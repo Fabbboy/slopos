@@ -7,8 +7,8 @@
 
 use slopos_abi::input::keycode::*;
 use slopos_abi::input::{
-    MODIFIER_ALT, MODIFIER_CAPS_LOCK, MODIFIER_CTRL, MODIFIER_NUM_LOCK, MODIFIER_SCROLL_LOCK,
-    MODIFIER_SHIFT, MODIFIER_SUPER,
+    MODIFIER_ALT, MODIFIER_ALTGR, MODIFIER_CAPS_LOCK, MODIFIER_CTRL, MODIFIER_NUM_LOCK,
+    MODIFIER_SCROLL_LOCK, MODIFIER_SHIFT, MODIFIER_SUPER,
 };
 
 use crate::keymap::{Locks, Mods};
@@ -126,13 +126,15 @@ impl ModTracker {
         self.scroll
     }
 
-    /// Modifier view for the keymap layer.
+    /// Modifier view for the keymap layer. `altgr` is the right Alt key alone
+    /// (AltGr), which selects a layout's level-3/4 glyph columns.
     pub fn mods(&self) -> Mods {
         Mods {
             shift: self.shift(),
             ctrl: self.ctrl(),
             alt: self.alt(),
             meta: self.meta(),
+            altgr: self.ralt,
         }
     }
 
@@ -156,6 +158,10 @@ impl ModTracker {
         }
         if self.alt() {
             mods |= MODIFIER_ALT;
+        }
+        if self.ralt {
+            // AltGr (right Alt) — also keeps MODIFIER_ALT set above.
+            mods |= MODIFIER_ALTGR;
         }
         if self.meta() {
             mods |= MODIFIER_SUPER;
@@ -202,6 +208,7 @@ pub fn mods_locks_from_raw(raw: u8) -> (Mods, Locks) {
         ctrl: raw & MODIFIER_CTRL != 0,
         alt: raw & MODIFIER_ALT != 0,
         meta: raw & MODIFIER_SUPER != 0,
+        altgr: raw & MODIFIER_ALTGR != 0,
     };
     let locks = Locks {
         caps: raw & MODIFIER_CAPS_LOCK != 0,

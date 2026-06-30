@@ -156,6 +156,10 @@ path = "src/bin/tests/terminal_grid_test.rs"
 name = "clipboard_test"
 path = "src/bin/tests/clipboard_test.rs"
 
+[[bin]]
+name = "keymap_test"
+path = "src/bin/tests/keymap_test.rs"
+
 [features]
 default = []
 testbins = []
@@ -164,6 +168,7 @@ testbins = []
 slopos-abi = { workspace = true }
 slopos-appkit = { workspace = true }
 slopos-font = { workspace = true }
+slopos-keymap-core = { workspace = true }
 slopos-gfx = { workspace = true }
 slopos-image = { workspace = true }
 slopos-protocol = { workspace = true }

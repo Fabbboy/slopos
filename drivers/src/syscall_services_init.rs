@@ -1,9 +1,10 @@
 use slopos_abi::KernelErrno;
 use slopos_abi::syscall::TtyIndex;
 use slopos_kernel_services::syscall_services::input::{InputServices, register_input_services};
+use slopos_kernel_services::syscall_services::keymap::{KeymapServices, register_keymap_services};
 use slopos_kernel_services::syscall_services::tty::{TtyServices, register_tty_services};
 
-use crate::{input_event, tty};
+use crate::{input_event, ps2, tty};
 
 static INPUT_SERVICES: InputServices = InputServices {
     poll: input_event::input_poll,
@@ -175,7 +176,13 @@ static TTY_SERVICES: TtyServices = TtyServices {
     get_exclusive: tty::get_exclusive,
 };
 
+static KEYMAP_SERVICES: KeymapServices = KeymapServices {
+    load: ps2::keyboard::load_layout_from_user,
+    current_name: ps2::keyboard::layout_name,
+};
+
 pub fn init_syscall_services() {
     register_input_services(&INPUT_SERVICES);
     register_tty_services(&TTY_SERVICES);
+    register_keymap_services(&KEYMAP_SERVICES);
 }

@@ -54,12 +54,86 @@ pub fn try_complete(input: &[u8], len: usize, cursor_pos: usize, cwd: &[u8]) -> 
 
     if is_first_token {
         complete_command(prefix, prefix_len, &mut result);
+    } else if command_word(input, word_start) == b"keymap" {
+        complete_keymap(prefix, prefix_len, &mut result);
     } else {
         let dirs_only = command_wants_dirs_only(input, word_start);
         complete_path(prefix, prefix_len, cwd, dirs_only, &mut result);
     }
 
     result
+}
+
+/// Tab-complete the argument of `keymap` against the installed layouts in
+/// `/usr/share/keymaps/*.layout` (by their short name), rather than the cwd.
+fn complete_keymap(prefix: &[u8], prefix_len: usize, result: &mut CompletionResult) {
+    let prefix_str = match core::str::from_utf8(prefix) {
+        Ok(s) => s,
+        Err(_) => return,
+    };
+    let mut names: Vec<String> = Vec::new();
+    if let Ok(rd) = fs::read_dir("/usr/share/keymaps") {
+        for entry in rd.flatten() {
+            if let Some(stem) = entry.file_name().to_string_lossy().strip_suffix(".layout") {
+                if stem.starts_with(prefix_str) {
+                    names.push(String::from(stem));
+                }
+            }
+        }
+    }
+    names.sort();
+    if names.is_empty() {
+        return;
+    }
+
+    if names.len() == 1 {
+        let name = names[0].as_bytes();
+        let remaining = name.len() - prefix_len;
+        let insert_len = remaining + 1;
+        if insert_len <= result.insertion.len() {
+            result.insertion[..remaining].copy_from_slice(&name[prefix_len..]);
+            result.insertion[remaining] = b' ';
+            result.insertion_len = insert_len;
+        }
+        return;
+    }
+
+    // Multiple: insert the longest common prefix, then list the matches.
+    let first = names[0].as_bytes();
+    let mut common_len = first.len();
+    for name in &names[1..] {
+        let nb = name.as_bytes();
+        let mut j = prefix_len;
+        while j < common_len && j < nb.len() && first[j] == nb[j] {
+            j += 1;
+        }
+        common_len = j;
+    }
+    if common_len > prefix_len {
+        let remaining = common_len - prefix_len;
+        if remaining <= result.insertion.len() {
+            result.insertion[..remaining].copy_from_slice(&first[prefix_len..common_len]);
+            result.insertion_len = remaining;
+        }
+    }
+
+    result.show_matches = true;
+    let mut pos = 0;
+    for name in &names {
+        let nb = name.as_bytes();
+        if pos + nb.len() + 2 < result.matches_buf.len() {
+            result.matches_buf[pos..pos + nb.len()].copy_from_slice(nb);
+            pos += nb.len();
+            result.matches_buf[pos] = b' ';
+            pos += 1;
+            result.matches_buf[pos] = b' ';
+            pos += 1;
+        }
+    }
+    if pos > 0 {
+        pos -= 2;
+    }
+    result.matches_len = pos;
 }
 
 fn complete_command(prefix: &[u8], prefix_len: usize, result: &mut CompletionResult) {
@@ -148,7 +222,9 @@ fn push_command_match(name: &'static [u8], matches: &mut [&'static [u8]; 64], co
     *count += 1;
 }
 
-fn command_wants_dirs_only(input: &[u8], word_start: usize) -> bool {
+/// The command word (first token) of `input`, given the start of the word being
+/// completed.
+fn command_word(input: &[u8], word_start: usize) -> &[u8] {
     let mut cmd_start = 0;
     while cmd_start < word_start && is_space(input[cmd_start]) {
         cmd_start += 1;
@@ -157,7 +233,11 @@ fn command_wants_dirs_only(input: &[u8], word_start: usize) -> bool {
     while cmd_end < word_start && !is_space(input[cmd_end]) {
         cmd_end += 1;
     }
-    let cmd = &input[cmd_start..cmd_end];
+    &input[cmd_start..cmd_end]
+}
+
+fn command_wants_dirs_only(input: &[u8], word_start: usize) -> bool {
+    let cmd = command_word(input, word_start);
     cmd == b"cd" || cmd == b"mkdir"
 }
 

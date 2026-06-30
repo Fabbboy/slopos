@@ -13,6 +13,7 @@
 //! contract.
 
 use slopos_abi::addr::{PhysAddr, VirtAddr};
+use slopos_abi::input::layout::{Cell, ComposeEntry, LayoutTable};
 use slopos_abi::input::{InputEvent, InputEventData, InputEventType};
 use slopos_abi::syscall::UserPollFd;
 use slopos_abi::syscall::termios::{
@@ -63,3 +64,14 @@ unsafe impl Zeroable for InputEvent {}
 // address (`PhysAddr::NULL` is `PhysAddr(0)`).
 unsafe impl Zeroable for PhysAddr {}
 unsafe impl Zeroable for VirtAddr {}
+
+// SAFETY: `Cell` is `#[repr(transparent)]` over `u32`; all-zero is the
+// canonical empty cell (`Cell::NONE`). `ComposeEntry` is `#[repr(C)]`
+// over `u8 + [u8;3] + u32 + u32`, all integers whose zero pattern is the
+// `EMPTY` entry. `LayoutTable` is `#[repr(C)]` over integers and arrays
+// of the above; the all-zero aggregate is a structurally valid (empty)
+// table — the kernel zero-allocates one via `KBox::zeroed()` and then
+// fills it by deserialising a validated upload.
+unsafe impl Zeroable for Cell {}
+unsafe impl Zeroable for ComposeEntry {}
+unsafe impl Zeroable for LayoutTable {}

@@ -15,6 +15,7 @@ use crate::syscall::fs::{
     syscall_fs_write, syscall_fstat, syscall_ioctl, syscall_lseek, syscall_pipe, syscall_pipe2,
     syscall_poll, syscall_rename, syscall_select,
 };
+use crate::syscall::keymap_handlers::{syscall_keymap_get_name, syscall_keymap_load};
 pub use crate::syscall::memory_handlers::{
     syscall_brk, syscall_ftruncate, syscall_memfd_create, syscall_mmap, syscall_mprotect,
     syscall_munmap,
@@ -202,6 +203,10 @@ static SYSCALL_TABLE: [SyscallEntry; SYSCALL_TABLE_SIZE] = syscall_table! {
 
     // Font management
     [SYSCALL_FONT_SET] => syscall_font_set, "font_set";
+
+    // Keyboard layout
+    [SYSCALL_KEYMAP_LOAD] => syscall_keymap_load, "keymap_load";
+    [SYSCALL_KEYMAP_GET_NAME] => syscall_keymap_get_name, "keymap_get_name";
 
     // Userland test harness
     [SYSCALL_TEST_REPORT] => syscall_test_report, "test_report";

@@ -1,6 +1,7 @@
 //! Input event types (Wayland-style per-task input queues)
 
 pub mod keycode;
+pub mod layout;
 
 /// Maximum number of tasks that can have input queues
 pub const MAX_INPUT_TASKS: usize = 32;
@@ -26,6 +27,10 @@ pub const MODIFIER_CAPS_LOCK: u8 = 1 << 4;
 pub const MODIFIER_NUM_LOCK: u8 = 1 << 5;
 /// Scroll Lock active.
 pub const MODIFIER_SCROLL_LOCK: u8 = 1 << 6;
+/// AltGr (right Alt) held. Distinct from `MODIFIER_ALT` (which is set for either
+/// Alt) so a layout-aware consumer can tell AltGr-as-text (e.g. `AltGr+2 = @`)
+/// from a left-Alt shortcut chord. Both bits are set when AltGr is held.
+pub const MODIFIER_ALTGR: u8 = 1 << 7;
 
 /// Key-event flag bits, carried in `data0[8:16]` of a key `InputEvent`.
 ///

@@ -87,6 +87,18 @@ if [ -f "${REPO_ROOT}/assets/logo.png" ]; then
     echo "Installed wallpaper: /usr/share/slopos/wallpapers/default.png"
 fi
 
+# Install keyboard layout files into /usr/share/keymaps/
+KEYMAPS_DIR="${REPO_ROOT}/assets/keymaps"
+if [ -d "$KEYMAPS_DIR" ]; then
+    debugfs -w -R "mkdir /usr/share/keymaps" "$IMAGE_PATH" >/dev/null 2>&1 || true
+    for layout in "$KEYMAPS_DIR"/*.layout; do
+        [ -e "$layout" ] || continue
+        lname=$(basename "$layout")
+        debugfs -w -R "write $layout /usr/share/keymaps/$lname" "$IMAGE_PATH" >/dev/null
+        echo "Installed keymap: /usr/share/keymaps/$lname"
+    done
+fi
+
 # Append a block-integrity (verity) trailer so the kernel detects on-disk
 # corruption of read-only content at read time (fs/src/verity.rs). Must be the
 # LAST step — it hashes the finished image. Optional: the kernel mounts

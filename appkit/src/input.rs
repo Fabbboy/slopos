@@ -1,29 +1,43 @@
 //! Input translation: windowing events → widget events.
 //!
-//! Key classification is delegated to the shared `keymap-core` layout, driven by
-//! the kernel-provided canonical keycode + modifier snapshot that each key event
-//! carries. The keyboard layout lives in one place (`keymap-core`, also used by
-//! the kernel), so a layout change flows everywhere automatically.
+//! Text characters come from the **kernel-resolved codepoint** the event already
+//! carries: the kernel is the single keyboard-layout authority (it applies the
+//! active runtime layout, AltGr levels, and dead-key composition before the
+//! event crosses to userland), so switching the layout with `keymap <name>`
+//! flows into every GUI app for free — no per-app layout engine. Named action
+//! keys and Ctrl-shortcut letters are layout-independent and come from the
+//! shared `keymap-core` classifier driven by the canonical keycode.
 
 use super::event::{Key, Modifiers, WidgetEvent};
 use slopos_keymap_core::{UiKey, mods_locks_from_raw, ui_classify};
 use slopos_windowing::Event;
 
-/// Map a shared `keymap-core` classification to an appkit [`Key`]. Modifier and
-/// otherwise-unmapped keys become [`Key::Unknown`] (so a press/release of e.g.
-/// Shift still drives focus modality, as before).
-fn ui_key_to_key(u: UiKey) -> Key {
-    match u {
-        UiKey::Char(c) => Key::Char(c),
-        UiKey::Named(nk) => Key::Named(nk),
-        UiKey::None => Key::Unknown,
-    }
-}
-
-/// Classify a windowing key event's keycode under its modifier snapshot.
-fn classify_key(keycode: u16, modifiers: u8) -> Key {
+/// Classify a windowing key event into an appkit [`Key`].
+///
+/// - Named action keys (arrows, F-keys, keypad navigation, Enter/Tab/Esc/Space/
+///   Backspace) are layout-independent → from the keycode classifier.
+/// - Printable text uses the kernel-resolved `codepoint` (honors the active
+///   layout incl. AltGr + dead keys). A freshly-pressed dead key carries
+///   `codepoint == 0` and classifies as [`Key::Unknown`] (no text yet).
+/// - When Ctrl makes the codepoint a control code, the Ctrl-independent letter
+///   is recovered from the classifier so shortcuts (Ctrl+C, …) still match.
+fn classify_key(keycode: u16, codepoint: u32, modifiers: u8) -> Key {
     let (mods, locks) = mods_locks_from_raw(modifiers);
-    ui_key_to_key(ui_classify(keycode, mods, locks))
+
+    if let UiKey::Named(nk) = ui_classify(keycode, mods, locks) {
+        return Key::Named(nk);
+    }
+    if let Some(c) = char::from_u32(codepoint) {
+        if !c.is_control() {
+            return Key::Char(c);
+        }
+    }
+    if mods.ctrl {
+        if let UiKey::Char(c) = ui_classify(keycode, mods, locks) {
+            return Key::Char(c);
+        }
+    }
+    Key::Unknown
 }
 
 /// Convert a windowing [`Event`] into a [`WidgetEvent`].
@@ -56,14 +70,18 @@ pub fn translate_event(event: &Event) -> Option<WidgetEvent> {
             })
         }
         Event::KeyPress {
-            keycode, modifiers, ..
+            keycode,
+            codepoint,
+            modifiers,
+            ..
         } => {
             let mods = Modifiers::from_raw(*modifiers);
-            let key = classify_key(*keycode, *modifiers);
+            let key = classify_key(*keycode, *codepoint, *modifiers);
             match key {
-                // Printable text with no Ctrl/Alt is text input; everything else
-                // (named keys, shortcuts, modifier keys) is a key-down.
-                Key::Char(c) if !mods.ctrl && !mods.alt => {
+                // Printable text with no Ctrl and no *plain* Alt is text input
+                // (AltGr-composed characters are text); everything else (named
+                // keys, shortcuts, modifier keys) is a key-down.
+                Key::Char(c) if !mods.ctrl && !mods.plain_alt() => {
                     Some(WidgetEvent::TextInput { character: c })
                 }
                 _ => Some(WidgetEvent::KeyDown {
@@ -74,10 +92,13 @@ pub fn translate_event(event: &Event) -> Option<WidgetEvent> {
             }
         }
         Event::KeyRelease {
-            keycode, modifiers, ..
+            keycode,
+            codepoint,
+            modifiers,
+            ..
         } => {
             let mods = Modifiers::from_raw(*modifiers);
-            let key = classify_key(*keycode, *modifiers);
+            let key = classify_key(*keycode, *codepoint, *modifiers);
             Some(WidgetEvent::KeyUp {
                 key,
                 modifiers: mods,

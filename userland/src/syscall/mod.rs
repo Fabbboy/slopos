@@ -31,6 +31,7 @@ pub mod core;
 pub mod error;
 pub mod fs;
 pub mod input;
+pub mod keymap;
 pub mod memory;
 pub mod net;
 pub mod numbers;

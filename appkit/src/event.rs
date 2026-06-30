@@ -14,6 +14,8 @@ pub struct Modifiers {
     pub shift: bool,
     pub ctrl: bool,
     pub alt: bool,
+    /// AltGr (right Alt) — distinct from `alt`. Set together with `alt`.
+    pub altgr: bool,
     pub super_key: bool,
     pub caps_lock: bool,
 }
@@ -24,9 +26,16 @@ impl Modifiers {
             shift: raw & slopos_abi::input::MODIFIER_SHIFT != 0,
             ctrl: raw & slopos_abi::input::MODIFIER_CTRL != 0,
             alt: raw & slopos_abi::input::MODIFIER_ALT != 0,
+            altgr: raw & slopos_abi::input::MODIFIER_ALTGR != 0,
             super_key: raw & slopos_abi::input::MODIFIER_SUPER != 0,
             caps_lock: raw & slopos_abi::input::MODIFIER_CAPS_LOCK != 0,
         }
+    }
+
+    /// A "plain Alt" chord (left Alt only) — a shortcut modifier, as opposed to
+    /// AltGr which composes layout text.
+    pub fn plain_alt(&self) -> bool {
+        self.alt && !self.altgr
     }
 }
 

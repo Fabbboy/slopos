@@ -2,24 +2,32 @@
 //!
 //! The IRQ handler ([`handle_scancode`]) feeds raw set-1 scancode bytes into a
 //! [`Set1Decoder`], folds modifier/lock state with a [`ModTracker`], and asks
-//! the [`UsQwerty`] layout for the produced text / named key. Each event is
-//! published carrying **both** the legacy `(scancode, ascii)` bytes (so the
-//! compositor, terminal, and TTY line discipline keep working unchanged) and
-//! the canonical `(keycode, codepoint, modifiers, flags)` payload.
+//! the **active layout** (a runtime-swappable [`LayoutTable`], defaulting to the
+//! built-in US-QWERTY) for the produced text / named key, running the dead-key
+//! compose state machine. Each event is published carrying **both** the legacy
+//! `(scancode, ascii)` bytes (so the compositor, terminal, and TTY line
+//! discipline keep working unchanged) and the canonical `(keycode, codepoint,
+//! modifiers, flags)` payload.
 //!
-//! All keyboard *logic* — scancode tables, layout, the numeric-keypad + Num
-//! Lock behavior — lives in the host-tested `keymap-core` crate; this module is
-//! just the kernel glue (locking, IRQ routing, the TTY fallback, LED I/O, and
-//! the legacy-byte bridge).
+//! All keyboard *logic* — scancode tables, layout resolution, AltGr levels, the
+//! numeric-keypad + Num Lock behavior, dead-key composition — lives in the
+//! host-tested `keymap-core` crate; this module is just the kernel glue (locking,
+//! IRQ routing, the active-layout swap, the TTY fallback, LED I/O, and the
+//! legacy-byte bridge).
 
 use slopos_arch::cpu;
 use slopos_ostd::sync::{LOCK_LEVEL_RESOURCE, SpinLock};
-use slopos_ostd::{klog_info, klog_warn};
+use slopos_ostd::{KBox, klog_info, klog_warn};
 
+use slopos_abi::Errno;
 use slopos_abi::input::{KEY_FLAG_FROM_KEYPAD, KEY_FLAG_HAS_CANONICAL};
 use slopos_keymap_core::keycode::{self, NamedKey};
-use slopos_keymap_core::keymap::{KeyOutcome, Layout, UsQwerty};
-use slopos_keymap_core::{LOCK_CAPS, LOCK_NUM, LOCK_SCROLL, ModSnapshot, ModTracker, Set1Decoder};
+use slopos_keymap_core::keymap::KeyOutcome;
+use slopos_keymap_core::{
+    DeadKeyState, LOCK_CAPS, LOCK_NUM, LOCK_SCROLL, LayoutTable, ModSnapshot, ModTracker, Resolved,
+    SERIALIZED_LEN, Set1Decoder, US_QWERTY, deserialize, resolve,
+};
+use slopos_mm::user_io_buf::memdup_user;
 
 use crate::input_event::{has_keyboard_focus, input_route_key_full};
 use crate::ps2;
@@ -32,11 +40,14 @@ const DEV_CMD_SET_LEDS: u8 = 0xED;
 /// Bounded poll budget when waiting for a device ACK during LED I/O.
 const ACK_WAIT_ITERS: u32 = 50_000;
 
-/// All keyboard state behind one lock: the byte-stream decoder and the
-/// modifier/lock tracker.
+/// All keyboard state behind one lock: the byte-stream decoder, the
+/// modifier/lock tracker, the dead-key compose state, and the active layout
+/// (`None` ⇒ the built-in [`US_QWERTY`]).
 struct KeyboardState {
     decoder: Set1Decoder,
     mods: ModTracker,
+    dead: DeadKeyState,
+    layout: Option<KBox<LayoutTable>>,
 }
 
 impl KeyboardState {
@@ -44,6 +55,8 @@ impl KeyboardState {
         Self {
             decoder: Set1Decoder::new(),
             mods: ModTracker::new(),
+            dead: DeadKeyState::new(),
+            layout: None,
         }
     }
 }
@@ -76,6 +89,7 @@ pub fn init() {
         let mut state = STATE.lock();
         state.decoder = Set1Decoder::new();
         state.mods = ModTracker::new();
+        state.dead = DeadKeyState::new();
         state.mods.snapshot()
     };
     // Reflect the initial lock state (Num Lock starts on) on the physical LEDs.
@@ -100,7 +114,6 @@ pub fn handle_scancode(byte: u8) {
     let legacy_scancode = byte & 0x7F;
 
     // ESC toggles the on-screen fblog console during boot (press only).
-    // `handle_esc_press` is a pure atomic flip, safe to call under the lock.
     if usage == keycode::KEY_ESC && pressed && slopos_ostd::fblog::handle_esc_press() {
         return;
     }
@@ -115,6 +128,17 @@ pub fn handle_scancode(byte: u8) {
             usage,
             keycode::KEY_CAPSLOCK | keycode::KEY_NUMLOCK | keycode::KEY_SCROLLLOCK
         );
+
+    // Resolve through the active layout while the lock is held (pure + fast: no
+    // allocation, no blocking). Modifier/lock keys and releases produce no text;
+    // only a fresh press runs the layout + dead-key state machine.
+    let resolved = if pressed && !is_mod_or_lock {
+        let st = &mut *state;
+        let table = st.layout.as_deref().unwrap_or(&US_QWERTY);
+        resolve(table, usage, mods, locks, &mut st.dead)
+    } else {
+        Resolved::none()
+    };
     drop(state);
 
     // Kernel vconsole scrollback: Shift+PageUp / Shift+PageDown page the
@@ -133,21 +157,21 @@ pub fn handle_scancode(byte: u8) {
         set_leds(snap);
     }
 
-    // Modifier / lock keys produce no text; everything else maps through the
-    // layout.
-    let outcome = if is_mod_or_lock {
-        KeyOutcome::None
-    } else {
-        UsQwerty.map(usage, mods, locks)
-    };
-    let (ascii, codepoint) = legacy_and_canonical(outcome, pressed);
+    let ts = slopos_kernel_services::clock::uptime_ms();
+
+    // Dead-key flush: a pending accent that did not compose with this key is
+    // emitted as its own text event, ahead of the key's own event.
+    if resolved.flush != 0 {
+        route_text(resolved.flush, snap.mods, ts);
+    }
+
+    let (ascii, codepoint) = legacy_and_canonical(resolved.outcome, pressed);
 
     let mut flags = KEY_FLAG_HAS_CANONICAL;
     if keycode::is_keypad(usage) {
         flags |= KEY_FLAG_FROM_KEYPAD;
     }
 
-    let ts = slopos_kernel_services::clock::uptime_ms();
     input_route_key_full(
         legacy_scancode,
         ascii,
@@ -160,11 +184,43 @@ pub fn handle_scancode(byte: u8) {
     );
 
     // TTY fallback: when nothing holds keyboard focus, feed the active TTY the
-    // produced byte (printable, control, or nav pseudo-code) on press.
-    if pressed && ascii != 0 && !has_keyboard_focus() {
-        push_input(active_tty(), ascii);
-        request_reschedule_from_interrupt();
+    // produced byte(s) on press (the flushed accent first, then the key).
+    if pressed && !has_keyboard_focus() {
+        let flush_byte = if resolved.flush != 0 && resolved.flush <= 0xFF {
+            resolved.flush as u8
+        } else {
+            0
+        };
+        if flush_byte != 0 {
+            push_input(active_tty(), flush_byte);
+        }
+        if ascii != 0 {
+            push_input(active_tty(), ascii);
+        }
+        if flush_byte != 0 || ascii != 0 {
+            request_reschedule_from_interrupt();
+        }
     }
+}
+
+/// Route a bare text codepoint as a synthetic key-press event (used for the
+/// dead-key accent flush; carries no canonical keycode).
+fn route_text(codepoint: u32, modifiers: u8, ts: u64) {
+    let ascii = if codepoint <= 0xFF {
+        codepoint as u8
+    } else {
+        0
+    };
+    input_route_key_full(
+        0,
+        ascii,
+        0,
+        codepoint,
+        modifiers,
+        KEY_FLAG_HAS_CANONICAL,
+        true,
+        ts,
+    );
 }
 
 /// Derive the legacy `ascii` byte and the canonical `codepoint` from a keymap
@@ -200,6 +256,47 @@ fn named_to_legacy_ascii(nk: NamedKey) -> u8 {
         NamedKey::Delete => 0x88,
         _ => 0,
     }
+}
+
+/// Install a new active layout, replacing the previous one. The old layout is
+/// freed **outside** the lock: a heap free can trigger a cross-CPU TLB/LUF drain
+/// that must not run while the keyboard `SpinLock` is held.
+pub fn set_layout(layout: KBox<LayoutTable>) {
+    let old = {
+        let mut state = STATE.lock();
+        state.dead.reset(); // a layout swap invalidates any pending dead key
+        state.layout.replace(layout)
+    };
+    drop(old);
+}
+
+/// Deserialise + validate a serialised `LayoutTable` blob from the calling
+/// task's user memory and install it as the active layout.
+///
+/// The kernel only ever ingests the **binary** form here (no text parsing): the
+/// blob is bounded, copied via `memdup_user`, then `deserialize` runs
+/// `keymap-core`'s validator before the table is installed.
+pub fn load_layout_from_user(data_ptr: u64, len: usize) -> Result<(), Errno> {
+    if data_ptr == 0 || len != SERIALIZED_LEN {
+        return Err(Errno::EINVAL);
+    }
+    let bytes = memdup_user(data_ptr, len, SERIALIZED_LEN)?;
+    let mut layout = KBox::<LayoutTable>::zeroed().map_err(|_| Errno::ENOMEM)?;
+    deserialize(bytes.as_slice(), &mut layout).map_err(|_| Errno::EINVAL)?;
+    set_layout(layout);
+    Ok(())
+}
+
+/// Write the active layout's short name into the kernel buffer `out`; return the
+/// number of bytes written. The caller (the syscall handler) copies `out` to
+/// user memory through the SMAP-safe path — this never touches user pages.
+pub fn layout_name(out: &mut [u8]) -> usize {
+    let state = STATE.lock();
+    let table = state.layout.as_deref().unwrap_or(&US_QWERTY);
+    let bytes = table.name_str().as_bytes();
+    let n = bytes.len().min(out.len());
+    out[..n].copy_from_slice(&bytes[..n]);
+    n
 }
 
 /// Program the keyboard's lock LEDs to match `snap`.
@@ -248,16 +345,23 @@ pub fn get_modifier_state() -> u8 {
     STATE.lock().mods.snapshot().mods
 }
 
-/// Reset decoder + modifier/lock state to defaults, without device I/O.
+/// Reset decoder + modifier/lock + dead-key state and the active layout to
+/// defaults, without device I/O.
 ///
 /// Test-only: keyboard state is a global shared with the live IRQ handler, so
 /// tests reset it before and after to avoid cross-test contamination (a stuck
-/// `E0` latch or held modifier) leaking into other tests or the live desktop.
+/// `E0` latch, a held modifier, a pending dead key, or a loaded layout) leaking
+/// into other tests or the live desktop.
 #[cfg(feature = "test-hooks")]
 pub fn reset_state_for_test() {
-    let mut state = STATE.lock();
-    state.decoder = Set1Decoder::new();
-    state.mods = ModTracker::new();
+    let old = {
+        let mut state = STATE.lock();
+        state.decoder = Set1Decoder::new();
+        state.mods = ModTracker::new();
+        state.dead = DeadKeyState::new();
+        state.layout.take()
+    };
+    drop(old);
 }
 
 pub fn poll_wait_enter() {

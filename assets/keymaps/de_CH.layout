@@ -1,0 +1,107 @@
+# slopos layout v1 — Swiss German (QWERTZ)
+#
+#   key <KEY_NAME> <caps:yes|no> <base> <shift> <altgr> <shift+altgr>
+# `KEY_*` names are physical positions (US-keycap names); the glyphs below are
+# the Swiss German assignment, so e.g. the physical "Y" key types `z` (QWERTZ).
+# Accented vowels are reached through the dead keys (^ ` ´ ¨ ~); the umlaut keys
+# carry ä/ö/ü directly (Shift = Ä/Ö/Ü), with à/é/è available via the dead keys.
+
+name = de_CH
+title = Swiss German (QWERTZ)
+deadkeys = acute grave circumflex diaeresis tilde
+
+# Number row.
+key KEY_GRAVE  no  section      degree       -          -
+key KEY_1      no  1            plus         brokenbar  -
+key KEY_2      no  2            dquote       at         -
+key KEY_3      no  3            asterisk     numbersign -
+key KEY_4      no  4            ccedilla     -          -
+key KEY_5      no  5            percent      -          -
+key KEY_6      no  6            ampersand    notsign    -
+key KEY_7      no  7            slash        -          -
+key KEY_8      no  8            parenleft    cent       -
+key KEY_9      no  9            parenright   -          -
+key KEY_0      no  0            equal        -          -
+key KEY_MINUS  no  apostrophe   question     dead:acute -
+key KEY_EQUAL  no  dead:circumflex  dead:grave  dead:tilde  -
+
+# Top alpha row — QWERTZ (physical Y types z, physical Z types y).
+key KEY_Q  yes  q  Q  -     -
+key KEY_W  yes  w  W  -     -
+key KEY_E  yes  e  E  euro  -
+key KEY_R  yes  r  R  -     -
+key KEY_T  yes  t  T  -     -
+key KEY_Y  yes  z  Z  -     -
+key KEY_U  yes  u  U  -     -
+key KEY_I  yes  i  I  -     -
+key KEY_O  yes  o  O  -     -
+key KEY_P  yes  p  P  -     -
+key KEY_LEFTBRACE   yes  udiaeresis  Udiaeresis  bracketleft   -
+key KEY_RIGHTBRACE  no   dead:diaeresis  exclam  bracketright  -
+
+# Home row.
+key KEY_A  yes  a  A  -  -
+key KEY_S  yes  s  S  -  -
+key KEY_D  yes  d  D  -  -
+key KEY_F  yes  f  F  -  -
+key KEY_G  yes  g  G  -  -
+key KEY_H  yes  h  H  -  -
+key KEY_J  yes  j  J  -  -
+key KEY_K  yes  k  K  -  -
+key KEY_L  yes  l  L  -  -
+key KEY_SEMICOLON   yes  odiaeresis  Odiaeresis  -          -
+key KEY_APOSTROPHE  yes  adiaeresis  Adiaeresis  braceleft  -
+key KEY_BACKSLASH   no   dollar      sterling    braceright -
+
+# Bottom row.
+key KEY_NONUS_BACKSLASH  no   less  greater  backslash  -
+key KEY_Z  yes  y  Y  -  -
+key KEY_X  yes  x  X  -  -
+key KEY_C  yes  c  C  -  -
+key KEY_V  yes  v  V  -  -
+key KEY_B  yes  b  B  -  -
+key KEY_N  yes  n  N  -  -
+key KEY_M  yes  m  M  -  -
+key KEY_COMMA  no  comma   semicolon  -  -
+key KEY_DOT    no  period  colon      -  -
+key KEY_SLASH  no  minus   underscore -  -
+
+# Dead-key compositions (dead + base -> accented letter). dead + space yields the
+# bare accent automatically.
+compose dead:acute  a -> aacute
+compose dead:acute  e -> eacute
+compose dead:acute  i -> iacute
+compose dead:acute  o -> oacute
+compose dead:acute  u -> uacute
+compose dead:acute  A -> Aacute
+compose dead:acute  E -> Eacute
+
+compose dead:grave  a -> agrave
+compose dead:grave  e -> egrave
+compose dead:grave  i -> igrave
+compose dead:grave  o -> ograve
+compose dead:grave  u -> ugrave
+compose dead:grave  A -> Agrave
+compose dead:grave  E -> Egrave
+
+compose dead:circumflex  a -> acircumflex
+compose dead:circumflex  e -> ecircumflex
+compose dead:circumflex  i -> icircumflex
+compose dead:circumflex  o -> ocircumflex
+compose dead:circumflex  u -> ucircumflex
+compose dead:circumflex  A -> Acircumflex
+compose dead:circumflex  E -> Ecircumflex
+
+compose dead:diaeresis  a -> adiaeresis
+compose dead:diaeresis  e -> ediaeresis
+compose dead:diaeresis  i -> idiaeresis
+compose dead:diaeresis  o -> odiaeresis
+compose dead:diaeresis  u -> udiaeresis
+compose dead:diaeresis  y -> ydiaeresis
+compose dead:diaeresis  A -> Adiaeresis
+compose dead:diaeresis  O -> Odiaeresis
+compose dead:diaeresis  U -> Udiaeresis
+
+compose dead:tilde  a -> atilde
+compose dead:tilde  n -> ntilde
+compose dead:tilde  o -> otilde

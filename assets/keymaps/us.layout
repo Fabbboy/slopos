@@ -1,0 +1,62 @@
+# slopos layout v1 — US English (QWERTY)
+#
+# Mirrors the kernel's built-in default. Format:
+#   key <KEY_NAME> <caps:yes|no> <base> <shift> <altgr> <shift+altgr>
+# A level token is a single literal character, a keysym name (e.g. numbersign),
+# or `-` for "absent". `#` begins a comment.
+
+name = us
+title = US English (QWERTY)
+
+# Letters (caps-affected: CapsLock case-folds them).
+key KEY_A  yes  a  A  -  -
+key KEY_B  yes  b  B  -  -
+key KEY_C  yes  c  C  -  -
+key KEY_D  yes  d  D  -  -
+key KEY_E  yes  e  E  -  -
+key KEY_F  yes  f  F  -  -
+key KEY_G  yes  g  G  -  -
+key KEY_H  yes  h  H  -  -
+key KEY_I  yes  i  I  -  -
+key KEY_J  yes  j  J  -  -
+key KEY_K  yes  k  K  -  -
+key KEY_L  yes  l  L  -  -
+key KEY_M  yes  m  M  -  -
+key KEY_N  yes  n  N  -  -
+key KEY_O  yes  o  O  -  -
+key KEY_P  yes  p  P  -  -
+key KEY_Q  yes  q  Q  -  -
+key KEY_R  yes  r  R  -  -
+key KEY_S  yes  s  S  -  -
+key KEY_T  yes  t  T  -  -
+key KEY_U  yes  u  U  -  -
+key KEY_V  yes  v  V  -  -
+key KEY_W  yes  w  W  -  -
+key KEY_X  yes  x  X  -  -
+key KEY_Y  yes  y  Y  -  -
+key KEY_Z  yes  z  Z  -  -
+
+# Number row.
+key KEY_1  no  1  exclam      -  -
+key KEY_2  no  2  at          -  -
+key KEY_3  no  3  numbersign  -  -
+key KEY_4  no  4  dollar      -  -
+key KEY_5  no  5  percent     -  -
+key KEY_6  no  6  asciicircum -  -
+key KEY_7  no  7  ampersand   -  -
+key KEY_8  no  8  asterisk    -  -
+key KEY_9  no  9  parenleft   -  -
+key KEY_0  no  0  parenright  -  -
+
+# Punctuation.
+key KEY_MINUS       no  minus        underscore   -  -
+key KEY_EQUAL       no  equal        plus         -  -
+key KEY_LEFTBRACE   no  bracketleft  braceleft    -  -
+key KEY_RIGHTBRACE  no  bracketright braceright   -  -
+key KEY_BACKSLASH   no  backslash    bar          -  -
+key KEY_SEMICOLON   no  semicolon    colon        -  -
+key KEY_APOSTROPHE  no  apostrophe   dquote       -  -
+key KEY_GRAVE       no  grave        asciitilde   -  -
+key KEY_COMMA       no  comma        less         -  -
+key KEY_DOT         no  period       greater      -  -
+key KEY_SLASH       no  slash        question     -  -

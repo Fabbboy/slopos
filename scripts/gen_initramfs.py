@@ -99,6 +99,14 @@ def main() -> None:
         dest = b"/usr/share/slopos/wallpapers/default.png"
         entries.append((dest, MODE_DATA, read_file(logo)))
 
+    keymaps_dir = os.path.join(repo_root, "assets", "keymaps")
+    if os.path.isdir(keymaps_dir):
+        for fname in sorted(os.listdir(keymaps_dir)):
+            if not fname.endswith(".layout"):
+                continue
+            dest = b"/usr/share/keymaps/" + fname.encode()
+            entries.append((dest, MODE_DATA, read_file(os.path.join(keymaps_dir, fname))))
+
     buf = bytearray()
     for dest, mode, data in entries:
         validate(dest)

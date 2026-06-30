@@ -8,6 +8,7 @@ pub mod dispatch;
 pub mod font_handlers;
 pub mod fs;
 pub mod handlers;
+pub mod keymap_handlers;
 pub mod memory_handlers;
 pub mod net_handlers;
 pub mod pidfd_handlers;

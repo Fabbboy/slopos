@@ -162,6 +162,65 @@ pub fn test_press_then_release_events() -> TestResult {
     pass!()
 }
 
+/// After swapping in the Swiss German layout at runtime, the IRQ handler
+/// resolves against it: the physical-Y key produces `z` (QWERTZ) and AltGr+2
+/// produces `@` — proving `handle_scancode` reads the loaded layout, not the
+/// hardcoded default. (Restored to the default in `teardown`.)
+pub fn test_runtime_layout_swap() -> TestResult {
+    use crate::ps2::keyboard::set_layout;
+    use slopos_keymap_core::{LayoutTable, parse};
+    use slopos_ostd::KBox;
+
+    const DE_CH: &str = include_str!("../../../assets/keymaps/de_CH.layout");
+
+    setup();
+
+    let mut table = match KBox::<LayoutTable>::zeroed() {
+        Ok(t) => t,
+        Err(_) => {
+            teardown();
+            return fail!("layout alloc failed");
+        }
+    };
+    if parse(DE_CH.as_bytes(), &mut table).is_err() {
+        teardown();
+        return fail!("de_CH layout failed to parse");
+    }
+    set_layout(table);
+
+    // Physical-Y key (set-1 make 0x15) → 'z' under QWERTZ.
+    handle_scancode(0x15);
+    let z_ev = input_poll(DUMMY_TASK);
+
+    // AltGr (right Alt = E0 38) + '2' (set-1 0x03) → '@'.
+    handle_scancode(0xE0);
+    handle_scancode(0x38);
+    let _altgr_press = input_poll(DUMMY_TASK);
+    handle_scancode(0x03);
+    let at_ev = input_poll(DUMMY_TASK);
+    handle_scancode(0xE0);
+    handle_scancode(0xB8); // right Alt release
+
+    teardown();
+
+    let z = match z_ev {
+        Some(e) => e,
+        None => return fail!("de_CH physical-Y produced no event"),
+    };
+    if z.key_codepoint() != 'z' as u32 {
+        return fail!("de_CH physical-Y did not produce 'z' (QWERTZ swap)");
+    }
+    let at = match at_ev {
+        Some(e) => e,
+        None => return fail!("de_CH AltGr+2 produced no event"),
+    };
+    if at.key_codepoint() != '@' as u32 {
+        return fail!("de_CH AltGr+2 did not produce '@'");
+    }
+    pass!()
+}
+
+slopos_testing::stest!(name = test_runtime_layout_swap, suite = keyboard);
 slopos_testing::stest!(name = test_keypad_numlock_digit, suite = keyboard);
 slopos_testing::stest!(name = test_letter_canonical_payload, suite = keyboard);
 slopos_testing::stest!(

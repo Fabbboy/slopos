@@ -817,12 +817,26 @@ pub const SYSCALL_CURSOR_MOVE: u64 = 163;
 /// Compositor-only; returns 0 on success.
 pub const SYSCALL_SET_DISPLAY_MODE: u64 = 164;
 
-pub const SYSCALL_TABLE_SIZE: usize = 165;
+/// Install a keyboard layout. `keymap_load(data_ptr: *const u8, len: usize)`,
+/// where the buffer is a serialised `LayoutTable` blob (see
+/// `slopos_abi::input::layout`). Console-admin only; returns 0 on success,
+/// `EINVAL` if the blob is malformed. The kernel never parses layout text —
+/// userland parses `*.layout` files and uploads the validated binary.
+pub const SYSCALL_KEYMAP_LOAD: u64 = 165;
+
+/// Query the active layout's short name. `keymap_get_name(buf: *mut u8,
+/// buf_len: usize)` copies up to `buf_len` bytes of the name and returns the
+/// number written. Unprivileged.
+pub const SYSCALL_KEYMAP_GET_NAME: u64 = 166;
+
+pub const SYSCALL_TABLE_SIZE: usize = 167;
 
 const _: () = assert!((SYSCALL_PIDFD_OPEN as usize) < SYSCALL_TABLE_SIZE);
 const _: () = assert!((SYSCALL_SIGNALFD as usize) < SYSCALL_TABLE_SIZE);
 const _: () = assert!((SYSCALL_RING_REGISTER as usize) < SYSCALL_TABLE_SIZE);
 const _: () = assert!((SYSCALL_SET_DISPLAY_MODE as usize) < SYSCALL_TABLE_SIZE);
+const _: () = assert!((SYSCALL_KEYMAP_LOAD as usize) < SYSCALL_TABLE_SIZE);
+const _: () = assert!((SYSCALL_KEYMAP_GET_NAME as usize) < SYSCALL_TABLE_SIZE);
 
 /// Standard return value for unimplemented syscalls: -ENOSYS (negated errno 38).
 pub const ENOSYS_RETURN: u64 = (-38i64) as u64;
