@@ -484,7 +484,7 @@ impl File {
         true
     }
 
-    pub fn read_buf(&self, cursor: BorrowedCursor<'_>) -> io::Result<()> {
+    pub fn read_buf(&self, cursor: BorrowedCursor<'_, u8>) -> io::Result<()> {
         io::default_read_buf(|buf| self.read(buf), cursor)
     }
 

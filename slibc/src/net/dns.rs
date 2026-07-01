@@ -3,7 +3,7 @@
 
 use crate::mem::malloc;
 use crate::pal::{Pal, Sys};
-use crate::string::strlen;
+use crate::string::u_strlen;
 
 use super::addr::{AF_INET, SOCK_STREAM, SockAddr, SockAddrIn};
 
@@ -74,7 +74,7 @@ pub unsafe extern "C" fn getaddrinfo(
         addr_u32
     } else {
         // Call the kernel resolver
-        let hostname_len = strlen(node);
+        let hostname_len = u_strlen(node);
         let mut result_buf = [0u8; 4];
         match Sys::resolve(node, hostname_len, result_buf.as_mut_ptr()) {
             Ok(()) => u32::from_ne_bytes(result_buf),

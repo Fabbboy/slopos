@@ -27,7 +27,7 @@ impl io::Read for Stdin {
         }
     }
 
-    fn read_buf(&mut self, mut cursor: BorrowedCursor<'_>) -> io::Result<()> {
+    fn read_buf(&mut self, mut cursor: BorrowedCursor<'_, u8>) -> io::Result<()> {
         let buf = unsafe { cursor.as_mut() };
         let ret = unsafe { read(0, buf.as_mut_ptr().cast(), buf.len()) };
         if ret < 0 {

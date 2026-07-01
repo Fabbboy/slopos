@@ -544,7 +544,7 @@ impl Socket {
 
     fn recv_with_flags(
         &self,
-        mut buf: BorrowedCursor<'_>,
+        mut buf: BorrowedCursor<'_, u8>,
         flags: c_int,
     ) -> io::Result<()> {
         let ret = cvt(unsafe {
@@ -573,7 +573,7 @@ impl Socket {
         Ok(buf.len())
     }
 
-    pub fn read_buf(&self, buf: BorrowedCursor<'_>) -> io::Result<()> {
+    pub fn read_buf(&self, buf: BorrowedCursor<'_, u8>) -> io::Result<()> {
         self.recv_with_flags(buf, 0)
     }
 

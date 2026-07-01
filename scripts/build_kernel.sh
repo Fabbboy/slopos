@@ -66,14 +66,40 @@ if [ "$KERNEL_RELEASE" = "1" ]; then
 fi
 CARGO_ARGS+=(--artifact-dir "$BUILD_DIR")
 
-CARGO_TARGET_DIR="$CARGO_TARGET_DIR" \
-RUSTFLAGS="${RUSTFLAGS:-} $KERNEL_RUSTFLAGS -Zunstable-options -Zemit-stack-sizes" \
-"$CARGO" "${CARGO_ARGS[@]}"
-
-if [ -f "$BUILD_DIR/kernel" ]; then
-    if [ ! -e "$BUILD_DIR/kernel.elf" ] || [ ! "$BUILD_DIR/kernel" -ef "$BUILD_DIR/kernel.elf" ]; then
-        mv "$BUILD_DIR/kernel" "$BUILD_DIR/kernel.elf"
+build_kernel_once() {
+    local ksyms_rs="${1:-}"
+    if [ -n "$ksyms_rs" ]; then
+        CARGO_TARGET_DIR="$CARGO_TARGET_DIR" \
+        SLOPOS_KSYMS_RS="$ksyms_rs" \
+        RUSTFLAGS="${RUSTFLAGS:-} $KERNEL_RUSTFLAGS -Zunstable-options -Zemit-stack-sizes" \
+        "$CARGO" "${CARGO_ARGS[@]}"
+    else
+        CARGO_TARGET_DIR="$CARGO_TARGET_DIR" \
+        RUSTFLAGS="${RUSTFLAGS:-} $KERNEL_RUSTFLAGS -Zunstable-options -Zemit-stack-sizes" \
+        "$CARGO" "${CARGO_ARGS[@]}"
     fi
+
+    if [ -f "$BUILD_DIR/kernel" ]; then
+        if [ ! -e "$BUILD_DIR/kernel.elf" ] || [ ! "$BUILD_DIR/kernel" -ef "$BUILD_DIR/kernel.elf" ]; then
+            mv "$BUILD_DIR/kernel" "$BUILD_DIR/kernel.elf"
+        fi
+    fi
+}
+
+build_kernel_once ""
+
+HOST_TRIPLE="$(rustc +"$RUST_CHANNEL" -vV | sed -n 's/^host: //p')"
+SYSROOT="$(rustc +"$RUST_CHANNEL" --print sysroot)"
+LLVM_NM="$SYSROOT/lib/rustlib/$HOST_TRIPLE/bin/llvm-nm"
+if [ ! -x "$LLVM_NM" ]; then
+    LLVM_NM="$(command -v llvm-nm || true)"
+fi
+if [ -z "$LLVM_NM" ]; then
+    echo "gen_kernel_symbols: llvm-nm not found; building without embedded symbol names" >&2
+else
+    KSYMS_RS="$(cd "$(dirname "$BUILD_DIR")" && pwd)/$(basename "$BUILD_DIR")/kallsyms.rs"
+    python3 "$SCRIPT_DIR/gen_kernel_symbols.py" "$LLVM_NM" "$BUILD_DIR/kernel.elf" "$KSYMS_RS"
+    build_kernel_once "$KSYMS_RS"
 fi
 
 # Kernel allocation + stack-frame invariant gates.

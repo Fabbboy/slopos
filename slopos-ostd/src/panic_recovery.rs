@@ -84,12 +84,11 @@ pub fn truncate_cleanup_handlers(count: usize) {
 }
 
 pub fn call_panic_cleanup() {
-    // SAFETY: invoked from catch_panic!'s longjmp tail. The longjmp
-    // invalidated every SpinLockGuard the panicking test body held;
-    // poison-unlock each tracked entry so registered handlers — and
-    // the surrounding KernelTestScope::Drop chain that re-acquires
-    // TASK_MANAGER / KERNEL_HEAP / etc. — don't deadlock on a stale
-    // ticket. Single-writer: the panicking CPU is the only accessor.
+    // SAFETY: invoked after catch_panic! catches a kernel-test unwind.
+    // Rust Drops should already have released normal guards; poison-unlock
+    // remains as a defensive cleanup for legacy paths and partially
+    // constructed lock guards. Single-writer: the panicking CPU is the only
+    // accessor.
     unsafe {
         crate::sync::lock_tracking::poison_unlock_all_held();
     }
@@ -183,20 +182,18 @@ pub fn longjmp_to_recovery(val: i32) -> ! {
 #[macro_export]
 macro_rules! catch_panic {
     ($code:block) => {{
-        use $crate::panic_recovery::{
-            call_panic_cleanup, get_recovery_buf, recovery_set_active, test_setjmp,
-        };
+        use $crate::panic_recovery::{call_panic_cleanup, recovery_set_active};
 
-        let result = unsafe { test_setjmp(get_recovery_buf()) };
+        recovery_set_active(true);
+        let result = $crate::unwind::catch_unwind(|| -> i32 { $code });
+        recovery_set_active(false);
 
-        if result == 0 {
-            recovery_set_active(true);
-            let ret = (|| -> i32 { $code })();
-            recovery_set_active(false);
-            ret
-        } else {
-            call_panic_cleanup();
-            -1
+        match result {
+            Ok(ret) => ret,
+            Err(_) => {
+                call_panic_cleanup();
+                -1
+            }
         }
     }};
 }

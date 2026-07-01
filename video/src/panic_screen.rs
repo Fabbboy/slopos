@@ -39,6 +39,49 @@ fn draw_register_line(
     );
 }
 
+fn draw_symbol_text(ctx: &mut GraphicsContext, atlas: &GlyphAtlas, mut x: i32, y: i32, rip: u64) {
+    let Some(sym) = slopos_ostd::ksym::lookup(rip) else {
+        return;
+    };
+
+    let max_x = ctx.width() as i32 - 40;
+    let char_width = atlas.cell_width();
+    let mut plus = numfmt::NumBuf::<19>::new();
+    let offset = plus.format_hex_u64(sym.offset);
+
+    for &byte in b" " {
+        if x + char_width > max_x {
+            return;
+        }
+        atlas.draw_char(ctx, x, y, byte as u32, PANIC_FG_COLOR, PANIC_BG_COLOR);
+        x += char_width;
+    }
+
+    for &byte in sym.symbol.as_bytes() {
+        if x + char_width > max_x {
+            return;
+        }
+        atlas.draw_char(ctx, x, y, byte as u32, PANIC_FG_COLOR, PANIC_BG_COLOR);
+        x += char_width;
+    }
+
+    for &byte in b"+" {
+        if x + char_width > max_x {
+            return;
+        }
+        atlas.draw_char(ctx, x, y, byte as u32, PANIC_FG_COLOR, PANIC_BG_COLOR);
+        x += char_width;
+    }
+
+    for &byte in offset {
+        if x + char_width > max_x {
+            return;
+        }
+        atlas.draw_char(ctx, x, y, byte as u32, PANIC_FG_COLOR, PANIC_BG_COLOR);
+        x += char_width;
+    }
+}
+
 /// Display the kernel panic screen.
 pub fn display_panic_screen(
     message: Option<&str>,
@@ -49,6 +92,7 @@ pub fn display_panic_screen(
     cr3: u64,
     cr4: u64,
     backtrace: &[u64],
+    backtrace_is_unwind: bool,
 ) -> bool {
     if framebuffer::snapshot().is_none() {
         return false;
@@ -165,19 +209,16 @@ pub fn display_panic_screen(
     draw_register_line(&mut ctx, &atlas, 60, y, b"CR4: \0", cr4);
     y += char_height + 4;
 
-    // Backtrace (most recent call first) — frame-pointer return addresses
-    // of the wedged/faulting call chain, so the call site is visible on
-    // the panic screen without a serial console.
+    // Backtrace (most recent call first) — DWARF unwind frames when available,
+    // otherwise frame-pointer return addresses of the wedged/faulting chain.
     if !backtrace.is_empty() {
         y += char_height;
-        atlas.draw_bytes(
-            &mut ctx,
-            40,
-            y,
-            b"Backtrace:\0",
-            PANIC_HEADER_COLOR,
-            PANIC_BG_COLOR,
-        );
+        let label = if backtrace_is_unwind {
+            b"DWARF unwind backtrace:\0" as &[u8]
+        } else {
+            b"Frame-pointer backtrace:\0" as &[u8]
+        };
+        atlas.draw_bytes(&mut ctx, 40, y, label, PANIC_HEADER_COLOR, PANIC_BG_COLOR);
         y += char_height + 8;
         for (i, &ra) in backtrace.iter().enumerate() {
             let label: &[u8] = match i {
@@ -191,6 +232,13 @@ pub fn display_panic_screen(
                 _ => b"#7:  \0",
             };
             draw_register_line(&mut ctx, &atlas, 60, y, label, ra);
+            draw_symbol_text(
+                &mut ctx,
+                &atlas,
+                60 + atlas.bytes_width(label) + 19 * char_width,
+                y,
+                ra,
+            );
             y += char_height + 4;
         }
     }

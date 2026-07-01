@@ -51,4 +51,3 @@ SECTIONS
     *(.interp)
   }
 }
-

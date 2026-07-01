@@ -86,23 +86,27 @@ pub fn slice_from_cstr_mut<'a>(ptr: *mut u8, len: usize) -> &'a mut [u8] {
 }
 
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn memcpy(dst: *mut u8, src: *const u8, n: usize) -> *mut u8 {
+pub unsafe extern "C" fn memcpy(dst: *mut c_void, src: *const c_void, n: usize) -> *mut c_void {
     if dst.is_null() || src.is_null() || n == 0 {
         return dst;
     }
+    let dst = dst as *mut u8;
+    let src = src as *const u8;
     let mut i = 0usize;
     while i < n {
         *dst.add(i) = *src.add(i);
         i += 1;
     }
-    dst
+    dst as *mut c_void
 }
 
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn memmove(dst: *mut u8, src: *const u8, n: usize) -> *mut u8 {
+pub unsafe extern "C" fn memmove(dst: *mut c_void, src: *const c_void, n: usize) -> *mut c_void {
     if dst.is_null() || src.is_null() || n == 0 {
         return dst;
     }
+    let dst = dst as *mut u8;
+    let src = src as *const u8;
     let d = dst as usize;
     let s = src as usize;
     if d > s && d < s.saturating_add(n) {
@@ -118,27 +122,30 @@ pub unsafe extern "C" fn memmove(dst: *mut u8, src: *const u8, n: usize) -> *mut
             i += 1;
         }
     }
-    dst
+    dst as *mut c_void
 }
 
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn memset(dst: *mut u8, c: i32, n: usize) -> *mut u8 {
+pub unsafe extern "C" fn memset(dst: *mut c_void, c: i32, n: usize) -> *mut c_void {
     if dst.is_null() || n == 0 {
         return dst;
     }
+    let dst = dst as *mut u8;
     let mut i = 0usize;
     while i < n {
         *dst.add(i) = c as u8;
         i += 1;
     }
-    dst
+    dst as *mut c_void
 }
 
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn memcmp(a: *const u8, b: *const u8, n: usize) -> i32 {
+pub unsafe extern "C" fn memcmp(a: *const c_void, b: *const c_void, n: usize) -> i32 {
     if n == 0 {
         return 0;
     }
+    let a = a as *const u8;
+    let b = b as *const u8;
     let mut i = 0usize;
     while i < n {
         let av = *a.add(i);
@@ -168,8 +175,8 @@ pub unsafe extern "C" fn memchr(s: *const u8, c: i32, n: usize) -> *const u8 {
 }
 
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn strlen(s: *const u8) -> usize {
-    u_strlen(s)
+pub unsafe extern "C" fn strlen(s: *const i8) -> usize {
+    u_strlen(s.cast())
 }
 
 #[unsafe(no_mangle)]

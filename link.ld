@@ -17,6 +17,7 @@ SECTIONS
 {
   /* Kernel starts at higher half virtual address */
   . = KERNEL_VIRT_BASE;
+  __executable_start = .;
 
   /* Limine requests section - must be in first LOAD segment */
   .limine_requests ALIGN(4096) : {
@@ -31,6 +32,7 @@ SECTIONS
     *(.text .text.*)
     _text_end = .;
   } :text
+  __etext = _text_end;
 
   /* Kernel start symbol (alias for start of text) */
   _kernel_start = _text_start;
@@ -39,6 +41,17 @@ SECTIONS
     _rodata_start = .;
     *(.rodata .rodata.*)
     _rodata_end = .;
+  } :rodata
+
+  .eh_frame ALIGN(8) : {
+    __eh_frame = .;
+    KEEP(*(.eh_frame))
+    KEEP(*(.eh_frame.*))
+  } :rodata
+
+  .gcc_except_table ALIGN(8) : {
+    KEEP(*(.gcc_except_table))
+    KEEP(*(.gcc_except_table.*))
   } :rodata
 
   .boot_init_early_hw ALIGN(8) : {
@@ -125,8 +138,6 @@ SECTIONS
   /DISCARD/ : {
     *(.comment*)
     *(.note*)
-    *(.eh_frame*)
-    *(.eh_frame_hdr)
     *(.interp)
     *(.dynamic)
     *(.dynsym)

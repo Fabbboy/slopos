@@ -20,6 +20,7 @@ bitflags = { workspace = true }
 paste = { workspace = true }
 slopos-abi = { workspace = true }
 slopos-ostd-derive = { workspace = true }
+unwinding = { workspace = true }
 
 [dev-dependencies]
 # Enables the `test-helpers` feature on the lib whenever a `cargo

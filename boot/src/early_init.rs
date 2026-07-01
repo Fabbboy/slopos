@@ -735,6 +735,10 @@ pub fn kernel_main_impl() {
     // switch prints a clean "=== KERNEL PANIC ===" instead of recursively
     // faulting. Halts the machine, so it is never enabled under `just test`.
     if let Some(cmdline) = crate::limine_protocol::kernel_cmdline_str() {
+        if cmdline.contains("panic.post_boot_unwind=on") {
+            boot_info(b"PANIC SMOKE: raising a deliberate post-boot unwind panic\0");
+            post_boot_unwind_smoke_outer();
+        }
         if cmdline.contains("panic.fatal_smoke=on") {
             boot_info(b"PANIC SMOKE: raising a deliberate deep fatal panic\0");
             let _ = fatal_smoke_deep(28);
@@ -742,6 +746,21 @@ pub fn kernel_main_impl() {
     }
 
     enter_scheduler(0);
+}
+
+#[inline(never)]
+fn post_boot_unwind_smoke_outer() -> ! {
+    post_boot_unwind_smoke_middle(0x51);
+}
+
+#[inline(never)]
+fn post_boot_unwind_smoke_middle(seed: u64) -> ! {
+    post_boot_unwind_smoke_inner(seed ^ 0x5a5a);
+}
+
+#[inline(never)]
+fn post_boot_unwind_smoke_inner(canary: u64) -> ! {
+    panic!("panic.post_boot_unwind: deliberate post-boot panic (canary={canary:#x})");
 }
 
 /// Recurse with a sizeable address-taken buffer per frame (driving the

@@ -13,7 +13,6 @@ json-target-spec = true
 linker = "rust-lld"
 rustflags = [
   "-C", "link-arg=-Tlink.ld",
-  "-C", "panic=abort",
   "-C", "force-frame-pointers=yes",
   "-C", "code-model=kernel",
   "-C", "relocation-model=static",
@@ -24,4 +23,3 @@ rustflags = [
   "-Z", "relro-level=off",
   "-Z", "emit-stack-sizes"
 ]
-

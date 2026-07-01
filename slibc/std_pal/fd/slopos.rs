@@ -85,7 +85,7 @@ impl FileDesc {
         result
     }
 
-    pub fn read_buf(&self, mut cursor: BorrowedCursor<'_>) -> io::Result<()> {
+    pub fn read_buf(&self, mut cursor: BorrowedCursor<'_, u8>) -> io::Result<()> {
         let ret = cvt(unsafe {
             read(
                 self.as_raw_fd(),

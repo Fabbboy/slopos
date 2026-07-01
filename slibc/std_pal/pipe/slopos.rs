@@ -53,7 +53,7 @@ impl Pipe {
         }
     }
 
-    pub fn read_buf(&self, mut cursor: BorrowedCursor<'_>) -> io::Result<()> {
+    pub fn read_buf(&self, mut cursor: BorrowedCursor<'_, u8>) -> io::Result<()> {
         let buf = unsafe { cursor.as_mut() };
         let ret = unsafe { read(self.0.as_raw_fd(), buf.as_mut_ptr().cast(), buf.len()) };
         if ret < 0 {

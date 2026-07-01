@@ -22,6 +22,9 @@ static PANIC_RSP: AtomicU64 = AtomicU64::new(0);
 static PANIC_FRAME_RBP: AtomicU64 = AtomicU64::new(0);
 static PANIC_HAS_CPU_STATE: StateFlag = StateFlag::new();
 const PANIC_BACKTRACE_MAX: usize = 16;
+static PANIC_UNWIND_BACKTRACE_LEN: AtomicUsize = AtomicUsize::new(0);
+static PANIC_UNWIND_BACKTRACE: [AtomicU64; PANIC_BACKTRACE_MAX] =
+    [const { AtomicU64::new(0) }; PANIC_BACKTRACE_MAX];
 
 /// The panicking `&PanicInfo` re-narrowed to a raw pointer, stashed before the
 /// emergency-stack switch so the reporter (running on the emergency stack) can
@@ -99,10 +102,38 @@ pub fn panic_abort_raw(msg: &'static str) -> ! {
     cpu::halt_loop()
 }
 
-/// Capture the panicking call chain's return addresses into `out`,
-/// returning the count. Mirrors `panic_dump_backtrace`'s RBP preference
-/// so the on-screen backtrace matches the serial one.
-fn panic_capture_backtrace(out: &mut [u64]) -> usize {
+fn panic_stash_unwind_backtrace() {
+    let bt = slopos_ostd::unwind::capture_backtrace();
+    let frames = bt.as_slice();
+    let n = frames.len().min(PANIC_BACKTRACE_MAX);
+    for (i, &rip) in frames[..n].iter().enumerate() {
+        PANIC_UNWIND_BACKTRACE[i].store(rip, Ordering::SeqCst);
+    }
+    PANIC_UNWIND_BACKTRACE_LEN.store(n, Ordering::SeqCst);
+}
+
+fn panic_read_unwind_backtrace(out: &mut [u64]) -> usize {
+    let n = PANIC_UNWIND_BACKTRACE_LEN
+        .load(Ordering::SeqCst)
+        .min(PANIC_BACKTRACE_MAX)
+        .min(out.len());
+    for (i, slot) in out[..n].iter_mut().enumerate() {
+        *slot = PANIC_UNWIND_BACKTRACE[i].load(Ordering::SeqCst);
+    }
+    n
+}
+
+/// Capture the panicking call chain's return addresses into `out`.
+/// Returns `(count, true)` for DWARF unwind frames and `(count, false)`
+/// for the frame-pointer fallback.
+fn panic_capture_backtrace(out: &mut [u64]) -> (usize, bool) {
+    if PANIC_FRAME_RBP.load(Ordering::SeqCst) == 0 {
+        let n = panic_read_unwind_backtrace(out);
+        if n > 0 {
+            return (n, true);
+        }
+    }
+
     let frame_rbp = PANIC_FRAME_RBP.load(Ordering::SeqCst);
     let stashed = PANIC_ORIG_RBP.load(Ordering::SeqCst);
     let rbp = if frame_rbp != 0 {
@@ -122,16 +153,38 @@ fn panic_capture_backtrace(out: &mut [u64]) -> usize {
         PANIC_BACKTRACE_MAX as c_int,
     );
     if captured <= 0 {
-        return 0;
+        return (0, false);
     }
     let n = (captured as usize).min(out.len());
     for (slot, entry) in out[..n].iter_mut().zip(entries.iter()) {
         *slot = entry.return_address;
     }
-    n
+    (n, false)
 }
 
 fn panic_dump_backtrace() {
+    if PANIC_FRAME_RBP.load(Ordering::SeqCst) == 0 {
+        let mut frames = [0u64; PANIC_BACKTRACE_MAX];
+        let captured = panic_read_unwind_backtrace(&mut frames);
+        if captured > 0 {
+            panic_serial_write("Backtrace (DWARF unwind, most recent call first):");
+            for (i, rip) in frames[..captured].iter().enumerate() {
+                let mut line = MessageBuffer::new();
+                if let Some(sym) = slopos_ostd::ksym::lookup(*rip) {
+                    let _ = write!(
+                        line,
+                        "  #{} rip=0x{:016x} {}+0x{:x}",
+                        i, rip, sym.symbol, sym.offset
+                    );
+                } else {
+                    let _ = write!(line, "  #{} rip=0x{:016x}", i, rip);
+                }
+                panic_serial_write(line.as_str());
+            }
+            return;
+        }
+    }
+
     // Prefer the trap frame's RBP (the faulting context) when an exception
     // path stashed one; then the pre-switch RBP (the panicking call chain);
     // finally the live RBP on the caught/recovery path.
@@ -163,11 +216,19 @@ fn panic_dump_backtrace() {
     for i in 0..captured as usize {
         let entry = &entries[i];
         let mut line = MessageBuffer::new();
-        let _ = write!(
-            line,
-            "  #{} rbp=0x{:016x} rip=0x{:016x}",
-            i, entry.frame_pointer, entry.return_address
-        );
+        if let Some(sym) = slopos_ostd::ksym::lookup(entry.return_address) {
+            let _ = write!(
+                line,
+                "  #{} rbp=0x{:016x} rip=0x{:016x} {}+0x{:x}",
+                i, entry.frame_pointer, entry.return_address, sym.symbol, sym.offset
+            );
+        } else {
+            let _ = write!(
+                line,
+                "  #{} rbp=0x{:016x} rip=0x{:016x}",
+                i, entry.frame_pointer, entry.return_address
+            );
+        }
         panic_serial_write(line.as_str());
     }
 }
@@ -205,20 +266,24 @@ pub fn panic_handler_impl(info: &PanicInfo) -> ! {
             panic_serial_write(msg_buf.as_str());
         }
 
-        // NOTE: Do NOT exit QEMU here. This is the CAUGHT panic path —
-        // catch_panic! will handle it via longjmp and the test harness
+        // NOTE: Do NOT exit QEMU here. This is the CAUGHT panic path:
+        // catch_panic! will catch the Rust unwind and the test harness
         // will record the failure and continue to the next suite.
-        // The uncaught path (below) handles the QEMU exit.
-
-        panic_recovery::recovery_set_active(false);
 
         // Re-enable interrupts if they were enabled before panic
-        // This is critical: longjmp will restore registers but NOT interrupt flag
+        // This is critical: unwinding restores Rust frames, not interrupt flags.
         if interrupts_were_enabled {
             cpu::enable_interrupts();
         }
 
-        panic_recovery::longjmp_to_recovery(1);
+        match slopos_ostd::unwind::begin_panic(info) {
+            Ok(never) => match never {},
+            Err(code) => {
+                let mut buf = MessageBuffer::new();
+                let _ = write!(buf, "  unwind initiation failed: {}", code.0);
+                panic_serial_write(buf.as_str());
+            }
+        }
     }
 
     // --- Fatal (uncaught) path: the Reliable Abort Core. ---
@@ -249,6 +314,11 @@ pub fn panic_handler_impl(info: &PanicInfo) -> ! {
     PANIC_INFO_PTR.store(info as *const PanicInfo as usize, Ordering::SeqCst);
     PANIC_ORIG_RSP.store(cpu::read_rsp(), Ordering::SeqCst);
     PANIC_ORIG_RBP.store(cpu::read_rbp(), Ordering::SeqCst);
+    if PANIC_FRAME_RBP.load(Ordering::SeqCst) == 0 {
+        panic_stash_unwind_backtrace();
+    } else {
+        PANIC_UNWIND_BACKTRACE_LEN.store(0, Ordering::SeqCst);
+    }
 
     // (4) Stop the world: NMI all peers (the only delivery that pierces a
     // wedged IF=0 spin), then wait — bounded — for them to acknowledge before
@@ -335,7 +405,7 @@ extern "sysv64" fn emergency_report() -> ! {
     }
 
     let mut bt = [0u64; 8];
-    let bt_n = panic_capture_backtrace(&mut bt);
+    let (bt_n, bt_is_unwind) = panic_capture_backtrace(&mut bt);
 
     if panic_screen::display_panic_screen(
         Some(message_str),
@@ -346,6 +416,7 @@ extern "sysv64" fn emergency_report() -> ! {
         cr3,
         cr4,
         &bt[..bt_n],
+        bt_is_unwind,
     ) {
         panic_serial_write("Press ENTER to shutdown...");
         poll_wait_enter();

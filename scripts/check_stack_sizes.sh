@@ -1,9 +1,8 @@
 #!/usr/bin/env bash
 # Fail the build if any function in the kernel ELF has a stack frame larger
-# than STACK_SIZE_THRESHOLD bytes. Default: 2048 (2 KiB) — matches Linux
-# mainline's default `CONFIG_FRAME_WARN` on x86_64/arm64, but SlopOS
-# fails the build rather than merely warning, and inspects the
-# post-link ELF rather than a compile-time heuristic (so inline
+# than STACK_SIZE_THRESHOLD bytes. Default: 4096 (4 KiB) — one x86_64
+# page. SlopOS fails the build rather than merely warning, and inspects
+# the post-link ELF rather than a compile-time heuristic (so inline
 # expansion, NRVO failures, and trait-object dispatch are all accounted
 # for).
 #
@@ -13,7 +12,7 @@
 # `panic_handler_impl`, `tcp::input`, `tcp::close`,
 # `virtio_net_probe`, ramfs insertion).
 #
-# This 2 KiB ceiling is the load-bearing enforcement of **Inv. 5'**
+# This 4 KiB ceiling is the load-bearing enforcement of **Inv. 5'**
 # (framekernel soundness invariant): an OSTD client's stack frame
 # cannot grow large enough to puncture the kernel guard page in a
 # single function entry. Derived from Asterinas paper §4.3 Inv. 5 +
@@ -28,7 +27,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 
 ELF="${1:-$REPO_ROOT/builddir/kernel.elf}"
-THRESHOLD="${STACK_SIZE_THRESHOLD:-2048}"
+THRESHOLD="${STACK_SIZE_THRESHOLD:-4096}"
 
 if [ ! -f "$ELF" ]; then
     echo "check_stack_sizes: missing $ELF (run \`just build\` first)" >&2

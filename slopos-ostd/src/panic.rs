@@ -99,3 +99,11 @@ pub use crate::arch::x86_64::naked::run_on_emergency_stacks;
 /// Enter the per-CPU fatal path, returning the previous recursion depth (a
 /// non-zero value means the fatal path itself faulted → degrade to abort).
 pub use crate::cpu::x86_64::pcr::panic_depth_enter;
+
+/// Unconditional abort used when the unwinder catches a foreign exception at a
+/// SlopOS-only boundary.
+pub fn abort_now() -> ! {
+    loop {
+        core::hint::spin_loop();
+    }
+}

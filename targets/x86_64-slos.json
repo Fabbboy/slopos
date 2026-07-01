@@ -14,7 +14,7 @@
   "llvm-target": "x86_64-unknown-none",
   "max-atomic-width": 64,
   "os": "none",
-  "panic-strategy": "abort",
+  "panic-strategy": "unwind",
   "pre-link-args": {
     "ld.lld": ["-Tlink.ld"]
   },
@@ -28,4 +28,3 @@
   "trap-unreachable": true,
   "vendor": "slopos"
 }
-

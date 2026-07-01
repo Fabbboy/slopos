@@ -181,12 +181,12 @@ boot:
 
 [doc("Boot SlopOS skipping the Wheel of Fate (fast dev iteration)")]
 boot-fast:
-    BOOT_CMDLINE="tests=off roulette=skip" just _iso-notests
+    BOOT_CMDLINE="{{boot_cmdline_effective}} roulette=skip" just _iso-notests
     just _qemu-boot "interactive" "1" {{iso_notests}} {{fs_image}} {{ if ports != "" { "NET=1 NET_PORTS=" + ports } else { "" } }}
 
 [doc("Boot SlopOS with release-optimized kernel (production build)")]
 boot-prod:
-    BOOT_CMDLINE="tests=off roulette=skip" KERNEL_RELEASE=1 just _iso-notests
+    BOOT_CMDLINE="{{boot_cmdline_effective}} roulette=skip" KERNEL_RELEASE=1 just _iso-notests
     just _qemu-boot "interactive" "1" {{iso_notests}} {{fs_image}} {{ if ports != "" { "NET=1 NET_PORTS=" + ports } else { "" } }}
 
 [doc("Boot SlopOS headless (serial only, ports= for forwarding)")]
@@ -201,7 +201,7 @@ boot-log: _iso-notests (_qemu-boot "logged" "0" iso_notests fs_image "BOOT_LOG_T
 boot-ramonly:
     #!/usr/bin/env bash
     set -euo pipefail
-    BOOT_CMDLINE="tests=off roulette=skip" just _iso-notests
+    BOOT_CMDLINE="{{boot_cmdline_effective}} roulette=skip" just _iso-notests
     just _qemu-boot "logged" "0" {{iso_notests}} {{fs_image}} "BOOT_LOG_TIMEOUT=25 LOG_FILE={{log_file}} QEMU_NO_ROOT_DISK=1"
     echo "──────── RAM-only boot: key serial lines ────────"
     grep -E "ROOTFS:|USERLAND: launched|VFS:|ext2" "{{log_file}}" || true
