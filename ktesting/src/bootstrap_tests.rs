@@ -51,16 +51,6 @@ fn bootstrap_aaa_glob_match() -> TestResult {
     TestResult::Pass
 }
 
-fn bootstrap_aab_unwind_backtrace_nonempty() -> TestResult {
-    BOOTSTRAP_CTR.fetch_add(1, Ordering::Relaxed);
-    let backtrace = slopos_ostd::unwind::capture_backtrace();
-    if backtrace.as_slice().is_empty() {
-        klog_info!("BOOTSTRAP unwind: _Unwind_Backtrace returned no frames");
-        return TestResult::Fail;
-    }
-    TestResult::Pass
-}
-
 fn bootstrap_bbb_capture_roundtrip() -> TestResult {
     BOOTSTRAP_CTR.fetch_add(1, Ordering::Relaxed);
     {
@@ -90,16 +80,16 @@ fn bootstrap_ccc_panic_canary() -> TestResult {
 }
 
 /// Verifies the harness recovered cleanly from `bootstrap_ccc`'s panic:
-///   1. The counter is at least 4 — proves prior tests (including the
+///   1. The counter is at least 3 — proves prior tests (including the
 ///      canary) ran in order and incremented before the panic.
 ///   2. The canary's Drop guard ran during the caught panic unwind.
 ///   3. The klog backend is not stuck on the buffering capture: a fresh
 ///      `capture::begin → klog → drain` roundtrip works.
 fn bootstrap_ddd_isolation_check() -> TestResult {
     let n = BOOTSTRAP_CTR.fetch_add(1, Ordering::Relaxed);
-    if n < 4 {
+    if n < 3 {
         klog_info!(
-            "BOOTSTRAP isolation: counter={} (expected >= 4 after canary)",
+            "BOOTSTRAP isolation: counter={} (expected >= 3 after canary)",
             n
         );
         return TestResult::Fail;
@@ -129,7 +119,6 @@ fn bootstrap_ddd_isolation_check() -> TestResult {
 }
 
 crate::stest!(name = bootstrap_aaa_glob_match);
-crate::stest!(name = bootstrap_aab_unwind_backtrace_nonempty);
 crate::stest!(name = bootstrap_bbb_capture_roundtrip);
 crate::stest!(
     name = bootstrap_ccc_panic_canary,

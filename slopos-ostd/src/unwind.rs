@@ -8,27 +8,64 @@
 //! interrupt/trap stubs, scheduler context switches, or other non-Rust ABI
 //! boundaries; those paths must catch before the boundary or abort.
 
-use alloc::boxed::Box;
 use core::convert::Infallible;
-use core::ffi::c_void;
-use core::mem::MaybeUninit;
 use core::panic::PanicInfo;
 
+#[cfg(feature = "kernel-unwind")]
+use alloc::boxed::Box;
+#[cfg(feature = "kernel-unwind")]
+use core::ffi::c_void;
+#[cfg(feature = "kernel-unwind")]
+use core::mem::MaybeUninit;
+
+#[cfg(feature = "kernel-unwind")]
 use unwinding::abi::{
     _Unwind_Backtrace, _Unwind_GetIP, _Unwind_RaiseException, UnwindContext, UnwindException,
     UnwindReasonCode,
 };
+#[cfg(feature = "kernel-unwind")]
 use unwinding::panicking::{self, Exception};
 
 #[derive(Debug)]
 pub struct KernelPanic;
 
+pub const UNWIND_BACKTRACE_MAX: usize = 16;
+
+#[derive(Clone, Copy)]
+pub struct UnwindBacktrace {
+    frames: [u64; UNWIND_BACKTRACE_MAX],
+    len: usize,
+}
+
+impl UnwindBacktrace {
+    pub const fn empty() -> Self {
+        Self {
+            frames: [0; UNWIND_BACKTRACE_MAX],
+            len: 0,
+        }
+    }
+
+    pub fn as_slice(&self) -> &[u64] {
+        &self.frames[..self.len]
+    }
+
+    #[cfg(feature = "kernel-unwind")]
+    fn push(&mut self, ip: u64) {
+        if self.len < self.frames.len() {
+            self.frames[self.len] = ip;
+            self.len += 1;
+        }
+    }
+}
+
+#[cfg(feature = "kernel-unwind")]
 #[repr(C)]
 struct ExceptionWithPayload {
     exception: MaybeUninit<UnwindException>,
     payload: KernelPanic,
 }
 
+#[cfg(feature = "kernel-unwind")]
 unsafe impl Exception for KernelPanic {
     const CLASS: [u8; 8] = *b"SLOPKERN";
 
@@ -51,6 +88,7 @@ unsafe impl Exception for KernelPanic {
     }
 }
 
+#[cfg(feature = "kernel-unwind")]
 pub fn begin_panic(_info: &PanicInfo) -> Result<Infallible, UnwindReasonCode> {
     unsafe extern "C" fn exception_cleanup(
         _unwind_code: UnwindReasonCode,
@@ -79,6 +117,12 @@ pub fn begin_panic(_info: &PanicInfo) -> Result<Infallible, UnwindReasonCode> {
     }
 }
 
+#[cfg(not(feature = "kernel-unwind"))]
+pub fn begin_panic(_info: &PanicInfo) -> Result<Infallible, ()> {
+    Err(())
+}
+
+#[cfg(feature = "kernel-unwind")]
 pub fn catch_unwind<R, F>(f: F) -> Result<R, KernelPanic>
 where
     F: FnOnce() -> R,
@@ -90,34 +134,26 @@ where
     }
 }
 
-pub const UNWIND_BACKTRACE_MAX: usize = 16;
-
-#[derive(Clone, Copy)]
-pub struct UnwindBacktrace {
-    frames: [u64; UNWIND_BACKTRACE_MAX],
-    len: usize,
-}
-
-impl UnwindBacktrace {
-    pub const fn empty() -> Self {
-        Self {
-            frames: [0; UNWIND_BACKTRACE_MAX],
-            len: 0,
-        }
-    }
-
-    pub fn as_slice(&self) -> &[u64] {
-        &self.frames[..self.len]
-    }
-
-    fn push(&mut self, ip: u64) {
-        if self.len < self.frames.len() {
-            self.frames[self.len] = ip;
-            self.len += 1;
-        }
+#[cfg(all(feature = "test-helpers", not(feature = "kernel-unwind")))]
+pub fn catch_unwind<R, F>(f: F) -> Result<R, KernelPanic>
+where
+    F: FnOnce() -> R,
+{
+    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(f)) {
+        Ok(value) => Ok(value),
+        Err(_) => Err(KernelPanic),
     }
 }
 
+#[cfg(not(any(feature = "kernel-unwind", feature = "test-helpers")))]
+pub fn catch_unwind<R, F>(f: F) -> Result<R, KernelPanic>
+where
+    F: FnOnce() -> R,
+{
+    Ok(f())
+}
+
+#[cfg(feature = "kernel-unwind")]
 pub fn capture_backtrace() -> UnwindBacktrace {
     extern "C" fn trace(ctx: &UnwindContext<'_>, arg: *mut c_void) -> UnwindReasonCode {
         let out = arg.cast::<UnwindBacktrace>();
@@ -139,4 +175,9 @@ pub fn capture_backtrace() -> UnwindBacktrace {
     let mut out = UnwindBacktrace::empty();
     let _ = _Unwind_Backtrace(trace, (&mut out as *mut UnwindBacktrace).cast());
     out
+}
+
+#[cfg(not(feature = "kernel-unwind"))]
+pub fn capture_backtrace() -> UnwindBacktrace {
+    UnwindBacktrace::empty()
 }

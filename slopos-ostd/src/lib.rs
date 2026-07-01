@@ -9,6 +9,8 @@
 #![deny(unsafe_op_in_unsafe_fn)]
 
 extern crate alloc;
+#[cfg(all(feature = "test-helpers", not(feature = "kernel-unwind")))]
+extern crate std;
 // Self-alias so the `#[derive(Pod)]` / `#[derive(Zeroable)]` expansions
 // (which name the trait as `::slopos_ostd::Pod` / `::slopos_ostd::Zeroable`)
 // resolve when used inside this crate itself.

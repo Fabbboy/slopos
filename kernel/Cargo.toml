@@ -18,7 +18,7 @@ slopos-core = { workspace = true }
 slopos-drivers = { workspace = true }
 slopos-fs = { workspace = true }
 slopos-mm = { workspace = true }
-slopos-ostd = { workspace = true }
+slopos-ostd = { workspace = true, features = ["kernel-unwind"] }
 slopos-testing = { workspace = true }
 slopos-video = { workspace = true }
 

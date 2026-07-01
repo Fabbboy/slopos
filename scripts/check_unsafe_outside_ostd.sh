@@ -62,16 +62,18 @@ SOURCE_WHITELIST=(
 )
 
 # git ls-files respects .gitignore and skips third_party / builddir /
-# target. Mirror the find-fallback from check_alloc_dep.sh for environments
-# without git.
+# target. Exclude vendor explicitly: vendored dependency code is audited at
+# the dependency boundary, not as a SlopOS kernel crate. Mirror the
+# find-fallback from check_alloc_dep.sh for environments without git.
 file_list="$(
     cd "$REPO_ROOT"
     if command -v git >/dev/null 2>&1 && git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
-        git ls-files '*.rs'
+        git ls-files '*.rs' ':!:vendor/**'
     else
         find . -type f -name '*.rs' \
             -not -path './builddir/*' \
             -not -path './third_party/*' \
+            -not -path './vendor/*' \
             -not -path './target/*' \
           | sed 's|^\./||'
     fi

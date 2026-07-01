@@ -26,9 +26,10 @@ while IFS= read -r -d '' manifest; do
     if [ "$manifest" = "$REPO_ROOT/Cargo.toml" ]; then
         continue
     fi
-    # Skip third_party, build outputs, and the userland carve-out.
+    # Skip vendored dependencies, third_party, build outputs, and the
+    # userland carve-out.
     case "$rel_dir" in
-        third_party/*|builddir/*|target/*|*/target/*) continue ;;
+        vendor/*|third_party/*|builddir/*|target/*|*/target/*) continue ;;
     esac
     if [[ "$crate_name" =~ $USERLAND_RE ]]; then
         continue
@@ -64,6 +65,7 @@ while IFS= read -r -d '' manifest; do
 done < <(find "$REPO_ROOT" -maxdepth 3 -name Cargo.toml \
              -not -path "$REPO_ROOT/builddir/*" \
              -not -path "$REPO_ROOT/third_party/*" \
+             -not -path "$REPO_ROOT/vendor/*" \
              -not -path "$REPO_ROOT/target/*" \
              -print0)
 
@@ -100,6 +102,7 @@ source_offenders="$(
             -not -path './target/*'
     fi \
       | grep -Ev '^(userland|terminal-core|slibc|slop-protocol|ktesting|image|slopos-ostd)/' \
+      | grep -Ev '^vendor/' \
       | grep -vxF "$SOURCE_WHITELIST" \
       | while IFS= read -r file; do
             [ -f "$file" ] || continue

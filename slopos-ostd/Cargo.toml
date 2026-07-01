@@ -14,13 +14,14 @@ workspace = true
 # `[dev-dependencies] slopos-ostd = { path = ".", features = [...] }`
 # trick below; Miri-only pivots use `cfg(miri)` (auto-set by cargo-miri).
 test-helpers = []
+kernel-unwind = ["dep:unwinding"]
 
 [dependencies]
 bitflags = { workspace = true }
 paste = { workspace = true }
 slopos-abi = { workspace = true }
 slopos-ostd-derive = { workspace = true }
-unwinding = { workspace = true }
+unwinding = { workspace = true, optional = true }
 
 [dev-dependencies]
 # Enables the `test-helpers` feature on the lib whenever a `cargo
