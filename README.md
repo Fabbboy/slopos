@@ -1,7 +1,8 @@
 <p align="center">
-  <img src="https://img.shields.io/badge/status-it%20boots%20(sometimes)-brightgreen?style=for-the-badge" />
+  <img src="https://img.shields.io/badge/status-boots%20on%20a%20real%20laptop-brightgreen?style=for-the-badge" />
   <img src="https://img.shields.io/badge/vibes-immaculate-blueviolet?style=for-the-badge" />
   <img src="https://img.shields.io/badge/stability-the%20wheel%20decides-orange?style=for-the-badge" />
+  <img src="https://img.shields.io/badge/unsafe-quarantined-critical?style=for-the-badge" />
 </p>
 
 <p align="center">
@@ -15,7 +16,7 @@
 </p>
 
 <p align="center">
-  <b>Win the spin → enter the shell.<br/>
+  <b>Win the spin → enter the desktop.<br/>
   Lose → reboot and try again.<br/>
   The house always wins. Eventually.</b>
 </p>
@@ -24,56 +25,62 @@
 
 <br/>
 
-## Get It Running
+## This Is Not QEMU
 
-> **You need:** QEMU, xorriso, mkfs.ext2, [`just`](https://github.com/casey/just), and mass skill issue tolerance
+<p align="center">
+  <img src="assets/hardware.jpg" alt="SlopOS desktop running on a real Lenovo laptop: terminal, file manager, system monitor, and image viewer" width="640" />
+</p>
 
-```bash
-# macOS
-brew install qemu xorriso e2fsprogs just
-
-# Debian/Ubuntu
-sudo apt install qemu-system-x86 xorriso e2fsprogs
-cargo install just  # or: https://github.com/casey/just#installation
-
-# Arch (btw)
-sudo pacman -S qemu-full xorriso e2fsprogs just
-
-# Then:
-just setup          # installs rust nightly
-just boot           # spins the wheel
-```
-
-> **macOS Note:** The Cocoa display backend is automatically detected and used. If you see display errors, run `qemu-system-x86_64 -display help` to check available backends.
+That is a real laptop. The desktop — compositor, terminal, file manager,
+system monitor, image viewer — is drawn by our own Intel Xe display driver.
+The keyboard and I²C-HID touchpad were discovered by walking the firmware's
+actual AML tables with our own ACPI interpreter, then driven over our own
+I²C and GPIO drivers. The slop has escaped the sandbox.
 
 <br/>
 
-|  | Command | What it does |
-|:--:|---------|--------------|
-| | `just boot` | Boot with display window |
-| | `just boot-headless` | Headless boot (serial only) |
-| | `just boot-log` | Boot with timeout, saves to `test_output.log` |
-| | `just test` | Run the test harness |
-| | `just --list` | Show all available recipes |
+---
 
-<details>
-<summary><b>Advanced Options</b></summary>
+<br/>
+
+## Get It Running
+
+> **You need:** QEMU, xorriso, e2fsprogs, [`just`](https://github.com/casey/just) — plus Go ≥ 1.22 if you want `just test`
 
 ```bash
-QEMU_DISPLAY=cocoa just boot           # Force Cocoa (macOS default)
-QEMU_DISPLAY=sdl just boot             # Force SDL (if installed)
-just show-qemu-resolution              # Show detected framebuffer mode
-QEMU_FB_AUTO=0 just boot               # Disable auto-detection, use defaults
-QEMU_FB_WIDTH=2560 QEMU_FB_HEIGHT=1440 just boot  # Manual override
-QEMU_FB_AUTO_POLICY=max just boot      # Multi-monitor: pick largest display
-QEMU_FB_AUTO_OUTPUT=DP-1 just boot     # Multi-monitor: pin specific output
-DEBUG=1 just boot                      # Debug logging
-just boot-log video=1                  # Timed boot with display window
-just ports=7777 boot                   # Expose guest:7777 on host:7777
-just ports=7777,8080 boot              # Expose multiple guest ports
+# macOS
+brew install qemu xorriso e2fsprogs just go
+
+# Debian/Ubuntu
+sudo apt install qemu-system-x86 xorriso e2fsprogs golang
+cargo install just  # or: https://github.com/casey/just#installation
+
+# Arch (btw)
+sudo pacman -S qemu-full xorriso e2fsprogs just go
+
+# Then:
+just setup          # installs the pinned rust nightly
+just boot           # spins the wheel
 ```
 
-**Note:** On macOS, GTK is not available. The justfile automatically uses Cocoa display.
+| Command | What it does |
+|---------|--------------|
+| `just boot` | Boot with a display window |
+| `just boot-fast` | Skip the Wheel of Fate (coward) |
+| `just boot-headless` | Serial only, no window |
+| `just test` | Run the 2,500+ test suite under QEMU |
+| `just --list` | Everything else (there's a lot) |
+
+<details>
+<summary><b>Advanced knobs</b></summary>
+
+```bash
+QEMU_DISPLAY=cocoa just boot                       # force a display backend (macOS auto-detects Cocoa)
+QEMU_FB_WIDTH=2560 QEMU_FB_HEIGHT=1440 just boot   # manual framebuffer override
+just ports=7777,8080 boot                          # expose guest ports on the host
+just test FILTER='mm::*'                           # run a subset of the tests
+just boot-debug                                    # QEMU GDB stub on :1234
+```
 
 </details>
 
@@ -83,40 +90,40 @@ just ports=7777,8080 boot              # Expose multiple guest ports
 
 <br/>
 
-## What's Inside
+## What's In The Slop
 
-```
-                          ┌─────────────────────────────────────┐
-                          │            USERLAND (Ring 3)        │
-                          │  ┌─────────┐ ┌────────┐ ┌─────────┐ │
-                          │  │  Shell  │ │Roulette│ │Composit.│ │
-                          │  └────┬────┘ └───┬────┘ └────┬────┘ │
-                          └───────┼──────────┼──────────┼───────┘
-                                  │ SYSCALL  │          │
-                          ┌───────▼──────────▼──────────▼───────┐
-                          │             KERNEL (Ring 0)         │
-                          │  ┌────────┐ ┌────────┐ ┌──────────┐ │
-                          │  │ Sched  │ │   MM   │ │  Video   │ │
-                          │  └────────┘ └────────┘ └──────────┘ │
-                          │  ┌────────┐ ┌────────┐ ┌──────────┐ │
-                          │  │  VirtIO│ │  ext2  │ │  PS/2    │ │
-                          │  └────────┘ └────────┘ └──────────┘ │
-                          └─────────────────────────────────────┘
-```
+Everything below is `#![no_std]` Rust written for this kernel — no smoltcp,
+no borrowed driver crates. When we say the wizards wrote a TCP stack, we
+mean the wizards wrote a TCP stack.
 
-<br/>
+**Kernel** — SMP preemptive scheduler, buddy allocator with demand paging
+and copy-on-write fork, SYSCALL/SYSRET fast path, LAPIC/IOAPIC + MSI-X
+interrupts, futexes, signals, pipes, ppoll, PTYs, process groups, signalfd,
+pidfd. A panic gets caught, its backtrace symbolized, and the damage billed
+to the offending task's oops ledger — the machine keeps going.
 
-| | Feature |
-|:--:|---------|
-| | Buddy allocator + demand paging |
-| | Ring 0/3 with proper TSS isolation |
-| | Preemptive scheduler |
-| | SYSCALL/SYSRET fast path |
-| | IOAPIC + LAPIC interrupts |
-| | PS/2 keyboard & mouse |
-| | ext2 on VirtIO block |
-| | Framebuffer graphics |
-| | The Wheel of Fate + W/L currency |
+**Drivers** — Intel Xe display (the one in the photo), virtio-gpu/blk/net,
+i8042 keyboard with live layout switching (the Swiss QWERTZ in the photo
+types its dead keys correctly), and an I²C-HID touchpad sitting on our own
+DesignWare I²C and Intel GPIO drivers, wired up by our own ACPI/AML
+interpreter.
+
+**Network** — a from-scratch TCP/IP stack: ARP, IPv4, TCP, UDP, ICMP, DHCP,
+DNS, unix sockets, NAPI-style ingress. Userland ships `curl`, `ping`, `nc`,
+and — for auditing your own two sockets — `nmap`.
+
+**Desktop** — a compositor with damage tracking and occlusion culling,
+clients passing buffers over memfd + SCM_RIGHTS (the Wayland trick), an
+appkit widget toolkit, and apps: terminal (with scrollback reflow), file
+manager, image viewer, system monitor.
+
+**Plumbing** — our own libc (`slibc`) with an mmap-only malloc, an
+io_uring-style submission ring (SlopRing), a VFS with ext2, devfs, ramfs,
+and an initramfs RAM root that boots with no disk attached at all.
+
+**The economy** — the Wheel of Fate gates every boot, and outcomes accrue
+to your W/L balance. The only operating system with a load-bearing gambling
+mechanic.
 
 <br/>
 
@@ -126,24 +133,33 @@ just ports=7777,8080 boot              # Expose multiple guest ports
 
 ## Actually, The Slop Is Proven
 
-Under the goofy exterior, SlopOS is a **framekernel**: every line of `unsafe`
-in the entire kernel is confined to one trusted crate, `slopos-ostd`, held
-under a **≤1% TCB budget**. Every other crate is `#![forbid(unsafe_code)]`,
-so the compiler itself refuses to let unsafety leak out of the trusted core.
+Under the goofy exterior, SlopOS is a **framekernel**: every line of
+`unsafe` in the entire kernel is confined to one trusted crate,
+`slopos-ostd`, held under a **≤1% TCB budget**. Every other kernel crate is
+`#![forbid(unsafe_code)]`, so the compiler itself refuses to let unsafety
+leak out of the trusted core — and CI gates inspect the final ELF to keep it
+honest: no stack frame over 2 KiB, no SSE instruction anywhere in the
+kernel, no `unsafe` outside the sanctum.
 
 The load-bearing invariants of that core are **machine-checked with
 [Verus](https://github.com/verus-lang/verus)**, an SMT-backed proof system
-for Rust. Three subsystems on the memory-safety critical path carry formal
-proofs:
+for Rust. The proofs cover the spots where a bug would be genuine undefined
+behaviour rather than a typed error:
 
 - **Frame reference counts** — no double-free, no use-after-free.
 - **Slab slot lifetimes** — a slot can never outlive the slab it came from.
 - **Page-table mutation** — every walk stays well-formed; user mappings
   can't reach into sensitive kernel memory.
+- **SlopRing cursors & buffer pool** — a hostile userland can't overwrite
+  or overflow the shared rings.
+- **TCP zero-copy pinning** — a page stays pinned as long as the NIC might
+  still read it.
 
-These are the spots where a bug would be genuine undefined behaviour rather
-than a typed error, so they are proven instead of merely tested. The proofs
-run in CI on every change and reproduce locally with `just verify`.
+The proofs run in CI on every change and reproduce locally with
+`just verify`. For everything they don't cover: 2,500+ tests boot under
+QEMU on every change (`just test`), the trusted core runs under Miri
+(`just check-miri`), and when a bug only reproduces on Tuesdays, there's
+deterministic time-travel debugging (`just rr-record` / `just rr-replay`).
 
 <br/>
 
