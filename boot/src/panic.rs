@@ -131,9 +131,9 @@ fn panic_capture_backtrace(out: &mut [u64]) -> usize {
 }
 
 fn panic_dump_backtrace() {
-    // Prefer the trap frame's RBP (the faulting context) when an exception
-    // path stashed one; then the pre-switch RBP (the panicking call chain);
-    // finally the live RBP on the caught/recovery path.
+    // Fatal-path rbp selection: prefer the trap frame's RBP (the faulting
+    // context) when an exception path stashed one; then the pre-switch RBP
+    // (the panicking call chain); finally the live RBP.
     let frame_rbp = PANIC_FRAME_RBP.load(Ordering::SeqCst);
     let stashed = PANIC_ORIG_RBP.load(Ordering::SeqCst);
     let rbp = if frame_rbp != 0 {
@@ -143,6 +143,16 @@ fn panic_dump_backtrace() {
     } else {
         cpu::read_rbp()
     };
+    panic_dump_backtrace_from(rbp)
+}
+
+/// Walk frame pointers from `rbp`, symbolize each return address, and print
+/// the trace via the lock-free serial writer. Shared by the fatal reporter
+/// and the task-scoped recovery report. All frames are printed, including
+/// the panic machinery's own — they symbolize to self-identifying names and
+/// a fixed skip count would silently rot as the handler's call shape
+/// changes.
+fn panic_dump_backtrace_from(rbp: u64) {
     let mut entries: [StacktraceEntry; PANIC_BACKTRACE_MAX] = [StacktraceEntry {
         frame_pointer: 0,
         return_address: 0,
@@ -247,6 +257,12 @@ pub fn panic_handler_impl(info: &PanicInfo) -> ! {
                 let _ = write!(buf, "  oops count: {}", oops_count);
                 panic_serial_write(buf.as_str());
             }
+
+            // Walk from the live rbp: the stashed rbp statics belong to the
+            // fatal/exception path and may be stale here. The walk starts in
+            // this handler, so the panic origin sits below a few
+            // panic-machinery frames.
+            panic_dump_backtrace_from(cpu::read_rbp());
 
             // The unwind is caught at the recovery boundary (syscall/kthread
             // edge, or `catch_panic!` in the test harness); do not exit here.

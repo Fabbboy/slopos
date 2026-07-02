@@ -67,6 +67,11 @@ impl<const N: usize> Write for FixedOopsStr<N> {
     }
 }
 
+/// Panic metadata carried through the catch boundary to the recovery
+/// consumer. Deliberately holds no backtrace: the panic handler prints the
+/// symbolized trace exactly once on serial with interrupts disabled, and
+/// this struct is `Copy` — a frames array would grow every copy to
+/// duplicate what serial already carries.
 #[derive(Clone, Copy, Debug)]
 pub struct OopsInfo {
     /// Best-effort task id supplied by the scheduler registration hook.
