@@ -9,6 +9,10 @@ fn main() {
     let dst = out_dir.join("kallsyms.rs");
 
     if let Some(src) = env::var_os("SLOPOS_KSYMS_RS") {
+        // Track the symbol table by content: rerun (and recompile) only when
+        // it changes, so a rebuild with unchanged symbols is a cache hit
+        // rather than a forced recompile of the whole kernel every phase.
+        println!("cargo:rerun-if-changed={}", PathBuf::from(&src).display());
         fs::copy(src, &dst).expect("copy generated SlopOS symbol table");
     } else {
         fs::write(
