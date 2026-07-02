@@ -1,4 +1,4 @@
-use core::sync::atomic::{AtomicPtr, AtomicUsize, Ordering};
+use core::sync::atomic::{AtomicPtr, AtomicU64, AtomicUsize, Ordering};
 
 use crate::unwind::OopsInfo;
 
@@ -37,6 +37,48 @@ pub fn current_oops_task_id() -> u32 {
 pub fn production_recovery_enabled() -> bool {
     !crate::boot_flags::has_flag(crate::boot_flags::BOOT_FLAG_TESTS_ENABLED)
         && !crate::boot_flags::has_flag(crate::boot_flags::BOOT_FLAG_PANIC_ON_OOPS)
+}
+
+/// Default budget of recovered production panics per boot. Reaching the
+/// limit makes the limit-crossing panic fatal: every recovered panic may
+/// leave non-RAII kernel state skewed (counters, refcounts), so the total
+/// degradation per boot must be bounded. `0` disables the limit.
+const OOPS_LIMIT_DEFAULT: u64 = 100;
+
+/// Recovered-production-panic ledger. Counts only panics caught at a
+/// production recovery boundary; test-harness catches are expected control
+/// flow and never recorded.
+static OOPS_COUNT: AtomicU64 = AtomicU64::new(0);
+static OOPS_LIMIT: AtomicU64 = AtomicU64::new(OOPS_LIMIT_DEFAULT);
+
+pub fn oops_count() -> u64 {
+    OOPS_COUNT.load(Ordering::Relaxed)
+}
+
+pub fn oops_limit() -> u64 {
+    OOPS_LIMIT.load(Ordering::Relaxed)
+}
+
+/// Set the recovered-panic budget (`panic.oops_limit=` boot knob).
+/// `0` disables the limit.
+pub fn set_oops_limit(limit: u64) {
+    OOPS_LIMIT.store(limit, Ordering::Relaxed);
+}
+
+/// Record one production oops. Returns the post-increment running count
+/// and whether the configured limit has been reached.
+pub fn oops_record() -> (u64, bool) {
+    let count = OOPS_COUNT.fetch_add(1, Ordering::SeqCst).saturating_add(1);
+    let limit = OOPS_LIMIT.load(Ordering::Relaxed);
+    (count, limit != 0 && count >= limit)
+}
+
+/// Restore the ledger to a snapshot. Hermetic-test use only: production
+/// code never lowers the count.
+#[doc(hidden)]
+pub fn restore_oops_ledger(count: u64, limit: u64) {
+    OOPS_COUNT.store(count, Ordering::SeqCst);
+    OOPS_LIMIT.store(limit, Ordering::SeqCst);
 }
 
 pub fn register_panic_cleanup(handler: PanicCleanupFn) {

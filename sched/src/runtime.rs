@@ -90,12 +90,13 @@ pub(crate) extern "C" fn kernel_thread_trampoline(arg: *mut c_void) {
         Ok(()) => {}
         Err(oops) => {
             klog_info!(
-                "panic recovery: kthread task={} {}:{}:{}: {}",
+                "panic recovery: kthread task={} {}:{}:{}: {} (oops total={})",
                 oops.task_id,
                 oops.file.as_str(),
                 oops.line,
                 oops.column,
                 oops.reason.as_str(),
+                slopos_ostd::panic_recovery::oops_count(),
             );
         }
     }

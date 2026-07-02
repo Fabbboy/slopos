@@ -37,8 +37,8 @@ static PANIC_ORIG_RSP: AtomicU64 = AtomicU64::new(0);
 static PANIC_ORIG_RBP: AtomicU64 = AtomicU64::new(0);
 
 /// Bounded spin budget the owner waits for peer CPUs to acknowledge the panic
-/// stop before printing (Windows "don't wait for stuck ones" — proceed on
-/// timeout).
+/// stop before printing; a stuck peer must never block the report, so the
+/// owner proceeds on timeout.
 const PEER_STOP_SPIN_BUDGET: u64 = 50_000_000;
 
 /// Set CPU state from an interrupt frame to be included in panic diagnostics.
@@ -192,49 +192,77 @@ pub fn panic_handler_impl(info: &PanicInfo) -> ! {
         && panic_recovery::recovery_is_active()
         && !slopos_ostd::panic::in_interrupt_context()
     {
+        // Only production oopses consume the recovered-panic budget;
+        // test-harness catches are expected control flow.
+        let production = panic_recovery::production_recovery_enabled();
+        let (oops_count, limit_reached) = if production {
+            panic_recovery::oops_record()
+        } else {
+            (0, false)
+        };
+
         // Disable interrupts only temporarily for the message
         let interrupts_were_enabled = cpu::are_interrupts_enabled();
         cpu::disable_interrupts();
 
-        panic_serial_write("\n[PANIC — task-scoped recovery]");
-
-        if let Some(location) = info.location() {
+        if limit_reached {
+            // The limit-crossing panic itself becomes fatal. Interrupts stay
+            // disabled: this CPU is committed to the fatal path below.
             let mut buf = MessageBuffer::new();
             let _ = write!(
                 buf,
-                "  at {}:{}:{}",
-                location.file(),
-                location.line(),
-                location.column()
+                "\n[PANIC] oops limit reached ({}/{}); escalating to fatal",
+                oops_count,
+                panic_recovery::oops_limit()
             );
             panic_serial_write(buf.as_str());
-        }
+        } else {
+            panic_serial_write("\n[PANIC — task-scoped recovery]");
 
-        // Also print the panic message for diagnostics
-        {
-            let mut msg_buf = MessageBuffer::new();
-            if let Some(msg) = info.message().as_str() {
-                let _ = write!(msg_buf, "  message: {}", msg);
-            } else {
-                let _ = write!(msg_buf, "  message: {}", info.message());
-            }
-            panic_serial_write(msg_buf.as_str());
-        }
-
-        // The unwind is caught at the recovery boundary (syscall/kthread
-        // edge, or `catch_panic!` in the test harness); do not exit here.
-
-        // Unwinding restores Rust frames, not the interrupt flag.
-        if interrupts_were_enabled {
-            cpu::enable_interrupts();
-        }
-
-        match slopos_ostd::unwind::begin_panic(info) {
-            Ok(never) => match never {},
-            Err(code) => {
+            if let Some(location) = info.location() {
                 let mut buf = MessageBuffer::new();
-                let _ = write!(buf, "  unwind initiation failed: {}", code.0);
+                let _ = write!(
+                    buf,
+                    "  at {}:{}:{}",
+                    location.file(),
+                    location.line(),
+                    location.column()
+                );
                 panic_serial_write(buf.as_str());
+            }
+
+            // Also print the panic message for diagnostics
+            {
+                let mut msg_buf = MessageBuffer::new();
+                if let Some(msg) = info.message().as_str() {
+                    let _ = write!(msg_buf, "  message: {}", msg);
+                } else {
+                    let _ = write!(msg_buf, "  message: {}", info.message());
+                }
+                panic_serial_write(msg_buf.as_str());
+            }
+
+            if production {
+                let mut buf = MessageBuffer::new();
+                let _ = write!(buf, "  oops count: {}", oops_count);
+                panic_serial_write(buf.as_str());
+            }
+
+            // The unwind is caught at the recovery boundary (syscall/kthread
+            // edge, or `catch_panic!` in the test harness); do not exit here.
+
+            // Unwinding restores Rust frames, not the interrupt flag.
+            if interrupts_were_enabled {
+                cpu::enable_interrupts();
+            }
+
+            match slopos_ostd::unwind::begin_panic(info) {
+                Ok(never) => match never {},
+                Err(code) => {
+                    let mut buf = MessageBuffer::new();
+                    let _ = write!(buf, "  unwind initiation failed: {}", code.0);
+                    panic_serial_write(buf.as_str());
+                }
             }
         }
     }
@@ -250,7 +278,7 @@ pub fn panic_handler_impl(info: &PanicInfo) -> ! {
         panic_abort_raw("recursive fatal fault — emergency reporter re-entered");
     }
 
-    // (2) Single-owner election (Linux panic_cpu). A peer that loses quietly
+    // (2) Single-owner election: first CAS wins. A peer that loses quietly
     // self-stops so it neither contends on the console nor holds a lock the
     // owner needs; the owner's NMI broadcast (below) will halt it for good.
     let cpu_id = slopos_arch::get_current_cpu() as u32;
@@ -283,7 +311,7 @@ pub fn panic_handler_impl(info: &PanicInfo) -> ! {
 }
 
 /// Bounded wait for peer CPUs to acknowledge the panic-stop NMI. Proceeds on
-/// timeout (Windows model: never block the panic on a stuck CPU).
+/// timeout so a stuck CPU can never block the report.
 fn wait_for_peer_stop() {
     let expected = (slopos_arch::pcr::get_pcr_count() as u32).saturating_sub(1);
     if expected == 0 {
@@ -315,6 +343,15 @@ extern "sysv64" fn emergency_report() -> ! {
     slopos_ostd::panic::format_panic_location_message(info_ptr, &mut message_buf);
     let message_str = message_buf.as_str();
     panic_serial_write(message_str);
+
+    // Recovered panics may have left non-RAII kernel state skewed; a
+    // non-zero count marks this report as post-degradation.
+    let oopses = panic_recovery::oops_count();
+    if oopses > 0 {
+        let mut taint_buf = MessageBuffer::new();
+        let _ = write!(taint_buf, "tainted: oops={}", oopses);
+        panic_serial_write(taint_buf.as_str());
+    }
 
     panic_serial_write("Register snapshot:");
     if let Some(rip) = extra_rip {

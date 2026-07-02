@@ -313,12 +313,9 @@ fn process_has_other_live_tasks(process_id: u32, excluding_task_id: u32) -> bool
 /// remaining 24 KiB of the 32 KiB per-task kernel stack covers the
 /// supervisor + every syscall handler's call chain.
 ///
-/// Linux solves the same problem by re-arming `TSS.SP0` on every
-/// userspace-exit boundary (`prepare_exit_to_usermode`); Asterinas'
-/// OSTD avoids it by running the supervisor on a per-CPU stack.  Our
-/// per-task-stack model takes the third path: split each task's kernel
-/// stack into supervisor + IRQ regions and place the supervisor at the
-/// bottom.  No scheduler / TSS / per-task-RSP plumbing required.
+/// The per-task-stack model splits each task's kernel stack into
+/// supervisor + IRQ regions and places the supervisor at the bottom.
+/// No scheduler / TSS / per-task-RSP plumbing required.
 const SUPERVISOR_RESERVE: u64 = 0x2000;
 
 const _: () = {
@@ -417,12 +414,13 @@ extern "C" fn kernel_task_entry_shim(task_arg: *mut c_void) {
         Ok(()) => {}
         Err(oops) => {
             klog_info!(
-                "panic recovery: legacy kthread task={} {}:{}:{}: {}",
+                "panic recovery: legacy kthread task={} {}:{}:{}: {} (oops total={})",
                 oops.task_id,
                 oops.file.as_str(),
                 oops.line,
                 oops.column,
                 oops.reason.as_str(),
+                slopos_ostd::panic_recovery::oops_count(),
             );
         }
     }
@@ -802,8 +800,8 @@ fn mark_task_terminated(task_ptr: *mut Task, resolved_id: u32) {
     // Adopt children: live ones become orphans (parent_task_id =
     // INVALID, so their later termination skips Zombie); zombie ones
     // are auto-reaped (Zombie → Terminated, freeing the slot for tier-2
-    // reuse). This is the SlopOS analog of Linux's reparent-to-init,
-    // simplified for a kernel without a userland-PID-1 reaper.
+    // reuse). There is no userland-PID-1 reaper, so orphan adoption
+    // happens entirely in the kernel.
     reparent_and_reap_children(resolved_id);
 
     if let Some(tty_idx) = should_hangup {

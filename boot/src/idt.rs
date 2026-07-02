@@ -409,12 +409,13 @@ fn handle_legacy_syscall(frame_ref: &mut slopos_arch::InterruptFrame, irq_nest: 
             Ok(()) => {}
             Err(oops) => {
                 klog_info!(
-                    "panic recovery: int80 task={} {}:{}:{}: {}",
+                    "panic recovery: int80 task={} {}:{}:{}: {} (oops total={})",
                     oops.task_id,
                     oops.file.as_str(),
                     oops.line,
                     oops.column,
                     oops.reason.as_str(),
+                    slopos_ostd::panic_recovery::oops_count(),
                 );
                 slopos_sched::scheduler::scheduler_task_exit_impl();
             }
@@ -739,9 +740,8 @@ fn try_handle_page_fault(frame: *mut slopos_arch::InterruptFrame) -> bool {
     // recover gracefully by redirecting RIP to the fault return
     // label, which returns a nonzero "remaining bytes" value to the
     // Rust caller. This makes the user-copy primitives safe against
-    // concurrent munmap on SMP (Redox OS pattern). The OSTD region
-    // is the only fault-recoverable copy band in the kernel — there
-    // is no parallel `slopos_mm` asm shim anymore.
+    // concurrent munmap on SMP. The OSTD region is the only
+    // fault-recoverable copy band in the kernel.
     if !in_user(frame_ref) {
         if slopos_ostd::user::copy::is_ostd_usercopy_ip(frame_ref.rip) {
             frame_ref.rip = slopos_ostd::user::copy::ostd_usercopy_fault_ip();

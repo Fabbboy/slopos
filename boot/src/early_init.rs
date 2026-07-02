@@ -572,6 +572,19 @@ fn boot_step_boot_config_fn(_ctx: &mut BootCtx<'_, BspInit>) {
         boot_info(b"Boot option: panic recovery smoke enabled\0");
     }
 
+    // Budget of recovered production panics per boot; reaching it makes the
+    // limit-crossing panic fatal. `panic.oops_limit=0` disables the limit.
+    for token in cmdline.split_whitespace() {
+        if let Some(value) = token.strip_prefix("panic.oops_limit=") {
+            if let Ok(limit) = value.parse::<u64>() {
+                slopos_ostd::panic_recovery::set_oops_limit(limit);
+                boot_info(b"Boot option: panic.oops_limit set\0");
+            } else {
+                boot_info(b"Boot option: panic.oops_limit ignored (not a u64)\0");
+            }
+        }
+    }
+
     // Root filesystem backing: `root=initramfs` forces the RAM-resident root,
     // `root=virtio` forces the ext2 disk, and the default (`root=auto`) uses the
     // initramfs when Limine loaded a module and falls back to the disk.

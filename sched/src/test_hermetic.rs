@@ -283,6 +283,25 @@ hermetic_state! {
 }
 
 // =============================================================================
+// OopsLedger — recovered-panic count and limit (tests may record/reconfigure)
+// =============================================================================
+
+hermetic_state! {
+    pub OopsLedgerShadow {
+        type Snapshot = (u64, u64);
+        fn snapshot() -> Result<Self::Snapshot, AllocError> {
+            Ok((
+                slopos_ostd::panic_recovery::oops_count(),
+                slopos_ostd::panic_recovery::oops_limit(),
+            ))
+        }
+        fn restore(snap: Self::Snapshot) {
+            slopos_ostd::panic_recovery::restore_oops_ledger(snap.0, snap.1);
+        }
+    }
+}
+
+// =============================================================================
 // KlogLevel — global klog verbosity (tests may set Debug or Trace)
 // =============================================================================
 

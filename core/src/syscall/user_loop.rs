@@ -112,12 +112,13 @@ fn user_task_loop(task: *mut Task) -> ! {
                         Ok(()) => {}
                         Err(oops) => {
                             klog_info!(
-                                "panic recovery: syscall task={} {}:{}:{}: {}",
+                                "panic recovery: syscall task={} {}:{}:{}: {} (oops total={})",
                                 oops.task_id,
                                 oops.file.as_str(),
                                 oops.line,
                                 oops.column,
                                 oops.reason.as_str(),
+                                panic_recovery::oops_count(),
                             );
                             scheduler_task_exit_impl();
                         }
