@@ -12,6 +12,9 @@
 #   single checked invariant from expanding into a broader Drop-panic surface.
 #   drivers/src/tty/mod.rs and fs/src/ext2/inode.rs keep debug-only Drop
 #   assertions that catch missing explicit cleanup during development.
+#   boot/src/early_init.rs: the `panic.nested_drop_smoke` boot hook's guard
+#   Drop panics BY DESIGN — it is the fault injection that proves a Drop
+#   panic mid-unwind lands on the fatal path.
 
 set -euo pipefail
 
@@ -63,7 +66,9 @@ offenders="$(
                     || fname == "drivers/src/tty/mod.rs" \
                     && line ~ /^[[:space:]]*debug_assert![[:space:]]*\(/ \
                     || fname == "fs/src/ext2/inode.rs" \
-                    && line ~ /^[[:space:]]*debug_assert![[:space:]]*\(/
+                    && line ~ /^[[:space:]]*debug_assert![[:space:]]*\(/ \
+                    || fname == "boot/src/early_init.rs" \
+                    && line ~ /panic\.nested_drop_smoke: Drop panic during unwind/
             }
             function count_braces(line,    i, c) {
                 for (i = 1; i <= length(line); i++) {
