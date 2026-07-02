@@ -16,6 +16,14 @@
 //! host shim below keeps this module's surface present off-target — where the
 //! std test harness owns panic handling — so `catch_panic!` and any host test
 //! that names this facade still compile.
+//!
+//! `unwinding` is built without its `dwarf-expr` feature: a call-frame
+//! instruction that requires DWARF expression evaluation
+//! (`DW_CFA_def_cfa_expression` and friends) fails the unwind,
+//! `begin_panic` returns `Err`, and the panic falls through to the fatal
+//! abort path. Fail-safe: an unsupported CFI rule can never resume with
+//! wrong register state. Both `unwinding` and its DWARF reader `gimli`
+//! are vendored TCB annexes pinned by `scripts/check_vendor_pin.sh`.
 
 use core::fmt::{self, Write};
 use core::panic::PanicInfo;

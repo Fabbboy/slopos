@@ -1,27 +1,21 @@
 #!/usr/bin/env bash
 # Verify pinned third-party code admitted into the kernel TCB.
 #
-# vendor/unwinding is a named TCB annex: it may contain executable unsafe,
-# but only while its identity and content match this pin. Updating it must be
-# an explicit review event that refreshes the version, upstream VCS SHA, file
-# count, and deterministic tree hash below.
+# Each entry in ANNEX_PINS is a named TCB annex: it may contain executable
+# unsafe, but only while its identity and content match its pin. Updating an
+# annex must be an explicit review event that refreshes the version, upstream
+# VCS SHA, file count, and deterministic tree hash in its table row.
 
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 
-ANNEX_REL="vendor/unwinding"
-ANNEX_DIR="$REPO_ROOT/$ANNEX_REL"
-MANIFEST="$ANNEX_DIR/Cargo.toml"
-VCS_INFO="$ANNEX_DIR/.cargo_vcs_info.json"
-
-EXPECTED_NAME="unwinding"
-EXPECTED_VERSION="0.2.9"
-EXPECTED_REPOSITORY="https://github.com/nbdd0121/unwinding/"
-EXPECTED_UPSTREAM_SHA="72162ed9c5c9111efb912b9b7dc3007d5ef19105"
-EXPECTED_FILE_COUNT="38"
-EXPECTED_TREE_SHA256="f6dd8243426f53b1e6f6156cb1b2ee38086e93bff93c05278c839adea53b3118"
+# name|rel_dir|version|repository|upstream_sha1|file_count|tree_sha256
+ANNEX_PINS=(
+    "unwinding|vendor/unwinding|0.2.9|https://github.com/nbdd0121/unwinding/|72162ed9c5c9111efb912b9b7dc3007d5ef19105|38|f6dd8243426f53b1e6f6156cb1b2ee38086e93bff93c05278c839adea53b3118"
+    "gimli|vendor/gimli|0.33.0|https://github.com/gimli-rs/gimli|033ef8dd5748236aa5bcecc868207a40e4e3f597|57|409a6a5ebf41fc015589e9b64576cb465161b78595eaa83ef5da9cf04d7c75cc"
+)
 
 sha256_file() {
     if command -v sha256sum >/dev/null 2>&1; then
@@ -46,7 +40,8 @@ sha256_stream() {
 }
 
 toml_package_value() {
-    local key="$1"
+    local manifest="$1"
+    local key="$2"
     awk -v key="$key" '
         /^[[:space:]]*\[package\][[:space:]]*$/ { in_package = 1; next }
         /^[[:space:]]*\[/ {
@@ -64,50 +59,32 @@ toml_package_value() {
                 exit
             }
         }
-    ' "$MANIFEST"
+    ' "$manifest"
 }
 
 json_sha1_value() {
-    sed -n 's/.*"sha1"[[:space:]]*:[[:space:]]*"\([0-9a-fA-F]\{40\}\)".*/\1/p' "$VCS_INFO" | head -n 1
+    sed -n 's/.*"sha1"[[:space:]]*:[[:space:]]*"\([0-9a-fA-F]\{40\}\)".*/\1/p' "$1" | head -n 1
 }
 
 tree_file_list() {
+    local annex_rel="$1"
     cd "$REPO_ROOT"
-    find "$ANNEX_REL" -type f \
-        -not -path "$ANNEX_REL/.git/*" \
-        -not -path "$ANNEX_REL/target/*" \
+    find "$annex_rel" -type f \
+        -not -path "$annex_rel/.git/*" \
+        -not -path "$annex_rel/target/*" \
         -print \
       | LC_ALL=C sort
 }
 
 tree_hash() {
+    local annex_rel="$1"
     cd "$REPO_ROOT"
-    tree_file_list | while IFS= read -r path; do
+    tree_file_list "$annex_rel" | while IFS= read -r path; do
         printf '%s  %s\n' "$(sha256_file "$path")" "$path"
     done | sha256_stream
 }
 
 bad=0
-
-if [ ! -d "$ANNEX_DIR" ]; then
-    echo "check_vendor_pin: missing $ANNEX_REL" >&2
-    exit 1
-fi
-if [ ! -f "$MANIFEST" ]; then
-    echo "check_vendor_pin: missing $ANNEX_REL/Cargo.toml" >&2
-    exit 1
-fi
-if [ ! -f "$VCS_INFO" ]; then
-    echo "check_vendor_pin: missing $ANNEX_REL/.cargo_vcs_info.json" >&2
-    exit 1
-fi
-
-actual_name="$(toml_package_value name)"
-actual_version="$(toml_package_value version)"
-actual_repository="$(toml_package_value repository)"
-actual_upstream_sha="$(json_sha1_value)"
-actual_file_count="$(tree_file_list | wc -l | tr -d '[:space:]')"
-actual_tree_sha256="$(tree_hash)"
 
 check_eq() {
     local label="$1"
@@ -122,16 +99,49 @@ check_eq() {
     fi
 }
 
-check_eq "crate name" "$EXPECTED_NAME" "$actual_name"
-check_eq "crate version" "$EXPECTED_VERSION" "$actual_version"
-check_eq "repository" "$EXPECTED_REPOSITORY" "$actual_repository"
-check_eq "upstream sha1" "$EXPECTED_UPSTREAM_SHA" "$actual_upstream_sha"
-check_eq "file count" "$EXPECTED_FILE_COUNT" "$actual_file_count"
-check_eq "content tree sha256" "$EXPECTED_TREE_SHA256" "$actual_tree_sha256"
+ok_names=""
+
+for spec in "${ANNEX_PINS[@]}"; do
+    IFS='|' read -r exp_name annex_rel exp_version exp_repository \
+        exp_upstream_sha exp_file_count exp_tree_sha256 <<<"$spec"
+
+    annex_dir="$REPO_ROOT/$annex_rel"
+    manifest="$annex_dir/Cargo.toml"
+    vcs_info="$annex_dir/.cargo_vcs_info.json"
+
+    if [ ! -d "$annex_dir" ]; then
+        echo "check_vendor_pin: missing $annex_rel" >&2
+        exit 1
+    fi
+    if [ ! -f "$manifest" ]; then
+        echo "check_vendor_pin: missing $annex_rel/Cargo.toml" >&2
+        exit 1
+    fi
+    if [ ! -f "$vcs_info" ]; then
+        echo "check_vendor_pin: missing $annex_rel/.cargo_vcs_info.json" >&2
+        exit 1
+    fi
+
+    actual_name="$(toml_package_value "$manifest" name)"
+    actual_version="$(toml_package_value "$manifest" version)"
+    actual_repository="$(toml_package_value "$manifest" repository)"
+    actual_upstream_sha="$(json_sha1_value "$vcs_info")"
+    actual_file_count="$(tree_file_list "$annex_rel" | wc -l | tr -d '[:space:]')"
+    actual_tree_sha256="$(tree_hash "$annex_rel")"
+
+    check_eq "$annex_rel crate name" "$exp_name" "$actual_name"
+    check_eq "$annex_rel crate version" "$exp_version" "$actual_version"
+    check_eq "$annex_rel repository" "$exp_repository" "$actual_repository"
+    check_eq "$annex_rel upstream sha1" "$exp_upstream_sha" "$actual_upstream_sha"
+    check_eq "$annex_rel file count" "$exp_file_count" "$actual_file_count"
+    check_eq "$annex_rel content tree sha256" "$exp_tree_sha256" "$actual_tree_sha256"
+
+    ok_names="$ok_names $exp_name $exp_version ($exp_upstream_sha);"
+done
 
 if [ "$bad" -ne 0 ]; then
-    echo "check_vendor_pin: FAIL — $ANNEX_REL no longer matches the reviewed TCB annex pin" >&2
+    echo "check_vendor_pin: FAIL — a vendored tree no longer matches its reviewed TCB annex pin" >&2
     exit 1
 fi
 
-echo "check_vendor_pin: OK — $ANNEX_REL is pinned to $EXPECTED_NAME $EXPECTED_VERSION ($EXPECTED_UPSTREAM_SHA)"
+echo "check_vendor_pin: OK —$ok_names"

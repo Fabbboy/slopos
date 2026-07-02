@@ -26,9 +26,8 @@
 #     than a hand-maintained list. Userland-side crates (userland, slibc,
 #     slop-protocol, appkit) and the workspace tooling fall out
 #     automatically because the kernel image does not link them.
-#   - "TCB annex LoC": non-blank, non-comment lines in named annex
-#     source trees that are not workspace members. Today the only annex
-#     is vendor/unwinding/src, pinned by scripts/check_vendor_pin.sh.
+#   - "TCB annex LoC": non-blank, non-comment lines in the named annex
+#     source trees (ANNEX_DIRS), each pinned by scripts/check_vendor_pin.sh.
 #
 # Phase 1 target: ≤ 1.5 %.  Phase 2 target: ≤ 1.0 %.
 
@@ -58,7 +57,7 @@ done
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
-ANNEX_UNWINDING="vendor/unwinding"
+ANNEX_DIRS=("vendor/unwinding" "vendor/gimli")
 
 # Kernel crate directories — the TCB-ratio denominator. Derived from
 # ground truth (the `kernel` binary's normal-dependency closure) by
@@ -120,17 +119,28 @@ count_loc_lines() {
 }
 
 ostd_unsafe_lines="$(count_unsafe_lines "$REPO_ROOT/slopos-ostd/src")"
-annex_unwinding_unsafe_lines="$(count_unsafe_lines "$REPO_ROOT/vendor/unwinding/src")"
-unsafe_lines=$(( ostd_unsafe_lines + annex_unwinding_unsafe_lines ))
+unsafe_lines="$ostd_unsafe_lines"
+declare -A annex_unsafe_lines
+for annex in "${ANNEX_DIRS[@]}"; do
+    annex_unsafe_lines["$annex"]="$(count_unsafe_lines "$REPO_ROOT/$annex/src")"
+    unsafe_lines=$(( unsafe_lines + annex_unsafe_lines["$annex"] ))
+done
 
 # ---- Kernel LoC count (every kernel crate) --------------------------------
 
 loc=0
 for crate in "${KERNEL_CRATES[@]}"; do
-    # vendor/unwinding is a named TCB annex. It can appear in the
-    # kernel dependency closure because it is a workspace member, but
-    # count it only in the annex bucket below.
-    if [ "$crate" = "$ANNEX_UNWINDING" ]; then
+    # Named TCB annexes can appear in the kernel dependency closure when
+    # they are workspace members; count them only in the annex bucket
+    # below.
+    is_annex=0
+    for annex in "${ANNEX_DIRS[@]}"; do
+        if [ "$crate" = "$annex" ]; then
+            is_annex=1
+            break
+        fi
+    done
+    if [ "$is_annex" -eq 1 ]; then
         continue
     fi
     dir="$REPO_ROOT/$crate"
@@ -146,8 +156,12 @@ for crate in "${KERNEL_CRATES[@]}"; do
     done < <(find "$dir/src" -type f -name '*.rs' -print0)
 done
 
-annex_unwinding_loc="$(count_loc_lines "$REPO_ROOT/$ANNEX_UNWINDING/src")"
-loc=$(( loc + annex_unwinding_loc ))
+kernel_crate_loc="$loc"
+declare -A annex_loc
+for annex in "${ANNEX_DIRS[@]}"; do
+    annex_loc["$annex"]="$(count_loc_lines "$REPO_ROOT/$annex/src")"
+    loc=$(( loc + annex_loc["$annex"] ))
+done
 
 # ---- Ratio ----------------------------------------------------------------
 
@@ -160,11 +174,15 @@ ratio=$(awk -v u="$unsafe_lines" -v l="$loc" 'BEGIN { printf "%.3f", (u * 100.0)
 
 printf 'TCB unsafe lines:\n'
 printf '  slopos-ostd:                 %d\n' "$ostd_unsafe_lines"
-printf '  annex vendor/unwinding:      %d\n' "$annex_unwinding_unsafe_lines"
+for annex in "${ANNEX_DIRS[@]}"; do
+    printf '  annex %-22s %d\n' "$annex:" "${annex_unsafe_lines[$annex]}"
+done
 printf '  total:                       %d\n' "$unsafe_lines"
 printf 'Kernel + annex Rust LoC:\n'
-printf '  kernel workspace crates:     %d\n' "$(( loc - annex_unwinding_loc ))"
-printf '  annex vendor/unwinding:      %d\n' "$annex_unwinding_loc"
+printf '  kernel workspace crates:     %d\n' "$kernel_crate_loc"
+for annex in "${ANNEX_DIRS[@]}"; do
+    printf '  annex %-22s %d\n' "$annex:" "${annex_loc[$annex]}"
+done
 printf '  total:                       %d\n' "$loc"
 printf 'TCB ratio:                     %s %%  (target Phase 1: <= 1.5 %%, Phase 2: <= 1.0 %%)\n' "$ratio"
 

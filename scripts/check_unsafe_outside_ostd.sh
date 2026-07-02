@@ -2,7 +2,7 @@
 # Fail the build if any kernel crate other than slopos-ostd contains a
 # bare `unsafe` block or `unsafe fn`. slopos-ostd is the kernel's
 # Operating System Trusted Domain — the single crate that owns every
-# line of `unsafe` in the kernel (Asterinas-paper AD-1 / AD-2). Every
+# line of first-party `unsafe` in the kernel. Every
 # other kernel crate must compile under `#![forbid(unsafe_code)]`; the
 # `forbid` attribute already rejects new `unsafe` at rustc time, but
 # this script is the load-bearing belt-and-braces gate that catches:
@@ -17,6 +17,8 @@
 #   - vendor/unwinding/             named TCB annex: a pinned third-party
 #                                   unwinder used only through OSTD's
 #                                   unwind surface.
+#   - vendor/gimli/                 named TCB annex: the pinned DWARF
+#                                   reader consumed by vendor/unwinding.
 #   - slopos-ostd-derive/           proc-macro support; emits literal
 #                                   `unsafe impl Trait for T {}` token
 #                                   text consumed inside OSTD. Listed
@@ -53,13 +55,13 @@ REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 
 # Crate-name allowlist — everything userland-side, plus the trusted
 # core and its proc-macro support. Matches the leading directory
-# component of the path (relative to REPO_ROOT). vendor/unwinding is
-# handled separately below as a named TCB annex; every other vendor
-# crate is scanned, including untracked vendor/**/*.rs.
+# component of the path (relative to REPO_ROOT). The named TCB annexes
+# (vendor/unwinding, vendor/gimli) are handled separately below; every
+# other vendor crate is scanned, including untracked vendor/**/*.rs.
 # slopos-rt = the userland async runtime; userland-side, identical role to
 # userland/appkit which are already exempt and already carry unsafe.
 USERLAND_RE='^(userland|slibc|slop-protocol|ktesting|appkit|image|slopos-rt|slopos-ostd|slopos-ostd-derive)/'
-TCB_ANNEX_RE='^vendor/unwinding/'
+TCB_ANNEX_RE='^vendor/(unwinding|gimli)/'
 
 # Explicit file-level allowlist. Each entry is a repo-relative path.
 SOURCE_WHITELIST=(
@@ -70,7 +72,7 @@ SOURCE_WHITELIST=(
 # Include tracked Rust sources, untracked Rust sources, and an explicit
 # vendor/**/*.rs sweep. The explicit vendor pass is intentional: a new
 # untracked vendored crate must not be able to carry executable unsafe
-# unless it is the named vendor/unwinding TCB annex.
+# unless it is a named TCB annex.
 file_list="$(
     cd "$REPO_ROOT"
     {
@@ -95,7 +97,7 @@ filtered=""
 while IFS= read -r path; do
     [ -z "$path" ] && continue
     [[ "$path" =~ $USERLAND_RE ]] && continue
-    # Named TCB annex. Other vendor crates are deliberately scanned.
+    # Named TCB annexes. Other vendor crates are deliberately scanned.
     [[ "$path" =~ $TCB_ANNEX_RE ]] && continue
     skip=0
     for exempt in "${SOURCE_WHITELIST[@]}"; do
@@ -160,12 +162,12 @@ source_offenders="$(
 )"
 
 if [ -n "$source_offenders" ]; then
-    echo "check_unsafe_outside_ostd: executable 'unsafe' detected outside slopos-ostd and vendor/unwinding:" >&2
+    echo "check_unsafe_outside_ostd: executable 'unsafe' detected outside slopos-ostd and the named TCB annexes:" >&2
     echo "$source_offenders" | sed 's/^/    /' >&2
-    echo "  slopos-ostd is the kernel OSTD; vendor/unwinding is the only named vendor TCB annex." >&2
+    echo "  slopos-ostd is the kernel OSTD; vendor/unwinding and vendor/gimli are the named vendor TCB annexes." >&2
     echo "  If a new file legitimately needs an unsafe attribute (e.g. #[unsafe(link_section)] in a" >&2
     echo "  macro_rules! body) and you have audited it, add the file to SOURCE_WHITELIST in this script." >&2
     exit 1
 fi
 
-echo "check_unsafe_outside_ostd: OK — no executable unsafe outside slopos-ostd and vendor/unwinding"
+echo "check_unsafe_outside_ostd: OK — no executable unsafe outside slopos-ostd and the named TCB annexes"

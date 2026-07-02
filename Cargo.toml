@@ -35,6 +35,10 @@ members = [
   "hermetic",
   "verification"
 ]
+# vendor/gimli is a pinned TCB annex reached via [patch.crates-io]; excluding
+# it from the workspace keeps workspace-wide tooling (cargo fmt --all) from
+# rewriting the content-hash-pinned tree.
+exclude = ["vendor/gimli"]
 resolver = "2"
 
 [workspace.package]
@@ -88,8 +92,14 @@ slopos-vt = { path = "vt" }
 slopos-windowing = { path = "windowing" }
 slopos-hermetic = { path = "hermetic" }
 paste = { version = "1.0", default-features = false }
-unwinding = { path = "vendor/unwinding", default-features = false, features = ["unwinder", "fde-static", "personality", "panic"] }
+unwinding = { path = "vendor/unwinding", default-features = false, features = ["unwinder", "fde-static", "personality", "panic", "hide-trace"] }
 x86_64 = { version = "0.15.4", default-features = false, features = ["instructions"] }
 syn = { version = "2", features = ["full"] }
 quote = "1"
 proc-macro2 = "1"
+
+# Pinned TCB annexes (scripts/check_vendor_pin.sh). The patch resolves the
+# registry `gimli` requested by vendor/unwinding to the vendored tree without
+# editing the pinned unwinding manifest.
+[patch.crates-io]
+gimli = { path = "vendor/gimli" }

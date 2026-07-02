@@ -7,10 +7,11 @@
 # directly. Userland crates are exempt — they run on larger stacks and
 # the constraint does not apply there.
 #
-# vendor/unwinding is a named TCB annex. It is third-party code pinned by
-# scripts/check_vendor_pin.sh and reached only through OSTD's unwind
-# surface, so this allocation gate skips that directory only. Other
-# vendor crates are scanned like first-party kernel code.
+# vendor/unwinding and vendor/gimli are named TCB annexes. They are
+# third-party code pinned by scripts/check_vendor_pin.sh and reached only
+# through OSTD's unwind surface, so this allocation gate skips those
+# directories only. Other vendor crates are scanned like first-party
+# kernel code.
 
 set -euo pipefail
 
@@ -32,10 +33,10 @@ while IFS= read -r -d '' manifest; do
         continue
     fi
     # Skip third_party, build outputs, and the userland carve-out.
-    # vendor/unwinding is the only named vendor TCB annex allowed to live
-    # outside the framekernel allocation discipline.
+    # The named vendor TCB annexes are the only vendored crates allowed to
+    # live outside the framekernel allocation discipline.
     case "$rel_dir" in
-        third_party/*|vendor/unwinding|vendor/unwinding/*|builddir/*|target/*|*/target/*) continue ;;
+        third_party/*|vendor/unwinding|vendor/unwinding/*|vendor/gimli|vendor/gimli/*|builddir/*|target/*|*/target/*) continue ;;
     esac
     if [[ "$crate_name" =~ $USERLAND_RE ]]; then
         continue
@@ -95,8 +96,8 @@ SOURCE_WHITELIST="kernel/src/main.rs"
 # matched by the regex below.
 #
 # The source scan includes untracked files and an explicit vendor sweep.
-# Only vendor/unwinding is skipped; any other vendored Rust source that
-# directly names alloc is a gate failure.
+# Only the named TCB annexes are skipped; any other vendored Rust source
+# that directly names alloc is a gate failure.
 source_offenders="$(
     cd "$REPO_ROOT"
     {
@@ -114,7 +115,7 @@ source_offenders="$(
       | sed 's|^\./||' \
       | LC_ALL=C sort -u \
       | grep -Ev '^(userland|terminal-core|slibc|slop-protocol|ktesting|image|slopos-ostd)/' \
-      | grep -Ev '^vendor/unwinding/' \
+      | grep -Ev '^vendor/(unwinding|gimli)/' \
       | grep -vxF "$SOURCE_WHITELIST" \
       | while IFS= read -r file; do
             [ -f "$file" ] || continue

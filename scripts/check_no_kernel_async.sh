@@ -26,7 +26,7 @@ REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 # slopos-rt = the userland async runtime; userland-side, identical role to
 # userland/appkit which are already exempt.
 USERLAND_RE='^(userland|slibc|slop-protocol|ktesting|appkit|image|slopos-rt|verification)/'
-TCB_ANNEX_RE='^vendor/unwinding/'
+TCB_ANNEX_RE='^vendor/(unwinding|gimli)/'
 
 file_list="$(
     cd "$REPO_ROOT"
@@ -48,7 +48,7 @@ filtered=""
 while IFS= read -r path; do
     [ -z "$path" ] && continue
     [[ "$path" =~ $USERLAND_RE ]] && continue
-    # Named TCB annex. Other vendor crates are deliberately scanned.
+    # Named TCB annexes. Other vendor crates are deliberately scanned.
     [[ "$path" =~ $TCB_ANNEX_RE ]] && continue
     filtered+="$path"$'\n'
 done <<< "$file_list"

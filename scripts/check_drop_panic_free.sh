@@ -19,9 +19,9 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 
 # Userland crates are out of the kernel framekernel discipline. The pinned
-# third-party unwinder is covered by scripts/check_vendor_pin.sh instead of
-# this first-party destructor-policy scan.
-OUT_OF_SCOPE_RE='^(userland|terminal-core|slibc|slop-protocol|ktesting|appkit|image|slopos-rt|vendor/unwinding)/'
+# TCB annexes are covered by scripts/check_vendor_pin.sh instead of this
+# first-party destructor-policy scan.
+OUT_OF_SCOPE_RE='^(userland|terminal-core|slibc|slop-protocol|ktesting|appkit|image|slopos-rt|vendor/unwinding|vendor/gimli)/'
 
 file_list="$(
     cd "$REPO_ROOT"
