@@ -146,10 +146,11 @@ use super::task::{
     task_is_invalid, task_is_ready, task_is_running, task_kernel_stack_top,
     task_last_run_timestamp_volatile, task_name_looks_idle, task_on_cpu_load,
     task_pcr_round_trip_swap, task_pgid, task_pointer_is_valid, task_priority, task_process_id,
-    task_record_context_switch, task_record_yield, task_remote_inbox_is_linked,
-    task_sched_placement_compare_exchange, task_sched_placement_load, task_sched_placement_store,
-    task_set_controlling_tty, task_set_on_cpu, task_set_state, task_set_status,
-    task_set_time_slice, task_set_time_slice_remaining, task_sid, task_status, task_switch_ctx_ptr,
+    task_record_context_switch, task_record_yield, task_recovery_depth_load,
+    task_recovery_depth_store, task_remote_inbox_is_linked, task_sched_placement_compare_exchange,
+    task_sched_placement_load, task_sched_placement_store, task_set_controlling_tty,
+    task_set_on_cpu, task_set_state, task_set_status, task_set_time_slice,
+    task_set_time_slice_remaining, task_sid, task_status, task_switch_ctx_ptr,
     task_switch_ctx_ptr_mut, task_switch_ctx_rip_rsp, task_time_slice, task_time_slice_remaining,
     task_try_transition_from,
 };
@@ -216,6 +217,19 @@ fn reset_task_quantum(task: *mut Task) {
 }
 
 #[inline]
+fn save_live_recovery_depth(task: *mut Task) {
+    if task.is_null() {
+        return;
+    }
+    task_recovery_depth_store(task, slopos_arch::pcr::recovery_depth());
+}
+
+#[inline]
+fn restore_live_recovery_depth(task: *mut Task) {
+    slopos_arch::pcr::recovery_depth_store(task_recovery_depth_load(task));
+}
+
+#[inline]
 fn scheduler_tasks_for_cpu(cpu_id: usize) -> (*mut Task, *mut Task) {
     let mut current = scheduler_get_current_task_for(cpu_id);
     let mut idle = scheduler_get_idle_task_for(cpu_id);
@@ -246,6 +260,7 @@ fn scheduler_tasks_for_cpu(cpu_id: usize) -> (*mut Task, *mut Task) {
         // PCR is the source of truth for SafeStack readers.
         if !current.is_null() {
             slopos_arch::pcr::set_current_task(current as *mut ());
+            restore_live_recovery_depth(current);
             task_set_status(current, TaskStatus::Running);
         }
     }
@@ -286,6 +301,7 @@ pub(crate) fn dispatch(cpu_id: usize, task: *mut Task) {
 
     // SafeStack reads this on every instrumented prologue.
     slopos_arch::pcr::set_current_task(task as *mut ());
+    restore_live_recovery_depth(task);
 
     // Keep PCR.syscall_pid in sync so copy_from_user always resolves
     // the correct process page directory, even after preemption.
@@ -548,6 +564,7 @@ fn switch_from_current_to_idle(cpu_id: usize, current: *mut Task, idle_task: *mu
         return;
     }
 
+    save_live_recovery_depth(current);
     dispatch(cpu_id, idle_task);
     slopos_ostd::sync::rcu_note_qs();
 
@@ -980,6 +997,7 @@ fn execute_task(cpu_id: usize, from_task: *mut Task, to_task: *mut Task) {
     // on this flag, but that spin was made redundant by Phase 1's
     // lock-pair barrier and removed.)
     task_set_on_cpu(to_task, true);
+    save_live_recovery_depth(from_task);
 
     // Single source-of-truth install: writes PCR.current_task
     // (SafeStack slot), PCR.syscall_pid, task.state = Running, and
@@ -1091,10 +1109,15 @@ pub(crate) fn run_ready_task_from_idle(cpu_id: usize, idle_task: *mut Task) -> b
         return false;
     }
 
-    // Hold a reference while the task is dispatched on this CPU.
-    // Without this, refcnt is 0 after dequeue and a concurrent
-    // task_terminate() on another CPU can kfree() the kernel stack
-    // while we are still executing on it — a use-after-free.
+    // Publish on_cpu with the dispatch claim, before the reference bump and
+    // the validation in execute_task. A concurrent task_terminate() must
+    // observe this task as on-CPU for the whole dispatch so it defers cleanup
+    // (kernel-stack free) to this CPU's post-switch path rather than freeing
+    // the stack while this CPU is about to run on it — a use-after-free.
+    task_set_on_cpu(next_task, true);
+
+    // Hold a reference while the task is dispatched on this CPU, so its stack
+    // survives until this CPU's post-switch cleanup releases the reference.
     let _ = task_inc_ref(next_task);
 
     execute_task(cpu_id, idle_task, next_task);
@@ -1106,6 +1129,7 @@ pub(crate) fn run_ready_task_from_idle(cpu_id: usize, idle_task: *mut Task) -> b
     slopos_ostd::sync::rcu_note_qs();
 
     switch_to_kernel_address_space(idle_task);
+    super::task::cleanup_current_task_after_switch(next_task);
 
     // Re-enqueue the task if it was preempted (Running) or already
     // woken (Ready) before its yield completed. Keep `on_cpu=true`
@@ -1789,6 +1813,7 @@ extern "sysv64" fn ostd_task_exit_hook() -> ! {
 /// [`register_task_exit_hook`] is one-shot and asserts on double-call.
 pub fn install_ostd_task_exit_hook<'b>(token: &slopos_ostd::sync::BspToken<'b>) {
     slopos_ostd::task::switch::register_task_exit_hook(token, ostd_task_exit_hook);
+    slopos_ostd::panic_recovery::register_oops_task_id_provider(current_task_id);
 }
 
 fn deferred_reschedule_callback() {

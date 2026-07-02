@@ -36,12 +36,14 @@
 //! IRQ vs. supervisor budget sizing.
 
 use slopos_ostd::KArc;
+use slopos_ostd::klog_info;
 use slopos_ostd::mm::vm_space::VmSpace;
+use slopos_ostd::panic_recovery;
 use slopos_ostd::sync::once_lock::OnceLock;
 use slopos_ostd::user::context::UserContext;
 use slopos_ostd::user::mode::{ReturnReason, UserMode};
 
-use slopos_sched::scheduler::scheduler_get_current_task;
+use slopos_sched::scheduler::{scheduler_get_current_task, scheduler_task_exit_impl};
 use slopos_sched::task_struct::Task;
 
 /// Single shared `VmSpace` handle used by every user task.
@@ -103,7 +105,26 @@ fn user_task_loop(task: *mut Task) -> ! {
                 // Hand the per-task UserContext straight to the syscall
                 // dispatcher; the handler signature now takes
                 // `*mut UserContext`, no adapter required.
-                crate::syscall::dispatch::syscall_handle(ctx_ptr);
+                if panic_recovery::production_recovery_enabled() {
+                    match panic_recovery::run_recoverable(|| {
+                        crate::syscall::dispatch::syscall_handle(ctx_ptr);
+                    }) {
+                        Ok(()) => {}
+                        Err(oops) => {
+                            klog_info!(
+                                "panic recovery: syscall task={} {}:{}:{}: {}",
+                                oops.task_id,
+                                oops.file.as_str(),
+                                oops.line,
+                                oops.column,
+                                oops.reason.as_str(),
+                            );
+                            scheduler_task_exit_impl();
+                        }
+                    }
+                } else {
+                    crate::syscall::dispatch::syscall_handle(ctx_ptr);
+                }
             }
             ReturnReason::Exception(info) => {
                 // Only the SYSCALL path is currently routed through

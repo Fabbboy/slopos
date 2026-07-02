@@ -361,6 +361,14 @@ pub struct TaskInner<K, U> {
     /// remote wake inbox at the same time.
     pub sched_placement: AtomicU8,
     pub refcnt: AtomicU32,
+    /// Panic-recovery nesting depth saved while this task is not running; the
+    /// live value lives in `PCR.recovery_depth` (read directly by the panic
+    /// handler), and context-switch code saves/restores it here so recovery
+    /// scopes survive migration.
+    pub recovery_depth: AtomicU32,
+    /// Idempotence bits for task/process teardown that may be split between
+    /// `task_terminate` and post-switch cleanup of the current task.
+    pub exit_cleanup_flags: AtomicU8,
     /// Per-task user-mode register snapshot.
     pub user_ctx: UserContext,
     /// Saved per-task value of `pcr.user_ctx_ptr`.
@@ -436,6 +444,8 @@ impl<K, U> TaskInner<K, U> {
             remote_inbox_link: Link::new(),
             sched_placement: AtomicU8::new(SchedPlacement::None.as_u8()),
             refcnt: AtomicU32::new(0),
+            recovery_depth: AtomicU32::new(0),
+            exit_cleanup_flags: AtomicU8::new(0),
             user_ctx: UserContext::const_zeroed(),
             saved_user_ctx_ptr: ptr::null_mut(),
             saved_kernel_return_ctx: KernelReturnContext {
@@ -697,6 +707,8 @@ impl<K, U> TaskInner<K, U> {
         self.sched_placement
             .store(SchedPlacement::None.as_u8(), Ordering::Release);
         self.refcnt.store(0, Ordering::Release);
+        self.recovery_depth.store(0, Ordering::Release);
+        self.exit_cleanup_flags.store(0, Ordering::Release);
     }
 
     /// Bulk-copy task state using `ptr::copy_nonoverlapping`, then reset
@@ -732,6 +744,8 @@ impl<K, U> TaskInner<K, U> {
         self.remote_inbox_link.reset();
         self.sched_placement = AtomicU8::new(SchedPlacement::None.as_u8());
         self.refcnt = AtomicU32::new(0);
+        self.recovery_depth = AtomicU32::new(0);
+        self.exit_cleanup_flags = AtomicU8::new(0);
         self.signal_pending = AtomicU64::new(0);
     }
 

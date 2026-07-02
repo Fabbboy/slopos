@@ -4,6 +4,8 @@ static FLAGS: AtomicU32 = AtomicU32::new(0);
 
 pub const BOOT_FLAG_ROULETTE_SKIP: u32 = 1 << 0;
 pub const BOOT_FLAG_TESTS_ENABLED: u32 = 1 << 1;
+pub const BOOT_FLAG_PANIC_ON_OOPS: u32 = 1 << 2;
+pub const BOOT_FLAG_PANIC_RECOVER_SMOKE: u32 = 1 << 3;
 
 pub fn set_flag(flag: u32) {
     FLAGS.fetch_or(flag, Ordering::Relaxed);

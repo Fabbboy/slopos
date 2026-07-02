@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
-# Compute the kernel's TCB ratio: lines of `unsafe` in slopos-ostd /
-# total kernel Rust LoC. By default informational (always exits 0); the
-# gate that *unconditionally* fails on a new unsafe outside OSTD is
+# Compute the kernel's TCB ratio: lines of `unsafe` in the OSTD plus
+# named TCB annexes / total kernel Rust LoC plus annex LoC. By default
+# informational (always exits 0); the gate that *unconditionally* fails
+# on a new unsafe outside OSTD/annexes is
 # scripts/check_unsafe_outside_ostd.sh.
 #
 # Pass `--max <pct>` to make the ratio a hard gate — the script exits 1
@@ -13,17 +14,21 @@
 #   scripts/tcb_ratio.sh --max 1.0      # gate at 1.0 % (Phase 2 bound)
 #
 # Definitions:
-#   - "unsafe tokens": lines under slopos-ostd/src/ containing the
-#     `unsafe` keyword (matched via explicit non-word-char boundaries
-#     since POSIX awk has no `\b`) after stripping pure comment lines
-#     (//, ///, //!, /*). The count is line-based, not token-based; a
-#     line with multiple `unsafe` keywords counts once.
+#   - "unsafe tokens": lines under slopos-ostd/src/ and named TCB
+#     annex source trees containing the `unsafe` keyword (matched via
+#     explicit non-word-char boundaries since POSIX awk has no `\b`)
+#     after stripping pure comment lines (//, ///, //!, /*). The count
+#     is line-based, not token-based; a line with multiple `unsafe`
+#     keywords counts once.
 #   - "kernel LoC": non-blank, non-comment lines across every kernel
 #     crate, where the kernel-crate set is derived from the `kernel`
 #     binary's normal-dependency closure (scripts/kernel_crates.sh) rather
 #     than a hand-maintained list. Userland-side crates (userland, slibc,
 #     slop-protocol, appkit) and the workspace tooling fall out
 #     automatically because the kernel image does not link them.
+#   - "TCB annex LoC": non-blank, non-comment lines in named annex
+#     source trees that are not workspace members. Today the only annex
+#     is vendor/unwinding/src, pinned by scripts/check_vendor_pin.sh.
 #
 # Phase 1 target: ≤ 1.5 %.  Phase 2 target: ≤ 1.0 %.
 
@@ -53,6 +58,7 @@ done
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+ANNEX_UNWINDING="vendor/unwinding"
 
 # Kernel crate directories — the TCB-ratio denominator. Derived from
 # ground truth (the `kernel` binary's normal-dependency closure) by
@@ -68,22 +74,65 @@ if [ "${#KERNEL_CRATES[@]}" -eq 0 ]; then
     exit 2
 fi
 
-# ---- Unsafe-token count (slopos-ostd only) --------------------------------
+# ---- TCB unsafe-token count ------------------------------------------------
 
-unsafe_lines=0
-while IFS= read -r -d '' file; do
-    n=$(awk '
+count_unsafe_lines() {
+    local root="$1"
+    local total=0
+
+    [ -d "$root" ] || {
+        echo 0
+        return
+    }
+
+    while IFS= read -r -d '' file; do
+        n=$(awk '
         /^[[:space:]]*(\/\/|\/\*)/ { next }
         /(^|[^A-Za-z0-9_])unsafe([^A-Za-z0-9_]|$)/ { c++ }
         END { print c+0 }
-    ' "$file")
-    unsafe_lines=$(( unsafe_lines + n ))
-done < <(find "$REPO_ROOT/slopos-ostd/src" -type f -name '*.rs' -print0)
+        ' "$file")
+        total=$(( total + n ))
+    done < <(find "$root" -type f -name '*.rs' -print0)
+
+    echo "$total"
+}
+
+count_loc_lines() {
+    local root="$1"
+    local total=0
+
+    [ -d "$root" ] || {
+        echo 0
+        return
+    }
+
+    while IFS= read -r -d '' file; do
+        n=$(awk '
+            /^[[:space:]]*$/ { next }
+            /^[[:space:]]*(\/\/|\/\*)/ { next }
+            { c++ }
+            END { print c+0 }
+        ' "$file")
+        total=$(( total + n ))
+    done < <(find "$root" -type f -name '*.rs' -print0)
+
+    echo "$total"
+}
+
+ostd_unsafe_lines="$(count_unsafe_lines "$REPO_ROOT/slopos-ostd/src")"
+annex_unwinding_unsafe_lines="$(count_unsafe_lines "$REPO_ROOT/vendor/unwinding/src")"
+unsafe_lines=$(( ostd_unsafe_lines + annex_unwinding_unsafe_lines ))
 
 # ---- Kernel LoC count (every kernel crate) --------------------------------
 
 loc=0
 for crate in "${KERNEL_CRATES[@]}"; do
+    # vendor/unwinding is a named TCB annex. It can appear in the
+    # kernel dependency closure because it is a workspace member, but
+    # count it only in the annex bucket below.
+    if [ "$crate" = "$ANNEX_UNWINDING" ]; then
+        continue
+    fi
     dir="$REPO_ROOT/$crate"
     [ -d "$dir/src" ] || continue
     while IFS= read -r -d '' file; do
@@ -97,6 +146,9 @@ for crate in "${KERNEL_CRATES[@]}"; do
     done < <(find "$dir/src" -type f -name '*.rs' -print0)
 done
 
+annex_unwinding_loc="$(count_loc_lines "$REPO_ROOT/$ANNEX_UNWINDING/src")"
+loc=$(( loc + annex_unwinding_loc ))
+
 # ---- Ratio ----------------------------------------------------------------
 
 if [ "$loc" -eq 0 ]; then
@@ -106,9 +158,15 @@ fi
 
 ratio=$(awk -v u="$unsafe_lines" -v l="$loc" 'BEGIN { printf "%.3f", (u * 100.0) / l }')
 
-printf 'TCB unsafe lines (slopos-ostd): %d\n' "$unsafe_lines"
-printf 'Kernel Rust LoC (all crates):   %d\n' "$loc"
-printf 'TCB ratio:                      %s %%  (target Phase 1: <= 1.5 %%, Phase 2: <= 1.0 %%)\n' "$ratio"
+printf 'TCB unsafe lines:\n'
+printf '  slopos-ostd:                 %d\n' "$ostd_unsafe_lines"
+printf '  annex vendor/unwinding:      %d\n' "$annex_unwinding_unsafe_lines"
+printf '  total:                       %d\n' "$unsafe_lines"
+printf 'Kernel + annex Rust LoC:\n'
+printf '  kernel workspace crates:     %d\n' "$(( loc - annex_unwinding_loc ))"
+printf '  annex vendor/unwinding:      %d\n' "$annex_unwinding_loc"
+printf '  total:                       %d\n' "$loc"
+printf 'TCB ratio:                     %s %%  (target Phase 1: <= 1.5 %%, Phase 2: <= 1.0 %%)\n' "$ratio"
 
 if [ -n "$max_pct" ]; then
     over=$(awk -v r="$ratio" -v m="$max_pct" 'BEGIN { print (r+0 > m+0) ? 1 : 0 }')

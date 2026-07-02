@@ -6,6 +6,11 @@
 # which is the only kernel module permitted to depend on `alloc`
 # directly. Userland crates are exempt — they run on larger stacks and
 # the constraint does not apply there.
+#
+# vendor/unwinding is a named TCB annex. It is third-party code pinned by
+# scripts/check_vendor_pin.sh and reached only through OSTD's unwind
+# surface, so this allocation gate skips that directory only. Other
+# vendor crates are scanned like first-party kernel code.
 
 set -euo pipefail
 
@@ -27,8 +32,10 @@ while IFS= read -r -d '' manifest; do
         continue
     fi
     # Skip third_party, build outputs, and the userland carve-out.
+    # vendor/unwinding is the only named vendor TCB annex allowed to live
+    # outside the framekernel allocation discipline.
     case "$rel_dir" in
-        third_party/*|builddir/*|target/*|*/target/*) continue ;;
+        third_party/*|vendor/unwinding|vendor/unwinding/*|builddir/*|target/*|*/target/*) continue ;;
     esac
     if [[ "$crate_name" =~ $USERLAND_RE ]]; then
         continue
@@ -87,19 +94,27 @@ SOURCE_WHITELIST="kernel/src/main.rs"
 # Both `use alloc::` and `use ::alloc::` (path-absolute form) are
 # matched by the regex below.
 #
-# `git ls-files` respects `.gitignore` and skips third_party / builddir
-# / target automatically.
+# The source scan includes untracked files and an explicit vendor sweep.
+# Only vendor/unwinding is skipped; any other vendored Rust source that
+# directly names alloc is a gate failure.
 source_offenders="$(
     cd "$REPO_ROOT"
-    if command -v git >/dev/null 2>&1 && git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
-        git ls-files '*.rs'
-    else
-        find . -type f -name '*.rs' \
-            -not -path './builddir/*' \
-            -not -path './third_party/*' \
-            -not -path './target/*'
-    fi \
+    {
+        if command -v git >/dev/null 2>&1 && git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+            git ls-files '*.rs'
+            git ls-files --others --exclude-standard '*.rs'
+        else
+            find . -type f -name '*.rs' \
+                -not -path './builddir/*' \
+                -not -path './third_party/*' \
+                -not -path './target/*'
+        fi
+        find vendor -type f -name '*.rs' 2>/dev/null || true
+    } \
+      | sed 's|^\./||' \
+      | LC_ALL=C sort -u \
       | grep -Ev '^(userland|terminal-core|slibc|slop-protocol|ktesting|image|slopos-ostd)/' \
+      | grep -Ev '^vendor/unwinding/' \
       | grep -vxF "$SOURCE_WHITELIST" \
       | while IFS= read -r file; do
             [ -f "$file" ] || continue

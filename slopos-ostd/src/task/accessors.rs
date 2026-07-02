@@ -24,6 +24,13 @@ use slopos_abi::task::{TaskExitReason, TaskFaultReason, TaskPriority, TaskStatus
 
 use crate::task::kernel_task::{SchedPlacement, TaskInner};
 
+pub const TASK_EXIT_CLEANUP_RESOURCES: u8 = 1 << 0;
+pub const TASK_EXIT_CLEANUP_VM: u8 = 1 << 1;
+/// The task's `num_tasks` accounting decrement has been applied. Exit cleanup
+/// may run from both an external `task_terminate` and the owning CPU's
+/// post-switch path; this bit keeps the decrement exactly-once.
+pub const TASK_EXIT_CLEANUP_ACCOUNTED: u8 = 1 << 2;
+
 /// The child-exit event for a task id. Parents blocked in `waitpid`-style
 /// waits park on this; the task's exit path publishes it. Public so the
 /// `slopos-pidfd` crate can subscribe a pidfd poller to the same event.
@@ -422,6 +429,49 @@ pub fn task_dec_ref<K, U>(task: *mut TaskInner<K, U>) -> Option<bool> {
     // SAFETY: caller pre-validated; `dec_ref` takes `&self` and
     // performs the atomic sub internally.
     Some(unsafe { (*task).dec_ref() })
+}
+
+/// Save the task's panic-recovery nesting depth while it is not running.
+#[inline]
+pub fn task_recovery_depth_store<K, U>(task: *mut TaskInner<K, U>, depth: u32) {
+    if task.is_null() {
+        return;
+    }
+    // SAFETY: caller pre-validated; `recovery_depth` is an atomic scalar.
+    unsafe {
+        (*task)
+            .recovery_depth
+            .store(depth, core::sync::atomic::Ordering::Release);
+    }
+}
+
+/// Load the task's saved panic-recovery nesting depth.
+#[inline]
+pub fn task_recovery_depth_load<K, U>(task: *const TaskInner<K, U>) -> u32 {
+    if task.is_null() {
+        return 0;
+    }
+    // SAFETY: caller pre-validated; `recovery_depth` is an atomic scalar.
+    unsafe {
+        (*task)
+            .recovery_depth
+            .load(core::sync::atomic::Ordering::Acquire)
+    }
+}
+
+/// Mark exit-cleanup bits and return the bits that were newly set.
+#[inline]
+pub fn task_exit_cleanup_mark<K, U>(task: *mut TaskInner<K, U>, bits: u8) -> u8 {
+    if task.is_null() {
+        return 0;
+    }
+    // SAFETY: caller pre-validated; `exit_cleanup_flags` is an atomic scalar.
+    let previous = unsafe {
+        (*task)
+            .exit_cleanup_flags
+            .fetch_or(bits, core::sync::atomic::Ordering::AcqRel)
+    };
+    bits & !previous
 }
 
 /// Reborrow `task->fpu_state` as `&mut FpuState`. The returned

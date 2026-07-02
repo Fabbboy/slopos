@@ -1,41 +1,9 @@
-use core::arch::naked_asm;
-use core::cell::SyncUnsafeCell;
-use core::sync::atomic::{AtomicBool, AtomicPtr, AtomicUsize, Ordering};
+use core::sync::atomic::{AtomicPtr, AtomicUsize, Ordering};
 
-use crate::cpu::x86_64::pcr::get_current_cpu;
-
-#[repr(C, align(16))]
-pub struct JumpBuf {
-    pub rbx: u64,
-    pub rbp: u64,
-    pub r12: u64,
-    pub r13: u64,
-    pub r14: u64,
-    pub r15: u64,
-    pub rsp: u64,
-    pub rip: u64,
-}
-
-impl JumpBuf {
-    pub const fn zeroed() -> Self {
-        Self {
-            rbx: 0,
-            rbp: 0,
-            r12: 0,
-            r13: 0,
-            r14: 0,
-            r15: 0,
-            rsp: 0,
-            rip: 0,
-        }
-    }
-}
-
-static RECOVERY_ACTIVE: AtomicBool = AtomicBool::new(false);
-static RECOVERY_CPU: AtomicUsize = AtomicUsize::new(0);
-static RECOVERY_BUF: SyncUnsafeCell<JumpBuf> = SyncUnsafeCell::new(JumpBuf::zeroed());
+use crate::unwind::OopsInfo;
 
 pub type PanicCleanupFn = fn();
+pub type OopsTaskIdProvider = fn() -> u32;
 
 const MAX_PANIC_CLEANUP_HANDLERS: usize = 8;
 static PANIC_CLEANUP_COUNT: AtomicUsize = AtomicUsize::new(0);
@@ -49,6 +17,27 @@ static PANIC_CLEANUP_HANDLERS: [AtomicPtr<()>; MAX_PANIC_CLEANUP_HANDLERS] = [
     AtomicPtr::new(core::ptr::null_mut()),
     AtomicPtr::new(core::ptr::null_mut()),
 ];
+static OOPS_TASK_ID_PROVIDER: AtomicPtr<()> = AtomicPtr::new(core::ptr::null_mut());
+
+pub fn register_oops_task_id_provider(provider: OopsTaskIdProvider) {
+    OOPS_TASK_ID_PROVIDER.store(provider as *mut (), Ordering::Release);
+}
+
+pub fn current_oops_task_id() -> u32 {
+    let ptr = OOPS_TASK_ID_PROVIDER.load(Ordering::Acquire);
+    if ptr.is_null() {
+        return u32::MAX;
+    }
+    // SAFETY: stored only by `register_oops_task_id_provider` from a valid
+    // `fn() -> u32` pointer; function pointers are never deallocated.
+    let provider: OopsTaskIdProvider = unsafe { core::mem::transmute(ptr) };
+    provider()
+}
+
+pub fn production_recovery_enabled() -> bool {
+    !crate::boot_flags::has_flag(crate::boot_flags::BOOT_FLAG_TESTS_ENABLED)
+        && !crate::boot_flags::has_flag(crate::boot_flags::BOOT_FLAG_PANIC_ON_OOPS)
+}
 
 pub fn register_panic_cleanup(handler: PanicCleanupFn) {
     let idx = PANIC_CLEANUP_COUNT.fetch_add(1, Ordering::SeqCst);
@@ -105,88 +94,83 @@ pub fn call_panic_cleanup() {
     }
 }
 
-#[unsafe(naked)]
-pub unsafe extern "C" fn test_setjmp(buf: *mut JumpBuf) -> i32 {
-    naked_asm!(
-        "mov [rdi], rbx",
-        "mov [rdi + 8], rbp",
-        "mov [rdi + 16], r12",
-        "mov [rdi + 24], r13",
-        "mov [rdi + 32], r14",
-        "mov [rdi + 40], r15",
-        "lea rax, [rsp + 8]",
-        "mov [rdi + 48], rax",
-        "mov rax, [rsp]",
-        "mov [rdi + 56], rax",
-        "xor eax, eax",
-        "ret",
-    )
-}
-
-#[unsafe(naked)]
-pub unsafe extern "C" fn test_longjmp(buf: *const JumpBuf, val: i32) -> ! {
-    naked_asm!(
-        "mov eax, esi",
-        "test eax, eax",
-        "jnz 2f",
-        "mov eax, 1",
-        "2:",
-        "mov rbx, [rdi]",
-        "mov rbp, [rdi + 8]",
-        "mov r12, [rdi + 16]",
-        "mov r13, [rdi + 24]",
-        "mov r14, [rdi + 32]",
-        "mov r15, [rdi + 40]",
-        "mov rsp, [rdi + 48]",
-        "jmp [rdi + 56]",
-    )
-}
-
+/// True when the current execution context is inside at least one
+/// panic-recovery scope.
 pub fn recovery_is_active() -> bool {
-    if !RECOVERY_ACTIVE.load(Ordering::SeqCst) {
-        return false;
+    crate::cpu::x86_64::pcr::recovery_depth() != 0
+}
+
+/// Current panic-recovery nesting depth for this execution context.
+pub fn recovery_depth() -> u32 {
+    crate::cpu::x86_64::pcr::recovery_depth()
+}
+
+/// Enter a panic-recovery scope in the current execution context.
+pub fn recovery_enter() -> u32 {
+    crate::cpu::x86_64::pcr::recovery_depth_enter()
+}
+
+/// Leave a panic-recovery scope in the current execution context.
+pub fn recovery_exit() -> u32 {
+    crate::cpu::x86_64::pcr::recovery_depth_exit()
+}
+
+#[doc(hidden)]
+pub struct RecoveryGuard {
+    active: bool,
+}
+
+impl RecoveryGuard {
+    pub fn enter() -> Self {
+        crate::cpu::x86_64::pcr::recovery_depth_enter();
+        Self { active: true }
     }
-    get_current_cpu() == RECOVERY_CPU.load(Ordering::SeqCst)
-}
 
-pub fn recovery_set_active(active: bool) {
-    if active {
-        RECOVERY_CPU.store(get_current_cpu(), Ordering::SeqCst);
+    pub fn exit(mut self) {
+        self.exit_inner();
     }
-    RECOVERY_ACTIVE.store(active, Ordering::SeqCst);
+
+    fn exit_inner(&mut self) {
+        if self.active {
+            crate::cpu::x86_64::pcr::recovery_depth_exit();
+            self.active = false;
+        }
+    }
 }
 
-pub fn get_recovery_buf() -> *mut JumpBuf {
-    RECOVERY_BUF.get()
+impl Drop for RecoveryGuard {
+    fn drop(&mut self) {
+        self.exit_inner();
+    }
 }
 
-/// Safe surface around [`test_longjmp`].
-///
-/// `recovery_is_active()` must have returned `true` before reaching
-/// this call — that guarantees `RECOVERY_BUF` was populated by a
-/// prior [`test_setjmp`] frame still on the stack. The unsafe
-/// `test_longjmp` asm and its raw-pointer dance live inside OSTD;
-/// consumers (boot's `#[panic_handler]`) call this safe entry point.
-pub fn longjmp_to_recovery(val: i32) -> ! {
-    // SAFETY: `RECOVERY_BUF` is a `'static` `SyncUnsafeCell<JumpBuf>`
-    // populated by the matching `test_setjmp` in `catch_panic!`. The
-    // longjmp restores callee-saved registers and resumes at the
-    // setjmp call site; the contract is the same as standard libc
-    // setjmp/longjmp and is verified by the calling order
-    // `catch_panic!` enforces.
-    unsafe {
-        test_longjmp(get_recovery_buf(), val);
+pub fn run_recoverable<F>(f: F) -> Result<(), OopsInfo>
+where
+    F: FnOnce(),
+{
+    let recovery_guard = RecoveryGuard::enter();
+    let result = crate::unwind::catch_unwind(|| {
+        f();
+    });
+    recovery_guard.exit();
+
+    match result {
+        Ok(()) => Ok(()),
+        Err(payload) => {
+            call_panic_cleanup();
+            Err(payload.info)
+        }
     }
 }
 
 #[macro_export]
 macro_rules! catch_panic {
     ($code:block) => {{
-        use $crate::panic_recovery::{call_panic_cleanup, recovery_set_active};
+        use $crate::panic_recovery::{RecoveryGuard, call_panic_cleanup};
 
-        recovery_set_active(true);
+        let recovery_guard = RecoveryGuard::enter();
         let result = $crate::unwind::catch_unwind(|| -> i32 { $code });
-        recovery_set_active(false);
+        recovery_guard.exit();
 
         match result {
             Ok(ret) => ret,

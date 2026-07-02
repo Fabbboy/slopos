@@ -14,6 +14,9 @@
 #
 # The trusted-core carve-outs:
 #   - slopos-ostd/                  the OSTD itself.
+#   - vendor/unwinding/             named TCB annex: a pinned third-party
+#                                   unwinder used only through OSTD's
+#                                   unwind surface.
 #   - slopos-ostd-derive/           proc-macro support; emits literal
 #                                   `unsafe impl Trait for T {}` token
 #                                   text consumed inside OSTD. Listed
@@ -50,10 +53,13 @@ REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 
 # Crate-name allowlist — everything userland-side, plus the trusted
 # core and its proc-macro support. Matches the leading directory
-# component of the path (relative to REPO_ROOT).
+# component of the path (relative to REPO_ROOT). vendor/unwinding is
+# handled separately below as a named TCB annex; every other vendor
+# crate is scanned, including untracked vendor/**/*.rs.
 # slopos-rt = the userland async runtime; userland-side, identical role to
 # userland/appkit which are already exempt and already carry unsafe.
 USERLAND_RE='^(userland|slibc|slop-protocol|ktesting|appkit|image|slopos-rt|slopos-ostd|slopos-ostd-derive)/'
+TCB_ANNEX_RE='^vendor/unwinding/'
 
 # Explicit file-level allowlist. Each entry is a repo-relative path.
 SOURCE_WHITELIST=(
@@ -61,20 +67,24 @@ SOURCE_WHITELIST=(
     "hermetic/src/macros.rs"
 )
 
-# git ls-files respects .gitignore and skips third_party / builddir /
-# target. Mirror the find-fallback from check_alloc_dep.sh for environments
-# without git.
+# Include tracked Rust sources, untracked Rust sources, and an explicit
+# vendor/**/*.rs sweep. The explicit vendor pass is intentional: a new
+# untracked vendored crate must not be able to carry executable unsafe
+# unless it is the named vendor/unwinding TCB annex.
 file_list="$(
     cd "$REPO_ROOT"
-    if command -v git >/dev/null 2>&1 && git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
-        git ls-files '*.rs'
-    else
-        find . -type f -name '*.rs' \
-            -not -path './builddir/*' \
-            -not -path './third_party/*' \
-            -not -path './target/*' \
-          | sed 's|^\./||'
-    fi
+    {
+        if command -v git >/dev/null 2>&1 && git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+            git ls-files '*.rs'
+            git ls-files --others --exclude-standard '*.rs'
+        else
+            find . -type f -name '*.rs' \
+                -not -path './builddir/*' \
+                -not -path './third_party/*' \
+                -not -path './target/*'
+        fi
+        find vendor -type f -name '*.rs' 2>/dev/null || true
+    } | sed 's|^\./||' | LC_ALL=C sort -u
 )"
 
 # Filter out userland-side crates and explicit-file exemptions. Built
@@ -85,6 +95,8 @@ filtered=""
 while IFS= read -r path; do
     [ -z "$path" ] && continue
     [[ "$path" =~ $USERLAND_RE ]] && continue
+    # Named TCB annex. Other vendor crates are deliberately scanned.
+    [[ "$path" =~ $TCB_ANNEX_RE ]] && continue
     skip=0
     for exempt in "${SOURCE_WHITELIST[@]}"; do
         if [ "$path" = "$exempt" ]; then
@@ -127,6 +139,7 @@ source_offenders="$(
             {
                 stripped = $0
                 gsub(/#\[unsafe\([^)]*\)\]/, "", stripped)
+                sub(/\/\/.*/, "", stripped)
                 if (stripped !~ /(^|[^A-Za-z0-9_])unsafe([^A-Za-z0-9_]|$)/) next
             }
             {
@@ -147,12 +160,12 @@ source_offenders="$(
 )"
 
 if [ -n "$source_offenders" ]; then
-    echo "check_unsafe_outside_ostd: kernel-side 'unsafe' detected outside slopos-ostd:" >&2
+    echo "check_unsafe_outside_ostd: executable 'unsafe' detected outside slopos-ostd and vendor/unwinding:" >&2
     echo "$source_offenders" | sed 's/^/    /' >&2
-    echo "  slopos-ostd is the only crate allowed to use unsafe." >&2
+    echo "  slopos-ostd is the kernel OSTD; vendor/unwinding is the only named vendor TCB annex." >&2
     echo "  If a new file legitimately needs an unsafe attribute (e.g. #[unsafe(link_section)] in a" >&2
     echo "  macro_rules! body) and you have audited it, add the file to SOURCE_WHITELIST in this script." >&2
     exit 1
 fi
 
-echo "check_unsafe_outside_ostd: OK — kernel crates outside slopos-ostd contain no executable unsafe"
+echo "check_unsafe_outside_ostd: OK — no executable unsafe outside slopos-ostd and vendor/unwinding"

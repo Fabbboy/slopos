@@ -214,6 +214,24 @@ pub struct ProcessorControlRegion {
     /// (now-suspect) report. Mirrors Linux `die_nest_count` / Asterinas
     /// `IN_PANIC`.
     pub panic_depth: AtomicU32,
+
+    /// Panic-core entry counter for this CPU.
+    ///
+    /// Incremented at the top of the panic handler and decremented only when a
+    /// caught test panic returns through the unwind boundary. A non-zero prior
+    /// value means the panic handler itself re-entered and must use the fixed
+    /// abort floor.
+    pub panic_in_flight: AtomicU32,
+
+    /// Depth-bearing interrupt/exception nesting counter for this CPU;
+    /// `in_interrupt` mirrors it as a one-bit flag for callers that only
+    /// need binary state.
+    pub interrupt_nesting: AtomicU32,
+
+    /// Panic-recovery nesting depth for this CPU: nested catch scopes unwind
+    /// one level at a time, and only the CPU that entered recovery observes
+    /// it as active.
+    pub recovery_depth: AtomicU32,
 }
 
 // Compile-time offset verification.
@@ -354,6 +372,9 @@ impl ProcessorControlRegion {
             panic_safe_sp: SyncUnsafeCell::new(0),
             panic_unsafe_sp: SyncUnsafeCell::new(0),
             panic_depth: AtomicU32::new(0),
+            panic_in_flight: AtomicU32::new(0),
+            interrupt_nesting: AtomicU32::new(0),
+            recovery_depth: AtomicU32::new(0),
         }
     }
 
@@ -1107,6 +1128,24 @@ pub fn local_panic_unsafe_sp() -> u64 {
         .unwrap_or(0)
 }
 
+fn counter_exit_saturating(counter: &AtomicU32) -> u32 {
+    let mut current = counter.load(Ordering::Acquire);
+    loop {
+        if current == 0 {
+            return 0;
+        }
+        match counter.compare_exchange_weak(
+            current,
+            current - 1,
+            Ordering::SeqCst,
+            Ordering::Acquire,
+        ) {
+            Ok(_) => return current,
+            Err(next) => current = next,
+        }
+    }
+}
+
 /// Enter the fatal-panic path on this CPU, returning the PREVIOUS depth. A
 /// non-zero return means the fatal path itself faulted (recursion) and the
 /// caller must degrade to the format-free abort. Never decremented — a CPU
@@ -1115,6 +1154,129 @@ pub fn local_panic_unsafe_sp() -> u64 {
 pub fn panic_depth_enter() -> u32 {
     current_pcr_local()
         .map(|pcr| pcr.panic_depth.fetch_add(1, Ordering::SeqCst))
+        .unwrap_or(0)
+}
+
+/// Enter the panic handler on this CPU, returning the previous in-flight
+/// depth. A non-zero previous value means the panic handler re-entered before
+/// the prior panic reached an unwind catch boundary or a fatal halt.
+#[inline]
+pub fn panic_in_flight_enter() -> u32 {
+    current_pcr_local()
+        .map(|pcr| pcr.panic_in_flight.fetch_add(1, Ordering::SeqCst))
+        .unwrap_or(0)
+}
+
+/// Leave the panic handler after a caught panic crosses an unwind catch
+/// boundary. Returns the previous in-flight depth and saturates at zero.
+#[inline]
+pub fn panic_in_flight_exit() -> u32 {
+    current_pcr_local()
+        .map(|pcr| counter_exit_saturating(&pcr.panic_in_flight))
+        .unwrap_or(0)
+}
+
+/// Current panic-handler in-flight depth for this CPU.
+#[inline]
+pub fn panic_in_flight_depth() -> u32 {
+    current_pcr_local()
+        .map(|pcr| pcr.panic_in_flight.load(Ordering::Acquire))
+        .unwrap_or(0)
+}
+
+/// Enter interrupt/exception context on this CPU, returning the previous
+/// nesting depth.
+#[inline]
+pub fn interrupt_nesting_enter() -> u32 {
+    current_pcr_local()
+        .map(|pcr| {
+            pcr.in_interrupt.store(true, Ordering::SeqCst);
+            pcr.interrupt_nesting.fetch_add(1, Ordering::SeqCst)
+        })
+        .unwrap_or(0)
+}
+
+/// Leave interrupt/exception context on this CPU. Returns the previous nesting
+/// depth and saturates at zero.
+#[inline]
+pub fn interrupt_nesting_exit() -> u32 {
+    current_pcr_local()
+        .map(|pcr| {
+            let previous = counter_exit_saturating(&pcr.interrupt_nesting);
+            if previous <= 1 {
+                pcr.in_interrupt.store(false, Ordering::SeqCst);
+            }
+            previous
+        })
+        .unwrap_or(0)
+}
+
+/// Current interrupt/exception nesting depth for this CPU.
+#[inline]
+pub fn interrupt_nesting_depth() -> u32 {
+    current_pcr_local()
+        .map(|pcr| pcr.interrupt_nesting.load(Ordering::Acquire))
+        .unwrap_or(0)
+}
+
+/// True if this CPU is currently in interrupt/exception context.
+#[inline]
+pub fn in_interrupt_context() -> bool {
+    current_pcr_local()
+        .map(|pcr| {
+            pcr.interrupt_nesting.load(Ordering::Acquire) != 0
+                || pcr.in_interrupt.load(Ordering::Acquire)
+        })
+        .unwrap_or(false)
+}
+
+/// Enter a panic-recovery scope on this CPU, returning the previous recovery
+/// depth.
+#[inline]
+pub fn recovery_depth_enter() -> u32 {
+    recovery_depth_enter_for_cpu(get_current_cpu())
+}
+
+/// Leave a panic-recovery scope on this CPU. Returns the previous recovery
+/// depth and saturates at zero.
+#[inline]
+pub fn recovery_depth_exit() -> u32 {
+    recovery_depth_exit_for_cpu(get_current_cpu())
+}
+
+/// Current panic-recovery depth for this CPU.
+#[inline]
+pub fn recovery_depth() -> u32 {
+    current_pcr_local()
+        .map(|pcr| pcr.recovery_depth.load(Ordering::Acquire))
+        .unwrap_or(0)
+}
+
+/// Replace this CPU's live panic-recovery depth.
+#[inline]
+pub fn recovery_depth_store(depth: u32) {
+    if let Some(pcr) = current_pcr_local() {
+        pcr.recovery_depth.store(depth, Ordering::Release);
+    }
+}
+
+/// Enter a panic-recovery scope for an explicit CPU id. Used by recovery
+/// guards so Drop exits the same per-CPU slot that was entered.
+#[doc(hidden)]
+#[inline]
+pub fn recovery_depth_enter_for_cpu(cpu_id: usize) -> u32 {
+    get_pcr(cpu_id)
+        .map(|pcr| pcr.recovery_depth.fetch_add(1, Ordering::SeqCst))
+        .unwrap_or(0)
+}
+
+/// Leave a panic-recovery scope for an explicit CPU id. Used by recovery
+/// guards so Drop exits the same per-CPU slot that was entered.
+#[doc(hidden)]
+#[inline]
+pub fn recovery_depth_exit_for_cpu(cpu_id: usize) -> u32 {
+    get_pcr(cpu_id)
+        .map(|pcr| counter_exit_saturating(&pcr.recovery_depth))
         .unwrap_or(0)
 }
 

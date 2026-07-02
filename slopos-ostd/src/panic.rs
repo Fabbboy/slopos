@@ -15,7 +15,7 @@
 
 use core::fmt::Write;
 use core::panic::PanicInfo;
-use core::sync::atomic::{AtomicU32, Ordering};
+use core::sync::atomic::{AtomicPtr, AtomicU32, Ordering};
 
 /// Sentinel for "no CPU is driving a fatal panic".
 const NO_OWNER: u32 = u32::MAX;
@@ -99,11 +99,63 @@ pub use crate::arch::x86_64::naked::run_on_emergency_stacks;
 /// Enter the per-CPU fatal path, returning the previous recursion depth (a
 /// non-zero value means the fatal path itself faulted → degrade to abort).
 pub use crate::cpu::x86_64::pcr::panic_depth_enter;
+pub use crate::cpu::x86_64::pcr::{
+    in_interrupt_context, panic_in_flight_depth, panic_in_flight_enter, panic_in_flight_exit,
+};
+
+/// Test-mode QEMU-exit hook for [`abort_now`], registered by the boot crate
+/// under its `tests` feature (ostd cannot depend on the test harness
+/// directly). Left null in production builds.
+pub type TestAbortShutdownFn = fn(i32);
+static TEST_ABORT_SHUTDOWN: AtomicPtr<()> = AtomicPtr::new(core::ptr::null_mut());
+
+/// Register the test-mode shutdown hook `abort_now` calls before halting.
+pub fn register_test_abort_shutdown(f: TestAbortShutdownFn) {
+    TEST_ABORT_SHUTDOWN.store(f as *mut (), Ordering::Release);
+}
 
 /// Unconditional abort used when the unwinder catches a foreign exception at a
 /// SlopOS-only boundary.
 pub fn abort_now() -> ! {
-    loop {
-        core::hint::spin_loop();
+    crate::cpu::x86_64::disable_interrupts();
+    crate::early_console::write_bytes(b"\n\n=== KERNEL ABORT ===\n");
+    crate::early_console::write_bytes(b"panic core abort\n");
+    crate::early_console::write_bytes(b"System halted.\n");
+    let shutdown = TEST_ABORT_SHUTDOWN.load(Ordering::Acquire);
+    if !shutdown.is_null() {
+        // SAFETY: stored only by `register_test_abort_shutdown` from a valid
+        // `fn(i32)` pointer; function pointers are never deallocated.
+        let shutdown: TestAbortShutdownFn = unsafe { core::mem::transmute(shutdown) };
+        shutdown(1);
+    }
+    crate::cpu::x86_64::halt_loop()
+}
+
+/// Guard for critical sections that must never be unwound through.
+///
+/// Dropping this guard during a panic unwind means a caller tried to recover
+/// across a partially-mutated invariant boundary. That is not a task-scoped
+/// oops; it is a kernel consistency failure, so the guard aborts.
+pub struct AbortOnUnwind {
+    armed: bool,
+}
+
+impl AbortOnUnwind {
+    #[inline]
+    pub const fn new() -> Self {
+        Self { armed: true }
+    }
+
+    #[inline]
+    pub fn disarm(mut self) {
+        self.armed = false;
+    }
+}
+
+impl Drop for AbortOnUnwind {
+    fn drop(&mut self) {
+        if self.armed && panic_in_flight_depth() != 0 {
+            abort_now();
+        }
     }
 }

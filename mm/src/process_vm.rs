@@ -6,6 +6,7 @@ use slopos_ostd::mm::KArc;
 use slopos_ostd::mm::frame::AnonymousMeta;
 use slopos_ostd::mm::uframe::UFrame;
 use slopos_ostd::mm::vm_space::{MapError, VmSpace};
+use slopos_ostd::panic::AbortOnUnwind;
 
 use slopos_abi::addr::{PhysAddr, VirtAddr};
 use slopos_ostd::sync::{KernelSync, LOCK_LEVEL_REGISTRY, LOCK_LEVEL_RESOURCE, SpinLock};
@@ -2512,6 +2513,10 @@ fn process_vm_mmap_inner(
                 return 0;
             }
         };
+        // Force a panic fatal while `vm_space` is out of `inner`; unwinding
+        // through the half-mutated global would leave it torn for later
+        // syscalls.
+        let abort_guard = AbortOnUnwind::new();
         let mut vm_space_taken = inner
             .vm_space
             .take()
@@ -2544,6 +2549,7 @@ fn process_vm_mmap_inner(
                         err.err
                     );
                     inner.vm_space = Some(vm_space_taken);
+                    abort_guard.disarm();
                     return 0;
                 }
             };
@@ -2559,6 +2565,7 @@ fn process_vm_mmap_inner(
         inner.total_pages = inner.total_pages.saturating_sub(total_freed);
 
         inner.vm_space = Some(vm_space_taken);
+        abort_guard.disarm();
 
         addr_hint
     } else {
@@ -2703,6 +2710,11 @@ pub fn process_vm_munmap(process_id: u32, addr: u64, length: u64) -> i32 {
             return -1;
         }
     };
+    // `vm_space` is out of `inner` for the duration of the unmap; a panic
+    // before it is restored would leave the global `PROCESS_VMS[slot]` torn
+    // (vm_space=None, stale vma_map) for every later syscall. Force such a
+    // panic fatal instead of unwinding through the half-mutated global.
+    let abort_guard = AbortOnUnwind::new();
     let mut vm_space_taken = inner
         .vm_space
         .take()
@@ -2731,6 +2743,7 @@ pub fn process_vm_munmap(process_id: u32, addr: u64, length: u64) -> i32 {
                 }
                 klog_info!("process_vm_munmap: unmap failed: {:?}", err.err);
                 inner.vm_space = Some(vm_space_taken);
+                abort_guard.disarm();
                 return -1;
             }
         };
@@ -2746,6 +2759,7 @@ pub fn process_vm_munmap(process_id: u32, addr: u64, length: u64) -> i32 {
     inner.vm_space = Some(vm_space_taken);
     inner.total_pages = inner.total_pages.saturating_sub(total_freed);
 
+    abort_guard.disarm();
     0
 }
 

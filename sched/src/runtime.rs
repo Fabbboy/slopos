@@ -9,8 +9,9 @@ use super::scheduler::{
     publish_new_task, run_ready_task_from_idle, set_scheduler_enabled, r#yield,
 };
 use super::task::{
-    INVALID_TASK_ID, TASK_FLAG_KERNEL_MODE, Task, TaskPriority, TaskStatus, reap_zombies,
-    task_create, task_get_info, task_sched_placement_store, task_set_status, task_terminate,
+    INVALID_TASK_ID, TASK_FLAG_KERNEL_MODE, TASK_FLAG_SYSTEM, Task, TaskPriority, TaskStatus,
+    reap_zombies, task_create, task_get_info, task_has_flag, task_sched_placement_store,
+    task_set_status, task_terminate,
 };
 use super::work_steal::try_work_steal;
 use slopos_ostd::task::SchedPlacement;
@@ -70,13 +71,34 @@ use slopos_ostd::task::{KernelThreadEntry, KernelThreadSpawner, SpawnError, Spaw
 /// size and alignment on every supported target — and recovering the
 /// function pointer here at task entry via OSTD's safe-Rust
 /// `fn_ptr_decode_opt` helper.
-extern "C" fn kernel_thread_trampoline(arg: *mut c_void) {
+pub(crate) extern "C" fn kernel_thread_trampoline(arg: *mut c_void) {
     let raw = arg as *mut ();
     let Some(entry) = slopos_ostd::util::fn_ptr::fn_ptr_decode_opt::<KernelThreadEntry>(raw) else {
         klog_info!("spawn: kernel-thread trampoline received null payload");
         return;
     };
-    entry();
+
+    let current = super::scheduler::scheduler_get_current_task();
+    let fatal_if_panics =
+        per_cpu::is_idle_task(current) || task_has_flag(current, TASK_FLAG_SYSTEM);
+    if fatal_if_panics || !slopos_ostd::panic_recovery::production_recovery_enabled() {
+        entry();
+        return;
+    }
+
+    match slopos_ostd::panic_recovery::run_recoverable(entry) {
+        Ok(()) => {}
+        Err(oops) => {
+            klog_info!(
+                "panic recovery: kthread task={} {}:{}:{}: {}",
+                oops.task_id,
+                oops.file.as_str(),
+                oops.line,
+                oops.column,
+                oops.reason.as_str(),
+            );
+        }
+    }
 }
 
 /// Build a NUL-terminated `&str -> [u8; N]` copy for the scheduler's

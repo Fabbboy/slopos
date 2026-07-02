@@ -4,6 +4,10 @@ use core::ptr;
 use slopos_arch::cpu;
 use slopos_ostd::kdiag_timestamp;
 use slopos_ostd::string::bytes_as_str;
+use slopos_ostd::task::accessors::{
+    TASK_EXIT_CLEANUP_ACCOUNTED, TASK_EXIT_CLEANUP_RESOURCES, TASK_EXIT_CLEANUP_VM,
+    task_exit_cleanup_mark,
+};
 use slopos_ostd::{klog_debug, klog_info};
 
 use slopos_ostd::task::switch::task_entry_trampoline;
@@ -16,10 +20,11 @@ use super::task_table::{
     reserve_task_slot, task_find_by_id, with_task_manager,
 };
 use super::{
-    INVALID_PROCESS_ID, INVALID_TASK_ID, TASK_FLAG_KERNEL_MODE, TASK_FLAG_USER_MODE,
-    TASK_KERNEL_STACK_SIZE, TASK_NAME_MAX_LEN, TASK_STACK_SIZE, TASK_UNSAFE_STACK_SIZE, Task,
-    TaskContext, TaskEntry, TaskExitReason, TaskPriority, TaskStatus, task_borrow, task_borrow_mut,
-    task_id_of, task_name_bytes, task_status,
+    INVALID_PROCESS_ID, INVALID_TASK_ID, TASK_FLAG_KERNEL_MODE, TASK_FLAG_SYSTEM,
+    TASK_FLAG_USER_MODE, TASK_KERNEL_STACK_SIZE, TASK_NAME_MAX_LEN, TASK_STACK_SIZE,
+    TASK_UNSAFE_STACK_SIZE, Task, TaskContext, TaskEntry, TaskExitReason, TaskPriority, TaskStatus,
+    task_borrow, task_borrow_mut, task_id_of, task_name_bytes, task_on_cpu_load,
+    task_recovery_depth_store, task_status,
 };
 use crate::exit_info::ExitInfo;
 use crate::scheduler;
@@ -234,7 +239,11 @@ fn cleanup_task_process_resources(
     resolved_id: u32,
     mode: TaskProcessCleanupMode,
 ) {
-    run_task_resource_cleanup_hooks(resolved_id);
+    if task_exit_cleanup_mark(task_ptr, TASK_EXIT_CLEANUP_RESOURCES) & TASK_EXIT_CLEANUP_RESOURCES
+        != 0
+    {
+        run_task_resource_cleanup_hooks(resolved_id);
+    }
 
     let process_id = super::task_accessors::task_process_id(task_ptr).unwrap_or(INVALID_PROCESS_ID);
     if process_id == INVALID_PROCESS_ID {
@@ -244,7 +253,9 @@ fn cleanup_task_process_resources(
     let task_id = task_id_of(task_ptr).unwrap_or(INVALID_TASK_ID);
     if !process_has_other_live_tasks(process_id, task_id) {
         fileio_destroy_table_for_process(process_id);
-        if matches!(mode, TaskProcessCleanupMode::DropVm) {
+        if matches!(mode, TaskProcessCleanupMode::DropVm)
+            && task_exit_cleanup_mark(task_ptr, TASK_EXIT_CLEANUP_VM) & TASK_EXIT_CLEANUP_VM != 0
+        {
             destroy_process_vm(process_id);
         }
     }
@@ -376,6 +387,47 @@ pub(crate) fn build_user_task_entry_frame(kernel_stack_top: u64) -> SwitchContex
     }
 }
 
+extern "C" fn kernel_task_entry_shim(task_arg: *mut c_void) {
+    let task_ptr = task_arg as *mut Task;
+    let Some((entry, arg, fatal_if_panics, already_recoverable)) =
+        task_borrow(task_ptr).map(|task| {
+            let raw_entry = task.entry_point as usize as *mut ();
+            let entry = slopos_ostd::util::fn_ptr::fn_ptr_from_raw::<TaskEntry>(raw_entry);
+            let fatal_if_panics = crate::per_cpu::is_idle_task(task_ptr)
+                || (task.flags & TASK_FLAG_SYSTEM) != 0
+                || !slopos_ostd::panic_recovery::production_recovery_enabled();
+            // `kernel_thread_trampoline` (the spawn() facade's entry point) already
+            // wraps the real entry in its own run_recoverable — skip the shim's
+            // boundary for it so a panic is caught exactly once.
+            let already_recoverable =
+                task.entry_point == crate::runtime::kernel_thread_trampoline as *const () as u64;
+            (entry, task.entry_arg, fatal_if_panics, already_recoverable)
+        })
+    else {
+        klog_info!("kernel_task_entry_shim: missing task slot");
+        return;
+    };
+
+    if fatal_if_panics || already_recoverable {
+        entry(arg);
+        return;
+    }
+
+    match slopos_ostd::panic_recovery::run_recoverable(|| entry(arg)) {
+        Ok(()) => {}
+        Err(oops) => {
+            klog_info!(
+                "panic recovery: legacy kthread task={} {}:{}:{}: {}",
+                oops.task_id,
+                oops.file.as_str(),
+                oops.line,
+                oops.column,
+                oops.reason.as_str(),
+            );
+        }
+    }
+}
+
 fn init_task_context(task: &mut Task) {
     task.context = TaskContext::default();
     // `task.fpu_state` is a valid in-place FpuState owned by the
@@ -385,16 +437,14 @@ fn init_task_context(task: &mut Task) {
 
     if task.flags & TASK_FLAG_KERNEL_MODE != 0 {
         let trampoline = task_entry_trampoline as *const () as u64;
+        let shim = kernel_task_entry_shim as *const () as u64;
+        let shim_arg = (task as *mut Task).cast::<c_void>() as u64;
         super::task_accessors::task_kernel_stack_seed_ret(task.kernel_stack_top, trampoline);
-        task.switch_ctx = SwitchContext::new_for_task(
-            task.entry_point,
-            task.entry_arg as u64,
-            task.kernel_stack_top,
-            trampoline,
-        );
+        task.switch_ctx =
+            SwitchContext::new_for_task(shim, shim_arg, task.kernel_stack_top, trampoline);
         task.context.rip = trampoline;
-        task.context.rsi = task.entry_arg as u64;
-        task.context.rdi = task.entry_point;
+        task.context.rsi = shim_arg;
+        task.context.rdi = shim;
         task.context.rsp = task.stack_pointer;
         task.context.rflags = 0x202;
         task.context.cs = 0x08;
@@ -616,14 +666,20 @@ pub fn task_terminate(task_id: u32) -> c_int {
     let _preempt = slopos_ostd::cpu::preempt::PreemptGuard::new();
     mark_task_terminated(task_ptr, resolved_id);
 
-    if !is_current {
-        cleanup_terminated_task_resources(task_ptr, resolved_id);
-    } else {
+    let defer_cleanup_to_running_cpu = !is_current && task_on_cpu_load(task_ptr);
+    if is_current {
         cleanup_task_process_resources(task_ptr, resolved_id, TaskProcessCleanupMode::KeepVm);
+    } else if !defer_cleanup_to_running_cpu {
+        cleanup_terminated_task_resources(task_ptr, resolved_id);
     }
 
+    let account_here = !is_current
+        && !defer_cleanup_to_running_cpu
+        && task_exit_cleanup_mark(task_ptr, TASK_EXIT_CLEANUP_ACCOUNTED)
+            & TASK_EXIT_CLEANUP_ACCOUNTED
+            != 0;
     with_task_manager(|mgr| {
-        if !is_current && mgr.num_tasks > 0 {
+        if account_here && mgr.num_tasks > 0 {
             mgr.num_tasks -= 1;
         }
         mgr.tasks_terminated = mgr.tasks_terminated.saturating_add(1);
@@ -802,15 +858,58 @@ fn reparent_and_reap_children(dying_id: u32) {
 }
 
 fn cleanup_terminated_task_resources(task_ptr: *mut Task, resolved_id: u32) {
-    cleanup_task_process_resources(task_ptr, resolved_id, TaskProcessCleanupMode::DropVm);
+    if task_on_cpu_load(task_ptr) {
+        return;
+    }
 
-    if super::task_accessors::task_ref_count(task_ptr).unwrap_or(0) > 0 {
+    cleanup_task_process_resources(task_ptr, resolved_id, TaskProcessCleanupMode::DropVm);
+    task_recovery_depth_store(task_ptr, 0);
+
+    let is_reapable = task_status(task_ptr) == Some(TaskStatus::Terminated);
+    if is_reapable && super::task_accessors::task_ref_count(task_ptr).unwrap_or(0) > 0 {
         defer_task_cleanup(task_ptr);
     } else {
-        // Free stacks but keep the task struct in Terminated state so
-        // task_find_by_id still resolves the ID.  This makes repeated
-        // task_terminate() calls idempotent.  reserve_task_slot() will
-        // reclaim the slot when a new task needs it.
+        // Free stacks but keep the task struct and exit_info stable.
+        // A waitable Zombie must survive until the parent consumes it;
+        // an unreferenced Terminated slot is reclaimed by reserve_task_slot().
+        free_task_stacks(task_ptr);
+    }
+}
+
+pub fn cleanup_current_task_after_switch(task_ptr: *mut Task) {
+    if task_ptr.is_null() {
+        return;
+    }
+    let Some(status) = task_status(task_ptr) else {
+        return;
+    };
+    if !matches!(status, TaskStatus::Terminated | TaskStatus::Zombie) {
+        return;
+    }
+    if super::task_accessors::task_kernel_stack_top(task_ptr).unwrap_or(0) == 0 {
+        return;
+    }
+
+    let resolved_id = task_id_of(task_ptr).unwrap_or(INVALID_TASK_ID);
+    cleanup_task_process_resources(task_ptr, resolved_id, TaskProcessCleanupMode::DropVm);
+    task_recovery_depth_store(task_ptr, 0);
+
+    if task_exit_cleanup_mark(task_ptr, TASK_EXIT_CLEANUP_ACCOUNTED) & TASK_EXIT_CLEANUP_ACCOUNTED
+        != 0
+    {
+        with_task_manager(|mgr| {
+            if mgr.num_tasks > 0 {
+                mgr.num_tasks -= 1;
+            }
+        });
+    }
+
+    if status == TaskStatus::Terminated
+        && super::task_accessors::task_ref_count(task_ptr).unwrap_or(0) > 0
+    {
+        defer_task_cleanup(task_ptr);
+        free_task_stacks(task_ptr);
+    } else {
         free_task_stacks(task_ptr);
     }
 }

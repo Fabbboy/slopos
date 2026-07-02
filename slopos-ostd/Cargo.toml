@@ -20,6 +20,12 @@ bitflags = { workspace = true }
 paste = { workspace = true }
 slopos-abi = { workspace = true }
 slopos-ostd-derive = { workspace = true }
+
+# Gated to target_os = "none": host/Miri builds (`x86_64-unknown-linux-gnu`)
+# already own the `eh_personality` lang item via `std`, so also linking
+# `unwinding` (which supplies its own `eh_personality`/`_Unwind_*`) there
+# collides (E0152).
+[target.'cfg(target_os = "none")'.dependencies]
 unwinding = { workspace = true }
 
 [dev-dependencies]

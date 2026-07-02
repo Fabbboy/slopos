@@ -3,7 +3,7 @@ use core::{
     ptr,
 };
 
-use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering};
 use slopos_drivers::serial;
 use slopos_ostd::klog::{self, KlogLevel};
 use slopos_ostd::sync::KernelSync;
@@ -556,6 +556,22 @@ fn boot_step_boot_config_fn(_ctx: &mut BootCtx<'_, BspInit>) {
         boot_info(b"Boot option: userland test mode enabled\0");
     }
 
+    if cmdline.contains("panic.on_oops=on")
+        || cmdline.contains("panic.on_oops=1")
+        || cmdline.contains("panic.on_oops=true")
+    {
+        slopos_ostd::boot_flags::set_flag(slopos_ostd::boot_flags::BOOT_FLAG_PANIC_ON_OOPS);
+        boot_info(b"Boot option: panic.on_oops enabled\0");
+    }
+
+    if cmdline.contains("panic.recover_smoke=on")
+        || cmdline.contains("panic.recover_smoke=1")
+        || cmdline.contains("panic.recover_smoke=true")
+    {
+        slopos_ostd::boot_flags::set_flag(slopos_ostd::boot_flags::BOOT_FLAG_PANIC_RECOVER_SMOKE);
+        boot_info(b"Boot option: panic recovery smoke enabled\0");
+    }
+
     // Root filesystem backing: `root=initramfs` forces the RAM-resident root,
     // `root=virtio` forces the ext2 disk, and the default (`root=auto`) uses the
     // initramfs when Limine loaded a module and falls back to the disk.
@@ -620,6 +636,9 @@ boot_init!(
 /// Implementation of kernel_main - called from FFI boundary
 pub fn kernel_main_impl() {
     wl_currency::reset();
+
+    #[cfg(feature = "tests")]
+    slopos_ostd::panic::register_test_abort_shutdown(slopos_testing::tests_request_shutdown);
 
     slopos_ostd::sync::run_bsp_init(|token| {
         // Initialise the BSP PCR (`init_bsp_pcr` is BSP-only one-shot,
@@ -729,6 +748,29 @@ pub fn kernel_main_impl() {
         klog_info!("");
     }
 
+    if slopos_ostd::boot_flags::has_flag(slopos_ostd::boot_flags::BOOT_FLAG_PANIC_RECOVER_SMOKE) {
+        RECOVER_SMOKE_DROP_RAN.store(false, Ordering::Release);
+        RECOVER_SMOKE_TASK_ID.store(u32::MAX, Ordering::Release);
+        let priority = slopos_sched::task::TaskPriority::Normal.as_u8();
+        let smoke_task =
+            slopos_ostd::task::spawn("panic-recover-smoke", panic_recover_smoke_task, priority);
+        let Ok(smoke_task) = smoke_task else {
+            klog_info!("PANIC RECOVERY SMOKE: failed to spawn panic task");
+            slopos_ostd::panic::abort_now();
+        };
+        RECOVER_SMOKE_TASK_ID.store(smoke_task.as_u32(), Ordering::Release);
+        if slopos_ostd::task::spawn(
+            "panic-recover-check",
+            panic_recover_smoke_observer,
+            priority,
+        )
+        .is_err()
+        {
+            klog_info!("PANIC RECOVERY SMOKE: failed to spawn observer task");
+            slopos_ostd::panic::abort_now();
+        }
+    }
+
     // Reliable Abort Core fatal-path smoke (off by default). When the cmdline
     // carries `panic.fatal_smoke=on`, deliberately raise an UNCAUGHT panic from
     // a deep call chain so a `just boot-log` run can confirm the emergency-stack
@@ -746,6 +788,38 @@ pub fn kernel_main_impl() {
     }
 
     enter_scheduler(0);
+}
+
+static RECOVER_SMOKE_DROP_RAN: AtomicBool = AtomicBool::new(false);
+static RECOVER_SMOKE_TASK_ID: AtomicU32 = AtomicU32::new(u32::MAX);
+
+struct RecoverSmokeDrop;
+
+impl Drop for RecoverSmokeDrop {
+    fn drop(&mut self) {
+        RECOVER_SMOKE_DROP_RAN.store(true, Ordering::Release);
+    }
+}
+
+fn panic_recover_smoke_task() {
+    let _guard = RecoverSmokeDrop;
+    panic!("panic.recover_smoke: deliberate recoverable kthread panic");
+}
+
+fn panic_recover_smoke_observer() {
+    let task_id = RECOVER_SMOKE_TASK_ID.load(Ordering::Acquire);
+    if task_id == u32::MAX {
+        klog_info!("PANIC RECOVERY SMOKE: missing panic task id");
+        slopos_ostd::panic::abort_now();
+    }
+
+    let _ = slopos_sched::scheduler::task_wait_for(task_id);
+    if RECOVER_SMOKE_DROP_RAN.load(Ordering::Acquire) {
+        klog_info!("PANIC RECOVERY SMOKE: cleanup observed; kernel survived");
+    } else {
+        klog_info!("PANIC RECOVERY SMOKE: cleanup was not observed");
+        slopos_ostd::panic::abort_now();
+    }
 }
 
 #[inline(never)]

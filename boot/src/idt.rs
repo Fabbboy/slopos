@@ -128,6 +128,51 @@ use slopos_sched::scheduler::{
     RescheduleReason, TrapExitSource, scheduler_handoff_on_trap_exit, scheduler_request_reschedule,
 };
 
+struct IrqNestHold {
+    active: bool,
+}
+
+impl IrqNestHold {
+    fn enter() -> Self {
+        slopos_ostd::cpu::x86_64::pcr::interrupt_nesting_enter();
+        Self { active: true }
+    }
+
+    fn reenter(&mut self) {
+        if !self.active {
+            slopos_ostd::cpu::x86_64::pcr::interrupt_nesting_enter();
+            self.active = true;
+        }
+    }
+
+    fn leave(&mut self) {
+        if self.active {
+            slopos_ostd::cpu::x86_64::pcr::interrupt_nesting_exit();
+            self.active = false;
+        }
+    }
+
+    /// Run the trap-exit scheduler handoff outside interrupt-nesting context
+    /// (so a switched-in task is not observed as in-interrupt), forcing any
+    /// panic in the pre-switch scheduler prologue fatal. That prologue runs on
+    /// the ISR stack beneath the non-unwindable asm trampoline while the
+    /// interrupted task's recovery depth is still live, so an unwind there
+    /// could not reach a catch boundary.
+    fn handoff(&mut self, source: TrapExitSource) {
+        self.leave();
+        let abort = slopos_ostd::panic::AbortOnUnwind::new();
+        scheduler_handoff_on_trap_exit(source);
+        abort.disarm();
+        self.reenter();
+    }
+}
+
+impl Drop for IrqNestHold {
+    fn drop(&mut self) {
+        self.leave();
+    }
+}
+
 /// One-shot BSP-only IDT initialisation: install OSTD's default
 /// handlers into the static `BUILDER` and seed our exception-handler
 /// tables. The `&BspToken<'brand>` witness binds the call to the BSP-init
@@ -326,8 +371,83 @@ fn nmi_watchdog_handler(frame: &slopos_arch::InterruptFrame) {
     panic!("NMI WATCHDOG: CPU {} not responding for >500ms", cpu_id);
 }
 
+fn handle_legacy_syscall(frame_ref: &mut slopos_arch::InterruptFrame, irq_nest: &mut IrqNestHold) {
+    // Legacy `int 0x80` syscall path. SlopOS userland uses the
+    // SYSCALL instruction (LSTAR -> `__ostd_user_return`) for every
+    // real syscall, so this trap is rarely taken in practice. We
+    // still bridge the InterruptFrame here onto a transient OSTD
+    // `UserContext` so any caller that does take this path observes
+    // identical syscall semantics.
+    use slopos_ostd::user::context::{FpuStateRef, UserContext, UserRegs};
+
+    let mut user_regs = UserRegs::default();
+    user_regs.r15 = frame_ref.r15;
+    user_regs.r14 = frame_ref.r14;
+    user_regs.r13 = frame_ref.r13;
+    user_regs.r12 = frame_ref.r12;
+    user_regs.r11 = frame_ref.r11;
+    user_regs.r10 = frame_ref.r10;
+    user_regs.r9 = frame_ref.r9;
+    user_regs.r8 = frame_ref.r8;
+    user_regs.rbp = frame_ref.rbp;
+    user_regs.rdi = frame_ref.rdi;
+    user_regs.rsi = frame_ref.rsi;
+    user_regs.rdx = frame_ref.rdx;
+    user_regs.rcx = frame_ref.rcx;
+    user_regs.rbx = frame_ref.rbx;
+    user_regs.rax = frame_ref.rax;
+    user_regs.rip = frame_ref.rip;
+    user_regs.rsp = frame_ref.rsp;
+    user_regs.rflags_user_subset = frame_ref.rflags;
+
+    let mut user_ctx = UserContext::new(user_regs, FpuStateRef::empty());
+    irq_nest.leave();
+    if slopos_ostd::panic_recovery::production_recovery_enabled() {
+        match slopos_ostd::panic_recovery::run_recoverable(|| {
+            syscall_handle(&mut user_ctx as *mut UserContext);
+        }) {
+            Ok(()) => {}
+            Err(oops) => {
+                klog_info!(
+                    "panic recovery: int80 task={} {}:{}:{}: {}",
+                    oops.task_id,
+                    oops.file.as_str(),
+                    oops.line,
+                    oops.column,
+                    oops.reason.as_str(),
+                );
+                slopos_sched::scheduler::scheduler_task_exit_impl();
+            }
+        }
+    } else {
+        syscall_handle(&mut user_ctx as *mut UserContext);
+    }
+    irq_nest.reenter();
+
+    let new_regs = user_ctx.regs();
+    frame_ref.r15 = new_regs.r15;
+    frame_ref.r14 = new_regs.r14;
+    frame_ref.r13 = new_regs.r13;
+    frame_ref.r12 = new_regs.r12;
+    frame_ref.r11 = new_regs.r11;
+    frame_ref.r10 = new_regs.r10;
+    frame_ref.r9 = new_regs.r9;
+    frame_ref.r8 = new_regs.r8;
+    frame_ref.rbp = new_regs.rbp;
+    frame_ref.rdi = new_regs.rdi;
+    frame_ref.rsi = new_regs.rsi;
+    frame_ref.rdx = new_regs.rdx;
+    frame_ref.rcx = new_regs.rcx;
+    frame_ref.rbx = new_regs.rbx;
+    frame_ref.rax = new_regs.rax;
+    frame_ref.rip = new_regs.rip;
+    frame_ref.rsp = new_regs.rsp;
+    frame_ref.rflags = new_regs.rflags_user_subset;
+}
+
 /// Implementation of common_exception_handler - called from FFI boundary
 pub fn common_exception_handler_impl(frame: *mut slopos_arch::InterruptFrame) {
+    let mut irq_nest = IrqNestHold::enter();
     let frame_ref = slopos_arch::InterruptFrame::from_ptr_mut(frame)
         .expect("common_exception_handler_impl: null frame ptr");
     let vector = (frame_ref.vector & 0xFF) as u8;
@@ -357,57 +477,7 @@ pub fn common_exception_handler_impl(frame: *mut slopos_arch::InterruptFrame) {
     }
 
     if vector == SYSCALL_VECTOR {
-        // Legacy `int 0x80` syscall path. SlopOS userland uses the
-        // SYSCALL instruction (LSTAR → `__ostd_user_return`) for every
-        // real syscall, so this trap is rarely taken in practice. We
-        // still bridge the InterruptFrame here onto a transient OSTD
-        // `UserContext` so any caller that does take this path observes
-        // identical syscall semantics — including the CS/SS/RFLAGS-mask
-        // discipline that `set_regs` enforces on the modern syscall
-        // entry.
-        use slopos_ostd::user::context::{FpuStateRef, UserContext, UserRegs};
-        let mut user_regs = UserRegs::default();
-        user_regs.r15 = frame_ref.r15;
-        user_regs.r14 = frame_ref.r14;
-        user_regs.r13 = frame_ref.r13;
-        user_regs.r12 = frame_ref.r12;
-        user_regs.r11 = frame_ref.r11;
-        user_regs.r10 = frame_ref.r10;
-        user_regs.r9 = frame_ref.r9;
-        user_regs.r8 = frame_ref.r8;
-        user_regs.rbp = frame_ref.rbp;
-        user_regs.rdi = frame_ref.rdi;
-        user_regs.rsi = frame_ref.rsi;
-        user_regs.rdx = frame_ref.rdx;
-        user_regs.rcx = frame_ref.rcx;
-        user_regs.rbx = frame_ref.rbx;
-        user_regs.rax = frame_ref.rax;
-        user_regs.rip = frame_ref.rip;
-        user_regs.rsp = frame_ref.rsp;
-        user_regs.rflags_user_subset = frame_ref.rflags;
-        let mut user_ctx = UserContext::new(user_regs, FpuStateRef::empty());
-        syscall_handle(&mut user_ctx as *mut UserContext);
-        // Apply the handler's mutations back onto the IRET frame so the
-        // CPU sees the new register state on `iretq`.
-        let new_regs = user_ctx.regs();
-        frame_ref.r15 = new_regs.r15;
-        frame_ref.r14 = new_regs.r14;
-        frame_ref.r13 = new_regs.r13;
-        frame_ref.r12 = new_regs.r12;
-        frame_ref.r11 = new_regs.r11;
-        frame_ref.r10 = new_regs.r10;
-        frame_ref.r9 = new_regs.r9;
-        frame_ref.r8 = new_regs.r8;
-        frame_ref.rbp = new_regs.rbp;
-        frame_ref.rdi = new_regs.rdi;
-        frame_ref.rsi = new_regs.rsi;
-        frame_ref.rdx = new_regs.rdx;
-        frame_ref.rcx = new_regs.rcx;
-        frame_ref.rbx = new_regs.rbx;
-        frame_ref.rax = new_regs.rax;
-        frame_ref.rip = new_regs.rip;
-        frame_ref.rsp = new_regs.rsp;
-        frame_ref.rflags = new_regs.rflags_user_subset;
+        handle_legacy_syscall(frame_ref, &mut irq_nest);
         return;
     }
 
@@ -430,7 +500,7 @@ pub fn common_exception_handler_impl(frame: *mut slopos_arch::InterruptFrame) {
     if vector == RESCHEDULE_IPI_VECTOR {
         send_eoi();
         scheduler_request_reschedule(RescheduleReason::RescheduleIpi);
-        scheduler_handoff_on_trap_exit(TrapExitSource::RescheduleIpi);
+        irq_nest.handoff(TrapExitSource::RescheduleIpi);
         slopos_core::syscall::signal::deliver_pending_signal_on_irq_exit(frame);
         return;
     }
@@ -451,7 +521,7 @@ pub fn common_exception_handler_impl(frame: *mut slopos_arch::InterruptFrame) {
         // pending until IRET re-enables interrupts.
         send_eoi();
         slopos_sched::scheduler::scheduler_handle_timer_interrupt(frame);
-        scheduler_handoff_on_trap_exit(TrapExitSource::Irq);
+        irq_nest.handoff(TrapExitSource::Irq);
         slopos_core::syscall::signal::deliver_pending_signal_on_irq_exit(frame);
         return;
     }
@@ -481,7 +551,7 @@ pub fn common_exception_handler_impl(frame: *mut slopos_arch::InterruptFrame) {
         }
 
         send_eoi();
-        scheduler_handoff_on_trap_exit(TrapExitSource::Irq);
+        irq_nest.handoff(TrapExitSource::Irq);
         slopos_core::syscall::signal::deliver_pending_signal_on_irq_exit(frame);
         return;
     }
