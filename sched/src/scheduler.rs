@@ -145,14 +145,14 @@ use super::task::{
     task_fpu_state_mut, task_fs_base, task_has_flag, task_id_of, task_inc_ref, task_is_exited,
     task_is_invalid, task_is_ready, task_is_running, task_kernel_stack_top,
     task_last_run_timestamp_volatile, task_name_looks_idle, task_on_cpu_load,
-    task_pcr_round_trip_swap, task_pgid, task_pointer_is_valid, task_priority, task_process_id,
-    task_record_context_switch, task_record_yield, task_recovery_depth_load,
-    task_recovery_depth_store, task_remote_inbox_is_linked, task_sched_placement_compare_exchange,
-    task_sched_placement_load, task_sched_placement_store, task_set_controlling_tty,
-    task_set_on_cpu, task_set_state, task_set_status, task_set_time_slice,
-    task_set_time_slice_remaining, task_sid, task_status, task_switch_ctx_ptr,
-    task_switch_ctx_ptr_mut, task_switch_ctx_rip_rsp, task_time_slice, task_time_slice_remaining,
-    task_try_transition_from,
+    task_panic_in_flight_load, task_panic_in_flight_store, task_pcr_round_trip_swap, task_pgid,
+    task_pointer_is_valid, task_priority, task_process_id, task_record_context_switch,
+    task_record_yield, task_recovery_depth_load, task_recovery_depth_store,
+    task_remote_inbox_is_linked, task_sched_placement_compare_exchange, task_sched_placement_load,
+    task_sched_placement_store, task_set_controlling_tty, task_set_on_cpu, task_set_state,
+    task_set_status, task_set_time_slice, task_set_time_slice_remaining, task_sid, task_status,
+    task_switch_ctx_ptr, task_switch_ctx_ptr_mut, task_switch_ctx_rip_rsp, task_time_slice,
+    task_time_slice_remaining, task_try_transition_from,
 };
 pub use super::trap::{
     RescheduleReason, TrapExitSource, save_preempt_context, save_task_context_from_interrupt_frame,
@@ -216,17 +216,26 @@ fn reset_task_quantum(task: *mut Task) {
     task_set_time_slice_remaining(task, slice);
 }
 
+// Recovery depth and panic in-flight depth are task-scoped state whose
+// live values sit in per-CPU PCR slots (read directly by the panic
+// handler and `AbortOnUnwind`). Both must be saved into the task on every
+// switch-out and reinstalled on switch-in: an unwinding task runs
+// interrupts-on and can migrate, and a leaked non-zero in-flight count on
+// the departed CPU would make any later `AbortOnUnwind` drop there abort
+// a healthy kernel.
 #[inline]
 fn save_live_recovery_depth(task: *mut Task) {
     if task.is_null() {
         return;
     }
     task_recovery_depth_store(task, slopos_arch::pcr::recovery_depth());
+    task_panic_in_flight_store(task, slopos_arch::pcr::panic_in_flight_depth());
 }
 
 #[inline]
 fn restore_live_recovery_depth(task: *mut Task) {
     slopos_arch::pcr::recovery_depth_store(task_recovery_depth_load(task));
+    slopos_arch::pcr::panic_in_flight_store(task_panic_in_flight_load(task));
 }
 
 #[inline]

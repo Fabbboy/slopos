@@ -144,9 +144,12 @@ pub fn abort_now() -> ! {
 /// inside a recovery scope (a syscall or kthread body under
 /// `run_recoverable`). Arm the guard AFTER acquiring the section's lock:
 /// drop order then fires the abort before the lock guard's release, so a
-/// torn invariant is never republished. Normal (non-unwinding) drops are
-/// no-ops, so no `disarm` call is needed at scope end; `disarm` exists for
-/// spans followed by code that may legitimately unwind.
+/// torn invariant is never republished. Every normal exit MUST `disarm` —
+/// the in-flight depth is non-zero for the whole panic window, so a guard
+/// that normal-drops inside it (an allocator section completing inside a
+/// landing-pad `Drop` mid-unwind, or the panic machinery's own exception
+/// allocation) would otherwise abort a healthy section. Prefer routing
+/// sections through a closure helper that arms and disarms in one place.
 ///
 /// Audited holders: the scheduler context-switch spans, the trap-exit
 /// handoff, buddy-allocator locked sections, slab class-lock sections, the

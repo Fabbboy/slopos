@@ -366,6 +366,11 @@ pub struct TaskInner<K, U> {
     /// handler), and context-switch code saves/restores it here so recovery
     /// scopes survive migration.
     pub recovery_depth: AtomicU32,
+    /// Panic in-flight depth saved while this task is not running; the live
+    /// value lives in `PCR.panic_in_flight`. An unwinding task runs
+    /// interrupts-on and can be preempted or migrate mid-unwind, so the
+    /// depth must travel with the task like `recovery_depth`.
+    pub panic_in_flight: AtomicU32,
     /// Idempotence bits for task/process teardown that may be split between
     /// `task_terminate` and post-switch cleanup of the current task.
     pub exit_cleanup_flags: AtomicU8,
@@ -445,6 +450,7 @@ impl<K, U> TaskInner<K, U> {
             sched_placement: AtomicU8::new(SchedPlacement::None.as_u8()),
             refcnt: AtomicU32::new(0),
             recovery_depth: AtomicU32::new(0),
+            panic_in_flight: AtomicU32::new(0),
             exit_cleanup_flags: AtomicU8::new(0),
             user_ctx: UserContext::const_zeroed(),
             saved_user_ctx_ptr: ptr::null_mut(),

@@ -459,6 +459,34 @@ pub fn task_recovery_depth_load<K, U>(task: *const TaskInner<K, U>) -> u32 {
     }
 }
 
+/// Save the task's panic in-flight depth while it is not running.
+#[inline]
+pub fn task_panic_in_flight_store<K, U>(task: *mut TaskInner<K, U>, depth: u32) {
+    if task.is_null() {
+        return;
+    }
+    // SAFETY: caller pre-validated; `panic_in_flight` is an atomic scalar.
+    unsafe {
+        (*task)
+            .panic_in_flight
+            .store(depth, core::sync::atomic::Ordering::Release);
+    }
+}
+
+/// Load the task's saved panic in-flight depth.
+#[inline]
+pub fn task_panic_in_flight_load<K, U>(task: *const TaskInner<K, U>) -> u32 {
+    if task.is_null() {
+        return 0;
+    }
+    // SAFETY: caller pre-validated; `panic_in_flight` is an atomic scalar.
+    unsafe {
+        (*task)
+            .panic_in_flight
+            .load(core::sync::atomic::Ordering::Acquire)
+    }
+}
+
 /// Mark exit-cleanup bits and return the bits that were newly set.
 #[inline]
 pub fn task_exit_cleanup_mark<K, U>(task: *mut TaskInner<K, U>, bits: u8) -> u8 {

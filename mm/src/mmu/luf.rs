@@ -283,8 +283,9 @@ pub fn drain_by_phys_cross_cpu(phys: PhysAddr, cpu_mask: u64) -> bool {
     // An unwind mid-protocol would release `DRAIN_LOCK` with the shared
     // `DRAIN_REQUEST` half-published and the caller's frame handed out
     // without the drain completing — abort instead. Armed after the lock
-    // so the abort fires before the lock guard's release.
-    let _abort_on_unwind = AbortOnUnwind::new();
+    // so the abort fires before the lock guard's release; disarmed once
+    // the ack wait resolves.
+    let abort_guard = AbortOnUnwind::new();
 
     DRAIN_REQUEST
         .target_phys
@@ -373,6 +374,7 @@ pub fn drain_by_phys_cross_cpu(phys: PhysAddr, cpu_mask: u64) -> bool {
         }
     }
 
+    abort_guard.disarm();
     drop(_guard);
 
     if !was_enabled {
@@ -444,17 +446,18 @@ fn drain_all(state: &mut PerCpuLuf, cpu: usize) {
     // `service_local_shootdown_queue`, not the IRQ vector. `with` composes
     // re-entrantly, so callers already IRQs-off nest for free.
     IrqDisabled::with(|_irq| {
-        // An unwind out of `flush_all` would skip both the ring reset and
-        // any caller's fallback flush, silently losing queued TLB
-        // invalidations into frame reuse — abort instead.
-        let _abort_on_unwind = AbortOnUnwind::new();
-
         // Snapshot the count once: it drives the saved-shootdown stat and
         // must never be re-read after `flush_all`.
         let drained = state.len;
         if drained == 0 {
             return;
         }
+
+        // An unwind out of `flush_all` would skip both the ring reset and
+        // any caller's fallback flush, silently losing queued TLB
+        // invalidations into frame reuse — abort instead. Disarmed once
+        // the ring reset completes.
+        let abort_guard = AbortOnUnwind::new();
 
         // Collapse every deferred entry into a single full-process flush.
         // TODO: peel apart by PCID so we issue one INVPCID per tag
@@ -472,6 +475,7 @@ fn drain_all(state: &mut PerCpuLuf, cpu: usize) {
             *e = LufEntry::EMPTY;
         }
         nonempty_mask_clear(cpu);
+        abort_guard.disarm();
     });
 }
 

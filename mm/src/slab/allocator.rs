@@ -31,9 +31,7 @@ use core::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use slopos_arch::pcr::{MAX_CPUS, get_current_cpu};
 use slopos_ostd::panic::AbortOnUnwind;
 use slopos_ostd::sync::cpu_local::{CacheAligned, CpuLocal};
-use slopos_ostd::sync::{
-    ByteChain, IrqPreemptGuard, LOCK_LEVEL_ALLOCATOR, RawLink, SpinLock, SpinLockGuard,
-};
+use slopos_ostd::sync::{ByteChain, IrqPreemptGuard, LOCK_LEVEL_ALLOCATOR, RawLink, SpinLock};
 use slopos_ostd::{klog_info, mm::Slab};
 
 use super::magazine::{MAGAZINE_CAPACITY, Magazine};
@@ -132,13 +130,10 @@ impl<const SIZE: usize> SlabAllocator<SIZE> {
 
         // Slow path: pop directly from an existing slab page's free-list
         // under the class lock.
-        {
-            let (_abort_on_unwind, state) = self.lock_class();
-            if let Some(ptr) = self.pop_from_existing_slabs(&*state) {
-                self.stats.alloc_count.fetch_add(1, Ordering::Relaxed);
-                self.stats.free_objects.fetch_sub(1, Ordering::Relaxed);
-                return Some(ptr);
-            }
+        if let Some(ptr) = self.with_class_locked(|state| self.pop_from_existing_slabs(state)) {
+            self.stats.alloc_count.fetch_add(1, Ordering::Relaxed);
+            self.stats.free_objects.fetch_sub(1, Ordering::Relaxed);
+            return Some(ptr);
         }
         // Every existing slab is full. Build a fresh page WITHOUT holding
         // the class lock: `build_slab_page` -> buddy alloc may perform a
@@ -147,13 +142,14 @@ impl<const SIZE: usize> SlabAllocator<SIZE> {
         // spinning on this same lock can't service the ack IPI). Then link
         // it and pop from it under the lock.
         let new_slab = self.build_slab_page()?;
-        let (_abort_on_unwind, state) = self.lock_class();
-        self.link_slab_at_head(&*state, new_slab);
-        let obj = RawLink::<SlabHeader>::with_mut_at(Some(new_slab), |slab| {
-            slab.free_count = slab.free_count.saturating_sub(1);
-            slab.free_list.pop_front()
-        })
-        .flatten()?;
+        let obj = self.with_class_locked(|state| {
+            self.link_slab_at_head(state, new_slab);
+            RawLink::<SlabHeader>::with_mut_at(Some(new_slab), |slab| {
+                slab.free_count = slab.free_count.saturating_sub(1);
+                slab.free_list.pop_front()
+            })
+            .flatten()
+        })?;
         self.stats.alloc_count.fetch_add(1, Ordering::Relaxed);
         self.stats.free_objects.fetch_sub(1, Ordering::Relaxed);
         Some(obj)
@@ -193,8 +189,7 @@ impl<const SIZE: usize> SlabAllocator<SIZE> {
         // chain and rejects duplicates, so double-frees that bypass
         // the magazine (caches disabled, or magazine fast path skipped
         // for any other reason) are still swallowed here.
-        let (_abort_on_unwind, state) = self.lock_class();
-        if self.push_to_slab(&*state, ptr) {
+        if self.with_class_locked(|state| self.push_to_slab(state, ptr)) {
             self.stats.free_count.fetch_add(1, Ordering::Relaxed);
             self.stats.free_objects.fetch_add(1, Ordering::Relaxed);
         }
@@ -206,50 +201,56 @@ impl<const SIZE: usize> SlabAllocator<SIZE> {
     pub(crate) fn drain_magazines(&self) {
         self.magazines.for_each_mut_at_shutdown(|_cpu, mag| {
             while let Some(ptr) = mag.pop() {
-                let (_abort_on_unwind, state) = self.lock_class();
-                let _ = self.push_to_slab(&*state, ptr);
+                let _ = self.with_class_locked(|state| self.push_to_slab(state, ptr));
             }
         });
     }
 
     // ---- internals --------------------------------------------------
 
-    /// Acquire the class lock with an unwind-abort guard armed. Every
-    /// class-lock section splices intrusive free lists; an unwind
-    /// mid-splice would release the lock around a torn chain, so it
-    /// aborts instead. Tuple order matters: the guard field drops before
-    /// the lock guard, so the abort fires while the lock is still held.
-    fn lock_class(&self) -> (AbortOnUnwind, SpinLockGuard<'_, SlabClassState>) {
+    /// Run `f` under the class lock with an unwind-abort guard armed.
+    /// Every class-lock section splices intrusive free lists; an unwind
+    /// mid-splice would release the lock around a torn chain, so it aborts
+    /// instead. The guard is armed after the lock (the abort fires before
+    /// the lock guard's release) and disarmed on the normal path, so a
+    /// completed section never aborts even while a panic is unwinding
+    /// elsewhere in the task.
+    fn with_class_locked<R>(&self, f: impl FnOnce(&SlabClassState) -> R) -> R {
         let state = self.inner.lock();
-        (AbortOnUnwind::new(), state)
+        let abort_guard = AbortOnUnwind::new();
+        let result = f(&state);
+        abort_guard.disarm();
+        result
     }
 
     fn refill_magazine(&self, mag: &mut Magazine) {
         let batch = MAGAZINE_CAPACITY / 2;
-        let (_abort_on_unwind, state) = self.lock_class();
         // Best-effort: drain existing partial slabs only. If none are
         // available the magazine stays partial and the caller falls to the
         // slow path, which grows a fresh page outside this lock.
-        for _ in 0..batch {
-            let Some(ptr) = self.pop_from_existing_slabs(&*state) else {
-                break;
-            };
-            if !mag.push(ptr) {
-                // Return the just-popped object back to the slab so
-                // the count stays consistent.
-                let _ = self.push_to_slab(&*state, ptr);
-                break;
+        self.with_class_locked(|state| {
+            for _ in 0..batch {
+                let Some(ptr) = self.pop_from_existing_slabs(state) else {
+                    break;
+                };
+                if !mag.push(ptr) {
+                    // Return the just-popped object back to the slab so
+                    // the count stays consistent.
+                    let _ = self.push_to_slab(state, ptr);
+                    break;
+                }
             }
-        }
+        });
     }
 
     fn drain_magazine_half(&self, mag: &mut Magazine) {
         let target = mag.count() / 2;
-        let (_abort_on_unwind, state) = self.lock_class();
-        for _ in 0..target {
-            let Some(ptr) = mag.pop() else { break };
-            let _ = self.push_to_slab(&*state, ptr);
-        }
+        self.with_class_locked(|state| {
+            for _ in 0..target {
+                let Some(ptr) = mag.pop() else { break };
+                let _ = self.push_to_slab(state, ptr);
+            }
+        });
     }
 
     /// Pop one object from an existing partial slab under the class lock.

@@ -24,7 +24,7 @@ use super::{
     TASK_FLAG_USER_MODE, TASK_KERNEL_STACK_SIZE, TASK_NAME_MAX_LEN, TASK_STACK_SIZE,
     TASK_UNSAFE_STACK_SIZE, Task, TaskContext, TaskEntry, TaskExitReason, TaskPriority, TaskStatus,
     task_borrow, task_borrow_mut, task_id_of, task_name_bytes, task_on_cpu_load,
-    task_recovery_depth_store, task_status,
+    task_panic_in_flight_store, task_recovery_depth_store, task_status,
 };
 use crate::exit_info::ExitInfo;
 use crate::scheduler;
@@ -862,6 +862,7 @@ fn cleanup_terminated_task_resources(task_ptr: *mut Task, resolved_id: u32) {
 
     cleanup_task_process_resources(task_ptr, resolved_id, TaskProcessCleanupMode::DropVm);
     task_recovery_depth_store(task_ptr, 0);
+    task_panic_in_flight_store(task_ptr, 0);
 
     let is_reapable = task_status(task_ptr) == Some(TaskStatus::Terminated);
     if is_reapable && super::task_accessors::task_ref_count(task_ptr).unwrap_or(0) > 0 {
@@ -891,6 +892,7 @@ pub fn cleanup_current_task_after_switch(task_ptr: *mut Task) {
     let resolved_id = task_id_of(task_ptr).unwrap_or(INVALID_TASK_ID);
     cleanup_task_process_resources(task_ptr, resolved_id, TaskProcessCleanupMode::DropVm);
     task_recovery_depth_store(task_ptr, 0);
+    task_panic_in_flight_store(task_ptr, 0);
 
     if task_exit_cleanup_mark(task_ptr, TASK_EXIT_CLEANUP_ACCOUNTED) & TASK_EXIT_CLEANUP_ACCOUNTED
         != 0
@@ -1063,6 +1065,13 @@ pub fn task_fork(
     // Child and parent are distinct task slots from the static TASK_TABLE,
     // and we hold exclusive access to child (just reserved).
     super::task_accessors::task_clone_from(child, parent);
+
+    // The bulk copy above may carry the parent's saved recovery/in-flight
+    // depths, which were written at its last switch-out and can be stale
+    // (e.g. saved mid-unwind, then the parent caught the panic without
+    // another switch-out). The child starts outside any recovery scope.
+    task_recovery_depth_store(child as *mut Task, 0);
+    task_panic_in_flight_store(child as *mut Task, 0);
 
     child.task_id = child_task_id;
     child.process_id = child_process_id;
@@ -1237,6 +1246,13 @@ pub fn task_clone(
     // Child and parent are distinct task slots from the static TASK_TABLE,
     // and we hold exclusive access to child (just reserved).
     super::task_accessors::task_clone_from(child, parent);
+
+    // The bulk copy above may carry the parent's saved recovery/in-flight
+    // depths, which were written at its last switch-out and can be stale
+    // (e.g. saved mid-unwind, then the parent caught the panic without
+    // another switch-out). The child starts outside any recovery scope.
+    task_recovery_depth_store(child as *mut Task, 0);
+    task_panic_in_flight_store(child as *mut Task, 0);
 
     child.task_id = child_task_id;
     child.process_id = child_process_id;

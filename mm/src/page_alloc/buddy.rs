@@ -635,12 +635,16 @@ impl BuddyAllocator {
     /// Locked sections split and merge free-list blocks as multi-step
     /// mutations; an unwind mid-mutation would release the lock around a
     /// torn free list, so it aborts instead. The guard is armed after the
-    /// lock so its abort fires before the lock guard's release.
+    /// lock (the abort fires before the lock guard's release) and disarmed
+    /// on the normal path, so a completed section never aborts even while
+    /// a panic is unwinding elsewhere in the task.
     #[inline]
     fn with_locked<R>(&self, f: impl FnOnce(&mut BuddyInner, &RawTable<PageFrame>) -> R) -> R {
         let mut inner = self.inner.lock();
-        let _abort_on_unwind = AbortOnUnwind::new();
-        f(&mut inner, &self.frame_table)
+        let abort_guard = AbortOnUnwind::new();
+        let result = f(&mut inner, &self.frame_table);
+        abort_guard.disarm();
+        result
     }
 
     /// Snapshot `(total, free, allocated)`. `free` folds in the PCP
@@ -806,93 +810,94 @@ impl BuddyAllocator {
         let _no_migrate = PreemptGuard::new();
         let cpu = slopos_arch::pcr::get_current_cpu();
 
-        let mut inner = self.inner.lock();
-        // Free/coalesce is a multi-step free-list mutation; an unwind here
-        // would release the lock around a torn chain, so abort instead.
-        let _abort_on_unwind = AbortOnUnwind::new();
-        let frame_num = inner.phys_to_frame(phys_addr);
-        if !inner.is_valid_frame(frame_num) {
-            return -1;
-        }
+        // Free/coalesce is a multi-step free-list mutation; `with_locked`
+        // arms an unwind-abort guard around the whole section.
+        self.with_locked(|inner, table| {
+            let frame_num = inner.phys_to_frame(phys_addr);
+            if !inner.is_valid_frame(frame_num) {
+                return -1;
+            }
 
-        let Some(frame) = inner.frame_desc_mut(&self.frame_table, frame_num) else {
-            return -1;
-        };
-        if !BuddyInner::frame_state_is_allocated(frame.state) {
-            return 0;
-        }
-        if frame.state == PAGE_FRAME_PCP {
-            return 0;
-        }
+            let Some(frame) = inner.frame_desc_mut(table, frame_num) else {
+                return -1;
+            };
+            if !BuddyInner::frame_state_is_allocated(frame.state) {
+                return 0;
+            }
+            if frame.state == PAGE_FRAME_PCP {
+                return 0;
+            }
 
-        let order = frame.order as u32;
-        let is_pcp_candidate = order == 0 && frame.state == PAGE_FRAME_ALLOCATED && pcp::is_live();
+            let order = frame.order as u32;
+            let is_pcp_candidate =
+                order == 0 && frame.state == PAGE_FRAME_ALLOCATED && pcp::is_live();
 
-        if is_pcp_candidate {
-            if let Some(cache) = pcp::cache_mut(cpu) {
-                if cache.count < pcp::PCP_HIGH_WATERMARK {
-                    if let Some(desc) = inner.frame_desc_mut(&self.frame_table, frame_num) {
-                        desc.state = PAGE_FRAME_PCP;
-                        desc.next_free = INVALID_PAGE_FRAME;
-                    }
-                    cache.stack[cache.count as usize] = frame_num;
-                    cache.count += 1;
-                    cache
-                        .free_count
-                        .fetch_add(1, core::sync::atomic::Ordering::Relaxed);
-
-                    if cache.count > pcp::PCP_HIGH_WATERMARK {
-                        let to_drain = (cache.count - pcp::PCP_HIGH_WATERMARK / 2)
-                            .min(pcp::PCP_BATCH_SIZE)
-                            as usize;
-                        let mut batch = [INVALID_PAGE_FRAME; pcp::PCP_BATCH_SIZE as usize];
-                        let mut drained = 0usize;
-                        while drained < to_drain && cache.count > 0 {
-                            cache.count -= 1;
-                            batch[drained] = cache.stack[cache.count as usize];
-                            cache.stack[cache.count as usize] = INVALID_PAGE_FRAME;
-                            drained += 1;
+            if is_pcp_candidate {
+                if let Some(cache) = pcp::cache_mut(cpu) {
+                    if cache.count < pcp::PCP_HIGH_WATERMARK {
+                        if let Some(desc) = inner.frame_desc_mut(table, frame_num) {
+                            desc.state = PAGE_FRAME_PCP;
+                            desc.next_free = INVALID_PAGE_FRAME;
                         }
-                        if drained > 0 {
-                            inner.free_batch_from_pcp(&self.frame_table, &batch[..drained]);
+                        cache.stack[cache.count as usize] = frame_num;
+                        cache.count += 1;
+                        cache
+                            .free_count
+                            .fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+
+                        if cache.count > pcp::PCP_HIGH_WATERMARK {
+                            let to_drain = (cache.count - pcp::PCP_HIGH_WATERMARK / 2)
+                                .min(pcp::PCP_BATCH_SIZE)
+                                as usize;
+                            let mut batch = [INVALID_PAGE_FRAME; pcp::PCP_BATCH_SIZE as usize];
+                            let mut drained = 0usize;
+                            while drained < to_drain && cache.count > 0 {
+                                cache.count -= 1;
+                                batch[drained] = cache.stack[cache.count as usize];
+                                cache.stack[cache.count as usize] = INVALID_PAGE_FRAME;
+                                drained += 1;
+                            }
+                            if drained > 0 {
+                                inner.free_batch_from_pcp(table, &batch[..drained]);
+                            }
                         }
+                        return 0;
                     }
-                    return 0;
                 }
             }
-        }
 
-        if let Some(frame) = inner.frame_desc_mut(&self.frame_table, frame_num) {
-            let pages = BuddyInner::order_block_pages(order);
-            frame.flags = 0;
-            frame.state = PAGE_FRAME_FREE;
-            inner.allocated_frames = inner.allocated_frames.saturating_sub(pages);
-            inner.insert_block_coalescing(&self.frame_table, frame_num, order);
-        }
-        0
+            if let Some(frame) = inner.frame_desc_mut(table, frame_num) {
+                let pages = BuddyInner::order_block_pages(order);
+                frame.flags = 0;
+                frame.state = PAGE_FRAME_FREE;
+                inner.allocated_frames = inner.allocated_frames.saturating_sub(pages);
+                inner.insert_block_coalescing(table, frame_num, order);
+            }
+            0
+        })
     }
 
     pub fn quarantine_allocated_phys(&self, phys_addr: PhysAddr) {
         if phys_addr.is_null() {
             return;
         }
-        let mut inner = self.inner.lock();
-        let _abort_on_unwind = AbortOnUnwind::new();
-        let frame_num = inner.phys_to_frame(phys_addr);
-        if !inner.is_valid_frame(frame_num) {
-            return;
-        }
-        let Some(frame) = inner.frame_desc_mut(&self.frame_table, frame_num) else {
-            return;
-        };
-        if !BuddyInner::frame_state_is_allocated(frame.state) {
-            return;
-        }
-        let pages = BuddyInner::order_block_pages(frame.order as u32);
-        frame.flags = 0;
-        frame.next_free = INVALID_PAGE_FRAME;
-        frame.state = PAGE_FRAME_NEVER_REUSE;
-        inner.allocated_frames = inner.allocated_frames.saturating_sub(pages);
+        self.with_locked(|inner, table| {
+            let frame_num = inner.phys_to_frame(phys_addr);
+            if !inner.is_valid_frame(frame_num) {
+                return;
+            }
+            let Some(frame) = inner.frame_desc_mut(table, frame_num) else {
+                return;
+            };
+            if !BuddyInner::frame_state_is_allocated(frame.state) {
+                return;
+            }
+            let pages = BuddyInner::order_block_pages(frame.order as u32);
+            frame.flags = 0;
+            frame.next_free = INVALID_PAGE_FRAME;
+            frame.state = PAGE_FRAME_NEVER_REUSE;
+            inner.allocated_frames = inner.allocated_frames.saturating_sub(pages);
+        })
     }
 
     /// Batch-allocate up to `out.len()` zeroed order-0 pages under a

@@ -1184,6 +1184,17 @@ pub fn panic_in_flight_depth() -> u32 {
         .unwrap_or(0)
 }
 
+/// Install a task's saved panic in-flight depth on this CPU. Context-switch
+/// use only: an unwinding task runs interrupts-on and can migrate, so the
+/// depth must travel with the task or the enter-CPU's counter leaks and a
+/// later `AbortOnUnwind` drop on that CPU false-aborts.
+#[inline]
+pub fn panic_in_flight_store(depth: u32) {
+    if let Some(pcr) = current_pcr_local() {
+        pcr.panic_in_flight.store(depth, Ordering::Release);
+    }
+}
+
 /// Enter interrupt/exception context on this CPU, returning the previous
 /// nesting depth.
 #[inline]
