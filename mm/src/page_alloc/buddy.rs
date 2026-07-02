@@ -25,6 +25,7 @@ use core::sync::atomic::{AtomicU8, Ordering};
 
 use slopos_abi::addr::PhysAddr;
 use slopos_ostd::mm::frame::{FrameAlloc, FrameAllocOptions, Paddr};
+use slopos_ostd::panic::AbortOnUnwind;
 use slopos_ostd::sync::{LOCK_LEVEL_ALLOCATOR, PreemptGuard, RawTable, SpinLock};
 use slopos_ostd::{align_down_u64, align_up_u64, klog_debug, klog_info};
 
@@ -630,9 +631,15 @@ impl BuddyAllocator {
     /// Acquire the buddy lock and run `f` with both the locked inner
     /// state and the (unlocked-but-exclusive-by-virtue-of-the-lock)
     /// frame descriptor table.
+    ///
+    /// Locked sections split and merge free-list blocks as multi-step
+    /// mutations; an unwind mid-mutation would release the lock around a
+    /// torn free list, so it aborts instead. The guard is armed after the
+    /// lock so its abort fires before the lock guard's release.
     #[inline]
     fn with_locked<R>(&self, f: impl FnOnce(&mut BuddyInner, &RawTable<PageFrame>) -> R) -> R {
         let mut inner = self.inner.lock();
+        let _abort_on_unwind = AbortOnUnwind::new();
         f(&mut inner, &self.frame_table)
     }
 
@@ -800,6 +807,9 @@ impl BuddyAllocator {
         let cpu = slopos_arch::pcr::get_current_cpu();
 
         let mut inner = self.inner.lock();
+        // Free/coalesce is a multi-step free-list mutation; an unwind here
+        // would release the lock around a torn chain, so abort instead.
+        let _abort_on_unwind = AbortOnUnwind::new();
         let frame_num = inner.phys_to_frame(phys_addr);
         if !inner.is_valid_frame(frame_num) {
             return -1;
@@ -867,6 +877,7 @@ impl BuddyAllocator {
             return;
         }
         let mut inner = self.inner.lock();
+        let _abort_on_unwind = AbortOnUnwind::new();
         let frame_num = inner.phys_to_frame(phys_addr);
         if !inner.is_valid_frame(frame_num) {
             return;
@@ -956,6 +967,10 @@ impl BuddyAllocator {
     // path through a single object.
     // -----------------------------------------------------------------------
 
+    // The PCP mutation spans below are straight-line bounds-checked field
+    // writes with no fallible calls, so no unwind-abort guard is needed:
+    // a panic there requires already-corrupt state, and the worst torn
+    // outcome is a leaked frame, never a torn list.
     fn pcp_try_alloc(&self, cpu: usize) -> u32 {
         debug_assert!(PreemptGuard::is_active());
         let Some(cache) = pcp::cache_mut(cpu) else {

@@ -27,6 +27,7 @@ use slopos_abi::addr::{PhysAddr, VirtAddr};
 use slopos_arch::cpu::IrqDisabled;
 use slopos_arch::pcr::MAX_CPUS;
 use slopos_ostd::klog_warn;
+use slopos_ostd::panic::AbortOnUnwind;
 use slopos_ostd::sync::lock_tracking::LOCK_LEVEL_ALLOCATOR;
 use slopos_ostd::sync::spin::PreemptMutex;
 
@@ -279,6 +280,12 @@ pub fn drain_by_phys_cross_cpu(phys: PhysAddr, cpu_mask: u64) -> bool {
     // Lock held. Ensure IRQs are enabled for the wait below.
     slopos_arch::cpu::enable_interrupts();
 
+    // An unwind mid-protocol would release `DRAIN_LOCK` with the shared
+    // `DRAIN_REQUEST` half-published and the caller's frame handed out
+    // without the drain completing — abort instead. Armed after the lock
+    // so the abort fires before the lock guard's release.
+    let _abort_on_unwind = AbortOnUnwind::new();
+
     DRAIN_REQUEST
         .target_phys
         .store(phys.as_u64(), Ordering::Release);
@@ -381,6 +388,9 @@ pub fn drain_by_phys_cross_cpu(phys: PhysAddr, cpu_mask: u64) -> bool {
 /// Called from `boot::idt`'s vector dispatcher; must be called with
 /// interrupts disabled.
 pub fn handle_drain_ipi(cpu: usize) {
+    // Runs in ISR context: panic recovery never unwinds interrupt
+    // context (the panic handler's gate excludes it), so no
+    // unwind-abort guard is needed here.
     let target = PhysAddr::new(DRAIN_REQUEST.target_phys.load(Ordering::Acquire));
 
     // Early ACK — the initiator may proceed as soon as we've observed
@@ -434,6 +444,11 @@ fn drain_all(state: &mut PerCpuLuf, cpu: usize) {
     // `service_local_shootdown_queue`, not the IRQ vector. `with` composes
     // re-entrantly, so callers already IRQs-off nest for free.
     IrqDisabled::with(|_irq| {
+        // An unwind out of `flush_all` would skip both the ring reset and
+        // any caller's fallback flush, silently losing queued TLB
+        // invalidations into frame reuse — abort instead.
+        let _abort_on_unwind = AbortOnUnwind::new();
+
         // Snapshot the count once: it drives the saved-shootdown stat and
         // must never be re-read after `flush_all`.
         let drained = state.len;

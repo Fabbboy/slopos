@@ -41,7 +41,9 @@ use crate::syscall::signal::{
     syscall_kill, syscall_rt_sigaction, syscall_rt_sigprocmask, syscall_rt_sigreturn,
 };
 pub use crate::syscall::signalfd_handlers::syscall_signalfd;
-pub use crate::syscall::test_handlers::{syscall_run_userland_tests, syscall_test_report};
+pub use crate::syscall::test_handlers::{
+    syscall_run_userland_tests, syscall_test_panic, syscall_test_report,
+};
 pub use crate::syscall::ui_handlers::{
     syscall_clipboard_copy, syscall_clipboard_paste, syscall_cursor_move, syscall_cursor_set_image,
     syscall_fb_flip, syscall_fb_info, syscall_getrandom, syscall_input_poll_batch,
@@ -211,6 +213,7 @@ static SYSCALL_TABLE: [SyscallEntry; SYSCALL_TABLE_SIZE] = syscall_table! {
     // Userland test harness
     [SYSCALL_TEST_REPORT] => syscall_test_report, "test_report";
     [SYSCALL_RUN_USERLAND_TESTS] => syscall_run_userland_tests, "run_userland_tests";
+    [SYSCALL_TEST_PANIC] => syscall_test_panic, "test_panic";
 
     // SlopRing (io_uring-style submission/completion ring — SLOPRING)
     [SYSCALL_RING_SETUP] => syscall_ring_setup, "ring_setup";

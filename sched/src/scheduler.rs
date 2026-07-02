@@ -564,6 +564,12 @@ fn switch_from_current_to_idle(cpu_id: usize, current: *mut Task, idle_task: *mu
         return;
     }
 
+    // The dispatch/switch span mutates current_task, PCR, and per-task
+    // context as one multi-step transition; an unwind through it would
+    // leave the CPU's scheduling state torn. The guard stays armed inside
+    // the descheduled frame while another task runs — harmless, since a
+    // descheduled frame cannot unwind until its task resumes.
+    let switch_abort_guard = slopos_ostd::panic::AbortOnUnwind::new();
     save_live_recovery_depth(current);
     dispatch(cpu_id, idle_task);
     slopos_ostd::sync::rcu_note_qs();
@@ -581,6 +587,7 @@ fn switch_from_current_to_idle(cpu_id: usize, current: *mut Task, idle_task: *mu
     // NOTE: code here runs when the TASK resumes (not on idle path).
     // All post-switch cleanup happens in run_ready_task_from_idle
     // after execute_task returns — that IS the idle resumption point.
+    switch_abort_guard.disarm();
 }
 
 #[inline]
@@ -836,10 +843,9 @@ pub fn schedule_task(task: *mut Task) -> c_int {
 
 /// Schedule a **newly created** task (fork, spawn, exec).
 ///
-/// Uses the `SD_BALANCE_FORK`-style slow path: bypasses `last_cpu` and
-/// finds the globally idlest CPU with round-robin tie-breaking.  This
-/// spreads new processes across CPUs at creation time, matching Linux's
-/// `wake_up_new_task()` → `select_task_rq(WF_FORK)` path.
+/// Fork-placement slow path: bypasses `last_cpu` and finds the globally
+/// idlest CPU with round-robin tie-breaking, spreading new processes
+/// across CPUs at creation time.
 ///
 /// Regular wakeups from sleep/block should use [`schedule_task()`] instead,
 /// which preserves cache affinity by preferring the last CPU.
@@ -992,10 +998,14 @@ fn execute_task(cpu_id: usize, from_task: *mut Task, to_task: *mut Task) {
     // Mark task as physically on this CPU. The dispatcher's re-enqueue
     // check at run_ready_task_from_idle (below) reads this flag before
     // dispatching a task — if it's still on_cpu on another CPU, the
-    // task is requeued rather than dispatched twice. (Linux's
-    // p->on_cpu pattern; pre-Phase-6 schedule_task also spin-waited
-    // on this flag, but that spin was made redundant by Phase 1's
-    // lock-pair barrier and removed.)
+    // task is requeued rather than dispatched twice.
+    //
+    // The on_cpu-through-switch span mutates current_task, PCR, and
+    // per-task context as one multi-step transition; an unwind through it
+    // would leave the CPU's scheduling state torn. The guard stays armed
+    // inside the descheduled frame while another task runs — harmless,
+    // since a descheduled frame cannot unwind until its task resumes.
+    let switch_abort_guard = slopos_ostd::panic::AbortOnUnwind::new();
     task_set_on_cpu(to_task, true);
     save_live_recovery_depth(from_task);
 
@@ -1015,6 +1025,8 @@ fn execute_task(cpu_id: usize, from_task: *mut Task, to_task: *mut Task) {
     // switch_context swaps the per-task preempt-count with the PCR around
     // the register switch (migration-safe accounting), then switches.
     switch_context(prev_ctx, next_ctx);
+    // Runs when the switched-out task resumes on a later dispatch.
+    switch_abort_guard.disarm();
 }
 
 pub(crate) fn run_ready_task_from_idle(cpu_id: usize, idle_task: *mut Task) -> bool {
@@ -1133,11 +1145,11 @@ pub(crate) fn run_ready_task_from_idle(cpu_id: usize, idle_task: *mut Task) -> b
 
     // Re-enqueue the task if it was preempted (Running) or already
     // woken (Ready) before its yield completed. Keep `on_cpu=true`
-    // until after any Ready task has a queue/inbox membership. This is
-    // the Linux `on_rq`/`on_cpu` ordering: a peer may observe a task as
-    // runnable while it is still completing a switch-out, but it must
-    // never observe Ready + off-CPU + unqueued. Peer dispatchers that
-    // pick such a task hit the `on_cpu` guard above and requeue it.
+    // until after any Ready task has a queue/inbox membership. The
+    // ordering invariant: a peer may observe a task as runnable while
+    // it is still completing a switch-out, but it must never observe
+    // Ready + off-CPU + unqueued. Peer dispatchers that pick such a
+    // task hit the `on_cpu` guard above and requeue it.
     //
     // The Ready case covers the self-wakeup window: a wake from the
     // timer ISR transitions state Blocked→Ready and routes through
@@ -1217,7 +1229,7 @@ pub(crate) fn run_ready_task_from_idle(cpu_id: usize, idle_task: *mut Task) -> b
     // Context switch OUT is complete and every still-Ready task has been
     // published to a runqueue (or was already in a remote inbox). Only now
     // clear on_cpu so peer CPUs may claim it. Pairs with peer Acquire loads
-    // of `on_cpu`, mirroring Linux `finish_task()`.
+    // of `on_cpu`.
     task_set_on_cpu(next_task, false);
 
     // Release the dispatch reference.  If the task was re-enqueued above,
@@ -1253,7 +1265,7 @@ fn schedule_internal() {
         return;
     }
 
-    // Invariant gate (Linux `__schedule_bug`/`schedule_debug` analogue):
+    // Invariant gate:
     // every context switch funnels through here, and a switch may only
     // happen at the running baseline (preempt_count == 0). Descheduling
     // with a preempt/lock guard held would make the held
@@ -1335,8 +1347,7 @@ pub fn mark_current_blocked() -> bool {
 /// case, the wake would be silently dropped (we'd be removed from
 /// the runqueue with state `Ready` and nobody to dispatch us).
 ///
-/// Scheduling-while-atomic guard (Linux's `__schedule_bug` / BUG on
-/// `in_atomic()`): a task must never deschedule while preemption is
+/// Scheduling-while-atomic guard: a task must never deschedule while preemption is
 /// disabled — the held `SpinLock`/`PreemptMutex` would travel with the
 /// blocked task and every contender would spin unpreemptibly until a
 /// wake that may itself need the lock. Before scheduler-backed waits
@@ -1478,8 +1489,7 @@ pub fn yield_blocked_task_with_timeout(timeout_ms: u32) {
 /// [`slopos_ostd::sync::wait_queue::WaitQueue::wait_event_until`] to
 /// cancel a previously committed `Running → Blocked` CAS when the
 /// wait condition becomes observable after the queue's SpinLock has
-/// been dropped (Linux's `set_current_state(TASK_RUNNING)` in
-/// `finish_wait`).
+/// been dropped.
 ///
 /// Idempotent vs. a concurrent producer-side `wake_*`: a wake that
 /// already CAS'd us to `Ready` and enqueued us on a runqueue is
@@ -1487,22 +1497,14 @@ pub fn yield_blocked_task_with_timeout(timeout_ms: u32) {
 /// removal, so the next scheduler dispatch will not try to
 /// double-dispatch the still-executing task.
 ///
-/// # Force-store idempotency (Linux `include/linux/sched.h:201-208`)
+/// # Force-store idempotency
 ///
-/// > Wakeup will do: if (@state & p->__state) p->__state =
-/// > TASK_RUNNING, that is, once it observes the
-/// > TASK_UNINTERRUPTIBLE store the waking CPU can issue a
-/// > TASK_RUNNING store which can collide with
-/// > `__set_current_state(TASK_RUNNING)`. […] Losing that store is
-/// > not a problem either because that will result in one extra go
-/// > around the loop and our @cond test will save the day.
-///
-/// SlopOS's argument is the same: the wake-side CAS
-/// `Blocked → Ready` and this function's store `→ Running` are
-/// indistinguishable for the purpose of "task is no longer blocked
-/// on this wait-queue"; whichever order they land in, the
-/// `wait_event_until` loop's condition recheck closes the residual
-/// race via the data lock's own happens-before chain.
+/// The wake-side CAS `Blocked → Ready` and this function's store
+/// `→ Running` are indistinguishable for the purpose of "task is no
+/// longer blocked on this wait-queue"; whichever order they land in,
+/// the `wait_event_until` loop's condition recheck closes the residual
+/// race via the data lock's own happens-before chain. A lost store
+/// costs at most one extra trip around the wait loop.
 pub fn set_current_runnable() {
     let current = scheduler_get_current_task();
     if current.is_null() {
@@ -1826,7 +1828,7 @@ fn deferred_reschedule_callback() {
         return;
     }
 
-    // SM_PREEMPT discipline (Linux `__schedule(SM_PREEMPT)`): an
+    // SM_PREEMPT discipline: an
     // involuntary reschedule must never park a task that has committed
     // `Running → Blocked` but is still executing its blocking protocol.
     // Every wait primitive CASes to Blocked under its queue lock and only
@@ -1975,7 +1977,7 @@ pub fn scheduler_timer_tick() {
 
     // Unconditional QS: the timer ISR firing proves this CPU is not
     // inside an RCU read-side critical section (those disable preemption
-    // but not interrupts).  Matches Linux rcu_sched_clock_irq().
+    // but not interrupts).
     slopos_ostd::sync::rcu_note_qs();
 
     // Raise the deferred-callback softirq flag on CPU 0 only.
@@ -1987,8 +1989,8 @@ pub fn scheduler_timer_tick() {
     let (current, idle_task) = scheduler_tasks_for_cpu(cpu_id);
     let running_idle = !current.is_null() && current == idle_task;
 
-    // Unconditional tick accounting — like Linux's account_process_tick().
-    // Every timer interrupt is counted regardless of preemption state.
+    // Unconditional tick accounting:
+    // every timer interrupt is counted regardless of preemption state.
     // Idle time is categorised per-tick (not per-idle-loop-iteration) so
     // that idle_ticks and total_ticks stay in lockstep.
     per_cpu::with_cpu_scheduler(cpu_id, |sched| {

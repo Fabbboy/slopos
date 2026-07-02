@@ -223,6 +223,12 @@ impl<T> HandleTable<T> {
     /// Reuses a recycled slot when one is free; otherwise appends a new
     /// slot (growable mode) or fails with [`HandleError::Full`]
     /// (fixed-capacity mode).
+    ///
+    /// Unwind safety: a panic between the free-list pop and the value
+    /// install (or, in [`Self::remove`], between the value take and the
+    /// free-list push) leaks that one slot but never poisons lookups —
+    /// `resolve` treats the torn slot as vacant/stale. No unwind-abort
+    /// guard is needed.
     pub fn insert(&mut self, value: T) -> Result<Handle<T>, HandleError> {
         if let Some(idx) = self.free_list.pop() {
             let slot = &mut self.slots[idx as usize];

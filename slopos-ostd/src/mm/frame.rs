@@ -30,8 +30,9 @@
 //!     use-after-free.
 //!
 //! The proof also encodes the *broken* unconditional `fetch_add(1)` clone
-//! — the Asterinas paper Fig. 9 UB — and shows it violates (I1), proving
-//! the conditional `fetch_update` in [`Frame::from_in_use`] is load-bearing.
+//! — a bump that can revive a slot mid-teardown — and shows it violates
+//! (I1), proving the conditional `fetch_update` in
+//! [`Frame::from_in_use`] is load-bearing.
 //! Verified against the pinned Verus toolchain recorded in
 //! `verification/verus.toml`; run `just verify` to re-check. Any change to
 //! the atomic protocol below must keep `frame_refcount.rs` in sync (see
@@ -159,9 +160,8 @@ impl MetaSlot {
 /// slot's type. Instead, type identity reads the [`TypeId`] *value* this
 /// table carries: `TypeId::of::<M>()` is identical in every crate by language
 /// guarantee, regardless of which crate's vtable copy a slot happens to hold.
-/// This mirrors Asterinas's `ostd`, which likewise stores its `DynMetadata`
-/// vtable for dispatch only and decides type identity via `core::any::TypeId`
-/// (`Any::is`), never by comparing the vtable pointer.
+/// The table is stored for dispatch only; type identity is always decided
+/// via `core::any::TypeId`, never by comparing the vtable pointer.
 pub struct MetaVtable {
     /// Run `core::ptr::drop_in_place::<M>` on the storage payload.
     pub(crate) drop_in_place: unsafe fn(*mut u8),
@@ -577,7 +577,7 @@ impl<M: AnyFrameMeta, S: init_state::InitState> Frame<M, S> {
     /// `paddr` does not have a slot, and [`FrameError::StateMismatch`]
     /// when the slot is already live.
     ///
-    /// **Soundness invariant (Inv. 1, Asterinas paper §4.3).** This is
+    /// **Soundness invariant (Inv. 1).** This is
     /// the framekernel's single entry point for claiming a physical
     /// frame as a typed `Frame<M>`. The atomic UNUSED→BUSY→live `ref_count`
     /// transition below means at most one `Frame<M>` exists for any
@@ -604,7 +604,10 @@ impl<M: AnyFrameMeta, S: init_state::InitState> Frame<M, S> {
         };
         // Claim the slot UNUSED -> BUSY. BUSY is the transient state a
         // concurrent construct/destruct of the *same* paddr holds; spin
-        // while we observe it and retry, then claim. (In practice a
+        // while we observe it and retry, then claim. The BUSY-to-live
+        // span below is straight-line panic-free code (a raw write plus
+        // atomic stores), so it cannot unwind and needs no unwind-abort
+        // guard. (In practice a
         // dropping frame's BUSY window is unreachable here — the page is
         // not returned to the allocator until after the slot is UNUSED, so
         // nobody is handed this paddr mid-teardown — but the interlock makes
@@ -666,8 +669,8 @@ impl<M: AnyFrameMeta, S: init_state::InitState> Frame<M, S> {
         // pointer compare therefore spuriously rejected live `RingMeta` slots
         // and wedged desktop bring-up. `TypeId::of::<M>()` is identical in
         // every crate by language guarantee, so the value check is sound
-        // across the `mm`/`slopos-ostd` boundary (this is how Asterinas's
-        // `ostd` does it — vtable for dispatch, `TypeId` for identity).
+        // across the `mm`/`slopos-ostd` boundary — vtable for dispatch,
+        // `TypeId` for identity.
         //
         // The `Acquire` load pairs with `from_unused`'s `Release` vtable
         // store. A null vtable means the slot is `UNUSED` (no `M`) → reject
@@ -695,8 +698,8 @@ impl<M: AnyFrameMeta, S: init_state::InitState> Frame<M, S> {
         // VERIFIED: `verification/proofs/frame_refcount.rs` proves this
         // conditional bump preserves the slot invariant on every reachable
         // state, and that the unconditional `fetch_add(1)` alternative
-        // (the Asterinas Fig. 9 UB) violates it. This refusal-to-revive is
-        // the single line the use-after-free proof (I3) leans on.
+        // violates it. This refusal-to-revive is the single line the
+        // use-after-free proof (I3) leans on.
         slot.ref_count
             .fetch_update(Ordering::AcqRel, Ordering::Acquire, |prev| {
                 if prev == REF_COUNT_BUSY || prev == REF_COUNT_UNUSED || prev >= REF_COUNT_MAX {

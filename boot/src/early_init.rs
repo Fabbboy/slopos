@@ -782,6 +782,16 @@ pub fn kernel_main_impl() {
             klog_info!("PANIC RECOVERY SMOKE: failed to spawn observer task");
             slopos_ostd::panic::abort_now();
         }
+        if slopos_ostd::task::spawn(
+            "panic-syscall-smoke",
+            panic_syscall_smoke_observer,
+            priority,
+        )
+        .is_err()
+        {
+            klog_info!("SYSCALL PANIC SMOKE: failed to spawn observer task");
+            slopos_ostd::panic::abort_now();
+        }
     }
 
     // Reliable Abort Core fatal-path smoke (off by default). When the cmdline
@@ -797,6 +807,10 @@ pub fn kernel_main_impl() {
         if cmdline.contains("panic.fatal_smoke=on") {
             boot_info(b"PANIC SMOKE: raising a deliberate deep fatal panic\0");
             let _ = fatal_smoke_deep(28);
+        }
+        if cmdline.contains("panic.nested_drop_smoke=on") {
+            boot_info(b"PANIC SMOKE: raising a Drop panic during a recoverable unwind\0");
+            nested_drop_smoke();
         }
     }
 
@@ -833,6 +847,54 @@ fn panic_recover_smoke_observer() {
         klog_info!("PANIC RECOVERY SMOKE: cleanup was not observed");
         slopos_ostd::panic::abort_now();
     }
+}
+
+/// Drive the syscall-boundary recovery end-to-end: spawn the userland
+/// `oops_smoke` binary, whose `SYSCALL_TEST_PANIC` call (armed by the same
+/// `panic.recover_smoke` boot flag) panics inside its syscall context. The
+/// recovery boundary kills the task and this observer confirms the kernel
+/// outlived it; the transcript's `panic recovery: syscall` line is the
+/// positive assertion.
+fn panic_syscall_smoke_observer() {
+    use slopos_sched::task::{INVALID_PROCESS_ID, INVALID_TASK_ID, TASK_FLAG_USER_MODE};
+
+    let pid = match slopos_core::exec::spawn_program_with_attrs(
+        b"/bin/oops_smoke",
+        None,
+        slopos_sched::task::TaskPriority::Normal,
+        TASK_FLAG_USER_MODE,
+        INVALID_PROCESS_ID,
+        INVALID_TASK_ID,
+    ) {
+        Ok(pid) => pid,
+        Err(err) => {
+            klog_info!("SYSCALL PANIC SMOKE: failed to spawn /bin/oops_smoke: {err:?}");
+            slopos_ostd::panic::abort_now();
+        }
+    };
+    let _ = slopos_sched::scheduler::task_wait_for(pid);
+    klog_info!("SYSCALL PANIC SMOKE: task died; kernel survived");
+}
+
+struct NestedDropPanic;
+
+impl Drop for NestedDropPanic {
+    fn drop(&mut self) {
+        panic!("panic.nested_drop_smoke: Drop panic during unwind");
+    }
+}
+
+/// A Drop that panics while a caught unwind is already in flight must land
+/// on the fatal path (a second panic mid-unwind observes the in-flight
+/// counter), printing exactly one clean `=== KERNEL PANIC ===`. Verified by
+/// a `just boot-log` transcript grep; halts the machine, so never enabled
+/// under `just test`.
+fn nested_drop_smoke() {
+    let _ = slopos_ostd::panic_recovery::run_recoverable(|| {
+        let _guard = NestedDropPanic;
+        panic!("panic.nested_drop_smoke: outer recoverable panic");
+    });
+    boot_info(b"PANIC SMOKE: nested drop smoke unexpectedly survived\0");
 }
 
 #[inline(never)]

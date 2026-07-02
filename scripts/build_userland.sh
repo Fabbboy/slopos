@@ -22,7 +22,7 @@ CARGO="${CARGO:-cargo}"
 RUST_CHANNEL="${RUST_CHANNEL:-$(sed -n 's/^channel[[:space:]]*=[[:space:]]*"\(.*\)"/\1/p' "${REPO_ROOT}/rust-toolchain.toml")}"
 USERLAND_TARGET="${USERLAND_TARGET:-${REPO_ROOT}/targets/x86_64-slos-userland.json}"
 
-BINS="init shell terminal compositor roulette file_manager image_viewer sysmon nmap ifconfig nc curl ping widget_gallery"
+BINS="init shell terminal compositor roulette file_manager image_viewer sysmon nmap ifconfig nc curl ping widget_gallery oops_smoke"
 BUILD_STD="${BUILD_STD:-core,alloc,std,panic_abort}"
 
 # Ensure toolchain is available and std patches are applied

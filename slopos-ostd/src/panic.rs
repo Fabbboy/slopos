@@ -8,10 +8,10 @@
 //! discipline (no `unsafe` outside `slopos-ostd`) intact while still letting the
 //! rest of the kernel drive single-owner election and the emergency stacks.
 //!
-//! Concurrency model (Linux `panic_cpu` cmpxchg + `crash_smp_send_stop`):
-//! one CPU is elected the sole console driver; all others see `panic_owner_claimed`
-//! and quietly stop. The owner NMI-broadcasts the stop, which also lets a wedged
-//! `wait_for_acks` abandon its shootdown wait.
+//! Concurrency model: one CPU wins the owner CAS and becomes the sole console
+//! driver; all others see `panic_owner_claimed` and quietly stop. The owner
+//! NMI-broadcasts the stop, which also lets a wedged `wait_for_acks` abandon
+//! its shootdown wait.
 
 use core::fmt::Write;
 use core::panic::PanicInfo;
@@ -58,7 +58,7 @@ pub fn format_panic_location_message(info_ptr: *const PanicInfo, out: &mut dyn W
     let _ = write!(out, "{}", info.message());
 }
 
-/// The single CPU elected to drive the fatal-panic console (Linux `panic_cpu`).
+/// The single CPU elected to drive the fatal-panic console.
 static PANIC_OWNER: AtomicU32 = AtomicU32::new(NO_OWNER);
 
 /// Try to become the sole fatal-panic driver. Returns `true` iff THIS call won
@@ -136,6 +136,26 @@ pub fn abort_now() -> ! {
 /// Dropping this guard during a panic unwind means a caller tried to recover
 /// across a partially-mutated invariant boundary. That is not a task-scoped
 /// oops; it is a kernel consistency failure, so the guard aborts.
+///
+/// # Rule
+///
+/// Any section that mutates a kernel-global multi-step invariant not
+/// restored by `Drop` must hold an `AbortOnUnwind` if it is reachable from
+/// inside a recovery scope (a syscall or kthread body under
+/// `run_recoverable`). Arm the guard AFTER acquiring the section's lock:
+/// drop order then fires the abort before the lock guard's release, so a
+/// torn invariant is never republished. Normal (non-unwinding) drops are
+/// no-ops, so no `disarm` call is needed at scope end; `disarm` exists for
+/// spans followed by code that may legitimately unwind.
+///
+/// Audited holders: the scheduler context-switch spans, the trap-exit
+/// handoff, buddy-allocator locked sections, slab class-lock sections, the
+/// TLB deferred-flush drain paths, and the process-VM address-space
+/// take/restore spans. Audited as not needing a guard: per-CPU page-cache
+/// pops (straight-line writes; worst case leaks a frame), `HandleTable`
+/// insert/remove (torn slot reads as vacant/stale), frame-metadata
+/// claim/publish (panic-free span), and ISR-context drains (recovery never
+/// unwinds interrupt context).
 pub struct AbortOnUnwind {
     armed: bool,
 }

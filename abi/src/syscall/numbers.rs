@@ -598,7 +598,7 @@ pub const SYSCALL_PERCPU_STATS: u64 = 143;
 
 /// Total size of the dispatch table. All syscall numbers must be below this.
 // =============================================================================
-// Font management (inspired by Linux KDFONTOP ioctl)
+// Font management
 // =============================================================================
 
 /// Upload a console font to the kernel.
@@ -829,7 +829,14 @@ pub const SYSCALL_KEYMAP_LOAD: u64 = 165;
 /// number written. Unprivileged.
 pub const SYSCALL_KEYMAP_GET_NAME: u64 = 166;
 
-pub const SYSCALL_TABLE_SIZE: usize = 167;
+/// Deliberately panic in syscall context to exercise the task-scoped
+/// panic-recovery boundary end-to-end. Returns `ENOSYS` unless the
+/// `panic.recover_smoke` boot flag is set, so production images expose no
+/// panic trigger; when armed, the call does not return (the task dies in
+/// recovery).
+pub const SYSCALL_TEST_PANIC: u64 = 167;
+
+pub const SYSCALL_TABLE_SIZE: usize = 168;
 
 const _: () = assert!((SYSCALL_PIDFD_OPEN as usize) < SYSCALL_TABLE_SIZE);
 const _: () = assert!((SYSCALL_SIGNALFD as usize) < SYSCALL_TABLE_SIZE);
@@ -837,6 +844,7 @@ const _: () = assert!((SYSCALL_RING_REGISTER as usize) < SYSCALL_TABLE_SIZE);
 const _: () = assert!((SYSCALL_SET_DISPLAY_MODE as usize) < SYSCALL_TABLE_SIZE);
 const _: () = assert!((SYSCALL_KEYMAP_LOAD as usize) < SYSCALL_TABLE_SIZE);
 const _: () = assert!((SYSCALL_KEYMAP_GET_NAME as usize) < SYSCALL_TABLE_SIZE);
+const _: () = assert!((SYSCALL_TEST_PANIC as usize) < SYSCALL_TABLE_SIZE);
 
 /// Standard return value for unimplemented syscalls: -ENOSYS (negated errno 38).
 pub const ENOSYS_RETURN: u64 = (-38i64) as u64;

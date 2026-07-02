@@ -99,3 +99,14 @@ define_syscall!(syscall_run_userland_tests (ctx) -> Result<(), Errno> {
 
     Ok(())
 });
+
+define_syscall!(syscall_test_panic (ctx) -> Result<(), Errno> {
+    // Runtime-armed fault injection: without the `panic.recover_smoke`
+    // boot flag this is indistinguishable from an unimplemented syscall,
+    // so production images expose no user-reachable panic trigger.
+    if !slopos_ostd::boot_flags::has_flag(slopos_ostd::boot_flags::BOOT_FLAG_PANIC_RECOVER_SMOKE) {
+        return Err(Errno::ENOSYS);
+    }
+    let _ = ctx;
+    panic!("test_panic: deliberate syscall-context panic (panic.recover_smoke)");
+});

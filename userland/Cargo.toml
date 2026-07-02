@@ -62,6 +62,10 @@ name = "curl"
 path = "src/bin/curl.rs"
 
 [[bin]]
+name = "oops_smoke"
+path = "src/bin/oops_smoke.rs"
+
+[[bin]]
 name = "ping"
 path = "src/bin/ping.rs"
 
