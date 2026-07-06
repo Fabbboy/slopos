@@ -14,7 +14,7 @@ pub const BITMAP_FONT_HEIGHT: u16 = 16;
 pub const BITMAP_FONT_GLYPH_COUNT: usize = 256;
 pub const BITMAP_FONT_BYTES_PER_GLYPH: usize = 16;
 
-use crate::{ASCII_COUNT, ASCII_FIRST, ASCII_LAST};
+use crate::{ASCII_FIRST, ASCII_LAST, GLYPH_COUNT};
 
 /// Get the bitmap data for a single glyph.
 /// Returns 16 bytes representing the glyph rows (MSB = leftmost pixel).
@@ -58,8 +58,11 @@ pub fn bitmap_to_coverage(
         return None;
     }
 
+    // Sized to the full glyph set; the bitmap source only fills the ASCII
+    // slots, so the extended (Latin-1/extras) slots stay blank — the bitmap
+    // fallback is an ASCII-only emergency font.
     let stride = cell_w.checked_mul(cell_h)?;
-    let coverage_len = ASCII_COUNT.checked_mul(stride)?;
+    let coverage_len = GLYPH_COUNT.checked_mul(stride)?;
     let mut coverage = KVec::<u8>::zeroed(coverage_len).ok()?;
 
     let expand_glyph = |glyph_index: usize, out: &mut [u8]| {
@@ -121,7 +124,7 @@ mod tests {
             bitmap_to_coverage(&data, width, height, glyph_count).expect("must convert");
 
         let stride = width as usize * height as usize;
-        assert_eq!(coverage.len(), 95 * stride);
+        assert_eq!(coverage.len(), crate::GLYPH_COUNT * stride);
         assert_eq!(replacement.len(), stride);
 
         assert_eq!(&coverage[0..8], &[255, 0, 0, 0, 0, 0, 0, 255]);

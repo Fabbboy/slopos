@@ -26,13 +26,55 @@ pub mod ttf_parser;
 use slopos_abi::damage::DamageRect;
 use slopos_abi::draw::{Canvas, Color32};
 
-// ── Shared ASCII constants ─────────────────────────────────────────────
+// ── Shared glyph-set constants ─────────────────────────────────────────
 /// First printable ASCII codepoint (space).
 pub const ASCII_FIRST: u32 = 0x20;
 /// Last printable ASCII codepoint (tilde).
 pub const ASCII_LAST: u32 = 0x7E;
 /// Number of printable ASCII characters (0x20..=0x7E → 95).
 pub const ASCII_COUNT: usize = (ASCII_LAST - ASCII_FIRST + 1) as usize;
+
+/// First Latin-1 supplement printable (no-break space).
+pub const LATIN1_FIRST: u32 = 0xA0;
+/// Last Latin-1 supplement codepoint (ÿ).
+pub const LATIN1_LAST: u32 = 0xFF;
+/// Number of Latin-1 supplement glyphs (0xA0..=0xFF → 96).
+pub const LATIN1_COUNT: usize = (LATIN1_LAST - LATIN1_FIRST + 1) as usize;
+
+/// Extra glyphs outside the two dense blocks: € plus the spacing accents a
+/// keyboard layout's `ring`/`caron` dead keys can flush.
+pub const EXTRA_GLYPHS: [u32; 3] = [0x20AC, 0x02DA, 0x02C7];
+
+/// Total glyph slots in an atlas (ASCII + Latin-1 supplement + extras). This
+/// is also the `glyph_count` of the `SYSCALL_FONT_SET` coverage wire format —
+/// both sides compile against this constant.
+pub const GLYPH_COUNT: usize = ASCII_COUNT + LATIN1_COUNT + EXTRA_GLYPHS.len();
+
+/// Atlas slot for a codepoint, or `None` for codepoints outside the glyph set
+/// (those render as the replacement glyph).
+#[inline]
+pub fn glyph_slot(cp: u32) -> Option<usize> {
+    match cp {
+        ASCII_FIRST..=ASCII_LAST => Some((cp - ASCII_FIRST) as usize),
+        LATIN1_FIRST..=LATIN1_LAST => Some(ASCII_COUNT + (cp - LATIN1_FIRST) as usize),
+        _ => EXTRA_GLYPHS
+            .iter()
+            .position(|&e| e == cp)
+            .map(|i| ASCII_COUNT + LATIN1_COUNT + i),
+    }
+}
+
+/// Inverse of [`glyph_slot`]: the codepoint a slot holds.
+#[inline]
+pub fn slot_codepoint(slot: usize) -> Option<u32> {
+    if slot < ASCII_COUNT {
+        Some(ASCII_FIRST + slot as u32)
+    } else if slot < ASCII_COUNT + LATIN1_COUNT {
+        Some(LATIN1_FIRST + (slot - ASCII_COUNT) as u32)
+    } else {
+        EXTRA_GLYPHS.get(slot - ASCII_COUNT - LATIN1_COUNT).copied()
+    }
+}
 
 use cache::GlyphCache;
 use outline::outline_to_edges;

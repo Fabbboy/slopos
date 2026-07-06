@@ -22,7 +22,7 @@ pub fn font_set_coverage(data: &[u8], width: u16, height: u16) -> i64 {
             data.as_ptr() as u64,
             width as u64,
             height as u64,
-            slopos_font::ASCII_COUNT as u64,
+            slopos_font::GLYPH_COUNT as u64,
             1,
         ) as i64
     }

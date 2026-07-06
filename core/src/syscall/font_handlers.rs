@@ -32,18 +32,21 @@ define_syscall!(syscall_font_set
         if width == 0 || height == 0 || height > 32 {
             return Err(Errno::EINVAL);
         }
-        if glyph_count != slopos_font::ASCII_COUNT {
+        if glyph_count != slopos_font::GLYPH_COUNT {
             return Err(Errno::EINVAL);
         }
 
+        // Upper bound: (GLYPH_COUNT + 1 replacement) cells of at most
+        // 32×32 px = ~200 KiB; 256 KiB caps the upload comfortably.
+        const MAX_COVERAGE_UPLOAD: usize = 256 * 1024;
         let stride = (width as usize).checked_mul(height as usize).ok_or(Errno::EINVAL)?;
-        let coverage_size = slopos_font::ASCII_COUNT.checked_mul(stride).ok_or(Errno::EINVAL)?;
-        let data_size = (slopos_font::ASCII_COUNT + 1)
+        let coverage_size = slopos_font::GLYPH_COUNT.checked_mul(stride).ok_or(Errno::EINVAL)?;
+        let data_size = (slopos_font::GLYPH_COUNT + 1)
             .checked_mul(stride)
-            .filter(|&size| size <= 65536)
+            .filter(|&size| size <= MAX_COVERAGE_UPLOAD)
             .ok_or(Errno::EINVAL)?;
 
-        let mut font_data = memdup_user(data_ptr, data_size, 65536)
+        let mut font_data = memdup_user(data_ptr, data_size, MAX_COVERAGE_UPLOAD)
             .map_err(|e| Errno::from_raw(e.raw()).unwrap_or(Errno::EINVAL))?;
 
         let replacement = font_data.split_off(coverage_size);

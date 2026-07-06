@@ -1,7 +1,9 @@
 //! Pre-rasterized fixed-width glyph atlas for fast terminal/console rendering.
 //!
-//! Contains coverage bitmaps for ASCII 32-126 at a fixed cell size.
-//! Each pixel has a coverage value 0-255 for anti-aliased rendering.
+//! Contains coverage bitmaps for the shared glyph set (ASCII 32-126, the
+//! Latin-1 supplement, and a few extras — see [`crate::glyph_slot`]) at a
+//! fixed cell size. Each pixel has a coverage value 0-255 for anti-aliased
+//! rendering.
 
 use slopos_ostd::KVec;
 
@@ -10,26 +12,26 @@ use slopos_abi::draw::{Canvas, Color32};
 
 use crate::{FontRenderer, FontSource};
 
-use crate::{ASCII_COUNT, ASCII_FIRST, ASCII_LAST};
+use crate::{ASCII_FIRST, ASCII_LAST, GLYPH_COUNT, glyph_slot, slot_codepoint};
 
 /// Pre-rasterized fixed-width glyph atlas.
 ///
-/// All ASCII printable characters (32-126) are rasterized into cells of
-/// uniform width and height. Each pixel is stored as a coverage byte (0-255)
-/// suitable for anti-aliased blending.
+/// Every glyph-set codepoint (see [`crate::glyph_slot`]) is rasterized into a
+/// cell of uniform width and height. Each pixel is stored as a coverage byte
+/// (0-255) suitable for anti-aliased blending.
 pub struct GlyphAtlas {
     cell_w: u16,
     cell_h: u16,
-    /// Flat coverage data: 95 glyphs × cell_w × cell_h bytes.
+    /// Flat coverage data: [`GLYPH_COUNT`] glyphs × cell_w × cell_h bytes.
     data: KVec<u8>,
-    /// Replacement glyph for non-ASCII codepoints.
+    /// Replacement glyph for codepoints outside the glyph set.
     replacement: KVec<u8>,
     /// Where the font data came from.
     source: FontSource,
 }
 
 impl GlyphAtlas {
-    /// Create a new atlas by pre-rasterizing all ASCII glyphs at `size_px`.
+    /// Create a new atlas by pre-rasterizing the whole glyph set at `size_px`.
     pub fn new(font_data: &[u8], size_px: u16) -> Option<Self> {
         let renderer = FontRenderer::new(font_data)?;
         let upem = renderer.font.units_per_em() as f32;
@@ -46,6 +48,9 @@ impl GlyphAtlas {
         let cell_h = (ascender - descender + line_gap / 2) as u16;
 
         // Cell width = max ceil'd advance across all ASCII printable chars.
+        // Deliberately ASCII-only so extending the glyph set never changes the
+        // cell geometry (the terminal grid is sized from it); wider extended
+        // glyphs are centered and clipped into the same cell.
         let mut max_advance: u16 = 0;
         for cp in ASCII_FIRST..=ASCII_LAST {
             if let Some(gid) = renderer.font.glyph_index(cp) {
@@ -63,10 +68,12 @@ impl GlyphAtlas {
         let cell_w = max_advance;
 
         let stride = cell_w as usize * cell_h as usize;
-        let mut data = KVec::<u8>::zeroed(ASCII_COUNT * stride).ok()?;
+        let mut data = KVec::<u8>::zeroed(GLYPH_COUNT * stride).ok()?;
 
-        for cp in ASCII_FIRST..=ASCII_LAST {
-            let idx = (cp - ASCII_FIRST) as usize;
+        for idx in 0..GLYPH_COUNT {
+            let Some(cp) = slot_codepoint(idx) else {
+                continue;
+            };
             let cell = &mut data[idx * stride..(idx + 1) * stride];
 
             if let Some(rg) = renderer.rasterize_glyph(cp, size_px, scale, ascender) {
@@ -140,7 +147,7 @@ impl GlyphAtlas {
         }
 
         let stride = (cell_w as usize).checked_mul(cell_h as usize)?;
-        let expected_coverage = ASCII_COUNT.checked_mul(stride)?;
+        let expected_coverage = GLYPH_COUNT.checked_mul(stride)?;
         if coverage.len() != expected_coverage || replacement.len() != stride {
             return None;
         }
@@ -177,8 +184,7 @@ impl GlyphAtlas {
     /// Get coverage data for a codepoint (cell_w × cell_h bytes).
     #[inline]
     pub fn get_coverage(&self, codepoint: u32) -> &[u8] {
-        if codepoint >= ASCII_FIRST && codepoint <= ASCII_LAST {
-            let idx = (codepoint - ASCII_FIRST) as usize;
+        if let Some(idx) = glyph_slot(codepoint) {
             let stride = self.cell_w as usize * self.cell_h as usize;
             &self.data[idx * stride..(idx + 1) * stride]
         } else {
@@ -309,8 +315,8 @@ impl GlyphAtlas {
         damage
     }
 
-    /// Draw a UTF-8 string.
-    #[inline]
+    /// Draw a UTF-8 string, decoding characters (a multi-byte character is one
+    /// glyph cell, not one cell per byte).
     pub fn draw_str<T: Canvas>(
         &self,
         target: &mut T,
@@ -320,7 +326,48 @@ impl GlyphAtlas {
         fg: Color32,
         bg: Color32,
     ) -> Option<DamageRect> {
-        self.draw_bytes(target, x, y, text.as_bytes(), fg, bg)
+        let cw = self.cell_w as i32;
+        let ch = self.cell_h as i32;
+        let w = target.width() as i32;
+        let h = target.height() as i32;
+        let mut cx = x;
+        let mut cy = y;
+        let mut damage: Option<DamageRect> = None;
+
+        for c in text.chars() {
+            match c {
+                '\0' => break,
+                '\n' => {
+                    cx = x;
+                    cy += ch;
+                }
+                '\r' => cx = x,
+                '\t' => {
+                    let tab = 4 * cw;
+                    cx = ((cx - x + tab) / tab) * tab + x;
+                }
+                _ => {
+                    if let Some(d) = self.draw_char(target, cx, cy, c as u32, fg, bg) {
+                        damage = Some(match damage {
+                            Some(prev) => prev.union(&d),
+                            None => d,
+                        });
+                    }
+                    cx += cw;
+                    if cx + cw > w {
+                        cx = x;
+                        cy += ch;
+                    }
+                }
+            }
+            if cy >= h {
+                break;
+            }
+        }
+        if let Some(d) = damage {
+            target.report_damage(d);
+        }
+        damage
     }
 
     /// Draw a single character, clipped to a rectangle.
@@ -372,7 +419,7 @@ impl GlyphAtlas {
         }
     }
 
-    /// Draw a UTF-8 string, clipped.
+    /// Draw a UTF-8 string, clipped (character-decoded, like [`Self::draw_str`]).
     pub fn draw_str_clipped<T: Canvas>(
         &self,
         target: &mut T,
@@ -389,15 +436,15 @@ impl GlyphAtlas {
             return;
         }
         let mut cx = x;
-        for &byte in text.as_bytes() {
-            if byte == 0 {
+        for c in text.chars() {
+            if c == '\0' {
                 break;
             }
             if cx > clip.x1 {
                 break;
             }
             if cx + cw - 1 >= clip.x0 {
-                self.draw_char_clipped(target, cx, y, byte as u32, fg, bg, clip);
+                self.draw_char_clipped(target, cx, y, c as u32, fg, bg, clip);
             }
             cx += cw;
         }
@@ -420,10 +467,21 @@ impl GlyphAtlas {
         width
     }
 
-    /// Measure width of a UTF-8 string.
-    #[inline]
+    /// Measure width of a UTF-8 string (character-decoded).
     pub fn str_width(&self, text: &str) -> i32 {
-        self.bytes_width(text.as_bytes())
+        let cw = self.cell_w as i32;
+        let mut width = 0i32;
+        for c in text.chars() {
+            match c {
+                '\0' | '\n' => break,
+                '\t' => {
+                    let tab = 4 * cw;
+                    width = ((width + tab - 1) / tab) * tab;
+                }
+                _ => width += cw,
+            }
+        }
+        width
     }
 
     /// Count lines in a null-terminated byte string.
@@ -608,7 +666,8 @@ mod tests {
         let cell_w = 8u16;
         let cell_h = 16u16;
         let stride = cell_w as usize * cell_h as usize;
-        let coverage = slopos_ostd::KVec::<u8>::filled(7u8, 95 * stride).expect("test alloc");
+        let coverage =
+            slopos_ostd::KVec::<u8>::filled(7u8, crate::GLYPH_COUNT * stride).expect("test alloc");
         let replacement = slopos_ostd::KVec::<u8>::filled(9u8, stride).expect("test alloc");
 
         let atlas = GlyphAtlas::from_raw_coverage(
@@ -632,7 +691,8 @@ mod tests {
         let cell_w = 8u16;
         let cell_h = 16u16;
         let stride = cell_w as usize * cell_h as usize;
-        let coverage = slopos_ostd::KVec::<u8>::zeroed(95 * stride - 1).expect("test alloc");
+        let coverage =
+            slopos_ostd::KVec::<u8>::zeroed(crate::GLYPH_COUNT * stride - 1).expect("test alloc");
         let replacement = slopos_ostd::KVec::<u8>::zeroed(stride).expect("test alloc");
 
         assert!(
@@ -655,5 +715,45 @@ mod tests {
         let atlas = global().expect("atlas must be set");
         assert_eq!(atlas.cell_width(), 8);
         assert_eq!(atlas.cell_height(), 16);
+    }
+
+    #[test]
+    fn glyph_slot_mapping_round_trips() {
+        use crate::{GLYPH_COUNT, glyph_slot, slot_codepoint};
+        for slot in 0..GLYPH_COUNT {
+            let cp = slot_codepoint(slot).expect("every slot names a codepoint");
+            assert_eq!(glyph_slot(cp), Some(slot));
+        }
+        // Outside the set: controls, C1, and an uncovered codepoint.
+        assert_eq!(glyph_slot(0x1F), None);
+        assert_eq!(glyph_slot(0x7F), None);
+        assert_eq!(glyph_slot(0x9F), None);
+        assert_eq!(glyph_slot(0x4E2D), None); // 中
+        // The keymap-relevant glyphs are all in the set.
+        for c in "äöüÄÖÜéèà§°ç£¦¬¢´¨€".chars() {
+            assert!(glyph_slot(c as u32).is_some(), "missing {c}");
+        }
+    }
+
+    #[test]
+    fn atlas_rasterizes_latin1_glyphs() {
+        const INTER_TTF: &[u8] = include_bytes!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../assets/fonts/Inter-Regular.ttf"
+        ));
+        let atlas = GlyphAtlas::new(INTER_TTF, 16).expect("atlas must build");
+        for c in ['ä', 'é', 'à', '€'] {
+            let cov = atlas.get_coverage(c as u32);
+            assert!(
+                cov.iter().any(|&b| b != 0),
+                "{c} should have nonzero coverage"
+            );
+            // And it is the glyph's own cell, not the replacement diamond.
+            assert_ne!(
+                cov,
+                atlas.get_coverage(0x4E2D),
+                "{c} must not be the replacement"
+            );
+        }
     }
 }
