@@ -42,6 +42,11 @@ fn spawn_service(name: &str) -> i32 {
 pub fn init_user_main() {
     upgrade_console_font();
 
+    // Re-apply the persisted keyboard-layout choice (`keymap <name>` writes
+    // /etc/keymap) before anything interactive starts. Silent no-op when the
+    // file is missing or invalid — the built-in US default stays active.
+    crate::keymap::apply_persisted_layout();
+
     let mut info = UserSysInfo::default();
     let info_ok = sys_core::sys_info(&mut info) == 0;
     let skip_roulette = info_ok && (info.boot_flags & BOOT_FLAG_ROULETTE_SKIP) != 0;

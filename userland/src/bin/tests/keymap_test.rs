@@ -5,37 +5,14 @@ use slopos_userland as _;
 
 use std::fs;
 
-use slopos_keymap_core::{LayoutTable, SERIALIZED_LEN, parse, serialize};
+use slopos_userland::keymap::{current_name as current, load_layout_by_name};
 use slopos_userland::syscall::keymap::{keymap_get_name, keymap_load};
 
-/// The active layout name, or `None` on error.
-fn current() -> Option<String> {
-    let mut buf = [0u8; 16];
-    let n = keymap_get_name(&mut buf);
-    if n <= 0 {
-        return None;
-    }
-    let n = (n as usize).min(buf.len());
-    core::str::from_utf8(&buf[..n]).ok().map(String::from)
-}
-
 /// Read `/usr/share/keymaps/<name>.layout`, parse it in userland, serialise the
-/// binary table, and upload it — the exact path the `keymap` builtin runs.
+/// binary table, and upload it — the exact shared pipeline the `keymap` builtin
+/// and the init boot applier run.
 fn load_layout_file(name: &str) -> bool {
-    let path = format!("/usr/share/keymaps/{name}.layout");
-    let src = match fs::read(&path) {
-        Ok(s) => s,
-        Err(_) => return false,
-    };
-    let mut table = Box::new(LayoutTable::empty());
-    if parse(&src, &mut table).is_err() {
-        return false;
-    }
-    let mut blob = vec![0u8; SERIALIZED_LEN];
-    if serialize(&table, &mut blob).is_err() {
-        return false;
-    }
-    keymap_load(&blob) == 0
+    load_layout_by_name(name).is_ok()
 }
 
 /// `keymap` with no args used to page-fault the kernel: `SYSCALL_KEYMAP_GET_NAME`

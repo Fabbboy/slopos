@@ -4,20 +4,15 @@
 //! `keymap list`      — list available `*.layout` files (active marked `*`).
 //! `keymap <name>`    — load `/usr/share/keymaps/<name>.layout` and switch to it.
 //!
-//! Layout files are parsed **in userland** (`slopos_keymap_core::parse`) into the
-//! binary `LayoutTable`, serialised, and uploaded to the kernel — the kernel
-//! never parses layout text.
+//! The file → parse → serialise → upload pipeline lives in [`crate::keymap`]
+//! (shared with the boot-time applier in init); the kernel never parses
+//! layout text.
 
 use std::fs;
 
-use slopos_keymap_core::{LayoutTable, SERIALIZED_LEN, parse, serialize};
-
-use crate::syscall::keymap::{keymap_get_name, keymap_load};
+use crate::keymap::{KEYMAP_DIR, PERSIST_PATH, current_name, load_layout_by_name};
 
 use super::super::display::{COLOR_ERROR_RED, COLOR_EXEC_GREEN, shell_write, shell_write_idx};
-
-const KEYMAP_DIR: &str = "/usr/share/keymaps";
-const PERSIST_PATH: &str = "/etc/keymap";
 
 pub fn cmd_keymap(argc: i32, argv: &[&[u8]]) -> i32 {
     if argc < 2 {
@@ -37,17 +32,6 @@ pub fn cmd_keymap(argc: i32, argv: &[&[u8]]) -> i32 {
 
 fn err(msg: &str) {
     shell_write_idx(msg.as_bytes(), COLOR_ERROR_RED);
-}
-
-/// The active layout name, queried from the kernel.
-fn current_name() -> Option<String> {
-    let mut buf = [0u8; 16];
-    let n = keymap_get_name(&mut buf);
-    if n < 0 {
-        return None;
-    }
-    let n = (n as usize).min(buf.len());
-    core::str::from_utf8(&buf[..n]).ok().map(String::from)
 }
 
 fn print_current() -> i32 {
@@ -92,35 +76,13 @@ fn list_layouts() -> i32 {
 }
 
 fn set_layout(name: &str) -> i32 {
-    let path = format!("{KEYMAP_DIR}/{name}.layout");
-    let src = match fs::read(&path) {
-        Ok(s) => s,
-        Err(_) => {
-            err(&format!("keymap: no such layout '{name}'\n"));
-            return 1;
-        }
-    };
-
-    // Parse the text layout into a binary table (in userland), then serialise.
-    let mut table = Box::new(LayoutTable::empty());
-    if parse(&src, &mut table).is_err() {
-        err(&format!("keymap: failed to parse {path}\n"));
-        return 1;
-    }
-    let mut blob = vec![0u8; SERIALIZED_LEN];
-    if serialize(&table, &mut blob).is_err() {
-        err("keymap: failed to serialise layout\n");
+    if let Err(cause) = load_layout_by_name(name) {
+        err(&format!("keymap: {cause}: '{name}'\n"));
         return 1;
     }
 
-    let rc = keymap_load(&blob);
-    if rc < 0 {
-        err(&format!("keymap: kernel rejected layout (errno {})\n", -rc));
-        return 1;
-    }
-
-    // Best-effort persistence (ignored if the root filesystem is read-only); a
-    // boot-time applier can re-load this on the next start.
+    // Best-effort persistence (ignored if the root filesystem is read-only);
+    // init re-applies it on the next boot.
     let _ = fs::write(PERSIST_PATH, name.as_bytes());
 
     shell_write_idx(

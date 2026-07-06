@@ -819,9 +819,11 @@ pub const SYSCALL_SET_DISPLAY_MODE: u64 = 164;
 
 /// Install a keyboard layout. `keymap_load(data_ptr: *const u8, len: usize)`,
 /// where the buffer is a serialised `LayoutTable` blob (see
-/// `slopos_abi::input::layout`). Console-admin only; returns 0 on success,
-/// `EINVAL` if the blob is malformed. The kernel never parses layout text —
-/// userland parses `*.layout` files and uploads the validated binary.
+/// `slopos_abi::input::layout`). Unprivileged — the layout is a per-session
+/// user preference (like `setxkbmap`), and the kernel-side binary validator is
+/// the safety boundary. Returns 0 on success, `EINVAL` if the blob is
+/// malformed. The kernel never parses layout text — userland parses
+/// `*.layout` files and uploads the validated binary.
 pub const SYSCALL_KEYMAP_LOAD: u64 = 165;
 
 /// Query the active layout's short name. `keymap_get_name(buf: *mut u8,

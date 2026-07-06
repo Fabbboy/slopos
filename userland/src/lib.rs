@@ -2,6 +2,7 @@
 
 pub mod apps;
 pub mod gfx;
+pub mod keymap;
 pub mod net;
 pub mod program_registry;
 pub mod readiness;
