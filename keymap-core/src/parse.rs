@@ -656,6 +656,10 @@ compose dead:acute  space -> acute
             KeyOutcome::Text(0x20AC)
         ); // €
         assert_eq!(
+            resolve(&t, KEY_7, ALTGR, NUM_ON, &mut d).outcome,
+            KeyOutcome::Text('|' as u32)
+        );
+        assert_eq!(
             resolve(&t, KEY_LEFTBRACE, ALTGR, NUM_ON, &mut d).outcome,
             KeyOutcome::Text('[' as u32)
         );
@@ -664,18 +668,36 @@ compose dead:acute  space -> acute
             KeyOutcome::Text('{' as u32)
         );
 
-        // Umlauts (direct keys), with Shift giving the capital.
+        // Umlaut keys: base umlaut, Shift = French accent (real Swiss layout).
         assert_eq!(
             resolve(&t, KEY_LEFTBRACE, NONE, NUM_ON, &mut d).outcome,
             KeyOutcome::Text(0x00FC) // ü
         );
         assert_eq!(
             resolve(&t, KEY_LEFTBRACE, SHIFT, NUM_ON, &mut d).outcome,
-            KeyOutcome::Text(0x00DC) // Ü
+            KeyOutcome::Text(0x00E8) // è
+        );
+        assert_eq!(
+            resolve(&t, KEY_SEMICOLON, SHIFT, NUM_ON, &mut d).outcome,
+            KeyOutcome::Text(0x00E9) // é
         );
         assert_eq!(
             resolve(&t, KEY_APOSTROPHE, NONE, NUM_ON, &mut d).outcome,
             KeyOutcome::Text(0x00E4) // ä
+        );
+        assert_eq!(
+            resolve(&t, KEY_APOSTROPHE, SHIFT, NUM_ON, &mut d).outcome,
+            KeyOutcome::Text(0x00E0) // à
+        );
+
+        // Capital umlaut via the diaeresis dead key: ¨ then U → Ü.
+        assert_eq!(
+            resolve(&t, KEY_RIGHTBRACE, NONE, NUM_ON, &mut d).outcome,
+            KeyOutcome::None
+        );
+        assert_eq!(
+            resolve(&t, KEY_U, SHIFT, NUM_ON, &mut d).outcome,
+            KeyOutcome::Text(0x00DC) // Ü
         );
 
         // Dead circumflex (KEY_EQUAL base) then 'a' → â.

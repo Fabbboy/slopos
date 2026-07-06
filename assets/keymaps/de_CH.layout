@@ -3,8 +3,10 @@
 #   key <KEY_NAME> <caps:yes|no> <base> <shift> <altgr> <shift+altgr>
 # `KEY_*` names are physical positions (US-keycap names); the glyphs below are
 # the Swiss German assignment, so e.g. the physical "Y" key types `z` (QWERTZ).
-# Accented vowels are reached through the dead keys (^ ` ´ ¨ ~); the umlaut keys
-# carry ä/ö/ü directly (Shift = Ä/Ö/Ü), with à/é/è available via the dead keys.
+# As on the real Swiss keyboard (XKB ch(basic)), Shift on the umlaut keys types
+# the French accents: Shift+ü = è, Shift+ö = é, Shift+ä = à. Capital umlauts go
+# through the diaeresis dead key (¨ then U → Ü); other accents through the dead
+# keys (^ ` ´ ¨ ~).
 
 name = de_CH
 title = Swiss German (QWERTZ)
@@ -18,7 +20,7 @@ key KEY_3      no  3            asterisk     numbersign -
 key KEY_4      no  4            ccedilla     -          -
 key KEY_5      no  5            percent      -          -
 key KEY_6      no  6            ampersand    notsign    -
-key KEY_7      no  7            slash        -          -
+key KEY_7      no  7            slash        bar        -
 key KEY_8      no  8            parenleft    cent       -
 key KEY_9      no  9            parenright   -          -
 key KEY_0      no  0            equal        -          -
@@ -36,7 +38,7 @@ key KEY_U  yes  u  U  -     -
 key KEY_I  yes  i  I  -     -
 key KEY_O  yes  o  O  -     -
 key KEY_P  yes  p  P  -     -
-key KEY_LEFTBRACE   yes  udiaeresis  Udiaeresis  bracketleft   -
+key KEY_LEFTBRACE   no   udiaeresis  egrave  bracketleft   -
 key KEY_RIGHTBRACE  no   dead:diaeresis  exclam  bracketright  -
 
 # Home row.
@@ -49,8 +51,8 @@ key KEY_H  yes  h  H  -  -
 key KEY_J  yes  j  J  -  -
 key KEY_K  yes  k  K  -  -
 key KEY_L  yes  l  L  -  -
-key KEY_SEMICOLON   yes  odiaeresis  Odiaeresis  -          -
-key KEY_APOSTROPHE  yes  adiaeresis  Adiaeresis  braceleft  -
+key KEY_SEMICOLON   no   odiaeresis  eacute  -          -
+key KEY_APOSTROPHE  no   adiaeresis  agrave  braceleft  -
 key KEY_BACKSLASH   no   dollar      sterling    braceright -
 
 # Bottom row.
