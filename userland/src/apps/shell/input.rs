@@ -134,6 +134,10 @@ fn prompt_colors_snapshot() -> ([u8; super::PROMPT_BUF_MAX], usize) {
 enum Decoded {
     /// A printable / control byte or a decoded internal key code.
     Key(u8),
+    /// A complete multi-byte UTF-8 character (`seq[..len]`) — non-ASCII text
+    /// like ä/é/€. Decoded at the parser so raw continuation bytes can never
+    /// alias the internal key-code space (0x80..).
+    Char([u8; 4], usize),
     /// A run of literal bytes from a bracketed paste (control chars already
     /// stripped except `\t`).
     Paste(Vec<u8>),
@@ -150,6 +154,11 @@ struct EscParser {
     in_paste: bool,
     /// Accumulated literal paste bytes.
     paste_buf: Vec<u8>,
+    /// In-progress UTF-8 multi-byte sequence (lead byte seen).
+    utf8: [u8; 4],
+    utf8_len: usize,
+    /// Total bytes the current UTF-8 sequence needs (0 = none pending).
+    utf8_need: usize,
 }
 
 impl EscParser {
@@ -158,6 +167,9 @@ impl EscParser {
             pending: Vec::new(),
             in_paste: false,
             paste_buf: Vec::new(),
+            utf8: [0; 4],
+            utf8_len: 0,
+            utf8_need: 0,
         }
     }
 
@@ -187,17 +199,51 @@ impl EscParser {
             self.feed_paste_byte(b, out);
             return;
         }
-        if self.pending.is_empty() {
-            if b == ESC {
-                self.pending.push(b);
-            } else {
-                out.push(Decoded::Key(b));
-            }
+        if !self.pending.is_empty() {
+            // Inside an escape sequence.
+            self.pending.push(b);
+            self.try_complete(out);
             return;
         }
-        // Inside an escape sequence.
-        self.pending.push(b);
-        self.try_complete(out);
+        // UTF-8 accumulation: a pending lead byte collects its continuations.
+        if self.utf8_need > 0 {
+            if is_utf8_continuation(b) {
+                self.utf8[self.utf8_len] = b;
+                self.utf8_len += 1;
+                if self.utf8_len == self.utf8_need {
+                    let n = self.utf8_need;
+                    self.utf8_need = 0;
+                    self.utf8_len = 0;
+                    // Only well-formed sequences (no overlongs/surrogates)
+                    // become text; malformed ones are dropped.
+                    if core::str::from_utf8(&self.utf8[..n]).is_ok() {
+                        out.push(Decoded::Char(self.utf8, n));
+                    }
+                }
+                return;
+            }
+            // Sequence broken: drop it and reprocess this byte normally.
+            self.utf8_need = 0;
+            self.utf8_len = 0;
+        }
+        match b {
+            ESC => self.pending.push(b),
+            // UTF-8 lead bytes (2/3/4-byte sequences).
+            0xC2..=0xF4 => {
+                self.utf8[0] = b;
+                self.utf8_len = 1;
+                self.utf8_need = match b {
+                    0xC2..=0xDF => 2,
+                    0xE0..=0xEF => 3,
+                    _ => 4,
+                };
+            }
+            // Stray continuation bytes and invalid leads are dropped — they
+            // must never reach the editor's u8 key dispatch, where 0x80..
+            // are the internal nav codes.
+            0x80..=0xC1 | 0xF5..=0xFF => {}
+            _ => out.push(Decoded::Key(b)),
+        }
     }
 
     fn feed_paste_byte(&mut self, b: u8, out: &mut Vec<Decoded>) {
@@ -231,7 +277,9 @@ impl EscParser {
     }
 
     fn push_paste_literal(&mut self, b: u8) {
-        if b == b'\t' || (0x20..=0x7e).contains(&b) {
+        // Tab, printable ASCII, and UTF-8 bytes (≥ 0x80) are literal paste
+        // content; C0 controls and DEL are stripped.
+        if b == b'\t' || (0x20..=0x7e).contains(&b) || b >= 0x80 {
             self.paste_buf.push(b);
         }
     }
@@ -388,6 +436,11 @@ async fn input_loop(
                     redraw(prompt, len, cursor_pos, cols, &mut cur_row);
                     continue;
                 }
+                Decoded::Char(seq, n) => {
+                    insert_text(&seq, n, &mut len, &mut cursor_pos);
+                    redraw(prompt, len, cursor_pos, cols, &mut cur_row);
+                    continue;
+                }
                 Decoded::Key(c) => c,
             };
 
@@ -395,7 +448,7 @@ async fn input_loop(
                 b'\n' | b'\r' => {
                     // Finish below the LAST wrapped row of the input, not
                     // wherever the cursor happens to sit mid-region.
-                    let end_row = row_of_offset(prompt.len() + len, cols.max(1));
+                    let end_row = row_of_offset(prompt.len() + cells_upto(len), cols.max(1));
                     emit_cursor_move(end_row.saturating_sub(cur_row), b'B');
                     super::display::shell_echo_char(b'\n');
                     buffers::with_line_buf(|buf| {
@@ -445,14 +498,15 @@ async fn input_loop(
 
                 KEY_LEFT => {
                     if cursor_pos > 0 {
-                        cursor_pos -= 1;
+                        cursor_pos = buffers::with_line_buf(|buf| prev_char_start(buf, cursor_pos));
                         redraw(prompt, len, cursor_pos, cols, &mut cur_row);
                     }
                 }
 
                 KEY_RIGHT => {
                     if cursor_pos < len {
-                        cursor_pos += 1;
+                        cursor_pos =
+                            buffers::with_line_buf(|buf| next_char_end(buf, cursor_pos, len));
                         redraw(prompt, len, cursor_pos, cols, &mut cur_row);
                     }
                 }
@@ -538,7 +592,7 @@ async fn input_loop(
                 }
 
                 CTRL_C => {
-                    let end_row = row_of_offset(prompt.len() + len, cols.max(1));
+                    let end_row = row_of_offset(prompt.len() + cells_upto(len), cols.max(1));
                     emit_cursor_move(end_row.saturating_sub(cur_row), b'B');
                     shell_write(b"^C\n");
                     history::reset_cursor();
@@ -562,7 +616,7 @@ async fn input_loop(
                     });
 
                     if comp.show_matches {
-                        let end_row = row_of_offset(prompt.len() + len, cols.max(1));
+                        let end_row = row_of_offset(prompt.len() + cells_upto(len), cols.max(1));
                         emit_cursor_move(end_row.saturating_sub(cur_row), b'B');
                         shell_write(b"\n");
                         shell_write(&comp.matches_buf[..comp.matches_len]);
@@ -746,39 +800,81 @@ async fn next_decoded(
     Wake::Input
 }
 
+// ---------------------------------------------------------------------------
+// UTF-8 aware buffer helpers — the line buffer holds UTF-8 bytes, the cursor
+// always rests on a character boundary, and the terminal renders one cell per
+// character (continuation bytes occupy no cell).
+// ---------------------------------------------------------------------------
+
+/// True for a UTF-8 continuation byte (`0b10xx_xxxx`).
+#[inline]
+fn is_utf8_continuation(b: u8) -> bool {
+    b & 0xC0 == 0x80
+}
+
+/// Byte offset where the character left of `pos` starts (`pos > 0`).
+fn prev_char_start(buf: &[u8; 256], pos: usize) -> usize {
+    let mut i = pos - 1;
+    while i > 0 && is_utf8_continuation(buf[i]) {
+        i -= 1;
+    }
+    i
+}
+
+/// Byte offset just past the character starting at `pos` (`pos < len`).
+fn next_char_end(buf: &[u8; 256], pos: usize, len: usize) -> usize {
+    let mut i = pos + 1;
+    while i < len && is_utf8_continuation(buf[i]) {
+        i += 1;
+    }
+    i
+}
+
+/// Display cells occupied by the first `n` buffer bytes.
+fn cells_upto(n: usize) -> usize {
+    buffers::with_line_buf(|buf| {
+        buf[..n]
+            .iter()
+            .filter(|&&b| !is_utf8_continuation(b))
+            .count()
+    })
+}
+
+/// Remove `buf[start..end]`, shifting the tail left and zero-filling.
+fn delete_byte_range(len: &mut usize, start: usize, end: usize) {
+    let removed = end - start;
+    buffers::with_line_buf(|buf| {
+        for i in start..*len - removed {
+            buf[i] = buf[i + removed];
+        }
+        for i in *len - removed..*len {
+            buf[i] = 0;
+        }
+    });
+    *len -= removed;
+}
+
+/// Delete the whole character left of the cursor (`cursor_pos > 0`).
 fn delete_char_before_cursor(len: &mut usize, cursor_pos: &mut usize) {
-    buffers::with_line_buf(|buf| delete_char_before_cursor_in_buf(buf, *cursor_pos, *len));
-    *len = len.saturating_sub(1);
-    *cursor_pos -= 1;
+    let start = buffers::with_line_buf(|buf| prev_char_start(buf, *cursor_pos));
+    delete_byte_range(len, start, *cursor_pos);
+    *cursor_pos = start;
 }
 
+/// Delete the whole character under the cursor (`cursor_pos < len`).
 fn delete_char_at_cursor(len: &mut usize, cursor_pos: usize) {
-    buffers::with_line_buf(|buf| delete_char_at_cursor_in_buf(buf, cursor_pos, *len));
-    *len = len.saturating_sub(1);
-}
-
-fn delete_char_before_cursor_in_buf(buf: &mut [u8; 256], cursor_pos: usize, len: usize) {
-    for i in cursor_pos - 1..len.saturating_sub(1) {
-        buf[i] = buf[i + 1];
-    }
-    if len > 0 {
-        buf[len - 1] = 0;
-    }
-}
-
-fn delete_char_at_cursor_in_buf(buf: &mut [u8; 256], cursor_pos: usize, len: usize) {
-    for i in cursor_pos..len.saturating_sub(1) {
-        buf[i] = buf[i + 1];
-    }
-    if len > 0 {
-        buf[len - 1] = 0;
-    }
+    let end = buffers::with_line_buf(|buf| next_char_end(buf, cursor_pos, *len));
+    delete_byte_range(len, cursor_pos, end);
 }
 
 fn insert_text(text: &[u8], text_len: usize, len: &mut usize, cursor_pos: &mut usize) {
     let max_len = buffers::with_line_buf(|buf| buf.len());
     let available = max_len.saturating_sub(*len + 1);
-    let insert_len = text_len.min(available);
+    let mut insert_len = text_len.min(available);
+    // Never cut a multi-byte character in half at the capacity limit.
+    while insert_len > 0 && insert_len < text_len && is_utf8_continuation(text[insert_len]) {
+        insert_len -= 1;
+    }
     if insert_len == 0 {
         return;
     }
@@ -843,9 +939,11 @@ fn redraw(prompt: &[u8], len: usize, cursor_pos: usize, cols: usize, cur_row: &m
     // Mid-content offsets use committed-wrap coordinates (a row-boundary
     // offset sits at column 0 of the next row); the end-of-content offset
     // uses the deferred resting position (last column of the full row).
-    let total = prompt.len() + len;
+    // All geometry is in display CELLS, not bytes (multi-byte UTF-8
+    // characters occupy one cell).
+    let total = prompt.len() + cells_upto(len);
     let end_row = row_of_offset(total, cols);
-    let offset = prompt.len() + cursor_pos;
+    let offset = prompt.len() + cells_upto(cursor_pos);
     let (target_row, target_col) = if offset == total {
         let col = if total == 0 {
             0
