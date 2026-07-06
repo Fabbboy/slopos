@@ -16,11 +16,12 @@ pub fn classify(evt: &ProtocolEvent) -> CompositorEvent {
         ProtocolEvent::Key {
             scancode,
             ascii,
+            codepoint,
             pressed,
             ..
         } => {
             if *pressed {
-                CompositorEvent::Key(*ascii as u8, *scancode as u8)
+                CompositorEvent::Key(*ascii as u8, *scancode as u8, *codepoint)
             } else {
                 CompositorEvent::Ignored
             }

@@ -186,7 +186,7 @@ pub fn handle_scancode(byte: u8) {
     // TTY fallback: when nothing holds keyboard focus, feed the active TTY the
     // produced byte(s) on press (the flushed accent first, then the key).
     if pressed && !has_keyboard_focus() {
-        let flush_byte = if resolved.flush != 0 && resolved.flush <= 0xFF {
+        let flush_byte = if resolved.flush != 0 && resolved.flush <= 0x7F {
             resolved.flush as u8
         } else {
             0
@@ -206,7 +206,7 @@ pub fn handle_scancode(byte: u8) {
 /// Route a bare text codepoint as a synthetic key-press event (used for the
 /// dead-key accent flush; carries no canonical keycode).
 fn route_text(codepoint: u32, modifiers: u8, ts: u64) {
-    let ascii = if codepoint <= 0xFF {
+    let ascii = if codepoint <= 0x7F {
         codepoint as u8
     } else {
         0
@@ -224,14 +224,17 @@ fn route_text(codepoint: u32, modifiers: u8, ts: u64) {
 }
 
 /// Derive the legacy `ascii` byte and the canonical `codepoint` from a keymap
-/// outcome. Releases carry no text.
+/// outcome. Releases carry no text. The legacy byte is ASCII-only: non-ASCII
+/// text (umlauts, accents) travels solely as the canonical codepoint — a raw
+/// Latin-1 byte on the TTY/PTY byte stream would be mojibake to UTF-8
+/// consumers, and 0x80..=0x88 are reserved as nav pseudo-codes.
 fn legacy_and_canonical(outcome: KeyOutcome, pressed: bool) -> (u8, u32) {
     if !pressed {
         return (0, 0);
     }
     match outcome {
         KeyOutcome::Text(cp) => {
-            let ascii = if cp <= 0xFF { cp as u8 } else { 0 };
+            let ascii = if cp <= 0x7F { cp as u8 } else { 0 };
             (ascii, cp)
         }
         KeyOutcome::Named(nk) => (named_to_legacy_ascii(nk), 0),

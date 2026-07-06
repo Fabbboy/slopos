@@ -70,6 +70,12 @@ impl KeyBytes {
         Self { buf, len }
     }
 
+    fn utf8(c: char) -> Self {
+        let mut buf = [0u8; 8];
+        let len = c.encode_utf8(&mut buf).len();
+        Self { buf, len }
+    }
+
     pub fn as_bytes(&self) -> &[u8] {
         &self.buf[..self.len]
     }
@@ -225,7 +231,11 @@ fn pixel_to_anchor(px: i32, py: i32, cell_w: i32, cell_h: i32, grid: &TerminalGr
 /// are terminal commands (the xterm/GNOME clipboard convention), never PTY
 /// input: the kernel bakes the same control byte for Ctrl+C and Ctrl+Shift+C,
 /// so the modifier state is the only way to tell them apart.
-pub fn encode_key(ascii: u8, scancode: u8, mods: u8) -> KeyAction {
+///
+/// `codepoint` is the kernel-resolved character for the active layout. ASCII
+/// text rides the legacy `ascii` byte; non-ASCII text (umlauts, accents, €)
+/// has no legacy byte and is written to the PTY as UTF-8 from the codepoint.
+pub fn encode_key(ascii: u8, scancode: u8, codepoint: u32, mods: u8) -> KeyAction {
     const CHORD: u8 = MODIFIER_CTRL | MODIFIER_SHIFT;
     if mods & CHORD == CHORD {
         match ascii {
@@ -253,6 +263,13 @@ pub fn encode_key(ascii: u8, scancode: u8, mods: u8) -> KeyAction {
         }
     }
 
+    // Non-ASCII text: UTF-8-encode the layout-resolved codepoint.
+    if codepoint > 0x7F {
+        if let Some(c) = char::from_u32(codepoint) {
+            return KeyAction::ToMaster(KeyBytes::utf8(c));
+        }
+    }
+
     // Non-ASCII keys arriving without a baked code: translate scancodes the
     // same way the shell's legacy encoder did.
     let seq: &[u8] = match scancode {
@@ -276,7 +293,8 @@ pub fn encode_key(ascii: u8, scancode: u8, mods: u8) -> KeyAction {
 
 /// What a (non-key) compositor event resolved to.
 pub enum CompositorEvent {
-    Key(u8, u8),
+    /// Key press: (legacy ascii byte, scancode, kernel-resolved codepoint).
+    Key(u8, u8, u32),
     /// Keyboard modifier state changed (bitfield of `MODIFIER_*`).
     Modifiers(u8),
     /// Configure: new pixel dimensions.
@@ -497,7 +515,7 @@ mod tests {
     #[test]
     fn ctrl_shift_c_copies_instead_of_sigint() {
         assert!(matches!(
-            encode_key(0x03, 0x2E, CTRL_SHIFT),
+            encode_key(0x03, 0x2E, 0x03, CTRL_SHIFT),
             KeyAction::CopySelection
         ));
     }
@@ -511,7 +529,7 @@ mod tests {
     #[test]
     fn ctrl_only_c_reaches_master_as_sigint_byte() {
         assert_eq!(
-            master_bytes(encode_key(0x03, 0x2E, MODIFIER_CTRL)),
+            master_bytes(encode_key(0x03, 0x2E, 0x03, MODIFIER_CTRL)),
             alloc::vec![0x03]
         );
     }
@@ -519,46 +537,55 @@ mod tests {
     #[test]
     fn ctrl_shift_v_requests_paste() {
         assert!(matches!(
-            encode_key(0x16, 0x2F, CTRL_SHIFT),
+            encode_key(0x16, 0x2F, 0x16, CTRL_SHIFT),
             KeyAction::RequestPaste
         ));
     }
 
     #[test]
     fn plain_ctrl_c_passes_through_to_ldisc() {
-        assert_eq!(master_bytes(encode_key(0x03, 0x2E, MODIFIER_CTRL)), [0x03]);
+        assert_eq!(
+            master_bytes(encode_key(0x03, 0x2E, 0x03, MODIFIER_CTRL)),
+            [0x03]
+        );
     }
 
     #[test]
     fn shift_only_c_is_plain_text() {
-        assert_eq!(master_bytes(encode_key(b'C', 0x2E, MODIFIER_SHIFT)), [b'C']);
+        assert_eq!(
+            master_bytes(encode_key(b'C', 0x2E, b'C' as u32, MODIFIER_SHIFT)),
+            [b'C']
+        );
     }
 
     #[test]
     fn ctrl_shift_other_keys_still_reach_master() {
         // Ctrl+Shift+A (0x01) is not a clipboard chord; the ldisc gets it.
-        assert_eq!(master_bytes(encode_key(0x01, 0x1E, CTRL_SHIFT)), [0x01]);
+        assert_eq!(
+            master_bytes(encode_key(0x01, 0x1E, 0x01, CTRL_SHIFT)),
+            [0x01]
+        );
     }
 
     #[test]
     fn baked_navigation_codes_map_to_csi() {
-        assert_eq!(master_bytes(encode_key(KEY_UP, 0, 0)), b"\x1b[A");
-        assert_eq!(master_bytes(encode_key(KEY_DOWN, 0, 0)), b"\x1b[B");
-        assert_eq!(master_bytes(encode_key(KEY_LEFT, 0, 0)), b"\x1b[D");
-        assert_eq!(master_bytes(encode_key(KEY_RIGHT, 0, 0)), b"\x1b[C");
-        assert_eq!(master_bytes(encode_key(KEY_HOME, 0, 0)), b"\x1b[H");
-        assert_eq!(master_bytes(encode_key(KEY_END, 0, 0)), b"\x1b[F");
-        assert_eq!(master_bytes(encode_key(KEY_DELETE, 0, 0)), b"\x1b[3~");
+        assert_eq!(master_bytes(encode_key(KEY_UP, 0, 0, 0)), b"\x1b[A");
+        assert_eq!(master_bytes(encode_key(KEY_DOWN, 0, 0, 0)), b"\x1b[B");
+        assert_eq!(master_bytes(encode_key(KEY_LEFT, 0, 0, 0)), b"\x1b[D");
+        assert_eq!(master_bytes(encode_key(KEY_RIGHT, 0, 0, 0)), b"\x1b[C");
+        assert_eq!(master_bytes(encode_key(KEY_HOME, 0, 0, 0)), b"\x1b[H");
+        assert_eq!(master_bytes(encode_key(KEY_END, 0, 0, 0)), b"\x1b[F");
+        assert_eq!(master_bytes(encode_key(KEY_DELETE, 0, 0, 0)), b"\x1b[3~");
     }
 
     #[test]
     fn page_keys_drive_local_scrollback() {
         assert!(matches!(
-            encode_key(KEY_PAGE_UP, 0, 0),
+            encode_key(KEY_PAGE_UP, 0, 0, 0),
             KeyAction::ScrollUp(SCROLLBACK_PAGE_LINES)
         ));
         assert!(matches!(
-            encode_key(KEY_PAGE_DOWN, 0, 0),
+            encode_key(KEY_PAGE_DOWN, 0, 0, 0),
             KeyAction::ScrollDown(SCROLLBACK_PAGE_LINES)
         ));
     }
@@ -578,9 +605,22 @@ mod tests {
 
     #[test]
     fn zero_ascii_falls_back_to_scancode_table() {
-        assert_eq!(master_bytes(encode_key(0, 0x82, 0)), b"\x1b[A");
-        assert_eq!(master_bytes(encode_key(0, 0x80, 0)), b"\x1b[5~");
-        assert!(matches!(encode_key(0, 0x42, 0), KeyAction::None));
+        assert_eq!(master_bytes(encode_key(0, 0x82, 0, 0)), b"\x1b[A");
+        assert_eq!(master_bytes(encode_key(0, 0x80, 0, 0)), b"\x1b[5~");
+        assert!(matches!(encode_key(0, 0x42, 0, 0), KeyAction::None));
+    }
+
+    /// Non-ASCII text (umlauts, accents, €) has no legacy byte: the kernel
+    /// codepoint is written to the PTY as UTF-8.
+    #[test]
+    fn non_ascii_codepoint_encodes_as_utf8() {
+        assert_eq!(master_bytes(encode_key(0, 0x1A, 0x00E4, 0)), "ä".as_bytes());
+        assert_eq!(master_bytes(encode_key(0, 0x12, 0x20AC, 0)), "€".as_bytes());
+        // The dead-key accent flush (keycode 0, bare codepoint) too.
+        assert_eq!(master_bytes(encode_key(0, 0, 0x00B4, 0)), "´".as_bytes());
+        // ASCII still rides the legacy byte; codepoint matches and is not
+        // double-encoded.
+        assert_eq!(master_bytes(encode_key(b'a', 0x1E, b'a' as u32, 0)), [b'a']);
     }
 
     #[test]

@@ -301,8 +301,8 @@ async fn event_loop(
                 continue;
             }
             match input::classify(&evt) {
-                CompositorEvent::Key(ascii, scancode) => {
-                    match input::encode_key(ascii, scancode, mods) {
+                CompositorEvent::Key(ascii, scancode, codepoint) => {
+                    match input::encode_key(ascii, scancode, codepoint, mods) {
                         KeyAction::ToMaster(bytes) => {
                             let action = bytes.as_bytes().to_vec();
                             if is_priority_keyboard_control(bytes.as_bytes()) {

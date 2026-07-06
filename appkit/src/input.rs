@@ -5,8 +5,9 @@
 //! active runtime layout, AltGr levels, and dead-key composition before the
 //! event crosses to userland), so switching the layout with `keymap <name>`
 //! flows into every GUI app for free — no per-app layout engine. Named action
-//! keys and Ctrl-shortcut letters are layout-independent and come from the
-//! shared `keymap-core` classifier driven by the canonical keycode.
+//! keys are layout-independent and come from the shared `keymap-core`
+//! classifier driven by the canonical keycode; Ctrl-shortcut letters are
+//! recovered from the kernel codepoint so they follow the active layout too.
 
 use super::event::{Key, Modifiers, WidgetEvent};
 use slopos_keymap_core::{UiKey, mods_locks_from_raw, ui_classify};
@@ -19,8 +20,12 @@ use slopos_windowing::Event;
 /// - Printable text uses the kernel-resolved `codepoint` (honors the active
 ///   layout incl. AltGr + dead keys). A freshly-pressed dead key carries
 ///   `codepoint == 0` and classifies as [`Key::Unknown`] (no text yet).
-/// - When Ctrl makes the codepoint a control code, the Ctrl-independent letter
-///   is recovered from the classifier so shortcuts (Ctrl+C, …) still match.
+/// - When Ctrl makes the codepoint a letter control code (`Ctrl+A` → 0x01 …
+///   `Ctrl+Z` → 0x1A), the letter is recovered by inverting that transform, so
+///   shortcuts follow the **active layout** (on QWERTZ, Ctrl on the key
+///   labelled Z is Ctrl+Z). Enter/Tab/Backspace/Esc are returned as Named
+///   above, so their control codes never reach the inversion. The keycode
+///   classifier remains the fallback for events without a codepoint.
 fn classify_key(keycode: u16, codepoint: u32, modifiers: u8) -> Key {
     let (mods, locks) = mods_locks_from_raw(modifiers);
 
@@ -33,6 +38,14 @@ fn classify_key(keycode: u16, codepoint: u32, modifiers: u8) -> Key {
         }
     }
     if mods.ctrl {
+        if (0x01..=0x1A).contains(&codepoint) {
+            let c = (b'a' + (codepoint as u8 - 1)) as char;
+            return Key::Char(if mods.shift {
+                c.to_ascii_uppercase()
+            } else {
+                c
+            });
+        }
         if let UiKey::Char(c) = ui_classify(keycode, mods, locks) {
             return Key::Char(c);
         }

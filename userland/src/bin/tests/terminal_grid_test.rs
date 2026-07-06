@@ -134,12 +134,12 @@ fn test_bracketed_paste_tracks_decset_2004() -> bool {
 /// still reaches the line discipline.
 fn test_ctrl_shift_c_copies_not_sigint() -> bool {
     if !matches!(
-        encode_key(0x03, 0x2E, MODIFIER_CTRL | MODIFIER_SHIFT),
+        encode_key(0x03, 0x2E, 0x03, MODIFIER_CTRL | MODIFIER_SHIFT),
         KeyAction::CopySelection
     ) {
         return false;
     }
-    match encode_key(0x03, 0x2E, MODIFIER_CTRL) {
+    match encode_key(0x03, 0x2E, 0x03, MODIFIER_CTRL) {
         KeyAction::ToMaster(b) => b.as_bytes() == [0x03],
         _ => false,
     }
@@ -148,12 +148,12 @@ fn test_ctrl_shift_c_copies_not_sigint() -> bool {
 /// Ctrl+Shift+V requests a compositor paste; plain Ctrl+V passes through.
 fn test_ctrl_shift_v_requests_paste() -> bool {
     if !matches!(
-        encode_key(0x16, 0x2F, MODIFIER_CTRL | MODIFIER_SHIFT),
+        encode_key(0x16, 0x2F, 0x16, MODIFIER_CTRL | MODIFIER_SHIFT),
         KeyAction::RequestPaste
     ) {
         return false;
     }
-    match encode_key(0x16, 0x2F, MODIFIER_CTRL) {
+    match encode_key(0x16, 0x2F, 0x16, MODIFIER_CTRL) {
         KeyAction::ToMaster(b) => b.as_bytes() == [0x16],
         _ => false,
     }
