@@ -32,7 +32,7 @@ pub use keymap::{
 pub use layout_table::{
     Cell, CellKind, ComposeEntry, LAYOUT_MAGIC, LAYOUT_NAME_LEN, LAYOUT_VERSION, LayoutError,
     LayoutTable, MAX_COMPOSE, MAX_DEADKEYS, NUM_KEYS, NUM_LEVELS, SERIALIZED_LEN, US_QWERTY,
-    deserialize, serialize, us_qwerty, validate,
+    deserialize, is_layout_dependent, serialize, us_qwerty, validate,
 };
 pub use modifiers::{
     LOCK_CAPS, LOCK_NUM, LOCK_SCROLL, ModSnapshot, ModTracker, mods_locks_from_raw,

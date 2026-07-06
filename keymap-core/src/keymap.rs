@@ -131,20 +131,23 @@ fn level_index(mods: Mods, locks: Locks, caps_affected: bool) -> usize {
 /// lower). Returns the decoded [`CellKind`] (text literal, dead key, or none).
 fn resolve_level(table: &LayoutTable, usage: u16, mods: Mods, locks: Locks) -> CellKind {
     let caps_affected = table.caps_affected(usage);
-    let mut level = level_index(mods, locks, caps_affected);
-    loop {
-        match table.cell(usage, level).kind() {
-            CellKind::None => {
-                level = match level {
-                    3 => 2,
-                    2 => 0,
-                    1 => 0,
-                    _ => return CellKind::None,
-                };
-            }
+    let level = level_index(mods, locks, caps_affected);
+    // Fallback chains for an empty selected level: shift+altgr keeps shift
+    // semantics through level 1 (XKB-style), but plain altgr must not pick up
+    // the shifted glyph, so level 2 falls straight to base.
+    let chain: &[usize] = match level {
+        3 => &[3, 2, 1, 0],
+        2 => &[2, 0],
+        1 => &[1, 0],
+        _ => &[0],
+    };
+    for &l in chain {
+        match table.cell(usage, l).kind() {
+            CellKind::None => {}
             kind => return kind,
         }
     }
+    CellKind::None
 }
 
 /// The codepoint this key contributes as a dead-key *compose base*: its literal
@@ -185,8 +188,12 @@ pub fn resolve(
     // A dead key is already pending: compose against it.
     if let Some(d) = dead.pending.take() {
         if let CellKind::Dead(d2) = level {
-            // dead + dead → emit the first accent now, arm the new dead key.
-            dead.pending = Some(d2);
+            // Same dead key twice → emit the accent once, sequence over (the
+            // standard double-press behavior); a *different* dead key chains:
+            // emit the first accent now and arm the new one.
+            if d2 != d {
+                dead.pending = Some(d2);
+            }
             return Resolved::text(table.dead_accent_of(d));
         }
         if let Some(base) = compose_base(usage, level) {
@@ -824,5 +831,48 @@ mod tests {
         assert_eq!(r.flush, 0x00B4);
         assert_eq!(r.outcome, KeyOutcome::Named(NamedKey::Left));
         assert_eq!(d.pending, None);
+    }
+
+    #[test]
+    fn dead_key_double_press_emits_accent_and_ends_sequence() {
+        let t = demo_layout();
+        let mut d = DeadKeyState::new();
+        resolve(&t, KEY_EQUAL, NONE, NUM_ON, &mut d); // arm acute
+        // Same dead key again → the bare accent once, pending cleared.
+        let r = resolve(&t, KEY_EQUAL, NONE, NUM_ON, &mut d);
+        assert_eq!(r.outcome, KeyOutcome::Text(0x00B4)); // ´
+        assert_eq!(r.flush, 0);
+        assert_eq!(d.pending, None);
+        // The next letter is NOT composed against a stale accent.
+        let r = resolve(&t, KEY_A, NONE, NUM_ON, &mut d);
+        assert_eq!(r.outcome, KeyOutcome::Text('a' as u32));
+    }
+
+    #[test]
+    fn altgr_shift_falls_back_to_shift_level() {
+        let t = demo_layout();
+        let mut d = DeadKeyState::new();
+        const ALTGR_SHIFT: Mods = Mods {
+            shift: true,
+            ctrl: false,
+            alt: false,
+            meta: false,
+            altgr: true,
+        };
+        // KEY_Y has no AltGr levels: AltGr+Shift keeps the shifted glyph.
+        assert_eq!(
+            resolve(&t, KEY_Y, ALTGR_SHIFT, NUM_ON, &mut d).outcome,
+            KeyOutcome::Text('Z' as u32)
+        );
+        // Plain AltGr still falls to base, never the shifted glyph.
+        assert_eq!(
+            resolve(&t, KEY_Y, ALTGR, NUM_ON, &mut d).outcome,
+            KeyOutcome::Text('z' as u32)
+        );
+        // A key with an AltGr level keeps it under AltGr+Shift (3 → 2).
+        assert_eq!(
+            resolve(&t, KEY_2, ALTGR_SHIFT, NUM_ON, &mut d).outcome,
+            KeyOutcome::Text('@' as u32)
+        );
     }
 }

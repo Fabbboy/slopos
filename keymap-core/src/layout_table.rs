@@ -44,16 +44,36 @@ pub enum LayoutError {
     Overflow,
     /// The source / buffer exceeded the size cap.
     TooLarge,
+    /// A cell or caps flag is set on a layout-independent key (Enter, nav, …).
+    ForbiddenKey,
 }
 
 /// Is `cp` a codepoint a literal cell / compose result may hold?
 ///
 /// Rejects `0` (the "absent" sentinel), the UTF-16 surrogate range, anything
-/// above the Unicode max, and control characters (never stored in the table —
-/// they are layout-independent). These are exactly the values `char::from_u32`
-/// rejects, plus `0` and the controls.
+/// above the Unicode max, and control characters — C0, DEL, **and C1**
+/// (0x80..=0x9F) — since controls are layout-independent and never stored in
+/// the table (C1 values would also collide with the legacy TTY nav
+/// pseudo-codes 0x80..=0x88).
 fn is_valid_glyph(cp: u32) -> bool {
-    cp != 0 && cp <= UNICODE_MAX && !(0xD800..=0xDFFF).contains(&cp) && cp >= 0x20 && cp != 0x7F
+    cp != 0
+        && cp <= UNICODE_MAX
+        && !(0xD800..=0xDFFF).contains(&cp)
+        && cp >= 0x20
+        && cp != 0x7F
+        && !(0x80..=0x9F).contains(&cp)
+}
+
+/// Is `usage` a key whose output legitimately varies by layout? Letters, the
+/// number row, the punctuation block (incl. NONUS_HASH), and NONUS_BACKSLASH —
+/// exactly the keys the text parser accepts. Everything else (Enter, Tab,
+/// navigation, keypad, F-keys, …) is layout-independent and resolved in code;
+/// [`validate`] rejects tables that try to override those, since the resolver
+/// consults the table before its layout-independent fallbacks.
+pub fn is_layout_dependent(usage: u16) -> bool {
+    (KEY_A..=KEY_0).contains(&usage)
+        || (KEY_MINUS..=KEY_SLASH).contains(&usage)
+        || usage == KEY_NONUS_BACKSLASH
 }
 
 /// Validate a (parsed or uploaded) layout. Pure, alloc-free, bounds-checked —
@@ -72,11 +92,17 @@ pub fn validate(t: &LayoutTable) -> Result<(), LayoutError> {
         return Err(LayoutError::BadName);
     }
 
-    // Every cell: literal glyphs valid; dead references declared.
-    for key in &t.levels {
+    // Every cell: only on layout-dependent keys; literal glyphs valid; dead
+    // references declared.
+    for (usage, key) in t.levels.iter().enumerate() {
+        let dependent = is_layout_dependent(usage as u16);
+        if !dependent && t.caps[usage] != 0 {
+            return Err(LayoutError::ForbiddenKey);
+        }
         for cell in key {
             match cell.kind() {
                 CellKind::None => {}
+                _ if !dependent => return Err(LayoutError::ForbiddenKey),
                 CellKind::Literal(cp) => {
                     if !is_valid_glyph(cp) {
                         return Err(LayoutError::BadCodepoint);
@@ -401,8 +427,28 @@ mod tests {
         t.levels[KEY_A as usize][0] = Cell(0xD800); // surrogate
         assert_eq!(validate(&t), Err(LayoutError::BadCodepoint));
         let mut t2 = US_QWERTY;
-        t2.levels[KEY_A as usize][0] = Cell(0x07); // control char
+        t2.levels[KEY_A as usize][0] = Cell(0x07); // C0 control
         assert_eq!(validate(&t2), Err(LayoutError::BadCodepoint));
+        let mut t3 = US_QWERTY;
+        t3.levels[KEY_A as usize][0] = Cell(0x85); // C1 control (NEL)
+        assert_eq!(validate(&t3), Err(LayoutError::BadCodepoint));
+    }
+
+    #[test]
+    fn validate_rejects_cells_on_layout_independent_keys() {
+        // A hostile table must not override Enter (or nav/keypad/F-keys) with
+        // text — the resolver consults the table before its built-in handling.
+        let mut t = US_QWERTY;
+        t.levels[KEY_ENTER as usize][0] = Cell::literal(b'x' as u32);
+        assert_eq!(validate(&t), Err(LayoutError::ForbiddenKey));
+
+        let mut t2 = US_QWERTY;
+        t2.levels[KEY_LEFT as usize][0] = Cell::literal(b'x' as u32);
+        assert_eq!(validate(&t2), Err(LayoutError::ForbiddenKey));
+
+        let mut t3 = US_QWERTY;
+        t3.caps[KEY_ENTER as usize] = 1;
+        assert_eq!(validate(&t3), Err(LayoutError::ForbiddenKey));
     }
 
     #[test]
