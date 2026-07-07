@@ -1,6 +1,6 @@
 # SlopOS Known Issues
 
-Last updated: 2026-05-31
+Last updated: 2026-07-07
 
 ---
 
@@ -27,10 +27,9 @@ is the hard one:
    round-trip hangs. A strict single-CPU non-zero pin can also dead-end a wake (`select_target_cpu`
    returns `None` when no permitted CPU is momentarily schedulable → the wake is silently dropped).
 
-Discovered implementing Phase-6 Tier B. A placement-only fix made all 4 workers migrate to distinct
-CPUs, but the cross-core round-trip then hung on #2, so the fix was reverted. The Tier-B
-per-thread-reactor + cross-core-channel infrastructure works fully **co-located** (all reactors on
-CPU 0); `percore_reactor_test` validates that.
+A placement-only fix is insufficient: with all 4 workers placed on distinct CPUs, the cross-core
+round-trip hangs on #2. The per-thread-reactor + cross-core-channel infrastructure works fully
+**co-located** (all reactors on CPU 0); `percore_reactor_test` validates that.
 
 ### Impact
 
@@ -62,7 +61,7 @@ physically distributed: all reactors time-slice on CPU 0. No current consumer ne
 
 **Status**: Open - Minor  
 **Severity**: Low  
-**Component**: `core/src/scheduler`
+**Component**: `sched/`
 
 ### Description
 
@@ -90,58 +89,8 @@ During steps 2-3, any task on an AP (including compositor) is paused.
 
 ### Related Files
 
-- `core/src/scheduler/task.rs` - `task_terminate()`
-- `core/src/scheduler/per_cpu.rs` - `pause_all_aps()`, `resume_all_aps()`
-
----
-
-## Performance: Scheduler Lock Contention
-
-**Status**: Open - Minor  
-**Severity**: Low  
-**Component**: `core/src/scheduler`
-
-### Description
-
-The scheduler uses a global `SCHEDULER` mutex that can cause contention when multiple CPUs try to schedule tasks simultaneously.
-
-### Current Architecture
-
-```
-SCHEDULER (global IrqMutex)
-├── ready_queues[4]     // Priority-based queues
-├── current_task
-├── idle_task
-└── various counters
-
-CPU_SCHEDULERS[MAX_CPUS] (per-CPU)
-├── ready_queues[4]     // Local priority queues
-├── current_task_atomic
-└── queue_lock (per-CPU mutex)
-```
-
-### Contention Points
-
-1. `schedule()` calls `with_scheduler()` which locks global mutex
-2. `schedule_task()` may fall back to global queue if per-CPU enqueue fails
-3. `select_next_task()` checks both per-CPU and global queues
-
-### Impact
-
-- Minor latency spikes under high task churn
-- Not significant with current workloads (compositor + shell)
-- Would become more noticeable with many concurrent tasks
-
-### Potential Optimizations
-
-1. **Fully per-CPU scheduling**: Eliminate global ready queue entirely
-2. **Lock-free queues**: Use compare-and-swap for enqueue/dequeue
-3. **Batch operations**: Coalesce multiple schedule operations
-
-### Related Files
-
-- `core/src/scheduler/scheduler.rs` - `SCHEDULER`, `with_scheduler()`
-- `core/src/scheduler/per_cpu.rs` - `CPU_SCHEDULERS`
+- `sched/src/task/task_lifecycle.rs` - task teardown invoking the pause
+- `sched/src/per_cpu.rs` - `pause_all_aps()`, `resume_all_aps()`
 
 ---
 
@@ -156,4 +105,4 @@ The kernel uses a unified Processor Control Region (PCR) per CPU, following Redo
 - Fast per-CPU access via `gs:[offset]` (~1-3 cycles vs ~100 cycles for LAPIC MMIO)
 - `get_current_cpu()` uses `gs:[24]` for instant CPU ID lookup
 
-See `lib/src/pcr.rs` for architecture details.
+See `slopos-ostd/src/cpu/x86_64/pcr.rs` for architecture details.

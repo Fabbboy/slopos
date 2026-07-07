@@ -21,8 +21,8 @@ The mixed approach is the source of recurring lifetime bugs and confused review:
 
 ## Scope (rip and replace, no shims)
 
-- `core::scheduler::task_struct::Task::refcnt` and its `inc_ref` / `dec_ref` / `ref_count` methods — deleted.
-- All `*mut Task` parameters across the scheduler, IPC, fileio, signals, futex — replaced by `KArc<Task>` (or `&Task` where short-lived).
+- The task type's `refcnt` field (`slopos-ostd/src/task/kernel_task.rs`) and its `inc_ref` / `dec_ref` methods, plus the `task_inc_ref` / `task_dec_ref` helpers in `slopos-ostd/src/task/accessors.rs` — deleted.
+- All `*mut Task` parameters across the scheduler (`sched/src/scheduler.rs`, `sched/src/per_cpu.rs`, `sched/src/futex.rs`), IPC, signals — replaced by `KArc<Task>` (or `&Task` where short-lived).
 - `Task::next_ready` / `Task::next_inbox` stay as intrusive link / Treiber-stack slots; intrusive lists hold a non-owning pointer derived from a `KArc<Task>` whose owning reference lives elsewhere (the runqueue's separate `KArc` table, the sleeper map, etc.). The two paradigms coexist: `KArc` for ownership, intrusive linkage for hot-path O(1) queueing. Linux does the equivalent (`struct task_struct *` + `get_task_struct`/`put_task_struct` + intrusive lists).
 - Same migration in `net::socket`, `fs::fileio`, anywhere else a struct carries its own refcount.
 
@@ -38,6 +38,6 @@ The mixed approach is the source of recurring lifetime bugs and confused review:
 - A `grep` for `inc_ref` / `dec_ref` / `task_inc_ref` / `task_dec_ref` returns zero hits.
 - Every `unsafe impl Send` / `unsafe impl Sync` for a raw-pointer wrapper is either deleted or replaced by a `KArc<T>`-based equivalent whose `Send` / `Sync` derives automatically.
 
-## Status
+## Prior art in-tree
 
-Not yet started. This document records the intent so the migration can be scheduled as a coherent rip-and-replace rather than a drift across many incremental PRs.
+`OpenFile` is `KArc`-managed with `KWeak` poll registrations (`fs/src/fileio`) — the working template for this migration. This document records the intent so the migration can be scheduled as a coherent rip-and-replace rather than a drift across many incremental PRs.

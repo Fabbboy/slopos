@@ -1,7 +1,5 @@
 # Kernel-Level Microtransactions — Task Plan
 
-Status: **proposed** (not started). Working notes; verify paths before relying on them.
-
 ## Goal
 
 Introduce a kernel-level microtransaction layer that **spends** W/L currency to
@@ -213,11 +211,8 @@ replaying the receipt is rejected.
 
 ---
 
-## Open decisions to record here as they're made
+## Open decisions
 
-- [x] **Persistence/seed mechanism for Phase 1: on-boot buy-in via a Limine
-      module read off the boot medium (USB).** The medium is the persistence; no
-      fs/UEFI-var backend needed to land the gate.
 - [ ] Buy-in module name (`wl-buyin` vs `wl.chips`) and exact record layout.
 - [ ] Integrity-tag scheme (keyed checksum vs MAC) and where the key lives —
       remembering it's obfuscation-grade, not real anti-cheat.
