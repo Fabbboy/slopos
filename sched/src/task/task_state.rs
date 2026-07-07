@@ -48,6 +48,12 @@ pub fn task_set_state_with_reason(
     apply_state_transition(task_ref, new_status, reason)
 }
 
+/// The fused state word's ABA epoch for a task pointer, or `None` for an
+/// invalid pointer. Diagnostics only (strand sweep).
+pub fn task_state_epoch(task: *mut Task) -> Option<u32> {
+    task_borrow(task).map(|t| t.state_epoch())
+}
+
 /// Atomically transition from `expected` to `target`.
 ///
 /// Returns 0 on success, -1 if the current state does not match `expected`

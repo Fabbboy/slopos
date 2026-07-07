@@ -1338,7 +1338,17 @@ pub fn mark_current_blocked() -> bool {
     if task_id == INVALID_TASK_ID {
         return false;
     }
-    task_try_transition_from(task_id, TaskStatus::Running, TaskStatus::Blocked) == 0
+    // Stamp a truthful reason: a bare `try_transition_from` KEEPS the
+    // previous reason, so a wait-queue park after an earlier timed sleep
+    // masqueraded as `Blocked(Sleep)`-with-no-entry — indistinguishable
+    // from a genuinely stranded sleeper. Timed wq waits re-stamp `Sleep`
+    // in `arm_blocked_timeout`, keeping `Sleep ⇔ a deadline is armed`.
+    super::task::task_set_state_from_with_reason(
+        task_id,
+        TaskStatus::Running,
+        TaskStatus::Blocked,
+        slopos_abi::task::BlockReason::Generic,
+    ) == 0
 }
 
 /// Yield a task already CAS-flipped to `Blocked` by
@@ -1647,32 +1657,52 @@ pub(crate) fn wake_blocked_task(task: *mut Task, task_id: u32) -> c_int {
     // switch window, but the producer that wins `Blocked -> Ready` still owns
     // runnable publication via `Waking`. The separate `on_cpu` bit prevents a
     // queued still-switching task from being dispatched twice.
-    for _ in 0..8 {
+    //
+    // TOTALITY CONTRACT (Linux-ttwu discipline): this function returns only
+    // once the wake is conclusive — we published Ready, or the task is
+    // observably no longer Blocked (a peer publisher won / it is running),
+    // or it is exited/invalid. It must NEVER give up while the task is
+    // still Blocked: wake sources are often one-shot (a popped sleep-queue
+    // deadline, a masked-until-drained GPIO edge, a consumed event), so a
+    // silently dropped wake strands the sleeper forever. Transient windows
+    // — the dispatcher's `OnCpu` claim during switch-out, a peer's `Waking`
+    // reservation — last microseconds and are waited out with `spin_loop`,
+    // mirroring `smp_cond_load_acquire(&p->on_cpu, !VAL)` in Linux's
+    // `try_to_wake_up`. (A prior 8-iteration cap here returned "0 = nothing
+    // done" on transient collisions; that was the root cause of the
+    // Blocked(Sleep)-with-no-entry kthread strands seen on hardware.)
+    loop {
+        if task_is_exited(task) || task_is_invalid(task) {
+            return -1;
+        }
+        if task_status(task) != Some(TaskStatus::Blocked) {
+            // Already woken (or never blocked): the wake is a no-op.
+            return 0;
+        }
         match task_sched_placement_load(task) {
             SchedPlacement::OnCpu => {
                 // `OnCpu` is also the dispatcher's transient claim after a
                 // ready-queue dequeue and before Ready->Running. A wake that
                 // targets an already-Ready/already-Running task is a no-op and
-                // must not steal that claim. Only a genuinely Blocked current
-                // task is converted to an explicit Waking publisher token.
-                if task_status(task) != Some(TaskStatus::Blocked) {
-                    return if task_is_exited(task) || task_is_invalid(task) {
-                        -1
-                    } else {
-                        0
-                    };
-                }
+                // must not steal that claim (the status check above filtered
+                // those). Only a genuinely Blocked current task is converted
+                // to an explicit Waking publisher token.
                 if !task_sched_placement_compare_exchange(
                     task,
                     SchedPlacement::OnCpu,
                     SchedPlacement::Waking,
                 ) {
+                    core::hint::spin_loop();
                     continue;
                 }
                 if task_try_transition_from(task_id, TaskStatus::Blocked, TaskStatus::Ready) == 0 {
-                    super::sleep::cancel_sleep(task_id);
+                    // No sleep-queue cancel here: only the owner and the
+                    // generation-checked timer path remove entries (a
+                    // waker-side cancel raced the owner's next re-arm).
                     return publish_reserved_waking_ready(task, task_id, "oncpu wake");
                 }
+                // Status moved under our reservation; restore the placement
+                // and re-observe from the top (exit if no longer Blocked).
                 let restore = if task_on_cpu_load(task) {
                     SchedPlacement::OnCpu
                 } else {
@@ -1680,11 +1710,8 @@ pub(crate) fn wake_blocked_task(task: *mut Task, task_id: u32) -> c_int {
                 };
                 let _ =
                     task_sched_placement_compare_exchange(task, SchedPlacement::Waking, restore);
-                return if task_is_exited(task) || task_is_invalid(task) {
-                    -1
-                } else {
-                    0
-                };
+                core::hint::spin_loop();
+                continue;
             }
             SchedPlacement::None => {
                 if !task_sched_placement_compare_exchange(
@@ -1692,6 +1719,7 @@ pub(crate) fn wake_blocked_task(task: *mut Task, task_id: u32) -> c_int {
                     SchedPlacement::None,
                     SchedPlacement::Waking,
                 ) {
+                    core::hint::spin_loop();
                     continue;
                 }
                 if task_try_transition_from(task_id, TaskStatus::Blocked, TaskStatus::Ready) != 0 {
@@ -1703,32 +1731,25 @@ pub(crate) fn wake_blocked_task(task: *mut Task, task_id: u32) -> c_int {
                         SchedPlacement::Waking,
                         SchedPlacement::None,
                     );
-                    return if task_is_exited(task) || task_is_invalid(task) {
-                        -1
-                    } else {
-                        0
-                    };
+                    core::hint::spin_loop();
+                    continue;
                 }
-                super::sleep::cancel_sleep(task_id);
                 core::sync::atomic::fence(core::sync::atomic::Ordering::SeqCst);
                 return publish_reserved_waking_ready(task, task_id, "unblock_task");
             }
             SchedPlacement::Waking => {
                 // `Waking` is an explicit publisher reservation. The CAS below
                 // is single-winner; duplicate wakes either see Ready already
-                // published/owned or leave the owner to finish.
+                // published/owned or wait for the owner to finish (its
+                // reservation lasts microseconds).
                 if task_try_transition_from(task_id, TaskStatus::Blocked, TaskStatus::Ready) == 0 {
-                    super::sleep::cancel_sleep(task_id);
                     return publish_reserved_waking_ready(task, task_id, "waking wake");
                 }
                 if task_is_ready(task) {
                     return publish_reserved_waking_ready(task, task_id, "waking wake");
                 }
-                return if task_is_exited(task) || task_is_invalid(task) {
-                    -1
-                } else {
-                    0
-                };
+                core::hint::spin_loop();
+                continue;
             }
             SchedPlacement::ReadyQueue | SchedPlacement::RemoteWake | SchedPlacement::Migrating => {
                 // Scheduler ownership already exists. If a direct state mutator
@@ -1736,22 +1757,12 @@ pub(crate) fn wake_blocked_task(task: *mut Task, task_id: u32) -> c_int {
                 // in place, the wake still performs the state CAS; the existing
                 // queue/inbox/migration owner then becomes runnable again.
                 if task_try_transition_from(task_id, TaskStatus::Blocked, TaskStatus::Ready) == 0 {
-                    super::sleep::cancel_sleep(task_id);
                     return 0;
                 }
-                return if task_is_exited(task) || task_is_invalid(task) {
-                    -1
-                } else {
-                    0
-                };
+                core::hint::spin_loop();
+                continue;
             }
         }
-    }
-
-    if task_is_exited(task) || task_is_invalid(task) {
-        -1
-    } else {
-        0
     }
 }
 

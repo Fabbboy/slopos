@@ -598,6 +598,15 @@ impl<K, U> TaskInner<K, U> {
             .is_ok()
     }
 
+    /// The fused state word's ABA epoch (bumped on every state transition).
+    /// Diagnostics: a task whose epoch is frozen across observation windows
+    /// has genuinely stopped transitioning, distinguishing a stranded task
+    /// from one merely caught mid-park by a racing scan.
+    #[inline]
+    pub fn state_epoch(&self) -> u32 {
+        self.state.snapshot().epoch
+    }
+
     /// Block from a specific expected state, stamping the block reason
     /// in the same CAS.
     #[inline]

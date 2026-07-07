@@ -2820,6 +2820,79 @@ pub fn test_tickless_idle_past_deadline_no_overflow() -> TestResult {
     TestResult::Pass
 }
 
+/// Regression: a due sleep entry whose task is NOT (yet) sleep-parked must
+/// survive the tick untouched. The old pop-then-wake design destroyed the
+/// entry and then dropped the wake when it hit the sleeper's commit window
+/// — leaving the task Blocked(Sleep) with no armed entry and placement
+/// `None`, permanently (the bare-metal `touchpad-poll` strand). Entries may
+/// only disappear once a wake conclusively publishes `Ready`.
+pub fn test_sleep_entry_survives_unparked_wake() -> TestResult {
+    let _fixture = SchedFixture::new();
+    super::sleep::reset_sleep_queue();
+
+    let task_id = task_create(
+        b"SleepPeek\0".as_ptr() as *const c_char,
+        dummy_task_entry,
+        ptr::null_mut(),
+        TaskPriority::Normal.as_u8(),
+        TASK_FLAG_KERNEL_MODE,
+    );
+    if task_id == INVALID_TASK_ID {
+        return TestResult::Fail;
+    }
+    let task_ptr = task_find_by_id(task_id);
+    if task_ptr.is_null() {
+        task_terminate(task_id);
+        return TestResult::Fail;
+    }
+
+    // Park the task outside the ready queue so the scheduler cannot dispatch
+    // (and exit) it mid-test. It ends up Blocked with a non-Sleep reason —
+    // exactly the "not sleep-parked" shape phase 1 needs.
+    let _ = unschedule_task(task_ptr);
+    if !task_is_blocked(task_ptr) {
+        klog_info!("SCHED_TEST: unschedule did not park the task");
+        task_terminate(task_id);
+        return TestResult::Fail;
+    }
+
+    // Phase 1 — the mid-commit snapshot: entry armed and already due, task
+    // not Blocked(Sleep). A tick must leave the entry armed for retry.
+    if !super::sleep::test_insert_sleep_entry(task_id, 1) {
+        klog_info!("SCHED_TEST: sleep entry insert failed");
+        task_terminate(task_id);
+        return TestResult::Fail;
+    }
+    super::sleep::wake_due_sleepers(u64::MAX / 2);
+    if !super::sleep::test_sleep_entry_armed(task_id) {
+        klog_info!("SCHED_TEST: due entry for unparked task was dropped by the tick");
+        super::sleep::cancel_sleep(task_id);
+        task_terminate(task_id);
+        return TestResult::Fail;
+    }
+
+    // Phase 2 — once the task is genuinely sleep-parked (reason stamped,
+    // deadline armed), the next tick must deliver the wake and only then
+    // clear the entry.
+    super::sleep::arm_blocked_timeout(task_id, 0);
+    super::sleep::wake_due_sleepers(u64::MAX / 2);
+    if task_is_blocked(task_ptr) {
+        klog_info!("SCHED_TEST: parked task not woken by due entry");
+        super::sleep::cancel_sleep(task_id);
+        task_terminate(task_id);
+        return TestResult::Fail;
+    }
+    if super::sleep::test_sleep_entry_armed(task_id) {
+        klog_info!("SCHED_TEST: delivered wake left its entry armed");
+        super::sleep::cancel_sleep(task_id);
+        task_terminate(task_id);
+        return TestResult::Fail;
+    }
+
+    task_terminate(task_id);
+    TestResult::Pass
+}
+
 // =============================================================================
 // REGRESSION: task_wait_for race-window robustness (harmonic-cascade Phase 1H)
 //
@@ -4306,6 +4379,10 @@ slopos_testing::stest!(
     suite = sched_core
 );
 slopos_testing::stest!(name = test_sleep_wake_race_regression, suite = sched_core);
+slopos_testing::stest!(
+    name = test_sleep_entry_survives_unparked_wake,
+    suite = sched_core
+);
 slopos_testing::stest!(
     name = test_tickless_idle_past_deadline_no_overflow,
     suite = sched_core

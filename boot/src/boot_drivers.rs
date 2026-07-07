@@ -331,6 +331,10 @@ fn boot_step_touchpad_init_fn(_ctx: &mut BootCtx<'_, BspInit>) {
     let debug = cmdline.map(|s| s.contains("tp.debug")).unwrap_or(false);
     // `tp.poll` forces the polling path instead of interrupt-driven input.
     let force_poll = cmdline.map(|s| s.contains("tp.poll")).unwrap_or(false);
+    if debug {
+        // Lost-wake diagnostics: periodic stranded-task sweep in the tick path.
+        slopos_sched::sleep::arm_strand_sweep();
+    }
     slopos_drivers::touchpad::init(rsdp_phys, width, height, debug, force_poll);
 }
 

@@ -20,6 +20,17 @@ use slopos_kernel_services::platform;
 struct SleepEntry {
     task_id: u32,
     wake_tick: u64,
+    /// Arm generation, bumped on every `upsert`. Removal by the timer path
+    /// is generation-checked so a wake delivered against one park can never
+    /// delete the entry of a later park (the owner may have re-armed on
+    /// another CPU in the meantime) — the cross-generation cancel was the
+    /// `net-timer` strand.
+    generation: u64,
+    /// Consecutive due-ticks on which the owner was observed not
+    /// sleep-parked. A mid-park transient lasts microseconds, so a large
+    /// miss count can only mean a stale entry (owner was event-woken and
+    /// never re-armed); it is then scrubbed to stop per-tick churn.
+    misses: u8,
     active: bool,
 }
 
@@ -28,6 +39,8 @@ impl SleepEntry {
         Self {
             task_id: INVALID_TASK_ID,
             wake_tick: 0,
+            generation: 0,
+            misses: 0,
             active: false,
         }
     }
@@ -48,6 +61,8 @@ struct SleepQueue {
     entries: KVec<SleepEntry>,
     active_count: u32,
     active_high_water: u32,
+    /// Monotonic arm-generation source (see [`SleepEntry::generation`]).
+    generation_counter: u64,
 }
 
 impl SleepQueue {
@@ -56,6 +71,7 @@ impl SleepQueue {
             entries: KVec::new(),
             active_count: 0,
             active_high_water: 0,
+            generation_counter: 1,
         }
     }
 
@@ -87,11 +103,15 @@ impl SleepQueue {
     }
 
     fn upsert(&mut self, task_id: u32, wake_tick: u64) -> bool {
+        let generation = self.generation_counter;
+        self.generation_counter = self.generation_counter.wrapping_add(1);
         let scan = self.scan_bound();
         let mut free_idx = None;
         for (idx, entry) in self.entries[..scan].iter_mut().enumerate() {
             if entry.active && entry.task_id == task_id {
                 entry.wake_tick = wake_tick;
+                entry.generation = generation;
+                entry.misses = 0;
                 return true;
             }
             if !entry.active && free_idx.is_none() {
@@ -108,6 +128,8 @@ impl SleepQueue {
         self.entries[idx] = SleepEntry {
             task_id,
             wake_tick,
+            generation,
+            misses: 0,
             active: true,
         };
         self.active_count = self.active_count.saturating_add(1);
@@ -131,26 +153,61 @@ impl SleepQueue {
         }
     }
 
-    /// Pop one due sleep entry (if any). Returns `INVALID_TASK_ID`
-    /// when no entries are due. The `active_count` fast path makes
-    /// the common "no sleepers at all" case O(1) — on a quiet system
-    /// the timer-tick caller touches no entries and releases the
-    /// lock immediately.
-    fn pop_due(&mut self, now_tick: u64) -> u32 {
+    /// Collect the task ids of due sleep entries into `out` WITHOUT
+    /// removing them. Entries are only removed once a wake conclusively
+    /// publishes `Ready` (`wake_blocked_task`'s success paths call
+    /// `cancel_sleep`) or the owner scrubs them. A pop-then-wake design
+    /// permanently lost the wake when the wake side hit the sleeper's
+    /// commit window (task transiently not Blocked) — the popped entry
+    /// was gone and the task stayed Blocked(Sleep) forever. Peeking
+    /// makes wakes at-least-once: a transient failure retries next tick.
+    fn collect_due(&self, now_tick: u64, out: &mut [(u32, u64)]) -> usize {
         if self.active_count == 0 {
-            return INVALID_TASK_ID;
+            return 0;
         }
         let scan = self.scan_bound();
-        for entry in self.entries[..scan].iter_mut() {
+        let mut n = 0;
+        for entry in self.entries[..scan].iter() {
+            if n >= out.len() {
+                break;
+            }
             if entry.active && tick_reached(now_tick, entry.wake_tick) {
-                let task_id = entry.task_id;
+                out[n] = (entry.task_id, entry.generation);
+                n += 1;
+            }
+        }
+        n
+    }
+
+    /// Remove the entry for `task_id` only if it is still the arm
+    /// generation the caller collected. A mismatch means the owner
+    /// re-armed in the meantime — that newer park's entry must survive.
+    fn remove_generation(&mut self, task_id: u32, generation: u64) {
+        let scan = self.scan_bound();
+        for entry in self.entries[..scan].iter_mut() {
+            if entry.active && entry.task_id == task_id && entry.generation == generation {
                 *entry = SleepEntry::empty();
                 self.active_count = self.active_count.saturating_sub(1);
                 SLEEP_ACTIVE_COUNT.store(self.active_count, Ordering::Release);
-                return task_id;
+                break;
             }
         }
-        INVALID_TASK_ID
+    }
+
+    /// Record that a due entry's owner was observed not sleep-parked.
+    /// Returns `true` once the miss budget is exhausted — a mid-park
+    /// transient lasts microseconds, so ~1 s of consecutive due-tick
+    /// misses can only be a stale entry (owner event-woken, never
+    /// re-armed) and the caller should scrub it.
+    fn note_miss(&mut self, task_id: u32, generation: u64) -> bool {
+        let scan = self.scan_bound();
+        for entry in self.entries[..scan].iter_mut() {
+            if entry.active && entry.task_id == task_id && entry.generation == generation {
+                entry.misses = entry.misses.saturating_add(1);
+                return entry.misses >= 100;
+            }
+        }
+        false
     }
 
     /// Earliest still-unfired wake deadline (tick units), or `None`
@@ -251,25 +308,44 @@ fn ms_to_sleep_ticks(ms: u32) -> u64 {
 // wait queue's lock, and the wake path's Blocked -> Ready CAS sees
 // the committed transition without a separate intermediate to race
 // against.
-fn wake_sleeping_task(task_id: u32) {
+/// Outcome of a timer-path wake attempt, deciding what happens to the
+/// collected entry: only a CONCLUSIVE outcome may remove it.
+enum WakeVerdict {
+    /// The wake resolved (published Ready, or the task was observably
+    /// awake after being sleep-parked) — the collected generation may go.
+    Delivered,
+    /// The owner is gone; the entry may go.
+    TaskGone,
+    /// The owner was not sleep-parked at this instant (mid-park commit
+    /// window, or a stale entry). The entry must stay armed for retry.
+    NotSleepParked,
+}
+
+fn wake_sleeping_task(task_id: u32) -> WakeVerdict {
     if task_id == INVALID_TASK_ID {
-        return;
+        return WakeVerdict::TaskGone;
     }
 
     let task = task_find_by_id(task_id);
     if task.is_null() || task_is_invalid(task) || task_is_exited(task) {
-        return;
+        return WakeVerdict::TaskGone;
     }
 
     let is_sleep_blocked =
         task_is_blocked(task) && task_load_block_reason(task) == Some(BlockReason::Sleep);
     if !is_sleep_blocked {
-        return;
+        // Transient: the task is mid-park (commit window) or already woken
+        // with its residual entry not yet re-armed. The entry must stay so
+        // the next tick retries — a pop-then-wake design turned exactly
+        // this window into a permanent lost wake.
+        return WakeVerdict::NotSleepParked;
     }
 
     // Delegate to the scheduler's single wake publisher. It handles the
     // Linux-style `on_cpu` switch window, reserves scheduler placement before
-    // publishing Ready, and queues/inboxes exactly once.
+    // publishing Ready, and queues/inboxes exactly once. Its totality
+    // contract guarantees it returns only once the task is published or
+    // observably no longer Blocked — so reaching here is conclusive.
     let rc = wake_blocked_task(task, task_id);
     if rc != 0 {
         slopos_ostd::klog_info!(
@@ -277,7 +353,9 @@ fn wake_sleeping_task(task_id: u32) {
             task_id,
             rc
         );
+        return WakeVerdict::TaskGone;
     }
+    WakeVerdict::Delivered
 }
 
 /// Wake every sleeper whose deadline has passed.
@@ -310,19 +388,211 @@ pub fn sleep_queue_next_deadline_ticks(now_tick: u64) -> Option<u64> {
 }
 
 pub fn wake_due_sleepers(now_tick: u64) {
+    // Before the fast-path return: a count desync (atomic 0, entries live)
+    // would silence this function forever — sweep first so that state is
+    // still observable.
+    strand_sweep(now_tick);
     if SLEEP_ACTIVE_COUNT.load(Ordering::Acquire) == 0 {
         return;
     }
-    loop {
-        let task_id = {
-            let mut queue = SLEEP_QUEUE.lock();
-            queue.pop_due(now_tick)
-        };
-        if task_id == INVALID_TASK_ID {
-            break;
+    // Peek-then-wake: entries stay armed until a wake conclusively lands
+    // (see `collect_due`). Bounded batch per tick; the remainder is
+    // retried on the next tick. Concurrent ticks on peer CPUs may collect
+    // the same entry — `wake_blocked_task`'s placement CAS is
+    // single-winner, so duplicates are no-ops.
+    //
+    // Removal discipline: ONLY this timer path (generation-checked, after a
+    // conclusive wake) and the owner task itself remove entries. Event
+    // wakes never touch the queue — a waker-side cancel after publishing
+    // Ready raced the owner's next re-arm and deleted the wrong
+    // generation's entry (the `net-timer` strand).
+    let mut due = [(INVALID_TASK_ID, 0u64); 16];
+    let n = {
+        let queue = SLEEP_QUEUE.lock();
+        queue.collect_due(now_tick, &mut due)
+    };
+    for &(task_id, generation) in &due[..n] {
+        match wake_sleeping_task(task_id) {
+            WakeVerdict::Delivered | WakeVerdict::TaskGone => {
+                SLEEP_QUEUE.lock().remove_generation(task_id, generation);
+            }
+            WakeVerdict::NotSleepParked => {
+                // Keep the entry for retry; scrub only once the miss budget
+                // proves it stale (owner event-woken and never re-armed).
+                if SLEEP_QUEUE.lock().note_miss(task_id, generation) {
+                    SLEEP_QUEUE.lock().remove_generation(task_id, generation);
+                }
+            }
         }
-        wake_sleeping_task(task_id);
     }
+}
+
+// ---------------------------------------------------------------------------
+// Strand sweep — lost-wake diagnostics (armed by `tp.debug` boots)
+// ---------------------------------------------------------------------------
+
+static STRAND_SWEEP_ARMED: core::sync::atomic::AtomicBool =
+    core::sync::atomic::AtomicBool::new(false);
+static STRAND_LAST_SWEEP: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+static STRAND_LOG_BUDGET: AtomicU32 = AtomicU32::new(120);
+
+/// Arm the ~once-per-second stranded-task sweep.
+pub fn arm_strand_sweep() {
+    STRAND_SWEEP_ARMED.store(true, Ordering::Release);
+}
+
+fn strand_log_ok() -> bool {
+    STRAND_LOG_BUDGET
+        .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |v| {
+            if v > 0 { Some(v - 1) } else { None }
+        })
+        .is_ok()
+}
+
+/// Scan for tasks stranded by a lost sleep wake: Blocked-on-Sleep with no
+/// armed queue entry (the wake was popped/wiped but never delivered), an
+/// overdue entry (pop never fires), a Ready task with no scheduler placement
+/// (publish lost), and sleep-queue count desync (fast path permanently
+/// silenced). Tick context; ~1 Hz via the tick-spacing gate.
+fn strand_sweep(now_tick: u64) {
+    if !STRAND_SWEEP_ARMED.load(Ordering::Acquire) {
+        return;
+    }
+    let last = STRAND_LAST_SWEEP.load(Ordering::Relaxed);
+    if now_tick.wrapping_sub(last) < 400 {
+        return;
+    }
+    if STRAND_LAST_SWEEP
+        .compare_exchange(last, now_tick, Ordering::AcqRel, Ordering::Relaxed)
+        .is_err()
+    {
+        return;
+    }
+
+    let (live, count, atomic) = {
+        let queue = SLEEP_QUEUE.lock();
+        let scan = queue.scan_bound();
+        let live = queue.entries[..scan].iter().filter(|e| e.active).count() as u32;
+        (
+            live,
+            queue.active_count,
+            SLEEP_ACTIVE_COUNT.load(Ordering::Acquire),
+        )
+    };
+    if (live != count || atomic != count) && strand_log_ok() {
+        slopos_ostd::klog_info!(
+            "STRAND: sleep-queue desync live={} count={} atomic={}",
+            live,
+            count,
+            atomic
+        );
+    }
+
+    for task_id in 0..TASK_POOL_CAPACITY as u32 {
+        let task = task_find_by_id(task_id);
+        if task.is_null() || task_is_invalid(task) || task_is_exited(task) {
+            continue;
+        }
+        let status = task_status(task);
+        // Classify this task's suspect state; 0 = healthy. A task mid-park
+        // (between its Blocked CAS and the queue upsert) or mid-wake looks
+        // stranded for a microsecond, so a strand is only REPORTED when the
+        // same class persists across two consecutive sweeps (≥1 s stuck).
+        let mut class = 0u8;
+        let mut detail: u64 = 0;
+        if status == Some(TaskStatus::Blocked)
+            && task_load_block_reason(task) == Some(BlockReason::Sleep)
+        {
+            let entry = {
+                let queue = SLEEP_QUEUE.lock();
+                let scan = queue.scan_bound();
+                queue.entries[..scan]
+                    .iter()
+                    .find(|e| e.active && e.task_id == task_id)
+                    .map(|e| e.wake_tick)
+            };
+            match entry {
+                // A settled park has placement None; `OnCpu` means the scan
+                // caught the task mid-park (Blocked CAS done, entry not yet
+                // armed) — a microsecond transient, not a strand.
+                None if super::task::task_sched_placement_load(task)
+                    == slopos_ostd::task::SchedPlacement::None =>
+                {
+                    class = 1
+                }
+                None => {}
+                // Generously overdue (≥400 ticks ≈ 1 s aggregate): the pop
+                // side is not firing despite a live entry.
+                Some(w)
+                    if now_tick.wrapping_sub(w) < (1 << 63) && now_tick.wrapping_sub(w) > 400 =>
+                {
+                    class = 2;
+                    detail = w;
+                }
+                _ => {}
+            }
+        } else if status == Some(TaskStatus::Ready)
+            && super::task::task_sched_placement_load(task)
+                == slopos_ostd::task::SchedPlacement::None
+        {
+            class = 3;
+        }
+
+        let idx = task_id as usize % STRAND_SUSPECT.len();
+        let prev = STRAND_SUSPECT[idx].swap(class, Ordering::Relaxed);
+        // Epoch gate: the fused state word's ABA epoch bumps on every
+        // transition, so a healthy sleeper caught mid-park by two racing
+        // sweeps shows different epochs (it transitioned hundreds of times
+        // in between), while a genuinely stranded task's epoch is frozen.
+        // Without this, the sweep's scan duration can synchronize with a
+        // periodic sleeper's park and report a fresh transient every sweep.
+        let epoch = super::task::task_state_epoch(task).unwrap_or(0);
+        let prev_epoch = STRAND_EPOCH[idx].swap(epoch, Ordering::Relaxed);
+        if class == 0 || prev != class || prev_epoch != epoch || !strand_log_ok() {
+            continue;
+        }
+        match class {
+            1 => slopos_ostd::klog_info!(
+                "STRAND: task {} '{}' Blocked(Sleep) NO ENTRY now={} placement={:?}",
+                task_id,
+                task_name_str(task),
+                now_tick,
+                super::task::task_sched_placement_load(task)
+            ),
+            2 => slopos_ostd::klog_info!(
+                "STRAND: task {} '{}' entry OVERDUE wake@{} now={}",
+                task_id,
+                task_name_str(task),
+                detail,
+                now_tick
+            ),
+            _ => slopos_ostd::klog_info!(
+                "STRAND: task {} '{}' Ready with placement=None (publish lost)",
+                task_id,
+                task_name_str(task)
+            ),
+        }
+    }
+}
+
+/// Per-task suspect class from the previous sweep (persistence filter),
+/// indexed by task id.
+static STRAND_SUSPECT: [core::sync::atomic::AtomicU8; TASK_POOL_CAPACITY] = {
+    const ZERO: core::sync::atomic::AtomicU8 = core::sync::atomic::AtomicU8::new(0);
+    [ZERO; TASK_POOL_CAPACITY]
+};
+
+/// Per-task state-word epoch from the previous sweep (see the epoch gate in
+/// [`strand_sweep`]).
+static STRAND_EPOCH: [AtomicU32; TASK_POOL_CAPACITY] = {
+    const ZERO: AtomicU32 = AtomicU32::new(0);
+    [ZERO; TASK_POOL_CAPACITY]
+};
+
+fn task_name_str<'a>(task: *mut super::task::Task) -> &'a str {
+    super::task::task_name_bytes(task)
+        .and_then(|b| core::str::from_utf8(b).ok())
+        .unwrap_or("?")
 }
 
 pub fn reset_sleep_queue() {
@@ -512,4 +782,14 @@ pub fn block_current_task_with_timeout(timeout_ms: u32) {
 #[cfg(feature = "test-hooks")]
 pub(crate) fn test_insert_sleep_entry(task_id: u32, wake_tick: u64) -> bool {
     SLEEP_QUEUE.lock().upsert(task_id, wake_tick)
+}
+
+/// Test hook: whether an armed sleep entry exists for `task_id`.
+#[cfg(feature = "test-hooks")]
+pub(crate) fn test_sleep_entry_armed(task_id: u32) -> bool {
+    let queue = SLEEP_QUEUE.lock();
+    let scan = queue.scan_bound();
+    queue.entries[..scan]
+        .iter()
+        .any(|e| e.active && e.task_id == task_id)
 }
