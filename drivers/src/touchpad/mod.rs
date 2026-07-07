@@ -106,6 +106,8 @@ pub fn init(rsdp_phys: u64, width: u32, height: u32, debug: bool, force_poll: bo
             }
             Err(e) => klog_warn!("touchpad: multitouch-mode request failed: {:?}", e),
         }
+    } else if debug {
+        klog_info!("touchpad: no input-mode selector; device stays in mouse mode");
     }
 
     let (pad_x, pad_y) = pad_logical_max(&format);
@@ -279,12 +281,21 @@ fn register_cascade(gsi: u32, edge: bool, active_low: bool) -> bool {
 /// re-enable the pad interrupt.
 fn irq_thread(_token: KernelIoToken<'static>) {
     let mut buf = [0u8; 256];
+    let mut first_report = true;
     loop {
         TOUCHPAD_WAKER.wait();
         if let Some(rt) = TOUCHPAD.get() {
             loop {
                 match rt.hid.read_input_report(&mut buf) {
                     Ok(n) if n > 0 => {
+                        if rt.debug && first_report {
+                            first_report = false;
+                            klog_info!(
+                                "touchpad: first report ({} bytes): {:02x?}",
+                                n,
+                                &buf[..n.min(24)]
+                            );
+                        }
                         if let Some(frame) = extract_frame(&rt.format, &buf[..n]) {
                             let ts = timestamp_ms();
                             rt.gesture.lock().process(&frame, ts);
@@ -327,23 +338,68 @@ fn poll_log_ok() -> bool {
 /// engine, sleep, repeat.
 fn poll_thread(token: KernelIoToken<'static>) {
     let mut buf = [0u8; 256];
+    // `tp.debug` diagnostics: one-shot dumps of the first report and first
+    // tipped frame, plus a periodic stats heartbeat. Together they pin which
+    // stage is dead: the device produces nothing (`empty` climbs, `data`
+    // stays 0), reports arrive but never carry contacts (`data` climbs,
+    // `tipped` stays 0 — e.g. stuck in mouse-compat mode), or frames flow
+    // and the fault is downstream in the gesture/compositor path.
+    let mut first_report = true;
+    let mut first_tip = true;
+    let (mut n_empty, mut n_data, mut n_err, mut n_tipped) = (0u64, 0u64, 0u64, 0u64);
+    let mut polls = 0u64;
     loop {
         if let Some(rt) = TOUCHPAD.get() {
             match rt.hid.read_input_report(&mut buf) {
                 Ok(n) if n > 0 => {
+                    n_data += 1;
+                    if rt.debug && first_report {
+                        first_report = false;
+                        klog_info!(
+                            "touchpad: first report ({} bytes): {:02x?}",
+                            n,
+                            &buf[..n.min(24)]
+                        );
+                    }
                     if let Some(frame) = extract_frame(&rt.format, &buf[..n]) {
+                        if frame.count > 0 {
+                            n_tipped += 1;
+                            if rt.debug && first_tip {
+                                first_tip = false;
+                                klog_info!(
+                                    "touchpad: first contact frame: count={} x={} y={} button={}",
+                                    frame.count,
+                                    frame.contacts[0].x,
+                                    frame.contacts[0].y,
+                                    frame.button
+                                );
+                            }
+                        }
                         let ts = timestamp_ms();
                         rt.gesture.lock().process(&frame, ts);
                     } else if rt.debug && poll_log_ok() {
                         klog_info!("touchpad: report of {} bytes, no decodable frame", n);
                     }
                 }
-                Ok(_) => {}
+                Ok(_) => n_empty += 1,
                 Err(e) => {
+                    n_err += 1;
                     if rt.debug && poll_log_ok() {
                         klog_warn!("touchpad: read error {:?}", e);
                     }
                 }
+            }
+            polls += 1;
+            // Own cap, independent of the shared error budget, so a burst of
+            // read-error lines can't starve the stats heartbeat.
+            if rt.debug && polls % 512 == 0 && polls <= 512 * 24 {
+                klog_info!(
+                    "touchpad: poll stats: empty={} data={} err={} tipped={}",
+                    n_empty,
+                    n_data,
+                    n_err,
+                    n_tipped
+                );
             }
         }
         // Deschedule (timer-armed wake) between polls instead of busy-waiting
