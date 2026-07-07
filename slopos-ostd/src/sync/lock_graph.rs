@@ -397,6 +397,24 @@ pub fn held_lock_addrs(out: &mut [u64]) -> usize {
     n
 }
 
+/// Cross-CPU variant of [`held_lock_addrs`] for watchdog/panic
+/// diagnostics: snapshot the locks held by an arbitrary CPU. Torn
+/// snapshots are acceptable (the target CPU may be mid push/pop);
+/// intended only for post-mortem dumps.
+pub fn held_lock_addrs_for_cpu(cpu: usize, out: &mut [u64]) -> usize {
+    if !TRACKING_ENABLED.load(Ordering::Relaxed) || cpu >= MAX_CPUS {
+        return 0;
+    }
+    // SAFETY: read-only racy snapshot of another CPU's held stack;
+    // same diagnostics-only caveat as `held_lock_addrs`.
+    let stack = unsafe { &*HELD[cpu].0.0.get() };
+    let n = (stack.depth as usize).min(out.len());
+    for (i, slot) in out.iter_mut().enumerate().take(n) {
+        *slot = stack.entries[i].lock_addr as u64;
+    }
+    n
+}
+
 /// Record that the current CPU acquired a lock.
 ///
 /// # Safety

@@ -365,6 +365,24 @@ fn nmi_watchdog_handler(frame: &slopos_arch::InterruptFrame) {
     // the serial log) so the wedge site is visible without a serial console.
     crate::panic::set_panic_cpu_state(frame.rip, frame.rsp, frame.rbp);
 
+    // A lockup is usually one CPU spinning on a lock some OTHER CPU holds:
+    // dump every CPU's tracked held locks and last-tick stamp so the holder
+    // is identifiable from the log (addresses match `nm kernel.elf`).
+    for cpu in 0..slopos_arch::MAX_CPUS {
+        let mut addrs = [0u64; 8];
+        let n = slopos_ostd::sync::held_lock_addrs_for_cpu(cpu, &mut addrs);
+        let last_tick = slopos_sched::scheduler::watchdog_last_tick(cpu);
+        if n > 0 || last_tick != 0 {
+            klog_info!(
+                "NMI WATCHDOG: cpu {} last_tick={} holds {}: {:#x?}",
+                cpu,
+                last_tick,
+                n,
+                &addrs[..n]
+            );
+        }
+    }
+
     // Force-release all tracked locks so other CPUs can make progress.
     slopos_ostd::sync::panic_recovery::poison_all_held_locks_no_halt();
 

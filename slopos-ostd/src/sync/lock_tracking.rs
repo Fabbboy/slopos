@@ -13,8 +13,8 @@
 pub use super::lock_graph::{
     LO_BLESSED, LO_DUPOK, LO_TRYLOCK, LOCK_LEVEL_ALLOCATOR, LOCK_LEVEL_REGISTRY,
     LOCK_LEVEL_RESOURCE, LOCK_LEVEL_SCHEDULER, LOCK_LEVEL_UNORDERED, PoisonUnlockFn,
-    enable_lock_tracking, enter_panic_bypass, held_lock_addrs, held_lock_count,
-    poison_unlock_all_held, pop_lock, push_lock,
+    enable_lock_tracking, enter_panic_bypass, held_lock_addrs, held_lock_addrs_for_cpu,
+    held_lock_count, poison_unlock_all_held, pop_lock, push_lock,
 };
 
 #[cfg(any(test, feature = "test-helpers"))]
