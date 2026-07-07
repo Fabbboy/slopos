@@ -123,7 +123,10 @@ fn dispatch(args: fmt::Arguments<'_>) {
 // from IRQ context.
 // ---------------------------------------------------------------------------
 
-const KLOG_RING_SIZE: usize = 64 * 1024;
+// Sized so a full boot log plus steady-state logging fits without wrapping:
+// `/dev/kmsg` reads the ring by byte offset, so a wrap during a `cat` shifts
+// the window under the reader and garbles the stream.
+const KLOG_RING_SIZE: usize = 256 * 1024;
 
 struct KlogRing {
     buf: [u8; KLOG_RING_SIZE],
