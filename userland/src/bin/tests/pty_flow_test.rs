@@ -37,8 +37,8 @@ const REAP_SPINS: usize = 200_000;
 const MAX_IDLE_READS: usize = 20_000;
 
 fn open_pair() -> Option<(i32, i32)> {
-    let (master_idx, _slave_idx) = process::openpty().ok()?;
-    let master_fd = process::open_tty_fd(master_idx).ok()?.into_raw();
+    let (master_owned, _slave_num) = process::openpty().ok()?;
+    let master_fd = master_owned.into_raw();
     let slave_fd = match fs::ioctl_tiocgptpeer(master_fd) {
         Ok(fd) => fd.into_raw(),
         Err(_) => {

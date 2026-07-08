@@ -237,29 +237,29 @@ pub fn test_ldisc_kind_raw_delegation() -> TestResult {
 
 /// PtyMaster and PtySlave DriverId variants exist and are distinct.
 pub fn test_pty_driver_id_variants() -> TestResult {
-    let master_id = DriverId::PtyMaster {
-        peer: PtyPeerHandle::new(TtyIndex(2), 0),
-    };
-    let slave_id = DriverId::PtySlave {
-        peer: PtyPeerHandle::new(TtyIndex(3), 0),
-    };
-    if master_id == slave_id {
-        klog_info!("TTY_TEST: BUG - PtyMaster and PtySlave DriverId should be distinct");
+    let master_id = DriverId::PtyMaster { peer: KWeak::new() };
+    let slave_id = DriverId::PtySlave { peer: KWeak::new() };
+    if !matches!(master_id, DriverId::PtyMaster { .. }) {
+        klog_info!("TTY_TEST: BUG - PtyMaster DriverId should be the PtyMaster variant");
         return TestResult::Fail;
     }
-    // Also verify they differ from existing IDs.
-    if master_id == DriverId::SerialConsole
-        || master_id == DriverId::VConsole
-        || master_id == DriverId::SerialConsole
-    {
-        klog_info!("TTY_TEST: BUG - PtyMaster should differ from SerialConsole/VConsole/None");
+    if !matches!(slave_id, DriverId::PtySlave { .. }) {
+        klog_info!("TTY_TEST: BUG - PtySlave DriverId should be the PtySlave variant");
         return TestResult::Fail;
     }
-    if slave_id == DriverId::SerialConsole
-        || slave_id == DriverId::VConsole
-        || slave_id == DriverId::SerialConsole
-    {
-        klog_info!("TTY_TEST: BUG - PtySlave should differ from SerialConsole/VConsole/None");
+    // The PTY variants are distinct from each other and from the consoles.
+    if matches!(
+        master_id,
+        DriverId::SerialConsole | DriverId::VConsole | DriverId::PtySlave { .. }
+    ) {
+        klog_info!("TTY_TEST: BUG - PtyMaster should differ from console and slave variants");
+        return TestResult::Fail;
+    }
+    if matches!(
+        slave_id,
+        DriverId::SerialConsole | DriverId::VConsole | DriverId::PtyMaster { .. }
+    ) {
+        klog_info!("TTY_TEST: BUG - PtySlave should differ from console and master variants");
         return TestResult::Fail;
     }
     TestResult::Pass
@@ -267,14 +267,8 @@ pub fn test_pty_driver_id_variants() -> TestResult {
 
 /// PtyMaster driver kind returns correct DriverId.
 pub fn test_pty_master_driver_kind() -> TestResult {
-    let drv = TtyDriverKind::PtyMaster {
-        peer: PtyPeerHandle::new(TtyIndex(2), 0),
-    };
-    if drv.id()
-        != (DriverId::PtyMaster {
-            peer: PtyPeerHandle::new(TtyIndex(2), 0),
-        })
-    {
+    let drv = TtyDriverKind::PtyMaster { peer: KWeak::new() };
+    if !matches!(drv.id(), DriverId::PtyMaster { .. }) {
         klog_info!("TTY_TEST: BUG - PtyMaster TtyDriverKind should return DriverId::PtyMaster");
         return TestResult::Fail;
     }
@@ -283,14 +277,8 @@ pub fn test_pty_master_driver_kind() -> TestResult {
 
 /// PtySlave driver kind returns correct DriverId.
 pub fn test_pty_slave_driver_kind() -> TestResult {
-    let drv = TtyDriverKind::PtySlave {
-        peer: PtyPeerHandle::new(TtyIndex(3), 0),
-    };
-    if drv.id()
-        != (DriverId::PtySlave {
-            peer: PtyPeerHandle::new(TtyIndex(3), 0),
-        })
-    {
+    let drv = TtyDriverKind::PtySlave { peer: KWeak::new() };
+    if !matches!(drv.id(), DriverId::PtySlave { .. }) {
         klog_info!("TTY_TEST: BUG - PtySlave TtyDriverKind should return DriverId::PtySlave");
         return TestResult::Fail;
     }
@@ -304,8 +292,8 @@ pub fn test_pty_slave_driver_kind() -> TestResult {
 pub fn test_pty_alloc_pair_both_initialized() -> TestResult {
     tty::table::tty_table_init();
 
-    let master = match tty::pty_alloc() {
-        Ok(idx) => idx,
+    let (master, _master_backing) = match tty::pty_alloc() {
+        Ok(pair) => pair,
         Err(err) => {
             klog_info!("TTY_TEST: BUG - pty_alloc failed: {:?}", err);
             return TestResult::Fail;
@@ -325,12 +313,6 @@ pub fn test_pty_alloc_pair_both_initialized() -> TestResult {
         tty::table::with_tty_ref(master, |tty| tty.index == master).unwrap_or(false);
     let slave_exists = tty::table::with_tty_ref(slave, |tty| tty.index == slave).unwrap_or(false);
 
-    // Cleanup.
-    tty::open_ref(master).ok();
-    tty::open_ref(slave).ok();
-    let _ = tty::close_ref(slave);
-    let _ = tty::close_ref(master);
-
     if !master_exists || !slave_exists {
         klog_info!(
             "TTY_TEST: BUG - pair not fully initialised (master={}, slave={})",
@@ -345,17 +327,18 @@ pub fn test_pty_alloc_pair_both_initialized() -> TestResult {
 /// An empty non-blocking master read reports WouldBlock — never `Ok(0)`.
 ///
 /// The master's `RawDisc` defaults to VMIN=1 so that `read() == 0` is
-/// reserved for "peer closed / hung up" (true EOF), matching Linux master
-/// semantics. With VMIN=0 the empty read would return the polling-read
-/// `Ok(0)`, which a terminal emulator cannot distinguish from EOF —
-/// it would tear the session down the moment the slave went quiet.
+/// reserved for "peer closed" (true EOF). With VMIN=0 the empty read would
+/// return the polling-read `Ok(0)`, which a terminal emulator cannot
+/// distinguish from EOF — it would tear the session down the moment the
+/// slave went quiet. Only closing the last slave open flips the master to
+/// EOF, letting the emulator detect the shell exiting.
 pub fn test_pty_master_empty_read_would_block_not_eof() -> TestResult {
     tty::table::tty_table_init();
 
-    let master = tty::pty_alloc().unwrap();
+    let (master, _master_backing) = tty::pty_alloc().unwrap();
     let slave = TtyIndex(tty::get_pty_number(master).unwrap() as u8);
-    tty::open_ref(master).unwrap();
-    tty::open_ref(slave).unwrap();
+    tty::set_pty_lock(master, false).unwrap();
+    let slave_backing = tty::pty_open_slave(slave).unwrap();
 
     // Empty + non-blocking: must be WouldBlock, not the EOF-shaped Ok(0).
     let mut buf = [0u8; 8];
@@ -365,8 +348,6 @@ pub fn test_pty_master_empty_read_would_block_not_eof() -> TestResult {
             "TTY_TEST: BUG - empty nonblock master read returned {:?}, want WouldBlock",
             empty
         );
-        let _ = tty::close_ref(master);
-        let _ = tty::close_ref(slave);
         return TestResult::Fail;
     }
 
@@ -378,24 +359,21 @@ pub fn test_pty_master_empty_read_would_block_not_eof() -> TestResult {
             "TTY_TEST: BUG - master read after slave write returned {:?}",
             got
         );
-        let _ = tty::close_ref(master);
-        let _ = tty::close_ref(slave);
         return TestResult::Fail;
     }
 
-    // Slave fully closed: NOW the master read reports EOF via Ok(0).
-    let _ = tty::close_ref(slave);
+    // Closing the last slave open flips the drained master to EOF
+    // (peer-closed latched), which is how the emulator sees shell exit.
+    drop(slave_backing);
     let eof = tty::read(master, &mut buf, true);
     if eof != Ok(0) {
         klog_info!(
-            "TTY_TEST: BUG - master read after slave close returned {:?}, want Ok(0)",
+            "TTY_TEST: BUG - master read after last slave close returned {:?}, want Ok(0)",
             eof
         );
-        let _ = tty::close_ref(master);
         return TestResult::Fail;
     }
 
-    let _ = tty::close_ref(master);
     TestResult::Pass
 }
 
@@ -408,10 +386,10 @@ pub fn test_pty_winsize_shared_across_pair() -> TestResult {
 
     tty::table::tty_table_init();
 
-    let master = tty::pty_alloc().unwrap();
+    let (master, _master_backing) = tty::pty_alloc().unwrap();
     let slave = TtyIndex(tty::get_pty_number(master).unwrap() as u8);
-    tty::open_ref(master).unwrap();
-    tty::open_ref(slave).unwrap();
+    tty::set_pty_lock(master, false).unwrap();
+    let _slave_backing = tty::pty_open_slave(slave).unwrap();
 
     let ws = UserWinsize {
         ws_row: 21,
@@ -433,9 +411,6 @@ pub fn test_pty_winsize_shared_across_pair() -> TestResult {
     let master_view = tty::get_winsize(master).unwrap();
     let slave_to_master = master_view.ws_row == 30 && master_view.ws_col == 100;
 
-    let _ = tty::close_ref(slave);
-    let _ = tty::close_ref(master);
-
     if !master_to_slave || !slave_to_master {
         klog_info!(
             "TTY_TEST: BUG - winsize not shared across pair (m->s ok={}, s->m ok={})",
@@ -451,14 +426,14 @@ pub fn test_pty_winsize_shared_across_pair() -> TestResult {
 pub fn test_pty_close_master_first_frees_pair() -> TestResult {
     tty::table::tty_table_init();
 
-    let master = tty::pty_alloc().unwrap();
+    let (master, master_backing) = tty::pty_alloc().unwrap();
     let slave = TtyIndex(tty::get_pty_number(master).unwrap() as u8);
-    tty::open_ref(master).unwrap();
-    tty::open_ref(slave).unwrap();
+    tty::set_pty_lock(master, false).unwrap();
+    let slave_backing = tty::pty_open_slave(slave).unwrap();
 
     // Close master first (triggers hangup on slave), then slave.
-    let _ = tty::close_ref(master);
-    let _ = tty::close_ref(slave);
+    drop(master_backing);
+    drop(slave_backing);
 
     // Both slots should now be None (freed).
     let master_freed = TTY_SLOTS[master.0 as usize].lock().is_none();
@@ -479,14 +454,14 @@ pub fn test_pty_close_master_first_frees_pair() -> TestResult {
 pub fn test_pty_close_slave_first_frees_pair() -> TestResult {
     tty::table::tty_table_init();
 
-    let master = tty::pty_alloc().unwrap();
+    let (master, master_backing) = tty::pty_alloc().unwrap();
     let slave = TtyIndex(tty::get_pty_number(master).unwrap() as u8);
-    tty::open_ref(master).unwrap();
-    tty::open_ref(slave).unwrap();
+    tty::set_pty_lock(master, false).unwrap();
+    let slave_backing = tty::pty_open_slave(slave).unwrap();
 
-    // Close slave first, then master.
-    let _ = tty::close_ref(slave);
-    let _ = tty::close_ref(master);
+    // Close slave first, then master (order independence).
+    drop(slave_backing);
+    drop(master_backing);
 
     let master_freed = TTY_SLOTS[master.0 as usize].lock().is_none();
     let slave_freed = TTY_SLOTS[slave.0 as usize].lock().is_none();
@@ -507,16 +482,16 @@ pub fn test_pty_reallocation_after_free() -> TestResult {
     tty::table::tty_table_init();
 
     // Allocate + open + close a pair to return slots to the free pool.
-    let master1 = tty::pty_alloc().unwrap();
+    let (master1, master1_backing) = tty::pty_alloc().unwrap();
     let slave1 = TtyIndex(tty::get_pty_number(master1).unwrap() as u8);
-    tty::open_ref(master1).unwrap();
-    tty::open_ref(slave1).unwrap();
-    let _ = tty::close_ref(slave1);
-    let _ = tty::close_ref(master1);
+    tty::set_pty_lock(master1, false).unwrap();
+    let slave1_backing = tty::pty_open_slave(slave1).unwrap();
+    drop(slave1_backing);
+    drop(master1_backing);
 
     // Reallocate — should succeed and return valid indices.
-    let master2 = match tty::pty_alloc() {
-        Ok(idx) => idx,
+    let (master2, _master2_backing) = match tty::pty_alloc() {
+        Ok(pair) => pair,
         Err(err) => {
             klog_info!("TTY_TEST: BUG - reallocation failed: {:?}", err);
             return TestResult::Fail;
@@ -525,14 +500,11 @@ pub fn test_pty_reallocation_after_free() -> TestResult {
     let slave2 = TtyIndex(tty::get_pty_number(master2).unwrap() as u8);
 
     // Verify the reallocated pair is functional.
-    tty::open_ref(master2).unwrap();
-    tty::open_ref(slave2).unwrap();
+    tty::set_pty_lock(master2, false).unwrap();
+    let _slave2_backing = tty::pty_open_slave(slave2).unwrap();
 
     let slave_is_pty = tty::is_pty_slave(slave2);
     let master_is_not_slave = !tty::is_pty_slave(master2);
-
-    let _ = tty::close_ref(slave2);
-    let _ = tty::close_ref(master2);
 
     if !slave_is_pty || !master_is_not_slave {
         klog_info!(
@@ -553,8 +525,7 @@ pub fn test_pty_open_slave_validates_type() -> TestResult {
     let result = tty::pty_open_slave(TtyIndex(0));
     if result.is_ok() {
         klog_info!("TTY_TEST: BUG - pty_open_slave should reject non-slave index 0");
-        // Undo the accidental open.
-        let _ = tty::close_ref(TtyIndex(0));
+        drop(result);
         return TestResult::Fail;
     }
 
@@ -562,77 +533,82 @@ pub fn test_pty_open_slave_validates_type() -> TestResult {
     let result = tty::pty_open_slave(TtyIndex(5));
     if result.is_ok() {
         klog_info!("TTY_TEST: BUG - pty_open_slave should reject empty slot 5");
+        drop(result);
         return TestResult::Fail;
     }
 
     TestResult::Pass
 }
 
-/// pty_open_slave increments open_count, preventing pair free.
+/// An open slave keeps its slot alive after the master closes.
 pub fn test_pty_open_slave_prevents_free() -> TestResult {
     tty::table::tty_table_init();
 
-    let master = tty::pty_alloc().unwrap();
+    let (master, master_backing) = tty::pty_alloc().unwrap();
     let slave = TtyIndex(tty::get_pty_number(master).unwrap() as u8);
-    tty::open_ref(master).unwrap();
 
     // Unlock slave so it can be opened (lock guard).
     tty::set_pty_lock(master, false).unwrap();
 
     // Open slave via the validated path.
-    let open_rc = tty::pty_open_slave(slave);
-    if open_rc.is_err() {
-        klog_info!("TTY_TEST: BUG - pty_open_slave failed on valid slave");
-        let _ = tty::close_ref(master);
-        return TestResult::Fail;
-    }
+    let slave_backing = match tty::pty_open_slave(slave) {
+        Ok(b) => b,
+        Err(_) => {
+            klog_info!("TTY_TEST: BUG - pty_open_slave failed on valid slave");
+            return TestResult::Fail;
+        }
+    };
 
-    // Close master — slave still has open_count > 0, so pair should NOT be freed.
-    let _ = tty::close_ref(master);
+    // Close master — the still-open slave keeps its slot alive.
+    drop(master_backing);
 
     let slave_still_exists = TTY_SLOTS[slave.0 as usize].lock().is_some();
 
     // Cleanup.
-    let _ = tty::close_ref(slave);
+    drop(slave_backing);
 
     if !slave_still_exists {
-        klog_info!("TTY_TEST: BUG - slave freed while open_count > 0");
+        klog_info!("TTY_TEST: BUG - slave freed while still open");
         return TestResult::Fail;
     }
     TestResult::Pass
 }
 
-/// free_pair_if_unused does not free when one side has open_count > 0.
-pub fn test_partial_open_no_free() -> TestResult {
+/// Closing the master frees the master slot at once, while any remaining
+/// slave open keeps the slave slot alive until its last open drops.
+pub fn test_extra_slave_open_keeps_slave_alive() -> TestResult {
     tty::table::tty_table_init();
 
-    let master = tty::pty_alloc().unwrap();
+    let (master, master_backing) = tty::pty_alloc().unwrap();
     let slave = TtyIndex(tty::get_pty_number(master).unwrap() as u8);
-    tty::open_ref(master).unwrap();
-    tty::open_ref(slave).unwrap();
+    tty::set_pty_lock(master, false).unwrap();
+    let slave_open1 = tty::pty_open_slave(slave).unwrap();
+    let slave_open2 = tty::pty_open_slave(slave).unwrap();
 
-    // Open slave a second time to keep it alive.
-    tty::open_ref(slave).unwrap();
+    // Closing the master frees the master slot and hangs up the slave, but
+    // the two slave opens keep the slave slot alive.
+    drop(master_backing);
+    let master_freed = TTY_SLOTS[master.0 as usize].lock().is_none();
+    let slave_alive_after_master = TTY_SLOTS[slave.0 as usize].lock().is_some();
 
-    // Close master (open_count → 0, hangup slave).
-    let _ = tty::close_ref(master);
+    // One slave open remains: still alive.
+    drop(slave_open1);
+    let slave_alive_after_one = TTY_SLOTS[slave.0 as usize].lock().is_some();
 
-    // Close slave once (open_count → 1, still alive).
-    let _ = tty::close_ref(slave);
+    // Last slave open closes: slot freed.
+    drop(slave_open2);
+    let slave_freed = TTY_SLOTS[slave.0 as usize].lock().is_none();
 
-    let slave_alive = TTY_SLOTS[slave.0 as usize].lock().is_some();
-    let master_alive = TTY_SLOTS[master.0 as usize].lock().is_some();
-
-    // Final close of slave (open_count → 0).
-    let _ = tty::close_ref(slave);
-
-    if !slave_alive {
-        klog_info!("TTY_TEST: BUG - slave freed with open_count > 0");
+    if !master_freed {
+        klog_info!("TTY_TEST: BUG - master slot not freed on last master close");
         return TestResult::Fail;
     }
-    // Master should still be alive because pair-free only happens when BOTH are 0.
-    if !master_alive {
-        klog_info!("TTY_TEST: BUG - master freed while slave still has open_count > 0");
+    if !slave_alive_after_master || !slave_alive_after_one {
+        klog_info!("TTY_TEST: BUG - slave freed while a slave open remained");
+        return TestResult::Fail;
+    }
+    if !slave_freed {
+        klog_info!("TTY_TEST: BUG - slave slot not freed after its last open closed");
         return TestResult::Fail;
     }
     TestResult::Pass
@@ -643,8 +619,8 @@ pub fn test_rapid_alloc_free_realloc() -> TestResult {
     tty::table::tty_table_init();
 
     for i in 0..3u8 {
-        let master = match tty::pty_alloc() {
-            Ok(idx) => idx,
+        let (master, _master_backing) = match tty::pty_alloc() {
+            Ok(pair) => pair,
             Err(err) => {
                 klog_info!("TTY_TEST: BUG - rapid alloc cycle {} failed: {:?}", i, err);
                 return TestResult::Fail;
@@ -652,8 +628,8 @@ pub fn test_rapid_alloc_free_realloc() -> TestResult {
         };
         let slave = TtyIndex(tty::get_pty_number(master).unwrap() as u8);
 
-        tty::open_ref(master).unwrap();
-        tty::open_ref(slave).unwrap();
+        tty::set_pty_lock(master, false).unwrap();
+        let _slave_backing = tty::pty_open_slave(slave).unwrap();
 
         // Verify data flows correctly on this pair.
         let saved = tty::get_termios(slave).unwrap();
@@ -666,8 +642,6 @@ pub fn test_rapid_alloc_free_realloc() -> TestResult {
         let read_ok = tty::read(slave, &mut buf, true) == Ok(1) && buf[0] == b'x';
 
         tty::set_termios(slave, &saved).unwrap();
-        let _ = tty::close_ref(slave);
-        let _ = tty::close_ref(master);
 
         if !write_ok || !read_ok {
             klog_info!(
@@ -686,20 +660,24 @@ pub fn test_rapid_alloc_free_realloc() -> TestResult {
 pub fn test_pty_open_slave_after_free() -> TestResult {
     tty::table::tty_table_init();
 
-    let master = tty::pty_alloc().unwrap();
+    let (master, master_backing) = tty::pty_alloc().unwrap();
     let slave = TtyIndex(tty::get_pty_number(master).unwrap() as u8);
-    tty::open_ref(master).unwrap();
-    tty::open_ref(slave).unwrap();
+    tty::set_pty_lock(master, false).unwrap();
+    let slave_backing = tty::pty_open_slave(slave).unwrap();
 
     // Free the pair.
-    let _ = tty::close_ref(slave);
-    let _ = tty::close_ref(master);
+    drop(slave_backing);
+    drop(master_backing);
 
     // Attempting to open the freed slave should fail.
-    let result = tty::pty_open_slave(slave);
-    match result {
+    match tty::pty_open_slave(slave) {
         Err(TtyError::NotAllocated) => TestResult::Pass,
-        other => {
+        Ok(backing) => {
+            klog_info!("TTY_TEST: BUG - pty_open_slave on freed slave unexpectedly succeeded");
+            drop(backing);
+            TestResult::Fail
+        }
+        Err(other) => {
             klog_info!(
                 "TTY_TEST: BUG - pty_open_slave on freed slave expected NotAllocated, got {:?}",
                 other
@@ -724,336 +702,227 @@ pub fn test_max_ttys_is_32() -> TestResult {
     TestResult::Pass
 }
 
-/// PtyPeerHandle stores index and generation.
-pub fn test_pty_peer_handle_creation() -> TestResult {
-    let handle = PtyPeerHandle::new(TtyIndex(5), 42);
-    if handle.idx != TtyIndex(5) {
-        klog_info!("TTY_TEST: BUG - PtyPeerHandle idx mismatch");
-        return TestResult::Fail;
-    }
-    if handle.generation != 42 {
-        klog_info!("TTY_TEST: BUG - PtyPeerHandle generation mismatch");
-        return TestResult::Fail;
-    }
-    TestResult::Pass
-}
-
-/// PtyPeerHandle::snapshot captures the current generation from TTY_GENERATIONS.
-pub fn test_pty_peer_handle_snapshot() -> TestResult {
-    use core::sync::atomic::Ordering;
-    // Use a high slot unlikely to be in use (slot 30).
-    let test_slot: usize = 30;
-    let old_gen = TTY_GENERATIONS[test_slot].load(Ordering::Acquire);
-    let handle = PtyPeerHandle::snapshot(TtyIndex(test_slot as u8));
-    if handle.generation != old_gen {
-        klog_info!(
-            "TTY_TEST: BUG - snapshot generation {} != expected {}",
-            handle.generation,
-            old_gen
-        );
-        return TestResult::Fail;
-    }
-    TestResult::Pass
-}
-
-/// Generation counter is bumped when a PTY pair is freed.
-pub fn test_generation_bumped_on_free() -> TestResult {
-    use core::sync::atomic::Ordering;
-    // Allocate a PTY pair.
-    let master_idx = match tty::pty_alloc() {
-        Ok(idx) => idx,
+/// A master's peer link upgrades to the live slave backing.
+pub fn test_master_peer_link_targets_slave() -> TestResult {
+    tty::table::tty_table_init();
+    let (master, _master_backing) = match tty::pty_alloc() {
+        Ok(pair) => pair,
         Err(_) => {
             klog_info!("TTY_TEST: BUG - pty_alloc failed");
             return TestResult::Fail;
         }
     };
-    let slave_num = match tty::get_pty_number(master_idx) {
-        Ok(n) => n,
-        Err(_) => {
-            klog_info!("TTY_TEST: BUG - get_pty_number failed");
-            return TestResult::Fail;
+    let slave = TtyIndex(tty::get_pty_number(master).unwrap() as u8);
+    let peer = peer_link_of(master);
+    match peer.upgrade() {
+        Some(slave_backing) if slave_backing.index() == slave => TestResult::Pass,
+        _ => {
+            klog_info!("TTY_TEST: BUG - master peer link should upgrade to the slave backing");
+            TestResult::Fail
         }
-    };
-    let slave_idx = TtyIndex(slave_num as u8);
-    let master_slot = master_idx.0 as usize;
-    let slave_slot = slave_idx.0 as usize;
-
-    let gen_master_before = TTY_GENERATIONS[master_slot].load(Ordering::Acquire);
-    let gen_slave_before = TTY_GENERATIONS[slave_slot].load(Ordering::Acquire);
-
-    // Free the pair (both have open_count 0 since we never opened them).
-    crate::tty::pty::free_pair_if_unused(master_idx, slave_idx);
-
-    let gen_master_after = TTY_GENERATIONS[master_slot].load(Ordering::Acquire);
-    let gen_slave_after = TTY_GENERATIONS[slave_slot].load(Ordering::Acquire);
-
-    if gen_master_after != gen_master_before + 1 {
-        klog_info!(
-            "TTY_TEST: BUG - master generation not bumped: {} -> {}",
-            gen_master_before,
-            gen_master_after
-        );
-        return TestResult::Fail;
     }
-    if gen_slave_after != gen_slave_before + 1 {
-        klog_info!(
-            "TTY_TEST: BUG - slave generation not bumped: {} -> {}",
-            gen_slave_before,
-            gen_slave_after
-        );
-        return TestResult::Fail;
-    }
-    TestResult::Pass
 }
 
-/// Stale PtyPeerHandle is detected by validate_peer.
-pub fn test_stale_handle_detected() -> TestResult {
-    // Allocate a PTY pair.
-    // Allocate a PTY pair.
-    let master_idx = match tty::pty_alloc() {
-        Ok(idx) => idx,
+/// A slave's peer link upgrades to the live master backing.
+pub fn test_slave_peer_link_targets_master() -> TestResult {
+    tty::table::tty_table_init();
+    let (master, _master_backing) = match tty::pty_alloc() {
+        Ok(pair) => pair,
         Err(_) => {
             klog_info!("TTY_TEST: BUG - pty_alloc failed");
             return TestResult::Fail;
         }
     };
-    let slave_num = match tty::get_pty_number(master_idx) {
-        Ok(n) => n,
+    let slave = TtyIndex(tty::get_pty_number(master).unwrap() as u8);
+    let peer = peer_link_of(slave);
+    match peer.upgrade() {
+        Some(master_backing) if master_backing.index() == master => TestResult::Pass,
+        _ => {
+            klog_info!("TTY_TEST: BUG - slave peer link should upgrade to the master backing");
+            TestResult::Fail
+        }
+    }
+}
+
+/// Freeing a PTY pair drops both backings: their weak links stop upgrading.
+pub fn test_backing_dies_on_free() -> TestResult {
+    tty::table::tty_table_init();
+    let (master, master_backing) = match tty::pty_alloc() {
+        Ok(pair) => pair,
         Err(_) => {
-            klog_info!("TTY_TEST: BUG - get_pty_number failed");
+            klog_info!("TTY_TEST: BUG - pty_alloc failed");
             return TestResult::Fail;
         }
     };
-    let slave_idx = TtyIndex(slave_num as u8);
+    let master_weak = KArc::downgrade(&master_backing);
+    // The master's peer link points at the slave backing.
+    let slave_weak = peer_link_of(master);
 
-    // Create a handle with the current generation.
-    let stale_handle = PtyPeerHandle::snapshot(slave_idx);
+    // With no slave open, dropping the last master backing frees the pair.
+    drop(master_backing);
 
-    // Verify the handle is valid before freeing.
-    if !crate::tty::pty::validate_peer(&stale_handle) {
-        klog_info!("TTY_TEST: BUG - handle should be valid before free");
+    if master_weak.upgrade().is_some() {
+        klog_info!("TTY_TEST: BUG - master backing outlived its last close");
+        return TestResult::Fail;
+    }
+    if slave_weak.upgrade().is_some() {
+        klog_info!("TTY_TEST: BUG - slave backing outlived pair teardown");
+        return TestResult::Fail;
+    }
+    TestResult::Pass
+}
+
+/// A peer link captured before teardown stops upgrading once the pair frees.
+pub fn test_stale_peer_link_detected() -> TestResult {
+    tty::table::tty_table_init();
+    let (master, master_backing) = match tty::pty_alloc() {
+        Ok(pair) => pair,
+        Err(_) => {
+            klog_info!("TTY_TEST: BUG - pty_alloc failed");
+            return TestResult::Fail;
+        }
+    };
+    let slave = TtyIndex(tty::get_pty_number(master).unwrap() as u8);
+
+    // Capture the slave's peer link (→ master) while the pair is live.
+    let peer = peer_link_of(slave);
+    if peer.upgrade().is_none() {
+        klog_info!("TTY_TEST: BUG - peer link should upgrade while the pair is live");
         return TestResult::Fail;
     }
 
     // Free the pair.
-    crate::tty::pty::free_pair_if_unused(master_idx, slave_idx);
+    drop(master_backing);
 
-    // Now the handle should be stale.
-    if crate::tty::pty::validate_peer(&stale_handle) {
-        klog_info!("TTY_TEST: BUG - handle should be stale after free");
+    if peer.upgrade().is_some() {
+        klog_info!("TTY_TEST: BUG - peer link should be stale after teardown");
         return TestResult::Fail;
     }
     TestResult::Pass
 }
 
-/// PTY alloc captures the correct generation in peer handles.
-pub fn test_pty_alloc_captures_generation() -> TestResult {
-    use core::sync::atomic::Ordering;
-    let master_idx = match tty::pty_alloc() {
-        Ok(idx) => idx,
+/// pty_alloc wires the master's peer link to the slave that get_pty_number
+/// reports.
+pub fn test_pty_alloc_links_master_to_slave() -> TestResult {
+    tty::table::tty_table_init();
+    let (master, _master_backing) = match tty::pty_alloc() {
+        Ok(pair) => pair,
         Err(_) => {
             klog_info!("TTY_TEST: BUG - pty_alloc failed");
             return TestResult::Fail;
         }
     };
-    let slave_num = match tty::get_pty_number(master_idx) {
-        Ok(n) => n,
-        Err(_) => {
-            klog_info!("TTY_TEST: BUG - get_pty_number failed");
-            return TestResult::Fail;
-        }
-    };
-    let slave_idx = TtyIndex(slave_num as u8);
-
-    // Read the peer handle from the master's driver.
-    let master_peer_gen = {
-        let guard = TTY_SLOTS[master_idx.0 as usize].lock();
-        match guard.as_ref() {
-            Some(tty) => match &tty.driver {
-                TtyDriverKind::PtyMaster { peer } => peer.generation,
-                _ => {
-                    klog_info!("TTY_TEST: BUG - master not PtyMaster");
-                    return TestResult::Fail;
-                }
-            },
-            None => {
-                klog_info!("TTY_TEST: BUG - master slot empty");
-                return TestResult::Fail;
-            }
-        }
-    };
-
-    // The peer generation should match the current generation of the slave slot.
-    let slave_gen = TTY_GENERATIONS[slave_idx.0 as usize].load(Ordering::Acquire);
-    if master_peer_gen != slave_gen {
-        klog_info!(
-            "TTY_TEST: BUG - master peer gen {} != slave slot gen {}",
-            master_peer_gen,
-            slave_gen
-        );
-        // Clean up.
-        crate::tty::pty::free_pair_if_unused(master_idx, slave_idx);
+    let reported_slave = TtyIndex(tty::get_pty_number(master).unwrap() as u8);
+    let peer = peer_link_of(master);
+    let linked_slave = peer.upgrade().map(|b| b.index());
+    if linked_slave != Some(reported_slave) {
+        klog_info!("TTY_TEST: BUG - master peer link disagrees with get_pty_number");
         return TestResult::Fail;
     }
-
-    // Clean up.
-    crate::tty::pty::free_pair_if_unused(master_idx, slave_idx);
     TestResult::Pass
 }
 
-/// Stale master write after free/realloc is a safe no-op.
+/// A master write through a peer link captured before free is a safe no-op.
 pub fn test_stale_write_safe_noop() -> TestResult {
-    // Allocate pair A.
-    let master_a = match tty::pty_alloc() {
-        Ok(idx) => idx,
+    tty::table::tty_table_init();
+
+    // Pair A.
+    let (master_a, master_a_backing) = match tty::pty_alloc() {
+        Ok(pair) => pair,
         Err(_) => {
             klog_info!("TTY_TEST: BUG - first pty_alloc failed");
             return TestResult::Fail;
         }
     };
-    let slave_a_num = match tty::get_pty_number(master_a) {
-        Ok(n) => n,
-        Err(_) => {
-            klog_info!("TTY_TEST: BUG - get_pty_number failed");
-            return TestResult::Fail;
-        }
-    };
-    let slave_a = TtyIndex(slave_a_num as u8);
-
-    // Capture the peer handle from master A (points to slave A).
-    let stale_peer = {
-        let guard = TTY_SLOTS[master_a.0 as usize].lock();
-        match guard.as_ref() {
-            Some(tty) => match &tty.driver {
-                TtyDriverKind::PtyMaster { peer } => *peer,
-                _ => {
-                    klog_info!("TTY_TEST: BUG - not PtyMaster");
-                    return TestResult::Fail;
-                }
-            },
-            None => {
-                klog_info!("TTY_TEST: BUG - master slot empty");
-                return TestResult::Fail;
-            }
-        }
-    };
+    // Capture master A's peer link (→ slave A) before tearing it down.
+    let stale_peer = peer_link_of(master_a);
 
     // Free pair A.
-    crate::tty::pty::free_pair_if_unused(master_a, slave_a);
+    drop(master_a_backing);
 
-    // Allocate pair B — may reuse the same slots.
-    let master_b = match tty::pty_alloc() {
-        Ok(idx) => idx,
+    // Pair B may reuse the same slots.
+    let (master_b, _master_b_backing) = match tty::pty_alloc() {
+        Ok(pair) => pair,
         Err(_) => {
             klog_info!("TTY_TEST: BUG - second pty_alloc failed");
             return TestResult::Fail;
         }
     };
-    let slave_b_num = match tty::get_pty_number(master_b) {
-        Ok(n) => n,
-        Err(_) => {
-            klog_info!("TTY_TEST: BUG - get_pty_number for B failed");
-            return TestResult::Fail;
-        }
-    };
-    let slave_b = TtyIndex(slave_b_num as u8);
+    let slave_b = TtyIndex(tty::get_pty_number(master_b).unwrap() as u8);
 
-    // Use the stale peer handle to attempt a write — should be a no-op.
-    crate::tty::pty::master_write(stale_peer, b"stale data");
-
-    // Verify pair B's slave has no unexpected data.
-    // Drain slave B to check no stale data leaked in.
+    // The stale link no longer upgrades: the write lands nowhere.
+    let written = crate::tty::pty::master_write(&stale_peer, b"stale data");
     drain_tty_nonblock(slave_b);
 
-    // Clean up pair B.
-    crate::tty::pty::free_pair_if_unused(master_b, slave_b);
+    if written != 0 {
+        klog_info!(
+            "TTY_TEST: BUG - stale master_write accepted {} bytes, want 0",
+            written
+        );
+        return TestResult::Fail;
+    }
     TestResult::Pass
 }
 
-/// Rapid alloc/free/realloc stress: generations increase monotonically.
-pub fn test_rapid_alloc_free_stress() -> TestResult {
-    use core::sync::atomic::Ordering;
+/// Rapid alloc/free cycles: each freed backing stops upgrading.
+pub fn test_rapid_alloc_free_backing_dies() -> TestResult {
+    tty::table::tty_table_init();
     for _ in 0..10 {
-        let master_idx = match tty::pty_alloc() {
-            Ok(idx) => idx,
+        let (_master, master_backing) = match tty::pty_alloc() {
+            Ok(pair) => pair,
             Err(_) => {
                 klog_info!("TTY_TEST: BUG - pty_alloc failed during stress");
                 return TestResult::Fail;
             }
         };
-        let slave_num = match tty::get_pty_number(master_idx) {
-            Ok(n) => n,
-            Err(_) => {
-                klog_info!("TTY_TEST: BUG - get_pty_number failed during stress");
-                return TestResult::Fail;
-            }
-        };
-        let slave_idx = TtyIndex(slave_num as u8);
-        let master_slot = master_idx.0 as usize;
-
-        let gen_before = TTY_GENERATIONS[master_slot].load(Ordering::Acquire);
-        crate::tty::pty::free_pair_if_unused(master_idx, slave_idx);
-        let gen_after = TTY_GENERATIONS[master_slot].load(Ordering::Acquire);
-
-        if gen_after != gen_before + 1 {
-            klog_info!(
-                "TTY_TEST: BUG - generation not monotonic: {} -> {}",
-                gen_before,
-                gen_after
-            );
+        let master_weak = KArc::downgrade(&master_backing);
+        drop(master_backing);
+        if master_weak.upgrade().is_some() {
+            klog_info!("TTY_TEST: BUG - freed backing still upgrades in stress loop");
             return TestResult::Fail;
         }
     }
     TestResult::Pass
 }
 
-/// Data flow still works correctly through generation-tagged handles.
-pub fn test_data_flow_with_generation() -> TestResult {
-    let master_idx = match tty::pty_alloc() {
-        Ok(idx) => idx,
+/// Data flows master→slave through the live peer link.
+pub fn test_data_flow_through_peer_link() -> TestResult {
+    tty::table::tty_table_init();
+    let (master, _master_backing) = match tty::pty_alloc() {
+        Ok(pair) => pair,
         Err(_) => {
             klog_info!("TTY_TEST: BUG - pty_alloc failed");
             return TestResult::Fail;
         }
     };
-    // Open both sides.
-    let _ = tty::open_ref(master_idx);
-    let slave_num = match tty::get_pty_number(master_idx) {
-        Ok(n) => n,
-        Err(_) => {
-            klog_info!("TTY_TEST: BUG - get_pty_number failed");
-            return TestResult::Fail;
-        }
-    };
-    let slave_idx = TtyIndex(slave_num as u8);
-    let _ = tty::open_ref(slave_idx);
+    let slave = TtyIndex(tty::get_pty_number(master).unwrap() as u8);
+    tty::set_pty_lock(master, false).unwrap();
+    let _slave_backing = tty::pty_open_slave(slave).unwrap();
 
     // Master write -> slave read (through slave's N_TTY ldisc).
-    let _ = tty::write(master_idx, b"gen\n", false);
+    let _ = tty::write(master, b"gen\n", false);
     let mut buf = [0u8; 16];
-    match tty::read(slave_idx, &mut buf, true) {
-        Ok(n) if n == 4 && &buf[..4] == b"gen\n" => {}
+    match tty::read(slave, &mut buf, true) {
+        Ok(n) if n == 4 && &buf[..4] == b"gen\n" => TestResult::Pass,
         other => {
             klog_info!(
                 "TTY_TEST: BUG - master->slave data flow failed: {:?}",
                 other
             );
-            let _ = tty::close_ref(slave_idx);
-            let _ = tty::close_ref(master_idx);
-            return TestResult::Fail;
+            TestResult::Fail
         }
     }
-
-    let _ = tty::close_ref(slave_idx);
-    let _ = tty::close_ref(master_idx);
-    TestResult::Pass
 }
 
-/// validate_peer returns false for out-of-range index.
-pub fn test_validate_peer_out_of_range() -> TestResult {
-    let handle = PtyPeerHandle::new(TtyIndex(255), 0);
-    if crate::tty::pty::validate_peer(&handle) {
-        klog_info!("TTY_TEST: BUG - validate_peer should reject out-of-range index");
+/// A dangling (never-linked) peer accepts no writes.
+pub fn test_dangling_peer_write_is_noop() -> TestResult {
+    let dangling: KWeak<TtyBacking> = KWeak::new();
+    let written = crate::tty::pty::master_write(&dangling, b"x");
+    if written != 0 {
+        klog_info!(
+            "TTY_TEST: BUG - write through a dangling peer accepted {} bytes",
+            written
+        );
         return TestResult::Fail;
     }
     TestResult::Pass
@@ -1061,37 +930,20 @@ pub fn test_validate_peer_out_of_range() -> TestResult {
 
 /// Multiple PTY pairs can be allocated with 32 slots available.
 pub fn test_multiple_pty_pairs() -> TestResult {
-    // With 32 slots and 2 reserved (serial + vconsole), we should be able
-    // to allocate up to 15 pairs (30 slots / 2).
-    let mut pairs: [(TtyIndex, TtyIndex); 10] = [(TtyIndex(0), TtyIndex(0)); 10];
-    for i in 0..10 {
-        let master = match tty::pty_alloc() {
-            Ok(idx) => idx,
+    tty::table::tty_table_init();
+    // With 32 slots and 2 reserved (serial + vconsole), several pairs fit at
+    // once. Hold every master backing so the pairs stay live simultaneously.
+    let mut backings: [Option<KArc<TtyBacking>>; 10] = [const { None }; 10];
+    for (i, slot) in backings.iter_mut().enumerate() {
+        match tty::pty_alloc() {
+            Ok((_master, backing)) => *slot = Some(backing),
             Err(_) => {
                 klog_info!("TTY_TEST: BUG - pty_alloc failed at pair {}", i);
-                // Clean up what we allocated.
-                for j in 0..i {
-                    crate::tty::pty::free_pair_if_unused(pairs[j].0, pairs[j].1);
-                }
                 return TestResult::Fail;
             }
-        };
-        let slave_num = match tty::get_pty_number(master) {
-            Ok(n) => n,
-            Err(_) => {
-                klog_info!("TTY_TEST: BUG - get_pty_number failed at pair {}", i);
-                for j in 0..i {
-                    crate::tty::pty::free_pair_if_unused(pairs[j].0, pairs[j].1);
-                }
-                return TestResult::Fail;
-            }
-        };
-        pairs[i] = (master, TtyIndex(slave_num as u8));
+        }
     }
-    // Clean up all pairs.
-    for i in 0..10 {
-        crate::tty::pty::free_pair_if_unused(pairs[i].0, pairs[i].1);
-    }
+    // Dropping every held backing frees all pairs.
     TestResult::Pass
 }
 // ===========================================================================
@@ -1122,8 +974,8 @@ pub fn test_pty_lock_ioctl_constants() -> TestResult {
 pub fn test_slave_locked_by_default() -> TestResult {
     tty::table::tty_table_init();
 
-    let master = match tty::pty_alloc() {
-        Ok(idx) => idx,
+    let (master, _master_backing) = match tty::pty_alloc() {
+        Ok(pair) => pair,
         Err(e) => {
             klog_info!("TTY_TEST: BUG - pty_alloc failed: {:?}", e);
             return TestResult::Fail;
@@ -1141,11 +993,9 @@ pub fn test_slave_locked_by_default() -> TestResult {
     // Slave should be locked by default.
     if !crate::tty::pty::is_slave_locked(slave) {
         klog_info!("TTY_TEST: BUG - new PTY slave should be locked by default");
-        crate::tty::pty::free_pair_if_unused(master, slave);
         return TestResult::Fail;
     }
 
-    crate::tty::pty::free_pair_if_unused(master, slave);
     TestResult::Pass
 }
 
@@ -1153,8 +1003,8 @@ pub fn test_slave_locked_by_default() -> TestResult {
 pub fn test_locked_slave_open_rejected() -> TestResult {
     tty::table::tty_table_init();
 
-    let master = match tty::pty_alloc() {
-        Ok(idx) => idx,
+    let (master, _master_backing) = match tty::pty_alloc() {
+        Ok(pair) => pair,
         Err(e) => {
             klog_info!("TTY_TEST: BUG - pty_alloc failed: {:?}", e);
             return TestResult::Fail;
@@ -1166,17 +1016,20 @@ pub fn test_locked_slave_open_rejected() -> TestResult {
     // Slave is locked (default) — open should fail.
     match tty::pty_open_slave(slave) {
         Err(TtyError::PermissionDenied) => {} // expected
-        other => {
+        Ok(backing) => {
+            klog_info!("TTY_TEST: BUG - locked slave open unexpectedly succeeded");
+            drop(backing);
+            return TestResult::Fail;
+        }
+        Err(other) => {
             klog_info!(
                 "TTY_TEST: BUG - locked slave open should return PermissionDenied, got {:?}",
                 other
             );
-            crate::tty::pty::free_pair_if_unused(master, slave);
             return TestResult::Fail;
         }
     }
 
-    crate::tty::pty::free_pair_if_unused(master, slave);
     TestResult::Pass
 }
 
@@ -1184,8 +1037,8 @@ pub fn test_locked_slave_open_rejected() -> TestResult {
 pub fn test_unlock_enables_open() -> TestResult {
     tty::table::tty_table_init();
 
-    let master = match tty::pty_alloc() {
-        Ok(idx) => idx,
+    let (master, _master_backing) = match tty::pty_alloc() {
+        Ok(pair) => pair,
         Err(e) => {
             klog_info!("TTY_TEST: BUG - pty_alloc failed: {:?}", e);
             return TestResult::Fail;
@@ -1197,22 +1050,18 @@ pub fn test_unlock_enables_open() -> TestResult {
     // Unlock the slave.
     if let Err(e) = tty::set_pty_lock(master, false) {
         klog_info!("TTY_TEST: BUG - set_pty_lock(false) failed: {:?}", e);
-        crate::tty::pty::free_pair_if_unused(master, slave);
         return TestResult::Fail;
     }
 
     // Now open should succeed.
     match tty::pty_open_slave(slave) {
-        Ok(_count) => {}
+        Ok(backing) => drop(backing),
         Err(e) => {
             klog_info!("TTY_TEST: BUG - unlocked slave open failed: {:?}", e);
-            crate::tty::pty::free_pair_if_unused(master, slave);
             return TestResult::Fail;
         }
     }
 
-    let _ = tty::close_ref(slave);
-    crate::tty::pty::free_pair_if_unused(master, slave);
     TestResult::Pass
 }
 
@@ -1220,15 +1069,13 @@ pub fn test_unlock_enables_open() -> TestResult {
 pub fn test_get_lock_round_trip() -> TestResult {
     tty::table::tty_table_init();
 
-    let master = match tty::pty_alloc() {
-        Ok(idx) => idx,
+    let (master, _master_backing) = match tty::pty_alloc() {
+        Ok(pair) => pair,
         Err(e) => {
             klog_info!("TTY_TEST: BUG - pty_alloc failed: {:?}", e);
             return TestResult::Fail;
         }
     };
-    let slave_num = tty::get_pty_number(master).unwrap();
-    let slave = TtyIndex(slave_num as u8);
 
     // Default: locked.
     match tty::get_pty_lock(master) {
@@ -1238,7 +1085,6 @@ pub fn test_get_lock_round_trip() -> TestResult {
                 "TTY_TEST: BUG - get_pty_lock should return Ok(true), got {:?}",
                 other
             );
-            crate::tty::pty::free_pair_if_unused(master, slave);
             return TestResult::Fail;
         }
     }
@@ -1252,7 +1098,6 @@ pub fn test_get_lock_round_trip() -> TestResult {
                 "TTY_TEST: BUG - after unlock, get_pty_lock should return Ok(false), got {:?}",
                 other
             );
-            crate::tty::pty::free_pair_if_unused(master, slave);
             return TestResult::Fail;
         }
     }
@@ -1266,12 +1111,10 @@ pub fn test_get_lock_round_trip() -> TestResult {
                 "TTY_TEST: BUG - after re-lock, get_pty_lock should return Ok(true), got {:?}",
                 other
             );
-            crate::tty::pty::free_pair_if_unused(master, slave);
             return TestResult::Fail;
         }
     }
 
-    crate::tty::pty::free_pair_if_unused(master, slave);
     TestResult::Pass
 }
 
@@ -1279,8 +1122,8 @@ pub fn test_get_lock_round_trip() -> TestResult {
 pub fn test_set_lock_non_master_rejected() -> TestResult {
     tty::table::tty_table_init();
 
-    let master = match tty::pty_alloc() {
-        Ok(idx) => idx,
+    let (master, _master_backing) = match tty::pty_alloc() {
+        Ok(pair) => pair,
         Err(e) => {
             klog_info!("TTY_TEST: BUG - pty_alloc failed: {:?}", e);
             return TestResult::Fail;
@@ -1297,12 +1140,10 @@ pub fn test_set_lock_non_master_rejected() -> TestResult {
                 "TTY_TEST: BUG - set_pty_lock on slave should return NotAllocated, got {:?}",
                 other
             );
-            crate::tty::pty::free_pair_if_unused(master, slave);
             return TestResult::Fail;
         }
     }
 
-    crate::tty::pty::free_pair_if_unused(master, slave);
     TestResult::Pass
 }
 
@@ -1310,22 +1151,19 @@ pub fn test_set_lock_non_master_rejected() -> TestResult {
 pub fn test_data_flow_after_unlock() -> TestResult {
     tty::table::tty_table_init();
 
-    let master = match tty::pty_alloc() {
-        Ok(idx) => idx,
+    let (master, _master_backing) = match tty::pty_alloc() {
+        Ok(pair) => pair,
         Err(e) => {
             klog_info!("TTY_TEST: BUG - pty_alloc failed: {:?}", e);
             return TestResult::Fail;
         }
     };
-    let _ = tty::open_ref(master);
     let slave_num = tty::get_pty_number(master).unwrap();
     let slave = TtyIndex(slave_num as u8);
 
-    // Unlock slave.
+    // Unlock and open slave.
     tty::set_pty_lock(master, false).unwrap();
-
-    // Open slave.
-    tty::pty_open_slave(slave).unwrap();
+    let _slave_backing = tty::pty_open_slave(slave).unwrap();
 
     // Set slave to raw mode for simple data flow.
     let saved = tty::get_termios(slave).unwrap();
@@ -1341,15 +1179,11 @@ pub fn test_data_flow_after_unlock() -> TestResult {
         other => {
             klog_info!("TTY_TEST: BUG - data flow after unlock failed: {:?}", other);
             tty::set_termios(slave, &saved).unwrap();
-            let _ = tty::close_ref(slave);
-            let _ = tty::close_ref(master);
             return TestResult::Fail;
         }
     }
 
     tty::set_termios(slave, &saved).unwrap();
-    let _ = tty::close_ref(slave);
-    let _ = tty::close_ref(master);
     TestResult::Pass
 }
 
@@ -1357,24 +1191,22 @@ pub fn test_data_flow_after_unlock() -> TestResult {
 pub fn test_master_close_slave_hangup() -> TestResult {
     tty::table::tty_table_init();
 
-    let master = match tty::pty_alloc() {
-        Ok(idx) => idx,
+    let (master, master_backing) = match tty::pty_alloc() {
+        Ok(pair) => pair,
         Err(e) => {
             klog_info!("TTY_TEST: BUG - pty_alloc failed: {:?}", e);
             return TestResult::Fail;
         }
     };
-    let _ = tty::open_ref(master);
     let slave_num = tty::get_pty_number(master).unwrap();
     let slave = TtyIndex(slave_num as u8);
 
     // Unlock and open slave.
     tty::set_pty_lock(master, false).unwrap();
-    tty::pty_open_slave(slave).unwrap();
+    let _slave_backing = tty::pty_open_slave(slave).unwrap();
 
-    // Close master -> slave should see hangup.
-    let _ = tty::close_ref(master);
-    crate::tty::pty::mark_peer_closed(slave);
+    // Closing the master hangs up the still-open slave.
+    drop(master_backing);
 
     // Read from slave should indicate peer closed (EOF or HungUp).
     let mut buf = [0u8; 16];
@@ -1382,12 +1214,10 @@ pub fn test_master_close_slave_hangup() -> TestResult {
         Ok(0) | Err(TtyError::HungUp) | Err(TtyError::WouldBlock) => {} // acceptable
         other => {
             klog_info!("TTY_TEST: BUG - slave read after master close: {:?}", other);
-            let _ = tty::close_ref(slave);
             return TestResult::Fail;
         }
     }
 
-    let _ = tty::close_ref(slave);
     TestResult::Pass
 }
 
@@ -1396,14 +1226,13 @@ pub fn test_multiple_pairs_with_locks() -> TestResult {
     tty::table::tty_table_init();
 
     let mut pairs: [(TtyIndex, TtyIndex); 5] = [(TtyIndex(0), TtyIndex(0)); 5];
+    // Hold every master backing so all five pairs stay live at once.
+    let mut backings: [Option<KArc<TtyBacking>>; 5] = [const { None }; 5];
     for i in 0..5 {
-        let master = match tty::pty_alloc() {
-            Ok(idx) => idx,
+        let (master, backing) = match tty::pty_alloc() {
+            Ok(pair) => pair,
             Err(_) => {
                 klog_info!("TTY_TEST: BUG - pty_alloc failed at pair {}", i);
-                for j in 0..i {
-                    crate::tty::pty::free_pair_if_unused(pairs[j].0, pairs[j].1);
-                }
                 return TestResult::Fail;
             }
         };
@@ -1411,20 +1240,15 @@ pub fn test_multiple_pairs_with_locks() -> TestResult {
             Ok(n) => n,
             Err(_) => {
                 klog_info!("TTY_TEST: BUG - get_pty_number failed at pair {}", i);
-                for j in 0..i {
-                    crate::tty::pty::free_pair_if_unused(pairs[j].0, pairs[j].1);
-                }
                 return TestResult::Fail;
             }
         };
         pairs[i] = (master, TtyIndex(slave_num as u8));
+        backings[i] = Some(backing);
 
         // Each pair's slave should be independently locked.
         if !crate::tty::pty::is_slave_locked(pairs[i].1) {
             klog_info!("TTY_TEST: BUG - pair {} slave not locked", i);
-            for j in 0..=i {
-                crate::tty::pty::free_pair_if_unused(pairs[j].0, pairs[j].1);
-            }
             return TestResult::Fail;
         }
     }
@@ -1434,25 +1258,17 @@ pub fn test_multiple_pairs_with_locks() -> TestResult {
 
     if crate::tty::pty::is_slave_locked(pairs[2].1) {
         klog_info!("TTY_TEST: BUG - pair 2 should be unlocked");
-        for i in 0..5 {
-            crate::tty::pty::free_pair_if_unused(pairs[i].0, pairs[i].1);
-        }
         return TestResult::Fail;
     }
     // Others still locked.
     for i in [0, 1, 3, 4] {
         if !crate::tty::pty::is_slave_locked(pairs[i].1) {
             klog_info!("TTY_TEST: BUG - pair {} should still be locked", i);
-            for j in 0..5 {
-                crate::tty::pty::free_pair_if_unused(pairs[j].0, pairs[j].1);
-            }
             return TestResult::Fail;
         }
     }
 
-    for i in 0..5 {
-        crate::tty::pty::free_pair_if_unused(pairs[i].0, pairs[i].1);
-    }
+    // Held backings drop here, freeing every pair.
     TestResult::Pass
 }
 
@@ -1568,7 +1384,10 @@ slopos_testing::stest!(
     name = test_pty_open_slave_prevents_free,
     suite = tty_test_pty_core
 );
-slopos_testing::stest!(name = test_partial_open_no_free, suite = tty_test_pty_core);
+slopos_testing::stest!(
+    name = test_extra_slave_open_keeps_slave_alive,
+    suite = tty_test_pty_core
+);
 slopos_testing::stest!(
     name = test_rapid_alloc_free_realloc,
     suite = tty_test_pty_core
@@ -1579,33 +1398,33 @@ slopos_testing::stest!(
 );
 slopos_testing::stest!(name = test_max_ttys_is_32, suite = tty_test_pty_core);
 slopos_testing::stest!(
-    name = test_pty_peer_handle_creation,
+    name = test_master_peer_link_targets_slave,
     suite = tty_test_pty_core
 );
 slopos_testing::stest!(
-    name = test_pty_peer_handle_snapshot,
+    name = test_slave_peer_link_targets_master,
+    suite = tty_test_pty_core
+);
+slopos_testing::stest!(name = test_backing_dies_on_free, suite = tty_test_pty_core);
+slopos_testing::stest!(
+    name = test_stale_peer_link_detected,
     suite = tty_test_pty_core
 );
 slopos_testing::stest!(
-    name = test_generation_bumped_on_free,
-    suite = tty_test_pty_core
-);
-slopos_testing::stest!(name = test_stale_handle_detected, suite = tty_test_pty_core);
-slopos_testing::stest!(
-    name = test_pty_alloc_captures_generation,
+    name = test_pty_alloc_links_master_to_slave,
     suite = tty_test_pty_core
 );
 slopos_testing::stest!(name = test_stale_write_safe_noop, suite = tty_test_pty_core);
 slopos_testing::stest!(
-    name = test_rapid_alloc_free_stress,
+    name = test_rapid_alloc_free_backing_dies,
     suite = tty_test_pty_core
 );
 slopos_testing::stest!(
-    name = test_data_flow_with_generation,
+    name = test_data_flow_through_peer_link,
     suite = tty_test_pty_core
 );
 slopos_testing::stest!(
-    name = test_validate_peer_out_of_range,
+    name = test_dangling_peer_write_is_noop,
     suite = tty_test_pty_core
 );
 slopos_testing::stest!(name = test_multiple_pty_pairs, suite = tty_test_pty_core);

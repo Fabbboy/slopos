@@ -2,7 +2,7 @@ use core::ffi::c_int;
 use core::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 
 use slopos_abi::KernelErrno;
-use slopos_abi::file_ops::{FileKind, FileOps};
+use slopos_abi::file_ops::{FileBacking, FileKind, FileOps};
 use slopos_abi::fs::{
     FS_TYPE_CHARDEV, FS_TYPE_FILE, O_ACCMODE, O_APPEND, O_CREAT, O_RDONLY, O_RDWR, O_WRONLY,
     UserFsStat,
@@ -135,8 +135,9 @@ impl PollRegInfo {
 
 /// One open file description — POSIX's "open file description". The
 /// fd-table entry holds a [`KArc<OpenFile>`]; its strong count is the
-/// dup/fork alias count, and its `Drop` is the file close (it runs the
-/// backing object's `release` exactly once on last drop). Position and
+/// dup/fork alias count, and its `Drop` is the file close: dropping the
+/// owned `backing` reference is the teardown (the backing object's own
+/// `Drop` runs when the last reference to it goes away). Position and
 /// status flags live in atomics so dup/dup2/fork aliases share them per
 /// POSIX without taking a second lock.
 pub(super) struct OpenFile {
@@ -144,6 +145,10 @@ pub(super) struct OpenFile {
     pub(super) handle: usize,
     pub(super) position: AtomicU64,
     pub(super) status_flags: AtomicU32,
+    /// Owned lifetime token for the subsystem object behind `handle`.
+    /// `None` only for backings with no teardown (e.g. pidfd).
+    #[expect(dead_code, reason = "held for ownership; dropping it is the teardown")]
+    pub(super) backing: Option<KArc<dyn FileBacking>>,
 }
 
 impl OpenFile {
@@ -160,13 +165,19 @@ impl OpenFile {
     }
 }
 
-impl Drop for OpenFile {
-    fn drop(&mut self) {
-        // Single-owner teardown: the last strong `KArc<OpenFile>` to drop
-        // runs the backing object's release exactly once. (S1 keeps
-        // `FileOps::release` as the teardown shim; later stages move the
-        // teardown into the backing object's own `Drop`.)
-        self.ops.release(self.handle);
+/// A strong, opaque reference to an open file description, for holding a
+/// file alive outside any fd table (SCM_RIGHTS in-flight custody, ring
+/// in-flight ops). Dropping it is a close of that alias; installing it
+/// into an fd table transfers the alias. The referenced description —
+/// offset, status flags, backing — is shared, per POSIX fd-passing
+/// semantics.
+pub struct FileRef {
+    pub(super) open_file: KArc<OpenFile>,
+}
+
+impl FileRef {
+    pub fn kind(&self) -> FileKind {
+        self.open_file.ops.kind()
     }
 }
 
@@ -407,20 +418,24 @@ pub(super) fn find_free_slot_from(inner: &FileTableSlotInner, min_fd: usize) -> 
     None
 }
 
-/// Build a `KArc<OpenFile>`, materialising the `OpenFile` directly into
-/// the heap allocation (no stack rvalue — the atomics are tiny but this
-/// keeps the construction uniform and honours the stack-frame gate).
+/// Build a `KArc<OpenFile>` owning `backing`, materialising the
+/// `OpenFile` directly into the heap allocation (no stack rvalue — the
+/// atomics are tiny but this keeps the construction uniform and honours
+/// the stack-frame gate). On allocation failure the caller's `backing`
+/// was consumed and dropped — its teardown has already run.
 pub(super) fn new_open_file(
     ops: &'static dyn FileOps,
     handle: usize,
     status_flags: OpenMode,
     position: u64,
+    backing: Option<KArc<dyn FileBacking>>,
 ) -> Option<KArc<OpenFile>> {
     KArc::try_new(OpenFile {
         ops,
         handle,
         position: AtomicU64::new(position),
         status_flags: AtomicU32::new(status_flags.bits()),
+        backing,
     })
     .ok()
 }
@@ -556,21 +571,6 @@ impl FileOps for LocalTtyOps {
             }
         }
         total as isize
-    }
-
-    fn release(&self, handle: usize) {
-        if let Ok(idx) = local_tty_index(handle) {
-            let _ = tty::close_ref(idx);
-        }
-    }
-
-    fn dup(&self, handle: usize) -> Option<usize> {
-        let tty_idx = local_tty_index(handle).ok()?;
-        if tty::open_ref(tty_idx).is_ok() {
-            Some(handle)
-        } else {
-            None
-        }
     }
 
     fn poll_fused(&self, handle: usize, events: u16) -> slopos_abi::file_ops::FusedPollResult {

@@ -37,9 +37,11 @@ pub fn pidfd_open(process_id: u32, caller_task_id: u32, target_task_id: u32) -> 
     if slopos_ostd::task::accessors::task_parent_task_id(task) != Some(caller_task_id) {
         return Errno::EPERM.raw();
     }
+    // A pidfd carries no per-open kernel state, so it has no backing to drop.
     slopos_fs::fileio_open_fd_with_ops(
         process_id,
         &file_ops::PIDFD_FILE_OPS,
         target_task_id as usize,
+        None,
     )
 }

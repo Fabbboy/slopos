@@ -7,39 +7,36 @@ use slopos_ostd::KVec;
 use super::*;
 
 /// Mint one console `OpenFile` for fd `stdin`/`stdout`/`stderr`. Each
-/// owns an independent `tty::open_ref`, released by the `OpenFile`'s
-/// `Drop`. If the ref or the allocation fails, releases the ref it took
-/// (if any) and returns `None`.
+/// holds its own alias of the shared console backing, dropped with the
+/// `OpenFile`.
 fn open_console_fd(
     tty_ops: &'static dyn FileOps,
     console_tty: TtyIndex,
     flags: OpenMode,
+    backing: KArc<dyn slopos_abi::file_ops::FileBacking>,
 ) -> Option<KArc<OpenFile>> {
-    if tty::open_ref(console_tty).is_err() {
-        return None;
-    }
-    match new_open_file(tty_ops, console_tty.0 as usize, flags, 0) {
-        Some(of) => Some(of),
-        None => {
-            let _ = tty::close_ref(console_tty);
-            None
-        }
-    }
+    new_open_file(tty_ops, console_tty.0 as usize, flags, 0, Some(backing))
 }
 
 fn bootstrap_console_fds(inner: &mut FileTableSlotInner, external_ops: &ExternalOpsState) {
     let tty_ops = effective_tty_ops(external_ops);
     let console_tty = tty::default_console_tty();
 
-    // All-or-nothing: if any fails, the already-built `OpenFile`s drop at
-    // scope exit and release their own console refs automatically.
-    let Some(stdin) = open_console_fd(tty_ops, console_tty, OpenMode::READ) else {
+    // One console open shared by all three standard fds; each `OpenFile`
+    // holds a clone. All-or-nothing: on any failure the already-built
+    // `OpenFile`s (and the backing) drop at scope exit.
+    let Ok(backing) = tty::open_tty(console_tty) else {
         return;
     };
-    let Some(stdout) = open_console_fd(tty_ops, console_tty, OpenMode::WRITE) else {
+
+    let Some(stdin) = open_console_fd(tty_ops, console_tty, OpenMode::READ, backing.clone()) else {
         return;
     };
-    let Some(stderr) = open_console_fd(tty_ops, console_tty, OpenMode::WRITE) else {
+    let Some(stdout) = open_console_fd(tty_ops, console_tty, OpenMode::WRITE, backing.clone())
+    else {
+        return;
+    };
+    let Some(stderr) = open_console_fd(tty_ops, console_tty, OpenMode::WRITE, backing) else {
         return;
     };
 

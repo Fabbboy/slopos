@@ -1,8 +1,9 @@
 use slopos_abi::Errno;
-use slopos_abi::file_ops::{FileKind, FileOps};
+use slopos_abi::file_ops::{FileBacking, FileKind, FileOps};
 use slopos_abi::fs::UserFsStat;
 use slopos_abi::io::{IO_STAGING_SIZE, IoBufRead, IoBufWrite};
 use slopos_abi::syscall::{POLLIN, POLLOUT};
+use slopos_ostd::KArc;
 use slopos_ostd::handle::{Handle, HandleTable};
 use slopos_ostd::sync::{LOCK_LEVEL_REGISTRY, SpinLock};
 
@@ -14,14 +15,12 @@ const MAX_OPEN_VNODES: usize = 256;
 /// generation (see [`Handle::pack`]).
 const SLOT_BITS: u32 = 10;
 
-/// One open vnode: the filesystem it lives on, its inode, and a per-open
-/// refcount (bumped by `dup`, dropped by `release`). The slot index and
-/// generation are owned by the [`HandleTable`], so a handle left over from a
-/// closed file whose slot was recycled resolves to a typed miss.
+/// One open vnode: the filesystem it lives on and its inode. The slot index
+/// and generation are owned by the [`HandleTable`], so a handle left over
+/// from a closed file whose slot was recycled resolves to a typed miss.
 struct OpenVnode {
     fs: &'static dyn FileSystem,
     inode: InodeId,
-    refcount: u16,
 }
 
 static OPEN_VNODES: SpinLock<Option<HandleTable<OpenVnode>>> =
@@ -55,11 +54,41 @@ pub fn vfs_open_handle_flags(
         t.insert(OpenVnode {
             fs: opened.fs,
             inode: opened.inode,
-            refcount: 1,
         })
         .map(|h| h.pack(SLOT_BITS))
         .map_err(|_| slopos_abi::Errno::ENFILE)
     })
+}
+
+/// Sole owner of one `OpenVnode` table entry; dropping it closes the vnode.
+struct VnodeBacking {
+    handle: usize,
+}
+
+impl FileBacking for VnodeBacking {}
+
+impl Drop for VnodeBacking {
+    fn drop(&mut self) {
+        let h = Handle::<OpenVnode>::unpack(self.handle, SLOT_BITS);
+        with_table(|t| {
+            let _ = t.remove(h);
+        });
+    }
+}
+
+/// Wrap a handle from [`vfs_open_handle_flags`] into its owning backing.
+/// On allocation failure the vnode entry is removed before returning.
+pub(crate) fn vnode_backing(handle: usize) -> Option<KArc<dyn FileBacking>> {
+    match KArc::try_new(VnodeBacking { handle }) {
+        Ok(backing) => Some(backing),
+        Err(_) => {
+            let h = Handle::<OpenVnode>::unpack(handle, SLOT_BITS);
+            with_table(|t| {
+                let _ = t.remove(h);
+            });
+            None
+        }
+    }
 }
 
 impl FileOps for VfsFileOps {
@@ -152,36 +181,6 @@ impl FileOps for VfsFileOps {
             }
         }
         total as isize
-    }
-
-    fn release(&self, handle: usize) {
-        let h = Handle::<OpenVnode>::unpack(handle, SLOT_BITS);
-        with_table(|t| {
-            // Drop the open after `get_mut`'s borrow ends so the `remove`
-            // re-borrow does not overlap it.
-            let drop_it = match t.get_mut(h) {
-                Ok(v) if v.refcount > 1 => {
-                    v.refcount -= 1;
-                    false
-                }
-                Ok(_) => true,
-                Err(_) => false,
-            };
-            if drop_it {
-                let _ = t.remove(h);
-            }
-        });
-    }
-
-    fn dup(&self, handle: usize) -> Option<usize> {
-        let h = Handle::<OpenVnode>::unpack(handle, SLOT_BITS);
-        with_table(|t| match t.get_mut(h) {
-            Ok(v) => {
-                v.refcount = v.refcount.saturating_add(1);
-                Some(handle)
-            }
-            Err(_) => None,
-        })
     }
 
     fn poll_events(&self, _handle: usize, events: u16) -> u16 {

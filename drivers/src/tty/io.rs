@@ -95,7 +95,7 @@ impl Tty {
 
 pub use super::pty::{
     get_packet_mode, get_pty_lock, get_pty_number, is_pty_slave, is_slave_locked, pty_alloc,
-    pty_open_peer, pty_open_slave, queue_packet_event, set_packet_mode, set_pty_lock,
+    queue_packet_event, set_packet_mode, set_pty_lock,
 };
 
 // ---------------------------------------------------------------------------
@@ -140,8 +140,9 @@ pub fn push_input_batch(idx: TtyIndex, events: &[InputEvent]) {
     // output lives in the peer master's read buffer; it is discarded after
     // the slave lock drops (peer lock ordering) and before the caret echo
     // is routed, so `^C` lands in an empty buffer and is immediately
-    // visible even when a flooding foreground job had filled it.
-    let mut signal_flush_master: Option<usize> = None;
+    // visible even when a flooding foreground job had filled it. The held
+    // backing pins the master's slot until the flush lands.
+    let mut signal_flush_master: Option<slopos_ostd::KArc<super::backing::TtyBacking>> = None;
     let wake = {
         let mut guard = TTY_SLOTS[slot].lock();
         let tty = match guard.as_mut() {
@@ -200,14 +201,15 @@ pub fn push_input_batch(idx: TtyIndex, events: &[InputEvent]) {
             // its wait predicate re-runs.
             if flush {
                 if let TtyDriverKind::PtySlave { peer } = &tty.driver {
-                    let master_slot = peer.idx.0 as usize;
-                    tty.flags.remove(TtyFlags::THROTTLED);
-                    signal_flush_master = Some(master_slot);
-                    deferred.add_packet_event(
-                        idx,
-                        slopos_abi::syscall::TIOCPKT_FLUSHREAD
-                            | slopos_abi::syscall::TIOCPKT_FLUSHWRITE,
-                    );
+                    if let Some(master_pin) = peer.upgrade() {
+                        tty.flags.remove(TtyFlags::THROTTLED);
+                        signal_flush_master = Some(master_pin);
+                        deferred.add_packet_event(
+                            idx,
+                            slopos_abi::syscall::TIOCPKT_FLUSHREAD
+                                | slopos_abi::syscall::TIOCPKT_FLUSHWRITE,
+                        );
+                    }
                 }
             }
         }
@@ -215,8 +217,9 @@ pub fn push_input_batch(idx: TtyIndex, events: &[InputEvent]) {
         batch.should_wake
     };
 
-    if let Some(master_slot) = signal_flush_master {
-        if master_slot < MAX_TTYS {
+    if let Some(master_pin) = signal_flush_master {
+        let master_slot = master_pin.index().0 as usize;
+        {
             {
                 let mut guard = TTY_SLOTS[master_slot].lock();
                 if let Some(master) = guard.as_mut() {
@@ -327,16 +330,20 @@ fn drain_and_recover(
     {
         tty.flags.remove(TtyFlags::THROTTLED);
         if let TtyDriverKind::PtySlave { peer } = &tty.driver {
-            deferred.wake_output_and_poll(peer.idx.0 as usize);
-            woke_peers = true;
+            if let Some(master) = peer.upgrade() {
+                deferred.wake_output_and_poll(master.index().0 as usize);
+                woke_peers = true;
+            }
         }
     }
 
     if tty.ldisc.check_no_room_recovery() {
         deferred.wake_input_and_poll(slot);
         if let TtyDriverKind::PtySlave { peer } = &tty.driver {
-            deferred.wake_output_and_poll(peer.idx.0 as usize);
-            woke_peers = true;
+            if let Some(master) = peer.upgrade() {
+                deferred.wake_output_and_poll(master.index().0 as usize);
+                woke_peers = true;
+            }
         }
     }
 
@@ -866,18 +873,36 @@ pub fn write(idx: TtyIndex, data: &[u8], nonblock: bool) -> Result<usize, TtyErr
     // for expansion while keeping the stack buffer small.
     const OUT_BUF_CAP: usize = 256;
 
-    // Cache peer slot indices once — PTY peer relationships are
-    // immutable for the lifetime of the pair, so a single lock acquisition
-    // suffices.  Previously this required two separate locks.
-    let (peer_slave_slot, peer_master_slot): (Option<usize>, Option<usize>) = {
+    // Pin the PTY peer once — holding the backing keeps the peer's slot
+    // from being freed or reused for the whole write, so the cached slot
+    // indices below stay valid. A failed upgrade means the peer is gone:
+    // the write has nowhere to go (the master strongly holds its slave,
+    // so only the slave→master direction can observe this).
+    let (_peer_pin, peer_slave_slot, peer_master_slot): (
+        Option<slopos_ostd::KArc<super::backing::TtyBacking>>,
+        Option<usize>,
+        Option<usize>,
+    ) = {
         let guard = TTY_SLOTS[slot].lock();
         match guard.as_ref() {
             Some(tty) => match &tty.driver {
-                TtyDriverKind::PtyMaster { peer } => (Some(peer.idx.0 as usize), None),
-                TtyDriverKind::PtySlave { peer } => (None, Some(peer.idx.0 as usize)),
-                _ => (None, None),
+                TtyDriverKind::PtyMaster { peer } => match peer.upgrade() {
+                    Some(pin) => {
+                        let s = pin.index().0 as usize;
+                        (Some(pin), Some(s), None)
+                    }
+                    None => return Err(TtyError::HungUp),
+                },
+                TtyDriverKind::PtySlave { peer } => match peer.upgrade() {
+                    Some(pin) => {
+                        let m = pin.index().0 as usize;
+                        (Some(pin), None, Some(m))
+                    }
+                    None => return Err(TtyError::HungUp),
+                },
+                _ => (None, None, None),
             },
-            None => (None, None),
+            None => (None, None, None),
         }
     };
     let mut pos = 0;

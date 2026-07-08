@@ -74,13 +74,17 @@ define_syscall!(syscall_socket
             return Err(Errno::EPROTONOSUPPORT);
         }
         let handle = unix_socket::unix_create().ok_or(Errno::ENOMEM)?;
+        // The backing owns the endpoint from here: a failed install (or a
+        // failed backing allocation) closes it.
+        let backing =
+            unix_socket_file_ops::unix_socket_backing(handle).ok_or(Errno::ENOMEM)?;
         let fd = slopos_fs::fileio_open_fd_with_ops(
             process_id,
             &unix_socket_file_ops::UNIX_SOCKET_FILE_OPS,
             handle.as_usize(),
+            Some(backing),
         );
         if fd < 0 {
-            let _ = unix_socket::unix_close(handle);
             return Err(Errno::ENOMEM);
         }
         return Ok(fd as u64);
@@ -99,9 +103,10 @@ define_syscall!(syscall_socket
         return Err(errno_from_neg(sock_idx));
     }
 
-    let fd = slopos_fs::fileio_open_socket_fd(process_id, sock_idx as u32);
+    let backing =
+        slopos_net::socket_file_ops::socket_backing(sock_idx as u32).ok_or(Errno::ENOMEM)?;
+    let fd = slopos_fs::fileio_open_socket_fd(process_id, sock_idx as u32, Some(backing));
     if fd < 0 {
-        let _ = socket::socket_close(sock_idx as u32);
         return Err(Errno::ENOMEM);
     }
 
@@ -173,13 +178,15 @@ define_syscall!(syscall_accept
         SocketFd::Unix(sh) => {
             let accepted_handle =
                 unix_socket::unix_accept(sh).map_err(errno_from_neg)?;
+            let backing = unix_socket_file_ops::unix_socket_backing(accepted_handle)
+                .ok_or(Errno::ENOMEM)?;
             let new_fd = slopos_fs::fileio_open_fd_with_ops(
                 process_id,
                 &unix_socket_file_ops::UNIX_SOCKET_FILE_OPS,
                 accepted_handle.as_usize(),
+                Some(backing),
             );
             if new_fd < 0 {
-                let _ = unix_socket::unix_close(accepted_handle);
                 return Err(Errno::ENOMEM);
             }
             Ok(new_fd as u64)
@@ -201,9 +208,11 @@ define_syscall!(syscall_accept
                 return Err(errno_from_neg(accepted_idx));
             }
 
-            let new_fd = slopos_fs::fileio_open_socket_fd(process_id, accepted_idx as u32);
+            let backing = slopos_net::socket_file_ops::socket_backing(accepted_idx as u32)
+                .ok_or(Errno::ENOMEM)?;
+            let new_fd =
+                slopos_fs::fileio_open_socket_fd(process_id, accepted_idx as u32, Some(backing));
             if new_fd < 0 {
-                let _ = socket::socket_close(accepted_idx as u32);
                 return Err(Errno::ENOMEM);
             }
 
@@ -578,9 +587,11 @@ define_syscall!(syscall_sendmsg
         copy_bytes_from_user(user_data, &mut scratch[..data_len]).map_err(|_| Errno::EFAULT)?;
     }
 
-    let mut inflight: [(usize, &'static dyn slopos_abi::file_ops::FileOps); SCM_MAX_FDS] =
-        [(0, slopos_mm::memfd::dummy_file_ops()); SCM_MAX_FDS];
-    let mut fd_count = 0usize;
+    // Owned aliases of the fds being passed. Each shares the sender's
+    // open-file description (offset, flags, backing) per POSIX fd-passing
+    // semantics; on any error return the vec drops, closing them.
+    let mut files: slopos_ostd::KVec<slopos_fs::FileRef> =
+        slopos_ostd::KVec::with_capacity(SCM_MAX_FDS).map_err(|_| Errno::ENOMEM)?;
 
     if msg.control_len >= core::mem::size_of::<CmsgHdr>() as u64 && msg.control != 0 {
         let cmsg_ptr = MmUserPtr::<CmsgHdr>::try_new(msg.control).map_err(|_| Errno::EFAULT)?;
@@ -602,41 +613,18 @@ define_syscall!(syscall_sendmsg
                         [..fd_bytes];
                 copy_bytes_from_user(user_fds, fd_buf_bytes).map_err(|_| Errno::EFAULT)?;
 
-                for j in 0..n_fds {
-                    let send_fd = fd_buf[j];
-                    let Some((handle, ops)) =
-                        slopos_fs::fileio::fileio_get_handle_and_ops(process_id, send_fd)
-                    else {
-                        for k in 0..fd_count {
-                            inflight[k].1.release(inflight[k].0);
-                        }
-                        return Err(Errno::ENOTSOCK);
-                    };
-                    let Some(new_handle) = ops.dup(handle) else {
-                        for k in 0..fd_count {
-                            inflight[k].1.release(inflight[k].0);
-                        }
-                        return Err(Errno::ENOMEM);
-                    };
-                    inflight[fd_count] = (new_handle, ops);
-                    fd_count += 1;
+                for &send_fd in fd_buf.iter().take(n_fds) {
+                    let file = slopos_fs::fileio_clone_file_ref(process_id, send_fd)
+                        .ok_or(Errno::EBADF)?;
+                    files.push(file).map_err(|_| Errno::ENOMEM)?;
                 }
             }
         }
     }
 
-    let rc = unix_socket::unix_sendmsg(
-        sh,
-        &scratch[..data_len],
-        &mut inflight[..fd_count],
-        fd_count,
-    );
+    let rc = unix_socket::unix_sendmsg(sh, &scratch[..data_len], &mut files);
     if rc < 0 {
-        for j in 0..fd_count {
-            if inflight[j].0 != 0 {
-                inflight[j].1.release(inflight[j].0);
-            }
-        }
+        // Uncommitted aliases drop with `files`.
         return Err(errno_from_neg(rc));
     }
     Ok(rc as u64)
@@ -646,25 +634,21 @@ define_syscall!(syscall_sendmsg
 fn recvmsg_writeback_cmsg(
     process_id: u32,
     msg: &slopos_abi::syscall::MsgHdr,
-    received_fds: &mut [(usize, &'static dyn slopos_abi::file_ops::FileOps)],
+    mut received: slopos_ostd::KVec<slopos_fs::FileRef>,
     msg_ptr: UserPtr<slopos_abi::syscall::MsgHdr>,
 ) -> Result<(), Errno> {
     use slopos_abi::syscall::{CmsgHdr, MsgHdr, SCM_MAX_FDS, SCM_RIGHTS};
 
-    let n_fds = received_fds.len();
+    let n_fds = received.len();
     if msg.control == 0 {
-        for j in 0..n_fds {
-            received_fds[j].1.release(received_fds[j].0);
-        }
+        // No control buffer to report them in — the aliases drop.
         return Ok(());
     }
 
     let hdr_size = core::mem::size_of::<CmsgHdr>();
     let needed = hdr_size + n_fds * 4;
     if (msg.control_len as usize) < needed {
-        for j in 0..n_fds {
-            received_fds[j].1.release(received_fds[j].0);
-        }
+        drop(received);
         let updated_msg = MsgHdr {
             iov_base: msg.iov_base,
             iov_len: msg.iov_len,
@@ -677,16 +661,12 @@ fn recvmsg_writeback_cmsg(
 
     debug_assert!(n_fds <= SCM_MAX_FDS);
     let mut fd_nums = [0i32; SCM_MAX_FDS];
-    for j in 0..n_fds {
-        let (handle, ops) = received_fds[j];
-        let new_fd = slopos_fs::fileio::fileio_open_fd_with_ops(process_id, ops, handle);
+    for (j, file) in received.drain(..).enumerate() {
+        let new_fd = slopos_fs::fileio_install_file_ref(process_id, file);
         if new_fd < 0 {
-            ops.release(handle);
-            for k in (j + 1)..n_fds {
-                received_fds[k].1.release(received_fds[k].0);
-            }
-            // Roll back the fds installed so far (a partial install with
-            // no surviving cmsg writeback would orphan them).
+            // The failed install dropped its alias; ending the drain drops
+            // the rest. Roll back the fds installed so far (a partial
+            // install with no surviving cmsg writeback would orphan them).
             for &fd in fd_nums.iter().take(j) {
                 let _ = slopos_fs::fileio::file_close_fd(process_id, fd);
             }
@@ -750,15 +730,13 @@ fn recvmsg_impl(
     let data_len = (msg.iov_len as usize).min(4096);
     let mut scratch = slopos_ostd::KVec::<u8>::zeroed(4096).map_err(|_| Errno::ENOMEM)?;
 
-    let mut received_fds: [(usize, &'static dyn slopos_abi::file_ops::FileOps); SCM_MAX_FDS] =
-        [(0, slopos_mm::memfd::dummy_file_ops()); SCM_MAX_FDS];
+    let mut received: slopos_ostd::KVec<slopos_fs::FileRef> =
+        slopos_ostd::KVec::with_capacity(SCM_MAX_FDS).map_err(|_| Errno::ENOMEM)?;
     let (bytes_read, n_fds) =
-        unix_socket::unix_recvmsg(sh, &mut scratch[..data_len], &mut received_fds, SCM_MAX_FDS);
+        unix_socket::unix_recvmsg(sh, &mut scratch[..data_len], &mut received, SCM_MAX_FDS);
 
     if bytes_read < 0 {
-        for j in 0..n_fds {
-            received_fds[j].1.release(received_fds[j].0);
-        }
+        // `received` drops, closing any drained aliases.
         return Err(errno_from_neg(bytes_read));
     }
 
@@ -769,7 +747,7 @@ fn recvmsg_impl(
     }
 
     if n_fds > 0 {
-        recvmsg_writeback_cmsg(process_id, &msg, &mut received_fds[..n_fds], msg_ptr)?;
+        recvmsg_writeback_cmsg(process_id, &msg, received, msg_ptr)?;
     }
 
     Ok(copied as u64)

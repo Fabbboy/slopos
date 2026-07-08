@@ -151,10 +151,16 @@ define_syscall!(syscall_clipboard_paste
 });
 
 define_syscall!(syscall_openpty
-    (ctx, master_out: UserPtr<u32>, slave_out: UserPtr<u32>) -> Result<(), Errno>
+    (ctx, master_out: UserPtr<u32>, slave_out: UserPtr<u32>)
+    requires(let pid: process_id)
+    -> Result<(), Errno>
 {
-    let master_idx = match tty::alloc_pty() {
-        Ok(idx) => idx,
+    // Allocate the pair and immediately install the master fd — the fd is
+    // what owns the pair (dropping the backing on any error arm below
+    // tears the freshly-made pair down). Writes the master FD and the
+    // slave pts number to the out params.
+    let (master_idx, backing) = match tty::alloc_pty() {
+        Ok(v) => v,
         Err(e) => return Err(Errno::from_raw(e.to_errno()).unwrap_or(Errno::EINVAL)),
     };
 
@@ -167,8 +173,17 @@ define_syscall!(syscall_openpty
         return Err(Errno::from_raw(e.to_errno()).unwrap_or(Errno::EINVAL));
     }
 
-    copy_to_user(master_out.inner(), &(master_idx.0 as u32)).map_err(|_| Errno::EFAULT)?;
-    copy_to_user(slave_out.inner(), &slave_num).map_err(|_| Errno::EFAULT)?;
+    let master_fd = file_open_tty_fd(pid, master_idx, slopos_abi::syscall::O_NOCTTY as u32, backing);
+    if master_fd < 0 {
+        return Err(Errno::from_raw(master_fd).unwrap_or(Errno::EINVAL));
+    }
+
+    if copy_to_user(master_out.inner(), &(master_fd as u32)).is_err()
+        || copy_to_user(slave_out.inner(), &slave_num).is_err()
+    {
+        let _ = slopos_fs::file_close_fd(pid, master_fd);
+        return Err(Errno::EFAULT);
+    }
     Ok(())
 });
 
@@ -234,14 +249,11 @@ define_syscall!(syscall_open_tty_fd
     -> Result<u64, Errno>
 {
     let tty_idx = TtyIndex(tty_idx);
-    if tty::open_ref(tty_idx).is_err() {
-        return Err(Errno::EINVAL);
-    }
-    // `file_open_tty_fd` transfers ownership of the `open_ref` minted
-    // above into the new `OpenFile`; on failure the install already
-    // released it exactly once, so the error arm must NOT close_ref again
-    // (a second decrement is the premature-close root cause).
-    let fd = file_open_tty_fd(pid, tty_idx, 0);
+    let backing = match tty::open_tty(tty_idx) {
+        Ok(b) => b,
+        Err(_) => return Err(Errno::EINVAL),
+    };
+    let fd = file_open_tty_fd(pid, tty_idx, 0, backing);
     if fd < 0 {
         Err(Errno::from_raw(fd).unwrap_or(Errno::EINVAL))
     } else {

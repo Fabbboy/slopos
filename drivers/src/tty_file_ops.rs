@@ -12,8 +12,9 @@ use crate::tty;
 // ---------------------------------------------------------------------------
 
 /// Lightweight newtype wrapping a TTY index for type-safe passage through
-/// the `FileOps` `handle: usize` boundary.  No generation counter needed
-/// since TTY slots are fixed (never recycled).
+/// the `FileOps` `handle: usize` boundary. Liveness is not its concern:
+/// every TTY fd owns a `KArc<TtyBacking>` that pins the slot behind this
+/// index for the open file's whole lifetime.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[repr(transparent)]
 pub struct TtyHandle(u8);
@@ -119,21 +120,6 @@ impl FileOps for TtyFileOps {
             }
         }
         total as isize
-    }
-
-    fn release(&self, handle: usize) {
-        if let Some(th) = TtyHandle::from_usize(handle) {
-            let _ = tty::close_ref(th.index());
-        }
-    }
-
-    fn dup(&self, handle: usize) -> Option<usize> {
-        let th = TtyHandle::from_usize(handle)?;
-        if tty::open_ref(th.index()).is_ok() {
-            Some(handle)
-        } else {
-            None
-        }
     }
 
     fn poll_fused(&self, handle: usize, events: u16) -> slopos_abi::file_ops::FusedPollResult {

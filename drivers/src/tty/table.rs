@@ -34,14 +34,15 @@
 
 use core::sync::atomic::{AtomicU32, Ordering};
 
+use super::backing::TtyBacking;
 use super::driver::{SerialConsoleDriver, TtyDriverKind, VConsoleDriver};
 use super::ldisc::{LdiscKind, LineDisc};
-use super::pty::PtyPeerHandle;
 use super::session::TtySession;
 use super::{MAX_TTYS, PacketEvents, Tty, TtyFlags, TtyIndex};
 use slopos_abi::event::{KernelEvent, TtySlot};
 use slopos_abi::syscall::UserWinsize;
-use slopos_ostd::sync::{LOCK_LEVEL_RESOURCE, SpinLock};
+use slopos_ostd::KWeak;
+use slopos_ostd::sync::{LOCK_LEVEL_REGISTRY, LOCK_LEVEL_RESOURCE, SpinLock};
 use slopos_ostd::{AllocError, PinBox};
 use slopos_ostd::{AtomicBitmap, words_for};
 
@@ -114,14 +115,35 @@ pub static TTY_OUTPUT_INFLIGHT: [AtomicU32; MAX_TTYS] = [const { AtomicU32::new(
 pub static TTY_WRITE_LOCKS: [SpinLock<()>; MAX_TTYS] =
     [const { SpinLock::new((), LOCK_LEVEL_RESOURCE) }; MAX_TTYS];
 
-/// Per-TTY generation counter.  Incremented each time a slot transitions
-/// from allocated → free (`*slot = None`).  Used by `PtyPeerHandle` to
-/// detect stale references after rapid PTY free/reuse cycles.
+/// Per-slot weak handle to the live [`TtyBacking`] — the open-by-index
+/// registry (`/dev/pts/N`, `/dev/tty`, bootstrap console fds). Weak by
+/// design: the registry must never keep a TTY open, and an upgrade that
+/// fails means the backing (and with it the slot's lifetime) is gone.
 ///
-/// A write to a peer whose generation no longer matches is silently
-/// discarded — the peer slot may have been freed and reallocated to an
-/// unrelated PTY pair.
-pub static TTY_GENERATIONS: [AtomicU32; MAX_TTYS] = [const { AtomicU32::new(0) }; MAX_TTYS];
+/// Lock ordering: `TTY_BACKINGS[i]` → `TTY_SLOTS[j]` (never the reverse).
+pub(crate) static TTY_BACKINGS: [SpinLock<KWeak<TtyBacking>>; MAX_TTYS] =
+    [const { SpinLock::new(KWeak::new(), LOCK_LEVEL_REGISTRY) }; MAX_TTYS];
+
+/// Per-slot weak handle to the shared [`TtySlaveOpen`] — alive while any
+/// slave fd is open. Same ordering rules as [`TTY_BACKINGS`].
+pub(crate) static TTY_SLAVE_OPENS: [SpinLock<KWeak<super::backing::TtySlaveOpen>>; MAX_TTYS] =
+    [const { SpinLock::new(KWeak::new(), LOCK_LEVEL_REGISTRY) }; MAX_TTYS];
+
+/// Free a PTY slot after its backing dropped: take the `Tty` out, run its
+/// drop (ldisc flush + session detach) outside the lock, clear the
+/// registry entry, and only then mark the slot reusable — an allocator
+/// that wins the bit sees a fully-empty slot.
+pub(crate) fn free_slot(idx: TtyIndex) {
+    let slot = idx.0 as usize;
+    if slot >= MAX_TTYS {
+        return;
+    }
+    let taken = { TTY_SLOTS[slot].lock().take() };
+    drop(taken);
+    *TTY_BACKINGS[slot].lock() = KWeak::new();
+    *TTY_SLAVE_OPENS[slot].lock() = KWeak::new();
+    mark_slot_free(slot);
+}
 
 /// Allocation bitmap — bit N is set when slot N contains a live `Tty`.
 ///
@@ -143,6 +165,8 @@ pub(crate) static TTY_ALLOC_BITMAP: AtomicBitmap<{ words_for(MAX_TTYS) }> = Atom
 /// - TTY 1  → VConsoleDriver (PS/2 + framebuffer)
 pub fn tty_table_init() {
     for i in 0..MAX_TTYS {
+        *TTY_BACKINGS[i].lock() = KWeak::new();
+        *TTY_SLAVE_OPENS[i].lock() = KWeak::new();
         let mut slot = TTY_SLOTS[i].lock();
         *slot = None;
         TTY_ALLOC_BITMAP.clear(i);
@@ -222,7 +246,6 @@ impl Tty {
                 ws_xpixel: 0,
                 ws_ypixel: 0,
             },
-            open_count: 0,
             flags: TtyFlags::empty(),
             packet_events: PacketEvents::empty(),
         })
@@ -230,7 +253,7 @@ impl Tty {
 
     pub fn new_pty_master(
         index: TtyIndex,
-        peer: PtyPeerHandle,
+        peer: KWeak<TtyBacking>,
     ) -> Result<PinBox<Self>, AllocError> {
         let ldisc = LdiscKind::Raw(super::ldisc::RawDisc::new_pinned()?);
         PinBox::try_new(Self {
@@ -244,13 +267,15 @@ impl Tty {
                 ws_xpixel: 0,
                 ws_ypixel: 0,
             },
-            open_count: 0,
             flags: TtyFlags::empty(),
             packet_events: PacketEvents::empty(),
         })
     }
 
-    pub fn new_pty_slave(index: TtyIndex, peer: PtyPeerHandle) -> Result<PinBox<Self>, AllocError> {
+    pub fn new_pty_slave(
+        index: TtyIndex,
+        peer: KWeak<TtyBacking>,
+    ) -> Result<PinBox<Self>, AllocError> {
         let ldisc = LdiscKind::NTty(LineDisc::new_pinned()?);
         PinBox::try_new(Self {
             index,
@@ -263,7 +288,6 @@ impl Tty {
                 ws_xpixel: 0,
                 ws_ypixel: 0,
             },
-            open_count: 0,
             flags: TtyFlags::SLAVE_LOCKED,
             packet_events: PacketEvents::empty(),
         })

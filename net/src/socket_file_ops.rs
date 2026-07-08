@@ -1,13 +1,39 @@
 use slopos_abi::Errno;
-use slopos_abi::file_ops::{FileKind, FileOps};
+use slopos_abi::file_ops::{FileBacking, FileKind, FileOps};
 use slopos_abi::io::{IO_STAGING_SIZE, IoBufRead, IoBufWrite};
 use slopos_abi::syscall::{POLLERR, POLLHUP, POLLIN, POLLOUT};
+use slopos_ostd::KArc;
 
 use crate::socket;
 
 pub struct SocketFileOps;
 
 pub static SOCKET_FILE_OPS: SocketFileOps = SocketFileOps;
+
+/// Sole owner of one AF_INET socket; dropping it closes the socket.
+struct SocketBacking {
+    idx: u32,
+}
+
+impl FileBacking for SocketBacking {}
+
+impl Drop for SocketBacking {
+    fn drop(&mut self) {
+        let _ = socket::socket_close(self.idx);
+    }
+}
+
+/// Wrap ownership of a freshly-created AF_INET socket. On allocation
+/// failure the socket is closed before returning, so it cannot leak.
+pub fn socket_backing(idx: u32) -> Option<KArc<dyn FileBacking>> {
+    match KArc::try_new(SocketBacking { idx }) {
+        Ok(backing) => Some(backing),
+        Err(_) => {
+            let _ = socket::socket_close(idx);
+            None
+        }
+    }
+}
 
 impl FileOps for SocketFileOps {
     fn kind(&self) -> FileKind {
@@ -73,10 +99,6 @@ impl FileOps for SocketFileOps {
             }
         }
         total as isize
-    }
-
-    fn release(&self, handle: usize) {
-        let _ = socket::socket_close(handle as u32);
     }
 
     fn poll_fused(&self, handle: usize, events: u16) -> slopos_abi::file_ops::FusedPollResult {

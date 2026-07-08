@@ -997,6 +997,21 @@ impl<T: ?Sized> KArc<T> {
             inner: Arc::downgrade(&this.inner),
         }
     }
+
+    /// Returns `true` if both handles point at the same allocation.
+    /// Mirrors [`alloc::sync::Arc::ptr_eq`]. This compares allocation
+    /// identity, never the pointee — safe for zero-sized and unsized `T`.
+    #[inline]
+    pub fn ptr_eq(this: &Self, other: &Self) -> bool {
+        Arc::ptr_eq(&this.inner, &other.inner)
+    }
+}
+
+impl<T, U> core::ops::CoerceUnsized<KArc<U>> for KArc<T>
+where
+    T: ?Sized + core::marker::Unsize<U>,
+    U: ?Sized,
+{
 }
 
 /// Kernel-blessed `Weak<T>`. A non-owning handle to a [`KArc`]
@@ -1011,9 +1026,10 @@ pub struct KWeak<T: ?Sized> {
 
 impl<T> KWeak<T> {
     /// An empty weak handle that never upgrades to a value. Mirrors
-    /// [`alloc::sync::Weak::new`]; useful as a sentinel / default.
+    /// [`alloc::sync::Weak::new`]; useful as a sentinel / default, and
+    /// `const` so empty handles can seed static registries.
     #[inline]
-    pub fn new() -> Self {
+    pub const fn new() -> Self {
         Self {
             inner: alloc::sync::Weak::new(),
         }
@@ -1052,6 +1068,13 @@ impl<T: ?Sized> Clone for KWeak<T> {
             inner: self.inner.clone(),
         }
     }
+}
+
+impl<T, U> core::ops::CoerceUnsized<KWeak<U>> for KWeak<T>
+where
+    T: ?Sized + core::marker::Unsize<U>,
+    U: ?Sized,
+{
 }
 
 impl<T: ?Sized> Clone for KArc<T> {

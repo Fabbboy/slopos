@@ -123,10 +123,21 @@ pub fn ring_setup(
         return eno(Errno::ENOMEM);
     };
 
-    // Open a FileKind::Ring fd referring to it.
-    let fd = slopos_fs::fileio_open_fd_with_ops(pid, &file_ops::RING_FILE_OPS, raw_handle);
+    // Open a FileKind::Ring fd referring to it. The backing owns the
+    // registry entry from here: a failed install drops it, removing the
+    // ring — only the mapping still needs explicit rollback.
+    let Some(backing) = file_ops::ring_backing(raw_handle) else {
+        let _ =
+            slopos_mm::process_vm::process_vm_munmap(pid, user_addr, layout.region_bytes as u64);
+        return eno(Errno::ENOMEM);
+    };
+    let fd = slopos_fs::fileio_open_fd_with_ops(
+        pid,
+        &file_ops::RING_FILE_OPS,
+        raw_handle,
+        Some(backing),
+    );
     if fd < 0 {
-        registry::remove(raw_handle);
         let _ =
             slopos_mm::process_vm::process_vm_munmap(pid, user_addr, layout.region_bytes as u64);
         return fd;

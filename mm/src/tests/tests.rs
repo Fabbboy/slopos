@@ -936,57 +936,65 @@ use crate::memfd;
 pub fn test_memfd_create_and_release() -> TestResult {
     let result = memfd::memfd_create(0);
     assert_test!(result.is_some(), "memfd_create should succeed");
-    if let Some((handle, _ops)) = result {
-        memfd::memfd_release(handle);
+    if let Some((_handle, _ops, backing)) = result {
+        drop(backing);
     }
     pass!()
 }
 
 pub fn test_memfd_ftruncate_valid() -> TestResult {
-    let (handle, _ops) = memfd::memfd_create(0).unwrap();
+    let (handle, _ops, backing) = memfd::memfd_create(0).unwrap();
     let rc = memfd::memfd_ftruncate(handle, 4096);
     assert_test!(rc == 0, "ftruncate(4096) should succeed");
     let (phys, size) = memfd::memfd_get_phys(handle);
     assert_test!(!phys.is_null(), "phys should be non-null after ftruncate");
     assert_test!(size >= 4096, "size should be >= 4096");
-    memfd::memfd_release(handle);
+    drop(backing);
     pass!()
 }
 
 pub fn test_memfd_ftruncate_zero() -> TestResult {
-    let (handle, _ops) = memfd::memfd_create(0).unwrap();
+    let (handle, _ops, backing) = memfd::memfd_create(0).unwrap();
     let rc = memfd::memfd_ftruncate(handle, 0);
     assert_test!(rc < 0, "ftruncate(0) should fail");
-    memfd::memfd_release(handle);
+    drop(backing);
     pass!()
 }
 
 pub fn test_memfd_ftruncate_excessive() -> TestResult {
-    let (handle, _ops) = memfd::memfd_create(0).unwrap();
+    let (handle, _ops, backing) = memfd::memfd_create(0).unwrap();
     let rc = memfd::memfd_ftruncate(handle, 128 * 1024 * 1024);
     assert_test!(rc < 0, "ftruncate(128MB) should fail");
-    memfd::memfd_release(handle);
+    drop(backing);
     pass!()
 }
 
 pub fn test_memfd_ftruncate_twice() -> TestResult {
-    let (handle, _ops) = memfd::memfd_create(0).unwrap();
+    let (handle, _ops, backing) = memfd::memfd_create(0).unwrap();
     let rc1 = memfd::memfd_ftruncate(handle, 4096);
     assert_test!(rc1 == 0, "first ftruncate should succeed");
     let rc2 = memfd::memfd_ftruncate(handle, 8192);
     assert_test!(rc2 < 0, "second ftruncate should fail (one-shot)");
-    memfd::memfd_release(handle);
+    drop(backing);
     pass!()
 }
 
 pub fn test_memfd_refcount() -> TestResult {
-    let (handle, _ops) = memfd::memfd_create(0).unwrap();
-    // Initial refcount is 1. Dup increments to 2.
-    memfd::memfd_inc_ref(handle);
-    // First release: refcount 2 -> 1 (no cleanup)
-    memfd::memfd_release(handle);
-    // Second release: refcount 1 -> 0 (cleanup)
-    memfd::memfd_release(handle);
+    let (handle, _ops, backing) = memfd::memfd_create(0).unwrap();
+    // A second alias (fd passing / dup shares the same backing).
+    let alias = backing.clone();
+    // First drop: the object stays alive through the remaining alias.
+    drop(backing);
+    assert_test!(
+        memfd::memfd_ftruncate(handle, 4096) == 0,
+        "memfd must stay alive while an alias holds it"
+    );
+    // Last drop: teardown.
+    drop(alias);
+    assert_test!(
+        memfd::memfd_size(handle) == 0,
+        "memfd must be gone after the last alias drops"
+    );
     pass!()
 }
 
@@ -1000,22 +1008,22 @@ pub fn test_memfd_invalid_handle() -> TestResult {
 }
 
 pub fn test_memfd_mapcount() -> TestResult {
-    let (handle, _ops) = memfd::memfd_create(0).unwrap();
+    let (handle, _ops, backing) = memfd::memfd_create(0).unwrap();
     let h = memfd::handle_from_raw(handle);
     memfd::memfd_ftruncate(handle, 4096);
     memfd::memfd_inc_mapcount_by(h, 1);
     memfd::memfd_inc_mapcount_by(h, 1);
-    // Release fd ref — should NOT free pages because map_count > 0
-    memfd::memfd_release(handle);
+    // Close the fd side — must NOT free pages because map_count > 0.
+    drop(backing);
     // Dec mapcounts
     memfd::memfd_dec_mapcount_by(h, 1);
     memfd::memfd_dec_mapcount_by(h, 1);
-    // Now both refcount=0 and map_count=0, pages should be freed
+    // Now both the fd side and map_count are gone; pages are freed.
     pass!()
 }
 
 pub fn test_memfd_get_info() -> TestResult {
-    let (handle, _ops) = memfd::memfd_create(0).unwrap();
+    let (handle, _ops, backing) = memfd::memfd_create(0).unwrap();
     let h = memfd::handle_from_raw(handle);
     // Before ftruncate, get_info should return None
     assert_test!(
@@ -1030,16 +1038,16 @@ pub fn test_memfd_get_info() -> TestResult {
         assert_test!(size >= 8192, "size >= 8192");
         assert_test!(pages >= 2, "pages >= 2");
     }
-    memfd::memfd_release(handle);
+    drop(backing);
     pass!()
 }
 
 pub fn test_memfd_size_query() -> TestResult {
-    let (handle, _ops) = memfd::memfd_create(0).unwrap();
+    let (handle, _ops, backing) = memfd::memfd_create(0).unwrap();
     assert_test!(memfd::memfd_size(handle) == 0, "size before ftruncate");
     memfd::memfd_ftruncate(handle, 16384);
     assert_test!(memfd::memfd_size(handle) >= 16384, "size after ftruncate");
-    memfd::memfd_release(handle);
+    drop(backing);
     pass!()
 }
 

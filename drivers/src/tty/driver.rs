@@ -8,20 +8,22 @@
 //! - `VConsoleDriver`      — wraps PS/2 keyboard + framebuffer text output
 //! - `PtyMaster` / `PtySlave` — pseudo-terminal pair endpoints
 //!
-//! adds `DriverId` for lock-free I/O dispatch: the TTY core copies
+//! adds `DriverId` for lock-free I/O dispatch: the TTY core clones
 //! the driver identifier while holding the per-TTY lock, drops the lock, and
 //! then writes the processed output via `write_driver_unlocked`.
 //!
-//! replaces plain `TtyIndex` peer references with generation-tagged
-//! `PtyPeerHandle`s so that stale writes after rapid PTY free/reuse are
-//! safely discarded.
+//! PTY peer references are `KWeak<TtyBacking>` links: the write site
+//! upgrades the link, which pins the peer's slot for the duration of the
+//! write — a failed upgrade means the peer is gone and the write is
+//! discarded.
 
 use slopos_abi::syscall::UserTermios;
+use slopos_ostd::KWeak;
 use slopos_ostd::io::port_consts::COM1;
 
 use crate::serial;
+use crate::tty::backing::TtyBacking;
 use crate::tty::pty;
-use crate::tty::pty::PtyPeerHandle;
 
 #[derive(Clone, Copy, Debug)]
 pub struct InputEvent {
@@ -109,17 +111,17 @@ pub trait TtyDriver {
 /// We use an enum rather than a trait object so that `Tty` can live in a
 /// `const`-initialised static array without requiring `alloc`.
 ///
-/// PTY variants now carry [`PtyPeerHandle`] (index + generation)
-/// instead of a plain `TtyIndex`, enabling stale-slot detection.
+/// PTY variants carry a `KWeak<TtyBacking>` peer link; upgrading it pins
+/// the peer's slot for the duration of a cross-end operation.
 pub enum TtyDriverKind {
     /// COM1 serial console.
     SerialConsole(SerialConsoleDriver),
     /// PS/2 keyboard + framebuffer virtual console.
     VConsole(VConsoleDriver),
     /// PTY master — writes go to the slave's input buffer.
-    PtyMaster { peer: PtyPeerHandle },
+    PtyMaster { peer: KWeak<TtyBacking> },
     /// PTY slave — writes go to the master's read buffer.
-    PtySlave { peer: PtyPeerHandle },
+    PtySlave { peer: KWeak<TtyBacking> },
 }
 
 impl TtyDriverKind {
@@ -127,8 +129,8 @@ impl TtyDriverKind {
         match self {
             Self::SerialConsole(d) => d.write_output(buf),
             Self::VConsole(d) => d.write_output(buf),
-            Self::PtyMaster { peer } => pty::master_write(*peer, buf),
-            Self::PtySlave { peer } => pty::slave_write(*peer, buf),
+            Self::PtyMaster { peer } => pty::master_write(peer, buf),
+            Self::PtySlave { peer } => pty::slave_write(peer, buf),
         }
     }
 
@@ -187,21 +189,21 @@ impl TtyDriverKind {
         !matches!(self, Self::PtyMaster { .. })
     }
 
-    /// Return a lightweight, copyable identifier for this driver variant.
+    /// Return a lightweight, clonable identifier for this driver variant.
     ///
-    /// Used by the split-write path: the caller copies the `DriverId` while
+    /// Used by the split-write path: the caller clones the `DriverId` while
     /// holding the per-TTY lock, drops the lock, and then calls
     /// [`write_driver_unlocked`] to perform the (slow) hardware I/O without
     /// holding any TTY lock.
     ///
-    /// PTY variants now carry [`PtyPeerHandle`] through the
-    /// `DriverId` so generation validation happens at the write site.
+    /// PTY variants carry the `KWeak<TtyBacking>` peer link through the
+    /// `DriverId`, so the write site pins the peer before touching it.
     pub fn id(&self) -> DriverId {
         match self {
             Self::SerialConsole(_) => DriverId::SerialConsole,
             Self::VConsole(_) => DriverId::VConsole,
-            Self::PtyMaster { peer } => DriverId::PtyMaster { peer: *peer },
-            Self::PtySlave { peer } => DriverId::PtySlave { peer: *peer },
+            Self::PtyMaster { peer } => DriverId::PtyMaster { peer: peer.clone() },
+            Self::PtySlave { peer } => DriverId::PtySlave { peer: peer.clone() },
         }
     }
 }
@@ -210,25 +212,22 @@ impl TtyDriverKind {
 // Lock-free driver I/O
 // ---------------------------------------------------------------------------
 
-/// Lightweight driver identifier — copyable across lock boundaries.
+/// Lightweight driver identifier — clonable across lock boundaries.
 ///
 /// This enum carries *no mutable state* — it identifies which hardware
-/// backend to use and, for PTY variants, carries a generation-tagged peer
-/// handle.  The TTY core copies it out of the per-TTY lock, drops the lock,
-/// and then calls [`write_driver_unlocked`] to perform the actual I/O.
-///
-/// PTY variants carry [`PtyPeerHandle`] for generation-safe
-/// cross-end writes.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+/// backend to use and, for PTY variants, carries the weak peer link.  The
+/// TTY core clones it out of the per-TTY lock, drops the lock, and then
+/// calls [`write_driver_unlocked`] to perform the actual I/O.
+#[derive(Clone)]
 pub enum DriverId {
     /// COM1 serial console.
     SerialConsole,
     /// PS/2 + framebuffer virtual console.
     VConsole,
-    /// PTY master — writes go to the slave via generation-validated handle.
-    PtyMaster { peer: PtyPeerHandle },
-    /// PTY slave — writes go to the master via generation-validated handle.
-    PtySlave { peer: PtyPeerHandle },
+    /// PTY master — writes go to the slave via the pinned peer link.
+    PtyMaster { peer: KWeak<TtyBacking> },
+    /// PTY slave — writes go to the master via the pinned peer link.
+    PtySlave { peer: KWeak<TtyBacking> },
 }
 
 /// Write processed output bytes to the hardware **without** holding any TTY
@@ -244,8 +243,8 @@ pub enum DriverId {
 /// This separation ensures that slow serial I/O (~86 μs/byte at 115200 baud)
 /// does not block operations on other TTYs.
 ///
-/// PTY variants pass the `PtyPeerHandle` to `master_write` /
-/// `slave_write`, which validate the generation before touching the peer slot.
+/// PTY variants pass the weak peer link to `master_write` / `slave_write`,
+/// which pin the peer before touching its slot.
 pub fn write_driver_unlocked(driver: DriverId, data: &[u8]) -> usize {
     match driver {
         DriverId::SerialConsole => {
@@ -267,8 +266,8 @@ pub fn write_driver_unlocked(driver: DriverId, data: &[u8]) -> usize {
             }
             data.len()
         }
-        DriverId::PtyMaster { peer } => pty::master_write(peer, data),
-        DriverId::PtySlave { peer } => pty::slave_write(peer, data),
+        DriverId::PtyMaster { peer } => pty::master_write(&peer, data),
+        DriverId::PtySlave { peer } => pty::slave_write(&peer, data),
     }
 }
 

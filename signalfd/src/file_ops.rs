@@ -18,7 +18,7 @@
 //! tests raw `pending`) still reports them.
 
 use slopos_abi::Errno;
-use slopos_abi::file_ops::{FileKind, FileOps};
+use slopos_abi::file_ops::{FileBacking, FileKind, FileOps};
 use slopos_abi::io::{IoBufRead, IoBufWrite};
 use slopos_abi::signal::{SignalfdSiginfo, sig_bit};
 use slopos_abi::syscall::{POLLIN, POLLNVAL};
@@ -33,6 +33,20 @@ use crate::registry::{self, SignalfdState};
 pub struct SignalfdFileOps;
 
 pub static SIGNALFD_FILE_OPS: SignalfdFileOps = SignalfdFileOps;
+
+/// Owns one signalfd registry entry. The open-file layer holds it as a
+/// `KArc<dyn FileBacking>`; dropping the last fd alias removes the entry.
+pub(crate) struct SignalfdBacking {
+    pub(crate) handle: usize,
+}
+
+impl FileBacking for SignalfdBacking {}
+
+impl Drop for SignalfdBacking {
+    fn drop(&mut self) {
+        registry::remove(self.handle);
+    }
+}
 
 /// Signals in `state.mask` currently pending for the owner task.
 fn pending_masked(state: &SignalfdState) -> u64 {
@@ -80,14 +94,6 @@ impl FileOps for SignalfdFileOps {
 
     fn write(&self, _handle: usize, _buf: &dyn IoBufRead, _offset: u64, _flags: u32) -> isize {
         Errno::EINVAL.as_isize()
-    }
-
-    fn release(&self, handle: usize) {
-        registry::remove(handle);
-    }
-
-    fn dup(&self, handle: usize) -> Option<usize> {
-        Some(handle)
     }
 
     fn poll_wait(&self, handle: usize) -> bool {

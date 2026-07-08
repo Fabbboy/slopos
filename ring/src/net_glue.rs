@@ -87,13 +87,19 @@ pub fn accept_nonblock(pid: u32, fd: i32) -> Result<Option<i32>, Errno> {
         let result = with_unix_forced_nonblock(listener, || unix_socket::unix_accept(listener));
         match result {
             Ok(accepted) => {
+                // The backing owns the accepted endpoint from here: a
+                // failed install (or failed backing alloc) closes it.
+                let Some(backing) = slopos_net::unix_socket_file_ops::unix_socket_backing(accepted)
+                else {
+                    return Err(Errno::ENOMEM);
+                };
                 let new_fd = slopos_fs::fileio_open_fd_with_ops(
                     pid,
                     &unix_socket_file_ops::UNIX_SOCKET_FILE_OPS,
                     accepted.as_usize(),
+                    Some(backing),
                 );
                 if new_fd < 0 {
-                    let _ = unix_socket::unix_close(accepted);
                     return Err(Errno::ENOMEM);
                 }
                 Ok(Some(new_fd))
@@ -113,9 +119,11 @@ pub fn accept_nonblock(pid: u32, fd: i32) -> Result<Option<i32>, Errno> {
             let e = Errno::from_raw(accepted).unwrap_or(Errno::EINVAL);
             return if e == Errno::EAGAIN { Ok(None) } else { Err(e) };
         }
-        let new_fd = slopos_fs::fileio_open_socket_fd(pid, accepted as u32);
+        let Some(backing) = slopos_net::socket_file_ops::socket_backing(accepted as u32) else {
+            return Err(Errno::ENOMEM);
+        };
+        let new_fd = slopos_fs::fileio_open_socket_fd(pid, accepted as u32, Some(backing));
         if new_fd < 0 {
-            let _ = socket::socket_close(accepted as u32);
             return Err(Errno::ENOMEM);
         }
         Ok(Some(new_fd))
@@ -306,42 +314,39 @@ pub fn recvmsg_nonblock(pid: u32, fd: i32, addr: u64, _op_flags: u32) -> Outcome
 
     if ops.is_unix_socket() {
         let sh = SocketHandle::from_usize(handle);
-        let mut received_fds: [(usize, &'static dyn FileOps); SCM_MAX_FDS] =
-            [(0, slopos_mm::memfd::dummy_file_ops()); SCM_MAX_FDS];
+        let mut received: slopos_ostd::KVec<slopos_fs::FileRef> =
+            match slopos_ostd::KVec::with_capacity(SCM_MAX_FDS) {
+                Ok(v) => v,
+                Err(_) => return Outcome::Inline(Errno::ENOMEM.raw()),
+            };
         let (bytes_read, n_fds) = with_unix_forced_nonblock(sh, || {
-            unix_socket::unix_recvmsg(sh, &mut scratch[..data_len], &mut received_fds, SCM_MAX_FDS)
+            unix_socket::unix_recvmsg(sh, &mut scratch[..data_len], &mut received, SCM_MAX_FDS)
         });
-        if bytes_read == EAGAIN {
+        if bytes_read == EAGAIN && n_fds == 0 {
             // No data and no fds drained — defer (the fds drain atomically
             // with the data on the real completion).
             return Outcome::WouldBlock;
         }
-        if bytes_read < 0 {
-            for slot in received_fds.iter().take(n_fds) {
-                slot.1.release(slot.0);
-            }
+        if bytes_read < 0 && !(bytes_read == EAGAIN && n_fds > 0) {
+            // `received` drops here, closing any drained aliases.
             return Outcome::Inline(bytes_read);
         }
-        let copied = bytes_read as usize;
+        let copied = if bytes_read > 0 {
+            bytes_read as usize
+        } else {
+            0
+        };
         if copied > 0 && msg.iov_base != 0 {
             let user_out = match UserBytes::try_new(msg.iov_base, copied) {
                 Ok(u) => u,
-                Err(_) => {
-                    for slot in received_fds.iter().take(n_fds) {
-                        slot.1.release(slot.0);
-                    }
-                    return Outcome::Inline(Errno::EFAULT.raw());
-                }
+                Err(_) => return Outcome::Inline(Errno::EFAULT.raw()),
             };
             if copy_bytes_to_user(user_out, &scratch[..copied]).is_err() {
-                for slot in received_fds.iter().take(n_fds) {
-                    slot.1.release(slot.0);
-                }
                 return Outcome::Inline(Errno::EFAULT.raw());
             }
         }
         if n_fds > 0 {
-            if let Err(e) = recvmsg_writeback_cmsg(pid, &msg, &mut received_fds[..n_fds], msg_ptr) {
+            if let Err(e) = recvmsg_writeback_cmsg(pid, &msg, received, msg_ptr) {
                 return Outcome::Inline(e.raw());
             }
         }
@@ -478,35 +483,31 @@ pub fn recvfrom_nonblock(pid: u32, fd: i32, addr: u64, len: u32, addr2: u64) -> 
     Outcome::Inline(copied as i32)
 }
 
-/// Install the received SCM_RIGHTS fds into the caller's fd table and
+/// Install the received SCM_RIGHTS files into the caller's fd table and
 /// write the `CmsgHdr` + fd array back into the user `control` buffer,
 /// updating `control_len`. Mirrors the kernel recvmsg syscall's
-/// cmsg-writeback exactly. On any failure the still-uninstalled handles
-/// are released so no inflight fd leaks; if a copy back to user memory
-/// fails *after* fds were installed, every installed fd is closed so the
+/// cmsg-writeback exactly. Consumes `received`: aliases that cannot be
+/// delivered drop (close) here; if a copy back to user memory fails
+/// *after* fds were installed, every installed fd is closed so the
 /// caller (which never learns the fd numbers) cannot orphan them — an
 /// fd-table-exhaustion DoS over repeated calls.
 fn recvmsg_writeback_cmsg(
     pid: u32,
     msg: &MsgHdr,
-    received_fds: &mut [(usize, &'static dyn FileOps)],
+    mut received: slopos_ostd::KVec<slopos_fs::FileRef>,
     msg_ptr: UserPtr<MsgHdr>,
 ) -> Result<(), Errno> {
-    let n_fds = received_fds.len();
+    let n_fds = received.len();
 
     if msg.control == 0 {
-        for slot in received_fds.iter() {
-            slot.1.release(slot.0);
-        }
+        // No control buffer to report them in — the aliases drop.
         return Ok(());
     }
 
     let hdr_size = core::mem::size_of::<CmsgHdr>();
     let needed = hdr_size + n_fds * 4;
     if (msg.control_len as usize) < needed {
-        for slot in received_fds.iter() {
-            slot.1.release(slot.0);
-        }
+        drop(received);
         let updated = MsgHdr {
             iov_base: msg.iov_base,
             iov_len: msg.iov_len,
@@ -519,16 +520,12 @@ fn recvmsg_writeback_cmsg(
 
     debug_assert!(n_fds <= SCM_MAX_FDS);
     let mut fd_nums = [0i32; SCM_MAX_FDS];
-    for (j, slot) in received_fds.iter().enumerate() {
-        let (h, ops) = *slot;
-        let new_fd = slopos_fs::fileio::fileio_open_fd_with_ops(pid, ops, h);
+    for (j, file) in received.drain(..).enumerate() {
+        let new_fd = slopos_fs::fileio::fileio_install_file_ref(pid, file);
         if new_fd < 0 {
-            ops.release(h);
-            for later in received_fds.iter().skip(j + 1) {
-                later.1.release(later.0);
-            }
-            // Roll back the fds installed so far (a partial install with
-            // no surviving cmsg writeback would orphan them).
+            // The failed install dropped its alias; the drain drops the
+            // rest. Roll back the fds installed so far (a partial install
+            // with no surviving cmsg writeback would orphan them).
             for &fd in fd_nums.iter().take(j) {
                 let _ = slopos_fs::fileio::file_close_fd(pid, fd);
             }
@@ -795,14 +792,12 @@ pub fn recvmsg_fixed(
     };
     let rc: i32 = if ops.is_unix_socket() {
         let sh = SocketHandle::from_usize(handle);
-        let mut fds: [(usize, &'static dyn FileOps); SCM_MAX_FDS] =
-            [(0, slopos_mm::memfd::dummy_file_ops()); SCM_MAX_FDS];
-        let (read, n_fds) = with_unix_forced_nonblock(sh, || {
-            unix_socket::unix_recvmsg_into(sh, &mut writer, &mut fds, SCM_MAX_FDS)
+        // Data-plane only: cap 0 makes the drain drop (close) any
+        // arriving SCM_RIGHTS aliases.
+        let mut no_files: slopos_ostd::KVec<slopos_fs::FileRef> = slopos_ostd::KVec::new();
+        let (read, _n_fds) = with_unix_forced_nonblock(sh, || {
+            unix_socket::unix_recvmsg_into(sh, &mut writer, &mut no_files, 0)
         });
-        for slot in fds.iter().take(n_fds) {
-            slot.1.release(slot.0);
-        }
         read
     } else {
         let idx = handle as u32;
@@ -855,14 +850,12 @@ pub fn recvmsg_provided(
     };
     let rc: i32 = if ops.is_unix_socket() {
         let sh = SocketHandle::from_usize(handle);
-        let mut fds: [(usize, &'static dyn FileOps); SCM_MAX_FDS] =
-            [(0, slopos_mm::memfd::dummy_file_ops()); SCM_MAX_FDS];
-        let (read, n_fds) = with_unix_forced_nonblock(sh, || {
-            unix_socket::unix_recvmsg_into(sh, &mut writer, &mut fds, SCM_MAX_FDS)
+        // Data-plane only: cap 0 makes the drain drop (close) any
+        // arriving SCM_RIGHTS aliases.
+        let mut no_files: slopos_ostd::KVec<slopos_fs::FileRef> = slopos_ostd::KVec::new();
+        let (read, _n_fds) = with_unix_forced_nonblock(sh, || {
+            unix_socket::unix_recvmsg_into(sh, &mut writer, &mut no_files, 0)
         });
-        for slot in fds.iter().take(n_fds) {
-            slot.1.release(slot.0);
-        }
         read
     } else {
         let idx = handle as u32;

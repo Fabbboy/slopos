@@ -511,7 +511,9 @@ pub fn set_winsize(idx: TtyIndex, ws: &UserWinsize) -> Result<(), TtyError> {
     // pair), and SIGWINCH targets the SLAVE side's foreground job — the
     // session lives on the slave, where the shell did TIOCSCTTY.
     let mut deferred = PostLockWork::new();
-    let peer_idx;
+    // Pinned peer backing (keeps the peer slot alive across the second
+    // lock below) plus whether the *target* of the ioctl was the master.
+    let peer_pin;
     let mut changed;
     {
         let mut guard = TTY_SLOTS[slot].lock();
@@ -520,25 +522,23 @@ pub fn set_winsize(idx: TtyIndex, ws: &UserWinsize) -> Result<(), TtyError> {
                 let old = tty.winsize;
                 tty.winsize = *ws;
                 changed = old.ws_row != ws.ws_row || old.ws_col != ws.ws_col;
-                match tty.driver {
-                    TtyDriverKind::PtyMaster { ref peer } => {
-                        peer_idx = Some((peer.idx, true));
+                match &tty.driver {
+                    TtyDriverKind::PtyMaster { peer } => {
+                        peer_pin = peer.upgrade().map(|pin| (pin, true));
                     }
-                    TtyDriverKind::PtySlave { ref peer } => {
-                        peer_idx = Some((peer.idx, false));
-                    }
-                    _ => {
-                        peer_idx = None;
+                    TtyDriverKind::PtySlave { peer } => {
+                        peer_pin = peer.upgrade().map(|pin| (pin, false));
+                        // Slave targeted directly: its own session carries
+                        // the foreground job.
                         if changed {
                             deferred.add_signal(tty.session.fg_pgrp_raw(), SIGWINCH);
                         }
                     }
-                }
-                if peer_idx.is_none() || matches!(peer_idx, Some((_, false))) {
-                    // Slave (or non-PTY) targeted directly: its own session
-                    // carries the foreground job.
-                    if changed && peer_idx.is_some() {
-                        deferred.add_signal(tty.session.fg_pgrp_raw(), SIGWINCH);
+                    _ => {
+                        peer_pin = None;
+                        if changed {
+                            deferred.add_signal(tty.session.fg_pgrp_raw(), SIGWINCH);
+                        }
                     }
                 }
             }
@@ -546,18 +546,16 @@ pub fn set_winsize(idx: TtyIndex, ws: &UserWinsize) -> Result<(), TtyError> {
         }
     }
 
-    if let Some((peer, target_is_master)) = peer_idx {
-        let peer_slot = peer.0 as usize;
-        if peer_slot < MAX_TTYS {
-            let mut guard = TTY_SLOTS[peer_slot].lock();
-            if let Some(peer_tty) = guard.as_mut() {
-                let old = peer_tty.winsize;
-                peer_tty.winsize = *ws;
-                changed = changed || old.ws_row != ws.ws_row || old.ws_col != ws.ws_col;
-                if target_is_master && changed {
-                    // The peer is the slave: signal ITS foreground job.
-                    deferred.add_signal(peer_tty.session.fg_pgrp_raw(), SIGWINCH);
-                }
+    if let Some((peer, target_is_master)) = peer_pin {
+        let peer_slot = peer.index().0 as usize;
+        let mut guard = TTY_SLOTS[peer_slot].lock();
+        if let Some(peer_tty) = guard.as_mut() {
+            let old = peer_tty.winsize;
+            peer_tty.winsize = *ws;
+            changed = changed || old.ws_row != ws.ws_row || old.ws_col != ws.ws_col;
+            if target_is_master && changed {
+                // The peer is the slave: signal ITS foreground job.
+                deferred.add_signal(peer_tty.session.fg_pgrp_raw(), SIGWINCH);
             }
         }
     }
@@ -590,9 +588,9 @@ pub fn tcflush(idx: TtyIndex, queue: i32) -> Result<(), TtyError> {
         return Err(TtyError::InvalidIndex);
     }
 
-    // Peer slot to wake after unthrottling (resolved inside the lock,
-    // wake delivered outside to respect lock ordering).
-    let mut unthrottled_peer: Option<usize> = None;
+    // Peer to wake after unthrottling (pinned inside the lock, wake
+    // delivered outside to respect lock ordering).
+    let mut unthrottled_peer = None;
 
     match queue {
         TCIFLUSH | TCIOFLUSH => {
@@ -608,7 +606,7 @@ pub fn tcflush(idx: TtyIndex, queue: i32) -> Result<(), TtyError> {
                     if tty.flags.contains(TtyFlags::THROTTLED) {
                         tty.flags.remove(TtyFlags::THROTTLED);
                         if let TtyDriverKind::PtySlave { ref peer } = tty.driver {
-                            unthrottled_peer = Some(peer.idx.0 as usize);
+                            unthrottled_peer = peer.upgrade();
                         }
                     }
                 } else {
@@ -627,11 +625,9 @@ pub fn tcflush(idx: TtyIndex, queue: i32) -> Result<(), TtyError> {
     }
 
     // Wake the master-side writer now that the lock is released.
-    if let Some(peer_slot) = unthrottled_peer {
-        if peer_slot < MAX_TTYS {
-            // Poll waiters park on the output queue too, so one publish covers both.
-            BUS.publish(tty_output_event(peer_slot));
-        }
+    if let Some(master) = unthrottled_peer {
+        // Poll waiters park on the output queue too, so one publish covers both.
+        BUS.publish(tty_output_event(master.index().0 as usize));
     }
 
     Ok(())

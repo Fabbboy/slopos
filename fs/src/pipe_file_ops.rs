@@ -1,9 +1,10 @@
 use slopos_abi::Errno;
 use slopos_abi::event::{KernelEvent, PipeSlot};
-use slopos_abi::file_ops::{FileKind, FileOps};
+use slopos_abi::file_ops::{FileBacking, FileKind, FileOps};
 use slopos_abi::io::{IO_STAGING_SIZE, IoBufRead, IoBufWrite};
 use slopos_abi::syscall::{POLLERR, POLLHUP};
 use slopos_kernel_services::driver_runtime::scheduler_is_enabled;
+use slopos_ostd::KArc;
 use slopos_ostd::sync::BUS;
 
 use crate::pipe;
@@ -31,24 +32,59 @@ fn write_ev(h: PipeHandle) -> KernelEvent {
     }
 }
 
-fn pipe_dup_reader(h: PipeHandle) -> Option<usize> {
-    if h == PipeHandle::INVALID {
-        return None;
-    }
-    pipe::with_pipe_mut(h, |slot| {
-        slot.readers = slot.readers.saturating_add(1);
-    })?;
-    Some(h.as_usize())
+/// Owner of the pipe's read end: dropping it retires one reader, waking
+/// blocked writers on the last-reader edge and freeing the pipe slot once
+/// both ends are gone.
+pub(crate) struct PipeReadBacking {
+    handle: PipeHandle,
 }
 
-fn pipe_dup_writer(h: PipeHandle) -> Option<usize> {
-    if h == PipeHandle::INVALID {
-        return None;
+impl FileBacking for PipeReadBacking {}
+
+impl Drop for PipeReadBacking {
+    fn drop(&mut self) {
+        pipe_release_reader(self.handle);
     }
-    pipe::with_pipe_mut(h, |slot| {
-        slot.writers = slot.writers.saturating_add(1);
-    })?;
-    Some(h.as_usize())
+}
+
+/// Owner of the pipe's write end — the reader-side EOF edge lives in its
+/// `Drop`.
+pub(crate) struct PipeWriteBacking {
+    handle: PipeHandle,
+}
+
+impl FileBacking for PipeWriteBacking {}
+
+impl Drop for PipeWriteBacking {
+    fn drop(&mut self) {
+        pipe_release_writer(self.handle);
+    }
+}
+
+/// Wrap ownership of both ends of a freshly-allocated, primed pipe
+/// (readers == writers == 1). Consumes both primed references: on
+/// allocation failure they are retired here, freeing the pipe slot —
+/// the caller must not free it itself.
+pub(crate) fn pipe_backings(
+    handle: PipeHandle,
+) -> Option<(KArc<dyn FileBacking>, KArc<dyn FileBacking>)> {
+    let read: KArc<dyn FileBacking> = match KArc::try_new(PipeReadBacking { handle }) {
+        Ok(backing) => backing,
+        Err(_) => {
+            pipe_release_reader(handle);
+            pipe_release_writer(handle);
+            return None;
+        }
+    };
+    let write: KArc<dyn FileBacking> = match KArc::try_new(PipeWriteBacking { handle }) {
+        Ok(backing) => backing,
+        Err(_) => {
+            drop(read);
+            pipe_release_writer(handle);
+            return None;
+        }
+    };
+    Some((read, write))
 }
 
 fn pipe_release_reader(h: PipeHandle) {
@@ -187,14 +223,6 @@ impl FileOps for PipeReadOps {
 
     fn write(&self, _handle: usize, _buf: &dyn IoBufRead, _offset: u64, _flags: u32) -> isize {
         Errno::EBADF.as_isize()
-    }
-
-    fn release(&self, handle: usize) {
-        pipe_release_reader(PipeHandle::from_usize(handle));
-    }
-
-    fn dup(&self, handle: usize) -> Option<usize> {
-        pipe_dup_reader(PipeHandle::from_usize(handle))
     }
 
     fn poll_fused(&self, handle: usize, events: u16) -> slopos_abi::file_ops::FusedPollResult {
@@ -404,14 +432,6 @@ impl FileOps for PipeWriteOps {
             // didn't fit — wait for room and resume the loop.
             BUS.subscribe(write_ev(h)).wait_event(drain_or_close);
         }
-    }
-
-    fn release(&self, handle: usize) {
-        pipe_release_writer(PipeHandle::from_usize(handle));
-    }
-
-    fn dup(&self, handle: usize) -> Option<usize> {
-        pipe_dup_writer(PipeHandle::from_usize(handle))
     }
 
     fn poll_fused(&self, handle: usize, events: u16) -> slopos_abi::file_ops::FusedPollResult {

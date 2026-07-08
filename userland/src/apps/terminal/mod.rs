@@ -62,19 +62,11 @@ pub fn terminal_user_main() {
     // The I-beam cursor is set on each pointer-enter (see the event loop),
     // where a live focus serial is available to authorize the request.
 
-    // Open the PTY pair and a real fd for the master (never the index-based
-    // tty_read/tty_write, which hardcode non-blocking and bypass fd tracking).
-    let (master_idx, _slave_idx) = match process::openpty() {
+    // Open the PTY pair; the master arrives as a real owned fd.
+    let (master_owned, _slave_num) = match process::openpty() {
         Ok(pair) => pair,
         Err(_) => {
             let _ = tty::write(b"terminal: openpty failed\n");
-            return;
-        }
-    };
-    let master_owned = match process::open_tty_fd(master_idx) {
-        Ok(fd) => fd,
-        Err(_) => {
-            let _ = tty::write(b"terminal: open_tty_fd failed\n");
             return;
         }
     };

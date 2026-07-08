@@ -286,24 +286,21 @@ pub fn test_pollhup_always_reported() -> TestResult {
 pub fn test_poll_events_peer_closed_pollhup() -> TestResult {
     tty::table::tty_table_init();
 
-    let master = match tty::pty_alloc() {
-        Ok(idx) => idx,
+    let (master, _master_backing) = match tty::pty_alloc() {
+        Ok(pair) => pair,
         Err(_) => {
             klog_info!("TTY_TEST: BUG - pty_alloc failed");
             return TestResult::Fail;
         }
     };
     let slave = TtyIndex(tty::get_pty_number(master).unwrap() as u8);
-    tty::open_ref(master).ok();
-    tty::open_ref(slave).ok();
+    tty::set_pty_lock(master, false).unwrap();
+    let slave_backing = tty::pty_open_slave(slave).unwrap();
 
     // Close the slave to mark peer_closed on master.
-    let _ = tty::close_ref(slave);
+    drop(slave_backing);
 
     let revents = tty::poll_events(master, slopos_abi::syscall::POLLIN);
-
-    // Cleanup.
-    let _ = tty::close_ref(master);
 
     if (revents & slopos_abi::syscall::POLLHUP) == 0 {
         klog_info!(
@@ -844,8 +841,8 @@ pub fn test_throttle_watermark_constants() -> TestResult {
 pub fn test_pty_initially_unthrottled() -> TestResult {
     tty::table::tty_table_init();
 
-    let master = match tty::pty_alloc() {
-        Ok(idx) => idx,
+    let (master, _master_backing) = match tty::pty_alloc() {
+        Ok(pair) => pair,
         Err(e) => {
             klog_info!("TTY_TEST: BUG - pty_alloc failed: {:?}", e);
             return TestResult::Fail;
@@ -866,15 +863,6 @@ pub fn test_pty_initially_unthrottled() -> TestResult {
         return TestResult::Fail;
     }
 
-    // Clean up.
-    {
-        let mut g = TTY_SLOTS[master.0 as usize].lock();
-        *g = None;
-    }
-    {
-        let mut g = TTY_SLOTS[slave.0 as usize].lock();
-        *g = None;
-    }
     TestResult::Pass
 }
 
@@ -883,18 +871,17 @@ pub fn test_throttle_activates_at_high_water() -> TestResult {
     use crate::tty::ldisc::THROTTLE_HIGH_WATER;
     tty::table::tty_table_init();
 
-    let master = match tty::pty_alloc() {
-        Ok(idx) => idx,
+    let (master, _master_backing) = match tty::pty_alloc() {
+        Ok(pair) => pair,
         Err(e) => {
             klog_info!("TTY_TEST: BUG - pty_alloc failed: {:?}", e);
             return TestResult::Fail;
         }
     };
-    let _ = tty::open_ref(master);
     let slave_num = tty::get_pty_number(master).unwrap();
     let slave = TtyIndex(slave_num as u8);
     tty::set_pty_lock(master, false).unwrap();
-    tty::pty_open_slave(slave).unwrap();
+    let _slave_backing = tty::pty_open_slave(slave).unwrap();
 
     // Put slave in raw mode so every byte goes straight to cooked buffer.
     let saved = tty::get_termios(slave).unwrap();
@@ -917,14 +904,10 @@ pub fn test_throttle_activates_at_high_water() -> TestResult {
     if !throttled {
         klog_info!("TTY_TEST: BUG - slave not throttled after exceeding high-water");
         tty::set_termios(slave, &saved).unwrap();
-        let _ = tty::close_ref(slave);
-        let _ = tty::close_ref(master);
         return TestResult::Fail;
     }
 
     tty::set_termios(slave, &saved).unwrap();
-    let _ = tty::close_ref(slave);
-    let _ = tty::close_ref(master);
     TestResult::Pass
 }
 
@@ -933,18 +916,17 @@ pub fn test_master_write_short_write_when_throttled() -> TestResult {
     use crate::tty::ldisc::THROTTLE_HIGH_WATER;
     tty::table::tty_table_init();
 
-    let master = match tty::pty_alloc() {
-        Ok(idx) => idx,
+    let (master, _master_backing) = match tty::pty_alloc() {
+        Ok(pair) => pair,
         Err(e) => {
             klog_info!("TTY_TEST: BUG - pty_alloc failed: {:?}", e);
             return TestResult::Fail;
         }
     };
-    let _ = tty::open_ref(master);
     let slave_num = tty::get_pty_number(master).unwrap();
     let slave = TtyIndex(slave_num as u8);
     tty::set_pty_lock(master, false).unwrap();
-    tty::pty_open_slave(slave).unwrap();
+    let _slave_backing = tty::pty_open_slave(slave).unwrap();
 
     // Raw mode so bytes go directly to cooked buffer.
     let saved = tty::get_termios(slave).unwrap();
@@ -967,8 +949,6 @@ pub fn test_master_write_short_write_when_throttled() -> TestResult {
         {
             klog_info!("TTY_TEST: BUG - slave throttled before high-water");
             tty::set_termios(slave, &saved).unwrap();
-            let _ = tty::close_ref(slave);
-            let _ = tty::close_ref(master);
             return TestResult::Fail;
         }
     }
@@ -988,7 +968,7 @@ pub fn test_master_write_short_write_when_throttled() -> TestResult {
     // Write a burst of bytes through master_write.  Since the slave is
     // near high-water, not all should be accepted.
     let burst = [b'B'; 256];
-    let accepted = crate::tty::pty::master_write(peer, &burst);
+    let accepted = crate::tty::pty::master_write(&peer, &burst);
 
     // After enough bytes to cross high-water, throttle activates and
     // master_write stops accepting.  We should get a short write.
@@ -998,8 +978,6 @@ pub fn test_master_write_short_write_when_throttled() -> TestResult {
             burst.len()
         );
         tty::set_termios(slave, &saved).unwrap();
-        let _ = tty::close_ref(slave);
-        let _ = tty::close_ref(master);
         return TestResult::Fail;
     }
 
@@ -1007,14 +985,10 @@ pub fn test_master_write_short_write_when_throttled() -> TestResult {
     if accepted == 0 {
         klog_info!("TTY_TEST: BUG - master_write accepted 0 bytes");
         tty::set_termios(slave, &saved).unwrap();
-        let _ = tty::close_ref(slave);
-        let _ = tty::close_ref(master);
         return TestResult::Fail;
     }
 
     tty::set_termios(slave, &saved).unwrap();
-    let _ = tty::close_ref(slave);
-    let _ = tty::close_ref(master);
     TestResult::Pass
 }
 
@@ -1023,18 +997,17 @@ pub fn test_read_unthrottles_slave() -> TestResult {
     use crate::tty::ldisc::THROTTLE_HIGH_WATER;
     tty::table::tty_table_init();
 
-    let master = match tty::pty_alloc() {
-        Ok(idx) => idx,
+    let (master, _master_backing) = match tty::pty_alloc() {
+        Ok(pair) => pair,
         Err(e) => {
             klog_info!("TTY_TEST: BUG - pty_alloc failed: {:?}", e);
             return TestResult::Fail;
         }
     };
-    let _ = tty::open_ref(master);
     let slave_num = tty::get_pty_number(master).unwrap();
     let slave = TtyIndex(slave_num as u8);
     tty::set_pty_lock(master, false).unwrap();
-    tty::pty_open_slave(slave).unwrap();
+    let _slave_backing = tty::pty_open_slave(slave).unwrap();
 
     // Raw mode.
     let saved = tty::get_termios(slave).unwrap();
@@ -1057,8 +1030,6 @@ pub fn test_read_unthrottles_slave() -> TestResult {
         {
             klog_info!("TTY_TEST: BUG - slave not throttled after fill");
             tty::set_termios(slave, &saved).unwrap();
-            let _ = tty::close_ref(slave);
-            let _ = tty::close_ref(master);
             return TestResult::Fail;
         }
     }
@@ -1100,14 +1071,10 @@ pub fn test_read_unthrottles_slave() -> TestResult {
             drained
         );
         tty::set_termios(slave, &saved).unwrap();
-        let _ = tty::close_ref(slave);
-        let _ = tty::close_ref(master);
         return TestResult::Fail;
     }
 
     tty::set_termios(slave, &saved).unwrap();
-    let _ = tty::close_ref(slave);
-    let _ = tty::close_ref(master);
     TestResult::Pass
 }
 
@@ -1115,18 +1082,17 @@ pub fn test_read_unthrottles_slave() -> TestResult {
 pub fn test_throttle_cycle_no_data_loss() -> TestResult {
     tty::table::tty_table_init();
 
-    let master = match tty::pty_alloc() {
-        Ok(idx) => idx,
+    let (master, _master_backing) = match tty::pty_alloc() {
+        Ok(pair) => pair,
         Err(e) => {
             klog_info!("TTY_TEST: BUG - pty_alloc failed: {:?}", e);
             return TestResult::Fail;
         }
     };
-    let _ = tty::open_ref(master);
     let slave_num = tty::get_pty_number(master).unwrap();
     let slave = TtyIndex(slave_num as u8);
     tty::set_pty_lock(master, false).unwrap();
-    tty::pty_open_slave(slave).unwrap();
+    let _slave_backing = tty::pty_open_slave(slave).unwrap();
 
     // Raw mode.
     let saved = tty::get_termios(slave).unwrap();
@@ -1151,7 +1117,7 @@ pub fn test_throttle_cycle_no_data_loss() -> TestResult {
     // Do 3 fill/drain cycles.
     for _ in 0..3 {
         // Write a chunk via master_write.
-        let accepted = crate::tty::pty::master_write(peer.clone(), &*chunk);
+        let accepted = crate::tty::pty::master_write(&peer, &*chunk);
         total_written += accepted;
 
         // Drain all available data from slave.
@@ -1171,14 +1137,10 @@ pub fn test_throttle_cycle_no_data_loss() -> TestResult {
             total_read
         );
         tty::set_termios(slave, &saved).unwrap();
-        let _ = tty::close_ref(slave);
-        let _ = tty::close_ref(master);
         return TestResult::Fail;
     }
 
     tty::set_termios(slave, &saved).unwrap();
-    let _ = tty::close_ref(slave);
-    let _ = tty::close_ref(master);
     TestResult::Pass
 }
 
@@ -1219,18 +1181,17 @@ pub fn test_console_not_throttled() -> TestResult {
 pub fn test_master_write_full_when_not_throttled() -> TestResult {
     tty::table::tty_table_init();
 
-    let master = match tty::pty_alloc() {
-        Ok(idx) => idx,
+    let (master, _master_backing) = match tty::pty_alloc() {
+        Ok(pair) => pair,
         Err(e) => {
             klog_info!("TTY_TEST: BUG - pty_alloc failed: {:?}", e);
             return TestResult::Fail;
         }
     };
-    let _ = tty::open_ref(master);
     let slave_num = tty::get_pty_number(master).unwrap();
     let slave = TtyIndex(slave_num as u8);
     tty::set_pty_lock(master, false).unwrap();
-    tty::pty_open_slave(slave).unwrap();
+    let _slave_backing = tty::pty_open_slave(slave).unwrap();
 
     // Raw mode.
     let saved = tty::get_termios(slave).unwrap();
@@ -1249,7 +1210,7 @@ pub fn test_master_write_full_when_not_throttled() -> TestResult {
 
     // Write a small burst — should be fully accepted.
     let small = [b'S'; 64];
-    let accepted = crate::tty::pty::master_write(peer, &small);
+    let accepted = crate::tty::pty::master_write(&peer, &small);
     if accepted != small.len() {
         klog_info!(
             "TTY_TEST: BUG - master_write accepted {} of {} (not throttled)",
@@ -1257,15 +1218,11 @@ pub fn test_master_write_full_when_not_throttled() -> TestResult {
             small.len()
         );
         tty::set_termios(slave, &saved).unwrap();
-        let _ = tty::close_ref(slave);
-        let _ = tty::close_ref(master);
         return TestResult::Fail;
     }
 
     drain_tty_nonblock(slave);
     tty::set_termios(slave, &saved).unwrap();
-    let _ = tty::close_ref(slave);
-    let _ = tty::close_ref(master);
     TestResult::Pass
 }
 

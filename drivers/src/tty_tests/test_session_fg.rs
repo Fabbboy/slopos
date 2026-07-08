@@ -573,65 +573,64 @@ pub fn test_tiocnotty_constant() -> TestResult {
 // /dev/tty Controlling Terminal Device
 // ===========================================================================
 
-/// `open_ref` increments open count for the same TTY slot — this is
-/// the mechanism that `/dev/tty` relies on (a second FD referencing the same
-/// TTY index via the caller's controlling terminal).
+/// A second open of the same console index clones the one backing; its
+/// strong count is the live open count — the mechanism `/dev/tty` relies
+/// on (a second FD referencing the caller's controlling terminal).
 pub fn test_open_ref_second_fd_increments_count() -> TestResult {
+    tty::table::tty_table_init();
     let idx = TtyIndex(0);
-    // Read initial open_count.
-    let initial = {
-        let guard = TTY_SLOTS[0].lock();
-        match guard.as_ref() {
-            Some(tty) => tty.open_count,
-            None => {
-                klog_info!("TTY_TEST: BUG - TTY0 not allocated");
-                return TestResult::Fail;
-            }
-        }
-    };
-    // Simulate /dev/tty open: open_ref on the same TTY.
-    let after_open = match tty::open_ref(idx) {
-        Ok(count) => count,
+    let con1 = match tty::open_tty(idx) {
+        Ok(c) => c,
         Err(e) => {
-            klog_info!("TTY_TEST: BUG - open_ref failed: {:?}", e);
+            klog_info!("TTY_TEST: BUG - first open_tty failed: {:?}", e);
             return TestResult::Fail;
         }
     };
-    if after_open != initial + 1 {
+    let con2 = match tty::open_tty(idx) {
+        Ok(c) => c,
+        Err(e) => {
+            klog_info!("TTY_TEST: BUG - second open_tty failed: {:?}", e);
+            return TestResult::Fail;
+        }
+    };
+    let count = KArc::strong_count(&con2);
+    drop(con2);
+    drop(con1);
+    if count != 2 {
         klog_info!(
-            "TTY_TEST: BUG - open_ref should increment: expected {}, got {}",
-            initial + 1,
-            after_open
+            "TTY_TEST: BUG - second open should make strong_count 2, got {}",
+            count
         );
-        let _ = tty::close_ref(idx);
         return TestResult::Fail;
     }
-    // Close the extra ref.
-    let _ = tty::close_ref(idx);
     TestResult::Pass
 }
 
-/// After `open_ref` (simulating `/dev/tty` open), read/write/termios
-/// operations work identically on the same TTY index — the FD created by
-/// `/dev/tty` is indistinguishable from one opened on the actual device path.
+/// While an extra open of the console is held, read/write/termios
+/// operations work identically on the same TTY index — a `/dev/tty` FD is
+/// indistinguishable from one opened on the device path.
 pub fn test_dev_tty_operations_identical_to_direct() -> TestResult {
+    tty::table::tty_table_init();
     let idx = TtyIndex(0);
-    // open_ref simulates /dev/tty open.
-    let _ = tty::open_ref(idx);
+    let con = match tty::open_tty(idx) {
+        Ok(c) => c,
+        Err(e) => {
+            klog_info!("TTY_TEST: BUG - open_tty failed: {:?}", e);
+            return TestResult::Fail;
+        }
+    };
 
     // get_termios should work.
     let termios = match tty::get_termios(idx) {
         Ok(t) => t,
         Err(e) => {
-            klog_info!("TTY_TEST: BUG - get_termios after open_ref failed: {:?}", e);
-            let _ = tty::close_ref(idx);
+            klog_info!("TTY_TEST: BUG - get_termios after open failed: {:?}", e);
             return TestResult::Fail;
         }
     };
     // Verify it returns a valid termios (ICANON should be set by default).
     if !termios.c_lflag.contains(LocalFlags::ICANON) {
-        klog_info!("TTY_TEST: BUG - termios from /dev/tty FD missing ICANON");
-        let _ = tty::close_ref(idx);
+        klog_info!("TTY_TEST: BUG - termios from console FD missing ICANON");
         return TestResult::Fail;
     }
 
@@ -640,35 +639,32 @@ pub fn test_dev_tty_operations_identical_to_direct() -> TestResult {
         Ok(n) if n == 7 => {}
         Ok(n) => {
             klog_info!(
-                "TTY_TEST: BUG - write via /dev/tty FD returned {}, expected 7",
+                "TTY_TEST: BUG - write via console FD returned {}, expected 7",
                 n
             );
-            let _ = tty::close_ref(idx);
             return TestResult::Fail;
         }
         Err(e) => {
-            klog_info!("TTY_TEST: BUG - write via /dev/tty FD failed: {:?}", e);
-            let _ = tty::close_ref(idx);
+            klog_info!("TTY_TEST: BUG - write via console FD failed: {:?}", e);
             return TestResult::Fail;
         }
     }
 
     // get_session_id should succeed.
     if tty::get_session_id(idx).is_err() {
-        klog_info!("TTY_TEST: BUG - get_session_id after open_ref failed");
-        let _ = tty::close_ref(idx);
+        klog_info!("TTY_TEST: BUG - get_session_id after open failed");
         return TestResult::Fail;
     }
 
-    let _ = tty::close_ref(idx);
+    drop(con);
     TestResult::Pass
 }
 
-/// `open_ref` on a TTY does NOT modify session state — opening
-/// `/dev/tty` only accesses an existing controlling terminal, never acquires one.
+/// Opening a TTY does NOT modify session state — opening `/dev/tty` only
+/// accesses an existing controlling terminal, never acquires one.
 pub fn test_open_ref_does_not_modify_session() -> TestResult {
     let idx = TtyIndex(0);
-    // Snapshot session state before open_ref.
+    // Snapshot session state before opening.
     let (sid_before, fg_before) = {
         let guard = TTY_SLOTS[0].lock();
         match guard.as_ref() {
@@ -680,8 +676,13 @@ pub fn test_open_ref_does_not_modify_session() -> TestResult {
         }
     };
 
-    // open_ref simulates /dev/tty open.
-    let _ = tty::open_ref(idx);
+    let con = match tty::open_tty(idx) {
+        Ok(c) => c,
+        Err(e) => {
+            klog_info!("TTY_TEST: BUG - open_tty failed: {:?}", e);
+            return TestResult::Fail;
+        }
+    };
 
     // Snapshot after.
     let (sid_after, fg_after) = {
@@ -690,37 +691,41 @@ pub fn test_open_ref_does_not_modify_session() -> TestResult {
             Some(tty) => (tty.session.session_id_raw(), tty.session.fg_pgrp_raw()),
             None => {
                 klog_info!("TTY_TEST: BUG - TTY0 vanished");
-                let _ = tty::close_ref(idx);
                 return TestResult::Fail;
             }
         }
     };
 
+    drop(con);
+
     if sid_before != sid_after || fg_before != fg_after {
         klog_info!(
-            "TTY_TEST: BUG - open_ref modified session: sid {}->{}, fg {}->{}",
+            "TTY_TEST: BUG - open modified session: sid {}->{}, fg {}->{}",
             sid_before,
             sid_after,
             fg_before,
             fg_after
         );
-        let _ = tty::close_ref(idx);
         return TestResult::Fail;
     }
 
-    let _ = tty::close_ref(idx);
     TestResult::Pass
 }
 
-/// `open_ref` on an invalid TTY index returns `InvalidIndex` error,
-/// matching the ENXIO semantics when `/dev/tty` resolution fails.
+/// Opening an invalid TTY index returns `InvalidIndex`, matching the ENXIO
+/// semantics when `/dev/tty` resolution fails.
 pub fn test_open_ref_invalid_index_returns_error() -> TestResult {
     let bad = TtyIndex(u8::MAX);
-    match tty::open_ref(bad) {
+    match tty::open_tty(bad) {
         Err(TtyError::InvalidIndex) => TestResult::Pass,
-        other => {
+        Ok(backing) => {
+            klog_info!("TTY_TEST: BUG - open_tty(255) unexpectedly succeeded");
+            drop(backing);
+            TestResult::Fail
+        }
+        Err(other) => {
             klog_info!(
-                "TTY_TEST: BUG - open_ref(255) should return InvalidIndex, got {:?}",
+                "TTY_TEST: BUG - open_tty(255) should return InvalidIndex, got {:?}",
                 other
             );
             TestResult::Fail
@@ -728,62 +733,78 @@ pub fn test_open_ref_invalid_index_returns_error() -> TestResult {
     }
 }
 
-/// `close_ref` correctly decrements the open count — ensures the
-/// `/dev/tty` FD lifecycle is properly paired with the direct device FD.
+/// Dropping the last open releases the backing — the registry weak then
+/// fails to upgrade, confirming the `/dev/tty` FD lifecycle pairs cleanly
+/// with the device FD.
 pub fn test_close_ref_decrements_after_open() -> TestResult {
+    tty::table::tty_table_init();
     let idx = TtyIndex(0);
-    let before = {
-        let guard = TTY_SLOTS[0].lock();
-        guard.as_ref().map(|t| t.open_count).unwrap_or(0)
+    // A freshly-initialised console has zero opens: nothing to upgrade.
+    if crate::tty::table::TTY_BACKINGS[0]
+        .lock()
+        .upgrade()
+        .is_some()
+    {
+        klog_info!("TTY_TEST: BUG - console should have no open before open_tty");
+        return TestResult::Fail;
+    }
+    let con = match tty::open_tty(idx) {
+        Ok(c) => c,
+        Err(e) => {
+            klog_info!("TTY_TEST: BUG - open_tty failed: {:?}", e);
+            return TestResult::Fail;
+        }
     };
-    let _ = tty::open_ref(idx);
-    let _ = tty::close_ref(idx);
-    let after = {
-        let guard = TTY_SLOTS[0].lock();
-        guard.as_ref().map(|t| t.open_count).unwrap_or(0)
-    };
-    if before != after {
+    let count = KArc::strong_count(&con);
+    if count != 1 {
         klog_info!(
-            "TTY_TEST: BUG - open+close ref should restore count: {} != {}",
-            before,
-            after
+            "TTY_TEST: BUG - single open should have strong_count 1, got {}",
+            count
         );
+        return TestResult::Fail;
+    }
+    drop(con);
+    // Last close releases the backing; the registry weak no longer upgrades.
+    if crate::tty::table::TTY_BACKINGS[0]
+        .lock()
+        .upgrade()
+        .is_some()
+    {
+        klog_info!("TTY_TEST: BUG - console should have no open after last close");
         return TestResult::Fail;
     }
     TestResult::Pass
 }
 
-/// Multiple `open_ref` calls (simulating multiple `/dev/tty` opens)
-/// all succeed and increment sequentially.
+/// Multiple opens of the same console index all clone the one backing; the
+/// shared strong count grows with each open.
 pub fn test_multiple_open_ref_sequential() -> TestResult {
+    tty::table::tty_table_init();
     let idx = TtyIndex(0);
-    let base = match tty::open_ref(idx) {
+    let c1 = match tty::open_tty(idx) {
         Ok(c) => c,
         Err(e) => {
-            klog_info!("TTY_TEST: BUG - first open_ref failed: {:?}", e);
+            klog_info!("TTY_TEST: BUG - first open_tty failed: {:?}", e);
             return TestResult::Fail;
         }
     };
-    let second = match tty::open_ref(idx) {
+    let c2 = match tty::open_tty(idx) {
         Ok(c) => c,
         Err(e) => {
-            klog_info!("TTY_TEST: BUG - second open_ref failed: {:?}", e);
-            let _ = tty::close_ref(idx);
+            klog_info!("TTY_TEST: BUG - second open_tty failed: {:?}", e);
             return TestResult::Fail;
         }
     };
-    if second != base + 1 {
+    let count = KArc::strong_count(&c2);
+    drop(c2);
+    drop(c1);
+    if count != 2 {
         klog_info!(
-            "TTY_TEST: BUG - sequential open_ref should increment: {} then {}",
-            base,
-            second
+            "TTY_TEST: BUG - two sequential opens should give strong_count 2, got {}",
+            count
         );
-        let _ = tty::close_ref(idx);
-        let _ = tty::close_ref(idx);
         return TestResult::Fail;
     }
-    let _ = tty::close_ref(idx);
-    let _ = tty::close_ref(idx);
     TestResult::Pass
 }
 
@@ -794,29 +815,29 @@ pub fn test_dev_tty_winsize_matches_direct() -> TestResult {
     let ws_before = match tty::get_winsize(idx) {
         Ok(ws) => ws,
         Err(e) => {
-            klog_info!(
-                "TTY_TEST: BUG - get_winsize before open_ref failed: {:?}",
-                e
-            );
+            klog_info!("TTY_TEST: BUG - get_winsize before open failed: {:?}", e);
             return TestResult::Fail;
         }
     };
-    // Simulate /dev/tty open.
-    let _ = tty::open_ref(idx);
+    let con = match tty::open_tty(idx) {
+        Ok(c) => c,
+        Err(e) => {
+            klog_info!("TTY_TEST: BUG - open_tty failed: {:?}", e);
+            return TestResult::Fail;
+        }
+    };
     let ws_after = match tty::get_winsize(idx) {
         Ok(ws) => ws,
         Err(e) => {
-            klog_info!("TTY_TEST: BUG - get_winsize after open_ref failed: {:?}", e);
-            let _ = tty::close_ref(idx);
+            klog_info!("TTY_TEST: BUG - get_winsize after open failed: {:?}", e);
             return TestResult::Fail;
         }
     };
+    drop(con);
     if ws_before.ws_row != ws_after.ws_row || ws_before.ws_col != ws_after.ws_col {
-        klog_info!("TTY_TEST: BUG - winsize differs after open_ref");
-        let _ = tty::close_ref(idx);
+        klog_info!("TTY_TEST: BUG - winsize differs after open");
         return TestResult::Fail;
     }
-    let _ = tty::close_ref(idx);
     TestResult::Pass
 }
 // ===========================================================================
@@ -1497,11 +1518,8 @@ pub fn test_ctty_can_be_ctty_vconsole() -> TestResult {
 }
 
 pub fn test_ctty_can_be_ctty_pty_slave() -> TestResult {
-    let peer = PtyPeerHandle {
-        idx: TtyIndex(2),
-        generation: 0,
-    };
-    let driver = TtyDriverKind::PtySlave { peer };
+    // Peer identity is irrelevant to controlling-terminal eligibility.
+    let driver = TtyDriverKind::PtySlave { peer: KWeak::new() };
     if !driver.can_be_controlling_terminal() {
         klog_info!("TTY_TEST: BUG - PtySlave should be a valid ctty");
         return TestResult::Fail;
@@ -1510,11 +1528,7 @@ pub fn test_ctty_can_be_ctty_pty_slave() -> TestResult {
 }
 
 pub fn test_ctty_cannot_be_ctty_pty_master() -> TestResult {
-    let peer = PtyPeerHandle {
-        idx: TtyIndex(3),
-        generation: 0,
-    };
-    let driver = TtyDriverKind::PtyMaster { peer };
+    let driver = TtyDriverKind::PtyMaster { peer: KWeak::new() };
     if driver.can_be_controlling_terminal() {
         klog_info!("TTY_TEST: BUG - PtyMaster must NOT be a valid ctty");
         return TestResult::Fail;
@@ -1524,31 +1538,35 @@ pub fn test_ctty_cannot_be_ctty_pty_master() -> TestResult {
 
 pub fn test_ctty_acquire_ctty_pty_master_rejected() -> TestResult {
     tty::table::tty_table_init();
-    let master = match tty::pty_alloc() {
-        Ok(idx) => idx,
+    // The master backing is the sole open of the pair; holding it keeps both
+    // ends alive, and dropping it below closes them and frees both slots.
+    let (master, master_backing) = match tty::pty_alloc() {
+        Ok(pair) => pair,
         Err(e) => {
             klog_info!("TTY_TEST: BUG - pty_alloc failed: {:?}", e);
             return TestResult::Fail;
         }
     };
-    match tty::acquire_controlling_terminal(master, 100, 100) {
-        Err(TtyError::PermissionDenied) => {}
+    let result = tty::acquire_controlling_terminal(master, 100, 100);
+    drop(master_backing);
+    match result {
+        Err(TtyError::PermissionDenied) => TestResult::Pass,
         Ok(()) => {
             klog_info!("TTY_TEST: BUG - acquire on PTY master should fail");
-            return TestResult::Fail;
+            TestResult::Fail
         }
         Err(e) => {
             klog_info!("TTY_TEST: BUG - expected PermissionDenied, got {:?}", e);
-            return TestResult::Fail;
+            TestResult::Fail
         }
     }
-    TestResult::Pass
 }
 
 pub fn test_ctty_acquire_ctty_pty_slave_succeeds() -> TestResult {
     tty::table::tty_table_init();
-    let master = match tty::pty_alloc() {
-        Ok(idx) => idx,
+    // Hold the master backing so the slave slot stays alive for the acquire.
+    let (master, master_backing) = match tty::pty_alloc() {
+        Ok(pair) => pair,
         Err(e) => {
             klog_info!("TTY_TEST: BUG - pty_alloc failed: {:?}", e);
             return TestResult::Fail;
@@ -1563,17 +1581,17 @@ pub fn test_ctty_acquire_ctty_pty_slave_succeeds() -> TestResult {
     };
     // Unlock the slave first.
     let _ = tty::set_pty_lock(master, false);
-    match tty::acquire_controlling_terminal(slave, 200, 200) {
-        Ok(()) => {}
-        Err(e) => {
-            klog_info!(
-                "TTY_TEST: BUG - acquire on PTY slave should succeed, got {:?}",
-                e
-            );
-            return TestResult::Fail;
-        }
+    let acquired = tty::acquire_controlling_terminal(slave, 200, 200);
+    let sid = tty::get_session_id(slave);
+    drop(master_backing);
+    if let Err(e) = acquired {
+        klog_info!(
+            "TTY_TEST: BUG - acquire on PTY slave should succeed, got {:?}",
+            e
+        );
+        return TestResult::Fail;
     }
-    match tty::get_session_id(slave) {
+    match sid {
         Ok(200) => TestResult::Pass,
         Ok(other) => {
             klog_info!(
@@ -1714,20 +1732,22 @@ pub fn test_ctty_set_fg_pgrp_checked_completes_without_deadlock() -> TestResult 
 
 pub fn test_ctty_pty_master_ctty_does_not_attach_session() -> TestResult {
     tty::table::tty_table_init();
-    let master = match tty::pty_alloc() {
-        Ok(idx) => idx,
+    let (master, master_backing) = match tty::pty_alloc() {
+        Ok(pair) => pair,
         Err(e) => {
             klog_info!("TTY_TEST: BUG - pty_alloc failed: {:?}", e);
             return TestResult::Fail;
         }
     };
     let _ = tty::acquire_controlling_terminal(master, 700, 700);
-    match tty::get_session_id(master) {
+    let sid = tty::get_session_id(master);
+    drop(master_backing);
+    match sid {
         Ok(0) => TestResult::Pass,
-        Ok(sid) => {
+        Ok(s) => {
             klog_info!(
                 "TTY_TEST: BUG - master should have no session after rejected acquire, got {}",
-                sid
+                s
             );
             TestResult::Fail
         }

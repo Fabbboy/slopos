@@ -150,9 +150,30 @@ fn try_cleanup(table: &mut HandleTable<MemfdObject>, handle: MemfdHandle) {
 // Public API — called by syscall handlers and mmap/munmap
 // ---------------------------------------------------------------------------
 
-/// Create a new memfd object. Returns (packed_handle, &FileOps) for fd
-/// installation. The packed handle is stored in `OpenFile.handle`.
-pub fn memfd_create(_flags: u32) -> Option<(usize, &'static dyn FileOps)> {
+/// Sole owner of one registry entry's fd reference; dropping it retires
+/// the reference and frees the pages once no mapping pins them.
+struct MemfdBacking {
+    handle: usize,
+}
+
+impl slopos_abi::file_ops::FileBacking for MemfdBacking {}
+
+impl Drop for MemfdBacking {
+    fn drop(&mut self) {
+        memfd_release(self.handle);
+    }
+}
+
+/// Create a new memfd object. Returns (packed_handle, &FileOps, backing)
+/// for fd installation. The packed handle is stored in `OpenFile.handle`;
+/// the backing's `Drop` is the close.
+pub fn memfd_create(
+    _flags: u32,
+) -> Option<(
+    usize,
+    &'static dyn FileOps,
+    slopos_ostd::KArc<dyn slopos_abi::file_ops::FileBacking>,
+)> {
     let raw = with_registry(|t| {
         t.insert(MemfdObject {
             phys_addr: PhysAddr::NULL,
@@ -165,7 +186,15 @@ pub fn memfd_create(_flags: u32) -> Option<(usize, &'static dyn FileOps)> {
         .ok()
         .map(|h| h.pack(SLOT_BITS))
     })?;
-    Some((raw, &MEMFD_FILE_OPS))
+    let backing: slopos_ostd::KArc<dyn slopos_abi::file_ops::FileBacking> =
+        match slopos_ostd::KArc::try_new(MemfdBacking { handle: raw }) {
+            Ok(b) => b,
+            Err(_) => {
+                memfd_release(raw);
+                return None;
+            }
+        };
+    Some((raw, &MEMFD_FILE_OPS, backing))
 }
 
 /// Set the size of a memfd (one-shot: only works when size is currently 0).
@@ -288,19 +317,8 @@ pub(crate) fn memfd_dec_mapcount_by(handle: MemfdHandle, count: u32) {
     });
 }
 
-/// Increment fd refcount (called by dup, fork, SCM_RIGHTS). `handle` is the
-/// packed fd value.
-pub fn memfd_inc_ref(handle: usize) {
-    let h = handle_from_raw(handle);
-    with_registry(|t| {
-        if let Ok(obj) = t.get_mut(h) {
-            obj.refcount += 1;
-        }
-    });
-}
-
-/// Decrement fd refcount (called by close / FileOps::release). `handle` is the
-/// packed fd value.
+/// Decrement fd refcount (fired by the backing's `Drop` on last close).
+/// `handle` is the packed fd value.
 pub fn memfd_release(handle: usize) {
     let h = handle_from_raw(handle);
     with_registry(|t| {
@@ -342,15 +360,6 @@ impl FileOps for MemfdFileOps {
 
     fn write(&self, _handle: usize, _buf: &dyn IoBufRead, _offset: u64, _flags: u32) -> isize {
         -22 // EINVAL — use mmap instead
-    }
-
-    fn release(&self, handle: usize) {
-        memfd_release(handle);
-    }
-
-    fn dup(&self, handle: usize) -> Option<usize> {
-        memfd_inc_ref(handle);
-        Some(handle)
     }
 
     fn stat(&self, handle: usize, out: &mut UserFsStat) -> i32 {

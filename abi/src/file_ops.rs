@@ -47,11 +47,22 @@ pub enum FileKind {
     Signalfd = 8,
 }
 
+/// Owned per-open backing object of a file description.
+///
+/// The open-file layer holds each open file's backing as a
+/// `KArc<dyn FileBacking>`; dropping the last strong reference **is** the
+/// teardown. Subsystems implement this on the object that owns their
+/// per-open state (or on a thin owner of their internal handle) and put
+/// the release logic in its `Drop` — there is no release callback, so a
+/// double teardown is unrepresentable and a forgotten one is impossible.
+pub trait FileBacking: Send + Sync {}
+
 /// Per-resource-type operations for open file descriptions.
 ///
 /// Subsystems provide **static** (zero-sized) implementations. Per-open
 /// state is identified by the opaque `handle` passed to every method.
-///
+/// Lifetime is NOT managed here: the open-file layer owns a
+/// [`FileBacking`] whose `Drop` is the teardown.
 pub trait FileOps: Send + Sync {
     fn kind(&self) -> FileKind;
 
@@ -75,14 +86,6 @@ pub trait FileOps: Send + Sync {
     ///
     /// Returns bytes written on success, or a negative errno.
     fn write(&self, handle: usize, buf: &dyn IoBufRead, offset: u64, flags: u32) -> isize;
-
-    /// Called exactly once when refcount reaches zero.
-    fn release(&self, handle: usize);
-
-    /// Returns `Some(new_handle)` on success. Default: same handle (no-op dup).
-    fn dup(&self, handle: usize) -> Option<usize> {
-        Some(handle)
-    }
 
     /// Poll: register waiter then check readiness (Linux pattern).
     ///

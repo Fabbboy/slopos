@@ -12,40 +12,38 @@ use slopos_abi::syscall::{
 };
 
 use crate::pipe;
-use crate::pipe_file_ops::{PIPE_READ_OPS, PIPE_WRITE_OPS};
+use crate::pipe_file_ops::{PIPE_READ_OPS, PIPE_WRITE_OPS, pipe_backings};
 use crate::vfs::{vfs_list, vfs_mkdir, vfs_stat, vfs_unlink};
-use crate::vfs_file_ops::{VFS_FILE_OPS, vfs_open_handle_flags};
+use crate::vfs_file_ops::{VFS_FILE_OPS, vfs_open_handle_flags, vnode_backing};
+use slopos_abi::file_ops::FileBacking;
+use slopos_abi::tty_error::TtyError;
 
 #[allow(non_camel_case_types)]
 type ssize_t = isize;
 
 /// Install an FD entry in `process_id`'s table.
 ///
-/// **Ownership contract:** the caller mints the backing reference (e.g.
-/// `tty::open_ref`, an allocated socket/pipe handle) and hands it here as
-/// `(ops, handle)`. This function constructs the single owning
-/// [`KArc<OpenFile>`] for it, so the backing reference is now owned by
-/// that `OpenFile` and released exactly once when the last alias drops.
-/// On any error path the freshly-built `OpenFile` is dropped (running the
-/// backing release once); if the `OpenFile` allocation itself fails the
-/// caller's minted reference is released explicitly. Callers therefore
-/// must **not** also release the backing reference on their own error arm
-/// — that would be a double release.
+/// **Ownership contract:** the caller hands over the owning `backing`
+/// reference for `handle` (its `Drop` is the subsystem teardown). This
+/// function binds it into the single owning [`KArc<OpenFile>`], so the
+/// backing lives exactly as long as the open-file description and its
+/// teardown runs exactly once, when the last alias drops. On any error
+/// path the backing (or the `OpenFile` owning it) is dropped here —
+/// callers must not tear the subsystem object down on their own error
+/// arm.
 fn install_fd_entry(
     process_id: u32,
     ops: &'static dyn FileOps,
     handle: usize,
     mut flags: OpenMode,
     call_tty_policy: Option<TtyIndex>,
+    backing: Option<KArc<dyn FileBacking>>,
 ) -> c_int {
     let mut position = 0u64;
     if flags.contains(OpenMode::APPEND) {
         match ops.size(handle) {
             Some(size) => position = size,
-            None => {
-                ops.release(handle);
-                return Errno::ENXIO.raw();
-            }
+            None => return Errno::ENXIO.raw(),
         }
     }
 
@@ -57,10 +55,9 @@ fn install_fd_entry(
 
     let cloexec = (flags.bits() & O_CLOEXEC as u32) != 0;
 
-    // Build the single owner up front; from here the backing reference is
-    // owned by `open_file` and released exactly once on its drop.
-    let Some(open_file) = new_open_file(ops, handle, flags, position) else {
-        ops.release(handle);
+    // Build the single owner up front; from here the backing is owned by
+    // `open_file` and torn down exactly once on its drop.
+    let Some(open_file) = new_open_file(ops, handle, flags, position, backing) else {
         return Errno::ENFILE.raw();
     };
 
@@ -119,21 +116,26 @@ pub fn file_open_for_process(process_id: u32, path: &[u8], posix_flags: u32) -> 
             Some(idx) => idx,
             None => return Errno::ENXIO.raw(),
         };
-        if tty::open_ref(tty_idx).is_err() {
-            return Errno::EBUSY.raw() as _;
-        }
+        let backing = match tty::open_tty(tty_idx) {
+            Ok(b) => b,
+            Err(e) => return tty_open_errno(e).raw() as _,
+        };
         let tty_ops = current_tty_ops();
-        return install_fd_entry(process_id, tty_ops, tty_idx.0 as usize, flags, None);
+        return install_fd_entry(
+            process_id,
+            tty_ops,
+            tty_idx.0 as usize,
+            flags,
+            None,
+            Some(backing),
+        );
     }
 
     if path == b"/dev/ptmx" {
-        let master_idx = match tty::alloc_pty() {
-            Ok(idx) => idx,
+        let (master_idx, backing) = match tty::alloc_pty() {
+            Ok(v) => v,
             Err(_) => return Errno::ENOMEM.raw() as _,
         };
-        if tty::open_ref(master_idx).is_err() {
-            return Errno::EBUSY.raw() as _;
-        }
         let tty_ops = current_tty_ops();
         return install_fd_entry(
             process_id,
@@ -141,13 +143,15 @@ pub fn file_open_for_process(process_id: u32, path: &[u8], posix_flags: u32) -> 
             master_idx.0 as usize,
             flags.with_raw(O_NOCTTY as u32),
             None,
+            Some(backing),
         );
     }
 
     if let Some(slave_idx) = parse_pts_path(path) {
-        if tty::open_pty_slave(slave_idx).is_err() {
-            return Errno::EBUSY.raw() as _;
-        }
+        let backing = match tty::open_pty_slave(slave_idx) {
+            Ok(b) => b,
+            Err(e) => return tty_open_errno(e).raw() as _,
+        };
         let tty_ops = current_tty_ops();
         return install_fd_entry(
             process_id,
@@ -155,6 +159,7 @@ pub fn file_open_for_process(process_id: u32, path: &[u8], posix_flags: u32) -> 
             slave_idx.0 as usize,
             flags,
             Some(slave_idx),
+            Some(backing),
         );
     }
 
@@ -172,7 +177,30 @@ pub fn file_open_for_process(process_id: u32, path: &[u8], posix_flags: u32) -> 
         Ok(h) => h,
         Err(e) => return e.raw() as _,
     };
-    install_fd_entry(process_id, &VFS_FILE_OPS, vfs_handle, flags, None)
+    let Some(backing) = vnode_backing(vfs_handle) else {
+        return Errno::ENOMEM.raw() as _;
+    };
+    install_fd_entry(
+        process_id,
+        &VFS_FILE_OPS,
+        vfs_handle,
+        flags,
+        None,
+        Some(backing),
+    )
+}
+
+/// Map a TTY open failure to the errno the open syscall reports. Busy
+/// (exclusive-mode) opens keep their historical `EBUSY`; a locked PTY
+/// slave reports `EIO` (Linux devpts behaviour); anything else is a
+/// dead/unknown device.
+fn tty_open_errno(e: TtyError) -> Errno {
+    match e {
+        TtyError::DeviceBusy => Errno::EBUSY,
+        TtyError::PermissionDenied => Errno::EIO,
+        TtyError::OutOfMemory => Errno::ENOMEM,
+        _ => Errno::ENXIO,
+    }
 }
 
 pub fn file_read_fd(process_id: u32, fd: c_int, buf: &mut dyn IoBufWrite) -> ssize_t {
@@ -476,11 +504,16 @@ pub fn file_get_tty_index(process_id: u32, fd: c_int) -> Option<TtyIndex> {
 
 /// Open a file descriptor for a TTY device.
 ///
-/// **Ownership contract:** the caller mints the `tty::open_ref` (or
-/// equivalent peer-open) for `tty_idx` and this consumes it via
-/// [`install_fd_entry`]. The caller must not release that reference on
-/// its own error arm (the failed install already released it once).
-pub fn file_open_tty_fd(process_id: u32, tty_idx: TtyIndex, posix_flags: u32) -> c_int {
+/// **Ownership contract:** the caller hands over the owning TTY backing
+/// for `tty_idx` (from `tty::open_tty` / `tty::open_pty_peer`); this
+/// consumes it via [`install_fd_entry`], so on failure the open is
+/// undone by the backing's drop.
+pub fn file_open_tty_fd(
+    process_id: u32,
+    tty_idx: TtyIndex,
+    posix_flags: u32,
+    backing: KArc<dyn FileBacking>,
+) -> c_int {
     let tty_ops = current_tty_ops();
     let base = OpenMode::READ | OpenMode::WRITE;
     let kept = posix_flags & (O_CLOEXEC as u32 | O_NOCTTY as u32 | O_NONBLOCK as u32);
@@ -491,6 +524,7 @@ pub fn file_open_tty_fd(process_id: u32, tty_idx: TtyIndex, posix_flags: u32) ->
         tty_idx.0 as usize,
         flags,
         Some(tty_idx),
+        Some(backing),
     )
 }
 
@@ -509,6 +543,22 @@ pub fn file_pipe_create(
         None => return Errno::ENOMEM.raw() as _,
     };
 
+    // Prime both ends before wrapping them: from here each backing owns
+    // one end's reference and the pair frees the slot when both drop —
+    // every error path below is a plain drop, never an explicit free.
+    if pipe::with_pipe_mut(pipe_handle, |slot| {
+        slot.readers = 1;
+        slot.writers = 1;
+    })
+    .is_none()
+    {
+        pipe::free_slot(pipe_handle);
+        return Errno::ENOMEM.raw() as _;
+    }
+    let Some((read_backing, write_backing)) = pipe_backings(pipe_handle) else {
+        return Errno::ENFILE.raw() as _;
+    };
+
     let nonblock = (flags & O_NONBLOCK as u32) != 0;
     let cloexec = (flags & O_CLOEXEC as u32) != 0;
     let read_flags = if nonblock {
@@ -522,34 +572,38 @@ pub fn file_pipe_create(
         OpenMode::WRITE
     };
 
-    // Build the two owning `OpenFile`s up front. Each owns one of the
-    // pipe's two backing references (released by the respective `Drop`);
-    // priming the reader/writer counts ties them to this pair.
-    let Some(read_of) = new_open_file(&PIPE_READ_OPS, pipe_handle.as_usize(), read_flags, 0) else {
-        pipe::free_slot(pipe_handle);
+    let Some(read_of) = new_open_file(
+        &PIPE_READ_OPS,
+        pipe_handle.as_usize(),
+        read_flags,
+        0,
+        Some(read_backing),
+    ) else {
+        // The read backing was consumed and dropped; `write_backing`
+        // drops here — together they retire the pair and free the slot.
         return Errno::ENFILE.raw() as _;
     };
-    let Some(write_of) = new_open_file(&PIPE_WRITE_OPS, pipe_handle.as_usize(), write_flags, 0)
-    else {
-        // `read_of` drops here; its `PIPE_READ_OPS::release` runs against
-        // an unprimed slot (readers/writers still 0) — a no-op teardown —
-        // then free the slot explicitly.
+    let Some(write_of) = new_open_file(
+        &PIPE_WRITE_OPS,
+        pipe_handle.as_usize(),
+        write_flags,
+        0,
+        Some(write_backing),
+    ) else {
         drop(read_of);
-        pipe::free_slot(pipe_handle);
         return Errno::ENFILE.raw() as _;
     };
 
     let Some(mut inner) = pick_pid_slot_locked(process_id) else {
         drop(read_of);
         drop(write_of);
-        pipe::free_slot(pipe_handle);
         return Errno::ESRCH.raw() as _;
     };
 
-    // Find two free slots and prime the pipe, all under the table lock.
-    // On any failure return `Err(errno)` carrying the still-owned
-    // `OpenFile`s out so they (and the slot) are torn down *after* the
-    // lock drops (detach-then-drop). On success install both entries.
+    // Find two free slots under the table lock. On any failure return
+    // `Err(errno)` carrying the still-owned `OpenFile`s out so they (and
+    // the pipe slot) are torn down *after* the lock drops
+    // (detach-then-drop). On success install both entries.
     let result: Result<(c_int, c_int), Errno> = (|| {
         let read_idx = find_free_slot(&inner).ok_or(Errno::EMFILE)?;
         inner.descriptors[read_idx] = Some(FdEntry {
@@ -563,14 +617,6 @@ pub fn file_pipe_create(
                 return Err(Errno::EMFILE);
             }
         };
-        let primed = pipe::with_pipe_mut(pipe_handle, |slot| {
-            slot.readers = 1;
-            slot.writers = 1;
-        });
-        if primed.is_none() {
-            inner.descriptors[read_idx] = None;
-            return Err(Errno::ENOMEM);
-        }
         inner.descriptors[write_idx] = Some(FdEntry {
             open_file: write_of.clone(),
             cloexec,
@@ -590,12 +636,10 @@ pub fn file_pipe_create(
             0
         }
         Err(e) => {
-            // The pipe was never primed on the failure paths, so dropping
-            // the two owning `OpenFile`s runs no-op backing teardowns; then
-            // reclaim the pipe slot.
+            // Last aliases: dropping them retires both ends and frees the
+            // pipe slot, lock-free.
             drop(read_of);
             drop(write_of);
-            pipe::free_slot(pipe_handle);
             e.raw() as _
         }
     }
@@ -779,7 +823,11 @@ pub fn file_fstat_fd(
     snap.ops().stat(snap.handle(), out_stat)
 }
 
-pub fn fileio_open_socket_fd(process_id: u32, socket_idx: u32) -> i32 {
+pub fn fileio_open_socket_fd(
+    process_id: u32,
+    socket_idx: u32,
+    backing: Option<KArc<dyn FileBacking>>,
+) -> i32 {
     let Some(socket_ops) = current_socket_ops() else {
         return Errno::ENOTSOCK.raw() as _;
     };
@@ -789,17 +837,24 @@ pub fn fileio_open_socket_fd(process_id: u32, socket_idx: u32) -> i32 {
         socket_idx as usize,
         OpenMode::READ | OpenMode::WRITE,
         None,
+        backing,
     )
 }
 
-/// Open an FD using caller-supplied FileOps and handle.
-pub fn fileio_open_fd_with_ops(process_id: u32, ops: &'static dyn FileOps, handle: usize) -> i32 {
+/// Open an FD using caller-supplied FileOps, handle, and owning backing.
+pub fn fileio_open_fd_with_ops(
+    process_id: u32,
+    ops: &'static dyn FileOps,
+    handle: usize,
+    backing: Option<KArc<dyn FileBacking>>,
+) -> i32 {
     install_fd_entry(
         process_id,
         ops,
         handle,
         OpenMode::READ | OpenMode::WRITE,
         None,
+        backing,
     )
 }
 
@@ -811,7 +866,10 @@ pub fn fileio_get_open_file_handle(process_id: u32, fd: i32) -> Option<(FileKind
     Some((snap.ops().kind(), snap.handle()))
 }
 
-/// Get the handle AND FileOps for an open fd.
+/// Resolve an open fd to its subsystem handle and ops vtable — a pure
+/// lookup for dispatch (e.g. ring ops routing on `kind()` /
+/// `is_unix_socket()`). Confers no ownership: the caller's fd keeps the
+/// file alive for the duration of its own operation.
 pub fn fileio_get_handle_and_ops(
     process_id: u32,
     fd: i32,
@@ -821,4 +879,38 @@ pub fn fileio_get_handle_and_ops(
         snapshot_fd(&inner, fd)?
     };
     Some((snap.handle(), snap.ops()))
+}
+
+/// Mint a [`FileRef`] alias of an open fd — the SCM_RIGHTS send side.
+/// The returned reference shares the open-file description (offset,
+/// status flags, backing) and keeps it alive until dropped or installed.
+pub fn fileio_clone_file_ref(process_id: u32, fd: i32) -> Option<FileRef> {
+    let snap = {
+        let inner = lock_pid_slot(process_id)?;
+        snapshot_fd(&inner, fd)?
+    };
+    Some(FileRef {
+        open_file: snap.open_file,
+    })
+}
+
+/// Install a received [`FileRef`] into `process_id`'s fd table — the
+/// SCM_RIGHTS receive side. The alias transfers into the table entry
+/// (cloexec clear, POSIX default for received fds); on failure it drops
+/// here, closing that alias.
+pub fn fileio_install_file_ref(process_id: u32, file: FileRef) -> c_int {
+    let Some(mut inner) = pick_pid_slot_locked(process_id) else {
+        return Errno::ESRCH.raw() as _;
+    };
+    let Some(idx) = find_free_slot(&inner) else {
+        drop(inner);
+        // Detach-then-drop: close the alias lock-free.
+        drop(file);
+        return Errno::EMFILE.raw() as _;
+    };
+    inner.descriptors[idx] = Some(FdEntry {
+        open_file: file.open_file,
+        cloexec: false,
+    });
+    idx as c_int
 }

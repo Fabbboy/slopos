@@ -1,8 +1,10 @@
 use slopos_abi::KernelErrno;
+use slopos_abi::file_ops::FileBacking;
 use slopos_abi::syscall::TtyIndex;
 use slopos_kernel_services::syscall_services::input::{InputServices, register_input_services};
 use slopos_kernel_services::syscall_services::keymap::{KeymapServices, register_keymap_services};
 use slopos_kernel_services::syscall_services::tty::{TtyServices, register_tty_services};
+use slopos_ostd::KArc;
 
 use crate::{input_event, ps2, tty};
 
@@ -56,6 +58,14 @@ fn tty_release_controlling_terminal_adapter(
 
 fn tty_grantpt_adapter(tty_index: TtyIndex) -> Result<(), tty::TtyError> {
     tty::set_pty_lock(tty_index, false)
+}
+
+// The pty_alloc adapter erases the concrete master `KArc<TtyBacking>` to
+// `KArc<dyn FileBacking>` at this boundary so the file layer can own it
+// without naming the driver type; the other opens are already erased.
+
+fn tty_alloc_pty_adapter() -> Result<(TtyIndex, KArc<dyn FileBacking>), tty::TtyError> {
+    tty::pty_alloc().map(|(idx, b)| -> (TtyIndex, KArc<dyn FileBacking>) { (idx, b) })
 }
 
 fn tty_ptsname_adapter(tty_index: TtyIndex, buf: *mut u8, buflen: usize) -> i32 {
@@ -146,11 +156,10 @@ static TTY_SERVICES: TtyServices = TtyServices {
     acquire_controlling_terminal: tty::acquire_controlling_terminal,
     release_controlling_terminal: tty_release_controlling_terminal_adapter,
     default_console_tty: tty::default_console_tty,
-    open_ref: tty::open_ref,
-    close_ref: tty::close_ref,
+    open_tty: tty::open_tty,
     hangup: tty::hangup,
     is_hung_up: tty::is_hung_up,
-    alloc_pty: tty::pty_alloc,
+    alloc_pty: tty_alloc_pty_adapter,
     grantpt: tty_grantpt_adapter,
     ptsname: tty_ptsname_adapter,
     get_pty_number: tty::get_pty_number,

@@ -94,10 +94,10 @@ define_syscall!(syscall_memfd_create
     requires(let process_id: process_id)
     -> Result<u64, Errno>
 {
-    let (handle, ops) = slopos_mm::memfd::memfd_create(flags).ok_or(Errno::ENOMEM)?;
-    let fd = slopos_fs::fileio::fileio_open_fd_with_ops(process_id, ops, handle);
+    let (handle, ops, backing) = slopos_mm::memfd::memfd_create(flags).ok_or(Errno::ENOMEM)?;
+    let fd = slopos_fs::fileio::fileio_open_fd_with_ops(process_id, ops, handle, Some(backing));
     if fd < 0 {
-        // fileio_open_fd_with_ops already called ops.release on failure
+        // A failed install drops the backing, which runs the memfd teardown.
         return Err(Errno::from_raw(fd).unwrap_or(Errno::ENOMEM));
     }
     Ok(fd as u64)

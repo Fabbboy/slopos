@@ -32,11 +32,23 @@ pub fn signalfd_create(process_id: u32, owner_task_id: u32, mask: u64) -> i32 {
     }) else {
         return Errno::ENOMEM.raw();
     };
-    let fd =
-        slopos_fs::fileio_open_fd_with_ops(process_id, &file_ops::SIGNALFD_FILE_OPS, raw_handle);
-    if fd < 0 {
-        // fd-table install failed — drop the orphaned registry entry.
-        registry::remove(raw_handle);
-    }
-    fd
+    // The backing owns the registry entry: dropping the last fd alias runs its
+    // `Drop`, which removes the entry. If the allocation itself fails there is
+    // no backing to hand off, so drop the orphaned entry here.
+    let backing: slopos_ostd::KArc<dyn slopos_abi::file_ops::FileBacking> =
+        match slopos_ostd::KArc::try_new(file_ops::SignalfdBacking { handle: raw_handle }) {
+            Ok(b) => b,
+            Err(_) => {
+                registry::remove(raw_handle);
+                return Errno::ENOMEM.raw();
+            }
+        };
+    // On install failure the fd layer drops the backing, which removes the
+    // registry entry — no manual cleanup on the error arm.
+    slopos_fs::fileio_open_fd_with_ops(
+        process_id,
+        &file_ops::SIGNALFD_FILE_OPS,
+        raw_handle,
+        Some(backing),
+    )
 }

@@ -1,8 +1,7 @@
-//! TTY lifecycle management — allocation, open/close reference counting,
-//! hangup, vhangup, active TTY routing, and subsystem initialization.
-//!
-//! decomposition: extracted from `mod.rs` to isolate lifecycle
-//! operations that control a TTY's existence and state transitions.
+//! TTY lifecycle management — hangup, vhangup, active TTY routing, and
+//! subsystem initialization. Open/close lifetime lives in
+//! [`super::backing`]: cloning and dropping `KArc<TtyBacking>` is the
+//! only open/close mechanism.
 
 use core::sync::atomic::{AtomicU8, Ordering};
 
@@ -12,7 +11,6 @@ use slopos_kernel_services::driver_runtime::{
     clear_session_controlling_tty, scheduler_is_enabled, signal_session,
 };
 
-use super::driver::TtyDriverKind;
 use super::pty;
 use super::table::{TTY_SLOTS, tty_input_event, tty_output_event};
 use super::{MAX_TTYS, TtyError, TtyFlags, TtyIndex};
@@ -80,102 +78,6 @@ pub fn default_console_tty() -> TtyIndex {
 /// Initialise the TTY subsystem.  Call during early boot after serial is ready.
 pub fn init() {
     super::table::tty_table_init();
-}
-
-// ---------------------------------------------------------------------------
-// Open / close reference counting
-// ---------------------------------------------------------------------------
-
-#[must_use]
-pub fn open_ref(idx: TtyIndex) -> Result<u32, TtyError> {
-    let slot = idx.0 as usize;
-    if slot >= MAX_TTYS {
-        return Err(TtyError::InvalidIndex);
-    }
-    let mut guard = TTY_SLOTS[slot].lock();
-    if let Some(tty) = guard.as_mut() {
-        // TIOCEXCL: reject opens when exclusive mode is set and TTY already open.
-        if tty.flags.contains(TtyFlags::EXCLUSIVE) && tty.open_count > 0 {
-            return Err(TtyError::DeviceBusy);
-        }
-        let peer_to_reopen = match tty.driver {
-            TtyDriverKind::PtySlave { ref peer } => Some(peer.idx),
-            _ => None,
-        };
-        tty.open_count = tty
-            .open_count
-            .checked_add(1)
-            .unwrap_or_else(|| panic!("tty open_count overflow for idx {}", idx.0));
-        tty.flags.remove(TtyFlags::HUNG_UP | TtyFlags::PEER_CLOSED);
-        let open_count = tty.open_count;
-        drop(guard);
-
-        if let Some(peer_idx) = peer_to_reopen {
-            pty::clear_peer_closed(peer_idx);
-        }
-
-        return Ok(open_count);
-    }
-    Err(TtyError::NotAllocated)
-}
-
-#[must_use]
-pub fn close_ref(idx: TtyIndex) -> Result<u32, TtyError> {
-    let slot = idx.0 as usize;
-    if slot >= MAX_TTYS {
-        return Err(TtyError::InvalidIndex);
-    }
-    let mut guard = TTY_SLOTS[slot].lock();
-    if let Some(tty) = guard.as_mut() {
-        if tty.open_count == 0 {
-            return Ok(0);
-        }
-        tty.open_count -= 1;
-        let open_count = tty.open_count;
-        if tty.open_count == 0 {
-            match tty.driver {
-                TtyDriverKind::PtyMaster { ref peer } => {
-                    let slave_idx = peer.idx;
-                    drop(guard);
-                    hangup(slave_idx);
-                    pty::free_pair_if_unused(idx, slave_idx);
-                    return Ok(0);
-                }
-                TtyDriverKind::PtySlave { ref peer } => {
-                    let master_idx = peer.idx;
-                    drop(guard);
-                    pty::mark_peer_closed(master_idx);
-                    pty::free_pair_if_unused(idx, master_idx);
-                    return Ok(0);
-                }
-                TtyDriverKind::SerialConsole(_) | TtyDriverKind::VConsole(_) => {
-                    let hupcl = tty
-                        .ldisc
-                        .termios()
-                        .control_flags()
-                        .contains(slopos_abi::syscall::ControlFlags::HUPCL);
-                    let sid = tty.session.session_id_raw();
-                    // HUPCL fires only when a session is attached (sid != 0).
-                    // Without a session, there is no process group to receive
-                    // SIGHUP and no DTR line to drop (QEMU serial is virtual).
-                    // POSIX allows this: HUPCL is "implementation-defined" for
-                    // terminals without modem control.
-                    if hupcl && sid != 0 {
-                        tty.flags.remove(TtyFlags::EXCLUSIVE);
-                        drop(guard);
-                        hangup(idx);
-                        return Ok(0);
-                    }
-                    tty.ldisc.flush_all();
-                    tty.session.detach();
-                    tty.flags
-                        .remove(TtyFlags::HUNG_UP | TtyFlags::PEER_CLOSED | TtyFlags::EXCLUSIVE);
-                }
-            }
-        }
-        return Ok(open_count);
-    }
-    Err(TtyError::NotAllocated)
 }
 
 // ---------------------------------------------------------------------------

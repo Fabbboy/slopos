@@ -6,20 +6,48 @@
 //! registry. Read/write/poll on a ring fd are meaningless (use
 //! `ring_enter`), so they return `-EINVAL` / `POLLNVAL`.
 //!
-//! `release` (last fd close) removes the ring from the registry,
-//! dropping the ring object — which releases the kernel's `RingMeta`
-//! frame refs. Any still-mapped user PTE holds its own ref, so frames
-//! survive until the mapping is also torn down (no mmap-after-close
-//! UAF).
+//! The fd's owning [`RingBacking`] removes the ring from the registry
+//! on last close, dropping the ring object — which releases the
+//! kernel's `RingMeta` frame refs. Any still-mapped user PTE holds its
+//! own ref, so frames survive until the mapping is also torn down (no
+//! mmap-after-close UAF). Intra-process dup'd ring fds share the one
+//! open-file description, so the teardown runs exactly once.
 
 use slopos_abi::Errno;
-use slopos_abi::file_ops::{FileKind, FileOps};
+use slopos_abi::file_ops::{FileBacking, FileKind, FileOps};
 use slopos_abi::io::{IoBufRead, IoBufWrite};
 use slopos_abi::syscall::POLLNVAL;
+use slopos_ostd::KArc;
 
 pub struct RingFileOps;
 
 pub static RING_FILE_OPS: RingFileOps = RingFileOps;
+
+/// Sole owner of one registry slot; dropping it drops the ring object.
+struct RingBacking {
+    handle: usize,
+}
+
+impl FileBacking for RingBacking {}
+
+impl Drop for RingBacking {
+    fn drop(&mut self) {
+        // The registry remove is idempotent / stale-safe.
+        crate::registry::remove(self.handle);
+    }
+}
+
+/// Wrap ownership of a freshly-registered ring. On allocation failure
+/// the registry entry is removed before returning, so it cannot leak.
+pub(crate) fn ring_backing(handle: usize) -> Option<KArc<dyn FileBacking>> {
+    match KArc::try_new(RingBacking { handle }) {
+        Ok(backing) => Some(backing),
+        Err(_) => {
+            crate::registry::remove(handle);
+            None
+        }
+    }
+}
 
 impl FileOps for RingFileOps {
     fn kind(&self) -> FileKind {
@@ -33,24 +61,6 @@ impl FileOps for RingFileOps {
 
     fn write(&self, _handle: usize, _buf: &dyn IoBufRead, _offset: u64, _flags: u32) -> isize {
         Errno::EINVAL.as_isize()
-    }
-
-    fn release(&self, handle: usize) {
-        // Last fd closed: drop the ring object (SLOPRING § 14). The
-        // registry remove is idempotent / stale-safe.
-        crate::registry::remove(handle);
-    }
-
-    fn dup(&self, handle: usize) -> Option<usize> {
-        // Intra-process dup is allowed (it is why the per-ring lock
-        // exists, SLOPRING § 6.3). The ring object is shared; both fds
-        // resolve to the same registry slot. The ring object itself is
-        // not refcounted per-fd here — a dup'd ring fd that closes must
-        // NOT drop the ring while another fd is live. To keep this
-        // simple and correct, dup returns the same handle but the
-        // ring is only removed when the *open-file* refcount (managed by
-        // the fd layer) hits zero, which calls `release` exactly once.
-        Some(handle)
     }
 
     fn poll_events(&self, _handle: usize, _events: u16) -> u16 {

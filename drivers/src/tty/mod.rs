@@ -40,6 +40,7 @@
 //! - [`poll`] — poll readiness, poll sleep, compositor focus
 
 // Existing sub-modules (unchanged)
+pub mod backing;
 pub mod driver;
 pub mod ldisc;
 pub mod pty;
@@ -121,7 +122,6 @@ pub struct Tty {
 
     /// Window size (for TIOCGWINSZ / TIOCSWINSZ).
     pub(crate) winsize: UserWinsize,
-    pub(crate) open_count: u32,
     pub(crate) flags: TtyFlags,
     pub(crate) packet_events: PacketEvents,
 }
@@ -286,7 +286,7 @@ impl PostLockWork {
             let _ = signal_process_group(pgid, sig);
         }
 
-        if let Some((driver_id, byte, slot)) = self.ixoff_byte {
+        if let Some((driver_id, byte, slot)) = self.ixoff_byte.take() {
             let _wg = (slot < MAX_TTYS).then(|| TTY_WRITE_LOCKS[slot].lock());
             write_driver_unlocked(driver_id, &[byte]);
         }
@@ -345,7 +345,7 @@ pub use self::io::{
 // io.rs: PTY re-exports (originally in mod.rs, routed through io.rs)
 pub use self::io::{
     get_packet_mode, get_pty_lock, get_pty_number, is_pty_slave, is_slave_locked, pty_alloc,
-    pty_open_peer, pty_open_slave, queue_packet_event, set_packet_mode, set_pty_lock,
+    queue_packet_event, set_packet_mode, set_pty_lock,
 };
 
 // termios.rs: terminal configuration and control ioctls
@@ -361,10 +361,13 @@ pub use self::job_control::{
     set_foreground_pgrp_checked,
 };
 
-// lifecycle.rs: open/close, hangup, active TTY, init, exclusive mode
+// backing.rs: open/close lifetime — clone/drop of the owning references
+pub use self::backing::{TtyBacking, TtySlaveOpen, open_tty, pty_open_peer, pty_open_slave};
+
+// lifecycle.rs: hangup, active TTY, init, exclusive mode
 pub use self::lifecycle::{
-    active_tty, close_ref, default_console_tty, get_exclusive, hangup, init, is_hung_up, open_ref,
-    set_active_tty, set_default_console_tty, set_exclusive, switch_active_tty, vhangup,
+    active_tty, default_console_tty, get_exclusive, hangup, init, is_hung_up, set_active_tty,
+    set_default_console_tty, set_exclusive, switch_active_tty, vhangup,
 };
 
 // poll.rs: poll readiness and compositor focus

@@ -708,8 +708,11 @@ pub fn test_pts_open_acquires_controlling_tty_without_o_noctty() -> TestResult {
     let task_ptr = task_find_by_id(task_id);
     assert_not_null!(task_ptr, "task lookup failed");
 
-    let master_idx = match slopos_kernel_services::syscall_services::tty::alloc_pty() {
-        Ok(idx) => idx,
+    // The returned backing IS the master open — held for the test so the
+    // pair stays alive, dropped at the end to tear it down.
+    let (master_idx, master_open) = match slopos_kernel_services::syscall_services::tty::alloc_pty()
+    {
+        Ok(v) => v,
         Err(_) => return TestResult::Fail,
     };
     let slave_number =
@@ -748,6 +751,7 @@ pub fn test_pts_open_acquires_controlling_tty_without_o_noctty() -> TestResult {
 
     let _ = file_close_fd(pid, fd);
     task_terminate(task_id);
+    drop(master_open);
     TestResult::Pass
 }
 
@@ -759,8 +763,9 @@ pub fn test_pts_open_with_o_noctty_skips_controlling_tty_acquire() -> TestResult
     let task_ptr = task_find_by_id(task_id);
     assert_not_null!(task_ptr, "task lookup failed");
 
-    let master_idx = match slopos_kernel_services::syscall_services::tty::alloc_pty() {
-        Ok(idx) => idx,
+    let (master_idx, master_open) = match slopos_kernel_services::syscall_services::tty::alloc_pty()
+    {
+        Ok(v) => v,
         Err(_) => return TestResult::Fail,
     };
     let slave_number =
@@ -799,6 +804,7 @@ pub fn test_pts_open_with_o_noctty_skips_controlling_tty_acquire() -> TestResult
 
     let _ = file_close_fd(pid, fd);
     task_terminate(task_id);
+    drop(master_open);
     TestResult::Pass
 }
 
@@ -1040,7 +1046,7 @@ pub fn test_memfd_create_boundaries() -> TestResult {
     // Test memfd_create + ftruncate basics
     let result = slopos_mm::memfd::memfd_create(0);
     assert_test!(result.is_some(), "memfd_create should succeed");
-    if let Some((handle, _ops)) = result {
+    if let Some((handle, _ops, backing)) = result {
         // ftruncate with zero size should fail
         let rc = slopos_mm::memfd::memfd_ftruncate(handle, 0);
         assert_test!(rc < 0, "ftruncate(0) should fail");
@@ -1053,8 +1059,8 @@ pub fn test_memfd_create_boundaries() -> TestResult {
         let rc = slopos_mm::memfd::memfd_ftruncate(handle, 8192);
         assert_test!(rc < 0, "ftruncate twice should fail");
 
-        // Cleanup
-        slopos_mm::memfd::memfd_release(handle);
+        // Dropping the backing runs the memfd teardown (the old close path).
+        drop(backing);
     }
     TestResult::Pass
 }
@@ -2953,12 +2959,12 @@ pub fn test_close_while_dup_keeps_object_alive() -> TestResult {
     TestResult::Pass
 }
 
-/// Forcing EMFILE on a tty open must not underflow / tear down the live
-/// tty whose `open_ref` was minted for the attempt. The failed install
-/// releases the minted ref exactly once (single owner), so the caller
-/// must NOT release again — the tty stays alive. Regression for the
-/// double-`close_ref` premature-close root cause (audit defect D2).
-pub fn test_open_tty_fd_emfile_no_underflow() -> TestResult {
+/// Forcing EMFILE on a tty open must tear down only the open that
+/// failed: the backing clone minted for the attempt drops exactly once
+/// inside the failed install, and the live tty (and its pair) survives
+/// untouched. A second teardown is unrepresentable — there is no
+/// release call for a caller to balance.
+pub fn test_open_tty_fd_emfile_no_double_teardown() -> TestResult {
     let _fixture = SyscallFixture::new();
 
     let task_id = create_test_user_task();
@@ -2985,43 +2991,190 @@ pub fn test_open_tty_fd_emfile_no_underflow() -> TestResult {
         }
     }
 
-    // Baseline the tty's open_count by round-tripping a ref.
-    let before = match slopos_kernel_services::syscall_services::tty::open_ref(master_tty) {
-        Ok(c) => c,
+    // Baseline: hold a probe clone of the live backing and record the
+    // strong count (fd aliases share one OpenFile, so the count here is
+    // the fd-table owner plus this probe).
+    let probe_backing = match slopos_kernel_services::syscall_services::tty::open_tty(master_tty) {
+        Ok(b) => b,
         Err(_) => {
             let _ = file_close_fd(pid, master_fd);
             task_terminate(task_id);
             return TestResult::Fail;
         }
     };
-    let _ = slopos_kernel_services::syscall_services::tty::close_ref(master_tty);
+    let before = slopos_ostd::KArc::strong_count(&probe_backing);
 
-    // Mirror the syscall caller: mint a ref, then attempt the open with a
-    // full table. On EMFILE we must NOT close_ref (install already did).
-    let mint = slopos_kernel_services::syscall_services::tty::open_ref(master_tty).map(|_| ());
-    assert_test!(mint.is_ok(), "open_ref mint failed");
-    let probe = file_open_tty_fd(pid, master_tty, 0);
-    assert_test!(probe < 0, "open should fail with a full fd table");
-
-    // After the failed open the tty must still be alive at the same
-    // baseline open_count (no double-decrement / collapse). Round-trip a
-    // ref again to read the count.
-    let after = match slopos_kernel_services::syscall_services::tty::open_ref(master_tty) {
-        Ok(c) => c,
+    // Mirror the syscall caller: mint a backing, then attempt the open
+    // with a full table. The failed install consumes and drops the mint.
+    let mint = match slopos_kernel_services::syscall_services::tty::open_tty(master_tty) {
+        Ok(b) => b,
         Err(_) => {
-            // open_ref failing means the tty was torn down — the bug.
             task_terminate(task_id);
             return TestResult::Fail;
         }
     };
-    let _ = slopos_kernel_services::syscall_services::tty::close_ref(master_tty);
+    let probe = file_open_tty_fd(pid, master_tty, 0, mint);
+    assert_test!(probe < 0, "open should fail with a full fd table");
+
+    // The failed open's mint dropped exactly once: the count is back at
+    // the baseline and the tty is still open (not collapsed).
+    let after = slopos_ostd::KArc::strong_count(&probe_backing);
     assert_eq_test!(
         after,
         before,
-        "tty open_count must be unchanged after a failed open (no underflow)"
+        "backing strong count must return to baseline after a failed open"
+    );
+    assert_test!(
+        slopos_kernel_services::syscall_services::tty::open_tty(master_tty).is_ok(),
+        "tty must still be open after the failed install"
     );
 
+    drop(probe_backing);
     let _ = file_close_fd(pid, master_fd);
+    task_terminate(task_id);
+    TestResult::Pass
+}
+
+/// TTY ioctls must never change the terminal's open state: only opening
+/// (cloning the backing) and closing (dropping a clone) may move the
+/// strong count. Exercises a representative set of state-touching
+/// service calls against a live PTY and asserts the count is untouched.
+pub fn test_tty_ioctl_never_changes_open_state() -> TestResult {
+    use slopos_kernel_services::syscall_services::tty as ttysvc;
+
+    let _fixture = SyscallFixture::new();
+
+    let task_id = create_test_user_task();
+    assert_test!(task_id != INVALID_TASK_ID);
+    let pid = task_process_id(task_find_by_id(task_id)).unwrap_or(0);
+
+    let master_fd = file_open_for_process(pid, b"/dev/ptmx", O_RDONLY);
+    assert_test!(master_fd >= 0, "ptmx open failed");
+    let Some(master_tty) = slopos_fs::fileio::file_get_tty_index(pid, master_fd) else {
+        task_terminate(task_id);
+        return TestResult::Fail;
+    };
+
+    let probe = match ttysvc::open_tty(master_tty) {
+        Ok(b) => b,
+        Err(_) => {
+            task_terminate(task_id);
+            return TestResult::Fail;
+        }
+    };
+    let baseline = slopos_ostd::KArc::strong_count(&probe);
+
+    // Terminal configuration, sizing, PTY control, exclusivity — the
+    // ioctl surface the syscall handler dispatches to.
+    if let Ok(t) = ttysvc::get_termios(master_tty) {
+        let _ = ttysvc::set_termios(master_tty, &t);
+    }
+    if let Ok(ws) = ttysvc::get_winsize(master_tty) {
+        let _ = ttysvc::set_winsize(master_tty, &ws);
+    }
+    let _ = ttysvc::get_pty_number(master_tty);
+    let _ = ttysvc::set_pty_lock(master_tty, true);
+    let _ = ttysvc::get_pty_lock(master_tty);
+    let _ = ttysvc::set_pty_lock(master_tty, false);
+    let _ = ttysvc::set_packet_mode(master_tty, true);
+    let _ = ttysvc::set_packet_mode(master_tty, false);
+    let _ = ttysvc::set_exclusive(master_tty, true);
+    let _ = ttysvc::get_exclusive(master_tty);
+    let _ = ttysvc::set_exclusive(master_tty, false);
+    let _ = ttysvc::bytes_available(master_tty);
+    let _ = ttysvc::tcflush(master_tty, 2);
+
+    assert_eq_test!(
+        slopos_ostd::KArc::strong_count(&probe),
+        baseline,
+        "ioctls must not change the tty open state"
+    );
+
+    drop(probe);
+    let _ = file_close_fd(pid, master_fd);
+    task_terminate(task_id);
+    TestResult::Pass
+}
+
+/// Passing a TTY fd via SCM_RIGHTS must be lifetime-balanced: in-flight
+/// custody shares the sender's open-file description (no shadow
+/// reference on the tty backing), and the receiver's close never tears
+/// down the sender's terminal.
+pub fn test_scm_rights_tty_balanced() -> TestResult {
+    use slopos_kernel_services::syscall_services::tty as ttysvc;
+    use slopos_net::unix_socket;
+
+    let _fixture = SyscallFixture::new();
+
+    let task_id = create_test_user_task();
+    assert_test!(task_id != INVALID_TASK_ID);
+    let pid = task_process_id(task_find_by_id(task_id)).unwrap_or(0);
+
+    let (srv, cli) = match unix_create_connected_pair_raw() {
+        Some(pair) => pair,
+        None => return fail!("could not create connected pair"),
+    };
+
+    let master_fd = file_open_for_process(pid, b"/dev/ptmx", O_RDONLY);
+    assert_test!(master_fd >= 0, "ptmx open failed");
+    let Some(master_tty) = slopos_fs::fileio::file_get_tty_index(pid, master_fd) else {
+        task_terminate(task_id);
+        return TestResult::Fail;
+    };
+    let probe = match ttysvc::open_tty(master_tty) {
+        Ok(b) => b,
+        Err(_) => {
+            task_terminate(task_id);
+            return TestResult::Fail;
+        }
+    };
+    let baseline = slopos_ostd::KArc::strong_count(&probe);
+
+    // Send the tty fd through the pair. The in-flight alias shares the
+    // fd's open-file description, so the backing count stays put.
+    let mut files: slopos_ostd::KVec<slopos_fs::FileRef> =
+        slopos_ostd::KVec::with_capacity(1).expect("files vec alloc");
+    let alias = slopos_fs::fileio_clone_file_ref(pid, master_fd).expect("clone_file_ref failed");
+    let _ = files.push(alias);
+    let n = unix_socket::unix_sendmsg(srv, b"T", &mut files);
+    assert_test!(n == 1, "sendmsg returned {}", n);
+    assert_eq_test!(
+        slopos_ostd::KArc::strong_count(&probe),
+        baseline,
+        "in-flight custody must not mint a shadow tty reference"
+    );
+
+    // Receive + install: the fd lands on the same terminal.
+    let mut buf = [0u8; 4];
+    let mut out: slopos_ostd::KVec<slopos_fs::FileRef> =
+        slopos_ostd::KVec::with_capacity(1).expect("out vec alloc");
+    let (bytes_read, n_fds) = unix_socket::unix_recvmsg(cli, &mut buf, &mut out, 1);
+    assert_eq_test!(bytes_read, 1, "recvmsg byte count");
+    assert_eq_test!(n_fds, 1, "recvmsg must deliver the tty fd");
+    let recv_fd = slopos_fs::fileio_install_file_ref(pid, out.pop().expect("delivered file"));
+    assert_test!(recv_fd >= 0, "install failed");
+    assert_eq_test!(
+        slopos_fs::fileio::file_get_tty_index(pid, recv_fd),
+        Some(master_tty),
+        "received fd must reference the same terminal"
+    );
+
+    // Receiver close: balanced — the sender's terminal survives.
+    let _ = file_close_fd(pid, recv_fd);
+    assert_eq_test!(
+        slopos_ostd::KArc::strong_count(&probe),
+        baseline,
+        "receiver close must be balanced against the shared description"
+    );
+    assert_test!(
+        ttysvc::open_tty(master_tty).is_ok(),
+        "sender's tty must still be open after the receiver closes"
+    );
+
+    drop(probe);
+    let _ = file_close_fd(pid, master_fd);
+    unix_socket::unix_close(srv);
+    unix_socket::unix_close(cli);
     task_terminate(task_id);
     TestResult::Pass
 }
@@ -3071,8 +3224,6 @@ impl slopos_abi::FileOps for SeekProbeOps {
         buf.len() as isize
     }
 
-    fn release(&self, _handle: usize) {}
-
     fn seekable(&self) -> bool {
         true
     }
@@ -3093,7 +3244,7 @@ pub fn test_dup_shares_offset() -> TestResult {
     assert_not_null!(task_ptr);
     let pid = task_process_id(task_ptr).unwrap_or(0);
 
-    let fd = slopos_fs::fileio::fileio_open_fd_with_ops(pid, &SEEK_PROBE_OPS, 0);
+    let fd = slopos_fs::fileio::fileio_open_fd_with_ops(pid, &SEEK_PROBE_OPS, 0, None);
     assert_test!(fd >= 0, "synthetic open failed");
 
     let dup = file_dup_fd(pid, fd);
@@ -3247,9 +3398,14 @@ slopos_testing::stest!(
     suite = syscall_valid
 );
 slopos_testing::stest!(
-    name = test_open_tty_fd_emfile_no_underflow,
+    name = test_open_tty_fd_emfile_no_double_teardown,
     suite = syscall_valid
 );
+slopos_testing::stest!(
+    name = test_tty_ioctl_never_changes_open_state,
+    suite = syscall_valid
+);
+slopos_testing::stest!(name = test_scm_rights_tty_balanced, suite = unix_scm_rights);
 slopos_testing::stest!(name = test_dup_shares_offset, suite = syscall_valid);
 slopos_testing::stest!(
     name = test_process_group_session_syscalls_baseline,
@@ -3482,15 +3638,19 @@ fn unix_create_connected_pair(pid: u32) -> Option<(i32, i32)> {
         }
     };
 
+    let srv_backing = slopos_net::unix_socket_file_ops::unix_socket_backing(accepted_handle)?;
     let srv_fd = slopos_fs::fileio::fileio_open_fd_with_ops(
         pid,
         &UNIX_SOCKET_FILE_OPS,
         accepted_handle.as_usize(),
+        Some(srv_backing),
     );
+    let cli_backing = slopos_net::unix_socket_file_ops::unix_socket_backing(cli_handle)?;
     let cli_fd = slopos_fs::fileio::fileio_open_fd_with_ops(
         pid,
         &UNIX_SOCKET_FILE_OPS,
         cli_handle.as_usize(),
+        Some(cli_backing),
     );
 
     unix_socket::unix_close(srv_handle);
@@ -4095,10 +4255,13 @@ pub fn test_compositor_handshake_listen_accept_send_poll() -> TestResult {
     assert_eq_test!(rc, 0, "connect");
 
     // Open FD for client side (like kernel does after connect syscall)
+    let cli_backing = slopos_net::unix_socket_file_ops::unix_socket_backing(cli_handle)
+        .expect("cli backing alloc");
     let cli_fd = slopos_fs::fileio::fileio_open_fd_with_ops(
         pid,
         &UNIX_SOCKET_FILE_OPS,
         cli_handle.as_usize(),
+        Some(cli_backing),
     );
     assert_test!(cli_fd >= 0, "cli fd open");
 
@@ -4112,10 +4275,13 @@ pub fn test_compositor_handshake_listen_accept_send_poll() -> TestResult {
     // ── Server: accept (gets side-B) ──
     let accepted_handle = unix_socket::unix_accept(listen_handle).expect("accept");
 
+    let srv_backing = slopos_net::unix_socket_file_ops::unix_socket_backing(accepted_handle)
+        .expect("srv backing alloc");
     let srv_fd = slopos_fs::fileio::fileio_open_fd_with_ops(
         pid,
         &UNIX_SOCKET_FILE_OPS,
         accepted_handle.as_usize(),
+        Some(srv_backing),
     );
     assert_test!(srv_fd >= 0, "srv fd open");
 
@@ -4443,14 +4609,18 @@ pub fn test_unix_scm_rights_atomic_delivery() -> TestResult {
     let _fixture = SyscallFixture::new();
     use slopos_net::unix_socket;
 
+    let task_id = create_test_user_task();
+    assert_test!(task_id != INVALID_TASK_ID, "task creation failed");
+    let pid = task_process_id(task_find_by_id(task_id)).unwrap_or(0);
+
     let (srv, cli) = match unix_create_connected_pair_raw() {
         Some(pair) => pair,
         None => return fail!("could not create connected pair"),
     };
 
-    // Build a memfd to use as the in-flight fd. `memfd_create`
-    // returns `(handle, ops)`; we hand both to `unix_sendmsg`.
-    let (mfd_handle, mfd_ops) = match slopos_mm::memfd::memfd_create(0) {
+    // A memfd fd in the sender's table; the in-flight alias is a FileRef
+    // minted from it.
+    let (mfd_handle, mfd_ops, mfd_backing) = match slopos_mm::memfd::memfd_create(0) {
         Some(h) => h,
         None => {
             unix_socket::unix_close(srv);
@@ -4458,11 +4628,17 @@ pub fn test_unix_scm_rights_atomic_delivery() -> TestResult {
             return fail!("memfd_create failed");
         }
     };
+    let mfd_fd =
+        slopos_fs::fileio::fileio_open_fd_with_ops(pid, mfd_ops, mfd_handle, Some(mfd_backing));
+    assert_test!(mfd_fd >= 0, "memfd fd install failed");
+
+    let mut files: slopos_ostd::KVec<slopos_fs::FileRef> =
+        slopos_ostd::KVec::with_capacity(1).expect("files vec alloc");
+    let alias = slopos_fs::fileio_clone_file_ref(pid, mfd_fd).expect("clone_file_ref failed");
+    let _ = files.push(alias);
 
     let payload = b"ATOM";
-    let mut inflight = [(mfd_handle, mfd_ops); 1];
-
-    let n = unix_socket::unix_sendmsg(srv, payload, &mut inflight, 1);
+    let n = unix_socket::unix_sendmsg(srv, payload, &mut files);
     assert_test!(
         n == payload.len() as i32,
         "unix_sendmsg returned {} (expected {})",
@@ -4470,69 +4646,90 @@ pub fn test_unix_scm_rights_atomic_delivery() -> TestResult {
         payload.len()
     );
     assert_test!(
-        inflight[0].0 == 0,
-        "unix_sendmsg must consume the fd on success (handle should be zeroed)"
+        files.is_empty(),
+        "unix_sendmsg must move the alias into the queue on success"
     );
 
     let mut buf = [0u8; 16];
-    let mut out_fds = [(0usize, slopos_mm::memfd::dummy_file_ops()); 1];
-    let (bytes_read, n_fds) = unix_socket::unix_recvmsg(cli, &mut buf, &mut out_fds, 1);
+    let mut out: slopos_ostd::KVec<slopos_fs::FileRef> =
+        slopos_ostd::KVec::with_capacity(1).expect("out vec alloc");
+    let (bytes_read, n_fds) = unix_socket::unix_recvmsg(cli, &mut buf, &mut out, 1);
 
     assert_eq_test!(bytes_read, payload.len() as i32, "recvmsg byte count");
     assert_eq_test!(n_fds, 1, "recvmsg must deliver the companion fd");
-    assert_test!(
-        out_fds[0].0 == mfd_handle,
-        "recvmsg fd handle mismatch: got {}, expected {}",
-        out_fds[0].0,
-        mfd_handle
-    );
     assert_test!(&buf[..payload.len()] == payload, "recvmsg payload mismatch");
 
-    // Release the recovered fd and close sockets.
-    out_fds[0].1.release(out_fds[0].0);
+    // The delivered alias shares the sender's open-file description:
+    // install it and compare the resolved backing handle.
+    let recv_fd = slopos_fs::fileio_install_file_ref(pid, out.pop().expect("delivered file"));
+    assert_test!(recv_fd >= 0, "install of delivered file failed");
+    let (kind, handle) =
+        slopos_fs::fileio::fileio_get_open_file_handle(pid, recv_fd).expect("resolve recv fd");
+    assert_test!(
+        kind == slopos_abi::file_ops::FileKind::Memfd && handle == mfd_handle,
+        "delivered fd must reference the sender's memfd (kind {:?}, handle {})",
+        kind,
+        handle
+    );
+
+    let _ = file_close_fd(pid, recv_fd);
+    let _ = file_close_fd(pid, mfd_fd);
     unix_socket::unix_close(srv);
     unix_socket::unix_close(cli);
+    task_terminate(task_id);
     pass!()
 }
 
-/// Ancillary queue overflow: a `sendmsg` whose fd_count would push
+/// Ancillary queue overflow: a `sendmsg` whose fd count would push
 /// the per-direction anc queue past `MAX_INFLIGHT_FDS` must reject
-/// with ENOMEM and release every fd from the caller's array — no
+/// with ENOMEM, leaving the aliases with the caller — no
 /// partial-publish to the peer.
 pub fn test_unix_scm_rights_anc_queue_full_no_partial() -> TestResult {
     let _fixture = SyscallFixture::new();
     use slopos_net::unix_socket;
+
+    let task_id = create_test_user_task();
+    assert_test!(task_id != INVALID_TASK_ID, "task creation failed");
+    let pid = task_process_id(task_find_by_id(task_id)).unwrap_or(0);
 
     let (srv, cli) = match unix_create_connected_pair_raw() {
         Some(pair) => pair,
         None => return fail!("could not create connected pair"),
     };
 
-    // Fill the anc queue up to capacity with 8 separate memfds.
-    const CAP: usize = 8;
-    let mut handles: [usize; CAP] = [0; CAP];
-    for slot in handles.iter_mut() {
-        let (h, _ops) = match slopos_mm::memfd::memfd_create(0) {
-            Some(p) => p,
-            None => return fail!("memfd_create failed during fill"),
-        };
-        *slot = h;
-    }
+    // One memfd fd; every queued alias clones from it.
+    let (mfd_handle, mfd_ops, mfd_backing) = match slopos_mm::memfd::memfd_create(0) {
+        Some(p) => p,
+        None => return fail!("memfd_create failed"),
+    };
+    let mfd_fd =
+        slopos_fs::fileio::fileio_open_fd_with_ops(pid, mfd_ops, mfd_handle, Some(mfd_backing));
+    assert_test!(mfd_fd >= 0, "memfd fd install failed");
 
-    for &h in handles.iter() {
-        let mut one = [(h, slopos_mm::memfd::dummy_file_ops()); 1];
-        let n = unix_socket::unix_sendmsg(srv, &[], &mut one, 1);
+    // Fill the anc queue up to capacity.
+    const CAP: usize = 8;
+    for _ in 0..CAP {
+        let mut one: slopos_ostd::KVec<slopos_fs::FileRef> =
+            slopos_ostd::KVec::with_capacity(1).expect("fill vec alloc");
+        let alias = slopos_fs::fileio_clone_file_ref(pid, mfd_fd).expect("fill clone failed");
+        let _ = one.push(alias);
+        let n = unix_socket::unix_sendmsg(srv, &[], &mut one);
         assert_test!(n >= 0, "fill push returned {}", n);
     }
 
-    // Capacity should now be at the cap. One more fd → ENOMEM.
-    let (overflow_h, overflow_ops) = match slopos_mm::memfd::memfd_create(0) {
-        Some(p) => p,
-        None => return fail!("memfd_create failed for overflow"),
-    };
-    let mut overflow_in = [(overflow_h, overflow_ops); 1];
-    let rc = unix_socket::unix_sendmsg(srv, b"X", &mut overflow_in, 1);
+    // Capacity is now at the cap. One more fd → ENOMEM, alias returned.
+    let mut overflow: slopos_ostd::KVec<slopos_fs::FileRef> =
+        slopos_ostd::KVec::with_capacity(1).expect("overflow vec alloc");
+    let alias = slopos_fs::fileio_clone_file_ref(pid, mfd_fd).expect("overflow clone failed");
+    let _ = overflow.push(alias);
+    let rc = unix_socket::unix_sendmsg(srv, b"X", &mut overflow);
     assert_test!(rc == -12, "expected ENOMEM (-12), got {}", rc);
+    assert_eq_test!(
+        overflow.len(),
+        1,
+        "rejected send must leave the alias with the caller"
+    );
+    drop(overflow);
 
     // Peer should see exactly the 8 originally-sent fds, no overflow.
     // The overflow `b"X"` must NOT be in the data FIFO since the
@@ -4541,7 +4738,8 @@ pub fn test_unix_scm_rights_anc_queue_full_no_partial() -> TestResult {
     // Drain anc with an empty data slice (skips `unix_recv` so we
     // don't trip EAGAIN from the empty non-blocking FIFO). Then
     // explicitly probe the data FIFO with a small read.
-    let mut out = [(0usize, slopos_mm::memfd::dummy_file_ops()); 16];
+    let mut out: slopos_ostd::KVec<slopos_fs::FileRef> =
+        slopos_ostd::KVec::with_capacity(16).expect("out vec alloc");
     let (anc_drain_bytes, n_fds) = unix_socket::unix_recvmsg(cli, &mut [], &mut out, 16);
     assert_eq_test!(n_fds, CAP, "peer must see all 8 fds, no overflow");
     assert_eq_test!(anc_drain_bytes, 0, "anc-drain returns zero data");
@@ -4554,24 +4752,25 @@ pub fn test_unix_scm_rights_anc_queue_full_no_partial() -> TestResult {
         probe
     );
 
-    // Release everything.
-    for i in 0..n_fds {
-        out[i].1.release(out[i].0);
-    }
+    // Dropping the drained aliases closes them.
+    drop(out);
+    let _ = file_close_fd(pid, mfd_fd);
     unix_socket::unix_close(srv);
     unix_socket::unix_close(cli);
+    task_terminate(task_id);
     pass!()
 }
 
-/// Non-blocking sender + full data FIFO: when the data fifo cannot
-/// fit any bytes (impossible by construction — `unix_create_connected_pair`
-/// gives a fresh empty FIFO), the proxy here is to set the sender
-/// non-blocking and force EAGAIN by sending after the peer is gone.
-/// The harder property to verify is "no fd leak on error" — we
-/// monitor the memfd via its registry pre/post send.
-pub fn test_unix_scm_rights_error_releases_fd() -> TestResult {
+/// A failed send must not strand the passed file: the alias stays with
+/// the caller (whose drop closes it), and the sender's own fd keeps the
+/// file alive — no leak, no double teardown.
+pub fn test_unix_scm_rights_error_returns_custody() -> TestResult {
     let _fixture = SyscallFixture::new();
     use slopos_net::unix_socket;
+
+    let task_id = create_test_user_task();
+    assert_test!(task_id != INVALID_TASK_ID, "task creation failed");
+    let pid = task_process_id(task_find_by_id(task_id)).unwrap_or(0);
 
     // Build a pair, close the peer immediately → next send sees
     // EPIPE because peer_closed is set.
@@ -4581,19 +4780,45 @@ pub fn test_unix_scm_rights_error_releases_fd() -> TestResult {
     };
     unix_socket::unix_close(cli);
 
-    let (h, ops) = match slopos_mm::memfd::memfd_create(0) {
+    let (mfd_handle, mfd_ops, mfd_backing) = match slopos_mm::memfd::memfd_create(0) {
         Some(p) => p,
         None => return fail!("memfd_create failed"),
     };
-    let mut inflight = [(h, ops); 1];
-    let rc = unix_socket::unix_sendmsg(srv, b"DEAD", &mut inflight, 1);
-    assert_test!(rc == -32, "expected EPIPE (-32), got {}", rc);
+    let mfd_fd =
+        slopos_fs::fileio::fileio_open_fd_with_ops(pid, mfd_ops, mfd_handle, Some(mfd_backing));
+    assert_test!(mfd_fd >= 0, "memfd fd install failed");
     assert_test!(
-        inflight[0].0 == 0,
-        "failed sendmsg must release the fd reference (handle should be zeroed)"
+        slopos_mm::memfd::memfd_ftruncate(mfd_handle, 4096) == 0,
+        "ftruncate failed"
+    );
+
+    let mut files: slopos_ostd::KVec<slopos_fs::FileRef> =
+        slopos_ostd::KVec::with_capacity(1).expect("files vec alloc");
+    let alias = slopos_fs::fileio_clone_file_ref(pid, mfd_fd).expect("clone_file_ref failed");
+    let _ = files.push(alias);
+    let rc = unix_socket::unix_sendmsg(srv, b"DEAD", &mut files);
+    assert_test!(rc == -32, "expected EPIPE (-32), got {}", rc);
+    assert_eq_test!(
+        files.len(),
+        1,
+        "failed sendmsg must leave the alias with the caller"
+    );
+
+    // Dropping the returned alias closes it; the sender's fd still pins
+    // the memfd — only the final close tears it down.
+    drop(files);
+    assert_test!(
+        slopos_mm::memfd::memfd_size(mfd_handle) >= 4096,
+        "memfd must survive the dropped alias while its fd is open"
+    );
+    let _ = file_close_fd(pid, mfd_fd);
+    assert_test!(
+        slopos_mm::memfd::memfd_size(mfd_handle) == 0,
+        "memfd must be torn down after the last reference closes"
     );
 
     unix_socket::unix_close(srv);
+    task_terminate(task_id);
     pass!()
 }
 
@@ -4606,7 +4831,7 @@ slopos_testing::stest!(
     suite = unix_scm_rights
 );
 slopos_testing::stest!(
-    name = test_unix_scm_rights_error_releases_fd,
+    name = test_unix_scm_rights_error_returns_custody,
     suite = unix_scm_rights
 );
 

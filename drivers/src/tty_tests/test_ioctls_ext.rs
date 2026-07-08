@@ -249,17 +249,13 @@ pub fn test_driver_kind_output_pending_dispatch() -> TestResult {
         return TestResult::Fail;
     }
 
-    let pty_master_kind = TtyDriverKind::PtyMaster {
-        peer: PtyPeerHandle::new(TtyIndex(3), 0),
-    };
+    let pty_master_kind = TtyDriverKind::PtyMaster { peer: KWeak::new() };
     if pty_master_kind.output_pending() {
         klog_info!("TTY_TEST: BUG - PtyMaster kind output_pending should be false");
         return TestResult::Fail;
     }
 
-    let pty_slave_kind = TtyDriverKind::PtySlave {
-        peer: PtyPeerHandle::new(TtyIndex(2), 0),
-    };
+    let pty_slave_kind = TtyDriverKind::PtySlave { peer: KWeak::new() };
     if pty_slave_kind.output_pending() {
         klog_info!("TTY_TEST: BUG - PtySlave kind output_pending should be false");
         return TestResult::Fail;
@@ -280,8 +276,8 @@ pub fn test_pty_output_idle_immediate() -> TestResult {
     tty::table::tty_table_init();
 
     // Allocate a PTY pair.
-    let master_idx = match tty::pty_alloc() {
-        Ok(idx) => idx,
+    let (master_idx, master_backing) = match tty::pty_alloc() {
+        Ok(pair) => pair,
         Err(_) => {
             klog_info!("TTY_TEST: SKIP - could not allocate PTY pair");
             return TestResult::Pass;
@@ -291,13 +287,12 @@ pub fn test_pty_output_idle_immediate() -> TestResult {
         Ok(n) => TtyIndex(n as u8),
         Err(_) => {
             klog_info!("TTY_TEST: SKIP - could not get PTY slave index");
-            let _ = tty::close_ref(master_idx);
             return TestResult::Pass;
         }
     };
 
     // Open the slave so the pair stays alive.
-    let _ = tty::open_ref(slave_idx);
+    let slave_backing = tty::open_tty(slave_idx).unwrap();
 
     // Write to master (goes to slave's input buffer).
     let _ = tty::write(master_idx, b"pty drain test", false);
@@ -310,8 +305,8 @@ pub fn test_pty_output_idle_immediate() -> TestResult {
                 "TTY_TEST: BUG - PTY master is_output_idle should be true, got {:?}",
                 other
             );
-            let _ = tty::close_ref(slave_idx);
-            let _ = tty::close_ref(master_idx);
+            drop(slave_backing);
+            drop(master_backing);
             return TestResult::Fail;
         }
     }
@@ -325,15 +320,15 @@ pub fn test_pty_output_idle_immediate() -> TestResult {
                 "TTY_TEST: BUG - TCSETSW on PTY slave should succeed, got {:?}",
                 e
             );
-            let _ = tty::close_ref(slave_idx);
-            let _ = tty::close_ref(master_idx);
+            drop(slave_backing);
+            drop(master_backing);
             return TestResult::Fail;
         }
     }
 
     // Clean up.
-    let _ = tty::close_ref(slave_idx);
-    let _ = tty::close_ref(master_idx);
+    drop(slave_backing);
+    drop(master_backing);
     TestResult::Pass
 }
 
@@ -417,7 +412,7 @@ pub fn test_tcsets_now_skips_drain() -> TestResult {
 pub fn test_hangup_read_returns_eof() -> TestResult {
     tty::table::tty_table_init();
     let idx = TtyIndex(0);
-    let _ = tty::open_ref(idx);
+    let con = tty::open_tty(idx).unwrap();
     tty::hangup(idx);
 
     let mut out = [0u8; 8];
@@ -425,6 +420,7 @@ pub fn test_hangup_read_returns_eof() -> TestResult {
     let result = tty::read(idx, &mut out, true);
 
     // Re-init before checking.
+    drop(con);
     tty::table::tty_table_init();
 
     match result {
@@ -443,11 +439,12 @@ pub fn test_hangup_read_returns_eof() -> TestResult {
 pub fn test_hangup_write_returns_eio() -> TestResult {
     tty::table::tty_table_init();
     let idx = TtyIndex(0);
-    let _ = tty::open_ref(idx);
+    let con = tty::open_tty(idx).unwrap();
     tty::hangup(idx);
 
     let result = tty::write(idx, b"hello", false);
 
+    drop(con);
     tty::table::tty_table_init();
 
     match result {
@@ -496,7 +493,7 @@ pub fn test_hangup_poll_returns_pollhup_pollin() -> TestResult {
 pub fn test_hangup_set_termios_returns_eio() -> TestResult {
     tty::table::tty_table_init();
     let idx = TtyIndex(0);
-    let _ = tty::open_ref(idx);
+    let con = tty::open_tty(idx).unwrap();
     tty::hangup(idx);
 
     let termios = tty::get_termios(idx);
@@ -510,6 +507,7 @@ pub fn test_hangup_set_termios_returns_eio() -> TestResult {
         }
     };
 
+    drop(con);
     tty::table::tty_table_init();
 
     match result {
@@ -528,7 +526,7 @@ pub fn test_hangup_set_termios_returns_eio() -> TestResult {
 pub fn test_hangup_set_winsize_returns_eio() -> TestResult {
     tty::table::tty_table_init();
     let idx = TtyIndex(0);
-    let _ = tty::open_ref(idx);
+    let con = tty::open_tty(idx).unwrap();
     tty::hangup(idx);
 
     let ws = slopos_abi::syscall::UserWinsize {
@@ -539,6 +537,7 @@ pub fn test_hangup_set_winsize_returns_eio() -> TestResult {
     };
     let result = tty::set_winsize(idx, &ws);
 
+    drop(con);
     tty::table::tty_table_init();
 
     match result {
@@ -557,11 +556,12 @@ pub fn test_hangup_set_winsize_returns_eio() -> TestResult {
 pub fn test_hangup_set_ldisc_returns_eio() -> TestResult {
     tty::table::tty_table_init();
     let idx = TtyIndex(0);
-    let _ = tty::open_ref(idx);
+    let con = tty::open_tty(idx).unwrap();
     tty::hangup(idx);
 
     let result = tty::set_ldisc(idx, 0);
 
+    drop(con);
     tty::table::tty_table_init();
 
     match result {
@@ -581,7 +581,7 @@ pub fn test_hangup_set_ldisc_returns_eio() -> TestResult {
 pub fn test_hangup_get_fg_pgrp_still_works() -> TestResult {
     tty::table::tty_table_init();
     let idx = TtyIndex(0);
-    let _ = tty::open_ref(idx);
+    let con = tty::open_tty(idx).unwrap();
     // Set a foreground pgrp before hangup.
     let _ = tty::set_foreground_pgrp(idx, 42);
     tty::hangup(idx);
@@ -589,6 +589,7 @@ pub fn test_hangup_get_fg_pgrp_still_works() -> TestResult {
     // get_foreground_pgrp should still succeed after hangup.
     let result = tty::get_foreground_pgrp(idx);
 
+    drop(con);
     tty::table::tty_table_init();
 
     match result {
@@ -608,47 +609,31 @@ pub fn test_hangup_get_fg_pgrp_still_works() -> TestResult {
 pub fn test_pty_master_close_slave_eof_eio() -> TestResult {
     tty::table::tty_table_init();
 
-    // Allocate a PTY pair.
-    let master_idx = match crate::tty::pty::pty_alloc() {
-        Ok(idx) => idx,
+    // Allocate a PTY pair. The returned backing is the sole master open.
+    let (master_idx, master_backing) = match crate::tty::pty::pty_alloc() {
+        Ok(pair) => pair,
         Err(e) => {
             klog_info!("TTY_TEST: BUG - pty_alloc failed: {:?}", e);
             return TestResult::Fail;
         }
     };
 
-    // Open master so close_ref will actually decrement to 0 and trigger hangup.
-    tty::open_ref(master_idx).unwrap();
+    let slave_idx = TtyIndex(tty::get_pty_number(master_idx).unwrap() as u8);
 
-    // Find slave index from master's driver.
-    let slave_idx = {
-        let guard = TTY_SLOTS[master_idx.0 as usize].lock();
-        match guard.as_ref() {
-            Some(tty) => match &tty.driver {
-                TtyDriverKind::PtyMaster { peer } => peer.idx,
-                _ => {
-                    klog_info!("TTY_TEST: BUG - master is not PtyMaster");
-                    return TestResult::Fail;
-                }
-            },
-            None => {
-                klog_info!("TTY_TEST: BUG - master slot is empty");
-                return TestResult::Fail;
-            }
-        }
-    };
-
-    // Unlock slave so it can be opened (lock guard).
+    // Unlock the slave so it can be opened.
     crate::tty::set_pty_lock(master_idx, false).unwrap();
 
     // Open slave.
-    if let Err(e) = crate::tty::pty::pty_open_slave(slave_idx) {
-        klog_info!("TTY_TEST: BUG - pty_open_slave failed: {:?}", e);
-        return TestResult::Fail;
-    }
+    let slave_backing = match tty::pty_open_slave(slave_idx) {
+        Ok(backing) => backing,
+        Err(e) => {
+            klog_info!("TTY_TEST: BUG - pty_open_slave failed: {:?}", e);
+            return TestResult::Fail;
+        }
+    };
 
-    // Close master (decrement to 0 triggers hangup on slave).
-    let _ = tty::close_ref(master_idx);
+    // Close the last master open — hangs up the slave.
+    drop(master_backing);
 
     // Slave read should return EOF (0 bytes).
     let mut out = [0u8; 8];
@@ -657,8 +642,7 @@ pub fn test_pty_master_close_slave_eof_eio() -> TestResult {
     // Slave write should return EIO.
     let write_result = tty::write(slave_idx, b"test", false);
 
-    // Cleanup.
-    tty::table::tty_table_init();
+    drop(slave_backing);
 
     let read_ok = matches!(read_result, Ok(0));
     let write_ok = matches!(write_result, Err(TtyError::HungUp));
@@ -685,7 +669,7 @@ pub fn test_pty_master_close_slave_eof_eio() -> TestResult {
 pub fn test_hangup_permanent_eof() -> TestResult {
     tty::table::tty_table_init();
     let idx = TtyIndex(0);
-    let _ = tty::open_ref(idx);
+    let con = tty::open_tty(idx).unwrap();
     tty::hangup(idx);
 
     let mut out = [0u8; 8];
@@ -693,6 +677,7 @@ pub fn test_hangup_permanent_eof() -> TestResult {
     let r2 = tty::read(idx, &mut out, true);
     let r3 = tty::read(idx, &mut out, true);
 
+    drop(con);
     tty::table::tty_table_init();
 
     let all_eof = matches!(r1, Ok(0)) && matches!(r2, Ok(0)) && matches!(r3, Ok(0));
@@ -712,37 +697,26 @@ pub fn test_hangup_permanent_eof() -> TestResult {
 pub fn test_pty_slave_poll_pollhup_after_master_close() -> TestResult {
     tty::table::tty_table_init();
 
-    let master_idx = match crate::tty::pty::pty_alloc() {
-        Ok(idx) => idx,
+    let (master_idx, master_backing) = match crate::tty::pty::pty_alloc() {
+        Ok(pair) => pair,
         Err(e) => {
             klog_info!("TTY_TEST: BUG - pty_alloc failed: {:?}", e);
             return TestResult::Fail;
         }
     };
 
-    // Open master so close_ref will decrement to 0 and trigger hangup.
-    tty::open_ref(master_idx).unwrap();
+    let slave_idx = TtyIndex(tty::get_pty_number(master_idx).unwrap() as u8);
 
-    let slave_idx = {
-        let guard = TTY_SLOTS[master_idx.0 as usize].lock();
-        match guard.as_ref() {
-            Some(tty) => match &tty.driver {
-                TtyDriverKind::PtyMaster { peer } => peer.idx,
-                _ => return TestResult::Fail,
-            },
-            None => return TestResult::Fail,
-        }
-    };
-
-    // Unlock slave so it can be opened (lock guard).
+    // Unlock the slave so it can be opened.
     crate::tty::set_pty_lock(master_idx, false).unwrap();
 
-    if let Err(_) = crate::tty::pty::pty_open_slave(slave_idx) {
-        return TestResult::Fail;
-    }
+    let slave_backing = match tty::pty_open_slave(slave_idx) {
+        Ok(backing) => backing,
+        Err(_) => return TestResult::Fail,
+    };
 
-    // Close master.
-    let _ = tty::close_ref(master_idx);
+    // Close the last master open — hangs up the slave.
+    drop(master_backing);
 
     // Poll slave.
     let revents = tty::poll_events(
@@ -750,7 +724,7 @@ pub fn test_pty_slave_poll_pollhup_after_master_close() -> TestResult {
         slopos_abi::syscall::POLLIN | slopos_abi::syscall::POLLOUT,
     );
 
-    tty::table::tty_table_init();
+    drop(slave_backing);
 
     if (revents & slopos_abi::syscall::POLLHUP) == 0 {
         klog_info!("TTY_TEST: BUG - PTY slave poll should return POLLHUP after master close");
@@ -1363,20 +1337,8 @@ pub fn test_invalid_action_still_errors() -> TestResult {
 /// TCOOFF on a PTY slave stops nonblocking writes to that
 /// slave.
 pub fn test_tcooff_pty_slave_write() -> TestResult {
-    tty::table::tty_table_init();
-
-    let master = match tty::pty_alloc() {
-        Ok(idx) => idx,
-        Err(e) => {
-            klog_info!("TTY_TEST: BUG - pty_alloc failed: {:?}", e);
-            return TestResult::Fail;
-        }
-    };
-    let _ = tty::open_ref(master);
-    let slave_num = tty::get_pty_number(master).unwrap();
-    let slave = TtyIndex(slave_num as u8);
-    tty::set_pty_lock(master, false).unwrap();
-    tty::pty_open_slave(slave).unwrap();
+    let pair = open_pty_pair();
+    let slave = pair.slave;
 
     // Stop output on the slave.
     tty::tcxonc(slave, slopos_abi::syscall::TCOOFF).unwrap();
@@ -1390,8 +1352,6 @@ pub fn test_tcooff_pty_slave_write() -> TestResult {
                 other
             );
             let _ = tty::tcxonc(slave, slopos_abi::syscall::TCOON);
-            let _ = tty::close_ref(slave);
-            let _ = tty::close_ref(master);
             return TestResult::Fail;
         }
     }
@@ -1405,14 +1365,10 @@ pub fn test_tcooff_pty_slave_write() -> TestResult {
                 "TTY_TEST: BUG - slave write after TCOON should succeed, got {:?}",
                 other
             );
-            let _ = tty::close_ref(slave);
-            let _ = tty::close_ref(master);
             return TestResult::Fail;
         }
     }
 
-    let _ = tty::close_ref(slave);
-    let _ = tty::close_ref(master);
     TestResult::Pass
 }
 
@@ -1780,7 +1736,7 @@ pub fn test_tiocoutq_various_byte_counts() -> TestResult {
 }
 
 pub fn test_packet_mode_1byte_with_events() -> TestResult {
-    let Some((master, slave, saved)) = packet_mode_setup_pty() else {
+    let Some((master, slave, saved, _hold)) = packet_mode_setup_pty() else {
         klog_info!("TTY_TEST: BUG - packet_mode setup failed");
         return TestResult::Fail;
     };
@@ -1816,7 +1772,7 @@ pub fn test_packet_mode_1byte_with_events() -> TestResult {
 }
 
 pub fn test_packet_mode_1byte_data_no_events() -> TestResult {
-    let Some((master, slave, saved)) = packet_mode_setup_pty() else {
+    let Some((master, slave, saved, _hold)) = packet_mode_setup_pty() else {
         klog_info!("TTY_TEST: BUG - packet_mode setup failed");
         return TestResult::Fail;
     };
@@ -1862,7 +1818,7 @@ pub fn test_packet_mode_1byte_data_no_events() -> TestResult {
 /// PTY master uses RawDisc (VMIN=0, VTIME=0) so empty nonblock reads
 /// return immediately with 0 bytes.
 pub fn test_packet_mode_1byte_no_data_nonblock() -> TestResult {
-    let Some((master, slave, saved)) = packet_mode_setup_pty() else {
+    let Some((master, slave, saved, _hold)) = packet_mode_setup_pty() else {
         klog_info!("TTY_TEST: BUG - packet_mode setup failed");
         return TestResult::Fail;
     };
@@ -1892,7 +1848,7 @@ pub fn test_packet_mode_1byte_no_data_nonblock() -> TestResult {
 }
 
 pub fn test_packet_mode_2byte_works() -> TestResult {
-    let Some((master, slave, saved)) = packet_mode_setup_pty() else {
+    let Some((master, slave, saved, _hold)) = packet_mode_setup_pty() else {
         klog_info!("TTY_TEST: BUG - packet_mode setup failed");
         return TestResult::Fail;
     };
@@ -1937,7 +1893,7 @@ pub fn test_tiocoutq_byte_accounting_regression_idle() -> TestResult {
 }
 
 pub fn test_packet_mode_data_prefix_regression() -> TestResult {
-    let Some((master, slave, saved)) = packet_mode_setup_pty() else {
+    let Some((master, slave, saved, _hold)) = packet_mode_setup_pty() else {
         klog_info!("TTY_TEST: BUG - packet regression setup failed");
         return TestResult::Fail;
     };
@@ -2092,51 +2048,60 @@ pub fn test_excl_hupcl_set_exclusive_roundtrip() -> TestResult {
 pub fn test_excl_hupcl_exclusive_blocks_second_open() -> TestResult {
     tty::table::tty_table_init();
     let idx = TtyIndex(0);
-    if tty::open_ref(idx).is_err() {
-        return TestResult::Fail;
-    }
+    let con = match tty::open_tty(idx) {
+        Ok(c) => c,
+        Err(_) => return TestResult::Fail,
+    };
     if tty::set_exclusive(idx, true).is_err() {
-        let _ = tty::close_ref(idx);
+        drop(con);
         return TestResult::Fail;
     }
-    match tty::open_ref(idx) {
+    match tty::open_tty(idx) {
         Err(TtyError::DeviceBusy) => {}
-        other => {
+        Ok(dup) => {
+            klog_info!("TTY_TEST: BUG - second open of exclusive tty unexpectedly succeeded");
+            drop(dup);
+            let _ = tty::set_exclusive(idx, false);
+            drop(con);
+            return TestResult::Fail;
+        }
+        Err(other) => {
             klog_info!(
                 "TTY_TEST: BUG - expected DeviceBusy on second open, got {:?}",
                 other
             );
             let _ = tty::set_exclusive(idx, false);
-            let _ = tty::close_ref(idx);
+            drop(con);
             return TestResult::Fail;
         }
     }
     let _ = tty::set_exclusive(idx, false);
-    let _ = tty::close_ref(idx);
+    drop(con);
     TestResult::Pass
 }
 
 pub fn test_excl_hupcl_nxcl_allows_second_open() -> TestResult {
     tty::table::tty_table_init();
     let idx = TtyIndex(0);
-    if tty::open_ref(idx).is_err() {
-        return TestResult::Fail;
-    }
+    let con = match tty::open_tty(idx) {
+        Ok(c) => c,
+        Err(_) => return TestResult::Fail,
+    };
     let _ = tty::set_exclusive(idx, true);
     let _ = tty::set_exclusive(idx, false);
-    match tty::open_ref(idx) {
-        Ok(_) => {}
+    let con2 = match tty::open_tty(idx) {
+        Ok(c) => c,
         Err(e) => {
             klog_info!(
                 "TTY_TEST: BUG - second open after NXCL should succeed, got {:?}",
                 e
             );
-            let _ = tty::close_ref(idx);
+            drop(con);
             return TestResult::Fail;
         }
-    }
-    let _ = tty::close_ref(idx);
-    let _ = tty::close_ref(idx);
+    };
+    drop(con2);
+    drop(con);
     TestResult::Pass
 }
 
@@ -2161,20 +2126,21 @@ pub fn test_excl_hupcl_exclusive_unallocated_slot() -> TestResult {
 pub fn test_excl_hupcl_hupcl_last_close_triggers_hangup() -> TestResult {
     tty::table::tty_table_init();
     let idx = TtyIndex(0);
-    if tty::open_ref(idx).is_err() {
-        return TestResult::Fail;
-    }
+    let con = match tty::open_tty(idx) {
+        Ok(c) => c,
+        Err(_) => return TestResult::Fail,
+    };
     tty::attach_session(idx, 600, 600);
     let mut t = match tty::get_termios(idx) {
         Ok(t) => t,
         Err(_) => {
-            let _ = tty::close_ref(idx);
+            drop(con);
             return TestResult::Fail;
         }
     };
     t.c_cflag |= ControlFlags::HUPCL;
     let _ = tty::set_termios(idx, &t);
-    let _ = tty::close_ref(idx);
+    drop(con);
     let hung = tty::is_hung_up(idx);
     if !hung {
         klog_info!("TTY_TEST: BUG - expected hung_up after HUPCL close");
@@ -2186,20 +2152,21 @@ pub fn test_excl_hupcl_hupcl_last_close_triggers_hangup() -> TestResult {
 pub fn test_excl_hupcl_no_hupcl_last_close_no_hangup() -> TestResult {
     tty::table::tty_table_init();
     let idx = TtyIndex(0);
-    if tty::open_ref(idx).is_err() {
-        return TestResult::Fail;
-    }
+    let con = match tty::open_tty(idx) {
+        Ok(c) => c,
+        Err(_) => return TestResult::Fail,
+    };
     tty::attach_session(idx, 700, 700);
     let mut t = match tty::get_termios(idx) {
         Ok(t) => t,
         Err(_) => {
-            let _ = tty::close_ref(idx);
+            drop(con);
             return TestResult::Fail;
         }
     };
     t.c_cflag &= !ControlFlags::HUPCL;
     let _ = tty::set_termios(idx, &t);
-    let _ = tty::close_ref(idx);
+    drop(con);
     let hung = tty::is_hung_up(idx);
     if hung {
         klog_info!("TTY_TEST: BUG - should NOT be hung_up without HUPCL");
@@ -2209,43 +2176,28 @@ pub fn test_excl_hupcl_no_hupcl_last_close_no_hangup() -> TestResult {
 }
 
 pub fn test_excl_hupcl_hupcl_pty_no_double_hangup() -> TestResult {
-    tty::table::tty_table_init();
-    let master = match tty::pty_alloc() {
-        Ok(idx) => idx,
-        Err(_) => return TestResult::Fail,
-    };
-    let slave = match tty::get_pty_number(master) {
-        Ok(n) => TtyIndex(n as u8),
-        Err(_) => return TestResult::Fail,
-    };
-    let _ = tty::set_pty_lock(master, false);
-    let _ = tty::open_ref(master);
-    let _ = tty::open_ref(slave);
+    let pair = open_pty_pair();
+    let slave = pair.slave;
 
     let mut t = match tty::get_termios(slave) {
         Ok(t) => t,
-        Err(_) => {
-            let _ = tty::close_ref(slave);
-            let _ = tty::close_ref(master);
-            return TestResult::Fail;
-        }
+        Err(_) => return TestResult::Fail,
     };
     t.c_cflag |= ControlFlags::HUPCL;
     let _ = tty::set_termios(slave, &t);
 
-    let _ = tty::close_ref(slave);
-    let _ = tty::close_ref(master);
     TestResult::Pass
 }
 
 pub fn test_excl_hupcl_close_clears_exclusive() -> TestResult {
     tty::table::tty_table_init();
     let idx = TtyIndex(0);
-    if tty::open_ref(idx).is_err() {
-        return TestResult::Fail;
-    }
+    let con = match tty::open_tty(idx) {
+        Ok(c) => c,
+        Err(_) => return TestResult::Fail,
+    };
     let _ = tty::set_exclusive(idx, true);
-    let _ = tty::close_ref(idx);
+    drop(con);
 
     match tty::get_exclusive(idx) {
         Ok(false) => TestResult::Pass,
@@ -2340,7 +2292,6 @@ pub fn test_tty_fields_pub_crate_smoke() -> TestResult {
     let ok = tty::table::with_tty_ref(TtyIndex(0), |tty| {
         let _ = tty.flags;
         let _ = tty.packet_events;
-        let _ = tty.open_count;
         let _ = &tty.ldisc;
         let _ = &tty.driver;
         let _ = &tty.session;
@@ -2370,23 +2321,16 @@ pub fn test_session_fields_pub_crate_smoke() -> TestResult {
 
 pub fn test_slave_starts_locked() -> TestResult {
     tty::table::tty_table_init();
-    let master = match tty::pty_alloc() {
-        Ok(m) => m,
+    let (master, master_backing) = match tty::pty_alloc() {
+        Ok(pair) => pair,
         Err(e) => {
             klog_info!("TTY_TEST: BUG - pty_alloc failed: {:?}", e);
             return TestResult::Fail;
         }
     };
-    let slave = match tty::table::with_tty_ref(master, |tty| match &tty.driver {
-        TtyDriverKind::PtyMaster { peer } => Some(peer.idx),
-        _ => None,
-    })
-    .flatten()
-    {
-        Some(s) => s,
-        None => return TestResult::Fail,
-    };
+    let slave = TtyIndex(tty::get_pty_number(master).unwrap() as u8);
     let locked = tty::table::with_tty_ref(slave, |tty| tty.flags.contains(TtyFlags::SLAVE_LOCKED));
+    drop(master_backing);
     if locked != Some(true) {
         klog_info!("TTY_TEST: BUG - PTY slave should start locked");
         return TestResult::Fail;
@@ -2427,8 +2371,8 @@ pub fn test_no_driver_kind_none() -> TestResult {
     use crate::tty::driver::DriverId;
     match (id0, id1) {
         (Some(DriverId::SerialConsole), Some(DriverId::VConsole)) => TestResult::Pass,
-        other => {
-            klog_info!("TTY_TEST: BUG - unexpected driver IDs: {:?}", other);
+        _ => {
+            klog_info!("TTY_TEST: BUG - unexpected driver IDs for slots 0 and 1");
             TestResult::Fail
         }
     }

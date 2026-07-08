@@ -5,8 +5,9 @@
 //! `SocketHandle::from_usize(handle)` before forwarding to `unix_socket::*`.
 
 use slopos_abi::Errno;
-use slopos_abi::file_ops::{FileKind, FileOps};
+use slopos_abi::file_ops::{FileBacking, FileKind, FileOps};
 use slopos_abi::io::{IO_STAGING_SIZE, IoBufRead, IoBufWrite};
+use slopos_ostd::KArc;
 
 use crate::unix_socket;
 use crate::unix_socket::SocketHandle;
@@ -14,6 +15,32 @@ use crate::unix_socket::SocketHandle;
 pub struct UnixSocketFileOps;
 
 pub static UNIX_SOCKET_FILE_OPS: UnixSocketFileOps = UnixSocketFileOps;
+
+/// Sole owner of one AF_UNIX socket endpoint; dropping it closes it.
+struct UnixSocketBacking {
+    handle: SocketHandle,
+}
+
+impl FileBacking for UnixSocketBacking {}
+
+impl Drop for UnixSocketBacking {
+    fn drop(&mut self) {
+        let _ = unix_socket::unix_close(self.handle);
+    }
+}
+
+/// Wrap ownership of a freshly-created (or accepted) AF_UNIX endpoint.
+/// On allocation failure the endpoint is closed before returning, so it
+/// cannot leak.
+pub fn unix_socket_backing(handle: SocketHandle) -> Option<KArc<dyn FileBacking>> {
+    match KArc::try_new(UnixSocketBacking { handle }) {
+        Ok(backing) => Some(backing),
+        Err(_) => {
+            let _ = unix_socket::unix_close(handle);
+            None
+        }
+    }
+}
 
 impl FileOps for UnixSocketFileOps {
     fn kind(&self) -> FileKind {
@@ -100,10 +127,6 @@ impl FileOps for UnixSocketFileOps {
             }
         }
         total as isize
-    }
-
-    fn release(&self, handle: usize) {
-        let _ = unix_socket::unix_close(SocketHandle::from_usize(handle));
     }
 
     fn poll_fused(&self, handle: usize, events: u16) -> slopos_abi::file_ops::FusedPollResult {

@@ -83,21 +83,27 @@ pub fn waitpid(task_id: u32) -> i32 {
     unsafe { syscall2(SYSCALL_WAITPID, task_id as u64, 0) as i32 }
 }
 
+/// Allocate a PTY pair. Returns the master as an owned fd plus the slave
+/// pts number (open the slave via `/dev/pts/N` or `TIOCGPTPEER`).
 #[inline(always)]
-pub fn openpty() -> Result<(u32, u32), i64> {
-    let mut master: u32 = 0;
-    let mut slave: u32 = 0;
+pub fn openpty() -> Result<(super::OwnedFd, u32), i64> {
+    let mut master_fd: u32 = 0;
+    let mut slave_num: u32 = 0;
     let ret = unsafe {
         syscall2(
             SYSCALL_OPENPTY,
-            (&mut master as *mut u32) as u64,
-            (&mut slave as *mut u32) as u64,
+            (&mut master_fd as *mut u32) as u64,
+            (&mut slave_num as *mut u32) as u64,
         )
     } as i64;
     if ret < 0 {
         Err(ret)
     } else {
-        Ok((master, slave))
+        // SAFETY: master_fd is a valid fd just installed by the kernel.
+        Ok((
+            unsafe { super::OwnedFd::from_raw(master_fd as i32) },
+            slave_num,
+        ))
     }
 }
 

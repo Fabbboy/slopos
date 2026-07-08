@@ -7,6 +7,7 @@
 //! `1` when one side closes, and dropped to `0` (freeing the pair) when
 //! the second side closes.
 
+use slopos_fs::FileRef;
 use slopos_ostd::{AllocError, KVec};
 
 use super::MAX_UNIX_SOCKETS;
@@ -31,40 +32,39 @@ pub enum PairSide {
     B,
 }
 
-/// A file descriptor reference in transit through a Unix socket.
-pub(super) struct InFlightFd {
-    pub(super) handle: usize,
-    pub(super) ops: &'static dyn slopos_abi::file_ops::FileOps,
-}
-
-/// Per-direction queue of in-flight fds (SCM_RIGHTS side-channel).
+/// Per-direction queue of in-flight files (SCM_RIGHTS side-channel).
 ///
-/// Backed by a `KVec` — entries live in their own heap allocation, so
-/// the queue's footprint inside [`ConnectionPair`] is just a vector
-/// header (~24 bytes) regardless of how many fds are queued.  On drop,
-/// any unclaimed fds are released via `ops.release` to avoid leaking
-/// kernel-side fd references.
+/// Entries are owned [`FileRef`] aliases of the sender's open files:
+/// queueing transfers custody in, delivery moves it on to the receiver's
+/// fd table, and dropping the queue closes whatever was never claimed —
+/// there is no reference for anyone to balance.
+///
+/// Storage is pre-reserved to [`MAX_INFLIGHT_FDS`] at pair creation so
+/// commit-path pushes never allocate — and, critically, never drop a
+/// `FileRef` while the socket state lock is held (a drop can recurse
+/// into arbitrary file teardown, including `unix_close`).
 pub(super) struct AncillaryQueue {
-    entries: KVec<InFlightFd>,
+    entries: KVec<FileRef>,
 }
 
 impl AncillaryQueue {
-    pub(super) const fn new() -> Self {
-        Self {
-            entries: KVec::new(),
-        }
+    fn new() -> Result<Self, AllocError> {
+        Ok(Self {
+            entries: KVec::with_capacity(MAX_INFLIGHT_FDS)?,
+        })
     }
 
-    /// Push an fd, capped at [`MAX_INFLIGHT_FDS`].  Returns `false` if
-    /// the cap is reached or the underlying allocation cannot grow.
-    pub(super) fn push(&mut self, fd: InFlightFd) -> bool {
+    /// Push a file, capped at [`MAX_INFLIGHT_FDS`].  Returns `false` if
+    /// the cap is reached (callers capacity-check first, so a `false`
+    /// is a logic error, not a runtime condition).
+    pub(super) fn push(&mut self, file: FileRef) -> bool {
         if self.entries.len() >= MAX_INFLIGHT_FDS {
             return false;
         }
-        self.entries.push(fd).is_ok()
+        self.entries.push(file).is_ok()
     }
 
-    /// Number of fds currently queued. Used by the atomic-publish path
+    /// Number of files currently queued. Used by the atomic-publish path
     /// in `unix_sendmsg` to capacity-check the ancillary queue *before*
     /// committing any fds, so a multi-fd send never publishes a
     /// partial set to the peer.
@@ -73,19 +73,11 @@ impl AncillaryQueue {
         self.entries.len()
     }
 
-    /// Drain all entries.  The returned `KVec` owns the fds; the
-    /// caller forwards each to userspace or releases on overflow.
-    pub(super) fn drain(&mut self) -> KVec<InFlightFd> {
+    /// Drain all entries.  A pure move: the returned `KVec` owns the
+    /// aliases, so the caller can carry them out of the state lock
+    /// before forwarding or dropping them.
+    pub(super) fn drain(&mut self) -> KVec<FileRef> {
         core::mem::replace(&mut self.entries, KVec::new())
-    }
-}
-
-impl Drop for AncillaryQueue {
-    fn drop(&mut self) {
-        // Release all unclaimed fds before the KVec backing storage drops.
-        for fd in self.entries.drain(..) {
-            fd.ops.release(fd.handle);
-        }
     }
 }
 
@@ -114,8 +106,8 @@ impl ConnectionPair {
         Ok(Self {
             a_to_b: UnixFifo::new()?,
             b_to_a: UnixFifo::new()?,
-            anc_a_to_b: AncillaryQueue::new(),
-            anc_b_to_a: AncillaryQueue::new(),
+            anc_a_to_b: AncillaryQueue::new()?,
+            anc_b_to_a: AncillaryQueue::new()?,
             refcount: 2,
         })
     }
@@ -206,25 +198,24 @@ impl PairTable {
             .and_then(|s| s.as_mut())
     }
 
-    /// Decrement the refcount of `handle`.  Returns `true` if the pair
-    /// was freed (refcount reached zero) — the caller should then no
-    /// longer use the handle.
-    pub(super) fn release(&mut self, handle: PairHandle) -> bool {
-        let entry = match self.pairs.get_mut(handle.0 as usize) {
-            Some(e) => e,
-            None => return false,
-        };
+    /// Decrement the refcount of `handle`.  When it reaches zero the
+    /// pair is detached from the table and returned so the caller can
+    /// drop it *after* releasing the socket state lock — its ancillary
+    /// queues may hold `FileRef`s whose teardown can recurse into
+    /// arbitrary subsystems (including `unix_close` itself).
+    #[must_use]
+    pub(super) fn release(&mut self, handle: PairHandle) -> Option<ConnectionPair> {
+        let entry = self.pairs.get_mut(handle.0 as usize)?;
         match entry {
             Some(pair) => {
                 pair.refcount = pair.refcount.saturating_sub(1);
                 if pair.refcount == 0 {
-                    *entry = None; // drops ConnectionPair → drops queues → releases fds
-                    true
+                    entry.take()
                 } else {
-                    false
+                    None
                 }
             }
-            None => false,
+            None => None,
         }
     }
 }

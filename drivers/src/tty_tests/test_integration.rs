@@ -3,8 +3,8 @@ use slopos_abi::KernelErrno;
 
 pub fn test_pty_data_roundtrip() -> TestResult {
     tty::table::tty_table_init();
-    let master = match tty::pty_alloc() {
-        Ok(idx) => idx,
+    let (master, _master_backing) = match tty::pty_alloc() {
+        Ok(pair) => pair,
         Err(_) => return TestResult::Fail,
     };
     let slave = TtyIndex(match tty::get_pty_number(master) {
@@ -12,9 +12,11 @@ pub fn test_pty_data_roundtrip() -> TestResult {
         Err(_) => return TestResult::Fail,
     });
 
-    if tty::open_ref(master).is_err() || tty::open_ref(slave).is_err() {
-        return TestResult::Fail;
-    }
+    tty::set_pty_lock(master, false).ok();
+    let _slave_backing = match tty::pty_open_slave(slave) {
+        Ok(b) => b,
+        Err(_) => return TestResult::Fail,
+    };
 
     let saved = match tty::get_termios(slave) {
         Ok(t) => t,
@@ -31,8 +33,6 @@ pub fn test_pty_data_roundtrip() -> TestResult {
     let read_rc = tty::read(slave, &mut out, true);
 
     let _ = tty::set_termios(slave, &saved);
-    let _ = tty::close_ref(slave);
-    let _ = tty::close_ref(master);
 
     if write_rc != Ok(9) || read_rc != Ok(9) || &out[..9] != b"roundtrip" {
         return TestResult::Fail;
@@ -42,8 +42,8 @@ pub fn test_pty_data_roundtrip() -> TestResult {
 
 pub fn test_pty_hangup_propagation() -> TestResult {
     tty::table::tty_table_init();
-    let master = match tty::pty_alloc() {
-        Ok(idx) => idx,
+    let (master, master_backing) = match tty::pty_alloc() {
+        Ok(pair) => pair,
         Err(_) => return TestResult::Fail,
     };
     let slave = TtyIndex(match tty::get_pty_number(master) {
@@ -51,16 +51,18 @@ pub fn test_pty_hangup_propagation() -> TestResult {
         Err(_) => return TestResult::Fail,
     });
 
-    if tty::open_ref(master).is_err() || tty::open_ref(slave).is_err() {
-        return TestResult::Fail;
-    }
+    tty::set_pty_lock(master, false).ok();
+    let _slave_backing = match tty::pty_open_slave(slave) {
+        Ok(b) => b,
+        Err(_) => return TestResult::Fail,
+    };
 
-    let _ = tty::close_ref(master);
+    // Closing the last master open hangs up the still-open slave.
+    drop(master_backing);
     let events = tty::poll_events(
         slave,
         slopos_abi::syscall::POLLIN | slopos_abi::syscall::POLLHUP,
     );
-    let _ = tty::close_ref(slave);
 
     if (events & slopos_abi::syscall::POLLHUP) == 0 {
         return TestResult::Fail;

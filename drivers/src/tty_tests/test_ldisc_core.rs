@@ -873,18 +873,25 @@ pub fn test_check_read_sole_gate_background() -> TestResult {
 pub fn test_tty_open_count_lifecycle() -> TestResult {
     tty::table::tty_table_init();
 
-    let open1 = tty::open_ref(TtyIndex(0));
-    let open2 = tty::open_ref(TtyIndex(0));
-    let close1 = tty::close_ref(TtyIndex(0));
-    let close2 = tty::close_ref(TtyIndex(0));
+    // The strong count of the backing is the open count; each clone is
+    // another open and each drop is a close.
+    let open1 = tty::open_tty(TtyIndex(0)).expect("open console");
+    let open2 = open1.clone();
+    let count_two_opens = KArc::strong_count(&open1);
+    drop(open2);
+    let count_one_open = KArc::strong_count(&open1);
+    drop(open1);
+    let closed = crate::tty::table::TTY_BACKINGS[0]
+        .lock()
+        .upgrade()
+        .is_none();
 
-    if open1 != Ok(1) || open2 != Ok(2) || close1 != Ok(1) || close2 != Ok(0) {
+    if count_two_opens != 2 || count_one_open != 1 || !closed {
         klog_info!(
-            "TTY_TEST: BUG - open/close ref counts mismatch: {:?} {:?} {:?} {:?}",
-            open1,
-            open2,
-            close1,
-            close2
+            "TTY_TEST: BUG - open count lifecycle mismatch: two={} one={} closed={}",
+            count_two_opens,
+            count_one_open,
+            closed
         );
         return TestResult::Fail;
     }
@@ -902,8 +909,7 @@ pub fn test_tty_hangup_sets_flag_and_detaches_session() -> TestResult {
     let hung = tty::is_hung_up(TtyIndex(0));
     let has_data = tty::has_data(TtyIndex(0));
 
-    let _ = tty::open_ref(TtyIndex(0));
-    let _ = tty::close_ref(TtyIndex(0));
+    let _ = tty::open_tty(TtyIndex(0));
 
     if sid != 0 {
         klog_info!(
@@ -925,14 +931,11 @@ pub fn test_tty_hangup_sets_flag_and_detaches_session() -> TestResult {
 
 pub fn test_tty_hangup_nonblock_read_eio() -> TestResult {
     tty::table::tty_table_init();
-    let _ = tty::open_ref(TtyIndex(0));
+    let _con = tty::open_tty(TtyIndex(0));
     tty::hangup(TtyIndex(0));
 
     let mut out = [0u8; 8];
     let rc = tty::read(TtyIndex(0), &mut out, true);
-
-    let _ = tty::open_ref(TtyIndex(0));
-    let _ = tty::close_ref(TtyIndex(0));
 
     if rc != Ok(0) {
         klog_info!(
@@ -946,14 +949,11 @@ pub fn test_tty_hangup_nonblock_read_eio() -> TestResult {
 
 pub fn test_tty_hangup_blocking_read_eof() -> TestResult {
     tty::table::tty_table_init();
-    let _ = tty::open_ref(TtyIndex(0));
+    let _con = tty::open_tty(TtyIndex(0));
     tty::hangup(TtyIndex(0));
 
     let mut out = [0u8; 8];
     let rc = tty::read(TtyIndex(0), &mut out, false);
-
-    let _ = tty::open_ref(TtyIndex(0));
-    let _ = tty::close_ref(TtyIndex(0));
 
     if rc != Ok(0) {
         klog_info!(
@@ -1218,14 +1218,11 @@ pub fn test_set_fg_pgrp_checked_permission_denied() -> TestResult {
 
 pub fn test_hangup_read_returns_hung_up() -> TestResult {
     tty::table::tty_table_init();
-    let _ = tty::open_ref(TtyIndex(0));
+    let _con = tty::open_tty(TtyIndex(0));
     tty::hangup(TtyIndex(0));
 
     let mut out = [0u8; 8];
     let result = tty::read(TtyIndex(0), &mut out, true);
-
-    let _ = tty::open_ref(TtyIndex(0));
-    let _ = tty::close_ref(TtyIndex(0));
 
     // hung-up TTY reads now always return EOF (Ok(0)),
     // regardless of blocking mode.  Previously nonblock returned
@@ -1271,18 +1268,18 @@ pub fn test_per_tty_lock_independence() -> TestResult {
 pub fn test_driver_id_round_trip() -> TestResult {
     let serial = TtyDriverKind::SerialConsole(crate::tty::driver::SerialConsoleDriver);
     let vconsole = TtyDriverKind::VConsole(VConsoleDriver);
-    let none = TtyDriverKind::SerialConsole(SerialConsoleDriver);
+    let also_serial = TtyDriverKind::SerialConsole(SerialConsoleDriver);
 
-    if serial.id() != DriverId::SerialConsole {
+    if !matches!(serial.id(), DriverId::SerialConsole) {
         klog_info!("TTY_TEST: BUG - SerialConsole id mismatch");
         return TestResult::Fail;
     }
-    if vconsole.id() != DriverId::VConsole {
+    if !matches!(vconsole.id(), DriverId::VConsole) {
         klog_info!("TTY_TEST: BUG - VConsole id mismatch");
         return TestResult::Fail;
     }
-    if none.id() != DriverId::SerialConsole {
-        klog_info!("TTY_TEST: BUG - None id mismatch");
+    if !matches!(also_serial.id(), DriverId::SerialConsole) {
+        klog_info!("TTY_TEST: BUG - second SerialConsole id mismatch");
         return TestResult::Fail;
     }
     TestResult::Pass
@@ -1387,19 +1384,19 @@ pub fn test_with_tty_per_slot() -> TestResult {
     TestResult::Pass
 }
 
-/// DriverId is Copy + Clone + Eq — verify that the derive attributes
-/// work correctly for the lock-free I/O dispatch identifier.
-pub fn test_driver_id_traits() -> TestResult {
+/// DriverId is clonable and its variants stay distinguishable — the
+/// identifier carries the weak peer link across the lock-free I/O dispatch
+/// boundary.
+pub fn test_driver_id_clonable() -> TestResult {
     let id = DriverId::SerialConsole;
-    let id_copy = id; // Copy
-    let id_clone = id.clone(); // Clone
+    let id_clone = id.clone();
 
-    if id != id_copy || id != id_clone {
-        klog_info!("TTY_TEST: BUG - DriverId Copy/Clone/Eq broken");
+    if !matches!(id_clone, DriverId::SerialConsole) {
+        klog_info!("TTY_TEST: BUG - DriverId clone lost its variant");
         return TestResult::Fail;
     }
-    if id == DriverId::VConsole {
-        klog_info!("TTY_TEST: BUG - DriverId Eq does not distinguish variants");
+    if matches!(DriverId::VConsole, DriverId::SerialConsole) {
+        klog_info!("TTY_TEST: BUG - DriverId variants must be distinguishable");
         return TestResult::Fail;
     }
     TestResult::Pass
@@ -2285,8 +2282,8 @@ pub fn test_set_ldisc_invalid_id_rejected() -> TestResult {
 pub fn test_pty_alloc_returns_master_and_slave() -> TestResult {
     tty::table::tty_table_init();
 
-    let master = match tty::pty_alloc() {
-        Ok(idx) => idx,
+    let (master, master_backing) = match tty::pty_alloc() {
+        Ok(pair) => pair,
         Err(err) => {
             klog_info!("TTY_TEST: BUG - pty_alloc failed: {:?}", err);
             return TestResult::Fail;
@@ -2300,13 +2297,15 @@ pub fn test_pty_alloc_returns_master_and_slave() -> TestResult {
         }
     };
 
-    let master_ok = tty::open_ref(master).is_ok();
-    let slave_ok = tty::open_ref(slave).is_ok();
+    tty::set_pty_lock(master, false).ok();
+    let slave_open = tty::pty_open_slave(slave);
+    let master_ok = master_backing.is_pty_master();
+    let slave_ok = slave_open.is_ok();
     let slave_is_pty = tty::is_pty_slave(slave);
     let master_is_not_slave = !tty::is_pty_slave(master);
 
-    let _ = tty::close_ref(slave);
-    let _ = tty::close_ref(master);
+    drop(slave_open);
+    drop(master_backing);
 
     if !master_ok || !slave_ok || master == slave || !slave_is_pty || !master_is_not_slave {
         klog_info!(
@@ -2327,10 +2326,10 @@ pub fn test_pty_alloc_returns_master_and_slave() -> TestResult {
 pub fn test_pty_master_to_slave_flow() -> TestResult {
     tty::table::tty_table_init();
 
-    let master = tty::pty_alloc().unwrap();
+    let (master, _master_backing) = tty::pty_alloc().unwrap();
     let slave = TtyIndex(tty::get_pty_number(master).unwrap() as u8);
-    tty::open_ref(master).unwrap();
-    tty::open_ref(slave).unwrap();
+    tty::set_pty_lock(master, false).unwrap();
+    let _slave_backing = tty::pty_open_slave(slave).unwrap();
 
     let saved = tty::get_termios(slave).unwrap();
     let mut raw = saved;
@@ -2342,8 +2341,6 @@ pub fn test_pty_master_to_slave_flow() -> TestResult {
     let read_rc = tty::read(slave, &mut buf, true);
 
     tty::set_termios(slave, &saved).unwrap();
-    let _ = tty::close_ref(slave);
-    let _ = tty::close_ref(master);
 
     if write_rc != Ok(5) || read_rc != Ok(5) || &buf[..5] != b"hello" {
         klog_info!(
@@ -2361,17 +2358,14 @@ pub fn test_pty_master_to_slave_flow() -> TestResult {
 pub fn test_pty_slave_to_master_flow() -> TestResult {
     tty::table::tty_table_init();
 
-    let master = tty::pty_alloc().unwrap();
+    let (master, _master_backing) = tty::pty_alloc().unwrap();
     let slave = TtyIndex(tty::get_pty_number(master).unwrap() as u8);
-    tty::open_ref(master).unwrap();
-    tty::open_ref(slave).unwrap();
+    tty::set_pty_lock(master, false).unwrap();
+    let _slave_backing = tty::pty_open_slave(slave).unwrap();
 
     let write_rc = tty::write(slave, b"world\n", false);
     let mut buf = [0u8; 16];
     let read_rc = tty::read(master, &mut buf, true);
-
-    let _ = tty::close_ref(slave);
-    let _ = tty::close_ref(master);
 
     if write_rc != Ok(6) || read_rc != Ok(7) || &buf[..7] != b"world\r\n" {
         klog_info!(
@@ -2389,22 +2383,21 @@ pub fn test_pty_slave_to_master_flow() -> TestResult {
 pub fn test_master_close_hangs_up_slave() -> TestResult {
     tty::table::tty_table_init();
 
-    let master = tty::pty_alloc().unwrap();
+    let (master, master_backing) = tty::pty_alloc().unwrap();
     let slave = TtyIndex(tty::get_pty_number(master).unwrap() as u8);
-    tty::open_ref(master).unwrap();
-    tty::open_ref(slave).unwrap();
+    tty::set_pty_lock(master, false).unwrap();
+    let _slave_backing = tty::pty_open_slave(slave).unwrap();
 
-    let close_rc = tty::close_ref(master);
+    // Closing the last master open hangs up the still-open slave: it reports
+    // hung-up and reads return EOF.
+    drop(master_backing);
     let is_hung = tty::is_hung_up(slave);
     let mut buf = [0u8; 8];
     let read_rc = tty::read(slave, &mut buf, true);
 
-    let _ = tty::close_ref(slave);
-
-    if close_rc != Ok(0) || !is_hung || read_rc != Ok(0) {
+    if !is_hung || read_rc != Ok(0) {
         klog_info!(
-            "TTY_TEST: BUG - master close should hang up slave (close={:?}, is_hung={}, read={:?})",
-            close_rc,
+            "TTY_TEST: BUG - master close should hang up slave (is_hung={}, read={:?})",
             is_hung,
             read_rc
         );
@@ -2414,25 +2407,51 @@ pub fn test_master_close_hangs_up_slave() -> TestResult {
     TestResult::Pass
 }
 
-pub fn test_slave_close_returns_master_eof() -> TestResult {
+pub fn test_slave_close_eofs_master_and_stays_reopenable() -> TestResult {
     tty::table::tty_table_init();
 
-    let master = tty::pty_alloc().unwrap();
+    let (master, _master_backing) = tty::pty_alloc().unwrap();
     let slave = TtyIndex(tty::get_pty_number(master).unwrap() as u8);
-    tty::open_ref(master).unwrap();
-    tty::open_ref(slave).unwrap();
+    tty::set_pty_lock(master, false).unwrap();
+    let slave_open = tty::pty_open_slave(slave).unwrap();
 
-    let close_rc = tty::close_ref(slave);
+    // With the slave open and no data, the master read blocks (not EOF).
     let mut buf = [0u8; 8];
-    let read_rc = tty::read(master, &mut buf, true);
+    let with_slave_open = tty::read(master, &mut buf, true);
 
-    let _ = tty::close_ref(master);
+    // Closing the last slave open latches peer-closed: the master reads EOF.
+    drop(slave_open);
+    let after_close = tty::read(master, &mut buf, true);
 
-    if close_rc != Ok(0) || read_rc != Ok(0) {
+    // The master's link keeps the slave slot alive, so it reopens; the
+    // reopen clears the peer-closed latch and the master blocks again.
+    let reopened = tty::pty_open_slave(slave);
+    let reopen_ok = reopened.is_ok();
+    let after_reopen = tty::read(master, &mut buf, true);
+    drop(reopened);
+
+    if with_slave_open != Err(TtyError::WouldBlock) {
         klog_info!(
-            "TTY_TEST: BUG - slave close should give master EOF (close={:?}, read={:?})",
-            close_rc,
-            read_rc
+            "TTY_TEST: BUG - master read with slave open should block, got {:?}",
+            with_slave_open
+        );
+        return TestResult::Fail;
+    }
+    if after_close != Ok(0) {
+        klog_info!(
+            "TTY_TEST: BUG - master read after last slave close should be EOF Ok(0), got {:?}",
+            after_close
+        );
+        return TestResult::Fail;
+    }
+    if !reopen_ok {
+        klog_info!("TTY_TEST: BUG - slave should be reopenable while the master lives");
+        return TestResult::Fail;
+    }
+    if after_reopen != Err(TtyError::WouldBlock) {
+        klog_info!(
+            "TTY_TEST: BUG - reopen should clear the EOF latch and block again, got {:?}",
+            after_reopen
         );
         return TestResult::Fail;
     }
@@ -2443,10 +2462,10 @@ pub fn test_slave_close_returns_master_eof() -> TestResult {
 pub fn test_pty_canonical_editing_on_slave() -> TestResult {
     tty::table::tty_table_init();
 
-    let master = tty::pty_alloc().unwrap();
+    let (master, _master_backing) = tty::pty_alloc().unwrap();
     let slave = TtyIndex(tty::get_pty_number(master).unwrap() as u8);
-    tty::open_ref(master).unwrap();
-    tty::open_ref(slave).unwrap();
+    tty::set_pty_lock(master, false).unwrap();
+    let _slave_backing = tty::pty_open_slave(slave).unwrap();
 
     let saved = tty::get_termios(slave).unwrap();
     let mut no_echo = saved;
@@ -2459,8 +2478,6 @@ pub fn test_pty_canonical_editing_on_slave() -> TestResult {
     let second_read = tty::read(slave, &mut buf, true);
 
     tty::set_termios(slave, &saved).unwrap();
-    let _ = tty::close_ref(slave);
-    let _ = tty::close_ref(master);
 
     if write_rc != Ok(8) || first_read != Ok(4) || second_read != Ok(4) {
         klog_info!(
@@ -3649,7 +3666,7 @@ slopos_testing::stest!(
 );
 slopos_testing::stest!(name = test_merged_drain_read, suite = tty_test_ldisc_core);
 slopos_testing::stest!(name = test_with_tty_per_slot, suite = tty_test_ldisc_core);
-slopos_testing::stest!(name = test_driver_id_traits, suite = tty_test_ldisc_core);
+slopos_testing::stest!(name = test_driver_id_clonable, suite = tty_test_ldisc_core);
 slopos_testing::stest!(
     name = test_default_termios_has_icrnl,
     suite = tty_test_ldisc_core
@@ -3788,7 +3805,7 @@ slopos_testing::stest!(
     suite = tty_test_ldisc_core
 );
 slopos_testing::stest!(
-    name = test_slave_close_returns_master_eof,
+    name = test_slave_close_eofs_master_and_stays_reopenable,
     suite = tty_test_ldisc_core
 );
 slopos_testing::stest!(

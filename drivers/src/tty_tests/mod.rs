@@ -27,14 +27,12 @@ use crate::tty::session::TtySession;
 use crate::tty::session::{
     ForegroundCheck, NO_FOREGROUND_PGRP, NO_SESSION, ProcessGroupId, SessionId,
 };
-use crate::tty::table::{TTY_GENERATIONS, TTY_OUTPUT_INFLIGHT, TTY_SLOTS};
+use crate::tty::table::{TTY_OUTPUT_INFLIGHT, TTY_SLOTS};
 use crate::tty::vconsole::{
     Cell, CellAttributes, CellGrid, CursorAttributes, VCONSOLE_MAX_COLS, VCONSOLE_MAX_ROWS,
     VConsoleState,
 };
 use crate::tty::vtparser::{Direction, EraseMode, SgrAttr, VtAction, VtParser};
-
-use crate::tty::pty::PtyPeerHandle;
 
 pub(crate) fn boxed_vconsole_state() -> slopos_ostd::KBox<VConsoleState> {
     let mut state = slopos_ostd::KBox::try_init(VConsoleState::init_default()).expect("test alloc");
@@ -286,7 +284,7 @@ slopos_testing::stest!(name = test_split_write_returns_input_len, suite = tty);
 slopos_testing::stest!(name = test_idle_cb_iterates_all_ttys, suite = tty);
 slopos_testing::stest!(name = test_merged_drain_read, suite = tty);
 slopos_testing::stest!(name = test_with_tty_per_slot, suite = tty);
-slopos_testing::stest!(name = test_driver_id_traits, suite = tty);
+slopos_testing::stest!(name = test_driver_id_clonable, suite = tty);
 // Job Control Correctness
 slopos_testing::stest!(name = test_sigttou_constant, suite = tty);
 slopos_testing::stest!(
@@ -386,7 +384,10 @@ slopos_testing::stest!(name = test_pty_alloc_returns_master_and_slave, suite = t
 slopos_testing::stest!(name = test_pty_master_to_slave_flow, suite = tty);
 slopos_testing::stest!(name = test_pty_slave_to_master_flow, suite = tty);
 slopos_testing::stest!(name = test_master_close_hangs_up_slave, suite = tty);
-slopos_testing::stest!(name = test_slave_close_returns_master_eof, suite = tty);
+slopos_testing::stest!(
+    name = test_slave_close_eofs_master_and_stays_reopenable,
+    suite = tty
+);
 slopos_testing::stest!(name = test_pty_canonical_editing_on_slave, suite = tty);
 // Strict Session Gates & Foreground Outcomes
 slopos_testing::stest!(name = test_bootstrap_allowed_no_session_read, suite = tty);
@@ -422,7 +423,7 @@ slopos_testing::stest!(name = test_pty_close_slave_first_frees_pair, suite = tty
 slopos_testing::stest!(name = test_pty_reallocation_after_free, suite = tty);
 slopos_testing::stest!(name = test_pty_open_slave_validates_type, suite = tty);
 slopos_testing::stest!(name = test_pty_open_slave_prevents_free, suite = tty);
-slopos_testing::stest!(name = test_partial_open_no_free, suite = tty);
+slopos_testing::stest!(name = test_extra_slave_open_keeps_slave_alive, suite = tty);
 slopos_testing::stest!(name = test_rapid_alloc_free_realloc, suite = tty);
 slopos_testing::stest!(name = test_pty_open_slave_after_free, suite = tty);
 // Event-Driven Readiness & IXON Completion
@@ -501,15 +502,15 @@ slopos_testing::stest!(name = test_console_drain_immediate, suite = tty);
 slopos_testing::stest!(name = test_tcsets_now_skips_drain, suite = tty);
 // PTY Lifetime Safety & Scalable Capacity
 slopos_testing::stest!(name = test_max_ttys_is_32, suite = tty);
-slopos_testing::stest!(name = test_pty_peer_handle_creation, suite = tty);
-slopos_testing::stest!(name = test_pty_peer_handle_snapshot, suite = tty);
-slopos_testing::stest!(name = test_generation_bumped_on_free, suite = tty);
-slopos_testing::stest!(name = test_stale_handle_detected, suite = tty);
-slopos_testing::stest!(name = test_pty_alloc_captures_generation, suite = tty);
+slopos_testing::stest!(name = test_master_peer_link_targets_slave, suite = tty);
+slopos_testing::stest!(name = test_slave_peer_link_targets_master, suite = tty);
+slopos_testing::stest!(name = test_backing_dies_on_free, suite = tty);
+slopos_testing::stest!(name = test_stale_peer_link_detected, suite = tty);
+slopos_testing::stest!(name = test_pty_alloc_links_master_to_slave, suite = tty);
 slopos_testing::stest!(name = test_stale_write_safe_noop, suite = tty);
-slopos_testing::stest!(name = test_rapid_alloc_free_stress, suite = tty);
-slopos_testing::stest!(name = test_data_flow_with_generation, suite = tty);
-slopos_testing::stest!(name = test_validate_peer_out_of_range, suite = tty);
+slopos_testing::stest!(name = test_rapid_alloc_free_backing_dies, suite = tty);
+slopos_testing::stest!(name = test_data_flow_through_peer_link, suite = tty);
+slopos_testing::stest!(name = test_dangling_peer_write_is_noop, suite = tty);
 slopos_testing::stest!(name = test_multiple_pty_pairs, suite = tty);
 // POSIX Completion Set (Rust-Idiomatic)
 slopos_testing::stest!(name = test_ignbrk_discards_break, suite = tty);

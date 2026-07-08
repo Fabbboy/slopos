@@ -54,16 +54,6 @@ impl FileOps for PidfdFileOps {
         Errno::EINVAL.as_isize()
     }
 
-    fn release(&self, _handle: usize) {
-        // No per-open kernel state: the handle is just a task id, and the
-        // task's lifecycle is independent of this fd.
-    }
-
-    fn dup(&self, handle: usize) -> Option<usize> {
-        // Both fds observe the same target task id.
-        Some(handle)
-    }
-
     fn poll_wait(&self, handle: usize) -> bool {
         // Register the calling task on the target's child-exit queue — the
         // exact register-then-recheck shape poll(2) / OP_POLL_ADD expect

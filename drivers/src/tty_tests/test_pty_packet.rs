@@ -45,7 +45,7 @@ pub fn test_abi_constants() -> TestResult {
 
 /// With packet mode ON, master read gets TIOCPKT_DATA prefix.
 pub fn test_tiocpkt_on_data_prefixed() -> TestResult {
-    let Some((master, slave, saved)) = packet_mode_setup_pty() else {
+    let Some((master, slave, saved, _guard)) = packet_mode_setup_pty() else {
         klog_info!("TTY_TEST: BUG - packet_mode setup failed");
         return TestResult::Fail;
     };
@@ -85,7 +85,7 @@ pub fn test_tiocpkt_on_data_prefixed() -> TestResult {
 
 /// With packet mode OFF, master read has no prefix.
 pub fn test_tiocpkt_off_normal_read() -> TestResult {
-    let Some((master, slave, saved)) = packet_mode_setup_pty() else {
+    let Some((master, slave, saved, _guard)) = packet_mode_setup_pty() else {
         klog_info!("TTY_TEST: BUG - packet_mode setup failed");
         return TestResult::Fail;
     };
@@ -112,7 +112,7 @@ pub fn test_tiocpkt_off_normal_read() -> TestResult {
 
 /// Slave input flush sets TIOCPKT_FLUSHREAD on master.
 pub fn test_tiocpkt_slave_flush_read() -> TestResult {
-    let Some((master, slave, saved)) = packet_mode_setup_pty() else {
+    let Some((master, slave, saved, _guard)) = packet_mode_setup_pty() else {
         klog_info!("TTY_TEST: BUG - packet_mode setup failed");
         return TestResult::Fail;
     };
@@ -146,7 +146,7 @@ pub fn test_tiocpkt_slave_flush_read() -> TestResult {
 
 /// Slave IXON toggle triggers TIOCPKT_DOSTOP / TIOCPKT_NOSTOP.
 pub fn test_tiocpkt_ixon_toggle() -> TestResult {
-    let Some((master, slave, saved)) = packet_mode_setup_pty() else {
+    let Some((master, slave, saved, _guard)) = packet_mode_setup_pty() else {
         klog_info!("TTY_TEST: BUG - packet_mode setup failed");
         return TestResult::Fail;
     };
@@ -198,7 +198,7 @@ pub fn test_tiocpkt_ixon_toggle() -> TestResult {
 
 /// Disabling packet mode clears pending events.
 pub fn test_tiocpkt_disable_clears_events() -> TestResult {
-    let Some((master, slave, saved)) = packet_mode_setup_pty() else {
+    let Some((master, slave, saved, _guard)) = packet_mode_setup_pty() else {
         klog_info!("TTY_TEST: BUG - packet_mode setup failed");
         return TestResult::Fail;
     };
@@ -240,7 +240,7 @@ pub fn test_tiocpkt_disable_clears_events() -> TestResult {
 
 /// poll_events reports POLLIN when packet events are pending.
 pub fn test_poll_packet_events_pollin() -> TestResult {
-    let Some((master, slave, saved)) = packet_mode_setup_pty() else {
+    let Some((master, slave, saved, _guard)) = packet_mode_setup_pty() else {
         klog_info!("TTY_TEST: BUG - packet_mode setup failed");
         return TestResult::Fail;
     };
@@ -292,8 +292,8 @@ pub fn test_poll_packet_events_pollin() -> TestResult {
 pub fn test_set_packet_mode_non_master() -> TestResult {
     tty::table::tty_table_init();
 
-    let master = match tty::pty_alloc() {
-        Ok(idx) => idx,
+    let (master, _master_backing) = match tty::pty_alloc() {
+        Ok(pair) => pair,
         Err(e) => {
             klog_info!("TTY_TEST: BUG - pty_alloc failed: {:?}", e);
             return TestResult::Fail;
@@ -310,7 +310,6 @@ pub fn test_set_packet_mode_non_master() -> TestResult {
                 "TTY_TEST: BUG - set_packet_mode on slave should return NotAllocated, got {:?}",
                 other
             );
-            crate::tty::pty::free_pair_if_unused(master, slave);
             return TestResult::Fail;
         }
     }
@@ -323,12 +322,10 @@ pub fn test_set_packet_mode_non_master() -> TestResult {
                 "TTY_TEST: BUG - set_packet_mode on console should return NotAllocated, got {:?}",
                 other
             );
-            crate::tty::pty::free_pair_if_unused(master, slave);
             return TestResult::Fail;
         }
     }
 
-    crate::tty::pty::free_pair_if_unused(master, slave);
     TestResult::Pass
 }
 

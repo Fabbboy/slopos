@@ -41,7 +41,8 @@ use slopos_ostd::handle::HandleTable;
 use slopos_ostd::sync::{BUS, LOCK_LEVEL_REGISTRY, LOCK_LEVEL_RESOURCE, SpinLock};
 use slopos_ostd::{KBTreeMap, KVec, KVecDeque};
 
-use pair::{InFlightFd, PairSide, PairTable};
+use pair::{PairSide, PairTable};
+use slopos_fs::FileRef;
 use slot::{MAX_BACKLOG, SlotState, UNIX_PATH_MAX, UnixSlot};
 
 pub use buffer::UNIX_BUF_SIZE;
@@ -273,9 +274,11 @@ pub fn unix_connect(handle: SocketHandle, path: &[u8]) -> i32 {
     };
 
     let Ok(h_b) = state.slots.insert(UnixSlot::created()) else {
-        // Capacity was checked above; release the just-allocated pair rather
-        // than leak it if the insert nonetheless fails.
-        state.pairs.release(pair_handle);
+        // Capacity was checked above; if the insert nonetheless fails, drop
+        // both endpoint refs of the just-allocated pair rather than leak it.
+        // Its queues are still empty, so the in-lock drop is inert.
+        let _ = state.pairs.release(pair_handle);
+        drop(state.pairs.release(pair_handle));
         return -23;
     };
     let a_handle = SocketHandle::from_handle(h_a);
@@ -326,7 +329,8 @@ pub fn unix_connect(handle: SocketHandle, path: &[u8]) -> i32 {
 /// implementation means there is exactly one place where the data
 /// FIFO + ancillary queue + peer-wake ordering invariants live.
 pub fn unix_send(handle: SocketHandle, data: &[u8]) -> i32 {
-    unix_sendmsg(handle, data, &mut [], 0)
+    let mut no_files: KVec<FileRef> = KVec::new();
+    unix_sendmsg(handle, data, &mut no_files)
 }
 
 /// Receive data from a connected AF_UNIX socket.
@@ -536,14 +540,16 @@ pub fn unix_recv_into(handle: SocketHandle, writer: &mut slopos_ostd::mm::VmWrit
 ///   + atomic publish again.
 /// - Slot reused / peer closed → release fds, return
 ///   `EBADF`/`ENOTCONN`/`EPIPE`.
-pub fn unix_sendmsg(
-    handle: SocketHandle,
-    data: &[u8],
-    inflight_fds: &mut [(usize, &'static dyn slopos_abi::file_ops::FileOps)],
-    fd_count: usize,
-) -> i32 {
+/// Send data plus optional in-flight files (SCM_RIGHTS).
+///
+/// `files` are owned aliases minted by the syscall handler
+/// (`fileio_clone_file_ref`). On commit they move into the peer's
+/// ancillary queue (all-or-nothing); on any error return they stay in
+/// the caller's `KVec` and close when the caller drops it — no net lock
+/// is held at that point, so the (possibly recursive) file teardown is
+/// safe.
+pub fn unix_sendmsg(handle: SocketHandle, data: &[u8], files: &mut KVec<FileRef>) -> i32 {
     let Some(wq_idx) = handle.slot_for_wq() else {
-        release_inflight(inflight_fds, fd_count);
         return -9; // EBADF
     };
 
@@ -564,31 +570,20 @@ pub fn unix_sendmsg(
             };
             let (nonblocking, pair_handle, side, peer_idx, peer_closed) = match conn {
                 Ok(t) => t,
-                Err(e) => {
-                    drop(state);
-                    release_inflight(inflight_fds, fd_count);
-                    return e;
-                }
+                Err(e) => return e,
             };
             if peer_closed {
-                drop(state);
-                release_inflight(inflight_fds, fd_count);
                 return -32; // EPIPE
             }
 
             let pair = match state.pairs.get_mut(pair_handle) {
                 Some(p) => p,
-                None => {
-                    drop(state);
-                    release_inflight(inflight_fds, fd_count);
-                    return -32; // EPIPE — pair already freed
-                }
+                None => return -32, // EPIPE — pair already freed
             };
 
             // Ancillary capacity check first: all-or-nothing fds.
+            let fd_count = files.len();
             if fd_count > 0 && pair.send_anc(side).len() + fd_count > pair::MAX_INFLIGHT_FDS {
-                drop(state);
-                release_inflight(inflight_fds, fd_count);
                 return -12; // ENOMEM
             }
 
@@ -609,12 +604,11 @@ pub fn unix_sendmsg(
                 // outside the state lock.
                 if fd_count > 0 {
                     let anc = pair.send_anc(side);
-                    for j in 0..fd_count {
-                        let (h, ops) = inflight_fds[j];
-                        let pushed = anc.push(InFlightFd { handle: h, ops });
-                        // Capacity was checked above; pushes must succeed.
+                    for file in files.drain(..) {
+                        // Capacity was checked above and the queue's
+                        // storage is pre-reserved; pushes must succeed.
+                        let pushed = anc.push(file);
                         debug_assert!(pushed, "anc.push must succeed after capacity check");
-                        inflight_fds[j] = (0, inflight_fds[j].1);
                     }
                 }
                 let n = if data.is_empty() {
@@ -636,19 +630,19 @@ pub fn unix_sendmsg(
             Err(true) => {
                 // Non-blocking with no data space; capacity check
                 // failed in the same iteration so no fds were
-                // committed.
-                release_inflight(inflight_fds, fd_count);
+                // committed — they stay with the caller.
                 return -11; // EAGAIN
             }
             Err(false) => {
-                // Block until peer drains, slot reuses, or peer
-                // closes. fds remain in the caller's array — the
-                // next iteration runs the full capacity check +
-                // atomic publish again. Hand the fds to the per-task
-                // custodian for the duration of the park so a kill
-                // while blocked cannot leak them (see `inflight_park`).
+                // Block until peer drains, slot reuses, or peer closes.
+                // Move the files into the per-task custodian for exactly
+                // the duration of the park: a task killed while blocked
+                // never unwinds this stack, so anything owned here would
+                // leak — the custodian (or its task-death hook) is the
+                // owner until the wake moves them back for the next
+                // iteration's capacity check + atomic publish.
                 let task_id = slopos_kernel_services::driver_runtime::current_task_id();
-                inflight_park(task_id, inflight_fds, fd_count);
+                inflight_park(task_id, files);
                 BUS.subscribe(unix_ev(wq_idx)).wait_event(|| {
                     let state = UNIX_STATE.lock();
                     match state.slots.get(handle.handle()) {
@@ -672,7 +666,7 @@ pub fn unix_sendmsg(
                         },
                     }
                 });
-                inflight_unpark(task_id);
+                inflight_unpark(task_id, files);
             }
         }
     }
@@ -730,114 +724,74 @@ pub fn unix_send_from(handle: SocketHandle, reader: &mut slopos_ostd::mm::VmRead
     n
 }
 
-/// Release every still-owned fd in `inflight_fds[..fd_count]`.
-/// Called on every error-return path of [`unix_sendmsg`] so a
-/// failed send never leaks the fd refs the kernel duplicated from
-/// the sender's process fd table in the sendmsg syscall handler.
-#[inline]
-fn release_inflight(
-    inflight_fds: &mut [(usize, &'static dyn slopos_abi::file_ops::FileOps)],
-    fd_count: usize,
-) {
-    for j in 0..fd_count {
-        if inflight_fds[j].0 != 0 {
-            inflight_fds[j].1.release(inflight_fds[j].0);
-            inflight_fds[j] = (0, inflight_fds[j].1);
-        }
-    }
-}
+// ── In-flight SCM_RIGHTS file custody across a blocking send ────────────────
+//
+// `unix_sendmsg` owns `FileRef` aliases until it commits them to the peer or
+// returns them to its caller. On the blocking path it parks in `wait_event`.
+// SlopOS tears a blocked task down asynchronously — its `schedule()` never
+// returns, so no stack cleanup runs — which would leak anything the parked
+// frame owned if the sender is SIGKILL'd while blocked.
+//
+// So the files are MOVED into this per-task custodian for exactly the
+// duration of the park (`inflight_park` before the wait, `inflight_unpark`
+// after it wakes): the parked frame owns nothing, and ownership is always in
+// exactly one place. On a normal wake the files move back for the next loop
+// iteration; if the sender dies while parked, `unix_inflight_cleanup_task`
+// (a task-termination hook) drops the custody entry, closing the aliases —
+// mirroring the poll/futex/waitpid teardown hooks.
 
-// ── In-flight SCM_RIGHTS fd custody across a blocking send ──────────────────
-//
-// `unix_sendmsg` owns fd references (duplicated from the sender's fd table by
-// the sendmsg syscall handler) until it either commits them to the peer or
-// releases them via `release_inflight`. On the blocking path it holds them
-// across a `wait_event` park. SlopOS tears a blocked task down asynchronously
-// — its `schedule()` never returns, so neither the loop's `release_inflight`
-// nor any stack cleanup runs — which would leak those fd refs if the sender is
-// SIGKILL'd while parked.
-//
-// To stay leak-free we hand the fds to this per-task custodian for *exactly*
-// the duration of the park (`inflight_park` before the wait, `inflight_unpark`
-// after it wakes). Only a *blocked* task can be async-abandoned; a running
-// task killed between operations still completes its current stack path
-// (releasing or committing normally) before exiting at the syscall boundary.
-// So covering the park window is sufficient and complete. If the sender dies
-// while parked, `unix_inflight_cleanup_task` (a task-termination hook) releases
-// the custodied refs — mirroring the poll/futex/waitpid teardown hooks.
-//
-// `inflight_park` only *copies* the (handle, ops) pairs (it does not zero the
-// caller's array): on a normal wake `inflight_unpark` drops the custody copy
-// without releasing, leaving the array to drive the usual commit/release path;
-// on kill the array is abandoned and the hook releases via the custody copy.
-// The two never both release — a killed task never runs `inflight_unpark`/the
-// array path, and a surviving task empties the custody on `inflight_unpark`.
-type InflightFd = (usize, &'static dyn slopos_abi::file_ops::FileOps);
-
-static SENDMSG_INFLIGHT: SpinLock<KBTreeMap<u32, KVec<InflightFd>>> =
+static SENDMSG_INFLIGHT: SpinLock<KBTreeMap<u32, KVec<FileRef>>> =
     SpinLock::new(KBTreeMap::new(), LOCK_LEVEL_RESOURCE);
 
-fn inflight_park(task_id: u32, inflight_fds: &[InflightFd], fd_count: usize) {
-    if task_id == 0 || fd_count == 0 {
+fn inflight_park(task_id: u32, files: &mut KVec<FileRef>) {
+    if task_id == 0 || files.is_empty() {
         return;
     }
-    let Ok(mut held) = KVec::with_capacity(fd_count) else {
-        return;
+    let held = core::mem::replace(files, KVec::new());
+    let stale = {
+        let mut map = SENDMSG_INFLIGHT.lock();
+        map.insert(task_id, held)
     };
-    for &fd in &inflight_fds[..fd_count] {
-        if fd.0 != 0 {
-            let _ = held.push(fd);
-        }
-    }
-    if held.is_empty() {
-        return;
-    }
-    let mut map = SENDMSG_INFLIGHT.lock();
-    if let Some(stale) = map.insert(task_id, held) {
-        // A prior un-released custody for this task would be a bug (a task can
-        // only be parked in one send at a time); release it rather than leak.
-        for &fd in stale.iter() {
-            if fd.0 != 0 {
-                fd.1.release(fd.0);
-            }
-        }
-    }
+    // A prior custody entry for this task would be a bug (a task can only be
+    // parked in one send at a time); dropping it here — outside the map lock —
+    // closes those aliases rather than leaking them.
+    drop(stale);
 }
 
-fn inflight_unpark(task_id: u32) {
+fn inflight_unpark(task_id: u32, files: &mut KVec<FileRef>) {
     if task_id == 0 {
         return;
     }
-    // Drop the custody copy WITHOUT releasing: the caller's array still owns
-    // these refs on the normal wake path and will commit or release them.
-    let _ = SENDMSG_INFLIGHT.lock().remove(&task_id);
+    let held = { SENDMSG_INFLIGHT.lock().remove(&task_id) };
+    if let Some(held) = held {
+        if files.is_empty() {
+            *files = held;
+        } else {
+            // Unreachable by construction (the park emptied the caller's
+            // vec); dropping `held` here would close live aliases, so keep
+            // the caller's view authoritative and drop the duplicates.
+            drop(held);
+        }
+    }
 }
 
-/// Task-termination hook: release any in-flight SCM_RIGHTS fd refs a task was
+/// Task-termination hook: close any in-flight SCM_RIGHTS files a task was
 /// holding across a blocking `unix_sendmsg` when it died. Registered via
 /// `register_task_resource_cleanup_hook` at boot. No-op for tasks holding none.
 pub fn unix_inflight_cleanup_task(task_id: u32) {
     let held = { SENDMSG_INFLIGHT.lock().remove(&task_id) };
-    if let Some(held) = held {
-        for &fd in held.iter() {
-            if fd.0 != 0 {
-                fd.1.release(fd.0);
-            }
-        }
-    }
+    // Dropped outside the map lock: closing an alias can recurse into
+    // arbitrary file teardown.
+    drop(held);
 }
 
-/// Receive data from a connected AF_UNIX socket, with optional in-flight fds.
-pub fn unix_recvmsg(
-    handle: SocketHandle,
-    buf: &mut [u8],
-    out_fds: &mut [(usize, &'static dyn slopos_abi::file_ops::FileOps)],
-    max_fds: usize,
-) -> (i32, usize) {
-    let bytes_read = unix_recv(handle, buf);
-
-    let mut received_fds = 0usize;
-    {
+/// Drain this side's pending SCM_RIGHTS files: up to `max_fds` move into
+/// `out_files`; any excess is carried out of the state lock and dropped
+/// here (closing those aliases). Returns the number delivered.
+fn drain_ancillary(handle: SocketHandle, out_files: &mut KVec<FileRef>, max_fds: usize) -> usize {
+    // Pure move out of the locked region: nothing is dropped while the
+    // state lock is held.
+    let mut drained = {
         let mut state = UNIX_STATE.lock();
         let conn = match state.slots.get(handle.handle()) {
             Ok(slot) => match slot.state {
@@ -846,62 +800,98 @@ pub fn unix_recvmsg(
             },
             Err(_) => None,
         };
-        if let Some((pair, side)) = conn {
-            if let Some(pair_ref) = state.pairs.get_mut(pair) {
-                let anc = pair_ref.recv_anc(side);
-                for fd in anc.drain() {
-                    if received_fds < max_fds {
-                        out_fds[received_fds] = (fd.handle, fd.ops);
-                        received_fds += 1;
-                    } else {
-                        fd.ops.release(fd.handle);
-                    }
-                }
-            }
+        match conn {
+            Some((pair, side)) => match state.pairs.get_mut(pair) {
+                Some(pair_ref) => pair_ref.recv_anc(side).drain(),
+                None => KVec::new(),
+            },
+            None => KVec::new(),
         }
-    }
+    };
 
+    let mut received = 0usize;
+    for file in drained.drain(..) {
+        if received < max_fds && out_files.push(file).is_ok() {
+            received += 1;
+        }
+        // Beyond the cap (or on push failure) the file drops here,
+        // closing that alias — matching the overflow policy of the old
+        // raw-reference queue.
+    }
+    received
+}
+
+/// Receive data from a connected AF_UNIX socket, with optional in-flight
+/// files. Delivered files are appended to `out_files` (the receive side
+/// installs them into the destination fd table).
+pub fn unix_recvmsg(
+    handle: SocketHandle,
+    buf: &mut [u8],
+    out_files: &mut KVec<FileRef>,
+    max_fds: usize,
+) -> (i32, usize) {
+    let bytes_read = unix_recv(handle, buf);
+    let received_fds = drain_ancillary(handle, out_files, max_fds);
     (bytes_read, received_fds)
 }
 
 /// Single-direct-copy [`unix_recvmsg`]: the data is drained straight into the
 /// pinned user pages (via `writer`) by [`unix_recv_into`] with no kernel
-/// scratch; any SCM_RIGHTS fds are drained into `out_fds` exactly as
+/// scratch; any SCM_RIGHTS files are drained into `out_files` exactly as
 /// `unix_recvmsg` does. Returns `(bytes_read, n_fds)`.
 pub fn unix_recvmsg_into(
     handle: SocketHandle,
     writer: &mut slopos_ostd::mm::VmWriter<'_>,
-    out_fds: &mut [(usize, &'static dyn slopos_abi::file_ops::FileOps)],
+    out_files: &mut KVec<FileRef>,
     max_fds: usize,
 ) -> (i32, usize) {
     let bytes_read = unix_recv_into(handle, writer);
+    let received_fds = drain_ancillary(handle, out_files, max_fds);
+    (bytes_read, received_fds)
+}
 
-    let mut received_fds = 0usize;
-    {
-        let mut state = UNIX_STATE.lock();
-        let conn = match state.slots.get(handle.handle()) {
-            Ok(slot) => match slot.state {
-                SlotState::Connected { pair, side, .. } => Some((pair, side)),
-                _ => None,
-            },
-            Err(_) => None,
+/// Tear down a closing listener's pending backlog: each entry is a
+/// side-B slot created by `unix_connect()` and never accepted. Marks
+/// every side-A peer closed, records their slots for post-lock wakes,
+/// and detaches freed pairs into `freed_pairs`. Returns the wake count.
+/// Split out of [`unix_close`] to keep its stack frame under the kernel
+/// gate.
+#[inline(never)]
+fn close_listener_backlog(
+    slots: &mut HandleTable<UnixSlot>,
+    pairs: &mut PairTable,
+    backlog: &KVecDeque<SocketHandle>,
+    backlog_a_peers: &mut [usize; MAX_BACKLOG],
+    freed_pairs: &mut KVec<pair::ConnectionPair>,
+) -> usize {
+    let mut wake_count = 0usize;
+    for h in backlog.iter().copied() {
+        let Ok(b_old) = slots.remove(h.handle()) else {
+            continue;
         };
-        if let Some((pair, side)) = conn {
-            if let Some(pair_ref) = state.pairs.get_mut(pair) {
-                let anc = pair_ref.recv_anc(side);
-                for fd in anc.drain() {
-                    if received_fds < max_fds {
-                        out_fds[received_fds] = (fd.handle, fd.ops);
-                        received_fds += 1;
-                    } else {
-                        fd.ops.release(fd.handle);
-                    }
+        if let SlotState::Connected {
+            pair: b_pair,
+            peer: b_peer,
+            ..
+        } = b_old.state
+        {
+            if let Ok(a_slot) = slots.get_mut(b_peer.handle()) {
+                if let SlotState::Connected {
+                    peer_closed: ref mut pc,
+                    ..
+                } = a_slot.state
+                {
+                    *pc = true;
                 }
+                backlog_a_peers[wake_count] = b_peer.slot();
+                wake_count += 1;
+            }
+            if let Some(freed) = pairs.release(b_pair) {
+                let _ = freed_pairs.push(freed);
             }
         }
     }
-
-    (bytes_read, received_fds)
+    wake_count
 }
 
 /// Close an AF_UNIX socket. Wakes all waiters on the peer if connected.
@@ -919,6 +909,16 @@ pub fn unix_close(handle: SocketHandle) -> i32 {
     let mut backlog_a_peers: [usize; MAX_BACKLOG] = [usize::MAX; MAX_BACKLOG];
     let mut backlog_wake_count = 0usize;
     let mut was_listener = false;
+
+    // Pairs freed by this close are detached under the lock and dropped
+    // here, after it releases: their ancillary queues can hold in-flight
+    // `FileRef`s whose teardown may recurse back into this module (a
+    // socket passed over a socket). Reserved up-front so collecting the
+    // freed pairs never allocates under the state lock.
+    let mut freed_pairs = match KVec::with_capacity(MAX_BACKLOG + 1) {
+        Ok(v) => v,
+        Err(_) => return -12, // ENOMEM
+    };
 
     {
         let mut state = UNIX_STATE.lock();
@@ -944,42 +944,28 @@ pub fn unix_close(handle: SocketHandle) -> i32 {
                     }
                 }
                 wake_peer = Some(peer.slot());
-                pairs.release(pair);
+                if let Some(freed) = pairs.release(pair) {
+                    let _ = freed_pairs.push(freed);
+                }
             }
             SlotState::Listening { backlog, .. } => {
                 was_listener = true;
-                // Each entry is a side-B handle whose slot is in
-                // SlotState::Connected.  Tear those down too, notifying each
-                // one's side-A peer.
-                for h in backlog.iter().copied() {
-                    let Ok(b_old) = slots.remove(h.handle()) else {
-                        continue;
-                    };
-                    if let SlotState::Connected {
-                        pair: b_pair,
-                        peer: b_peer,
-                        ..
-                    } = b_old.state
-                    {
-                        if let Ok(a_slot) = slots.get_mut(b_peer.handle()) {
-                            if let SlotState::Connected {
-                                peer_closed: ref mut pc,
-                                ..
-                            } = a_slot.state
-                            {
-                                *pc = true;
-                            }
-                            backlog_a_peers[backlog_wake_count] = b_peer.slot();
-                            backlog_wake_count += 1;
-                        }
-                        pairs.release(b_pair);
-                    }
-                }
+                backlog_wake_count = close_listener_backlog(
+                    slots,
+                    pairs,
+                    &backlog,
+                    &mut backlog_a_peers,
+                    &mut freed_pairs,
+                );
             }
             // Created / Bound — nothing extra to release.
             _ => {}
         }
     }
+
+    // State lock released: tear the freed pairs (and any in-flight files
+    // they still carried) down now.
+    drop(freed_pairs);
 
     if let Some(peer) = wake_peer {
         if peer < MAX_UNIX_SOCKETS {

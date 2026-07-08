@@ -186,18 +186,17 @@ pub fn test_review_tcflush_unthrottles_pty() -> TestResult {
     use crate::tty::ldisc::THROTTLE_HIGH_WATER;
     tty::table::tty_table_init();
 
-    let master = match tty::pty_alloc() {
-        Ok(idx) => idx,
+    let (master, _master_backing) = match tty::pty_alloc() {
+        Ok(pair) => pair,
         Err(e) => {
             klog_info!("TTY_TEST: BUG - pty_alloc failed: {:?}", e);
             return TestResult::Fail;
         }
     };
-    let _ = tty::open_ref(master);
     let slave_num = tty::get_pty_number(master).unwrap();
     let slave = TtyIndex(slave_num as u8);
     tty::set_pty_lock(master, false).unwrap();
-    tty::pty_open_slave(slave).unwrap();
+    let _slave_backing = tty::pty_open_slave(slave).unwrap();
 
     // Raw mode so every byte goes straight to cooked buffer.
     let saved = tty::get_termios(slave).unwrap();
@@ -220,8 +219,6 @@ pub fn test_review_tcflush_unthrottles_pty() -> TestResult {
         {
             klog_info!("TTY_TEST: BUG - slave not throttled after fill");
             tty::set_termios(slave, &saved).unwrap();
-            let _ = tty::close_ref(slave);
-            let _ = tty::close_ref(master);
             return TestResult::Fail;
         }
     }
@@ -232,8 +229,6 @@ pub fn test_review_tcflush_unthrottles_pty() -> TestResult {
         Err(e) => {
             klog_info!("TTY_TEST: BUG - tcflush TCIFLUSH failed: {:?}", e);
             tty::set_termios(slave, &saved).unwrap();
-            let _ = tty::close_ref(slave);
-            let _ = tty::close_ref(master);
             return TestResult::Fail;
         }
     }
@@ -249,14 +244,10 @@ pub fn test_review_tcflush_unthrottles_pty() -> TestResult {
     if still_throttled {
         klog_info!("TTY_TEST: BUG - slave still throttled after tcflush(TCIFLUSH)");
         tty::set_termios(slave, &saved).unwrap();
-        let _ = tty::close_ref(slave);
-        let _ = tty::close_ref(master);
         return TestResult::Fail;
     }
 
     tty::set_termios(slave, &saved).unwrap();
-    let _ = tty::close_ref(slave);
-    let _ = tty::close_ref(master);
     TestResult::Pass
 }
 
@@ -268,18 +259,17 @@ pub fn test_review_tcflush_both_unthrottles_pty() -> TestResult {
     use crate::tty::ldisc::THROTTLE_HIGH_WATER;
     tty::table::tty_table_init();
 
-    let master = match tty::pty_alloc() {
-        Ok(idx) => idx,
+    let (master, _master_backing) = match tty::pty_alloc() {
+        Ok(pair) => pair,
         Err(e) => {
             klog_info!("TTY_TEST: BUG - pty_alloc failed: {:?}", e);
             return TestResult::Fail;
         }
     };
-    let _ = tty::open_ref(master);
     let slave_num = tty::get_pty_number(master).unwrap();
     let slave = TtyIndex(slave_num as u8);
     tty::set_pty_lock(master, false).unwrap();
-    tty::pty_open_slave(slave).unwrap();
+    let _slave_backing = tty::pty_open_slave(slave).unwrap();
 
     let saved = tty::get_termios(slave).unwrap();
     let mut raw = saved;
@@ -305,14 +295,10 @@ pub fn test_review_tcflush_both_unthrottles_pty() -> TestResult {
     if still_throttled {
         klog_info!("TTY_TEST: BUG - slave still throttled after tcflush(TCIOFLUSH)");
         tty::set_termios(slave, &saved).unwrap();
-        let _ = tty::close_ref(slave);
-        let _ = tty::close_ref(master);
         return TestResult::Fail;
     }
 
     tty::set_termios(slave, &saved).unwrap();
-    let _ = tty::close_ref(slave);
-    let _ = tty::close_ref(master);
     TestResult::Pass
 }
 
@@ -327,18 +313,17 @@ pub fn test_review_master_write_batch_boundary() -> TestResult {
     use crate::tty::ldisc::THROTTLE_HIGH_WATER;
     tty::table::tty_table_init();
 
-    let master = match tty::pty_alloc() {
-        Ok(idx) => idx,
+    let (master, _master_backing) = match tty::pty_alloc() {
+        Ok(pair) => pair,
         Err(e) => {
             klog_info!("TTY_TEST: BUG - pty_alloc failed: {:?}", e);
             return TestResult::Fail;
         }
     };
-    let _ = tty::open_ref(master);
     let slave_num = tty::get_pty_number(master).unwrap();
     let slave = TtyIndex(slave_num as u8);
     tty::set_pty_lock(master, false).unwrap();
-    tty::pty_open_slave(slave).unwrap();
+    let _slave_backing = tty::pty_open_slave(slave).unwrap();
 
     // Raw mode.
     let saved = tty::get_termios(slave).unwrap();
@@ -363,8 +348,6 @@ pub fn test_review_master_write_batch_boundary() -> TestResult {
         {
             klog_info!("TTY_TEST: BUG - slave throttled before master_write burst");
             tty::set_termios(slave, &saved).unwrap();
-            let _ = tty::close_ref(slave);
-            let _ = tty::close_ref(master);
             return TestResult::Fail;
         }
     }
@@ -384,7 +367,7 @@ pub fn test_review_master_write_batch_boundary() -> TestResult {
     // Write 256 bytes.  Throttle activates at byte ~10 within the first
     // batch, but the full 64-byte batch completes before the check.
     let burst = [b'Q'; 256];
-    let accepted = crate::tty::pty::master_write(peer, &burst);
+    let accepted = crate::tty::pty::master_write(&peer, &burst);
 
     // With BATCH_SIZE=64, the first batch pushes all 64 bytes (throttle
     // activates at ~byte 10 but isn't checked until after the batch).
@@ -395,14 +378,10 @@ pub fn test_review_master_write_batch_boundary() -> TestResult {
             accepted
         );
         tty::set_termios(slave, &saved).unwrap();
-        let _ = tty::close_ref(slave);
-        let _ = tty::close_ref(master);
         return TestResult::Fail;
     }
 
     tty::set_termios(slave, &saved).unwrap();
-    let _ = tty::close_ref(slave);
-    let _ = tty::close_ref(master);
     TestResult::Pass
 }
 
@@ -552,21 +531,20 @@ pub fn test_review_pollerr_on_hangup() -> TestResult {
 pub fn test_review_pollerr_on_peer_closed() -> TestResult {
     tty::table::tty_table_init();
 
-    let master = match tty::pty_alloc() {
-        Ok(idx) => idx,
+    let (master, _master_backing) = match tty::pty_alloc() {
+        Ok(pair) => pair,
         Err(e) => {
             klog_info!("TTY_TEST: BUG - pty_alloc failed: {:?}", e);
             return TestResult::Fail;
         }
     };
-    let _ = tty::open_ref(master);
     let slave_num = tty::get_pty_number(master).unwrap();
     let slave = TtyIndex(slave_num as u8);
     tty::set_pty_lock(master, false).unwrap();
-    tty::pty_open_slave(slave).unwrap();
+    let slave_backing = tty::pty_open_slave(slave).unwrap();
 
     // Close slave side.
-    let _ = tty::close_ref(slave);
+    drop(slave_backing);
 
     // Poll master — should see POLLHUP and POLLERR.
     let revents = tty::poll_events(
@@ -576,8 +554,6 @@ pub fn test_review_pollerr_on_peer_closed() -> TestResult {
 
     let has_pollerr = (revents & slopos_abi::syscall::POLLERR) != 0;
     let has_pollhup = (revents & slopos_abi::syscall::POLLHUP) != 0;
-
-    let _ = tty::close_ref(master);
 
     if !has_pollhup {
         klog_info!("TTY_TEST: BUG - PTY master poll should return POLLHUP after slave close");
@@ -682,18 +658,17 @@ pub fn test_bugfix_flush_edit_preserves_remainder() -> TestResult {
 pub fn test_bugfix_nonblock_write_throttled_pty() -> TestResult {
     tty::table::tty_table_init();
 
-    let master = match tty::pty_alloc() {
-        Ok(idx) => idx,
+    let (master, _master_backing) = match tty::pty_alloc() {
+        Ok(pair) => pair,
         Err(e) => {
             klog_info!("TTY_TEST: BUG - pty_alloc failed: {:?}", e);
             return TestResult::Fail;
         }
     };
-    let _ = tty::open_ref(master);
     let slave_num = tty::get_pty_number(master).unwrap();
     let slave = TtyIndex(slave_num as u8);
     tty::set_pty_lock(master, false).unwrap();
-    tty::pty_open_slave(slave).unwrap();
+    let _slave_backing = tty::pty_open_slave(slave).unwrap();
 
     // Put slave in raw mode so master writes flow into cooked buffer.
     let saved = tty::get_termios(slave).unwrap();
@@ -713,8 +688,6 @@ pub fn test_bugfix_nonblock_write_throttled_pty() -> TestResult {
 
     // Clean up.
     tty::set_termios(slave, &saved).unwrap();
-    let _ = tty::close_ref(slave);
-    let _ = tty::close_ref(master);
 
     match result {
         Err(TtyError::WouldBlock) => TestResult::Pass,
@@ -733,18 +706,17 @@ pub fn test_bugfix_nonblock_write_throttled_pty() -> TestResult {
 pub fn test_bugfix_nonblock_write_unthrottled_pty() -> TestResult {
     tty::table::tty_table_init();
 
-    let master = match tty::pty_alloc() {
-        Ok(idx) => idx,
+    let (master, _master_backing) = match tty::pty_alloc() {
+        Ok(pair) => pair,
         Err(e) => {
             klog_info!("TTY_TEST: BUG - pty_alloc failed: {:?}", e);
             return TestResult::Fail;
         }
     };
-    let _ = tty::open_ref(master);
     let slave_num = tty::get_pty_number(master).unwrap();
     let slave = TtyIndex(slave_num as u8);
     tty::set_pty_lock(master, false).unwrap();
-    tty::pty_open_slave(slave).unwrap();
+    let _slave_backing = tty::pty_open_slave(slave).unwrap();
 
     // Put slave in raw mode.
     let saved = tty::get_termios(slave).unwrap();
@@ -756,8 +728,6 @@ pub fn test_bugfix_nonblock_write_unthrottled_pty() -> TestResult {
     let result = tty::write(master, b"hello", true);
 
     tty::set_termios(slave, &saved).unwrap();
-    let _ = tty::close_ref(slave);
-    let _ = tty::close_ref(master);
 
     match result {
         Ok(5) => TestResult::Pass,
@@ -773,10 +743,15 @@ pub fn test_bugfix_nonblock_write_unthrottled_pty() -> TestResult {
 
 fn throttled_priority_setup(
     noflsh: bool,
-) -> Option<(TtyIndex, TtyIndex, slopos_abi::syscall::UserTermios)> {
+) -> Option<(
+    TtyIndex,
+    TtyIndex,
+    slopos_abi::syscall::UserTermios,
+    PtyGuard,
+)> {
     use crate::tty::ldisc::THROTTLE_HIGH_WATER;
 
-    let (master, slave, saved) = packet_mode_setup_pty()?;
+    let (master, slave, saved, guard) = packet_mode_setup_pty()?;
     let mut t = saved;
     t.c_lflag &= !(LocalFlags::ICANON | LocalFlags::ECHO);
     t.c_lflag |= LocalFlags::ISIG;
@@ -788,19 +763,15 @@ fn throttled_priority_setup(
         tty::push_input(slave, b'A');
     }
 
-    Some((master, slave, saved))
+    Some((master, slave, saved, guard))
 }
 
-fn pty_master_peer(master: TtyIndex) -> Option<PtyPeerHandle> {
-    let guard = TTY_SLOTS[master.0 as usize].lock();
-    match guard.as_ref()?.driver {
-        TtyDriverKind::PtyMaster { ref peer } => Some(*peer),
-        _ => None,
-    }
+fn pty_master_peer(master: TtyIndex) -> KWeak<TtyBacking> {
+    peer_link_of(master)
 }
 
 pub fn test_priority_vintr_throttled_nonblock_flushes_and_unthrottles() -> TestResult {
-    let Some((master, slave, saved)) = throttled_priority_setup(false) else {
+    let Some((master, slave, saved, _guard)) = throttled_priority_setup(false) else {
         klog_info!("TTY_TEST: BUG - throttled priority setup failed");
         return TestResult::Fail;
     };
@@ -842,7 +813,7 @@ pub fn test_priority_vintr_throttled_nonblock_flushes_and_unthrottles() -> TestR
 pub fn test_priority_vintr_throttled_noflsh_preserves_throttle() -> TestResult {
     use crate::tty::ldisc::THROTTLE_HIGH_WATER;
 
-    let Some((master, slave, saved)) = throttled_priority_setup(true) else {
+    let Some((master, slave, saved, _guard)) = throttled_priority_setup(true) else {
         klog_info!("TTY_TEST: BUG - throttled NOFLSH setup failed");
         return TestResult::Fail;
     };
@@ -882,17 +853,13 @@ pub fn test_priority_vintr_throttled_noflsh_preserves_throttle() -> TestResult {
 }
 
 pub fn test_master_write_throttled_ordinary_direct_rejected() -> TestResult {
-    let Some((master, slave, saved)) = throttled_priority_setup(false) else {
+    let Some((master, slave, saved, _guard)) = throttled_priority_setup(false) else {
         klog_info!("TTY_TEST: BUG - throttled ordinary setup failed");
         return TestResult::Fail;
     };
-    let Some(peer) = pty_master_peer(master) else {
-        packet_mode_teardown_pty(master, slave, &saved);
-        klog_info!("TTY_TEST: BUG - failed to resolve PTY master peer");
-        return TestResult::Fail;
-    };
+    let peer = pty_master_peer(master);
 
-    let accepted = crate::tty::pty::master_write(peer, b"x");
+    let accepted = crate::tty::pty::master_write(&peer, b"x");
     packet_mode_teardown_pty(master, slave, &saved);
 
     if accepted != 0 {
@@ -906,7 +873,7 @@ pub fn test_master_write_throttled_ordinary_direct_rejected() -> TestResult {
 }
 
 pub fn test_literal_next_vintr_does_not_bypass_throttle() -> TestResult {
-    let Some((master, slave, saved)) = throttled_priority_setup(false) else {
+    let Some((master, slave, saved, _guard)) = throttled_priority_setup(false) else {
         klog_info!("TTY_TEST: BUG - throttled literal-next setup failed");
         return TestResult::Fail;
     };
@@ -981,28 +948,25 @@ pub fn test_bugfix_rawdisc_input_full() -> TestResult {
 pub fn test_bugfix_slave_write_stops_on_full() -> TestResult {
     tty::table::tty_table_init();
 
-    let master = match tty::pty_alloc() {
-        Ok(idx) => idx,
+    let (master, _master_backing) = match tty::pty_alloc() {
+        Ok(pair) => pair,
         Err(e) => {
             klog_info!("TTY_TEST: BUG - pty_alloc failed: {:?}", e);
             return TestResult::Fail;
         }
     };
-    let _ = tty::open_ref(master);
     let slave_num = tty::get_pty_number(master).unwrap();
     let slave = TtyIndex(slave_num as u8);
     tty::set_pty_lock(master, false).unwrap();
-    tty::pty_open_slave(slave).unwrap();
+    let _slave_backing = tty::pty_open_slave(slave).unwrap();
 
     // Get the master's peer handle so we can call slave_write directly.
     let _master_peer = {
         let guard = TTY_SLOTS[master.0 as usize].lock();
         match guard.as_ref().unwrap().driver {
-            tty::driver::TtyDriverKind::PtyMaster { peer } => peer,
+            tty::driver::TtyDriverKind::PtyMaster { ref peer } => peer.clone(),
             _ => {
                 klog_info!("TTY_TEST: BUG - expected PtyMaster driver");
-                let _ = tty::close_ref(slave);
-                let _ = tty::close_ref(master);
                 return TestResult::Fail;
             }
         }
@@ -1013,11 +977,9 @@ pub fn test_bugfix_slave_write_stops_on_full() -> TestResult {
     let slave_peer = {
         let guard = TTY_SLOTS[slave.0 as usize].lock();
         match guard.as_ref().unwrap().driver {
-            tty::driver::TtyDriverKind::PtySlave { peer } => peer,
+            tty::driver::TtyDriverKind::PtySlave { ref peer } => peer.clone(),
             _ => {
                 klog_info!("TTY_TEST: BUG - expected PtySlave driver");
-                let _ = tty::close_ref(slave);
-                let _ = tty::close_ref(master);
                 return TestResult::Fail;
             }
         }
@@ -1026,24 +988,19 @@ pub fn test_bugfix_slave_write_stops_on_full() -> TestResult {
     // Fill the master's buffer (4096 bytes via slave_write).
     let mut fill: KBox<[u8; 4096]> = KBox::zeroed().expect("alloc");
     fill.iter_mut().for_each(|b| *b = b'X');
-    let written1 = tty::pty::slave_write(slave_peer, &*fill);
+    let written1 = tty::pty::slave_write(&slave_peer, &*fill);
 
     if written1 != 4096 {
         klog_info!(
             "TTY_TEST: BUG - first slave_write should accept 4096 bytes, got {}",
             written1
         );
-        let _ = tty::close_ref(slave);
-        let _ = tty::close_ref(master);
         return TestResult::Fail;
     }
 
     // Now try to write more — should get a short write (0 bytes accepted).
     let extra = [b'Y'; 100];
-    let written2 = tty::pty::slave_write(slave_peer, &extra);
-
-    let _ = tty::close_ref(slave);
-    let _ = tty::close_ref(master);
+    let written2 = tty::pty::slave_write(&slave_peer, &extra);
 
     if written2 != 0 {
         klog_info!(
@@ -2197,8 +2154,8 @@ pub fn test_drain_unallocated_slot() -> TestResult {
 pub fn test_pty_tcsbrk_drain_immediate() -> TestResult {
     tty::table::tty_table_init();
 
-    let master_idx = match tty::pty_alloc() {
-        Ok(idx) => idx,
+    let (master_idx, _master_backing) = match tty::pty_alloc() {
+        Ok(pair) => pair,
         Err(_) => {
             klog_info!("TTY_TEST: SKIP - could not allocate PTY pair");
             return TestResult::Pass;
@@ -2207,12 +2164,12 @@ pub fn test_pty_tcsbrk_drain_immediate() -> TestResult {
     let slave_idx = match tty::get_pty_number(master_idx) {
         Ok(n) => TtyIndex(n as u8),
         Err(_) => {
-            let _ = tty::close_ref(master_idx);
             klog_info!("TTY_TEST: SKIP - could not get PTY slave index");
             return TestResult::Pass;
         }
     };
-    let _ = tty::open_ref(slave_idx);
+    tty::set_pty_lock(master_idx, false).unwrap();
+    let _slave_backing = tty::pty_open_slave(slave_idx).unwrap();
 
     // Write to master.
     let _ = tty::write(master_idx, b"pty drain fp13", false);
@@ -2220,9 +2177,6 @@ pub fn test_pty_tcsbrk_drain_immediate() -> TestResult {
     // tcsbrk drain should succeed immediately.
     let drain_result = tty::tcsbrk(master_idx, 1);
     let idle_result = tty::is_output_idle(master_idx);
-
-    let _ = tty::close_ref(slave_idx);
-    let _ = tty::close_ref(master_idx);
 
     if let Err(e) = drain_result {
         klog_info!("TTY_TEST: BUG - fp13 PTY tcsbrk failed: {:?}", e);
@@ -2286,17 +2240,13 @@ pub fn test_output_pending_bytes_all_drivers() -> TestResult {
         return TestResult::Fail;
     }
 
-    let pty_master = TtyDriverKind::PtyMaster {
-        peer: PtyPeerHandle::new(TtyIndex(3), 0),
-    };
+    let pty_master = TtyDriverKind::PtyMaster { peer: KWeak::new() };
     if pty_master.output_pending_bytes() != 0 {
         klog_info!("TTY_TEST: BUG - fp13 PtyMaster output_pending_bytes should be 0");
         return TestResult::Fail;
     }
 
-    let pty_slave = TtyDriverKind::PtySlave {
-        peer: PtyPeerHandle::new(TtyIndex(2), 0),
-    };
+    let pty_slave = TtyDriverKind::PtySlave { peer: KWeak::new() };
     if pty_slave.output_pending_bytes() != 0 {
         klog_info!("TTY_TEST: BUG - fp13 PtySlave output_pending_bytes should be 0");
         return TestResult::Fail;
@@ -2552,14 +2502,13 @@ pub fn test_grantpt_unlocks_slave() -> TestResult {
     use slopos_kernel_services::syscall_services::tty::tty_services;
 
     tty::table::tty_table_init();
-    let master = match tty::pty_alloc() {
-        Ok(idx) => idx,
+    let (master, _master_backing) = match tty::pty_alloc() {
+        Ok(pair) => pair,
         Err(_) => return TestResult::Pass,
     };
     let locked_before = tty::get_pty_lock(master).unwrap_or(false);
     let rc = (tty_services().grantpt)(master);
     let locked_after = tty::get_pty_lock(master).unwrap_or(true);
-    let _ = tty::close_ref(master);
     if !locked_before || rc.is_err() || locked_after {
         klog_info!(
             "TTY_TEST: BUG - grantpt should unlock slave (before={}, rc_ok={}, after={})",
@@ -2669,7 +2618,7 @@ pub fn test_batched_ingress_no_data_loss() -> TestResult {
 }
 
 pub fn test_batched_ingress_signal_in_middle() -> TestResult {
-    let Some((master, slave, saved)) = packet_mode_setup_pty() else {
+    let Some((master, slave, saved, _guard)) = packet_mode_setup_pty() else {
         klog_info!("TTY_TEST: BUG - packet_mode setup failed");
         return TestResult::Fail;
     };
@@ -2773,8 +2722,7 @@ pub fn test_mod_reexports_lifecycle_functions() -> TestResult {
     let _: fn() -> TtyIndex = tty::default_console_tty;
     let _: fn(TtyIndex) = tty::set_default_console_tty;
     let _: fn() = tty::init;
-    let _: fn(TtyIndex) -> Result<u32, TtyError> = tty::open_ref;
-    let _: fn(TtyIndex) -> Result<u32, TtyError> = tty::close_ref;
+    let _: fn(TtyIndex) -> Result<KArc<dyn FileBacking>, TtyError> = tty::open_tty;
     let _: fn(TtyIndex) = tty::hangup;
     let _: fn(TtyIndex) -> bool = tty::is_hung_up;
     let _: fn(TtyIndex) = tty::vhangup;
@@ -2804,7 +2752,6 @@ pub fn test_tty_struct_fields_accessible() -> TestResult {
         // active field removed — slot being Some means active
         let _ = tty.flags.contains(TtyFlags::HUNG_UP);
         let _ = tty.flags.contains(TtyFlags::PEER_CLOSED);
-        let _ = tty.open_count;
         let _ = tty.flags.contains(TtyFlags::SLAVE_LOCKED);
         let _ = tty.flags.contains(TtyFlags::PACKET_MODE);
         let _ = tty.packet_events;
@@ -2964,22 +2911,16 @@ pub fn test_p21_postlockwork_zero_event_bits_ignored() -> TestResult {
 
 pub fn test_p21_write_path_peer_cache_consolidation() -> TestResult {
     tty::table::tty_table_init();
-    let master_idx = match tty::pty::pty_alloc() {
-        Ok(idx) => idx,
+    let (master_idx, _master_backing) = match tty::pty::pty_alloc() {
+        Ok(pair) => pair,
         Err(_) => return TestResult::Pass,
     };
-    let slave_idx = {
-        let guard = TTY_SLOTS[master_idx.0 as usize].lock();
-        match guard.as_ref() {
-            Some(tty) => match &tty.driver {
-                TtyDriverKind::PtyMaster { peer } => peer.idx,
-                _ => return TestResult::Fail,
-            },
-            None => return TestResult::Fail,
-        }
+    let slave_idx = match tty::get_pty_number(master_idx) {
+        Ok(n) => TtyIndex(n as u8),
+        Err(_) => return TestResult::Fail,
     };
     tty::pty::set_pty_lock(master_idx, false).ok();
-    tty::pty::pty_open_slave(slave_idx).ok();
+    let _slave_backing = tty::pty_open_slave(slave_idx).ok();
     let result = tty::write(slave_idx, b"hello", true);
     match result {
         Ok(n) if n > 0 => {}
@@ -2987,8 +2928,6 @@ pub fn test_p21_write_path_peer_cache_consolidation() -> TestResult {
         Err(_) => {}
         _ => {}
     }
-    tty::close_ref(slave_idx).ok();
-    tty::close_ref(master_idx).ok();
     TestResult::Pass
 }
 
@@ -3037,12 +2976,11 @@ pub fn test_p21_forward_ldisc_ops_rawdisc() -> TestResult {
 pub fn test_p21_existing_api_smoke_read_write() -> TestResult {
     tty::table::tty_table_init();
     let idx = TtyIndex(0);
-    let _ = tty::open_ref(idx);
+    let _console_backing = tty::open_tty(idx);
     let write_result = tty::write(idx, b"phase21test\n", true);
     if write_result.is_err() {
         klog_info!("TTY_TEST: write failed: {:?}", write_result);
     }
-    let _ = tty::close_ref(idx);
     TestResult::Pass
 }
 
