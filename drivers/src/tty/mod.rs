@@ -69,7 +69,9 @@ use self::driver::{DriverId, TtyDriverKind, write_driver_unlocked};
 use self::ldisc::LdiscKind;
 use self::session::TtySession;
 use self::table::{TTY_WRITE_LOCKS, tty_input_event, tty_output_event};
+use slopos_ostd::KArc;
 use slopos_ostd::sync::BUS;
+use slopos_ostd::task::ProcessGroup;
 
 // ---------------------------------------------------------------------------
 // Public types
@@ -173,7 +175,9 @@ pub(crate) fn sysrq_mark_pending() {
 /// deferred.execute();  // delivers everything outside the lock
 /// ```
 pub(crate) struct PostLockWork {
-    signal: Option<(u32, u8)>,
+    /// Foreground group to signal, pinned strongly so the group's identity
+    /// survives across the off-lock delivery scan (no reused-pid window).
+    signal: Option<(KArc<ProcessGroup>, u8)>,
     ixoff_byte: Option<(DriverId, u8, usize)>,
     packet_event: Option<(TtyIndex, u8)>,
     wake_input: u32,
@@ -211,12 +215,10 @@ impl PostLockWork {
             && self.wake_poll == 0
     }
 
-    /// Queue a signal for delivery to a process group.
+    /// Queue a signal for delivery to a (live) foreground process group.
     #[inline]
-    pub(crate) fn add_signal(&mut self, pgid: u32, signum: u8) {
-        if pgid != 0 {
-            self.signal = Some((pgid, signum));
-        }
+    pub(crate) fn add_signal(&mut self, pgrp: KArc<ProcessGroup>, signum: u8) {
+        self.signal = Some((pgrp, signum));
     }
 
     #[inline]
@@ -282,8 +284,8 @@ impl PostLockWork {
         }
         use slopos_kernel_services::driver_runtime::signal_process_group;
 
-        if let Some((pgid, sig)) = self.signal {
-            let _ = signal_process_group(pgid, sig);
+        if let Some((pgrp, sig)) = self.signal.take() {
+            let _ = signal_process_group(pgrp.id(), sig);
         }
 
         if let Some((driver_id, byte, slot)) = self.ixoff_byte.take() {

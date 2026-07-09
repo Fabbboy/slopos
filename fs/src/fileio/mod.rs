@@ -16,7 +16,7 @@ use slopos_ostd::sync::{
 
 use slopos_abi::task::INVALID_PROCESS_ID;
 use slopos_kernel_services::driver_runtime::{
-    current_task_controlling_tty, current_task_id, current_task_pgid, current_task_sid,
+    current_task_controlling_tty, current_task_id, current_task_pgrp_handle, current_task_sid,
     set_current_task_controlling_tty,
 };
 use slopos_kernel_services::syscall_services::tty;
@@ -497,7 +497,6 @@ pub(super) fn maybe_acquire_controlling_tty_on_open(tty_idx: TtyIndex, flags: u3
 
     let task_id = current_task_id();
     let sid = current_task_sid();
-    let pgid = current_task_pgid();
     if task_id == 0 || sid == 0 || sid != task_id {
         return;
     }
@@ -505,7 +504,8 @@ pub(super) fn maybe_acquire_controlling_tty_on_open(tty_idx: TtyIndex, flags: u3
         return;
     }
 
-    if tty::acquire_controlling_terminal(tty_idx, sid, pgid).is_ok() {
+    let fg = current_task_pgrp_handle().unwrap_or_else(slopos_ostd::KWeak::new);
+    if tty::acquire_controlling_terminal(tty_idx, fg).is_ok() {
         let _ = set_current_task_controlling_tty(Some(tty_idx));
     }
 }

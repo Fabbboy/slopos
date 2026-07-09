@@ -1981,7 +1981,8 @@ pub fn test_excl_hupcl_errno_ebusy_value() -> TestResult {
 pub fn test_excl_hupcl_get_session_id_returns_correct_sid() -> TestResult {
     tty::table::tty_table_init();
     let idx = TtyIndex(0);
-    tty::attach_session(idx, 500, 500);
+    let scope = SessionScope::new(500, 500);
+    tty::session::test_install_session(idx, scope.session_weak(), scope.pgrp_weak());
     match tty::get_session_id(idx) {
         Ok(500) => {}
         other => {
@@ -2130,7 +2131,8 @@ pub fn test_excl_hupcl_hupcl_last_close_triggers_hangup() -> TestResult {
         Ok(c) => c,
         Err(_) => return TestResult::Fail,
     };
-    tty::attach_session(idx, 600, 600);
+    let scope = SessionScope::new(600, 600);
+    tty::session::test_install_session(idx, scope.session_weak(), scope.pgrp_weak());
     let mut t = match tty::get_termios(idx) {
         Ok(t) => t,
         Err(_) => {
@@ -2156,7 +2158,8 @@ pub fn test_excl_hupcl_no_hupcl_last_close_no_hangup() -> TestResult {
         Ok(c) => c,
         Err(_) => return TestResult::Fail,
     };
-    tty::attach_session(idx, 700, 700);
+    let scope = SessionScope::new(700, 700);
+    tty::session::test_install_session(idx, scope.session_weak(), scope.pgrp_weak());
     let mut t = match tty::get_termios(idx) {
         Ok(t) => t,
         Err(_) => {
@@ -2307,9 +2310,8 @@ pub fn test_tty_fields_pub_crate_smoke() -> TestResult {
 pub fn test_session_fields_pub_crate_smoke() -> TestResult {
     tty::table::tty_table_init();
     let ok = tty::table::with_tty_ref(TtyIndex(0), |tty| {
-        let _ = tty.session.session_leader;
-        let _ = tty.session.session_id;
-        let _ = tty.session.fg_pgrp;
+        let _ = tty.session.session_id();
+        let _ = tty.session.fg_pgrp_id();
         let _ = tty.session.focused_task_id;
         true
     });

@@ -696,16 +696,18 @@ pub fn test_tty_per_tty_winsize_isolation() -> TestResult {
 pub fn test_tty_per_tty_fg_pgrp_isolation() -> TestResult {
     tty::table::tty_table_init();
 
-    // Set different foreground pgrps on TTY 0 and TTY 1.
-    let _ = tty::set_foreground_pgrp(TtyIndex(0), 100);
-    let _ = tty::set_foreground_pgrp(TtyIndex(1), 200);
+    // Install live sessions with distinct foreground groups on TTY 0 and TTY 1.
+    let scope0 = SessionScope::new(100, 100);
+    let scope1 = SessionScope::new(200, 200);
+    tty::session::test_install_session(TtyIndex(0), scope0.session_weak(), scope0.pgrp_weak());
+    tty::session::test_install_session(TtyIndex(1), scope1.session_weak(), scope1.pgrp_weak());
 
     let pgid0 = tty::get_foreground_pgrp(TtyIndex(0)).unwrap_or(0);
     let pgid1 = tty::get_foreground_pgrp(TtyIndex(1)).unwrap_or(0);
 
     // Clean up.
-    let _ = tty::set_foreground_pgrp(TtyIndex(0), 0);
-    let _ = tty::set_foreground_pgrp(TtyIndex(1), 0);
+    tty::detach_session(TtyIndex(0));
+    tty::detach_session(TtyIndex(1));
 
     if pgid0 != 100 {
         klog_info!("TTY_TEST: BUG - TTY 0 fg_pgrp should be 100, got {}", pgid0);
@@ -751,7 +753,8 @@ pub fn test_tty_per_tty_has_data_isolation() -> TestResult {
 pub fn test_tty_per_tty_session_isolation() -> TestResult {
     tty::table::tty_table_init();
 
-    tty::attach_session(TtyIndex(0), 500, 500);
+    let scope = SessionScope::new(500, 500);
+    tty::session::test_install_session(TtyIndex(0), scope.session_weak(), scope.pgrp_weak());
     let sid0 = tty::get_session_id(TtyIndex(0)).unwrap_or(0);
     let sid1 = tty::get_session_id(TtyIndex(1)).unwrap_or(0);
 
@@ -825,14 +828,16 @@ pub fn test_signal_constants() -> TestResult {
 /// set_compositor_focus does NOT modify fg_pgrp.
 pub fn test_set_compositor_focus_does_not_set_fg_pgrp() -> TestResult {
     tty::table::tty_table_init();
-    // Set a known fg_pgrp first.
-    let _ = tty::set_foreground_pgrp(TtyIndex(0), 42);
+    // Install a live session with a known foreground group first.
+    let scope = SessionScope::new(42, 42);
+    tty::session::test_install_session(TtyIndex(0), scope.session_weak(), scope.pgrp_weak());
     let fg_before = tty::get_foreground_pgrp(TtyIndex(0)).unwrap_or(0);
 
     // Change compositor focus.
     let _ = tty::set_compositor_focus(99);
     let fg_after = tty::get_foreground_pgrp(TtyIndex(0)).unwrap_or(0);
     let _ = tty::set_compositor_focus(0); // Reset.
+    tty::detach_session(TtyIndex(0));
 
     if fg_before != fg_after {
         klog_info!(
@@ -851,8 +856,9 @@ pub fn test_set_compositor_focus_does_not_set_fg_pgrp() -> TestResult {
 
 /// check_read is the sole read gate — BackgroundRead for non-fg pgrp.
 pub fn test_check_read_sole_gate_background() -> TestResult {
+    let scope = SessionScope::new(10, 10);
     let mut s = TtySession::new();
-    s.attach(10, 10); // session=10, fg_pgrp=10
+    scope.attach_to(&mut s); // session=10, fg_pgrp=10
     s.focused_task_id = 42; // compositor says task 42 is focused
 
     // Even though task 42 has compositor focus, if its pgid (99) is NOT
@@ -900,7 +906,8 @@ pub fn test_tty_open_count_lifecycle() -> TestResult {
 
 pub fn test_tty_hangup_sets_flag_and_detaches_session() -> TestResult {
     tty::table::tty_table_init();
-    tty::attach_session(TtyIndex(0), 500, 500);
+    let scope = SessionScope::new(500, 500);
+    tty::session::test_install_session(TtyIndex(0), scope.session_weak(), scope.pgrp_weak());
     tty::push_input(TtyIndex(0), b'x');
     tty::push_input(TtyIndex(0), b'\n');
 
@@ -1202,7 +1209,8 @@ pub fn test_canonical_to_noncanonical_preserves_buffered_data() -> TestResult {
 
 pub fn test_set_fg_pgrp_checked_permission_denied() -> TestResult {
     tty::table::tty_table_init();
-    tty::attach_session(TtyIndex(0), 10, 10);
+    let scope = SessionScope::new(10, 10);
+    tty::session::test_install_session(TtyIndex(0), scope.session_weak(), scope.pgrp_weak());
     match tty::set_foreground_pgrp_checked(TtyIndex(0), 20, 99) {
         Err(TtyError::PermissionDenied) => {
             tty::detach_session(TtyIndex(0));
@@ -2159,7 +2167,8 @@ pub fn test_acquire_and_release_controlling_terminal() -> TestResult {
     tty::table::tty_table_init();
     tty::detach_session(TtyIndex(0));
 
-    let acquire = tty::acquire_controlling_terminal(TtyIndex(0), 42, 77);
+    let scope = SessionScope::new(42, 77);
+    let acquire = tty::acquire_controlling_terminal(TtyIndex(0), scope.pgrp_weak());
     let sid_after_acquire = tty::get_session_id(TtyIndex(0)).unwrap_or(0);
     let release = tty::release_controlling_terminal(TtyIndex(0), 42);
     let sid_after_release = tty::get_session_id(TtyIndex(0)).unwrap_or(0);
@@ -2182,7 +2191,8 @@ pub fn test_acquire_and_release_controlling_terminal() -> TestResult {
 pub fn test_release_wrong_session_is_noop() -> TestResult {
     tty::table::tty_table_init();
     tty::detach_session(TtyIndex(0));
-    tty::acquire_controlling_terminal(TtyIndex(0), 88, 88).unwrap();
+    let scope = SessionScope::new(88, 88);
+    tty::acquire_controlling_terminal(TtyIndex(0), scope.pgrp_weak()).unwrap();
 
     let release = tty::release_controlling_terminal(TtyIndex(0), 99);
     let sid = tty::get_session_id(TtyIndex(0)).unwrap_or(0);

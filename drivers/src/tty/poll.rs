@@ -116,8 +116,8 @@ pub fn poll_events(idx: TtyIndex, requested: u16) -> u16 {
             None => return 0,
         };
 
-        if let Some((pgid, sig)) = tty.drain_hw_input_locked() {
-            deferred.add_signal(pgid, sig);
+        if let Some((pg, sig)) = tty.drain_hw_input_locked() {
+            deferred.add_signal(pg, sig);
         }
 
         let mut revents = 0u16;

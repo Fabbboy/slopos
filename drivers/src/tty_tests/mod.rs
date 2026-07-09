@@ -23,16 +23,15 @@ use crate::tty::TtyError;
 use crate::tty::TtyIndex;
 use crate::tty::driver::{DriverId, TtyDriverKind, VConsoleDriver};
 use crate::tty::ldisc::{InputAction, LdiscKind, LineDisc, OutputAction, RawDisc};
+use crate::tty::session::ForegroundCheck;
 use crate::tty::session::TtySession;
-use crate::tty::session::{
-    ForegroundCheck, NO_FOREGROUND_PGRP, NO_SESSION, ProcessGroupId, SessionId,
-};
 use crate::tty::table::{TTY_OUTPUT_INFLIGHT, TTY_SLOTS};
 use crate::tty::vconsole::{
     Cell, CellAttributes, CellGrid, CursorAttributes, VCONSOLE_MAX_COLS, VCONSOLE_MAX_ROWS,
     VConsoleState,
 };
 use crate::tty::vtparser::{Direction, EraseMode, SgrAttr, VtAction, VtParser};
+use slopos_ostd::task::{ProcessGroup, Session};
 
 pub(crate) fn boxed_vconsole_state() -> slopos_ostd::KBox<VConsoleState> {
     let mut state = slopos_ostd::KBox::try_init(VConsoleState::init_default()).expect("test alloc");

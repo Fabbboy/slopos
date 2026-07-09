@@ -6,11 +6,18 @@ use slopos_kernel_services::driver_runtime::{
 };
 
 use crate::irq;
+use slopos_ostd::KArc;
+use slopos_ostd::task::ProcessGroup;
 use slopos_sched::scheduler;
 use slopos_sched::task::{
-    self, Task, task_has_deliverable_signal, task_parent_task_id, task_pgid, task_sid,
-    task_signal_blocked, task_signal_handler, task_signal_post,
+    self, Task, task_has_deliverable_signal, task_parent_task_id, task_pgid, task_process_group,
+    task_sid, task_signal_blocked, task_signal_handler, task_signal_post,
 };
+
+fn runtime_current_task_pgrp_handle() -> Option<slopos_ostd::KWeak<ProcessGroup>> {
+    let task = scheduler::scheduler_get_current_task();
+    task_process_group(task).map(|pg| KArc::downgrade(&pg))
+}
 
 // ---------------------------------------------------------------------------
 // Adapter functions — only for service methods that need type conversion or
@@ -306,6 +313,9 @@ static DRIVER_RUNTIME_SERVICES: DriverRuntimeServices = DriverRuntimeServices {
     register_idle_wakeup_callback: scheduler::scheduler_register_idle_wakeup_callback,
     signal_process_group: runtime_signal_process_group,
     signal_session: runtime_signal_session,
+    pgrp_handle: slopos_sched::task::pgrp_handle_for_pgid,
+    session_handle: slopos_sched::task::session_handle_for_sid,
+    current_task_pgrp_handle: runtime_current_task_pgrp_handle,
     pgrp_exists_in_session: runtime_pgrp_exists_in_session,
     is_current_signal_blocked_or_ignored: runtime_is_current_signal_blocked_or_ignored,
     is_pgrp_orphaned: runtime_is_pgrp_orphaned,

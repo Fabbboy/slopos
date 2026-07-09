@@ -1,3 +1,4 @@
+use super::fixtures::SessionScope;
 use super::*;
 use slopos_abi::KernelErrno;
 
@@ -168,9 +169,10 @@ pub fn test_set_active_tty() -> TestResult {
 /// set_foreground_pgrp / get_foreground_pgrp round-trip via per-TTY API.
 pub fn test_foreground_pgrp() -> TestResult {
     tty::table::tty_table_init();
-    let _ = tty::set_foreground_pgrp(TtyIndex(0), 42);
+    let scope = SessionScope::new(42, 42);
+    tty::session::test_install_session(TtyIndex(0), scope.session_weak(), scope.pgrp_weak());
     let pgid = tty::get_foreground_pgrp(TtyIndex(0)).unwrap_or(0);
-    let _ = tty::set_foreground_pgrp(TtyIndex(0), 0); // Reset.
+    tty::detach_session(TtyIndex(0)); // Reset.
 
     if pgid != 42 {
         klog_info!(

@@ -23,6 +23,8 @@ use slopos_abi::signal::{NSIG, SIG_DFL, SIG_IGN, SigSet, sig_bit};
 use slopos_abi::syscall::TtyIndex;
 use slopos_abi::task::{TaskExitReason, TaskFaultReason, TaskPriority, TaskStatus};
 
+use crate::KArc;
+use crate::task::job_control::{ProcessGroup, Session};
 use crate::task::kernel_task::{SchedPlacement, SignalAction, TaskInner};
 
 pub const TASK_EXIT_CLEANUP_RESOURCES: u8 = 1 << 0;
@@ -545,6 +547,49 @@ pub fn task_set_controlling_tty<K, U>(task: *mut TaskInner<K, U>, tty: Option<Tt
 #[inline]
 pub fn task_has_flag<K, U>(task: *const TaskInner<K, U>, flag: u16) -> bool {
     task_flags(task).is_some_and(|f| (f & flag) != 0)
+}
+
+/// Clone this task's strong process-group membership handle, if any.
+#[inline]
+pub fn task_process_group<K, U>(task: *const TaskInner<K, U>) -> Option<KArc<ProcessGroup>> {
+    if task.is_null() {
+        return None;
+    }
+    // SAFETY: caller pre-validated; the field is an owned `Option<KArc>` and
+    // cloning bumps the group refcount atomically.
+    unsafe { (*task).process_group.clone() }
+}
+
+/// Replace this task's process-group membership, dropping the previous handle.
+/// Caller must hold exclusive access to `task` (the old handle drops here).
+#[inline]
+pub fn task_set_process_group<K, U>(
+    task: *mut TaskInner<K, U>,
+    pg: Option<KArc<ProcessGroup>>,
+) -> bool {
+    if task.is_null() {
+        return false;
+    }
+    // SAFETY: caller pre-validated + exclusive; group `Drop` is trivial.
+    unsafe {
+        (*task).process_group = pg;
+    }
+    true
+}
+
+/// Clone this task's session handle, resolved through its process group.
+#[inline]
+pub fn task_session<K, U>(task: *const TaskInner<K, U>) -> Option<KArc<Session>> {
+    if task.is_null() {
+        return None;
+    }
+    // SAFETY: caller pre-validated; reads the owned `Option<KArc>` field.
+    unsafe {
+        (*task)
+            .process_group
+            .as_ref()
+            .map(|pg| pg.session().clone())
+    }
 }
 
 /// Read `task->name[..]` and probe whether the first 5 bytes

@@ -30,11 +30,12 @@ use crate::sync::intrusive::Link;
 use crate::task::abi::TaskAbi;
 use crate::task::exit_info::ExitInfo;
 use crate::task::fpu::{FPU_STATE_SIZE, FpuState};
+use crate::task::job_control::ProcessGroup;
 use crate::task::link_roles::{ReadyQueueRole, RemoteWakeRole, ZombieListRole};
 use crate::task::state::TaskState;
 use crate::task::test_reports::TestReportRing;
 use crate::user::context::UserContext;
-use crate::{AllocError, Init, KBox, init_from_closure};
+use crate::{AllocError, Init, KArc, KBox, init_from_closure};
 
 // =============================================================================
 // TaskContext — full CPU register state for interrupt-driven context switches
@@ -283,14 +284,21 @@ pub struct TaskInner<K, U> {
     pub kernel_stack: Option<K>,
     /// Owning handle to the SafeStack-sanitizer unsafe (data) stack.
     pub unsafe_stack: Option<U>,
+    /// Strong membership in this task's process group. The group (and, via
+    /// it, the session) lives while any member holds this handle; dropping it
+    /// at slot recycle is what releases the group. Placed inside the
+    /// `reset_in_place` owned-handle hole (between `unsafe_stack` and
+    /// `test_reports`). `None` for kernel-mode tasks, which never join a
+    /// terminal session.
+    pub process_group: Option<KArc<ProcessGroup>>,
     /// Per-task ring of `SYSCALL_TEST_REPORT` payloads.
     ///
     /// `None` for non-test tasks (the syscall is never invoked). The first
     /// `SYSCALL_TEST_REPORT` from a task lazily allocates a fresh ring; the
     /// kernel-side userland-test runner takes ownership once the task has
-    /// exited. The handle is contiguous with `kernel_stack`/`unsafe_stack`
-    /// so `reset_in_place`'s zero-byte hole covers all three Option<KBox>-
-    /// style owned handles in one span.
+    /// exited. The handle is contiguous with `kernel_stack`/`unsafe_stack`/
+    /// `process_group` so `reset_in_place`'s zero-byte hole covers every
+    /// owned-handle field in one span.
     pub test_reports: Option<KBox<TestReportRing>>,
     /// Index of this Task's slot in the `TASK_MANAGER` pool spine.
     pub slot_index: u32,
@@ -406,6 +414,7 @@ impl<K, U> TaskInner<K, U> {
             fpu_state: FpuState::new(),
             kernel_stack: None,
             unsafe_stack: None,
+            process_group: None,
             test_reports: None,
             slot_index: u32::MAX,
             generation: 0,
@@ -498,6 +507,7 @@ impl<K, U> TaskInner<K, U> {
 
                 addr_of_mut!((*slot).kernel_stack).write(None);
                 addr_of_mut!((*slot).unsafe_stack).write(None);
+                addr_of_mut!((*slot).process_group).write(None);
                 addr_of_mut!((*slot).test_reports).write(None);
                 addr_of_mut!((*slot).abi.unsafe_stack_sp).write(0);
 
@@ -529,6 +539,7 @@ impl<K, U> TaskInner<K, U> {
             let preserved_slot_index = (*this).slot_index;
             let _ = (*this).kernel_stack.take();
             let _ = (*this).unsafe_stack.take();
+            let _ = (*this).process_group.take();
             let _ = (*this).test_reports.take();
             (*this).exit_info.reset();
             let bytes = core::mem::size_of::<Self>();
@@ -748,6 +759,7 @@ impl<K, U> TaskInner<K, U> {
             );
             core::ptr::write(&mut self.kernel_stack as *mut _, None);
             core::ptr::write(&mut self.unsafe_stack as *mut _, None);
+            core::ptr::write(&mut self.process_group as *mut _, None);
             core::ptr::write(&mut self.test_reports as *mut _, None);
             self.abi.unsafe_stack_sp = 0;
             core::ptr::write(&mut self.exit_info as *mut _, AtomicCell::empty());

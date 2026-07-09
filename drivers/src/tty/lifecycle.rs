@@ -96,7 +96,7 @@ pub fn hangup(idx: TtyIndex) {
             Some(t) => t,
             None => return,
         };
-        let sid = tty.session.session_id_raw();
+        let sid = tty.session.session_id();
         tty.ldisc.flush_all();
         // full flush → both FLUSHREAD + FLUSHWRITE packet events.
         // Deferred until after lock is dropped to avoid self-deadlock.

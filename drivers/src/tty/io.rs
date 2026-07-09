@@ -26,6 +26,8 @@ use slopos_kernel_services::driver_runtime::{
     is_current_signal_blocked_or_ignored, is_pgrp_orphaned, register_idle_wakeup_callback,
     scheduler_is_enabled, signal_process_group,
 };
+use slopos_ostd::KArc;
+use slopos_ostd::task::ProcessGroup;
 
 use super::driver::{InputEvent, TtyDriverKind, write_driver_unlocked};
 use super::ldisc::{self, BatchResult, OutputAction};
@@ -47,10 +49,11 @@ impl Tty {
     /// Called while holding the per-TTY lock.  Feeds bytes from the hardware
     /// driver through `ldisc.input_char()`, echoing output via the driver.
     ///
-    /// Returns a deferred signal `(pgid, signum)` if signal generation was
-    /// triggered (e.g. Ctrl+C on serial).  The caller **must** deliver the
-    /// signal **after** dropping the per-TTY lock to avoid deadlock.
-    pub(crate) fn drain_hw_input_locked(&mut self) -> Option<(u32, u8)> {
+    /// Returns a deferred signal `(foreground group, signum)` if signal
+    /// generation was triggered (e.g. Ctrl+C on serial) and a live foreground
+    /// group exists.  The caller **must** deliver the signal **after** dropping
+    /// the per-TTY lock to avoid deadlock.
+    pub(crate) fn drain_hw_input_locked(&mut self) -> Option<(KArc<ProcessGroup>, u8)> {
         let mut scratch = [0u8; 64];
         let count = self.driver.drain_input(&mut scratch);
         // SysRq (Ctrl+T) on the serial path: runs under the per-TTY lock, so
@@ -85,7 +88,7 @@ impl Tty {
         }
         batch
             .signal
-            .map(|(sig, _)| (self.session.fg_pgrp_raw(), sig))
+            .and_then(|(sig, _)| self.session.fg_pgrp_handle().map(|pg| (pg, sig)))
     }
 }
 
@@ -190,7 +193,9 @@ pub fn push_input_batch(idx: TtyIndex, events: &[InputEvent]) {
         }
 
         if let Some((sig, flush)) = batch.signal {
-            deferred.add_signal(tty.session.fg_pgrp_raw(), sig);
+            if let Some(pg) = tty.session.fg_pgrp_handle() {
+                deferred.add_signal(pg, sig);
+            }
             // A signal char discards the foreground job's pending I/O
             // unless NOFLSH is set. The line discipline already flushed
             // its input queues; clear input throttle here as part of the
@@ -475,8 +480,8 @@ pub fn read_with_attach(
                 }
             }
 
-            if let Some((pgid, sig)) = tty.drain_hw_input_locked() {
-                deferred.add_signal(pgid, sig);
+            if let Some((pg, sig)) = tty.drain_hw_input_locked() {
+                deferred.add_signal(pg, sig);
             }
 
             if tty.flags.contains(TtyFlags::PACKET_MODE) && total == 0 {
@@ -589,8 +594,8 @@ pub fn read_with_attach(
                                 return false;
                             }
                         }
-                        if let Some((pgid, signum)) = tty.drain_hw_input_locked() {
-                            wd.add_signal(pgid, signum);
+                        if let Some((pg, signum)) = tty.drain_hw_input_locked() {
+                            wd.add_signal(pg, signum);
                         }
                         tty.flags.contains(TtyFlags::HUNG_UP)
                             || tty.flags.contains(TtyFlags::PEER_CLOSED)
@@ -1002,8 +1007,8 @@ pub fn has_data(idx: TtyIndex) -> bool {
     let result = {
         let mut guard = TTY_SLOTS[slot].lock();
         if let Some(tty) = guard.as_mut() {
-            if let Some((pgid, sig)) = tty.drain_hw_input_locked() {
-                deferred.add_signal(pgid, sig);
+            if let Some((pg, sig)) = tty.drain_hw_input_locked() {
+                deferred.add_signal(pg, sig);
             }
             tty.ldisc.has_data()
         } else {
@@ -1028,8 +1033,8 @@ pub fn bytes_available(idx: TtyIndex) -> Result<usize, TtyError> {
     let count = {
         let mut guard = TTY_SLOTS[slot].lock();
         if let Some(tty) = guard.as_mut() {
-            if let Some((pgid, sig)) = tty.drain_hw_input_locked() {
-                deferred.add_signal(pgid, sig);
+            if let Some((pg, sig)) = tty.drain_hw_input_locked() {
+                deferred.add_signal(pg, sig);
             }
             tty.ldisc.bytes_available()
         } else {
@@ -1096,8 +1101,8 @@ fn input_available_cb() -> c_int {
         let has_data = {
             let mut guard = TTY_SLOTS[i].lock();
             if let Some(tty) = guard.as_mut() {
-                if let Some((pgid, sig)) = tty.drain_hw_input_locked() {
-                    deferred.add_signal(pgid, sig);
+                if let Some((pg, sig)) = tty.drain_hw_input_locked() {
+                    deferred.add_signal(pg, sig);
                 }
                 tty.ldisc.has_data()
             } else {

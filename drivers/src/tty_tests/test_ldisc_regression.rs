@@ -2648,8 +2648,9 @@ pub fn test_batched_ingress_signal_in_middle() -> TestResult {
 }
 
 pub fn test_background_read_sigttin_blocked_eio() -> TestResult {
+    let scope = SessionScope::new(10, 10);
     let mut s = TtySession::new();
-    s.attach(10, 10);
+    scope.attach_to(&mut s);
     if !matches!(s.check_read(99, 10), ForegroundCheck::BackgroundRead) {
         klog_info!("TTY_TEST: BUG - expected BackgroundRead precondition");
         return TestResult::Fail;
@@ -2827,8 +2828,9 @@ pub fn test_p21_postlockwork_default_is_empty() -> TestResult {
 }
 
 pub fn test_p21_postlockwork_signal_makes_nonempty() -> TestResult {
+    let scope = SessionScope::new(42, 42);
     let mut plw = PostLockWork::new();
-    plw.add_signal(42, slopos_abi::signal::SIGINT);
+    plw.add_signal(scope.pgrp.clone(), slopos_abi::signal::SIGINT);
     if plw.is_empty() {
         klog_info!("TTY_TEST: BUG - PostLockWork with signal should not be empty");
         return TestResult::Fail;
@@ -2837,8 +2839,9 @@ pub fn test_p21_postlockwork_signal_makes_nonempty() -> TestResult {
 }
 
 pub fn test_p21_postlockwork_execute_completes() -> TestResult {
+    let scope = SessionScope::new(42, 42);
     let mut plw = PostLockWork::new();
-    plw.add_signal(0, slopos_abi::signal::SIGINT);
+    plw.add_signal(scope.pgrp.clone(), slopos_abi::signal::SIGINT);
     plw.wake_input_slot(0);
     plw.wake_output_slot(0);
     plw.wake_poll_slot(0);
@@ -2889,10 +2892,16 @@ pub fn test_p21_postlockwork_wake_helpers() -> TestResult {
 }
 
 pub fn test_p21_postlockwork_zero_pgid_signal_ignored() -> TestResult {
+    // With no live foreground group, the call sites resolve `None` and never
+    // queue a signal — the "no target, no signal" invariant now lives at
+    // resolution time rather than inside `add_signal`.
+    let s = TtySession::new();
     let mut plw = PostLockWork::new();
-    plw.add_signal(0, slopos_abi::signal::SIGINT);
+    if let Some(pg) = s.fg_pgrp_handle() {
+        plw.add_signal(pg, slopos_abi::signal::SIGINT);
+    }
     if !plw.is_empty() {
-        klog_info!("TTY_TEST: BUG - pgid=0 signal should not be added");
+        klog_info!("TTY_TEST: BUG - no live fg group should queue no signal");
         return TestResult::Fail;
     }
     plw.execute();

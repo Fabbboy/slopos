@@ -20,7 +20,7 @@ slopos_service_core::define_service! {
         set_foreground_pgrp_checked(tty_index: slopos_abi::syscall::TtyIndex, pgid: u32, caller_sid: u32) -> Result<(), slopos_abi::tty_error::TtyError>;
         write_bytes(tty_index: slopos_abi::syscall::TtyIndex, buf: *const u8, len: usize, nonblock: bool) -> Result<usize, slopos_abi::tty_error::TtyError>;
         attach_session(tty_index: slopos_abi::syscall::TtyIndex, leader_pid: u32, leader_pgid: u32);
-        acquire_controlling_terminal(tty_index: slopos_abi::syscall::TtyIndex, session_leader: u32, session_pgid: u32) -> Result<(), slopos_abi::tty_error::TtyError>;
+        acquire_controlling_terminal(tty_index: slopos_abi::syscall::TtyIndex, fg: slopos_ostd::KWeak<slopos_ostd::task::ProcessGroup>) -> Result<(), slopos_abi::tty_error::TtyError>;
         release_controlling_terminal(tty_index: slopos_abi::syscall::TtyIndex, session_id: u32) -> Result<bool, slopos_abi::tty_error::TtyError>;
         default_console_tty() -> slopos_abi::syscall::TtyIndex;
         open_tty(tty_index: slopos_abi::syscall::TtyIndex) -> Result<slopos_ostd::KArc<dyn slopos_abi::file_ops::FileBacking>, slopos_abi::tty_error::TtyError>;

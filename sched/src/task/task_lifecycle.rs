@@ -10,6 +10,8 @@ use slopos_ostd::task::accessors::{
 };
 use slopos_ostd::{klog_debug, klog_info};
 
+use slopos_ostd::task::accessors::task_process_group;
+use slopos_ostd::task::new_session_group;
 use slopos_ostd::task::switch::task_entry_trampoline;
 
 use super::task_cleanup_hooks::run_task_resource_cleanup_hooks;
@@ -551,6 +553,22 @@ pub fn task_create(
     task_ref.pgid = task_id;
     task_ref.sid = task_id;
     task_ref.controlling_tty = None;
+    // A user task is born its own session and group leader. Kernel tasks never
+    // join a terminal session, so they carry no group object (ints only).
+    if flags & TASK_FLAG_USER_MODE != 0 {
+        match new_session_group(task_id) {
+            Some(pg) => task_ref.process_group = Some(pg),
+            None => {
+                cleanup_task_create_resources(
+                    resources.process_id,
+                    resources.kernel_stack,
+                    resources.unsafe_stack,
+                );
+                release_task_slot(task);
+                return INVALID_TASK_ID;
+            }
+        }
+    }
     task_ref.clear_child_tid = 0;
     task_ref.parent_task_id = INVALID_TASK_ID;
     task_ref.stack_base = resources.stack_base;
@@ -1079,6 +1097,9 @@ pub fn task_fork(
     child.tgid = child_task_id;
     child.pgid = parent.pgid;
     child.sid = parent.sid;
+    // Share the parent's group object (clone_from_raw nulled the copied
+    // handle); the shared identity is what a stale pid check keys on.
+    child.process_group = task_process_group(parent as *const Task);
     child.clear_child_tid = 0;
 
     child.kernel_stack_base = child_kernel_stack_base;
@@ -1269,6 +1290,9 @@ pub fn task_clone(
     }
     child.pgid = parent.pgid;
     child.sid = parent.sid;
+    // Share the parent's group object (clone_from_raw nulled the copied
+    // handle); the shared identity is what a stale pid check keys on.
+    child.process_group = task_process_group(parent as *const Task);
 
     child.kernel_stack_base = child_kernel_stack_base;
     child.kernel_stack_top = child_kernel_stack.top().as_u64();

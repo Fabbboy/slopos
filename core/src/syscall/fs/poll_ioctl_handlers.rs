@@ -661,7 +661,9 @@ define_syscall!(syscall_ioctl
                 return Err(Errno::EINVAL);
             }
 
-            if tty::acquire_controlling_terminal(tty_idx, task.sid, task.pgid).is_err() {
+            let fg = slopos_sched::task::task_process_group(task_ptr)
+                .map_or_else(slopos_ostd::KWeak::new, |pg| slopos_ostd::KArc::downgrade(&pg));
+            if tty::acquire_controlling_terminal(tty_idx, fg).is_err() {
                 return Err(Errno::EINVAL);
             }
             task.controlling_tty = Some(tty_idx);

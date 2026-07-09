@@ -2,18 +2,22 @@
 //! controlling terminal acquire/release/detach, and SIGTTIN/SIGTTOU
 //! enforcement.
 //!
-//! decomposition: extracted from `mod.rs` to isolate POSIX
-//! job control operations from the I/O and termios paths.
+//! Session and foreground-group links are resolved to weak handles
+//! ([`KWeak`]) **before** the per-TTY lock is taken: the resolvers acquire the
+//! task-manager lock, which must never nest under a TTY slot lock.
 
 use slopos_abi::signal::{SIGCONT, SIGHUP};
 
 use slopos_kernel_services::driver_runtime::{
-    clear_session_controlling_tty, scheduler_is_enabled, signal_process_group,
+    clear_session_controlling_tty, pgrp_handle, scheduler_is_enabled, session_handle,
+    signal_process_group,
 };
 
 use super::table::{TTY_SLOTS, tty_input_event};
 use super::{MAX_TTYS, TtyError, TtyIndex};
 use slopos_ostd::sync::BUS;
+use slopos_ostd::task::ProcessGroup;
+use slopos_ostd::{KArc, KWeak};
 
 // ---------------------------------------------------------------------------
 // Foreground process group
@@ -28,7 +32,7 @@ pub fn get_foreground_pgrp(idx: TtyIndex) -> Result<u32, TtyError> {
     }
     let guard = TTY_SLOTS[slot].lock();
     match guard.as_ref() {
-        Some(tty) => Ok(tty.session.fg_pgrp_raw()),
+        Some(tty) => Ok(tty.session.fg_pgrp_id()),
         None => Err(TtyError::NotAllocated),
     }
 }
@@ -43,11 +47,17 @@ pub fn set_foreground_pgrp(idx: TtyIndex, pgid: u32) -> Result<(), TtyError> {
     if slot >= MAX_TTYS {
         return Err(TtyError::InvalidIndex);
     }
+    // Resolve the group handle off-lock (empty weak clears the foreground).
+    let fg = if pgid == 0 {
+        KWeak::new()
+    } else {
+        pgrp_handle(pgid).unwrap_or_else(KWeak::new)
+    };
     {
         let mut guard = TTY_SLOTS[slot].lock();
         match guard.as_mut() {
             Some(tty) => {
-                tty.session.set_fg_pgrp_raw(pgid);
+                tty.session.set_fg_pgrp(fg);
             }
             None => return Err(TtyError::NotAllocated),
         }
@@ -63,8 +73,8 @@ pub fn set_foreground_pgrp(idx: TtyIndex, pgid: u32) -> Result<(), TtyError> {
 /// Set foreground pgrp with session validation (POSIX TIOCSPGRP semantics).
 ///
 /// Only processes in the same session as the TTY's controlling session may
-/// change the foreground pgrp.  Additionally validates that the
-/// target process group actually has living members in the session.
+/// change the foreground pgrp, and the target group must have living members
+/// in that session.
 ///
 /// Returns `Ok(())` on success, `Err(PermissionDenied)` on validation failure.
 pub fn set_foreground_pgrp_checked(
@@ -77,32 +87,22 @@ pub fn set_foreground_pgrp_checked(
         return Err(TtyError::InvalidIndex);
     }
 
-    // Before acquiring the per-TTY lock, validate that the target
-    // pgrp actually exists within the session.  This uses the scheduler's
-    // task iterator and must be done outside the TTY lock.  Clearing the
-    // foreground group (pgid == 0) is always allowed.
-    if pgid != 0 {
-        let guard = TTY_SLOTS[slot].lock();
-        let session_id = match guard.as_ref() {
-            Some(tty) if tty.session.has_session() => tty.session.session_id_raw(),
-            Some(_) => 0, // no session attached — skip pgrp validation
-            None => return Err(TtyError::NotAllocated),
-        };
-        drop(guard);
-
-        if session_id != 0 {
-            use slopos_kernel_services::driver_runtime::pgrp_exists_in_session;
-            if !pgrp_exists_in_session(pgid, session_id) {
-                return Err(TtyError::PermissionDenied);
-            }
+    // Resolve the target group off-lock. Clearing (pgid == 0) is always
+    // allowed; a named group with no living members cannot be foregrounded.
+    let fg = if pgid == 0 {
+        KWeak::new()
+    } else {
+        match pgrp_handle(pgid) {
+            Some(w) => w,
+            None => return Err(TtyError::PermissionDenied),
         }
-    }
+    };
 
     let changed = {
         let mut guard = TTY_SLOTS[slot].lock();
         match guard.as_mut() {
             Some(tty) => {
-                if tty.session.set_fg_pgrp_checked(pgid, caller_sid) {
+                if tty.session.set_fg_pgrp_checked(fg, caller_sid) {
                     true
                 } else {
                     return Err(TtyError::PermissionDenied);
@@ -132,7 +132,7 @@ pub fn get_session_id(idx: TtyIndex) -> Result<u32, TtyError> {
     }
     let guard = TTY_SLOTS[slot].lock();
     match guard.as_ref() {
-        Some(tty) => Ok(tty.session.session_id_raw()),
+        Some(tty) => Ok(tty.session.session_id()),
         None => Err(TtyError::NotAllocated),
     }
 }
@@ -146,21 +146,33 @@ pub fn attach_session(idx: TtyIndex, leader_pid: u32, leader_pgid: u32) {
     if slot >= MAX_TTYS {
         return;
     }
+    // Resolve both handles off-lock before taking the TTY slot lock.
+    let session = session_handle(leader_pid).unwrap_or_else(KWeak::new);
+    let fg = pgrp_handle(leader_pgid).unwrap_or_else(KWeak::new);
     let mut guard = TTY_SLOTS[slot].lock();
     if let Some(tty) = guard.as_mut() {
-        tty.session.attach(leader_pid, leader_pgid);
+        tty.session.attach(session, fg);
     }
 }
 
+/// Make the caller's session the controlling session of a TTY. The caller's
+/// foreground group is passed as a weak handle; the session is derived from it
+/// (a group pins its session).
 pub fn acquire_controlling_terminal(
     idx: TtyIndex,
-    session_leader: u32,
-    session_pgid: u32,
+    fg: KWeak<ProcessGroup>,
 ) -> Result<(), TtyError> {
     let slot = idx.0 as usize;
     if slot >= MAX_TTYS {
         return Err(TtyError::InvalidIndex);
     }
+
+    // The acquiring session is the one that owns the caller's foreground group.
+    let group = fg.upgrade();
+    let acquiring_sid = group.as_ref().map_or(0, |pg| pg.session_id());
+    let session = group
+        .as_ref()
+        .map_or_else(KWeak::new, |pg| KArc::downgrade(pg.session()));
 
     let mut guard = TTY_SLOTS[slot].lock();
     let tty = match guard.as_mut() {
@@ -173,13 +185,13 @@ pub fn acquire_controlling_terminal(
         return Err(TtyError::PermissionDenied);
     }
 
-    let current_sid = tty.session.session_id_raw();
-    if current_sid != 0 && current_sid != session_leader {
+    let current_sid = tty.session.session_id();
+    if current_sid != 0 && current_sid != acquiring_sid {
         return Err(TtyError::PermissionDenied);
     }
 
     if current_sid == 0 {
-        tty.session.attach(session_leader, session_pgid);
+        tty.session.attach(session, fg);
     }
 
     Ok(())
@@ -187,7 +199,7 @@ pub fn acquire_controlling_terminal(
 
 /// Detach the controlling session from a TTY.
 ///
-/// Clears session leader, session ID, and foreground pgrp.
+/// Clears session and foreground pgrp.
 /// Compositor focus (`focused_task_id`) is NOT cleared.
 pub fn detach_session(idx: TtyIndex) {
     let slot = idx.0 as usize;
@@ -213,7 +225,7 @@ pub fn release_controlling_terminal(idx: TtyIndex, session_id: u32) -> Result<bo
         None => return Err(TtyError::NotAllocated),
     };
 
-    if tty.session.session_id_raw() != session_id {
+    if tty.session.session_id() != session_id {
         return Ok(false);
     }
 
@@ -252,8 +264,9 @@ pub fn detach_controlling_terminal(
     }
 
     // Session leader: detach the session from the TTY and signal the
-    // foreground process group.
-    let (fg_pgid, session_id) = {
+    // foreground process group. Pinning the group over the off-lock signal
+    // keeps its identity stable (no reused-pid window).
+    let (fg_pgrp, session_id) = {
         let mut guard = TTY_SLOTS[slot].lock();
         let tty = match guard.as_mut() {
             Some(tty) => tty,
@@ -261,24 +274,24 @@ pub fn detach_controlling_terminal(
         };
 
         // Only the controlling session may detach.
-        let tty_sid = tty.session.session_id_raw();
+        let tty_sid = tty.session.session_id();
         if tty_sid != 0 && tty_sid != caller_sid {
             return Err(TtyError::PermissionDenied);
         }
 
-        let pgid = tty.session.fg_pgrp_raw();
-        let sid = tty.session.session_id_raw();
+        let pgrp = tty.session.fg_pgrp_handle();
+        let sid = tty.session.session_id();
         tty.session.detach();
-        (pgid, sid)
+        (pgrp, sid)
     };
 
     // Signal delivery OUTSIDE the lock to avoid deadlock.
     if session_id != 0 {
         let _ = clear_session_controlling_tty(session_id, idx);
     }
-    if fg_pgid != 0 {
-        let _ = signal_process_group(fg_pgid, SIGHUP);
-        let _ = signal_process_group(fg_pgid, SIGCONT);
+    if let Some(pgrp) = fg_pgrp {
+        let _ = signal_process_group(pgrp.id(), SIGHUP);
+        let _ = signal_process_group(pgrp.id(), SIGCONT);
     }
 
     Ok(true)

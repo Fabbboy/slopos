@@ -6,87 +6,97 @@ use super::fixtures::*;
 // Responsibility Split — PTY Foundation
 // ===========================================================================
 
-// -- 18.4: SessionId / ProcessGroupId newtype tests --
+// -- 18.4: Session / ProcessGroup object tests --
 
-/// SessionId::new(0) returns None (zero is the "no session" sentinel).
+/// Session::new(0) returns None (zero is the "no session" sentinel).
 pub fn test_session_id_zero_is_none() -> TestResult {
-    if SessionId::new(0).is_some() {
-        klog_info!("TTY_TEST: BUG - SessionId::new(0) should be None");
+    if Session::new(0).is_some() {
+        klog_info!("TTY_TEST: BUG - Session::new(0) should be None");
         return TestResult::Fail;
     }
     TestResult::Pass
 }
 
-/// SessionId::new(non-zero) returns Some and round-trips through get().
+/// Session::new(non-zero) round-trips through id().
 pub fn test_session_id_round_trip() -> TestResult {
-    match SessionId::new(42) {
+    match Session::new(42) {
         Some(sid) => {
-            if sid.get() != 42 {
+            if sid.id() != 42 {
                 klog_info!(
-                    "TTY_TEST: BUG - SessionId(42).get() = {}, expected 42",
-                    sid.get()
+                    "TTY_TEST: BUG - Session(42).id() = {}, expected 42",
+                    sid.id()
                 );
                 return TestResult::Fail;
             }
             TestResult::Pass
         }
         None => {
-            klog_info!("TTY_TEST: BUG - SessionId::new(42) returned None");
+            klog_info!("TTY_TEST: BUG - Session::new(42) returned None");
             TestResult::Fail
         }
     }
 }
 
-/// ProcessGroupId::new(0) returns None.
+/// ProcessGroup::new(0, ..) returns None.
 pub fn test_pgrp_id_zero_is_none() -> TestResult {
-    if ProcessGroupId::new(0).is_some() {
-        klog_info!("TTY_TEST: BUG - ProcessGroupId::new(0) should be None");
+    let session = KArc::try_new(Session::new(1).expect("nonzero")).expect("alloc");
+    if ProcessGroup::new(0, session).is_some() {
+        klog_info!("TTY_TEST: BUG - ProcessGroup::new(0, ..) should be None");
         return TestResult::Fail;
     }
     TestResult::Pass
 }
 
-/// ProcessGroupId::new(non-zero) round-trips through get().
+/// ProcessGroup::new(non-zero, ..) round-trips id() and carries its session.
 pub fn test_pgrp_id_round_trip() -> TestResult {
-    match ProcessGroupId::new(99) {
+    let session = KArc::try_new(Session::new(7).expect("nonzero")).expect("alloc");
+    match ProcessGroup::new(99, session) {
         Some(pgid) => {
-            if pgid.get() != 99 {
+            if pgid.id() != 99 {
                 klog_info!(
-                    "TTY_TEST: BUG - ProcessGroupId(99).get() = {}, expected 99",
-                    pgid.get()
+                    "TTY_TEST: BUG - ProcessGroup(99).id() = {}, expected 99",
+                    pgid.id()
+                );
+                return TestResult::Fail;
+            }
+            if pgid.session_id() != 7 {
+                klog_info!(
+                    "TTY_TEST: BUG - ProcessGroup session_id() = {}, expected 7",
+                    pgid.session_id()
                 );
                 return TestResult::Fail;
             }
             TestResult::Pass
         }
         None => {
-            klog_info!("TTY_TEST: BUG - ProcessGroupId::new(99) returned None");
+            klog_info!("TTY_TEST: BUG - ProcessGroup::new(99, ..) returned None");
             TestResult::Fail
         }
     }
 }
 
-/// TtySession uses Option-based fields: new() has None for all IDs.
+/// A fresh TtySession reports no live session or foreground group.
 pub fn test_session_option_fields() -> TestResult {
     let s = TtySession::new();
-    if s.session_leader.is_some() || s.session_id.is_some() || s.fg_pgrp.is_some() {
-        klog_info!("TTY_TEST: BUG - new TtySession should have None for all Option fields");
+    if s.session_id() != 0 || s.fg_pgrp_id() != 0 {
+        klog_info!("TTY_TEST: BUG - new TtySession should report no session/fg group");
         return TestResult::Fail;
     }
     TestResult::Pass
 }
 
-/// After attach(), Option fields are Some; after detach(), they are None.
+/// After attach(), session/fg resolve; after detach(), they read as 0.
 pub fn test_session_option_attach_detach() -> TestResult {
+    let scope = SessionScope::new(10, 20);
     let mut s = TtySession::new();
-    s.attach(10, 20);
-    if s.session_leader.is_none() || s.session_id.is_none() || s.fg_pgrp.is_none() {
-        klog_info!("TTY_TEST: BUG - Option fields should be Some after attach");
+    scope.attach_to(&mut s);
+    if s.session_id() == 0 || s.fg_pgrp_id() == 0 {
+        klog_info!("TTY_TEST: BUG - session/fg should resolve after attach");
         return TestResult::Fail;
     }
     s.detach();
-    if s.session_leader.is_some() || s.session_id.is_some() || s.fg_pgrp.is_some() {
-        klog_info!("TTY_TEST: BUG - Option fields should be None after detach");
+    if s.session_id() != 0 || s.fg_pgrp_id() != 0 {
+        klog_info!("TTY_TEST: BUG - session/fg should read 0 after detach");
         return TestResult::Fail;
     }
     TestResult::Pass

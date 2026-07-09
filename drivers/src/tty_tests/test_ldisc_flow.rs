@@ -484,8 +484,10 @@ pub fn test_vconsole_scroll_at_bottom() -> TestResult {
 
 pub fn test_active_tty_independent_of_fg_pgrp() -> TestResult {
     tty::table::tty_table_init();
-    let _ = tty::set_foreground_pgrp(TtyIndex(0), 100);
-    let _ = tty::set_foreground_pgrp(TtyIndex(1), 200);
+    let scope0 = SessionScope::new(100, 100);
+    let scope1 = SessionScope::new(200, 200);
+    tty::session::test_install_session(TtyIndex(0), scope0.session_weak(), scope0.pgrp_weak());
+    tty::session::test_install_session(TtyIndex(1), scope1.session_weak(), scope1.pgrp_weak());
 
     let before0 = tty::get_foreground_pgrp(TtyIndex(0)).unwrap_or(0);
     let before1 = tty::get_foreground_pgrp(TtyIndex(1)).unwrap_or(0);
@@ -495,6 +497,9 @@ pub fn test_active_tty_independent_of_fg_pgrp() -> TestResult {
     let after0 = tty::get_foreground_pgrp(TtyIndex(0)).unwrap_or(0);
     let after1 = tty::get_foreground_pgrp(TtyIndex(1)).unwrap_or(0);
     let _ = tty::switch_active_tty(TtyIndex(0));
+
+    tty::detach_session(TtyIndex(0));
+    tty::detach_session(TtyIndex(1));
 
     if before0 != after0 || before1 != after1 {
         klog_info!("TTY_TEST: BUG - switch_active_tty modified fg_pgrp state");

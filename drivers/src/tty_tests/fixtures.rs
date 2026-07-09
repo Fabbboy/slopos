@@ -30,10 +30,8 @@ pub(super) use crate::tty::driver::{
     DriverId, InputEvent, InputStatus, SerialConsoleDriver, TtyDriverKind, VConsoleDriver,
 };
 pub(super) use crate::tty::ldisc::{InputAction, LdiscKind, LineDisc, OutputAction, RawDisc};
+pub(super) use crate::tty::session::ForegroundCheck;
 pub(super) use crate::tty::session::TtySession;
-pub(super) use crate::tty::session::{
-    ForegroundCheck, NO_FOREGROUND_PGRP, NO_SESSION, ProcessGroupId, SessionId,
-};
 pub(super) use crate::tty::table::{TTY_OUTPUT_INFLIGHT, TTY_SLOTS};
 pub(super) use crate::tty::vconsole::{
     Cell, CellAttributes, CellGrid, CursorAttributes, VCONSOLE_MAX_COLS, VCONSOLE_MAX_ROWS,
@@ -42,8 +40,48 @@ pub(super) use crate::tty::vconsole::{
 pub(super) use crate::tty::vtparser::{Direction, EraseMode, SgrAttr, VtAction, VtParser};
 pub(super) use crate::tty::{PacketEvents, TtyFlags};
 pub(super) use slopos_abi::file_ops::FileBacking;
+pub(super) use slopos_ostd::task::{ProcessGroup, Session};
 
 pub(super) use slopos_ostd::{KArc, KWeak};
+
+/// Holds strong session + foreground-group refs alive so that a `TtySession`'s
+/// weak links resolve for the duration of a test. A `TtySession` only stores
+/// `KWeak`s; keep the owning `SessionScope` in scope across the assertions.
+pub(super) struct SessionScope {
+    pub(super) session: KArc<Session>,
+    pub(super) pgrp: KArc<ProcessGroup>,
+}
+
+impl SessionScope {
+    /// A live session `sid` whose foreground group is `pgid`.
+    pub(super) fn new(sid: u32, pgid: u32) -> Self {
+        let session =
+            KArc::try_new(Session::new(sid).expect("nonzero sid")).expect("alloc session");
+        let pgrp = KArc::try_new(ProcessGroup::new(pgid, session.clone()).expect("nonzero pgid"))
+            .expect("alloc pgrp");
+        Self { session, pgrp }
+    }
+
+    pub(super) fn session_weak(&self) -> KWeak<Session> {
+        KArc::downgrade(&self.session)
+    }
+
+    pub(super) fn pgrp_weak(&self) -> KWeak<ProcessGroup> {
+        KArc::downgrade(&self.pgrp)
+    }
+
+    /// Attach this scope's session + foreground group to a bare `TtySession`.
+    pub(super) fn attach_to(&self, s: &mut TtySession) {
+        s.attach(self.session_weak(), self.pgrp_weak());
+    }
+
+    /// Mint an additional foreground-group candidate `pgid` inside this scope's
+    /// session (for `set_fg_pgrp*`). The caller keeps the handle alive.
+    pub(super) fn extra_group(&self, pgid: u32) -> KArc<ProcessGroup> {
+        KArc::try_new(ProcessGroup::new(pgid, self.session.clone()).expect("nonzero pgid"))
+            .expect("alloc pgrp")
+    }
+}
 
 pub(super) fn boxed_vconsole_state() -> slopos_ostd::KBox<VConsoleState> {
     let mut state = slopos_ostd::KBox::try_init(VConsoleState::init_default()).expect("test alloc");

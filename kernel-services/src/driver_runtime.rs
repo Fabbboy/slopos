@@ -34,6 +34,9 @@ slopos_service_core::define_service! {
         register_idle_wakeup_callback(callback: Option<fn() -> c_int>);
         signal_process_group(pgid: u32, signum: u8) -> bool;
         signal_session(sid: u32, signum: u8) -> bool;
+        pgrp_handle(pgid: u32) -> Option<slopos_ostd::KWeak<slopos_ostd::task::ProcessGroup>>;
+        session_handle(sid: u32) -> Option<slopos_ostd::KWeak<slopos_ostd::task::Session>>;
+        current_task_pgrp_handle() -> Option<slopos_ostd::KWeak<slopos_ostd::task::ProcessGroup>>;
         pgrp_exists_in_session(pgid: u32, sid: u32) -> bool;
         is_current_signal_blocked_or_ignored(signum: u8) -> bool;
         is_pgrp_orphaned(pgid: u32, sid: u32) -> bool;

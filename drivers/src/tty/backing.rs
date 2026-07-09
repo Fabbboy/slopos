@@ -195,7 +195,7 @@ fn console_last_close(idx: TtyIndex) {
             .termios()
             .control_flags()
             .contains(ControlFlags::HUPCL);
-        let sid = tty.session.session_id_raw();
+        let sid = tty.session.session_id();
         // HUPCL fires only when a session is attached (sid != 0). Without
         // a session there is no process group to receive SIGHUP and no DTR
         // line to drop (QEMU serial is virtual). POSIX allows this: HUPCL

@@ -12,6 +12,7 @@ pub mod accessors;
 pub mod exit_info;
 pub mod fpu;
 pub mod handles;
+pub mod job_control;
 pub mod kernel_task;
 pub mod link_roles;
 pub mod spawner;
@@ -21,6 +22,7 @@ pub mod task;
 pub mod test_reports;
 
 pub use exit_info::ExitInfo;
+pub use job_control::{ProcessGroup, Session, new_group_in_session, new_session_group};
 pub use kernel_task::SchedPlacement;
 pub use link_roles::{ReadyQueueRole, RemoteWakeRole, ZombieListRole};
 pub use state::{TaskState, TaskStateView};

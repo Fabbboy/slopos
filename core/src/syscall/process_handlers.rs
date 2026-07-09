@@ -5,12 +5,14 @@ use slopos_abi::syscall::{ARCH_GET_FS, ARCH_SET_FS, ENOSYS_RETURN, FUTEX_WAIT, F
 use slopos_abi::task::{INVALID_TASK_ID, TaskPriority};
 use slopos_fs::vfs::traits::VfsError;
 use slopos_ostd::KVec;
+use slopos_ostd::task::{new_group_in_session, new_session_group};
 use slopos_ostd::user::context::UserContext;
 use slopos_sched::scheduler::task_wait_for;
 use slopos_sched::task::{
     task_borrow, task_borrow_mut, task_consume_zombie, task_cpu_affinity,
     task_default_signals_in_mask, task_find_by_id, task_fork, task_peek_exit_info, task_pgid,
-    task_reset_caught_handlers, task_set_cpu_affinity, task_set_fs_base, task_terminate,
+    task_process_group, task_reset_caught_handlers, task_session, task_set_cpu_affinity,
+    task_set_fs_base, task_terminate,
 };
 
 use slopos_arch::cpu;
@@ -528,7 +530,20 @@ define_syscall!(syscall_setpgid
         return Err(Errno::EINVAL);
     }
 
-    if resolved_pgid != resolved_pid {
+    // Resolve the group object the target should carry, mirroring the integer
+    // pgid it is about to hold.
+    let new_group = if resolved_pgid == resolved_pid {
+        // Become a new group leader within the current session — unless the
+        // target already leads exactly this group.
+        match task_process_group(target_ptr) {
+            Some(existing) if existing.id() == resolved_pgid => Some(existing),
+            _ => {
+                let session = task_session(target_ptr).ok_or(Errno::EPERM)?;
+                Some(new_group_in_session(resolved_pgid, session).ok_or(Errno::ENOMEM)?)
+            }
+        }
+    } else {
+        // Join an existing group: its leader must exist and share the session.
         let leader_ptr = task_find_by_id(resolved_pgid);
         if leader_ptr.is_null() {
             return Err(Errno::EINVAL);
@@ -537,9 +552,11 @@ define_syscall!(syscall_setpgid
         if leader.sid != caller_sid {
             return Err(Errno::EINVAL);
         }
-    }
+        Some(task_process_group(leader_ptr).ok_or(Errno::EINVAL)?)
+    };
 
     target.pgid = resolved_pgid;
+    target.process_group = new_group;
     Ok(())
 });
 
@@ -555,11 +572,15 @@ define_syscall!(syscall_setsid (ctx)
     if task.pgid == task.task_id || task.sid == task.task_id {
         return Err(Errno::EPERM);
     }
+    // A fresh session + its initial group; installing them drops the old group
+    // membership (so the old session and any terminal weak links to it die).
+    let pg = new_session_group(task.task_id).ok_or(Errno::ENOMEM)?;
     if task.controlling_tty.is_some() {
         task.controlling_tty = None;
     }
     task.sid = task.task_id;
     task.pgid = task.task_id;
+    task.process_group = Some(pg);
     Ok(task.sid)
 });
 

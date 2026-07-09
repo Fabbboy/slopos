@@ -31,11 +31,12 @@ use slopos_mm::process_vm::{
 use slopos_ostd::klog_info;
 
 use slopos_abi::task::INVALID_TASK_ID;
+use slopos_ostd::task::new_group_in_session;
 use slopos_sched::scheduler::publish_new_task;
 use slopos_sched::task::{
     TaskEntry, task_borrow, task_borrow_mut, task_default_signals_in_mask,
-    task_entry_from_kernel_va, task_process_id, task_set_context_rip_rsp, task_set_entry_point,
-    task_set_fs_base, task_user_ctx_mut,
+    task_entry_from_kernel_va, task_process_group, task_process_id, task_session,
+    task_set_context_rip_rsp, task_set_entry_point, task_set_fs_base, task_user_ctx_mut,
 };
 use slopos_sched::task::{task_create, task_find_by_id, task_get_info, task_terminate};
 
@@ -286,10 +287,16 @@ pub fn spawn_program_with_attrs(
                 if let (Some(parent), Some(child)) =
                     (task_borrow(parent_ptr), task_borrow_mut(task_info))
                 {
+                    // Point the child's group object at the same identity its
+                    // inherited pgid names: a fresh group in the parent's
+                    // session for NEW_PGRP, otherwise the parent's own group.
                     if flags & slopos_abi::task::TASK_FLAG_NEW_PGRP != 0 {
                         child.pgid = task_id;
+                        child.process_group =
+                            task_session(parent_ptr).and_then(|s| new_group_in_session(task_id, s));
                     } else {
                         child.pgid = parent.pgid;
+                        child.process_group = task_process_group(parent_ptr);
                     }
                     child.sid = parent.sid;
                     child.controlling_tty = parent.controlling_tty;

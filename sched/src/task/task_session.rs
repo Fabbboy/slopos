@@ -2,13 +2,54 @@ use core::ffi::c_void;
 
 use slopos_abi::signal::SIGCHLD;
 use slopos_abi::syscall::TtyIndex;
+use slopos_ostd::task::{ProcessGroup, Session};
+use slopos_ostd::{KArc, KWeak};
 
 use super::task_accessors::{
     task_clear_controlling_tty_for, task_id_of, task_parent_task_id, task_signal_post, task_tgid,
     task_wake_all_waiters,
 };
-use super::task_table::{task_find_by_id, task_iterate_active};
+use super::task_table::{task_find_by_id, task_iterate_active, with_task_manager};
 use super::{INVALID_TASK_ID, Task};
+
+/// Resolve a live weak handle to the process group `pgid` names, by
+/// downgrading a current member's strong handle. `None` when no live member
+/// carries a group object for `pgid`. Runs under the task-manager lock so it
+/// never races slot recycle (which drops the member handle under the same lock).
+pub fn pgrp_handle_for_pgid(pgid: u32) -> Option<KWeak<ProcessGroup>> {
+    if pgid == 0 {
+        return None;
+    }
+    with_task_manager(|mgr| {
+        for task in mgr.iter_tasks() {
+            if task.pgid == pgid {
+                if let Some(pg) = task.process_group.as_ref() {
+                    return Some(KArc::downgrade(pg));
+                }
+            }
+        }
+        None
+    })
+}
+
+/// Resolve a live weak handle to the session `sid` names, by downgrading a
+/// current member's session handle. `None` when no live member carries a group
+/// object for `sid`.
+pub fn session_handle_for_sid(sid: u32) -> Option<KWeak<Session>> {
+    if sid == 0 {
+        return None;
+    }
+    with_task_manager(|mgr| {
+        for task in mgr.iter_tasks() {
+            if task.sid == sid {
+                if let Some(pg) = task.process_group.as_ref() {
+                    return Some(KArc::downgrade(pg.session()));
+                }
+            }
+        }
+        None
+    })
+}
 
 struct ClearControllingTtyContext {
     session_id: u32,

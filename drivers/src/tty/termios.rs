@@ -531,13 +531,17 @@ pub fn set_winsize(idx: TtyIndex, ws: &UserWinsize) -> Result<(), TtyError> {
                         // Slave targeted directly: its own session carries
                         // the foreground job.
                         if changed {
-                            deferred.add_signal(tty.session.fg_pgrp_raw(), SIGWINCH);
+                            if let Some(pg) = tty.session.fg_pgrp_handle() {
+                                deferred.add_signal(pg, SIGWINCH);
+                            }
                         }
                     }
                     _ => {
                         peer_pin = None;
                         if changed {
-                            deferred.add_signal(tty.session.fg_pgrp_raw(), SIGWINCH);
+                            if let Some(pg) = tty.session.fg_pgrp_handle() {
+                                deferred.add_signal(pg, SIGWINCH);
+                            }
                         }
                     }
                 }
@@ -555,7 +559,9 @@ pub fn set_winsize(idx: TtyIndex, ws: &UserWinsize) -> Result<(), TtyError> {
             changed = changed || old.ws_row != ws.ws_row || old.ws_col != ws.ws_col;
             if target_is_master && changed {
                 // The peer is the slave: signal ITS foreground job.
-                deferred.add_signal(peer_tty.session.fg_pgrp_raw(), SIGWINCH);
+                if let Some(pg) = peer_tty.session.fg_pgrp_handle() {
+                    deferred.add_signal(pg, SIGWINCH);
+                }
             }
         }
     }

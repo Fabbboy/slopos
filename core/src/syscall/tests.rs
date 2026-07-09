@@ -35,10 +35,10 @@ use slopos_mm::paging_defs::PageFlags;
 use slopos_mm::process_vm::{process_vm_alloc, process_vm_get_stack_top};
 use slopos_mm::user_copy::{copy_from_user, copy_to_user, set_test_process_id};
 use slopos_mm::user_ptr::UserPtr;
-use slopos_ostd::KBox;
-use slopos_ostd::klog_info;
 use slopos_ostd::task::SchedPlacement;
+use slopos_ostd::task::{new_group_in_session, new_session_group};
 use slopos_ostd::user::context::UserContext;
+use slopos_ostd::{KArc, KBox, klog_info};
 use slopos_sched::task_struct::{SignalAction, Task};
 use slopos_testing::{TestResult, assert_eq_test, assert_not_null, assert_test, fail, pass};
 
@@ -57,7 +57,7 @@ use slopos_sched::scheduler::unblock_task;
 use slopos_sched::task;
 use slopos_sched::task::{
     task_clone, task_controlling_tty, task_create, task_find_by_id, task_fork, task_fs_base,
-    task_pgid, task_process_id, task_sched_placement_store, task_set_state,
+    task_pgid, task_process_group, task_process_id, task_sched_placement_store, task_set_state,
     task_set_state_from_with_reason, task_sid, task_signal_pending, task_status, task_terminate,
     task_try_transition_from,
 };
@@ -514,6 +514,89 @@ pub fn test_kill_process_group_semantics() -> TestResult {
 
     task_terminate(member_id);
     task_terminate(leader_id);
+    TestResult::Pass
+}
+
+/// A user task is born its own process-group leader with a live group object;
+/// fork shares that object by identity; setsid installs a fresh one.
+pub fn test_process_group_object_fork_and_setsid_identity() -> TestResult {
+    let _fixture = SyscallFixture::new();
+
+    let parent_id = create_test_user_task();
+    assert_test!(parent_id != INVALID_TASK_ID);
+    let parent_ptr = task_find_by_id(parent_id);
+    assert_not_null!(parent_ptr);
+
+    let parent_pg = task_process_group(parent_ptr).expect("parent carries a process group");
+    assert_eq_test!(parent_pg.id(), parent_id, "leader group id == leader pid");
+    assert_eq_test!(
+        parent_pg.session_id(),
+        parent_id,
+        "leader session id == leader pid"
+    );
+
+    let child_id = task_fork(parent_ptr, core::ptr::null());
+    assert_test!(child_id != INVALID_TASK_ID);
+    task_set_state(child_id, TaskStatus::Blocked);
+    let child_ptr = task_find_by_id(child_id);
+    assert_not_null!(child_ptr);
+
+    let child_pg = task_process_group(child_ptr).expect("child inherits a process group");
+    assert_test!(
+        KArc::ptr_eq(&parent_pg, &child_pg),
+        "fork shares the parent's group object by identity"
+    );
+
+    // setsid on the child swaps to a brand-new session + group.
+    let mut setsid_frame = zero_frame();
+    let _ =
+        crate::syscall::dispatch::dispatch_handler(syscall_setsid, child_ptr, &mut setsid_frame);
+    let child_pg2 = task_process_group(child_ptr).expect("child group after setsid");
+    assert_test!(
+        !KArc::ptr_eq(&parent_pg, &child_pg2),
+        "setsid installs a new group object"
+    );
+    assert_eq_test!(child_pg2.id(), child_id, "new group id == child pid");
+    assert_eq_test!(
+        child_pg2.session_id(),
+        child_id,
+        "new session id == child pid"
+    );
+
+    task_terminate(child_id);
+    task_terminate(parent_id);
+    TestResult::Pass
+}
+
+/// The strong graph `ProcessGroup -> Session` is a DAG kept alive by member
+/// tasks: a session outlives every group that belongs to it and is freed only
+/// when the last group drops. A weak handle proves the death.
+pub fn test_process_group_session_dag_lifetime() -> TestResult {
+    let _fixture = SyscallFixture::new();
+
+    let pg = new_session_group(42).expect("mint session+group");
+    assert_eq_test!(pg.id(), 42, "group id");
+    assert_eq_test!(pg.session_id(), 42, "session id == leader pid");
+
+    let session_weak = KArc::downgrade(pg.session());
+
+    // A second group inside the same session pins that session.
+    let pg2 = new_group_in_session(43, pg.session().clone()).expect("mint second group");
+    assert_eq_test!(pg2.session_id(), 42, "second group shares the session");
+
+    // Dropping the first group leaves the session alive via the second.
+    drop(pg);
+    assert_test!(
+        session_weak.upgrade().is_some(),
+        "session alive while any group lives"
+    );
+
+    // Dropping the last group frees the session — the weak goes dead.
+    drop(pg2);
+    assert_test!(
+        session_weak.upgrade().is_none(),
+        "session freed when its last group drops"
+    );
     TestResult::Pass
 }
 
@@ -3793,6 +3876,14 @@ slopos_testing::stest!(
     suite = syscall_valid
 );
 slopos_testing::stest!(
+    name = test_process_group_object_fork_and_setsid_identity,
+    suite = syscall_valid
+);
+slopos_testing::stest!(
+    name = test_process_group_session_dag_lifetime,
+    suite = syscall_valid
+);
+slopos_testing::stest!(
     name = test_tiocsctty_session_leader_acquires_ctty,
     suite = syscall_valid
 );
@@ -3904,6 +3995,14 @@ slopos_testing::stest!(
 );
 slopos_testing::stest!(
     name = test_kill_process_group_semantics,
+    suite = syscall_compat_smoke
+);
+slopos_testing::stest!(
+    name = test_process_group_object_fork_and_setsid_identity,
+    suite = syscall_compat_smoke
+);
+slopos_testing::stest!(
+    name = test_process_group_session_dag_lifetime,
     suite = syscall_compat_smoke
 );
 slopos_testing::stest!(
