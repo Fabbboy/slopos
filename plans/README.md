@@ -15,10 +15,9 @@ editing.
 | Document | Scope |
 |----------|-------|
 | `KNOWN_ISSUES.md` | Working notes on open issues; verify before using as source of truth |
-| `RAW_PTR_TO_KARC_MIGRATION.md` | Migrate `Task` from raw-pointer+refcount sharing to `KArc` |
+| `RAW_PTR_TO_KARC_MIGRATION.md` | Own tasks with `KArc<Task>`: delete the permanent task pool, hand-rolled refcnt, and generation identity; deferred final drop + placement-token ownership |
 | `driver-framework-base.html` | Driver-framework base: unified Bus model, platform/ACPI registry, deferred-probe/hotplug/unbind |
 | `microtransactions.md` | Kernel microtransaction layer on W/L currency; Phase 1 = pay-to-boot gate |
-| `resource-lifetime-redesign.md` | Single-owner, Drop-driven lifetime for TTY/PTY; spawn fd-action ABI; ring file refs |
 | `usb-xhci.md` | USB/xHCI stack: host controller, enumeration, HID input, mass storage |
 
 ## When To Promote A Plan
