@@ -289,7 +289,7 @@ _build-run-tests:
     mkdir -p {{build_dir}}
     cd tools/run_tests && go build -o ../../{{build_dir}}/run_tests .
 
-[doc("Run the SlopOS test harness — live progress bar, per-failure detail, FILTER='glob' supported")]
+[doc("Run the SlopOS test harness — live progress bar, per-failure detail; pass a 'glob' filter as the positional argument")]
 test FILTER='': _build-run-tests
     {{build_dir}}/run_tests --filter "{{FILTER}}"
 

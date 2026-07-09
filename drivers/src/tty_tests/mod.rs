@@ -247,7 +247,7 @@ slopos_testing::stest!(
     suite = tty
 );
 slopos_testing::stest!(name = test_check_read_sole_gate_background, suite = tty);
-slopos_testing::stest!(name = test_tty_open_count_lifecycle, suite = tty);
+slopos_testing::stest!(name = test_backing_strong_count_is_open_count, suite = tty);
 slopos_testing::stest!(
     name = test_tty_hangup_sets_flag_and_detaches_session,
     suite = tty
@@ -551,18 +551,21 @@ slopos_testing::stest!(name = test_dispatch_macro_raw_routing, suite = tty);
 slopos_testing::stest!(name = test_process_output_byte_dispatch, suite = tty);
 slopos_testing::stest!(name = test_edit_content_dispatch, suite = tty);
 // /dev/tty Controlling Terminal Device
-slopos_testing::stest!(name = test_open_ref_second_fd_increments_count, suite = tty);
+slopos_testing::stest!(
+    name = test_second_open_bumps_backing_strong_count,
+    suite = tty
+);
 slopos_testing::stest!(
     name = test_dev_tty_operations_identical_to_direct,
     suite = tty
 );
-slopos_testing::stest!(name = test_open_ref_does_not_modify_session, suite = tty);
+slopos_testing::stest!(name = test_open_tty_does_not_modify_session, suite = tty);
 slopos_testing::stest!(
-    name = test_open_ref_invalid_index_returns_error,
+    name = test_open_tty_invalid_index_returns_error,
     suite = tty
 );
-slopos_testing::stest!(name = test_close_ref_decrements_after_open, suite = tty);
-slopos_testing::stest!(name = test_multiple_open_ref_sequential, suite = tty);
+slopos_testing::stest!(name = test_last_close_releases_backing, suite = tty);
+slopos_testing::stest!(name = test_sequential_opens_share_backing, suite = tty);
 slopos_testing::stest!(name = test_dev_tty_winsize_matches_direct, suite = tty);
 // Background Write Protection (SIGTTOU on tcsetattr)
 slopos_testing::stest!(name = test_tcsetattr_background_blocked, suite = tty);

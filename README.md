@@ -78,7 +78,7 @@ just boot           # spins the wheel
 QEMU_DISPLAY=cocoa just boot                       # force a display backend (macOS auto-detects Cocoa)
 QEMU_FB_WIDTH=2560 QEMU_FB_HEIGHT=1440 just boot   # manual framebuffer override
 just ports=7777,8080 boot                          # expose guest ports on the host
-just test FILTER='mm::*'                           # run a subset of the tests
+just test 'mm::*'                                  # run a subset of the tests
 just boot-debug                                    # QEMU GDB stub on :1234
 ```
 

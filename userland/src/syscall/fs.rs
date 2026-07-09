@@ -291,8 +291,8 @@ pub fn tiocsctty(fd: RawFd) -> SyscallResult<()> {
     demux(result).map(|_| ())
 }
 
-/// Open the PTY slave peer of a master FD (TIOCGPTPEER ioctl).
-/// Properly calls pty_open_slave in the kernel, incrementing open_count.
+/// Open the PTY slave peer of a master FD (TIOCGPTPEER ioctl). The new fd
+/// shares the slave's open state with every other slave fd.
 #[inline(always)]
 pub fn ioctl_tiocgptpeer(master_fd: RawFd) -> SyscallResult<super::OwnedFd> {
     let result = unsafe { syscall3(SYSCALL_IOCTL, master_fd as u64, TIOCGPTPEER, 0) };

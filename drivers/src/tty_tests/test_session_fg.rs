@@ -591,7 +591,7 @@ pub fn test_tiocnotty_constant() -> TestResult {
 /// A second open of the same console index clones the one backing; its
 /// strong count is the live open count — the mechanism `/dev/tty` relies
 /// on (a second FD referencing the caller's controlling terminal).
-pub fn test_open_ref_second_fd_increments_count() -> TestResult {
+pub fn test_second_open_bumps_backing_strong_count() -> TestResult {
     tty::table::tty_table_init();
     let idx = TtyIndex(0);
     let con1 = match tty::open_tty(idx) {
@@ -677,7 +677,7 @@ pub fn test_dev_tty_operations_identical_to_direct() -> TestResult {
 
 /// Opening a TTY does NOT modify session state — opening `/dev/tty` only
 /// accesses an existing controlling terminal, never acquires one.
-pub fn test_open_ref_does_not_modify_session() -> TestResult {
+pub fn test_open_tty_does_not_modify_session() -> TestResult {
     let idx = TtyIndex(0);
     // Snapshot session state before opening.
     let (sid_before, fg_before) = {
@@ -729,7 +729,7 @@ pub fn test_open_ref_does_not_modify_session() -> TestResult {
 
 /// Opening an invalid TTY index returns `InvalidIndex`, matching the ENXIO
 /// semantics when `/dev/tty` resolution fails.
-pub fn test_open_ref_invalid_index_returns_error() -> TestResult {
+pub fn test_open_tty_invalid_index_returns_error() -> TestResult {
     let bad = TtyIndex(u8::MAX);
     match tty::open_tty(bad) {
         Err(TtyError::InvalidIndex) => TestResult::Pass,
@@ -751,7 +751,7 @@ pub fn test_open_ref_invalid_index_returns_error() -> TestResult {
 /// Dropping the last open releases the backing — the registry weak then
 /// fails to upgrade, confirming the `/dev/tty` FD lifecycle pairs cleanly
 /// with the device FD.
-pub fn test_close_ref_decrements_after_open() -> TestResult {
+pub fn test_last_close_releases_backing() -> TestResult {
     tty::table::tty_table_init();
     let idx = TtyIndex(0);
     // A freshly-initialised console has zero opens: nothing to upgrade.
@@ -793,7 +793,7 @@ pub fn test_close_ref_decrements_after_open() -> TestResult {
 
 /// Multiple opens of the same console index all clone the one backing; the
 /// shared strong count grows with each open.
-pub fn test_multiple_open_ref_sequential() -> TestResult {
+pub fn test_sequential_opens_share_backing() -> TestResult {
     tty::table::tty_table_init();
     let idx = TtyIndex(0);
     let c1 = match tty::open_tty(idx) {
@@ -2245,7 +2245,7 @@ slopos_testing::stest!(
 );
 slopos_testing::stest!(name = test_tiocnotty_constant, suite = tty_test_session_fg);
 slopos_testing::stest!(
-    name = test_open_ref_second_fd_increments_count,
+    name = test_second_open_bumps_backing_strong_count,
     suite = tty_test_session_fg
 );
 slopos_testing::stest!(
@@ -2253,19 +2253,19 @@ slopos_testing::stest!(
     suite = tty_test_session_fg
 );
 slopos_testing::stest!(
-    name = test_open_ref_does_not_modify_session,
+    name = test_open_tty_does_not_modify_session,
     suite = tty_test_session_fg
 );
 slopos_testing::stest!(
-    name = test_open_ref_invalid_index_returns_error,
+    name = test_open_tty_invalid_index_returns_error,
     suite = tty_test_session_fg
 );
 slopos_testing::stest!(
-    name = test_close_ref_decrements_after_open,
+    name = test_last_close_releases_backing,
     suite = tty_test_session_fg
 );
 slopos_testing::stest!(
-    name = test_multiple_open_ref_sequential,
+    name = test_sequential_opens_share_backing,
     suite = tty_test_session_fg
 );
 slopos_testing::stest!(

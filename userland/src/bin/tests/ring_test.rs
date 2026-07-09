@@ -199,8 +199,8 @@ fn test_cancel() -> bool {
 /// loopback does not complete its handshake in the test environment (a
 /// pre-existing netstack limitation, unrelated to the ring), so this
 /// proves the socket dispatch deterministically instead: an OP_WRITE on a
-/// freshly-created, *unconnected* TCP socket must route through
-/// `file_write_fd_nonblock` → the socket write op and complete inline with
+/// freshly-created, *unconnected* TCP socket must route through the
+/// nonblocking write probe → the socket write op and complete inline with
 /// a socket-specific negative errno (e.g. -ENOTCONN) — never blocking,
 /// never crashing, never mis-dispatched to a pipe. The OP_READ/OP_WRITE
 /// *data* path is the same `file_read_fd`/`file_write_fd` code proven by

@@ -686,7 +686,7 @@ fn run_in_child(
     // must never claim the terminal): the child claims the terminal for its
     // own pgrp itself, racing the parent's `enter_foreground` so whichever
     // lands first wins (both set the same value).  Must happen *before*
-    // the default_signal() calls below — at this point SIGTTOU is still
+    // the sigdefault reset below — at this point SIGTTOU is still
     // inherited-ignored from the shell, so the not-yet-foreground child's
     // tcsetpgrp proceeds instead of being denied.
     if foreground {

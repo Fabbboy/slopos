@@ -876,7 +876,7 @@ pub fn test_check_read_sole_gate_background() -> TestResult {
     }
 }
 
-pub fn test_tty_open_count_lifecycle() -> TestResult {
+pub fn test_backing_strong_count_is_open_count() -> TestResult {
     tty::table::tty_table_init();
 
     // The strong count of the backing is the open count; each clone is
@@ -3600,7 +3600,7 @@ slopos_testing::stest!(
     suite = tty_test_ldisc_core
 );
 slopos_testing::stest!(
-    name = test_tty_open_count_lifecycle,
+    name = test_backing_strong_count_is_open_count,
     suite = tty_test_ldisc_core
 );
 slopos_testing::stest!(
