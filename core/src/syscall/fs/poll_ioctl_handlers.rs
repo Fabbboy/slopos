@@ -12,7 +12,7 @@ use slopos_abi::syscall::{
 };
 
 use slopos_fs::fileio::{
-    file_get_tty_index, file_open_tty_fd, file_poll_fused, file_poll_unfused_by_idx,
+    file_get_tty_index, file_open_tty_fd, file_poll_fused, file_poll_unfused_by_token,
 };
 
 use slopos_kernel_services::driver_runtime::{
@@ -290,7 +290,7 @@ define_syscall!(syscall_poll
 
         let cleanup = |reg_count: usize, ofis: &[u64]| {
             for &ofi in &ofis[..reg_count] {
-                file_poll_unfused_by_idx(ofi);
+                file_poll_unfused_by_token(ofi);
             }
         };
         let writeback = |cached: &[u16], nfds: usize| -> Result<(), Errno> {
@@ -510,7 +510,7 @@ define_syscall!(syscall_select
 
         let cleanup = |reg_count: usize, ofis: &[u64]| {
             for &ofi in &ofis[..reg_count] {
-                file_poll_unfused_by_idx(ofi);
+                file_poll_unfused_by_token(ofi);
             }
         };
 

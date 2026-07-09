@@ -136,42 +136,6 @@ pub fn openpty() -> Result<(super::OwnedFd, u32), i64> {
     }
 }
 
-/// Open a file descriptor for a TTY by its kernel index.
-#[inline(always)]
-pub fn open_tty_fd(tty_idx: u32) -> Result<super::OwnedFd, i64> {
-    let ret = unsafe { syscall1(SYSCALL_OPEN_TTY_FD, tty_idx as u64) as i64 };
-    if ret < 0 {
-        Err(ret)
-    } else {
-        // SAFETY: ret is a valid fd just returned by the kernel.
-        Ok(unsafe { super::OwnedFd::from_raw(ret as i32) })
-    }
-}
-
-#[inline(always)]
-pub fn tty_read(idx: u32, buf: &mut [u8]) -> i64 {
-    unsafe {
-        syscall3(
-            SYSCALL_TTY_READ,
-            idx as u64,
-            buf.as_mut_ptr() as u64,
-            buf.len() as u64,
-        ) as i64
-    }
-}
-
-#[inline(always)]
-pub fn tty_write(idx: u32, buf: &[u8]) -> i64 {
-    unsafe {
-        syscall3(
-            SYSCALL_TTY_WRITE,
-            idx as u64,
-            buf.as_ptr() as u64,
-            buf.len() as u64,
-        ) as i64
-    }
-}
-
 #[inline(always)]
 pub fn waitpid_nohang(task_id: u32) -> Option<i32> {
     let rc = unsafe { syscall2(SYSCALL_WAITPID, task_id as u64, 1) as i64 };

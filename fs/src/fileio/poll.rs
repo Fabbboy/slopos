@@ -91,7 +91,7 @@ pub fn file_poll_unregister_fd(reg: &PollRegInfo) {
 // `file_poll_fused` is the kernel-internal poll ABI used by `poll`/`select`
 // and the SlopRing harvest. The ABI carries an opaque `u64` token
 // (`FusedPollResult::open_file_token`) the caller later hands back to
-// `file_poll_unfused_by_idx` to unregister from the wait queue. The token is
+// `file_poll_unfused_by_token` to unregister from the wait queue. The token is
 // now an opaque *registration id* resolving (in this table) to a
 // `KWeak<OpenFile>`: the registration NEVER keeps the open file alive, and a
 // dead registration upgrades to `None` so it can never touch a reused slot or
@@ -156,20 +156,11 @@ pub fn file_poll_fused(
     .unwrap_or(invalid)
 }
 
-/// Unregister from a wait queue after fused poll.
-pub fn file_poll_unfused(process_id: u32, fd: c_int) {
-    let _ = with_pid_slot(process_id, |inner| {
-        if let Some(open_file) = snapshot_open_file(inner, fd) {
-            open_file.ops.poll_unwait(open_file.handle);
-        }
-    });
-}
-
 /// Unregister from a wait queue using the opaque registration token from
 /// [`file_poll_fused`]. Upgrade-or-skip: a token whose open file was
 /// already dropped is silently discarded — the backing teardown cleared
 /// its own wait queue, and the weak can never resurrect a reused slot.
-pub fn file_poll_unfused_by_idx(open_file_token: u64) {
+pub fn file_poll_unfused_by_token(open_file_token: u64) {
     let Some(weak) = poll_reg_take(open_file_token) else {
         return;
     };
@@ -181,7 +172,7 @@ pub fn file_poll_unfused_by_idx(open_file_token: u64) {
 // ── Poll-registration leak guard (task-lifecycle teardown) ──────────────────
 //
 // `poll`/`select`/`ring` register fds on wait queues via `file_poll_fused` and
-// normally unregister via `file_poll_unfused_by_idx` the moment the task wakes.
+// normally unregister via `file_poll_unfused_by_token` the moment the task wakes.
 // A task that is SIGKILL'd *while blocked* never resumes its syscall, so that
 // unregister is skipped and a stale wait-queue entry would linger. Every
 // outstanding registration token is recorded per-task here; the registered
@@ -234,7 +225,7 @@ pub fn fileio_poll_cleanup_task(task_id: u32) {
     };
     if let Some(tokens) = tokens {
         for &token in tokens.iter() {
-            file_poll_unfused_by_idx(token);
+            file_poll_unfused_by_token(token);
         }
     }
 }

@@ -47,9 +47,9 @@ pub use crate::syscall::test_handlers::{
 };
 pub use crate::syscall::ui_handlers::{
     syscall_clipboard_copy, syscall_clipboard_paste, syscall_cursor_move, syscall_cursor_set_image,
-    syscall_fb_flip, syscall_fb_info, syscall_getrandom, syscall_input_poll_batch,
-    syscall_open_tty_fd, syscall_openpty, syscall_roulette_draw, syscall_roulette_result,
-    syscall_roulette_spin, syscall_set_display_mode, syscall_tty_read, syscall_tty_write,
+    syscall_fb_flip, syscall_fb_info, syscall_getrandom, syscall_input_poll_batch, syscall_openpty,
+    syscall_roulette_draw, syscall_roulette_result, syscall_roulette_spin,
+    syscall_set_display_mode,
 };
 
 /// Build the static syscall dispatch table from a compact registration list.
@@ -133,9 +133,6 @@ static SYSCALL_TABLE: [SyscallEntry; SYSCALL_TABLE_SIZE] = syscall_table! {
 
     // TTY
     [SYSCALL_OPENPTY]       => syscall_openpty,       "openpty";
-    [SYSCALL_TTY_READ]      => syscall_tty_read,      "tty_read";
-    [SYSCALL_TTY_WRITE]     => syscall_tty_write,     "tty_write";
-    [SYSCALL_OPEN_TTY_FD]   => syscall_open_tty_fd,   "open_tty_fd";
 
     // Compositor framebuffer
     [SYSCALL_FB_FLIP]             => syscall_fb_flip,             "fb_flip";

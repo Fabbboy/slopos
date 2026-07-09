@@ -55,19 +55,17 @@ whole-table clone:
   `default_signal` calls (kept because execve preserves SIG_IGN and an in-child
   builtin never execs).
 
+Index-addressed TTY I/O is retired: `syscall_tty_read` / `syscall_tty_write` /
+`syscall_open_tty_fd` (146-148) and their userland wrappers are gone — TTY access
+is fd-only (`read`/`write` on fds 0/1/2, `openpty`, `/dev/pts/N`, `/dev/ptmx`,
+`/dev/tty`). The poll wait-queue release path is opaque-token → `KWeak<OpenFile>`
+only (`file_poll_unfused_by_token`, backed by `POLL_REG_TABLE`, with a task-death
+leak-guard); the dead fd-resnapshot release variant is removed. `read_cooked` /
+`write_bytes` stay as ldisc internals behind the fd path.
+
 ---
 
 ## 1. Diagnosis — what is still architecturally wrong
-
-### D2 (residue) — index-addressed I/O syscalls bypass ownership
-`syscall_tty_read=146` / `syscall_tty_write=147`
-(`core/src/syscall/ui_handlers.rs`; `abi/src/syscall/numbers.rs:76-77`) address a
-TTY by raw `TtyIndex` and call `tty::read_cooked` / `tty::write_bytes` with **no
-fd, no backing, no ownership check**. A stale or guessed index reads/writes a
-PTY the caller never opened. `file_poll_unfused_by_idx`
-(`fs/src/fileio/poll.rs`) keeps an index-keyed release path alive alongside the
-`KWeak`-backed registrations. `syscall_open_tty_fd=148` opens any TTY by raw
-index with no policy.
 
 ### D5 — the ring holds an fd integer, not a file reference
 `ring/src/ring_obj.rs` stores `fd: i32` "re-validated each probe". Userland can
@@ -97,42 +95,11 @@ defence-in-depth. `distinct_inflight_fds` keys off reference identity
 
 ---
 
-## 3. What gets deleted
-
-| Deleted | Location | Subsumed by |
-|---|---|---|
-| `syscall_tty_read` (146), `syscall_tty_write` (147) | `core/src/syscall/ui_handlers.rs` | fd-based `read`/`write` only |
-| `syscall_open_tty_fd` (148) or an ownership-checked replacement | `core/src/syscall/ui_handlers.rs` | fd-based opens (`openpty`, `/dev/pts/N`, `/dev/tty`) |
-| `file_poll_unfused_by_idx` | `fs/src/fileio/poll.rs` | `KWeak<OpenFile>` registrations only |
-
-Retired syscall numbers leave gaps (table size unchanged; gaps are expected per
-the ID policy). The userland `tty::read`/`tty::write` index wrappers go with
-them; callers use fd 0/1/2.
-
----
-
 ## 4. Migration plan (each stage independently green under `just test`)
 
 Each stage compiles, passes `just check-framekernel` + `check_stack_sizes.sh`, and is
 green under `just test` (target: ≥ the `TEST_COUNT_BASELINE` planned tests in the
 justfile; never regress).
-
-### Stage B — retire index-based I/O APIs
-- **Files:** delete `syscall_tty_read`/`syscall_tty_write`
-  (`core/src/syscall/ui_handlers.rs`; unregister in `core/src/syscall/handlers.rs`)
-  and retire numbers 146/147; decide `syscall_open_tty_fd` (148): delete, or gate
-  to consoles the caller may claim; remove the `file_poll_unfused_by_idx` token
-  path (`fs/src/fileio/poll.rs`); audit `vconsole`/`switch_active_tty`/
-  `set_active_tty` — input routing, not lifetime; they stay (they read a slot,
-  never mutate ownership), but assert via test they never touch it.
-- **Tests added:** `tty::no_index_io_path` (compile-time: the index read/write syscalls
-  no longer exist); `tty::poll_after_close_reuse_no_crossobject` (D2): register a poll,
-  close + reuse the fd number, assert no cross-object readiness (the `KWeak` upgrade
-  fails).
-- **Risk:** low-medium — mostly deletion; grep for in-tree callers of 146/147/148
-  before deleting (the kernel `tty::read_cooked`/`write_bytes` stay as ldisc
-  internals, only the *syscalls* go). The userland `tty::read`/`tty::write` index
-  wrappers (`userland/src/syscall/process.rs`) go too.
 
 ### Stage C — ring holds real file references
 - **Files:** `ring/src/ring_obj.rs` (per-op state holds `FileRef` not `fd: i32`),
@@ -155,7 +122,7 @@ justfile; never regress).
 ## 5. Compatibility constraints (what must stay green)
 
 - **≥ `TEST_COUNT_BASELINE` planned tests must stay green every stage**
-  (currently 2660; `scripts/check_test_count.sh`); `just check-test-count` guards
+  (currently 2662; `scripts/check_test_count.sh`); `just check-test-count` guards
   count regression. New regression tests *raise* the baseline — update it
   deliberately, never lower it.
 - **Userland test bins that pin behavior:** `userland/src/bin/tests/fork_test.rs` (fork

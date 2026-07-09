@@ -224,6 +224,25 @@ pub fn test_syscall_lookup_empty_slot() -> TestResult {
     TestResult::Pass
 }
 
+pub fn test_index_tty_io_syscalls_retired() -> TestResult {
+    // 146/147/148 were index-addressed TTY read/write/open. They are
+    // retired to unregistered slots (dispatch returns ENOSYS); TTY access
+    // is fd-only now. Guards against anyone re-registering the numbers.
+    assert_test!(
+        syscall_lookup(146).is_none(),
+        "146 (tty_read) must be retired"
+    );
+    assert_test!(
+        syscall_lookup(147).is_none(),
+        "147 (tty_write) must be retired"
+    );
+    assert_test!(
+        syscall_lookup(148).is_none(),
+        "148 (open_tty_fd) must be retired"
+    );
+    TestResult::Pass
+}
+
 pub fn test_syscall_lookup_valid() -> TestResult {
     // SYSCALL_EXIT = 1
     let entry = syscall_lookup(1);
@@ -805,6 +824,84 @@ pub fn test_pts_open_with_o_noctty_skips_controlling_tty_acquire() -> TestResult
     );
 
     let _ = file_close_fd(pid, fd);
+    task_terminate(task_id);
+    drop(master_open);
+    TestResult::Pass
+}
+
+pub fn test_tty_poll_after_close_reuse_no_crossobject() -> TestResult {
+    let _fixture = SyscallFixture::new();
+
+    let task_id = create_test_user_task();
+    assert_test!(task_id != INVALID_TASK_ID, "failed to create task");
+    let task_ptr = task_find_by_id(task_id);
+    assert_not_null!(task_ptr, "task lookup failed");
+
+    // The returned backing owns the pair for the test's duration.
+    let (master_idx, master_open) = match slopos_kernel_services::syscall_services::tty::alloc_pty()
+    {
+        Ok(v) => v,
+        Err(_) => return TestResult::Fail,
+    };
+    let slave_number =
+        match slopos_kernel_services::syscall_services::tty::get_pty_number(master_idx) {
+            Ok(n) => n,
+            Err(_) => return TestResult::Fail,
+        };
+    let path = match pts_path_for(slave_number) {
+        Some(path) => path,
+        None => {
+            task_terminate(task_id);
+            drop(master_open);
+            return TestResult::Fail;
+        }
+    };
+    let _ = slopos_kernel_services::syscall_services::tty::set_pty_lock(master_idx, false);
+
+    let pid = task_process_id(task_ptr).unwrap_or(0);
+    // file_poll_register_fd registers the current task as the waiter, so the
+    // FD-owning task must be PCR.current_task (mirrors the real poll path).
+    make_task_current(task_ptr);
+
+    let slave_fd = file_open_for_process(pid, &path[..path.len() - 1], O_RDONLY | O_NOCTTY as u32);
+    assert_test!(slave_fd >= 0, "open(/dev/pts/N) failed");
+
+    // The registration carries only a KWeak<OpenFile> — never a strong ref —
+    // so it resolves to the live open file while the fd is open.
+    let reg = slopos_fs::fileio::file_poll_register_fd(pid, slave_fd, POLLIN);
+    assert_test!(!reg.is_stale(), "fresh registration must not be stale");
+
+    // Close the slave fd: drops the last OpenFile alias.
+    assert_eq_test!(file_close_fd(pid, slave_fd), 0, "close slave fd failed");
+    assert_test!(
+        reg.is_stale(),
+        "registration must go stale once its fd closes"
+    );
+
+    // Reopen — reuses the freed fd number for a fresh, distinct open file.
+    let reused_fd = file_open_for_process(pid, &path[..path.len() - 1], O_RDONLY | O_NOCTTY as u32);
+    assert_test!(reused_fd >= 0, "reopen(/dev/pts/N) failed");
+    assert_eq_test!(reused_fd, slave_fd, "expected fd-number reuse");
+
+    // Same fd number, but the old registration stays dead while a fresh
+    // registration on the reused fd resolves live: the two can never be the
+    // same object, so the stale registration cannot adopt the reused fd.
+    let reg_reused = slopos_fs::fileio::file_poll_register_fd(pid, reused_fd, POLLIN);
+    assert_test!(
+        !reg_reused.is_stale(),
+        "reused fd must resolve to a live object"
+    );
+    assert_test!(
+        reg.is_stale(),
+        "stale registration must not adopt the reused fd"
+    );
+
+    // Unregistering the stale registration is a safe no-op.
+    slopos_fs::fileio::file_poll_unregister_fd(&reg);
+    slopos_fs::fileio::file_poll_unregister_fd(&reg_reused);
+
+    park_bootstrap_on_current_cpu();
+    let _ = file_close_fd(pid, reused_fd);
     task_terminate(task_id);
     drop(master_open);
     TestResult::Pass
@@ -3557,6 +3654,10 @@ slopos_testing::stest!(
     suite = syscall_valid
 );
 slopos_testing::stest!(name = test_syscall_lookup_empty_slot, suite = syscall_valid);
+slopos_testing::stest!(
+    name = test_index_tty_io_syscalls_retired,
+    suite = syscall_valid
+);
 slopos_testing::stest!(name = test_syscall_lookup_valid, suite = syscall_valid);
 slopos_testing::stest!(
     name = test_process_syscall_lookup_valid,
@@ -3717,6 +3818,10 @@ slopos_testing::stest!(
 );
 slopos_testing::stest!(
     name = test_pts_open_with_o_noctty_skips_controlling_tty_acquire,
+    suite = syscall_valid
+);
+slopos_testing::stest!(
+    name = test_tty_poll_after_close_reuse_no_crossobject,
     suite = syscall_valid
 );
 slopos_testing::stest!(

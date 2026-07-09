@@ -131,6 +131,13 @@ impl PollRegInfo {
             registered: false,
         }
     }
+
+    /// True once the registered open file has been closed: the weak no
+    /// longer upgrades, so this registration can never reach the object
+    /// that reuses its fd number.
+    pub fn is_stale(&self) -> bool {
+        self.open_file.upgrade().is_none()
+    }
 }
 
 /// One open file description — POSIX's "open file description". The

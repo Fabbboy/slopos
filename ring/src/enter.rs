@@ -20,7 +20,7 @@ use slopos_abi::syscall::{POLLERR, POLLHUP, POLLNVAL};
 
 use slopos_fs::fileio::{
     file_poll_clear_registrations, file_poll_fused, file_poll_track_registrations,
-    file_poll_unfused_by_idx,
+    file_poll_unfused_by_token,
 };
 use slopos_kernel_services::driver_runtime::{block_current_task_with_timeout, has_pending_signal};
 use slopos_kernel_services::platform::get_time_ms;
@@ -495,7 +495,7 @@ fn harvest(pid: u32, task_id: u32, raw_handle: usize, min_complete: u32) -> i32 
 /// Unregister the calling task from every queue it registered on.
 fn unregister(task_id: u32, tokens: &KVec<u64>) {
     for &tok in tokens.iter() {
-        file_poll_unfused_by_idx(tok);
+        file_poll_unfused_by_token(tok);
     }
     if !tokens.is_empty() {
         file_poll_clear_registrations(task_id);

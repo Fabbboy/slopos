@@ -2,7 +2,6 @@ use slopos_abi::Errno;
 use slopos_abi::KernelErrno;
 use slopos_abi::damage::{DamageRect, MAX_DAMAGE_REGIONS};
 use slopos_abi::fate::FateResult;
-use slopos_abi::syscall::TtyIndex;
 use slopos_abi::{DisplayInfo, InputEvent};
 
 use slopos_fs::fileio::file_open_tty_fd;
@@ -185,80 +184,6 @@ define_syscall!(syscall_openpty
         return Err(Errno::EFAULT);
     }
     Ok(())
-});
-
-define_syscall!(syscall_tty_read
-    (ctx, tty_idx: u8, dst: UserBytes) -> Result<u64, Errno>
-{
-    let tty_idx = TtyIndex(tty_idx);
-    if dst.base_u64() == 0 || dst.len() == 0 {
-        return Ok(0);
-    }
-
-    const MAX_COPY: usize = 512;
-    let mut scratch = [0u8; MAX_COPY];
-    let read_len = dst.len().min(MAX_COPY);
-
-    match tty::read_cooked(tty_idx, scratch.as_mut_ptr(), read_len, true) {
-        Ok(n) => {
-            let user_bytes = MmUserBytes::try_new(dst.base_u64(), n).map_err(|_| Errno::EFAULT)?;
-            copy_bytes_to_user(user_bytes, &scratch[..n]).map_err(|_| Errno::EFAULT)?;
-            Ok(n as u64)
-        }
-        Err(e) => {
-            let errno = e.to_errno();
-            if errno == -512 {
-                Err(Errno::ERESTARTSYS)
-            } else {
-                Err(Errno::from_raw(errno).unwrap_or(Errno::EINVAL))
-            }
-        }
-    }
-});
-
-define_syscall!(syscall_tty_write
-    (ctx, tty_idx: u8, src: UserBytes) -> Result<u64, Errno>
-{
-    let tty_idx = TtyIndex(tty_idx);
-    if src.base_u64() == 0 || src.len() == 0 {
-        return Ok(0);
-    }
-
-    const MAX_COPY: usize = 512;
-    let mut scratch = [0u8; MAX_COPY];
-    let write_len = src.len().min(MAX_COPY);
-    let user_bytes = MmUserBytes::try_new(src.base_u64(), write_len).map_err(|_| Errno::EFAULT)?;
-    copy_bytes_from_user(user_bytes, &mut scratch[..write_len]).map_err(|_| Errno::EFAULT)?;
-
-    match tty::write_bytes(tty_idx, scratch.as_ptr(), write_len, true) {
-        Ok(n) => Ok(n as u64),
-        Err(e) => {
-            let errno = e.to_errno();
-            if errno == -512 {
-                Err(Errno::ERESTARTSYS)
-            } else {
-                Err(Errno::from_raw(errno).unwrap_or(Errno::EINVAL))
-            }
-        }
-    }
-});
-
-define_syscall!(syscall_open_tty_fd
-    (ctx, tty_idx: u8)
-    requires(let pid: process_id)
-    -> Result<u64, Errno>
-{
-    let tty_idx = TtyIndex(tty_idx);
-    let backing = match tty::open_tty(tty_idx) {
-        Ok(b) => b,
-        Err(_) => return Err(Errno::EINVAL),
-    };
-    let fd = file_open_tty_fd(pid, tty_idx, 0, backing);
-    if fd < 0 {
-        Err(Errno::from_raw(fd).unwrap_or(Errno::EINVAL))
-    } else {
-        Ok(fd as u64)
-    }
 });
 
 define_syscall!(syscall_fb_flip
