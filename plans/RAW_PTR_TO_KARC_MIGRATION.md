@@ -171,10 +171,31 @@ W0 verification:
   raw ownership boundary, and the syscall/mm/fs/driver consumers were
   re-reviewed. No confidence-scored or CVSS-eligible finding was produced.
 
-**W1 — Drop-context infrastructure.** The per-CPU deferred previous-task
-slot + its IRQs-on drain in the dispatcher; the cross-CPU
-spin-until-`!on_cpu` dispatch guard; the off-lock drop helper and the
-`Task::drop` context assertions (I3).
+**W1 — Drop-context infrastructure (complete 2026-07-10).** The PCR now owns
+one deferred previous-task slot per CPU. The IRQ-off switch tail moves its
+dispatch reference into that slot after publishing `on_cpu = false`; the idle
+dispatcher takes and releases it exactly once on its own stack, with IRQs
+enabled and no tracked lock held. Cross-CPU dispatch now waits for the prior
+CPU's Acquire/Release `on_cpu` handoff instead of requeueing a still-switching
+task. The reusable off-lock context gate and `Task::drop` assertions enforce
+IRQs-on/empty-held-lock destruction. The slot currently carries the existing
+dispatch refcount ownership; W3 changes that payload to the moved `KArc<Task>`
+without changing this switch boundary.
+
+W1 verification:
+
+- A kernel `stest!` moves one task reference through the PCR slot, proves the
+  first drain releases it, and proves a second drain is empty.
+- Host and Miri coverage proves `Task::drop` rejects IRQs-off and held-lock
+  contexts and that the off-lock helper runs destructors with IRQs enabled.
+- `just build`, `just check-framekernel`, all 82 Verus obligations, and the
+  complete OSTD Miri suite pass. The TCB ratio is 0.529%, below both targets.
+- Full QEMU testing passes: 2,647 kernel tests plus 23 userland tests, with no
+  failures or skips.
+- Security triage raw findings: none. The PCR ownership transfer, exact-once
+  drain, `on_cpu` publication ordering, destructor context gate, and the
+  syscall/mm/fs/driver boundaries were re-reviewed. No confidence-scored or
+  CVSS-eligible finding was produced; `CVSS.md` is unchanged.
 
 **W2 — Registry.** `TaskRegistry` with `KWeak` values, monotonic `u64` ids,
 `Handle` resolution via upgrade, live-task cap. Port `task_find_by_id`,
@@ -198,8 +219,9 @@ slot; TTY hangup and futex cleanup keep their ordering but hold typed refs.
 `task_inc_ref`/`task_dec_ref`, `TaskRefGuard`, every `KernelSync<*mut Task>`,
 and generation identity. Acceptance greps below must return zero hits.
 
-W1–W2 remain independent of the flip and land next with their own tests;
-W3–W5 are the rip-and-replace and land as one coherent series.
+W1 is complete. W2 remains independent of the ownership flip and lands next
+with its own tests; W3–W5 are the rip-and-replace and land as one coherent
+series.
 
 ## Acceptance
 
@@ -220,11 +242,11 @@ W3–W5 are the rip-and-replace and land as one coherent series.
 
 - W0 coverage is complete (`KArc` saturation and cyclic init as `stest!`s;
   upgrade-vs-drop races, DST coercion, raw round trips, and uniqueness under
-  host tests and Miri). Add `stest!` coverage for W1 (deferred slot drains
-  exactly once, drop asserts fire under injected
-  lock/IRQ contexts in test-hooks builds), W2 (upgrade returns `None` after
-  death; id non-reuse; cap behavior), W3 (placement transitions move
-  ownership exactly once; double-insert CAS-rejected).
+  host tests and Miri). W1 coverage is complete (the deferred slot drains
+  exactly once; host/Miri fault injection exercises the lock/IRQ assertions).
+  Add coverage for W2 (upgrade returns `None` after death; id non-reuse; cap
+  behavior) and W3 (placement transitions move ownership exactly once;
+  double-insert CAS-rejected).
 - Torture: existing spawn/kill stress (`mm_stress_test`, `ctrlc_flood_test`,
   strand sweep) plus a dedicated spawn-exit-waitpid churn test asserting
   memory returns (allocator watermark) — the property the pool never had.

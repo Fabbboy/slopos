@@ -228,6 +228,14 @@ pub struct ProcessorControlRegion {
     /// need binary state.
     pub interrupt_nesting: AtomicU32,
 
+    /// Owning reference to the task most recently switched off this CPU.
+    ///
+    /// The context-switch tail installs the outgoing reference while running
+    /// on the idle stack. The dispatcher takes and releases it exactly once
+    /// after leaving the IRQ-off switch window. Kept opaque here because the
+    /// concrete task type belongs to the scheduler crate.
+    pub previous_task: AtomicPtr<()>,
+
     /// Panic-recovery nesting depth for this CPU: nested catch scopes unwind
     /// one level at a time, and only the CPU that entered recovery observes
     /// it as active.
@@ -374,6 +382,7 @@ impl ProcessorControlRegion {
             panic_depth: AtomicU32::new(0),
             panic_in_flight: AtomicU32::new(0),
             interrupt_nesting: AtomicU32::new(0),
+            previous_task: AtomicPtr::new(ptr::null_mut()),
             recovery_depth: AtomicU32::new(0),
         }
     }
@@ -1435,6 +1444,40 @@ pub fn get_current_task() -> *mut () {
         );
     }
     task
+}
+
+/// Move one outgoing-task ownership reference into this CPU's deferred slot.
+///
+/// Returns `Err(task)` if the previous reference has not yet been taken. The
+/// caller must not release a successfully installed reference by any other
+/// path.
+#[inline]
+pub fn defer_previous_task(task: *mut ()) -> Result<(), *mut ()> {
+    if task.is_null() || !GS_BASE_SET.is_set() {
+        return Err(task);
+    }
+    // SAFETY: GS_BASE is installed (checked above), and only the running CPU
+    // mutates its own deferred slot.
+    let slot = unsafe { &current_pcr().previous_task };
+    slot.compare_exchange(ptr::null_mut(), task, Ordering::Release, Ordering::Relaxed)
+        .map(|_| ())
+        .map_err(|_| task)
+}
+
+/// Take this CPU's deferred outgoing-task ownership reference, if present.
+/// The returned reference must be released exactly once by the caller.
+#[inline]
+pub fn take_previous_task() -> *mut () {
+    if !GS_BASE_SET.is_set() {
+        return ptr::null_mut();
+    }
+    // SAFETY: GS_BASE is installed (checked above), and only the running CPU
+    // drains its own deferred slot.
+    unsafe {
+        current_pcr()
+            .previous_task
+            .swap(ptr::null_mut(), Ordering::Acquire)
+    }
 }
 
 /// Read the current CPU's `syscall_pid` atomically. Returns

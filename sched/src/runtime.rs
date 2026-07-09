@@ -552,6 +552,7 @@ fn scheduler_loop(cpu_id: usize, idle_task: *mut Task) -> ! {
         let irq_flags = slopos_arch::cpu::save_flags_cli();
         let dispatched = run_ready_task_from_idle(cpu_id, idle_task);
         slopos_arch::cpu::restore_flags(irq_flags);
+        let _ = crate::scheduler::drain_previous_task();
         if dispatched {
             continue;
         }

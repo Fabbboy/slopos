@@ -392,6 +392,12 @@ pub struct TaskInner<K, U> {
     pub exit_info: AtomicCell<ExitInfo>,
 }
 
+impl<K, U> Drop for TaskInner<K, U> {
+    fn drop(&mut self) {
+        crate::task::drop_context::assert_task_drop_context();
+    }
+}
+
 impl<K, U> TaskInner<K, U> {
     pub const fn invalid() -> Self {
         Self {

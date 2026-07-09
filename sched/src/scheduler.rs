@@ -1093,16 +1093,12 @@ pub(crate) fn run_ready_task_from_idle(cpu_id: usize, idle_task: *mut Task) -> b
         return false;
     }
 
-    // Guard: if the task is still physically on another CPU (context switch
-    // in progress), put it back and skip. Re-enqueue rather than spin —
-    // the idle loop must not block, and Phase 6 removed the schedule_task
-    // spin in favour of this check + the WaitQueue lock-pair barrier.
-    if task_on_cpu_load(next_task) {
-        per_cpu::with_cpu_scheduler(cpu_id, |sched| {
-            let _ = sched.enqueue_from_on_cpu(next_task);
-            sched.set_executing_task(false);
-        });
-        return false;
+    // A runnable task may become visible on this CPU while its prior CPU is
+    // still completing the switch-out tail. The dequeue already transferred
+    // scheduler placement to this CPU, so wait for the prior CPU's Release
+    // store instead of publishing a second queue membership.
+    while task_on_cpu_load(next_task) {
+        core::hint::spin_loop();
     }
 
     // Single-winner dispatch claim: only one CPU may run a READY task.
@@ -1241,16 +1237,61 @@ pub(crate) fn run_ready_task_from_idle(cpu_id: usize, idle_task: *mut Task) -> b
     // of `on_cpu`.
     task_set_on_cpu(next_task, false);
 
-    // Release the dispatch reference.  If the task was re-enqueued above,
-    // the queue holds its own reference so the refcnt stays > 0.  If the
-    // task was terminated/blocked, this may drop refcnt to 0, allowing the
-    // zombie reaper to safely reclaim its resources on the next pass.
-    let _ = super::task::task_dec_ref(next_task);
+    // Move the dispatch reference into the CPU-local deferred slot. Its
+    // successor releases it after this IRQ-off switch window has ended and
+    // while executing on the idle stack.
+    assert!(
+        slopos_arch::pcr::defer_previous_task(next_task.cast()).is_ok(),
+        "previous-task slot was not drained before the next switch"
+    );
 
     per_cpu::with_cpu_scheduler(cpu_id, |sched| {
         sched.set_executing_task(false);
     });
 
+    true
+}
+
+/// Release the outgoing dispatch reference from this CPU's deferred slot.
+/// Returns whether a reference was present.
+#[inline]
+pub(crate) fn drain_previous_task() -> bool {
+    let previous = slopos_arch::pcr::take_previous_task().cast::<Task>();
+    if previous.is_null() {
+        return false;
+    }
+
+    // The scheduler loop normally returns from `sti; hlt; cli` with IF clear.
+    // This code runs on the CPU's non-migrating idle stack, so it may open the
+    // required interruptible drop window and then restore the loop's prior
+    // state without an IRQ-driven migration moving that state to another CPU.
+    struct RestoreInterruptState {
+        disable_on_drop: bool,
+    }
+
+    impl Drop for RestoreInterruptState {
+        #[inline]
+        fn drop(&mut self) {
+            if self.disable_on_drop {
+                slopos_arch::cpu::disable_interrupts();
+            }
+        }
+    }
+
+    let was_enabled = slopos_ostd::cpu::x86_64::interrupts::are_interrupts_enabled();
+    if !was_enabled {
+        slopos_arch::cpu::enable_interrupts();
+    }
+    let _restore_interrupts = RestoreInterruptState {
+        disable_on_drop: !was_enabled,
+    };
+
+    // The reference-count decrement is not yet the object destructor, but it
+    // runs under the same context contract so the ownership implementation
+    // can become drop-driven without changing the switch boundary again.
+    slopos_ostd::task::run_off_lock(|| {
+        let _ = super::task::task_dec_ref(previous);
+    });
     true
 }
 
@@ -1287,6 +1328,7 @@ fn schedule_internal() {
     if current == idle_task {
         let _ = run_ready_task_from_idle(cpu_id, idle_task);
         cpu::restore_flags(irq_flags);
+        let _ = drain_previous_task();
         return;
     }
 

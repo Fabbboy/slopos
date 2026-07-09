@@ -10,6 +10,7 @@
 use core::ffi::{c_char, c_void};
 use core::ptr;
 
+use slopos_ostd::KBox;
 use slopos_ostd::klog_info;
 use slopos_testing::TestResult;
 
@@ -21,8 +22,8 @@ use super::scheduler::{
 use super::task::{
     INVALID_PROCESS_ID, INVALID_TASK_ID, IdtEntry, TASK_FLAG_KERNEL_MODE, TASK_FLAG_USER_MODE,
     Task, TaskPriority, TaskStatus, reap_zombies, task_create, task_exit_info_is_set,
-    task_find_by_id, task_get_info, task_handle, task_id_of, task_is_blocked, task_is_terminated,
-    task_kernel_stack_top, task_last_cpu, task_priority, task_ref_count,
+    task_find_by_id, task_get_info, task_handle, task_id_of, task_inc_ref, task_is_blocked,
+    task_is_terminated, task_kernel_stack_top, task_last_cpu, task_priority, task_ref_count,
     task_remote_inbox_is_linked, task_resolve_handle, task_sched_placement_load, task_set_state,
     task_set_state_with_reason, task_slot_index, task_status, task_terminate, task_waiter_count,
 };
@@ -73,6 +74,63 @@ fn is_published_placement(placement: SchedPlacement) -> bool {
             | SchedPlacement::Migrating
     )
 }
+
+pub fn test_previous_task_reference_drains_exactly_once() -> TestResult {
+    let mut task = match KBox::try_init(Task::init_invalid()) {
+        Ok(task) => task,
+        Err(_) => return TestResult::Fail,
+    };
+    let task_ptr = &mut *task as *mut Task;
+    let Some(before) = task_ref_count(task_ptr) else {
+        klog_info!("SCHED_TEST: task refcount unavailable");
+        return TestResult::Fail;
+    };
+
+    let incremented = task_inc_ref(task_ptr);
+    if incremented != Some(before.saturating_add(1)) {
+        klog_info!(
+            "SCHED_TEST: ref increment mismatch before={} observed={:?}",
+            before,
+            incremented
+        );
+        return TestResult::Fail;
+    }
+    if slopos_arch::pcr::defer_previous_task(task_ptr.cast()).is_err() {
+        klog_info!("SCHED_TEST: previous-task slot was already occupied");
+        let _ = super::task::task_dec_ref(task_ptr);
+        return TestResult::Fail;
+    }
+    let retained_before_drain = task_ref_count(task_ptr) == Some(before.saturating_add(1));
+    if !retained_before_drain {
+        klog_info!(
+            "SCHED_TEST: deferred refcount changed unexpectedly before drain: {:?}",
+            task_ref_count(task_ptr)
+        );
+    }
+    let drained = scheduler::drain_previous_task();
+    let restored_after_drain = task_ref_count(task_ptr) == Some(before);
+    if !drained || !restored_after_drain {
+        klog_info!(
+            "SCHED_TEST: drain failed or count mismatched after drain: {:?}",
+            task_ref_count(task_ptr)
+        );
+    }
+    let second_drain_empty = !scheduler::drain_previous_task();
+    if !second_drain_empty {
+        klog_info!("SCHED_TEST: second drain unexpectedly found a reference");
+    }
+
+    if retained_before_drain && drained && restored_after_drain && second_drain_empty {
+        TestResult::Pass
+    } else {
+        TestResult::Fail
+    }
+}
+
+slopos_testing::stest!(
+    name = test_previous_task_reference_drains_exactly_once,
+    suite = sched_core
+);
 
 pub fn test_raw_ready_store_does_not_reserve_waking_placement() -> TestResult {
     let _fixture = SchedFixture::new();

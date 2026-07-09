@@ -9,6 +9,7 @@
 
 pub mod abi;
 pub mod accessors;
+pub mod drop_context;
 pub mod exit_info;
 pub mod fpu;
 pub mod handles;
@@ -21,6 +22,7 @@ pub mod switch;
 pub mod task;
 pub mod test_reports;
 
+pub use drop_context::{assert_task_drop_context, drop_off_lock, run_off_lock};
 pub use exit_info::ExitInfo;
 pub use job_control::{ProcessGroup, Session, new_group_in_session, new_session_group};
 pub use kernel_task::SchedPlacement;
