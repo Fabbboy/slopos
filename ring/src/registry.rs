@@ -103,11 +103,16 @@ pub fn with_ring<R>(raw_handle: usize, f: impl FnOnce(&mut Ring) -> R) -> Result
 /// ring's `Drop` then releases the kernel's `RingMeta` frame refs; any
 /// user PTE still mapped holds its own ref, so frames survive until the
 /// mapping is torn down too. Safe to call on a stale handle (no-op).
+///
+/// The removed slot is taken out **under** the table lock but dropped
+/// **after** it is released: when this was the last clone the `Ring` drops
+/// here, tearing down every in-flight op's held `FileRef`, and that
+/// teardown can take arbitrary subsystem locks (even re-enter the registry
+/// for a passed ring fd) — which must never run under the table spinlock.
 pub fn remove(raw_handle: usize) {
     let h = Handle::unpack(raw_handle, SLOT_BITS);
-    with_registry(|t| {
-        let _ = t.remove(h);
-    });
+    let removed = with_registry(|t| t.remove(h).ok());
+    drop(removed);
 }
 
 /// `true` iff the packed handle resolves to a live ring owned by

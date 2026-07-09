@@ -156,6 +156,18 @@ pub fn file_poll_fused(
     .unwrap_or(invalid)
 }
 
+/// Fused poll against a held [`FileRef`] — the reference analog of
+/// [`file_poll_fused`], used by the ring harvest to register the calling
+/// task on an in-flight op's wait queue by open-file identity rather than
+/// by an fd number that may have been closed or reused.
+pub fn file_poll_fused_ref(file: &FileRef, events: u16) -> slopos_abi::file_ops::FusedPollResult {
+    let mut r = file.open_file.ops.poll_fused(file.open_file.handle, events);
+    if r.registered {
+        r.open_file_token = poll_reg_insert(&file.open_file);
+    }
+    r
+}
+
 /// Unregister from a wait queue using the opaque registration token from
 /// [`file_poll_fused`]. Upgrade-or-skip: a token whose open file was
 /// already dropped is silently discarded — the backing teardown cleared
@@ -238,4 +250,12 @@ pub fn file_poll_fd(process_id: u32, fd: c_int, events: u16) -> u16 {
         open_file.ops.poll_events(open_file.handle, events)
     })
     .unwrap_or(POLLNVAL)
+}
+
+/// Level readiness of a held [`FileRef`] — the reference analog of
+/// [`file_poll_fd`], for the ring's multishot poll re-arm.
+pub fn file_poll_ref(file: &FileRef, events: u16) -> u16 {
+    file.open_file
+        .ops
+        .poll_events(file.open_file.handle, events)
 }

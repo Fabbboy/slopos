@@ -8,8 +8,6 @@
 //! registry-table lock is held only briefly inside `registry::with_ring`
 //! to clone the ring handle, never across the fileio probe or the block.
 
-use core::ffi::c_int;
-
 use slopos_abi::Errno;
 use slopos_abi::ring::{
     OP_CANCEL, OP_NOP, OP_POLL_ADD, OP_TIMEOUT, RingLayout, SLOPRING_ASYNC_CANCEL_ALL,
@@ -19,8 +17,8 @@ use slopos_abi::ring::{
 use slopos_abi::syscall::{POLLERR, POLLHUP, POLLNVAL};
 
 use slopos_fs::fileio::{
-    file_poll_clear_registrations, file_poll_fused, file_poll_track_registrations,
-    file_poll_unfused_by_token,
+    FileRef, file_poll_clear_registrations, file_poll_fused_ref, file_poll_track_registrations,
+    file_poll_unfused_by_token, fileio_clone_file_ref,
 };
 use slopos_kernel_services::driver_runtime::{block_current_task_with_timeout, has_pending_signal};
 use slopos_kernel_services::platform::get_time_ms;
@@ -102,6 +100,19 @@ pub fn ring_setup(
 
     // Build the ring object.
     let cq_cap = layout.cq_entries as usize;
+    // Pre-reserve the reap buffer to the in-flight bound so a terminal
+    // completion never allocates while draining under the ring lock.
+    let pending_reap = match KVec::with_capacity(cq_cap) {
+        Ok(v) => v,
+        Err(_) => {
+            let _ = slopos_mm::process_vm::process_vm_munmap(
+                pid,
+                user_addr,
+                layout.region_bytes as u64,
+            );
+            return eno(Errno::ENOMEM);
+        }
+    };
     let ring = Ring {
         region,
         layout,
@@ -112,6 +123,7 @@ pub fn ring_setup(
         owner_pid: pid,
         cq_overflow: 0,
         buffers,
+        pending_reap,
     };
 
     // Register it, get the packed fd-handle.
@@ -213,11 +225,17 @@ pub fn ring_enter(
     }
 
     // ---- Submit phase (under the per-ring lock only) ----
-    let submit_result = registry::with_ring(raw_handle, |ring| submit(pid, ring, to_submit));
-    let n_submitted = match submit_result {
-        Ok(n) => n,
+    let submit_result = registry::with_ring(raw_handle, |ring| {
+        let n = submit(pid, ring, to_submit);
+        (n, core::mem::take(&mut ring.pending_reap))
+    });
+    let (n_submitted, reaped) = match submit_result {
+        Ok(v) => v,
         Err(_) => return eno(Errno::EBADF),
     };
+    // Drop rows retired during submit (e.g. OP_CANCEL) with the ring lock
+    // released — a completing op's file teardown must not run under it.
+    drop(reaped);
 
     // ---- Complete phase (block the caller; lock dropped while parked) ----
     if min_complete > 0 {
@@ -273,7 +291,10 @@ fn process_sqe(pid: u32, ring: &mut Ring, sqe: &Sqe) {
             // Record a timeout row: its deadline bounds the next harvest
             // block; the harvest posts -ETIME on expiry (SLOPRING § 12).
             let deadline = get_time_ms().wrapping_add(sqe.off / 1_000_000); // ns → ms
-            if !ring.inflight.push(opcode::inflight_from(sqe, deadline)) {
+            if !ring
+                .inflight
+                .push(opcode::inflight_from(sqe, deadline, None))
+            {
                 let _ = ring.post_cqe(sqe.user_data, eno(Errno::EAGAIN), 0);
             }
             return;
@@ -284,6 +305,20 @@ fn process_sqe(pid: u32, ring: &mut Ring, sqe: &Sqe) {
         }
         _ => {}
     }
+
+    // Resolve the target fd once, here at submit, into a strong reference the
+    // op holds for its whole in-flight window — so it stays bound to this
+    // exact open file even if userland closes the fd or reuses the number
+    // (the "the ring keeps a real struct file reference" rule). A closed fd
+    // resolves to `None`; `probe` reports it as `-EBADF` (after the static
+    // buffer-selection check). Inline completions drop the reference below
+    // (never the last alias — the fd is still open in this synchronous submit
+    // span); a would-block moves it into the row.
+    let file: Option<FileRef> = if opcode::needs_file_ref(sqe.opcode) {
+        fileio_clone_file_ref(pid, sqe.fd)
+    } else {
+        None
+    };
 
     // Ownership ops reserve a CQE slot before running the side effect
     // (SLOPRING § 11) so a full CQ never orphans an fd / loses data.
@@ -316,7 +351,7 @@ fn process_sqe(pid: u32, ring: &mut Ring, sqe: &Sqe) {
             let _ = ring.post_cqe(sqe.user_data, eno(Errno::EINVAL), 0);
             return;
         }
-        if !ring.inflight.push(opcode::inflight_from(sqe, 0)) {
+        if !ring.inflight.push(opcode::inflight_from(sqe, 0, file)) {
             let _ = ring.post_cqe(sqe.user_data, eno(Errno::EAGAIN), 0);
         }
         return;
@@ -333,7 +368,7 @@ fn process_sqe(pid: u32, ring: &mut Ring, sqe: &Sqe) {
         return;
     }
 
-    match opcode::probe(pid, sqe, &mut *ring.buffers) {
+    match opcode::probe(pid, sqe, file.as_ref(), &mut *ring.buffers) {
         Outcome::Inline(res) => {
             let _ = ring.post_cqe(sqe.user_data, res, 0);
             release_fixed(ring, sel);
@@ -343,7 +378,7 @@ fn process_sqe(pid: u32, ring: &mut Ring, sqe: &Sqe) {
             release_fixed(ring, sel);
         }
         Outcome::WouldBlock => {
-            if !ring.inflight.push(opcode::inflight_from(sqe, 0)) {
+            if !ring.inflight.push(opcode::inflight_from(sqe, 0, file)) {
                 release_fixed(ring, sel);
                 let _ = ring.post_cqe(sqe.user_data, eno(Errno::EAGAIN), 0);
             }
@@ -426,6 +461,7 @@ fn do_cancel(ring: &mut Ring, sqe: &Sqe) {
             // with F_MORE clear (SLOPRING §1.3 trigger 4).
             let _ = ring.post_cqe(row.user_data, eno(Errno::ECANCELED), 0);
             release_fixed_row(ring, &row);
+            reap_row(ring, row);
             found += 1;
         }
         if !cancel_all {
@@ -442,35 +478,42 @@ fn do_cancel(ring: &mut Ring, sqe: &Sqe) {
 /// `-EINTR` on signal.
 fn harvest(pid: u32, task_id: u32, raw_handle: usize, min_complete: u32) -> i32 {
     loop {
-        // Step 1: snapshot the distinct in-flight fds + the nearest
-        // OP_TIMEOUT deadline under the lock (quick, no blocking).
+        // Step 1: snapshot the distinct in-flight files (by reference
+        // identity) + the nearest OP_TIMEOUT deadline under the lock (quick,
+        // no blocking). The returned aliases keep the backings alive across
+        // the unlocked registration below.
         let pre = registry::with_ring(raw_handle, |ring| {
-            (distinct_inflight_fds(ring), nearest_deadline_ms(ring))
+            (distinct_inflight_files(ring), nearest_deadline_ms(ring))
         });
-        let (fds, deadline) = match pre {
+        let (files, deadline) = match pre {
             Ok(v) => v,
             Err(_) => return eno(Errno::EBADF),
         };
 
-        // Step 2: REGISTER the calling task on each fd's resource queue
+        // Step 2: REGISTER the calling task on each file's resource queue
         // *before* the re-probe (SLOPRING § 7.1 — register-then-recheck
         // closes the lost-wakeup window: a producer that publishes after
         // this point has already enqueued our wait node).
-        let tokens = register_fds(pid, &fds);
+        let tokens = register_files(&files);
         if !tokens.is_empty() {
             file_poll_track_registrations(task_id, tokens.as_slice());
         }
 
         // Step 3: re-probe every in-flight row, post ready CQEs, and
-        // check whether we now have enough.
-        let enough = registry::with_ring(raw_handle, |ring| harvest_step(pid, ring, min_complete));
-        let enough = match enough {
+        // check whether we now have enough. Retired rows are moved out to
+        // drop after the ring lock is released.
+        let step = registry::with_ring(raw_handle, |ring| {
+            let enough = harvest_step(pid, ring, min_complete);
+            (enough, core::mem::take(&mut ring.pending_reap))
+        });
+        let (enough, reaped) = match step {
             Ok(v) => v,
             Err(_) => {
                 unregister(task_id, &tokens);
                 return eno(Errno::EBADF);
             }
         };
+        drop(reaped);
         if enough {
             unregister(task_id, &tokens);
             return 0;
@@ -502,18 +545,26 @@ fn unregister(task_id: u32, tokens: &KVec<u64>) {
     }
 }
 
-/// Distinct fds across all non-timeout in-flight rows (for registration).
-fn distinct_inflight_fds(ring: &Ring) -> KVec<i32> {
-    let mut fds: KVec<i32> = KVec::new();
+/// Distinct in-flight files (by open-file identity, not fd number) across
+/// all non-timeout rows, aliased so the returned set outlives the ring
+/// lock for the unlocked registration step. Keying on identity is what
+/// closes the close+reuse aliasing window: two rows on the same reused fd
+/// number are distinct files here, and a single file backing two rows
+/// registers once.
+fn distinct_inflight_files(ring: &Ring) -> KVec<FileRef> {
+    let mut files: KVec<FileRef> = KVec::new();
     for row in ring.inflight.iter() {
-        if row.opcode == OP_TIMEOUT || row.fd < 0 {
+        if row.opcode == OP_TIMEOUT {
             continue;
         }
-        if !fds.iter().any(|f| *f == row.fd) {
-            let _ = fds.push(row.fd);
+        let Some(file) = row.file.as_ref() else {
+            continue;
+        };
+        if !files.iter().any(|f| f.ptr_eq(file)) {
+            let _ = files.push(file.alias());
         }
     }
-    fds
+    files
 }
 
 /// Nearest OP_TIMEOUT absolute deadline (ms), if any.
@@ -559,18 +610,14 @@ fn harvest_step(pid: u32, ring: &mut Ring, min_complete: u32) -> bool {
     for row in snapshot.iter() {
         if row.opcode == OP_TIMEOUT {
             if row.deadline_ms != 0 && now >= row.deadline_ms {
-                if let Some(i) = ring.inflight.find_user_data(row.user_data) {
-                    if let Some(r) = ring.inflight.remove_at(i) {
-                        let _ = ring.post_cqe(r.user_data, eno(Errno::ETIME), 0);
-                    }
-                }
+                retire_row(ring, row.user_data, eno(Errno::ETIME), 0, false, false);
             }
             continue;
         }
 
         if row.is_multishot {
             if row.opcode == OP_POLL_ADD {
-                harvest_poll_multishot(pid, ring, row);
+                harvest_poll_multishot(ring, row);
             } else {
                 harvest_consuming_multishot(pid, ring, row);
             }
@@ -589,44 +636,21 @@ fn harvest_step(pid: u32, ring: &mut Ring, min_complete: u32) -> bool {
             }
         }
         match opcode::reprobe(pid, row, &mut *ring.buffers) {
-            Outcome::Inline(res) => {
-                if let Some(i) = ring.inflight.find_user_data(row.user_data) {
-                    if let Some(r) = ring.inflight.remove_at(i) {
-                        let _ = ring.post_cqe(r.user_data, res, 0);
-                        release_fixed_row(ring, &r);
-                    }
-                }
-            }
+            Outcome::Inline(res) => retire_row(ring, row.user_data, res, 0, false, true),
             Outcome::InlineBuf(res, cqe_flags) => {
-                if let Some(i) = ring.inflight.find_user_data(row.user_data) {
-                    if let Some(r) = ring.inflight.remove_at(i) {
-                        let _ = ring.post_cqe(r.user_data, res, cqe_flags);
-                        release_fixed_row(ring, &r);
-                    }
-                }
+                retire_row(ring, row.user_data, res, cqe_flags, false, true)
             }
             Outcome::InlineNotif(res) => {
                 // A deferred OP_SEND_ZC that became sendable on the copy backend:
-                // post the two-CQE result (F_MORE) + notification (F_NOTIF), then
-                // retire the row.
-                if let Some(i) = ring.inflight.find_user_data(row.user_data) {
-                    if let Some(r) = ring.inflight.remove_at(i) {
-                        let _ = ring.post_cqe(r.user_data, res, SLOPRING_CQE_F_MORE);
-                        let _ = ring.post_cqe(r.user_data, 0, SLOPRING_CQE_F_NOTIF);
-                        release_fixed_row(ring, &r);
-                    }
-                }
+                // post the two-CQE result (F_MORE) + notification (F_NOTIF).
+                retire_row(ring, row.user_data, res, SLOPRING_CQE_F_MORE, true, true)
             }
             Outcome::DeferredNotif(res) => {
                 // A would-blocked OP_SEND_ZC that got queued to the NIC on
-                // re-probe: post the result (F_MORE) and retire the in-flight
-                // row, but keep the buffer checked out — the registry's deferred
-                // table now holds it until the reclaim posts F_NOTIF.
-                if let Some(i) = ring.inflight.find_user_data(row.user_data) {
-                    if let Some(r) = ring.inflight.remove_at(i) {
-                        let _ = ring.post_cqe(r.user_data, res, SLOPRING_CQE_F_MORE);
-                    }
-                }
+                // re-probe: post the result (F_MORE) and retire the row, but keep
+                // the buffer checked out — the registry's deferred table holds it
+                // until the reclaim posts F_NOTIF.
+                retire_row(ring, row.user_data, res, SLOPRING_CQE_F_MORE, false, false)
             }
             Outcome::WouldBlock => {}
         }
@@ -715,8 +739,8 @@ fn harvest_consuming_multishot(pid: u32, ring: &mut Ring, row: &InFlight) {
 /// post), which suppresses the level flood the caller-as-waiter model
 /// would otherwise produce. `POLLERR`/`POLLHUP` post one terminal CQE
 /// (F_MORE clear) and retire the row.
-fn harvest_poll_multishot(pid: u32, ring: &mut Ring, row: &InFlight) {
-    let revents = opcode::probe_poll_revents(pid, row);
+fn harvest_poll_multishot(ring: &mut Ring, row: &InFlight) {
+    let revents = opcode::probe_poll_revents(row);
     if revents & POLLNVAL != 0 {
         // Bad fd — terminate the armed row.
         remove_and_post(ring, row.user_data, eno(Errno::EBADF), 0);
@@ -743,25 +767,55 @@ fn harvest_poll_multishot(pid: u32, ring: &mut Ring, row: &InFlight) {
     }
 }
 
-/// Remove the live row matching `user_data` and post its terminal CQE.
+/// Remove the live row matching `user_data` and post its terminal CQE
+/// (multishot terminals carry no fixed buffer and a single CQE).
 fn remove_and_post(ring: &mut Ring, user_data: u64, res: i32, cqe_flags: u32) {
+    retire_row(ring, user_data, res, cqe_flags, false, false);
+}
+
+/// Retire the live in-flight row `user_data`: remove it, post its terminal
+/// CQE (`res`/`cqe_flags`, plus a zero-copy `F_NOTIF` when `notif`), release
+/// any fixed buffer it held when `release_fixed`, and move it into the reap
+/// buffer to drop off-lock. `#[inline(never)]` keeps the by-value `InFlight`
+/// out of `harvest_step`'s frame, holding it under the 2 KiB ceiling (Inv. 5').
+#[inline(never)]
+fn retire_row(
+    ring: &mut Ring,
+    user_data: u64,
+    res: i32,
+    cqe_flags: u32,
+    notif: bool,
+    release_fixed: bool,
+) {
     if let Some(i) = ring.inflight.find_user_data(user_data) {
         if let Some(r) = ring.inflight.remove_at(i) {
             let _ = ring.post_cqe(r.user_data, res, cqe_flags);
+            if notif {
+                let _ = ring.post_cqe(r.user_data, 0, SLOPRING_CQE_F_NOTIF);
+            }
+            if release_fixed {
+                release_fixed_row(ring, &r);
+            }
+            reap_row(ring, r);
         }
     }
 }
 
-/// Register the calling task on each fd's resource queue via the
-/// existing fused-poll path; return the open-file tokens for cleanup.
-fn register_fds(pid: u32, fds: &KVec<i32>) -> KVec<u64> {
+/// Detach a retired in-flight row into the ring's reap buffer. Its file
+/// reference is dropped by the `ring_enter`/`harvest` caller once the ring
+/// lock is released — never here, since a completing op's file may be its
+/// backing's last alias and the teardown must not run under the ring lock.
+fn reap_row(ring: &mut Ring, row: InFlight) {
+    let _ = ring.pending_reap.push(row);
+}
+
+/// Register the calling task on each in-flight file's resource queue via
+/// the fused-poll path; return the open-file tokens for cleanup.
+fn register_files(files: &KVec<FileRef>) -> KVec<u64> {
     use slopos_abi::syscall::{POLLIN, POLLOUT};
     let mut tokens: KVec<u64> = KVec::new();
-    for &fd in fds.iter() {
-        if fd < 0 {
-            continue;
-        }
-        let r = file_poll_fused(pid, fd as c_int, POLLIN | POLLOUT);
+    for file in files.iter() {
+        let r = file_poll_fused_ref(file, POLLIN | POLLOUT);
         if r.registered {
             let _ = tokens.push(r.open_file_token);
         }

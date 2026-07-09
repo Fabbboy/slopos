@@ -61,6 +61,8 @@ fn make_ring(entries: u32) -> Ring {
         cq_overflow: 0,
         buffers: slopos_ostd::KBox::try_new(crate::buffers::BufferRegistry::new())
             .expect("ring test: buffer registry alloc"),
+        pending_reap: KVec::with_capacity(layout.cq_entries as usize)
+            .expect("ring test: reap alloc"),
     }
 }
 
@@ -68,7 +70,7 @@ fn inflight(user_data: u64, opcode: u8) -> InFlight {
     InFlight {
         user_data,
         opcode,
-        fd: 3,
+        file: None,
         addr: 0,
         addr2: 0,
         len: 0,
@@ -491,7 +493,12 @@ fn set_last_revents_updates_live_row() -> TestResult {
     let found = snap.iter().find(|r| r.user_data == 0x1234);
     match found {
         Some(r) if r.last_revents == 0x0001 && r.is_multishot => TestResult::Pass,
-        other => slopos_testing::fail!("last_revents not updated on live row: {:?}", other),
+        Some(r) => slopos_testing::fail!(
+            "last_revents not updated on live row: revents={:#x} multishot={}",
+            r.last_revents,
+            r.is_multishot
+        ),
+        None => slopos_testing::fail!("row missing from snapshot"),
     }
 }
 stest!(name = set_last_revents_updates_live_row, suite = slopring);
@@ -552,7 +559,7 @@ fn sqe_multishot_flag_round_trips() -> TestResult {
     if round != sqe {
         return slopos_testing::fail!("SQE v2 round-trip mismatch");
     }
-    let row = crate::opcode::inflight_from(&round, 0);
+    let row = crate::opcode::inflight_from(&round, 0, None);
     if row.is_multishot && row.last_revents == 0 {
         TestResult::Pass
     } else {
@@ -1008,3 +1015,161 @@ fn bufpool_provided_peek_commit() -> TestResult {
     TestResult::Pass
 }
 stest!(name = bufpool_provided_peek_commit, suite = slopring);
+
+// ---------------------------------------------------------------------------
+// The ring holds a real file reference (Stage C / D5). These drive a real fd
+// through an op using a pipe (its read end blocks empty, so an OP_POLL_ADD
+// defers) and a real per-test process fd table. Readiness is produced by
+// closing the pipe's *write* end (→ POLLHUP), so no user buffer is needed.
+// ---------------------------------------------------------------------------
+
+fn read_cqe_at(ring: &Ring, idx: u32) -> Cqe {
+    let mut bytes = [0u8; 16];
+    ring.region
+        .copy_out(ring.layout.cqe_off(idx) as usize, &mut bytes)
+        .unwrap();
+    Cqe::from_bytes(&bytes)
+}
+
+/// An in-flight op keeps operating against its held backing after userland
+/// closes the fd, and releases that reference on completion (no leak).
+fn op_survives_fd_close() -> TestResult {
+    use core::ffi::c_int;
+    use slopos_abi::syscall::POLLIN;
+    use slopos_fs::fileio::{file_close_fd, file_pipe_create, fileio_clone_file_ref};
+
+    const PID: u32 = 0x51D0_0001;
+    let mut ring = make_ring(8);
+    ring.owner_pid = PID;
+
+    let mut rfd: c_int = -1;
+    let mut wfd: c_int = -1;
+    if file_pipe_create(PID, 0, &mut rfd, &mut wfd) != 0 {
+        return slopos_testing::fail!("pipe create failed");
+    }
+
+    // Our own alias to the read end, to observe the ring's reference count.
+    let probe_ref = match fileio_clone_file_ref(PID, rfd) {
+        Some(f) => f,
+        None => return slopos_testing::fail!("clone read-end ref failed"),
+    };
+    // fd-table entry + probe_ref.
+    let baseline = probe_ref.description_strong_count();
+
+    // OP_POLL_ADD(POLLIN) on an empty pipe defers, recording an in-flight row
+    // that holds a strong reference to the read end.
+    let mut sqe = Sqe::ZERO;
+    sqe.opcode = OP_POLL_ADD;
+    sqe.fd = rfd;
+    sqe.op_flags = POLLIN as u32;
+    sqe.user_data = 0xA1;
+    crate::enter::process_sqe_for_test(PID, &mut ring, &sqe);
+    if ring.inflight.len() != 1 {
+        return slopos_testing::fail!("poll should defer, inflight={}", ring.inflight.len());
+    }
+    if probe_ref.description_strong_count() != baseline + 1 {
+        return slopos_testing::fail!(
+            "ring should hold one extra reference: {}",
+            probe_ref.description_strong_count()
+        );
+    }
+
+    // Close the read fd. The held reference keeps the read end alive.
+    let _ = file_close_fd(PID, rfd);
+
+    // Still no readiness (peer write end open) → op stays in flight against the
+    // held backing rather than resolving to a closed-fd error.
+    let done = crate::enter::harvest_step_for_test(PID, &mut ring, 1);
+    drop(core::mem::take(&mut ring.pending_reap));
+    if done || ring.inflight.len() != 1 {
+        return slopos_testing::fail!(
+            "op must survive the fd close, inflight={}",
+            ring.inflight.len()
+        );
+    }
+
+    // Close the write end → the read end reports POLLHUP → the op completes.
+    let _ = file_close_fd(PID, wfd);
+    let _ = crate::enter::harvest_step_for_test(PID, &mut ring, 1);
+    // Drop the retired row's reference exactly as ring_enter would, off-lock.
+    drop(core::mem::take(&mut ring.pending_reap));
+
+    if ring.inflight.len() != 0 {
+        return slopos_testing::fail!("op must complete after peer close");
+    }
+    let cqe = read_cqe_at(&ring, 0);
+    if cqe.user_data != 0xA1 {
+        return slopos_testing::fail!("wrong completion: {:?}", cqe);
+    }
+    // Read fd closed + ring reference released → only our probe_ref remains.
+    if probe_ref.description_strong_count() != 1 {
+        return slopos_testing::fail!(
+            "ring leaked its reference: strong_count={}",
+            probe_ref.description_strong_count()
+        );
+    }
+    TestResult::Pass
+}
+stest!(name = op_survives_fd_close, suite = slopring);
+
+/// Closing an in-flight op's fd and reusing its number for a different file
+/// does not retarget the op: it stays bound to the original open file (D5).
+fn no_reuse_aliasing() -> TestResult {
+    use slopos_abi::syscall::POLLIN;
+    use slopos_fs::fileio::{file_close_fd, file_pipe_create};
+
+    const PID: u32 = 0x51D0_0002;
+    let mut ring = make_ring(8);
+    ring.owner_pid = PID;
+
+    // Pipe A.
+    let (mut rfd_a, mut wfd_a) = (-1i32, -1i32);
+    if file_pipe_create(PID, 0, &mut rfd_a, &mut wfd_a) != 0 {
+        return slopos_testing::fail!("pipe A create failed");
+    }
+
+    // OP_POLL_ADD on A's read end defers, holding a reference to A.
+    let mut sqe = Sqe::ZERO;
+    sqe.opcode = OP_POLL_ADD;
+    sqe.fd = rfd_a;
+    sqe.op_flags = POLLIN as u32;
+    sqe.user_data = 0xB1;
+    crate::enter::process_sqe_for_test(PID, &mut ring, &sqe);
+    if ring.inflight.len() != 1 {
+        return slopos_testing::fail!("poll A should defer");
+    }
+
+    // Close A's read fd, then open pipe B — B's read end reuses A's fd number.
+    let _ = file_close_fd(PID, rfd_a);
+    let (mut rfd_b, mut wfd_b) = (-1i32, -1i32);
+    if file_pipe_create(PID, 0, &mut rfd_b, &mut wfd_b) != 0 {
+        return slopos_testing::fail!("pipe B create failed");
+    }
+    if rfd_b != rfd_a {
+        return slopos_testing::fail!(
+            "test needs fd-number reuse: rfd_a={} rfd_b={}",
+            rfd_a,
+            rfd_b
+        );
+    }
+
+    // Make the HELD file (A) ready via POLLHUP while the reused number (B)
+    // stays not-ready (B's write end open, buffer empty).
+    let _ = file_close_fd(PID, wfd_a);
+
+    // The op must complete: it polls the held A, not the reused number → B.
+    let _ = crate::enter::harvest_step_for_test(PID, &mut ring, 1);
+    drop(core::mem::take(&mut ring.pending_reap));
+    if ring.inflight.len() != 0 {
+        return slopos_testing::fail!("op must target held file A, not reused B");
+    }
+    let cqe = read_cqe_at(&ring, 0);
+    if cqe.user_data != 0xB1 {
+        return slopos_testing::fail!("wrong completion: {:?}", cqe);
+    }
+
+    let _ = file_close_fd(PID, rfd_b);
+    let _ = file_close_fd(PID, wfd_b);
+    TestResult::Pass
+}
+stest!(name = no_reuse_aliasing, suite = slopring);

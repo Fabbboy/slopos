@@ -186,6 +186,27 @@ impl FileRef {
     pub fn kind(&self) -> FileKind {
         self.open_file.ops.kind()
     }
+
+    /// Mint another strong alias of this open file description (a
+    /// deliberate incref). `FileRef` is intentionally not `Clone` so that
+    /// creating an alias is always an explicit act at the call site.
+    pub fn alias(&self) -> FileRef {
+        FileRef {
+            open_file: self.open_file.clone(),
+        }
+    }
+
+    /// True iff both references name the same open file description
+    /// (identity, not equality of contents).
+    pub fn ptr_eq(&self, other: &FileRef) -> bool {
+        KArc::ptr_eq(&self.open_file, &other.open_file)
+    }
+
+    /// Strong-reference count of the underlying description — its live
+    /// aliases plus fd-table entries. For lifetime assertions in tests.
+    pub fn description_strong_count(&self) -> usize {
+        KArc::strong_count(&self.open_file)
+    }
 }
 
 /// One file-descriptor-number → open-file mapping. `cloexec` is per-fd

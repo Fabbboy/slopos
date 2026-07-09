@@ -7,20 +7,24 @@
 //! into the shared page on each advance.
 
 use slopos_abi::ring::{Cqe, RingLayout, SLOPRING_CQ_OVERFLOW};
+use slopos_fs::fileio::FileRef;
 
 use crate::region::{RegionError, RingRegion};
 
 /// One armed-but-incomplete SQE — plain data, never a suspended future
-/// (SLOPRING § 9). Holds the bytes needed to re-run the non-blocking
-/// probe at harvest time and nothing that references ring memory.
-#[derive(Clone, Copy, Debug)]
+/// (SLOPRING § 9). Holds the strong file reference and the bytes needed to
+/// re-run the non-blocking probe at harvest time, and nothing that
+/// references ring memory.
 pub struct InFlight {
     /// Correlation cookie, echoed into the eventual CQE.
     pub user_data: u64,
     /// `OP_*` opcode.
     pub opcode: u8,
-    /// Target fd resolved at submit (re-validated each probe).
-    pub fd: i32,
+    /// Strong reference to the target open file, resolved once at submit.
+    /// It keeps the backing alive for the op's whole in-flight window even
+    /// if userland closes the fd or reuses the number. `None` for fd-less
+    /// rows (`OP_TIMEOUT`; path/fd-number ops never defer).
+    pub file: Option<FileRef>,
     /// User VA of the data buffer / msghdr / sockaddr.
     pub addr: u64,
     /// Secondary VA (accept's socklen out-ptr).
@@ -51,6 +55,32 @@ pub struct InFlight {
     pub buf_flags: u8,
 }
 
+impl InFlight {
+    /// Duplicate a row, aliasing its file reference (a deliberate incref).
+    /// The harvest walks a `snapshot()` clone while removing from the live
+    /// table; the alias keeps the description alive for the pass, and the
+    /// live row still holds the authoritative reference that reaps outside
+    /// the ring lock.
+    pub fn alias(&self) -> InFlight {
+        InFlight {
+            user_data: self.user_data,
+            opcode: self.opcode,
+            file: self.file.as_ref().map(FileRef::alias),
+            addr: self.addr,
+            addr2: self.addr2,
+            len: self.len,
+            op_flags: self.op_flags,
+            off: self.off,
+            deadline_ms: self.deadline_ms,
+            is_multishot: self.is_multishot,
+            last_revents: self.last_revents,
+            buf_group: self.buf_group,
+            buf_index: self.buf_index,
+            buf_flags: self.buf_flags,
+        }
+    }
+}
+
 /// One ring object — created by `ring_setup`, dropped when its last fd
 /// closes. Stored in the per-process ring registry (SLOPRING § 9).
 pub struct Ring {
@@ -78,6 +108,12 @@ pub struct Ring {
     /// Heap-boxed so `Ring` stays small enough to construct within the 2 KiB
     /// stack ceiling when the `KArc<SpinLock<Ring>>` is allocated (Inv. 5').
     pub buffers: slopos_ostd::KBox<crate::buffers::BufferRegistry>,
+    /// Rows retired this `with_ring` span, detached under the per-ring lock
+    /// but dropped by the caller *after* releasing it: a completing op's
+    /// `FileRef` may be the backing's last alias, and its teardown can take
+    /// arbitrary subsystem locks (even re-enter the ring registry for a
+    /// passed ring fd), which must never run under the ring lock.
+    pub pending_reap: slopos_ostd::KVec<InFlight>,
 }
 
 impl Ring {
@@ -211,12 +247,15 @@ pub mod heapless_vec {
             Some(self.rows.swap_remove(i))
         }
 
-        /// Snapshot the rows into an owned vec for harvest re-probing
-        /// without holding the ring lock across blocking.
+        /// Snapshot the rows (aliasing each file reference) into an owned
+        /// vec for harvest re-probing. The clone lets the harvest walk a
+        /// stable set while removing from the live table; the aliased refs
+        /// are never the last (the live row keeps the authoritative one),
+        /// so dropping the snapshot under the ring lock is safe.
         pub fn snapshot(&self) -> KVec<InFlight> {
             let mut out = KVec::with_capacity(self.rows.len()).expect("ring: inflight snapshot");
             for r in self.rows.iter() {
-                out.push(*r).expect("ring: inflight snapshot push");
+                out.push(r.alias()).expect("ring: inflight snapshot push");
             }
             out
         }

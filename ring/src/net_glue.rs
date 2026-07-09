@@ -22,6 +22,7 @@ use slopos_mm::user_copy::{
 };
 use slopos_mm::user_ptr::{UserBytes, UserPtr};
 
+use slopos_fs::fileio::FileRef;
 use slopos_net::socket::ZcSendOutcome;
 use slopos_net::unix_socket::SocketHandle;
 use slopos_net::{socket, unix_socket, unix_socket_file_ops};
@@ -71,13 +72,8 @@ fn with_inet_forced_nonblock<T>(idx: u32, f: impl FnOnce() -> T) -> T {
 /// Reserve-before-side-effect (SLOPRING § 11) is the *caller's*
 /// responsibility — by the time we install the fd here the CQE slot is
 /// already reserved, so the accepted fd can always be reported.
-pub fn accept_nonblock(pid: u32, fd: i32) -> Result<Option<i32>, Errno> {
-    let Some((handle, ops)) = slopos_fs::fileio::fileio_get_handle_and_ops(pid, fd) else {
-        return Err(Errno::ENOTSOCK);
-    };
-    if ops.kind() != FileKind::Socket {
-        return Err(Errno::ENOTSOCK);
-    }
+pub fn accept_nonblock(pid: u32, file: &FileRef) -> Result<Option<i32>, Errno> {
+    let (handle, ops) = socket_handle_from_ref(file)?;
 
     if ops.is_unix_socket() {
         let listener = SocketHandle::from_usize(handle);
@@ -140,8 +136,8 @@ pub fn accept_nonblock(pid: u32, fd: i32) -> Result<Option<i32>, Errno> {
 /// effect so a faulting address fails cleanly and a re-probe re-reads the same
 /// (caller-stable) pointer. Both AF_INET (`SockAddrIn`) and AF_UNIX
 /// (`SockAddrUn`) are supported.
-pub fn connect_nonblock(pid: u32, fd: i32, addr_va: u64, addr_len: u32) -> Result<i32, Errno> {
-    let (handle, ops) = socket_handle_for(pid, fd)?;
+pub fn connect_nonblock(file: &FileRef, addr_va: u64, addr_len: u32) -> Result<i32, Errno> {
+    let (handle, ops) = socket_handle_from_ref(file)?;
     if ops.is_unix_socket() {
         // AF_UNIX: copy the SockAddrUn path and run the (already nonblock-aware)
         // unix_connect under the forced-nonblock guard. Its `-EAGAIN` means the
@@ -188,11 +184,11 @@ pub fn connect_nonblock(pid: u32, fd: i32, addr_va: u64, addr_len: u32) -> Resul
     }))
 }
 
-/// Resolve `fd` to a socket, returning `ENOTSOCK` for any non-socket fd.
-fn socket_handle_for(pid: u32, fd: i32) -> Result<(usize, &'static dyn FileOps), Errno> {
-    let Some((handle, ops)) = slopos_fs::fileio::fileio_get_handle_and_ops(pid, fd) else {
-        return Err(Errno::ENOTSOCK);
-    };
+/// Resolve a held [`FileRef`] to its socket handle + ops, returning
+/// `ENOTSOCK` for any non-socket reference. The reference pins one socket
+/// identity for the op's duration — no fd number is re-interpreted.
+fn socket_handle_from_ref(file: &FileRef) -> Result<(usize, &'static dyn FileOps), Errno> {
+    let (handle, ops) = slopos_fs::fileio::fileio_handle_and_ops_from_ref(file);
     if ops.kind() != FileKind::Socket {
         return Err(Errno::ENOTSOCK);
     }
@@ -220,11 +216,8 @@ pub(crate) fn outcome_from_rc(rc: i32) -> Outcome {
 /// `sqe.op_flags` is accepted and ignored, matching the `send(2)` syscall
 /// path (`_flags`). The socket's stored nonblock flag is forced across
 /// the probe; `-EAGAIN` defers, every other result completes inline.
-pub fn send_nonblock(pid: u32, fd: i32, addr: u64, len: u32, _op_flags: u32) -> Outcome {
-    if fd < 0 {
-        return Outcome::Inline(Errno::EBADF.raw());
-    }
-    let (handle, ops) = match socket_handle_for(pid, fd) {
+pub fn send_nonblock(file: &FileRef, addr: u64, len: u32, _op_flags: u32) -> Outcome {
+    let (handle, ops) = match socket_handle_from_ref(file) {
         Ok(v) => v,
         Err(e) => return Outcome::Inline(e.raw()),
     };
@@ -287,11 +280,8 @@ pub fn send_nonblock(pid: u32, fd: i32, addr: u64, len: u32, _op_flags: u32) -> 
 /// match (R12). AF_INET fills data only (no SCM_RIGHTS), which is
 /// correct, not an error. This is an ownership op (it installs fds), so
 /// the caller reserves a CQE slot before dispatch (SLOPRING § 11).
-pub fn recvmsg_nonblock(pid: u32, fd: i32, addr: u64, _op_flags: u32) -> Outcome {
-    if fd < 0 {
-        return Outcome::Inline(Errno::EBADF.raw());
-    }
-    let (handle, ops) = match socket_handle_for(pid, fd) {
+pub fn recvmsg_nonblock(pid: u32, file: &FileRef, addr: u64, _op_flags: u32) -> Outcome {
+    let (handle, ops) = match socket_handle_from_ref(file) {
         Ok(v) => v,
         Err(e) => return Outcome::Inline(e.raw()),
     };
@@ -398,16 +388,13 @@ pub fn recvmsg_nonblock(pid: u32, fd: i32, addr: u64, _op_flags: u32) -> Outcome
 /// the datagram. Null `addr` (with non-zero `len`) or null `addr2` →
 /// `-EFAULT` before any recv (the source addr is mandatory, like
 /// `recvfrom(2)`'s `src_addr` when requested).
-pub fn recvfrom_nonblock(pid: u32, fd: i32, addr: u64, len: u32, addr2: u64) -> Outcome {
-    if fd < 0 {
-        return Outcome::Inline(Errno::EBADF.raw());
-    }
+pub fn recvfrom_nonblock(file: &FileRef, addr: u64, len: u32, addr2: u64) -> Outcome {
     // The source-addr out-pointer is mandatory for OP_RECVFROM (it is the
     // entire point of the op); a null one is a caller error → EFAULT.
     if addr2 == 0 {
         return Outcome::Inline(Errno::EFAULT.raw());
     }
-    let (handle, ops) = match socket_handle_for(pid, fd) {
+    let (handle, ops) = match socket_handle_from_ref(file) {
         Ok(v) => v,
         Err(e) => return Outcome::Inline(e.raw()),
     };
@@ -582,17 +569,13 @@ fn recvmsg_writeback_cmsg(
 
 /// `OP_SEND` from registered fixed buffer `index` (`SLOPRING_SQE_FIXED_BUFFER`).
 pub fn send_fixed(
-    pid: u32,
-    fd: i32,
+    file: &FileRef,
     index: u16,
     len: u32,
     _op_flags: u32,
     reg: &mut BufferRegistry,
 ) -> Outcome {
-    if fd < 0 {
-        return Outcome::Inline(Errno::EBADF.raw());
-    }
-    let (handle, ops) = match socket_handle_for(pid, fd) {
+    let (handle, ops) = match socket_handle_from_ref(file) {
         Ok(v) => v,
         Err(e) => return Outcome::Inline(e.raw()),
     };
@@ -634,18 +617,14 @@ pub fn send_fixed(
 /// fallback). AF_UNIX always uses the copy leaf. A real error (`rc < 0`) posts a
 /// single CQE; a would-block defers.
 pub fn send_zc_fixed(
-    pid: u32,
-    fd: i32,
+    file: &FileRef,
     index: u16,
     len: u32,
     user_data: u64,
     _op_flags: u32,
     reg: &mut BufferRegistry,
 ) -> Outcome {
-    if fd < 0 {
-        return Outcome::Inline(Errno::EBADF.raw());
-    }
-    let (handle, ops) = match socket_handle_for(pid, fd) {
+    let (handle, ops) = match socket_handle_from_ref(file) {
         Ok(v) => v,
         Err(e) => return Outcome::Inline(e.raw()),
     };
@@ -771,16 +750,12 @@ fn try_send_zc_tcp(
 /// SCM_RIGHTS fds that arrive are released (registered buffers carry bulk data,
 /// not descriptors). The recv'd bytes land in the fixed buffer, not `iov_base`.
 pub fn recvmsg_fixed(
-    pid: u32,
-    fd: i32,
+    file: &FileRef,
     index: u16,
     _op_flags: u32,
     reg: &mut BufferRegistry,
 ) -> Outcome {
-    if fd < 0 {
-        return Outcome::Inline(Errno::EBADF.raw());
-    }
-    let (handle, ops) = match socket_handle_for(pid, fd) {
+    let (handle, ops) = match socket_handle_from_ref(file) {
         Ok(v) => v,
         Err(e) => return Outcome::Inline(e.raw()),
     };
@@ -819,15 +794,12 @@ pub fn recvmsg_fixed(
 /// the ring untouched), and the ring head advances atomically with the fill.
 pub fn recvmsg_provided(
     pid: u32,
-    fd: i32,
+    file: &FileRef,
     group: u16,
     _op_flags: u32,
     reg: &mut BufferRegistry,
 ) -> Outcome {
-    if fd < 0 {
-        return Outcome::Inline(Errno::EBADF.raw());
-    }
-    let (handle, ops) = match socket_handle_for(pid, fd) {
+    let (handle, ops) = match socket_handle_from_ref(file) {
         Ok(v) => v,
         Err(e) => return Outcome::Inline(e.raw()),
     };

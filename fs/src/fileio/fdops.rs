@@ -223,44 +223,62 @@ fn file_read_fd_inner(
     buf: &mut dyn IoBufWrite,
     force_nonblock: bool,
 ) -> ssize_t {
-    let snap = {
+    let open_file = {
         let Some(inner) = lock_pid_slot(process_id) else {
             return Errno::EBADF.raw() as _;
         };
         match snapshot_fd(&inner, fd) {
-            Some(s) if s.status_flags().contains(OpenMode::READ) => s,
-            _ => return Errno::EBADF.raw() as _,
+            Some(s) => s.open_file,
+            None => return Errno::EBADF.raw() as _,
         }
     };
+    read_open_file(&open_file, buf, force_nonblock)
+}
 
-    let ops = snap.ops();
+/// The read core over an owned open-file description — shared by the
+/// fd-addressed path and the [`FileRef`]-addressed ring path. The held
+/// `KArc<OpenFile>` is the very object the fd points at, so advancing its
+/// shared offset is correct even if a concurrent close dropped the fd
+/// alias mid-read.
+fn read_open_file(
+    open_file: &KArc<OpenFile>,
+    buf: &mut dyn IoBufWrite,
+    force_nonblock: bool,
+) -> ssize_t {
+    if !open_file.status_flags().contains(OpenMode::READ) {
+        return Errno::EBADF.raw() as _;
+    }
+    let ops = open_file.ops;
 
     if buf.len() == 0 {
         return 0;
     }
 
     let seekable = ops.seekable();
-    let used_offset = if seekable { snap.position() } else { 0 };
-    let mut flag_bits = snap.status_flags().bits();
+    let used_offset = if seekable { open_file.position() } else { 0 };
+    let mut flag_bits = open_file.status_flags().bits();
     let mut socket_guard = None;
     if force_nonblock {
         flag_bits |= slopos_abi::syscall::O_NONBLOCK as u32;
         // Sockets ignore the per-call flag and consult their *stored*
         // nonblocking state (SLOPRING § 12 reality 1), so toggle it
         // across the probe and restore it on drop.
-        socket_guard = ForcedNonblockGuard::engage(ops, snap.handle(), snap.status_flags().bits());
+        socket_guard =
+            ForcedNonblockGuard::engage(ops, open_file.handle, open_file.status_flags().bits());
     }
-    let rc = ops.read(snap.handle(), buf, used_offset, flag_bits);
+    let rc = ops.read(open_file.handle, buf, used_offset, flag_bits);
     drop(socket_guard);
     if rc > 0 && seekable {
-        // The held `KArc<OpenFile>` is the very object the fd points at,
-        // so advancing its shared offset is correct even if a concurrent
-        // close dropped the fd alias mid-read.
-        snap.open_file
-            .position
-            .fetch_add(rc as u64, Ordering::AcqRel);
+        open_file.position.fetch_add(rc as u64, Ordering::AcqRel);
     }
     rc
+}
+
+/// SlopRing non-blocking read against a held [`FileRef`] — the ring holds
+/// a real reference to the open file for the op's duration, so the read
+/// targets that description even after userland closed the fd.
+pub fn file_read_ref_nonblock(file: &FileRef, buf: &mut dyn IoBufWrite) -> ssize_t {
+    read_open_file(&file.open_file, buf, true)
 }
 
 pub fn file_write_fd(process_id: u32, fd: c_int, buf: &dyn IoBufRead) -> ssize_t {
@@ -279,38 +297,55 @@ fn file_write_fd_inner(
     buf: &dyn IoBufRead,
     force_nonblock: bool,
 ) -> ssize_t {
-    let snap = {
+    let open_file = {
         let Some(inner) = lock_pid_slot(process_id) else {
             return Errno::EBADF.raw() as _;
         };
         match snapshot_fd(&inner, fd) {
-            Some(s) if s.status_flags().contains(OpenMode::WRITE) => s,
-            _ => return Errno::EBADF.raw() as _,
+            Some(s) => s.open_file,
+            None => return Errno::EBADF.raw() as _,
         }
     };
+    write_open_file(&open_file, buf, force_nonblock)
+}
 
-    let ops = snap.ops();
+/// The write core over an owned open-file description — shared by the
+/// fd-addressed path and the [`FileRef`]-addressed ring path.
+fn write_open_file(
+    open_file: &KArc<OpenFile>,
+    buf: &dyn IoBufRead,
+    force_nonblock: bool,
+) -> ssize_t {
+    if !open_file.status_flags().contains(OpenMode::WRITE) {
+        return Errno::EBADF.raw() as _;
+    }
+    let ops = open_file.ops;
 
     if buf.len() == 0 {
         return 0;
     }
 
     let seekable = ops.seekable();
-    let used_offset = if seekable { snap.position() } else { 0 };
-    let mut flag_bits = snap.status_flags().bits();
+    let used_offset = if seekable { open_file.position() } else { 0 };
+    let mut flag_bits = open_file.status_flags().bits();
     let mut socket_guard = None;
     if force_nonblock {
         flag_bits |= slopos_abi::syscall::O_NONBLOCK as u32;
-        socket_guard = ForcedNonblockGuard::engage(ops, snap.handle(), snap.status_flags().bits());
+        socket_guard =
+            ForcedNonblockGuard::engage(ops, open_file.handle, open_file.status_flags().bits());
     }
-    let rc = ops.write(snap.handle(), buf, used_offset, flag_bits);
+    let rc = ops.write(open_file.handle, buf, used_offset, flag_bits);
     drop(socket_guard);
     if rc > 0 && seekable {
-        snap.open_file
-            .position
-            .fetch_add(rc as u64, Ordering::AcqRel);
+        open_file.position.fetch_add(rc as u64, Ordering::AcqRel);
     }
     rc
+}
+
+/// SlopRing non-blocking write against a held [`FileRef`] — see
+/// [`file_read_ref_nonblock`].
+pub fn file_write_ref_nonblock(file: &FileRef, buf: &dyn IoBufRead) -> ssize_t {
+    write_open_file(&file.open_file, buf, true)
 }
 
 /// RAII guard that forces a socket fd's *stored* nonblocking flag on for
@@ -879,6 +914,13 @@ pub fn fileio_get_handle_and_ops(
         snapshot_fd(&inner, fd)?
     };
     Some((snap.handle(), snap.ops()))
+}
+
+/// Resolve a held [`FileRef`] to its subsystem handle and ops vtable — the
+/// reference analog of [`fileio_get_handle_and_ops`], for ring ops routing
+/// on `kind()` / `is_unix_socket()` without an fd lookup.
+pub fn fileio_handle_and_ops_from_ref(file: &FileRef) -> (usize, &'static dyn FileOps) {
+    (file.open_file.handle, file.open_file.ops)
 }
 
 /// Mint a [`FileRef`] alias of an open fd — the SCM_RIGHTS send side.
