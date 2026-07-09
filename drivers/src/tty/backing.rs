@@ -129,7 +129,8 @@ impl TtyBacking {
                     }
                 }
             }
-        });
+        })
+        .ok()?;
         if slave_alloc_failed {
             return None;
         }

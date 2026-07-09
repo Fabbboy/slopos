@@ -70,10 +70,13 @@ struct CyclicNode {
 }
 
 pub fn test_karc_try_new_cyclic_wires_weak_self_link() -> TestResult {
-    let node = KArc::try_new_cyclic(|weak| CyclicNode {
+    let node = match KArc::try_new_cyclic(|weak| CyclicNode {
         payload: 0xBEEF,
         self_link: weak.clone(),
-    });
+    }) {
+        Ok(node) => node,
+        Err(_) => return TestResult::Fail,
+    };
 
     // The stored weak link upgrades back to the very same allocation.
     let Some(via_weak) = node.self_link.upgrade() else {
@@ -136,6 +139,28 @@ pub fn test_karc_weak_count_accuracy() -> TestResult {
     TestResult::Pass
 }
 
+pub fn test_karc_strong_count_saturates() -> TestResult {
+    let strong = match KArc::try_new(0x5A_u8) {
+        Ok(arc) => arc,
+        Err(_) => return TestResult::Fail,
+    };
+    KArc::prepare_strong_saturation_for_test(&strong);
+    let clone = strong.clone();
+    assert_test!(
+        KArc::strong_count(&strong) == KArc::<u8>::max_refcount_for_test(),
+        "clone must saturate the strong count"
+    );
+    drop(clone);
+    assert_test!(
+        KArc::strong_count(&strong) == KArc::<u8>::max_refcount_for_test(),
+        "drop must not undo strong-count saturation"
+    );
+    // The deliberately saturated allocation is immortal by design. Letting
+    // this final handle go confirms Drop takes the saturation path.
+    drop(strong);
+    TestResult::Pass
+}
+
 slopos_testing::stest!(
     name = test_kweak_upgrade_after_last_strong_drop_is_none,
     suite = ostd_arc
@@ -149,3 +174,4 @@ slopos_testing::stest!(
     suite = ostd_arc
 );
 slopos_testing::stest!(name = test_karc_weak_count_accuracy, suite = ostd_arc);
+slopos_testing::stest!(name = test_karc_strong_count_saturates, suite = ostd_arc);

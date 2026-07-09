@@ -142,16 +142,34 @@ exactly why invariant I3 below exists.
 
 ## Workstreams
 
-**W0 — In-house `KArc` (prerequisite, parallelizable).** Today's `KArc` is a
-newtype over `alloc::sync::Arc` (`slopos-ostd/src/mm/heap.rs`): it *aborts* on
-refcount overflow instead of saturating, and `try_new_cyclic` is infallible.
-Reimplement `KArc`/`KWeak` in-house in ostd (precedent: in-house `Init` over
-`pinned-init`): saturating count, Release-dec + Acquire-before-destructor
-ordering (documented), fallible `try_new`/`try_init`/`try_new_cyclic`,
-`upgrade` as `inc_not_zero`, DST coercion (existing `KArc<dyn FileBacking>`
-users must recompile unchanged), plus ostd-internal `into_raw`/`from_raw` for
-the placement primitives and the PCR/deferred slots. New unsafe lands in the
-trusted domain; `just tcb-ratio` stays within Phase-1 target.
+**W0 — In-house `KArc` (complete 2026-07-09).** `KArc`/`KWeak` are now an
+in-house ostd primitive backed by one tail-allocated `KArcInner<T: ?Sized>`;
+the `alloc::sync::Arc`/`Weak` backing was removed outright. Strong and weak
+counts saturate permanently at `isize::MAX`, releases use Release CAS plus an
+Acquire fence before destruction/deallocation, and weak upgrade is an Acquire
+`inc_not_zero` loop. `get_mut` locks the implicit weak count while proving
+uniqueness. `try_new`, in-place `try_init`, and `try_new_cyclic` are fallible;
+cyclic construction publishes the strong count only after `T` is initialized.
+DST coercion works for both handles, including all existing
+`KArc<dyn FileBacking>` users, and sized ostd-internal `into_raw`/`from_raw`
+move one strong reference into and out of future placement/PCR slots.
+
+W0 verification:
+
+- Kernel `stest!` coverage exercises weak lifetime, downgrade/upgrade,
+  fallible cyclic construction, weak-count accounting, and strong-count
+  saturation.
+- Host and Miri coverage exercises 10,000 native upgrade-vs-final-drop races,
+  cyclic publication, strong and weak DST coercion, empty weak handles,
+  uniqueness, and raw ownership round trips with exactly-once destruction.
+- `just build`, `just check-framekernel`, and all 82 Verus obligations pass;
+  the TCB ratio is 0.528%, below both the Phase-1 and Phase-2 limits.
+- Full QEMU testing passes: 2,646 kernel tests plus 23 userland tests, with no
+  failures or skips.
+- Security triage raw findings: none. The refcount ordering, saturation races,
+  allocation layouts, destructor/deallocator split, cyclic publication,
+  raw ownership boundary, and the syscall/mm/fs/driver consumers were
+  re-reviewed. No confidence-scored or CVSS-eligible finding was produced.
 
 **W1 — Drop-context infrastructure.** The per-CPU deferred previous-task
 slot + its IRQs-on drain in the dispatcher; the cross-CPU
@@ -180,8 +198,8 @@ slot; TTY hangup and futex cleanup keep their ordering but hold typed refs.
 `task_inc_ref`/`task_dec_ref`, `TaskRefGuard`, every `KernelSync<*mut Task>`,
 and generation identity. Acceptance greps below must return zero hits.
 
-W0–W2 are independent of the flip and land first with their own tests; W3–W5
-are the rip-and-replace and land as one coherent series.
+W1–W2 remain independent of the flip and land next with their own tests;
+W3–W5 are the rip-and-replace and land as one coherent series.
 
 ## Acceptance
 
@@ -200,8 +218,10 @@ are the rip-and-replace and land as one coherent series.
 
 ## Testing
 
-- `stest!` for W0 (`KArc` saturation, upgrade-vs-drop races, cyclic init),
-  W1 (deferred slot drains exactly once, drop asserts fire under injected
+- W0 coverage is complete (`KArc` saturation and cyclic init as `stest!`s;
+  upgrade-vs-drop races, DST coercion, raw round trips, and uniqueness under
+  host tests and Miri). Add `stest!` coverage for W1 (deferred slot drains
+  exactly once, drop asserts fire under injected
   lock/IRQ contexts in test-hooks builds), W2 (upgrade returns `None` after
   death; id non-reuse; cap behavior), W3 (placement transitions move
   ownership exactly once; double-insert CAS-rejected).

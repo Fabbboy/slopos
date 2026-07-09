@@ -23,14 +23,16 @@
 //! subset tuned for our allocator and our stack-frame gate.
 
 use core::cell::SyncUnsafeCell;
+use core::hint;
+use core::mem::MaybeUninit;
+use core::num::NonZeroUsize;
 use core::ops::{Deref, DerefMut};
 use core::pin::Pin;
 use core::ptr::NonNull;
-use core::sync::atomic::{AtomicBool, AtomicPtr, AtomicUsize, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicPtr, AtomicUsize, Ordering, fence};
 
 use alloc::boxed::Box;
 use alloc::collections::{BTreeMap, VecDeque};
-use alloc::sync::Arc;
 
 pub use alloc::alloc::AllocError;
 
@@ -884,20 +886,98 @@ impl<'a, T> IntoIterator for &'a mut KVec<T> {
     }
 }
 
-/// Kernel-blessed `Arc<T>`. Fallible constructor; ref-counted clone is
-/// infallible (just bumps the refcount).
+/// Largest live reference count. Reaching this value makes that counter
+/// permanently saturated: subsequent clones and drops leave it unchanged.
+/// Leaking an allocation is the only sound response to a count that can no
+/// longer represent all live handles; wrapping would permit use-after-free.
+const KARC_MAX_REFCOUNT: usize = isize::MAX as usize;
+
+/// Sentinel used to exclude concurrent downgrades while `get_mut` verifies
+/// unique ownership. It is deliberately outside the saturating count range.
+const KARC_WEAK_LOCKED: usize = usize::MAX;
+
+#[repr(C, align(2))]
+struct KArcInner<T: ?Sized> {
+    strong: AtomicUsize,
+    /// Includes one implicit weak reference while `strong` is non-zero.
+    weak: AtomicUsize,
+    /// The tail position is load-bearing: it lets `KArc<T>` unsize to
+    /// `KArc<dyn Trait>` without changing the allocation or pointer metadata.
+    data: T,
+}
+
+enum RefcountRelease {
+    Remaining,
+    Last,
+    Saturated,
+}
+
+/// Increment a live reference count without allowing integer wraparound.
+/// Once saturated, the counter stays saturated for the allocation's lifetime.
+#[inline]
+fn refcount_increment_saturating(counter: &AtomicUsize) {
+    let mut current = counter.load(Ordering::Relaxed);
+    loop {
+        if current >= KARC_MAX_REFCOUNT {
+            return;
+        }
+        match counter.compare_exchange_weak(
+            current,
+            current + 1,
+            Ordering::Relaxed,
+            Ordering::Relaxed,
+        ) {
+            Ok(_) => return,
+            Err(observed) => current = observed,
+        }
+    }
+}
+
+/// Release one reference. A CAS loop is required because a racing increment
+/// may saturate the counter; a plain `fetch_sub` could then undo saturation
+/// and make uncounted handles reachable by a later deallocation.
+#[inline]
+fn refcount_release(counter: &AtomicUsize) -> RefcountRelease {
+    let mut current = counter.load(Ordering::Relaxed);
+    loop {
+        if current == KARC_MAX_REFCOUNT {
+            return RefcountRelease::Saturated;
+        }
+        debug_assert!(current > 0, "KArc reference count underflow");
+        match counter.compare_exchange_weak(
+            current,
+            current - 1,
+            Ordering::Release,
+            Ordering::Relaxed,
+        ) {
+            Ok(_) if current == 1 => return RefcountRelease::Last,
+            Ok(_) => return RefcountRelease::Remaining,
+            Err(observed) => current = observed,
+        }
+    }
+}
+
+/// Kernel-owned atomically reference-counted pointer. Allocation is fallible;
+/// cloning is allocation-free and saturates rather than wrapping its count.
 ///
 /// As with [`KBox::try_new`] the rvalue passed to [`KArc::try_new`] does
 /// briefly land on the caller's stack; large `T` should be constructed
 /// via [`KArc::try_init`], which writes the `T` directly into the Arc's
 /// heap allocation without a stack materialisation step.
 pub struct KArc<T: ?Sized> {
-    inner: Arc<T>,
+    ptr: NonNull<KArcInner<T>>,
 }
 
 impl<T> KArc<T> {
     pub fn try_new(value: T) -> Result<Self, AllocError> {
-        Arc::try_new(value).map(|inner| Self { inner })
+        let inner = Box::try_new(KArcInner {
+            strong: AtomicUsize::new(1),
+            weak: AtomicUsize::new(1),
+            data: value,
+        })?;
+        // SAFETY: `Box::into_raw` never returns null.
+        let ptr = unsafe { NonNull::new_unchecked(Box::into_raw(inner)) };
+        Ok(Self { ptr })
     }
 
     /// Heap-allocate and initialise a `T` in place from an
@@ -909,72 +989,103 @@ impl<T> KArc<T> {
     where
         E: From<AllocError>,
     {
-        let mut uninit: Arc<core::mem::MaybeUninit<T>> =
-            Arc::try_new_uninit().map_err(|_| E::from(AllocError))?;
-        // SAFETY: `uninit` is freshly allocated and unique, so `get_mut`
-        // yields exclusive access to the `MaybeUninit<T>` slot, which is
-        // sized and aligned for `T` by construction (upholding **Inv. 10**).
-        // `init.__init` writes a valid `T` into the slot on `Ok(())`; on
-        // `Err` we return early and drop the still-uninit `Arc`, freeing
-        // the allocation without running `T`'s drop glue.
+        let uninit: Box<MaybeUninit<KArcInner<T>>> = Box::try_new_uninit().map_err(E::from)?;
+        let allocation = Box::into_raw(uninit);
+        let inner = allocation.cast::<KArcInner<T>>();
+        // SAFETY: `allocation` is a fresh, correctly sized and aligned slot.
+        // The two header fields are initialized before the recipe receives
+        // the data slot. On recipe failure the original `MaybeUninit` box is
+        // reconstructed, so no partially initialized field is dropped.
         unsafe {
-            let slot: *mut T = Arc::get_mut(&mut uninit)
-                .expect("freshly-allocated Arc is uniquely owned")
-                .as_mut_ptr();
-            init.__init(slot)?;
+            core::ptr::addr_of_mut!((*inner).strong).write(AtomicUsize::new(1));
+            core::ptr::addr_of_mut!((*inner).weak).write(AtomicUsize::new(1));
+            let slot = core::ptr::addr_of_mut!((*inner).data);
+            if let Err(error) = init.__init(slot) {
+                drop(Box::from_raw(allocation));
+                return Err(error);
+            }
             Ok(Self {
-                inner: uninit.assume_init(),
+                ptr: NonNull::new_unchecked(inner),
+            })
+        }
+    }
+
+    /// Heap-allocate a `T` whose initialiser receives a [`KWeak<T>`]
+    /// pointing back at the allocation being constructed, enabling a
+    /// self-referential weak link (e.g. a parent/child pair where the
+    /// child holds a weak back-pointer to the parent).
+    ///
+    /// `data_fn` can clone the supplied weak handle, but upgrading it returns
+    /// `None` until the returned value has been written completely. Allocation
+    /// failure is reported before `data_fn` runs.
+    pub fn try_new_cyclic<F>(data_fn: F) -> Result<Self, AllocError>
+    where
+        F: FnOnce(&KWeak<T>) -> T,
+    {
+        let uninit: Box<MaybeUninit<KArcInner<T>>> = Box::try_new_uninit()?;
+        let inner = Box::into_raw(uninit).cast::<KArcInner<T>>();
+        // SAFETY: `inner` points to a fresh `KArcInner<T>` allocation. The
+        // temporary `KWeak` owns the implicit weak count. Forgetting it after
+        // publication transfers that count to the strong-reference set. If
+        // `data_fn` unwinds in a host test, its Drop instead deallocates the
+        // still-uninitialized allocation without reading `data`.
+        unsafe {
+            core::ptr::addr_of_mut!((*inner).strong).write(AtomicUsize::new(0));
+            core::ptr::addr_of_mut!((*inner).weak).write(AtomicUsize::new(1));
+            let weak = KWeak {
+                ptr: NonNull::new_unchecked(inner),
+            };
+            let value = data_fn(&weak);
+            core::ptr::addr_of_mut!((*inner).data).write(value);
+            (*inner).strong.store(1, Ordering::Release);
+            core::mem::forget(weak);
+            Ok(Self {
+                ptr: NonNull::new_unchecked(inner),
             })
         }
     }
 }
 
-impl<T> KArc<T> {
-    /// Heap-allocate a `T` whose initialiser receives a [`KWeak<T>`]
-    /// pointing back at the allocation being constructed, enabling a
-    /// self-referential weak link (e.g. a parent/child pair where the
-    /// child holds a weak back-pointer to the parent). Mirrors
-    /// [`alloc::sync::Arc::new_cyclic`].
-    ///
-    /// Allocation carve-out: `alloc::sync` exposes only the infallible
-    /// [`Arc::new_cyclic`] — there is no `try_new_cyclic` to forward to —
-    /// so this constructor inherits `new_cyclic`'s allocation behaviour
-    /// (abort-on-OOM via the global allocator) rather than returning a
-    /// fallible `Result` like [`KArc::try_new`]. The `data_fn` closure is
-    /// the only place a [`KWeak`] to a not-yet-fully-constructed `KArc`
-    /// is observable; it must not [`KWeak::upgrade`] that weak (the strong
-    /// count is still zero), matching the `Arc::new_cyclic` contract.
-    pub fn try_new_cyclic<F>(data_fn: F) -> Self
-    where
-        F: FnOnce(&KWeak<T>) -> T,
-    {
-        let inner = Arc::new_cyclic(|weak| {
-            let kweak = KWeak {
-                inner: weak.clone(),
-            };
-            data_fn(&kweak)
-        });
-        Self { inner }
-    }
-}
-
 impl<T: ?Sized> KArc<T> {
-    /// Returns a mutable reference to the inner value, iff this is
-    /// the only `KArc` pointing at it. Mirrors [`alloc::sync::Arc::get_mut`].
+    #[inline]
+    fn inner(&self) -> &KArcInner<T> {
+        // SAFETY: every live `KArc` owns one strong reference, so the header
+        // and initialized data remain allocated for this borrow.
+        unsafe { self.ptr.as_ref() }
+    }
+
+    /// Returns a mutable reference to the inner value iff no other strong or
+    /// weak handle can access this allocation.
     ///
     /// Returns `None` when the strong or weak ref-count exceeds one,
     /// because handing out `&mut T` while another clone exists would
     /// alias the inner value.
     #[inline]
     pub fn get_mut(this: &mut Self) -> Option<&mut T> {
-        Arc::get_mut(&mut this.inner)
+        let inner = this.inner();
+        if inner
+            .weak
+            .compare_exchange(1, KARC_WEAK_LOCKED, Ordering::Acquire, Ordering::Relaxed)
+            .is_err()
+        {
+            return None;
+        }
+        let unique = inner.strong.load(Ordering::Acquire) == 1;
+        inner.weak.store(1, Ordering::Release);
+        if !unique {
+            return None;
+        }
+        // SAFETY: the locked weak count proved that no explicit `KWeak`
+        // exists, the strong count is one, and `&mut KArc` prevents access
+        // through this sole handle for the returned borrow.
+        Some(unsafe { &mut (*this.ptr.as_ptr()).data })
     }
 
     /// Strong reference count. Useful for invariant assertions in
     /// callers that rely on sole ownership for `get_mut` to succeed.
     #[inline]
     pub fn strong_count(this: &Self) -> usize {
-        Arc::strong_count(&this.inner)
+        this.inner().strong.load(Ordering::Relaxed)
     }
 
     /// Weak reference count. The count is 0 when no [`KWeak`] points at
@@ -983,7 +1094,16 @@ impl<T: ?Sized> KArc<T> {
     /// for invariant assertions about outstanding weak handles.
     #[inline]
     pub fn weak_count(this: &Self) -> usize {
-        Arc::weak_count(&this.inner)
+        let inner = this.inner();
+        let weak = inner.weak.load(Ordering::Acquire);
+        let strong = inner.strong.load(Ordering::Relaxed);
+        if strong == 0 {
+            0
+        } else if weak == KARC_MAX_REFCOUNT {
+            KARC_MAX_REFCOUNT
+        } else {
+            weak - 1
+        }
     }
 
     /// Create a [`KWeak`] handle that does *not* keep the allocation
@@ -993,9 +1113,28 @@ impl<T: ?Sized> KArc<T> {
     /// `None`. Mirrors [`alloc::sync::Arc::downgrade`].
     #[inline]
     pub fn downgrade(this: &Self) -> KWeak<T> {
-        KWeak {
-            inner: Arc::downgrade(&this.inner),
+        let weak = &this.inner().weak;
+        let mut current = weak.load(Ordering::Relaxed);
+        loop {
+            if current == KARC_WEAK_LOCKED {
+                hint::spin_loop();
+                current = weak.load(Ordering::Relaxed);
+                continue;
+            }
+            if current == KARC_MAX_REFCOUNT {
+                break;
+            }
+            match weak.compare_exchange_weak(
+                current,
+                current + 1,
+                Ordering::Acquire,
+                Ordering::Relaxed,
+            ) {
+                Ok(_) => break,
+                Err(observed) => current = observed,
+            }
         }
+        KWeak { ptr: this.ptr }
     }
 
     /// Returns `true` if both handles point at the same allocation.
@@ -1003,7 +1142,53 @@ impl<T: ?Sized> KArc<T> {
     /// identity, never the pointee — safe for zero-sized and unsized `T`.
     #[inline]
     pub fn ptr_eq(this: &Self, other: &Self) -> bool {
-        Arc::ptr_eq(&this.inner, &other.inner)
+        core::ptr::addr_eq(this.ptr.as_ptr(), other.ptr.as_ptr())
+    }
+
+    /// Move one strong reference into an OSTD-owned raw slot.
+    #[allow(dead_code)]
+    pub(crate) fn into_raw(this: Self) -> *const T
+    where
+        T: Sized,
+    {
+        // SAFETY: `this` owns a live strong reference, so its initialized data
+        // field has a stable address for the duration of this operation.
+        let data = unsafe { core::ptr::addr_of!((*this.ptr.as_ptr()).data) };
+        core::mem::forget(this);
+        data
+    }
+
+    /// Reconstruct a strong reference previously moved with `into_raw`.
+    ///
+    /// # Safety
+    /// `data` must be the still-live result of exactly one matching
+    /// `KArc::into_raw` call for the same `T`, and that raw ownership must not
+    /// already have been reconstructed.
+    #[allow(dead_code)]
+    pub(crate) unsafe fn from_raw(data: *const T) -> Self
+    where
+        T: Sized,
+    {
+        let offset = core::mem::offset_of!(KArcInner<T>, data);
+        let inner = data.cast::<u8>().wrapping_sub(offset).cast_mut().cast();
+        // SAFETY: the caller guarantees this is the matching live allocation.
+        Self {
+            ptr: unsafe { NonNull::new_unchecked(inner) },
+        }
+    }
+
+    /// Test hook that places the strong count one step below saturation.
+    #[cfg(any(test, feature = "test-helpers"))]
+    pub fn prepare_strong_saturation_for_test(this: &Self) {
+        debug_assert_eq!(this.inner().strong.load(Ordering::Relaxed), 1);
+        this.inner()
+            .strong
+            .store(KARC_MAX_REFCOUNT - 1, Ordering::Relaxed);
+    }
+
+    #[cfg(any(test, feature = "test-helpers"))]
+    pub const fn max_refcount_for_test() -> usize {
+        KARC_MAX_REFCOUNT
     }
 }
 
@@ -1021,7 +1206,7 @@ where
 /// reference that must not extend the referent's lifetime (e.g. a poll
 /// registration that observes — but never resurrects — a closed file).
 pub struct KWeak<T: ?Sized> {
-    inner: alloc::sync::Weak<T>,
+    ptr: NonNull<KArcInner<T>>,
 }
 
 impl<T> KWeak<T> {
@@ -1030,8 +1215,11 @@ impl<T> KWeak<T> {
     /// `const` so empty handles can seed static registries.
     #[inline]
     pub const fn new() -> Self {
+        // Matches the standard library's empty-weak representation. A real
+        // `KArcInner` has alignment >= 2, so this address cannot identify an
+        // allocation. It is never dereferenced.
         Self {
-            inner: alloc::sync::Weak::new(),
+            ptr: NonNull::without_provenance(NonZeroUsize::MAX),
         }
     }
 }
@@ -1043,6 +1231,23 @@ impl<T> Default for KWeak<T> {
 }
 
 impl<T: ?Sized> KWeak<T> {
+    #[inline]
+    fn is_empty(&self) -> bool {
+        self.ptr.as_ptr().cast::<()>().addr() == usize::MAX
+    }
+
+    #[inline]
+    fn counters(&self) -> Option<(&AtomicUsize, &AtomicUsize)> {
+        if self.is_empty() {
+            return None;
+        }
+        let ptr = self.ptr.as_ptr();
+        // SAFETY: a live weak count keeps the allocation and its two header
+        // atomics valid even after `data` has been dropped. We deliberately do
+        // not form a reference to the whole, potentially dead, `KArcInner<T>`.
+        Some(unsafe { (&(*ptr).strong, &(*ptr).weak) })
+    }
+
     /// Attempt to promote this weak handle to a strong [`KArc`],
     /// bumping the strong count. Returns `None` if the inner value has
     /// already been dropped (the last strong `KArc` is gone) or if this
@@ -1050,7 +1255,25 @@ impl<T: ?Sized> KWeak<T> {
     /// [`alloc::sync::Weak::upgrade`].
     #[inline]
     pub fn upgrade(&self) -> Option<KArc<T>> {
-        self.inner.upgrade().map(|inner| KArc { inner })
+        let (strong, _) = self.counters()?;
+        let mut current = strong.load(Ordering::Relaxed);
+        loop {
+            if current == 0 {
+                return None;
+            }
+            if current == KARC_MAX_REFCOUNT {
+                return Some(KArc { ptr: self.ptr });
+            }
+            match strong.compare_exchange_weak(
+                current,
+                current + 1,
+                Ordering::Acquire,
+                Ordering::Relaxed,
+            ) {
+                Ok(_) => return Some(KArc { ptr: self.ptr }),
+                Err(observed) => current = observed,
+            }
+        }
     }
 
     /// Strong reference count of the referent, or 0 if it has been
@@ -1058,15 +1281,17 @@ impl<T: ?Sized> KWeak<T> {
     /// [`alloc::sync::Weak::strong_count`].
     #[inline]
     pub fn strong_count(&self) -> usize {
-        self.inner.strong_count()
+        self.counters()
+            .map_or(0, |(strong, _)| strong.load(Ordering::Relaxed))
     }
 }
 
 impl<T: ?Sized> Clone for KWeak<T> {
     fn clone(&self) -> Self {
-        Self {
-            inner: self.inner.clone(),
+        if let Some((_, weak)) = self.counters() {
+            refcount_increment_saturating(weak);
         }
+        Self { ptr: self.ptr }
     }
 }
 
@@ -1079,23 +1304,141 @@ where
 
 impl<T: ?Sized> Clone for KArc<T> {
     fn clone(&self) -> Self {
-        Self {
-            inner: Arc::clone(&self.inner),
+        refcount_increment_saturating(&self.inner().strong);
+        Self { ptr: self.ptr }
+    }
+}
+
+impl<T: ?Sized> Drop for KArc<T> {
+    fn drop(&mut self) {
+        match refcount_release(&self.inner().strong) {
+            RefcountRelease::Remaining | RefcountRelease::Saturated => return,
+            RefcountRelease::Last => {}
+        }
+
+        // Every prior reference release publishes accesses through Release;
+        // this Acquire fence makes them visible before `T`'s destructor runs.
+        fence(Ordering::Acquire);
+        // Materialize the implicit weak as an RAII guard before calling user
+        // drop glue. It releases the allocation on both normal return and a
+        // host-test unwind; kernel panics abort, but the stronger invariant
+        // keeps this primitive correct in every build mode.
+        let implicit = KWeak { ptr: self.ptr };
+        // SAFETY: this thread changed the strong count from one to zero, so no
+        // strong handle can access data and weak upgrades can no longer win.
+        unsafe {
+            core::ptr::drop_in_place(core::ptr::addr_of_mut!((*self.ptr.as_ptr()).data));
+        }
+        drop(implicit);
+    }
+}
+
+impl<T: ?Sized> Drop for KWeak<T> {
+    fn drop(&mut self) {
+        self.drop_inner();
+    }
+}
+
+impl<T: ?Sized> KWeak<T> {
+    fn drop_inner(&mut self) {
+        let Some((_, weak)) = self.counters() else {
+            return;
+        };
+        match refcount_release(weak) {
+            RefcountRelease::Remaining | RefcountRelease::Saturated => return,
+            RefcountRelease::Last => {}
+        }
+
+        // Pair with every weak Release before returning the storage to the
+        // allocator. `Layout::for_value_raw` uses pointer metadata only; it
+        // does not read the already-dropped `data` tail.
+        fence(Ordering::Acquire);
+        // SAFETY: this was the final weak reference, the strong count is zero,
+        // and the layout is that of the original (possibly unsized) allocation.
+        unsafe {
+            let layout = core::alloc::Layout::for_value_raw(self.ptr.as_ptr());
+            alloc::alloc::dealloc(self.ptr.cast::<u8>().as_ptr(), layout);
         }
     }
 }
+
+// SAFETY: shared access through either handle is limited to `&T`; moving a
+// handle between CPUs is sound exactly when `T` is both Send and Sync.
+unsafe impl<T: ?Sized + Send + Sync> Send for KArc<T> {}
+// SAFETY: see the `Send` implementation above.
+unsafe impl<T: ?Sized + Send + Sync> Sync for KArc<T> {}
+// SAFETY: weak handles access only atomic header fields until a successful
+// upgrade produces a `KArc<T>` under the same Send + Sync bounds.
+unsafe impl<T: ?Sized + Send + Sync> Send for KWeak<T> {}
+// SAFETY: see the `KWeak` Send implementation above.
+unsafe impl<T: ?Sized + Send + Sync> Sync for KWeak<T> {}
 
 impl<T: ?Sized> Deref for KArc<T> {
     type Target = T;
 
     fn deref(&self) -> &T {
-        &self.inner
+        &self.inner().data
     }
 }
 
 impl<T: ?Sized> AsRef<T> for KArc<T> {
     fn as_ref(&self) -> &T {
-        &self.inner
+        &self.inner().data
+    }
+}
+
+#[cfg(test)]
+mod karc_tests {
+    use core::sync::atomic::{AtomicUsize, Ordering};
+
+    use super::{KArc, KWeak};
+
+    static RAW_ROUND_TRIP_DROPS: AtomicUsize = AtomicUsize::new(0);
+
+    struct DropProbe(u32);
+
+    impl Drop for DropProbe {
+        fn drop(&mut self) {
+            RAW_ROUND_TRIP_DROPS.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    #[test]
+    fn raw_strong_ownership_round_trip_drops_exactly_once() {
+        RAW_ROUND_TRIP_DROPS.store(0, Ordering::Relaxed);
+        let arc = KArc::try_new(DropProbe(0xCAFE)).expect("KArc allocation");
+        let data = KArc::into_raw(arc);
+        // SAFETY: `data` is the live result of the immediately preceding
+        // `into_raw` and this call reconstructs that ownership exactly once.
+        let arc = unsafe { KArc::from_raw(data) };
+        assert_eq!(arc.0, 0xCAFE);
+        assert_eq!(RAW_ROUND_TRIP_DROPS.load(Ordering::Relaxed), 0);
+        drop(arc);
+        assert_eq!(RAW_ROUND_TRIP_DROPS.load(Ordering::Relaxed), 1);
+    }
+
+    #[test]
+    fn get_mut_requires_no_other_strong_or_weak_handles() {
+        let mut arc = KArc::try_new(10_u32).expect("KArc allocation");
+        *KArc::get_mut(&mut arc).expect("fresh KArc is unique") = 20;
+
+        let weak = KArc::downgrade(&arc);
+        assert!(KArc::get_mut(&mut arc).is_none());
+        drop(weak);
+
+        let clone = arc.clone();
+        assert!(KArc::get_mut(&mut arc).is_none());
+        drop(clone);
+        assert_eq!(KArc::get_mut(&mut arc).map(|value| *value), Some(20));
+    }
+
+    #[test]
+    fn empty_weak_is_cloneable_and_never_upgrades() {
+        let weak = KWeak::<u64>::new();
+        let clone = weak.clone();
+        assert_eq!(weak.strong_count(), 0);
+        assert!(weak.upgrade().is_none());
+        assert!(clone.upgrade().is_none());
     }
 }
 

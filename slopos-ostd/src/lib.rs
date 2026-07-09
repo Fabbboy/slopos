@@ -5,7 +5,13 @@
 //! safe APIs exposed from this crate.
 
 #![no_std]
-#![feature(allocator_api, coerce_unsized, sync_unsafe_cell, unsize)]
+#![feature(
+    allocator_api,
+    coerce_unsized,
+    layout_for_ptr,
+    sync_unsafe_cell,
+    unsize
+)]
 #![deny(unsafe_op_in_unsafe_fn)]
 
 extern crate alloc;

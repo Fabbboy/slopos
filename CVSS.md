@@ -1,6 +1,6 @@
 # SlopOS Vulnerability Audit and CVSS Scoring
 
-Date: 2026-03-17 (original); last reviewed 2026-05-25.
+Date: 2026-03-17 (original); last reviewed 2026-07-09.
 Method: repository-wide static review (`grep`, `ast-grep`, targeted source inspection), plus NVD CVE lookups via `curl` + `jq`.
 
 > **Pre-alpha ledger policy.** SlopOS is pre-alpha with no backwards-compatibility or audit-trail obligations, so this ledger tracks **open findings only**. When a finding is resolved it is **removed** from this file (not retained as a `fixed` historical record). Internal IDs stay stable for findings that remain open, so gaps in the numbering are expected.
