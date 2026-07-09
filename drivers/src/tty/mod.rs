@@ -36,7 +36,7 @@
 //! - [`io`] — read, write, push_input, hardware drain, data queries
 //! - [`termios`] — termios get/set, window size, ldisc, ioctls, drain
 //! - [`job_control`] — session, foreground pgrp, controlling terminal
-//! - [`lifecycle`] — open/close ref counting, hangup, active TTY, init
+//! - [`lifecycle`] — hangup, vhangup, active TTY routing, init
 //! - [`poll`] — poll readiness, poll sleep, compositor focus
 
 // Existing sub-modules (unchanged)

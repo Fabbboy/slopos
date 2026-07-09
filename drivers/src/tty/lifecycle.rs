@@ -85,25 +85,37 @@ pub fn init() {
 // ---------------------------------------------------------------------------
 
 pub fn hangup(idx: TtyIndex) {
+    let Some(session_id) = hangup_mark(idx) else {
+        return;
+    };
+    hangup_notify(idx, session_id);
+}
+
+/// The locked half of a hangup: flush, detach the session, latch
+/// `HUNG_UP`. Returns the detached session id for [`hangup_notify`], or
+/// `None` when the slot is empty. Split from the notify half so a caller
+/// serialising against reopen can run this under its own outer lock while
+/// signals and wakeups stay outside every lock.
+pub(crate) fn hangup_mark(idx: TtyIndex) -> Option<u32> {
     let slot = idx.0 as usize;
     if slot >= MAX_TTYS {
-        return;
+        return None;
     }
+    let mut guard = TTY_SLOTS[slot].lock();
+    let tty = guard.as_mut()?;
+    let sid = tty.session.session_id();
+    tty.ldisc.flush_all();
+    // full flush → both FLUSHREAD + FLUSHWRITE packet events.
+    // Deferred until after lock is dropped to avoid self-deadlock.
+    tty.session.detach();
+    tty.mark_hung_up();
+    Some(sid)
+}
 
-    let session_id = {
-        let mut guard = TTY_SLOTS[slot].lock();
-        let tty = match guard.as_mut() {
-            Some(t) => t,
-            None => return,
-        };
-        let sid = tty.session.session_id();
-        tty.ldisc.flush_all();
-        // full flush → both FLUSHREAD + FLUSHWRITE packet events.
-        // Deferred until after lock is dropped to avoid self-deadlock.
-        tty.session.detach();
-        tty.mark_hung_up();
-        sid
-    };
+/// The unlocked half of a hangup: deliver the flush packet events, signal
+/// the session, and wake readers/writers/poll waiters.
+pub(crate) fn hangup_notify(idx: TtyIndex, session_id: u32) {
+    let slot = idx.0 as usize;
 
     // Deliver deferred packet events now that the slot lock is released.
     pty::queue_packet_event(

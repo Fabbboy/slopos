@@ -40,7 +40,11 @@
 //! # Lock ordering
 //!
 //! `TTY_BACKINGS[i]` / `TTY_SLAVE_OPENS[i]` → `TTY_SLOTS[j]`. Drop bodies
-//! take only per-slot locks, never `PTY_ALLOC_LOCK`.
+//! take only per-slot locks, never `PTY_ALLOC_LOCK`. Because teardown
+//! retakes a slot's registry locks (`free_slot`, and the console close
+//! serialising against reopen), a strong backing reference must never be
+//! dropped while its own slot's registry lock is held — open paths
+//! release the guard first or pin an alias past it.
 
 use slopos_abi::file_ops::FileBacking;
 use slopos_abi::syscall::ControlFlags;
@@ -182,37 +186,57 @@ impl Drop for TtySlaveOpen {
 /// Console last-close: HUPCL with an attached session hangs the terminal
 /// up; otherwise flush and detach in place. The slot is never freed —
 /// consoles are permanent.
+///
+/// The slot mutation runs under the slot's backing-registry lock, which
+/// also serialises `open_tty`'s mint of a replacement backing. A close
+/// that observes a live registry entry belongs to a superseded backing —
+/// the fresh owner's state must not be torn down under it — so it bows
+/// out. Liveness is read as `strong_count() > 0` rather than `upgrade()`:
+/// a transient strong reference dropped here could itself become the last
+/// one and re-enter this function under the registry lock.
 fn console_last_close(idx: TtyIndex) {
     let slot = idx.0 as usize;
     if slot >= MAX_TTYS {
         return;
     }
-    let hangup_now = {
-        let mut guard = TTY_SLOTS[slot].lock();
-        let Some(tty) = guard.as_mut() else { return };
-        let hupcl = tty
-            .ldisc
-            .termios()
-            .control_flags()
-            .contains(ControlFlags::HUPCL);
-        let sid = tty.session.session_id();
-        // HUPCL fires only when a session is attached (sid != 0). Without
-        // a session there is no process group to receive SIGHUP and no DTR
-        // line to drop (QEMU serial is virtual). POSIX allows this: HUPCL
-        // is "implementation-defined" for terminals without modem control.
-        if hupcl && sid != 0 {
-            tty.flags.remove(TtyFlags::EXCLUSIVE);
-            true
+    let notify_sid = {
+        let reg = TTY_BACKINGS[slot].lock();
+        if reg.strong_count() > 0 {
+            return;
+        }
+        let hangup_now = {
+            let mut guard = TTY_SLOTS[slot].lock();
+            let Some(tty) = guard.as_mut() else { return };
+            let hupcl = tty
+                .ldisc
+                .termios()
+                .control_flags()
+                .contains(ControlFlags::HUPCL);
+            let sid = tty.session.session_id();
+            // HUPCL fires only when a session is attached (sid != 0). Without
+            // a session there is no process group to receive SIGHUP and no DTR
+            // line to drop (QEMU serial is virtual). POSIX allows this: HUPCL
+            // is "implementation-defined" for terminals without modem control.
+            if hupcl && sid != 0 {
+                tty.flags.remove(TtyFlags::EXCLUSIVE);
+                true
+            } else {
+                tty.ldisc.flush_all();
+                tty.session.detach();
+                tty.flags
+                    .remove(TtyFlags::HUNG_UP | TtyFlags::PEER_CLOSED | TtyFlags::EXCLUSIVE);
+                false
+            }
+        };
+        if hangup_now {
+            super::lifecycle::hangup_mark(idx)
         } else {
-            tty.ldisc.flush_all();
-            tty.session.detach();
-            tty.flags
-                .remove(TtyFlags::HUNG_UP | TtyFlags::PEER_CLOSED | TtyFlags::EXCLUSIVE);
-            false
+            None
         }
     };
-    if hangup_now {
-        super::lifecycle::hangup(idx);
+    // Signals and wakeups fire outside every lock.
+    if let Some(sid) = notify_sid {
+        super::lifecycle::hangup_notify(idx, sid);
     }
 }
 
@@ -230,34 +254,58 @@ pub fn open_tty(idx: TtyIndex) -> Result<KArc<dyn FileBacking>, TtyError> {
     if slot >= MAX_TTYS {
         return Err(TtyError::InvalidIndex);
     }
-    let mut reg = TTY_BACKINGS[slot].lock();
-    if let Some(existing) = reg.upgrade() {
-        if existing.is_pty_slave() {
-            drop(reg);
-            return Ok(open_slave_shared(existing)?);
+    loop {
+        {
+            let reg = TTY_BACKINGS[slot].lock();
+            if let Some(existing) = reg.upgrade() {
+                if existing.is_pty_slave() {
+                    drop(reg);
+                    return Ok(open_slave_shared(existing)?);
+                }
+                if let Err(e) = exclusive_gate(&existing) {
+                    // Release the registry lock before `existing` drops:
+                    // were this upgrade the last strong reference, its
+                    // teardown retakes the same lock.
+                    drop(reg);
+                    return Err(e);
+                }
+                clear_own_latches(slot);
+                return Ok(existing);
+            }
         }
-        exclusive_gate(&existing)?;
-        clear_own_latches(slot);
-        return Ok(existing);
-    }
 
-    {
-        let mut guard = TTY_SLOTS[slot].lock();
-        let tty = guard.as_mut().ok_or(TtyError::NotAllocated)?;
-        match tty.driver {
-            TtyDriverKind::SerialConsole(_) | TtyDriverKind::VConsole(_) => {}
-            _ => return Err(TtyError::NotAllocated),
+        {
+            let guard = TTY_SLOTS[slot].lock();
+            let tty = guard.as_ref().ok_or(TtyError::NotAllocated)?;
+            match tty.driver {
+                TtyDriverKind::SerialConsole(_) | TtyDriverKind::VConsole(_) => {}
+                _ => return Err(TtyError::NotAllocated),
+            }
         }
-        tty.flags.remove(TtyFlags::HUNG_UP | TtyFlags::PEER_CLOSED);
-    }
 
-    let backing = KArc::try_new(TtyBacking {
-        idx,
-        peer: PeerLink::Console,
-    })
-    .map_err(|_| TtyError::OutOfMemory)?;
-    *reg = KArc::downgrade(&backing);
-    Ok(backing)
+        // Allocate with no lock held: a failed allocation drops a console
+        // backing whose teardown takes the registry lock.
+        let backing = KArc::try_new(TtyBacking {
+            idx,
+            peer: PeerLink::Console,
+        })
+        .map_err(|_| TtyError::OutOfMemory)?;
+
+        {
+            let mut reg = TTY_BACKINGS[slot].lock();
+            if reg.strong_count() == 0 {
+                *reg = KArc::downgrade(&backing);
+                // Re-open semantics: latches clear under the registry lock,
+                // serialised against the previous backing's stale close.
+                clear_own_latches(slot);
+                return Ok(backing);
+            }
+        }
+        // A concurrent open registered its backing first; ours tears down
+        // harmlessly (the live registration makes its close bow out) and
+        // the retry adopts the winner.
+        drop(backing);
+    }
 }
 
 /// Open the PTY slave at `idx` (`/dev/pts/N`). Fails on a locked slave
@@ -308,6 +356,11 @@ pub(crate) fn open_slave_shared(backing: KArc<TtyBacking>) -> Result<KArc<TtySla
         let guard = TTY_SLOTS[slot].lock();
         matches!(guard.as_ref(), Some(tty) if tty.flags.contains(TtyFlags::EXCLUSIVE))
     };
+    // Failure paths below can drop the last alias of the slave backing
+    // while the registry lock is held; its teardown frees the slot, which
+    // retakes this lock. This alias outlives the guard so the backing's
+    // teardown can only ever run after release.
+    let _pin = backing.clone();
     let mut reg = TTY_SLAVE_OPENS[slot].lock();
     if let Some(existing) = reg.upgrade() {
         // TIOCEXCL: an exclusive slave that is already open rejects
