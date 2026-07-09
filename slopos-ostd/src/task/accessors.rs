@@ -19,10 +19,11 @@ use crate::sync::BUS;
 use crate::task::fpu::FpuState;
 use crate::user::context::UserContext;
 use slopos_abi::event::{KernelEvent, TaskSlot};
+use slopos_abi::signal::{NSIG, SIG_DFL, SIG_IGN, SigSet, sig_bit};
 use slopos_abi::syscall::TtyIndex;
 use slopos_abi::task::{TaskExitReason, TaskFaultReason, TaskPriority, TaskStatus};
 
-use crate::task::kernel_task::{SchedPlacement, TaskInner};
+use crate::task::kernel_task::{SchedPlacement, SignalAction, TaskInner};
 
 pub const TASK_EXIT_CLEANUP_RESOURCES: u8 = 1 << 0;
 pub const TASK_EXIT_CLEANUP_VM: u8 = 1 << 1;
@@ -1207,6 +1208,32 @@ pub fn task_reset_fpu_state<K, U>(task: &mut TaskInner<K, U>) {
     // `FpuState` value into the slot.
     unsafe {
         crate::task::kernel_task::fpu_reset_in_place(&raw mut task.fpu_state);
+    }
+}
+
+/// Reset every *caught* signal (a handler other than `SIG_DFL`/`SIG_IGN`) to
+/// `SIG_DFL`. This is the execve disposition reset: a stale handler pointer
+/// must never survive into the new image, but POSIX keeps ignored signals
+/// ignored, so `SIG_IGN` (and `SIG_DFL`) entries are left untouched. The
+/// blocked mask and pending set are preserved across exec by the caller.
+#[inline]
+pub fn task_reset_caught_handlers<K, U>(task: &mut TaskInner<K, U>) {
+    for action in task.signal_actions.iter_mut() {
+        if action.handler != SIG_DFL && action.handler != SIG_IGN {
+            *action = SignalAction::default();
+        }
+    }
+}
+
+/// Force every signal named in `mask` to `SIG_DFL`, overriding a caught
+/// handler or `SIG_IGN`. Backs POSIX_SPAWN_SETSIGDEF (spawn) and the
+/// `sigdefault` syscall (a forked child installing job-control defaults).
+#[inline]
+pub fn task_default_signals_in_mask<K, U>(task: &mut TaskInner<K, U>, mask: SigSet) {
+    for signum in 1..=NSIG {
+        if mask & sig_bit(signum as u8) != 0 {
+            task.signal_actions[signum - 1] = SignalAction::default();
+        }
     }
 }
 

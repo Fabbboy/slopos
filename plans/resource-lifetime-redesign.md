@@ -1,6 +1,6 @@
-# SlopOS Resource-Lifetime Redesign — Spawn, Index APIs, and Ring — Remaining Work
+# SlopOS Resource-Lifetime Redesign — Index APIs and Ring — Remaining Work
 
-Scope: the spawn / index-addressed-syscall / ring resource-lifetime surface.
+Scope: the index-addressed-syscall / ring resource-lifetime surface.
 Discipline constraints (CLAUDE.md): all `unsafe` lives in `slopos-ostd`; every other
 kernel crate is `#![forbid(unsafe_code)]` and allocates only through `KBox/KVec/KArc/…`;
 no function stack frame > 2 KiB; pre-alpha — breaking changes are fine, no external users.
@@ -25,6 +25,36 @@ Single-owner, Drop-driven lifetime is in place for the whole file layer:
 - `syscall_openpty` returns a real master fd + slave pts number; userland
   `process::openpty()` yields `(OwnedFd, u32)`.
 
+Spawn is a per-fd **action allow-list** (posix_spawn file-actions), not
+whole-table clone:
+
+- `SYSCALL_SPAWN_PATH=64` takes `path`, `argv`, and a `SpawnAttrs` pointer
+  (`abi/src/spawn.rs`: `SpawnFdAction{CloneFd,TransferFd,Close,Open}`,
+  `SpawnAttrs{priority,flags,actions,sigdefault_mask}`, offset-asserted).
+  `spawn_program_with_attrs` decodes actions to an owned `FdAction` and, when
+  `parent_process_id != INVALID_PROCESS_ID`, rebuilds the child from an empty
+  table (`fileio_create_empty_table_for_process` + `apply_fd_actions`, all in
+  the Blocked/unpublished window; all-or-nothing via `task_terminate`).
+  `launch_init` (no parent) keeps its console bootstrap. `fileio_clone_table_for_spawn`
+  is gone; primitives `fileio_install_file_ref_at` / `fileio_take_file_ref` /
+  `fileio_open_at_fd` back the actions (`fs/src/fileio/fdops.rs`).
+- Userland `spawn_path`/`spawn_path_with_attrs` inject clone-stdio; terminal
+  (`spawn_shell_on_slave`) and shell (`execute_registry_spawn`) pass explicit
+  actions — the dup2 save/restore dances and `dup_above_stdio` are gone.
+  **fd inheritance is now an explicit action:** init clones the readiness
+  notifier (fd 3, `userland/src/readiness.rs`) into the compositor via a
+  `CloneFd` action (`spawn_service_inheriting`) — a plain clone-stdio spawn
+  would EOF init's readiness gate immediately and race the terminal ahead of a
+  ready compositor.
+- Signal disposition: one ostd primitive, three entry points —
+  `task_reset_caught_handlers` (execve resets caught handlers to SIG_DFL,
+  preserving SIG_IGN and the blocked/pending state) and
+  `task_default_signals_in_mask` (spawn `SpawnAttrs.sigdefault_mask` and the new
+  `SYSCALL_SIGDEFAULT=118` batch-reset). The shell's `run_in_child` uses one
+  `process::sigdefault(...)` call for job-control defaults instead of four
+  `default_signal` calls (kept because execve preserves SIG_IGN and an in-child
+  builtin never execs).
+
 ---
 
 ## 1. Diagnosis — what is still architecturally wrong
@@ -38,22 +68,6 @@ PTY the caller never opened. `file_poll_unfused_by_idx`
 (`fs/src/fileio/poll.rs`) keeps an index-keyed release path alive alongside the
 `KWeak`-backed registrations. `syscall_open_tty_fd=148` opens any TTY by raw
 index with no policy.
-
-### D4 — spawn mutates the parent's own fd table; whole-table-clone is the only inheritance
-`spawn_program_with_attrs` has exactly one inheritance mode: destroy the child's
-bootstrap table, then `fileio_clone_table_for_spawn` (`fs/src/fileio/fdtable.rs`,
-called from `core/src/exec/mod.rs`) clones the *entire* parent table (skipping
-cloexec). There is no per-fd action list. Consequently every userland spawn site
-mutates **its own** fd table around the call: `spawn_shell_on_slave`
-(`userland/src/apps/terminal/mod.rs`) dup2's the slave over fd 0/1/2, spawns,
-then restores; the shell's pipe-capture spawn does the same dance
-(`userland/src/apps/shell/exec.rs`). This is race-prone and non-reentrant, and
-it forces the fragile `dup_above_stdio` workaround (`terminal/mod.rs`).
-
-Adjacent, folded into the same stage: **execve never resets `signal_actions`**
-(`core/src/exec/mod.rs`, `sched/.../task_cleanup_hooks.rs`) — a stale handler
-pointer survives into a new image. Fix as a `POSIX_SPAWN_SETSIGDEF`-equivalent
-plus an exec-time reset.
 
 ### D5 — the ring holds an fd integer, not a file reference
 `ring/src/ring_obj.rs` stores `fd: i32` "re-validated each probe". Userland can
@@ -72,56 +86,7 @@ touches session state next.
 
 ## 2. Remaining design
 
-### 2.1 Spawn — per-fd action ABI; the child table is an allow-list
-
-- **ABI (decided signature):** keep `SYSCALL_SPAWN_PATH=64`; pass the action list as a
-  UserPtr-to-array (all 6 arg regs are used; this is the `syscall_poll` struct-array
-  idiom). Repurpose the unused arg slots / add a sibling `SYSCALL_SPAWN_EX` if 6 regs
-  are insufficient (path ptr+len, argv ptr+len, attrs ptr → attrs struct carries
-  priority, flags, actions ptr+count, sigdefault mask).
-
-```rust
-// abi/src/spawn.rs (new)
-#[repr(u32)]
-pub enum SpawnFdActionKind { CloneFd = 1, TransferFd = 2, Close = 3, Open = 4 }
-#[repr(C)]
-pub struct SpawnFdAction {
-    pub kind: u32,
-    pub src_fd: i32,            // CloneFd/TransferFd
-    pub target_fd: i32,        // all except a future bare-Open variant
-    pub open_path_ptr: u64,    // Open
-    pub open_path_len: u64,    // Open
-    pub open_flags: u32,       // Open
-    pub open_mode: u32,        // Open
-}
-#[repr(C)]
-pub struct SpawnAttrs {
-    pub priority: u8, pub _pad: [u8;3], pub flags: u16, pub _pad2: u16,
-    pub actions_ptr: u64, pub actions_len: u64,
-    pub sigdefault_mask: u64,   // POSIX_SPAWN_SETSIGDEF-equivalent
-}
-```
-
-  Kernel signature:
-  `spawn_program_with_attrs(path, argv, attrs: &SpawnAttrs, actions: &[SpawnFdAction], parent_task_id) -> Result<u32, ExecError>`.
-- **Execution rules (decided):** child starts with an **empty** fd table (allow-list,
-  not the deny-list whole-table clone). Actions apply in array order to the child's
-  (Blocked, unpublished) table — slotted exactly where `fileio_clone_table_for_spawn`
-  sits today (`core/src/exec/mod.rs`), before `task_set_status(Ready)`.
-  `CloneFd`/`TransferFd` clone the parent slot's `KArc<OpenFile>` into the child
-  (cloexec cleared; honor adddup2 target==src cloexec-clear). `TransferFd` also `take`s
-  the parent slot. All-or-nothing: any error tears down the scratch child table
-  (existing `task_terminate` error path). A `FDIO_SPAWN_CLONE_STDIO`-style convenience
-  expands to three `CloneFd` actions in the userland wrapper.
-- **Signal fix (folded in):** `do_exec` resets caught signals to SIG_DFL preserving
-  SIG_IGN (`task_cleanup_for_exec`); spawn applies `attrs.sigdefault_mask` in the
-  parent-inherit window. Replaces the manual `default_signal(...)` calls in the shell's
-  `run_in_child`.
-- Session/ctty teardown stays explicit but Drop/hangup-driven; job-control links
-  become `KWeak` (`foreground()` = upgrade-or-skip) when this stage touches the
-  session structs.
-
-### 2.2 The ring holds a real file reference, not an fd integer
+### 2.1 The ring holds a real file reference, not an fd integer
 At **submit** time the op resolves the fd once to a `FileRef` and stores it in
 the per-op inflight state; the held reference keeps the backing alive for the
 op's duration even if userland `close()`s the fd or the slot is reused (the
@@ -139,9 +104,6 @@ defence-in-depth. `distinct_inflight_fds` keys off reference identity
 | `syscall_tty_read` (146), `syscall_tty_write` (147) | `core/src/syscall/ui_handlers.rs` | fd-based `read`/`write` only |
 | `syscall_open_tty_fd` (148) or an ownership-checked replacement | `core/src/syscall/ui_handlers.rs` | fd-based opens (`openpty`, `/dev/pts/N`, `/dev/tty`) |
 | `file_poll_unfused_by_idx` | `fs/src/fileio/poll.rs` | `KWeak<OpenFile>` registrations only |
-| `fileio_clone_table_for_spawn` | `fs/src/fileio/fdtable.rs`, `exec/mod.rs` | fd-action ABI (§2.1) |
-| `dup_above_stdio` userland workaround | `userland/src/apps/terminal/mod.rs` | fd-action ABI atomic install |
-| dup2-save/restore dances | `terminal/mod.rs` (`spawn_shell_on_slave`), `shell/exec.rs` | fd-action ABI |
 
 Retired syscall numbers leave gaps (table size unchanged; gaps are expected per
 the ID policy). The userland `tty::read`/`tty::write` index wrappers go with
@@ -149,31 +111,11 @@ them; callers use fd 0/1/2.
 
 ---
 
-## 4. Migration plan (three stages, each independently green under `just test`)
+## 4. Migration plan (each stage independently green under `just test`)
 
 Each stage compiles, passes `just check-framekernel` + `check_stack_sizes.sh`, and is
 green under `just test` (target: ≥ the `TEST_COUNT_BASELINE` planned tests in the
 justfile; never regress).
-
-### Stage A — spawn fd-action ABI + signal-disposition fix; userland consumers
-- **Files:** `abi/src/spawn.rs` (new), `abi/src/syscall/numbers.rs`,
-  `core/src/syscall/process_handlers.rs` (copy_from_user the action array),
-  `core/src/exec/mod.rs` (apply actions; reset signals),
-  `userland/src/syscall/process.rs` (new `spawn_path_with_actions` + stdio convenience),
-  `userland/src/apps/terminal/mod.rs` (replace the `spawn_shell_on_slave` dance with
-  `[CloneFd slave→0/1/2]`; delete `dup_above_stdio`),
-  `userland/src/apps/shell/exec.rs` (replace pipe-capture and redirect dances).
-- **Tests added:**
-  - `spawn::empty_table_unless_actions` (D4): spawned child with no actions has no fds.
-  - `spawn::clone_fd_shares_backing` / `spawn::transfer_fd_moves` (D4): strong-count and
-    parent-slot assertions.
-  - `spawn::actions_all_or_nothing` (D4): a mid-list error leaves no partial child.
-  - `exec::execve_resets_caught_signals_keeps_ignored`.
-  - userland `fork_test`/terminal/shell stay green (the dance removal must be behavior-
-    preserving).
-- **Risk:** medium — ABI churn. The empty-default-table change is the biggest
-  behavioral shift; gate it behind the convenience wrapper so existing callers keep
-  stdio.
 
 ### Stage B — retire index-based I/O APIs
 - **Files:** delete `syscall_tty_read`/`syscall_tty_write`
@@ -189,7 +131,8 @@ justfile; never regress).
   fails).
 - **Risk:** low-medium — mostly deletion; grep for in-tree callers of 146/147/148
   before deleting (the kernel `tty::read_cooked`/`write_bytes` stay as ldisc
-  internals, only the *syscalls* go).
+  internals, only the *syscalls* go). The userland `tty::read`/`tty::write` index
+  wrappers (`userland/src/syscall/process.rs`) go too.
 
 ### Stage C — ring holds real file references
 - **Files:** `ring/src/ring_obj.rs` (per-op state holds `FileRef` not `fd: i32`),
@@ -211,9 +154,10 @@ justfile; never regress).
 
 ## 5. Compatibility constraints (what must stay green)
 
-- **≥ `TEST_COUNT_BASELINE` planned tests must stay green every stage**;
-  `just check-test-count` guards count regression. New regression tests *raise*
-  the baseline — update it deliberately, never lower it.
+- **≥ `TEST_COUNT_BASELINE` planned tests must stay green every stage**
+  (currently 2660; `scripts/check_test_count.sh`); `just check-test-count` guards
+  count regression. New regression tests *raise* the baseline — update it
+  deliberately, never lower it.
 - **Userland test bins that pin behavior:** `userland/src/bin/tests/fork_test.rs` (fork
   fd inheritance + cloexec keep), `io_capture_test.rs` (fd save/restore lifetime),
   `ring_test.rs`, `signalfd_test.rs`, `pidfd_e2e_test.rs`, `spin_signal_test.rs`,
@@ -228,9 +172,6 @@ justfile; never regress).
   fs/drivers/ring/core changes stay forbid-unsafe), `check_alloc_dep.sh` (route through
   `KArc`/`KVec`, never bare `alloc`), `check_stack_sizes.sh` (2 KiB — build backings
   via `KArc::try_init`).
-- **SMP "task invisible until initialized" invariant:** Stage A must keep applying fd
-  actions while the child is Blocked/unpublished (`exec/mod.rs` TASK_NEW window),
-  preserving the Release-store publish at `task_set_status(Ready)`.
 - **Lock ordering:** fileio table lock → object/backing lock, table lock dropped before
   any blocking op or backing `Drop` — the detach-then-drop close path enforces this
   structurally; every new holder of a `FileRef`/backing must obey it too (never drop

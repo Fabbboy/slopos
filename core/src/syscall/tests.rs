@@ -42,13 +42,15 @@ use slopos_ostd::user::context::UserContext;
 use slopos_sched::task_struct::{SignalAction, Task};
 use slopos_testing::{TestResult, assert_eq_test, assert_not_null, assert_test, fail, pass};
 
+use crate::exec::{FdAction, apply_fd_actions};
 use crate::syscall::handlers::syscall_lookup;
 use slopos_abi::io::{KernelIoBuf, KernelIoBufRef};
 use slopos_abi::task::BlockReason;
 use slopos_fs::fileio::{
     file_close_fd, file_dup_fd, file_dup3_fd, file_fcntl_fd, file_open_for_process,
     file_open_tty_fd, file_pipe_create, file_poll_fd, file_read_fd, file_seek_fd, file_write_fd,
-    fileio_clone_table_for_process, fileio_clone_table_for_spawn, fileio_destroy_table_for_process,
+    fileio_clone_table_for_process, fileio_create_empty_table_for_process,
+    fileio_destroy_table_for_process,
 };
 use slopos_mm::memory_layout_defs::PROCESS_CODE_START_VA;
 use slopos_sched::scheduler::unblock_task;
@@ -2442,9 +2444,9 @@ pub fn test_exit_current_task_releases_pipe_refs() -> TestResult {
     TestResult::Pass
 }
 
-/// Spawn-style fd-table clones must skip close-on-exec descriptors
-/// (spawn is fork+exec in one step), while fork-style clones keep them.
-pub fn test_spawn_clone_skips_cloexec_fds() -> TestResult {
+/// Fork-style clones keep close-on-exec descriptors (POSIX fork; only exec
+/// strips them). Spawn no longer whole-table clones — see the fd-action tests.
+pub fn test_fork_clone_keeps_cloexec_fds() -> TestResult {
     let _fixture = SyscallFixture::new();
 
     let t1 = create_test_user_task();
@@ -2475,24 +2477,6 @@ pub fn test_spawn_clone_skips_cloexec_fds() -> TestResult {
         "set cloexec failed"
     );
 
-    // Spawn-style clone: the cloexec write end must not appear in pid2.
-    fileio_destroy_table_for_process(pid2);
-    assert_eq_test!(
-        fileio_clone_table_for_spawn(pid1, pid2),
-        0,
-        "spawn clone failed"
-    );
-    assert_eq_test!(
-        file_close_fd(pid2, read_fd),
-        0,
-        "read end should be inherited by spawn clone"
-    );
-    assert_test!(
-        file_close_fd(pid2, write_fd) != 0,
-        "cloexec write end must not be inherited by spawn clone"
-    );
-
-    // Fork-style clone keeps cloexec descriptors.
     fileio_destroy_table_for_process(pid2);
     assert_eq_test!(
         fileio_clone_table_for_process(pid1, pid2),
@@ -2513,20 +2497,203 @@ pub fn test_spawn_clone_skips_cloexec_fds() -> TestResult {
     TestResult::Pass
 }
 
-/// Regression test for the stale-argv spawn bug (compositor spawn failure).
-///
-/// Before the fix, `spawn_path_with_attrs()` used `syscall4` which left r8/r9
-/// (argv_ptr / argc) as stale garbage.  The kernel handler would try to parse
-/// argv from those garbage addresses, returning EINVAL instead of reaching the
-/// actual exec path.  After the fix (syscall6 with explicit 0,0), r8/r9 are
-/// always zero when no argv is passed.
-///
-/// This test verifies the two code paths return distinguishable errors:
-///   - Garbage r8/r9 → argv parsing failure → ERRNO_EINVAL (-22)
-///   - Zero   r8/r9 → exec path reached    → ExecError::NoEntry (-2)
-pub fn test_spawn_path_stale_argv_regression() -> TestResult {
+/// A spawned child with no actions starts with an empty fd table — no stdio.
+pub fn test_spawn_empty_table_unless_actions() -> TestResult {
+    let _fixture = SyscallFixture::new();
+
+    let t = create_test_user_task();
+    assert_test!(t != INVALID_TASK_ID, "failed to create task");
+    let p = task_find_by_id(t);
+    assert_not_null!(p, "task lookup failed");
+    let pid = task_process_id(p).unwrap_or(0);
+
+    // The bootstrap console table is replaced with an empty one.
+    fileio_destroy_table_for_process(pid);
+    assert_eq_test!(
+        fileio_create_empty_table_for_process(pid),
+        0,
+        "create empty failed"
+    );
+
+    assert_test!(file_close_fd(pid, 0) != 0, "fd 0 should be absent");
+    assert_test!(file_close_fd(pid, 1) != 0, "fd 1 should be absent");
+    assert_test!(file_close_fd(pid, 2) != 0, "fd 2 should be absent");
+
+    task_terminate(t);
+    TestResult::Pass
+}
+
+/// CloneFd shares the description: after the parent closes its own write end,
+/// the child's cloned end keeps the pipe open, so the reader sees no EOF.
+pub fn test_spawn_clone_fd_shares_backing() -> TestResult {
+    let _fixture = SyscallFixture::new();
+
+    let t1 = create_test_user_task();
+    let t2 = create_test_user_task();
+    assert_test!(
+        t1 != INVALID_TASK_ID && t2 != INVALID_TASK_ID,
+        "failed to create tasks"
+    );
+    let p1 = task_find_by_id(t1);
+    let p2 = task_find_by_id(t2);
+    assert_not_null!(p1, "task1 lookup failed");
+    assert_not_null!(p2, "task2 lookup failed");
+    let pid1 = task_process_id(p1).unwrap_or(0);
+    let pid2 = task_process_id(p2).unwrap_or(0);
+
+    let mut read_fd = -1;
+    let mut write_fd = -1;
+    assert_eq_test!(
+        file_pipe_create(pid1, O_NONBLOCK as u32, &mut read_fd, &mut write_fd),
+        0,
+        "pipe create failed"
+    );
+
+    fileio_destroy_table_for_process(pid2);
+    assert_eq_test!(
+        fileio_create_empty_table_for_process(pid2),
+        0,
+        "create empty failed"
+    );
+    let actions = [FdAction::Clone {
+        src_fd: write_fd,
+        target_fd: 1,
+    }];
+    assert_test!(
+        apply_fd_actions(pid1, pid2, &actions).is_ok(),
+        "clone action failed"
+    );
+
+    // Parent drops its write end; the child's clone still keeps the pipe
+    // writable, so a nonblocking read is not EOF.
+    assert_eq_test!(file_close_fd(pid1, write_fd), 0, "pid1 close write failed");
+    let mut one = [0u8; 1];
+    let r = file_read_fd(pid1, read_fd, &mut KernelIoBuf::new(&mut one));
+    assert_test!(
+        r != 0,
+        "reader must not see EOF while child holds a write end"
+    );
+
+    // Dropping the child's clone too → EOF.
+    assert_eq_test!(file_close_fd(pid2, 1), 0, "pid2 close write failed");
+    let r2 = file_read_fd(pid1, read_fd, &mut KernelIoBuf::new(&mut one));
+    assert_eq_test!(r2, 0, "reader should see EOF after every write end closes");
+
+    assert_eq_test!(file_close_fd(pid1, read_fd), 0, "pid1 close read failed");
+    task_terminate(t1);
+    task_terminate(t2);
+    TestResult::Pass
+}
+
+/// TransferFd moves the description: the parent slot is emptied and the child
+/// receives it at the target fd.
+pub fn test_spawn_transfer_fd_moves() -> TestResult {
+    let _fixture = SyscallFixture::new();
+
+    let t1 = create_test_user_task();
+    let t2 = create_test_user_task();
+    assert_test!(
+        t1 != INVALID_TASK_ID && t2 != INVALID_TASK_ID,
+        "failed to create tasks"
+    );
+    let p1 = task_find_by_id(t1);
+    let p2 = task_find_by_id(t2);
+    assert_not_null!(p1, "task1 lookup failed");
+    assert_not_null!(p2, "task2 lookup failed");
+    let pid1 = task_process_id(p1).unwrap_or(0);
+    let pid2 = task_process_id(p2).unwrap_or(0);
+
+    let mut read_fd = -1;
+    let mut write_fd = -1;
+    assert_eq_test!(
+        file_pipe_create(pid1, O_NONBLOCK as u32, &mut read_fd, &mut write_fd),
+        0,
+        "pipe create failed"
+    );
+
+    fileio_destroy_table_for_process(pid2);
+    assert_eq_test!(
+        fileio_create_empty_table_for_process(pid2),
+        0,
+        "create empty failed"
+    );
+    let actions = [FdAction::Transfer {
+        src_fd: write_fd,
+        target_fd: 3,
+    }];
+    assert_test!(
+        apply_fd_actions(pid1, pid2, &actions).is_ok(),
+        "transfer action failed"
+    );
+
+    assert_test!(
+        file_close_fd(pid1, write_fd) != 0,
+        "parent slot must be emptied by transfer"
+    );
+    assert_eq_test!(
+        file_close_fd(pid2, 3),
+        0,
+        "child must hold the transferred fd"
+    );
+
+    assert_eq_test!(file_close_fd(pid1, read_fd), 0, "pid1 close read failed");
+    task_terminate(t1);
+    task_terminate(t2);
+    TestResult::Pass
+}
+
+/// A mid-list bad fd aborts the whole action list — spawn is all-or-nothing.
+pub fn test_spawn_actions_all_or_nothing() -> TestResult {
+    let _fixture = SyscallFixture::new();
+
+    let t1 = create_test_user_task();
+    let t2 = create_test_user_task();
+    assert_test!(
+        t1 != INVALID_TASK_ID && t2 != INVALID_TASK_ID,
+        "failed to create tasks"
+    );
+    let p1 = task_find_by_id(t1);
+    let p2 = task_find_by_id(t2);
+    assert_not_null!(p1, "task1 lookup failed");
+    assert_not_null!(p2, "task2 lookup failed");
+    let pid1 = task_process_id(p1).unwrap_or(0);
+    let pid2 = task_process_id(p2).unwrap_or(0);
+
+    fileio_destroy_table_for_process(pid2);
+    assert_eq_test!(
+        fileio_create_empty_table_for_process(pid2),
+        0,
+        "create empty failed"
+    );
+
+    // pid1 has bootstrap console fd 0; fd 99 is out of range → the second
+    // action fails and the list aborts.
+    let actions = [
+        FdAction::Clone {
+            src_fd: 0,
+            target_fd: 0,
+        },
+        FdAction::Clone {
+            src_fd: 99,
+            target_fd: 1,
+        },
+    ];
+    assert_test!(
+        apply_fd_actions(pid1, pid2, &actions).is_err(),
+        "a bad src fd must abort the action list"
+    );
+
+    task_terminate(t1);
+    task_terminate(t2);
+    TestResult::Pass
+}
+
+/// The spawn ABI reads its `SpawnAttrs` by pointer (arg4 = attrs_ptr). A bad
+/// attrs pointer is rejected with EFAULT before exec; a valid one reaches the
+/// exec path and reports the real load error.
+pub fn test_spawn_path_rejects_bad_attrs() -> TestResult {
     use crate::syscall::handlers::syscall_spawn_path;
-    use slopos_abi::syscall::ERRNO_EINVAL;
+    use slopos_abi::spawn::SpawnAttrs;
 
     let _fixture = SyscallFixture::new();
 
@@ -2536,7 +2703,8 @@ pub fn test_spawn_path_stale_argv_regression() -> TestResult {
     assert_not_null!(task_ptr, "task lookup failed");
     let pid = task_process_id(task_ptr).unwrap_or(0);
 
-    // Map a user-accessible page and write a path that will fail at VFS open.
+    // Map a user page; write a path that will fail at VFS open plus a valid
+    // attrs struct (Normal priority, no fd actions) at a non-overlapping offset.
     let user_page = match map_user_rw_page(pid) {
         Some(v) => v,
         None => {
@@ -2549,54 +2717,149 @@ pub fn test_spawn_path_stale_argv_regression() -> TestResult {
         user_copy_out(pid, user_page, path),
         "failed to write path into user memory"
     );
-
-    // ---- Case A: Stale/garbage r8 (argv_ptr) and r9 (argc) ----
-    // Simulates the pre-fix bug where syscall4 left r8/r9 with junk.
-    let mut frame_stale = zero_frame();
-    frame_stale.regs_mut().rdi = user_page; // arg0 = path_ptr
-    frame_stale.regs_mut().rsi = path.len() as u64; // arg1 = path_len
-    frame_stale.regs_mut().rdx = 2; // arg2 = priority (Normal; KernelIo=1 is kernel-only)
-    frame_stale.regs_mut().r10 = 0; // arg3 = flags
-    frame_stale.regs_mut().r8 = 0xDEAD_BEEF_CAFE_BABEu64; // arg4 = garbage argv_ptr
-    frame_stale.regs_mut().r9 = 42; // arg5 = garbage argc
-    let _ = with_user_process_context(pid, || {
-        crate::syscall::dispatch::dispatch_handler(syscall_spawn_path, task_ptr, &mut frame_stale)
-    });
-    assert_eq_test!(
-        frame_stale.regs().rax,
-        ERRNO_EINVAL,
-        "stale argv must trigger EINVAL from argv parsing failure"
+    let attrs = SpawnAttrs {
+        priority: 2, // TaskPriority::Normal (KernelIo=1 is kernel-only)
+        _pad: [0; 3],
+        flags: 0,
+        _pad2: 0,
+        actions_ptr: 0,
+        actions_len: 0,
+        sigdefault_mask: 0,
+    };
+    let attrs_addr = user_page + 512;
+    assert_test!(
+        user_copy_out(pid, attrs_addr, &attrs),
+        "failed to write attrs into user memory"
     );
 
-    // ---- Case B: Clean r8=0, r9=0 (the fixed behavior) ----
-    // With no argv, the handler skips argv parsing and reaches the exec path.
-    let mut frame_clean = zero_frame();
-    frame_clean.regs_mut().rdi = user_page; // arg0 = path_ptr
-    frame_clean.regs_mut().rsi = path.len() as u64; // arg1 = path_len
-    frame_clean.regs_mut().rdx = 2; // arg2 = priority (Normal; KernelIo=1 is kernel-only)
-    frame_clean.regs_mut().r10 = 0; // arg3 = flags
-    frame_clean.regs_mut().r8 = 0; // arg4 = no argv
-    frame_clean.regs_mut().r9 = 0; // arg5 = no argc
+    // ---- Case A: garbage attrs pointer → EFAULT before exec ----
+    let mut frame_bad = zero_frame();
+    frame_bad.regs_mut().rdi = user_page; // path_ptr
+    frame_bad.regs_mut().rsi = path.len() as u64; // path_len
+    frame_bad.regs_mut().rdx = 0; // argv_ptr
+    frame_bad.regs_mut().r10 = 0; // argc
+    frame_bad.regs_mut().r8 = 0xDEAD_BEEF_CAFE_BABEu64; // attrs_ptr (garbage)
     let _ = with_user_process_context(pid, || {
-        crate::syscall::dispatch::dispatch_handler(syscall_spawn_path, task_ptr, &mut frame_clean)
+        crate::syscall::dispatch::dispatch_handler(syscall_spawn_path, task_ptr, &mut frame_bad)
     });
+    assert_eq_test!(
+        frame_bad.regs().rax,
+        slopos_abi::Errno::EFAULT.as_u64(),
+        "garbage attrs pointer must return EFAULT"
+    );
 
-    // ExecError::NoEntry = -2, returned via ctx.ok(err as i32 as u64)
+    // ---- Case B: valid attrs, missing binary → reaches exec → NoEntry (-2) ----
+    let mut frame_ok = zero_frame();
+    frame_ok.regs_mut().rdi = user_page;
+    frame_ok.regs_mut().rsi = path.len() as u64;
+    frame_ok.regs_mut().rdx = 0;
+    frame_ok.regs_mut().r10 = 0;
+    frame_ok.regs_mut().r8 = attrs_addr;
+    let _ = with_user_process_context(pid, || {
+        crate::syscall::dispatch::dispatch_handler(syscall_spawn_path, task_ptr, &mut frame_ok)
+    });
+    // ExecError::NoEntry = -2, returned via ctx.ok(err as i32 as u64).
     let exec_no_entry = (-2i32) as u64;
     assert_eq_test!(
-        frame_clean.regs().rax,
+        frame_ok.regs().rax,
         exec_no_entry,
-        "clean argv must reach exec path and return NoEntry for missing binary"
-    );
-
-    // The two error codes must differ — that's the whole point of this regression.
-    assert_test!(
-        frame_stale.regs().rax != frame_clean.regs().rax,
-        "stale and clean argv paths must return different error codes"
+        "valid attrs with missing binary must reach exec and return NoEntry"
     );
 
     task_terminate(task_id);
     TestResult::Pass
+}
+
+/// execve resets caught handlers to SIG_DFL but preserves SIG_IGN and SIG_DFL
+/// (the stale-handler-pointer fix).
+pub fn test_execve_resets_caught_signals_keeps_ignored() -> TestResult {
+    let _fixture = SyscallFixture::new();
+
+    let t = create_test_user_task();
+    assert_test!(t != INVALID_TASK_ID, "failed to create task");
+    let p = task_find_by_id(t);
+    assert_not_null!(p, "task lookup failed");
+
+    // SIGINT caught (custom handler), SIGTSTP ignored, SIGTERM default.
+    if let Some(task) = task::task_borrow_mut(p) {
+        task.signal_actions[(SIGINT - 1) as usize] = SignalAction {
+            handler: 0x4100_0000,
+            mask: 0,
+            flags: 0,
+            restorer: 0,
+        };
+        task.signal_actions[(SIGTSTP - 1) as usize] = SignalAction {
+            handler: SIG_IGN,
+            mask: 0,
+            flags: 0,
+            restorer: 0,
+        };
+        task.signal_actions[(SIGTERM - 1) as usize] = SignalAction::default();
+    }
+
+    if let Some(task) = task::task_borrow_mut(p) {
+        task::task_reset_caught_handlers(task);
+    }
+
+    let ok = if let Some(task) = task::task_borrow_mut(p) {
+        task.signal_actions[(SIGINT - 1) as usize].handler == slopos_abi::signal::SIG_DFL
+            && task.signal_actions[(SIGTSTP - 1) as usize].handler == SIG_IGN
+            && task.signal_actions[(SIGTERM - 1) as usize].handler == slopos_abi::signal::SIG_DFL
+    } else {
+        false
+    };
+
+    task_terminate(t);
+    if ok {
+        TestResult::Pass
+    } else {
+        TestResult::Fail
+    }
+}
+
+/// `sigdefault` (POSIX_SPAWN_SETSIGDEF and the syscall) forces masked signals
+/// to SIG_DFL, overriding a caught handler or SIG_IGN.
+pub fn test_sigdefault_forces_default_over_ignore() -> TestResult {
+    let _fixture = SyscallFixture::new();
+
+    let t = create_test_user_task();
+    assert_test!(t != INVALID_TASK_ID, "failed to create task");
+    let p = task_find_by_id(t);
+    assert_not_null!(p, "task lookup failed");
+
+    if let Some(task) = task::task_borrow_mut(p) {
+        task.signal_actions[(SIGINT - 1) as usize] = SignalAction {
+            handler: 0x4100_0000,
+            mask: 0,
+            flags: 0,
+            restorer: 0,
+        };
+        task.signal_actions[(SIGTSTP - 1) as usize] = SignalAction {
+            handler: SIG_IGN,
+            mask: 0,
+            flags: 0,
+            restorer: 0,
+        };
+    }
+
+    let mask = slopos_abi::signal::sig_bit(SIGINT) | slopos_abi::signal::sig_bit(SIGTSTP);
+    if let Some(task) = task::task_borrow_mut(p) {
+        task::task_default_signals_in_mask(task, mask);
+    }
+
+    let ok = if let Some(task) = task::task_borrow_mut(p) {
+        task.signal_actions[(SIGINT - 1) as usize].handler == slopos_abi::signal::SIG_DFL
+            && task.signal_actions[(SIGTSTP - 1) as usize].handler == slopos_abi::signal::SIG_DFL
+    } else {
+        false
+    };
+
+    task_terminate(t);
+    if ok {
+        TestResult::Pass
+    } else {
+        TestResult::Fail
+    }
 }
 
 // =============================================================================
@@ -3388,7 +3651,20 @@ slopos_testing::stest!(
     suite = syscall_valid
 );
 slopos_testing::stest!(
-    name = test_spawn_clone_skips_cloexec_fds,
+    name = test_fork_clone_keeps_cloexec_fds,
+    suite = syscall_valid
+);
+slopos_testing::stest!(
+    name = test_spawn_empty_table_unless_actions,
+    suite = syscall_valid
+);
+slopos_testing::stest!(
+    name = test_spawn_clone_fd_shares_backing,
+    suite = syscall_valid
+);
+slopos_testing::stest!(name = test_spawn_transfer_fd_moves, suite = syscall_valid);
+slopos_testing::stest!(
+    name = test_spawn_actions_all_or_nothing,
     suite = syscall_valid
 );
 slopos_testing::stest!(name = test_dup_does_not_copy_cloexec, suite = syscall_valid);
@@ -3448,7 +3724,15 @@ slopos_testing::stest!(
     suite = syscall_valid
 );
 slopos_testing::stest!(
-    name = test_spawn_path_stale_argv_regression,
+    name = test_spawn_path_rejects_bad_attrs,
+    suite = syscall_valid
+);
+slopos_testing::stest!(
+    name = test_execve_resets_caught_signals_keeps_ignored,
+    suite = syscall_valid
+);
+slopos_testing::stest!(
+    name = test_sigdefault_forces_default_over_ignore,
     suite = syscall_valid
 );
 // /dev/tty Controlling Terminal Device
@@ -3562,7 +3846,7 @@ slopos_testing::stest!(
     suite = syscall_compat_smoke
 );
 slopos_testing::stest!(
-    name = test_spawn_path_stale_argv_regression,
+    name = test_spawn_path_rejects_bad_attrs,
     suite = syscall_compat_smoke
 );
 // /dev/tty Controlling Terminal Device

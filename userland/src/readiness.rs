@@ -8,7 +8,10 @@
 
 use crate::syscall::fs;
 
-const NOTIFIER_FD: i32 = 3;
+/// The well-known fd the notifier write-end lives on. A parent that wants a
+/// spawned child to signal readiness must clone this fd into the child (a
+/// `CloneFd` spawn action) so the child inherits the notifier.
+pub const NOTIFIER_FD: i32 = 3;
 
 /// Parent side: blocks until the child signals readiness.
 pub struct ReadinessGate {

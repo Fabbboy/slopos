@@ -119,13 +119,16 @@ pub const SYSCALL_FB_FLIP: u64 = 45;
 
 /// Spawn a new userspace task by absolute executable path.
 ///
+/// The child begins with an empty fd table; the `SpawnAttrs` action list
+/// installs exactly the descriptors it inherits (`posix_spawn` file-actions).
+///
 /// # Arguments (via registers)
 /// * rdi (arg0): pointer to path bytes (NUL-terminated or explicit length)
 /// * rsi (arg1): path length in bytes
-/// * rdx (arg2): task priority (`u8`)
-/// * r10 (arg3): task flags (`u16`, kernel enforces user-mode bit)
-/// * r8  (arg4): argv pointer (null-terminated array of null-terminated string pointers, or 0)
-/// * r9  (arg5): argc count (number of args, or 0)
+/// * rdx (arg2): argv pointer (null-terminated array of string pointers, or 0)
+/// * r10 (arg3): argc count (number of args, or 0)
+/// * r8  (arg4): pointer to a `SpawnAttrs` struct (priority, flags, fd actions,
+///               sigdefault mask)
 ///
 /// # Returns
 /// * positive task ID on success
@@ -521,6 +524,20 @@ pub const SYSCALL_KILL: u64 = 104;
 /// # Returns
 /// * Does not return to caller -- restores saved execution context.
 pub const SYSCALL_RT_SIGRETURN: u64 = 105;
+
+/// Reset a set of signals to their default disposition (`SIG_DFL`) in one call.
+///
+/// Forces every signal in the mask to `SIG_DFL`, overriding a caught handler
+/// or `SIG_IGN` — the batch equivalent of `rt_sigaction(SIG_DFL)` per signal.
+/// A freshly forked child uses it to install job-control defaults before
+/// running a command.
+///
+/// # Arguments (via registers)
+/// * rdi (arg0): signal mask (`SigSet`; bit N = signal N+1)
+///
+/// # Returns
+/// * 0 on success
+pub const SYSCALL_SIGDEFAULT: u64 = 118;
 
 // =============================================================================
 // Futex

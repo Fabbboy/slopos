@@ -70,15 +70,7 @@ pub fn terminal_user_main() {
             return;
         }
     };
-    // The terminal starts with an empty fd table, so freshly opened fds
-    // land in the 0-2 range — exactly the slots the spawn dance dup2s the
-    // slave over. Lift both PTY fds above stdio first, or the dup2s would
-    // silently close the master and hang up the pair.
-    let master_fd = dup_above_stdio(master_owned.into_raw());
-    if master_fd < 0 {
-        let _ = tty::write(b"terminal: master fd relocation failed\n");
-        return;
-    }
+    let master_fd = master_owned.into_raw();
 
     // Resolve the slave peer fd from the master (TIOCGPTPEER).
     let slave_fd = match fs::ioctl_tiocgptpeer(master_fd) {
@@ -89,20 +81,6 @@ pub fn terminal_user_main() {
             return;
         }
     };
-    let slave_fd = dup_above_stdio(slave_fd);
-    if slave_fd < 0 {
-        let _ = tty::write(b"terminal: slave fd relocation failed\n");
-        let _ = fs::close_fd_raw(master_fd);
-        return;
-    }
-
-    // Close-on-exec: the spawned shell must inherit ONLY the slave copies
-    // dup2'd onto fd 0/1/2 (dup2 clears cloexec on the new slots) — never
-    // the terminal's own master/slave descriptors. A leaked master ref in
-    // the shell would keep the pair alive after the terminal closes it,
-    // breaking EOF/SIGHUP semantics.
-    let _ = fs::set_fd_cloexec(master_fd);
-    let _ = fs::set_fd_cloexec(slave_fd);
 
     // Set the initial winsize from the default geometry so the shell sees a
     // sane TERM size immediately (a Configure later re-pushes the real one).
@@ -112,14 +90,15 @@ pub fn terminal_user_main() {
     let rows = (WINDOW_HEIGHT / ch).clamp(1, grid::MAX_ROWS as i32) as u16;
     push_winsize(master_fd, rows, cols);
 
-    // Spawn the shell with the slave as its fd 0/1/2 by transiently dup2'ing
-    // it over the terminal's own stdio around the spawn, then restoring.
-    // No TASK_FLAG_NEW_PGRP: the shell must run its own setsid()/TIOCSCTTY.
+    // Spawn the shell with the slave cloned onto its stdin/stdout/stderr. The
+    // child's empty table inherits only those clones — the terminal's own
+    // master/slave descriptors are never in the child, so no cloexec juggling
+    // is needed. No TASK_FLAG_NEW_PGRP: the shell runs its own setsid()/TIOCSCTTY.
     spawn_shell_on_slave(slave_fd);
 
     // The terminal no longer needs the slave fd; the shell holds its own
-    // references. Closing the last extra ref here keeps the master's EOF /
-    // SIGHUP semantics correct when the shell finally exits.
+    // clone. Closing this ref keeps the master's EOF / SIGHUP semantics
+    // correct when the shell finally exits.
     let _ = fs::close_fd_raw(slave_fd);
 
     // Master must be non-blocking so the drain loop can read-until-WouldBlock.
@@ -191,66 +170,29 @@ fn with_client_fd(handle: &slopos_windowing::ProtocolHandle) -> i32 {
     handle.borrow_client().fd()
 }
 
-/// Spawn `/bin/shell` with the PTY slave as its stdin/stdout/stderr.
+/// Spawn `/bin/shell` with the PTY slave cloned onto its stdin/stdout/stderr.
 ///
-/// Mirrors the save/restore dup2 pattern (shell exec.rs): point the terminal's
-/// own fd 0/1/2 at the slave just long enough for the spawned child to inherit
-/// them, then restore the terminal's descriptors. The shell itself performs
-/// `setsid()` + `TIOCSCTTY`, so we deliberately omit `TASK_FLAG_NEW_PGRP`.
+/// The child starts with an empty fd table, so the three `CloneFd` actions
+/// install exactly the slave — the terminal's own descriptors are never
+/// inherited. The shell performs its own `setsid()` + `TIOCSCTTY`, so we
+/// deliberately omit `TASK_FLAG_NEW_PGRP`.
 fn spawn_shell_on_slave(slave_fd: i32) {
-    let saved0 = fs::dup(0).map(|f| f.into_raw()).unwrap_or(-1);
-    let saved1 = fs::dup(1).map(|f| f.into_raw()).unwrap_or(-1);
-    let saved2 = fs::dup(2).map(|f| f.into_raw()).unwrap_or(-1);
-
-    let _ = fs::dup2(slave_fd, 0);
-    let _ = fs::dup2(slave_fd, 1);
-    let _ = fs::dup2(slave_fd, 2);
-
-    let tid = process::spawn_path_with_attrs(
+    let actions = [
+        process::clone_fd(slave_fd, 0),
+        process::clone_fd(slave_fd, 1),
+        process::clone_fd(slave_fd, 2),
+    ];
+    let tid = process::spawn_path_with_actions(
         b"/bin/shell",
+        &[],
         TaskPriority::Normal,
         slopos_abi::task::TASK_FLAG_USER_MODE,
+        &actions,
+        0,
     );
     if tid <= 0 {
         let _ = tty::write(b"terminal: failed to spawn shell\n");
     }
-
-    // Restore the terminal's own descriptors.
-    restore_fd(saved0, 0);
-    restore_fd(saved1, 1);
-    restore_fd(saved2, 2);
-}
-
-fn restore_fd(saved: i32, slot: i32) {
-    if saved >= 0 {
-        let _ = fs::dup2(saved, slot);
-        let _ = fs::close_fd_raw(saved);
-    } else {
-        // The slot was empty before the spawn dance — return it to empty
-        // so the terminal does not keep stray slave references alive.
-        let _ = fs::close_fd_raw(slot);
-    }
-}
-
-/// Re-home `fd` above the stdio range (>= 3), closing the low-numbered
-/// originals. `dup` allocates the lowest free slot, so walking upward
-/// terminates after at most three hops.
-fn dup_above_stdio(fd: i32) -> i32 {
-    let mut cur = fd;
-    let mut low = [-1i32; 3];
-    let mut n = 0;
-    while (0..3).contains(&cur) {
-        low[n] = cur;
-        n += 1;
-        cur = match fs::dup(cur) {
-            Ok(f) => f.into_raw(),
-            Err(_) => break,
-        };
-    }
-    for &l in &low[..n] {
-        let _ = fs::close_fd_raw(l);
-    }
-    if (0..3).contains(&cur) { -1 } else { cur }
 }
 
 /// The `block_on` root: select over compositor readiness, master readiness,

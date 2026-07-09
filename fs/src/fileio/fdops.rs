@@ -914,3 +914,73 @@ pub fn fileio_install_file_ref(process_id: u32, file: FileRef) -> c_int {
     });
     idx as c_int
 }
+
+/// Install a [`FileRef`] at exactly `target_fd`, displacing any occupant
+/// (detach-then-drop). Generalises [`fileio_install_file_ref`] for the spawn
+/// fd-action allow-list. On failure the alias drops here — lock-free — closing it.
+pub fn fileio_install_file_ref_at(
+    process_id: u32,
+    target_fd: c_int,
+    file: FileRef,
+    cloexec: bool,
+) -> c_int {
+    if target_fd < 0 || target_fd as usize >= FILEIO_MAX_OPEN_FILES {
+        drop(file);
+        return Errno::EBADF.raw() as _;
+    }
+    let displaced = {
+        let Some(mut inner) = lock_pid_slot(process_id) else {
+            // No table: no lock held here, so close the alias lock-free.
+            drop(file);
+            return Errno::ESRCH.raw() as _;
+        };
+        let displaced = inner.descriptors[target_fd as usize].take();
+        inner.descriptors[target_fd as usize] = Some(FdEntry {
+            open_file: file.open_file,
+            cloexec,
+        });
+        displaced
+    };
+    // Slot lock released above; any displaced alias tears down lock-free.
+    drop(displaced);
+    target_fd
+}
+
+/// Detach the description at `fd` and return it as a [`FileRef`] — the spawn
+/// `TransferFd` move. The parent slot is emptied and the caller owns the
+/// returned alias. `None` if `fd` is absent or the table is missing.
+pub fn fileio_take_file_ref(process_id: u32, fd: c_int) -> Option<FileRef> {
+    let entry = with_pid_slot(process_id, |inner| {
+        if fd < 0 || fd as usize >= FILEIO_MAX_OPEN_FILES {
+            return None;
+        }
+        inner.descriptors[fd as usize].take()
+    })??;
+    Some(FileRef {
+        open_file: entry.open_file,
+    })
+}
+
+/// Open `path` and install its description at exactly `target_fd`, displacing
+/// any occupant — the spawn `Open` action. Composed from the next-free open
+/// plus a relocate, so the inherited fd is never close-on-exec.
+pub fn fileio_open_at_fd(
+    process_id: u32,
+    target_fd: c_int,
+    path: &[u8],
+    posix_flags: u32,
+) -> c_int {
+    if target_fd < 0 || target_fd as usize >= FILEIO_MAX_OPEN_FILES {
+        return Errno::EBADF.raw() as _;
+    }
+    let opened = file_open_for_process(process_id, path, posix_flags & !(O_CLOEXEC as u32));
+    if opened < 0 {
+        return opened;
+    }
+    if opened == target_fd {
+        return target_fd;
+    }
+    let rc = file_dup2_fd(process_id, opened, target_fd);
+    let _ = file_close_fd(process_id, opened);
+    if rc < 0 { rc } else { target_fd }
+}

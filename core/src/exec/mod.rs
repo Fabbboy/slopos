@@ -5,16 +5,21 @@ pub mod tests;
 #[cfg(feature = "test-hooks")]
 pub mod utest;
 
-use core::ffi::c_char;
+use core::ffi::{c_char, c_int};
 use core::ptr;
 
+use slopos_abi::Errno;
 use slopos_ostd::KVec;
 
 use slopos_abi::auxv::{AT_ENTRY, AT_NULL, AT_PAGESZ, AT_PHDR, AT_PHENT, AT_PHNUM};
 use slopos_abi::task::{
     INVALID_PROCESS_ID, TASK_FLAG_SYSTEM, TASK_FLAG_USER_MODE, TASK_NAME_MAX_LEN, TaskPriority,
 };
-use slopos_fs::fileio::{fileio_clone_table_for_spawn, fileio_destroy_table_for_process};
+use slopos_fs::fileio::{
+    file_close_fd, fileio_clone_file_ref, fileio_create_empty_table_for_process,
+    fileio_destroy_table_for_process, fileio_install_file_ref_at, fileio_open_at_fd,
+    fileio_take_file_ref,
+};
 use slopos_fs::vfs::ops::vfs_open;
 use slopos_mm::elf::{ElfError, ElfExecInfo};
 use slopos_mm::memory_layout_defs::PROCESS_CODE_START_VA;
@@ -28,8 +33,9 @@ use slopos_ostd::klog_info;
 use slopos_abi::task::INVALID_TASK_ID;
 use slopos_sched::scheduler::publish_new_task;
 use slopos_sched::task::{
-    TaskEntry, task_borrow, task_borrow_mut, task_entry_from_kernel_va, task_process_id,
-    task_set_context_rip_rsp, task_set_entry_point, task_set_fs_base, task_user_ctx_mut,
+    TaskEntry, task_borrow, task_borrow_mut, task_default_signals_in_mask,
+    task_entry_from_kernel_va, task_process_id, task_set_context_rip_rsp, task_set_entry_point,
+    task_set_fs_base, task_user_ctx_mut,
 };
 use slopos_sched::task::{task_create, task_find_by_id, task_get_info, task_terminate};
 
@@ -45,12 +51,30 @@ pub const INIT_PATH: &[u8] = b"/sbin/init";
 #[repr(i32)]
 pub enum ExecError {
     NoEntry = -2,
+    IoError = -5,
+    TooManyArgs = -7,
     NoExec = -8,
+    BadFd = -9,
     NoMem = -12,
     Fault = -14,
     NameTooLong = -36,
-    IoError = -5,
-    TooManyArgs = -7,
+}
+
+/// A decoded spawn file action (kernel-owned; `Open` paths are copied from
+/// user memory in the syscall handler before crossing into `exec`).
+pub enum FdAction {
+    /// Share the parent's `src_fd` description into the child's `target_fd`.
+    Clone { src_fd: i32, target_fd: i32 },
+    /// Move the parent's `src_fd` into the child's `target_fd`.
+    Transfer { src_fd: i32, target_fd: i32 },
+    /// Close the child's `target_fd`.
+    Close { target_fd: i32 },
+    /// Open `path` into the child's `target_fd`.
+    Open {
+        target_fd: i32,
+        path: KVec<u8>,
+        flags: u32,
+    },
 }
 
 impl From<ElfError> for ExecError {
@@ -70,9 +94,62 @@ pub fn launch_init() -> Result<u32, ExecError> {
         None,
         TaskPriority::Normal,
         TASK_FLAG_USER_MODE | TASK_FLAG_SYSTEM,
+        &[],
+        0,
         INVALID_PROCESS_ID,
         INVALID_TASK_ID,
     )
+}
+
+/// Apply the spawn fd-action allow-list to the child's empty, unpublished
+/// table. `Clone`/`Transfer` resolve against the parent; `Open` opens a path;
+/// each installs at an explicit child fd. Any failure aborts — the caller
+/// tears the child down (all-or-nothing).
+pub(crate) fn apply_fd_actions(
+    parent_process_id: u32,
+    child_process_id: u32,
+    actions: &[FdAction],
+) -> Result<(), ExecError> {
+    for action in actions {
+        let rc: c_int = match action {
+            FdAction::Clone { src_fd, target_fd } => {
+                match fileio_clone_file_ref(parent_process_id, *src_fd) {
+                    Some(file) => {
+                        fileio_install_file_ref_at(child_process_id, *target_fd, file, false)
+                    }
+                    None => Errno::EBADF.raw(),
+                }
+            }
+            FdAction::Transfer { src_fd, target_fd } => {
+                match fileio_take_file_ref(parent_process_id, *src_fd) {
+                    Some(file) => {
+                        fileio_install_file_ref_at(child_process_id, *target_fd, file, false)
+                    }
+                    None => Errno::EBADF.raw(),
+                }
+            }
+            FdAction::Close { target_fd } => {
+                let rc = file_close_fd(child_process_id, *target_fd);
+                // A fresh child table holds nothing at most fds; closing an
+                // absent one is a no-op success.
+                if rc == Errno::EBADF.raw() { 0 } else { rc }
+            }
+            FdAction::Open {
+                target_fd,
+                path,
+                flags,
+            } => fileio_open_at_fd(child_process_id, *target_fd, path.as_slice(), *flags),
+        };
+        if rc < 0 {
+            return Err(match Errno::from_raw(rc) {
+                Some(Errno::EBADF) => ExecError::BadFd,
+                Some(Errno::ENOENT) => ExecError::NoEntry,
+                Some(Errno::ENOMEM) => ExecError::NoMem,
+                _ => ExecError::Fault,
+            });
+        }
+    }
+    Ok(())
 }
 
 fn task_name_from_path(path: &[u8]) -> Result<[u8; TASK_NAME_MAX_LEN], ExecError> {
@@ -101,7 +178,9 @@ pub fn spawn_program_with_attrs(
     argv: Option<&[&[u8]]>,
     priority: TaskPriority,
     mut flags: u16,
-    inherit_fds_from: u32,
+    actions: &[FdAction],
+    sigdefault_mask: u64,
+    parent_process_id: u32,
     parent_task_id: u32,
 ) -> Result<u32, ExecError> {
     let result = (|| {
@@ -169,13 +248,30 @@ pub fn spawn_program_with_attrs(
             slopos_sched::task::init_user_ctx_for_new_task(uc, entry, stack_ptr, 0);
         }
 
-        // Clone the parent's fd table BEFORE scheduling so the child has
-        // stdin/stdout/stderr available from the moment it starts running.
-        // This avoids an SMP race where the child runs before the parent
-        // can set up the fd table post-spawn.
-        if inherit_fds_from != INVALID_PROCESS_ID {
+        // Build the child's fd table from the action allow-list BEFORE
+        // scheduling, so its descriptors are in place from the moment it
+        // runs (avoids the SMP race where the child runs before the parent
+        // finishes fd setup). The child starts empty; each action installs
+        // exactly what it inherits. A caller with no parent process
+        // (`launch_init`) keeps its console bootstrap table untouched.
+        if parent_process_id != INVALID_PROCESS_ID {
             fileio_destroy_table_for_process(process_id);
-            let _ = fileio_clone_table_for_spawn(inherit_fds_from, process_id);
+            if fileio_create_empty_table_for_process(process_id) != 0 {
+                task_terminate(task_id);
+                return Err(ExecError::NoMem);
+            }
+            if let Err(err) = apply_fd_actions(parent_process_id, process_id, actions) {
+                task_terminate(task_id);
+                return Err(err);
+            }
+        }
+
+        // POSIX_SPAWN_SETSIGDEF: force the named signals to their default
+        // disposition in the child.
+        if sigdefault_mask != 0
+            && let Some(child) = task_borrow_mut(task_info)
+        {
+            task_default_signals_in_mask(child, sigdefault_mask);
         }
 
         // Inherit job-control state (pgid, sid, controlling_tty) from the

@@ -1011,6 +1011,102 @@ fn test_verity_multiblock_span_detects() -> TestResult {
     }
 }
 
+/// `fileio_open_at_fd` installs a path at an explicit fd, relocating off the
+/// next-free slot when they differ.
+pub fn test_fileio_open_at_fd() -> TestResult {
+    use crate::fileio::{
+        file_close_fd, fileio_create_empty_table_for_process, fileio_destroy_table_for_process,
+        fileio_open_at_fd,
+    };
+    use slopos_abi::fs::O_RDONLY;
+
+    // The writable ext2 root is mounted by `test_ext2_aaa_init` (lex-first);
+    // this test runs after it. Use a private directory so it never collides
+    // with `test_vfs_*`, whose `mkdir` asserts first-creation.
+    let _ = vfs_mkdir(b"/fileio_test");
+    let handle = match vfs_open(b"/fileio_test/open_at.txt", true) {
+        Ok(h) => h,
+        Err(_) => return TestResult::Fail,
+    };
+    if handle.write(0, b"x").is_err() {
+        return TestResult::Fail;
+    }
+
+    const PID: u32 = 0x5A01;
+    fileio_destroy_table_for_process(PID);
+    if fileio_create_empty_table_for_process(PID) != 0 {
+        return TestResult::Fail;
+    }
+
+    // Next-free would be fd 0; opening at fd 5 must relocate off it.
+    let rc = fileio_open_at_fd(PID, 5, b"/fileio_test/open_at.txt", O_RDONLY as u32);
+    let present = rc == 5 && file_close_fd(PID, 5) == 0;
+    let low_absent = file_close_fd(PID, 0) != 0;
+    fileio_destroy_table_for_process(PID);
+
+    if present && low_absent {
+        TestResult::Pass
+    } else {
+        TestResult::Fail
+    }
+}
+
+/// `fileio_install_file_ref_at` shares a description at an explicit fd, and
+/// `fileio_take_file_ref` moves one out (source emptied).
+pub fn test_fileio_file_ref_move() -> TestResult {
+    use crate::fileio::{
+        file_close_fd, fileio_clone_file_ref, fileio_create_empty_table_for_process,
+        fileio_destroy_table_for_process, fileio_install_file_ref_at, fileio_open_at_fd,
+        fileio_take_file_ref,
+    };
+    use slopos_abi::fs::O_RDONLY;
+
+    let _ = vfs_mkdir(b"/fileio_test");
+    let handle = match vfs_open(b"/fileio_test/refmove.txt", true) {
+        Ok(h) => h,
+        Err(_) => return TestResult::Fail,
+    };
+    let _ = handle.write(0, b"x");
+
+    const PID: u32 = 0x5A02;
+    fileio_destroy_table_for_process(PID);
+    if fileio_create_empty_table_for_process(PID) != 0 {
+        return TestResult::Fail;
+    }
+    if fileio_open_at_fd(PID, 2, b"/fileio_test/refmove.txt", O_RDONLY as u32) != 2 {
+        fileio_destroy_table_for_process(PID);
+        return TestResult::Fail;
+    }
+
+    // Clone fd 2 → install a shared alias at fd 7.
+    let outcome = (|| {
+        let cloned = fileio_clone_file_ref(PID, 2)?;
+        if fileio_install_file_ref_at(PID, 7, cloned, false) != 7 {
+            return None;
+        }
+        // Move fd 2 → fd 9; fd 2 is emptied by the take.
+        let taken = fileio_take_file_ref(PID, 2)?;
+        if fileio_install_file_ref_at(PID, 9, taken, false) != 9 {
+            return None;
+        }
+        Some(())
+    })();
+
+    let ok = outcome.is_some()
+        && file_close_fd(PID, 2) != 0
+        && file_close_fd(PID, 7) == 0
+        && file_close_fd(PID, 9) == 0;
+    fileio_destroy_table_for_process(PID);
+
+    if ok {
+        TestResult::Pass
+    } else {
+        TestResult::Fail
+    }
+}
+
+slopos_testing::stest!(name = test_fileio_open_at_fd);
+slopos_testing::stest!(name = test_fileio_file_ref_move);
 slopos_testing::stest!(name = test_verity_crc32_known_vectors);
 slopos_testing::stest!(name = test_verity_clean_read_passes);
 slopos_testing::stest!(name = test_verity_corruption_detected);

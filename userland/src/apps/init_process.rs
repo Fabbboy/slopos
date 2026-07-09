@@ -27,12 +27,37 @@ fn upgrade_console_font() {
 }
 
 fn spawn_service(name: &str) -> i32 {
-    let tid = match program_registry::resolve_program(name) {
-        Some(spec) => {
-            process::spawn_path_with_attrs(spec.path.as_bytes(), spec.priority, spec.flags)
-        }
-        None => -1,
+    spawn_service_inheriting(name, &[])
+}
+
+/// Spawn a registry service. The child inherits the caller's stdio plus each
+/// fd in `extra_fds` (e.g. the readiness notifier) via the fd-action
+/// allow-list. Up to two extra fds are honored.
+fn spawn_service_inheriting(name: &str, extra_fds: &[i32]) -> i32 {
+    let Some(spec) = program_registry::resolve_program(name) else {
+        eprintln!("init: failed to spawn service");
+        return -1;
     };
+    let mut actions = [
+        process::clone_fd(0, 0),
+        process::clone_fd(1, 1),
+        process::clone_fd(2, 2),
+        process::clone_fd(-1, -1),
+        process::clone_fd(-1, -1),
+    ];
+    let base = 3;
+    let n = extra_fds.len().min(actions.len() - base);
+    for (slot, &fd) in actions[base..base + n].iter_mut().zip(extra_fds) {
+        *slot = process::clone_fd(fd, fd);
+    }
+    let tid = process::spawn_path_with_actions(
+        spec.path.as_bytes(),
+        &[],
+        spec.priority,
+        spec.flags,
+        &actions[..base + n],
+        0,
+    );
     if tid <= 0 {
         eprintln!("init: failed to spawn service");
     }
@@ -76,7 +101,15 @@ pub fn init_user_main() {
     }
 
     let gate = ReadinessGate::create();
-    let compositor_tid = spawn_service("compositor");
+    // The compositor must inherit the readiness notifier (fd 3) so it can
+    // signal init once it is up; without it, init's gate read would EOF
+    // immediately and race the terminal ahead of a ready compositor. Only
+    // clone the notifier when the gate was actually set up (fd 3 exists).
+    let compositor_tid = if gate.is_some() {
+        spawn_service_inheriting("compositor", &[crate::readiness::NOTIFIER_FD])
+    } else {
+        spawn_service("compositor")
+    };
 
     // Root supervision loop on the slopfut runtime: await the compositor's
     // readiness byte, spawn the shell, then await the compositor's exit via

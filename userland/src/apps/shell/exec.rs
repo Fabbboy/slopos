@@ -15,6 +15,14 @@ use std::sync::atomic::{AtomicU32, Ordering};
 const MAX_PIPE_CMDS: usize = 8;
 const MAX_REDIRECTS: usize = 4;
 
+/// Signals a forked job resets to SIG_DFL before running a command — the shell
+/// catches SIGINT and ignores SIGTTOU/SIGTTIN/SIGTSTP, none of which a launched
+/// job should inherit.
+const JOB_CONTROL_DEFAULT_SIGNALS: slopos_abi::signal::SigSet = {
+    use slopos_abi::signal::{SIGINT, SIGTSTP, SIGTTIN, SIGTTOU, sig_bit};
+    sig_bit(SIGINT) | sig_bit(SIGTTOU) | sig_bit(SIGTTIN) | sig_bit(SIGTSTP)
+};
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum RedirectKind {
     Input,
@@ -382,9 +390,11 @@ fn execute_registry_spawn(
     }
     let spec = registry_spec_for_command(cmd, tokens)?;
     let capture = !spec.gui && !background;
-    let mut pipe_fds = [-1i32; 2];
-    let mut backup_fd = -1i32;
 
+    // Capture jobs stream the child's stdout through a pipe the shell drains;
+    // non-capture jobs write straight to the shell's own stdout.
+    let mut read_fd = -1i32;
+    let mut write_fd = -1i32;
     if capture {
         let (r, w) = match fs::pipe() {
             Ok(pair) => pair,
@@ -393,26 +403,8 @@ fn execute_registry_spawn(
                 return Some(1);
             }
         };
-        pipe_fds[0] = r.into_raw();
-        pipe_fds[1] = w.into_raw();
-        backup_fd = match fs::dup(1) {
-            Ok(fd) => fd.into_raw(),
-            Err(_) => {
-                let _ = fs::close_fd_raw(pipe_fds[0]);
-                let _ = fs::close_fd_raw(pipe_fds[1]);
-                shell_write(b"dup failed\n");
-                return Some(1);
-            }
-        };
-        if fs::dup2(pipe_fds[1], 1).is_err() {
-            let _ = fs::close_fd_raw(pipe_fds[0]);
-            let _ = fs::close_fd_raw(pipe_fds[1]);
-            let _ = fs::close_fd_raw(backup_fd);
-            shell_write(b"dup2 failed\n");
-            return Some(1);
-        }
-        // Close extra write-end; child will inherit fd 1 = pipe write.
-        let _ = fs::close_fd_raw(pipe_fds[1]);
+        read_fd = r.into_raw();
+        write_fd = w.into_raw();
     }
 
     // Foreground jobs get their own pgrp AND the kernel-side atomic
@@ -441,20 +433,32 @@ fn execute_registry_spawn(
         argv_ptrs[i] = arg_bufs[i].as_ptr();
     }
 
-    let tid = process::spawn_path_with_argv(
+    // The child's empty table inherits exactly the shell's stdin/stderr plus a
+    // stdout taken from either the capture pipe or the shell's own fd 1. The
+    // pipe read end is never in the actions, so it does not leak into the child.
+    let stdout_src = if capture { write_fd } else { 1 };
+    let actions = [
+        process::clone_fd(0, 0),
+        process::clone_fd(stdout_src, 1),
+        process::clone_fd(2, 2),
+    ];
+    let tid = process::spawn_path_with_actions(
         spec.path.as_bytes(),
         &argv_ptrs[..cmd.argc],
         spec.priority,
         spawn_flags,
+        &actions,
+        0,
     );
 
+    // Drop the shell's copy of the write end so the child holds the only
+    // writer — the drain loop then sees EOF when the child exits.
     if capture {
-        let _ = fs::dup2(backup_fd, 1);
-        let _ = fs::close_fd_raw(backup_fd);
+        let _ = fs::close_fd_raw(write_fd);
     }
     if tid <= 0 {
         if capture {
-            let _ = fs::close_fd_raw(pipe_fds[0]);
+            let _ = fs::close_fd_raw(read_fd);
         }
         shell_write(b"spawn failed\n");
         return Some(1);
@@ -485,19 +489,19 @@ fn execute_registry_spawn(
     // returns EAGAIN when all available data is consumed instead of
     // blocking forever (which would hang for long-running children like nc).
     let status = if capture {
-        let _ = crate::syscall::fs::set_fd_nonblocking(pipe_fds[0]);
+        let _ = crate::syscall::fs::set_fd_nonblocking(read_fd);
         let mut buf = [0u8; 512];
         let exit_status;
         loop {
             let mut pfds = [UserPollFd {
-                fd: pipe_fds[0],
+                fd: read_fd,
                 events: POLLIN,
                 revents: 0,
             }];
             let _ = fs::poll(&mut pfds, 10);
 
             loop {
-                match fs::read_slice(pipe_fds[0], &mut buf) {
+                match fs::read_slice(read_fd, &mut buf) {
                     Ok(0) => break,
                     Ok(n) => {
                         shell_write(&buf[..n]);
@@ -508,7 +512,7 @@ fn execute_registry_spawn(
 
             if let Some(st) = process::waitpid_nohang(pid) {
                 loop {
-                    match fs::read_slice(pipe_fds[0], &mut buf) {
+                    match fs::read_slice(read_fd, &mut buf) {
                         Ok(0) => break,
                         Ok(n) => {
                             shell_write(&buf[..n]);
@@ -520,7 +524,7 @@ fn execute_registry_spawn(
                 break;
             }
         }
-        let _ = fs::close_fd_raw(pipe_fds[0]);
+        let _ = fs::close_fd_raw(read_fd);
         exit_status
     } else {
         loop {
@@ -694,14 +698,13 @@ fn run_in_child(
         let _ = fs::tcsetpgrp(0, fg_pgid);
     }
 
-    // Forked children take the default job-control signal dispositions
-    // before running the command, so a terminal-generated SIGINT/SIGTSTP
-    // acts on the job instead of inheriting the interactive shell's
-    // handler/ignore state.
-    let _ = process::default_signal(slopos_abi::signal::SIGINT);
-    let _ = process::default_signal(slopos_abi::signal::SIGTTOU);
-    let _ = process::default_signal(slopos_abi::signal::SIGTTIN);
-    let _ = process::default_signal(slopos_abi::signal::SIGTSTP);
+    // Forked children take the default job-control signal dispositions before
+    // running the command, so a terminal-generated SIGINT/SIGTSTP acts on the
+    // job instead of inheriting the shell's caught SIGINT or its ignored
+    // SIGTTOU/SIGTTIN/SIGTSTP. One declarative reset forces all four to
+    // SIG_DFL — execve would preserve the ignores, and an in-child builtin
+    // never execs at all.
+    let _ = process::sigdefault(JOB_CONTROL_DEFAULT_SIGNALS);
     super::interrupt::mark_forked_child();
 
     if stdin_fd >= 0 {

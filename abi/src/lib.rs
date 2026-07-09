@@ -30,6 +30,7 @@ pub mod net;
 pub mod pixel;
 pub mod ring;
 pub mod signal;
+pub mod spawn;
 pub mod surface;
 pub mod syscall;
 pub mod task;

@@ -1,8 +1,9 @@
 //! Process management syscalls: spawn, exec, fork, halt, reboot.
 
 use super::numbers::*;
-use super::raw::{syscall0, syscall1, syscall2, syscall3, syscall4, syscall6};
+use super::raw::{syscall0, syscall1, syscall2, syscall3, syscall4, syscall5};
 use slopos_abi::signal::{SIG_DFL, SIG_IGN, SigSet, UserSigaction};
+use slopos_abi::spawn::{SpawnAttrs, SpawnFdAction, SpawnFdActionKind};
 use slopos_abi::task::TaskPriority;
 
 /// Signal restorer trampoline — called when a signal handler returns.
@@ -37,45 +38,73 @@ pub fn getcwd(buf: &mut [u8]) -> i64 {
     unsafe { syscall2(SYSCALL_GETCWD, buf.as_mut_ptr() as u64, buf.len() as u64) as i64 }
 }
 
+/// Build a `CloneFd` action: share the caller's `src` fd into the child's `target`.
+#[inline(always)]
+pub fn clone_fd(src: i32, target: i32) -> SpawnFdAction {
+    SpawnFdAction {
+        kind: SpawnFdActionKind::CloneFd as u32,
+        src_fd: src,
+        target_fd: target,
+        _pad: 0,
+        open_path_ptr: 0,
+        open_path_len: 0,
+        open_flags: 0,
+        open_mode: 0,
+    }
+}
+
+/// Spawn `path` with an explicit fd-action allow-list. The child starts with
+/// an empty fd table; `actions` install exactly the descriptors it inherits.
+/// `sigdefault_mask` forces those signals to their default disposition.
+#[inline(always)]
+pub fn spawn_path_with_actions(
+    path: &[u8],
+    argv: &[*const u8],
+    priority: TaskPriority,
+    flags: u16,
+    actions: &[SpawnFdAction],
+    sigdefault_mask: SigSet,
+) -> i32 {
+    let attrs = SpawnAttrs {
+        priority: priority.as_u8(),
+        _pad: [0; 3],
+        flags,
+        _pad2: 0,
+        actions_ptr: actions.as_ptr() as u64,
+        actions_len: actions.len() as u64,
+        sigdefault_mask,
+    };
+    unsafe {
+        syscall5(
+            SYSCALL_SPAWN_PATH,
+            path.as_ptr() as u64,
+            path.len() as u64,
+            argv.as_ptr() as u64,
+            argv.len() as u64,
+            &attrs as *const SpawnAttrs as u64,
+        ) as i32
+    }
+}
+
+/// Spawn `path`, cloning the caller's stdio (fd 0/1/2) into the child. This
+/// preserves console inheritance for service/app spawns that used to rely on
+/// whole-table clone.
 #[inline(always)]
 pub fn spawn_path(path: impl AsRef<[u8]>) -> i32 {
     spawn_path_with_attrs(path, TaskPriority::Normal, 0)
 }
 
+/// Spawn `path` at `priority`/`flags`, cloning the caller's stdio into the child.
 #[inline(always)]
 pub fn spawn_path_with_attrs(path: impl AsRef<[u8]>, priority: TaskPriority, flags: u16) -> i32 {
-    let path = path.as_ref();
-    unsafe {
-        syscall6(
-            SYSCALL_SPAWN_PATH,
-            path.as_ptr() as u64,
-            path.len() as u64,
-            priority.as_u8() as u64,
-            flags as u64,
-            0,
-            0,
-        ) as i32
-    }
+    let stdio = [clone_fd(0, 0), clone_fd(1, 1), clone_fd(2, 2)];
+    spawn_path_with_actions(path.as_ref(), &[], priority, flags, &stdio, 0)
 }
 
+/// Reset the given signals to their default disposition (`SIG_DFL`) in one call.
 #[inline(always)]
-pub fn spawn_path_with_argv(
-    path: &[u8],
-    argv: &[*const u8],
-    priority: TaskPriority,
-    flags: u16,
-) -> i32 {
-    unsafe {
-        syscall6(
-            SYSCALL_SPAWN_PATH,
-            path.as_ptr() as u64,
-            path.len() as u64,
-            priority.as_u8() as u64,
-            flags as u64,
-            argv.as_ptr() as u64,
-            argv.len() as u64,
-        ) as i32
-    }
+pub fn sigdefault(mask: SigSet) -> i64 {
+    unsafe { syscall1(SYSCALL_SIGDEFAULT, mask) as i64 }
 }
 
 #[inline(always)]

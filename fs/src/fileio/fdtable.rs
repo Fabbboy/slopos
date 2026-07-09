@@ -77,28 +77,54 @@ pub fn fileio_create_table_for_process(process_id: u32) -> i32 {
     }
     // Claim a free slot via CAS so two concurrent creates can't pick
     // the same one.
+    let Some(slot) = claim_free_process_slot(process_id) else {
+        return -1;
+    };
+    let mut inner = slot.inner.lock();
+    inner.in_use = true;
+    for entry in inner.descriptors.iter_mut() {
+        *entry = None;
+    }
+    let external_ops = with_open_files(|state| state.external_ops);
+    bootstrap_console_fds(&mut inner, &external_ops);
+    0
+}
+
+/// CAS-claim a free process-table slot for `pid`; the caller then locks it and
+/// sets `in_use`. `None` if every slot is in use.
+fn claim_free_process_slot(pid: u32) -> Option<&'static FileTableSlot> {
     for slot in PROCESS_TABLES.iter() {
         if slot
             .process_id
-            .compare_exchange(
-                INVALID_PROCESS_ID,
-                process_id,
-                Ordering::AcqRel,
-                Ordering::Acquire,
-            )
+            .compare_exchange(INVALID_PROCESS_ID, pid, Ordering::AcqRel, Ordering::Acquire)
             .is_ok()
         {
-            let mut inner = slot.inner.lock();
-            inner.in_use = true;
-            for entry in inner.descriptors.iter_mut() {
-                *entry = None;
-            }
-            let external_ops = with_open_files(|state| state.external_ops);
-            bootstrap_console_fds(&mut inner, &external_ops);
-            return 0;
+            return Some(slot);
         }
     }
-    -1
+    None
+}
+
+/// Create an empty fd table for `process_id` — no console bootstrap. Spawn's
+/// fd-action allow-list installs every descriptor the child inherits, so it
+/// starts from nothing. Returns 0, or -1 if the pid is invalid, already has a
+/// table, or no slot is free.
+pub fn fileio_create_empty_table_for_process(process_id: u32) -> i32 {
+    if process_id == INVALID_PROCESS_ID {
+        return -1;
+    }
+    if slot_for_pid(process_id).is_some() {
+        return -1;
+    }
+    let Some(slot) = claim_free_process_slot(process_id) else {
+        return -1;
+    };
+    let mut inner = slot.inner.lock();
+    inner.in_use = true;
+    for entry in inner.descriptors.iter_mut() {
+        *entry = None;
+    }
+    0
 }
 
 pub fn fileio_destroy_table_for_process(process_id: u32) {
@@ -125,19 +151,9 @@ pub fn fileio_destroy_table_for_process(process_id: u32) {
 
 /// Fork-style clone: every valid descriptor is duplicated, including
 /// close-on-exec ones (POSIX fork keeps `FD_CLOEXEC` descriptors; only
-/// `exec` strips them).
+/// `exec` strips them). Spawn no longer clones tables — it builds the child's
+/// from an fd-action allow-list.
 pub fn fileio_clone_table_for_process(src_process_id: u32, dst_process_id: u32) -> i32 {
-    clone_table_inner(src_process_id, dst_process_id, false)
-}
-
-/// Spawn-style clone: descriptors marked close-on-exec are skipped.
-/// `spawn` is fork+exec in one step, so a `FD_CLOEXEC` descriptor must
-/// never appear in the spawned image.
-pub fn fileio_clone_table_for_spawn(src_process_id: u32, dst_process_id: u32) -> i32 {
-    clone_table_inner(src_process_id, dst_process_id, true)
-}
-
-fn clone_table_inner(src_process_id: u32, dst_process_id: u32, skip_cloexec: bool) -> i32 {
     if src_process_id == INVALID_PROCESS_ID || dst_process_id == INVALID_PROCESS_ID {
         return -1;
     }
@@ -162,9 +178,6 @@ fn clone_table_inner(src_process_id: u32, dst_process_id: u32, skip_cloexec: boo
         }
         for (i, src_fd) in guard.descriptors.iter().enumerate() {
             let Some(src_fd) = src_fd else { continue };
-            if skip_cloexec && src_fd.cloexec {
-                continue;
-            }
             if snapshot.push((i, src_fd.clone())).is_err() {
                 // Allocation failed mid-snapshot: drop the partial clones
                 // (decrement only — src keeps every `OpenFile` alive).
@@ -174,23 +187,7 @@ fn clone_table_inner(src_process_id: u32, dst_process_id: u32, skip_cloexec: boo
     }
 
     // Step 2: claim a free slot for the destination.
-    let Some(dst_slot) = (|| -> Option<&'static FileTableSlot> {
-        for slot in PROCESS_TABLES.iter() {
-            if slot
-                .process_id
-                .compare_exchange(
-                    INVALID_PROCESS_ID,
-                    dst_process_id,
-                    Ordering::AcqRel,
-                    Ordering::Acquire,
-                )
-                .is_ok()
-            {
-                return Some(slot);
-            }
-        }
-        None
-    })() else {
+    let Some(dst_slot) = claim_free_process_slot(dst_process_id) else {
         // No free slot: drop the cloned aliases (decrement only).
         drop(snapshot);
         return -1;

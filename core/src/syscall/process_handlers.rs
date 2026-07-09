@@ -1,5 +1,6 @@
 use slopos_abi::Errno;
 use slopos_abi::fs::FS_TYPE_DIRECTORY;
+use slopos_abi::spawn::{SPAWN_MAX_FD_ACTIONS, SpawnAttrs, SpawnFdAction, SpawnFdActionKind};
 use slopos_abi::syscall::{ARCH_GET_FS, ARCH_SET_FS, ENOSYS_RETURN, FUTEX_WAIT, FUTEX_WAKE};
 use slopos_abi::task::{INVALID_TASK_ID, TaskPriority};
 use slopos_fs::vfs::traits::VfsError;
@@ -7,9 +8,9 @@ use slopos_ostd::KVec;
 use slopos_ostd::user::context::UserContext;
 use slopos_sched::scheduler::task_wait_for;
 use slopos_sched::task::{
-    task_borrow, task_borrow_mut, task_consume_zombie, task_cpu_affinity, task_find_by_id,
-    task_fork, task_peek_exit_info, task_pgid, task_set_cpu_affinity, task_set_fs_base,
-    task_terminate,
+    task_borrow, task_borrow_mut, task_consume_zombie, task_cpu_affinity,
+    task_default_signals_in_mask, task_find_by_id, task_fork, task_peek_exit_info, task_pgid,
+    task_reset_caught_handlers, task_set_cpu_affinity, task_set_fs_base, task_terminate,
 };
 
 use slopos_arch::cpu;
@@ -92,15 +93,91 @@ fn read_user_cstr_list(ptrs: &[u64]) -> Result<KVec<KVec<u8>>, ()> {
     Ok(out)
 }
 
+/// Copy an `Open` action's path out of user memory into a kernel buffer,
+/// trimming at the first NUL (accepts both explicit-length and NUL-terminated
+/// paths).
+fn read_open_action_path(ptr: u64, len: u64) -> Result<KVec<u8>, Errno> {
+    if ptr == 0 || len == 0 {
+        return Err(Errno::EINVAL);
+    }
+    let mut tmp = [0u8; exec::EXEC_MAX_PATH];
+    let copied = syscall_bounded_from_user(&mut tmp, ptr, len, exec::EXEC_MAX_PATH)
+        .map_err(|_| Errno::EFAULT)?;
+    let bytes = &tmp[..copied];
+    let bytes = match bytes.iter().position(|&b| b == 0) {
+        Some(nul) => &bytes[..nul],
+        None => bytes,
+    };
+    if bytes.is_empty() {
+        return Err(Errno::EINVAL);
+    }
+    let mut buf = KVec::<u8>::with_capacity(bytes.len()).map_err(|_| Errno::ENOMEM)?;
+    buf.extend_from_slice(bytes).map_err(|_| Errno::ENOMEM)?;
+    Ok(buf)
+}
+
+/// Decode the spawn fd-action array from user memory into kernel-owned
+/// [`exec::FdAction`]s (`Open` paths copied in). Bounded by
+/// [`SPAWN_MAX_FD_ACTIONS`].
+fn read_user_spawn_actions(attrs: &SpawnAttrs) -> Result<KVec<exec::FdAction>, Errno> {
+    let count = attrs.actions_len as usize;
+    if count == 0 {
+        return Ok(KVec::new());
+    }
+    if count > SPAWN_MAX_FD_ACTIONS {
+        return Err(Errno::EINVAL);
+    }
+    if attrs.actions_ptr == 0 {
+        return Err(Errno::EFAULT);
+    }
+
+    let mut out = KVec::<exec::FdAction>::with_capacity(count).map_err(|_| Errno::ENOMEM)?;
+    for idx in 0..count {
+        let slot_addr = attrs
+            .actions_ptr
+            .checked_add((idx * core::mem::size_of::<SpawnFdAction>()) as u64)
+            .ok_or(Errno::EFAULT)?;
+        let user_slot =
+            MmUserPtr::<SpawnFdAction>::try_new(slot_addr).map_err(|_| Errno::EFAULT)?;
+        let raw = copy_from_user(user_slot).map_err(|_| Errno::EFAULT)?;
+        let action = match SpawnFdActionKind::from_u32(raw.kind).ok_or(Errno::EINVAL)? {
+            SpawnFdActionKind::CloneFd => exec::FdAction::Clone {
+                src_fd: raw.src_fd,
+                target_fd: raw.target_fd,
+            },
+            SpawnFdActionKind::TransferFd => exec::FdAction::Transfer {
+                src_fd: raw.src_fd,
+                target_fd: raw.target_fd,
+            },
+            SpawnFdActionKind::Close => exec::FdAction::Close {
+                target_fd: raw.target_fd,
+            },
+            SpawnFdActionKind::Open => exec::FdAction::Open {
+                target_fd: raw.target_fd,
+                path: read_open_action_path(raw.open_path_ptr, raw.open_path_len)?,
+                flags: raw.open_flags,
+            },
+        };
+        out.push(action).map_err(|_| Errno::ENOMEM)?;
+    }
+    Ok(out)
+}
+
 define_syscall!(syscall_spawn_path
-    (ctx, path: UserBytes, priority_raw: u8, flags_raw: u16, argv_ptr: u64, argc_raw: u32)
+    (ctx, path: UserBytes, argv_ptr: u64, argc_raw: u32, attrs_ptr: u64)
     -> Result<u64, Errno>
 {
     if path.base_u64() == 0 || path.len() == 0 || path.len() > exec::EXEC_MAX_PATH {
         return Err(Errno::EINVAL);
     }
+    if attrs_ptr == 0 {
+        return Err(Errno::EFAULT);
+    }
 
-    let priority = TaskPriority::try_from_u8(priority_raw).ok_or(Errno::EINVAL)?;
+    let attrs_user = MmUserPtr::<SpawnAttrs>::try_new(attrs_ptr).map_err(|_| Errno::EFAULT)?;
+    let attrs = copy_from_user(attrs_user).map_err(|_| Errno::EFAULT)?;
+
+    let priority = TaskPriority::try_from_u8(attrs.priority).ok_or(Errno::EINVAL)?;
     // KernelIo is reserved for kernel kthreads (NAPI, net-timer, …).
     // User space must not be able to spawn at that tier or it would
     // starve every other user task. The kernel-side spawn surface is
@@ -109,7 +186,6 @@ define_syscall!(syscall_spawn_path
     if matches!(priority, TaskPriority::KernelIo) {
         return Err(Errno::EINVAL);
     }
-    let flags = flags_raw;
     let argc = argc_raw as usize;
 
     let mut path_buf = [0u8; exec::EXEC_MAX_PATH];
@@ -138,19 +214,32 @@ define_syscall!(syscall_spawn_path
         None => None,
     };
 
+    let actions = read_user_spawn_actions(&attrs)?;
+
     let parent_pid = ctx.process_id().unwrap_or(slopos_abi::task::INVALID_PROCESS_ID);
     let parent_tid = ctx.task_id().unwrap_or(slopos_abi::task::INVALID_TASK_ID);
     match exec::spawn_program_with_attrs(
         &path_buf[..copied_len],
         argv_refs.as_deref(),
         priority,
-        flags,
+        attrs.flags,
+        actions.as_slice(),
+        attrs.sigdefault_mask,
         parent_pid,
         parent_tid,
     ) {
         Ok(task_id) => Ok(task_id as u64),
         Err(err) => Ok((err as i32) as u64),
     }
+});
+
+define_syscall!(syscall_sigdefault
+    (ctx, mask: u64) -> Result<u64, Errno>
+{
+    if let Some(task) = task_borrow_mut(ctx.task_ptr()) {
+        task_default_signals_in_mask(task, mask);
+    }
+    Ok(0)
 });
 
 define_syscall!(syscall_waitpid
@@ -305,6 +394,13 @@ define_syscall!(syscall_exec
             // resources (compositor surface, shm buffers, input queues, ...).
             let task_id = ctx.task_id().unwrap_or(slopos_abi::task::INVALID_TASK_ID);
             slopos_sched::task::task_cleanup_for_exec(task_id);
+
+            // Reset caught signal handlers to SIG_DFL so a stale handler
+            // pointer never survives into the new image; SIG_IGN and the
+            // blocked/pending state are preserved (POSIX exec semantics).
+            if let Some(task) = task_borrow_mut(ctx.task_ptr()) {
+                task_reset_caught_handlers(task);
+            }
 
             if tls_tp != 0 {
                 task_set_fs_base(ctx.task_ptr(), tls_tp);

@@ -863,6 +863,8 @@ fn panic_syscall_smoke_observer() {
         None,
         slopos_sched::task::TaskPriority::Normal,
         TASK_FLAG_USER_MODE,
+        &[],
+        0,
         INVALID_PROCESS_ID,
         INVALID_TASK_ID,
     ) {

@@ -32,7 +32,8 @@ pub use crate::syscall::process_handlers::{
     syscall_get_cpu_affinity, syscall_get_cpu_count, syscall_get_current_cpu, syscall_getcwd,
     syscall_getegid, syscall_geteuid, syscall_getgid, syscall_getpgid, syscall_getpid,
     syscall_getppid, syscall_getuid, syscall_set_cpu_affinity, syscall_setpgid, syscall_setsid,
-    syscall_spawn_path, syscall_terminate_task, syscall_vhangup, syscall_waitpid,
+    syscall_sigdefault, syscall_spawn_path, syscall_terminate_task, syscall_vhangup,
+    syscall_waitpid,
 };
 pub use crate::syscall::ring_handlers::{
     syscall_ring_enter, syscall_ring_register, syscall_ring_setup,
@@ -185,6 +186,7 @@ static SYSCALL_TABLE: [SyscallEntry; SYSCALL_TABLE_SIZE] = syscall_table! {
     [SYSCALL_RT_SIGPROCMASK] => syscall_rt_sigprocmask, "rt_sigprocmask";
     [SYSCALL_KILL]           => syscall_kill,           "kill";
     [SYSCALL_RT_SIGRETURN]   => syscall_rt_sigreturn,   "rt_sigreturn";
+    [SYSCALL_SIGDEFAULT]     => syscall_sigdefault,     "sigdefault";
 
     // File descriptor operations
     [SYSCALL_DUP]   => syscall_dup,   "dup";

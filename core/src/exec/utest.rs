@@ -16,7 +16,7 @@ use slopos_ostd::KVec;
 use slopos_ostd::{catch_panic, klog_info};
 use slopos_testing::{TestDesc, TestResult, ktap};
 
-use crate::exec::spawn_program_with_attrs;
+use crate::exec::{FdAction, spawn_program_with_attrs};
 use slopos_sched::scheduler::scheduler_get_current_task;
 use slopos_sched::scheduler::{sleep_current_task_ms, task_wait_for};
 use slopos_sched::task::{task_consume_zombie, task_find_by_id, task_peek_exit_info};
@@ -83,12 +83,9 @@ fn exit_reason_str(reason: TaskExitReason) -> &'static str {
 }
 
 fn dispatch(bin: &str, argv: Option<&[&[u8]]>) -> TestResult {
-    // Pull init's pid/tid out of the current task so spawned utests inherit
-    // the fd table and have a real `parent_task_id` set. Without this, the
-    // spawned task has `parent_task_id = INVALID_TASK_ID` and
-    // `inherit_fds_from = INVALID_PROCESS_ID` — which leaves it with no
-    // stdin/stdout/stderr and would prevent `notify_parent_of_child_exit`
-    // from delivering SIGCHLD anywhere meaningful.
+    // Pull init's pid/tid out of the current task so a spawned utest resolves
+    // its stdio clone-actions against init's console fds and gets a real
+    // `parent_task_id` (so `notify_parent_of_child_exit` can deliver SIGCHLD).
     let (parent_pid, parent_tid) = {
         let cur = scheduler_get_current_task();
         let pid = slopos_sched::task::task_process_id(cur).unwrap_or(INVALID_PROCESS_ID);
@@ -98,11 +95,29 @@ fn dispatch(bin: &str, argv: Option<&[&[u8]]>) -> TestResult {
 
     klog_info!("UTEST: starting '{}'", bin);
 
+    // Inherit the harness's stdio so the test binary's KTAP output reaches
+    // the serial console.
+    let stdio = [
+        FdAction::Clone {
+            src_fd: 0,
+            target_fd: 0,
+        },
+        FdAction::Clone {
+            src_fd: 1,
+            target_fd: 1,
+        },
+        FdAction::Clone {
+            src_fd: 2,
+            target_fd: 2,
+        },
+    ];
     let pid = match spawn_program_with_attrs(
         bin.as_bytes(),
         argv,
         TaskPriority::Normal,
         TASK_FLAG_USER_MODE | TASK_FLAG_SYSTEM,
+        &stdio,
+        0,
         parent_pid,
         parent_tid,
     ) {
