@@ -49,7 +49,7 @@ pub fn clone_fd(src: i32, target: i32) -> SpawnFdAction {
         open_path_ptr: 0,
         open_path_len: 0,
         open_flags: 0,
-        open_mode: 0,
+        _pad2: 0,
     }
 }
 

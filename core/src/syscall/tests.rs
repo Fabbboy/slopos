@@ -2822,7 +2822,9 @@ pub fn test_spawn_transfer_fd_moves() -> TestResult {
     TestResult::Pass
 }
 
-/// A mid-list bad fd aborts the whole action list — spawn is all-or-nothing.
+/// A mid-list bad fd aborts the whole action list, and the parent table is
+/// untouched: a `Transfer` staged before the failing action must not have
+/// emptied its parent slot or closed the description.
 pub fn test_spawn_actions_all_or_nothing() -> TestResult {
     let _fixture = SyscallFixture::new();
 
@@ -2839,6 +2841,14 @@ pub fn test_spawn_actions_all_or_nothing() -> TestResult {
     let pid1 = task_process_id(p1).unwrap_or(0);
     let pid2 = task_process_id(p2).unwrap_or(0);
 
+    let mut read_fd = -1;
+    let mut write_fd = -1;
+    assert_eq_test!(
+        file_pipe_create(pid1, O_NONBLOCK as u32, &mut read_fd, &mut write_fd),
+        0,
+        "pipe create failed"
+    );
+
     fileio_destroy_table_for_process(pid2);
     assert_eq_test!(
         fileio_create_empty_table_for_process(pid2),
@@ -2846,11 +2856,10 @@ pub fn test_spawn_actions_all_or_nothing() -> TestResult {
         "create empty failed"
     );
 
-    // pid1 has bootstrap console fd 0; fd 99 is out of range → the second
-    // action fails and the list aborts.
+    // fd 99 is out of range → the second action fails and the list aborts.
     let actions = [
-        FdAction::Clone {
-            src_fd: 0,
+        FdAction::Transfer {
+            src_fd: write_fd,
             target_fd: 0,
         },
         FdAction::Clone {
@@ -2863,6 +2872,19 @@ pub fn test_spawn_actions_all_or_nothing() -> TestResult {
         "a bad src fd must abort the action list"
     );
 
+    // The aborted spawn tears the child table down; the parent must still
+    // hold a live write end, so the reader sees no EOF.
+    fileio_destroy_table_for_process(pid2);
+    let mut one = [0u8; 1];
+    let r = file_read_fd(pid1, read_fd, &mut KernelIoBuf::new(&mut one));
+    assert_test!(r != 0, "parent write end must survive the aborted transfer");
+    assert_eq_test!(
+        file_close_fd(pid1, write_fd),
+        0,
+        "parent slot must still hold the transferred-then-aborted fd"
+    );
+
+    assert_eq_test!(file_close_fd(pid1, read_fd), 0, "pid1 close read failed");
     task_terminate(t1);
     task_terminate(t2);
     TestResult::Pass

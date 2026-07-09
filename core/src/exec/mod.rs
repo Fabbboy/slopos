@@ -16,9 +16,9 @@ use slopos_abi::task::{
     INVALID_PROCESS_ID, TASK_FLAG_SYSTEM, TASK_FLAG_USER_MODE, TASK_NAME_MAX_LEN, TaskPriority,
 };
 use slopos_fs::fileio::{
-    file_close_fd, fileio_clone_file_ref, fileio_create_empty_table_for_process,
+    FileRef, file_close_fd, fileio_clone_file_ref, fileio_create_empty_table_for_process,
     fileio_destroy_table_for_process, fileio_install_file_ref_at, fileio_open_at_fd,
-    fileio_take_file_ref,
+    fileio_take_file_ref_matching,
 };
 use slopos_fs::vfs::ops::vfs_open;
 use slopos_mm::elf::{ElfError, ElfExecInfo};
@@ -104,13 +104,17 @@ pub fn launch_init() -> Result<u32, ExecError> {
 
 /// Apply the spawn fd-action allow-list to the child's empty, unpublished
 /// table. `Clone`/`Transfer` resolve against the parent; `Open` opens a path;
-/// each installs at an explicit child fd. Any failure aborts — the caller
-/// tears the child down (all-or-nothing).
+/// each installs at an explicit child fd. Any failure aborts with the parent
+/// table untouched: `Transfer` installs a shared alias first and empties its
+/// parent slot only after the whole list has applied, so the caller tears the
+/// child down (all-or-nothing) while the parent keeps every descriptor.
 pub(crate) fn apply_fd_actions(
     parent_process_id: u32,
     child_process_id: u32,
     actions: &[FdAction],
 ) -> Result<(), ExecError> {
+    let mut transfers: KVec<(i32, FileRef)> =
+        KVec::with_capacity(actions.len()).map_err(|_| ExecError::NoMem)?;
     for action in actions {
         let rc: c_int = match action {
             FdAction::Clone { src_fd, target_fd } => {
@@ -122,9 +126,15 @@ pub(crate) fn apply_fd_actions(
                 }
             }
             FdAction::Transfer { src_fd, target_fd } => {
-                match fileio_take_file_ref(parent_process_id, *src_fd) {
+                match fileio_clone_file_ref(parent_process_id, *src_fd) {
                     Some(file) => {
-                        fileio_install_file_ref_at(child_process_id, *target_fd, file, false)
+                        let moved = file.alias();
+                        let rc =
+                            fileio_install_file_ref_at(child_process_id, *target_fd, file, false);
+                        if rc >= 0 && transfers.push((*src_fd, moved)).is_err() {
+                            return Err(ExecError::NoMem);
+                        }
+                        rc
                     }
                     None => Errno::EBADF.raw(),
                 }
@@ -149,6 +159,16 @@ pub(crate) fn apply_fd_actions(
                 _ => ExecError::Fault,
             });
         }
+    }
+    // Every action applied — only now do transfers empty their parent slots.
+    // The identity match skips a slot the parent concurrently closed or
+    // repopulated; the taken alias drops here, lock-free.
+    for (src_fd, moved) in transfers.iter() {
+        drop(fileio_take_file_ref_matching(
+            parent_process_id,
+            *src_fd,
+            moved,
+        ));
     }
     Ok(())
 }

@@ -204,25 +204,6 @@ fn tty_open_errno(e: TtyError) -> Errno {
 }
 
 pub fn file_read_fd(process_id: u32, fd: c_int, buf: &mut dyn IoBufWrite) -> ssize_t {
-    file_read_fd_inner(process_id, fd, buf, false)
-}
-
-/// SlopRing non-blocking probe variant of [`file_read_fd`] (SLOPRING
-/// § 12). Runs the **exact same** `FileOps::read` path — so observable
-/// results match the blocking syscall (R12 parity) — but forces the
-/// `O_NONBLOCK` flag so the path returns `-EAGAIN` instead of parking on
-/// a `WaitQueue`. Used by `OP_READ` / consuming reads; the ring's
-/// harvest phase (not this call) is what blocks.
-pub fn file_read_fd_nonblock(process_id: u32, fd: c_int, buf: &mut dyn IoBufWrite) -> ssize_t {
-    file_read_fd_inner(process_id, fd, buf, true)
-}
-
-fn file_read_fd_inner(
-    process_id: u32,
-    fd: c_int,
-    buf: &mut dyn IoBufWrite,
-    force_nonblock: bool,
-) -> ssize_t {
     let open_file = {
         let Some(inner) = lock_pid_slot(process_id) else {
             return Errno::EBADF.raw() as _;
@@ -232,7 +213,7 @@ fn file_read_fd_inner(
             None => return Errno::EBADF.raw() as _,
         }
     };
-    read_open_file(&open_file, buf, force_nonblock)
+    read_open_file(&open_file, buf, false)
 }
 
 /// The read core over an owned open-file description — shared by the
@@ -282,21 +263,6 @@ pub fn file_read_ref_nonblock(file: &FileRef, buf: &mut dyn IoBufWrite) -> ssize
 }
 
 pub fn file_write_fd(process_id: u32, fd: c_int, buf: &dyn IoBufRead) -> ssize_t {
-    file_write_fd_inner(process_id, fd, buf, false)
-}
-
-/// SlopRing non-blocking probe variant of [`file_write_fd`] — see
-/// [`file_read_fd_nonblock`].
-pub fn file_write_fd_nonblock(process_id: u32, fd: c_int, buf: &dyn IoBufRead) -> ssize_t {
-    file_write_fd_inner(process_id, fd, buf, true)
-}
-
-fn file_write_fd_inner(
-    process_id: u32,
-    fd: c_int,
-    buf: &dyn IoBufRead,
-    force_nonblock: bool,
-) -> ssize_t {
     let open_file = {
         let Some(inner) = lock_pid_slot(process_id) else {
             return Errno::EBADF.raw() as _;
@@ -306,7 +272,7 @@ fn file_write_fd_inner(
             None => return Errno::EBADF.raw() as _,
         }
     };
-    write_open_file(&open_file, buf, force_nonblock)
+    write_open_file(&open_file, buf, false)
 }
 
 /// The write core over an owned open-file description — shared by the
@@ -994,6 +960,30 @@ pub fn fileio_install_file_ref_at(
 pub fn fileio_take_file_ref(process_id: u32, fd: c_int) -> Option<FileRef> {
     let entry = with_pid_slot(process_id, |inner| {
         if fd < 0 || fd as usize >= FILEIO_MAX_OPEN_FILES {
+            return None;
+        }
+        inner.descriptors[fd as usize].take()
+    })??;
+    Some(FileRef {
+        open_file: entry.open_file,
+    })
+}
+
+/// Detach the description at `fd` only while the slot still holds
+/// `expected`'s description; a slot the owner concurrently closed or
+/// repopulated is left untouched. The taken alias returns to the caller
+/// so its teardown runs lock-free (detach-then-drop).
+pub fn fileio_take_file_ref_matching(
+    process_id: u32,
+    fd: c_int,
+    expected: &FileRef,
+) -> Option<FileRef> {
+    let entry = with_pid_slot(process_id, |inner| {
+        if fd < 0 || fd as usize >= FILEIO_MAX_OPEN_FILES {
+            return None;
+        }
+        let held = inner.descriptors[fd as usize].as_ref()?;
+        if !KArc::ptr_eq(&held.open_file, &expected.open_file) {
             return None;
         }
         inner.descriptors[fd as usize].take()

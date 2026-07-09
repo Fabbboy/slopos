@@ -50,8 +50,7 @@ pub struct SpawnFdAction {
     pub open_path_len: u64,
     /// POSIX open flags — `Open`.
     pub open_flags: u32,
-    /// Creation mode — `Open`.
-    pub open_mode: u32,
+    pub _pad2: u32,
 }
 
 /// Spawn attributes, passed by pointer in the spawn syscall's `attrs` register.
@@ -83,7 +82,6 @@ const _: () = assert!(core::mem::offset_of!(SpawnFdAction, target_fd) == 8);
 const _: () = assert!(core::mem::offset_of!(SpawnFdAction, open_path_ptr) == 16);
 const _: () = assert!(core::mem::offset_of!(SpawnFdAction, open_path_len) == 24);
 const _: () = assert!(core::mem::offset_of!(SpawnFdAction, open_flags) == 32);
-const _: () = assert!(core::mem::offset_of!(SpawnFdAction, open_mode) == 36);
 
 const _: () = assert!(core::mem::size_of::<SpawnAttrs>() == 32);
 const _: () = assert!(core::mem::align_of::<SpawnAttrs>() == 8);
