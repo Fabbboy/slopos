@@ -235,7 +235,7 @@ pub fn init_bootstrap_tasks() {
 /// Return `true` if `ptr` is one of the statically-allocated
 /// bootstrap Task stubs (BSP or any AP).  Used by
 /// `task_pointer_is_valid` to whitelist stubs alongside
-/// pool-allocated tasks — the scheduler's pre-first-dispatch
+/// registry-owned tasks — the scheduler's pre-first-dispatch
 /// window legitimately observes a stub as `PCR.current_task`, and
 /// corruption-recovery paths would otherwise flag it as invalid
 /// and loop trying to replace it with idle.

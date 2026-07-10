@@ -21,11 +21,12 @@ use super::scheduler::{
 };
 use super::task::{
     INVALID_PROCESS_ID, INVALID_TASK_ID, IdtEntry, TASK_FLAG_KERNEL_MODE, TASK_FLAG_USER_MODE,
-    Task, TaskPriority, TaskStatus, reap_zombies, task_create, task_exit_info_is_set,
-    task_find_by_id, task_get_info, task_handle, task_id_of, task_inc_ref, task_is_blocked,
-    task_is_terminated, task_kernel_stack_top, task_last_cpu, task_priority, task_ref_count,
-    task_remote_inbox_is_linked, task_resolve_handle, task_sched_placement_load, task_set_state,
-    task_set_state_with_reason, task_slot_index, task_status, task_terminate, task_waiter_count,
+    Task, TaskPriority, TaskStatus, task_create, task_exit_info_is_set,
+    task_find_by_id_raw_for_test as task_find_by_id, task_get_info, task_handle, task_id_of,
+    task_inc_ref, task_is_blocked, task_is_terminated, task_kernel_stack_top, task_last_cpu,
+    task_live_cap_rejects_for_test, task_priority, task_ref_count, task_remote_inbox_is_linked,
+    task_resolve_handle_raw_for_test as task_resolve_handle, task_sched_placement_load,
+    task_set_state, task_set_state_with_reason, task_status, task_terminate, task_waiter_count,
 };
 use super::test_fixture::KernelTestScope;
 use slopos_abi::task::BlockReason;
@@ -442,14 +443,12 @@ pub fn test_state_transition_invalid_blocked_to_running() -> TestResult {
 // Test behavior at and beyond MAX_TASKS limit
 // =============================================================================
 
-/// Test: the pool grows lazily. Walks creation past 256 so the
-/// tier-3 path in `reserve_task_slot` (`None` slot → fresh
-/// `KBox::try_init`) actually fires — tier-1 and tier-2 can only
-/// satisfy the first allocations before the pool ever gets that big.
-pub fn test_pool_grow_on_demand() -> TestResult {
+/// Individually allocated tasks coexist and the concurrent-task cap rejects
+/// without consuming an ID or inserting a registry entry.
+pub fn test_task_registry_live_cap() -> TestResult {
     let _fixture = SchedFixture::new();
 
-    const TARGET: usize = 512;
+    const TARGET: usize = 4;
     let mut ids: slopos_ostd::KVec<u32> = match slopos_ostd::KVec::with_capacity(TARGET) {
         Ok(v) => v,
         Err(_) => return TestResult::Fail,
@@ -463,7 +462,7 @@ pub fn test_pool_grow_on_demand() -> TestResult {
             TASK_FLAG_KERNEL_MODE,
         );
         if id == INVALID_TASK_ID {
-            klog_info!("SCHED_TEST: pool grow failed at {} tasks", ids.len());
+            klog_info!("SCHED_TEST: task allocation failed at {} tasks", ids.len());
             return TestResult::Fail;
         }
         let _ = ids.push(id);
@@ -472,11 +471,49 @@ pub fn test_pool_grow_on_demand() -> TestResult {
     for id in ids.iter() {
         let _ = task_terminate(*id);
     }
-    reap_zombies();
+    if task_live_cap_rejects_for_test() {
+        TestResult::Pass
+    } else {
+        TestResult::Fail
+    }
+}
+
+/// A held registry guard pins a terminated task; the final guard drop
+/// retires it and later lookups fail.
+pub fn test_task_guard_pins_terminated_task() -> TestResult {
+    let _fixture = SchedFixture::new();
+
+    let id = task_create(
+        b"GuardPin\0".as_ptr() as *const c_char,
+        dummy_task_entry,
+        ptr::null_mut(),
+        TaskPriority::Normal.as_u8(),
+        TASK_FLAG_KERNEL_MODE,
+    );
+    if id == INVALID_TASK_ID {
+        return TestResult::Fail;
+    }
+    let Some(guard) = super::task::task_find_by_id(id) else {
+        return TestResult::Fail;
+    };
+    if task_terminate(id) != 0 {
+        return TestResult::Fail;
+    }
+    // The held guard blocks retirement: the task must still resolve.
+    if super::task::task_find_by_id(id).is_none() {
+        klog_info!("SCHED_TEST: guarded terminated task {} vanished", id);
+        return TestResult::Fail;
+    }
+    drop(guard);
+    // The final guard drop retired the task.
+    if super::task::task_find_by_id(id).is_some() {
+        klog_info!("SCHED_TEST: task {} survived its final guard drop", id);
+        return TestResult::Fail;
+    }
     TestResult::Pass
 }
 
-/// Test: Rapid create/destroy cycle - stress test slot reuse
+/// Test: rapid individually allocated task create/destroy cycle.
 pub fn test_rapid_create_destroy_cycle() -> TestResult {
     let _fixture = SchedFixture::new();
 
@@ -515,14 +552,7 @@ pub fn test_rapid_create_destroy_cycle() -> TestResult {
     TestResult::Pass
 }
 
-/// Test: a `Handle<Task>` is generation-checked. The core safety
-/// invariant — proven on every iteration below — is that a stale handle
-/// NEVER resolves to a *different* task than the one it was minted for:
-/// `task_resolve_handle` returns either null or a pointer to that same
-/// task, never a use-after-reuse alias of a recycled slot's new
-/// occupant. When a freshly created task demonstrably reclaims the
-/// original slot (matching `slot_index`), the stale handle must resolve
-/// to null because the slot's generation has advanced.
+/// A task handle resolves through weak upgrade and never aliases a later ID.
 pub fn test_task_handle_stale_after_reuse() -> TestResult {
     let _fixture = SchedFixture::new();
 
@@ -538,65 +568,39 @@ pub fn test_task_handle_stale_after_reuse() -> TestResult {
     }
     let Some(h1) = task_handle(id1) else {
         let _ = task_terminate(id1);
-        reap_zombies();
         return TestResult::Fail;
     };
-    // The live handle resolves to the same task as the id lookup.
+    // The live handle resolves to the same allocation as the ID lookup.
     if task_resolve_handle(h1).is_null() || task_resolve_handle(h1) != task_find_by_id(id1) {
         let _ = task_terminate(id1);
-        reap_zombies();
         return TestResult::Fail;
     }
 
-    // Terminate and reap so the slot becomes a reuse candidate.
+    // Destruction makes both lookup forms fail.
     let _ = task_terminate(id1);
-    reap_zombies();
+    if !task_resolve_handle(h1).is_null() || !task_find_by_id(id1).is_null() {
+        return TestResult::Fail;
+    }
 
-    // Drive slot reuse: create tasks until one reclaims h1's slot.
-    let mut created: slopos_ostd::KVec<u32> = match slopos_ostd::KVec::with_capacity(96) {
-        Ok(v) => v,
-        Err(_) => return TestResult::Fail,
+    let id2 = task_create(
+        b"HandleB\0".as_ptr() as *const c_char,
+        dummy_task_entry,
+        ptr::null_mut(),
+        TaskPriority::Normal.as_u8(),
+        TASK_FLAG_KERNEL_MODE,
+    );
+    if id2 == INVALID_TASK_ID || id2 <= id1 {
+        return TestResult::Fail;
+    }
+    let Some(h2) = task_handle(id2) else {
+        return TestResult::Fail;
     };
-    let mut result = TestResult::Pass;
-    for _ in 0..96 {
-        let id = task_create(
-            b"HandleB\0".as_ptr() as *const c_char,
-            dummy_task_entry,
-            ptr::null_mut(),
-            TaskPriority::Normal.as_u8(),
-            TASK_FLAG_KERNEL_MODE,
-        );
-        if id == INVALID_TASK_ID {
-            break;
-        }
-        let _ = created.push(id);
-
-        // Safety invariant: the stale handle must never alias a *different*
-        // task. It may resolve to null, or (until the slot is recycled) to
-        // the original id1 task — but never to another task.
-        let stale = task_resolve_handle(h1);
-        if !stale.is_null() && task_id_of(stale) != Some(id1) {
-            result = TestResult::Fail;
-            break;
-        }
-
-        if let Some(h) = task_handle(id) {
-            if h.slot() == h1.slot() {
-                // The new task reclaimed h1's slot with a fresh
-                // generation: the stale handle must now be dead, and the
-                // new handle must resolve.
-                if !task_resolve_handle(h1).is_null() || task_resolve_handle(h).is_null() {
-                    result = TestResult::Fail;
-                }
-                break;
-            }
-        }
-    }
-
-    for c in created.iter() {
-        let _ = task_terminate(*c);
-    }
-    reap_zombies();
+    let result = if h2.slot() != id2 || h2.generation() != 0 || task_resolve_handle(h2).is_null() {
+        TestResult::Fail
+    } else {
+        TestResult::Pass
+    };
+    let _ = task_terminate(id2);
     result
 }
 
@@ -3001,10 +3005,7 @@ pub fn test_task_wait_exit_race_1000() -> TestResult {
             TASK_FLAG_KERNEL_MODE,
         );
         if child_id == INVALID_TASK_ID {
-            klog_info!(
-                "SCHED_TEST: task_create failed at iteration {} (pool exhausted?)",
-                i
-            );
+            klog_info!("SCHED_TEST: task_create failed at iteration {}", i);
             return TestResult::Fail;
         }
 
@@ -3055,10 +3056,6 @@ pub fn test_task_wait_exit_race_1000() -> TestResult {
             );
             return TestResult::Fail;
         }
-
-        // Reap on every iteration so the pool does not fill with
-        // zombies; reap_zombies is bounded and idempotent.
-        reap_zombies();
     }
 
     TestResult::Pass
@@ -3083,10 +3080,7 @@ pub fn test_task_wait_exit_race_with_work() -> TestResult {
             TASK_FLAG_KERNEL_MODE,
         );
         if child_id == INVALID_TASK_ID {
-            klog_info!(
-                "SCHED_TEST: task_create failed at iteration {} (pool exhausted?)",
-                i
-            );
+            klog_info!("SCHED_TEST: task_create failed at iteration {}", i);
             return TestResult::Fail;
         }
 
@@ -3150,8 +3144,6 @@ pub fn test_task_wait_exit_race_with_work() -> TestResult {
             );
             return TestResult::Fail;
         }
-
-        reap_zombies();
     }
 
     TestResult::Pass
@@ -3188,10 +3180,10 @@ pub fn test_task_wait_multi_waiter() -> TestResult {
         return TestResult::Fail;
     }
 
-    let child_ptr = task_find_by_id(child_id);
-    if child_ptr.is_null() {
+    let Some(child_ref) = super::task::task_find_by_id(child_id) else {
         return TestResult::Fail;
-    }
+    };
+    let child_ptr = child_ref.as_ptr();
 
     // Pre-condition: waiters queue is empty before terminate.
     if task_waiter_count(child_ptr) > 0 {
@@ -3238,7 +3230,6 @@ pub fn test_task_wait_multi_waiter() -> TestResult {
         }
     }
 
-    reap_zombies();
     TestResult::Pass
 }
 
@@ -3718,24 +3709,22 @@ pub fn test_effective_load_accuracy() -> TestResult {
 //   1. Overlapping parent/child lifetimes within each "fork group" so
 //      multiple terminate publishes interleave with multiple wait
 //      observations against distinct waiters queues.
-//   2. Deep slot-reuse churn: 1000 children, each fully reaped before
-//      the next is spawned, exercising `reset_in_place` /
-//      `clone_from_raw` correctness for the per-task `waiters` ring +
-//      `exit_info` cell — stale entries from the previous occupant
-//      must NOT leak into the fresh slot.
+//   2. Deep allocation churn: 1000 children, each destroyed before
+//      the next is spawned, exercising fresh per-task `waiters` and
+//      `exit_info` initialization.
 //   3. Cross-priority terminate/wait pair so the runqueue's
 //      priority-aware enqueue logic is exercised on the wake path
 //      even though the child publishes from a Low-priority slot.
 //
 // Under `KernelTestScope` APs are paused, so these are not true SMP
 // races — they widen coverage of the durable-exit-info fast path,
-// the reset_in_place reuse contract, and the cross-priority wake
+// fresh-allocation initialization, and the cross-priority wake
 // fanout. A regression that re-introduces lost wakeups would either
 // deadlock (test runner hangs) or fail one of the post-conditions.
 // =============================================================================
 
 /// 10 fork-groups × 100 iterations: each iteration spawns 10 children
-/// concurrently (all live in the slot pool together), then terminates
+/// concurrently, then terminates
 /// and waits for each in turn. Total fork/exit/wait cycles = 1000.
 ///
 /// What this catches if regressed:
@@ -3744,9 +3733,7 @@ pub fn test_effective_load_accuracy() -> TestResult {
 ///   first child has had ample opportunity to observe non-empty
 ///   waiter slots from sibling churn, so a missed fanout would
 ///   diverge from the durable exit_info path.
-/// - `reset_in_place` failing to clear the `waiters` ring between
-///   slot reuses — would surface as a non-empty `has_waiters()` on a
-///   fresh task before the test calls terminate.
+/// - A fresh allocation carrying non-empty waiter state.
 const FORK_GROUP_WIDTH: usize = 10;
 const FORK_GROUP_ITERATIONS: usize = 100;
 
@@ -3757,10 +3744,10 @@ pub fn test_fork_exit_wait_stress_10x100() -> TestResult {
 
     for outer in 0..FORK_GROUP_ITERATIONS {
         // Phase 1: spawn FORK_GROUP_WIDTH children. Their lifetimes
-        // overlap — every slot is allocated before any is terminated
-        // — so the wait/wake protocol is exercised against a pool
-        // with WIDTH live siblings rather than the always-singleton
-        // case of the existing 1000-iter test.
+        // overlap — every child is allocated before any is terminated
+        // — so the wait/wake protocol is exercised with WIDTH live
+        // siblings rather than the always-singleton case of the
+        // existing 1000-iter test.
         for slot in 0..FORK_GROUP_WIDTH {
             let id = task_create(
                 b"ForkStress\0".as_ptr() as *const c_char,
@@ -3771,7 +3758,7 @@ pub fn test_fork_exit_wait_stress_10x100() -> TestResult {
             );
             if id == INVALID_TASK_ID {
                 klog_info!(
-                    "SCHED_TEST: task_create failed at outer={} slot={} (pool exhausted?)",
+                    "SCHED_TEST: task_create failed at outer={} slot={}",
                     outer,
                     slot
                 );
@@ -3782,9 +3769,7 @@ pub fn test_fork_exit_wait_stress_10x100() -> TestResult {
             // Pre-condition: a freshly-allocated slot must come back
             // with an empty waiters ring and an unset exit_info, no
             // matter how many prior reuses it has been through. Stale
-            // state here would mean `reset_in_place` /
-            // `clone_from_raw` left residue from the previous
-            // occupant.
+            // Any state here means fresh initialization regressed.
             let ptr = task_find_by_id(id);
             if ptr.is_null() {
                 klog_info!(
@@ -3849,38 +3834,18 @@ pub fn test_fork_exit_wait_stress_10x100() -> TestResult {
                 return TestResult::Fail;
             }
         }
-
-        // Reap on every outer iteration so the pool does not fill
-        // with zombies; reap_zombies is bounded and idempotent.
-        reap_zombies();
     }
 
     TestResult::Pass
 }
 
-/// 1000 children spawned and reaped sequentially. Verifies that the
-/// per-task `waiters` queue and `exit_info` cell handle high churn
-/// — a recycled slot must NEVER carry stale waiter pointers or
-/// stale exit_info from the previous occupant. Exercises Phase 1C's
-/// `reset_in_place` correctness specifically.
-///
-/// What this catches if regressed:
-/// - `reset_in_place` byte-zero pass overwriting the `WaitQueue`
-///   storage without re-`write`ing a fresh `WaitQueue::new()` —
-///   would surface as a corrupt has_waiters() / waiter_count() read
-///   on the fresh slot's first inspection.
-/// - `reset_in_place` failing to call `exit_info.reset()` before the
-///   byte-zero pass — would leak the previous KBox<ExitValue> and
-///   leave is_set() observably true on a fresh task.
-/// - A regression that drops the `addr_of_mut!.write(WaitQueue::new())`
-///   re-init step would corrupt the AtomicUsize generation counter
-///   and break wake_all on the recycled slot.
+/// 1000 tasks allocated and destroyed sequentially. IDs must advance, dead
+/// weak entries must stop upgrading, and each fresh allocation starts clean.
 pub fn test_serial_reap_stampede() -> TestResult {
     let _fixture = SchedFixture::new();
 
     const STAMPEDE: usize = 1000;
-    let mut last_slot: u32 = u32::MAX;
-    let mut distinct_slots: usize = 0;
+    let mut last_id = 0u32;
 
     for i in 0..STAMPEDE {
         let id = task_create(
@@ -3891,10 +3856,7 @@ pub fn test_serial_reap_stampede() -> TestResult {
             TASK_FLAG_KERNEL_MODE,
         );
         if id == INVALID_TASK_ID {
-            klog_info!(
-                "SCHED_TEST: task_create failed at iteration {} (pool exhausted?)",
-                i
-            );
+            klog_info!("SCHED_TEST: task_create failed at iteration {}", i);
             return TestResult::Fail;
         }
 
@@ -3904,76 +3866,42 @@ pub fn test_serial_reap_stampede() -> TestResult {
             return TestResult::Fail;
         }
 
-        // Track slot reuse so we can prove this test actually
-        // exercises the recycle path — if every iteration grabbed a
-        // fresh slot the pool would have to be >= STAMPEDE, but
-        // reap_zombies below should free slots for reuse and so
-        // `slot_index` should repeat.
-        let slot_index = task_slot_index(ptr).unwrap_or(0);
-        if slot_index != last_slot {
-            distinct_slots += 1;
+        if id <= last_id {
+            klog_info!(
+                "SCHED_TEST: task id did not advance: {} after {}",
+                id,
+                last_id
+            );
+            return TestResult::Fail;
         }
-        last_slot = slot_index;
+        last_id = id;
 
-        // Pre-condition: the recycled slot must come back blank.
-        // These two assertions are the heart of this test — they
-        // catch any regression in `reset_in_place`'s reuse
-        // discipline.
         if task_waiter_count(ptr) > 0 {
             klog_info!(
-                "SCHED_TEST: recycled slot {} has stale waiters at iter {}",
-                slot_index,
+                "SCHED_TEST: fresh task {} has stale waiters at iter {}",
+                id,
                 i
             );
             return TestResult::Fail;
         }
         if task_exit_info_is_set(ptr) {
             klog_info!(
-                "SCHED_TEST: recycled slot {} has stale exit_info at iter {}",
-                slot_index,
+                "SCHED_TEST: fresh task {} has stale exit_info at iter {}",
+                id,
                 i
             );
             return TestResult::Fail;
         }
 
-        // Terminate + wait + reap. The wait must hit the fast path.
         let rc = task_terminate(id);
         if rc != 0 {
             klog_info!("SCHED_TEST: task_terminate returned {} at iter {}", rc, i);
             return TestResult::Fail;
         }
-        if !task_is_terminated(ptr) {
-            klog_info!("SCHED_TEST: child not Terminated at iter {}", i);
+        if !task_find_by_id(id).is_null() {
+            klog_info!("SCHED_TEST: destroyed task {} still upgrades", id);
             return TestResult::Fail;
         }
-        if !task_exit_info_is_set(ptr) {
-            klog_info!("SCHED_TEST: exit_info not published at iter {}", i);
-            return TestResult::Fail;
-        }
-        let wait_rc = task_wait_for(id);
-        if wait_rc != 0 {
-            klog_info!(
-                "SCHED_TEST: task_wait_for returned {} at iter {} (expected 0)",
-                wait_rc,
-                i
-            );
-            return TestResult::Fail;
-        }
-        reap_zombies();
-    }
-
-    // Sanity: with a 1000-iter stampede on an 8192-slot pool the
-    // allocator should still hand out fresh slots most of the time
-    // (zombies are reaped only at the end of each iteration), so
-    // `distinct_slots` will be high. The looser invariant we care
-    // about is that *some* reuse happened — otherwise the test is
-    // not actually exercising the recycle path it claims to.
-    if distinct_slots == STAMPEDE {
-        klog_info!(
-            "SCHED_TEST: stampede saw {} distinct slots — no slot reuse, recycle path NOT exercised",
-            distinct_slots
-        );
-        return TestResult::Fail;
     }
 
     TestResult::Pass
@@ -3982,22 +3910,13 @@ pub fn test_serial_reap_stampede() -> TestResult {
 /// Regression: a parent's `waitpid_nohang`-equivalent reaper must still
 /// observe a child's exit info after dozens of unrelated task
 /// allocations fire between the child's termination and the parent's
-/// reaping call. Before the Zombie-state introduction, the child's
-/// exit record lived in a slot-indexed parallel array that was wiped on
-/// every tier-2 slot reuse, so any new `task_create` between the
-/// child's exit and the reap would silently drop the exit code and
-/// hang the WNOHANG spin loop. The fix gates tier-2 reuse on
-/// `Terminated` (not `Zombie`), so the child's `exit_info` cell stays
-/// stable until `task_consume_zombie` transitions it.
+/// reaping call. The child's `exit_info` stays stable in the Zombie task
+/// until `task_consume_zombie` transitions it.
 ///
 /// What this catches if regressed:
-/// - Anyone re-adding a separate exit-record cache keyed by slot index
-///   that gets wiped on slot reuse → fails because the post-churn
-///   consume returns None.
-/// - A change that lets `reserve_task_slot` tier-2 pick a slot whose
-///   status is still `Zombie` → the recycled slot's exit_info gets
-///   reset, again the post-churn consume returns None.
-pub fn test_waitpid_survives_concurrent_slot_reuse() -> TestResult {
+/// - Anyone re-adding a recyclable parallel exit-record cache causes the
+///   post-churn consume to return `None`.
+pub fn test_waitpid_survives_task_churn() -> TestResult {
     use super::task::{task_consume_zombie, task_set_parent};
 
     let _fixture = SchedFixture::new();
@@ -4044,10 +3963,9 @@ pub fn test_waitpid_survives_concurrent_slot_reuse() -> TestResult {
         return TestResult::Fail;
     }
 
-    // Churn: spawn + immediately terminate + reap a long chain of
+    // Churn: spawn + immediately terminate a long chain of
     // kernel-mode tasks. These have no parent so they go straight to
-    // Terminated, then reap_zombies + tier-2 reuse will hammer the
-    // pool. None of these may steal the child's slot.
+    // Terminated and destroyed. None may disturb the Zombie child.
     for _ in 0..256 {
         let id = task_create(
             b"ChurnTask\0".as_ptr() as *const c_char,
@@ -4060,17 +3978,14 @@ pub fn test_waitpid_survives_concurrent_slot_reuse() -> TestResult {
             return TestResult::Fail;
         }
         let _ = task_terminate(id);
-        reap_zombies();
     }
 
-    // Re-find the child by ID and confirm its slot is still the same
-    // task (slot_index + task_id pair preserved). This is the "no
-    // slot-reuse for Zombies" invariant under inspection.
-    let child_ptr_after = task_find_by_id(child_id);
-    if child_ptr_after.is_null() {
-        klog_info!("SCHED_TEST: child slot vanished during churn");
+    // Re-find the child by ID and confirm it is still the same task.
+    let Some(child_ref_after) = super::task::task_find_by_id(child_id) else {
+        klog_info!("SCHED_TEST: child vanished during churn");
         return TestResult::Fail;
-    }
+    };
+    let child_ptr_after = child_ref_after.as_ptr();
     if task_id_of(child_ptr_after).unwrap_or(0) != child_id {
         return TestResult::Fail;
     }
@@ -4091,23 +4006,21 @@ pub fn test_waitpid_survives_concurrent_slot_reuse() -> TestResult {
         return TestResult::Fail;
     }
 
-    // After consume, slot should be Terminated and tier-2 reusable.
+    // The held lookup keeps the consumed task inspectable until this check.
     if task_status(child_ptr_after).unwrap_or(TaskStatus::Terminated) != TaskStatus::Terminated {
         klog_info!("SCHED_TEST: child not Terminated after consume");
         return TestResult::Fail;
     }
 
-    // Cleanup: terminate the parent so the next test sees a clean pool.
+    // Cleanup: terminate the parent so the next test starts clean.
     let _ = task_terminate(parent_id);
-    reap_zombies();
-
     TestResult::Pass
 }
 
 /// Regression: when a parent terminates without reaping its Zombie
 /// children, those children must be auto-reaped (Zombie → Terminated)
-/// so their slots become tier-2 reusable. Without this, a parent that
-/// crashes leaves zombie slots pinned forever and the pool eventually
+/// so they can be destroyed. Without this, a parent that crashes
+/// leaves zombies pinned forever and the live-task cap eventually
 /// exhausts.
 ///
 /// What this catches if regressed:
@@ -4158,19 +4071,11 @@ pub fn test_orphan_child_auto_reaped_on_parent_exit() -> TestResult {
         return TestResult::Fail;
     }
 
-    let child_ptr_after = task_find_by_id(child_id);
-    if child_ptr_after.is_null() {
-        return TestResult::Fail;
-    }
-    if task_status(child_ptr_after).unwrap_or(TaskStatus::Terminated) != TaskStatus::Terminated {
-        klog_info!(
-            "SCHED_TEST: orphan child still {:?} after parent exit",
-            task_status(child_ptr_after).unwrap_or(TaskStatus::Terminated)
-        );
+    if !task_find_by_id(child_id).is_null() {
+        klog_info!("SCHED_TEST: orphan child still registered after parent exit");
         return TestResult::Fail;
     }
 
-    reap_zombies();
     TestResult::Pass
 }
 
@@ -4196,17 +4101,7 @@ pub fn test_orphan_child_auto_reaped_on_parent_exit() -> TestResult {
 pub fn test_cross_priority_wait() -> TestResult {
     let _fixture = SchedFixture::new();
 
-    // Pre-allocate the High slot BEFORE creating the Low child. If
-    // we created High after Low and Low had already been
-    // terminated, `reserve_task_slot`'s tier-2 reuse path would pick
-    // up the Low slot, run `Task::reset_in_place` on it, and the
-    // Low child's `exit_info` would be silently invalidated under
-    // our feet — at which point the cross-priority test would no
-    // longer be checking what it claims to check.
-    //
-    // Allocation order: High first → Low second → terminate Low →
-    // wait_for(Low) from the runner. Both slots stay valid for the
-    // duration of the test.
+    // Allocate the High waiter before the Low child so both lifetimes overlap.
     let high_id = task_create(
         b"HighWaiter\0".as_ptr() as *const c_char,
         dummy_task_entry,
@@ -4218,11 +4113,11 @@ pub fn test_cross_priority_wait() -> TestResult {
         klog_info!("SCHED_TEST: task_create(High) failed");
         return TestResult::Fail;
     }
-    let high_ptr = task_find_by_id(high_id);
-    if high_ptr.is_null() {
+    let Some(high_ref) = super::task::task_find_by_id(high_id) else {
         klog_info!("SCHED_TEST: task_find_by_id(High) null");
         return TestResult::Fail;
-    }
+    };
+    let high_ptr = high_ref.as_ptr();
     if task_priority(high_ptr).unwrap_or(TaskPriority::Low) != TaskPriority::High {
         klog_info!(
             "SCHED_TEST: High waiter priority is {:?}, expected High",
@@ -4247,11 +4142,11 @@ pub fn test_cross_priority_wait() -> TestResult {
         return TestResult::Fail;
     }
 
-    let child_ptr = task_find_by_id(child_id);
-    if child_ptr.is_null() {
+    let Some(child_ref) = super::task::task_find_by_id(child_id) else {
         klog_info!("SCHED_TEST: task_find_by_id(Low) null");
         return TestResult::Fail;
-    }
+    };
+    let child_ptr = child_ref.as_ptr();
     if task_priority(child_ptr).unwrap_or(TaskPriority::Low) != TaskPriority::Low {
         klog_info!(
             "SCHED_TEST: Low child priority is {:?}, expected Low",
@@ -4287,8 +4182,7 @@ pub fn test_cross_priority_wait() -> TestResult {
     // The wait must complete via the durable exit_info fast path.
     // A regression that gates wake fanout on producer priority
     // would either deadlock the runner here or corrupt exit_info.
-    // task_wait_for holds a TaskRefGuard for the duration of the
-    // call, so the Low slot cannot be tier-2-recycled mid-wait.
+    // `child_ref` keeps the Low task alive across the wait.
     let wait_rc = task_wait_for(child_id);
     if wait_rc != 0 {
         klog_info!(
@@ -4299,10 +4193,7 @@ pub fn test_cross_priority_wait() -> TestResult {
     }
 
     // Post-condition: the durable exit_info is still observable on
-    // the Low slot. Because the High slot was reserved BEFORE the
-    // Low slot terminated, no tier-2 reset_in_place could have run
-    // on the Low slot — so this assertion is not racing the
-    // recycle path. The wait path uses `try_get`/`is_set`
+    // the strongly held Low task. The wait path uses `try_get`/`is_set`
     // (non-consuming), never `take`; a regression that consumed
     // the cell would leave subsequent waiters stranded.
     if !task_exit_info_is_set(child_ptr) {
@@ -4310,13 +4201,11 @@ pub fn test_cross_priority_wait() -> TestResult {
         return TestResult::Fail;
     }
 
-    // Clean up the High waiter slot so reap_zombies retires both.
+    // Clean up the High waiter task.
     if task_terminate(high_id) != 0 {
         klog_info!("SCHED_TEST: task_terminate(High) failed");
         return TestResult::Fail;
     }
-    reap_zombies();
-
     TestResult::Pass
 }
 
@@ -4348,7 +4237,11 @@ slopos_testing::stest!(
     name = test_wake_blocked_task_publishes_from_none,
     suite = sched_core
 );
-slopos_testing::stest!(name = test_pool_grow_on_demand, suite = sched_core);
+slopos_testing::stest!(name = test_task_registry_live_cap, suite = sched_core);
+slopos_testing::stest!(
+    name = test_task_guard_pins_terminated_task,
+    suite = sched_core
+);
 slopos_testing::stest!(name = test_rapid_create_destroy_cycle, suite = sched_core);
 slopos_testing::stest!(
     name = test_task_handle_stale_after_reuse,
@@ -4475,10 +4368,7 @@ slopos_testing::stest!(name = test_fork_exit_wait_stress_10x100, suite = sched_c
 slopos_testing::stest!(name = test_serial_reap_stampede, suite = sched_core);
 slopos_testing::stest!(name = test_cross_priority_wait, suite = sched_core);
 slopos_testing::stest!(name = test_effective_load_accuracy, suite = sched_core);
-slopos_testing::stest!(
-    name = test_waitpid_survives_concurrent_slot_reuse,
-    suite = sched_core
-);
+slopos_testing::stest!(name = test_waitpid_survives_task_churn, suite = sched_core);
 slopos_testing::stest!(
     name = test_orphan_child_auto_reaped_on_parent_exit,
     suite = sched_core

@@ -148,9 +148,8 @@ impl<T> AtomicCell<T> {
     /// # Safety
     ///
     /// Caller must serialise externally with all readers and writers.
-    /// This is the slot-recycling primitive used by
-    /// `Task::reset_in_place`, where the task is provably
-    /// unreachable from any other CPU. Calling concurrently with
+    /// The owner must be provably unreachable from every other CPU.
+    /// Calling concurrently with
     /// [`try_get`], [`try_set`], or [`take`] is a use-after-free.
     pub unsafe fn reset(&self) {
         let ptr = self.raw.swap(core::ptr::null_mut(), Ordering::Release);

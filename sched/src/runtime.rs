@@ -10,8 +10,7 @@ use super::scheduler::{
 };
 use super::task::{
     INVALID_TASK_ID, TASK_FLAG_KERNEL_MODE, TASK_FLAG_SYSTEM, Task, TaskPriority, TaskStatus,
-    reap_zombies, task_create, task_get_info, task_has_flag, task_sched_placement_store,
-    task_set_status, task_terminate,
+    task_create, task_has_flag, task_sched_placement_store, task_set_status, task_terminate,
 };
 use super::work_steal::try_work_steal;
 use slopos_ostd::task::SchedPlacement;
@@ -142,12 +141,13 @@ impl KernelThreadSpawner for KernelThreadSpawnerImpl {
         if task_id == INVALID_TASK_ID {
             return Err(SpawnError::OutOfTaskIds);
         }
-        let mut task_ptr: *mut Task = core::ptr::null_mut();
-        if task_get_info(task_id, &mut task_ptr) != 0 || task_ptr.is_null() {
+        // Hold the registry guard across publication so the raw projection
+        // cannot be invalidated by a concurrent terminate.
+        let Some(task) = crate::task::task_find_by_id(task_id) else {
             let _ = task_terminate(task_id);
             return Err(SpawnError::OutOfTaskIds);
-        }
-        if publish_new_task(task_ptr) != 0 {
+        };
+        if publish_new_task(task.as_ptr()) != 0 {
             let _ = task_terminate(task_id);
             return Err(SpawnError::ScheduleFailed);
         }
@@ -304,10 +304,10 @@ pub fn create_idle_task_for_cpu(cpu_id: usize) -> c_int {
     if idle_task_id == INVALID_TASK_ID {
         return -1;
     }
-    let mut idle_task: *mut Task = ptr::null_mut();
-    if task_get_info(idle_task_id, &mut idle_task) != 0 {
+    let Some(idle_guard) = crate::task::task_find_by_id(idle_task_id) else {
         return -1;
-    }
+    };
+    let idle_task = idle_guard.as_ptr();
 
     super::task::task_install_idle_affinity(
         idle_task,
@@ -553,6 +553,7 @@ fn scheduler_loop(cpu_id: usize, idle_task: *mut Task) -> ! {
         let dispatched = run_ready_task_from_idle(cpu_id, idle_task);
         slopos_arch::cpu::restore_flags(irq_flags);
         let _ = crate::scheduler::drain_previous_task();
+        crate::scheduler::drain_deferred_task_reclaim();
         if dispatched {
             continue;
         }
@@ -561,13 +562,11 @@ fn scheduler_loop(cpu_id: usize, idle_task: *mut Task) -> ! {
             continue;
         }
 
-        reap_zombies();
-
         // Belt-and-braces: re-enqueue any task stranded READY with no
         // runqueue entry (a lost-enqueue race would otherwise freeze it
         // forever — see `rescue_stranded_ready_tasks`). Runs only when this
         // CPU is fully idle (nothing to run, nothing to steal), so the
-        // pool walk costs idle time only.
+        // registry walk costs idle time only.
         crate::scheduler::rescue_stranded_ready_tasks();
 
         // idle_time is now incremented per-tick in scheduler_timer_tick(),

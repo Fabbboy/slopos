@@ -197,11 +197,58 @@ W1 verification:
   syscall/mm/fs/driver boundaries were re-reviewed. No confidence-scored or
   CVSS-eligible finding was produced; `CVSS.md` is unchanged.
 
-**W2 — Registry.** `TaskRegistry` with `KWeak` values, monotonic `u64` ids,
-`Handle` resolution via upgrade, live-task cap. Port `task_find_by_id`,
-`task_resolve_handle`, `task_find_by_cr3` and audit every caller's execution
-context. The pool, `reserve_task_slot`, `reap_zombies`, and `reset_in_place`
-are deleted in this workstream.
+**W2 — Registry (complete 2026-07-10).** The permanent pool is gone: tasks
+are individually `KArc::try_init`-allocated and the pool, `reserve_task_slot`,
+`reap_zombies`, `reset_in_place`, generation identity, `slot_index`, and the
+`ZombieList`/`zombie_link` are deleted. `TaskRegistry` is a pre-reserved
+`MAX_TASKS` slot spine (allocated once outside the manager lock, never
+grown) whose slots hold `RegistryEntry { id, KWeak, KArc }`: the weak handle
+serves lookups, the strong handle is the transitional scheduler-lifetime
+owner W3 moves into placement containers. Every mutation under the
+cli-spinlock is a plain slot write — registration and retirement allocate
+nothing under the lock, and removed handles drop off-lock — so the buddy's
+LUF reuse drain can never deadlock against the registry lock. Ids are
+monotonic non-reused `u64` (public width stays `u32`; exhaustion is a
+permanent failure, not a wrap); `Handle` generation is permanently zero and
+resolution is the same weak upgrade as id lookup. `task_find_by_id`,
+`task_resolve_handle`, and `task_find_by_cr3` all return a liveness-checked
+`TaskRef` guard; lookup is weak-upgrade only (I6). A dead task's spine slot
+is reclaimed by the last releaser's `TaskRef`/`task_release_ref` drop; when
+that release lands in a context that cannot run the allocator-heavy `Task`
+destructor (IRQs off or a tracked lock held), a one-shot latch defers the
+retirement to the idle dispatcher's off-lock drain, so no terminated task
+strands. Both the concurrent-task cap and the id space preserve the pool's
+old DoS bound (spawn fails fallibly at either limit). Every migrated
+lookup caller holds its `TaskRef` across the raw-pointer window
+(`scheduler.rs`, `runtime.rs`, `kthread.rs`, `exec`, syscall handlers, the
+user-fault path).
+
+W2 verification:
+
+- New/rewritten kernel `stest!`s: weak upgrade returns `None` after death, a
+  held guard pins a terminated task until its final drop, ids advance and
+  never reuse across a 1000-task stampede, the concurrent-task cap rejects
+  without consuming an id or a spine slot, and the handle path never aliases
+  a later id. 110 `slopos_sched` tests, 16 context tests, 127 core-syscall
+  tests, and 45 process/signal/exec tests pass.
+- `just build`, the tests-enabled kernel build, all framekernel gates
+  (`check_unsafe_outside_ostd`, `check_stack_sizes`, `check_kernel_softfloat`,
+  `check_alloc_dep`, `check_drop_panic_free`, `check_wait_predicate_purity`),
+  all 82 Verus obligations, the OSTD host suite, and the OSTD Miri suite pass.
+  The TCB ratio is 0.527%, below both targets.
+- End-to-end: the production kernel boots to userland and spawns `/sbin/init`
+  plus the shell through the registry with no fault.
+- The full 2648-test kernel phase cannot complete on this host because of a
+  pre-existing panic-recovery/unwinder NMI-watchdog interaction (deliberate
+  panic in `test_run_recoverable_cleanup` runs the DWARF unwinder long enough
+  to trip the cross-CPU watchdog). An A/B run of the same filter against the
+  pre-W2 baseline reproduces the identical panic, confirming it is not a W2
+  regression.
+- Security triage raw findings: `task_find_by_cr3` guard drops under the
+  registry lock, the `task_release_ref` pre-decrement status/id capture, the
+  deferred-reclaim latch, id monotonicity/exhaustion, and the spine
+  circular-scan bound were all reviewed. No finding reached the confidence-80
+  threshold; `CVSS.md` is unchanged.
 
 **W3 — Scheduler ownership flip.** Placement state machine carries the owning
 ref (I2): ReadyQueue, remote-wake inbox (Treiber push moves a strong ref;
@@ -219,9 +266,12 @@ slot; TTY hangup and futex cleanup keep their ordering but hold typed refs.
 `task_inc_ref`/`task_dec_ref`, `TaskRefGuard`, every `KernelSync<*mut Task>`,
 and generation identity. Acceptance greps below must return zero hits.
 
-W1 is complete. W2 remains independent of the ownership flip and lands next
-with its own tests; W3–W5 are the rip-and-replace and land as one coherent
-series.
+W0–W2 are complete. The registry is weak-only with a transitional
+scheduler-lifetime strong owner per task; the placement containers, remote
+inbox, `WAIT_REFS`, and dispatch path still move ownership through the legacy
+`refcnt` (`task_inc_ref`/`task_release_ref`), which W3 replaces by moving the
+owning `KArc<Task>` into the placement state machine. W3–W5 are the
+rip-and-replace and land as one coherent series.
 
 ## Acceptance
 
@@ -244,12 +294,17 @@ series.
   upgrade-vs-drop races, DST coercion, raw round trips, and uniqueness under
   host tests and Miri). W1 coverage is complete (the deferred slot drains
   exactly once; host/Miri fault injection exercises the lock/IRQ assertions).
-  Add coverage for W2 (upgrade returns `None` after death; id non-reuse; cap
-  behavior) and W3 (placement transitions move ownership exactly once;
-  double-insert CAS-rejected).
-- Torture: existing spawn/kill stress (`mm_stress_test`, `ctrlc_flood_test`,
-  strand sweep) plus a dedicated spawn-exit-waitpid churn test asserting
-  memory returns (allocator watermark) — the property the pool never had.
+  W2 coverage is complete (upgrade returns `None` after death; a held guard
+  pins a terminated task until its final drop; id non-reuse across a
+  1000-task stampede; the cap rejects without consuming an id or slot; the
+  handle path never aliases a later id). W3 still needs its coverage
+  (placement transitions move ownership exactly once; double-insert
+  CAS-rejected).
+- Torture: the rewritten kernel churn tests (`test_serial_reap_stampede`,
+  `test_fork_exit_wait_stress_10x100`, `test_task_wait_exit_race_1000`) now
+  assert that a destroyed task stops upgrading — the memory-actually-returns
+  property the pool never had. Userland spawn/kill stress (`mm_stress_test`,
+  `ctrlc_flood_test`) and the strand sweep remain.
 - The lost-wake regression suite must stay green: wake paths change ownership
   plumbing but not the ttwu-style totality loop semantics.
 

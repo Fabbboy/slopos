@@ -233,7 +233,7 @@ define_syscall!(syscall_kill
     let mut targets = TargetSet::new();
     if pid > 0 {
         let target_id = pid as u32;
-        if task_find_by_id(target_id).is_null() {
+        if task_find_by_id(target_id).is_none() {
             return SyscallResult::Err(Errno::ESRCH);
         }
         targets.push(target_id);
@@ -241,11 +241,10 @@ define_syscall!(syscall_kill
         if caller_id == INVALID_TASK_ID {
             return SyscallResult::Err(Errno::ESRCH);
         }
-        let caller = task_find_by_id(caller_id);
-        if caller.is_null() {
+        let Some(caller) = task_find_by_id(caller_id) else {
             return SyscallResult::Err(Errno::ESRCH);
-        }
-        let caller_pgid = task_pgid(caller).unwrap_or(INVALID_TASK_ID);
+        };
+        let caller_pgid = task_pgid(caller.as_ptr()).unwrap_or(INVALID_TASK_ID);
         if caller_pgid == INVALID_TASK_ID {
             return SyscallResult::Err(Errno::ESRCH);
         }
@@ -282,10 +281,10 @@ define_syscall!(syscall_kill
     let mut caller_terminated = false;
 
     for target_id in targets.iter() {
-        let target = task_find_by_id(*target_id);
-        if target.is_null() {
+        let Some(target) = task_find_by_id(*target_id) else {
             continue;
-        }
+        };
+        let target_ptr = target.as_ptr();
 
         if signum == SIGKILL {
             if task_terminate(*target_id) == 0 {
@@ -299,8 +298,8 @@ define_syscall!(syscall_kill
 
         // POSIX: kill() succeeds even when the disposition discards the
         // signal — only the wake is skipped for a send-time drop.
-        if task_signal_post(target, signum) {
-            let _ = unblock_task(target);
+        if task_signal_post(target_ptr, signum) {
+            let _ = unblock_task(target_ptr);
         }
         signaled += 1;
     }

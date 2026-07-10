@@ -767,10 +767,10 @@ fn try_handle_page_fault(frame: *mut slopos_arch::InterruptFrame) -> bool {
         }
         return false;
     }
-    let task_ptr = resolve_user_fault_task();
-    if task_ptr.is_null() {
+    let Some(task_ref) = resolve_user_fault_task() else {
         return false;
-    }
+    };
+    let task_ptr = task_ref.as_ptr();
     let pid = task_process_id(task_ptr).unwrap_or(0);
     let tid = task_id_of(task_ptr).unwrap_or(0);
 

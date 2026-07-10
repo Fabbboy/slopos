@@ -8,8 +8,10 @@ fn with_task<F, R>(task_id: u32, f: F) -> c_int
 where
     F: FnOnce(&mut Task) -> R,
 {
-    let task = task_find_by_id(task_id);
-    let Some(t) = crate::task::task_borrow_mut(task) else {
+    let Some(task) = task_find_by_id(task_id) else {
+        return -1;
+    };
+    let Some(t) = crate::task::task_borrow_mut(task.as_ptr()) else {
         return -1;
     };
     f(t);

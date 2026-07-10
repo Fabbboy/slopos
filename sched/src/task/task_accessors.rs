@@ -12,7 +12,7 @@ use super::task_table::{task_find_by_id, task_pointer_is_valid};
 /// Validate the pointer through [`task_pointer_is_valid`]. Wraps the
 /// downstream null/whitelist check so callers can short-circuit
 /// before touching any field. Kernel-side because
-/// `task_pointer_is_valid` reaches the kernel's task pool.
+/// `task_pointer_is_valid` reaches the kernel task registry.
 #[inline]
 pub fn task_validate(task: *const Task) -> Option<*const Task> {
     if task.is_null() {
@@ -24,16 +24,15 @@ pub fn task_validate(task: *const Task) -> Option<*const Task> {
     }
 }
 
-/// Override the `parent_task_id` for a slot by task_id. Returns 0 on
-/// success, -1 if the slot cannot be located. Kernel-side because
-/// `task_find_by_id` reaches the kernel's task pool. The unsafe
+/// Override the `parent_task_id` for a task by ID. Returns 0 on success,
+/// -1 if the task cannot be located. Kernel-side because
+/// `task_find_by_id` reaches the kernel registry. The unsafe
 /// field-write lives inside OSTD via
 /// [`task_set_parent_task_id`](slopos_ostd::task::accessors::task_set_parent_task_id).
 pub fn task_set_parent(task_id: u32, parent_task_id: u32) -> core::ffi::c_int {
-    let task = task_find_by_id(task_id);
-    if task.is_null() {
+    let Some(task) = task_find_by_id(task_id) else {
         return -1;
-    }
-    slopos_ostd::task::accessors::task_set_parent_task_id(task, parent_task_id);
+    };
+    slopos_ostd::task::accessors::task_set_parent_task_id(task.as_ptr(), parent_task_id);
     0
 }

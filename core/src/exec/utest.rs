@@ -19,15 +19,17 @@ use slopos_testing::{TestDesc, TestResult, ktap};
 use crate::exec::{FdAction, spawn_program_with_attrs};
 use slopos_sched::scheduler::scheduler_get_current_task;
 use slopos_sched::scheduler::{sleep_current_task_ms, task_wait_for};
-use slopos_sched::task::{task_consume_zombie, task_find_by_id, task_peek_exit_info};
+use slopos_sched::task::{
+    task_consume_zombie, task_find_by_id_raw_for_test as task_find_by_id, task_peek_exit_info,
+};
 use slopos_sched::test_reports::{
     PendingDrain, TestReport, consume_pending_drain, pending_drain_present,
 };
 
 /// Per-utest entry point installed in every `TestDesc::run` produced by the
 /// [`utest!`](crate::utest) macro. Spawns the binary, waits for it to
-/// terminate, drains its `SYSCALL_TEST_REPORT` ring via the slot-lifecycle-
-/// independent pending-drain cache, emits one indented KTAP subtest line
+/// terminate, drains its `SYSCALL_TEST_REPORT` ring via the
+/// lifetime-independent pending-drain cache, emits one indented KTAP subtest line
 /// per report, then rolls up to a parent outcome.
 ///
 /// Wrapped in `catch_panic!` so a kernel-side panic inside spawn / wait /

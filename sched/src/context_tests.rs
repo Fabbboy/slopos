@@ -13,8 +13,8 @@ use slopos_testing::{TestResult, assert_eq_test, assert_not_null, assert_test};
 
 use super::scheduler::save_task_context_from_interrupt_frame;
 use super::task::{
-    MAX_TASKS, task_create, task_find_by_id, task_get_info, task_set_state, task_status,
-    task_terminate,
+    MAX_TASKS, task_create, task_find_by_id_raw_for_test as task_find_by_id, task_get_info,
+    task_set_state, task_status, task_terminate,
 };
 use super::task_struct::TaskContext;
 use super::test_fixture::KernelTestScope;

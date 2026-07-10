@@ -258,8 +258,7 @@ define_syscall!(syscall_waitpid
     }
 
     if wnohang {
-        let slot = task_find_by_id(target_id);
-        return if slot.is_null() {
+        return if task_find_by_id(target_id).is_none() {
             Err(Errno::ECHILD)
         } else {
             Err(Errno::EAGAIN)
@@ -460,10 +459,10 @@ define_syscall!(syscall_set_cpu_affinity
     -> Result<(), Errno>
 {
     let resolved = if target == 0 { task_id } else { target };
-    let task_ptr = task_find_by_id(resolved);
-    if task_ptr.is_null() {
+    let Some(task_ref) = task_find_by_id(resolved) else {
         return Err(Errno::ESRCH);
-    }
+    };
+    let task_ptr = task_ref.as_ptr();
     task_set_cpu_affinity(task_ptr, new_affinity);
     Ok(())
 });
@@ -474,10 +473,10 @@ define_syscall!(syscall_get_cpu_affinity
     -> Result<u64, Errno>
 {
     let resolved = if target == 0 { task_id } else { target };
-    let task_ptr = task_find_by_id(resolved);
-    if task_ptr.is_null() {
+    let Some(task_ref) = task_find_by_id(resolved) else {
         return Err(Errno::ESRCH);
-    }
+    };
+    let task_ptr = task_ref.as_ptr();
     Ok(task_cpu_affinity(task_ptr).unwrap_or(0) as u64)
 });
 
@@ -499,10 +498,10 @@ define_syscall!(syscall_getpgid
     -> Result<u32, Errno>
 {
     let resolved = if target == 0 { task_id } else { target };
-    let task_ptr = task_find_by_id(resolved);
-    if task_ptr.is_null() {
+    let Some(task_ref) = task_find_by_id(resolved) else {
         return Err(Errno::ESRCH);
-    }
+    };
+    let task_ptr = task_ref.as_ptr();
     Ok(task_pgid(task_ptr).unwrap_or(0))
 });
 
@@ -514,11 +513,17 @@ define_syscall!(syscall_setpgid
     let resolved_pid = if pid == 0 { task_id } else { pid };
     let resolved_pgid = if pgid_arg == 0 { resolved_pid } else { pgid_arg };
 
-    let caller_ptr = task_find_by_id(task_id);
-    let target_ptr = task_find_by_id(resolved_pid);
-    if caller_ptr.is_null() || target_ptr.is_null() || resolved_pgid == 0 {
+    let Some(caller_ref) = task_find_by_id(task_id) else {
+        return Err(Errno::EINVAL);
+    };
+    let Some(target_ref) = task_find_by_id(resolved_pid) else {
+        return Err(Errno::EINVAL);
+    };
+    if resolved_pgid == 0 {
         return Err(Errno::EINVAL);
     }
+    let caller_ptr = caller_ref.as_ptr();
+    let target_ptr = target_ref.as_ptr();
 
     let caller = task_borrow(caller_ptr).ok_or(Errno::EINVAL)?;
     let caller_sid = caller.sid;
@@ -544,10 +549,10 @@ define_syscall!(syscall_setpgid
         }
     } else {
         // Join an existing group: its leader must exist and share the session.
-        let leader_ptr = task_find_by_id(resolved_pgid);
-        if leader_ptr.is_null() {
+        let Some(leader_ref) = task_find_by_id(resolved_pgid) else {
             return Err(Errno::EINVAL);
-        }
+        };
+        let leader_ptr = leader_ref.as_ptr();
         let leader = task_borrow(leader_ptr).ok_or(Errno::EINVAL)?;
         if leader.sid != caller_sid {
             return Err(Errno::EINVAL);
@@ -564,10 +569,10 @@ define_syscall!(syscall_setsid (ctx)
     requires(let task_id: task_id)
     -> Result<u32, Errno>
 {
-    let task_ptr = task_find_by_id(task_id);
-    if task_ptr.is_null() {
+    let Some(task_ref) = task_find_by_id(task_id) else {
         return Err(Errno::EINVAL);
-    }
+    };
+    let task_ptr = task_ref.as_ptr();
     let task = task_borrow_mut(task_ptr).ok_or(Errno::EINVAL)?;
     if task.pgid == task.task_id || task.sid == task.task_id {
         return Err(Errno::EPERM);
@@ -713,10 +718,10 @@ define_syscall!(syscall_vhangup (ctx)
     requires(let task_id: task_id)
     -> Result<(), Errno>
 {
-    let task_ptr = task_find_by_id(task_id);
-    if task_ptr.is_null() {
+    let Some(task_ref) = task_find_by_id(task_id) else {
         return Err(Errno::EINVAL);
-    }
+    };
+    let task_ptr = task_ref.as_ptr();
     let task = task_borrow(task_ptr).ok_or(Errno::EINVAL)?;
     let ctty = match task.controlling_tty {
         Some(idx) => idx,

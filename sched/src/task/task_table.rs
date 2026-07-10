@@ -1,245 +1,232 @@
 use core::ffi::{c_int, c_void};
-use core::ptr::{self, NonNull};
-use core::sync::atomic::{AtomicU32, Ordering};
+use core::ops::Deref;
+use core::ptr;
+use core::sync::atomic::{AtomicBool, Ordering};
 
 use slopos_ostd::handle::Handle;
 use slopos_ostd::string::bytes_as_str;
-use slopos_ostd::sync::intrusive::IntrusiveLinkedList;
-use slopos_ostd::sync::{KernelSync, LOCK_LEVEL_REGISTRY, SpinLock};
-use slopos_ostd::{KBox, KVec};
+use slopos_ostd::sync::{KernelSync, LOCK_LEVEL_REGISTRY, SpinLock, held_lock_count};
+use slopos_ostd::{KArc, KVec, KWeak};
 use slopos_ostd::{klog_debug, klog_info};
 
-use super::task_accessors::{task_id_of, task_ref_count};
-use super::{INVALID_TASK_ID, Task, TaskIterateCb, TaskStatus};
+use super::task_accessors::task_id_of;
+use super::{INVALID_TASK_ID, MAX_TASKS, Task, TaskIterateCb, TaskStatus};
 use crate::exit_info::ExitInfo;
 use crate::scheduler;
 
-/// Concurrent task capacity, matching the kernel-stack VA region cap in
-/// `mm/src/memory_layout_defs.rs` — every live task owns a KSTACK VA
-/// slot, so the task pool cannot usefully exceed the number of KSTACK
-/// slots. Growing beyond this requires expanding the KSTACK VA window.
-pub const TASK_POOL_CAPACITY: usize = 8192;
-
-// =============================================================================
-// Zombie List for Deferred Task Reclamation
-// =============================================================================
-
-/// List of terminated tasks waiting for the zombie reaper to reset them
-/// once `refcnt == 0`. Protected by `SpinLock` for interrupt safety.
-/// The `KVec` is pre-reserved to `TASK_POOL_CAPACITY` at init time so
-/// pushes never allocate under the lock.
-static ZOMBIE_LIST: SpinLock<ZombieList> = SpinLock::new(ZombieList::new(), LOCK_LEVEL_REGISTRY);
-
-/// High-water mark of pool-slot indices that have ever been populated
-/// with a `KBox<Task>`. Monotonically increases; only written in
-/// tier-3 of [`reserve_task_slot`] when a fresh slot is allocated past
-/// the current HWM. Iteration bounds (`reserve_task_slot` tier scans,
-/// `task_find_by_id`, `task_find_by_cr3`, `task_iterate_active`,
-/// `task_slot_census`) load this with `Acquire` and only walk
-/// `0..hwm` — O(peak-concurrent-tasks) rather than
-/// O(`TASK_POOL_CAPACITY`). Because slots never transition `Some →
-/// None` during normal operation, the HWM is a safe upper bound: any
-/// live pointer lives at an index strictly below `hwm`, and
-/// lower-indexed `None` slots are simply harmless skips.
-static POOL_HIGH_WATER: AtomicU32 = AtomicU32::new(0);
-
-#[inline]
-pub(super) fn pool_high_water() -> usize {
-    POOL_HIGH_WATER.load(Ordering::Acquire) as usize
-}
-
-#[inline]
-fn bump_pool_high_water(new_idx: usize) {
-    let new_hwm = (new_idx as u32).saturating_add(1);
-    let mut cur = POOL_HIGH_WATER.load(Ordering::Relaxed);
-    while cur < new_hwm {
-        match POOL_HIGH_WATER.compare_exchange_weak(
-            cur,
-            new_hwm,
-            Ordering::Release,
-            Ordering::Relaxed,
-        ) {
-            Ok(_) => break,
-            Err(observed) => cur = observed,
-        }
-    }
-}
-
-/// Deferred-reaper queue holding terminated tasks until their
-/// refcount drops to zero.
+/// Strong task reference returned by registry lookups.
 ///
-/// Role tag for the zombie-list intrusive list. Threads through
-/// `Task::zombie_link`, distinct from the per-CPU `ReadyQueue`'s
-/// link slot — see `Task::ready_link`. Defined in OSTD so the
-/// generic `TaskInner<K, U>` can `impl LinkProvider` against it
-/// without OSTD reaching into `core/`.
-pub use slopos_ostd::task::link_roles::ZombieListRole;
-
-/// Allocation-free: `IntrusiveLinkedList::push` only updates the
-/// in-Task link slot; no heap touched while the spin-lock is held.
-struct ZombieList {
-    list: KernelSync<IntrusiveLinkedList<Task, ZombieListRole>>,
+/// The registry stores only `KWeak<Task>`; constructing this guard is the one
+/// liveness-checked weak upgrade path. The raw pointer escape is transitional
+/// scheduler plumbing and remains valid for exactly the lifetime of this
+/// guard (or of another owning reference).
+pub struct TaskRef {
+    arc: Option<KArc<Task>>,
 }
 
-impl ZombieList {
-    const fn new() -> Self {
-        Self {
-            list: KernelSync::new(IntrusiveLinkedList::new()),
-        }
+impl TaskRef {
+    #[inline]
+    fn new(arc: KArc<Task>) -> Self {
+        Self { arc: Some(arc) }
     }
 
-    /// Best-effort push. If the task's link slot is unexpectedly
-    /// non-null (would indicate a residual ReadyQueue membership),
-    /// the underlying `push` returns `AlreadyLinked` and we log
-    /// rather than corrupt either list. The slot stays `Terminated`
-    /// and will be reclaimed by a `reserve_task_slot` tier-2 scan
-    /// once `refcnt == 0`, matching the legacy floor-drop semantics.
-    fn push(&self, task: *mut Task) {
-        let Some(node) = NonNull::new(task) else {
+    #[inline]
+    pub fn as_ptr(&self) -> *mut Task {
+        KArc::as_ptr(self.arc.as_ref().expect("live TaskRef")) as *mut Task
+    }
+}
+
+impl Clone for TaskRef {
+    fn clone(&self) -> Self {
+        Self::new(self.arc.as_ref().expect("live TaskRef").clone())
+    }
+}
+
+impl Deref for TaskRef {
+    type Target = Task;
+
+    fn deref(&self) -> &Task {
+        self.arc.as_ref().expect("live TaskRef")
+    }
+}
+
+impl PartialEq for TaskRef {
+    fn eq(&self, other: &Self) -> bool {
+        KArc::ptr_eq(
+            self.arc.as_ref().expect("live TaskRef"),
+            other.arc.as_ref().expect("live TaskRef"),
+        )
+    }
+}
+
+impl Eq for TaskRef {}
+
+impl Drop for TaskRef {
+    fn drop(&mut self) {
+        let Some(arc) = self.arc.take() else {
             return;
         };
-        if self.list.push(node).is_err() {
-            klog_info!("zombie_list: push failed, leaving task in Terminated state");
+        let id = arc.task_id;
+        let terminated = arc.status() == TaskStatus::Terminated;
+        drop(arc);
+
+        // A lookup may be the last strong reference besides the temporary
+        // scheduler-lifetime owner. Retire that owner (or, from contexts in
+        // which Task's allocator-heavy destructor may not run, arm the idle
+        // dispatcher's deferred retry).
+        if terminated {
+            let _ = task_try_reclaim_id(id);
         }
+    }
+}
+
+/// One registered task. Lookups upgrade `weak`; `owner` is the transitional
+/// scheduler-lifetime strong reference, held here until the scheduler's
+/// placement containers take ownership, after which the registry is
+/// weak-only.
+struct RegistryEntry {
+    id: u32,
+    weak: KWeak<Task>,
+    owner: KArc<Task>,
+}
+
+/// Weak-upgrade liveness index over a pre-reserved slot spine.
+///
+/// IDs are never recycled, so `RegistryEntry::id` is the stable identity and
+/// no parallel slot-generation scheme exists — array slots are reused, IDs
+/// are not. The spine is allocated once outside the manager lock
+/// ([`ensure_registry_allocated`]) and never grows: every mutation under the
+/// cli-spinlock is a plain slot write, so registration and retirement never
+/// touch the heap while the lock is held (the buddy's LUF reuse drain is a
+/// hidden cross-CPU wait; allocating under a cli-lock is the known
+/// slab/LUF deadlock).
+struct TaskRegistry {
+    slots: KVec<Option<KernelSync<RegistryEntry>>>,
+    /// Occupied-slot count.
+    live: usize,
+    /// Monotone scan bound: one past the highest slot ever occupied, so
+    /// lookups walk O(peak concurrent tasks), not O(capacity).
+    high_water: usize,
+    /// First-free search hint; insertion scans circularly from here.
+    free_hint: usize,
+}
+
+impl TaskRegistry {
+    const fn new() -> Self {
+        Self {
+            slots: KVec::new(),
+            live: 0,
+            high_water: 0,
+            free_hint: 0,
+        }
+    }
+
+    fn is_allocated(&self) -> bool {
+        !self.slots.is_empty()
+    }
+
+    /// Adopt a pre-filled spine. Returns the spine back to the caller (for
+    /// an off-lock drop) when a racing allocation already installed one.
+    fn install(
+        &mut self,
+        spine: KVec<Option<KernelSync<RegistryEntry>>>,
+    ) -> Option<KVec<Option<KernelSync<RegistryEntry>>>> {
+        if self.is_allocated() {
+            return Some(spine);
+        }
+        self.slots = spine;
+        None
+    }
+
+    fn find(&self, id: u32) -> Option<&RegistryEntry> {
+        if id == INVALID_TASK_ID {
+            return None;
+        }
+        self.slots[..self.high_water]
+            .iter()
+            .flatten()
+            .map(KernelSync::get)
+            .find(|entry| entry.id == id)
+    }
+
+    fn get(&self, id: u32) -> Option<TaskRef> {
+        self.find(id)?.weak.upgrade().map(TaskRef::new)
+    }
+
+    /// Store `entry` in a free slot. On a full (or uninstalled) spine the
+    /// entry is handed back so the caller can drop its handles off-lock.
+    fn insert(&mut self, entry: RegistryEntry) -> Result<(), RegistryEntry> {
+        let capacity = self.slots.len();
+        if capacity == 0 || self.live == capacity {
+            return Err(entry);
+        }
+        let start = self.free_hint.min(capacity - 1);
+        let mut idx = start;
+        let free = loop {
+            if self.slots[idx].is_none() {
+                break Some(idx);
+            }
+            idx = (idx + 1) % capacity;
+            if idx == start {
+                break None;
+            }
+        };
+        let Some(idx) = free else {
+            return Err(entry);
+        };
+        self.slots[idx] = Some(KernelSync::new(entry));
+        self.live += 1;
+        self.high_water = self.high_water.max(idx + 1);
+        self.free_hint = (idx + 1) % capacity;
+        Ok(())
+    }
+
+    /// Move an entry out of its slot. The caller owns the returned handles
+    /// and must drop them off-lock; the slot itself is reused in place.
+    fn remove(&mut self, id: u32) -> Option<RegistryEntry> {
+        if id == INVALID_TASK_ID {
+            return None;
+        }
+        let idx = self.slots[..self.high_water]
+            .iter()
+            .position(|slot| slot.as_ref().is_some_and(|entry| entry.get().id == id))?;
+        let entry = self.slots[idx].take()?;
+        self.live -= 1;
+        self.free_hint = idx;
+        Some(entry.into_inner())
     }
 
     fn len(&self) -> usize {
-        self.list.len()
+        self.live
     }
 
-    fn iter(&self) -> impl Iterator<Item = NonNull<Task>> + '_ {
-        self.list.iter()
+    fn iter(&self) -> impl Iterator<Item = (u32, TaskRef)> + '_ {
+        self.slots[..self.high_water]
+            .iter()
+            .flatten()
+            .map(KernelSync::get)
+            .filter_map(|entry| {
+                entry
+                    .weak
+                    .upgrade()
+                    .map(|arc| (entry.id, TaskRef::new(arc)))
+            })
     }
 
-    fn remove(&self, node: NonNull<Task>) -> bool {
-        self.list.remove(node).is_ok()
-    }
-}
-
-/// Add a terminated task to the zombie list for deferred cleanup.
-/// The task slot will be reset when its reference count reaches zero.
-pub(super) fn defer_task_cleanup(task: *mut Task) {
-    if task.is_null() {
-        return;
-    }
-    ZOMBIE_LIST.lock().push(task);
-}
-
-const ZOMBIE_REAP_BATCH: usize = 16;
-
-/// Free a task's kernel-mode stack without invalidating the task struct.
-///
-/// Dropping `task.kernel_stack = None` runs the `KernelStack::drop`
-/// handler: releases the VA slot and physical frames via the per-CPU
-/// kstack cache. All automatic; no manual `kfree`.
-///
-/// The slot remains in its current status (typically Terminated) so
-/// that `task_find_by_id` can still locate it for idempotent terminate
-/// calls.
-///
-/// User-space stacks live in the owning process's VM and are reclaimed
-/// by `destroy_process_vm`, not here.
-pub(super) fn free_task_stacks(task: *mut Task) {
-    // Drops the kernel/unsafe stack handles and zeroes the plain-u64
-    // mirrors; safe wrapper lives in `task_accessors`.
-    super::task_accessors::task_release_stacks(task);
-}
-
-pub(super) fn free_task_memory_and_invalidate(task: *mut Task) {
-    if task.is_null() {
-        return;
-    }
-    free_task_stacks(task);
-    super::task_accessors::task_reset_in_place(task);
-}
-
-/// Reap zombie tasks that are ready to be reset.
-/// Should be called periodically (e.g., from scheduler idle path).
-///
-/// Invariant: this does NOT drop the owning `KBox<Task>` — the pool
-/// keeps KBoxes alive until kernel shutdown so lock-free readers never
-/// observe a freed backing allocation. It only resets the Task struct
-/// in place (via `free_task_memory_and_invalidate`) so the slot becomes
-/// reusable for future allocations.
-///
-/// **Hot-path constraint**: this runs on every iteration of every
-/// CPU's scheduler idle loop, so the work MUST be bounded by the
-/// zombie-list length (typically a handful of entries) — never the
-/// pool size. Lazily-Terminated slots (tasks that skipped the zombie
-/// list because `refcnt == 0` at cleanup) are reclaimed on demand by
-/// tier-2 of [`reserve_task_slot`]; the pool can sit in a Terminated
-/// steady state between allocations without leaking anything (kstacks
-/// are released at termination via `free_task_stacks`, not at reset).
-pub fn reap_zombies() {
-    let list = ZOMBIE_LIST.lock();
-    if list.len() == 0 {
-        return;
-    }
-
-    // Two-pass: snapshot reapable nodes, then remove them. Walking
-    // `iter()` and removing in one pass would race the iterator's
-    // cursor (the freshly-removed node's `next` slot is cleared, so
-    // the iterator loses its successor). The on-stack scratch buffer
-    // is fixed-size (`ZOMBIE_REAP_BATCH`) so the spinlock is held
-    // for an O(handful) window per call — exactly the bound the
-    // function's hot-path comment promises.
-    let mut to_reap: [Option<NonNull<Task>>; ZOMBIE_REAP_BATCH] = [None; ZOMBIE_REAP_BATCH];
-    let mut count = 0usize;
-    for node in list.iter() {
-        if count >= ZOMBIE_REAP_BATCH {
-            break;
-        }
-        let raw = node.as_ptr();
-        if task_ref_count(raw) == Some(0) {
-            to_reap[count] = Some(node);
-            count += 1;
-        }
-    }
-
-    for slot in &to_reap[..count] {
-        let Some(node) = *slot else {
-            continue;
-        };
-        if !list.remove(node) {
-            continue;
-        }
-        let raw = node.as_ptr();
-        if let Some(id) = task_id_of(raw) {
-            klog_debug!("reap_zombies: resetting zombie task {}", id);
-        }
-        free_task_memory_and_invalidate(raw);
+    fn owns_pointer(&self, task: *const Task) -> bool {
+        self.slots[..self.high_water]
+            .iter()
+            .flatten()
+            .any(|entry| core::ptr::eq(KArc::as_ptr(&entry.get().owner), task))
     }
 }
-
-// =============================================================================
-// TaskManagerInner — dynamic heap-backed task pool
-// =============================================================================
 
 pub(super) struct TaskManagerInner {
-    /// Fixed-capacity pool of task slots. The backing `KVec` is
-    /// pre-reserved to `TASK_POOL_CAPACITY` at `init_task_manager`
-    /// time and never reallocates afterwards, so pointers into slot
-    /// bodies (held by the scheduler, ready queues, per-CPU
-    /// current-task caches, assembly switch routines) remain valid for
-    /// each Task's lifetime.
-    ///
-    /// Each slot is one of:
-    /// - `None`: pristine, never allocated a Task (tier-3 target).
-    /// - `Some(kbox)` with `status == Invalid`: reusable (tier-1 target).
-    /// - `Some(kbox)` with `status == Terminated` and `refcnt == 0`:
-    ///   reap candidate (tier-2 target).
-    /// - `Some(kbox)` with any live status: in-use.
-    ///
-    /// A slot never transitions `Some → None` during normal operation.
-    /// The `KBox` lives until kernel shutdown; recycling happens via
-    /// `Task::reset_in_place` on the KBox's contents.
-    pub(super) tasks: KernelSync<KVec<Option<KBox<Task>>>>,
+    registry: TaskRegistry,
     pub(super) num_tasks: u32,
-    pub(super) next_task_id: u32,
-    /// Monotonic source of per-slot generations. Each slot reservation
-    /// draws a fresh value, so a [`Handle`] minted for a prior occupant
-    /// of a recycled slot resolves to a typed staleness error.
-    pub(super) next_generation: u64,
+    /// Monotonic, non-wrapping allocator. The stored/public ID remains `u32`;
+    /// exhaustion is a permanent allocation failure rather than reuse.
+    pub(super) next_task_id: u64,
     pub(super) total_context_switches: u64,
     pub(super) total_yields: u64,
     pub(super) tasks_created: u32,
@@ -250,10 +237,9 @@ pub(super) struct TaskManagerInner {
 impl TaskManagerInner {
     const fn new() -> Self {
         Self {
-            tasks: KernelSync::new(KVec::new()),
+            registry: TaskRegistry::new(),
             num_tasks: 0,
             next_task_id: 1,
-            next_generation: 1,
             total_context_switches: 0,
             total_yields: 0,
             tasks_created: 0,
@@ -262,26 +248,12 @@ impl TaskManagerInner {
         }
     }
 
-    /// Iterate every occupied pool slot, yielding `&Task`. Skips `None`
-    /// entries. Does not filter by status — callers interested in
-    /// only-live or only-active tasks must check `task.status()`.
-    ///
-    /// Scan bound is the global pool high-water mark (slots that have
-    /// ever been populated), not the full spine length — crucial for
-    /// latency on hot paths under the manager lock.
-    pub(super) fn iter_tasks(&self) -> impl Iterator<Item = &Task> + '_ {
-        let bound = pool_high_water().min(self.tasks.len());
-        self.tasks[..bound]
-            .iter()
-            .filter_map(|slot| slot.as_deref())
+    pub(super) fn iter_tasks(&self) -> impl Iterator<Item = TaskRef> + '_ {
+        self.registry.iter().map(|(_, task)| task)
     }
 
-    /// Mutable variant of [`Self::iter_tasks`].
-    pub(super) fn iter_tasks_mut(&mut self) -> impl Iterator<Item = &mut Task> + '_ {
-        let bound = pool_high_water().min(self.tasks.len());
-        self.tasks[..bound]
-            .iter_mut()
-            .filter_map(|slot| slot.as_deref_mut())
+    pub(super) fn iter_tasks_mut(&mut self) -> impl Iterator<Item = TaskRef> + '_ {
+        self.registry.iter().map(|(_, task)| task)
     }
 }
 
@@ -304,490 +276,457 @@ pub(super) fn try_with_task_manager<R>(f: impl FnOnce(&mut TaskManagerInner) -> 
     }
 }
 
-/// Ensure the task-manager pool spines are allocated. Safe to call
-/// multiple times — only the first invocation performs the big
-/// allocations; subsequent calls are cheap no-ops.
-///
-/// APs bring their per-CPU idle task up during the Drivers boot phase
-/// (`smp` init step, priority 45), while `init_task_manager` itself
-/// is scheduled in the Services phase (priority 20 — runs *after*
-/// Drivers). This helper is invoked from any entry that might reach
-/// the pool before `init_task_manager` runs (notably
-/// `reserve_task_slot`), so AP idle-task creation succeeds regardless
-/// of where it lands in the boot ordering.
-fn ensure_pool_allocated() -> bool {
-    let already_sized = with_task_manager(|mgr| !mgr.tasks.is_empty());
-    if already_sized {
+#[inline]
+pub(super) fn task_registry_len() -> usize {
+    with_task_manager(|mgr| mgr.registry.len())
+}
+
+/// Allocate the registry spine outside the manager lock and install it if
+/// absent. A spine that loses the install race is dropped off-lock.
+fn ensure_registry_allocated() -> bool {
+    if with_task_manager(|mgr| mgr.registry.is_allocated()) {
         return true;
     }
-
-    // Allocate spines outside the lock.
-    let mut tasks: KVec<Option<KBox<Task>>> = match KVec::with_capacity(TASK_POOL_CAPACITY) {
-        Ok(v) => v,
+    let mut spine = match KVec::with_capacity(MAX_TASKS) {
+        Ok(spine) => spine,
         Err(_) => return false,
     };
-    for _ in 0..TASK_POOL_CAPACITY {
-        if tasks.push(None).is_err() {
+    for _ in 0..MAX_TASKS {
+        if spine.push(None).is_err() {
             return false;
         }
     }
-    // ZombieList no longer needs a heap pre-reservation: pushes go
-    // through `IntrusiveLinkedList::push`, which only mutates the
-    // in-Task link slot and never allocates.
-    // Install under the manager lock. Double-check emptiness in case
-    // another CPU raced us to init (single-CPU at this boot stage in
-    // practice, but stay race-safe).
-    let installed = with_task_manager(|mgr| {
-        if mgr.tasks.is_empty() {
-            mgr.tasks = KernelSync::new(tasks);
-            true
-        } else {
-            false
-        }
-    });
-    // Seeding the sleep queue here rather than inside init_task_manager
-    // means early IRQ paths that block with timeouts survive even if
-    // they're exercised before the service-phase init.
-    crate::sleep::init_sleep_queue();
-    if installed {
-        TASK_MANAGER.clear_poison();
-    }
-    // If a race lost, our freshly-allocated spines drop harmlessly.
+    let leftover = with_task_manager(|mgr| mgr.registry.install(spine));
+    drop(leftover);
     true
 }
 
-/// Initialise or re-initialise the task manager.
+#[inline]
+fn task_drop_context_is_safe() -> bool {
+    slopos_ostd::cpu::x86_64::interrupts::are_interrupts_enabled() && held_lock_count() == 0
+}
+
+fn drop_unregistered(entry: Option<(KWeak<Task>, KArc<Task>)>) {
+    let Some((weak, owner)) = entry else {
+        return;
+    };
+    slopos_ostd::task::drop_off_lock(weak);
+    slopos_ostd::task::drop_off_lock(owner);
+}
+
+fn remove_registration(id: u32, require_sole_owner: bool) -> Option<(KWeak<Task>, KArc<Task>)> {
+    with_task_manager(|mgr| {
+        if require_sole_owner && KArc::strong_count(&mgr.registry.find(id)?.owner) != 1 {
+            return None;
+        }
+        let entry = mgr.registry.remove(id)?;
+        Some((entry.weak, entry.owner))
+    })
+}
+
+/// Retire a terminated task once the legacy scheduler reference count and
+/// every upgraded registry guard are gone.
+pub(crate) fn task_try_reclaim(task: *mut Task) -> bool {
+    let Some(id) = task_id_of(task) else {
+        return false;
+    };
+    task_try_reclaim_id(id)
+}
+
+/// Release one reference held by the transitional scheduler containers and
+/// retire a terminated task when that was the final such reference.
 ///
-/// First-ever call allocates the pool spines (two `KVec`s pre-reserved
-/// to `TASK_POOL_CAPACITY`). Subsequent calls (primarily from test
-/// fixtures resetting between tests) preserve idle-task slots and
-/// reset every other live Task in place.
+/// The task id and termination status are captured before the decrement:
+/// once the count reaches zero any other holder's retry may destroy the
+/// task, so the pointer must not be dereferenced afterwards.
+#[inline]
+pub fn task_release_ref(task: *mut Task) -> Option<bool> {
+    let id = task_id_of(task)?;
+    let terminated =
+        slopos_ostd::task::accessors::task_status(task) == Some(TaskStatus::Terminated);
+    let reached_zero = slopos_ostd::task::accessors::task_dec_ref(task)?;
+    if reached_zero && terminated {
+        let _ = task_try_reclaim_id(id);
+    }
+    Some(reached_zero)
+}
+
+/// One-shot retry latch for reclaims attempted from contexts where the
+/// `Task` destructor may not run (IRQs off or a tracked lock held). The
+/// idle dispatcher drains it via [`task_reclaim_deferred`]; ids are never
+/// recorded because id-keyed re-lookup is race-free and allocation-free.
+static RECLAIM_PENDING: AtomicBool = AtomicBool::new(false);
+
+fn task_try_reclaim_id(id: u32) -> bool {
+    if id == INVALID_TASK_ID {
+        return false;
+    }
+    if !task_drop_context_is_safe() {
+        RECLAIM_PENDING.store(true, Ordering::Release);
+        return false;
+    }
+    let reclaimable = with_task_manager(|mgr| {
+        let owner = &mgr.registry.find(id)?.owner;
+        let task = owner.as_ref();
+        if task.status() != TaskStatus::Terminated {
+            return None;
+        }
+        if task.ref_count() == 0
+            && !task.on_cpu.load(Ordering::Acquire)
+            && KArc::strong_count(owner) == 1
+        {
+            return Some(());
+        }
+        // Terminated but still pinned. Every pinning reference retries on
+        // release, but a releaser may have sampled the status before this
+        // task turned Terminated — arm the idle drain so that race cannot
+        // strand the task.
+        RECLAIM_PENDING.store(true, Ordering::Release);
+        None
+    })
+    .is_some();
+    if !reclaimable {
+        return false;
+    }
+    let entry = remove_registration(id, true);
+    let removed = entry.is_some();
+    drop_unregistered(entry);
+    removed
+}
+
+/// Whether a deferred reclaim attempt has armed the retry latch since the
+/// last [`task_reclaim_deferred`] drain.
+#[inline]
+pub fn task_reclaim_pending() -> bool {
+    RECLAIM_PENDING.load(Ordering::Acquire)
+}
+
+/// Arm the deferred-reclaim latch directly. For paths that transition tasks
+/// to `Terminated` but cannot perform the retirement themselves.
+#[inline]
+pub(super) fn arm_deferred_reclaim() {
+    RECLAIM_PENDING.store(true, Ordering::Release);
+}
+
+/// Retire terminated tasks whose reclaim was attempted from a context that
+/// could not run the destructor. Called by the idle dispatcher with IRQs
+/// enabled and no tracked lock held; a no-op unless such an attempt armed
+/// the latch since the last drain.
+pub fn task_reclaim_deferred() {
+    if !RECLAIM_PENDING.swap(false, Ordering::AcqRel) {
+        return;
+    }
+    const BATCH: usize = 32;
+    let mut ids = [INVALID_TASK_ID; BATCH];
+    let mut count = 0usize;
+    let mut truncated = false;
+    with_task_manager(|mgr| {
+        for (id, task) in mgr.registry.iter() {
+            if task.status() != TaskStatus::Terminated {
+                continue;
+            }
+            if count == BATCH {
+                truncated = true;
+                break;
+            }
+            ids[count] = id;
+            count += 1;
+        }
+    });
+    if truncated {
+        RECLAIM_PENDING.store(true, Ordering::Release);
+    }
+    for id in &ids[..count] {
+        let _ = task_try_reclaim_id(*id);
+    }
+}
+
+/// Initialize the registry. Reinitialization is a test-fixture operation:
+/// preserve CPU idle tasks, retire every other registration, and keep the
+/// monotonic ID source advancing so IDs are never reused across resets.
 pub fn init_task_manager() -> c_int {
-    if !ensure_pool_allocated() {
+    if !ensure_registry_allocated() {
         return -1;
     }
     let was_initialized = with_task_manager(|mgr| mgr.initialized);
     if !was_initialized {
-        // First-ever call: simply flip the `initialized` flag and
-        // clear the manager lock's poison bit. We must NOT reset
-        // `num_tasks` / `next_task_id` / counters here — APs that
-        // came up during the Drivers phase already allocated their
-        // idle tasks via the lazy-init path in `reserve_task_slot`,
-        // and those bookkeeping fields already reflect them.
         with_task_manager(|mgr| mgr.initialized = true);
         TASK_MANAGER.clear_poison();
+        crate::sleep::init_sleep_queue();
         return 0;
     }
 
-    // Re-init path (tests): preserve idle tasks, reset everything else.
+    let mut retire = match KVec::with_capacity(MAX_TASKS) {
+        Ok(ids) => ids,
+        Err(_) => return -1,
+    };
+    with_task_manager(|mgr| {
+        for (id, task) in mgr.registry.iter() {
+            if crate::per_cpu::is_idle_task(task.as_ptr()) {
+                klog_debug!(
+                    "init_task_manager: preserving idle task {} ('{}')",
+                    id,
+                    bytes_as_str(&task.name)
+                );
+            } else if retire.push(id).is_err() {
+                return false;
+            }
+        }
+        true
+    });
+    for id in retire.iter() {
+        drop_unregistered(remove_registration(*id, false));
+    }
     with_task_manager(|mgr| {
         mgr.total_context_switches = 0;
         mgr.total_yields = 0;
         mgr.tasks_created = 0;
         mgr.tasks_terminated = 0;
-
-        let mut preserved_count: u32 = 0;
-        let mut max_task_id: u32 = 0;
-        for slot in mgr.tasks.iter_mut() {
-            let Some(kbox) = slot.as_deref_mut() else {
-                continue;
-            };
-            let task_ptr = kbox as *mut Task;
-            if crate::per_cpu::is_idle_task(task_ptr) {
-                preserved_count += 1;
-                if kbox.task_id != INVALID_TASK_ID && kbox.task_id > max_task_id {
-                    max_task_id = kbox.task_id;
-                }
-                klog_debug!(
-                    "init_task_manager: preserving idle task {} ('{}')",
-                    kbox.task_id,
-                    bytes_as_str(&kbox.name)
-                );
-                continue;
-            }
-            // Exclusive `&mut` under the manager lock.
-            super::task_accessors::task_reset_in_place(task_ptr);
-        }
-        mgr.num_tasks = preserved_count;
-        mgr.next_task_id = max_task_id.saturating_add(1);
+        mgr.num_tasks = mgr.registry.len() as u32;
         mgr.initialized = true;
     });
     TASK_MANAGER.clear_poison();
+    crate::sleep::init_sleep_queue();
     0
 }
 
-/// Find a task by its unique ID.
-///
-/// **Lock-free fast path**: scans the pool directly without taking the
-/// `TASK_MANAGER` lock. Safety rests on three invariants:
-///
-/// 1. The `tasks` KVec's backing buffer is allocated once in
-///    `init_task_manager` and never reallocates — `len` and the
-///    backing pointer are stable.
-/// 2. `Option<KBox<Task>>` has niche-optimised layout (one pointer;
-///    null = None). Stores of the pointer are atomic on x86_64 so a
-///    reader observes either null (skip) or a valid KBox pointer.
-/// 3. Under the "KBoxes live forever" rule, once a slot is `Some`,
-///    that pointer is valid until kernel shutdown. The Task contents
-///    may cycle through identities, but `task_id` is a naturally
-///    aligned u32 (atomic u32 load on x86_64), yielding either the
-///    current live ID, `INVALID_TASK_ID`, or a recent stale ID —
-///    all benign for the caller.
-pub fn task_find_by_id(task_id: u32) -> *mut Task {
-    if task_id == INVALID_TASK_ID {
-        return ptr::null_mut();
-    }
-
-    // Lock-free read — see function doc for invariants. OSTD's
-    // `read_atomic_field` folds the one `unsafe` reborrow.
-    TASK_MANAGER.read_atomic_field(|mgr| {
-        let bound = pool_high_water().min(mgr.tasks.len());
-        for slot in &mgr.tasks[..bound] {
-            if let Some(kbox) = slot.as_deref() {
-                if kbox.task_id == task_id {
-                    return kbox as *const Task as *mut Task;
-                }
-            }
-        }
-        ptr::null_mut()
-    })
-}
-
-/// The current generation-checked [`Handle`] for `task_id`, if a live
-/// task carries it.
-///
-/// The handle pairs the pool slot index with the slot's generation;
-/// held across time, it lets [`task_resolve_handle`] detect — without
-/// re-searching by id — whether the slot still belongs to the same task
-/// or has been recycled.
-pub fn task_handle(task_id: u32) -> Option<Handle<Task>> {
+/// Find a task by its never-reused ID. The returned guard owns the successful
+/// weak upgrade; absence and completed destruction both return `None`.
+pub fn task_find_by_id(task_id: u32) -> Option<TaskRef> {
     if task_id == INVALID_TASK_ID {
         return None;
     }
-    with_task_manager(|mgr| {
-        mgr.iter_tasks()
-            .find(|t| t.task_id == task_id)
-            .map(|t| Handle::from_parts(t.slot_index, t.generation))
-    })
+    with_task_manager(|mgr| mgr.registry.get(task_id))
 }
 
-/// Resolve a [`Handle<Task>`] to its pool-slot pointer, generation-checked.
-///
-/// **Lock-free**, on the same invariants as [`task_find_by_id`]: the pool
-/// spine never reallocates, and `slot_index` / `generation` / `task_id`
-/// are naturally-aligned atomic-width reads. Returns null if the slot is
-/// empty or its generation no longer matches the handle — a stale handle
-/// is a typed miss, never a use-after-reuse on a recycled slot.
-pub fn task_resolve_handle(handle: Handle<Task>) -> *mut Task {
-    let slot = handle.slot() as usize;
-    TASK_MANAGER.read_atomic_field(|mgr| {
-        let bound = pool_high_water().min(mgr.tasks.len());
-        if slot >= bound {
-            return ptr::null_mut();
-        }
-        match mgr.tasks[slot].as_deref() {
-            Some(kbox)
-                if kbox.task_id != INVALID_TASK_ID && kbox.generation == handle.generation() =>
-            {
-                kbox as *const Task as *mut Task
-            }
-            _ => ptr::null_mut(),
-        }
-    })
+/// Raw projection for legacy test fixtures whose own scoped handle pins the
+/// task before retaining the pointer.
+#[cfg(feature = "test-hooks")]
+pub fn task_find_by_id_raw_for_test(task_id: u32) -> *mut Task {
+    task_find_by_id(task_id).map_or(ptr::null_mut(), |task| task.as_ptr())
+}
+
+/// Mint the width-compatible task handle. Its slot component is the monotonic
+/// task ID; generation is permanently zero because IDs are never recycled.
+pub fn task_handle(task_id: u32) -> Option<Handle<Task>> {
+    task_find_by_id(task_id).map(|_| Handle::from_parts(task_id, 0))
+}
+
+/// Resolve a task handle through the same weak-upgrade path as ID lookup.
+pub fn task_resolve_handle(handle: Handle<Task>) -> Option<TaskRef> {
+    if handle.generation() != 0 {
+        return None;
+    }
+    task_find_by_id(handle.slot())
+}
+
+#[cfg(feature = "test-hooks")]
+pub fn task_resolve_handle_raw_for_test(handle: Handle<Task>) -> *mut Task {
+    task_resolve_handle(handle).map_or(ptr::null_mut(), |task| task.as_ptr())
 }
 
 /// Find a live task whose active address space matches `cr3`.
 ///
-/// This is primarily used by exception paths that need to recover the faulting
-/// task even if per-CPU scheduler current-task metadata is temporarily stale.
-/// **Lock-free** — see [`task_find_by_id`] for the safety argument.
-pub fn task_find_by_cr3(cr3: u64) -> *mut Task {
+/// The registry cli-spinlock makes this safe in exception context; weak
+/// upgrade performs no allocation. Callers must release the returned guard
+/// before entering a diverging exception tail.
+pub fn task_find_by_cr3(cr3: u64) -> Option<TaskRef> {
     if cr3 == 0 {
-        return ptr::null_mut();
+        return None;
     }
-
     let target = cr3 & !0xFFF;
-    // Lock-free read — same rationale as task_find_by_id; OSTD's
-    // `read_atomic_field` folds the one `unsafe` reborrow.
-    TASK_MANAGER.read_atomic_field(|mgr| {
-        let bound = pool_high_water().min(mgr.tasks.len());
-        let mut fallback: *mut Task = ptr::null_mut();
-
-        for slot in &mgr.tasks[..bound] {
-            let Some(kbox) = slot.as_deref() else {
-                continue;
-            };
-            let status = kbox.status();
-            if status == TaskStatus::Invalid || status == TaskStatus::Terminated {
+    with_task_manager(|mgr| {
+        let mut fallback = None;
+        for task in mgr.iter_tasks() {
+            let status = task.status();
+            if matches!(status, TaskStatus::Invalid | TaskStatus::Terminated) {
                 continue;
             }
-
             let task_cr3 =
-                super::task_accessors::task_context_cr3(kbox as *const Task).unwrap_or(0) & !0xFFF;
+                super::task_accessors::task_context_cr3(task.as_ptr()).unwrap_or(0) & !0xFFF;
             if task_cr3 != target {
                 continue;
             }
-
-            let task_ptr = kbox as *const Task as *mut Task;
             if status == TaskStatus::Running {
-                return task_ptr;
+                return Some(task);
             }
-
-            if fallback.is_null() {
-                fallback = task_ptr;
+            if fallback.is_none() {
+                fallback = Some(task);
             }
         }
-
         fallback
     })
-}
-
-/// Look up the pool index of `task` in `mgr`.
-///
-/// Returns `Some(idx)` when `task` is a live pool-member, `None`
-/// otherwise. The fast path reads `task.slot_index` (an O(1) field
-/// populated by [`reserve_task_slot`]) and validates it against the
-/// pool; a linear scan fallback handles edge cases where `slot_index`
-/// is the `u32::MAX` sentinel or out of range.
-pub(super) fn task_slot_index_inner(mgr: &TaskManagerInner, task: *const Task) -> Option<usize> {
-    if task.is_null() {
-        return None;
-    }
-    // Fast path: Task's own slot_index field.
-    let hint = super::task_accessors::task_slot_index(task)
-        .map(|i| i as usize)
-        .unwrap_or(usize::MAX);
-    if hint < mgr.tasks.len() {
-        if let Some(kbox) = mgr.tasks[hint].as_deref() {
-            if (kbox as *const Task) == task {
-                return Some(hint);
-            }
-        }
-    }
-    // Fallback: linear scan bounded by the high-water mark — no need
-    // to look past slots that have never held a Task.
-    let bound = pool_high_water().min(mgr.tasks.len());
-    for (i, slot) in mgr.tasks[..bound].iter().enumerate() {
-        if let Some(kbox) = slot.as_deref() {
-            if (kbox as *const Task) == task {
-                return Some(i);
-            }
-        }
-    }
-    None
 }
 
 pub fn task_pointer_is_valid(task: *const Task) -> bool {
     if task.is_null() {
         return false;
     }
-    // Pool-allocated tasks are the common case.
-    if with_task_manager(|mgr| task_slot_index_inner(mgr, task).is_some()) {
+    if with_task_manager(|mgr| mgr.registry.owns_pointer(task)) {
         return true;
     }
-    // SafeStack bootstrap Task stubs live in `.data` (Task::invalid()
-    // initializer + init_bootstrap_tasks seed of `unsafe_stack_sp`).
-    // They are NEVER inserted into the pool but ARE valid `Task`
-    // allocations that the scheduler legitimately observes as
-    // `PCR.current_task` during the pre-first-dispatch window AND
-    // across test-fixture transitions (when the previously-current
-    // task has been `reset_in_place`'d and the next test hasn't
-    // dispatched anything yet).  Whitelisting prevents the
-    // corruption-recovery loop in `scheduler_tasks_for_cpu`.
     crate::safestack_rt::is_bootstrap_task_ptr(task)
 }
 
-pub(super) enum ReserveTaskSlotError {
+pub(super) enum TaskAllocError {
     MaxTasks,
     NoFreeSlot,
+    IdExhausted,
 }
 
-/// Reserve a pool slot for a new task.
-///
-/// Three-tier scan under the lock:
-/// 1. Reuse an existing `Some(kbox)` whose Task is `Invalid`.
-/// 2. Reuse an existing `Some(kbox)` whose Task is `Terminated` and
-///    whose refcount has dropped to zero (resets in place).
-/// 3. Allocate a fresh `KBox<Task>` (via `init_invalid` recipe, no
-///    stack rvalue) and install it in a `None` slot.
-///
-/// On success: sets the Task's status to `Blocked` to close the TOCTOU
-/// race with a second concurrent caller, populates `slot_index`, and
-/// returns `(*mut Task, task_id)`.
-pub(super) fn reserve_task_slot() -> Result<(*mut Task, u32), ReserveTaskSlotError> {
-    // Lazy-init guard: APs may reserve an idle task before the
-    // Services-phase `init_task_manager` step runs (see
-    // `ensure_pool_allocated` for the ordering rationale).
-    if !ensure_pool_allocated() {
-        return Err(ReserveTaskSlotError::NoFreeSlot);
+pub(super) struct PendingTask {
+    task: Option<KArc<Task>>,
+    id: u32,
+}
+
+impl PendingTask {
+    #[inline]
+    pub(super) fn id(&self) -> u32 {
+        self.id
     }
-    with_task_manager(|mgr| {
-        let capacity = mgr.tasks.len();
-        if mgr.num_tasks as usize >= capacity {
-            return Err(ReserveTaskSlotError::MaxTasks);
-        }
 
-        let hwm = pool_high_water().min(capacity);
-        let mut chosen_idx: Option<usize> = None;
+    #[inline]
+    pub(super) fn as_ptr(&self) -> *mut Task {
+        KArc::as_ptr(self.task.as_ref().expect("pending task owns allocation")) as *mut Task
+    }
+}
 
-        // Tier 1: Some(kbox) with Invalid status — only among slots
-        // that have actually been populated.
-        for (i, slot) in mgr.tasks[..hwm].iter().enumerate() {
-            if let Some(kbox) = slot.as_deref() {
-                if kbox.status() == TaskStatus::Invalid {
-                    chosen_idx = Some(i);
-                    break;
-                }
-            }
-        }
-
-        // Tier 2: Some(kbox) with Terminated+refcnt=0 — reset and reuse.
-        if chosen_idx.is_none() {
-            for (i, slot) in mgr.tasks[..hwm].iter_mut().enumerate() {
-                if let Some(kbox) = slot.as_deref_mut() {
-                    if kbox.status() == TaskStatus::Terminated && kbox.ref_count() == 0 {
-                        // Exclusive &mut under the manager lock.
-                        super::task_accessors::task_reset_in_place(kbox as *mut Task);
-                        chosen_idx = Some(i);
-                        break;
-                    }
-                }
-            }
-        }
-
-        // Tier 3: allocate a fresh KBox past the high-water mark.
-        // The first `None` slot is guaranteed to sit at index `hwm` —
-        // every slot below has been populated at least once and never
-        // reverts to `None` — so there's no need to scan for one.
-        let need_fresh = chosen_idx.is_none();
-        if need_fresh {
-            if hwm >= capacity {
-                return Err(ReserveTaskSlotError::NoFreeSlot);
-            }
-            let i = hwm;
-            let kbox = match KBox::try_init(Task::init_invalid()) {
-                Ok(b) => b,
-                Err(_) => return Err(ReserveTaskSlotError::NoFreeSlot),
-            };
-            mgr.tasks[i] = Some(kbox);
-            bump_pool_high_water(i);
-            chosen_idx = Some(i);
-        }
-
-        let idx = chosen_idx.expect("tier 1/2/3 must produce a slot");
-
-        let generation = mgr.next_generation;
-        mgr.next_generation = mgr.next_generation.wrapping_add(1);
-
-        let slot_ptr: *mut Task = {
-            let kbox = mgr.tasks[idx]
-                .as_deref_mut()
-                .expect("chosen slot must be Some");
-            // TOCTOU protection: publish Blocked under the lock so no
-            // concurrent caller can reserve the same slot.
-            kbox.set_status(TaskStatus::Blocked);
-            kbox.slot_index = idx as u32;
-            // Stamp a fresh generation so any handle to a prior occupant
-            // of this recycled slot now resolves as stale.
-            kbox.generation = generation;
-            kbox as *mut Task
+impl Drop for PendingTask {
+    fn drop(&mut self) {
+        let Some(task) = self.task.take() else {
+            return;
         };
+        with_task_manager(|mgr| mgr.num_tasks = mgr.num_tasks.saturating_sub(1));
+        slopos_ostd::task::drop_off_lock(task);
+    }
+}
 
-        let task_id = mgr.next_task_id;
-        mgr.next_task_id = task_id.wrapping_add(1);
+/// Reserve capacity and allocate one task without publishing it to lookups.
+pub(super) fn allocate_task() -> Result<PendingTask, TaskAllocError> {
+    if !ensure_registry_allocated() {
+        return Err(TaskAllocError::NoFreeSlot);
+    }
+    let id = with_task_manager(|mgr| {
+        if mgr.num_tasks as usize >= MAX_TASKS {
+            return Err(TaskAllocError::MaxTasks);
+        }
+        // Registered-but-unreclaimed tasks (zombies awaiting waitpid) occupy
+        // spine slots without counting toward `num_tasks`; refuse early so
+        // registration after full initialization almost never fails.
+        if mgr.registry.len() >= MAX_TASKS {
+            return Err(TaskAllocError::NoFreeSlot);
+        }
+        if mgr.next_task_id >= INVALID_TASK_ID as u64 {
+            return Err(TaskAllocError::IdExhausted);
+        }
+        let id = mgr.next_task_id as u32;
+        mgr.next_task_id += 1;
         mgr.num_tasks += 1;
+        Ok(id)
+    })?;
 
-        Ok((slot_ptr, task_id))
+    let mut task = match KArc::try_init(Task::init_invalid()) {
+        Ok(task) => task,
+        Err(_) => {
+            with_task_manager(|mgr| mgr.num_tasks = mgr.num_tasks.saturating_sub(1));
+            return Err(TaskAllocError::NoFreeSlot);
+        }
+    };
+    let value = KArc::get_mut(&mut task).expect("fresh task allocation must be unique");
+    value.task_id = id;
+    value.set_status(TaskStatus::Blocked);
+    Ok(PendingTask {
+        task: Some(task),
+        id,
     })
 }
 
-/// Release a previously reserved task slot back to Invalid.
-/// Called when task_create fails after reserve_task_slot succeeded.
-pub(super) fn release_task_slot(slot: *mut Task) {
-    if slot.is_null() {
-        return;
-    }
-    with_task_manager(|mgr| {
-        super::task_accessors::task_reset_in_place(slot);
-        mgr.num_tasks = mgr.num_tasks.saturating_sub(1);
+/// Publish a fully initialized task into the registry: the weak handle
+/// serves lookups, the strong handle is the transitional scheduler-lifetime
+/// owner. Fails only when every spine slot is occupied (live tasks plus
+/// not-yet-retired terminated ones); the caller discards the pending task.
+pub(super) fn register_task(mut pending: PendingTask) -> Result<*mut Task, PendingTask> {
+    let id = pending.id;
+    let task = pending.task.take().expect("pending task owns allocation");
+    let raw = KArc::as_ptr(&task) as *mut Task;
+    let entry = RegistryEntry {
+        id,
+        weak: KArc::downgrade(&task),
+        owner: task,
+    };
+    let rejected = with_task_manager(|mgr| {
+        debug_assert!(mgr.registry.find(id).is_none(), "task id collision");
+        mgr.registry.insert(entry).err()
     });
+    match rejected {
+        None => Ok(raw),
+        Some(entry) => {
+            slopos_ostd::task::drop_off_lock(entry.weak);
+            pending.task = Some(entry.owner);
+            Err(pending)
+        }
+    }
+}
+
+#[cfg(feature = "test-hooks")]
+pub fn task_live_cap_rejects_for_test() -> bool {
+    let (saved_live, saved_next, saved_entries) = with_task_manager(|mgr| {
+        let snapshot = (mgr.num_tasks, mgr.next_task_id, mgr.registry.len());
+        mgr.num_tasks = MAX_TASKS as u32;
+        snapshot
+    });
+    let result = allocate_task();
+    let unchanged = with_task_manager(|mgr| {
+        let unchanged = mgr.next_task_id == saved_next && mgr.registry.len() == saved_entries;
+        mgr.num_tasks = saved_live;
+        unchanged
+    });
+    matches!(result, Err(TaskAllocError::MaxTasks)) && unchanged
+}
+
+/// Abandon a task whose construction failed before publication.
+pub(super) fn discard_task(pending: PendingTask) {
+    drop(pending);
 }
 
 pub fn task_get_info(task_id: u32, task_info: *mut *mut Task) -> c_int {
     if task_info.is_null() {
         return -1;
     }
-    let task = task_find_by_id(task_id);
-    if task.is_null() || super::task_accessors::task_status(task) == Some(TaskStatus::Invalid) {
+    let Some(task) = task_find_by_id(task_id) else {
+        slopos_ostd::util::ptr_buf::nullable_write(task_info, ptr::null_mut());
+        return -1;
+    };
+    let raw = task.as_ptr();
+    if task.status() == TaskStatus::Invalid {
         slopos_ostd::util::ptr_buf::nullable_write(task_info, ptr::null_mut());
         return -1;
     }
-    slopos_ostd::util::ptr_buf::nullable_write(task_info, task);
+    slopos_ostd::util::ptr_buf::nullable_write(task_info, raw);
     0
 }
 
-/// Reap a Zombie task: copy its `ExitInfo` and transition the slot to
-/// `Terminated` atomically under the task-manager lock.
-///
-/// This is the parent-side waitpid-success path. The Zombie → Terminated
-/// transition makes the slot eligible for tier-2 reuse on a subsequent
-/// `reserve_task_slot`. Returns `None` if no slot currently carries
-/// `task_id` or the matching slot is not Zombie (already reaped, still
-/// alive, or invalid).
-///
-/// Single source of truth: `Task::exit_info` is read here directly; no
-/// parallel slot-indexed array exists. Holding the manager lock across
-/// the find + read + transition prevents `reserve_task_slot` tier-2 from
-/// recycling the slot mid-read — the historical race that hung pipeline
-/// reapers under TCG.
 pub fn task_consume_zombie(task_id: u32) -> Option<ExitInfo> {
-    if task_id == INVALID_TASK_ID {
+    let task = task_find_by_id(task_id)?;
+    if task.status() != TaskStatus::Zombie {
         return None;
     }
-    with_task_manager(|mgr| {
-        for slot in mgr.iter_tasks_mut() {
-            if slot.task_id != task_id {
-                continue;
-            }
-            if slot.status() != TaskStatus::Zombie {
-                return None;
-            }
-            // `mark_task_terminated` publishes `exit_info` BEFORE
-            // transitioning to Zombie, so Zombie + empty cell is
-            // unreachable; treat it defensively as "not yet ready"
-            // (leave status at Zombie so the caller can retry rather
-            // than silently dropping the exit code).
-            let info = slot.exit_info.try_get().cloned()?;
-            if !slot.try_transition_to(TaskStatus::Terminated) {
-                return None;
-            }
-            return Some(info);
-        }
-        None
-    })
+    let info = task.exit_info.try_get().cloned()?;
+    if !task.try_transition_to(TaskStatus::Terminated) {
+        return None;
+    }
+    drop(task);
+    let _ = task_try_reclaim_id(task_id);
+    Some(info)
 }
 
-/// Read the exit info for a Zombie or already-Terminated slot without
-/// transitioning it. Used by the blocking-waitpid post-wait re-read to
-/// surface an exit code even if the slot has since been moved past
-/// Zombie (e.g. by auto-reap when the parent itself was a grandparent).
-/// Returns `None` if the slot is missing, invalid, or still running.
 pub fn task_peek_exit_info(task_id: u32) -> Option<ExitInfo> {
-    if task_id == INVALID_TASK_ID {
-        return None;
-    }
-    with_task_manager(|mgr| {
-        for slot in mgr.iter_tasks() {
-            if slot.task_id != task_id {
-                continue;
-            }
-            if matches!(slot.status(), TaskStatus::Zombie | TaskStatus::Terminated) {
-                return slot.exit_info.try_get().cloned();
-            }
-            return None;
-        }
+    let task = task_find_by_id(task_id)?;
+    if matches!(task.status(), TaskStatus::Zombie | TaskStatus::Terminated) {
+        task.exit_info.try_get().cloned()
+    } else {
         None
-    })
+    }
 }
 
 pub fn task_get_current_id() -> u32 {
@@ -800,86 +739,58 @@ pub fn task_get_current() -> *mut Task {
 }
 
 pub fn task_iterate_active(callback: TaskIterateCb, context: *mut c_void) {
-    let cb = match callback {
-        Some(cb) => cb,
-        None => return,
+    let Some(cb) = callback else {
+        return;
     };
-
-    // Collect active task pointers into a heap-backed KVec so the
-    // caller's stack frame doesn't carry a multi-KiB array of
-    // pointers, and we can release the manager lock before running
-    // callbacks (which may take other locks transitively).
-    //
-    // Size the scratch buffer to the current pool high-water mark,
-    // not the full pool capacity — the HWM bounds how many slots can
-    // possibly be populated, so a larger capacity would just waste
-    // heap on signal-hot paths.
-    let hwm = pool_high_water().max(1);
-    let mut addrs = match KVec::<usize>::with_capacity(hwm) {
-        Ok(v) => v,
+    let capacity = with_task_manager(|mgr| mgr.registry.len()).max(1);
+    let mut tasks = match KVec::<TaskRef>::with_capacity(capacity) {
+        Ok(tasks) => tasks,
         Err(_) => return,
     };
     with_task_manager(|mgr| {
-        for task in mgr.iter_tasks_mut() {
+        for task in mgr.iter_tasks() {
             if task.status() != TaskStatus::Invalid && task.task_id != INVALID_TASK_ID {
-                let _ = addrs.push(task as *mut Task as usize);
+                let _ = tasks.push(task);
             }
         }
     });
-
-    for addr in addrs.iter() {
-        cb(*addr as *mut Task, context);
+    for task in tasks.iter() {
+        cb(task.as_ptr(), context);
     }
 }
 
-/// Return a breakdown of slot states across the pool.
-///
-/// Returns `(num_tasks, none_or_invalid, terminated, active)`.
-/// `none_or_invalid` counts slots that are either `None` (never
-/// allocated) or `Some(kbox)` with `status == Invalid` — both are
-/// reusable by `reserve_task_slot`.
+/// Return `(live, remaining_capacity, terminated, active)` for diagnostics.
 pub fn task_slot_census() -> (u32, u32, u32, u32) {
     with_task_manager(|mgr| {
-        let hwm = pool_high_water().min(mgr.tasks.len());
-        let never_populated = (mgr.tasks.len() - hwm) as u32;
-        let mut none_or_invalid = never_populated;
         let mut terminated = 0u32;
         let mut active = 0u32;
-        for slot in &mgr.tasks[..hwm] {
-            match slot.as_deref() {
-                None => none_or_invalid += 1,
-                Some(kbox) => match kbox.status() {
-                    TaskStatus::Invalid => none_or_invalid += 1,
-                    TaskStatus::Terminated => terminated += 1,
-                    _ => active += 1,
-                },
+        for task in mgr.iter_tasks() {
+            if task.status() == TaskStatus::Terminated {
+                terminated += 1;
+            } else if task.status() != TaskStatus::Invalid {
+                active += 1;
             }
         }
-        (mgr.num_tasks, none_or_invalid, terminated, active)
+        (
+            mgr.num_tasks,
+            (MAX_TASKS as u32).saturating_sub(mgr.num_tasks),
+            terminated,
+            active,
+        )
     })
 }
 
-/// Take ownership of the per-task `SYSCALL_TEST_REPORT` ring and drain its
-/// contents. Returns an empty vector if the task never reported (ring was
-/// never lazily allocated) or if the slot is no longer the original task
-/// (recycled or invalid). Caller-required invariant: invoke only after the
-/// child task has exited, so no further pushes can race with the take.
 pub fn task_drain_test_reports(task_id: u32) -> KVec<crate::test_reports::TestReport> {
-    let task = task_find_by_id(task_id);
-    if task.is_null() {
+    let Some(task) = task_find_by_id(task_id) else {
         return KVec::new();
-    }
-    let mut ring = match super::task_accessors::task_take_test_reports(task) {
-        Some(r) => r,
+    };
+    let mut ring = match super::task_accessors::task_take_test_reports(task.as_ptr()) {
+        Some(ring) => ring,
         None => return KVec::new(),
     };
     ring.drain().unwrap_or_else(|_| KVec::new())
 }
 
-/// SysRq-style debug dump: one klog line per live task slot (id, name,
-/// status, pgid, sid). Triggered from the TTY input path on Ctrl+T so a
-/// wedged interactive session can still be diagnosed from the serial log —
-/// the input ISR path stays alive even when userland input routing is dead.
 pub fn debug_dump_tasks_klog() {
     klog_info!("SYSRQ: ---- task dump ----");
     task_iterate_active(Some(dump_one_task), ptr::null_mut());
@@ -890,10 +801,6 @@ fn dump_one_task(task: *mut Task, _context: *mut c_void) {
     let Some(t) = super::task_borrow(task) else {
         return;
     };
-    // Scheduler-state fields make a lost wake diagnosable from the dump
-    // alone: a task stuck `Blocked` shows its block reason and that no
-    // scheduler owner exists; a stranded `Ready` shows placement/queue
-    // ownership without a runqueue (the rescue-sweep class).
     let reason = slopos_ostd::task::accessors::task_load_block_reason(task as *const Task);
     let placement = slopos_ostd::task::accessors::task_sched_placement_load(task as *const Task);
     let on_cpu = slopos_ostd::task::accessors::task_on_cpu_load(task as *const Task);
@@ -912,9 +819,6 @@ fn dump_one_task(task: *mut Task, _context: *mut c_void) {
         t.sid,
         last_run,
     );
-    // For a parked task, walk its saved kernel call chain so a lost wake is
-    // diagnosable from the dump alone: the frames name the exact blocking
-    // primitive (wait queue / sleep / blk completion) the task is stuck in.
     if t.status() == TaskStatus::Blocked {
         let (ctx_rip, ctx_rsp) =
             slopos_ostd::task::accessors::task_switch_ctx_rip_rsp(task as *const Task)

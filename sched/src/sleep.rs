@@ -10,7 +10,7 @@ use super::scheduler::{
     scheduler_get_current_task, wake_blocked_task,
 };
 use super::task::{
-    INVALID_TASK_ID, TASK_POOL_CAPACITY, TaskStatus, task_find_by_id, task_id_of, task_is_blocked,
+    INVALID_TASK_ID, MAX_TASKS, TaskStatus, task_find_by_id, task_id_of, task_is_blocked,
     task_is_exited, task_is_invalid, task_load_block_reason, task_set_state_from_with_reason,
     task_status, task_store_block_reason,
 };
@@ -47,14 +47,14 @@ impl SleepEntry {
 }
 
 /// Sleep queue backed by a heap `KVec`. The backing buffer is
-/// pre-reserved to `TASK_POOL_CAPACITY` on first `init_sleep_queue`
+/// pre-reserved to `MAX_TASKS` on first `init_sleep_queue`
 /// call and never reallocates afterwards; `upsert`/`remove`/
 /// `pop_due` mutate entries in place.
 ///
 /// `active_count` lets the timer-tick hot path (`pop_due` via
 /// `wake_due_sleepers`) skip the full-capacity scan when no tasks
 /// are sleeping — the common case. `active_high_water` further bounds
-/// the scan by the largest slot index ever occupied, so a pool that
+/// the scan by the largest slot index ever occupied, so a queue that
 /// briefly held sleepers and has since quiesced still scans O(peak),
 /// not O(capacity).
 struct SleepQueue {
@@ -76,13 +76,13 @@ impl SleepQueue {
     }
 
     /// First-time init: pre-fill with empty entries up to
-    /// `TASK_POOL_CAPACITY`. Subsequent calls reset every entry.
+    /// `MAX_TASKS`. Subsequent calls reset every entry.
     fn init_or_reset(&mut self) -> Result<(), ()> {
         if self.entries.is_empty() {
-            if self.entries.try_reserve_exact(TASK_POOL_CAPACITY).is_err() {
+            if self.entries.try_reserve_exact(MAX_TASKS).is_err() {
                 return Err(());
             }
-            for _ in 0..TASK_POOL_CAPACITY {
+            for _ in 0..MAX_TASKS {
                 if self.entries.push(SleepEntry::empty()).is_err() {
                     return Err(());
                 }
@@ -326,8 +326,11 @@ fn wake_sleeping_task(task_id: u32) -> WakeVerdict {
         return WakeVerdict::TaskGone;
     }
 
-    let task = task_find_by_id(task_id);
-    if task.is_null() || task_is_invalid(task) || task_is_exited(task) {
+    let Some(task_ref) = task_find_by_id(task_id) else {
+        return WakeVerdict::TaskGone;
+    };
+    let task = task_ref.as_ptr();
+    if task_is_invalid(task) || task_is_exited(task) {
         return WakeVerdict::TaskGone;
     }
 
@@ -488,105 +491,116 @@ fn strand_sweep(now_tick: u64) {
         );
     }
 
-    for task_id in 0..TASK_POOL_CAPACITY as u32 {
-        let task = task_find_by_id(task_id);
-        if task.is_null() || task_is_invalid(task) || task_is_exited(task) {
-            continue;
-        }
-        let status = task_status(task);
-        // Classify this task's suspect state; 0 = healthy. A task mid-park
-        // (between its Blocked CAS and the queue upsert) or mid-wake looks
-        // stranded for a microsecond, so a strand is only REPORTED when the
-        // same class persists across two consecutive sweeps (≥1 s stuck).
-        let mut class = 0u8;
-        let mut detail: u64 = 0;
-        if status == Some(TaskStatus::Blocked)
-            && task_load_block_reason(task) == Some(BlockReason::Sleep)
-        {
-            let entry = {
-                let queue = SLEEP_QUEUE.lock();
-                let scan = queue.scan_bound();
-                queue.entries[..scan]
-                    .iter()
-                    .find(|e| e.active && e.task_id == task_id)
-                    .map(|e| e.wake_tick)
-            };
-            match entry {
-                // A settled park has placement None; `OnCpu` means the scan
-                // caught the task mid-park (Blocked CAS done, entry not yet
-                // armed) — a microsecond transient, not a strand.
-                None if super::task::task_sched_placement_load(task)
-                    == slopos_ostd::task::SchedPlacement::None =>
-                {
-                    class = 1
-                }
-                None => {}
-                // Generously overdue (≥400 ticks ≈ 1 s aggregate): the pop
-                // side is not firing despite a live entry.
-                Some(w)
-                    if now_tick.wrapping_sub(w) < (1 << 63) && now_tick.wrapping_sub(w) > 400 =>
-                {
-                    class = 2;
-                    detail = w;
-                }
-                _ => {}
-            }
-        } else if status == Some(TaskStatus::Ready)
-            && super::task::task_sched_placement_load(task)
-                == slopos_ostd::task::SchedPlacement::None
-        {
-            class = 3;
-        }
+    let mut context = StrandSweepContext { now_tick };
+    super::task::task_iterate_active(
+        Some(strand_sweep_task),
+        (&mut context as *mut StrandSweepContext).cast(),
+    );
+}
 
-        let idx = task_id as usize % STRAND_SUSPECT.len();
-        let prev = STRAND_SUSPECT[idx].swap(class, Ordering::Relaxed);
-        // Epoch gate: the fused state word's ABA epoch bumps on every
-        // transition, so a healthy sleeper caught mid-park by two racing
-        // sweeps shows different epochs (it transitioned hundreds of times
-        // in between), while a genuinely stranded task's epoch is frozen.
-        // Without this, the sweep's scan duration can synchronize with a
-        // periodic sleeper's park and report a fresh transient every sweep.
-        let epoch = super::task::task_state_epoch(task).unwrap_or(0);
-        let prev_epoch = STRAND_EPOCH[idx].swap(epoch, Ordering::Relaxed);
-        if class == 0 || prev != class || prev_epoch != epoch || !strand_log_ok() {
-            continue;
+struct StrandSweepContext {
+    now_tick: u64,
+}
+
+fn strand_sweep_task(task: *mut super::task::Task, context: *mut core::ffi::c_void) {
+    let Some(context) = slopos_ostd::util::ptr_buf::try_void_ctx_mut::<StrandSweepContext>(context)
+    else {
+        return;
+    };
+    if task_is_invalid(task) || task_is_exited(task) {
+        return;
+    }
+    let Some(task_id) = task_id_of(task) else {
+        return;
+    };
+    let status = task_status(task);
+    let mut class = 0u8;
+    let mut detail = 0u64;
+    if status == Some(TaskStatus::Blocked)
+        && task_load_block_reason(task) == Some(BlockReason::Sleep)
+    {
+        let entry = {
+            let queue = SLEEP_QUEUE.lock();
+            let scan = queue.scan_bound();
+            queue.entries[..scan]
+                .iter()
+                .find(|entry| entry.active && entry.task_id == task_id)
+                .map(|entry| entry.wake_tick)
+        };
+        match entry {
+            None if super::task::task_sched_placement_load(task)
+                == slopos_ostd::task::SchedPlacement::None =>
+            {
+                class = 1;
+            }
+            None => {}
+            Some(wake_tick)
+                if context.now_tick.wrapping_sub(wake_tick) < (1 << 63)
+                    && context.now_tick.wrapping_sub(wake_tick) > 400 =>
+            {
+                class = 2;
+                detail = wake_tick;
+            }
+            _ => {}
         }
-        match class {
-            1 => slopos_ostd::klog_info!(
-                "STRAND: task {} '{}' Blocked(Sleep) NO ENTRY now={} placement={:?}",
-                task_id,
-                task_name_str(task),
-                now_tick,
-                super::task::task_sched_placement_load(task)
-            ),
-            2 => slopos_ostd::klog_info!(
-                "STRAND: task {} '{}' entry OVERDUE wake@{} now={}",
-                task_id,
-                task_name_str(task),
-                detail,
-                now_tick
-            ),
-            _ => slopos_ostd::klog_info!(
-                "STRAND: task {} '{}' Ready with placement=None (publish lost)",
-                task_id,
-                task_name_str(task)
-            ),
-        }
+    } else if status == Some(TaskStatus::Ready)
+        && super::task::task_sched_placement_load(task) == slopos_ostd::task::SchedPlacement::None
+    {
+        class = 3;
+    }
+
+    let idx = task_id as usize % STRAND_SUSPECT.len();
+    let previous_id = STRAND_TASK_ID[idx].swap(task_id, Ordering::Relaxed);
+    if previous_id != task_id {
+        STRAND_SUSPECT[idx].store(0, Ordering::Relaxed);
+        STRAND_EPOCH[idx].store(0, Ordering::Relaxed);
+    }
+    let previous_class = STRAND_SUSPECT[idx].swap(class, Ordering::Relaxed);
+    let epoch = super::task::task_state_epoch(task).unwrap_or(0);
+    let previous_epoch = STRAND_EPOCH[idx].swap(epoch, Ordering::Relaxed);
+    if class == 0 || previous_class != class || previous_epoch != epoch || !strand_log_ok() {
+        return;
+    }
+    match class {
+        1 => slopos_ostd::klog_info!(
+            "STRAND: task {} '{}' Blocked(Sleep) NO ENTRY now={} placement={:?}",
+            task_id,
+            task_name_str(task),
+            context.now_tick,
+            super::task::task_sched_placement_load(task)
+        ),
+        2 => slopos_ostd::klog_info!(
+            "STRAND: task {} '{}' entry OVERDUE wake@{} now={}",
+            task_id,
+            task_name_str(task),
+            detail,
+            context.now_tick
+        ),
+        _ => slopos_ostd::klog_info!(
+            "STRAND: task {} '{}' Ready with placement=None (publish lost)",
+            task_id,
+            task_name_str(task)
+        ),
     }
 }
 
 /// Per-task suspect class from the previous sweep (persistence filter),
 /// indexed by task id.
-static STRAND_SUSPECT: [core::sync::atomic::AtomicU8; TASK_POOL_CAPACITY] = {
+static STRAND_SUSPECT: [core::sync::atomic::AtomicU8; MAX_TASKS] = {
     const ZERO: core::sync::atomic::AtomicU8 = core::sync::atomic::AtomicU8::new(0);
-    [ZERO; TASK_POOL_CAPACITY]
+    [ZERO; MAX_TASKS]
+};
+
+static STRAND_TASK_ID: [AtomicU32; MAX_TASKS] = {
+    const EMPTY: AtomicU32 = AtomicU32::new(INVALID_TASK_ID);
+    [EMPTY; MAX_TASKS]
 };
 
 /// Per-task state-word epoch from the previous sweep (see the epoch gate in
 /// [`strand_sweep`]).
-static STRAND_EPOCH: [AtomicU32; TASK_POOL_CAPACITY] = {
+static STRAND_EPOCH: [AtomicU32; MAX_TASKS] = {
     const ZERO: AtomicU32 = AtomicU32::new(0);
-    [ZERO; TASK_POOL_CAPACITY]
+    [ZERO; MAX_TASKS]
 };
 
 fn task_name_str<'a>(task: *mut super::task::Task) -> &'a str {
@@ -621,12 +635,11 @@ pub fn arm_blocked_timeout(task_id: u32, timeout_ms: u32) {
     if task_id == INVALID_TASK_ID {
         return;
     }
-    let task = task_find_by_id(task_id);
-    if !task.is_null() {
+    if let Some(task) = task_find_by_id(task_id) {
         // Pointer is a valid Task slot returned by `task_find_by_id`;
         // `task_store_block_reason` performs the relaxed atomic store
         // on the fused state word internally.
-        task_store_block_reason(task, BlockReason::Sleep);
+        task_store_block_reason(task.as_ptr(), BlockReason::Sleep);
     }
     let now_tick = platform::timer_ticks();
     let wake_tick = now_tick.wrapping_add(ms_to_sleep_ticks(timeout_ms));

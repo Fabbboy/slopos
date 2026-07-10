@@ -31,7 +31,7 @@ use crate::task::abi::TaskAbi;
 use crate::task::exit_info::ExitInfo;
 use crate::task::fpu::{FPU_STATE_SIZE, FpuState};
 use crate::task::job_control::ProcessGroup;
-use crate::task::link_roles::{ReadyQueueRole, RemoteWakeRole, ZombieListRole};
+use crate::task::link_roles::{ReadyQueueRole, RemoteWakeRole};
 use crate::task::state::TaskState;
 use crate::task::test_reports::TestReportRing;
 use crate::user::context::UserContext;
@@ -285,30 +285,15 @@ pub struct TaskInner<K, U> {
     /// Owning handle to the SafeStack-sanitizer unsafe (data) stack.
     pub unsafe_stack: Option<U>,
     /// Strong membership in this task's process group. The group (and, via
-    /// it, the session) lives while any member holds this handle; dropping it
-    /// at slot recycle is what releases the group. Placed inside the
-    /// `reset_in_place` owned-handle hole (between `unsafe_stack` and
-    /// `test_reports`). `None` for kernel-mode tasks, which never join a
-    /// terminal session.
+    /// it, the session) lives while any member holds this handle; dropping the
+    /// task releases the membership. `None` for kernel-mode tasks.
     pub process_group: Option<KArc<ProcessGroup>>,
     /// Per-task ring of `SYSCALL_TEST_REPORT` payloads.
     ///
     /// `None` for non-test tasks (the syscall is never invoked). The first
     /// `SYSCALL_TEST_REPORT` from a task lazily allocates a fresh ring; the
-    /// kernel-side userland-test runner takes ownership once the task has
-    /// exited. The handle is contiguous with `kernel_stack`/`unsafe_stack`/
-    /// `process_group` so `reset_in_place`'s zero-byte hole covers every
-    /// owned-handle field in one span.
+    /// kernel-side userland-test runner takes ownership once the task exits.
     pub test_reports: Option<KBox<TestReportRing>>,
-    /// Index of this Task's slot in the `TASK_MANAGER` pool spine.
-    pub slot_index: u32,
-    /// Slot-reuse generation, paired with `slot_index` to form this
-    /// task's [`crate::handle::Handle`]. A fresh value is stamped each
-    /// time the slot is reserved for a new task, so a handle minted for a
-    /// previous occupant resolves to a typed staleness error once the
-    /// slot has been recycled — never a use-after-reuse on a stale
-    /// pointer. `0` marks an unallocated slot.
-    pub generation: u64,
     pub parent_task_id: u32,
     /// FS segment base address (TLS pointer). Written to MSR FS_BASE before
     /// switching to user mode, and read back on context save.
@@ -352,8 +337,6 @@ pub struct TaskInner<K, U> {
     pub on_cpu: AtomicBool,
     /// Intrusive link slot for the per-CPU `ReadyQueue`.
     pub ready_link: Link<TaskInner<K, U>, ReadyQueueRole>,
-    /// Intrusive link slot for the global `ZombieList`.
-    pub zombie_link: Link<TaskInner<K, U>, ZombieListRole>,
     /// Intrusive link slot for per-CPU remote wake inboxes.
     ///
     /// Although the inbox itself is a lock-free Treiber stack, not an
@@ -422,8 +405,6 @@ impl<K, U> TaskInner<K, U> {
             unsafe_stack: None,
             process_group: None,
             test_reports: None,
-            slot_index: u32::MAX,
-            generation: 0,
             parent_task_id: INVALID_TASK_ID,
             fs_base: 0,
             tgid: INVALID_TASK_ID,
@@ -460,7 +441,6 @@ impl<K, U> TaskInner<K, U> {
             switch_ctx: SwitchContext::zero(),
             on_cpu: AtomicBool::new(false),
             ready_link: Link::new(),
-            zombie_link: Link::new(),
             remote_inbox_link: Link::new(),
             sched_placement: AtomicU8::new(SchedPlacement::None.as_u8()),
             refcnt: AtomicU32::new(0),
@@ -517,8 +497,6 @@ impl<K, U> TaskInner<K, U> {
                 addr_of_mut!((*slot).test_reports).write(None);
                 addr_of_mut!((*slot).abi.unsafe_stack_sp).write(0);
 
-                addr_of_mut!((*slot).slot_index).write(u32::MAX);
-
                 addr_of_mut!((*slot).signal_blocked).write(SIG_EMPTY);
                 for i in 0..NSIG {
                     let p = (addr_of_mut!((*slot).signal_actions) as *mut SignalAction).add(i);
@@ -531,47 +509,6 @@ impl<K, U> TaskInner<K, U> {
 
                 Ok(())
             })
-        }
-    }
-
-    /// Reset a Task slot in place to the `invalid` state.
-    ///
-    /// # Safety
-    /// - `this` must be non-null, aligned, and point to a writable
-    ///   `TaskInner<K, U>` slot that the caller has exclusive access to.
-    /// - The slot must currently hold a valid `TaskInner<K, U>`.
-    pub unsafe fn reset_in_place(this: *mut Self) {
-        unsafe {
-            let preserved_slot_index = (*this).slot_index;
-            let _ = (*this).kernel_stack.take();
-            let _ = (*this).unsafe_stack.take();
-            let _ = (*this).process_group.take();
-            let _ = (*this).test_reports.take();
-            (*this).exit_info.reset();
-            let bytes = core::mem::size_of::<Self>();
-            let kernel_stack_off = core::mem::offset_of!(Self, kernel_stack);
-            let test_reports_off = core::mem::offset_of!(Self, test_reports);
-            let test_reports_size = core::mem::size_of::<Option<KBox<TestReportRing>>>();
-            debug_assert!(
-                kernel_stack_off < test_reports_off,
-                "TaskInner: kernel_stack must precede test_reports for reset_in_place hole span"
-            );
-            let tail_start = test_reports_off + test_reports_size;
-            let base = this as *mut u8;
-            core::ptr::write_bytes(base, 0, kernel_stack_off);
-            core::ptr::write_bytes(base.add(tail_start), 0, bytes - tail_start);
-            (*this).task_id = INVALID_TASK_ID;
-            (*this).priority = TaskPriority::Normal;
-            (*this).process_id = INVALID_PROCESS_ID;
-            (*this).slot_index = preserved_slot_index;
-            (*this).parent_task_id = INVALID_TASK_ID;
-            (*this).tgid = INVALID_TASK_ID;
-            (*this).pgid = INVALID_TASK_ID;
-            (*this).sid = INVALID_TASK_ID;
-            (*this).cwd[0] = b'/';
-            (*this).cwd_len = 1;
-            addr_of_mut!((*this).exit_info).write(AtomicCell::empty());
-            addr_of_mut!((*this).state).write(TaskState::invalid());
         }
     }
 
@@ -711,14 +648,13 @@ impl<K, U> TaskInner<K, U> {
         matches!(self.status(), TaskStatus::Zombie | TaskStatus::Terminated)
     }
 
-    /// Reset the per-run "runtime" bookkeeping on a slot being (re)activated:
+    /// Reset the per-run runtime bookkeeping on a newly allocated task:
     /// clears timing, exit/fault disposition, fate tokens, scheduler
     /// placement, the intrusive scheduler links, and the refcount, and stamps
     /// a fresh creation timestamp.
     ///
-    /// Drives both the task-create path (after a fresh slot is reserved) and
-    /// the fork path (after the child slot is bulk-copied from its parent), so
-    /// a recycled or cloned slot always starts from neutral runtime state. The
+    /// Drives both the task-create path and the fork path (after the child is
+    /// bulk-copied from its parent), so every task starts neutral. The
     /// owning crate holds exclusive `&mut self` access at every call site.
     pub fn reset_runtime_state(&mut self) {
         self.time_slice_remaining = self.time_slice;
@@ -734,7 +670,6 @@ impl<K, U> TaskInner<K, U> {
         self.fate_pending = 0;
         self.on_cpu.store(false, Ordering::Release);
         self.ready_link.reset();
-        self.zombie_link.reset();
         self.remote_inbox_link.reset();
         self.sched_placement
             .store(SchedPlacement::None.as_u8(), Ordering::Release);
@@ -753,7 +688,6 @@ impl<K, U> TaskInner<K, U> {
     /// values via `ptr::write` so their `Drop` does not free the
     /// parent's resources.
     pub unsafe fn clone_from_raw(&mut self, other: &Self) {
-        let preserved_slot_index = self.slot_index;
         // SAFETY: Both pointers are valid, non-overlapping TaskInner
         // instances. The caller guarantees exclusive write access to
         // `self`.
@@ -771,9 +705,7 @@ impl<K, U> TaskInner<K, U> {
             core::ptr::write(&mut self.exit_info as *mut _, AtomicCell::empty());
             core::ptr::write(&mut self.state as *mut _, TaskState::invalid());
         }
-        self.slot_index = preserved_slot_index;
         self.ready_link.reset();
-        self.zombie_link.reset();
         self.remote_inbox_link.reset();
         self.sched_placement = AtomicU8::new(SchedPlacement::None.as_u8());
         self.refcnt = AtomicU32::new(0);
@@ -814,12 +746,6 @@ impl<K, U> TaskInner<K, U> {
 impl<K, U> crate::task::LinkProvider<ReadyQueueRole> for TaskInner<K, U> {
     fn link(&self) -> &Link<Self, ReadyQueueRole> {
         &self.ready_link
-    }
-}
-
-impl<K, U> crate::task::LinkProvider<ZombieListRole> for TaskInner<K, U> {
-    fn link(&self) -> &Link<Self, ZombieListRole> {
-        &self.zombie_link
     }
 }
 

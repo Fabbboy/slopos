@@ -1145,6 +1145,15 @@ impl<T: ?Sized> KArc<T> {
         core::ptr::addr_eq(this.ptr.as_ptr(), other.ptr.as_ptr())
     }
 
+    /// Return a stable raw pointer to the shared value without transferring
+    /// ownership. The pointer remains valid only while at least one strong
+    /// [`KArc`] is alive; callers that retain it must retain a strong handle
+    /// for the same duration.
+    #[inline]
+    pub fn as_ptr(this: &Self) -> *const T {
+        core::ptr::addr_of!(this.inner().data)
+    }
+
     /// Move one strong reference into an OSTD-owned raw slot.
     #[allow(dead_code)]
     pub(crate) fn into_raw(this: Self) -> *const T

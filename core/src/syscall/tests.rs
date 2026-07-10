@@ -56,10 +56,10 @@ use slopos_mm::memory_layout_defs::PROCESS_CODE_START_VA;
 use slopos_sched::scheduler::unblock_task;
 use slopos_sched::task;
 use slopos_sched::task::{
-    task_clone, task_controlling_tty, task_create, task_find_by_id, task_fork, task_fs_base,
-    task_pgid, task_process_group, task_process_id, task_sched_placement_store, task_set_state,
-    task_set_state_from_with_reason, task_sid, task_signal_pending, task_status, task_terminate,
-    task_try_transition_from,
+    task_clone, task_controlling_tty, task_create, task_find_by_id_raw_for_test as task_find_by_id,
+    task_fork, task_fs_base, task_pgid, task_process_group, task_process_id,
+    task_sched_placement_store, task_set_state, task_set_state_from_with_reason, task_sid,
+    task_signal_pending, task_status, task_terminate, task_try_transition_from,
 };
 
 // =============================================================================

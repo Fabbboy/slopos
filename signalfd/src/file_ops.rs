@@ -50,11 +50,9 @@ impl Drop for SignalfdBacking {
 
 /// Signals in `state.mask` currently pending for the owner task.
 fn pending_masked(state: &SignalfdState) -> u64 {
-    let task = task_find_by_id(state.owner_task_id);
-    if task.is_null() {
-        return 0;
-    }
-    task_signal_pending(task) & state.mask
+    task_find_by_id(state.owner_task_id)
+        .map(|task| task_signal_pending(task.as_ptr()) & state.mask)
+        .unwrap_or(0)
 }
 
 impl FileOps for SignalfdFileOps {
@@ -77,11 +75,10 @@ impl FileOps for SignalfdFileOps {
         }
         // Drain the lowest pending masked signal.
         let signum = (pending.trailing_zeros() as u8).wrapping_add(1);
-        let task = task_find_by_id(state.owner_task_id);
-        if task.is_null() {
+        let Some(task) = task_find_by_id(state.owner_task_id) else {
             return Errno::EBADF.as_isize();
-        }
-        let _ = task_signal_pending_clear(task, sig_bit(signum));
+        };
+        let _ = task_signal_pending_clear(task.as_ptr(), sig_bit(signum));
         let info = SignalfdSiginfo {
             ssi_signo: signum as u32,
             ..Default::default()

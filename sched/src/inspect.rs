@@ -1,20 +1,14 @@
-//! Lifetime-branded handle for inspecting kernel `Task` slots from
+//! Lifetime-branded handle for inspecting kernel tasks from
 //! tests. Replaces the ~150 `unsafe { (*task_ptr).field }` idiom that
 //! `core::scheduler::{sched_tests, context_tests}` and `core::syscall::tests`
 //! use today.
 //!
 //! ## Why a handle (not raw pointers)
 //!
-//! - **Lifetime safety:** the `'pool` lifetime ties the handle to the
-//!   active [`KernelTestScope`] fixture. The scope coordinates with
-//!   the zombie reaper, so a handle minted inside a scope cannot
-//!   observe a recycled slot.
-//! - **Refcount safety:** the handle embeds a [`TaskRefGuard`] which
-//!   increments `task->refcnt` on construction and decrements on
-//!   drop. Even if `KernelTestScope`'s reaper-quiescence guarantee is
-//!   violated by future refactoring, the slot remains pinned for the
-//!   handle's lifetime (`reap_zombies` requires
-//!   `task_ref_count(raw) == Some(0)`).
+//! - **Lifetime safety:** the `'scope` lifetime ties the handle to the
+//!   active [`KernelTestScope`] fixture.
+//! - **Ownership safety:** the handle owns a registry-upgraded `TaskRef`,
+//!   pinning the task for the handle's lifetime.
 //! - **Aliasing safety:** the handle exposes a shared `&Task` only.
 //!   Mutations go through the existing `task_set_*` free functions
 //!   in `task_accessors`, which take `*mut Task` and validate.
@@ -24,7 +18,7 @@
 //!
 //! ## What's the surface
 //!
-//! - [`TaskHandle<'pool>`]: borrowed handle, `Copy`-free (carries a
+//! - [`TaskHandle<'scope>`]: borrowed handle, `Copy`-free (carries a
 //!   ref guard), construction via [`by_id`] / [`current`] / [`by_cr3`]
 //!   that take a `&KernelTestScope`.
 //! - [`TaskSnapshot`]: POD struct capturing the most-frequently-read
@@ -42,15 +36,13 @@
 //! `task/task_accessors.rs` and the inner `task_borrow` lookup.
 
 use core::marker::PhantomData;
-use core::ptr::NonNull;
 use core::sync::atomic::Ordering;
 
 use slopos_abi::syscall::TtyIndex;
 
 use super::exit_info::ExitInfo;
 use super::task::{
-    TaskStatus, task_borrow, task_dec_ref, task_find_by_cr3, task_find_by_id, task_inc_ref,
-    task_pointer_is_valid, task_waiter_count,
+    TaskRef, TaskStatus, task_find_by_cr3, task_find_by_id, task_id_of, task_waiter_count,
 };
 use super::task_struct::{Task, TaskPriority};
 use super::test_fixture::KernelTestScope;
@@ -61,29 +53,26 @@ use super::test_fixture::KernelTestScope;
 
 /// Lifetime-branded inspection handle for a kernel task slot.
 ///
-/// `TaskHandle<'pool>` is constructed only inside an active
-/// [`KernelTestScope`], with `'pool` tied to a borrow of the scope.
-/// Carries a `TaskRefGuard`-equivalent reference bump so the slot
-/// stays pinned for the handle's lifetime regardless of scope
-/// quiescence guarantees.
-pub struct TaskHandle<'pool> {
-    raw: NonNull<Task>,
-    _marker: PhantomData<&'pool Task>,
+/// `TaskHandle<'scope>` is constructed only inside an active
+/// [`KernelTestScope`], with `'scope` tied to a borrow of the scope.
+/// Carries a strong registry guard so the task stays pinned for the handle's
+/// lifetime regardless of scope quiescence guarantees.
+pub struct TaskHandle<'scope> {
+    task: TaskRef,
+    _marker: PhantomData<&'scope Task>,
 }
 
-impl<'pool> TaskHandle<'pool> {
-    /// Internal constructor — validates `raw` is a live pool slot and
-    /// bumps the refcount. Returns `None` for null / unmapped / dead
-    /// pointers.
+impl<'scope> TaskHandle<'scope> {
+    /// Internal constructor — validates `raw` through the weak registry and
+    /// retains the upgraded strong reference.
     fn from_raw(raw: *mut Task) -> Option<Self> {
-        if raw.is_null() || !task_pointer_is_valid(raw as *const Task) {
+        let id = task_id_of(raw)?;
+        let task = task_find_by_id(id)?;
+        if task.as_ptr() != raw {
             return None;
         }
-        // Bump the refcount via the existing safe-fn API. Free on Drop.
-        let _ = task_inc_ref(raw);
-        let nn = NonNull::new(raw)?;
         Some(Self {
-            raw: nn,
+            task,
             _marker: PhantomData,
         })
     }
@@ -95,9 +84,7 @@ impl<'pool> TaskHandle<'pool> {
     /// the field level — tests should not assume otherwise without
     /// explicit synchronisation).
     pub fn task(&self) -> &Task {
-        // task_borrow validates the raw pointer; we know it's valid by
-        // construction.
-        task_borrow(self.raw.as_ptr() as *const Task).expect("TaskHandle refers to a live slot")
+        &self.task
     }
 
     /// Raw `*mut Task` escape hatch for the handful of test sites
@@ -105,7 +92,7 @@ impl<'pool> TaskHandle<'pool> {
     /// `task_set_*` mutator APIs. Prefer field-specific safe-fn
     /// wrappers where possible.
     pub fn as_mut_ptr(&self) -> *mut Task {
-        self.raw.as_ptr()
+        self.task.as_ptr()
     }
 
     // -------- frequency-sorted field accessors --------
@@ -148,11 +135,6 @@ impl<'pool> TaskHandle<'pool> {
     #[inline]
     pub fn last_cpu(&self) -> u8 {
         self.task().last_cpu
-    }
-
-    #[inline]
-    pub fn slot_index(&self) -> u32 {
-        self.task().slot_index
     }
 
     #[inline]
@@ -237,15 +219,6 @@ impl<'pool> TaskHandle<'pool> {
     }
 }
 
-impl<'pool> Drop for TaskHandle<'pool> {
-    fn drop(&mut self) {
-        // Release the refcount taken in `from_raw`. The `_` discards
-        // the optional bool return (true if the slot transitioned to
-        // refcount zero).
-        let _ = task_dec_ref(self.raw.as_ptr());
-    }
-}
-
 // =============================================================================
 // TaskSnapshot
 // =============================================================================
@@ -272,25 +245,24 @@ pub struct TaskSnapshot {
 // =============================================================================
 
 /// Find a task by ID and return a handle valid for the scope's lifetime.
-pub fn by_id<'pool>(_scope: &'pool KernelTestScope, id: u32) -> Option<TaskHandle<'pool>> {
-    TaskHandle::from_raw(task_find_by_id(id))
+pub fn by_id<'scope>(_scope: &'scope KernelTestScope, id: u32) -> Option<TaskHandle<'scope>> {
+    task_find_by_id(id).and_then(|task| TaskHandle::from_raw(task.as_ptr()))
 }
 
 /// Wrap an already-located raw `*mut Task` — used by tests that
 /// retain the pointer from `task_fork` / `task_clone` return values.
-/// Returns `None` if the pointer is null or no longer maps to a live
-/// pool slot.
-pub fn wrap<'pool>(_scope: &'pool KernelTestScope, raw: *mut Task) -> Option<TaskHandle<'pool>> {
+/// Returns `None` if the pointer is null or no longer maps to a live task.
+pub fn wrap<'scope>(_scope: &'scope KernelTestScope, raw: *mut Task) -> Option<TaskHandle<'scope>> {
     TaskHandle::from_raw(raw)
 }
 
 /// Find a task by CR3.
-pub fn by_cr3<'pool>(_scope: &'pool KernelTestScope, cr3: u64) -> Option<TaskHandle<'pool>> {
-    TaskHandle::from_raw(task_find_by_cr3(cr3))
+pub fn by_cr3<'scope>(_scope: &'scope KernelTestScope, cr3: u64) -> Option<TaskHandle<'scope>> {
+    task_find_by_cr3(cr3).and_then(|task| TaskHandle::from_raw(task.as_ptr()))
 }
 
 /// Return a handle for the currently-running BSP task.
-pub fn current<'pool>(_scope: &'pool KernelTestScope) -> Option<TaskHandle<'pool>> {
+pub fn current<'scope>(_scope: &'scope KernelTestScope) -> Option<TaskHandle<'scope>> {
     let raw = slopos_arch::pcr::get_current_task_for(0) as *mut Task;
     TaskHandle::from_raw(raw)
 }

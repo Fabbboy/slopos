@@ -7,7 +7,7 @@
 //! ring alone could not (process reaping has no fd to submit against).
 //!
 //! Strictly synchronous, no `unsafe`: the heavy lifting is the existing
-//! task table + event bus. See [`file_ops`] for the readiness contract.
+//! task registry + event bus. See [`file_ops`] for the readiness contract.
 
 #![no_std]
 #![forbid(unsafe_code)]
@@ -28,13 +28,12 @@ use slopos_abi::Errno;
 /// On success the fd is `FileKind::Pidfd` with the target task id as its
 /// opaque handle (see [`file_ops`]).
 pub fn pidfd_open(process_id: u32, caller_task_id: u32, target_task_id: u32) -> i32 {
-    let task = slopos_sched::task::task_find_by_id(target_task_id);
-    if task.is_null() {
+    let Some(task) = slopos_sched::task::task_find_by_id(target_task_id) else {
         return Errno::ESRCH.raw();
-    }
+    };
     // Restrict to children of the caller: a pidfd is for reaping your own
     // children, mirroring how `waitpid` is scoped.
-    if slopos_ostd::task::accessors::task_parent_task_id(task) != Some(caller_task_id) {
+    if slopos_ostd::task::accessors::task_parent_task_id(task.as_ptr()) != Some(caller_task_id) {
         return Errno::EPERM.raw();
     }
     // A pidfd carries no per-open kernel state, so it has no backing to drop.

@@ -182,8 +182,6 @@ task_scalar_getters! {
     task_kernel_stack_top -> u64 = kernel_stack_top,
     /// Read `task->fs_base`.
     task_fs_base -> u64 = fs_base,
-    /// Read `task->slot_index`.
-    task_slot_index -> u32 = slot_index,
     /// Read `task->last_cpu`.
     task_last_cpu -> u8 = last_cpu,
     /// Read `task->tgid` (thread-group id).
@@ -267,7 +265,7 @@ task_state_predicates! {
 }
 
 /// True iff the task pointer is null **or** the task is in the `Invalid`
-/// state (an unallocated / fully-reset pool slot). Preserves the historical
+/// state (an uninitialized task). Preserves the historical
 /// `task_get_state(...) == Invalid` semantics where a null pointer collapsed
 /// to `Invalid`.
 #[inline]
@@ -746,9 +744,8 @@ pub fn task_context_rflags<K, U>(task: *const TaskInner<K, U>) -> Option<u64> {
 
 /// RAII increment of `task->refcnt`. `new` bumps the count; `Drop`
 /// decrements. Used by callers that hold a `*mut Task` across a
-/// scheduler yield (e.g. `task_wait_for`) so the pool slot cannot be
-/// reset by the zombie reaper while the borrow is live — `reap_zombies`
-/// requires `task_ref_count(raw) == Some(0)` before recycling.
+/// scheduler yield (e.g. `task_wait_for`) so transitional scheduler ownership
+/// cannot release the task while the borrow is live.
 pub struct TaskRefGuard<K, U> {
     task: *mut TaskInner<K, U>,
 }
@@ -997,7 +994,7 @@ pub fn task_remote_inbox_is_linked<K, U>(task: *const TaskInner<K, U>) -> bool {
     unsafe { (*task).remote_inbox_link.is_linked() }
 }
 
-/// Read `task->task_id` without any pool-validity gate. Mirrors
+/// Read `task->task_id` without any registry-validity gate. Mirrors
 /// [`task_id_of`] but skips the null-check.
 #[inline]
 pub fn task_task_id<K, U>(task: *const TaskInner<K, U>) -> Option<u32> {
@@ -1194,14 +1191,14 @@ pub fn task_with_user_ctx<R, K, U>(
 ///
 /// # Preconditions
 /// - Caller has interrupts disabled.
-/// - `prev` and `next` are pool-pinned Task pointers (or null for
-///   `prev` on bootstrap entry).
+/// - `prev` and `next` are Task pointers pinned by their dispatch
+///   references (or null for `prev` on bootstrap entry).
 #[inline]
 pub fn task_pcr_round_trip_swap<K, U>(prev: *mut TaskInner<K, U>, next: *mut TaskInner<K, U>) {
     use core::sync::atomic::Ordering;
     // SAFETY: interrupts disabled by caller; the per-CPU PCR is
     // stable for this CPU during a switch window. Each `(*prev)` /
-    // `(*next)` access is to a pool-pinned Task whose memory is
+    // `(*next)` access is to a dispatch-pinned Task whose memory is
     // valid for the duration of `prepare_switch_to`.
     unsafe {
         let pcr = crate::cpu::x86_64::pcr::current_pcr();
@@ -1372,19 +1369,6 @@ pub fn task_migration_count_inc<K, U>(task: *mut TaskInner<K, U>) {
     unsafe {
         (*task).migration_count = (*task).migration_count.saturating_add(1);
     }
-}
-
-/// Reset a `Task` in place via [`Task::reset_in_place`]. No-op for
-/// null pointers; caller must hold exclusive access to the slot
-/// (typically via the task-manager lock).
-#[inline]
-pub fn task_reset_in_place<K, U>(task: *mut TaskInner<K, U>) {
-    if task.is_null() {
-        return;
-    }
-    // SAFETY: caller guarantees exclusive access; `reset_in_place` is
-    // the canonical slot-recycle entry point.
-    unsafe { TaskInner::<K, U>::reset_in_place(task) };
 }
 
 /// Release the kernel-stack and SafeStack handles owned by `task`,

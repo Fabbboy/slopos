@@ -26,7 +26,7 @@ pub use drop_context::{assert_task_drop_context, drop_off_lock, run_off_lock};
 pub use exit_info::ExitInfo;
 pub use job_control::{ProcessGroup, Session, new_group_in_session, new_session_group};
 pub use kernel_task::SchedPlacement;
-pub use link_roles::{ReadyQueueRole, RemoteWakeRole, ZombieListRole};
+pub use link_roles::{ReadyQueueRole, RemoteWakeRole};
 pub use state::{TaskState, TaskStateView};
 pub use test_reports::{
     PendingDrain, TestReport, TestReportRing, alloc_ring, consume_pending_drain, empty_report,

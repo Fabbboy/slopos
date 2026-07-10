@@ -10,7 +10,8 @@ use slopos_sched::scheduler::{
 };
 use slopos_sched::task::{
     INVALID_TASK_ID, TASK_FLAG_KERNEL_MODE, TaskPriority, TaskStatus, init_task_manager,
-    task_create, task_find_by_id, task_shutdown_all, task_terminate,
+    task_create, task_find_by_id_raw_for_test as task_find_by_id, task_shutdown_all,
+    task_terminate,
 };
 use slopos_sched::test_fixture::KernelTestScope;
 use slopos_testing::{TestResult, assert_eq_test, assert_test};

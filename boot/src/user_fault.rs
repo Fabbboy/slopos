@@ -6,6 +6,7 @@ use slopos_arch::cpu;
 use slopos_kernel_services::kernel_vm_space::activate_post_user_fault;
 use slopos_ostd::{kdiag_dump_interrupt_frame, klog_info};
 use slopos_sched::scheduler::{schedule, scheduler_get_current_task};
+use slopos_sched::task::TaskRef;
 use slopos_sched::task::task_terminate;
 use slopos_sched::task::{
     task_context_cr3, task_entry_point, task_find_by_cr3, task_flags, task_id_of, task_name_bytes,
@@ -26,9 +27,14 @@ use crate::panic::set_panic_cpu_state;
 /// # Safety invariant
 /// The caller must be handling a user-mode exception (CS RPL == 3).
 /// This function never returns.
-fn retire_faulted_cpu(task: *mut Task, reason: TaskFaultReason) -> ! {
+fn retire_faulted_cpu(task_ref: TaskRef, reason: TaskFaultReason) -> ! {
+    let mut task_ref = Some(task_ref);
+    let task = task_ref.as_ref().expect("fault task guard").as_ptr();
     if let Some(tid) = task_record_user_fault_exit(task, reason) {
         task_terminate(tid);
+        // The current-task dispatch owner keeps the raw projection alive.
+        // Release the registry upgrade before the diverging switch tail.
+        drop(task_ref.take());
         // This is the one exception path that abandons the per-CPU exception
         // SafeStack data stack WITHOUT unwinding: `schedule()` switches away
         // and never returns here, so the depth consumed by this handler
@@ -54,6 +60,7 @@ fn retire_faulted_cpu(task: *mut Task, reason: TaskFaultReason) -> ! {
         slopos_ostd::cpu::preempt::release_diverging_exception_hold();
         schedule();
     }
+    drop(task_ref.take());
     // schedule() returned without switching — park safely on the
     // kernel master PML4 so this CPU can keep servicing IPIs.
     let _ = activate_post_user_fault();
@@ -70,25 +77,18 @@ pub(crate) fn cstr_from_bytes(bytes: &'static [u8]) -> &'static CStr {
 }
 
 #[inline]
-pub(crate) fn resolve_user_fault_task() -> *mut Task {
+pub(crate) fn resolve_user_fault_task() -> Option<TaskRef> {
     let hw_cr3 = cpu::read_cr3() & !0xFFF;
-    let mut task = scheduler_get_current_task() as *mut Task;
+    let task = scheduler_get_current_task() as *mut Task;
 
     if !task.is_null() && task_pointer_is_valid(task as *const Task) {
         let task_cr3 = task_context_cr3(task as *const Task).unwrap_or(0) & !0xFFF;
         if task_cr3 == hw_cr3 {
-            return task;
+            return task_id_of(task).and_then(slopos_sched::task::task_find_by_id);
         }
-    } else {
-        task = core::ptr::null_mut();
     }
 
-    let by_cr3 = task_find_by_cr3(hw_cr3);
-    if !by_cr3.is_null() {
-        return by_cr3;
-    }
-
-    task
+    task_find_by_cr3(hw_cr3)
 }
 
 pub(crate) fn terminate_user_task(
@@ -96,9 +96,7 @@ pub(crate) fn terminate_user_task(
     frame: &InterruptFrame,
     detail: &'static CStr,
 ) {
-    let task = resolve_user_fault_task();
-
-    if task.is_null() {
+    let Some(task_ref) = resolve_user_fault_task() else {
         klog_info!(
             "Terminating user fault context without a valid current task: {}",
             detail.to_str().unwrap_or("<invalid utf-8>")
@@ -109,7 +107,8 @@ pub(crate) fn terminate_user_task(
             frame as *const _ as *mut _,
         );
         return;
-    }
+    };
+    let task = task_ref.as_ptr();
 
     let tid = task_id_of(task as *const Task).unwrap_or(INVALID_TASK_ID);
     let detail_str = detail.to_str().unwrap_or("<invalid utf-8>");
@@ -143,10 +142,7 @@ pub(crate) fn terminate_user_task(
         flags
     );
     kdiag_dump_interrupt_frame(frame as *const _);
-    if !task.is_null() {
-        retire_faulted_cpu(task, reason);
-    }
-    let _ = frame;
+    retire_faulted_cpu(task_ref, reason);
 }
 
 pub(crate) fn panic_with_frame(message: &str, frame: *mut InterruptFrame) {

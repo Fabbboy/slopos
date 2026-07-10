@@ -41,8 +41,8 @@ pub fn fork_rr_counter_set(value: usize) {
 }
 
 use super::task::{
-    task_cpu_affinity, task_dec_ref, task_inc_ref, task_last_cpu, task_next_inbox_load,
-    task_next_inbox_store_relaxed, task_next_inbox_store_release, task_priority,
+    task_cpu_affinity, task_inc_ref, task_last_cpu, task_next_inbox_load,
+    task_next_inbox_store_relaxed, task_next_inbox_store_release, task_priority, task_release_ref,
     task_remote_inbox_try_link, task_remote_inbox_unlink, task_sched_placement_compare_exchange,
     task_sched_placement_load, task_set_last_cpu, task_status,
 };
@@ -89,7 +89,7 @@ impl ReadyQueue {
                 SchedPlacement::ReadyQueue,
                 SchedPlacement::None,
             );
-            let _ = task_dec_ref(raw);
+            let _ = task_release_ref(raw);
         }
     }
 
@@ -137,7 +137,7 @@ impl ReadyQueue {
                     SchedPlacement::ReadyQueue,
                     SchedPlacement::OnCpu,
                 );
-                let _ = task_dec_ref(raw);
+                let _ = task_release_ref(raw);
                 raw
             }
             None => ptr::null_mut(),
@@ -156,7 +156,7 @@ impl ReadyQueue {
             SchedPlacement::ReadyQueue,
             SchedPlacement::None,
         );
-        let _ = task_dec_ref(task);
+        let _ = task_release_ref(task);
         0
     }
 
@@ -181,7 +181,7 @@ impl ReadyQueue {
             );
             return None;
         }
-        let _ = task_dec_ref(raw);
+        let _ = task_release_ref(raw);
         Some(raw)
     }
 }
@@ -575,7 +575,7 @@ impl PriorityRunQueue {
             let old_head = self.remote_inbox_head.load(Ordering::Acquire);
 
             // Point our RemoteWakeRole link to the current head. `node` is a
-            // non-null `*mut Task` pointing at a pool-pinned Task.
+            // non-null `*mut Task` pinned by the inbox reference above.
             task_next_inbox_store_relaxed(node.as_ptr(), old_head);
 
             // Try to become new head
@@ -646,7 +646,7 @@ impl PriorityRunQueue {
                         SchedPlacement::None,
                     );
                 }
-                let _ = task_dec_ref(current);
+                let _ = task_release_ref(current);
             } else {
                 // The task is no longer Ready, or another owner repaired an
                 // inconsistent placement. Drop the remote-inbox claim, then
@@ -660,10 +660,13 @@ impl PriorityRunQueue {
                     SchedPlacement::RemoteWake,
                     SchedPlacement::None,
                 );
-                let _ = task_dec_ref(current);
                 if task_status(current) == Some(TaskStatus::Ready) {
                     let _ = self.enqueue_local(current);
                 }
+                // Release the inbox reference only after the last use of
+                // `current`: for a terminated task this may be the final
+                // reference, after which the pointer must not be touched.
+                let _ = task_release_ref(current);
             }
 
             current = next;
@@ -686,7 +689,7 @@ impl PriorityRunQueue {
                 SchedPlacement::RemoteWake,
                 SchedPlacement::None,
             );
-            let _ = task_dec_ref(cursor);
+            let _ = task_release_ref(cursor);
             cursor = next;
             drained = drained.saturating_add(1);
         }

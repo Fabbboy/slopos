@@ -38,7 +38,7 @@ use slopos_sched::task::{
     task_entry_from_kernel_va, task_process_group, task_process_id, task_session,
     task_set_context_rip_rsp, task_set_entry_point, task_set_fs_base, task_user_ctx_mut,
 };
-use slopos_sched::task::{task_create, task_find_by_id, task_get_info, task_terminate};
+use slopos_sched::task::{task_create, task_find_by_id, task_terminate};
 
 pub const EXEC_MAX_PATH: usize = 256;
 pub const EXEC_MAX_ARG_STRLEN: usize = 4096;
@@ -226,11 +226,14 @@ pub fn spawn_program_with_attrs(
             return Err(ExecError::NoMem);
         }
 
-        let mut task_info: *mut slopos_sched::task_struct::Task = ptr::null_mut();
-        if task_get_info(task_id, &mut task_info) != 0 || task_info.is_null() {
+        // Hold the registry guard for the whole spawn sequence: the raw
+        // projection below is written to until publish_new_task, and a
+        // concurrent terminate must not invalidate it mid-initialization.
+        let Some(task_guard) = task_find_by_id(task_id) else {
             task_terminate(task_id);
             return Err(ExecError::Fault);
-        }
+        };
+        let task_info = task_guard.as_ptr();
 
         // task_create() returns a non-runnable task. It stays Blocked while
         // we perform disk I/O and write entry_point, rip, rsp, fd table, pgid,
@@ -302,8 +305,8 @@ pub fn spawn_program_with_attrs(
         // set it as the foreground process group.
         let mut fg_handoff: Option<(slopos_abi::syscall::TtyIndex, u32, u32)> = None;
         if parent_task_id != INVALID_TASK_ID {
-            let parent_ptr = task_find_by_id(parent_task_id);
-            if !parent_ptr.is_null() {
+            if let Some(parent_ref) = task_find_by_id(parent_task_id) {
+                let parent_ptr = parent_ref.as_ptr();
                 if let (Some(parent), Some(child)) =
                     (task_borrow(parent_ptr), task_borrow_mut(task_info))
                 {

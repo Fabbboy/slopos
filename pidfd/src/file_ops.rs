@@ -13,13 +13,8 @@
 //! - `read`/`write` are meaningless (`-EINVAL`); the exit status is reaped
 //!   with the existing `waitpid` syscall once the fd signals.
 //!
-//! Lifetime: the kernel's task `KBox`es live for the kernel's lifetime
-//! (see `task_find_by_id`), so dereferencing the looked-up pointer is
-//! always sound — there is no use-after-free. The only residual ambiguity
-//! is task-id *recycling* (the slot's identity changing after a reap),
-//! which is the same benign staleness `task_wait_for`'s readiness check
-//! tolerates; for a pidfd's short lifetime (open → poll → reap) it is not
-//! a concern.
+//! Lifetime: lookup upgrades the task registry's weak handle. IDs are
+//! monotonic and never recycled, so an absent task is unambiguously dead.
 
 use slopos_abi::Errno;
 use slopos_abi::file_ops::{FileKind, FileOps};
@@ -35,9 +30,10 @@ pub static PIDFD_FILE_OPS: PidfdFileOps = PidfdFileOps;
 
 /// `true` once the target task (by id) has exited, or is gone entirely.
 fn target_exited(task_id: u32) -> bool {
-    let task = task_find_by_id(task_id);
-    // A null lookup means the task was already reaped — treat as exited.
-    task.is_null() || task_is_exited(task)
+    // A failed upgrade means the task was already destroyed — treat as exited.
+    task_find_by_id(task_id)
+        .map(|task| task_is_exited(task.as_ptr()))
+        .unwrap_or(true)
 }
 
 impl FileOps for PidfdFileOps {

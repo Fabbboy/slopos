@@ -5,8 +5,7 @@ use super::task_table::task_find_by_id;
 use super::{BlockReason, Task, TaskStatus};
 
 pub fn task_set_state(task_id: u32, new_status: TaskStatus) -> c_int {
-    let task = task_find_by_id(task_id);
-    let Some(task_ref) = task_borrow(task) else {
+    let Some(task_ref) = task_find_by_id(task_id) else {
         return -1;
     };
     if task_ref.status() == TaskStatus::Invalid {
@@ -37,15 +36,14 @@ pub fn task_set_state_with_reason(
     new_status: TaskStatus,
     reason: BlockReason,
 ) -> c_int {
-    let task = task_find_by_id(task_id);
-    let Some(task_ref) = task_borrow(task) else {
+    let Some(task_ref) = task_find_by_id(task_id) else {
         return -1;
     };
     if task_ref.status() == TaskStatus::Invalid {
         return -1;
     }
 
-    apply_state_transition(task_ref, new_status, reason)
+    apply_state_transition(&task_ref, new_status, reason)
 }
 
 /// The fused state word's ABA epoch for a task pointer, or `None` for an
@@ -59,8 +57,7 @@ pub fn task_state_epoch(task: *mut Task) -> Option<u32> {
 /// Returns 0 on success, -1 if the current state does not match `expected`
 /// or the transition is invalid.
 pub fn task_try_transition_from(task_id: u32, expected: TaskStatus, target: TaskStatus) -> c_int {
-    let task = task_find_by_id(task_id);
-    let Some(task_ref) = task_borrow(task) else {
+    let Some(task_ref) = task_find_by_id(task_id) else {
         return -1;
     };
     if task_ref.status() == TaskStatus::Invalid {
@@ -76,8 +73,7 @@ pub fn task_set_state_from_with_reason(
     new_status: TaskStatus,
     reason: BlockReason,
 ) -> c_int {
-    let task = task_find_by_id(task_id);
-    let Some(task_ref) = task_borrow(task) else {
+    let Some(task_ref) = task_find_by_id(task_id) else {
         return -1;
     };
     if task_ref.status() == TaskStatus::Invalid {

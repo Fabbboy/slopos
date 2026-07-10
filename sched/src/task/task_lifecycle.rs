@@ -8,7 +8,7 @@ use slopos_ostd::task::accessors::{
     TASK_EXIT_CLEANUP_ACCOUNTED, TASK_EXIT_CLEANUP_RESOURCES, TASK_EXIT_CLEANUP_VM,
     task_exit_cleanup_mark,
 };
-use slopos_ostd::{klog_debug, klog_info};
+use slopos_ostd::{KVec, klog_debug, klog_info};
 
 use slopos_ostd::task::accessors::task_process_group;
 use slopos_ostd::task::new_session_group;
@@ -18,8 +18,8 @@ use super::task_cleanup_hooks::run_task_resource_cleanup_hooks;
 use super::task_session::{notify_parent_of_child_exit, release_task_dependents};
 use super::task_stats::record_task_created;
 use super::task_table::{
-    ReserveTaskSlotError, defer_task_cleanup, free_task_stacks, release_task_slot,
-    reserve_task_slot, task_find_by_id, with_task_manager,
+    TaskAllocError, allocate_task, discard_task, register_task, task_find_by_id, task_registry_len,
+    task_try_reclaim, with_task_manager,
 };
 use super::{
     INVALID_PROCESS_ID, INVALID_TASK_ID, TASK_FLAG_KERNEL_MODE, TASK_FLAG_SYSTEM,
@@ -520,22 +520,24 @@ pub fn task_create(
         return INVALID_TASK_ID;
     }
 
-    let (task, task_id) = match reserve_task_slot() {
-        Ok(values) => values,
-        Err(ReserveTaskSlotError::MaxTasks) => {
+    let pending = match allocate_task() {
+        Ok(pending) => pending,
+        Err(TaskAllocError::MaxTasks) => {
             klog_info!("task_create: Maximum tasks reached");
             return INVALID_TASK_ID;
         }
-        Err(ReserveTaskSlotError::NoFreeSlot) => {
+        Err(TaskAllocError::NoFreeSlot | TaskAllocError::IdExhausted) => {
             klog_info!("task_create: No free task slots");
             return INVALID_TASK_ID;
         }
     };
+    let task_id = pending.id();
+    let task = pending.as_ptr();
 
     let resources = match allocate_task_create_resources(flags) {
         Some(resources) => resources,
         None => {
-            release_task_slot(task);
+            discard_task(pending);
             return INVALID_TASK_ID;
         }
     };
@@ -545,7 +547,7 @@ pub fn task_create(
     };
     task_ref.task_id = task_id;
     copy_name(&mut task_ref.name, name);
-    // Status stays Blocked (set by reserve_task_slot) until fully initialised.
+    // Status stays Blocked (set during allocation) until fully initialised.
     task_ref.priority = TaskPriority::from_u8(priority);
     task_ref.flags = flags;
     task_ref.process_id = resources.process_id;
@@ -564,7 +566,7 @@ pub fn task_create(
                     resources.kernel_stack,
                     resources.unsafe_stack,
                 );
-                release_task_slot(task);
+                discard_task(pending);
                 return INVALID_TASK_ID;
             }
         }
@@ -581,7 +583,7 @@ pub fn task_create(
             resources.kernel_stack,
             resources.unsafe_stack,
         );
-        release_task_slot(task);
+        discard_task(pending);
         return INVALID_TASK_ID;
     }
 
@@ -619,6 +621,12 @@ pub fn task_create(
             slopos_mm::process_vm::process_vm_get_ostd_pml4_paddr(resources.process_id);
     }
 
+    if let Err(pending) = register_task(pending) {
+        klog_info!("task_create: task registry full");
+        discard_task(pending);
+        return INVALID_TASK_ID;
+    }
+
     // task_create() deliberately returns a fully initialized but non-runnable
     // task. The sole new-task runnable edge is scheduler::publish_new_task(),
     // which reserves scheduler placement and publishes Ready as one protocol.
@@ -626,7 +634,7 @@ pub fn task_create(
 
     klog_debug!(
         "Created task '{}' with ID {}",
-        bytes_as_str(&task_ref.name),
+        task_name_bytes(task).map(bytes_as_str).unwrap_or(""),
         task_id
     );
 
@@ -634,7 +642,22 @@ pub fn task_create(
 }
 
 pub fn task_terminate(task_id: u32) -> c_int {
-    let (task_ptr, resolved_id) = resolve_termination_target(task_id);
+    let target = if task_id == u32::MAX {
+        None
+    } else {
+        task_find_by_id(task_id)
+    };
+    let (task_ptr, resolved_id) = if task_id == u32::MAX {
+        let current = scheduler::scheduler_get_current_task();
+        (current, task_id_of(current).unwrap_or(INVALID_TASK_ID))
+    } else {
+        (
+            target
+                .as_ref()
+                .map_or(ptr::null_mut(), |task| task.as_ptr()),
+            task_id,
+        )
+    };
 
     if task_id == u32::MAX && task_ptr.is_null() {
         klog_info!("task_terminate: No current task to terminate");
@@ -701,20 +724,8 @@ pub fn task_terminate(task_id: u32) -> c_int {
         mgr.tasks_terminated = mgr.tasks_terminated.saturating_add(1);
     });
 
+    drop(target);
     0
-}
-
-fn resolve_termination_target(task_id: u32) -> (*mut Task, u32) {
-    if task_id == u32::MAX {
-        let current = scheduler::scheduler_get_current_task();
-        if current.is_null() {
-            (ptr::null_mut(), INVALID_TASK_ID)
-        } else {
-            (current, task_id_of(current).unwrap_or(INVALID_TASK_ID))
-        }
-    } else {
-        (task_find_by_id(task_id), task_id)
-    }
 }
 
 fn mark_task_terminated(task_ptr: *mut Task, resolved_id: u32) {
@@ -787,8 +798,8 @@ fn mark_task_terminated(task_ptr: *mut Task, resolved_id: u32) {
 
     // Release any waitpid wait-reference this task held on its target. A task
     // SIGKILL'd while parked in `task_wait_for` never unwinds its own stack,
-    // so the incref it took on the target must be dropped here or the target's
-    // zombie slot would be pinned forever (reap_zombies gates on refcnt==0).
+    // so the reference it took on the target must be dropped here or the
+    // target cannot be destroyed.
     scheduler::release_wait_ref(resolved_id);
 
     let clear_tid = task.clear_child_tid;
@@ -835,42 +846,55 @@ fn parent_alive_for(parent_id: u32) -> bool {
     if parent_id == INVALID_TASK_ID {
         return false;
     }
-    let parent = task_find_by_id(parent_id);
-    if parent.is_null() {
+    let Some(parent) = task_find_by_id(parent_id) else {
         return false;
-    }
-    match task_status(parent) {
+    };
+    match task_status(parent.as_ptr()) {
         Some(TaskStatus::Ready) | Some(TaskStatus::Running) | Some(TaskStatus::Blocked) => true,
         _ => false,
     }
 }
 
-/// Walk the task pool once and, for every task whose `parent_task_id`
+/// Walk the task registry once and, for every task whose `parent_task_id`
 /// is `dying_id`:
 ///   * if the child is still alive (Ready/Running/Blocked), clear its
 ///     `parent_task_id` so its eventual exit skips the Zombie state;
 ///   * if the child is already in Zombie, transition it to Terminated
 ///     (the would-be reaper just died, so the exit code has no
-///     consumer and the slot can be tier-2 reused).
+///     consumer and the task can be destroyed).
 ///
-/// Runs under the task-manager lock so concurrent `reserve_task_slot`
-/// can't recycle a slot while we inspect it. O(`pool_high_water()`);
-/// task exit is not in any tight loop.
+/// Runs under the task-manager lock so registration cannot change while it is
+/// inspected. Task destruction is retried after dropping that lock.
 fn reparent_and_reap_children(dying_id: u32) {
     if dying_id == INVALID_TASK_ID {
         return;
     }
+    let mut transitioned = KVec::with_capacity(task_registry_len()).unwrap_or_else(|_| KVec::new());
+    let mut missed = false;
     with_task_manager(|mgr| {
         for slot in mgr.iter_tasks_mut() {
             if slot.parent_task_id != dying_id {
                 continue;
             }
-            slot.parent_task_id = INVALID_TASK_ID;
-            if slot.status() == TaskStatus::Zombie {
-                let _ = slot.try_transition_to(TaskStatus::Terminated);
+            super::task_accessors::task_set_parent_task_id(slot.as_ptr(), INVALID_TASK_ID);
+            if slot.status() == TaskStatus::Zombie && slot.try_transition_to(TaskStatus::Terminated)
+            {
+                // Record within the pre-reserved capacity only: a push must
+                // never allocate while the manager lock is held.
+                if transitioned.len() < transitioned.capacity() {
+                    let _ = transitioned.push(slot.task_id);
+                } else {
+                    missed = true;
+                }
             }
         }
     });
+    for id in transitioned.iter() {
+        drop(task_find_by_id(*id));
+    }
+    if missed {
+        super::task_table::arm_deferred_reclaim();
+    }
 }
 
 fn cleanup_terminated_task_resources(task_ptr: *mut Task, resolved_id: u32) {
@@ -882,15 +906,7 @@ fn cleanup_terminated_task_resources(task_ptr: *mut Task, resolved_id: u32) {
     task_recovery_depth_store(task_ptr, 0);
     task_panic_in_flight_store(task_ptr, 0);
 
-    let is_reapable = task_status(task_ptr) == Some(TaskStatus::Terminated);
-    if is_reapable && super::task_accessors::task_ref_count(task_ptr).unwrap_or(0) > 0 {
-        defer_task_cleanup(task_ptr);
-    } else {
-        // Free stacks but keep the task struct and exit_info stable.
-        // A waitable Zombie must survive until the parent consumes it;
-        // an unreferenced Terminated slot is reclaimed by reserve_task_slot().
-        free_task_stacks(task_ptr);
-    }
+    let _ = task_try_reclaim(task_ptr);
 }
 
 pub fn cleanup_current_task_after_switch(task_ptr: *mut Task) {
@@ -922,14 +938,7 @@ pub fn cleanup_current_task_after_switch(task_ptr: *mut Task) {
         });
     }
 
-    if status == TaskStatus::Terminated
-        && super::task_accessors::task_ref_count(task_ptr).unwrap_or(0) > 0
-    {
-        defer_task_cleanup(task_ptr);
-        free_task_stacks(task_ptr);
-    } else {
-        free_task_stacks(task_ptr);
-    }
+    let _ = task_try_reclaim(task_ptr);
 }
 
 #[inline]
@@ -950,8 +959,8 @@ fn collect_shutdown_task_ids(current: *mut Task) -> slopos_ostd::KVec<u32> {
     with_task_manager(|mgr| {
         let mut ids: slopos_ostd::KVec<u32> = slopos_ostd::KVec::new();
         for task in mgr.iter_tasks() {
-            let task_ptr = task as *const Task as *mut Task;
-            if should_collect_for_shutdown(task, task_ptr, current) {
+            let task_ptr = task.as_ptr();
+            if should_collect_for_shutdown(&task, task_ptr, current) {
                 let _ = ids.push(task.task_id);
             }
         }
@@ -1068,13 +1077,15 @@ pub fn task_fork(
     };
     let child_unsafe_stack_top = child_unsafe_stack.top().as_u64();
 
-    let (child_task_ptr, child_task_id) = match reserve_task_slot() {
-        Ok(values) => values,
+    let pending = match allocate_task() {
+        Ok(pending) => pending,
         Err(_) => {
             klog_info!("task_fork: no free task slots");
             return INVALID_TASK_ID;
         }
     };
+    let child_task_id = pending.id();
+    let child_task_ptr = pending.as_ptr();
 
     let Some(child) = task_borrow_mut(child_task_ptr) else {
         return INVALID_TASK_ID;
@@ -1140,13 +1151,17 @@ pub fn task_fork(
 
     child.reset_runtime_state();
     let _ = child_process.disarm();
-    // Transfer ownership of the kernel stack into the task slot.  The
-    // `Drop` on this handle will only run when the task's slot is
-    // cleared (`task.kernel_stack = None` in `free_task_stacks`).
+    // Transfer ownership of the kernel stack into the task; its `Drop`
+    // runs when the task is destroyed.
     child.kernel_stack = Some(child_kernel_stack);
     child.abi.unsafe_stack_sp = child_unsafe_stack_top;
     child.unsafe_stack = Some(child_unsafe_stack);
 
+    if let Err(pending) = register_task(pending) {
+        klog_info!("task_fork: task registry full");
+        discard_task(pending);
+        return INVALID_TASK_ID;
+    }
     record_task_created();
 
     klog_debug!(
@@ -1255,10 +1270,12 @@ pub fn task_clone(
     };
     let child_unsafe_stack_top = child_unsafe_stack.top().as_u64();
 
-    let (child_task_ptr, child_task_id) = match reserve_task_slot() {
-        Ok(values) => values,
+    let pending = match allocate_task() {
+        Ok(pending) => pending,
         Err(_) => return Err(ERRNO_EAGAIN),
     };
+    let child_task_id = pending.id();
+    let child_task_ptr = pending.as_ptr();
 
     let Some(child) = task_borrow_mut(child_task_ptr) else {
         return Err(ERRNO_EINVAL);
@@ -1355,10 +1372,17 @@ pub fn task_clone(
     if !share_vm {
         let _ = child_process.disarm();
     }
-    // Transfer ownership of the kernel stack to the task slot.
+    // Transfer ownership of the kernel stack to the task; its `Drop`
+    // runs when the task is destroyed.
     child.kernel_stack = Some(child_kernel_stack);
     child.abi.unsafe_stack_sp = child_unsafe_stack_top;
     child.unsafe_stack = Some(child_unsafe_stack);
+    let child_tgid = child.tgid;
+    if let Err(pending) = register_task(pending) {
+        klog_info!("task_clone: task registry full");
+        discard_task(pending);
+        return Err(ERRNO_EAGAIN);
+    }
     record_task_created();
 
     if flags & CLONE_PARENT_SETTID != 0 && parent_tidptr != 0 {
@@ -1395,7 +1419,7 @@ pub fn task_clone(
         "task_clone: created child task {} (process {}, tgid {}) flags=0x{:x} from parent {} (process {})",
         child_task_id,
         child_process_id,
-        child.tgid,
+        child_tgid,
         flags,
         parent.task_id,
         parent.process_id

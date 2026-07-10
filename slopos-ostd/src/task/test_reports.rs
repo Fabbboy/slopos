@@ -87,16 +87,14 @@ pub fn empty_report() -> TestReport {
 }
 
 // =============================================================================
-// PendingDrain — slot-lifecycle-independent stash of test-task termination
+// PendingDrain — lifetime-independent stash of test-task termination
 // =============================================================================
 //
 // The per-task `TestReportRing` lives in the `Task::test_reports` field and
-// is tied to the slot's lifecycle: tier-2 reuse via `reserve_task_slot` calls
-// `Task::reset_in_place`, which drops the ring — so the report data the
-// userland-test runner needs to drain disappears the moment the slot is
-// recycled.
+// is tied to the task's lifetime. Task destruction drops the ring, so the
+// userland-test runner needs the data moved out before the final strong drop.
 //
-// `PendingDrain` decouples the test framework from the slot lifecycle: when a
+// `PendingDrain` decouples the test framework from the task lifetime: when a
 // task that has lazily allocated a `TestReportRing` terminates, the kernel
 // moves the ring into a process-wide map keyed by the original `task_id`. The
 // userland-test runner reads (and removes) from this map by `task_id`, so it

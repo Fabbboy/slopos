@@ -40,16 +40,17 @@ pub fn kthread_spawn_ex(
         return id;
     }
 
-    let mut task: *mut super::task::Task = core::ptr::null_mut();
-    if super::task::task_get_info(id, &mut task) != 0 || task.is_null() {
+    // Hold the registry guard across publication so the raw projection
+    // cannot be invalidated by a concurrent terminate.
+    let Some(task) = super::task::task_find_by_id(id) else {
         klog_info!(
             "kthread_spawn_ex: failed to resolve thread '{}'",
             string::cstr_to_str_lossy(name)
         );
         let _ = task_terminate(id);
         return INVALID_TASK_ID;
-    }
-    if scheduler::publish_new_task(task) != 0 {
+    };
+    if scheduler::publish_new_task(task.as_ptr()) != 0 {
         klog_info!(
             "kthread_spawn_ex: failed to publish thread '{}'",
             string::cstr_to_str_lossy(name)

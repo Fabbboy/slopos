@@ -234,16 +234,23 @@ pub(crate) fn log_user_page_fault_diagnostics(frame_ref: &InterruptFrame, fault_
     let mut ctx_rip = 0u64;
     let mut ctx_rsp = 0u64;
 
-    let task_ptr = resolve_user_fault_task();
-    if let Some(task_pid) = task_process_id(task_ptr) {
-        pid = task_pid;
-        ctx_rip = task_context_rip(task_ptr).unwrap_or(0);
-        ctx_rsp = task_context_rsp(task_ptr).unwrap_or(0);
-        cr3 = process_vm::process_vm_get_ostd_pml4_paddr(pid);
-        if cr3 != 0 {
-            fault_phys = PhysAddr::new(process_vm::process_vm_user_va_to_paddr(pid, fault_addr));
-            rsp_phys = PhysAddr::new(process_vm::process_vm_user_va_to_paddr(pid, frame_ref.rsp));
-            rip_phys = PhysAddr::new(process_vm::process_vm_user_va_to_paddr(pid, frame_ref.rip));
+    let task_ref = resolve_user_fault_task();
+    if let Some(task_ref) = task_ref {
+        let task_ptr = task_ref.as_ptr();
+        let task_pid = task_process_id(task_ptr).unwrap_or(slopos_abi::task::INVALID_TASK_ID);
+        if task_pid != slopos_abi::task::INVALID_TASK_ID {
+            pid = task_pid;
+            ctx_rip = task_context_rip(task_ptr).unwrap_or(0);
+            ctx_rsp = task_context_rsp(task_ptr).unwrap_or(0);
+            cr3 = process_vm::process_vm_get_ostd_pml4_paddr(pid);
+            if cr3 != 0 {
+                fault_phys =
+                    PhysAddr::new(process_vm::process_vm_user_va_to_paddr(pid, fault_addr));
+                rsp_phys =
+                    PhysAddr::new(process_vm::process_vm_user_va_to_paddr(pid, frame_ref.rsp));
+                rip_phys =
+                    PhysAddr::new(process_vm::process_vm_user_va_to_paddr(pid, frame_ref.rip));
+            }
         }
     }
 

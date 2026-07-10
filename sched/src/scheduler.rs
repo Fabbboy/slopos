@@ -296,7 +296,7 @@ fn scheduler_ready_count(cpu_id: usize) -> u32 {
 /// - `cpu_id == slopos_arch::pcr::get_current_cpu()`.  SafeStack only
 ///   reads the *local* PCR via GS; cross-CPU dispatch would write
 ///   the wrong PCR and corrupt the remote CPU's unsafe-SP resolution.
-/// - `task` is non-null, lives in the task pool (or is a bootstrap
+/// - `task` is non-null, is registry-owned (or is a bootstrap
 ///   stub), and has its `unsafe_stack_sp` primed.
 /// - Caller runs with preemption disabled OR inside the
 ///   interrupts-off context-switch window.
@@ -1252,6 +1252,38 @@ pub(crate) fn run_ready_task_from_idle(cpu_id: usize, idle_task: *mut Task) -> b
     true
 }
 
+/// Scoped interrupt-enable window for the idle dispatcher's deferred-drop
+/// work. The scheduler loop normally returns from `sti; hlt; cli` with IF
+/// clear. This code runs on the CPU's non-migrating idle stack, so it may
+/// open the required interruptible drop window and then restore the loop's
+/// prior state without an IRQ-driven migration moving that state to another
+/// CPU.
+struct RestoreInterruptState {
+    disable_on_drop: bool,
+}
+
+impl RestoreInterruptState {
+    #[inline]
+    fn open_window() -> Self {
+        let was_enabled = slopos_ostd::cpu::x86_64::interrupts::are_interrupts_enabled();
+        if !was_enabled {
+            slopos_arch::cpu::enable_interrupts();
+        }
+        Self {
+            disable_on_drop: !was_enabled,
+        }
+    }
+}
+
+impl Drop for RestoreInterruptState {
+    #[inline]
+    fn drop(&mut self) {
+        if self.disable_on_drop {
+            slopos_arch::cpu::disable_interrupts();
+        }
+    }
+}
+
 /// Release the outgoing dispatch reference from this CPU's deferred slot.
 /// Returns whether a reference was present.
 #[inline]
@@ -1261,38 +1293,27 @@ pub(crate) fn drain_previous_task() -> bool {
         return false;
     }
 
-    // The scheduler loop normally returns from `sti; hlt; cli` with IF clear.
-    // This code runs on the CPU's non-migrating idle stack, so it may open the
-    // required interruptible drop window and then restore the loop's prior
-    // state without an IRQ-driven migration moving that state to another CPU.
-    struct RestoreInterruptState {
-        disable_on_drop: bool,
-    }
-
-    impl Drop for RestoreInterruptState {
-        #[inline]
-        fn drop(&mut self) {
-            if self.disable_on_drop {
-                slopos_arch::cpu::disable_interrupts();
-            }
-        }
-    }
-
-    let was_enabled = slopos_ostd::cpu::x86_64::interrupts::are_interrupts_enabled();
-    if !was_enabled {
-        slopos_arch::cpu::enable_interrupts();
-    }
-    let _restore_interrupts = RestoreInterruptState {
-        disable_on_drop: !was_enabled,
-    };
+    let _restore_interrupts = RestoreInterruptState::open_window();
 
     // The reference-count decrement is not yet the object destructor, but it
     // runs under the same context contract so the ownership implementation
     // can become drop-driven without changing the switch boundary again.
     slopos_ostd::task::run_off_lock(|| {
-        let _ = super::task::task_dec_ref(previous);
+        let _ = super::task::task_release_ref(previous);
     });
     true
+}
+
+/// Retire terminated tasks whose reclaim was attempted from a context that
+/// could not run the `Task` destructor. Runs under the same idle-stack
+/// interrupt-window contract as [`drain_previous_task`]; a cheap no-op
+/// unless a deferred attempt armed the retry latch.
+pub(crate) fn drain_deferred_task_reclaim() {
+    if !super::task::task_reclaim_pending() {
+        return;
+    }
+    let _restore_interrupts = RestoreInterruptState::open_window();
+    slopos_ostd::task::run_off_lock(super::task::task_reclaim_deferred);
 }
 
 fn schedule_internal() {
@@ -1588,9 +1609,15 @@ pub fn task_wait_for(task_id: u32) -> c_int {
         return -1;
     }
 
-    let mut target: *mut Task = ptr::null_mut();
-    if super::task::task_get_info(task_id, &mut target) != 0 || target.is_null() {
+    // The registry guard pins the target across the raw-pointer window
+    // below: `wait_ref_acquire` must record its reference before the last
+    // strong holder could destroy the task.
+    let Some(target_guard) = super::task::task_find_by_id(task_id) else {
         // Already gone — waitpid semantics treat this as success.
+        return 0;
+    };
+    let target = target_guard.as_ptr();
+    if task_status(target) == Some(TaskStatus::Invalid) {
         return 0;
     }
 
@@ -1607,7 +1634,7 @@ pub fn task_wait_for(task_id: u32) -> c_int {
         return 0;
     };
 
-    // Hold a reference on `target` for the whole wait so its slot — and the
+    // Hold a reference on `target` for the whole wait so the task — and the
     // `exit_cell` we read in the predicate below — cannot be recycled while
     // we are parked. Memory ordering: the producer's `try_set` is Release;
     // `is_set` (Acquire, evaluated under the event-bus queue's SpinLock) is
@@ -1619,12 +1646,17 @@ pub fn task_wait_for(task_id: u32) -> c_int {
     // path if this waiter is SIGKILL'd while parked. SlopOS tears a blocked
     // task down asynchronously (its kernel stack, and any RAII guard on it,
     // is never unwound on async kill), so a plain stack `TaskRefGuard` would
-    // leak its incref and pin the target's zombie slot forever
-    // (`reap_zombies` gates on refcnt==0). Tying the release to the task's
+    // leak its reference and pin the target forever. Tying the release to the task's
     // kernel-object lifecycle — the map entry IS the reference, and the
     // atomic `remove` elects the single releaser — mirrors `futex_remove_task`
     // and is the correct pattern under this kill model.
     wait_ref_acquire(waiter_id, target);
+
+    // The WAIT_REFS entry now pins the target. Drop the registry guard
+    // before parking: a waiter SIGKILL'd mid-wait never unwinds this stack,
+    // and a leaked guard here would pin the target forever, while the map
+    // entry is released by the teardown path.
+    drop(target_guard);
 
     // The `task_is_exited` fallback covers the case where the target's status
     // flips to Zombie/Terminated via a path that has not (yet) published
@@ -1664,7 +1696,7 @@ fn wait_ref_acquire(waiter_id: u32, target: *mut Task) {
     if let Some(prev) = stale {
         let prev = *prev;
         if !prev.is_null() {
-            let _ = super::task::task_dec_ref(prev);
+            let _ = super::task::task_release_ref(prev);
         }
     }
 }
@@ -1674,7 +1706,7 @@ fn wait_ref_release(waiter_id: u32) {
     if let Some(target) = entry {
         let target = *target;
         if !target.is_null() {
-            let _ = super::task::task_dec_ref(target);
+            let _ = super::task::task_release_ref(target);
         }
     }
 }
@@ -1846,9 +1878,11 @@ pub fn scheduler_task_exit_impl() -> ! {
     }
 
     // Dying task stays in PCR.current_task until `schedule()` below
-    // dispatches idle.  Task memory is pool-allocated (never freed),
-    // and its primed `unsafe_stack_sp` keeps SafeStack prologues
-    // happy through the switch window.
+    // dispatches idle.  Its memory is pinned through the switch window:
+    // `on_cpu` blocks reclaim until the switch tail publishes the
+    // handoff, and the dispatch reference is released only by the
+    // successor's `drain_previous_task`.  The primed `unsafe_stack_sp`
+    // keeps SafeStack prologues happy through that window.
     schedule();
 
     klog_info!(
@@ -2135,8 +2169,8 @@ pub fn scheduler_timer_tick() {
 /// true candidate across multiple consecutive sweeps.
 pub(crate) fn rescue_stranded_ready_tasks() {
     // Cooldown: the sweep is a backstop, not a hot path — walking the task
-    // pool (manager lock + scratch alloc) from every idle iteration on every
-    // CPU would cost hundreds of pool walks per second at idle. One sweep
+    // registry (manager lock + scratch alloc) from every idle iteration on
+    // every CPU would cost hundreds of walks per second at idle. One sweep
     // per RESCUE_COOLDOWN_TICKS across all CPUs bounds a genuine strand's
     // extra latency to ~100ms while keeping the steady-state cost near zero.
     const RESCUE_COOLDOWN_TICKS: u64 = 10;

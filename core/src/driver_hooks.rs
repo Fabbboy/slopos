@@ -251,10 +251,10 @@ fn orphan_check_task(task: *mut Task, context: *mut c_void) {
         return; // no parent or init — can't help
     }
 
-    let parent = task::task_find_by_id(parent_id);
-    if parent.is_null() {
+    let Some(parent) = task::task_find_by_id(parent_id) else {
         return;
-    }
+    };
+    let parent = parent.as_ptr();
 
     // Parent is in the same session but a different pgrp → not orphaned.
     if task_sid(parent) == Some(ctx.sid) && task_pgid(parent) != Some(ctx.pgid) {

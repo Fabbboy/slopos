@@ -599,10 +599,10 @@ define_syscall!(syscall_ioctl
             if arg == 0 {
                 return Err(Errno::EINVAL);
             }
-            let task_ptr = slopos_sched::task::task_find_by_id(task_id);
-            if task_ptr.is_null() {
+            let Some(task_ref) = slopos_sched::task::task_find_by_id(task_id) else {
                 return Err(Errno::EINVAL);
-            }
+            };
+            let task_ptr = task_ref.as_ptr();
             let task = slopos_sched::task::task_borrow(task_ptr).ok_or(Errno::EINVAL)?;
             match task.controlling_tty {
                 Some(ctty) if ctty == tty_idx => {}
@@ -639,10 +639,10 @@ define_syscall!(syscall_ioctl
                 return Err(Errno::EINVAL);
             }
 
-            let task_ptr = slopos_sched::task::task_find_by_id(task_id);
-            if task_ptr.is_null() {
+            let Some(task_ref) = slopos_sched::task::task_find_by_id(task_id) else {
                 return Err(Errno::EINVAL);
-            }
+            };
+            let task_ptr = task_ref.as_ptr();
 
             let task = slopos_sched::task::task_borrow_mut(task_ptr).ok_or(Errno::EINVAL)?;
             if task.sid == 0 || task.sid != task.task_id {
@@ -673,10 +673,10 @@ define_syscall!(syscall_ioctl
             if arg == 0 {
                 return Err(Errno::EINVAL);
             }
-            let task_ptr = slopos_sched::task::task_find_by_id(task_id);
-            if task_ptr.is_null() {
+            let Some(task_ref) = slopos_sched::task::task_find_by_id(task_id) else {
                 return Err(Errno::EINVAL);
-            }
+            };
+            let task_ptr = task_ref.as_ptr();
             let task = slopos_sched::task::task_borrow(task_ptr).ok_or(Errno::EINVAL)?;
             match task.controlling_tty {
                 Some(ctty) if ctty == tty_idx => {}
@@ -688,10 +688,10 @@ define_syscall!(syscall_ioctl
             Ok(0)
         }
         TIOCNOTTY => {
-            let task_ptr = slopos_sched::task::task_find_by_id(task_id);
-            if task_ptr.is_null() {
+            let Some(task_ref) = slopos_sched::task::task_find_by_id(task_id) else {
                 return Err(Errno::EINVAL);
-            }
+            };
+            let task_ptr = task_ref.as_ptr();
 
             let task = slopos_sched::task::task_borrow_mut(task_ptr).ok_or(Errno::EINVAL)?;
             match task.controlling_tty {

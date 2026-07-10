@@ -90,10 +90,9 @@ pub fn task_clear_controlling_tty_for_session(session_id: u32, tty: TtyIndex) ->
 }
 
 pub(super) fn release_task_dependents(completed_task_id: u32) {
-    let task = task_find_by_id(completed_task_id);
-    if task.is_null() {
+    let Some(task) = task_find_by_id(completed_task_id) else {
         return;
-    }
+    };
     // Caller (mark_task_terminated) holds the task pointer stable via
     // the task-manager lock window in which it runs; additionally,
     // the per-task `waiters` queue is a `WaitQueue` whose internal
@@ -102,7 +101,7 @@ pub(super) fn release_task_dependents(completed_task_id: u32) {
     // side + the waiter's `is_set` check inside `wait_event`) is the
     // bidirectional full barrier that pairs with the Release
     // `try_set` published just before this call.
-    task_wake_all_waiters(task);
+    task_wake_all_waiters(task.as_ptr());
 }
 
 pub(super) fn notify_parent_of_child_exit(task_ptr: *mut Task) {
@@ -122,10 +121,9 @@ pub(super) fn notify_parent_of_child_exit(task_ptr: *mut Task) {
         return;
     }
 
-    let parent = task_find_by_id(parent_task_id);
-    if parent.is_null() {
+    let Some(parent) = task_find_by_id(parent_task_id) else {
         return;
-    }
+    };
 
-    let _ = task_signal_post(parent, SIGCHLD);
+    let _ = task_signal_post(parent.as_ptr(), SIGCHLD);
 }
