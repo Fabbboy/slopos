@@ -9,9 +9,11 @@
 
 use core::ffi::{c_char, c_void};
 use core::ptr;
+use core::ptr::NonNull;
 
-use slopos_ostd::KBox;
+use slopos_ostd::KArc;
 use slopos_ostd::klog_info;
+use slopos_ostd::task::{task_placement_leak, task_placement_reclaim, task_placement_strong_count};
 use slopos_testing::TestResult;
 
 use super::runtime::{self, IdleStackResolveError};
@@ -23,8 +25,8 @@ use super::task::{
     INVALID_PROCESS_ID, INVALID_TASK_ID, IdtEntry, TASK_FLAG_KERNEL_MODE, TASK_FLAG_USER_MODE,
     Task, TaskPriority, TaskStatus, task_create, task_exit_info_is_set,
     task_find_by_id_raw_for_test as task_find_by_id, task_get_info, task_handle, task_id_of,
-    task_inc_ref, task_is_blocked, task_is_terminated, task_kernel_stack_top, task_last_cpu,
-    task_live_cap_rejects_for_test, task_priority, task_ref_count, task_remote_inbox_is_linked,
+    task_is_blocked, task_is_terminated, task_kernel_stack_top, task_last_cpu,
+    task_live_cap_rejects_for_test, task_priority, task_remote_inbox_is_linked,
     task_resolve_handle_raw_for_test as task_resolve_handle, task_sched_placement_load,
     task_set_state, task_set_state_with_reason, task_status, task_terminate, task_waiter_count,
 };
@@ -77,43 +79,40 @@ fn is_published_placement(placement: SchedPlacement) -> bool {
 }
 
 pub fn test_previous_task_reference_drains_exactly_once() -> TestResult {
-    let mut task = match KBox::try_init(Task::init_invalid()) {
-        Ok(task) => task,
+    let arc = match KArc::try_init(Task::init_invalid()) {
+        Ok(arc) => arc,
         Err(_) => return TestResult::Fail,
     };
-    let task_ptr = &mut *task as *mut Task;
-    let Some(before) = task_ref_count(task_ptr) else {
-        klog_info!("SCHED_TEST: task refcount unavailable");
-        return TestResult::Fail;
-    };
+    // A witness clone observes the strong count while one reference travels
+    // through the deferred slot.
+    let witness = arc.clone();
+    let strong_before = KArc::strong_count(&witness);
 
-    let incremented = task_inc_ref(task_ptr);
-    if incremented != Some(before.saturating_add(1)) {
-        klog_info!(
-            "SCHED_TEST: ref increment mismatch before={} observed={:?}",
-            before,
-            incremented
-        );
-        return TestResult::Fail;
-    }
-    if slopos_arch::pcr::defer_previous_task(task_ptr.cast()).is_err() {
+    // Park one owning reference into the deferred slot exactly as the
+    // dispatcher's switch tail does. `leak` consumes `arc` without changing the
+    // strong count (the reference moves into the raw slot pointer).
+    let parked = task_placement_leak(arc);
+    if slopos_arch::pcr::defer_previous_task(parked.as_ptr().cast()).is_err() {
         klog_info!("SCHED_TEST: previous-task slot was already occupied");
-        let _ = super::task::task_dec_ref(task_ptr);
+        drop(task_placement_reclaim(parked));
         return TestResult::Fail;
     }
-    let retained_before_drain = task_ref_count(task_ptr) == Some(before.saturating_add(1));
+    let retained_before_drain = KArc::strong_count(&witness) == strong_before;
     if !retained_before_drain {
         klog_info!(
-            "SCHED_TEST: deferred refcount changed unexpectedly before drain: {:?}",
-            task_ref_count(task_ptr)
+            "SCHED_TEST: parked reference changed strong count before drain: {}",
+            KArc::strong_count(&witness)
         );
     }
+
+    // The first drain reclaims and drops the parked reference exactly once; the
+    // second finds an empty slot.
     let drained = scheduler::drain_previous_task();
-    let restored_after_drain = task_ref_count(task_ptr) == Some(before);
+    let restored_after_drain = KArc::strong_count(&witness) == strong_before - 1;
     if !drained || !restored_after_drain {
         klog_info!(
-            "SCHED_TEST: drain failed or count mismatched after drain: {:?}",
-            task_ref_count(task_ptr)
+            "SCHED_TEST: drain failed or count mismatched after drain: {}",
+            KArc::strong_count(&witness)
         );
     }
     let second_drain_empty = !scheduler::drain_previous_task();
@@ -130,6 +129,45 @@ pub fn test_previous_task_reference_drains_exactly_once() -> TestResult {
 
 slopos_testing::stest!(
     name = test_previous_task_reference_drains_exactly_once,
+    suite = sched_core
+);
+
+pub fn test_task_placement_leak_reclaim_round_trip() -> TestResult {
+    let arc = match KArc::try_init(Task::init_invalid()) {
+        Ok(arc) => arc,
+        Err(_) => return TestResult::Fail,
+    };
+    let strong_before = KArc::strong_count(&arc);
+    let base = KArc::as_ptr(&arc);
+
+    // Leak parks one strong reference as a raw pointer without dropping it, so
+    // the visible strong count is unchanged and the base pointer is stable.
+    let parked = task_placement_leak(arc);
+    if parked.as_ptr().cast_const() != base {
+        klog_info!("SCHED_TEST: placement leak moved the base pointer");
+        return TestResult::Fail;
+    }
+
+    // Reclaim reconstitutes exactly that reference.
+    let arc = task_placement_reclaim(parked);
+    if KArc::strong_count(&arc) != strong_before {
+        klog_info!(
+            "SCHED_TEST: placement round-trip changed strong count {} -> {}",
+            strong_before,
+            KArc::strong_count(&arc)
+        );
+        return TestResult::Fail;
+    }
+    if KArc::as_ptr(&arc) != base {
+        klog_info!("SCHED_TEST: placement reclaim changed the base pointer");
+        return TestResult::Fail;
+    }
+    drop(arc);
+    TestResult::Pass
+}
+
+slopos_testing::stest!(
+    name = test_task_placement_leak_reclaim_round_trip,
     suite = sched_core
 );
 
@@ -2334,6 +2372,12 @@ pub fn test_remote_inbox_duplicate_push_is_single_membership() -> TestResult {
     let cpu_id = slopos_arch::pcr::get_current_cpu();
     let ready_before =
         super::per_cpu::with_cpu_scheduler(cpu_id, |sched| sched.total_ready_count()).unwrap_or(0);
+    let Some(node) = NonNull::new(task_ptr) else {
+        return TestResult::Fail;
+    };
+    // Baseline strong count with the task merely registered (its registry
+    // owner). One placement reference should survive the duplicate push + drain.
+    let strong_base = task_placement_strong_count(node);
 
     super::per_cpu::with_cpu_scheduler(cpu_id, |sched| {
         sched.push_remote_wake(task_ptr);
@@ -2366,10 +2410,12 @@ pub fn test_remote_inbox_duplicate_push_is_single_membership() -> TestResult {
         return TestResult::Fail;
     }
 
-    if task_ref_count(task_ptr).unwrap_or(0) != 1 {
+    let strong_after = task_placement_strong_count(node);
+    if strong_after != strong_base + 1 {
         klog_info!(
-            "SCHED_TEST: duplicate inbox push leaked refcount (refcnt={})",
-            task_ref_count(task_ptr).unwrap_or(0)
+            "SCHED_TEST: duplicate inbox push leaked references (base={}, after={})",
+            strong_base,
+            strong_after,
         );
         return TestResult::Fail;
     }
@@ -2524,6 +2570,10 @@ pub fn test_remote_inbox_drops_non_ready_tasks() -> TestResult {
     if task_get_info(task_id, &mut task_ptr) != 0 || task_ptr.is_null() {
         return TestResult::Fail;
     }
+    let Some(node) = NonNull::new(task_ptr) else {
+        return TestResult::Fail;
+    };
+    let strong_base = task_placement_strong_count(node);
 
     super::per_cpu::with_cpu_scheduler(cpu_id, |sched| {
         sched.push_remote_wake(task_ptr);
@@ -2556,10 +2606,12 @@ pub fn test_remote_inbox_drops_non_ready_tasks() -> TestResult {
         return TestResult::Fail;
     }
 
-    if task_ref_count(task_ptr).unwrap_or(0) != 0 {
+    let strong_after = task_placement_strong_count(node);
+    if strong_after != strong_base {
         klog_info!(
-            "SCHED_TEST: Task refcount leaked after inbox drain (refcnt={})",
-            task_ref_count(task_ptr).unwrap_or(0)
+            "SCHED_TEST: dropped inbox task leaked references (base={}, after={})",
+            strong_base,
+            strong_after,
         );
         return TestResult::Fail;
     }

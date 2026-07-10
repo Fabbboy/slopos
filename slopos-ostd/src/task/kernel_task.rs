@@ -351,7 +351,6 @@ pub struct TaskInner<K, U> {
     /// cross-role gate that prevents a task from being in a ready queue and a
     /// remote wake inbox at the same time.
     pub sched_placement: AtomicU8,
-    pub refcnt: AtomicU32,
     /// Panic-recovery nesting depth saved while this task is not running; the
     /// live value lives in `PCR.recovery_depth` (read directly by the panic
     /// handler), and context-switch code saves/restores it here so recovery
@@ -443,7 +442,6 @@ impl<K, U> TaskInner<K, U> {
             ready_link: Link::new(),
             remote_inbox_link: Link::new(),
             sched_placement: AtomicU8::new(SchedPlacement::None.as_u8()),
-            refcnt: AtomicU32::new(0),
             recovery_depth: AtomicU32::new(0),
             panic_in_flight: AtomicU32::new(0),
             exit_cleanup_flags: AtomicU8::new(0),
@@ -673,13 +671,12 @@ impl<K, U> TaskInner<K, U> {
         self.remote_inbox_link.reset();
         self.sched_placement
             .store(SchedPlacement::None.as_u8(), Ordering::Release);
-        self.refcnt.store(0, Ordering::Release);
         self.recovery_depth.store(0, Ordering::Release);
         self.exit_cleanup_flags.store(0, Ordering::Release);
     }
 
     /// Bulk-copy task state using `ptr::copy_nonoverlapping`, then reset
-    /// linkage, refcount, and owned resources.
+    /// linkage, placement, and owned resources.
     ///
     /// # Safety
     /// Caller must ensure `self` and `other` do not overlap and that
@@ -708,33 +705,9 @@ impl<K, U> TaskInner<K, U> {
         self.ready_link.reset();
         self.remote_inbox_link.reset();
         self.sched_placement = AtomicU8::new(SchedPlacement::None.as_u8());
-        self.refcnt = AtomicU32::new(0);
         self.recovery_depth = AtomicU32::new(0);
         self.exit_cleanup_flags = AtomicU8::new(0);
         self.signal_pending = AtomicU64::new(0);
-    }
-
-    #[inline]
-    pub fn inc_ref(&self) -> u32 {
-        let prev = self.refcnt.load(Ordering::Acquire);
-        if prev == u32::MAX {
-            return u32::MAX;
-        }
-        self.refcnt.fetch_add(1, Ordering::AcqRel) + 1
-    }
-
-    #[inline]
-    pub fn dec_ref(&self) -> bool {
-        let prev = self.refcnt.load(Ordering::Acquire);
-        if prev == 0 {
-            return false;
-        }
-        self.refcnt.fetch_sub(1, Ordering::AcqRel) == 1
-    }
-
-    #[inline]
-    pub fn ref_count(&self) -> u32 {
-        self.refcnt.load(Ordering::Acquire)
     }
 }
 

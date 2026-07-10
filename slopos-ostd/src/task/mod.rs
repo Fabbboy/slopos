@@ -16,6 +16,7 @@ pub mod handles;
 pub mod job_control;
 pub mod kernel_task;
 pub mod link_roles;
+pub mod placement;
 pub mod spawner;
 pub mod state;
 pub mod switch;
@@ -27,6 +28,10 @@ pub use exit_info::ExitInfo;
 pub use job_control::{ProcessGroup, Session, new_group_in_session, new_session_group};
 pub use kernel_task::SchedPlacement;
 pub use link_roles::{ReadyQueueRole, RemoteWakeRole};
+pub use placement::{
+    task_placement_clone, task_placement_leak, task_placement_reclaim, task_placement_retain,
+    task_placement_strong_count,
+};
 pub use state::{TaskState, TaskStateView};
 pub use test_reports::{
     PendingDrain, TestReport, TestReportRing, alloc_ring, consume_pending_drain, empty_report,

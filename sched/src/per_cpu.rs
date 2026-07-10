@@ -41,8 +41,8 @@ pub fn fork_rr_counter_set(value: usize) {
 }
 
 use super::task::{
-    task_cpu_affinity, task_inc_ref, task_last_cpu, task_next_inbox_load,
-    task_next_inbox_store_relaxed, task_next_inbox_store_release, task_priority, task_release_ref,
+    release_placement_arc, task_cpu_affinity, task_last_cpu, task_next_inbox_load,
+    task_next_inbox_store_relaxed, task_next_inbox_store_release, task_priority,
     task_remote_inbox_try_link, task_remote_inbox_unlink, task_sched_placement_compare_exchange,
     task_sched_placement_load, task_set_last_cpu, task_status,
 };
@@ -51,7 +51,7 @@ use slopos_abi::task::TaskStatus;
 use slopos_arch::MAX_CPUS;
 use slopos_ostd::sync::intrusive::{IntrusiveLinkedList, LinkError};
 use slopos_ostd::sync::{InitFlag, KernelSync, LOCK_LEVEL_SCHEDULER, SpinLock};
-use slopos_ostd::task::SchedPlacement;
+use slopos_ostd::task::{SchedPlacement, task_placement_reclaim, task_placement_retain};
 use slopos_ostd::{klog_debug, klog_info};
 
 /// One slot per [`TaskPriority`] variant: `High`, `KernelIo`,
@@ -79,8 +79,8 @@ impl ReadyQueue {
         }
     }
 
-    /// Drop every linked task, decrementing each one's refcount as we
-    /// pop. Used during scheduler shutdown / per-CPU reinitialisation.
+    /// Drop every linked task, releasing each one's parked owning reference as
+    /// we pop. Used during scheduler shutdown / per-CPU reinitialisation.
     fn clear_with_ref_release(&self) {
         while let Some(node) = self.list.pop() {
             let raw = node.as_ptr();
@@ -89,7 +89,7 @@ impl ReadyQueue {
                 SchedPlacement::ReadyQueue,
                 SchedPlacement::None,
             );
-            let _ = task_release_ref(raw);
+            release_placement_arc(task_placement_reclaim(node));
         }
     }
 
@@ -111,7 +111,7 @@ impl ReadyQueue {
     /// `SchedPlacement::ReadyQueue`.
     ///
     /// Returns:
-    /// - `0` when the task was newly linked and refcounted;
+    /// - `0` when the task was newly linked and its owning reference parked;
     /// - `1` when it was already linked in a ready queue;
     /// - `-1` on invalid input or an unexpected list error.
     fn link_preclaimed_with_status(&self, task: *mut Task) -> i32 {
@@ -120,7 +120,8 @@ impl ReadyQueue {
         };
         match self.list.push(node) {
             Ok(()) => {
-                let _ = task_inc_ref(task);
+                // Membership now holds one owning reference to the task.
+                task_placement_retain(node);
                 0
             }
             Err(LinkError::AlreadyLinked) => 1,
@@ -137,7 +138,7 @@ impl ReadyQueue {
                     SchedPlacement::ReadyQueue,
                     SchedPlacement::OnCpu,
                 );
-                let _ = task_release_ref(raw);
+                release_placement_arc(task_placement_reclaim(node));
                 raw
             }
             None => ptr::null_mut(),
@@ -156,7 +157,7 @@ impl ReadyQueue {
             SchedPlacement::ReadyQueue,
             SchedPlacement::None,
         );
-        let _ = task_release_ref(task);
+        release_placement_arc(task_placement_reclaim(node));
         0
     }
 
@@ -181,7 +182,9 @@ impl ReadyQueue {
             );
             return None;
         }
-        let _ = task_release_ref(raw);
+        // The task stays alive across migration via its registry owner; the
+        // migrating CPU re-parks a fresh reference on enqueue.
+        release_placement_arc(task_placement_reclaim(last));
         Some(raw)
     }
 }
@@ -563,11 +566,11 @@ impl PriorityRunQueue {
             return -1;
         }
 
-        // Take the inbox reference before publishing the node so a drain that
-        // immediately swaps the head cannot drop the last reference before the
-        // producer has finished linking it.
+        // Park the inbox's owning reference before publishing the node so a
+        // drain that immediately swaps the head cannot drop the last reference
+        // before the producer has finished linking it.
         task_set_last_cpu(task, self.cpu_id() as u8);
-        let _ = task_inc_ref(task);
+        task_placement_retain(node);
 
         // Lock-free push using CAS loop (Treiber stack pattern)
         loop {
@@ -646,7 +649,9 @@ impl PriorityRunQueue {
                         SchedPlacement::None,
                     );
                 }
-                let _ = task_release_ref(current);
+                if let Some(node) = NonNull::new(current) {
+                    release_placement_arc(task_placement_reclaim(node));
+                }
             } else {
                 // The task is no longer Ready, or another owner repaired an
                 // inconsistent placement. Drop the remote-inbox claim, then
@@ -664,9 +669,11 @@ impl PriorityRunQueue {
                     let _ = self.enqueue_local(current);
                 }
                 // Release the inbox reference only after the last use of
-                // `current`: for a terminated task this may be the final
-                // reference, after which the pointer must not be touched.
-                let _ = task_release_ref(current);
+                // `current`: reclaim may retire a terminated task, after which
+                // the pointer must not be touched.
+                if let Some(node) = NonNull::new(current) {
+                    release_placement_arc(task_placement_reclaim(node));
+                }
             }
 
             current = next;
@@ -689,7 +696,9 @@ impl PriorityRunQueue {
                 SchedPlacement::RemoteWake,
                 SchedPlacement::None,
             );
-            let _ = task_release_ref(cursor);
+            if let Some(node) = NonNull::new(cursor) {
+                release_placement_arc(task_placement_reclaim(node));
+            }
             cursor = next;
             drained = drained.saturating_add(1);
         }

@@ -333,22 +333,41 @@ pub(crate) fn task_try_reclaim(task: *mut Task) -> bool {
     task_try_reclaim_id(id)
 }
 
-/// Release one reference held by the transitional scheduler containers and
-/// retire a terminated task when that was the final such reference.
+/// Drop one owning reference held by a transitional scheduler container (ready
+/// queue, remote inbox, dispatch slot, or wait map) and retire a terminated
+/// task when that drop leaves only the registry owner.
 ///
-/// The task id and termination status are captured before the decrement:
-/// once the count reaches zero any other holder's retry may destroy the
-/// task, so the pointer must not be dereferenced afterwards.
+/// The id and termination status are captured before the drop: retirement may
+/// run the owner's destructor, after which the pointer must not be touched.
+/// The drop here is never the last strong reference — the registry owner
+/// outlives every placement reference — so it is a bare atomic decrement and is
+/// safe under a lock or with interrupts disabled; the actual destructor runs
+/// off-lock inside [`task_try_reclaim_id`].
 #[inline]
-pub fn task_release_ref(task: *mut Task) -> Option<bool> {
-    let id = task_id_of(task)?;
-    let terminated =
-        slopos_ostd::task::accessors::task_status(task) == Some(TaskStatus::Terminated);
-    let reached_zero = slopos_ostd::task::accessors::task_dec_ref(task)?;
-    if reached_zero && terminated {
+pub fn release_placement_arc(arc: KArc<Task>) {
+    let id = arc.task_id;
+    let terminated = arc.status() == TaskStatus::Terminated;
+    drop(arc);
+    if terminated {
         let _ = task_try_reclaim_id(id);
     }
-    Some(reached_zero)
+}
+
+/// Drop one owning placement reference and, for a terminated task, arm the idle
+/// dispatcher's reclaim drain instead of retiring it inline.
+///
+/// The context-switch tail uses this so its drain stays a bare atomic decrement:
+/// the allocator-heavy `Task` destructor (buddy free + cross-CPU TLB drain)
+/// never runs in the switch window, only later on the idle stack via
+/// [`task_reclaim_deferred`]. As with [`release_placement_arc`], this drop is
+/// never the last strong reference — the registry owner outlives it.
+#[inline]
+pub fn release_placement_arc_deferred(arc: KArc<Task>) {
+    let terminated = arc.status() == TaskStatus::Terminated;
+    drop(arc);
+    if terminated {
+        arm_deferred_reclaim();
+    }
 }
 
 /// One-shot retry latch for reclaims attempted from contexts where the
@@ -371,10 +390,7 @@ fn task_try_reclaim_id(id: u32) -> bool {
         if task.status() != TaskStatus::Terminated {
             return None;
         }
-        if task.ref_count() == 0
-            && !task.on_cpu.load(Ordering::Acquire)
-            && KArc::strong_count(owner) == 1
-        {
+        if !task.on_cpu.load(Ordering::Acquire) && KArc::strong_count(owner) == 1 {
             return Some(());
         }
         // Terminated but still pinned. Every pinning reference retries on

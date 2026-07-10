@@ -7,15 +7,18 @@
 //! keyed by the physical address of the futex word. Each bucket holds a
 //! small fixed-capacity list of waiting tasks.
 
-use core::ptr;
+use core::ptr::NonNull;
 
 use slopos_abi::task::BlockReason;
 use slopos_mm::user_ptr::UserPtr;
+use slopos_ostd::KArc;
 use slopos_ostd::sync::{KernelSync, LOCK_LEVEL_RESOURCE, SpinLock};
+use slopos_ostd::task::task_placement_clone;
 
 use super::scheduler::{
     mark_current_blocked, scheduler_get_current_task, unblock_task, yield_blocked_task,
 };
+use super::task::{INVALID_TASK_ID, release_placement_arc, task_id_of};
 use super::task_struct::Task;
 
 /// Number of hash buckets. Must be a power of two.
@@ -25,24 +28,32 @@ const FUTEX_HASH_BUCKETS: usize = 64;
 const FUTEX_MAX_WAITERS_PER_BUCKET: usize = 16;
 
 /// A single waiter entry in a futex bucket.
-#[derive(Clone, Copy)]
+///
+/// The bucket owns one strong reference to each blocked waiter (`task`), so a
+/// waiter cannot be freed out from under the queue. `task_id` identifies the
+/// waiter for teardown removal without dereferencing the handle.
 struct FutexWaiter {
     /// Physical address of the futex word (used as the key).
     futex_addr: u64,
-    /// Pointer to the blocked task.
-    task: KernelSync<*mut Task>,
+    /// Owning reference to the blocked task, or `None` for a free slot. The
+    /// `KernelSync` wrapper asserts the cross-CPU access to the raw pointers
+    /// inside `Task` is serialised by the bucket lock.
+    task: KernelSync<Option<KArc<Task>>>,
+    /// The waiter's task id, or `INVALID_TASK_ID` for a free slot.
+    task_id: u32,
 }
 
 impl FutexWaiter {
     const fn empty() -> Self {
         Self {
             futex_addr: 0,
-            task: KernelSync::new(ptr::null_mut()),
+            task: KernelSync::new(None),
+            task_id: INVALID_TASK_ID,
         }
     }
 
     fn is_empty(&self) -> bool {
-        self.task.is_null()
+        self.task.is_none()
     }
 }
 
@@ -54,7 +65,7 @@ struct FutexBucket {
 impl FutexBucket {
     const fn new() -> Self {
         Self {
-            waiters: [FutexWaiter::empty(); FUTEX_MAX_WAITERS_PER_BUCKET],
+            waiters: [const { FutexWaiter::empty() }; FUTEX_MAX_WAITERS_PER_BUCKET],
             count: 0,
         }
     }
@@ -146,9 +157,16 @@ pub fn futex_wait(uaddr: u64, expected: u32, _timeout_ms: u64) -> i64 {
             return slopos_abi::syscall::ERRNO_ENOMEM as i64;
         };
 
+        // The bucket owns a strong reference to the blocked waiter. `current`
+        // is the running task, kept alive by its dispatch reference, so cloning
+        // its handle here is sound.
+        let Some(node) = NonNull::new(current) else {
+            return slopos_abi::syscall::ERRNO_EAGAIN as i64;
+        };
         bucket.waiters[idx] = FutexWaiter {
             futex_addr: uaddr,
-            task: KernelSync::new(current),
+            task: KernelSync::new(Some(task_placement_clone(node))),
+            task_id: task_id_of(current).unwrap_or(INVALID_TASK_ID),
         };
         bucket.count += 1;
 
@@ -185,20 +203,23 @@ pub fn futex_wake(uaddr: u64, max_wake: u32) -> i64 {
         if woken >= max_wake {
             break;
         }
-        let waiter = &mut bucket.waiters[i];
-        if !waiter.is_empty() && waiter.futex_addr == uaddr {
-            let task = *waiter.task;
-            *waiter = FutexWaiter::empty();
-            bucket.count = bucket.count.saturating_sub(1);
-
-            // Release the bucket lock before unblocking to avoid
-            // potential lock ordering issues with the scheduler.
-            // Actually, we need to keep the lock to avoid races with
-            // concurrent FUTEX_WAIT adding to the same bucket.
-            // unblock_task handles its own locking internally.
-            let _ = unblock_task(task);
-            woken += 1;
+        if bucket.waiters[i].is_empty() || bucket.waiters[i].futex_addr != uaddr {
+            continue;
         }
+        // Take the waiter's owning reference out of the slot. The bucket lock
+        // is held across the unblock so a concurrent FUTEX_WAIT reusing this
+        // freed slot races only against a different task; the woken task stays
+        // alive because we still hold `arc`. `unblock_task`'s enqueue path
+        // clones its own membership reference (bucket lock RESOURCE → run-queue
+        // lock, no cycle), then we drop `arc` — never the last reference, since
+        // the registry owner outlives it.
+        let taken = core::mem::replace(&mut bucket.waiters[i], FutexWaiter::empty());
+        bucket.count = bucket.count.saturating_sub(1);
+        if let Some(arc) = taken.task.into_inner() {
+            let _ = unblock_task(KArc::as_ptr(&arc) as *mut Task);
+            release_placement_arc(arc);
+        }
+        woken += 1;
     }
 
     drop(bucket);
@@ -211,17 +232,24 @@ pub fn futex_wake(uaddr: u64, max_wake: u32) -> i64 {
 /// blocked on a futex. This prevents dangling pointers in the
 /// wait queue.
 pub fn futex_remove_task(task: *mut Task) {
-    if task.is_null() {
+    let Some(target_id) = task_id_of(task) else {
         return;
-    }
+    };
 
     for bucket_mutex in FUTEX_TABLE.iter() {
         let mut bucket = bucket_mutex.lock();
         let mut removed = 0usize;
         for waiter in bucket.waiters.iter_mut() {
-            if !waiter.is_empty() && *waiter.task == task {
-                *waiter = FutexWaiter::empty();
-                removed += 1;
+            if waiter.is_empty() || waiter.task_id != target_id {
+                continue;
+            }
+            let taken = core::mem::replace(waiter, FutexWaiter::empty());
+            removed += 1;
+            // Drop the bucket's owning reference. Never the last one — the
+            // registry owner outlives it — so this is a bare decrement under
+            // the bucket lock, and any retirement it triggers self-defers.
+            if let Some(arc) = taken.task.into_inner() {
+                release_placement_arc(arc);
             }
         }
         bucket.count = bucket.count.saturating_sub(removed);

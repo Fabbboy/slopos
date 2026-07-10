@@ -1,13 +1,14 @@
 use core::ffi::c_int;
 use core::ptr;
+use core::ptr::NonNull;
 use core::sync::atomic::{AtomicU64, Ordering};
 
 use slopos_abi::event::{KernelEvent, TaskSlot};
 use slopos_arch::cpu;
-use slopos_ostd::KBTreeMap;
 use slopos_ostd::sync::BUS;
 use slopos_ostd::sync::PreemptGuard;
 use slopos_ostd::sync::{KernelSync, LOCK_LEVEL_RESOURCE, SpinLock};
+use slopos_ostd::{KArc, KBTreeMap};
 
 use slopos_ostd::kdiag_timestamp;
 use slopos_ostd::klog_info;
@@ -141,18 +142,19 @@ pub use super::sleep::{block_current_task_with_timeout, cancel_sleep, sleep_curr
 use super::sleep::{reset_sleep_queue, sleep_queue_next_deadline_ticks, wake_due_sleepers};
 use super::task::{
     INVALID_PROCESS_ID, INVALID_TASK_ID, TASK_FLAG_KERNEL_MODE, TASK_FLAG_NO_PREEMPT,
-    TASK_FLAG_USER_MODE, Task, TaskPriority, TaskStatus, task_controlling_tty, task_exit_info_ref,
-    task_fpu_state_mut, task_fs_base, task_has_flag, task_id_of, task_inc_ref, task_is_exited,
-    task_is_invalid, task_is_ready, task_is_running, task_kernel_stack_top,
-    task_last_run_timestamp_volatile, task_name_looks_idle, task_on_cpu_load,
-    task_panic_in_flight_load, task_panic_in_flight_store, task_pcr_round_trip_swap, task_pgid,
-    task_pointer_is_valid, task_priority, task_process_id, task_record_context_switch,
-    task_record_yield, task_recovery_depth_load, task_recovery_depth_store,
-    task_remote_inbox_is_linked, task_sched_placement_compare_exchange, task_sched_placement_load,
-    task_sched_placement_store, task_set_controlling_tty, task_set_on_cpu, task_set_state,
-    task_set_status, task_set_time_slice, task_set_time_slice_remaining, task_sid, task_status,
-    task_switch_ctx_ptr, task_switch_ctx_ptr_mut, task_switch_ctx_rip_rsp, task_time_slice,
-    task_time_slice_remaining, task_try_transition_from,
+    TASK_FLAG_USER_MODE, Task, TaskPriority, TaskStatus, release_placement_arc,
+    task_controlling_tty, task_exit_info_ref, task_fpu_state_mut, task_fs_base, task_has_flag,
+    task_id_of, task_is_exited, task_is_invalid, task_is_ready, task_is_running,
+    task_kernel_stack_top, task_last_run_timestamp_volatile, task_name_looks_idle,
+    task_on_cpu_load, task_panic_in_flight_load, task_panic_in_flight_store,
+    task_pcr_round_trip_swap, task_pgid, task_pointer_is_valid, task_priority, task_process_id,
+    task_record_context_switch, task_record_yield, task_recovery_depth_load,
+    task_recovery_depth_store, task_remote_inbox_is_linked, task_sched_placement_compare_exchange,
+    task_sched_placement_load, task_sched_placement_store, task_set_controlling_tty,
+    task_set_on_cpu, task_set_state, task_set_status, task_set_time_slice,
+    task_set_time_slice_remaining, task_sid, task_status, task_switch_ctx_ptr,
+    task_switch_ctx_ptr_mut, task_switch_ctx_rip_rsp, task_time_slice, task_time_slice_remaining,
+    task_try_transition_from,
 };
 pub use super::trap::{
     RescheduleReason, TrapExitSource, save_preempt_context, save_task_context_from_interrupt_frame,
@@ -170,7 +172,9 @@ fn kernel_text_range() -> (u64, u64) {
 }
 
 use core::sync::atomic::AtomicU8;
-use slopos_ostd::task::SchedPlacement;
+use slopos_ostd::task::{
+    SchedPlacement, task_placement_clone, task_placement_leak, task_placement_reclaim,
+};
 /// Global scheduler-enabled flag. `pub(crate)` so the
 /// `test_hermetic::SchedulerEnabledFlag` HermeticState impl can
 /// snapshot/restore it. External code should go through
@@ -1133,9 +1137,12 @@ pub(crate) fn run_ready_task_from_idle(cpu_id: usize, idle_task: *mut Task) -> b
     // the stack while this CPU is about to run on it — a use-after-free.
     task_set_on_cpu(next_task, true);
 
-    // Hold a reference while the task is dispatched on this CPU, so its stack
-    // survives until this CPU's post-switch cleanup releases the reference.
-    let _ = task_inc_ref(next_task);
+    // Hold an owning reference while the task is dispatched on this CPU, so its
+    // stack survives until this CPU's post-switch cleanup releases it. Cloned
+    // from the still-live task rather than moved out of the ready queue so the
+    // re-enqueue path below can publish an independent membership reference.
+    let dispatch_ref =
+        task_placement_clone(NonNull::new(next_task).expect("dispatched task pointer is non-null"));
 
     execute_task(cpu_id, idle_task, next_task);
 
@@ -1237,11 +1244,12 @@ pub(crate) fn run_ready_task_from_idle(cpu_id: usize, idle_task: *mut Task) -> b
     // of `on_cpu`.
     task_set_on_cpu(next_task, false);
 
-    // Move the dispatch reference into the CPU-local deferred slot. Its
-    // successor releases it after this IRQ-off switch window has ended and
-    // while executing on the idle stack.
+    // Park the owning dispatch reference in the CPU-local deferred slot. Its
+    // successor reclaims and releases it after this IRQ-off switch window has
+    // ended and while executing on the idle stack.
+    let parked = task_placement_leak(dispatch_ref);
     assert!(
-        slopos_arch::pcr::defer_previous_task(next_task.cast()).is_ok(),
+        slopos_arch::pcr::defer_previous_task(parked.as_ptr().cast()).is_ok(),
         "previous-task slot was not drained before the next switch"
     );
 
@@ -1289,18 +1297,19 @@ impl Drop for RestoreInterruptState {
 #[inline]
 pub(crate) fn drain_previous_task() -> bool {
     let previous = slopos_arch::pcr::take_previous_task().cast::<Task>();
-    if previous.is_null() {
+    let Some(node) = NonNull::new(previous) else {
         return false;
-    }
+    };
 
-    let _restore_interrupts = RestoreInterruptState::open_window();
-
-    // The reference-count decrement is not yet the object destructor, but it
-    // runs under the same context contract so the ownership implementation
-    // can become drop-driven without changing the switch boundary again.
-    slopos_ostd::task::run_off_lock(|| {
-        let _ = super::task::task_release_ref(previous);
-    });
+    // Reclaim the parked dispatch reference and drop it. This drop is never the
+    // last strong reference (the registry owner outlives it), so it is a bare
+    // atomic decrement — safe here even with interrupts disabled and no lock
+    // discipline. Crucially, a terminated task's allocator-heavy retirement is
+    // NOT run in this switch tail: `release_placement_arc_deferred` arms the
+    // idle dispatcher's reclaim drain, which frees the outgoing stack later on
+    // the successor's idle stack with interrupts enabled and no lock held.
+    let dispatch_ref = task_placement_reclaim(node);
+    super::task::release_placement_arc_deferred(dispatch_ref);
     true
 }
 
@@ -1348,8 +1357,14 @@ fn schedule_internal() {
 
     if current == idle_task {
         let _ = run_ready_task_from_idle(cpu_id, idle_task);
-        cpu::restore_flags(irq_flags);
+        // Drain the deferred reference before re-enabling interrupts. The drain
+        // clears the CPU-local previous-task slot while interrupts are still
+        // disabled, then drops the reference in its own interrupt window.
+        // Re-enabling interrupts first would open a window in which a
+        // timer-driven re-entrant dispatch parks a second reference into the
+        // still-occupied slot.
         let _ = drain_previous_task();
+        cpu::restore_flags(irq_flags);
         return;
     }
 
@@ -1640,14 +1655,14 @@ pub fn task_wait_for(task_id: u32) -> c_int {
     // `is_set` (Acquire, evaluated under the event-bus queue's SpinLock) is
     // the matching consumer; the SpinLock pair supplies the full barrier.
     //
-    // The reference is recorded in WAIT_REFS keyed by this waiter so it is
-    // released exactly once — either here on the normal wake path
+    // The owning reference is recorded in WAIT_REFS keyed by this waiter so it
+    // is released exactly once — either here on the normal wake path
     // (`wait_ref_release`), or by `release_wait_ref` from the task-teardown
     // path if this waiter is SIGKILL'd while parked. SlopOS tears a blocked
     // task down asynchronously (its kernel stack, and any RAII guard on it,
-    // is never unwound on async kill), so a plain stack `TaskRefGuard` would
-    // leak its reference and pin the target forever. Tying the release to the task's
-    // kernel-object lifecycle — the map entry IS the reference, and the
+    // is never unwound on async kill), so a plain stack guard would leak its
+    // reference and pin the target forever. Tying the release to the task's
+    // kernel-object lifecycle — the map entry IS the owning reference, and the
     // atomic `remove` elects the single releaser — mirrors `futex_remove_task`
     // and is the correct pattern under this kill model.
     wait_ref_acquire(waiter_id, target);
@@ -1674,40 +1689,41 @@ pub fn task_wait_for(task_id: u32) -> c_int {
 
 // ── waitpid wait-reference tracking (kill-safe) ─────────────────────────────
 //
-// `task_wait_for` increfs its target for the duration of the wait. Because a
-// blocked task that is killed never unwinds its own stack, that incref cannot
-// be released by a stack guard — it must be released from the task-teardown
-// path. WAIT_REFS records the held reference per waiting task; whoever removes
-// the entry (normal wake or kill teardown) performs the lone `dec_ref`.
-static WAIT_REFS: SpinLock<KBTreeMap<u32, KernelSync<*mut Task>>> =
+// `task_wait_for` holds an owning reference on its target for the duration of
+// the wait. Because a blocked task that is killed never unwinds its own stack,
+// that reference cannot be released by a stack guard — it must be released from
+// the task-teardown path. WAIT_REFS owns one strong reference per waiting task;
+// whoever removes the entry (normal wake or kill teardown) performs the lone
+// drop, off the map lock.
+static WAIT_REFS: SpinLock<KBTreeMap<u32, KernelSync<KArc<Task>>>> =
     SpinLock::new(KBTreeMap::new(), LOCK_LEVEL_RESOURCE);
 
 fn wait_ref_acquire(waiter_id: u32, target: *mut Task) {
-    if waiter_id == INVALID_TASK_ID || target.is_null() {
+    let Some(node) = NonNull::new(target) else {
+        return;
+    };
+    if waiter_id == INVALID_TASK_ID {
         return;
     }
-    let _ = task_inc_ref(target);
+    // The map entry owns a strong reference that pins the target — and the
+    // `exit_info` cell the wait predicate reads — for the whole wait, even
+    // after the target becomes a zombie.
+    let arc = task_placement_clone(node);
     let stale = {
         let mut map = WAIT_REFS.lock();
-        map.insert(waiter_id, KernelSync::new(target))
+        map.insert(waiter_id, KernelSync::new(arc))
     };
     // A task can only be parked in one wait at a time; a pre-existing entry
-    // would be a bug, but release it defensively rather than leak.
+    // would be a bug, but release it off-lock rather than leak.
     if let Some(prev) = stale {
-        let prev = *prev;
-        if !prev.is_null() {
-            let _ = super::task::task_release_ref(prev);
-        }
+        release_placement_arc(prev.into_inner());
     }
 }
 
 fn wait_ref_release(waiter_id: u32) {
     let entry = { WAIT_REFS.lock().remove(&waiter_id) };
     if let Some(target) = entry {
-        let target = *target;
-        if !target.is_null() {
-            let _ = super::task::task_release_ref(target);
-        }
+        release_placement_arc(target.into_inner());
     }
 }
 

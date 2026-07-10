@@ -1155,7 +1155,6 @@ impl<T: ?Sized> KArc<T> {
     }
 
     /// Move one strong reference into an OSTD-owned raw slot.
-    #[allow(dead_code)]
     pub(crate) fn into_raw(this: Self) -> *const T
     where
         T: Sized,
@@ -1173,7 +1172,6 @@ impl<T: ?Sized> KArc<T> {
     /// `data` must be the still-live result of exactly one matching
     /// `KArc::into_raw` call for the same `T`, and that raw ownership must not
     /// already have been reconstructed.
-    #[allow(dead_code)]
     pub(crate) unsafe fn from_raw(data: *const T) -> Self
     where
         T: Sized,

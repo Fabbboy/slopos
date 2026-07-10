@@ -250,28 +250,80 @@ W2 verification:
   circular-scan bound were all reviewed. No finding reached the confidence-80
   threshold; `CVSS.md` is unchanged.
 
-**W3 — Scheduler ownership flip.** Placement state machine carries the owning
-ref (I2): ReadyQueue, remote-wake inbox (Treiber push moves a strong ref;
-drain moves it out), dispatch reference, `WAIT_REFS` →
-`KBTreeMap<u32, KArc<Task>>` with off-lock drops. Migrate the raw-pointer
-signatures across `scheduler.rs`, `per_cpu.rs`, `futex.rs`, signals, IPC —
-`KArc<Task>`/`&Task` per site — and shrink the accessor layer to methods on
-`Task`.
+**W3 — Scheduler ownership flip (complete 2026-07-10).** Every scheduler
+ownership transfer now moves a `KArc<Task>`, on the Linux
+`get_task_struct`/`put_task_struct` shape: a container gains membership by
+cloning one owning reference from the still-live task and parking it (the
+intrusive `ready_link`/`remote_inbox_link` plus one leaked strong count are the
+owning ref, I2); it loses membership by reclaiming and dropping that reference.
+Four ostd primitives are the sole sanctioned hand-off
+(`slopos-ostd/src/task/placement.rs`): `task_placement_clone` (mint an owning
+handle from a live pointer — one atomic, the wake fast path, I4),
+`task_placement_retain` (park one into a container), `task_placement_leak`/
+`task_placement_reclaim` (park/recover a handle as a raw pointer), all wrapping
+the ostd-internal `KArc::into_raw`/`from_raw`. The ready queue, the remote-wake
+Treiber inbox, and the dispatch reference are converted; the dequeued task's
+dispatch reference is a cloned handle held across the context switch, parked in
+the `previous_task` PCR slot, then reclaimed and dropped by the successor on the
+idle stack (finishing the half-built `finish_task_switch`). The switch tail
+drains that slot *before* re-enabling interrupts and drops the reference as a
+bare decrement — a terminated task's allocator-heavy retirement (buddy free +
+cross-CPU TLB drain) is deferred to the idle dispatcher's reclaim drain rather
+than run in the switch window, which both closes the re-entrant double-park
+window and keeps the switch tail cheap.
+`WAIT_REFS` is `KBTreeMap<u32, KernelSync<KArc<Task>>>` and the futex bucket
+owns its waiter (`KernelSync<Option<KArc<Task>>>` keyed by id), both dropping
+off the map/bucket path. Reclaim re-keys from the deleted `refcnt` to
+`!on_cpu && KArc::strong_count(owner) == 1 && terminated`: a placement reference
+forces `strong_count >= 2`, so a terminated task cannot be reclaimed while
+queued/running, and every placement drop captures id+status before the drop and
+routes retirement through the self-deferring `task_try_reclaim_id`
+(`release_placement_arc`). The registry `owner` remains the interim anchor for
+blocked/zombie tasks — it outlives every placement reference, which is what
+makes those drops never-final and therefore lock- and IRQ-safe. `refcnt` and
+its whole surface (`inc_ref`/`dec_ref`/`ref_count`, `task_inc_ref`/
+`task_dec_ref`/`task_inc_ref_with_id`/`task_ref_count`, `TaskRefGuard`, the
+`KernelSync<*mut Task>` fields in `scheduler.rs`/`futex.rs`) are deleted.
+
+W3 verification:
+
+- New/rewritten kernel `stest!`s: a placement leak/reclaim round-trip conserves
+  the strong count and base pointer; the deferred slot drains exactly one
+  owning reference; the remote-inbox duplicate-push and non-ready-drop tests now
+  assert strong-count deltas instead of the old `refcnt`.
+- `just build` (both the production and tests-enabled kernels),
+  `check_stack_sizes` (the ~8 KiB `Task` is still only ever `KArc::try_init`-ed,
+  never on a stack), `check_kernel_softfloat`, the full `just check-framekernel`
+  source and host gates, and all 82 Verus obligations pass.
+- Full QEMU testing under KVM passes: 2,649 kernel tests with no failures or
+  skips; the 112-test scheduler suite (placement transitions, lost-wake
+  regressions, inbox ownership) and the fork/exit/wait and reap-stampede churn
+  tests are green, asserting that a destroyed task stops upgrading.
+- Security triage raw findings: the clone-at-leaf liveness contract, the
+  never-final placement drops, the reclaim gate, the off-lock wait-map/futex
+  drops, and the dispatch-slot hand-off were reviewed. No confidence-scored or
+  CVSS-eligible finding was produced; `CVSS.md` is unchanged.
 
 **W4 — Teardown rebuild.** Ownership-driven zombie/waitpid/reparent per the
 target architecture; exit paths route the final ref through the deferred
 slot; TTY hangup and futex cleanup keep their ordering but hold typed refs.
 
-**W5 — Excision + acceptance.** Delete `refcnt`, `inc_ref`/`dec_ref`,
-`task_inc_ref`/`task_dec_ref`, `TaskRefGuard`, every `KernelSync<*mut Task>`,
-and generation identity. Acceptance greps below must return zero hits.
+**W5 — Excision + acceptance.** With the `refcnt` surface already gone (W3),
+what remains is to retire the registry's transitional strong `owner` so the
+registry is truly weak-only — the placement containers, the parent's zombie
+ownership (W4), and the wait maps then hold the only strong references — and to
+finish the accessor→method excision so no `*mut Task` survives in a signature
+outside ostd placement/link primitives and the PCR slot. Acceptance greps below
+must return zero hits.
 
-W0–W2 are complete. The registry is weak-only with a transitional
-scheduler-lifetime strong owner per task; the placement containers, remote
-inbox, `WAIT_REFS`, and dispatch path still move ownership through the legacy
-`refcnt` (`task_inc_ref`/`task_release_ref`), which W3 replaces by moving the
-owning `KArc<Task>` into the placement state machine. W3–W5 are the
-rip-and-replace and land as one coherent series.
+W0–W3 are complete. The `refcnt` field and its whole accessor surface, the
+`KernelSync<*mut Task>` fields, and the legacy inc/dec discipline are deleted;
+the scheduler now owns tasks by moving `KArc<Task>` clones through the ready
+queue, remote inbox, dispatch slot, and wait maps, with reclaim keyed on the
+registry owner's strong count. The registry still holds that transitional
+strong `owner` as the interim anchor for blocked/zombie tasks. W4 (ownership-
+driven teardown/zombie/waitpid/reparent) and W5 (retire the registry owner,
+finish the accessor excision, acceptance greps green) remain and land next.
 
 ## Acceptance
 

@@ -234,8 +234,6 @@ task_scalar_setters! {
 task_method_getters! {
     /// Read the task's atomic status (`Ready`, `Running`, `Blocked`, …).
     task_status -> TaskStatus = status,
-    /// Read `task->refcnt`.
-    task_ref_count -> u32 = ref_count,
     /// Read the task's current block reason via the `&self` method.
     task_load_block_reason -> slopos_abi::task::BlockReason = load_block_reason,
 }
@@ -405,31 +403,6 @@ pub fn task_record_user_fault_exit<K, U>(
         (*task).exit_code = 1;
         Some((*task).task_id)
     }
-}
-
-/// Bump `task->refcnt`. Returns the post-increment count, mirroring
-/// `Task::inc_ref`. Returns `None` for null pointers.
-#[inline]
-pub fn task_inc_ref<K, U>(task: *mut TaskInner<K, U>) -> Option<u32> {
-    if task.is_null() {
-        return None;
-    }
-    // SAFETY: caller pre-validated; `inc_ref` takes `&self` and
-    // performs the atomic add internally.
-    Some(unsafe { (*task).inc_ref() })
-}
-
-/// Decrement `task->refcnt`. Returns `Some(true)` if the count
-/// dropped to zero (caller is the last reference), mirroring
-/// `Task::dec_ref`. Returns `None` for null pointers.
-#[inline]
-pub fn task_dec_ref<K, U>(task: *mut TaskInner<K, U>) -> Option<bool> {
-    if task.is_null() {
-        return None;
-    }
-    // SAFETY: caller pre-validated; `dec_ref` takes `&self` and
-    // performs the atomic sub internally.
-    Some(unsafe { (*task).dec_ref() })
 }
 
 /// Save the task's panic-recovery nesting depth while it is not running.
@@ -626,19 +599,6 @@ pub fn task_install_idle_affinity<K, U>(task: *mut TaskInner<K, U>, mask: u32, l
     }
 }
 
-/// Read `task->task_id` and increment its refcount in one shot.
-/// Returns the (post-inc) refcount, or `None` if `task` is null.
-#[inline]
-pub fn task_inc_ref_with_id<K, U>(task: *mut TaskInner<K, U>) -> Option<(u32, u32)> {
-    if task.is_null() {
-        return None;
-    }
-    // SAFETY: caller pre-validated; both ops are atomic / scalar.
-    let id = unsafe { (*task).task_id };
-    let count = unsafe { (*task).inc_ref() };
-    Some((id, count))
-}
-
 /// Set `task->on_cpu = on`. The dispatcher uses `true` before
 /// switching in, then clears to `false` after the outgoing context
 /// save completes.
@@ -742,30 +702,6 @@ pub fn task_context_rflags<K, U>(task: *const TaskInner<K, U>) -> Option<u64> {
     Some(unsafe { (*task).context.rflags })
 }
 
-/// RAII increment of `task->refcnt`. `new` bumps the count; `Drop`
-/// decrements. Used by callers that hold a `*mut Task` across a
-/// scheduler yield (e.g. `task_wait_for`) so transitional scheduler ownership
-/// cannot release the task while the borrow is live.
-pub struct TaskRefGuard<K, U> {
-    task: *mut TaskInner<K, U>,
-}
-
-impl<K, U> TaskRefGuard<K, U> {
-    pub fn new(task: *mut TaskInner<K, U>) -> Self {
-        if !task.is_null() {
-            let _ = task_inc_ref(task);
-        }
-        Self { task }
-    }
-}
-
-impl<K, U> Drop for TaskRefGuard<K, U> {
-    fn drop(&mut self) {
-        if !self.task.is_null() {
-            let _ = task_dec_ref(self.task);
-        }
-    }
-}
 // ---------------------------------------------------------------------------
 // Phase-2 accessors: scheduler / driver / signal / stats hot paths.
 // Each absorbs an `unsafe { (*task).<field> }` deref formerly scattered
@@ -1003,7 +939,7 @@ pub fn task_task_id<K, U>(task: *const TaskInner<K, U>) -> Option<u32> {
 
 /// Wake every task currently blocked waiting for this task to exit.
 /// Caller must hold the task pointer stable (e.g. via the task-manager
-/// lock or a `TaskRefGuard`) long enough to resolve its id; the event
+/// lock or an owning `KArc`) long enough to resolve its id; the event
 /// bus queue's internal SpinLock makes the publish interrupt-safe and
 /// serialises against any concurrent waiter registration.
 #[inline]

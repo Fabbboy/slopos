@@ -1202,7 +1202,7 @@ impl Drop for WaitNode {
         if !q.is_null() {
             // SAFETY: `queue_store` always casts a `*const WaitQueue`
             // (a static array element, an inline field of a `TaskInner`
-            // kept alive by `TaskRefGuard`, etc.) into the back-pointer.
+            // kept alive by an owning `KArc`, etc.) into the back-pointer.
             // The WaitQueue is required by its API contract to outlive
             // every WaitNode that has been linked into it (see the
             // `wait_node.rs` module doc for the lifetime invariant).

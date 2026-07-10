@@ -551,8 +551,13 @@ fn scheduler_loop(cpu_id: usize, idle_task: *mut Task) -> ! {
         // resumption.
         let irq_flags = slopos_arch::cpu::save_flags_cli();
         let dispatched = run_ready_task_from_idle(cpu_id, idle_task);
-        slopos_arch::cpu::restore_flags(irq_flags);
+        // Drain before re-enabling interrupts: the drain clears the CPU-local
+        // previous-task slot while interrupts are disabled, closing the window
+        // in which a re-entrant dispatch would park a second reference into the
+        // still-occupied slot. The reference is then dropped in the drain's own
+        // interrupt window.
         let _ = crate::scheduler::drain_previous_task();
+        slopos_arch::cpu::restore_flags(irq_flags);
         crate::scheduler::drain_deferred_task_reclaim();
         if dispatched {
             continue;

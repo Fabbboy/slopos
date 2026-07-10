@@ -36,9 +36,11 @@
 //! `task/task_accessors.rs` and the inner `task_borrow` lookup.
 
 use core::marker::PhantomData;
+use core::ptr::NonNull;
 use core::sync::atomic::Ordering;
 
 use slopos_abi::syscall::TtyIndex;
+use slopos_ostd::task::task_placement_strong_count;
 
 use super::exit_info::ExitInfo;
 use super::task::{
@@ -142,9 +144,13 @@ impl<'scope> TaskHandle<'scope> {
         self.task().kernel_stack_top
     }
 
+    /// Current strong reference count on the task, including this handle's own
+    /// registry guard. Diagnostic only.
     #[inline]
-    pub fn ref_count(&self) -> u32 {
-        self.task().ref_count()
+    pub fn strong_count(&self) -> u32 {
+        NonNull::new(self.task.as_ptr())
+            .map(|node| task_placement_strong_count(node) as u32)
+            .unwrap_or(0)
     }
 
     #[inline]
