@@ -490,6 +490,18 @@ pub fn init_task_manager() -> c_int {
     0
 }
 
+/// Whether `task_id` was ever handed out by the allocator. Because ids are
+/// monotonic and never reused, any id below the watermark named a real task
+/// at some point — it is now either live or fully retired — whereas an id at
+/// or above the watermark never existed. Lets callers treat an operation on
+/// an already-retired task as idempotent rather than "no such task".
+pub fn task_id_was_allocated(task_id: u32) -> bool {
+    if task_id == INVALID_TASK_ID || task_id == 0 {
+        return false;
+    }
+    with_task_manager(|mgr| (task_id as u64) < mgr.next_task_id)
+}
+
 /// Find a task by its never-reused ID. The returned guard owns the successful
 /// weak upgrade; absence and completed destruction both return `None`.
 pub fn task_find_by_id(task_id: u32) -> Option<TaskRef> {

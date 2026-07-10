@@ -664,7 +664,18 @@ pub fn task_terminate(task_id: u32) -> c_int {
         return -1;
     }
 
-    if task_ptr.is_null() || task_status(task_ptr) == Some(TaskStatus::Invalid) {
+    if task_ptr.is_null() {
+        // A specific id that no longer resolves either named a task that has
+        // been fully terminated and reclaimed (idempotent success) or one
+        // that never existed. Monotonic non-reused ids tell the two apart.
+        if super::task_table::task_id_was_allocated(task_id) {
+            return 0;
+        }
+        klog_info!("task_terminate: Task not found");
+        return -1;
+    }
+
+    if task_status(task_ptr) == Some(TaskStatus::Invalid) {
         klog_info!("task_terminate: Task not found");
         return -1;
     }
