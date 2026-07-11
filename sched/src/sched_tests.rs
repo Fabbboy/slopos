@@ -4131,6 +4131,168 @@ pub fn test_orphan_child_auto_reaped_on_parent_exit() -> TestResult {
     TestResult::Pass
 }
 
+/// A linked child is owned by its parent: it sits on the parent's children list
+/// and carries exactly one extra parked strong reference (invariant I2 —
+/// membership IS the owning reference). `waitpid`'s reap unlinks it, drops that
+/// reference, and reclaims the task.
+pub fn test_child_owned_by_parent_children_list() -> TestResult {
+    use super::task::{task_consume_zombie, task_set_parent};
+    use slopos_ostd::task::accessors::task_children_is_empty;
+
+    let _fixture = SchedFixture::new();
+
+    let parent_id = task_create(
+        b"FamParent\0".as_ptr() as *const c_char,
+        dummy_task_entry,
+        ptr::null_mut(),
+        TaskPriority::Normal.as_u8(),
+        TASK_FLAG_KERNEL_MODE,
+    );
+    let child_id = task_create(
+        b"FamChild\0".as_ptr() as *const c_char,
+        dummy_task_entry,
+        ptr::null_mut(),
+        TaskPriority::Normal.as_u8(),
+        TASK_FLAG_KERNEL_MODE,
+    );
+    if parent_id == INVALID_TASK_ID || child_id == INVALID_TASK_ID {
+        return TestResult::Fail;
+    }
+
+    let parent_ptr = task_find_by_id(parent_id);
+    let child_ptr = task_find_by_id(child_id);
+    if parent_ptr.is_null() || child_ptr.is_null() {
+        return TestResult::Fail;
+    }
+    let Some(child_nn) = NonNull::new(child_ptr) else {
+        return TestResult::Fail;
+    };
+
+    // Before linking: the parent owns no children; the child is pinned only by
+    // its registry owner.
+    if !task_children_is_empty(parent_ptr) {
+        klog_info!("SCHED_TEST: parent children list non-empty before link");
+        return TestResult::Fail;
+    }
+    let count_before = task_placement_strong_count(child_nn);
+
+    task_set_parent(child_id, parent_id);
+
+    // After linking: the child is on the parent's list and carries exactly one
+    // extra owning reference.
+    if task_children_is_empty(parent_ptr) {
+        klog_info!("SCHED_TEST: child not on parent children list after link");
+        return TestResult::Fail;
+    }
+    if task_placement_strong_count(child_nn) != count_before + 1 {
+        klog_info!("SCHED_TEST: link did not add exactly one owning reference");
+        return TestResult::Fail;
+    }
+
+    // Terminating the child makes it a Zombie still owned by the (alive) parent.
+    if task_terminate(child_id) != 0 {
+        return TestResult::Fail;
+    }
+    if task_status(child_ptr).unwrap_or(TaskStatus::Terminated) != TaskStatus::Zombie {
+        klog_info!("SCHED_TEST: child not Zombie after terminate");
+        return TestResult::Fail;
+    }
+    if task_children_is_empty(parent_ptr) {
+        klog_info!("SCHED_TEST: zombie child fell off parent children list");
+        return TestResult::Fail;
+    }
+
+    // Reaping via the waitpid path unlinks the child, drops the parent's parked
+    // reference, and reclaims the task.
+    if task_consume_zombie(child_id).is_none() {
+        klog_info!("SCHED_TEST: task_consume_zombie returned None");
+        return TestResult::Fail;
+    }
+    if !task_children_is_empty(parent_ptr) {
+        klog_info!("SCHED_TEST: reaped child still on parent children list");
+        return TestResult::Fail;
+    }
+    if !task_find_by_id(child_id).is_null() {
+        klog_info!("SCHED_TEST: reaped child still registered");
+        return TestResult::Fail;
+    }
+
+    let _ = task_terminate(parent_id);
+    TestResult::Pass
+}
+
+/// A dying parent drains its whole children list in O(children): zombie children
+/// are auto-reaped (reclaimed) and live children are orphaned (they survive, off
+/// the list, with a cleared parent id).
+pub fn test_parent_death_drains_multiple_children() -> TestResult {
+    use super::task::task_set_parent;
+    use slopos_ostd::task::accessors::task_children_is_empty;
+
+    let _fixture = SchedFixture::new();
+
+    let parent_id = task_create(
+        b"DrainParent\0".as_ptr() as *const c_char,
+        dummy_task_entry,
+        ptr::null_mut(),
+        TaskPriority::Normal.as_u8(),
+        TASK_FLAG_KERNEL_MODE,
+    );
+    if parent_id == INVALID_TASK_ID {
+        return TestResult::Fail;
+    }
+
+    let mut child_ids = [INVALID_TASK_ID; 4];
+    for slot in child_ids.iter_mut() {
+        let id = task_create(
+            b"DrainChild\0".as_ptr() as *const c_char,
+            dummy_task_entry,
+            ptr::null_mut(),
+            TaskPriority::Normal.as_u8(),
+            TASK_FLAG_KERNEL_MODE,
+        );
+        if id == INVALID_TASK_ID {
+            return TestResult::Fail;
+        }
+        task_set_parent(id, parent_id);
+        *slot = id;
+    }
+
+    let parent_ptr = task_find_by_id(parent_id);
+    if parent_ptr.is_null() || task_children_is_empty(parent_ptr) {
+        klog_info!("SCHED_TEST: parent children list empty after linking four children");
+        return TestResult::Fail;
+    }
+
+    // Two children become Zombies owned by the parent; two stay live.
+    if task_terminate(child_ids[0]) != 0 || task_terminate(child_ids[1]) != 0 {
+        return TestResult::Fail;
+    }
+
+    // Parent dies: drains its list. (Its own children list must be empty by the
+    // time it is reclaimed, which the `Drop` tripwire also asserts.)
+    if task_terminate(parent_id) != 0 {
+        return TestResult::Fail;
+    }
+
+    // The two zombies were reaped; the two live children survive as orphans.
+    if !task_find_by_id(child_ids[0]).is_null() || !task_find_by_id(child_ids[1]).is_null() {
+        klog_info!("SCHED_TEST: zombie children not reaped on parent death");
+        return TestResult::Fail;
+    }
+    for &id in &child_ids[2..] {
+        if task_find_by_id(id).is_null() {
+            klog_info!("SCHED_TEST: live child wrongly reaped on parent death");
+            return TestResult::Fail;
+        }
+    }
+
+    // Orphans go straight to Terminated (no reaper remains).
+    for &id in &child_ids[2..] {
+        let _ = task_terminate(id);
+    }
+    TestResult::Pass
+}
+
 /// Cross-priority wait: a high-priority caller waits on a
 /// low-priority child that has already published its exit. Under the
 /// paused-AP fixture this is not a true SMP priority-inversion
@@ -4423,6 +4585,14 @@ slopos_testing::stest!(name = test_effective_load_accuracy, suite = sched_core);
 slopos_testing::stest!(name = test_waitpid_survives_task_churn, suite = sched_core);
 slopos_testing::stest!(
     name = test_orphan_child_auto_reaped_on_parent_exit,
+    suite = sched_core
+);
+slopos_testing::stest!(
+    name = test_child_owned_by_parent_children_list,
+    suite = sched_core
+);
+slopos_testing::stest!(
+    name = test_parent_death_drains_multiple_children,
     suite = sched_core
 );
 

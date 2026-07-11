@@ -15,7 +15,9 @@
 //! All helpers return `Option<T>`; the caller threads the `None` case
 //! through their existing diagnostics.
 
-use crate::sync::BUS;
+use core::ptr::NonNull;
+
+use crate::sync::{BUS, LinkError};
 use crate::task::fpu::FpuState;
 use crate::user::context::UserContext;
 use slopos_abi::event::{KernelEvent, TaskSlot};
@@ -377,6 +379,57 @@ pub fn task_borrow_mut<'a, K, U>(task: *mut TaskInner<K, U>) -> Option<&'a mut T
     // SAFETY: caller pre-validated; the borrow's lifetime is bounded
     // by the caller's frame.
     Some(unsafe { &mut *task })
+}
+
+// ---------------------------------------------------------------------------
+// Children-list mechanism.
+//
+// The parent's `children` list and each child's `sibling_link` are the
+// intrusive membership machinery; these accessors are the safe surface over it.
+// They are pure mechanism — the strong-reference ownership (park on link,
+// reclaim on unlink) and the serialising registry lock are the scheduler crate's
+// policy. All list operations are `&self`, so a shared `task_borrow` suffices.
+// ---------------------------------------------------------------------------
+
+/// Link `child` into `parent`'s children list. `Err(AlreadyLinked)` if the
+/// child is already a member of some parent's list; `Err(NotPresent)` on a null
+/// parent.
+#[inline]
+pub fn task_children_push<K, U>(
+    parent: *const TaskInner<K, U>,
+    child: NonNull<TaskInner<K, U>>,
+) -> Result<(), LinkError> {
+    match task_borrow(parent) {
+        Some(p) => p.children.push(child),
+        None => Err(LinkError::NotPresent),
+    }
+}
+
+/// Detach and return one child from the head of `parent`'s children list, or
+/// `None` when the list is empty (or the parent pointer is null).
+#[inline]
+pub fn task_children_pop<K, U>(parent: *const TaskInner<K, U>) -> Option<NonNull<TaskInner<K, U>>> {
+    task_borrow(parent)?.children.pop()
+}
+
+/// Remove a specific `child` from `parent`'s children list. `Err(NotPresent)`
+/// if the child is not in the list (e.g. a concurrent drain already detached it)
+/// or the parent pointer is null.
+#[inline]
+pub fn task_children_remove<K, U>(
+    parent: *const TaskInner<K, U>,
+    child: NonNull<TaskInner<K, U>>,
+) -> Result<(), LinkError> {
+    match task_borrow(parent) {
+        Some(p) => p.children.remove(child),
+        None => Err(LinkError::NotPresent),
+    }
+}
+
+/// Whether `parent`'s children list is empty (also true for a null pointer).
+#[inline]
+pub fn task_children_is_empty<K, U>(parent: *const TaskInner<K, U>) -> bool {
+    task_borrow(parent).is_none_or(|p| p.children.is_empty())
 }
 
 /// Record a user-mode-fault exit on `task`: sets `exit_reason`,

@@ -304,9 +304,70 @@ W3 verification:
   drops, and the dispatch-slot hand-off were reviewed. No confidence-scored or
   CVSS-eligible finding was produced; `CVSS.md` is unchanged.
 
-**W4 — Teardown rebuild.** Ownership-driven zombie/waitpid/reparent per the
-target architecture; exit paths route the final ref through the deferred
-slot; TTY hangup and futex cleanup keep their ordering but hold typed refs.
+**W4 — Teardown rebuild (complete 2026-07-11).** Teardown is now ownership-
+driven. A parent owns each of its children — live and zombie — through an
+intrusive `children` list on the parent `Task` (new `SiblingRole` + per-child
+`sibling_link`), whose membership is one strong reference parked exactly like
+ready-queue placement (`task_placement_retain` on link, `task_placement_reclaim`
+on unlink, I2); there is no separate zombie list, and a zombie is simply a dead
+child still parked in its parent's list. Three registry-lock-guarded,
+allocation-free helpers are the sole hand-off (`sched/src/task/task_family.rs`):
+`link_child` (park a child, or orphan it if the parent is already dying — the
+under-lock parent-alive check plus the `set_status`-before-drain ordering closes
+the stranded-child window), `take_one_child` (drain one), and `unlink_child`
+(detach a specific child, reclaiming only when the list removal wins against a
+concurrent drain). `waitpid` (`task_consume_zombie`) reaps by unlinking the child
+and dropping the parent's owning reference off-lock; a dying parent's
+`reparent_and_reap_children` drains its own list in O(children) — auto-reaping
+zombies (Zombie → Terminated) and orphaning live children — deleting the former
+whole-registry scan (`iter_tasks_mut` and `task_registry_len` are gone). Every
+reclaimed reference drops off the registry lock via `release_placement_arc` and
+is never the last reference (the registry owner outlives it until W5), so each
+drop is a bare decrement and a zombie's retirement self-defers. The child→parent
+link stays a `u32 parent_task_id` resolved through the registry weak-upgrade —
+the shape Redox (`ppid` + `CONTEXTS`) and Asterinas (`AtomicPid` + `pid_table`)
+both use, and the shape the signal-target and poll back-edges already use —
+rather than an embedded `KWeak`, which would duplicate the registry's single
+liveness index and add a cross-CPU data race on a non-atomic field. Fork, clone,
+exec, and `task_set_parent` publish the parent edge via `link_child` after
+registration; `clone_from_raw` resets the copied list head, sibling slot, and
+parent id; `Task::drop` debug-asserts an empty children list and a detached
+sibling slot. (The exit path already routes its final on-CPU reference through
+the deferred previous-task slot from W1/W3, and futex cleanup and TTY hangup
+already hold typed refs / ids from W3 — this workstream leaves those intact.)
+
+W4 verification:
+
+- New kernel `stest!`s: a linked child sits on its parent's children list and
+  carries exactly one extra parked strong reference, and `waitpid`'s reap unlinks
+  it, drops that reference, and reclaims the task; a dying parent drains a
+  multi-child list, auto-reaping the zombies and orphaning the live children. The
+  reworked `test_orphan_child_auto_reaped_on_parent_exit` and
+  `test_waitpid_survives_task_churn` pass on the new `link_child` path.
+- `just build`, `check_stack_sizes` (the `Task` grew by one intrusive list head +
+  one link slot and is still only ever `KArc::try_init`-ed), and
+  `check_kernel_softfloat` pass; the full `just check-framekernel` source and host
+  gates pass, with no `unsafe` added outside `slopos-ostd`.
+- The kernel test phase (2,674 planned — including the scheduler churn, reap-
+  stampede, fork-exit-wait, and wait-exit-race suites that directly exercise
+  teardown) passes with no failures on every completing run.
+- Full `just test` under KVM completes green on most runs; a minority abort in
+  the userland phase on one of three pre-existing, non-deterministic spots
+  unrelated to task ownership — the OSTD user-mode round-trip's per-CPU
+  `return_reason` slot (read after a preemption in the trampoline-return tail),
+  the cross-core per-core reactor (`utest_percore_reactor`, a documented thread-
+  per-core wakeup gap), and the deliberate panic-recovery unwind
+  (`test_run_recoverable_cleanup` tripping the cross-CPU NMI watchdog). An A/B of
+  ten baseline runs against eight W4 runs reproduces the identical failure
+  signatures at comparable rates (baseline ~2/10, W4 ~3/8), confirming these are
+  pre-existing and not a W4 regression; none touch the changed teardown, fork, or
+  reap code, all of which stays in the green kernel phase.
+- Security triage raw findings: the drain's off-lock reclaim, the `unlink_child`
+  removal-gated reclaim (no double free against a concurrent drain), the
+  `link_child` under-lock parent-alive check (no stranded child), the `Task::drop`
+  leak tripwires, and the reclaim-gate interaction (a zombie's extra parent
+  reference never trips the `strong_count == 1` gate early) were reviewed. No
+  finding reached the confidence-80 threshold; `CVSS.md` is unchanged.
 
 **W5 — Excision + acceptance.** With the `refcnt` surface already gone (W3),
 what remains is to retire the registry's transitional strong `owner` so the
@@ -316,14 +377,16 @@ finish the accessor→method excision so no `*mut Task` survives in a signature
 outside ostd placement/link primitives and the PCR slot. Acceptance greps below
 must return zero hits.
 
-W0–W3 are complete. The `refcnt` field and its whole accessor surface, the
+W0–W4 are complete. The `refcnt` field and its whole accessor surface, the
 `KernelSync<*mut Task>` fields, and the legacy inc/dec discipline are deleted;
-the scheduler now owns tasks by moving `KArc<Task>` clones through the ready
-queue, remote inbox, dispatch slot, and wait maps, with reclaim keyed on the
-registry owner's strong count. The registry still holds that transitional
-strong `owner` as the interim anchor for blocked/zombie tasks. W4 (ownership-
-driven teardown/zombie/waitpid/reparent) and W5 (retire the registry owner,
-finish the accessor excision, acceptance greps green) remain and land next.
+the scheduler owns tasks by moving `KArc<Task>` clones through the ready queue,
+remote inbox, dispatch slot, and wait maps, and teardown is ownership-driven — a
+parent owns its children through an intrusive list, `waitpid` reaps by dropping
+that reference off-lock, and a dying parent drains its own list in O(children)
+with no global scan. The registry still holds a transitional strong `owner` as
+the interim anchor for blocked/zombie tasks, with reclaim keyed on its strong
+count. W5 (retire the registry owner so the registry is weak-only, finish the
+accessor→method excision, acceptance greps green) remains and lands next.
 
 ## Acceptance
 

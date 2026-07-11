@@ -27,7 +27,7 @@ pub use drop_context::{assert_task_drop_context, drop_off_lock, run_off_lock};
 pub use exit_info::ExitInfo;
 pub use job_control::{ProcessGroup, Session, new_group_in_session, new_session_group};
 pub use kernel_task::SchedPlacement;
-pub use link_roles::{ReadyQueueRole, RemoteWakeRole};
+pub use link_roles::{ReadyQueueRole, RemoteWakeRole, SiblingRole};
 pub use placement::{
     task_placement_clone, task_placement_leak, task_placement_reclaim, task_placement_retain,
     task_placement_strong_count,

@@ -251,10 +251,6 @@ impl TaskManagerInner {
     pub(super) fn iter_tasks(&self) -> impl Iterator<Item = TaskRef> + '_ {
         self.registry.iter().map(|(_, task)| task)
     }
-
-    pub(super) fn iter_tasks_mut(&mut self) -> impl Iterator<Item = TaskRef> + '_ {
-        self.registry.iter().map(|(_, task)| task)
-    }
 }
 
 static TASK_MANAGER: SpinLock<TaskManagerInner> =
@@ -274,11 +270,6 @@ pub(super) fn try_with_task_manager<R>(f: impl FnOnce(&mut TaskManagerInner) -> 
     } else {
         None
     }
-}
-
-#[inline]
-pub(super) fn task_registry_len() -> usize {
-    with_task_manager(|mgr| mgr.registry.len())
 }
 
 /// Allocate the registry spine outside the manager lock and install it if
@@ -743,7 +734,15 @@ pub fn task_consume_zombie(task_id: u32) -> Option<ExitInfo> {
     if !task.try_transition_to(TaskStatus::Terminated) {
         return None;
     }
+    let child_ptr = task.as_ptr();
     drop(task);
+    // waitpid drops the parent's owning reference off-lock: unlink the child
+    // from its parent's children list and release the reference the list held.
+    // A Zombie is pinned by that reference, so without this the reaped child
+    // would stay Terminated-pinned until the parent itself exits.
+    if let Some(parent_ref) = super::unlink_child(child_ptr) {
+        release_placement_arc(parent_ref);
+    }
     let _ = task_try_reclaim_id(task_id);
     Some(info)
 }

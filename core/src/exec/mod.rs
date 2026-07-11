@@ -38,7 +38,7 @@ use slopos_sched::task::{
     task_entry_from_kernel_va, task_process_group, task_process_id, task_session,
     task_set_context_rip_rsp, task_set_entry_point, task_set_fs_base, task_user_ctx_mut,
 };
-use slopos_sched::task::{task_create, task_find_by_id, task_terminate};
+use slopos_sched::task::{link_child, task_create, task_find_by_id, task_terminate};
 
 pub const EXEC_MAX_PATH: usize = 256;
 pub const EXEC_MAX_ARG_STRLEN: usize = 4096;
@@ -323,7 +323,6 @@ pub fn spawn_program_with_attrs(
                     }
                     child.sid = parent.sid;
                     child.controlling_tty = parent.controlling_tty;
-                    child.parent_task_id = parent_task_id;
 
                     if flags & slopos_abi::task::TASK_FLAG_FOREGROUND != 0
                         && child.pgid != 0
@@ -332,6 +331,10 @@ pub fn spawn_program_with_attrs(
                         fg_handoff = Some((ctty, child.pgid, child.sid));
                     }
                 }
+                // Publish the parent→child ownership edge (parent id +
+                // children-list membership) after the field borrows above have
+                // ended; the child was already registered by `task_create`.
+                link_child(parent_ptr, task_info);
             }
         }
 

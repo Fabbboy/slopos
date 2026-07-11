@@ -8,7 +8,7 @@ use slopos_ostd::task::accessors::{
     TASK_EXIT_CLEANUP_ACCOUNTED, TASK_EXIT_CLEANUP_RESOURCES, TASK_EXIT_CLEANUP_VM,
     task_exit_cleanup_mark,
 };
-use slopos_ostd::{KVec, klog_debug, klog_info};
+use slopos_ostd::{KArc, klog_debug, klog_info};
 
 use slopos_ostd::task::accessors::task_process_group;
 use slopos_ostd::task::new_session_group;
@@ -18,8 +18,8 @@ use super::task_cleanup_hooks::run_task_resource_cleanup_hooks;
 use super::task_session::{notify_parent_of_child_exit, release_task_dependents};
 use super::task_stats::record_task_created;
 use super::task_table::{
-    TaskAllocError, allocate_task, discard_task, register_task, task_find_by_id, task_registry_len,
-    task_try_reclaim, with_task_manager,
+    TaskAllocError, allocate_task, discard_task, register_task, task_find_by_id, task_try_reclaim,
+    with_task_manager,
 };
 use super::{
     INVALID_PROCESS_ID, INVALID_TASK_ID, TASK_FLAG_KERNEL_MODE, TASK_FLAG_SYSTEM,
@@ -837,12 +837,11 @@ fn mark_task_terminated(task_ptr: *mut Task, resolved_id: u32) {
 
     release_task_dependents(resolved_id);
 
-    // Adopt children: live ones become orphans (parent_task_id =
-    // INVALID, so their later termination skips Zombie); zombie ones
-    // are auto-reaped (Zombie → Terminated, freeing the slot for tier-2
-    // reuse). There is no userland-PID-1 reaper, so orphan adoption
-    // happens entirely in the kernel.
-    reparent_and_reap_children(resolved_id);
+    // Adopt children: live ones become orphans (parent id cleared, so their
+    // later termination skips Zombie); zombie ones are auto-reaped (Zombie →
+    // Terminated). There is no userland-PID-1 reaper, so orphan adoption happens
+    // entirely in the kernel.
+    reparent_and_reap_children(task_ptr);
 
     if let Some(tty_idx) = should_hangup {
         tty::hangup(tty_idx);
@@ -866,45 +865,29 @@ fn parent_alive_for(parent_id: u32) -> bool {
     }
 }
 
-/// Walk the task registry once and, for every task whose `parent_task_id`
-/// is `dying_id`:
-///   * if the child is still alive (Ready/Running/Blocked), clear its
-///     `parent_task_id` so its eventual exit skips the Zombie state;
-///   * if the child is already in Zombie, transition it to Terminated
-///     (the would-be reaper just died, so the exit code has no
-///     consumer and the task can be destroyed).
+/// Drain the dying task's owned children list — O(children), not a registry
+/// scan. For each child:
+///   * clear its parent id so a live child's later exit skips the Zombie state
+///     and a reaped zombie leaves no dangling parent id;
+///   * if it is already a Zombie, demote it to Terminated (the would-be reaper
+///     just died, so its exit code has no consumer and it can be destroyed);
+///   * drop the owning reference the list held.
 ///
-/// Runs under the task-manager lock so registration cannot change while it is
-/// inspected. Task destruction is retried after dropping that lock.
-fn reparent_and_reap_children(dying_id: u32) {
-    if dying_id == INVALID_TASK_ID {
+/// Each `take_one_child` pop runs under the registry lock; the returned
+/// reference is dropped off-lock via `release_placement_arc` and is never the
+/// last reference (the registry owner outlives it), so the drop is a bare
+/// decrement and a zombie's retirement self-defers.
+fn reparent_and_reap_children(dying: *mut Task) {
+    if dying.is_null() {
         return;
     }
-    let mut transitioned = KVec::with_capacity(task_registry_len()).unwrap_or_else(|_| KVec::new());
-    let mut missed = false;
-    with_task_manager(|mgr| {
-        for slot in mgr.iter_tasks_mut() {
-            if slot.parent_task_id != dying_id {
-                continue;
-            }
-            super::task_accessors::task_set_parent_task_id(slot.as_ptr(), INVALID_TASK_ID);
-            if slot.status() == TaskStatus::Zombie && slot.try_transition_to(TaskStatus::Terminated)
-            {
-                // Record within the pre-reserved capacity only: a push must
-                // never allocate while the manager lock is held.
-                if transitioned.len() < transitioned.capacity() {
-                    let _ = transitioned.push(slot.task_id);
-                } else {
-                    missed = true;
-                }
-            }
+    while let Some(child) = super::take_one_child(dying) {
+        let child_ptr = KArc::as_ptr(&child) as *mut Task;
+        super::task_accessors::task_set_parent_task_id(child_ptr, INVALID_TASK_ID);
+        if child.status() == TaskStatus::Zombie {
+            let _ = child.try_transition_to(TaskStatus::Terminated);
         }
-    });
-    for id in transitioned.iter() {
-        drop(task_find_by_id(*id));
-    }
-    if missed {
-        super::task_table::arm_deferred_reclaim();
+        super::task_table::release_placement_arc(child);
     }
 }
 
@@ -1115,7 +1098,8 @@ pub fn task_fork(
 
     child.task_id = child_task_id;
     child.process_id = child_process_id;
-    child.parent_task_id = parent.task_id;
+    // The parent link and children-list membership are published together, after
+    // registration, via `link_child` — never a bare field write.
     child.tgid = child_task_id;
     child.pgid = parent.pgid;
     child.sid = parent.sid;
@@ -1182,6 +1166,12 @@ pub fn task_fork(
         parent.task_id,
         parent.process_id
     );
+
+    // Publish the parent→child ownership edge: sets the child's parent id and
+    // parks one owning reference in the parent's children list. Done after
+    // registration (so the child is a live registry entry) and after the `child`
+    // / `parent` borrows above have ended.
+    super::link_child(parent_task, child_task_ptr);
 
     // Publish Ready only after all child-specific fields are fully initialized.
     // `publish_new_task` reserves scheduler placement before setting Ready, so
@@ -1305,7 +1295,8 @@ pub fn task_clone(
 
     child.task_id = child_task_id;
     child.process_id = child_process_id;
-    child.parent_task_id = parent.task_id;
+    // The parent link and children-list membership are published together, after
+    // registration, via `link_child` — never a bare field write.
 
     if is_thread {
         child.tgid = if parent.tgid != INVALID_TASK_ID {
@@ -1435,6 +1426,11 @@ pub fn task_clone(
         parent.task_id,
         parent.process_id
     );
+
+    // Publish the parent→child ownership edge (parent id + children-list
+    // membership) after registration and after the `child` / `parent` borrows
+    // above have ended.
+    super::link_child(parent_task, child_task_ptr);
 
     // Publish Ready only after all child-specific fields are fully initialized.
     // `publish_new_task` reserves scheduler placement before setting Ready, so

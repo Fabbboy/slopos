@@ -1,0 +1,106 @@
+//! Parent/child task ownership.
+//!
+//! A parent owns each of its children — live and zombie — through the intrusive
+//! `children` list on the parent `Task`. Membership in that list is one strong
+//! reference parked exactly like ready-queue placement: linking a child pairs a
+//! list push with [`task_placement_retain`], unlinking pairs a list removal with
+//! [`task_placement_reclaim`]. So a zombie is simply a dead child still parked in
+//! its parent's list; `waitpid` reaps it by unlinking (dropping the parked
+//! reference off-lock), and a dying parent reaps or reparents by draining the
+//! list. The child→parent direction stays a plain id (`parent_task_id`) resolved
+//! through the registry — the registry is the single liveness index.
+//!
+//! Every list mutation runs under the registry lock ([`with_task_manager`]): the
+//! intrusive ops and the strong-count park/reclaim are allocation-free, so they
+//! are safe under the cli-spinlock, and the heavy `KArc` destructor is never run
+//! under the lock — these helpers hand the reclaimed `KArc` back for an off-lock
+//! drop.
+
+use core::ptr::NonNull;
+
+use slopos_ostd::KArc;
+use slopos_ostd::task::accessors::{
+    task_borrow, task_children_pop, task_children_push, task_children_remove,
+    task_set_parent_task_id,
+};
+use slopos_ostd::task::{task_placement_reclaim, task_placement_retain};
+
+use super::task_table::{task_find_by_id, with_task_manager};
+use super::{INVALID_TASK_ID, Task, TaskStatus};
+
+/// Whether a task in `status` may still acquire children — i.e. it has not begun
+/// tearing down. Mirrors the "parent alive" predicate teardown keys on.
+#[inline]
+fn status_can_parent(status: TaskStatus) -> bool {
+    matches!(
+        status,
+        TaskStatus::Ready | TaskStatus::Running | TaskStatus::Blocked
+    )
+}
+
+/// Publish `child` as a child of `parent`: record the parent id on the child and
+/// park one owning reference in the parent's children list.
+///
+/// If `parent` is already tearing down (its children drain may have run), the
+/// child is orphaned instead — its parent id is cleared so its own exit skips
+/// the Zombie state and it is never stranded in a dead parent's list. The status
+/// check and the list push are one registry-lock critical section, so a push
+/// either lands before the parent's teardown drain (which then reaps/orphans the
+/// child) or observes the dying status and orphans here.
+pub fn link_child(parent: *mut Task, child: *mut Task) {
+    let Some(child_nn) = NonNull::new(child) else {
+        return;
+    };
+    with_task_manager(|_mgr| {
+        let Some(parent_ref) = task_borrow(parent as *const Task) else {
+            task_set_parent_task_id(child, INVALID_TASK_ID);
+            return;
+        };
+        if !status_can_parent(parent_ref.status()) {
+            task_set_parent_task_id(child, INVALID_TASK_ID);
+            return;
+        }
+        task_set_parent_task_id(child, parent_ref.task_id);
+        // Push first, park the owning reference only on success: retain pairs
+        // one-to-one with membership. A fresh/forked child is unlinked, so the
+        // push cannot fail in practice; if it did, no retain is leaked.
+        if task_children_push(parent as *const Task, child_nn).is_ok() {
+            task_placement_retain(child_nn);
+        }
+    });
+}
+
+/// Detach one child from `parent`'s list and hand back the owning reference the
+/// list held. `None` when the list is empty. The returned `KArc` must be dropped
+/// off-lock (via [`super::task_table::release_placement_arc`]); it is never the
+/// last reference (the registry owner outlives it), so the drop is a bare
+/// decrement and any retirement it triggers self-defers.
+pub fn take_one_child(parent: *mut Task) -> Option<KArc<Task>> {
+    let child_nn = with_task_manager(|_mgr| task_children_pop(parent as *const Task))?;
+    Some(task_placement_reclaim(child_nn))
+}
+
+/// Remove `child` from its parent's children list and hand back the owning
+/// reference the list held, or `None` if the child is not currently linked (its
+/// parent is gone, or a concurrent drain already detached it).
+///
+/// The parent is resolved through the registry before taking the registry lock
+/// (a `TaskRef` pins it across the removal); the reclaim is gated on the list
+/// removal succeeding so a concurrent [`take_one_child`] drain cannot cause a
+/// double reclaim of the same parked reference.
+pub fn unlink_child(child: *mut Task) -> Option<KArc<Task>> {
+    let child_nn = NonNull::new(child)?;
+    let parent_id = task_borrow(child as *const Task)?.parent_task_id;
+    if parent_id == INVALID_TASK_ID {
+        return None;
+    }
+    let parent = task_find_by_id(parent_id)?;
+    let parent_ptr = parent.as_ptr();
+    let removed =
+        with_task_manager(|_mgr| task_children_remove(parent_ptr as *const Task, child_nn).is_ok());
+    if removed {
+        Some(task_placement_reclaim(child_nn))
+    } else {
+        None
+    }
+}

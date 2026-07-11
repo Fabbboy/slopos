@@ -26,12 +26,12 @@ pub use slopos_abi::task::{
 
 use crate::cpu::x86_64::pcr::KernelReturnContext;
 use crate::sync::AtomicCell;
-use crate::sync::intrusive::Link;
+use crate::sync::intrusive::{IntrusiveLinkedList, Link};
 use crate::task::abi::TaskAbi;
 use crate::task::exit_info::ExitInfo;
 use crate::task::fpu::{FPU_STATE_SIZE, FpuState};
 use crate::task::job_control::ProcessGroup;
-use crate::task::link_roles::{ReadyQueueRole, RemoteWakeRole};
+use crate::task::link_roles::{ReadyQueueRole, RemoteWakeRole, SiblingRole};
 use crate::task::state::TaskState;
 use crate::task::test_reports::TestReportRing;
 use crate::user::context::UserContext;
@@ -347,6 +347,20 @@ pub struct TaskInner<K, U> {
     /// inbox and diagnostics can distinguish pending wake delivery from a
     /// genuinely stranded Ready task.
     pub remote_inbox_link: Link<TaskInner<K, U>, RemoteWakeRole>,
+    /// Owning list of this task's live and zombie children.
+    ///
+    /// Each entry is one child task whose membership is backed by a strong
+    /// reference parked exactly like ready-queue placement: linking a child
+    /// pairs with `task_placement_retain`, unlinking with
+    /// `task_placement_reclaim`. A zombie child stays here — pinned by that
+    /// parked reference — until `waitpid` reaps it or this task's own teardown
+    /// drains the list. There is no separate zombie list; a zombie is just a
+    /// child whose status is `Zombie`.
+    pub children: IntrusiveLinkedList<TaskInner<K, U>, SiblingRole>,
+    /// Intrusive link slot naming this task's membership in its parent's
+    /// `children` list. A task is linked into at most one parent's list; the
+    /// single-membership invariant of the role-typed slot rejects a double-link.
+    pub sibling_link: Link<TaskInner<K, U>, SiblingRole>,
     /// Explicit scheduler placement owner for runnable tasks. This is the
     /// cross-role gate that prevents a task from being in a ready queue and a
     /// remote wake inbox at the same time.
@@ -377,6 +391,33 @@ pub struct TaskInner<K, U> {
 impl<K, U> Drop for TaskInner<K, U> {
     fn drop(&mut self) {
         crate::task::drop_context::assert_task_drop_context();
+        self.assert_family_links_detached();
+    }
+}
+
+impl<K, U> TaskInner<K, U> {
+    /// Debug tripwire that a task's family links are detached before reclaim.
+    ///
+    /// `IntrusiveLinkedList` has no `Drop`, so a non-empty `children` list at
+    /// reclaim would silently leak every parked child reference; a still-linked
+    /// `sibling_link` would mean a parent's list still names this task. Teardown
+    /// drains the children list and reap/reparent unlinks the sibling slot before
+    /// a task can reach a reclaimable state, so both hold here. Factored out of
+    /// `Drop` (as [`assert_task_drop_context`] is) so the destructor body carries
+    /// no literal panic op; `debug_assert!` compiles out of release, so the
+    /// destructor is panic-free there.
+    ///
+    /// [`assert_task_drop_context`]: crate::task::drop_context::assert_task_drop_context
+    #[inline]
+    fn assert_family_links_detached(&self) {
+        debug_assert!(
+            self.children.is_empty(),
+            "task dropped with a non-empty children list"
+        );
+        debug_assert!(
+            !self.sibling_link.is_linked(),
+            "task dropped while still linked into a parent's children list"
+        );
     }
 }
 
@@ -441,6 +482,8 @@ impl<K, U> TaskInner<K, U> {
             on_cpu: AtomicBool::new(false),
             ready_link: Link::new(),
             remote_inbox_link: Link::new(),
+            children: IntrusiveLinkedList::new(),
+            sibling_link: Link::new(),
             sched_placement: AtomicU8::new(SchedPlacement::None.as_u8()),
             recovery_depth: AtomicU32::new(0),
             panic_in_flight: AtomicU32::new(0),
@@ -669,6 +712,7 @@ impl<K, U> TaskInner<K, U> {
         self.on_cpu.store(false, Ordering::Release);
         self.ready_link.reset();
         self.remote_inbox_link.reset();
+        self.sibling_link.reset();
         self.sched_placement
             .store(SchedPlacement::None.as_u8(), Ordering::Release);
         self.recovery_depth.store(0, Ordering::Release);
@@ -701,9 +745,22 @@ impl<K, U> TaskInner<K, U> {
             self.abi.unsafe_stack_sp = 0;
             core::ptr::write(&mut self.exit_info as *mut _, AtomicCell::empty());
             core::ptr::write(&mut self.state as *mut _, TaskState::invalid());
+            // The bytewise copy duplicated the parent's `children` head/tail
+            // and its `sibling_link` membership state. Overwrite the list head
+            // with an empty one (no `Drop` on `IntrusiveLinkedList`, so
+            // `ptr::write` over the raw copy is correct — it must not run a
+            // destructor on the copied bits) and detach the sibling slot: a
+            // fresh child owns no children and is linked into no parent's list
+            // until `link_child` publishes it.
+            core::ptr::write(&mut self.children as *mut _, IntrusiveLinkedList::new());
         }
         self.ready_link.reset();
         self.remote_inbox_link.reset();
+        self.sibling_link.reset();
+        // The bytewise copy carried the parent's own parent id. A fresh child
+        // starts parentless; the spawn path publishes the real parent edge (id
+        // + children-list membership) via `link_child` after registration.
+        self.parent_task_id = INVALID_TASK_ID;
         self.sched_placement = AtomicU8::new(SchedPlacement::None.as_u8());
         self.recovery_depth = AtomicU32::new(0);
         self.exit_cleanup_flags = AtomicU8::new(0);
@@ -725,5 +782,11 @@ impl<K, U> crate::task::LinkProvider<ReadyQueueRole> for TaskInner<K, U> {
 impl<K, U> crate::task::LinkProvider<RemoteWakeRole> for TaskInner<K, U> {
     fn link(&self) -> &Link<Self, RemoteWakeRole> {
         &self.remote_inbox_link
+    }
+}
+
+impl<K, U> crate::task::LinkProvider<SiblingRole> for TaskInner<K, U> {
+    fn link(&self) -> &Link<Self, SiblingRole> {
+        &self.sibling_link
     }
 }

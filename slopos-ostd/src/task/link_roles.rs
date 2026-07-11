@@ -17,3 +17,14 @@ pub enum ReadyQueueRole {}
 /// ready-queue link as a remote-wake link, and duplicate pushes are rejected by
 /// the link slot itself instead of by ad-hoc parallel state.
 pub enum RemoteWakeRole {}
+
+/// Role tag for a task's membership in its parent's list of children.
+///
+/// Each task carries one `Link<Task, SiblingRole>` slot naming its node in its
+/// parent's `children` list; the parent owns the list head. A task appears in at
+/// most one parent's children list, so the same single-membership invariant the
+/// other roles rely on rejects a double-link. This is distinct from the
+/// scheduler roles: a task can be simultaneously in a ready queue (via its ready
+/// link) and in its parent's children list (via this sibling link), because the
+/// two memberships are independent ownership edges.
+pub enum SiblingRole {}
