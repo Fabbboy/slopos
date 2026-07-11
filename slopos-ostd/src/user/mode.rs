@@ -111,7 +111,10 @@ impl<'a> UserMode<'a> {
 /// 5. Build the IRETQ frame and `swapgs; iretq`.
 /// 6. On the next user→kernel transition, the trampoline restores
 ///    callee-saves and returns control to step 6.
-/// 7. Read [`ReturnReason`] out of the per-CPU slot and return it.
+/// 7. Derive the [`ReturnReason`] from the per-task `UserContext` the
+///    trampoline just wrote (the syscall number is `(*ctx_ptr).regs().rax`)
+///    and return it — never from a per-CPU slot, which a preemption in
+///    the trampoline-return tail could misdirect to another CPU.
 ///
 /// # Safety
 ///
@@ -182,10 +185,10 @@ pub fn reset_user_mode_backend_for_test() {
 /// round trip via the per-CPU PCR slots.
 ///
 /// `execute_round_trip` stashes the active [`UserContext`] pointer in
-/// `pcr.user_ctx_ptr`, resets the return-reason slot, invokes
-/// [`user_mode_round_trip_asm`] (which builds the IRETQ frame and
-/// transitions to user mode), and on user→kernel re-entry decodes the
-/// trampoline's return-reason payload via [`read_return_reason`].
+/// `pcr.user_ctx_ptr`, invokes [`user_mode_round_trip_asm`] (which builds
+/// the IRETQ frame and transitions to user mode), and on user→kernel
+/// re-entry derives the [`ReturnReason`] from the per-task `UserContext`
+/// the trampoline wrote (always a syscall on this path).
 ///
 /// `_space` is intentionally ignored at this layer: CR3 is owned by
 /// the kernel paging code outside OSTD, so address-space activation
@@ -197,13 +200,14 @@ pub struct PcrUserModeBackend;
 /// `register_user_mode_backend(&DEFAULT_USER_MODE_BACKEND)`.
 pub static DEFAULT_USER_MODE_BACKEND: PcrUserModeBackend = PcrUserModeBackend;
 
-// SAFETY: `PcrUserModeBackend` carries no per-instance state. Every
-// method reads the per-CPU PCR slots through `current_pcr()` (which
-// resolves to the running CPU's PCR via `gs:[0]`). The round trip is
-// not preemptible (the caller — `user_task_loop` — runs with IRQs on
-// only inside user mode; the kernel-side window between the
-// `user_ctx_ptr.store` and the iretq is fully serialised on the
-// running CPU).
+// SAFETY: `PcrUserModeBackend` carries no per-instance state. The
+// outbound leg reads per-CPU PCR slots through `current_pcr()` (which
+// resolves to the running CPU's PCR via `gs:[0]`) while IRQs are off and
+// the kernel-side window between the `user_ctx_ptr.store` and the iretq
+// is serialised on the running CPU. The return reason is read from the
+// per-task `UserContext`, so it is correct even though the trampoline
+// `sti`s before returning and the task may be preempted/migrated in the
+// return tail — the `UserContext` travels with the task.
 #[cfg(all(target_arch = "x86_64", not(test)))]
 unsafe impl UserModeBackend for PcrUserModeBackend {
     unsafe fn execute_round_trip(
@@ -211,7 +215,7 @@ unsafe impl UserModeBackend for PcrUserModeBackend {
         ctx_ptr: *mut UserContext,
         _space: &VmSpace,
     ) -> ReturnReason {
-        use crate::cpu::x86_64::pcr::{RETURN_REASON_KIND_NONE, current_pcr};
+        use crate::cpu::x86_64::pcr::current_pcr;
 
         // Stash the context pointer where `__ostd_user_return` will
         // find it. Released before the iretq so the trampoline (which
@@ -221,14 +225,6 @@ unsafe impl UserModeBackend for PcrUserModeBackend {
         // the sole writer in this scope.
         let pcr = unsafe { current_pcr() };
         pcr.user_ctx_ptr.store(ctx_ptr, Ordering::Release);
-
-        // Reset return-reason to a sentinel so a stale value can't be
-        // misread if the trampoline somehow returns without writing
-        // (defense in depth against the asm contract being violated).
-        pcr.return_reason
-            .kind
-            .store(RETURN_REASON_KIND_NONE, Ordering::Release);
-        pcr.return_reason.payload.store(0, Ordering::Release);
 
         // Drive the actual round trip. The asm helper saves kernel
         // callee-saves + RSP + return RIP, builds the IRETQ frame from
@@ -246,18 +242,33 @@ unsafe impl UserModeBackend for PcrUserModeBackend {
             user_mode_round_trip_asm(regs_ptr);
         }
 
-        // SAFETY: the trampoline wrote a well-formed encoding into the
-        // return-reason slot before it `jmp`ed back; `read_return_reason`
-        // panics on an invalid encoding (defense in depth).
-        read_return_reason()
+        // The only path back here is the SYSCALL trampoline
+        // (`__ostd_user_return`): the CPU enters it on SYSCALL with IF
+        // cleared (SFMASK), saves the user GPRs — including the syscall
+        // number in RAX — into the *per-task* `UserContext`, and only
+        // then `sti`s and `jmp`s back. Exceptions and interrupts from
+        // user mode take the legacy IDT path and never return through
+        // this round trip (see `user_task_loop`), so the reason is always
+        // a syscall. Deriving it from the per-task `UserContext` — rather
+        // than a per-CPU slot read after the trampoline's `sti` — is
+        // migration-safe: if a timer preempts and migrates the task in the
+        // trampoline-return tail, its `UserContext` travels with it, so
+        // the syscall number is still correct. This mirrors Linux
+        // (`pt_regs->orig_ax`) and Asterinas (per-task `UserContext`),
+        // which likewise read the reason from per-task state, never a
+        // per-CPU slot held across an IRQ-enable window.
+        // SAFETY: the trampoline wrote the user GPRs into `*ctx_ptr`
+        // before returning; the pointer is still valid (caller invariant).
+        let syscall_nr = unsafe { (*ctx_ptr).regs().rax };
+        ReturnReason::Syscall(syscall_nr)
     }
 }
 
-// Host-side test build: `user_mode_round_trip_asm` and
-// `read_return_reason` are only compiled on `x86_64` `not(test)`. The
-// trait surface still needs an impl so `DEFAULT_USER_MODE_BACKEND`
-// type-checks; host tests never invoke `execute_round_trip` (they
-// drive `UserMode` through a `reset_user_mode_backend_for_test` reset).
+// Host-side test build: `user_mode_round_trip_asm` is only compiled on
+// `x86_64` `not(test)`. The trait surface still needs an impl so
+// `DEFAULT_USER_MODE_BACKEND` type-checks; host tests never invoke
+// `execute_round_trip` (they drive `UserMode` through a
+// `reset_user_mode_backend_for_test` reset).
 #[cfg(not(all(target_arch = "x86_64", not(test))))]
 // SAFETY: this build branch never has its `execute_round_trip` called
 // because the host test fixtures install a stub backend; the
@@ -479,34 +490,6 @@ pub unsafe extern "sysv64" fn user_mode_round_trip_asm(_user_regs: *const UserRe
         ur_rip = const core::mem::offset_of!(UserRegs, rip),
         ur_rflags = const core::mem::offset_of!(UserRegs, rflags_user_subset),
     );
-}
-
-/// Decode the per-CPU return-reason slot the trampoline wrote.  Called
-/// by the user-mode backend after [`user_mode_round_trip_asm`] returns.
-#[cfg(all(target_arch = "x86_64", not(test)))]
-pub fn read_return_reason() -> ReturnReason {
-    use crate::cpu::x86_64::pcr::{
-        RETURN_REASON_KIND_EXCEPTION, RETURN_REASON_KIND_INTERRUPT, RETURN_REASON_KIND_SYSCALL,
-        current_pcr,
-    };
-    // SAFETY: GS_BASE is installed before any user mode is reached;
-    // `current_pcr()` returns a valid `&'static ProcessorControlRegion`.
-    let pcr = unsafe { current_pcr() };
-    let kind = pcr.return_reason.kind.load(Ordering::Acquire);
-    let payload = pcr.return_reason.payload.load(Ordering::Acquire);
-    match kind {
-        RETURN_REASON_KIND_SYSCALL => ReturnReason::Syscall(payload),
-        RETURN_REASON_KIND_INTERRUPT => ReturnReason::Interrupt(payload as u8),
-        RETURN_REASON_KIND_EXCEPTION => ReturnReason::Exception(ExceptionInfo {
-            vector: payload as u8,
-            error_code: 0,
-            fault_addr: 0,
-        }),
-        _ => panic!(
-            "slopos_ostd::user::mode: unknown ReturnReason kind {kind} \
-             — `__ostd_user_return` left an invalid encoding"
-        ),
-    }
 }
 
 #[cfg(test)]

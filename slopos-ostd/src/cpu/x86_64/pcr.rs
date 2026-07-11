@@ -136,16 +136,12 @@ pub struct ProcessorControlRegion {
     /// to unwind back to the caller of `execute_round_trip`.
     pub kernel_return_ctx: SyncUnsafeCell<KernelReturnContext>, // offset 104
 
-    /// Encoded `ReturnReason` written by `__ostd_user_return` and read
-    /// back by `execute_round_trip` after the trampoline jmps in.
-    pub return_reason: ReturnReasonSlot, // offset 168
-
     /// Per-CPU scratch slot for the user RAX value during the
     /// `__ostd_user_return` trampoline.  Spilling RAX onto the kernel
     /// stack at `kernel_rsp - 8` would collide with the next CPU-pushed
     /// IRET frame's SS slot at TSS.RSP0; this per-CPU slot is the same
     /// fix Asterinas / Linux apply to their SYSCALL fast paths.
-    pub user_rax_tmp: SyncUnsafeCell<u64>, // offset 184
+    pub user_rax_tmp: SyncUnsafeCell<u64>, // offset 168
 
     // ==================== EMBEDDED GDT ====================
     /// Per-CPU Global Descriptor Table.
@@ -256,8 +252,7 @@ const _: () = {
     assert!(core::mem::offset_of!(ProcessorControlRegion, idle_task) == 48);
     assert!(core::mem::offset_of!(ProcessorControlRegion, user_ctx_ptr) == 96);
     assert!(core::mem::offset_of!(ProcessorControlRegion, kernel_return_ctx) == 104);
-    assert!(core::mem::offset_of!(ProcessorControlRegion, return_reason) == 168);
-    assert!(core::mem::offset_of!(ProcessorControlRegion, user_rax_tmp) == 184);
+    assert!(core::mem::offset_of!(ProcessorControlRegion, user_rax_tmp) == 168);
     assert!(core::mem::align_of::<ProcessorControlRegion>() == 4096);
 };
 
@@ -294,41 +289,6 @@ const _: () = {
     assert!(core::mem::offset_of!(KernelReturnContext, rsp) == 48);
     assert!(core::mem::offset_of!(KernelReturnContext, rip) == 56);
     assert!(core::mem::size_of::<KernelReturnContext>() == 64);
-};
-
-/// Encoded `ReturnReason` slot written by `__ostd_user_return` and read
-/// back by `execute_round_trip` after the trampoline jumps in.  Two
-/// AtomicU64s so the asm can store via `mov %r, %gs:[off]` without
-/// needing a Cell wrapper at the bytes themselves; atomics also let
-/// Rust read the slot back safely.
-#[repr(C)]
-pub struct ReturnReasonSlot {
-    /// Discriminant: 0 = none/uninitialised, 1 = Syscall, 2 = Exception, 3 = Interrupt.
-    pub kind: AtomicU64, // offset 0
-    /// Variant payload.  For Syscall: the syscall number (RAX from
-    /// user).  For Interrupt: the vector number.  For Exception: the
-    /// vector number; auxiliary data lives in future fields.
-    pub payload: AtomicU64, // offset 8
-}
-
-impl ReturnReasonSlot {
-    pub const fn new() -> Self {
-        Self {
-            kind: AtomicU64::new(0),
-            payload: AtomicU64::new(0),
-        }
-    }
-}
-
-pub const RETURN_REASON_KIND_NONE: u64 = 0;
-pub const RETURN_REASON_KIND_SYSCALL: u64 = 1;
-pub const RETURN_REASON_KIND_EXCEPTION: u64 = 2;
-pub const RETURN_REASON_KIND_INTERRUPT: u64 = 3;
-
-const _: () = {
-    assert!(core::mem::offset_of!(ReturnReasonSlot, kind) == 0);
-    assert!(core::mem::offset_of!(ReturnReasonSlot, payload) == 8);
-    assert!(core::mem::size_of::<ReturnReasonSlot>() == 16);
 };
 
 // SAFETY: PCR uses atomics for all mutable fields and is only
@@ -369,7 +329,6 @@ impl ProcessorControlRegion {
                 rsp: 0,
                 rip: 0,
             }),
-            return_reason: ReturnReasonSlot::new(),
             user_rax_tmp: SyncUnsafeCell::new(0),
             gdt: GdtLayout::new(),
             _tss_align: [0; 8],
@@ -488,14 +447,10 @@ pub mod offsets {
     /// (`SyncUnsafeCell<KernelReturnContext>`).  Written by
     /// `execute_round_trip` and consumed by `__ostd_user_return`.
     pub const KERNEL_RETURN_CTX: usize = 104;
-    /// Offset of the `return_reason.kind` `AtomicU64` slot.
-    pub const RETURN_REASON_KIND: usize = 168;
-    /// Offset of the `return_reason.payload` `AtomicU64` slot.
-    pub const RETURN_REASON_PAYLOAD: usize = 176;
     /// Offset of the `user_rax_tmp` PCR scratch slot used by
     /// `__ostd_user_return` to spill user RAX without touching the
     /// kernel stack at `kernel_rsp - 8`.
-    pub const USER_RAX_TMP: usize = 184;
+    pub const USER_RAX_TMP: usize = 168;
     /// Offset of the `ist_unsafe_sp` field — the per-CPU SafeStack
     /// data-stack pointer used while running on an IST/exception stack.
     /// Consumed by `__safestack_pointer_address` as a `const` operand.
@@ -1268,6 +1223,19 @@ pub fn recovery_depth_exit() -> u32 {
 #[inline]
 pub fn recovery_depth() -> u32 {
     current_pcr_local()
+        .map(|pcr| pcr.recovery_depth.load(Ordering::Acquire))
+        .unwrap_or(0)
+}
+
+/// Panic-recovery depth for `cpu_id` (cross-CPU read; `0` for an unknown or
+/// offline CPU). Non-zero means that CPU is inside a `run_recoverable` scope,
+/// where a caught panic may run the DWARF unwinder with interrupts disabled
+/// (and thus without advancing its per-CPU timer tick) for a legitimately long
+/// time. The NMI watchdog reads this to grant that CPU a bounded grace before
+/// treating it as stuck.
+#[inline]
+pub fn recovery_depth_for_cpu(cpu_id: usize) -> u32 {
+    get_pcr(cpu_id)
         .map(|pcr| pcr.recovery_depth.load(Ordering::Acquire))
         .unwrap_or(0)
 }

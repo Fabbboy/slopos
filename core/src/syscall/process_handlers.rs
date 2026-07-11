@@ -7,7 +7,7 @@ use slopos_fs::vfs::traits::VfsError;
 use slopos_ostd::KVec;
 use slopos_ostd::task::{new_group_in_session, new_session_group};
 use slopos_ostd::user::context::UserContext;
-use slopos_sched::scheduler::task_wait_for;
+use slopos_sched::scheduler::{task_apply_affinity, task_wait_for};
 use slopos_sched::task::{
     task_borrow, task_borrow_mut, task_consume_zombie, task_cpu_affinity,
     task_default_signals_in_mask, task_find_by_id, task_fork, task_peek_exit_info, task_pgid,
@@ -464,6 +464,9 @@ define_syscall!(syscall_set_cpu_affinity
     };
     let task_ptr = task_ref.as_ptr();
     task_set_cpu_affinity(task_ptr, new_affinity);
+    // Stamping the mask is not enough — re-place the task so the new mask
+    // actually governs where it runs (Linux `sched_setaffinity` → migrate).
+    task_apply_affinity(task_ptr, new_affinity);
     Ok(())
 });
 

@@ -143,9 +143,9 @@ use super::sleep::{reset_sleep_queue, sleep_queue_next_deadline_ticks, wake_due_
 use super::task::{
     INVALID_PROCESS_ID, INVALID_TASK_ID, TASK_FLAG_KERNEL_MODE, TASK_FLAG_NO_PREEMPT,
     TASK_FLAG_USER_MODE, Task, TaskPriority, TaskStatus, release_placement_arc,
-    task_controlling_tty, task_exit_info_ref, task_fpu_state_mut, task_fs_base, task_has_flag,
-    task_id_of, task_is_exited, task_is_invalid, task_is_ready, task_is_running,
-    task_kernel_stack_top, task_last_run_timestamp_volatile, task_name_looks_idle,
+    task_controlling_tty, task_cpu_affinity, task_exit_info_ref, task_fpu_state_mut, task_fs_base,
+    task_has_flag, task_id_of, task_is_exited, task_is_invalid, task_is_ready, task_is_running,
+    task_kernel_stack_top, task_last_cpu, task_last_run_timestamp_volatile, task_name_looks_idle,
     task_on_cpu_load, task_panic_in_flight_load, task_panic_in_flight_store,
     task_pcr_round_trip_swap, task_pgid, task_pointer_is_valid, task_priority, task_process_id,
     task_record_context_switch, task_record_yield, task_recovery_depth_load,
@@ -669,21 +669,59 @@ fn publish_ready_fallback(task: *mut Task) -> c_int {
         SchedPlacement::None | SchedPlacement::Waking => {}
     }
 
+    // Honor affinity in the fallback too: a strict-pinned task must never be
+    // enqueued on a CPU outside its mask just because a permitted CPU's enqueue
+    // momentarily raced. Try the local CPU (if permitted), then every other
+    // permitted CPU (waking it via IPI). Only if no permitted CPU accepts the
+    // task do we relax onto any CPU — Linux's `select_fallback_rq` last resort,
+    // which in practice means the permitted CPUs are all offline. `affinity == 0`
+    // permits every CPU, so the common case walks all CPUs as before.
+    let affinity = task_cpu_affinity(task).unwrap_or(0);
     let current_cpu = slopos_arch::pcr::get_current_cpu();
-    if per_cpu::with_cpu_scheduler(current_cpu, |sched| sched.enqueue_local(task)) == Some(0) {
+    let cpu_count = slopos_arch::pcr::get_cpu_count();
+
+    if per_cpu::affinity_allows_cpu(affinity, current_cpu)
+        && per_cpu::with_cpu_scheduler(current_cpu, |sched| sched.enqueue_local(task)) == Some(0)
+    {
         if newcomer_outranks_current(current_cpu, task) {
             scheduler_request_reschedule(RescheduleReason::InterruptWake);
         }
         return 0;
     }
 
-    let cpu_count = slopos_arch::pcr::get_cpu_count();
     for cpu_id in 0..cpu_count {
-        if cpu_id == current_cpu {
+        if cpu_id == current_cpu || !per_cpu::affinity_allows_cpu(affinity, cpu_id) {
             continue;
         }
         if per_cpu::with_cpu_scheduler(cpu_id, |sched| sched.enqueue_local(task)) == Some(0) {
             if slopos_arch::pcr::is_cpu_online(cpu_id) {
+                send_reschedule_ipi(cpu_id);
+            }
+            return 0;
+        }
+        match task_sched_placement_load(task) {
+            SchedPlacement::ReadyQueue
+            | SchedPlacement::RemoteWake
+            | SchedPlacement::OnCpu
+            | SchedPlacement::Migrating => return 0,
+            SchedPlacement::None | SchedPlacement::Waking => {}
+        }
+    }
+
+    // Last resort: no permitted CPU accepted the task. Relax affinity onto any
+    // CPU rather than strand a runnable task, and log the relaxation.
+    for cpu_id in 0..cpu_count {
+        if per_cpu::affinity_allows_cpu(affinity, cpu_id) {
+            continue; // already attempted above
+        }
+        if per_cpu::with_cpu_scheduler(cpu_id, |sched| sched.enqueue_local(task)) == Some(0) {
+            klog_info!(
+                "SCHED: relaxed affinity 0x{:x} for task {} onto cpu {} (no permitted CPU accepted)",
+                affinity,
+                task_id_of(task).unwrap_or(INVALID_TASK_ID),
+                cpu_id,
+            );
+            if cpu_id != current_cpu && slopos_arch::pcr::is_cpu_online(cpu_id) {
                 send_reschedule_ipi(cpu_id);
             }
             return 0;
@@ -931,6 +969,47 @@ pub fn unschedule_task(task: *mut Task) -> c_int {
     0
 }
 
+/// Re-place a task after its CPU-affinity mask changes so the new mask actually
+/// governs where it runs — mirroring Linux `sched_setaffinity`, where stamping
+/// the mask is followed by a migrate if the task is no longer allowed on its
+/// current CPU. Idempotent when the task is still permitted where it is.
+///
+/// - A **Ready** task sitting in a now-disallowed CPU's queue is pulled out
+///   (`unschedule_task`, which reclaims its parked ref) and re-scheduled onto a
+///   permitted CPU (`schedule_task` → `select_target_cpu`, affinity-honoring).
+/// - A **Running** task on a now-disallowed CPU is asked to reschedule; the
+///   switch-out tail then repatriates it (a local flag for the calling CPU, a
+///   reschedule IPI for a remote one).
+/// - A **blocked / remote-inbox / migrating** task needs nothing: its next wake
+///   or drain re-selects via `select_target_cpu`, which now honors the mask.
+pub fn task_apply_affinity(task: *mut Task, new_affinity: u32) {
+    if task.is_null() {
+        return;
+    }
+    let last_cpu = task_last_cpu(task).map(|c| c as usize).unwrap_or(0);
+    if per_cpu::affinity_allows_cpu(new_affinity, last_cpu) {
+        return;
+    }
+    match task_sched_placement_load(task) {
+        SchedPlacement::ReadyQueue => {
+            let _ = unschedule_task(task);
+            let _ = schedule_task(task);
+        }
+        SchedPlacement::OnCpu => {
+            let current_cpu = slopos_arch::pcr::get_current_cpu();
+            if last_cpu == current_cpu {
+                scheduler_request_reschedule(RescheduleReason::InterruptWake);
+            } else if slopos_arch::pcr::is_cpu_online(last_cpu) {
+                send_reschedule_ipi(last_cpu);
+            }
+        }
+        SchedPlacement::None
+        | SchedPlacement::Waking
+        | SchedPlacement::RemoteWake
+        | SchedPlacement::Migrating => {}
+    }
+}
+
 /// Unified task execution for all CPUs.
 /// Handles switch_ctx validation, prepare_switch_to, and switch_registers.
 fn execute_task(cpu_id: usize, from_task: *mut Task, to_task: *mut Task) {
@@ -1053,6 +1132,17 @@ pub(crate) fn run_ready_task_from_idle(cpu_id: usize, idle_task: *mut Task) -> b
     if !task_is_idle_candidate(idle_task) {
         return false;
     }
+
+    // Flush cross-core wakes parked in this CPU's remote inbox into the ready
+    // queue *before* the pick. Every dispatch entry point funnels through here
+    // — the idle loop, the timer-preempt handoff, and crucially the
+    // reschedule-IPI trap-exit path, whose only job is to run a just-pushed
+    // remote wake but which would otherwise pick from ready queues that cannot
+    // yet see the inbox task. This mirrors Linux running `sched_ttwu_pending()`
+    // before `pick_next_task`. `cpu_id` is the current (owning) CPU, satisfying
+    // `drain_remote_inbox`'s single-consumer contract; draining an empty inbox
+    // is a no-op, so this is idempotent with the idle-loop and tick drains.
+    per_cpu::with_cpu_scheduler(cpu_id, |sched| sched.drain_remote_inbox());
 
     let next_task = per_cpu::with_cpu_scheduler(cpu_id, |sched| sched.dequeue_highest_priority())
         .unwrap_or(ptr::null_mut());
@@ -1191,9 +1281,22 @@ pub(crate) fn run_ready_task_from_idle(cpu_id: usize, idle_task: *mut Task) -> b
             false
         };
         if should_enqueue {
-            let rc =
+            // Repatriate a task whose affinity mask no longer permits this CPU
+            // (it changed while the task ran here) instead of re-queueing it
+            // locally forever. `publish_ready_from_current_owner` transitions the
+            // OnCpu owner token to Waking and routes through `select_target_cpu`
+            // (now affinity-honoring) to a permitted CPU's inbox + reschedule IPI
+            // — the same proven publisher the raced-wake fallback below uses;
+            // single-membership CAS prevents a second queue entry, and `on_cpu`
+            // is still cleared below so the target dispatcher waits for us.
+            let allowed =
+                per_cpu::affinity_allows_cpu(task_cpu_affinity(next_task).unwrap_or(0), cpu_id);
+            let rc = if allowed {
                 per_cpu::with_cpu_scheduler(cpu_id, |sched| sched.enqueue_from_on_cpu(next_task))
-                    .unwrap_or(-1);
+                    .unwrap_or(-1)
+            } else {
+                publish_ready_from_current_owner(next_task, next_task_id, "affinity_migrate")
+            };
             ready_published = rc == 0
                 || matches!(
                     task_sched_placement_load(next_task),

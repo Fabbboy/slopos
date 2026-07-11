@@ -423,6 +423,20 @@ impl PriorityRunQueue {
         self.ready_queues.iter().map(|q| q.len()).sum()
     }
 
+    /// Pending cross-core wakes parked in this CPU's remote inbox. Like
+    /// [`Self::effective_load`], treat a non-null head as at least one entry:
+    /// `push_remote_wake` links the head before bumping `inbox_count`, so a
+    /// bare count can momentarily undercount. Used by `resume_all_aps` to wake a
+    /// paused AP that has an inbox wake but no ready-queue entry.
+    pub fn inbox_count(&self) -> u32 {
+        let inbox = self.inbox_count.load(Ordering::Relaxed);
+        if inbox == 0 && !self.remote_inbox_head.load(Ordering::Acquire).is_null() {
+            1
+        } else {
+            inbox
+        }
+    }
+
     /// Returns the effective load on this CPU: queued tasks plus one if a
     /// non-idle task is currently running.  Lock-free and approximate.
     /// Mirrors Linux's `rq->nr_running` which includes the running task.
@@ -964,6 +978,24 @@ pub fn select_target_cpu(task: *mut Task) -> Option<usize> {
         return Some(current_cpu);
     }
 
+    // Last resort, mirroring Linux `select_fallback_rq`: no *schedulable* CPU in
+    // the mask right now, but a permitted CPU may be merely transiently
+    // non-schedulable (an AP paused for a teardown, or mid-enable). Target it
+    // anyway rather than dropping to `None` and stranding the wake — the remote
+    // push parks it in that CPU's inbox and its next drain (idle-loop, tick, or
+    // reschedule IPI) runs it. Prefer `last_cpu` (cache-warm), else the
+    // lowest-index permitted online CPU. Only a mask with no online CPU at all
+    // yields `None`.
+    if slopos_arch::pcr::is_cpu_online(last_cpu) && affinity_allows_cpu(affinity, last_cpu) {
+        return Some(last_cpu);
+    }
+    let cpu_count = slopos_arch::pcr::get_cpu_count();
+    for cpu_id in 0..cpu_count {
+        if affinity_allows_cpu(affinity, cpu_id) && slopos_arch::pcr::is_cpu_online(cpu_id) {
+            return Some(cpu_id);
+        }
+    }
+
     None
 }
 
@@ -1205,8 +1237,14 @@ pub fn resume_all_aps() {
 
     let cpu_count = slopos_arch::pcr::get_cpu_count();
     for cpu_id in 1..cpu_count {
-        if let Some(count) = with_cpu_scheduler(cpu_id, |sched| sched.total_ready_count()) {
-            if count > 0 {
+        // Wake an AP that has ready work OR a cross-core wake parked in its
+        // inbox. Gating only on the ready count would leave an inbox-parked
+        // wake (pushed while this AP was paused during a task teardown) waiting
+        // for the next timer tick instead of resuming promptly on the IPI.
+        if let Some((ready, inbox)) = with_cpu_scheduler(cpu_id, |sched| {
+            (sched.total_ready_count(), sched.inbox_count())
+        }) {
+            if ready > 0 || inbox > 0 {
                 if let Some(apic_id) = slopos_arch::pcr::apic_id_from_cpu_index(cpu_id) {
                     slopos_arch::pcr::send_ipi_to_cpu(
                         apic_id,

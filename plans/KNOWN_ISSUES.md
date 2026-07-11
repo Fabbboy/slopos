@@ -1,59 +1,48 @@
 # SlopOS Known Issues
 
-Last updated: 2026-07-07
+Last updated: 2026-07-11
 
 ---
 
-## Userland threads do not distribute across CPUs (thread-per-core placement)
+## Multi-CPU userland blocked by a buddy/slab cross-CPU TLB-shootdown deadlock
 
-**Status**: Open  
-**Severity**: Low (no production consumer; userland is effectively single-threaded today)  
-**Component**: `sched/src/scheduler.rs`, `sched/src/per_cpu.rs`
+**Status**: Open (thread-per-core *scheduler* half resolved; the *allocator* half is the blocker)  
+**Severity**: Low (no production consumer; the test suite runs userland co-located)  
+**Component**: `mm/src/slab/`, `mm/src/buddy*` (the SMP alloc / reuse-drain path)
 
 ### Description
 
-Userland OS threads never run on application processors (APs) even when given a non-zero CPU
-affinity — they stay on the BSP (CPU 0). The kernel IS fully SMP (per-CPU runqueues, AP schedulers
-online, and APs *can* run userland: CR3 / FS_BASE / GS / IST / TSS / SYSCALL are all set up per-AP),
-and placement honors affinity at task *creation* and at *wake*. The gap is two-fold; the second half
-is the hard one:
+The thread-per-core **scheduler** path is complete. A `ring_enter`-parked reactor woken cross-core is
+now re-dispatched on an affinity-permitted CPU (the remote-inbox flush before every dispatch pick +
+affinity-honoring wake selection), a runnable thread whose affinity no longer permits its current CPU
+is repatriated (`task_apply_affinity` + the switch-out-tail migration), `select_target_cpu` falls back
+to an affinity-permitted online CPU instead of misplacing, and `set_cpu_affinity` re-places. Verified:
+with strict per-worker pins, `percore_reactor_test`'s N reactors run on N distinct cores and the
+cross-core round-trip completes (each worker on its pinned CPU, `multi_cpu && each_on_pinned_cpu`).
 
-1. **No re-placement of a runnable thread.** Affinity is not consulted at the post-slice re-enqueue
-   (`run_ready_task_from_idle` re-queues to the current CPU) nor by `set_cpu_affinity` (it only stamps
-   the mask). A CPU-bound thread pinned to an AP re-queues to CPU 0 forever. This half is a small fix.
-2. **No cross-core re-dispatch of a `ring_enter`-parked thread woken cross-core.** The deeper blocker:
-   once a worker parks in `ring_enter` on a non-zero CPU and is woken by a cross-core fd write (the
-   slopfut cross-core channel's wakeup self-pipe), it is not re-dispatched on its CPU and the
-   round-trip hangs. A strict single-CPU non-zero pin can also dead-end a wake (`select_target_cpu`
-   returns `None` when no permitted CPU is momentarily schedulable → the wake is silently dropped).
+The remaining blocker is in the **allocator**, exposed (not caused) by the distribution the scheduler
+now produces: under sustained concurrent allocation on multiple CPUs, a `SlabAllocator::alloc_one`
+running under a per-CPU `CpuLocal::get_pinned_mut` pin (interrupts off) can reach the buddy reuse
+path, whose synchronous cross-CPU TLB shootdown spins with interrupts off — stopping that CPU's timer
+tick until the NMI watchdog fires (`NMI WATCHDOG: CPU N not responding`). This is the latent
+"heap-alloc under a cli-lock / LUF reuse-drain is a hidden cross-CPU wait" hazard. It is intermittent
+(~2/12 with 4 strictly-pinned workers) and does **not** occur co-located, so `percore_reactor_test`
+ships with the co-located `(1 << idx) | 1` mask and the full suite is reliably green.
 
-A placement-only fix is insufficient: with all 4 workers placed on distinct CPUs, the cross-core
-round-trip hangs on #2. The per-thread-reactor + cross-core-channel infrastructure works fully
-**co-located** (all reactors on CPU 0); `percore_reactor_test` validates that.
+### Fix (allocator SMP hardening)
 
-### Impact
-
-Thread-per-core is logically complete (N independent reactors + a `Send` cross-core channel) but not
-physically distributed: all reactors time-slice on CPU 0. No current consumer needs distribution
-(production userland is single-threaded), so impact is low today.
-
-### Fix (dedicated effort — both halves needed together)
-
-1. Re-enqueue honors affinity: route an affinity-disallowed re-enqueue through `schedule_task` (after
-   `on_cpu` clears).
-2. `set_cpu_affinity` re-places a Ready task on a now-disallowed CPU.
-3. `select_target_cpu`: affinity-permitted online-CPU fallback instead of `None`.
-4. **Cross-core ring-wakeup re-dispatch** (load-bearing): a `ring_enter`-blocked task woken via a
-   cross-core fd write must be re-dispatched on an affinity-permitted CPU and its reactor roused
-   there. This is why the naive placement fix is insufficient alone.
+The buddy reuse-path cross-CPU TLB shootdown must not spin interrupts-off under a slab per-CPU pin.
+Candidates: defer the shootdown out of the pinned/IRQ-off region; make the shootdown wait
+tick-pumping / interruptible; or refill slab magazines without holding the pin across a buddy reuse
+drain. See the related latent notes on synchronous cross-CPU shootdown on the buddy reuse path.
 
 ### Related Files
 
-- `sched/src/scheduler.rs` — `run_ready_task_from_idle`, `schedule_task`, `unblock_task`
-- `sched/src/per_cpu.rs` — `select_target_cpu`, `affinity_allows_cpu`, `enqueue_local`
-- `core/src/syscall/process_handlers.rs` — `syscall_set_cpu_affinity`
-- `slopos-rt/src/slopfut/{reactor,cross_core}.rs` — the cross-core wakeup-fd path
-- `userland/src/bin/tests/percore_reactor_test.rs` — the co-located validation
+- `mm/src/slab/allocator.rs`, `mm/src/slab/magazine.rs` — `alloc_one`, `get_pinned_mut`
+- `mm/src/buddy*` — the reuse-drain / cross-CPU TLB shootdown
+- `userland/src/bin/tests/percore_reactor_test.rs` — flip the worker mask to strict `1 << idx` and
+  promote the `multi_cpu` / `each_on_pinned_cpu` assertions once the allocator is hardened; the
+  scheduler already passes that variant except for this deadlock
 
 ---
 

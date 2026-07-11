@@ -9,12 +9,15 @@
 #   - RDI/RSI/RDX/R10/R8/R9 = syscall args (Linux x86_64 ABI)
 #   - User RSP intact; user GS intact (SWAPGS not yet performed).
 #
-# The trampoline saves user state into the per-CPU `UserContext` slot
-# stashed by `PcrUserModeBackend::execute_round_trip`, encodes
-# `ReturnReason::Syscall(rax)` into the per-CPU return-reason slot, and
-# then unwinds back to the caller of `execute_round_trip` by restoring
-# the saved kernel callee-save snapshot from
-# `pcr.kernel_return_ctx` and `jmp`ing to the saved RIP.
+# The trampoline saves user state (including the syscall number in RAX)
+# into the per-task `UserContext` stashed by
+# `PcrUserModeBackend::execute_round_trip`, then unwinds back to the
+# caller of `execute_round_trip` by restoring the saved kernel
+# callee-save snapshot from `pcr.kernel_return_ctx` and `jmp`ing to the
+# saved RIP.  The return reason is derived from that per-task
+# `UserContext` (always a syscall on this path) — there is no per-CPU
+# return-reason slot, so a preemption/migration after the `sti` below
+# cannot corrupt it.
 #
 # Offsets are mirrored from `slopos-ostd/src/cpu/x86_64/pcr.rs` (the
 # `pub mod offsets` block) and `slopos-ostd/src/user/context.rs`
@@ -32,9 +35,7 @@
 .equ PCR_KERNEL_RSP,          16
 .equ PCR_USER_CTX_PTR,        96
 .equ PCR_KERNEL_RETURN_CTX,   104
-.equ PCR_RETURN_REASON_KIND,  168
-.equ PCR_RETURN_REASON_PAYLD, 176
-.equ PCR_USER_RAX_TMP,        184
+.equ PCR_USER_RAX_TMP,        168
 
 # KernelReturnContext field offsets, relative to PCR_KERNEL_RETURN_CTX.
 .equ KRC_RBX, 0
@@ -69,9 +70,6 @@
 
 # Kernel data segment selector (matches SegmentSelector::KERNEL_DATA).
 .equ SEL_KERNEL_DATA, 0x10
-
-# Return-reason kind discriminants (mirrored from pcr.rs constants).
-.equ RR_KIND_SYSCALL, 1
 
 .global __ostd_user_return
 .global __ostd_user_return_end
@@ -128,14 +126,13 @@ __ostd_user_return:
     movq %gs:PCR_USER_RSP_TMP, %rdx
     movq %rdx, UR_RSP(%rax)
 
-    # ctx.rax = saved user RAX (from PCR scratch slot).  Also used as
-    # the syscall-number payload in the ReturnReason encoding.
+    # ctx.rax = saved user RAX (from PCR scratch slot) = the syscall
+    # number.  This per-task write is the sole record of the return
+    # reason: `execute_round_trip` reads it back from the UserContext
+    # after the jmp, so no per-CPU return-reason slot is needed (the
+    # per-task value is migration-safe across the trampoline's `sti`).
     movq %gs:PCR_USER_RAX_TMP, %rdx
     movq %rdx, UR_RAX(%rax)
-
-    # Encode ReturnReason::Syscall(rax).
-    movq %rdx, %gs:PCR_RETURN_REASON_PAYLD
-    movq $RR_KIND_SYSCALL, %gs:PCR_RETURN_REASON_KIND
 
     # Restore kernel data segments (matches what the kernel left them
     # as on the way out — the exception-handler asm does the same).
