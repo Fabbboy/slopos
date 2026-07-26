@@ -369,24 +369,85 @@ W4 verification:
   reference never trips the `strong_count == 1` gate early) were reviewed. No
   finding reached the confidence-80 threshold; `CVSS.md` is unchanged.
 
-**W5 — Excision + acceptance.** With the `refcnt` surface already gone (W3),
-what remains is to retire the registry's transitional strong `owner` so the
-registry is truly weak-only — the placement containers, the parent's zombie
-ownership (W4), and the wait maps then hold the only strong references — and to
-finish the accessor→method excision so no `*mut Task` survives in a signature
-outside ostd placement/link primitives and the PCR slot. Acceptance greps below
-must return zero hits.
+**W5 — Excision + acceptance.** The ownership half has landed; the raw-pointer
+half has not. What follows is the state W5 works against and the work left.
 
-W0–W4 are complete. The `refcnt` field and its whole accessor surface, the
-`KernelSync<*mut Task>` fields, and the legacy inc/dec discipline are deleted;
-the scheduler owns tasks by moving `KArc<Task>` clones through the ready queue,
-remote inbox, dispatch slot, and wait maps, and teardown is ownership-driven — a
-parent owns its children through an intrusive list, `waitpid` reaps by dropping
-that reference off-lock, and a dying parent drains its own list in O(children)
-with no global scan. The registry still holds a transitional strong `owner` as
-the interim anchor for blocked/zombie tasks, with reclaim keyed on its strong
-count. W5 (retire the registry owner so the registry is weak-only, finish the
-accessor→method excision, acceptance greps green) remains and lands next.
+**Ownership is now as the target architecture describes it.** `RegistryEntry` is
+`{ id, weak }` — the registry observes tasks and owns none, so a lookup is a
+liveness-checked upgrade and no entry can fabricate a strong reference.
+`owns_pointer` compares against `KWeak::as_ptr`, which is defined without
+upgrading and without reading through the pointer, so the cr3 scan no longer
+mints a handle that could run the destructor under the registry lock.
+
+What keeps a registered task alive is the **existence reference** — one strong
+reference the task holds to itself, handed over at registration and taken back
+exactly once when it is reaped, exactly as Linux does for `task_struct` and
+releases in `release_task`. Containers do not cover every live state: a blocked
+kernel thread sits in no queue, has no parent, and is named by its wait node only
+through an opaque handle; a placement reservation has not reached its queue; a
+freshly created or forked task is registered before it is published. The
+existence reference covers all of them, and it is what keeps every container's
+release provably non-final — hence still a bare decrement, safe under a lock.
+
+Reap is unhash plus release-existence as one step, gated on `Terminated &&
+!task_is_dispatch_pinned` — a statement about task *state*, with no strong-count
+read anywhere. The gate is shared with the destructor gate so the two cannot
+disagree, and it is load-bearing: `dispatch()` publishes `PCR.current_task`
+without setting `on_cpu`, so unhashing a task that is still a CPU's current would
+make `task_pointer_is_valid` report pointer corruption and send
+`scheduler_tasks_for_cpu` down its recovery path on the dying task's own stack.
+`task_put` is the sole release primitive; `release_placement_arc` and its
+`_deferred` twin are gone, and the latch survives only as a dispatch-pin retry.
+`register_task` hands its caller an owning handle that pins the task across the
+rest of its construction. The `refcnt`, `task_inc_ref`/`task_dec_ref`, and
+`KernelSync<*mut Task>` greps are all at zero.
+
+**Remaining.**
+
+- *Coverage for the ownership half.* A leak tripwire asserting the parked
+  existence count equals registry occupancy at quiescent points (compare the two
+  counters, not an absolute — per-CPU idle tasks are never reaped, and
+  `KernelTestScope::drop` runs `task_shutdown_all` without `init_task_manager`); a
+  blocked kernel thread surviving on the existence reference alone; the reap
+  declining while dispatch-pinned and completing after the drain; and a
+  parked-count assertion on the churn tests so a missed release fails loudly
+  instead of leaking 8 KiB a thousand times. Finish the lookup-after-reap consumer
+  audit; anything that turns out to need a reaped task to stay findable gets its
+  own side table, never a delayed unhash.
+- *The raw-pointer excision.* 110 signature-position `*mut Task` sites (91 in
+  `sched/`, 19 in `core/`), plus the 112-function accessor layer over
+  `*mut`/`*const TaskInner<K, U>` and its ~827 call sites. `placement.rs` and the
+  PCR slot — the carve-outs this plan names — are already clean, so they absorb
+  none of the 110. Ordered as: field atomicisation, then register/FPU/user-context
+  cells carrying exclusivity as a witness parameter, then the `CurrentTask` borrow
+  guard (invariant I5), then two mechanical accessor passes (retype to `&TaskInner`
+  keeping `Option`; then bodies to inherent methods, dropping `Option`), then
+  `per_cpu`, the switch core, lifecycle/table/family/futex, the `core/` syscall
+  surface, and tests. Cell accessors must return `*mut T` or `&mut T` and never
+  `T`: one `FpuCell::set(FpuState)` puts 2.6 KiB on the caller's frame and fails
+  the stack gate.
+- *Two carve-outs this plan failed to name.* `safestack_rt.rs` holds 17 non-`KArc`
+  `Task` bodies in `.bss`, seeded by asm before the heap exists; retype that
+  surface to the PCR's own `*mut ()` shape rather than adding a third named
+  exception. `inspect.rs` needs no carve-out once its callers hand it `TaskRef`.
+- *Defects found while doing the above, none of them in this plan's original
+  scope.* `WaitTaskHandle = *mut c_void` launders a `*mut Task` through the
+  driver-runtime vtable and `wake_one`/`wake_all` dereference it on any CPU — a
+  use-after-free the acceptance grep cannot see; fix by making the handle a task
+  id resolved through a weak upgrade. `newcomer_outranks_current` dereferences
+  another CPU's PCR task to read its priority, racing that CPU's
+  `drain_previous_task`; publish a per-CPU priority instead.
+  `mark_task_terminated` and `deliver_pending_signal_core` each hold a `&mut Task`
+  across calls that re-derive a reference to the same allocation, which the cells
+  step is what allows to be retyped away. And a task created by `task_create` is
+  `Blocked` and reachable between registration and publication, so a
+  process-group signal can `unblock_task` it onto a runqueue before its publisher
+  finishes — make "registered but not yet published" an explicit placement token
+  that `wake_blocked_task` refuses, rather than a status coincidence.
+- *Widen the acceptance greps* to `*mut TaskInner`, `WaitTaskHandle` and
+  `DriverTaskHandle`: the first is the same defect one type parameter away, and
+  the other two launder a task pointer through `c_void`.
+- Machine-checked Verus obligations for the ownership core, and the closeout.
 
 ## Acceptance
 
@@ -409,12 +470,23 @@ accessor→method excision, acceptance greps green) remains and lands next.
   upgrade-vs-drop races, DST coercion, raw round trips, and uniqueness under
   host tests and Miri). W1 coverage is complete (the deferred slot drains
   exactly once; host/Miri fault injection exercises the lock/IRQ assertions).
-  W2 coverage is complete (upgrade returns `None` after death; a held guard
-  pins a terminated task until its final drop; id non-reuse across a
-  1000-task stampede; the cap rejects without consuming an id or slot; the
-  handle path never aliases a later id). W3 still needs its coverage
-  (placement transitions move ownership exactly once; double-insert
-  CAS-rejected).
+  W2 coverage is complete (upgrade returns `None` after death; id non-reuse
+  across a 1000-task stampede; the cap rejects without consuming an id or slot;
+  the handle path never aliases a later id). W3 coverage is complete (a
+  placement leak/reclaim round trip conserves the strong count and base
+  pointer; the deferred slot drains exactly one owning reference; the
+  remote-inbox duplicate-push and non-ready-drop tests assert strong-count
+  deltas). W4 coverage is complete (a linked child carries exactly one extra
+  parked reference; `waitpid`'s reap drops it; a dying parent drains a
+  multi-child list). The existence reference has host and Miri coverage
+  (park/release round-trips exactly once, a second release yields nothing, a
+  never-parked task releases nothing, and a cloned task does not inherit the
+  flag); its kernel-side coverage is listed under W5.
+
+  Note that the guard test no longer asserts that an outstanding guard keeps a
+  terminated task *resolvable* — the reap unhashes independently of guards. It
+  asserts the property that replaced it: the registration goes immediately,
+  while the guard still pins the allocation until its last reference drops.
 - Torture: the rewritten kernel churn tests (`test_serial_reap_stampede`,
   `test_fork_exit_wait_stress_10x100`, `test_task_wait_exit_race_1000`) now
   assert that a destroyed task stops upgrading — the memory-actually-returns
