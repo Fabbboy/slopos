@@ -666,6 +666,44 @@ pub fn test_task_guard_pins_terminated_task() -> TestResult {
     TestResult::Pass
 }
 
+/// A registered-but-unpublished task is terminable and reclaimable.
+///
+/// Reproduces the shape a fork/clone child has between `register_task` and
+/// `publish_new_task`: fully constructed, registered, `Invalid`, and hidden from
+/// every active-task scan. `task_terminate` used to report such a task as "not
+/// found" and walk away, abandoning it along with its kernel stack, unsafe
+/// stack and address space on every pre-publication failure path.
+pub fn test_unpublished_task_is_terminable() -> TestResult {
+    let _fixture = SchedFixture::new();
+
+    let id = task_create(
+        b"Unpublish\0".as_ptr() as *const c_char,
+        dummy_task_entry,
+        ptr::null_mut(),
+        TaskPriority::Normal.as_u8(),
+        TASK_FLAG_KERNEL_MODE,
+    );
+    if id == INVALID_TASK_ID {
+        return TestResult::Fail;
+    }
+    {
+        let Some(task) = super::task::task_find_by_id(id) else {
+            return TestResult::Fail;
+        };
+        super::task::task_set_status(task.as_ptr(), TaskStatus::Invalid);
+    }
+
+    if task_terminate(id) != 0 {
+        klog_info!("SCHED_TEST: unpublished task {} refused termination", id);
+        return TestResult::Fail;
+    }
+    if super::task::task_find_by_id(id).is_some() {
+        klog_info!("SCHED_TEST: unpublished task {} leaked past terminate", id);
+        return TestResult::Fail;
+    }
+    TestResult::Pass
+}
+
 /// Test: rapid individually allocated task create/destroy cycle.
 pub fn test_rapid_create_destroy_cycle() -> TestResult {
     let _fixture = SchedFixture::new();
@@ -4567,6 +4605,10 @@ slopos_testing::stest!(
     suite = sched_core
 );
 slopos_testing::stest!(name = test_task_registry_live_cap, suite = sched_core);
+slopos_testing::stest!(
+    name = test_unpublished_task_is_terminable,
+    suite = sched_core
+);
 slopos_testing::stest!(
     name = test_task_guard_pins_terminated_task,
     suite = sched_core

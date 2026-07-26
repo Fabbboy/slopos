@@ -675,10 +675,16 @@ pub fn task_terminate(task_id: u32) -> c_int {
         return -1;
     }
 
-    if task_status(task_ptr) == Some(TaskStatus::Invalid) {
-        klog_info!("task_terminate: Task not found");
-        return -1;
-    }
+    // A resolvable `Invalid` task is not a missing one — it is a fork/clone
+    // child between `register_task` and `publish_new_task`. Its construction is
+    // complete (stacks, address space and user context are all installed before
+    // registration); only scheduler publication is outstanding, which is why it
+    // is still hidden from every active-task scan. Refusing to terminate it is
+    // what abandoned it on the pre-publication failure paths — a failed
+    // `publish_new_task`, or a faulting `CLONE_*_SETTID` write — leaking the
+    // task together with its kernel stack, unsafe stack and address space.
+    // `mark_task_terminated` force-publishes the terminal status, so the
+    // `Invalid -> Ready`-only transition rule does not stand in the way.
 
     if matches!(
         task_status(task_ptr),
