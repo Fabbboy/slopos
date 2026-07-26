@@ -32,8 +32,6 @@ pub use task_stats::*;
 pub use task_table::*;
 pub use user_ctx_init::{init_user_ctx_for_new_task, init_user_ctx_from_parent_frame};
 
-pub type TaskIterateCb = Option<fn(*mut Task, *mut c_void)>;
-
 /// Kernel-task entry-point function pointer.
 ///
 /// Always `extern "C"` so caller side (driver-spawned kernel

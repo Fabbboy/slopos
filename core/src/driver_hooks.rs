@@ -1,4 +1,4 @@
-use core::ffi::c_void;
+use core::ops::ControlFlow;
 
 use slopos_abi::signal::{SIG_IGN, sig_bit};
 use slopos_kernel_services::driver_runtime::{
@@ -10,8 +10,8 @@ use slopos_ostd::KArc;
 use slopos_ostd::task::ProcessGroup;
 use slopos_sched::scheduler;
 use slopos_sched::task::{
-    self, Task, task_has_deliverable_signal, task_parent_task_id, task_pgid, task_process_group,
-    task_sid, task_signal_blocked, task_signal_handler, task_signal_post,
+    self, Task, task_has_deliverable_signal, task_process_group, task_signal_blocked,
+    task_signal_handler, task_signal_post,
 };
 
 fn runtime_current_task_pgrp_handle() -> Option<slopos_ostd::KWeak<ProcessGroup>> {
@@ -37,141 +37,64 @@ fn runtime_unblock_task(task: DriverTaskHandle) -> i32 {
     scheduler::unblock_task(handle_to_task(task))
 }
 
-struct SignalGroupContext {
-    pgid: u32,
-    signum: u8,
-    matched: bool,
-}
-
-fn signal_group_task(task: *mut Task, context: *mut c_void) {
-    if task.is_null() || context.is_null() {
-        return;
-    }
-
-    // OSTD's `try_void_ctx_mut` carries the interior cast + reborrow.
-    // Caller (`task_iterate_active`) stashed a `&mut SignalGroupContext`
-    // into `context`; no aliasing inside the iteration.
-    let Some(ctx) = slopos_ostd::util::ptr_buf::try_void_ctx_mut::<SignalGroupContext>(context)
-    else {
-        return;
-    };
-    if task_pgid(task) != Some(ctx.pgid) {
-        return;
-    }
-
-    if task_signal_post(task, ctx.signum) {
-        let _ = scheduler::unblock_task(task);
-    }
-    ctx.matched = true;
-}
-
+/// Post `signum` to every member of `pgid`, waking blocked members. True if at
+/// least one member matched.
 fn runtime_signal_process_group(pgid: u32, signum: u8) -> bool {
     if pgid == 0 {
         return false;
     }
 
-    let mut ctx = SignalGroupContext {
-        pgid,
-        signum,
-        matched: false,
-    };
-
-    task::task_iterate_active(
-        Some(signal_group_task),
-        (&mut ctx as *mut SignalGroupContext).cast(),
-    );
-
-    ctx.matched
+    let mut matched = false;
+    task::task_for_each_active(|task| {
+        if task.pgid != pgid {
+            return;
+        }
+        if task_signal_post(core::ptr::from_ref(task), signum) {
+            let _ = scheduler::unblock_task(core::ptr::from_ref(task).cast_mut());
+        }
+        matched = true;
+    });
+    matched
 }
 
-struct SignalSessionContext {
-    sid: u32,
-    signum: u8,
-    matched: bool,
-}
-
-fn signal_session_task(task: *mut Task, context: *mut c_void) {
-    if task.is_null() || context.is_null() {
-        return;
-    }
-
-    let Some(ctx) = slopos_ostd::util::ptr_buf::try_void_ctx_mut::<SignalSessionContext>(context)
-    else {
-        return;
-    };
-    if task_sid(task) != Some(ctx.sid) {
-        return;
-    }
-
-    if task_signal_post(task, ctx.signum) {
-        let _ = scheduler::unblock_task(task);
-    }
-    ctx.matched = true;
-}
-
+/// Post `signum` to every member of session `sid`, waking blocked members. True
+/// if at least one member matched.
 fn runtime_signal_session(sid: u32, signum: u8) -> bool {
     if sid == 0 {
         return false;
     }
 
-    let mut ctx = SignalSessionContext {
-        sid,
-        signum,
-        matched: false,
-    };
-
-    task::task_iterate_active(
-        Some(signal_session_task),
-        (&mut ctx as *mut SignalSessionContext).cast(),
-    );
-
-    ctx.matched
+    let mut matched = false;
+    task::task_for_each_active(|task| {
+        if task.sid != sid {
+            return;
+        }
+        if task_signal_post(core::ptr::from_ref(task), signum) {
+            let _ = scheduler::unblock_task(core::ptr::from_ref(task).cast_mut());
+        }
+        matched = true;
+    });
+    matched
 }
 
 // ---------------------------------------------------------------------------
 // Check if a process group exists within a given session.
 // ---------------------------------------------------------------------------
 
-struct PgrpExistsContext {
-    pgid: u32,
-    sid: u32,
-    found: bool,
-}
-
-fn pgrp_exists_task(task: *mut Task, context: *mut c_void) {
-    if task.is_null() || context.is_null() {
-        return;
-    }
-
-    let Some(ctx) = slopos_ostd::util::ptr_buf::try_void_ctx_mut::<PgrpExistsContext>(context)
-    else {
-        return;
-    };
-    if ctx.found {
-        return; // already found, skip remaining tasks
-    }
-    if task_pgid(task) == Some(ctx.pgid) && task_sid(task) == Some(ctx.sid) {
-        ctx.found = true;
-    }
-}
-
 fn runtime_pgrp_exists_in_session(pgid: u32, sid: u32) -> bool {
     if pgid == 0 || sid == 0 {
         return false;
     }
 
-    let mut ctx = PgrpExistsContext {
-        pgid,
-        sid,
-        found: false,
-    };
-
-    task::task_iterate_active(
-        Some(pgrp_exists_task),
-        (&mut ctx as *mut PgrpExistsContext).cast(),
-    );
-
-    ctx.found
+    let mut found = false;
+    task::task_try_for_each_active(|task| {
+        if task.pgid == pgid && task.sid == sid {
+            found = true;
+            return ControlFlow::Break(());
+        }
+        ControlFlow::Continue(())
+    });
+    found
 }
 
 // ---------------------------------------------------------------------------
@@ -220,48 +143,6 @@ fn runtime_has_pending_signal() -> bool {
 // continue the stopped group).
 // ---------------------------------------------------------------------------
 
-struct OrphanCheckContext {
-    pgid: u32,
-    sid: u32,
-    is_orphaned: bool,
-}
-
-fn orphan_check_task(task: *mut Task, context: *mut c_void) {
-    if task.is_null() || context.is_null() {
-        return;
-    }
-
-    let Some(ctx) = slopos_ostd::util::ptr_buf::try_void_ctx_mut::<OrphanCheckContext>(context)
-    else {
-        return;
-    };
-    if !ctx.is_orphaned {
-        return; // already found a non-orphan indicator, skip
-    }
-
-    // Only look at members of the target process group.
-    if task_pgid(task) != Some(ctx.pgid) || task_sid(task) != Some(ctx.sid) {
-        return;
-    }
-
-    // Check if this member's parent is in a different pgrp within the same
-    // session — if so, the pgrp is NOT orphaned.
-    let parent_id = task_parent_task_id(task).unwrap_or(slopos_abi::task::INVALID_TASK_ID);
-    if parent_id == 0 || parent_id == slopos_abi::task::INVALID_TASK_ID {
-        return; // no parent or init — can't help
-    }
-
-    let Some(parent) = task::task_find_by_id(parent_id) else {
-        return;
-    };
-    let parent = parent.as_ptr();
-
-    // Parent is in the same session but a different pgrp → not orphaned.
-    if task_sid(parent) == Some(ctx.sid) && task_pgid(parent) != Some(ctx.pgid) {
-        ctx.is_orphaned = false;
-    }
-}
-
 fn runtime_is_pgrp_orphaned(pgid: u32, sid: u32) -> bool {
     if pgid == 0 || sid == 0 {
         return false; // no valid group/session — not orphaned by definition
@@ -272,18 +153,34 @@ fn runtime_is_pgrp_orphaned(pgid: u32, sid: u32) -> bool {
         return true; // no members at all — effectively orphaned
     }
 
-    let mut ctx = OrphanCheckContext {
-        pgid,
-        sid,
-        is_orphaned: true, // assume orphaned, disprove by finding a qualifying parent
-    };
+    // Assume orphaned; one member with a parent in a different pgrp of the same
+    // session disproves it. The visitor resolves that parent through the
+    // registry, which is why iteration hands out its guards off-lock.
+    let mut is_orphaned = true;
+    task::task_try_for_each_active(|task| {
+        // Only look at members of the target process group.
+        if task.pgid != pgid || task.sid != sid {
+            return ControlFlow::Continue(());
+        }
 
-    task::task_iterate_active(
-        Some(orphan_check_task),
-        (&mut ctx as *mut OrphanCheckContext).cast(),
-    );
+        let parent_id = task.parent_task_id;
+        if parent_id == 0 || parent_id == slopos_abi::task::INVALID_TASK_ID {
+            return ControlFlow::Continue(()); // no parent or init — can't help
+        }
 
-    ctx.is_orphaned
+        let Some(parent) = task::task_find_by_id(parent_id) else {
+            return ControlFlow::Continue(());
+        };
+
+        // Parent is in the same session but a different pgrp → not orphaned.
+        if parent.sid == sid && parent.pgid != pgid {
+            is_orphaned = false;
+            return ControlFlow::Break(());
+        }
+        ControlFlow::Continue(())
+    });
+
+    is_orphaned
 }
 
 // ---------------------------------------------------------------------------

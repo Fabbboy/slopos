@@ -2321,7 +2321,7 @@ pub(crate) fn rescue_stranded_ready_tasks() {
         .fetch_add(1, Ordering::Relaxed)
         .saturating_add(1);
     CURRENT_RESCUE_SWEEP.store(seq, Ordering::Relaxed);
-    super::task::task_iterate_active(Some(rescue_check_task), ptr::null_mut());
+    super::task::task_for_each_active(rescue_check_task);
 }
 
 /// Consecutive-sweep strike tracking for genuinely stranded READY tasks.
@@ -2378,10 +2378,8 @@ fn task_is_current_on_any_cpu(task: *mut Task) -> bool {
     false
 }
 
-fn rescue_check_task(task: *mut Task, _context: *mut core::ffi::c_void) {
-    let Some(t) = super::task::task_borrow(task) else {
-        return;
-    };
+fn rescue_check_task(t: &Task) {
+    let task = core::ptr::from_ref(t).cast_mut();
     if t.status() != TaskStatus::Ready {
         return;
     }

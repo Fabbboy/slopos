@@ -1,5 +1,6 @@
-use core::ffi::{c_char, c_void};
+use core::ffi::c_char;
 use core::mem::size_of;
+use core::ops::ControlFlow;
 
 use slopos_abi::Errno;
 use slopos_abi::syscall::{CLOCK_MONOTONIC, CLOCK_REALTIME, Timespec, TtyIndex, UserSysInfo};
@@ -210,31 +211,30 @@ define_syscall!(syscall_process_list
     use slopos_abi::syscall::UserTaskEntry;
     use slopos_abi::task::{INVALID_TASK_ID, MAX_TASKS};
     use slopos_ostd::KVec;
-    use slopos_sched::task::task_iterate_active;
+    use slopos_sched::task::task_try_for_each_active;
 
-    struct IterCtx {
-        entries: KVec<UserTaskEntry>,
-        count: usize,
-        max: usize,
-    }
-
-    fn collect_task(task_ptr: *mut slopos_sched::task_struct::Task, ctx_ptr: *mut c_void) {
-        let Some(iter_ctx) = slopos_ostd::util::ptr_buf::try_void_ctx_mut::<IterCtx>(ctx_ptr)
-        else {
-            return;
-        };
-        if iter_ctx.count >= iter_ctx.max {
-            return;
+    let max_entries = (max as usize).min(MAX_TASKS);
+    let mut entries = match KVec::<UserTaskEntry>::with_capacity(max_entries) {
+        Ok(mut v) => {
+            for _ in 0..max_entries {
+                if v.push(UserTaskEntry::default()).is_err() {
+                    return Err(Errno::ENOMEM);
+                }
+            }
+            v
         }
+        Err(_) => return Err(Errno::ENOMEM),
+    };
 
-        let Some(task) = slopos_sched::task::task_borrow(task_ptr) else {
-            return;
-        };
+    let mut count = 0usize;
+    task_try_for_each_active(|task| {
+        if count >= max_entries {
+            return ControlFlow::Break(());
+        }
         if task.task_id == INVALID_TASK_ID {
-            return;
+            return ControlFlow::Continue(());
         }
-
-        let entry = &mut iter_ctx.entries[iter_ctx.count];
+        let entry = &mut entries[count];
         entry.task_id = task.task_id;
         entry.parent_task_id = task.parent_task_id;
         entry.process_id = task.process_id;
@@ -248,37 +248,17 @@ define_syscall!(syscall_process_list
         entry.creation_time_ms = task.creation_time;
         entry.yield_count = task.yield_count;
         entry.name = task.name;
-        iter_ctx.count += 1;
-    }
+        count += 1;
+        ControlFlow::Continue(())
+    });
 
-    let max_entries = (max as usize).min(MAX_TASKS);
-    let entries = match KVec::<UserTaskEntry>::with_capacity(max_entries) {
-        Ok(mut v) => {
-            for _ in 0..max_entries {
-                if v.push(UserTaskEntry::default()).is_err() {
-                    return Err(Errno::ENOMEM);
-                }
-            }
-            v
-        }
-        Err(_) => return Err(Errno::ENOMEM),
-    };
-    let mut iter_ctx = IterCtx {
-        entries,
-        count: 0,
-        max: max_entries,
-    };
-
-    task_iterate_active(Some(collect_task), (&mut iter_ctx as *mut IterCtx).cast());
-
-    let count = iter_ctx.count;
     for i in 0..count {
         let dst_addr = buf
             .as_u64()
             .wrapping_add((i * core::mem::size_of::<UserTaskEntry>()) as u64);
         let user_ptr = slopos_mm::user_ptr::UserPtr::<UserTaskEntry>::try_new(dst_addr)
             .map_err(|_| Errno::EFAULT)?;
-        copy_to_user(user_ptr, &iter_ctx.entries[i]).map_err(|_| Errno::EFAULT)?;
+        copy_to_user(user_ptr, &entries[i]).map_err(|_| Errno::EFAULT)?;
     }
 
     Ok(count as u64)

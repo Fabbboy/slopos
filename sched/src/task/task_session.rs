@@ -1,5 +1,3 @@
-use core::ffi::c_void;
-
 use slopos_abi::signal::SIGCHLD;
 use slopos_abi::syscall::TtyIndex;
 use slopos_ostd::task::{ProcessGroup, Session};
@@ -9,7 +7,7 @@ use super::task_accessors::{
     task_clear_controlling_tty_for, task_id_of, task_parent_task_id, task_signal_post, task_tgid,
     task_wake_all_waiters,
 };
-use super::task_table::{task_find_by_id, task_iterate_active, with_task_manager};
+use super::task_table::{task_find_by_id, task_for_each_active, with_task_manager};
 use super::{INVALID_TASK_ID, Task};
 
 /// Resolve a live weak handle to the process group `pgid` names, by
@@ -51,42 +49,18 @@ pub fn session_handle_for_sid(sid: u32) -> Option<KWeak<Session>> {
     })
 }
 
-struct ClearControllingTtyContext {
-    session_id: u32,
-    tty: TtyIndex,
-    cleared: usize,
-}
-
-fn clear_controlling_tty_for_session_task(task: *mut Task, context: *mut c_void) {
-    if task.is_null() || context.is_null() {
-        return;
-    }
-
-    let Some(ctx) =
-        slopos_ostd::util::ptr_buf::try_void_ctx_mut::<ClearControllingTtyContext>(context)
-    else {
-        return;
-    };
-    if task_clear_controlling_tty_for(task, ctx.session_id, ctx.tty) {
-        ctx.cleared = ctx.cleared.saturating_add(1);
-    }
-}
-
 pub fn task_clear_controlling_tty_for_session(session_id: u32, tty: TtyIndex) -> usize {
     if session_id == 0 {
         return 0;
     }
 
-    let mut ctx = ClearControllingTtyContext {
-        session_id,
-        tty,
-        cleared: 0,
-    };
-    task_iterate_active(
-        Some(clear_controlling_tty_for_session_task),
-        (&mut ctx as *mut ClearControllingTtyContext).cast(),
-    );
-    ctx.cleared
+    let mut cleared = 0usize;
+    task_for_each_active(|task| {
+        if task_clear_controlling_tty_for(core::ptr::from_ref(task), session_id, tty) {
+            cleared = cleared.saturating_add(1);
+        }
+    });
+    cleared
 }
 
 pub(super) fn release_task_dependents(completed_task_id: u32) {

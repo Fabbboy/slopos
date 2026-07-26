@@ -491,22 +491,11 @@ fn strand_sweep(now_tick: u64) {
         );
     }
 
-    let mut context = StrandSweepContext { now_tick };
-    super::task::task_iterate_active(
-        Some(strand_sweep_task),
-        (&mut context as *mut StrandSweepContext).cast(),
-    );
+    super::task::task_for_each_active(|task| strand_sweep_task(task, now_tick));
 }
 
-struct StrandSweepContext {
-    now_tick: u64,
-}
-
-fn strand_sweep_task(task: *mut super::task::Task, context: *mut core::ffi::c_void) {
-    let Some(context) = slopos_ostd::util::ptr_buf::try_void_ctx_mut::<StrandSweepContext>(context)
-    else {
-        return;
-    };
+fn strand_sweep_task(t: &super::task::Task, now_tick: u64) {
+    let task = core::ptr::from_ref(t).cast_mut();
     if task_is_invalid(task) || task_is_exited(task) {
         return;
     }
@@ -535,8 +524,8 @@ fn strand_sweep_task(task: *mut super::task::Task, context: *mut core::ffi::c_vo
             }
             None => {}
             Some(wake_tick)
-                if context.now_tick.wrapping_sub(wake_tick) < (1 << 63)
-                    && context.now_tick.wrapping_sub(wake_tick) > 400 =>
+                if now_tick.wrapping_sub(wake_tick) < (1 << 63)
+                    && now_tick.wrapping_sub(wake_tick) > 400 =>
             {
                 class = 2;
                 detail = wake_tick;
@@ -566,7 +555,7 @@ fn strand_sweep_task(task: *mut super::task::Task, context: *mut core::ffi::c_vo
             "STRAND: task {} '{}' Blocked(Sleep) NO ENTRY now={} placement={:?}",
             task_id,
             task_name_str(task),
-            context.now_tick,
+            now_tick,
             super::task::task_sched_placement_load(task)
         ),
         2 => slopos_ostd::klog_info!(
@@ -574,7 +563,7 @@ fn strand_sweep_task(task: *mut super::task::Task, context: *mut core::ffi::c_vo
             task_id,
             task_name_str(task),
             detail,
-            context.now_tick
+            now_tick
         ),
         _ => slopos_ostd::klog_info!(
             "STRAND: task {} '{}' Ready with placement=None (publish lost)",

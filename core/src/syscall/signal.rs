@@ -1,4 +1,3 @@
-use core::ffi::c_void;
 use core::sync::atomic::Ordering;
 
 use slopos_abi::Errno;
@@ -22,7 +21,7 @@ use crate::syscall::args::{Signum, UserPtr};
 use crate::syscall::result::SyscallResult;
 use slopos_sched::scheduler::{schedule, unblock_task};
 use slopos_sched::task::{
-    task_find_by_id, task_id_of, task_iterate_active, task_pgid, task_signal_post, task_terminate,
+    task_find_by_id, task_for_each_active, task_pgid, task_signal_post, task_terminate,
 };
 use slopos_sched::task_struct::{SignalAction, Task};
 use slopos_sched::trap::trap_running_on_exception_stack;
@@ -69,71 +68,20 @@ impl TargetSet {
     }
 }
 
-struct GroupCollectContext {
-    pgid: u32,
-    targets: *mut TargetSet,
-}
-
-struct AllCollectContext {
-    exclude_task_id: u32,
-    targets: *mut TargetSet,
-}
-
-fn collect_group_member(task: *mut Task, context: *mut c_void) {
-    let Some(ctx) = slopos_ostd::util::ptr_buf::try_void_ctx_mut::<GroupCollectContext>(context)
-    else {
-        return;
-    };
-    let Some(pgid) = task_pgid(task) else {
-        return;
-    };
-    if pgid != ctx.pgid {
-        return;
-    }
-    let Some(tid) = task_id_of(task) else {
-        return;
-    };
-    if let Some(set) = slopos_ostd::util::ptr_buf::try_borrow_ref_mut(ctx.targets) {
-        set.push(tid);
-    }
-}
-
-fn collect_all_members(task: *mut Task, context: *mut c_void) {
-    let Some(ctx) = slopos_ostd::util::ptr_buf::try_void_ctx_mut::<AllCollectContext>(context)
-    else {
-        return;
-    };
-    let Some(task_id) = task_id_of(task) else {
-        return;
-    };
-    if task_id == INVALID_TASK_ID || task_id == ctx.exclude_task_id {
-        return;
-    }
-    if let Some(set) = slopos_ostd::util::ptr_buf::try_borrow_ref_mut(ctx.targets) {
-        set.push(task_id);
-    }
-}
-
 fn collect_targets_for_group(pgid: u32, targets: &mut TargetSet) {
-    let mut ctx = GroupCollectContext {
-        pgid,
-        targets: targets as *mut TargetSet,
-    };
-    task_iterate_active(
-        Some(collect_group_member),
-        (&mut ctx as *mut GroupCollectContext).cast(),
-    );
+    task_for_each_active(|task| {
+        if task.pgid == pgid {
+            targets.push(task.task_id);
+        }
+    });
 }
 
 fn collect_targets_for_all(exclude_task_id: u32, targets: &mut TargetSet) {
-    let mut ctx = AllCollectContext {
-        exclude_task_id,
-        targets: targets as *mut TargetSet,
-    };
-    task_iterate_active(
-        Some(collect_all_members),
-        (&mut ctx as *mut AllCollectContext).cast(),
-    );
+    task_for_each_active(|task| {
+        if task.task_id != INVALID_TASK_ID && task.task_id != exclude_task_id {
+            targets.push(task.task_id);
+        }
+    });
 }
 
 fn action_from_user(new_action: UserSigaction) -> SignalAction {

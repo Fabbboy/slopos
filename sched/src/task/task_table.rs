@@ -1,5 +1,5 @@
-use core::ffi::{c_int, c_void};
-use core::ops::Deref;
+use core::ffi::c_int;
+use core::ops::{ControlFlow, Deref};
 use core::ptr;
 use core::sync::atomic::{AtomicBool, Ordering};
 
@@ -10,7 +10,7 @@ use slopos_ostd::{KArc, KVec, KWeak};
 use slopos_ostd::{klog_debug, klog_info};
 
 use super::task_accessors::task_id_of;
-use super::{INVALID_TASK_ID, MAX_TASKS, Task, TaskIterateCb, TaskStatus};
+use super::{INVALID_TASK_ID, MAX_TASKS, Task, TaskStatus};
 use crate::exit_info::ExitInfo;
 use crate::scheduler;
 
@@ -774,10 +774,22 @@ pub fn task_get_current() -> *mut Task {
     scheduler::scheduler_get_current_task()
 }
 
-pub fn task_iterate_active(callback: TaskIterateCb, context: *mut c_void) {
-    let Some(cb) = callback else {
-        return;
-    };
+/// Visit every registered task that is neither `Invalid` nor id-less.
+///
+/// The guards are upgraded into a snapshot under the registry lock and `f` runs
+/// only after that lock is released, so a visitor may take the registry lock
+/// again — resolve a parent, enqueue a task, post a signal — without
+/// deadlocking. Each guard pins its task for the whole visit.
+pub fn task_for_each_active(mut f: impl FnMut(&Task)) {
+    task_try_for_each_active(|task| {
+        f(task);
+        ControlFlow::Continue(())
+    });
+}
+
+/// [`task_for_each_active`] with early exit: visiting stops as soon as `f`
+/// returns [`ControlFlow::Break`].
+pub fn task_try_for_each_active(mut f: impl FnMut(&Task) -> ControlFlow<()>) {
     let capacity = with_task_manager(|mgr| mgr.registry.len()).max(1);
     let mut tasks = match KVec::<TaskRef>::with_capacity(capacity) {
         Ok(tasks) => tasks,
@@ -791,7 +803,9 @@ pub fn task_iterate_active(callback: TaskIterateCb, context: *mut c_void) {
         }
     });
     for task in tasks.iter() {
-        cb(task.as_ptr(), context);
+        if f(task).is_break() {
+            return;
+        }
     }
 }
 
@@ -829,19 +843,16 @@ pub fn task_drain_test_reports(task_id: u32) -> KVec<crate::test_reports::TestRe
 
 pub fn debug_dump_tasks_klog() {
     klog_info!("SYSRQ: ---- task dump ----");
-    task_iterate_active(Some(dump_one_task), ptr::null_mut());
+    task_for_each_active(dump_one_task);
     klog_info!("SYSRQ: ---- end task dump ----");
 }
 
-fn dump_one_task(task: *mut Task, _context: *mut c_void) {
-    let Some(t) = super::task_borrow(task) else {
-        return;
-    };
-    let reason = slopos_ostd::task::accessors::task_load_block_reason(task as *const Task);
-    let placement = slopos_ostd::task::accessors::task_sched_placement_load(task as *const Task);
-    let on_cpu = slopos_ostd::task::accessors::task_on_cpu_load(task as *const Task);
-    let last_run =
-        slopos_ostd::task::accessors::task_last_run_timestamp(task as *const Task).unwrap_or(0);
+fn dump_one_task(t: &Task) {
+    let task = core::ptr::from_ref(t);
+    let reason = t.load_block_reason();
+    let placement = slopos_ostd::task::accessors::task_sched_placement_load(task);
+    let on_cpu = slopos_ostd::task::accessors::task_on_cpu_load(task);
+    let last_run = t.last_run_timestamp();
     klog_info!(
         "SYSRQ: task {:>3} '{}' status={:?} reason={:?} placement={:?} on_cpu={} pid={} pgid={} sid={} last_run={}",
         t.task_id,
@@ -857,10 +868,8 @@ fn dump_one_task(task: *mut Task, _context: *mut c_void) {
     );
     if t.status() == TaskStatus::Blocked {
         let (ctx_rip, ctx_rsp) =
-            slopos_ostd::task::accessors::task_switch_ctx_rip_rsp(task as *const Task)
-                .unwrap_or((0, 0));
-        let ctx_rbp =
-            slopos_ostd::task::accessors::task_switch_ctx_rbp(task as *const Task).unwrap_or(0);
+            slopos_ostd::task::accessors::task_switch_ctx_rip_rsp(task).unwrap_or((0, 0));
+        let ctx_rbp = slopos_ostd::task::accessors::task_switch_ctx_rbp(task).unwrap_or(0);
         klog_info!(
             "SYSRQ:   parked at rip=0x{:x} rsp=0x{:x} rbp=0x{:x}",
             ctx_rip,

@@ -147,32 +147,6 @@ pub fn try_borrow_ref<'a, T>(ptr: *const T) -> Option<&'a T> {
     Some(borrow_ref(ptr))
 }
 
-/// Nullable companion to [`borrow_ref_mut`]. Returns `None` on null.
-#[inline]
-pub fn try_borrow_ref_mut<'a, T>(ptr: *mut T) -> Option<&'a mut T> {
-    if ptr.is_null() {
-        return None;
-    }
-    Some(borrow_ref_mut(ptr))
-}
-
-/// Reborrow a `*mut c_void` callback context as `Option<&mut T>` where
-/// `T` is the originally stashed type. Returns `None` on null. Used by
-/// the iterate-callback pattern (e.g.
-/// `task_iterate_active(callback, &mut ctx as *mut Ctx as *mut c_void)`)
-/// where the callback reconstructs `&mut Ctx` from the opaque pointer.
-///
-/// # Safety contract on the caller
-///
-/// The pointer must be null or have been derived from `&mut T` by the
-/// caller's stash site. Mismatched `T` is undefined behaviour. The
-/// returned borrow is bounded by `'a`; the call site is responsible
-/// for keeping `T`'s underlying storage alive for that lifetime.
-#[inline]
-pub fn try_void_ctx_mut<'a, T>(ptr: *mut core::ffi::c_void) -> Option<&'a mut T> {
-    try_borrow_ref_mut(ptr as *mut T)
-}
-
 /// Mutable sibling of [`borrow_ref`].
 #[inline]
 pub fn borrow_ref_mut<'a, T>(ptr: *mut T) -> &'a mut T {
