@@ -673,10 +673,14 @@ pub(super) fn allocate_task() -> Result<PendingTask, TaskAllocError> {
 /// serves lookups, the strong handle is the transitional scheduler-lifetime
 /// owner. Fails only when every spine slot is occupied (live tasks plus
 /// not-yet-retired terminated ones); the caller discards the pending task.
-pub(super) fn register_task(mut pending: PendingTask) -> Result<*mut Task, PendingTask> {
+pub(super) fn register_task(mut pending: PendingTask) -> Result<KArc<Task>, PendingTask> {
     let id = pending.id;
     let task = pending.task.take().expect("pending task owns allocation");
-    let raw = KArc::as_ptr(&task) as *mut Task;
+    // Handed back so the caller pins the task across the rest of its own
+    // construction. Registration alone is not enough: the caller keeps using a
+    // raw pointer afterwards (to link a parent, to publish), and a concurrent
+    // shutdown sweep can terminate and reclaim a registered task.
+    let registered = task.clone();
     let entry = RegistryEntry {
         id,
         weak: KArc::downgrade(&task),
@@ -687,10 +691,12 @@ pub(super) fn register_task(mut pending: PendingTask) -> Result<*mut Task, Pendi
         mgr.registry.insert(entry).err()
     });
     match rejected {
-        None => Ok(raw),
+        None => Ok(registered),
         Some(entry) => {
             slopos_ostd::task::drop_off_lock(entry.weak);
             pending.task = Some(entry.owner);
+            // Non-final: the handle just restored into `pending` outlives it.
+            drop(registered);
             Err(pending)
         }
     }

@@ -621,11 +621,16 @@ pub fn task_create(
             slopos_mm::process_vm::process_vm_get_ostd_pml4_paddr(resources.process_id);
     }
 
-    if let Err(pending) = register_task(pending) {
-        klog_info!("task_create: task registry full");
-        discard_task(pending);
-        return INVALID_TASK_ID;
-    }
+    // Held to the end of the function so the `task` raw pointer below cannot be
+    // reclaimed under us by a concurrent shutdown sweep.
+    let _registered = match register_task(pending) {
+        Ok(registered) => registered,
+        Err(pending) => {
+            klog_info!("task_create: task registry full");
+            discard_task(pending);
+            return INVALID_TASK_ID;
+        }
+    };
 
     // task_create() deliberately returns a fully initialized but non-runnable
     // task. The sole new-task runnable edge is scheduler::publish_new_task(),
@@ -1163,11 +1168,17 @@ pub fn task_fork(
     child.abi.unsafe_stack_sp = child_unsafe_stack_top;
     child.unsafe_stack = Some(child_unsafe_stack);
 
-    if let Err(pending) = register_task(pending) {
-        klog_info!("task_fork: task registry full");
-        discard_task(pending);
-        return INVALID_TASK_ID;
-    }
+    // Held across link_child and publication below: those still work through
+    // `child_task_ptr`, and registration alone would let a concurrent shutdown
+    // sweep reclaim the child under them.
+    let _registered = match register_task(pending) {
+        Ok(registered) => registered,
+        Err(pending) => {
+            klog_info!("task_fork: task registry full");
+            discard_task(pending);
+            return INVALID_TASK_ID;
+        }
+    };
     record_task_created();
 
     klog_debug!(
@@ -1391,11 +1402,18 @@ pub fn task_clone(
     child.abi.unsafe_stack_sp = child_unsafe_stack_top;
     child.unsafe_stack = Some(child_unsafe_stack);
     let child_tgid = child.tgid;
-    if let Err(pending) = register_task(pending) {
-        klog_info!("task_clone: task registry full");
-        discard_task(pending);
-        return Err(ERRNO_EAGAIN);
-    }
+    // Held across the settid writes, link_child and publication below, each of
+    // which still works through `child_task_ptr`. Registration alone would let a
+    // concurrent shutdown sweep reclaim the child under them; the scope-held
+    // guard also covers every faulting early return between here and the end.
+    let _registered = match register_task(pending) {
+        Ok(registered) => registered,
+        Err(pending) => {
+            klog_info!("task_clone: task registry full");
+            discard_task(pending);
+            return Err(ERRNO_EAGAIN);
+        }
+    };
     record_task_created();
 
     if flags & CLONE_PARENT_SETTID != 0 && parent_tidptr != 0 {
