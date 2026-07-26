@@ -272,7 +272,10 @@ fn scheduler_tasks_for_cpu(cpu_id: usize) -> (*mut Task, *mut Task) {
         // on a null fallback when both current and idle are corrupt.
         // PCR is the source of truth for SafeStack readers.
         if !current.is_null() {
-            slopos_arch::pcr::set_current_task(current as *mut ());
+            slopos_arch::pcr::set_current_task(
+                current as *mut (),
+                task_id_of(current).unwrap_or(INVALID_TASK_ID),
+            );
             restore_live_recovery_depth(current);
             task_set_status(current, TaskStatus::Running);
         }
@@ -312,8 +315,12 @@ pub(crate) fn dispatch(cpu_id: usize, task: *mut Task) {
         "dispatch() must run on the target CPU (SafeStack slot is gs-local)"
     );
 
-    // SafeStack reads this on every instrumented prologue.
-    slopos_arch::pcr::set_current_task(task as *mut ());
+    // SafeStack reads this on every instrumented prologue. The id rides along so
+    // callers that want only "who is running" never dereference the task.
+    slopos_arch::pcr::set_current_task(
+        task as *mut (),
+        task_id_of(task).unwrap_or(INVALID_TASK_ID),
+    );
     restore_live_recovery_depth(task);
 
     // Keep PCR.syscall_pid in sync so copy_from_user always resolves
@@ -1523,11 +1530,9 @@ pub fn yield_() {
 /// matching yield happens after the lock is dropped via
 /// [`yield_blocked_task`].
 pub fn mark_current_blocked() -> bool {
-    let current = scheduler_get_current_task();
-    if current.is_null() {
-        return false;
-    }
-    let task_id = task_id_of(current).unwrap_or(INVALID_TASK_ID);
+    // The PCR id answers this without dereferencing the task, which keeps the
+    // wait-queue's under-lock park free of a task load.
+    let task_id = slopos_arch::pcr::current_task_id();
     if task_id == INVALID_TASK_ID {
         return false;
     }
@@ -2133,8 +2138,18 @@ pub fn scheduler_get_idle_task_for(cpu_id: usize) -> *mut Task {
     slopos_arch::pcr::get_idle_task(cpu_id) as *mut Task
 }
 
+/// ID of the task running on this CPU, or 0 when there is none.
+///
+/// Reads the id `dispatch()` published in the PCR rather than dereferencing
+/// `current_task`, so it stays correct — and cheap — while the slot names a
+/// pre-heap bootstrap stub. The "no task" and "stub" cases both report the
+/// `INVALID_TASK_ID` sentinel, which this collapses to 0 for callers that treat
+/// zero as absent.
 pub fn current_task_id() -> u32 {
-    task_id_of(scheduler_get_current_task()).unwrap_or(0)
+    match slopos_arch::pcr::current_task_id() {
+        INVALID_TASK_ID => 0,
+        id => id,
+    }
 }
 
 pub fn current_task_pgid() -> u32 {

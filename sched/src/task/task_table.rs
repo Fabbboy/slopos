@@ -766,8 +766,7 @@ pub fn task_peek_exit_info(task_id: u32) -> Option<ExitInfo> {
 }
 
 pub fn task_get_current_id() -> u32 {
-    let current = scheduler::scheduler_get_current_task();
-    task_id_of(current).unwrap_or(0)
+    scheduler::current_task_id()
 }
 
 pub fn task_get_current() -> *mut Task {

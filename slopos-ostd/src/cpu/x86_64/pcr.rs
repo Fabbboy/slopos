@@ -236,6 +236,20 @@ pub struct ProcessorControlRegion {
     /// one level at a time, and only the CPU that entered recovery observes
     /// it as active.
     pub recovery_depth: AtomicU32,
+
+    /// ID of the task `current_task` names, republished by the same
+    /// `dispatch()` that writes the pointer.
+    ///
+    /// Exists so the many callers that want only "who am I" never dereference
+    /// the task at all. Reading the id out of the pointer costs a load through
+    /// a pointer that may name a pre-heap bootstrap stub, and it is the one
+    /// question that does not need a borrow. `INVALID_TASK_ID` until this CPU
+    /// dispatches for the first time.
+    ///
+    /// Appended at the tail: every asm-critical offset (`<= 184`) stays
+    /// byte-identical, and a 4-byte tail field cannot perturb the 4096-byte
+    /// alignment the razors pin.
+    pub current_task_id: AtomicU32,
 }
 
 // Compile-time offset verification.
@@ -343,6 +357,7 @@ impl ProcessorControlRegion {
             interrupt_nesting: AtomicU32::new(0),
             previous_task: AtomicPtr::new(ptr::null_mut()),
             recovery_depth: AtomicU32::new(0),
+            current_task_id: AtomicU32::new(u32::MAX),
         }
     }
 
@@ -468,6 +483,12 @@ pub mod offsets {
     /// trampoline writes into the running data-SP slot. Computed.
     pub const PANIC_UNSAFE_SP: usize =
         core::mem::offset_of!(super::ProcessorControlRegion, panic_unsafe_sp);
+    /// Offset of the `current_task_id` field (`AtomicU32`). Consumed as a
+    /// `const` operand by the single-instruction accessors so the id always
+    /// comes from the CPU executing the instruction. Computed, not pinned: no
+    /// asm outside this module reads it, so it may move as the tail grows.
+    pub const CURRENT_TASK_ID: usize =
+        core::mem::offset_of!(super::ProcessorControlRegion, current_task_id);
 }
 
 /// IST/exception safe-stack region bounds used by
@@ -1367,13 +1388,19 @@ pub fn is_cpu_online(cpu_id: usize) -> bool {
 // ==================== PER-CPU DATA ACCESSORS ====================
 // These operate on the *current* CPU's PCR via GS_BASE.
 
-/// Set the current task pointer for this CPU.
+/// Set the current task pointer and its id for this CPU.
 ///
-/// Single gs-relative store: migration-atomic (see the
-/// single-instruction per-CPU ops block above) — the pointer can
-/// never land in a PCR the writing task has been migrated away from.
+/// Two gs-relative stores, each migration-atomic (see the
+/// single-instruction per-CPU ops block above) — neither value can land in a
+/// PCR the writing task has been migrated away from.
+///
+/// The id travels with the pointer rather than in its own setter so the two
+/// cannot be written independently: [`current_task_id`] is only trustworthy
+/// because every publisher of the pointer necessarily publishes the id in the
+/// same call. Pass `u32::MAX` (`INVALID_TASK_ID`) for a task with no registry
+/// identity, such as a pre-heap bootstrap stub.
 #[inline]
-pub fn set_current_task(task: *mut ()) {
+pub fn set_current_task(task: *mut (), task_id: u32) {
     if !GS_BASE_SET.is_set() {
         return;
     }
@@ -1387,6 +1414,7 @@ pub fn set_current_task(task: *mut ()) {
             options(nostack, preserves_flags),
         );
     }
+    set_current_task_id(task_id);
 }
 
 /// Get the current task pointer for this CPU.
@@ -1492,6 +1520,63 @@ pub fn set_current_syscall_pid(pid: u32) {
             options(nostack, preserves_flags),
         );
     }
+}
+
+/// Read the id of the task running on this CPU, or `u32::MAX`
+/// (`INVALID_TASK_ID`) before this CPU's first dispatch or until GS_BASE is
+/// installed.
+///
+/// Single gs-relative load, so it is migration-atomic on the same argument as
+/// [`current_syscall_pid`]: a caller preempted mid-call still reads the PCR of
+/// the CPU executing the instruction, which post-migration holds this task
+/// again. Answers "which task am I" without dereferencing the task, which is
+/// what makes it safe while `current_task` names a pre-heap bootstrap stub.
+#[inline]
+pub fn current_task_id() -> u32 {
+    if !GS_BASE_SET.is_set() {
+        return u32::MAX;
+    }
+    let id: u32;
+    // SAFETY: GS_BASE is installed (checked above); single gs-relative
+    // load from this CPU's PCR field.
+    unsafe {
+        core::arch::asm!(
+            "mov {id:e}, gs:[{off}]",
+            off = const offsets::CURRENT_TASK_ID,
+            id = out(reg) id,
+            options(nostack, preserves_flags, readonly),
+        );
+    }
+    id
+}
+
+/// Publish the id of the task this CPU is switching to.
+///
+/// Private on purpose: [`set_current_task`] is the only caller, which is what
+/// keeps the id and the pointer from ever naming different tasks.
+/// Single gs-relative store (migration-atomic).
+#[inline]
+fn set_current_task_id(task_id: u32) {
+    if !GS_BASE_SET.is_set() {
+        return;
+    }
+    // SAFETY: GS_BASE is installed (checked above); single gs-relative
+    // store to this CPU's PCR field.
+    unsafe {
+        core::arch::asm!(
+            "mov gs:[{off}], {id:e}",
+            off = const offsets::CURRENT_TASK_ID,
+            id = in(reg) task_id,
+            options(nostack, preserves_flags),
+        );
+    }
+}
+
+/// Read the id of the task running on `cpu_id`, or `u32::MAX` when that CPU has
+/// no PCR or has not dispatched yet. Cross-CPU sibling of [`current_task_id`].
+#[inline]
+pub fn current_task_id_for(cpu_id: usize) -> u32 {
+    get_pcr(cpu_id).map_or(u32::MAX, |pcr| pcr.current_task_id.load(Ordering::Acquire))
 }
 
 /// Set the idle-task pointer for `cpu_id`.

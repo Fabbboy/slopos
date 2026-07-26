@@ -130,12 +130,19 @@ hermetic_state! {
 
 hermetic_state! {
     pub BspCurrentTask {
-        type Snapshot = u64; // raw pointer as u64 to satisfy Send
+        // Raw pointer as u64 to satisfy Send, paired with the id the PCR
+        // published for it: restoring the pointer alone would leave the id
+        // naming a different task.
+        type Snapshot = (u64, u32);
         fn snapshot() -> Result<Self::Snapshot, AllocError> {
-            Ok(pcr::get_current_task_for(0) as u64)
+            Ok((
+                pcr::get_current_task_for(0) as u64,
+                pcr::current_task_id_for(0),
+            ))
         }
-        fn restore(addr: Self::Snapshot) {
-            pcr::set_current_task(addr as *mut ());
+        fn restore(saved: Self::Snapshot) {
+            let (addr, task_id) = saved;
+            pcr::set_current_task(addr as *mut (), task_id);
         }
     }
 }
