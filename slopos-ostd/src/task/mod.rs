@@ -29,8 +29,8 @@ pub use job_control::{ProcessGroup, Session, new_group_in_session, new_session_g
 pub use kernel_task::SchedPlacement;
 pub use link_roles::{ReadyQueueRole, RemoteWakeRole, SiblingRole};
 pub use placement::{
-    task_placement_clone, task_placement_leak, task_placement_reclaim, task_placement_retain,
-    task_placement_strong_count,
+    task_destroy_parked, task_placement_clone, task_placement_leak, task_placement_reclaim,
+    task_placement_retain, task_placement_strong_count, task_release_strong,
 };
 pub use state::{TaskState, TaskStateView};
 pub use test_reports::{

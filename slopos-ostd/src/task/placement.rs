@@ -84,6 +84,37 @@ pub fn task_placement_retain<K, U>(ptr: NonNull<TaskInner<K, U>>) {
     core::mem::forget(task_placement_clone(ptr));
 }
 
+/// Release one strong reference without running `TaskInner`'s destructor.
+///
+/// `Some(node)` exactly when this call was the final release, in which case the
+/// caller uniquely owns the allocation — the task body is still initialised and
+/// nothing else can reach it — and must pass `node` to
+/// [`task_destroy_parked`] exactly once. `None` means other references remain
+/// and this was a bare atomic decrement.
+///
+/// This is the split that lets a task's final release happen in a context where
+/// the allocator-heavy destructor must not run (interrupts off, a lock held, or
+/// on the dying task's own stack): release here, park `node`, destroy later.
+/// Whether this call is the final one is decided by the decrement itself, never
+/// by reading the count first — a `strong_count == 1` pre-check is racy.
+#[inline]
+pub fn task_release_strong<K, U>(arc: KArc<TaskInner<K, U>>) -> Option<NonNull<TaskInner<K, U>>> {
+    KArc::release_deferrable(arc)
+}
+
+/// Run the destructor that [`task_release_strong`] deferred, returning the
+/// allocation to the heap.
+///
+/// # Correctness
+/// `node` must be the result of exactly one [`task_release_strong`] call that
+/// returned `Some`, not already destroyed. Because that call proved unique
+/// ownership, no other reference to the task can exist.
+#[inline]
+pub fn task_destroy_parked<K, U>(node: NonNull<TaskInner<K, U>>) {
+    // SAFETY: the caller contract above is exactly `KArc::destroy_deferred`'s.
+    unsafe { KArc::destroy_deferred(node) };
+}
+
 /// Read a live task's current strong reference count without taking a
 /// reference. For diagnostics and invariant assertions only. Same liveness
 /// contract as [`task_placement_clone`].

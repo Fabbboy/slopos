@@ -1184,6 +1184,95 @@ impl<T: ?Sized> KArc<T> {
         }
     }
 
+    /// Release one strong reference **without** running the destructor.
+    ///
+    /// Returns `Some(data)` exactly when this call took the strong count from
+    /// one to zero. In that case the caller **uniquely** owns the allocation:
+    /// `T` is still initialized, the implicit weak reference is still held, and
+    /// no other thread can reach the value. That uniqueness is what makes it
+    /// sound to park the allocation in an intrusive list — the link slot has no
+    /// contention — and destroy it later from a context where the destructor
+    /// may safely run. The returned pointer must reach
+    /// [`KArc::destroy_deferred`] exactly once.
+    ///
+    /// Deciding finality here rather than by reading the count beforehand is
+    /// load-bearing: a `strong_count == 1` pre-check is racy, because two
+    /// holders can both observe two and both then drop.
+    ///
+    /// A saturated count never destroys, matching [`Drop`].
+    ///
+    /// The returned address is the same one [`KArc::as_ptr`] and
+    /// [`KArc::into_raw`] yield, so it interchanges with the placement
+    /// primitives' node pointers.
+    pub(crate) fn release_deferrable(this: Self) -> Option<NonNull<T>>
+    where
+        T: Sized,
+    {
+        let ptr = this.ptr;
+        let release = refcount_release(&this.inner().strong);
+        // This handle's release is already accounted for above; `Drop` must
+        // not repeat it.
+        core::mem::forget(this);
+        match release {
+            RefcountRelease::Remaining | RefcountRelease::Saturated => None,
+            RefcountRelease::Last => {
+                // SAFETY: the allocation is still mapped (the implicit weak is
+                // untouched) and `data` is still initialized, so its address is
+                // valid and non-null.
+                let data = unsafe { core::ptr::addr_of_mut!((*ptr.as_ptr()).data) };
+                // SAFETY: a field address inside a live allocation is non-null.
+                Some(unsafe { NonNull::new_unchecked(data) })
+            }
+        }
+    }
+
+    /// Run the destruction sequence that [`KArc::release_deferrable`] deferred.
+    ///
+    /// # Safety
+    /// `data` must be the result of exactly one [`KArc::release_deferrable`]
+    /// call that returned `Some`, and must not already have been destroyed.
+    pub(crate) unsafe fn destroy_deferred(data: NonNull<T>)
+    where
+        T: Sized,
+    {
+        let offset = core::mem::offset_of!(KArcInner<T>, data);
+        let inner = data
+            .as_ptr()
+            .cast::<u8>()
+            .wrapping_sub(offset)
+            .cast::<KArcInner<T>>();
+        // SAFETY: per the caller contract this is the matching live allocation
+        // whose strong count this thread took to zero, with the implicit weak
+        // still held.
+        unsafe { Self::finish_last_strong(NonNull::new_unchecked(inner)) };
+    }
+
+    /// Test-only view of [`KArc::release_deferrable`]. The production surface
+    /// stays `pub(crate)` (raw strong ownership belongs inside OSTD), but the
+    /// racing-releaser property is a property of the generic refcount, not of
+    /// any one payload — and `TaskInner` is `!Send`, so it cannot be raced in a
+    /// host test.
+    #[cfg(any(test, feature = "test-helpers"))]
+    pub fn release_deferrable_for_test(this: Self) -> Option<NonNull<T>>
+    where
+        T: Sized,
+    {
+        Self::release_deferrable(this)
+    }
+
+    /// Test-only view of [`KArc::destroy_deferred`].
+    ///
+    /// # Safety
+    /// Same contract as [`KArc::destroy_deferred`].
+    #[cfg(any(test, feature = "test-helpers"))]
+    pub unsafe fn destroy_deferred_for_test(data: NonNull<T>)
+    where
+        T: Sized,
+    {
+        // SAFETY: forwarded verbatim to the caller.
+        unsafe { Self::destroy_deferred(data) }
+    }
+
     /// Test hook that places the strong count one step below saturation.
     #[cfg(any(test, feature = "test-helpers"))]
     pub fn prepare_strong_saturation_for_test(this: &Self) {
@@ -1228,6 +1317,28 @@ impl<T> KWeak<T> {
         Self {
             ptr: NonNull::without_provenance(NonZeroUsize::MAX),
         }
+    }
+
+    /// Identity address of the referent, without upgrading and without
+    /// touching any reference count. Null for an empty [`KWeak::new`] handle.
+    ///
+    /// The result is a **comparison token only and must never be
+    /// dereferenced**: the strong count may already be zero, in which case `T`
+    /// has been dropped. Computing it is nonetheless always well-defined — a
+    /// live weak count keeps the allocation itself mapped, and this reads no
+    /// field — and it equals [`KArc::as_ptr`] for any strong handle onto the
+    /// same allocation.
+    ///
+    /// Exists so a registry can answer "is this pointer one of mine?" without
+    /// upgrading, because an upgraded handle dropped under a lock could be the
+    /// final reference and run an allocator-heavy destructor there.
+    #[inline]
+    pub fn as_ptr(&self) -> *const T {
+        if self.is_empty() {
+            return core::ptr::null();
+        }
+        let offset = core::mem::offset_of!(KArcInner<T>, data);
+        self.ptr.as_ptr().cast::<u8>().wrapping_add(offset).cast()
     }
 }
 
@@ -1316,13 +1427,16 @@ impl<T: ?Sized> Clone for KArc<T> {
     }
 }
 
-impl<T: ?Sized> Drop for KArc<T> {
-    fn drop(&mut self) {
-        match refcount_release(&self.inner().strong) {
-            RefcountRelease::Remaining | RefcountRelease::Saturated => return,
-            RefcountRelease::Last => {}
-        }
-
+impl<T: ?Sized> KArc<T> {
+    /// The sole strong-destruction sequence. Both [`Drop`] and
+    /// [`KArc::destroy_deferred`] funnel here, so there is exactly one
+    /// ordering and one deallocation path to audit.
+    ///
+    /// # Safety
+    /// The caller must have taken this allocation's strong count from one to
+    /// zero exactly once, and must not yet have released the implicit weak
+    /// reference that the strong count owned.
+    unsafe fn finish_last_strong(ptr: NonNull<KArcInner<T>>) {
         // Every prior reference release publishes accesses through Release;
         // this Acquire fence makes them visible before `T`'s destructor runs.
         fence(Ordering::Acquire);
@@ -1330,13 +1444,25 @@ impl<T: ?Sized> Drop for KArc<T> {
         // drop glue. It releases the allocation on both normal return and a
         // host-test unwind; kernel panics abort, but the stronger invariant
         // keeps this primitive correct in every build mode.
-        let implicit = KWeak { ptr: self.ptr };
-        // SAFETY: this thread changed the strong count from one to zero, so no
+        let implicit = KWeak { ptr };
+        // SAFETY: the caller changed the strong count from one to zero, so no
         // strong handle can access data and weak upgrades can no longer win.
         unsafe {
-            core::ptr::drop_in_place(core::ptr::addr_of_mut!((*self.ptr.as_ptr()).data));
+            core::ptr::drop_in_place(core::ptr::addr_of_mut!((*ptr.as_ptr()).data));
         }
         drop(implicit);
+    }
+}
+
+impl<T: ?Sized> Drop for KArc<T> {
+    fn drop(&mut self) {
+        match refcount_release(&self.inner().strong) {
+            RefcountRelease::Remaining | RefcountRelease::Saturated => return,
+            RefcountRelease::Last => {}
+        }
+        // SAFETY: this thread won the one-to-zero transition, exactly once,
+        // and has not touched the implicit weak.
+        unsafe { Self::finish_last_strong(self.ptr) };
     }
 }
 
