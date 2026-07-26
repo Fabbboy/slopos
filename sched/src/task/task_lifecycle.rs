@@ -750,12 +750,26 @@ pub fn task_terminate(task_id: u32) -> c_int {
     0
 }
 
-fn mark_task_terminated(task_ptr: *mut Task, resolved_id: u32) {
-    let now = kdiag_timestamp();
-    let mut should_hangup = None;
+/// What [`stamp_exit_state`] hands to the teardown tail.
+///
+/// The tail runs with no borrow of the task held, so anything it needs from
+/// the task body is captured here instead.
+struct ExitPlan {
+    /// `clear_child_tid`, if this task is the one running and the address is
+    /// non-zero — i.e. if the futex clear is ours to perform.
+    clear_tid: Option<u64>,
+}
 
+/// Write every field the exit path owns, then give the borrow back.
+///
+/// Deliberately its own function: the teardown tail below calls into futex
+/// cleanup, parent notification, unschedule, and the children drain, each of
+/// which re-derives a reference to this same allocation from `task_ptr`. Held
+/// across those, the `&mut` here aliased references it does not know about.
+/// Scoping it to the writes is what makes the tail sound.
+fn stamp_exit_state(task_ptr: *mut Task, resolved_id: u32, now: u64) -> Option<ExitPlan> {
     let Some(task) = task_borrow_mut(task_ptr) else {
-        return;
+        return None;
     };
 
     let last_run = task.last_run_timestamp();
@@ -812,11 +826,33 @@ fn mark_task_terminated(task_ptr: *mut Task, resolved_id: u32) {
         TaskStatus::Terminated
     };
     task.set_status(final_status);
-    scheduler::cancel_sleep(resolved_id);
     task.fate_token = 0;
     task.fate_value = 0;
     task.fate_pending = 0;
 
+    // The futex clear is ours only when we are the running task; capture the
+    // address and clear the field now, while the borrow is still in scope.
+    let clear_tid = task.clear_child_tid;
+    let clear_tid = if clear_tid != 0 && task_ptr == scheduler::scheduler_get_current_task() {
+        task.clear_child_tid = 0;
+        Some(clear_tid)
+    } else {
+        None
+    };
+
+    Some(ExitPlan { clear_tid })
+}
+
+fn mark_task_terminated(task_ptr: *mut Task, resolved_id: u32) {
+    let now = kdiag_timestamp();
+
+    let Some(plan) = stamp_exit_state(task_ptr, resolved_id, now) else {
+        return;
+    };
+
+    // From here on nothing holds a borrow of the task, so every call below is
+    // free to re-derive its own reference from `task_ptr`.
+    scheduler::cancel_sleep(resolved_id);
     crate::futex::futex_remove_task(task_ptr);
 
     // Release any waitpid wait-reference this task held on its target. A task
@@ -825,25 +861,29 @@ fn mark_task_terminated(task_ptr: *mut Task, resolved_id: u32) {
     // target cannot be destroyed.
     scheduler::release_wait_ref(resolved_id);
 
-    let clear_tid = task.clear_child_tid;
-    if clear_tid != 0 && task_ptr == scheduler::scheduler_get_current_task() {
+    if let Some(clear_tid) = plan.clear_tid {
         if let Ok(clear_ptr) = UserPtr::<u32>::try_new(clear_tid) {
             let _ = copy_to_user(clear_ptr, &0u32);
         }
         let _ = crate::futex::futex_wake_one(clear_tid);
-        task.clear_child_tid = 0;
     }
 
     notify_parent_of_child_exit(task_ptr);
 
-    if task.sid != 0
-        && task.task_id != INVALID_TASK_ID
-        && task.sid == task.task_id
-        && task.controlling_tty().is_some()
-    {
-        should_hangup = task.controlling_tty();
-        task.set_controlling_tty(None);
-    }
+    // Session-leader hangup. Every field here is either a frozen identity or an
+    // atomic, so a shared borrow suffices.
+    let should_hangup = task_borrow(task_ptr as *const Task).and_then(|task| {
+        if task.sid != 0
+            && task.task_id != INVALID_TASK_ID
+            && task.sid == task.task_id
+            && let Some(tty_idx) = task.controlling_tty()
+        {
+            task.set_controlling_tty(None);
+            Some(tty_idx)
+        } else {
+            None
+        }
+    });
 
     scheduler::unschedule_task(task_ptr);
 
