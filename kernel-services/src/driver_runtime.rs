@@ -1,8 +1,6 @@
-use core::ffi::{c_int, c_void};
+use core::ffi::c_int;
 
 use slopos_arch::InterruptFrame;
-
-pub type DriverTaskHandle = *mut c_void;
 
 pub const LEGACY_IRQ_TIMER: u8 = 0;
 pub const LEGACY_IRQ_KEYBOARD: u8 = 1;
@@ -17,8 +15,8 @@ slopos_service_core::define_service! {
         scheduler_handle_timer_interrupt(frame: *mut InterruptFrame);
         request_reschedule_from_interrupt();
         scheduler_is_enabled() -> c_int;
-        current_task() -> DriverTaskHandle;
         current_task_id() -> u32;
+        current_task_handle() -> u32;
         current_task_pgid() -> u32;
         current_task_sid() -> u32;
         current_task_controlling_tty() -> Option<slopos_abi::syscall::TtyIndex>;
@@ -30,7 +28,7 @@ slopos_service_core::define_service! {
         yield_blocked_task();
         yield_blocked_task_with_timeout(timeout_ms: u32);
         set_current_runnable();
-        unblock_task(task: DriverTaskHandle) -> c_int;
+        unblock_task(task_id: u32) -> c_int;
         register_idle_wakeup_callback(callback: Option<fn() -> c_int>);
         signal_process_group(pgid: u32, signum: u8) -> bool;
         signal_session(sid: u32, signum: u8) -> bool;

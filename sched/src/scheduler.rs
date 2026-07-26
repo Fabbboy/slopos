@@ -2157,6 +2157,18 @@ pub fn current_task_id() -> u32 {
     }
 }
 
+/// Id of the task running on this CPU for wait-queue parking, or
+/// `INVALID_TASK_ID` when there is none.
+///
+/// Deliberately *not* [`current_task_id`], which collapses "absent" to 0 for
+/// its own callers. A wait queue must be able to tell "no current task" apart
+/// from a real id, and 0 is a value the sentinel check would let through — a
+/// waiter would then park a task that does not exist and never be woken.
+#[inline]
+pub fn current_task_handle() -> u32 {
+    slopos_arch::pcr::current_task_id()
+}
+
 pub fn current_task_pgid() -> u32 {
     task_pgid(scheduler_get_current_task()).unwrap_or(0)
 }

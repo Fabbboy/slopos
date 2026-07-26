@@ -2,7 +2,7 @@ use core::ops::ControlFlow;
 
 use slopos_abi::signal::{SIG_IGN, sig_bit};
 use slopos_kernel_services::driver_runtime::{
-    DriverRuntimeServices, DriverTaskHandle, register_driver_runtime_services,
+    DriverRuntimeServices, register_driver_runtime_services,
 };
 
 use crate::irq;
@@ -10,7 +10,7 @@ use slopos_ostd::KArc;
 use slopos_ostd::task::ProcessGroup;
 use slopos_sched::scheduler;
 use slopos_sched::task::{
-    self, Task, task_has_deliverable_signal, task_process_group, task_signal_blocked,
+    self, task_has_deliverable_signal, task_process_group, task_signal_blocked,
     task_signal_handler, task_signal_post,
 };
 
@@ -25,16 +25,18 @@ fn runtime_current_task_pgrp_handle() -> Option<slopos_ostd::KWeak<ProcessGroup>
 // service table below.
 // ---------------------------------------------------------------------------
 
-fn handle_to_task(handle: DriverTaskHandle) -> *mut Task {
-    handle.cast::<Task>()
-}
-
-fn runtime_current_task() -> DriverTaskHandle {
-    scheduler::scheduler_get_current_task().cast()
-}
-
-fn runtime_unblock_task(task: DriverTaskHandle) -> i32 {
-    scheduler::unblock_task(handle_to_task(task))
+/// Wake the task named by `task_id`.
+///
+/// The id is resolved through the registry rather than dereferenced: the wait
+/// queue hands this back on an arbitrary CPU at an arbitrary later time, and a
+/// waiter killed while parked never unwinds its own stack, so its node can
+/// outlive it. A weak upgrade answers "already gone" where a pointer would have
+/// named freed memory. The guard pins the task across the wake.
+fn runtime_unblock_task(task_id: u32) -> i32 {
+    let Some(target) = task::task_find_by_id(task_id) else {
+        return -1;
+    };
+    scheduler::unblock_task(target.as_ptr())
 }
 
 /// Post `signum` to every member of `pgid`, waking blocked members. True if at
@@ -193,8 +195,8 @@ static DRIVER_RUNTIME_SERVICES: DriverRuntimeServices = DriverRuntimeServices {
     scheduler_handle_timer_interrupt: scheduler::scheduler_handle_timer_interrupt,
     request_reschedule_from_interrupt: scheduler::scheduler_request_reschedule_from_interrupt,
     scheduler_is_enabled: scheduler::scheduler_is_enabled,
-    current_task: runtime_current_task,
     current_task_id: scheduler::current_task_id,
+    current_task_handle: scheduler::current_task_handle,
     current_task_pgid: scheduler::current_task_pgid,
     current_task_sid: scheduler::current_task_sid,
     current_task_controlling_tty: scheduler::current_task_controlling_tty,

@@ -26,7 +26,7 @@ fn rcu_log_warn_noop(_args: core::fmt::Arguments<'_>) {}
 /// registers it inline, taking the witness from `&ctx.bsp_token()`.
 pub static WAIT_QUEUE_OPS: WaitQueueOps = WaitQueueOps {
     is_runtime_initialised: driver_runtime::is_driver_runtime_initialized,
-    current_task_handle: driver_runtime::current_task,
+    current_task_handle: driver_runtime::current_task_handle,
     mark_current_blocked: driver_runtime::mark_current_blocked,
     yield_blocked_task: driver_runtime::yield_blocked_task,
     yield_blocked_task_with_timeout: driver_runtime::yield_blocked_task_with_timeout,

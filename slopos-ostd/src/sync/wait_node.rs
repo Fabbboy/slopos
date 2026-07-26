@@ -68,7 +68,9 @@
 
 use core::ffi::c_void;
 use core::marker::PhantomData;
-use core::sync::atomic::{AtomicBool, AtomicPtr, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicPtr, AtomicU32, Ordering};
+
+use slopos_abi::task::INVALID_TASK_ID;
 
 use crate::sync::intrusive::{Link, Linked};
 
@@ -78,11 +80,18 @@ pub enum WaitQueueRole {}
 /// Stack- or heap-resident wait-list entry.
 pub struct WaitNode {
     link: Link<WaitNode, WaitQueueRole>,
-    /// Opaque task handle — the kernel scheduler's `*mut Task` cast to
-    /// `*mut c_void`. Read-only after construction; the wait queue's
-    /// `SpinLock` synchronises wake-side reads against waiter-side
+    /// Id of the task this node represents, or `INVALID_TASK_ID` for a node
+    /// that has not been claimed yet. Read-only after construction; the wait
+    /// queue's `SpinLock` synchronises wake-side reads against waiter-side
     /// reads.
-    task: AtomicPtr<c_void>,
+    ///
+    /// An **id**, not a task pointer. A waiter can be killed and reaped while
+    /// its node is still linked — a blocked task never unwinds its own stack —
+    /// so a pointer stored here outlives the allocation it names, and the wake
+    /// side dereferences it on whichever CPU called `wake_one`/`wake_all`. An
+    /// id cannot dangle: resolving it is a registry weak upgrade that returns
+    /// `None` for a dead task.
+    task: AtomicU32,
     /// `true` for nodes constructed via `KBox<WaitNode>` and consumed
     /// via `KBox::from_raw`. `false` for stack-pinned nodes whose
     /// lifetime is bound by their owning stack frame.
@@ -133,7 +142,7 @@ impl WaitNode {
     pub const fn new() -> Self {
         Self {
             link: Link::new(),
-            task: AtomicPtr::new(core::ptr::null_mut()),
+            task: AtomicU32::new(INVALID_TASK_ID),
             heap_owned: AtomicBool::new(false),
             has_woken: AtomicBool::new(false),
             queue_ptr: AtomicPtr::new(core::ptr::null_mut()),
@@ -148,7 +157,7 @@ impl WaitNode {
     pub(crate) const fn new_heap() -> Self {
         Self {
             link: Link::new(),
-            task: AtomicPtr::new(core::ptr::null_mut()),
+            task: AtomicU32::new(INVALID_TASK_ID),
             heap_owned: AtomicBool::new(true),
             has_woken: AtomicBool::new(false),
             queue_ptr: AtomicPtr::new(core::ptr::null_mut()),
@@ -156,18 +165,18 @@ impl WaitNode {
         }
     }
 
-    /// Publish the task handle this node represents. Called once,
+    /// Publish the id of the task this node represents. Called once,
     /// before the node is pushed onto the queue.
     #[inline]
-    pub(crate) fn set_task(&self, task: *mut c_void) {
+    pub(crate) fn set_task(&self, task: u32) {
         self.task.store(task, Ordering::Release);
     }
 
-    /// Read the task handle. Reads happen under the queue's `SpinLock`
+    /// Read the task id. Reads happen under the queue's `SpinLock`
     /// in wake / scan paths; the Acquire pairs with the Release store
     /// in [`set_task`](Self::set_task).
     #[inline]
-    pub(crate) fn task(&self) -> *mut c_void {
+    pub(crate) fn task(&self) -> u32 {
         self.task.load(Ordering::Acquire)
     }
 

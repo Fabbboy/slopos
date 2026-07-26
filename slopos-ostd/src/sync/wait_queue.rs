@@ -119,6 +119,8 @@ use core::pin::Pin;
 use core::ptr::NonNull;
 use core::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 
+use slopos_abi::task::INVALID_TASK_ID;
+
 use crate::mm::KBox;
 use crate::sync::BspToken;
 use crate::sync::intrusive::IntrusiveLinkedList;
@@ -127,12 +129,20 @@ use crate::sync::spin::SpinLock;
 use crate::sync::wait_node::WaitNode;
 use crate::sync::wait_node::WaitQueueRole;
 
-/// Opaque task identifier carried by the wait queue. The actual
-/// representation is the kernel scheduler's task pointer.
-pub type WaitTaskHandle = *mut c_void;
+/// Identifier of a task parked on a wait queue: its registry id.
+///
+/// An id rather than a task pointer, because the wake side runs on an
+/// arbitrary CPU at an arbitrary later time. A blocked task that is killed
+/// never unwinds its own stack, so its node can still be linked here after the
+/// task has been reaped and its allocation returned to the heap; a stored
+/// pointer would dangle, and the backend would dereference it. Resolving an id
+/// is a registry weak upgrade, which answers "already gone" instead.
+pub type WaitTaskHandle = u32;
 
-/// A null task handle sentinel.
-const NULL_HANDLE: WaitTaskHandle = core::ptr::null_mut();
+/// Sentinel for a node with no task claim yet, and the value
+/// [`WaitQueueBackend::current_task_handle`] returns when there is no current
+/// task (idle CPU, pre-init, or a harness reset).
+const NULL_HANDLE: WaitTaskHandle = INVALID_TASK_ID;
 
 // ---------------------------------------------------------------------------
 // WaitOutcome — the canonical result type for generic-return waits.
@@ -269,14 +279,17 @@ pub unsafe trait WaitQueueBackend: Send + Sync + 'static {
     /// (kernel-side `set_current_runnable` in `scheduler.rs`).
     fn set_current_runnable(&self);
 
-    /// Wake a previously-blocked task. Returns 0 on success or a
-    /// negative errno-shaped value on failure.
+    /// Wake a previously-blocked task, named by id. Returns 0 on success or a
+    /// negative errno-shaped value on failure — including the case where the
+    /// task is already gone, which is not an error the queue can act on.
     ///
-    /// # Safety
-    ///
-    /// `task` must have been obtained from [`current_task_handle`](Self::current_task_handle)
-    /// and must still refer to a live task.
-    unsafe fn unblock_task(&self, task: WaitTaskHandle) -> i32;
+    /// Safe, and deliberately so: the id is resolved through the task registry,
+    /// so an implementation cannot be handed a stale reference. The pointer
+    /// form this replaced carried an unenforceable "must still refer to a live
+    /// task" obligation that the wait queue had no way to discharge — a waiter
+    /// killed while parked never unwinds its own stack, so its node outlives
+    /// the task it names.
+    fn unblock_task(&self, task: WaitTaskHandle) -> i32;
 
     /// Current monotonic time in milliseconds.
     fn get_time_ms(&self) -> u64;
@@ -302,7 +315,7 @@ unsafe impl WaitQueueBackend for UnregisteredBackend {
     fn yield_blocked_task(&self) {}
     fn yield_blocked_task_with_timeout(&self, _timeout_ms: u32) {}
     fn set_current_runnable(&self) {}
-    unsafe fn unblock_task(&self, _task: WaitTaskHandle) -> i32 {
+    fn unblock_task(&self, _task: WaitTaskHandle) -> i32 {
         0
     }
     fn get_time_ms(&self) -> u64 {
@@ -335,11 +348,6 @@ pub struct WaitQueueOps {
     /// See [`WaitQueueBackend::set_current_runnable`].
     pub set_current_runnable: fn(),
     /// See [`WaitQueueBackend::unblock_task`].
-    ///
-    /// The fn pointer is `safe` because consumers always pass it
-    /// through the [`WaitQueueBackend::unblock_task`] trait method
-    /// (which is `unsafe fn`) and the surrounding ops-backend wraps
-    /// the call in an unsafe block that re-asserts the contract.
     pub unblock_task: fn(WaitTaskHandle) -> i32,
     /// See [`WaitQueueBackend::get_time_ms`].
     pub get_time_ms: fn() -> u64,
@@ -369,10 +377,7 @@ unsafe impl WaitQueueBackend for OpsBackend {
     fn set_current_runnable(&self) {
         (self.0.set_current_runnable)()
     }
-    unsafe fn unblock_task(&self, task: WaitTaskHandle) -> i32 {
-        // The ops-table fn pointer is `fn` (not `unsafe fn`); the
-        // trait-method safety contract is owned by the caller of
-        // `WaitQueueBackend::unblock_task`.
+    fn unblock_task(&self, task: WaitTaskHandle) -> i32 {
         (self.0.unblock_task)(task)
     }
     fn get_time_ms(&self) -> u64 {
@@ -614,7 +619,7 @@ impl WaitQueue {
             }
 
             let task = bk.current_task_handle();
-            if task.is_null() {
+            if task == NULL_HANDLE {
                 self.unlink_if_linked(node.as_ref());
                 return None;
             }
@@ -734,7 +739,7 @@ impl WaitQueue {
         }
 
         let task = bk.current_task_handle();
-        if task.is_null() {
+        if task == NULL_HANDLE {
             return WaitOutcome::NoRuntime;
         }
 
@@ -807,7 +812,7 @@ impl WaitQueue {
         }
 
         let task = bk.current_task_handle();
-        if task.is_null() {
+        if task == NULL_HANDLE {
             return false;
         }
 
@@ -850,7 +855,7 @@ impl WaitQueue {
     pub fn remove_current(&self) {
         let bk = backend();
         let task = bk.current_task_handle();
-        if task.is_null() {
+        if task == NULL_HANDLE {
             return;
         }
         self.remove_task(task);
@@ -908,10 +913,9 @@ impl WaitQueue {
                         drop(KBox::from_raw(nn.as_ptr()));
                     }
                 }
-                // SAFETY: `task` came from `current_task_handle` on the
-                // waiter's CPU; the backend tolerates already-woken or
-                // stale handles.
-                let _ = unsafe { backend().unblock_task(task) };
+                // An id, so a waiter reaped while parked resolves to nothing
+                // rather than to freed memory. Already-woken ids are a no-op.
+                let _ = backend().unblock_task(task);
                 true
             }
         }
@@ -949,8 +953,8 @@ impl WaitQueue {
                             drop(KBox::from_raw(nn.as_ptr()));
                         }
                     }
-                    // SAFETY: see `wake_one`.
-                    let _ = unsafe { backend().unblock_task(task) };
+                    // See `wake_one`: an id cannot name freed memory.
+                    let _ = backend().unblock_task(task);
                     woken += 1;
                 }
             }
@@ -1031,7 +1035,7 @@ impl WaitQueue {
     /// stack-pinned `wait_event` nodes manage their own lifecycle and
     /// are left alone here.
     pub fn remove_task(&self, task: WaitTaskHandle) {
-        if task.is_null() {
+        if task == NULL_HANDLE {
             return;
         }
 
