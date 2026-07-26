@@ -11,8 +11,7 @@ use slopos_mm::user_copy::{
 };
 use slopos_mm::user_ptr::{UserBytes, UserPtr as MmUserPtr};
 use slopos_ostd::irq::InterruptFrame;
-use slopos_ostd::task::FPU_STATE_SIZE;
-use slopos_ostd::task::accessors::task_fpu_state_mut;
+use slopos_ostd::task::{FPU_STATE_SIZE, FpuState};
 use slopos_ostd::user::context::{
     USER_RFLAGS_FORCED, USER_RFLAGS_PERMITTED, UserContext, UserRegs,
 };
@@ -284,10 +283,11 @@ fn sigframe_fpu_addr(sigframe_addr: u64) -> u64 {
 /// kernel is `+soft-float` and has not touched the vector file since
 /// entry, so the live CPU state is still the interrupted user's. Returns
 /// false on a user-copy fault.
-fn save_fpu_to_sigframe(task: *mut Task, sigframe_addr: u64) -> bool {
-    let Some(fpu) = task_fpu_state_mut(task) else {
-        return false;
-    };
+///
+/// Takes the FPU area by reference rather than re-deriving it from a task
+/// pointer: the caller already holds a borrow of the task, and minting a second
+/// `&mut FpuState` from the raw pointer underneath it aliased that borrow.
+fn save_fpu_to_sigframe(fpu: &mut FpuState, sigframe_addr: u64) -> bool {
     fpu.save_current(slopos_ostd::cpu::x86_64::xsave::active_xcr0());
     let Ok(bytes) = UserBytes::try_new(sigframe_fpu_addr(sigframe_addr), FPU_STATE_SIZE) else {
         return false;
@@ -300,15 +300,15 @@ fn save_fpu_to_sigframe(task: *mut Task, sigframe_addr: u64) -> bool {
 /// context switch cannot overwrite the task's `fpu_state` slot between
 /// the two steps (the scheduler also saves/restores that same slot).
 /// Returns false on a user-copy fault, leaving the prior FPU state.
-fn restore_fpu_from_sigframe(task: *mut Task, sigframe_addr: u64) -> bool {
+///
+/// Takes the FPU area by reference for the same reason as
+/// [`save_fpu_to_sigframe`].
+fn restore_fpu_from_sigframe(fpu: &mut FpuState, sigframe_addr: u64) -> bool {
     let Ok(bytes) = UserBytes::try_new(sigframe_fpu_addr(sigframe_addr), FPU_STATE_SIZE) else {
         return false;
     };
     let xcr0 = slopos_ostd::cpu::x86_64::xsave::active_xcr0();
     slopos_ostd::cpu::x86_64::interrupts::IrqDisabled::with(|_irq| {
-        let Some(fpu) = task_fpu_state_mut(task) else {
-            return false;
-        };
         if copy_bytes_from_user(bytes, &mut fpu.data).is_err() {
             return false;
         }
@@ -318,10 +318,9 @@ fn restore_fpu_from_sigframe(task: *mut Task, sigframe_addr: u64) -> bool {
 }
 
 define_syscall!(syscall_rt_sigreturn (ctx) -> SyscallResult {
-    let task_ref = match ctx.task_mut() {
-        Some(t) => t,
-        None => return SyscallResult::Err(Errno::EINVAL),
-    };
+    if !ctx.has_task() {
+        return SyscallResult::Err(Errno::EINVAL);
+    }
 
     // After the handler's `ret` pops the restorer address, RSP points
     // directly at the SignalFrame.
@@ -330,8 +329,6 @@ define_syscall!(syscall_rt_sigreturn (ctx) -> SyscallResult {
         Some(sf) => sf,
         None => return SyscallResult::Err(Errno::EFAULT),
     };
-
-    task_ref.signal_blocked = sigframe.saved_mask & !SIG_UNCATCHABLE;
 
     // Rebuild the user GPR snapshot from the SignalFrame and commit
     // through `set_regs` (re-applies CS/SS selectors and RFLAGS mask).
@@ -356,9 +353,19 @@ define_syscall!(syscall_rt_sigreturn (ctx) -> SyscallResult {
     regs.rflags_user_subset = sigframe.rflags;
     ctx.user_ctx_mut().set_regs(regs);
 
+    // Borrow the task only after the user-context writes are done, so this
+    // borrow never overlaps the one `user_ctx_mut` derives from the same
+    // allocation. The FPU area is then a reborrow rather than a third
+    // derivation from the raw task pointer.
+    let task_ref = match ctx.task_mut() {
+        Some(t) => t,
+        None => return SyscallResult::Err(Errno::EINVAL),
+    };
+    task_ref.signal_blocked = sigframe.saved_mask & !SIG_UNCATCHABLE;
+
     // Restore the FPU/vector state saved at delivery (best-effort: a
     // faulted save area leaves the current vector registers in place).
-    let _ = restore_fpu_from_sigframe(ctx.task_ptr(), rsp);
+    let _ = restore_fpu_from_sigframe(&mut task_ref.fpu_state, rsp);
 
     // sigreturn fully replaced the user-mode register state — the
     // dispatcher must not overwrite RAX after we return.
@@ -461,19 +468,41 @@ impl UserRegView for InterruptFrameRegs<'_> {
 /// On ANY `copy_to_user` failure the pending bit is re-armed
 /// (`fetch_or`) so the signal retries at the next delivery point rather
 /// than being silently dropped.
-fn deliver_pending_signal_core(task: *mut Task, regs: &mut impl UserRegView) {
+/// What [`claim_pending_signal`] decided, for a caller holding no borrow.
+enum SignalDisposition {
+    /// Nothing deliverable, or the disposition needs no further work.
+    Done,
+    /// Default action is to terminate; the exit fields are already stamped.
+    Terminate(u32),
+    /// Run a user handler.
+    Handle {
+        signum: u8,
+        bit: u64,
+        action: SignalAction,
+        saved_mask: SigSet,
+    },
+}
+
+/// Pick the lowest deliverable signal, consume its pending bit, and decide what
+/// happens to it.
+///
+/// Split from the delivery below so the borrow ends before anything acts on the
+/// decision. Terminating re-enters the task through the registry and then
+/// context-switches; a `&mut Task` held across that aliased every reference
+/// those paths derive, and stayed live across a `schedule()`.
+fn claim_pending_signal(task: *mut Task) -> SignalDisposition {
     let Some(task_ref) = slopos_sched::task::task_borrow_mut(task) else {
-        return;
+        return SignalDisposition::Done;
     };
 
     if (task_ref.flags & TASK_FLAG_USER_MODE) == 0 {
-        return;
+        return SignalDisposition::Done;
     }
 
     let pending = task_ref.signal_pending.load(Ordering::Acquire);
     let deliverable = pending & !task_ref.signal_blocked;
     if deliverable == 0 {
-        return;
+        return SignalDisposition::Done;
     }
 
     let signum = (deliverable.trailing_zeros() + 1) as u8;
@@ -482,28 +511,55 @@ fn deliver_pending_signal_core(task: *mut Task, regs: &mut impl UserRegView) {
 
     let action = task_ref.signal_actions[(signum - 1) as usize];
     if action.handler == SIG_IGN {
-        return;
+        return SignalDisposition::Done;
     }
 
     if action.handler == SIG_DFL {
-        match sig_default_action(signum) {
-            SigDefault::Ignore | SigDefault::Stop | SigDefault::Continue => return,
+        return match sig_default_action(signum) {
+            SigDefault::Ignore | SigDefault::Stop | SigDefault::Continue => SignalDisposition::Done,
             SigDefault::Terminate => {
-                let task_id = task_ref.task_id;
                 task_ref.exit_reason = TaskExitReason::Normal;
                 task_ref.fault_reason = TaskFaultReason::None;
                 task_ref.exit_code = 128 + signum as u32;
-                if task_terminate(task_id) == 0 {
-                    schedule();
-                }
-                return;
+                SignalDisposition::Terminate(task_ref.task_id)
             }
-        }
+        };
     }
 
     if action.restorer == 0 {
-        return;
+        return SignalDisposition::Done;
     }
+
+    SignalDisposition::Handle {
+        signum,
+        bit,
+        action,
+        saved_mask: task_ref.signal_blocked,
+    }
+}
+
+fn deliver_pending_signal_core(task: *mut Task, regs: &mut impl UserRegView) {
+    let (signum, bit, action, saved_mask) = match claim_pending_signal(task) {
+        SignalDisposition::Done => return,
+        SignalDisposition::Terminate(task_id) => {
+            // No borrow is live here, so terminate is free to re-enter the task
+            // through the registry and to context-switch.
+            if task_terminate(task_id) == 0 {
+                schedule();
+            }
+            return;
+        }
+        SignalDisposition::Handle {
+            signum,
+            bit,
+            action,
+            saved_mask,
+        } => (signum, bit, action, saved_mask),
+    };
+
+    let Some(task_ref) = slopos_sched::task::task_borrow_mut(task) else {
+        return;
+    };
 
     let regs_snapshot = regs.snapshot();
 
@@ -540,7 +596,6 @@ fn deliver_pending_signal_core(task: *mut Task, regs: &mut impl UserRegView) {
         }
     };
 
-    let saved_mask = task_ref.signal_blocked;
     let sigframe = SignalFrame {
         signum: signum as u64,
         rax: regs_snapshot.rax,
@@ -569,8 +624,10 @@ fn deliver_pending_signal_core(task: *mut Task, regs: &mut impl UserRegView) {
         return;
     }
 
-    // Preserve the interrupted task's vector state across the handler.
-    if !save_fpu_to_sigframe(task, sigframe_addr) {
+    // Preserve the interrupted task's vector state across the handler. The FPU
+    // area is reborrowed from the task borrow already in hand, not re-derived
+    // from the raw pointer beneath it.
+    if !save_fpu_to_sigframe(&mut task_ref.fpu_state, sigframe_addr) {
         task_ref.signal_pending.fetch_or(bit, Ordering::AcqRel);
         return;
     }
