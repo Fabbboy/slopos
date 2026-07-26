@@ -18,7 +18,7 @@
 use core::arch::naked_asm;
 use core::cell::SyncUnsafeCell;
 use core::ptr;
-use core::sync::atomic::{AtomicBool, AtomicPtr, AtomicU32, AtomicU64, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicPtr, AtomicU8, AtomicU32, AtomicU64, Ordering};
 
 use crate::arch::x86_64::gdt::{GdtLayout, SegmentSelector, Tss64};
 use crate::arch::x86_64::msr::Msr;
@@ -250,7 +250,28 @@ pub struct ProcessorControlRegion {
     /// byte-identical, and a 4-byte tail field cannot perturb the 4096-byte
     /// alignment the razors pin.
     pub current_task_id: AtomicU32,
+
+    /// Scheduling priority of the task `current_task` names, republished by the
+    /// same [`set_current_task`] that writes the pointer and the id.
+    ///
+    /// Exists so a wake publisher can ask "would the newcomer preempt what is
+    /// running over there?" without dereferencing a *foreign* CPU's task. That
+    /// dereference raced the target CPU's switch tail, which reclaims and
+    /// releases the outgoing dispatch reference and can run the allocator-heavy
+    /// destructor — so the read could land in freed memory.
+    ///
+    /// [`PRIORITY_NONE`] until this CPU dispatches for the first time, and
+    /// restored to it whenever the CPU parks on its idle task, so a CPU with
+    /// nothing to run always loses the comparison.
+    pub current_task_priority: AtomicU8,
 }
+
+/// `current_task_priority` for a CPU that is running nothing schedulable.
+///
+/// Numerically worst, because `TaskPriority` orders `High = 0` upward: any real
+/// task outranks it, which reproduces the old "current pointer was null, so the
+/// newcomer wins" branch without a pointer.
+pub const PRIORITY_NONE: u8 = u8::MAX;
 
 // Compile-time offset verification.
 const _: () = {
@@ -358,6 +379,7 @@ impl ProcessorControlRegion {
             previous_task: AtomicPtr::new(ptr::null_mut()),
             recovery_depth: AtomicU32::new(0),
             current_task_id: AtomicU32::new(u32::MAX),
+            current_task_priority: AtomicU8::new(PRIORITY_NONE),
         }
     }
 
@@ -489,6 +511,11 @@ pub mod offsets {
     /// asm outside this module reads it, so it may move as the tail grows.
     pub const CURRENT_TASK_ID: usize =
         core::mem::offset_of!(super::ProcessorControlRegion, current_task_id);
+    /// Offset of the `current_task_priority` field (`AtomicU8`). Same rules as
+    /// [`CURRENT_TASK_ID`]: computed, not pinned, and read only through the
+    /// single-instruction accessor in this module.
+    pub const CURRENT_TASK_PRIORITY: usize =
+        core::mem::offset_of!(super::ProcessorControlRegion, current_task_priority);
 }
 
 /// IST/exception safe-stack region bounds used by
@@ -1394,13 +1421,14 @@ pub fn is_cpu_online(cpu_id: usize) -> bool {
 /// single-instruction per-CPU ops block above) — neither value can land in a
 /// PCR the writing task has been migrated away from.
 ///
-/// The id travels with the pointer rather than in its own setter so the two
-/// cannot be written independently: [`current_task_id`] is only trustworthy
-/// because every publisher of the pointer necessarily publishes the id in the
-/// same call. Pass `u32::MAX` (`INVALID_TASK_ID`) for a task with no registry
-/// identity, such as a pre-heap bootstrap stub.
+/// The id and the priority travel with the pointer rather than in their own
+/// setters so the three cannot be written independently: [`current_task_id`]
+/// and [`current_task_priority_for`] are only trustworthy because every
+/// publisher of the pointer necessarily publishes both in the same call. Pass
+/// `u32::MAX` (`INVALID_TASK_ID`) and [`PRIORITY_NONE`] for a task with no
+/// registry identity, such as a pre-heap bootstrap stub.
 #[inline]
-pub fn set_current_task(task: *mut (), task_id: u32) {
+pub fn set_current_task(task: *mut (), task_id: u32, priority: u8) {
     if !GS_BASE_SET.is_set() {
         return;
     }
@@ -1415,6 +1443,7 @@ pub fn set_current_task(task: *mut (), task_id: u32) {
         );
     }
     set_current_task_id(task_id);
+    set_current_task_priority(priority);
 }
 
 /// Get the current task pointer for this CPU.
@@ -1577,6 +1606,42 @@ fn set_current_task_id(task_id: u32) {
 #[inline]
 pub fn current_task_id_for(cpu_id: usize) -> u32 {
     get_pcr(cpu_id).map_or(u32::MAX, |pcr| pcr.current_task_id.load(Ordering::Acquire))
+}
+
+/// Publish the priority of the task this CPU is switching to.
+///
+/// Private for the same reason as [`set_current_task_id`]: keeping
+/// [`set_current_task`] the only writer is what stops the priority from ever
+/// describing a task other than the one the pointer names.
+#[inline]
+fn set_current_task_priority(priority: u8) {
+    if !GS_BASE_SET.is_set() {
+        return;
+    }
+    // SAFETY: GS_BASE is installed (checked above); single gs-relative
+    // store to this CPU's PCR field.
+    unsafe {
+        core::arch::asm!(
+            "mov gs:[{off}], {prio}",
+            off = const offsets::CURRENT_TASK_PRIORITY,
+            prio = in(reg_byte) priority,
+            options(nostack, preserves_flags),
+        );
+    }
+}
+
+/// Read the scheduling priority of the task running on `cpu_id`, or
+/// [`PRIORITY_NONE`] when that CPU has no PCR or is running nothing.
+///
+/// The whole point is that this answers the preemption question **without
+/// dereferencing a foreign CPU's task**: that CPU's switch tail may be
+/// releasing the outgoing dispatch reference and running the task's
+/// allocator-heavy destructor concurrently.
+#[inline]
+pub fn current_task_priority_for(cpu_id: usize) -> u8 {
+    get_pcr(cpu_id).map_or(PRIORITY_NONE, |pcr| {
+        pcr.current_task_priority.load(Ordering::Acquire)
+    })
 }
 
 /// Set the idle-task pointer for `cpu_id`.

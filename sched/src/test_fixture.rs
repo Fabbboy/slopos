@@ -159,10 +159,12 @@ impl KernelTestScope {
         // This is what test bodies see at the start of their critical
         // section. Drop's restore() walk puts back the pre-reset
         // values from the snapshots above.
-        // The stub has no registry identity, so it publishes no id.
+        // The stub has no registry identity, so it publishes no id and no
+        // priority.
         slopos_arch::pcr::set_current_task(
             super::safestack_rt::BSP_BOOTSTRAP_TASK.get() as *mut (),
             slopos_abi::task::INVALID_TASK_ID,
+            slopos_arch::pcr::PRIORITY_NONE,
         );
 
         task_shutdown_all();

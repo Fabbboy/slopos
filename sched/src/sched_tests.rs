@@ -286,6 +286,86 @@ slopos_testing::stest!(
     suite = sched_core
 );
 
+/// A CPU publishes the priority of the task it dispatches, and returns to the
+/// "nothing schedulable" sentinel when it parks on a bootstrap stub.
+///
+/// This is what lets a wake publisher decide whether to preempt a *remote* CPU
+/// without dereferencing that CPU's current task — a read that raced its switch
+/// tail, where the outgoing dispatch reference is released and the task's
+/// destructor can run. A stale published priority is the failure with no crash:
+/// the CPU looks permanently high-priority and silently stops being preempted.
+pub fn test_dispatch_publishes_current_priority() -> TestResult {
+    let _fixture = SchedFixture::new();
+
+    let task_id = task_create(
+        b"PrioPublish\0".as_ptr() as *const c_char,
+        dummy_task_entry,
+        ptr::null_mut(),
+        TaskPriority::Low.as_u8(),
+        TASK_FLAG_KERNEL_MODE,
+    );
+    if task_id == INVALID_TASK_ID {
+        return TestResult::Fail;
+    }
+    let task = task_find_by_id(task_id);
+    if task.is_null() {
+        return TestResult::Fail;
+    }
+
+    // `dispatch` only accepts a runnable task; a fresh one is Blocked.
+    if task_set_state(task_id, TaskStatus::Ready) != 0 {
+        klog_info!("SCHED_TEST: task_set_state Ready failed");
+        let _ = task_terminate(task_id);
+        return TestResult::Fail;
+    }
+
+    let cpu = slopos_arch::pcr::get_current_cpu();
+    scheduler::dispatch_for_test(cpu, task);
+
+    let published = slopos_arch::pcr::current_task_priority_for(cpu);
+    if published != TaskPriority::Low.as_u8() {
+        klog_info!(
+            "SCHED_TEST: dispatch published priority {}, expected {}",
+            published,
+            TaskPriority::Low.as_u8()
+        );
+        let _ = task_terminate(task_id);
+        return TestResult::Fail;
+    }
+
+    // Parking on the bootstrap stub is "this CPU runs nothing schedulable".
+    slopos_arch::pcr::set_current_task(
+        super::safestack_rt::BSP_BOOTSTRAP_TASK.get() as *mut (),
+        INVALID_TASK_ID,
+        slopos_arch::pcr::PRIORITY_NONE,
+    );
+    let parked = slopos_arch::pcr::current_task_priority_for(cpu);
+    if parked != slopos_arch::pcr::PRIORITY_NONE {
+        klog_info!(
+            "SCHED_TEST: parked CPU published priority {}, expected PRIORITY_NONE",
+            parked
+        );
+        let _ = task_terminate(task_id);
+        return TestResult::Fail;
+    }
+
+    // Every real priority outranks the sentinel, so a newcomer always wins
+    // against a CPU running nothing — the branch the old null-pointer test took.
+    if TaskPriority::Idle.as_u8() >= slopos_arch::pcr::PRIORITY_NONE {
+        klog_info!("SCHED_TEST: PRIORITY_NONE does not lose to every real priority");
+        let _ = task_terminate(task_id);
+        return TestResult::Fail;
+    }
+
+    let _ = task_terminate(task_id);
+    TestResult::Pass
+}
+
+slopos_testing::stest!(
+    name = test_dispatch_publishes_current_priority,
+    suite = sched_core
+);
+
 pub fn test_raw_ready_store_does_not_reserve_waking_placement() -> TestResult {
     let _fixture = SchedFixture::new();
 

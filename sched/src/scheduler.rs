@@ -274,6 +274,7 @@ fn scheduler_tasks_for_cpu(cpu_id: usize) -> (*mut Task, *mut Task) {
             slopos_arch::pcr::set_current_task(
                 current as *mut (),
                 task_id_of(current).unwrap_or(INVALID_TASK_ID),
+                published_priority(current),
             );
             restore_live_recovery_depth(current);
             task_set_status(current, TaskStatus::Running);
@@ -314,11 +315,14 @@ pub(crate) fn dispatch(cpu_id: usize, task: *mut Task) {
         "dispatch() must run on the target CPU (SafeStack slot is gs-local)"
     );
 
-    // SafeStack reads this on every instrumented prologue. The id rides along so
-    // callers that want only "who is running" never dereference the task.
+    // SafeStack reads this on every instrumented prologue. The id and the
+    // priority ride along so callers that want only "who is running" or "would
+    // a newcomer preempt it" never dereference the task — least of all from
+    // another CPU, where the switch tail may be destroying it.
     slopos_arch::pcr::set_current_task(
         task as *mut (),
         task_id_of(task).unwrap_or(INVALID_TASK_ID),
+        published_priority(task),
     );
     restore_live_recovery_depth(task);
 
@@ -648,18 +652,28 @@ fn task_has_durable_owner(task: *mut Task) -> bool {
     placement_is_durable_owner(task_sched_placement_load(task))
 }
 
+/// The value `dispatch()` publishes in `PCR.current_task_priority` for `task`.
+///
+/// A task with no readable priority — a bootstrap stub, a null — publishes
+/// [`PRIORITY_NONE`], so a CPU parked on one always loses the preemption
+/// comparison, exactly as the old null-pointer branch did.
+#[inline]
+fn published_priority(task: *mut Task) -> u8 {
+    task_priority(task).map_or(slopos_arch::pcr::PRIORITY_NONE, |p| p.as_u8())
+}
+
+/// Whether `new` should preempt whatever `cpu` is running.
+///
+/// Reads the priority `cpu` published in its own PCR rather than dereferencing
+/// its `current_task`. The dereference raced that CPU's `drain_previous_task`,
+/// which reclaims and releases the outgoing dispatch reference and can run the
+/// task's allocator-heavy destructor — so the priority read could land in freed
+/// memory. A published scalar cannot dangle.
 fn newcomer_outranks_current(cpu: usize, new: *mut Task) -> bool {
     let Some(new_prio) = task_priority(new) else {
         return false;
     };
-    let current = scheduler_get_current_task_for(cpu);
-    if current.is_null() {
-        return true; // CPU idle (or about to be)
-    }
-    let Some(current_prio) = task_priority(current) else {
-        return true;
-    };
-    (new_prio.as_u8()) < (current_prio.as_u8())
+    new_prio.as_u8() < slopos_arch::pcr::current_task_priority_for(cpu)
 }
 
 fn publish_ready_fallback(task: *mut Task) -> c_int {
