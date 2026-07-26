@@ -17,11 +17,127 @@
 //! reclaim (or a matching drop of the cloned handle). An unmatched park
 //! inflates the task's strong count forever, so the allocation never returns to
 //! the heap; a double reclaim frees one reference too many.
+//!
+//! # The existence reference
+//!
+//! Containers do not cover every state a live task can be in. A blocked kernel
+//! thread sits in no queue, has no parent, and is named by its waiter node only
+//! through an opaque handle; a task holding a placement *reservation* has not
+//! reached its queue yet; a freshly created task is registered before it is
+//! published; a forked child is registered before it joins its parent's list. In
+//! each of those, no container holds a reference.
+//!
+//! So a task also owns one reference to *itself*, handed to it at registration
+//! by [`task_existence_park`] and taken back exactly once, when it is reaped, by
+//! [`task_existence_release`]. Linux gives `task_struct` the same self-reference
+//! and takes it back in `release_task`. Two properties follow, and the rest of
+//! the ownership model leans on both:
+//!
+//! - While a task is live, every container's release is provably *not* the final
+//!   one, so it stays a bare atomic decrement — safe under a lock and with
+//!   interrupts disabled.
+//! - A task is registered if and only if it holds this reference, so the
+//!   registry can be a pure weak index: it observes tasks without keeping any
+//!   alive, and a lookup is a liveness-checked upgrade rather than a fabricated
+//!   strong reference.
 
 use core::ptr::NonNull;
+use core::sync::atomic::{AtomicUsize, Ordering};
 
 use crate::KArc;
 use crate::task::kernel_task::TaskInner;
+
+/// Number of tasks currently holding their own existence reference.
+///
+/// Equal, at every quiescent point, to the number of tasks the registry has
+/// published and not yet reaped — which is what makes it a leak tripwire: the
+/// two diverging means a reap released the reference without unhashing, or an
+/// unhash dropped an entry without reaping.
+static EXISTENCE_REFS_PARKED: AtomicUsize = AtomicUsize::new(0);
+
+/// Hand a task one strong reference to *itself*, to be taken back exactly once
+/// when it is reaped. Returns `false` if it already holds one.
+///
+/// This is the reference that keeps a task alive in the states where no
+/// container holds it — blocked with its waiter node holding only an opaque
+/// handle, holding a placement reservation that has not reached a queue,
+/// registered but not yet published, or mid-fork before joining its parent's
+/// list. Linux gives `task_struct` the same self-reference and takes it back in
+/// `release_task`.
+///
+/// # Correctness
+/// Same liveness contract as [`task_placement_clone`]: `task`'s strong count
+/// must currently be non-zero, which the caller's own owning reference
+/// establishes. The retain happens *before* the flag is published, so a
+/// releaser that observes the flag necessarily observes the incremented count.
+#[inline]
+pub fn task_existence_park<K, U>(task: NonNull<TaskInner<K, U>>) -> bool {
+    // SAFETY: per the contract the caller holds an owning reference, so the
+    // referent is live for the duration of this call.
+    let flag = unsafe { &task.as_ref().existence_ref_parked };
+    // Retain before claiming the flag, never after: a releaser that observes
+    // the flag must be guaranteed the count it is about to take back already
+    // exists. The cost is that a loser has to undo its retain.
+    task_placement_retain(task);
+    if flag
+        .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+        .is_err()
+    {
+        // Another caller parked first. Give back the reference we minted; the
+        // caller's own owning reference means this cannot be the final one, so
+        // it is a bare atomic decrement.
+        drop(task_placement_reclaim(task));
+        return false;
+    }
+    EXISTENCE_REFS_PARKED.fetch_add(1, Ordering::Relaxed);
+    true
+}
+
+/// Take back the existence reference [`task_existence_park`] handed out.
+///
+/// `Some` for the single caller that wins the flag, `None` for every later one
+/// and for a task that never held one — so a reap is idempotent and two racing
+/// reapers cannot both release. The returned handle is an ordinary owning
+/// reference; dispose of it through the task-release path so a final drop lands
+/// in a context that may run the destructor.
+///
+/// # Correctness
+/// The caller must hold an owning reference of its own for the duration of the
+/// call. That is what makes reading the flag sound, and it is why the returned
+/// handle can never be the referent's last reference *at the moment of return*.
+#[inline]
+pub fn task_existence_release<K, U>(
+    task: NonNull<TaskInner<K, U>>,
+) -> Option<KArc<TaskInner<K, U>>> {
+    // SAFETY: per the contract the caller holds an owning reference, so the
+    // referent is live for the duration of this call.
+    let flag = unsafe { &task.as_ref().existence_ref_parked };
+    if flag
+        .compare_exchange(true, false, Ordering::AcqRel, Ordering::Acquire)
+        .is_err()
+    {
+        return None;
+    }
+    EXISTENCE_REFS_PARKED.fetch_sub(1, Ordering::Relaxed);
+    Some(task_placement_reclaim(task))
+}
+
+/// Whether `task` currently holds its own existence reference.
+///
+/// # Correctness
+/// Same liveness contract as [`task_placement_clone`].
+#[inline]
+pub fn task_existence_is_parked<K, U>(task: NonNull<TaskInner<K, U>>) -> bool {
+    // SAFETY: per the contract the caller holds an owning reference.
+    unsafe { task.as_ref().existence_ref_parked.load(Ordering::Acquire) }
+}
+
+/// How many tasks currently hold their own existence reference. Diagnostics and
+/// leak assertions only.
+#[inline]
+pub fn task_existence_parked_count() -> usize {
+    EXISTENCE_REFS_PARKED.load(Ordering::Relaxed)
+}
 
 /// Move one strong reference out of a `KArc` and into a raw placement slot,
 /// returning the task's stable base pointer.

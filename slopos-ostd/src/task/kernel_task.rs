@@ -409,6 +409,22 @@ pub struct TaskInner<K, U> {
     /// Idempotence bits for task/process teardown that may be split between
     /// `task_terminate` and post-switch cleanup of the current task.
     pub exit_cleanup_flags: AtomicU8,
+    /// Whether this task currently holds one strong reference to *itself* —
+    /// the reference it is handed at registration and that is taken back
+    /// exactly once when it is reaped.
+    ///
+    /// Every other owner of a task is a container: a ready queue, a remote
+    /// inbox, a CPU's dispatch slot, a parent's children list, a wait map. This
+    /// one is the task itself, and it is what keeps a task alive in the states
+    /// where no container holds it at all — a blocked kernel thread (whose wait
+    /// node stores only an opaque handle, and which has no parent), a placement
+    /// reservation that has not reached its queue yet, a freshly created task
+    /// before publication, and a child mid-fork before it joins its parent's
+    /// list.
+    ///
+    /// The flag, not the count, is the witness that authorises taking the
+    /// reference back, so the reclaim is exactly-once even under a race.
+    pub existence_ref_parked: AtomicBool,
     /// Per-task user-mode register snapshot.
     pub user_ctx: UserContext,
     /// Saved per-task value of `pcr.user_ctx_ptr`.
@@ -422,7 +438,7 @@ pub struct TaskInner<K, U> {
 impl<K, U> Drop for TaskInner<K, U> {
     fn drop(&mut self) {
         crate::task::drop_context::assert_task_drop_context();
-        self.assert_family_links_detached();
+        self.assert_no_owner_holds_this_task();
     }
 }
 
@@ -493,7 +509,7 @@ impl<K, U> TaskInner<K, U> {
         self.last_cpu.store(cpu, Ordering::Release);
     }
 
-    /// Debug tripwire that a task's family links are detached before reclaim.
+    /// Debug tripwire that nothing still claims to own this task at reclaim.
     ///
     /// `IntrusiveLinkedList` has no `Drop`, so a non-empty `children` list at
     /// reclaim would silently leak every parked child reference; a still-linked
@@ -506,7 +522,14 @@ impl<K, U> TaskInner<K, U> {
     ///
     /// [`assert_task_drop_context`]: crate::task::drop_context::assert_task_drop_context
     #[inline]
-    fn assert_family_links_detached(&self) {
+    fn assert_no_owner_holds_this_task(&self) {
+        // The count could not have reached zero while the task still held a
+        // reference to itself, so observing this here means a reap released the
+        // reference without clearing the flag, or a copy inherited it.
+        debug_assert!(
+            !self.existence_ref_parked.load(Ordering::Relaxed),
+            "task dropped while still holding its own existence reference"
+        );
         debug_assert!(
             self.children.is_empty(),
             "task dropped with a non-empty children list"
@@ -604,6 +627,7 @@ impl<K, U> TaskInner<K, U> {
             recovery_depth: AtomicU32::new(0),
             panic_in_flight: AtomicU32::new(0),
             exit_cleanup_flags: AtomicU8::new(0),
+            existence_ref_parked: AtomicBool::new(false),
             user_ctx: UserContext::const_zeroed(),
             saved_user_ctx_ptr: ptr::null_mut(),
             saved_kernel_return_ctx: KernelReturnContext {
@@ -887,6 +911,11 @@ impl<K, U> TaskInner<K, U> {
         self.recovery_depth = AtomicU32::new(0);
         self.exit_cleanup_flags = AtomicU8::new(0);
         self.signal_pending = AtomicU64::new(0);
+        // The bytewise copy duplicated the live parent's parked flag. A child
+        // is handed its own existence reference at registration; inheriting the
+        // parent's `true` would let the child's reap take back a reference that
+        // was never given, dropping the count one below what any owner holds.
+        self.existence_ref_parked = AtomicBool::new(false);
     }
 }
 
