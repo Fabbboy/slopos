@@ -11,7 +11,7 @@
 use core::ffi::c_void;
 use core::ptr;
 use core::ptr::addr_of_mut;
-use core::sync::atomic::{AtomicBool, AtomicU8, AtomicU32, AtomicU64, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU8, AtomicU16, AtomicU32, AtomicU64, Ordering};
 
 use slopos_abi::signal::{NSIG, SIG_DFL, SIG_EMPTY, SigSet};
 use slopos_abi::syscall::TtyIndex;
@@ -303,7 +303,17 @@ pub struct TaskInner<K, U> {
     pub tgid: u32,
     pub pgid: u32,
     pub sid: u32,
-    pub controlling_tty: Option<TtyIndex>,
+    /// Controlling terminal of this task's session, encoded per
+    /// [`TTY_INDEX_NONE`]. Read and written through
+    /// [`controlling_tty`](TaskInner::controlling_tty) and
+    /// [`set_controlling_tty`](TaskInner::set_controlling_tty).
+    ///
+    /// Atomic because the session-hangup path clears it through a *shared*
+    /// snapshot of the task table: the leader's exit walks every task in the
+    /// session and clears the field on each, concurrently with those tasks
+    /// reading it. A plain field made that a data race that the pointer
+    /// accessors happened to hide behind a `*mut` reborrow.
+    pub controlling_tty: AtomicU16,
     /// Current working directory path (null-terminated, max 256 bytes).
     pub cwd: [u8; 256],
     pub cwd_len: u16,
@@ -314,7 +324,13 @@ pub struct TaskInner<K, U> {
     pub total_runtime: u64,
     pub creation_time: u64,
     pub yield_count: u32,
-    pub last_run_timestamp: u64,
+    /// Timestamp of this task's last dispatch.
+    ///
+    /// Atomic because the context-switch path writes it on the owning CPU
+    /// while the stranded-task rescue sweep reads it from another. The old
+    /// plain field needed a hand-rolled `read_volatile` accessor to paper over
+    /// exactly that.
+    pub last_run_timestamp: AtomicU64,
     pub user_started: u8,
     pub context_from_user: u8,
     pub exit_reason: TaskExitReason,
@@ -324,7 +340,11 @@ pub struct TaskInner<K, U> {
     pub fate_value: u32,
     pub fate_pending: u8,
     pub cpu_affinity: u32,
-    pub last_cpu: u8,
+    /// CPU this task last ran on, a placement hint.
+    ///
+    /// Atomic because the enqueue paths stamp it on whichever CPU is
+    /// publishing the task while `select_target_cpu` reads it from another.
+    pub last_cpu: AtomicU8,
     pub migration_count: u32,
     // --- Signal state ---
     /// Bitmask of pending signals (written atomically by kill()).
@@ -406,7 +426,73 @@ impl<K, U> Drop for TaskInner<K, U> {
     }
 }
 
+/// Encoding of "no controlling terminal" in [`TaskInner::controlling_tty`].
+/// Out of range for a `TtyIndex`, whose payload is a `u8`, so it cannot
+/// collide with a real terminal. Deliberately not zero: the task initialiser
+/// bulk-zeroes, and a zero sentinel would silently mean "TTY 0".
+pub const TTY_INDEX_NONE: u16 = u16::MAX;
+
 impl<K, U> TaskInner<K, U> {
+    /// This task's controlling terminal, if any.
+    #[inline]
+    pub fn controlling_tty(&self) -> Option<TtyIndex> {
+        match self.controlling_tty.load(Ordering::Acquire) {
+            TTY_INDEX_NONE => None,
+            raw => Some(TtyIndex(raw as u8)),
+        }
+    }
+
+    /// Set or clear the controlling terminal. `&self` because the
+    /// session-hangup path reaches tasks through a shared snapshot.
+    #[inline]
+    pub fn set_controlling_tty(&self, tty: Option<TtyIndex>) {
+        let raw = tty.map_or(TTY_INDEX_NONE, |t| u16::from(t.0));
+        self.controlling_tty.store(raw, Ordering::Release);
+    }
+
+    /// Clear the controlling terminal only if it currently names `tty`,
+    /// reporting whether this call did the clearing.
+    ///
+    /// Compare-and-clear rather than load-then-store so a session teardown
+    /// racing a task that has already moved to a different terminal cannot
+    /// clear the new one.
+    #[inline]
+    pub fn clear_controlling_tty_if(&self, tty: TtyIndex) -> bool {
+        self.controlling_tty
+            .compare_exchange(
+                u16::from(tty.0),
+                TTY_INDEX_NONE,
+                Ordering::AcqRel,
+                Ordering::Relaxed,
+            )
+            .is_ok()
+    }
+
+    /// Timestamp of this task's last dispatch.
+    #[inline]
+    pub fn last_run_timestamp(&self) -> u64 {
+        self.last_run_timestamp.load(Ordering::Acquire)
+    }
+
+    /// Stamp the last-dispatch timestamp. `&self`: written by the owning CPU's
+    /// switch path while other CPUs read it.
+    #[inline]
+    pub fn set_last_run_timestamp(&self, timestamp: u64) {
+        self.last_run_timestamp.store(timestamp, Ordering::Release);
+    }
+
+    /// CPU this task last ran on.
+    #[inline]
+    pub fn last_cpu(&self) -> u8 {
+        self.last_cpu.load(Ordering::Acquire)
+    }
+
+    /// Stamp the last-CPU placement hint.
+    #[inline]
+    pub fn set_last_cpu(&self, cpu: u8) {
+        self.last_cpu.store(cpu, Ordering::Release);
+    }
+
     /// Debug tripwire that a task's family links are detached before reclaim.
     ///
     /// `IntrusiveLinkedList` has no `Drop`, so a non-empty `children` list at
@@ -479,7 +565,7 @@ impl<K, U> TaskInner<K, U> {
             tgid: INVALID_TASK_ID,
             pgid: INVALID_TASK_ID,
             sid: INVALID_TASK_ID,
-            controlling_tty: None,
+            controlling_tty: AtomicU16::new(TTY_INDEX_NONE),
             cwd: {
                 let mut c = [0u8; 256];
                 c[0] = b'/';
@@ -492,7 +578,7 @@ impl<K, U> TaskInner<K, U> {
             total_runtime: 0,
             creation_time: 0,
             yield_count: 0,
-            last_run_timestamp: 0,
+            last_run_timestamp: AtomicU64::new(0),
             user_started: 0,
             context_from_user: 0,
             exit_reason: TaskExitReason::None,
@@ -502,7 +588,7 @@ impl<K, U> TaskInner<K, U> {
             fate_value: 0,
             fate_pending: 0,
             cpu_affinity: 0,
-            last_cpu: 0,
+            last_cpu: AtomicU8::new(0),
             migration_count: 0,
             signal_pending: AtomicU64::new(0),
             signal_blocked: SIG_EMPTY,
@@ -555,7 +641,9 @@ impl<K, U> TaskInner<K, U> {
                 addr_of_mut!((*slot).pgid).write(INVALID_TASK_ID);
                 addr_of_mut!((*slot).sid).write(INVALID_TASK_ID);
 
-                addr_of_mut!((*slot).controlling_tty).write(None);
+                // Not all-zero: zero would name TTY 0, not "no controlling
+                // terminal".
+                addr_of_mut!((*slot).controlling_tty).write(AtomicU16::new(TTY_INDEX_NONE));
 
                 addr_of_mut!((*slot).cwd_len).write(1);
                 (addr_of_mut!((*slot).cwd) as *mut u8).write(b'/');
@@ -732,7 +820,7 @@ impl<K, U> TaskInner<K, U> {
         self.total_runtime = 0;
         self.creation_time = crate::kdiag_timestamp();
         self.yield_count = 0;
-        self.last_run_timestamp = 0;
+        self.last_run_timestamp.store(0, Ordering::Relaxed);
         self.exit_reason = TaskExitReason::None;
         self.fault_reason = TaskFaultReason::None;
         self.exit_code = 0;

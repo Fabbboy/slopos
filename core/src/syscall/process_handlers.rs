@@ -583,8 +583,8 @@ define_syscall!(syscall_setsid (ctx)
     // A fresh session + its initial group; installing them drops the old group
     // membership (so the old session and any terminal weak links to it die).
     let pg = new_session_group(task.task_id).ok_or(Errno::ENOMEM)?;
-    if task.controlling_tty.is_some() {
-        task.controlling_tty = None;
+    if task.controlling_tty().is_some() {
+        task.set_controlling_tty(None);
     }
     task.sid = task.task_id;
     task.pgid = task.task_id;
@@ -726,7 +726,7 @@ define_syscall!(syscall_vhangup (ctx)
     };
     let task_ptr = task_ref.as_ptr();
     let task = task_borrow(task_ptr).ok_or(Errno::EINVAL)?;
-    let ctty = match task.controlling_tty {
+    let ctty = match task.controlling_tty() {
         Some(idx) => idx,
         None => return Err(Errno::EPERM),
     };

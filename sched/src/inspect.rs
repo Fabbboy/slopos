@@ -136,7 +136,7 @@ impl<'scope> TaskHandle<'scope> {
 
     #[inline]
     pub fn last_cpu(&self) -> u8 {
-        self.task().last_cpu
+        self.task().last_cpu()
     }
 
     #[inline]
@@ -155,7 +155,7 @@ impl<'scope> TaskHandle<'scope> {
 
     #[inline]
     pub fn controlling_tty(&self) -> Option<TtyIndex> {
-        self.task().controlling_tty
+        self.task().controlling_tty()
     }
 
     #[inline]
@@ -214,7 +214,7 @@ impl<'scope> TaskHandle<'scope> {
             sid: task.sid,
             priority: task.priority,
             flags: task.flags,
-            last_cpu: task.last_cpu,
+            last_cpu: task.last_cpu(),
             kernel_stack_top: task.kernel_stack_top,
             status: task.status(),
             exit_info_set: task.exit_info.is_set(),

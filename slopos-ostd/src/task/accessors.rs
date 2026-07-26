@@ -185,15 +185,10 @@ task_scalar_getters! {
     task_kernel_stack_top -> u64 = kernel_stack_top,
     /// Read `task->fs_base`.
     task_fs_base -> u64 = fs_base,
-    /// Read `task->last_cpu`.
-    task_last_cpu -> u8 = last_cpu,
     /// Read `task->tgid` (thread-group id).
     task_tgid -> u32 = tgid,
     /// Read `task->parent_task_id`.
     task_parent_task_id -> u32 = parent_task_id,
-    /// Plain (non-volatile) read of `task->last_run_timestamp`. Used by
-    /// callers that don't need ordering across the context-switch boundary.
-    task_last_run_timestamp -> u64 = last_run_timestamp,
     /// Read `task->signal_blocked` (`SigSet = u64`).
     task_signal_blocked -> slopos_abi::signal::SigSet = signal_blocked,
 }
@@ -214,11 +209,6 @@ task_scalar_setters! {
     task_set_time_slice = time_slice: u64,
     /// Stamp `task->time_slice_remaining`.
     task_set_time_slice_remaining = time_slice_remaining: u64,
-    /// Stamp `task->last_cpu` (set when the scheduler enqueues the task onto a
-    /// particular CPU's run queue or remote-wake inbox).
-    task_set_last_cpu = last_cpu: u8,
-    /// Stamp `task->last_run_timestamp`.
-    task_set_last_run_timestamp = last_run_timestamp: u64,
     /// Stamp `task->kernel_stack_top`. Used by tests that simulate a missing
     /// kernel-stack-top error path.
     task_set_kernel_stack_top = kernel_stack_top: u64,
@@ -572,21 +562,20 @@ pub fn task_controlling_tty<K, U>(task: *const TaskInner<K, U>) -> Option<TtyInd
     if task.is_null() {
         return None;
     }
-    // SAFETY: caller pre-validated; the field is `Option<TtyIndex>`,
-    // both variants are 1-byte / 2-byte naturally-aligned scalars.
-    unsafe { (*task).controlling_tty }
+    // SAFETY: caller pre-validated; the read is an atomic load.
+    unsafe { (*task).controlling_tty() }
 }
 
 /// Stamp `task->controlling_tty`. Used by the session-leader
 /// disposition path when a TTY is hung up.
 #[inline]
-pub fn task_set_controlling_tty<K, U>(task: *mut TaskInner<K, U>, tty: Option<TtyIndex>) -> bool {
+pub fn task_set_controlling_tty<K, U>(task: *const TaskInner<K, U>, tty: Option<TtyIndex>) -> bool {
     if task.is_null() {
         return false;
     }
-    // SAFETY: caller pre-validated; field write is naturally aligned.
+    // SAFETY: caller pre-validated; the write is an atomic store.
     unsafe {
-        (*task).controlling_tty = tty;
+        (*task).set_controlling_tty(tty);
     }
     true
 }
@@ -653,10 +642,11 @@ pub fn task_install_idle_affinity<K, U>(task: *mut TaskInner<K, U>, mask: u32, l
     if task.is_null() {
         return;
     }
-    // SAFETY: caller pre-validated; both fields are scalars.
+    // SAFETY: caller pre-validated; the affinity mask is a scalar write and
+    // the last-CPU hint is an atomic store.
     unsafe {
         (*task).cpu_affinity = mask;
-        (*task).last_cpu = last_cpu;
+        (*task).set_last_cpu(last_cpu);
     }
 }
 
@@ -1082,12 +1072,43 @@ pub fn task_yield_count_inc<K, U>(task: *mut TaskInner<K, U>) {
 /// Read `task->last_run_timestamp` via `read_volatile` to defeat
 /// compiler reordering across the context-switch boundary.
 #[inline]
-pub fn task_last_run_timestamp_volatile<K, U>(task: *const TaskInner<K, U>) -> Option<u64> {
+pub fn task_last_run_timestamp<K, U>(task: *const TaskInner<K, U>) -> Option<u64> {
     if task.is_null() {
         return None;
     }
-    // SAFETY: caller pre-validated; field is naturally-aligned u64.
-    Some(unsafe { core::ptr::read_volatile(core::ptr::addr_of!((*task).last_run_timestamp)) })
+    // SAFETY: caller pre-validated; the read is an atomic load.
+    Some(unsafe { (*task).last_run_timestamp() })
+}
+
+/// Stamp `task->last_run_timestamp`.
+#[inline]
+pub fn task_set_last_run_timestamp<K, U>(task: *const TaskInner<K, U>, timestamp: u64) {
+    if task.is_null() {
+        return;
+    }
+    // SAFETY: caller pre-validated; the write is an atomic store.
+    unsafe { (*task).set_last_run_timestamp(timestamp) };
+}
+
+/// Read `task->last_cpu`, the placement hint for the CPU this task last ran on.
+#[inline]
+pub fn task_last_cpu<K, U>(task: *const TaskInner<K, U>) -> Option<u8> {
+    if task.is_null() {
+        return None;
+    }
+    // SAFETY: caller pre-validated; the read is an atomic load.
+    Some(unsafe { (*task).last_cpu() })
+}
+
+/// Stamp `task->last_cpu` (set when the scheduler enqueues the task onto a
+/// particular CPU's run queue or remote-wake inbox).
+#[inline]
+pub fn task_set_last_cpu<K, U>(task: *const TaskInner<K, U>, cpu: u8) {
+    if task.is_null() {
+        return;
+    }
+    // SAFETY: caller pre-validated; the write is an atomic store.
+    unsafe { (*task).set_last_cpu(cpu) };
 }
 
 /// Bump `task->total_runtime` by `delta`, saturating.
@@ -1107,21 +1128,17 @@ pub fn task_add_total_runtime<K, U>(task: *mut TaskInner<K, U>, delta: u64) {
 /// hook.
 #[inline]
 pub fn task_clear_controlling_tty_for<K, U>(
-    task: *mut TaskInner<K, U>,
+    task: *const TaskInner<K, U>,
     sid: u32,
     tty: TtyIndex,
 ) -> bool {
     if task.is_null() {
         return false;
     }
-    // SAFETY: caller pre-validated; both reads are scalar.
-    unsafe {
-        if (*task).sid == sid && (*task).controlling_tty == Some(tty) {
-            (*task).controlling_tty = None;
-            return true;
-        }
-    }
-    false
+    // SAFETY: caller pre-validated; the session id is a scalar read and the
+    // clear is a compare-and-clear, so a task that has meanwhile moved to a
+    // different terminal keeps it.
+    unsafe { (*task).sid == sid && (*task).clear_controlling_tty_if(tty) }
 }
 
 /// PCR↔Task mirror used by the scheduler context-switch path.

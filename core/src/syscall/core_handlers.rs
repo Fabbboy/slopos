@@ -241,7 +241,7 @@ define_syscall!(syscall_process_list
         entry.state = task.status().as_u8();
         entry.block_reason = task.load_block_reason().as_u8();
         entry.priority = task.priority.as_u8();
-        entry.last_cpu = task.last_cpu;
+        entry.last_cpu = task.last_cpu();
         entry.cpu_affinity = task.cpu_affinity;
         entry.total_runtime_us =
             slopos_kernel_services::clock::ticks_to_microseconds(task.total_runtime);

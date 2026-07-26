@@ -604,7 +604,7 @@ define_syscall!(syscall_ioctl
             };
             let task_ptr = task_ref.as_ptr();
             let task = slopos_sched::task::task_borrow(task_ptr).ok_or(Errno::EINVAL)?;
-            match task.controlling_tty {
+            match task.controlling_tty() {
                 Some(ctty) if ctty == tty_idx => {}
                 _ => return Err(Errno::EINVAL),
             }
@@ -649,7 +649,7 @@ define_syscall!(syscall_ioctl
                 return Err(Errno::EINVAL);
             }
 
-            if let Some(current_tty) = task.controlling_tty {
+            if let Some(current_tty) = task.controlling_tty() {
                 if current_tty == tty_idx {
                     return Ok(0);
                 }
@@ -666,7 +666,7 @@ define_syscall!(syscall_ioctl
             if tty::acquire_controlling_terminal(tty_idx, fg).is_err() {
                 return Err(Errno::EINVAL);
             }
-            task.controlling_tty = Some(tty_idx);
+            task.set_controlling_tty(Some(tty_idx));
             Ok(0)
         }
         TIOCGSID => {
@@ -678,7 +678,7 @@ define_syscall!(syscall_ioctl
             };
             let task_ptr = task_ref.as_ptr();
             let task = slopos_sched::task::task_borrow(task_ptr).ok_or(Errno::EINVAL)?;
-            match task.controlling_tty {
+            match task.controlling_tty() {
                 Some(ctty) if ctty == tty_idx => {}
                 _ => return Err(Errno::EINVAL),
             }
@@ -694,14 +694,14 @@ define_syscall!(syscall_ioctl
             let task_ptr = task_ref.as_ptr();
 
             let task = slopos_sched::task::task_borrow_mut(task_ptr).ok_or(Errno::EINVAL)?;
-            match task.controlling_tty {
+            match task.controlling_tty() {
                 Some(ctty) if ctty == tty_idx => {}
                 _ => return Err(Errno::EINVAL),
             }
 
             let caller_sid = task.sid;
             let is_session_leader = task.sid != 0 && task.sid == task.task_id;
-            task.controlling_tty = None;
+            task.set_controlling_tty(None);
             let _ = tty::detach_controlling_terminal(tty_idx, caller_sid, is_session_leader);
             Ok(0)
         }

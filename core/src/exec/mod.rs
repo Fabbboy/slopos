@@ -322,11 +322,11 @@ pub fn spawn_program_with_attrs(
                         child.process_group = task_process_group(parent_ptr);
                     }
                     child.sid = parent.sid;
-                    child.controlling_tty = parent.controlling_tty;
+                    child.set_controlling_tty(parent.controlling_tty());
 
                     if flags & slopos_abi::task::TASK_FLAG_FOREGROUND != 0
                         && child.pgid != 0
-                        && let Some(ctty) = child.controlling_tty
+                        && let Some(ctty) = child.controlling_tty()
                     {
                         fg_handoff = Some((ctty, child.pgid, child.sid));
                     }

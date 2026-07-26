@@ -145,7 +145,7 @@ use super::task::{
     TASK_FLAG_USER_MODE, Task, TaskPriority, TaskStatus, release_placement_arc,
     task_controlling_tty, task_cpu_affinity, task_exit_info_ref, task_fpu_state_mut, task_fs_base,
     task_has_flag, task_id_of, task_is_exited, task_is_invalid, task_is_ready, task_is_running,
-    task_kernel_stack_top, task_last_cpu, task_last_run_timestamp_volatile, task_name_looks_idle,
+    task_kernel_stack_top, task_last_cpu, task_last_run_timestamp, task_name_looks_idle,
     task_on_cpu_load, task_panic_in_flight_load, task_panic_in_flight_store,
     task_pcr_round_trip_swap, task_pgid, task_pointer_is_valid, task_priority, task_process_id,
     task_record_context_switch, task_record_yield, task_recovery_depth_load,
@@ -2380,7 +2380,7 @@ fn rescue_check_task(task: *mut Task, _context: *mut core::ffi::c_void) {
     // running task on some CPU. A self-wakeup can temporarily make the
     // current task Ready before it yields back to idle; it is not stranded
     // until the context-switch-out accounting has cleared this timestamp.
-    if task_last_run_timestamp_volatile(task).unwrap_or(0) != 0 {
+    if task_last_run_timestamp(task).unwrap_or(0) != 0 {
         return;
     }
     if t.ready_link.is_linked() {

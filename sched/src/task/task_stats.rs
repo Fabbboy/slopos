@@ -1,6 +1,6 @@
 use super::Task;
 use super::task_accessors::{
-    task_add_total_runtime, task_last_run_timestamp_volatile, task_set_last_run_timestamp,
+    task_add_total_runtime, task_last_run_timestamp, task_set_last_run_timestamp,
     task_yield_count_inc,
 };
 use super::task_table::{try_with_task_manager, with_task_manager};
@@ -16,7 +16,7 @@ pub fn get_task_stats(total_tasks: *mut u32, active_tasks: *mut u32, context_swi
 
 pub fn task_record_context_switch(from: *mut Task, to: *mut Task, timestamp: u64) {
     if !from.is_null() {
-        let last = task_last_run_timestamp_volatile(from).unwrap_or(0);
+        let last = task_last_run_timestamp(from).unwrap_or(0);
         if last != 0 {
             task_add_total_runtime(from, timestamp.saturating_sub(last));
         }

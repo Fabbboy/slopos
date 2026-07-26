@@ -554,7 +554,7 @@ pub fn task_create(
     task_ref.tgid = task_id;
     task_ref.pgid = task_id;
     task_ref.sid = task_id;
-    task_ref.controlling_tty = None;
+    task_ref.set_controlling_tty(None);
     // A user task is born its own session and group leader. Kernel tasks never
     // join a terminal session, so they carry no group object (ints only).
     if flags & TASK_FLAG_USER_MODE != 0 {
@@ -747,10 +747,11 @@ fn mark_task_terminated(task_ptr: *mut Task, resolved_id: u32) {
         return;
     };
 
-    if task.last_run_timestamp != 0 && now >= task.last_run_timestamp {
-        task.total_runtime += now - task.last_run_timestamp;
+    let last_run = task.last_run_timestamp();
+    if last_run != 0 && now >= last_run {
+        task.total_runtime += now - last_run;
     }
-    task.last_run_timestamp = 0;
+    task.set_last_run_timestamp(0);
     if task.exit_reason == TaskExitReason::None {
         task.exit_reason = TaskExitReason::Kernel;
     }
@@ -827,10 +828,10 @@ fn mark_task_terminated(task_ptr: *mut Task, resolved_id: u32) {
     if task.sid != 0
         && task.task_id != INVALID_TASK_ID
         && task.sid == task.task_id
-        && task.controlling_tty.is_some()
+        && task.controlling_tty().is_some()
     {
-        should_hangup = task.controlling_tty;
-        task.controlling_tty = None;
+        should_hangup = task.controlling_tty();
+        task.set_controlling_tty(None);
     }
 
     scheduler::unschedule_task(task_ptr);
