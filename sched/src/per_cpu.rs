@@ -41,10 +41,10 @@ pub fn fork_rr_counter_set(value: usize) {
 }
 
 use super::task::{
-    release_placement_arc, task_cpu_affinity, task_last_cpu, task_next_inbox_load,
-    task_next_inbox_store_relaxed, task_next_inbox_store_release, task_priority,
-    task_remote_inbox_try_link, task_remote_inbox_unlink, task_sched_placement_compare_exchange,
-    task_sched_placement_load, task_set_last_cpu, task_status,
+    task_cpu_affinity, task_last_cpu, task_next_inbox_load, task_next_inbox_store_relaxed,
+    task_next_inbox_store_release, task_priority, task_put, task_remote_inbox_try_link,
+    task_remote_inbox_unlink, task_sched_placement_compare_exchange, task_sched_placement_load,
+    task_set_last_cpu, task_status,
 };
 use super::task_struct::{SwitchContext, Task};
 use slopos_abi::task::TaskStatus;
@@ -90,7 +90,7 @@ impl ReadyQueue {
                 SchedPlacement::ReadyQueue,
                 SchedPlacement::None,
             );
-            release_placement_arc(task_placement_reclaim(node));
+            task_put(task_placement_reclaim(node));
         }
     }
 
@@ -159,7 +159,7 @@ impl ReadyQueue {
             SchedPlacement::ReadyQueue,
             SchedPlacement::None,
         );
-        release_placement_arc(task_placement_reclaim(node));
+        task_put(task_placement_reclaim(node));
         0
     }
 
@@ -689,7 +689,7 @@ impl PriorityRunQueue {
                     );
                 }
                 if let Some(node) = NonNull::new(current) {
-                    release_placement_arc(task_placement_reclaim(node));
+                    task_put(task_placement_reclaim(node));
                 }
             } else {
                 // The task is no longer Ready, or another owner repaired an
@@ -711,7 +711,7 @@ impl PriorityRunQueue {
                 // `current`: reclaim may retire a terminated task, after which
                 // the pointer must not be touched.
                 if let Some(node) = NonNull::new(current) {
-                    release_placement_arc(task_placement_reclaim(node));
+                    task_put(task_placement_reclaim(node));
                 }
             }
 
@@ -736,7 +736,7 @@ impl PriorityRunQueue {
                 SchedPlacement::None,
             );
             if let Some(node) = NonNull::new(cursor) {
-                release_placement_arc(task_placement_reclaim(node));
+                task_put(task_placement_reclaim(node));
             }
             cursor = next;
             drained = drained.saturating_add(1);

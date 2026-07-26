@@ -14,7 +14,8 @@
 //! intrusive ops and the strong-count park/reclaim are allocation-free, so they
 //! are safe under the cli-spinlock, and the heavy `KArc` destructor is never run
 //! under the lock — these helpers hand the reclaimed `KArc` back for an off-lock
-//! drop.
+//! drop. That drop is never final while the child is live: a task holds its own
+//! existence reference from registration until it is reaped.
 
 use core::ptr::NonNull;
 
@@ -72,9 +73,9 @@ pub fn link_child(parent: *mut Task, child: *mut Task) {
 
 /// Detach one child from `parent`'s list and hand back the owning reference the
 /// list held. `None` when the list is empty. The returned `KArc` must be dropped
-/// off-lock (via [`super::task_table::release_placement_arc`]); it is never the
-/// last reference (the registry owner outlives it), so the drop is a bare
-/// decrement and any retirement it triggers self-defers.
+/// off-lock (via [`super::task_put`]); it is never the last reference, because
+/// the child holds its own existence reference until it is reaped, so the drop is
+/// a bare decrement.
 pub fn take_one_child(parent: *mut Task) -> Option<KArc<Task>> {
     let child_nn = with_task_manager(|_mgr| task_children_pop(parent as *const Task))?;
     Some(task_placement_reclaim(child_nn))

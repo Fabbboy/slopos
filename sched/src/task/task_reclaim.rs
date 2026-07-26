@@ -43,8 +43,8 @@ use slopos_ostd::KArc;
 use slopos_ostd::cpu::preempt::PreemptGuard;
 use slopos_ostd::sync::held_lock_count;
 use slopos_ostd::task::accessors::{
-    task_on_cpu_load, task_reclaim_next_load, task_reclaim_next_store_relaxed,
-    task_reclaim_try_link, task_reclaim_unlink,
+    task_reclaim_next_load, task_reclaim_next_store_relaxed, task_reclaim_try_link,
+    task_reclaim_unlink,
 };
 use slopos_ostd::task::{task_destroy_parked, task_release_strong};
 
@@ -95,14 +95,10 @@ fn destroy_context_is_safe(node: NonNull<Task>) -> bool {
     if PreemptGuard::is_active() {
         return false;
     }
-    // Never free the stack this CPU is running on, and never free one another
-    // CPU is still switching off of. Both reads are sound because we uniquely
-    // own an initialised task.
-    let raw = node.as_ptr();
-    if ptr::eq(raw, crate::scheduler::scheduler_get_current_task()) {
-        return false;
-    }
-    !task_on_cpu_load(raw)
+    // Never free the stack a CPU is running on, and never free one another CPU
+    // is still switching off of. Shares its predicate with the reap gate so the
+    // two can never disagree about when a task is still dispatch-pinned.
+    !crate::scheduler::task_is_dispatch_pinned(node.as_ptr())
 }
 
 /// Park a uniquely-owned dead task for later destruction.

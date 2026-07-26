@@ -1,15 +1,16 @@
 use core::ffi::c_int;
 use core::ops::{ControlFlow, Deref};
 use core::ptr;
+use core::ptr::NonNull;
 use core::sync::atomic::{AtomicBool, Ordering};
 
 use slopos_ostd::handle::Handle;
 use slopos_ostd::string::bytes_as_str;
-use slopos_ostd::sync::{KernelSync, LOCK_LEVEL_REGISTRY, SpinLock, held_lock_count};
+use slopos_ostd::sync::{KernelSync, LOCK_LEVEL_REGISTRY, SpinLock};
+use slopos_ostd::task::{task_existence_park, task_existence_release};
 use slopos_ostd::{KArc, KVec, KWeak};
 use slopos_ostd::{klog_debug, klog_info};
 
-use super::task_accessors::task_id_of;
 use super::{INVALID_TASK_ID, MAX_TASKS, Task, TaskStatus};
 use crate::exit_info::ExitInfo;
 use crate::scheduler;
@@ -33,6 +34,13 @@ impl TaskRef {
     #[inline]
     pub fn as_ptr(&self) -> *mut Task {
         KArc::as_ptr(self.arc.as_ref().expect("live TaskRef")) as *mut Task
+    }
+
+    /// Weak handle onto the same allocation, so a test can distinguish "the
+    /// registration is gone" from "the allocation is gone".
+    #[cfg(feature = "test-hooks")]
+    pub fn downgrade_for_test(&self) -> KWeak<Task> {
+        KArc::downgrade(self.arc.as_ref().expect("live TaskRef"))
     }
 }
 
@@ -66,28 +74,25 @@ impl Drop for TaskRef {
         let Some(arc) = self.arc.take() else {
             return;
         };
-        let id = arc.task_id;
-        let terminated = arc.status() == TaskStatus::Terminated;
-        drop(arc);
-
-        // A lookup may be the last strong reference besides the temporary
-        // scheduler-lifetime owner. Retire that owner (or, from contexts in
-        // which Task's allocator-heavy destructor may not run, arm the idle
-        // dispatcher's deferred retry).
-        if terminated {
-            let _ = task_try_reclaim_id(id);
-        }
+        // Routed through the universal release rather than dropped: a guard on a
+        // reaped task can hold the final reference, and guards are constructed
+        // and dropped *under* the registry cli-spinlock (the cr3 scan, every
+        // registry walk, the fixture reset). `task_put` decrements here and
+        // defers the allocator-heavy destructor to a context that can run it.
+        super::task_put(arc);
     }
 }
 
-/// One registered task. Lookups upgrade `weak`; `owner` is the transitional
-/// scheduler-lifetime strong reference, held here until the scheduler's
-/// placement containers take ownership, after which the registry is
-/// weak-only.
+/// One registered task.
+///
+/// The registry never owns a task. `weak` is the only handle it keeps, so a
+/// lookup is a liveness-checked upgrade and there is no way to fabricate a
+/// strong reference from an entry. What keeps a registered task alive instead is
+/// its own existence reference: a task is registered exactly while it holds one,
+/// and the reap gives it back and unhashes the entry as a single step.
 struct RegistryEntry {
     id: u32,
     weak: KWeak<Task>,
-    owner: KArc<Task>,
 }
 
 /// Weak-upgrade liveness index over a pre-reserved slot spine.
@@ -213,11 +218,19 @@ impl TaskRegistry {
             })
     }
 
+    /// Whether `task` addresses one of this registry's entries.
+    ///
+    /// Compares against the weak handle's identity address, which is defined
+    /// without upgrading and without reading through the pointer — upgrading
+    /// here would mint a handle that could become the final reference and run
+    /// the allocator-heavy destructor under this lock. Because a registered task
+    /// is exactly one holding its existence reference, a match still means the
+    /// pointer names a live, initialised task.
     fn owns_pointer(&self, task: *const Task) -> bool {
         self.slots[..self.high_water]
             .iter()
             .flatten()
-            .any(|entry| core::ptr::eq(KArc::as_ptr(&entry.get().owner), task))
+            .any(|entry| core::ptr::eq(entry.get().weak.as_ptr(), task))
     }
 }
 
@@ -292,140 +305,107 @@ fn ensure_registry_allocated() -> bool {
     true
 }
 
-#[inline]
-fn task_drop_context_is_safe() -> bool {
-    slopos_ostd::cpu::x86_64::interrupts::are_interrupts_enabled() && held_lock_count() == 0
-}
-
-fn drop_unregistered(entry: Option<(KWeak<Task>, KArc<Task>)>) {
-    let Some((weak, owner)) = entry else {
-        return;
-    };
-    slopos_ostd::task::drop_off_lock(weak);
-    slopos_ostd::task::drop_off_lock(owner);
-}
-
-fn remove_registration(id: u32, require_sole_owner: bool) -> Option<(KWeak<Task>, KArc<Task>)> {
-    with_task_manager(|mgr| {
-        if require_sole_owner && KArc::strong_count(&mgr.registry.find(id)?.owner) != 1 {
-            return None;
-        }
-        let entry = mgr.registry.remove(id)?;
-        Some((entry.weak, entry.owner))
-    })
-}
-
-/// Retire a terminated task once the legacy scheduler reference count and
-/// every upgraded registry guard are gone.
-pub(crate) fn task_try_reclaim(task: *mut Task) -> bool {
-    let Some(id) = task_id_of(task) else {
-        return false;
-    };
-    task_try_reclaim_id(id)
-}
-
-/// Drop one owning reference held by a transitional scheduler container (ready
-/// queue, remote inbox, dispatch slot, or wait map) and retire a terminated
-/// task when that drop leaves only the registry owner.
+/// Reap a task: unhash its registration and give back the existence reference
+/// it has held since registration, as one step.
 ///
-/// The id and termination status are captured before the drop: retirement may
-/// run the owner's destructor, after which the pointer must not be touched.
-/// The drop here is never the last strong reference — the registry owner
-/// outlives every placement reference — so it is a bare atomic decrement and is
-/// safe under a lock or with interrupts disabled; the actual destructor runs
-/// off-lock inside [`task_try_reclaim_id`].
-#[inline]
-pub fn release_placement_arc(arc: KArc<Task>) {
-    let id = arc.task_id;
-    let terminated = arc.status() == TaskStatus::Terminated;
-    // Routed through `task_put` so the release is safe from any context: if
-    // this ever becomes the final reference, the destructor either runs here or
-    // is deferred to the graveyard rather than firing under a lock.
-    super::task_put(arc);
-    if terminated {
-        let _ = task_try_reclaim_id(id);
-    }
-}
-
-/// Drop one owning placement reference and, for a terminated task, arm the idle
-/// dispatcher's reclaim drain instead of retiring it inline.
+/// This is SlopOS's `release_task`. It declines while the task is still
+/// dispatch-pinned, because unhashing a task that is still some CPU's current
+/// would make [`task_pointer_is_valid`] report pointer corruption and send
+/// `scheduler_tasks_for_cpu` down its recovery path on the dying task's own
+/// stack; the deferred drain retries once the pin clears.
 ///
-/// The context-switch tail uses this so its drain stays a bare atomic decrement:
-/// the allocator-heavy `Task` destructor (buddy free + cross-CPU TLB drain)
-/// never runs in the switch window, only later on the idle stack via
-/// [`task_reclaim_deferred`]. As with [`release_placement_arc`], this drop is
-/// never the last strong reference — the registry owner outlives it.
-#[inline]
-pub fn release_placement_arc_deferred(arc: KArc<Task>) {
-    let terminated = arc.status() == TaskStatus::Terminated;
-    // The switch tail runs with interrupts off, so `task_put` will park rather
-    // than destroy if this is ever the final reference.
-    super::task_put(arc);
-    if terminated {
-        arm_deferred_reclaim();
-    }
-}
-
-/// One-shot retry latch for reclaims attempted from contexts where the
-/// `Task` destructor may not run (IRQs off or a tracked lock held). The
-/// idle dispatcher drains it via [`task_reclaim_deferred`]; ids are never
-/// recorded because id-keyed re-lookup is race-free and allocation-free.
-static RECLAIM_PENDING: AtomicBool = AtomicBool::new(false);
-
-fn task_try_reclaim_id(id: u32) -> bool {
+/// The gate is a statement about task *state*, never about a reference count: a
+/// count pre-check cannot be made race-free, and the final release is decided by
+/// the decrement inside [`super::task_put`] instead.
+fn reap_task_registration(id: u32) -> bool {
     if id == INVALID_TASK_ID {
         return false;
     }
-    if !task_drop_context_is_safe() {
-        RECLAIM_PENDING.store(true, Ordering::Release);
-        return false;
-    }
-    let reclaimable = with_task_manager(|mgr| {
-        let owner = &mgr.registry.find(id)?.owner;
-        let task = owner.as_ref();
+    let taken = with_task_manager(|mgr| {
+        // A registered task holds its existence reference, so this upgrade
+        // cannot fail for an entry that is present.
+        let task = mgr.registry.find(id)?.weak.upgrade()?;
+        let node = NonNull::new(KArc::as_ptr(&task) as *mut Task)?;
         if task.status() != TaskStatus::Terminated {
             return None;
         }
-        if !task.on_cpu.load(Ordering::Acquire) && KArc::strong_count(owner) == 1 {
-            return Some(());
+        if crate::scheduler::task_is_dispatch_pinned(node.as_ptr()) {
+            REAP_BLOCKED_BY_DISPATCH.store(true, Ordering::Release);
+            return None;
         }
-        // Terminated but still pinned. Every pinning reference retries on
-        // release, but a releaser may have sampled the status before this
-        // task turned Terminated — arm the idle drain so that race cannot
-        // strand the task.
-        RECLAIM_PENDING.store(true, Ordering::Release);
-        None
-    })
-    .is_some();
-    if !reclaimable {
+        let existence = task_existence_release(node)?;
+        // Unhash while the existence reference is still held: the weak count is
+        // then at least two (the implicit one the strongs own, plus this entry's),
+        // so dropping the entry is a bare decrement that provably cannot reach
+        // the allocator from under this cli-spinlock.
+        let entry = mgr.registry.remove(id).expect("found under the same lock");
+        drop(entry.weak);
+        // The temporary upgrade above. Non-final while `existence` is held.
+        super::task_put(task);
+        Some(existence)
+    });
+    let Some(existence) = taken else {
         return false;
+    };
+    // Off-lock, so this may be the final release and run the destructor inline.
+    super::task_put(existence);
+    true
+}
+
+/// Retire a registration unconditionally, ignoring the status and dispatch-pin
+/// gates. Fixture reset only.
+///
+/// Unlinks the task from its parent first: a zombie still parked in a preserved
+/// parent's children list would otherwise keep a reference in a list nothing can
+/// reach afterwards, leaving the task linked, unreachable and never dropped.
+fn force_reap_registration(id: u32) {
+    let Some(guard) = task_find_by_id(id) else {
+        return;
+    };
+    let Some(node) = NonNull::new(guard.as_ptr()) else {
+        return;
+    };
+    // Off-lock, and before the unhash: resolving the parent takes the same lock.
+    if let Some(parent_ref) = super::unlink_child(node.as_ptr()) {
+        super::task_put(parent_ref);
     }
-    let entry = remove_registration(id, true);
-    let removed = entry.is_some();
-    drop_unregistered(entry);
-    removed
+    let existence = task_existence_release(node);
+    let entry = with_task_manager(|mgr| mgr.registry.remove(id));
+    if let Some(entry) = entry {
+        slopos_ostd::task::drop_off_lock(entry.weak);
+    }
+    drop(guard);
+    if let Some(existence) = existence {
+        super::task_put(existence);
+    }
 }
 
-/// Whether a deferred reclaim attempt has armed the retry latch since the
-/// last [`task_reclaim_deferred`] drain.
+/// One-shot retry latch for reaps refused because the task was still
+/// dispatch-pinned. The idle dispatcher drains it via
+/// [`task_reap_dispatch_pinned`]; ids are never recorded, because id-keyed
+/// re-lookup is race-free and allocation-free — recording them would mean
+/// allocating under the registry lock, which the spine design forbids.
+static REAP_BLOCKED_BY_DISPATCH: AtomicBool = AtomicBool::new(false);
+
+/// Whether a reap has been refused for a still-pinned task since the last drain.
 #[inline]
-pub fn task_reclaim_pending() -> bool {
-    RECLAIM_PENDING.load(Ordering::Acquire)
+pub fn task_reap_pending() -> bool {
+    REAP_BLOCKED_BY_DISPATCH.load(Ordering::Acquire)
 }
 
-/// Arm the deferred-reclaim latch directly. For paths that transition tasks
-/// to `Terminated` but cannot perform the retirement themselves.
+/// Arm the deferred-reap latch directly, for paths that move a task to
+/// `Terminated` but cannot reap it themselves.
 #[inline]
-pub(super) fn arm_deferred_reclaim() {
-    RECLAIM_PENDING.store(true, Ordering::Release);
+pub fn arm_deferred_reap() {
+    REAP_BLOCKED_BY_DISPATCH.store(true, Ordering::Release);
 }
 
-/// Retire terminated tasks whose reclaim was attempted from a context that
-/// could not run the destructor. Called by the idle dispatcher with IRQs
-/// enabled and no tracked lock held; a no-op unless such an attempt armed
-/// the latch since the last drain.
-pub fn task_reclaim_deferred() {
-    if !RECLAIM_PENDING.swap(false, Ordering::AcqRel) {
+/// Reap terminated tasks whose reap was refused while they were dispatch-pinned.
+///
+/// Called by the idle dispatcher with interrupts enabled and no lock held; a
+/// no-op unless a refusal armed the latch since the last drain.
+pub fn task_reap_dispatch_pinned() {
+    if !REAP_BLOCKED_BY_DISPATCH.swap(false, Ordering::AcqRel) {
         return;
     }
     const BATCH: usize = 32;
@@ -446,11 +426,21 @@ pub fn task_reclaim_deferred() {
         }
     });
     if truncated {
-        RECLAIM_PENDING.store(true, Ordering::Release);
+        REAP_BLOCKED_BY_DISPATCH.store(true, Ordering::Release);
     }
     for id in &ids[..count] {
-        let _ = task_try_reclaim_id(*id);
+        let _ = reap_task_registration(*id);
     }
+}
+
+/// Reap the task `id` names, if it is ready to be reaped.
+///
+/// The sole entry point for teardown paths: `task_terminate`'s cleanup, the
+/// post-switch cleanup of a task that has just left its CPU, `waitpid`'s reap,
+/// and a dying parent's auto-reap of its zombie children.
+#[inline]
+pub(crate) fn task_reap(id: u32) -> bool {
+    reap_task_registration(id)
 }
 
 /// Initialize the registry. Reinitialization is a test-fixture operation:
@@ -487,7 +477,7 @@ pub fn init_task_manager() -> c_int {
         true
     });
     for id in retire.iter() {
-        drop_unregistered(remove_registration(*id, false));
+        force_reap_registration(*id);
     }
     with_task_manager(|mgr| {
         mgr.total_context_switches = 0;
@@ -669,34 +659,44 @@ pub(super) fn allocate_task() -> Result<PendingTask, TaskAllocError> {
     })
 }
 
-/// Publish a fully initialized task into the registry: the weak handle
-/// serves lookups, the strong handle is the transitional scheduler-lifetime
-/// owner. Fails only when every spine slot is occupied (live tasks plus
-/// not-yet-retired terminated ones); the caller discards the pending task.
+/// Publish a fully initialized task into the registry and hand it its own
+/// existence reference.
+///
+/// The registry keeps only a weak handle, so what makes the task outlive this
+/// call is the existence reference — parked after the insert succeeds, so a
+/// rejected insert leaves nothing to unpark. Fails only when every spine slot is
+/// occupied (live tasks plus not-yet-reaped terminated ones); the caller then
+/// discards the pending task.
+///
+/// The returned handle pins the task across the rest of the caller's own
+/// construction, which still works through a raw pointer.
 pub(super) fn register_task(mut pending: PendingTask) -> Result<KArc<Task>, PendingTask> {
     let id = pending.id;
     let task = pending.task.take().expect("pending task owns allocation");
-    // Handed back so the caller pins the task across the rest of its own
-    // construction. Registration alone is not enough: the caller keeps using a
-    // raw pointer afterwards (to link a parent, to publish), and a concurrent
-    // shutdown sweep can terminate and reclaim a registered task.
-    let registered = task.clone();
+    let Some(node) = NonNull::new(KArc::as_ptr(&task) as *mut Task) else {
+        pending.task = Some(task);
+        return Err(pending);
+    };
     let entry = RegistryEntry {
         id,
         weak: KArc::downgrade(&task),
-        owner: task,
     };
     let rejected = with_task_manager(|mgr| {
         debug_assert!(mgr.registry.find(id).is_none(), "task id collision");
         mgr.registry.insert(entry).err()
     });
     match rejected {
-        None => Ok(registered),
+        None => {
+            let parked = task_existence_park(node);
+            debug_assert!(
+                parked,
+                "a freshly registered task already held its existence reference"
+            );
+            Ok(task)
+        }
         Some(entry) => {
             slopos_ostd::task::drop_off_lock(entry.weak);
-            pending.task = Some(entry.owner);
-            // Non-final: the handle just restored into `pending` outlives it.
-            drop(registered);
+            pending.task = Some(task);
             Err(pending)
         }
     }
@@ -756,9 +756,9 @@ pub fn task_consume_zombie(task_id: u32) -> Option<ExitInfo> {
     // A Zombie is pinned by that reference, so without this the reaped child
     // would stay Terminated-pinned until the parent itself exits.
     if let Some(parent_ref) = super::unlink_child(child_ptr) {
-        release_placement_arc(parent_ref);
+        super::task_put(parent_ref);
     }
-    let _ = task_try_reclaim_id(task_id);
+    let _ = reap_task_registration(task_id);
     Some(info)
 }
 

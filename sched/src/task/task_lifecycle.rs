@@ -18,7 +18,7 @@ use super::task_cleanup_hooks::run_task_resource_cleanup_hooks;
 use super::task_session::{notify_parent_of_child_exit, release_task_dependents};
 use super::task_stats::record_task_created;
 use super::task_table::{
-    TaskAllocError, allocate_task, discard_task, register_task, task_find_by_id, task_try_reclaim,
+    TaskAllocError, allocate_task, discard_task, register_task, task_find_by_id, task_reap,
     with_task_manager,
 };
 use super::{
@@ -886,20 +886,26 @@ fn parent_alive_for(parent_id: u32) -> bool {
 ///   * drop the owning reference the list held.
 ///
 /// Each `take_one_child` pop runs under the registry lock; the returned
-/// reference is dropped off-lock via `release_placement_arc` and is never the
-/// last reference (the registry owner outlives it), so the drop is a bare
-/// decrement and a zombie's retirement self-defers.
+/// reference is dropped off-lock and is never the last one, because the child
+/// still holds its own existence reference until it is reaped.
+///
+/// A child demoted to `Terminated` here has just lost its only reaper, so this
+/// is the one place that must reap it. A live child keeps its existence
+/// reference and reaps itself when it exits.
 fn reparent_and_reap_children(dying: *mut Task) {
     if dying.is_null() {
         return;
     }
     while let Some(child) = super::take_one_child(dying) {
         let child_ptr = KArc::as_ptr(&child) as *mut Task;
+        let child_id = task_id_of(child_ptr).unwrap_or(INVALID_TASK_ID);
         super::task_accessors::task_set_parent_task_id(child_ptr, INVALID_TASK_ID);
-        if child.status() == TaskStatus::Zombie {
-            let _ = child.try_transition_to(TaskStatus::Terminated);
+        let orphaned_zombie =
+            child.status() == TaskStatus::Zombie && child.try_transition_to(TaskStatus::Terminated);
+        super::task_put(child);
+        if orphaned_zombie {
+            let _ = task_reap(child_id);
         }
-        super::task_table::release_placement_arc(child);
     }
 }
 
@@ -912,7 +918,7 @@ fn cleanup_terminated_task_resources(task_ptr: *mut Task, resolved_id: u32) {
     task_recovery_depth_store(task_ptr, 0);
     task_panic_in_flight_store(task_ptr, 0);
 
-    let _ = task_try_reclaim(task_ptr);
+    let _ = task_reap(task_id_of(task_ptr).unwrap_or(INVALID_TASK_ID));
 }
 
 pub fn cleanup_current_task_after_switch(task_ptr: *mut Task) {
@@ -944,7 +950,7 @@ pub fn cleanup_current_task_after_switch(task_ptr: *mut Task) {
         });
     }
 
-    let _ = task_try_reclaim(task_ptr);
+    let _ = task_reap(task_id_of(task_ptr).unwrap_or(INVALID_TASK_ID));
 }
 
 #[inline]

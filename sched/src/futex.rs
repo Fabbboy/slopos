@@ -18,7 +18,7 @@ use slopos_ostd::task::task_placement_clone;
 use super::scheduler::{
     mark_current_blocked, scheduler_get_current_task, unblock_task, yield_blocked_task,
 };
-use super::task::{INVALID_TASK_ID, release_placement_arc, task_id_of};
+use super::task::{INVALID_TASK_ID, task_id_of, task_put};
 use super::task_struct::Task;
 
 /// Number of hash buckets. Must be a power of two.
@@ -212,12 +212,12 @@ pub fn futex_wake(uaddr: u64, max_wake: u32) -> i64 {
         // alive because we still hold `arc`. `unblock_task`'s enqueue path
         // clones its own membership reference (bucket lock RESOURCE → run-queue
         // lock, no cycle), then we drop `arc` — never the last reference, since
-        // the registry owner outlives it.
+        // the task holds its own existence reference until it is reaped.
         let taken = core::mem::replace(&mut bucket.waiters[i], FutexWaiter::empty());
         bucket.count = bucket.count.saturating_sub(1);
         if let Some(arc) = taken.task.into_inner() {
             let _ = unblock_task(KArc::as_ptr(&arc) as *mut Task);
-            release_placement_arc(arc);
+            task_put(arc);
         }
         woken += 1;
     }
@@ -246,10 +246,10 @@ pub fn futex_remove_task(task: *mut Task) {
             let taken = core::mem::replace(waiter, FutexWaiter::empty());
             removed += 1;
             // Drop the bucket's owning reference. Never the last one — the
-            // registry owner outlives it — so this is a bare decrement under
+            // task's own existence reference outlives it — so this is a bare decrement under
             // the bucket lock, and any retirement it triggers self-defers.
             if let Some(arc) = taken.task.into_inner() {
-                release_placement_arc(arc);
+                task_put(arc);
             }
         }
         bucket.count = bucket.count.saturating_sub(removed);

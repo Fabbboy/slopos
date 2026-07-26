@@ -631,8 +631,14 @@ pub fn test_task_registry_live_cap() -> TestResult {
     }
 }
 
-/// A held registry guard pins a terminated task; the final guard drop
-/// retires it and later lookups fail.
+/// A held registry guard pins the *allocation* of a reaped task, not its
+/// *registration*.
+///
+/// The reap unhashes the entry as soon as the task is terminated and off-CPU, so
+/// lookups stop resolving immediately and do not wait on outstanding guards —
+/// this is `release_task`'s unhash. What the guard still guarantees is that the
+/// memory stays valid while it is held, which is the property the registry can no
+/// longer provide now that it only observes tasks.
 pub fn test_task_guard_pins_terminated_task() -> TestResult {
     let _fixture = SchedFixture::new();
 
@@ -649,18 +655,25 @@ pub fn test_task_guard_pins_terminated_task() -> TestResult {
     let Some(guard) = super::task::task_find_by_id(id) else {
         return TestResult::Fail;
     };
+    let weak = guard.downgrade_for_test();
     if task_terminate(id) != 0 {
         return TestResult::Fail;
     }
-    // The held guard blocks retirement: the task must still resolve.
-    if super::task::task_find_by_id(id).is_none() {
-        klog_info!("SCHED_TEST: guarded terminated task {} vanished", id);
+
+    // Unhashed by the reap, independently of the outstanding guard.
+    if super::task::task_find_by_id(id).is_some() {
+        klog_info!("SCHED_TEST: reaped task {} still resolves", id);
         return TestResult::Fail;
     }
+    // ...but the guard still keeps the allocation alive.
+    if weak.upgrade().is_none() {
+        klog_info!("SCHED_TEST: guarded task {} freed while pinned", id);
+        return TestResult::Fail;
+    }
+
     drop(guard);
-    // The final guard drop retired the task.
-    if super::task::task_find_by_id(id).is_some() {
-        klog_info!("SCHED_TEST: task {} survived its final guard drop", id);
+    if weak.upgrade().is_some() {
+        klog_info!("SCHED_TEST: task {} survived its final reference", id);
         return TestResult::Fail;
     }
     TestResult::Pass

@@ -142,19 +142,18 @@ pub use super::sleep::{block_current_task_with_timeout, cancel_sleep, sleep_curr
 use super::sleep::{reset_sleep_queue, sleep_queue_next_deadline_ticks, wake_due_sleepers};
 use super::task::{
     INVALID_PROCESS_ID, INVALID_TASK_ID, TASK_FLAG_KERNEL_MODE, TASK_FLAG_NO_PREEMPT,
-    TASK_FLAG_USER_MODE, Task, TaskPriority, TaskStatus, release_placement_arc,
-    task_controlling_tty, task_cpu_affinity, task_exit_info_ref, task_fpu_state_mut, task_fs_base,
-    task_has_flag, task_id_of, task_is_exited, task_is_invalid, task_is_ready, task_is_running,
-    task_kernel_stack_top, task_last_cpu, task_last_run_timestamp, task_name_looks_idle,
-    task_on_cpu_load, task_panic_in_flight_load, task_panic_in_flight_store,
-    task_pcr_round_trip_swap, task_pgid, task_pointer_is_valid, task_priority, task_process_id,
-    task_record_context_switch, task_record_yield, task_recovery_depth_load,
-    task_recovery_depth_store, task_remote_inbox_is_linked, task_sched_placement_compare_exchange,
-    task_sched_placement_load, task_sched_placement_store, task_set_controlling_tty,
-    task_set_on_cpu, task_set_state, task_set_status, task_set_time_slice,
-    task_set_time_slice_remaining, task_sid, task_status, task_switch_ctx_ptr,
-    task_switch_ctx_ptr_mut, task_switch_ctx_rip_rsp, task_time_slice, task_time_slice_remaining,
-    task_try_transition_from,
+    TASK_FLAG_USER_MODE, Task, TaskPriority, TaskStatus, task_controlling_tty, task_cpu_affinity,
+    task_exit_info_ref, task_fpu_state_mut, task_fs_base, task_has_flag, task_id_of,
+    task_is_exited, task_is_invalid, task_is_ready, task_is_running, task_kernel_stack_top,
+    task_last_cpu, task_last_run_timestamp, task_name_looks_idle, task_on_cpu_load,
+    task_panic_in_flight_load, task_panic_in_flight_store, task_pcr_round_trip_swap, task_pgid,
+    task_pointer_is_valid, task_priority, task_process_id, task_put, task_record_context_switch,
+    task_record_yield, task_recovery_depth_load, task_recovery_depth_store,
+    task_remote_inbox_is_linked, task_sched_placement_compare_exchange, task_sched_placement_load,
+    task_sched_placement_store, task_set_controlling_tty, task_set_on_cpu, task_set_state,
+    task_set_status, task_set_time_slice, task_set_time_slice_remaining, task_sid, task_status,
+    task_switch_ctx_ptr, task_switch_ctx_ptr_mut, task_switch_ctx_rip_rsp, task_time_slice,
+    task_time_slice_remaining, task_try_transition_from,
 };
 pub use super::trap::{
     RescheduleReason, TrapExitSource, save_preempt_context, save_task_context_from_interrupt_frame,
@@ -1414,31 +1413,37 @@ pub(crate) fn drain_previous_task() -> bool {
         return false;
     };
 
-    // Reclaim the parked dispatch reference and drop it. This drop is never the
-    // last strong reference (the registry owner outlives it), so it is a bare
-    // atomic decrement — safe here even with interrupts disabled and no lock
-    // discipline. Crucially, a terminated task's allocator-heavy retirement is
-    // NOT run in this switch tail: `release_placement_arc_deferred` arms the
-    // idle dispatcher's reclaim drain, which frees the outgoing stack later on
-    // the successor's idle stack with interrupts enabled and no lock held.
+    // Reclaim the parked dispatch reference and release it. The task still holds
+    // its own existence reference until it is reaped, so this is a bare atomic
+    // decrement — safe here with interrupts disabled and no lock discipline —
+    // and `task_put` parks rather than destroys should it ever be the last.
+    //
+    // A terminated task's allocator-heavy reap is deliberately not run in this
+    // switch tail; arming the latch defers it to the idle dispatcher, which
+    // frees the outgoing stack later on the successor's stack with interrupts
+    // enabled and no lock held. Sampled before the release: afterwards the
+    // pointer must not be touched.
     let dispatch_ref = task_placement_reclaim(node);
-    super::task::release_placement_arc_deferred(dispatch_ref);
+    let terminated = dispatch_ref.status() == TaskStatus::Terminated;
+    super::task::task_put(dispatch_ref);
+    if terminated {
+        super::task::arm_deferred_reap();
+    }
     true
 }
 
-/// Retire terminated tasks whose reclaim was attempted from a context that
-/// could not run the `Task` destructor. Runs under the same idle-stack
+/// Reap terminated tasks whose reap was refused while they were dispatch-pinned. Runs under the same idle-stack
 /// interrupt-window contract as [`drain_previous_task`]; a cheap no-op
 /// unless a deferred attempt armed the retry latch.
 pub(crate) fn drain_deferred_task_reclaim() {
-    let retire = super::task::task_reclaim_pending();
+    let retire = super::task::task_reap_pending();
     let destroy = super::task::task_graveyard_pending();
     if !retire && !destroy {
         return;
     }
     let _restore_interrupts = RestoreInterruptState::open_window();
     if retire {
-        slopos_ostd::task::run_off_lock(super::task::task_reclaim_deferred);
+        slopos_ostd::task::run_off_lock(super::task::task_reap_dispatch_pinned);
     }
     // Destroy after retiring: a retirement can drop the last reference and so
     // park a fresh corpse, and draining second collects it in the same pass.
@@ -1836,14 +1841,14 @@ fn wait_ref_acquire(waiter_id: u32, target: *mut Task) {
     // A task can only be parked in one wait at a time; a pre-existing entry
     // would be a bug, but release it off-lock rather than leak.
     if let Some(prev) = stale {
-        release_placement_arc(prev.into_inner());
+        task_put(prev.into_inner());
     }
 }
 
 fn wait_ref_release(waiter_id: u32) {
     let entry = { WAIT_REFS.lock().remove(&waiter_id) };
     if let Some(target) = entry {
-        release_placement_arc(target.into_inner());
+        task_put(target.into_inner());
     }
 }
 
@@ -2378,6 +2383,24 @@ fn rescue_strike(task_id: u32) -> bool {
         .fetch_add(1, Ordering::Relaxed)
         .saturating_add(1);
     strikes >= RESCUE_STRIKE_THRESHOLD
+}
+
+/// Whether any CPU is still executing `task` or still names it as its current
+/// task.
+///
+/// The reap gate and the destructor gate both key on this, so they can never
+/// disagree. `on_cpu` alone is not enough: `dispatch()` publishes
+/// `PCR.current_task` without setting `on_cpu`, so a task can be a CPU's current
+/// without being marked on-CPU. Unhashing such a task would make
+/// `task_pointer_is_valid` report pointer corruption and send
+/// `scheduler_tasks_for_cpu` down its recovery path — on the dying task's own
+/// stack.
+#[inline]
+pub(crate) fn task_is_dispatch_pinned(task: *mut Task) -> bool {
+    if task.is_null() {
+        return false;
+    }
+    slopos_ostd::task::accessors::task_on_cpu_load(task) || task_is_current_on_any_cpu(task)
 }
 
 fn task_is_current_on_any_cpu(task: *mut Task) -> bool {

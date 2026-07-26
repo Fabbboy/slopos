@@ -172,7 +172,7 @@ pub fn task_placement_reclaim<K, U>(ptr: NonNull<TaskInner<K, U>>) -> KArc<TaskI
 ///
 /// # Correctness
 /// `ptr` must address a task whose strong count is currently non-zero (it has a
-/// live owning reference — its registry owner, an on-CPU dispatch reference, or
+/// live owning reference — its own existence reference, an on-CPU dispatch one, or
 /// an existing container membership — that keeps the allocation alive for the
 /// duration of the call). The returned handle is an independent owning
 /// reference the caller disposes normally.
