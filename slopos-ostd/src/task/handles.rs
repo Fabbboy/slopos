@@ -5,6 +5,7 @@
 //! `Linked` keyword stays interior to the trusted core.
 
 use crate::sync::intrusive::{Link, Linked};
+use crate::sync::intrusive_dlist::{DLink, DLinked};
 
 /// Kernel-implemented safe trait pointing at a task's `Link<Self, Role>`
 /// field. A blanket `unsafe impl<T: LinkProvider<R>, R> Linked<R> for T`
@@ -36,5 +37,25 @@ where
     #[inline]
     fn link(&self) -> &Link<Self, R> {
         LinkProvider::link(self)
+    }
+}
+
+/// [`LinkProvider`]'s counterpart for the doubly-linked ownership lists.
+/// Same delegation: the kernel writes a safe impl naming the field, and the
+/// `unsafe trait` site stays interior to OSTD.
+pub trait DLinkProvider<Role>: Sized {
+    fn dlink(&self) -> &DLink<Self, Role>;
+}
+
+// SAFETY: as with `LinkProvider` above, the stable-address and
+// distinct-field-per-role properties are discharged by the kernel-side impl on
+// a stable kernel type.
+unsafe impl<T, R> DLinked<R> for T
+where
+    T: DLinkProvider<R>,
+{
+    #[inline]
+    fn dlink(&self) -> &DLink<Self, R> {
+        DLinkProvider::dlink(self)
     }
 }

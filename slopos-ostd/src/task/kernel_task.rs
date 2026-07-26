@@ -26,12 +26,13 @@ pub use slopos_abi::task::{
 
 use crate::cpu::x86_64::pcr::KernelReturnContext;
 use crate::sync::AtomicCell;
-use crate::sync::intrusive::{IntrusiveLinkedList, Link};
+use crate::sync::intrusive::Link;
+use crate::sync::intrusive_dlist::{DLink, IntrusiveDList};
 use crate::task::abi::TaskAbi;
 use crate::task::exit_info::ExitInfo;
 use crate::task::fpu::{FPU_STATE_SIZE, FpuState};
 use crate::task::job_control::ProcessGroup;
-use crate::task::link_roles::{ReadyQueueRole, RemoteWakeRole, SiblingRole};
+use crate::task::link_roles::{ReadyQueueRole, ReclaimRole, RemoteWakeRole, SiblingRole};
 use crate::task::state::TaskState;
 use crate::task::test_reports::TestReportRing;
 use crate::user::context::UserContext;
@@ -356,11 +357,21 @@ pub struct TaskInner<K, U> {
     /// parked reference — until `waitpid` reaps it or this task's own teardown
     /// drains the list. There is no separate zombie list; a zombie is just a
     /// child whose status is `Zombie`.
-    pub children: IntrusiveLinkedList<TaskInner<K, U>, SiblingRole>,
-    /// Intrusive link slot naming this task's membership in its parent's
-    /// `children` list. A task is linked into at most one parent's list; the
-    /// single-membership invariant of the role-typed slot rejects a double-link.
-    pub sibling_link: Link<TaskInner<K, U>, SiblingRole>,
+    pub children: IntrusiveDList<TaskInner<K, U>, SiblingRole>,
+    /// Intrusive link slot naming this task's membership in the one owner list
+    /// holding it. A task is linked into at most one such list; the
+    /// single-membership invariant of the role-typed slot rejects a
+    /// double-link, and the slot's owner back-pointer lets the task be
+    /// unlinked without naming which list that is.
+    pub sibling_link: DLink<TaskInner<K, U>, SiblingRole>,
+    /// Intrusive link slot for the task graveyard — the lock-free stack of
+    /// tasks awaiting destruction in a context where the allocator may run.
+    ///
+    /// Unlike every other link slot, membership here does *not* imply a parked
+    /// strong reference: the pusher won the final release, so the strong count
+    /// is already zero and the pusher owns the allocation outright. That is why
+    /// it gets its own role.
+    pub reclaim_link: Link<TaskInner<K, U>, ReclaimRole>,
     /// Explicit scheduler placement owner for runnable tasks. This is the
     /// cross-role gate that prevents a task from being in a ready queue and a
     /// remote wake inbox at the same time.
@@ -416,7 +427,25 @@ impl<K, U> TaskInner<K, U> {
         );
         debug_assert!(
             !self.sibling_link.is_linked(),
-            "task dropped while still linked into a parent's children list"
+            "task dropped while still linked into an owner list"
+        );
+        // A still-linked scheduler slot means the container's parked reference
+        // leaked: the count could not have reached zero while that reference
+        // existed, so reaching the destructor here means a retain/reclaim pair
+        // went unbalanced. Previously undetectable.
+        debug_assert!(
+            !self.ready_link.is_linked(),
+            "task dropped while still linked into a ready queue"
+        );
+        debug_assert!(
+            !self.remote_inbox_link.is_linked(),
+            "task dropped while still linked into a remote wake inbox"
+        );
+        // The graveyard pops a node before destroying it; still being linked
+        // means the destructor is running on a node another drain still names.
+        debug_assert!(
+            !self.reclaim_link.is_linked(),
+            "task dropped while still parked in the reclaim queue"
         );
     }
 }
@@ -482,8 +511,9 @@ impl<K, U> TaskInner<K, U> {
             on_cpu: AtomicBool::new(false),
             ready_link: Link::new(),
             remote_inbox_link: Link::new(),
-            children: IntrusiveLinkedList::new(),
-            sibling_link: Link::new(),
+            children: IntrusiveDList::new(),
+            sibling_link: DLink::new(),
+            reclaim_link: Link::new(),
             sched_placement: AtomicU8::new(SchedPlacement::None.as_u8()),
             recovery_depth: AtomicU32::new(0),
             panic_in_flight: AtomicU32::new(0),
@@ -713,6 +743,7 @@ impl<K, U> TaskInner<K, U> {
         self.ready_link.reset();
         self.remote_inbox_link.reset();
         self.sibling_link.reset();
+        self.reclaim_link.reset();
         self.sched_placement
             .store(SchedPlacement::None.as_u8(), Ordering::Release);
         self.recovery_depth.store(0, Ordering::Release);
@@ -746,17 +777,20 @@ impl<K, U> TaskInner<K, U> {
             core::ptr::write(&mut self.exit_info as *mut _, AtomicCell::empty());
             core::ptr::write(&mut self.state as *mut _, TaskState::invalid());
             // The bytewise copy duplicated the parent's `children` head/tail
-            // and its `sibling_link` membership state. Overwrite the list head
-            // with an empty one (no `Drop` on `IntrusiveLinkedList`, so
-            // `ptr::write` over the raw copy is correct — it must not run a
-            // destructor on the copied bits) and detach the sibling slot: a
-            // fresh child owns no children and is linked into no parent's list
-            // until `link_child` publishes it.
-            core::ptr::write(&mut self.children as *mut _, IntrusiveLinkedList::new());
+            // and its owner-list membership state. Overwrite the list head with
+            // an empty one (no `Drop` on `IntrusiveDList`, so `ptr::write` over
+            // the raw copy is correct — it must not run a destructor on the
+            // copied bits) and detach the owner slot: a fresh child owns no
+            // children and is linked into no owner list until registration
+            // publishes it. Leaving the copied `owner` back-pointer in place
+            // would make the child claim membership in its parent's list, and
+            // an unlink would then corrupt that list.
+            core::ptr::write(&mut self.children as *mut _, IntrusiveDList::new());
         }
         self.ready_link.reset();
         self.remote_inbox_link.reset();
         self.sibling_link.reset();
+        self.reclaim_link.reset();
         // The bytewise copy carried the parent's own parent id. A fresh child
         // starts parentless; the spawn path publishes the real parent edge (id
         // + children-list membership) via `link_child` after registration.
@@ -785,8 +819,14 @@ impl<K, U> crate::task::LinkProvider<RemoteWakeRole> for TaskInner<K, U> {
     }
 }
 
-impl<K, U> crate::task::LinkProvider<SiblingRole> for TaskInner<K, U> {
-    fn link(&self) -> &Link<Self, SiblingRole> {
+impl<K, U> crate::task::DLinkProvider<SiblingRole> for TaskInner<K, U> {
+    fn dlink(&self) -> &DLink<Self, SiblingRole> {
         &self.sibling_link
+    }
+}
+
+impl<K, U> crate::task::LinkProvider<ReclaimRole> for TaskInner<K, U> {
+    fn link(&self) -> &Link<Self, ReclaimRole> {
+        &self.reclaim_link
     }
 }

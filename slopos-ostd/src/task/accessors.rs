@@ -28,6 +28,7 @@ use slopos_abi::task::{TaskExitReason, TaskFaultReason, TaskPriority, TaskStatus
 use crate::KArc;
 use crate::task::job_control::{ProcessGroup, Session};
 use crate::task::kernel_task::{SchedPlacement, SignalAction, TaskInner};
+use crate::task::link_roles::SiblingRole;
 
 pub const TASK_EXIT_CLEANUP_RESOURCES: u8 = 1 << 0;
 pub const TASK_EXIT_CLEANUP_VM: u8 = 1 << 1;
@@ -372,17 +373,17 @@ pub fn task_borrow_mut<'a, K, U>(task: *mut TaskInner<K, U>) -> Option<&'a mut T
 }
 
 // ---------------------------------------------------------------------------
-// Children-list mechanism.
+// Owner-list mechanism.
 //
-// The parent's `children` list and each child's `sibling_link` are the
-// intrusive membership machinery; these accessors are the safe surface over it.
-// They are pure mechanism — the strong-reference ownership (park on link,
-// reclaim on unlink) and the serialising registry lock are the scheduler crate's
-// policy. All list operations are `&self`, so a shared `task_borrow` suffices.
+// A parent's `children` list and each task's `sibling_link` are the intrusive
+// membership machinery; these accessors are the safe surface over it. They are
+// pure mechanism — the strong-reference ownership (park on link, reclaim on
+// unlink) and the serialising registry lock are the scheduler crate's policy.
+// All list operations are `&self`, so a shared `task_borrow` suffices.
 // ---------------------------------------------------------------------------
 
 /// Link `child` into `parent`'s children list. `Err(AlreadyLinked)` if the
-/// child is already a member of some parent's list; `Err(NotPresent)` on a null
+/// child is already a member of some owner list; `Err(NotPresent)` on a null
 /// parent.
 #[inline]
 pub fn task_children_push<K, U>(
@@ -390,7 +391,7 @@ pub fn task_children_push<K, U>(
     child: NonNull<TaskInner<K, U>>,
 ) -> Result<(), LinkError> {
     match task_borrow(parent) {
-        Some(p) => p.children.push(child),
+        Some(p) => p.children.push_back(child),
         None => Err(LinkError::NotPresent),
     }
 }
@@ -399,12 +400,21 @@ pub fn task_children_push<K, U>(
 /// `None` when the list is empty (or the parent pointer is null).
 #[inline]
 pub fn task_children_pop<K, U>(parent: *const TaskInner<K, U>) -> Option<NonNull<TaskInner<K, U>>> {
-    task_borrow(parent)?.children.pop()
+    task_borrow(parent)?.children.pop_front()
+}
+
+/// The head of `parent`'s children list without detaching it, so a caller can
+/// decide a child's fate and unlink it in the same critical section.
+#[inline]
+pub fn task_children_peek<K, U>(
+    parent: *const TaskInner<K, U>,
+) -> Option<NonNull<TaskInner<K, U>>> {
+    task_borrow(parent)?.children.peek_front()
 }
 
 /// Remove a specific `child` from `parent`'s children list. `Err(NotPresent)`
-/// if the child is not in the list (e.g. a concurrent drain already detached it)
-/// or the parent pointer is null.
+/// if the child is not in that list (e.g. a concurrent drain already detached
+/// it) or the parent pointer is null.
 #[inline]
 pub fn task_children_remove<K, U>(
     parent: *const TaskInner<K, U>,
@@ -420,6 +430,31 @@ pub fn task_children_remove<K, U>(
 #[inline]
 pub fn task_children_is_empty<K, U>(parent: *const TaskInner<K, U>) -> bool {
     task_borrow(parent).is_none_or(|p| p.children.is_empty())
+}
+
+/// Number of children currently linked under `parent`.
+#[inline]
+pub fn task_children_len<K, U>(parent: *const TaskInner<K, U>) -> usize {
+    task_borrow(parent).map_or(0, |p| p.children.len())
+}
+
+/// Detach `task` from whichever owner list currently holds it, without the
+/// caller having to know which one that is. Returns whether it was linked.
+///
+/// This is what makes retirement uniform: a task is dropped from its owner list
+/// identically whether that list is a parent's `children` or the parentless-task
+/// root list. The caller must hold the lock serialising every owner list.
+#[inline]
+pub fn task_owner_unlink<K, U>(task: NonNull<TaskInner<K, U>>) -> bool {
+    crate::sync::dlist_unlink::<TaskInner<K, U>, SiblingRole>(task)
+}
+
+/// Whether `task` is currently a member of some owner list. With ownership
+/// total, this is equivalent to "is registered", and the two are cross-checked
+/// by debug assertions at the registration and retirement sites.
+#[inline]
+pub fn task_owner_is_linked<K, U>(task: *const TaskInner<K, U>) -> bool {
+    task_borrow(task).is_some_and(|t| t.sibling_link.is_linked())
 }
 
 /// Record a user-mode-fault exit on `task`: sets `exit_reason`,

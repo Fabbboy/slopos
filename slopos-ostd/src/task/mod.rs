@@ -39,7 +39,7 @@ pub use test_reports::{
 };
 
 pub use fpu::{FPU_STATE_SIZE, FXSAVE_AREA_SIZE, FpuState, MXCSR_DEFAULT, fpu_xrstor, fpu_xsave};
-pub use handles::LinkProvider;
+pub use handles::{DLinkProvider, LinkProvider};
 pub use spawner::{
     KernelThreadEntry, KernelThreadSpawner, SpawnError, SpawnedTaskId,
     current_kernel_thread_spawner, register_kernel_thread_spawner, spawn,
