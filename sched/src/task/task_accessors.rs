@@ -6,23 +6,7 @@
 
 pub use slopos_ostd::task::accessors::*;
 
-use super::Task;
-use super::task_table::{task_find_by_id, task_pointer_is_valid};
-
-/// Validate the pointer through [`task_pointer_is_valid`]. Wraps the
-/// downstream null/whitelist check so callers can short-circuit
-/// before touching any field. Kernel-side because
-/// `task_pointer_is_valid` reaches the kernel task registry.
-#[inline]
-pub fn task_validate(task: *const Task) -> Option<*const Task> {
-    if task.is_null() {
-        None
-    } else if task_pointer_is_valid(task) {
-        Some(task)
-    } else {
-        None
-    }
-}
+use super::task_table::task_find_by_id;
 
 /// Establish `parent_task_id` as the parent of `task_id`: sets the child's
 /// parent id and parks one owning reference in the parent's children list (via

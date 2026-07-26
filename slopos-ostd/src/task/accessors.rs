@@ -190,14 +190,6 @@ task_scalar_getters! {
     task_tgid -> u32 = tgid,
     /// Read `task->parent_task_id`.
     task_parent_task_id -> u32 = parent_task_id,
-    /// Read `task->clear_child_tid` (futex-on-exit user-mode address).
-    task_clear_child_tid -> u64 = clear_child_tid,
-    /// Read `task->stack_pointer`.
-    task_stack_pointer -> u64 = stack_pointer,
-    /// Read `task->stack_base`.
-    task_stack_base -> u64 = stack_base,
-    /// Read `task->stack_size`.
-    task_stack_size -> u64 = stack_size,
     /// Plain (non-volatile) read of `task->last_run_timestamp`. Used by
     /// callers that don't need ordering across the context-switch boundary.
     task_last_run_timestamp -> u64 = last_run_timestamp,
@@ -224,8 +216,6 @@ task_scalar_setters! {
     /// Stamp `task->last_cpu` (set when the scheduler enqueues the task onto a
     /// particular CPU's run queue or remote-wake inbox).
     task_set_last_cpu = last_cpu: u8,
-    /// Stamp `task->clear_child_tid`.
-    task_set_clear_child_tid = clear_child_tid: u64,
     /// Stamp `task->last_run_timestamp`.
     task_set_last_run_timestamp = last_run_timestamp: u64,
     /// Stamp `task->kernel_stack_top`. Used by tests that simulate a missing
@@ -584,23 +574,6 @@ pub fn task_process_group<K, U>(task: *const TaskInner<K, U>) -> Option<KArc<Pro
     unsafe { (*task).process_group.clone() }
 }
 
-/// Replace this task's process-group membership, dropping the previous handle.
-/// Caller must hold exclusive access to `task` (the old handle drops here).
-#[inline]
-pub fn task_set_process_group<K, U>(
-    task: *mut TaskInner<K, U>,
-    pg: Option<KArc<ProcessGroup>>,
-) -> bool {
-    if task.is_null() {
-        return false;
-    }
-    // SAFETY: caller pre-validated + exclusive; group `Drop` is trivial.
-    unsafe {
-        (*task).process_group = pg;
-    }
-    true
-}
-
 /// Clone this task's session handle, resolved through its process group.
 #[inline]
 pub fn task_session<K, U>(task: *const TaskInner<K, U>) -> Option<KArc<Session>> {
@@ -668,17 +641,6 @@ pub fn task_set_on_cpu<K, U>(task: *mut TaskInner<K, U>, on: bool) {
     }
 }
 
-/// Read `task->test_reports.is_some()`.
-#[inline]
-pub fn task_has_test_reports<K, U>(task: *const TaskInner<K, U>) -> bool {
-    if task.is_null() {
-        return false;
-    }
-    // SAFETY: caller pre-validated; `Option<KBox<..>>` is one
-    // pointer-sized slot, the niche-optimised None matches null.
-    unsafe { (*task).test_reports.is_some() }
-}
-
 /// Take ownership of `task->test_reports`, leaving the slot as
 /// `None`. Caller-required invariant: invoke after the task has
 /// exited so no further `SYSCALL_TEST_REPORT` push races the take.
@@ -743,16 +705,6 @@ pub fn task_waiter_count<K, U>(task: *const TaskInner<K, U>) -> usize {
         Some(id) => BUS.waiter_count(child_exit_event(id)),
         None => 0,
     }
-}
-
-/// Read `task->context.rflags`.
-#[inline]
-pub fn task_context_rflags<K, U>(task: *const TaskInner<K, U>) -> Option<u64> {
-    if task.is_null() {
-        return None;
-    }
-    // SAFETY: caller pre-validated; `rflags` is a u64 field.
-    Some(unsafe { (*task).context.rflags })
 }
 
 // ---------------------------------------------------------------------------
@@ -898,13 +850,6 @@ pub fn task_sched_placement_store<K, U>(task: *const TaskInner<K, U>, placement:
     }
 }
 
-/// True when the scheduler already owns the task in a runqueue, remote inbox,
-/// dispatch/on-CPU window, or migration handoff.
-#[inline]
-pub fn task_sched_placement_is_owned<K, U>(task: *const TaskInner<K, U>) -> bool {
-    task_sched_placement_load(task) != SchedPlacement::None
-}
-
 /// Read the task's remote-inbox successor as `*mut Task` with `Acquire`
 /// ordering.
 #[inline]
@@ -983,13 +928,6 @@ pub fn task_remote_inbox_is_linked<K, U>(task: *const TaskInner<K, U>) -> bool {
     unsafe { (*task).remote_inbox_link.is_linked() }
 }
 
-/// Read `task->task_id` without any registry-validity gate. Mirrors
-/// [`task_id_of`] but skips the null-check.
-#[inline]
-pub fn task_task_id<K, U>(task: *const TaskInner<K, U>) -> Option<u32> {
-    task_id_of(task)
-}
-
 /// Wake every task currently blocked waiting for this task to exit.
 /// Caller must hold the task pointer stable (e.g. via the task-manager
 /// lock or an owning `KArc`) long enough to resolve its id; the event
@@ -1017,21 +955,6 @@ pub fn task_signal_pending_store<K, U>(task: *const TaskInner<K, U>, value: u64)
     }
 }
 
-/// OR `mask` into `task->signal_pending` with `AcqRel` ordering.
-/// Returns the previous bitmask. Used by signal-delivery hooks.
-#[inline]
-pub fn task_signal_pending_or<K, U>(task: *const TaskInner<K, U>, mask: u64) -> u64 {
-    if task.is_null() {
-        return 0;
-    }
-    // SAFETY: caller pre-validated; `signal_pending` is `AtomicU64`.
-    unsafe {
-        (*task)
-            .signal_pending
-            .fetch_or(mask, core::sync::atomic::Ordering::AcqRel)
-    }
-}
-
 /// Raise `mask` on `task`'s pending set **and** wake any `signalfd` poller
 /// registered on it (publishes [`signal_pending_event`]). This is the
 /// signal-raise chokepoint for in-band (signalfd / ring) delivery: a masked
@@ -1039,7 +962,15 @@ pub fn task_signal_pending_or<K, U>(task: *const TaskInner<K, U>, mask: u64) -> 
 /// poller subscribed to its `SignalPending` queue is still woken to drain it.
 /// Returns the previous pending bitmask.
 pub fn task_signal_raise<K, U>(task: *const TaskInner<K, U>, mask: u64) -> u64 {
-    let prev = task_signal_pending_or(task, mask);
+    if task.is_null() {
+        return 0;
+    }
+    // SAFETY: caller pre-validated; `signal_pending` is `AtomicU64`.
+    let prev = unsafe {
+        (*task)
+            .signal_pending
+            .fetch_or(mask, core::sync::atomic::Ordering::AcqRel)
+    };
     if let Some(id) = task_id_of(task) {
         BUS.publish(signal_pending_event(id));
     }
@@ -1156,20 +1087,6 @@ pub fn task_clear_controlling_tty_for<K, U>(
         }
     }
     false
-}
-
-/// Run `f` against `task->user_ctx` borrowed as `&UserContext`.
-/// Returns `None` for null `task`; otherwise returns `Some(f(...))`.
-#[inline]
-pub fn task_with_user_ctx<R, K, U>(
-    task: *const TaskInner<K, U>,
-    f: impl FnOnce(&UserContext) -> R,
-) -> Option<R> {
-    if task.is_null() {
-        return None;
-    }
-    // SAFETY: caller pre-validated; `user_ctx` is an in-Task field.
-    Some(f(unsafe { &(*task).user_ctx }))
 }
 
 /// PCR↔Task mirror used by the scheduler context-switch path.
@@ -1357,35 +1274,6 @@ pub fn task_migration_count_inc<K, U>(task: *mut TaskInner<K, U>) {
     // SAFETY: caller pre-validated; field is naturally-aligned u32.
     unsafe {
         (*task).migration_count = (*task).migration_count.saturating_add(1);
-    }
-}
-
-/// Release the kernel-stack and SafeStack handles owned by `task`,
-/// zero the adjacent plain-u64 fields, and clear the kernel-task
-/// `stack_base` alias. Used by `free_task_stacks` to retire a
-/// Terminated task's backing memory while keeping the slot
-/// discoverable for idempotent terminate calls.
-#[inline]
-pub fn task_release_stacks<K, U>(task: *mut TaskInner<K, U>) {
-    if task.is_null() {
-        return;
-    }
-    // SAFETY: caller holds the task-manager lock (or equivalent
-    // exclusive access); dropping the handles releases VA slots +
-    // physical frames; the plain-u64 mirrors are cleared so no
-    // stray reader sees a dangling base/top.
-    unsafe {
-        (*task).kernel_stack = None;
-        (*task).kernel_stack_base = 0;
-        (*task).kernel_stack_top = 0;
-        (*task).kernel_stack_size = 0;
-
-        (*task).unsafe_stack = None;
-        (*task).abi.unsafe_stack_sp = 0;
-
-        if (*task).process_id == slopos_abi::task::INVALID_PROCESS_ID {
-            (*task).stack_base = 0;
-        }
     }
 }
 

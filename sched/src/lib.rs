@@ -20,7 +20,6 @@ pub mod sched_tests;
 pub mod scheduler;
 pub mod sleep;
 pub mod task;
-pub mod task_lock;
 pub mod task_stack;
 pub mod task_struct;
 #[cfg(feature = "test-hooks")]
