@@ -1149,9 +1149,18 @@ impl<T: ?Sized> KArc<T> {
     /// ownership. The pointer remains valid only while at least one strong
     /// [`KArc`] is alive; callers that retain it must retain a strong handle
     /// for the same duration.
+    ///
+    /// Derived from the handle's raw pointer rather than through a
+    /// `&KArcInner`, so it carries provenance over the whole allocation and not
+    /// just the `data` field. That is what makes it interchangeable with
+    /// [`KArc::into_raw`] — the placement primitives hand these pointers to
+    /// [`KArc::from_raw`], which walks *backwards* out of `data` to reach the
+    /// reference counts in the header.
     #[inline]
     pub fn as_ptr(this: &Self) -> *const T {
-        core::ptr::addr_of!(this.inner().data)
+        // SAFETY: `this` owns a live strong reference, so the allocation and its
+        // initialized `data` field are valid for the duration of this call.
+        unsafe { core::ptr::addr_of!((*this.ptr.as_ptr()).data) }
     }
 
     /// Move one strong reference into an OSTD-owned raw slot.
