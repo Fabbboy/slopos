@@ -17,6 +17,7 @@ pub mod event_bus;
 pub mod init_flag;
 pub mod init_in_place;
 pub mod intrusive;
+pub mod intrusive_dlist;
 pub mod kernel_io_task;
 pub mod kernel_sync;
 pub mod lock_graph;
@@ -39,6 +40,7 @@ pub use event_bus::{BUS, EventBus, Subscription};
 pub use init_flag::{InitFlag, StateFlag};
 pub use init_in_place::InitInPlace;
 pub use intrusive::{IntrusiveLinkedList, Iter as IntrusiveIter, Link, LinkError, Linked};
+pub use intrusive_dlist::{DIter as IntrusiveDIter, DLink, DLinked, IntrusiveDList, dlist_unlink};
 pub use kernel_sync::{ApToken, BspToken, CpuInitWitness, KernelSync, run_ap_init, run_bsp_init};
 #[cfg(any(test, feature = "test-helpers"))]
 pub use kernel_sync::{
