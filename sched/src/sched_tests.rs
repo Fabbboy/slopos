@@ -132,6 +132,121 @@ slopos_testing::stest!(
     suite = sched_core
 );
 
+/// A final release in a context that cannot run the allocator-heavy `Task`
+/// destructor must park the task rather than destroy it inline, and the drain
+/// must then destroy it exactly once.
+///
+/// Uses an unregistered task so this release really is final — a registered one
+/// is pinned by the registry, and no placement release can reach zero.
+pub fn test_task_put_defers_unsafe_context_then_drains() -> TestResult {
+    // Start from a clean slate so the assertions below observe only this task.
+    crate::task::task_graveyard_drain();
+    if crate::task::task_graveyard_pending() {
+        klog_info!("SCHED_TEST: graveyard non-empty after a drain");
+        return TestResult::Fail;
+    }
+
+    let arc = match KArc::try_init(Task::init_invalid()) {
+        Ok(arc) => arc,
+        Err(_) => return TestResult::Fail,
+    };
+    let witness = KArc::downgrade(&arc);
+
+    // Interrupts off is one of the contexts where the destructor must not run.
+    let flags = slopos_arch::cpu::save_flags_cli();
+    crate::task::task_put(arc);
+    let parked = crate::task::task_graveyard_pending();
+    slopos_arch::cpu::restore_flags(flags);
+
+    if !parked {
+        klog_info!("SCHED_TEST: final release with interrupts off was not deferred");
+        return TestResult::Fail;
+    }
+    // The strong side is gone the moment the release lands, whether or not the
+    // destructor has run.
+    if witness.upgrade().is_some() {
+        klog_info!("SCHED_TEST: task still upgradable after its final release");
+        return TestResult::Fail;
+    }
+
+    crate::task::task_graveyard_drain();
+    if crate::task::task_graveyard_pending() {
+        klog_info!("SCHED_TEST: graveyard still pending after drain");
+        return TestResult::Fail;
+    }
+    // A second drain must be a no-op rather than a double destroy.
+    crate::task::task_graveyard_drain();
+    TestResult::Pass
+}
+
+slopos_testing::stest!(
+    name = test_task_put_defers_unsafe_context_then_drains,
+    suite = sched_core
+);
+
+/// The mirror image: a final release in a context that *does* allow the
+/// destructor must destroy inline and leave nothing parked, so a task freed on
+/// a safe path never waits on an idle pass.
+pub fn test_task_put_destroys_inline_when_context_allows() -> TestResult {
+    crate::task::task_graveyard_drain();
+
+    let arc = match KArc::try_init(Task::init_invalid()) {
+        Ok(arc) => arc,
+        Err(_) => return TestResult::Fail,
+    };
+    let witness = KArc::downgrade(&arc);
+    crate::task::task_put(arc);
+
+    if crate::task::task_graveyard_pending() {
+        klog_info!("SCHED_TEST: safe-context release was deferred unnecessarily");
+        crate::task::task_graveyard_drain();
+        return TestResult::Fail;
+    }
+    if witness.upgrade().is_some() {
+        klog_info!("SCHED_TEST: task still upgradable after its final release");
+        return TestResult::Fail;
+    }
+    TestResult::Pass
+}
+
+slopos_testing::stest!(
+    name = test_task_put_destroys_inline_when_context_allows,
+    suite = sched_core
+);
+
+/// A non-final release must be a plain decrement: no destruction, nothing
+/// parked. This is the common case on every dequeue and inbox drain.
+pub fn test_task_put_non_final_release_parks_nothing() -> TestResult {
+    crate::task::task_graveyard_drain();
+
+    let arc = match KArc::try_init(Task::init_invalid()) {
+        Ok(arc) => arc,
+        Err(_) => return TestResult::Fail,
+    };
+    let keep = arc.clone();
+    crate::task::task_put(arc);
+
+    let parked = crate::task::task_graveyard_pending();
+    let still_live = KArc::strong_count(&keep) == 1;
+    crate::task::task_put(keep);
+    crate::task::task_graveyard_drain();
+
+    if parked {
+        klog_info!("SCHED_TEST: non-final release parked a task");
+        return TestResult::Fail;
+    }
+    if !still_live {
+        klog_info!("SCHED_TEST: non-final release left an unexpected strong count");
+        return TestResult::Fail;
+    }
+    TestResult::Pass
+}
+
+slopos_testing::stest!(
+    name = test_task_put_non_final_release_parks_nothing,
+    suite = sched_core
+);
+
 pub fn test_task_placement_leak_reclaim_round_trip() -> TestResult {
     let arc = match KArc::try_init(Task::init_invalid()) {
         Ok(arc) => arc,

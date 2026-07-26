@@ -998,6 +998,10 @@ pub fn task_shutdown_all() -> c_int {
     refresh_num_tasks_after_shutdown();
 
     crate::per_cpu::resume_all_aps_if_not_nested(was_paused);
+    // Queue teardown releases every parked reference, so this is where the last
+    // one usually lands. Drain now — with the APs resumed and no lock held —
+    // rather than leaving corpses for an idle pass that may never come.
+    super::task_graveyard_drain();
     result
 }
 

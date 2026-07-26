@@ -943,6 +943,63 @@ pub fn task_remote_inbox_unlink<K, U>(task: *const TaskInner<K, U>) {
     unsafe { (*task).remote_inbox_link.mark_unlinked() };
 }
 
+// ---------------------------------------------------------------------------
+// Reclaim-link mechanism (the task graveyard).
+//
+// Same Treiber-stack shape as the remote-wake inbox, but the invariant is
+// inverted: a node here has a strong count of zero and the pusher owns the
+// allocation outright, having won the final release. Nothing else may touch a
+// parked node, which is why the single-membership claim below can never
+// contend.
+// ---------------------------------------------------------------------------
+
+/// Read the task's graveyard successor with `Acquire` ordering.
+#[inline]
+pub fn task_reclaim_next_load<K, U>(task: *const TaskInner<K, U>) -> *mut TaskInner<K, U> {
+    if task.is_null() {
+        return core::ptr::null_mut();
+    }
+    // SAFETY: caller uniquely owns the parked allocation; `reclaim_link` is an
+    // in-task `Link` whose storage outlives the destructor call that follows.
+    unsafe { (*task).reclaim_link.load() }
+}
+
+/// Store the task's graveyard successor with `Relaxed` ordering. The head CAS
+/// supplies the `AcqRel` barrier.
+#[inline]
+pub fn task_reclaim_next_store_relaxed<K, U>(
+    task: *const TaskInner<K, U>,
+    next: *mut TaskInner<K, U>,
+) {
+    if task.is_null() {
+        return;
+    }
+    // SAFETY: caller uniquely owns the parked allocation.
+    unsafe { (*task).reclaim_link.store_relaxed(next) };
+}
+
+/// Claim graveyard membership. Fails only if the node is already parked, which
+/// would mean two threads believed they won the same final release.
+#[inline]
+pub fn task_reclaim_try_link<K, U>(task: *const TaskInner<K, U>) -> bool {
+    if task.is_null() {
+        return false;
+    }
+    // SAFETY: caller uniquely owns the parked allocation.
+    unsafe { (*task).reclaim_link.try_mark_linked() }
+}
+
+/// Release graveyard membership once a drain has detached the node, before its
+/// destructor runs (the destructor frees the memory the link lives in).
+#[inline]
+pub fn task_reclaim_unlink<K, U>(task: *const TaskInner<K, U>) {
+    if task.is_null() {
+        return;
+    }
+    // SAFETY: caller uniquely owns the parked allocation.
+    unsafe { (*task).reclaim_link.mark_unlinked() };
+}
+
 /// True iff the task is currently claimed by some CPU's remote wake inbox.
 #[inline]
 pub fn task_remote_inbox_is_linked<K, U>(task: *const TaskInner<K, U>) -> bool {

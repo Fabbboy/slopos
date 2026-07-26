@@ -338,7 +338,10 @@ pub(crate) fn task_try_reclaim(task: *mut Task) -> bool {
 pub fn release_placement_arc(arc: KArc<Task>) {
     let id = arc.task_id;
     let terminated = arc.status() == TaskStatus::Terminated;
-    drop(arc);
+    // Routed through `task_put` so the release is safe from any context: if
+    // this ever becomes the final reference, the destructor either runs here or
+    // is deferred to the graveyard rather than firing under a lock.
+    super::task_put(arc);
     if terminated {
         let _ = task_try_reclaim_id(id);
     }
@@ -355,7 +358,9 @@ pub fn release_placement_arc(arc: KArc<Task>) {
 #[inline]
 pub fn release_placement_arc_deferred(arc: KArc<Task>) {
     let terminated = arc.status() == TaskStatus::Terminated;
-    drop(arc);
+    // The switch tail runs with interrupts off, so `task_put` will park rather
+    // than destroy if this is ever the final reference.
+    super::task_put(arc);
     if terminated {
         arm_deferred_reclaim();
     }
@@ -494,6 +499,10 @@ pub fn init_task_manager() -> c_int {
     });
     TASK_MANAGER.clear_poison();
     crate::sleep::init_sleep_queue();
+    // Retiring the previous generation's tasks above may have parked their
+    // final references; destroy them here so a test fixture never starts with
+    // the previous run's corpses outstanding.
+    super::task_graveyard_drain();
     0
 }
 

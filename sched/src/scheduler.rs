@@ -1421,11 +1421,20 @@ pub(crate) fn drain_previous_task() -> bool {
 /// interrupt-window contract as [`drain_previous_task`]; a cheap no-op
 /// unless a deferred attempt armed the retry latch.
 pub(crate) fn drain_deferred_task_reclaim() {
-    if !super::task::task_reclaim_pending() {
+    let retire = super::task::task_reclaim_pending();
+    let destroy = super::task::task_graveyard_pending();
+    if !retire && !destroy {
         return;
     }
     let _restore_interrupts = RestoreInterruptState::open_window();
-    slopos_ostd::task::run_off_lock(super::task::task_reclaim_deferred);
+    if retire {
+        slopos_ostd::task::run_off_lock(super::task::task_reclaim_deferred);
+    }
+    // Destroy after retiring: a retirement can drop the last reference and so
+    // park a fresh corpse, and draining second collects it in the same pass.
+    if super::task::task_graveyard_pending() {
+        slopos_ostd::task::run_off_lock(super::task::task_graveyard_drain);
+    }
 }
 
 fn schedule_internal() {
