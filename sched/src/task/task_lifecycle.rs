@@ -887,6 +887,15 @@ fn mark_task_terminated(task_ptr: *mut Task, resolved_id: u32) {
 
     scheduler::unschedule_task(task_ptr);
 
+    // A task that dies before it was ever published leaves `Nascent` behind.
+    // Retire it to `None` so placement keeps meaning "no scheduler owner" for
+    // every dead task, whatever stage it died at.
+    let _ = slopos_ostd::task::accessors::task_sched_placement_compare_exchange(
+        task_ptr,
+        slopos_ostd::task::SchedPlacement::Nascent,
+        slopos_ostd::task::SchedPlacement::None,
+    );
+
     release_task_dependents(resolved_id);
 
     // Adopt children: live ones become orphans (parent id cleared, so their

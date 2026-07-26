@@ -189,8 +189,8 @@ impl SignalAction {
 #[repr(u8)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SchedPlacement {
-    /// Not owned by any scheduler structure. Valid for blocked/exited tasks
-    /// and for a not-yet-published freshly-created task.
+    /// Not owned by any scheduler structure. Valid for blocked and exited
+    /// tasks.
     None = 0,
     /// Linked in exactly one per-CPU ready queue via `ready_link`.
     ReadyQueue = 1,
@@ -206,6 +206,22 @@ pub enum SchedPlacement {
     /// linked the task into its final queue/inbox yet. This closes the
     /// Ready-with-no-owner publication window without blocking producers.
     Waking = 5,
+    /// Allocated, possibly registered, never published. No publisher has ever
+    /// made this task schedulable.
+    ///
+    /// Distinct from `None` because `None` is also the placement of a blocked
+    /// task and of a terminated one — and that coincidence was exploitable.
+    /// A task is registry-visible from `register_task`, with status `Blocked`
+    /// and placement `None`, until its creator calls `publish_new_task`; those
+    /// two facts together are indistinguishable from a legitimate wake target,
+    /// so a process-group signal arriving in that window drove a half-built
+    /// task onto a runqueue. `task_create` publishes `pgid = task_id` before it
+    /// registers, which is exactly how such a signal finds one.
+    ///
+    /// Entered once, at allocation. Left once, either by `publish_new_task`
+    /// (→ `Waking`) or by teardown (→ `None`). Nothing else may leave it, and
+    /// it is never a durable owner: it holds no reference.
+    Nascent = 6,
 }
 
 impl SchedPlacement {
@@ -222,6 +238,7 @@ impl SchedPlacement {
             3 => Self::OnCpu,
             4 => Self::Migrating,
             5 => Self::Waking,
+            6 => Self::Nascent,
             _ => Self::None,
         }
     }
@@ -623,7 +640,7 @@ impl<K, U> TaskInner<K, U> {
             children: IntrusiveDList::new(),
             sibling_link: DLink::new(),
             reclaim_link: Link::new(),
-            sched_placement: AtomicU8::new(SchedPlacement::None.as_u8()),
+            sched_placement: AtomicU8::new(SchedPlacement::Nascent.as_u8()),
             recovery_depth: AtomicU32::new(0),
             panic_in_flight: AtomicU32::new(0),
             exit_cleanup_flags: AtomicU8::new(0),
@@ -856,8 +873,10 @@ impl<K, U> TaskInner<K, U> {
         self.remote_inbox_link.reset();
         self.sibling_link.reset();
         self.reclaim_link.reset();
+        // Nascent, not None: a task that has been reset for (re)construction
+        // has not been published, and None is also a blocked task's placement.
         self.sched_placement
-            .store(SchedPlacement::None.as_u8(), Ordering::Release);
+            .store(SchedPlacement::Nascent.as_u8(), Ordering::Release);
         self.recovery_depth.store(0, Ordering::Release);
         self.exit_cleanup_flags.store(0, Ordering::Release);
     }
@@ -907,7 +926,7 @@ impl<K, U> TaskInner<K, U> {
         // starts parentless; the spawn path publishes the real parent edge (id
         // + children-list membership) via `link_child` after registration.
         self.parent_task_id = INVALID_TASK_ID;
-        self.sched_placement = AtomicU8::new(SchedPlacement::None.as_u8());
+        self.sched_placement = AtomicU8::new(SchedPlacement::Nascent.as_u8());
         self.recovery_depth = AtomicU32::new(0);
         self.exit_cleanup_flags = AtomicU8::new(0);
         self.signal_pending = AtomicU64::new(0);

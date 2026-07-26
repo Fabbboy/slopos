@@ -686,6 +686,7 @@ fn publish_ready_fallback(task: *mut Task) -> c_int {
         | SchedPlacement::RemoteWake
         | SchedPlacement::OnCpu
         | SchedPlacement::Migrating => return 0,
+        SchedPlacement::Nascent => return -1,
         SchedPlacement::None | SchedPlacement::Waking => {}
     }
 
@@ -724,6 +725,7 @@ fn publish_ready_fallback(task: *mut Task) -> c_int {
             | SchedPlacement::RemoteWake
             | SchedPlacement::OnCpu
             | SchedPlacement::Migrating => return 0,
+            SchedPlacement::Nascent => return -1,
             SchedPlacement::None | SchedPlacement::Waking => {}
         }
     }
@@ -751,6 +753,7 @@ fn publish_ready_fallback(task: *mut Task) -> c_int {
             | SchedPlacement::RemoteWake
             | SchedPlacement::OnCpu
             | SchedPlacement::Migrating => return 0,
+            SchedPlacement::Nascent => return -1,
             SchedPlacement::None | SchedPlacement::Waking => {}
         }
     }
@@ -814,6 +817,10 @@ fn publish_ready_from_current_owner(task: *mut Task, task_id: u32, context: &str
                 return 0;
             }
             SchedPlacement::Waking => return publish_reserved_waking_ready(task, task_id, context),
+            // Never published, so there is nothing to re-publish. A wake path
+            // that reached a nascent task is a bug in its caller, not a race
+            // to spin on.
+            SchedPlacement::Nascent => return -1,
             SchedPlacement::OnCpu => {
                 if task_sched_placement_compare_exchange(
                     task,
@@ -870,6 +877,9 @@ fn schedule_task_from_placement(task: *mut Task, from: SchedPlacement, new_task:
             // carried.
             SchedPlacement::Migrating => sched.enqueue_migrated_raw(task),
             SchedPlacement::ReadyQueue | SchedPlacement::RemoteWake => 0,
+            // `from` is a reservation the caller already holds; a nascent task
+            // has none, so there is nothing to transfer into a queue.
+            SchedPlacement::Nascent => -1,
         });
 
         if result != Some(0) {
@@ -891,7 +901,7 @@ fn schedule_task_from_placement(task: *mut Task, from: SchedPlacement, new_task:
             }
             SchedPlacement::Waking => sched.push_remote_wake_waking(task),
             SchedPlacement::ReadyQueue | SchedPlacement::RemoteWake | SchedPlacement::OnCpu => 0,
-            SchedPlacement::Migrating => -1,
+            SchedPlacement::Migrating | SchedPlacement::Nascent => -1,
         });
         if !matches!(push_result, Some(0) | Some(1)) {
             return publish_ready_fallback(task);
@@ -906,13 +916,50 @@ fn schedule_task_from_placement(task: *mut Task, from: SchedPlacement, new_task:
     }
 }
 
+/// Reserve scheduler ownership for an explicit publication.
+///
+/// A never-published task must leave `Nascent` through a CAS before anything
+/// downstream sees it, so the queue machinery never has to reason about the
+/// state at all. Returns the `from` placement to publish with, or `None` if the
+/// task is nascent and someone else won the promotion.
+#[inline]
+fn reserve_publication(task: *mut Task) -> Option<SchedPlacement> {
+    match task_sched_placement_load(task) {
+        SchedPlacement::Waking => Some(SchedPlacement::Waking),
+        SchedPlacement::Nascent => {
+            if task_sched_placement_compare_exchange(
+                task,
+                SchedPlacement::Nascent,
+                SchedPlacement::Waking,
+            ) {
+                Some(SchedPlacement::Waking)
+            } else {
+                // Lost the promotion: whoever won it owns the publication.
+                None
+            }
+        }
+        _ => Some(SchedPlacement::None),
+    }
+}
+
 pub fn schedule_task(task: *mut Task) -> c_int {
-    let from = if task_sched_placement_load(task) == SchedPlacement::Waking {
-        SchedPlacement::Waking
-    } else {
-        SchedPlacement::None
+    let Some(from) = reserve_publication(task) else {
+        return 0;
     };
     schedule_task_from_placement(task, from, false)
+}
+
+/// Put a freshly created task into the placement a *published, then blocked*
+/// task has: owned by nothing, but past construction.
+///
+/// Tests that exercise wake and inbox machinery need a task in that state, and
+/// a task straight out of `task_create` is not in it — it is `Nascent`, which
+/// every wake path deliberately refuses. Reaching the state for real means
+/// publishing the task and letting it run and block, which those tests are not
+/// about. Returns false if the task had already left `Nascent`.
+#[cfg(feature = "test-hooks")]
+pub fn clear_nascent_for_test(task: *mut Task) -> bool {
+    task_sched_placement_compare_exchange(task, SchedPlacement::Nascent, SchedPlacement::None)
 }
 
 /// Schedule a **newly created** task (fork, spawn, exec).
@@ -924,10 +971,8 @@ pub fn schedule_task(task: *mut Task) -> c_int {
 /// Regular wakeups from sleep/block should use [`schedule_task()`] instead,
 /// which preserves cache affinity by preferring the last CPU.
 pub fn schedule_new_task(task: *mut Task) -> c_int {
-    let from = if task_sched_placement_load(task) == SchedPlacement::Waking {
-        SchedPlacement::Waking
-    } else {
-        SchedPlacement::None
+    let Some(from) = reserve_publication(task) else {
+        return 0;
     };
     schedule_task_from_placement(task, from, true)
 }
@@ -942,13 +987,13 @@ pub fn publish_new_task(task: *mut Task) -> c_int {
     if task.is_null() {
         return -1;
     }
-    match task_sched_placement_load(task) {
-        SchedPlacement::None => {
-            if !task_sched_placement_compare_exchange(
-                task,
-                SchedPlacement::None,
-                SchedPlacement::Waking,
-            ) {
+    // The sole sanctioned exit from `Nascent`: this is what makes a
+    // never-published task schedulable, and every other path refuses the
+    // transition. `None` stays accepted for a task that was unscheduled back to
+    // no owner and is being re-published.
+    let reserved_from = match task_sched_placement_load(task) {
+        from @ (SchedPlacement::Nascent | SchedPlacement::None) => {
+            if !task_sched_placement_compare_exchange(task, from, SchedPlacement::Waking) {
                 return if task_has_durable_owner(task)
                     || task_sched_placement_load(task) == SchedPlacement::Waking
                 {
@@ -957,21 +1002,21 @@ pub fn publish_new_task(task: *mut Task) -> c_int {
                     -1
                 };
             }
+            from
         }
-        SchedPlacement::Waking => {}
+        SchedPlacement::Waking => SchedPlacement::Waking,
         _ => {
             return if task_has_durable_owner(task) { 0 } else { -1 };
         }
-    }
+    };
     let previous_status = task_status(task).unwrap_or(TaskStatus::Blocked);
     task_set_status(task, TaskStatus::Ready);
     let rc = schedule_task_from_placement(task, SchedPlacement::Waking, true);
     if rc != 0 {
-        let _ = task_sched_placement_compare_exchange(
-            task,
-            SchedPlacement::Waking,
-            SchedPlacement::None,
-        );
+        // Roll back to whichever unpublished state we reserved from, so a
+        // failed publication leaves "never published" still spelled `Nascent`
+        // and a retry — or a later `task_terminate` — sees a coherent state.
+        let _ = task_sched_placement_compare_exchange(task, SchedPlacement::Waking, reserved_from);
         task_set_status(task, previous_status);
     }
     rc
@@ -1029,7 +1074,8 @@ pub fn task_apply_affinity(task: *mut Task, new_affinity: u32) {
         SchedPlacement::None
         | SchedPlacement::Waking
         | SchedPlacement::RemoteWake
-        | SchedPlacement::Migrating => {}
+        | SchedPlacement::Migrating
+        | SchedPlacement::Nascent => {}
     }
 }
 
@@ -1909,6 +1955,28 @@ pub(crate) fn wake_blocked_task(task: *mut Task, task_id: u32) -> c_int {
             return 0;
         }
         match task_sched_placement_load(task) {
+            // Registered but never published: its creator has not finished
+            // building it, and publishing it here would put a half-constructed
+            // task on a runqueue. `task_create` stamps `pgid = task_id` before
+            // it registers, so a process-group signal reaches exactly this
+            // window.
+            //
+            // Terminal, not a retry — and compatible with the totality
+            // contract above, for three reasons. A nascent task has never
+            // executed, so it holds no one-shot wake source: it has never
+            // parked on a sleep queue, a futex bucket, a wait node, or the
+            // event bus. The senders that *can* name it — kill, and the
+            // process-group and session fanouts — are level-triggered: each
+            // sets the durable `signal_pending` bit before waking, and that
+            // bit survives this refusal to be consumed at the task's first
+            // user-mode boundary. And every creation path reaches either
+            // `publish_new_task` or `task_terminate`, so the window is bounded
+            // by its creator's own progress.
+            //
+            // Returns 0 ("nothing to do"), never -1: -1 means the target is
+            // gone, and `kill` would turn that into ESRCH for a task that very
+            // much exists.
+            SchedPlacement::Nascent => return 0,
             SchedPlacement::OnCpu => {
                 // `OnCpu` is also the dispatcher's transient claim after a
                 // ready-queue dequeue and before Ready->Running. A wake that
@@ -2445,6 +2513,12 @@ fn task_is_current_on_any_cpu(task: *mut Task) -> bool {
 fn rescue_check_task(t: &Task) {
     let task = core::ptr::from_ref(t).cast_mut();
     if t.status() != TaskStatus::Ready {
+        return;
+    }
+    // A never-published task is not stranded, it is unfinished. Rescuing one
+    // onto a runqueue is the very thing `Nascent` exists to prevent, so the
+    // sweep must decline even if something has forced it Ready.
+    if task_sched_placement_load(task) == SchedPlacement::Nascent {
         return;
     }
     if slopos_ostd::task::accessors::task_on_cpu_load(task) || task_is_current_on_any_cpu(task) {

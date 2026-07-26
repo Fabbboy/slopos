@@ -363,6 +363,13 @@ impl PriorityRunQueue {
         }
 
         let current = task_sched_placement_load(task);
+        // A never-published task is not enqueueable by anyone but its creator,
+        // and its creator goes through `publish_new_task`. `-1`, not `1`: `1`
+        // means "some queue already owns it", which would make the publish
+        // fallback believe the task landed somewhere.
+        if current == SchedPlacement::Nascent {
+            return -1;
+        }
         if current == SchedPlacement::ReadyQueue || current == SchedPlacement::RemoteWake {
             return 1;
         }
