@@ -845,7 +845,10 @@ fn schedule_task_from_placement(task: *mut Task, from: SchedPlacement, new_task:
             SchedPlacement::None => sched.enqueue_local(task),
             SchedPlacement::Waking => sched.enqueue_waking(task),
             SchedPlacement::OnCpu => sched.enqueue_from_on_cpu(task),
-            SchedPlacement::Migrating => sched.enqueue_migrated(task),
+            // Raw re-publish of a migrating task: the queue parks its own
+            // membership reference and the caller keeps whatever handle it
+            // carried.
+            SchedPlacement::Migrating => sched.enqueue_migrated_raw(task),
             SchedPlacement::ReadyQueue | SchedPlacement::RemoteWake => 0,
         });
 
@@ -1144,12 +1147,15 @@ pub(crate) fn run_ready_task_from_idle(cpu_id: usize, idle_task: *mut Task) -> b
     // is a no-op, so this is idempotent with the idle-loop and tick drains.
     per_cpu::with_cpu_scheduler(cpu_id, |sched| sched.drain_remote_inbox());
 
-    let next_task = per_cpu::with_cpu_scheduler(cpu_id, |sched| sched.dequeue_highest_priority())
-        .unwrap_or(ptr::null_mut());
-
-    if next_task.is_null() {
+    // The dequeue hands over the queue's owning reference rather than releasing
+    // it, so the task is pinned for the whole dispatch window below — including
+    // the unbounded `on_cpu` spin. It becomes this CPU's dispatch reference.
+    let Some(dispatch_ref) =
+        per_cpu::with_cpu_scheduler(cpu_id, |sched| sched.dequeue_highest_priority()).flatten()
+    else {
         return false;
-    }
+    };
+    let next_task = KArc::as_ptr(&dispatch_ref) as *mut Task;
 
     per_cpu::with_cpu_scheduler(cpu_id, |sched| {
         sched.set_executing_task(true);
@@ -1161,6 +1167,7 @@ pub(crate) fn run_ready_task_from_idle(cpu_id: usize, idle_task: *mut Task) -> b
             sched.set_executing_task(false);
         });
         core::hint::spin_loop();
+        super::task::task_put(dispatch_ref);
         return false;
     }
 
@@ -1172,6 +1179,7 @@ pub(crate) fn run_ready_task_from_idle(cpu_id: usize, idle_task: *mut Task) -> b
         per_cpu::with_cpu_scheduler(cpu_id, |sched| {
             sched.set_executing_task(false);
         });
+        super::task::task_put(dispatch_ref);
         return false;
     }
 
@@ -1184,6 +1192,7 @@ pub(crate) fn run_ready_task_from_idle(cpu_id: usize, idle_task: *mut Task) -> b
         per_cpu::with_cpu_scheduler(cpu_id, |sched| {
             sched.set_executing_task(false);
         });
+        super::task::task_put(dispatch_ref);
         return false;
     }
 
@@ -1217,6 +1226,7 @@ pub(crate) fn run_ready_task_from_idle(cpu_id: usize, idle_task: *mut Task) -> b
         per_cpu::with_cpu_scheduler(cpu_id, |sched| {
             sched.set_executing_task(false);
         });
+        super::task::task_put(dispatch_ref);
         return false;
     }
 
@@ -1226,13 +1236,6 @@ pub(crate) fn run_ready_task_from_idle(cpu_id: usize, idle_task: *mut Task) -> b
     // (kernel-stack free) to this CPU's post-switch path rather than freeing
     // the stack while this CPU is about to run on it — a use-after-free.
     task_set_on_cpu(next_task, true);
-
-    // Hold an owning reference while the task is dispatched on this CPU, so its
-    // stack survives until this CPU's post-switch cleanup releases it. Cloned
-    // from the still-live task rather than moved out of the ready queue so the
-    // re-enqueue path below can publish an independent membership reference.
-    let dispatch_ref =
-        task_placement_clone(NonNull::new(next_task).expect("dispatched task pointer is non-null"));
 
     execute_task(cpu_id, idle_task, next_task);
 

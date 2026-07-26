@@ -23,6 +23,7 @@ use super::per_cpu::{
 use super::task::{task_cpu_affinity, task_last_run_timestamp, task_migration_count_inc};
 use super::task_struct::Task;
 use slopos_arch::{get_cpu_count, get_current_cpu};
+use slopos_ostd::KArc;
 use slopos_ostd::{kdiag_timestamp, klog_debug};
 
 // ---------------------------------------------------------------------------
@@ -85,11 +86,16 @@ pub fn try_work_steal() -> bool {
         }
 
         if let Some(task) = try_steal_from_cpu(victim, cpu_id) {
-            if with_local_scheduler(|sched| sched.enqueue_migrated(task)) == 0 {
-                klog_debug!("WORK_STEAL: CPU {} stole task from CPU {}", cpu_id, victim);
-                return true;
+            // The stolen handle is the task's owning reference for the whole
+            // migration window; hand it to the thief's queue, and give it back
+            // to the victim if that queue refuses it.
+            match with_local_scheduler(|sched| sched.enqueue_migrated(task)) {
+                Ok(()) => {
+                    klog_debug!("WORK_STEAL: CPU {} stole task from CPU {}", cpu_id, victim);
+                    return true;
+                }
+                Err(task) => return_to_victim(victim, task),
             }
-            let _ = enqueue_task_on_cpu(victim, task);
         }
     }
 
@@ -115,13 +121,14 @@ fn steal_cooldown_elapsed(cpu_id: usize) -> bool {
 }
 
 /// Try to steal one task from `victim`, respecting affinity and cache-hot.
-fn try_steal_from_cpu(victim: usize, thief: usize) -> Option<*mut Task> {
-    let task = try_steal_task_from_cpu(victim)?;
+fn try_steal_from_cpu(victim: usize, thief: usize) -> Option<KArc<Task>> {
+    let stolen = try_steal_task_from_cpu(victim)?;
+    let task = KArc::as_ptr(&stolen) as *mut Task;
 
     // Affinity: can the task run on the thief CPU?
     let affinity = task_cpu_affinity(task).unwrap_or(0);
     if !affinity_allows_cpu(affinity, thief) {
-        enqueue_task_on_cpu(victim, task);
+        return_to_victim(victim, stolen);
         return None;
     }
 
@@ -135,14 +142,24 @@ fn try_steal_from_cpu(victim: usize, thief: usize) -> Option<*mut Task> {
         if last_run != 0 {
             let now = kdiag_timestamp();
             if now.saturating_sub(last_run) < MIGRATION_COST_CYCLES {
-                enqueue_task_on_cpu(victim, task);
+                return_to_victim(victim, stolen);
                 return None;
             }
         }
     }
 
     task_migration_count_inc(task);
-    Some(task)
+    Some(stolen)
+}
+
+/// Hand a stolen task back to the CPU it came from, releasing the carried
+/// reference once that queue has parked its own. If the victim refuses it the
+/// reference is still released rather than leaked; the task keeps its other
+/// owners and the rescue sweep will re-publish it.
+fn return_to_victim(victim: usize, task: KArc<Task>) {
+    let raw = KArc::as_ptr(&task) as *mut Task;
+    let _ = enqueue_task_on_cpu(victim, raw);
+    crate::task::task_put(task);
 }
 
 // ---------------------------------------------------------------------------

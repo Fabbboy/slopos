@@ -49,6 +49,7 @@ use super::task::{
 use super::task_struct::{SwitchContext, Task};
 use slopos_abi::task::TaskStatus;
 use slopos_arch::MAX_CPUS;
+use slopos_ostd::KArc;
 use slopos_ostd::sync::intrusive::{IntrusiveLinkedList, LinkError};
 use slopos_ostd::sync::{InitFlag, KernelSync, LOCK_LEVEL_SCHEDULER, SpinLock};
 use slopos_ostd::task::{SchedPlacement, task_placement_reclaim, task_placement_retain};
@@ -129,20 +130,21 @@ impl ReadyQueue {
         }
     }
 
-    fn dequeue(&self) -> *mut Task {
-        match self.list.pop() {
-            Some(node) => {
-                let raw = node.as_ptr();
-                let _ = task_sched_placement_compare_exchange(
-                    raw,
-                    SchedPlacement::ReadyQueue,
-                    SchedPlacement::OnCpu,
-                );
-                release_placement_arc(task_placement_reclaim(node));
-                raw
-            }
-            None => ptr::null_mut(),
-        }
+    /// Detach the head task and hand the caller the owning reference this
+    /// queue held.
+    ///
+    /// The membership reference is *moved* out rather than released: the
+    /// dispatcher needs a reference for the whole window between dequeue and
+    /// the switch, and releasing here would leave the task pinned by nothing
+    /// across that window — including an unbounded `on_cpu` spin.
+    fn dequeue(&self) -> Option<KArc<Task>> {
+        let node = self.list.pop()?;
+        let _ = task_sched_placement_compare_exchange(
+            node.as_ptr(),
+            SchedPlacement::ReadyQueue,
+            SchedPlacement::OnCpu,
+        );
+        Some(task_placement_reclaim(node))
     }
 
     fn remove(&self, task: *mut Task) -> i32 {
@@ -161,7 +163,15 @@ impl ReadyQueue {
         0
     }
 
-    fn steal_from_tail(&self) -> Option<*mut Task> {
+    /// Detach the tail task for migration, handing the thief the owning
+    /// reference this queue held.
+    ///
+    /// As with [`ReadyQueue::dequeue`] the reference moves rather than being
+    /// released: a stolen task travels through the work-stealer, possibly
+    /// bouncing back to the victim, before any queue re-parks a reference for
+    /// it. Carrying the handle makes the `Migrating` window owned like every
+    /// other placement instead of relying on an anchor elsewhere.
+    fn steal_from_tail(&self) -> Option<KArc<Task>> {
         if self.list.len() <= 1 {
             return None;
         }
@@ -182,10 +192,7 @@ impl ReadyQueue {
             );
             return None;
         }
-        // The task stays alive across migration via its registry owner; the
-        // migrating CPU re-parks a fresh reference on enqueue.
-        release_placement_arc(task_placement_reclaim(last));
-        Some(raw)
+        Some(task_placement_reclaim(last))
     }
 }
 
@@ -318,10 +325,29 @@ impl PriorityRunQueue {
     }
 
     /// Enqueue a task returned by the work-stealing migration handoff.
-    pub fn enqueue_migrated(&self, task: *mut Task) -> i32 {
+    /// Park a migrating task on this CPU, consuming the handle the thief
+    /// carried across the `Migrating` window.
+    ///
+    /// On failure the handle comes back in `Err` so the caller can return the
+    /// task to its victim (or release it) rather than leaking the reference.
+    /// Park a migrating task named only by pointer, for callers that keep
+    /// ownership of the handle they carried (the give-it-back paths).
+    pub fn enqueue_migrated_raw(&self, task: *mut Task) -> i32 {
         match self.enqueue_local_from_placement(task, SchedPlacement::Migrating) {
             0 | 1 => 0,
             _ => -1,
+        }
+    }
+
+    pub fn enqueue_migrated(&self, task: KArc<Task>) -> Result<(), KArc<Task>> {
+        let raw = KArc::as_ptr(&task) as *mut Task;
+        match self.enqueue_local_from_placement(raw, SchedPlacement::Migrating) {
+            // Membership parked its own reference, so the carried one is spent.
+            0 | 1 => {
+                super::task::task_put(task);
+                Ok(())
+            }
+            _ => Err(task),
         }
     }
 
@@ -387,23 +413,22 @@ impl PriorityRunQueue {
         self.ready_queues[idx].link_preclaimed_with_status(task)
     }
 
-    pub fn dequeue_highest_priority(&self) -> *mut Task {
+    pub fn dequeue_highest_priority(&self) -> Option<KArc<Task>> {
         let self_addr = self as *const _ as usize;
         if self_addr < 0xffffffff80000000 {
             klog_info!(
                 "SCHED: BUG - dequeue_highest_priority called with invalid self=0x{:x}",
                 self_addr
             );
-            return ptr::null_mut();
+            return None;
         }
         let _guard = self.queue_lock.lock();
         for queue in &self.ready_queues {
-            let task = queue.dequeue();
-            if !task.is_null() {
-                return task;
+            if let Some(task) = queue.dequeue() {
+                return Some(task);
             }
         }
-        ptr::null_mut()
+        None
     }
 
     pub fn remove_task(&self, task: *mut Task) -> i32 {
@@ -473,7 +498,7 @@ impl PriorityRunQueue {
         self.inbox_count.store(0, Ordering::Relaxed);
     }
 
-    pub fn steal_task(&self) -> Option<*mut Task> {
+    pub fn steal_task(&self) -> Option<KArc<Task>> {
         let _guard = self.queue_lock.lock();
         for queue in self.ready_queues.iter().rev() {
             if let Some(task) = queue.steal_from_tail() {
@@ -844,14 +869,17 @@ pub fn enqueue_task_on_cpu(cpu_id: usize, task: *mut Task) -> i32 {
     }
 
     with_cpu_scheduler(cpu_id, |sched| match task_sched_placement_load(task) {
-        SchedPlacement::Migrating => sched.enqueue_migrated(task),
+        // A raw re-enqueue of a migrating task (the give-it-back path) parks a
+        // fresh membership reference; the caller still owns the handle it
+        // carried and releases it separately.
+        SchedPlacement::Migrating => sched.enqueue_migrated_raw(task),
         SchedPlacement::Waking => sched.enqueue_waking(task),
         _ => sched.enqueue_local(task),
     })
     .unwrap_or(-1)
 }
 
-pub fn try_steal_task_from_cpu(cpu_id: usize) -> Option<*mut Task> {
+pub fn try_steal_task_from_cpu(cpu_id: usize) -> Option<KArc<Task>> {
     with_cpu_scheduler(cpu_id, |sched| {
         if sched.total_ready_count() <= 1 {
             return None;
