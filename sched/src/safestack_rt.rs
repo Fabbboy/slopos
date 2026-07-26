@@ -7,10 +7,10 @@
 //! 1. [`__safestack_pointer_address`] — naked C-ABI function LLVM's
 //!    instrumented prologues call to fetch the slot address.  Returns
 //!    `&current_task->unsafe_stack_sp`.
-//! 2. Bootstrap Task stubs — per-CPU pre-allocated `Task` structs
-//!    with `unsafe_stack_sp` primed to a dedicated bootstrap stack
-//!    buffer.  Installed into each CPU's `PCR.current_task` *before*
-//!    any instrumented Rust runs on that CPU.
+//! 2. Bootstrap stubs — one per-CPU [`BootstrapTaskAbi`], the eight-byte
+//!    prefix a `Task` shares with it, primed to a dedicated bootstrap
+//!    stack buffer.  Installed into each CPU's `PCR.current_task`
+//!    *before* any instrumented Rust runs on that CPU.
 //!
 //! # Why the slot lives in the Task, not the PCR
 //!
@@ -56,11 +56,9 @@
 //!    stub is never used again.
 
 use core::cell::SyncUnsafeCell;
+use core::sync::atomic::{AtomicU64, Ordering};
 
-use slopos_ostd::sync::KernelSync;
-
-use super::task::task_set_unsafe_stack_sp;
-use super::task_struct::{TASK_UNSAFE_STACK_SP_OFFSET, Task};
+use super::task_struct::TASK_UNSAFE_STACK_SP_OFFSET;
 
 /// Maximum number of statically-allocated AP bootstrap stubs.
 /// Matches `slopos_arch::pcr::MAX_STATIC_APS`.
@@ -112,64 +110,89 @@ slopos_ostd::no_mangle_static! {
 // ---------------------------------------------------------------------------
 // Bootstrap Task stubs
 // ---------------------------------------------------------------------------
-//
-// Each stub is a full `Task::invalid()` — ~6 KiB BSS per CPU.
-// The only field that matters during bootstrap is `unsafe_stack_sp`,
-// which gets primed to the top of the corresponding bootstrap unsafe
-// stack before the CPU's GS_BASE is installed.  Every other field
-// keeps its `Task::invalid()` default.
 
-/// Bootstrap-Task stub cell; `Sync` via `KernelSync<T>`.
+/// The prefix of `Task` that pre-heap bootstrap needs, and nothing else.
+///
+/// A stub exists to answer exactly one question — "where is this CPU's data
+/// stack pointer?" — asked by the SafeStack prologue as `gs:[CURRENT_TASK]`
+/// then `[rax + TASK_UNSAFE_STACK_SP_OFFSET]`. That offset is zero, so eight
+/// bytes suffice; a full `Task` body per CPU was ~8 KiB of `.bss` of which
+/// every field but this one kept its `invalid()` default and was never read.
+///
+/// Being a distinct type is the point, not an optimisation. Nothing can spell a
+/// stub as `*mut Task` any more, so the "PCR names a stub" case cannot reach a
+/// task accessor and read eight bytes past the object. The two PCR readers
+/// filter stubs out, and `task_pointer_is_valid` whitelists them by address.
+#[repr(C)]
+pub struct BootstrapTaskAbi {
+    /// Layout-identical to `TaskAbi::unsafe_stack_sp`. Atomic so the seeding
+    /// path needs no `unsafe`; the boot asm's plain `mov` is a valid relaxed
+    /// store against it on x86-64.
+    pub unsafe_stack_sp: AtomicU64,
+}
+
+// The asm reaches this field through `TASK_UNSAFE_STACK_SP_OFFSET`, computed
+// from `TaskAbi` inside OSTD. A stub must agree with a real task on it.
+const _: () = assert!(core::mem::offset_of!(BootstrapTaskAbi, unsafe_stack_sp) == 0);
+const _: () = assert!(TASK_UNSAFE_STACK_SP_OFFSET == 0);
+const _: () = assert!(core::mem::size_of::<BootstrapTaskAbi>() == 8);
+
+impl BootstrapTaskAbi {
+    #[inline]
+    const fn new() -> Self {
+        Self {
+            unsafe_stack_sp: AtomicU64::new(0),
+        }
+    }
+}
+
+/// Bootstrap-stub cell. `AtomicU64` supplies the interior mutability the
+/// seeding path needs, so this is a plain `Sync` static with no cell wrapper.
 #[repr(transparent)]
-pub struct BootstrapTaskCell(pub KernelSync<SyncUnsafeCell<Task>>);
+pub struct BootstrapTaskCell(pub BootstrapTaskAbi);
 
 impl BootstrapTaskCell {
     #[inline]
-    pub const fn new(task: Task) -> Self {
-        Self(KernelSync::new(SyncUnsafeCell::new(task)))
+    pub const fn new() -> Self {
+        Self(BootstrapTaskAbi::new())
     }
 
+    /// Address of this stub, in the PCR's own opaque shape.
     #[inline]
-    pub fn get(&self) -> *mut Task {
-        (*self.0).get()
+    pub fn get(&self) -> *mut () {
+        core::ptr::from_ref(&self.0) as *mut ()
     }
 }
 
 #[repr(transparent)]
-pub struct BootstrapTaskArrayCell(pub KernelSync<SyncUnsafeCell<[Task; MAX_STATIC_APS]>>);
+pub struct BootstrapTaskArrayCell(pub [BootstrapTaskAbi; MAX_STATIC_APS]);
 
 impl BootstrapTaskArrayCell {
     #[inline]
-    pub const fn new(tasks: [Task; MAX_STATIC_APS]) -> Self {
-        Self(KernelSync::new(SyncUnsafeCell::new(tasks)))
+    pub const fn new() -> Self {
+        const INIT: BootstrapTaskAbi = BootstrapTaskAbi::new();
+        Self([INIT; MAX_STATIC_APS])
     }
 
     #[inline]
-    pub fn get(&self) -> *mut [Task; MAX_STATIC_APS] {
-        (*self.0).get()
+    pub fn get(&self) -> *mut () {
+        core::ptr::from_ref(&self.0) as *mut ()
     }
 
-    /// Pointer to the `i`-th element of the bootstrap-task array.
-    /// Computed via pointer arithmetic without dereferencing; the
-    /// returned pointer is the same address `&raw mut (*self.get())[i]`
-    /// would produce, but the cast is centralised here.
+    /// Address of AP slot `i`, in the PCR's own opaque shape.
     #[inline]
-    pub fn ptr_at(&self, i: usize) -> *mut Task {
+    pub fn ptr_at(&self, i: usize) -> *mut () {
         debug_assert!(i < MAX_STATIC_APS);
-        let base: *mut Task = (*self.0).get().cast();
-        base.wrapping_add(i)
+        core::ptr::from_ref(&self.0[i]) as *mut ()
     }
 }
 
 slopos_ostd::no_mangle_static! {
-    pub static BSP_BOOTSTRAP_TASK: BootstrapTaskCell = BootstrapTaskCell::new(Task::invalid());
+    pub static BSP_BOOTSTRAP_TASK: BootstrapTaskCell = BootstrapTaskCell::new();
 }
 
 slopos_ostd::no_mangle_static! {
-    pub static AP_BOOTSTRAP_TASKS: BootstrapTaskArrayCell = BootstrapTaskArrayCell::new({
-        const INIT: Task = Task::invalid();
-        [INIT; MAX_STATIC_APS]
-    });
+    pub static AP_BOOTSTRAP_TASKS: BootstrapTaskArrayCell = BootstrapTaskArrayCell::new();
 }
 
 // ---------------------------------------------------------------------------
@@ -223,12 +246,14 @@ pub fn ap_bootstrap_unsafe_sp(i: usize) -> *mut u8 {
 /// Pre-SMP single-writer phase: must run exactly once before any AP
 /// trampoline reads `current_task->unsafe_stack_sp`.
 pub fn init_bootstrap_tasks() {
-    let bsp_task = BSP_BOOTSTRAP_TASK.get();
-    task_set_unsafe_stack_sp(bsp_task, bsp_bootstrap_unsafe_sp() as u64);
+    BSP_BOOTSTRAP_TASK
+        .0
+        .unsafe_stack_sp
+        .store(bsp_bootstrap_unsafe_sp() as u64, Ordering::Release);
 
-    for i in 0..MAX_STATIC_APS {
-        let ap_task = AP_BOOTSTRAP_TASKS.ptr_at(i);
-        task_set_unsafe_stack_sp(ap_task, ap_bootstrap_unsafe_sp(i) as u64);
+    for (i, stub) in AP_BOOTSTRAP_TASKS.0.iter().enumerate() {
+        stub.unsafe_stack_sp
+            .store(ap_bootstrap_unsafe_sp(i) as u64, Ordering::Release);
     }
 }
 
@@ -239,20 +264,20 @@ pub fn init_bootstrap_tasks() {
 /// window legitimately observes a stub as `PCR.current_task`, and
 /// corruption-recovery paths would otherwise flag it as invalid
 /// and loop trying to replace it with idle.
-pub fn is_bootstrap_task_ptr(ptr: *const Task) -> bool {
+pub fn is_bootstrap_task_ptr(ptr: *const ()) -> bool {
     if ptr.is_null() {
         return false;
     }
     let p = ptr as usize;
-    // BSP stub: exactly one Task.
+    // BSP stub: exactly one.
     if p == BSP_BOOTSTRAP_TASK.get() as usize {
         return true;
     }
-    // AP stubs: contiguous array of MAX_STATIC_APS Tasks.
+    // AP stubs: contiguous array of MAX_STATIC_APS entries.
     let base = AP_BOOTSTRAP_TASKS.get() as usize;
-    let task_size = core::mem::size_of::<Task>();
-    let end = base + task_size * MAX_STATIC_APS;
-    if p >= base && p < end && (p - base) % task_size == 0 {
+    let stride = core::mem::size_of::<BootstrapTaskAbi>();
+    let end = base + stride * MAX_STATIC_APS;
+    if p >= base && p < end && (p - base) % stride == 0 {
         return true;
     }
     false
@@ -269,8 +294,8 @@ pub fn is_bootstrap_task_ptr(ptr: *const Task) -> bool {
 /// globals never move).
 pub fn ap_bootstrap_task_ptrs() -> [*mut (); MAX_STATIC_APS] {
     let mut out = [core::ptr::null_mut::<()>(); MAX_STATIC_APS];
-    for i in 0..MAX_STATIC_APS {
-        out[i] = AP_BOOTSTRAP_TASKS.ptr_at(i) as *mut ();
+    for (i, slot) in out.iter_mut().enumerate() {
+        *slot = AP_BOOTSTRAP_TASKS.ptr_at(i);
     }
     out
 }

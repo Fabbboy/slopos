@@ -583,7 +583,7 @@ pub fn task_pointer_is_valid(task: *const Task) -> bool {
     if with_task_manager(|mgr| mgr.registry.owns_pointer(task)) {
         return true;
     }
-    crate::safestack_rt::is_bootstrap_task_ptr(task)
+    crate::safestack_rt::is_bootstrap_task_ptr(task.cast())
 }
 
 pub(super) enum TaskAllocError {

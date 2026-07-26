@@ -2133,7 +2133,7 @@ pub fn scheduler_get_current_task() -> *mut Task {
     // slot targets (they carry a primed `unsafe_stack_sp`) but are
     // semantically "no scheduled task" for scheduler-facing readers.
     let ptr = slopos_arch::pcr::get_current_task() as *mut Task;
-    if super::safestack_rt::is_bootstrap_task_ptr(ptr) {
+    if super::safestack_rt::is_bootstrap_task_ptr(ptr.cast()) {
         core::ptr::null_mut()
     } else {
         ptr
@@ -2144,7 +2144,7 @@ pub fn scheduler_get_current_task() -> *mut Task {
 #[inline]
 pub fn scheduler_get_current_task_for(cpu_id: usize) -> *mut Task {
     let ptr = slopos_arch::pcr::get_current_task_for(cpu_id) as *mut Task;
-    if super::safestack_rt::is_bootstrap_task_ptr(ptr) {
+    if super::safestack_rt::is_bootstrap_task_ptr(ptr.cast()) {
         core::ptr::null_mut()
     } else {
         ptr

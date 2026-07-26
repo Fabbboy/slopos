@@ -480,7 +480,7 @@ impl PriorityRunQueue {
         let current = slopos_arch::pcr::get_current_task_for(cpu_id) as *mut Task;
         let idle = slopos_arch::pcr::get_idle_task(cpu_id) as *mut Task;
         let running_real = !current.is_null()
-            && !crate::safestack_rt::is_bootstrap_task_ptr(current)
+            && !crate::safestack_rt::is_bootstrap_task_ptr(current.cast())
             && current != idle;
         let load = queued.saturating_add(inbox);
         if running_real {
