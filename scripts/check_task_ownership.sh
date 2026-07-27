@@ -69,6 +69,58 @@
 #      neither the stack budget for it nor any guarantee the allocator
 #      locks are free.
 #
+#   8. No function whose return type names a lifetime that appears in no
+#      argument. Such a signature fabricates its output lifetime from
+#      nothing: `'a` is chosen by the caller, so it can be any lifetime at
+#      all, and two calls yield two simultaneously-live references to the
+#      same place. For the `&'a mut` forms that is instant aliasing UB on
+#      the second call, with no unsafe block anywhere in sight at the call
+#      site.
+#
+#      This catches the *shape*, not a list of names — which is the whole
+#      point of having it alongside check 4. Check 4 greps two identifiers,
+#      so a seventh function of the same shape could be added tomorrow and
+#      the gate would say nothing about it.
+#
+#      ## What check 8 does and does not see
+#
+#      It is a real parser rather than a regex: it splits a signature into
+#      its generic list, argument list and return type by counting angle
+#      brackets and parentheses (stepping over `->` so the arrow in a
+#      `Fn(A) -> B` bound does not close a generic list), then reports a
+#      declared lifetime the return type names and no argument does.
+#      Signatures spanning several lines are joined first, because the tree
+#      contains a three-line one that a line-at-a-time scan misses.
+#
+#      Known limits, stated rather than implied away:
+#
+#        - Only lifetimes declared on the function's own generic list are
+#          considered. One declared on an enclosing `impl<'a>` block and
+#          used in an inherent method's return type is NOT seen.
+#        - A lifetime introduced by a higher-ranked bound inside the
+#          argument list (`for<'x>`) is not treated as declared, which is
+#          correct, but one written in the fn's own generic list purely as
+#          a bound (`<'a: 'b>`) is, so an exotic bound-only lifetime could
+#          in principle be reported.
+#        - `'static` is excluded, being a fixed lifetime rather than a
+#          parameter the caller picks.
+#        - Elided lifetimes are not analysed at all. `fn f(x: &Task) -> &Foo`
+#          is tied to its argument by the elision rules and is silent here,
+#          which is the correct answer, but it is silent by not looking
+#          rather than by checking.
+#        - A signature longer than 20 lines is not joined, so it is skipped.
+#        - The shape is sound when every input the caller could present
+#          again is consumed by value, because then the function cannot be
+#          called twice on the same referent. `KBox::leak<'a>(b: Self) ->
+#          &'a mut T` is std's `Box::leak` signature and is correct for
+#          exactly that reason: the box is moved in, the allocation is
+#          deliberately never freed, and no second call against it is
+#          possible. Check 8 reports it anyway — distinguishing "consumed
+#          owning handle" from "re-presentable raw pointer or address"
+#          needs type resolution, not a signature parse. One such case
+#          exists in the tree; the rest of the hits take a raw pointer,
+#          a `NonNull`, or a bare address, and are the real shape.
+#
 # ---------------------------------------------------------------------
 # Sanctioned surfaces (exempt from checks 1 and 3)
 # ---------------------------------------------------------------------
@@ -221,8 +273,90 @@ scan_sources() {
                 printf "%s\t%s:%d: %s\n", tag, fname, n, lines[n]
             }
 
+            # ---- check 8 helpers: a small Rust signature parser --------
+            # Bracket matchers that step over `->` so the `>` of an arrow
+            # inside a bound (`F: Fn(u32) -> u32`) does not close a generic
+            # list.
+            function match_angle(s, p,   d, i, c) {
+                d = 0
+                i = p
+                while (i <= length(s)) {
+                    c = substr(s, i, 1)
+                    if (c == "-" && substr(s, i + 1, 1) == ">") { i += 2; continue }
+                    if (c == "<") { d++ }
+                    else if (c == ">") { d--; if (d == 0) { return i } }
+                    i++
+                }
+                return 0
+            }
+            function match_paren(s, p,   d, i, c) {
+                d = 0
+                i = p
+                while (i <= length(s)) {
+                    c = substr(s, i, 1)
+                    if (c == "(") { d++ }
+                    else if (c == ")") { d--; if (d == 0) { return i } }
+                    i++
+                }
+                return 0
+            }
+            # Whole-token test, so `<Q>a` does not match inside `<Q>ab`.
+            function names_lifetime(s, lt) {
+                return (s ~ (lt "([^A-Za-z0-9_]|$)"))
+            }
+            # The check-8 predicate. Splits a joined signature into its
+            # generic list, argument list and return type, then reports the
+            # first declared lifetime that the return type names and no
+            # argument does. Returns the lifetime, or "" for a clean
+            # signature.
+            function unconstrained_lifetime(sig,   i, gend, aend, generics, args,
+                                            ret, rest, tmp, lt, k, nlt, lts) {
+                if (match(sig, /(^|[^A-Za-z0-9_])fn[[:space:]]+[A-Za-z0-9_]+/) == 0) {
+                    return ""
+                }
+                i = RSTART + RLENGTH
+                while (substr(sig, i, 1) == " " || substr(sig, i, 1) == "\t") { i++ }
+                # No generic list means no declared lifetime to fabricate.
+                if (substr(sig, i, 1) != "<") { return "" }
+                gend = match_angle(sig, i)
+                if (gend == 0) { return "" }
+                generics = substr(sig, i, gend - i + 1)
+                i = gend + 1
+                while (substr(sig, i, 1) == " " || substr(sig, i, 1) == "\t") { i++ }
+                if (substr(sig, i, 1) != "(") { return "" }
+                aend = match_paren(sig, i)
+                if (aend == 0) { return "" }
+                args = substr(sig, i, aend - i + 1)
+                rest = substr(sig, aend + 1)
+                if (index(rest, "->") == 0) { return "" }
+                ret = substr(rest, index(rest, "->") + 2)
+                # A `where` clause constrains but does not tie a lifetime to
+                # an argument, so it is not part of the return type.
+                if (match(ret, /(^|[^A-Za-z0-9_])where([^A-Za-z0-9_]|$)/)) {
+                    ret = substr(ret, 1, RSTART - 1)
+                }
+                if (index(ret, "{")) { ret = substr(ret, 1, index(ret, "{") - 1) }
+
+                nlt = 0
+                tmp = generics
+                while (match(tmp, (Q "[A-Za-z_][A-Za-z0-9_]*"))) {
+                    lt = substr(tmp, RSTART, RLENGTH)
+                    tmp = substr(tmp, RSTART + RLENGTH)
+                    if (lt == (Q "static")) { continue }
+                    lts[++nlt] = lt
+                }
+                for (k = 1; k <= nlt; k++) {
+                    if (names_lifetime(ret, lts[k]) && !names_lifetime(args, lts[k])) {
+                        return lts[k]
+                    }
+                }
+                return ""
+            }
+
+            BEGIN { Q = sprintf("%c", 39) }
+
             # Store first so every later rule can look back.
-            { lines[NR] = $0 }
+            { lines[NR] = $0; last = NR }
 
             {
                 # Skip pure comment lines. `^\*` with no following space
@@ -333,6 +467,38 @@ scan_sources() {
                     emit("6", NR)
                 }
             }
+
+            # ---- check 8: output lifetime tied to no argument ---------
+            # Runs in END rather than per-line because a signature can span
+            # several lines and the whole of it has to be seen at once —
+            # `task_exit_info_ref` in the tree is a three-line signature
+            # that a line-at-a-time scan misses entirely.
+            #
+            # Joining rule: start at a line carrying `fn <name><`, append
+            # following lines until the accumulated text reaches the `{` or
+            # `;` that ends the signature, stripping trailing `//` comments
+            # as it goes. Capped so an unterminated signature cannot run
+            # away over the rest of the file.
+            END {
+                for (n = 1; n <= last; n++) {
+                    line = lines[n]
+                    if (line ~ /^[[:space:]]*(\/\/|\/\*|\*\/|\*[[:space:]])/) { continue }
+                    if (line !~ /(^|[^A-Za-z0-9_])fn[[:space:]]+[A-Za-z0-9_]+[[:space:]]*</) { continue }
+                    if (cfg_gated(n)) { continue }
+
+                    sig = ""
+                    for (j = n; j <= last && j < n + 20; j++) {
+                        piece = lines[j]
+                        sub(/\/\/.*/, "", piece)
+                        sig = sig " " piece
+                        if (piece ~ /[{;]/) { break }
+                    }
+                    lt = unconstrained_lifetime(sig)
+                    if (lt != "") {
+                        emit("8", n)
+                    }
+                }
+            }
         ' "$file" || true
     done
 }
@@ -406,6 +572,75 @@ fn counts() {
 }
 FIXTURE
 
+    # Check 8 gets its own fixture pair: the three dangerous shapes, and
+    # the lookalikes that must stay silent. The negatives carry the weight
+    # here — this is the check most able to produce false positives.
+    # `Payload` rather than `Task` throughout, so these files exercise
+    # check 8 and nothing else: a fixture that also tripped check 1 would
+    # make both checks' counts uninterpretable. The predicate reads only
+    # the lifetime tokens in the generic list, arguments and return type,
+    # so the referent type is immaterial to what is under test.
+    cat > "$fixture_root/sched/src/task/lifetimes_bad.rs" <<'FIXTURE'
+pub fn borrow_mut<'a, K, U>(p: *mut Payload<K, U>) -> Option<&'a mut Payload<K, U>> {
+    None
+}
+pub fn name_bytes<'a, K, U>(p: *const Payload<K, U>) -> Option<&'a [u8]> {
+    None
+}
+pub fn fpu_mut<'a, K, U>(p: *mut Payload<K, U>) -> &'a mut FpuState {
+    todo!()
+}
+pub fn plain_ref<'a>(p: *const Payload) -> &'a Payload {
+    todo!()
+}
+pub fn spans_lines<'a, K, U>(
+    p: *const Payload<K, U>,
+) -> Option<&'a crate::sync::AtomicCell<ExitInfo>> {
+    None
+}
+FIXTURE
+
+    cat > "$fixture_root/sched/src/task/lifetimes_ok.rs" <<'FIXTURE'
+// The lifetime IS tied to an argument — the whole point of the check.
+pub fn tied<'a>(p: &'a Payload) -> &'a Foo {
+    &p.foo
+}
+pub fn tied_mut<'a>(p: &'a mut Payload) -> Option<&'a mut Foo> {
+    None
+}
+// Elided: bound to the argument by the elision rules.
+pub fn elided(p: &Payload) -> &Foo {
+    &p.foo
+}
+// A lifetime declared and used only in an argument.
+pub fn consumes<'a>(p: &'a Payload) -> u32 {
+    0
+}
+// 'static is a fixed lifetime, not one the caller picks.
+pub fn statics<K, U>(p: *const Payload<K, U>) -> Option<&'static [u8]> {
+    None
+}
+// No generic list at all.
+pub fn no_generics(p: *mut Payload) -> u32 {
+    0
+}
+// An arrow inside a bound must not close the generic list, and `F` is not
+// a lifetime.
+pub fn with_bound<'a, F: Fn(u32) -> u32>(p: &'a Payload, f: F) -> &'a Foo {
+    &p.foo
+}
+// Higher-ranked bound in argument position: 'x is not declared on the fn.
+pub fn hrtb<'a>(p: &'a Payload, f: impl for<'x> Fn(&'x u32)) -> &'a Foo {
+    &p.foo
+}
+// Multi-line, but argument-tied.
+pub fn tied_multiline<'a, K, U>(
+    p: &'a Payload<K, U>,
+) -> Option<&'a crate::sync::AtomicCell<ExitInfo>> {
+    None
+}
+FIXTURE
+
     # Negative fixtures — nothing here may fire. The c_void payload types
     # are the false positive check 3 is written to avoid.
     cat > "$fixture_root/sched/src/task/negatives.rs" <<'FIXTURE'
@@ -451,6 +686,8 @@ FIXTURE
     fixture_files=(
         "sched/src/task/positives.rs"
         "sched/src/task/negatives.rs"
+        "sched/src/task/lifetimes_bad.rs"
+        "sched/src/task/lifetimes_ok.rs"
         "slopos-ostd/src/task/placement.rs"
         "mm/src/paging/frames.rs"
     )
@@ -478,15 +715,24 @@ FIXTURE
     expect 5  1   # Send impl justified by a task refcount
     expect 6  3   # task_inc_ref, task_dec_ref, refcnt
     expect 7  5   # five forbidden symbols on the fault path
+    expect 8  5   # Option<&'a mut T>, Option<&'a [u8]>, &'a mut T, &'a T, multi-line
 
-    # Nothing in negatives.rs may fire, on any check.
-    negatives="$(printf '%s\n' "$findings" | grep 'negatives\.rs' || true)"
-    if [ -n "$negatives" ]; then
-        echo "check_task_ownership --self-test: false positive in negatives.rs:" >&2
-        printf '%s\n' "$negatives" | sed 's/^/      /' >&2
-        self_test_fail=1
-    else
+    # Nothing in either negative fixture may fire, on any check. The
+    # lifetime negatives are the load-bearing ones: check 8 is the check
+    # most able to cry wolf, and a gate that flags correct code gets
+    # switched off.
+    for neg in "negatives\.rs" "lifetimes_ok\.rs"; do
+        hits="$(printf '%s\n' "$findings" | grep "$neg" || true)"
+        if [ -n "$hits" ]; then
+            echo "check_task_ownership --self-test: false positive in ${neg//\\/}:" >&2
+            printf '%s\n' "$hits" | sed 's/^/      /' >&2
+            self_test_fail=1
+        fi
+    done
+    if [ "$self_test_fail" -eq 0 ]; then
         echo "  negatives: no false positives (TaskEntry / entry_arg / TaskRef / TaskAddr clean)"
+        echo "  lifetime negatives: no false positives (argument-tied, elided, 'static,"
+        echo "    Fn(..) -> .. bound, and for<'x> HRTB all stay silent)"
     fi
 
     if [ "$self_test_fail" -ne 0 ]; then
@@ -518,7 +764,7 @@ fi
 
 findings="$(run_scan "$REPO_ROOT" "${scan_files[@]}")"
 
-CHECK_TAGS=(1 2 3a 3b 4 5 6 7)
+CHECK_TAGS=(1 2 3a 3b 4 5 6 7 8)
 declare -A CHECK_DESC=(
     [1]="raw task pointer in binding position (: *mut/*const Task/TaskInner, *mut *mut Task)"
     [2]="KernelSync<*mut Task> — an owner-less handle with Send/Sync silenced"
@@ -528,6 +774,7 @@ declare -A CHECK_DESC=(
     [5]="unsafe impl Send/Sync justified by a task refcount"
     [6]="manual task refcount manipulation (refcnt / inc_ref / dec_ref)"
     [7]="panic/fault path takes a lock or upgrades a KArc"
+    [8]="return type names a lifetime no argument constrains — the caller picks it"
 )
 
 total=0
