@@ -272,4 +272,125 @@ impl<K, U> TaskInner<K, U> {
     pub fn reclaim_link(&self) -> &Link<TaskInner<K, U>, ReclaimRole> {
         &self.reclaim_link
     }
+
+    // ── Saved register state: racy diagnostic reads ───────────────────
+    //
+    // `TaskContext` is `#[repr(C, packed)]`, so a pointer to one of its `u64`
+    // fields carries no alignment guarantee — hence `read_unaligned` rather
+    // than a plain read, and hence the only `unsafe` in this file. The
+    // unsafety is about alignment and tearing, not about whether the task
+    // exists: `as_ptr_racy` is `TaskOwnCell`'s sanctioned unsynchronised read
+    // path and forms no reference, so a concurrent write by the owning CPU is
+    // a torn value rather than UB.
+    //
+    // Torn is acceptable for every consumer: these feed log lines, the
+    // cr3-identity scan, and stack-probe bounds that range-check each address
+    // they read. A witnessed accessor would be wrong here — the whole point is
+    // to read a task this CPU is *not* running.
+
+    /// The task's saved `CR3`. The address-space identity tag the user-fault
+    /// dispatcher compares against live `CR3`.
+    #[inline]
+    pub fn context_cr3(&self) -> u64 {
+        self.read_context_field(core::mem::offset_of!(
+            crate::task::kernel_task::TaskContext,
+            cr3
+        ))
+    }
+
+    /// The task's saved instruction pointer.
+    #[inline]
+    pub fn context_rip(&self) -> u64 {
+        self.read_context_field(core::mem::offset_of!(
+            crate::task::kernel_task::TaskContext,
+            rip
+        ))
+    }
+
+    /// The task's saved stack pointer.
+    #[inline]
+    pub fn context_rsp(&self) -> u64 {
+        self.read_context_field(core::mem::offset_of!(
+            crate::task::kernel_task::TaskContext,
+            rsp
+        ))
+    }
+
+    /// The task's saved code selector.
+    #[inline]
+    pub fn context_cs(&self) -> u64 {
+        self.read_context_field(core::mem::offset_of!(
+            crate::task::kernel_task::TaskContext,
+            cs
+        ))
+    }
+
+    /// The task's saved stack selector.
+    #[inline]
+    pub fn context_ss(&self) -> u64 {
+        self.read_context_field(core::mem::offset_of!(
+            crate::task::kernel_task::TaskContext,
+            ss
+        ))
+    }
+
+    /// The task's saved RFLAGS.
+    #[inline]
+    pub fn context_rflags(&self) -> u64 {
+        self.read_context_field(core::mem::offset_of!(
+            crate::task::kernel_task::TaskContext,
+            rflags
+        ))
+    }
+
+    /// One racy, unaligned `u64` read out of the saved `context`.
+    ///
+    /// Note the two distinct `TaskContext` types: `context` is
+    /// `kernel_task::TaskContext`, the packed 25-register interrupt-frame
+    /// snapshot, while `switch_ctx` is `task::task::TaskContext`, the
+    /// callee-saved frame the switch asm uses. They share a name and not a
+    /// layout, which is why the two readers below cannot be one.
+    ///
+    /// Offset-driven so the six getters above share a single `unsafe` block
+    /// rather than six copies of the same three lines.
+    #[inline]
+    fn read_context_field(&self, offset: usize) -> u64 {
+        let base = self.context.as_ptr_racy().cast::<u8>();
+        // SAFETY: `offset` is an `offset_of!` into the very `TaskContext` this
+        // pointer addresses, so the read is in bounds. `read_unaligned`
+        // because the struct is packed; no reference is formed, so a
+        // concurrent write is a torn value rather than UB.
+        unsafe { base.add(offset).cast::<u64>().read_unaligned() }
+    }
+
+    /// The saved callee-saved frame's `(rip, rsp)` — the seed for walking a
+    /// descheduled task's parked call chain.
+    #[inline]
+    pub fn switch_ctx_rip_rsp(&self) -> (u64, u64) {
+        (
+            self.read_switch_ctx_field(core::mem::offset_of!(crate::task::TaskContext, rip)),
+            self.read_switch_ctx_field(core::mem::offset_of!(crate::task::TaskContext, rsp)),
+        )
+    }
+
+    /// The saved frame pointer of a descheduled task.
+    #[inline]
+    pub fn switch_ctx_rbp(&self) -> u64 {
+        self.read_switch_ctx_field(core::mem::offset_of!(crate::task::TaskContext, rbp))
+    }
+
+    /// The saved RFLAGS of a descheduled task.
+    #[inline]
+    pub fn switch_ctx_rflags(&self) -> u64 {
+        self.read_switch_ctx_field(core::mem::offset_of!(crate::task::TaskContext, rflags))
+    }
+
+    /// See [`read_context_field`](Self::read_context_field); same contract,
+    /// other cell.
+    #[inline]
+    fn read_switch_ctx_field(&self, offset: usize) -> u64 {
+        let base = self.switch_ctx.as_ptr_racy().cast::<u8>();
+        // SAFETY: as `read_context_field`.
+        unsafe { base.add(offset).cast::<u64>().read_unaligned() }
+    }
 }
