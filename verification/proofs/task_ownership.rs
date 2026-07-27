@@ -55,6 +55,41 @@
 // survives every `Step` holds in every reachable state of every interleaving —
 // which is the concurrency claim.
 //
+// ONE exception to "each method body is one atomic-bounded Step", and the
+// reason it is sound. `DispatchPin` and `DispatchUnpin` are single atomic
+// steps here, but each is TWO separate writes in the tree, in two different
+// functions, with a real window between them:
+//
+//   pin    `task_set_on_cpu(_, true)`  (scheduler.rs:1221, :1355)
+//          then `PCR.current_task` <- task     (inside `dispatch()`)
+//   unpin  `PCR.current_task` <- successor     (`dispatch()` on the incoming)
+//          then `task_set_on_cpu(_, false)`    (scheduler.rs:1471)
+//
+// So a state exists in which exactly one of the two writes has landed, and
+// this model has no image for it. It does not need one, because `pinned`
+// mirrors `task_is_dispatch_pinned`, which is a DISJUNCTION —
+// `task_on_cpu_load || task_is_current_on_any_cpu`. Whichever write lands
+// first, the other disjunct is still true, so `pinned` is true throughout the
+// window and the intermediate state collapses onto the pre-state of the step.
+// Modelling the pair as atomic is therefore sound, and the disjunction is the
+// entire reason. Note what this does NOT depend on: the order of the two
+// writes. Either order is safe, which is why the pin and unpin sequences above
+// use opposite orders without consequence.
+//
+// The edit that breaks it is not a reordering. It is narrowing
+// `task_is_dispatch_pinned` to a conjunction, or deleting either disjunct.
+// Then one write landing would take `pinned` false while the task is still on
+// a CPU, T6 would no longer describe the tree, and — the part that makes this
+// worth writing down — THIS PROOF WOULD KEEP VERIFYING, because the model
+// never sees the intermediate state it just started admitting.
+//
+// The same disjunction underwrites `CurrentTask`'s soundness in
+// `slopos-ostd/src/task/cell.rs`: that guard takes no reference count and
+// relies on the `task_is_current_on_any_cpu` disjunct keeping a running task
+// unreapable, and its doc says in terms that deleting that disjunct deletes
+// the guard's soundness proof. Both facts rest on the same predicate; until
+// now only the `cell.rs` half was written down.
+//
 // TWO invariants, deliberately:
 //
 //   `own_inv`     — the sub-step-robust core. It survives not only every
@@ -115,8 +150,21 @@
 //                     task_is_current_on_any_cpu` (sched/src/scheduler.rs)
 //   `body_live`   <-> the `TaskInner` body is still initialised, i.e.
 //                     `drop_in_place` has not run
-//   `parked_node` <-> `task_release_strong` returned `Some(node)` and the
-//                     matching `task_destroy_parked` has not consumed it
+//   `parked_node` <-> `task_release_strong` returned `Some(ParkedTask)` — the
+//                     reclaim token minted only for the winner of the
+//                     one-to-zero release — and the matching
+//                     `task_destroy_parked` has not consumed it. Since the
+//                     token landed, that second clause is enforced by the
+//                     compiler rather than only by this model:
+//                     `task_destroy_parked` takes the token BY VALUE and
+//                     `ParkedTask` is neither `Copy` nor `Clone`, so a second
+//                     destroy would need a second token and the type has no
+//                     public constructor. `t5_destruction_runs_at_most_once`
+//                     below therefore now proves something the type system
+//                     also rejects — belt and braces, not the sole guard.
+//                     The one place a token is built from a bare pointer is
+//                     `task_parked_reclaim`, whose single caller is the
+//                     graveyard drain.
 //   `destroys`    <-> ghost: destructor run count (must be at most one)
 
 use vstd::prelude::*;
@@ -198,6 +246,9 @@ pub open spec fn own_inv(s: TaskOwn) -> bool {
     //      corruption and send `scheduler_tasks_for_cpu` down its recovery
     //      path on the dying task's own stack.
     //      `broken_reap_ignoring_pin_violates_invariant` breaks exactly this.
+    //      `pinned` is set and cleared by two writes rather than one; see the
+    //      disjunction note in the header for why modelling that pair as a
+    //      single atomic step is sound, and what would silently invalidate it.
     &&& (s.pinned ==> s.exist_refs == 1)
     &&& (s.pinned ==> s.registered)
     // (T4) A referenced task's body is live. This is the no-use-after-free
@@ -290,19 +341,41 @@ pub enum Step {
     /// deferred previous-task slot is this step.
     ContainerLeak,
     /// `task_placement_reclaim`: take a parked reference back out as a handle.
-    /// `strong` untouched. Unconditional in the tree — `ReadyQueue::dequeue`
-    /// and `drain_previous_task` both call it with no further gate, and the
-    /// dequeue's whole point is that the reference *moves* to the dispatcher
-    /// rather than being released, so the task is pinned by a caller handle
-    /// across the switch window including the unbounded `on_cpu` spin.
+    /// `strong` untouched — the reference changes ledger, not existence.
+    ///
+    /// The transition's own guard is `containers > 0`, and that is the whole
+    /// of what this step claims. Individual call sites may add their own gate
+    /// and some do: `task_family.rs`'s remove-child path reclaims only when
+    /// `task_children_remove` reports the child was actually unlinked, which
+    /// is correct — an ungated reclaim there would take a reference the list
+    /// no longer holds. A gated site is still an instance of this step; it
+    /// simply does not take it on every path.
+    ///
+    /// Deliberately not enumerated here. There are nine call sites across
+    /// `per_cpu.rs`, `task_family.rs` and `scheduler.rs`, the set grows
+    /// whenever a container is added — C4's remote-inbox drain added two —
+    /// and a list in a comment rots silently while the guard above does not.
+    ///
+    /// The load-bearing instance is `ReadyQueue::dequeue`: the reference
+    /// *moves* to the dispatcher rather than being released, so the task is
+    /// pinned by a caller handle across the switch window including the
+    /// unbounded `on_cpu` spin. That is why `pinned ==> containers >= 1` is
+    /// false and `pinned ==> exist_refs == 1` is what holds.
     ContainerReclaim,
-    /// `dispatch()` claiming the task: `task_set_on_cpu(true)` plus the
-    /// `PCR.current_task` publication. Only a registered task still holding
-    /// its existence reference can be claimed, and the dispatching CPU holds
-    /// the dequeued reference as a caller handle for the whole window.
+    /// A CPU claiming the task. Only a registered task still holding its
+    /// existence reference can be claimed, and the dispatching CPU holds the
+    /// dequeued reference as a caller handle for the whole window.
+    ///
+    /// Two writes, not one, and not in the same function: `task_set_on_cpu(_,
+    /// true)` at `scheduler.rs:1221` and `:1355`, then the `PCR.current_task`
+    /// publication inside `dispatch()`. `dispatch()` itself does *not* set
+    /// `on_cpu` — it did once, and this comment said so for longer than it was
+    /// true.
     DispatchPin,
-    /// The switch tail retiring the task: `task_set_on_cpu(false)` and the
-    /// successor taking over `PCR.current_task`.
+    /// The switch tail retiring the task. Also two writes in that order
+    /// reversed: the successor takes `PCR.current_task` (`dispatch()` on the
+    /// incoming task) and only then is `task_set_on_cpu(_, false)` cleared, at
+    /// `scheduler.rs:1471`, once every still-Ready task has been published.
     DispatchUnpin,
     /// `task_release_strong` -> `KArc::release_deferrable`, non-final: the CAS
     /// loop observed a previous value above one. A bare atomic decrement, safe
