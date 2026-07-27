@@ -35,6 +35,18 @@ pub type Current = slopos_ostd::task::CurrentTask<KernelStack, UnsafeStack>;
 /// kernel monomorphisation. Minted only by `slopos_ostd::task::run_switch`.
 pub type Switching<'a> = slopos_ostd::task::SwitchWindow<'a, KernelStack, UnsafeStack>;
 
+/// Racy, lock-free, allocation-free snapshot of the running task, at the
+/// concrete kernel monomorphisation.
+///
+/// The fault handlers in `boot/` are the callers, and they must not name the
+/// stack-handle types to get one. Takes no lock, mints no handle, forms no
+/// reference — see `slopos_ostd::task::diag` for what it does and does not
+/// promise.
+#[inline]
+pub fn current_task_diag() -> Option<slopos_ostd::task::TaskDiag> {
+    slopos_ostd::task::current_task_diag::<KernelStack, UnsafeStack>()
+}
+
 // =============================================================================
 // Razor blocks against the concrete monomorphisation
 // =============================================================================

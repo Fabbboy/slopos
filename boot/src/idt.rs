@@ -4,7 +4,6 @@ use core::ffi::c_void;
 use core::sync::atomic::{AtomicU8, Ordering};
 
 use slopos_arch::cpu;
-use slopos_sched::task::{task_has_flag, task_id_of, task_kernel_stack_bounds, task_process_id};
 // Re-export the OSTD IDT types/constants the legacy `boot::idt::*`
 // surface exposed (consumed by `boot/src/tests/gdt_tests.rs` and similar).
 pub use slopos_ostd::irq::{
@@ -688,18 +687,15 @@ pub(crate) fn handle_corrupt_iret_frame(iret_frame: *const u64) -> ! {
     // Limit the probe range to avoid nested faults on invalid addresses:
     // use the current task's kernel stack bounds when available, otherwise
     // conservatively bound to ±128 bytes around iret_frame.
-    // Call scheduler_get_current_task() once and reuse for both the
-    // bounds computation and the task-info dump below.
-    let task_ptr = slopos_sched::scheduler::scheduler_get_current_task();
+    // One racy snapshot, reused for the probe bounds and the task line below.
+    // This is a fault path — it must take no lock and upgrade no `KArc`, both
+    // for the reasons `slopos_ostd::task::diag` sets out — so the fields come
+    // from a volatile read behind the PCR's id filter rather than a lookup.
+    let diag = slopos_sched::task_struct::current_task_diag();
 
     klog_info!("=== IRET FRAME VICINITY DUMP ===");
-    let (dump_lo, dump_hi) = match task_kernel_stack_bounds(task_ptr) {
-        Some((base, top)) if base != 0 && top > base => (base as usize, top as usize),
-        _ => {
-            let mid = iret_frame as usize;
-            (mid.saturating_sub(128), mid.saturating_add(128))
-        }
-    };
+    let (dump_lo, dump_hi) =
+        slopos_ostd::task::TaskDiag::probe_range(diag.as_ref(), iret_frame as usize, 128);
     for offset in -4isize..10 {
         // Use wrapping_offset to avoid UB when the resulting pointer
         // falls outside the allocated object (negative offsets).
@@ -725,12 +721,11 @@ pub(crate) fn handle_corrupt_iret_frame(iret_frame: *const u64) -> ! {
     }
     klog_info!("=== END DUMP ===");
 
-    if !task_ptr.is_null() {
-        let is_user = task_has_flag(task_ptr, slopos_abi::task::TASK_FLAG_USER_MODE);
+    if let Some(diag) = diag.as_ref() {
         klog_info!(
             "  Current task: id={} user={}",
-            task_id_of(task_ptr).unwrap_or(0),
-            is_user,
+            diag.id,
+            (diag.flags & slopos_abi::task::TASK_FLAG_USER_MODE) != 0,
         );
     }
 
@@ -775,9 +770,10 @@ fn try_handle_page_fault(frame: *mut slopos_arch::InterruptFrame) -> bool {
     let Some(task_ref) = resolve_user_fault_task() else {
         return false;
     };
-    let task_ptr = task_ref.as_ptr();
-    let pid = task_process_id(task_ptr).unwrap_or(0);
-    let tid = task_id_of(task_ptr).unwrap_or(0);
+    // Recoverable user fault, not the panic path: `resolve_user_fault_task`
+    // keeps its registry lookup and the guard derefs straight to the fields.
+    let pid = task_ref.process_id;
+    let tid = task_ref.task_id;
 
     slopos_mm::page_fault::try_resolve_user_fault(fault_addr, frame_ref.error_code, pid, tid)
 }

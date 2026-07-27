@@ -5,12 +5,12 @@ use slopos_arch::InterruptFrame;
 use slopos_arch::cpu;
 use slopos_kernel_services::kernel_vm_space::activate_post_user_fault;
 use slopos_ostd::{kdiag_dump_interrupt_frame, klog_info};
-use slopos_sched::scheduler::{schedule, scheduler_get_current_task};
+use slopos_sched::scheduler::schedule;
 use slopos_sched::task::TaskRef;
 use slopos_sched::task::task_terminate;
 use slopos_sched::task::{
     task_context_cr3, task_entry_point, task_find_by_cr3, task_flags, task_id_of, task_name_bytes,
-    task_pointer_is_valid, task_process_id, task_record_user_fault_exit,
+    task_process_id, task_record_user_fault_exit,
 };
 use slopos_sched::task_struct::Task;
 
@@ -79,12 +79,21 @@ pub(crate) fn cstr_from_bytes(bytes: &'static [u8]) -> &'static CStr {
 #[inline]
 pub(crate) fn resolve_user_fault_task() -> Option<TaskRef> {
     let hw_cr3 = cpu::read_cr3() & !0xFFF;
-    let task = scheduler_get_current_task() as *mut Task;
 
-    if !task.is_null() && task_pointer_is_valid(task as *const Task) {
-        let task_cr3 = task_context_cr3(task as *const Task).unwrap_or(0) & !0xFFF;
+    // Recoverable user page fault, not a panic path: the registry lookups stay.
+    // Resolving the id to a `TaskRef` first makes the guard itself the validity
+    // proof — strictly stronger than `task_pointer_is_valid`'s address test,
+    // which only asked whether the registry or the stub whitelist knew that
+    // address — and hands back a borrow, so the CR3 read comes off the guard
+    // rather than a raw projection. A bootstrap stub has no valid id and so
+    // falls through to the CR3 scan, as before.
+    if let Some(task_ref) = slopos_sched::task_struct::Current::get()
+        .map(|current| current.id())
+        .and_then(slopos_sched::task::task_find_by_id)
+    {
+        let task_cr3 = task_context_cr3(&*task_ref).unwrap_or(0) & !0xFFF;
         if task_cr3 == hw_cr3 {
-            return task_id_of(task).and_then(slopos_sched::task::task_find_by_id);
+            return Some(task_ref);
         }
     }
 

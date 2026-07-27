@@ -4,11 +4,9 @@ use slopos_arch::InterruptFrame;
 use slopos_arch::cpu;
 use slopos_mm::hhdm::PhysAddrHhdm;
 use slopos_mm::process_vm;
+use slopos_ostd::task::TaskDiag;
 use slopos_ostd::{kdiag_dump_interrupt_frame, kdiag_stack_word_at, klog_info};
-use slopos_sched::task::{
-    task_context_cr3, task_context_rip, task_context_rsp, task_flags, task_id_of,
-    task_kernel_stack_bounds, task_name_bytes, task_process_id,
-};
+use slopos_sched::task::{task_context_rip, task_context_rsp};
 
 use crate::ist_stacks;
 use crate::user_fault::*;
@@ -162,14 +160,16 @@ pub(crate) fn exception_page_fault(frame: *mut InterruptFrame) {
     if (frame_ref.error_code & 0x10) != 0 {
         klog_info!("=== STACK DUMP at RSP 0x{:x} ===", frame_ref.rsp);
 
-        // Determine a safe probe range for the stack dump.  Call
-        // scheduler_get_current_task() once and reuse the pointer for
-        // both bounds computation and the task-context dump below.
-        let task_ptr = slopos_sched::scheduler::scheduler_get_current_task();
-        let (stack_lo, stack_hi) = match task_kernel_stack_bounds(task_ptr) {
-            Some((base, top)) if base != 0 && top > base => (base as usize, top as usize),
-            _ => (frame_ref.rsp as usize, frame_ref.rsp as usize + 128),
-        };
+        // One racy snapshot, reused for the probe bounds and the task line
+        // below. This is a fault path: it must take no lock (every registry
+        // lookup holds the global cli-spinlock, and a fault arriving while a
+        // CPU holds it would hang the dump) and must upgrade no `KArc` (the
+        // matching drop could run the allocator-heavy destructor from a fault
+        // handler on an IST stack). `current_task_diag` does neither — see its
+        // module docs for the residual hazard it accepts and why.
+        let diag = slopos_sched::task_struct::current_task_diag();
+        let (stack_lo, stack_hi) =
+            TaskDiag::probe_range(diag.as_ref(), frame_ref.rsp as usize, 128);
 
         for i in 0..16isize {
             match kdiag_stack_word_at(frame_ref.rsp, i, stack_lo, stack_hi) {
@@ -191,26 +191,21 @@ pub(crate) fn exception_page_fault(frame: *mut InterruptFrame) {
         let current_cr3 = cpu::read_cr3();
         klog_info!("Active CR3: 0x{:x}", current_cr3);
 
-        if let (Some(tid), Some(name_bytes), Some((kbase, ktop)), Some(fl), Some(ctx_cr3)) = (
-            task_id_of(task_ptr),
-            task_name_bytes(task_ptr),
-            task_kernel_stack_bounds(task_ptr),
-            task_flags(task_ptr),
-            task_context_cr3(task_ptr),
-        ) {
+        if let Some(diag) = diag.as_ref() {
             klog_info!(
                 "Current task: id={} name='{}' kstack=0x{:x}..0x{:x} flags=0x{:x} ctx_cr3=0x{:x}",
-                tid,
-                slopos_ostd::string::bytes_as_str(name_bytes),
-                kbase,
-                ktop,
-                fl,
-                ctx_cr3
+                diag.id,
+                diag.name_str(),
+                diag.kernel_stack_base,
+                diag.kernel_stack_top,
+                diag.flags,
+                diag.context_cr3
             );
-            // Check if RSP is outside the task's kernel stack bounds
-            let rsp_val = frame_ref.rsp;
-            if rsp_val < kbase || rsp_val >= ktop {
-                klog_info!("WARNING: RSP 0x{:x} OUTSIDE kernel stack bounds!", rsp_val);
+            if !diag.stack_contains(frame_ref.rsp) {
+                klog_info!(
+                    "WARNING: RSP 0x{:x} OUTSIDE kernel stack bounds!",
+                    frame_ref.rsp
+                );
             }
         }
 
@@ -235,13 +230,16 @@ pub(crate) fn log_user_page_fault_diagnostics(frame_ref: &InterruptFrame, fault_
     let mut ctx_rsp = 0u64;
 
     let task_ref = resolve_user_fault_task();
+    // Not the panic path: a user page fault is recoverable, and
+    // `resolve_user_fault_task` deliberately keeps its registry lookup. The
+    // guard derefs to `&Task`, so the fields come off it directly rather than
+    // through a raw projection.
     if let Some(task_ref) = task_ref {
-        let task_ptr = task_ref.as_ptr();
-        let task_pid = task_process_id(task_ptr).unwrap_or(slopos_abi::task::INVALID_TASK_ID);
+        let task_pid = task_ref.process_id;
         if task_pid != slopos_abi::task::INVALID_TASK_ID {
             pid = task_pid;
-            ctx_rip = task_context_rip(task_ptr).unwrap_or(0);
-            ctx_rsp = task_context_rsp(task_ptr).unwrap_or(0);
+            ctx_rip = task_context_rip(&*task_ref).unwrap_or(0);
+            ctx_rsp = task_context_rsp(&*task_ref).unwrap_or(0);
             cr3 = process_vm::process_vm_get_ostd_pml4_paddr(pid);
             if cr3 != 0 {
                 fault_phys =
