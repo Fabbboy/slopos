@@ -215,36 +215,18 @@ func run(rawArgv []string) int {
 
 	// --- compute exit + persist last-fail.list
 	failures := recorder.Summary.Failures()
-	bailed := false
-	for _, p := range recorder.Summary.Phases {
-		if p.BailReason != nil {
-			bailed = true
-			break
-		}
+	// A run narrowed by the caller is allowed to match nothing; an
+	// unfiltered one is not. `--rerun-failed` counts as a selection, since
+	// `filters` holds the names it read from last-fail.list.
+	hasSelection := len(filters) > 0 || len(args.Skips) > 0
+	verdict := ClassifyRun(recorder.Summary, driverRes, hasSelection)
+	if verdict.QemuStatusWarning != "" {
+		fmt.Fprintln(os.Stderr, verdict.QemuStatusWarning)
 	}
-	failedOverall := len(failures) > 0 || bailed || driverRes.TimedOut || recorder.Summary.Truncated
-
-	exitCode := 0
-	switch {
-	case driverRes.UserAborted:
-		exitCode = 130
-	case failedOverall:
-		exitCode = 1
-		if driverRes.QemuStatus != nil && *driverRes.QemuStatus != 0 && *driverRes.QemuStatus != 1 {
-			fmt.Fprintf(os.Stderr,
-				"run_tests: warning: unexpected qemu_run.sh exit status %d "+
-					"(kernel did not reach isa-debug-exit cleanly)\n",
-				*driverRes.QemuStatus)
-			exitCode = 2
-		}
-	default:
-		if driverRes.QemuStatus != nil && *driverRes.QemuStatus != 0 {
-			fmt.Fprintf(os.Stderr,
-				"run_tests: warning: green run but qemu_run.sh exit status was %d; "+
-					"treating as wrapper failure\n", *driverRes.QemuStatus)
-			exitCode = 2
-		}
+	if verdict.Diagnostic != "" {
+		fmt.Fprintln(os.Stderr, verdict.Diagnostic)
 	}
+	exitCode := verdict.Code
 
 	if !driverRes.UserAborted {
 		if err := writeLastFailList(lastFailList, failures); err != nil {
