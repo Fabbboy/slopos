@@ -234,6 +234,20 @@ impl<K, U> TaskInner<K, U> {
         &self.name
     }
 
+    /// Take this task's `SYSCALL_TEST_REPORT` ring, leaving the slot empty.
+    ///
+    /// The taker is a foreign task draining a corpse while the owner installs
+    /// the ring lazily, so the `SpinLock` is what makes the two safe against
+    /// each other. The `KBox` leaves with the return value and is therefore
+    /// dropped by the caller after the guard is released — freeing a ring under
+    /// the lock would put an allocator call in the critical section.
+    #[inline]
+    pub fn take_test_reports(
+        &self,
+    ) -> Option<crate::KBox<crate::task::test_reports::TestReportRing>> {
+        self.test_reports.lock().take()
+    }
+
     // ── Children list ─────────────────────────────────────────────────
     //
     // Membership in this list *is* a parked strong reference, so every method

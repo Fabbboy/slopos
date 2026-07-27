@@ -4,8 +4,7 @@ use slopos_ostd::task::{ProcessGroup, Session};
 use slopos_ostd::{KArc, KWeak};
 
 use super::task_accessors::{
-    task_clear_controlling_tty_for, task_id_of, task_parent_task_id, task_signal_post, task_tgid,
-    task_wake_all_waiters,
+    task_id_of, task_parent_task_id, task_signal_post, task_tgid, task_wake_all_waiters,
 };
 use super::task_table::{task_find_by_id, task_for_each_active, with_task_manager};
 use super::{INVALID_TASK_ID, Task};
@@ -56,7 +55,9 @@ pub fn task_clear_controlling_tty_for_session(session_id: u32, tty: TtyIndex) ->
 
     let mut cleared = 0usize;
     task_for_each_active(|task| {
-        if task_clear_controlling_tty_for(core::ptr::from_ref(task), session_id, tty) {
+        // The walk hands us a live registry entry as `&Task`; both halves are
+        // `&self` operations, so the accessor was a null check around nothing.
+        if task.sid == session_id && task.clear_controlling_tty_if(tty) {
             cleared = cleared.saturating_add(1);
         }
     });

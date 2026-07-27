@@ -560,8 +560,9 @@ pub fn task_find_by_cr3(cr3: u64) -> Option<TaskRef> {
             if matches!(status, TaskStatus::Invalid | TaskStatus::Terminated) {
                 continue;
             }
-            let task_cr3 =
-                super::task_accessors::task_context_cr3(task.as_ptr()).unwrap_or(0) & !0xFFF;
+            // `task` is the registry guard the walk yields; it derefs to
+            // `&Task`, so the racy context read comes off it directly.
+            let task_cr3 = task.context_cr3() & !0xFFF;
             if task_cr3 != target {
                 continue;
             }
@@ -825,7 +826,7 @@ pub fn task_drain_test_reports(task_id: u32) -> KVec<crate::test_reports::TestRe
     let Some(task) = task_find_by_id(task_id) else {
         return KVec::new();
     };
-    let mut ring = match super::task_accessors::task_take_test_reports(task.as_ptr()) {
+    let mut ring = match task.take_test_reports() {
         Some(ring) => ring,
         None => return KVec::new(),
     };
@@ -839,10 +840,11 @@ pub fn debug_dump_tasks_klog() {
 }
 
 fn dump_one_task(t: &Task) {
-    let task = core::ptr::from_ref(t);
+    // The parameter is the borrow; this used to cast it back to a pointer for
+    // two of the five reads while the other three already went through it.
     let reason = t.load_block_reason();
-    let placement = slopos_ostd::task::accessors::task_sched_placement_load(task);
-    let on_cpu = slopos_ostd::task::accessors::task_on_cpu_load(task);
+    let placement = t.sched_placement();
+    let on_cpu = t.on_cpu();
     let last_run = t.last_run_timestamp();
     klog_info!(
         "SYSRQ: task {:>3} '{}' status={:?} reason={:?} placement={:?} on_cpu={} pid={} pgid={} sid={} last_run={}",
@@ -858,9 +860,8 @@ fn dump_one_task(t: &Task) {
         last_run,
     );
     if t.status() == TaskStatus::Blocked {
-        let (ctx_rip, ctx_rsp) =
-            slopos_ostd::task::accessors::task_switch_ctx_rip_rsp(task).unwrap_or((0, 0));
-        let ctx_rbp = slopos_ostd::task::accessors::task_switch_ctx_rbp(task).unwrap_or(0);
+        let (ctx_rip, ctx_rsp) = t.switch_ctx_rip_rsp();
+        let ctx_rbp = t.switch_ctx_rbp();
         klog_info!(
             "SYSRQ:   parked at rip=0x{:x} rsp=0x{:x} rbp=0x{:x}",
             ctx_rip,
