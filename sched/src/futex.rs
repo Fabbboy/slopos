@@ -15,9 +15,7 @@ use slopos_ostd::KArc;
 use slopos_ostd::sync::{KernelSync, LOCK_LEVEL_RESOURCE, SpinLock};
 use slopos_ostd::task::task_placement_clone;
 
-use super::scheduler::{
-    mark_current_blocked, scheduler_get_current_task, unblock_task, yield_blocked_task,
-};
+use super::scheduler::{mark_current_blocked, unblock_task, yield_blocked_task};
 use super::task::{INVALID_TASK_ID, task_id_of, task_put};
 use super::task_struct::Task;
 
@@ -111,10 +109,12 @@ fn futex_hash(addr: u64) -> usize {
 pub fn futex_wait(uaddr: u64, expected: u32, _timeout_ms: u64) -> i64 {
     let bucket_idx = futex_hash(uaddr);
 
-    let current = scheduler_get_current_task();
-    if current.is_null() {
+    // The running task, as a borrow: the bucket needs its identity and its
+    // block reason, and both come off the guard the syscall path already has.
+    let Some(current_guard) = crate::task_struct::Current::get() else {
         return slopos_abi::syscall::ERRNO_EAGAIN as i64;
-    }
+    };
+    let current = current_guard.as_ptr();
 
     // The bucket SpinLock plays the same role as a WaitQueue's internal
     // SpinLock in the harmonic-cascade wait protocol: under the lock we
@@ -166,14 +166,16 @@ pub fn futex_wait(uaddr: u64, expected: u32, _timeout_ms: u64) -> i64 {
         bucket.waiters[idx] = FutexWaiter {
             futex_addr: uaddr,
             task: KernelSync::new(Some(task_placement_clone(node))),
-            task_id: task_id_of(current).unwrap_or(INVALID_TASK_ID),
+            task_id: current_guard.id(),
         };
         bucket.count += 1;
 
         // Stamp the block reason before flipping status so any tracer
         // (or future signal-aware unblock path) sees the committed
         // reason at the same moment the status flips.
-        crate::task::task_store_block_reason(current, BlockReason::FutexWait);
+        current_guard
+            .task()
+            .store_block_reason(BlockReason::FutexWait);
 
         mark_current_blocked()
     };

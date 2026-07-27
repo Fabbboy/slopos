@@ -10,7 +10,7 @@ use super::scheduler::{
 };
 use super::task::{
     INVALID_TASK_ID, TASK_FLAG_KERNEL_MODE, TASK_FLAG_SYSTEM, Task, TaskPriority, TaskStatus,
-    task_create, task_has_flag, task_sched_placement_store, task_set_status, task_terminate,
+    task_create, task_terminate,
 };
 use super::work_steal::try_work_steal;
 use slopos_ostd::task::SchedPlacement;
@@ -77,9 +77,10 @@ pub(crate) extern "C" fn kernel_thread_trampoline(arg: *mut c_void) {
         return;
     };
 
-    let current = super::scheduler::scheduler_get_current_task();
+    // The running task's own flags, off the guard rather than a raw pointer.
     let fatal_if_panics = slopos_ostd::task::TaskAddr::current().is_some_and(per_cpu::is_idle_task)
-        || task_has_flag(current, TASK_FLAG_SYSTEM);
+        || crate::task_struct::Current::get()
+            .is_some_and(|current| current.task().flags & TASK_FLAG_SYSTEM != 0);
     if fatal_if_panics || !slopos_ostd::panic_recovery::production_recovery_enabled() {
         entry();
         return;
@@ -315,8 +316,10 @@ pub fn create_idle_task_for_cpu(cpu_id: usize) -> c_int {
         cpu_id as u8,
     );
 
-    task_set_status(idle_task, TaskStatus::Running);
-    task_sched_placement_store(idle_task, SchedPlacement::OnCpu);
+    // `idle_guard` is the registry guard taken three lines above; both of
+    // these are its own state.
+    idle_guard.set_status(TaskStatus::Running);
+    idle_guard.set_sched_placement(SchedPlacement::OnCpu);
 
     super::scheduler::install_idle_task(cpu_id, idle_task);
 

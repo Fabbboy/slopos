@@ -3,9 +3,7 @@ use slopos_mm::memory_layout_defs::{EXCEPTION_STACK_REGION_BASE, EXCEPTION_STACK
 use slopos_ostd::sync::PreemptGuard;
 
 use super::scheduler::{is_scheduling_active, schedule_from_trap_exit, scheduler_timer_tick};
-use super::task::{
-    TASK_FLAG_USER_MODE, Task, TaskStatus, task_has_flag, task_save_from_interrupt_frame,
-};
+use super::task::{TASK_FLAG_USER_MODE, Task, TaskStatus, task_save_from_interrupt_frame};
 
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub enum RescheduleReason {
@@ -59,11 +57,10 @@ pub fn save_preempt_context(frame: *mut InterruptFrame) {
     let Some(current) = crate::task_struct::Current::get() else {
         return;
     };
-    let task = current.as_ptr();
-
-    if !task_has_flag(task, TASK_FLAG_USER_MODE) {
+    if current.task().flags & TASK_FLAG_USER_MODE == 0 {
         return;
     }
+    let task = current.as_ptr();
 
     // OSTD's `borrow_ref` folds the one `unsafe` reborrow; the
     // caller-supplied frame lives on the ISR stack for the duration

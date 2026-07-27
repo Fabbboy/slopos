@@ -20,7 +20,7 @@ use super::per_cpu::{
     affinity_allows_cpu, enqueue_task_on_cpu, get_cpu_ready_count, try_steal_task_from_cpu,
     with_cpu_scheduler, with_local_scheduler,
 };
-use super::task::{task_cpu_affinity, task_last_run_timestamp, task_migration_count_inc};
+use super::task::task_migration_count_inc;
 use super::task_struct::Task;
 use slopos_arch::{get_cpu_count, get_current_cpu};
 use slopos_ostd::KArc;
@@ -126,7 +126,7 @@ fn try_steal_from_cpu(victim: usize, thief: usize) -> Option<KArc<Task>> {
     let task: &Task = &stolen;
 
     // Affinity: can the task run on the thief CPU?
-    let affinity = task_cpu_affinity(task).unwrap_or(0);
+    let affinity = task.cpu_affinity;
     if !affinity_allows_cpu(affinity, thief) {
         return_to_victim(victim, stolen);
         return None;
@@ -138,7 +138,7 @@ fn try_steal_from_cpu(victim: usize, thief: usize) -> Option<KArc<Task>> {
     // without invariant TSC this check may be inaccurate and should be
     // disabled or replaced with a CPU-synchronized timestamp method.
     if MIGRATION_COST_CYCLES > 0 {
-        let last_run = task_last_run_timestamp(task).unwrap_or(0);
+        let last_run = task.last_run_timestamp();
         if last_run != 0 {
             let now = kdiag_timestamp();
             if now.saturating_sub(last_run) < MIGRATION_COST_CYCLES {
