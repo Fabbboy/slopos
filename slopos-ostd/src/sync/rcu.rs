@@ -361,8 +361,11 @@ pub unsafe fn call_rcu(ptr: *mut u8, callback: RcuCallback) {
 /// code stays fully safe. After the next grace period the callback is
 /// invoked with the rebuilt `KBox<T>`, which then drops normally.
 ///
-/// On OOM the deferred-allocation fast path falls through to a
-/// synchronous grace period (mirroring [`call_rcu`]).
+/// On OOM this takes a synchronous grace period *before* releasing `arg`,
+/// mirroring [`call_rcu`]. The ordering is the whole point: a reader that
+/// entered its read-side section before the publication must be allowed to
+/// leave it before the old value dies, and an allocation failure is not a
+/// licence to skip that.
 pub fn rcu_call_typed<T: Send + 'static>(arg: crate::mm::KBox<T>, drop_fn: fn(crate::mm::KBox<T>)) {
     // The trampoline forms a closure-free function pointer compatible
     // with `RcuCallback = unsafe fn(*mut u8)`. Each `T` / `drop_fn`
@@ -372,14 +375,16 @@ pub fn rcu_call_typed<T: Send + 'static>(arg: crate::mm::KBox<T>, drop_fn: fn(cr
     }
     impl<T: Send + 'static> Trampoline<T> {
         unsafe fn run(ptr: *mut u8) {
-            // The pushed pointer is always (boxed_arg, drop_fn) packed in
-            // a single allocation — see the alloc dance below. Reverse
-            // it to recover both halves.
+            // The pushed pointer is the (arg, drop_fn) pack the reservation
+            // below allocated. Recover both halves, release the pack's own
+            // storage symmetrically with `raw_alloc`, then run the callback.
             let pack = ptr as *mut TypedRcuPack<T>;
             // SAFETY: `pack` was allocated by the matching path in
-            // `rcu_call_typed`; ownership transferred at that point.
-            let pack_box = unsafe { crate::mm::KBox::from_raw(pack) };
-            let TypedRcuPack { arg, drop_fn } = crate::mm::KBox::into_inner(pack_box);
+            // `rcu_call_typed`; ownership transferred at that point, and this
+            // trampoline runs exactly once per allocation.
+            let TypedRcuPack { arg, drop_fn } = unsafe { pack.read() };
+            // SAFETY: symmetric with the `raw_alloc` below, same layout.
+            unsafe { raw_dealloc(pack.cast::<u8>(), Layout::new::<TypedRcuPack<T>>()) };
             drop_fn(arg);
         }
     }
@@ -389,24 +394,34 @@ pub fn rcu_call_typed<T: Send + 'static>(arg: crate::mm::KBox<T>, drop_fn: fn(cr
         drop_fn: fn(crate::mm::KBox<T>),
     }
 
-    let pack = match crate::mm::KBox::try_new(TypedRcuPack { arg, drop_fn }) {
-        Ok(p) => p,
-        Err(_) => {
-            // Fall back to a synchronous grace period — same fallback
-            // shape as `call_rcu`.
-            backend().log_warn(format_args!(
-                "RCU: rcu_call_typed allocation failed, falling back to synchronous grace period"
-            ));
-            return;
-        }
-    };
-    let raw = crate::mm::KBox::into_raw(pack) as *mut u8;
-    // SAFETY: `Trampoline::<T>::run` is sound iff `raw` was produced
-    // by the matching `KBox::into_raw(pack)` of a `TypedRcuPack<T>`,
-    // which it is. After a grace period elapses, no reader can hold a
-    // reference to the value inside `arg`.
+    // Reserve the pack's storage *before* taking ownership of `arg`. Moving
+    // `arg` into a fallible constructor instead would hand it to a callee that
+    // drops it on failure — freeing the payload with no grace period at all,
+    // which is exactly the use-after-free the deferral exists to prevent, and
+    // is invisible because the failure path still logs that it waited.
+    let layout = Layout::new::<TypedRcuPack<T>>();
+    // SAFETY: `TypedRcuPack<T>` holds a `KBox` and a fn pointer, so its layout
+    // is non-zero-sized.
+    let pack = unsafe { raw_alloc(layout) }.cast::<TypedRcuPack<T>>();
+    if pack.is_null() {
+        backend().log_warn(format_args!(
+            "RCU: rcu_call_typed allocation failed, falling back to synchronous grace period"
+        ));
+        synchronize_rcu();
+        drop_fn(arg);
+        return;
+    }
+    // SAFETY: freshly allocated, correctly aligned for `TypedRcuPack<T>`, and
+    // uniquely owned until `call_rcu` publishes it.
+    unsafe { pack.write(TypedRcuPack { arg, drop_fn }) };
+
+    // SAFETY: `Trampoline::<T>::run` is sound iff the pointer is the matching
+    // `TypedRcuPack<T>` allocation, which it is. After a grace period elapses,
+    // no reader can hold a reference to the value inside `arg`. `call_rcu`'s
+    // own OOM path takes the grace period before invoking the callback, so the
+    // ordering holds even when the node cannot be allocated either.
     unsafe {
-        call_rcu(raw, Trampoline::<T>::run);
+        call_rcu(pack.cast::<u8>(), Trampoline::<T>::run);
     }
 }
 
