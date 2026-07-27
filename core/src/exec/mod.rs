@@ -363,7 +363,7 @@ pub fn spawn_program_with_attrs(
         // eventually runs this task.  This is the Linux TASK_NEW →
         // TASK_RUNNING pattern: task_create leaves the task Blocked,
         // and we make it schedulable only here.
-        if publish_new_task(task_info) != 0 {
+        if publish_new_task(task_guard.arc()) != 0 {
             task_terminate(task_id);
             return Err(ExecError::NoMem);
         }

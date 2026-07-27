@@ -78,8 +78,8 @@ pub(crate) extern "C" fn kernel_thread_trampoline(arg: *mut c_void) {
     };
 
     let current = super::scheduler::scheduler_get_current_task();
-    let fatal_if_panics =
-        per_cpu::is_idle_task(current) || task_has_flag(current, TASK_FLAG_SYSTEM);
+    let fatal_if_panics = slopos_ostd::task::TaskAddr::current().is_some_and(per_cpu::is_idle_task)
+        || task_has_flag(current, TASK_FLAG_SYSTEM);
     if fatal_if_panics || !slopos_ostd::panic_recovery::production_recovery_enabled() {
         entry();
         return;
@@ -147,7 +147,7 @@ impl KernelThreadSpawner for KernelThreadSpawnerImpl {
             let _ = task_terminate(task_id);
             return Err(SpawnError::OutOfTaskIds);
         };
-        if publish_new_task(task.as_ptr()) != 0 {
+        if publish_new_task(task.arc()) != 0 {
             let _ = task_terminate(task_id);
             return Err(SpawnError::ScheduleFailed);
         }

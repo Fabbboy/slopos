@@ -392,9 +392,10 @@ extern "C" fn kernel_task_entry_shim(task_arg: *mut c_void) {
         task_borrow(task_ptr).map(|task| {
             let raw_entry = task.entry_point as usize as *mut ();
             let entry = slopos_ostd::util::fn_ptr::fn_ptr_from_raw::<TaskEntry>(raw_entry);
-            let fatal_if_panics = crate::per_cpu::is_idle_task(task_ptr)
-                || (task.flags & TASK_FLAG_SYSTEM) != 0
-                || !slopos_ostd::panic_recovery::production_recovery_enabled();
+            let fatal_if_panics =
+                crate::per_cpu::is_idle_task(slopos_ostd::task::TaskAddr::of(task))
+                    || (task.flags & TASK_FLAG_SYSTEM) != 0
+                    || !slopos_ostd::panic_recovery::production_recovery_enabled();
             // `kernel_thread_trampoline` (the spawn() facade's entry point) already
             // wraps the real entry in its own run_recoverable — skip the shim's
             // boundary for it so a panic is caught exactly once.
@@ -885,7 +886,9 @@ fn mark_task_terminated(task_ptr: *mut Task, resolved_id: u32) {
         }
     });
 
-    scheduler::unschedule_task(task_ptr);
+    if let Some(body) = task_borrow(task_ptr as *const Task) {
+        scheduler::unschedule_task(body);
+    }
 
     // A task that dies before it was ever published leaves `Nascent` behind.
     // Retire it to `None` so placement keeps meaning "no scheduler owner" for
@@ -1010,7 +1013,7 @@ fn should_collect_for_shutdown(task: &Task, task_ptr: *mut Task, current: *mut T
     if task_ptr == current {
         return false;
     }
-    if crate::per_cpu::is_idle_task(task_ptr) {
+    if crate::per_cpu::is_idle_task(slopos_ostd::task::TaskAddr::of(task)) {
         return false;
     }
     task.task_id != INVALID_TASK_ID
@@ -1226,7 +1229,7 @@ pub fn task_fork(
     // Held across link_child and publication below: those still work through
     // `child_task_ptr`, and registration alone would let a concurrent shutdown
     // sweep reclaim the child under them.
-    let _registered = match register_task(pending) {
+    let registered = match register_task(pending) {
         Ok(registered) => registered,
         Err(pending) => {
             klog_info!("task_fork: task registry full");
@@ -1253,7 +1256,7 @@ pub fn task_fork(
     // Publish Ready only after all child-specific fields are fully initialized.
     // `publish_new_task` reserves scheduler placement before setting Ready, so
     // the child is never visible as Ready with no runqueue/inbox owner.
-    if scheduler::publish_new_task(child_task_ptr) != 0 {
+    if scheduler::publish_new_task(&registered) != 0 {
         klog_info!("fork: initial runnable publish failed for task {child_task_id}");
         let _ = task_terminate(child_task_id);
         return INVALID_TASK_ID;
@@ -1461,7 +1464,7 @@ pub fn task_clone(
     // which still works through `child_task_ptr`. Registration alone would let a
     // concurrent shutdown sweep reclaim the child under them; the scope-held
     // guard also covers every faulting early return between here and the end.
-    let _registered = match register_task(pending) {
+    let registered = match register_task(pending) {
         Ok(registered) => registered,
         Err(pending) => {
             klog_info!("task_clone: task registry full");
@@ -1519,7 +1522,7 @@ pub fn task_clone(
     // Publish Ready only after all child-specific fields are fully initialized.
     // `publish_new_task` reserves scheduler placement before setting Ready, so
     // the child is never visible as Ready with no runqueue/inbox owner.
-    if scheduler::publish_new_task(child_task_ptr) != 0 {
+    if scheduler::publish_new_task(&registered) != 0 {
         klog_info!("clone: initial runnable publish failed for task {child_task_id}");
         let _ = task_terminate(child_task_id);
         return Err(ERRNO_EAGAIN);

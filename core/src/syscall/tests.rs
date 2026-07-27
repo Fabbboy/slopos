@@ -4465,7 +4465,7 @@ pub fn test_wq_wrong_order_wakeup_lost() -> TestResult {
     assert_eq_test!(cas_block, 0);
 
     // 3. Producer wakeup: unblock_task CAS(Blocked → Ready).
-    let result = unblock_task(task_ptr);
+    let result = unblock_task(task_guard.arc());
     assert_eq_test!(result, 0, "unblock_task should succeed from Blocked");
 
     let state = task_status(task_ptr).unwrap_or(TaskStatus::Terminated);
@@ -4497,7 +4497,7 @@ pub fn test_wq_correct_order_wakeup_preserved() -> TestResult {
 
     // unblock_task on a Running task is a no-op — there's nothing to
     // unblock, but the call must not corrupt the state.
-    let result = unblock_task(task_ptr);
+    let result = unblock_task(task_guard.arc());
     assert_eq_test!(result, 0, "unblock_task on Running task is a no-op");
 
     let state = task_status(task_ptr).unwrap_or(TaskStatus::Terminated);

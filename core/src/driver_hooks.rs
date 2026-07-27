@@ -31,12 +31,10 @@ fn runtime_current_task_pgrp_handle() -> Option<slopos_ostd::KWeak<ProcessGroup>
 /// queue hands this back on an arbitrary CPU at an arbitrary later time, and a
 /// waiter killed while parked never unwinds its own stack, so its node can
 /// outlive it. A weak upgrade answers "already gone" where a pointer would have
-/// named freed memory. The guard pins the task across the wake.
+/// named freed memory. [`scheduler::unblock_task_id`] is that lookup — this hook
+/// is now only the service-table shape around it.
 fn runtime_unblock_task(task_id: u32) -> i32 {
-    let Some(target) = task::task_find_by_id(task_id) else {
-        return -1;
-    };
-    scheduler::unblock_task(target.as_ptr())
+    scheduler::unblock_task_id(task_id)
 }
 
 /// Post `signum` to every member of `pgid`, waking blocked members. True if at
@@ -52,7 +50,7 @@ fn runtime_signal_process_group(pgid: u32, signum: u8) -> bool {
             return;
         }
         if task_signal_post(task.as_ptr(), signum) {
-            let _ = scheduler::unblock_task(task.as_ptr());
+            let _ = scheduler::unblock_task(task.arc());
         }
         matched = true;
     });
@@ -72,7 +70,7 @@ fn runtime_signal_session(sid: u32, signum: u8) -> bool {
             return;
         }
         if task_signal_post(task.as_ptr(), signum) {
-            let _ = scheduler::unblock_task(task.as_ptr());
+            let _ = scheduler::unblock_task(task.arc());
         }
         matched = true;
     });

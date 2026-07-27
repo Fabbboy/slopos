@@ -476,7 +476,7 @@ pub fn init_task_manager() -> c_int {
     };
     with_task_manager(|mgr| {
         for (id, task) in mgr.registry.iter() {
-            if crate::per_cpu::is_idle_task(task.as_ptr()) {
+            if crate::per_cpu::is_idle_task(slopos_ostd::task::TaskAddr::of(&task)) {
                 klog_debug!(
                     "init_task_manager: preserving idle task {} ('{}')",
                     id,

@@ -499,7 +499,7 @@ pub fn test_failed_publication_restores_nascent() -> TestResult {
     let task = guard.as_ptr();
 
     // Blocked + Nascent: the publish path must refuse this.
-    if scheduler::schedule_new_task(task) == 0 {
+    if scheduler::schedule_new_task(guard.arc()) == 0 {
         klog_info!("SCHED_TEST: schedule_new_task published a Blocked task");
         let _ = task_terminate(task_id);
         return TestResult::Fail;
@@ -515,7 +515,7 @@ pub fn test_failed_publication_restores_nascent() -> TestResult {
 
     // And the wake gate must still hold, which is the property the missing
     // rollback actually destroyed.
-    if scheduler::unblock_task(task) != 0 {
+    if scheduler::unblock_task(guard.arc()) != 0 {
         klog_info!("SCHED_TEST: wake after a failed publication did not no-op");
         let _ = task_terminate(task_id);
         return TestResult::Fail;
@@ -529,7 +529,7 @@ pub fn test_failed_publication_restores_nascent() -> TestResult {
     }
 
     // A real publication still works afterwards.
-    if publish_new_task(task) != 0 {
+    if publish_new_task(guard.arc()) != 0 {
         klog_info!("SCHED_TEST: publish_new_task failed after a rolled-back reservation");
         let _ = task_terminate(task_id);
         return TestResult::Fail;
@@ -637,7 +637,7 @@ pub fn test_nascent_task_refuses_wake() -> TestResult {
 
     // The wake reports "nothing to do" rather than failure: the task exists, so
     // a caller like `kill` must not turn this into ESRCH.
-    if scheduler::unblock_task(task) != 0 {
+    if scheduler::unblock_task(guard.arc()) != 0 {
         klog_info!("SCHED_TEST: nascent wake did not report a no-op");
         let _ = task_terminate(task_id);
         return TestResult::Fail;
@@ -672,7 +672,7 @@ pub fn test_nascent_task_refuses_wake() -> TestResult {
     }
 
     // Publication is the one sanctioned way out, and it still works.
-    if publish_new_task(task) != 0 {
+    if publish_new_task(guard.arc()) != 0 {
         klog_info!("SCHED_TEST: publish_new_task failed after a refused wake");
         let _ = task_terminate(task_id);
         return TestResult::Fail;
@@ -736,7 +736,7 @@ pub fn test_raw_ready_store_does_not_reserve_waking_placement() -> TestResult {
         return TestResult::Fail;
     }
 
-    if scheduler::schedule_task(task) != 0 {
+    if scheduler::schedule_task(guard.arc()) != 0 {
         klog_info!("SCHED_TEST: explicit Ready publish failed");
         return TestResult::Fail;
     }
@@ -775,7 +775,7 @@ pub fn test_publish_new_task_owns_ready_publication() -> TestResult {
         return TestResult::Fail;
     }
 
-    if publish_new_task(task) != 0 {
+    if publish_new_task(guard.arc()) != 0 {
         klog_info!("SCHED_TEST: publish_new_task failed");
         return TestResult::Fail;
     }
@@ -824,7 +824,7 @@ pub fn test_wake_blocked_task_publishes_from_none() -> TestResult {
         return TestResult::Fail;
     }
 
-    if scheduler::wake_blocked_task(task, task_id) != 0 {
+    if scheduler::wake_blocked_task(guard.arc(), task_id) != 0 {
         klog_info!("SCHED_TEST: wake_blocked_task failed");
         return TestResult::Fail;
     }
@@ -2087,7 +2087,6 @@ pub fn test_schedule_to_empty_queue() -> TestResult {
     let Some(task_guard) = task_find_by_id(task_id) else {
         return TestResult::Fail;
     };
-    let task_ptr = task_guard.as_ptr();
 
     if !make_task_ready(task_id) {
         klog_info!("SCHED_TEST: Failed to make empty-queue task READY");
@@ -2095,7 +2094,7 @@ pub fn test_schedule_to_empty_queue() -> TestResult {
     }
 
     // Schedule to empty queue
-    if schedule_task(task_ptr) != 0 {
+    if schedule_task(task_guard.arc()) != 0 {
         klog_info!("SCHED_TEST: Failed to schedule task to empty queue");
         return TestResult::Fail;
     }
@@ -2136,7 +2135,6 @@ pub fn test_schedule_duplicate_task() -> TestResult {
     let Some(task_guard) = task_find_by_id(task_id) else {
         return TestResult::Fail;
     };
-    let task_ptr = task_guard.as_ptr();
 
     if !make_task_ready(task_id) {
         klog_info!("SCHED_TEST: Failed to make duplicate-schedule task READY");
@@ -2144,7 +2142,7 @@ pub fn test_schedule_duplicate_task() -> TestResult {
     }
 
     // Schedule once
-    schedule_task(task_ptr);
+    schedule_task(task_guard.arc());
 
     let mut ready_before = 0u32;
     get_scheduler_stats(
@@ -2155,7 +2153,7 @@ pub fn test_schedule_duplicate_task() -> TestResult {
     );
 
     // Schedule again - should be idempotent
-    schedule_task(task_ptr);
+    schedule_task(task_guard.arc());
 
     let mut ready_after = 0u32;
     get_scheduler_stats(
@@ -2178,17 +2176,46 @@ pub fn test_schedule_duplicate_task() -> TestResult {
     TestResult::Pass
 }
 
-/// Test: Schedule null task pointer
-pub fn test_schedule_null_task() -> TestResult {
+/// Test: the publication entry point refuses input it cannot schedule.
+///
+/// This used to pass a null pointer. `schedule_task` now takes an owning
+/// handle, so a null is unrepresentable and the branch that rejected one is
+/// gone with it — the type is the guard. What still needs a runtime check is
+/// the other unschedulable input: a task that is not Ready. The reservation it
+/// takes must be rolled back, leaving a never-published task spelled `Nascent`.
+pub fn test_schedule_refuses_non_ready_task() -> TestResult {
     let _fixture = SchedFixture::new();
 
-    let result = schedule_task(ptr::null_mut());
+    let task_id = task_create(
+        b"NotReady\0".as_ptr() as *const c_char,
+        dummy_task_entry,
+        ptr::null_mut(),
+        TaskPriority::Normal.as_u8(),
+        TASK_FLAG_KERNEL_MODE,
+    );
+    if task_id == INVALID_TASK_ID {
+        return TestResult::Fail;
+    }
+    let Some(guard) = task_find_by_id(task_id) else {
+        return TestResult::Fail;
+    };
 
-    if result == 0 {
-        klog_info!("SCHED_TEST: BUG - Scheduling null task succeeded!");
+    // A fresh task is Blocked + Nascent.
+    if schedule_task(guard.arc()) == 0 {
+        klog_info!("SCHED_TEST: BUG - scheduled a task that was not Ready!");
+        let _ = task_terminate(task_id);
+        return TestResult::Fail;
+    }
+    if task_sched_placement_load(&*guard) != SchedPlacement::Nascent {
+        klog_info!(
+            "SCHED_TEST: refused publication left placement {:?}, expected Nascent",
+            task_sched_placement_load(&*guard)
+        );
+        let _ = task_terminate(task_id);
         return TestResult::Fail;
     }
 
+    let _ = task_terminate(task_id);
     TestResult::Pass
 }
 
@@ -2212,7 +2239,7 @@ pub fn test_unschedule_not_in_queue() -> TestResult {
         return TestResult::Fail;
     };
 
-    let _result = unschedule_task(task_guard.as_ptr());
+    let _result = unschedule_task(&task_guard);
 
     TestResult::Pass
 }
@@ -2264,17 +2291,14 @@ pub fn test_priority_ordering() -> TestResult {
     ) else {
         return TestResult::Fail;
     };
-    let low_ptr = low_guard.as_ptr();
-    let normal_ptr = normal_guard.as_ptr();
-    let high_ptr = high_guard.as_ptr();
     if !make_task_ready(low_id) || !make_task_ready(normal_id) || !make_task_ready(high_id) {
         klog_info!("SCHED_TEST: Failed to make priority tasks READY");
         return TestResult::Fail;
     }
 
-    schedule_task(low_ptr);
-    schedule_task(normal_ptr);
-    schedule_task(high_ptr);
+    schedule_task(low_guard.arc());
+    schedule_task(normal_guard.arc());
+    schedule_task(high_guard.arc());
 
     TestResult::Pass
 }
@@ -2308,16 +2332,14 @@ pub fn test_idle_priority_last() -> TestResult {
     else {
         return TestResult::Fail;
     };
-    let idle_ptr = idle_guard.as_ptr();
-    let normal_ptr = normal_guard.as_ptr();
     if !make_task_ready(idle_id) || !make_task_ready(normal_id) {
         klog_info!("SCHED_TEST: Failed to make idle-priority tasks READY");
         return TestResult::Fail;
     }
 
     // Schedule idle first, then normal
-    schedule_task(idle_ptr);
-    schedule_task(normal_ptr);
+    schedule_task(idle_guard.arc());
+    schedule_task(normal_guard.arc());
 
     // The scheduler should pick normal before idle due to priority
     // We can't directly verify this without running, but we verify no crash
@@ -2357,7 +2379,7 @@ pub fn test_timer_tick_decrements_slice() -> TestResult {
         klog_info!("SCHED_TEST: Failed to make timer-slice task READY");
         return TestResult::Fail;
     }
-    schedule_task(task_guard.as_ptr());
+    schedule_task(task_guard.arc());
 
     TestResult::Pass
 }
@@ -2569,7 +2591,7 @@ pub fn test_schedule_task_before_scheduler_enable_on_current_cpu() -> TestResult
     }
     crate::task::task_install_idle_affinity(task_ptr, 1u32 << cpu_id, cpu_id as u8);
 
-    if schedule_task(task_ptr) != 0 {
+    if schedule_task(task_guard.arc()) != 0 {
         klog_info!(
             "SCHED_TEST: Failed to schedule task before scheduler enable on CPU {}",
             cpu_id
@@ -2740,7 +2762,7 @@ pub fn test_many_same_priority_tasks() -> TestResult {
                     "make_task_ready failed for id {:?}",
                     id
                 );
-                schedule_task(task.as_ptr());
+                schedule_task(task.arc());
             }
         }
     }
@@ -2792,7 +2814,7 @@ pub fn test_interleaved_operations() -> TestResult {
                 "make_task_ready failed for id {:?}",
                 id1
             );
-            schedule_task(task1.as_ptr());
+            schedule_task(task1.arc());
         }
 
         // Terminate first before scheduling second
@@ -2805,7 +2827,7 @@ pub fn test_interleaved_operations() -> TestResult {
                 "make_task_ready failed for id {:?}",
                 id2
             );
-            schedule_task(task2.as_ptr());
+            schedule_task(task2.arc());
         }
 
         // Terminate second
@@ -2841,7 +2863,6 @@ pub fn test_remote_inbox_push_drain() -> TestResult {
     let Some(task_guard) = task_find_by_id(task_id) else {
         return TestResult::Fail;
     };
-    let task_ptr = task_guard.as_ptr();
     // Stand in for a published-then-blocked task: inbox and wake paths refuse
     // a task that is still nascent.
     assert!(
@@ -2862,7 +2883,7 @@ pub fn test_remote_inbox_push_drain() -> TestResult {
 
     // Push to remote inbox (simulating cross-CPU wake)
     super::per_cpu::with_cpu_scheduler(cpu_id, |sched| {
-        sched.push_remote_wake(task_ptr);
+        sched.push_remote_wake(task_guard.arc());
     });
 
     // Verify inbox has pending task.
@@ -2947,8 +2968,8 @@ pub fn test_remote_inbox_duplicate_push_is_single_membership() -> TestResult {
     let strong_base = task_placement_strong_count(node);
 
     super::per_cpu::with_cpu_scheduler(cpu_id, |sched| {
-        sched.push_remote_wake(task_ptr);
-        sched.push_remote_wake(task_ptr);
+        sched.push_remote_wake(task_guard.arc());
+        sched.push_remote_wake(task_guard.arc());
     });
 
     if !task_remote_inbox_is_linked(task_ptr) {
@@ -3035,7 +3056,7 @@ pub fn test_remote_inbox_multiple_tasks() -> TestResult {
     // Push all to inbox
     for guard in task_guards.iter().flatten() {
         super::per_cpu::with_cpu_scheduler(cpu_id, |sched| {
-            sched.push_remote_wake(guard.as_ptr());
+            sched.push_remote_wake(guard.arc());
         });
     }
 
@@ -3086,7 +3107,6 @@ pub fn test_timer_tick_drains_inbox() -> TestResult {
     let Some(task_guard) = task_find_by_id(task_id) else {
         return TestResult::Fail;
     };
-    let task_ptr = task_guard.as_ptr();
     // Stand in for a published-then-blocked task: inbox and wake paths refuse
     // a task that is still nascent.
     assert!(
@@ -3103,7 +3123,7 @@ pub fn test_timer_tick_drains_inbox() -> TestResult {
 
     // Push to inbox (bypassing normal schedule_task)
     super::per_cpu::with_cpu_scheduler(cpu_id, |sched| {
-        sched.push_remote_wake(task_ptr);
+        sched.push_remote_wake(task_guard.arc());
     });
 
     // Verify inbox has pending
@@ -3158,7 +3178,7 @@ pub fn test_remote_inbox_drops_non_ready_tasks() -> TestResult {
     let strong_base = task_placement_strong_count(node);
 
     super::per_cpu::with_cpu_scheduler(cpu_id, |sched| {
-        sched.push_remote_wake(task_ptr);
+        sched.push_remote_wake(task_guard.arc());
     });
 
     if task_status(task_ptr) != Some(TaskStatus::Blocked) {
@@ -3258,7 +3278,7 @@ pub fn test_cross_cpu_schedule_lockfree() -> TestResult {
     // Keep last_cpu on the current CPU so the scheduler must migrate it.
     crate::task::task_install_idle_affinity(task_ptr, 1u32 << target_cpu, current_cpu as u8);
 
-    let result = schedule_task(task_ptr);
+    let result = schedule_task(task_guard.arc());
     if result != 0 {
         klog_info!("SCHED_TEST: Cross-CPU schedule_task failed");
         return TestResult::Fail;
@@ -3401,13 +3421,13 @@ pub fn test_scheduler_wakeup_race_stress_baseline() -> TestResult {
                     id
                 );
             }
-            let _ = schedule_task(task_ptr);
+            let _ = schedule_task(task.arc());
         }
         scheduler_timer_tick();
         schedule();
         for id in task_ids {
             if let Some(task) = task_find_by_id(id) {
-                let _ = unschedule_task(task.as_ptr());
+                let _ = unschedule_task(&task);
             }
             if task_find_by_id(id).is_none() {
                 return TestResult::Fail;
@@ -3455,7 +3475,7 @@ pub fn test_sleep_wake_race_regression() -> TestResult {
     const FAR_FUTURE: u64 = u64::MAX / 2;
 
     for round in 0..64 {
-        let _ = unschedule_task(task_ptr);
+        let _ = unschedule_task(&task_guard);
         if task_status(task_ptr) == Some(TaskStatus::Blocked) && !make_task_ready(task_id) {
             klog_info!("SCHED_TEST: set Ready failed at round {}", round);
             task_terminate(task_id);
@@ -3554,7 +3574,7 @@ pub fn test_sleep_entry_survives_unparked_wake() -> TestResult {
     // Park the task outside the ready queue so the scheduler cannot dispatch
     // (and exit) it mid-test. It ends up Blocked with a non-Sleep reason —
     // exactly the "not sleep-parked" shape phase 1 needs.
-    let _ = unschedule_task(task_ptr);
+    let _ = unschedule_task(&task_guard);
     if !task_is_blocked(task_ptr) {
         klog_info!("SCHED_TEST: unschedule did not park the task");
         task_terminate(task_id);
@@ -4058,7 +4078,7 @@ pub fn test_select_target_cpu_prefers_idle_cpu() -> TestResult {
             super::per_cpu::affinity_mask_for_cpu(cpu_id),
             cpu_id as u8,
         );
-        if !make_task_ready(tid) || schedule_task(tp) != 0 {
+        if !make_task_ready(tid) || schedule_task(filler.arc()) != 0 {
             return TestResult::Fail;
         }
     }
@@ -4082,7 +4102,7 @@ pub fn test_select_target_cpu_prefers_idle_cpu() -> TestResult {
 
     crate::task::task_install_idle_affinity(task_ptr, 0, cpu_id as u8);
 
-    let target = super::per_cpu::select_target_cpu(task_ptr);
+    let target = super::per_cpu::select_target_cpu(&task_guard);
     match target {
         Some(t) if t == other_cpu => { /* expected — migrated to idle CPU */ }
         Some(t) if t == cpu_id => {
@@ -4184,7 +4204,7 @@ pub fn test_select_target_cpu_running_task_not_idle() -> TestResult {
     let task_ptr = task_guard.as_ptr();
     crate::task::task_install_idle_affinity(task_ptr, 0, cpu_id as u8);
 
-    let target = super::per_cpu::select_target_cpu(task_ptr);
+    let target = super::per_cpu::select_target_cpu(&task_guard);
     match target {
         Some(t) if t != cpu_id => { /* expected — migrated away from busy CPU */ }
         Some(t) => {
@@ -4265,7 +4285,7 @@ pub fn test_schedule_new_task_spreads_across_cpus() -> TestResult {
         };
         let tp = child.as_ptr();
         crate::task::task_set_cpu_affinity(tp, 0); // any CPU
-        if !make_task_ready(tid) || schedule_new_task(tp) != 0 {
+        if !make_task_ready(tid) || schedule_new_task(child.arc()) != 0 {
             return TestResult::Fail;
         }
         placed_on[i] = task_last_cpu(tp).unwrap_or(0) as usize;
@@ -4324,7 +4344,6 @@ pub fn test_effective_load_accuracy() -> TestResult {
     let Some(task_guard) = task_find_by_id(task_id) else {
         return TestResult::Fail;
     };
-    let task_ptr = task_guard.as_ptr();
     // Stand in for a published-then-blocked task; the enqueue path refuses a
     // task that is still nascent.
     assert!(
@@ -4332,7 +4351,7 @@ pub fn test_effective_load_accuracy() -> TestResult {
         "fixture task was not nascent"
     );
     super::per_cpu::with_cpu_scheduler(cpu_id, |sched| {
-        sched.enqueue_local(task_ptr);
+        sched.enqueue_local(task_guard.arc());
     });
 
     let load_after =
@@ -5097,7 +5116,10 @@ slopos_testing::stest!(name = test_ustack_pcp_stress_1000, suite = sched_core);
 slopos_testing::stest!(name = test_regions_disjoint, suite = sched_core);
 slopos_testing::stest!(name = test_schedule_to_empty_queue, suite = sched_core);
 slopos_testing::stest!(name = test_schedule_duplicate_task, suite = sched_core);
-slopos_testing::stest!(name = test_schedule_null_task, suite = sched_core);
+slopos_testing::stest!(
+    name = test_schedule_refuses_non_ready_task,
+    suite = sched_core
+);
 slopos_testing::stest!(name = test_unschedule_not_in_queue, suite = sched_core);
 slopos_testing::stest!(name = test_priority_ordering, suite = sched_core);
 slopos_testing::stest!(name = test_idle_priority_last, suite = sched_core);

@@ -216,7 +216,7 @@ pub fn futex_wake(uaddr: u64, max_wake: u32) -> i64 {
         let taken = core::mem::replace(&mut bucket.waiters[i], FutexWaiter::empty());
         bucket.count = bucket.count.saturating_sub(1);
         if let Some(arc) = taken.task.into_inner() {
-            let _ = unblock_task(KArc::as_ptr(&arc) as *mut Task);
+            let _ = unblock_task(&arc);
             task_put(arc);
         }
         woken += 1;

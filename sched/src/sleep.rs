@@ -349,7 +349,7 @@ fn wake_sleeping_task(task_id: u32) -> WakeVerdict {
     // publishing Ready, and queues/inboxes exactly once. Its totality
     // contract guarantees it returns only once the task is published or
     // observably no longer Blocked — so reaching here is conclusive.
-    let rc = wake_blocked_task(task, task_id);
+    let rc = wake_blocked_task(task_ref.arc(), task_id);
     if rc != 0 {
         slopos_ostd::klog_info!(
             "SCHED: sleep wake failed to publish READY task {} (rc={})",
@@ -649,7 +649,7 @@ pub fn sleep_current_task_ms(ms: u32) -> c_int {
     if current.is_null() {
         return -1;
     }
-    if super::per_cpu::is_idle_task(current) {
+    if slopos_ostd::task::TaskAddr::current().is_some_and(super::per_cpu::is_idle_task) {
         platform::timer_poll_delay_ms(ms);
         return 0;
     }
@@ -725,7 +725,7 @@ pub fn block_current_task_with_timeout(timeout_ms: u32) {
     if current.is_null() {
         return;
     }
-    if super::per_cpu::is_idle_task(current) {
+    if slopos_ostd::task::TaskAddr::current().is_some_and(super::per_cpu::is_idle_task) {
         return;
     }
 

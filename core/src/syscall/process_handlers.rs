@@ -467,7 +467,7 @@ define_syscall!(syscall_set_cpu_affinity
     task_set_cpu_affinity(task_ptr, new_affinity);
     // Stamping the mask is not enough — re-place the task so the new mask
     // actually governs where it runs (Linux `sched_setaffinity` → migrate).
-    task_apply_affinity(task_ptr, new_affinity);
+    task_apply_affinity(task_ref.arc(), new_affinity);
     Ok(())
 });
 

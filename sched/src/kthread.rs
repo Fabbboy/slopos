@@ -50,7 +50,7 @@ pub fn kthread_spawn_ex(
         let _ = task_terminate(id);
         return INVALID_TASK_ID;
     };
-    if scheduler::publish_new_task(task.as_ptr()) != 0 {
+    if scheduler::publish_new_task(task.arc()) != 0 {
         klog_info!(
             "kthread_spawn_ex: failed to publish thread '{}'",
             string::cstr_to_str_lossy(name)

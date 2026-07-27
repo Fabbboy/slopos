@@ -246,7 +246,7 @@ define_syscall!(syscall_kill
         // POSIX: kill() succeeds even when the disposition discards the
         // signal — only the wake is skipped for a send-time drop.
         if task_signal_post(target_ptr, signum) {
-            let _ = unblock_task(target_ptr);
+            let _ = unblock_task(target.arc());
         }
         signaled += 1;
     }

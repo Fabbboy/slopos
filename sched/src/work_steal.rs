@@ -123,7 +123,7 @@ fn steal_cooldown_elapsed(cpu_id: usize) -> bool {
 /// Try to steal one task from `victim`, respecting affinity and cache-hot.
 fn try_steal_from_cpu(victim: usize, thief: usize) -> Option<KArc<Task>> {
     let stolen = try_steal_task_from_cpu(victim)?;
-    let task = KArc::as_ptr(&stolen) as *mut Task;
+    let task: &Task = &stolen;
 
     // Affinity: can the task run on the thief CPU?
     let affinity = task_cpu_affinity(task).unwrap_or(0);
@@ -148,7 +148,7 @@ fn try_steal_from_cpu(victim: usize, thief: usize) -> Option<KArc<Task>> {
         }
     }
 
-    task_migration_count_inc(task);
+    task_migration_count_inc(KArc::node(&stolen).as_ptr());
     Some(stolen)
 }
 
@@ -157,8 +157,7 @@ fn try_steal_from_cpu(victim: usize, thief: usize) -> Option<KArc<Task>> {
 /// reference is still released rather than leaked; the task keeps its other
 /// owners and the rescue sweep will re-publish it.
 fn return_to_victim(victim: usize, task: KArc<Task>) {
-    let raw = KArc::as_ptr(&task) as *mut Task;
-    let _ = enqueue_task_on_cpu(victim, raw);
+    let _ = enqueue_task_on_cpu(victim, &task);
     crate::task::task_put(task);
 }
 
