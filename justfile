@@ -329,11 +329,21 @@ check-tests-host:
 check-test-count: _build-run-tests
     scripts/check_test_count.sh
 
-[doc("Run slopos-ostd unit + integration tests under Miri to detect UB in the OSTD critical path. See tools/kernmiri/README.md.")]
+# Two passes, because the two aliasing models disagree about exactly the
+# thing the task cells rely on. `TaskOwnCell::get_ptr` hands out `*mut T`
+# rather than `&mut T` so that two witnesses for one task may hold live
+# pointers into the same field at once; whether that is legal is a
+# question about raw-pointer retagging, which is where Stacked and Tree
+# Borrows differ. Passing under one proves nothing about the other.
+[doc("Run slopos-ostd unit + integration tests under Miri to detect UB in the OSTD critical path, under both Stacked and Tree Borrows. See tools/kernmiri/README.md.")]
 check-miri:
     @rustup component list --installed --toolchain {{rust_channel}} 2>/dev/null | grep -q '^miri' || rustup component add miri --toolchain {{rust_channel}}
     {{cargo}} +{{rust_channel}} miri setup
+    @echo "── KernMiri: Stacked Borrows ──"
     MIRIFLAGS="-Zmiri-disable-isolation -Zmiri-ignore-leaks" \
+        {{cargo}} +{{rust_channel}} miri test -p slopos-ostd --no-fail-fast
+    @echo "── KernMiri: Tree Borrows ──"
+    MIRIFLAGS="-Zmiri-disable-isolation -Zmiri-ignore-leaks -Zmiri-tree-borrows" \
         {{cargo}} +{{rust_channel}} miri test -p slopos-ostd --no-fail-fast
 
 [doc("Print TCB ratio: unsafe lines in slopos-ostd / total kernel Rust LoC (target Phase 1 <= 1.5%, Phase 2 <= 1.0%)")]
