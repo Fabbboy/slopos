@@ -3,14 +3,19 @@
 ## Intent
 
 `KArc<Task>` is already the single owning handle for every kernel task. What
-remains is the other half of that change: `sched/` and `core/` still thread raw
-task pointers through 96 signature positions and reach task state through an
-85-function accessor layer over `*mut TaskInner<K, U>`, called from ~1,600 sites.
-Those signatures carry no lifetime, so the contract they encode is enforced by
-review rather than by the type system — which is what let four use-after-free and
-data-race defects sit in the tree unnoticed.
+remains is the other half of that change: `sched/` and `core/` still bind raw
+task pointers in ~167 argument positions and reach task state through a
+110-function accessor layer over `*mut TaskInner<K, U>`. Those signatures carry
+no lifetime, so the contract they encode is enforced by review rather than by
+the type system — which is what let four use-after-free and data-race defects
+sit in the tree unnoticed.
 
-Finish the excision, prove the ownership core, and delete this plan.
+`scripts/check_task_ownership.sh` measures the remaining surface: check 1 is
+the argument positions, of which 93 are the accessor layer itself, and check 4
+is `task_borrow`/`task_borrow_mut`, the terminal criterion. Both reaching zero
+is what "done" means. The gate runs in warn mode until then.
+
+Finish the excision and delete this plan.
 
 ## Invariants (the contract)
 
@@ -32,6 +37,13 @@ Finish the excision, prove the ownership core, and delete this plan.
 - **I6** Lookup is weak-upgrade only. Upgrading a terminated-but-referenced task
   is legal; fabricating a strong reference from a raw pointer is not.
 - **I7** `KArc` is fallible everywhere and saturates on refcount overflow.
+- **I8** Every strong reference to a task is rooted in a location that survives
+  independently of that task's kernel stack — the PCR slots, a placement
+  container, or an explicit named clone owned by a structure that outlives the
+  stack. **No owning task handle may live in a stack frame that can be
+  abandoned**, which here means any frame that can block: SlopOS tears a blocked
+  task down from another CPU without unwinding, so a handle left on that stack
+  is never dropped and leaks the task, its stacks and its address space.
 
 ## Baseline this works against
 
@@ -118,33 +130,66 @@ In priority order:
   reaches one; the current test drives `unblock_task` directly instead.
 - `newcomer_outranks_current`'s decision. An inverted comparison means the kernel
   never preempts on wake — a latency cliff no functional test would catch.
-- `slopos-ostd/tests/task_cells.rs` under Miri. `SwitchWindow` is the
-  host-constructible witness (`CurrentTask::get()` always returns `None` without
-  a PCR). The point is proving two witnesses for one task may coexist, so a
-  future edit turning `get_ptr` into `&mut T` becomes UB rather than latent.
 - Forked-child `cwd` inheritance — incidental today, via the bytewise clone, and
   one plausible edit from silently resetting every child to `/`.
 - `is_bootstrap_task_ptr`'s stride, `rt_sigaction`'s full-field round-trip, and
   a task-id-never-reused assertion.
+- FPU save/restore across a switch: per-task slot isolation, the dispatcher's
+  save-prev/restore-next ordering, and the AVX upper halves a regression to
+  `fxsave` would silently drop.
 
-### 6. Machine-checked ownership core
+`check_test_count.sh`'s baseline sits at exactly the current planned count, so
+there is no margin — these restore it. Bump it in the same commit, and correct
+the stale figure in the agent guidelines.
 
-`verification/proofs/task_ownership.rs`, in the abstract state-machine style of
-`frame_refcount.rs`: existence reference parked and released at most once and
-flag-elected rather than count-elected, container transitions conserving the
-strong count, exactly one winner of the one-to-zero release with destruction
-running exactly once, and a reap that never fires on a dispatch-pinned task.
-Encode a broken variant alongside — a release elected by reading
-`strong_count == 1` — so the proof is demonstrably load-bearing. Move `task` out
-of `STATUS.md`'s audited-only list.
+### 6. Closeout
 
-### 7. Closeout
+Fold I1–I8 into the module docs that already carry most of the rationale
+(`placement.rs`, `task_reclaim.rs`, `cell.rs`, `task_table.rs`), add the
+task-ownership contract to the agent guidelines beside the unsafe-surface and
+allocation-discipline sections, and drop `TASK_OWNERSHIP_GATE_WARN=1` so the
+gate goes hard. The docs-repo page is written but **must not be committed**
+until every register field is a cell and the gate's `task_borrow` check reads
+zero — it describes the finished architecture, not the tree. Then delete this
+plan.
 
-Fold I1–I7 into the module docs that already carry most of the rationale
-(`placement.rs`, `task_reclaim.rs`), add the task-ownership contract to the
-agent guidelines beside the unsafe-surface and allocation-discipline sections,
-back it with a `check_task_ownership.sh` gate carrying the acceptance greps, and
-promote a conceptual page to the docs repo. Then delete this plan.
+## Constraints the tree imposes
+
+Facts that an earlier reading of this plan got wrong. Check them before
+designing against any of these areas again.
+
+- **The dispatch reference is transient, not a container membership.**
+  `ReadyQueue::dequeue` *moves* the membership reference out and returns
+  `KArc<Task>`, deliberately, so a task is not "pinned by nothing" across an
+  unbounded `on_cpu` spin. So `pinned ⇒ containers ≥ 1` is false; what holds is
+  `pinned ⇒ exist_refs == 1`, which is stronger and makes `pinned ⇒ strong > 0`
+  a derived corollary. The dispatcher therefore needs no new borrow primitive —
+  it already holds an owning handle.
+- **The PCR idle slot cannot own a leaked reference.** Three test paths write it
+  directly: the hermetic fixture snapshots and restores it as a bare address,
+  one test nulls and restores it, and `create_idle_task_for_cpu` is called
+  repeatedly. A leaked handle would leak one reference per re-install.
+- **The FPU owner tag cannot live inside `FpuState`.** That struct carries a
+  `size_of == FPU_STATE_SIZE` assertion plus `Copy` and `Zeroable`; an atomic
+  field breaks all three. It is a hardware XSAVE buffer and stays one — the tag
+  belongs beside it on the task, which is also where Linux keeps `last_cpu`.
+- **`SyscallContext` holds a borrow, not an owning handle.** The plan's stated
+  reason for the owning form (a PCR-keyed borrow going stale across migration)
+  is wrong — the guard is `!Send` and travels with the task's own frames. The
+  conclusion inverts too: SlopOS tears a blocked task down without unwinding, so
+  an owning handle on that stack leaks the task, its stacks and its address
+  space. Every kernel surveyed — Linux, Rust-for-Linux, Asterinas, Zircon, Tock,
+  Theseus — holds a borrow here; Asterinas hit this exact leak twice and fixed
+  it structurally.
+- **`task_borrow` needs one sanctioned survivor.** `task_put` consults the
+  dispatch-pin predicate *after* winning the one-to-zero release, where no
+  handle exists and a placement clone would be resurrection. That is
+  `with_parked`, sound for the opposite reason to every other borrow: not
+  because someone else keeps the task alive, but because nobody else can reach
+  it.
+- **A raw task-pointer gate must not cover return position.** "Reference in,
+  pointer out" is sanctioned — a Treiber successor *is* a raw pointer, governed
+  by the parked reference the link represents.
 
 ## Acceptance
 
@@ -155,7 +200,7 @@ promote a conceptual page to the docs repo. Then delete this plan.
 - No `unsafe impl Send`/`Sync` justified by "caller holds a task refcount".
 - Zero hits for `refcnt|task_inc_ref|task_dec_ref|inc_ref|dec_ref` across kernel
   crates, page-table refcounts excepted.
-- Every framekernel gate green, the Verus set green including the new proof, and
+- Every framekernel gate green, the Verus set green, and
   full `just test` green under KVM.
 - `just test` wall-time and `just boot-fast` within noise of the pre-migration
   baseline — measured, not assumed.
