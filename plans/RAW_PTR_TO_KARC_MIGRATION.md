@@ -67,12 +67,18 @@ in that layer live.
 
 ### 1. Register state into witness cells
 
-Move `context`, `fpu_state`, `switch_ctx`, `user_ctx`, `saved_user_ctx_ptr` and
-`saved_kernel_return_ctx` into `TaskOwnCell`, exposed as typed operations on
-`TaskInner`. `SwitchWindow` covers the outgoing task — the dispatcher publishes
-the incoming one into the PCR before the outgoing one's registers are saved, so
-`CurrentTask` does not reach it. `context` is diagnostics plus the cr3 identity
-tag; only `cr3` has a functional reader, and the switch never reads it.
+Move **five** fields into `TaskOwnCell` — `context`, `fpu_state`, `switch_ctx`,
+`user_ctx` and `saved_kernel_return_ctx` — exposed as typed operations on
+`TaskInner`. **Not `saved_user_ctx_ptr`**: it is one pointer word, read and
+written only in the PCR round-trip swap, whose other side is already atomic, so
+it becomes an `AtomicPtr<UserContext>` and stays off the witness surface
+entirely. Wrapping it would be the obvious way to "finish" this step and would
+be wrong.
+
+`SwitchWindow` covers the outgoing task — the dispatcher publishes the incoming
+one into the PCR before the outgoing one's registers are saved, so `CurrentTask`
+does not reach it. `context` is diagnostics plus the cr3 identity tag; only
+`cr3` has a functional reader, and the switch never reads it.
 
 Cell accessors must return `*mut T` or `&mut T`, never `T`: one `FpuState` by
 value is 2.6 KiB on the caller's frame and fails the 2 KiB stack gate. This is
@@ -96,11 +102,21 @@ fork and clone returning ids → `core/` syscall surface → `boot/` → test su
 
 - **The terminal criterion is deleting `task_borrow` and `task_borrow_mut`**, not
   the pointer grep. Both fabricate an output lifetime from nothing, which is what
-  made the two `&mut`-aliasing defects expressible. 27 and 29 call sites.
-- `SyscallContext` holds an owning `TaskRef`, **not** a `CurrentTask`: handlers
-  call `schedule()` and can migrate, which would leave a PCR-keyed borrow stale.
+  made the `&mut`-aliasing defects expressible. But they are **not the only two**
+  of that shape: seven task functions declare a lifetime no argument constrains,
+  so the caller picks it and two calls hand out two live references to one place.
+  `check_task_ownership.sh` check 8 finds them, and all seven must go.
+- `SyscallContext` holds a **bare `*mut Task`** — not an owning handle, and not a
+  borrow. It becomes `SyscallContext<'a> { task: &'a Task, … }`. The reasoning
+  for that is prior art, not a leak in the present code: every kernel surveyed
+  holds a borrow of the current task on the syscall path, and an owning handle
+  here would leak, because a blocked task is torn down from another CPU without
+  unwinding. Its two constructors differ because the test fixture parks the BSP
+  on a bootstrap stub, so `Current::get()` returns `None` there — which is the
+  real reason a witness cannot simply be stored in the struct.
 - `task_get_info` has no production callers. Delete it with its ~35 test sites in
-  the test-suite pass; it is the only `*mut *mut Task` in the tree.
+  the test-suite pass; it is the only `*mut *mut Task` in the tree — though not
+  the only double indirection, `slibc` has several.
 - `inspect::wrap` goes once fork and clone return ids; `inspect::by_id` already
   does the same job through the registry.
 - The intrusive-link accessors stay pointer-typed in return position — a Treiber
@@ -173,14 +189,14 @@ designing against any of these areas again.
   `size_of == FPU_STATE_SIZE` assertion plus `Copy` and `Zeroable`; an atomic
   field breaks all three. It is a hardware XSAVE buffer and stays one — the tag
   belongs beside it on the task, which is also where Linux keeps `last_cpu`.
-- **`SyscallContext` holds a borrow, not an owning handle.** The plan's stated
-  reason for the owning form (a PCR-keyed borrow going stale across migration)
-  is wrong — the guard is `!Send` and travels with the task's own frames. The
-  conclusion inverts too: SlopOS tears a blocked task down without unwinding, so
-  an owning handle on that stack leaks the task, its stacks and its address
-  space. Every kernel surveyed — Linux, Rust-for-Linux, Asterinas, Zircon, Tock,
-  Theseus — holds a borrow here; Asterinas hit this exact leak twice and fixed
-  it structurally.
+- **`SyscallContext` holds a bare `*mut Task`.** Earlier revisions of this plan
+  said it holds an owning `TaskRef`, and argued at length that an owning handle
+  would leak because a blocked task is torn down without unwinding. The argument
+  is sound and the premise was invented: the struct has always been a raw
+  pointer. So the target is still a borrow — every kernel surveyed holds one on
+  the syscall path, and Asterinas hit the leak twice before fixing it
+  structurally — but the leak was never present here, and nobody should go
+  looking for the handle that supposedly causes it.
 - **`task_borrow` needs one sanctioned survivor.** `task_put` consults the
   dispatch-pin predicate *after* winning the one-to-zero release, where no
   handle exists and a placement clone would be resurrection. That is
