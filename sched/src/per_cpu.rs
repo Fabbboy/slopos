@@ -42,9 +42,8 @@ pub fn fork_rr_counter_set(value: usize) {
 
 use super::task::{
     task_cpu_affinity, task_last_cpu, task_next_inbox_load, task_next_inbox_store_relaxed,
-    task_next_inbox_store_release, task_priority, task_put, task_remote_inbox_try_link,
-    task_remote_inbox_unlink, task_sched_placement_compare_exchange, task_sched_placement_load,
-    task_set_last_cpu, task_status,
+    task_next_inbox_store_release, task_put, task_remote_inbox_try_link, task_remote_inbox_unlink,
+    task_sched_placement_compare_exchange, task_status,
 };
 use super::task_struct::{SwitchContext, Task};
 use slopos_abi::task::TaskStatus;
@@ -286,7 +285,7 @@ impl PriorityRunQueue {
     }
 
     pub fn enqueue_local(&self, task: &KArc<Task>) -> i32 {
-        let from = if task_sched_placement_load(&**task) == SchedPlacement::Waking {
+        let from = if task.sched_placement() == SchedPlacement::Waking {
             SchedPlacement::Waking
         } else {
             SchedPlacement::None
@@ -348,7 +347,7 @@ impl PriorityRunQueue {
     fn enqueue_local_from_placement(&self, task: &KArc<Task>, from: SchedPlacement) -> i32 {
         let body: &Task = task;
 
-        let current = task_sched_placement_load(body);
+        let current = body.sched_placement();
         // A never-published task is not enqueueable by anyone but its creator,
         // and its creator goes through `publish_new_task`. `-1`, not `1`: `1`
         // means "some queue already owns it", which would make the publish
@@ -371,8 +370,8 @@ impl PriorityRunQueue {
         if current != from {
             return -1;
         }
-        if !task_sched_placement_compare_exchange(body, from, SchedPlacement::ReadyQueue) {
-            let after = task_sched_placement_load(body);
+        if !body.sched_placement_compare_exchange(from, SchedPlacement::ReadyQueue) {
+            let after = body.sched_placement();
             if after != SchedPlacement::None {
                 return 1;
             }
@@ -381,7 +380,7 @@ impl PriorityRunQueue {
 
         let result = self.enqueue_local_preclaimed(task);
         if result < 0 {
-            let _ = task_sched_placement_compare_exchange(body, SchedPlacement::ReadyQueue, from);
+            let _ = body.sched_placement_compare_exchange(SchedPlacement::ReadyQueue, from);
         }
         result
     }
@@ -396,12 +395,10 @@ impl PriorityRunQueue {
             return -1;
         }
         let body: &Task = task;
-        let Some(priority) = task_priority(body) else {
-            return -1;
-        };
+        let priority = body.priority;
         let idx = (priority as usize).min(NUM_PRIORITY_LEVELS - 1);
 
-        task_set_last_cpu(body, self.cpu_id() as u8);
+        body.set_last_cpu(self.cpu_id() as u8);
 
         let _guard = self.queue_lock.lock();
         self.ready_queues[idx].link_preclaimed_with_status(task)
@@ -426,9 +423,7 @@ impl PriorityRunQueue {
     }
 
     pub fn remove_task(&self, task: &Task) -> i32 {
-        let Some(priority) = task_priority(task) else {
-            return -1;
-        };
+        let priority = task.priority;
         let idx = (priority as usize).min(NUM_PRIORITY_LEVELS - 1);
         let _guard = self.queue_lock.lock();
         self.ready_queues[idx].remove(task)
@@ -544,7 +539,7 @@ impl PriorityRunQueue {
     /// This is a lock-free MPSC (multi-producer single-consumer) push.
     /// Can be called from ANY CPU safely.
     pub fn push_remote_wake(&self, task: &KArc<Task>) {
-        let from = if task_sched_placement_load(&**task) == SchedPlacement::Waking {
+        let from = if task.sched_placement() == SchedPlacement::Waking {
             SchedPlacement::Waking
         } else {
             SchedPlacement::None
@@ -567,7 +562,7 @@ impl PriorityRunQueue {
         // switch window, or a migration handoff is already scheduler-owned;
         // duplicate wakes are no-ops. This is the single gate that prevents
         // the historical ready-queue + remote-inbox double-placement race.
-        let current = task_sched_placement_load(body);
+        let current = body.sched_placement();
         if current == SchedPlacement::ReadyQueue
             || current == SchedPlacement::RemoteWake
             || current == SchedPlacement::OnCpu
@@ -579,8 +574,8 @@ impl PriorityRunQueue {
         if current != from {
             return -1;
         }
-        if !task_sched_placement_compare_exchange(body, from, SchedPlacement::RemoteWake) {
-            let after = task_sched_placement_load(body);
+        if !body.sched_placement_compare_exchange(from, SchedPlacement::RemoteWake) {
+            let after = body.sched_placement();
             if after != SchedPlacement::None {
                 return 1;
             }
@@ -592,14 +587,14 @@ impl PriorityRunQueue {
         // tail node has a null successor while still queued, so membership must
         // be tracked by the link's `linked` bit just like the ready queue.
         if !task_remote_inbox_try_link(body) {
-            let _ = task_sched_placement_compare_exchange(body, SchedPlacement::RemoteWake, from);
+            let _ = body.sched_placement_compare_exchange(SchedPlacement::RemoteWake, from);
             return -1;
         }
 
         // Park the inbox's owning reference before publishing the node so a
         // drain that immediately swaps the head cannot drop the last reference
         // before the producer has finished linking it.
-        task_set_last_cpu(body, self.cpu_id() as u8);
+        body.set_last_cpu(self.cpu_id() as u8);
         task_placement_retain(node);
 
         // Lock-free push using CAS loop (Treiber stack pattern)
@@ -679,8 +674,7 @@ impl PriorityRunQueue {
             task_next_inbox_store_release(body, ptr::null_mut());
 
             if task_status(body) == Some(TaskStatus::Ready)
-                && task_sched_placement_compare_exchange(
-                    body,
+                && body.sched_placement_compare_exchange(
                     SchedPlacement::RemoteWake,
                     SchedPlacement::ReadyQueue,
                 )
@@ -691,8 +685,7 @@ impl PriorityRunQueue {
                 // linked, so a duplicate wake cannot publish a second entry.
                 task_remote_inbox_unlink(body);
                 if self.enqueue_local_preclaimed(&task) < 0 {
-                    let _ = task_sched_placement_compare_exchange(
-                        body,
+                    let _ = body.sched_placement_compare_exchange(
                         SchedPlacement::ReadyQueue,
                         SchedPlacement::None,
                     );
@@ -705,8 +698,7 @@ impl PriorityRunQueue {
                 // enqueue now; if the producer already enqueued after the
                 // release, `enqueue_local` sees non-None placement and no-ops.
                 task_remote_inbox_unlink(body);
-                let _ = task_sched_placement_compare_exchange(
-                    body,
+                let _ = body.sched_placement_compare_exchange(
                     SchedPlacement::RemoteWake,
                     SchedPlacement::None,
                 );
@@ -737,11 +729,8 @@ impl PriorityRunQueue {
             let next = task_next_inbox_load(body);
             task_next_inbox_store_release(body, ptr::null_mut());
             task_remote_inbox_unlink(body);
-            let _ = task_sched_placement_compare_exchange(
-                body,
-                SchedPlacement::RemoteWake,
-                SchedPlacement::None,
-            );
+            let _ = body
+                .sched_placement_compare_exchange(SchedPlacement::RemoteWake, SchedPlacement::None);
             task_put(task);
             cursor = next;
             drained = drained.saturating_add(1);
@@ -874,7 +863,7 @@ pub fn enqueue_task_on_cpu(cpu_id: usize, task: &KArc<Task>) -> i32 {
         return -1;
     }
 
-    with_cpu_scheduler(cpu_id, |sched| match task_sched_placement_load(body) {
+    with_cpu_scheduler(cpu_id, |sched| match body.sched_placement() {
         // A borrowed re-enqueue of a migrating task (the give-it-back path)
         // parks a fresh membership reference; the caller still owns the handle
         // it carried and releases it separately.
