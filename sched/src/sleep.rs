@@ -10,9 +10,7 @@ use super::scheduler::{
     wake_blocked_task,
 };
 use super::task::{
-    INVALID_TASK_ID, MAX_TASKS, TaskStatus, task_find_by_id, task_id_of, task_is_blocked,
-    task_is_exited, task_is_invalid, task_load_block_reason, task_set_state_from_with_reason,
-    task_status, task_store_block_reason,
+    INVALID_TASK_ID, MAX_TASKS, TaskStatus, task_find_by_id, task_set_state_from_with_reason,
 };
 use slopos_kernel_services::platform;
 
@@ -329,13 +327,12 @@ fn wake_sleeping_task(task_id: u32) -> WakeVerdict {
     let Some(task_ref) = task_find_by_id(task_id) else {
         return WakeVerdict::TaskGone;
     };
-    let task = task_ref.as_ptr();
-    if task_is_invalid(task) || task_is_exited(task) {
+    if task_ref.status() == TaskStatus::Invalid || task_ref.is_exited() {
         return WakeVerdict::TaskGone;
     }
 
     let is_sleep_blocked =
-        task_is_blocked(task) && task_load_block_reason(task) == Some(BlockReason::Sleep);
+        task_ref.is_blocked() && task_ref.load_block_reason() == BlockReason::Sleep;
     if !is_sleep_blocked {
         // Transient: the task is mid-park (commit window) or already woken
         // with its residual entry not yet re-armed. The entry must stay so
@@ -494,20 +491,17 @@ fn strand_sweep(now_tick: u64) {
     super::task::task_for_each_active(|task| strand_sweep_task(task, now_tick));
 }
 
-fn strand_sweep_task(t: &super::task::Task, now_tick: u64) {
-    let task = core::ptr::from_ref(t).cast_mut();
-    if task_is_invalid(task) || task_is_exited(task) {
+fn strand_sweep_task(task: &super::task::Task, now_tick: u64) {
+    // The parameter is already the borrow; this used to cast it straight back
+    // to a pointer to call the accessor layer.
+    if task.status() == TaskStatus::Invalid || task.is_exited() {
         return;
     }
-    let Some(task_id) = task_id_of(task) else {
-        return;
-    };
-    let status = task_status(task);
+    let task_id = task.task_id;
+    let status = task.status();
     let mut class = 0u8;
     let mut detail = 0u64;
-    if status == Some(TaskStatus::Blocked)
-        && task_load_block_reason(task) == Some(BlockReason::Sleep)
-    {
+    if status == TaskStatus::Blocked && task.load_block_reason() == BlockReason::Sleep {
         let entry = {
             let queue = SLEEP_QUEUE.lock();
             let scan = queue.scan_bound();
@@ -517,9 +511,7 @@ fn strand_sweep_task(t: &super::task::Task, now_tick: u64) {
                 .map(|entry| entry.wake_tick)
         };
         match entry {
-            None if super::task::task_sched_placement_load(task)
-                == slopos_ostd::task::SchedPlacement::None =>
-            {
+            None if task.sched_placement() == slopos_ostd::task::SchedPlacement::None => {
                 class = 1;
             }
             None => {}
@@ -532,8 +524,8 @@ fn strand_sweep_task(t: &super::task::Task, now_tick: u64) {
             }
             _ => {}
         }
-    } else if status == Some(TaskStatus::Ready)
-        && super::task::task_sched_placement_load(task) == slopos_ostd::task::SchedPlacement::None
+    } else if status == TaskStatus::Ready
+        && task.sched_placement() == slopos_ostd::task::SchedPlacement::None
     {
         class = 3;
     }
@@ -545,7 +537,7 @@ fn strand_sweep_task(t: &super::task::Task, now_tick: u64) {
         STRAND_EPOCH[idx].store(0, Ordering::Relaxed);
     }
     let previous_class = STRAND_SUSPECT[idx].swap(class, Ordering::Relaxed);
-    let epoch = super::task::task_state_epoch(task).unwrap_or(0);
+    let epoch = task.state_epoch();
     let previous_epoch = STRAND_EPOCH[idx].swap(epoch, Ordering::Relaxed);
     if class == 0 || previous_class != class || previous_epoch != epoch || !strand_log_ok() {
         return;
@@ -556,7 +548,7 @@ fn strand_sweep_task(t: &super::task::Task, now_tick: u64) {
             task_id,
             task_name_str(task),
             now_tick,
-            super::task::task_sched_placement_load(task)
+            task.sched_placement()
         ),
         2 => slopos_ostd::klog_info!(
             "STRAND: task {} '{}' entry OVERDUE wake@{} now={}",
@@ -592,10 +584,8 @@ static STRAND_EPOCH: [AtomicU32; MAX_TASKS] = {
     [ZERO; MAX_TASKS]
 };
 
-fn task_name_str<'a>(task: *mut super::task::Task) -> &'a str {
-    super::task::task_name_bytes(task)
-        .and_then(|b| core::str::from_utf8(b).ok())
-        .unwrap_or("?")
+fn task_name_str(task: &super::task::Task) -> &str {
+    core::str::from_utf8(task.name_bytes()).unwrap_or("?")
 }
 
 pub fn reset_sleep_queue() {
@@ -625,10 +615,9 @@ pub fn arm_blocked_timeout(task_id: u32, timeout_ms: u32) {
         return;
     }
     if let Some(task) = task_find_by_id(task_id) {
-        // Pointer is a valid Task slot returned by `task_find_by_id`;
-        // `task_store_block_reason` performs the relaxed atomic store
-        // on the fused state word internally.
-        task_store_block_reason(task.as_ptr(), BlockReason::Sleep);
+        // The guard derefs to `&Task`; the store is a relaxed atomic on the
+        // fused state word.
+        task.store_block_reason(BlockReason::Sleep);
     }
     let now_tick = platform::timer_ticks();
     let wake_tick = now_tick.wrapping_add(ms_to_sleep_ticks(timeout_ms));
