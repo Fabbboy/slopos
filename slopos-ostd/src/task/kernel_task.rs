@@ -453,7 +453,11 @@ pub struct TaskInner<K, U> {
     pub time_slice_remaining: u64,
     pub total_runtime: u64,
     pub creation_time: u64,
-    pub yield_count: u32,
+    /// Voluntary-yield count.
+    ///
+    /// Atomic for the same reason as `migration_count` below, and Relaxed for
+    /// the same reason: a diagnostic tally with no publication relationship.
+    pub yield_count: AtomicU32,
     /// Timestamp of this task's last dispatch.
     ///
     /// Atomic because the context-switch path writes it on the owning CPU
@@ -499,7 +503,19 @@ pub struct TaskInner<K, U> {
     /// [`FPU_CPU_NONE`] must not be a representable CPU index, and because it
     /// mirrors Linux's `fpu->last_cpu`.
     fpu_last_cpu: AtomicI32,
-    pub migration_count: u32,
+    /// How many times this task has been migrated between CPUs.
+    ///
+    /// Atomic because the **thief** CPU increments it in `work_steal`, while
+    /// the task may be running on its victim — a plain `u32` made that a
+    /// cross-CPU non-atomic read-modify-write, i.e. a data race, not merely a
+    /// soundness wart. It was also unconvertible: no shared borrow can express
+    /// a write to a plain field, so this had to become an atomic before the
+    /// accessor could take `&self` at all.
+    ///
+    /// Relaxed: a counter nobody orders anything against. Reaching for
+    /// Acquire/Release here would imply a publication relationship that does
+    /// not exist.
+    pub migration_count: AtomicU32,
     // --- Signal state ---
     /// Bitmask of pending signals (written atomically by kill()).
     pub signal_pending: AtomicU64,
@@ -1015,7 +1031,7 @@ impl<K, U> TaskInner<K, U> {
             time_slice_remaining: 0,
             total_runtime: 0,
             creation_time: 0,
-            yield_count: 0,
+            yield_count: AtomicU32::new(0),
             last_run_timestamp: AtomicU64::new(0),
             user_started: 0,
             context_from_user: 0,
@@ -1028,7 +1044,7 @@ impl<K, U> TaskInner<K, U> {
             cpu_affinity: 0,
             last_cpu: AtomicU8::new(0),
             fpu_last_cpu: AtomicI32::new(FPU_CPU_NONE),
-            migration_count: 0,
+            migration_count: AtomicU32::new(0),
             signal_pending: AtomicU64::new(0),
             signal_blocked: AtomicU64::new(SIG_EMPTY),
             signal_actions: [const { SignalActionCell::default() }; NSIG],
@@ -1268,7 +1284,7 @@ impl<K, U> TaskInner<K, U> {
         self.time_slice_remaining = self.time_slice;
         self.total_runtime = 0;
         self.creation_time = crate::kdiag_timestamp();
-        self.yield_count = 0;
+        self.yield_count.store(0, Ordering::Relaxed);
         self.last_run_timestamp.store(0, Ordering::Relaxed);
         self.exit_reason
             .store(TaskExitReason::None.as_u16(), Ordering::Release);

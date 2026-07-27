@@ -184,6 +184,38 @@ impl<K, U> TaskInner<K, U> {
         self.signal_actions.get(idx).map(|a| a.handler())
     }
 
+    // ── Diagnostic counters ───────────────────────────────────────────
+    //
+    // Relaxed throughout: nothing is ordered against these. `fetch_add` rather
+    // than the old `saturating_add` — an atomic increment wraps, which for a
+    // 32-bit tally of yields or migrations is a distinction without a
+    // difference, and saturation is not worth a compare-exchange loop.
+
+    /// How many times this task has voluntarily yielded.
+    #[inline]
+    pub fn yield_count(&self) -> u32 {
+        self.yield_count.load(Ordering::Relaxed)
+    }
+
+    /// Record one voluntary yield.
+    #[inline]
+    pub fn inc_yield_count(&self) {
+        self.yield_count.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// How many times this task has migrated between CPUs.
+    #[inline]
+    pub fn migration_count(&self) -> u32 {
+        self.migration_count.load(Ordering::Relaxed)
+    }
+
+    /// Record one migration. Called by the *thief* CPU, which is why the field
+    /// is atomic — see its declaration.
+    #[inline]
+    pub fn inc_migration_count(&self) {
+        self.migration_count.fetch_add(1, Ordering::Relaxed);
+    }
+
     // ── Stacks and identity ───────────────────────────────────────────
 
     /// Kernel-stack bounds as `(base, top)`. `(0, 0)` when unset.

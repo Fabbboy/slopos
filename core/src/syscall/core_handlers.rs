@@ -252,7 +252,7 @@ define_syscall!(syscall_process_list
         entry.total_runtime_us =
             slopos_kernel_services::clock::ticks_to_microseconds(task.total_runtime);
         entry.creation_time_ms = task.creation_time;
-        entry.yield_count = task.yield_count;
+        entry.yield_count = task.yield_count();
         entry.name = task.name;
         count += 1;
         ControlFlow::Continue(())

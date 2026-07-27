@@ -1649,11 +1649,12 @@ pub fn schedule() {
 
 pub fn r#yield() {
     let cpu_id = slopos_arch::pcr::get_current_cpu();
-    let current = scheduler_get_current_task();
     per_cpu::with_cpu_scheduler(cpu_id, |sched| {
         sched.increment_yields();
     });
-    task_record_yield(current);
+    if let Some(current) = Current::get() {
+        task_record_yield(current.task());
+    }
     schedule();
 }
 

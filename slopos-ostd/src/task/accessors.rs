@@ -1144,18 +1144,6 @@ pub fn task_store_block_reason<K, U>(
     unsafe { (*task).store_block_reason(reason) };
 }
 
-/// Bump `task->yield_count` with saturating-add semantics.
-#[inline]
-pub fn task_yield_count_inc<K, U>(task: *mut TaskInner<K, U>) {
-    if task.is_null() {
-        return;
-    }
-    // SAFETY: caller pre-validated; field is naturally-aligned u32.
-    unsafe {
-        (*task).yield_count = (*task).yield_count.saturating_add(1);
-    }
-}
-
 /// Read `task->last_run_timestamp` via `read_volatile` to defeat
 /// compiler reordering across the context-switch boundary.
 #[inline]
@@ -1406,18 +1394,6 @@ pub fn task_save_from_interrupt_frame<K, U>(
         if mark_user_started {
             (*task).user_started = 1;
         }
-    }
-}
-
-/// Bump `task->migration_count` with saturating-add semantics.
-#[inline]
-pub fn task_migration_count_inc<K, U>(task: *mut TaskInner<K, U>) {
-    if task.is_null() {
-        return;
-    }
-    // SAFETY: caller pre-validated; field is naturally-aligned u32.
-    unsafe {
-        (*task).migration_count = (*task).migration_count.saturating_add(1);
     }
 }
 

@@ -1,7 +1,6 @@
 use super::Task;
 use super::task_accessors::{
     task_add_total_runtime, task_last_run_timestamp, task_set_last_run_timestamp,
-    task_yield_count_inc,
 };
 use super::task_table::{try_with_task_manager, with_task_manager};
 
@@ -34,13 +33,11 @@ pub fn task_record_context_switch(from: *mut Task, to: *mut Task, timestamp: u64
     }
 }
 
-pub fn task_record_yield(task: *mut Task) {
+pub fn task_record_yield(task: &Task) {
     with_task_manager(|mgr| {
         mgr.total_yields += 1;
     });
-    if !task.is_null() {
-        task_yield_count_inc(task);
-    }
+    task.inc_yield_count();
 }
 
 pub fn task_get_total_yields() -> u64 {

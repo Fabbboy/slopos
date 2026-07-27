@@ -20,7 +20,6 @@ use super::per_cpu::{
     affinity_allows_cpu, enqueue_task_on_cpu, get_cpu_ready_count, try_steal_task_from_cpu,
     with_cpu_scheduler, with_local_scheduler,
 };
-use super::task::task_migration_count_inc;
 use super::task_struct::Task;
 use slopos_arch::{get_cpu_count, get_current_cpu};
 use slopos_ostd::KArc;
@@ -148,7 +147,9 @@ fn try_steal_from_cpu(victim: usize, thief: usize) -> Option<KArc<Task>> {
         }
     }
 
-    task_migration_count_inc(KArc::node(&stolen).as_ptr());
+    // `task` is the borrow bound at the top of this function; the counter is
+    // atomic precisely because this CPU is the thief, not the runner.
+    task.inc_migration_count();
     Some(stolen)
 }
 
