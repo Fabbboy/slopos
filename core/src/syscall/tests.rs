@@ -17,9 +17,10 @@ use crate::syscall::signal::{
 use slopos_abi::addr::PhysAddr;
 use slopos_abi::fs::O_RDONLY;
 use slopos_abi::signal::{
-    SIG_IGN, SIG_SETMASK, SIG_UNBLOCK, SIGCHLD, SIGCONT, SIGHUP, SIGINT, SIGSTOP, SIGTERM, SIGTSTP,
-    SIGTTIN, SIGTTOU, SIGUSR1, SIGWINCH, SigDefault, SigSet, SignalFrame, UserSigaction, sig_bit,
-    sig_default_action, sig_default_ignores,
+    SA_NODEFER, SA_RESTART, SIG_DFL, SIG_IGN, SIG_SETMASK, SIG_UNBLOCK, SIGCHLD, SIGCONT, SIGHUP,
+    SIGINT, SIGKILL, SIGSTOP, SIGTERM, SIGTSTP, SIGTTIN, SIGTTOU, SIGUSR1, SIGUSR2, SIGWINCH,
+    SigDefault, SigSet, SignalFrame, UserSigaction, sig_bit, sig_default_action,
+    sig_default_ignores,
 };
 use slopos_abi::syscall::{
     ARCH_GET_FS, ARCH_SET_FS, CLONE_SETTLS, CLONE_SIGHAND, CLONE_THREAD, CLONE_VM, ERRNO_EAGAIN,
@@ -5641,4 +5642,339 @@ slopos_testing::stest!(
 slopos_testing::stest!(
     name = test_kill_default_ignored_sigwinch_target_survives,
     suite = signal_dispositions
+);
+
+// =============================================================================
+// D3 coverage backlog
+// =============================================================================
+
+/// `kill(-pgid)` reaches a task that is registered but was never published.
+///
+/// `task_create` writes `pgid = task_id` before it registers the task, so on
+/// return the task is registered, Blocked, and `SchedPlacement::Nascent` — and
+/// a process-group signal names it. This drives the real `syscall_kill` path;
+/// `sched_tests::test_nascent_task_refuses_wake` drives `unblock_task`
+/// directly, which is why that test does not cover this vector.
+///
+/// The kill must **succeed** and the signal must pend: the task exists, so
+/// ESRCH would be a lie, and the pending bit is what it consumes at its first
+/// user-mode boundary. What must not happen is publication — placement stays
+/// `Nascent` and no runqueue grows.
+pub fn test_kill_process_group_reaches_nascent_task_without_publishing() -> TestResult {
+    use slopos_sched::task::{task_sched_placement_load, task_signal_pending_store};
+
+    let _fixture = SyscallFixture::new();
+
+    let caller_id = create_test_user_task();
+    assert_test!(caller_id != INVALID_TASK_ID, "failed to create caller task");
+    let caller_guard = assert_some!(task_find_by_id(caller_id), "caller lookup failed");
+    let caller_ptr = caller_guard.as_ptr();
+    let caller_pid = task_process_id(caller_ptr).unwrap_or(0);
+
+    // Straight out of `task_create`: registered, Blocked, Nascent.
+    let target_id = create_test_kernel_task();
+    assert_test!(target_id != INVALID_TASK_ID, "failed to create target task");
+    let target_guard = assert_some!(task_find_by_id(target_id), "target lookup failed");
+    let target_ptr = target_guard.as_ptr();
+
+    assert_eq_test!(
+        task_pgid(target_ptr),
+        Some(target_id),
+        "task_create must seed pgid = task_id for the group signal to reach it"
+    );
+    assert_eq_test!(
+        task_sched_placement_load(target_ptr),
+        SchedPlacement::Nascent,
+        "a freshly created task must still be Nascent"
+    );
+    task_signal_pending_store(target_ptr, 0);
+
+    let cpu_id = slopos_arch::pcr::get_current_cpu();
+    let ready_before =
+        slopos_sched::per_cpu::with_cpu_scheduler(cpu_id, |sched| sched.total_ready_count())
+            .unwrap_or(0);
+
+    let mut frame = zero_frame();
+    frame.regs_mut().rdi = (-(target_id as i32) as i64) as u64;
+    frame.regs_mut().rsi = SIGUSR1 as u64;
+    let _ = with_user_process_context(caller_pid, || {
+        crate::syscall::dispatch::dispatch_handler(syscall_kill, caller_ptr, &mut frame)
+    });
+
+    assert_eq_test!(
+        frame.regs().rax,
+        0,
+        "kill(-pgid) must succeed for a task that exists, nascent or not"
+    );
+    assert_test!(
+        (task_signal_pending(target_ptr) & sig_bit(SIGUSR1)) != 0,
+        "the signal must pend on the nascent target"
+    );
+    assert_eq_test!(
+        task_sched_placement_load(target_ptr),
+        SchedPlacement::Nascent,
+        "the kill published a half-built task"
+    );
+    let ready_after =
+        slopos_sched::per_cpu::with_cpu_scheduler(cpu_id, |sched| sched.total_ready_count())
+            .unwrap_or(0);
+    assert_eq_test!(
+        ready_after,
+        ready_before,
+        "the kill enqueued a task that was never published"
+    );
+
+    task_terminate(target_id);
+    task_terminate(caller_id);
+    TestResult::Pass
+}
+
+/// A forked child inherits the parent's working directory, and the two diverge
+/// from there.
+///
+/// Inheritance is incidental today — it falls out of `clone_from_raw`'s
+/// bytewise copy of the parent's `cwd` cell — so it is one plausible edit away
+/// from every child starting at `/`. The exact-slice compare is what catches a
+/// copied buffer with an uncopied `cwd_len`: `with_cwd` slices by the length,
+/// so a stale length surfaces as a truncated or over-long path, not a fault.
+pub fn test_fork_child_inherits_and_then_diverges_from_parent_cwd() -> TestResult {
+    let _fixture = SyscallFixture::new();
+
+    let parent_id = create_test_user_task();
+    assert_test!(parent_id != INVALID_TASK_ID, "failed to create parent task");
+    let parent_guard = assert_some!(task_find_by_id(parent_id), "parent lookup failed");
+    let parent_ptr = parent_guard.as_ptr();
+
+    // Give the parent a non-default cwd before the fork.
+    make_task_current(parent_id);
+    let seeded = Current::get().is_some_and(|current| {
+        current.task().set_cwd(&current, b"/usr/share")
+            && current
+                .task()
+                .with_cwd(&current, |cwd| cwd == b"/usr/share\0".as_slice())
+    });
+    park_bootstrap_on_current_cpu();
+    assert_test!(seeded, "could not seed the parent cwd");
+
+    let child_id = task_fork(parent_ptr, core::ptr::null());
+    assert_test!(child_id != INVALID_TASK_ID, "fork failed");
+    task_set_state(child_id, TaskStatus::Blocked);
+
+    // The child starts where the parent was, byte for byte...
+    make_task_current(child_id);
+    let inherited = Current::get().is_some_and(|current| {
+        current
+            .task()
+            .with_cwd(&current, |cwd| cwd == b"/usr/share\0".as_slice())
+    });
+    // ...and moving the child does not move the parent.
+    let child_moved = Current::get().is_some_and(|current| {
+        current.task().set_cwd(&current, b"/tmp")
+            && current
+                .task()
+                .with_cwd(&current, |cwd| cwd == b"/tmp\0".as_slice())
+    });
+    park_bootstrap_on_current_cpu();
+
+    make_task_current(parent_id);
+    let parent_unchanged = Current::get().is_some_and(|current| {
+        current
+            .task()
+            .with_cwd(&current, |cwd| cwd == b"/usr/share\0".as_slice())
+    });
+    park_bootstrap_on_current_cpu();
+
+    task_terminate(child_id);
+    task_terminate(parent_id);
+
+    assert_test!(inherited, "the child did not inherit the parent's cwd");
+    assert_test!(child_moved, "the child could not change its own cwd");
+    assert_test!(
+        parent_unchanged,
+        "the child's chdir moved the parent — the cwd cell is shared, not copied"
+    );
+    TestResult::Pass
+}
+
+/// `rt_sigaction` round-trips every field of the disposition, filters the
+/// uncatchable signals out of `sa_mask`, and keeps signals independent.
+///
+/// The existing signal tests only ever assert `sa_handler`, so `sa_flags`,
+/// `sa_restorer` and `sa_mask` could each be dropped on the floor without a
+/// failure. `sa_mask` matters at delivery, where it is OR'd into the blocked
+/// set — an unfiltered mask would let a handler block SIGKILL.
+pub fn test_rt_sigaction_round_trips_every_field() -> TestResult {
+    let _fixture = SyscallFixture::new();
+
+    let task_id = create_test_user_task();
+    assert_test!(task_id != INVALID_TASK_ID, "failed to create user task");
+    let task_guard = assert_some!(task_find_by_id(task_id), "task lookup failed");
+    let task_ptr = task_guard.as_ptr();
+    let pid = task_process_id(task_ptr).unwrap_or(0);
+
+    let page = match map_user_rw_page(pid) {
+        Some(v) => v,
+        None => {
+            task_terminate(task_id);
+            return TestResult::Fail;
+        }
+    };
+    let new_addr = page;
+    let old_addr = page + 128;
+    let set_size = core::mem::size_of::<SigSet>() as u64;
+
+    let installed = UserSigaction {
+        sa_handler: 0x4321_0000,
+        sa_flags: SA_RESTART | SA_NODEFER,
+        sa_restorer: 0x8765_0000,
+        // SIGKILL and SIGSTOP must be filtered out; SIGCHLD must survive.
+        sa_mask: sig_bit(SIGCHLD) | sig_bit(SIGKILL) | sig_bit(SIGSTOP),
+    };
+    assert_test!(
+        user_copy_out(pid, new_addr, &installed),
+        "failed to write the new sigaction"
+    );
+
+    let mut install = zero_frame();
+    install.regs_mut().rdi = SIGUSR1 as u64;
+    install.regs_mut().rsi = new_addr;
+    install.regs_mut().rdx = 0;
+    install.regs_mut().r10 = set_size;
+    let _ = with_user_process_context(pid, || {
+        crate::syscall::dispatch::dispatch_handler(syscall_rt_sigaction, task_ptr, &mut install)
+    });
+    assert_eq_test!(install.regs().rax, 0, "install failed");
+
+    // Query-only form: a null `new` reads back without disturbing anything.
+    let mut query = zero_frame();
+    query.regs_mut().rdi = SIGUSR1 as u64;
+    query.regs_mut().rsi = 0;
+    query.regs_mut().rdx = old_addr;
+    query.regs_mut().r10 = set_size;
+    let _ = with_user_process_context(pid, || {
+        crate::syscall::dispatch::dispatch_handler(syscall_rt_sigaction, task_ptr, &mut query)
+    });
+    assert_eq_test!(query.regs().rax, 0, "query-only rt_sigaction failed");
+
+    let read_back: UserSigaction = match user_copy_in(pid, old_addr) {
+        Some(v) => v,
+        None => {
+            task_terminate(task_id);
+            return TestResult::Fail;
+        }
+    };
+    assert_eq_test!(
+        read_back.sa_handler,
+        installed.sa_handler,
+        "sa_handler did not round-trip"
+    );
+    assert_eq_test!(
+        read_back.sa_flags,
+        installed.sa_flags,
+        "sa_flags did not round-trip"
+    );
+    assert_eq_test!(
+        read_back.sa_restorer,
+        installed.sa_restorer,
+        "sa_restorer did not round-trip"
+    );
+    assert_eq_test!(
+        read_back.sa_mask,
+        sig_bit(SIGCHLD),
+        "sa_mask must keep catchable signals and drop SIGKILL/SIGSTOP"
+    );
+
+    // Per-signal independence: installing on SIGUSR1 must not touch SIGTERM.
+    let mut other = zero_frame();
+    other.regs_mut().rdi = SIGTERM as u64;
+    other.regs_mut().rsi = 0;
+    other.regs_mut().rdx = old_addr;
+    other.regs_mut().r10 = set_size;
+    let _ = with_user_process_context(pid, || {
+        crate::syscall::dispatch::dispatch_handler(syscall_rt_sigaction, task_ptr, &mut other)
+    });
+    assert_eq_test!(other.regs().rax, 0, "query of SIGTERM failed");
+    let untouched: UserSigaction = match user_copy_in(pid, old_addr) {
+        Some(v) => v,
+        None => {
+            task_terminate(task_id);
+            return TestResult::Fail;
+        }
+    };
+    assert_eq_test!(
+        untouched.sa_handler,
+        SIG_DFL,
+        "installing on one signal disturbed another — the action index is off by one"
+    );
+
+    // A wrong sigsetsize is EINVAL.
+    let mut bad_size = zero_frame();
+    bad_size.regs_mut().rdi = SIGUSR1 as u64;
+    bad_size.regs_mut().rsi = 0;
+    bad_size.regs_mut().rdx = old_addr;
+    bad_size.regs_mut().r10 = set_size + 1;
+    let _ = with_user_process_context(pid, || {
+        crate::syscall::dispatch::dispatch_handler(syscall_rt_sigaction, task_ptr, &mut bad_size)
+    });
+    assert_eq_test!(
+        bad_size.regs().rax,
+        slopos_abi::Errno::EINVAL.as_u64(),
+        "a wrong sigsetsize must be EINVAL"
+    );
+
+    // Installing a disposition for an uncatchable signal is EINVAL.
+    let mut uncatchable = zero_frame();
+    uncatchable.regs_mut().rdi = SIGKILL as u64;
+    uncatchable.regs_mut().rsi = new_addr;
+    uncatchable.regs_mut().rdx = 0;
+    uncatchable.regs_mut().r10 = set_size;
+    let _ = with_user_process_context(pid, || {
+        crate::syscall::dispatch::dispatch_handler(syscall_rt_sigaction, task_ptr, &mut uncatchable)
+    });
+    assert_eq_test!(
+        uncatchable.regs().rax,
+        slopos_abi::Errno::EINVAL.as_u64(),
+        "installing a handler for SIGKILL must be EINVAL"
+    );
+
+    // A real handler with no restorer cannot return, so it is EINVAL.
+    let no_restorer = UserSigaction {
+        sa_handler: 0x4444_0000,
+        sa_flags: 0,
+        sa_restorer: 0,
+        sa_mask: 0,
+    };
+    assert_test!(
+        user_copy_out(pid, new_addr, &no_restorer),
+        "failed to write the restorer-less sigaction"
+    );
+    let mut missing = zero_frame();
+    missing.regs_mut().rdi = SIGUSR2 as u64;
+    missing.regs_mut().rsi = new_addr;
+    missing.regs_mut().rdx = 0;
+    missing.regs_mut().r10 = set_size;
+    let _ = with_user_process_context(pid, || {
+        crate::syscall::dispatch::dispatch_handler(syscall_rt_sigaction, task_ptr, &mut missing)
+    });
+    assert_eq_test!(
+        missing.regs().rax,
+        slopos_abi::Errno::EINVAL.as_u64(),
+        "a catching handler with no restorer must be EINVAL"
+    );
+
+    task_terminate(task_id);
+    TestResult::Pass
+}
+
+slopos_testing::stest!(
+    name = test_kill_process_group_reaches_nascent_task_without_publishing,
+    suite = syscall_valid
+);
+slopos_testing::stest!(
+    name = test_fork_child_inherits_and_then_diverges_from_parent_cwd,
+    suite = syscall_valid
+);
+slopos_testing::stest!(
+    name = test_rt_sigaction_round_trips_every_field,
+    suite = syscall_valid
 );

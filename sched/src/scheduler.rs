@@ -674,7 +674,7 @@ fn published_priority(task: *mut Task) -> u8 {
 /// which reclaims and releases the outgoing dispatch reference and can run the
 /// task's allocator-heavy destructor — so the priority read could land in freed
 /// memory. A published scalar cannot dangle.
-fn newcomer_outranks_current(cpu: usize, new: &Task) -> bool {
+pub(crate) fn newcomer_outranks_current(cpu: usize, new: &Task) -> bool {
     let Some(new_prio) = task_priority(new) else {
         return false;
     };

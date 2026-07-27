@@ -21,7 +21,7 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 
-BASELINE="${TEST_COUNT_BASELINE:-2682}"
+BASELINE="${TEST_COUNT_BASELINE:-2689}"
 TMP="$(mktemp)"
 trap 'rm -f "$TMP"' EXIT INT TERM
 
@@ -33,9 +33,24 @@ builddir/run_tests --raw --no-color > "$TMP" 2>&1 || true
 
 # Sum the plan numbers across all phases.
 total=0
+plans=0
 while read -r n; do
     total=$(( total + n ))
+    plans=$(( plans + 1 ))
 done < <(grep -E $'^KTAP\t1\\.\\.[0-9]+$' "$TMP" | sed -E 's/.*1\.\.([0-9]+)/\1/')
+
+# A run that emitted no plan line at all did not measure anything. Without
+# this, "sum of nothing" is 0, which passes against any baseline <= 0 — so the
+# `TEST_COUNT_BASELINE=0` idiom used to read the current count would report 0
+# for a kernel that failed to boot, and the number would then be written into
+# the baseline as if it were real.
+if [ "$plans" -eq 0 ]; then
+    echo "FAIL: no KTAP plan line was emitted — nothing was measured." >&2
+    echo "      The kernel did not reach the harness (boot panic, missing ISO," >&2
+    echo "      or builddir/run_tests not built). Run 'just check-test-count'," >&2
+    echo "      which builds the wrapper first, and read the output above." >&2
+    exit 1
+fi
 
 if [ "$total" -lt "$BASELINE" ]; then
     echo "FAIL: observed $total tests, baseline is $BASELINE." >&2

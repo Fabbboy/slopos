@@ -5616,3 +5616,509 @@ slopos_testing::stest!(
     name = test_preempt_count_balanced_under_guard_churn,
     suite = sched_core
 );
+
+// =============================================================================
+// D3 coverage backlog
+// =============================================================================
+
+fn park_bootstrap_on_current_cpu() {
+    slopos_arch::pcr::set_current_task(
+        super::safestack_rt::BSP_BOOTSTRAP_TASK.get() as *mut (),
+        INVALID_TASK_ID,
+        slopos_arch::pcr::PRIORITY_NONE,
+    );
+}
+
+/// Make `task_id` this CPU's current task.
+///
+/// `dispatch` asserts its incoming task is runnable, so publishing Ready first
+/// is not optional: a task straight out of `task_create` is Blocked, and
+/// dispatching one trips the dispatcher's own invariant rather than returning
+/// an error.
+fn dispatch_as_current(task_id: u32) -> bool {
+    let cpu = slopos_arch::pcr::get_current_cpu();
+    make_task_ready(task_id) && scheduler::dispatch_task_for_test(cpu, task_id)
+}
+
+/// Park `task_id` on `wq`.
+///
+/// [`WaitQueue::enqueue_current`] reads the waiter's identity from the PCR, so
+/// making the task this CPU's current for exactly the duration of the enqueue
+/// is the only way to put a *chosen* task on a queue from a test. The
+/// bootstrap stub is restored before returning: a task that is still some
+/// CPU's current is dispatch-pinned, and the reap would refuse it.
+fn park_task_on_queue(wq: &WaitQueue, task_id: u32) -> bool {
+    // Stand in for a published-then-blocked waiter. A task straight out of
+    // `task_create` is `Nascent`, and every wake path deliberately refuses one
+    // — so a nascent control would report "not woken" for a reason that has
+    // nothing to do with what is under test.
+    if !scheduler::clear_nascent_for_test(task_id) {
+        return false;
+    }
+    if !dispatch_as_current(task_id) {
+        return false;
+    }
+    let parked = wq.enqueue_current();
+    park_bootstrap_on_current_cpu();
+    parked
+}
+
+/// `(id, status)` for every registered task, so a wake that touches something
+/// it should not is visible as a diff rather than as a later mystery.
+fn snapshot_live_task_states() -> slopos_ostd::KVec<(u32, TaskStatus)> {
+    let mut out = match slopos_ostd::KVec::with_capacity(super::task::MAX_TASKS) {
+        Ok(v) => v,
+        Err(_) => return slopos_ostd::KVec::new(),
+    };
+    super::task::task_for_each_active(|task| {
+        let _ = out.push((task.task_id, task.status()));
+    });
+    out
+}
+
+/// A wake delivered to a wait-queue node whose task has been reaped resolves to
+/// nothing, and disturbs no other task.
+///
+/// Teardown scrubs sleep entries and futex buckets but never unlinks
+/// wait-queue nodes, so a node outliving its task is structurally reachable —
+/// a waiter SIGKILL'd while parked never unwinds its own stack. The node holds
+/// an id, and the wake resolves it through the registry, which is what makes
+/// the dangling node inert. Were the node to hold a pointer instead, this wake
+/// would read freed memory.
+///
+/// The `weak.upgrade()` check is load-bearing: it asserts the allocation is
+/// *freed*, not merely unhashed, so "the id resolves to nothing" is not
+/// masking a task that is still sitting at that address.
+pub fn test_wake_against_reaped_waiter_is_inert() -> TestResult {
+    let _fixture = SchedFixture::new();
+
+    let victim_id = task_create(
+        b"ReapedWaiter\0".as_ptr() as *const c_char,
+        dummy_task_entry,
+        ptr::null_mut(),
+        TaskPriority::Normal.as_u8(),
+        TASK_FLAG_KERNEL_MODE,
+    );
+    if victim_id == INVALID_TASK_ID {
+        return TestResult::Fail;
+    }
+    let Some(victim) = task_find_by_id(victim_id) else {
+        return TestResult::Fail;
+    };
+    let weak = victim.downgrade_for_test();
+
+    let wq = WaitQueue::new();
+    if !park_task_on_queue(&wq, victim_id) {
+        klog_info!("SCHED_TEST: could not park the victim on a wait queue");
+        let _ = task_terminate(victim_id);
+        return TestResult::Fail;
+    }
+    if !wq.has_waiters() {
+        klog_info!("SCHED_TEST: enqueue_current reported success but queued nothing");
+        let _ = task_terminate(victim_id);
+        return TestResult::Fail;
+    }
+
+    drop(victim);
+    if task_terminate(victim_id) != 0 {
+        klog_info!("SCHED_TEST: could not terminate the parked victim");
+        return TestResult::Fail;
+    }
+    crate::task::task_graveyard_drain();
+
+    // Gone in both senses: unhashed from the registry, and actually freed.
+    if task_find_by_id(victim_id).is_some() {
+        klog_info!("SCHED_TEST: reaped waiter {} still resolves", victim_id);
+        return TestResult::Fail;
+    }
+    if weak.upgrade().is_some() {
+        klog_info!(
+            "SCHED_TEST: reaped waiter {} is still allocated — its node names memory that could be reused",
+            victim_id
+        );
+        return TestResult::Fail;
+    }
+
+    let before = snapshot_live_task_states();
+
+    // The node is still linked. The wake must pop it and resolve its id to
+    // nothing, rather than to whatever now occupies the address.
+    if !wq.wake_one() {
+        klog_info!("SCHED_TEST: the reaped waiter's node was not on the queue");
+        return TestResult::Fail;
+    }
+    if wq.has_waiters() {
+        klog_info!("SCHED_TEST: wake_one left the queue non-empty");
+        return TestResult::Fail;
+    }
+
+    let after = snapshot_live_task_states();
+    if before.len() != after.len() {
+        klog_info!(
+            "SCHED_TEST: live-task set changed across the wake ({} -> {})",
+            before.len(),
+            after.len()
+        );
+        return TestResult::Fail;
+    }
+    for (i, (id, status)) in before.iter().enumerate() {
+        let (after_id, after_status) = after[i];
+        if *id != after_id || *status != after_status {
+            klog_info!(
+                "SCHED_TEST: wake against a reaped waiter disturbed task {} ({:?} -> {:?})",
+                id,
+                status,
+                after_status
+            );
+            return TestResult::Fail;
+        }
+    }
+
+    // Positive control. Without it, "a node was popped" is satisfiable by a
+    // `wake_one` that reaches no task at all, and the no-disturbance assertion
+    // above would hold vacuously.
+    let live_id = task_create(
+        b"LiveWaiter\0".as_ptr() as *const c_char,
+        dummy_task_entry,
+        ptr::null_mut(),
+        TaskPriority::Normal.as_u8(),
+        TASK_FLAG_KERNEL_MODE,
+    );
+    if live_id == INVALID_TASK_ID {
+        return TestResult::Fail;
+    }
+    let control = WaitQueue::new();
+    if !park_task_on_queue(&control, live_id) {
+        let _ = task_terminate(live_id);
+        return TestResult::Fail;
+    }
+    if task_set_state(live_id, TaskStatus::Blocked) != 0 {
+        klog_info!("SCHED_TEST: could not block the control waiter");
+        let _ = task_terminate(live_id);
+        return TestResult::Fail;
+    }
+    if !control.wake_one() {
+        klog_info!("SCHED_TEST: control waiter was not on its queue");
+        let _ = task_terminate(live_id);
+        return TestResult::Fail;
+    }
+    let Some(live) = task_find_by_id(live_id) else {
+        return TestResult::Fail;
+    };
+    let control_woken = live.status() == TaskStatus::Ready;
+    let observed = live.status();
+    drop(live);
+    let _ = task_terminate(live_id);
+    if !control_woken {
+        klog_info!(
+            "SCHED_TEST: control waiter was not woken (status {:?}) — the reaped-waiter result above is vacuous",
+            observed
+        );
+        return TestResult::Fail;
+    }
+
+    TestResult::Pass
+}
+
+/// The preemption gate: strictly-higher priority preempts, equal does not, and
+/// a CPU parked on a bootstrap stub loses to every real priority.
+///
+/// Covers the predicate and the effect it drives. Equal priority is the case
+/// that matters: an inverted or non-strict comparison still passes a
+/// high-versus-low check, and turns every same-priority wake into a
+/// reschedule — a preemption storm rather than a visible fault.
+pub fn test_newcomer_outranks_current_preemption_gate() -> TestResult {
+    let _fixture = SchedFixture::new();
+    let cpu = slopos_arch::pcr::get_current_cpu();
+
+    let make = |name: &[u8], priority: TaskPriority| -> Option<TaskRef> {
+        let id = task_create(
+            name.as_ptr() as *const c_char,
+            dummy_task_entry,
+            ptr::null_mut(),
+            priority.as_u8(),
+            TASK_FLAG_KERNEL_MODE,
+        );
+        if id == INVALID_TASK_ID {
+            return None;
+        }
+        task_find_by_id(id)
+    };
+
+    let (Some(high), Some(normal_a), Some(normal_b), Some(low), Some(idle)) = (
+        make(b"OutrankHigh\0", TaskPriority::High),
+        make(b"OutrankNormA\0", TaskPriority::Normal),
+        make(b"OutrankNormB\0", TaskPriority::Normal),
+        make(b"OutrankLow\0", TaskPriority::Low),
+        make(b"OutrankIdle\0", TaskPriority::Idle),
+    ) else {
+        return TestResult::Fail;
+    };
+
+    // --- predicate, against a Normal current task --------------------------
+    if !dispatch_as_current(normal_a.task_id) {
+        klog_info!("SCHED_TEST: could not dispatch the current-task fixture");
+        return TestResult::Fail;
+    }
+    if !scheduler::newcomer_outranks_current(cpu, &high) {
+        klog_info!("SCHED_TEST: High did not outrank a Normal current task");
+        return TestResult::Fail;
+    }
+    if scheduler::newcomer_outranks_current(cpu, &normal_b) {
+        klog_info!("SCHED_TEST: equal priority preempted — the comparison is not strict");
+        return TestResult::Fail;
+    }
+    if scheduler::newcomer_outranks_current(cpu, &low) {
+        klog_info!("SCHED_TEST: Low outranked a Normal current task — comparison inverted");
+        return TestResult::Fail;
+    }
+
+    // --- predicate, against a CPU running nothing schedulable --------------
+    park_bootstrap_on_current_cpu();
+    if !scheduler::newcomer_outranks_current(cpu, &idle) {
+        klog_info!("SCHED_TEST: Idle did not outrank PRIORITY_NONE");
+        return TestResult::Fail;
+    }
+
+    // --- the effect the predicate drives -----------------------------------
+    slopos_arch::pcr::mark_cpu_online(cpu);
+    if super::per_cpu::with_cpu_scheduler(cpu, |sched| sched.enable()).is_none() {
+        return TestResult::Fail;
+    }
+    let affinity = super::per_cpu::affinity_mask_for_cpu(cpu);
+    crate::task::task_install_idle_affinity(high.as_ptr(), affinity, cpu as u8);
+    crate::task::task_install_idle_affinity(normal_b.as_ptr(), affinity, cpu as u8);
+
+    // The reschedule request is gated on scheduling being active; enable it
+    // only across the two publications so the fixture's quiescence is
+    // disturbed as little as possible.
+    scheduler::set_scheduler_enabled(true);
+    let effect = (|| {
+        if !scheduler::is_scheduling_active() {
+            klog_info!("SCHED_TEST: could not make scheduling active — effect half is untestable");
+            return TestResult::Fail;
+        }
+
+        if !dispatch_as_current(normal_a.task_id) {
+            return TestResult::Fail;
+        }
+        PreemptGuard::clear_reschedule_pending();
+        if !make_task_ready(high.task_id) || scheduler::schedule_task(high.arc()) != 0 {
+            klog_info!("SCHED_TEST: could not publish the High newcomer");
+            return TestResult::Fail;
+        }
+        if !PreemptGuard::is_reschedule_pending() {
+            klog_info!("SCHED_TEST: a higher-priority wake did not request a reschedule");
+            return TestResult::Fail;
+        }
+
+        if !dispatch_as_current(normal_a.task_id) {
+            return TestResult::Fail;
+        }
+        PreemptGuard::clear_reschedule_pending();
+        if !make_task_ready(normal_b.task_id) || scheduler::schedule_task(normal_b.arc()) != 0 {
+            klog_info!("SCHED_TEST: could not publish the equal-priority newcomer");
+            return TestResult::Fail;
+        }
+        if PreemptGuard::is_reschedule_pending() {
+            klog_info!("SCHED_TEST: an equal-priority wake requested a reschedule");
+            return TestResult::Fail;
+        }
+        TestResult::Pass
+    })();
+    scheduler::set_scheduler_enabled(false);
+    PreemptGuard::clear_reschedule_pending();
+    park_bootstrap_on_current_cpu();
+
+    for id in [
+        high.task_id,
+        normal_a.task_id,
+        normal_b.task_id,
+        low.task_id,
+        idle.task_id,
+    ] {
+        let _ = task_terminate(id);
+    }
+    effect
+}
+
+/// `is_bootstrap_task_ptr` accepts stub base addresses and nothing else.
+///
+/// It whitelists stubs for `task_pointer_is_valid`, so a false accept hands a
+/// corruption-recovery path an address that is not a task at all. The interior
+/// sweep is exhaustive only because the stub is exactly its 8-byte ABI header,
+/// which is asserted here so a growth of the struct fails by name rather than
+/// silently reducing this test's coverage to the first byte.
+pub fn test_bootstrap_task_ptr_rejects_interior_addresses() -> TestResult {
+    use super::safestack_rt::{
+        AP_BOOTSTRAP_TASKS, BSP_BOOTSTRAP_TASK, BootstrapTaskAbi, MAX_STATIC_APS,
+        is_bootstrap_task_ptr,
+    };
+
+    let stride = core::mem::size_of::<BootstrapTaskAbi>();
+    if stride != 8 {
+        klog_info!(
+            "SCHED_TEST: BootstrapTaskAbi is {} bytes, not 8 — the interior sweep below is no longer exhaustive",
+            stride
+        );
+        return TestResult::Fail;
+    }
+
+    if is_bootstrap_task_ptr(ptr::null()) {
+        klog_info!("SCHED_TEST: null accepted as a bootstrap stub");
+        return TestResult::Fail;
+    }
+
+    let bsp = BSP_BOOTSTRAP_TASK.get() as usize;
+    if !is_bootstrap_task_ptr(bsp as *const ()) {
+        klog_info!("SCHED_TEST: the BSP stub base was rejected");
+        return TestResult::Fail;
+    }
+    for off in 1..stride {
+        if is_bootstrap_task_ptr((bsp + off) as *const ()) {
+            klog_info!("SCHED_TEST: BSP stub +{} accepted as a stub base", off);
+            return TestResult::Fail;
+        }
+    }
+
+    let base = AP_BOOTSTRAP_TASKS.get() as usize;
+    let end = base + stride * MAX_STATIC_APS;
+    for slot in 0..MAX_STATIC_APS {
+        let slot_base = base + slot * stride;
+        if !is_bootstrap_task_ptr(slot_base as *const ()) {
+            klog_info!("SCHED_TEST: AP stub {} base was rejected", slot);
+            return TestResult::Fail;
+        }
+        for off in 1..stride {
+            if is_bootstrap_task_ptr((slot_base + off) as *const ()) {
+                klog_info!(
+                    "SCHED_TEST: AP stub {} +{} accepted as a stub base",
+                    slot,
+                    off
+                );
+                return TestResult::Fail;
+            }
+        }
+    }
+
+    // One past the end and one before the base. Both are asserted only when
+    // they are not the BSP stub itself: the two statics are independent, so
+    // the linker may place the BSP stub immediately either side of the array.
+    if end != bsp && is_bootstrap_task_ptr(end as *const ()) {
+        klog_info!("SCHED_TEST: one-past-the-end of the AP array accepted");
+        return TestResult::Fail;
+    }
+    if base > 0 && (base - 1) != bsp && is_bootstrap_task_ptr((base - 1) as *const ()) {
+        klog_info!("SCHED_TEST: one-before the AP array accepted");
+        return TestResult::Fail;
+    }
+
+    TestResult::Pass
+}
+
+/// Task ids are handed out strictly increasing, are never recycled once
+/// retired, and the allocator does not rewind across a fixture reset.
+///
+/// Every id-keyed subsystem — the wait queues, the sleep queue, the futex
+/// buckets, `waitpid` — is only safe because a stale id resolves to nothing
+/// rather than to a different task. `init_task_manager` promises the monotonic
+/// source survives reinitialisation, and nothing else checks it.
+pub fn test_task_ids_are_never_reused() -> TestResult {
+    let _fixture = SchedFixture::new();
+
+    const ROUNDS: usize = 8;
+    let mut seen = [INVALID_TASK_ID; ROUNDS];
+    let mut previous = 0u32;
+
+    for round in seen.iter_mut() {
+        let id = task_create(
+            b"IdMonotonic\0".as_ptr() as *const c_char,
+            dummy_task_entry,
+            ptr::null_mut(),
+            TaskPriority::Normal.as_u8(),
+            TASK_FLAG_KERNEL_MODE,
+        );
+        if id == INVALID_TASK_ID {
+            return TestResult::Fail;
+        }
+        if id <= previous {
+            klog_info!(
+                "SCHED_TEST: task id {} did not advance past {}",
+                id,
+                previous
+            );
+            return TestResult::Fail;
+        }
+        previous = id;
+        *round = id;
+
+        if task_terminate(id) != 0 {
+            return TestResult::Fail;
+        }
+        // Retired, not recycled: the id stays spent even though nothing holds
+        // it any more.
+        if task_find_by_id(id).is_some() {
+            klog_info!("SCHED_TEST: terminated task {} still resolves", id);
+            return TestResult::Fail;
+        }
+        if !crate::task::task_id_was_allocated(id) {
+            klog_info!(
+                "SCHED_TEST: id {} fell below the allocator watermark — it can be handed out again",
+                id
+            );
+            return TestResult::Fail;
+        }
+    }
+
+    for (i, id) in seen.iter().enumerate() {
+        for other in seen.iter().skip(i + 1) {
+            if id == other {
+                klog_info!("SCHED_TEST: task id {} was handed out twice", id);
+                return TestResult::Fail;
+            }
+        }
+    }
+
+    // A fixture reset retires every non-idle registration. The monotonic id
+    // source must survive it.
+    if crate::task::init_task_manager() != 0 {
+        klog_info!("SCHED_TEST: init_task_manager failed");
+        return TestResult::Fail;
+    }
+    let after_reset = task_create(
+        b"IdPostReset\0".as_ptr() as *const c_char,
+        dummy_task_entry,
+        ptr::null_mut(),
+        TaskPriority::Normal.as_u8(),
+        TASK_FLAG_KERNEL_MODE,
+    );
+    if after_reset == INVALID_TASK_ID {
+        return TestResult::Fail;
+    }
+    let rewound = after_reset <= previous;
+    let _ = task_terminate(after_reset);
+    if rewound {
+        klog_info!(
+            "SCHED_TEST: id allocator rewound across a fixture reset ({} after {})",
+            after_reset,
+            previous
+        );
+        return TestResult::Fail;
+    }
+
+    TestResult::Pass
+}
+
+slopos_testing::stest!(
+    name = test_wake_against_reaped_waiter_is_inert,
+    suite = sched_core
+);
+slopos_testing::stest!(
+    name = test_newcomer_outranks_current_preemption_gate,
+    suite = sched_core
+);
+slopos_testing::stest!(
+    name = test_bootstrap_task_ptr_rejects_interior_addresses,
+    suite = sched_core
+);
+slopos_testing::stest!(name = test_task_ids_are_never_reused, suite = sched_core);
