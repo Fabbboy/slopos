@@ -27,7 +27,7 @@ use slopos_abi::task::{TaskExitReason, TaskFaultReason, TaskPriority, TaskStatus
 
 use crate::KArc;
 use crate::task::job_control::{ProcessGroup, Session};
-use crate::task::kernel_task::{SchedPlacement, SignalAction, TaskInner};
+use crate::task::kernel_task::{SchedPlacement, TaskInner};
 use crate::task::link_roles::SiblingRole;
 
 pub const TASK_EXIT_CLEANUP_RESOURCES: u8 = 1 << 0;
@@ -189,8 +189,6 @@ task_scalar_getters! {
     task_tgid -> u32 = tgid,
     /// Read `task->parent_task_id`.
     task_parent_task_id -> u32 = parent_task_id,
-    /// Read `task->signal_blocked` (`SigSet = u64`).
-    task_signal_blocked -> slopos_abi::signal::SigSet = signal_blocked,
 }
 
 task_scalar_setters! {
@@ -219,6 +217,8 @@ task_method_getters! {
     task_status -> TaskStatus = status,
     /// Read the task's current block reason via the `&self` method.
     task_load_block_reason -> slopos_abi::task::BlockReason = load_block_reason,
+    /// Read `task->signal_blocked` (`SigSet = u64`).
+    task_signal_blocked -> slopos_abi::signal::SigSet = signal_blocked,
 }
 
 task_context_getters! {
@@ -1248,7 +1248,7 @@ pub fn task_signal_handler<K, U>(task: *const TaskInner<K, U>, idx: usize) -> Op
     unsafe {
         let actions = &(*task).signal_actions;
         if idx < actions.len() {
-            Some(actions[idx].handler)
+            Some(actions[idx].handler())
         } else {
             None
         }
@@ -1274,10 +1274,11 @@ pub fn task_reset_fpu_state<K, U>(task: &mut TaskInner<K, U>) {
 /// ignored, so `SIG_IGN` (and `SIG_DFL`) entries are left untouched. The
 /// blocked mask and pending set are preserved across exec by the caller.
 #[inline]
-pub fn task_reset_caught_handlers<K, U>(task: &mut TaskInner<K, U>) {
-    for action in task.signal_actions.iter_mut() {
-        if action.handler != SIG_DFL && action.handler != SIG_IGN {
-            *action = SignalAction::default();
+pub fn task_reset_caught_handlers<K, U>(task: &TaskInner<K, U>) {
+    for action in task.signal_actions.iter() {
+        let handler = action.handler();
+        if handler != SIG_DFL && handler != SIG_IGN {
+            action.reset();
         }
     }
 }
@@ -1286,10 +1287,10 @@ pub fn task_reset_caught_handlers<K, U>(task: &mut TaskInner<K, U>) {
 /// handler or `SIG_IGN`. Backs POSIX_SPAWN_SETSIGDEF (spawn) and the
 /// `sigdefault` syscall (a forked child installing job-control defaults).
 #[inline]
-pub fn task_default_signals_in_mask<K, U>(task: &mut TaskInner<K, U>, mask: SigSet) {
+pub fn task_default_signals_in_mask<K, U>(task: &TaskInner<K, U>, mask: SigSet) {
     for signum in 1..=NSIG {
         if mask & sig_bit(signum as u8) != 0 {
-            task.signal_actions[signum - 1] = SignalAction::default();
+            task.signal_actions[signum - 1].reset();
         }
     }
 }
@@ -1399,7 +1400,7 @@ pub fn task_has_deliverable_signal<K, U>(task: *const TaskInner<K, U>) -> bool {
         let pending = (*task)
             .signal_pending
             .load(core::sync::atomic::Ordering::Acquire);
-        let blocked = (*task).signal_blocked;
+        let blocked = (*task).signal_blocked();
         (pending & !blocked) != 0
     }
 }

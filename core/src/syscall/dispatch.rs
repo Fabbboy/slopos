@@ -102,14 +102,14 @@ fn handle_erestartsys(task: *mut Task, ctx_ptr: *mut UserContext, sysno: u64) {
         return;
     };
     let pending = task_ref.signal_pending.load(Ordering::Acquire);
-    let blocked = task_ref.signal_blocked;
+    let blocked = task_ref.signal_blocked();
     let deliverable = pending & !blocked;
     let (handler, flags) = if deliverable == 0 {
         (0u64, 0u64)
     } else {
         let signum = (deliverable.trailing_zeros() + 1) as u8;
         let idx = (signum as usize).wrapping_sub(1);
-        let action = task_ref.signal_actions[idx];
+        let action = task_ref.signal_actions[idx].load();
         (action.handler, action.flags)
     };
 

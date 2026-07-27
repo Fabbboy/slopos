@@ -114,7 +114,7 @@ define_syscall!(syscall_rt_sigaction
 
     if old_act_ptr != 0 {
         let old_ptr = MmUserPtr::<UserSigaction>::try_new(old_act_ptr).map_err(|_| Errno::EFAULT)?;
-        let old_action = action_to_user(&task_ref.signal_actions[idx]);
+        let old_action = action_to_user(&task_ref.signal_actions[idx].load());
         copy_to_user(old_ptr, &old_action).map_err(|_| Errno::EFAULT)?;
     }
 
@@ -130,7 +130,7 @@ define_syscall!(syscall_rt_sigaction
         {
             return Err(Errno::EINVAL);
         }
-        task_ref.signal_actions[idx] = action_from_user(new_action);
+        task_ref.signal_actions[idx].store(action_from_user(new_action));
     }
 
     Ok(())
@@ -147,21 +147,21 @@ define_syscall!(syscall_rt_sigprocmask
 
     if oldset_ptr != 0 {
         let old_ptr = MmUserPtr::<SigSet>::try_new(oldset_ptr).map_err(|_| Errno::EFAULT)?;
-        copy_to_user(old_ptr, &task_ref.signal_blocked).map_err(|_| Errno::EFAULT)?;
+        copy_to_user(old_ptr, &task_ref.signal_blocked()).map_err(|_| Errno::EFAULT)?;
     }
 
     if set_ptr != 0 {
         let new_ptr = MmUserPtr::<SigSet>::try_new(set_ptr).map_err(|_| Errno::EFAULT)?;
         let set = copy_from_user(new_ptr).map_err(|_| Errno::EFAULT)?;
 
-        let mut blocked = task_ref.signal_blocked;
+        let mut blocked = task_ref.signal_blocked();
         match how {
             slopos_abi::signal::SIG_BLOCK => blocked |= set,
             SIG_UNBLOCK => blocked &= !set,
             SIG_SETMASK => blocked = set,
             _ => return Err(Errno::EINVAL),
         }
-        task_ref.signal_blocked = blocked & !SIG_UNCATCHABLE;
+        task_ref.set_signal_blocked(blocked & !SIG_UNCATCHABLE);
     }
 
     Ok(())
@@ -361,7 +361,7 @@ define_syscall!(syscall_rt_sigreturn (ctx) -> SyscallResult {
         Some(t) => t,
         None => return SyscallResult::Err(Errno::EINVAL),
     };
-    task_ref.signal_blocked = sigframe.saved_mask & !SIG_UNCATCHABLE;
+    task_ref.set_signal_blocked(sigframe.saved_mask & !SIG_UNCATCHABLE);
 
     // Restore the FPU/vector state saved at delivery (best-effort: a
     // faulted save area leaves the current vector registers in place).
@@ -500,7 +500,7 @@ fn claim_pending_signal(task: *mut Task) -> SignalDisposition {
     }
 
     let pending = task_ref.signal_pending.load(Ordering::Acquire);
-    let deliverable = pending & !task_ref.signal_blocked;
+    let deliverable = pending & !task_ref.signal_blocked();
     if deliverable == 0 {
         return SignalDisposition::Done;
     }
@@ -509,7 +509,7 @@ fn claim_pending_signal(task: *mut Task) -> SignalDisposition {
     let bit = sig_bit(signum);
     task_ref.signal_pending.fetch_and(!bit, Ordering::AcqRel);
 
-    let action = task_ref.signal_actions[(signum - 1) as usize];
+    let action = task_ref.signal_actions[(signum - 1) as usize].load();
     if action.handler == SIG_IGN {
         return SignalDisposition::Done;
     }
@@ -534,7 +534,7 @@ fn claim_pending_signal(task: *mut Task) -> SignalDisposition {
         signum,
         bit,
         action,
-        saved_mask: task_ref.signal_blocked,
+        saved_mask: task_ref.signal_blocked(),
     }
 }
 
@@ -636,7 +636,7 @@ fn deliver_pending_signal_core(task: *mut Task, regs: &mut impl UserRegView) {
     if (action.flags & SA_NODEFER) == 0 {
         blocked |= bit;
     }
-    task_ref.signal_blocked = blocked & !SIG_UNCATCHABLE;
+    task_ref.set_signal_blocked(blocked & !SIG_UNCATCHABLE);
 
     let mut redirected = regs_snapshot;
     redirected.rsp = frame_addr;

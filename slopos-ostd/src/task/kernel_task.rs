@@ -176,6 +176,76 @@ impl SignalAction {
     }
 }
 
+/// One task's disposition for one signal, stored as four atomics.
+///
+/// Atomic because `task_signal_post` reads `handler` from whichever CPU is
+/// sending — every `kill`, every process-group and session fanout — while the
+/// owner rewrites the whole entry in `rt_sigaction`, on exec, and through the
+/// spawn `sigdefault` mask. A plain struct made that a data race the pointer
+/// accessors happened to hide behind a `*mut` reborrow.
+///
+/// Four independent atomics rather than a lock: the fields are never read as a
+/// group from another CPU (senders want only `handler`), and the owner reads
+/// them in its own program order, so there is no group to keep consistent. The
+/// layout matches the plain struct, so `[SignalActionCell; NSIG]` leaves
+/// `Task`'s size unchanged.
+#[repr(C)]
+pub struct SignalActionCell {
+    handler: AtomicU64,
+    mask: AtomicU64,
+    flags: AtomicU64,
+    restorer: AtomicU64,
+}
+
+const _: () = assert!(
+    core::mem::size_of::<SignalActionCell>() == core::mem::size_of::<SignalAction>(),
+    "SignalActionCell must not change Task's layout"
+);
+
+impl SignalActionCell {
+    pub const fn default() -> Self {
+        Self {
+            handler: AtomicU64::new(SIG_DFL),
+            mask: AtomicU64::new(SIG_EMPTY),
+            flags: AtomicU64::new(0),
+            restorer: AtomicU64::new(0),
+        }
+    }
+
+    /// The handler address alone — the one field a remote CPU reads.
+    #[inline]
+    pub fn handler(&self) -> u64 {
+        self.handler.load(Ordering::Acquire)
+    }
+
+    #[inline]
+    pub fn load(&self) -> SignalAction {
+        SignalAction {
+            handler: self.handler.load(Ordering::Acquire),
+            mask: self.mask.load(Ordering::Acquire),
+            flags: self.flags.load(Ordering::Acquire),
+            restorer: self.restorer.load(Ordering::Acquire),
+        }
+    }
+
+    /// Publish a whole disposition. `handler` is written last so a remote
+    /// reader that observes a new handler also observes the mask, flags and
+    /// restorer that belong with it.
+    #[inline]
+    pub fn store(&self, action: SignalAction) {
+        self.mask.store(action.mask, Ordering::Release);
+        self.flags.store(action.flags, Ordering::Release);
+        self.restorer.store(action.restorer, Ordering::Release);
+        self.handler.store(action.handler, Ordering::Release);
+    }
+
+    /// Reset to the default disposition.
+    #[inline]
+    pub fn reset(&self) {
+        self.store(SignalAction::default());
+    }
+}
+
 // =============================================================================
 // Scheduler placement — runnable ownership separate from TaskStatus
 // =============================================================================
@@ -367,9 +437,16 @@ pub struct TaskInner<K, U> {
     /// Bitmask of pending signals (written atomically by kill()).
     pub signal_pending: AtomicU64,
     /// Bitmask of blocked signals (modified by rt_sigprocmask).
-    pub signal_blocked: SigSet,
+    /// Bitmask of blocked signals.
+    ///
+    /// Atomic because `task_signal_post` reads it from whichever CPU is
+    /// sending — every `kill`, every process-group and session fanout — while
+    /// the owner writes it in `rt_sigprocmask`, `rt_sigreturn`, and on exec.
+    /// A plain field made that a data race the pointer accessors happened to
+    /// hide behind a `*mut` reborrow.
+    pub signal_blocked: AtomicU64,
     /// Per-signal action table.
-    pub signal_actions: [SignalAction; NSIG],
+    pub signal_actions: [SignalActionCell; NSIG],
     pub switch_ctx: SwitchContext,
     /// Set while a CPU is physically executing this task.
     pub on_cpu: AtomicBool,
@@ -466,6 +543,20 @@ impl<K, U> Drop for TaskInner<K, U> {
 pub const TTY_INDEX_NONE: u16 = u16::MAX;
 
 impl<K, U> TaskInner<K, U> {
+    /// Read the blocked-signal mask. `&self` because every signal sender reads
+    /// it from its own CPU.
+    #[inline]
+    pub fn signal_blocked(&self) -> SigSet {
+        self.signal_blocked.load(Ordering::Acquire)
+    }
+
+    /// Replace the blocked-signal mask. `&self` for the same reason; only the
+    /// owning task writes it.
+    #[inline]
+    pub fn set_signal_blocked(&self, mask: SigSet) {
+        self.signal_blocked.store(mask, Ordering::Release);
+    }
+
     /// This task's controlling terminal, if any.
     #[inline]
     pub fn controlling_tty(&self) -> Option<TtyIndex> {
@@ -631,8 +722,8 @@ impl<K, U> TaskInner<K, U> {
             last_cpu: AtomicU8::new(0),
             migration_count: 0,
             signal_pending: AtomicU64::new(0),
-            signal_blocked: SIG_EMPTY,
-            signal_actions: [SignalAction::default(); NSIG],
+            signal_blocked: AtomicU64::new(SIG_EMPTY),
+            signal_actions: [const { SignalActionCell::default() }; NSIG],
             switch_ctx: SwitchContext::zero(),
             on_cpu: AtomicBool::new(false),
             ready_link: Link::new(),
@@ -697,10 +788,10 @@ impl<K, U> TaskInner<K, U> {
                 addr_of_mut!((*slot).test_reports).write(None);
                 addr_of_mut!((*slot).abi.unsafe_stack_sp).write(0);
 
-                addr_of_mut!((*slot).signal_blocked).write(SIG_EMPTY);
+                addr_of_mut!((*slot).signal_blocked).write(AtomicU64::new(SIG_EMPTY));
                 for i in 0..NSIG {
-                    let p = (addr_of_mut!((*slot).signal_actions) as *mut SignalAction).add(i);
-                    p.write(SignalAction::default());
+                    let p = (addr_of_mut!((*slot).signal_actions) as *mut SignalActionCell).add(i);
+                    p.write(SignalActionCell::default());
                 }
 
                 addr_of_mut!((*slot).switch_ctx).write(SwitchContext::zero());

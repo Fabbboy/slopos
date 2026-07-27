@@ -2217,7 +2217,7 @@ pub fn test_sigchld_and_wait_interaction() -> TestResult {
     // Blocked SIGCHLD: the bit must pend so a signalfd drain (or a
     // later-installed handler) can observe the exit.
     if let Some(t) = task::task_borrow_mut(parent_ptr) {
-        t.signal_blocked = sig_bit(SIGCHLD);
+        t.set_signal_blocked(sig_bit(SIGCHLD));
     }
 
     let child2_id = task_fork(parent_ptr, core::ptr::null());
@@ -2988,19 +2988,19 @@ pub fn test_execve_resets_caught_signals_keeps_ignored() -> TestResult {
 
     // SIGINT caught (custom handler), SIGTSTP ignored, SIGTERM default.
     if let Some(task) = task::task_borrow_mut(p) {
-        task.signal_actions[(SIGINT - 1) as usize] = SignalAction {
+        task.signal_actions[(SIGINT - 1) as usize].store(SignalAction {
             handler: 0x4100_0000,
             mask: 0,
             flags: 0,
             restorer: 0,
-        };
-        task.signal_actions[(SIGTSTP - 1) as usize] = SignalAction {
+        });
+        task.signal_actions[(SIGTSTP - 1) as usize].store(SignalAction {
             handler: SIG_IGN,
             mask: 0,
             flags: 0,
             restorer: 0,
-        };
-        task.signal_actions[(SIGTERM - 1) as usize] = SignalAction::default();
+        });
+        task.signal_actions[(SIGTERM - 1) as usize].reset();
     }
 
     if let Some(task) = task::task_borrow_mut(p) {
@@ -3008,9 +3008,9 @@ pub fn test_execve_resets_caught_signals_keeps_ignored() -> TestResult {
     }
 
     let ok = if let Some(task) = task::task_borrow_mut(p) {
-        task.signal_actions[(SIGINT - 1) as usize].handler == slopos_abi::signal::SIG_DFL
-            && task.signal_actions[(SIGTSTP - 1) as usize].handler == SIG_IGN
-            && task.signal_actions[(SIGTERM - 1) as usize].handler == slopos_abi::signal::SIG_DFL
+        task.signal_actions[(SIGINT - 1) as usize].handler() == slopos_abi::signal::SIG_DFL
+            && task.signal_actions[(SIGTSTP - 1) as usize].handler() == SIG_IGN
+            && task.signal_actions[(SIGTERM - 1) as usize].handler() == slopos_abi::signal::SIG_DFL
     } else {
         false
     };
@@ -3034,18 +3034,18 @@ pub fn test_sigdefault_forces_default_over_ignore() -> TestResult {
     assert_not_null!(p, "task lookup failed");
 
     if let Some(task) = task::task_borrow_mut(p) {
-        task.signal_actions[(SIGINT - 1) as usize] = SignalAction {
+        task.signal_actions[(SIGINT - 1) as usize].store(SignalAction {
             handler: 0x4100_0000,
             mask: 0,
             flags: 0,
             restorer: 0,
-        };
-        task.signal_actions[(SIGTSTP - 1) as usize] = SignalAction {
+        });
+        task.signal_actions[(SIGTSTP - 1) as usize].store(SignalAction {
             handler: SIG_IGN,
             mask: 0,
             flags: 0,
             restorer: 0,
-        };
+        });
     }
 
     let mask = slopos_abi::signal::sig_bit(SIGINT) | slopos_abi::signal::sig_bit(SIGTSTP);
@@ -3054,8 +3054,8 @@ pub fn test_sigdefault_forces_default_over_ignore() -> TestResult {
     }
 
     let ok = if let Some(task) = task::task_borrow_mut(p) {
-        task.signal_actions[(SIGINT - 1) as usize].handler == slopos_abi::signal::SIG_DFL
-            && task.signal_actions[(SIGTSTP - 1) as usize].handler == slopos_abi::signal::SIG_DFL
+        task.signal_actions[(SIGINT - 1) as usize].handler() == slopos_abi::signal::SIG_DFL
+            && task.signal_actions[(SIGTSTP - 1) as usize].handler() == slopos_abi::signal::SIG_DFL
     } else {
         false
     };
@@ -5445,7 +5445,7 @@ pub fn test_signal_post_disposition_gate() -> TestResult {
     // A blocked signal pends regardless of disposition: a signalfd reader
     // or a later-installed handler may drain it after unblocking.
     if let Some(t) = task::task_borrow_mut(task_ptr) {
-        t.signal_blocked = sig_bit(SIGWINCH);
+        t.set_signal_blocked(sig_bit(SIGWINCH));
     }
     assert_test!(
         task::task_signal_post(task_ptr, SIGWINCH),
@@ -5458,17 +5458,17 @@ pub fn test_signal_post_disposition_gate() -> TestResult {
     );
     task::task_signal_pending_store(task_ptr, 0);
     if let Some(t) = task::task_borrow_mut(task_ptr) {
-        t.signal_blocked = 0;
+        t.set_signal_blocked(0);
     }
 
     // A real handler overrides the default-ignore drop.
     if let Some(t) = task::task_borrow_mut(task_ptr) {
-        t.signal_actions[(SIGWINCH - 1) as usize] = SignalAction {
+        t.signal_actions[(SIGWINCH - 1) as usize].store(SignalAction {
             handler: 0x4100_0000,
             mask: 0,
             flags: 0,
             restorer: 0x4200_0000,
-        };
+        });
     }
     assert_test!(
         task::task_signal_post(task_ptr, SIGWINCH),
@@ -5478,12 +5478,12 @@ pub fn test_signal_post_disposition_gate() -> TestResult {
 
     // SIG_IGN drops even a default-terminate signal.
     if let Some(t) = task::task_borrow_mut(task_ptr) {
-        t.signal_actions[(SIGTERM - 1) as usize] = SignalAction {
+        t.signal_actions[(SIGTERM - 1) as usize].store(SignalAction {
             handler: SIG_IGN,
             mask: 0,
             flags: 0,
             restorer: 0,
-        };
+        });
     }
     assert_test!(
         !task::task_signal_post(task_ptr, SIGTERM),
