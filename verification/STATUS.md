@@ -28,6 +28,7 @@ own doc-comments — not duplicated here.
 | `slopos_ostd::mm::frame` | `proofs/frame_refcount.rs` | `Frame<M>` ref-count: no double-free, no use-after-free, `ref_count > 0` ⇒ allocated, free-listed ⇒ slot reset-before-free (I1–I4) |
 | `slopos_ostd::mm::slab` | `proofs/slab_lifetime.rs` | `HeapSlot` lifetime: a slot can't outlive its slab (Inv. 9); a cell fits any in-range type (Inv. 10) |
 | `slopos_ostd::mm::vm_space` | `proofs/vm_space_cursor.rs` | `Cursor`: page-table well-formedness, balanced map/unmap, user leaves are insensitive `UFrame`s (Inv. 4 + 5) |
+| `slopos_ostd::task` ownership core **LOGIC** | `proofs/task_ownership.rs` | Task ownership: the existence reference is flag-elected and parked/released at most once (T1), container transitions conserve the strong count (T2), registered ⟺ holds its existence reference (T3), no use-after-free (T4), exactly one winner of the 1→0 release with destruction exactly once (T5), a reap never fires on a dispatch-pinned task (T6), destruction implies full detachment (T7) |
 | `slopos_ring` index/state-machine **LOGIC** | `proofs/ring_cursor.rs` + `proofs/ring_layout.rs` | SlopRing cursors: CQ no-overwrite, CQ-full correctness, overflow monotone-latch, cq_tail advance-exactly-one, in-flight cap, submit/consume bound; masked SQE/CQE indices in bounds + `locate` no-OOB/no-straddle |
 | `slopos_net::tcp` zero-copy send queue **LOGIC** | `proofs/tcp_zc_pin.rs` | TCP `MSG_ZEROCOPY` pin lifetime: every (re)transmit reads in-bounds of its pin (INV-TCPZC-PIN-IN-BOUNDS); a pin is held across retransmits and freed only on cumulative ACK / teardown, never mid-DMA (INV-TCPZC-HELD-UNTIL-ACK) |
 
@@ -60,6 +61,28 @@ own doc-comments — not duplicated here.
 > all reclaims) is an atomic weak-memory protocol Verus cannot model — it remains
 > audited-only and KernMiri-covered, like the `slopos_ring` accessors above.
 
+> `slopos_ostd::task` verifies the **ownership state-machine LOGIC only** — the
+> strong-count ledger split by owner class, the existence-reference flag
+> election, the registry and dispatch-pin gates, and the deferred-destruction
+> accounting, modelled as one atomic-bounded `Step` machine over an abstract
+> `TaskOwn`. The weak-memory ordering of the `existence_ref_parked`
+> compare-exchange and of `KArc`'s `refcount_release` CAS loop, the intrusive
+> placement links, and the provenance of the raw pointers
+> `task_placement_leak`/`_reclaim` hand around are **NOT** machine-checked:
+> Verus has no weak-memory model. Neither is the rest of the module's `unsafe`
+> surface — `cell`, `accessors`, `switch`, `fpu`, `kernel_task` — which the
+> ownership model does not reach at all. `KArc`'s saturation arm (a count at
+> `isize::MAX` never destroys, so the allocation leaks rather than freeing) and
+> the weak count behind `KWeak::upgrade` are excluded from the model rather
+> than proved; a registry entry is the bare boolean `registered`. All of that
+> remains audited-only and KernMiri-covered (`tests/task_existence.rs`,
+> `tests/karc_deferred.rs`, `tests/task_cells.rs`, `tests/intrusive_list.rs`).
+> Where the model diverges from the tree it is deliberately *more permissive*:
+> the reap step drops the real gate's `TaskStatus::Terminated` and
+> entry-present preconditions, so the proof covers a superset of the real
+> behaviours. The registry-reset fixture path (`force_reap_registration`),
+> which bypasses the status and dispatch-pin gates on purpose, is out of model.
+
 ### Audited only
 
 All other `unsafe`-carrying OSTD modules — the load-bearing remainder.
@@ -67,7 +90,7 @@ Reviewed against the invariants, KernMiri-covered, but **not**
 machine-checked. Full-OSTD Verus verification is out of scope; critical-path
 verification gets the bulk of the credibility for a fraction of the cost.
 
-`arch` · `boot` · `cpu` · `dma` · `io` · `irq` · `sync` · `task` · `user` ·
+`arch` · `boot` · `cpu` · `dma` · `io` · `irq` · `sync` · `user` ·
 `util` · the `mm` remainder (`frame_alloc`, `heap`, `hhdm_bytes`, `io_mem`,
 `page_table`, `phys`, `tlb`, `uframe`) · `acpi` · `dev` · `ffi` · `pci` ·
 and the top-level support modules carrying contained `unsafe` (`memory`,

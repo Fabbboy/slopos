@@ -88,7 +88,34 @@ state-machine **logic only**: the runtime refcounted `ZcNotifToken` weak-memory
 protocol (buffer-reusable `F_NOTIF` signal) is audited-only / KernMiri-covered
 (Verus has no weak-memory model) — see the file header and `../STATUS.md`.
 
-The narrative obligation total is 51 over the original five files
-(9 + 11 + 12 + 13 + 6) plus 8 for `tcp_zc_pin.rs`, confirmed by `just verify` on
-the pinned Verus — `verify.sh` auto-sums the exact `N verified` count it reports
-per file.
+`task_ownership.rs` machine-checks the task lifetime's ownership core —
+`slopos_ostd::task::placement` (the existence reference plus the four placement
+primitives), `KArc`'s deferred strong-release split
+(`release_deferrable` / `destroy_deferred`), `task_reclaim`'s `task_put` and
+graveyard, and `task_table`'s `register_task` / `reap_task_registration` gates.
+23 obligations over an abstract `TaskOwn` ledger driven by a 14-variant `Step`
+machine, proving T1 the existence reference is flag-elected (never
+count-elected) and parked/released at most once, T2 container transitions
+conserve the strong count so linked implies owned, T3 registered ⟺ holds its
+existence reference (what lets the registry be a pure `KWeak` index), T4 no
+use-after-free, T5 exactly one caller wins the 1→0 release and destruction runs
+exactly once, T6 a reap never fires on a dispatch-pinned task, and T7
+destruction implies full detachment. The invariant is split in two on purpose:
+`own_inv` survives every *sub*-step of a decomposed transition, while the two
+biconditionals in `flag_agrees` cannot — `register_task` inserts the registry
+entry before parking the reference and `reap_task_registration` releases the
+reference before removing the entry, opposite orders under the same lock — so
+carrying them separately is what keeps the model honest. Five load-bearing
+witnesses, each pairing an `exists` that the broken shape violates the invariant
+with a `forall` that the real step preserves it: a release elected by reading
+`strong_count == 1`, a park that claims the flag before retaining, a reap that
+unhashes before winning the release, a reap that ignores the dispatch-pin gate,
+and a destroy that never won the one-to-zero. The flagship witness state is
+additionally proved *reachable* by an explicit five-step trace. The
+state-machine **logic only**: the flag CAS and `KArc` CAS-loop memory ordering,
+the intrusive links, pointer provenance, and `KArc` saturation stay audited-only
+/ KernMiri-covered — see the file header and `../STATUS.md`.
+
+The narrative obligation total is 105 across the nine files, confirmed by
+`just verify` on the pinned Verus — `verify.sh` auto-sums the exact `N verified`
+count it reports per file.
