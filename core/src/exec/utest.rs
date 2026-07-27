@@ -17,7 +17,6 @@ use slopos_ostd::{catch_panic, klog_info};
 use slopos_testing::{TestDesc, TestResult, ktap};
 
 use crate::exec::{FdAction, spawn_program_with_attrs};
-use slopos_sched::scheduler::scheduler_get_current_task;
 use slopos_sched::scheduler::{sleep_current_task_ms, task_wait_for};
 use slopos_sched::task::{task_consume_zombie, task_find_by_id, task_peek_exit_info};
 use slopos_sched::test_reports::{
@@ -86,11 +85,9 @@ fn dispatch(bin: &str, argv: Option<&[&[u8]]>) -> TestResult {
     // Pull init's pid/tid out of the current task so a spawned utest resolves
     // its stdio clone-actions against init's console fds and gets a real
     // `parent_task_id` (so `notify_parent_of_child_exit` can deliver SIGCHLD).
-    let (parent_pid, parent_tid) = {
-        let cur = scheduler_get_current_task();
-        let pid = slopos_sched::task::task_process_id(cur).unwrap_or(INVALID_PROCESS_ID);
-        let tid = slopos_sched::task::task_id_of(cur).unwrap_or(INVALID_TASK_ID);
-        (pid, tid)
+    let (parent_pid, parent_tid) = match slopos_sched::task_struct::Current::get() {
+        Some(cur) => (cur.task().process_id, cur.id()),
+        None => (INVALID_PROCESS_ID, INVALID_TASK_ID),
     };
 
     klog_info!("UTEST: starting '{}'", bin);

@@ -10,13 +10,13 @@ use slopos_ostd::KArc;
 use slopos_ostd::task::ProcessGroup;
 use slopos_sched::scheduler;
 use slopos_sched::task::{
-    self, task_has_deliverable_signal, task_process_group, task_signal_blocked,
-    task_signal_handler, task_signal_post,
+    self, task_has_deliverable_signal, task_signal_blocked, task_signal_handler, task_signal_post,
 };
+use slopos_sched::task_struct::Current;
 
 fn runtime_current_task_pgrp_handle() -> Option<slopos_ostd::KWeak<ProcessGroup>> {
-    let task = scheduler::scheduler_get_current_task();
-    task_process_group(task).map(|pg| KArc::downgrade(&pg))
+    let current = Current::get()?;
+    current.task().process_group.as_ref().map(KArc::downgrade)
 }
 
 // ---------------------------------------------------------------------------
@@ -102,14 +102,14 @@ fn runtime_pgrp_exists_in_session(pgid: u32, sid: u32) -> bool {
 // ---------------------------------------------------------------------------
 
 fn runtime_is_current_signal_blocked_or_ignored(signum: u8) -> bool {
-    let task = scheduler::scheduler_get_current_task();
-    if task.is_null() {
+    let Some(current) = Current::get() else {
         return false;
-    }
+    };
     let bit = sig_bit(signum);
     if bit == 0 {
         return false; // invalid signal number
     }
+    let task = current.as_ptr();
     if let Some(blocked) = task_signal_blocked(task) {
         if (blocked & bit) != 0 {
             return true;
@@ -129,8 +129,7 @@ fn runtime_is_current_signal_blocked_or_ignored(signum: u8) -> bool {
 // ---------------------------------------------------------------------------
 
 fn runtime_has_pending_signal() -> bool {
-    let task = scheduler::scheduler_get_current_task();
-    task_has_deliverable_signal(task)
+    Current::get().is_some_and(|current| task_has_deliverable_signal(current.as_ptr()))
 }
 
 // ---------------------------------------------------------------------------

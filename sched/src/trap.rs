@@ -2,12 +2,9 @@ use slopos_arch::{InterruptFrame, MAX_CPUS, cpu};
 use slopos_mm::memory_layout_defs::{EXCEPTION_STACK_REGION_BASE, EXCEPTION_STACK_REGION_STRIDE};
 use slopos_ostd::sync::PreemptGuard;
 
-use super::scheduler::{
-    is_scheduling_active, schedule_from_trap_exit, scheduler_get_current_task, scheduler_timer_tick,
-};
+use super::scheduler::{is_scheduling_active, schedule_from_trap_exit, scheduler_timer_tick};
 use super::task::{
     TASK_FLAG_USER_MODE, Task, TaskStatus, task_has_flag, task_save_from_interrupt_frame,
-    task_status,
 };
 
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
@@ -59,10 +56,10 @@ pub fn save_preempt_context(frame: *mut InterruptFrame) {
         return;
     }
 
-    let task = scheduler_get_current_task();
-    if task.is_null() {
+    let Some(current) = crate::task_struct::Current::get() else {
         return;
-    }
+    };
+    let task = current.as_ptr();
 
     if !task_has_flag(task, TASK_FLAG_USER_MODE) {
         return;
@@ -100,8 +97,9 @@ pub fn scheduler_handoff_on_trap_exit(source: TrapExitSource) {
     // armed, losing any wake that fired in the gap. Leave the pending flag
     // set; the task's own `schedule()` follows within the protocol and a
     // later trap exit re-checks the flag once a Running task is current.
-    let current = scheduler_get_current_task();
-    if !current.is_null() && matches!(task_status(current), Some(TaskStatus::Blocked)) {
+    if crate::task_struct::Current::get()
+        .is_some_and(|current| current.task().status() == TaskStatus::Blocked)
+    {
         return;
     }
 

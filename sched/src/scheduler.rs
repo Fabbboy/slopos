@@ -142,17 +142,16 @@ pub use super::sleep::{block_current_task_with_timeout, cancel_sleep, sleep_curr
 use super::sleep::{reset_sleep_queue, sleep_queue_next_deadline_ticks, wake_due_sleepers};
 use super::task::{
     INVALID_PROCESS_ID, INVALID_TASK_ID, TASK_FLAG_KERNEL_MODE, TASK_FLAG_NO_PREEMPT,
-    TASK_FLAG_USER_MODE, Task, TaskPriority, TaskStatus, task_controlling_tty, task_cpu_affinity,
-    task_exit_info_ref, task_fs_base, task_has_flag, task_id_of, task_is_exited, task_is_invalid,
-    task_is_ready, task_is_running, task_kernel_stack_top, task_last_cpu, task_last_run_timestamp,
+    TASK_FLAG_USER_MODE, Task, TaskPriority, TaskStatus, task_cpu_affinity, task_exit_info_ref,
+    task_fs_base, task_has_flag, task_id_of, task_is_exited, task_is_invalid, task_is_ready,
+    task_is_running, task_kernel_stack_top, task_last_cpu, task_last_run_timestamp,
     task_name_looks_idle, task_on_cpu_load, task_panic_in_flight_load, task_panic_in_flight_store,
-    task_pcr_round_trip_swap, task_pgid, task_pointer_is_valid, task_priority, task_process_id,
-    task_put, task_record_context_switch, task_record_yield, task_recovery_depth_load,
+    task_pcr_round_trip_swap, task_pointer_is_valid, task_priority, task_process_id, task_put,
+    task_record_context_switch, task_record_yield, task_recovery_depth_load,
     task_recovery_depth_store, task_remote_inbox_is_linked, task_sched_placement_compare_exchange,
-    task_sched_placement_load, task_sched_placement_store, task_set_controlling_tty,
-    task_set_on_cpu, task_set_state, task_set_status, task_set_time_slice,
-    task_set_time_slice_remaining, task_sid, task_status, task_switch_ctx_rip_rsp, task_time_slice,
-    task_time_slice_remaining, task_try_transition_from,
+    task_sched_placement_load, task_sched_placement_store, task_set_on_cpu, task_set_state,
+    task_set_status, task_set_time_slice, task_set_time_slice_remaining, task_status,
+    task_switch_ctx_rip_rsp, task_time_slice, task_time_slice_remaining, task_try_transition_from,
 };
 pub use super::trap::{
     RescheduleReason, TrapExitSource, save_preempt_context, save_task_context_from_interrupt_frame,
@@ -201,6 +200,7 @@ use slopos_ostd::cpu::x86_64::xsave::active_xcr0;
 use slopos_ostd::task::switch::switch_context;
 
 use super::ffi_boundary::kernel_stack_top;
+use crate::task_struct::Current;
 
 fn get_default_time_slice() -> u64 {
     SCHED_DEFAULT_TIME_SLICE as u64
@@ -1747,11 +1747,12 @@ fn assert_switch_preempt_safe() {
 /// ready entry or a remote-inbox node. Local ready entries are removed here;
 /// stale remote-inbox nodes are harmless because the owner CPU will unlink/drop
 /// them when it drains and observes placement != `RemoteWake`.
-pub(crate) fn consume_ready_wake_for_current(current: *mut Task) {
-    let Some(body) = crate::task::task_borrow(current) else {
-        return;
-    };
-    task_set_status(current, TaskStatus::Running);
+pub(crate) fn consume_ready_wake_for_current(current: &Current) {
+    // `&Current` is the borrow the old `*mut Task` + `task_borrow` pair was
+    // standing in for: the guard already proves this CPU is running the task,
+    // so the null check and the fabricated-lifetime reborrow both go away.
+    let body = current.task();
+    task_set_status(current.as_ptr(), TaskStatus::Running);
     unschedule_task(body);
     task_sched_placement_store(body, SchedPlacement::OnCpu);
 }
@@ -1790,10 +1791,8 @@ pub(crate) fn consume_ready_wake_for_current(current: *mut Task) {
 ///
 /// Must be called with IRQs disabled, after the caller committed
 /// `Running → Blocked`.
-pub(crate) fn commit_blocked_deschedule(current: *mut Task) -> bool {
-    let Some(body) = crate::task::task_borrow(current) else {
-        return false;
-    };
+pub(crate) fn commit_blocked_deschedule(current: &Current) -> bool {
+    let body = current.task();
     unschedule_task(body);
     if !matches!(task_status(body), Some(TaskStatus::Blocked)) {
         consume_ready_wake_for_current(current);
@@ -1803,16 +1802,14 @@ pub(crate) fn commit_blocked_deschedule(current: *mut Task) -> bool {
 }
 
 pub fn yield_blocked_task() {
-    let current = scheduler_get_current_task();
-    if current.is_null() {
+    // `Current::get()` folds the old null-pointer and invalid-id checks into
+    // one: it yields `None` unless the PCR names a task with a valid id.
+    let Some(current) = Current::get() else {
         return;
-    }
-    if task_id_of(current).unwrap_or(INVALID_TASK_ID) == INVALID_TASK_ID {
-        return;
-    }
+    };
     assert_not_blocking_while_atomic();
     slopos_ostd::cpu::x86_64::interrupts::IrqDisabled::with(|_irq| {
-        if commit_blocked_deschedule(current) {
+        if commit_blocked_deschedule(&current) {
             schedule();
         }
     });
@@ -1830,18 +1827,14 @@ pub fn yield_blocked_task() {
 /// `mark_current_blocked` and entry here, we restore `Running` and
 /// return without descheduling.
 pub fn yield_blocked_task_with_timeout(timeout_ms: u32) {
-    let current = scheduler_get_current_task();
-    if current.is_null() {
+    let Some(current) = Current::get() else {
         return;
-    }
-    let task_id = task_id_of(current).unwrap_or(INVALID_TASK_ID);
-    if task_id == INVALID_TASK_ID {
-        return;
-    }
+    };
+    let task_id = current.id();
     assert_not_blocking_while_atomic();
     super::sleep::arm_blocked_timeout(task_id, timeout_ms);
     slopos_ostd::cpu::x86_64::interrupts::IrqDisabled::with(|_irq| {
-        if commit_blocked_deschedule(current) {
+        if commit_blocked_deschedule(&current) {
             schedule();
         }
     });
@@ -1870,10 +1863,9 @@ pub fn yield_blocked_task_with_timeout(timeout_ms: u32) {
 /// race via the data lock's own happens-before chain. A lost store
 /// costs at most one extra trip around the wait loop.
 pub fn set_current_runnable() {
-    let current = scheduler_get_current_task();
-    if current.is_null() {
+    let Some(current) = Current::get() else {
         return;
-    }
+    };
     slopos_ostd::cpu::x86_64::interrupts::IrqDisabled::with(|_irq| {
         // Force-set state to Running. `set_status` is a plain
         // store (force_set on the underlying packed TaskState atomic),
@@ -1882,7 +1874,7 @@ pub fn set_current_runnable() {
         // Remove any runqueue presence a racing wake may have added and
         // restore the scheduler owner to OnCpu — we are about to keep running
         // on this CPU, the task must not also be eligible for dispatch.
-        consume_ready_wake_for_current(current);
+        consume_ready_wake_for_current(&current);
     });
 }
 
@@ -1903,11 +1895,13 @@ pub fn task_wait_for(task_id: u32) -> c_int {
         return 0;
     }
 
-    let current = scheduler_get_current_task();
-    if !current.is_null() && task_id_of(current) == Some(task_id) {
+    // Id-only: nothing here dereferences the current task, so read the id
+    // straight out of the PCR rather than a pointer that would have to be
+    // proven live.
+    let waiter_id = slopos_ostd::cpu::x86_64::pcr::current_task_id();
+    if waiter_id == task_id {
         return -1; // self-wait rejected
     }
-    let waiter_id = task_id_of(current).unwrap_or(INVALID_TASK_ID);
 
     let Some(target_id) = task_id_of(target) else {
         return 0;
@@ -2344,22 +2338,26 @@ pub fn current_task_handle() -> u32 {
 }
 
 pub fn current_task_pgid() -> u32 {
-    task_pgid(scheduler_get_current_task()).unwrap_or(0)
+    Current::get().map_or(0, |c| c.task().pgid)
 }
 
 /// Get the current task's session ID (SID).
 ///
 /// Returns 0 if there is no current task or the scheduler is not yet active.
 pub fn current_task_sid() -> u32 {
-    task_sid(scheduler_get_current_task()).unwrap_or(0)
+    Current::get().map_or(0, |c| c.task().sid)
 }
 
 pub fn current_task_controlling_tty() -> Option<slopos_abi::syscall::TtyIndex> {
-    task_controlling_tty(scheduler_get_current_task())
+    Current::get().and_then(|c| c.task().controlling_tty())
 }
 
 pub fn set_current_task_controlling_tty(tty: Option<slopos_abi::syscall::TtyIndex>) -> bool {
-    task_set_controlling_tty(scheduler_get_current_task(), tty)
+    let Some(current) = Current::get() else {
+        return false;
+    };
+    current.task().set_controlling_tty(tty);
+    true
 }
 
 pub fn clear_session_controlling_tty(session_id: u32, tty: slopos_abi::syscall::TtyIndex) -> usize {
@@ -2408,10 +2406,16 @@ pub fn scheduler_timer_tick() {
         Ordering::Relaxed,
     );
 
-    // Unconditional QS: the timer ISR firing proves this CPU is not
-    // inside an RCU read-side critical section (those disable preemption
-    // but not interrupts).
-    slopos_ostd::sync::rcu_note_qs();
+    // Conditional QS. A read-side critical section disables preemption but
+    // NOT interrupts, so the timer ISR can land in the middle of one — which
+    // is exactly why this cannot report unconditionally. Reporting from inside
+    // a reader tells `synchronize_rcu` that reader has finished, and the object
+    // it is still dereferencing is then freed underneath it.
+    //
+    // Declining is always safe: it delays a grace period, never shortens one.
+    // The switch and idle sites stay unconditional and carry the liveness, so
+    // a CPU that is preempt-disabled here simply reports at its next switch.
+    slopos_ostd::sync::rcu_note_qs_from_interrupt();
 
     // Raise the deferred-callback softirq flag on CPU 0 only.
     // rcu_process_callbacks() runs later from the idle loop, not here.

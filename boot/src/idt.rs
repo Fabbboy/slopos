@@ -511,7 +511,12 @@ pub fn common_exception_handler_impl(frame: *mut slopos_arch::InterruptFrame) {
     }
 
     if vector == RCU_QS_IPI_VECTOR {
-        slopos_ostd::sync::rcu_note_qs();
+        // Conditional, and more sharply needed here than at the tick:
+        // `synchronize_rcu` sends this IPI precisely to break a stall, so an
+        // unconditional report would force a false quiescent state on the very
+        // CPU the grace period is waiting for — turning "this CPU is slow" into
+        // "this CPU's reader is done" while it is still inside one.
+        slopos_ostd::sync::rcu_note_qs_from_interrupt();
         send_eoi();
         return;
     }

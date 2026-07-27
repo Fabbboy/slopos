@@ -7,7 +7,7 @@ use slopos_ostd::sync::{LOCK_LEVEL_REGISTRY, SpinLock};
 
 use super::scheduler::{
     commit_blocked_deschedule, consume_ready_wake_for_current, is_scheduling_active, schedule,
-    scheduler_get_current_task, wake_blocked_task,
+    wake_blocked_task,
 };
 use super::task::{
     INVALID_TASK_ID, MAX_TASKS, TaskStatus, task_find_by_id, task_id_of, task_is_blocked,
@@ -645,19 +645,15 @@ pub fn sleep_current_task_ms(ms: u32) -> c_int {
         return 0;
     }
 
-    let current = scheduler_get_current_task();
-    if current.is_null() {
+    let Some(current) = crate::task_struct::Current::get() else {
         return -1;
-    }
+    };
     if slopos_ostd::task::TaskAddr::current().is_some_and(super::per_cpu::is_idle_task) {
         platform::timer_poll_delay_ms(ms);
         return 0;
     }
 
-    let task_id = task_id_of(current).unwrap_or(INVALID_TASK_ID);
-    if task_id == INVALID_TASK_ID {
-        return -1;
-    }
+    let task_id = current.id();
 
     let now_tick = platform::timer_ticks();
     let wake_tick = now_tick.wrapping_add(ms_to_sleep_ticks(ms));
@@ -675,8 +671,8 @@ pub fn sleep_current_task_ms(ms: u32) -> c_int {
             // it tries to block again. Consume that wake here: restore the
             // in-CPU state to Running and scrub any stale runqueue entry, so
             // we do not continue executing indefinitely as Ready/unqueued.
-            if task_status(current) == Some(TaskStatus::Ready) {
-                consume_ready_wake_for_current(current);
+            if current.task().status() == TaskStatus::Ready {
+                consume_ready_wake_for_current(&current);
                 return 1;
             }
             return -1;
@@ -689,7 +685,7 @@ pub fn sleep_current_task_ms(ms: u32) -> c_int {
             );
             return -1;
         }
-        if !commit_blocked_deschedule(current) {
+        if !commit_blocked_deschedule(&current) {
             return 1; // raced: a wake was consumed; scrub the sleep entry below
         }
         schedule();
@@ -721,18 +717,14 @@ pub fn block_current_task_with_timeout(timeout_ms: u32) {
         return;
     }
 
-    let current = scheduler_get_current_task();
-    if current.is_null() {
+    let Some(current) = crate::task_struct::Current::get() else {
         return;
-    }
+    };
     if slopos_ostd::task::TaskAddr::current().is_some_and(super::per_cpu::is_idle_task) {
         return;
     }
 
-    let task_id = task_id_of(current).unwrap_or(INVALID_TASK_ID);
-    if task_id == INVALID_TASK_ID {
-        return;
-    }
+    let task_id = current.id();
 
     let now_tick = platform::timer_ticks();
     let wake_tick = now_tick.wrapping_add(ms_to_sleep_ticks(timeout_ms));
@@ -756,8 +748,8 @@ pub fn block_current_task_with_timeout(timeout_ms: u32) {
             // published Ready. Convert it back to Running and retry from the
             // caller instead of leaving a Ready current task for the rescue
             // sweep to rediscover.
-            if task_status(current) == Some(TaskStatus::Ready) {
-                consume_ready_wake_for_current(current);
+            if current.task().status() == TaskStatus::Ready {
+                consume_ready_wake_for_current(&current);
             }
             return true;
         }
@@ -769,7 +761,7 @@ pub fn block_current_task_with_timeout(timeout_ms: u32) {
             );
             return true;
         }
-        if !commit_blocked_deschedule(current) {
+        if !commit_blocked_deschedule(&current) {
             return false; // raced: a wake was consumed; cancel_sleep below scrubs
         }
         schedule();

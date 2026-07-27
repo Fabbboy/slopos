@@ -7,11 +7,22 @@
 //! through at least one quiescent state, making it safe to free the old
 //! version.
 //!
-//! Quiescent states are recorded by calling [`rcu_note_qs`] from:
-//! - The LAPIC timer tick handler (100 Hz on every CPU)
-//! - The scheduler after each context switch
-//! - Each iteration of the idle loop
-//! - The dedicated RCU QS IPI handler (vector 0xFB)
+//! Quiescent states are recorded from four sites, and the two that run in
+//! interrupt context report *conditionally*:
+//! - The scheduler after each context switch — [`rcu_note_qs`], unconditional:
+//!   a read-side section holds a [`PreemptGuard`], so reaching a switch proves
+//!   the section has ended.
+//! - Each iteration of the idle loop — [`rcu_note_qs`], same reasoning.
+//! - The LAPIC timer tick handler (100 Hz on every CPU) —
+//!   [`rcu_note_qs_from_interrupt`]. A section disables preemption but not
+//!   interrupts, so the tick can land inside one.
+//! - The dedicated RCU QS IPI handler (vector 0xFB) — likewise, and more
+//!   sharply: [`synchronize_rcu`] sends that IPI to break a stall, so an
+//!   unconditional report there would fake a quiescent state on the very CPU
+//!   the grace period is waiting for.
+//!
+//! The two unconditional sites are what carry liveness: a tick that declines
+//! only delays a grace period, because the next switch reports regardless.
 //!
 //! ## Stall detection
 //!
@@ -800,6 +811,23 @@ unsafe fn drop_karc<T: Send + Sync + 'static>(raw: *mut u8) {
 
 fn drop_typed<T: Send + 'static>(_b: crate::mm::KBox<T>) {
     // `KBox::drop` releases the heap allocation.
+}
+
+/// A CPU's quiescent-state counter.
+///
+/// Diagnostics, and the only way to tell a *declined* report from a silent one:
+/// asserting `rcu_note_qs_from_interrupt` returned `false` would pass just as
+/// happily against a version that always declined and never reported, which is
+/// a liveness bug rather than a soundness one but still a bug a test should be
+/// able to see. Ungated rather than `test-helpers`-gated because it is a plain
+/// atomic load with no more privilege than `synchronize_rcu` already exercises,
+/// and `slopos-ostd/test-helpers` is not in the kernel test build's feature
+/// chain.
+pub fn rcu_qs_counter(cpu: usize) -> u64 {
+    if cpu >= MAX_CPUS {
+        return 0;
+    }
+    RCU_QS_CTR[cpu].0.load(Ordering::Acquire)
 }
 
 /// Test-only reset hook.
