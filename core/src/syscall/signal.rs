@@ -11,7 +11,7 @@ use slopos_mm::user_copy::{
 };
 use slopos_mm::user_ptr::{UserBytes, UserPtr as MmUserPtr};
 use slopos_ostd::irq::InterruptFrame;
-use slopos_ostd::task::{FPU_STATE_SIZE, FpuState};
+use slopos_ostd::task::FPU_STATE_SIZE;
 use slopos_ostd::user::context::{
     USER_RFLAGS_FORCED, USER_RFLAGS_PERMITTED, UserContext, UserRegs,
 };
@@ -287,8 +287,13 @@ fn sigframe_fpu_addr(sigframe_addr: u64) -> u64 {
 /// Takes the FPU area by reference rather than re-deriving it from a task
 /// pointer: the caller already holds a borrow of the task, and minting a second
 /// `&mut FpuState` from the raw pointer underneath it aliased that borrow.
-fn save_fpu_to_sigframe(fpu: &mut FpuState, sigframe_addr: u64) -> bool {
-    fpu.save_current(slopos_ostd::cpu::x86_64::xsave::active_xcr0());
+fn save_fpu_to_sigframe(task: &mut Task, sigframe_addr: u64) -> bool {
+    // Not a switch-out: the task resumes into its handler with this state still
+    // live in the register file, so the save keeps the owner tag rather than
+    // releasing it. `&mut Task` is the exclusive proof here — minting a
+    // `CurrentTask` witness alongside it would alias the borrow.
+    task.fpu_save_in_place_mut(slopos_ostd::cpu::x86_64::xsave::active_xcr0());
+    let fpu = task.fpu_state.get_mut();
     let Ok(bytes) = UserBytes::try_new(sigframe_fpu_addr(sigframe_addr), FPU_STATE_SIZE) else {
         return false;
     };
@@ -303,16 +308,16 @@ fn save_fpu_to_sigframe(fpu: &mut FpuState, sigframe_addr: u64) -> bool {
 ///
 /// Takes the FPU area by reference for the same reason as
 /// [`save_fpu_to_sigframe`].
-fn restore_fpu_from_sigframe(fpu: &mut FpuState, sigframe_addr: u64) -> bool {
+fn restore_fpu_from_sigframe(task: &mut Task, sigframe_addr: u64) -> bool {
     let Ok(bytes) = UserBytes::try_new(sigframe_fpu_addr(sigframe_addr), FPU_STATE_SIZE) else {
         return false;
     };
     let xcr0 = slopos_ostd::cpu::x86_64::xsave::active_xcr0();
     slopos_ostd::cpu::x86_64::interrupts::IrqDisabled::with(|_irq| {
-        if copy_bytes_from_user(bytes, &mut fpu.data).is_err() {
+        if copy_bytes_from_user(bytes, &mut task.fpu_state.get_mut().data).is_err() {
             return false;
         }
-        fpu.restore_to_cpu(xcr0);
+        task.fpu_restore_to_cpu_mut(xcr0);
         true
     })
 }
@@ -365,7 +370,7 @@ define_syscall!(syscall_rt_sigreturn (ctx) -> SyscallResult {
 
     // Restore the FPU/vector state saved at delivery (best-effort: a
     // faulted save area leaves the current vector registers in place).
-    let _ = restore_fpu_from_sigframe(&mut task_ref.fpu_state, rsp);
+    let _ = restore_fpu_from_sigframe(task_ref, rsp);
 
     // sigreturn fully replaced the user-mode register state — the
     // dispatcher must not overwrite RAX after we return.
@@ -627,7 +632,7 @@ fn deliver_pending_signal_core(task: *mut Task, regs: &mut impl UserRegView) {
     // Preserve the interrupted task's vector state across the handler. The FPU
     // area is reborrowed from the task borrow already in hand, not re-derived
     // from the raw pointer beneath it.
-    if !save_fpu_to_sigframe(&mut task_ref.fpu_state, sigframe_addr) {
+    if !save_fpu_to_sigframe(task_ref, sigframe_addr) {
         task_ref.signal_pending.fetch_or(bit, Ordering::AcqRel);
         return;
     }

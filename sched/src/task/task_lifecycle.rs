@@ -430,7 +430,7 @@ extern "C" fn kernel_task_entry_shim(task_arg: *mut c_void) {
 }
 
 fn init_task_context(task: &mut Task) {
-    task.context = TaskContext::default();
+    *task.context.get_mut() = TaskContext::default();
     // `task.fpu_state` is a valid in-place FpuState owned by the
     // caller-provided `&mut Task`. Writing into it does not alias
     // with any other reference because we hold the unique `&mut`.
@@ -441,17 +441,17 @@ fn init_task_context(task: &mut Task) {
         let shim = kernel_task_entry_shim as *const () as u64;
         let shim_arg = (task as *mut Task).cast::<c_void>() as u64;
         super::task_accessors::task_kernel_stack_seed_ret(task.kernel_stack_top, trampoline);
-        task.switch_ctx =
+        *task.switch_ctx.get_mut() =
             SwitchContext::new_for_task(shim, shim_arg, task.kernel_stack_top, trampoline);
-        task.context.rip = trampoline;
-        task.context.rsi = shim_arg;
-        task.context.rdi = shim;
-        task.context.rsp = task.stack_pointer;
-        task.context.rflags = 0x202;
-        task.context.cs = 0x08;
-        task.context.ds = 0x10;
-        task.context.es = 0x10;
-        task.context.ss = 0x10;
+        task.context.get_mut().rip = trampoline;
+        task.context.get_mut().rsi = shim_arg;
+        task.context.get_mut().rdi = shim;
+        task.context.get_mut().rsp = task.stack_pointer;
+        task.context.get_mut().rflags = 0x202;
+        task.context.get_mut().cs = 0x08;
+        task.context.get_mut().ds = 0x10;
+        task.context.get_mut().es = 0x10;
+        task.context.get_mut().ss = 0x10;
     } else {
         // OSTD user-mode entry: populate `task.user_ctx` with the
         // initial register snapshot and set up the kernel stack so
@@ -459,26 +459,26 @@ fn init_task_context(task: &mut Task) {
         // first iteration of `user_task_loop` will iretq into user
         // mode at (entry_point, stack_pointer) with rdi=entry_arg.
         crate::task::init_user_ctx_for_new_task(
-            &mut task.user_ctx,
+            task.user_ctx.get_mut(),
             task.entry_point,
             task.stack_pointer,
             task.entry_arg as u64,
         );
         // SAFETY: kernel_stack region was just allocated and is writable.
-        task.switch_ctx = build_user_task_entry_frame(task.kernel_stack_top);
-        task.context.rip = task.entry_point;
-        task.context.rsp = task.stack_pointer;
-        task.context.rflags = 0x202;
-        task.context.cs = 0x23;
-        task.context.ds = 0x1B;
-        task.context.es = 0x1B;
-        task.context.fs = 0x1B;
-        task.context.gs = 0x1B;
-        task.context.ss = 0x1B;
-        task.context.rdi = task.entry_arg as u64;
+        *task.switch_ctx.get_mut() = build_user_task_entry_frame(task.kernel_stack_top);
+        task.context.get_mut().rip = task.entry_point;
+        task.context.get_mut().rsp = task.stack_pointer;
+        task.context.get_mut().rflags = 0x202;
+        task.context.get_mut().cs = 0x23;
+        task.context.get_mut().ds = 0x1B;
+        task.context.get_mut().es = 0x1B;
+        task.context.get_mut().fs = 0x1B;
+        task.context.get_mut().gs = 0x1B;
+        task.context.get_mut().ss = 0x1B;
+        task.context.get_mut().rdi = task.entry_arg as u64;
     }
 
-    task.context.cr3 = 0;
+    task.context.get_mut().cr3 = 0;
 }
 
 /// Walk a caller-owned C string up to `TASK_NAME_MAX_LEN-1` bytes,
@@ -613,12 +613,12 @@ pub fn task_create(
     init_task_context(task_ref);
 
     if flags & TASK_FLAG_KERNEL_MODE != 0 {
-        task_ref.context.cr3 = cpu::read_cr3() & !0xFFF;
+        task_ref.context.get_mut().cr3 = cpu::read_cr3() & !0xFFF;
     } else {
         // task.context.cr3 holds the OSTD PML4 paddr — that's what
         // VmSpace::activate writes to CR3 during context switch, and
         // the user-fault dispatcher compares it against hardware CR3.
-        task_ref.context.cr3 =
+        task_ref.context.get_mut().cr3 =
             slopos_mm::process_vm::process_vm_get_ostd_pml4_paddr(resources.process_id);
     }
 
@@ -1087,9 +1087,20 @@ fn flush_live_fpu_for_clone(parent_task: *mut Task) {
     if parent_task != scheduler::scheduler_get_current_task() {
         return;
     }
-    if let Some(fpu) = slopos_ostd::task::accessors::task_fpu_state_mut(parent_task) {
-        fpu.save_current(slopos_ostd::cpu::x86_64::xsave::active_xcr0());
+    // The check above established the parent is this CPU's current task, so the
+    // guard names it — and that is exactly the fact that makes capturing *this
+    // CPU's* vector file the right thing to do.
+    let Some(current) = crate::task_struct::Current::get() else {
+        return;
+    };
+    if current.as_ptr() != parent_task {
+        return;
     }
+    // Not a switch-out: the parent keeps running and its state stays live in
+    // the register file, so the owner tag must keep saying so.
+    current
+        .task()
+        .fpu_save_in_place(&current, slopos_ostd::cpu::x86_64::xsave::active_xcr0());
 }
 
 pub fn task_fork(
@@ -1199,23 +1210,24 @@ pub fn task_fork(
     if let Some(parent_ctx) = parent_ctx_opt {
         let mut regs = *parent_ctx.regs();
         regs.rax = 0;
-        child.user_ctx.set_regs(regs);
+        child.user_ctx.get_mut().set_regs(regs);
     } else {
         // No parent UserContext available — `clone_from_raw` already
         // copied the parent's `user_ctx` into the child; force rax to
         // 0 through `set_regs` so CS/SS/RFLAGS-mask invariants hold.
-        let mut regs = *child.user_ctx.regs();
+        let mut regs = *child.user_ctx.get_mut().regs();
         regs.rax = 0;
-        child.user_ctx.set_regs(regs);
+        child.user_ctx.get_mut().set_regs(regs);
     }
     // SAFETY: child kernel stack was just allocated and is writable.
-    child.switch_ctx = build_user_task_entry_frame(child.kernel_stack_top);
+    *child.switch_ctx.get_mut() = build_user_task_entry_frame(child.kernel_stack_top);
     child.context_from_user = 0;
-    child.context.rax = 0;
+    child.context.get_mut().rax = 0;
 
     let child_page_dir = process_vm_get_page_dir(child_process_id);
     if !child_page_dir.is_null() {
-        child.context.cr3 = slopos_mm::process_vm::process_vm_get_ostd_pml4_paddr(child_process_id);
+        child.context.get_mut().cr3 =
+            slopos_mm::process_vm::process_vm_get_ostd_pml4_paddr(child_process_id);
     }
 
     child.reset_runtime_state();
@@ -1413,7 +1425,7 @@ pub fn task_clone(
         >(parent_user_ctx);
         let mut regs = match parent_ctx_opt {
             Some(parent_ctx) => *parent_ctx.regs(),
-            None => *child.user_ctx.regs(),
+            None => *child.user_ctx.get_mut().regs(),
         };
         regs.rax = 0;
         if child_stack != 0 {
@@ -1422,14 +1434,14 @@ pub fn task_clone(
         if flags & CLONE_SETTLS != 0 {
             regs.fs_base = tls;
         }
-        child.user_ctx.set_regs(regs);
+        child.user_ctx.get_mut().set_regs(regs);
         // SAFETY: child kernel stack was just allocated and is writable.
-        child.switch_ctx = build_user_task_entry_frame(child.kernel_stack_top);
+        *child.switch_ctx.get_mut() = build_user_task_entry_frame(child.kernel_stack_top);
     }
     child.context_from_user = 0;
-    child.context.rax = 0;
+    child.context.get_mut().rax = 0;
     if child_stack != 0 {
-        child.context.rsp = child_stack;
+        child.context.get_mut().rsp = child_stack;
     }
 
     if flags & CLONE_CHILD_CLEARTID != 0 && child_tidptr != 0 {
@@ -1445,7 +1457,7 @@ pub fn task_clone(
     if !share_vm {
         let child_page_dir = process_vm_get_page_dir(child_process_id);
         if !child_page_dir.is_null() {
-            child.context.cr3 =
+            child.context.get_mut().cr3 =
                 slopos_mm::process_vm::process_vm_get_ostd_pml4_paddr(child_process_id);
         }
     }

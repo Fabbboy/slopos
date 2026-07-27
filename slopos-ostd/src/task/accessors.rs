@@ -18,7 +18,6 @@
 use core::ptr::NonNull;
 
 use crate::sync::{BUS, LinkError};
-use crate::task::fpu::FpuState;
 use crate::user::context::UserContext;
 use slopos_abi::event::{KernelEvent, TaskSlot};
 use slopos_abi::signal::{NSIG, SIG_DFL, SIG_IGN, SigSet, sig_bit};
@@ -128,7 +127,12 @@ macro_rules! task_context_getters {
         $(#[$meta])*
         #[inline]
         pub fn $name<K, U>(task: *const TaskInner<K, U>) -> Option<u64> {
-            Some(task_borrow(task)?.context.$field)
+            let ctx = task_borrow(task)?.context.as_ptr_racy();
+            // SAFETY: `as_ptr_racy` addresses the in-Task context, which
+            // outlives this read. A concurrent write by the owning CPU may tear
+            // the value; every consumer is a log line or a stack-walk seed, and
+            // no reference is formed.
+            Some(unsafe { core::ptr::read_unaligned(core::ptr::addr_of!((*ctx).$field)) })
         }
     )+};
 }
@@ -215,6 +219,12 @@ task_context_getters! {
     task_context_rip = rip,
     /// Read the task's saved stack pointer from its `TaskContext`.
     task_context_rsp = rsp,
+    /// Read the task's saved user code selector from its `TaskContext`.
+    task_context_cs = cs,
+    /// Read the task's saved user stack selector from its `TaskContext`.
+    task_context_ss = ss,
+    /// Read the task's saved RFLAGS from its `TaskContext`.
+    task_context_rflags = rflags,
 }
 
 task_state_predicates! {
@@ -308,22 +318,55 @@ pub fn task_set_context_rip_rsp<K, U>(task: *mut TaskInner<K, U>, rip: u64, rsp:
     // SAFETY: caller pre-validated; `context` is in-Task; both fields
     // are u64. `write_unaligned` lifts the alignment requirement to
     // match the legacy exec path's discipline.
+    // SAFETY: caller pre-validated. `as_ptr_nascent` is the sanctioned
+    // pre-publication write path — see its contract; the exec seeding runs
+    // between `task_create` and `publish_new_task`, where no witness exists.
     unsafe {
-        core::ptr::write_unaligned(core::ptr::addr_of_mut!((*task).context.rip), rip);
-        core::ptr::write_unaligned(core::ptr::addr_of_mut!((*task).context.rsp), rsp);
+        let ctx = (*task).context.as_ptr_nascent();
+        core::ptr::write_unaligned(core::ptr::addr_of_mut!((*ctx).rip), rip);
+        core::ptr::write_unaligned(core::ptr::addr_of_mut!((*ctx).rsp), rsp);
     }
 }
 
-/// Reborrow `task->user_ctx` as `&mut UserContext`. The returned
-/// borrow's lifetime is bounded by the caller's borrow of `task`.
+/// Seed a not-yet-published task's user-mode register snapshot.
+///
+/// Replaces the former `task_user_ctx_mut`, whose `'a` was constrained by no
+/// argument, so the caller chose it and two calls yielded two live `&mut` to
+/// one place. The borrow here cannot escape the closure.
+///
+/// The witnessed path is [`TaskInner::with_user_ctx`]-shaped
+/// (`TaskInner::user_ctx_ptr`). This one exists for the exec seeding, which
+/// runs between `task_create` and `publish_new_task` where no witness is
+/// obtainable — see `TaskOwnCell::as_ptr_nascent`.
 #[inline]
-pub fn task_user_ctx_mut<'a, K, U>(task: *mut TaskInner<K, U>) -> Option<&'a mut UserContext> {
+pub fn task_seed_user_ctx_nascent<K, U, R>(
+    task: *mut TaskInner<K, U>,
+    f: impl FnOnce(&mut UserContext) -> R,
+) -> Option<R> {
     if task.is_null() {
         return None;
     }
-    // SAFETY: caller pre-validated; `user_ctx` is an in-Task field
-    // whose pin-stability matches the rest of the Task struct.
-    Some(unsafe { &mut (*task).user_ctx })
+    // SAFETY: caller pre-validated; the task is registered but unpublished, so
+    // this thread is its only writer. The borrow is confined to `f`.
+    Some(f(unsafe { &mut *(*task).user_ctx.as_ptr_nascent() }))
+}
+
+/// Raw pointer to a running task's user-mode register snapshot.
+///
+/// The user-mode round-trip loop (`core::syscall::user_loop`) holds the task as
+/// a raw pointer and hands this straight to `UserMode`, which keeps it across
+/// an iretq/syscall round trip. Restructuring that loop to carry a
+/// `CurrentTask` witness is C12's job, not this step's; until then this is the
+/// bridge, and unlike the `task_user_ctx_mut` it replaces it fabricates no
+/// lifetime — the caller gets a pointer and must justify its own borrow.
+#[inline]
+pub fn task_user_ctx_ptr<K, U>(task: *mut TaskInner<K, U>) -> *mut UserContext {
+    if task.is_null() {
+        return core::ptr::null_mut();
+    }
+    // SAFETY: caller pre-validated; the cell is an in-Task field whose address
+    // is stable for the task's lifetime.
+    unsafe { (*task).user_ctx.as_ptr_nascent() }
 }
 
 /// Reborrow `*const Task` as `&Task`. Used by callers that need a
@@ -529,18 +572,6 @@ pub fn task_exit_cleanup_mark<K, U>(task: *mut TaskInner<K, U>, bits: u8) -> u8 
             .fetch_or(bits, core::sync::atomic::Ordering::AcqRel)
     };
     bits & !previous
-}
-
-/// Reborrow `task->fpu_state` as `&mut FpuState`. The returned
-/// borrow's lifetime is bounded by the caller's borrow of `task`.
-#[inline]
-pub fn task_fpu_state_mut<'a, K, U>(task: *mut TaskInner<K, U>) -> Option<&'a mut FpuState> {
-    if task.is_null() {
-        return None;
-    }
-    // SAFETY: caller pre-validated; `fpu_state` is an in-Task field
-    // whose pin-stability matches the rest of the Task struct.
-    Some(unsafe { &mut (*task).fpu_state })
 }
 
 /// Read `task->controlling_tty`.
@@ -760,8 +791,25 @@ pub fn task_switch_ctx_rbp<K, U>(task: *const TaskInner<K, U>) -> Option<u64> {
     // SAFETY: caller pre-validated; addr_of! produces a valid pointer
     // into the in-Task crate::task::TaskContext; read_unaligned is safe.
     unsafe {
-        let ctx = core::ptr::addr_of!((*task).switch_ctx);
+        let ctx = (*task).switch_ctx.as_ptr_racy();
         Some(core::ptr::read_unaligned(core::ptr::addr_of!((*ctx).rbp)))
+    }
+}
+
+/// Read `task->switch_ctx.rflags` via `read_unaligned`. Diagnostics and the
+/// context test-suite; a torn read is acceptable for both.
+#[inline]
+pub fn task_switch_ctx_rflags<K, U>(task: *const TaskInner<K, U>) -> Option<u64> {
+    if task.is_null() {
+        return None;
+    }
+    // SAFETY: caller pre-validated; `as_ptr_racy` addresses the in-Task
+    // context and no reference is formed.
+    unsafe {
+        let ctx = (*task).switch_ctx.as_ptr_racy();
+        Some(core::ptr::read_unaligned(core::ptr::addr_of!(
+            (*ctx).rflags
+        )))
     }
 }
 
@@ -775,37 +823,12 @@ pub fn task_switch_ctx_rip_rsp<K, U>(task: *const TaskInner<K, U>) -> Option<(u6
     // SAFETY: caller pre-validated; addr_of! produces a valid pointer
     // into the in-Task crate::task::TaskContext; read_unaligned is safe.
     unsafe {
-        let ctx = core::ptr::addr_of!((*task).switch_ctx);
+        let ctx = (*task).switch_ctx.as_ptr_racy();
         Some((
             core::ptr::read_unaligned(core::ptr::addr_of!((*ctx).rip)),
             core::ptr::read_unaligned(core::ptr::addr_of!((*ctx).rsp)),
         ))
     }
-}
-
-/// Reborrow `task->switch_ctx` as `*mut crate::task::TaskContext`. Returns
-/// `null_mut()` when the caller passes a null Task pointer. Used by
-/// the scheduler dispatcher to feed `switch_registers`.
-#[inline]
-pub fn task_switch_ctx_ptr_mut<K, U>(task: *mut TaskInner<K, U>) -> *mut crate::task::TaskContext {
-    if task.is_null() {
-        return core::ptr::null_mut();
-    }
-    // SAFETY: caller pre-validated; `switch_ctx` is in-Task; the
-    // returned raw pointer's validity is bounded by the Task's
-    // lifetime.
-    unsafe { &raw mut (*task).switch_ctx }
-}
-
-/// Reborrow `task->switch_ctx` as `*const crate::task::TaskContext`. Mirror of
-/// [`task_switch_ctx_ptr_mut`] for read-only callers.
-#[inline]
-pub fn task_switch_ctx_ptr<K, U>(task: *const TaskInner<K, U>) -> *const crate::task::TaskContext {
-    if task.is_null() {
-        return core::ptr::null();
-    }
-    // SAFETY: caller pre-validated; in-Task field reborrow.
-    unsafe { &raw const (*task).switch_ctx }
 }
 
 /// Read the task's scheduler placement owner.
@@ -1205,18 +1228,22 @@ pub fn task_pcr_round_trip_swap<K, U>(prev: *mut TaskInner<K, U>, next: *mut Tas
     unsafe {
         let pcr = crate::cpu::x86_64::pcr::current_pcr();
         if !prev.is_null() {
-            (*prev).saved_user_ctx_ptr = pcr.user_ctx_ptr.load(Ordering::Acquire);
+            (*prev)
+                .saved_user_ctx_ptr
+                .store(pcr.user_ctx_ptr.load(Ordering::Acquire), Ordering::Release);
             core::ptr::copy_nonoverlapping(
                 pcr.kernel_return_ctx.get(),
-                &raw mut (*prev).saved_kernel_return_ctx,
+                (*prev).saved_kernel_return_ctx.as_ptr_nascent(),
                 1,
             );
         }
         if !next.is_null() {
-            pcr.user_ctx_ptr
-                .store((*next).saved_user_ctx_ptr, Ordering::Release);
+            pcr.user_ctx_ptr.store(
+                (*next).saved_user_ctx_ptr.load(Ordering::Acquire),
+                Ordering::Release,
+            );
             core::ptr::copy_nonoverlapping(
-                &raw const (*next).saved_kernel_return_ctx,
+                (*next).saved_kernel_return_ctx.as_ptr_racy(),
                 pcr.kernel_return_ctx.get(),
                 1,
             );
@@ -1251,7 +1278,7 @@ pub fn task_reset_fpu_state<K, U>(task: &mut TaskInner<K, U>) {
     // `fpu_state` field; the OSTD reset routine writes a fresh
     // `FpuState` value into the slot.
     unsafe {
-        crate::task::kernel_task::fpu_reset_in_place(&raw mut task.fpu_state);
+        crate::task::kernel_task::fpu_reset_in_place(task.fpu_state.get_mut());
     }
 }
 
@@ -1328,7 +1355,7 @@ pub fn task_save_from_interrupt_frame<K, U>(
     // exclusive for the duration of this call.
     unsafe {
         use crate::arch::x86_64::gdt::SegmentSelector;
-        let ctx = &mut (*task).context;
+        let ctx = &mut *(*task).context.as_ptr_nascent();
         let f = &*frame;
         ctx.rax = f.rax;
         ctx.rbx = f.rbx;

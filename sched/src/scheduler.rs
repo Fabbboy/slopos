@@ -143,16 +143,15 @@ use super::sleep::{reset_sleep_queue, sleep_queue_next_deadline_ticks, wake_due_
 use super::task::{
     INVALID_PROCESS_ID, INVALID_TASK_ID, TASK_FLAG_KERNEL_MODE, TASK_FLAG_NO_PREEMPT,
     TASK_FLAG_USER_MODE, Task, TaskPriority, TaskStatus, task_controlling_tty, task_cpu_affinity,
-    task_exit_info_ref, task_fpu_state_mut, task_fs_base, task_has_flag, task_id_of,
-    task_is_exited, task_is_invalid, task_is_ready, task_is_running, task_kernel_stack_top,
-    task_last_cpu, task_last_run_timestamp, task_name_looks_idle, task_on_cpu_load,
-    task_panic_in_flight_load, task_panic_in_flight_store, task_pcr_round_trip_swap, task_pgid,
-    task_pointer_is_valid, task_priority, task_process_id, task_put, task_record_context_switch,
-    task_record_yield, task_recovery_depth_load, task_recovery_depth_store,
-    task_remote_inbox_is_linked, task_sched_placement_compare_exchange, task_sched_placement_load,
-    task_sched_placement_store, task_set_controlling_tty, task_set_on_cpu, task_set_state,
-    task_set_status, task_set_time_slice, task_set_time_slice_remaining, task_sid, task_status,
-    task_switch_ctx_ptr, task_switch_ctx_ptr_mut, task_switch_ctx_rip_rsp, task_time_slice,
+    task_exit_info_ref, task_fs_base, task_has_flag, task_id_of, task_is_exited, task_is_invalid,
+    task_is_ready, task_is_running, task_kernel_stack_top, task_last_cpu, task_last_run_timestamp,
+    task_name_looks_idle, task_on_cpu_load, task_panic_in_flight_load, task_panic_in_flight_store,
+    task_pcr_round_trip_swap, task_pgid, task_pointer_is_valid, task_priority, task_process_id,
+    task_put, task_record_context_switch, task_record_yield, task_recovery_depth_load,
+    task_recovery_depth_store, task_remote_inbox_is_linked, task_sched_placement_compare_exchange,
+    task_sched_placement_load, task_sched_placement_store, task_set_controlling_tty,
+    task_set_on_cpu, task_set_state, task_set_status, task_set_time_slice,
+    task_set_time_slice_remaining, task_sid, task_status, task_switch_ctx_rip_rsp, task_time_slice,
     task_time_slice_remaining, task_try_transition_from,
 };
 pub use super::trap::{
@@ -444,7 +443,18 @@ fn task_is_idle_candidate(task: *mut Task) -> bool {
 /// interrupts disabled and only by the scheduler hot path so the
 /// FPU / TLB / FS_BASE / TSS / CR3 sequencing matches the dispatch
 /// state machine.
-fn prepare_switch_to(cpu_id: usize, prev: *mut Task, next: *mut Task) {
+fn prepare_switch_to(
+    cpu_id: usize,
+    prev_window: Option<&crate::task_struct::Switching<'_>>,
+    next_window: &crate::task_struct::Switching<'_>,
+) {
+    // Raw projections for the TLB / FS_BASE / TSS / CR3 stages below, which
+    // still work through `*mut Task`. The witnesses authorise the
+    // register-state writes; the rest of the sequence is unchanged.
+    let prev: *mut Task = prev_window.map_or(core::ptr::null_mut(), |w| {
+        core::ptr::from_ref(w.task()).cast_mut()
+    });
+    let next: *mut Task = core::ptr::from_ref(next_window.task()).cast_mut();
     // Cache the active XCR0 mask once for the whole switch — the OSTD
     // `fpu_xsave` / `fpu_xrstor` primitives take it as a parameter
     // (the static is set at boot by `slopos_ostd::cpu::x86_64::xsave::init`).
@@ -465,11 +475,12 @@ fn prepare_switch_to(cpu_id: usize, prev: *mut Task, next: *mut Task) {
     task_pcr_round_trip_swap(prev, next);
 
     // --- FPU save (prev) ---
-    if let Some(prev_fpu) = task_fpu_state_mut(prev) {
-        // Safe wrapper: `&mut FpuState` discharges the exclusive-write
-        // half of the contract; the scheduler's IRQs-off + Inv. 8
-        // discharge the remaining ordering requirement.
-        prev_fpu.save_current(xcr0);
+    if let Some(prev_window) = prev_window {
+        // The witness discharges the exclusive-access half of the contract and
+        // the scheduler's IRQs-off window the ordering half. This is a
+        // switch-out, so the save also hands the register file back — which is
+        // what lets the restore below pass its own precondition.
+        prev_window.task().fpu_save_current(prev_window, xcr0);
     }
 
     // --- TLB / address-space switch ---
@@ -544,8 +555,7 @@ fn prepare_switch_to(cpu_id: usize, prev: *mut Task, next: *mut Task) {
     // Safe wrapper: `&FpuState` keeps the buffer read-only borrowed;
     // XRSTOR64 only reads. Scheduler upholds Inv. 8 (no concurrent
     // mutator on another CPU).
-    let next_fpu = task_fpu_state_mut(next).expect("next must be non-null");
-    next_fpu.restore_to_cpu(xcr0);
+    next_window.task().fpu_restore_to_cpu(next_window, xcr0);
 }
 
 /// Validate that the idle task's switch_ctx has a sane RIP (in kernel .text)
@@ -605,13 +615,19 @@ fn switch_from_current_to_idle(cpu_id: usize, current: *mut Task, idle_task: *mu
     // Scheduler hot path: IRQs disabled by caller; the safe-fn shims
     // for `prepare_switch_to` and `switch_registers` capture the
     // per-call validity through the now-installed dispatch target.
-    let prev_ctx = task_switch_ctx_ptr_mut(current);
-    let next_ctx = task_switch_ctx_ptr(idle_task);
-    // prepare_switch_to handles FPU, TLB, FS_BASE, TSS, CR3
-    prepare_switch_to(cpu_id, current, idle_task);
-    // switch_context swaps the per-task preempt-count with the PCR around
-    // the register switch (migration-safe accounting), then switches.
-    switch_context(prev_ctx, next_ctx);
+    // `run_switch` is the sole `SwitchWindow` construction site: OSTD proves
+    // the exclusivity precondition and lends the witness in. The switch itself
+    // stays inside the window, so the register-state pointers never outlive
+    // the proof that authorised them.
+    slopos_ostd::task::run_switch(current, idle_task, |prev_window, next_window| {
+        // prepare_switch_to handles FPU, TLB, FS_BASE, TSS, CR3
+        prepare_switch_to(cpu_id, prev_window, next_window);
+        let prev_ctx = prev_window.map_or(core::ptr::null_mut(), |w| w.task().switch_ctx_ptr(w));
+        let next_ctx = next_window.task().switch_ctx_ptr(next_window).cast_const();
+        // switch_context swaps the per-task preempt-count with the PCR around
+        // the register switch (migration-safe accounting), then switches.
+        switch_context(prev_ctx, next_ctx);
+    });
     // NOTE: code here runs when the TASK resumes (not on idle path).
     // All post-switch cleanup happens in run_ready_task_from_idle
     // after execute_task returns — that IS the idle resumption point.
@@ -1230,13 +1246,19 @@ fn execute_task(cpu_id: usize, from_task: *mut Task, to_task: *mut Task) {
     // Scheduler hot path: IRQs disabled by caller; switch_ctx pointers
     // were freshly validated above, both safe shims accept the
     // raw-task arguments and route through the OSTD safe-fn surfaces.
-    let prev_ctx = task_switch_ctx_ptr_mut(from_task);
-    let next_ctx = task_switch_ctx_ptr(to_task);
-    // prepare_switch_to handles FPU, TLB, FS_BASE, TSS RSP0, CR3
-    prepare_switch_to(cpu_id, from_task, to_task);
-    // switch_context swaps the per-task preempt-count with the PCR around
-    // the register switch (migration-safe accounting), then switches.
-    switch_context(prev_ctx, next_ctx);
+    // `run_switch` is the sole `SwitchWindow` construction site: OSTD proves
+    // the exclusivity precondition and lends the witness in. The switch itself
+    // stays inside the window, so the register-state pointers never outlive
+    // the proof that authorised them.
+    slopos_ostd::task::run_switch(from_task, to_task, |prev_window, next_window| {
+        // prepare_switch_to handles FPU, TLB, FS_BASE, TSS, CR3
+        prepare_switch_to(cpu_id, prev_window, next_window);
+        let prev_ctx = prev_window.map_or(core::ptr::null_mut(), |w| w.task().switch_ctx_ptr(w));
+        let next_ctx = next_window.task().switch_ctx_ptr(next_window).cast_const();
+        // switch_context swaps the per-task preempt-count with the PCR around
+        // the register switch (migration-safe accounting), then switches.
+        switch_context(prev_ctx, next_ctx);
+    });
     // Runs when the switched-out task resumes on a later dispatch.
     switch_abort_guard.disarm();
 }

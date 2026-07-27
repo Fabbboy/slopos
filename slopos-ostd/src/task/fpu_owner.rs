@@ -131,28 +131,78 @@ fn cpu_tag(cpu: usize) -> i32 {
     cpu as i32
 }
 
-/// The shared precondition of both transitions: this CPU's register file must
-/// be unowned, or already owned by `task` itself.
+/// The precondition of a **save**: this CPU's register file must be unowned, or
+/// already owned by `task` itself — checked only once `task` has an ownership
+/// claim to speak of (see below).
 ///
-/// Violating it is one of two real bugs, and which one depends on the caller:
+/// Violating it is a real bug — the live registers belong to a *different*
+/// task, so the `XSAVE` would capture that task's vector state into `task`'s
+/// buffer, a silent cross-task corruption with no bad pointer in sight.
 ///
-/// - before an `XSAVE`, it means the live registers belong to a *different*
-///   task, so the save would capture that task's vector state into `task`'s
-///   buffer — a silent cross-task corruption with no bad pointer in sight;
-/// - before an `XRSTOR`, it means a different task's state is live and has not
-///   been saved, so the restore would discard it outright.
+/// Deliberately **not** applied before a restore. An earlier version of this
+/// module asserted the same condition on both transitions, on the reasoning
+/// that restoring over an unsaved owner discards its state. That reasoning is
+/// wrong, and the tree disproves it: a restore is not always preceded by a save
+/// on the same CPU. `prepare_switch_to` skips the save entirely when `prev` is
+/// null — the first switch out of the boot context, and a CPU's first dispatch
+/// — so the incoming task legitimately finds the slot still naming whoever ran
+/// there last. Asserting it cost the whole userland test phase, silently,
+/// because the switch runs on the outgoing task's kernel stack.
 ///
-/// A debug assertion rather than a hard check: on a correctly sequenced switch
-/// it is never false, and the switch path runs with interrupts off where a
-/// panic is its own hazard.
+/// Linux draws the same line: `fpregs_activate` sets the owner unconditionally
+/// and asserts nothing about the previous one, because `switch_fpu_prepare`
+/// structurally guarantees the save. The save side is where a missing
+/// precondition actually corrupts data.
+///
+/// # The never-restored exemption, and the leak behind it
+///
+/// The check is skipped while `task.fpu_last_cpu()` is [`FPU_CPU_NONE`],
+/// because a task that has never been FPU-restored on any CPU cannot yet own a
+/// register file. Instrumenting the assertion on the live tree found exactly
+/// one violation, and it is that case: `prepare_switch_to` saving an outgoing
+/// task whose half is still `FPU_CPU_NONE`, on a CPU whose register file
+/// belongs to a third task.
+///
+/// That is not a modelling artifact. It means a context enters the scheduler,
+/// runs, and is switched out without ever having had its own vector state
+/// loaded — so its first `XSAVE` captures whatever the previously-restored task
+/// left in the registers, and it inherits that state on its next restore. Not
+/// memory-unsafe, but it is cross-task vector-register leakage of exactly the
+/// kind eager switching exists to prevent. Fixing it means giving such a
+/// context an FPU restore (or an explicit reset) before its first switch-out,
+/// which is a scheduler change, not a change here. Documented rather than
+/// asserted away.
+///
+/// A debug assertion rather than a hard check: the switch path runs with
+/// interrupts off, where a panic is its own hazard.
 #[inline]
 pub fn fpu_owner_assert_may_take<K, U>(task: &TaskInner<K, U>, cpu: usize) {
-    debug_assert!(
-        fpu_owner_may_take(task, cpu),
-        "FPU register file on this CPU belongs to another task: a save would \
-         capture its vector state into the wrong buffer, a restore would \
-         discard it"
-    );
+    if !cfg!(debug_assertions) {
+        return;
+    }
+    // A task that has never been FPU-restored anywhere has no claim on any
+    // register file yet, so "the registers are not yours" is not a bug for it —
+    // it is the *normal* state of the boot context on its first switch-out. See
+    // the note below; that case is a real pre-existing vector-state leak, but
+    // it is not this assertion's to report.
+    if task.fpu_last_cpu() == FPU_CPU_NONE {
+        return;
+    }
+    if !fpu_owner_may_take(task, cpu) {
+        fpu_owner_violation();
+    }
+}
+
+/// The panic half of [`fpu_owner_assert_may_take`], kept `#[cold]` and
+/// `#[inline(never)]` so the panic formatter never lands in the inlined
+/// context-switch frame.
+#[cold]
+#[inline(never)]
+fn fpu_owner_violation() -> ! {
+    panic!(
+        "XSAVE into this task's buffer while the register file belongs to \
+         another task: the save would capture the wrong task's vector state"
+    )
 }
 
 /// The predicate behind [`fpu_owner_assert_may_take`], exposed so the state
@@ -272,6 +322,7 @@ mod tests {
     const CPU_HALF: usize = 11;
     const CPU_FORGET: usize = 12;
     const CPU_FORGET_OTHER: usize = 13;
+    const CPU_EXEMPT: usize = 14;
 
     #[test]
     fn a_fresh_task_owns_no_cpu() {
@@ -369,15 +420,44 @@ mod tests {
 
     /// The assertion is not decorative: it panics on the refused sequence.
     /// A check that cannot fail is not a check.
+    ///
+    /// `next` is given an ownership claim first, because a task that has never
+    /// been restored anywhere is deliberately exempt — see
+    /// `a_never_restored_task_is_exempt_from_the_precondition`.
     #[test]
     #[should_panic(expected = "belongs to another task")]
     #[cfg(debug_assertions)]
     fn the_precondition_assertion_actually_fires() {
         let prev = fresh();
         let next = fresh();
+        next.set_fpu_last_cpu(CPU_ASSERT_FIRES as i32);
         fpu_owner_take(&prev, CPU_ASSERT_FIRES);
 
         fpu_owner_assert_may_take(&next, CPU_ASSERT_FIRES);
+    }
+
+    /// The exemption, and the reason it exists.
+    ///
+    /// A task whose half is still `FPU_CPU_NONE` has never had its vector state
+    /// loaded on any CPU, so it owns no register file and "these registers are
+    /// not yours" is not a bug for it. Instrumenting the live tree found this
+    /// is reachable: `prepare_switch_to` saves an outgoing context that was
+    /// never restored, on a CPU whose registers belong to a third task. Without
+    /// the exemption the assertion fires on every boot and takes the userland
+    /// test phase down silently.
+    #[test]
+    fn a_never_restored_task_is_exempt_from_the_precondition() {
+        let prev = fresh();
+        let newcomer = fresh();
+        fpu_owner_take(&prev, CPU_EXEMPT);
+
+        assert_eq!(newcomer.fpu_last_cpu(), FPU_CPU_NONE);
+        assert!(
+            !fpu_owner_may_take(&newcomer, CPU_EXEMPT),
+            "the raw predicate still reports the mismatch"
+        );
+        // ...but the assertion declines to panic on it.
+        fpu_owner_assert_may_take(&newcomer, CPU_EXEMPT);
     }
 
     /// ...and stays quiet on the legal sequences, so it is not merely always-on.

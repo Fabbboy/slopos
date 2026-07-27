@@ -20,6 +20,8 @@ use core::sync::atomic::{AtomicBool, Ordering};
 
 use crate::cpu::x86_64::pcr;
 use crate::sync::BspToken;
+use crate::task::cell::SwitchWindow;
+use crate::task::kernel_task::TaskInner;
 use crate::task::task::TaskContext;
 
 // ---------------------------------------------------------------------------
@@ -152,6 +154,83 @@ pub fn switch_context(prev: *mut TaskContext, next: *const TaskContext) {
     // `switch_registers` has a safe signature (its preconditions match
     // ours and are documented on its own item); forward the swap.
     switch_registers(prev, next);
+}
+
+// ---------------------------------------------------------------------------
+// run_switch — the sole `SwitchWindow` construction site.
+// ---------------------------------------------------------------------------
+
+/// Open the switch window over both endpoints of a context switch and lend it
+/// to `prepare`.
+///
+/// [`SwitchWindow::new`] is `unsafe` and the scheduler crate is
+/// `#![forbid(unsafe_code)]`, so the window cannot be opened there. This is the
+/// inversion: OSTD proves the precondition once, here, and hands the scheduler
+/// a witness it could not have forged. It is the *only* place a `SwitchWindow`
+/// is constructed in the kernel.
+///
+/// Takes raw pointers rather than references because the scheduler holds
+/// `*mut Task`; forming the borrows at the call site would mean another
+/// unconstrained-lifetime helper, which is what this migration removes. The
+/// borrows live inside, bounded by the closure. `prev` may be null for the
+/// first switch out of the boot context. Returns `None` if `next` is null.
+///
+/// The interrupts-off check is an always-on `assert!`, not a `debug_assert!`,
+/// and deliberately one frame earlier than the identical assertion in
+/// [`switch_context`]. By the time that one runs, `prepare` has already saved
+/// the outgoing FPU state and swapped the PCR round-trip slots, so an IRQ that
+/// interleaved has had its chance to corrupt them. Catching the violation here
+/// catches it before the first write.
+///
+/// # Panics
+///
+/// If interrupts are enabled.
+#[inline]
+pub fn run_switch<K, U, R>(
+    prev: *mut TaskInner<K, U>,
+    next: *mut TaskInner<K, U>,
+    prepare: impl FnOnce(Option<&SwitchWindow<'_, K, U>>, &SwitchWindow<'_, K, U>) -> R,
+) -> Option<R> {
+    assert!(
+        !crate::cpu::x86_64::interrupts::are_interrupts_enabled(),
+        "run_switch called with interrupts enabled"
+    );
+    if next.is_null() {
+        return None;
+    }
+    // SAFETY: `next` is non-null and dispatch-pinned by the caller's dispatch
+    // reference for the whole call.
+    let next_ref = unsafe { &*next };
+    // Deliberately NOT asserted: `on_cpu`. The two switch paths differ — the
+    // ready-task dispatch sets it before the switch, the idle switch does not
+    // — so requiring it here would be a false invariant, and asserting it cost
+    // a boot panic to discover. The PCR publication below is the fact both
+    // paths share, and it is the one `SwitchWindow` soundness rests on:
+    // `task_is_dispatch_pinned`'s second disjunct is exactly "some CPU names
+    // this task as its current", which is what stops a reap freeing an
+    // endpoint mid-switch.
+    debug_assert!(
+        core::ptr::eq(
+            pcr::get_current_task()
+                .cast::<TaskInner<K, U>>()
+                .cast_const(),
+            next.cast_const(),
+        ),
+        "run_switch: incoming task is not this CPU's published current task"
+    );
+
+    // SAFETY: this CPU is performing the switch (it is the one running this
+    // code with interrupts disabled, asserted above), it holds both endpoints'
+    // dispatch references for the whole call, and the IRQs-off state means the
+    // window cannot be re-entered on this CPU.
+    let next_window = unsafe { SwitchWindow::new(next_ref) };
+    if prev.is_null() {
+        return Some(prepare(None, &next_window));
+    }
+    // SAFETY: as above, for the outgoing endpoint. The dispatcher holds its
+    // dispatch reference until the switch tail parks it.
+    let prev_window = unsafe { SwitchWindow::new(&*prev) };
+    Some(prepare(Some(&prev_window), &next_window))
 }
 
 /// Initialise context from current CPU state (for boot/kernel context).

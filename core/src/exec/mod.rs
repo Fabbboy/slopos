@@ -35,8 +35,8 @@ use slopos_ostd::task::new_group_in_session;
 use slopos_sched::scheduler::publish_new_task;
 use slopos_sched::task::{
     TaskEntry, task_borrow, task_borrow_mut, task_default_signals_in_mask,
-    task_entry_from_kernel_va, task_process_group, task_process_id, task_session,
-    task_set_context_rip_rsp, task_set_entry_point, task_set_fs_base, task_user_ctx_mut,
+    task_entry_from_kernel_va, task_process_group, task_process_id, task_seed_user_ctx_nascent,
+    task_session, task_set_context_rip_rsp, task_set_entry_point, task_set_fs_base,
 };
 use slopos_sched::task::{link_child, task_create, task_find_by_id, task_terminate};
 
@@ -268,9 +268,12 @@ pub fn spawn_program_with_attrs(
         // a return-address slot pointing at `user_task_first_run`);
         // the iretq frame is rebuilt from `user_ctx` on every
         // round-trip by `user_mode_round_trip_asm`.
-        if let Some(uc) = task_user_ctx_mut(task_info) {
+        // Registered but not yet published: no witness is obtainable here (see
+        // `TaskOwnCell::as_ptr_nascent`). The closure bounds the borrow, which
+        // the former `task_user_ctx_mut` did not.
+        task_seed_user_ctx_nascent(task_info, |uc| {
             slopos_sched::task::init_user_ctx_for_new_task(uc, entry, stack_ptr, 0);
-        }
+        });
 
         // Build the child's fd table from the action allow-list BEFORE
         // scheduling, so its descriptors are in place from the moment it

@@ -133,6 +133,33 @@ impl<T> TaskOwnCell<T> {
         self.value.get_mut()
     }
 
+    /// Unsynchronised **write** pointer for the pre-publication window, where
+    /// no witness exists to be had.
+    ///
+    /// `spawn_program_with_attrs` seeds a task's entry `context` and its
+    /// `user_ctx` after `task_create` has already registered the task but
+    /// before `publish_new_task` makes it schedulable. In that window neither
+    /// witness is obtainable — [`CurrentTask`] names a different task (the
+    /// spawner), no [`SwitchWindow`] is open, and `KArc::get_mut` fails because
+    /// the existence reference the registration handed out puts the strong
+    /// count at two. The module header spells out why `SchedPlacement::Nascent`
+    /// is *not* itself a proof of exclusivity: a nascent task is still
+    /// reachable through every registry lookup and diagnostic walk.
+    ///
+    /// So this is a named debt rather than a disguised one — greppable, and
+    /// deleted when the nascent window closes by handing the spawner a
+    /// pre-registration exclusive handle, at which point every caller moves to
+    /// [`get_mut`](Self::get_mut).
+    ///
+    /// # Correctness
+    ///
+    /// The caller must be the thread that created the task, and the task must
+    /// not yet have been published to any run queue.
+    #[inline]
+    pub fn as_ptr_nascent(&self) -> *mut T {
+        self.value.get()
+    }
+
     /// Unsynchronised read pointer, for diagnostics only.
     ///
     /// The contents may be written concurrently by the owning CPU, so the
@@ -152,6 +179,43 @@ impl<T: Default> Default for TaskOwnCell<T> {
         Self::new(T::default())
     }
 }
+
+// Layout razors for the register-state payloads.
+//
+// `#[repr(transparent)]` over `UnsafeCell<T>` (itself `repr(transparent)`) is
+// what makes wrapping a `Task` field free, and `sched/src/task_struct.rs`'s
+// `offset_of!(Task, fpu_state) - offset_of!(Task, context)` razor silently
+// depends on it. That razor does NOT catch a regression here: if someone wrote
+// `#[repr(C)]` on the cell, both offsets would move together and the delta
+// would still land in range, while `FpuState` quietly lost its 64-byte
+// alignment and `XSAVE64` started faulting with a #GP at the first context
+// switch. So assert the properties the hardware actually needs, here, beside
+// the definition that could break them.
+const _: () = {
+    use crate::task::fpu::FpuState;
+    use crate::task::task::TaskContext;
+    use crate::user::context::UserContext;
+
+    assert!(
+        core::mem::size_of::<TaskOwnCell<TaskContext>>() == core::mem::size_of::<TaskContext>()
+    );
+    assert!(
+        core::mem::align_of::<TaskOwnCell<TaskContext>>() == core::mem::align_of::<TaskContext>()
+    );
+
+    assert!(core::mem::size_of::<TaskOwnCell<FpuState>>() == core::mem::size_of::<FpuState>());
+    assert!(core::mem::align_of::<TaskOwnCell<FpuState>>() == core::mem::align_of::<FpuState>());
+    // The one the hardware enforces: XSAVE64/XRSTOR64 require a 64-byte-aligned
+    // save area, and the cell must not erode it.
+    assert!(core::mem::align_of::<TaskOwnCell<FpuState>>() >= 64);
+
+    assert!(
+        core::mem::size_of::<TaskOwnCell<UserContext>>() == core::mem::size_of::<UserContext>()
+    );
+    assert!(
+        core::mem::align_of::<TaskOwnCell<UserContext>>() == core::mem::align_of::<UserContext>()
+    );
+};
 
 // ---------------------------------------------------------------------------
 // CurrentTask — invariant I5: `current` is a borrow, never an owned handle

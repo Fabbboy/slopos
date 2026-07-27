@@ -56,7 +56,7 @@ pub use spawner::{
     current_kernel_thread_spawner, register_kernel_thread_spawner, spawn,
 };
 pub use switch::{
-    TaskExitHook, init_current_context, register_task_exit_hook, switch_context, switch_registers,
-    task_entry_trampoline,
+    TaskExitHook, init_current_context, register_task_exit_hook, run_switch, switch_context,
+    switch_registers, task_entry_trampoline,
 };
 pub use task::TaskContext;

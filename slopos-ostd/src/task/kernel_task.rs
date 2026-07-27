@@ -12,7 +12,7 @@ use core::ffi::c_void;
 use core::ptr;
 use core::ptr::addr_of_mut;
 use core::sync::atomic::{
-    AtomicBool, AtomicI32, AtomicU8, AtomicU16, AtomicU32, AtomicU64, Ordering,
+    AtomicBool, AtomicI32, AtomicPtr, AtomicU8, AtomicU16, AtomicU32, AtomicU64, Ordering,
 };
 
 use slopos_abi::signal::{NSIG, SIG_DFL, SIG_EMPTY, SigSet};
@@ -382,8 +382,8 @@ pub struct TaskInner<K, U> {
     pub kernel_stack_size: u64,
     pub entry_point: u64,
     pub entry_arg: *mut c_void,
-    pub context: TaskContext,
-    pub fpu_state: FpuState,
+    pub context: TaskOwnCell<TaskContext>,
+    pub fpu_state: TaskOwnCell<FpuState>,
     // --- Fields below are NOT accessed by assembly and can be freely reordered ---
     /// Owning handle to the kernel-mode stack.
     ///
@@ -488,7 +488,7 @@ pub struct TaskInner<K, U> {
     pub signal_blocked: AtomicU64,
     /// Per-signal action table.
     pub signal_actions: [SignalActionCell; NSIG],
-    pub switch_ctx: SwitchContext,
+    pub switch_ctx: TaskOwnCell<SwitchContext>,
     /// Set while a CPU is physically executing this task.
     pub on_cpu: AtomicBool,
     /// Intrusive link slot for the per-CPU `ReadyQueue`.
@@ -561,11 +561,11 @@ pub struct TaskInner<K, U> {
     /// reference back, so the reclaim is exactly-once even under a race.
     pub existence_ref_parked: AtomicBool,
     /// Per-task user-mode register snapshot.
-    pub user_ctx: UserContext,
+    pub user_ctx: TaskOwnCell<UserContext>,
     /// Saved per-task value of `pcr.user_ctx_ptr`.
-    pub saved_user_ctx_ptr: *mut UserContext,
+    pub saved_user_ctx_ptr: AtomicPtr<UserContext>,
     /// Saved per-task copy of `pcr.kernel_return_ctx`.
-    pub saved_kernel_return_ctx: KernelReturnContext,
+    pub saved_kernel_return_ctx: TaskOwnCell<KernelReturnContext>,
     /// Durable per-task exit value.
     pub exit_info: AtomicCell<ExitInfo>,
 }
@@ -609,73 +609,159 @@ impl<K, U> TaskInner<K, U> {
     /// hand the register file back.
     ///
     /// Pairs the `XSAVE64` with both halves of the owner tag so a call site
-    /// cannot perform one without the other. The witness proves this CPU has
+    /// cannot do one without the other. The witness proves this CPU has
     /// exclusive access to the task's register state — the same fact that makes
-    /// the save sound in the first place, now checkable rather than commented.
+    /// the save sound, now checkable rather than commented.
     ///
-    /// `fpu` is passed rather than reached through `self` because
-    /// [`fpu_state`](Self::fpu_state) is a plain field, not a
-    /// [`TaskOwnCell`]: writing it through a shared reference would be a
-    /// provenance violation, so the buffer arrives as its own `&mut` exactly as
-    /// the signal-frame helpers already take it. A debug assertion checks it is
-    /// *this* task's buffer, which is what keeps the pairing honest until the
-    /// cell migration lets the parameter go away.
-    ///
-    /// Eager by construction: there is no "save only if dirty" branch. Lazy FPU
+    /// Eager by construction: no "save only if dirty" branch. Lazy FPU
     /// switching is CVE-2018-3665 and this is not it.
     #[inline]
-    pub fn fpu_save_current(
-        &self,
-        witness: &impl TaskExclusive<K, U>,
-        fpu: &mut FpuState,
-        xcr0_mask: u64,
-    ) {
+    pub fn fpu_save_current(&self, witness: &impl TaskExclusive<K, U>, xcr0_mask: u64) {
         debug_assert!(
             core::ptr::eq(witness.witnessed(), self),
             "witness names a different task"
         );
-        debug_assert!(
-            core::ptr::eq(core::ptr::from_ref(fpu), &raw const self.fpu_state),
-            "save area belongs to a different task"
-        );
         let cpu = crate::task::fpu_owner::fpu_current_cpu();
         fpu_owner_assert_may_take(self, cpu);
-        fpu.save_current(xcr0_mask);
+        // SAFETY: the witness proves exclusive access to this task's register
+        // state, and `get_ptr` yields a `SharedReadWrite` derivation of the
+        // cell — never a `&mut` — so a nested witness on the same task (an
+        // interrupt above a syscall) cannot invalidate this pointer. XSAVE64's
+        // 64-byte alignment is pinned by the razors beside `TaskOwnCell`.
+        unsafe { crate::task::fpu::fpu_xsave(self.fpu_state.get_ptr(witness), xcr0_mask) };
         fpu_owner_yield_after_save(self, cpu);
     }
 
     /// Load this task's saved FPU/vector state into the register file and take
-    /// ownership of it.
-    ///
-    /// The mirror of [`fpu_save_current`](Self::fpu_save_current); the same
-    /// witness, buffer-identity and tag-pairing rules apply. The precondition
-    /// fires when another task's state is live and has not been saved — the
-    /// restore would discard it.
+    /// ownership of it. Mirror of [`fpu_save_current`](Self::fpu_save_current).
     ///
     /// Deliberately unconditional. The tag makes it *possible* to skip a
     /// restore when [`fpu_state_valid`](crate::task::fpu_owner::fpu_state_valid)
-    /// already holds, which is Linux's optimisation and not lazy FPU — but
-    /// taking it is a behaviour change, so this entry point stays eager and the
-    /// predicate is exported for a caller that wants to opt in explicitly.
+    /// already holds — Linux's optimisation, and not lazy FPU — but taking it
+    /// is a behaviour change, so this entry point stays eager and the predicate
+    /// is exported for a caller that opts in explicitly.
     #[inline]
-    pub fn fpu_restore_to_cpu(
-        &self,
-        witness: &impl TaskExclusive<K, U>,
-        fpu: &FpuState,
-        xcr0_mask: u64,
-    ) {
+    pub fn fpu_restore_to_cpu(&self, witness: &impl TaskExclusive<K, U>, xcr0_mask: u64) {
         debug_assert!(
             core::ptr::eq(witness.witnessed(), self),
             "witness names a different task"
         );
+        let cpu = crate::task::fpu_owner::fpu_current_cpu();
+        // No precondition: a restore defines the register file's new contents,
+        // and is not always preceded by a save on this CPU — see
+        // `fpu_owner_assert_may_take`.
+        // SAFETY: as `fpu_save_current`; XRSTOR64 only reads the buffer.
+        unsafe {
+            crate::task::fpu::fpu_xrstor(self.fpu_state.get_ptr(witness).cast_const(), xcr0_mask)
+        };
+        fpu_owner_take(self, cpu);
+    }
+
+    /// Capture the live registers into the save area **without** handing the
+    /// register file back.
+    ///
+    /// For the two saves that are not switch-outs — the signal-frame save and
+    /// the fork flush. Both run while the task keeps executing, so its state is
+    /// still live in the registers afterwards and the owner tag must keep
+    /// saying so.
+    #[inline]
+    pub fn fpu_save_in_place(&self, witness: &impl TaskExclusive<K, U>, xcr0_mask: u64) {
         debug_assert!(
-            core::ptr::eq(core::ptr::from_ref(fpu), &raw const self.fpu_state),
-            "save area belongs to a different task"
+            core::ptr::eq(witness.witnessed(), self),
+            "witness names a different task"
         );
         let cpu = crate::task::fpu_owner::fpu_current_cpu();
         fpu_owner_assert_may_take(self, cpu);
-        fpu.restore_to_cpu(xcr0_mask);
+        // SAFETY: as `fpu_save_current`.
+        unsafe { crate::task::fpu::fpu_xsave(self.fpu_state.get_ptr(witness), xcr0_mask) };
         fpu_owner_take(self, cpu);
+    }
+
+    /// `&mut self`-authorised counterparts to the two ops above.
+    ///
+    /// Exclusive access proven by the borrow rather than by a witness, for the
+    /// paths that already hold `&mut TaskInner` — the signal-frame save and
+    /// restore reach the task through `SyscallContext::task_mut`. Minting a
+    /// `CurrentTask` witness alongside that `&mut` would alias it, so these
+    /// exist rather than forcing a caller to hold two exclusive proofs of the
+    /// same fact at once. Both maintain the owner tag.
+    #[inline]
+    pub fn fpu_save_in_place_mut(&mut self, xcr0_mask: u64) {
+        let cpu = crate::task::fpu_owner::fpu_current_cpu();
+        fpu_owner_assert_may_take(self, cpu);
+        // SAFETY: `&mut self` is exclusive access to the whole task.
+        unsafe { crate::task::fpu::fpu_xsave(self.fpu_state.get_mut(), xcr0_mask) };
+        fpu_owner_take(self, cpu);
+    }
+
+    /// See [`fpu_save_in_place_mut`](Self::fpu_save_in_place_mut).
+    #[inline]
+    pub fn fpu_restore_to_cpu_mut(&mut self, xcr0_mask: u64) {
+        let cpu = crate::task::fpu_owner::fpu_current_cpu();
+        // Restore side takes no precondition — see `fpu_restore_to_cpu`.
+        // SAFETY: `&mut self` is exclusive access to the whole task.
+        unsafe { crate::task::fpu::fpu_xrstor(self.fpu_state.get_mut(), xcr0_mask) };
+        fpu_owner_take(self, cpu);
+    }
+
+    /// Borrow this task's FPU save area as bytes, authorised by `witness`.
+    ///
+    /// The signal-frame paths copy the area to and from user memory and cannot
+    /// stage it through a 2.6 KiB stack buffer (the frame gate is 2 KiB), so
+    /// they borrow it in place. Same shape and same re-entrancy contract as
+    /// [`with_cwd`](Self::with_cwd): `f` must not itself take a witness on this
+    /// task and call back in, or the `&mut` handed out here would alias.
+    #[inline]
+    pub fn with_fpu_bytes_mut<R>(
+        &self,
+        witness: &impl TaskExclusive<K, U>,
+        f: impl FnOnce(&mut [u8; FPU_STATE_SIZE]) -> R,
+    ) -> R {
+        debug_assert!(
+            core::ptr::eq(witness.witnessed(), self),
+            "witness names a different task"
+        );
+        // SAFETY: the witness proves exclusive access; the contract above
+        // forbids re-entering through a second witness while `f` runs.
+        f(unsafe { &mut (*self.fpu_state.get_ptr(witness)).data })
+    }
+
+    /// Reset the FPU save area to the kernel default (x87/SSE exceptions
+    /// masked, XSTATE header zeroed), authorised by `witness`. The execve
+    /// disposition reset — the old image's vector state must not survive.
+    #[inline]
+    pub fn fpu_reset(&self, witness: &impl TaskExclusive<K, U>) {
+        debug_assert!(
+            core::ptr::eq(witness.witnessed(), self),
+            "witness names a different task"
+        );
+        // SAFETY: the witness proves exclusive access; `fpu_reset_in_place`
+        // writes a whole valid `FpuState` into the slot.
+        unsafe { fpu_reset_in_place(self.fpu_state.get_ptr(witness)) };
+    }
+
+    /// This task's user-mode register snapshot, authorised by `witness`. Raw
+    /// rather than `&mut` for the reason `TaskOwnCell::get_ptr` is: two
+    /// witnesses on one task may legitimately coexist.
+    #[inline]
+    pub fn user_ctx_ptr(&self, witness: &impl TaskExclusive<K, U>) -> *mut UserContext {
+        debug_assert!(
+            core::ptr::eq(witness.witnessed(), self),
+            "witness names a different task"
+        );
+        self.user_ctx.get_ptr(witness)
+    }
+
+    /// This task's saved callee-saved register frame, authorised by `witness`.
+    /// Feeds [`switch_registers`](crate::task::switch_registers), whose asm
+    /// takes both endpoints as raw pointers.
+    #[inline]
+    pub fn switch_ctx_ptr(&self, witness: &impl TaskExclusive<K, U>) -> *mut SwitchContext {
+        debug_assert!(
+            core::ptr::eq(witness.witnessed(), self),
+            "witness names a different task"
+        );
+        self.switch_ctx.get_ptr(witness)
     }
 
     /// Replace the working directory. The witness is what proves no other CPU
@@ -859,8 +945,8 @@ impl<K, U> TaskInner<K, U> {
             kernel_stack_size: 0,
             entry_point: 0,
             entry_arg: ptr::null_mut(),
-            context: TaskContext::zero(),
-            fpu_state: FpuState::new(),
+            context: TaskOwnCell::new(TaskContext::zero()),
+            fpu_state: TaskOwnCell::new(FpuState::new()),
             kernel_stack: None,
             unsafe_stack: None,
             process_group: None,
@@ -899,7 +985,7 @@ impl<K, U> TaskInner<K, U> {
             signal_pending: AtomicU64::new(0),
             signal_blocked: AtomicU64::new(SIG_EMPTY),
             signal_actions: [const { SignalActionCell::default() }; NSIG],
-            switch_ctx: SwitchContext::zero(),
+            switch_ctx: TaskOwnCell::new(SwitchContext::zero()),
             on_cpu: AtomicBool::new(false),
             ready_link: Link::new(),
             remote_inbox_link: Link::new(),
@@ -911,9 +997,9 @@ impl<K, U> TaskInner<K, U> {
             panic_in_flight: AtomicU32::new(0),
             exit_cleanup_flags: AtomicU8::new(0),
             existence_ref_parked: AtomicBool::new(false),
-            user_ctx: UserContext::const_zeroed(),
-            saved_user_ctx_ptr: ptr::null_mut(),
-            saved_kernel_return_ctx: KernelReturnContext {
+            user_ctx: TaskOwnCell::new(UserContext::const_zeroed()),
+            saved_user_ctx_ptr: AtomicPtr::new(ptr::null_mut()),
+            saved_kernel_return_ctx: TaskOwnCell::new(KernelReturnContext {
                 rbx: 0,
                 rbp: 0,
                 r12: 0,
@@ -922,7 +1008,7 @@ impl<K, U> TaskInner<K, U> {
                 r15: 0,
                 rsp: 0,
                 rip: 0,
-            },
+            }),
             exit_info: AtomicCell::empty(),
         }
     }
@@ -962,7 +1048,9 @@ impl<K, U> TaskInner<K, U> {
                 // is the array's.
                 (addr_of_mut!((*slot).cwd) as *mut u8).write(b'/');
 
-                fpu_reset_in_place(addr_of_mut!((*slot).fpu_state));
+                // `TaskOwnCell` is `repr(transparent)`, so the cell's
+                // address is the buffer's.
+                fpu_reset_in_place(addr_of_mut!((*slot).fpu_state).cast::<FpuState>());
 
                 addr_of_mut!((*slot).kernel_stack).write(None);
                 addr_of_mut!((*slot).unsafe_stack).write(None);
@@ -976,7 +1064,7 @@ impl<K, U> TaskInner<K, U> {
                     p.write(SignalActionCell::default());
                 }
 
-                addr_of_mut!((*slot).switch_ctx).write(SwitchContext::zero());
+                addr_of_mut!((*slot).switch_ctx).write(TaskOwnCell::new(SwitchContext::zero()));
 
                 addr_of_mut!((*slot).exit_info).write(AtomicCell::empty());
 

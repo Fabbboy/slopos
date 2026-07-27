@@ -434,10 +434,11 @@ define_syscall!(syscall_exec
             let xcr0 = slopos_ostd::cpu::x86_64::xsave::active_xcr0();
             slopos_ostd::cpu::x86_64::interrupts::IrqDisabled::with(|_irq| {
                 if let Some(t) = slopos_sched::task::task_borrow_mut(task) {
+                    // One `&mut Task` covers both steps, so the reset and the
+                    // load cannot be split by a second derivation; both
+                    // maintain the FPU owner tag.
                     slopos_ostd::task::accessors::task_reset_fpu_state(t);
-                }
-                if let Some(fpu) = slopos_ostd::task::accessors::task_fpu_state_mut(task) {
-                    fpu.restore_to_cpu(xcr0);
+                    t.fpu_restore_to_cpu_mut(xcr0);
                 }
             });
             SyscallResult::NoReturn

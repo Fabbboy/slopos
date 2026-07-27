@@ -91,9 +91,9 @@ fn user_task_loop(task: *mut Task) -> ! {
         // `task_user_ctx_mut` accessor null-checks `task` once and
         // hands back a `&mut UserContext` whose lifetime is the loop
         // iteration scope.
-        let ctx_ref = slopos_sched::task::task_user_ctx_mut(task)
+        let ctx_ptr: *mut UserContext = slopos_ostd::task::accessors::task_user_ctx_ptr(task);
+        let ctx_ref = UserContext::from_ptr_mut(ctx_ptr)
             .expect("user_task_loop: scheduler dispatched null task");
-        let ctx_ptr: *mut UserContext = ctx_ref as *mut UserContext;
 
         let reason = {
             let user_mode = UserMode::new(ctx_ref, space);

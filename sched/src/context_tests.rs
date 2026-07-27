@@ -55,8 +55,10 @@ pub fn test_task_context_initial_state() -> TestResult {
 
     let task = assert_some!(task_find_by_id(task_id));
 
-    let ctx_rsp = task.context.rsp;
-    let ctx_rip = task.context.rip;
+    // Shared guard, not a `&mut`: these are diagnostic reads of a live task,
+    // so they go through the racy accessors rather than a witness.
+    let ctx_rsp = slopos_ostd::task::accessors::task_context_rsp(task.as_ptr()).unwrap_or(0);
+    let ctx_rip = slopos_ostd::task::accessors::task_context_rip(task.as_ptr()).unwrap_or(0);
     if ctx_rsp == 0 && ctx_rip == 0 {
         klog_info!("CONTEXT_TEST: WARNING - Context RSP and RIP both zero");
     }
@@ -259,7 +261,7 @@ pub fn test_task_has_switch_ctx() -> TestResult {
     assert_test!(task_id != INVALID_TASK_ID);
 
     let task = assert_some!(task_find_by_id(task_id));
-    let rflags = task.switch_ctx.rflags;
+    let rflags = slopos_ostd::task::accessors::task_switch_ctx_rflags(task.as_ptr()).unwrap_or(0);
     assert_eq_test!(rflags, 0x202, "switch_ctx rflags not initialized");
 
     task_terminate(task_id);
@@ -284,7 +286,7 @@ fn check_u64_fields(labels: &[&'static str], expected: &[u64], actual: &[u64]) -
 
 pub fn test_save_task_context_from_interrupt_frame_marks_started() -> TestResult {
     let mut task: KBox<Task> = KBox::try_init(Task::init_invalid()).expect("alloc");
-    task.context = TaskContext::zero();
+    *task.context.get_mut() = TaskContext::zero();
     task.user_started = 0;
     task.context_from_user = 0;
 
@@ -350,51 +352,51 @@ pub fn test_save_task_context_from_interrupt_frame_marks_started() -> TestResult
     let mut expected: KBox<[u64; 25]> = KBox::zeroed().expect("alloc");
     let mut actual: KBox<[u64; 25]> = KBox::zeroed().expect("alloc");
     expected[0] = 0xA1;
-    actual[0] = task.context.rax;
+    actual[0] = task.context.get_mut().rax;
     expected[1] = 0xB1;
-    actual[1] = task.context.rbx;
+    actual[1] = task.context.get_mut().rbx;
     expected[2] = 0xC1;
-    actual[2] = task.context.rcx;
+    actual[2] = task.context.get_mut().rcx;
     expected[3] = 0xD2;
-    actual[3] = task.context.rdx;
+    actual[3] = task.context.get_mut().rdx;
     expected[4] = 0x51;
-    actual[4] = task.context.rsi;
+    actual[4] = task.context.get_mut().rsi;
     expected[5] = 0xD1;
-    actual[5] = task.context.rdi;
+    actual[5] = task.context.get_mut().rdi;
     expected[6] = 0x8;
-    actual[6] = task.context.r8;
+    actual[6] = task.context.get_mut().r8;
     expected[7] = 0x9;
-    actual[7] = task.context.r9;
+    actual[7] = task.context.get_mut().r9;
     expected[8] = 0x10;
-    actual[8] = task.context.r10;
+    actual[8] = task.context.get_mut().r10;
     expected[9] = 0x11;
-    actual[9] = task.context.r11;
+    actual[9] = task.context.get_mut().r11;
     expected[10] = 0x12;
-    actual[10] = task.context.r12;
+    actual[10] = task.context.get_mut().r12;
     expected[11] = 0x13;
-    actual[11] = task.context.r13;
+    actual[11] = task.context.get_mut().r13;
     expected[12] = 0x14;
-    actual[12] = task.context.r14;
+    actual[12] = task.context.get_mut().r14;
     expected[13] = 0x15;
-    actual[13] = task.context.r15;
+    actual[13] = task.context.get_mut().r15;
     expected[14] = 0x4000;
-    actual[14] = task.context.rip;
+    actual[14] = task.context.get_mut().rip;
     expected[15] = 0x8000;
-    actual[15] = task.context.rsp;
+    actual[15] = task.context.get_mut().rsp;
     expected[16] = 0x202;
-    actual[16] = task.context.rflags;
+    actual[16] = task.context.get_mut().rflags;
     expected[17] = user_code;
-    actual[17] = task.context.cs;
+    actual[17] = task.context.get_mut().cs;
     expected[18] = user_data;
-    actual[18] = task.context.ss;
+    actual[18] = task.context.get_mut().ss;
     expected[19] = user_data;
-    actual[19] = task.context.ds;
+    actual[19] = task.context.get_mut().ds;
     expected[20] = user_data;
-    actual[20] = task.context.es;
+    actual[20] = task.context.get_mut().es;
     expected[21] = 0;
-    actual[21] = task.context.fs;
+    actual[21] = task.context.get_mut().fs;
     expected[22] = 0;
-    actual[22] = task.context.gs;
+    actual[22] = task.context.get_mut().gs;
     expected[23] = 1;
     actual[23] = task.context_from_user as u64;
     expected[24] = 1;
@@ -408,7 +410,7 @@ pub fn test_save_task_context_from_interrupt_frame_marks_started() -> TestResult
 
 pub fn test_save_task_context_from_interrupt_frame_keeps_user_started() -> TestResult {
     let mut task: KBox<Task> = KBox::try_init(Task::init_invalid()).expect("alloc");
-    task.context = TaskContext::zero();
+    *task.context.get_mut() = TaskContext::zero();
     task.user_started = 0;
     task.context_from_user = 0;
 

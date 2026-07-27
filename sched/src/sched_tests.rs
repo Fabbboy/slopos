@@ -3354,8 +3354,8 @@ pub fn test_privilege_separation_invariants() -> TestResult {
         klog_info!("SCHED_TEST: user task missing kernel RSP0 stack");
         return TestResult::Fail;
     }
-    let cs = task_ref.context.cs;
-    let ss = task_ref.context.ss;
+    let cs = slopos_ostd::task::accessors::task_context_cs(&*task_ref).unwrap_or(0);
+    let ss = slopos_ostd::task::accessors::task_context_ss(&*task_ref).unwrap_or(0);
     if cs != SegmentSelector::USER_CODE.bits() as u64
         || ss != SegmentSelector::USER_DATA.bits() as u64
     {
