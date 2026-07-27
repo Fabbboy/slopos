@@ -29,6 +29,7 @@ use crate::sync::AtomicCell;
 use crate::sync::intrusive::Link;
 use crate::sync::intrusive_dlist::{DLink, IntrusiveDList};
 use crate::task::abi::TaskAbi;
+use crate::task::cell::{TaskExclusive, TaskOwnCell};
 use crate::task::exit_info::ExitInfo;
 use crate::task::fpu::{FPU_STATE_SIZE, FpuState};
 use crate::task::job_control::ProcessGroup;
@@ -119,6 +120,9 @@ pub type SwitchContext = crate::task::TaskContext;
 // =============================================================================
 // fpu_reset_in_place — initialise an FpuState directly at `ptr`
 // =============================================================================
+
+/// Capacity of a task's working-directory buffer, NUL terminator included.
+pub const CWD_MAX: usize = 256;
 
 /// x87 FPU Control Word offset within both FXSAVE and XSAVE legacy region.
 const LEGACY_FCW_OFFSET: usize = 0;
@@ -402,8 +406,12 @@ pub struct TaskInner<K, U> {
     /// accessors happened to hide behind a `*mut` reborrow.
     pub controlling_tty: AtomicU16,
     /// Current working directory path (null-terminated, max 256 bytes).
-    pub cwd: [u8; 256],
-    pub cwd_len: u16,
+    /// Only the owning task reads or writes it (chdir/getcwd), so the cell's
+    /// witness is always a `CurrentTask`.
+    pub cwd: TaskOwnCell<[u8; CWD_MAX]>,
+    /// Length of `cwd` up to but not including the NUL. Atomic so it can be
+    /// published after the bytes.
+    pub cwd_len: AtomicU16,
     /// User-space address to clear (and futex-wake) on thread exit.
     pub clear_child_tid: u64,
     pub time_slice: u64,
@@ -543,6 +551,45 @@ impl<K, U> Drop for TaskInner<K, U> {
 pub const TTY_INDEX_NONE: u16 = u16::MAX;
 
 impl<K, U> TaskInner<K, U> {
+    /// Replace the working directory. The witness is what proves no other CPU
+    /// is reading the bytes while they are half-written; the length is
+    /// published after them.
+    ///
+    /// Returns false if `path` does not fit with its NUL terminator.
+    #[inline]
+    pub fn set_cwd(&self, witness: &impl TaskExclusive<K, U>, path: &[u8]) -> bool {
+        debug_assert!(
+            core::ptr::eq(witness.witnessed(), self),
+            "witness names a different task"
+        );
+        if path.len() + 1 > CWD_MAX {
+            return false;
+        }
+        let cwd = self.cwd.get_ptr(witness).cast::<u8>();
+        // SAFETY: the witness proves exclusive access to this task's `cwd`, and
+        // the bounds check above keeps the write inside the array.
+        let dst = unsafe { core::slice::from_raw_parts_mut(cwd, CWD_MAX) };
+        dst[..path.len()].copy_from_slice(path);
+        dst[path.len()] = 0;
+        self.cwd_len.store(path.len() as u16, Ordering::Release);
+        true
+    }
+
+    /// Call `f` with the working directory including its NUL terminator.
+    #[inline]
+    pub fn with_cwd<R>(&self, witness: &impl TaskExclusive<K, U>, f: impl FnOnce(&[u8]) -> R) -> R {
+        debug_assert!(
+            core::ptr::eq(witness.witnessed(), self),
+            "witness names a different task"
+        );
+        let len = self.cwd_len.load(Ordering::Acquire) as usize;
+        let cwd = self.cwd.get_ptr(witness).cast::<u8>();
+        // SAFETY: the witness proves exclusive access; `len` was published
+        // after the bytes it describes, and `set_cwd` bounds it by the array.
+        let bytes = unsafe { core::slice::from_raw_parts(cwd, (len + 1).min(CWD_MAX)) };
+        f(bytes)
+    }
+
     /// Read the blocked-signal mask. `&self` because every signal sender reads
     /// it from its own CPU.
     #[inline]
@@ -697,12 +744,12 @@ impl<K, U> TaskInner<K, U> {
             pgid: INVALID_TASK_ID,
             sid: INVALID_TASK_ID,
             controlling_tty: AtomicU16::new(TTY_INDEX_NONE),
-            cwd: {
-                let mut c = [0u8; 256];
+            cwd: TaskOwnCell::new({
+                let mut c = [0u8; CWD_MAX];
                 c[0] = b'/';
                 c
-            },
-            cwd_len: 1,
+            }),
+            cwd_len: AtomicU16::new(1),
             clear_child_tid: 0,
             time_slice: 0,
             time_slice_remaining: 0,
@@ -777,7 +824,9 @@ impl<K, U> TaskInner<K, U> {
                 // terminal".
                 addr_of_mut!((*slot).controlling_tty).write(AtomicU16::new(TTY_INDEX_NONE));
 
-                addr_of_mut!((*slot).cwd_len).write(1);
+                addr_of_mut!((*slot).cwd_len).write(AtomicU16::new(1));
+                // `TaskOwnCell` is `repr(transparent)`, so the cell's address
+                // is the array's.
                 (addr_of_mut!((*slot).cwd) as *mut u8).write(b'/');
 
                 fpu_reset_in_place(addr_of_mut!((*slot).fpu_state));
