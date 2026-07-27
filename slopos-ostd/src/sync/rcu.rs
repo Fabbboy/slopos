@@ -69,13 +69,45 @@ pub fn rcu_read_lock() -> RcuReadGuard {
 
 /// Record a quiescent state on the current CPU.
 ///
-/// Safe to call from any context including interrupt handlers.
+/// Call this only from a site that is a quiescent state *by construction* — a
+/// context switch or the idle loop. A switch qualifies because a read-side
+/// section holds a [`PreemptGuard`], so a CPU cannot switch away from inside
+/// one; reaching a switch therefore proves the section has ended.
+///
+/// **Not safe from an interrupt handler.** A section disables preemption but
+/// **not** interrupts, so an ISR can land in the middle of one; reporting a
+/// quiescent state from there tells [`synchronize_rcu`] a reader has finished
+/// when it has not, and the object it is reading can then be freed underneath
+/// it. Interrupt context wants [`rcu_note_qs_from_interrupt`].
 #[inline]
 pub fn rcu_note_qs() {
     let cpu = get_current_cpu();
     if cpu < MAX_CPUS {
         RCU_QS_CTR[cpu].0.fetch_add(1, Ordering::Release);
     }
+}
+
+/// Record a quiescent state from an interrupt handler, if this CPU is in one.
+///
+/// Reports only when the preemption count is zero, which is exactly the
+/// condition "this interrupt did not land inside an RCU read-side critical
+/// section". Returns whether it reported.
+///
+/// Declining is always safe: it delays a grace period, never shortens one. The
+/// switch and idle sites remain unconditional quiescent states, so liveness
+/// does not depend on the tick — and a CPU that is preempt-disabled for some
+/// unrelated reason (a spinlock, say) simply reports at its next switch.
+///
+/// This is the distinction Linux draws between a context switch, which is a
+/// quiescent state outright, and a clock interrupt, which is one only if it did
+/// not interrupt a reader.
+#[inline]
+pub fn rcu_note_qs_from_interrupt() -> bool {
+    if PreemptGuard::is_active() {
+        return false;
+    }
+    rcu_note_qs();
+    true
 }
 
 const RCU_IPI_THRESHOLD: u32 = 1_000;
