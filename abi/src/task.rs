@@ -277,6 +277,28 @@ pub enum TaskExitReason {
     Kernel = 3,
 }
 
+impl TaskExitReason {
+    /// Widen to the storage type of the `AtomicU16` this lives in on
+    /// `TaskInner`. Mirrors `SchedPlacement::as_u8`/`from_u8`.
+    #[inline]
+    pub const fn as_u16(self) -> u16 {
+        self as u16
+    }
+
+    /// Narrow back, saturating an unrecognised encoding to `None`. Total
+    /// rather than fallible: the only writer is the kernel itself, and a
+    /// diagnostic field is not worth an `Option` at every read site.
+    #[inline]
+    pub const fn from_u16(raw: u16) -> Self {
+        match raw {
+            1 => Self::Normal,
+            2 => Self::UserFault,
+            3 => Self::Kernel,
+            _ => Self::None,
+        }
+    }
+}
+
 /// Specific fault that caused task termination.
 #[repr(u16)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
@@ -287,6 +309,26 @@ pub enum TaskFaultReason {
     UserGp = 2,
     UserUd = 3,
     UserDeviceNa = 4,
+}
+
+impl TaskFaultReason {
+    /// See [`TaskExitReason::as_u16`].
+    #[inline]
+    pub const fn as_u16(self) -> u16 {
+        self as u16
+    }
+
+    /// See [`TaskExitReason::from_u16`].
+    #[inline]
+    pub const fn from_u16(raw: u16) -> Self {
+        match raw {
+            1 => Self::UserPage,
+            2 => Self::UserGp,
+            3 => Self::UserUd,
+            4 => Self::UserDeviceNa,
+            _ => Self::None,
+        }
+    }
 }
 
 // --- TaskExitRecord ---
