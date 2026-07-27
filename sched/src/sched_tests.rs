@@ -23,12 +23,14 @@ use super::scheduler::{
 };
 use super::task::{
     INVALID_PROCESS_ID, INVALID_TASK_ID, IdtEntry, TASK_FLAG_KERNEL_MODE, TASK_FLAG_USER_MODE,
-    Task, TaskPriority, TaskStatus, task_create, task_exit_info_is_set,
-    task_find_by_id_raw_for_test as task_find_by_id, task_get_info, task_handle, task_id_of,
-    task_is_blocked, task_is_terminated, task_kernel_stack_top, task_last_cpu,
-    task_live_cap_rejects_for_test, task_priority, task_remote_inbox_is_linked,
+    Task, TaskPriority, TaskStatus, task_cpu_affinity, task_create, task_entry_point,
+    task_exit_info_is_set, task_find_by_id_raw_for_test as task_find_by_id, task_flags,
+    task_fs_base, task_get_info, task_handle, task_id_of, task_is_blocked, task_is_ready,
+    task_is_terminated, task_kernel_stack_top, task_last_cpu, task_live_cap_rejects_for_test,
+    task_parent_task_id, task_pgid, task_priority, task_process_id, task_remote_inbox_is_linked,
     task_resolve_handle_raw_for_test as task_resolve_handle, task_sched_placement_load,
-    task_set_state, task_set_state_with_reason, task_status, task_terminate, task_waiter_count,
+    task_set_state, task_set_state_with_reason, task_sid, task_status, task_terminate, task_tgid,
+    task_time_slice, task_time_slice_remaining, task_waiter_count,
 };
 use super::test_fixture::KernelTestScope;
 use slopos_abi::task::BlockReason;
@@ -363,6 +365,107 @@ pub fn test_dispatch_publishes_current_priority() -> TestResult {
 
 slopos_testing::stest!(
     name = test_dispatch_publishes_current_priority,
+    suite = sched_core
+);
+
+/// Every generated scalar accessor reads the field its table row names.
+///
+/// The accessor layer is generated from tables of `name -> type = field`, so
+/// its one realistic failure mode is a row naming the wrong field — which
+/// compiles cleanly whenever the types match, and then silently reports one
+/// task property as another. Distinct sentinels make that a test failure
+/// instead of a mystery.
+pub fn test_scalar_accessor_field_identity() -> TestResult {
+    let arc = match KArc::try_init(Task::init_invalid()) {
+        Ok(arc) => arc,
+        Err(_) => return TestResult::Fail,
+    };
+    let raw = KArc::as_ptr(&arc) as *mut Task;
+
+    {
+        let Some(task) = super::task::task_borrow_mut(raw) else {
+            return TestResult::Fail;
+        };
+        task.task_id = 0x1111;
+        task.process_id = 0x2222;
+        task.flags = 0x3333;
+        task.entry_point = 0x4444;
+        task.cpu_affinity = 0x5555;
+        task.pgid = 0x6666;
+        task.time_slice = 0x7777;
+        task.time_slice_remaining = 0x8888;
+        task.sid = 0x9999;
+        task.kernel_stack_top = 0xAAAA;
+        task.fs_base = 0xBBBB;
+        task.tgid = 0xCCCC;
+        task.parent_task_id = 0xDDDD;
+        task.priority = TaskPriority::Low;
+    }
+
+    let checks: [(&str, u64, u64); 13] = [
+        ("task_id", task_id_of(raw).unwrap_or(0) as u64, 0x1111),
+        (
+            "process_id",
+            task_process_id(raw).unwrap_or(0) as u64,
+            0x2222,
+        ),
+        ("flags", task_flags(raw).unwrap_or(0) as u64, 0x3333),
+        ("entry_point", task_entry_point(raw).unwrap_or(0), 0x4444),
+        (
+            "cpu_affinity",
+            task_cpu_affinity(raw).unwrap_or(0) as u64,
+            0x5555,
+        ),
+        ("pgid", task_pgid(raw).unwrap_or(0) as u64, 0x6666),
+        ("time_slice", task_time_slice(raw).unwrap_or(0), 0x7777),
+        (
+            "time_slice_remaining",
+            task_time_slice_remaining(raw).unwrap_or(0),
+            0x8888,
+        ),
+        ("sid", task_sid(raw).unwrap_or(0) as u64, 0x9999),
+        (
+            "kernel_stack_top",
+            task_kernel_stack_top(raw).unwrap_or(0),
+            0xAAAA,
+        ),
+        ("fs_base", task_fs_base(raw).unwrap_or(0), 0xBBBB),
+        ("tgid", task_tgid(raw).unwrap_or(0) as u64, 0xCCCC),
+        (
+            "parent_task_id",
+            task_parent_task_id(raw).unwrap_or(0) as u64,
+            0xDDDD,
+        ),
+    ];
+    for (name, got, want) in checks {
+        if got != want {
+            klog_info!(
+                "SCHED_TEST: accessor for {} read 0x{:x}, expected 0x{:x}",
+                name,
+                got,
+                want
+            );
+            return TestResult::Fail;
+        }
+    }
+    if task_priority(raw) != Some(TaskPriority::Low) {
+        klog_info!("SCHED_TEST: accessor for priority read the wrong field");
+        return TestResult::Fail;
+    }
+
+    // A null pointer reports absence rather than reading through it.
+    let null_task: *const Task = ptr::null();
+    if task_id_of(null_task).is_some() || task_is_ready(null_task) {
+        klog_info!("SCHED_TEST: accessor did not null-check");
+        return TestResult::Fail;
+    }
+
+    drop(arc);
+    TestResult::Pass
+}
+
+slopos_testing::stest!(
+    name = test_scalar_accessor_field_identity,
     suite = sched_core
 );
 

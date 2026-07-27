@@ -61,45 +61,38 @@ pub fn signal_pending_event(task_id: u32) -> KernelEvent {
 // ===========================================================================
 // Generated accessors.
 //
-// Most pointer accessors share one of a handful of byte-identical shapes:
-// null-check then a single scalar field read/write, or null-check then a
-// single `&self` method call. They are generated from the tables that follow
-// so the unsafe deref pattern is written — and audited — exactly once per
-// shape rather than once per field. Accessors with non-trivial bodies
-// (atomics with explicit ordering, intrusive-link ops, register marshalling,
-// reborrows, signal logic) stay hand-written further down this file.
+// Every one of these is now a thin shim: null-check via `task_borrow` /
+// `task_borrow_mut`, then a plain field access or a `&self` method call on the
+// resulting reference. The `unsafe` deref that used to be inlined into each
+// shape lives in exactly those two functions, so the whole layer carries two
+// audited derefs rather than one per accessor.
+//
+// The shims exist only to keep the raw-pointer call sites compiling while they
+// migrate to holding a `&Task` directly; each disappears with its last caller.
 // ===========================================================================
 
-/// Generate `Option<T>` getters that null-check then read one naturally
-/// aligned scalar field. `None` on a null pointer.
+/// Generate `Option<T>` getters that null-check then read one field.
+/// `None` on a null pointer.
 macro_rules! task_scalar_getters {
     ($( $(#[$meta:meta])* $name:ident -> $ty:ty = $field:ident ),+ $(,)?) => {$(
         $(#[$meta])*
         #[inline]
         pub fn $name<K, U>(task: *const TaskInner<K, U>) -> Option<$ty> {
-            if task.is_null() {
-                return None;
-            }
-            // SAFETY: caller pre-validated the pointer; the field is a
-            // naturally-aligned scalar, so the read is sound and tear-free.
-            Some(unsafe { (*task).$field })
+            Some(task_borrow(task)?.$field)
         }
     )+};
 }
 
-/// Generate setters that null-check then write one naturally aligned scalar
-/// field. No-op on a null pointer.
+/// Generate setters that null-check then write one field. No-op on a null
+/// pointer.
 macro_rules! task_scalar_setters {
     ($( $(#[$meta:meta])* $name:ident = $field:ident : $ty:ty ),+ $(,)?) => {$(
         $(#[$meta])*
         #[inline]
         pub fn $name<K, U>(task: *mut TaskInner<K, U>, value: $ty) {
-            if task.is_null() {
-                return;
+            if let Some(task) = task_borrow_mut(task) {
+                task.$field = value;
             }
-            // SAFETY: caller pre-validated the pointer; the field is a
-            // naturally-aligned scalar single-writer store.
-            unsafe { (*task).$field = value };
         }
     )+};
 }
@@ -111,32 +104,19 @@ macro_rules! task_method_getters {
         $(#[$meta])*
         #[inline]
         pub fn $name<K, U>(task: *const TaskInner<K, U>) -> Option<$ty> {
-            if task.is_null() {
-                return None;
-            }
-            // SAFETY: caller pre-validated the pointer; the method takes
-            // `&self` and performs any atomics internally.
-            Some(unsafe { (*task).$method() })
+            Some(task_borrow(task)?.$method())
         }
     )+};
 }
 
 /// Generate `Option<u64>` getters that read a `TaskContext` register field
-/// with `read_unaligned` (the saved context is not guaranteed aligned).
+/// with `read_unaligned` (the saved context is `repr(C, packed)`).
 macro_rules! task_context_getters {
     ($( $(#[$meta:meta])* $name:ident = $field:ident ),+ $(,)?) => {$(
         $(#[$meta])*
         #[inline]
         pub fn $name<K, U>(task: *const TaskInner<K, U>) -> Option<u64> {
-            if task.is_null() {
-                return None;
-            }
-            // SAFETY: caller pre-validated the pointer; addr_of! yields a
-            // valid pointer into the in-Task context and read_unaligned is
-            // sound regardless of that field's alignment.
-            Some(unsafe {
-                core::ptr::read_unaligned(core::ptr::addr_of!((*task).context.$field))
-            })
+            Some(task_borrow(task)?.context.$field)
         }
     )+};
 }
@@ -148,12 +128,7 @@ macro_rules! task_state_predicates {
         $(#[$meta])*
         #[inline]
         pub fn $name<K, U>(task: *const TaskInner<K, U>) -> bool {
-            if task.is_null() {
-                return false;
-            }
-            // SAFETY: caller pre-validated the pointer; the predicate takes
-            // `&self` and reads the status atomically.
-            unsafe { (*task).$method() }
+            task_borrow(task).is_some_and(|task| task.$method())
         }
     )+};
 }
