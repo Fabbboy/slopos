@@ -916,37 +916,78 @@ fn schedule_task_from_placement(task: *mut Task, from: SchedPlacement, new_task:
     }
 }
 
+/// A publication reservation: the placement to publish `from`, plus the
+/// placement to restore if the publication fails.
+struct Reservation {
+    from: SchedPlacement,
+    /// `Some` only when this reservation moved the task out of `Nascent` and
+    /// therefore owes it a rollback.
+    restore_nascent: bool,
+}
+
 /// Reserve scheduler ownership for an explicit publication.
 ///
 /// A never-published task must leave `Nascent` through a CAS before anything
 /// downstream sees it, so the queue machinery never has to reason about the
-/// state at all. Returns the `from` placement to publish with, or `None` if the
-/// task is nascent and someone else won the promotion.
+/// state at all. Returns `None` if the task is nascent and someone else won the
+/// promotion — that winner owns the publication.
+///
+/// A reservation that took a task out of `Nascent` **must** be released by
+/// [`release_publication`] if the publication does not complete. Leaving a task
+/// parked in `Waking` after a failed publish is not merely a leak: `Waking` is a
+/// state `wake_blocked_task` publishes from, so it would hand any later signal
+/// exactly the half-built task that `Nascent` exists to protect.
 #[inline]
-fn reserve_publication(task: *mut Task) -> Option<SchedPlacement> {
+fn reserve_publication(task: *mut Task) -> Option<Reservation> {
     match task_sched_placement_load(task) {
-        SchedPlacement::Waking => Some(SchedPlacement::Waking),
+        SchedPlacement::Waking => Some(Reservation {
+            from: SchedPlacement::Waking,
+            restore_nascent: false,
+        }),
         SchedPlacement::Nascent => {
             if task_sched_placement_compare_exchange(
                 task,
                 SchedPlacement::Nascent,
                 SchedPlacement::Waking,
             ) {
-                Some(SchedPlacement::Waking)
+                Some(Reservation {
+                    from: SchedPlacement::Waking,
+                    restore_nascent: true,
+                })
             } else {
                 // Lost the promotion: whoever won it owns the publication.
                 None
             }
         }
-        _ => Some(SchedPlacement::None),
+        _ => Some(Reservation {
+            from: SchedPlacement::None,
+            restore_nascent: false,
+        }),
+    }
+}
+
+/// Undo a reservation whose publication failed, so "never published" stays
+/// spelled `Nascent`.
+#[inline]
+fn release_publication(task: *mut Task, reservation: &Reservation) {
+    if reservation.restore_nascent {
+        let _ = task_sched_placement_compare_exchange(
+            task,
+            SchedPlacement::Waking,
+            SchedPlacement::Nascent,
+        );
     }
 }
 
 pub fn schedule_task(task: *mut Task) -> c_int {
-    let Some(from) = reserve_publication(task) else {
+    let Some(reservation) = reserve_publication(task) else {
         return 0;
     };
-    schedule_task_from_placement(task, from, false)
+    let rc = schedule_task_from_placement(task, reservation.from, false);
+    if rc != 0 {
+        release_publication(task, &reservation);
+    }
+    rc
 }
 
 /// Put a freshly created task into the placement a *published, then blocked*
@@ -971,10 +1012,14 @@ pub fn clear_nascent_for_test(task: *mut Task) -> bool {
 /// Regular wakeups from sleep/block should use [`schedule_task()`] instead,
 /// which preserves cache affinity by preferring the last CPU.
 pub fn schedule_new_task(task: *mut Task) -> c_int {
-    let Some(from) = reserve_publication(task) else {
+    let Some(reservation) = reserve_publication(task) else {
         return 0;
     };
-    schedule_task_from_placement(task, from, true)
+    let rc = schedule_task_from_placement(task, reservation.from, true);
+    if rc != 0 {
+        release_publication(task, &reservation);
+    }
+    rc
 }
 
 /// Publish a fully-initialized new task as runnable without ever exposing

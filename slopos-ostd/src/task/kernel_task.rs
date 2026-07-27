@@ -222,8 +222,19 @@ impl SignalActionCell {
         self.handler.load(Ordering::Acquire)
     }
 
+    /// Read the whole disposition.
+    ///
+    /// Not atomic as a group, and named for the only caller that may rely on
+    /// it: the owning task, which is the sole writer and so cannot observe a
+    /// half-written entry. A remote CPU must use [`handler`](Self::handler) —
+    /// reading the group from another CPU can pair an old handler with a new
+    /// mask.
+    ///
+    /// `handler` is loaded **first**, and must stay first: its Acquire pairs
+    /// with the Release in [`store`](Self::store), which writes it last, so
+    /// observing a handler guarantees the three fields written before it.
     #[inline]
-    pub fn load(&self) -> SignalAction {
+    pub fn load_owner_only(&self) -> SignalAction {
         SignalAction {
             handler: self.handler.load(Ordering::Acquire),
             mask: self.mask.load(Ordering::Acquire),
@@ -292,9 +303,12 @@ pub enum SchedPlacement {
     /// task onto a runqueue. `task_create` publishes `pgid = task_id` before it
     /// registers, which is exactly how such a signal finds one.
     ///
-    /// Entered once, at allocation. Left once, either by `publish_new_task`
-    /// (→ `Waking`) or by teardown (→ `None`). Nothing else may leave it, and
-    /// it is never a durable owner: it holds no reference.
+    /// Entered once, at allocation. Left by exactly four paths: the two
+    /// publication entry points (`publish_new_task` and the `schedule_task` /
+    /// `schedule_new_task` reservation, both → `Waking`, both rolling back to
+    /// `Nascent` if the publication fails), the per-CPU idle installer (which
+    /// stores `OnCpu` directly — an idle task is dispatched, never published),
+    /// and teardown (→ `None`). Never a durable owner: it holds no reference.
     Nascent = 6,
 }
 

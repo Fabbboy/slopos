@@ -114,7 +114,7 @@ define_syscall!(syscall_rt_sigaction
 
     if old_act_ptr != 0 {
         let old_ptr = MmUserPtr::<UserSigaction>::try_new(old_act_ptr).map_err(|_| Errno::EFAULT)?;
-        let old_action = action_to_user(&task_ref.signal_actions[idx].load());
+        let old_action = action_to_user(&task_ref.signal_actions[idx].load_owner_only());
         copy_to_user(old_ptr, &old_action).map_err(|_| Errno::EFAULT)?;
     }
 
@@ -509,7 +509,7 @@ fn claim_pending_signal(task: *mut Task) -> SignalDisposition {
     let bit = sig_bit(signum);
     task_ref.signal_pending.fetch_and(!bit, Ordering::AcqRel);
 
-    let action = task_ref.signal_actions[(signum - 1) as usize].load();
+    let action = task_ref.signal_actions[(signum - 1) as usize].load_owner_only();
     if action.handler == SIG_IGN {
         return SignalDisposition::Done;
     }

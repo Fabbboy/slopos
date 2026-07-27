@@ -268,7 +268,16 @@ pub fn by_cr3<'scope>(_scope: &'scope KernelTestScope, cr3: u64) -> Option<TaskH
 }
 
 /// Return a handle for the currently-running BSP task.
+///
+/// Goes through the published id rather than the PCR pointer. The pointer may
+/// name a pre-heap bootstrap stub — which is what a CPU parks on before its
+/// first dispatch, and what `KernelTestScope` installs on every fixture entry —
+/// and a stub is eight bytes, so reading a `Task` out of one runs off the end
+/// of the object.
 pub fn current<'scope>(_scope: &'scope KernelTestScope) -> Option<TaskHandle<'scope>> {
-    let raw = slopos_arch::pcr::get_current_task_for(0) as *mut Task;
-    TaskHandle::from_raw(raw)
+    let id = slopos_arch::pcr::current_task_id_for(0);
+    if id == crate::task::INVALID_TASK_ID {
+        return None;
+    }
+    task_find_by_id(id).and_then(|task| TaskHandle::from_raw(task.as_ptr()))
 }

@@ -25,12 +25,12 @@ use super::task::{
     INVALID_PROCESS_ID, INVALID_TASK_ID, IdtEntry, TASK_FLAG_KERNEL_MODE, TASK_FLAG_USER_MODE,
     Task, TaskPriority, TaskStatus, task_cpu_affinity, task_create, task_entry_point,
     task_exit_info_is_set, task_find_by_id_raw_for_test as task_find_by_id, task_flags,
-    task_fs_base, task_get_info, task_handle, task_id_of, task_is_blocked, task_is_ready,
-    task_is_terminated, task_kernel_stack_top, task_last_cpu, task_live_cap_rejects_for_test,
-    task_parent_task_id, task_pgid, task_priority, task_process_id, task_remote_inbox_is_linked,
-    task_resolve_handle_raw_for_test as task_resolve_handle, task_sched_placement_load,
-    task_set_state, task_set_state_with_reason, task_sid, task_status, task_terminate, task_tgid,
-    task_time_slice, task_time_slice_remaining, task_waiter_count,
+    task_fs_base, task_get_info, task_handle, task_id_of, task_is_blocked, task_is_exited,
+    task_is_ready, task_is_terminated, task_kernel_stack_top, task_last_cpu,
+    task_live_cap_rejects_for_test, task_parent_task_id, task_pgid, task_priority, task_process_id,
+    task_remote_inbox_is_linked, task_resolve_handle_raw_for_test as task_resolve_handle,
+    task_sched_placement_load, task_set_state, task_set_state_with_reason, task_sid, task_status,
+    task_terminate, task_tgid, task_time_slice, task_time_slice_remaining, task_waiter_count,
 };
 use super::test_fixture::KernelTestScope;
 use slopos_abi::task::BlockReason;
@@ -466,6 +466,132 @@ pub fn test_scalar_accessor_field_identity() -> TestResult {
 
 slopos_testing::stest!(
     name = test_scalar_accessor_field_identity,
+    suite = sched_core
+);
+
+/// A publication that fails leaves the task nascent, not reserved.
+///
+/// `schedule_task`/`schedule_new_task` reserve scheduler ownership by CASing
+/// `Nascent -> Waking` *before* the publish path checks the task is Ready. A
+/// fresh task is Blocked, so that check fails — and without a rollback the task
+/// would sit in `Waking` forever. That is worse than a leak: `Waking` is a state
+/// `wake_blocked_task` publishes from, so the next signal would hand a runqueue
+/// exactly the half-built task `Nascent` exists to protect. Teardown would not
+/// recover it either, since the retire CAS only matches `Nascent`.
+pub fn test_failed_publication_restores_nascent() -> TestResult {
+    let _fixture = SchedFixture::new();
+
+    let task_id = task_create(
+        b"FailPublish\0".as_ptr() as *const c_char,
+        dummy_task_entry,
+        ptr::null_mut(),
+        TaskPriority::Normal.as_u8(),
+        TASK_FLAG_KERNEL_MODE,
+    );
+    if task_id == INVALID_TASK_ID {
+        return TestResult::Fail;
+    }
+    let task = task_find_by_id(task_id);
+    if task.is_null() {
+        return TestResult::Fail;
+    }
+
+    // Blocked + Nascent: the publish path must refuse this.
+    if scheduler::schedule_new_task(task) == 0 {
+        klog_info!("SCHED_TEST: schedule_new_task published a Blocked task");
+        let _ = task_terminate(task_id);
+        return TestResult::Fail;
+    }
+    if task_sched_placement_load(task) != SchedPlacement::Nascent {
+        klog_info!(
+            "SCHED_TEST: failed publication left placement {:?}, expected Nascent",
+            task_sched_placement_load(task)
+        );
+        let _ = task_terminate(task_id);
+        return TestResult::Fail;
+    }
+
+    // And the wake gate must still hold, which is the property the missing
+    // rollback actually destroyed.
+    if scheduler::unblock_task(task) != 0 {
+        klog_info!("SCHED_TEST: wake after a failed publication did not no-op");
+        let _ = task_terminate(task_id);
+        return TestResult::Fail;
+    }
+    if task_sched_placement_load(task) != SchedPlacement::Nascent
+        || task_status(task) != Some(TaskStatus::Blocked)
+    {
+        klog_info!("SCHED_TEST: wake published a task whose publication had failed");
+        let _ = task_terminate(task_id);
+        return TestResult::Fail;
+    }
+
+    // A real publication still works afterwards.
+    if publish_new_task(task) != 0 {
+        klog_info!("SCHED_TEST: publish_new_task failed after a rolled-back reservation");
+        let _ = task_terminate(task_id);
+        return TestResult::Fail;
+    }
+    if !is_published_placement(task_sched_placement_load(task)) {
+        klog_info!("SCHED_TEST: publication after rollback did not take ownership");
+        let _ = task_terminate(task_id);
+        return TestResult::Fail;
+    }
+
+    let _ = task_terminate(task_id);
+    TestResult::Pass
+}
+
+slopos_testing::stest!(
+    name = test_failed_publication_restores_nascent,
+    suite = sched_core
+);
+
+/// Terminating a never-published task retires its placement to `None`.
+///
+/// A corpse left in `Nascent` would be permanently unreapable — the reap gate
+/// and the destructor gate both key on task state, and nothing retires the
+/// placement afterwards — so the registry slot would leak until spawns started
+/// failing with `NoFreeSlot` thousands of tasks later.
+pub fn test_nascent_task_is_terminable_and_retires_to_none() -> TestResult {
+    let _fixture = SchedFixture::new();
+
+    let task_id = task_create(
+        b"NascentDie\0".as_ptr() as *const c_char,
+        dummy_task_entry,
+        ptr::null_mut(),
+        TaskPriority::Normal.as_u8(),
+        TASK_FLAG_KERNEL_MODE,
+    );
+    if task_id == INVALID_TASK_ID {
+        return TestResult::Fail;
+    }
+    let task = task_find_by_id(task_id);
+    if task.is_null() || task_sched_placement_load(task) != SchedPlacement::Nascent {
+        klog_info!("SCHED_TEST: fresh task not Nascent");
+        return TestResult::Fail;
+    }
+
+    if task_terminate(task_id) != 0 {
+        klog_info!("SCHED_TEST: a nascent task was not terminable");
+        return TestResult::Fail;
+    }
+    if task_sched_placement_load(task) != SchedPlacement::None {
+        klog_info!(
+            "SCHED_TEST: terminated nascent task left placement {:?}, expected None",
+            task_sched_placement_load(task)
+        );
+        return TestResult::Fail;
+    }
+    if !task_is_exited(task) {
+        klog_info!("SCHED_TEST: terminated nascent task is not exited");
+        return TestResult::Fail;
+    }
+    TestResult::Pass
+}
+
+slopos_testing::stest!(
+    name = test_nascent_task_is_terminable_and_retires_to_none,
     suite = sched_core
 );
 
@@ -2738,7 +2864,10 @@ pub fn test_remote_inbox_push_drain() -> TestResult {
     }
     // Stand in for a published-then-blocked task: inbox and wake paths refuse
     // a task that is still nascent.
-    let _ = scheduler::clear_nascent_for_test(task_ptr);
+    assert!(
+        scheduler::clear_nascent_for_test(task_ptr),
+        "fixture task was not nascent"
+    );
 
     if task_set_state(task_id, TaskStatus::Ready) != 0 {
         klog_info!("SCHED_TEST: Failed to set inbox test task READY");
@@ -2817,7 +2946,10 @@ pub fn test_remote_inbox_duplicate_push_is_single_membership() -> TestResult {
     }
     // Stand in for a published-then-blocked task: inbox and wake paths refuse
     // a task that is still nascent.
-    let _ = scheduler::clear_nascent_for_test(task_ptr);
+    assert!(
+        scheduler::clear_nascent_for_test(task_ptr),
+        "fixture task was not nascent"
+    );
 
     if task_set_state(task_id, TaskStatus::Ready) != 0 {
         klog_info!("SCHED_TEST: Failed to set duplicate inbox task READY");
@@ -2905,7 +3037,10 @@ pub fn test_remote_inbox_multiple_tasks() -> TestResult {
         task_get_info(task_ids[i], &mut task_ptrs[i]);
         // Stand in for a published-then-blocked task; the inbox refuses a
         // task that is still nascent.
-        let _ = scheduler::clear_nascent_for_test(task_ptrs[i]);
+        assert!(
+            scheduler::clear_nascent_for_test(task_ptrs[i]),
+            "fixture task was not nascent"
+        );
         if task_set_state(task_ids[i], TaskStatus::Ready) != 0 {
             klog_info!("SCHED_TEST: Failed to set inbox task {} READY", i);
             return TestResult::Fail;
@@ -2971,7 +3106,10 @@ pub fn test_timer_tick_drains_inbox() -> TestResult {
     }
     // Stand in for a published-then-blocked task: inbox and wake paths refuse
     // a task that is still nascent.
-    let _ = scheduler::clear_nascent_for_test(task_ptr);
+    assert!(
+        scheduler::clear_nascent_for_test(task_ptr),
+        "fixture task was not nascent"
+    );
 
     if task_set_state(task_id, TaskStatus::Ready) != 0 {
         klog_info!("SCHED_TEST: Failed to set timer-drain task READY");
@@ -3322,7 +3460,10 @@ pub fn test_sleep_wake_race_regression() -> TestResult {
         return TestResult::Fail;
     }
     // Stand in for a published-then-blocked task; wakes refuse a nascent one.
-    let _ = scheduler::clear_nascent_for_test(task_ptr);
+    assert!(
+        scheduler::clear_nascent_for_test(task_ptr),
+        "fixture task was not nascent"
+    );
 
     // Use a wake_tick far in the future so that real timer interrupts
     // (which call wake_due_sleepers with the current tick) never collect
@@ -3423,7 +3564,10 @@ pub fn test_sleep_entry_survives_unparked_wake() -> TestResult {
         return TestResult::Fail;
     }
     // Stand in for a published-then-blocked task; wakes refuse a nascent one.
-    let _ = scheduler::clear_nascent_for_test(task_ptr);
+    assert!(
+        scheduler::clear_nascent_for_test(task_ptr),
+        "fixture task was not nascent"
+    );
 
     // Park the task outside the ready queue so the scheduler cannot dispatch
     // (and exit) it mid-test. It ends up Blocked with a non-Sleep reason —
@@ -4201,7 +4345,10 @@ pub fn test_effective_load_accuracy() -> TestResult {
     }
     // Stand in for a published-then-blocked task; the enqueue path refuses a
     // task that is still nascent.
-    let _ = scheduler::clear_nascent_for_test(task_ptr);
+    assert!(
+        scheduler::clear_nascent_for_test(task_ptr),
+        "fixture task was not nascent"
+    );
     super::per_cpu::with_cpu_scheduler(cpu_id, |sched| {
         sched.enqueue_local(task_ptr);
     });

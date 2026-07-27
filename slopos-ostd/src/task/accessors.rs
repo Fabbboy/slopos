@@ -85,14 +85,26 @@ macro_rules! task_scalar_getters {
 
 /// Generate setters that null-check then write one field. No-op on a null
 /// pointer.
+///
+/// Writes through the raw pointer rather than through a `&mut TaskInner`,
+/// deliberately. A `&mut` to the whole task would retag the entire allocation
+/// and invalidate every outstanding reference to *any* other field — so a
+/// setter called while some caller holds an unrelated borrow would be aliasing
+/// UB, even though the two touch disjoint fields. A raw field write forms no
+/// reference and cannot invalidate anything. The getters are free to take a
+/// shared reference because shared borrows coexist.
 macro_rules! task_scalar_setters {
     ($( $(#[$meta:meta])* $name:ident = $field:ident : $ty:ty ),+ $(,)?) => {$(
         $(#[$meta])*
         #[inline]
         pub fn $name<K, U>(task: *mut TaskInner<K, U>, value: $ty) {
-            if let Some(task) = task_borrow_mut(task) {
-                task.$field = value;
+            if task.is_null() {
+                return;
             }
+            // SAFETY: non-null checked above; the caller holds a live task.
+            // `addr_of_mut!` keeps this a raw place write — no reference to the
+            // task is formed, so no outstanding borrow is invalidated.
+            unsafe { core::ptr::addr_of_mut!((*task).$field).write(value) };
         }
     )+};
 }

@@ -109,7 +109,7 @@ fn handle_erestartsys(task: *mut Task, ctx_ptr: *mut UserContext, sysno: u64) {
     } else {
         let signum = (deliverable.trailing_zeros() + 1) as u8;
         let idx = (signum as usize).wrapping_sub(1);
-        let action = task_ref.signal_actions[idx].load();
+        let action = task_ref.signal_actions[idx].load_owner_only();
         (action.handler, action.flags)
     };
 

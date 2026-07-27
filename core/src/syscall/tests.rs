@@ -4444,7 +4444,10 @@ pub fn test_wq_wrong_order_wakeup_lost() -> TestResult {
     let task_ptr = task_find_by_id(task_id);
     assert_not_null!(task_ptr);
     // Stand in for a published-then-blocked task; wakes refuse a nascent one.
-    let _ = slopos_sched::scheduler::clear_nascent_for_test(task_ptr);
+    assert!(
+        slopos_sched::scheduler::clear_nascent_for_test(task_ptr),
+        "fixture task was not nascent"
+    );
 
     // 1. Task starts Running (precondition for wait-queue's lock-held CAS).
     assert_eq_test!(task_set_state(task_id, TaskStatus::Ready), 0);

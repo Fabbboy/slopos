@@ -178,12 +178,25 @@ impl<K, U> CurrentTask<K, U> {
     /// rather than the pointer's address, because `set_current_task` is the one
     /// publisher of the pair and writes both in the same call — so an id that
     /// is not `INVALID_TASK_ID` guarantees the pointer names a real task.
+    ///
+    /// # Type parameters
+    ///
+    /// `K` and `U` must be the stack-handle types the running kernel
+    /// instantiated `TaskInner` with. The PCR slot is type-erased, so naming
+    /// different ones would reinterpret the task body. The kernel spells this
+    /// through its `Current` alias, which fixes both; there is exactly one
+    /// `TaskInner` monomorphisation reachable from the PCR, and the switch and
+    /// spawner surfaces already assume the same thing.
     #[inline]
     pub fn get() -> Option<Self> {
         let id = pcr::current_task_id();
         if id == INVALID_TASK_ID {
             return None;
         }
+        // A valid id and a bootstrap-stub pointer are contradictory: every site
+        // that parks a CPU on a stub publishes `INVALID_TASK_ID` with it, and
+        // `set_current_task` is the only publisher of the pair. So the id check
+        // above is also the stub filter.
         let ptr = NonNull::new(pcr::get_current_task().cast::<TaskInner<K, U>>())?;
         Some(Self {
             ptr,

@@ -260,9 +260,12 @@ pub struct ProcessorControlRegion {
     /// releases the outgoing dispatch reference and can run the allocator-heavy
     /// destructor — so the read could land in freed memory.
     ///
-    /// [`PRIORITY_NONE`] until this CPU dispatches for the first time, and
-    /// restored to it whenever the CPU parks on its idle task, so a CPU with
-    /// nothing to run always loses the comparison.
+    /// [`PRIORITY_NONE`] until this CPU dispatches for the first time. After
+    /// that it always names a real task: a CPU with nothing to run parks on its
+    /// idle task, which publishes `TaskPriority::Idle` rather than the
+    /// sentinel. Both lose to every other priority, which is what the
+    /// comparison needs — the sentinel is for "this CPU has never dispatched",
+    /// not for "this CPU is idle".
     pub current_task_priority: AtomicU8,
 }
 
@@ -1432,6 +1435,13 @@ pub fn set_current_task(task: *mut (), task_id: u32, priority: u8) {
     if !GS_BASE_SET.is_set() {
         return;
     }
+    // Retire the old id before the pointer moves. Readers discriminate on the
+    // id — `CurrentTask::get` treats `INVALID_TASK_ID` as "no task, and
+    // therefore possibly a bootstrap stub" — so publishing the pointer first
+    // would briefly pair a new pointer with the *previous* id. When the new
+    // pointer is a stub and the previous id was a real task, that window reads
+    // as "a live task lives at this stub address".
+    set_current_task_id(slopos_abi::task::INVALID_TASK_ID);
     // SAFETY: GS_BASE is installed (checked above); single gs-relative
     // store to this CPU's PCR field.
     unsafe {
