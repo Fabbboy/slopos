@@ -21,8 +21,7 @@ use core::ptr::NonNull;
 
 use slopos_ostd::KArc;
 use slopos_ostd::task::accessors::{
-    task_borrow, task_children_pop, task_children_push, task_children_remove,
-    task_set_parent_task_id,
+    task_borrow, task_children_pop, task_children_remove, task_set_parent_task_id,
 };
 use slopos_ostd::task::{task_placement_reclaim, task_placement_retain};
 
@@ -48,25 +47,21 @@ fn status_can_parent(status: TaskStatus) -> bool {
 /// check and the list push are one registry-lock critical section, so a push
 /// either lands before the parent's teardown drain (which then reaps/orphans the
 /// child) or observes the dying status and orphans here.
-pub fn link_child(parent: *mut Task, child: *mut Task) {
-    let Some(child_nn) = NonNull::new(child) else {
-        return;
-    };
+pub fn link_child(parent: &Task, child: NonNull<Task>) {
     with_task_manager(|_mgr| {
-        let Some(parent_ref) = task_borrow(parent as *const Task) else {
-            task_set_parent_task_id(child, INVALID_TASK_ID);
-            return;
-        };
-        if !status_can_parent(parent_ref.status()) {
-            task_set_parent_task_id(child, INVALID_TASK_ID);
+        // The parent arrives as a borrow now: it is only ever read here, and a
+        // raw parameter would have been a task handle with no owner for a
+        // status check and an id copy.
+        if !status_can_parent(parent.status()) {
+            task_set_parent_task_id(child.as_ptr(), INVALID_TASK_ID);
             return;
         }
-        task_set_parent_task_id(child, parent_ref.task_id);
+        task_set_parent_task_id(child.as_ptr(), parent.task_id);
         // Push first, park the owning reference only on success: retain pairs
         // one-to-one with membership. A fresh/forked child is unlinked, so the
         // push cannot fail in practice; if it did, no retain is leaked.
-        if task_children_push(parent as *const Task, child_nn).is_ok() {
-            task_placement_retain(child_nn);
+        if parent.children.push_back(child).is_ok() {
+            task_placement_retain(child);
         }
     });
 }
@@ -81,14 +76,6 @@ pub fn take_one_child(parent: *mut Task) -> Option<KArc<Task>> {
     Some(task_placement_reclaim(child_nn))
 }
 
-/// Remove `child` from its parent's children list and hand back the owning
-/// reference the list held, or `None` if the child is not currently linked (its
-/// parent is gone, or a concurrent drain already detached it).
-///
-/// The parent is resolved through the registry before taking the registry lock
-/// (a `TaskRef` pins it across the removal); the reclaim is gated on the list
-/// removal succeeding so a concurrent [`take_one_child`] drain cannot cause a
-/// double reclaim of the same parked reference.
 pub fn unlink_child(child: *mut Task) -> Option<KArc<Task>> {
     let child_nn = NonNull::new(child)?;
     let parent_id = task_borrow(child as *const Task)?.parent_task_id;

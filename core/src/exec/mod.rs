@@ -339,7 +339,15 @@ pub fn spawn_program_with_attrs(
                 // Publish the parent→child ownership edge (parent id +
                 // children-list membership) after the field borrows above have
                 // ended; the child was already registered by `task_create`.
-                link_child(parent_ptr, task_info);
+                // Both ends resolved to a borrow / non-null handle before the
+                // link: `link_child` now reads the parent rather than taking a
+                // pointer it has to re-borrow internally.
+                // `parent_ref` is the registry guard already in scope and
+                // derefs to `&Task`; `link_child` reads the parent, so no
+                // pointer needs laundering back into a borrow.
+                if let Some(child_nn) = core::ptr::NonNull::new(task_info) {
+                    link_child(&parent_ref, child_nn);
+                }
             }
         }
 

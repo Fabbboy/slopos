@@ -1127,8 +1127,8 @@ pub fn task_shutdown_all() -> c_int {
 /// gated on the parent being the running task — the fork/clone
 /// self-syscall contract. If it ever isn't current, the scheduler's own
 /// switch-out already holds a correct snapshot and we skip the flush.
-fn flush_live_fpu_for_clone(parent_task: *mut Task) {
-    if parent_task != scheduler::scheduler_get_current_task() {
+fn flush_live_fpu_for_clone(parent: &Task) {
+    if !core::ptr::eq(parent, scheduler::scheduler_get_current_task().cast_const()) {
         return;
     }
     // The check above established the parent is this CPU's current task, so the
@@ -1137,7 +1137,7 @@ fn flush_live_fpu_for_clone(parent_task: *mut Task) {
     let Some(current) = crate::task_struct::Current::get() else {
         return;
     };
-    if current.as_ptr() != parent_task {
+    if !core::ptr::eq(current.as_ptr().cast_const(), parent) {
         return;
     }
     // Not a switch-out: the parent keeps running and its state stays live in
@@ -1148,19 +1148,13 @@ fn flush_live_fpu_for_clone(parent_task: *mut Task) {
 }
 
 pub fn task_fork(
-    parent_task: *mut Task,
+    parent: &Task,
     parent_user_ctx: *const slopos_ostd::user::context::UserContext,
 ) -> u32 {
-    if parent_task.is_null() {
-        klog_info!("task_fork: null parent task");
-        return INVALID_TASK_ID;
-    }
-
-    flush_live_fpu_for_clone(parent_task);
-
-    let Some(parent) = task_borrow(parent_task) else {
-        return INVALID_TASK_ID;
-    };
+    // The parent is read-only throughout — it was a `*mut Task` only to be
+    // immediately `task_borrow`ed back into the borrow it now arrives as.
+    let parent_task = core::ptr::from_ref(parent).cast_mut();
+    flush_live_fpu_for_clone(parent);
 
     if parent.process_id == INVALID_PROCESS_ID {
         klog_info!("task_fork: parent has no process VM (kernel task?)");
@@ -1307,7 +1301,12 @@ pub fn task_fork(
     // parks one owning reference in the parent's children list. Done after
     // registration (so the child is a live registry entry) and after the `child`
     // / `parent` borrows above have ended.
-    super::link_child(parent_task, child_task_ptr);
+    if let (Some(parent_ref), Some(child_nn)) = (
+        task_borrow(parent_task),
+        core::ptr::NonNull::new(child_task_ptr),
+    ) {
+        super::link_child(parent_ref, child_nn);
+    }
 
     // Publish Ready only after all child-specific fields are fully initialized.
     // `publish_new_task` reserves scheduler placement before setting Ready, so
@@ -1322,7 +1321,7 @@ pub fn task_fork(
 }
 
 pub fn task_clone(
-    parent_task: *mut Task,
+    parent: &Task,
     parent_user_ctx: *const slopos_ostd::user::context::UserContext,
     flags: u64,
     child_stack: u64,
@@ -1332,15 +1331,10 @@ pub fn task_clone(
 ) -> Result<u32, u64> {
     use slopos_abi::syscall::*;
 
-    if parent_task.is_null() {
-        return Err(ERRNO_EINVAL);
-    }
-
-    flush_live_fpu_for_clone(parent_task);
-
-    let Some(parent) = task_borrow(parent_task) else {
-        return Err(ERRNO_EINVAL);
-    };
+    // Read-only parent, as in `task_fork`: it was a `*mut Task` only to be
+    // immediately `task_borrow`ed back into the borrow it now arrives as.
+    let parent_task = core::ptr::from_ref(parent).cast_mut();
+    flush_live_fpu_for_clone(parent);
 
     if parent.flags & TASK_FLAG_KERNEL_MODE != 0 || parent.process_id == INVALID_PROCESS_ID {
         return Err(ERRNO_EINVAL);
@@ -1573,7 +1567,12 @@ pub fn task_clone(
     // Publish the parent→child ownership edge (parent id + children-list
     // membership) after registration and after the `child` / `parent` borrows
     // above have ended.
-    super::link_child(parent_task, child_task_ptr);
+    if let (Some(parent_ref), Some(child_nn)) = (
+        task_borrow(parent_task),
+        core::ptr::NonNull::new(child_task_ptr),
+    ) {
+        super::link_child(parent_ref, child_nn);
+    }
 
     // Publish Ready only after all child-specific fields are fully initialized.
     // `publish_new_task` reserves scheduler placement before setting Ready, so

@@ -19,6 +19,9 @@ pub fn task_set_parent(task_id: u32, parent_task_id: u32) -> core::ffi::c_int {
     let Some(parent) = task_find_by_id(parent_task_id) else {
         return -1;
     };
-    super::link_child(parent.as_ptr(), child.as_ptr());
+    let Some(child_nn) = core::ptr::NonNull::new(child.as_ptr()) else {
+        return -1;
+    };
+    super::link_child(&parent, child_nn);
     0
 }

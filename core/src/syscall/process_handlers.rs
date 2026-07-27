@@ -673,7 +673,7 @@ define_syscall!(syscall_arch_prctl
 });
 
 define_syscall!(syscall_fork (ctx) -> Result<u64, Errno> {
-    let task = ctx.task_ptr();
+    let task = ctx.task().ok_or(Errno::ESRCH)?;
     let user_ctx_ptr = ctx.user_ctx_ptr() as *const UserContext;
     let child_id = task_fork(task, user_ctx_ptr);
     if child_id == slopos_abi::task::INVALID_TASK_ID {
@@ -687,8 +687,9 @@ define_syscall!(syscall_clone
     (ctx, flags: u64, child_stack: u64, parent_tidptr: u64, child_tidptr: u64, tls: u64)
     -> Result<u64, Errno>
 {
+    let parent = ctx.task().ok_or(Errno::ESRCH)?;
     match slopos_sched::task::task_clone(
-        ctx.task_ptr(),
+        parent,
         ctx.user_ctx_ptr() as *const UserContext,
         flags,
         child_stack,

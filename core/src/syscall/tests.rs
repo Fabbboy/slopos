@@ -368,7 +368,7 @@ pub fn test_process_group_session_syscalls_baseline() -> TestResult {
     let parent_guard = assert_some!(task_find_by_id(parent_id));
     let parent_ptr = parent_guard.as_ptr();
 
-    let child_id = task_fork(parent_ptr, core::ptr::null());
+    let child_id = task_fork(&parent_guard, core::ptr::null());
     assert_test!(child_id != INVALID_TASK_ID);
     task_set_state(child_id, TaskStatus::Blocked);
     let child_guard = assert_some!(task_find_by_id(child_id));
@@ -430,7 +430,7 @@ pub fn test_kill_process_group_semantics() -> TestResult {
     let leader_guard = assert_some!(task_find_by_id(leader_id), "leader lookup failed");
     let leader_ptr = leader_guard.as_ptr();
 
-    let member_id = task_fork(leader_ptr, core::ptr::null());
+    let member_id = task_fork(&leader_guard, core::ptr::null());
     assert_test!(member_id != INVALID_TASK_ID, "failed to fork member task");
     task_set_state(member_id, TaskStatus::Blocked);
     let member_guard = assert_some!(task_find_by_id(member_id), "member lookup failed");
@@ -542,7 +542,7 @@ pub fn test_process_group_object_fork_and_setsid_identity() -> TestResult {
         "leader session id == leader pid"
     );
 
-    let child_id = task_fork(parent_ptr, core::ptr::null());
+    let child_id = task_fork(&parent_guard, core::ptr::null());
     assert_test!(child_id != INVALID_TASK_ID);
     task_set_state(child_id, TaskStatus::Blocked);
     let child_guard = assert_some!(task_find_by_id(child_id));
@@ -644,9 +644,9 @@ pub fn test_tiocsctty_non_leader_rejected() -> TestResult {
     let parent_id = create_test_user_task();
     assert_test!(parent_id != INVALID_TASK_ID, "failed to create parent task");
     let parent_guard = assert_some!(task_find_by_id(parent_id), "parent lookup failed");
-    let parent_ptr = parent_guard.as_ptr();
+    let _parent_ptr = parent_guard.as_ptr();
 
-    let child_id = task_fork(parent_ptr, core::ptr::null());
+    let child_id = task_fork(&parent_guard, core::ptr::null());
     assert_test!(child_id != INVALID_TASK_ID, "failed to fork child");
     task_set_state(child_id, TaskStatus::Blocked);
 
@@ -728,7 +728,7 @@ pub fn test_setsid_child_preserves_parent_controlling_tty() -> TestResult {
     let _ = crate::syscall::dispatch::dispatch_handler(syscall_ioctl, parent_ptr, &mut ioctl_frame);
     assert_eq_test!(ioctl_frame.regs().rax, 0, "parent TIOCSCTTY should succeed");
 
-    let child_id = task_fork(parent_ptr, core::ptr::null());
+    let child_id = task_fork(&parent_guard, core::ptr::null());
     assert_test!(child_id != INVALID_TASK_ID, "failed to fork child");
     task_set_state(child_id, TaskStatus::Blocked);
 
@@ -782,7 +782,7 @@ pub fn test_hangup_clears_all_session_controlling_ttys() -> TestResult {
     let _ = crate::syscall::dispatch::dispatch_handler(syscall_ioctl, leader_ptr, &mut ioctl_frame);
     assert_eq_test!(ioctl_frame.regs().rax, 0, "leader TIOCSCTTY should succeed");
 
-    let child_id = task_fork(leader_ptr, core::ptr::null());
+    let child_id = task_fork(&leader_guard, core::ptr::null());
     assert_test!(child_id != INVALID_TASK_ID, "failed to fork child");
     task_set_state(child_id, TaskStatus::Blocked);
     let child_guard = assert_some!(task_find_by_id(child_id), "child lookup failed");
@@ -1034,18 +1034,6 @@ pub fn test_vm_mmap_munmap_stress_baseline() -> TestResult {
 // Fork Edge Case Tests
 // =============================================================================
 
-pub fn test_fork_null_parent() -> TestResult {
-    let _fixture = SyscallFixture::new();
-
-    use slopos_sched::task::task_fork;
-    let child_id = task_fork(ptr::null_mut(), core::ptr::null());
-    assert_test!(
-        child_id == INVALID_TASK_ID,
-        "fork with null parent should fail"
-    );
-    TestResult::Pass
-}
-
 pub fn test_fork_kernel_task() -> TestResult {
     let _fixture = SyscallFixture::new();
 
@@ -1056,7 +1044,10 @@ pub fn test_fork_kernel_task() -> TestResult {
     let kernel_task = kernel_task_guard.as_ptr();
 
     use slopos_sched::task::task_fork;
-    let child_id = task_fork(kernel_task, core::ptr::null());
+    let child_id = task_fork(
+        &*slopos_sched::task::task_borrow(kernel_task).expect("parent borrow"),
+        core::ptr::null(),
+    );
     assert_test!(
         child_id == INVALID_TASK_ID,
         "kernel tasks should not be forkable"
@@ -1081,7 +1072,7 @@ pub fn test_fork_terminated_parent() -> TestResult {
     if let Some(task_after) = task_find_by_id(task_id) {
         let state = task_status(task_after.as_ptr()).unwrap_or(TaskStatus::Terminated);
         if state == TaskStatus::Terminated {
-            let child_id = task_fork(task_after.as_ptr(), core::ptr::null());
+            let child_id = task_fork(&task_after, core::ptr::null());
             assert_test!(
                 child_id == INVALID_TASK_ID,
                 "fork terminated parent should fail"
@@ -1101,11 +1092,11 @@ pub fn test_fork_blocked_parent() -> TestResult {
     assert_test!(task_id != INVALID_TASK_ID);
 
     let task_guard = assert_some!(task_find_by_id(task_id));
-    let task_ptr = task_guard.as_ptr();
+    let _task_ptr = task_guard.as_ptr();
 
     task_set_state(task_id, TaskStatus::Blocked);
 
-    let child_id = task_fork(task_ptr, core::ptr::null());
+    let child_id = task_fork(&task_guard, core::ptr::null());
 
     task_terminate(task_id);
     if child_id != INVALID_TASK_ID {
@@ -1420,7 +1411,7 @@ pub fn test_clone_thread_tls_isolation() -> TestResult {
 
     let flags = CLONE_VM | CLONE_SIGHAND | CLONE_THREAD | CLONE_SETTLS;
     let child_id = match task_clone(
-        parent_ptr,
+        &parent_guard,
         core::ptr::null(),
         flags,
         0,
@@ -1475,7 +1466,7 @@ pub fn test_clone_then_fork_interaction() -> TestResult {
     let parent_ptr = parent_guard.as_ptr();
 
     let thread_flags = CLONE_VM | CLONE_SIGHAND | CLONE_THREAD;
-    let thread_id = match task_clone(parent_ptr, core::ptr::null(), thread_flags, 0, 0, 0, 0) {
+    let thread_id = match task_clone(&parent_guard, core::ptr::null(), thread_flags, 0, 0, 0, 0) {
         Ok(id) => {
             task_set_state(id, TaskStatus::Blocked);
             id
@@ -1486,7 +1477,7 @@ pub fn test_clone_then_fork_interaction() -> TestResult {
         }
     };
 
-    let fork_id = task_fork(parent_ptr, core::ptr::null());
+    let fork_id = task_fork(&parent_guard, core::ptr::null());
     assert_test!(fork_id != INVALID_TASK_ID, "fork after clone failed");
     task_set_state(fork_id, TaskStatus::Blocked);
 
@@ -2250,7 +2241,7 @@ pub fn test_sigchld_and_wait_interaction() -> TestResult {
 
     // Unblocked + SIG_DFL: the exit-path raise is dropped at the send
     // site — no stale pending bit, no spurious wake.
-    let child_id = task_fork(parent_ptr, core::ptr::null());
+    let child_id = task_fork(&parent_guard, core::ptr::null());
     assert_test!(child_id != INVALID_TASK_ID, "task_fork failed");
     task_set_state(child_id, TaskStatus::Blocked);
 
@@ -2269,7 +2260,7 @@ pub fn test_sigchld_and_wait_interaction() -> TestResult {
         t.set_signal_blocked(sig_bit(SIGCHLD));
     }
 
-    let child2_id = task_fork(parent_ptr, core::ptr::null());
+    let child2_id = task_fork(&parent_guard, core::ptr::null());
     assert_test!(child2_id != INVALID_TASK_ID, "second task_fork failed");
     task_set_state(child2_id, TaskStatus::Blocked);
 
@@ -2333,7 +2324,7 @@ pub fn test_arch_prctl_set_get_fs_roundtrip() -> TestResult {
     assert_eq_test!(got_fs, expected_fs, "ARCH_GET_FS returned wrong value");
 
     let child_no_settls = match task_clone(
-        task_ptr,
+        &task_guard,
         core::ptr::null(),
         CLONE_VM | CLONE_SIGHAND | CLONE_THREAD,
         0,
@@ -3214,7 +3205,7 @@ pub fn test_setsid_then_dev_tty_returns_enxio() -> TestResult {
     assert_eq_test!(frame.regs().rax, 0, "TIOCSCTTY should succeed");
 
     // Fork a child — it inherits the controlling terminal.
-    let child_id = task_fork(parent_ptr, core::ptr::null());
+    let child_id = task_fork(&parent_guard, core::ptr::null());
     assert_test!(child_id != INVALID_TASK_ID, "failed to fork child");
     task_set_state(child_id, TaskStatus::Blocked);
     let child_guard = assert_some!(task_find_by_id(child_id), "child lookup failed");
@@ -3273,7 +3264,7 @@ pub fn test_fork_child_inherits_dev_tty() -> TestResult {
     assert_eq_test!(frame.regs().rax, 0, "TIOCSCTTY should succeed for parent");
 
     // Fork child.
-    let child_id = task_fork(parent_ptr, core::ptr::null());
+    let child_id = task_fork(&parent_guard, core::ptr::null());
     assert_test!(child_id != INVALID_TASK_ID, "failed to fork child");
     task_set_state(child_id, TaskStatus::Blocked);
     let child_guard = assert_some!(task_find_by_id(child_id), "child lookup failed");
@@ -3833,7 +3824,6 @@ slopos_testing::stest!(
     name = test_net_scan_syscall_lookup_valid,
     suite = syscall_valid
 );
-slopos_testing::stest!(name = test_fork_null_parent, suite = syscall_valid);
 slopos_testing::stest!(name = test_fork_kernel_task, suite = syscall_valid);
 slopos_testing::stest!(name = test_fork_terminated_parent, suite = syscall_valid);
 slopos_testing::stest!(name = test_fork_blocked_parent, suite = syscall_valid);
@@ -5743,7 +5733,7 @@ pub fn test_fork_child_inherits_and_then_diverges_from_parent_cwd() -> TestResul
     let parent_id = create_test_user_task();
     assert_test!(parent_id != INVALID_TASK_ID, "failed to create parent task");
     let parent_guard = assert_some!(task_find_by_id(parent_id), "parent lookup failed");
-    let parent_ptr = parent_guard.as_ptr();
+    let _parent_ptr = parent_guard.as_ptr();
 
     // Give the parent a non-default cwd before the fork.
     make_task_current(parent_id);
@@ -5756,7 +5746,7 @@ pub fn test_fork_child_inherits_and_then_diverges_from_parent_cwd() -> TestResul
     park_bootstrap_on_current_cpu();
     assert_test!(seeded, "could not seed the parent cwd");
 
-    let child_id = task_fork(parent_ptr, core::ptr::null());
+    let child_id = task_fork(&parent_guard, core::ptr::null());
     assert_test!(child_id != INVALID_TASK_ID, "fork failed");
     task_set_state(child_id, TaskStatus::Blocked);
 
