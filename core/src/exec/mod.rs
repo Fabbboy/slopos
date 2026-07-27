@@ -260,7 +260,9 @@ pub fn spawn_program_with_attrs(
 
         task_set_entry_point(task_info, entry);
         task_set_context_rip_rsp(task_info, entry, stack_ptr);
-        task_set_fs_base(task_info, tls_tp);
+        // The registry guard is already in scope and derefs to `&Task`; no
+        // need to launder its pointer back into a borrow.
+        task_set_fs_base(&task_guard, tls_tp);
 
         // OSTD user-mode entry: re-seed the task's `UserContext`
         // with the post-load entry / stack pointers.  The kernel

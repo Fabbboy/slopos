@@ -16,6 +16,7 @@
 //! through their existing diagnostics.
 
 use core::ptr::NonNull;
+use core::sync::atomic::Ordering;
 
 use crate::sync::{BUS, LinkError};
 use crate::user::context::UserContext;
@@ -175,7 +176,6 @@ task_scalar_getters! {
     /// only `top` for TSS RSP0 programming).
     task_kernel_stack_top -> u64 = kernel_stack_top,
     /// Read `task->fs_base`.
-    task_fs_base -> u64 = fs_base,
     /// Read `task->tgid` (thread-group id).
     task_tgid -> u32 = tgid,
     /// Read `task->parent_task_id`.
@@ -191,7 +191,6 @@ task_scalar_setters! {
     /// ELF entry (exec path).
     task_set_entry_point = entry_point: u64,
     /// Stamp `task->fs_base` (TLS thread pointer).
-    task_set_fs_base = fs_base: u64,
     /// Stamp `task->cpu_affinity`.
     task_set_cpu_affinity = cpu_affinity: u32,
     /// Stamp `task->time_slice`.
@@ -204,6 +203,8 @@ task_scalar_setters! {
 }
 
 task_method_getters! {
+    /// Read `task->fs_base`. See [`TaskInner::fs_base`] for the ordering.
+    task_fs_base -> u64 = fs_base,
     /// Read the task's atomic status (`Ready`, `Running`, `Blocked`, …).
     task_status -> TaskStatus = status,
     /// Read the task's current block reason via the `&self` method.
@@ -477,6 +478,14 @@ pub fn task_owner_is_linked<K, U>(task: *const TaskInner<K, U>) -> bool {
     task_borrow(task).is_some_and(|t| t.sibling_link.is_linked())
 }
 
+/// Stamp `task->fs_base`. Takes a borrow rather than a pointer: every caller
+/// already has one, and a raw parameter here would be a task handle with no
+/// owner for no gain.
+#[inline]
+pub fn task_set_fs_base<K, U>(task: &TaskInner<K, U>, value: u64) {
+    task.set_fs_base(value);
+}
+
 /// Record a user-mode-fault exit on `task`: sets `exit_reason`,
 /// `fault_reason`, and `exit_code`, then returns the task's id so the
 /// caller can drive `task_terminate(tid)`.
@@ -496,9 +505,13 @@ pub fn task_record_user_fault_exit<K, U>(
     // is single-threaded for the faulting CPU and the task is not
     // dispatchable while we mutate its exit state.
     unsafe {
-        (*task).exit_reason = TaskExitReason::UserFault;
-        (*task).fault_reason = reason;
-        (*task).exit_code = 1;
+        (*task)
+            .exit_reason
+            .store(TaskExitReason::UserFault.as_u16(), Ordering::Release);
+        (*task)
+            .fault_reason
+            .store(reason.as_u16(), Ordering::Release);
+        (*task).exit_code.store(1, Ordering::Release);
         Some((*task).task_id)
     }
 }
@@ -684,19 +697,26 @@ pub fn task_set_on_cpu<K, U>(task: *mut TaskInner<K, U>, on: bool) {
     }
 }
 
-/// Take ownership of `task->test_reports`, leaving the slot as
-/// `None`. Caller-required invariant: invoke after the task has
-/// exited so no further `SYSCALL_TEST_REPORT` push races the take.
+/// Take ownership of `task->test_reports`, leaving the slot `None`.
+///
+/// The taker is a foreign task draining a corpse, while the owner lazily
+/// installs the ring on its first report — so the two need mutual exclusion
+/// rather than the "call me after exit" convention this used to carry as a
+/// comment. The `SpinLock` makes that structural.
+///
+/// The `KBox` leaves with the return value, so it is dropped by the caller
+/// *after* the guard is released: freeing a ring under a lock would put an
+/// allocator call inside the critical section for no reason.
 #[inline]
 pub fn task_take_test_reports<K, U>(
-    task: *mut TaskInner<K, U>,
+    task: *const TaskInner<K, U>,
 ) -> Option<crate::KBox<crate::task::test_reports::TestReportRing>> {
     if task.is_null() {
         return None;
     }
-    // SAFETY: caller pre-validated; `Option::take` is a single
-    // word swap on the in-Task field.
-    unsafe { (*task).test_reports.take() }
+    // SAFETY: caller pre-validated; the lock makes the take race-free against
+    // the owner's lazy install.
+    unsafe { (*task).test_reports.lock().take() }
 }
 
 /// Read `task->exit_info.is_set()`.

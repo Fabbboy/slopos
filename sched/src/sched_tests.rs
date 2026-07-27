@@ -398,7 +398,8 @@ pub fn test_scalar_accessor_field_identity() -> TestResult {
         task.time_slice_remaining = 0x8888;
         task.sid = 0x9999;
         task.kernel_stack_top = 0xAAAA;
-        task.fs_base = 0xBBBB;
+        task.fs_base
+            .store(0xBBBB, core::sync::atomic::Ordering::Release);
         task.tgid = 0xCCCC;
         task.parent_task_id = 0xDDDD;
         task.priority = TaskPriority::Low;

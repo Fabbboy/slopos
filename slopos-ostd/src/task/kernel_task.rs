@@ -27,9 +27,9 @@ pub use slopos_abi::task::{
 };
 
 use crate::cpu::x86_64::pcr::KernelReturnContext;
-use crate::sync::AtomicCell;
 use crate::sync::intrusive::Link;
 use crate::sync::intrusive_dlist::{DLink, IntrusiveDList};
+use crate::sync::{AtomicCell, LOCK_LEVEL_RESOURCE, SpinLock};
 use crate::task::abi::TaskAbi;
 use crate::task::cell::{TaskExclusive, TaskOwnCell};
 use crate::task::exit_info::ExitInfo;
@@ -404,11 +404,27 @@ pub struct TaskInner<K, U> {
     /// `None` for non-test tasks (the syscall is never invoked). The first
     /// `SYSCALL_TEST_REPORT` from a task lazily allocates a fresh ring; the
     /// kernel-side userland-test runner takes ownership once the task exits.
-    pub test_reports: Option<KBox<TestReportRing>>,
+    /// Per-task ring of `SYSCALL_TEST_REPORT` payloads.
+    ///
+    /// Behind a `SpinLock` rather than an atomic: it owns a `KBox`, which no
+    /// atomic can hold. The owner lazily allocates it on its first report while
+    /// a *foreign* task drains it after exit (`task_drain_test_reports`), so a
+    /// shared borrow has to be enough for both — which is exactly what the lock
+    /// buys. `LOCK_LEVEL_RESOURCE`: neither side is on the switch path or runs
+    /// with interrupts off, and the allocation happens before the store so the
+    /// lock never covers one.
+    pub test_reports: SpinLock<Option<KBox<TestReportRing>>>,
     pub parent_task_id: u32,
     /// FS segment base address (TLS pointer). Written to MSR FS_BASE before
     /// switching to user mode, and read back on context save.
-    pub fs_base: u64,
+    /// FS segment base (TLS pointer).
+    ///
+    /// Atomic because the owner writes it via `arch_prctl` while
+    /// `prepare_switch_to` reads the *incoming* task's copy from whichever CPU
+    /// is performing the switch — a cross-task read, so a plain field made it a
+    /// data race. Release/Acquire rather than Relaxed: the value must be
+    /// visible to the next switch on any CPU.
+    pub fs_base: AtomicU64,
     /// Thread-group ID.
     pub tgid: u32,
     pub pgid: u32,
@@ -447,9 +463,19 @@ pub struct TaskInner<K, U> {
     pub last_run_timestamp: AtomicU64,
     pub user_started: u8,
     pub context_from_user: u8,
-    pub exit_reason: TaskExitReason,
-    pub fault_reason: TaskFaultReason,
-    pub exit_code: u32,
+    /// Why the task exited, as [`TaskExitReason::as_u16`].
+    ///
+    /// This trio is atomic because `stamp_exit_state` runs from
+    /// `task_terminate(other_tid)` — *any* CPU terminating *any* task — so the
+    /// writer is generally not the owner and no exclusivity witness is
+    /// obtainable. Release on store / Acquire on load, not Relaxed: the three
+    /// are read back into `ExitInfo` before the status store publishes them, so
+    /// they carry a publication relationship rather than being counters.
+    pub exit_reason: AtomicU16,
+    /// The specific fault, as [`TaskFaultReason::as_u16`]. See `exit_reason`.
+    pub fault_reason: AtomicU16,
+    /// Exit code. See `exit_reason`.
+    pub exit_code: AtomicU32,
     pub fate_token: u32,
     pub fate_value: u32,
     pub fate_pending: u8,
@@ -584,6 +610,22 @@ impl<K, U> Drop for TaskInner<K, U> {
 pub const TTY_INDEX_NONE: u16 = u16::MAX;
 
 impl<K, U> TaskInner<K, U> {
+    /// This task's FS segment base (TLS pointer).
+    ///
+    /// Acquire, pairing with [`set_fs_base`](Self::set_fs_base)'s Release: the
+    /// value must be visible to the next `prepare_switch_to` on any CPU, which
+    /// reads the *incoming* task's copy.
+    #[inline]
+    pub fn fs_base(&self) -> u64 {
+        self.fs_base.load(Ordering::Acquire)
+    }
+
+    /// Stamp this task's FS segment base. See [`fs_base`](Self::fs_base).
+    #[inline]
+    pub fn set_fs_base(&self, value: u64) {
+        self.fs_base.store(value, Ordering::Release);
+    }
+
     /// The CPU whose register file last held this task's FPU state, or
     /// [`FPU_CPU_NONE`]. The per-task half of the FPU owner tag; meaningful
     /// only in agreement with the per-CPU half, via
@@ -914,9 +956,9 @@ impl<K, U> TaskInner<K, U> {
             kernel_stack: None,
             unsafe_stack: None,
             process_group: None,
-            test_reports: None,
+            test_reports: SpinLock::new(None, LOCK_LEVEL_RESOURCE),
             parent_task_id: INVALID_TASK_ID,
-            fs_base: 0,
+            fs_base: AtomicU64::new(0),
             tgid: INVALID_TASK_ID,
             pgid: INVALID_TASK_ID,
             sid: INVALID_TASK_ID,
@@ -936,9 +978,9 @@ impl<K, U> TaskInner<K, U> {
             last_run_timestamp: AtomicU64::new(0),
             user_started: 0,
             context_from_user: 0,
-            exit_reason: TaskExitReason::None,
-            fault_reason: TaskFaultReason::None,
-            exit_code: 0,
+            exit_reason: AtomicU16::new(TaskExitReason::None.as_u16()),
+            fault_reason: AtomicU16::new(TaskFaultReason::None.as_u16()),
+            exit_code: AtomicU32::new(0),
             fate_token: 0,
             fate_value: 0,
             fate_pending: 0,
@@ -1019,7 +1061,7 @@ impl<K, U> TaskInner<K, U> {
                 addr_of_mut!((*slot).kernel_stack).write(None);
                 addr_of_mut!((*slot).unsafe_stack).write(None);
                 addr_of_mut!((*slot).process_group).write(None);
-                addr_of_mut!((*slot).test_reports).write(None);
+                addr_of_mut!((*slot).test_reports).write(SpinLock::new(None, LOCK_LEVEL_RESOURCE));
                 addr_of_mut!((*slot).abi.unsafe_stack_sp).write(0);
 
                 addr_of_mut!((*slot).signal_blocked).write(AtomicU64::new(SIG_EMPTY));
@@ -1187,9 +1229,11 @@ impl<K, U> TaskInner<K, U> {
         self.creation_time = crate::kdiag_timestamp();
         self.yield_count = 0;
         self.last_run_timestamp.store(0, Ordering::Relaxed);
-        self.exit_reason = TaskExitReason::None;
-        self.fault_reason = TaskFaultReason::None;
-        self.exit_code = 0;
+        self.exit_reason
+            .store(TaskExitReason::None.as_u16(), Ordering::Release);
+        self.fault_reason
+            .store(TaskFaultReason::None.as_u16(), Ordering::Release);
+        self.exit_code.store(0, Ordering::Release);
         self.fate_token = 0;
         self.fate_value = 0;
         self.fate_pending = 0;
@@ -1228,7 +1272,10 @@ impl<K, U> TaskInner<K, U> {
             core::ptr::write(&mut self.kernel_stack as *mut _, None);
             core::ptr::write(&mut self.unsafe_stack as *mut _, None);
             core::ptr::write(&mut self.process_group as *mut _, None);
-            core::ptr::write(&mut self.test_reports as *mut _, None);
+            core::ptr::write(
+                &mut self.test_reports as *mut _,
+                SpinLock::new(None, LOCK_LEVEL_RESOURCE),
+            );
             self.abi.unsafe_stack_sp = 0;
             core::ptr::write(&mut self.exit_info as *mut _, AtomicCell::empty());
             core::ptr::write(&mut self.state as *mut _, TaskState::invalid());

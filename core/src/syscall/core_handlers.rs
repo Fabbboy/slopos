@@ -1,6 +1,7 @@
 use core::ffi::c_char;
 use core::mem::size_of;
 use core::ops::ControlFlow;
+use core::sync::atomic::Ordering as AtomicOrdering;
 
 use slopos_abi::Errno;
 use slopos_abi::syscall::{CLOCK_MONOTONIC, CLOCK_REALTIME, Timespec, TtyIndex, UserSysInfo};
@@ -82,10 +83,14 @@ define_syscall!(syscall_sleep_ms (ctx, ms: u64) -> Result<(), Errno> {
 define_syscall!(syscall_exit (ctx, code: u32) -> SyscallResult {
     let task_id = ctx.task_id().unwrap_or(u32::MAX);
     klog_debug!("SYSCALL_EXIT: task {} entering exit", task_id);
-    if let Some(t) = ctx.task_mut() {
-        t.exit_reason = TaskExitReason::Normal;
-        t.fault_reason = TaskFaultReason::None;
-        t.exit_code = code;
+    if let Some(t) = ctx.task() {
+        // Atomics now, so a shared borrow is enough — these are written by any
+        // CPU terminating any task, never only by the owner.
+        t.exit_reason
+            .store(TaskExitReason::Normal.as_u16(), AtomicOrdering::Release);
+        t.fault_reason
+            .store(TaskFaultReason::None.as_u16(), AtomicOrdering::Release);
+        t.exit_code.store(code, AtomicOrdering::Release);
     }
     klog_debug!("SYSCALL_EXIT: task {} calling task_terminate", task_id);
     task_terminate(task_id);

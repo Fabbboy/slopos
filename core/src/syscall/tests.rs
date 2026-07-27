@@ -1416,7 +1416,7 @@ pub fn test_clone_thread_tls_isolation() -> TestResult {
     let parent_guard = assert_some!(task_find_by_id(parent_id), "parent task lookup failed");
     let parent_ptr = parent_guard.as_ptr();
 
-    slopos_sched::task::task_set_fs_base(parent_ptr, 0x0000_1111_2222_3000);
+    slopos_sched::task::task_set_fs_base(&parent_guard, 0x0000_1111_2222_3000);
 
     let flags = CLONE_VM | CLONE_SIGHAND | CLONE_THREAD | CLONE_SETTLS;
     let child_id = match task_clone(

@@ -1,3 +1,4 @@
+use core::sync::atomic::Ordering;
 use slopos_abi::Errno;
 use slopos_abi::fs::FS_TYPE_DIRECTORY;
 use slopos_abi::spawn::{SPAWN_MAX_FD_ACTIONS, SpawnAttrs, SpawnFdAction, SpawnFdActionKind};
@@ -405,7 +406,9 @@ define_syscall!(syscall_exec
             }
 
             if tls_tp != 0 {
-                task_set_fs_base(ctx.task_ptr(), tls_tp);
+                if let Some(t) = ctx.task() {
+                    task_set_fs_base(t, tls_tp);
+                }
                 slopos_arch::cpu::msr::write_msr(slopos_arch::cpu::msr::Msr::FS_BASE, tls_tp);
             }
             // Build the new user-mode entry register snapshot, then commit
@@ -493,7 +496,7 @@ define_syscall!(syscall_getpid (ctx)
 });
 
 define_syscall!(syscall_getppid (ctx) -> Result<u32, Errno> {
-    let task = ctx.task_mut().ok_or(Errno::ESRCH)?;
+    let task = ctx.task().ok_or(Errno::ESRCH)?;
     Ok(task.parent_task_id)
 });
 
@@ -650,8 +653,8 @@ define_syscall!(syscall_arch_prctl
             if addr >= slopos_mm::memory_layout_defs::USER_SPACE_END_VA && addr != 0 {
                 return Err(Errno::EINVAL);
             }
-            let t = ctx.task_mut().ok_or(Errno::ESRCH)?;
-            t.fs_base = addr;
+            let t = ctx.task().ok_or(Errno::ESRCH)?;
+            t.fs_base.store(addr, Ordering::Release);
             slopos_arch::cpu::msr::write_msr(slopos_arch::cpu::msr::Msr::FS_BASE, addr);
             Ok(())
         }
@@ -659,8 +662,8 @@ define_syscall!(syscall_arch_prctl
             if addr == 0 {
                 return Err(Errno::EINVAL);
             }
-            let t = ctx.task_mut().ok_or(Errno::ESRCH)?;
-            let fs_base_val = t.fs_base;
+            let t = ctx.task().ok_or(Errno::ESRCH)?;
+            let fs_base_val = t.fs_base.load(Ordering::Acquire);
             let user_ptr = MmUserPtr::<u64>::try_new(addr).map_err(|_| Errno::EFAULT)?;
             copy_to_user(user_ptr, &fs_base_val).map_err(|_| Errno::EFAULT)?;
             Ok(())

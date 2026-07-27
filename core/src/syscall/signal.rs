@@ -109,7 +109,7 @@ define_syscall!(syscall_rt_sigaction
         return Err(Errno::EINVAL);
     }
     let signum = signum.raw();
-    let task_ref = ctx.task_mut().ok_or(Errno::EINVAL)?;
+    let task_ref = ctx.task().ok_or(Errno::EINVAL)?;
     let idx = (signum - 1) as usize;
 
     if old_act_ptr != 0 {
@@ -143,7 +143,7 @@ define_syscall!(syscall_rt_sigprocmask
     if sigsetsize != core::mem::size_of::<SigSet>() as u64 {
         return Err(Errno::EINVAL);
     }
-    let task_ref = ctx.task_mut().ok_or(Errno::EINVAL)?;
+    let task_ref = ctx.task().ok_or(Errno::EINVAL)?;
 
     if oldset_ptr != 0 {
         let old_ptr = MmUserPtr::<SigSet>::try_new(oldset_ptr).map_err(|_| Errno::EFAULT)?;
@@ -523,9 +523,15 @@ fn claim_pending_signal(task: *mut Task) -> SignalDisposition {
         return match sig_default_action(signum) {
             SigDefault::Ignore | SigDefault::Stop | SigDefault::Continue => SignalDisposition::Done,
             SigDefault::Terminate => {
-                task_ref.exit_reason = TaskExitReason::Normal;
-                task_ref.fault_reason = TaskFaultReason::None;
-                task_ref.exit_code = 128 + signum as u32;
+                task_ref
+                    .exit_reason
+                    .store(TaskExitReason::Normal.as_u16(), Ordering::Release);
+                task_ref
+                    .fault_reason
+                    .store(TaskFaultReason::None.as_u16(), Ordering::Release);
+                task_ref
+                    .exit_code
+                    .store(128 + signum as u32, Ordering::Release);
                 SignalDisposition::Terminate(task_ref.task_id)
             }
         };

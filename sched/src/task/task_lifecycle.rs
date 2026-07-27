@@ -1,5 +1,6 @@
 use core::ffi::{c_char, c_int, c_void};
 use core::ptr;
+use core::sync::atomic::Ordering;
 
 use slopos_arch::cpu;
 use slopos_ostd::kdiag_timestamp;
@@ -24,9 +25,9 @@ use super::task_table::{
 use super::{
     INVALID_PROCESS_ID, INVALID_TASK_ID, TASK_FLAG_KERNEL_MODE, TASK_FLAG_SYSTEM,
     TASK_FLAG_USER_MODE, TASK_KERNEL_STACK_SIZE, TASK_NAME_MAX_LEN, TASK_STACK_SIZE,
-    TASK_UNSAFE_STACK_SIZE, Task, TaskContext, TaskEntry, TaskExitReason, TaskPriority, TaskStatus,
-    task_borrow, task_borrow_mut, task_id_of, task_name_bytes, task_on_cpu_load,
-    task_panic_in_flight_store, task_recovery_depth_store, task_status,
+    TASK_UNSAFE_STACK_SIZE, Task, TaskContext, TaskEntry, TaskExitReason, TaskFaultReason,
+    TaskPriority, TaskStatus, task_borrow, task_borrow_mut, task_id_of, task_name_bytes,
+    task_on_cpu_load, task_panic_in_flight_store, task_recovery_depth_store, task_status,
 };
 use crate::exit_info::ExitInfo;
 use crate::scheduler;
@@ -812,8 +813,9 @@ fn stamp_exit_state(task_ptr: *mut Task, resolved_id: u32, now: u64) -> Option<E
         task.total_runtime += now - last_run;
     }
     task.set_last_run_timestamp(0);
-    if task.exit_reason == TaskExitReason::None {
-        task.exit_reason = TaskExitReason::Kernel;
+    if TaskExitReason::from_u16(task.exit_reason.load(Ordering::Acquire)) == TaskExitReason::None {
+        task.exit_reason
+            .store(TaskExitReason::Kernel.as_u16(), Ordering::Release);
     }
 
     // Stash the per-task test-report ring (if any) so the userland-test
@@ -821,8 +823,13 @@ fn stamp_exit_state(task_ptr: *mut Task, resolved_id: u32, now: u64) -> Option<E
     // longer needs an out-of-slot copy: `Task::exit_info` is the single
     // source of truth, kept stable until either `waitpid` consumes the
     // Zombie or the parent itself dies and auto-reaps.
-    if task.test_reports.is_some() {
-        let reports = task.test_reports.take();
+    // One `take` under the lock rather than `is_some()` then `take()`: the
+    // ring is installed by the owning task on its first report, so the old
+    // two-step could observe `Some` and then take `None`. The guard is a
+    // temporary, so it is released before `stash_pending_drain` runs and the
+    // `KBox` never travels under the lock.
+    let reports = task.test_reports.lock().take();
+    if reports.is_some() {
         crate::test_reports::stash_pending_drain(
             resolved_id,
             crate::test_reports::PendingDrain { reports },
@@ -841,10 +848,13 @@ fn stamp_exit_state(task_ptr: *mut Task, resolved_id: u32, now: u64) -> Option<E
     // `try_set` returns Err on a re-entry (e.g. fault path also calling
     // task_terminate(self)); discard via `_` — the operation is
     // idempotent.
+    // Acquire loads pairing with the Release stores above and in
+    // `task_record_user_fault_exit`: whoever publishes the status below must
+    // publish a fully-populated `ExitInfo`, and these three are its inputs.
     let info = ExitInfo {
-        exit_code: task.exit_code as i32,
-        exit_reason: task.exit_reason,
-        fault_reason: task.fault_reason,
+        exit_code: task.exit_code.load(Ordering::Acquire) as i32,
+        exit_reason: TaskExitReason::from_u16(task.exit_reason.load(Ordering::Acquire)),
+        fault_reason: TaskFaultReason::from_u16(task.fault_reason.load(Ordering::Acquire)),
         signal: 0,
         exit_time_ms: now,
     };
@@ -1485,7 +1495,7 @@ pub fn task_clone(
     }
 
     if flags & CLONE_SETTLS != 0 {
-        child.fs_base = tls;
+        child.fs_base.store(tls, Ordering::Release);
     }
 
     if !share_vm {
