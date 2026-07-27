@@ -3,7 +3,7 @@ use slopos_abi::Errno;
 use slopos_abi::fs::FS_TYPE_DIRECTORY;
 use slopos_abi::spawn::{SPAWN_MAX_FD_ACTIONS, SpawnAttrs, SpawnFdAction, SpawnFdActionKind};
 use slopos_abi::syscall::{ARCH_GET_FS, ARCH_SET_FS, ENOSYS_RETURN, FUTEX_WAIT, FUTEX_WAKE};
-use slopos_abi::task::{INVALID_TASK_ID, TaskPriority};
+use slopos_abi::task::TaskPriority;
 use slopos_fs::vfs::traits::VfsError;
 use slopos_ostd::KVec;
 use slopos_ostd::task::{new_group_in_session, new_session_group};
@@ -220,8 +220,8 @@ define_syscall!(syscall_spawn_path
 
     let actions = read_user_spawn_actions(&attrs)?;
 
-    let parent_pid = ctx.process_id().unwrap_or(slopos_abi::task::INVALID_PROCESS_ID);
-    let parent_tid = ctx.task_id().unwrap_or(slopos_abi::task::INVALID_TASK_ID);
+    let parent_pid = ctx.process_id();
+    let parent_tid = ctx.task_id();
     match exec::spawn_program_with_attrs(
         &path_buf[..copied_len],
         argv_refs.as_deref(),
@@ -240,7 +240,7 @@ define_syscall!(syscall_spawn_path
 define_syscall!(syscall_sigdefault
     (ctx, mask: u64) -> Result<u64, Errno>
 {
-    if let Some(task) = task_borrow_mut(ctx.task_ptr()) {
+    if let Some(task) = Some(ctx.task()) {
         task_default_signals_in_mask(task, mask);
     }
     Ok(0)
@@ -287,7 +287,7 @@ define_syscall!(syscall_terminate_task
     if target_id == 0 {
         return Err(Errno::EINVAL);
     }
-    let caller_id = ctx.task_id().unwrap_or(INVALID_TASK_ID);
+    let caller_id = ctx.task_id();
     if target_id == caller_id {
         return Err(Errno::EINVAL);
     }
@@ -395,18 +395,19 @@ define_syscall!(syscall_exec
 
             // Point of no return: old image is gone. Tear down task-bound
             // resources (compositor surface, shm buffers, input queues, ...).
-            let task_id = ctx.task_id().unwrap_or(slopos_abi::task::INVALID_TASK_ID);
+            let task_id = ctx.task_id();
             slopos_sched::task::task_cleanup_for_exec(task_id);
 
             // Reset caught signal handlers to SIG_DFL so a stale handler
             // pointer never survives into the new image; SIG_IGN and the
             // blocked/pending state are preserved (POSIX exec semantics).
-            if let Some(task) = task_borrow_mut(ctx.task_ptr()) {
+            if let Some(task) = Some(ctx.task()) {
                 task_reset_caught_handlers(task);
             }
 
             if tls_tp != 0 {
-                if let Some(t) = ctx.task() {
+                {
+        let t = ctx.task();
                     task_set_fs_base(t, tls_tp);
                 }
                 slopos_arch::cpu::msr::write_msr(slopos_arch::cpu::msr::Msr::FS_BASE, tls_tp);
@@ -433,15 +434,15 @@ define_syscall!(syscall_exec
             // state AND load the default into the CPU under IRQ-off, so a
             // context switch can't re-save the old image's live registers
             // over the reset before the new image runs.
-            let task = ctx.task_ptr();
             let xcr0 = slopos_ostd::cpu::x86_64::xsave::active_xcr0();
             slopos_ostd::cpu::x86_64::interrupts::IrqDisabled::with(|_irq| {
-                if let Some(t) = slopos_sched::task::task_borrow_mut(task) {
-                    // One `&mut Task` covers both steps, so the reset and the
-                    // load cannot be split by a second derivation; both
-                    // maintain the FPU owner tag.
-                    slopos_ostd::task::accessors::task_reset_fpu_state(t);
-                    t.fpu_restore_to_cpu_mut(xcr0);
+                // The exec'ing task is this CPU's current, so the guard is the
+                // witness that authorises both writes. One witness covers the
+                // reset and the load, so they cannot be split by a second
+                // derivation, and both maintain the FPU owner tag.
+                if let Some(current) = slopos_sched::task_struct::Current::get() {
+                    current.task().fpu_reset(&current);
+                    current.task().fpu_restore_to_cpu(&current, xcr0);
                 }
             });
             SyscallResult::NoReturn
@@ -496,7 +497,7 @@ define_syscall!(syscall_getpid (ctx)
 });
 
 define_syscall!(syscall_getppid (ctx) -> Result<u32, Errno> {
-    let task = ctx.task().ok_or(Errno::ESRCH)?;
+    let task = ctx.task();
     Ok(task.parent_task_id)
 });
 
@@ -653,7 +654,7 @@ define_syscall!(syscall_arch_prctl
             if addr >= slopos_mm::memory_layout_defs::USER_SPACE_END_VA && addr != 0 {
                 return Err(Errno::EINVAL);
             }
-            let t = ctx.task().ok_or(Errno::ESRCH)?;
+            let t = ctx.task();
             t.fs_base.store(addr, Ordering::Release);
             slopos_arch::cpu::msr::write_msr(slopos_arch::cpu::msr::Msr::FS_BASE, addr);
             Ok(())
@@ -662,7 +663,7 @@ define_syscall!(syscall_arch_prctl
             if addr == 0 {
                 return Err(Errno::EINVAL);
             }
-            let t = ctx.task().ok_or(Errno::ESRCH)?;
+            let t = ctx.task();
             let fs_base_val = t.fs_base.load(Ordering::Acquire);
             let user_ptr = MmUserPtr::<u64>::try_new(addr).map_err(|_| Errno::EFAULT)?;
             copy_to_user(user_ptr, &fs_base_val).map_err(|_| Errno::EFAULT)?;
@@ -673,7 +674,7 @@ define_syscall!(syscall_arch_prctl
 });
 
 define_syscall!(syscall_fork (ctx) -> Result<u64, Errno> {
-    let task = ctx.task().ok_or(Errno::ESRCH)?;
+    let task = ctx.task();
     let user_ctx_ptr = ctx.user_ctx_ptr() as *const UserContext;
     let child_id = task_fork(task, user_ctx_ptr);
     if child_id == slopos_abi::task::INVALID_TASK_ID {
@@ -687,7 +688,7 @@ define_syscall!(syscall_clone
     (ctx, flags: u64, child_stack: u64, parent_tidptr: u64, child_tidptr: u64, tls: u64)
     -> Result<u64, Errno>
 {
-    let parent = ctx.task().ok_or(Errno::ESRCH)?;
+    let parent = ctx.task();
     match slopos_sched::task::task_clone(
         parent,
         ctx.user_ctx_ptr() as *const UserContext,

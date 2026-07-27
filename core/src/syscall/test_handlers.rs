@@ -40,7 +40,7 @@ define_syscall!(syscall_test_report
             .map_err(|_| Errno::EFAULT)?
     };
 
-    let task = ctx.task().ok_or(Errno::EINVAL)?;
+    let task = ctx.task();
 
     // Build the report before touching the lock: it is a stack value with no
     // allocation, and the critical section should cover nothing but the push.

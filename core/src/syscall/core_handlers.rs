@@ -81,9 +81,10 @@ define_syscall!(syscall_sleep_ms (ctx, ms: u64) -> Result<(), Errno> {
 });
 
 define_syscall!(syscall_exit (ctx, code: u32) -> SyscallResult {
-    let task_id = ctx.task_id().unwrap_or(u32::MAX);
+    let task_id = ctx.task_id();
     klog_debug!("SYSCALL_EXIT: task {} entering exit", task_id);
-    if let Some(t) = ctx.task() {
+    {
+        let t = ctx.task();
         // Atomics now, so a shared borrow is enough — these are written by any
         // CPU terminating any task, never only by the owner.
         t.exit_reason

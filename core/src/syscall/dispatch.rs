@@ -39,9 +39,12 @@ pub fn syscall_handle(ctx_ptr: *mut UserContext) {
 
     match handler {
         Some(func) => {
-            let Some(ctx) = SyscallContext::from_user_context(task, user_ctx) else {
+            // The task running this syscall is this CPU's current, by
+            // definition of how we got here.
+            let Some(current) = slopos_sched::task_struct::Current::get() else {
                 return;
             };
+            let ctx = SyscallContext::from_current(&current, user_ctx);
             let result = func(&ctx);
             ctx.write_result(result);
 
@@ -163,9 +166,14 @@ pub fn dispatch_handler(
     task: *mut Task,
     frame: &mut UserContext,
 ) -> SyscallResult {
-    let Some(ctx) = SyscallContext::from_test_frame(task, frame) else {
+    // Test entry point: the fixture may have no current task, so the caller
+    // supplies the task by id and we resolve a registry guard for it.
+    let Some(guard) = slopos_sched::task::task_find_by_id(
+        slopos_sched::task::task_id_of(task).unwrap_or(slopos_abi::task::INVALID_TASK_ID),
+    ) else {
         return SyscallResult::Err(Errno::EINVAL);
     };
+    let ctx = SyscallContext::from_task_ref(&guard, frame);
     let result = handler(&ctx);
     ctx.write_result(result);
     result

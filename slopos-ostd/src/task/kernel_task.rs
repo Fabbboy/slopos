@@ -746,6 +746,47 @@ impl<K, U> TaskInner<K, U> {
         fpu_owner_take(self, cpu);
     }
 
+    /// Borrow this task's FPU save area as bytes, authorised by `witness`.
+    ///
+    /// The signal-frame paths copy the area to and from user memory and cannot
+    /// stage it through a 2.6 KiB stack buffer (the frame gate is 2 KiB), so
+    /// they borrow it in place. Same re-entrancy contract as
+    /// [`with_cwd`](Self::with_cwd): `f` must not itself take a witness on this
+    /// task and call back in, or the `&mut` handed out here would alias.
+    #[inline]
+    pub fn with_fpu_bytes_mut<R>(
+        &self,
+        witness: &impl TaskExclusive<K, U>,
+        f: impl FnOnce(&mut [u8; FPU_STATE_SIZE]) -> R,
+    ) -> R {
+        debug_assert!(
+            core::ptr::eq(witness.witnessed(), self),
+            "witness names a different task"
+        );
+        // SAFETY: the witness proves exclusive access; the contract above
+        // forbids re-entering through a second witness while `f` runs.
+        f(unsafe { &mut (*self.fpu_state.get_ptr(witness)).data })
+    }
+
+    /// Reset the FPU save area to the kernel default (x87/SSE exceptions
+    /// masked, XSTATE header zeroed), authorised by `witness`.
+    ///
+    /// The execve disposition reset: the old image's vector state must not
+    /// survive into the new one. Paired with
+    /// [`fpu_restore_to_cpu`](Self::fpu_restore_to_cpu) under one IRQ-off
+    /// window, so a context switch cannot re-save the old image's live
+    /// registers over the reset before the new image runs.
+    #[inline]
+    pub fn fpu_reset(&self, witness: &impl TaskExclusive<K, U>) {
+        debug_assert!(
+            core::ptr::eq(witness.witnessed(), self),
+            "witness names a different task"
+        );
+        // SAFETY: the witness proves exclusive access; `fpu_reset_in_place`
+        // writes a whole valid `FpuState` into the slot.
+        unsafe { fpu_reset_in_place(self.fpu_state.get_ptr(witness)) };
+    }
+
     /// This task's user-mode register snapshot, authorised by `witness`. Raw
     /// rather than `&mut` for the reason `TaskOwnCell::get_ptr` is: two
     /// witnesses on one task may legitimately coexist.

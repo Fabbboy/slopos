@@ -109,7 +109,7 @@ define_syscall!(syscall_rt_sigaction
         return Err(Errno::EINVAL);
     }
     let signum = signum.raw();
-    let task_ref = ctx.task().ok_or(Errno::EINVAL)?;
+    let task_ref = ctx.task();
     let idx = (signum - 1) as usize;
 
     if old_act_ptr != 0 {
@@ -143,7 +143,7 @@ define_syscall!(syscall_rt_sigprocmask
     if sigsetsize != core::mem::size_of::<SigSet>() as u64 {
         return Err(Errno::EINVAL);
     }
-    let task_ref = ctx.task().ok_or(Errno::EINVAL)?;
+    let task_ref = ctx.task();
 
     if oldset_ptr != 0 {
         let old_ptr = MmUserPtr::<SigSet>::try_new(oldset_ptr).map_err(|_| Errno::EFAULT)?;
@@ -170,7 +170,7 @@ define_syscall!(syscall_rt_sigprocmask
 define_syscall!(syscall_kill
     (ctx, raw_pid_arg: i64, sig: u64) -> SyscallResult
 {
-    let caller_id = ctx.task_id().unwrap_or(INVALID_TASK_ID);
+    let caller_id = ctx.task_id();
 
     if raw_pid_arg < i32::MIN as i64 || raw_pid_arg > i32::MAX as i64 {
         return SyscallResult::Err(Errno::ESRCH);
@@ -308,25 +308,27 @@ fn save_fpu_to_sigframe(task: &mut Task, sigframe_addr: u64) -> bool {
 ///
 /// Takes the FPU area by reference for the same reason as
 /// [`save_fpu_to_sigframe`].
-fn restore_fpu_from_sigframe(task: &mut Task, sigframe_addr: u64) -> bool {
+fn restore_fpu_from_sigframe(
+    current: &slopos_sched::task_struct::Current,
+    sigframe_addr: u64,
+) -> bool {
     let Ok(bytes) = UserBytes::try_new(sigframe_fpu_addr(sigframe_addr), FPU_STATE_SIZE) else {
         return false;
     };
     let xcr0 = slopos_ostd::cpu::x86_64::xsave::active_xcr0();
     slopos_ostd::cpu::x86_64::interrupts::IrqDisabled::with(|_irq| {
-        if copy_bytes_from_user(bytes, &mut task.fpu_state.get_mut().data).is_err() {
+        if !current
+            .task()
+            .with_fpu_bytes_mut(current, |data| copy_bytes_from_user(bytes, data).is_ok())
+        {
             return false;
         }
-        task.fpu_restore_to_cpu_mut(xcr0);
+        current.task().fpu_restore_to_cpu(current, xcr0);
         true
     })
 }
 
 define_syscall!(syscall_rt_sigreturn (ctx) -> SyscallResult {
-    if !ctx.has_task() {
-        return SyscallResult::Err(Errno::EINVAL);
-    }
-
     // After the handler's `ret` pops the restorer address, RSP points
     // directly at the SignalFrame.
     let rsp = ctx.user_rsp();
@@ -362,15 +364,15 @@ define_syscall!(syscall_rt_sigreturn (ctx) -> SyscallResult {
     // borrow never overlaps the one `user_ctx_mut` derives from the same
     // allocation. The FPU area is then a reborrow rather than a third
     // derivation from the raw task pointer.
-    let task_ref = match ctx.task_mut() {
-        Some(t) => t,
-        None => return SyscallResult::Err(Errno::EINVAL),
-    };
-    task_ref.set_signal_blocked(sigframe.saved_mask & !SIG_UNCATCHABLE);
+    ctx.task()
+        .set_signal_blocked(sigframe.saved_mask & !SIG_UNCATCHABLE);
 
-    // Restore the FPU/vector state saved at delivery (best-effort: a
-    // faulted save area leaves the current vector registers in place).
-    let _ = restore_fpu_from_sigframe(task_ref, rsp);
+    // Restore the FPU/vector state saved at delivery (best-effort: a faulted
+    // save area leaves the current vector registers in place). The sigreturn
+    // caller is this CPU's current task, so the guard is the witness.
+    if let Some(current) = slopos_sched::task_struct::Current::get() {
+        let _ = restore_fpu_from_sigframe(&current, rsp);
+    }
 
     // sigreturn fully replaced the user-mode register state — the
     // dispatcher must not overwrite RAX after we return.

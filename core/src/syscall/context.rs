@@ -17,10 +17,8 @@ use slopos_ostd::KArc;
 use slopos_ostd::mm::vm_space::VmSpace;
 use slopos_ostd::user::context::UserContext;
 use slopos_ostd::wl_currency::{self, WL_DELTA};
-use slopos_sched::task::{
-    task_borrow, task_borrow_mut, task_flags as task_flags_of, task_id_of, task_process_id,
-};
-use slopos_sched::task_struct::Task;
+use slopos_sched::task::TaskRef;
+use slopos_sched::task_struct::{Current, Task};
 
 use crate::syscall::result::SyscallResult;
 
@@ -39,31 +37,60 @@ use crate::syscall::result::SyscallResult;
 /// | 5     | `r9`     |
 pub type SyscallRegs = [u64; 6];
 
-pub struct SyscallContext {
-    task_ptr: *mut Task,
+/// The calling task, its arguments, and its user-mode frame, for the duration
+/// of one syscall.
+///
+/// The task is a **borrow**, not a pointer and not an owning handle. A pointer
+/// carried no lifetime, so every accessor had to re-derive a reference and hope;
+/// an owning handle would be worse, because SlopOS tears a blocked task down
+/// from another CPU without unwinding, so a `KArc` left on this frame would
+/// never be dropped and would pin the task, its stacks and its address space
+/// forever. A borrow is exactly the claim the syscall path can honestly make:
+/// the task is alive because it is the one executing this code.
+pub struct SyscallContext<'a> {
+    task: &'a Task,
+    task_id: u32,
     user_ctx_ptr: *mut UserContext,
     regs: SyscallRegs,
 }
 
-impl SyscallContext {
-    /// Construct from a live `UserContext` reference. Used by the
-    /// dispatch entry point.
-    pub fn from_user_context(task: *mut Task, ctx: &mut UserContext) -> Option<Self> {
-        let r = ctx.regs();
-        let regs: SyscallRegs = [r.rdi, r.rsi, r.rdx, r.r10, r.r8, r.r9];
-        Some(Self {
-            task_ptr: task,
-            user_ctx_ptr: ctx as *mut UserContext,
-            regs,
-        })
+impl<'a> SyscallContext<'a> {
+    /// Build a context for the task this CPU is running. The production
+    /// dispatch path.
+    ///
+    /// The guard is borrowed rather than stored: `CurrentTask` is `!Send` and
+    /// carries its own meaning (this CPU is running this task), whereas what a
+    /// handler needs is just the task. Taking `&'a Current` ties the context's
+    /// lifetime to the guard, which is what makes the borrow inside sound.
+    pub fn from_current(current: &'a Current, ctx: &mut UserContext) -> Self {
+        Self::new(current.task(), current.id(), ctx)
     }
 
-    /// Test-only constructor — used by `core/src/syscall/tests.rs`.
-    /// Builds a `SyscallContext` directly from a caller-owned
-    /// `UserContext`, identical to the dispatch-path constructor.
+    /// Build a context from a registry guard. Tests only.
+    ///
+    /// Not a convenience: the kernel test fixture parks the BSP on a
+    /// pre-heap bootstrap stub, so `Current::get()` returns `None` there and
+    /// the production constructor is unusable. That, rather than any staleness
+    /// concern, is why a witness cannot simply be stored in this struct.
     #[doc(hidden)]
-    pub fn from_test_frame(task: *mut Task, ctx: &mut UserContext) -> Option<Self> {
-        Self::from_user_context(task, ctx)
+    pub fn from_task_ref(task: &'a TaskRef, ctx: &mut UserContext) -> Self {
+        Self::new(task, task.task_id, ctx)
+    }
+
+    #[inline]
+    fn new(task: &'a Task, task_id: u32, ctx: &mut UserContext) -> Self {
+        // Snapshot the argument registers before taking the pointer: `regs()`
+        // borrows `ctx`, and `from_mut` needs it back.
+        let regs = {
+            let r = ctx.regs();
+            [r.rdi, r.rsi, r.rdx, r.r10, r.r8, r.r9]
+        };
+        Self {
+            task,
+            task_id,
+            user_ctx_ptr: core::ptr::from_mut(ctx),
+            regs,
+        }
     }
 
     // ── Raw argument payload (macro-internal) ─────────────────────────
@@ -79,54 +106,35 @@ impl SyscallContext {
 
     // ── Task / process / VM space accessors ───────────────────────────
 
+    /// The calling task. Infallible: a context cannot exist without one.
     #[inline]
-    pub fn task_ptr(&self) -> *mut Task {
-        self.task_ptr
+    pub fn task(&self) -> &'a Task {
+        self.task
     }
 
+    /// The calling task's registry id.
     #[inline]
-    pub fn has_task(&self) -> bool {
-        !self.task_ptr.is_null()
+    pub fn task_id(&self) -> u32 {
+        self.task_id
     }
 
+    /// The calling task's process id, or `INVALID_PROCESS_ID` for a task bound
+    /// to no process. Use [`require_process_id`](Self::require_process_id) when
+    /// the handler needs a real one.
     #[inline]
-    pub fn task(&self) -> Option<&Task> {
-        task_borrow(self.task_ptr)
-    }
-
-    #[inline]
-    pub fn task_mut(&self) -> Option<&mut Task> {
-        task_borrow_mut(self.task_ptr)
-    }
-
-    #[inline]
-    pub fn task_id(&self) -> Option<u32> {
-        task_id_of(self.task_ptr)
-    }
-
-    #[inline]
-    pub fn process_id(&self) -> Option<u32> {
-        task_process_id(self.task_ptr)
-    }
-
-    #[inline]
-    pub fn require_task(&self) -> Result<(), Errno> {
-        if self.task_ptr.is_null() {
-            Err(Errno::ESRCH)
-        } else {
-            Ok(())
-        }
+    pub fn process_id(&self) -> u32 {
+        self.task.process_id
     }
 
     #[inline]
     pub fn require_task_id(&self) -> Result<u32, Errno> {
-        self.task_id().ok_or(Errno::ESRCH)
+        Ok(self.task_id)
     }
 
     #[inline]
     pub fn require_process_id(&self) -> Result<u32, Errno> {
         match self.process_id() {
-            Some(pid) if pid != INVALID_PROCESS_ID => Ok(pid),
+            pid if pid != INVALID_PROCESS_ID => Ok(pid),
             _ => Err(Errno::ESRCH),
         }
     }
@@ -142,10 +150,7 @@ impl SyscallContext {
 
     #[inline]
     pub fn has_flag(&self, flag: u16) -> bool {
-        match task_flags_of(self.task_ptr) {
-            Some(f) => f & flag != 0,
-            None => false,
-        }
+        self.task.flags & flag != 0
     }
 
     #[inline]

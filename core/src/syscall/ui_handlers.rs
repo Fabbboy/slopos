@@ -194,7 +194,7 @@ define_syscall!(syscall_fb_flip
     let fd = fd as i32;
     let damage_count = damage_count as usize;
 
-    let process_id = ctx.process_id().ok_or(Errno::ESRCH)?;
+    let process_id = ctx.process_id();
     let (kind, handle) = slopos_fs::fileio::fileio_get_open_file_handle(process_id, fd)
         .ok_or(Errno::EBADF)?;
     if kind != slopos_abi::file_ops::FileKind::Memfd {
@@ -228,7 +228,7 @@ define_syscall!(syscall_fb_flip
     if rc < 0 {
         return Err(Errno::EINVAL);
     }
-    video::set_compositor_task_id(ctx.task_id().unwrap_or(0));
+    video::set_compositor_task_id(ctx.task_id());
     // 0 = shown, 1 = suppressed (kernel log owns the screen, or a prior present
     // is still in flight). The compositor treats any nonzero result as "not
     // shown" and keeps the frame's damage pending for retry.
@@ -293,9 +293,7 @@ define_syscall!(syscall_roulette_draw
     let caller_pid = ctx.process_id();
     kernel_vm_space().lock().activate_kernel_master();
     let result = video::roulette_draw(fate);
-    if let Some(pid) = caller_pid {
-        let _ = slopos_mm::process_vm::process_vm_activate(pid);
-    }
+    let _ = slopos_mm::process_vm::process_vm_activate(caller_pid);
     result.map_err(|_| Errno::EINVAL)
 });
 
