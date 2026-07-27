@@ -386,27 +386,59 @@ pub(crate) fn build_user_task_entry_frame(kernel_stack_top: u64) -> SwitchContex
     }
 }
 
-extern "C" fn kernel_task_entry_shim(task_arg: *mut c_void) {
-    let task_ptr = task_arg as *mut Task;
-    let Some((entry, arg, fatal_if_panics, already_recoverable)) =
-        task_borrow(task_ptr).map(|task| {
-            let raw_entry = task.entry_point as usize as *mut ();
-            let entry = slopos_ostd::util::fn_ptr::fn_ptr_from_raw::<TaskEntry>(raw_entry);
-            let fatal_if_panics =
-                crate::per_cpu::is_idle_task(slopos_ostd::task::TaskAddr::of(task))
-                    || (task.flags & TASK_FLAG_SYSTEM) != 0
-                    || !slopos_ostd::panic_recovery::production_recovery_enabled();
-            // `kernel_thread_trampoline` (the spawn() facade's entry point) already
-            // wraps the real entry in its own run_recoverable — skip the shim's
-            // boundary for it so a panic is caught exactly once.
-            let already_recoverable =
-                task.entry_point == crate::runtime::kernel_thread_trampoline as *const () as u64;
-            (entry, task.entry_arg, fatal_if_panics, already_recoverable)
-        })
-    else {
-        klog_info!("kernel_task_entry_shim: missing task slot");
-        return;
+/// First thing a fresh kernel task runs, reached from
+/// [`task_entry_trampoline`] with this task's **id** in `rdi`.
+///
+/// The argument used to be the task's own address, laundered through
+/// `*mut c_void` into `switch_ctx.r13` so it survived in a saved register file
+/// across every context switch until first dispatch, then cast back here. That
+/// round trip is what checks 3a and 3b of `check_task_ownership.sh` name: a
+/// task handle with no owner, parked in a register, reconstituted on faith.
+///
+/// An id is a scalar. It cannot be dereferenced, so it carries no claim about
+/// the task still existing, and the task is re-derived from the PCR instead —
+/// which is authoritative, because by the time this runs the task *is* this
+/// CPU's current. `execute_task` calls `dispatch` (which publishes the PCR)
+/// before `switch_context`, and the trampoline `sti`s before calling here, so
+/// `Current::get()` is two gs-relative loads that cannot fail. Deliberately
+/// **not** a registry lookup: that would take the global registry cli-spinlock
+/// and scan it on every kernel thread's first dispatch to learn what the PCR
+/// already publishes.
+///
+/// The id survives only as a cross-check — a `debug_assert` that the task the
+/// PCR names is the one this shim was seeded for.
+///
+/// `extern "sysv64" fn(u64)` rather than `extern "C" fn(*mut c_void)` so
+/// "this argument is not a caller payload" is checked by the compiler. The
+/// trampoline ABI is one integer in `rdi` either way, so no asm moves.
+extern "sysv64" fn kernel_task_entry_shim(task_id: u64) {
+    let seeded = {
+        let Some(current) = crate::task_struct::Current::get() else {
+            klog_info!("kernel_task_entry_shim: no current task on this CPU");
+            return;
+        };
+        debug_assert_eq!(
+            current.id() as u64,
+            task_id,
+            "entry shim ran on a different task than it was seeded for"
+        );
+        let task = current.task();
+        let raw_entry = task.entry_point as usize as *mut ();
+        let entry = slopos_ostd::util::fn_ptr::fn_ptr_from_raw::<TaskEntry>(raw_entry);
+        let fatal_if_panics = crate::per_cpu::is_idle_task(slopos_ostd::task::TaskAddr::of(task))
+            || (task.flags & TASK_FLAG_SYSTEM) != 0
+            || !slopos_ostd::panic_recovery::production_recovery_enabled();
+        // `kernel_thread_trampoline` (the spawn() facade's entry point) already
+        // wraps the real entry in its own run_recoverable — skip the shim's
+        // boundary for it so a panic is caught exactly once.
+        let already_recoverable =
+            task.entry_point == crate::runtime::kernel_thread_trampoline as *const () as u64;
+        // The guard is dropped here, before `entry` runs: the task body may
+        // block, migrate or exit, and none of that is a borrow this frame
+        // should still be holding.
+        (entry, task.entry_arg, fatal_if_panics, already_recoverable)
     };
+    let (entry, arg, fatal_if_panics, already_recoverable) = seeded;
 
     if fatal_if_panics || already_recoverable {
         entry(arg);
@@ -439,7 +471,9 @@ fn init_task_context(task: &mut Task) {
     if task.flags & TASK_FLAG_KERNEL_MODE != 0 {
         let trampoline = task_entry_trampoline as *const () as u64;
         let shim = kernel_task_entry_shim as *const () as u64;
-        let shim_arg = (task as *mut Task).cast::<c_void>() as u64;
+        // The task's id, not its address: a scalar the trampoline can carry in
+        // a saved register file without it being an unowned task handle.
+        let shim_arg = task.task_id as u64;
         super::task_accessors::task_kernel_stack_seed_ret(task.kernel_stack_top, trampoline);
         *task.switch_ctx.get_mut() =
             SwitchContext::new_for_task(shim, shim_arg, task.kernel_stack_top, trampoline);
