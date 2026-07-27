@@ -381,10 +381,18 @@ pub(crate) fn dispatch(cpu_id: usize, task: *mut Task) {
 /// as [`dispatch`] — only invoke from a fixture that has primed
 /// `unsafe_stack_sp` and is running with preemption disabled on the
 /// target CPU.
+///
+/// Takes an id rather than a pointer so the registry guard that keeps the
+/// task alive across the dispatch is held here, where the dispatch happens,
+/// instead of being something the caller has to remember to hold.
+/// Returns whether the id still named a live task.
 #[cfg(feature = "test-hooks")]
-#[inline]
-pub fn dispatch_for_test(cpu_id: usize, task: *mut Task) {
-    dispatch(cpu_id, task);
+pub fn dispatch_task_for_test(cpu_id: usize, task_id: u32) -> bool {
+    let Some(task) = crate::task::task_find_by_id(task_id) else {
+        return false;
+    };
+    dispatch(cpu_id, task.as_ptr());
+    true
 }
 
 /// Install `task` as `cpu_id`'s idle task.  Writes `PCR.idle_task` —
@@ -997,10 +1005,17 @@ pub fn schedule_task(task: *mut Task) -> c_int {
 /// a task straight out of `task_create` is not in it — it is `Nascent`, which
 /// every wake path deliberately refuses. Reaching the state for real means
 /// publishing the task and letting it run and block, which those tests are not
-/// about. Returns false if the task had already left `Nascent`.
+/// about. Returns false if the task is gone or had already left `Nascent`.
 #[cfg(feature = "test-hooks")]
-pub fn clear_nascent_for_test(task: *mut Task) -> bool {
-    task_sched_placement_compare_exchange(task, SchedPlacement::Nascent, SchedPlacement::None)
+pub fn clear_nascent_for_test(task_id: u32) -> bool {
+    let Some(task) = crate::task::task_find_by_id(task_id) else {
+        return false;
+    };
+    task_sched_placement_compare_exchange(
+        task.as_ptr(),
+        SchedPlacement::Nascent,
+        SchedPlacement::None,
+    )
 }
 
 /// Schedule a **newly created** task (fork, spawn, exec).

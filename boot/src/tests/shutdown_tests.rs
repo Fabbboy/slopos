@@ -10,8 +10,7 @@ use slopos_sched::scheduler::{
 };
 use slopos_sched::task::{
     INVALID_TASK_ID, TASK_FLAG_KERNEL_MODE, TaskPriority, TaskStatus, init_task_manager,
-    task_create, task_find_by_id_raw_for_test as task_find_by_id, task_shutdown_all,
-    task_terminate,
+    task_create, task_find_by_id, task_shutdown_all, task_terminate,
 };
 use slopos_sched::test_fixture::KernelTestScope;
 use slopos_testing::{TestResult, assert_eq_test, assert_test};
@@ -25,13 +24,13 @@ use core::sync::atomic::{AtomicU32, Ordering};
 // =============================================================================
 
 struct ShutdownFixture {
-    scope: KernelTestScope,
+    _scope: KernelTestScope,
 }
 
 impl ShutdownFixture {
     fn new() -> Self {
         Self {
-            scope: KernelTestScope::enter(),
+            _scope: KernelTestScope::enter(),
         }
     }
 }
@@ -176,7 +175,7 @@ pub fn test_scheduler_shutdown_clears_state() -> TestResult {
     );
     assert_test!(task_id != INVALID_TASK_ID, "task creation failed");
     assert_test!(
-        !task_find_by_id(task_id).is_null(),
+        task_find_by_id(task_id).is_some(),
         "task should be findable"
     );
 
@@ -474,8 +473,8 @@ pub fn test_task_terminate_idempotent() -> TestResult {
     assert_eq_test!(task_terminate(task_id), 0, "first terminate should succeed");
 
     // Verify the task is actually terminated.
-    if let Some(handle) = slopos_sched::inspect::wrap(&_fixture.scope, task_find_by_id(task_id)) {
-        let status = handle.status();
+    if let Some(task) = task_find_by_id(task_id) {
+        let status = task.status();
         assert_eq_test!(
             status,
             TaskStatus::Terminated,

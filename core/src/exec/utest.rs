@@ -19,9 +19,7 @@ use slopos_testing::{TestDesc, TestResult, ktap};
 use crate::exec::{FdAction, spawn_program_with_attrs};
 use slopos_sched::scheduler::scheduler_get_current_task;
 use slopos_sched::scheduler::{sleep_current_task_ms, task_wait_for};
-use slopos_sched::task::{
-    task_consume_zombie, task_find_by_id_raw_for_test as task_find_by_id, task_peek_exit_info,
-};
+use slopos_sched::task::{task_consume_zombie, task_find_by_id, task_peek_exit_info};
 use slopos_sched::test_reports::{
     PendingDrain, TestReport, consume_pending_drain, pending_drain_present,
 };
@@ -169,7 +167,7 @@ fn dispatch(bin: &str, argv: Option<&[&[u8]]>) -> TestResult {
     const POLL_STEP_MS: u32 = 1;
     const POLL_LIMIT_MS: u32 = 5000;
     while !pending_drain_present(pid) {
-        if task_find_by_id(pid).is_null() {
+        if task_find_by_id(pid).is_none() {
             // Slot reset under us with no drain stashed — task crashed or
             // was terminated by an external path that bypassed our stash.
             break;

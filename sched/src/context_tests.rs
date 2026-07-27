@@ -9,25 +9,24 @@ use super::task_struct::Task;
 use slopos_abi::task::{INVALID_TASK_ID, TASK_FLAG_KERNEL_MODE, TaskStatus};
 use slopos_arch::InterruptFrame;
 use slopos_ostd::klog_info;
-use slopos_testing::{TestResult, assert_eq_test, assert_not_null, assert_test};
+use slopos_testing::{TestResult, assert_eq_test, assert_some, assert_test};
 
 use super::scheduler::save_task_context_from_interrupt_frame;
 use super::task::{
-    MAX_TASKS, task_create, task_find_by_id_raw_for_test as task_find_by_id, task_get_info,
-    task_set_state, task_status, task_terminate,
+    MAX_TASKS, task_create, task_find_by_id, task_set_state, task_status, task_terminate,
 };
 use super::task_struct::TaskContext;
 use super::test_fixture::KernelTestScope;
 use slopos_arch::arch::gdt::SegmentSelector;
 
 struct ContextFixture {
-    scope: KernelTestScope,
+    _scope: KernelTestScope,
 }
 
 impl ContextFixture {
     fn new() -> Self {
         Self {
-            scope: KernelTestScope::enter(),
+            _scope: KernelTestScope::enter(),
         }
     }
 }
@@ -54,16 +53,12 @@ pub fn test_task_context_initial_state() -> TestResult {
     let task_id = create_test_task(b"CtxInit\0", TASK_FLAG_KERNEL_MODE);
     assert_test!(task_id != INVALID_TASK_ID);
 
-    let task_ptr = task_find_by_id(task_id);
-    assert_not_null!(task_ptr);
+    let task = assert_some!(task_find_by_id(task_id));
 
-    if let Some(h) = super::inspect::wrap(&_fixture.scope, task_ptr) {
-        let ctx_rsp = h.context_rsp();
-        let ctx_rip = h.context_rip();
-
-        if ctx_rsp == 0 && ctx_rip == 0 {
-            klog_info!("CONTEXT_TEST: WARNING - Context RSP and RIP both zero");
-        }
+    let ctx_rsp = task.context.rsp;
+    let ctx_rip = task.context.rip;
+    if ctx_rsp == 0 && ctx_rip == 0 {
+        klog_info!("CONTEXT_TEST: WARNING - Context RSP and RIP both zero");
     }
 
     task_terminate(task_id);
@@ -76,14 +71,11 @@ pub fn test_task_state_transitions_exhaustive() -> TestResult {
     let task_id = create_test_task(b"StateTrans\0", TASK_FLAG_KERNEL_MODE);
     assert_test!(task_id != INVALID_TASK_ID);
 
-    let task_ptr = task_find_by_id(task_id);
-    assert_not_null!(task_ptr);
+    let task = assert_some!(task_find_by_id(task_id));
+    let task_ptr = task.as_ptr();
 
-    let initial_state = super::inspect::wrap(&_fixture.scope, task_ptr)
-        .map(|h| h.status())
-        .unwrap_or(TaskStatus::Terminated);
     assert_eq_test!(
-        initial_state,
+        task.status(),
         TaskStatus::Blocked,
         "new task not in BLOCKED/non-runnable state"
     );
@@ -108,9 +100,8 @@ pub fn test_task_invalid_state_transition() -> TestResult {
     task_terminate(task_id);
     let _result = task_set_state(task_id, TaskStatus::Running);
 
-    let task_ptr = task_find_by_id(task_id);
-    if let Some(h) = super::inspect::wrap(&_fixture.scope, task_ptr) {
-        let state = h.status();
+    if let Some(task) = task_find_by_id(task_id) {
+        let state = task.status();
         assert_test!(
             state != TaskStatus::Running,
             "revived terminated task to RUNNING"
@@ -121,38 +112,8 @@ pub fn test_task_invalid_state_transition() -> TestResult {
 }
 
 // =============================================================================
-// Task Info & Termination Edge Cases
+// Termination Edge Cases
 // =============================================================================
-
-pub fn test_task_get_info_null_output() -> TestResult {
-    let _fixture = ContextFixture::new();
-
-    let task_id = create_test_task(b"InfoNull\0", TASK_FLAG_KERNEL_MODE);
-    assert_test!(task_id != INVALID_TASK_ID);
-
-    let _result = task_get_info(task_id, ptr::null_mut());
-
-    task_terminate(task_id);
-    TestResult::Pass
-}
-
-pub fn test_task_get_info_invalid_id() -> TestResult {
-    let _fixture = ContextFixture::new();
-
-    let mut task_ptr: *mut Task = ptr::null_mut();
-
-    let result = task_get_info(INVALID_TASK_ID, &mut task_ptr);
-    assert_test!(
-        result != 0 || task_ptr.is_null(),
-        "succeeded for INVALID_TASK_ID"
-    );
-
-    task_ptr = ptr::null_mut();
-    let result2 = task_get_info(0xFFFF_FFFF, &mut task_ptr);
-    assert_test!(result2 != 0 || task_ptr.is_null(), "succeeded for max ID");
-
-    TestResult::Pass
-}
 
 pub fn test_task_double_terminate() -> TestResult {
     let _fixture = ContextFixture::new();
@@ -184,16 +145,15 @@ pub fn test_task_find_after_terminate() -> TestResult {
     let task_id = create_test_task(b"FindTerm\0", TASK_FLAG_KERNEL_MODE);
     assert_test!(task_id != INVALID_TASK_ID);
 
-    assert_not_null!(
-        task_find_by_id(task_id),
+    assert_test!(
+        task_find_by_id(task_id).is_some(),
         "task should exist before termination"
     );
 
     task_terminate(task_id);
 
-    let ptr_after = task_find_by_id(task_id);
-    if let Some(h) = super::inspect::wrap(&_fixture.scope, ptr_after) {
-        let state = h.status();
+    if let Some(task) = task_find_by_id(task_id) {
+        let state = task.status();
         assert_eq_test!(
             state,
             TaskStatus::Terminated,
@@ -224,12 +184,8 @@ pub fn test_task_process_id_consistency() -> TestResult {
     let task_id = create_test_task(b"ProcId\0", TASK_FLAG_KERNEL_MODE);
     assert_test!(task_id != INVALID_TASK_ID);
 
-    let task_ptr = task_find_by_id(task_id);
-    assert_not_null!(task_ptr);
-
-    let _proc_id = super::inspect::wrap(&_fixture.scope, task_ptr)
-        .map(|h| h.process_id())
-        .unwrap_or(0);
+    let task = assert_some!(task_find_by_id(task_id));
+    let _proc_id = task.process_id;
 
     task_terminate(task_id);
     TestResult::Pass
@@ -241,12 +197,8 @@ pub fn test_task_flags_preserved() -> TestResult {
     let task_id = create_test_task(b"FlagsTest\0", TASK_FLAG_KERNEL_MODE);
     assert_test!(task_id != INVALID_TASK_ID);
 
-    let task_ptr = task_find_by_id(task_id);
-    assert_not_null!(task_ptr);
-
-    let flags = super::inspect::wrap(&_fixture.scope, task_ptr)
-        .map(|h| h.flags())
-        .unwrap_or(0);
+    let task = assert_some!(task_find_by_id(task_id));
+    let flags = task.flags;
     assert_test!(
         (flags & TASK_FLAG_KERNEL_MODE) != 0,
         "kernel mode flag not preserved"
@@ -306,12 +258,8 @@ pub fn test_task_has_switch_ctx() -> TestResult {
     let task_id = create_test_task(b"SwitchTest\0", TASK_FLAG_KERNEL_MODE);
     assert_test!(task_id != INVALID_TASK_ID);
 
-    let task_ptr = task_find_by_id(task_id);
-    assert_not_null!(task_ptr);
-
-    let rflags = super::inspect::wrap(&_fixture.scope, task_ptr)
-        .map(|h| h.task().switch_ctx.rflags)
-        .unwrap_or(0);
+    let task = assert_some!(task_find_by_id(task_id));
+    let rflags = task.switch_ctx.rflags;
     assert_eq_test!(rflags, 0x202, "switch_ctx rflags not initialized");
 
     task_terminate(task_id);
@@ -503,8 +451,6 @@ slopos_testing::stest!(
     suite = context
 );
 slopos_testing::stest!(name = test_task_invalid_state_transition, suite = context);
-slopos_testing::stest!(name = test_task_get_info_null_output, suite = context);
-slopos_testing::stest!(name = test_task_get_info_invalid_id, suite = context);
 slopos_testing::stest!(name = test_task_double_terminate, suite = context);
 slopos_testing::stest!(name = test_task_terminate_invalid_ids, suite = context);
 slopos_testing::stest!(name = test_task_find_after_terminate, suite = context);

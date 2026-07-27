@@ -56,6 +56,32 @@ macro_rules! assert_not_null {
     }};
 }
 
+/// Unwrap an `Option`, failing the test when it is `None`.
+///
+/// The registry lookups return an owning guard, so the binding this yields
+/// must outlive every use of the task it names.
+#[macro_export]
+macro_rules! assert_some {
+    ($opt:expr) => {{
+        match $opt {
+            Some(v) => v,
+            None => {
+                slopos_ostd::klog_info!("ASSERT_SOME: value is None");
+                return $crate::TestResult::Fail;
+            }
+        }
+    }};
+    ($opt:expr, $msg:expr) => {{
+        match $opt {
+            Some(v) => v,
+            None => {
+                slopos_ostd::klog_info!("ASSERT_SOME: {}", $msg);
+                return $crate::TestResult::Fail;
+            }
+        }
+    }};
+}
+
 #[macro_export]
 macro_rules! assert_test {
     ($cond:expr) => {{

@@ -1,6 +1,5 @@
 use core::ffi::c_int;
 use core::ops::{ControlFlow, Deref};
-use core::ptr;
 use core::ptr::NonNull;
 use core::sync::atomic::{AtomicBool, Ordering};
 
@@ -530,13 +529,6 @@ pub fn task_find_by_id(task_id: u32) -> Option<TaskRef> {
     with_task_manager(|mgr| mgr.registry.get(task_id))
 }
 
-/// Raw projection for legacy test fixtures whose own scoped handle pins the
-/// task before retaining the pointer.
-#[cfg(feature = "test-hooks")]
-pub fn task_find_by_id_raw_for_test(task_id: u32) -> *mut Task {
-    task_find_by_id(task_id).map_or(ptr::null_mut(), |task| task.as_ptr())
-}
-
 /// Mint the width-compatible task handle. Its slot component is the monotonic
 /// task ID; generation is permanently zero because IDs are never recycled.
 pub fn task_handle(task_id: u32) -> Option<Handle<Task>> {
@@ -549,11 +541,6 @@ pub fn task_resolve_handle(handle: Handle<Task>) -> Option<TaskRef> {
         return None;
     }
     task_find_by_id(handle.slot())
-}
-
-#[cfg(feature = "test-hooks")]
-pub fn task_resolve_handle_raw_for_test(handle: Handle<Task>) -> *mut Task {
-    task_resolve_handle(handle).map_or(ptr::null_mut(), |task| task.as_ptr())
 }
 
 /// Find a live task whose active address space matches `cr3`.
@@ -736,23 +723,6 @@ pub(super) fn discard_task(pending: PendingTask) {
     drop(pending);
 }
 
-pub fn task_get_info(task_id: u32, task_info: *mut *mut Task) -> c_int {
-    if task_info.is_null() {
-        return -1;
-    }
-    let Some(task) = task_find_by_id(task_id) else {
-        slopos_ostd::util::ptr_buf::nullable_write(task_info, ptr::null_mut());
-        return -1;
-    };
-    let raw = task.as_ptr();
-    if task.status() == TaskStatus::Invalid {
-        slopos_ostd::util::ptr_buf::nullable_write(task_info, ptr::null_mut());
-        return -1;
-    }
-    slopos_ostd::util::ptr_buf::nullable_write(task_info, raw);
-    0
-}
-
 pub fn task_consume_zombie(task_id: u32) -> Option<ExitInfo> {
     let task = task_find_by_id(task_id)?;
     if task.status() != TaskStatus::Zombie {
@@ -786,10 +756,6 @@ pub fn task_peek_exit_info(task_id: u32) -> Option<ExitInfo> {
 
 pub fn task_get_current_id() -> u32 {
     scheduler::current_task_id()
-}
-
-pub fn task_get_current() -> *mut Task {
-    scheduler::scheduler_get_current_task()
 }
 
 /// Visit every registered task that is neither `Invalid` nor id-less.
