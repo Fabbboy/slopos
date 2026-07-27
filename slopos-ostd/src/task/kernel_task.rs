@@ -11,7 +11,9 @@
 use core::ffi::c_void;
 use core::ptr;
 use core::ptr::addr_of_mut;
-use core::sync::atomic::{AtomicBool, AtomicU8, AtomicU16, AtomicU32, AtomicU64, Ordering};
+use core::sync::atomic::{
+    AtomicBool, AtomicI32, AtomicU8, AtomicU16, AtomicU32, AtomicU64, Ordering,
+};
 
 use slopos_abi::signal::{NSIG, SIG_DFL, SIG_EMPTY, SigSet};
 use slopos_abi::syscall::TtyIndex;
@@ -32,6 +34,9 @@ use crate::task::abi::TaskAbi;
 use crate::task::cell::{TaskExclusive, TaskOwnCell};
 use crate::task::exit_info::ExitInfo;
 use crate::task::fpu::{FPU_STATE_SIZE, FpuState};
+use crate::task::fpu_owner::{
+    FPU_CPU_NONE, fpu_owner_assert_may_take, fpu_owner_take, fpu_owner_yield_after_save,
+};
 use crate::task::job_control::ProcessGroup;
 use crate::task::link_roles::{ReadyQueueRole, ReclaimRole, RemoteWakeRole, SiblingRole};
 use crate::task::state::TaskState;
@@ -454,6 +459,20 @@ pub struct TaskInner<K, U> {
     /// Atomic because the enqueue paths stamp it on whichever CPU is
     /// publishing the task while `select_target_cpu` reads it from another.
     pub last_cpu: AtomicU8,
+    /// The CPU whose register file last held this task's FPU/vector state, or
+    /// [`FPU_CPU_NONE`] for none — the per-task half of the FPU owner tag.
+    ///
+    /// Not to be confused with [`last_cpu`](Self::last_cpu) directly above,
+    /// which is the *scheduler's* placement hint. This one is about the vector
+    /// register file and nothing else: it is stamped by an `XSAVE`/`XRSTOR`
+    /// pairing, not by an enqueue, and it is meaningful only in agreement with
+    /// the per-CPU owner slot. See [`crate::task::fpu_owner`] for why the tag
+    /// has two halves and what each one catches.
+    ///
+    /// Signed rather than a `usize` with a max sentinel because
+    /// [`FPU_CPU_NONE`] must not be a representable CPU index, and because it
+    /// mirrors Linux's `fpu->last_cpu`.
+    fpu_last_cpu: AtomicI32,
     pub migration_count: u32,
     // --- Signal state ---
     /// Bitmask of pending signals (written atomically by kill()).
@@ -565,6 +584,100 @@ impl<K, U> Drop for TaskInner<K, U> {
 pub const TTY_INDEX_NONE: u16 = u16::MAX;
 
 impl<K, U> TaskInner<K, U> {
+    /// The CPU whose register file last held this task's FPU state, or
+    /// [`FPU_CPU_NONE`]. The per-task half of the FPU owner tag; meaningful
+    /// only in agreement with the per-CPU half, via
+    /// [`fpu_state_valid`](crate::task::fpu_owner::fpu_state_valid).
+    #[inline]
+    pub fn fpu_last_cpu(&self) -> i32 {
+        self.fpu_last_cpu.load(Ordering::Acquire)
+    }
+
+    /// Stamp the per-task half of the FPU owner tag.
+    ///
+    /// `pub(crate)` on purpose: outside OSTD the only sanctioned way to move
+    /// this field is [`fpu_save_current`](Self::fpu_save_current) /
+    /// [`fpu_restore_to_cpu`](Self::fpu_restore_to_cpu), which move both halves
+    /// together. A caller able to stamp one half alone could manufacture the
+    /// agreement the tag exists to check.
+    #[inline]
+    pub(crate) fn set_fpu_last_cpu(&self, cpu: i32) {
+        self.fpu_last_cpu.store(cpu, Ordering::Release);
+    }
+
+    /// Capture this task's live FPU/vector registers into its save area and
+    /// hand the register file back.
+    ///
+    /// Pairs the `XSAVE64` with both halves of the owner tag so a call site
+    /// cannot perform one without the other. The witness proves this CPU has
+    /// exclusive access to the task's register state — the same fact that makes
+    /// the save sound in the first place, now checkable rather than commented.
+    ///
+    /// `fpu` is passed rather than reached through `self` because
+    /// [`fpu_state`](Self::fpu_state) is a plain field, not a
+    /// [`TaskOwnCell`]: writing it through a shared reference would be a
+    /// provenance violation, so the buffer arrives as its own `&mut` exactly as
+    /// the signal-frame helpers already take it. A debug assertion checks it is
+    /// *this* task's buffer, which is what keeps the pairing honest until the
+    /// cell migration lets the parameter go away.
+    ///
+    /// Eager by construction: there is no "save only if dirty" branch. Lazy FPU
+    /// switching is CVE-2018-3665 and this is not it.
+    #[inline]
+    pub fn fpu_save_current(
+        &self,
+        witness: &impl TaskExclusive<K, U>,
+        fpu: &mut FpuState,
+        xcr0_mask: u64,
+    ) {
+        debug_assert!(
+            core::ptr::eq(witness.witnessed(), self),
+            "witness names a different task"
+        );
+        debug_assert!(
+            core::ptr::eq(core::ptr::from_ref(fpu), &raw const self.fpu_state),
+            "save area belongs to a different task"
+        );
+        let cpu = crate::task::fpu_owner::fpu_current_cpu();
+        fpu_owner_assert_may_take(self, cpu);
+        fpu.save_current(xcr0_mask);
+        fpu_owner_yield_after_save(self, cpu);
+    }
+
+    /// Load this task's saved FPU/vector state into the register file and take
+    /// ownership of it.
+    ///
+    /// The mirror of [`fpu_save_current`](Self::fpu_save_current); the same
+    /// witness, buffer-identity and tag-pairing rules apply. The precondition
+    /// fires when another task's state is live and has not been saved — the
+    /// restore would discard it.
+    ///
+    /// Deliberately unconditional. The tag makes it *possible* to skip a
+    /// restore when [`fpu_state_valid`](crate::task::fpu_owner::fpu_state_valid)
+    /// already holds, which is Linux's optimisation and not lazy FPU — but
+    /// taking it is a behaviour change, so this entry point stays eager and the
+    /// predicate is exported for a caller that wants to opt in explicitly.
+    #[inline]
+    pub fn fpu_restore_to_cpu(
+        &self,
+        witness: &impl TaskExclusive<K, U>,
+        fpu: &FpuState,
+        xcr0_mask: u64,
+    ) {
+        debug_assert!(
+            core::ptr::eq(witness.witnessed(), self),
+            "witness names a different task"
+        );
+        debug_assert!(
+            core::ptr::eq(core::ptr::from_ref(fpu), &raw const self.fpu_state),
+            "save area belongs to a different task"
+        );
+        let cpu = crate::task::fpu_owner::fpu_current_cpu();
+        fpu_owner_assert_may_take(self, cpu);
+        fpu.restore_to_cpu(xcr0_mask);
+        fpu_owner_take(self, cpu);
+    }
+
     /// Replace the working directory. The witness is what proves no other CPU
     /// is reading the bytes while they are half-written; the length is
     /// published after them.
@@ -781,6 +894,7 @@ impl<K, U> TaskInner<K, U> {
             fate_pending: 0,
             cpu_affinity: 0,
             last_cpu: AtomicU8::new(0),
+            fpu_last_cpu: AtomicI32::new(FPU_CPU_NONE),
             migration_count: 0,
             signal_pending: AtomicU64::new(0),
             signal_blocked: AtomicU64::new(SIG_EMPTY),
@@ -837,6 +951,11 @@ impl<K, U> TaskInner<K, U> {
                 // Not all-zero: zero would name TTY 0, not "no controlling
                 // terminal".
                 addr_of_mut!((*slot).controlling_tty).write(AtomicU16::new(TTY_INDEX_NONE));
+
+                // Also not all-zero: zero would name CPU 0 as holding this
+                // task's vector state, which would let a never-run task pass
+                // the FPU owner agreement check on the boot CPU.
+                addr_of_mut!((*slot).fpu_last_cpu).write(AtomicI32::new(FPU_CPU_NONE));
 
                 addr_of_mut!((*slot).cwd_len).write(AtomicU16::new(1));
                 // `TaskOwnCell` is `repr(transparent)`, so the cell's address
@@ -1089,6 +1208,12 @@ impl<K, U> TaskInner<K, U> {
         // parent's `true` would let the child's reap take back a reference that
         // was never given, dropping the count one below what any owner holds.
         self.existence_ref_parked = AtomicBool::new(false);
+        // The bytewise copy also duplicated the parent's FPU owner tag. The
+        // child's vector state has never been live in any register file, so
+        // inheriting a CPU index would let it agree with a slot that names the
+        // *parent* — and skip a restore it genuinely needs. Poisoned so the
+        // agreement check fails and the child takes the slow path.
+        self.fpu_last_cpu = AtomicI32::new(FPU_CPU_NONE);
     }
 }
 
