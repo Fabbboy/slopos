@@ -10,6 +10,7 @@
 pub mod abi;
 pub mod accessors;
 pub mod addr;
+pub mod borrowed;
 pub mod cell;
 pub mod diag;
 pub mod drop_context;
