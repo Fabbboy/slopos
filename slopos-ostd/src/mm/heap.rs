@@ -1163,6 +1163,21 @@ impl<T: ?Sized> KArc<T> {
         unsafe { core::ptr::addr_of!((*this.ptr.as_ptr()).data) }
     }
 
+    /// The allocation's stable node pointer, as a [`NonNull`].
+    ///
+    /// The same address [`KArc::as_ptr`] and [`KArc::into_raw`] yield, which is
+    /// also the node pointer the placement primitives and the intrusive links
+    /// are keyed on — so a container can derive its key from a handle without a
+    /// null check, and without the pointer ever being the *source* of a
+    /// reference. Borrowing, not owning: parking the result requires a matching
+    /// retain or leak.
+    #[inline]
+    pub fn node(this: &Self) -> NonNull<T> {
+        // SAFETY: `as_ptr` derives from a live allocation's initialized `data`
+        // field, whose address is never null.
+        unsafe { NonNull::new_unchecked(Self::as_ptr(this).cast_mut()) }
+    }
+
     /// Move one strong reference into an OSTD-owned raw slot.
     pub(crate) fn into_raw(this: Self) -> *const T
     where

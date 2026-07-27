@@ -607,6 +607,150 @@ impl<T: Send + 'static> RcuCell<T> {
 unsafe impl<T: Send + 'static> Send for RcuCell<T> {}
 unsafe impl<T: Send + Sync + 'static> Sync for RcuCell<T> {}
 
+/// RCU-protected slot holding at most one [`KArc<T>`].
+///
+/// The refcounted sibling of [`RcuCell`]. Where `RcuCell` owns a `KBox<T>` and
+/// lends readers a guard that borrows it, this owns one *strong reference* and
+/// gives each reader one of their own — so a reader's handle stays valid after
+/// the slot has moved on. That is what a shared object with independent
+/// lifetime, like a process group, needs from a field that a *different* task
+/// may replace at any moment.
+///
+/// - **Read** — preemption off, one acquire load, one refcount increment.
+///   Wait-free: no lock, no allocation, and no ordering against the writer
+///   beyond the load itself.
+/// - **Write** — one swap, then the displaced reference is released after a
+///   grace period. So the destructor never runs on the writer's stack, never
+///   under the writer's locks, and never with interrupts off.
+///
+/// # Why the read side holds the section across the increment
+///
+/// Loading the pointer and incrementing its refcount are two steps, and a
+/// writer may swap the slot between them. What makes the increment sound is
+/// not that it beat the writer, but that the writer's *release* cannot run
+/// until every CPU has passed through a quiescent state — and this CPU cannot,
+/// because [`rcu_read_lock`] holds preemption off across both steps. Shrinking
+/// the section to cover only the load would reintroduce exactly the
+/// resurrection race the deferral exists to prevent.
+///
+/// `T: Send + Sync` because a reference published here can be cloned, read and
+/// finally released by a CPU other than the one that stored it.
+pub struct RcuArcSlot<T: Send + Sync + 'static> {
+    /// A strong reference parked as a raw pointer (`KArc::into_raw`), or null.
+    ptr: AtomicPtr<T>,
+}
+
+impl<T: Send + Sync + 'static> RcuArcSlot<T> {
+    /// An empty slot. `const`, so it can initialise a struct field.
+    #[inline]
+    pub const fn empty() -> Self {
+        Self {
+            ptr: AtomicPtr::new(core::ptr::null_mut()),
+        }
+    }
+
+    /// Take an owning handle on the current contents, or `None` if empty.
+    #[inline]
+    pub fn load(&self) -> Option<crate::mm::KArc<T>> {
+        let _rcu = rcu_read_lock();
+        let raw = self.ptr.load(Ordering::Acquire);
+        if raw.is_null() {
+            return None;
+        }
+        // Reconstruct the slot's parked reference without taking it, clone one
+        // fresh reference from it, then hand the borrow back untouched — the
+        // same balanced borrow the task placement primitives use.
+        // SAFETY: `raw` was produced by `KArc::into_raw` on a reference this
+        // slot still owns. A concurrent `store` cannot have released it yet:
+        // that release is deferred past a grace period, which cannot complete
+        // while `_rcu` holds preemption off on this CPU.
+        let borrowed = unsafe { crate::mm::KArc::from_raw(raw.cast_const()) };
+        let cloned = borrowed.clone();
+        let _ = crate::mm::KArc::into_raw(borrowed);
+        Some(cloned)
+    }
+
+    /// Publish `value`, releasing the displaced reference after a grace period.
+    ///
+    /// Must not be called with interrupts disabled or a lock held that the RCU
+    /// machinery could need — this is a writer path, and writers are rare.
+    pub fn store(&self, value: Option<crate::mm::KArc<T>>) {
+        let new_raw = match value {
+            Some(arc) => crate::mm::KArc::into_raw(arc).cast_mut(),
+            None => core::ptr::null_mut(),
+        };
+        let old = self.ptr.swap(new_raw, Ordering::AcqRel);
+        if old.is_null() {
+            return;
+        }
+        // SAFETY: `old` is the reference this slot owned until the swap, and
+        // the swap made this call its unique owner, so the deferred release
+        // happens exactly once. `drop_karc::<T>` is the matching release, and
+        // deferring it past a grace period is what lets a concurrent `load`
+        // finish its increment first. `call_rcu`'s own OOM path takes a
+        // synchronous grace period before invoking the callback, so the
+        // ordering holds even when the deferral cannot be allocated.
+        unsafe { call_rcu(old.cast::<u8>(), drop_karc::<T>) };
+    }
+
+    /// Replace the contents with exclusivity proven by `&mut self` rather than
+    /// by a grace period, returning the displaced handle to the caller.
+    ///
+    /// Reachable only where no reader can exist — construction, before the
+    /// containing object is published, and [`Drop`].
+    #[inline]
+    pub fn replace_exclusive(
+        &mut self,
+        value: Option<crate::mm::KArc<T>>,
+    ) -> Option<crate::mm::KArc<T>> {
+        let new_raw = match value {
+            Some(arc) => crate::mm::KArc::into_raw(arc).cast_mut(),
+            None => core::ptr::null_mut(),
+        };
+        let old = *self.ptr.get_mut();
+        *self.ptr.get_mut() = new_raw;
+        if old.is_null() {
+            return None;
+        }
+        // SAFETY: `old` is the reference this slot owned, and `&mut self`
+        // proves no other observer exists, so taking it back is balanced.
+        Some(unsafe { crate::mm::KArc::from_raw(old.cast_const()) })
+    }
+
+    /// Whether the slot currently holds a reference. Racy by nature; for
+    /// diagnostics and assertions, never for deciding to dereference.
+    #[inline]
+    pub fn is_empty_racy(&self) -> bool {
+        self.ptr.load(Ordering::Relaxed).is_null()
+    }
+}
+
+impl<T: Send + Sync + 'static> Default for RcuArcSlot<T> {
+    #[inline]
+    fn default() -> Self {
+        Self::empty()
+    }
+}
+
+impl<T: Send + Sync + 'static> Drop for RcuArcSlot<T> {
+    fn drop(&mut self) {
+        // The slot owns one reference; releasing it here is what keeps a
+        // dropped container from leaking its member. `&mut self` proves no
+        // reader can be mid-clone, so no grace period is needed.
+        drop(self.replace_exclusive(None));
+    }
+}
+
+/// Release one `KArc<T>` parked by [`RcuArcSlot::store`].
+///
+/// # Safety
+/// `raw` must be the `KArc::into_raw` pointer a single `RcuArcSlot::store`
+/// displaced, and a grace period must have elapsed since that swap.
+unsafe fn drop_karc<T: Send + Sync + 'static>(raw: *mut u8) {
+    // SAFETY: forwarded from the caller contract above.
+    drop(unsafe { crate::mm::KArc::<T>::from_raw(raw.cast::<T>().cast_const()) });
+}
+
 fn drop_typed<T: Send + 'static>(_b: crate::mm::KBox<T>) {
     // `KBox::drop` releases the heap allocation.
 }

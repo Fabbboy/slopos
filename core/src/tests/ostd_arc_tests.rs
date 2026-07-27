@@ -8,6 +8,7 @@
 //!   - `KArc::try_new_cyclic` wires the self-referential weak back-link
 //!   - `KArc::weak_count` accuracy as weak handles come and go
 
+use slopos_ostd::sync::RcuArcSlot;
 use slopos_ostd::{KArc, KWeak};
 use slopos_testing::TestResult;
 use slopos_testing::assert_test;
@@ -161,8 +162,82 @@ pub fn test_karc_strong_count_saturates() -> TestResult {
     TestResult::Pass
 }
 
+/// `RcuArcSlot::load` mints exactly one reference per call, and the handles it
+/// mints stay valid after the slot has been published over.
+///
+/// Kernel-side because both halves open an RCU read-side section, and
+/// `rcu_read_lock` takes a `PreemptGuard` whose gs-relative increment faults
+/// without a PCR — so the host suite (`slopos-ostd/tests/rcu_arc_slot.rs`)
+/// can only reach the exclusive paths. This is the test that covers the
+/// published path a `setpgid` racing a `kill(-pgid)` actually takes.
+pub fn test_rcu_arc_slot_load_mints_one_reference() -> TestResult {
+    let slot: RcuArcSlot<u64> = RcuArcSlot::empty();
+    assert_test!(slot.load().is_none(), "an empty slot loads nothing");
+
+    let Ok(published) = KArc::try_new(0xDEAD_BEEF_u64) else {
+        return TestResult::Fail;
+    };
+    let observer = KArc::downgrade(&published);
+    slot.store(Some(published));
+
+    let Some(first) = slot.load() else {
+        return TestResult::Fail;
+    };
+    assert_test!(*first == 0xDEAD_BEEF, "loaded value mismatch");
+    assert_test!(
+        KArc::strong_count(&first) == 2,
+        "load mints one reference on top of the slot's own"
+    );
+
+    let Some(second) = slot.load() else {
+        return TestResult::Fail;
+    };
+    assert_test!(
+        KArc::strong_count(&second) == 3,
+        "a second load mints a second reference"
+    );
+    assert_test!(
+        KArc::ptr_eq(&first, &second),
+        "both loads name the same allocation"
+    );
+
+    // Publish over the slot. The displaced reference is released only after a
+    // grace period, and the handles already minted are independent of it —
+    // which is the property a borrow-lending cell could not offer.
+    let Ok(replacement) = KArc::try_new(0x1234_u64) else {
+        return TestResult::Fail;
+    };
+    slot.store(Some(replacement));
+    assert_test!(
+        *first == 0xDEAD_BEEF,
+        "an outstanding reader handle survives republication"
+    );
+
+    drop(first);
+    drop(second);
+    // The slot's own reference is still parked for the grace period, so the
+    // allocation must not be gone yet; what this pins down is that the reader
+    // handles were released rather than leaked.
+    slot.store(None);
+    // `call_rcu` only queues; it is the timer tick that arms the drain via
+    // `rcu_raise_softirq`. Arm it by hand rather than waiting a tick, so the
+    // test is deterministic. `rcu_process_callbacks` takes the grace period
+    // itself, inside `drain_and_invoke`.
+    slopos_ostd::sync::rcu_raise_softirq();
+    slopos_ostd::sync::rcu_process_callbacks();
+    assert_test!(
+        observer.upgrade().is_none(),
+        "every reference the slot handed out was released exactly once"
+    );
+    TestResult::Pass
+}
+
 slopos_testing::stest!(
     name = test_kweak_upgrade_after_last_strong_drop_is_none,
+    suite = ostd_arc
+);
+slopos_testing::stest!(
+    name = test_rcu_arc_slot_load_mints_one_reference,
     suite = ostd_arc
 );
 slopos_testing::stest!(

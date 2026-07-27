@@ -9,6 +9,7 @@
 
 pub mod abi;
 pub mod accessors;
+pub mod addr;
 pub mod cell;
 pub mod drop_context;
 pub mod exit_info;
@@ -24,6 +25,7 @@ pub mod switch;
 pub mod task;
 pub mod test_reports;
 
+pub use addr::TaskAddr;
 pub use cell::{CurrentTask, SwitchWindow, TaskExclusive, TaskOwnCell};
 pub use drop_context::{assert_task_drop_context, drop_off_lock, run_off_lock};
 pub use exit_info::ExitInfo;
@@ -34,7 +36,7 @@ pub use placement::{
     task_destroy_parked, task_existence_is_parked, task_existence_park,
     task_existence_parked_count, task_existence_release, task_placement_clone, task_placement_leak,
     task_placement_reclaim, task_placement_retain, task_placement_strong_count,
-    task_release_strong,
+    task_release_strong, with_parked,
 };
 pub use state::{TaskState, TaskStateView};
 pub use test_reports::{

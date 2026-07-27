@@ -231,6 +231,37 @@ pub fn task_destroy_parked<K, U>(node: NonNull<TaskInner<K, U>>) {
     unsafe { KArc::destroy_deferred(node) };
 }
 
+/// Borrow a task whose last strong reference is already gone.
+///
+/// The reclaim path has to ask questions of a task it has just won the
+/// one-to-zero release on: `task_put` consults the dispatch-pin predicate
+/// before deciding whether the destructor may run in this context. At that
+/// moment the strong count is zero and no [`KArc`] exists, so there is no
+/// owning handle to borrow from and [`task_placement_clone`] would be
+/// resurrection rather than a clone.
+///
+/// This is the one sanctioned way to form a `&TaskInner` without an owning
+/// reference behind it, and it is sound for the opposite reason to every other
+/// borrow in this module: not because someone else is keeping the task alive,
+/// but because *nobody else can reach it at all*.
+///
+/// # Correctness
+/// `node` must be the `Some` result of exactly one [`task_release_strong`]
+/// that has not yet been passed to [`task_destroy_parked`]. That call proved
+/// unique ownership — the body is still initialised and no other reference to
+/// it can exist — so the borrow is exclusive by construction. `f` must not
+/// store the borrow anywhere that outlives the call.
+#[inline]
+pub fn with_parked<K, U, R>(
+    node: NonNull<TaskInner<K, U>>,
+    f: impl FnOnce(&TaskInner<K, U>) -> R,
+) -> R {
+    // SAFETY: per the contract the caller uniquely owns `node` and its body is
+    // still initialised, so this reference is valid and unaliased for the
+    // duration of `f`.
+    f(unsafe { node.as_ref() })
+}
+
 /// Read a live task's current strong reference count without taking a
 /// reference. For diagnostics and invariant assertions only. Same liveness
 /// contract as [`task_placement_clone`].

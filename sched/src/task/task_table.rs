@@ -36,6 +36,19 @@ impl TaskRef {
         KArc::as_ptr(self.arc.as_ref().expect("live TaskRef")) as *mut Task
     }
 
+    /// The owning handle behind this guard.
+    ///
+    /// [`Deref`] already answers "read this task's state"; this answers the
+    /// other question a lookup result gets asked — "park a reference to it" —
+    /// for the callers that mint one (a ready-queue publication, a wait map, a
+    /// futex bucket). Lending the handle rather than the pointer is what makes
+    /// the mint's precondition, *the caller holds a live strong reference*, a
+    /// fact the signature carries instead of a comment.
+    #[inline]
+    pub fn arc(&self) -> &KArc<Task> {
+        self.arc.as_ref().expect("live TaskRef")
+    }
+
     /// Weak handle onto the same allocation, so a test can distinguish "the
     /// registration is gone" from "the allocation is gone".
     #[cfg(feature = "test-hooks")]
