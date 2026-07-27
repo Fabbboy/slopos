@@ -34,6 +34,16 @@
 //! a bare CAS with no lock — which in turn is what lets a push happen under the
 //! registry lock, where taking any further lock would risk the very deadlock
 //! this module exists to avoid.
+//!
+//! # The reclaim token
+//!
+//! "The pusher won the final release" is carried by a value rather than by this
+//! comment. `task_release_strong` hands back a `ParkedTask` only to the winner;
+//! every operation here takes it by value, so the allocation has exactly one
+//! owner at each point and a double-destroy does not typecheck. The stack
+//! itself is threaded through the task bodies and can only hold a pointer, so
+//! the token is surrendered on push and reconstituted on drain — one place,
+//! marked as such below.
 
 use core::ptr;
 use core::ptr::NonNull;
@@ -46,9 +56,15 @@ use slopos_ostd::task::accessors::{
     task_reclaim_next_load, task_reclaim_next_store_relaxed, task_reclaim_try_link,
     task_reclaim_unlink,
 };
-use slopos_ostd::task::{task_destroy_parked, task_release_strong};
+use slopos_ostd::task::{
+    ParkedTask, task_destroy_parked, task_parked_leak, task_parked_reclaim, task_release_strong,
+};
 
 use super::Task;
+use crate::task_stack::{KernelStack, UnsafeStack};
+
+/// The reclaim token for this crate's concrete `Task`.
+type ParkedTaskRef = ParkedTask<KernelStack, UnsafeStack>;
 
 /// Tasks whose final reference was released where the destructor could not run.
 ///
@@ -66,15 +82,17 @@ static TASK_GRAVEYARD: AtomicPtr<Task> = AtomicPtr::new(ptr::null_mut());
 /// for [`task_graveyard_drain`].
 #[inline]
 pub fn task_put(arc: KArc<Task>) {
-    let Some(node) = task_release_strong(arc) else {
+    let Some(parked) = task_release_strong(arc) else {
         // Other references remain: a bare decrement, safe anywhere.
         return;
     };
-    // We won the one-to-zero transition, so `node` is ours alone.
-    if destroy_context_is_safe(node) {
-        task_destroy_parked(node);
+    // The token is the proof that we won the one-to-zero transition, so the
+    // allocation is ours alone. Both arms consume it, so exactly one of them
+    // can run and neither can run twice.
+    if destroy_context_is_safe(parked.node()) {
+        task_destroy_parked(parked);
     } else {
-        graveyard_push(node);
+        graveyard_push(parked);
     }
 }
 
@@ -102,8 +120,11 @@ fn destroy_context_is_safe(node: NonNull<Task>) -> bool {
 }
 
 /// Park a uniquely-owned dead task for later destruction.
-fn graveyard_push(node: NonNull<Task>) {
-    let raw = node.as_ptr();
+///
+/// Consumes the reclaim token: from here the stack owns the allocation, and the
+/// only way back to a token is [`task_graveyard_drain`] detaching the node.
+fn graveyard_push(parked: ParkedTaskRef) {
+    let raw = task_parked_leak(parked).as_ptr();
     // Claim membership unconditionally — `debug_assert!` does not evaluate its
     // expression in release builds, so the claim cannot live inside one.
     let claimed = task_reclaim_try_link(raw);
@@ -149,9 +170,13 @@ pub fn task_graveyard_drain() {
         task_reclaim_next_store_relaxed(node.as_ptr(), ptr::null_mut());
         task_reclaim_unlink(node.as_ptr());
 
-        // The node was parked by the winner of its final strong release and
-        // detached from the stack above, so this owns it and destroys it
-        // exactly once.
-        task_destroy_parked(node);
+        // The single reconstitution point for the reclaim token, and the one
+        // place in the kernel where unique ownership rests on an argument
+        // rather than on the type. It holds because the swap above detached
+        // this whole chain atomically: every node on it was parked by the
+        // winner of its own final strong release, no other drainer can hold
+        // the same chain, and the node is unlinked before it is reclaimed, so
+        // a second push cannot alias it.
+        task_destroy_parked(task_parked_reclaim(node));
     }
 }

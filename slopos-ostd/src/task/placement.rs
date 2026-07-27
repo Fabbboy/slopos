@@ -40,6 +40,21 @@
 //!   registry can be a pure weak index: it observes tasks without keeping any
 //!   alive, and a lookup is a liveness-checked upgrade rather than a fabricated
 //!   strong reference.
+//!
+//! # The reclaim token
+//!
+//! Everything above is about a task with references left. [`ParkedTask`] covers
+//! the state after the last one goes: strong count zero, body still intact,
+//! exactly one thread able to reach it. Only the winner of that transition gets
+//! the token, it cannot be constructed from an address, and every operation on
+//! it takes it by value — so a double-destroy does not typecheck, and
+//! [`with_parked`] can hand out a `&TaskInner` with no caller obligation at all.
+//!
+//! That last point is why the token exists rather than a comment. Every kernel
+//! crate outside OSTD compiles under `#![forbid(unsafe_code)]`, so a safe
+//! function here that dereferenced a caller-supplied address would let such a
+//! crate reach undefined behaviour without writing the keyword the discipline
+//! is built to require.
 
 use core::ptr::NonNull;
 use core::sync::atomic::{AtomicUsize, Ordering};
@@ -200,35 +215,116 @@ pub fn task_placement_retain<K, U>(ptr: NonNull<TaskInner<K, U>>) {
     core::mem::forget(task_placement_clone(ptr));
 }
 
+/// Proof that the holder uniquely owns a task allocation whose strong count has
+/// reached zero — the body still initialised, and nothing else able to reach it.
+///
+/// The field is private and there is no public constructor, so the token cannot
+/// be fabricated from an arbitrary address. It is obtained by winning the
+/// one-to-zero transition ([`task_release_strong`]) or by reclaiming one this
+/// module itself parked ([`task_parked_reclaim`]).
+///
+/// # What the token buys
+///
+/// [`with_parked`] takes `&ParkedTask` and forms a `&TaskInner` with **no
+/// caller obligation at all** — the token's existence is the safety argument,
+/// so the borrow is sound by construction rather than by contract. That matters
+/// beyond tidiness: every kernel crate outside OSTD compiles under
+/// `#![forbid(unsafe_code)]`, and a safe function that dereferences a
+/// caller-supplied address lets such a crate reach undefined behaviour without
+/// ever writing the keyword the discipline is built to require.
+///
+/// [`task_destroy_parked`] consumes the token by value, which makes a
+/// double-destroy *unrepresentable* rather than merely forbidden.
+///
+/// # Why there is no `Drop`
+///
+/// Destroying a task is allocator-heavy work whose whole reason for being
+/// deferred is that it must not run in an arbitrary context. A `Drop` impl
+/// would run it at whatever moment the token happened to go out of scope —
+/// under a lock, with interrupts off, on the dying task's own stack. So a
+/// dropped token leaks the allocation instead. Leaking is memory-safe;
+/// destroying in the wrong context is not, and `#[must_use]` catches the
+/// accident at compile time.
+///
+/// Neither `Clone` nor `Copy`: two tokens for one allocation would be two
+/// claims of unique ownership.
+#[must_use = "dropping a ParkedTask leaks the task allocation — pass it to task_destroy_parked"]
+pub struct ParkedTask<K, U> {
+    node: NonNull<TaskInner<K, U>>,
+}
+
+impl<K, U> ParkedTask<K, U> {
+    /// The allocation's node pointer, for identity comparisons and for the
+    /// predicates the reclaim path consults before choosing a destroy context.
+    ///
+    /// Borrows rather than consumes: the token still owns the allocation. This
+    /// hands a pointer *out*, which is not the direction that was unsound —
+    /// what the private field prevents is an arbitrary address coming *in*.
+    #[inline]
+    pub fn node(&self) -> NonNull<TaskInner<K, U>> {
+        self.node
+    }
+}
+
 /// Release one strong reference without running `TaskInner`'s destructor.
 ///
-/// `Some(node)` exactly when this call was the final release, in which case the
-/// caller uniquely owns the allocation — the task body is still initialised and
-/// nothing else can reach it — and must pass `node` to
+/// `Some(token)` exactly when this call was the final release, in which case
+/// the caller uniquely owns the allocation and must pass the token to
 /// [`task_destroy_parked`] exactly once. `None` means other references remain
 /// and this was a bare atomic decrement.
 ///
 /// This is the split that lets a task's final release happen in a context where
 /// the allocator-heavy destructor must not run (interrupts off, a lock held, or
-/// on the dying task's own stack): release here, park `node`, destroy later.
+/// on the dying task's own stack): release here, park the token, destroy later.
 /// Whether this call is the final one is decided by the decrement itself, never
 /// by reading the count first — a `strong_count == 1` pre-check is racy.
 #[inline]
-pub fn task_release_strong<K, U>(arc: KArc<TaskInner<K, U>>) -> Option<NonNull<TaskInner<K, U>>> {
-    KArc::release_deferrable(arc)
+pub fn task_release_strong<K, U>(arc: KArc<TaskInner<K, U>>) -> Option<ParkedTask<K, U>> {
+    KArc::release_deferrable(arc).map(|node| ParkedTask { node })
 }
 
 /// Run the destructor that [`task_release_strong`] deferred, returning the
 /// allocation to the heap.
 ///
-/// # Correctness
-/// `node` must be the result of exactly one [`task_release_strong`] call that
-/// returned `Some`, not already destroyed. Because that call proved unique
-/// ownership, no other reference to the task can exist.
+/// Consuming `parked` by value is what retires the old contract "not already
+/// destroyed": a second call would need a second token, and there is no way to
+/// obtain one.
 #[inline]
-pub fn task_destroy_parked<K, U>(node: NonNull<TaskInner<K, U>>) {
-    // SAFETY: the caller contract above is exactly `KArc::destroy_deferred`'s.
-    unsafe { KArc::destroy_deferred(node) };
+pub fn task_destroy_parked<K, U>(parked: ParkedTask<K, U>) {
+    // SAFETY: `parked` witnesses that its holder won the one-to-zero release
+    // and has not destroyed the allocation yet — exactly
+    // `KArc::destroy_deferred`'s contract, now carried by the type.
+    unsafe { KArc::destroy_deferred(parked.node) };
+}
+
+/// Surrender a reclaim token to a raw slot, yielding the node pointer to store.
+///
+/// The graveyard is an intrusive stack threaded through the task bodies
+/// themselves, so what it can hold is a pointer, not a Rust value. This is the
+/// same park/reclaim shape as [`task_placement_leak`] and
+/// [`task_placement_reclaim`], applied to unique ownership rather than to a
+/// strong reference: token in, pointer out.
+#[inline]
+pub fn task_parked_leak<K, U>(parked: ParkedTask<K, U>) -> NonNull<TaskInner<K, U>> {
+    parked.node
+}
+
+/// Reconstitute the token a prior [`task_parked_leak`] parked in a raw slot.
+///
+/// This is the **only** way to obtain a [`ParkedTask`] other than winning a
+/// final release, and therefore the one point at which the token's guarantee
+/// rests on a caller obligation rather than on the type. It is deliberately
+/// narrow, named, and greppable so that the obligation has exactly one place to
+/// be audited.
+///
+/// # Correctness
+/// `node` must be the result of exactly one [`task_parked_leak`], recovered
+/// from the slot it was parked in, and not already reclaimed. Reclaiming a
+/// pointer that was never parked, or reclaiming one twice, manufactures a claim
+/// of unique ownership that is not true.
+#[inline]
+pub fn task_parked_reclaim<K, U>(node: NonNull<TaskInner<K, U>>) -> ParkedTask<K, U> {
+    ParkedTask { node }
 }
 
 /// Borrow a task whose last strong reference is already gone.
@@ -245,21 +341,16 @@ pub fn task_destroy_parked<K, U>(node: NonNull<TaskInner<K, U>>) {
 /// borrow in this module: not because someone else is keeping the task alive,
 /// but because *nobody else can reach it at all*.
 ///
-/// # Correctness
-/// `node` must be the `Some` result of exactly one [`task_release_strong`]
-/// that has not yet been passed to [`task_destroy_parked`]. That call proved
-/// unique ownership — the body is still initialised and no other reference to
-/// it can exist — so the borrow is exclusive by construction. `f` must not
-/// store the borrow anywhere that outlives the call.
+/// Taking `&ParkedTask` rather than a bare pointer is what makes that argument
+/// checkable. The token cannot be fabricated, and borrowing it rather than
+/// consuming it means the allocation cannot be destroyed for as long as `f`
+/// holds the reference. There is no caller obligation left to state.
 #[inline]
-pub fn with_parked<K, U, R>(
-    node: NonNull<TaskInner<K, U>>,
-    f: impl FnOnce(&TaskInner<K, U>) -> R,
-) -> R {
-    // SAFETY: per the contract the caller uniquely owns `node` and its body is
-    // still initialised, so this reference is valid and unaliased for the
-    // duration of `f`.
-    f(unsafe { node.as_ref() })
+pub fn with_parked<K, U, R>(parked: &ParkedTask<K, U>, f: impl FnOnce(&TaskInner<K, U>) -> R) -> R {
+    // SAFETY: `parked` witnesses unique ownership of a still-initialised task
+    // body, and holding it by shared reference keeps it alive across `f`, so
+    // this reference is valid and unaliased for the duration of the call.
+    f(unsafe { parked.node.as_ref() })
 }
 
 /// Read a live task's current strong reference count without taking a
