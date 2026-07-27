@@ -798,7 +798,7 @@ pub fn task_get_current() -> *mut Task {
 /// only after that lock is released, so a visitor may take the registry lock
 /// again — resolve a parent, enqueue a task, post a signal — without
 /// deadlocking. Each guard pins its task for the whole visit.
-pub fn task_for_each_active(mut f: impl FnMut(&Task)) {
+pub fn task_for_each_active(mut f: impl FnMut(&TaskRef)) {
     task_try_for_each_active(|task| {
         f(task);
         ControlFlow::Continue(())
@@ -807,7 +807,14 @@ pub fn task_for_each_active(mut f: impl FnMut(&Task)) {
 
 /// [`task_for_each_active`] with early exit: visiting stops as soon as `f`
 /// returns [`ControlFlow::Break`].
-pub fn task_try_for_each_active(mut f: impl FnMut(&Task) -> ControlFlow<()>) {
+///
+/// Visitors are lent the [`TaskRef`] guard rather than a bare `&Task`. Most
+/// only read, and [`Deref`] makes that spelling identical — but the walk also
+/// feeds the stranded-task rescue, which has to *park* a reference on a ready
+/// queue, and a shared borrow is not proof of a non-zero strong count. Lending
+/// the guard is what lets that one caller mint a reference without the walk
+/// handing every other caller a raw pointer to do it with.
+pub fn task_try_for_each_active(mut f: impl FnMut(&TaskRef) -> ControlFlow<()>) {
     let capacity = with_task_manager(|mgr| mgr.registry.len()).max(1);
     let mut tasks = match KVec::<TaskRef>::with_capacity(capacity) {
         Ok(tasks) => tasks,
@@ -861,7 +868,7 @@ pub fn task_drain_test_reports(task_id: u32) -> KVec<crate::test_reports::TestRe
 
 pub fn debug_dump_tasks_klog() {
     klog_info!("SYSRQ: ---- task dump ----");
-    task_for_each_active(dump_one_task);
+    task_for_each_active(|guard| dump_one_task(guard));
     klog_info!("SYSRQ: ---- end task dump ----");
 }
 

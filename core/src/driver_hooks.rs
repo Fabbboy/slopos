@@ -51,8 +51,8 @@ fn runtime_signal_process_group(pgid: u32, signum: u8) -> bool {
         if task.pgid != pgid {
             return;
         }
-        if task_signal_post(core::ptr::from_ref(task), signum) {
-            let _ = scheduler::unblock_task(core::ptr::from_ref(task).cast_mut());
+        if task_signal_post(task.as_ptr(), signum) {
+            let _ = scheduler::unblock_task(task.as_ptr());
         }
         matched = true;
     });
@@ -71,8 +71,8 @@ fn runtime_signal_session(sid: u32, signum: u8) -> bool {
         if task.sid != sid {
             return;
         }
-        if task_signal_post(core::ptr::from_ref(task), signum) {
-            let _ = scheduler::unblock_task(core::ptr::from_ref(task).cast_mut());
+        if task_signal_post(task.as_ptr(), signum) {
+            let _ = scheduler::unblock_task(task.as_ptr());
         }
         matched = true;
     });

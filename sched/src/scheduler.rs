@@ -2555,8 +2555,9 @@ fn task_is_current_on_any_cpu(task: *mut Task) -> bool {
     false
 }
 
-fn rescue_check_task(t: &Task) {
-    let task = core::ptr::from_ref(t).cast_mut();
+fn rescue_check_task(guard: &crate::task::TaskRef) {
+    let t: &Task = guard;
+    let task = guard.as_ptr();
     if t.status() != TaskStatus::Ready {
         return;
     }
