@@ -5,7 +5,6 @@ use slopos_abi::syscall::{ARCH_GET_FS, ARCH_SET_FS, ENOSYS_RETURN, FUTEX_WAIT, F
 use slopos_abi::task::{INVALID_TASK_ID, TaskPriority};
 use slopos_fs::vfs::traits::VfsError;
 use slopos_ostd::KVec;
-use slopos_ostd::task::CurrentTask;
 use slopos_ostd::task::{new_group_in_session, new_session_group};
 use slopos_ostd::user::context::UserContext;
 use slopos_sched::scheduler::{task_apply_affinity, task_wait_for};
@@ -15,7 +14,7 @@ use slopos_sched::task::{
     task_process_group, task_reset_caught_handlers, task_session, task_set_cpu_affinity,
     task_set_fs_base, task_terminate,
 };
-use slopos_sched::task_stack::{KernelStack, UnsafeStack};
+use slopos_sched::task_struct::Current;
 
 use slopos_arch::cpu;
 use slopos_mm::user_copy::{copy_from_user, copy_to_user};
@@ -619,7 +618,7 @@ define_syscall!(syscall_chdir
     // The working directory is written under the exclusivity witness rather
     // than a `&mut Task`: only the running task touches its own cwd, and that
     // is precisely what `CurrentTask` proves.
-    let current = CurrentTask::<KernelStack, UnsafeStack>::get().ok_or(Errno::EINVAL)?;
+    let current = Current::get().ok_or(Errno::EINVAL)?;
     if !current.task().set_cwd(&current, path.as_bytes()) {
         return Err(Errno::ENAMETOOLONG);
     }
@@ -632,7 +631,7 @@ define_syscall!(syscall_getcwd
     if buf.base_u64() == 0 {
         return Err(Errno::EFAULT);
     }
-    let current = CurrentTask::<KernelStack, UnsafeStack>::get().ok_or(Errno::EINVAL)?;
+    let current = Current::get().ok_or(Errno::EINVAL)?;
     current.task().with_cwd(&current, |cwd| {
         if buf.len() < cwd.len() {
             return Err(Errno::ERANGE);

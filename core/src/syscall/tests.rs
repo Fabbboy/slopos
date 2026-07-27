@@ -35,13 +35,11 @@ use slopos_mm::paging_defs::PageFlags;
 use slopos_mm::process_vm::{process_vm_alloc, process_vm_get_stack_top};
 use slopos_mm::user_copy::{copy_from_user, copy_to_user, set_test_process_id};
 use slopos_mm::user_ptr::UserPtr;
-use slopos_ostd::task::CurrentTask;
 use slopos_ostd::task::SchedPlacement;
 use slopos_ostd::task::{new_group_in_session, new_session_group};
 use slopos_ostd::user::context::UserContext;
 use slopos_ostd::{KArc, KBox, klog_info};
-use slopos_sched::task_stack::{KernelStack, UnsafeStack};
-use slopos_sched::task_struct::{SignalAction, Task};
+use slopos_sched::task_struct::{Current, SignalAction, Task};
 use slopos_testing::{TestResult, assert_eq_test, assert_not_null, assert_test, fail, pass};
 
 use crate::exec::{FdAction, apply_fd_actions};
@@ -1850,7 +1848,7 @@ pub fn test_task_cwd_round_trips_through_the_cell() -> TestResult {
     assert_not_null!(task_ptr, "task lookup failed");
     make_task_current(task_ptr);
 
-    let Some(current) = CurrentTask::<KernelStack, UnsafeStack>::get() else {
+    let Some(current) = Current::get() else {
         task_terminate(task_id);
         return TestResult::Fail;
     };

@@ -26,6 +26,11 @@ pub use slopos_ostd::task::kernel_task::{
 /// to spell the type as `Task`; the struct body lives in OSTD.
 pub type Task = TaskInner<KernelStack, UnsafeStack>;
 
+/// Borrow of the task running on this CPU, at the concrete kernel
+/// monomorphisation. Spelled `Current::get()` rather than
+/// `CurrentTask::<KernelStack, UnsafeStack>::get()` at every call site.
+pub type Current = slopos_ostd::task::CurrentTask<KernelStack, UnsafeStack>;
+
 // =============================================================================
 // Razor blocks against the concrete monomorphisation
 // =============================================================================
