@@ -84,16 +84,15 @@ jobs:
       - name: Build kernel
         run: just build
 
-      - name: Framekernel gates (vendor pin + unsafe/async/alloc/Drop/stack + TCB ratio)
-        run: |
-          scripts/check_vendor_pin.sh
-          scripts/check_unsafe_outside_ostd.sh
-          scripts/check_no_kernel_async.sh
-          scripts/check_alloc_dep.sh
-          scripts/check_drop_panic_free.sh
-          scripts/check_stack_sizes.sh builddir/kernel.elf
-          scripts/check_kernel_softfloat.sh builddir/kernel.elf
-          scripts/tcb_ratio.sh --max 1.0
+      # Delegates to the justfile so the gate list has one home. This
+      # step used to inline the list and had already drifted — it was
+      # missing check_wait_predicate_purity.sh, which `check-framekernel`
+      # has run for some time. `check-framekernel-gates` is the scripts
+      # only; the fmt / KernMiri / Verus steps that `check-framekernel`
+      # also runs are covered by the `Check formatting` step above and by
+      # the separate `miri` and `verify` jobs below.
+      - name: Framekernel gates (vendor pin + unsafe/async/alloc/Drop/stack + wait purity + task ownership + TCB ratio)
+        run: just check-framekernel-gates
 
       - name: Run tests
         run: |

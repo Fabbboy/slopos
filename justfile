@@ -362,13 +362,18 @@ verify FILTER='':
 check-no-kernel-async:
     scripts/check_no_kernel_async.sh
 
-# Run every framekernel-discipline gate in one shot. Requires a prior
-# `just build` so check_stack_sizes.sh has a kernel.elf to inspect.
-# A kernel-aware `cargo clippy -- -D warnings` gate is not included
-# here yet — SlopOS has no clippy config in tree and the custom
-# `no_std` target needs plumbing; track as a Phase 2 chore.
-[doc("Run every framekernel-discipline gate: vendor pin / unsafe / async / alloc / Drop / stack / TCB ratio / fmt / KernMiri / Verus (requires a prior `just build`)")]
-check-framekernel:
+# The gate scripts alone, with no toolchain-heavy steps. This is the
+# single source of truth for the gate list: CI calls this recipe directly
+# rather than duplicating the list inline, because `check-framekernel`
+# below also runs KernMiri and Verus, which are separate CI jobs.
+# Requires a prior `just build` so check_stack_sizes.sh has a kernel.elf
+# to inspect.
+#
+# TASK_OWNERSHIP_GATE_WARN=1: the KArc<Task> migration is landing in
+# stages, so the task-ownership gate reports its backlog without failing
+# the build. Drop the variable at migration closeout to make it hard.
+[doc("Run the framekernel gate scripts only — no fmt, KernMiri, or Verus (requires a prior `just build`)")]
+check-framekernel-gates:
     scripts/check_vendor_pin.sh
     scripts/check_unsafe_outside_ostd.sh
     scripts/check_no_kernel_async.sh
@@ -377,7 +382,16 @@ check-framekernel:
     scripts/check_stack_sizes.sh {{build_dir}}/kernel.elf
     scripts/check_kernel_softfloat.sh {{build_dir}}/kernel.elf
     scripts/check_wait_predicate_purity.sh
+    TASK_OWNERSHIP_GATE_WARN=1 scripts/check_task_ownership.sh
     scripts/tcb_ratio.sh --max 1.0
+
+# Run every framekernel-discipline gate in one shot. Requires a prior
+# `just build` so check_stack_sizes.sh has a kernel.elf to inspect.
+# A kernel-aware `cargo clippy -- -D warnings` gate is not included
+# here yet — SlopOS has no clippy config in tree and the custom
+# `no_std` target needs plumbing; track as a Phase 2 chore.
+[doc("Run every framekernel-discipline gate: vendor pin / unsafe / async / alloc / Drop / stack / task ownership / TCB ratio / fmt / KernMiri / Verus (requires a prior `just build`)")]
+check-framekernel: check-framekernel-gates
     {{cargo}} +{{rust_channel}} fmt --all -- --check
     just check-miri
     just verify
