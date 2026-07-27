@@ -35,10 +35,12 @@ use slopos_mm::paging_defs::PageFlags;
 use slopos_mm::process_vm::{process_vm_alloc, process_vm_get_stack_top};
 use slopos_mm::user_copy::{copy_from_user, copy_to_user, set_test_process_id};
 use slopos_mm::user_ptr::UserPtr;
+use slopos_ostd::task::CurrentTask;
 use slopos_ostd::task::SchedPlacement;
 use slopos_ostd::task::{new_group_in_session, new_session_group};
 use slopos_ostd::user::context::UserContext;
 use slopos_ostd::{KArc, KBox, klog_info};
+use slopos_sched::task_stack::{KernelStack, UnsafeStack};
 use slopos_sched::task_struct::{SignalAction, Task};
 use slopos_testing::{TestResult, assert_eq_test, assert_not_null, assert_test, fail, pass};
 
@@ -1831,6 +1833,58 @@ fn user_irq_frame(rip: u64, rsp: u64) -> KBox<slopos_arch::InterruptFrame> {
     frame.ss = 0x1B; // user data selector (RPL 3)
     frame.rflags = 0x202; // IF + MBO
     frame
+}
+
+/// The working directory round-trips through its witness cell.
+///
+/// `cwd` moved from a plain `[u8; 256]` field to a `TaskOwnCell` written under
+/// an exclusivity witness, and it had no kernel coverage at all — a regression
+/// in the cell's bounds handling or in the publish-length-after-bytes ordering
+/// would surface as a corrupted path in userland, not as a fault.
+pub fn test_task_cwd_round_trips_through_the_cell() -> TestResult {
+    let _fixture = SyscallFixture::new();
+
+    let task_id = create_test_kernel_task();
+    assert_test!(task_id != INVALID_TASK_ID, "failed to create task");
+    let task_ptr = task_find_by_id(task_id);
+    assert_not_null!(task_ptr, "task lookup failed");
+    make_task_current(task_ptr);
+
+    let Some(current) = CurrentTask::<KernelStack, UnsafeStack>::get() else {
+        task_terminate(task_id);
+        return TestResult::Fail;
+    };
+
+    // A fresh task starts at "/".
+    let initial_ok = current
+        .task()
+        .with_cwd(&current, |cwd| cwd == b"/\0".as_slice());
+    assert_test!(initial_ok, "fresh task cwd is not \"/\"");
+
+    assert_test!(
+        current.task().set_cwd(&current, b"/usr/share"),
+        "set_cwd rejected a path that fits"
+    );
+    let round_trip = current
+        .task()
+        .with_cwd(&current, |cwd| cwd == b"/usr/share\0".as_slice());
+    assert_test!(round_trip, "cwd did not round-trip through the cell");
+
+    // The bounds check is the cell's own: one byte short of the buffer is the
+    // longest path that fits with its NUL.
+    let too_long = [b'a'; 256];
+    assert_test!(
+        !current.task().set_cwd(&current, &too_long),
+        "set_cwd accepted a path with no room for its NUL"
+    );
+    let unchanged = current
+        .task()
+        .with_cwd(&current, |cwd| cwd == b"/usr/share\0".as_slice());
+    assert_test!(unchanged, "a rejected set_cwd still mutated the buffer");
+
+    drop(current);
+    task_terminate(task_id);
+    TestResult::Pass
 }
 
 pub fn test_signal_delivery_on_irq_exit_dispatch() -> TestResult {
@@ -3823,6 +3877,10 @@ slopos_testing::stest!(
 );
 slopos_testing::stest!(
     name = test_signal_install_deliver_and_sigreturn,
+    suite = syscall_valid
+);
+slopos_testing::stest!(
+    name = test_task_cwd_round_trips_through_the_cell,
     suite = syscall_valid
 );
 slopos_testing::stest!(
