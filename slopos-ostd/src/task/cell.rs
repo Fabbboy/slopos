@@ -102,6 +102,16 @@ impl<T> TaskOwnCell<T> {
     ///   same task), and two `&mut` to one field would be aliasing UB even when
     ///   the accesses are disjoint.
     ///
+    /// The second reason is the load-bearing one, and it is not a local
+    /// judgement call: memory inside an `UnsafeCell` carries `SharedReadWrite`
+    /// provenance, which composes with itself, whereas forming a `&mut` pushes
+    /// a `Unique` that pops its sibling. Rust-for-Linux reached the identical
+    /// fork with `Opaque<T>` and chose the same signature, `get(&self) ->
+    /// *mut T`, listing "no uniqueness for mutable references: it is fine to
+    /// have multiple `&mut Opaque<T>` point to the same value" as a design
+    /// property rather than a caveat. The `task::cell` unit tests hold both
+    /// aliasing models — Stacked and Tree Borrows — to that claim.
+    ///
     /// # Safety
     ///
     /// The returned pointer is valid for as long as `self` is, and the caller
@@ -303,5 +313,142 @@ unsafe impl<K, U> TaskExclusive<K, U> for SwitchWindow<'_, K, U> {
     #[inline]
     fn witnessed(&self) -> *const TaskInner<K, U> {
         core::ptr::from_ref(self.task)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+//
+// These live inside the module rather than in `tests/task_cells.rs` because
+// [`TaskOwnCell::get_ptr`] is `pub(crate)` and must stay that way: handing a
+// `*mut T` to a `#![forbid(unsafe_code)]` crate is exactly the surface the
+// witness exists to remove. Testing through a `test-helpers` shim would test a
+// *different function* — the regression guarded against here is a future edit
+// changing `get_ptr`'s return type, and a shim can keep its own signature while
+// the production one changes. So the test calls the production signature.
+//
+// `just check-miri` runs with `-Zmiri-ignore-leaks`, which suppresses leak
+// reports only. Every property below is a borrow-model or value property, so
+// the flag hides nothing here.
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::task::kernel_task::TaskInner;
+
+    type HostTask = TaskInner<(), ()>;
+
+    fn fresh() -> KArc<HostTask> {
+        KArc::try_new(HostTask::invalid()).expect("task allocation")
+    }
+
+    /// Open a switch window over `task`.
+    ///
+    /// # Safety
+    /// Single-threaded host test: this "CPU" owns the switch, holds the only
+    /// reference to `task`, and the window cannot be re-entered.
+    fn window(task: &HostTask) -> SwitchWindow<'_, (), ()> {
+        unsafe { SwitchWindow::new(task) }
+    }
+
+    /// Off-PCR there is no current task, which is *why* [`SwitchWindow`] is the
+    /// only witness a host test can mint — `pcr::current_task_id` short-circuits
+    /// on `GS_BASE_SET` and reports `INVALID_TASK_ID`.
+    #[test]
+    fn current_task_is_none_without_a_pcr() {
+        assert!(CurrentTask::<(), ()>::get().is_none());
+    }
+
+    /// THE test this module exists for.
+    ///
+    /// Two witnesses for one task may legitimately coexist — an interrupt
+    /// handler above a syscall, both on the same task — and both may hold a
+    /// live pointer into the same cell at once.
+    ///
+    /// The write ordering is load-bearing: derive `a`, derive `b`, then write
+    /// through `a` *again*. `UnsafeCell::get()` yields a `SharedReadWrite`
+    /// derivation, so interleaving is defined. If `get_ptr` ever returns
+    /// `&mut T`, deriving `b` pops `a` off the borrow stack and that third
+    /// write becomes instant Miri UB — which is the whole point: the hazard
+    /// turns into a hard test failure instead of sitting latent.
+    ///
+    /// That claim was checked, not assumed. Temporarily giving the accessor the
+    /// `&mut T` shape and re-running this body under Miri fails with
+    /// "<tag> was created by a Unique retag … later invalidated … by a Unique
+    /// retag", pointing at exactly the third write. Re-do that probe if you
+    /// ever doubt this test still bites.
+    ///
+    /// Run under **both** aliasing models — plain `cargo miri test` and
+    /// `MIRIFLAGS=-Zmiri-tree-borrows` — because the two differ precisely on
+    /// raw-pointer retagging, which is the thing under test.
+    #[test]
+    fn two_witnesses_for_one_task_may_write_the_same_cell() {
+        let task = fresh();
+
+        let outer = window(&task);
+        let inner = window(&task);
+
+        let a = task.cwd.get_ptr(&outer).cast::<u8>();
+        let b = task.cwd.get_ptr(&inner).cast::<u8>();
+        assert_eq!(a, b, "both witnesses address the same storage");
+
+        // SAFETY: both pointers address the task's 256-byte `cwd` array, which
+        // outlives them, and both are `SharedReadWrite` derivations of the same
+        // `UnsafeCell`, so interleaved writes are defined.
+        unsafe {
+            a.write(b'/');
+            b.add(1).write(b'a');
+            // Written after `b` was derived: the access that would be UB if
+            // `get_ptr` handed out `&mut T`.
+            a.add(2).write(b'b');
+            assert_eq!(a.read(), b'/');
+            assert_eq!(b.add(1).read(), b'a');
+            assert_eq!(b.add(2).read(), b'b');
+        }
+    }
+
+    /// A witness authorises exactly one task. Writing another's state through
+    /// it is what the owner check in `set_cwd`/`with_cwd` refuses.
+    #[test]
+    fn a_witness_names_exactly_one_task() {
+        let first = fresh();
+        let second = fresh();
+        let w = window(&first);
+
+        assert_eq!(w.witnessed(), core::ptr::from_ref(&*first));
+        assert_ne!(
+            w.witnessed(),
+            core::ptr::from_ref(&*second),
+            "a witness for one task must not name another"
+        );
+    }
+
+    /// The witnessed path and the `&mut self` path address the same storage —
+    /// so pre-publication construction through `get_mut` and post-publication
+    /// writes through a witness cannot disagree about where a field lives.
+    #[test]
+    fn get_mut_and_get_ptr_address_the_same_storage() {
+        let mut task = fresh();
+        {
+            let unique = KArc::get_mut(&mut task).expect("sole strong reference");
+            unique.cwd.get_mut()[0] = b'/';
+        }
+        let w = window(&task);
+        let via_witness = task.cwd.get_ptr(&w).cast::<u8>();
+        // SAFETY: addresses the task's own `cwd` array, which outlives the read.
+        assert_eq!(unsafe { via_witness.read() }, b'/');
+    }
+
+    /// `as_ptr_racy` is the diagnostics read: same address, no witness, and
+    /// deliberately no `&T` — a torn read is acceptable, an aliasing violation
+    /// is not.
+    #[test]
+    fn racy_read_addresses_the_same_storage() {
+        let task = fresh();
+        let w = window(&task);
+        assert_eq!(
+            task.cwd.as_ptr_racy().cast::<u8>(),
+            task.cwd.get_ptr(&w).cast::<u8>().cast_const()
+        );
     }
 }
