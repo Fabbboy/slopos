@@ -82,6 +82,29 @@ The productive shape to grep for first is a function that already takes `&Task`
 or `&KArc<Task>` and converts it back — `from_ref(…).cast_mut()`, or
 `let p = task_ref.as_ptr()` under a registry guard already in scope.
 
+### 2b. Two loose ends the ownership retyping left
+
+Neither is a regression from the pre-migration tree, so neither blocks the
+steps around it — but both are consequences of decisions taken here and belong
+to whoever finishes them.
+
+- **`spawn` violates I8.** `spawn_program_with_attrs` holds a `PendingTask` —
+  the *sole* reference to a child that already owns its kernel stack, data
+  stack and process VM — across `do_exec`'s blocking ELF read. A `SIGKILL` on
+  the spawner reaps it without unwinding, so `PendingTask::drop` never runs.
+  The pre-migration tree leaked the same resources plus a registry slot, so the
+  severity is unchanged; what is new is that the orphan is no longer nameable
+  by `task_find_by_id`, a registry walk or `task_slot_census`, so even
+  shutdown-time reclamation loses it. Registering before the load, or parking
+  the handle somewhere that outlives the frame, is the fix.
+- **Wake resolves a task id twice.** Naming wait-queue waiters by id moved the
+  wake path from a pointer to `task_find_by_id`, and `task_try_transition_from`
+  then resolves the same id again — two registry lock acquisitions and two
+  linear scans per wake, from hard-IRQ context. The lock and the scan are not
+  new (the id-keyed transition already took both at the baseline); the second
+  resolution is. Threading the guard from the first lookup into the transition
+  removes it.
+
 ### 3. Dissolve the accessor layer
 
 `slopos-ostd/src/task/accessors.rs`, 75 `pub fn`s over 1350 lines, is the
