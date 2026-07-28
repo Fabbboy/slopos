@@ -2,18 +2,24 @@
 
 ## Intent
 
-`KArc<Task>` is already the single owning handle for every kernel task. What
-remains is the other half of that change: `sched/` and `core/` still bind raw
-task pointers in ~167 argument positions and reach task state through a
-110-function accessor layer over `*mut TaskInner<K, U>`. Those signatures carry
-no lifetime, so the contract they encode is enforced by review rather than by
-the type system — which is what let four use-after-free and data-race defects
-sit in the tree unnoticed.
+`KArc<Task>` is the single owning handle for every kernel task, and the
+ownership rules are machine-checked. What remains is the type-level half:
+`slopos-ostd` still carries a 75-function accessor layer over
+`*mut TaskInner<K, U>`, and `sched`/`core` still bind raw task pointers in the
+signatures that call it. Those signatures carry no lifetime, so their contract
+is enforced by review rather than by the compiler.
 
-`scripts/check_task_ownership.sh` measures the remaining surface: check 1 is
-the argument positions, of which 93 are the accessor layer itself, and check 4
-is `task_borrow`/`task_borrow_mut`, the terminal criterion. Both reaching zero
-is what "done" means. The gate runs in warn mode until then.
+`scripts/check_task_ownership.sh` measures what is left:
+
+| Check | Count | Where |
+|---|---|---|
+| 1 — raw task pointer in binding position | 115 | 74 in `accessors.rs`, 17 `scheduler.rs`, 5 `switch.rs`, 5 `task_lifecycle.rs`, rest scattered |
+| 4 — `task_borrow` / `task_borrow_mut` | 45 | 12 `core/src/syscall/tests.rs`, 6 `process_handlers.rs`, 4 `poll_ioctl_handlers.rs`, 2 each in `task_state.rs` / `task_family.rs` / `sched_tests.rs` / `signal.rs` / `dispatch.rs`, 1 `scheduler.rs` |
+| 8 — return type names a lifetime no argument constrains | 34 | only 3 on task paths (`accessors.rs`); the rest are unrelated helpers in `ptr_buf.rs`, `dev/`, `pcr.rs`, `io_mem.rs`, `heap.rs` |
+
+**Check 4 reaching zero is the terminal criterion.** Check 1 falls out of it —
+74 of its 115 hits are inside the layer being deleted. The gate runs in warn
+mode until then.
 
 Finish the excision and delete this plan.
 
@@ -45,158 +51,127 @@ Finish the excision and delete this plan.
   task down from another CPU without unwinding, so a handle left on that stack
   is never dropped and leaks the task, its stacks and its address space.
 
-## Baseline this works against
-
-One task is one `KArc<Task>`, individually allocated and freed by its final
-strong drop. The registry holds only `KWeak` and owns nothing; what keeps a
-registered task alive is the **existence reference** it holds to itself, handed
-over at registration and taken back exactly once at reap. Containers — ready
-queue, remote inbox, dispatch slot, parent's children list, wait maps, futex
-buckets — own their members through the placement primitives. `task_put` is the
-sole release primitive, and the task graveyard makes a final drop safe from any
-context. Ids are monotonic `u64` internally and never reused.
-
-`SchedPlacement::Nascent` marks a task registered but never published, so a wake
-cannot publish one mid-construction. `TaskOwnCell` plus the sealed
-`CurrentTask` / `SwitchWindow` witnesses give exclusive access to register state
-without a `&mut`; `cwd` is the only field migrated so far. The accessor layer is
-a shim over `task_borrow`/`task_borrow_mut`, which is where the last two derefs
-in that layer live.
-
 ## Remaining work
 
-### 1. Register state into witness cells
+Ordered so each step's callers are converted before the callee it depends on.
 
-Move **five** fields into `TaskOwnCell` — `context`, `fpu_state`, `switch_ctx`,
-`user_ctx` and `saved_kernel_return_ctx` — exposed as typed operations on
-`TaskInner`. **Not `saved_user_ctx_ptr`**: it is one pointer word, read and
-written only in the PCR round-trip swap, whose other side is already atomic, so
-it becomes an `AtomicPtr<UserContext>` and stays off the witness surface
-entirely. Wrapping it would be the obvious way to "finish" this step and would
-be wrong.
+### 1. `core/` syscall surface
 
-`SwitchWindow` covers the outgoing task — the dispatcher publishes the incoming
-one into the PCR before the outgoing one's registers are saved, so `CurrentTask`
-does not reach it. `context` is diagnostics plus the cr3 identity tag; only
-`cr3` has a functional reader, and the switch never reads it.
+14 of the 45 `task_borrow` sites and the last raw-pointer bindings outside
+`sched`. `SyscallContext<'a>` already holds `&'a Task`; these are call sites
+that still route around it.
 
-Cell accessors must return `*mut T` or `&mut T`, never `T`: one `FpuState` by
-value is 2.6 KiB on the caller's frame and fails the 2 KiB stack gate. This is
-the highest-risk step in the plan — a mis-sequenced FPU save is silent
-user-visible corruption, not a fault.
+- `process_handlers.rs` (6), `poll_ioctl_handlers.rs` (4), `signal.rs` (2 plus
+  3 raw bindings), `dispatch.rs` (2 plus 2 raw bindings).
+- `core/src/syscall/tests.rs` holds 12 — the single largest cluster. Convert
+  last, after the production surface settles, so the fixtures are rewritten
+  once.
 
-### 2. `CurrentTask` at the call sites
+### 2. `sched` remainder
 
-37 `scheduler_get_current_task()` sites. Roughly half want only "who am I" and
-should read `pcr::current_task_id()` instead, which dereferences nothing. Then
-narrow the cross-CPU reader to an opaque address type with `PartialEq` and no
-deref: after the priority moved into the PCR, both surviving foreign-CPU readers
-only compare, so a foreign task dereference becomes unrepresentable.
+`task_state.rs` (2), `task_family.rs` (2), `scheduler.rs` (1 borrow + 17 raw
+bindings), `task_lifecycle.rs` (5 raw bindings), `switch.rs` (5).
 
-### 3. The pointer excision
+`scheduler.rs` is the delicate one and wants a session that opens on it. Two of
+its raw derivations come from the switch witnesses in `prepare_switch_to`,
+feeding the TLB/FS_BASE/TSS/CR3 stages; unpicking those is design work, not a
+mechanical conversion, and a wrong borrow there is silent rather than a build
+error.
 
-96 signature-position raw task pointers (87 in `sched/`, 9 in `core/`), plus the
-accessor shims and their call sites. Order, following the compiler: `per_cpu` →
-switch core → `task_lifecycle` → registry and family → futex/sleep/stats/trap →
-fork and clone returning ids → `core/` syscall surface → `boot/` → test suites.
+The productive shape to grep for first is a function that already takes `&Task`
+or `&KArc<Task>` and converts it back — `from_ref(…).cast_mut()`, or
+`let p = task_ref.as_ptr()` under a registry guard already in scope.
 
-- **The terminal criterion is deleting `task_borrow` and `task_borrow_mut`**, not
-  the pointer grep. Both fabricate an output lifetime from nothing, which is what
-  made the `&mut`-aliasing defects expressible. But they are **not the only two**
-  of that shape: seven task functions declare a lifetime no argument constrains,
-  so the caller picks it and two calls hand out two live references to one place.
-  `check_task_ownership.sh` check 8 finds them, and all seven must go.
-- `SyscallContext` holds a **bare `*mut Task`** — not an owning handle, and not a
-  borrow. It becomes `SyscallContext<'a> { task: &'a Task, … }`. The reasoning
-  for that is prior art, not a leak in the present code: every kernel surveyed
-  holds a borrow of the current task on the syscall path, and an owning handle
-  here would leak, because a blocked task is torn down from another CPU without
-  unwinding. Its two constructors differ because the test fixture parks the BSP
-  on a bootstrap stub, so `Current::get()` returns `None` there — which is the
-  real reason a witness cannot simply be stored in the struct.
-- `task_get_info` has no production callers. Delete it with its ~35 test sites in
-  the test-suite pass; it is the only `*mut *mut Task` in the tree — though not
-  the only double indirection, `slibc` has several.
-- `inspect::wrap` goes once fork and clone return ids; `inspect::by_id` already
-  does the same job through the registry.
-- The intrusive-link accessors stay pointer-typed in return position — a Treiber
-  successor *is* a raw pointer, and its lifetime is governed by the parked
-  reference the link represents, not by a Rust borrow. Reference in, pointer out.
+### 3. Dissolve the accessor layer
 
-### 4. Two open soundness items
+`slopos-ostd/src/task/accessors.rs`, 75 `pub fn`s over 1350 lines, is the
+terminal step. Its replacement — `&self` methods on `TaskInner` in
+`borrowed.rs` — exists; 28 of those methods have no caller yet and acquire one
+here. Delete `task_borrow` and `task_borrow_mut` with the layer.
 
-- `CurrentTask::get()` casts the type-erased PCR pointer to whatever
-  `TaskInner<K, U>` the caller names. It cannot simply be `unsafe`, because
-  `sched`/`core` forbid `unsafe` and could then never call it; it needs a sealed
-  marker the kernel implements once. Latent rather than live: the kernel's
-  `Current` alias is the only spelling and there is one monomorphisation.
-- The witness is advisory while `task_borrow_mut` is public — any crate can reach
-  a `&mut TaskInner` and bypass it. Closed by the terminal criterion above.
+Two accessors cannot convert until their callers do, and both are named in
+step 2: `futex_remove_task` (teardown holds a raw pointer) and
+`save_task_context_from_interrupt_frame` (writes register state through
+`as_ptr_nascent`).
 
-### 5. Coverage
+### 4. Sealed `PcrTaskType` marker
 
-In priority order:
+`CurrentTask::get()` casts the type-erased PCR pointer to whatever
+`TaskInner<K, U>` the caller names. It cannot be `unsafe fn`, because
+`sched`/`core` forbid `unsafe` and could then never call it, and ostd cannot
+name the concrete type (`KernelStack`/`UnsafeStack` live in
+`sched/src/task_stack.rs`).
 
-- A wait-queue wake against a *reaped* waiter, plus a live positive control. The
-  id-handle change has no end-to-end test, and the hazard is structurally
-  reachable: teardown scrubs sleep entries and futex buckets but never unlinks
-  wait-queue nodes.
-- A process-group signal against a nascent task — the defect's actual vector.
-  `task_create` publishes `pgid = task_id` before registering, so `kill(-pgid)`
-  reaches one; the current test drives `unblock_task` directly instead.
-- `newcomer_outranks_current`'s decision. An inverted comparison means the kernel
-  never preempts on wake — a latency cliff no functional test would catch.
-- Forked-child `cwd` inheritance — incidental today, via the bytewise clone, and
-  one plausible edit from silently resetting every child to `/`.
-- `is_bootstrap_task_ptr`'s stride, `rt_sigaction`'s full-field round-trip, and
-  a task-id-never-reused assertion.
-- FPU save/restore across a switch: per-task slot isolation, the dispatcher's
-  save-prev/restore-next ordering, and the AVX upper halves a regression to
-  `fxsave` would silently drop.
+Resolution: an ostd-exported `macro_rules! declare_pcr_task_type!` whose body
+carries the `unsafe impl PcrTaskType`, invoked once in `sched/src/task_struct.rs`.
+The invocation site contains no `unsafe` token, and `#![forbid(unsafe_code)]`
+does not reject an expansion from an external-crate macro —
+`slopos_ostd::no_mangle_static!` is invoked six times in `sched/src/safestack_rt.rs`
+today. **Verify that empirically with a throwaway build before committing to
+it.** Bind the *publisher* to the same marker
+(`pcr::publish_current_task::<K,U>`) so reader and writer agree by type rather
+than by comment.
 
-`check_test_count.sh`'s baseline sits at exactly the current planned count, so
-there is no margin — these restore it. Bump it in the same commit, and correct
-the stale figure in the agent guidelines.
+Latent rather than live: the kernel's `Current` alias is the only spelling and
+there is one monomorphisation.
 
-### 6. Closeout
+### 5. Closeout
 
 Fold I1–I8 into the module docs that already carry most of the rationale
-(`placement.rs`, `task_reclaim.rs`, `cell.rs`, `task_table.rs`), add the
+(`placement.rs`, `task_reclaim.rs`, `cell.rs`, `task_table.rs`), each
+cross-referencing the Verus corollary that is its machine-checked form. Add the
 task-ownership contract to the agent guidelines beside the unsafe-surface and
-allocation-discipline sections, and drop `TASK_OWNERSHIP_GATE_WARN=1` so the
-gate goes hard. The docs-repo page is written but **must not be committed**
-until every register field is a cell and the gate's `task_borrow` check reads
-zero — it describes the finished architecture, not the tree. Then delete this
-plan.
+allocation-discipline sections. Drop `TASK_OWNERSHIP_GATE_WARN=1` so the gate
+goes hard.
+
+The docs-repo page (`content/docs/architecture/task-ownership.mdx`, written and
+uncommitted in `/home/nil0ft/repos/slopos-docs`) states that the only routes to
+a `&mut TaskInner` are `KArc::get_mut` on the sole pre-registration strong
+reference, and `Drop`. That is false while `task_borrow_mut` is public, so the
+page **must not be committed until check 4 reads zero** — it describes the
+finished architecture, not the tree. Register it in `architecture/meta.json` and
+add the row to `verification/verus-status.mdx`.
+
+Then delete this plan.
 
 ## Constraints the tree imposes
 
-Facts that an earlier reading of this plan got wrong. Check them before
-designing against any of these areas again.
+Check these before designing against any of these areas — each contradicts a
+plausible assumption.
 
 - **The dispatch reference is transient, not a container membership.**
   `ReadyQueue::dequeue` *moves* the membership reference out and returns
   `KArc<Task>`, deliberately, so a task is not "pinned by nothing" across an
   unbounded `on_cpu` spin. So `pinned ⇒ containers ≥ 1` is false; what holds is
   `pinned ⇒ exist_refs == 1`, which is stronger and makes `pinned ⇒ strong > 0`
-  a derived corollary. The dispatcher therefore needs no new borrow primitive —
-  it already holds an owning handle.
+  a derived corollary. The dispatcher needs no new borrow primitive — it already
+  holds an owning handle.
 - **The PCR idle slot cannot own a leaked reference.** Three test paths write it
   directly: the hermetic fixture snapshots and restores it as a bare address,
   one test nulls and restores it, and `create_idle_task_for_cpu` is called
   repeatedly. A leaked handle would leak one reference per re-install.
+- **The FPU owner tag records ownership, not content freshness.** It answers
+  "which task does this register file belong to", never "does the file still
+  agree with the save area". Signal delivery saves via `fpu_save_current_keep`
+  and *keeps* ownership, so a handler clobbers live vector registers with both
+  halves of the tag untouched. `fpu_restore_to_cpu` must therefore stay
+  unconditional; a tag-driven skip discards exactly the state `sigreturn`
+  reinstates, and fails `signal_preserves_vector_regs`. Separating the two
+  questions needs a per-task generation counter bumped on save and recorded on
+  restore, which does not exist. Until it does, `fpu_state_valid` has no sound
+  call site.
 - **The FPU owner tag cannot live inside `FpuState`.** That struct carries a
   `size_of == FPU_STATE_SIZE` assertion plus `Copy` and `Zeroable`; an atomic
   field breaks all three. It is a hardware XSAVE buffer and stays one — the tag
   belongs beside it on the task, which is also where Linux keeps `last_cpu`.
-- **`SyscallContext` holds a bare `*mut Task`.** Earlier revisions of this plan
-  said it holds an owning `TaskRef`, and argued at length that an owning handle
-  would leak because a blocked task is torn down without unwinding. The argument
-  is sound and the premise was invented: the struct has always been a raw
-  pointer. So the target is still a borrow — every kernel surveyed holds one on
-  the syscall path, and Asterinas hit the leak twice before fixing it
-  structurally — but the leak was never present here, and nobody should go
-  looking for the handle that supposedly causes it.
+- **`SyscallContext` holds a borrow, and never held an owning handle.** The
+  target is `&'a Task` because every kernel surveyed holds a borrow of the
+  current task on the syscall path, and an owning handle would leak here: a
+  blocked task is torn down from another CPU without unwinding. Asterinas hit
+  exactly that leak twice (issues #785/#1491) before fixing it structurally.
+  Its two constructors differ because the test fixture parks the BSP on a
+  bootstrap stub, so `Current::get()` returns `None` there — which is the real
+  reason a witness cannot simply be stored in the struct.
 - **`task_borrow` needs one sanctioned survivor.** `task_put` consults the
   dispatch-pin predicate *after* winning the one-to-zero release, where no
   handle exists and a placement clone would be resurrection. That is
@@ -206,6 +181,30 @@ designing against any of these areas again.
 - **A raw task-pointer gate must not cover return position.** "Reference in,
   pointer out" is sanctioned — a Treiber successor *is* a raw pointer, governed
   by the parked reference the link represents.
+- **Converting a plain field to an atomic can raise both counters.** The
+  conversion moves its accessor out of the macro families into a hand-written
+  function, and the obvious form takes `*const TaskInner` and calls
+  `task_borrow`. Write the replacement as an `&self` method from the start, and
+  re-measure after each field rather than after the step.
+
+## Verification
+
+Every commit: `cargo fmt --all`, `just build`, and a full green `just test`.
+
+- Clear `builddir/.kernel-elf-gates.stamp` before `just build` — the ELF gates
+  cache on ELF hash and print `skipped` otherwise.
+- Read `just test`'s **pass count**, not its exit code.
+- `just test` leaves a tests-build kernel at `builddir/kernel.elf`, so
+  `check_kernel_softfloat.sh` run afterwards reports on a different
+  configuration with different exemptions.
+- Review every `Ordering::` in the diff. A silent Acquire→Relaxed downgrade
+  during a mechanical retype is a scheduler that works under TCG and loses
+  wakeups under KVM.
+- Confirm KVM before trusting any full-suite failure — no `/dev/kvm` means a
+  silent TCG fallback and a panic-recovery NMI hang that reads as a real
+  regression.
+- `scheduler.rs` additionally wants `just boot-fast` ×3: a broken switch core
+  does not boot, and unit tests will not tell you.
 
 ## Acceptance
 
@@ -216,8 +215,11 @@ designing against any of these areas again.
 - No `unsafe impl Send`/`Sync` justified by "caller holds a task refcount".
 - Zero hits for `refcnt|task_inc_ref|task_dec_ref|inc_ref|dec_ref` across kernel
   crates, page-table refcounts excepted.
-- Every framekernel gate green, the Verus set green, and
-  full `just test` green under KVM.
+- Check 8 reads zero **on task paths**; the unrelated helpers it also matches
+  (`ptr_buf.rs`, `dev/`, `pcr.rs`, `io_mem.rs`, `heap.rs`) are a separate
+  backlog and not a blocker here.
+- Every framekernel gate green, the Verus set green, and full `just test` green
+  under KVM.
 - `just test` wall-time and `just boot-fast` within noise of the pre-migration
   baseline — measured, not assumed.
 
