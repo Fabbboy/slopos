@@ -363,7 +363,7 @@ impl<K, U> TaskInner<K, U> {
         &self,
         child: core::ptr::NonNull<TaskInner<K, U>>,
     ) -> Result<(), LinkError> {
-        self.children.remove(child)
+        self.children.remove(child).map(|_| ())
     }
 
     /// Whether this task has no children.

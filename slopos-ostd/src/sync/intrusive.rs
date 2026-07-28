@@ -244,8 +244,16 @@ where
         Some(unsafe { NonNull::new_unchecked(head_ptr) })
     }
 
-    /// Remove `node` from the list via linear scan from the head.
-    pub fn remove(&self, node: NonNull<T>) -> Result<(), LinkError> {
+    /// Remove `node` from the list via linear scan from the head, and hand back
+    /// the pointer the list itself held.
+    ///
+    /// `node` is only ever compared, so a caller may search with an address
+    /// derived from anything — a `&T`, say. The returned pointer is the one the
+    /// link chain stored, which is the one a caller may *act* on: reconstituting
+    /// an owning handle from it reaches backwards out of `T` into the
+    /// allocation header, and a pointer derived from a `&T` carries provenance
+    /// over `T` alone. Callers that only need "was it there" discard it.
+    pub fn remove(&self, node: NonNull<T>) -> Result<NonNull<T>, LinkError> {
         let target = node.as_ptr();
         let mut prev: *mut T = core::ptr::null_mut();
         let mut cursor = self.head.load(Ordering::Acquire);
@@ -274,7 +282,10 @@ where
                     .store(core::ptr::null_mut(), Ordering::Release);
                 cursor_link.linked.store(false, Ordering::Release);
                 self.count.fetch_sub(1, Ordering::AcqRel);
-                return Ok(());
+                // SAFETY: `cursor` matched a non-null `target`, and it is the
+                // pointer the link chain stored rather than the one searched
+                // with.
+                return Ok(unsafe { NonNull::new_unchecked(cursor) });
             }
             prev = cursor;
             cursor = cursor_link.next.load(Ordering::Acquire);

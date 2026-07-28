@@ -149,10 +149,15 @@ impl ReadyQueue {
     /// queue's own reference and mints nothing, so the caller only has to
     /// prove the task is there to be unlinked.
     fn remove(&self, task: &Task) -> i32 {
-        let node = NonNull::from(task);
-        if self.list.remove(node).is_err() {
+        // Search with the borrow, reclaim with what the list hands back. The
+        // two addresses are equal but not interchangeable:
+        // `task_placement_reclaim` walks backwards out of the task body into
+        // the `KArc` header, which a pointer derived from a `&Task` has no
+        // provenance over. The list's own link pointer came from
+        // `KArc::node`, which does.
+        let Ok(node) = self.list.remove(NonNull::from(task)) else {
             return -1;
-        }
+        };
         let _ = task_sched_placement_compare_exchange(
             task,
             SchedPlacement::ReadyQueue,

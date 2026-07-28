@@ -382,7 +382,7 @@ pub fn task_children_remove<K, U>(
     child: NonNull<TaskInner<K, U>>,
 ) -> Result<(), LinkError> {
     match task_borrow(parent) {
-        Some(p) => p.children.remove(child),
+        Some(p) => p.children.remove(child).map(|_| ()),
         None => Err(LinkError::NotPresent),
     }
 }
