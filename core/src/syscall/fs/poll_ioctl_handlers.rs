@@ -635,7 +635,7 @@ define_syscall!(syscall_ioctl
             }
 
             let task = ctx.task();
-            if task.sid == 0 || task.sid != task.task_id {
+            if !task.is_session_leader() {
                 return Err(Errno::EINVAL);
             }
 
@@ -647,7 +647,7 @@ define_syscall!(syscall_ioctl
             }
 
             let tty_sid = tty::get_session_id(tty_idx).unwrap_or(0);
-            if tty_sid != 0 && tty_sid != task.sid {
+            if tty_sid != 0 && tty_sid != task.sid() {
                 return Err(Errno::EINVAL);
             }
 
@@ -681,8 +681,8 @@ define_syscall!(syscall_ioctl
                 _ => return Err(Errno::EINVAL),
             }
 
-            let caller_sid = task.sid;
-            let is_session_leader = task.sid != 0 && task.sid == task.task_id;
+            let caller_sid = task.sid();
+            let is_session_leader = task.is_session_leader();
             task.set_controlling_tty(None);
             let _ = tty::detach_controlling_terminal(tty_idx, caller_sid, is_session_leader);
             Ok(0)

@@ -395,10 +395,10 @@ pub fn test_scalar_accessor_field_identity() -> TestResult {
         task.flags = 0x3333;
         task.entry_point = 0x4444;
         task.cpu_affinity = 0x5555;
-        task.pgid = 0x6666;
+        task.set_pgid(0x6666);
         task.time_slice = 0x7777;
         task.time_slice_remaining = 0x8888;
-        task.sid = 0x9999;
+        task.set_sid(0x9999);
         task.kernel_stack_top = 0xAAAA;
         task.fs_base
             .store(0xBBBB, core::sync::atomic::Ordering::Release);
@@ -726,7 +726,7 @@ pub fn test_pending_task_is_unreachable_until_commit() -> TestResult {
     // The spawn path's job-control inherit, performed here for the same reason
     // it is performed there: while the task is still private.
     let group_pgid = task_id + 0x4000;
-    pending.as_mut().pgid = group_pgid;
+    pending.as_mut().set_pgid(group_pgid);
 
     if task_find_by_id(task_id).is_some() {
         klog_info!("SCHED_TEST: a task under construction was findable by id");
@@ -741,7 +741,7 @@ pub fn test_pending_task_is_unreachable_until_commit() -> TestResult {
         if task.task_id == task_id {
             seen_by_id = true;
         }
-        if task.pgid == group_pgid {
+        if task.pgid() == group_pgid {
             seen_by_pgid = true;
         }
     });
@@ -765,10 +765,10 @@ pub fn test_pending_task_is_unreachable_until_commit() -> TestResult {
         let _ = task_terminate(task_id);
         return TestResult::Fail;
     };
-    if guard.pgid != group_pgid {
+    if guard.pgid() != group_pgid {
         klog_info!(
             "SCHED_TEST: committed task carries pgid {}, expected {}",
-            guard.pgid,
+            guard.pgid(),
             group_pgid
         );
         drop(guard);

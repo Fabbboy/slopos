@@ -51,7 +51,7 @@ fn runtime_signal_process_group(pgid: u32, signum: u8) -> bool {
 
     let mut matched = false;
     task::task_for_each_active(|task| {
-        if task.pgid != pgid {
+        if task.pgid() != pgid {
             return;
         }
         if task_signal_post(task.as_ptr(), signum) {
@@ -71,7 +71,7 @@ fn runtime_signal_session(sid: u32, signum: u8) -> bool {
 
     let mut matched = false;
     task::task_for_each_active(|task| {
-        if task.sid != sid {
+        if task.sid() != sid {
             return;
         }
         if task_signal_post(task.as_ptr(), signum) {
@@ -93,7 +93,7 @@ fn runtime_pgrp_exists_in_session(pgid: u32, sid: u32) -> bool {
 
     let mut found = false;
     task::task_try_for_each_active(|task| {
-        if task.pgid == pgid && task.sid == sid {
+        if task.pgid() == pgid && task.sid() == sid {
             found = true;
             return ControlFlow::Break(());
         }
@@ -163,7 +163,7 @@ fn runtime_is_pgrp_orphaned(pgid: u32, sid: u32) -> bool {
     let mut is_orphaned = true;
     task::task_try_for_each_active(|task| {
         // Only look at members of the target process group.
-        if task.pgid != pgid || task.sid != sid {
+        if task.pgid() != pgid || task.sid() != sid {
             return ControlFlow::Continue(());
         }
 
@@ -177,7 +177,7 @@ fn runtime_is_pgrp_orphaned(pgid: u32, sid: u32) -> bool {
         };
 
         // Parent is in the same session but a different pgrp → not orphaned.
-        if parent.sid == sid && parent.pgid != pgid {
+        if parent.sid() == sid && parent.pgid() != pgid {
             is_orphaned = false;
             return ControlFlow::Break(());
         }

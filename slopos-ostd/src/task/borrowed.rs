@@ -164,6 +164,44 @@ impl<K, U> TaskInner<K, U> {
         self.task_id
     }
 
+    // ── Job control ───────────────────────────────────────────────────
+
+    /// This task's process-group id. See [`pgid`](TaskInner::pgid) for the
+    /// ordering.
+    #[inline]
+    pub fn pgid(&self) -> u32 {
+        self.pgid.load(Ordering::Relaxed)
+    }
+
+    /// Retarget this task's process group. The caller stamps the matching
+    /// [`process_group`](TaskInner::process_group) membership afterwards; that
+    /// slot's Release store is what orders the pair.
+    #[inline]
+    pub fn set_pgid(&self, pgid: u32) {
+        self.pgid.store(pgid, Ordering::Relaxed);
+    }
+
+    /// This task's session id. See [`sid`](TaskInner::sid) for the ordering.
+    #[inline]
+    pub fn sid(&self) -> u32 {
+        self.sid.load(Ordering::Relaxed)
+    }
+
+    /// Move this task into a session. Same pairing as
+    /// [`set_pgid`](Self::set_pgid).
+    #[inline]
+    pub fn set_sid(&self, sid: u32) {
+        self.sid.store(sid, Ordering::Relaxed);
+    }
+
+    /// Whether this task leads its own session — the `setsid`/`TIOCSCTTY`
+    /// precondition, and what makes it the one that hangs up the terminal.
+    #[inline]
+    pub fn is_session_leader(&self) -> bool {
+        let sid = self.sid();
+        sid != 0 && sid == self.task_id
+    }
+
     // ── Signals ───────────────────────────────────────────────────────
 
     /// Pending-signal bitmask.

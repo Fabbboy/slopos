@@ -633,8 +633,8 @@ pub fn task_build(
     task_ref.flags = flags;
     task_ref.process_id = resources.process_id;
     task_ref.tgid = task_id;
-    task_ref.pgid = task_id;
-    task_ref.sid = task_id;
+    task_ref.set_pgid(task_id);
+    task_ref.set_sid(task_id);
     task_ref.set_controlling_tty(None);
     // The token proves this task is unpublished, so there is no reader to defer
     // a release past and no displaced handle to release — exclusivity carries
@@ -994,9 +994,8 @@ fn mark_task_terminated(task: &Task, resolved_id: u32) {
 
     // Session-leader hangup. Every field here is either a frozen identity or an
     // atomic, so a shared borrow suffices.
-    let should_hangup = if task.sid != 0
-        && task.task_id != INVALID_TASK_ID
-        && task.sid == task.task_id
+    let should_hangup = if task.task_id != INVALID_TASK_ID
+        && task.is_session_leader()
         && let Some(tty_idx) = task.controlling_tty()
     {
         task.set_controlling_tty(None);
@@ -1290,8 +1289,8 @@ pub fn task_fork(
     // The parent link and children-list membership are published together, after
     // registration, via `link_child` — never a bare field write.
     child.tgid = child_task_id;
-    child.pgid = parent.pgid;
-    child.sid = parent.sid;
+    child.set_pgid(parent.pgid());
+    child.set_sid(parent.sid());
     // Share the parent's group object (clone_from_raw emptied the copied
     // slot); the shared identity is what a stale pid check keys on. Exclusive
     // because the child is not published yet.
@@ -1493,8 +1492,8 @@ pub fn task_clone(
     } else {
         child.tgid = child_task_id;
     }
-    child.pgid = parent.pgid;
-    child.sid = parent.sid;
+    child.set_pgid(parent.pgid());
+    child.set_sid(parent.sid());
     // Share the parent's group object (clone_from_raw emptied the copied
     // slot); the shared identity is what a stale pid check keys on. Exclusive
     // because the child is not published yet.

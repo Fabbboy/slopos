@@ -996,8 +996,8 @@ fn dump_one_task(t: &Task) {
         placement,
         on_cpu,
         t.process_id,
-        t.pgid,
-        t.sid,
+        t.pgid(),
+        t.sid(),
         last_run,
     );
     if t.status() == TaskStatus::Blocked {

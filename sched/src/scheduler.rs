@@ -2353,14 +2353,14 @@ pub fn current_task_handle() -> u32 {
 }
 
 pub fn current_task_pgid() -> u32 {
-    Current::get().map_or(0, |c| c.task().pgid)
+    Current::get().map_or(0, |c| c.task().pgid())
 }
 
 /// Get the current task's session ID (SID).
 ///
 /// Returns 0 if there is no current task or the scheduler is not yet active.
 pub fn current_task_sid() -> u32 {
-    Current::get().map_or(0, |c| c.task().sid)
+    Current::get().map_or(0, |c| c.task().sid())
 }
 
 pub fn current_task_controlling_tty() -> Option<slopos_abi::syscall::TtyIndex> {

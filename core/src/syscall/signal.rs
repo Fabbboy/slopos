@@ -19,9 +19,7 @@ use slopos_ostd::user::context::{
 use crate::syscall::args::{Signum, UserPtr};
 use crate::syscall::result::SyscallResult;
 use slopos_sched::scheduler::{schedule, unblock_task};
-use slopos_sched::task::{
-    task_find_by_id, task_for_each_active, task_pgid, task_signal_post, task_terminate,
-};
+use slopos_sched::task::{task_find_by_id, task_for_each_active, task_signal_post, task_terminate};
 use slopos_sched::task_struct::{SignalAction, Task};
 use slopos_sched::trap::trap_running_on_exception_stack;
 
@@ -69,7 +67,7 @@ impl TargetSet {
 
 fn collect_targets_for_group(pgid: u32, targets: &mut TargetSet) {
     task_for_each_active(|task| {
-        if task.pgid == pgid {
+        if task.pgid() == pgid {
             targets.push(task.task_id);
         }
     });
@@ -191,7 +189,7 @@ define_syscall!(syscall_kill
         let Some(caller) = task_find_by_id(caller_id) else {
             return SyscallResult::Err(Errno::ESRCH);
         };
-        let caller_pgid = task_pgid(caller.as_ptr()).unwrap_or(INVALID_TASK_ID);
+        let caller_pgid = caller.pgid();
         if caller_pgid == INVALID_TASK_ID {
             return SyscallResult::Err(Errno::ESRCH);
         }

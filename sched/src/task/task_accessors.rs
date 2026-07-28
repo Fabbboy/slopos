@@ -26,7 +26,7 @@ pub use slopos_ostd::task::accessors::{
     task_remote_inbox_is_linked, task_remote_inbox_try_link, task_remote_inbox_unlink,
     task_reset_caught_handlers, task_reset_fpu_state, task_save_from_interrupt_frame,
     task_sched_placement_compare_exchange, task_sched_placement_load, task_sched_placement_store,
-    task_session, task_set_cpu_affinity, task_set_fs_base, task_set_kernel_stack_top,
+    task_set_cpu_affinity, task_set_fs_base, task_set_kernel_stack_top,
     task_set_last_run_timestamp, task_set_on_cpu, task_set_parent_task_id, task_set_status,
     task_set_time_slice, task_set_time_slice_remaining, task_sid, task_signal_blocked,
     task_signal_handler, task_signal_pending, task_signal_pending_store, task_signal_post,

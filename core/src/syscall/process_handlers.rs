@@ -10,9 +10,8 @@ use slopos_ostd::task::{new_group_in_session, new_session_group};
 use slopos_ostd::user::context::UserContext;
 use slopos_sched::scheduler::{task_apply_affinity, task_wait_for};
 use slopos_sched::task::{
-    task_borrow, task_borrow_mut, task_consume_zombie, task_cpu_affinity,
-    task_default_signals_in_mask, task_find_by_id, task_fork, task_peek_exit_info, task_pgid,
-    task_process_group, task_reset_caught_handlers, task_session, task_set_cpu_affinity,
+    task_consume_zombie, task_cpu_affinity, task_default_signals_in_mask, task_find_by_id,
+    task_fork, task_peek_exit_info, task_reset_caught_handlers, task_set_cpu_affinity,
     task_set_fs_base, task_terminate,
 };
 use slopos_sched::task_struct::Current;
@@ -510,8 +509,7 @@ define_syscall!(syscall_getpgid
     let Some(task_ref) = task_find_by_id(resolved) else {
         return Err(Errno::ESRCH);
     };
-    let task_ptr = task_ref.as_ptr();
-    Ok(task_pgid(task_ptr).unwrap_or(0))
+    Ok(task_ref.pgid())
 });
 
 define_syscall!(syscall_setpgid
@@ -522,25 +520,19 @@ define_syscall!(syscall_setpgid
     let resolved_pid = if pid == 0 { task_id } else { pid };
     let resolved_pgid = if pgid_arg == 0 { resolved_pid } else { pgid_arg };
 
-    let Some(caller_ref) = task_find_by_id(task_id) else {
-        return Err(Errno::EINVAL);
-    };
     let Some(target_ref) = task_find_by_id(resolved_pid) else {
         return Err(Errno::EINVAL);
     };
     if resolved_pgid == 0 {
         return Err(Errno::EINVAL);
     }
-    let caller_ptr = caller_ref.as_ptr();
-    let target_ptr = target_ref.as_ptr();
 
-    let caller = task_borrow(caller_ptr).ok_or(Errno::EINVAL)?;
-    let caller_sid = caller.sid;
-    let target = task_borrow_mut(target_ptr).ok_or(Errno::EINVAL)?;
+    let caller_sid = ctx.task().sid();
+    let target = &*target_ref;
     if resolved_pid != task_id && target.parent_task_id != task_id {
         return Err(Errno::EINVAL);
     }
-    if target.sid != caller_sid {
+    if target.sid() != caller_sid {
         return Err(Errno::EINVAL);
     }
 
@@ -549,10 +541,14 @@ define_syscall!(syscall_setpgid
     let new_group = if resolved_pgid == resolved_pid {
         // Become a new group leader within the current session — unless the
         // target already leads exactly this group.
-        match task_process_group(target_ptr) {
+        match target.process_group.load() {
             Some(existing) if existing.id() == resolved_pgid => Some(existing),
             _ => {
-                let session = task_session(target_ptr).ok_or(Errno::EPERM)?;
+                let session = target
+                    .process_group
+                    .load()
+                    .map(|pg| pg.session().clone())
+                    .ok_or(Errno::EPERM)?;
                 Some(new_group_in_session(resolved_pgid, session).ok_or(Errno::ENOMEM)?)
             }
         }
@@ -561,19 +557,19 @@ define_syscall!(syscall_setpgid
         let Some(leader_ref) = task_find_by_id(resolved_pgid) else {
             return Err(Errno::EINVAL);
         };
-        let leader_ptr = leader_ref.as_ptr();
-        let leader = task_borrow(leader_ptr).ok_or(Errno::EINVAL)?;
-        if leader.sid != caller_sid {
+        if leader_ref.sid() != caller_sid {
             return Err(Errno::EINVAL);
         }
-        Some(task_process_group(leader_ptr).ok_or(Errno::EINVAL)?)
+        Some(leader_ref.process_group.load().ok_or(Errno::EINVAL)?)
     };
 
-    target.pgid = resolved_pgid;
-    // `target` is generally *not* the calling task, so this write lands on a
-    // field a reader on another CPU may be cloning from right now. The
-    // displaced membership is released after a grace period, which is what
-    // keeps a concurrent reader's clone from racing its destructor.
+    // `target` is generally *not* the calling task, so both writes land on
+    // fields a reader on another CPU may be looking at right now. The integer
+    // goes first and the membership second: the slot's Release store is what
+    // orders the pair, and the displaced membership is released after a grace
+    // period, which keeps a concurrent reader's clone from racing its
+    // destructor.
+    target.set_pgid(resolved_pgid);
     target.process_group.store(new_group);
     Ok(())
 });
@@ -582,12 +578,8 @@ define_syscall!(syscall_setsid (ctx)
     requires(let task_id: task_id)
     -> Result<u32, Errno>
 {
-    let Some(task_ref) = task_find_by_id(task_id) else {
-        return Err(Errno::EINVAL);
-    };
-    let task_ptr = task_ref.as_ptr();
-    let task = task_borrow_mut(task_ptr).ok_or(Errno::EINVAL)?;
-    if task.pgid == task.task_id || task.sid == task.task_id {
+    let task = ctx.task();
+    if task.pgid() == task.task_id || task.sid() == task.task_id {
         return Err(Errno::EPERM);
     }
     // A fresh session + its initial group; installing them drops the old group
@@ -596,10 +588,11 @@ define_syscall!(syscall_setsid (ctx)
     if task.controlling_tty().is_some() {
         task.set_controlling_tty(None);
     }
-    task.sid = task.task_id;
-    task.pgid = task.task_id;
+    // Integers first, membership second — see `syscall_setpgid`.
+    task.set_sid(task.task_id);
+    task.set_pgid(task.task_id);
     task.process_group.store(Some(pg));
-    Ok(task.sid)
+    Ok(task.sid())
 });
 
 define_syscall!(syscall_getuid (ctx) -> u32 { 0 });

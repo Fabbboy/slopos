@@ -25,7 +25,7 @@ use slopos_abi::syscall::TtyIndex;
 use slopos_abi::task::{TaskPriority, TaskStatus};
 
 use crate::KArc;
-use crate::task::job_control::{ProcessGroup, Session};
+use crate::task::job_control::ProcessGroup;
 use crate::task::kernel_task::{SchedPlacement, TaskInner};
 
 pub const TASK_EXIT_CLEANUP_RESOURCES: u8 = 1 << 0;
@@ -159,8 +159,6 @@ task_scalar_getters! {
     task_entry_point -> u64 = entry_point,
     /// Read `task->cpu_affinity`.
     task_cpu_affinity -> u32 = cpu_affinity,
-    /// Read `task->pgid` (process-group id).
-    task_pgid -> u32 = pgid,
     /// Read `task->time_slice`.
     task_time_slice -> u64 = time_slice,
     /// Read `task->time_slice_remaining`.
@@ -168,8 +166,6 @@ task_scalar_getters! {
     /// Read `task->priority`. The field is a `Copy` enum stored in a single
     /// naturally-aligned byte slot.
     task_priority -> TaskPriority = priority,
-    /// Read `task->sid` (session id).
-    task_sid -> u32 = sid,
     /// Read `task->kernel_stack_top` directly (the dispatcher hot path needs
     /// only `top` for TSS RSP0 programming).
     task_kernel_stack_top -> u64 = kernel_stack_top,
@@ -202,6 +198,10 @@ task_method_getters! {
     task_status -> TaskStatus = status,
     /// Read `task->signal_blocked` (`SigSet = u64`).
     task_signal_blocked -> slopos_abi::signal::SigSet = signal_blocked,
+    /// Read `task->pgid` (process-group id).
+    task_pgid -> u32 = pgid,
+    /// Read `task->sid` (session id).
+    task_sid -> u32 = sid,
 }
 
 task_context_getters! {
@@ -437,17 +437,6 @@ pub fn task_process_group<K, U>(task: *const TaskInner<K, U>) -> Option<KArc<Pro
     // mints the caller's own reference under an RCU read-side section, so a
     // concurrent `setpgid` on this task cannot release the group underneath it.
     unsafe { (*task).process_group.load() }
-}
-
-/// Clone this task's session handle, resolved through its process group.
-#[inline]
-pub fn task_session<K, U>(task: *const TaskInner<K, U>) -> Option<KArc<Session>> {
-    if task.is_null() {
-        return None;
-    }
-    // SAFETY: caller pre-validated; see `task_process_group` — the group handle
-    // this borrows the session from is one `load` minted for us.
-    unsafe { (*task).process_group.load() }.map(|pg| pg.session().clone())
 }
 
 /// Read `task->name[..]` and probe whether the first 5 bytes

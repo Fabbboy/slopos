@@ -436,8 +436,20 @@ pub struct TaskInner<K, U> {
     pub fs_base: AtomicU64,
     /// Thread-group ID.
     pub tgid: u32,
-    pub pgid: u32,
-    pub sid: u32,
+    /// Process-group and session ids.
+    ///
+    /// Atomic because `setpgid`/`setsid` retarget a task from its own CPU while
+    /// job control scans every other task from elsewhere — the process-group
+    /// signal walk, the orphaned-group test, and the TTY hangup sweep all read
+    /// these from a CPU that does not own the task. A plain field cannot
+    /// express that without a data race.
+    ///
+    /// Relaxed: they are identity scalars, not a publication protocol. Where
+    /// one has to be seen together with the [`process_group`](Self::process_group)
+    /// membership it mirrors, the ordering comes from that slot's own
+    /// Release store, which every writer performs after stamping these.
+    pub pgid: AtomicU32,
+    pub sid: AtomicU32,
     /// Controlling terminal of this task's session, encoded per
     /// [`TTY_INDEX_NONE`]. Read and written through
     /// [`controlling_tty`](TaskInner::controlling_tty) and
@@ -1065,8 +1077,8 @@ impl<K, U> TaskInner<K, U> {
             parent_task_id: INVALID_TASK_ID,
             fs_base: AtomicU64::new(0),
             tgid: INVALID_TASK_ID,
-            pgid: INVALID_TASK_ID,
-            sid: INVALID_TASK_ID,
+            pgid: AtomicU32::new(INVALID_TASK_ID),
+            sid: AtomicU32::new(INVALID_TASK_ID),
             controlling_tty: AtomicU16::new(TTY_INDEX_NONE),
             cwd: TaskOwnCell::new({
                 let mut c = [0u8; CWD_MAX];
@@ -1142,8 +1154,8 @@ impl<K, U> TaskInner<K, U> {
                 addr_of_mut!((*slot).entry_arg).write(ptr::null_mut());
                 addr_of_mut!((*slot).parent_task_id).write(INVALID_TASK_ID);
                 addr_of_mut!((*slot).tgid).write(INVALID_TASK_ID);
-                addr_of_mut!((*slot).pgid).write(INVALID_TASK_ID);
-                addr_of_mut!((*slot).sid).write(INVALID_TASK_ID);
+                addr_of_mut!((*slot).pgid).write(AtomicU32::new(INVALID_TASK_ID));
+                addr_of_mut!((*slot).sid).write(AtomicU32::new(INVALID_TASK_ID));
 
                 // Not all-zero: zero would name TTY 0, not "no controlling
                 // terminal".

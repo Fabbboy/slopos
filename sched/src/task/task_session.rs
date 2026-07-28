@@ -17,7 +17,7 @@ pub fn pgrp_handle_for_pgid(pgid: u32) -> Option<KWeak<ProcessGroup>> {
     }
     with_task_manager(|mgr| {
         for task in mgr.iter_tasks() {
-            if task.pgid == pgid {
+            if task.pgid() == pgid {
                 if let Some(pg) = task.process_group.load() {
                     return Some(KArc::downgrade(&pg));
                 }
@@ -36,7 +36,7 @@ pub fn session_handle_for_sid(sid: u32) -> Option<KWeak<Session>> {
     }
     with_task_manager(|mgr| {
         for task in mgr.iter_tasks() {
-            if task.sid == sid {
+            if task.sid() == sid {
                 if let Some(pg) = task.process_group.load() {
                     return Some(KArc::downgrade(pg.session()));
                 }
@@ -55,7 +55,7 @@ pub fn task_clear_controlling_tty_for_session(session_id: u32, tty: TtyIndex) ->
     task_for_each_active(|task| {
         // The walk hands us a live registry entry as `&Task`; both halves are
         // `&self` operations, so the accessor was a null check around nothing.
-        if task.sid == session_id && task.clear_controlling_tty_if(tty) {
+        if task.sid() == session_id && task.clear_controlling_tty_if(tty) {
             cleared = cleared.saturating_add(1);
         }
     });

@@ -303,24 +303,24 @@ pub fn spawn_program_with_attrs(
                 // rather than an RCU store — the child is unreachable, so there
                 // is no reader to defer a release past.
                 let group = if flags & slopos_abi::task::TASK_FLAG_NEW_PGRP != 0 {
-                    child.pgid = task_id;
+                    child.set_pgid(task_id);
                     parent
                         .process_group
                         .load()
                         .and_then(|pg| new_group_in_session(task_id, pg.session().clone()))
                 } else {
-                    child.pgid = parent.pgid;
+                    child.set_pgid(parent.pgid());
                     parent.process_group.load()
                 };
                 let _ = child.process_group.replace_exclusive(group);
-                child.sid = parent.sid;
+                child.set_sid(parent.sid());
                 child.set_controlling_tty(parent.controlling_tty());
 
                 if flags & slopos_abi::task::TASK_FLAG_FOREGROUND != 0
-                    && child.pgid != 0
+                    && child.pgid() != 0
                     && let Some(ctty) = child.controlling_tty()
                 {
-                    fg_handoff = Some((ctty, child.pgid, child.sid));
+                    fg_handoff = Some((ctty, child.pgid(), child.sid()));
                 }
             }
         }
