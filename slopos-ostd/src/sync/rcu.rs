@@ -610,8 +610,7 @@ impl<T: Send + 'static> RcuCell<T> {
     /// [`rcu_call_typed`] so concurrent readers can complete safely.
     ///
     /// Returns the raw `*mut T` of the displaced value (may be null
-    /// on first publish). Callers who need the typed `KBox<T>` back
-    /// for a custom drop should use [`replace_take`] instead.
+    /// on first publish).
     pub fn replace(&self, new_value: crate::mm::KBox<T>) -> *mut T {
         let new_ptr = crate::mm::KBox::into_raw(new_value);
         let old = self.ptr.swap(new_ptr, Ordering::AcqRel);
@@ -623,26 +622,6 @@ impl<T: Send + 'static> RcuCell<T> {
             rcu_call_typed::<T>(old_box, drop_typed::<T>);
         }
         old
-    }
-
-    /// Replace the cell contents with `new_value` and return the
-    /// displaced `KBox<T>` to the caller (instead of scheduling a
-    /// deferred drop).
-    ///
-    /// **Caller must arrange grace-period safety** — typically by
-    /// either (a) this being a pre-scheduler init or panic path
-    /// where no reader can exist, or (b) passing the returned box
-    /// to [`rcu_call_typed`] themselves.
-    pub fn replace_take(&self, new_value: crate::mm::KBox<T>) -> Option<crate::mm::KBox<T>> {
-        let new_ptr = crate::mm::KBox::into_raw(new_value);
-        let old = self.ptr.swap(new_ptr, Ordering::AcqRel);
-        if old.is_null() {
-            None
-        } else {
-            // SAFETY: see `replace`; caller takes responsibility for
-            // grace-period safety.
-            Some(unsafe { crate::mm::KBox::from_raw(old) })
-        }
     }
 
     /// Pre-scheduler-only store: replace the cell contents and drop
