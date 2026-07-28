@@ -151,7 +151,7 @@ use super::task::{
     task_recovery_depth_store, task_remote_inbox_is_linked, task_sched_placement_compare_exchange,
     task_sched_placement_load, task_sched_placement_store, task_set_on_cpu, task_set_state,
     task_set_status, task_set_time_slice, task_set_time_slice_remaining, task_status,
-    task_switch_ctx_rip_rsp, task_time_slice, task_time_slice_remaining, task_try_transition_from,
+    task_switch_ctx_rip_rsp, task_time_slice, task_time_slice_remaining, task_transition_from,
 };
 pub use super::trap::{
     RescheduleReason, TrapExitSource, save_preempt_context, save_task_context_from_interrupt_frame,
@@ -2084,7 +2084,7 @@ pub(crate) fn wake_blocked_task(task: &TaskRef, task_id: u32) -> c_int {
                     core::hint::spin_loop();
                     continue;
                 }
-                if task_try_transition_from(task_id, TaskStatus::Blocked, TaskStatus::Ready) == 0 {
+                if task_transition_from(body, TaskStatus::Blocked, TaskStatus::Ready) {
                     // No sleep-queue cancel here: only the owner and the
                     // generation-checked timer path remove entries (a
                     // waker-side cancel raced the owner's next re-arm).
@@ -2111,7 +2111,7 @@ pub(crate) fn wake_blocked_task(task: &TaskRef, task_id: u32) -> c_int {
                     core::hint::spin_loop();
                     continue;
                 }
-                if task_try_transition_from(task_id, TaskStatus::Blocked, TaskStatus::Ready) != 0 {
+                if !task_transition_from(body, TaskStatus::Blocked, TaskStatus::Ready) {
                     if task_is_ready(body) {
                         return publish_reserved_waking_ready(task, task_id, "unblock_task");
                     }
@@ -2131,7 +2131,7 @@ pub(crate) fn wake_blocked_task(task: &TaskRef, task_id: u32) -> c_int {
                 // is single-winner; duplicate wakes either see Ready already
                 // published/owned or wait for the owner to finish (its
                 // reservation lasts microseconds).
-                if task_try_transition_from(task_id, TaskStatus::Blocked, TaskStatus::Ready) == 0 {
+                if task_transition_from(body, TaskStatus::Blocked, TaskStatus::Ready) {
                     return publish_reserved_waking_ready(task, task_id, "waking wake");
                 }
                 if task_is_ready(body) {
@@ -2145,7 +2145,7 @@ pub(crate) fn wake_blocked_task(task: &TaskRef, task_id: u32) -> c_int {
                 // or test fixture parked the task while leaving that ownership
                 // in place, the wake still performs the state CAS; the existing
                 // queue/inbox/migration owner then becomes runnable again.
-                if task_try_transition_from(task_id, TaskStatus::Blocked, TaskStatus::Ready) == 0 {
+                if task_transition_from(body, TaskStatus::Blocked, TaskStatus::Ready) {
                     return 0;
                 }
                 core::hint::spin_loop();

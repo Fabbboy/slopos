@@ -467,8 +467,8 @@ fn force_reap_registration(id: u32) {
         return;
     };
     // Off-lock, and before the unhash: resolving the parent takes the same lock.
-    if let Some(parent_ref) = super::unlink_child(node.as_ptr()) {
-        task_put(parent_ref);
+    if let Some(child_ref) = super::unlink_child(&guard) {
+        task_put(child_ref);
     }
     let existence = TaskRef::take_existence(node);
     let entry = with_task_manager(|mgr| mgr.registry.remove(id));
@@ -848,7 +848,6 @@ pub fn task_consume_zombie(task_id: u32) -> Option<ExitInfo> {
     if !task.try_transition_to(TaskStatus::Terminated) {
         return None;
     }
-    let child_ptr = task.as_ptr();
     // waitpid drops the parent's owning reference off-lock: unlink the child
     // from its parent's children list and release the reference the list held.
     // A Zombie is pinned by that reference, so without this the reaped child
@@ -858,8 +857,8 @@ pub fn task_consume_zombie(task_id: u32) -> Option<ExitInfo> {
     // the child reapable, so from that instant a peer CPU's deferred-reap drain
     // may retire the registration and hand back the existence reference; this
     // guard is then the only thing keeping `child_ptr` addressable.
-    if let Some(parent_ref) = super::unlink_child(child_ptr) {
-        task_put(parent_ref);
+    if let Some(child_ref) = super::unlink_child(&task) {
+        task_put(child_ref);
     }
     drop(task);
     let _ = reap_task_registration(task_id);

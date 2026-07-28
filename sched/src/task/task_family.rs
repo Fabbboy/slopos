@@ -19,9 +19,7 @@
 
 use core::ptr::NonNull;
 
-use slopos_ostd::task::accessors::{
-    task_borrow, task_children_pop, task_children_remove, task_set_parent_task_id,
-};
+use slopos_ostd::task::accessors::task_set_parent_task_id;
 use slopos_ostd::task::task_placement_retain;
 
 use super::task_table::{TaskRef, task_find_by_id, with_task_manager};
@@ -70,20 +68,26 @@ pub fn link_child(parent: &Task, child: NonNull<Task>) {
 /// off-lock; it is never the last reference, because the child holds its own
 /// existence reference until it is reaped, so the drop is a bare decrement.
 pub fn take_one_child(parent: &Task) -> Option<TaskRef> {
-    let child_nn = with_task_manager(|_mgr| task_children_pop(parent))?;
+    let child_nn = with_task_manager(|_mgr| parent.children_pop())?;
     Some(TaskRef::from_placement(child_nn))
 }
 
-pub fn unlink_child(child: *mut Task) -> Option<TaskRef> {
-    let child_nn = NonNull::new(child)?;
-    let parent_id = task_borrow(child as *const Task)?.parent_task_id;
+/// Detach `child` from its parent's children list and hand back the owning
+/// reference the list held. `None` when the child has no parent, the parent is
+/// already gone, or the list did not hold it.
+///
+/// Takes the guard rather than a pointer because that is what makes the child
+/// addressable here: the caller has already made it reapable, so a peer CPU's
+/// deferred-reap drain may be retiring its registration concurrently, and the
+/// guard is the only thing holding the allocation.
+pub fn unlink_child(child: &TaskRef) -> Option<TaskRef> {
+    let parent_id = child.parent_task_id;
     if parent_id == INVALID_TASK_ID {
         return None;
     }
     let parent = task_find_by_id(parent_id)?;
-    let parent_ptr = parent.as_ptr();
-    let removed =
-        with_task_manager(|_mgr| task_children_remove(parent_ptr as *const Task, child_nn).is_ok());
+    let child_nn = child.node();
+    let removed = with_task_manager(|_mgr| parent.children_remove(child_nn).is_ok());
     if removed {
         Some(TaskRef::from_placement(child_nn))
     } else {
