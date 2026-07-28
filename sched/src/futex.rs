@@ -234,8 +234,8 @@ pub fn futex_wake(uaddr: u64, max_wake: u32) -> i64 {
 /// blocked on a futex. This prevents dangling pointers in the
 /// wait queue.
 ///
-/// Keyed by id, not by address: the buckets store ids, so the pointer this
-/// used to take was dereferenced once to read the id back out of it.
+/// Keyed by id, not by address: the buckets store ids, so an id is the only
+/// thing this needs to match against them.
 pub fn futex_remove_task(target_id: u32) {
     for bucket_mutex in FUTEX_TABLE.iter() {
         let mut bucket = bucket_mutex.lock();

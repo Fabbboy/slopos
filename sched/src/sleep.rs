@@ -300,12 +300,10 @@ fn ms_to_sleep_ticks(ms: u32) -> u64 {
 //     IRQ-off, paired with `wake_sleeping_task`'s
 //     CAS-via-`task_set_state_with_reason` from Blocked -> Ready.
 //
-// Both directions serialise through atomic state CAS. Phase 5
-// collapsed the WillBlock intermediate state — paths that used to
-// pre-set WillBlock now CAS Running -> Blocked directly under their
-// wait queue's lock, and the wake path's Blocked -> Ready CAS sees
-// the committed transition without a separate intermediate to race
-// against.
+// Both directions serialise through atomic state CAS. A blocking path
+// CASes Running -> Blocked directly under its wait queue's lock, so the
+// wake path's Blocked -> Ready CAS sees a committed transition with no
+// intermediate state to race against.
 /// Outcome of a timer-path wake attempt, deciding what happens to the
 /// collected entry: only a CONCLUSIVE outcome may remove it.
 enum WakeVerdict {
@@ -492,8 +490,6 @@ fn strand_sweep(now_tick: u64) {
 }
 
 fn strand_sweep_task(task: &super::task::Task, now_tick: u64) {
-    // The parameter is already the borrow; this used to cast it straight back
-    // to a pointer to call the accessor layer.
     if task.status() == TaskStatus::Invalid || task.is_exited() {
         return;
     }

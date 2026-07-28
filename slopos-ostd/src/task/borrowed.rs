@@ -30,10 +30,8 @@
 //!
 //! # Where the orderings come from
 //!
-//! Each method carries the ordering its accessor had, and the pairing is noted
-//! where it is load-bearing. This is a retyping, not a redesign: an ordering
-//! change smuggled in here would be invisible against a diff whose stated
-//! purpose is "take a borrow instead of a pointer".
+//! Each method states the ordering it uses, and names the pairing wherever it
+//! is load-bearing.
 
 use core::sync::atomic::Ordering;
 
@@ -186,10 +184,10 @@ impl<K, U> TaskInner<K, U> {
 
     // ── Diagnostic counters ───────────────────────────────────────────
     //
-    // Relaxed throughout: nothing is ordered against these. `fetch_add` rather
-    // than the old `saturating_add` — an atomic increment wraps, which for a
-    // 32-bit tally of yields or migrations is a distinction without a
-    // difference, and saturation is not worth a compare-exchange loop.
+    // Relaxed throughout: nothing is ordered against these. `fetch_add` wraps
+    // at 2^32, which for a tally of yields or migrations is immaterial and
+    // costs one instruction where saturation would cost a compare-exchange
+    // loop.
 
     /// How many times this task has voluntarily yielded.
     #[inline]

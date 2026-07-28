@@ -3,13 +3,12 @@
 //! Some scheduler questions are about *which* task, not about its state — "is
 //! the task I am about to publish already running on that CPU?", "is this
 //! pointer one the registry issued?", "is CPU 3 on its idle task?". Answering
-//! them used to mean handing out a `*mut Task` naming a task that another CPU
-//! owns, and nothing in the type stopped the next edit from reading through
-//! it. Such a read races the owning CPU's switch tail, which reclaims and
-//! releases the outgoing dispatch reference and can run the allocator-heavy
-//! destructor — so the value read may come from freed memory.
+//! them with a pointer to a task another CPU owns is a hazard: reading through
+//! it races the owning CPU's switch tail, which reclaims and releases the
+//! outgoing dispatch reference and can run the allocator-heavy destructor, so
+//! the value read may come from freed memory.
 //!
-//! [`TaskAddr`] is the same answer with the hazard removed rather than
+//! [`TaskAddr`] answers those questions with the hazard removed rather than
 //! commented. It carries an address and supports exactly two operations, `==`
 //! and `Debug`. There is no `as_ptr`, no `Deref`, no `upgrade`, and nothing
 //! anywhere converts one back into a pointer, so a foreign-task dereference is

@@ -716,11 +716,17 @@ impl<K, U> TaskInner<K, U> {
     /// Load this task's saved FPU/vector state into the register file and take
     /// ownership of it. Mirror of [`fpu_save_current`](Self::fpu_save_current).
     ///
-    /// Deliberately unconditional. The tag makes it *possible* to skip a
-    /// restore when [`fpu_state_valid`](crate::task::fpu_owner::fpu_state_valid)
-    /// already holds — Linux's optimisation, and not lazy FPU — but taking it
-    /// is a behaviour change, so this entry point stays eager and the predicate
-    /// is exported for a caller that opts in explicitly.
+    /// Unconditional, and it must stay that way at this entry point. The owner
+    /// tag records *which task* the register file belongs to, not whether the
+    /// file still agrees with the save area — signal delivery saves via
+    /// [`fpu_save_current_keep`](Self::fpu_save_current_keep) and keeps
+    /// ownership, so a handler clobbers the live registers without disturbing
+    /// either half of the tag. Skipping the reload on a tag hit would then
+    /// discard the saved state that `sigreturn` exists to reinstate.
+    ///
+    /// [`fpu_state_valid`](crate::task::fpu_owner::fpu_state_valid) is
+    /// therefore an opt-in predicate for callers that can rule out an
+    /// intervening write, not a precondition of this function.
     #[inline]
     pub fn fpu_restore_to_cpu(&self, witness: &impl TaskExclusive<K, U>, xcr0_mask: u64) {
         debug_assert!(
@@ -995,7 +1001,7 @@ impl<K, U> TaskInner<K, U> {
         // A still-linked scheduler slot means the container's parked reference
         // leaked: the count could not have reached zero while that reference
         // existed, so reaching the destructor here means a retain/reclaim pair
-        // went unbalanced. Previously undetectable.
+        // went unbalanced.
         debug_assert!(
             !self.ready_link.is_linked(),
             "task dropped while still linked into a ready queue"

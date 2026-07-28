@@ -286,9 +286,9 @@ pub fn task_release_strong<K, U>(arc: KArc<TaskInner<K, U>>) -> Option<ParkedTas
 /// Run the destructor that [`task_release_strong`] deferred, returning the
 /// allocation to the heap.
 ///
-/// Consuming `parked` by value is what retires the old contract "not already
-/// destroyed": a second call would need a second token, and there is no way to
-/// obtain one.
+/// Consuming `parked` by value is what makes "not already destroyed" a fact
+/// rather than a contract: a second call would need a second token, and there
+/// is no way to obtain one.
 #[inline]
 pub fn task_destroy_parked<K, U>(parked: ParkedTask<K, U>) {
     // SAFETY: `parked` witnesses that its holder won the one-to-zero release

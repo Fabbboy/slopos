@@ -50,8 +50,8 @@ pub use test_reports::{
 
 pub use fpu::{FPU_STATE_SIZE, FXSAVE_AREA_SIZE, FpuState, MXCSR_DEFAULT, fpu_xrstor, fpu_xsave};
 pub use fpu_owner::{
-    FPU_CPU_NONE, fpu_current_cpu, fpu_owner_assert_may_take, fpu_owner_forget, fpu_owner_is,
-    fpu_owner_may_take, fpu_owner_on, fpu_owner_take, fpu_owner_yield_after_save, fpu_state_valid,
+    FPU_CPU_NONE, fpu_current_cpu, fpu_owner_assert_may_take, fpu_owner_forget, fpu_owner_take,
+    fpu_owner_yield_after_save, fpu_state_valid,
 };
 pub use handles::{DLinkProvider, LinkProvider};
 pub use spawner::{

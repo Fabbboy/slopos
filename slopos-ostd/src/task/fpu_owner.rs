@@ -94,7 +94,7 @@ fn owner_key<K, U>(task: &TaskInner<K, U>) -> *mut () {
 /// Diagnostics and assertions only: the result is a bare address that must
 /// never be dereferenced. Out-of-range `cpu` reads as null.
 #[inline]
-pub fn fpu_owner_on(cpu: usize) -> *mut () {
+pub(crate) fn fpu_owner_on(cpu: usize) -> *mut () {
     if cpu >= MAX_CPUS {
         return core::ptr::null_mut();
     }
@@ -107,7 +107,7 @@ pub fn fpu_owner_on(cpu: usize) -> *mut () {
 /// registers really hold this task's state want [`fpu_state_valid`], which
 /// checks both.
 #[inline]
-pub fn fpu_owner_is<K, U>(task: &TaskInner<K, U>, cpu: usize) -> bool {
+pub(crate) fn fpu_owner_is<K, U>(task: &TaskInner<K, U>, cpu: usize) -> bool {
     fpu_owner_on(cpu) == owner_key(task)
 }
 
@@ -208,7 +208,7 @@ fn fpu_owner_violation() -> ! {
 /// The predicate behind [`fpu_owner_assert_may_take`], exposed so the state
 /// machine is testable without relying on a panic.
 #[inline]
-pub fn fpu_owner_may_take<K, U>(task: &TaskInner<K, U>, cpu: usize) -> bool {
+pub(crate) fn fpu_owner_may_take<K, U>(task: &TaskInner<K, U>, cpu: usize) -> bool {
     let owner = fpu_owner_on(cpu);
     owner.is_null() || owner == owner_key(task)
 }
