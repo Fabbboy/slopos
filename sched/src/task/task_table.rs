@@ -831,18 +831,41 @@ pub fn task_for_each_active(mut f: impl FnMut(&TaskRef)) {
 /// the guard is what lets that one caller mint a reference without the walk
 /// handing every other caller a raw pointer to do it with.
 pub fn task_try_for_each_active(mut f: impl FnMut(&TaskRef) -> ControlFlow<()>) {
-    let capacity = with_task_manager(|mgr| mgr.registry.len()).max(1);
-    let mut tasks = match KVec::<TaskRef>::with_capacity(capacity) {
-        Ok(tasks) => tasks,
-        Err(_) => return,
-    };
-    with_task_manager(|mgr| {
-        for task in mgr.iter_tasks() {
-            if task.status() != TaskStatus::Invalid && task.task_id != INVALID_TASK_ID {
-                let _ = tasks.push(task);
+    // The buffer is sized in one lock section and filled in another, so the
+    // registry can gain an entry in between. `KVec::with_capacity` reserves
+    // exactly, so an overflowing `push` would reallocate *under* the registry
+    // cli-spinlock — the buddy's reuse drain is a cross-CPU wait, and
+    // allocating under a cli-lock is the known slab/LUF deadlock. So the fill
+    // never grows the buffer: it reports how many entries it saw and the retry
+    // re-reserves off-lock. Truncating instead would silently drop tasks from a
+    // walk that feeds the stranded-task rescue and the shutdown sweep. The spine
+    // holds at most `MAX_TASKS`, so this converges.
+    let mut capacity = with_task_manager(|mgr| mgr.registry.len()).max(1);
+    let tasks = loop {
+        let mut tasks = match KVec::<TaskRef>::with_capacity(capacity) {
+            Ok(tasks) => tasks,
+            Err(_) => return,
+        };
+        let seen = with_task_manager(|mgr| {
+            let mut seen = 0usize;
+            for task in mgr.iter_tasks() {
+                if task.status() == TaskStatus::Invalid || task.task_id == INVALID_TASK_ID {
+                    continue;
+                }
+                seen += 1;
+                if seen <= capacity {
+                    let _ = tasks.push(task);
+                }
             }
+            seen
+        });
+        if seen <= capacity {
+            break tasks;
         }
-    });
+        // Off-lock, so releasing the partial snapshot may destroy inline.
+        drop(tasks);
+        capacity = seen;
+    };
     for task in tasks.iter() {
         if f(task).is_break() {
             return;
