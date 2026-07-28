@@ -6,8 +6,6 @@ use slopos_abi::syscall::ERRNO_ERESTARTSYS;
 use slopos_abi::task::TASK_FLAG_USER_MODE;
 use slopos_ostd::klog_info;
 use slopos_ostd::user::context::UserContext;
-use slopos_sched::scheduler::scheduler_get_current_task;
-use slopos_sched::task::{task_borrow, task_flags};
 use slopos_sched::task_struct::Task;
 
 use crate::syscall::context::SyscallContext;
@@ -21,11 +19,15 @@ pub fn syscall_handle(ctx_ptr: *mut UserContext) {
 
     let sysno = user_ctx.regs().rax;
 
-    let task = scheduler_get_current_task() as *mut Task;
-    let Some(flags) = task_flags(task) else {
+    // The task running this syscall is this CPU's current, by definition of how
+    // we got here. The guard is taken once for the whole exit path: the restart
+    // decision and the signal delivery below both need the task, and the
+    // delivery runs on the no-handler arm too.
+    let Some(current) = slopos_sched::task_struct::Current::get() else {
         return;
     };
-    if (flags & TASK_FLAG_USER_MODE) == 0 {
+    let task = current.task();
+    if (task.flags & TASK_FLAG_USER_MODE) == 0 {
         return;
     }
 
@@ -39,11 +41,6 @@ pub fn syscall_handle(ctx_ptr: *mut UserContext) {
 
     match handler {
         Some(func) => {
-            // The task running this syscall is this CPU's current, by
-            // definition of how we got here.
-            let Some(current) = slopos_sched::task_struct::Current::get() else {
-                return;
-            };
             let ctx = SyscallContext::from_current(&current, user_ctx);
             let result = func(&ctx);
             ctx.write_result(result);
@@ -76,7 +73,7 @@ pub fn syscall_handle(ctx_ptr: *mut UserContext) {
     // Deliver pending signals on every syscall exit path, not just
     // when a handler ran. Linux checks TIF_SIGPENDING unconditionally
     // on return to userspace.
-    crate::syscall::signal::deliver_pending_signal(task, ctx_ptr);
+    crate::syscall::signal::deliver_pending_signal(&current, ctx_ptr);
 }
 
 // ---------------------------------------------------------------------------
@@ -92,7 +89,7 @@ const SYSCALL_INSN_SIZE: u64 = 2;
 /// Inspect the syscall return value and, if it is `ERESTARTSYS`,
 /// decide whether to transparently restart the syscall or convert to
 /// `EINTR`.
-fn handle_erestartsys(task: *mut Task, ctx_ptr: *mut UserContext, sysno: u64) {
+fn handle_erestartsys(task_ref: &Task, ctx_ptr: *mut UserContext, sysno: u64) {
     let Some(user_ctx) = UserContext::from_ptr_mut(ctx_ptr) else {
         return;
     };
@@ -101,9 +98,6 @@ fn handle_erestartsys(task: *mut Task, ctx_ptr: *mut UserContext, sysno: u64) {
         return;
     }
 
-    let Some(task_ref) = task_borrow(task) else {
-        return;
-    };
     let pending = task_ref.signal_pending.load(Ordering::Acquire);
     let blocked = task_ref.signal_blocked();
     let deliverable = pending & !blocked;

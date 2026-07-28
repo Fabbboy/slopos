@@ -284,20 +284,18 @@ fn sigframe_fpu_addr(sigframe_addr: u64) -> u64 {
 /// entry, so the live CPU state is still the interrupted user's. Returns
 /// false on a user-copy fault.
 ///
-/// Takes the FPU area by reference rather than re-deriving it from a task
-/// pointer: the caller already holds a borrow of the task, and minting a second
-/// `&mut FpuState` from the raw pointer underneath it aliased that borrow.
-fn save_fpu_to_sigframe(task: &mut Task, sigframe_addr: u64) -> bool {
+/// Delivery only ever runs on the interrupted task's own CPU, so the exclusive
+/// access the save needs is the `CurrentTask` witness the caller already holds.
+fn save_fpu_to_sigframe(current: &slopos_sched::task_struct::Current, sigframe_addr: u64) -> bool {
     // Not a switch-out: the task resumes into its handler with this state still
     // live in the register file, so the save keeps the owner tag rather than
-    // releasing it. `&mut Task` is the exclusive proof here — minting a
-    // `CurrentTask` witness alongside it would alias the borrow.
-    task.fpu_save_in_place_mut(slopos_ostd::cpu::x86_64::xsave::active_xcr0());
-    let fpu = task.fpu_state.get_mut();
+    // releasing it.
+    let task = current.task();
+    task.fpu_save_in_place(current, slopos_ostd::cpu::x86_64::xsave::active_xcr0());
     let Ok(bytes) = UserBytes::try_new(sigframe_fpu_addr(sigframe_addr), FPU_STATE_SIZE) else {
         return false;
     };
-    copy_bytes_to_user(bytes, &fpu.data).is_ok()
+    task.with_fpu_bytes_mut(current, |data| copy_bytes_to_user(bytes, data).is_ok())
 }
 
 /// Restore the FPU/vector state saved by [`save_fpu_to_sigframe`]. The
@@ -497,11 +495,7 @@ enum SignalDisposition {
 /// decision. Terminating re-enters the task through the registry and then
 /// context-switches; a `&mut Task` held across that aliased every reference
 /// those paths derive, and stayed live across a `schedule()`.
-fn claim_pending_signal(task: *mut Task) -> SignalDisposition {
-    let Some(task_ref) = slopos_sched::task::task_borrow_mut(task) else {
-        return SignalDisposition::Done;
-    };
-
+fn claim_pending_signal(task_ref: &Task) -> SignalDisposition {
     if (task_ref.flags & TASK_FLAG_USER_MODE) == 0 {
         return SignalDisposition::Done;
     }
@@ -551,12 +545,17 @@ fn claim_pending_signal(task: *mut Task) -> SignalDisposition {
     }
 }
 
-fn deliver_pending_signal_core(task: *mut Task, regs: &mut impl UserRegView) {
-    let (signum, bit, action, saved_mask) = match claim_pending_signal(task) {
+fn deliver_pending_signal_core(
+    current: &slopos_sched::task_struct::Current,
+    regs: &mut impl UserRegView,
+) {
+    let task_ref = current.task();
+    let (signum, bit, action, saved_mask) = match claim_pending_signal(task_ref) {
         SignalDisposition::Done => return,
         SignalDisposition::Terminate(task_id) => {
-            // No borrow is live here, so terminate is free to re-enter the task
-            // through the registry and to context-switch.
+            // Terminate re-enters the task through the registry and then
+            // context-switches. The guard is a borrow, not an owning handle, so
+            // abandoning this frame leaks nothing.
             if task_terminate(task_id) == 0 {
                 schedule();
             }
@@ -568,10 +567,6 @@ fn deliver_pending_signal_core(task: *mut Task, regs: &mut impl UserRegView) {
             action,
             saved_mask,
         } => (signum, bit, action, saved_mask),
-    };
-
-    let Some(task_ref) = slopos_sched::task::task_borrow_mut(task) else {
-        return;
     };
 
     let regs_snapshot = regs.snapshot();
@@ -637,10 +632,8 @@ fn deliver_pending_signal_core(task: *mut Task, regs: &mut impl UserRegView) {
         return;
     }
 
-    // Preserve the interrupted task's vector state across the handler. The FPU
-    // area is reborrowed from the task borrow already in hand, not re-derived
-    // from the raw pointer beneath it.
-    if !save_fpu_to_sigframe(task_ref, sigframe_addr) {
+    // Preserve the interrupted task's vector state across the handler.
+    if !save_fpu_to_sigframe(current, sigframe_addr) {
         task_ref.signal_pending.fetch_or(bit, Ordering::AcqRel);
         return;
     }
@@ -660,11 +653,14 @@ fn deliver_pending_signal_core(task: *mut Task, regs: &mut impl UserRegView) {
     regs.commit_redirect(&redirected);
 }
 
-pub fn deliver_pending_signal(task: *mut Task, ctx_ptr: *mut UserContext) {
+pub fn deliver_pending_signal(
+    current: &slopos_sched::task_struct::Current,
+    ctx_ptr: *mut UserContext,
+) {
     let Some(user_ctx) = UserContext::from_ptr_mut(ctx_ptr) else {
         return;
     };
-    deliver_pending_signal_core(task, user_ctx);
+    deliver_pending_signal_core(current, user_ctx);
 }
 
 /// Deliver a pending signal on the IRQ/timer/IPI return-to-user path.
@@ -691,13 +687,12 @@ pub fn deliver_pending_signal_on_irq_exit(frame: *mut InterruptFrame) {
         return;
     }
 
-    let task = slopos_sched::scheduler::scheduler_get_current_task() as *mut Task;
-    if task.is_null() {
+    let Some(current) = slopos_sched::task_struct::Current::get() else {
         return;
-    }
+    };
 
     let mut view = InterruptFrameRegs { frame: frame_ref };
-    deliver_pending_signal_core(task, &mut view);
+    deliver_pending_signal_core(&current, &mut view);
 }
 
 #[allow(dead_code)]

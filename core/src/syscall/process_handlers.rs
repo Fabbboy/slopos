@@ -732,12 +732,7 @@ define_syscall!(syscall_vhangup (ctx)
     requires(let task_id: task_id)
     -> Result<(), Errno>
 {
-    let Some(task_ref) = task_find_by_id(task_id) else {
-        return Err(Errno::EINVAL);
-    };
-    let task_ptr = task_ref.as_ptr();
-    let task = task_borrow(task_ptr).ok_or(Errno::EINVAL)?;
-    let ctty = match task.controlling_tty() {
+    let ctty = match ctx.task().controlling_tty() {
         Some(idx) => idx,
         None => return Err(Errno::EPERM),
     };

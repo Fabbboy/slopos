@@ -599,12 +599,7 @@ define_syscall!(syscall_ioctl
             if arg == 0 {
                 return Err(Errno::EINVAL);
             }
-            let Some(task_ref) = slopos_sched::task::task_find_by_id(task_id) else {
-                return Err(Errno::EINVAL);
-            };
-            let task_ptr = task_ref.as_ptr();
-            let task = slopos_sched::task::task_borrow(task_ptr).ok_or(Errno::EINVAL)?;
-            match task.controlling_tty() {
+            match ctx.task().controlling_tty() {
                 Some(ctty) if ctty == tty_idx => {}
                 _ => return Err(Errno::EINVAL),
             }
@@ -639,12 +634,7 @@ define_syscall!(syscall_ioctl
                 return Err(Errno::EINVAL);
             }
 
-            let Some(task_ref) = slopos_sched::task::task_find_by_id(task_id) else {
-                return Err(Errno::EINVAL);
-            };
-            let task_ptr = task_ref.as_ptr();
-
-            let task = slopos_sched::task::task_borrow_mut(task_ptr).ok_or(Errno::EINVAL)?;
+            let task = ctx.task();
             if task.sid == 0 || task.sid != task.task_id {
                 return Err(Errno::EINVAL);
             }
@@ -661,7 +651,9 @@ define_syscall!(syscall_ioctl
                 return Err(Errno::EINVAL);
             }
 
-            let fg = slopos_sched::task::task_process_group(task_ptr)
+            let fg = task
+                .process_group
+                .load()
                 .map_or_else(slopos_ostd::KWeak::new, |pg| slopos_ostd::KArc::downgrade(&pg));
             if tty::acquire_controlling_terminal(tty_idx, fg).is_err() {
                 return Err(Errno::EINVAL);
@@ -673,12 +665,7 @@ define_syscall!(syscall_ioctl
             if arg == 0 {
                 return Err(Errno::EINVAL);
             }
-            let Some(task_ref) = slopos_sched::task::task_find_by_id(task_id) else {
-                return Err(Errno::EINVAL);
-            };
-            let task_ptr = task_ref.as_ptr();
-            let task = slopos_sched::task::task_borrow(task_ptr).ok_or(Errno::EINVAL)?;
-            match task.controlling_tty() {
+            match ctx.task().controlling_tty() {
                 Some(ctty) if ctty == tty_idx => {}
                 _ => return Err(Errno::EINVAL),
             }
@@ -688,12 +675,7 @@ define_syscall!(syscall_ioctl
             Ok(0)
         }
         TIOCNOTTY => {
-            let Some(task_ref) = slopos_sched::task::task_find_by_id(task_id) else {
-                return Err(Errno::EINVAL);
-            };
-            let task_ptr = task_ref.as_ptr();
-
-            let task = slopos_sched::task::task_borrow_mut(task_ptr).ok_or(Errno::EINVAL)?;
+            let task = ctx.task();
             match task.controlling_tty() {
                 Some(ctty) if ctty == tty_idx => {}
                 _ => return Err(Errno::EINVAL),
