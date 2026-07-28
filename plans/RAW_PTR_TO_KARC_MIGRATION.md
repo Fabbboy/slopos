@@ -181,6 +181,17 @@ plausible assumption.
 - **A raw task-pointer gate must not cover return position.** "Reference in,
   pointer out" is sanctioned — a Treiber successor *is* a raw pointer, governed
   by the parked reference the link represents.
+- **Nothing may open a SafeStack frame between `dispatch()` and the register
+  swap.** The kernel runs on two stacks per task. `RSP` is swapped atomically by
+  `switch_registers`; the *data* stack, which holds every address-taken local,
+  is selected by `PCR.current_task`, so it swaps when the dispatcher republishes
+  the PCR — several frames earlier. A frame opened in between is carved out of
+  the incoming task's data stack and released when the *calling* task next runs,
+  on whatever CPU picks it up, unsynchronised against the CPU that owns that
+  stack by then. The owner's next prologue then lays a frame over its own live
+  locals. `run_switch` takes the publication as an argument for exactly this
+  reason, and asserts the ordering; a new address-taken local in the closure or
+  in `switch_context` would reintroduce it silently.
 - **Converting a plain field to an atomic can raise both counters.** The
   conversion moves its accessor out of the macro families into a hand-written
   function, and the obvious form takes `*const TaskInner` and calls
