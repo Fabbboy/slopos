@@ -448,10 +448,19 @@ pub struct TaskInner<K, U> {
     /// published after the bytes.
     pub cwd_len: AtomicU16,
     /// User-space address to clear (and futex-wake) on thread exit.
-    pub clear_child_tid: u64,
+    ///
+    /// Atomic because the exit path reads and clears it, and that path runs on
+    /// whichever task called `task_terminate` — not necessarily this one.
+    pub clear_child_tid: AtomicU64,
     pub time_slice: u64,
     pub time_slice_remaining: u64,
-    pub total_runtime: u64,
+    /// Accumulated on-CPU time.
+    ///
+    /// Atomic because it has three writers on different CPUs: the switch-out
+    /// tail bumps the *outgoing* task's tally, the exit path adds the final
+    /// slice, and the task-list syscall reads it from a registry walk while
+    /// both are running. A plain field made that a data race.
+    pub total_runtime: AtomicU64,
     pub creation_time: u64,
     /// Voluntary-yield count.
     ///
@@ -480,9 +489,14 @@ pub struct TaskInner<K, U> {
     pub fault_reason: AtomicU16,
     /// Exit code. See `exit_reason`.
     pub exit_code: AtomicU32,
-    pub fate_token: u32,
-    pub fate_value: u32,
-    pub fate_pending: u8,
+    /// Pending Wheel-of-Fate outcome, published by the `fate` syscall on
+    /// whatever task issued it and cleared by whoever consumes it or by the
+    /// exit path. None of those three is guaranteed to be this task, so the
+    /// trio is atomic; `fate_pending` is the flag that publishes the pair, so
+    /// it is Release on store and Acquire on load while the values are Relaxed.
+    pub fate_token: AtomicU32,
+    pub fate_value: AtomicU32,
+    pub fate_pending: AtomicU8,
     pub cpu_affinity: u32,
     /// CPU this task last ran on, a placement hint.
     ///
@@ -1026,10 +1040,10 @@ impl<K, U> TaskInner<K, U> {
                 c
             }),
             cwd_len: AtomicU16::new(1),
-            clear_child_tid: 0,
+            clear_child_tid: AtomicU64::new(0),
             time_slice: 0,
             time_slice_remaining: 0,
-            total_runtime: 0,
+            total_runtime: AtomicU64::new(0),
             creation_time: 0,
             yield_count: AtomicU32::new(0),
             last_run_timestamp: AtomicU64::new(0),
@@ -1038,9 +1052,9 @@ impl<K, U> TaskInner<K, U> {
             exit_reason: AtomicU16::new(TaskExitReason::None.as_u16()),
             fault_reason: AtomicU16::new(TaskFaultReason::None.as_u16()),
             exit_code: AtomicU32::new(0),
-            fate_token: 0,
-            fate_value: 0,
-            fate_pending: 0,
+            fate_token: AtomicU32::new(0),
+            fate_value: AtomicU32::new(0),
+            fate_pending: AtomicU8::new(0),
             cpu_affinity: 0,
             last_cpu: AtomicU8::new(0),
             fpu_last_cpu: AtomicI32::new(FPU_CPU_NONE),
@@ -1282,7 +1296,7 @@ impl<K, U> TaskInner<K, U> {
     /// owning crate holds exclusive `&mut self` access at every call site.
     pub fn reset_runtime_state(&mut self) {
         self.time_slice_remaining = self.time_slice;
-        self.total_runtime = 0;
+        self.total_runtime.store(0, Ordering::Relaxed);
         self.creation_time = crate::kdiag_timestamp();
         self.yield_count.store(0, Ordering::Relaxed);
         self.last_run_timestamp.store(0, Ordering::Relaxed);
@@ -1291,9 +1305,7 @@ impl<K, U> TaskInner<K, U> {
         self.fault_reason
             .store(TaskFaultReason::None.as_u16(), Ordering::Release);
         self.exit_code.store(0, Ordering::Release);
-        self.fate_token = 0;
-        self.fate_value = 0;
-        self.fate_pending = 0;
+        self.clear_fate();
         self.on_cpu.store(false, Ordering::Release);
         self.ready_link.reset();
         self.remote_inbox_link.reset();

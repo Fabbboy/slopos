@@ -1,5 +1,5 @@
 use core::ffi::{c_char, c_int, c_void};
-use core::ptr;
+use core::ptr::NonNull;
 use core::sync::atomic::Ordering;
 
 use slopos_arch::cpu;
@@ -19,15 +19,15 @@ use super::task_cleanup_hooks::run_task_resource_cleanup_hooks;
 use super::task_session::{notify_parent_of_child_exit, release_task_dependents};
 use super::task_stats::record_task_created;
 use super::task_table::{
-    TaskAllocError, allocate_task, discard_task, register_task, task_find_by_id, task_reap,
-    with_task_manager,
+    TaskAllocError, TaskRef, allocate_task, discard_task, register_task, task_find_by_id,
+    task_reap, with_task_manager,
 };
 use super::{
     INVALID_PROCESS_ID, INVALID_TASK_ID, TASK_FLAG_KERNEL_MODE, TASK_FLAG_SYSTEM,
     TASK_FLAG_USER_MODE, TASK_KERNEL_STACK_SIZE, TASK_NAME_MAX_LEN, TASK_STACK_SIZE,
     TASK_UNSAFE_STACK_SIZE, Task, TaskContext, TaskEntry, TaskExitReason, TaskFaultReason,
-    TaskPriority, TaskStatus, task_borrow, task_borrow_mut, task_id_of, task_name_bytes,
-    task_on_cpu_load, task_panic_in_flight_store, task_recovery_depth_store, task_status,
+    TaskPriority, TaskStatus, task_id_of, task_on_cpu_load, task_panic_in_flight_store,
+    task_recovery_depth_store, task_status,
 };
 use crate::exit_info::ExitInfo;
 use crate::scheduler;
@@ -45,6 +45,7 @@ use slopos_mm::process_vm::{
 };
 use slopos_mm::user_copy::copy_to_user;
 use slopos_mm::user_ptr::UserPtr;
+use slopos_ostd::task::{TaskAddr, task_placement_clone};
 
 slopos_ostd::extern_block! {
     mod task_externs {
@@ -556,7 +557,7 @@ pub fn task_create(
         return INVALID_TASK_ID;
     }
 
-    let pending = match allocate_task() {
+    let mut pending = match allocate_task() {
         Ok(pending) => pending,
         Err(TaskAllocError::MaxTasks) => {
             klog_info!("task_create: Maximum tasks reached");
@@ -568,7 +569,6 @@ pub fn task_create(
         }
     };
     let task_id = pending.id();
-    let task = pending.as_ptr();
 
     let resources = match allocate_task_create_resources(flags) {
         Some(resources) => resources,
@@ -578,40 +578,11 @@ pub fn task_create(
         }
     };
 
-    let Some(task_ref) = task_borrow_mut(task) else {
-        return INVALID_TASK_ID;
-    };
-    task_ref.task_id = task_id;
-    copy_name(&mut task_ref.name, name);
-    // Status stays Blocked (set during allocation) until fully initialised.
-    task_ref.priority = TaskPriority::from_u8(priority);
-    task_ref.flags = flags;
-    task_ref.process_id = resources.process_id;
-    task_ref.tgid = task_id;
-    task_ref.pgid = task_id;
-    task_ref.sid = task_id;
-    task_ref.set_controlling_tty(None);
-    // A user task is born its own session and group leader. Kernel tasks never
-    // join a terminal session, so they carry no group object (ints only).
-    if flags & TASK_FLAG_USER_MODE != 0 {
-        match new_session_group(task_id) {
-            Some(pg) => task_ref.process_group = Some(pg),
-            None => {
-                cleanup_task_create_resources(
-                    resources.process_id,
-                    resources.kernel_stack,
-                    resources.unsafe_stack,
-                );
-                discard_task(pending);
-                return INVALID_TASK_ID;
-            }
-        }
-    }
-    task_ref.clear_child_tid = 0;
-    task_ref.parent_task_id = INVALID_TASK_ID;
-    task_ref.stack_base = resources.stack_base;
-    task_ref.stack_size = TASK_STACK_SIZE;
-    task_ref.stack_pointer = resources.stack_base + TASK_STACK_SIZE - 8;
+    // Both ways this can still fail are decided by the arguments alone, so
+    // they are settled before the first field write rather than midway
+    // through it. That is also what lets the initialisation below hold one
+    // uninterrupted exclusive borrow: an early return in the middle would
+    // have had to move `pending` out from under it.
     if flags & TASK_FLAG_USER_MODE != 0 && !user_entry_is_allowed(entry_point as u64) {
         klog_info!("task_create: user entry outside user_text window");
         cleanup_task_create_resources(
@@ -622,6 +593,45 @@ pub fn task_create(
         discard_task(pending);
         return INVALID_TASK_ID;
     }
+
+    // A user task is born its own session and group leader. Kernel tasks never
+    // join a terminal session, so they carry no group object (ints only).
+    let process_group = if flags & TASK_FLAG_USER_MODE != 0 {
+        match new_session_group(task_id) {
+            Some(pg) => Some(pg),
+            None => {
+                cleanup_task_create_resources(
+                    resources.process_id,
+                    resources.kernel_stack,
+                    resources.unsafe_stack,
+                );
+                discard_task(pending);
+                return INVALID_TASK_ID;
+            }
+        }
+    } else {
+        None
+    };
+
+    // Exclusive because the token holds the only reference, not because a
+    // pointer accessor said so.
+    let task_ref = pending.as_mut();
+    task_ref.task_id = task_id;
+    copy_name(&mut task_ref.name, name);
+    // Status stays Blocked (set during allocation) until fully initialised.
+    task_ref.priority = TaskPriority::from_u8(priority);
+    task_ref.flags = flags;
+    task_ref.process_id = resources.process_id;
+    task_ref.tgid = task_id;
+    task_ref.pgid = task_id;
+    task_ref.sid = task_id;
+    task_ref.set_controlling_tty(None);
+    task_ref.process_group = process_group;
+    task_ref.set_clear_child_tid(0);
+    task_ref.parent_task_id = INVALID_TASK_ID;
+    task_ref.stack_base = resources.stack_base;
+    task_ref.stack_size = TASK_STACK_SIZE;
+    task_ref.stack_pointer = resources.stack_base + TASK_STACK_SIZE - 8;
 
     // Populate the plain-u64 fields from the `KernelStack` handle, then
     // move ownership of the handle into the task slot.  Dropping the
@@ -657,9 +667,9 @@ pub fn task_create(
             slopos_mm::process_vm::process_vm_get_ostd_pml4_paddr(resources.process_id);
     }
 
-    // Held to the end of the function so the `task` raw pointer below cannot be
+    // Held to the end of the function so the name read below cannot be
     // reclaimed under us by a concurrent shutdown sweep.
-    let _registered = match register_task(pending) {
+    let registered = match register_task(pending) {
         Ok(registered) => registered,
         Err(pending) => {
             klog_info!("task_create: task registry full");
@@ -675,7 +685,7 @@ pub fn task_create(
 
     klog_debug!(
         "Created task '{}' with ID {}",
-        task_name_bytes(task).map(bytes_as_str).unwrap_or(""),
+        bytes_as_str(&registered.name),
         task_id
     );
 
@@ -683,29 +693,25 @@ pub fn task_create(
 }
 
 pub fn task_terminate(task_id: u32) -> c_int {
-    let target = if task_id == u32::MAX {
-        None
+    // One owning handle covers both entry shapes. A named id resolves through
+    // the registry, which hands back a guard. `u32::MAX` means "me", and there
+    // the handle is minted from this CPU's current-task pointer — sound because
+    // the dispatch reference the scheduler parked on the idle stack keeps this
+    // task alive for exactly as long as it is the current one.
+    //
+    // Holding it for the whole function is what lets the teardown below take a
+    // borrow instead of a pointer: nothing it calls can be the last release.
+    let target: Option<KArc<Task>> = if task_id == u32::MAX {
+        NonNull::new(scheduler::scheduler_get_current_task()).map(task_placement_clone)
     } else {
-        task_find_by_id(task_id)
-    };
-    let (task_ptr, resolved_id) = if task_id == u32::MAX {
-        let current = scheduler::scheduler_get_current_task();
-        (current, task_id_of(current).unwrap_or(INVALID_TASK_ID))
-    } else {
-        (
-            target
-                .as_ref()
-                .map_or(ptr::null_mut(), |task| task.as_ptr()),
-            task_id,
-        )
+        task_find_by_id(task_id).map(TaskRef::into_arc)
     };
 
-    if task_id == u32::MAX && task_ptr.is_null() {
-        klog_info!("task_terminate: No current task to terminate");
-        return -1;
-    }
-
-    if task_ptr.is_null() {
+    let Some(target) = target else {
+        if task_id == u32::MAX {
+            klog_info!("task_terminate: No current task to terminate");
+            return -1;
+        }
         // A specific id that no longer resolves either named a task that has
         // been fully terminated and reclaimed (idempotent success) or one
         // that never existed. Monotonic non-reused ids tell the two apart.
@@ -714,7 +720,15 @@ pub fn task_terminate(task_id: u32) -> c_int {
         }
         klog_info!("task_terminate: Task not found");
         return -1;
-    }
+    };
+
+    let task: &Task = &target;
+    let task_ptr = KArc::as_ptr(&target) as *mut Task;
+    let resolved_id = if task_id == u32::MAX {
+        task.task_id
+    } else {
+        task_id
+    };
 
     // A resolvable `Invalid` task is not a missing one — it is a fork/clone
     // child between `register_task` and `publish_new_task`. Its construction is
@@ -727,17 +741,17 @@ pub fn task_terminate(task_id: u32) -> c_int {
     // `mark_task_terminated` force-publishes the terminal status, so the
     // `Invalid -> Ready`-only transition rule does not stand in the way.
 
-    if matches!(
-        task_status(task_ptr),
-        Some(TaskStatus::Terminated) | Some(TaskStatus::Zombie)
-    ) {
+    if matches!(task.status(), TaskStatus::Terminated | TaskStatus::Zombie) {
         return 0;
     }
 
-    let name_str = task_name_bytes(task_ptr).map(bytes_as_str).unwrap_or("");
-    klog_info!("Terminating task '{}' (ID {})", name_str, resolved_id);
+    klog_info!(
+        "Terminating task '{}' (ID {})",
+        bytes_as_str(&task.name),
+        resolved_id
+    );
 
-    let is_current = task_ptr == scheduler::scheduler_get_current_task();
+    let is_current = TaskAddr::current() == Some(TaskAddr::of(task));
 
     // Hold preemption disabled across the `mark_task_terminated` →
     // cleanup → defer/free sequence below. Without this guard, a
@@ -761,9 +775,9 @@ pub fn task_terminate(task_id: u32) -> c_int {
     // refcounts on inherited file objects never reach zero, and any
     // waiter on a pipe whose only writer was this task hangs forever.
     let _preempt = slopos_ostd::cpu::preempt::PreemptGuard::new();
-    mark_task_terminated(task_ptr, resolved_id);
+    mark_task_terminated(task, resolved_id);
 
-    let defer_cleanup_to_running_cpu = !is_current && task_on_cpu_load(task_ptr);
+    let defer_cleanup_to_running_cpu = !is_current && task_on_cpu_load(task);
     if is_current {
         cleanup_task_process_resources(task_ptr, resolved_id, TaskProcessCleanupMode::KeepVm);
     } else if !defer_cleanup_to_running_cpu {
@@ -788,29 +802,26 @@ pub fn task_terminate(task_id: u32) -> c_int {
 
 /// What [`stamp_exit_state`] hands to the teardown tail.
 ///
-/// The tail runs with no borrow of the task held, so anything it needs from
-/// the task body is captured here instead.
+/// Carries the decisions the stamping phase made, so the tail does not have to
+/// re-derive them from fields it has already retired.
 struct ExitPlan {
     /// `clear_child_tid`, if this task is the one running and the address is
     /// non-zero — i.e. if the futex clear is ours to perform.
     clear_tid: Option<u64>,
 }
 
-/// Write every field the exit path owns, then give the borrow back.
+/// Write every field the exit path owns.
 ///
-/// Deliberately its own function: the teardown tail below calls into futex
-/// cleanup, parent notification, unschedule, and the children drain, each of
-/// which re-derives a reference to this same allocation from `task_ptr`. Held
-/// across those, the `&mut` here aliased references it does not know about.
-/// Scoping it to the writes is what makes the tail sound.
-fn stamp_exit_state(task_ptr: *mut Task, resolved_id: u32, now: u64) -> Option<ExitPlan> {
-    let Some(task) = task_borrow_mut(task_ptr) else {
-        return None;
-    };
-
+/// Shared, not exclusive. The dying task is still reachable: a peer CPU may be
+/// in `wake_blocked_task` reading its status and placement, and its parent may
+/// be in `waitpid` reading `exit_info`. An `&mut` here would have claimed those
+/// readers do not exist. Every field this writes is therefore atomic or behind
+/// a lock, which is also what lets the teardown tail below keep using the same
+/// borrow instead of re-deriving one per call.
+fn stamp_exit_state(task: &Task, resolved_id: u32, now: u64) -> ExitPlan {
     let last_run = task.last_run_timestamp();
     if last_run != 0 && now >= last_run {
-        task.total_runtime += now - last_run;
+        task.add_total_runtime(now - last_run);
     }
     task.set_last_run_timestamp(0);
     if TaskExitReason::from_u16(task.exit_reason.load(Ordering::Acquire)) == TaskExitReason::None {
@@ -871,34 +882,35 @@ fn stamp_exit_state(task_ptr: *mut Task, resolved_id: u32, now: u64) -> Option<E
         TaskStatus::Terminated
     };
     task.set_status(final_status);
-    task.fate_token = 0;
-    task.fate_value = 0;
-    task.fate_pending = 0;
+    task.clear_fate();
 
-    // The futex clear is ours only when we are the running task; capture the
-    // address and clear the field now, while the borrow is still in scope.
-    let clear_tid = task.clear_child_tid;
-    let clear_tid = if clear_tid != 0 && task_ptr == scheduler::scheduler_get_current_task() {
-        task.clear_child_tid = 0;
-        Some(clear_tid)
+    // The futex clear is ours only when we are the running task. The swap is
+    // what elects a single performer: whoever takes a non-zero address does
+    // the wake, and there is no window in which two teardowns both see one.
+    let clear_tid = if TaskAddr::current() == Some(TaskAddr::of(task)) {
+        Some(task.take_clear_child_tid()).filter(|addr| *addr != 0)
     } else {
         None
     };
 
-    Some(ExitPlan { clear_tid })
+    ExitPlan { clear_tid }
 }
 
-fn mark_task_terminated(task_ptr: *mut Task, resolved_id: u32) {
+/// Drive one task to its terminal status and unhook it from everything that
+/// still names it.
+///
+/// The caller holds an owning reference for the whole call — either the
+/// registry guard it resolved the id through, or, for self-termination, a
+/// handle minted from this CPU's dispatch reference. That is what makes a
+/// single borrow good across the whole sequence: nothing below can be the last
+/// release, because the caller's handle outlives all of them.
+fn mark_task_terminated(task: &Task, resolved_id: u32) {
     let now = kdiag_timestamp();
 
-    let Some(plan) = stamp_exit_state(task_ptr, resolved_id, now) else {
-        return;
-    };
+    let plan = stamp_exit_state(task, resolved_id, now);
 
-    // From here on nothing holds a borrow of the task, so every call below is
-    // free to re-derive its own reference from `task_ptr`.
     scheduler::cancel_sleep(resolved_id);
-    crate::futex::futex_remove_task(task_ptr);
+    crate::futex::futex_remove_task(resolved_id);
 
     // Release any waitpid wait-reference this task held on its target. A task
     // SIGKILL'd while parked in `task_wait_for` never unwinds its own stack,
@@ -913,32 +925,28 @@ fn mark_task_terminated(task_ptr: *mut Task, resolved_id: u32) {
         let _ = crate::futex::futex_wake_one(clear_tid);
     }
 
-    notify_parent_of_child_exit(task_ptr);
+    notify_parent_of_child_exit(task);
 
     // Session-leader hangup. Every field here is either a frozen identity or an
     // atomic, so a shared borrow suffices.
-    let should_hangup = task_borrow(task_ptr as *const Task).and_then(|task| {
-        if task.sid != 0
-            && task.task_id != INVALID_TASK_ID
-            && task.sid == task.task_id
-            && let Some(tty_idx) = task.controlling_tty()
-        {
-            task.set_controlling_tty(None);
-            Some(tty_idx)
-        } else {
-            None
-        }
-    });
+    let should_hangup = if task.sid != 0
+        && task.task_id != INVALID_TASK_ID
+        && task.sid == task.task_id
+        && let Some(tty_idx) = task.controlling_tty()
+    {
+        task.set_controlling_tty(None);
+        Some(tty_idx)
+    } else {
+        None
+    };
 
-    if let Some(body) = task_borrow(task_ptr as *const Task) {
-        scheduler::unschedule_task(body);
-    }
+    scheduler::unschedule_task(task);
 
     // A task that dies before it was ever published leaves `Nascent` behind.
     // Retire it to `None` so placement keeps meaning "no scheduler owner" for
     // every dead task, whatever stage it died at.
     let _ = slopos_ostd::task::accessors::task_sched_placement_compare_exchange(
-        task_ptr,
+        task,
         slopos_ostd::task::SchedPlacement::Nascent,
         slopos_ostd::task::SchedPlacement::None,
     );
@@ -949,7 +957,7 @@ fn mark_task_terminated(task_ptr: *mut Task, resolved_id: u32) {
     // later termination skips Zombie); zombie ones are auto-reaped (Zombie →
     // Terminated). There is no userland-PID-1 reaper, so orphan adoption happens
     // entirely in the kernel.
-    reparent_and_reap_children(task_ptr);
+    reparent_and_reap_children(task);
 
     if let Some(tty_idx) = should_hangup {
         tty::hangup(tty_idx);
@@ -988,10 +996,7 @@ fn parent_alive_for(parent_id: u32) -> bool {
 /// A child demoted to `Terminated` here has just lost its only reaper, so this
 /// is the one place that must reap it. A live child keeps its existence
 /// reference and reaps itself when it exits.
-fn reparent_and_reap_children(dying: *mut Task) {
-    if dying.is_null() {
-        return;
-    }
+fn reparent_and_reap_children(dying: &Task) {
     while let Some(child) = super::take_one_child(dying) {
         let child_ptr = KArc::as_ptr(&child) as *mut Task;
         let child_id = task_id_of(child_ptr).unwrap_or(INVALID_TASK_ID);
@@ -1128,7 +1133,8 @@ pub fn task_shutdown_all() -> c_int {
 /// self-syscall contract. If it ever isn't current, the scheduler's own
 /// switch-out already holds a correct snapshot and we skip the flush.
 fn flush_live_fpu_for_clone(parent: &Task) {
-    if !core::ptr::eq(parent, scheduler::scheduler_get_current_task().cast_const()) {
+    let parent_addr = TaskAddr::of(parent);
+    if TaskAddr::current() != Some(parent_addr) {
         return;
     }
     // The check above established the parent is this CPU's current task, so the
@@ -1137,7 +1143,7 @@ fn flush_live_fpu_for_clone(parent: &Task) {
     let Some(current) = crate::task_struct::Current::get() else {
         return;
     };
-    if !core::ptr::eq(current.as_ptr().cast_const(), parent) {
+    if TaskAddr::of(current.task()) != parent_addr {
         return;
     }
     // Not a switch-out: the parent keeps running and its state stays live in
@@ -1151,9 +1157,6 @@ pub fn task_fork(
     parent: &Task,
     parent_user_ctx: *const slopos_ostd::user::context::UserContext,
 ) -> u32 {
-    // The parent is read-only throughout — it was a `*mut Task` only to be
-    // immediately `task_borrow`ed back into the borrow it now arrives as.
-    let parent_task = core::ptr::from_ref(parent).cast_mut();
     flush_live_fpu_for_clone(parent);
 
     if parent.process_id == INVALID_PROCESS_ID {
@@ -1194,7 +1197,7 @@ pub fn task_fork(
     };
     let child_unsafe_stack_top = child_unsafe_stack.top().as_u64();
 
-    let pending = match allocate_task() {
+    let mut pending = match allocate_task() {
         Ok(pending) => pending,
         Err(_) => {
             klog_info!("task_fork: no free task slots");
@@ -1202,14 +1205,12 @@ pub fn task_fork(
         }
     };
     let child_task_id = pending.id();
-    let child_task_ptr = pending.as_ptr();
 
-    let Some(child) = task_borrow_mut(child_task_ptr) else {
-        return INVALID_TASK_ID;
-    };
+    // Exclusive because the token holds the only reference to the child; the
+    // parent is a separate allocation reached through a shared borrow, so the
+    // two coexist without the accessor layer arbitrating between them.
+    let child = pending.as_mut();
 
-    // Child and parent are distinct task slots from the static TASK_TABLE,
-    // and we hold exclusive access to child (just reserved).
     super::task_accessors::task_clone_from(child, parent);
 
     // The bulk copy above may carry the parent's saved recovery/in-flight
@@ -1229,7 +1230,7 @@ pub fn task_fork(
     // Share the parent's group object (clone_from_raw nulled the copied
     // handle); the shared identity is what a stale pid check keys on.
     child.process_group = task_process_group(parent as *const Task);
-    child.clear_child_tid = 0;
+    child.set_clear_child_tid(0);
 
     child.kernel_stack_base = child_kernel_stack_base;
     child.kernel_stack_top = child_kernel_stack.top().as_u64();
@@ -1276,9 +1277,9 @@ pub fn task_fork(
     child.abi.unsafe_stack_sp = child_unsafe_stack_top;
     child.unsafe_stack = Some(child_unsafe_stack);
 
-    // Held across link_child and publication below: those still work through
-    // `child_task_ptr`, and registration alone would let a concurrent shutdown
-    // sweep reclaim the child under them.
+    // Held across link_child and publication below: registration alone would
+    // let a concurrent shutdown sweep reclaim the child under them, and this
+    // handle is also where those two get the child's address from.
     let registered = match register_task(pending) {
         Ok(registered) => registered,
         Err(pending) => {
@@ -1299,13 +1300,11 @@ pub fn task_fork(
 
     // Publish the parent→child ownership edge: sets the child's parent id and
     // parks one owning reference in the parent's children list. Done after
-    // registration (so the child is a live registry entry) and after the `child`
-    // / `parent` borrows above have ended.
-    if let (Some(parent_ref), Some(child_nn)) = (
-        task_borrow(parent_task),
-        core::ptr::NonNull::new(child_task_ptr),
-    ) {
-        super::link_child(parent_ref, child_nn);
+    // registration (so the child is a live registry entry) and after the
+    // `child` borrow above has ended. The parent is the borrow this function
+    // was handed, which outlives every child-side write.
+    if let Some(child_nn) = core::ptr::NonNull::new(KArc::as_ptr(&registered) as *mut Task) {
+        super::link_child(parent, child_nn);
     }
 
     // Publish Ready only after all child-specific fields are fully initialized.
@@ -1331,9 +1330,6 @@ pub fn task_clone(
 ) -> Result<u32, u64> {
     use slopos_abi::syscall::*;
 
-    // Read-only parent, as in `task_fork`: it was a `*mut Task` only to be
-    // immediately `task_borrow`ed back into the borrow it now arrives as.
-    let parent_task = core::ptr::from_ref(parent).cast_mut();
     flush_live_fpu_for_clone(parent);
 
     if parent.flags & TASK_FLAG_KERNEL_MODE != 0 || parent.process_id == INVALID_PROCESS_ID {
@@ -1401,19 +1397,17 @@ pub fn task_clone(
     };
     let child_unsafe_stack_top = child_unsafe_stack.top().as_u64();
 
-    let pending = match allocate_task() {
+    let mut pending = match allocate_task() {
         Ok(pending) => pending,
         Err(_) => return Err(ERRNO_EAGAIN),
     };
     let child_task_id = pending.id();
-    let child_task_ptr = pending.as_ptr();
 
-    let Some(child) = task_borrow_mut(child_task_ptr) else {
-        return Err(ERRNO_EINVAL);
-    };
+    // Exclusive because the token holds the only reference to the child; the
+    // parent is a separate allocation reached through a shared borrow, so the
+    // two coexist without the accessor layer arbitrating between them.
+    let child = pending.as_mut();
 
-    // Child and parent are distinct task slots from the static TASK_TABLE,
-    // and we hold exclusive access to child (just reserved).
     super::task_accessors::task_clone_from(child, parent);
 
     // The bulk copy above may carry the parent's saved recovery/in-flight
@@ -1483,9 +1477,9 @@ pub fn task_clone(
     }
 
     if flags & CLONE_CHILD_CLEARTID != 0 && child_tidptr != 0 {
-        child.clear_child_tid = child_tidptr;
+        child.set_clear_child_tid(child_tidptr);
     } else {
-        child.clear_child_tid = 0;
+        child.set_clear_child_tid(0);
     }
 
     if flags & CLONE_SETTLS != 0 {
@@ -1510,10 +1504,11 @@ pub fn task_clone(
     child.abi.unsafe_stack_sp = child_unsafe_stack_top;
     child.unsafe_stack = Some(child_unsafe_stack);
     let child_tgid = child.tgid;
-    // Held across the settid writes, link_child and publication below, each of
-    // which still works through `child_task_ptr`. Registration alone would let a
-    // concurrent shutdown sweep reclaim the child under them; the scope-held
-    // guard also covers every faulting early return between here and the end.
+    // Held across the settid writes, link_child and publication below.
+    // Registration alone would let a concurrent shutdown sweep reclaim the
+    // child under them; the scope-held guard also covers every faulting early
+    // return between here and the end, and is where link_child reads the
+    // child's address from.
     let registered = match register_task(pending) {
         Ok(registered) => registered,
         Err(pending) => {
@@ -1565,13 +1560,11 @@ pub fn task_clone(
     );
 
     // Publish the parent→child ownership edge (parent id + children-list
-    // membership) after registration and after the `child` / `parent` borrows
-    // above have ended.
-    if let (Some(parent_ref), Some(child_nn)) = (
-        task_borrow(parent_task),
-        core::ptr::NonNull::new(child_task_ptr),
-    ) {
-        super::link_child(parent_ref, child_nn);
+    // membership) after registration and after the `child` borrow above has
+    // ended. The parent is the borrow this function was handed, which outlives
+    // every child-side write.
+    if let Some(child_nn) = core::ptr::NonNull::new(KArc::as_ptr(&registered) as *mut Task) {
+        super::link_child(parent, child_nn);
     }
 
     // Publish Ready only after all child-specific fields are fully initialized.

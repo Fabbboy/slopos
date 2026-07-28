@@ -71,8 +71,8 @@ pub fn link_child(parent: &Task, child: NonNull<Task>) {
 /// off-lock (via [`super::task_put`]); it is never the last reference, because
 /// the child holds its own existence reference until it is reaped, so the drop is
 /// a bare decrement.
-pub fn take_one_child(parent: *mut Task) -> Option<KArc<Task>> {
-    let child_nn = with_task_manager(|_mgr| task_children_pop(parent as *const Task))?;
+pub fn take_one_child(parent: &Task) -> Option<KArc<Task>> {
+    let child_nn = with_task_manager(|_mgr| task_children_pop(parent))?;
     Some(task_placement_reclaim(child_nn))
 }
 

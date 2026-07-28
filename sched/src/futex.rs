@@ -16,7 +16,7 @@ use slopos_ostd::sync::{KernelSync, LOCK_LEVEL_RESOURCE, SpinLock};
 use slopos_ostd::task::task_placement_clone;
 
 use super::scheduler::{mark_current_blocked, unblock_task, yield_blocked_task};
-use super::task::{INVALID_TASK_ID, task_id_of, task_put};
+use super::task::{INVALID_TASK_ID, task_put};
 use super::task_struct::Task;
 
 /// Number of hash buckets. Must be a power of two.
@@ -233,11 +233,10 @@ pub fn futex_wake(uaddr: u64, max_wake: u32) -> i64 {
 /// Called when a task is terminated or exits abnormally while
 /// blocked on a futex. This prevents dangling pointers in the
 /// wait queue.
-pub fn futex_remove_task(task: *mut Task) {
-    let Some(target_id) = task_id_of(task) else {
-        return;
-    };
-
+///
+/// Keyed by id, not by address: the buckets store ids, so the pointer this
+/// used to take was dereferenced once to read the id back out of it.
+pub fn futex_remove_task(target_id: u32) {
     for bucket_mutex in FUTEX_TABLE.iter() {
         let mut bucket = bucket_mutex.lock();
         let mut removed = 0usize;

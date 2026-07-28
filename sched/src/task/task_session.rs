@@ -3,9 +3,7 @@ use slopos_abi::syscall::TtyIndex;
 use slopos_ostd::task::{ProcessGroup, Session};
 use slopos_ostd::{KArc, KWeak};
 
-use super::task_accessors::{
-    task_id_of, task_parent_task_id, task_signal_post, task_tgid, task_wake_all_waiters,
-};
+use super::task_accessors::{task_signal_post, task_wake_all_waiters};
 use super::task_table::{task_find_by_id, task_for_each_active, with_task_manager};
 use super::{INVALID_TASK_ID, Task};
 
@@ -79,14 +77,10 @@ pub(super) fn release_task_dependents(completed_task_id: u32) {
     task_wake_all_waiters(task.as_ptr());
 }
 
-pub(super) fn notify_parent_of_child_exit(task_ptr: *mut Task) {
-    if task_ptr.is_null() {
-        return;
-    }
-
-    let task_id = task_id_of(task_ptr).unwrap_or(INVALID_TASK_ID);
-    let tgid = task_tgid(task_ptr).unwrap_or(INVALID_TASK_ID);
-    let parent_task_id = task_parent_task_id(task_ptr).unwrap_or(INVALID_TASK_ID);
+pub(super) fn notify_parent_of_child_exit(task: &Task) {
+    let task_id = task.task_id;
+    let tgid = task.tgid;
+    let parent_task_id = task.parent_task_id;
 
     if parent_task_id == INVALID_TASK_ID || parent_task_id == task_id {
         return;

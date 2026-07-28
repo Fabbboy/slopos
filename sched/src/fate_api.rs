@@ -4,17 +4,20 @@ use slopos_abi::fate::FateResult;
 use slopos_kernel_services::platform;
 use slopos_ostd::wl_currency::{self, WL_DELTA};
 
+/// Run `f` against a live task, or report -1 if the id no longer resolves.
+///
+/// A shared borrow: the target is very often *not* the calling task — the
+/// syscall names an arbitrary id — so an exclusive one would have been a claim
+/// about a task that is concurrently running. The fate trio is atomic for
+/// exactly that reason.
 fn with_task<F, R>(task_id: u32, f: F) -> c_int
 where
-    F: FnOnce(&mut Task) -> R,
+    F: FnOnce(&Task) -> R,
 {
     let Some(task) = task_find_by_id(task_id) else {
         return -1;
     };
-    let Some(t) = crate::task::task_borrow_mut(task.as_ptr()) else {
-        return -1;
-    };
-    f(t);
+    f(&task);
     0
 }
 pub fn fate_spin() -> FateResult {
@@ -25,24 +28,13 @@ pub fn fate_spin() -> FateResult {
     }
 }
 pub fn fate_set_pending(res: FateResult, task_id: u32) -> c_int {
-    with_task(task_id, |t| {
-        t.fate_token = res.token;
-        t.fate_value = res.value;
-        t.fate_pending = 1;
-    })
+    with_task(task_id, |t| t.set_fate(res.token, res.value))
 }
 pub fn fate_take_pending(task_id: u32, out: *mut FateResult) -> c_int {
     let mut result = -1;
     let _ = with_task(task_id, |t| {
-        if t.fate_pending != 0 {
-            slopos_ostd::util::ptr_buf::nullable_write(
-                out,
-                FateResult {
-                    token: t.fate_token,
-                    value: t.fate_value,
-                },
-            );
-            t.fate_pending = 0;
+        if let Some((token, value)) = t.take_fate() {
+            slopos_ostd::util::ptr_buf::nullable_write(out, FateResult { token, value });
             result = 0;
         }
     });

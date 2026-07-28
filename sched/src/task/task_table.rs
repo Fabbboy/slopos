@@ -48,6 +48,17 @@ impl TaskRef {
         self.arc.as_ref().expect("live TaskRef")
     }
 
+    /// Consume the guard for the handle it owns.
+    ///
+    /// [`Self::arc`] lends the handle to callers that want to mint another
+    /// reference from it; this is for the ones that want to *become* the
+    /// owner. Costs no refcount traffic — the guard is only ever a wrapper
+    /// around this one reference.
+    #[inline]
+    pub fn into_arc(mut self) -> KArc<Task> {
+        self.arc.take().expect("live TaskRef")
+    }
+
     /// Weak handle onto the same allocation, so a test can distinguish "the
     /// registration is gone" from "the allocation is gone".
     #[cfg(feature = "test-hooks")]
@@ -604,9 +615,19 @@ impl PendingTask {
         self.id
     }
 
+    /// Exclusive access to the task being built.
+    ///
+    /// The construction paths used to claim this exclusivity with
+    /// `task_borrow_mut` on a raw pointer, which asserts it. Here it is
+    /// *checked*: the token holds the only strong reference and the registry
+    /// has not published a weak one yet, so `KArc::get_mut` succeeds precisely
+    /// when nobody else can reach the allocation. The `&mut self` receiver is
+    /// what carries that fact out to the caller — a second builder cannot
+    /// exist, and the borrow ends before `register_task` consumes the token.
     #[inline]
-    pub(super) fn as_ptr(&self) -> *mut Task {
-        KArc::as_ptr(self.task.as_ref().expect("pending task owns allocation")) as *mut Task
+    pub(super) fn as_mut(&mut self) -> &mut Task {
+        KArc::get_mut(self.task.as_mut().expect("pending task owns allocation"))
+            .expect("pending task is the sole reference until registration")
     }
 }
 

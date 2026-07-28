@@ -216,6 +216,89 @@ impl<K, U> TaskInner<K, U> {
         self.migration_count.fetch_add(1, Ordering::Relaxed);
     }
 
+    // ── Runtime accounting ────────────────────────────────────────────
+
+    /// Accumulated on-CPU time, in `kdiag_timestamp` ticks.
+    #[inline]
+    pub fn total_runtime(&self) -> u64 {
+        self.total_runtime.load(Ordering::Relaxed)
+    }
+
+    /// Add one on-CPU slice, saturating.
+    ///
+    /// A compare-exchange loop rather than `fetch_add` because this one *does*
+    /// want saturation: the tally is reported to userland as a duration, and a
+    /// wrap would show a task that has run for a few microseconds as having run
+    /// for millennia.
+    #[inline]
+    pub fn add_total_runtime(&self, delta: u64) {
+        let _ = self
+            .total_runtime
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
+                Some(current.saturating_add(delta))
+            });
+    }
+
+    // ── Thread-exit futex address ─────────────────────────────────────
+
+    /// The `clear_child_tid` address, or 0 if this task set none.
+    #[inline]
+    pub fn clear_child_tid(&self) -> u64 {
+        self.clear_child_tid.load(Ordering::Relaxed)
+    }
+
+    /// Install (or clear, with 0) the address to zero and futex-wake on exit.
+    #[inline]
+    pub fn set_clear_child_tid(&self, addr: u64) {
+        self.clear_child_tid.store(addr, Ordering::Relaxed);
+    }
+
+    /// Claim the address, leaving none behind.
+    ///
+    /// A swap rather than a read followed by a store, so that two teardown
+    /// paths racing on the same task cannot both perform the futex wake.
+    #[inline]
+    pub fn take_clear_child_tid(&self) -> u64 {
+        self.clear_child_tid.swap(0, Ordering::Relaxed)
+    }
+
+    // ── Wheel of Fate ─────────────────────────────────────────────────
+
+    /// Publish a pending outcome. The flag store is Release so a consumer that
+    /// sees the flag sees both values.
+    #[inline]
+    pub fn set_fate(&self, token: u32, value: u32) {
+        self.fate_token.store(token, Ordering::Relaxed);
+        self.fate_value.store(value, Ordering::Relaxed);
+        self.fate_pending.store(1, Ordering::Release);
+    }
+
+    /// Consume the pending outcome, if there is one. `None` for a task with
+    /// nothing pending, and for every loser of a race to consume it.
+    #[inline]
+    pub fn take_fate(&self) -> Option<(u32, u32)> {
+        if self
+            .fate_pending
+            .compare_exchange(1, 0, Ordering::AcqRel, Ordering::Acquire)
+            .is_err()
+        {
+            return None;
+        }
+        Some((
+            self.fate_token.load(Ordering::Relaxed),
+            self.fate_value.load(Ordering::Relaxed),
+        ))
+    }
+
+    /// Drop any pending outcome without consuming it — the exit path, where
+    /// there is no longer anyone to hand it to.
+    #[inline]
+    pub fn clear_fate(&self) {
+        self.fate_pending.store(0, Ordering::Release);
+        self.fate_token.store(0, Ordering::Relaxed);
+        self.fate_value.store(0, Ordering::Relaxed);
+    }
+
     // ── Stacks and identity ───────────────────────────────────────────
 
     /// Kernel-stack bounds as `(base, top)`. `(0, 0)` when unset.

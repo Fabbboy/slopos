@@ -1188,14 +1188,12 @@ pub fn task_set_last_cpu<K, U>(task: *const TaskInner<K, U>, cpu: u8) {
 
 /// Bump `task->total_runtime` by `delta`, saturating.
 #[inline]
-pub fn task_add_total_runtime<K, U>(task: *mut TaskInner<K, U>, delta: u64) {
+pub fn task_add_total_runtime<K, U>(task: *const TaskInner<K, U>, delta: u64) {
     if task.is_null() {
         return;
     }
-    // SAFETY: caller pre-validated; field is naturally-aligned u64.
-    unsafe {
-        (*task).total_runtime = (*task).total_runtime.saturating_add(delta);
-    }
+    // SAFETY: caller pre-validated; the update is an atomic read-modify-write.
+    unsafe { (*task).add_total_runtime(delta) };
 }
 
 /// Clear `task->controlling_tty` if `(sid, tty)` matches. Returns
