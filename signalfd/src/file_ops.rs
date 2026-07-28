@@ -23,9 +23,7 @@ use slopos_abi::io::{IoBufRead, IoBufWrite};
 use slopos_abi::signal::{SignalfdSiginfo, sig_bit};
 use slopos_abi::syscall::{POLLIN, POLLNVAL};
 use slopos_ostd::sync::event_bus::BUS;
-use slopos_ostd::task::accessors::{
-    signal_pending_event, task_signal_pending, task_signal_pending_clear,
-};
+use slopos_ostd::task::accessors::signal_pending_event;
 use slopos_sched::task::task_find_by_id;
 
 use crate::registry::{self, SignalfdState};
@@ -51,7 +49,7 @@ impl Drop for SignalfdBacking {
 /// Signals in `state.mask` currently pending for the owner task.
 fn pending_masked(state: &SignalfdState) -> u64 {
     task_find_by_id(state.owner_task_id)
-        .map(|task| task_signal_pending(task.as_ptr()) & state.mask)
+        .map(|task| task.signal_pending() & state.mask)
         .unwrap_or(0)
 }
 
@@ -78,7 +76,7 @@ impl FileOps for SignalfdFileOps {
         let Some(task) = task_find_by_id(state.owner_task_id) else {
             return Errno::EBADF.as_isize();
         };
-        let _ = task_signal_pending_clear(task.as_ptr(), sig_bit(signum));
+        let _ = task.clear_signal_pending(sig_bit(signum));
         let info = SignalfdSiginfo {
             ssi_signo: signum as u32,
             ..Default::default()

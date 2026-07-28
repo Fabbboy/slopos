@@ -16,14 +16,13 @@
 //! through their existing diagnostics.
 
 use core::ptr::NonNull;
-use core::sync::atomic::Ordering;
 
 use crate::sync::{BUS, LinkError};
 use crate::user::context::UserContext;
 use slopos_abi::event::{KernelEvent, TaskSlot};
 use slopos_abi::signal::{NSIG, SIG_DFL, SIG_IGN, SigSet, sig_bit};
 use slopos_abi::syscall::TtyIndex;
-use slopos_abi::task::{TaskExitReason, TaskFaultReason, TaskPriority, TaskStatus};
+use slopos_abi::task::{TaskPriority, TaskStatus};
 
 use crate::KArc;
 use crate::task::job_control::{ProcessGroup, Session};
@@ -174,7 +173,6 @@ task_scalar_getters! {
     /// Read `task->kernel_stack_top` directly (the dispatcher hot path needs
     /// only `top` for TSS RSP0 programming).
     task_kernel_stack_top -> u64 = kernel_stack_top,
-    /// Read `task->fs_base`.
     /// Read `task->tgid` (thread-group id).
     task_tgid -> u32 = tgid,
     /// Read `task->parent_task_id`.
@@ -207,8 +205,6 @@ task_method_getters! {
 }
 
 task_context_getters! {
-    /// Read the task's saved CR3 from its `TaskContext`.
-    task_context_cr3 = cr3,
     /// Read the task's saved instruction pointer from its `TaskContext`.
     task_context_rip = rip,
     /// Read the task's saved stack pointer from its `TaskContext`.
@@ -241,20 +237,6 @@ task_state_predicates! {
 #[inline]
 pub fn task_is_invalid<K, U>(task: *const TaskInner<K, U>) -> bool {
     task_status(task).map_or(true, |s| s == TaskStatus::Invalid)
-}
-
-/// Borrow the raw task-name byte array. The bytes are 0-padded; the
-/// caller usually slices on the first NUL with `iter().position(|&b|
-/// b == 0)`.
-#[inline]
-pub fn task_name_bytes<'a, K, U>(task: *const TaskInner<K, U>) -> Option<&'a [u8]> {
-    if task.is_null() {
-        return None;
-    }
-    // SAFETY: caller pre-validated; `name` is a fixed-length byte
-    // array embedded in `Task`. The returned slice's lifetime is
-    // bounded by the caller's frame.
-    Some(unsafe { &(*task).name })
 }
 
 /// Drive `task->set_status(...)`. The atomic-state setter lives on
@@ -355,36 +337,6 @@ pub fn task_children_is_empty<K, U>(parent: *const TaskInner<K, U>) -> bool {
 #[inline]
 pub fn task_set_fs_base<K, U>(task: &TaskInner<K, U>, value: u64) {
     task.set_fs_base(value);
-}
-
-/// Record a user-mode-fault exit on `task`: sets `exit_reason`,
-/// `fault_reason`, and `exit_code`, then returns the task's id so the
-/// caller can drive `task_terminate(tid)`.
-///
-/// Returns `None` if `task` is null. Used by the user-fault retire
-/// path in `boot/src/user_fault.rs`.
-#[inline]
-pub fn task_record_user_fault_exit<K, U>(
-    task: *mut TaskInner<K, U>,
-    reason: TaskFaultReason,
-) -> Option<u32> {
-    if task.is_null() {
-        return None;
-    }
-    // SAFETY: caller pre-validated `task`; the per-task spinlock that
-    // gates context-switch is not held here, but the user-fault path
-    // is single-threaded for the faulting CPU and the task is not
-    // dispatchable while we mutate its exit state.
-    unsafe {
-        (*task)
-            .exit_reason
-            .store(TaskExitReason::UserFault.as_u16(), Ordering::Release);
-        (*task)
-            .fault_reason
-            .store(reason.as_u16(), Ordering::Release);
-        (*task).exit_code.store(1, Ordering::Release);
-        Some((*task).task_id)
-    }
 }
 
 /// Save the task's panic-recovery nesting depth while it is not running.
@@ -573,23 +525,6 @@ pub fn task_signal_pending<K, U>(task: *const TaskInner<K, U>) -> u64 {
         (*task)
             .signal_pending
             .load(core::sync::atomic::Ordering::Acquire)
-    }
-}
-
-/// Clear `mask` from `task->signal_pending` with `AcqRel`; returns the
-/// previous bitmask. Used by `signalfd` `read` to consume (drain) the
-/// signals it reports, mirroring how `deliver_pending_signal` clears a bit
-/// once it has handled a signal.
-#[inline]
-pub fn task_signal_pending_clear<K, U>(task: *const TaskInner<K, U>, mask: u64) -> u64 {
-    if task.is_null() {
-        return 0;
-    }
-    // SAFETY: caller pre-validated; `signal_pending` is `AtomicU64`.
-    unsafe {
-        (*task)
-            .signal_pending
-            .fetch_and(!mask, core::sync::atomic::Ordering::AcqRel)
     }
 }
 

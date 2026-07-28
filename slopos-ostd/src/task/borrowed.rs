@@ -36,6 +36,7 @@
 use core::sync::atomic::Ordering;
 
 use slopos_abi::signal::SigSet;
+use slopos_abi::task::{TaskExitReason, TaskFaultReason};
 
 use crate::sync::LinkError;
 use crate::sync::intrusive::Link;
@@ -147,6 +148,20 @@ impl<K, U> TaskInner<K, U> {
     #[inline]
     pub fn exit_info_is_set(&self) -> bool {
         self.exit_info.is_set()
+    }
+
+    /// Stamp the exit state of a task killed by a fatal user-mode fault, and
+    /// report its id so the caller can drive termination by id rather than by
+    /// holding this borrow across the diverging switch tail.
+    ///
+    /// Release on each store, in the order a fault reader walks them.
+    #[inline]
+    pub fn record_user_fault_exit(&self, reason: TaskFaultReason) -> u32 {
+        self.exit_reason
+            .store(TaskExitReason::UserFault.as_u16(), Ordering::Release);
+        self.fault_reason.store(reason.as_u16(), Ordering::Release);
+        self.exit_code.store(1, Ordering::Release);
+        self.task_id
     }
 
     // ── Signals ───────────────────────────────────────────────────────

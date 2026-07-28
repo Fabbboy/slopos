@@ -6,7 +6,6 @@ use slopos_mm::hhdm::PhysAddrHhdm;
 use slopos_mm::process_vm;
 use slopos_ostd::task::TaskDiag;
 use slopos_ostd::{kdiag_dump_interrupt_frame, kdiag_stack_word_at, klog_info};
-use slopos_sched::task::{task_context_rip, task_context_rsp};
 
 use crate::ist_stacks;
 use crate::user_fault::*;
@@ -238,8 +237,8 @@ pub(crate) fn log_user_page_fault_diagnostics(frame_ref: &InterruptFrame, fault_
         let task_pid = task_ref.process_id;
         if task_pid != slopos_abi::task::INVALID_TASK_ID {
             pid = task_pid;
-            ctx_rip = task_context_rip(&*task_ref).unwrap_or(0);
-            ctx_rsp = task_context_rsp(&*task_ref).unwrap_or(0);
+            ctx_rip = task_ref.context_rip();
+            ctx_rsp = task_ref.context_rsp();
             cr3 = process_vm::process_vm_get_ostd_pml4_paddr(pid);
             if cr3 != 0 {
                 fault_phys =
