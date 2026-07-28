@@ -143,8 +143,6 @@ pub fn kernel_shutdown(reason: *const c_char) -> ! {
     // would only time out. Best-effort, runs once, no-op if ext2 unmounted.
     flush_filesystems_for_shutdown();
 
-    cpu::disable_interrupts();
-
     if !SHUTDOWN_IN_PROGRESS.enter() {
         kernel_quiesce_interrupts();
         kernel_drain_serial_output();
@@ -156,14 +154,22 @@ pub fn kernel_shutdown(reason: *const c_char) -> ! {
         klog_info!("Reason: {}", cstr_to_str_lossy(reason));
     }
 
-    pcp_drain_all();
-    stack_pcp_drain_all::<KstackRegion>();
-
     // Terminate all tasks while the scheduler is still enabled so that APs
-    // whose current task is destroyed can schedule() to idle normally.
+    // whose current task is destroyed can schedule() to idle normally, and with
+    // interrupts still ENABLED: a task's destructor returns its kernel stack,
+    // unsafe stack and address space to the buddy allocator, whose reuse path
+    // waits on synchronous cross-CPU TLB drains. Running that with interrupts
+    // off is the slab/buddy deadlock, and `Task`'s destructor asserts against
+    // it rather than hanging.
     if task_shutdown_all() != 0 {
         klog_info!("Warning: Failed to terminate one or more tasks");
     }
+
+    cpu::disable_interrupts();
+
+    // After teardown, so the kernel stacks it just freed are drained too.
+    pcp_drain_all();
+    stack_pcp_drain_all::<KstackRegion>();
 
     scheduler_shutdown();
 

@@ -162,6 +162,17 @@ Then delete this plan.
 Check these before designing against any of these areas — each contradicts a
 plausible assumption.
 
+- **`task_put` is the only release; `KArc<Task>`'s own `Drop` is not.** The
+  destructor is allocator-heavy and its context predicate lives in `task_put`,
+  so a handle that reaches `KArc::drop` skips the preempt-guard and dispatch-pin
+  gates entirely — and `Task::drop`'s tripwire is a `debug_assert!`, so a release
+  build turns the mistake into a buddy/TLB deadlock rather than a panic. A bare
+  `KArc<Task>` in a binding is therefore a liability: every exit from its scope,
+  including the ones `?` and `return` create, is a release site. Prefer `TaskRef`,
+  whose `Drop` routes correctly, and reserve the bare handle for the frames that
+  hand it straight to a placement primitive. `kernel_shutdown` is the matching
+  constraint from the other side: task teardown runs there with interrupts *on*,
+  because the destructor waits on cross-CPU TLB drains.
 - **The dispatch reference is transient, not a container membership.**
   `ReadyQueue::dequeue` *moves* the membership reference out and returns
   `KArc<Task>`, deliberately, so a task is not "pinned by nothing" across an

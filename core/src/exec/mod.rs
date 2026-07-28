@@ -9,7 +9,7 @@ use core::ffi::{c_char, c_int};
 use core::ptr;
 
 use slopos_abi::Errno;
-use slopos_ostd::{KArc, KVec};
+use slopos_ostd::KVec;
 
 use slopos_abi::auxv::{AT_ENTRY, AT_NULL, AT_PAGESZ, AT_PHDR, AT_PHENT, AT_PHNUM};
 use slopos_abi::task::{
@@ -338,7 +338,7 @@ pub fn spawn_program_with_attrs(
         // reads the parent, and `parent_ref` is the registry guard already in
         // scope, so no pointer needs laundering back into a borrow.
         if let Some(parent) = parent_ref.as_ref()
-            && let Some(child_nn) = core::ptr::NonNull::new(KArc::as_ptr(&registered).cast_mut())
+            && let Some(child_nn) = core::ptr::NonNull::new(registered.as_ptr())
         {
             link_child(parent, child_nn);
         }
@@ -364,7 +364,7 @@ pub fn spawn_program_with_attrs(
         // The Release ordering on the status store inside `publish_new_task`
         // is what makes every write above visible to the CPU that eventually
         // runs this task.
-        if publish_new_task(&registered) != 0 {
+        if publish_new_task(registered.arc()) != 0 {
             task_terminate(task_id);
             return Err(ExecError::NoMem);
         }

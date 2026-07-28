@@ -347,8 +347,15 @@ fn reap_task_registration(id: u32) -> bool {
     let taken = with_task_manager(|mgr| {
         // A registered task holds its existence reference, so this upgrade
         // cannot fail for an entry that is present.
-        let task = mgr.registry.find(id)?.weak.upgrade()?;
-        let node = NonNull::new(KArc::as_ptr(&task) as *mut Task)?;
+        //
+        // Held as a guard rather than as the bare handle: every exit below
+        // releases it while the registry cli-spinlock is held, and one of them
+        // is reached exactly when a racing reaper already took the existence
+        // reference — which makes this upgrade the last one. `TaskRef::drop`
+        // routes that through `task_put`, so the allocator-heavy destructor
+        // never runs under the lock.
+        let task = TaskRef::new(mgr.registry.find(id)?.weak.upgrade()?);
+        let node = NonNull::new(task.as_ptr())?;
         if task.status() != TaskStatus::Terminated {
             return None;
         }
@@ -364,7 +371,7 @@ fn reap_task_registration(id: u32) -> bool {
         let entry = mgr.registry.remove(id).expect("found under the same lock");
         drop(entry.weak);
         // The temporary upgrade above. Non-final while `existence` is held.
-        super::task_put(task);
+        super::task_put(task.into_arc());
         Some(existence)
     });
     let Some(existence) = taken else {
@@ -648,7 +655,12 @@ impl Drop for PendingTask {
             return;
         };
         with_task_manager(|mgr| mgr.num_tasks = mgr.num_tasks.saturating_sub(1));
-        slopos_ostd::task::drop_off_lock(task);
+        // Always the final release — the token holds the only reference a
+        // never-registered task ever had — so it goes through the universal
+        // release like every other one. `drop_off_lock` checks interrupts and
+        // the lock count but not the preempt guard, and an abandon under one
+        // would run the destructor in the very context `task_put` defers.
+        super::task_put(task);
     }
 }
 
@@ -701,9 +713,14 @@ pub(super) fn allocate_task() -> Result<PendingTask, TaskAllocError> {
 /// occupied (live tasks plus not-yet-reaped terminated ones); the caller then
 /// discards the pending task.
 ///
-/// The returned handle pins the task across the rest of the caller's own
-/// construction, which still works through a raw pointer.
-pub(super) fn register_task(mut pending: PendingTask) -> Result<KArc<Task>, PendingTask> {
+/// The returned guard pins the task across the rest of the caller's own
+/// construction, which still works through a raw pointer. It is a [`TaskRef`]
+/// rather than the bare handle so that the construction path releases through
+/// [`super::task_put`] like every other holder: the callers that take it run a
+/// fallible tail (`CLONE_*_SETTID` writes, `publish_new_task`) whose error exits
+/// terminate the child first, and that makes the scope-end drop the child's
+/// final release.
+pub(super) fn register_task(mut pending: PendingTask) -> Result<TaskRef, PendingTask> {
     let id = pending.id;
     let task = pending.task.take().expect("pending task owns allocation");
     let Some(node) = NonNull::new(KArc::as_ptr(&task) as *mut Task) else {
@@ -725,7 +742,7 @@ pub(super) fn register_task(mut pending: PendingTask) -> Result<KArc<Task>, Pend
                 parked,
                 "a freshly registered task already held its existence reference"
             );
-            Ok(task)
+            Ok(TaskRef::new(task))
         }
         Some(entry) => {
             slopos_ostd::task::drop_off_lock(entry.weak);
@@ -761,14 +778,19 @@ pub fn task_consume_zombie(task_id: u32) -> Option<ExitInfo> {
         return None;
     }
     let child_ptr = task.as_ptr();
-    drop(task);
     // waitpid drops the parent's owning reference off-lock: unlink the child
     // from its parent's children list and release the reference the list held.
     // A Zombie is pinned by that reference, so without this the reaped child
     // would stay Terminated-pinned until the parent itself exits.
+    //
+    // The lookup guard stays live across the unlink. The transition above made
+    // the child reapable, so from that instant a peer CPU's deferred-reap drain
+    // may retire the registration and hand back the existence reference; this
+    // guard is then the only thing keeping `child_ptr` addressable.
     if let Some(parent_ref) = super::unlink_child(child_ptr) {
         super::task_put(parent_ref);
     }
+    drop(task);
     let _ = reap_task_registration(task_id);
     Some(info)
 }

@@ -693,7 +693,7 @@ pub fn task_build(
 ///
 /// A registry that cannot take the task abandons it, so the token is consumed
 /// either way and no caller can be left holding one it must remember to release.
-pub fn task_commit(pending: PendingTask) -> Option<KArc<Task>> {
+pub fn task_commit(pending: PendingTask) -> Option<TaskRef> {
     let task_id = pending.id();
     let registered = match register_task(pending) {
         Ok(registered) => registered,
@@ -856,7 +856,12 @@ pub fn task_terminate(task_id: u32) -> c_int {
         mgr.tasks_terminated = mgr.tasks_terminated.saturating_add(1);
     });
 
-    drop(target);
+    // Release through the reclaim path, never through `KArc`'s own `Drop`. This
+    // can be the final reference — terminating a task that no queue, inbox or
+    // parent list still holds leaves this handle as the last one — and the
+    // preempt guard above is still live, so the destructor must not run here.
+    // `task_put` parks it for the graveyard instead.
+    super::task_put(target);
     0
 }
 
@@ -1360,14 +1365,14 @@ pub fn task_fork(
     // registration (so the child is a live registry entry) and after the
     // `child` borrow above has ended. The parent is the borrow this function
     // was handed, which outlives every child-side write.
-    if let Some(child_nn) = core::ptr::NonNull::new(KArc::as_ptr(&registered) as *mut Task) {
+    if let Some(child_nn) = core::ptr::NonNull::new(registered.as_ptr()) {
         super::link_child(parent, child_nn);
     }
 
     // Publish Ready only after all child-specific fields are fully initialized.
     // `publish_new_task` reserves scheduler placement before setting Ready, so
     // the child is never visible as Ready with no runqueue/inbox owner.
-    if scheduler::publish_new_task(&registered) != 0 {
+    if scheduler::publish_new_task(registered.arc()) != 0 {
         klog_info!("fork: initial runnable publish failed for task {child_task_id}");
         let _ = task_terminate(child_task_id);
         return INVALID_TASK_ID;
@@ -1617,14 +1622,14 @@ pub fn task_clone(
     // membership) after registration and after the `child` borrow above has
     // ended. The parent is the borrow this function was handed, which outlives
     // every child-side write.
-    if let Some(child_nn) = core::ptr::NonNull::new(KArc::as_ptr(&registered) as *mut Task) {
+    if let Some(child_nn) = core::ptr::NonNull::new(registered.as_ptr()) {
         super::link_child(parent, child_nn);
     }
 
     // Publish Ready only after all child-specific fields are fully initialized.
     // `publish_new_task` reserves scheduler placement before setting Ready, so
     // the child is never visible as Ready with no runqueue/inbox owner.
-    if scheduler::publish_new_task(&registered) != 0 {
+    if scheduler::publish_new_task(registered.arc()) != 0 {
         klog_info!("clone: initial runnable publish failed for task {child_task_id}");
         let _ = task_terminate(child_task_id);
         return Err(ERRNO_EAGAIN);
