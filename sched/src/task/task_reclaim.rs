@@ -52,12 +52,10 @@ use core::sync::atomic::{AtomicPtr, Ordering};
 use slopos_ostd::KArc;
 use slopos_ostd::cpu::preempt::PreemptGuard;
 use slopos_ostd::sync::held_lock_count;
-use slopos_ostd::task::accessors::{
-    task_reclaim_next_load, task_reclaim_next_store_relaxed, task_reclaim_try_link,
-    task_reclaim_unlink,
-};
+use slopos_ostd::task::accessors::task_reclaim_next_store_relaxed;
 use slopos_ostd::task::{
     ParkedTask, task_destroy_parked, task_parked_leak, task_parked_reclaim, task_release_strong,
+    with_parked,
 };
 
 use super::Task;
@@ -89,7 +87,7 @@ pub fn task_put(arc: KArc<Task>) {
     // The token is the proof that we won the one-to-zero transition, so the
     // allocation is ours alone. Both arms consume it, so exactly one of them
     // can run and neither can run twice.
-    if destroy_context_is_safe(parked.node()) {
+    if destroy_context_is_safe(&parked) {
         task_destroy_parked(parked);
     } else {
         graveyard_push(parked);
@@ -100,8 +98,11 @@ pub fn task_put(arc: KArc<Task>) {
 ///
 /// Deliberately a property of the *context*, never of a reference count: a
 /// count-based test cannot be made race-free, whereas these are all facts about
-/// the calling CPU right now.
-fn destroy_context_is_safe(node: NonNull<Task>) -> bool {
+/// the calling CPU right now. The one question it does ask of the task itself
+/// goes through the token: `&ParkedTaskRef` is what makes reading a body whose
+/// strong count is already zero sound rather than merely intended, and holding
+/// the token by reference is what keeps the body alive across the read.
+fn destroy_context_is_safe(parked: &ParkedTaskRef) -> bool {
     // The first two mirror `Task::drop`'s own assertions, so the predicate and
     // the tripwire can never disagree.
     if !slopos_ostd::cpu::x86_64::interrupts::are_interrupts_enabled() || held_lock_count() != 0 {
@@ -116,7 +117,7 @@ fn destroy_context_is_safe(node: NonNull<Task>) -> bool {
     // Never free the stack a CPU is running on, and never free one another CPU
     // is still switching off of. Shares its predicate with the reap gate so the
     // two can never disagree about when a task is still dispatch-pinned.
-    !crate::scheduler::task_is_dispatch_pinned(node.as_ptr())
+    !with_parked(parked, crate::scheduler::task_is_dispatch_pinned)
 }
 
 /// Park a uniquely-owned dead task for later destruction.
@@ -124,15 +125,19 @@ fn destroy_context_is_safe(node: NonNull<Task>) -> bool {
 /// Consumes the reclaim token: from here the stack owns the allocation, and the
 /// only way back to a token is [`task_graveyard_drain`] detaching the node.
 fn graveyard_push(parked: ParkedTaskRef) {
-    let raw = task_parked_leak(parked).as_ptr();
     // Claim membership unconditionally — `debug_assert!` does not evaluate its
     // expression in release builds, so the claim cannot live inside one.
-    let claimed = task_reclaim_try_link(raw);
+    let claimed = with_parked(&parked, |task| task.reclaim_link().try_mark_linked());
     debug_assert!(
         claimed,
         "task pushed to the graveyard twice: two threads believed they won the \
          same final release"
     );
+    // Past this point the node's address becomes reachable to every other
+    // drainer, so the successor writes below go through a raw pointer: a
+    // `&Task` still live across the publishing CAS would be a reference to a
+    // task another CPU may already be destroying.
+    let raw = task_parked_leak(parked).as_ptr();
     loop {
         let head = TASK_GRAVEYARD.load(Ordering::Acquire);
         task_reclaim_next_store_relaxed(raw, head);
@@ -164,19 +169,26 @@ pub fn task_graveyard_pending() -> bool {
 pub fn task_graveyard_drain() {
     let mut cursor = TASK_GRAVEYARD.swap(ptr::null_mut(), Ordering::AcqRel);
     while let Some(node) = NonNull::new(cursor) {
-        // Read the successor and clear membership *before* destroying: the
-        // destructor frees the memory the link lives in.
-        cursor = task_reclaim_next_load(node.as_ptr());
-        task_reclaim_next_store_relaxed(node.as_ptr(), ptr::null_mut());
-        task_reclaim_unlink(node.as_ptr());
-
         // The single reconstitution point for the reclaim token, and the one
         // place in the kernel where unique ownership rests on an argument
         // rather than on the type. It holds because the swap above detached
         // this whole chain atomically: every node on it was parked by the
-        // winner of its own final strong release, no other drainer can hold
-        // the same chain, and the node is unlinked before it is reclaimed, so
-        // a second push cannot alias it.
-        task_destroy_parked(task_parked_reclaim(node));
+        // winner of its own final strong release, and no other drainer can
+        // hold the same chain.
+        let parked = task_parked_reclaim(node);
+
+        // Read the successor and clear membership *before* destroying: the
+        // destructor frees the memory the link lives in. The token is what
+        // makes that read checkable — the borrow ends with the closure, and
+        // the destructor below takes the token by value, so the two cannot
+        // overlap.
+        cursor = with_parked(&parked, |task| {
+            let next = task.reclaim_link().load();
+            task.reclaim_link().store_relaxed(ptr::null_mut());
+            task.reclaim_link().mark_unlinked();
+            next
+        });
+
+        task_destroy_parked(parked);
     }
 }
