@@ -23,13 +23,14 @@ use super::scheduler::{
 };
 use super::task::{
     INVALID_PROCESS_ID, INVALID_TASK_ID, IdtEntry, TASK_FLAG_KERNEL_MODE, TASK_FLAG_USER_MODE,
-    Task, TaskPriority, TaskRef, TaskStatus, task_cpu_affinity, task_create, task_entry_point,
-    task_exit_info_is_set, task_find_by_id, task_flags, task_fs_base, task_handle, task_id_of,
+    Task, TaskPriority, TaskRef, TaskStatus, task_abandon, task_build, task_commit,
+    task_cpu_affinity, task_create, task_entry_point, task_exit_info_is_set, task_find_by_id,
+    task_flags, task_for_each_active, task_fs_base, task_handle, task_id_of, task_id_was_allocated,
     task_is_blocked, task_is_exited, task_is_ready, task_is_terminated, task_kernel_stack_top,
     task_last_cpu, task_live_cap_rejects_for_test, task_parent_task_id, task_pgid, task_priority,
     task_process_id, task_remote_inbox_is_linked, task_resolve_handle, task_sched_placement_load,
-    task_set_state, task_set_state_with_reason, task_sid, task_status, task_terminate, task_tgid,
-    task_time_slice, task_time_slice_remaining, task_waiter_count,
+    task_set_state, task_set_state_with_reason, task_sid, task_slot_census, task_status,
+    task_terminate, task_tgid, task_time_slice, task_time_slice_remaining, task_waiter_count,
 };
 use super::test_fixture::KernelTestScope;
 use slopos_abi::task::BlockReason;
@@ -693,6 +694,165 @@ pub fn test_nascent_task_refuses_wake() -> TestResult {
 }
 
 slopos_testing::stest!(name = test_nascent_task_refuses_wake, suite = sched_core);
+
+/// A task under construction is reachable through nothing but the token that
+/// owns it, so `kill(-pgid)` cannot catch it half-built.
+///
+/// The spawn path writes a child's job-control identity — pgid, sid, group
+/// object — only once its ELF is loaded, a disk read's worth of time after the
+/// task exists. [`PendingTask`](crate::task::PendingTask) is what keeps that
+/// whole span private: with no registry entry there is nothing for
+/// `task_find_by_id` or the active-task walk to yield, and that walk matching
+/// `task.pgid` is exactly how a process-group signal picks its targets. The
+/// task appears at `task_commit` with its identity already written, so no
+/// observer can find it carrying a stale one.
+pub fn test_pending_task_is_unreachable_until_commit() -> TestResult {
+    let _fixture = SchedFixture::new();
+
+    let Some(mut pending) = task_build(
+        b"PendingHidden\0".as_ptr() as *const c_char,
+        dummy_task_entry,
+        ptr::null_mut(),
+        TaskPriority::Normal.as_u8(),
+        TASK_FLAG_KERNEL_MODE,
+    ) else {
+        klog_info!("SCHED_TEST: task_build refused a well-formed kernel task");
+        return TestResult::Fail;
+    };
+    let task_id = pending.id();
+
+    // The spawn path's job-control inherit, performed here for the same reason
+    // it is performed there: while the task is still private.
+    let group_pgid = task_id + 0x4000;
+    pending.as_mut().pgid = group_pgid;
+
+    if task_find_by_id(task_id).is_some() {
+        klog_info!("SCHED_TEST: a task under construction was findable by id");
+        return TestResult::Fail;
+    }
+
+    // The `kill(-pgid)` target scan, verbatim: walk the active tasks and match
+    // on pgid.
+    let mut seen_by_id = false;
+    let mut seen_by_pgid = false;
+    task_for_each_active(|task| {
+        if task.task_id == task_id {
+            seen_by_id = true;
+        }
+        if task.pgid == group_pgid {
+            seen_by_pgid = true;
+        }
+    });
+    if seen_by_id || seen_by_pgid {
+        klog_info!(
+            "SCHED_TEST: the active walk yielded a task under construction (by id {}, by pgid {})",
+            seen_by_id,
+            seen_by_pgid
+        );
+        return TestResult::Fail;
+    }
+
+    let Some(registered) = task_commit(pending) else {
+        klog_info!("SCHED_TEST: task_commit rejected a fully built task");
+        return TestResult::Fail;
+    };
+    drop(registered);
+
+    let Some(guard) = task_find_by_id(task_id) else {
+        klog_info!("SCHED_TEST: a committed task was not findable");
+        let _ = task_terminate(task_id);
+        return TestResult::Fail;
+    };
+    if guard.pgid != group_pgid {
+        klog_info!(
+            "SCHED_TEST: committed task carries pgid {}, expected {}",
+            guard.pgid,
+            group_pgid
+        );
+        drop(guard);
+        let _ = task_terminate(task_id);
+        return TestResult::Fail;
+    }
+    drop(guard);
+
+    let _ = task_terminate(task_id);
+    TestResult::Pass
+}
+
+slopos_testing::stest!(
+    name = test_pending_task_is_unreachable_until_commit,
+    suite = sched_core
+);
+
+/// Abandoning a built task gives back everything it reserved.
+///
+/// This is every spawn failure before publication — a missing binary, a
+/// rejected fd action — so what it has to release is the full cost of a task:
+/// the live-task reservation, the allocation, and the address space the task
+/// was going to run in. Only the id is spent, because ids are monotonic and
+/// never recycled, which is what lets a caller tell "already retired" from
+/// "never existed".
+pub fn test_task_abandon_releases_the_address_space() -> TestResult {
+    let _fixture = SchedFixture::new();
+
+    let (live_before, _, _, _) = task_slot_census();
+
+    let Some(mut pending) = task_build(
+        b"AbandonMe\0".as_ptr() as *const c_char,
+        crate::task::task_entry_from_kernel_va(PROCESS_CODE_START_VA as u64),
+        ptr::null_mut(),
+        TaskPriority::Normal.as_u8(),
+        TASK_FLAG_USER_MODE,
+    ) else {
+        klog_info!("SCHED_TEST: task_build refused a well-formed user task");
+        return TestResult::Fail;
+    };
+    let task_id = pending.id();
+    let process_id = pending.as_mut().process_id;
+
+    if process_id == INVALID_PROCESS_ID
+        || slopos_mm::process_vm::process_vm_get_vm_space(process_id).is_none()
+    {
+        klog_info!("SCHED_TEST: a built user task has no address space");
+        task_abandon(pending);
+        return TestResult::Fail;
+    }
+
+    task_abandon(pending);
+
+    if slopos_mm::process_vm::process_vm_get_vm_space(process_id).is_some() {
+        klog_info!(
+            "SCHED_TEST: abandoning task {} left process {} standing",
+            task_id,
+            process_id
+        );
+        return TestResult::Fail;
+    }
+    if task_find_by_id(task_id).is_some() {
+        klog_info!("SCHED_TEST: an abandoned task is findable");
+        return TestResult::Fail;
+    }
+    if !task_id_was_allocated(task_id) {
+        klog_info!("SCHED_TEST: an abandoned task's id was handed back to the allocator");
+        return TestResult::Fail;
+    }
+    let (live_after, _, _, _) = task_slot_census();
+    if live_after != live_before {
+        klog_info!(
+            "SCHED_TEST: abandon left the live-task count at {}, expected {}",
+            live_after,
+            live_before
+        );
+        return TestResult::Fail;
+    }
+
+    TestResult::Pass
+}
+
+slopos_testing::stest!(
+    name = test_task_abandon_releases_the_address_space,
+    suite = sched_core
+);
 
 pub fn test_raw_ready_store_does_not_reserve_waking_placement() -> TestResult {
     let _fixture = SchedFixture::new();

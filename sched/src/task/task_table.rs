@@ -604,14 +604,26 @@ pub(super) enum TaskAllocError {
     IdExhausted,
 }
 
-pub(super) struct PendingTask {
+/// Sole ownership of a task that is being built and is not yet reachable.
+///
+/// The token *is* the pre-publication window: while it exists the task has no
+/// registry entry, so no lookup, no active-task walk and no diagnostic scan can
+/// observe it half-constructed, and the only way to reach it is [`Self::as_mut`]
+/// — an exclusive borrow the compiler can see. Construction therefore finishes
+/// before the task becomes reachable, which is what makes the field writes need
+/// no witness: there is nobody to be a witness against.
+///
+/// Every exit is accounted for. [`register_task`] consumes the token and hands
+/// back the strong reference that pins the now-registered task; dropping it
+/// instead gives the reservation back and releases the allocation.
+pub struct PendingTask {
     task: Option<KArc<Task>>,
     id: u32,
 }
 
 impl PendingTask {
     #[inline]
-    pub(super) fn id(&self) -> u32 {
+    pub fn id(&self) -> u32 {
         self.id
     }
 
@@ -624,7 +636,7 @@ impl PendingTask {
     /// what carries that fact out to the caller — a second builder cannot
     /// exist, and the borrow ends before `register_task` consumes the token.
     #[inline]
-    pub(super) fn as_mut(&mut self) -> &mut Task {
+    pub fn as_mut(&mut self) -> &mut Task {
         KArc::get_mut(self.task.as_mut().expect("pending task owns allocation"))
             .expect("pending task is the sole reference until registration")
     }
@@ -737,11 +749,6 @@ pub fn task_live_cap_rejects_for_test() -> bool {
         unchanged
     });
     matches!(result, Err(TaskAllocError::MaxTasks)) && unchanged
-}
-
-/// Abandon a task whose construction failed before publication.
-pub(super) fn discard_task(pending: PendingTask) {
-    drop(pending);
 }
 
 pub fn task_consume_zombie(task_id: u32) -> Option<ExitInfo> {

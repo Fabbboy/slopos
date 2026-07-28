@@ -187,10 +187,6 @@ task_scalar_setters! {
     /// `task_id`-to-pointer lookup live on the kernel-side shim (the only
     /// caller of this writer); this just exposes the store inside OSTD.
     task_set_parent_task_id = parent_task_id: u32,
-    /// Stamp `task->entry_point` when re-targeting a task at a freshly-loaded
-    /// ELF entry (exec path).
-    task_set_entry_point = entry_point: u64,
-    /// Stamp `task->fs_base` (TLS thread pointer).
     /// Stamp `task->cpu_affinity`.
     task_set_cpu_affinity = cpu_affinity: u32,
     /// Stamp `task->time_slice`.
@@ -252,18 +248,6 @@ pub fn task_is_invalid<K, U>(task: *const TaskInner<K, U>) -> bool {
     task_status(task).map_or(true, |s| s == TaskStatus::Invalid)
 }
 
-/// Read the task's kernel-stack `(base, top)` pair.
-#[inline]
-pub fn task_kernel_stack_bounds<K, U>(task: *const TaskInner<K, U>) -> Option<(u64, u64)> {
-    if task.is_null() {
-        return None;
-    }
-    // SAFETY: caller pre-validated; both fields are u64.
-    let base = unsafe { (*task).kernel_stack_base };
-    let top = unsafe { (*task).kernel_stack_top };
-    Some((base, top))
-}
-
 /// Borrow the raw task-name byte array. The bytes are 0-padded; the
 /// caller usually slices on the first NUL with `iter().position(|&b|
 /// b == 0)`.
@@ -306,49 +290,6 @@ pub fn task_set_status<K, U>(task: *mut TaskInner<K, U>, status: TaskStatus) {
     unsafe {
         (*task).set_status(status);
     }
-}
-
-/// Stamp `task->context.{rip,rsp}` with the unaligned-write pattern
-/// the exec path requires. Used by ELF load to seed the user-mode
-/// entry RIP/RSP before activation.
-#[inline]
-pub fn task_set_context_rip_rsp<K, U>(task: *mut TaskInner<K, U>, rip: u64, rsp: u64) {
-    if task.is_null() {
-        return;
-    }
-    // SAFETY: caller pre-validated; `context` is in-Task and both fields are
-    // u64, written unaligned because `TaskContext` carries no alignment
-    // guarantee. `as_ptr_nascent` is the sanctioned pre-publication write path
-    // — see its contract; the exec seeding runs between `task_create` and
-    // `publish_new_task`, where no witness exists.
-    unsafe {
-        let ctx = (*task).context.as_ptr_nascent();
-        core::ptr::write_unaligned(core::ptr::addr_of_mut!((*ctx).rip), rip);
-        core::ptr::write_unaligned(core::ptr::addr_of_mut!((*ctx).rsp), rsp);
-    }
-}
-
-/// Seed a not-yet-published task's user-mode register snapshot.
-///
-/// The closure is what bounds the borrow. Handing the `&mut` back instead
-/// would leave its lifetime constrained by no argument, so the caller would
-/// pick it and two calls could yield two live `&mut` to one place.
-///
-/// The witnessed path is [`TaskInner::with_user_ctx`]-shaped
-/// (`TaskInner::user_ctx_ptr`). This one exists for the exec seeding, which
-/// runs between `task_create` and `publish_new_task` where no witness is
-/// obtainable — see `TaskOwnCell::as_ptr_nascent`.
-#[inline]
-pub fn task_seed_user_ctx_nascent<K, U, R>(
-    task: *mut TaskInner<K, U>,
-    f: impl FnOnce(&mut UserContext) -> R,
-) -> Option<R> {
-    if task.is_null() {
-        return None;
-    }
-    // SAFETY: caller pre-validated; the task is registered but unpublished, so
-    // this thread is its only writer. The borrow is confined to `f`.
-    Some(f(unsafe { &mut *(*task).user_ctx.as_ptr_nascent() }))
 }
 
 /// Raw pointer to a running task's user-mode register snapshot.

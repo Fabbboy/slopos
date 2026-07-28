@@ -19,8 +19,8 @@ use super::task_cleanup_hooks::run_task_resource_cleanup_hooks;
 use super::task_session::{notify_parent_of_child_exit, release_task_dependents};
 use super::task_stats::record_task_created;
 use super::task_table::{
-    TaskAllocError, TaskRef, allocate_task, discard_task, register_task, task_find_by_id,
-    task_reap, with_task_manager,
+    PendingTask, TaskAllocError, TaskRef, allocate_task, register_task, task_find_by_id, task_reap,
+    with_task_manager,
 };
 use super::{
     INVALID_PROCESS_ID, INVALID_TASK_ID, TASK_FLAG_KERNEL_MODE, TASK_FLAG_SYSTEM,
@@ -535,16 +535,28 @@ fn copy_name(dest: &mut [u8; TASK_NAME_MAX_LEN], src: *const c_char) {
     // `dest[take]` is already 0 from the wipe above; tail stays zero.
 }
 
-pub fn task_create(
+/// Build a task and hand back the token that solely owns it.
+///
+/// The task is fully formed — address space, both stacks, entry frame, job
+/// control identity — and reachable through nothing but the returned token, so
+/// a caller with more to write finishes construction through
+/// [`PendingTask::as_mut`] and only then makes the task reachable with
+/// [`task_commit`]. That ordering is what removes the pre-publication window
+/// entirely rather than papering over it: there is no interval in which a
+/// half-built task is visible to a registry lookup or an active-task walk.
+///
+/// A caller with nothing to add wants [`task_create`], which is this and
+/// [`task_commit`] with no gap between them.
+pub fn task_build(
     name: *const c_char,
     entry_point: TaskEntry,
     arg: *mut c_void,
     priority: u8,
     mut flags: u16,
-) -> u32 {
+) -> Option<PendingTask> {
     if entry_point as usize == 0 {
         klog_info!("task_create: Invalid entry point");
-        return INVALID_TASK_ID;
+        return None;
     }
 
     if flags & TASK_FLAG_KERNEL_MODE == 0 && flags & TASK_FLAG_USER_MODE == 0 {
@@ -553,18 +565,18 @@ pub fn task_create(
 
     if flags & TASK_FLAG_KERNEL_MODE != 0 && flags & TASK_FLAG_USER_MODE != 0 {
         klog_info!("task_create: Conflicting mode flags");
-        return INVALID_TASK_ID;
+        return None;
     }
 
     let mut pending = match allocate_task() {
         Ok(pending) => pending,
         Err(TaskAllocError::MaxTasks) => {
             klog_info!("task_create: Maximum tasks reached");
-            return INVALID_TASK_ID;
+            return None;
         }
         Err(TaskAllocError::NoFreeSlot | TaskAllocError::IdExhausted) => {
             klog_info!("task_create: No free task slots");
-            return INVALID_TASK_ID;
+            return None;
         }
     };
     let task_id = pending.id();
@@ -572,8 +584,8 @@ pub fn task_create(
     let resources = match allocate_task_create_resources(flags) {
         Some(resources) => resources,
         None => {
-            discard_task(pending);
-            return INVALID_TASK_ID;
+            drop(pending);
+            return None;
         }
     };
 
@@ -589,8 +601,8 @@ pub fn task_create(
             resources.kernel_stack,
             resources.unsafe_stack,
         );
-        discard_task(pending);
-        return INVALID_TASK_ID;
+        drop(pending);
+        return None;
     }
 
     // A user task is born its own session and group leader. Kernel tasks never
@@ -604,8 +616,8 @@ pub fn task_create(
                     resources.kernel_stack,
                     resources.unsafe_stack,
                 );
-                discard_task(pending);
-                return INVALID_TASK_ID;
+                drop(pending);
+                return None;
             }
         }
     } else {
@@ -668,20 +680,29 @@ pub fn task_create(
             slopos_mm::process_vm::process_vm_get_ostd_pml4_paddr(resources.process_id);
     }
 
-    // Held to the end of the function so the name read below cannot be
-    // reclaimed under us by a concurrent shutdown sweep.
+    Some(pending)
+}
+
+/// Make a built task reachable, returning the strong reference that pins it.
+///
+/// The task becomes findable here, not runnable: `scheduler::publish_new_task`
+/// is the sole new-task runnable edge, and it reserves scheduler placement and
+/// publishes `Ready` as one protocol. Between the two the task is registered
+/// but nascent, which is why every field a caller owns is written *before* this
+/// call, through the token's exclusive borrow.
+///
+/// A registry that cannot take the task abandons it, so the token is consumed
+/// either way and no caller can be left holding one it must remember to release.
+pub fn task_commit(pending: PendingTask) -> Option<KArc<Task>> {
+    let task_id = pending.id();
     let registered = match register_task(pending) {
         Ok(registered) => registered,
         Err(pending) => {
-            klog_info!("task_create: task registry full");
-            discard_task(pending);
-            return INVALID_TASK_ID;
+            klog_info!("task_commit: task registry full");
+            task_abandon(pending);
+            return None;
         }
     };
-
-    // task_create() deliberately returns a fully initialized but non-runnable
-    // task. The sole new-task runnable edge is scheduler::publish_new_task(),
-    // which reserves scheduler placement and publishes Ready as one protocol.
     record_task_created();
 
     klog_debug!(
@@ -690,7 +711,45 @@ pub fn task_create(
         task_id
     );
 
-    task_id
+    Some(registered)
+}
+
+/// Release a task whose construction failed before it was ever made reachable.
+///
+/// The token owns the task, so dropping it releases both stacks and everything
+/// else the task itself holds. The address space and its file table are
+/// process-scoped and outlive any single task, so they are torn down only when
+/// no other live task shares the process — the same rule the ordinary exit path
+/// applies, and what makes this correct for a `CLONE_VM` thread whose address
+/// space belongs to the parent it was branching from.
+pub fn task_abandon(mut pending: PendingTask) {
+    let (task_id, process_id) = {
+        let task = pending.as_mut();
+        (task.task_id, task.process_id)
+    };
+    if process_id != INVALID_PROCESS_ID && !process_has_other_live_tasks(process_id, task_id) {
+        ProcessResourceLease::cleanup_owned_process(process_id, true, true);
+    }
+    drop(pending);
+}
+
+/// Build and commit a task in one step, for callers with nothing to add
+/// between the two. Returns the new task's id, or [`INVALID_TASK_ID`].
+pub fn task_create(
+    name: *const c_char,
+    entry_point: TaskEntry,
+    arg: *mut c_void,
+    priority: u8,
+    flags: u16,
+) -> u32 {
+    let Some(pending) = task_build(name, entry_point, arg, priority, flags) else {
+        return INVALID_TASK_ID;
+    };
+    let task_id = pending.id();
+    match task_commit(pending) {
+        Some(_) => task_id,
+        None => INVALID_TASK_ID,
+    }
 }
 
 pub fn task_terminate(task_id: u32) -> c_int {
@@ -1284,15 +1343,9 @@ pub fn task_fork(
     // Held across link_child and publication below: registration alone would
     // let a concurrent shutdown sweep reclaim the child under them, and this
     // handle is also where those two get the child's address from.
-    let registered = match register_task(pending) {
-        Ok(registered) => registered,
-        Err(pending) => {
-            klog_info!("task_fork: task registry full");
-            discard_task(pending);
-            return INVALID_TASK_ID;
-        }
+    let Some(registered) = task_commit(pending) else {
+        return INVALID_TASK_ID;
     };
-    record_task_created();
 
     klog_debug!(
         "task_fork: created child task {} (process {}) from parent task {} (process {})",
@@ -1516,15 +1569,9 @@ pub fn task_clone(
     // child under them; the scope-held guard also covers every faulting early
     // return between here and the end, and is where link_child reads the
     // child's address from.
-    let registered = match register_task(pending) {
-        Ok(registered) => registered,
-        Err(pending) => {
-            klog_info!("task_clone: task registry full");
-            discard_task(pending);
-            return Err(ERRNO_EAGAIN);
-        }
+    let Some(registered) = task_commit(pending) else {
+        return Err(ERRNO_EAGAIN);
     };
-    record_task_created();
 
     if flags & CLONE_PARENT_SETTID != 0 && parent_tidptr != 0 {
         let parent_tid_user = match UserPtr::<u32>::try_new(parent_tidptr) {

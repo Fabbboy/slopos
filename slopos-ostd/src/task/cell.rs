@@ -133,28 +133,28 @@ impl<T> TaskOwnCell<T> {
         self.value.get_mut()
     }
 
-    /// Unsynchronised **write** pointer for the pre-publication window, where
-    /// no witness exists to be had.
+    /// Unsynchronised **write** pointer for the paths that hold a task as a raw
+    /// pointer and have no witness to offer.
     ///
-    /// `spawn_program_with_attrs` seeds a task's entry `context` and its
-    /// `user_ctx` after `task_create` has already registered the task but
-    /// before `publish_new_task` makes it schedulable. In that window neither
-    /// witness is obtainable — [`CurrentTask`] names a different task (the
-    /// spawner), no [`SwitchWindow`] is open, and `KArc::get_mut` fails because
-    /// the existence reference the registration handed out puts the strong
-    /// count at two. The module header spells out why `SchedPlacement::Nascent`
-    /// is *not* itself a proof of exclusivity: a nascent task is still
-    /// reachable through every registry lookup and diagnostic walk.
+    /// Three remain, and each is exclusive for a reason the type system cannot
+    /// see: the user-mode round-trip loop hands `user_ctx` straight to
+    /// `UserMode`, which keeps it across an iretq/syscall pair; the switch
+    /// path's `prepare_switch_to` copies the outgoing task's kernel return
+    /// context with interrupts off and both tasks dispatch-pinned; and the
+    /// interrupt-frame sync writes a `context` the interrupted task is not
+    /// running from. In none of them is a witness obtainable — [`CurrentTask`]
+    /// names a different task or is mid-swap, no [`SwitchWindow`] is open, and
+    /// `KArc::get_mut` fails against a registered task's existence reference.
     ///
     /// So this is a named debt rather than a disguised one — greppable, and
-    /// deleted when the nascent window closes by handing the spawner a
-    /// pre-registration exclusive handle, at which point every caller moves to
+    /// deleted as each of those paths gains a witness it can carry, at which
+    /// point its caller moves to [`get_ptr`](Self::get_ptr) or
     /// [`get_mut`](Self::get_mut).
     ///
     /// # Correctness
     ///
-    /// The caller must be the thread that created the task, and the task must
-    /// not yet have been published to any run queue.
+    /// The caller must have exclusive access to the task by an argument the
+    /// signature cannot carry, and must not retain the pointer past it.
     #[inline]
     pub fn as_ptr_nascent(&self) -> *mut T {
         self.value.get()

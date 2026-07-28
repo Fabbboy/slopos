@@ -9,7 +9,7 @@ use core::ffi::{c_char, c_int};
 use core::ptr;
 
 use slopos_abi::Errno;
-use slopos_ostd::KVec;
+use slopos_ostd::{KArc, KVec};
 
 use slopos_abi::auxv::{AT_ENTRY, AT_NULL, AT_PAGESZ, AT_PHDR, AT_PHENT, AT_PHNUM};
 use slopos_abi::task::{
@@ -33,12 +33,10 @@ use slopos_ostd::klog_info;
 use slopos_abi::task::INVALID_TASK_ID;
 use slopos_ostd::task::new_group_in_session;
 use slopos_sched::scheduler::publish_new_task;
+use slopos_sched::task::{TaskEntry, task_default_signals_in_mask, task_entry_from_kernel_va};
 use slopos_sched::task::{
-    TaskEntry, task_borrow, task_borrow_mut, task_default_signals_in_mask,
-    task_entry_from_kernel_va, task_process_group, task_process_id, task_seed_user_ctx_nascent,
-    task_session, task_set_context_rip_rsp, task_set_entry_point, task_set_fs_base,
+    link_child, task_abandon, task_build, task_commit, task_find_by_id, task_terminate,
 };
-use slopos_sched::task::{link_child, task_create, task_find_by_id, task_terminate};
 
 pub const EXEC_MAX_PATH: usize = 256;
 pub const EXEC_MAX_ARG_STRLEN: usize = 4096;
@@ -214,33 +212,24 @@ pub fn spawn_program_with_attrs(
         let task_name = task_name_from_path(normalized_path)?;
         let user_code_entry: TaskEntry = task_entry_from_kernel_va(PROCESS_CODE_START_VA as u64);
 
-        let task_id = task_create(
+        // The token owns the task outright — it has no registry entry, so
+        // everything below runs where no lookup, no active-task walk and no
+        // other CPU can observe the task, and `task_commit` makes it reachable
+        // already complete. That is what lets the field writes be a plain
+        // exclusive borrow rather than an unwitnessed write into a published
+        // allocation.
+        let Some(mut pending) = task_build(
             task_name.as_ptr() as *const c_char,
             user_code_entry,
             ptr::null_mut(),
             priority.as_u8(),
             flags,
-        );
-
-        if task_id == INVALID_TASK_ID {
+        ) else {
             return Err(ExecError::NoMem);
-        }
-
-        // Hold the registry guard for the whole spawn sequence: the raw
-        // projection below is written to until publish_new_task, and a
-        // concurrent terminate must not invalidate it mid-initialization.
-        let Some(task_guard) = task_find_by_id(task_id) else {
-            task_terminate(task_id);
-            return Err(ExecError::Fault);
         };
-        let task_info = task_guard.as_ptr();
+        let task_id = pending.id();
+        let process_id = pending.as_mut().process_id;
 
-        // task_create() returns a non-runnable task. It stays Blocked while
-        // we perform disk I/O and write entry_point, rip, rsp, fd table, pgid,
-        // sid, and controlling_tty. publish_new_task() below is the sole
-        // schedulable edge, matching Linux's wake_up_new_task() pattern.
-
-        let process_id = task_process_id(task_info).unwrap_or(INVALID_PROCESS_ID);
         let mut entry = 0u64;
         let mut stack_ptr = 0u64;
         let mut tls_tp = 0u64;
@@ -254,107 +243,110 @@ pub fn spawn_program_with_attrs(
             &mut stack_ptr,
             &mut tls_tp,
         ) {
-            task_terminate(task_id);
+            task_abandon(pending);
             return Err(err);
         }
 
-        task_set_entry_point(task_info, entry);
-        task_set_context_rip_rsp(task_info, entry, stack_ptr);
-        // The registry guard is already in scope and derefs to `&Task`; no
-        // need to launder its pointer back into a borrow.
-        task_set_fs_base(&task_guard, tls_tp);
-
-        // OSTD user-mode entry: re-seed the task's `UserContext`
-        // with the post-load entry / stack pointers.  The kernel
-        // stack itself stays as `init_task_context` left it (just
-        // a return-address slot pointing at `user_task_first_run`);
-        // the iretq frame is rebuilt from `user_ctx` on every
-        // round-trip by `user_mode_round_trip_asm`.
-        // Registered but not yet published: no witness is obtainable here (see
-        // `TaskOwnCell::as_ptr_nascent`). The closure is what bounds the borrow.
-        task_seed_user_ctx_nascent(task_info, |uc| {
-            slopos_sched::task::init_user_ctx_for_new_task(uc, entry, stack_ptr, 0);
-        });
-
-        // Build the child's fd table from the action allow-list BEFORE
-        // scheduling, so its descriptors are in place from the moment it
-        // runs (avoids the SMP race where the child runs before the parent
-        // finishes fd setup). The child starts empty; each action installs
-        // exactly what it inherits. A caller with no parent process
-        // (`launch_init`) keeps its console bootstrap table untouched.
+        // Build the child's fd table from the action allow-list. The child
+        // starts empty; each action installs exactly what it inherits. A caller
+        // with no parent process (`launch_init`) keeps its console bootstrap
+        // table untouched.
         if parent_process_id != INVALID_PROCESS_ID {
             fileio_destroy_table_for_process(process_id);
             if fileio_create_empty_table_for_process(process_id) != 0 {
-                task_terminate(task_id);
+                task_abandon(pending);
                 return Err(ExecError::NoMem);
             }
             if let Err(err) = apply_fd_actions(parent_process_id, process_id, actions) {
-                task_terminate(task_id);
+                task_abandon(pending);
                 return Err(err);
             }
         }
 
-        // POSIX_SPAWN_SETSIGDEF: force the named signals to their default
-        // disposition in the child.
-        if sigdefault_mask != 0
-            && let Some(child) = task_borrow_mut(task_info)
-        {
-            task_default_signals_in_mask(child, sigdefault_mask);
-        }
+        // Job control is inherited from the parent task so spawned children
+        // participate in the parent's session. This matches fork semantics and
+        // is required for proper job control: without it, the child is in its
+        // own session and the shell cannot set it as the foreground group.
+        // Resolved before the child borrow opens, so the two live at once.
+        let parent_ref = task_find_by_id(parent_task_id);
 
-        // Inherit job-control state (pgid, sid, controlling_tty) from the
-        // parent task so spawned children participate in the parent's session.
-        // This matches fork semantics and is required for proper job control:
-        // without it, the child is in its own session and the shell cannot
-        // set it as the foreground process group.
         let mut fg_handoff: Option<(slopos_abi::syscall::TtyIndex, u32, u32)> = None;
-        if parent_task_id != INVALID_TASK_ID {
-            if let Some(parent_ref) = task_find_by_id(parent_task_id) {
-                let parent_ptr = parent_ref.as_ptr();
-                if let (Some(parent), Some(child)) =
-                    (task_borrow(parent_ptr), task_borrow_mut(task_info))
-                {
-                    // Point the child's group object at the same identity its
-                    // inherited pgid names: a fresh group in the parent's
-                    // session for NEW_PGRP, otherwise the parent's own group.
-                    if flags & slopos_abi::task::TASK_FLAG_NEW_PGRP != 0 {
-                        child.pgid = task_id;
-                        child.process_group.store(
-                            task_session(parent_ptr).and_then(|s| new_group_in_session(task_id, s)),
-                        );
-                    } else {
-                        child.pgid = parent.pgid;
-                        child.process_group.store(task_process_group(parent_ptr));
-                    }
-                    child.sid = parent.sid;
-                    child.set_controlling_tty(parent.controlling_tty());
+        {
+            let child = pending.as_mut();
+            child.entry_point = entry;
+            child.context.get_mut().rip = entry;
+            child.context.get_mut().rsp = stack_ptr;
+            child.set_fs_base(tls_tp);
 
-                    if flags & slopos_abi::task::TASK_FLAG_FOREGROUND != 0
-                        && child.pgid != 0
-                        && let Some(ctty) = child.controlling_tty()
-                    {
-                        fg_handoff = Some((ctty, child.pgid, child.sid));
-                    }
-                }
-                // Publish the parent→child ownership edge (parent id +
-                // children-list membership) after the field borrows above have
-                // ended; the child was already registered by `task_create`.
-                // Both ends resolved to a borrow / non-null handle before the
-                // link: `link_child` now reads the parent rather than taking a
-                // pointer it has to re-borrow internally.
-                // `parent_ref` is the registry guard already in scope and
-                // derefs to `&Task`; `link_child` reads the parent, so no
-                // pointer needs laundering back into a borrow.
-                if let Some(child_nn) = core::ptr::NonNull::new(task_info) {
-                    link_child(&parent_ref, child_nn);
+            // OSTD user-mode entry: re-seed the task's `UserContext` with the
+            // post-load entry / stack pointers. The kernel stack itself stays
+            // as `task_build` left it (just a return-address slot pointing at
+            // `user_task_first_run`); the iretq frame is rebuilt from
+            // `user_ctx` on every round trip by `user_mode_round_trip_asm`.
+            slopos_sched::task::init_user_ctx_for_new_task(
+                child.user_ctx.get_mut(),
+                entry,
+                stack_ptr,
+                0,
+            );
+
+            // POSIX_SPAWN_SETSIGDEF: force the named signals to their default
+            // disposition in the child.
+            if sigdefault_mask != 0 {
+                task_default_signals_in_mask(child, sigdefault_mask);
+            }
+
+            if let Some(parent) = parent_ref.as_ref() {
+                // Point the child's group object at the same identity its
+                // inherited pgid names: a fresh group in the parent's session
+                // for NEW_PGRP, otherwise the parent's own group. Exclusive
+                // rather than an RCU store — the child is unreachable, so there
+                // is no reader to defer a release past.
+                let group = if flags & slopos_abi::task::TASK_FLAG_NEW_PGRP != 0 {
+                    child.pgid = task_id;
+                    parent
+                        .process_group
+                        .load()
+                        .and_then(|pg| new_group_in_session(task_id, pg.session().clone()))
+                } else {
+                    child.pgid = parent.pgid;
+                    parent.process_group.load()
+                };
+                let _ = child.process_group.replace_exclusive(group);
+                child.sid = parent.sid;
+                child.set_controlling_tty(parent.controlling_tty());
+
+                if flags & slopos_abi::task::TASK_FLAG_FOREGROUND != 0
+                    && child.pgid != 0
+                    && let Some(ctty) = child.controlling_tty()
+                {
+                    fg_handoff = Some((ctty, child.pgid, child.sid));
                 }
             }
+        }
+
+        // Every field the spawn owns is written, so the task can become
+        // reachable. It is findable from here but still not runnable:
+        // `publish_new_task` below is the sole schedulable edge, matching
+        // Linux's wake_up_new_task() pattern.
+        let Some(registered) = task_commit(pending) else {
+            return Err(ExecError::NoMem);
+        };
+
+        // Publish the parent→child ownership edge (parent id + children-list
+        // membership) now that the child is a live registry entry. `link_child`
+        // reads the parent, and `parent_ref` is the registry guard already in
+        // scope, so no pointer needs laundering back into a borrow.
+        if let Some(parent) = parent_ref.as_ref()
+            && let Some(child_nn) = core::ptr::NonNull::new(KArc::as_ptr(&registered).cast_mut())
+        {
+            link_child(parent, child_nn);
         }
 
         // Atomic foreground handoff (TASK_FLAG_FOREGROUND): make the child's
         // process group the controlling terminal's foreground group *before*
         // the Ready-publish below.  Doing it parent-side after spawn returns
-        // (the old `tcsetpgrp` round-trip) leaves a window where the child is
+        // (a `tcsetpgrp` round-trip) leaves a window where the child is
         // already schedulable but still a background process — its first
         // terminal read then fails the foreground check and poisons async
         // readers.  Session-validated: a child whose session does not own the
@@ -364,19 +356,15 @@ pub fn spawn_program_with_attrs(
             // The checked variant validates the session match and performs
             // the set under one TTY lock acquisition (no read-then-write
             // TOCTOU); a child whose session does not own the terminal is
-            // refused. `pgrp_exists_in_session` sees the child: its pgid and
-            // sid were written above and the slot is live (Blocked).
+            // refused. Resolving the target group walks the registry for a
+            // member, which is why this follows the commit above.
             let _ = tty::set_foreground_pgrp_checked(ctty, child_pgid, child_sid);
         }
 
-        // Publish the task as Ready only after ALL field writes are done.
-        // The Release ordering on this atomic store ensures that every
-        // prior write (process_id, entry_point, rip, rsp, fd table,
-        // pgid, sid, controlling_tty) is visible to the CPU that
-        // eventually runs this task.  This is the Linux TASK_NEW →
-        // TASK_RUNNING pattern: task_create leaves the task Blocked,
-        // and we make it schedulable only here.
-        if publish_new_task(task_guard.arc()) != 0 {
+        // The Release ordering on the status store inside `publish_new_task`
+        // is what makes every write above visible to the CPU that eventually
+        // runs this task.
+        if publish_new_task(&registered) != 0 {
             task_terminate(task_id);
             return Err(ExecError::NoMem);
         }
