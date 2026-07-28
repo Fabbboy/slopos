@@ -3,7 +3,7 @@ use slopos_mm::memory_layout_defs::{EXCEPTION_STACK_REGION_BASE, EXCEPTION_STACK
 use slopos_ostd::sync::PreemptGuard;
 
 use super::scheduler::{is_scheduling_active, schedule_from_trap_exit, scheduler_timer_tick};
-use super::task::{TASK_FLAG_USER_MODE, Task, TaskStatus, task_save_from_interrupt_frame};
+use super::task::{TASK_FLAG_USER_MODE, TaskStatus};
 
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub enum RescheduleReason {
@@ -26,12 +26,19 @@ pub fn trap_running_on_exception_stack() -> bool {
     rsp >= EXCEPTION_STACK_REGION_BASE && rsp < ist_region_end
 }
 
+/// Save the interrupted user-mode frame into the running task's context.
+///
+/// Takes the `CurrentTask` guard because the task being written is the one this
+/// CPU is running, so the guard the caller already holds is exactly the witness
+/// the register write needs.
 pub fn save_task_context_from_interrupt_frame(
-    task: *mut Task,
-    frame: *mut InterruptFrame,
+    current: &crate::task_struct::Current,
+    frame: &InterruptFrame,
     mark_user_started: bool,
 ) {
-    task_save_from_interrupt_frame(task, frame as *const InterruptFrame, mark_user_started);
+    current
+        .task()
+        .save_from_interrupt_frame(current, frame, mark_user_started);
 }
 
 pub fn scheduler_request_reschedule(_reason: RescheduleReason) {
@@ -60,8 +67,6 @@ pub fn save_preempt_context(frame: *mut InterruptFrame) {
     if current.task().flags & TASK_FLAG_USER_MODE == 0 {
         return;
     }
-    let task = current.as_ptr();
-
     // OSTD's `borrow_ref` folds the one `unsafe` reborrow; the
     // caller-supplied frame lives on the ISR stack for the duration
     // of this call.
@@ -70,7 +75,7 @@ pub fn save_preempt_context(frame: *mut InterruptFrame) {
         return;
     }
 
-    save_task_context_from_interrupt_frame(task, frame, false);
+    save_task_context_from_interrupt_frame(&current, frame_ref, false);
 }
 
 pub fn scheduler_handoff_on_trap_exit(source: TrapExitSource) {

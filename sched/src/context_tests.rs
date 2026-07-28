@@ -2,6 +2,7 @@
 
 use core::ffi::c_char;
 use core::ptr;
+use core::sync::atomic::Ordering;
 
 use slopos_ostd::KBox;
 
@@ -11,7 +12,6 @@ use slopos_arch::InterruptFrame;
 use slopos_ostd::klog_info;
 use slopos_testing::{TestResult, assert_eq_test, assert_some, assert_test};
 
-use super::scheduler::save_task_context_from_interrupt_frame;
 use super::task::{
     MAX_TASKS, task_create, task_find_by_id, task_set_state, task_status, task_terminate,
 };
@@ -287,10 +287,10 @@ fn check_u64_fields(labels: &[&'static str], expected: &[u64], actual: &[u64]) -
 pub fn test_save_task_context_from_interrupt_frame_marks_started() -> TestResult {
     let mut task: KBox<Task> = KBox::try_init(Task::init_invalid()).expect("alloc");
     *task.context.get_mut() = TaskContext::zero();
-    task.user_started = 0;
-    task.context_from_user = 0;
+    *task.user_started.get_mut() = 0;
+    *task.context_from_user.get_mut() = 0;
 
-    let mut frame = InterruptFrame {
+    let frame = InterruptFrame {
         r15: 0x15,
         r14: 0x14,
         r13: 0x13,
@@ -315,7 +315,7 @@ pub fn test_save_task_context_from_interrupt_frame_marks_started() -> TestResult
         ss: SegmentSelector::USER_DATA.bits() as u64,
     };
 
-    save_task_context_from_interrupt_frame(&mut *task, &mut frame, true);
+    task.save_from_interrupt_frame_mut(&frame, true);
 
     let user_data = SegmentSelector::USER_DATA.bits() as u64;
     let user_code = SegmentSelector::USER_CODE.bits() as u64;
@@ -398,9 +398,9 @@ pub fn test_save_task_context_from_interrupt_frame_marks_started() -> TestResult
     expected[22] = 0;
     actual[22] = task.context.get_mut().gs;
     expected[23] = 1;
-    actual[23] = task.context_from_user as u64;
+    actual[23] = task.context_from_user.load(Ordering::Relaxed) as u64;
     expected[24] = 1;
-    actual[24] = task.user_started as u64;
+    actual[24] = task.user_started.load(Ordering::Relaxed) as u64;
     if check_u64_fields(&LABELS, &*expected, &*actual).is_err() {
         return TestResult::Fail;
     }
@@ -411,10 +411,10 @@ pub fn test_save_task_context_from_interrupt_frame_marks_started() -> TestResult
 pub fn test_save_task_context_from_interrupt_frame_keeps_user_started() -> TestResult {
     let mut task: KBox<Task> = KBox::try_init(Task::init_invalid()).expect("alloc");
     *task.context.get_mut() = TaskContext::zero();
-    task.user_started = 0;
-    task.context_from_user = 0;
+    *task.user_started.get_mut() = 0;
+    *task.context_from_user.get_mut() = 0;
 
-    let mut frame = InterruptFrame {
+    let frame = InterruptFrame {
         r15: 0,
         r14: 0,
         r13: 0,
@@ -439,10 +439,10 @@ pub fn test_save_task_context_from_interrupt_frame_keeps_user_started() -> TestR
         ss: SegmentSelector::USER_DATA.bits() as u64,
     };
 
-    save_task_context_from_interrupt_frame(&mut *task, &mut frame, false);
+    task.save_from_interrupt_frame_mut(&frame, false);
 
-    assert_eq_test!(task.context_from_user, 1);
-    assert_eq_test!(task.user_started, 0);
+    assert_eq_test!(task.context_from_user.load(Ordering::Relaxed), 1);
+    assert_eq_test!(task.user_started.load(Ordering::Relaxed), 0);
 
     TestResult::Pass
 }

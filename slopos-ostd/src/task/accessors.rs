@@ -985,60 +985,6 @@ pub fn task_clone_from<K, U>(dest: &mut TaskInner<K, U>, other: &TaskInner<K, U>
     unsafe { dest.clone_from_raw(other) };
 }
 
-/// Save register state from `frame` into `task->context`, set the
-/// segment selectors to USER_DATA, and stamp `context_from_user = 1`.
-/// Optionally also stamp `user_started = 1`.
-///
-/// The field-by-field copy behind
-/// `core::scheduler::trap::save_task_context_from_interrupt_frame`.
-#[inline]
-pub fn task_save_from_interrupt_frame<K, U>(
-    task: *mut TaskInner<K, U>,
-    frame: *const crate::irq::interrupt_frame::InterruptFrame,
-    mark_user_started: bool,
-) {
-    if task.is_null() || frame.is_null() {
-        return;
-    }
-    // SAFETY: caller pre-validated both pointers; the in-Task
-    // `context` field and the caller-owned `InterruptFrame` are
-    // exclusive for the duration of this call.
-    unsafe {
-        use crate::arch::x86_64::gdt::SegmentSelector;
-        let ctx = &mut *(*task).context.as_ptr_nascent();
-        let f = &*frame;
-        ctx.rax = f.rax;
-        ctx.rbx = f.rbx;
-        ctx.rcx = f.rcx;
-        ctx.rdx = f.rdx;
-        ctx.rsi = f.rsi;
-        ctx.rdi = f.rdi;
-        ctx.rbp = f.rbp;
-        ctx.r8 = f.r8;
-        ctx.r9 = f.r9;
-        ctx.r10 = f.r10;
-        ctx.r11 = f.r11;
-        ctx.r12 = f.r12;
-        ctx.r13 = f.r13;
-        ctx.r14 = f.r14;
-        ctx.r15 = f.r15;
-        ctx.rip = f.rip;
-        ctx.rsp = f.rsp;
-        ctx.rflags = f.rflags;
-        ctx.cs = f.cs;
-        ctx.ss = f.ss;
-        ctx.ds = SegmentSelector::USER_DATA.bits() as u64;
-        ctx.es = SegmentSelector::USER_DATA.bits() as u64;
-        ctx.fs = 0;
-        ctx.gs = 0;
-
-        (*task).context_from_user = 1;
-        if mark_user_started {
-            (*task).user_started = 1;
-        }
-    }
-}
-
 /// Test whether `task->signal_pending & !task->signal_blocked` is non-zero,
 /// i.e. there is at least one deliverable signal.
 #[inline]

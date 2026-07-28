@@ -154,9 +154,9 @@ use super::task::{
     task_switch_ctx_rip_rsp, task_time_slice, task_time_slice_remaining, task_transition_from,
 };
 pub use super::trap::{
-    RescheduleReason, TrapExitSource, save_preempt_context, save_task_context_from_interrupt_frame,
-    scheduler_handle_post_irq, scheduler_handle_timer_interrupt, scheduler_handoff_on_trap_exit,
-    scheduler_request_reschedule, scheduler_request_reschedule_from_interrupt,
+    RescheduleReason, TrapExitSource, save_preempt_context, scheduler_handle_post_irq,
+    scheduler_handle_timer_interrupt, scheduler_handoff_on_trap_exit, scheduler_request_reschedule,
+    scheduler_request_reschedule_from_interrupt,
 };
 const SCHED_DEFAULT_TIME_SLICE: u32 = 10;
 const SCHEDULER_PREEMPTION_DEFAULT: u8 = 1;

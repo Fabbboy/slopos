@@ -136,13 +136,12 @@ impl<T> TaskOwnCell<T> {
     /// Unsynchronised **write** pointer for the paths that hold a task as a raw
     /// pointer and have no witness to offer.
     ///
-    /// Two remain, and each is exclusive for a reason the type system cannot
-    /// see: the switch path's `prepare_switch_to` copies the outgoing task's
-    /// kernel return context with interrupts off and both tasks dispatch-pinned,
-    /// and the interrupt-frame sync writes a `context` the interrupted task is
-    /// not running from. In neither is a witness obtainable — [`CurrentTask`]
-    /// names a different task or is mid-swap, no [`SwitchWindow`] is open, and
-    /// `KArc::get_mut` fails against a registered task's existence reference.
+    /// One remains: the switch path's `prepare_switch_to` copies the outgoing
+    /// task's kernel return context with interrupts off and both tasks
+    /// dispatch-pinned. No witness is obtainable there — [`CurrentTask`] names
+    /// the incoming task by then, the [`SwitchWindow`]s cover the endpoints
+    /// rather than the round-trip slots, and `KArc::get_mut` fails against a
+    /// registered task's existence reference.
     ///
     /// So this is a named debt rather than a disguised one — greppable, and
     /// deleted as each of those paths gains a witness it can carry, at which

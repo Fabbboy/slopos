@@ -665,8 +665,8 @@ pub fn task_build(
     task_ref.entry_arg = arg;
     task_ref.time_slice = 10;
     task_ref.reset_runtime_state();
-    task_ref.user_started = 0;
-    task_ref.context_from_user = 0;
+    task_ref.user_started.store(0, Ordering::Relaxed);
+    task_ref.context_from_user.store(0, Ordering::Relaxed);
 
     init_task_context(task_ref);
 
@@ -1327,7 +1327,7 @@ pub fn task_fork(
     }
     // SAFETY: child kernel stack was just allocated and is writable.
     *child.switch_ctx.get_mut() = build_user_task_entry_frame(child.kernel_stack_top);
-    child.context_from_user = 0;
+    child.context_from_user.store(0, Ordering::Relaxed);
     child.context.get_mut().rax = 0;
 
     let child_page_dir = process_vm_get_page_dir(child_process_id);
@@ -1534,7 +1534,7 @@ pub fn task_clone(
         // SAFETY: child kernel stack was just allocated and is writable.
         *child.switch_ctx.get_mut() = build_user_task_entry_frame(child.kernel_stack_top);
     }
-    child.context_from_user = 0;
+    child.context_from_user.store(0, Ordering::Relaxed);
     child.context.get_mut().rax = 0;
     if child_stack != 0 {
         child.context.get_mut().rsp = child_stack;

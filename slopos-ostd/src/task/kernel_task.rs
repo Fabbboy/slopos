@@ -495,8 +495,15 @@ pub struct TaskInner<K, U> {
     /// plain field needed a hand-rolled `read_volatile` accessor to paper over
     /// exactly that.
     pub last_run_timestamp: AtomicU64,
-    pub user_started: u8,
-    pub context_from_user: u8,
+    /// Whether this task has ever entered user mode, and whether its saved
+    /// context came from a user-mode trap frame rather than a kernel switch.
+    ///
+    /// Atomic so the trap-save path can stamp them through the same witness
+    /// that authorises the register write, rather than needing an exclusive
+    /// borrow of the whole task. Relaxed: each is a standalone flag whose
+    /// writer is the task's own CPU, ordered by the trap frame it accompanies.
+    pub user_started: AtomicU8,
+    pub context_from_user: AtomicU8,
     /// Why the task exited, as [`TaskExitReason::as_u16`].
     ///
     /// This trio is atomic because `stamp_exit_state` runs from
@@ -875,6 +882,46 @@ impl<K, U> TaskInner<K, U> {
         self.user_ctx.get_ptr(witness)
     }
 
+    /// Save `frame`'s register state into this task's context, authorised by
+    /// `witness`, and stamp the user-mode entry flags.
+    ///
+    /// The preempt path takes the trap frame of the task it is already running,
+    /// so the `CurrentTask` guard it holds is the exclusivity proof.
+    pub fn save_from_interrupt_frame(
+        &self,
+        witness: &impl TaskExclusive<K, U>,
+        frame: &crate::irq::interrupt_frame::InterruptFrame,
+        mark_user_started: bool,
+    ) {
+        debug_assert!(
+            core::ptr::eq(witness.witnessed(), self),
+            "witness names a different task"
+        );
+        // SAFETY: the witness proves exclusive access to this task's register
+        // state for the duration of the call.
+        write_trap_frame(unsafe { &mut *self.context.get_ptr(witness) }, frame);
+        self.mark_user_entry(mark_user_started);
+    }
+
+    /// [`save_from_interrupt_frame`](Self::save_from_interrupt_frame) proven by
+    /// `&mut self` rather than by a witness — the sole-owner path.
+    pub fn save_from_interrupt_frame_mut(
+        &mut self,
+        frame: &crate::irq::interrupt_frame::InterruptFrame,
+        mark_user_started: bool,
+    ) {
+        write_trap_frame(self.context.get_mut(), frame);
+        self.mark_user_entry(mark_user_started);
+    }
+
+    #[inline]
+    fn mark_user_entry(&self, mark_user_started: bool) {
+        self.context_from_user.store(1, Ordering::Relaxed);
+        if mark_user_started {
+            self.user_started.store(1, Ordering::Relaxed);
+        }
+    }
+
     /// This task's saved callee-saved register frame, authorised by `witness`.
     /// Feeds [`switch_registers`](crate::task::switch_registers), whose asm
     /// takes both endpoints as raw pointers.
@@ -1093,8 +1140,8 @@ impl<K, U> TaskInner<K, U> {
             creation_time: 0,
             yield_count: AtomicU32::new(0),
             last_run_timestamp: AtomicU64::new(0),
-            user_started: 0,
-            context_from_user: 0,
+            user_started: AtomicU8::new(0),
+            context_from_user: AtomicU8::new(0),
             exit_reason: AtomicU16::new(TaskExitReason::None.as_u16()),
             fault_reason: AtomicU16::new(TaskFaultReason::None.as_u16()),
             exit_code: AtomicU32::new(0),
@@ -1458,4 +1505,34 @@ impl<K, U> crate::task::LinkProvider<ReclaimRole> for TaskInner<K, U> {
     fn link(&self) -> &Link<Self, ReclaimRole> {
         &self.reclaim_link
     }
+}
+
+/// Copy an interrupted user-mode frame into a saved task context, forcing the
+/// segment selectors to the user-data descriptors the resume path expects.
+fn write_trap_frame(ctx: &mut TaskContext, frame: &crate::irq::interrupt_frame::InterruptFrame) {
+    use crate::arch::x86_64::gdt::SegmentSelector;
+    ctx.rax = frame.rax;
+    ctx.rbx = frame.rbx;
+    ctx.rcx = frame.rcx;
+    ctx.rdx = frame.rdx;
+    ctx.rsi = frame.rsi;
+    ctx.rdi = frame.rdi;
+    ctx.rbp = frame.rbp;
+    ctx.r8 = frame.r8;
+    ctx.r9 = frame.r9;
+    ctx.r10 = frame.r10;
+    ctx.r11 = frame.r11;
+    ctx.r12 = frame.r12;
+    ctx.r13 = frame.r13;
+    ctx.r14 = frame.r14;
+    ctx.r15 = frame.r15;
+    ctx.rip = frame.rip;
+    ctx.rsp = frame.rsp;
+    ctx.rflags = frame.rflags;
+    ctx.cs = frame.cs;
+    ctx.ss = frame.ss;
+    ctx.ds = SegmentSelector::USER_DATA.bits() as u64;
+    ctx.es = SegmentSelector::USER_DATA.bits() as u64;
+    ctx.fs = 0;
+    ctx.gs = 0;
 }
