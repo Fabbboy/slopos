@@ -751,17 +751,33 @@ impl<K, U> TaskInner<K, U> {
     /// the fork flush. Both run while the task keeps executing, so its state is
     /// still live in the registers afterwards and the owner tag must keep
     /// saying so.
+    ///
+    /// # Why this one disables interrupts and the switch-out saves do not
+    ///
+    /// Both callers reach here from a syscall with interrupts *enabled*, and
+    /// the sequence — read this CPU's index, `XSAVE` 2.6 KiB, stamp both halves
+    /// of the owner tag against that index — is not migration-atomic. A
+    /// reschedule in the middle moves the task to another CPU, and the stamp
+    /// then names the CPU it left: the per-CPU slot claims a register file that
+    /// now belongs to whatever task was dispatched there, and the task's own
+    /// half points at the wrong CPU. The next save on the abandoned CPU trips
+    /// [`fpu_owner_assert_may_take`] and panics a task that did nothing wrong.
+    /// The switch-out saves need no guard because the scheduler already holds
+    /// interrupts off across the whole switch, which `run_switch` and
+    /// `switch_context` both assert.
     #[inline]
     pub fn fpu_save_in_place(&self, witness: &impl TaskExclusive<K, U>, xcr0_mask: u64) {
         debug_assert!(
             core::ptr::eq(witness.witnessed(), self),
             "witness names a different task"
         );
-        let cpu = crate::task::fpu_owner::fpu_current_cpu();
-        fpu_owner_assert_may_take(self, cpu);
-        // SAFETY: as `fpu_save_current`.
-        unsafe { crate::task::fpu::fpu_xsave(self.fpu_state.get_ptr(witness), xcr0_mask) };
-        fpu_owner_take(self, cpu);
+        crate::cpu::x86_64::interrupts::IrqDisabled::with(|_irq| {
+            let cpu = crate::task::fpu_owner::fpu_current_cpu();
+            fpu_owner_assert_may_take(self, cpu);
+            // SAFETY: as `fpu_save_current`.
+            unsafe { crate::task::fpu::fpu_xsave(self.fpu_state.get_ptr(witness), xcr0_mask) };
+            fpu_owner_take(self, cpu);
+        });
     }
 
     /// `&mut self`-authorised counterparts to the two ops above.
@@ -774,11 +790,14 @@ impl<K, U> TaskInner<K, U> {
     /// same fact at once. Both maintain the owner tag.
     #[inline]
     pub fn fpu_save_in_place_mut(&mut self, xcr0_mask: u64) {
-        let cpu = crate::task::fpu_owner::fpu_current_cpu();
-        fpu_owner_assert_may_take(self, cpu);
-        // SAFETY: `&mut self` is exclusive access to the whole task.
-        unsafe { crate::task::fpu::fpu_xsave(self.fpu_state.get_mut(), xcr0_mask) };
-        fpu_owner_take(self, cpu);
+        // Migration-atomic for the reason spelled out on `fpu_save_in_place`.
+        crate::cpu::x86_64::interrupts::IrqDisabled::with(|_irq| {
+            let cpu = crate::task::fpu_owner::fpu_current_cpu();
+            fpu_owner_assert_may_take(self, cpu);
+            // SAFETY: `&mut self` is exclusive access to the whole task.
+            unsafe { crate::task::fpu::fpu_xsave(self.fpu_state.get_mut(), xcr0_mask) };
+            fpu_owner_take(self, cpu);
+        });
     }
 
     /// See [`fpu_save_in_place_mut`](Self::fpu_save_in_place_mut).
