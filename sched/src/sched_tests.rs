@@ -379,14 +379,15 @@ slopos_testing::stest!(
 /// task property as another. Distinct sentinels make that a test failure
 /// instead of a mystery.
 pub fn test_scalar_accessor_field_identity() -> TestResult {
-    let arc = match KArc::try_init(Task::init_invalid()) {
+    let mut arc = match KArc::try_init(Task::init_invalid()) {
         Ok(arc) => arc,
         Err(_) => return TestResult::Fail,
     };
-    let raw = KArc::as_ptr(&arc) as *mut Task;
 
     {
-        let Some(task) = super::task::task_borrow_mut(raw) else {
+        // The sole strong reference to a never-registered task, so `get_mut`
+        // succeeds and the exclusivity is checked rather than asserted.
+        let Some(task) = KArc::get_mut(&mut arc) else {
             return TestResult::Fail;
         };
         task.task_id = 0x1111;
@@ -406,6 +407,7 @@ pub fn test_scalar_accessor_field_identity() -> TestResult {
         task.priority = TaskPriority::Low;
     }
 
+    let raw = KArc::as_ptr(&arc) as *mut Task;
     let checks: [(&str, u64, u64); 13] = [
         ("task_id", task_id_of(raw).unwrap_or(0) as u64, 0x1111),
         (

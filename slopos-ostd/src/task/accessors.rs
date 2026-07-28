@@ -28,7 +28,6 @@ use slopos_abi::task::{TaskExitReason, TaskFaultReason, TaskPriority, TaskStatus
 use crate::KArc;
 use crate::task::job_control::{ProcessGroup, Session};
 use crate::task::kernel_task::{SchedPlacement, TaskInner};
-use crate::task::link_roles::SiblingRole;
 
 pub const TASK_EXIT_CLEANUP_RESOURCES: u8 = 1 << 0;
 pub const TASK_EXIT_CLEANUP_VM: u8 = 1 << 1;
@@ -203,8 +202,6 @@ task_method_getters! {
     task_fs_base -> u64 = fs_base,
     /// Read the task's atomic status (`Ready`, `Running`, `Blocked`, …).
     task_status -> TaskStatus = status,
-    /// Read the task's current block reason via the `&self` method.
-    task_load_block_reason -> slopos_abi::task::BlockReason = load_block_reason,
     /// Read `task->signal_blocked` (`SigSet = u64`).
     task_signal_blocked -> slopos_abi::signal::SigSet = signal_blocked,
 }
@@ -220,8 +217,6 @@ task_context_getters! {
     task_context_cs = cs,
     /// Read the task's saved user stack selector from its `TaskContext`.
     task_context_ss = ss,
-    /// Read the task's saved RFLAGS from its `TaskContext`.
-    task_context_rflags = rflags,
 }
 
 task_state_predicates! {
@@ -260,22 +255,6 @@ pub fn task_name_bytes<'a, K, U>(task: *const TaskInner<K, U>) -> Option<&'a [u8
     // array embedded in `Task`. The returned slice's lifetime is
     // bounded by the caller's frame.
     Some(unsafe { &(*task).name })
-}
-
-/// Stamp `task->unsafe_stack_sp` with `sp`. Used by the safestack
-/// bootstrap-stub seeding path during pre-SMP init, where the writer is
-/// the only observer of the field. No-op on a null pointer.
-#[inline]
-pub fn task_set_unsafe_stack_sp<K, U>(task: *mut TaskInner<K, U>, sp: u64) {
-    if task.is_null() {
-        return;
-    }
-    // SAFETY: caller pre-validated `task`; field is a naturally-aligned
-    // u64 inside the Task struct. Pre-SMP single-writer access precludes
-    // races on this field.
-    unsafe {
-        (*task).abi.unsafe_stack_sp = sp;
-    }
 }
 
 /// Drive `task->set_status(...)`. The atomic-state setter lives on
@@ -343,34 +322,11 @@ pub fn task_borrow_mut<'a, K, U>(task: *mut TaskInner<K, U>) -> Option<&'a mut T
 // All list operations are `&self`, so a shared `task_borrow` suffices.
 // ---------------------------------------------------------------------------
 
-/// Link `child` into `parent`'s children list. `Err(AlreadyLinked)` if the
-/// child is already a member of some owner list; `Err(NotPresent)` on a null
-/// parent.
-#[inline]
-pub fn task_children_push<K, U>(
-    parent: *const TaskInner<K, U>,
-    child: NonNull<TaskInner<K, U>>,
-) -> Result<(), LinkError> {
-    match task_borrow(parent) {
-        Some(p) => p.children.push_back(child),
-        None => Err(LinkError::NotPresent),
-    }
-}
-
 /// Detach and return one child from the head of `parent`'s children list, or
 /// `None` when the list is empty (or the parent pointer is null).
 #[inline]
 pub fn task_children_pop<K, U>(parent: *const TaskInner<K, U>) -> Option<NonNull<TaskInner<K, U>>> {
     task_borrow(parent)?.children.pop_front()
-}
-
-/// The head of `parent`'s children list without detaching it, so a caller can
-/// decide a child's fate and unlink it in the same critical section.
-#[inline]
-pub fn task_children_peek<K, U>(
-    parent: *const TaskInner<K, U>,
-) -> Option<NonNull<TaskInner<K, U>>> {
-    task_borrow(parent)?.children.peek_front()
 }
 
 /// Remove a specific `child` from `parent`'s children list. `Err(NotPresent)`
@@ -391,31 +347,6 @@ pub fn task_children_remove<K, U>(
 #[inline]
 pub fn task_children_is_empty<K, U>(parent: *const TaskInner<K, U>) -> bool {
     task_borrow(parent).is_none_or(|p| p.children.is_empty())
-}
-
-/// Number of children currently linked under `parent`.
-#[inline]
-pub fn task_children_len<K, U>(parent: *const TaskInner<K, U>) -> usize {
-    task_borrow(parent).map_or(0, |p| p.children.len())
-}
-
-/// Detach `task` from whichever owner list currently holds it, without the
-/// caller having to know which one that is. Returns whether it was linked.
-///
-/// This is what makes retirement uniform: a task is dropped from its owner list
-/// identically whether that list is a parent's `children` or the parentless-task
-/// root list. The caller must hold the lock serialising every owner list.
-#[inline]
-pub fn task_owner_unlink<K, U>(task: NonNull<TaskInner<K, U>>) -> bool {
-    crate::sync::dlist_unlink::<TaskInner<K, U>, SiblingRole>(task)
-}
-
-/// Whether `task` is currently a member of some owner list. With ownership
-/// total, this is equivalent to "is registered", and the two are cross-checked
-/// by debug assertions at the registration and retirement sites.
-#[inline]
-pub fn task_owner_is_linked<K, U>(task: *const TaskInner<K, U>) -> bool {
-    task_borrow(task).is_some_and(|t| t.sibling_link.is_linked())
 }
 
 /// Stamp `task->fs_base`. Takes a borrow rather than a pointer: every caller
@@ -537,20 +468,6 @@ pub fn task_controlling_tty<K, U>(task: *const TaskInner<K, U>) -> Option<TtyInd
     unsafe { (*task).controlling_tty() }
 }
 
-/// Stamp `task->controlling_tty`. Used by the session-leader
-/// disposition path when a TTY is hung up.
-#[inline]
-pub fn task_set_controlling_tty<K, U>(task: *const TaskInner<K, U>, tty: Option<TtyIndex>) -> bool {
-    if task.is_null() {
-        return false;
-    }
-    // SAFETY: caller pre-validated; the write is an atomic store.
-    unsafe {
-        (*task).set_controlling_tty(tty);
-    }
-    true
-}
-
 /// Read `task->flags`. (`task_flags` already exists as `u16`; this
 /// helper exposes a typed bit-test the scheduler uses.)
 #[inline]
@@ -634,28 +551,6 @@ pub fn task_set_on_cpu<K, U>(task: *mut TaskInner<K, U>, on: bool) {
     }
 }
 
-/// Take ownership of `task->test_reports`, leaving the slot `None`.
-///
-/// The taker is a foreign task draining a corpse, while the owner lazily
-/// installs the ring on its first report — so the two need mutual exclusion,
-/// and the `SpinLock` is what makes it structural rather than a convention the
-/// caller has to remember.
-///
-/// The `KBox` leaves with the return value, so it is dropped by the caller
-/// *after* the guard is released: freeing a ring under a lock would put an
-/// allocator call inside the critical section for no reason.
-#[inline]
-pub fn task_take_test_reports<K, U>(
-    task: *const TaskInner<K, U>,
-) -> Option<crate::KBox<crate::task::test_reports::TestReportRing>> {
-    if task.is_null() {
-        return None;
-    }
-    // SAFETY: caller pre-validated; the lock makes the take race-free against
-    // the owner's lazy install.
-    unsafe { (*task).test_reports.lock().take() }
-}
-
 /// Read `task->exit_info.is_set()`.
 #[inline]
 pub fn task_exit_info_is_set<K, U>(task: *const TaskInner<K, U>) -> bool {
@@ -733,22 +628,6 @@ pub fn task_exit_info_ref<'a, K, U>(
     }
     // SAFETY: caller pre-validated; `exit_info` is in-Task.
     Some(unsafe { &(*task).exit_info })
-}
-
-/// Read `task->switch_ctx.rbp` via `read_unaligned`. The saved frame
-/// pointer of a descheduled task — the anchor for walking its parked
-/// call chain in diagnostics (SysRq task dump).
-#[inline]
-pub fn task_switch_ctx_rbp<K, U>(task: *const TaskInner<K, U>) -> Option<u64> {
-    if task.is_null() {
-        return None;
-    }
-    // SAFETY: caller pre-validated; addr_of! produces a valid pointer
-    // into the in-Task crate::task::TaskContext; read_unaligned is safe.
-    unsafe {
-        let ctx = (*task).switch_ctx.as_ptr_racy();
-        Some(core::ptr::read_unaligned(core::ptr::addr_of!((*ctx).rbp)))
-    }
 }
 
 /// Read `task->switch_ctx.rflags` via `read_unaligned`. Diagnostics and the
@@ -919,17 +798,6 @@ pub fn task_remote_inbox_unlink<K, U>(task: *const TaskInner<K, U>) {
 // contend.
 // ---------------------------------------------------------------------------
 
-/// Read the task's graveyard successor with `Acquire` ordering.
-#[inline]
-pub fn task_reclaim_next_load<K, U>(task: *const TaskInner<K, U>) -> *mut TaskInner<K, U> {
-    if task.is_null() {
-        return core::ptr::null_mut();
-    }
-    // SAFETY: caller uniquely owns the parked allocation; `reclaim_link` is an
-    // in-task `Link` whose storage outlives the destructor call that follows.
-    unsafe { (*task).reclaim_link.load() }
-}
-
 /// Store the task's graveyard successor with `Relaxed` ordering. The head CAS
 /// supplies the `AcqRel` barrier.
 #[inline]
@@ -942,28 +810,6 @@ pub fn task_reclaim_next_store_relaxed<K, U>(
     }
     // SAFETY: caller uniquely owns the parked allocation.
     unsafe { (*task).reclaim_link.store_relaxed(next) };
-}
-
-/// Claim graveyard membership. Fails only if the node is already parked, which
-/// would mean two threads believed they won the same final release.
-#[inline]
-pub fn task_reclaim_try_link<K, U>(task: *const TaskInner<K, U>) -> bool {
-    if task.is_null() {
-        return false;
-    }
-    // SAFETY: caller uniquely owns the parked allocation.
-    unsafe { (*task).reclaim_link.try_mark_linked() }
-}
-
-/// Release graveyard membership once a drain has detached the node, before its
-/// destructor runs (the destructor frees the memory the link lives in).
-#[inline]
-pub fn task_reclaim_unlink<K, U>(task: *const TaskInner<K, U>) {
-    if task.is_null() {
-        return;
-    }
-    // SAFETY: caller uniquely owns the parked allocation.
-    unsafe { (*task).reclaim_link.mark_unlinked() };
 }
 
 /// True iff the task is currently claimed by some CPU's remote wake inbox.
@@ -1066,20 +912,6 @@ pub fn task_signal_post<K, U>(task: *const TaskInner<K, U>, signum: u8) -> bool 
     true
 }
 
-/// Drive `task->store_block_reason(reason)` via the existing `&self`
-/// method (atomic store internally).
-#[inline]
-pub fn task_store_block_reason<K, U>(
-    task: *const TaskInner<K, U>,
-    reason: slopos_abi::task::BlockReason,
-) {
-    if task.is_null() {
-        return;
-    }
-    // SAFETY: caller pre-validated; `store_block_reason` is `&self`.
-    unsafe { (*task).store_block_reason(reason) };
-}
-
 /// Read `task->last_run_timestamp` via `read_volatile` to defeat
 /// compiler reordering across the context-switch boundary.
 #[inline]
@@ -1111,17 +943,6 @@ pub fn task_last_cpu<K, U>(task: *const TaskInner<K, U>) -> Option<u8> {
     Some(unsafe { (*task).last_cpu() })
 }
 
-/// Stamp `task->last_cpu` (set when the scheduler enqueues the task onto a
-/// particular CPU's run queue or remote-wake inbox).
-#[inline]
-pub fn task_set_last_cpu<K, U>(task: *const TaskInner<K, U>, cpu: u8) {
-    if task.is_null() {
-        return;
-    }
-    // SAFETY: caller pre-validated; the write is an atomic store.
-    unsafe { (*task).set_last_cpu(cpu) };
-}
-
 /// Bump `task->total_runtime` by `delta`, saturating.
 #[inline]
 pub fn task_add_total_runtime<K, U>(task: *const TaskInner<K, U>, delta: u64) {
@@ -1130,24 +951,6 @@ pub fn task_add_total_runtime<K, U>(task: *const TaskInner<K, U>, delta: u64) {
     }
     // SAFETY: caller pre-validated; the update is an atomic read-modify-write.
     unsafe { (*task).add_total_runtime(delta) };
-}
-
-/// Clear `task->controlling_tty` if `(sid, tty)` matches. Returns
-/// `true` if a clear occurred. Used by the session-leader TTY-hangup
-/// hook.
-#[inline]
-pub fn task_clear_controlling_tty_for<K, U>(
-    task: *const TaskInner<K, U>,
-    sid: u32,
-    tty: TtyIndex,
-) -> bool {
-    if task.is_null() {
-        return false;
-    }
-    // SAFETY: caller pre-validated; the session id is a scalar read and the
-    // clear is a compare-and-clear, so a task that has meanwhile moved to a
-    // different terminal keeps it.
-    unsafe { (*task).sid == sid && (*task).clear_controlling_tty_if(tty) }
 }
 
 /// PCR↔Task mirror used by the scheduler context-switch path.

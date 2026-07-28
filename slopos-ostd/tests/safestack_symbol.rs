@@ -42,9 +42,9 @@ fn install_safestack_runtime_accepts_bsp_token() {
 
 #[test]
 fn task_abi_unsafe_stack_sp_is_writeable_round_trip() {
-    // The kernel-side `task_set_unsafe_stack_sp` writes through this
-    // field; round-trip a value to verify the field is a plain u64
-    // with no #[repr(packed)] alignment surprise that would force
+    // The task-build path stamps this field directly through its exclusive
+    // pre-registration borrow; round-trip a value to verify the field is a
+    // plain u64 with no #[repr(packed)] alignment surprise that would force
     // unaligned read/write paths.
     let mut abi = TaskAbi { unsafe_stack_sp: 0 };
     abi.unsafe_stack_sp = 0xDEAD_BEEF_CAFE_F00D;

@@ -400,7 +400,7 @@ pub(super) fn install_idle_task(cpu_id: usize, task: *mut Task) {
     slopos_arch::pcr::set_idle_task(cpu_id, task as *mut ());
 }
 
-fn switch_to_kernel_address_space(_task: *mut Task) {
+fn switch_to_kernel_address_space() {
     let cpu_id = slopos_arch::pcr::get_current_cpu();
     tlb::enter_lazy_tlb(cpu_id);
     // Safe-wrapper entry: KERNEL_VM_SPACE is the canonical kernel
@@ -1398,7 +1398,7 @@ pub(crate) fn run_ready_task_from_idle(cpu_id: usize, idle_task: *mut Task) -> b
     dispatch(cpu_id, idle_task);
     slopos_ostd::sync::rcu_note_qs();
 
-    switch_to_kernel_address_space(idle_task);
+    switch_to_kernel_address_space();
     super::task::cleanup_current_task_after_switch(next_task);
 
     // Re-enqueue the task if it was preempted (Running) or already

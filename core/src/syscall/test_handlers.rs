@@ -54,7 +54,7 @@ define_syscall!(syscall_test_report
     }
 
     // Allocate outside the lock, then install under it. The drain side is a
-    // foreign task (`task_take_test_reports` on a corpse), so the two need
+    // foreign task (`take_test_reports` on a corpse), so the two need
     // mutual exclusion — but an allocator call inside the critical section is
     // the shape that deadlocks against the buddy's cross-CPU reuse path, so the
     // ring is built first and only the install is guarded. The re-check under
