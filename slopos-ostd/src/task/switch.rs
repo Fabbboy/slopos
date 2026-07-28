@@ -20,6 +20,7 @@ use core::sync::atomic::{AtomicBool, Ordering};
 
 use crate::cpu::x86_64::pcr;
 use crate::sync::BspToken;
+use crate::task::abi::TASK_UNSAFE_STACK_SP_OFFSET;
 use crate::task::cell::SwitchWindow;
 use crate::task::kernel_task::TaskInner;
 use crate::task::task::TaskContext;
@@ -160,8 +161,17 @@ pub fn switch_context(prev: *mut TaskContext, next: *const TaskContext) {
 // run_switch — the sole `SwitchWindow` construction site.
 // ---------------------------------------------------------------------------
 
-/// Open the switch window over both endpoints of a context switch and lend it
-/// to `prepare`.
+/// Address of the data-stack pointer slot the running context allocates from,
+/// resolved exactly as a SafeStack-instrumented prologue resolves it.
+#[inline]
+fn current_data_stack_slot() -> *const u8 {
+    crate::arch::x86_64::naked::__safestack_pointer_address()
+        .cast::<u8>()
+        .cast_const()
+}
+
+/// Open the switch window over both endpoints of a context switch, publish the
+/// incoming task through `publish`, and lend the window to `prepare`.
 ///
 /// [`SwitchWindow::new`] is `unsafe` and the scheduler crate is
 /// `#![forbid(unsafe_code)]`, so the window cannot be opened there. This is the
@@ -173,7 +183,37 @@ pub fn switch_context(prev: *mut TaskContext, next: *const TaskContext) {
 /// `*mut Task`; forming the borrows at the call site would mean another
 /// unconstrained-lifetime helper, which is what this migration removes. The
 /// borrows live inside, bounded by the closure. `prev` may be null for the
-/// first switch out of the boot context. Returns `None` if `next` is null.
+/// first switch out of the boot context. Returns `None` if `next` is null, in
+/// which case `publish` never runs.
+///
+/// # Why the publication is an argument
+///
+/// A task runs on two stacks. The *safe* stack is `RSP`, swapped atomically by
+/// [`switch_registers`]. The *data* stack carries every address-taken local,
+/// and which one is in use is decided by `PCR.current_task`: SafeStack's
+/// `__safestack_pointer_address` resolves the data-stack pointer slot to
+/// `current_task->abi.unsafe_stack_sp` in every instrumented prologue. The two
+/// therefore switch at *different instants* — the data stack when the
+/// dispatcher republishes the PCR, the safe stack several frames later at the
+/// register swap.
+///
+/// A frame created between those two instants takes its data-stack space from
+/// the *incoming* task, and gives it back only when the calling task is
+/// dispatched again — from whichever CPU picks that task up, because the
+/// cached slot address travels with the frame on the calling task's kernel
+/// stack. The reservation is therefore released by a CPU that no longer owns
+/// that data stack, with nothing ordering it against the CPU that does: the
+/// owner's next instrumented prologue reads a pointer raised back above its
+/// live frames and lays a foreign frame over them. The first visible symptom
+/// is a half-overwritten pointer somewhere unrelated, so the corruption is
+/// found nowhere near where it was caused.
+///
+/// This function owns such a frame — the two [`SwitchWindow`]s are
+/// address-taken, so they live on the data stack, and they must outlive the
+/// switch. Taking the publication as an argument is what keeps that frame on
+/// the outgoing task's data stack, where its release pairs with its
+/// allocation. The assertion below enforces the ordering rather than trusting
+/// each call site to keep it.
 ///
 /// The interrupts-off check is an always-on `assert!`, not a `debug_assert!`,
 /// and deliberately one frame earlier than the identical assertion in
@@ -184,11 +224,13 @@ pub fn switch_context(prev: *mut TaskContext, next: *const TaskContext) {
 ///
 /// # Panics
 ///
-/// If interrupts are enabled.
+/// If interrupts are enabled, or if `next` has already been published as this
+/// CPU's current task.
 #[inline]
 pub fn run_switch<K, U, R>(
     prev: *mut TaskInner<K, U>,
     next: *mut TaskInner<K, U>,
+    publish: impl FnOnce(),
     prepare: impl FnOnce(Option<&SwitchWindow<'_, K, U>>, &SwitchWindow<'_, K, U>) -> R,
 ) -> Option<R> {
     assert!(
@@ -198,17 +240,40 @@ pub fn run_switch<K, U, R>(
     if next.is_null() {
         return None;
     }
+    // The data stack this frame allocated from must not already be the
+    // incoming task's — see the ordering rationale above. Always-on, because
+    // the failure it guards is silent cross-task memory corruption whose
+    // symptom surfaces frames or seconds later.
+    assert!(
+        !core::ptr::eq(
+            current_data_stack_slot(),
+            next.cast::<u8>()
+                .cast_const()
+                .wrapping_add(TASK_UNSAFE_STACK_SP_OFFSET),
+        ),
+        "run_switch entered with the incoming task already published: its \
+         SafeStack frame would be released against the wrong task"
+    );
     // SAFETY: `next` is non-null and dispatch-pinned by the caller's dispatch
-    // reference for the whole call.
+    // reference for the whole call — the ready queue hands that reference to
+    // the dispatcher, and a CPU's idle task is pinned by its PCR slot. The
+    // publication below adds `task_is_dispatch_pinned`'s second disjunct
+    // ("some CPU names this task as its current") on top of it; the reference
+    // the caller already holds is what covers the span before that.
     let next_ref = unsafe { &*next };
+    // SAFETY: this CPU is performing the switch (it is the one running this
+    // code with interrupts disabled, asserted above), it holds both endpoints'
+    // dispatch references for the whole call, and the IRQs-off state means the
+    // window cannot be re-entered on this CPU.
+    let next_window = unsafe { SwitchWindow::new(next_ref) };
+
+    publish();
+
     // Deliberately NOT asserted: `on_cpu`. The two switch paths differ — the
     // ready-task dispatch sets it before the switch, the idle switch does not
     // — so requiring it here would be a false invariant, and asserting it cost
-    // a boot panic to discover. The PCR publication below is the fact both
-    // paths share, and it is the one `SwitchWindow` soundness rests on:
-    // `task_is_dispatch_pinned`'s second disjunct is exactly "some CPU names
-    // this task as its current", which is what stops a reap freeing an
-    // endpoint mid-switch.
+    // a boot panic to discover. The PCR publication is the fact both paths
+    // share.
     debug_assert!(
         core::ptr::eq(
             pcr::get_current_task()
@@ -216,14 +281,9 @@ pub fn run_switch<K, U, R>(
                 .cast_const(),
             next.cast_const(),
         ),
-        "run_switch: incoming task is not this CPU's published current task"
+        "run_switch: publish did not install the incoming task as current"
     );
 
-    // SAFETY: this CPU is performing the switch (it is the one running this
-    // code with interrupts disabled, asserted above), it holds both endpoints'
-    // dispatch references for the whole call, and the IRQs-off state means the
-    // window cannot be re-entered on this CPU.
-    let next_window = unsafe { SwitchWindow::new(next_ref) };
     if prev.is_null() {
         return Some(prepare(None, &next_window));
     }

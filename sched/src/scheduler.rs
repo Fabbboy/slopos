@@ -608,8 +608,6 @@ fn switch_from_current_to_idle(cpu_id: usize, current: *mut Task, idle_task: *mu
     // descheduled frame cannot unwind until its task resumes.
     let switch_abort_guard = slopos_ostd::panic::AbortOnUnwind::new();
     save_live_recovery_depth(current);
-    dispatch(cpu_id, idle_task);
-    slopos_ostd::sync::rcu_note_qs();
 
     // Scheduler hot path: IRQs disabled by caller; the safe-fn shims
     // for `prepare_switch_to` and `switch_registers` capture the
@@ -617,16 +615,27 @@ fn switch_from_current_to_idle(cpu_id: usize, current: *mut Task, idle_task: *mu
     // `run_switch` is the sole `SwitchWindow` construction site: OSTD proves
     // the exclusivity precondition and lends the witness in. The switch itself
     // stays inside the window, so the register-state pointers never outlive
-    // the proof that authorised them.
-    slopos_ostd::task::run_switch(current, idle_task, |prev_window, next_window| {
-        // prepare_switch_to handles FPU, TLB, FS_BASE, TSS, CR3
-        prepare_switch_to(cpu_id, prev_window, next_window);
-        let prev_ctx = prev_window.map_or(core::ptr::null_mut(), |w| w.task().switch_ctx_ptr(w));
-        let next_ctx = next_window.task().switch_ctx_ptr(next_window).cast_const();
-        // switch_context swaps the per-task preempt-count with the PCR around
-        // the register switch (migration-safe accounting), then switches.
-        switch_context(prev_ctx, next_ctx);
-    });
+    // the proof that authorised them. `dispatch` runs inside it because
+    // publishing the incoming task also swaps the SafeStack data stack, and
+    // the window's own frame has to be allocated before that happens.
+    slopos_ostd::task::run_switch(
+        current,
+        idle_task,
+        || {
+            dispatch(cpu_id, idle_task);
+            slopos_ostd::sync::rcu_note_qs();
+        },
+        |prev_window, next_window| {
+            // prepare_switch_to handles FPU, TLB, FS_BASE, TSS, CR3
+            prepare_switch_to(cpu_id, prev_window, next_window);
+            let prev_ctx =
+                prev_window.map_or(core::ptr::null_mut(), |w| w.task().switch_ctx_ptr(w));
+            let next_ctx = next_window.task().switch_ctx_ptr(next_window).cast_const();
+            // switch_context swaps the per-task preempt-count with the PCR around
+            // the register switch (migration-safe accounting), then switches.
+            switch_context(prev_ctx, next_ctx);
+        },
+    );
     // NOTE: code here runs when the TASK resumes (not on idle path).
     // All post-switch cleanup happens in run_ready_task_from_idle
     // after execute_task returns — that IS the idle resumption point.
@@ -1236,28 +1245,36 @@ fn execute_task(cpu_id: usize, from_task: *mut Task, to_task: *mut Task) {
     task_set_on_cpu(to_task, true);
     save_live_recovery_depth(from_task);
 
-    // Single source-of-truth install: writes PCR.current_task
-    // (SafeStack slot), PCR.syscall_pid, task.state = Running, and
-    // the per-CPU switch counter in one place.
-    dispatch(cpu_id, to_task);
-    slopos_ostd::sync::rcu_note_qs();
-
     // Scheduler hot path: IRQs disabled by caller; switch_ctx pointers
     // were freshly validated above, both safe shims accept the
     // raw-task arguments and route through the OSTD safe-fn surfaces.
     // `run_switch` is the sole `SwitchWindow` construction site: OSTD proves
     // the exclusivity precondition and lends the witness in. The switch itself
     // stays inside the window, so the register-state pointers never outlive
-    // the proof that authorised them.
-    slopos_ostd::task::run_switch(from_task, to_task, |prev_window, next_window| {
-        // prepare_switch_to handles FPU, TLB, FS_BASE, TSS, CR3
-        prepare_switch_to(cpu_id, prev_window, next_window);
-        let prev_ctx = prev_window.map_or(core::ptr::null_mut(), |w| w.task().switch_ctx_ptr(w));
-        let next_ctx = next_window.task().switch_ctx_ptr(next_window).cast_const();
-        // switch_context swaps the per-task preempt-count with the PCR around
-        // the register switch (migration-safe accounting), then switches.
-        switch_context(prev_ctx, next_ctx);
-    });
+    // the proof that authorised them. `dispatch` runs inside it because
+    // publishing the incoming task also swaps the SafeStack data stack, and
+    // the window's own frame has to be allocated before that happens.
+    slopos_ostd::task::run_switch(
+        from_task,
+        to_task,
+        || {
+            // Single source-of-truth install: writes PCR.current_task
+            // (SafeStack slot), PCR.syscall_pid, task.state = Running, and
+            // the per-CPU switch counter in one place.
+            dispatch(cpu_id, to_task);
+            slopos_ostd::sync::rcu_note_qs();
+        },
+        |prev_window, next_window| {
+            // prepare_switch_to handles FPU, TLB, FS_BASE, TSS, CR3
+            prepare_switch_to(cpu_id, prev_window, next_window);
+            let prev_ctx =
+                prev_window.map_or(core::ptr::null_mut(), |w| w.task().switch_ctx_ptr(w));
+            let next_ctx = next_window.task().switch_ctx_ptr(next_window).cast_const();
+            // switch_context swaps the per-task preempt-count with the PCR around
+            // the register switch (migration-safe accounting), then switches.
+            switch_context(prev_ctx, next_ctx);
+        },
+    );
     // Runs when the switched-out task resumes on a later dispatch.
     switch_abort_guard.disarm();
 }

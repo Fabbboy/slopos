@@ -579,15 +579,17 @@ pub fn test_fpu_per_task_slot_isolation() -> TestResult {
 }
 
 /// The dispatcher's save-prev / restore-next pair, run through `run_switch`
-/// with the PCR already naming the incoming task.
+/// with the incoming task published inside the window.
 ///
 /// That ordering is the whole reason `SwitchWindow` exists: the dispatcher
 /// publishes the incoming task into the PCR *before* the outgoing task's
 /// registers are saved, so `CurrentTask` no longer names the task whose vector
-/// state is about to be written. This drives the real
-/// `fpu_save_current` / `fpu_restore_to_cpu` pair through the real witnesses
-/// and checks both halves: the outgoing task's live registers land in its own
-/// slot, and the incoming task's slot lands in the registers.
+/// state is about to be written. Publication happens in `run_switch`'s
+/// `publish` step, which is where production puts it — the window has to be
+/// open first, because publishing also swaps the SafeStack data stack. This
+/// drives the real `fpu_save_current` / `fpu_restore_to_cpu` pair through the
+/// real witnesses and checks both halves: the outgoing task's live registers
+/// land in its own slot, and the incoming task's slot lands in the registers.
 pub fn test_fpu_switch_saves_prev_and_restores_next() -> TestResult {
     use slopos_ostd::task::SchedPlacement;
     use slopos_ostd::task::accessors::task_sched_placement_store;
@@ -615,49 +617,50 @@ pub fn test_fpu_switch_saves_prev_and_restores_next() -> TestResult {
     }
     task_sched_placement_store(next_guard.as_ptr(), SchedPlacement::OnCpu);
     let cpu_id = slopos_arch::pcr::get_current_cpu();
-    assert_test!(
-        crate::scheduler::dispatch_task_for_test(cpu_id, next_id),
-        "incoming task vanished before dispatch"
-    );
-
-    let Some(next_ptr) = crate::task_struct::Current::get().map(|c| c.as_ptr()) else {
-        task_terminate(next_id);
-        klog_info!("FPU_SWITCH: dispatch did not publish a current task");
-        return TestResult::Fail;
-    };
+    let next_ptr = next_guard.as_ptr();
 
     let xcr0 = slopos_ostd::cpu::x86_64::xsave::active_xcr0();
     let mut prev: KBox<Task> = KBox::try_init(Task::init_invalid()).expect("alloc");
     let pat_prev = patterns_a();
     let pat_next = patterns_b();
 
-    let (live_after_switch, prev_slot) =
+    let (live_after_switch, prev_slot, published) =
         slopos_ostd::cpu::x86_64::interrupts::IrqDisabled::with(|_irq| {
             let saved = snapshot_live_fpu(xcr0);
-
-            // Park pattern "next" in the incoming task's own slot, using the
-            // witness for the task the PCR now names.
-            if let Some(current) = crate::task_struct::Current::get() {
-                cpu::xmm_load_4(&pat_next);
-                current.task().fpu_save_in_place(&current, xcr0);
-            }
-
-            // Hand the outgoing task the register file (see the module note on
-            // why), then make pattern "prev" the live state it is switched out
-            // with.
-            prev.fpu_restore_to_cpu_mut(xcr0);
-            cpu::xmm_load_4(&pat_prev);
-
             let prev_ptr: *mut Task = &mut *prev as *mut Task;
-            // `run_switch` is the only way to obtain a `SwitchWindow`, and it
-            // asserts the PCR already names `next` — the condition this test
-            // exists to exercise.
-            slopos_ostd::task::run_switch(prev_ptr, next_ptr, |prev_window, next_window| {
-                if let Some(prev_window) = prev_window {
-                    prev_window.task().fpu_save_current(prev_window, xcr0);
-                }
-                next_window.task().fpu_restore_to_cpu(next_window, xcr0);
-            });
+            let mut published = false;
+
+            // `run_switch` is the only way to obtain a `SwitchWindow`. The
+            // publication it takes as an argument is the condition this test
+            // exists to exercise: everything in `prepare` runs with the PCR
+            // naming `next`, so the outgoing task's registers are saved through
+            // a witness `CurrentTask` could no longer supply.
+            slopos_ostd::task::run_switch(
+                prev_ptr,
+                next_ptr,
+                || {
+                    published = crate::scheduler::dispatch_task_for_test(cpu_id, next_id);
+
+                    // Park pattern "next" in the incoming task's own slot,
+                    // using the witness for the task the PCR now names.
+                    if let Some(current) = crate::task_struct::Current::get() {
+                        cpu::xmm_load_4(&pat_next);
+                        current.task().fpu_save_in_place(&current, xcr0);
+                    }
+
+                    // Hand the outgoing task the register file (see the module
+                    // note on why), then make pattern "prev" the live state it
+                    // is switched out with.
+                    prev.fpu_restore_to_cpu_mut(xcr0);
+                    cpu::xmm_load_4(&pat_prev);
+                },
+                |prev_window, next_window| {
+                    if let Some(prev_window) = prev_window {
+                        prev_window.task().fpu_save_current(prev_window, xcr0);
+                    }
+                    next_window.task().fpu_restore_to_cpu(next_window, xcr0);
+                },
+            );
 
             // The incoming task's saved state must now be live...
             let live_after_switch = cpu::xmm_read_4();
@@ -668,11 +671,13 @@ pub fn test_fpu_switch_saves_prev_and_restores_next() -> TestResult {
 
             slopos_ostd::task::fpu_owner_forget(&*prev);
             saved.restore_to_cpu(xcr0);
-            (live_after_switch, prev_slot)
+            (live_after_switch, prev_slot, published)
         });
 
     drop(next_guard);
     task_terminate(next_id);
+
+    assert_test!(published, "incoming task vanished before dispatch");
 
     for i in 0..4 {
         if live_after_switch[i] != pat_next[i] {
