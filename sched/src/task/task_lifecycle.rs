@@ -238,27 +238,20 @@ enum TaskProcessCleanupMode {
     DropVm,
 }
 
-fn cleanup_task_process_resources(
-    task_ptr: *mut Task,
-    resolved_id: u32,
-    mode: TaskProcessCleanupMode,
-) {
-    if task_exit_cleanup_mark(task_ptr, TASK_EXIT_CLEANUP_RESOURCES) & TASK_EXIT_CLEANUP_RESOURCES
-        != 0
-    {
+fn cleanup_task_process_resources(task: &Task, resolved_id: u32, mode: TaskProcessCleanupMode) {
+    if task.exit_cleanup_mark(TASK_EXIT_CLEANUP_RESOURCES) & TASK_EXIT_CLEANUP_RESOURCES != 0 {
         run_task_resource_cleanup_hooks(resolved_id);
     }
 
-    let process_id = super::task_accessors::task_process_id(task_ptr).unwrap_or(INVALID_PROCESS_ID);
+    let process_id = task.process_id;
     if process_id == INVALID_PROCESS_ID {
         return;
     }
 
-    let task_id = task_id_of(task_ptr).unwrap_or(INVALID_TASK_ID);
-    if !process_has_other_live_tasks(process_id, task_id) {
+    if !process_has_other_live_tasks(process_id, task.task_id) {
         fileio_destroy_table_for_process(process_id);
         if matches!(mode, TaskProcessCleanupMode::DropVm)
-            && task_exit_cleanup_mark(task_ptr, TASK_EXIT_CLEANUP_VM) & TASK_EXIT_CLEANUP_VM != 0
+            && task.exit_cleanup_mark(TASK_EXIT_CLEANUP_VM) & TASK_EXIT_CLEANUP_VM != 0
         {
             destroy_process_vm(process_id);
         }
@@ -839,9 +832,9 @@ pub fn task_terminate(task_id: u32) -> c_int {
 
     let defer_cleanup_to_running_cpu = !is_current && task_on_cpu_load(task);
     if is_current {
-        cleanup_task_process_resources(task_ptr, resolved_id, TaskProcessCleanupMode::KeepVm);
+        cleanup_task_process_resources(task, resolved_id, TaskProcessCleanupMode::KeepVm);
     } else if !defer_cleanup_to_running_cpu {
-        cleanup_terminated_task_resources(task_ptr, resolved_id);
+        cleanup_terminated_task_resources(&target, resolved_id);
     }
 
     let account_here = !is_current
@@ -1074,40 +1067,36 @@ fn reparent_and_reap_children(dying: &Task) {
     }
 }
 
-fn cleanup_terminated_task_resources(task_ptr: *mut Task, resolved_id: u32) {
-    if task_on_cpu_load(task_ptr) {
+/// Takes the guard rather than a borrow: the `task_reap` below releases the
+/// task's existence reference off-lock and may run the destructor inline, so the
+/// caller's handle is what keeps the body addressable across this call.
+fn cleanup_terminated_task_resources(task: &TaskRef, resolved_id: u32) {
+    if task.on_cpu() {
         return;
     }
 
-    cleanup_task_process_resources(task_ptr, resolved_id, TaskProcessCleanupMode::DropVm);
-    task_recovery_depth_store(task_ptr, 0);
-    task_panic_in_flight_store(task_ptr, 0);
+    cleanup_task_process_resources(task, resolved_id, TaskProcessCleanupMode::DropVm);
+    task.set_recovery_depth(0);
+    task.set_panic_in_flight(0);
 
-    let _ = task_reap(task_id_of(task_ptr).unwrap_or(INVALID_TASK_ID));
+    let _ = task_reap(task.task_id);
 }
 
-pub fn cleanup_current_task_after_switch(task_ptr: *mut Task) {
-    if task_ptr.is_null() {
+/// Same guard contract as [`cleanup_terminated_task_resources`].
+pub fn cleanup_current_task_after_switch(task: &TaskRef) {
+    if !matches!(task.status(), TaskStatus::Terminated | TaskStatus::Zombie) {
         return;
     }
-    let Some(status) = task_status(task_ptr) else {
-        return;
-    };
-    if !matches!(status, TaskStatus::Terminated | TaskStatus::Zombie) {
-        return;
-    }
-    if super::task_accessors::task_kernel_stack_top(task_ptr).unwrap_or(0) == 0 {
+    if task.kernel_stack_top == 0 {
         return;
     }
 
-    let resolved_id = task_id_of(task_ptr).unwrap_or(INVALID_TASK_ID);
-    cleanup_task_process_resources(task_ptr, resolved_id, TaskProcessCleanupMode::DropVm);
-    task_recovery_depth_store(task_ptr, 0);
-    task_panic_in_flight_store(task_ptr, 0);
+    let resolved_id = task.task_id;
+    cleanup_task_process_resources(task, resolved_id, TaskProcessCleanupMode::DropVm);
+    task.set_recovery_depth(0);
+    task.set_panic_in_flight(0);
 
-    if task_exit_cleanup_mark(task_ptr, TASK_EXIT_CLEANUP_ACCOUNTED) & TASK_EXIT_CLEANUP_ACCOUNTED
-        != 0
-    {
+    if task.exit_cleanup_mark(TASK_EXIT_CLEANUP_ACCOUNTED) & TASK_EXIT_CLEANUP_ACCOUNTED != 0 {
         with_task_manager(|mgr| {
             if mgr.num_tasks > 0 {
                 mgr.num_tasks -= 1;
@@ -1115,15 +1104,15 @@ pub fn cleanup_current_task_after_switch(task_ptr: *mut Task) {
         });
     }
 
-    let _ = task_reap(task_id_of(task_ptr).unwrap_or(INVALID_TASK_ID));
+    let _ = task_reap(resolved_id);
 }
 
 #[inline]
-fn should_collect_for_shutdown(task: &Task, task_ptr: *mut Task, current: *mut Task) -> bool {
+fn should_collect_for_shutdown(task: &Task, current: Option<slopos_ostd::task::TaskAddr>) -> bool {
     if task.status() == TaskStatus::Invalid {
         return false;
     }
-    if task_ptr == current {
+    if current == Some(slopos_ostd::task::TaskAddr::of(task)) {
         return false;
     }
     if crate::per_cpu::is_idle_task(slopos_ostd::task::TaskAddr::of(task)) {
@@ -1132,12 +1121,13 @@ fn should_collect_for_shutdown(task: &Task, task_ptr: *mut Task, current: *mut T
     task.task_id != INVALID_TASK_ID
 }
 
-fn collect_shutdown_task_ids(current: *mut Task) -> slopos_ostd::KVec<u32> {
+fn collect_shutdown_task_ids(
+    current: Option<slopos_ostd::task::TaskAddr>,
+) -> slopos_ostd::KVec<u32> {
     with_task_manager(|mgr| {
         let mut ids: slopos_ostd::KVec<u32> = slopos_ostd::KVec::new();
         for task in mgr.iter_tasks() {
-            let task_ptr = task.as_ptr();
-            if should_collect_for_shutdown(&task, task_ptr, current) {
+            if should_collect_for_shutdown(&task, current) {
                 let _ = ids.push(task.task_id);
             }
         }
@@ -1172,8 +1162,7 @@ fn refresh_num_tasks_after_shutdown() {
 
 pub fn task_shutdown_all() -> c_int {
     let was_paused = crate::per_cpu::pause_all_aps();
-    let current = scheduler::scheduler_get_current_task();
-    let tasks_to_terminate = collect_shutdown_task_ids(current);
+    let tasks_to_terminate = collect_shutdown_task_ids(slopos_ostd::task::TaskAddr::current());
     let result = terminate_task_ids(&tasks_to_terminate);
 
     crate::per_cpu::clear_all_cpu_queues();

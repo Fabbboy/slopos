@@ -1399,7 +1399,7 @@ pub(crate) fn run_ready_task_from_idle(cpu_id: usize, idle_task: *mut Task) -> b
     slopos_ostd::sync::rcu_note_qs();
 
     switch_to_kernel_address_space();
-    super::task::cleanup_current_task_after_switch(next_task);
+    super::task::cleanup_current_task_after_switch(&dispatch_ref);
 
     // Re-enqueue the task if it was preempted (Running) or already
     // woken (Ready) before its yield completed. Keep `on_cpu=true`
