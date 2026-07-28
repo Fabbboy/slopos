@@ -29,7 +29,7 @@ pub use slopos_abi::task::{
 use crate::cpu::x86_64::pcr::KernelReturnContext;
 use crate::sync::intrusive::Link;
 use crate::sync::intrusive_dlist::{DLink, IntrusiveDList};
-use crate::sync::{AtomicCell, LOCK_LEVEL_RESOURCE, SpinLock};
+use crate::sync::{AtomicCell, LOCK_LEVEL_RESOURCE, RcuArcSlot, SpinLock};
 use crate::task::abi::TaskAbi;
 use crate::task::cell::{TaskExclusive, TaskOwnCell};
 use crate::task::exit_info::ExitInfo;
@@ -42,7 +42,7 @@ use crate::task::link_roles::{ReadyQueueRole, ReclaimRole, RemoteWakeRole, Sibli
 use crate::task::state::TaskState;
 use crate::task::test_reports::TestReportRing;
 use crate::user::context::UserContext;
-use crate::{AllocError, Init, KArc, KBox, init_from_closure};
+use crate::{AllocError, Init, KBox, init_from_closure};
 
 // =============================================================================
 // TaskContext — full CPU register state for interrupt-driven context switches
@@ -397,8 +397,17 @@ pub struct TaskInner<K, U> {
     pub unsafe_stack: Option<U>,
     /// Strong membership in this task's process group. The group (and, via
     /// it, the session) lives while any member holds this handle; dropping the
-    /// task releases the membership. `None` for kernel-mode tasks.
-    pub process_group: Option<KArc<ProcessGroup>>,
+    /// task releases the membership. Empty for kernel-mode tasks.
+    ///
+    /// Published through an RCU slot because the writer is not the owner:
+    /// `setpgid(pid, …)` re-homes a *different* task, so the store lands on a
+    /// field a reader on another CPU may be cloning from at that instant. The
+    /// slot is what keeps the two apart. A reader clones its own handle inside
+    /// a read-side section — one acquire load, one increment — and the
+    /// displaced reference is released only once a grace period has elapsed, so
+    /// the writer can never drive to zero a count a reader is still raising,
+    /// and no destructor runs on the writer's stack.
+    pub process_group: RcuArcSlot<ProcessGroup>,
     /// Per-task ring of `SYSCALL_TEST_REPORT` payloads.
     ///
     /// `None` for non-test tasks (the syscall is never invoked). The first
@@ -421,9 +430,9 @@ pub struct TaskInner<K, U> {
     ///
     /// Atomic because the owner writes it via `arch_prctl` while
     /// `prepare_switch_to` reads the *incoming* task's copy from whichever CPU
-    /// is performing the switch — a cross-task read, so a plain field made it a
-    /// data race. Release/Acquire rather than Relaxed: the value must be
-    /// visible to the next switch on any CPU.
+    /// is performing the switch — a cross-task read, which a plain field cannot
+    /// express without a data race. Release/Acquire rather than Relaxed: the
+    /// value must be visible to the next switch on any CPU.
     pub fs_base: AtomicU64,
     /// Thread-group ID.
     pub tgid: u32,
@@ -1026,7 +1035,7 @@ impl<K, U> TaskInner<K, U> {
             fpu_state: TaskOwnCell::new(FpuState::new()),
             kernel_stack: None,
             unsafe_stack: None,
-            process_group: None,
+            process_group: RcuArcSlot::empty(),
             test_reports: SpinLock::new(None, LOCK_LEVEL_RESOURCE),
             parent_task_id: INVALID_TASK_ID,
             fs_base: AtomicU64::new(0),
@@ -1131,7 +1140,7 @@ impl<K, U> TaskInner<K, U> {
 
                 addr_of_mut!((*slot).kernel_stack).write(None);
                 addr_of_mut!((*slot).unsafe_stack).write(None);
-                addr_of_mut!((*slot).process_group).write(None);
+                addr_of_mut!((*slot).process_group).write(RcuArcSlot::empty());
                 addr_of_mut!((*slot).test_reports).write(SpinLock::new(None, LOCK_LEVEL_RESOURCE));
                 addr_of_mut!((*slot).abi.unsafe_stack_sp).write(0);
 
@@ -1340,7 +1349,7 @@ impl<K, U> TaskInner<K, U> {
             );
             core::ptr::write(&mut self.kernel_stack as *mut _, None);
             core::ptr::write(&mut self.unsafe_stack as *mut _, None);
-            core::ptr::write(&mut self.process_group as *mut _, None);
+            core::ptr::write(&mut self.process_group as *mut _, RcuArcSlot::empty());
             core::ptr::write(
                 &mut self.test_reports as *mut _,
                 SpinLock::new(None, LOCK_LEVEL_RESOURCE),

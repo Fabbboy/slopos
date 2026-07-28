@@ -271,8 +271,7 @@ pub fn spawn_program_with_attrs(
         // the iretq frame is rebuilt from `user_ctx` on every
         // round-trip by `user_mode_round_trip_asm`.
         // Registered but not yet published: no witness is obtainable here (see
-        // `TaskOwnCell::as_ptr_nascent`). The closure bounds the borrow, which
-        // the former `task_user_ctx_mut` did not.
+        // `TaskOwnCell::as_ptr_nascent`). The closure is what bounds the borrow.
         task_seed_user_ctx_nascent(task_info, |uc| {
             slopos_sched::task::init_user_ctx_for_new_task(uc, entry, stack_ptr, 0);
         });
@@ -320,11 +319,12 @@ pub fn spawn_program_with_attrs(
                     // session for NEW_PGRP, otherwise the parent's own group.
                     if flags & slopos_abi::task::TASK_FLAG_NEW_PGRP != 0 {
                         child.pgid = task_id;
-                        child.process_group =
-                            task_session(parent_ptr).and_then(|s| new_group_in_session(task_id, s));
+                        child.process_group.store(
+                            task_session(parent_ptr).and_then(|s| new_group_in_session(task_id, s)),
+                        );
                     } else {
                         child.pgid = parent.pgid;
-                        child.process_group = task_process_group(parent_ptr);
+                        child.process_group.store(task_process_group(parent_ptr));
                     }
                     child.sid = parent.sid;
                     child.set_controlling_tty(parent.controlling_tty());

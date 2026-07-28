@@ -391,11 +391,10 @@ pub(crate) fn build_user_task_entry_frame(kernel_stack_top: u64) -> SwitchContex
 /// First thing a fresh kernel task runs, reached from
 /// [`task_entry_trampoline`] with this task's **id** in `rdi`.
 ///
-/// The argument used to be the task's own address, laundered through
-/// `*mut c_void` into `switch_ctx.r13` so it survived in a saved register file
-/// across every context switch until first dispatch, then cast back here. That
-/// round trip is what checks 3a and 3b of `check_task_ownership.sh` name: a
-/// task handle with no owner, parked in a register, reconstituted on faith.
+/// An **id**, not an address: a task handle parked in a saved register file
+/// across every context switch until first dispatch, then cast back, is a
+/// handle with no owner reconstituted on faith — which is exactly what checks
+/// 3a and 3b of `check_task_ownership.sh` name.
 ///
 /// An id is a scalar. It cannot be dereferenced, so it carries no claim about
 /// the task still existing, and the task is re-derived from the PCR instead —
@@ -613,8 +612,7 @@ pub fn task_create(
         None
     };
 
-    // Exclusive because the token holds the only reference, not because a
-    // pointer accessor said so.
+    // Exclusive because the token holds the only reference to this task.
     let task_ref = pending.as_mut();
     task_ref.task_id = task_id;
     copy_name(&mut task_ref.name, name);
@@ -626,7 +624,10 @@ pub fn task_create(
     task_ref.pgid = task_id;
     task_ref.sid = task_id;
     task_ref.set_controlling_tty(None);
-    task_ref.process_group = process_group;
+    // The token proves this task is unpublished, so there is no reader to defer
+    // a release past and no displaced handle to release — exclusivity carries
+    // the write, not a grace period.
+    let _ = task_ref.process_group.replace_exclusive(process_group);
     task_ref.set_clear_child_tid(0);
     task_ref.parent_task_id = INVALID_TASK_ID;
     task_ref.stack_base = resources.stack_base;
@@ -699,8 +700,8 @@ pub fn task_terminate(task_id: u32) -> c_int {
     // the dispatch reference the scheduler parked on the idle stack keeps this
     // task alive for exactly as long as it is the current one.
     //
-    // Holding it for the whole function is what lets the teardown below take a
-    // borrow instead of a pointer: nothing it calls can be the last release.
+    // Holding it for the whole function is what lets the teardown below work
+    // from a borrow: nothing it calls can be the last release.
     let target: Option<KArc<Task>> = if task_id == u32::MAX {
         NonNull::new(scheduler::scheduler_get_current_task()).map(task_placement_clone)
     } else {
@@ -816,8 +817,8 @@ struct ExitPlan {
 /// in `wake_blocked_task` reading its status and placement, and its parent may
 /// be in `waitpid` reading `exit_info`. An `&mut` here would have claimed those
 /// readers do not exist. Every field this writes is therefore atomic or behind
-/// a lock, which is also what lets the teardown tail below keep using the same
-/// borrow instead of re-deriving one per call.
+/// a lock, which is also what lets the teardown tail below keep using this one
+/// borrow rather than re-deriving one per call.
 fn stamp_exit_state(task: &Task, resolved_id: u32, now: u64) -> ExitPlan {
     let last_run = task.last_run_timestamp();
     if last_run != 0 && now >= last_run {
@@ -1207,8 +1208,8 @@ pub fn task_fork(
     let child_task_id = pending.id();
 
     // Exclusive because the token holds the only reference to the child; the
-    // parent is a separate allocation reached through a shared borrow, so the
-    // two coexist without the accessor layer arbitrating between them.
+    // parent is a separate allocation reached through a shared borrow, so one
+    // `&mut` and one `&` coexist without aliasing.
     let child = pending.as_mut();
 
     super::task_accessors::task_clone_from(child, parent);
@@ -1227,9 +1228,12 @@ pub fn task_fork(
     child.tgid = child_task_id;
     child.pgid = parent.pgid;
     child.sid = parent.sid;
-    // Share the parent's group object (clone_from_raw nulled the copied
-    // handle); the shared identity is what a stale pid check keys on.
-    child.process_group = task_process_group(parent as *const Task);
+    // Share the parent's group object (clone_from_raw emptied the copied
+    // slot); the shared identity is what a stale pid check keys on. Exclusive
+    // because the child is not published yet.
+    let _ = child
+        .process_group
+        .replace_exclusive(task_process_group(parent as *const Task));
     child.set_clear_child_tid(0);
 
     child.kernel_stack_base = child_kernel_stack_base;
@@ -1404,8 +1408,8 @@ pub fn task_clone(
     let child_task_id = pending.id();
 
     // Exclusive because the token holds the only reference to the child; the
-    // parent is a separate allocation reached through a shared borrow, so the
-    // two coexist without the accessor layer arbitrating between them.
+    // parent is a separate allocation reached through a shared borrow, so one
+    // `&mut` and one `&` coexist without aliasing.
     let child = pending.as_mut();
 
     super::task_accessors::task_clone_from(child, parent);
@@ -1433,9 +1437,12 @@ pub fn task_clone(
     }
     child.pgid = parent.pgid;
     child.sid = parent.sid;
-    // Share the parent's group object (clone_from_raw nulled the copied
-    // handle); the shared identity is what a stale pid check keys on.
-    child.process_group = task_process_group(parent as *const Task);
+    // Share the parent's group object (clone_from_raw emptied the copied
+    // slot); the shared identity is what a stale pid check keys on. Exclusive
+    // because the child is not published yet.
+    let _ = child
+        .process_group
+        .replace_exclusive(task_process_group(parent as *const Task));
 
     child.kernel_stack_base = child_kernel_stack_base;
     child.kernel_stack_top = child_kernel_stack.top().as_u64();

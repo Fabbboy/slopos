@@ -352,7 +352,7 @@ fn reap_task_registration(id: u32) -> bool {
         if task.status() != TaskStatus::Terminated {
             return None;
         }
-        if crate::scheduler::task_is_dispatch_pinned(node.as_ptr()) {
+        if crate::scheduler::task_is_dispatch_pinned(&task) {
             REAP_BLOCKED_BY_DISPATCH.store(true, Ordering::Release);
             return None;
         }
@@ -617,11 +617,10 @@ impl PendingTask {
 
     /// Exclusive access to the task being built.
     ///
-    /// The construction paths used to claim this exclusivity with
-    /// `task_borrow_mut` on a raw pointer, which asserts it. Here it is
-    /// *checked*: the token holds the only strong reference and the registry
-    /// has not published a weak one yet, so `KArc::get_mut` succeeds precisely
-    /// when nobody else can reach the allocation. The `&mut self` receiver is
+    /// The exclusivity is *checked*, not asserted: the token holds the only
+    /// strong reference and the registry has not published a weak one yet, so
+    /// `KArc::get_mut` succeeds precisely when nobody else can reach the
+    /// allocation. The `&mut self` receiver is
     /// what carries that fact out to the caller — a second builder cannot
     /// exist, and the borrow ends before `register_task` consumes the token.
     #[inline]
@@ -861,8 +860,6 @@ pub fn debug_dump_tasks_klog() {
 }
 
 fn dump_one_task(t: &Task) {
-    // The parameter is the borrow; this used to cast it back to a pointer for
-    // two of the five reads while the other three already went through it.
     let reason = t.load_block_reason();
     let placement = t.sched_placement();
     let on_cpu = t.on_cpu();

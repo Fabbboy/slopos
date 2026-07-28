@@ -338,8 +338,7 @@ pub(crate) fn dispatch(cpu_id: usize, task: *mut Task) {
 
     // Lifecycle state transition — (Ready|Running) → Running.
     //
-    // After Phase 1 (durable exit_info + per-task waiters WaitQueue),
-    // a task entering `dispatch` MUST be Ready or Running. Anything
+    // A task entering `dispatch` MUST be Ready or Running. Anything
     // else is an invariant violation: a Blocked task in a runqueue
     // means a wake path enqueued without first transitioning to
     // Ready, or a state transition raced the dispatcher. Either is
@@ -525,7 +524,7 @@ fn prepare_switch_to(
     // --- CR3 ---
     //
     // Routes through `VmSpace::activate`, the only sanctioned CR3 write
-    // path post-framekernel. `activate` lazily resyncs kernel-half from
+    // path. `activate` lazily resyncs kernel-half from
     // the master PML4 (KERNEL_MASTER_GEN bump propagation), fires the
     // registered `CursorUnmapHook::on_activate` callback, and writes
     // CR3 with PCID + NOFLUSH=1. Cold-path PCID rotation is OSTD's
@@ -677,7 +676,7 @@ fn task_has_durable_owner(task: &Task) -> bool {
 ///
 /// A task with no readable priority — a bootstrap stub, a null — publishes
 /// [`PRIORITY_NONE`], so a CPU parked on one always loses the preemption
-/// comparison, exactly as the old null-pointer branch did.
+/// comparison.
 #[inline]
 fn published_priority(task: *mut Task) -> u8 {
     task_priority(task).map_or(slopos_arch::pcr::PRIORITY_NONE, |p| p.as_u8())
@@ -1803,8 +1802,8 @@ pub(crate) fn commit_blocked_deschedule(current: &Current) -> bool {
 }
 
 pub fn yield_blocked_task() {
-    // `Current::get()` folds the old null-pointer and invalid-id checks into
-    // one: it yields `None` unless the PCR names a task with a valid id.
+    // `Current::get()` folds the null-pointer and invalid-id checks into one:
+    // it yields `None` unless the PCR names a task with a valid id.
     let Some(current) = Current::get() else {
         return;
     };
@@ -1999,16 +1998,16 @@ pub fn release_wait_ref(waiter_id: u32) {
 }
 
 pub(crate) fn wake_blocked_task(task: &KArc<Task>, task_id: u32) -> c_int {
-    // Phase 5 collapsed the WillBlock state; the only blockable intermediate
-    // is `Blocked` itself. Wake-side must either observe an existing scheduler
-    // owner (ready queue / remote inbox / migration), or acquire the explicit
-    // `Waking` publication token before it publishes `TaskStatus::Ready`.
+    // `Blocked` is the only blockable intermediate state. Wake-side must either
+    // observe an existing scheduler owner (ready queue / remote inbox /
+    // migration), or acquire the explicit `Waking` publication token before it
+    // publishes `TaskStatus::Ready`.
     //
-    // Importantly, `OnCpu` is no longer treated as a sufficient Ready
-    // publication owner. It proves the task is physically executing or in a
-    // switch window, but the producer that wins `Blocked -> Ready` still owns
-    // runnable publication via `Waking`. The separate `on_cpu` bit prevents a
-    // queued still-switching task from being dispatched twice.
+    // `OnCpu` is deliberately *not* a sufficient Ready publication owner. It
+    // proves the task is physically executing or in a switch window, but the
+    // producer that wins `Blocked -> Ready` still owns runnable publication via
+    // `Waking`. The separate `on_cpu` bit prevents a queued still-switching
+    // task from being dispatched twice.
     //
     // TOTALITY CONTRACT (Linux-ttwu discipline): this function returns only
     // once the wake is conclusive — we published Ready, or the task is
@@ -2587,20 +2586,19 @@ fn rescue_strike(task_id: u32) -> bool {
 /// `scheduler_tasks_for_cpu` down its recovery path — on the dying task's own
 /// stack.
 #[inline]
-pub(crate) fn task_is_dispatch_pinned(task: *mut Task) -> bool {
-    if task.is_null() {
-        return false;
-    }
-    slopos_ostd::task::accessors::task_on_cpu_load(task) || task_is_current_on_any_cpu(task)
+pub(crate) fn task_is_dispatch_pinned(task: &Task) -> bool {
+    task.on_cpu() || task_is_current_on_any_cpu(task)
 }
 
-fn task_is_current_on_any_cpu(task: *mut Task) -> bool {
-    if task.is_null() {
-        return false;
-    }
+/// Address comparison only — the per-CPU current-task slots are raw pointers,
+/// and nothing here dereferences one.
+fn task_is_current_on_any_cpu(task: &Task) -> bool {
     let cpu_count = slopos_arch::pcr::get_cpu_count();
     for cpu_id in 0..cpu_count {
-        if scheduler_get_current_task_for(cpu_id) == task {
+        if core::ptr::eq(
+            scheduler_get_current_task_for(cpu_id).cast_const(),
+            task as *const Task,
+        ) {
             return true;
         }
     }
@@ -2619,7 +2617,7 @@ fn rescue_check_task(guard: &crate::task::TaskRef) {
     if task_sched_placement_load(task) == SchedPlacement::Nascent {
         return;
     }
-    if slopos_ostd::task::accessors::task_on_cpu_load(task) || task_is_current_on_any_cpu(task) {
+    if t.on_cpu() || task_is_current_on_any_cpu(t) {
         return;
     }
     // `last_run_timestamp != 0` means the task is still accounted as the

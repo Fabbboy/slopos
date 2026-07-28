@@ -570,7 +570,11 @@ define_syscall!(syscall_setpgid
     };
 
     target.pgid = resolved_pgid;
-    target.process_group = new_group;
+    // `target` is generally *not* the calling task, so this write lands on a
+    // field a reader on another CPU may be cloning from right now. The
+    // displaced membership is released after a grace period, which is what
+    // keeps a concurrent reader's clone from racing its destructor.
+    target.process_group.store(new_group);
     Ok(())
 });
 
@@ -594,7 +598,7 @@ define_syscall!(syscall_setsid (ctx)
     }
     task.sid = task.task_id;
     task.pgid = task.task_id;
-    task.process_group = Some(pg);
+    task.process_group.store(Some(pg));
     Ok(task.sid)
 });
 

@@ -6,11 +6,11 @@
 //! crate so call-site files (`boot/`, `mm/`) stay in safe Rust.
 //!
 //! Each accessor null-checks the pointer; `Task` field reads use
-//! [`core::ptr::read_unaligned`] for fields that the legacy
-//! `task_struct` does not annotate as `repr(C, packed)` but where
-//! callers historically used unaligned reads to be safe against
-//! mid-update tearing on x86_64. Plain field reads (`(*p).field`) are
-//! used where the field is a naturally-aligned scalar.
+//! [`core::ptr::read_unaligned`] where the field lives inside a struct
+//! that carries no `repr(C, packed)` annotation yet may be read while
+//! another CPU is mid-update, so an aligned read could tear on x86_64.
+//! Plain field reads (`(*p).field`) are used where the field is a
+//! naturally-aligned scalar.
 //!
 //! All helpers return `Option<T>`; the caller threads the `None` case
 //! through their existing diagnostics.
@@ -61,14 +61,14 @@ pub fn signal_pending_event(task_id: u32) -> KernelEvent {
 // ===========================================================================
 // Generated accessors.
 //
-// Every one of these is now a thin shim: null-check via `task_borrow` /
+// Every one of these is a thin shim: null-check via `task_borrow` /
 // `task_borrow_mut`, then a plain field access or a `&self` method call on the
-// resulting reference. The `unsafe` deref that used to be inlined into each
-// shape lives in exactly those two functions, so the whole layer carries two
-// audited derefs rather than one per accessor.
+// resulting reference. Concentrating the `unsafe` deref in exactly those two
+// functions is what keeps the whole layer down to two audited derefs instead of
+// one per accessor.
 //
-// The shims exist only to keep the raw-pointer call sites compiling while they
-// migrate to holding a `&Task` directly; each disappears with its last caller.
+// A shim exists only to serve call sites that hold a raw pointer rather than a
+// `&Task`; each disappears with its last caller.
 // ===========================================================================
 
 /// Generate `Option<T>` getters that null-check then read one field.
@@ -316,12 +316,11 @@ pub fn task_set_context_rip_rsp<K, U>(task: *mut TaskInner<K, U>, rip: u64, rsp:
     if task.is_null() {
         return;
     }
-    // SAFETY: caller pre-validated; `context` is in-Task; both fields
-    // are u64. `write_unaligned` lifts the alignment requirement to
-    // match the legacy exec path's discipline.
-    // SAFETY: caller pre-validated. `as_ptr_nascent` is the sanctioned
-    // pre-publication write path — see its contract; the exec seeding runs
-    // between `task_create` and `publish_new_task`, where no witness exists.
+    // SAFETY: caller pre-validated; `context` is in-Task and both fields are
+    // u64, written unaligned because `TaskContext` carries no alignment
+    // guarantee. `as_ptr_nascent` is the sanctioned pre-publication write path
+    // — see its contract; the exec seeding runs between `task_create` and
+    // `publish_new_task`, where no witness exists.
     unsafe {
         let ctx = (*task).context.as_ptr_nascent();
         core::ptr::write_unaligned(core::ptr::addr_of_mut!((*ctx).rip), rip);
@@ -331,9 +330,9 @@ pub fn task_set_context_rip_rsp<K, U>(task: *mut TaskInner<K, U>, rip: u64, rsp:
 
 /// Seed a not-yet-published task's user-mode register snapshot.
 ///
-/// Replaces the former `task_user_ctx_mut`, whose `'a` was constrained by no
-/// argument, so the caller chose it and two calls yielded two live `&mut` to
-/// one place. The borrow here cannot escape the closure.
+/// The closure is what bounds the borrow. Handing the `&mut` back instead
+/// would leave its lifetime constrained by no argument, so the caller would
+/// pick it and two calls could yield two live `&mut` to one place.
 ///
 /// The witnessed path is [`TaskInner::with_user_ctx`]-shaped
 /// (`TaskInner::user_ctx_ptr`). This one exists for the exec seeding, which
@@ -624,9 +623,10 @@ pub fn task_process_group<K, U>(task: *const TaskInner<K, U>) -> Option<KArc<Pro
     if task.is_null() {
         return None;
     }
-    // SAFETY: caller pre-validated; the field is an owned `Option<KArc>` and
-    // cloning bumps the group refcount atomically.
-    unsafe { (*task).process_group.clone() }
+    // SAFETY: caller pre-validated; the field is an `RcuArcSlot`, whose `load`
+    // mints the caller's own reference under an RCU read-side section, so a
+    // concurrent `setpgid` on this task cannot release the group underneath it.
+    unsafe { (*task).process_group.load() }
 }
 
 /// Clone this task's session handle, resolved through its process group.
@@ -635,13 +635,9 @@ pub fn task_session<K, U>(task: *const TaskInner<K, U>) -> Option<KArc<Session>>
     if task.is_null() {
         return None;
     }
-    // SAFETY: caller pre-validated; reads the owned `Option<KArc>` field.
-    unsafe {
-        (*task)
-            .process_group
-            .as_ref()
-            .map(|pg| pg.session().clone())
-    }
+    // SAFETY: caller pre-validated; see `task_process_group` — the group handle
+    // this borrows the session from is one `load` minted for us.
+    unsafe { (*task).process_group.load() }.map(|pg| pg.session().clone())
 }
 
 /// Read `task->name[..]` and probe whether the first 5 bytes
@@ -700,9 +696,9 @@ pub fn task_set_on_cpu<K, U>(task: *mut TaskInner<K, U>, on: bool) {
 /// Take ownership of `task->test_reports`, leaving the slot `None`.
 ///
 /// The taker is a foreign task draining a corpse, while the owner lazily
-/// installs the ring on its first report — so the two need mutual exclusion
-/// rather than the "call me after exit" convention this used to carry as a
-/// comment. The `SpinLock` makes that structural.
+/// installs the ring on its first report — so the two need mutual exclusion,
+/// and the `SpinLock` is what makes it structural rather than a convention the
+/// caller has to remember.
 ///
 /// The `KBox` leaves with the return value, so it is dropped by the caller
 /// *after* the guard is released: freeing a ring under a lock would put an
@@ -771,10 +767,8 @@ pub fn task_waiter_count<K, U>(task: *const TaskInner<K, U>) -> usize {
 }
 
 // ---------------------------------------------------------------------------
-// Phase-2 accessors: scheduler / driver / signal / stats hot paths.
-// Each absorbs an `unsafe { (*task).<field> }` deref formerly scattered
-// across `core/src/scheduler/{scheduler,per_cpu,task/*}.rs`,
-// `core/src/scheduler/sleep.rs`, `core/src/driver_hooks.rs`, etc.
+// Scheduler / driver / signal / stats hot paths. Each absorbs one
+// `unsafe { (*task).<field> }` deref so its call sites stay in safe Rust.
 // ---------------------------------------------------------------------------
 
 /// Load `task->on_cpu` as `bool` with `Acquire` ordering.
@@ -833,8 +827,9 @@ pub fn task_switch_ctx_rflags<K, U>(task: *const TaskInner<K, U>) -> Option<u64>
     }
 }
 
-/// Read `task->switch_ctx.(rip, rsp)` as `(u64, u64)` via
-/// `read_unaligned`. Mirrors the legacy idiom in `scheduler.rs`.
+/// Read `task->switch_ctx.(rip, rsp)` as `(u64, u64)` via `read_unaligned`:
+/// `SwitchContext` carries no alignment guarantee, and the read may land while
+/// the owning CPU is mid-switch.
 #[inline]
 pub fn task_switch_ctx_rip_rsp<K, U>(task: *const TaskInner<K, U>) -> Option<(u64, u64)> {
     if task.is_null() {
@@ -1345,7 +1340,7 @@ pub fn task_clone_from<K, U>(dest: &mut TaskInner<K, U>, other: &TaskInner<K, U>
 /// segment selectors to USER_DATA, and stamp `context_from_user = 1`.
 /// Optionally also stamp `user_started = 1`.
 ///
-/// Centralises the field-by-field copy formerly inline in
+/// The field-by-field copy behind
 /// `core::scheduler::trap::save_task_context_from_interrupt_frame`.
 #[inline]
 pub fn task_save_from_interrupt_frame<K, U>(

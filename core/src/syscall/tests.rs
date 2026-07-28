@@ -67,12 +67,12 @@ use slopos_sched::task::{
 // Test Helpers
 // =============================================================================
 
-/// Wrapper around the hermetic `KernelTestScope` so existing call sites
-/// (`let _f = SyscallFixture::new();`) keep working without churn.
-/// The previous hand-rolled fixture leaked PCR pointers and per-CPU
-/// `enabled` bits; the hermetic scope's registry walk handles every
-/// such leak through the per-subsystem `HermeticState` impls in
-/// `slopos_sched::test_hermetic`.
+/// This file's name for the hermetic `KernelTestScope`.
+///
+/// The scope's registry walk restores every piece of cross-test state a
+/// syscall test can disturb — PCR pointers, per-CPU `enabled` bits — through
+/// the per-subsystem `HermeticState` impls in `slopos_sched::test_hermetic`,
+/// so a test cannot leak into the next one by forgetting a teardown.
 type SyscallFixture = slopos_sched::test_fixture::KernelTestScope;
 
 /// Park PCR's `current_task` on the BSP bootstrap stub. Used by tests
@@ -568,6 +568,79 @@ pub fn test_process_group_object_fork_and_setsid_identity() -> TestResult {
         child_pg2.session_id(),
         child_id,
         "new session id == child pid"
+    );
+
+    task_terminate(child_id);
+    task_terminate(parent_id);
+    TestResult::Pass
+}
+
+/// A membership handle read out of a task's group slot stays valid after a
+/// *different* task republishes that slot.
+///
+/// `setpgid(pid, …)` writes the *target's* group field while holding nothing,
+/// and `task_process_group` clones that same field from any CPU while holding
+/// nothing. What keeps the reader's increment from racing the writer's
+/// decrement-and-maybe-destroy is the slot: the read mints its reference inside
+/// an RCU read-side section, and the displaced reference is released only after
+/// a grace period.
+pub fn test_process_group_slot_survives_republication() -> TestResult {
+    let _fixture = SyscallFixture::new();
+
+    let parent_id = create_test_user_task();
+    assert_test!(parent_id != INVALID_TASK_ID);
+    let parent_guard = assert_some!(task_find_by_id(parent_id));
+    let parent_ptr = parent_guard.as_ptr();
+
+    let child_id = task_fork(&parent_guard, core::ptr::null());
+    assert_test!(child_id != INVALID_TASK_ID);
+    task_set_state(child_id, TaskStatus::Blocked);
+    let child_guard = assert_some!(task_find_by_id(child_id));
+    let child_ptr = child_guard.as_ptr();
+
+    // The reader's handle, taken before the writer runs. Counted relative to
+    // whatever else holds the group, so the assertions below stay exact
+    // without assuming this test is the only holder.
+    let held = task_process_group(child_ptr).expect("child inherits a group");
+    assert_eq_test!(held.id(), parent_id, "child starts in the parent's group");
+    let observer = KArc::downgrade(&held);
+    let count_before = KArc::strong_count(&held);
+
+    // The writer: the parent re-homes the child into a group of its own,
+    // displacing the reference `held` was minted from.
+    let mut setpgid_frame = zero_frame();
+    setpgid_frame.regs_mut().rdi = child_id as u64;
+    setpgid_frame.regs_mut().rsi = child_id as u64;
+    let _ =
+        crate::syscall::dispatch::dispatch_handler(syscall_setpgid, parent_ptr, &mut setpgid_frame);
+    assert_eq_test!(setpgid_frame.regs().rax, 0, "setpgid should succeed");
+
+    let replaced = task_process_group(child_ptr).expect("child carries its new group");
+    assert_test!(
+        !KArc::ptr_eq(&held, &replaced),
+        "setpgid published a different group object"
+    );
+    assert_eq_test!(replaced.id(), child_id, "new group id == child pid");
+    // The slot moved on; the handle taken before it did has not.
+    assert_eq_test!(
+        held.id(),
+        parent_id,
+        "the displaced group is still readable through the handle"
+    );
+
+    // Retire whatever the store deferred. Whether the idle loop already drained
+    // it or this call does, the reckoning is the same: exactly one reference —
+    // the child slot's — must have gone, and the reader's must not have.
+    slopos_ostd::sync::rcu_raise_softirq();
+    slopos_ostd::sync::rcu_process_callbacks();
+    assert_eq_test!(
+        KArc::strong_count(&held),
+        count_before - 1,
+        "the store released the slot's reference exactly once"
+    );
+    assert_test!(
+        observer.upgrade().is_some(),
+        "the reader's own reference outlives the republication"
     );
 
     task_terminate(child_id);
@@ -1237,7 +1310,7 @@ pub fn test_memfd_create_boundaries() -> TestResult {
         let rc = slopos_mm::memfd::memfd_ftruncate(handle, 8192);
         assert_test!(rc < 0, "ftruncate twice should fail");
 
-        // Dropping the backing runs the memfd teardown (the old close path).
+        // Dropping the backing runs the memfd teardown.
         drop(backing);
     }
     TestResult::Pass
@@ -3956,6 +4029,10 @@ slopos_testing::stest!(
     suite = syscall_valid
 );
 slopos_testing::stest!(
+    name = test_process_group_slot_survives_republication,
+    suite = syscall_valid
+);
+slopos_testing::stest!(
     name = test_process_group_session_dag_lifetime,
     suite = syscall_valid
 );
@@ -4075,6 +4152,10 @@ slopos_testing::stest!(
 );
 slopos_testing::stest!(
     name = test_process_group_object_fork_and_setsid_identity,
+    suite = syscall_compat_smoke
+);
+slopos_testing::stest!(
+    name = test_process_group_slot_survives_republication,
     suite = syscall_compat_smoke
 );
 slopos_testing::stest!(
@@ -4346,9 +4427,9 @@ pub fn test_unix_socket_poll_before_send() -> TestResult {
 // =============================================================================
 // Poll/Wakeup Race Condition Tests
 // =============================================================================
-// Wait/wake state machine tests — Phase 5 collapsed `WillBlock` into
-// the wait queue's lock-held `Running → Blocked` CAS. The tests below
-// exercise the post-Phase-5 protocol directly.
+// Wait/wake state machine tests. The blocking transition is the wait
+// queue's lock-held `Running → Blocked` CAS, with no intermediate state;
+// the tests below exercise that protocol directly.
 // =============================================================================
 
 /// `sleep_current_task_ms`'s `CAS(Running, Blocked)` must fail when the
@@ -5124,8 +5205,8 @@ slopos_testing::stest!(
 // `unix_sendmsg` must publish data bytes and ancillary fds together:
 // the peer's `unix_recvmsg` either sees both or neither. Without the
 // single-critical-section publish, the preempt-on-enqueue scheduler
-// (Phase 1.2) makes the peer drain the data FIFO before the sender
-// commits the fds — surfacing as a Wayland-style decoder receiving
+// makes the peer drain the data FIFO before the sender commits the
+// fds — surfacing as a Wayland-style decoder receiving
 // `SurfaceAttach { buffer_fd: None }`.
 
 /// Build a connected AF_UNIX pair and return the raw socket handles

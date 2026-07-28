@@ -16,7 +16,12 @@ use slopos_sched::task_struct::Current;
 
 fn runtime_current_task_pgrp_handle() -> Option<slopos_ostd::KWeak<ProcessGroup>> {
     let current = Current::get()?;
-    current.task().process_group.as_ref().map(KArc::downgrade)
+    current
+        .task()
+        .process_group
+        .load()
+        .as_ref()
+        .map(KArc::downgrade)
 }
 
 // ---------------------------------------------------------------------------
