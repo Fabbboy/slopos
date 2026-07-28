@@ -136,13 +136,11 @@ impl<T> TaskOwnCell<T> {
     /// Unsynchronised **write** pointer for the paths that hold a task as a raw
     /// pointer and have no witness to offer.
     ///
-    /// Three remain, and each is exclusive for a reason the type system cannot
-    /// see: the user-mode round-trip loop hands `user_ctx` straight to
-    /// `UserMode`, which keeps it across an iretq/syscall pair; the switch
-    /// path's `prepare_switch_to` copies the outgoing task's kernel return
-    /// context with interrupts off and both tasks dispatch-pinned; and the
-    /// interrupt-frame sync writes a `context` the interrupted task is not
-    /// running from. In none of them is a witness obtainable — [`CurrentTask`]
+    /// Two remain, and each is exclusive for a reason the type system cannot
+    /// see: the switch path's `prepare_switch_to` copies the outgoing task's
+    /// kernel return context with interrupts off and both tasks dispatch-pinned,
+    /// and the interrupt-frame sync writes a `context` the interrupted task is
+    /// not running from. In neither is a witness obtainable — [`CurrentTask`]
     /// names a different task or is mid-swap, no [`SwitchWindow`] is open, and
     /// `KArc::get_mut` fails against a registered task's existence reference.
     ///

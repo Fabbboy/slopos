@@ -18,7 +18,6 @@
 use core::ptr::NonNull;
 
 use crate::sync::{BUS, LinkError};
-use crate::user::context::UserContext;
 use slopos_abi::event::{KernelEvent, TaskSlot};
 use slopos_abi::signal::{NSIG, SIG_DFL, SIG_IGN, SigSet, sig_bit};
 use slopos_abi::syscall::TtyIndex;
@@ -251,24 +250,6 @@ pub fn task_set_status<K, U>(task: *mut TaskInner<K, U>, status: TaskStatus) {
     unsafe {
         (*task).set_status(status);
     }
-}
-
-/// Raw pointer to a running task's user-mode register snapshot.
-///
-/// The user-mode round-trip loop (`core::syscall::user_loop`) holds the task as
-/// a raw pointer and hands this straight to `UserMode`, which keeps it across
-/// an iretq/syscall round trip. Restructuring that loop to carry a
-/// `CurrentTask` witness is C12's job, not this step's; until then this is the
-/// bridge, and unlike the `task_user_ctx_mut` it replaces it fabricates no
-/// lifetime — the caller gets a pointer and must justify its own borrow.
-#[inline]
-pub fn task_user_ctx_ptr<K, U>(task: *mut TaskInner<K, U>) -> *mut UserContext {
-    if task.is_null() {
-        return core::ptr::null_mut();
-    }
-    // SAFETY: caller pre-validated; the cell is an in-Task field whose address
-    // is stable for the task's lifetime.
-    unsafe { (*task).user_ctx.as_ptr_nascent() }
 }
 
 /// Reborrow `*const Task` as `&Task`. Used by callers that need a

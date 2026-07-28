@@ -43,8 +43,8 @@ use slopos_ostd::sync::once_lock::OnceLock;
 use slopos_ostd::user::context::UserContext;
 use slopos_ostd::user::mode::{ReturnReason, UserMode};
 
-use slopos_sched::scheduler::{scheduler_get_current_task, scheduler_task_exit_impl};
-use slopos_sched::task_struct::Task;
+use slopos_sched::scheduler::scheduler_task_exit_impl;
+use slopos_sched::task_struct::Current;
 
 /// Single shared `VmSpace` handle used by every user task.
 ///
@@ -75,25 +75,22 @@ slopos_ostd::extern_c_entry! {
     /// `extern "C"` because the address is taken and stored as a `u64`
     /// on the kernel stack as a synthetic return address.
     pub fn user_task_first_run() -> ! {
-        let task = scheduler_get_current_task() as *mut Task;
-        if task.is_null() {
-            panic!("user_task_first_run: scheduler_get_current_task returned null");
-        }
-        user_task_loop(task)
+        user_task_loop()
     }
 }
 
-fn user_task_loop(task: *mut Task) -> ! {
+fn user_task_loop() -> ! {
     let space = placeholder_vm_space();
+    // This loop is the task's own outermost frame, so one guard names it for
+    // the whole loop: a task cannot stop being itself, and the borrow travels
+    // with its frames across migration. It is the witness that authorises
+    // handing the task's register snapshot to `UserMode`, which keeps it across
+    // the iretq/SYSCALL round trip — the address is stable for the task's life.
+    let current = Current::get().expect("user_task_loop: dispatched with no current task");
+    let ctx_ptr = current.task().user_ctx_ptr(&current);
     loop {
-        // `task` is the currently running task; nothing else mutates
-        // `task->user_ctx` while it is the running task. The
-        // `task_user_ctx_mut` accessor null-checks `task` once and
-        // hands back a `&mut UserContext` whose lifetime is the loop
-        // iteration scope.
-        let ctx_ptr: *mut UserContext = slopos_ostd::task::accessors::task_user_ctx_ptr(task);
-        let ctx_ref = UserContext::from_ptr_mut(ctx_ptr)
-            .expect("user_task_loop: scheduler dispatched null task");
+        let ctx_ref =
+            UserContext::from_ptr_mut(ctx_ptr).expect("user_task_loop: task has no user context");
 
         let reason = {
             let user_mode = UserMode::new(ctx_ref, space);

@@ -31,8 +31,7 @@ pub use slopos_ostd::task::accessors::{
     task_set_time_slice, task_set_time_slice_remaining, task_sid, task_signal_blocked,
     task_signal_handler, task_signal_pending, task_signal_pending_store, task_signal_post,
     task_signal_raise, task_status, task_switch_ctx_rflags, task_switch_ctx_rip_rsp, task_tgid,
-    task_time_slice, task_time_slice_remaining, task_user_ctx_ptr, task_waiter_count,
-    task_wake_all_waiters,
+    task_time_slice, task_time_slice_remaining, task_waiter_count, task_wake_all_waiters,
 };
 
 use super::task_table::task_find_by_id;
