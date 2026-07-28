@@ -3504,11 +3504,8 @@ pub fn test_privilege_separation_invariants() -> TestResult {
         klog_info!("SCHED_TEST: user task lookup failed");
         return TestResult::Fail;
     };
-    let task_ptr = task_guard.as_ptr();
 
-    let Some(task_ref) = crate::task::task_borrow(task_ptr) else {
-        return TestResult::Fail;
-    };
+    let task_ref = &*task_guard;
     if task_ref.process_id == INVALID_PROCESS_ID {
         klog_info!("SCHED_TEST: user task missing process VM");
         return TestResult::Fail;

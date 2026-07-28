@@ -215,6 +215,42 @@ pub fn task_placement_retain<K, U>(ptr: NonNull<TaskInner<K, U>>) {
     core::mem::forget(task_placement_clone(ptr));
 }
 
+/// Reverse a detached intrusive chain, returning its new head and node count.
+///
+/// A Treiber container hands its whole chain over in one swap, so the caller
+/// that performed the swap is the sole owner of every node on it, and each node
+/// is still backed by the owning reference its producer parked. Reversing it is
+/// what turns LIFO push order into FIFO drain order.
+///
+/// The walk is expressed on pointers rather than borrows because the link field
+/// *is* the placement slot: it is the same "reference in, pointer out" surface
+/// as [`task_placement_leak`], and a `&T` held across the rewrite would name a
+/// node the chain no longer links.
+///
+/// # Correctness
+/// `head` must be a chain this caller detached and not yet published anywhere
+/// else, threaded through `Role`'s link on every node.
+#[inline]
+pub fn reverse_detached_chain<T, Role>(head: *mut T) -> (*mut T, u32)
+where
+    T: crate::sync::intrusive::Linked<Role>,
+{
+    let mut reversed: *mut T = core::ptr::null_mut();
+    let mut cursor = head;
+    let mut count = 0u32;
+    while !cursor.is_null() {
+        // SAFETY: per the contract the caller solely owns the detached chain,
+        // and each node is kept alive by its producer's parked reference.
+        let link = unsafe { crate::sync::intrusive::Linked::<Role>::link(&*cursor) };
+        let next = link.load();
+        link.store_relaxed(reversed);
+        reversed = cursor;
+        cursor = next;
+        count = count.saturating_add(1);
+    }
+    (reversed, count)
+}
+
 /// Proof that the holder uniquely owns a task allocation whose strong count has
 /// reached zero — the body still initialised, and nothing else able to reach it.
 ///

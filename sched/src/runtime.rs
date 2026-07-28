@@ -348,8 +348,8 @@ pub(crate) fn resolve_idle_stack_for_cpu(
     Ok((idle_task, stack_top))
 }
 
-extern "C" fn scheduler_loop_entry(cpu_id: usize, idle_task: *mut ()) -> ! {
-    scheduler_loop(cpu_id, idle_task as *mut Task)
+extern "C" fn scheduler_loop_entry(cpu_id: usize, _idle_task: *mut ()) -> ! {
+    scheduler_loop(cpu_id)
 }
 
 pub fn enter_scheduler(cpu_id: usize) -> ! {
@@ -542,7 +542,11 @@ fn check_watchdog_for_neighbor(my_cpu: usize) {
     }
 }
 
-fn scheduler_loop(cpu_id: usize, idle_task: *mut Task) -> ! {
+fn scheduler_loop(cpu_id: usize) -> ! {
+    // Resolved from this CPU's idle slot rather than carried in: the payload
+    // crosses `enter_scheduler_loop_noreturn`'s stack switch type-erased, and
+    // the slot is the authority for which task the loop dispatches from.
+    let idle_task = super::scheduler::scheduler_get_idle_task_for(cpu_id);
     loop {
         // Start the LAPIC timer on this AP once the boot layer registers
         // the callback (after calibration).  No-op after the first success.

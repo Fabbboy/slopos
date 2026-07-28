@@ -630,27 +630,6 @@ impl PriorityRunQueue {
         }
     }
 
-    /// Reverse the detached Treiber chain so the drain runs it in FIFO order.
-    ///
-    /// Walks the raw slot pointers and rewrites only each node's inbox link.
-    /// That field *is* the placement slot, the one raw window invariant I1
-    /// sanctions, and every node on the chain is still backed by the owning
-    /// reference its producer parked — so the walk touches nothing it does not
-    /// already own. Returns the new head and the node count.
-    fn reverse_detached_inbox(head: *mut Task) -> (*mut Task, u32) {
-        let mut reversed: *mut Task = ptr::null_mut();
-        let mut cursor = head;
-        let mut count = 0u32;
-        while !cursor.is_null() {
-            let next = task_next_inbox_load(cursor);
-            task_next_inbox_store_relaxed(cursor, reversed);
-            reversed = cursor;
-            cursor = next;
-            count = count.saturating_add(1);
-        }
-        (reversed, count)
-    }
-
     /// Drain all tasks from remote inbox into local ready queues.
     /// MUST only be called by the owning CPU.
     ///
@@ -668,7 +647,13 @@ impl PriorityRunQueue {
             return;
         }
 
-        let (mut cursor, count) = Self::reverse_detached_inbox(head);
+        // The swap above detached the whole chain, so this CPU owns every node
+        // on it; reversing turns the producers' LIFO push order into FIFO drain
+        // order.
+        let (mut cursor, count) = slopos_ostd::task::reverse_detached_chain::<
+            Task,
+            slopos_ostd::task::RemoteWakeRole,
+        >(head);
 
         while let Some(node) = NonNull::new(cursor) {
             // Take the reference back before reading anything through it.
