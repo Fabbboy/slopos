@@ -10,24 +10,69 @@ use slopos_ostd::task::{task_existence_park, task_existence_release};
 use slopos_ostd::{KArc, KVec, KWeak};
 use slopos_ostd::{klog_debug, klog_info};
 
-use super::{INVALID_TASK_ID, MAX_TASKS, Task, TaskStatus};
+use super::{INVALID_TASK_ID, MAX_TASKS, Task, TaskStatus, task_put};
 use crate::exit_info::ExitInfo;
 use crate::scheduler;
 
-/// Strong task reference returned by registry lookups.
+/// The kernel's owning task handle — outside OSTD, the only one.
 ///
-/// The registry stores only `KWeak<Task>`; constructing this guard is the one
-/// liveness-checked weak upgrade path. The raw pointer escape is transitional
-/// scheduler plumbing and remains valid for exactly the lifetime of this
-/// guard (or of another owning reference).
+/// Every way to obtain a strong task reference lands here: the registry's
+/// liveness-checked weak upgrade, a placement container giving its reference
+/// back, a clone minted from a live one, a task surrendering its existence
+/// reference. Each is a constructor below, and none of them hands out the
+/// `KArc<Task>` underneath.
+///
+/// That is deliberate, and it is the whole safety argument. `Task`'s destructor
+/// frees to the buddy allocator, whose reuse path waits on synchronous
+/// cross-CPU TLB drains, so whether it may run *here* is a question about the
+/// calling context — asked by [`super::task_put`], which `Drop` below routes
+/// every release through. `KArc`'s own `Drop` does not ask it. So a bare
+/// `KArc<Task>` in a binding is a hazard rather than a handle: every scope exit
+/// is a release site, including the ones `?` and `return` create, and a struct
+/// field holding one has a derived `Drop` that is silently the wrong one. Since
+/// no expression outside this module produces a `KArc<Task>`, that mistake is
+/// not merely discouraged — it cannot be written.
+///
+/// The raw pointer escape ([`Self::as_ptr`]) is transitional scheduler plumbing
+/// and remains valid for exactly the lifetime of this guard (or of another
+/// owning reference).
 pub struct TaskRef {
     arc: Option<KArc<Task>>,
 }
 
 impl TaskRef {
     #[inline]
-    fn new(arc: KArc<Task>) -> Self {
+    pub(super) fn new(arc: KArc<Task>) -> Self {
         Self { arc: Some(arc) }
+    }
+
+    /// Take back the reference a placement container parked, as a guard.
+    ///
+    /// # Correctness
+    /// Inherits `task_placement_reclaim`'s contract: `node` must name a
+    /// reference this container parked and has not yet reclaimed.
+    #[inline]
+    pub(crate) fn from_placement(node: NonNull<Task>) -> Self {
+        Self::new(slopos_ostd::task::task_placement_reclaim(node))
+    }
+
+    /// Mint a second guard onto a task some other owner is keeping alive.
+    ///
+    /// # Correctness
+    /// Inherits `task_placement_clone`'s contract: the caller must hold, or be
+    /// covered by, a live strong reference to `node` for the duration.
+    #[inline]
+    pub(crate) fn clone_of(node: NonNull<Task>) -> Self {
+        Self::new(slopos_ostd::task::task_placement_clone(node))
+    }
+
+    /// Take back a task's own existence reference, as a guard.
+    ///
+    /// `None` when another reaper already won it, which is what makes a reap
+    /// idempotent. Same liveness contract as [`Self::clone_of`].
+    #[inline]
+    pub(crate) fn take_existence(node: NonNull<Task>) -> Option<Self> {
+        task_existence_release(node).map(Self::new)
     }
 
     #[inline]
@@ -35,28 +80,51 @@ impl TaskRef {
         KArc::as_ptr(self.arc.as_ref().expect("live TaskRef")) as *mut Task
     }
 
-    /// The owning handle behind this guard.
+    /// This task's allocation node, for the placement primitives.
     ///
     /// [`Deref`] already answers "read this task's state"; this answers the
-    /// other question a lookup result gets asked — "park a reference to it" —
-    /// for the callers that mint one (a ready-queue publication, a wait map, a
-    /// futex bucket). Lending the handle rather than the pointer is what makes
-    /// the mint's precondition, *the caller holds a live strong reference*, a
-    /// fact the signature carries instead of a comment.
+    /// other question a live guard gets asked — "park a reference to it" — for
+    /// the callers that mint one (a ready-queue publication, a wait map, a
+    /// futex bucket). Handing out the node rather than the handle is what keeps
+    /// `task.arc().clone()` from being a way back to a bare `KArc<Task>`, while
+    /// still carrying the mint's precondition — *the caller holds a live strong
+    /// reference* — as a fact in the signature rather than a comment.
     #[inline]
-    pub fn arc(&self) -> &KArc<Task> {
-        self.arc.as_ref().expect("live TaskRef")
+    pub fn node(&self) -> NonNull<Task> {
+        KArc::node(self.arc.as_ref().expect("live TaskRef"))
     }
 
-    /// Consume the guard for the handle it owns.
-    ///
-    /// [`Self::arc`] lends the handle to callers that want to mint another
-    /// reference from it; this is for the ones that want to *become* the
-    /// owner. Costs no refcount traffic — the guard is only ever a wrapper
-    /// around this one reference.
+    /// Park this guard's reference in a raw slot, yielding the node pointer to
+    /// store. The inverse of [`Self::from_placement`], and the only way a guard
+    /// leaves the type system — into a slot that hands it straight back.
     #[inline]
-    pub fn into_arc(mut self) -> KArc<Task> {
+    pub(crate) fn into_placement(self) -> NonNull<Task> {
+        slopos_ostd::task::task_placement_leak(self.into_arc())
+    }
+
+    /// Surrender the handle this guard wraps.
+    ///
+    /// `pub(super)` on purpose: this is the one place a bare `KArc<Task>`
+    /// escapes the guard, and its only caller is the release path in
+    /// [`super::task_reclaim`], which consumes it immediately. Widening this is
+    /// what would put an un-guarded handle back into a binding.
+    ///
+    /// Costs no refcount traffic — the guard is only ever a wrapper around this
+    /// one reference.
+    #[inline]
+    pub(super) fn into_arc(mut self) -> KArc<Task> {
         self.arc.take().expect("live TaskRef")
+    }
+
+    /// Wrap a freshly built, never-registered task so the reclaim tests can
+    /// exercise a release that really is final.
+    ///
+    /// The one constructor that takes a handle rather than a node, and gated to
+    /// `test-hooks` for exactly that reason: a production caller reaching for it
+    /// would be a production caller holding a bare `KArc<Task>`.
+    #[cfg(feature = "test-hooks")]
+    pub fn from_arc_for_test(arc: KArc<Task>) -> Self {
+        Self::new(arc)
     }
 
     /// Weak handle onto the same allocation, so a test can distinguish "the
@@ -100,9 +168,12 @@ impl Drop for TaskRef {
         // Routed through the universal release rather than dropped: a guard on a
         // reaped task can hold the final reference, and guards are constructed
         // and dropped *under* the registry cli-spinlock (the cr3 scan, every
-        // registry walk, the fixture reset). `task_put` decrements here and
+        // registry walk, the fixture reset). The release decrements here and
         // defers the allocator-heavy destructor to a context that can run it.
-        super::task_put(arc);
+        //
+        // This is why the guard exists at all, and why nothing hands out the
+        // handle it wraps: `KArc<Task>`'s own `Drop` skips that decision.
+        super::task_reclaim::release_arc(arc);
     }
 }
 
@@ -363,7 +434,7 @@ fn reap_task_registration(id: u32) -> bool {
             REAP_BLOCKED_BY_DISPATCH.store(true, Ordering::Release);
             return None;
         }
-        let existence = task_existence_release(node)?;
+        let existence = TaskRef::take_existence(node)?;
         // Unhash while the existence reference is still held: the weak count is
         // then at least two (the implicit one the strongs own, plus this entry's),
         // so dropping the entry is a bare decrement that provably cannot reach
@@ -371,14 +442,14 @@ fn reap_task_registration(id: u32) -> bool {
         let entry = mgr.registry.remove(id).expect("found under the same lock");
         drop(entry.weak);
         // The temporary upgrade above. Non-final while `existence` is held.
-        super::task_put(task.into_arc());
+        task_put(task);
         Some(existence)
     });
     let Some(existence) = taken else {
         return false;
     };
     // Off-lock, so this may be the final release and run the destructor inline.
-    super::task_put(existence);
+    task_put(existence);
     true
 }
 
@@ -397,16 +468,16 @@ fn force_reap_registration(id: u32) {
     };
     // Off-lock, and before the unhash: resolving the parent takes the same lock.
     if let Some(parent_ref) = super::unlink_child(node.as_ptr()) {
-        super::task_put(parent_ref);
+        task_put(parent_ref);
     }
-    let existence = task_existence_release(node);
+    let existence = TaskRef::take_existence(node);
     let entry = with_task_manager(|mgr| mgr.registry.remove(id));
     if let Some(entry) = entry {
         slopos_ostd::task::drop_off_lock(entry.weak);
     }
     drop(guard);
     if let Some(existence) = existence {
-        super::task_put(existence);
+        task_put(existence);
     }
 }
 
@@ -660,7 +731,7 @@ impl Drop for PendingTask {
         // release like every other one. `drop_off_lock` checks interrupts and
         // the lock count but not the preempt guard, and an abandon under one
         // would run the destructor in the very context `task_put` defers.
-        super::task_put(task);
+        task_put(TaskRef::new(task));
     }
 }
 
@@ -788,7 +859,7 @@ pub fn task_consume_zombie(task_id: u32) -> Option<ExitInfo> {
     // may retire the registration and hand back the existence reference; this
     // guard is then the only thing keeping `child_ptr` addressable.
     if let Some(parent_ref) = super::unlink_child(child_ptr) {
-        super::task_put(parent_ref);
+        task_put(parent_ref);
     }
     drop(task);
     let _ = reap_task_registration(task_id);

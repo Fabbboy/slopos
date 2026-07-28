@@ -58,7 +58,7 @@ use slopos_ostd::task::{
     with_parked,
 };
 
-use super::Task;
+use super::{Task, TaskRef};
 use crate::task_stack::{KernelStack, UnsafeStack};
 
 /// The reclaim token for this crate's concrete `Task`.
@@ -79,7 +79,17 @@ static TASK_GRAVEYARD: AtomicPtr<Task> = AtomicPtr::new(ptr::null_mut());
 /// destroys inline when the context allows and otherwise parks the allocation
 /// for [`task_graveyard_drain`].
 #[inline]
-pub fn task_put(arc: KArc<Task>) {
+pub fn task_put(task: TaskRef) {
+    release_arc(task.into_arc());
+}
+
+/// The release itself, on the handle the guard wraps.
+///
+/// Private, and reached only from [`task_put`] and [`TaskRef`]'s `Drop`, so
+/// there is one release sequence and it cannot be spelled with a handle that
+/// came from anywhere else.
+#[inline]
+pub(super) fn release_arc(arc: KArc<Task>) {
     let Some(parked) = task_release_strong(arc) else {
         // Other references remain: a bare decrement, safe anywhere.
         return;

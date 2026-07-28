@@ -20,9 +20,9 @@ use super::per_cpu::{
     affinity_allows_cpu, enqueue_task_on_cpu, get_cpu_ready_count, try_steal_task_from_cpu,
     with_cpu_scheduler, with_local_scheduler,
 };
+use super::task::TaskRef;
 use super::task_struct::Task;
 use slopos_arch::{get_cpu_count, get_current_cpu};
-use slopos_ostd::KArc;
 use slopos_ostd::{kdiag_timestamp, klog_debug};
 
 // ---------------------------------------------------------------------------
@@ -120,7 +120,7 @@ fn steal_cooldown_elapsed(cpu_id: usize) -> bool {
 }
 
 /// Try to steal one task from `victim`, respecting affinity and cache-hot.
-fn try_steal_from_cpu(victim: usize, thief: usize) -> Option<KArc<Task>> {
+fn try_steal_from_cpu(victim: usize, thief: usize) -> Option<TaskRef> {
     let stolen = try_steal_task_from_cpu(victim)?;
     let task: &Task = &stolen;
 
@@ -157,7 +157,7 @@ fn try_steal_from_cpu(victim: usize, thief: usize) -> Option<KArc<Task>> {
 /// reference once that queue has parked its own. If the victim refuses it the
 /// reference is still released rather than leaked; the task keeps its other
 /// owners and the rescue sweep will re-publish it.
-fn return_to_victim(victim: usize, task: KArc<Task>) {
+fn return_to_victim(victim: usize, task: TaskRef) {
     let _ = enqueue_task_on_cpu(victim, &task);
     crate::task::task_put(task);
 }

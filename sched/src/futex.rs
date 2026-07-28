@@ -11,13 +11,10 @@ use core::ptr::NonNull;
 
 use slopos_abi::task::BlockReason;
 use slopos_mm::user_ptr::UserPtr;
-use slopos_ostd::KArc;
 use slopos_ostd::sync::{KernelSync, LOCK_LEVEL_RESOURCE, SpinLock};
-use slopos_ostd::task::task_placement_clone;
 
 use super::scheduler::{mark_current_blocked, unblock_task, yield_blocked_task};
-use super::task::{INVALID_TASK_ID, task_put};
-use super::task_struct::Task;
+use super::task::{INVALID_TASK_ID, TaskRef, task_put};
 
 /// Number of hash buckets. Must be a power of two.
 const FUTEX_HASH_BUCKETS: usize = 64;
@@ -36,7 +33,7 @@ struct FutexWaiter {
     /// Owning reference to the blocked task, or `None` for a free slot. The
     /// `KernelSync` wrapper asserts the cross-CPU access to the raw pointers
     /// inside `Task` is serialised by the bucket lock.
-    task: KernelSync<Option<KArc<Task>>>,
+    task: KernelSync<Option<TaskRef>>,
     /// The waiter's task id, or `INVALID_TASK_ID` for a free slot.
     task_id: u32,
 }
@@ -165,7 +162,7 @@ pub fn futex_wait(uaddr: u64, expected: u32, _timeout_ms: u64) -> i64 {
         };
         bucket.waiters[idx] = FutexWaiter {
             futex_addr: uaddr,
-            task: KernelSync::new(Some(task_placement_clone(node))),
+            task: KernelSync::new(Some(TaskRef::clone_of(node))),
             task_id: current_guard.id(),
         };
         bucket.count += 1;
@@ -213,13 +210,14 @@ pub fn futex_wake(uaddr: u64, max_wake: u32) -> i64 {
         // freed slot races only against a different task; the woken task stays
         // alive because we still hold `arc`. `unblock_task`'s enqueue path
         // clones its own membership reference (bucket lock RESOURCE → run-queue
-        // lock, no cycle), then we drop `arc` — never the last reference, since
-        // the task holds its own existence reference until it is reaped.
+        // lock, no cycle), then we drop the waiter's guard — never the last
+        // reference, since the task holds its own existence reference until it
+        // is reaped.
         let taken = core::mem::replace(&mut bucket.waiters[i], FutexWaiter::empty());
         bucket.count = bucket.count.saturating_sub(1);
-        if let Some(arc) = taken.task.into_inner() {
-            let _ = unblock_task(&arc);
-            task_put(arc);
+        if let Some(waiter) = taken.task.into_inner() {
+            let _ = unblock_task(&waiter);
+            task_put(waiter);
         }
         woken += 1;
     }
@@ -249,8 +247,8 @@ pub fn futex_remove_task(target_id: u32) {
             // Drop the bucket's owning reference. Never the last one — the
             // task's own existence reference outlives it — so this is a bare decrement under
             // the bucket lock, and any retirement it triggers self-defers.
-            if let Some(arc) = taken.task.into_inner() {
-                task_put(arc);
+            if let Some(waiter) = taken.task.into_inner() {
+                task_put(waiter);
             }
         }
         bucket.count = bucket.count.saturating_sub(removed);

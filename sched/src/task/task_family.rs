@@ -4,7 +4,7 @@
 //! `children` list on the parent `Task`. Membership in that list is one strong
 //! reference parked exactly like ready-queue placement: linking a child pairs a
 //! list push with [`task_placement_retain`], unlinking pairs a list removal with
-//! [`task_placement_reclaim`]. So a zombie is simply a dead child still parked in
+//! [`TaskRef::from_placement`]. So a zombie is simply a dead child still parked in
 //! its parent's list; `waitpid` reaps it by unlinking (dropping the parked
 //! reference off-lock), and a dying parent reaps or reparents by draining the
 //! list. The child→parent direction stays a plain id (`parent_task_id`) resolved
@@ -12,20 +12,19 @@
 //!
 //! Every list mutation runs under the registry lock ([`with_task_manager`]): the
 //! intrusive ops and the strong-count park/reclaim are allocation-free, so they
-//! are safe under the cli-spinlock, and the heavy `KArc` destructor is never run
-//! under the lock — these helpers hand the reclaimed `KArc` back for an off-lock
-//! drop. That drop is never final while the child is live: a task holds its own
+//! are safe under the cli-spinlock, and the heavy destructor is never run under
+//! the lock — these helpers hand the reclaimed guard back for an off-lock drop.
+//! That drop is never final while the child is live: a task holds its own
 //! existence reference from registration until it is reaped.
 
 use core::ptr::NonNull;
 
-use slopos_ostd::KArc;
 use slopos_ostd::task::accessors::{
     task_borrow, task_children_pop, task_children_remove, task_set_parent_task_id,
 };
-use slopos_ostd::task::{task_placement_reclaim, task_placement_retain};
+use slopos_ostd::task::task_placement_retain;
 
-use super::task_table::{task_find_by_id, with_task_manager};
+use super::task_table::{TaskRef, task_find_by_id, with_task_manager};
 use super::{INVALID_TASK_ID, Task, TaskStatus};
 
 /// Whether a task in `status` may still acquire children — i.e. it has not begun
@@ -67,16 +66,15 @@ pub fn link_child(parent: &Task, child: NonNull<Task>) {
 }
 
 /// Detach one child from `parent`'s list and hand back the owning reference the
-/// list held. `None` when the list is empty. The returned `KArc` must be dropped
-/// off-lock (via [`super::task_put`]); it is never the last reference, because
-/// the child holds its own existence reference until it is reaped, so the drop is
-/// a bare decrement.
-pub fn take_one_child(parent: &Task) -> Option<KArc<Task>> {
+/// list held. `None` when the list is empty. The returned guard must be dropped
+/// off-lock; it is never the last reference, because the child holds its own
+/// existence reference until it is reaped, so the drop is a bare decrement.
+pub fn take_one_child(parent: &Task) -> Option<TaskRef> {
     let child_nn = with_task_manager(|_mgr| task_children_pop(parent))?;
-    Some(task_placement_reclaim(child_nn))
+    Some(TaskRef::from_placement(child_nn))
 }
 
-pub fn unlink_child(child: *mut Task) -> Option<KArc<Task>> {
+pub fn unlink_child(child: *mut Task) -> Option<TaskRef> {
     let child_nn = NonNull::new(child)?;
     let parent_id = task_borrow(child as *const Task)?.parent_task_id;
     if parent_id == INVALID_TASK_ID {
@@ -87,7 +85,7 @@ pub fn unlink_child(child: *mut Task) -> Option<KArc<Task>> {
     let removed =
         with_task_manager(|_mgr| task_children_remove(parent_ptr as *const Task, child_nn).is_ok());
     if removed {
-        Some(task_placement_reclaim(child_nn))
+        Some(TaskRef::from_placement(child_nn))
     } else {
         None
     }

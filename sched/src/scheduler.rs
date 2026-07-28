@@ -5,10 +5,10 @@ use core::sync::atomic::{AtomicU64, Ordering};
 
 use slopos_abi::event::{KernelEvent, TaskSlot};
 use slopos_arch::cpu;
+use slopos_ostd::KBTreeMap;
 use slopos_ostd::sync::BUS;
 use slopos_ostd::sync::PreemptGuard;
 use slopos_ostd::sync::{KernelSync, LOCK_LEVEL_RESOURCE, SpinLock};
-use slopos_ostd::{KArc, KBTreeMap};
 
 use slopos_ostd::kdiag_timestamp;
 use slopos_ostd::klog_info;
@@ -142,9 +142,9 @@ pub use super::sleep::{block_current_task_with_timeout, cancel_sleep, sleep_curr
 use super::sleep::{reset_sleep_queue, sleep_queue_next_deadline_ticks, wake_due_sleepers};
 use super::task::{
     INVALID_PROCESS_ID, INVALID_TASK_ID, TASK_FLAG_KERNEL_MODE, TASK_FLAG_NO_PREEMPT,
-    TASK_FLAG_USER_MODE, Task, TaskPriority, TaskStatus, task_cpu_affinity, task_exit_info_ref,
-    task_fs_base, task_has_flag, task_id_of, task_is_exited, task_is_invalid, task_is_ready,
-    task_is_running, task_kernel_stack_top, task_last_cpu, task_last_run_timestamp,
+    TASK_FLAG_USER_MODE, Task, TaskPriority, TaskRef, TaskStatus, task_cpu_affinity,
+    task_exit_info_ref, task_fs_base, task_has_flag, task_id_of, task_is_exited, task_is_invalid,
+    task_is_ready, task_is_running, task_kernel_stack_top, task_last_cpu, task_last_run_timestamp,
     task_name_looks_idle, task_on_cpu_load, task_panic_in_flight_load, task_panic_in_flight_store,
     task_pcr_round_trip_swap, task_pointer_is_valid, task_priority, task_process_id, task_put,
     task_record_context_switch, task_record_yield, task_recovery_depth_load,
@@ -169,9 +169,7 @@ fn kernel_text_range() -> (u64, u64) {
 }
 
 use core::sync::atomic::AtomicU8;
-use slopos_ostd::task::{
-    SchedPlacement, task_placement_clone, task_placement_leak, task_placement_reclaim,
-};
+use slopos_ostd::task::SchedPlacement;
 /// Global scheduler-enabled flag. `pub(crate)` so the
 /// `test_hermetic::SchedulerEnabledFlag` HermeticState impl can
 /// snapshot/restore it. External code should go through
@@ -705,7 +703,7 @@ pub(crate) fn newcomer_outranks_current(cpu: usize, new: &Task) -> bool {
     new_prio.as_u8() < slopos_arch::pcr::current_task_priority_for(cpu)
 }
 
-fn publish_ready_fallback(task: &KArc<Task>) -> c_int {
+fn publish_ready_fallback(task: &TaskRef) -> c_int {
     let body: &Task = task;
     if !task_is_ready(body) {
         return -1;
@@ -799,7 +797,7 @@ fn publish_ready_fallback(task: &KArc<Task>) -> c_int {
     -1
 }
 
-fn publish_reserved_waking_ready(task: &KArc<Task>, task_id: u32, context: &str) -> c_int {
+fn publish_reserved_waking_ready(task: &TaskRef, task_id: u32, context: &str) -> c_int {
     let body: &Task = task;
     if !task_is_ready(body) {
         if task_sched_placement_load(body) == SchedPlacement::Waking {
@@ -841,7 +839,7 @@ fn publish_reserved_waking_ready(task: &KArc<Task>, task_id: u32, context: &str)
     rc
 }
 
-fn publish_ready_from_current_owner(task: &KArc<Task>, task_id: u32, context: &str) -> c_int {
+fn publish_ready_from_current_owner(task: &TaskRef, task_id: u32, context: &str) -> c_int {
     let body: &Task = task;
     for _ in 0..4 {
         match task_sched_placement_load(body) {
@@ -877,14 +875,14 @@ fn publish_ready_from_current_owner(task: &KArc<Task>, task_id: u32, context: &s
     if task_has_durable_owner(body) { 0 } else { -1 }
 }
 
-fn schedule_task_from_placement(task: &KArc<Task>, from: SchedPlacement, new_task: bool) -> c_int {
+fn schedule_task_from_placement(task: &TaskRef, from: SchedPlacement, new_task: bool) -> c_int {
     let body: &Task = task;
     if !task_is_ready(body) {
         return -1;
     }
 
     if task_time_slice_remaining(body) == Some(0) {
-        reset_task_quantum(KArc::node(task).as_ptr());
+        reset_task_quantum(task.as_ptr());
     }
 
     let target_cpu = if new_task {
@@ -1009,7 +1007,7 @@ fn release_publication(task: &Task, reservation: &Reservation) {
     }
 }
 
-pub fn schedule_task(task: &KArc<Task>) -> c_int {
+pub fn schedule_task(task: &TaskRef) -> c_int {
     let Some(reservation) = reserve_publication(task) else {
         return 0;
     };
@@ -1048,7 +1046,7 @@ pub fn clear_nascent_for_test(task_id: u32) -> bool {
 ///
 /// Regular wakeups from sleep/block should use [`schedule_task()`] instead,
 /// which preserves cache affinity by preferring the last CPU.
-pub fn schedule_new_task(task: &KArc<Task>) -> c_int {
+pub fn schedule_new_task(task: &TaskRef) -> c_int {
     let Some(reservation) = reserve_publication(task) else {
         return 0;
     };
@@ -1065,7 +1063,7 @@ pub fn schedule_new_task(task: &KArc<Task>) -> c_int {
 /// This is SlopOS's `wake_up_new_task()` equivalent: reserve scheduler
 /// placement first (`Waking`), publish `TaskStatus::Ready`, then transfer the
 /// reservation into a runqueue or remote inbox.
-pub fn publish_new_task(task: &KArc<Task>) -> c_int {
+pub fn publish_new_task(task: &TaskRef) -> c_int {
     let body: &Task = task;
     // The sole sanctioned exit from `Nascent`: this is what makes a
     // never-published task schedulable, and every other path refuses the
@@ -1089,7 +1087,7 @@ pub fn publish_new_task(task: &KArc<Task>) -> c_int {
             return if task_has_durable_owner(body) { 0 } else { -1 };
         }
     };
-    let node = KArc::node(task).as_ptr();
+    let node = task.as_ptr();
     let previous_status = task_status(body).unwrap_or(TaskStatus::Blocked);
     task_set_status(node, TaskStatus::Ready);
     let rc = schedule_task_from_placement(task, SchedPlacement::Waking, true);
@@ -1127,7 +1125,7 @@ pub fn unschedule_task(task: &Task) -> c_int {
 ///   reschedule IPI for a remote one).
 /// - A **blocked / remote-inbox / migrating** task needs nothing: its next wake
 ///   or drain re-selects via `select_target_cpu`, which now honors the mask.
-pub fn task_apply_affinity(task: &KArc<Task>, new_affinity: u32) {
+pub fn task_apply_affinity(task: &TaskRef, new_affinity: u32) {
     let body: &Task = task;
     let last_cpu = task_last_cpu(body).map(|c| c as usize).unwrap_or(0);
     if per_cpu::affinity_allows_cpu(new_affinity, last_cpu) {
@@ -1310,7 +1308,7 @@ pub(crate) fn run_ready_task_from_idle(cpu_id: usize, idle_task: *mut Task) -> b
     else {
         return false;
     };
-    let next_task = KArc::as_ptr(&dispatch_ref) as *mut Task;
+    let next_task = dispatch_ref.as_ptr();
 
     per_cpu::with_cpu_scheduler(cpu_id, |sched| {
         sched.set_executing_task(true);
@@ -1511,7 +1509,7 @@ pub(crate) fn run_ready_task_from_idle(cpu_id: usize, idle_task: *mut Task) -> b
     // Park the owning dispatch reference in the CPU-local deferred slot. Its
     // successor reclaims and releases it after this IRQ-off switch window has
     // ended and while executing on the idle stack.
-    let parked = task_placement_leak(dispatch_ref);
+    let parked = dispatch_ref.into_placement();
     assert!(
         slopos_arch::pcr::defer_previous_task(parked.as_ptr().cast()).is_ok(),
         "previous-task slot was not drained before the next switch"
@@ -1575,7 +1573,7 @@ pub(crate) fn drain_previous_task() -> bool {
     // frees the outgoing stack later on the successor's stack with interrupts
     // enabled and no lock held. Sampled before the release: afterwards the
     // pointer must not be touched.
-    let dispatch_ref = task_placement_reclaim(node);
+    let dispatch_ref = TaskRef::from_placement(node);
     let terminated = dispatch_ref.status() == TaskStatus::Terminated;
     super::task::task_put(dispatch_ref);
     if terminated {
@@ -1973,7 +1971,7 @@ pub fn task_wait_for(task_id: u32) -> c_int {
 // the task-teardown path. WAIT_REFS owns one strong reference per waiting task;
 // whoever removes the entry (normal wake or kill teardown) performs the lone
 // drop, off the map lock.
-static WAIT_REFS: SpinLock<KBTreeMap<u32, KernelSync<KArc<Task>>>> =
+static WAIT_REFS: SpinLock<KBTreeMap<u32, KernelSync<TaskRef>>> =
     SpinLock::new(KBTreeMap::new(), LOCK_LEVEL_RESOURCE);
 
 fn wait_ref_acquire(waiter_id: u32, target: *mut Task) {
@@ -1986,10 +1984,10 @@ fn wait_ref_acquire(waiter_id: u32, target: *mut Task) {
     // The map entry owns a strong reference that pins the target — and the
     // `exit_info` cell the wait predicate reads — for the whole wait, even
     // after the target becomes a zombie.
-    let arc = task_placement_clone(node);
+    let target = TaskRef::clone_of(node);
     let stale = {
         let mut map = WAIT_REFS.lock();
-        map.insert(waiter_id, KernelSync::new(arc))
+        map.insert(waiter_id, KernelSync::new(target))
     };
     // A task can only be parked in one wait at a time; a pre-existing entry
     // would be a bug, but release it off-lock rather than leak.
@@ -2014,7 +2012,7 @@ pub fn release_wait_ref(waiter_id: u32) {
     wait_ref_release(waiter_id);
 }
 
-pub(crate) fn wake_blocked_task(task: &KArc<Task>, task_id: u32) -> c_int {
+pub(crate) fn wake_blocked_task(task: &TaskRef, task_id: u32) -> c_int {
     // `Blocked` is the only blockable intermediate state. Wake-side must either
     // observe an existing scheduler owner (ready queue / remote inbox /
     // migration), or acquire the explicit `Waking` publication token before it
@@ -2157,7 +2155,7 @@ pub(crate) fn wake_blocked_task(task: &KArc<Task>, task_id: u32) -> c_int {
     }
 }
 
-pub fn unblock_task(task: &KArc<Task>) -> c_int {
+pub fn unblock_task(task: &TaskRef) -> c_int {
     let task_id = task_id_of(&**task).unwrap_or(INVALID_TASK_ID);
     wake_blocked_task(task, task_id)
 }
@@ -2172,7 +2170,7 @@ pub fn unblock_task_id(task_id: u32) -> c_int {
     let Some(task) = crate::task::task_find_by_id(task_id) else {
         return -1;
     };
-    wake_blocked_task(task.arc(), task_id)
+    wake_blocked_task(&task, task_id)
 }
 
 /// Unified task exit for all CPUs.
@@ -2664,9 +2662,9 @@ fn rescue_check_task(guard: &crate::task::TaskRef) {
     let cpu_id = slopos_arch::pcr::get_current_cpu();
     let enqueue_status = per_cpu::with_cpu_scheduler(cpu_id, |sched| {
         if placement == SchedPlacement::Waking {
-            sched.enqueue_waking(guard.arc())
+            sched.enqueue_waking(guard)
         } else {
-            sched.enqueue_local_with_status(guard.arc())
+            sched.enqueue_local_with_status(guard)
         }
     })
     .unwrap_or(-1);

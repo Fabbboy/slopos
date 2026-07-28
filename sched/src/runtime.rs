@@ -148,7 +148,7 @@ impl KernelThreadSpawner for KernelThreadSpawnerImpl {
             let _ = task_terminate(task_id);
             return Err(SpawnError::OutOfTaskIds);
         };
-        if publish_new_task(task.arc()) != 0 {
+        if publish_new_task(&task) != 0 {
             let _ = task_terminate(task_id);
             return Err(SpawnError::ScheduleFailed);
         }

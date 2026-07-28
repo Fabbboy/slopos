@@ -364,7 +364,7 @@ pub fn spawn_program_with_attrs(
         // The Release ordering on the status store inside `publish_new_task`
         // is what makes every write above visible to the CPU that eventually
         // runs this task.
-        if publish_new_task(registered.arc()) != 0 {
+        if publish_new_task(&registered) != 0 {
             task_terminate(task_id);
             return Err(ExecError::NoMem);
         }

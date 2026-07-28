@@ -9,7 +9,7 @@ use slopos_ostd::task::accessors::{
     TASK_EXIT_CLEANUP_ACCOUNTED, TASK_EXIT_CLEANUP_RESOURCES, TASK_EXIT_CLEANUP_VM,
     task_exit_cleanup_mark,
 };
-use slopos_ostd::{KArc, klog_debug, klog_info};
+use slopos_ostd::{klog_debug, klog_info};
 
 use slopos_ostd::task::accessors::task_process_group;
 use slopos_ostd::task::new_session_group;
@@ -45,7 +45,7 @@ use slopos_mm::process_vm::{
 };
 use slopos_mm::user_copy::copy_to_user;
 use slopos_mm::user_ptr::UserPtr;
-use slopos_ostd::task::{TaskAddr, task_placement_clone};
+use slopos_ostd::task::TaskAddr;
 
 slopos_ostd::extern_block! {
     mod task_externs {
@@ -761,10 +761,10 @@ pub fn task_terminate(task_id: u32) -> c_int {
     //
     // Holding it for the whole function is what lets the teardown below work
     // from a borrow: nothing it calls can be the last release.
-    let target: Option<KArc<Task>> = if task_id == u32::MAX {
-        NonNull::new(scheduler::scheduler_get_current_task()).map(task_placement_clone)
+    let target: Option<TaskRef> = if task_id == u32::MAX {
+        NonNull::new(scheduler::scheduler_get_current_task()).map(TaskRef::clone_of)
     } else {
-        task_find_by_id(task_id).map(TaskRef::into_arc)
+        task_find_by_id(task_id)
     };
 
     let Some(target) = target else {
@@ -783,7 +783,7 @@ pub fn task_terminate(task_id: u32) -> c_int {
     };
 
     let task: &Task = &target;
-    let task_ptr = KArc::as_ptr(&target) as *mut Task;
+    let task_ptr = target.as_ptr();
     let resolved_id = if task_id == u32::MAX {
         task.task_id
     } else {
@@ -1063,7 +1063,7 @@ fn parent_alive_for(parent_id: u32) -> bool {
 /// reference and reaps itself when it exits.
 fn reparent_and_reap_children(dying: &Task) {
     while let Some(child) = super::take_one_child(dying) {
-        let child_ptr = KArc::as_ptr(&child) as *mut Task;
+        let child_ptr = child.as_ptr();
         let child_id = task_id_of(child_ptr).unwrap_or(INVALID_TASK_ID);
         super::task_accessors::task_set_parent_task_id(child_ptr, INVALID_TASK_ID);
         let orphaned_zombie =
@@ -1372,7 +1372,7 @@ pub fn task_fork(
     // Publish Ready only after all child-specific fields are fully initialized.
     // `publish_new_task` reserves scheduler placement before setting Ready, so
     // the child is never visible as Ready with no runqueue/inbox owner.
-    if scheduler::publish_new_task(registered.arc()) != 0 {
+    if scheduler::publish_new_task(&registered) != 0 {
         klog_info!("fork: initial runnable publish failed for task {child_task_id}");
         let _ = task_terminate(child_task_id);
         return INVALID_TASK_ID;
@@ -1629,7 +1629,7 @@ pub fn task_clone(
     // Publish Ready only after all child-specific fields are fully initialized.
     // `publish_new_task` reserves scheduler placement before setting Ready, so
     // the child is never visible as Ready with no runqueue/inbox owner.
-    if scheduler::publish_new_task(registered.arc()) != 0 {
+    if scheduler::publish_new_task(&registered) != 0 {
         klog_info!("clone: initial runnable publish failed for task {child_task_id}");
         let _ = task_terminate(child_task_id);
         return Err(ERRNO_EAGAIN);

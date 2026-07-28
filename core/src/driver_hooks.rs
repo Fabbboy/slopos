@@ -55,7 +55,7 @@ fn runtime_signal_process_group(pgid: u32, signum: u8) -> bool {
             return;
         }
         if task_signal_post(task.as_ptr(), signum) {
-            let _ = scheduler::unblock_task(task.arc());
+            let _ = scheduler::unblock_task(task);
         }
         matched = true;
     });
@@ -75,7 +75,7 @@ fn runtime_signal_session(sid: u32, signum: u8) -> bool {
             return;
         }
         if task_signal_post(task.as_ptr(), signum) {
-            let _ = scheduler::unblock_task(task.arc());
+            let _ = scheduler::unblock_task(task);
         }
         matched = true;
     });

@@ -344,7 +344,7 @@ fn wake_sleeping_task(task_id: u32) -> WakeVerdict {
     // publishing Ready, and queues/inboxes exactly once. Its totality
     // contract guarantees it returns only once the task is published or
     // observably no longer Blocked — so reaching here is conclusive.
-    let rc = wake_blocked_task(task_ref.arc(), task_id);
+    let rc = wake_blocked_task(&task_ref, task_id);
     if rc != 0 {
         slopos_ostd::klog_info!(
             "SCHED: sleep wake failed to publish READY task {} (rc={})",
