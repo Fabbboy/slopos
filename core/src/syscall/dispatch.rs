@@ -157,17 +157,13 @@ fn debug_assert_erestartsys_not_leaked(ctx_ptr: *mut UserContext) {
 /// handlers without going through the full ISR entry.
 pub fn dispatch_handler(
     handler: crate::syscall::common::SyscallHandler,
-    task: *mut Task,
+    task: &slopos_sched::task::TaskRef,
     frame: &mut UserContext,
 ) -> SyscallResult {
-    // Test entry point: the fixture may have no current task, so the caller
-    // supplies the task by id and we resolve a registry guard for it.
-    let Some(guard) = slopos_sched::task::task_find_by_id(
-        slopos_sched::task::task_id_of(task).unwrap_or(slopos_abi::task::INVALID_TASK_ID),
-    ) else {
-        return SyscallResult::Err(Errno::EINVAL);
-    };
-    let ctx = SyscallContext::from_task_ref(&guard, frame);
+    // Test entry point: the fixture parks the BSP on a bootstrap stub, so
+    // `Current::get()` yields nothing and the caller supplies the task as the
+    // registry guard it already holds.
+    let ctx = SyscallContext::from_task_ref(task, frame);
     let result = handler(&ctx);
     ctx.write_result(result);
     result
