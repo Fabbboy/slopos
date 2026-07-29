@@ -215,6 +215,30 @@ pub fn task_placement_retain<K, U>(ptr: NonNull<TaskInner<K, U>>) {
     core::mem::forget(task_placement_clone(ptr));
 }
 
+/// Borrow a task through a reference some container has parked on it.
+///
+/// The counterpart to [`with_parked`] for the *other* kind of unowned node: not
+/// a task nobody can reach any more, but one whose owning reference lives in a
+/// container rather than in the caller's frame. A ready queue peeking at its
+/// tail, or a wait map's predicate, holds only the node — reclaiming to read it
+/// would take a membership the container still owns.
+///
+/// Scoped rather than returning a reference, so the borrow's lifetime is the
+/// call and the caller cannot choose it.
+///
+/// # Correctness
+/// Same liveness contract as [`task_placement_clone`]: the caller must hold, or
+/// be covered by, a live strong reference to `node` for the duration.
+#[inline]
+pub fn with_parked_node<K, U, R>(
+    node: NonNull<TaskInner<K, U>>,
+    f: impl FnOnce(&TaskInner<K, U>) -> R,
+) -> R {
+    // SAFETY: per the contract the caller is covered by a live strong
+    // reference, so the body is initialised and stays so across `f`.
+    f(unsafe { node.as_ref() })
+}
+
 /// Whether a task a caller has parked a reference on has finished exiting.
 ///
 /// The one read the `waitpid` predicate needs, and the reason it has to live
@@ -236,10 +260,7 @@ pub fn task_placement_retain<K, U>(ptr: NonNull<TaskInner<K, U>>) {
 /// be covered by, a live strong reference to `node` for the duration.
 #[inline]
 pub fn parked_task_has_exited<K, U>(node: NonNull<TaskInner<K, U>>) -> bool {
-    // SAFETY: per the contract the caller is covered by a live strong
-    // reference, so the body is initialised and stays so across both loads.
-    let task = unsafe { node.as_ref() };
-    task.exit_info().is_set() || task.is_exited()
+    with_parked_node(node, |task| task.exit_info().is_set() || task.is_exited())
 }
 
 /// Reverse a detached intrusive chain, returning its new head and node count.
