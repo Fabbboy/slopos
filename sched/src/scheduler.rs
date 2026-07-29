@@ -198,7 +198,7 @@ use slopos_ostd::cpu::x86_64::xsave::active_xcr0;
 use slopos_ostd::task::switch::switch_context;
 
 use super::ffi_boundary::kernel_stack_top;
-use crate::task_struct::Current;
+use crate::task_struct::{Current, Idle};
 
 fn get_default_time_slice() -> u64 {
     SCHED_DEFAULT_TIME_SLICE as u64
@@ -233,49 +233,6 @@ fn save_live_recovery_depth(task: *mut Task) {
 fn restore_live_recovery_depth(task: *mut Task) {
     slopos_arch::pcr::recovery_depth_store(task_recovery_depth_load(task));
     slopos_arch::pcr::panic_in_flight_store(task_panic_in_flight_load(task));
-}
-
-#[inline]
-fn scheduler_tasks_for_cpu(cpu_id: usize) -> (*mut Task, *mut Task) {
-    let mut current = scheduler_get_current_task_for(cpu_id);
-    let mut idle = scheduler_get_idle_task_for(cpu_id);
-
-    if !idle.is_null() && !task_pointer_is_valid(idle) {
-        klog_info!(
-            "SCHED: CPU {} has corrupted idle task pointer {:p}; disabling scheduler view",
-            cpu_id,
-            idle
-        );
-        idle = ptr::null_mut();
-    }
-
-    if !current.is_null() && !task_pointer_is_valid(current) {
-        klog_info!(
-            "SCHED: CPU {} has corrupted current task pointer {:p}; recovering",
-            cpu_id,
-            current
-        );
-        current = if idle.is_null() {
-            ptr::null_mut()
-        } else {
-            idle
-        };
-        // Quiet log-and-continue semantic: `dispatch()` isn't
-        // appropriate here because its non-null assert would panic
-        // on a null fallback when both current and idle are corrupt.
-        // PCR is the source of truth for SafeStack readers.
-        if !current.is_null() {
-            slopos_arch::pcr::set_current_task(
-                current as *mut (),
-                task_id_of(current).unwrap_or(INVALID_TASK_ID),
-                published_priority(current),
-            );
-            restore_live_recovery_depth(current);
-            task_set_status(current, TaskStatus::Running);
-        }
-    }
-
-    (current, idle)
 }
 
 #[inline]
@@ -1611,16 +1568,23 @@ fn schedule_internal() {
         return;
     }
 
-    let (current, idle_task) = scheduler_tasks_for_cpu(cpu_id);
+    // Both endpoints of the switch this CPU may be about to make, minted here
+    // and never inside `run_switch`'s closures: a guard is address-taken, so
+    // the frame that holds it must be allocated while the *outgoing* task is
+    // still published or its SafeStack reservation is released against the
+    // wrong data stack. This frame straddles the switch, so it is the right
+    // place; see `slopos_ostd::task::run_switch`.
+    let idle = Idle::current();
+    let current = Current::get();
 
     per_cpu::with_cpu_scheduler(cpu_id, |sched| {
         sched.increment_schedule_calls();
     });
 
-    if idle_task.is_null() {
+    let Some(idle) = idle else {
         cpu::restore_flags(irq_flags);
         return;
-    }
+    };
 
     // Invariant gate:
     // every context switch funnels through here, and a switch may only
@@ -1632,8 +1596,11 @@ fn schedule_internal() {
     // corrupting the count into a later, context-free underflow panic.
     assert_switch_preempt_safe();
 
-    if current == idle_task {
-        let _ = run_ready_task_from_idle(cpu_id, idle_task);
+    // A CPU with no current task is *not* running idle: it is parked on a
+    // pre-heap bootstrap stub, and its first switch out of the boot context
+    // takes the `prev = None` path below rather than the idle dispatcher.
+    if current.as_ref().is_some_and(|c| c.addr() == idle.addr()) {
+        let _ = run_ready_task_from_idle(cpu_id, idle.as_ptr());
         // Drain the deferred reference before re-enabling interrupts. The drain
         // clears the CPU-local previous-task slot while interrupts are still
         // disabled, then drops the reference in its own interrupt window.
@@ -1649,7 +1616,11 @@ fn schedule_internal() {
     // "wake-before-switch-complete" SMP race.  The re-enqueue happens in
     // run_ready_task_from_idle (the idle resumption point) AFTER
     // execute_task returns and on_cpu is cleared.
-    switch_from_current_to_idle(cpu_id, current, idle_task);
+    switch_from_current_to_idle(
+        cpu_id,
+        current.map_or(ptr::null_mut(), |c| c.as_ptr()),
+        idle.as_ptr(),
+    );
     cpu::restore_flags(irq_flags);
 }
 
@@ -2442,8 +2413,12 @@ pub fn scheduler_timer_tick() {
         slopos_ostd::sync::rcu_raise_softirq();
     }
 
-    let (current, idle_task) = scheduler_tasks_for_cpu(cpu_id);
-    let running_idle = !current.is_null() && current == idle_task;
+    let idle = Idle::current();
+    let current = Current::get();
+    let running_idle = match (&current, &idle) {
+        (Some(current), Some(idle)) => current.addr() == idle.addr(),
+        _ => false,
+    };
 
     // Unconditional tick accounting:
     // every timer interrupt is counted regardless of preemption state.
@@ -2475,25 +2450,25 @@ pub fn scheduler_timer_tick() {
         return;
     }
 
-    if current.is_null() {
+    let Some(current) = current else {
         return;
-    }
+    };
 
-    if current == idle_task {
+    if running_idle {
         mark_preempt_if_ready(cpu_id);
         return;
     }
 
-    if task_has_no_preempt_flag(current) {
+    if task_has_no_preempt_flag(current.as_ptr()) {
         return;
     }
 
-    if consume_time_slice(current) {
+    if consume_time_slice(current.as_ptr()) {
         return;
     }
 
     if scheduler_ready_count(cpu_id) == 0 {
-        reset_task_quantum(current);
+        reset_task_quantum(current.as_ptr());
         return;
     }
 
