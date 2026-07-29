@@ -40,6 +40,48 @@ These gates enforce the discipline. The source-scanning gates run via `just chec
 
 The in-place-init primitive (`slopos_ostd::Init<T, E>`, `Zeroable`, `init_from_closure`, `init_zeroed`) is **in-house** — defined in `slopos-ostd/src/mm/init.rs` with no external dependency on `pinned-init` or Rust-for-Linux's `pin-init`. Large structs must be constructed via `KBox::try_init(T::init_…())` / `PinBox::try_init(T::init_…())` so the `T` rvalue never materialises on the caller's stack. `check_stack_sizes.sh` enforces the upper bound from the other direction.
 
+### Task-ownership discipline
+
+**`KArc<Task>` is the only owning handle for a task, and `TaskRef` is the only
+way to hold one outside `slopos-ostd`.** A raw task pointer says nothing about
+whether the task is still alive, whether anyone else is mutating it, or who is
+responsible for tearing it down; the owning handle says all three.
+CI-enforced by `scripts/check_task_ownership.sh` (run from
+`just check-framekernel`, hard-failing), whose header documents each check.
+
+The invariants the gate protects:
+
+- **I1** Raw task pointers exist only inside the ostd placement/link
+  primitives, the PCR slots, and the pre-heap `.bss` stubs — the surfaces the
+  gate lists as sanctioned. Everything else binds `&Task`, a guard, or a
+  `TaskRef`.
+- **I2** Linked implies owned: a task on any queue, inbox or wait map has its
+  owning reference held *by that container*, moved in and out only through
+  `slopos_ostd::task::placement`.
+- **I3** The final drop never runs on the dying task's own stack, never with
+  IRQs disabled, and never under a lock. `task_put` is the sole release; its
+  destructor frees to the buddy allocator, whose reuse path performs
+  synchronous cross-CPU TLB drains.
+- **I4** Wake and enqueue allocate nothing; a `KArc` clone is one atomic.
+- **I5** `current` is a borrow (`CurrentTask`), never an owned handle. PCR
+  offset 40 stays raw and ABI-frozen. `IdleTask` is the same shape for the
+  idle slot.
+- **I6** Lookup is weak-upgrade only. Fabricating a strong reference from a
+  raw pointer is not a thing that can be written.
+- **I7** `KArc` is fallible everywhere and saturates on refcount overflow.
+- **I8** **No owning task handle may live in a stack frame that can
+  deschedule.** SlopOS tears such a task down from another CPU without
+  unwinding, so the handle is never dropped and the task leaks with its stacks
+  and its address space. Park it somewhere that outlives the frame (see
+  `sched/src/task/pending_spawn.rs` and the wait-reference map in
+  `scheduler.rs`), or cover the frame with a `PreemptGuard` and keep it
+  non-blocking — `assert_switch_preempt_safe` turns a violation of the latter
+  into a panic naming the frame.
+
+I1–I7 are machine-checked in `verification/proofs/task_ownership.rs`; read that
+file's header before changing `task_is_dispatch_pinned`, because the proof
+keeps verifying whether or not the model still describes the tree.
+
 ## Testing Guidelines
 The kernel ships a per-test harness that boots under QEMU, runs every `stest!`/`utest!` registration in lex order, and reports results over the serial console in KTAP grammar. The host wrapper at `tools/run_tests/` (Go, builds to `builddir/run_tests`) parses that stream and renders a live progress bar + per-failure detail blocks. Before sending changes, run `just test` (non-interactive, auto-shutdown). For manual inspection use `just boot` (interactive) or `just boot-log` to capture a serial transcript in `test_output.log` (append `VIDEO=1` if you need a visible framebuffer). Note any observed regressions or warnings in your PR description.
 

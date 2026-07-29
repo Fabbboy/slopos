@@ -369,9 +369,6 @@ check-no-kernel-async:
 # Requires a prior `just build` so check_stack_sizes.sh has a kernel.elf
 # to inspect.
 #
-# TASK_OWNERSHIP_GATE_WARN=1: the KArc<Task> migration is landing in
-# stages, so the task-ownership gate reports its backlog without failing
-# the build. Drop the variable at migration closeout to make it hard.
 [doc("Run the framekernel gate scripts only — no fmt, KernMiri, or Verus (requires a prior `just build`)")]
 check-framekernel-gates:
     scripts/check_vendor_pin.sh
@@ -382,7 +379,7 @@ check-framekernel-gates:
     scripts/check_stack_sizes.sh {{build_dir}}/kernel.elf
     scripts/check_kernel_softfloat.sh {{build_dir}}/kernel.elf
     scripts/check_wait_predicate_purity.sh
-    TASK_OWNERSHIP_GATE_WARN=1 scripts/check_task_ownership.sh
+    scripts/check_task_ownership.sh
     scripts/tcb_ratio.sh --max 1.0
 
 # Run every framekernel-discipline gate in one shot. Requires a prior

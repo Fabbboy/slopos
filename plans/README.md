@@ -15,7 +15,7 @@ editing.
 | Document | Scope |
 |----------|-------|
 | `KNOWN_ISSUES.md` | Working notes on open issues; verify before using as source of truth |
-| `RAW_PTR_TO_KARC_MIGRATION.md` | Finish the `*mut Task` excision: register state behind exclusivity witnesses, `current` as a borrow, the accessor layer retyped to references, and a machine-checked ownership core |
+| `RAW_PTR_TO_KARC_MIGRATION.md` | Retire the last three unconstrained-lifetime borrow helpers (page-table walk, `UserContext`, `ptr_buf`); the task-ownership gate is otherwise hard and green |
 | `driver-framework-base.html` | Driver-framework base: unified Bus model, platform/ACPI registry, deferred-probe/hotplug/unbind |
 | `microtransactions.md` | Kernel microtransaction layer on W/L currency; Phase 1 = pay-to-boot gate |
 | `usb-xhci.md` | USB/xHCI stack: host controller, enumeration, HID input, mass storage |

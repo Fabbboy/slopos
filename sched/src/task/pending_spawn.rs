@@ -284,11 +284,10 @@ impl Drop for SpawnGuard {
         let Some(token) = self.take_token() else {
             return;
         };
-        debug_assert_eq!(
-            held_lock_count(),
-            0,
-            "a spawn token was abandoned under a lock"
-        );
+        // Off the spine lock by construction: `take_token` releases it before
+        // returning. No assertion here — a `Drop` that can panic is its own
+        // hazard, and `scripts/check_drop_panic_free.sh` says so; the
+        // equivalent check lives on `release_parked_spawn`, which is not one.
         task_abandon(token);
     }
 }
