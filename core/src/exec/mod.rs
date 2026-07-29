@@ -33,10 +33,8 @@ use slopos_ostd::klog_info;
 use slopos_abi::task::INVALID_TASK_ID;
 use slopos_ostd::task::new_group_in_session;
 use slopos_sched::scheduler::publish_new_task;
+use slopos_sched::task::{SpawnGuard, link_child, task_build, task_find_by_id, task_terminate};
 use slopos_sched::task::{TaskEntry, task_default_signals_in_mask, task_entry_from_kernel_va};
-use slopos_sched::task::{
-    link_child, task_abandon, task_build, task_commit, task_find_by_id, task_terminate,
-};
 
 pub const EXEC_MAX_PATH: usize = 256;
 pub const EXEC_MAX_ARG_STRLEN: usize = 4096;
@@ -192,6 +190,46 @@ fn task_name_from_path(path: &[u8]) -> Result<[u8; TASK_NAME_MAX_LEN], ExecError
     Ok(name)
 }
 
+/// The job-control identity a spawned child inherits from its parent.
+///
+/// Split out because minting a group for `TASK_FLAG_NEW_PGRP` allocates, and
+/// the field block it used to sit in now runs preempt-disabled inside
+/// `SpawnGuard::with_child`. Depends only on the parent and the child's id —
+/// never on the child — which is what makes the hoist a pure move rather than a
+/// reordering.
+struct InheritedJobControl {
+    pgid: u32,
+    sid: u32,
+    ctty: Option<slopos_abi::syscall::TtyIndex>,
+    group: Option<slopos_ostd::KArc<slopos_ostd::task::ProcessGroup>>,
+}
+
+/// Point the child's group at the same identity its inherited pgid names: a
+/// fresh group in the parent's session for `NEW_PGRP`, otherwise the parent's
+/// own group.
+fn resolve_inherited_job_control(
+    parent: &slopos_sched::task_struct::Task,
+    child_task_id: u32,
+    flags: u16,
+) -> InheritedJobControl {
+    let new_pgrp = flags & slopos_abi::task::TASK_FLAG_NEW_PGRP != 0;
+    let (pgid, group) = if new_pgrp {
+        let group = parent
+            .process_group
+            .load()
+            .and_then(|pg| new_group_in_session(child_task_id, pg.session().clone()));
+        (child_task_id, group)
+    } else {
+        (parent.pgid(), parent.process_group.load())
+    };
+    InheritedJobControl {
+        pgid,
+        sid: parent.sid(),
+        ctty: parent.controlling_tty(),
+        group,
+    }
+}
+
 pub fn spawn_program_with_attrs(
     path: &[u8],
     argv: Option<&[&[u8]]>,
@@ -218,7 +256,7 @@ pub fn spawn_program_with_attrs(
         // already complete. That is what lets the field writes be a plain
         // exclusive borrow rather than an unwitnessed write into a published
         // allocation.
-        let Some(mut pending) = task_build(
+        let Some(pending) = task_build(
             task_name.as_ptr() as *const c_char,
             user_code_entry,
             ptr::null_mut(),
@@ -227,14 +265,24 @@ pub fn spawn_program_with_attrs(
         ) else {
             return Err(ExecError::NoMem);
         };
-        let task_id = pending.id();
-        let process_id = pending.as_mut().process_id;
+        // Parked before the first blocking call below. The token is the only
+        // reference to a child that already owns its kernel stack, data stack
+        // and process VM, and this frame is about to block: a `SIGKILL` here
+        // reaps the spawner without unwinding, so a token left on the stack is
+        // never released and nothing afterwards can find the orphan. Every exit
+        // from here on — `?`, an early `return`, or an asynchronous kill that
+        // never returns at all — releases it.
+        let Ok(mut spawn) = SpawnGuard::park(pending) else {
+            return Err(ExecError::NoMem);
+        };
+        let task_id = spawn.child_id();
+        let process_id = spawn.child_process_id();
 
         let mut entry = 0u64;
         let mut stack_ptr = 0u64;
         let mut tls_tp = 0u64;
 
-        if let Err(err) = do_exec(
+        do_exec(
             process_id,
             normalized_path,
             argv,
@@ -242,10 +290,7 @@ pub fn spawn_program_with_attrs(
             &mut entry,
             &mut stack_ptr,
             &mut tls_tp,
-        ) {
-            task_abandon(pending);
-            return Err(err);
-        }
+        )?;
 
         // Build the child's fd table from the action allow-list. The child
         // starts empty; each action installs exactly what it inherits. A caller
@@ -254,13 +299,9 @@ pub fn spawn_program_with_attrs(
         if parent_process_id != INVALID_PROCESS_ID {
             fileio_destroy_table_for_process(process_id);
             if fileio_create_empty_table_for_process(process_id) != 0 {
-                task_abandon(pending);
                 return Err(ExecError::NoMem);
             }
-            if let Err(err) = apply_fd_actions(parent_process_id, process_id, actions) {
-                task_abandon(pending);
-                return Err(err);
-            }
+            apply_fd_actions(parent_process_id, process_id, actions)?;
         }
 
         // Job control is inherited from the parent task so spawned children
@@ -270,9 +311,16 @@ pub fn spawn_program_with_attrs(
         // Resolved before the child borrow opens, so the two live at once.
         let parent_ref = task_find_by_id(parent_task_id);
 
-        let mut fg_handoff: Option<(slopos_abi::syscall::TtyIndex, u32, u32)> = None;
-        {
-            let child = pending.as_mut();
+        // Resolved — and, for NEW_PGRP, allocated — before the child borrow
+        // opens. The borrow below runs preempt-disabled so the frame cannot be
+        // torn down while it holds the token, and a fresh group object is a
+        // fallible allocation that has no business inside an otherwise
+        // infallible run of field writes.
+        let inherited = parent_ref
+            .as_ref()
+            .map(|parent| resolve_inherited_job_control(parent, task_id, flags));
+
+        let Some((fg_handoff, displaced_group)) = spawn.with_child(|child| {
             child.entry_point = entry;
             child.context.get_mut().rip = entry;
             child.context.get_mut().rsp = stack_ptr;
@@ -296,40 +344,33 @@ pub fn spawn_program_with_attrs(
                 task_default_signals_in_mask(child, sigdefault_mask);
             }
 
-            if let Some(parent) = parent_ref.as_ref() {
-                // Point the child's group object at the same identity its
-                // inherited pgid names: a fresh group in the parent's session
-                // for NEW_PGRP, otherwise the parent's own group. Exclusive
-                // rather than an RCU store — the child is unreachable, so there
-                // is no reader to defer a release past.
-                let group = if flags & slopos_abi::task::TASK_FLAG_NEW_PGRP != 0 {
-                    child.set_pgid(task_id);
-                    parent
-                        .process_group
-                        .load()
-                        .and_then(|pg| new_group_in_session(task_id, pg.session().clone()))
-                } else {
-                    child.set_pgid(parent.pgid());
-                    parent.process_group.load()
-                };
-                let _ = child.process_group.replace_exclusive(group);
-                child.set_sid(parent.sid());
-                child.set_controlling_tty(parent.controlling_tty());
+            let Some(inherited) = inherited else {
+                return (None, None);
+            };
+            child.set_pgid(inherited.pgid);
+            child.set_sid(inherited.sid);
+            child.set_controlling_tty(inherited.ctty);
+            // Exclusive rather than an RCU store — the child is unreachable, so
+            // there is no reader to defer a release past. The displaced handle
+            // travels out: dropping a `KArc` here could reach the buddy
+            // allocator's reuse path, which is what the preempt guard forbids.
+            let displaced = child.process_group.replace_exclusive(inherited.group);
 
-                if flags & slopos_abi::task::TASK_FLAG_FOREGROUND != 0
-                    && child.pgid() != 0
-                    && let Some(ctty) = child.controlling_tty()
-                {
-                    fg_handoff = Some((ctty, child.pgid(), child.sid()));
-                }
-            }
-        }
+            let fg = (flags & slopos_abi::task::TASK_FLAG_FOREGROUND != 0 && inherited.pgid != 0)
+                .then_some(inherited.ctty)
+                .flatten()
+                .map(|ctty| (ctty, inherited.pgid, inherited.sid));
+            (fg, displaced)
+        }) else {
+            return Err(ExecError::NoMem);
+        };
+        drop(displaced_group);
 
         // Every field the spawn owns is written, so the task can become
         // reachable. It is findable from here but still not runnable:
         // `publish_new_task` below is the sole schedulable edge, matching
         // Linux's wake_up_new_task() pattern.
-        let Some(registered) = task_commit(pending) else {
+        let Some(registered) = spawn.commit() else {
             return Err(ExecError::NoMem);
         };
 
