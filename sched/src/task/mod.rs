@@ -34,7 +34,7 @@ pub use task_session::*;
 pub use task_state::*;
 pub use task_stats::*;
 pub use task_table::*;
-pub use user_ctx_init::{init_user_ctx_for_new_task, init_user_ctx_from_parent_frame};
+pub use user_ctx_init::init_user_ctx_for_new_task;
 
 /// Kernel-task entry-point function pointer.
 ///

@@ -1229,7 +1229,7 @@ fn flush_live_fpu_for_clone(parent: &Task) {
 
 pub fn task_fork(
     parent: &Task,
-    parent_user_ctx: *const slopos_ostd::user::context::UserContext,
+    parent_user_ctx: Option<&slopos_ostd::user::context::UserContext>,
 ) -> u32 {
     flush_live_fpu_for_clone(parent);
 
@@ -1324,32 +1324,16 @@ pub fn task_fork(
     child.kernel_stack_size = TASK_KERNEL_STACK_SIZE;
 
     // OSTD user-mode entry: seed `child.user_ctx` from the parent's
-    // syscall-time UserContext (when supplied) with rax forced to 0
-    // for fork's child return, and set up the kernel stack so
-    // `switch_registers` rets into `user_task_first_run`. The caller-
-    // facing contract on `parent_user_ctx` (null or valid snapshot)
-    // is upheld by `task_fork`'s callers in the syscall layer;
-    // OSTD's `try_borrow_ref` carries the one `unsafe` deref.
-    // Anchored on a frame-local rather than scoped in a closure: these two
-    // builders sit within 100 bytes of the 2 KiB frame gate, and a closure's
-    // captures were enough to push them over.
-    let ctx_anchor = ();
-    let parent_ctx_opt = slopos_ostd::util::ptr_buf::try_anchored_ref::<
-        _,
-        slopos_ostd::user::context::UserContext,
-    >(&ctx_anchor, parent_user_ctx);
-    if let Some(parent_ctx) = parent_ctx_opt {
-        let mut regs = parent_ctx.regs();
-        regs.rax = 0;
-        child.user_ctx.get_mut().set_regs(regs);
-    } else {
-        // No parent UserContext available — `clone_from_raw` already
-        // copied the parent's `user_ctx` into the child; force rax to
-        // 0 through `set_regs` so CS/SS/RFLAGS-mask invariants hold.
-        let mut regs = child.user_ctx.get_mut().regs();
-        regs.rax = 0;
-        child.user_ctx.get_mut().set_regs(regs);
-    }
+    // syscall-time UserContext when one is supplied, and otherwise from
+    // the copy `clone_from_raw` already made. Either way rax is forced
+    // to 0 for fork's child return, and through `set_regs` so the
+    // CS/SS/RFLAGS-mask invariants hold.
+    let mut regs = match parent_user_ctx {
+        Some(parent_ctx) => parent_ctx.regs(),
+        None => child.user_ctx.get_mut().regs(),
+    };
+    regs.rax = 0;
+    child.user_ctx.get_mut().set_regs(regs);
     // SAFETY: child kernel stack was just allocated and is writable.
     *child.switch_ctx.get_mut() = build_user_task_entry_frame(child.kernel_stack_top);
     child.context_from_user.store(0, Ordering::Relaxed);
@@ -1407,7 +1391,7 @@ pub fn task_fork(
 
 pub fn task_clone(
     parent: &Task,
-    parent_user_ctx: *const slopos_ostd::user::context::UserContext,
+    parent_user_ctx: Option<&slopos_ostd::user::context::UserContext>,
     flags: u64,
     child_stack: u64,
     parent_tidptr: u64,
@@ -1551,12 +1535,7 @@ pub fn task_clone(
     // parent's `user_ctx` as the fallback when no live snapshot is
     // supplied.
     {
-        let ctx_anchor = ();
-        let parent_ctx_opt = slopos_ostd::util::ptr_buf::try_anchored_ref::<
-            _,
-            slopos_ostd::user::context::UserContext,
-        >(&ctx_anchor, parent_user_ctx);
-        let mut regs = match parent_ctx_opt {
+        let mut regs = match parent_user_ctx {
             Some(parent_ctx) => parent_ctx.regs(),
             None => child.user_ctx.get_mut().regs(),
         };
