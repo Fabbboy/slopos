@@ -90,6 +90,16 @@ macro_rules! task_scalar_getters {
 /// UB, even though the two touch disjoint fields. A raw field write forms no
 /// reference and cannot invalidate anything. The getters are free to take a
 /// shared reference because shared borrows coexist.
+///
+/// This family is also why the setter surface is split by *provenance* rather
+/// than by the aliasing argument above. These rows write a plain field, so the
+/// pointer has to carry write provenance and the parameter stays `*mut`. The
+/// hand-written setters below — `task_set_status`, `task_set_on_cpu`,
+/// `task_recovery_depth_store`, `task_panic_in_flight_store`,
+/// `task_exit_cleanup_mark` — write through an atomic instead, so the write
+/// lands inside an `UnsafeCell` and a `*const` derived from a `&TaskInner` is
+/// sound. They take `*const` precisely so a caller holding a borrow can reach
+/// them: `&T` coerces to `*const T` and never to `*mut T`.
 macro_rules! task_scalar_setters {
     ($( $(#[$meta:meta])* $name:ident = $field:ident : $ty:ty ),+ $(,)?) => {$(
         $(#[$meta])*
@@ -241,7 +251,7 @@ pub fn task_is_invalid<K, U>(task: *const TaskInner<K, U>) -> bool {
 /// Drive `task->set_status(...)`. The atomic-state setter lives on
 /// `Task` itself; this helper centralises the unsafe deref.
 #[inline]
-pub fn task_set_status<K, U>(task: *mut TaskInner<K, U>, status: TaskStatus) {
+pub fn task_set_status<K, U>(task: *const TaskInner<K, U>, status: TaskStatus) {
     if task.is_null() {
         return;
     }
@@ -322,7 +332,7 @@ pub fn task_set_fs_base<K, U>(task: &TaskInner<K, U>, value: u64) {
 
 /// Save the task's panic-recovery nesting depth while it is not running.
 #[inline]
-pub fn task_recovery_depth_store<K, U>(task: *mut TaskInner<K, U>, depth: u32) {
+pub fn task_recovery_depth_store<K, U>(task: *const TaskInner<K, U>, depth: u32) {
     if task.is_null() {
         return;
     }
@@ -350,7 +360,7 @@ pub fn task_recovery_depth_load<K, U>(task: *const TaskInner<K, U>) -> u32 {
 
 /// Save the task's panic in-flight depth while it is not running.
 #[inline]
-pub fn task_panic_in_flight_store<K, U>(task: *mut TaskInner<K, U>, depth: u32) {
+pub fn task_panic_in_flight_store<K, U>(task: *const TaskInner<K, U>, depth: u32) {
     if task.is_null() {
         return;
     }
@@ -378,7 +388,7 @@ pub fn task_panic_in_flight_load<K, U>(task: *const TaskInner<K, U>) -> u32 {
 
 /// Mark exit-cleanup bits and return the bits that were newly set.
 #[inline]
-pub fn task_exit_cleanup_mark<K, U>(task: *mut TaskInner<K, U>, bits: u8) -> u8 {
+pub fn task_exit_cleanup_mark<K, U>(task: *const TaskInner<K, U>, bits: u8) -> u8 {
     if task.is_null() {
         return 0;
     }
@@ -461,7 +471,7 @@ pub fn task_install_idle_affinity<K, U>(task: *mut TaskInner<K, U>, mask: u32, l
 /// switching in, then clears to `false` after the outgoing context
 /// save completes.
 #[inline]
-pub fn task_set_on_cpu<K, U>(task: *mut TaskInner<K, U>, on: bool) {
+pub fn task_set_on_cpu<K, U>(task: *const TaskInner<K, U>, on: bool) {
     if task.is_null() {
         return;
     }
