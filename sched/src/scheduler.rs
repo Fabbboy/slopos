@@ -1898,9 +1898,10 @@ pub fn task_wait_for(task_id: u32) -> c_int {
         return -1;
     }
 
-    // The registry guard pins the target across the raw-pointer window
-    // below: `wait_ref_acquire` must record its reference before the last
-    // strong holder could destroy the task.
+    // The registry guard pins the target across the reads below, and is the
+    // reference `wait_ref_acquire` clones into the wait map — the map entry has
+    // to exist before the guard is dropped, or the last strong holder could
+    // destroy the task in between.
     let Some(target_guard) = super::task::task_find_by_id(task_id) else {
         // Already gone — waitpid semantics treat this as success.
         return 0;
@@ -1941,7 +1942,7 @@ pub fn task_wait_for(task_id: u32) -> c_int {
     // kernel-object lifecycle — the map entry IS the owning reference, and the
     // atomic `remove` elects the single releaser — mirrors `futex_remove_task`
     // and is the correct pattern under this kill model.
-    wait_ref_acquire(waiter_id, target);
+    wait_ref_acquire(waiter_id, &target_guard);
 
     // The WAIT_REFS entry now pins the target. Drop the registry guard
     // before parking: a waiter SIGKILL'd mid-wait never unwinds this stack,
@@ -1974,17 +1975,20 @@ pub fn task_wait_for(task_id: u32) -> c_int {
 static WAIT_REFS: SpinLock<KBTreeMap<u32, KernelSync<TaskRef>>> =
     SpinLock::new(KBTreeMap::new(), LOCK_LEVEL_RESOURCE);
 
-fn wait_ref_acquire(waiter_id: u32, target: *mut Task) {
-    let Some(node) = NonNull::new(target) else {
-        return;
-    };
+/// Record `waiter_id`'s owning reference on the task it is about to park on.
+///
+/// Takes the caller's guard rather than a pointer: `TaskRef::clone_of`'s
+/// contract is that the caller already holds a live strong reference, and
+/// `&TaskRef` is that contract written in the signature instead of in a comment
+/// above the call.
+fn wait_ref_acquire(waiter_id: u32, target: &TaskRef) {
     if waiter_id == INVALID_TASK_ID {
         return;
     }
     // The map entry owns a strong reference that pins the target — and the
     // `exit_info` cell the wait predicate reads — for the whole wait, even
     // after the target becomes a zombie.
-    let target = TaskRef::clone_of(node);
+    let target = TaskRef::clone_of(target.node());
     let stale = {
         let mut map = WAIT_REFS.lock();
         map.insert(waiter_id, KernelSync::new(target))
