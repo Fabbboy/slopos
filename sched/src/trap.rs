@@ -57,9 +57,12 @@ pub fn scheduler_handle_timer_interrupt(frame: *mut InterruptFrame) {
 }
 
 pub fn save_preempt_context(frame: *mut InterruptFrame) {
-    if frame.is_null() {
+    // The frame lives for exactly this handler invocation, so a frame-local
+    // is the honest anchor for a borrow of it.
+    let frame_anchor = ();
+    let Some(frame_ref) = InterruptFrame::from_ptr(&frame_anchor, frame) else {
         return;
-    }
+    };
 
     let Some(current) = crate::task_struct::Current::get() else {
         return;
@@ -67,10 +70,6 @@ pub fn save_preempt_context(frame: *mut InterruptFrame) {
     if current.task().flags & TASK_FLAG_USER_MODE == 0 {
         return;
     }
-    // OSTD's `borrow_ref` folds the one `unsafe` reborrow; the
-    // caller-supplied frame lives on the ISR stack for the duration
-    // of this call.
-    let frame_ref: &InterruptFrame = slopos_ostd::util::ptr_buf::borrow_ref(frame);
     if (frame_ref.cs & 3) != 3 {
         return;
     }

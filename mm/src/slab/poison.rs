@@ -2,15 +2,15 @@
 //!
 //! Bytes returned to the free pool are filled with [`POISON_FREED`]
 //! so a use-after-free reader sees a recognisable pattern instead of
-//! the previous owner's data. The fill is performed through OSTD's
-//! safe `ptr_buf::borrow_buf_mut` helper — the residual `unsafe` for
+//! the previous owner's data. The fill runs inside a closure handed to
+//! OSTD's scoped `ptr_buf::with_*` family — the residual `unsafe` for
 //! the raw-pointer-to-slice conversion lives inside OSTD.
 //!
 //! `USegment::write_bytes` is not used here because slab pages are
 //! kernel-owned memory (the `AnyUFrameMeta` safety contract in
 //! `slopos-ostd/src/mm/uframe.rs` excludes sensitive kernel metas
-//! from the untyped-byte-copy surface). `ptr_buf::borrow_buf_mut` is
-//! OSTD's canonical safe-byte-write primitive for this case.
+//! from the untyped-byte-copy surface). The scoped `ptr_buf::with_*`
+//! family is OSTD's canonical safe-byte-write primitive for this case.
 
 /// Byte pattern written into freed slab objects. Chosen so a
 /// use-after-free dereference fault on a typical pointer-shaped read

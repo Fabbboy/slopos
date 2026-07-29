@@ -81,7 +81,7 @@ impl ProcessPageDir {
     /// was produced by `kmalloc(size_of::<ProcessPageDir>())` +
     /// [`Self::init_in_kmalloc_slot`]. Returns `PhysAddr::NULL` if the
     /// handle is null. The raw-pointer deref is folded into OSTD's
-    /// `borrow_ref` helper so this site stays in safe Rust.
+    /// `with_ref` helper so this site stays in safe Rust.
     #[inline]
     pub fn pml4_phys_from_raw(page_dir: *mut ProcessPageDir) -> PhysAddr {
         if page_dir.is_null() {
