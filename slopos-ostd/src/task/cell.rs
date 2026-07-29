@@ -137,30 +137,6 @@ impl<T> TaskOwnCell<T> {
         self.value.get_mut()
     }
 
-    /// Unsynchronised **write** pointer for the paths that hold a task as a raw
-    /// pointer and have no witness to offer.
-    ///
-    /// One remains: the switch path's `prepare_switch_to` copies the outgoing
-    /// task's kernel return context with interrupts off and both tasks
-    /// dispatch-pinned. No witness is obtainable there — [`CurrentTask`] names
-    /// the incoming task by then, the [`SwitchWindow`]s cover the endpoints
-    /// rather than the round-trip slots, and `KArc::get_mut` fails against a
-    /// registered task's existence reference.
-    ///
-    /// So this is a named debt rather than a disguised one — greppable, and
-    /// deleted as each of those paths gains a witness it can carry, at which
-    /// point its caller moves to [`get_ptr`](Self::get_ptr) or
-    /// [`get_mut`](Self::get_mut).
-    ///
-    /// # Correctness
-    ///
-    /// The caller must have exclusive access to the task by an argument the
-    /// signature cannot carry, and must not retain the pointer past it.
-    #[inline]
-    pub fn as_ptr_nascent(&self) -> *mut T {
-        self.value.get()
-    }
-
     /// Unsynchronised read pointer, for diagnostics only.
     ///
     /// The contents may be written concurrently by the owning CPU, so the

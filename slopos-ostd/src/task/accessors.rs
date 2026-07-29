@@ -860,49 +860,6 @@ pub fn task_add_total_runtime<K, U>(task: *const TaskInner<K, U>, delta: u64) {
     unsafe { (*task).add_total_runtime(delta) };
 }
 
-/// PCR↔Task mirror used by the scheduler context-switch path.
-/// Saves the per-CPU PCR's user-mode round-trip slots onto `prev`,
-/// then loads `next`'s saved slots back into the PCR. Single source
-/// of truth for the "switch the user-mode round-trip" half of
-/// `prepare_switch_to`. Operates only on the current CPU's PCR.
-///
-/// # Preconditions
-/// - Caller has interrupts disabled.
-/// - `prev` and `next` are Task pointers pinned by their dispatch
-///   references (or null for `prev` on bootstrap entry).
-#[inline]
-pub fn task_pcr_round_trip_swap<K, U>(prev: *mut TaskInner<K, U>, next: *mut TaskInner<K, U>) {
-    use core::sync::atomic::Ordering;
-    // SAFETY: interrupts disabled by caller; the per-CPU PCR is
-    // stable for this CPU during a switch window. Each `(*prev)` /
-    // `(*next)` access is to a dispatch-pinned Task whose memory is
-    // valid for the duration of `prepare_switch_to`.
-    unsafe {
-        let pcr = crate::cpu::x86_64::pcr::current_pcr();
-        if !prev.is_null() {
-            (*prev)
-                .saved_user_ctx_ptr
-                .store(pcr.user_ctx_ptr.load(Ordering::Acquire), Ordering::Release);
-            core::ptr::copy_nonoverlapping(
-                pcr.kernel_return_ctx.get(),
-                (*prev).saved_kernel_return_ctx.as_ptr_nascent(),
-                1,
-            );
-        }
-        if !next.is_null() {
-            pcr.user_ctx_ptr.store(
-                (*next).saved_user_ctx_ptr.load(Ordering::Acquire),
-                Ordering::Release,
-            );
-            core::ptr::copy_nonoverlapping(
-                (*next).saved_kernel_return_ctx.as_ptr_racy(),
-                pcr.kernel_return_ctx.get(),
-                1,
-            );
-        }
-    }
-}
-
 /// Read `task->signal_actions[idx].handler` if `idx` is in range.
 #[inline]
 pub fn task_signal_handler<K, U>(task: *const TaskInner<K, U>, idx: usize) -> Option<u64> {

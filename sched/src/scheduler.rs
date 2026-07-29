@@ -145,11 +145,11 @@ use super::task::{
     task_exit_info_ref, task_fs_base, task_has_flag, task_id_of, task_is_exited, task_is_invalid,
     task_is_ready, task_is_running, task_kernel_stack_top, task_last_cpu, task_last_run_timestamp,
     task_name_looks_idle, task_on_cpu_load, task_panic_in_flight_load, task_panic_in_flight_store,
-    task_pcr_round_trip_swap, task_priority, task_process_id, task_put, task_record_context_switch,
-    task_record_yield, task_recovery_depth_load, task_recovery_depth_store,
-    task_remote_inbox_is_linked, task_sched_placement_compare_exchange, task_sched_placement_load,
-    task_sched_placement_store, task_set_on_cpu, task_set_state, task_set_status, task_status,
-    task_switch_ctx_rip_rsp, task_transition_from,
+    task_priority, task_process_id, task_put, task_record_context_switch, task_record_yield,
+    task_recovery_depth_load, task_recovery_depth_store, task_remote_inbox_is_linked,
+    task_sched_placement_compare_exchange, task_sched_placement_load, task_sched_placement_store,
+    task_set_on_cpu, task_set_state, task_set_status, task_status, task_switch_ctx_rip_rsp,
+    task_transition_from,
 };
 pub use super::trap::{
     RescheduleReason, TrapExitSource, save_preempt_context, scheduler_handle_post_irq,
@@ -382,42 +382,23 @@ fn switch_to_kernel_address_space() {
 ///
 /// # Caller invariants
 ///
-/// Routed through safe-fn wrappers that take `*mut Task` (handled
-/// internally by null-and-validity checks) and `&mut FpuState`
-/// (witnessed by the safe FPU helpers). Must still be called with
-/// interrupts disabled and only by the scheduler hot path so the
-/// FPU / TLB / FS_BASE / TSS / CR3 sequencing matches the dispatch
-/// state machine.
+/// Every stage reaches its task through one of the two switch windows, which
+/// are mintable only inside `run_switch`. Must still be called with interrupts
+/// disabled and only by the scheduler hot path, so the FPU / TLB / FS_BASE /
+/// TSS / CR3 sequencing matches the dispatch state machine.
 fn prepare_switch_to(
     cpu_id: usize,
     prev_window: Option<&crate::task_struct::Switching<'_>>,
     next_window: &crate::task_struct::Switching<'_>,
 ) {
-    // Raw projections for the TLB / FS_BASE / TSS / CR3 stages below, which
-    // still work through `*mut Task`. The witnesses authorise the
-    // register-state writes; the rest of the sequence is unchanged.
-    let prev: *mut Task = prev_window.map_or(core::ptr::null_mut(), |w| {
-        core::ptr::from_ref(w.task()).cast_mut()
-    });
-    let next: *mut Task = core::ptr::from_ref(next_window.task()).cast_mut();
+    let next = next_window.task();
     // Cache the active XCR0 mask once for the whole switch — the OSTD
     // `fpu_xsave` / `fpu_xrstor` primitives take it as a parameter
     // (the static is set at boot by `slopos_ostd::cpu::x86_64::xsave::init`).
     let xcr0 = active_xcr0();
 
     // --- Save/restore per-CPU PCR user-mode round-trip slots ---
-    //
-    // `pcr.user_ctx_ptr` and `pcr.kernel_return_ctx` are written by
-    // `slopos_ostd::user::mode::user_mode_round_trip_asm` before iretq
-    // and read by `__ostd_user_return` on the next user→kernel SYSCALL.
-    // The slots are per-CPU but the data they carry belongs to the
-    // user-mode round trip in flight on the *running task*.  When
-    // another task is scheduled in between the iretq and the SYSCALL
-    // back, that task overwrites the PCR slots with its own values; on
-    // resume the original task's trampoline would otherwise jump into
-    // the wrong saved RIP/RSP.  Mirror them onto the per-task `Task`
-    // struct here so each task carries its own copy across switches.
-    task_pcr_round_trip_swap(prev, next);
+    slopos_ostd::task::switch::pcr_round_trip_swap(prev_window, next_window);
 
     // --- FPU save (prev) ---
     if let Some(prev_window) = prev_window {
@@ -430,7 +411,7 @@ fn prepare_switch_to(
 
     // --- TLB / address-space switch ---
     let is_user_mode = task_has_flag(next, TASK_FLAG_USER_MODE);
-    let old_pid = task_process_id(prev).unwrap_or(INVALID_PROCESS_ID);
+    let old_pid = prev_window.map_or(INVALID_PROCESS_ID, |w| w.task().process_id);
     let new_pid = if is_user_mode {
         task_process_id(next).unwrap_or(INVALID_PROCESS_ID)
     } else {

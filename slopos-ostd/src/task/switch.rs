@@ -161,6 +161,83 @@ pub fn switch_context(prev: *mut TaskContext, next: *const TaskContext) {
 // run_switch — the sole `SwitchWindow` construction site.
 // ---------------------------------------------------------------------------
 
+/// Mirror the per-CPU user-mode round-trip slots across a context switch:
+/// save the PCR's onto `prev`, then load `next`'s into the PCR.
+///
+/// `pcr.user_ctx_ptr` and `pcr.kernel_return_ctx` are written by
+/// [`crate::user::mode`]'s round-trip trampoline before `iretq` and read by
+/// `__ostd_user_return` on the next user→kernel `SYSCALL`. The slots are
+/// per-CPU but the data they carry belongs to the round trip in flight on the
+/// *running task*, so a task scheduled in between the two would otherwise send
+/// the original task's trampoline to the wrong saved RIP/RSP.
+///
+/// Takes the switch windows rather than raw pointers: they are the witnesses
+/// that authorise writing another task's register-adjacent state, and taking
+/// them is what removed the last unwitnessed write into a task cell.
+///
+/// # Memory ordering
+///
+/// Four orderings, all preserved from the raw form, and weaker than they look
+/// — which is the part worth writing down:
+///
+/// 1. `pcr.user_ctx_ptr` load (`Acquire`) — a per-CPU slot read by the CPU
+///    that wrote it.
+/// 2. `prev.saved_user_ctx_ptr` store (`Release`) — this orders writes that
+///    *precede* it. The `saved_kernel_return_ctx` copy below is **after** it
+///    and therefore **not** ordered by it.
+/// 3. `next.saved_user_ctx_ptr` load (`Acquire`).
+/// 4. `pcr.user_ctx_ptr` store (`Release`) — same asymmetry, mirrored.
+///
+/// What actually orders both slots across a migration is the dispatch
+/// handshake either side of this call: `dispatch`'s `set_current_task` and the
+/// switch tail's `Release` store on `on_cpu`, against the incoming
+/// dispatcher's `Acquire` loads. Do not tighten or drop that handshake on the
+/// strength of the `Release`s here — they do not cover the copies.
+///
+/// # Preconditions
+///
+/// Interrupts disabled, and the caller is the CPU performing the switch — both
+/// of which the windows already stand for.
+#[inline]
+pub fn pcr_round_trip_swap<K, U>(
+    prev: Option<&SwitchWindow<'_, K, U>>,
+    next: &SwitchWindow<'_, K, U>,
+) {
+    let pcr = pcr::current_pcr_local();
+    let Some(pcr) = pcr else { return };
+
+    if let Some(prev) = prev {
+        let task = prev.task();
+        task.saved_user_ctx_ptr
+            .store(pcr.user_ctx_ptr.load(Ordering::Acquire), Ordering::Release);
+        // SAFETY: both pointers address a `KernelReturnContext` that outlives
+        // this call — the PCR's is this CPU's own slot and the task's is
+        // authorised by the window — and the two are distinct objects, so the
+        // copy cannot overlap.
+        unsafe {
+            core::ptr::copy_nonoverlapping(
+                pcr.kernel_return_ctx.get(),
+                task.saved_kernel_return_ctx.get_ptr(prev),
+                1,
+            );
+        }
+    }
+
+    let task = next.task();
+    pcr.user_ctx_ptr.store(
+        task.saved_user_ctx_ptr.load(Ordering::Acquire),
+        Ordering::Release,
+    );
+    // SAFETY: as above, with the direction reversed.
+    unsafe {
+        core::ptr::copy_nonoverlapping(
+            task.saved_kernel_return_ctx.get_ptr(next).cast_const(),
+            pcr.kernel_return_ctx.get(),
+            1,
+        );
+    }
+}
+
 /// Address of the data-stack pointer slot the running context allocates from,
 /// resolved exactly as a SafeStack-instrumented prologue resolves it.
 #[inline]
