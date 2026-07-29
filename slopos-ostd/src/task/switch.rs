@@ -318,7 +318,10 @@ pub fn run_switch<K, U, R>(
     next: &TaskInner<K, U>,
     publish: impl FnOnce(),
     prepare: impl FnOnce(Option<&SwitchWindow<'_, K, U>>, &SwitchWindow<'_, K, U>) -> R,
-) -> R {
+) -> R
+where
+    TaskInner<K, U>: crate::task::PcrTaskType,
+{
     assert!(
         !crate::cpu::x86_64::interrupts::are_interrupts_enabled(),
         "run_switch called with interrupts enabled"

@@ -234,13 +234,16 @@ impl<K, U> CurrentTask<K, U> {
     /// # Type parameters
     ///
     /// `K` and `U` must be the stack-handle types the running kernel
-    /// instantiated `TaskInner` with. The PCR slot is type-erased, so naming
-    /// different ones would reinterpret the task body. The kernel spells this
-    /// through its `Current` alias, which fixes both; there is exactly one
-    /// `TaskInner` monomorphisation reachable from the PCR, and the switch and
-    /// spawner surfaces already assume the same thing.
+    /// instantiated `TaskInner` with — the PCR slot is type-erased, so naming
+    /// different ones would reinterpret the task body. That is the
+    /// `PcrTaskType` bound rather than a caveat: it holds exactly when both
+    /// parameters are declared `PcrStackTy`, which the kernel does once, beside
+    /// its `Current` alias.
     #[inline]
-    pub fn get() -> Option<Self> {
+    pub fn get() -> Option<Self>
+    where
+        TaskInner<K, U>: crate::task::PcrTaskType,
+    {
         let id = pcr::current_task_id();
         if id == INVALID_TASK_ID {
             return None;
@@ -359,7 +362,10 @@ pub struct IdleTask<K, U> {
 impl<K, U> IdleTask<K, U> {
     /// This CPU's idle task, or `None` when its slot names nothing.
     #[inline]
-    pub fn current() -> Option<Self> {
+    pub fn current() -> Option<Self>
+    where
+        TaskInner<K, U>: crate::task::PcrTaskType,
+    {
         let cpu_id = pcr::get_current_cpu();
         let ptr = NonNull::new(pcr::get_idle_task(cpu_id).cast::<TaskInner<K, U>>())?;
         Some(Self {
@@ -373,7 +379,10 @@ impl<K, U> IdleTask<K, U> {
     /// earlier does not have to be threaded away, and it debug-asserts that the
     /// index is this CPU's rather than trusting it.
     #[inline]
-    pub fn get(cpu_id: usize) -> Option<Self> {
+    pub fn get(cpu_id: usize) -> Option<Self>
+    where
+        TaskInner<K, U>: crate::task::PcrTaskType,
+    {
         debug_assert_eq!(
             cpu_id,
             pcr::get_current_cpu(),
@@ -473,7 +482,7 @@ mod tests {
     use super::*;
     use crate::task::kernel_task::TaskInner;
 
-    type HostTask = TaskInner<(), ()>;
+    type HostTask = TaskInner<crate::task::HostStack, crate::task::HostStack>;
 
     fn fresh() -> KArc<HostTask> {
         KArc::try_new(HostTask::invalid()).expect("task allocation")
@@ -484,7 +493,7 @@ mod tests {
     /// # Safety
     /// Single-threaded host test: this "CPU" owns the switch, holds the only
     /// reference to `task`, and the window cannot be re-entered.
-    fn window(task: &HostTask) -> SwitchWindow<'_, (), ()> {
+    fn window(task: &HostTask) -> SwitchWindow<'_, crate::task::HostStack, crate::task::HostStack> {
         unsafe { SwitchWindow::new(task) }
     }
 
@@ -493,7 +502,7 @@ mod tests {
     /// on `GS_BASE_SET` and reports `INVALID_TASK_ID`.
     #[test]
     fn current_task_is_none_without_a_pcr() {
-        assert!(CurrentTask::<(), ()>::get().is_none());
+        assert!(CurrentTask::<crate::task::HostStack, crate::task::HostStack>::get().is_none());
     }
 
     /// THE test this module exists for.

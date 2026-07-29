@@ -133,7 +133,10 @@ impl TaskDiag {
 /// `set_current_task` is the sole publisher of the (pointer, id) pair and
 /// stamps `INVALID_TASK_ID` whenever the slot does not name a heap task.
 #[inline]
-pub fn current_task_diag<K, U>() -> Option<TaskDiag> {
+pub fn current_task_diag<K, U>() -> Option<TaskDiag>
+where
+    TaskInner<K, U>: crate::task::PcrTaskType,
+{
     let id = pcr::current_task_id();
     if id == INVALID_TASK_ID {
         return None;

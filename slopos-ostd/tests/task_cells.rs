@@ -20,6 +20,7 @@
 //! nothing here is hidden by it.
 
 use slopos_ostd::KArc;
+use slopos_ostd::task::HostStack;
 use slopos_ostd::task::kernel_task::TaskInner;
 use slopos_ostd::task::{CurrentTask, SwitchWindow};
 
@@ -44,7 +45,7 @@ fn window(task: &HostTask) -> SwitchWindow<'_, (), ()> {
 /// CPU's current by the time its registers are saved.
 #[test]
 fn current_task_is_none_without_a_pcr() {
-    assert!(CurrentTask::<(), ()>::get().is_none());
+    assert!(CurrentTask::<HostStack, HostStack>::get().is_none());
 }
 
 /// The witnessed write is readable back through a witness for the same task,

@@ -22,6 +22,14 @@ pub use slopos_ostd::task::kernel_task::{
     SignalAction, SwitchContext, TaskContext, TaskInner, fpu_reset_in_place,
 };
 
+// The two stack-handle types this kernel builds every task from, declared so
+// `CurrentTask` and the PCR publisher agree on the monomorphisation the
+// current-task slot holds. `KernelStack` and `UnsafeStack` are aliases, so the
+// impl heads are the local `TaskStack<_>` — which is what makes them legal to
+// write here at all.
+slopos_ostd::declare_pcr_stack_type!(KernelStack);
+slopos_ostd::declare_pcr_stack_type!(UnsafeStack);
+
 /// Concrete kernel `Task` type alias. Every existing call site continues
 /// to spell the type as `Task`; the struct body lives in OSTD.
 pub type Task = TaskInner<KernelStack, UnsafeStack>;
