@@ -215,6 +215,33 @@ pub fn task_placement_retain<K, U>(ptr: NonNull<TaskInner<K, U>>) {
     core::mem::forget(task_placement_clone(ptr));
 }
 
+/// Whether a task a caller has parked a reference on has finished exiting.
+///
+/// The one read the `waitpid` predicate needs, and the reason it has to live
+/// here. That predicate outlives the registry guard that found the target: a
+/// waiter killed mid-wait never unwinds its own stack, so the owning reference
+/// is parked in the wait map instead and the stack keeps only the node. A
+/// borrow tied to the guard therefore cannot be what the predicate holds, and
+/// this is the sanctioned surface for turning the parked node back into one —
+/// the same "reference in, answer out" shape as [`task_placement_clone`].
+///
+/// Two reads, because they answer slightly different questions and either is
+/// sufficient: `exit_info` is the value the exit path publishes, and the
+/// exited-status check covers a path that flipped state without publishing
+/// one. Both are atomic loads and nothing else, which is what a wait predicate
+/// is allowed to be.
+///
+/// # Correctness
+/// Same liveness contract as [`task_placement_clone`]: the caller must hold, or
+/// be covered by, a live strong reference to `node` for the duration.
+#[inline]
+pub fn parked_task_has_exited<K, U>(node: NonNull<TaskInner<K, U>>) -> bool {
+    // SAFETY: per the contract the caller is covered by a live strong
+    // reference, so the body is initialised and stays so across both loads.
+    let task = unsafe { node.as_ref() };
+    task.exit_info().is_set() || task.is_exited()
+}
+
 /// Reverse a detached intrusive chain, returning its new head and node count.
 ///
 /// A Treiber container hands its whole chain over in one swap, so the caller

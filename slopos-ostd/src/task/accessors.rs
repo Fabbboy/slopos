@@ -15,9 +15,7 @@
 //! All helpers return `Option<T>`; the caller threads the `None` case
 //! through their existing diagnostics.
 
-use core::ptr::NonNull;
-
-use crate::sync::{BUS, LinkError};
+use crate::sync::BUS;
 use slopos_abi::event::{KernelEvent, TaskSlot};
 use slopos_abi::signal::{NSIG, SIG_DFL, SIG_IGN, SigSet, sig_bit};
 use slopos_abi::syscall::TtyIndex;
@@ -219,8 +217,6 @@ task_context_getters! {
 task_state_predicates! {
     /// True iff the task is in the `Ready` state (null pointer → `false`).
     task_is_ready = is_ready,
-    /// True iff the task is in the `Running` state (null pointer → `false`).
-    task_is_running = is_running,
     /// True iff the task is in the `Blocked` state (null pointer → `false`).
     task_is_blocked = is_blocked,
     /// True iff the task is in the `Terminated` state (null pointer → `false`).
@@ -229,15 +225,6 @@ task_state_predicates! {
     /// schedulable. Use this anywhere a "task has stopped running" check is
     /// needed; reserve `task_is_terminated` for the strict, reapable variant.
     task_is_exited = is_exited,
-}
-
-/// True iff the task pointer is null **or** the task is in the `Invalid`
-/// state (an uninitialized task). Preserves the historical
-/// `task_get_state(...) == Invalid` semantics where a null pointer collapsed
-/// to `Invalid`.
-#[inline]
-pub fn task_is_invalid<K, U>(task: *const TaskInner<K, U>) -> bool {
-    task_status(task).map_or(true, |s| s == TaskStatus::Invalid)
 }
 
 /// Drive `task->set_status(...)`. The atomic-state setter lives on
@@ -287,27 +274,6 @@ pub fn task_borrow_mut<'a, K, U>(task: *mut TaskInner<K, U>) -> Option<&'a mut T
 // All list operations are `&self`, so a shared `task_borrow` suffices.
 // ---------------------------------------------------------------------------
 
-/// Detach and return one child from the head of `parent`'s children list, or
-/// `None` when the list is empty (or the parent pointer is null).
-#[inline]
-pub fn task_children_pop<K, U>(parent: *const TaskInner<K, U>) -> Option<NonNull<TaskInner<K, U>>> {
-    task_borrow(parent)?.children.pop_front()
-}
-
-/// Remove a specific `child` from `parent`'s children list. `Err(NotPresent)`
-/// if the child is not in that list (e.g. a concurrent drain already detached
-/// it) or the parent pointer is null.
-#[inline]
-pub fn task_children_remove<K, U>(
-    parent: *const TaskInner<K, U>,
-    child: NonNull<TaskInner<K, U>>,
-) -> Result<(), LinkError> {
-    match task_borrow(parent) {
-        Some(p) => p.children.remove(child).map(|_| ()),
-        None => Err(LinkError::NotPresent),
-    }
-}
-
 /// Whether `parent`'s children list is empty (also true for a null pointer).
 #[inline]
 pub fn task_children_is_empty<K, U>(parent: *const TaskInner<K, U>) -> bool {
@@ -336,20 +302,6 @@ pub fn task_recovery_depth_store<K, U>(task: *const TaskInner<K, U>, depth: u32)
     }
 }
 
-/// Load the task's saved panic-recovery nesting depth.
-#[inline]
-pub fn task_recovery_depth_load<K, U>(task: *const TaskInner<K, U>) -> u32 {
-    if task.is_null() {
-        return 0;
-    }
-    // SAFETY: caller pre-validated; `recovery_depth` is an atomic scalar.
-    unsafe {
-        (*task)
-            .recovery_depth
-            .load(core::sync::atomic::Ordering::Acquire)
-    }
-}
-
 /// Save the task's panic in-flight depth while it is not running.
 #[inline]
 pub fn task_panic_in_flight_store<K, U>(task: *const TaskInner<K, U>, depth: u32) {
@@ -361,20 +313,6 @@ pub fn task_panic_in_flight_store<K, U>(task: *const TaskInner<K, U>, depth: u32
         (*task)
             .panic_in_flight
             .store(depth, core::sync::atomic::Ordering::Release);
-    }
-}
-
-/// Load the task's saved panic in-flight depth.
-#[inline]
-pub fn task_panic_in_flight_load<K, U>(task: *const TaskInner<K, U>) -> u32 {
-    if task.is_null() {
-        return 0;
-    }
-    // SAFETY: caller pre-validated; `panic_in_flight` is an atomic scalar.
-    unsafe {
-        (*task)
-            .panic_in_flight
-            .load(core::sync::atomic::Ordering::Acquire)
     }
 }
 
@@ -403,13 +341,6 @@ pub fn task_controlling_tty<K, U>(task: *const TaskInner<K, U>) -> Option<TtyInd
     unsafe { (*task).controlling_tty() }
 }
 
-/// Read `task->flags`. (`task_flags` already exists as `u16`; this
-/// helper exposes a typed bit-test the scheduler uses.)
-#[inline]
-pub fn task_has_flag<K, U>(task: *const TaskInner<K, U>, flag: u16) -> bool {
-    task_flags(task).is_some_and(|f| (f & flag) != 0)
-}
-
 /// Clone this task's strong process-group membership handle, if any.
 #[inline]
 pub fn task_process_group<K, U>(task: *const TaskInner<K, U>) -> Option<KArc<ProcessGroup>> {
@@ -420,27 +351,6 @@ pub fn task_process_group<K, U>(task: *const TaskInner<K, U>) -> Option<KArc<Pro
     // mints the caller's own reference under an RCU read-side section, so a
     // concurrent `setpgid` on this task cannot release the group underneath it.
     unsafe { (*task).process_group.load() }
-}
-
-/// Read `task->name[..]` and probe whether the first 5 bytes
-/// match the kernel-internal `idle/<digit>` or `idle\0`/`idle_`
-/// prefix used to identify per-CPU idle tasks. Encapsulates the
-/// hot-path byte-poke from `scheduler.rs::task_name_looks_idle`.
-#[inline]
-pub fn task_name_looks_idle<K, U>(task: *const TaskInner<K, U>) -> bool {
-    if task.is_null() {
-        return false;
-    }
-    // SAFETY: caller pre-validated; `name` is an in-Task fixed array.
-    let name = unsafe { &(*task).name };
-    if name[0] != b'i' || name[1] != b'd' || name[2] != b'l' || name[3] != b'e' {
-        return false;
-    }
-    match name[4] {
-        0 | b'_' => true,
-        b'/' => name[5].is_ascii_digit(),
-        _ => false,
-    }
 }
 
 /// Stamp `task->cpu_affinity` and `task->last_cpu` from a single
@@ -456,22 +366,6 @@ pub fn task_install_idle_affinity<K, U>(task: *mut TaskInner<K, U>, mask: u32, l
     unsafe {
         (*task).cpu_affinity = mask;
         (*task).set_last_cpu(last_cpu);
-    }
-}
-
-/// Set `task->on_cpu = on`. The dispatcher uses `true` before
-/// switching in, then clears to `false` after the outgoing context
-/// save completes.
-#[inline]
-pub fn task_set_on_cpu<K, U>(task: *const TaskInner<K, U>, on: bool) {
-    if task.is_null() {
-        return;
-    }
-    // SAFETY: caller pre-validated; `on_cpu` is `AtomicBool`.
-    unsafe {
-        (*task)
-            .on_cpu
-            .store(on, core::sync::atomic::Ordering::Release);
     }
 }
 
@@ -524,19 +418,6 @@ pub fn task_on_cpu_load<K, U>(task: *const TaskInner<K, U>) -> bool {
     unsafe { (*task).on_cpu.load(core::sync::atomic::Ordering::Acquire) }
 }
 
-/// Borrow `task->exit_info` as `&AtomicCell<ExitInfo>`. The returned
-/// borrow's lifetime is bounded by the caller's borrow of `task`.
-#[inline]
-pub fn task_exit_info_ref<'a, K, U>(
-    task: *const TaskInner<K, U>,
-) -> Option<&'a crate::sync::AtomicCell<crate::task::exit_info::ExitInfo>> {
-    if task.is_null() {
-        return None;
-    }
-    // SAFETY: caller pre-validated; `exit_info` is in-Task.
-    Some(unsafe { &(*task).exit_info })
-}
-
 /// Read `task->switch_ctx.rflags` via `read_unaligned`. Diagnostics and the
 /// context test-suite; a torn read is acceptable for both.
 #[inline]
@@ -551,25 +432,6 @@ pub fn task_switch_ctx_rflags<K, U>(task: *const TaskInner<K, U>) -> Option<u64>
         Some(core::ptr::read_unaligned(core::ptr::addr_of!(
             (*ctx).rflags
         )))
-    }
-}
-
-/// Read `task->switch_ctx.(rip, rsp)` as `(u64, u64)` via `read_unaligned`:
-/// `SwitchContext` carries no alignment guarantee, and the read may land while
-/// the owning CPU is mid-switch.
-#[inline]
-pub fn task_switch_ctx_rip_rsp<K, U>(task: *const TaskInner<K, U>) -> Option<(u64, u64)> {
-    if task.is_null() {
-        return None;
-    }
-    // SAFETY: caller pre-validated; addr_of! produces a valid pointer
-    // into the in-Task crate::task::TaskContext; read_unaligned is safe.
-    unsafe {
-        let ctx = (*task).switch_ctx.as_ptr_racy();
-        Some((
-            core::ptr::read_unaligned(core::ptr::addr_of!((*ctx).rip)),
-            core::ptr::read_unaligned(core::ptr::addr_of!((*ctx).rsp)),
-        ))
     }
 }
 
@@ -819,17 +681,6 @@ pub fn task_signal_post<K, U>(task: *const TaskInner<K, U>, signum: u8) -> bool 
     true
 }
 
-/// Read `task->last_run_timestamp` via `read_volatile` to defeat
-/// compiler reordering across the context-switch boundary.
-#[inline]
-pub fn task_last_run_timestamp<K, U>(task: *const TaskInner<K, U>) -> Option<u64> {
-    if task.is_null() {
-        return None;
-    }
-    // SAFETY: caller pre-validated; the read is an atomic load.
-    Some(unsafe { (*task).last_run_timestamp() })
-}
-
 /// Stamp `task->last_run_timestamp`.
 #[inline]
 pub fn task_set_last_run_timestamp<K, U>(task: *const TaskInner<K, U>, timestamp: u64) {
@@ -848,16 +699,6 @@ pub fn task_last_cpu<K, U>(task: *const TaskInner<K, U>) -> Option<u8> {
     }
     // SAFETY: caller pre-validated; the read is an atomic load.
     Some(unsafe { (*task).last_cpu() })
-}
-
-/// Bump `task->total_runtime` by `delta`, saturating.
-#[inline]
-pub fn task_add_total_runtime<K, U>(task: *const TaskInner<K, U>, delta: u64) {
-    if task.is_null() {
-        return;
-    }
-    // SAFETY: caller pre-validated; the update is an atomic read-modify-write.
-    unsafe { (*task).add_total_runtime(delta) };
 }
 
 /// Read `task->signal_actions[idx].handler` if `idx` is in range.

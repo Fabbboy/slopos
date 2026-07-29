@@ -141,9 +141,8 @@ pub use super::sleep::{block_current_task_with_timeout, cancel_sleep, sleep_curr
 use super::sleep::{reset_sleep_queue, sleep_queue_next_deadline_ticks, wake_due_sleepers};
 use super::task::{
     INVALID_PROCESS_ID, INVALID_TASK_ID, TASK_FLAG_KERNEL_MODE, TASK_FLAG_NO_PREEMPT,
-    TASK_FLAG_USER_MODE, Task, TaskPriority, TaskRef, TaskStatus, task_exit_info_ref, task_id_of,
-    task_is_exited, task_put, task_record_context_switch, task_record_yield, task_set_state,
-    task_status, task_transition_from,
+    TASK_FLAG_USER_MODE, Task, TaskPriority, TaskRef, TaskStatus, task_put,
+    task_record_context_switch, task_record_yield, task_set_state, task_transition_from,
 };
 pub use super::trap::{
     RescheduleReason, TrapExitSource, save_preempt_context, scheduler_handle_post_irq,
@@ -1800,8 +1799,7 @@ pub fn task_wait_for(task_id: u32) -> c_int {
         // Already gone — waitpid semantics treat this as success.
         return 0;
     };
-    let target = target_guard.as_ptr();
-    if task_status(target) == Some(TaskStatus::Invalid) {
+    if target_guard.status() == TaskStatus::Invalid {
         return 0;
     }
 
@@ -1813,12 +1811,11 @@ pub fn task_wait_for(task_id: u32) -> c_int {
         return -1; // self-wait rejected
     }
 
-    let Some(target_id) = task_id_of(target) else {
-        return 0;
-    };
-    let Some(exit_cell) = task_exit_info_ref(target) else {
-        return 0;
-    };
+    let target_id = target_guard.task_id;
+    // The predicate below outlives this guard, so it keeps the node rather than
+    // a borrow — the WAIT_REFS entry is what owns the target across the wait,
+    // and `parked_task_has_exited` is the sanctioned read against that.
+    let target = target_guard.node();
 
     // Hold a reference on `target` for the whole wait so the task — and the
     // `exit_cell` we read in the predicate below — cannot be recycled while
@@ -1844,15 +1841,15 @@ pub fn task_wait_for(task_id: u32) -> c_int {
     // entry is released by the teardown path.
     drop(target_guard);
 
-    // The `task_is_exited` fallback covers the case where the target's status
-    // flips to Zombie/Terminated via a path that has not (yet) published
-    // exit_info — defensive, but cheap. The exit-cell re-check also makes a
-    // colliding `ChildExit` bucket harmless.
+    // The exited-status fallback covers a target whose status flips to
+    // Zombie/Terminated via a path that has not (yet) published exit_info —
+    // defensive, but cheap. The exit-cell re-check also makes a colliding
+    // `ChildExit` bucket harmless.
     let _ = BUS
         .subscribe(KernelEvent::ChildExit {
             task: TaskSlot(target_id),
         })
-        .wait_event(|| exit_cell.is_set() || task_is_exited(target));
+        .wait_event(|| slopos_ostd::task::parked_task_has_exited(target));
 
     wait_ref_release(waiter_id);
     0
