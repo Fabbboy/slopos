@@ -77,12 +77,8 @@ type SyscallFixture = slopos_sched::test_fixture::KernelTestScope;
 /// that mutate the running-task pointer. The hermetic
 /// `BspCurrentTask` impl restores the original value on scope drop.
 fn park_bootstrap_on_current_cpu() {
-    // The stub has no registry identity, so it publishes no id and no
-    // priority.
-    slopos_arch::pcr::set_current_task(
-        slopos_sched::safestack_rt::BSP_BOOTSTRAP_TASK.get() as *mut (),
-        INVALID_TASK_ID,
-        slopos_arch::pcr::PRIORITY_NONE,
+    slopos_arch::pcr::park_bootstrap_task(
+        slopos_sched::safestack_rt::BSP_BOOTSTRAP_TASK.get() as *mut ()
     );
 }
 

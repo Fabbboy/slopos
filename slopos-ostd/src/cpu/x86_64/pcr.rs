@@ -1431,7 +1431,7 @@ pub fn is_cpu_online(cpu_id: usize) -> bool {
 /// `u32::MAX` (`INVALID_TASK_ID`) and [`PRIORITY_NONE`] for a task with no
 /// registry identity, such as a pre-heap bootstrap stub.
 #[inline]
-pub fn set_current_task(task: *mut (), task_id: u32, priority: u8) {
+pub(crate) fn set_current_task(task: *mut (), task_id: u32, priority: u8) {
     if !GS_BASE_SET.is_set() {
         return;
     }
@@ -1454,6 +1454,36 @@ pub fn set_current_task(task: *mut (), task_id: u32, priority: u8) {
     }
     set_current_task_id(task_id);
     set_current_task_priority(priority);
+}
+
+/// Publish `task` as the task running on this CPU.
+///
+/// The typed counterpart of the reader in [`crate::task::cell`]: this is where
+/// the monomorphisation the PCR slot holds is *decided*, and the
+/// `PcrTaskType` bound is what makes reader and writer name the same one. The
+/// erased [`set_current_task`] is `pub(crate)`, so this and
+/// [`park_bootstrap_task`] are the only ways in from outside OSTD.
+#[inline]
+pub fn set_current_task_typed<K, U>(
+    task: *mut crate::task::kernel_task::TaskInner<K, U>,
+    task_id: u32,
+    priority: u8,
+) where
+    crate::task::kernel_task::TaskInner<K, U>: crate::task::PcrTaskType,
+{
+    set_current_task(task.cast::<()>(), task_id, priority);
+}
+
+/// Park this CPU on a pre-heap bootstrap stub.
+///
+/// A stub is deliberately *not* a `TaskInner`: it holds only the eight-byte
+/// `unsafe_stack_sp` prefix an instrumented prologue reads. Publishing
+/// `INVALID_TASK_ID` and [`PRIORITY_NONE`] alongside it is what every reader's
+/// stub filter keys on, so the two travel together here rather than being
+/// spelled out at each call site.
+#[inline]
+pub fn park_bootstrap_task(stub: *mut ()) {
+    set_current_task(stub, slopos_abi::task::INVALID_TASK_ID, PRIORITY_NONE);
 }
 
 /// Get the current task pointer for this CPU.

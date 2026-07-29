@@ -143,7 +143,16 @@ hermetic_state! {
         }
         fn restore(saved: Self::Snapshot) {
             let (addr, task_id, priority) = saved;
-            pcr::set_current_task(addr as *mut (), task_id, priority);
+            // Same discriminator every reader uses: `set_current_task` is the
+            // sole publisher of the (pointer, id) pair and stamps
+            // `INVALID_TASK_ID` whenever the slot does not name a heap task, so
+            // the id decides which shape the saved pointer had and the restore
+            // goes back through the matching publisher.
+            if task_id == slopos_abi::task::INVALID_TASK_ID {
+                pcr::park_bootstrap_task(addr as *mut ());
+            } else {
+                pcr::set_current_task_typed(addr as *mut crate::task_struct::Task, task_id, priority);
+            }
         }
     }
 }

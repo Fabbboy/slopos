@@ -334,11 +334,7 @@ pub fn test_dispatch_publishes_current_priority() -> TestResult {
     }
 
     // Parking on the bootstrap stub is "this CPU runs nothing schedulable".
-    slopos_arch::pcr::set_current_task(
-        super::safestack_rt::BSP_BOOTSTRAP_TASK.get() as *mut (),
-        INVALID_TASK_ID,
-        slopos_arch::pcr::PRIORITY_NONE,
-    );
+    slopos_arch::pcr::park_bootstrap_task(super::safestack_rt::BSP_BOOTSTRAP_TASK.get() as *mut ());
     let parked = slopos_arch::pcr::current_task_priority_for(cpu);
     if parked != slopos_arch::pcr::PRIORITY_NONE {
         klog_info!(
@@ -5954,11 +5950,7 @@ slopos_testing::stest!(
 // =============================================================================
 
 fn park_bootstrap_on_current_cpu() {
-    slopos_arch::pcr::set_current_task(
-        super::safestack_rt::BSP_BOOTSTRAP_TASK.get() as *mut (),
-        INVALID_TASK_ID,
-        slopos_arch::pcr::PRIORITY_NONE,
-    );
+    slopos_arch::pcr::park_bootstrap_task(super::safestack_rt::BSP_BOOTSTRAP_TASK.get() as *mut ());
 }
 
 /// Make `task_id` this CPU's current task.

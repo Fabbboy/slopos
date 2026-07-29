@@ -257,8 +257,8 @@ pub(crate) fn dispatch(cpu_id: usize, task: &Task) {
     // priority ride along so callers that want only "who is running" or "would
     // a newcomer preempt it" never dereference the task — least of all from
     // another CPU, where the switch tail may be destroying it.
-    slopos_arch::pcr::set_current_task(
-        core::ptr::from_ref(task).cast::<()>().cast_mut(),
+    slopos_arch::pcr::set_current_task_typed(
+        core::ptr::from_ref(task).cast_mut(),
         task.task_id,
         published_priority(task),
     );
