@@ -168,10 +168,6 @@ task_scalar_getters! {
     task_entry_point -> u64 = entry_point,
     /// Read `task->cpu_affinity`.
     task_cpu_affinity -> u32 = cpu_affinity,
-    /// Read `task->time_slice`.
-    task_time_slice -> u64 = time_slice,
-    /// Read `task->time_slice_remaining`.
-    task_time_slice_remaining -> u64 = time_slice_remaining,
     /// Read `task->priority`. The field is a `Copy` enum stored in a single
     /// naturally-aligned byte slot.
     task_priority -> TaskPriority = priority,
@@ -191,10 +187,6 @@ task_scalar_setters! {
     task_set_parent_task_id = parent_task_id: u32,
     /// Stamp `task->cpu_affinity`.
     task_set_cpu_affinity = cpu_affinity: u32,
-    /// Stamp `task->time_slice`.
-    task_set_time_slice = time_slice: u64,
-    /// Stamp `task->time_slice_remaining`.
-    task_set_time_slice_remaining = time_slice_remaining: u64,
     /// Stamp `task->kernel_stack_top`. Used by tests that simulate a missing
     /// kernel-stack-top error path.
     task_set_kernel_stack_top = kernel_stack_top: u64,

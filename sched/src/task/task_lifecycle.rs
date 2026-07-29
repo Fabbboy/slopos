@@ -656,7 +656,7 @@ pub fn task_build(
     task_ref.unsafe_stack = Some(resources.unsafe_stack);
     task_ref.entry_point = entry_point as usize as u64;
     task_ref.entry_arg = arg;
-    task_ref.time_slice = 10;
+    task_ref.set_time_slice(10);
     task_ref.reset_runtime_state();
     task_ref.user_started.store(0, Ordering::Relaxed);
     task_ref.context_from_user.store(0, Ordering::Relaxed);

@@ -473,8 +473,17 @@ pub struct TaskInner<K, U> {
     /// Atomic because the exit path reads and clears it, and that path runs on
     /// whichever task called `task_terminate` — not necessarily this one.
     pub clear_child_tid: AtomicU64,
-    pub time_slice: u64,
-    pub time_slice_remaining: u64,
+    /// The task's full scheduling quantum, in timer ticks.
+    ///
+    /// Atomic because its writer and its reader are on different CPUs:
+    /// `reset_task_quantum` runs from `schedule_task_from_placement` on the
+    /// *waking* CPU against a task that may still be `on_cpu` elsewhere, while
+    /// the timer ISR on that other CPU is decrementing
+    /// [`time_slice_remaining`](Self::time_slice_remaining) below.
+    pub time_slice: AtomicU64,
+    /// Ticks left in the current quantum. Decremented by the timer ISR on the
+    /// CPU running the task; reset cross-CPU with `time_slice` above.
+    pub time_slice_remaining: AtomicU64,
     /// Accumulated on-CPU time.
     ///
     /// Atomic because it has three writers on different CPUs: the switch-out
@@ -1022,6 +1031,34 @@ impl<K, U> TaskInner<K, U> {
             .is_ok()
     }
 
+    /// This task's full scheduling quantum, in timer ticks.
+    ///
+    /// Relaxed throughout: the quantum orders nothing else, and a tick lost or
+    /// duplicated across the reset/decrement race costs one tick of scheduling
+    /// fairness rather than correctness.
+    #[inline]
+    pub fn time_slice(&self) -> u64 {
+        self.time_slice.load(Ordering::Relaxed)
+    }
+
+    /// See [`time_slice`](Self::time_slice).
+    #[inline]
+    pub fn set_time_slice(&self, ticks: u64) {
+        self.time_slice.store(ticks, Ordering::Relaxed);
+    }
+
+    /// Ticks left in this task's current quantum.
+    #[inline]
+    pub fn time_slice_remaining(&self) -> u64 {
+        self.time_slice_remaining.load(Ordering::Relaxed)
+    }
+
+    /// See [`time_slice_remaining`](Self::time_slice_remaining).
+    #[inline]
+    pub fn set_time_slice_remaining(&self, ticks: u64) {
+        self.time_slice_remaining.store(ticks, Ordering::Relaxed);
+    }
+
     /// Timestamp of this task's last dispatch.
     #[inline]
     pub fn last_run_timestamp(&self) -> u64 {
@@ -1134,8 +1171,8 @@ impl<K, U> TaskInner<K, U> {
             }),
             cwd_len: AtomicU16::new(1),
             clear_child_tid: AtomicU64::new(0),
-            time_slice: 0,
-            time_slice_remaining: 0,
+            time_slice: AtomicU64::new(0),
+            time_slice_remaining: AtomicU64::new(0),
             total_runtime: AtomicU64::new(0),
             creation_time: 0,
             yield_count: AtomicU32::new(0),
@@ -1388,7 +1425,7 @@ impl<K, U> TaskInner<K, U> {
     /// bulk-copied from its parent), so every task starts neutral. The
     /// owning crate holds exclusive `&mut self` access at every call site.
     pub fn reset_runtime_state(&mut self) {
-        self.time_slice_remaining = self.time_slice;
+        *self.time_slice_remaining.get_mut() = *self.time_slice.get_mut();
         self.total_runtime.store(0, Ordering::Relaxed);
         self.creation_time = crate::kdiag_timestamp();
         self.yield_count.store(0, Ordering::Relaxed);

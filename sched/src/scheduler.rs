@@ -149,9 +149,8 @@ use super::task::{
     task_pcr_round_trip_swap, task_priority, task_process_id, task_put, task_record_context_switch,
     task_record_yield, task_recovery_depth_load, task_recovery_depth_store,
     task_remote_inbox_is_linked, task_sched_placement_compare_exchange, task_sched_placement_load,
-    task_sched_placement_store, task_set_on_cpu, task_set_state, task_set_status,
-    task_set_time_slice, task_set_time_slice_remaining, task_status, task_switch_ctx_rip_rsp,
-    task_time_slice, task_time_slice_remaining, task_transition_from,
+    task_sched_placement_store, task_set_on_cpu, task_set_state, task_set_status, task_status,
+    task_switch_ctx_rip_rsp, task_transition_from,
 };
 pub use super::trap::{
     RescheduleReason, TrapExitSource, save_preempt_context, scheduler_handle_post_irq,
@@ -204,13 +203,13 @@ fn get_default_time_slice() -> u64 {
     SCHED_DEFAULT_TIME_SLICE as u64
 }
 
-fn reset_task_quantum(task: *mut Task) {
-    let slice = match task_time_slice(task) {
-        Some(0) | None => get_default_time_slice(),
-        Some(s) => s,
+fn reset_task_quantum(task: &Task) {
+    let slice = match task.time_slice() {
+        0 => get_default_time_slice(),
+        s => s,
     };
-    task_set_time_slice(task, slice);
-    task_set_time_slice_remaining(task, slice);
+    task.set_time_slice(slice);
+    task.set_time_slice_remaining(slice);
 }
 
 // Recovery depth and panic in-flight depth are task-scoped state whose
@@ -606,12 +605,12 @@ fn task_has_no_preempt_flag(task: *mut Task) -> bool {
 }
 
 #[inline]
-fn consume_time_slice(current: *mut Task) -> bool {
-    let remaining = task_time_slice_remaining(current).unwrap_or(0);
+fn consume_time_slice(current: &Task) -> bool {
+    let remaining = current.time_slice_remaining();
     if remaining > 0 {
-        task_set_time_slice_remaining(current, remaining - 1);
+        current.set_time_slice_remaining(remaining - 1);
     }
-    task_time_slice_remaining(current).unwrap_or(0) > 0
+    current.time_slice_remaining() > 0
 }
 
 #[inline]
@@ -841,8 +840,8 @@ fn schedule_task_from_placement(task: &TaskRef, from: SchedPlacement, new_task: 
         return -1;
     }
 
-    if task_time_slice_remaining(body) == Some(0) {
-        reset_task_quantum(task.as_ptr());
+    if body.time_slice_remaining() == 0 {
+        reset_task_quantum(task);
     }
 
     let target_cpu = if new_task {
@@ -2450,12 +2449,12 @@ pub fn scheduler_timer_tick() {
         return;
     }
 
-    if consume_time_slice(current.as_ptr()) {
+    if consume_time_slice(current.task()) {
         return;
     }
 
     if scheduler_ready_count(cpu_id) == 0 {
-        reset_task_quantum(current.as_ptr());
+        reset_task_quantum(current.task());
         return;
     }
 

@@ -30,7 +30,7 @@ use super::task::{
     task_last_cpu, task_live_cap_rejects_for_test, task_parent_task_id, task_pgid, task_priority,
     task_process_id, task_remote_inbox_is_linked, task_resolve_handle, task_sched_placement_load,
     task_set_state, task_set_state_with_reason, task_sid, task_slot_census, task_status,
-    task_terminate, task_tgid, task_time_slice, task_time_slice_remaining, task_waiter_count,
+    task_terminate, task_tgid, task_waiter_count,
 };
 use super::test_fixture::KernelTestScope;
 use slopos_abi::task::BlockReason;
@@ -396,8 +396,8 @@ pub fn test_scalar_accessor_field_identity() -> TestResult {
         task.entry_point = 0x4444;
         task.cpu_affinity = 0x5555;
         task.set_pgid(0x6666);
-        task.time_slice = 0x7777;
-        task.time_slice_remaining = 0x8888;
+        task.set_time_slice(0x7777);
+        task.set_time_slice_remaining(0x8888);
         task.set_sid(0x9999);
         task.kernel_stack_top = 0xAAAA;
         task.fs_base
@@ -423,12 +423,8 @@ pub fn test_scalar_accessor_field_identity() -> TestResult {
             0x5555,
         ),
         ("pgid", task_pgid(raw).unwrap_or(0) as u64, 0x6666),
-        ("time_slice", task_time_slice(raw).unwrap_or(0), 0x7777),
-        (
-            "time_slice_remaining",
-            task_time_slice_remaining(raw).unwrap_or(0),
-            0x8888,
-        ),
+        ("time_slice", arc.time_slice(), 0x7777),
+        ("time_slice_remaining", arc.time_slice_remaining(), 0x8888),
         ("sid", task_sid(raw).unwrap_or(0) as u64, 0x9999),
         (
             "kernel_stack_top",
