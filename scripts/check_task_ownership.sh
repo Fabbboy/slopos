@@ -761,9 +761,9 @@ findings="$(run_scan "$REPO_ROOT" "${scan_files[@]}")"
 # Check-8 residue
 # ---------------------------------------------------------------------
 #
-# Two shapes remain, and both need a restructure rather than a signature
-# edit, so they are named here instead of hiding the whole gate in warn
-# mode. Anything not on this list fails.
+# Each entry below names a file whose check-8 shape needs a restructure
+# rather than a signature edit, and carries the reason. Anything not
+# listed fails.
 #
 #   mm/src/paging/tables.rs::pml4_table{,_mut}
 #       The walks in that file hold `&mut` into the PML4, the PDPT, the PD
@@ -772,17 +772,16 @@ findings="$(run_scan "$REPO_ROOT" "${scan_files[@]}")"
 #       fabricated independently. Scoping them means rewriting the unmap
 #       walk to re-borrow at each mutation point.
 #
-#   slopos-ostd/src/user/context.rs::from_ptr{,_mut}
-#       `SyscallContext::user_ctx_mut` takes `&self` and returns the borrow
-#       out, so the honest anchor is `&mut self` — which means threading
-#       `&mut SyscallContext` through every syscall handler.
+#   slopos-ostd/src/util/ptr_buf.rs::borrow_ref{,_mut}
+#       The helpers the shape is named for. They stop tripping the check
+#       only by being deleted, and their last callers are the page-table
+#       walks above.
 #
 # This list may only shrink. Adding to it means a new function of a shape
 # the whole gate exists to delete, and needs the same kind of written
-# reason these two carry.
+# reason these carry.
 CHECK8_ALLOWLIST=(
     "mm/src/paging/tables.rs"
-    "slopos-ostd/src/user/context.rs"
     "slopos-ostd/src/util/ptr_buf.rs"
 )
 

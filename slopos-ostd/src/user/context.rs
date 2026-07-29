@@ -306,45 +306,6 @@ impl UserContext {
         }
     }
 
-    /// Null-checked reborrow of a raw `*mut UserContext`.
-    ///
-    /// Callers in syscall handlers receive `*mut UserContext` from the
-    /// `__ostd_user_return` trampoline (or the legacy `int 0x80`
-    /// adapter); this helper centralises the null-check + lifetime
-    /// reborrow so handlers do not write `unsafe { &mut *ptr }` at
-    /// every entry.
-    ///
-    /// SAFETY (Inv. 5): every per-task `UserContext` lives at a fixed
-    /// position inside the per-task `Task` struct (`Task::user_ctx`)
-    /// for the task's lifetime; the syscall path holds a kernel-mode
-    /// borrow that cannot race with the user-mode round trip per the
-    /// `__ostd_user_return` contract (which only re-enters with
-    /// `pcr.user_ctx_ptr` after kernel-side return). The unsafe
-    /// `&mut *ptr` is therefore sound iff the caller did not fabricate
-    /// a non-task pointer.
-    /// **Prefer a form whose lifetime is anchored.** This one lets the caller
-    /// pick, and two picks is two `&mut UserContext` to one task. It survives
-    /// because `SyscallContext::user_ctx_mut` takes `&self` and returns the
-    /// borrow out, so the honest anchor is `&mut self` — which means threading
-    /// `&mut SyscallContext` through every handler. Worth doing; not worth
-    /// doing as a side effect of a lifetime cleanup.
-    #[inline]
-    pub fn from_ptr_mut<'a>(ptr: *mut UserContext) -> Option<&'a mut UserContext> {
-        if ptr.is_null() {
-            return None;
-        }
-        Some(unsafe { &mut *ptr })
-    }
-
-    /// Read-only sibling of [`Self::from_ptr_mut`].
-    #[inline]
-    pub fn from_ptr<'a>(ptr: *const UserContext) -> Option<&'a UserContext> {
-        if ptr.is_null() {
-            return None;
-        }
-        Some(unsafe { &*ptr })
-    }
-
     /// Build a fresh `UserContext` with the given GPR snapshot. `cs`
     /// and `ss` are forced to the OSTD user selectors; `rflags` is
     /// passed through [`Self::set_rflags`].

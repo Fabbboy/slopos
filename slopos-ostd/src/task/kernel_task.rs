@@ -905,18 +905,6 @@ impl<K, U> TaskInner<K, U> {
         crate::util::ptr_buf::anchored_ref(self, self.user_ctx.get_ptr(witness))
     }
 
-    /// This task's user-mode register snapshot as a raw pointer, authorised by
-    /// `witness`. Raw rather than `&mut` for the reason `TaskOwnCell::get_ptr`
-    /// is: two witnesses on one task may legitimately coexist.
-    #[inline]
-    pub fn user_ctx_ptr(&self, witness: &impl TaskExclusive<K, U>) -> *mut UserContext {
-        debug_assert!(
-            core::ptr::eq(witness.witnessed(), self),
-            "witness names a different task"
-        );
-        self.user_ctx.get_ptr(witness)
-    }
-
     /// Save `frame`'s register state into this task's context, authorised by
     /// `witness`, and stamp the user-mode entry flags.
     ///
