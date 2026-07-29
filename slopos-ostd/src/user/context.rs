@@ -82,14 +82,38 @@ pub struct UserRegs {
 // inline asm at fixed byte offsets. These compile-time asserts pin the
 // layout so a future field reorder fails to build rather than silently
 // scrambling user state on the next user-mode round trip.
+//
+// Every offset `asm/user_return.s` names as a `UR_*` displacement is
+// here, including the fourteen general-purpose registers between `rax`
+// and `rip`: that file mirrors them by hand, so an unasserted one lets
+// a field swap write user RBX into the RCX slot with every other razor
+// still passing. `user_mode_round_trip_asm` feeds `offset_of!` straight
+// into its operands and needs no razor of its own.
 const _: () = {
     use core::mem::offset_of;
     assert!(offset_of!(UserRegs, rax) == 0);
+    assert!(offset_of!(UserRegs, rbx) == 8);
+    assert!(offset_of!(UserRegs, rcx) == 2 * 8);
+    assert!(offset_of!(UserRegs, rdx) == 3 * 8);
+    assert!(offset_of!(UserRegs, rsi) == 4 * 8);
+    assert!(offset_of!(UserRegs, rdi) == 5 * 8);
+    assert!(offset_of!(UserRegs, rbp) == 6 * 8);
+    assert!(offset_of!(UserRegs, rsp) == 7 * 8);
+    assert!(offset_of!(UserRegs, r8) == 8 * 8);
+    assert!(offset_of!(UserRegs, r9) == 9 * 8);
+    assert!(offset_of!(UserRegs, r10) == 10 * 8);
+    assert!(offset_of!(UserRegs, r11) == 11 * 8);
+    assert!(offset_of!(UserRegs, r12) == 12 * 8);
+    assert!(offset_of!(UserRegs, r13) == 13 * 8);
+    assert!(offset_of!(UserRegs, r14) == 14 * 8);
+    assert!(offset_of!(UserRegs, r15) == 15 * 8);
     assert!(offset_of!(UserRegs, rip) == 16 * 8);
     assert!(offset_of!(UserRegs, rflags_user_subset) == 17 * 8);
     assert!(offset_of!(UserRegs, fs_base) == 18 * 8);
     assert!(offset_of!(UserRegs, gs_base) == 19 * 8);
     assert!(offset_of!(UserRegs, cs) == 20 * 8);
+    assert!(offset_of!(UserRegs, ss) == 20 * 8 + 2);
+    assert!(core::mem::size_of::<UserRegs>() == 176);
 };
 
 // SAFETY: every field is u64/u16/[u16; 3] — primitive integer types
@@ -206,6 +230,11 @@ pub struct UserContext {
     regs: UserRegs,
     fpu_state: FpuStateRef,
 }
+
+// `__ostd_user_return` loads a `*mut UserContext` out of the PCR and
+// indexes it with the `UR_*` displacements above — it treats the whole
+// context as its register file, so `regs` must sit at offset zero.
+const _: () = assert!(core::mem::offset_of!(UserContext, regs) == 0);
 
 // SAFETY: every field of `UserContext` is `Zeroable`
 // (`UserRegs` and `FpuStateRef` impls above). The all-zero
