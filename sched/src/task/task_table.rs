@@ -403,10 +403,10 @@ fn ensure_registry_allocated() -> bool {
 /// it has held since registration, as one step.
 ///
 /// This is SlopOS's `release_task`. It declines while the task is still
-/// dispatch-pinned, because unhashing a task that is still some CPU's current
-/// would make [`task_pointer_is_valid`] report pointer corruption and send
-/// `scheduler_tasks_for_cpu` down its recovery path on the dying task's own
-/// stack; the deferred drain retries once the pin clears.
+/// dispatch-pinned, because unhashing a task takes its existence reference
+/// back, and the last release that follows runs the allocator-heavy destructor
+/// — which frees the kernel stack a CPU is still executing on. The deferred
+/// drain retries once the pin clears.
 ///
 /// The gate is a statement about task *state*, never about a reference count: a
 /// count pre-check cannot be made race-free, and the final release is decided by

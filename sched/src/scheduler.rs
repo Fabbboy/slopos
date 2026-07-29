@@ -169,7 +169,7 @@ fn kernel_text_range() -> (u64, u64) {
 }
 
 use core::sync::atomic::AtomicU8;
-use slopos_ostd::task::SchedPlacement;
+use slopos_ostd::task::{SchedPlacement, TaskAddr};
 /// Global scheduler-enabled flag. `pub(crate)` so the
 /// `test_hermetic::SchedulerEnabledFlag` HermeticState impl can
 /// snapshot/restore it. External code should go through
@@ -2594,34 +2594,42 @@ fn rescue_strike(task_id: u32) -> bool {
     strikes >= RESCUE_STRIKE_THRESHOLD
 }
 
-/// Whether any CPU is still executing `task` or still names it as its current
-/// task.
+/// Whether any CPU is still executing `task`, still names it as its current
+/// task, or holds it in its idle slot.
 ///
 /// The reap gate and the destructor gate both key on this, so they can never
-/// disagree. `on_cpu` alone is not enough: `dispatch()` publishes
-/// `PCR.current_task` without setting `on_cpu`, so a task can be a CPU's current
-/// without being marked on-CPU. Unhashing such a task would make
-/// `task_pointer_is_valid` report pointer corruption and send
-/// `scheduler_tasks_for_cpu` down its recovery path — on the dying task's own
-/// stack.
+/// disagree. Unhashing a task that satisfies any disjunct takes back its
+/// existence reference, and the last release that follows runs the
+/// allocator-heavy destructor — freeing the kernel stack a CPU is executing on.
+///
+/// **Each disjunct is load-bearing on its own, and deleting one deletes a
+/// guard's soundness proof.**
+///
+/// - `on_cpu` alone is not enough: `dispatch()` publishes `PCR.current_task`
+///   without setting `on_cpu`, so a task can be a CPU's current without being
+///   marked on-CPU. The second disjunct is what makes [`CurrentTask`] sound.
+/// - The current-task disjunct alone is not enough either: a CPU's idle task is
+///   not its current task while a ready task runs there, yet the idle task must
+///   stay reapable-never — it is minted once at `create_idle_task_for_cpu` and
+///   the PCR idle slot names it for the machine's whole life. The third
+///   disjunct is what makes [`IdleTask`] sound, and it is also what discharges
+///   `SwitchWindow::new`'s dispatch-reference precondition for the idle
+///   endpoint of a switch, which no owning handle covers.
+///
+/// [`CurrentTask`]: slopos_ostd::task::CurrentTask
+/// [`IdleTask`]: slopos_ostd::task::IdleTask
 #[inline]
 pub(crate) fn task_is_dispatch_pinned(task: &Task) -> bool {
-    task.on_cpu() || task_is_current_on_any_cpu(task)
+    let addr = TaskAddr::of(task);
+    task.on_cpu() || task_is_current_on_any_cpu(addr) || crate::per_cpu::is_idle_task(addr)
 }
 
 /// Address comparison only — the per-CPU current-task slots are raw pointers,
-/// and nothing here dereferences one.
-fn task_is_current_on_any_cpu(task: &Task) -> bool {
+/// and [`TaskAddr`] is the compare-only view of one, so nothing here can
+/// dereference a foreign CPU's task even by accident.
+fn task_is_current_on_any_cpu(addr: TaskAddr) -> bool {
     let cpu_count = slopos_arch::pcr::get_cpu_count();
-    for cpu_id in 0..cpu_count {
-        if core::ptr::eq(
-            scheduler_get_current_task_for(cpu_id).cast_const(),
-            task as *const Task,
-        ) {
-            return true;
-        }
-    }
-    false
+    (0..cpu_count).any(|cpu_id| TaskAddr::current_of(cpu_id) == Some(addr))
 }
 
 fn rescue_check_task(guard: &crate::task::TaskRef) {
@@ -2636,7 +2644,7 @@ fn rescue_check_task(guard: &crate::task::TaskRef) {
     if task_sched_placement_load(task) == SchedPlacement::Nascent {
         return;
     }
-    if t.on_cpu() || task_is_current_on_any_cpu(t) {
+    if t.on_cpu() || task_is_current_on_any_cpu(TaskAddr::of(t)) {
         return;
     }
     // `last_run_timestamp != 0` means the task is still accounted as the

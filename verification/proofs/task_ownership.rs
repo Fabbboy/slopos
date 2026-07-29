@@ -29,8 +29,8 @@
 //        it), and destruction runs exactly once. Finality is decided BY THE
 //        DECREMENT, never by reading the count first.
 //   (T6) A reap never fires on a dispatch-pinned task: a task some CPU is
-//        executing, or names as its `PCR.current_task`, stays in the registry
-//        and keeps its existence reference.
+//        executing, names as its `PCR.current_task`, or holds in its idle slot
+//        stays in the registry and keeps its existence reference.
 //   (T7) Destruction implies full detachment: a destroyed task is
 //        unregistered, unpinned, in no container, and holds no existence
 //        reference.
@@ -68,20 +68,36 @@
 // So a state exists in which exactly one of the two writes has landed, and
 // this model has no image for it. It does not need one, because `pinned`
 // mirrors `task_is_dispatch_pinned`, which is a DISJUNCTION —
-// `task_on_cpu_load || task_is_current_on_any_cpu`. Whichever write lands
-// first, the other disjunct is still true, so `pinned` is true throughout the
-// window and the intermediate state collapses onto the pre-state of the step.
-// Modelling the pair as atomic is therefore sound, and the disjunction is the
-// entire reason. Note what this does NOT depend on: the order of the two
-// writes. Either order is safe, which is why the pin and unpin sequences above
-// use opposite orders without consequence.
+// `task_on_cpu_load || task_is_current_on_any_cpu || is_idle_task`. Whichever
+// write lands first, another disjunct is still true, so `pinned` is true
+// throughout the window and the intermediate state collapses onto the
+// pre-state of the step. Modelling the pair as atomic is therefore sound, and
+// the disjunction is the entire reason. Note what this does NOT depend on: the
+// order of the two writes. Either order is safe, which is why the pin and
+// unpin sequences above use opposite orders without consequence.
 //
 // The edit that breaks it is not a reordering. It is narrowing
-// `task_is_dispatch_pinned` to a conjunction, or deleting either disjunct.
+// `task_is_dispatch_pinned` to a conjunction, or deleting a disjunct.
 // Then one write landing would take `pinned` false while the task is still on
 // a CPU, T6 would no longer describe the tree, and — the part that makes this
 // worth writing down — THIS PROOF WOULD KEEP VERIFYING, because the model
 // never sees the intermediate state it just started admitting.
+//
+// The third disjunct is a different shape from the first two, and the
+// difference is worth stating because it looks like a modelling error and is
+// not. `is_idle_task` is set once per CPU by `install_idle_task` and is never
+// cleared, so a CPU's idle task is `pinned` for the machine's whole life —
+// whereas `Step::DispatchUnpin` sets `pinned: false` unconditionally. The model
+// is therefore an OVER-approximation for idle tasks: it admits states in which
+// `pinned` is false while the tree would still say true. That direction is the
+// safe one. Every obligation that mentions `pinned` is an implication with
+// `pinned` in the ANTECEDENT ((T6): `pinned ==> exist_refs == 1`,
+// `pinned ==> registered`), so a model that takes `pinned` false more often
+// proves a WEAKER statement about a tree that is pinned more often, and the
+// real behaviours remain a subset of the proved ones. Do not "fix"
+// `DispatchUnpin` to preserve the idle disjunct — an unconditional
+// `pinned: false` is what keeps the step total, and narrowing it is how the
+// induction breaks.
 //
 // The same disjunction underwrites `CurrentTask`'s soundness in
 // `slopos-ostd/src/task/cell.rs`: that guard takes no reference count and
@@ -147,7 +163,8 @@
 //   `exist_flag`  <-> `TaskInner::existence_ref_parked` (AtomicBool)
 //   `registered`  <-> a `RegistryEntry` for this id is in the registry spine
 //   `pinned`      <-> `task_is_dispatch_pinned` = `task_on_cpu_load ||
-//                     task_is_current_on_any_cpu` (sched/src/scheduler.rs)
+//                     task_is_current_on_any_cpu || per_cpu::is_idle_task`
+//                     (sched/src/scheduler.rs)
 //   `body_live`   <-> the `TaskInner` body is still initialised, i.e.
 //                     `drop_in_place` has not run
 //   `parked_node` <-> `task_release_strong` returned `Some(ParkedTask)` — the
@@ -242,13 +259,15 @@ pub open spec fn own_inv(s: TaskOwn) -> bool {
     //      the dispatching CPU's own dispatch reference is a caller handle it
     //      will hand on, whereas the existence reference is pinned down by the
     //      reap gate for as long as the task is on a CPU. Unhashing a
-    //      still-pinned task would make `task_pointer_is_valid` report pointer
-    //      corruption and send `scheduler_tasks_for_cpu` down its recovery
-    //      path on the dying task's own stack.
+    //      still-pinned task takes that reference back, and the last release
+    //      which follows runs the allocator-heavy destructor — freeing the
+    //      kernel stack the CPU is executing on.
     //      `broken_reap_ignoring_pin_violates_invariant` breaks exactly this.
     //      `pinned` is set and cleared by two writes rather than one; see the
     //      disjunction note in the header for why modelling that pair as a
-    //      single atomic step is sound, and what would silently invalidate it.
+    //      single atomic step is sound, why the idle disjunct's one-way shape
+    //      is an over-approximation in the safe direction, and what would
+    //      silently invalidate either.
     &&& (s.pinned ==> s.exist_refs == 1)
     &&& (s.pinned ==> s.registered)
     // (T4) A referenced task's body is live. This is the no-use-after-free
@@ -371,6 +390,13 @@ pub enum Step {
     /// publication inside `dispatch()`. `dispatch()` itself does *not* set
     /// `on_cpu` — it did once, and this comment said so for longer than it was
     /// true.
+    ///
+    /// `install_idle_task` is the third writer, and it fits this step's guard
+    /// (`!pinned && exist_flag && transient > 0`) exactly: `create_idle_task_
+    /// for_cpu` holds the idle task's registry guard across the call, and the
+    /// task is registered by then. Unlike the other two it is a one-way write —
+    /// see the header note on why that is an over-approximation in the safe
+    /// direction rather than a hole.
     DispatchPin,
     /// The switch tail retiring the task. Also two writes in that order
     /// reversed: the successor takes `PCR.current_task` (`dispatch()` on the
@@ -1071,13 +1097,13 @@ pub open spec fn broken_reap_ignoring_pin(s: TaskOwn) -> TaskOwn {
 /// dispatching CPU's live dispatch reference, and is currently on a CPU — the
 /// ordinary running state. The ungated reap unhashes it and takes back the one
 /// reference that is not the dispatcher's own, reaching a state where a CPU's
-/// `PCR.current_task` names a task the registry does not know:
-/// `task_pointer_is_valid` reports pointer corruption and
-/// `scheduler_tasks_for_cpu` runs its recovery path ON THE DYING TASK'S OWN
-/// STACK. The gated reap is identity on that state. This also deletes
-/// `CurrentTask`'s soundness argument, which is why the gate is spelled out at
-/// both the reap and the destructor (`destroy_context_is_safe` shares the
-/// predicate so the two can never disagree).
+/// `PCR.current_task` names a task the registry does not know and whose last
+/// reference is now the dispatcher's. When that one drops, the destructor FREES
+/// THE KERNEL STACK THE CPU IS EXECUTING ON. The gated reap is identity on that
+/// state. This also deletes `CurrentTask`'s and `IdleTask`'s soundness
+/// arguments, which is why the gate is spelled out at both the reap and the
+/// destructor (`destroy_context_is_safe` shares the predicate so the two can
+/// never disagree).
 pub proof fn broken_reap_ignoring_pin_violates_invariant()
     ensures
         exists|s: TaskOwn|
