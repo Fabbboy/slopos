@@ -29,7 +29,7 @@ pub mod task;
 pub mod test_reports;
 
 pub use addr::TaskAddr;
-pub use cell::{CurrentTask, SwitchWindow, TaskExclusive, TaskOwnCell};
+pub use cell::{CurrentTask, IdleTask, SwitchWindow, TaskExclusive, TaskOwnCell};
 pub use diag::{TaskDiag, current_task_diag};
 pub use drop_context::{assert_task_drop_context, drop_off_lock, run_off_lock};
 pub use exit_info::ExitInfo;

@@ -31,6 +31,10 @@ pub type Task = TaskInner<KernelStack, UnsafeStack>;
 /// `CurrentTask::<KernelStack, UnsafeStack>::get()` at every call site.
 pub type Current = slopos_ostd::task::CurrentTask<KernelStack, UnsafeStack>;
 
+/// Borrow of this CPU's idle task, at the concrete kernel monomorphisation.
+/// Spelled `Idle::current()` at every call site.
+pub type Idle = slopos_ostd::task::IdleTask<KernelStack, UnsafeStack>;
+
 /// Exclusive access to one endpoint of a context switch, at the concrete
 /// kernel monomorphisation. Minted only by `slopos_ostd::task::run_switch`.
 pub type Switching<'a> = slopos_ostd::task::SwitchWindow<'a, KernelStack, UnsafeStack>;

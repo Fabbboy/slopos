@@ -27,6 +27,10 @@
 //! other than the one that minted it, and the trait is sealed, so no crate
 //! outside OSTD can forge a third.
 //!
+//! [`IdleTask`] also lives here and is deliberately *not* one of them: it
+//! borrows this CPU's idle task, which is usually not the task this CPU is
+//! running, so it proves liveness and identity but authorises no write.
+//!
 //! # What a witness does *not* authorise
 //!
 //! Not the atomic fields — they need no witness — and not the states that
@@ -222,10 +226,11 @@ const _: () = {
 ///
 /// Takes no reference count. The task cannot be freed underneath it because a
 /// task's own execution pins its allocation: the reap gate declines while
-/// `task_is_dispatch_pinned` holds, and that predicate's second disjunct tests
-/// whether the task is any CPU's `PCR.current_task` — which is exactly the
-/// condition under which this guard exists. **Deleting that disjunct deletes
-/// this guard's soundness proof**, so it is spelled out at the gate too.
+/// `task_is_dispatch_pinned` holds, and that predicate's *current-task*
+/// disjunct tests whether the task is any CPU's `PCR.current_task` — which is
+/// exactly the condition under which this guard exists. **Deleting that
+/// disjunct deletes this guard's soundness proof**, so it is spelled out at the
+/// gate too. [`IdleTask`] rests on the gate's idle disjunct the same way.
 ///
 /// `!Send` and `!Sync`, which is the whole enforcement: a guard cannot travel
 /// to a CPU whose PCR names a different task. It deliberately does *not* hold a
@@ -282,6 +287,13 @@ impl<K, U> CurrentTask<K, U> {
         self.id
     }
 
+    /// This task's compare-only address, for identity tests that must not
+    /// dereference either side.
+    #[inline]
+    pub fn addr(&self) -> crate::task::TaskAddr {
+        crate::task::TaskAddr::of(self.task())
+    }
+
     /// Borrow the task. The returned reference cannot outlive the guard.
     #[inline]
     pub fn task(&self) -> &TaskInner<K, U> {
@@ -320,6 +332,104 @@ impl<K, U> sealed::Sealed for CurrentTask<K, U> {}
 unsafe impl<K, U> TaskExclusive<K, U> for CurrentTask<K, U> {
     #[inline]
     fn witnessed(&self) -> *const TaskInner<K, U> {
+        self.ptr.as_ptr()
+    }
+}
+
+// ---------------------------------------------------------------------------
+// IdleTask — borrow of this CPU's idle task
+// ---------------------------------------------------------------------------
+
+/// Borrow of this CPU's idle task.
+///
+/// Takes no reference count, for the same reason [`CurrentTask`] does not: the
+/// reap gate declines while `task_is_dispatch_pinned` holds, and that
+/// predicate's *idle* disjunct tests whether the task is any CPU's PCR idle
+/// task — which is exactly the condition under which this guard exists.
+/// **Deleting that disjunct deletes this guard's soundness proof**, so it is
+/// spelled out at the gate too.
+///
+/// # Local CPU only, by construction
+///
+/// [`current`](Self::current) takes no CPU index, so there is no way to name a
+/// foreign CPU's idle task and get something dereferenceable back. That is
+/// deliberate: reading another CPU's task races its switch tail, and a
+/// `debug_assert!` on an index would evaporate in release exactly where the
+/// hazard is real. `TaskAddr::idle_of` stays the compare-only answer for
+/// foreign CPUs — it can be compared and never dereferenced.
+///
+/// `None` covers the two states in which the slot names nothing: a CPU whose
+/// idle task has not been installed yet, and the two test fixtures that null
+/// the slot and restore it. `install_idle_task` is the only other writer, so a
+/// non-null slot names a real task and no id sidecar is needed — unlike
+/// [`CurrentTask`], whose slot is also parked on pre-heap bootstrap stubs and
+/// therefore needs the id as its discriminator.
+///
+/// # Not a [`TaskExclusive`]
+///
+/// Deliberately no `TaskExclusive` impl. A CPU's idle task is frequently *not*
+/// the task that CPU is running — this guard is mintable at any moment,
+/// including while a ready task is on-CPU — so it proves identity and liveness,
+/// never exclusivity. The idle task's register state is written only inside
+/// `run_switch`, where the [`SwitchWindow`] over that endpoint is the witness,
+/// and that window's dispatch-reference precondition is discharged by the same
+/// idle disjunct rather than by this guard.
+pub struct IdleTask<K, U> {
+    ptr: NonNull<TaskInner<K, U>>,
+    /// Opts out of `Send`/`Sync`.
+    _not_send: PhantomData<*mut ()>,
+}
+
+impl<K, U> IdleTask<K, U> {
+    /// This CPU's idle task, or `None` when its slot names nothing.
+    #[inline]
+    pub fn current() -> Option<Self> {
+        let cpu_id = pcr::get_current_cpu();
+        let ptr = NonNull::new(pcr::get_idle_task(cpu_id).cast::<TaskInner<K, U>>())?;
+        Some(Self {
+            ptr,
+            _not_send: PhantomData,
+        })
+    }
+
+    /// [`current`](Self::current) for a caller that already carries its own CPU
+    /// index. Prefer `current`; this exists so an index computed one frame
+    /// earlier does not have to be threaded away, and it debug-asserts that the
+    /// index is this CPU's rather than trusting it.
+    #[inline]
+    pub fn get(cpu_id: usize) -> Option<Self> {
+        debug_assert_eq!(
+            cpu_id,
+            pcr::get_current_cpu(),
+            "IdleTask is a local-CPU guard"
+        );
+        Self::current()
+    }
+
+    /// Borrow the idle task. The returned reference cannot outlive the guard.
+    #[inline]
+    pub fn task(&self) -> &TaskInner<K, U> {
+        // SAFETY: the guard exists only while this CPU's PCR idle slot names
+        // the task, and such a task cannot be reaped — the reap gate declines
+        // while `task_is_dispatch_pinned`, whose idle disjunct is exactly that
+        // condition.
+        unsafe { self.ptr.as_ref() }
+    }
+
+    /// This task's compare-only address, for identity tests that must not
+    /// dereference either side.
+    #[inline]
+    pub fn addr(&self) -> crate::task::TaskAddr {
+        crate::task::TaskAddr::of(self.task())
+    }
+
+    /// The underlying pointer.
+    ///
+    /// Transitional, exactly as [`CurrentTask::as_ptr`]: it exists so call
+    /// sites can migrate to the guard before the surfaces they feed have been
+    /// retyped, and goes away with the last of them.
+    #[inline]
+    pub fn as_ptr(&self) -> *mut TaskInner<K, U> {
         self.ptr.as_ptr()
     }
 }
