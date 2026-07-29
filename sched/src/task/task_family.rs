@@ -19,8 +19,7 @@
 
 use core::ptr::NonNull;
 
-use slopos_ostd::task::accessors::task_set_parent_task_id;
-use slopos_ostd::task::task_placement_retain;
+use slopos_ostd::task::{task_placement_retain, with_parked_node};
 
 use super::task_table::{TaskRef, task_find_by_id, with_task_manager};
 use super::{INVALID_TASK_ID, Task, TaskStatus};
@@ -49,11 +48,14 @@ pub fn link_child(parent: &Task, child: NonNull<Task>) {
         // The parent arrives as a borrow now: it is only ever read here, and a
         // raw parameter would have been a task handle with no owner for a
         // status check and an id copy.
+        // The caller holds the child's reference across this call — it is
+        // about to be parked in the list below — so the node borrows through
+        // the sanctioned surface rather than through a raw pointer.
         if !status_can_parent(parent.status()) {
-            task_set_parent_task_id(child.as_ptr(), INVALID_TASK_ID);
+            with_parked_node(child, |child| child.set_parent_task_id(INVALID_TASK_ID));
             return;
         }
-        task_set_parent_task_id(child.as_ptr(), parent.task_id);
+        with_parked_node(child, |c| c.set_parent_task_id(parent.task_id));
         // Push first, park the owning reference only on success: retain pairs
         // one-to-one with membership. A fresh/forked child is unlinked, so the
         // push cannot fail in practice; if it did, no retain is leaked.
@@ -81,7 +83,7 @@ pub fn take_one_child(parent: &Task) -> Option<TaskRef> {
 /// deferred-reap drain may be retiring its registration concurrently, and the
 /// guard is the only thing holding the allocation.
 pub fn unlink_child(child: &TaskRef) -> Option<TaskRef> {
-    let parent_id = child.parent_task_id;
+    let parent_id = child.parent_task_id();
     if parent_id == INVALID_TASK_ID {
         return None;
     }

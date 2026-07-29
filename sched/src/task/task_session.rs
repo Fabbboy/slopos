@@ -3,7 +3,7 @@ use slopos_abi::syscall::TtyIndex;
 use slopos_ostd::task::{ProcessGroup, Session};
 use slopos_ostd::{KArc, KWeak};
 
-use super::task_accessors::{task_signal_post, task_wake_all_waiters};
+use super::task_ops::{task_signal_post, task_wake_all_waiters};
 use super::task_table::{task_find_by_id, task_for_each_active, with_task_manager};
 use super::{INVALID_TASK_ID, Task};
 
@@ -74,13 +74,13 @@ pub(super) fn release_task_dependents(completed_task_id: u32) {
     // side + the waiter's `is_set` check inside `wait_event`) is the
     // bidirectional full barrier that pairs with the Release
     // `try_set` published just before this call.
-    task_wake_all_waiters(task.as_ptr());
+    task_wake_all_waiters(&task);
 }
 
 pub(super) fn notify_parent_of_child_exit(task: &Task) {
     let task_id = task.task_id;
     let tgid = task.tgid;
-    let parent_task_id = task.parent_task_id;
+    let parent_task_id = task.parent_task_id();
 
     if parent_task_id == INVALID_TASK_ID || parent_task_id == task_id {
         return;
@@ -94,5 +94,5 @@ pub(super) fn notify_parent_of_child_exit(task: &Task) {
         return;
     };
 
-    let _ = task_signal_post(parent.as_ptr(), SIGCHLD);
+    let _ = task_signal_post(&parent, SIGCHLD);
 }

@@ -24,8 +24,8 @@ use super::task::{
     INVALID_PROCESS_ID, INVALID_TASK_ID, IdtEntry, TASK_FLAG_KERNEL_MODE, TASK_FLAG_USER_MODE,
     Task, TaskPriority, TaskRef, TaskStatus, task_abandon, task_build, task_commit, task_create,
     task_find_by_id, task_for_each_active, task_handle, task_id_was_allocated,
-    task_live_cap_rejects_for_test, task_resolve_handle, task_sched_placement_load, task_set_state,
-    task_set_state_with_reason, task_slot_census, task_status, task_terminate, task_waiter_count,
+    task_live_cap_rejects_for_test, task_resolve_handle, task_set_state,
+    task_set_state_with_reason, task_slot_census, task_terminate, task_waiter_count,
 };
 use super::test_fixture::KernelTestScope;
 use slopos_abi::task::BlockReason;
@@ -398,7 +398,7 @@ pub fn test_scalar_field_identity() -> TestResult {
         task.fs_base
             .store(0xBBBB, core::sync::atomic::Ordering::Release);
         task.tgid = 0xCCCC;
-        task.parent_task_id = 0xDDDD;
+        task.set_parent_task_id(0xDDDD);
         task.priority = TaskPriority::Low;
     }
 
@@ -415,7 +415,7 @@ pub fn test_scalar_field_identity() -> TestResult {
         ("kernel_stack_top", arc.kernel_stack_top, 0xAAAA),
         ("fs_base", arc.fs_base(), 0xBBBB),
         ("tgid", arc.tgid as u64, 0xCCCC),
-        ("parent_task_id", arc.parent_task_id as u64, 0xDDDD),
+        ("parent_task_id", arc.parent_task_id() as u64, 0xDDDD),
     ];
     for (name, got, want) in checks {
         if got != want {
@@ -1052,7 +1052,7 @@ pub fn test_state_transition_running_to_blocked() -> TestResult {
     }
 
     let state = task_find_by_id(task_id)
-        .and_then(|task| task_status(task.as_ptr()))
+        .map(|task| task.status())
         .unwrap_or(TaskStatus::Terminated);
     if state != TaskStatus::Blocked {
         klog_info!("SCHED_TEST: Expected BLOCKED, got {:?}", state);
@@ -1083,7 +1083,7 @@ pub fn test_state_transition_invalid_terminated_to_running() -> TestResult {
     // Try to find it again - should fail or be in TERMINATED/INVALID state
     if let Some(task) = task_find_by_id(task_id) {
         let _result = task_set_state(task_id, TaskStatus::Running);
-        let new_state = task_status(task.as_ptr()).unwrap_or(TaskStatus::Terminated);
+        let new_state = Some(task.status()).unwrap_or(TaskStatus::Terminated);
 
         if new_state == TaskStatus::Running {
             klog_info!("SCHED_TEST: BUG - Invalid transition TERMINATED->RUNNING was allowed!");
@@ -1113,7 +1113,7 @@ pub fn test_state_transition_invalid_blocked_to_running() -> TestResult {
     let _result = task_set_state(task_id, TaskStatus::Running);
 
     let state = task_find_by_id(task_id)
-        .and_then(|task| task_status(task.as_ptr()))
+        .map(|task| task.status())
         .unwrap_or(TaskStatus::Terminated);
 
     if state == TaskStatus::Running {
@@ -1236,7 +1236,7 @@ pub fn test_unpublished_task_is_terminable() -> TestResult {
         let Some(task) = task_find_by_id(id) else {
             return TestResult::Fail;
         };
-        super::task::task_set_status(task.as_ptr(), TaskStatus::Invalid);
+        task.set_status(TaskStatus::Invalid);
     }
 
     if task_terminate(id) != 0 {
@@ -2325,10 +2325,10 @@ pub fn test_schedule_refuses_non_ready_task() -> TestResult {
         let _ = task_terminate(task_id);
         return TestResult::Fail;
     }
-    if task_sched_placement_load(&*guard) != SchedPlacement::Nascent {
+    if guard.sched_placement() != SchedPlacement::Nascent {
         klog_info!(
             "SCHED_TEST: refused publication left placement {:?}, expected Nascent",
-            task_sched_placement_load(&*guard)
+            guard.sched_placement()
         );
         let _ = task_terminate(task_id);
         return TestResult::Fail;
@@ -3467,8 +3467,8 @@ pub fn test_privilege_separation_invariants() -> TestResult {
         klog_info!("SCHED_TEST: user task missing kernel RSP0 stack");
         return TestResult::Fail;
     }
-    let cs = slopos_ostd::task::accessors::task_context_cs(&*task_ref).unwrap_or(0);
-    let ss = slopos_ostd::task::accessors::task_context_ss(&*task_ref).unwrap_or(0);
+    let cs = task_ref.context_cs();
+    let ss = task_ref.context_ss();
     if cs != SegmentSelector::USER_CODE.bits() as u64
         || ss != SegmentSelector::USER_DATA.bits() as u64
     {
@@ -3589,7 +3589,7 @@ pub fn test_sleep_wake_race_regression() -> TestResult {
 
     for round in 0..64 {
         let _ = unschedule_task(&task_guard);
-        if task_ptr.status() == (TaskStatus::Blocked) && !make_task_ready(task_id) {
+        if task_ptr.status() == TaskStatus::Blocked && !make_task_ready(task_id) {
             klog_info!("SCHED_TEST: set Ready failed at round {}", round);
             task_terminate(task_id);
             return TestResult::Fail;
@@ -4839,7 +4839,7 @@ pub fn test_orphan_child_auto_reaped_on_parent_exit() -> TestResult {
     let Some(child) = task_find_by_id(child_id) else {
         return TestResult::Fail;
     };
-    if task_status(child.as_ptr()).unwrap_or(TaskStatus::Terminated) != TaskStatus::Zombie {
+    if Some(child.status()).unwrap_or(TaskStatus::Terminated) != TaskStatus::Zombie {
         return TestResult::Fail;
     }
     drop(child);

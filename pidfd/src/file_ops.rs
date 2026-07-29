@@ -21,7 +21,7 @@ use slopos_abi::file_ops::{FileKind, FileOps};
 use slopos_abi::io::{IoBufRead, IoBufWrite};
 use slopos_abi::syscall::POLLIN;
 use slopos_ostd::sync::event_bus::BUS;
-use slopos_ostd::task::accessors::child_exit_event;
+use slopos_ostd::task::ops::child_exit_event;
 use slopos_sched::task::task_find_by_id;
 
 pub struct PidfdFileOps;

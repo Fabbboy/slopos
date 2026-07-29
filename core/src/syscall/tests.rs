@@ -57,9 +57,8 @@ use slopos_mm::memory_layout_defs::PROCESS_CODE_START_VA;
 use slopos_sched::scheduler::unblock_task;
 use slopos_sched::task;
 use slopos_sched::task::{
-    task_clone, task_create, task_find_by_id, task_fork, task_process_id,
-    task_sched_placement_store, task_set_state, task_set_state_from_with_reason, task_status,
-    task_terminate, task_try_transition_from,
+    task_clone, task_create, task_find_by_id, task_fork, task_set_state,
+    task_set_state_from_with_reason, task_terminate, task_try_transition_from,
 };
 
 // =============================================================================
@@ -89,10 +88,10 @@ fn park_bootstrap_on_current_cpu() {
 
 fn make_task_current(task_id: u32) {
     let task = task_find_by_id(task_id).expect("make_task_current: no such task");
-    if task_status(task.as_ptr()) == Some(TaskStatus::Blocked) {
+    if task.status() == TaskStatus::Blocked {
         assert_eq!(task_set_state(task_id, TaskStatus::Ready), 0);
     }
-    task_sched_placement_store(task.as_ptr(), SchedPlacement::OnCpu);
+    task.set_sched_placement(SchedPlacement::OnCpu);
     let cpu_id = slopos_arch::pcr::get_current_cpu();
     assert!(
         slopos_sched::scheduler::dispatch_task_for_test(cpu_id, task_id),
@@ -1157,7 +1156,7 @@ pub fn test_fork_terminated_parent() -> TestResult {
     task_terminate(task_id);
 
     if let Some(task_after) = task_find_by_id(task_id) {
-        let state = task_status(task_after.as_ptr()).unwrap_or(TaskStatus::Terminated);
+        let state = task_after.status();
         if state == TaskStatus::Terminated {
             let child_id = task_fork(&task_after, core::ptr::null());
             assert_test!(
@@ -1345,7 +1344,7 @@ pub fn test_terminate_already_terminated() -> TestResult {
     let _r2 = task_terminate(task_id);
 
     if let Some(task) = task_find_by_id(task_id) {
-        let state = task_status(task.as_ptr()).unwrap_or(TaskStatus::Terminated);
+        let state = task.status();
         assert_test!(state != TaskStatus::Ready, "terminated task in READY state");
     }
 
@@ -1367,7 +1366,7 @@ pub fn test_operations_on_terminated_task() -> TestResult {
     let state_result = task_set_state(task_id, TaskStatus::Ready);
     if state_result == 0 {
         if let Some(task) = task_find_by_id(task_id) {
-            let current_state = task_status(task.as_ptr()).unwrap_or(TaskStatus::Terminated);
+            let current_state = task.status();
             assert_test!(
                 current_state != TaskStatus::Ready,
                 "revived terminated task"
@@ -1573,7 +1572,7 @@ pub fn test_clone_then_fork_interaction() -> TestResult {
         "fork child should be its own thread-group leader"
     );
     assert_eq_test!(
-        fork_guard.parent_task_id,
+        fork_guard.parent_task_id(),
         parent_id,
         "fork child parent id mismatch"
     );
@@ -3573,7 +3572,7 @@ pub fn test_tty_ioctl_never_changes_open_state() -> TestResult {
     let task_id = create_test_user_task();
     assert_test!(task_id != INVALID_TASK_ID);
     let pid = task_find_by_id(task_id)
-        .and_then(|task| task_process_id(task.as_ptr()))
+        .map(|task| task.process_id)
         .unwrap_or(0);
 
     let master_fd = file_open_for_process(pid, b"/dev/ptmx", O_RDONLY);
@@ -3637,7 +3636,7 @@ pub fn test_scm_rights_tty_balanced() -> TestResult {
     let task_id = create_test_user_task();
     assert_test!(task_id != INVALID_TASK_ID);
     let pid = task_find_by_id(task_id)
-        .and_then(|task| task_process_id(task.as_ptr()))
+        .map(|task| task.process_id)
         .unwrap_or(0);
 
     let (srv, cli) = match unix_create_connected_pair_raw() {
@@ -4251,7 +4250,7 @@ pub fn test_unix_socket_send_recv_basic() -> TestResult {
     let task_id = create_test_user_task();
     assert_test!(task_id != INVALID_TASK_ID, "task creation failed");
     let pid = task_find_by_id(task_id)
-        .and_then(|task| task_process_id(task.as_ptr()))
+        .map(|task| task.process_id)
         .unwrap_or(0);
 
     let (srv_fd, cli_fd) = match unix_create_connected_pair(pid) {
@@ -4283,7 +4282,7 @@ pub fn test_unix_socket_poll_after_send() -> TestResult {
     let task_id = create_test_user_task();
     assert_test!(task_id != INVALID_TASK_ID, "task creation failed");
     let pid = task_find_by_id(task_id)
-        .and_then(|task| task_process_id(task.as_ptr()))
+        .map(|task| task.process_id)
         .unwrap_or(0);
 
     let (srv_fd, cli_fd) = match unix_create_connected_pair(pid) {
@@ -4827,7 +4826,7 @@ pub fn test_compositor_handshake_listen_accept_send_poll() -> TestResult {
     let task_id = create_test_user_task();
     assert_test!(task_id != INVALID_TASK_ID, "create task");
     let pid = task_find_by_id(task_id)
-        .and_then(|task| task_process_id(task.as_ptr()))
+        .map(|task| task.process_id)
         .unwrap_or(0);
 
     let path = b"/test/compositor-handshake";
@@ -5198,7 +5197,7 @@ pub fn test_unix_scm_rights_atomic_delivery() -> TestResult {
     let task_id = create_test_user_task();
     assert_test!(task_id != INVALID_TASK_ID, "task creation failed");
     let pid = task_find_by_id(task_id)
-        .and_then(|task| task_process_id(task.as_ptr()))
+        .map(|task| task.process_id)
         .unwrap_or(0);
 
     let (srv, cli) = match unix_create_connected_pair_raw() {
@@ -5279,7 +5278,7 @@ pub fn test_unix_scm_rights_anc_queue_full_no_partial() -> TestResult {
     let task_id = create_test_user_task();
     assert_test!(task_id != INVALID_TASK_ID, "task creation failed");
     let pid = task_find_by_id(task_id)
-        .and_then(|task| task_process_id(task.as_ptr()))
+        .map(|task| task.process_id)
         .unwrap_or(0);
 
     let (srv, cli) = match unix_create_connected_pair_raw() {
@@ -5361,7 +5360,7 @@ pub fn test_unix_scm_rights_error_returns_custody() -> TestResult {
     let task_id = create_test_user_task();
     assert_test!(task_id != INVALID_TASK_ID, "task creation failed");
     let pid = task_find_by_id(task_id)
-        .and_then(|task| task_process_id(task.as_ptr()))
+        .map(|task| task.process_id)
         .unwrap_or(0);
 
     // Build a pair, close the peer immediately → next send sees

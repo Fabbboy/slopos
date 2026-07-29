@@ -5,13 +5,11 @@ use core::sync::atomic::Ordering;
 use slopos_arch::cpu;
 use slopos_ostd::kdiag_timestamp;
 use slopos_ostd::string::bytes_as_str;
-use slopos_ostd::task::accessors::{
+use slopos_ostd::task::ops::{
     TASK_EXIT_CLEANUP_ACCOUNTED, TASK_EXIT_CLEANUP_RESOURCES, TASK_EXIT_CLEANUP_VM,
-    task_exit_cleanup_mark,
 };
 use slopos_ostd::{klog_debug, klog_info};
 
-use slopos_ostd::task::accessors::task_process_group;
 use slopos_ostd::task::new_session_group;
 use slopos_ostd::task::switch::task_entry_trampoline;
 
@@ -26,8 +24,7 @@ use super::{
     INVALID_PROCESS_ID, INVALID_TASK_ID, TASK_FLAG_KERNEL_MODE, TASK_FLAG_SYSTEM,
     TASK_FLAG_USER_MODE, TASK_KERNEL_STACK_SIZE, TASK_NAME_MAX_LEN, TASK_STACK_SIZE,
     TASK_UNSAFE_STACK_SIZE, Task, TaskContext, TaskEntry, TaskExitReason, TaskFaultReason,
-    TaskPriority, TaskStatus, task_id_of, task_on_cpu_load, task_panic_in_flight_store,
-    task_recovery_depth_store, task_status,
+    TaskPriority, TaskStatus,
 };
 use crate::exit_info::ExitInfo;
 use crate::scheduler;
@@ -460,7 +457,7 @@ fn init_task_context(task: &mut Task) {
     // `task.fpu_state` is a valid in-place FpuState owned by the
     // caller-provided `&mut Task`. Writing into it does not alias
     // with any other reference because we hold the unique `&mut`.
-    super::task_accessors::task_reset_fpu_state(task);
+    super::task_ops::task_reset_fpu_state(task);
 
     if task.flags & TASK_FLAG_KERNEL_MODE != 0 {
         let trampoline = task_entry_trampoline as *const () as u64;
@@ -468,7 +465,7 @@ fn init_task_context(task: &mut Task) {
         // The task's id, not its address: a scalar the trampoline can carry in
         // a saved register file without it being an unowned task handle.
         let shim_arg = task.task_id as u64;
-        super::task_accessors::task_kernel_stack_seed_ret(task.kernel_stack_top, trampoline);
+        super::task_ops::task_kernel_stack_seed_ret(task.kernel_stack_top, trampoline);
         *task.switch_ctx.get_mut() =
             SwitchContext::new_for_task(shim, shim_arg, task.kernel_stack_top, trampoline);
         task.context.get_mut().rip = trampoline;
@@ -634,7 +631,7 @@ pub fn task_build(
     // the write, not a grace period.
     let _ = task_ref.process_group.replace_exclusive(process_group);
     task_ref.set_clear_child_tid(0);
-    task_ref.parent_task_id = INVALID_TASK_ID;
+    task_ref.set_parent_task_id(INVALID_TASK_ID);
     task_ref.stack_base = resources.stack_base;
     task_ref.stack_size = TASK_STACK_SIZE;
     task_ref.stack_pointer = resources.stack_base + TASK_STACK_SIZE - 8;
@@ -777,7 +774,6 @@ pub fn task_terminate(task_id: u32) -> c_int {
     };
 
     let task: &Task = &target;
-    let task_ptr = target.as_ptr();
     let resolved_id = if task_id == u32::MAX {
         task.task_id
     } else {
@@ -831,7 +827,7 @@ pub fn task_terminate(task_id: u32) -> c_int {
     let _preempt = slopos_ostd::cpu::preempt::PreemptGuard::new();
     mark_task_terminated(task, resolved_id);
 
-    let defer_cleanup_to_running_cpu = !is_current && task_on_cpu_load(task);
+    let defer_cleanup_to_running_cpu = !is_current && task.on_cpu();
     if is_current {
         cleanup_task_process_resources(task, resolved_id, TaskProcessCleanupMode::KeepVm);
     } else if !defer_cleanup_to_running_cpu {
@@ -840,9 +836,7 @@ pub fn task_terminate(task_id: u32) -> c_int {
 
     let account_here = !is_current
         && !defer_cleanup_to_running_cpu
-        && task_exit_cleanup_mark(task_ptr, TASK_EXIT_CLEANUP_ACCOUNTED)
-            & TASK_EXIT_CLEANUP_ACCOUNTED
-            != 0;
+        && task.exit_cleanup_mark(TASK_EXIT_CLEANUP_ACCOUNTED) & TASK_EXIT_CLEANUP_ACCOUNTED != 0;
     with_task_manager(|mgr| {
         if account_here && mgr.num_tasks > 0 {
             mgr.num_tasks -= 1;
@@ -934,7 +928,7 @@ fn stamp_exit_state(task: &Task, resolved_id: u32, now: u64) -> ExitPlan {
     // call `waitpid` on us. Kernel-mode tasks and orphans skip Zombie
     // and go straight to Terminated — their exit code has no consumer,
     // so the slot is immediately reapable.
-    let parent_alive = parent_alive_for(task.parent_task_id);
+    let parent_alive = parent_alive_for(task.parent_task_id());
     let final_status = if parent_alive {
         TaskStatus::Zombie
     } else {
@@ -1003,8 +997,7 @@ fn mark_task_terminated(task: &Task, resolved_id: u32) {
     // A task that dies before it was ever published leaves `Nascent` behind.
     // Retire it to `None` so placement keeps meaning "no scheduler owner" for
     // every dead task, whatever stage it died at.
-    let _ = slopos_ostd::task::accessors::task_sched_placement_compare_exchange(
-        task,
+    let _ = task.sched_placement_compare_exchange(
         slopos_ostd::task::SchedPlacement::Nascent,
         slopos_ostd::task::SchedPlacement::None,
     );
@@ -1033,10 +1026,10 @@ fn parent_alive_for(parent_id: u32) -> bool {
     let Some(parent) = task_find_by_id(parent_id) else {
         return false;
     };
-    match task_status(parent.as_ptr()) {
-        Some(TaskStatus::Ready) | Some(TaskStatus::Running) | Some(TaskStatus::Blocked) => true,
-        _ => false,
-    }
+    matches!(
+        parent.status(),
+        TaskStatus::Ready | TaskStatus::Running | TaskStatus::Blocked
+    )
 }
 
 /// Drain the dying task's owned children list — O(children), not a registry
@@ -1056,9 +1049,8 @@ fn parent_alive_for(parent_id: u32) -> bool {
 /// reference and reaps itself when it exits.
 fn reparent_and_reap_children(dying: &Task) {
     while let Some(child) = super::take_one_child(dying) {
-        let child_ptr = child.as_ptr();
-        let child_id = task_id_of(child_ptr).unwrap_or(INVALID_TASK_ID);
-        super::task_accessors::task_set_parent_task_id(child_ptr, INVALID_TASK_ID);
+        let child_id = child.task_id;
+        child.set_parent_task_id(INVALID_TASK_ID);
         let orphaned_zombie =
             child.status() == TaskStatus::Zombie && child.try_transition_to(TaskStatus::Terminated);
         super::task_put(child);
@@ -1265,14 +1257,14 @@ pub fn task_fork(
     // `&mut` and one `&` coexist without aliasing.
     let child = pending.as_mut();
 
-    super::task_accessors::task_clone_from(child, parent);
+    super::task_ops::task_clone_from(child, parent);
 
     // The bulk copy above may carry the parent's saved recovery/in-flight
     // depths, which were written at its last switch-out and can be stale
     // (e.g. saved mid-unwind, then the parent caught the panic without
     // another switch-out). The child starts outside any recovery scope.
-    task_recovery_depth_store(child as *mut Task, 0);
-    task_panic_in_flight_store(child as *mut Task, 0);
+    child.set_recovery_depth(0);
+    child.set_panic_in_flight(0);
 
     child.task_id = child_task_id;
     child.process_id = child_process_id;
@@ -1286,7 +1278,7 @@ pub fn task_fork(
     // because the child is not published yet.
     let _ = child
         .process_group
-        .replace_exclusive(task_process_group(parent as *const Task));
+        .replace_exclusive(parent.process_group.load());
     child.set_clear_child_tid(0);
 
     child.kernel_stack_base = child_kernel_stack_base;
@@ -1459,14 +1451,14 @@ pub fn task_clone(
     // `&mut` and one `&` coexist without aliasing.
     let child = pending.as_mut();
 
-    super::task_accessors::task_clone_from(child, parent);
+    super::task_ops::task_clone_from(child, parent);
 
     // The bulk copy above may carry the parent's saved recovery/in-flight
     // depths, which were written at its last switch-out and can be stale
     // (e.g. saved mid-unwind, then the parent caught the panic without
     // another switch-out). The child starts outside any recovery scope.
-    task_recovery_depth_store(child as *mut Task, 0);
-    task_panic_in_flight_store(child as *mut Task, 0);
+    child.set_recovery_depth(0);
+    child.set_panic_in_flight(0);
 
     child.task_id = child_task_id;
     child.process_id = child_process_id;
@@ -1489,7 +1481,7 @@ pub fn task_clone(
     // because the child is not published yet.
     let _ = child
         .process_group
-        .replace_exclusive(task_process_group(parent as *const Task));
+        .replace_exclusive(parent.process_group.load());
 
     child.kernel_stack_base = child_kernel_stack_base;
     child.kernel_stack_top = child_kernel_stack.top().as_u64();

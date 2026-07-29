@@ -52,10 +52,9 @@ use core::sync::atomic::{AtomicPtr, Ordering};
 use slopos_ostd::KArc;
 use slopos_ostd::cpu::preempt::PreemptGuard;
 use slopos_ostd::sync::held_lock_count;
-use slopos_ostd::task::accessors::task_reclaim_next_store_relaxed;
 use slopos_ostd::task::{
     ParkedTask, task_destroy_parked, task_parked_leak, task_parked_reclaim, task_release_strong,
-    with_parked,
+    with_parked, with_parked_node,
 };
 
 use super::{Task, TaskRef};
@@ -147,12 +146,13 @@ fn graveyard_push(parked: ParkedTaskRef) {
     // drainer, so the successor writes below go through a raw pointer: a
     // `&Task` still live across the publishing CAS would be a reference to a
     // task another CPU may already be destroying.
-    let raw = task_parked_leak(parked).as_ptr();
+    let node = task_parked_leak(parked);
     loop {
         let head = TASK_GRAVEYARD.load(Ordering::Acquire);
-        task_reclaim_next_store_relaxed(raw, head);
+        // Scoped, so the borrow ends before the CAS below publishes the node.
+        with_parked_node(node, |task| task.reclaim_link().store_relaxed(head));
         if TASK_GRAVEYARD
-            .compare_exchange_weak(head, raw, Ordering::AcqRel, Ordering::Acquire)
+            .compare_exchange_weak(head, node.as_ptr(), Ordering::AcqRel, Ordering::Acquire)
             .is_ok()
         {
             return;

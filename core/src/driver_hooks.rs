@@ -9,9 +9,7 @@ use crate::irq;
 use slopos_ostd::KArc;
 use slopos_ostd::task::ProcessGroup;
 use slopos_sched::scheduler;
-use slopos_sched::task::{
-    self, task_has_deliverable_signal, task_signal_blocked, task_signal_handler, task_signal_post,
-};
+use slopos_sched::task::{self, task_has_deliverable_signal, task_signal_post};
 use slopos_sched::task_struct::Current;
 
 fn runtime_current_task_pgrp_handle() -> Option<slopos_ostd::KWeak<ProcessGroup>> {
@@ -54,7 +52,7 @@ fn runtime_signal_process_group(pgid: u32, signum: u8) -> bool {
         if task.pgid() != pgid {
             return;
         }
-        if task_signal_post(task.as_ptr(), signum) {
+        if task_signal_post(&task, signum) {
             let _ = scheduler::unblock_task(task);
         }
         matched = true;
@@ -74,7 +72,7 @@ fn runtime_signal_session(sid: u32, signum: u8) -> bool {
         if task.sid() != sid {
             return;
         }
-        if task_signal_post(task.as_ptr(), signum) {
+        if task_signal_post(&task, signum) {
             let _ = scheduler::unblock_task(task);
         }
         matched = true;
@@ -114,17 +112,12 @@ fn runtime_is_current_signal_blocked_or_ignored(signum: u8) -> bool {
     if bit == 0 {
         return false; // invalid signal number
     }
-    let task = current.as_ptr();
-    if let Some(blocked) = task_signal_blocked(task) {
-        if (blocked & bit) != 0 {
-            return true;
-        }
-    }
-    let idx = (signum as usize).wrapping_sub(1);
-    if task_signal_handler(task, idx) == Some(SIG_IGN) {
+    let task = current.task();
+    if (task.signal_blocked() & bit) != 0 {
         return true;
     }
-    false
+    let idx = (signum as usize).wrapping_sub(1);
+    task.signal_handler(idx) == Some(SIG_IGN)
 }
 
 // ---------------------------------------------------------------------------
@@ -134,7 +127,7 @@ fn runtime_is_current_signal_blocked_or_ignored(signum: u8) -> bool {
 // ---------------------------------------------------------------------------
 
 fn runtime_has_pending_signal() -> bool {
-    Current::get().is_some_and(|current| task_has_deliverable_signal(current.as_ptr()))
+    Current::get().is_some_and(|current| task_has_deliverable_signal(current.task()))
 }
 
 // ---------------------------------------------------------------------------
@@ -167,7 +160,7 @@ fn runtime_is_pgrp_orphaned(pgid: u32, sid: u32) -> bool {
             return ControlFlow::Continue(());
         }
 
-        let parent_id = task.parent_task_id;
+        let parent_id = task.parent_task_id();
         if parent_id == 0 || parent_id == slopos_abi::task::INVALID_TASK_ID {
             return ControlFlow::Continue(()); // no parent or init — can't help
         }

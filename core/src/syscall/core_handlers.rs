@@ -242,7 +242,7 @@ define_syscall!(syscall_process_list
         }
         let entry = &mut entries[count];
         entry.task_id = task.task_id;
-        entry.parent_task_id = task.parent_task_id;
+        entry.parent_task_id = task.parent_task_id();
         entry.process_id = task.process_id;
         entry.state = task.status().as_u8();
         entry.block_reason = task.load_block_reason().as_u8();

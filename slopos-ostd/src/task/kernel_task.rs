@@ -423,7 +423,12 @@ pub struct TaskInner<K, U> {
     /// with interrupts off, and the allocation happens before the store so the
     /// lock never covers one.
     pub test_reports: SpinLock<Option<KBox<TestReportRing>>>,
-    pub parent_task_id: u32,
+    /// Id of this task's parent, or `INVALID_TASK_ID` once reparented.
+    ///
+    /// Atomic because the write is cross-task: a dying parent stamps
+    /// `INVALID_TASK_ID` into each of its live children while `getppid`, the
+    /// task-list syscall and the pidfd layer read it from elsewhere.
+    pub parent_task_id: AtomicU32,
     /// FS segment base address (TLS pointer). Written to MSR FS_BASE before
     /// switching to user mode, and read back on context save.
     /// FS segment base (TLS pointer).
@@ -1037,6 +1042,20 @@ impl<K, U> TaskInner<K, U> {
             .is_ok()
     }
 
+    /// Id of this task's parent, or `INVALID_TASK_ID` once reparented. Relaxed:
+    /// an identity scalar, ordered against the children-list membership it
+    /// mirrors by that list's own lock.
+    #[inline]
+    pub fn parent_task_id(&self) -> u32 {
+        self.parent_task_id.load(Ordering::Relaxed)
+    }
+
+    /// See [`parent_task_id`](Self::parent_task_id).
+    #[inline]
+    pub fn set_parent_task_id(&self, id: u32) {
+        self.parent_task_id.store(id, Ordering::Relaxed);
+    }
+
     /// Bitmask of CPUs this task may run on. Relaxed: an affinity change races
     /// dispatch by nature, and the loser of that race is repatriated on the
     /// task's next switch-out.
@@ -1178,7 +1197,7 @@ impl<K, U> TaskInner<K, U> {
             unsafe_stack: None,
             process_group: RcuArcSlot::empty(),
             test_reports: SpinLock::new(None, LOCK_LEVEL_RESOURCE),
-            parent_task_id: INVALID_TASK_ID,
+            parent_task_id: AtomicU32::new(INVALID_TASK_ID),
             fs_base: AtomicU64::new(0),
             tgid: INVALID_TASK_ID,
             pgid: AtomicU32::new(INVALID_TASK_ID),
@@ -1256,7 +1275,7 @@ impl<K, U> TaskInner<K, U> {
                 addr_of_mut!((*slot).priority).write(TaskPriority::Normal);
                 addr_of_mut!((*slot).process_id).write(INVALID_PROCESS_ID);
                 addr_of_mut!((*slot).entry_arg).write(ptr::null_mut());
-                addr_of_mut!((*slot).parent_task_id).write(INVALID_TASK_ID);
+                addr_of_mut!((*slot).parent_task_id).write(AtomicU32::new(INVALID_TASK_ID));
                 addr_of_mut!((*slot).tgid).write(INVALID_TASK_ID);
                 addr_of_mut!((*slot).pgid).write(AtomicU32::new(INVALID_TASK_ID));
                 addr_of_mut!((*slot).sid).write(AtomicU32::new(INVALID_TASK_ID));
@@ -1516,7 +1535,7 @@ impl<K, U> TaskInner<K, U> {
         // The bytewise copy carried the parent's own parent id. A fresh child
         // starts parentless; the spawn path publishes the real parent edge (id
         // + children-list membership) via `link_child` after registration.
-        self.parent_task_id = INVALID_TASK_ID;
+        self.set_parent_task_id(INVALID_TASK_ID);
         self.sched_placement = AtomicU8::new(SchedPlacement::Nascent.as_u8());
         self.recovery_depth = AtomicU32::new(0);
         self.exit_cleanup_flags = AtomicU8::new(0);

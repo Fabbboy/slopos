@@ -23,7 +23,7 @@ use slopos_abi::io::{IoBufRead, IoBufWrite};
 use slopos_abi::signal::{SignalfdSiginfo, sig_bit};
 use slopos_abi::syscall::{POLLIN, POLLNVAL};
 use slopos_ostd::sync::event_bus::BUS;
-use slopos_ostd::task::accessors::signal_pending_event;
+use slopos_ostd::task::ops::signal_pending_event;
 use slopos_sched::task::task_find_by_id;
 
 use crate::registry::{self, SignalfdState};

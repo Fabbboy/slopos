@@ -12,9 +12,7 @@ use slopos_arch::InterruptFrame;
 use slopos_ostd::klog_info;
 use slopos_testing::{TestResult, assert_eq_test, assert_some, assert_test};
 
-use super::task::{
-    MAX_TASKS, task_create, task_find_by_id, task_set_state, task_status, task_terminate,
-};
+use super::task::{MAX_TASKS, task_create, task_find_by_id, task_set_state, task_terminate};
 use super::task_struct::TaskContext;
 use super::test_fixture::KernelTestScope;
 use slopos_arch::arch::gdt::SegmentSelector;
@@ -57,8 +55,8 @@ pub fn test_task_context_initial_state() -> TestResult {
 
     // Shared guard, not a `&mut`: these are diagnostic reads of a live task,
     // so they go through the racy accessors rather than a witness.
-    let ctx_rsp = slopos_ostd::task::accessors::task_context_rsp(task.as_ptr()).unwrap_or(0);
-    let ctx_rip = slopos_ostd::task::accessors::task_context_rip(task.as_ptr()).unwrap_or(0);
+    let ctx_rsp = task.context_rsp();
+    let ctx_rip = task.context_rip();
     if ctx_rsp == 0 && ctx_rip == 0 {
         klog_info!("CONTEXT_TEST: WARNING - Context RSP and RIP both zero");
     }
@@ -74,7 +72,7 @@ pub fn test_task_state_transitions_exhaustive() -> TestResult {
     assert_test!(task_id != INVALID_TASK_ID);
 
     let task = assert_some!(task_find_by_id(task_id));
-    let task_ptr = task.as_ptr();
+    let task_ptr: &Task = &task;
 
     assert_eq_test!(
         task.status(),
@@ -83,11 +81,11 @@ pub fn test_task_state_transitions_exhaustive() -> TestResult {
     );
 
     task_set_state(task_id, TaskStatus::Ready);
-    assert_eq_test!(task_status(task_ptr), Some(TaskStatus::Ready));
+    assert_eq_test!(task_ptr.status(), TaskStatus::Ready);
     task_set_state(task_id, TaskStatus::Running);
-    assert_eq_test!(task_status(task_ptr), Some(TaskStatus::Running));
+    assert_eq_test!(task_ptr.status(), TaskStatus::Running);
     task_set_state(task_id, TaskStatus::Blocked);
-    assert_eq_test!(task_status(task_ptr), Some(TaskStatus::Blocked));
+    assert_eq_test!(task_ptr.status(), TaskStatus::Blocked);
 
     task_terminate(task_id);
     TestResult::Pass
@@ -261,7 +259,7 @@ pub fn test_task_has_switch_ctx() -> TestResult {
     assert_test!(task_id != INVALID_TASK_ID);
 
     let task = assert_some!(task_find_by_id(task_id));
-    let rflags = slopos_ostd::task::accessors::task_switch_ctx_rflags(task.as_ptr()).unwrap_or(0);
+    let rflags = task.switch_ctx_rflags();
     assert_eq_test!(rflags, 0x202, "switch_ctx rflags not initialized");
 
     task_terminate(task_id);
@@ -592,7 +590,6 @@ pub fn test_fpu_per_task_slot_isolation() -> TestResult {
 /// land in its own slot, and the incoming task's slot lands in the registers.
 pub fn test_fpu_switch_saves_prev_and_restores_next() -> TestResult {
     use slopos_ostd::task::SchedPlacement;
-    use slopos_ostd::task::accessors::task_sched_placement_store;
     use slopos_ostd::task::fpu_current_cpu;
     use slopos_ostd::test_support::cpu_state as cpu;
 
@@ -609,14 +606,14 @@ pub fn test_fpu_switch_saves_prev_and_restores_next() -> TestResult {
     let next_id = create_test_task(b"FpuSwitch\0", TASK_FLAG_KERNEL_MODE);
     assert_test!(next_id != INVALID_TASK_ID, "failed to create incoming task");
     let next_guard = assert_some!(task_find_by_id(next_id));
-    if task_status(next_guard.as_ptr()) == Some(TaskStatus::Blocked) {
+    if next_guard.status() == TaskStatus::Blocked {
         assert_eq_test!(
             task_set_state(next_id, TaskStatus::Ready),
             0,
             "could not make the incoming task Ready"
         );
     }
-    task_sched_placement_store(next_guard.as_ptr(), SchedPlacement::OnCpu);
+    next_guard.set_sched_placement(SchedPlacement::OnCpu);
     let cpu_id = slopos_arch::pcr::get_current_cpu();
 
     let xcr0 = slopos_ostd::cpu::x86_64::xsave::active_xcr0();

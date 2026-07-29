@@ -1656,9 +1656,8 @@ fn assert_switch_preempt_safe() {
 /// stale remote-inbox nodes are harmless because the owner CPU will unlink/drop
 /// them when it drains and observes placement != `RemoteWake`.
 pub(crate) fn consume_ready_wake_for_current(current: &Current) {
-    // `&Current` is the borrow the old `*mut Task` + `task_borrow` pair was
-    // standing in for: the guard already proves this CPU is running the task,
-    // so the null check and the fabricated-lifetime reborrow both go away.
+    // The guard already proves this CPU is running the task, so every read
+    // below comes off it directly.
     let body = current.task();
     current.task().set_status(TaskStatus::Running);
     unschedule_task(body);

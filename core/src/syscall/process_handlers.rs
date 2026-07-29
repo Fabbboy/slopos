@@ -11,7 +11,7 @@ use slopos_ostd::user::context::UserContext;
 use slopos_sched::scheduler::{task_apply_affinity, task_wait_for};
 use slopos_sched::task::{
     task_consume_zombie, task_default_signals_in_mask, task_find_by_id, task_fork,
-    task_peek_exit_info, task_reset_caught_handlers, task_set_fs_base, task_terminate,
+    task_peek_exit_info, task_reset_caught_handlers, task_terminate,
 };
 use slopos_sched::task_struct::Current;
 
@@ -406,7 +406,7 @@ define_syscall!(syscall_exec
             if tls_tp != 0 {
                 {
         let t = ctx.task();
-                    task_set_fs_base(t, tls_tp);
+                    t.set_fs_base(tls_tp);
                 }
                 slopos_arch::cpu::msr::write_msr(slopos_arch::cpu::msr::Msr::FS_BASE, tls_tp);
             }
@@ -494,7 +494,7 @@ define_syscall!(syscall_getpid (ctx)
 
 define_syscall!(syscall_getppid (ctx) -> Result<u32, Errno> {
     let task = ctx.task();
-    Ok(task.parent_task_id)
+    Ok(task.parent_task_id())
 });
 
 define_syscall!(syscall_getpgid
@@ -526,7 +526,7 @@ define_syscall!(syscall_setpgid
 
     let caller_sid = ctx.task().sid();
     let target = &*target_ref;
-    if resolved_pid != task_id && target.parent_task_id != task_id {
+    if resolved_pid != task_id && target.parent_task_id() != task_id {
         return Err(Errno::EINVAL);
     }
     if target.sid() != caller_sid {

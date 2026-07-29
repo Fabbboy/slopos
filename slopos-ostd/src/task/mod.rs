@@ -8,7 +8,6 @@
 //! `Linked` impls into the trusted core.
 
 pub mod abi;
-pub mod accessors;
 pub mod addr;
 pub mod borrowed;
 pub mod cell;
@@ -21,6 +20,7 @@ pub mod handles;
 pub mod job_control;
 pub mod kernel_task;
 pub mod link_roles;
+pub mod ops;
 pub mod placement;
 pub mod spawner;
 pub mod state;

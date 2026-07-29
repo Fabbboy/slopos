@@ -33,7 +33,7 @@ pub fn pidfd_open(process_id: u32, caller_task_id: u32, target_task_id: u32) -> 
     };
     // Restrict to children of the caller: a pidfd is for reaping your own
     // children, mirroring how `waitpid` is scoped.
-    if task.parent_task_id != caller_task_id {
+    if task.parent_task_id() != caller_task_id {
         return Errno::EPERM.raw();
     }
     // A pidfd carries no per-open kernel state, so it has no backing to drop.
