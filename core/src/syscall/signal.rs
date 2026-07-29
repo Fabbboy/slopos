@@ -674,7 +674,10 @@ pub fn deliver_pending_signal(
 /// IST/exception stack — exception vectors 0-31 run under
 /// `IstPreemptHold` and must never deliver signals here.
 pub fn deliver_pending_signal_on_irq_exit(frame: *mut InterruptFrame) {
-    let Some(frame_ref) = InterruptFrame::from_ptr_mut(frame) else {
+    // The frame lives for exactly this handler invocation, so a frame-local
+    // is the honest anchor for a borrow of it.
+    let mut frame_anchor = ();
+    let Some(frame_ref) = InterruptFrame::from_ptr_mut(&mut frame_anchor, frame) else {
         return;
     };
     if (frame_ref.cs & 3) != 3 {

@@ -465,8 +465,11 @@ fn handle_legacy_syscall(frame_ref: &mut slopos_arch::InterruptFrame, irq_nest: 
 
 /// Implementation of common_exception_handler - called from FFI boundary
 pub fn common_exception_handler_impl(frame: *mut slopos_arch::InterruptFrame) {
+    // The frame lives for exactly this handler invocation, so a frame-local
+    // is the honest anchor for a borrow of it.
+    let mut frame_anchor = ();
     let mut irq_nest = IrqNestHold::enter();
-    let frame_ref = slopos_arch::InterruptFrame::from_ptr_mut(frame)
+    let frame_ref = slopos_arch::InterruptFrame::from_ptr_mut(&mut frame_anchor, frame)
         .expect("common_exception_handler_impl: null frame ptr");
     let vector = (frame_ref.vector & 0xFF) as u8;
 
@@ -735,8 +738,11 @@ pub(crate) fn handle_corrupt_iret_frame(iret_frame: *const u64) -> ! {
 }
 
 fn try_handle_page_fault(frame: *mut slopos_arch::InterruptFrame) -> bool {
+    // The frame lives for exactly this handler invocation, so a frame-local
+    // is the honest anchor for a borrow of it.
+    let mut frame_anchor = ();
     let fault_addr = cpu::read_cr2();
-    let frame_ref = slopos_arch::InterruptFrame::from_ptr_mut(frame)
+    let frame_ref = slopos_arch::InterruptFrame::from_ptr_mut(&mut frame_anchor, frame)
         .expect("try_handle_page_fault: null frame ptr");
 
     // Fault-recoverable kernel probe read (diagnostic walkers). Checked

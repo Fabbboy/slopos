@@ -244,6 +244,12 @@ impl UserContext {
     /// `pcr.user_ctx_ptr` after kernel-side return). The unsafe
     /// `&mut *ptr` is therefore sound iff the caller did not fabricate
     /// a non-task pointer.
+    /// **Prefer a form whose lifetime is anchored.** This one lets the caller
+    /// pick, and two picks is two `&mut UserContext` to one task. It survives
+    /// because `SyscallContext::user_ctx_mut` takes `&self` and returns the
+    /// borrow out, so the honest anchor is `&mut self` — which means threading
+    /// `&mut SyscallContext` through every handler. Worth doing; not worth
+    /// doing as a side effect of a lifetime cleanup.
     #[inline]
     pub fn from_ptr_mut<'a>(ptr: *mut UserContext) -> Option<&'a mut UserContext> {
         if ptr.is_null() {

@@ -30,7 +30,10 @@ pub(crate) fn exception_nonfatal(frame: *mut InterruptFrame) {
 }
 
 pub(crate) fn frame_exception_name(frame: *mut InterruptFrame) -> &'static str {
-    let vector = match InterruptFrame::from_ptr(frame) {
+    // The frame lives for exactly this handler invocation, so a frame-local
+    // is the honest anchor for a borrow of it.
+    let frame_anchor = ();
+    let vector = match InterruptFrame::from_ptr(&frame_anchor, frame) {
         Some(f) => (f.vector & 0xFF) as u8,
         None => return "<null frame>",
     };
@@ -38,7 +41,10 @@ pub(crate) fn frame_exception_name(frame: *mut InterruptFrame) -> &'static str {
 }
 
 pub(crate) fn exception_invalid_opcode(frame: *mut InterruptFrame) {
-    if let Some(f) = InterruptFrame::from_ptr(frame) {
+    // The frame lives for exactly this handler invocation, so a frame-local
+    // is the honest anchor for a borrow of it.
+    let frame_anchor = ();
+    if let Some(f) = InterruptFrame::from_ptr(&frame_anchor, frame) {
         if in_user(f) {
             terminate_user_task(
                 TaskFaultReason::UserUd,
@@ -52,7 +58,10 @@ pub(crate) fn exception_invalid_opcode(frame: *mut InterruptFrame) {
 }
 
 pub(crate) fn exception_device_not_available(frame: *mut InterruptFrame) {
-    if let Some(f) = InterruptFrame::from_ptr(frame) {
+    // The frame lives for exactly this handler invocation, so a frame-local
+    // is the honest anchor for a borrow of it.
+    let frame_anchor = ();
+    if let Some(f) = InterruptFrame::from_ptr(&frame_anchor, frame) {
         if in_user(f) {
             terminate_user_task(
                 TaskFaultReason::UserDeviceNa,
@@ -66,7 +75,10 @@ pub(crate) fn exception_device_not_available(frame: *mut InterruptFrame) {
 }
 
 pub(crate) fn exception_general_protection(frame: *mut InterruptFrame) {
-    if let Some(f) = InterruptFrame::from_ptr(frame) {
+    // The frame lives for exactly this handler invocation, so a frame-local
+    // is the honest anchor for a borrow of it.
+    let frame_anchor = ();
+    if let Some(f) = InterruptFrame::from_ptr(&frame_anchor, frame) {
         if in_user(f) {
             terminate_user_task(
                 TaskFaultReason::UserGp,
@@ -80,8 +92,11 @@ pub(crate) fn exception_general_protection(frame: *mut InterruptFrame) {
 }
 
 pub(crate) fn exception_page_fault(frame: *mut InterruptFrame) {
+    // The frame lives for exactly this handler invocation, so a frame-local
+    // is the honest anchor for a borrow of it.
+    let frame_anchor = ();
     let fault_addr = cpu::read_cr2();
-    let Some(frame_ref) = InterruptFrame::from_ptr(frame) else {
+    let Some(frame_ref) = InterruptFrame::from_ptr(&frame_anchor, frame) else {
         klog_info!("FATAL: page fault with null frame pointer");
         panic!("page fault with null frame");
     };

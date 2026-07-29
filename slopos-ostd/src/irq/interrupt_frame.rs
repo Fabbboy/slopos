@@ -35,12 +35,17 @@ impl InterruptFrame {
     /// IDT entry trampoline. Returns `None` for null; otherwise wraps
     /// the raw deref so callers stay in safe Rust.
     ///
-    /// The lifetime of the returned reference is bounded by the
-    /// caller's frame — typically the duration of an exception
-    /// handler invocation, where the trampoline guarantees the frame
-    /// remains valid until the handler returns.
+    /// Anchored rather than caller-chosen: the frame is alive for the duration
+    /// of one handler invocation, so the honest lifetime is that of something
+    /// living in the handler's own frame — which is what `anchor` is. A
+    /// lifetime the caller names is one it could name twice, and for the
+    /// mutable sibling two `&mut` to one interrupt frame is aliasing UB.
     #[inline]
-    pub fn from_ptr<'a>(ptr: *const InterruptFrame) -> Option<&'a InterruptFrame> {
+    pub fn from_ptr<'a, A: ?Sized>(
+        anchor: &'a A,
+        ptr: *const InterruptFrame,
+    ) -> Option<&'a InterruptFrame> {
+        let _ = anchor;
         if ptr.is_null() {
             None
         } else {
@@ -51,9 +56,14 @@ impl InterruptFrame {
         }
     }
 
-    /// Mutable variant of [`InterruptFrame::from_ptr`].
+    /// Mutable variant of [`InterruptFrame::from_ptr`]. Takes `&mut A`, so the
+    /// exclusivity of the frame is the exclusivity of the anchor.
     #[inline]
-    pub fn from_ptr_mut<'a>(ptr: *mut InterruptFrame) -> Option<&'a mut InterruptFrame> {
+    pub fn from_ptr_mut<'a, A: ?Sized>(
+        anchor: &'a mut A,
+        ptr: *mut InterruptFrame,
+    ) -> Option<&'a mut InterruptFrame> {
+        let _ = anchor;
         if ptr.is_null() {
             None
         } else {
