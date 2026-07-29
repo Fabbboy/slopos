@@ -121,8 +121,9 @@ slopos_ostd::no_mangle_static! {
 ///
 /// Being a distinct type is the point, not an optimisation. Nothing can spell a
 /// stub as `*mut Task` any more, so the "PCR names a stub" case cannot reach a
-/// task accessor and read eight bytes past the object. The two PCR readers
-/// filter stubs out, and `task_pointer_is_valid` whitelists them by address.
+/// task accessor and read eight bytes past the object. Both PCR readers filter
+/// stubs out — `CurrentTask::get` by the `INVALID_TASK_ID` the stub is always
+/// published with, `IdleTask::current` because the idle slot never holds one.
 #[repr(C)]
 pub struct BootstrapTaskAbi {
     /// Layout-identical to `TaskAbi::unsafe_stack_sp`. Atomic so the seeding
@@ -258,12 +259,10 @@ pub fn init_bootstrap_tasks() {
 }
 
 /// Return `true` if `ptr` is one of the statically-allocated
-/// bootstrap Task stubs (BSP or any AP).  Used by
-/// `task_pointer_is_valid` to whitelist stubs alongside
-/// registry-owned tasks — the scheduler's pre-first-dispatch
-/// window legitimately observes a stub as `PCR.current_task`, and
-/// corruption-recovery paths would otherwise flag it as invalid
-/// and loop trying to replace it with idle.
+/// bootstrap Task stubs (BSP or any AP). The scheduler's
+/// pre-first-dispatch window legitimately observes a stub as
+/// `PCR.current_task`, so the raw readers that still exist need a
+/// way to tell one from a registry-owned task by address.
 pub fn is_bootstrap_task_ptr(ptr: *const ()) -> bool {
     if ptr.is_null() {
         return false;

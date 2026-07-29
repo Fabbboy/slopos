@@ -73,11 +73,10 @@ pub(crate) fn resolve_user_fault_task() -> Option<TaskRef> {
 
     // Recoverable user page fault, not a panic path: the registry lookups stay.
     // Resolving the id to a `TaskRef` first makes the guard itself the validity
-    // proof — strictly stronger than `task_pointer_is_valid`'s address test,
-    // which only asked whether the registry or the stub whitelist knew that
-    // address — and hands back a borrow, so the CR3 read comes off the guard
-    // rather than a raw projection. A bootstrap stub has no valid id and so
-    // falls through to the CR3 scan, as before.
+    // proof — an address test only asks whether the registry knows that
+    // address, never whether it still will — and hands back a borrow, so the
+    // CR3 read comes off the guard rather than a raw projection. A bootstrap
+    // stub has no valid id and so falls through to the CR3 scan, as before.
     if let Some(task_ref) = slopos_sched::task_struct::Current::get()
         .map(|current| current.id())
         .and_then(slopos_sched::task::task_find_by_id)

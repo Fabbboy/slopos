@@ -146,12 +146,12 @@ use super::task::{
     task_exit_info_ref, task_fs_base, task_has_flag, task_id_of, task_is_exited, task_is_invalid,
     task_is_ready, task_is_running, task_kernel_stack_top, task_last_cpu, task_last_run_timestamp,
     task_name_looks_idle, task_on_cpu_load, task_panic_in_flight_load, task_panic_in_flight_store,
-    task_pcr_round_trip_swap, task_pointer_is_valid, task_priority, task_process_id, task_put,
-    task_record_context_switch, task_record_yield, task_recovery_depth_load,
-    task_recovery_depth_store, task_remote_inbox_is_linked, task_sched_placement_compare_exchange,
-    task_sched_placement_load, task_sched_placement_store, task_set_on_cpu, task_set_state,
-    task_set_status, task_set_time_slice, task_set_time_slice_remaining, task_status,
-    task_switch_ctx_rip_rsp, task_time_slice, task_time_slice_remaining, task_transition_from,
+    task_pcr_round_trip_swap, task_priority, task_process_id, task_put, task_record_context_switch,
+    task_record_yield, task_recovery_depth_load, task_recovery_depth_store,
+    task_remote_inbox_is_linked, task_sched_placement_compare_exchange, task_sched_placement_load,
+    task_sched_placement_store, task_set_on_cpu, task_set_state, task_set_status,
+    task_set_time_slice, task_set_time_slice_remaining, task_status, task_switch_ctx_rip_rsp,
+    task_time_slice, task_time_slice_remaining, task_transition_from,
 };
 pub use super::trap::{
     RescheduleReason, TrapExitSource, save_preempt_context, scheduler_handle_post_irq,
@@ -515,10 +515,7 @@ fn prepare_switch_to(
 
 /// Validate that the idle task's switch_ctx has a sane RIP (in kernel .text)
 /// and RSP (above USER_SPACE_TOP).
-fn ensure_idle_switch_ctx_valid(idle_task: *mut Task) -> bool {
-    if idle_task.is_null() {
-        return false;
-    }
+fn ensure_idle_switch_ctx_valid(idle_task: &Task) -> bool {
     let (rip, rsp) = task_switch_ctx_rip_rsp(idle_task).unwrap_or((0, 0));
 
     let (text_start, text_end) = kernel_text_range();
@@ -541,9 +538,13 @@ fn ensure_idle_switch_ctx_valid(idle_task: *mut Task) -> bool {
     false
 }
 
-fn switch_from_current_to_idle(cpu_id: usize, current: *mut Task, idle_task: *mut Task) {
+fn switch_from_current_to_idle(cpu_id: usize, current: Option<&Task>, idle_task: &Task) {
     let timestamp = kdiag_timestamp();
-    task_record_context_switch(current, idle_task, timestamp);
+    task_record_context_switch(
+        current.map_or(core::ptr::null_mut(), |t| core::ptr::from_ref(t).cast_mut()),
+        core::ptr::from_ref(idle_task).cast_mut(),
+        timestamp,
+    );
 
     // Validate the idle context BEFORE publishing it as current_task.
     // Otherwise, other CPUs could observe current_task pointing at an
@@ -563,7 +564,9 @@ fn switch_from_current_to_idle(cpu_id: usize, current: *mut Task, idle_task: *mu
     // the descheduled frame while another task runs — harmless, since a
     // descheduled frame cannot unwind until its task resumes.
     let switch_abort_guard = slopos_ostd::panic::AbortOnUnwind::new();
-    save_live_recovery_depth(current);
+    if let Some(current) = current {
+        save_live_recovery_depth(core::ptr::from_ref(current).cast_mut());
+    }
 
     // Scheduler hot path: IRQs disabled by caller; the safe-fn shims
     // for `prepare_switch_to` and `switch_registers` capture the
@@ -575,10 +578,10 @@ fn switch_from_current_to_idle(cpu_id: usize, current: *mut Task, idle_task: *mu
     // publishing the incoming task also swaps the SafeStack data stack, and
     // the window's own frame has to be allocated before that happens.
     slopos_ostd::task::run_switch(
-        current,
-        idle_task,
+        current.map_or(core::ptr::null_mut(), |t| core::ptr::from_ref(t).cast_mut()),
+        core::ptr::from_ref(idle_task).cast_mut(),
         || {
-            dispatch(cpu_id, idle_task);
+            dispatch(cpu_id, core::ptr::from_ref(idle_task).cast_mut());
             slopos_ostd::sync::rcu_note_qs();
         },
         |prev_window, next_window| {
@@ -1112,19 +1115,7 @@ pub fn task_apply_affinity(task: &TaskRef, new_affinity: u32) {
 
 /// Unified task execution for all CPUs.
 /// Handles switch_ctx validation, prepare_switch_to, and switch_registers.
-fn execute_task(cpu_id: usize, from_task: *mut Task, to_task: *mut Task) {
-    if to_task.is_null() {
-        return;
-    }
-
-    if !task_pointer_is_valid(to_task) {
-        klog_info!(
-            "SCHED: refusing to dispatch invalid task pointer {:p}",
-            to_task
-        );
-        return;
-    }
-
+fn execute_task(cpu_id: usize, from_task: Option<&Task>, to_task: &Task) {
     let pid = task_process_id(to_task).unwrap_or(INVALID_PROCESS_ID);
     let pid_ok =
         pid == INVALID_PROCESS_ID || (pid as usize) < slopos_mm::memory_layout_defs::MAX_PROCESSES;
@@ -1185,7 +1176,11 @@ fn execute_task(cpu_id: usize, from_task: *mut Task, to_task: *mut Task) {
     }
 
     let timestamp = kdiag_timestamp();
-    task_record_context_switch(from_task, to_task, timestamp);
+    task_record_context_switch(
+        from_task.map_or(core::ptr::null_mut(), |t| core::ptr::from_ref(t).cast_mut()),
+        core::ptr::from_ref(to_task).cast_mut(),
+        timestamp,
+    );
 
     // Mark task as physically on this CPU. The dispatcher's re-enqueue
     // check at run_ready_task_from_idle (below) reads this flag before
@@ -1199,7 +1194,9 @@ fn execute_task(cpu_id: usize, from_task: *mut Task, to_task: *mut Task) {
     // since a descheduled frame cannot unwind until its task resumes.
     let switch_abort_guard = slopos_ostd::panic::AbortOnUnwind::new();
     task_set_on_cpu(to_task, true);
-    save_live_recovery_depth(from_task);
+    if let Some(from_task) = from_task {
+        save_live_recovery_depth(core::ptr::from_ref(from_task).cast_mut());
+    }
 
     // Scheduler hot path: IRQs disabled by caller; switch_ctx pointers
     // were freshly validated above, both safe shims accept the
@@ -1211,13 +1208,13 @@ fn execute_task(cpu_id: usize, from_task: *mut Task, to_task: *mut Task) {
     // publishing the incoming task also swaps the SafeStack data stack, and
     // the window's own frame has to be allocated before that happens.
     slopos_ostd::task::run_switch(
-        from_task,
-        to_task,
+        from_task.map_or(core::ptr::null_mut(), |t| core::ptr::from_ref(t).cast_mut()),
+        core::ptr::from_ref(to_task).cast_mut(),
         || {
             // Single source-of-truth install: writes PCR.current_task
             // (SafeStack slot), PCR.syscall_pid, task.state = Running, and
             // the per-CPU switch counter in one place.
-            dispatch(cpu_id, to_task);
+            dispatch(cpu_id, core::ptr::from_ref(to_task).cast_mut());
             slopos_ostd::sync::rcu_note_qs();
         },
         |prev_window, next_window| {
@@ -1334,11 +1331,7 @@ pub(crate) fn run_ready_task_from_idle(cpu_id: usize, idle_task: &Task) -> bool 
     // the stack while this CPU is about to run on it — a use-after-free.
     task_set_on_cpu(next_task, true);
 
-    execute_task(
-        cpu_id,
-        core::ptr::from_ref(idle_task).cast_mut(),
-        core::ptr::from_ref(next_task).cast_mut(),
-    );
+    execute_task(cpu_id, Some(idle_task), next_task);
 
     let timestamp = kdiag_timestamp();
     task_record_context_switch(
@@ -1613,8 +1606,8 @@ fn schedule_internal() {
     // execute_task returns and on_cpu is cleared.
     switch_from_current_to_idle(
         cpu_id,
-        current.map_or(ptr::null_mut(), |c| c.as_ptr()),
-        idle.as_ptr(),
+        current.as_ref().map(|current| current.task()),
+        idle.task(),
     );
     cpu::restore_flags(irq_flags);
 }

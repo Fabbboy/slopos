@@ -311,21 +311,6 @@ impl TaskRegistry {
                     .map(|arc| (entry.id, TaskRef::new(arc)))
             })
     }
-
-    /// Whether `task` addresses one of this registry's entries.
-    ///
-    /// Compares against the weak handle's identity address, which is defined
-    /// without upgrading and without reading through the pointer — upgrading
-    /// here would mint a handle that could become the final reference and run
-    /// the allocator-heavy destructor under this lock. Because a registered task
-    /// is exactly one holding its existence reference, a match still means the
-    /// pointer names a live, initialised task.
-    fn owns_pointer(&self, task: *const Task) -> bool {
-        self.slots[..self.high_water]
-            .iter()
-            .flatten()
-            .any(|entry| core::ptr::eq(entry.get().weak.as_ptr(), task))
-    }
 }
 
 pub(super) struct TaskManagerInner {
@@ -664,16 +649,6 @@ pub fn task_find_by_cr3(cr3: u64) -> Option<TaskRef> {
         }
         fallback
     })
-}
-
-pub fn task_pointer_is_valid(task: *const Task) -> bool {
-    if task.is_null() {
-        return false;
-    }
-    if with_task_manager(|mgr| mgr.registry.owns_pointer(task)) {
-        return true;
-    }
-    crate::safestack_rt::is_bootstrap_task_ptr(task.cast())
 }
 
 pub(super) enum TaskAllocError {

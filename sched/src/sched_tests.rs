@@ -6100,8 +6100,8 @@ pub fn test_newcomer_outranks_current_preemption_gate() -> TestResult {
 
 /// `is_bootstrap_task_ptr` accepts stub base addresses and nothing else.
 ///
-/// It whitelists stubs for `task_pointer_is_valid`, so a false accept hands a
-/// corruption-recovery path an address that is not a task at all. The interior
+/// A false accept would hand a raw PCR reader an address that is not a task at
+/// all, to be read as one. The interior
 /// sweep is exhaustive only because the stub is exactly its 8-byte ABI header,
 /// which is asserted here so a growth of the struct fails by name rather than
 /// silently reducing this test's coverage to the first byte.

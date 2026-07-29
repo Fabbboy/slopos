@@ -8,10 +8,10 @@
 //! stack-word probe so the dump cannot itself fault. Every ordinary way of
 //! getting them is unavailable in that context:
 //!
-//! - **No lookup.** `task_find_by_id`, `task_find_by_cr3` and
-//!   `task_pointer_is_valid` all take the global registry cli-spinlock. A
-//!   fault that arrives while any CPU holds it deadlocks the dump, so the
-//!   machine hangs instead of describing why it died.
+//! - **No lookup.** `task_find_by_id` and `task_find_by_cr3` both take the
+//!   global registry cli-spinlock. A fault that arrives while any CPU holds it
+//!   deadlocks the dump, so the machine hangs instead of describing why it
+//!   died.
 //! - **No owning handle.** Upgrading to a `KArc` means a matching drop, and
 //!   that drop can win the one-to-zero transition and run the allocator-heavy
 //!   destructor — from inside a fault handler, possibly on an IST stack. That
