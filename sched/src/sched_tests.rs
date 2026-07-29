@@ -2792,12 +2792,8 @@ pub fn test_resolve_idle_stack_for_bsp_uses_idle_task_kernel_stack() -> TestResu
         }
     };
 
-    if idle_task.is_null() {
-        klog_info!("SCHED_TEST: Resolved idle task pointer is null");
-        return TestResult::Fail;
-    }
-
-    let expected_top = task_kernel_stack_top(idle_task).unwrap_or(0);
+    // `Ok` already means the slot named a task — the guard cannot be null.
+    let expected_top = idle_task.task().kernel_stack_top;
     if expected_top == 0 || stack_top != expected_top {
         klog_info!(
             "SCHED_TEST: Idle stack mismatch (expected=0x{:x}, got=0x{:x})",

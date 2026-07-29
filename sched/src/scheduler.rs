@@ -348,11 +348,31 @@ pub fn dispatch_task_for_test(cpu_id: usize, task_id: u32) -> bool {
 /// Install `task` as `cpu_id`'s idle task.  Writes `PCR.idle_task` —
 /// the single source of truth for "idle task on CPU N".
 /// Called once per CPU by `create_idle_task_for_cpu`.
+///
+/// The "is this really an idle task" screen lives here, at the one-shot
+/// publisher, rather than on every dispatch: the slot has a single production
+/// writer, so a property checked once at install holds for every later reader.
 #[inline]
 pub(super) fn install_idle_task(cpu_id: usize, task: *mut Task) {
     debug_assert!(
         !task.is_null(),
         "install_idle_task() must receive a non-null task"
+    );
+    debug_assert!(
+        task_id_of(task) != Some(INVALID_TASK_ID),
+        "install_idle_task() must receive a registered task"
+    );
+    debug_assert!(
+        task_priority(task) == Some(TaskPriority::Idle),
+        "install_idle_task() must receive an Idle-priority task"
+    );
+    debug_assert!(
+        task_has_flag(task, TASK_FLAG_KERNEL_MODE),
+        "install_idle_task() must receive a kernel-mode task"
+    );
+    debug_assert!(
+        task_name_looks_idle(task),
+        "install_idle_task() must receive a task named idle/<n>"
     );
     slopos_arch::pcr::set_idle_task(cpu_id, task as *mut ());
 }
@@ -364,25 +384,6 @@ fn switch_to_kernel_address_space() {
     // master PML4; the kernel-half invariant is trivially satisfied
     // when we're switching onto the master itself.
     kernel_vm_space().lock().activate_kernel_master();
-}
-
-#[inline]
-fn task_is_idle_candidate(task: *mut Task) -> bool {
-    if task.is_null() || !task_pointer_is_valid(task) {
-        return false;
-    }
-
-    if task_id_of(task) == Some(INVALID_TASK_ID) {
-        return false;
-    }
-    if task_priority(task) != Some(TaskPriority::Idle) {
-        return false;
-    }
-    if !task_has_flag(task, TASK_FLAG_KERNEL_MODE) {
-        return false;
-    }
-
-    task_name_looks_idle(task)
 }
 
 /// Pre-switch housekeeping: FPU save(prev), TLB flush, FS_BASE, TSS RSP0,
@@ -1234,18 +1235,13 @@ fn execute_task(cpu_id: usize, from_task: *mut Task, to_task: *mut Task) {
     switch_abort_guard.disarm();
 }
 
-pub(crate) fn run_ready_task_from_idle(cpu_id: usize, idle_task: *mut Task) -> bool {
-    let canonical_idle = scheduler_get_idle_task_for(cpu_id);
-    let mut idle_task = idle_task;
-
-    if !task_is_idle_candidate(idle_task) && task_is_idle_candidate(canonical_idle) {
-        idle_task = canonical_idle;
-    }
-
-    if !task_is_idle_candidate(idle_task) {
-        return false;
-    }
-
+/// Dispatch one ready task from this CPU's idle context, returning whether one
+/// ran.
+///
+/// `idle_task` is the borrow both callers mint from the PCR idle slot, so it is
+/// canonical by construction — there is no second candidate to reconcile
+/// against, and no pointer to re-validate.
+pub(crate) fn run_ready_task_from_idle(cpu_id: usize, idle_task: &Task) -> bool {
     // Flush cross-core wakes parked in this CPU's remote inbox into the ready
     // queue *before* the pick. Every dispatch entry point funnels through here
     // — the idle loop, the timer-preempt handoff, and crucially the
@@ -1265,7 +1261,10 @@ pub(crate) fn run_ready_task_from_idle(cpu_id: usize, idle_task: *mut Task) -> b
     else {
         return false;
     };
-    let next_task = dispatch_ref.as_ptr();
+    // The dequeue's own reference is what makes this borrow sound — it is held
+    // across the whole window below, including the unbounded `on_cpu` spin — so
+    // there is nothing left to validate about the pointer it came from.
+    let next_task: &Task = &dispatch_ref;
 
     per_cpu::with_cpu_scheduler(cpu_id, |sched| {
         sched.set_executing_task(true);
@@ -1277,18 +1276,6 @@ pub(crate) fn run_ready_task_from_idle(cpu_id: usize, idle_task: *mut Task) -> b
             sched.set_executing_task(false);
         });
         core::hint::spin_loop();
-        super::task::task_put(dispatch_ref);
-        return false;
-    }
-
-    if !task_pointer_is_valid(next_task) {
-        klog_info!(
-            "SCHED: dropped invalid ready-queue task pointer {:p}",
-            next_task
-        );
-        per_cpu::with_cpu_scheduler(cpu_id, |sched| {
-            sched.set_executing_task(false);
-        });
         super::task::task_put(dispatch_ref);
         return false;
     }
@@ -1347,12 +1334,20 @@ pub(crate) fn run_ready_task_from_idle(cpu_id: usize, idle_task: *mut Task) -> b
     // the stack while this CPU is about to run on it — a use-after-free.
     task_set_on_cpu(next_task, true);
 
-    execute_task(cpu_id, idle_task, next_task);
+    execute_task(
+        cpu_id,
+        core::ptr::from_ref(idle_task).cast_mut(),
+        core::ptr::from_ref(next_task).cast_mut(),
+    );
 
     let timestamp = kdiag_timestamp();
-    task_record_context_switch(next_task, idle_task, timestamp);
+    task_record_context_switch(
+        core::ptr::from_ref(next_task).cast_mut(),
+        core::ptr::from_ref(idle_task).cast_mut(),
+        timestamp,
+    );
 
-    dispatch(cpu_id, idle_task);
+    dispatch(cpu_id, core::ptr::from_ref(idle_task).cast_mut());
     slopos_ostd::sync::rcu_note_qs();
 
     switch_to_kernel_address_space();
@@ -1600,7 +1595,7 @@ fn schedule_internal() {
     // pre-heap bootstrap stub, and its first switch out of the boot context
     // takes the `prev = None` path below rather than the idle dispatcher.
     if current.as_ref().is_some_and(|c| c.addr() == idle.addr()) {
-        let _ = run_ready_task_from_idle(cpu_id, idle.as_ptr());
+        let _ = run_ready_task_from_idle(cpu_id, idle.task());
         // Drain the deferred reference before re-enabling interrupts. The drain
         // clears the CPU-local previous-task slot while interrupts are still
         // disabled, then drops the reference in its own interrupt window.

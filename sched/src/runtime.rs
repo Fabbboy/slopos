@@ -9,10 +9,11 @@ use super::scheduler::{
     publish_new_task, run_ready_task_from_idle, set_scheduler_enabled, r#yield,
 };
 use super::task::{
-    INVALID_TASK_ID, TASK_FLAG_KERNEL_MODE, TASK_FLAG_SYSTEM, Task, TaskPriority, TaskStatus,
+    INVALID_TASK_ID, TASK_FLAG_KERNEL_MODE, TASK_FLAG_SYSTEM, TaskPriority, TaskStatus,
     task_create, task_terminate,
 };
 use super::work_steal::try_work_steal;
+use crate::task_struct::Idle;
 use slopos_ostd::task::SchedPlacement;
 
 const MAX_IDLE_CALLBACKS: usize = 4;
@@ -332,20 +333,25 @@ pub(crate) enum IdleStackResolveError {
     MissingKernelStack,
 }
 
+/// This CPU's idle task and the top of its kernel stack.
+///
+/// Returns the borrow guard rather than a pointer: the caller is about to
+/// switch onto that stack, so it needs the task to still be there when it does,
+/// and the guard is what says so. `Idle` carries no lifetime, so the pair can
+/// be returned by value.
 pub(crate) fn resolve_idle_stack_for_cpu(
     cpu_id: usize,
-) -> Result<(*mut Task, u64), IdleStackResolveError> {
-    let idle_task = super::scheduler::scheduler_get_idle_task_for(cpu_id);
-    if idle_task.is_null() {
+) -> Result<(Idle, u64), IdleStackResolveError> {
+    let Some(idle) = Idle::get(cpu_id) else {
         return Err(IdleStackResolveError::MissingIdleTask);
-    }
+    };
 
-    let stack_top = super::task::task_kernel_stack_top(idle_task).unwrap_or(0);
+    let stack_top = idle.task().kernel_stack_top;
     if stack_top == 0 {
         return Err(IdleStackResolveError::MissingKernelStack);
     }
 
-    Ok((idle_task, stack_top))
+    Ok((idle, stack_top))
 }
 
 extern "C" fn scheduler_loop_entry(cpu_id: usize, _idle_task: *mut ()) -> ! {
@@ -399,16 +405,21 @@ pub fn enter_scheduler(cpu_id: usize) -> ! {
     // every subsequent instrumented prologue on this CPU reads
     // `idle_task.unsafe_stack_sp` via `gs:[CURRENT_TASK]` instead of
     // the per-CPU bootstrap stub's.
-    super::scheduler::dispatch(cpu_id, idle_task);
+    super::scheduler::dispatch(cpu_id, core::ptr::from_ref(idle_task.task()).cast_mut());
 
     // OSTD's `enter_scheduler_loop_noreturn` folds the one `unsafe`
     // stack-switch primitive behind the documented scheduler-bringup
     // discharge.
+    //
+    // The payload is null: `scheduler_loop_entry` ignores it and
+    // `scheduler_loop` re-reads the idle slot per iteration, so passing the
+    // task here would launder a type-erased task handle across a stack switch
+    // for a value nothing reads.
     slopos_ostd::cpu::x86_64::stack::enter_scheduler_loop_noreturn(
         idle_stack_top,
         scheduler_loop_entry,
         cpu_id,
-        idle_task as *mut (),
+        ptr::null_mut(),
     )
 }
 
@@ -543,10 +554,6 @@ fn check_watchdog_for_neighbor(my_cpu: usize) {
 }
 
 fn scheduler_loop(cpu_id: usize) -> ! {
-    // Resolved from this CPU's idle slot rather than carried in: the payload
-    // crosses `enter_scheduler_loop_noreturn`'s stack switch type-erased, and
-    // the slot is the authority for which task the loop dispatches from.
-    let idle_task = super::scheduler::scheduler_get_idle_task_for(cpu_id);
     loop {
         // Start the LAPIC timer on this AP once the boot layer registers
         // the callback (after calibration).  No-op after the first success.
@@ -578,7 +585,20 @@ fn scheduler_loop(cpu_id: usize) -> ! {
         // context saves IF=0 and the flags restore below runs at idle
         // resumption.
         let irq_flags = slopos_arch::cpu::save_flags_cli();
-        let dispatched = run_ready_task_from_idle(cpu_id, idle_task);
+        // Minted per iteration rather than once outside the loop: the slot is
+        // the authority for which task this loop dispatches from, and the
+        // payload that crossed `enter_scheduler_loop_noreturn`'s stack switch
+        // is type-erased and deliberately ignored. Re-reading it here is two
+        // atomic loads and removes the question of whether a cached pointer is
+        // still the CPU's idle task.
+        let Some(idle) = Idle::current() else {
+            slopos_arch::cpu::restore_flags(irq_flags);
+            slopos_ostd::sync::rcu_note_qs();
+            crate::scheduler::arm_tickless_idle_if_due();
+            slopos_ostd::cpu::x86_64::core::sti_hlt_cli_atomic();
+            continue;
+        };
+        let dispatched = run_ready_task_from_idle(cpu_id, idle.task());
         // Drain before re-enabling interrupts: the drain clears the CPU-local
         // previous-task slot while interrupts are disabled, closing the window
         // in which a re-entrant dispatch would park a second reference into the
