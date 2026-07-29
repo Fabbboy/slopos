@@ -10,7 +10,7 @@
 //! The first identifier in the parameter list is the *context name*
 //! the body sees (canonically `ctx`); the body then has direct access
 //! to its [`SyscallContext`] methods (`ctx.task_mut()`,
-//! `ctx.process_id()`, `ctx.user_ctx_mut()`, …). Subsequent
+//! `ctx.process_id()`, `ctx.user_ctx()`, …). Subsequent
 //! `ident: Type` pairs are typed arguments parsed from
 //! `ctx.regs()`.
 //!

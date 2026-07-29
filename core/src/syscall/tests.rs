@@ -100,11 +100,11 @@ fn make_task_current(task_id: u32) {
 /// signal frame. Restores the bootstrap current-task afterwards so a later
 /// `task_terminate` does not take the is-current Zombie path against the
 /// test task.
-fn deliver_pending_signal_as_current(task_id: u32, pid: u32, ctx_ptr: *mut UserContext) {
+fn deliver_pending_signal_as_current(task_id: u32, pid: u32, ctx: &UserContext) {
     make_task_current(task_id);
     {
         let current = Current::get().expect("current task after dispatch");
-        let _ = with_user_process_context(pid, || deliver_pending_signal(&current, ctx_ptr));
+        let _ = with_user_process_context(pid, || deliver_pending_signal(&current, ctx));
     }
     park_bootstrap_on_current_cpu();
 }
@@ -1805,7 +1805,7 @@ pub fn test_signal_install_deliver_and_sigreturn() -> TestResult {
     user_frame.regs_mut().rsp = original_rsp;
     user_frame.regs_mut().rax = 0xAA55;
     user_frame.regs_mut().rbx = 0xBB66;
-    deliver_pending_signal_as_current(task_id, pid, &mut *user_frame as *mut UserContext);
+    deliver_pending_signal_as_current(task_id, pid, &user_frame);
 
     assert_eq_test!(
         user_frame.regs().rip,
@@ -2247,7 +2247,7 @@ pub fn test_sigprocmask_block_then_unblock_delivery() -> TestResult {
     let mut user_frame = zero_frame();
     user_frame.regs_mut().rip = 0x6000_1111;
     user_frame.regs_mut().rsp = stack_top.wrapping_sub(0x200);
-    deliver_pending_signal_as_current(task_id, pid, &mut user_frame as *mut UserContext);
+    deliver_pending_signal_as_current(task_id, pid, &user_frame);
     assert_eq_test!(
         user_frame.regs().rip,
         0x6000_1111,
@@ -2272,7 +2272,7 @@ pub fn test_sigprocmask_block_then_unblock_delivery() -> TestResult {
         "rt_sigprocmask(SIG_UNBLOCK) failed"
     );
 
-    deliver_pending_signal_as_current(task_id, pid, &mut user_frame as *mut UserContext);
+    deliver_pending_signal_as_current(task_id, pid, &user_frame);
     assert_eq_test!(
         user_frame.regs().rip,
         action.sa_handler,
@@ -5594,7 +5594,7 @@ pub fn test_kill_default_ignored_sigwinch_target_survives() -> TestResult {
     let original_rip = 0x5000_4321u64;
     let mut user_frame: KBox<UserContext> = KBox::zeroed().expect("alloc");
     user_frame.regs_mut().rip = original_rip;
-    deliver_pending_signal_as_current(task_id, pid, &mut *user_frame as *mut UserContext);
+    deliver_pending_signal_as_current(task_id, pid, &user_frame);
     assert_eq_test!(
         user_frame.regs().rip,
         original_rip,

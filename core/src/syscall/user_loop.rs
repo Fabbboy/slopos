@@ -86,25 +86,21 @@ fn user_task_loop() -> ! {
     // handing the task's register snapshot to `UserMode`, which keeps it across
     // the iretq/SYSCALL round trip — the address is stable for the task's life.
     let current = Current::get().expect("user_task_loop: dispatched with no current task");
-    let ctx_ptr = current.task().user_ctx_ptr(&current);
+    let user_ctx = current.task().user_ctx(&current);
     loop {
-        // The borrow ends before `syscall_handle` runs, which still derives a
-        // `&mut UserContext` from `ctx_ptr`: that derivation retags every byte
-        // of the context as exclusive and would invalidate a borrow held
-        // across it.
         let reason = {
-            let user_mode = UserMode::new(current.task().user_ctx(&current), space);
+            let user_mode = UserMode::new(user_ctx, space);
             user_mode.execute()
         };
 
         match reason {
             ReturnReason::Syscall(_n) => {
                 // Hand the per-task UserContext straight to the syscall
-                // dispatcher; the handler signature now takes
-                // `*mut UserContext`, no adapter required.
+                // dispatcher; handlers take the OSTD context by borrow, no
+                // adapter required.
                 if panic_recovery::production_recovery_enabled() {
                     match panic_recovery::run_recoverable(|| {
-                        crate::syscall::dispatch::syscall_handle(ctx_ptr);
+                        crate::syscall::dispatch::syscall_handle(user_ctx);
                     }) {
                         Ok(()) => {}
                         Err(oops) => {
@@ -121,7 +117,7 @@ fn user_task_loop() -> ! {
                         }
                     }
                 } else {
-                    crate::syscall::dispatch::syscall_handle(ctx_ptr);
+                    crate::syscall::dispatch::syscall_handle(user_ctx);
                 }
             }
             ReturnReason::Exception(info) => {

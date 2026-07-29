@@ -13,7 +13,7 @@ use slopos_ostd::user::context::{UserContext, UserRegs};
 /// (entry_point, stack_pointer, entry_arg) the legacy task-create
 /// path used to encode in a synthetic `InterruptFrame`.
 pub fn init_user_ctx_for_new_task(
-    ctx: &mut UserContext,
+    ctx: &UserContext,
     entry_point: u64,
     stack_pointer: u64,
     entry_arg: u64,
@@ -30,11 +30,7 @@ pub fn init_user_ctx_for_new_task(
 /// syscall-time `InterruptFrame`. Caller guarantees `frame` is the
 /// parent's frame at SYSCALL exit. `force_rax` is the value to install
 /// in the child's RAX (typically 0 for fork's child return).
-pub fn init_user_ctx_from_parent_frame(
-    ctx: &mut UserContext,
-    frame: &InterruptFrame,
-    force_rax: u64,
-) {
+pub fn init_user_ctx_from_parent_frame(ctx: &UserContext, frame: &InterruptFrame, force_rax: u64) {
     let mut regs = UserRegs::default();
     regs.r15 = frame.r15;
     regs.r14 = frame.r14;

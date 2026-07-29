@@ -50,8 +50,12 @@ pub type SyscallRegs = [u64; 6];
 pub struct SyscallContext<'a> {
     task: &'a Task,
     task_id: u32,
-    user_ctx_ptr: *mut UserContext,
+    user_ctx: &'a UserContext,
     regs: SyscallRegs,
+    /// A context describes one syscall on one CPU, and both borrows it
+    /// holds are that CPU's. Dropping the raw pointer this struct used to
+    /// carry would otherwise have made it auto-`Send + Sync`.
+    _not_send: core::marker::PhantomData<*const ()>,
 }
 
 impl<'a> SyscallContext<'a> {
@@ -62,7 +66,7 @@ impl<'a> SyscallContext<'a> {
     /// carries its own meaning (this CPU is running this task), whereas what a
     /// handler needs is just the task. Taking `&'a Current` ties the context's
     /// lifetime to the guard, which is what makes the borrow inside sound.
-    pub fn from_current(current: &'a Current, ctx: &mut UserContext) -> Self {
+    pub fn from_current(current: &'a Current, ctx: &'a UserContext) -> Self {
         Self::new(current.task(), current.id(), ctx)
     }
 
@@ -73,12 +77,12 @@ impl<'a> SyscallContext<'a> {
     /// the production constructor is unusable. That, rather than any staleness
     /// concern, is why a witness cannot simply be stored in this struct.
     #[doc(hidden)]
-    pub fn from_task_ref(task: &'a TaskRef, ctx: &mut UserContext) -> Self {
+    pub fn from_task_ref(task: &'a TaskRef, ctx: &'a UserContext) -> Self {
         Self::new(task, task.task_id, ctx)
     }
 
     #[inline]
-    fn new(task: &'a Task, task_id: u32, ctx: &mut UserContext) -> Self {
+    fn new(task: &'a Task, task_id: u32, ctx: &'a UserContext) -> Self {
         // Snapshot the argument registers once: a handler reads them
         // through `SyscallArg::from_raw` long after the user context may
         // have been rewritten by signal delivery or a restart decision.
@@ -86,7 +90,8 @@ impl<'a> SyscallContext<'a> {
             task,
             task_id,
             regs: ctx.syscall_args(),
-            user_ctx_ptr: core::ptr::from_mut(ctx),
+            user_ctx: ctx,
+            _not_send: core::marker::PhantomData,
         }
     }
 
@@ -199,23 +204,11 @@ impl<'a> SyscallContext<'a> {
     // rt_sigreturn — whole-frame manipulation, NOT argument parsing).
     // ────────────────────────────────────────────────────────────────
 
+    /// The user-mode register file this syscall entered from. Writes go
+    /// through it directly — see the write contract on [`UserContext`].
     #[inline]
-    pub fn user_ctx_ptr(&self) -> *mut UserContext {
-        self.user_ctx_ptr
-    }
-
-    #[inline]
-    pub fn user_ctx(&self) -> &UserContext {
-        UserContext::from_ptr(self.user_ctx_ptr).expect("syscall: user_ctx_ptr null")
-    }
-
-    /// Mutable view of the per-task user-mode register snapshot the
-    /// syscall handler is operating on. Lifetime is the borrow of
-    /// `self`; callers must not retain it across nested handler
-    /// dispatch.
-    #[inline]
-    pub fn user_ctx_mut(&self) -> &mut UserContext {
-        UserContext::from_ptr_mut(self.user_ctx_ptr).expect("syscall: user_ctx_ptr null")
+    pub fn user_ctx(&self) -> &'a UserContext {
+        self.user_ctx
     }
 
     /// User-mode RSP at syscall entry. Convenience for `rt_sigreturn`
@@ -237,27 +230,21 @@ impl<'a> SyscallContext<'a> {
     /// `ctx.ok(value)` accounting.
     pub fn write_ok(&self, value: u64) {
         wl_currency::adjust_balance(WL_DELTA);
-        if let Some(uc) = UserContext::from_ptr_mut(self.user_ctx_ptr) {
-            uc.set_rax(value);
-        }
+        self.user_ctx.set_rax(value);
     }
 
     /// Write an errno return value to user `rax`. Decrements the
     /// `wl_currency` balance.
     pub fn write_err(&self, errno: Errno) {
         wl_currency::adjust_balance(-WL_DELTA);
-        if let Some(uc) = UserContext::from_ptr_mut(self.user_ctx_ptr) {
-            uc.set_rax(errno.as_u64());
-        }
+        self.user_ctx.set_rax(errno.as_u64());
     }
 
     /// Write a raw u64 (used for the `ERRNO_ERESTARTSYS` sentinel that
     /// is outside the `[-4095, -1]` `Errno` range).
     pub fn write_err_u64(&self, raw: u64) {
         wl_currency::adjust_balance(-WL_DELTA);
-        if let Some(uc) = UserContext::from_ptr_mut(self.user_ctx_ptr) {
-            uc.set_rax(raw);
-        }
+        self.user_ctx.set_rax(raw);
     }
 
     /// Convenience: write the post-handler `SyscallResult` directly.

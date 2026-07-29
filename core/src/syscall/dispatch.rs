@@ -12,11 +12,7 @@ use crate::syscall::context::SyscallContext;
 use crate::syscall::handlers::syscall_lookup;
 use crate::syscall::result::SyscallResult;
 
-pub fn syscall_handle(ctx_ptr: *mut UserContext) {
-    let Some(user_ctx) = UserContext::from_ptr_mut(ctx_ptr) else {
-        return;
-    };
-
+pub fn syscall_handle(user_ctx: &UserContext) {
     let sysno = user_ctx.rax();
 
     // The task running this syscall is this CPU's current, by definition of how
@@ -54,26 +50,24 @@ pub fn syscall_handle(ctx_ptr: *mut UserContext) {
             // `EINTR`, based on the pending signal's `SA_RESTART`
             // flag. Runs before `deliver_pending_signal` so the
             // signal frame captures the correct state.
-            handle_erestartsys(task, ctx_ptr, sysno);
+            handle_erestartsys(task, user_ctx, sysno);
 
             // Safety net: ERESTARTSYS must NEVER leak to userland.
-            debug_assert_erestartsys_not_leaked(ctx_ptr);
+            debug_assert_erestartsys_not_leaked(user_ctx);
         }
         None => {
             if entry.is_none() {
                 klog_info!("SYSCALL: Unknown syscall {} -> ENOSYS", sysno);
             }
             // Reserved table slot with no handler — return ENOSYS.
-            if let Some(uc) = UserContext::from_ptr_mut(ctx_ptr) {
-                uc.set_rax(slopos_abi::syscall::ENOSYS_RETURN);
-            }
+            user_ctx.set_rax(slopos_abi::syscall::ENOSYS_RETURN);
         }
     }
 
     // Deliver pending signals on every syscall exit path, not just
     // when a handler ran. Linux checks TIF_SIGPENDING unconditionally
     // on return to userspace.
-    crate::syscall::signal::deliver_pending_signal(&current, ctx_ptr);
+    crate::syscall::signal::deliver_pending_signal(&current, user_ctx);
 }
 
 // ---------------------------------------------------------------------------
@@ -89,10 +83,7 @@ const SYSCALL_INSN_SIZE: u64 = 2;
 /// Inspect the syscall return value and, if it is `ERESTARTSYS`,
 /// decide whether to transparently restart the syscall or convert to
 /// `EINTR`.
-fn handle_erestartsys(task_ref: &Task, ctx_ptr: *mut UserContext, sysno: u64) {
-    let Some(user_ctx) = UserContext::from_ptr_mut(ctx_ptr) else {
-        return;
-    };
+fn handle_erestartsys(task_ref: &Task, user_ctx: &UserContext, sysno: u64) {
     let result = user_ctx.rax();
     if result != ERRNO_ERESTARTSYS {
         return;
@@ -136,10 +127,7 @@ fn handle_erestartsys(task_ref: &Task, ctx_ptr: *mut UserContext, sysno: u64) {
 /// Safety net: assert that `ERESTARTSYS` never leaks to userland. In
 /// debug builds this would panic; release silently converts to
 /// `EINTR` as a last resort.
-fn debug_assert_erestartsys_not_leaked(ctx_ptr: *mut UserContext) {
-    let Some(user_ctx) = UserContext::from_ptr_mut(ctx_ptr) else {
-        return;
-    };
+fn debug_assert_erestartsys_not_leaked(user_ctx: &UserContext) {
     let rax = user_ctx.rax();
     if rax == ERRNO_ERESTARTSYS {
         user_ctx.set_rax(Errno::EINTR.as_u64());

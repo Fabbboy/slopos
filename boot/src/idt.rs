@@ -417,11 +417,11 @@ fn handle_legacy_syscall(frame_ref: &mut slopos_arch::InterruptFrame, irq_nest: 
     user_regs.rsp = frame_ref.rsp;
     user_regs.rflags_user_subset = frame_ref.rflags;
 
-    let mut user_ctx = UserContext::new(user_regs, FpuStateRef::empty());
+    let user_ctx = UserContext::new(user_regs, FpuStateRef::empty());
     irq_nest.leave();
     if slopos_ostd::panic_recovery::production_recovery_enabled() {
         match slopos_ostd::panic_recovery::run_recoverable(|| {
-            syscall_handle(&mut user_ctx as *mut UserContext);
+            syscall_handle(&user_ctx);
         }) {
             Ok(()) => {}
             Err(oops) => {
@@ -438,7 +438,7 @@ fn handle_legacy_syscall(frame_ref: &mut slopos_arch::InterruptFrame, irq_nest: 
             }
         }
     } else {
-        syscall_handle(&mut user_ctx as *mut UserContext);
+        syscall_handle(&user_ctx);
     }
     irq_nest.reenter();
 

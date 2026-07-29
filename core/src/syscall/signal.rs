@@ -353,12 +353,8 @@ define_syscall!(syscall_rt_sigreturn (ctx) -> SyscallResult {
     regs.r15 = sigframe.r15;
     regs.rip = sigframe.rip;
     regs.rflags_user_subset = sigframe.rflags;
-    ctx.user_ctx_mut().set_regs(regs);
+    ctx.user_ctx().set_regs(regs);
 
-    // Borrow the task only after the user-context writes are done, so this
-    // borrow never overlaps the one `user_ctx_mut` derives from the same
-    // allocation. The FPU area is then a reborrow rather than a third
-    // derivation from the raw task pointer.
     ctx.task()
         .set_signal_blocked(sigframe.saved_mask & !SIG_UNCATCHABLE);
 
@@ -391,13 +387,22 @@ trait UserRegView {
     fn commit_redirect(&mut self, regs: &UserRegs);
 }
 
-impl UserRegView for UserContext {
+/// Syscall-exit register view over the per-task [`UserContext`]. The
+/// `&mut self` the trait asks for is unused exclusivity here — the
+/// register file is written through a shared borrow — but
+/// [`InterruptFrameRegs`] genuinely needs it, so the wrapper carries the
+/// weaker claim rather than the trait carrying a weaker signature.
+struct UserContextRegs<'a> {
+    ctx: &'a UserContext,
+}
+
+impl UserRegView for UserContextRegs<'_> {
     fn snapshot(&self) -> UserRegs {
-        self.regs()
+        self.ctx.regs()
     }
 
     fn commit_redirect(&mut self, regs: &UserRegs) {
-        self.set_regs(*regs);
+        self.ctx.set_regs(*regs);
     }
 }
 
@@ -652,12 +657,9 @@ fn deliver_pending_signal_core(
 
 pub fn deliver_pending_signal(
     current: &slopos_sched::task_struct::Current,
-    ctx_ptr: *mut UserContext,
+    user_ctx: &UserContext,
 ) {
-    let Some(user_ctx) = UserContext::from_ptr_mut(ctx_ptr) else {
-        return;
-    };
-    deliver_pending_signal_core(current, user_ctx);
+    deliver_pending_signal_core(current, &mut UserContextRegs { ctx: user_ctx });
 }
 
 /// Deliver a pending signal on the IRQ/timer/IPI return-to-user path.

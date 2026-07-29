@@ -7,7 +7,6 @@ use slopos_abi::task::TaskPriority;
 use slopos_fs::vfs::traits::VfsError;
 use slopos_ostd::KVec;
 use slopos_ostd::task::{new_group_in_session, new_session_group};
-use slopos_ostd::user::context::UserContext;
 use slopos_sched::scheduler::{task_apply_affinity, task_wait_for};
 use slopos_sched::task::{
     task_consume_zombie, task_default_signals_in_mask, task_find_by_id, task_fork,
@@ -412,7 +411,7 @@ define_syscall!(syscall_exec
             }
             // Build the new user-mode entry register snapshot, then commit
             // through `set_regs` so CS/SS/RFLAGS sandbox bits are reapplied.
-            let uc = ctx.user_ctx_mut();
+            let uc = ctx.user_ctx();
             let mut regs = uc.regs();
             regs.rip = entry_point;
             regs.rsp = stack_ptr;
@@ -669,7 +668,7 @@ define_syscall!(syscall_arch_prctl
 
 define_syscall!(syscall_fork (ctx) -> Result<u64, Errno> {
     let task = ctx.task();
-    let user_ctx_ptr = ctx.user_ctx_ptr() as *const UserContext;
+    let user_ctx_ptr = core::ptr::from_ref(ctx.user_ctx());
     let child_id = task_fork(task, user_ctx_ptr);
     if child_id == slopos_abi::task::INVALID_TASK_ID {
         Err(Errno::EAGAIN)
@@ -685,7 +684,7 @@ define_syscall!(syscall_clone
     let parent = ctx.task();
     match slopos_sched::task::task_clone(
         parent,
-        ctx.user_ctx_ptr() as *const UserContext,
+        core::ptr::from_ref(ctx.user_ctx()),
         flags,
         child_stack,
         parent_tidptr,
