@@ -1,5 +1,6 @@
 use core::ffi::c_void;
 
+mod pending_spawn;
 mod task_cleanup_hooks;
 mod task_family;
 mod task_lifecycle;
@@ -21,6 +22,9 @@ pub use slopos_abi::task::{
 };
 pub use slopos_arch::arch::idt::IdtEntry;
 
+pub use pending_spawn::{
+    SpawnGuard, drain_parked_spawns, parked_spawn_count, parked_spawn_high_water,
+};
 pub use task_cleanup_hooks::*;
 pub use task_family::*;
 pub use task_lifecycle::*;

@@ -1068,6 +1068,14 @@ fn cleanup_terminated_task_resources(task: &TaskRef, resolved_id: u32) {
         return;
     }
 
+    // Past the `on_cpu` bail, so this task is established not to be executing:
+    // it cannot be inside the ELF read or the fd actions of a spawn whose child
+    // this abandons. That is the whole reason the release hooks here and in
+    // `cleanup_current_task_after_switch` rather than in
+    // `mark_task_terminated`, which runs *before* `task_terminate` has even
+    // asked whether the victim is on a CPU.
+    super::pending_spawn::release_parked_spawn(resolved_id);
+
     cleanup_task_process_resources(task, resolved_id, TaskProcessCleanupMode::DropVm);
     task.set_recovery_depth(0);
     task.set_panic_in_flight(0);
@@ -1085,6 +1093,10 @@ pub fn cleanup_current_task_after_switch(task: &TaskRef) {
     }
 
     let resolved_id = task.task_id;
+    // The victim's own CPU, after the register swap: its frames are dead, so a
+    // spawn it was in the middle of can no longer touch the child.
+    super::pending_spawn::release_parked_spawn(resolved_id);
+
     cleanup_task_process_resources(task, resolved_id, TaskProcessCleanupMode::DropVm);
     task.set_recovery_depth(0);
     task.set_panic_in_flight(0);
@@ -1159,6 +1171,12 @@ pub fn task_shutdown_all() -> c_int {
     let result = terminate_task_ids(&tasks_to_terminate);
 
     crate::per_cpu::clear_all_cpu_queues();
+    // Before the recount, not after: `refresh_num_tasks_after_shutdown`
+    // recomputes `num_tasks` from the registry, which cannot see a parked
+    // token — so draining afterwards would paper over the accounting without
+    // returning the memory. The shutdown sweep cannot reach these either, for
+    // the same reason, so this is an explicit call rather than a byproduct.
+    let _ = super::pending_spawn::drain_parked_spawns();
     refresh_num_tasks_after_shutdown();
 
     crate::per_cpu::resume_all_aps_if_not_nested(was_paused);
