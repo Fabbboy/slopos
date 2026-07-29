@@ -10,9 +10,8 @@ use slopos_ostd::task::{new_group_in_session, new_session_group};
 use slopos_ostd::user::context::UserContext;
 use slopos_sched::scheduler::{task_apply_affinity, task_wait_for};
 use slopos_sched::task::{
-    task_consume_zombie, task_cpu_affinity, task_default_signals_in_mask, task_find_by_id,
-    task_fork, task_peek_exit_info, task_reset_caught_handlers, task_set_cpu_affinity,
-    task_set_fs_base, task_terminate,
+    task_consume_zombie, task_default_signals_in_mask, task_find_by_id, task_fork,
+    task_peek_exit_info, task_reset_caught_handlers, task_set_fs_base, task_terminate,
 };
 use slopos_sched::task_struct::Current;
 
@@ -467,8 +466,7 @@ define_syscall!(syscall_set_cpu_affinity
     let Some(task_ref) = task_find_by_id(resolved) else {
         return Err(Errno::ESRCH);
     };
-    let task_ptr = task_ref.as_ptr();
-    task_set_cpu_affinity(task_ptr, new_affinity);
+    task_ref.set_cpu_affinity(new_affinity);
     // Stamping the mask is not enough — re-place the task so the new mask
     // actually governs where it runs (Linux `sched_setaffinity` → migrate).
     task_apply_affinity(&task_ref, new_affinity);
@@ -484,8 +482,7 @@ define_syscall!(syscall_get_cpu_affinity
     let Some(task_ref) = task_find_by_id(resolved) else {
         return Err(Errno::ESRCH);
     };
-    let task_ptr = task_ref.as_ptr();
-    Ok(task_cpu_affinity(task_ptr).unwrap_or(0) as u64)
+    Ok(task_ref.cpu_affinity() as u64)
 });
 
 define_syscall!(syscall_getpid (ctx)

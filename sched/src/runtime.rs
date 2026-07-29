@@ -9,7 +9,7 @@ use super::scheduler::{
     publish_new_task, run_ready_task_from_idle, set_scheduler_enabled, r#yield,
 };
 use super::task::{
-    INVALID_TASK_ID, TASK_FLAG_KERNEL_MODE, TASK_FLAG_SYSTEM, TaskPriority, TaskStatus,
+    INVALID_TASK_ID, TASK_FLAG_KERNEL_MODE, TASK_FLAG_SYSTEM, Task, TaskPriority, TaskStatus,
     task_create, task_terminate,
 };
 use super::work_steal::try_work_steal;
@@ -309,10 +309,9 @@ pub fn create_idle_task_for_cpu(cpu_id: usize) -> c_int {
     let Some(idle_guard) = crate::task::task_find_by_id(idle_task_id) else {
         return -1;
     };
-    let idle_task = idle_guard.as_ptr();
 
     super::task::task_install_idle_affinity(
-        idle_task,
+        &idle_guard,
         per_cpu::affinity_mask_for_cpu(cpu_id),
         cpu_id as u8,
     );
@@ -346,12 +345,20 @@ pub(crate) fn resolve_idle_stack_for_cpu(
         return Err(IdleStackResolveError::MissingIdleTask);
     };
 
-    let stack_top = idle.task().kernel_stack_top;
-    if stack_top == 0 {
-        return Err(IdleStackResolveError::MissingKernelStack);
-    }
-
+    let stack_top = idle_stack_top(idle.task())?;
     Ok((idle, stack_top))
+}
+
+/// The top of an idle task's kernel stack, or why it cannot be switched onto.
+///
+/// Split out from [`resolve_idle_stack_for_cpu`] so the "installed but
+/// unusable" case is reachable from a test without mutating the live idle task
+/// a running CPU is standing on.
+pub(crate) fn idle_stack_top(task: &Task) -> Result<u64, IdleStackResolveError> {
+    match task.kernel_stack_top {
+        0 => Err(IdleStackResolveError::MissingKernelStack),
+        top => Ok(top),
+    }
 }
 
 extern "C" fn scheduler_loop_entry(cpu_id: usize, _idle_task: *mut ()) -> ! {

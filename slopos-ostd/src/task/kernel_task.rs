@@ -534,7 +534,13 @@ pub struct TaskInner<K, U> {
     pub fate_token: AtomicU32,
     pub fate_value: AtomicU32,
     pub fate_pending: AtomicU8,
-    pub cpu_affinity: u32,
+    /// Bitmask of CPUs this task may run on.
+    ///
+    /// Atomic because it is written across tasks and read across CPUs:
+    /// `sched_setaffinity` stamps another task's mask while the work-stealer
+    /// and the switch-out repatriation check read it on whichever CPU that task
+    /// happens to be on.
+    pub cpu_affinity: AtomicU32,
     /// CPU this task last ran on, a placement hint.
     ///
     /// Atomic because the enqueue paths stamp it on whichever CPU is
@@ -1031,6 +1037,20 @@ impl<K, U> TaskInner<K, U> {
             .is_ok()
     }
 
+    /// Bitmask of CPUs this task may run on. Relaxed: an affinity change races
+    /// dispatch by nature, and the loser of that race is repatriated on the
+    /// task's next switch-out.
+    #[inline]
+    pub fn cpu_affinity(&self) -> u32 {
+        self.cpu_affinity.load(Ordering::Relaxed)
+    }
+
+    /// See [`cpu_affinity`](Self::cpu_affinity).
+    #[inline]
+    pub fn set_cpu_affinity(&self, mask: u32) {
+        self.cpu_affinity.store(mask, Ordering::Relaxed);
+    }
+
     /// This task's full scheduling quantum, in timer ticks.
     ///
     /// Relaxed throughout: the quantum orders nothing else, and a tick lost or
@@ -1185,7 +1205,7 @@ impl<K, U> TaskInner<K, U> {
             fate_token: AtomicU32::new(0),
             fate_value: AtomicU32::new(0),
             fate_pending: AtomicU8::new(0),
-            cpu_affinity: 0,
+            cpu_affinity: AtomicU32::new(0),
             last_cpu: AtomicU8::new(0),
             fpu_last_cpu: AtomicI32::new(FPU_CPU_NONE),
             migration_count: AtomicU32::new(0),

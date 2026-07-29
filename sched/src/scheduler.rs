@@ -652,7 +652,7 @@ fn publish_ready_fallback(task: &TaskRef) -> c_int {
     // task do we relax onto any CPU — Linux's `select_fallback_rq` last resort,
     // which in practice means the permitted CPUs are all offline. `affinity == 0`
     // permits every CPU, so the common case walks all CPUs as before.
-    let affinity = body.cpu_affinity;
+    let affinity = body.cpu_affinity();
     let current_cpu = slopos_arch::pcr::get_current_cpu();
     let cpu_count = slopos_arch::pcr::get_cpu_count();
 
@@ -1328,7 +1328,7 @@ pub(crate) fn run_ready_task_from_idle(cpu_id: usize, idle_task: &Task) -> bool 
             // — the same proven publisher the raced-wake fallback below uses;
             // single-membership CAS prevents a second queue entry, and `on_cpu`
             // is still cleared below so the target dispatcher waits for us.
-            let allowed = per_cpu::affinity_allows_cpu(next_task.cpu_affinity, cpu_id);
+            let allowed = per_cpu::affinity_allows_cpu(next_task.cpu_affinity(), cpu_id);
             let rc = if allowed {
                 per_cpu::with_cpu_scheduler(cpu_id, |sched| {
                     sched.enqueue_from_on_cpu(&dispatch_ref)

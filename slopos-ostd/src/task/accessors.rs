@@ -164,8 +164,6 @@ task_scalar_getters! {
     task_flags -> u16 = flags,
     /// Read the task's user-mode `entry_point` virtual address.
     task_entry_point -> u64 = entry_point,
-    /// Read `task->cpu_affinity`.
-    task_cpu_affinity -> u32 = cpu_affinity,
     /// Read `task->priority`. The field is a `Copy` enum stored in a single
     /// naturally-aligned byte slot.
     task_priority -> TaskPriority = priority,
@@ -183,11 +181,6 @@ task_scalar_setters! {
     /// `task_id`-to-pointer lookup live on the kernel-side shim (the only
     /// caller of this writer); this just exposes the store inside OSTD.
     task_set_parent_task_id = parent_task_id: u32,
-    /// Stamp `task->cpu_affinity`.
-    task_set_cpu_affinity = cpu_affinity: u32,
-    /// Stamp `task->kernel_stack_top`. Used by tests that simulate a missing
-    /// kernel-stack-top error path.
-    task_set_kernel_stack_top = kernel_stack_top: u64,
 }
 
 task_method_getters! {
@@ -357,16 +350,9 @@ pub fn task_process_group<K, U>(task: *const TaskInner<K, U>) -> Option<KArc<Pro
 /// boot-time idle-task install. Wraps two field writes to keep the
 /// caller's site free of `unsafe`.
 #[inline]
-pub fn task_install_idle_affinity<K, U>(task: *mut TaskInner<K, U>, mask: u32, last_cpu: u8) {
-    if task.is_null() {
-        return;
-    }
-    // SAFETY: caller pre-validated; the affinity mask is a scalar write and
-    // the last-CPU hint is an atomic store.
-    unsafe {
-        (*task).cpu_affinity = mask;
-        (*task).set_last_cpu(last_cpu);
-    }
+pub fn task_install_idle_affinity<K, U>(task: &TaskInner<K, U>, mask: u32, last_cpu: u8) {
+    task.set_cpu_affinity(mask);
+    task.set_last_cpu(last_cpu);
 }
 
 /// Read `task->exit_info.is_set()`.

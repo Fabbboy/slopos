@@ -125,7 +125,7 @@ fn try_steal_from_cpu(victim: usize, thief: usize) -> Option<TaskRef> {
     let task: &Task = &stolen;
 
     // Affinity: can the task run on the thief CPU?
-    let affinity = task.cpu_affinity;
+    let affinity = task.cpu_affinity();
     if !affinity_allows_cpu(affinity, thief) {
         return_to_victim(victim, stolen);
         return None;

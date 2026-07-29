@@ -9,7 +9,6 @@
 
 use core::ffi::{c_char, c_void};
 use core::ptr;
-use core::ptr::NonNull;
 
 use slopos_ostd::KArc;
 use slopos_ostd::klog_info;
@@ -23,14 +22,10 @@ use super::scheduler::{
 };
 use super::task::{
     INVALID_PROCESS_ID, INVALID_TASK_ID, IdtEntry, TASK_FLAG_KERNEL_MODE, TASK_FLAG_USER_MODE,
-    Task, TaskPriority, TaskRef, TaskStatus, task_abandon, task_build, task_commit,
-    task_cpu_affinity, task_create, task_entry_point, task_exit_info_is_set, task_find_by_id,
-    task_flags, task_for_each_active, task_fs_base, task_handle, task_id_of, task_id_was_allocated,
-    task_is_blocked, task_is_exited, task_is_ready, task_is_terminated, task_kernel_stack_top,
-    task_last_cpu, task_live_cap_rejects_for_test, task_parent_task_id, task_pgid, task_priority,
-    task_process_id, task_remote_inbox_is_linked, task_resolve_handle, task_sched_placement_load,
-    task_set_state, task_set_state_with_reason, task_sid, task_slot_census, task_status,
-    task_terminate, task_tgid, task_waiter_count,
+    Task, TaskPriority, TaskRef, TaskStatus, task_abandon, task_build, task_commit, task_create,
+    task_find_by_id, task_for_each_active, task_handle, task_id_was_allocated,
+    task_live_cap_rejects_for_test, task_resolve_handle, task_sched_placement_load, task_set_state,
+    task_set_state_with_reason, task_slot_census, task_status, task_terminate, task_waiter_count,
 };
 use super::test_fixture::KernelTestScope;
 use slopos_abi::task::BlockReason;
@@ -371,14 +366,14 @@ slopos_testing::stest!(
     suite = sched_core
 );
 
-/// Every generated scalar accessor reads the field its table row names.
+/// Every scalar task field reads back the value written to the field it names.
 ///
-/// The accessor layer is generated from tables of `name -> type = field`, so
-/// its one realistic failure mode is a row naming the wrong field — which
-/// compiles cleanly whenever the types match, and then silently reports one
-/// task property as another. Distinct sentinels make that a test failure
-/// instead of a mystery.
-pub fn test_scalar_accessor_field_identity() -> TestResult {
+/// `TaskInner` carries a dozen same-typed scalars side by side, so the
+/// realistic failure mode is a getter, a bulk copy or a rename wiring one to
+/// another's storage — which compiles cleanly whenever the types match, and
+/// then silently reports one task property as another. Distinct sentinels make
+/// that a test failure instead of a mystery.
+pub fn test_scalar_field_identity() -> TestResult {
     let mut arc = match KArc::try_init(Task::init_invalid()) {
         Ok(arc) => arc,
         Err(_) => return TestResult::Fail,
@@ -394,7 +389,7 @@ pub fn test_scalar_accessor_field_identity() -> TestResult {
         task.process_id = 0x2222;
         task.flags = 0x3333;
         task.entry_point = 0x4444;
-        task.cpu_affinity = 0x5555;
+        task.set_cpu_affinity(0x5555);
         task.set_pgid(0x6666);
         task.set_time_slice(0x7777);
         task.set_time_slice_remaining(0x8888);
@@ -407,42 +402,25 @@ pub fn test_scalar_accessor_field_identity() -> TestResult {
         task.priority = TaskPriority::Low;
     }
 
-    let raw = KArc::as_ptr(&arc) as *mut Task;
     let checks: [(&str, u64, u64); 13] = [
-        ("task_id", task_id_of(raw).unwrap_or(0) as u64, 0x1111),
-        (
-            "process_id",
-            task_process_id(raw).unwrap_or(0) as u64,
-            0x2222,
-        ),
-        ("flags", task_flags(raw).unwrap_or(0) as u64, 0x3333),
-        ("entry_point", task_entry_point(raw).unwrap_or(0), 0x4444),
-        (
-            "cpu_affinity",
-            task_cpu_affinity(raw).unwrap_or(0) as u64,
-            0x5555,
-        ),
-        ("pgid", task_pgid(raw).unwrap_or(0) as u64, 0x6666),
+        ("task_id", arc.task_id as u64, 0x1111),
+        ("process_id", arc.process_id as u64, 0x2222),
+        ("flags", arc.flags as u64, 0x3333),
+        ("entry_point", arc.entry_point, 0x4444),
+        ("cpu_affinity", arc.cpu_affinity() as u64, 0x5555),
+        ("pgid", arc.pgid() as u64, 0x6666),
         ("time_slice", arc.time_slice(), 0x7777),
         ("time_slice_remaining", arc.time_slice_remaining(), 0x8888),
-        ("sid", task_sid(raw).unwrap_or(0) as u64, 0x9999),
-        (
-            "kernel_stack_top",
-            task_kernel_stack_top(raw).unwrap_or(0),
-            0xAAAA,
-        ),
-        ("fs_base", task_fs_base(raw).unwrap_or(0), 0xBBBB),
-        ("tgid", task_tgid(raw).unwrap_or(0) as u64, 0xCCCC),
-        (
-            "parent_task_id",
-            task_parent_task_id(raw).unwrap_or(0) as u64,
-            0xDDDD,
-        ),
+        ("sid", arc.sid() as u64, 0x9999),
+        ("kernel_stack_top", arc.kernel_stack_top, 0xAAAA),
+        ("fs_base", arc.fs_base(), 0xBBBB),
+        ("tgid", arc.tgid as u64, 0xCCCC),
+        ("parent_task_id", arc.parent_task_id as u64, 0xDDDD),
     ];
     for (name, got, want) in checks {
         if got != want {
             klog_info!(
-                "SCHED_TEST: accessor for {} read 0x{:x}, expected 0x{:x}",
+                "SCHED_TEST: field {} read 0x{:x}, expected 0x{:x}",
                 name,
                 got,
                 want
@@ -450,15 +428,8 @@ pub fn test_scalar_accessor_field_identity() -> TestResult {
             return TestResult::Fail;
         }
     }
-    if task_priority(raw) != Some(TaskPriority::Low) {
-        klog_info!("SCHED_TEST: accessor for priority read the wrong field");
-        return TestResult::Fail;
-    }
-
-    // A null pointer reports absence rather than reading through it.
-    let null_task: *const Task = ptr::null();
-    if task_id_of(null_task).is_some() || task_is_ready(null_task) {
-        klog_info!("SCHED_TEST: accessor did not null-check");
+    if arc.priority != TaskPriority::Low {
+        klog_info!("SCHED_TEST: priority read the wrong field");
         return TestResult::Fail;
     }
 
@@ -466,10 +437,7 @@ pub fn test_scalar_accessor_field_identity() -> TestResult {
     TestResult::Pass
 }
 
-slopos_testing::stest!(
-    name = test_scalar_accessor_field_identity,
-    suite = sched_core
-);
+slopos_testing::stest!(name = test_scalar_field_identity, suite = sched_core);
 
 /// A publication that fails leaves the task nascent, not reserved.
 ///
@@ -496,7 +464,7 @@ pub fn test_failed_publication_restores_nascent() -> TestResult {
     let Some(guard) = task_find_by_id(task_id) else {
         return TestResult::Fail;
     };
-    let task = guard.as_ptr();
+    let task: &Task = &guard;
 
     // Blocked + Nascent: the publish path must refuse this.
     if scheduler::schedule_new_task(&guard) == 0 {
@@ -504,10 +472,10 @@ pub fn test_failed_publication_restores_nascent() -> TestResult {
         let _ = task_terminate(task_id);
         return TestResult::Fail;
     }
-    if task_sched_placement_load(task) != SchedPlacement::Nascent {
+    if task.sched_placement() != SchedPlacement::Nascent {
         klog_info!(
             "SCHED_TEST: failed publication left placement {:?}, expected Nascent",
-            task_sched_placement_load(task)
+            task.sched_placement()
         );
         let _ = task_terminate(task_id);
         return TestResult::Fail;
@@ -520,9 +488,7 @@ pub fn test_failed_publication_restores_nascent() -> TestResult {
         let _ = task_terminate(task_id);
         return TestResult::Fail;
     }
-    if task_sched_placement_load(task) != SchedPlacement::Nascent
-        || task_status(task) != Some(TaskStatus::Blocked)
-    {
+    if task.sched_placement() != SchedPlacement::Nascent || task.status() != (TaskStatus::Blocked) {
         klog_info!("SCHED_TEST: wake published a task whose publication had failed");
         let _ = task_terminate(task_id);
         return TestResult::Fail;
@@ -534,7 +500,7 @@ pub fn test_failed_publication_restores_nascent() -> TestResult {
         let _ = task_terminate(task_id);
         return TestResult::Fail;
     }
-    if !is_published_placement(task_sched_placement_load(task)) {
+    if !is_published_placement(task.sched_placement()) {
         klog_info!("SCHED_TEST: publication after rollback did not take ownership");
         let _ = task_terminate(task_id);
         return TestResult::Fail;
@@ -571,8 +537,8 @@ pub fn test_nascent_task_is_terminable_and_retires_to_none() -> TestResult {
     let Some(guard) = task_find_by_id(task_id) else {
         return TestResult::Fail;
     };
-    let task = guard.as_ptr();
-    if task_sched_placement_load(task) != SchedPlacement::Nascent {
+    let task: &Task = &guard;
+    if task.sched_placement() != SchedPlacement::Nascent {
         klog_info!("SCHED_TEST: fresh task not Nascent");
         return TestResult::Fail;
     }
@@ -581,14 +547,14 @@ pub fn test_nascent_task_is_terminable_and_retires_to_none() -> TestResult {
         klog_info!("SCHED_TEST: a nascent task was not terminable");
         return TestResult::Fail;
     }
-    if task_sched_placement_load(task) != SchedPlacement::None {
+    if task.sched_placement() != SchedPlacement::None {
         klog_info!(
             "SCHED_TEST: terminated nascent task left placement {:?}, expected None",
-            task_sched_placement_load(task)
+            task.sched_placement()
         );
         return TestResult::Fail;
     }
-    if !task_is_exited(task) {
+    if !task.is_exited() {
         klog_info!("SCHED_TEST: terminated nascent task is not exited");
         return TestResult::Fail;
     }
@@ -624,8 +590,8 @@ pub fn test_nascent_task_refuses_wake() -> TestResult {
     let Some(guard) = task_find_by_id(task_id) else {
         return TestResult::Fail;
     };
-    let task = guard.as_ptr();
-    if task_sched_placement_load(task) != SchedPlacement::Nascent {
+    let task: &Task = &guard;
+    if task.sched_placement() != SchedPlacement::Nascent {
         klog_info!("SCHED_TEST: fresh task not Nascent");
         let _ = task_terminate(task_id);
         return TestResult::Fail;
@@ -643,18 +609,16 @@ pub fn test_nascent_task_refuses_wake() -> TestResult {
         return TestResult::Fail;
     }
 
-    if task_status(task) != Some(TaskStatus::Blocked)
-        || task_sched_placement_load(task) != SchedPlacement::Nascent
-    {
+    if task.status() != (TaskStatus::Blocked) || task.sched_placement() != SchedPlacement::Nascent {
         klog_info!(
             "SCHED_TEST: nascent task moved on wake: status {:?} placement {:?}",
-            task_status(task),
-            task_sched_placement_load(task)
+            Some(task.status()),
+            task.sched_placement()
         );
         let _ = task_terminate(task_id);
         return TestResult::Fail;
     }
-    if task_remote_inbox_is_linked(task) {
+    if task.inbox_link().is_linked() {
         klog_info!("SCHED_TEST: nascent task was linked into a scheduler container");
         let _ = task_terminate(task_id);
         return TestResult::Fail;
@@ -677,7 +641,7 @@ pub fn test_nascent_task_refuses_wake() -> TestResult {
         let _ = task_terminate(task_id);
         return TestResult::Fail;
     }
-    let placement = task_sched_placement_load(task);
+    let placement = task.sched_placement();
     if placement == SchedPlacement::Nascent || !is_published_placement(placement) {
         klog_info!(
             "SCHED_TEST: publish left placement {:?}, expected a durable owner",
@@ -868,13 +832,13 @@ pub fn test_raw_ready_store_does_not_reserve_waking_placement() -> TestResult {
     let Some(guard) = task_find_by_id(task_id) else {
         return TestResult::Fail;
     };
-    let task = guard.as_ptr();
+    let task: &Task = &guard;
 
-    if task_status(task) != Some(TaskStatus::Blocked) {
+    if task.status() != (TaskStatus::Blocked) {
         klog_info!("SCHED_TEST: fresh task not Blocked");
         return TestResult::Fail;
     }
-    if task_sched_placement_load(task) != SchedPlacement::Nascent {
+    if task.sched_placement() != SchedPlacement::Nascent {
         klog_info!("SCHED_TEST: fresh task not placement Nascent");
         return TestResult::Fail;
     }
@@ -883,14 +847,14 @@ pub fn test_raw_ready_store_does_not_reserve_waking_placement() -> TestResult {
         klog_info!("SCHED_TEST: task_set_state Ready failed");
         return TestResult::Fail;
     }
-    if task_status(task) != Some(TaskStatus::Ready) {
+    if task.status() != (TaskStatus::Ready) {
         klog_info!("SCHED_TEST: raw Ready store did not publish Ready status");
         return TestResult::Fail;
     }
-    if task_sched_placement_load(task) != SchedPlacement::Nascent {
+    if task.sched_placement() != SchedPlacement::Nascent {
         klog_info!(
             "SCHED_TEST: raw Ready store placement {:?}, expected Nascent",
-            task_sched_placement_load(task)
+            task.sched_placement()
         );
         return TestResult::Fail;
     }
@@ -899,10 +863,10 @@ pub fn test_raw_ready_store_does_not_reserve_waking_placement() -> TestResult {
         klog_info!("SCHED_TEST: explicit Ready publish failed");
         return TestResult::Fail;
     }
-    if !is_published_placement(task_sched_placement_load(task)) {
+    if !is_published_placement(task.sched_placement()) {
         klog_info!(
             "SCHED_TEST: explicit Ready publish left placement {:?}",
-            task_sched_placement_load(task)
+            task.sched_placement()
         );
         return TestResult::Fail;
     }
@@ -926,10 +890,8 @@ pub fn test_publish_new_task_owns_ready_publication() -> TestResult {
     let Some(guard) = task_find_by_id(task_id) else {
         return TestResult::Fail;
     };
-    let task = guard.as_ptr();
-    if task_status(task) != Some(TaskStatus::Blocked)
-        || task_sched_placement_load(task) != SchedPlacement::Nascent
-    {
+    let task: &Task = &guard;
+    if task.status() != (TaskStatus::Blocked) || task.sched_placement() != SchedPlacement::Nascent {
         klog_info!("SCHED_TEST: new task was not born non-runnable");
         return TestResult::Fail;
     }
@@ -938,11 +900,11 @@ pub fn test_publish_new_task_owns_ready_publication() -> TestResult {
         klog_info!("SCHED_TEST: publish_new_task failed");
         return TestResult::Fail;
     }
-    let placement = task_sched_placement_load(task);
-    if task_status(task) != Some(TaskStatus::Ready) || !is_published_placement(placement) {
+    let placement = task.sched_placement();
+    if task.status() != (TaskStatus::Ready) || !is_published_placement(placement) {
         klog_info!(
             "SCHED_TEST: publish_new_task left status {:?} placement {:?}",
-            task_status(task),
+            Some(task.status()),
             placement
         );
         return TestResult::Fail;
@@ -968,7 +930,7 @@ pub fn test_wake_blocked_task_publishes_from_none() -> TestResult {
     let Some(guard) = task_find_by_id(task_id) else {
         return TestResult::Fail;
     };
-    let task = guard.as_ptr();
+    let task: &Task = &guard;
     // Stand in for a task that was published, ran, and blocked: wakes are
     // refused while a task is still nascent, which is what this test is *not*
     // about (see `test_nascent_task_refuses_wake`).
@@ -976,9 +938,7 @@ pub fn test_wake_blocked_task_publishes_from_none() -> TestResult {
         klog_info!("SCHED_TEST: wake fixture was not nascent");
         return TestResult::Fail;
     }
-    if task_status(task) != Some(TaskStatus::Blocked)
-        || task_sched_placement_load(task) != SchedPlacement::None
-    {
+    if task.status() != (TaskStatus::Blocked) || task.sched_placement() != SchedPlacement::None {
         klog_info!("SCHED_TEST: wake fixture not Blocked+None");
         return TestResult::Fail;
     }
@@ -987,11 +947,11 @@ pub fn test_wake_blocked_task_publishes_from_none() -> TestResult {
         klog_info!("SCHED_TEST: wake_blocked_task failed");
         return TestResult::Fail;
     }
-    let placement = task_sched_placement_load(task);
-    if task_status(task) != Some(TaskStatus::Ready) || !is_published_placement(placement) {
+    let placement = task.sched_placement();
+    if task.status() != (TaskStatus::Ready) || !is_published_placement(placement) {
         klog_info!(
             "SCHED_TEST: wake_blocked_task left status {:?} placement {:?}",
-            task_status(task),
+            Some(task.status()),
             placement
         );
         return TestResult::Fail;
@@ -1026,9 +986,9 @@ pub fn test_state_transition_ready_to_running() -> TestResult {
     let Some(guard) = task_find_by_id(task_id) else {
         return TestResult::Fail;
     };
-    let task = guard.as_ptr();
+    let task: &Task = &guard;
 
-    let initial_state = task_status(task).unwrap_or(TaskStatus::Terminated);
+    let initial_state = task.status();
     if initial_state != TaskStatus::Blocked {
         klog_info!(
             "SCHED_TEST: Expected initial BLOCKED state, got {:?}",
@@ -1047,7 +1007,7 @@ pub fn test_state_transition_ready_to_running() -> TestResult {
         return TestResult::Fail;
     }
 
-    let new_state = task_status(task).unwrap_or(TaskStatus::Terminated);
+    let new_state = task.status();
     if new_state != TaskStatus::Running {
         klog_info!(
             "SCHED_TEST: Expected RUNNING state after transition, got {:?}",
@@ -2738,8 +2698,6 @@ pub fn test_schedule_task_before_scheduler_enable_on_current_cpu() -> TestResult
     let Some(task_guard) = task_find_by_id(task_id) else {
         return TestResult::Fail;
     };
-    let task_ptr = task_guard.as_ptr();
-
     if cpu_id >= u32::BITS as usize {
         return TestResult::Pass;
     }
@@ -2748,7 +2706,7 @@ pub fn test_schedule_task_before_scheduler_enable_on_current_cpu() -> TestResult
         klog_info!("SCHED_TEST: Failed to make pre-init task READY");
         return TestResult::Fail;
     }
-    crate::task::task_install_idle_affinity(task_ptr, 1u32 << cpu_id, cpu_id as u8);
+    crate::task::task_install_idle_affinity(&task_guard, 1u32 << cpu_id, cpu_id as u8);
 
     if schedule_task(&task_guard) != 0 {
         klog_info!(
@@ -2845,41 +2803,44 @@ pub fn test_resolve_idle_stack_reports_missing_idle_task() -> TestResult {
 pub fn test_resolve_idle_stack_reports_missing_kernel_stack() -> TestResult {
     let _fixture = SchedFixture::new();
 
-    if scheduler::create_idle_task_for_cpu(0) != 0 {
-        klog_info!("SCHED_TEST: Failed to create BSP idle task");
-        return TestResult::Fail;
-    }
-
-    let idle_task = slopos_arch::pcr::get_idle_task(0) as *mut Task;
-    if idle_task.is_null() {
-        klog_info!("SCHED_TEST: Failed to fetch BSP idle task from PCR");
-        return TestResult::Fail;
-    }
-
-    let original_top = task_kernel_stack_top(idle_task).unwrap_or(0);
-    crate::task::task_set_kernel_stack_top(idle_task, 0);
-
-    let result = match runtime::resolve_idle_stack_for_cpu(0) {
-        Err(IdleStackResolveError::MissingKernelStack) => TestResult::Pass,
-        Err(other) => {
-            klog_info!(
-                "SCHED_TEST: Expected MissingKernelStack, got different error: {:?}",
-                other
-            );
-            TestResult::Fail
-        }
-        Ok((_, stack_top)) => {
-            klog_info!(
-                "SCHED_TEST: Expected missing kernel stack, got stack 0x{:x}",
-                stack_top
-            );
-            TestResult::Fail
-        }
+    // Built here rather than mutated in place on the installed idle task: a
+    // running CPU is standing on that stack, and zeroing its top to see the
+    // error would be a live edit to the thing under it.
+    let mut arc = match KArc::try_init(Task::init_invalid()) {
+        Ok(task) => task,
+        Err(_) => return TestResult::Fail,
     };
+    {
+        let task = match KArc::get_mut(&mut arc) {
+            Some(task) => task,
+            None => return TestResult::Fail,
+        };
+        task.kernel_stack_top = 0;
+    }
 
-    crate::task::task_set_kernel_stack_top(idle_task, original_top);
+    let missing = runtime::idle_stack_top(&arc);
+    if !matches!(missing, Err(IdleStackResolveError::MissingKernelStack)) {
+        klog_info!(
+            "SCHED_TEST: Expected MissingKernelStack for a zero stack top, got {:?}",
+            missing
+        );
+        return TestResult::Fail;
+    }
 
-    result
+    {
+        let task = match KArc::get_mut(&mut arc) {
+            Some(task) => task,
+            None => return TestResult::Fail,
+        };
+        task.kernel_stack_top = 0xFFFF_8000_0010_0000;
+    }
+    if runtime::idle_stack_top(&arc) != Ok(0xFFFF_8000_0010_0000) {
+        klog_info!("SCHED_TEST: A populated stack top did not resolve");
+        return TestResult::Fail;
+    }
+
+    drop(arc);
+    TestResult::Pass
 }
 
 // =============================================================================
@@ -3099,7 +3060,7 @@ pub fn test_remote_inbox_duplicate_push_is_single_membership() -> TestResult {
     let Some(task_guard) = task_find_by_id(task_id) else {
         return TestResult::Fail;
     };
-    let task_ptr = task_guard.as_ptr();
+    let task_ptr: &Task = &task_guard;
     // Stand in for a published-then-blocked task: inbox and wake paths refuse
     // a task that is still nascent.
     assert!(
@@ -3115,7 +3076,7 @@ pub fn test_remote_inbox_duplicate_push_is_single_membership() -> TestResult {
     let cpu_id = slopos_arch::pcr::get_current_cpu();
     let ready_before =
         super::per_cpu::with_cpu_scheduler(cpu_id, |sched| sched.total_ready_count()).unwrap_or(0);
-    let Some(node) = NonNull::new(task_ptr) else {
+    let Some(node) = Some(task_guard.node()) else {
         return TestResult::Fail;
     };
     // Baseline strong count with the task merely registered (its registry
@@ -3127,7 +3088,7 @@ pub fn test_remote_inbox_duplicate_push_is_single_membership() -> TestResult {
         sched.push_remote_wake(&task_guard);
     });
 
-    if !task_remote_inbox_is_linked(task_ptr) {
+    if !task_ptr.inbox_link().is_linked() {
         klog_info!("SCHED_TEST: Duplicate-push task was not marked inbox-linked");
         return TestResult::Fail;
     }
@@ -3136,7 +3097,7 @@ pub fn test_remote_inbox_duplicate_push_is_single_membership() -> TestResult {
         sched.drain_remote_inbox();
     });
 
-    if task_remote_inbox_is_linked(task_ptr) {
+    if task_ptr.inbox_link().is_linked() {
         klog_info!("SCHED_TEST: inbox-linked bit not cleared after drain");
         return TestResult::Fail;
     }
@@ -3326,8 +3287,8 @@ pub fn test_remote_inbox_drops_non_ready_tasks() -> TestResult {
     let Some(task_guard) = task_find_by_id(task_id) else {
         return TestResult::Fail;
     };
-    let task_ptr = task_guard.as_ptr();
-    let Some(node) = NonNull::new(task_ptr) else {
+    let task_ptr: &Task = &task_guard;
+    let Some(node) = Some(task_guard.node()) else {
         return TestResult::Fail;
     };
     let strong_base = task_placement_strong_count(node);
@@ -3336,7 +3297,7 @@ pub fn test_remote_inbox_drops_non_ready_tasks() -> TestResult {
         sched.push_remote_wake(&task_guard);
     });
 
-    if task_status(task_ptr) != Some(TaskStatus::Blocked) {
+    if task_ptr.status() != (TaskStatus::Blocked) {
         klog_info!("SCHED_TEST: inbox drop task was not initially BLOCKED");
         return TestResult::Fail;
     }
@@ -3425,7 +3386,7 @@ pub fn test_cross_cpu_schedule_lockfree() -> TestResult {
     let Some(task_guard) = task_find_by_id(task_id) else {
         return TestResult::Fail;
     };
-    let task_ptr = task_guard.as_ptr();
+    let task_ptr: &Task = &task_guard;
     if task_set_state(task_id, TaskStatus::Ready) != 0 {
         klog_info!("SCHED_TEST: Failed to set cross-CPU task READY");
         return TestResult::Fail;
@@ -3456,11 +3417,11 @@ pub fn test_cross_cpu_schedule_lockfree() -> TestResult {
         return TestResult::Fail;
     }
 
-    if task_last_cpu(task_ptr).unwrap_or(0) != target_cpu_u8 {
+    if task_ptr.last_cpu() != target_cpu_u8 {
         klog_info!(
             "SCHED_TEST: last_cpu not updated to target CPU (expected {}, got {})",
             target_cpu,
-            task_last_cpu(task_ptr).unwrap_or(0)
+            task_ptr.last_cpu()
         );
         return TestResult::Fail;
     }
@@ -3565,8 +3526,8 @@ pub fn test_scheduler_wakeup_race_stress_baseline() -> TestResult {
             let Some(task) = task_find_by_id(id) else {
                 return TestResult::Fail;
             };
-            let task_ptr = task.as_ptr();
-            if task_status(task_ptr) != Some(TaskStatus::Ready) {
+            let task_ptr: &Task = &task;
+            if task_ptr.status() != (TaskStatus::Ready) {
                 assert!(
                     make_task_ready(id),
                     "make_task_ready failed for id {:?}",
@@ -3612,7 +3573,7 @@ pub fn test_sleep_wake_race_regression() -> TestResult {
     let Some(task_guard) = task_find_by_id(task_id) else {
         return TestResult::Fail;
     };
-    let task_ptr = task_guard.as_ptr();
+    let task_ptr: &Task = &task_guard;
     // Stand in for a published-then-blocked task; wakes refuse a nascent one.
     assert!(
         scheduler::clear_nascent_for_test(task_id),
@@ -3628,7 +3589,7 @@ pub fn test_sleep_wake_race_regression() -> TestResult {
 
     for round in 0..64 {
         let _ = unschedule_task(&task_guard);
-        if task_status(task_ptr) == Some(TaskStatus::Blocked) && !make_task_ready(task_id) {
+        if task_ptr.status() == (TaskStatus::Blocked) && !make_task_ready(task_id) {
             klog_info!("SCHED_TEST: set Ready failed at round {}", round);
             task_terminate(task_id);
             return TestResult::Fail;
@@ -3653,7 +3614,7 @@ pub fn test_sleep_wake_race_regression() -> TestResult {
 
         super::sleep::wake_due_sleepers(FAR_FUTURE + 1);
 
-        if task_is_blocked(task_ptr) {
+        if task_ptr.is_blocked() {
             klog_info!("SCHED_TEST: task stuck in Blocked after wake — race bug");
             let _ = task_set_state(task_id, TaskStatus::Ready);
             task_terminate(task_id);
@@ -3716,7 +3677,7 @@ pub fn test_sleep_entry_survives_unparked_wake() -> TestResult {
         task_terminate(task_id);
         return TestResult::Fail;
     };
-    let task_ptr = task_guard.as_ptr();
+    let task_ptr: &Task = &task_guard;
     // Stand in for a published-then-blocked task; wakes refuse a nascent one.
     assert!(
         scheduler::clear_nascent_for_test(task_id),
@@ -3727,7 +3688,7 @@ pub fn test_sleep_entry_survives_unparked_wake() -> TestResult {
     // (and exit) it mid-test. It ends up Blocked with a non-Sleep reason —
     // exactly the "not sleep-parked" shape phase 1 needs.
     let _ = unschedule_task(&task_guard);
-    if !task_is_blocked(task_ptr) {
+    if !task_ptr.is_blocked() {
         klog_info!("SCHED_TEST: unschedule did not park the task");
         task_terminate(task_id);
         return TestResult::Fail;
@@ -3753,7 +3714,7 @@ pub fn test_sleep_entry_survives_unparked_wake() -> TestResult {
     // clear the entry.
     super::sleep::arm_blocked_timeout(task_id, 0);
     super::sleep::wake_due_sleepers(u64::MAX / 2);
-    if task_is_blocked(task_ptr) {
+    if task_ptr.is_blocked() {
         klog_info!("SCHED_TEST: parked task not woken by due entry");
         super::sleep::cancel_sleep(task_id);
         task_terminate(task_id);
@@ -3802,7 +3763,7 @@ pub fn test_sleep_entry_survives_unparked_wake() -> TestResult {
 ///   would not see `is_set()` true and could fall through to the
 ///   blocking path, deadlocking the runner.
 /// - `task_wait_for`'s condition closure forgetting the
-///   `task_is_terminated(target)` fallback (Phase 1E regression) →
+///   `target.is_terminated()` fallback (Phase 1E regression) →
 ///   same outcome if the publish path ever skipped `try_set`.
 /// - `release_task_dependents` no longer doing `waiters.wake_all()`
 ///   (Phase 1F regression) → caught only on the multi-waiter
@@ -3828,7 +3789,7 @@ pub fn test_task_wait_exit_race_1000() -> TestResult {
             klog_info!("SCHED_TEST: task_find_by_id null at iteration {}", i);
             return TestResult::Fail;
         };
-        let child_ptr = child.as_ptr();
+        let child_ptr: &Task = &child;
 
         // Terminate the child synchronously. mark_task_terminated runs
         // inline: publishes exit_info via try_set, then wake_all on
@@ -3844,14 +3805,14 @@ pub fn test_task_wait_exit_race_1000() -> TestResult {
         }
 
         // Post-conditions for the publish step.
-        if !task_is_terminated(child_ptr) {
+        if !child_ptr.is_terminated() {
             klog_info!(
                 "SCHED_TEST: child not Terminated after task_terminate at iter {}",
                 i
             );
             return TestResult::Fail;
         }
-        if !task_exit_info_is_set(child_ptr) {
+        if !child_ptr.exit_info_is_set() {
             klog_info!(
                 "SCHED_TEST: exit_info not published after task_terminate at iter {}",
                 i
@@ -3903,7 +3864,7 @@ pub fn test_task_wait_exit_race_with_work() -> TestResult {
             klog_info!("SCHED_TEST: task_find_by_id null at iter {}", i);
             return TestResult::Fail;
         };
-        let child_ptr = child.as_ptr();
+        let child_ptr: &Task = &child;
 
         // Simulate "child did some work": Ready -> Running, advance a
         // synthetic last_run_timestamp, then back to Ready so terminate
@@ -3918,7 +3879,7 @@ pub fn test_task_wait_exit_race_with_work() -> TestResult {
             klog_info!("SCHED_TEST: failed Running transition at iter {}", i);
             return TestResult::Fail;
         }
-        crate::task::task_set_last_run_timestamp(child_ptr, 1);
+        child_ptr.set_last_run_timestamp(1);
         // Spin a few iterations to advance any kdiag timestamp source
         // and shift the relative ordering of publish vs. observe.
         for _ in 0..16 {
@@ -3935,14 +3896,14 @@ pub fn test_task_wait_exit_race_with_work() -> TestResult {
             return TestResult::Fail;
         }
 
-        if !task_is_terminated(child_ptr) {
+        if !child_ptr.is_terminated() {
             klog_info!(
                 "SCHED_TEST: child not Terminated after terminate at iter {}",
                 i
             );
             return TestResult::Fail;
         }
-        if !task_exit_info_is_set(child_ptr) {
+        if !child_ptr.exit_info_is_set() {
             klog_info!(
                 "SCHED_TEST: exit_info not published after terminate at iter {}",
                 i
@@ -3998,7 +3959,7 @@ pub fn test_task_wait_multi_waiter() -> TestResult {
     let Some(child_ref) = task_find_by_id(child_id) else {
         return TestResult::Fail;
     };
-    let child_ptr = child_ref.as_ptr();
+    let child_ptr: &Task = &child_ref;
 
     // Pre-condition: waiters queue is empty before terminate.
     if task_waiter_count(child_ptr) > 0 {
@@ -4012,11 +3973,11 @@ pub fn test_task_wait_multi_waiter() -> TestResult {
     }
 
     // After terminate: status Terminated and exit_info published.
-    if !task_is_terminated(child_ptr) {
+    if !child_ptr.is_terminated() {
         klog_info!("SCHED_TEST: child not Terminated after terminate");
         return TestResult::Fail;
     }
-    if !task_exit_info_is_set(child_ptr) {
+    if !child_ptr.exit_info_is_set() {
         klog_info!("SCHED_TEST: exit_info not set after terminate");
         return TestResult::Fail;
     }
@@ -4036,7 +3997,7 @@ pub fn test_task_wait_multi_waiter() -> TestResult {
         // exit_info must remain set across multiple observations
         // (try_get is non-consuming; only `take` consumes — and the
         // wait path never takes).
-        if !task_exit_info_is_set(child_ptr) {
+        if !child_ptr.exit_info_is_set() {
             klog_info!(
                 "SCHED_TEST: exit_info became unset after waiter {} returned",
                 waiter
@@ -4222,7 +4183,7 @@ pub fn test_select_target_cpu_prefers_idle_cpu() -> TestResult {
         let Some(filler) = task_find_by_id(tid) else {
             return TestResult::Fail;
         };
-        let tp = filler.as_ptr();
+        let tp: &Task = &filler;
         // Pin fillers to cpu_id so they stay in its queue.
         crate::task::task_install_idle_affinity(
             tp,
@@ -4249,7 +4210,7 @@ pub fn test_select_target_cpu_prefers_idle_cpu() -> TestResult {
     let Some(task_guard) = task_find_by_id(task_id) else {
         return TestResult::Fail;
     };
-    let task_ptr = task_guard.as_ptr();
+    let task_ptr: &Task = &task_guard;
 
     crate::task::task_install_idle_affinity(task_ptr, 0, cpu_id as u8);
 
@@ -4351,7 +4312,7 @@ pub fn test_select_target_cpu_running_task_not_idle() -> TestResult {
     let Some(task_guard) = task_find_by_id(task_id) else {
         return TestResult::Fail;
     };
-    let task_ptr = task_guard.as_ptr();
+    let task_ptr: &Task = &task_guard;
     crate::task::task_install_idle_affinity(task_ptr, 0, cpu_id as u8);
 
     let target = super::per_cpu::select_target_cpu(&task_guard);
@@ -4432,12 +4393,12 @@ pub fn test_schedule_new_task_spreads_across_cpus() -> TestResult {
         let Some(child) = task_find_by_id(tid) else {
             return TestResult::Fail;
         };
-        let tp = child.as_ptr();
-        crate::task::task_set_cpu_affinity(tp, 0); // any CPU
+        let tp: &Task = &child;
+        tp.set_cpu_affinity(0); // any CPU
         if !make_task_ready(tid) || schedule_new_task(&child) != 0 {
             return TestResult::Fail;
         }
-        placed_on[i] = task_last_cpu(tp).unwrap_or(0) as usize;
+        placed_on[i] = tp.last_cpu() as usize;
     }
 
     // Verify that at least 2 distinct CPUs were used (not all on CPU0).
@@ -4595,7 +4556,7 @@ pub fn test_fork_exit_wait_stress_10x100() -> TestResult {
                 );
                 return TestResult::Fail;
             };
-            let ptr = child.as_ptr();
+            let ptr: &Task = &child;
             if task_waiter_count(ptr) > 0 {
                 klog_info!(
                     "SCHED_TEST: fresh child has stale waiters at outer={} slot={}",
@@ -4604,7 +4565,7 @@ pub fn test_fork_exit_wait_stress_10x100() -> TestResult {
                 );
                 return TestResult::Fail;
             }
-            if task_exit_info_is_set(ptr) {
+            if ptr.exit_info_is_set() {
                 klog_info!(
                     "SCHED_TEST: fresh child has stale exit_info at outer={} slot={}",
                     outer,
@@ -4681,7 +4642,7 @@ pub fn test_serial_reap_stampede() -> TestResult {
             klog_info!("SCHED_TEST: task_find_by_id null at iter {}", i);
             return TestResult::Fail;
         };
-        let ptr = task.as_ptr();
+        let ptr: &Task = &task;
 
         if id <= last_id {
             klog_info!(
@@ -4701,7 +4662,7 @@ pub fn test_serial_reap_stampede() -> TestResult {
             );
             return TestResult::Fail;
         }
-        if task_exit_info_is_set(ptr) {
+        if ptr.exit_info_is_set() {
             klog_info!(
                 "SCHED_TEST: fresh task {} has stale exit_info at iter {}",
                 id,
@@ -4771,11 +4732,11 @@ pub fn test_waitpid_survives_task_churn() -> TestResult {
     let Some(child) = task_find_by_id(child_id) else {
         return TestResult::Fail;
     };
-    let child_ptr = child.as_ptr();
-    if task_status(child_ptr).unwrap_or(TaskStatus::Terminated) != TaskStatus::Zombie {
+    let child_ptr: &Task = &child;
+    if child_ptr.status() != TaskStatus::Zombie {
         klog_info!(
             "SCHED_TEST: child not Zombie after terminate (status={:?})",
-            task_status(child_ptr).unwrap_or(TaskStatus::Terminated)
+            child_ptr.status()
         );
         return TestResult::Fail;
     }
@@ -4802,11 +4763,11 @@ pub fn test_waitpid_survives_task_churn() -> TestResult {
         klog_info!("SCHED_TEST: child vanished during churn");
         return TestResult::Fail;
     };
-    let child_ptr_after = child_ref_after.as_ptr();
-    if task_id_of(child_ptr_after).unwrap_or(0) != child_id {
+    let child_ptr_after: &Task = &child_ref_after;
+    if child_ptr_after.task_id != child_id {
         return TestResult::Fail;
     }
-    if task_status(child_ptr_after).unwrap_or(TaskStatus::Terminated) != TaskStatus::Zombie {
+    if child_ptr_after.status() != TaskStatus::Zombie {
         klog_info!("SCHED_TEST: child not Zombie after churn");
         return TestResult::Fail;
     }
@@ -4824,7 +4785,7 @@ pub fn test_waitpid_survives_task_churn() -> TestResult {
     }
 
     // The held lookup keeps the consumed task inspectable until this check.
-    if task_status(child_ptr_after).unwrap_or(TaskStatus::Terminated) != TaskStatus::Terminated {
+    if child_ptr_after.status() != TaskStatus::Terminated {
         klog_info!("SCHED_TEST: child not Terminated after consume");
         return TestResult::Fail;
     }
@@ -4903,7 +4864,6 @@ pub fn test_orphan_child_auto_reaped_on_parent_exit() -> TestResult {
 /// reference, and reclaims the task.
 pub fn test_child_owned_by_parent_children_list() -> TestResult {
     use super::task::{task_consume_zombie, task_set_parent};
-    use slopos_ostd::task::accessors::task_children_is_empty;
 
     let _fixture = SchedFixture::new();
 
@@ -4929,15 +4889,15 @@ pub fn test_child_owned_by_parent_children_list() -> TestResult {
     else {
         return TestResult::Fail;
     };
-    let parent_ptr = parent.as_ptr();
-    let child_ptr = child.as_ptr();
-    let Some(child_nn) = NonNull::new(child_ptr) else {
+    let parent_ptr: &Task = &parent;
+    let child_ptr: &Task = &child;
+    let Some(child_nn) = Some(child.node()) else {
         return TestResult::Fail;
     };
 
     // Before linking: the parent owns no children; the child is pinned only by
     // its registry owner.
-    if !task_children_is_empty(parent_ptr) {
+    if !parent_ptr.children_is_empty() {
         klog_info!("SCHED_TEST: parent children list non-empty before link");
         return TestResult::Fail;
     }
@@ -4947,7 +4907,7 @@ pub fn test_child_owned_by_parent_children_list() -> TestResult {
 
     // After linking: the child is on the parent's list and carries exactly one
     // extra owning reference.
-    if task_children_is_empty(parent_ptr) {
+    if parent_ptr.children_is_empty() {
         klog_info!("SCHED_TEST: child not on parent children list after link");
         return TestResult::Fail;
     }
@@ -4960,11 +4920,11 @@ pub fn test_child_owned_by_parent_children_list() -> TestResult {
     if task_terminate(child_id) != 0 {
         return TestResult::Fail;
     }
-    if task_status(child_ptr).unwrap_or(TaskStatus::Terminated) != TaskStatus::Zombie {
+    if child_ptr.status() != TaskStatus::Zombie {
         klog_info!("SCHED_TEST: child not Zombie after terminate");
         return TestResult::Fail;
     }
-    if task_children_is_empty(parent_ptr) {
+    if parent_ptr.children_is_empty() {
         klog_info!("SCHED_TEST: zombie child fell off parent children list");
         return TestResult::Fail;
     }
@@ -4975,7 +4935,7 @@ pub fn test_child_owned_by_parent_children_list() -> TestResult {
         klog_info!("SCHED_TEST: task_consume_zombie returned None");
         return TestResult::Fail;
     }
-    if !task_children_is_empty(parent_ptr) {
+    if !parent_ptr.children_is_empty() {
         klog_info!("SCHED_TEST: reaped child still on parent children list");
         return TestResult::Fail;
     }
@@ -4993,7 +4953,6 @@ pub fn test_child_owned_by_parent_children_list() -> TestResult {
 /// the list, with a cleared parent id).
 pub fn test_parent_death_drains_multiple_children() -> TestResult {
     use super::task::task_set_parent;
-    use slopos_ostd::task::accessors::task_children_is_empty;
 
     let _fixture = SchedFixture::new();
 
@@ -5028,7 +4987,7 @@ pub fn test_parent_death_drains_multiple_children() -> TestResult {
         klog_info!("SCHED_TEST: parent lookup failed after linking four children");
         return TestResult::Fail;
     };
-    if task_children_is_empty(parent.as_ptr()) {
+    if parent.children_is_empty() {
         klog_info!("SCHED_TEST: parent children list empty after linking four children");
         return TestResult::Fail;
     }
@@ -5102,11 +5061,11 @@ pub fn test_cross_priority_wait() -> TestResult {
         klog_info!("SCHED_TEST: task_find_by_id(High) null");
         return TestResult::Fail;
     };
-    let high_ptr = high_ref.as_ptr();
-    if task_priority(high_ptr).unwrap_or(TaskPriority::Low) != TaskPriority::High {
+    let high_ptr: &Task = &high_ref;
+    if Some(high_ptr.priority).unwrap_or(TaskPriority::Low) != TaskPriority::High {
         klog_info!(
             "SCHED_TEST: High waiter priority is {:?}, expected High",
-            task_priority(high_ptr).unwrap_or(TaskPriority::Low)
+            Some(high_ptr.priority).unwrap_or(TaskPriority::Low)
         );
         return TestResult::Fail;
     }
@@ -5131,11 +5090,11 @@ pub fn test_cross_priority_wait() -> TestResult {
         klog_info!("SCHED_TEST: task_find_by_id(Low) null");
         return TestResult::Fail;
     };
-    let child_ptr = child_ref.as_ptr();
-    if task_priority(child_ptr).unwrap_or(TaskPriority::Low) != TaskPriority::Low {
+    let child_ptr: &Task = &child_ref;
+    if Some(child_ptr.priority).unwrap_or(TaskPriority::Low) != TaskPriority::Low {
         klog_info!(
             "SCHED_TEST: Low child priority is {:?}, expected Low",
-            task_priority(child_ptr).unwrap_or(TaskPriority::Low)
+            Some(child_ptr.priority).unwrap_or(TaskPriority::Low)
         );
         return TestResult::Fail;
     }
@@ -5155,11 +5114,11 @@ pub fn test_cross_priority_wait() -> TestResult {
         klog_info!("SCHED_TEST: task_terminate(Low) failed");
         return TestResult::Fail;
     }
-    if !task_is_terminated(child_ptr) {
+    if !child_ptr.is_terminated() {
         klog_info!("SCHED_TEST: Low child not Terminated after task_terminate");
         return TestResult::Fail;
     }
-    if !task_exit_info_is_set(child_ptr) {
+    if !child_ptr.exit_info_is_set() {
         klog_info!("SCHED_TEST: exit_info not published by Low producer");
         return TestResult::Fail;
     }
@@ -5181,7 +5140,7 @@ pub fn test_cross_priority_wait() -> TestResult {
     // the strongly held Low task. The wait path uses `try_get`/`is_set`
     // (non-consuming), never `take`; a regression that consumed
     // the cell would leave subsequent waiters stranded.
-    if !task_exit_info_is_set(child_ptr) {
+    if !child_ptr.exit_info_is_set() {
         klog_info!("SCHED_TEST: exit_info became unset after High-priority wait returned");
         return TestResult::Fail;
     }
@@ -6035,8 +5994,8 @@ pub fn test_newcomer_outranks_current_preemption_gate() -> TestResult {
         return TestResult::Fail;
     }
     let affinity = super::per_cpu::affinity_mask_for_cpu(cpu);
-    crate::task::task_install_idle_affinity(high.as_ptr(), affinity, cpu as u8);
-    crate::task::task_install_idle_affinity(normal_b.as_ptr(), affinity, cpu as u8);
+    crate::task::task_install_idle_affinity(&high, affinity, cpu as u8);
+    crate::task::task_install_idle_affinity(&normal_b, affinity, cpu as u8);
 
     // The reschedule request is gated on scheduling being active; enable it
     // only across the two publications so the fixture's quiescence is

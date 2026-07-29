@@ -41,7 +41,7 @@ pub fn fork_rr_counter_set(value: usize) {
 }
 
 use super::task::{
-    TaskRef, task_cpu_affinity, task_last_cpu, task_next_inbox_load, task_next_inbox_store_relaxed,
+    TaskRef, task_last_cpu, task_next_inbox_load, task_next_inbox_store_relaxed,
     task_next_inbox_store_release, task_put, task_remote_inbox_try_link, task_remote_inbox_unlink,
     task_sched_placement_compare_exchange, task_status,
 };
@@ -943,7 +943,7 @@ fn cpu_is_idle(cpu_id: usize) -> bool {
 ///   4. Last resort: `last_cpu` even if busy (keeps the task runnable).
 pub fn select_target_cpu(task: &Task) -> Option<usize> {
     let current_cpu = slopos_arch::pcr::get_current_cpu();
-    let affinity = task_cpu_affinity(task).unwrap_or(0);
+    let affinity = task.cpu_affinity();
     let last_cpu = task_last_cpu(task).map(|c| c as usize).unwrap_or(0);
 
     // 1. Prefer last_cpu when idle — cache-warm data is still there and
@@ -1009,7 +1009,7 @@ pub fn select_target_cpu(task: &Task) -> Option<usize> {
 /// so sequential forks spread evenly when all CPUs have equal load.
 pub fn select_target_cpu_for_new(task: &Task) -> Option<usize> {
     let current_cpu = slopos_arch::pcr::get_current_cpu();
-    let affinity = task_cpu_affinity(task).unwrap_or(0);
+    let affinity = task.cpu_affinity();
 
     // Go straight to the global idlest-CPU search — no last_cpu preference.
     if let Some(best_cpu) = find_idlest_cpu(affinity) {
