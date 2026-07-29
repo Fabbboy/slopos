@@ -141,15 +141,9 @@ pub use super::sleep::{block_current_task_with_timeout, cancel_sleep, sleep_curr
 use super::sleep::{reset_sleep_queue, sleep_queue_next_deadline_ticks, wake_due_sleepers};
 use super::task::{
     INVALID_PROCESS_ID, INVALID_TASK_ID, TASK_FLAG_KERNEL_MODE, TASK_FLAG_NO_PREEMPT,
-    TASK_FLAG_USER_MODE, Task, TaskPriority, TaskRef, TaskStatus, task_cpu_affinity,
-    task_exit_info_ref, task_fs_base, task_has_flag, task_id_of, task_is_exited, task_is_invalid,
-    task_is_ready, task_is_running, task_kernel_stack_top, task_last_cpu, task_last_run_timestamp,
-    task_name_looks_idle, task_on_cpu_load, task_panic_in_flight_load, task_panic_in_flight_store,
-    task_priority, task_process_id, task_put, task_record_context_switch, task_record_yield,
-    task_recovery_depth_load, task_recovery_depth_store, task_remote_inbox_is_linked,
-    task_sched_placement_compare_exchange, task_sched_placement_load, task_sched_placement_store,
-    task_set_on_cpu, task_set_state, task_set_status, task_status, task_switch_ctx_rip_rsp,
-    task_transition_from,
+    TASK_FLAG_USER_MODE, Task, TaskPriority, TaskRef, TaskStatus, task_exit_info_ref, task_id_of,
+    task_is_exited, task_put, task_record_context_switch, task_record_yield, task_set_state,
+    task_status, task_transition_from,
 };
 pub use super::trap::{
     RescheduleReason, TrapExitSource, save_preempt_context, scheduler_handle_post_irq,
@@ -220,14 +214,14 @@ fn reset_task_quantum(task: &Task) {
 // a healthy kernel.
 #[inline]
 fn save_live_recovery_depth(task: &Task) {
-    task_recovery_depth_store(task, slopos_arch::pcr::recovery_depth());
-    task_panic_in_flight_store(task, slopos_arch::pcr::panic_in_flight_depth());
+    task.set_recovery_depth(slopos_arch::pcr::recovery_depth());
+    task.set_panic_in_flight(slopos_arch::pcr::panic_in_flight_depth());
 }
 
 #[inline]
 fn restore_live_recovery_depth(task: &Task) {
-    slopos_arch::pcr::recovery_depth_store(task_recovery_depth_load(task));
-    slopos_arch::pcr::panic_in_flight_store(task_panic_in_flight_load(task));
+    slopos_arch::pcr::recovery_depth_store(task.recovery_depth());
+    slopos_arch::pcr::panic_in_flight_store(task.panic_in_flight());
 }
 
 #[inline]
@@ -266,14 +260,14 @@ pub(crate) fn dispatch(cpu_id: usize, task: &Task) {
     // another CPU, where the switch tail may be destroying it.
     slopos_arch::pcr::set_current_task(
         core::ptr::from_ref(task).cast::<()>().cast_mut(),
-        task_id_of(task).unwrap_or(INVALID_TASK_ID),
+        task.task_id,
         published_priority(task),
     );
     restore_live_recovery_depth(task);
 
     // Keep PCR.syscall_pid in sync so copy_from_user always resolves
     // the correct process page directory, even after preemption.
-    let pid = task_process_id(task).unwrap_or(INVALID_PROCESS_ID);
+    let pid = task.process_id;
     // Safe surface: the local-CPU PCR lookup folds the GS resolution
     // behind a table read; the atomic store on `syscall_pid` is
     // race-free under the dispatch IRQs-off + on-this-CPU window.
@@ -292,20 +286,14 @@ pub(crate) fn dispatch(cpu_id: usize, task: &Task) {
     // means a wake path enqueued without first transitioning to
     // Ready, or a state transition raced the dispatcher. Either is
     // a bug we want surfaced loudly in debug, not silently coerced.
-    let current_status = task_status(task);
+    let current_status = task.status();
     debug_assert!(
-        matches!(
-            current_status,
-            Some(TaskStatus::Ready) | Some(TaskStatus::Running)
-        ),
+        matches!(current_status, TaskStatus::Ready | TaskStatus::Running),
         "dispatch: invariant broken — task {} in unexpected state {:?}",
-        task_id_of(task).unwrap_or(INVALID_TASK_ID),
+        task.task_id,
         current_status,
     );
-    if !matches!(
-        current_status,
-        Some(TaskStatus::Ready) | Some(TaskStatus::Running)
-    ) {
+    if !matches!(current_status, TaskStatus::Ready | TaskStatus::Running) {
         // Production fallback: skip dispatch and let the caller pick
         // a different task. The pre-Phase-1 code logged + coerced to
         // Running, which produced the `0xdfdedddcdbdad9d8`-shape page
@@ -314,9 +302,8 @@ pub(crate) fn dispatch(cpu_id: usize, task: &Task) {
         // the safe move.
         return;
     }
-    let _ =
-        task_sched_placement_compare_exchange(task, SchedPlacement::None, SchedPlacement::OnCpu);
-    task_set_status(task, TaskStatus::Running);
+    let _ = task.sched_placement_compare_exchange(SchedPlacement::None, SchedPlacement::OnCpu);
+    task.set_status(TaskStatus::Running);
 }
 
 /// Cross-crate, test-only entry point into [`dispatch`] for hermetic
@@ -339,6 +326,22 @@ pub fn dispatch_task_for_test(cpu_id: usize, task_id: u32) -> bool {
     true
 }
 
+/// Whether a task name is one `create_idle_task_for_cpu` would have produced.
+///
+/// Scheduler policy, so it lives beside the publisher rather than on the task:
+/// what makes a task "the idle task" is that a CPU installed it as one, and
+/// this is the shape check on the name that install stamps.
+fn name_looks_idle(name: &[u8]) -> bool {
+    let Some(rest) = name.strip_prefix(b"idle") else {
+        return false;
+    };
+    match rest.first() {
+        None | Some(0) | Some(b'_') => true,
+        Some(b'/') => rest.get(1).is_some_and(u8::is_ascii_digit),
+        _ => false,
+    }
+}
+
 /// Install `task` as `cpu_id`'s idle task.  Writes `PCR.idle_task` —
 /// the single source of truth for "idle task on CPU N".
 /// Called once per CPU by `create_idle_task_for_cpu`.
@@ -349,19 +352,19 @@ pub fn dispatch_task_for_test(cpu_id: usize, task_id: u32) -> bool {
 #[inline]
 pub(super) fn install_idle_task(cpu_id: usize, task: &Task) {
     debug_assert!(
-        task_id_of(task) != Some(INVALID_TASK_ID),
+        task.task_id != INVALID_TASK_ID,
         "install_idle_task() must receive a registered task"
     );
     debug_assert!(
-        task_priority(task) == Some(TaskPriority::Idle),
+        task.priority == TaskPriority::Idle,
         "install_idle_task() must receive an Idle-priority task"
     );
     debug_assert!(
-        task_has_flag(task, TASK_FLAG_KERNEL_MODE),
+        (task.flags & TASK_FLAG_KERNEL_MODE != 0),
         "install_idle_task() must receive a kernel-mode task"
     );
     debug_assert!(
-        task_name_looks_idle(task),
+        name_looks_idle(task.name_bytes()),
         "install_idle_task() must receive a task named idle/<n>"
     );
     slopos_arch::pcr::set_idle_task(cpu_id, core::ptr::from_ref(task).cast::<()>().cast_mut());
@@ -410,10 +413,10 @@ fn prepare_switch_to(
     }
 
     // --- TLB / address-space switch ---
-    let is_user_mode = task_has_flag(next, TASK_FLAG_USER_MODE);
+    let is_user_mode = next.flags & TASK_FLAG_USER_MODE != 0;
     let old_pid = prev_window.map_or(INVALID_PROCESS_ID, |w| w.task().process_id);
     let new_pid = if is_user_mode {
-        task_process_id(next).unwrap_or(INVALID_PROCESS_ID)
+        next.process_id
     } else {
         INVALID_PROCESS_ID
     };
@@ -426,7 +429,7 @@ fn prepare_switch_to(
 
     // --- FS_BASE ---
     let fs = if is_user_mode {
-        let raw = task_fs_base(next).unwrap_or(0);
+        let raw = next.fs_base();
         if raw == 0 || slopos_abi::addr::VirtAddr::is_canonical(raw) {
             raw
         } else {
@@ -439,8 +442,8 @@ fn prepare_switch_to(
 
     // --- TSS RSP0 ---
     let kernel_rsp = if is_user_mode {
-        match task_kernel_stack_top(next) {
-            Some(kst) if kst != 0 => kst,
+        match next.kernel_stack_top {
+            kst if kst != 0 => kst,
             _ => kernel_stack_top() as u64,
         }
     } else {
@@ -461,7 +464,7 @@ fn prepare_switch_to(
     // this hot path; the per-CPU ASID pool retires when the legacy
     // paging surface deletes.
     let _ = cpu_id;
-    let next_pid = task_process_id(next).unwrap_or(INVALID_PROCESS_ID);
+    let next_pid = next.process_id;
     if next_pid != INVALID_PROCESS_ID {
         process_vm_sync_kernel_mappings(next_pid);
         // Scheduler-invariant safe entry: IRQs disabled by caller,
@@ -487,7 +490,7 @@ fn prepare_switch_to(
 /// Validate that the idle task's switch_ctx has a sane RIP (in kernel .text)
 /// and RSP (above USER_SPACE_TOP).
 fn ensure_idle_switch_ctx_valid(idle_task: &Task) -> bool {
-    let (rip, rsp) = task_switch_ctx_rip_rsp(idle_task).unwrap_or((0, 0));
+    let (rip, rsp) = idle_task.switch_ctx_rip_rsp();
 
     let (text_start, text_end) = kernel_text_range();
     let rip_ok = rip >= text_start && rip < text_end;
@@ -500,7 +503,7 @@ fn ensure_idle_switch_ctx_valid(idle_task: &Task) -> bool {
     klog_info!(
         "SCHED: CPU {} idle task {} has corrupt switch_ctx: rip=0x{:x} (ok={}) rsp=0x{:x} (ok={}) — refusing switch",
         slopos_arch::pcr::get_current_cpu(),
-        task_id_of(idle_task).unwrap_or(INVALID_TASK_ID),
+        idle_task.task_id,
         rip,
         rip_ok,
         rsp,
@@ -520,7 +523,7 @@ fn switch_from_current_to_idle(cpu_id: usize, current: Option<&Task>, idle_task:
         klog_info!(
             "SCHED: CPU {} cannot recover idle switch_ctx for task {}",
             cpu_id,
-            task_id_of(idle_task).unwrap_or(INVALID_TASK_ID)
+            idle_task.task_id
         );
         return;
     }
@@ -570,7 +573,7 @@ fn switch_from_current_to_idle(cpu_id: usize, current: Option<&Task>, idle_task:
 
 #[inline]
 fn task_has_no_preempt_flag(task: &Task) -> bool {
-    task_has_flag(task, TASK_FLAG_NO_PREEMPT)
+    task.flags & TASK_FLAG_NO_PREEMPT != 0
 }
 
 #[inline]
@@ -604,7 +607,7 @@ fn placement_is_durable_owner(placement: SchedPlacement) -> bool {
 }
 
 fn task_has_durable_owner(task: &Task) -> bool {
-    placement_is_durable_owner(task_sched_placement_load(task))
+    placement_is_durable_owner(task.sched_placement())
 }
 
 /// The value `dispatch()` publishes in `PCR.current_task_priority` for `task`.
@@ -614,7 +617,7 @@ fn task_has_durable_owner(task: &Task) -> bool {
 /// comparison.
 #[inline]
 fn published_priority(task: &Task) -> u8 {
-    task_priority(task).map_or(slopos_arch::pcr::PRIORITY_NONE, |p| p.as_u8())
+    Some(task.priority).map_or(slopos_arch::pcr::PRIORITY_NONE, |p| p.as_u8())
 }
 
 /// Whether `new` should preempt whatever `cpu` is running.
@@ -625,19 +628,16 @@ fn published_priority(task: &Task) -> u8 {
 /// task's allocator-heavy destructor — so the priority read could land in freed
 /// memory. A published scalar cannot dangle.
 pub(crate) fn newcomer_outranks_current(cpu: usize, new: &Task) -> bool {
-    let Some(new_prio) = task_priority(new) else {
-        return false;
-    };
-    new_prio.as_u8() < slopos_arch::pcr::current_task_priority_for(cpu)
+    new.priority.as_u8() < slopos_arch::pcr::current_task_priority_for(cpu)
 }
 
 fn publish_ready_fallback(task: &TaskRef) -> c_int {
     let body: &Task = task;
-    if !task_is_ready(body) {
+    if !body.is_ready() {
         return -1;
     }
 
-    match task_sched_placement_load(body) {
+    match body.sched_placement() {
         SchedPlacement::ReadyQueue
         | SchedPlacement::RemoteWake
         | SchedPlacement::OnCpu
@@ -653,7 +653,7 @@ fn publish_ready_fallback(task: &TaskRef) -> c_int {
     // task do we relax onto any CPU — Linux's `select_fallback_rq` last resort,
     // which in practice means the permitted CPUs are all offline. `affinity == 0`
     // permits every CPU, so the common case walks all CPUs as before.
-    let affinity = task_cpu_affinity(body).unwrap_or(0);
+    let affinity = body.cpu_affinity;
     let current_cpu = slopos_arch::pcr::get_current_cpu();
     let cpu_count = slopos_arch::pcr::get_cpu_count();
 
@@ -676,7 +676,7 @@ fn publish_ready_fallback(task: &TaskRef) -> c_int {
             }
             return 0;
         }
-        match task_sched_placement_load(body) {
+        match body.sched_placement() {
             SchedPlacement::ReadyQueue
             | SchedPlacement::RemoteWake
             | SchedPlacement::OnCpu
@@ -696,7 +696,7 @@ fn publish_ready_fallback(task: &TaskRef) -> c_int {
             klog_info!(
                 "SCHED: relaxed affinity 0x{:x} for task {} onto cpu {} (no permitted CPU accepted)",
                 affinity,
-                task_id_of(body).unwrap_or(INVALID_TASK_ID),
+                body.task_id,
                 cpu_id,
             );
             if cpu_id != current_cpu && slopos_arch::pcr::is_cpu_online(cpu_id) {
@@ -704,7 +704,7 @@ fn publish_ready_fallback(task: &TaskRef) -> c_int {
             }
             return 0;
         }
-        match task_sched_placement_load(body) {
+        match body.sched_placement() {
             SchedPlacement::ReadyQueue
             | SchedPlacement::RemoteWake
             | SchedPlacement::OnCpu
@@ -716,9 +716,9 @@ fn publish_ready_fallback(task: &TaskRef) -> c_int {
 
     klog_info!(
         "SCHED: publish fallback failed task={} status={:?} placement={:?} current_cpu={} cpu_count={}",
-        task_id_of(body).unwrap_or(INVALID_TASK_ID),
-        task_status(body),
-        task_sched_placement_load(body),
+        body.task_id,
+        body.status(),
+        body.sched_placement(),
         current_cpu,
         cpu_count,
     );
@@ -727,16 +727,16 @@ fn publish_ready_fallback(task: &TaskRef) -> c_int {
 
 fn publish_reserved_waking_ready(task: &TaskRef, task_id: u32, context: &str) -> c_int {
     let body: &Task = task;
-    if !task_is_ready(body) {
-        if task_sched_placement_load(body) == SchedPlacement::Waking {
-            let restore = if task_on_cpu_load(body) {
+    if !body.is_ready() {
+        if body.sched_placement() == SchedPlacement::Waking {
+            let restore = if body.on_cpu() {
                 SchedPlacement::OnCpu
             } else {
                 SchedPlacement::None
             };
-            let _ = task_sched_placement_compare_exchange(body, SchedPlacement::Waking, restore);
+            let _ = body.sched_placement_compare_exchange(SchedPlacement::Waking, restore);
         }
-        return if task_is_exited(body) || task_is_invalid(body) || !task_is_ready(body) {
+        return if body.is_exited() || (body.status() == TaskStatus::Invalid) || !body.is_ready() {
             0
         } else {
             -1
@@ -746,7 +746,7 @@ fn publish_reserved_waking_ready(task: &TaskRef, task_id: u32, context: &str) ->
     let rc = schedule_task_from_placement(task, SchedPlacement::Waking, false);
     if rc == 0
         || matches!(
-            task_sched_placement_load(body),
+            body.sched_placement(),
             SchedPlacement::ReadyQueue
                 | SchedPlacement::RemoteWake
                 | SchedPlacement::OnCpu
@@ -761,8 +761,8 @@ fn publish_reserved_waking_ready(task: &TaskRef, task_id: u32, context: &str) ->
         context,
         task_id,
         rc,
-        task_status(body),
-        task_sched_placement_load(body),
+        body.status(),
+        body.sched_placement(),
     );
     rc
 }
@@ -770,7 +770,7 @@ fn publish_reserved_waking_ready(task: &TaskRef, task_id: u32, context: &str) ->
 fn publish_ready_from_current_owner(task: &TaskRef, task_id: u32, context: &str) -> c_int {
     let body: &Task = task;
     for _ in 0..4 {
-        match task_sched_placement_load(body) {
+        match body.sched_placement() {
             SchedPlacement::ReadyQueue | SchedPlacement::RemoteWake | SchedPlacement::Migrating => {
                 return 0;
             }
@@ -780,20 +780,16 @@ fn publish_ready_from_current_owner(task: &TaskRef, task_id: u32, context: &str)
             // to spin on.
             SchedPlacement::Nascent => return -1,
             SchedPlacement::OnCpu => {
-                if task_sched_placement_compare_exchange(
-                    body,
-                    SchedPlacement::OnCpu,
-                    SchedPlacement::Waking,
-                ) {
+                if body
+                    .sched_placement_compare_exchange(SchedPlacement::OnCpu, SchedPlacement::Waking)
+                {
                     return publish_reserved_waking_ready(task, task_id, context);
                 }
             }
             SchedPlacement::None => {
-                if task_sched_placement_compare_exchange(
-                    body,
-                    SchedPlacement::None,
-                    SchedPlacement::Waking,
-                ) {
+                if body
+                    .sched_placement_compare_exchange(SchedPlacement::None, SchedPlacement::Waking)
+                {
                     return publish_reserved_waking_ready(task, task_id, context);
                 }
             }
@@ -805,7 +801,7 @@ fn publish_ready_from_current_owner(task: &TaskRef, task_id: u32, context: &str)
 
 fn schedule_task_from_placement(task: &TaskRef, from: SchedPlacement, new_task: bool) -> c_int {
     let body: &Task = task;
-    if !task_is_ready(body) {
+    if !body.is_ready() {
         return -1;
     }
 
@@ -895,17 +891,15 @@ struct Reservation {
 /// exactly the half-built task that `Nascent` exists to protect.
 #[inline]
 fn reserve_publication(task: &Task) -> Option<Reservation> {
-    match task_sched_placement_load(task) {
+    match task.sched_placement() {
         SchedPlacement::Waking => Some(Reservation {
             from: SchedPlacement::Waking,
             restore_nascent: false,
         }),
         SchedPlacement::Nascent => {
-            if task_sched_placement_compare_exchange(
-                task,
-                SchedPlacement::Nascent,
-                SchedPlacement::Waking,
-            ) {
+            if task
+                .sched_placement_compare_exchange(SchedPlacement::Nascent, SchedPlacement::Waking)
+            {
                 Some(Reservation {
                     from: SchedPlacement::Waking,
                     restore_nascent: true,
@@ -927,11 +921,8 @@ fn reserve_publication(task: &Task) -> Option<Reservation> {
 #[inline]
 fn release_publication(task: &Task, reservation: &Reservation) {
     if reservation.restore_nascent {
-        let _ = task_sched_placement_compare_exchange(
-            task,
-            SchedPlacement::Waking,
-            SchedPlacement::Nascent,
-        );
+        let _ =
+            task.sched_placement_compare_exchange(SchedPlacement::Waking, SchedPlacement::Nascent);
     }
 }
 
@@ -959,11 +950,7 @@ pub fn clear_nascent_for_test(task_id: u32) -> bool {
     let Some(task) = crate::task::task_find_by_id(task_id) else {
         return false;
     };
-    task_sched_placement_compare_exchange(
-        task.as_ptr(),
-        SchedPlacement::Nascent,
-        SchedPlacement::None,
-    )
+    task.sched_placement_compare_exchange(SchedPlacement::Nascent, SchedPlacement::None)
 }
 
 /// Schedule a **newly created** task (fork, spawn, exec).
@@ -997,11 +984,11 @@ pub fn publish_new_task(task: &TaskRef) -> c_int {
     // never-published task schedulable, and every other path refuses the
     // transition. `None` stays accepted for a task that was unscheduled back to
     // no owner and is being re-published.
-    let reserved_from = match task_sched_placement_load(body) {
+    let reserved_from = match body.sched_placement() {
         from @ (SchedPlacement::Nascent | SchedPlacement::None) => {
-            if !task_sched_placement_compare_exchange(body, from, SchedPlacement::Waking) {
+            if !body.sched_placement_compare_exchange(from, SchedPlacement::Waking) {
                 return if task_has_durable_owner(body)
-                    || task_sched_placement_load(body) == SchedPlacement::Waking
+                    || body.sched_placement() == SchedPlacement::Waking
                 {
                     0
                 } else {
@@ -1015,16 +1002,15 @@ pub fn publish_new_task(task: &TaskRef) -> c_int {
             return if task_has_durable_owner(body) { 0 } else { -1 };
         }
     };
-    let node = task.as_ptr();
-    let previous_status = task_status(body).unwrap_or(TaskStatus::Blocked);
-    task_set_status(node, TaskStatus::Ready);
+    let previous_status = body.status();
+    body.set_status(TaskStatus::Ready);
     let rc = schedule_task_from_placement(task, SchedPlacement::Waking, true);
     if rc != 0 {
         // Roll back to whichever unpublished state we reserved from, so a
         // failed publication leaves "never published" still spelled `Nascent`
         // and a retry — or a later `task_terminate` — sees a coherent state.
-        let _ = task_sched_placement_compare_exchange(body, SchedPlacement::Waking, reserved_from);
-        task_set_status(node, previous_status);
+        let _ = body.sched_placement_compare_exchange(SchedPlacement::Waking, reserved_from);
+        body.set_status(previous_status);
     }
     rc
 }
@@ -1055,11 +1041,11 @@ pub fn unschedule_task(task: &Task) -> c_int {
 ///   or drain re-selects via `select_target_cpu`, which now honors the mask.
 pub fn task_apply_affinity(task: &TaskRef, new_affinity: u32) {
     let body: &Task = task;
-    let last_cpu = task_last_cpu(body).map(|c| c as usize).unwrap_or(0);
+    let last_cpu = body.last_cpu() as usize;
     if per_cpu::affinity_allows_cpu(new_affinity, last_cpu) {
         return;
     }
-    match task_sched_placement_load(body) {
+    match body.sched_placement() {
         SchedPlacement::ReadyQueue => {
             let _ = unschedule_task(body);
             let _ = schedule_task(task);
@@ -1083,11 +1069,11 @@ pub fn task_apply_affinity(task: &TaskRef, new_affinity: u32) {
 /// Unified task execution for all CPUs.
 /// Handles switch_ctx validation, prepare_switch_to, and switch_registers.
 fn execute_task(cpu_id: usize, from_task: Option<&Task>, to_task: &Task) {
-    let pid = task_process_id(to_task).unwrap_or(INVALID_PROCESS_ID);
+    let pid = to_task.process_id;
     let pid_ok =
         pid == INVALID_PROCESS_ID || (pid as usize) < slopos_mm::memory_layout_defs::MAX_PROCESSES;
 
-    let to_id = task_id_of(to_task).unwrap_or(INVALID_TASK_ID);
+    let to_id = to_task.task_id;
 
     if !pid_ok {
         klog_info!(
@@ -1102,7 +1088,7 @@ fn execute_task(cpu_id: usize, from_task: Option<&Task>, to_task: &Task) {
     // Validate switch_ctx.rip — must be in kernel .text (the OSTD
     // task-entry trampoline / user_task_first_run wrapper / a
     // schedule resume point all live there).
-    let (rip, rsp) = task_switch_ctx_rip_rsp(to_task).unwrap_or((0, 0));
+    let (rip, rsp) = to_task.switch_ctx_rip_rsp();
     let (text_start, text_end) = kernel_text_range();
     if rip < text_start || rip >= text_end {
         klog_info!(
@@ -1156,7 +1142,7 @@ fn execute_task(cpu_id: usize, from_task: Option<&Task>, to_task: &Task) {
     // inside the descheduled frame while another task runs — harmless,
     // since a descheduled frame cannot unwind until its task resumes.
     let switch_abort_guard = slopos_ostd::panic::AbortOnUnwind::new();
-    task_set_on_cpu(to_task, true);
+    to_task.set_on_cpu(true);
     if let Some(from_task) = from_task {
         save_live_recovery_depth(from_task);
     }
@@ -1240,12 +1226,9 @@ pub(crate) fn run_ready_task_from_idle(cpu_id: usize, idle_task: &Task) -> bool 
         return false;
     }
 
-    if task_is_exited(next_task) || !task_is_ready(next_task) {
-        let _ = task_sched_placement_compare_exchange(
-            next_task,
-            SchedPlacement::OnCpu,
-            SchedPlacement::None,
-        );
+    if next_task.is_exited() || !next_task.is_ready() {
+        let _ =
+            next_task.sched_placement_compare_exchange(SchedPlacement::OnCpu, SchedPlacement::None);
         per_cpu::with_cpu_scheduler(cpu_id, |sched| {
             sched.set_executing_task(false);
         });
@@ -1257,28 +1240,25 @@ pub(crate) fn run_ready_task_from_idle(cpu_id: usize, idle_task: &Task) -> bool 
     // still completing the switch-out tail. The dequeue already transferred
     // scheduler placement to this CPU, so wait for the prior CPU's Release
     // store instead of publishing a second queue membership.
-    while task_on_cpu_load(next_task) {
+    while next_task.on_cpu() {
         core::hint::spin_loop();
     }
 
     // Single-winner dispatch claim: only one CPU may run a READY task.
     // If another CPU already claimed it (or state changed), drop this dequeue.
-    let next_task_id = task_id_of(next_task).unwrap_or(INVALID_TASK_ID);
+    let next_task_id = next_task.task_id;
     if task_set_state(next_task_id, TaskStatus::Running) != 0 {
         // Lost the claim — but if the task is *still* Ready we hold its only
         // scheduler placement, so dropping the dequeue would strand it READY.
         // Put it back; a claimed (Running/exited) task is the winner's
         // responsibility and is correctly dropped.
-        if task_is_ready(next_task) {
+        if next_task.is_ready() {
             per_cpu::with_cpu_scheduler(cpu_id, |sched| {
                 let _ = sched.enqueue_from_on_cpu(&dispatch_ref);
             });
         } else {
-            let _ = task_sched_placement_compare_exchange(
-                next_task,
-                SchedPlacement::OnCpu,
-                SchedPlacement::None,
-            );
+            let _ = next_task
+                .sched_placement_compare_exchange(SchedPlacement::OnCpu, SchedPlacement::None);
         }
         per_cpu::with_cpu_scheduler(cpu_id, |sched| {
             sched.set_executing_task(false);
@@ -1292,7 +1272,7 @@ pub(crate) fn run_ready_task_from_idle(cpu_id: usize, idle_task: &Task) -> bool 
     // observe this task as on-CPU for the whole dispatch so it defers cleanup
     // (kernel-stack free) to this CPU's post-switch path rather than freeing
     // the stack while this CPU is about to run on it — a use-after-free.
-    task_set_on_cpu(next_task, true);
+    next_task.set_on_cpu(true);
 
     execute_task(cpu_id, Some(idle_task), next_task);
 
@@ -1330,9 +1310,9 @@ pub(crate) fn run_ready_task_from_idle(cpu_id: usize, idle_task: &Task) -> bool 
     // context is saved but before on_cpu is cleared, so there is no
     // Ready/off-CPU/unlinked window.
     let mut ready_published = false;
-    if !task_is_exited(next_task) {
-        let already_ready = task_is_ready(next_task);
-        let needs_ready_transition = task_is_running(next_task);
+    if !next_task.is_exited() {
+        let already_ready = next_task.is_ready();
+        let needs_ready_transition = next_task.is_running();
         let should_enqueue = if already_ready {
             true
         } else if needs_ready_transition {
@@ -1349,8 +1329,7 @@ pub(crate) fn run_ready_task_from_idle(cpu_id: usize, idle_task: &Task) -> bool 
             // — the same proven publisher the raced-wake fallback below uses;
             // single-membership CAS prevents a second queue entry, and `on_cpu`
             // is still cleared below so the target dispatcher waits for us.
-            let allowed =
-                per_cpu::affinity_allows_cpu(task_cpu_affinity(next_task).unwrap_or(0), cpu_id);
+            let allowed = per_cpu::affinity_allows_cpu(next_task.cpu_affinity, cpu_id);
             let rc = if allowed {
                 per_cpu::with_cpu_scheduler(cpu_id, |sched| {
                     sched.enqueue_from_on_cpu(&dispatch_ref)
@@ -1361,7 +1340,7 @@ pub(crate) fn run_ready_task_from_idle(cpu_id: usize, idle_task: &Task) -> bool 
             };
             ready_published = rc == 0
                 || matches!(
-                    task_sched_placement_load(next_task),
+                    next_task.sched_placement(),
                     SchedPlacement::ReadyQueue
                         | SchedPlacement::RemoteWake
                         | SchedPlacement::Migrating
@@ -1373,23 +1352,20 @@ pub(crate) fn run_ready_task_from_idle(cpu_id: usize, idle_task: &Task) -> bool 
         // without a Ready+None interval. If the task is Ready, transfer the
         // current CPU's placement ownership to Waking and publish from that
         // token. Only non-ready tasks may drop OnCpu to None.
-        if task_is_ready(next_task) {
+        if next_task.is_ready() {
             let rc = publish_ready_from_current_owner(&dispatch_ref, next_task_id, "finish_switch");
             if rc != 0 {
                 klog_info!(
                     "SCHED: finish_switch failed final READY publish id={} rc={} placement={:?}",
                     next_task_id,
                     rc,
-                    task_sched_placement_load(next_task),
+                    next_task.sched_placement(),
                 );
             }
         } else {
-            let _ = task_sched_placement_compare_exchange(
-                next_task,
-                SchedPlacement::OnCpu,
-                SchedPlacement::None,
-            );
-            if task_is_ready(next_task) {
+            let _ = next_task
+                .sched_placement_compare_exchange(SchedPlacement::OnCpu, SchedPlacement::None);
+            if next_task.is_ready() {
                 let rc =
                     publish_ready_from_current_owner(&dispatch_ref, next_task_id, "finish_switch");
                 if rc != 0 {
@@ -1397,7 +1373,7 @@ pub(crate) fn run_ready_task_from_idle(cpu_id: usize, idle_task: &Task) -> bool 
                         "SCHED: finish_switch failed raced READY publish id={} rc={} placement={:?}",
                         next_task_id,
                         rc,
-                        task_sched_placement_load(next_task),
+                        next_task.sched_placement(),
                     );
                 }
             }
@@ -1408,7 +1384,7 @@ pub(crate) fn run_ready_task_from_idle(cpu_id: usize, idle_task: &Task) -> bool 
     // published to a runqueue (or was already in a remote inbox). Only now
     // clear on_cpu so peer CPUs may claim it. Pairs with peer Acquire loads
     // of `on_cpu`.
-    task_set_on_cpu(next_task, false);
+    next_task.set_on_cpu(false);
 
     // Park the owning dispatch reference in the CPU-local deferred slot. Its
     // successor reclaims and releases it after this IRQ-off switch window has
@@ -1685,9 +1661,9 @@ pub(crate) fn consume_ready_wake_for_current(current: &Current) {
     // standing in for: the guard already proves this CPU is running the task,
     // so the null check and the fabricated-lifetime reborrow both go away.
     let body = current.task();
-    task_set_status(current.as_ptr(), TaskStatus::Running);
+    current.task().set_status(TaskStatus::Running);
     unschedule_task(body);
-    task_sched_placement_store(body, SchedPlacement::OnCpu);
+    body.set_sched_placement(SchedPlacement::OnCpu);
 }
 
 /// Defence: at entry, `unschedule_task` strips us from every
@@ -1727,7 +1703,7 @@ pub(crate) fn consume_ready_wake_for_current(current: &Current) {
 pub(crate) fn commit_blocked_deschedule(current: &Current) -> bool {
     let body = current.task();
     unschedule_task(body);
-    if !matches!(task_status(body), Some(TaskStatus::Blocked)) {
+    if body.status() != TaskStatus::Blocked {
         consume_ready_wake_for_current(current);
         return false;
     }
@@ -1961,14 +1937,14 @@ pub(crate) fn wake_blocked_task(task: &TaskRef, task_id: u32) -> c_int {
     // Blocked(Sleep)-with-no-entry kthread strands seen on hardware.)
     let body: &Task = task;
     loop {
-        if task_is_exited(body) || task_is_invalid(body) {
+        if body.is_exited() || (body.status() == TaskStatus::Invalid) {
             return -1;
         }
-        if task_status(body) != Some(TaskStatus::Blocked) {
+        if body.status() != TaskStatus::Blocked {
             // Already woken (or never blocked): the wake is a no-op.
             return 0;
         }
-        match task_sched_placement_load(body) {
+        match body.sched_placement() {
             // Registered but never published: its creator has not finished
             // building it, and publishing it here would put a half-constructed
             // task on a runqueue. `task_create` stamps `pgid = task_id` before
@@ -1998,11 +1974,9 @@ pub(crate) fn wake_blocked_task(task: &TaskRef, task_id: u32) -> c_int {
                 // must not steal that claim (the status check above filtered
                 // those). Only a genuinely Blocked current task is converted
                 // to an explicit Waking publisher token.
-                if !task_sched_placement_compare_exchange(
-                    body,
-                    SchedPlacement::OnCpu,
-                    SchedPlacement::Waking,
-                ) {
+                if !body
+                    .sched_placement_compare_exchange(SchedPlacement::OnCpu, SchedPlacement::Waking)
+                {
                     core::hint::spin_loop();
                     continue;
                 }
@@ -2014,31 +1988,27 @@ pub(crate) fn wake_blocked_task(task: &TaskRef, task_id: u32) -> c_int {
                 }
                 // Status moved under our reservation; restore the placement
                 // and re-observe from the top (exit if no longer Blocked).
-                let restore = if task_on_cpu_load(body) {
+                let restore = if body.on_cpu() {
                     SchedPlacement::OnCpu
                 } else {
                     SchedPlacement::None
                 };
-                let _ =
-                    task_sched_placement_compare_exchange(body, SchedPlacement::Waking, restore);
+                let _ = body.sched_placement_compare_exchange(SchedPlacement::Waking, restore);
                 core::hint::spin_loop();
                 continue;
             }
             SchedPlacement::None => {
-                if !task_sched_placement_compare_exchange(
-                    body,
-                    SchedPlacement::None,
-                    SchedPlacement::Waking,
-                ) {
+                if !body
+                    .sched_placement_compare_exchange(SchedPlacement::None, SchedPlacement::Waking)
+                {
                     core::hint::spin_loop();
                     continue;
                 }
                 if !task_transition_from(body, TaskStatus::Blocked, TaskStatus::Ready) {
-                    if task_is_ready(body) {
+                    if body.is_ready() {
                         return publish_reserved_waking_ready(task, task_id, "unblock_task");
                     }
-                    let _ = task_sched_placement_compare_exchange(
-                        body,
+                    let _ = body.sched_placement_compare_exchange(
                         SchedPlacement::Waking,
                         SchedPlacement::None,
                     );
@@ -2056,7 +2026,7 @@ pub(crate) fn wake_blocked_task(task: &TaskRef, task_id: u32) -> c_int {
                 if task_transition_from(body, TaskStatus::Blocked, TaskStatus::Ready) {
                     return publish_reserved_waking_ready(task, task_id, "waking wake");
                 }
-                if task_is_ready(body) {
+                if body.is_ready() {
                     return publish_reserved_waking_ready(task, task_id, "waking wake");
                 }
                 core::hint::spin_loop();
@@ -2078,7 +2048,7 @@ pub(crate) fn wake_blocked_task(task: &TaskRef, task_id: u32) -> c_int {
 }
 
 pub fn unblock_task(task: &TaskRef) -> c_int {
-    let task_id = task_id_of(&**task).unwrap_or(INVALID_TASK_ID);
+    let task_id = task.task_id;
     wake_blocked_task(task, task_id)
 }
 
@@ -2531,14 +2501,13 @@ fn task_is_current_on_any_cpu(addr: TaskAddr) -> bool {
 
 fn rescue_check_task(guard: &crate::task::TaskRef) {
     let t: &Task = guard;
-    let task = guard.as_ptr();
     if t.status() != TaskStatus::Ready {
         return;
     }
     // A never-published task is not stranded, it is unfinished. Rescuing one
     // onto a runqueue is the very thing `Nascent` exists to prevent, so the
     // sweep must decline even if something has forced it Ready.
-    if task_sched_placement_load(task) == SchedPlacement::Nascent {
+    if t.sched_placement() == SchedPlacement::Nascent {
         return;
     }
     if t.on_cpu() || task_is_current_on_any_cpu(TaskAddr::of(t)) {
@@ -2548,16 +2517,16 @@ fn rescue_check_task(guard: &crate::task::TaskRef) {
     // running task on some CPU. A self-wakeup can temporarily make the
     // current task Ready before it yields back to idle; it is not stranded
     // until the context-switch-out accounting has cleared this timestamp.
-    if task_last_run_timestamp(task).unwrap_or(0) != 0 {
+    if t.last_run_timestamp() != 0 {
         return;
     }
     if t.ready_link.is_linked() {
         return;
     }
-    if task_remote_inbox_is_linked(task) {
+    if t.inbox_link().is_linked() {
         return;
     }
-    let placement = task_sched_placement_load(task);
+    let placement = t.sched_placement();
     if placement_is_durable_owner(placement) {
         return;
     }
