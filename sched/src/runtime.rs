@@ -405,7 +405,7 @@ pub fn enter_scheduler(cpu_id: usize) -> ! {
     // every subsequent instrumented prologue on this CPU reads
     // `idle_task.unsafe_stack_sp` via `gs:[CURRENT_TASK]` instead of
     // the per-CPU bootstrap stub's.
-    super::scheduler::dispatch(cpu_id, core::ptr::from_ref(idle_task.task()).cast_mut());
+    super::scheduler::dispatch(cpu_id, idle_task.task());
 
     // OSTD's `enter_scheduler_loop_noreturn` folds the one `unsafe`
     // stack-switch primitive behind the documented scheduler-bringup

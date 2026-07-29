@@ -4115,11 +4115,10 @@ pub fn test_idle_time_tracks_ticks_not_iterations() -> TestResult {
     // Set current task to the idle task so timer_tick recognises us as idle.
     // `dispatch()` writes PCR.current_task + scheduler-copy + syscall_pid
     // + state=Running in lockstep — single-writer invariant.
-    let idle_task = slopos_arch::pcr::get_idle_task(cpu_id) as *mut Task;
-    if idle_task.is_null() {
+    let Some(idle) = crate::task_struct::Idle::current() else {
         return TestResult::Fail;
-    }
-    super::scheduler::dispatch(cpu_id, idle_task);
+    };
+    super::scheduler::dispatch(cpu_id, idle.task());
 
     let (ticks_before, idle_before) = super::per_cpu::with_cpu_scheduler(cpu_id, |sched| {
         (
@@ -4326,11 +4325,10 @@ pub fn test_select_target_cpu_running_task_not_idle() -> TestResult {
     let Some(runner_guard) = task_find_by_id(runner_id) else {
         return TestResult::Fail;
     };
-    let runner_ptr = runner_guard.as_ptr();
     if !make_task_ready(runner_id) {
         return TestResult::Fail;
     }
-    super::scheduler::dispatch(cpu_id, runner_ptr);
+    super::scheduler::dispatch(cpu_id, &runner_guard);
 
     let load =
         super::per_cpu::with_cpu_scheduler(cpu_id, |sched| sched.effective_load()).unwrap_or(0);
@@ -4416,11 +4414,10 @@ pub fn test_schedule_new_task_spreads_across_cpus() -> TestResult {
     let Some(parent_guard) = task_find_by_id(parent_id) else {
         return TestResult::Fail;
     };
-    let parent_ptr = parent_guard.as_ptr();
     if !make_task_ready(parent_id) {
         return TestResult::Fail;
     }
-    super::scheduler::dispatch(cpu_id, parent_ptr);
+    super::scheduler::dispatch(cpu_id, &parent_guard);
 
     // Spawn N children using schedule_new_task (the fork path).
     let n = cpu_count.min(4);

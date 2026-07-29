@@ -230,7 +230,7 @@ fn save_live_recovery_depth(task: *mut Task) {
 }
 
 #[inline]
-fn restore_live_recovery_depth(task: *mut Task) {
+fn restore_live_recovery_depth(task: &Task) {
     slopos_arch::pcr::recovery_depth_store(task_recovery_depth_load(task));
     slopos_arch::pcr::panic_in_flight_store(task_panic_in_flight_load(task));
 }
@@ -259,8 +259,7 @@ fn scheduler_ready_count(cpu_id: usize) -> u32 {
 /// - Caller runs with preemption disabled OR inside the
 ///   interrupts-off context-switch window.
 #[inline]
-pub(crate) fn dispatch(cpu_id: usize, task: *mut Task) {
-    debug_assert!(!task.is_null(), "dispatch() must receive a non-null task");
+pub(crate) fn dispatch(cpu_id: usize, task: &Task) {
     debug_assert!(
         cpu_id == slopos_arch::pcr::get_current_cpu(),
         "dispatch() must run on the target CPU (SafeStack slot is gs-local)"
@@ -271,7 +270,7 @@ pub(crate) fn dispatch(cpu_id: usize, task: *mut Task) {
     // a newcomer preempt it" never dereference the task — least of all from
     // another CPU, where the switch tail may be destroying it.
     slopos_arch::pcr::set_current_task(
-        task as *mut (),
+        core::ptr::from_ref(task).cast::<()>().cast_mut(),
         task_id_of(task).unwrap_or(INVALID_TASK_ID),
         published_priority(task),
     );
@@ -341,7 +340,7 @@ pub fn dispatch_task_for_test(cpu_id: usize, task_id: u32) -> bool {
     let Some(task) = crate::task::task_find_by_id(task_id) else {
         return false;
     };
-    dispatch(cpu_id, task.as_ptr());
+    dispatch(cpu_id, &task);
     true
 }
 
@@ -581,7 +580,7 @@ fn switch_from_current_to_idle(cpu_id: usize, current: Option<&Task>, idle_task:
         current.map_or(core::ptr::null_mut(), |t| core::ptr::from_ref(t).cast_mut()),
         core::ptr::from_ref(idle_task).cast_mut(),
         || {
-            dispatch(cpu_id, core::ptr::from_ref(idle_task).cast_mut());
+            dispatch(cpu_id, idle_task);
             slopos_ostd::sync::rcu_note_qs();
         },
         |prev_window, next_window| {
@@ -646,7 +645,7 @@ fn task_has_durable_owner(task: &Task) -> bool {
 /// [`PRIORITY_NONE`], so a CPU parked on one always loses the preemption
 /// comparison.
 #[inline]
-fn published_priority(task: *mut Task) -> u8 {
+fn published_priority(task: &Task) -> u8 {
     task_priority(task).map_or(slopos_arch::pcr::PRIORITY_NONE, |p| p.as_u8())
 }
 
@@ -1214,7 +1213,7 @@ fn execute_task(cpu_id: usize, from_task: Option<&Task>, to_task: &Task) {
             // Single source-of-truth install: writes PCR.current_task
             // (SafeStack slot), PCR.syscall_pid, task.state = Running, and
             // the per-CPU switch counter in one place.
-            dispatch(cpu_id, core::ptr::from_ref(to_task).cast_mut());
+            dispatch(cpu_id, to_task);
             slopos_ostd::sync::rcu_note_qs();
         },
         |prev_window, next_window| {
@@ -1340,7 +1339,7 @@ pub(crate) fn run_ready_task_from_idle(cpu_id: usize, idle_task: &Task) -> bool 
         timestamp,
     );
 
-    dispatch(cpu_id, core::ptr::from_ref(idle_task).cast_mut());
+    dispatch(cpu_id, idle_task);
     slopos_ostd::sync::rcu_note_qs();
 
     switch_to_kernel_address_space();
