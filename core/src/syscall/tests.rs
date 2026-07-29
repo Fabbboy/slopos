@@ -57,10 +57,9 @@ use slopos_mm::memory_layout_defs::PROCESS_CODE_START_VA;
 use slopos_sched::scheduler::unblock_task;
 use slopos_sched::task;
 use slopos_sched::task::{
-    task_clone, task_controlling_tty, task_create, task_find_by_id, task_fork, task_fs_base,
-    task_pgid, task_process_group, task_process_id, task_sched_placement_store, task_set_state,
-    task_set_state_from_with_reason, task_sid, task_signal_pending, task_status, task_terminate,
-    task_try_transition_from,
+    task_clone, task_create, task_find_by_id, task_fork, task_process_id,
+    task_sched_placement_store, task_set_state, task_set_state_from_with_reason, task_status,
+    task_terminate, task_try_transition_from,
 };
 
 // =============================================================================
@@ -177,7 +176,7 @@ fn with_user_process_context<R>(pid: u32, f: impl FnOnce() -> R) -> Option<R> {
 fn user_copy_out<T: Copy>(pid: u32, addr: u64, value: &T) -> bool {
     with_user_process_context(pid, || {
         let ptr = match UserPtr::<T>::try_new(addr) {
-            Ok(p) => p,
+            Ok(p_guard) => p_guard,
             Err(_) => return false,
         };
         copy_to_user(ptr, value).is_ok()
@@ -338,8 +337,7 @@ pub fn test_pipe_poll_eof_baseline() -> TestResult {
     let task_id = create_test_user_task();
     assert_test!(task_id != INVALID_TASK_ID);
     let task_guard = assert_some!(task_find_by_id(task_id));
-    let task_ptr = task_guard.as_ptr();
-    let pid = task_process_id(task_ptr).unwrap_or(0);
+    let pid = task_guard.process_id;
 
     let mut read_fd = -1;
     let mut write_fd = -1;
@@ -380,19 +378,17 @@ pub fn test_process_group_session_syscalls_baseline() -> TestResult {
     let parent_id = create_test_user_task();
     assert_test!(parent_id != INVALID_TASK_ID);
     let parent_guard = assert_some!(task_find_by_id(parent_id));
-    let parent_ptr = parent_guard.as_ptr();
 
     let child_id = task_fork(&parent_guard, core::ptr::null());
     assert_test!(child_id != INVALID_TASK_ID);
     task_set_state(child_id, TaskStatus::Blocked);
     let child_guard = assert_some!(task_find_by_id(child_id));
-    let child_ptr = child_guard.as_ptr();
 
     let mut frame = zero_frame();
     let _ = crate::syscall::dispatch::dispatch_handler(syscall_getpgid, &parent_guard, &mut frame);
     assert_eq_test!(
         frame.regs().rax as u32,
-        task_pgid(parent_ptr).unwrap_or(0),
+        parent_guard.pgid(),
         "getpgid self mismatch"
     );
 
@@ -410,7 +406,7 @@ pub fn test_process_group_session_syscalls_baseline() -> TestResult {
         "setpgid should succeed for child"
     );
     assert_eq_test!(
-        task_pgid(child_ptr).unwrap_or(0),
+        child_guard.pgid(),
         parent_id,
         "child pgid mismatch after setpgid"
     );
@@ -424,12 +420,12 @@ pub fn test_process_group_session_syscalls_baseline() -> TestResult {
         "setsid should return child sid"
     );
     assert_eq_test!(
-        task_sid(child_ptr).unwrap_or(0),
+        child_guard.sid(),
         child_id,
         "child sid mismatch after setsid"
     );
     assert_eq_test!(
-        task_pgid(child_ptr).unwrap_or(0),
+        child_guard.pgid(),
         child_id,
         "child pgid mismatch after setsid"
     );
@@ -445,13 +441,11 @@ pub fn test_kill_process_group_semantics() -> TestResult {
     let leader_id = create_test_user_task();
     assert_test!(leader_id != INVALID_TASK_ID, "failed to create leader task");
     let leader_guard = assert_some!(task_find_by_id(leader_id), "leader lookup failed");
-    let leader_ptr = leader_guard.as_ptr();
 
     let member_id = task_fork(&leader_guard, core::ptr::null());
     assert_test!(member_id != INVALID_TASK_ID, "failed to fork member task");
     task_set_state(member_id, TaskStatus::Blocked);
     let member_guard = assert_some!(task_find_by_id(member_id), "member lookup failed");
-    let member_ptr = member_guard.as_ptr();
 
     let mut setpgid_frame = zero_frame();
     setpgid_frame.regs_mut().rdi = member_id as u64;
@@ -467,8 +461,8 @@ pub fn test_kill_process_group_semantics() -> TestResult {
         "setpgid should succeed for member"
     );
 
-    let leader_pid = task_process_id(leader_ptr).unwrap_or(0);
-    let member_pid = task_process_id(member_ptr).unwrap_or(0);
+    let leader_pid = leader_guard.process_id;
+    let member_pid = member_guard.process_id;
 
     let mut probe_frame = zero_frame();
     probe_frame.regs_mut().rdi = (-(leader_id as i32) as i64) as u64;
@@ -482,8 +476,8 @@ pub fn test_kill_process_group_semantics() -> TestResult {
         "kill(group, 0) probe should succeed"
     );
 
-    slopos_sched::task::task_signal_pending_store(leader_ptr, 0);
-    slopos_sched::task::task_signal_pending_store(member_ptr, 0);
+    leader_guard.set_signal_pending(0);
+    member_guard.set_signal_pending(0);
 
     let mut negative_group_frame = zero_frame();
     negative_group_frame.regs_mut().rdi = (-(leader_id as i32) as i64) as u64;
@@ -502,8 +496,8 @@ pub fn test_kill_process_group_semantics() -> TestResult {
     );
 
     let pending_bit = sig_bit(SIGUSR1);
-    let leader_pending = task_signal_pending(leader_ptr);
-    let member_pending = task_signal_pending(member_ptr);
+    let leader_pending = leader_guard.signal_pending();
+    let member_pending = member_guard.signal_pending();
     assert_test!(
         (leader_pending & pending_bit) != 0,
         "leader did not receive group signal"
@@ -513,8 +507,8 @@ pub fn test_kill_process_group_semantics() -> TestResult {
         "member did not receive group signal"
     );
 
-    slopos_sched::task::task_signal_pending_store(leader_ptr, 0);
-    slopos_sched::task::task_signal_pending_store(member_ptr, 0);
+    leader_guard.set_signal_pending(0);
+    member_guard.set_signal_pending(0);
 
     let mut caller_group_frame = zero_frame();
     caller_group_frame.regs_mut().rdi = 0;
@@ -528,8 +522,8 @@ pub fn test_kill_process_group_semantics() -> TestResult {
     });
     assert_eq_test!(caller_group_frame.regs().rax, 0, "kill(0, SIGUSR1) failed");
 
-    let leader_pending_after = task_signal_pending(leader_ptr);
-    let member_pending_after = task_signal_pending(member_ptr);
+    let leader_pending_after = leader_guard.signal_pending();
+    let member_pending_after = member_guard.signal_pending();
     assert_test!(
         (leader_pending_after & pending_bit) != 0,
         "leader missing kill(0) group signal"
@@ -552,9 +546,11 @@ pub fn test_process_group_object_fork_and_setsid_identity() -> TestResult {
     let parent_id = create_test_user_task();
     assert_test!(parent_id != INVALID_TASK_ID);
     let parent_guard = assert_some!(task_find_by_id(parent_id));
-    let parent_ptr = parent_guard.as_ptr();
 
-    let parent_pg = task_process_group(parent_ptr).expect("parent carries a process group");
+    let parent_pg = parent_guard
+        .process_group
+        .load()
+        .expect("parent carries a process group");
     assert_eq_test!(parent_pg.id(), parent_id, "leader group id == leader pid");
     assert_eq_test!(
         parent_pg.session_id(),
@@ -566,9 +562,11 @@ pub fn test_process_group_object_fork_and_setsid_identity() -> TestResult {
     assert_test!(child_id != INVALID_TASK_ID);
     task_set_state(child_id, TaskStatus::Blocked);
     let child_guard = assert_some!(task_find_by_id(child_id));
-    let child_ptr = child_guard.as_ptr();
 
-    let child_pg = task_process_group(child_ptr).expect("child inherits a process group");
+    let child_pg = child_guard
+        .process_group
+        .load()
+        .expect("child inherits a process group");
     assert_test!(
         KArc::ptr_eq(&parent_pg, &child_pg),
         "fork shares the parent's group object by identity"
@@ -578,7 +576,10 @@ pub fn test_process_group_object_fork_and_setsid_identity() -> TestResult {
     let mut setsid_frame = zero_frame();
     let _ =
         crate::syscall::dispatch::dispatch_handler(syscall_setsid, &child_guard, &mut setsid_frame);
-    let child_pg2 = task_process_group(child_ptr).expect("child group after setsid");
+    let child_pg2 = child_guard
+        .process_group
+        .load()
+        .expect("child group after setsid");
     assert_test!(
         !KArc::ptr_eq(&parent_pg, &child_pg2),
         "setsid installs a new group object"
@@ -615,12 +616,14 @@ pub fn test_process_group_slot_survives_republication() -> TestResult {
     assert_test!(child_id != INVALID_TASK_ID);
     task_set_state(child_id, TaskStatus::Blocked);
     let child_guard = assert_some!(task_find_by_id(child_id));
-    let child_ptr = child_guard.as_ptr();
 
     // The reader's handle, taken before the writer runs. Counted relative to
     // whatever else holds the group, so the assertions below stay exact
     // without assuming this test is the only holder.
-    let held = task_process_group(child_ptr).expect("child inherits a group");
+    let held = child_guard
+        .process_group
+        .load()
+        .expect("child inherits a group");
     assert_eq_test!(held.id(), parent_id, "child starts in the parent's group");
     let observer = KArc::downgrade(&held);
     let count_before = KArc::strong_count(&held);
@@ -637,7 +640,10 @@ pub fn test_process_group_slot_survives_republication() -> TestResult {
     );
     assert_eq_test!(setpgid_frame.regs().rax, 0, "setpgid should succeed");
 
-    let replaced = task_process_group(child_ptr).expect("child carries its new group");
+    let replaced = child_guard
+        .process_group
+        .load()
+        .expect("child carries its new group");
     assert_test!(
         !KArc::ptr_eq(&held, &replaced),
         "setpgid published a different group object"
@@ -708,7 +714,6 @@ pub fn test_tiocsctty_session_leader_acquires_ctty() -> TestResult {
     let task_id = create_test_user_task();
     assert_test!(task_id != INVALID_TASK_ID, "failed to create task");
     let task_guard = assert_some!(task_find_by_id(task_id), "task lookup failed");
-    let task_ptr = task_guard.as_ptr();
 
     let mut frame = zero_frame();
     frame.regs_mut().rdi = 0;
@@ -721,8 +726,8 @@ pub fn test_tiocsctty_session_leader_acquires_ctty() -> TestResult {
         "TIOCSCTTY should succeed for session leader"
     );
 
-    let sid = task_sid(task_ptr).unwrap_or(0);
-    let ctty = task_controlling_tty(task_ptr);
+    let sid = task_guard.sid();
+    let ctty = task_guard.controlling_tty();
     assert_eq_test!(ctty, Some(TtyIndex(0)), "controlling_tty should be tty0");
 
     let tty_sid =
@@ -739,14 +744,12 @@ pub fn test_tiocsctty_non_leader_rejected() -> TestResult {
     let parent_id = create_test_user_task();
     assert_test!(parent_id != INVALID_TASK_ID, "failed to create parent task");
     let parent_guard = assert_some!(task_find_by_id(parent_id), "parent lookup failed");
-    let _parent_ptr = parent_guard.as_ptr();
 
     let child_id = task_fork(&parent_guard, core::ptr::null());
     assert_test!(child_id != INVALID_TASK_ID, "failed to fork child");
     task_set_state(child_id, TaskStatus::Blocked);
 
     let child_guard = assert_some!(task_find_by_id(child_id), "child lookup failed");
-    let child_ptr = child_guard.as_ptr();
 
     let mut frame = zero_frame();
     frame.regs_mut().rdi = 0;
@@ -759,7 +762,7 @@ pub fn test_tiocsctty_non_leader_rejected() -> TestResult {
     );
 
     assert_eq_test!(
-        task_controlling_tty(child_ptr),
+        child_guard.controlling_tty(),
         None,
         "child ctty should remain None"
     );
@@ -775,7 +778,6 @@ pub fn test_open_dev_tty_with_o_noctty_preserves_flag() -> TestResult {
     let task_id = create_test_user_task();
     assert_test!(task_id != INVALID_TASK_ID, "failed to create task");
     let task_guard = assert_some!(task_find_by_id(task_id), "task lookup failed");
-    let task_ptr = task_guard.as_ptr();
 
     let mut frame = zero_frame();
     frame.regs_mut().rdi = 0;
@@ -788,7 +790,7 @@ pub fn test_open_dev_tty_with_o_noctty_preserves_flag() -> TestResult {
         "TIOCSCTTY should succeed before /dev/tty open"
     );
 
-    let pid = task_process_id(task_ptr).unwrap_or(0);
+    let pid = task_guard.process_id;
     make_task_current(task_id);
     let fd = file_open_for_process(pid, b"/dev/tty", O_RDONLY | O_NOCTTY as u32);
     park_bootstrap_on_current_cpu();
@@ -814,7 +816,6 @@ pub fn test_setsid_child_preserves_parent_controlling_tty() -> TestResult {
     let parent_id = create_test_user_task();
     assert_test!(parent_id != INVALID_TASK_ID, "failed to create parent task");
     let parent_guard = assert_some!(task_find_by_id(parent_id), "parent lookup failed");
-    let parent_ptr = parent_guard.as_ptr();
 
     let mut ioctl_frame = zero_frame();
     ioctl_frame.regs_mut().rdi = 0;
@@ -829,7 +830,6 @@ pub fn test_setsid_child_preserves_parent_controlling_tty() -> TestResult {
     task_set_state(child_id, TaskStatus::Blocked);
 
     let child_guard = assert_some!(task_find_by_id(child_id), "child lookup failed");
-    let child_ptr = child_guard.as_ptr();
 
     let mut setsid_frame = zero_frame();
     let _ =
@@ -840,12 +840,12 @@ pub fn test_setsid_child_preserves_parent_controlling_tty() -> TestResult {
         "setsid should succeed for child"
     );
     assert_eq_test!(
-        task_controlling_tty(child_ptr),
+        child_guard.controlling_tty(),
         None,
         "child should drop inherited ctty"
     );
     assert_eq_test!(
-        task_controlling_tty(parent_ptr),
+        parent_guard.controlling_tty(),
         Some(TtyIndex(0)),
         "parent should retain controlling tty"
     );
@@ -869,7 +869,6 @@ pub fn test_hangup_clears_all_session_controlling_ttys() -> TestResult {
     let leader_id = create_test_user_task();
     assert_test!(leader_id != INVALID_TASK_ID, "failed to create leader task");
     let leader_guard = assert_some!(task_find_by_id(leader_id), "leader lookup failed");
-    let leader_ptr = leader_guard.as_ptr();
 
     let mut ioctl_frame = zero_frame();
     ioctl_frame.regs_mut().rdi = 0;
@@ -883,17 +882,16 @@ pub fn test_hangup_clears_all_session_controlling_ttys() -> TestResult {
     assert_test!(child_id != INVALID_TASK_ID, "failed to fork child");
     task_set_state(child_id, TaskStatus::Blocked);
     let child_guard = assert_some!(task_find_by_id(child_id), "child lookup failed");
-    let child_ptr = child_guard.as_ptr();
 
     slopos_kernel_services::syscall_services::tty::hangup(TtyIndex(0));
 
     assert_eq_test!(
-        task_controlling_tty(leader_ptr),
+        leader_guard.controlling_tty(),
         None,
         "leader ctty should clear on hangup"
     );
     assert_eq_test!(
-        task_controlling_tty(child_ptr),
+        child_guard.controlling_tty(),
         None,
         "child ctty should clear on hangup"
     );
@@ -914,7 +912,6 @@ pub fn test_pts_open_acquires_controlling_tty_without_o_noctty() -> TestResult {
     let task_id = create_test_user_task();
     assert_test!(task_id != INVALID_TASK_ID, "failed to create task");
     let task_guard = assert_some!(task_find_by_id(task_id), "task lookup failed");
-    let task_ptr = task_guard.as_ptr();
 
     // The returned backing IS the master open — held for the test so the
     // pair stays alive, dropped at the end to tear it down.
@@ -939,14 +936,14 @@ pub fn test_pts_open_acquires_controlling_tty_without_o_noctty() -> TestResult {
     // Unlock slave so /dev/pts/N open succeeds.
     let _ = slopos_kernel_services::syscall_services::tty::set_pty_lock(master_idx, false);
 
-    let pid = task_process_id(task_ptr).unwrap_or(0);
+    let pid = task_guard.process_id;
     make_task_current(task_id);
     let fd = file_open_for_process(pid, &path[..path.len() - 1], O_RDONLY);
     park_bootstrap_on_current_cpu();
 
     assert_test!(fd >= 0, "open(/dev/pts/N) failed");
     assert_eq_test!(
-        task_controlling_tty(task_ptr),
+        task_guard.controlling_tty(),
         Some(TtyIndex(slave_number as u8)),
         "PTY slave open should acquire controlling tty"
     );
@@ -969,7 +966,6 @@ pub fn test_pts_open_with_o_noctty_skips_controlling_tty_acquire() -> TestResult
     let task_id = create_test_user_task();
     assert_test!(task_id != INVALID_TASK_ID, "failed to create task");
     let task_guard = assert_some!(task_find_by_id(task_id), "task lookup failed");
-    let task_ptr = task_guard.as_ptr();
 
     let (master_idx, master_open) = match slopos_kernel_services::syscall_services::tty::alloc_pty()
     {
@@ -992,14 +988,14 @@ pub fn test_pts_open_with_o_noctty_skips_controlling_tty_acquire() -> TestResult
     // Unlock slave so /dev/pts/N open succeeds.
     let _ = slopos_kernel_services::syscall_services::tty::set_pty_lock(master_idx, false);
 
-    let pid = task_process_id(task_ptr).unwrap_or(0);
+    let pid = task_guard.process_id;
     make_task_current(task_id);
     let fd = file_open_for_process(pid, &path[..path.len() - 1], O_RDONLY | O_NOCTTY as u32);
     park_bootstrap_on_current_cpu();
 
     assert_test!(fd >= 0, "open(/dev/pts/N, O_NOCTTY) failed");
     assert_eq_test!(
-        task_controlling_tty(task_ptr),
+        task_guard.controlling_tty(),
         None,
         "O_NOCTTY should prevent ctty acquire"
     );
@@ -1022,7 +1018,6 @@ pub fn test_tty_poll_after_close_reuse_no_crossobject() -> TestResult {
     let task_id = create_test_user_task();
     assert_test!(task_id != INVALID_TASK_ID, "failed to create task");
     let task_guard = assert_some!(task_find_by_id(task_id), "task lookup failed");
-    let task_ptr = task_guard.as_ptr();
 
     // The returned backing owns the pair for the test's duration.
     let (master_idx, master_open) = match slopos_kernel_services::syscall_services::tty::alloc_pty()
@@ -1045,7 +1040,7 @@ pub fn test_tty_poll_after_close_reuse_no_crossobject() -> TestResult {
     };
     let _ = slopos_kernel_services::syscall_services::tty::set_pty_lock(master_idx, false);
 
-    let pid = task_process_id(task_ptr).unwrap_or(0);
+    let pid = task_guard.process_id;
     // file_poll_register_fd registers the current task as the waiter, so the
     // FD-owning task must be PCR.current_task (mirrors the real poll path).
     make_task_current(task_id);
@@ -1100,8 +1095,7 @@ pub fn test_vm_mmap_munmap_stress_baseline() -> TestResult {
     let task_id = create_test_user_task();
     assert_test!(task_id != INVALID_TASK_ID);
     let task_guard = assert_some!(task_find_by_id(task_id));
-    let task_ptr = task_guard.as_ptr();
-    let pid = task_process_id(task_ptr).unwrap_or(0);
+    let pid = task_guard.process_id;
 
     for _ in 0..128 {
         let addr = slopos_mm::process_vm::process_vm_mmap(
@@ -1185,7 +1179,6 @@ pub fn test_fork_blocked_parent() -> TestResult {
     assert_test!(task_id != INVALID_TASK_ID);
 
     let task_guard = assert_some!(task_find_by_id(task_id));
-    let _task_ptr = task_guard.as_ptr();
 
     task_set_state(task_id, TaskStatus::Blocked);
 
@@ -1498,9 +1491,8 @@ pub fn test_clone_thread_tls_isolation() -> TestResult {
         "failed to create parent user task"
     );
     let parent_guard = assert_some!(task_find_by_id(parent_id), "parent task lookup failed");
-    let parent_ptr = parent_guard.as_ptr();
 
-    slopos_sched::task::task_set_fs_base(&parent_guard, 0x0000_1111_2222_3000);
+    parent_guard.set_fs_base(0x0000_1111_2222_3000);
 
     let flags = CLONE_VM | CLONE_SIGHAND | CLONE_THREAD | CLONE_SETTLS;
     let child_id = match task_clone(
@@ -1523,22 +1515,20 @@ pub fn test_clone_thread_tls_isolation() -> TestResult {
     };
 
     let child_guard = assert_some!(task_find_by_id(child_id), "child task lookup failed");
-    let child_ptr = child_guard.as_ptr();
 
-    use slopos_sched::task::{task_fs_base, task_tgid};
     assert_eq_test!(
-        task_tgid(child_ptr),
-        task_tgid(parent_ptr),
+        child_guard.tgid,
+        parent_guard.tgid,
         "thread did not join parent thread-group"
     );
     assert_eq_test!(
-        task_fs_base(child_ptr),
-        Some(0x0000_5555_6666_7000),
+        child_guard.fs_base(),
+        0x0000_5555_6666_7000,
         "child TLS base not set by CLONE_SETTLS"
     );
     assert_eq_test!(
-        task_fs_base(parent_ptr),
-        Some(0x0000_1111_2222_3000),
+        parent_guard.fs_base(),
+        0x0000_1111_2222_3000,
         "parent TLS base unexpectedly modified"
     );
 
@@ -1556,7 +1546,6 @@ pub fn test_clone_then_fork_interaction() -> TestResult {
         "failed to create parent user task"
     );
     let parent_guard = assert_some!(task_find_by_id(parent_id), "parent task lookup failed");
-    let parent_ptr = parent_guard.as_ptr();
 
     let thread_flags = CLONE_VM | CLONE_SIGHAND | CLONE_THREAD;
     let thread_id = match task_clone(&parent_guard, core::ptr::null(), thread_flags, 0, 0, 0, 0) {
@@ -1576,23 +1565,16 @@ pub fn test_clone_then_fork_interaction() -> TestResult {
 
     let thread_guard = assert_some!(task_find_by_id(thread_id), "thread task lookup failed");
     let fork_guard = assert_some!(task_find_by_id(fork_id), "fork child task lookup failed");
-    let thread_ptr = thread_guard.as_ptr();
-    let fork_ptr = fork_guard.as_ptr();
 
-    use slopos_sched::task::{task_parent_task_id, task_tgid};
+    assert_eq_test!(thread_guard.tgid, parent_guard.tgid, "thread tgid mismatch");
     assert_eq_test!(
-        task_tgid(thread_ptr),
-        task_tgid(parent_ptr),
-        "thread tgid mismatch"
-    );
-    assert_eq_test!(
-        task_tgid(fork_ptr),
-        Some(fork_id),
+        fork_guard.tgid,
+        fork_id,
         "fork child should be its own thread-group leader"
     );
     assert_eq_test!(
-        task_parent_task_id(fork_ptr),
-        Some(parent_id),
+        fork_guard.parent_task_id,
+        parent_id,
         "fork child parent id mismatch"
     );
 
@@ -1608,8 +1590,7 @@ pub fn test_futex_wait_mismatch_and_wake_no_waiters() -> TestResult {
     let task_id = create_test_user_task();
     assert_test!(task_id != INVALID_TASK_ID, "failed to create user task");
     let task_guard = assert_some!(task_find_by_id(task_id), "task lookup failed");
-    let task_ptr = task_guard.as_ptr();
-    let pid = task_process_id(task_ptr).unwrap_or(0);
+    let pid = task_guard.process_id;
 
     let uaddr = match map_user_rw_page(pid) {
         Some(v) => v,
@@ -1660,8 +1641,7 @@ pub fn test_futex_lost_wakeup_regression() -> TestResult {
     let task_id = create_test_user_task();
     assert_test!(task_id != INVALID_TASK_ID, "failed to create user task");
     let task_guard = assert_some!(task_find_by_id(task_id), "task lookup failed");
-    let task_ptr = task_guard.as_ptr();
-    let pid = task_process_id(task_ptr).unwrap_or(0);
+    let pid = task_guard.process_id;
 
     let uaddr = match map_user_rw_page(pid) {
         Some(v) => v,
@@ -1712,8 +1692,7 @@ pub fn test_futex_contention_path_stability() -> TestResult {
     let task_id = create_test_user_task();
     assert_test!(task_id != INVALID_TASK_ID, "failed to create user task");
     let task_guard = assert_some!(task_find_by_id(task_id), "task lookup failed");
-    let task_ptr = task_guard.as_ptr();
-    let pid = task_process_id(task_ptr).unwrap_or(0);
+    let pid = task_guard.process_id;
 
     let uaddr = match map_user_rw_page(pid) {
         Some(v) => v,
@@ -1764,8 +1743,7 @@ pub fn test_signal_install_deliver_and_sigreturn() -> TestResult {
     let task_id = create_test_user_task();
     assert_test!(task_id != INVALID_TASK_ID, "failed to create user task");
     let task_guard = assert_some!(task_find_by_id(task_id), "task lookup failed");
-    let task_ptr = task_guard.as_ptr();
-    let pid = task_process_id(task_ptr).unwrap_or(0);
+    let pid = task_guard.process_id;
 
     let page = match map_user_rw_page(pid) {
         Some(v) => v,
@@ -1974,8 +1952,7 @@ pub fn test_signal_delivery_on_irq_exit_dispatch() -> TestResult {
     let task_id = create_test_user_task();
     assert_test!(task_id != INVALID_TASK_ID, "failed to create user task");
     let task_guard = assert_some!(task_find_by_id(task_id), "task lookup failed");
-    let task_ptr = task_guard.as_ptr();
-    let pid = task_process_id(task_ptr).unwrap_or(0);
+    let pid = task_guard.process_id;
 
     let page = match map_user_rw_page(pid) {
         Some(v) => v,
@@ -2011,7 +1988,7 @@ pub fn test_signal_delivery_on_irq_exit_dispatch() -> TestResult {
     assert_eq_test!(install_frame.regs().rax, 0, "SIGINT install failed");
 
     // Raise SIGINT directly (mirrors what kill() leaves pending).
-    let _ = task::task_signal_raise(task_ptr, sig_bit(SIGINT));
+    let _ = task::task_signal_raise(&*task_guard, sig_bit(SIGINT));
 
     // The IRQ-exit path resolves the task via scheduler_get_current_task().
     make_task_current(task_id);
@@ -2072,7 +2049,7 @@ pub fn test_signal_delivery_on_irq_exit_dispatch() -> TestResult {
 
     // The handler signal must now be blocked (no SA_NODEFER) and the
     // pending bit cleared.
-    let blocked = task::task_signal_pending(task_ptr); // pending cleared
+    let blocked = task_guard.signal_pending(); // pending cleared
     assert_eq_test!(blocked, 0, "pending SIGINT bit should be cleared");
 
     task_terminate(task_id);
@@ -2085,9 +2062,8 @@ pub fn test_signal_delivery_on_irq_exit_kernel_frame_untouched() -> TestResult {
     let task_id = create_test_user_task();
     assert_test!(task_id != INVALID_TASK_ID, "failed to create user task");
     let task_guard = assert_some!(task_find_by_id(task_id), "task lookup failed");
-    let task_ptr = task_guard.as_ptr();
 
-    let _ = task::task_signal_raise(task_ptr, sig_bit(SIGINT));
+    let _ = task::task_signal_raise(&*task_guard, sig_bit(SIGINT));
     make_task_current(task_id);
 
     let original_rip = 0xFFFF_8000_0001_0000;
@@ -2113,7 +2089,7 @@ pub fn test_signal_delivery_on_irq_exit_kernel_frame_untouched() -> TestResult {
     );
     // Pending bit must still be set — nothing was delivered.
     assert_eq_test!(
-        task::task_signal_pending(task_ptr) & sig_bit(SIGINT),
+        task_guard.signal_pending() & sig_bit(SIGINT),
         sig_bit(SIGINT),
         "pending SIGINT must remain when frame is kernel-mode"
     );
@@ -2128,8 +2104,7 @@ pub fn test_signal_delivery_on_irq_exit_copy_failure_rearms() -> TestResult {
     let task_id = create_test_user_task();
     assert_test!(task_id != INVALID_TASK_ID, "failed to create user task");
     let task_guard = assert_some!(task_find_by_id(task_id), "task lookup failed");
-    let task_ptr = task_guard.as_ptr();
-    let pid = task_process_id(task_ptr).unwrap_or(0);
+    let pid = task_guard.process_id;
 
     let page = match map_user_rw_page(pid) {
         Some(v) => v,
@@ -2163,7 +2138,7 @@ pub fn test_signal_delivery_on_irq_exit_copy_failure_rearms() -> TestResult {
     });
     assert_eq_test!(install_frame.regs().rax, 0, "SIGINT install failed");
 
-    let _ = task::task_signal_raise(task_ptr, sig_bit(SIGINT));
+    let _ = task::task_signal_raise(&*task_guard, sig_bit(SIGINT));
     make_task_current(task_id);
 
     // RSP points into an unmapped user address: the restorer copy_to_user
@@ -2188,7 +2163,7 @@ pub fn test_signal_delivery_on_irq_exit_copy_failure_rearms() -> TestResult {
         "frame RSP must be untouched on copy failure"
     );
     assert_eq_test!(
-        task::task_signal_pending(task_ptr) & sig_bit(SIGINT),
+        task_guard.signal_pending() & sig_bit(SIGINT),
         sig_bit(SIGINT),
         "pending SIGINT must be re-armed after copy_to_user failure"
     );
@@ -2203,8 +2178,7 @@ pub fn test_sigprocmask_block_then_unblock_delivery() -> TestResult {
     let task_id = create_test_user_task();
     assert_test!(task_id != INVALID_TASK_ID, "failed to create user task");
     let task_guard = assert_some!(task_find_by_id(task_id), "task lookup failed");
-    let task_ptr = task_guard.as_ptr();
-    let pid = task_process_id(task_ptr).unwrap_or(0);
+    let pid = task_guard.process_id;
 
     let page = match map_user_rw_page(pid) {
         Some(v) => v,
@@ -2328,7 +2302,6 @@ pub fn test_sigchld_and_wait_interaction() -> TestResult {
     let parent_id = create_test_user_task();
     assert_test!(parent_id != INVALID_TASK_ID, "failed to create parent");
     let parent_guard = assert_some!(task_find_by_id(parent_id), "parent lookup failed");
-    let parent_ptr = parent_guard.as_ptr();
 
     // Unblocked + SIG_DFL: the exit-path raise is dropped at the send
     // site — no stale pending bit, no spurious wake.
@@ -2338,7 +2311,7 @@ pub fn test_sigchld_and_wait_interaction() -> TestResult {
 
     assert_eq_test!(task_terminate(child_id), 0, "failed to terminate child");
 
-    let pending = task_signal_pending(parent_ptr);
+    let pending = parent_guard.signal_pending();
     assert_eq_test!(
         pending & sig_bit(SIGCHLD),
         0,
@@ -2359,7 +2332,7 @@ pub fn test_sigchld_and_wait_interaction() -> TestResult {
         "failed to terminate second child"
     );
 
-    let pending = task_signal_pending(parent_ptr);
+    let pending = parent_guard.signal_pending();
     assert_test!(
         (pending & sig_bit(SIGCHLD)) != 0,
         "parent missing SIGCHLD pending bit after child exit (SIGCHLD blocked)"
@@ -2375,8 +2348,7 @@ pub fn test_arch_prctl_set_get_fs_roundtrip() -> TestResult {
     let task_id = create_test_user_task();
     assert_test!(task_id != INVALID_TASK_ID, "failed to create user task");
     let task_guard = assert_some!(task_find_by_id(task_id), "task lookup failed");
-    let task_ptr = task_guard.as_ptr();
-    let pid = task_process_id(task_ptr).unwrap_or(0);
+    let pid = task_guard.process_id;
 
     let out_addr = match map_user_rw_page(pid) {
         Some(v) => v,
@@ -2431,10 +2403,9 @@ pub fn test_arch_prctl_set_get_fs_roundtrip() -> TestResult {
         task_find_by_id(child_no_settls),
         "clone child lookup failed"
     );
-    let child_ptr = child_guard.as_ptr();
     assert_eq_test!(
-        task_fs_base(child_ptr),
-        Some(expected_fs),
+        child_guard.fs_base(),
+        expected_fs,
         "clone without CLONE_SETTLS must inherit FS base"
     );
 
@@ -2454,8 +2425,7 @@ pub fn test_pipe_write_read_basic() -> TestResult {
     let task_id = create_test_user_task();
     assert_test!(task_id != INVALID_TASK_ID, "failed to create user task");
     let task_guard = assert_some!(task_find_by_id(task_id), "task lookup failed");
-    let task_ptr = task_guard.as_ptr();
-    let pid = task_process_id(task_ptr).unwrap_or(0);
+    let pid = task_guard.process_id;
 
     let mut read_fd = -1;
     let mut write_fd = -1;
@@ -2495,8 +2465,7 @@ pub fn test_pipe_eof_returns_zero() -> TestResult {
     let task_id = create_test_user_task();
     assert_test!(task_id != INVALID_TASK_ID, "failed to create user task");
     let task_guard = assert_some!(task_find_by_id(task_id), "task lookup failed");
-    let task_ptr = task_guard.as_ptr();
-    let pid = task_process_id(task_ptr).unwrap_or(0);
+    let pid = task_guard.process_id;
 
     let mut read_fd = -1;
     let mut write_fd = -1;
@@ -2538,8 +2507,7 @@ pub fn test_pipe_broken_pipe() -> TestResult {
     let task_id = create_test_user_task();
     assert_test!(task_id != INVALID_TASK_ID, "failed to create user task");
     let task_guard = assert_some!(task_find_by_id(task_id), "task lookup failed");
-    let task_ptr = task_guard.as_ptr();
-    let pid = task_process_id(task_ptr).unwrap_or(0);
+    let pid = task_guard.process_id;
 
     let mut read_fd = -1;
     let mut write_fd = -1;
@@ -2568,8 +2536,7 @@ pub fn test_pipe_multi_write_read() -> TestResult {
     let task_id = create_test_user_task();
     assert_test!(task_id != INVALID_TASK_ID, "failed to create user task");
     let task_guard = assert_some!(task_find_by_id(task_id), "task lookup failed");
-    let task_ptr = task_guard.as_ptr();
-    let pid = task_process_id(task_ptr).unwrap_or(0);
+    let pid = task_guard.process_id;
 
     let mut read_fd = -1;
     let mut write_fd = -1;
@@ -2605,8 +2572,7 @@ pub fn test_pipe_partial_read() -> TestResult {
     let task_id = create_test_user_task();
     assert_test!(task_id != INVALID_TASK_ID, "failed to create user task");
     let task_guard = assert_some!(task_find_by_id(task_id), "task lookup failed");
-    let task_ptr = task_guard.as_ptr();
-    let pid = task_process_id(task_ptr).unwrap_or(0);
+    let pid = task_guard.process_id;
 
     let mut read_fd = -1;
     let mut write_fd = -1;
@@ -2656,8 +2622,7 @@ pub fn test_pipe_buffer_full() -> TestResult {
     let task_id = create_test_user_task();
     assert_test!(task_id != INVALID_TASK_ID, "failed to create user task");
     let task_guard = assert_some!(task_find_by_id(task_id), "task lookup failed");
-    let task_ptr = task_guard.as_ptr();
-    let pid = task_process_id(task_ptr).unwrap_or(0);
+    let pid = task_guard.process_id;
 
     // Create pipe with O_NONBLOCK so writes don't block when full.
     let mut read_fd = -1;
@@ -2718,11 +2683,9 @@ pub fn test_exit_current_task_releases_pipe_refs() -> TestResult {
 
     let p1_guard = assert_some!(task_find_by_id(t1), "task1 lookup failed");
     let p2_guard = assert_some!(task_find_by_id(t2), "task2 lookup failed");
-    let p1 = p1_guard.as_ptr();
-    let p2 = p2_guard.as_ptr();
 
-    let pid1 = task_process_id(p1).unwrap_or(0);
-    let pid2 = task_process_id(p2).unwrap_or(0);
+    let pid1 = p1_guard.process_id;
+    let pid2 = p2_guard.process_id;
 
     let mut read_fd = -1;
     let mut write_fd = -1;
@@ -2774,11 +2737,9 @@ pub fn test_fork_clone_keeps_cloexec_fds() -> TestResult {
 
     let p1_guard = assert_some!(task_find_by_id(t1), "task1 lookup failed");
     let p2_guard = assert_some!(task_find_by_id(t2), "task2 lookup failed");
-    let p1 = p1_guard.as_ptr();
-    let p2 = p2_guard.as_ptr();
 
-    let pid1 = task_process_id(p1).unwrap_or(0);
-    let pid2 = task_process_id(p2).unwrap_or(0);
+    let pid1 = p1_guard.process_id;
+    let pid2 = p2_guard.process_id;
 
     let mut read_fd = -1;
     let mut write_fd = -1;
@@ -2820,8 +2781,7 @@ pub fn test_spawn_empty_table_unless_actions() -> TestResult {
     let t = create_test_user_task();
     assert_test!(t != INVALID_TASK_ID, "failed to create task");
     let p_guard = assert_some!(task_find_by_id(t), "task lookup failed");
-    let p = p_guard.as_ptr();
-    let pid = task_process_id(p).unwrap_or(0);
+    let pid = p_guard.process_id;
 
     // The bootstrap console table is replaced with an empty one.
     fileio_destroy_table_for_process(pid);
@@ -2852,10 +2812,8 @@ pub fn test_spawn_clone_fd_shares_backing() -> TestResult {
     );
     let p1_guard = assert_some!(task_find_by_id(t1), "task1 lookup failed");
     let p2_guard = assert_some!(task_find_by_id(t2), "task2 lookup failed");
-    let p1 = p1_guard.as_ptr();
-    let p2 = p2_guard.as_ptr();
-    let pid1 = task_process_id(p1).unwrap_or(0);
-    let pid2 = task_process_id(p2).unwrap_or(0);
+    let pid1 = p1_guard.process_id;
+    let pid2 = p2_guard.process_id;
 
     let mut read_fd = -1;
     let mut write_fd = -1;
@@ -2914,10 +2872,8 @@ pub fn test_spawn_transfer_fd_moves() -> TestResult {
     );
     let p1_guard = assert_some!(task_find_by_id(t1), "task1 lookup failed");
     let p2_guard = assert_some!(task_find_by_id(t2), "task2 lookup failed");
-    let p1 = p1_guard.as_ptr();
-    let p2 = p2_guard.as_ptr();
-    let pid1 = task_process_id(p1).unwrap_or(0);
-    let pid2 = task_process_id(p2).unwrap_or(0);
+    let pid1 = p1_guard.process_id;
+    let pid2 = p2_guard.process_id;
 
     let mut read_fd = -1;
     let mut write_fd = -1;
@@ -2972,10 +2928,8 @@ pub fn test_spawn_actions_all_or_nothing() -> TestResult {
     );
     let p1_guard = assert_some!(task_find_by_id(t1), "task1 lookup failed");
     let p2_guard = assert_some!(task_find_by_id(t2), "task2 lookup failed");
-    let p1 = p1_guard.as_ptr();
-    let p2 = p2_guard.as_ptr();
-    let pid1 = task_process_id(p1).unwrap_or(0);
-    let pid2 = task_process_id(p2).unwrap_or(0);
+    let pid1 = p1_guard.process_id;
+    let pid2 = p2_guard.process_id;
 
     let mut read_fd = -1;
     let mut write_fd = -1;
@@ -3038,8 +2992,7 @@ pub fn test_spawn_path_rejects_bad_attrs() -> TestResult {
     let task_id = create_test_user_task();
     assert_test!(task_id != INVALID_TASK_ID, "failed to create user task");
     let task_guard = assert_some!(task_find_by_id(task_id), "task lookup failed");
-    let task_ptr = task_guard.as_ptr();
-    let pid = task_process_id(task_ptr).unwrap_or(0);
+    let pid = task_guard.process_id;
 
     // Map a user page; write a path that will fail at VFS open plus a valid
     // attrs struct (Normal priority, no fd actions) at a non-overlapping offset.
@@ -3194,16 +3147,15 @@ pub fn test_dev_tty_no_ctty_returns_enxio() -> TestResult {
     let task_id = create_test_user_task();
     assert_test!(task_id != INVALID_TASK_ID, "failed to create task");
     let task_guard = assert_some!(task_find_by_id(task_id), "task lookup failed");
-    let task_ptr = task_guard.as_ptr();
 
     // The task has no controlling terminal by default.
     assert_eq_test!(
-        task_controlling_tty(task_ptr),
+        task_guard.controlling_tty(),
         None,
         "fresh task should have no controlling_tty"
     );
 
-    let pid = task_process_id(task_ptr).unwrap_or(0);
+    let pid = task_guard.process_id;
     make_task_current(task_id);
     let fd = file_open_for_process(pid, b"/dev/tty", O_RDONLY);
     park_bootstrap_on_current_cpu();
@@ -3226,7 +3178,6 @@ pub fn test_dev_tty_with_ctty_succeeds() -> TestResult {
     let task_id = create_test_user_task();
     assert_test!(task_id != INVALID_TASK_ID, "failed to create task");
     let task_guard = assert_some!(task_find_by_id(task_id), "task lookup failed");
-    let task_ptr = task_guard.as_ptr();
 
     // Acquire controlling terminal via TIOCSCTTY.
     let mut frame = zero_frame();
@@ -3236,13 +3187,13 @@ pub fn test_dev_tty_with_ctty_succeeds() -> TestResult {
     let _ = crate::syscall::dispatch::dispatch_handler(syscall_ioctl, &task_guard, &mut frame);
     assert_eq_test!(frame.regs().rax, 0, "TIOCSCTTY should succeed");
     assert_eq_test!(
-        task_controlling_tty(task_ptr),
+        task_guard.controlling_tty(),
         Some(TtyIndex(0)),
         "controlling_tty should be set after TIOCSCTTY"
     );
 
     // Now open /dev/tty — should succeed.
-    let pid = task_process_id(task_ptr).unwrap_or(0);
+    let pid = task_guard.process_id;
     make_task_current(task_id);
     let fd = file_open_for_process(pid, b"/dev/tty", O_RDONLY);
     park_bootstrap_on_current_cpu();
@@ -3279,11 +3230,10 @@ pub fn test_setsid_then_dev_tty_returns_enxio() -> TestResult {
     assert_test!(child_id != INVALID_TASK_ID, "failed to fork child");
     task_set_state(child_id, TaskStatus::Blocked);
     let child_guard = assert_some!(task_find_by_id(child_id), "child lookup failed");
-    let child_ptr = child_guard.as_ptr();
 
     // Child should have inherited controlling_tty.
     assert_eq_test!(
-        task_controlling_tty(child_ptr),
+        child_guard.controlling_tty(),
         Some(TtyIndex(0)),
         "child should inherit controlling_tty from parent"
     );
@@ -3293,13 +3243,13 @@ pub fn test_setsid_then_dev_tty_returns_enxio() -> TestResult {
     let _ =
         crate::syscall::dispatch::dispatch_handler(syscall_setsid, &child_guard, &mut setsid_frame);
     assert_eq_test!(
-        task_controlling_tty(child_ptr),
+        child_guard.controlling_tty(),
         None,
         "setsid should clear controlling_tty"
     );
 
     // Now child tries to open /dev/tty — should fail with ENXIO.
-    let child_pid = task_process_id(child_ptr).unwrap_or(0);
+    let child_pid = child_guard.process_id;
     make_task_current(child_id);
     let fd = file_open_for_process(child_pid, b"/dev/tty", O_RDONLY);
     park_bootstrap_on_current_cpu();
@@ -3323,7 +3273,6 @@ pub fn test_fork_child_inherits_dev_tty() -> TestResult {
     let parent_id = create_test_user_task();
     assert_test!(parent_id != INVALID_TASK_ID, "failed to create parent");
     let parent_guard = assert_some!(task_find_by_id(parent_id), "parent lookup failed");
-    let parent_ptr = parent_guard.as_ptr();
 
     // Parent acquires controlling terminal.
     let mut frame = zero_frame();
@@ -3338,11 +3287,10 @@ pub fn test_fork_child_inherits_dev_tty() -> TestResult {
     assert_test!(child_id != INVALID_TASK_ID, "failed to fork child");
     task_set_state(child_id, TaskStatus::Blocked);
     let child_guard = assert_some!(task_find_by_id(child_id), "child lookup failed");
-    let child_ptr = child_guard.as_ptr();
 
     // Child should have inherited controlling_tty.
-    let parent_ctty = task_controlling_tty(parent_ptr);
-    let child_ctty = task_controlling_tty(child_ptr);
+    let parent_ctty = parent_guard.controlling_tty();
+    let child_ctty = child_guard.controlling_tty();
     assert_eq_test!(
         parent_ctty,
         child_ctty,
@@ -3350,7 +3298,7 @@ pub fn test_fork_child_inherits_dev_tty() -> TestResult {
     );
 
     // Child opens /dev/tty — should succeed (inherits parent's ctty).
-    let child_pid = task_process_id(child_ptr).unwrap_or(0);
+    let child_pid = child_guard.process_id;
     make_task_current(child_id);
     let fd = file_open_for_process(child_pid, b"/dev/tty", O_RDONLY);
     park_bootstrap_on_current_cpu();
@@ -3389,8 +3337,7 @@ pub fn test_dup_does_not_copy_cloexec() -> TestResult {
     let task_id = create_test_user_task();
     assert_test!(task_id != INVALID_TASK_ID);
     let task_guard = assert_some!(task_find_by_id(task_id));
-    let task_ptr = task_guard.as_ptr();
-    let pid = task_process_id(task_ptr).unwrap_or(0);
+    let pid = task_guard.process_id;
 
     let mut read_fd = -1;
     let mut write_fd = -1;
@@ -3457,8 +3404,7 @@ pub fn test_close_twice_is_safe() -> TestResult {
     let task_id = create_test_user_task();
     assert_test!(task_id != INVALID_TASK_ID);
     let task_guard = assert_some!(task_find_by_id(task_id));
-    let task_ptr = task_guard.as_ptr();
-    let pid = task_process_id(task_ptr).unwrap_or(0);
+    let pid = task_guard.process_id;
 
     let mut read_fd = -1;
     let mut write_fd = -1;
@@ -3493,8 +3439,7 @@ pub fn test_close_while_dup_keeps_object_alive() -> TestResult {
     let task_id = create_test_user_task();
     assert_test!(task_id != INVALID_TASK_ID);
     let task_guard = assert_some!(task_find_by_id(task_id));
-    let task_ptr = task_guard.as_ptr();
-    let pid = task_process_id(task_ptr).unwrap_or(0);
+    let pid = task_guard.process_id;
 
     let mut read_fd = -1;
     let mut write_fd = -1;
@@ -3552,8 +3497,7 @@ pub fn test_open_tty_fd_emfile_no_double_teardown() -> TestResult {
     let task_id = create_test_user_task();
     assert_test!(task_id != INVALID_TASK_ID);
     let task_guard = assert_some!(task_find_by_id(task_id));
-    let task_ptr = task_guard.as_ptr();
-    let pid = task_process_id(task_ptr).unwrap_or(0);
+    let pid = task_guard.process_id;
 
     // Open a PTY master to get a real, independently-tracked tty index.
     let master_fd = file_open_for_process(pid, b"/dev/ptmx", O_RDONLY);
@@ -3827,8 +3771,7 @@ pub fn test_dup_shares_offset() -> TestResult {
     let task_id = create_test_user_task();
     assert_test!(task_id != INVALID_TASK_ID);
     let task_guard = assert_some!(task_find_by_id(task_id));
-    let task_ptr = task_guard.as_ptr();
-    let pid = task_process_id(task_ptr).unwrap_or(0);
+    let pid = task_guard.process_id;
 
     let fd = slopos_fs::fileio::fileio_open_fd_with_ops(pid, &SEEK_PROBE_OPS, 0, None);
     assert_test!(fd >= 0, "synthetic open failed");
@@ -4369,8 +4312,7 @@ pub fn test_unix_socket_poll_before_send() -> TestResult {
     let task_id = create_test_user_task();
     assert_test!(task_id != INVALID_TASK_ID, "task creation failed");
     let task_guard = assert_some!(task_find_by_id(task_id), "task lookup failed");
-    let task_ptr = task_guard.as_ptr();
-    let pid = task_process_id(task_ptr).unwrap_or(0);
+    let pid = task_guard.process_id;
 
     let (srv_fd, cli_fd) = match unix_create_connected_pair(pid) {
         Some(pair) => pair,
@@ -4439,7 +4381,6 @@ pub fn test_sleep_ms_cas_overwrites_wakeup() -> TestResult {
     let task_id = create_test_user_task();
     assert_test!(task_id != INVALID_TASK_ID);
     let task_guard = assert_some!(task_find_by_id(task_id));
-    let task_ptr = task_guard.as_ptr();
 
     // Set up: task is `Blocked` at creation. Publish it Ready, then Running,
     // before modelling the wait queue's lock-held CAS.
@@ -4462,7 +4403,7 @@ pub fn test_sleep_ms_cas_overwrites_wakeup() -> TestResult {
         BlockReason::Sleep,
     );
 
-    let state = task_status(task_ptr).unwrap_or(TaskStatus::Terminated);
+    let state = Some(task_guard.status()).unwrap_or(TaskStatus::Terminated);
     assert_eq_test!(state, TaskStatus::Blocked, "state stays Blocked");
     assert_test!(
         result != 0,
@@ -4486,7 +4427,6 @@ pub fn test_block_current_task_toctou_allows_reblock() -> TestResult {
     let task_id = create_test_user_task();
     assert_test!(task_id != INVALID_TASK_ID);
     let task_guard = assert_some!(task_find_by_id(task_id));
-    let task_ptr = task_guard.as_ptr();
 
     // 1. Task is Running.
     assert_eq_test!(task_set_state(task_id, TaskStatus::Ready), 0);
@@ -4500,7 +4440,7 @@ pub fn test_block_current_task_toctou_allows_reblock() -> TestResult {
 
     // 4. A stale "block again" CAS source `Running` must fail.
     let result = task_try_transition_from(task_id, TaskStatus::Running, TaskStatus::Blocked);
-    let state = task_status(task_ptr).unwrap_or(TaskStatus::Terminated);
+    let state = Some(task_guard.status()).unwrap_or(TaskStatus::Terminated);
     assert_eq_test!(state, TaskStatus::Ready, "state should still be Ready");
     assert_test!(result != 0, "CAS(Running, Blocked) should fail from Ready");
 
@@ -4518,7 +4458,6 @@ pub fn test_wq_wrong_order_wakeup_lost() -> TestResult {
     let task_id = create_test_user_task();
     assert_test!(task_id != INVALID_TASK_ID);
     let task_guard = assert_some!(task_find_by_id(task_id));
-    let task_ptr = task_guard.as_ptr();
     // Stand in for a published-then-blocked task; wakes refuse a nascent one.
     assert!(
         slopos_sched::scheduler::clear_nascent_for_test(task_id),
@@ -4537,7 +4476,7 @@ pub fn test_wq_wrong_order_wakeup_lost() -> TestResult {
     let result = unblock_task(&task_guard);
     assert_eq_test!(result, 0, "unblock_task should succeed from Blocked");
 
-    let state = task_status(task_ptr).unwrap_or(TaskStatus::Terminated);
+    let state = Some(task_guard.status()).unwrap_or(TaskStatus::Terminated);
     assert_eq_test!(
         state,
         TaskStatus::Ready,
@@ -4559,7 +4498,6 @@ pub fn test_wq_correct_order_wakeup_preserved() -> TestResult {
     let task_id = create_test_user_task();
     assert_test!(task_id != INVALID_TASK_ID);
     let task_guard = assert_some!(task_find_by_id(task_id));
-    let task_ptr = task_guard.as_ptr();
 
     assert_eq_test!(task_set_state(task_id, TaskStatus::Ready), 0);
     assert_eq_test!(task_set_state(task_id, TaskStatus::Running), 0);
@@ -4569,7 +4507,7 @@ pub fn test_wq_correct_order_wakeup_preserved() -> TestResult {
     let result = unblock_task(&task_guard);
     assert_eq_test!(result, 0, "unblock_task on Running task is a no-op");
 
-    let state = task_status(task_ptr).unwrap_or(TaskStatus::Terminated);
+    let state = Some(task_guard.status()).unwrap_or(TaskStatus::Terminated);
     assert_eq_test!(state, TaskStatus::Running, "state stays Running");
 
     task_terminate(task_id);
@@ -4587,7 +4525,6 @@ pub fn test_try_transition_from_rejects_wrong_state() -> TestResult {
     let task_id = create_test_user_task();
     assert_test!(task_id != INVALID_TASK_ID);
     let task_guard = assert_some!(task_find_by_id(task_id));
-    let task_ptr = task_guard.as_ptr();
 
     // Set up: task is Ready (a wake has already transitioned us off Running).
     assert_eq_test!(task_set_state(task_id, TaskStatus::Ready), 0);
@@ -4607,7 +4544,7 @@ pub fn test_try_transition_from_rejects_wrong_state() -> TestResult {
         0,
         "try_transition_from(Running, Blocked) succeeds from Running"
     );
-    let state2 = task_status(task_ptr).unwrap_or(TaskStatus::Terminated);
+    let state2 = Some(task_guard.status()).unwrap_or(TaskStatus::Terminated);
     assert_eq_test!(state2, TaskStatus::Blocked, "state should be Blocked");
 
     task_terminate(task_id);
@@ -4734,8 +4671,7 @@ pub fn test_unix_socket_poll_syscall_e2e() -> TestResult {
     let task_id = create_test_user_task();
     assert_test!(task_id != INVALID_TASK_ID, "create task");
     let task_guard = assert_some!(task_find_by_id(task_id), "task ptr");
-    let task_ptr = task_guard.as_ptr();
-    let pid = task_process_id(task_ptr).unwrap_or(0);
+    let pid = task_guard.process_id;
 
     // Need a user-space page for the pollfd struct.
     let upage = match map_user_rw_page(pid) {
@@ -4986,8 +4922,7 @@ pub fn test_unix_send_wakes_blocked_poll_waiter() -> TestResult {
     let task_id = create_test_user_task();
     assert_test!(task_id != INVALID_TASK_ID, "create task");
     let task_guard = assert_some!(task_find_by_id(task_id), "task lookup failed");
-    let task_ptr = task_guard.as_ptr();
-    let pid = task_process_id(task_ptr).unwrap_or(0);
+    let pid = task_guard.process_id;
 
     let (srv_fd, cli_fd) = match unix_create_connected_pair(pid) {
         Some(pair) => pair,
@@ -5020,7 +4955,7 @@ pub fn test_unix_send_wakes_blocked_poll_waiter() -> TestResult {
     assert_eq_test!(written as usize, payload.len(), "STEP3: write");
 
     // Step 4: the registered task must now be Ready.
-    let state_after = task_status(task_ptr).unwrap_or(TaskStatus::Terminated);
+    let state_after = Some(task_guard.status()).unwrap_or(TaskStatus::Terminated);
     assert_eq_test!(state_after, TaskStatus::Ready, "STEP4: Blocked → Ready");
 
     let revents_after = file_poll_fd(pid, cli_fd, POLLIN);
@@ -5050,8 +4985,7 @@ pub fn test_poll_fused_gap_demonstrates_race() -> TestResult {
     let task_id = create_test_user_task();
     assert_test!(task_id != INVALID_TASK_ID, "create task");
     let task_guard = assert_some!(task_find_by_id(task_id), "task lookup failed");
-    let task_ptr = task_guard.as_ptr();
-    let pid = task_process_id(task_ptr).unwrap_or(0);
+    let pid = task_guard.process_id;
 
     let (srv_fd, cli_fd) = match unix_create_connected_pair(pid) {
         Some(pair) => pair,
@@ -5083,7 +5017,7 @@ pub fn test_poll_fused_gap_demonstrates_race() -> TestResult {
     let reg = slopos_fs::fileio::file_poll_register_fd(pid, cli_fd, POLLIN);
 
     // Task must STILL be Blocked — the lost-wakeup signature.
-    let state = task_status(task_ptr).unwrap_or(TaskStatus::Terminated);
+    let state = Some(task_guard.status()).unwrap_or(TaskStatus::Terminated);
     assert_eq_test!(state, TaskStatus::Blocked, "wakeup lost — still Blocked");
 
     // Cleanup: undo the manual Blocked transition before terminate.
@@ -5110,8 +5044,7 @@ pub fn test_poll_fused_register_first_catches_wakeup() -> TestResult {
     let task_id = create_test_user_task();
     assert_test!(task_id != INVALID_TASK_ID, "create task");
     let task_guard = assert_some!(task_find_by_id(task_id), "task lookup failed");
-    let task_ptr = task_guard.as_ptr();
-    let pid = task_process_id(task_ptr).unwrap_or(0);
+    let pid = task_guard.process_id;
 
     let (srv_fd, cli_fd) = match unix_create_connected_pair(pid) {
         Some(pair) => pair,
@@ -5138,7 +5071,7 @@ pub fn test_poll_fused_register_first_catches_wakeup() -> TestResult {
     assert_eq_test!(written as usize, payload.len(), "write");
 
     // Step 4: wakeup preserved — Blocked → Ready.
-    let state = task_status(task_ptr).unwrap_or(TaskStatus::Terminated);
+    let state = Some(task_guard.status()).unwrap_or(TaskStatus::Terminated);
     assert_eq_test!(state, TaskStatus::Ready, "wakeup preserved — Ready");
 
     // Step 5: readiness check sees the data.
@@ -5356,7 +5289,7 @@ pub fn test_unix_scm_rights_anc_queue_full_no_partial() -> TestResult {
 
     // One memfd fd; every queued alias clones from it.
     let (mfd_handle, mfd_ops, mfd_backing) = match slopos_mm::memfd::memfd_create(0) {
-        Some(p) => p,
+        Some(p_guard) => p_guard,
         None => return fail!("memfd_create failed"),
     };
     let mfd_fd =
@@ -5440,7 +5373,7 @@ pub fn test_unix_scm_rights_error_returns_custody() -> TestResult {
     unix_socket::unix_close(cli);
 
     let (mfd_handle, mfd_ops, mfd_backing) = match slopos_mm::memfd::memfd_create(0) {
-        Some(p) => p,
+        Some(p_guard) => p_guard,
         None => return fail!("memfd_create failed"),
     };
     let mfd_fd =
@@ -5559,45 +5492,44 @@ pub fn test_signal_post_disposition_gate() -> TestResult {
     let task_id = create_test_user_task();
     assert_test!(task_id != INVALID_TASK_ID, "failed to create user task");
     let task_guard = assert_some!(task_find_by_id(task_id), "task lookup failed");
-    let task_ptr = task_guard.as_ptr();
 
     // Fresh task: every action is SIG_DFL. A default-ignored SIGWINCH is
     // dropped at the send site — no pending bit, no wake requested.
     assert_test!(
-        !task::task_signal_post(task_ptr, SIGWINCH),
+        !task::task_signal_post(&*task_guard, SIGWINCH),
         "default-ignored SIGWINCH must be dropped at send"
     );
     assert_eq_test!(
-        task_signal_pending(task_ptr),
+        task_guard.signal_pending(),
         0,
         "dropped signal must not pend"
     );
 
     // A default-terminate signal pends and requests a wake.
     assert_test!(
-        task::task_signal_post(task_ptr, SIGTERM),
+        task::task_signal_post(&*task_guard, SIGTERM),
         "SIGTERM must pend"
     );
     assert_eq_test!(
-        task_signal_pending(task_ptr),
+        task_guard.signal_pending(),
         sig_bit(SIGTERM),
         "SIGTERM pending bit expected"
     );
-    task::task_signal_pending_store(task_ptr, 0);
+    task_guard.set_signal_pending(0);
 
     // A blocked signal pends regardless of disposition: a signalfd reader
     // or a later-installed handler may drain it after unblocking.
     task_guard.set_signal_blocked(sig_bit(SIGWINCH));
     assert_test!(
-        task::task_signal_post(task_ptr, SIGWINCH),
+        task::task_signal_post(&*task_guard, SIGWINCH),
         "blocked SIGWINCH must pend"
     );
     assert_eq_test!(
-        task_signal_pending(task_ptr),
+        task_guard.signal_pending(),
         sig_bit(SIGWINCH),
         "blocked SIGWINCH pending bit expected"
     );
-    task::task_signal_pending_store(task_ptr, 0);
+    task_guard.set_signal_pending(0);
     task_guard.set_signal_blocked(0);
 
     // A real handler overrides the default-ignore drop.
@@ -5608,10 +5540,10 @@ pub fn test_signal_post_disposition_gate() -> TestResult {
         restorer: 0x4200_0000,
     });
     assert_test!(
-        task::task_signal_post(task_ptr, SIGWINCH),
+        task::task_signal_post(&*task_guard, SIGWINCH),
         "handled SIGWINCH must pend"
     );
-    task::task_signal_pending_store(task_ptr, 0);
+    task_guard.set_signal_pending(0);
 
     // SIG_IGN drops even a default-terminate signal.
     task_guard.signal_actions[(SIGTERM - 1) as usize].store(SignalAction {
@@ -5621,11 +5553,11 @@ pub fn test_signal_post_disposition_gate() -> TestResult {
         restorer: 0,
     });
     assert_test!(
-        !task::task_signal_post(task_ptr, SIGTERM),
+        !task::task_signal_post(&*task_guard, SIGTERM),
         "SIG_IGN SIGTERM must be dropped at send"
     );
     assert_eq_test!(
-        task_signal_pending(task_ptr),
+        task_guard.signal_pending(),
         0,
         "ignored SIGTERM must not pend"
     );
@@ -5644,8 +5576,7 @@ pub fn test_kill_default_ignored_sigwinch_target_survives() -> TestResult {
     let task_id = create_test_user_task();
     assert_test!(task_id != INVALID_TASK_ID, "failed to create user task");
     let task_guard = assert_some!(task_find_by_id(task_id), "task lookup failed");
-    let task_ptr = task_guard.as_ptr();
-    let pid = task_process_id(task_ptr).unwrap_or(0);
+    let pid = task_guard.process_id;
 
     // kill() reports success even though the disposition discards the
     // signal at the send site.
@@ -5657,14 +5588,14 @@ pub fn test_kill_default_ignored_sigwinch_target_survives() -> TestResult {
     });
     assert_eq_test!(kill_frame.regs().rax, 0, "kill(SIGWINCH) must succeed");
     assert_eq_test!(
-        task_signal_pending(task_ptr),
+        task_guard.signal_pending(),
         0,
         "SIGWINCH must be dropped at the send site"
     );
 
     // Belt-and-braces: a SIGWINCH bit pended directly (bypassing the send
     // gate) must be discarded at the delivery point, never terminate.
-    let _ = task::task_signal_raise(task_ptr, sig_bit(SIGWINCH));
+    let _ = task::task_signal_raise(&*task_guard, sig_bit(SIGWINCH));
     let original_rip = 0x5000_4321u64;
     let mut user_frame: KBox<UserContext> = KBox::zeroed().expect("alloc");
     user_frame.regs_mut().rip = original_rip;
@@ -5675,11 +5606,11 @@ pub fn test_kill_default_ignored_sigwinch_target_survives() -> TestResult {
         "ignored delivery must not redirect RIP"
     );
     assert_eq_test!(
-        task_signal_pending(task_ptr),
+        task_guard.signal_pending(),
         0,
         "delivery must consume the ignored signal"
     );
-    let state = task_status(task_ptr).unwrap_or(TaskStatus::Terminated);
+    let state = Some(task_guard.status()).unwrap_or(TaskStatus::Terminated);
     assert_test!(
         state != TaskStatus::Zombie && state != TaskStatus::Terminated,
         "SIGWINCH must not terminate the target"
@@ -5719,33 +5650,29 @@ slopos_testing::stest!(
 /// user-mode boundary. What must not happen is publication — placement stays
 /// `Nascent` and no runqueue grows.
 pub fn test_kill_process_group_reaches_nascent_task_without_publishing() -> TestResult {
-    use slopos_sched::task::{task_sched_placement_load, task_signal_pending_store};
-
     let _fixture = SyscallFixture::new();
 
     let caller_id = create_test_user_task();
     assert_test!(caller_id != INVALID_TASK_ID, "failed to create caller task");
     let caller_guard = assert_some!(task_find_by_id(caller_id), "caller lookup failed");
-    let caller_ptr = caller_guard.as_ptr();
-    let caller_pid = task_process_id(caller_ptr).unwrap_or(0);
+    let caller_pid = caller_guard.process_id;
 
     // Straight out of `task_create`: registered, Blocked, Nascent.
     let target_id = create_test_kernel_task();
     assert_test!(target_id != INVALID_TASK_ID, "failed to create target task");
     let target_guard = assert_some!(task_find_by_id(target_id), "target lookup failed");
-    let target_ptr = target_guard.as_ptr();
 
     assert_eq_test!(
-        task_pgid(target_ptr),
-        Some(target_id),
+        target_guard.pgid(),
+        target_id,
         "task_create must seed pgid = task_id for the group signal to reach it"
     );
     assert_eq_test!(
-        task_sched_placement_load(target_ptr),
+        target_guard.sched_placement(),
         SchedPlacement::Nascent,
         "a freshly created task must still be Nascent"
     );
-    task_signal_pending_store(target_ptr, 0);
+    target_guard.set_signal_pending(0);
 
     let cpu_id = slopos_arch::pcr::get_current_cpu();
     let ready_before =
@@ -5765,11 +5692,11 @@ pub fn test_kill_process_group_reaches_nascent_task_without_publishing() -> Test
         "kill(-pgid) must succeed for a task that exists, nascent or not"
     );
     assert_test!(
-        (task_signal_pending(target_ptr) & sig_bit(SIGUSR1)) != 0,
+        (target_guard.signal_pending() & sig_bit(SIGUSR1)) != 0,
         "the signal must pend on the nascent target"
     );
     assert_eq_test!(
-        task_sched_placement_load(target_ptr),
+        target_guard.sched_placement(),
         SchedPlacement::Nascent,
         "the kill published a half-built task"
     );
@@ -5801,7 +5728,6 @@ pub fn test_fork_child_inherits_and_then_diverges_from_parent_cwd() -> TestResul
     let parent_id = create_test_user_task();
     assert_test!(parent_id != INVALID_TASK_ID, "failed to create parent task");
     let parent_guard = assert_some!(task_find_by_id(parent_id), "parent lookup failed");
-    let _parent_ptr = parent_guard.as_ptr();
 
     // Give the parent a non-default cwd before the fork.
     make_task_current(parent_id);
@@ -5867,8 +5793,7 @@ pub fn test_rt_sigaction_round_trips_every_field() -> TestResult {
     let task_id = create_test_user_task();
     assert_test!(task_id != INVALID_TASK_ID, "failed to create user task");
     let task_guard = assert_some!(task_find_by_id(task_id), "task lookup failed");
-    let task_ptr = task_guard.as_ptr();
-    let pid = task_process_id(task_ptr).unwrap_or(0);
+    let pid = task_guard.process_id;
 
     let page = match map_user_rw_page(pid) {
         Some(v) => v,
