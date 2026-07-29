@@ -545,8 +545,8 @@ fn switch_from_current_to_idle(cpu_id: usize, current: Option<&Task>, idle_task:
     // publishing the incoming task also swaps the SafeStack data stack, and
     // the window's own frame has to be allocated before that happens.
     slopos_ostd::task::run_switch(
-        current.map_or(core::ptr::null_mut(), |t| core::ptr::from_ref(t).cast_mut()),
-        core::ptr::from_ref(idle_task).cast_mut(),
+        current,
+        idle_task,
         || {
             dispatch(cpu_id, idle_task);
             slopos_ostd::sync::rcu_note_qs();
@@ -1171,8 +1171,8 @@ fn execute_task(cpu_id: usize, from_task: Option<&Task>, to_task: &Task) {
     // publishing the incoming task also swaps the SafeStack data stack, and
     // the window's own frame has to be allocated before that happens.
     slopos_ostd::task::run_switch(
-        from_task.map_or(core::ptr::null_mut(), |t| core::ptr::from_ref(t).cast_mut()),
-        core::ptr::from_ref(to_task).cast_mut(),
+        from_task,
+        to_task,
         || {
             // Single source-of-truth install: writes PCR.current_task
             // (SafeStack slot), PCR.syscall_pid, task.state = Running, and

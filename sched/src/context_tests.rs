@@ -593,6 +593,7 @@ pub fn test_fpu_per_task_slot_isolation() -> TestResult {
 pub fn test_fpu_switch_saves_prev_and_restores_next() -> TestResult {
     use slopos_ostd::task::SchedPlacement;
     use slopos_ostd::task::accessors::task_sched_placement_store;
+    use slopos_ostd::task::fpu_current_cpu;
     use slopos_ostd::test_support::cpu_state as cpu;
 
     let _fixture = ContextFixture::new();
@@ -617,7 +618,6 @@ pub fn test_fpu_switch_saves_prev_and_restores_next() -> TestResult {
     }
     task_sched_placement_store(next_guard.as_ptr(), SchedPlacement::OnCpu);
     let cpu_id = slopos_arch::pcr::get_current_cpu();
-    let next_ptr = next_guard.as_ptr();
 
     let xcr0 = slopos_ostd::cpu::x86_64::xsave::active_xcr0();
     let mut prev: KBox<Task> = KBox::try_init(Task::init_invalid()).expect("alloc");
@@ -627,7 +627,7 @@ pub fn test_fpu_switch_saves_prev_and_restores_next() -> TestResult {
     let (live_after_switch, prev_slot, published) =
         slopos_ostd::cpu::x86_64::interrupts::IrqDisabled::with(|_irq| {
             let saved = snapshot_live_fpu(xcr0);
-            let prev_ptr: *mut Task = &mut *prev as *mut Task;
+            let prev_ref: &Task = &prev;
             let mut published = false;
 
             // `run_switch` is the only way to obtain a `SwitchWindow`. The
@@ -636,8 +636,8 @@ pub fn test_fpu_switch_saves_prev_and_restores_next() -> TestResult {
             // naming `next`, so the outgoing task's registers are saved through
             // a witness `CurrentTask` could no longer supply.
             slopos_ostd::task::run_switch(
-                prev_ptr,
-                next_ptr,
+                Some(prev_ref),
+                &next_guard,
                 || {
                     published = crate::scheduler::dispatch_task_for_test(cpu_id, next_id);
 
@@ -651,7 +651,19 @@ pub fn test_fpu_switch_saves_prev_and_restores_next() -> TestResult {
                     // Hand the outgoing task the register file (see the module
                     // note on why), then make pattern "prev" the live state it
                     // is switched out with.
-                    prev.fpu_restore_to_cpu_mut(xcr0);
+                    //
+                    // The owner tag is taken directly rather than as a
+                    // side-effect of a restore, and that is the stronger
+                    // version, not a workaround for the shared borrow this
+                    // closure holds. An `XRSTOR` here would load a slot that
+                    // the `xmm_load_4` on the next line immediately overwrites,
+                    // so only the tag survives it — and the tag is what the
+                    // test needs: without it `prev.fpu_last_cpu()` stays
+                    // `FPU_CPU_NONE`, `fpu_owner_assert_may_take` inside the
+                    // `fpu_save_current` below takes its never-restored
+                    // exemption, and the assertion this test exists for is
+                    // skipped rather than exercised.
+                    slopos_ostd::task::fpu_owner_take(prev_ref, fpu_current_cpu());
                     cpu::xmm_load_4(&pat_prev);
                 },
                 |prev_window, next_window| {

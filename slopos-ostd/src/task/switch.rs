@@ -256,12 +256,21 @@ fn current_data_stack_slot() -> *const u8 {
 /// a witness it could not have forged. It is the *only* place a `SwitchWindow`
 /// is constructed in the kernel.
 ///
-/// Takes raw pointers rather than references because the scheduler holds
-/// `*mut Task`; forming the borrows at the call site would mean another
-/// unconstrained-lifetime helper, which is what this migration removes. The
-/// borrows live inside, bounded by the closure. `prev` may be null for the
-/// first switch out of the boot context. Returns `None` if `next` is null, in
-/// which case `publish` never runs.
+/// `prev` is `None` for the first switch out of the boot context.
+///
+/// # Every borrow the switch needs is established before this call
+///
+/// `publish` and `prepare` capture already-formed references. Neither may mint
+/// a guard, form a new task borrow, or create any other address-taken local:
+/// `prepare` straddles the register switch, so a frame it opened would take
+/// its SafeStack reservation from the incoming task's data stack and release
+/// it against the outgoing task's — the corruption described below, one frame
+/// lower. Taking `prev` and `next` as references rather than pointers enforces
+/// that for the endpoints, because the borrows have to exist at the call.
+///
+/// `CurrentTask::get` in particular must not be called inside or after
+/// `publish`: by then the PCR names the *incoming* task, so the guard would be
+/// a correct guard over the wrong task.
 ///
 /// # Why the publication is an argument
 ///
@@ -305,18 +314,15 @@ fn current_data_stack_slot() -> *const u8 {
 /// CPU's current task.
 #[inline]
 pub fn run_switch<K, U, R>(
-    prev: *mut TaskInner<K, U>,
-    next: *mut TaskInner<K, U>,
+    prev: Option<&TaskInner<K, U>>,
+    next: &TaskInner<K, U>,
     publish: impl FnOnce(),
     prepare: impl FnOnce(Option<&SwitchWindow<'_, K, U>>, &SwitchWindow<'_, K, U>) -> R,
-) -> Option<R> {
+) -> R {
     assert!(
         !crate::cpu::x86_64::interrupts::are_interrupts_enabled(),
         "run_switch called with interrupts enabled"
     );
-    if next.is_null() {
-        return None;
-    }
     // The data stack this frame allocated from must not already be the
     // incoming task's — see the ordering rationale above. Always-on, because
     // the failure it guards is silent cross-task memory corruption whose
@@ -324,25 +330,23 @@ pub fn run_switch<K, U, R>(
     assert!(
         !core::ptr::eq(
             current_data_stack_slot(),
-            next.cast::<u8>()
-                .cast_const()
+            core::ptr::from_ref(next)
+                .cast::<u8>()
                 .wrapping_add(TASK_UNSAFE_STACK_SP_OFFSET),
         ),
         "run_switch entered with the incoming task already published: its \
          SafeStack frame would be released against the wrong task"
     );
-    // SAFETY: `next` is non-null and dispatch-pinned by the caller's dispatch
-    // reference for the whole call — the ready queue hands that reference to
-    // the dispatcher, and a CPU's idle task is pinned by its PCR slot. The
-    // publication below adds `task_is_dispatch_pinned`'s second disjunct
-    // ("some CPU names this task as its current") on top of it; the reference
-    // the caller already holds is what covers the span before that.
-    let next_ref = unsafe { &*next };
     // SAFETY: this CPU is performing the switch (it is the one running this
-    // code with interrupts disabled, asserted above), it holds both endpoints'
-    // dispatch references for the whole call, and the IRQs-off state means the
-    // window cannot be re-entered on this CPU.
-    let next_window = unsafe { SwitchWindow::new(next_ref) };
+    // code with interrupts disabled, asserted above), and the IRQs-off state
+    // means the window cannot be re-entered on this CPU. The dispatch-reference
+    // half holds for both endpoints and by different routes: the ready queue
+    // hands the dispatcher its reference on the incoming task, and a CPU's idle
+    // task is pinned by `task_is_dispatch_pinned`'s idle disjunct — which is
+    // the fact that makes "pinned by its PCR slot" checkable rather than
+    // asserted here. The publication below adds the current-task disjunct on
+    // top for the incoming endpoint.
+    let next_window = unsafe { SwitchWindow::new(next) };
 
     publish();
 
@@ -356,18 +360,18 @@ pub fn run_switch<K, U, R>(
             pcr::get_current_task()
                 .cast::<TaskInner<K, U>>()
                 .cast_const(),
-            next.cast_const(),
+            core::ptr::from_ref(next),
         ),
         "run_switch: publish did not install the incoming task as current"
     );
 
-    if prev.is_null() {
-        return Some(prepare(None, &next_window));
-    }
+    let Some(prev) = prev else {
+        return prepare(None, &next_window);
+    };
     // SAFETY: as above, for the outgoing endpoint. The dispatcher holds its
     // dispatch reference until the switch tail parks it.
-    let prev_window = unsafe { SwitchWindow::new(&*prev) };
-    Some(prepare(Some(&prev_window), &next_window))
+    let prev_window = unsafe { SwitchWindow::new(prev) };
+    prepare(Some(&prev_window), &next_window)
 }
 
 /// Initialise context from current CPU state (for boot/kernel context).
