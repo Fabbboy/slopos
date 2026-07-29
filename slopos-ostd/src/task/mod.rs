@@ -21,6 +21,7 @@ pub mod job_control;
 pub mod kernel_task;
 pub mod link_roles;
 pub mod ops;
+pub mod pcr_ty;
 pub mod placement;
 pub mod spawner;
 pub mod state;
@@ -36,6 +37,9 @@ pub use exit_info::ExitInfo;
 pub use job_control::{ProcessGroup, Session, new_group_in_session, new_session_group};
 pub use kernel_task::SchedPlacement;
 pub use link_roles::{ReadyQueueRole, RemoteWakeRole, SiblingRole};
+#[cfg(any(test, feature = "test-helpers"))]
+pub use pcr_ty::HostStack;
+pub use pcr_ty::{PcrStackTy, PcrTaskType};
 pub use placement::{
     ParkedTask, parked_task_has_exited, reverse_detached_chain, task_destroy_parked,
     task_existence_is_parked, task_existence_park, task_existence_parked_count,
