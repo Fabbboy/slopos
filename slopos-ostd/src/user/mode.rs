@@ -300,14 +300,54 @@ fn current_user_mode_backend() -> &'static dyn UserModeBackend {
 // which lands in `execute_round_trip`'s tail and lets it return
 // normally.
 //
-// The asm body lives in `asm/user_return.s` (AT&T syntax) and is
-// included verbatim here.  Field offsets used by the asm are mirrored
-// from `pcr.rs` and `context.rs` and pinned by the `const _: () =
-// assert!(...)` razors in those files.
+// The asm body lives in `asm/user_return.s` (AT&T syntax). Every field
+// offset it uses arrives as a `const offset_of!` operand below, so the
+// asm reads whatever the Rust structs lay out and there is no mirror to
+// drift.
 // =============================================================================
 
 #[cfg(all(target_arch = "x86_64", not(test)))]
-core::arch::global_asm!(include_str!("asm/user_return.s"), options(att_syntax),);
+core::arch::global_asm!(
+    include_str!("asm/user_return.s"),
+    pcr_user_rsp_tmp = const core::mem::offset_of!(
+        crate::cpu::x86_64::pcr::ProcessorControlRegion, user_rsp_tmp),
+    pcr_kernel_rsp = const core::mem::offset_of!(
+        crate::cpu::x86_64::pcr::ProcessorControlRegion, kernel_rsp),
+    pcr_user_ctx_ptr = const core::mem::offset_of!(
+        crate::cpu::x86_64::pcr::ProcessorControlRegion, user_ctx_ptr),
+    pcr_kernel_return_ctx = const core::mem::offset_of!(
+        crate::cpu::x86_64::pcr::ProcessorControlRegion, kernel_return_ctx),
+    pcr_user_rax_tmp = const core::mem::offset_of!(
+        crate::cpu::x86_64::pcr::ProcessorControlRegion, user_rax_tmp),
+    krc_rbx = const core::mem::offset_of!(crate::cpu::x86_64::pcr::KernelReturnContext, rbx),
+    krc_rbp = const core::mem::offset_of!(crate::cpu::x86_64::pcr::KernelReturnContext, rbp),
+    krc_r12 = const core::mem::offset_of!(crate::cpu::x86_64::pcr::KernelReturnContext, r12),
+    krc_r13 = const core::mem::offset_of!(crate::cpu::x86_64::pcr::KernelReturnContext, r13),
+    krc_r14 = const core::mem::offset_of!(crate::cpu::x86_64::pcr::KernelReturnContext, r14),
+    krc_r15 = const core::mem::offset_of!(crate::cpu::x86_64::pcr::KernelReturnContext, r15),
+    krc_rsp = const core::mem::offset_of!(crate::cpu::x86_64::pcr::KernelReturnContext, rsp),
+    krc_rip = const core::mem::offset_of!(crate::cpu::x86_64::pcr::KernelReturnContext, rip),
+    ur_rax = const core::mem::offset_of!(UserRegs, rax),
+    ur_rbx = const core::mem::offset_of!(UserRegs, rbx),
+    ur_rcx = const core::mem::offset_of!(UserRegs, rcx),
+    ur_rdx = const core::mem::offset_of!(UserRegs, rdx),
+    ur_rsi = const core::mem::offset_of!(UserRegs, rsi),
+    ur_rdi = const core::mem::offset_of!(UserRegs, rdi),
+    ur_rbp = const core::mem::offset_of!(UserRegs, rbp),
+    ur_rsp = const core::mem::offset_of!(UserRegs, rsp),
+    ur_r8 = const core::mem::offset_of!(UserRegs, r8),
+    ur_r9 = const core::mem::offset_of!(UserRegs, r9),
+    ur_r10 = const core::mem::offset_of!(UserRegs, r10),
+    ur_r11 = const core::mem::offset_of!(UserRegs, r11),
+    ur_r12 = const core::mem::offset_of!(UserRegs, r12),
+    ur_r13 = const core::mem::offset_of!(UserRegs, r13),
+    ur_r14 = const core::mem::offset_of!(UserRegs, r14),
+    ur_r15 = const core::mem::offset_of!(UserRegs, r15),
+    ur_rip = const core::mem::offset_of!(UserRegs, rip),
+    ur_rflags = const core::mem::offset_of!(UserRegs, rflags_user_subset),
+    sel_kernel_data = const crate::arch::x86_64::gdt::SegmentSelector::KERNEL_DATA.0,
+    options(att_syntax),
+);
 
 // On host-side `cargo test -p slopos-ostd` runs we still need the
 // `__ostd_user_return` symbol so `user_return_trampoline_addr()` is

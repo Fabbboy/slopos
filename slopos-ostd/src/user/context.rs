@@ -88,17 +88,13 @@ pub struct UserRegs {
     pub _pad: [u16; 3],
 }
 
-// SAFETY (Inv. 2): `UserRegs` is consumed by `__ostd_user_return`'s
-// inline asm at fixed byte offsets. These compile-time asserts pin the
-// layout so a future field reorder fails to build rather than silently
-// scrambling user state on the next user-mode round trip.
-//
-// Every offset `asm/user_return.s` names as a `UR_*` displacement is
-// here, including the fourteen general-purpose registers between `rax`
-// and `rip`: that file mirrors them by hand, so an unasserted one lets
-// a field swap write user RBX into the RCX slot with every other razor
-// still passing. `user_mode_round_trip_asm` feeds `offset_of!` straight
-// into its operands and needs no razor of its own.
+// This layout is the user-mode register ABI. Both asm halves of the
+// round trip derive their displacements from it with `offset_of!`, so a
+// field reorder would move them in lockstep rather than scramble user
+// state — but the numbers are the contract, and anything reading a
+// `UserRegs` without going through `offset_of!` (a debugger, a core
+// dump, a future consumer) reads them. These asserts are what makes a
+// reorder a build failure instead of a silent ABI break.
 const _: () = {
     use core::mem::offset_of;
     assert!(offset_of!(UserRegs, rax) == 0);
