@@ -413,7 +413,7 @@ define_syscall!(syscall_exec
             // Build the new user-mode entry register snapshot, then commit
             // through `set_regs` so CS/SS/RFLAGS sandbox bits are reapplied.
             let uc = ctx.user_ctx_mut();
-            let mut regs = *uc.regs();
+            let mut regs = uc.regs();
             regs.rip = entry_point;
             regs.rsp = stack_ptr;
             regs.rax = 0;

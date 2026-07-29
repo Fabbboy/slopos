@@ -1339,14 +1339,14 @@ pub fn task_fork(
         slopos_ostd::user::context::UserContext,
     >(&ctx_anchor, parent_user_ctx);
     if let Some(parent_ctx) = parent_ctx_opt {
-        let mut regs = *parent_ctx.regs();
+        let mut regs = parent_ctx.regs();
         regs.rax = 0;
         child.user_ctx.get_mut().set_regs(regs);
     } else {
         // No parent UserContext available — `clone_from_raw` already
         // copied the parent's `user_ctx` into the child; force rax to
         // 0 through `set_regs` so CS/SS/RFLAGS-mask invariants hold.
-        let mut regs = *child.user_ctx.get_mut().regs();
+        let mut regs = child.user_ctx.get_mut().regs();
         regs.rax = 0;
         child.user_ctx.get_mut().set_regs(regs);
     }
@@ -1557,8 +1557,8 @@ pub fn task_clone(
             slopos_ostd::user::context::UserContext,
         >(&ctx_anchor, parent_user_ctx);
         let mut regs = match parent_ctx_opt {
-            Some(parent_ctx) => *parent_ctx.regs(),
-            None => *child.user_ctx.get_mut().regs(),
+            Some(parent_ctx) => parent_ctx.regs(),
+            None => child.user_ctx.get_mut().regs(),
         };
         regs.rax = 0;
         if child_stack != 0 {

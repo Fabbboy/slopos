@@ -17,7 +17,7 @@ pub fn syscall_handle(ctx_ptr: *mut UserContext) {
         return;
     };
 
-    let sysno = user_ctx.regs().rax;
+    let sysno = user_ctx.rax();
 
     // The task running this syscall is this CPU's current, by definition of how
     // we got here. The guard is taken once for the whole exit path: the restart
@@ -93,7 +93,7 @@ fn handle_erestartsys(task_ref: &Task, ctx_ptr: *mut UserContext, sysno: u64) {
     let Some(user_ctx) = UserContext::from_ptr_mut(ctx_ptr) else {
         return;
     };
-    let result = user_ctx.regs().rax;
+    let result = user_ctx.rax();
     if result != ERRNO_ERESTARTSYS {
         return;
     }
@@ -124,7 +124,7 @@ fn handle_erestartsys(task_ref: &Task, ctx_ptr: *mut UserContext, sysno: u64) {
     };
 
     if should_restart {
-        let mut regs = *user_ctx.regs();
+        let mut regs = user_ctx.regs();
         regs.rip = regs.rip.wrapping_sub(SYSCALL_INSN_SIZE);
         regs.rax = sysno;
         user_ctx.set_regs(regs);
@@ -140,7 +140,7 @@ fn debug_assert_erestartsys_not_leaked(ctx_ptr: *mut UserContext) {
     let Some(user_ctx) = UserContext::from_ptr_mut(ctx_ptr) else {
         return;
     };
-    let rax = user_ctx.regs().rax;
+    let rax = user_ctx.rax();
     if rax == ERRNO_ERESTARTSYS {
         user_ctx.set_rax(Errno::EINTR.as_u64());
     }

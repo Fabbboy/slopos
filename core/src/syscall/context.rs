@@ -79,17 +79,14 @@ impl<'a> SyscallContext<'a> {
 
     #[inline]
     fn new(task: &'a Task, task_id: u32, ctx: &mut UserContext) -> Self {
-        // Snapshot the argument registers before taking the pointer: `regs()`
-        // borrows `ctx`, and `from_mut` needs it back.
-        let regs = {
-            let r = ctx.regs();
-            [r.rdi, r.rsi, r.rdx, r.r10, r.r8, r.r9]
-        };
+        // Snapshot the argument registers once: a handler reads them
+        // through `SyscallArg::from_raw` long after the user context may
+        // have been rewritten by signal delivery or a restart decision.
         Self {
             task,
             task_id,
+            regs: ctx.syscall_args(),
             user_ctx_ptr: core::ptr::from_mut(ctx),
-            regs,
         }
     }
 

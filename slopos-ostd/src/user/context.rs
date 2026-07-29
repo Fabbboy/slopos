@@ -16,6 +16,8 @@
 //! [`crate::user::ptr::UserSlice`], enforcing Inv. 5 (no
 //! kernel-half address ever enters the kernel as a user pointer).
 
+use core::cell::SyncUnsafeCell;
+
 use crate::mm::Pod;
 use crate::user::ptr::{UserBytes, UserPtr, UserPtrError, UserSlice};
 
@@ -49,6 +51,14 @@ pub const USER_RFLAGS_PERMITTED: u64 = (1 << 0)
 /// - bit 1  reserved-MBO
 /// - bit 9  IF       — user must run with interrupts enabled
 pub const USER_RFLAGS_FORCED: u64 = (1 << 1) | (1 << 9);
+
+/// Drop every RFLAGS bit userland must not influence and force the
+/// ones it must not clear. Every write of `rflags_user_subset` goes
+/// through this.
+#[inline]
+const fn sanitize_user_rflags(value: u64) -> u64 {
+    (value & USER_RFLAGS_PERMITTED) | USER_RFLAGS_FORCED
+}
 
 #[derive(Clone, Copy, Debug, Default)]
 #[repr(C)]
@@ -166,12 +176,16 @@ pub struct FpuStateRef {
     len: usize,
 }
 
-// SAFETY: `FpuStateRef` carries a raw pointer + length pair. The
-// borrow tracking happens at the OSTD-internal call sites (the task
-// owns the buffer, and `UserMode<'a>` holds a `&'a mut UserContext`
-// which transitively pins the FpuStateRef for the duration of
-// `execute`). Sending a `UserContext` between threads is fine because
-// the buffer it points at is owned by the task it represents.
+// SAFETY: `FpuStateRef` is a raw pointer + length pair naming a task's
+// own XSAVE area, and `Send`/`Sync` claim only that the pair is
+// meaningful on any CPU — the buffer is task memory, not CPU-local.
+// Neither carries an aliasing promise; exclusivity over an FPU area is
+// arranged by the `TaskExclusive` witness every `Task::fpu_*` accessor
+// demands, so an `FpuStateRef` riding inside a `UserContext` grants no
+// access its holder did not already have. The pair's only producer is
+// the `unsafe` `from_raw`, whose contract names the buffer and requires
+// it to outlive every `UserContext` built for that task. `from_raw` has
+// no caller today, so every `FpuStateRef` in the kernel is `empty()`.
 unsafe impl Send for FpuStateRef {}
 unsafe impl Sync for FpuStateRef {}
 
@@ -224,11 +238,44 @@ impl core::fmt::Debug for FpuStateRef {
     }
 }
 
-#[derive(Clone, Debug)]
+/// A task's user-mode register file plus a handle to its XSAVE area.
+///
+/// # Who may write it
+///
+/// The register file sits in a cell, so writes go through `&self` and
+/// the type arranges no exclusivity — the round-trip protocol does.
+/// `UserContext` is `Send + Sync` (a task's context travels with the
+/// task across CPUs), so this is a contract rather than a bound.
+///
+/// There are exactly two writers, and they cannot overlap:
+///
+/// 1. `__ostd_user_return`, on the task's own CPU, between the SYSCALL
+///    that left user mode and the jump back into the round trip. IRQs
+///    are off for that whole window — `SFMASK` clears IF on entry and
+///    the `sti` is the last instruction before the jump — and the task
+///    cannot be running anywhere else, because it is running here.
+/// 2. Kernel code acting for that task — the syscall dispatcher, signal
+///    delivery, `exec`, the fork and clone builders reading a parent —
+///    after the trampoline returned and before the next
+///    [`crate::user::mode::UserMode::execute`] republishes
+///    `pcr.user_ctx_ptr`.
+///
+/// There is no third: the only route to another task's context is
+/// [`crate::task::Task::user_ctx`], which demands a `TaskExclusive`
+/// witness, and that witness is `!Send`, `!Sync`, and names one task.
 #[repr(C)]
 pub struct UserContext {
-    regs: UserRegs,
+    regs: SyncUnsafeCell<UserRegs>,
     fpu_state: FpuStateRef,
+}
+
+impl core::fmt::Debug for UserContext {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("UserContext")
+            .field("regs", &self.regs())
+            .field("fpu_state", &self.fpu_state)
+            .finish()
+    }
 }
 
 // `__ostd_user_return` loads a `*mut UserContext` out of the PCR and
@@ -237,10 +284,12 @@ pub struct UserContext {
 const _: () = assert!(core::mem::offset_of!(UserContext, regs) == 0);
 
 // SAFETY: every field of `UserContext` is `Zeroable`
-// (`UserRegs` and `FpuStateRef` impls above). The all-zero
-// bit pattern is identical to what `UserContext::const_zeroed()`
-// produces. `#[repr(C)]` pins the layout so the impl stays
-// well-formed under field reorder.
+// (`UserRegs` and `FpuStateRef` impls above). `SyncUnsafeCell<T>` is
+// `#[repr(transparent)]` over `UnsafeCell<T>` over `T`, so wrapping
+// `UserRegs` in one leaves its bit patterns untouched and the all-zero
+// one is still what `UserContext::const_zeroed()` produces.
+// `#[repr(C)]` pins the layout so the impl stays well-formed under
+// field reorder.
 unsafe impl crate::mm::init::Zeroable for UserContext {}
 
 impl UserContext {
@@ -252,7 +301,7 @@ impl UserContext {
     /// the context is consumed by [`crate::user::mode::UserMode`].
     pub const fn const_zeroed() -> Self {
         Self {
-            regs: UserRegs::const_zeroed(),
+            regs: SyncUnsafeCell::new(UserRegs::const_zeroed()),
             fpu_state: FpuStateRef::empty(),
         }
     }
@@ -303,15 +352,24 @@ impl UserContext {
         regs.cs = USER_CODE_SELECTOR;
         regs.ss = USER_DATA_SELECTOR;
         regs._pad = [0; 3];
-        let mut ctx = Self { regs, fpu_state };
-        let raw_rflags = ctx.regs.rflags_user_subset;
-        ctx.set_rflags(raw_rflags);
-        ctx
+        regs.rflags_user_subset = sanitize_user_rflags(regs.rflags_user_subset);
+        Self {
+            regs: SyncUnsafeCell::new(regs),
+            fpu_state,
+        }
     }
 
+    /// Snapshot the register file.
+    ///
+    /// By value, not by reference: the file is written through `&self`,
+    /// so a `&UserRegs` handed out here would be a shared borrow of
+    /// memory the next setter mutates.
     #[inline]
-    pub fn regs(&self) -> &UserRegs {
-        &self.regs
+    pub fn regs(&self) -> UserRegs {
+        // SAFETY: the cell's contents are a plain `UserRegs`, always
+        // initialised, and the write contract on this type keeps the
+        // two writers from overlapping this read.
+        unsafe { *self.regs.get() }
     }
 
     /// Raw pointer to the embedded `UserRegs`.  Used by the kernel→user
@@ -321,17 +379,11 @@ impl UserContext {
     /// instead.
     #[inline]
     pub fn regs_ptr(&self) -> *const UserRegs {
-        &self.regs as *const UserRegs
+        self.regs.get().cast_const()
     }
 
-    /// Mutable raw pointer to the embedded `UserRegs`.  Same caveat as
-    /// [`Self::regs_ptr`].
-    #[inline]
-    pub fn regs_mut_ptr(&mut self) -> *mut UserRegs {
-        &mut self.regs as *mut UserRegs
-    }
-
-    /// Direct mutable view of the embedded GPR snapshot.
+    /// Direct mutable view of the embedded GPR snapshot, proven by
+    /// `&mut self` rather than by the write contract.
     ///
     /// **Mask discipline is on the caller**: writes to
     /// `rflags_user_subset` through this reference bypass
@@ -346,21 +398,21 @@ impl UserContext {
     /// handler).
     #[inline]
     pub fn regs_mut(&mut self) -> &mut UserRegs {
-        &mut self.regs
+        self.regs.get_mut()
     }
 
     /// Replace the entire register snapshot. `cs` / `ss` from `regs`
     /// are ignored — the OSTD selectors are re-applied. `rflags` is
-    /// re-masked through [`Self::set_rflags`] so a caller cannot
-    /// bypass the sensitive-bits filter by writing the snapshot
-    /// directly.
-    pub fn set_regs(&mut self, mut regs: UserRegs) {
+    /// masked so a caller cannot bypass the sensitive-bits filter by
+    /// writing the snapshot directly. Sanitised before the store, so an
+    /// unmasked value is never briefly live in the cell.
+    pub fn set_regs(&self, mut regs: UserRegs) {
         regs.cs = USER_CODE_SELECTOR;
         regs.ss = USER_DATA_SELECTOR;
         regs._pad = [0; 3];
-        let raw_rflags = regs.rflags_user_subset;
-        self.regs = regs;
-        self.set_rflags(raw_rflags);
+        regs.rflags_user_subset = sanitize_user_rflags(regs.rflags_user_subset);
+        // SAFETY: see the write contract on `UserContext`.
+        unsafe { *self.regs.get() = regs };
     }
 
     #[inline]
@@ -369,48 +421,82 @@ impl UserContext {
     }
 
     #[inline]
+    pub fn rax(&self) -> u64 {
+        // SAFETY: see the write contract on `UserContext`. A raw place
+        // read, so no reference into the cell is formed.
+        unsafe { (*self.regs.get()).rax }
+    }
+
+    #[inline]
+    pub fn set_rax(&self, rax: u64) {
+        // SAFETY: see the write contract on `UserContext`.
+        unsafe { (*self.regs.get()).rax = rax };
+    }
+
+    /// The six syscall argument registers in ABI order:
+    /// `rdi`, `rsi`, `rdx`, `r10`, `r8`, `r9`.
+    #[inline]
+    pub fn syscall_args(&self) -> [u64; 6] {
+        let regs = self.regs.get();
+        // SAFETY: see the write contract on `UserContext`.
+        unsafe {
+            [
+                (*regs).rdi,
+                (*regs).rsi,
+                (*regs).rdx,
+                (*regs).r10,
+                (*regs).r8,
+                (*regs).r9,
+            ]
+        }
+    }
+
+    #[inline]
     pub fn rip(&self) -> u64 {
-        self.regs.rip
+        // SAFETY: see the write contract on `UserContext`.
+        unsafe { (*self.regs.get()).rip }
     }
 
     #[inline]
-    pub fn set_rip(&mut self, rip: u64) {
-        self.regs.rip = rip;
-    }
-
-    #[inline]
-    pub fn set_rax(&mut self, rax: u64) {
-        self.regs.rax = rax;
+    pub fn set_rip(&self, rip: u64) {
+        // SAFETY: see the write contract on `UserContext`.
+        unsafe { (*self.regs.get()).rip = rip };
     }
 
     #[inline]
     pub fn rsp(&self) -> u64 {
-        self.regs.rsp
+        // SAFETY: see the write contract on `UserContext`.
+        unsafe { (*self.regs.get()).rsp }
     }
 
     #[inline]
-    pub fn set_rsp(&mut self, rsp: u64) {
-        self.regs.rsp = rsp;
+    pub fn set_rsp(&self, rsp: u64) {
+        // SAFETY: see the write contract on `UserContext`.
+        unsafe { (*self.regs.get()).rsp = rsp };
     }
 
     #[inline]
     pub fn fs_base(&self) -> u64 {
-        self.regs.fs_base
+        // SAFETY: see the write contract on `UserContext`.
+        unsafe { (*self.regs.get()).fs_base }
     }
 
     #[inline]
-    pub fn set_fs_base(&mut self, fs_base: u64) {
-        self.regs.fs_base = fs_base;
+    pub fn set_fs_base(&self, fs_base: u64) {
+        // SAFETY: see the write contract on `UserContext`.
+        unsafe { (*self.regs.get()).fs_base = fs_base };
     }
 
     #[inline]
     pub fn gs_base(&self) -> u64 {
-        self.regs.gs_base
+        // SAFETY: see the write contract on `UserContext`.
+        unsafe { (*self.regs.get()).gs_base }
     }
 
     #[inline]
-    pub fn set_gs_base(&mut self, gs_base: u64) {
-        self.regs.gs_base = gs_base;
+    pub fn set_gs_base(&self, gs_base: u64) {
+        // SAFETY: see the write contract on `UserContext`.
+        unsafe { (*self.regs.get()).gs_base = gs_base };
     }
 
     /// Write user-mode RFLAGS, masking every sensitive bit.
@@ -421,14 +507,16 @@ impl UserContext {
     /// active for kernel-mode code that runs after the next IRETQ,
     /// VM/NT/RF/VIF/VIP cleared closes the corresponding x86 escape
     /// hatches.
-    pub fn set_rflags(&mut self, value: u64) {
-        self.regs.rflags_user_subset = (value & USER_RFLAGS_PERMITTED) | USER_RFLAGS_FORCED;
+    pub fn set_rflags(&self, value: u64) {
+        // SAFETY: see the write contract on `UserContext`.
+        unsafe { (*self.regs.get()).rflags_user_subset = sanitize_user_rflags(value) };
     }
 
     /// Read the masked RFLAGS value as it will be loaded by IRETQ.
     #[inline]
     pub fn rflags(&self) -> u64 {
-        self.regs.rflags_user_subset
+        // SAFETY: see the write contract on `UserContext`.
+        unsafe { (*self.regs.get()).rflags_user_subset }
     }
 
     /// Read the raw value of a syscall argument register. Indices map
@@ -436,12 +524,7 @@ impl UserContext {
     /// `2 → rdx`, `3 → r10`, `4 → r8`, `5 → r9`.
     pub fn syscall_arg(&self, reg_index: usize) -> u64 {
         match reg_index {
-            0 => self.regs.rdi,
-            1 => self.regs.rsi,
-            2 => self.regs.rdx,
-            3 => self.regs.r10,
-            4 => self.regs.r8,
-            5 => self.regs.r9,
+            0..=5 => self.syscall_args()[reg_index],
             _ => panic!("UserContext::syscall_arg: reg_index {reg_index} out of range"),
         }
     }
@@ -499,7 +582,7 @@ mod tests {
 
     #[test]
     fn set_rflags_forces_if_and_mbo() {
-        let mut ctx = ctx_with_rflags(0);
+        let ctx = ctx_with_rflags(0);
         ctx.set_rflags(0);
         let f = ctx.rflags();
         assert!(f & (1 << 9) != 0, "IF must be forced on");
@@ -508,35 +591,35 @@ mod tests {
 
     #[test]
     fn set_rflags_clears_iopl() {
-        let mut ctx = ctx_with_rflags(0);
+        let ctx = ctx_with_rflags(0);
         ctx.set_rflags(0x3000); // IOPL = 3
         assert_eq!(ctx.rflags() & 0x3000, 0);
     }
 
     #[test]
     fn set_rflags_clears_ac() {
-        let mut ctx = ctx_with_rflags(0);
+        let ctx = ctx_with_rflags(0);
         ctx.set_rflags(1 << 18);
         assert_eq!(ctx.rflags() & (1 << 18), 0);
     }
 
     #[test]
     fn set_rflags_clears_nt_and_vm() {
-        let mut ctx = ctx_with_rflags(0);
+        let ctx = ctx_with_rflags(0);
         ctx.set_rflags((1 << 14) | (1 << 17));
         assert_eq!(ctx.rflags() & ((1 << 14) | (1 << 17)), 0);
     }
 
     #[test]
     fn set_rflags_clears_vif_vip_and_rf() {
-        let mut ctx = ctx_with_rflags(0);
+        let ctx = ctx_with_rflags(0);
         ctx.set_rflags((1 << 16) | (1 << 19) | (1 << 20));
         assert_eq!(ctx.rflags() & ((1 << 16) | (1 << 19) | (1 << 20)), 0);
     }
 
     #[test]
     fn set_rflags_preserves_id_and_user_arith_flags() {
-        let mut ctx = ctx_with_rflags(0);
+        let ctx = ctx_with_rflags(0);
         ctx.set_rflags((1 << 21) | (1 << 0) | (1 << 6) | (1 << 11));
         let f = ctx.rflags();
         assert!(f & (1 << 21) != 0, "ID preserved");
@@ -547,7 +630,7 @@ mod tests {
 
     #[test]
     fn set_rflags_drops_all_other_bits() {
-        let mut ctx = ctx_with_rflags(0);
+        let ctx = ctx_with_rflags(0);
         ctx.set_rflags(u64::MAX);
         let f = ctx.rflags();
         // No bits beyond 21 may be set.

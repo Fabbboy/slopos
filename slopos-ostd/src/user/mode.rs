@@ -259,7 +259,7 @@ unsafe impl UserModeBackend for PcrUserModeBackend {
         // per-CPU slot held across an IRQ-enable window.
         // SAFETY: the trampoline wrote the user GPRs into `*ctx_ptr`
         // before returning; the pointer is still valid (caller invariant).
-        let syscall_nr = unsafe { (*ctx_ptr).regs().rax };
+        let syscall_nr = unsafe { (*ctx_ptr).rax() };
         ReturnReason::Syscall(syscall_nr)
     }
 }
@@ -518,11 +518,11 @@ mod tests {
         // proves the type compiles + ctx is reachable through the
         // wrapper.
         let regs = UserRegs::default();
-        let mut ctx = UserContext::new(regs, FpuStateRef::empty());
+        let ctx = UserContext::new(regs, FpuStateRef::empty());
         // VmSpace requires a registered allocator + kernel master,
         // which the per-test fixture sets up. We avoid constructing
         // one here so this test stays free of fixture coupling.
-        // Simply assert ctx is usable through &mut.
+        // Simply assert ctx is usable through a shared borrow.
         ctx.set_rip(0x1000);
         assert_eq!(ctx.rip(), 0x1000);
     }

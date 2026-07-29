@@ -334,7 +334,7 @@ define_syscall!(syscall_rt_sigreturn (ctx) -> SyscallResult {
 
     // Rebuild the user GPR snapshot from the SignalFrame and commit
     // through `set_regs` (re-applies CS/SS selectors and RFLAGS mask).
-    let mut regs = *ctx.user_ctx().regs();
+    let mut regs = ctx.user_ctx().regs();
     regs.rax = sigframe.rax;
     regs.rbx = sigframe.rbx;
     regs.rcx = sigframe.rcx;
@@ -393,7 +393,7 @@ trait UserRegView {
 
 impl UserRegView for UserContext {
     fn snapshot(&self) -> UserRegs {
-        *self.regs()
+        self.regs()
     }
 
     fn commit_redirect(&mut self, regs: &UserRegs) {
