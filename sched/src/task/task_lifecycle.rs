@@ -558,6 +558,16 @@ pub fn task_build(
         return None;
     }
 
+    // The token below is the sole reference to a task that already owns its
+    // process lease; from here to the commit it must not be lost. This region
+    // allocates but never blocks, so a preempt guard is enough and the spawn
+    // spine is not needed: a frame that cannot deschedule cannot be
+    // asynchronously torn down — a peer's `task_terminate` observes `on_cpu`
+    // and defers — and `assert_switch_preempt_safe` turns a blocking call
+    // added here into a panic naming this frame rather than into a leak.
+    // Allocation under the guard is fine; interrupts stay on, so cross-CPU TLB
+    // acks still land.
+    let _preempt = slopos_ostd::cpu::preempt::PreemptGuard::new();
     let mut pending = match allocate_task() {
         Ok(pending) => pending,
         Err(TaskAllocError::MaxTasks) => {
@@ -1261,6 +1271,16 @@ pub fn task_fork(
     };
     let child_unsafe_stack_top = child_unsafe_stack.top().as_u64();
 
+    // The token below is the sole reference to a task that already owns its
+    // process lease; from here to the commit it must not be lost. This region
+    // allocates but never blocks, so a preempt guard is enough and the spawn
+    // spine is not needed: a frame that cannot deschedule cannot be
+    // asynchronously torn down — a peer's `task_terminate` observes `on_cpu`
+    // and defers — and `assert_switch_preempt_safe` turns a blocking call
+    // added here into a panic naming this frame rather than into a leak.
+    // Allocation under the guard is fine; interrupts stay on, so cross-CPU TLB
+    // acks still land.
+    let _preempt = slopos_ostd::cpu::preempt::PreemptGuard::new();
     let mut pending = match allocate_task() {
         Ok(pending) => pending,
         Err(_) => {
@@ -1458,6 +1478,16 @@ pub fn task_clone(
     };
     let child_unsafe_stack_top = child_unsafe_stack.top().as_u64();
 
+    // The token below is the sole reference to a task that already owns its
+    // process lease; from here to the commit it must not be lost. This region
+    // allocates but never blocks, so a preempt guard is enough and the spawn
+    // spine is not needed: a frame that cannot deschedule cannot be
+    // asynchronously torn down — a peer's `task_terminate` observes `on_cpu`
+    // and defers — and `assert_switch_preempt_safe` turns a blocking call
+    // added here into a panic naming this frame rather than into a leak.
+    // Allocation under the guard is fine; interrupts stay on, so cross-CPU TLB
+    // acks still land.
+    let _preempt = slopos_ostd::cpu::preempt::PreemptGuard::new();
     let mut pending = match allocate_task() {
         Ok(pending) => pending,
         Err(_) => return Err(ERRNO_EAGAIN),
