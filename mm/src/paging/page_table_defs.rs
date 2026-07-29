@@ -264,3 +264,73 @@ impl Default for PageTable {
         Self::EMPTY
     }
 }
+
+// ---------------------------------------------------------------------
+// Per-entry access to a page-table frame
+// ---------------------------------------------------------------------
+//
+// The descent in `tables.rs` reaches page-table frames only through
+// these five, and none of them forms a reference into a frame. That is
+// the point: a `&PageTable` — even one scoped to a single statement —
+// claims the whole 4096 bytes in order to touch eight, and two CPUs
+// mapping different VAs that share a table would each hold one. The
+// hardware page walker also stamps Accessed and Dirty into any entry it
+// uses, so even a single-CPU `&mut PageTable` claims exclusivity the
+// machine does not honour.
+//
+// Access is therefore per-entry and atomic, which is what a page-table
+// entry actually is. This mirrors `slopos_ostd::mm::page_table`'s `Pte`,
+// hardened for the setting these walks run in: `KERNEL_PAGE_DIR` carries
+// no lock, and one cannot be added, because `alloc_page_table` reaches
+// the buddy whose reuse path performs a cross-CPU drain.
+//
+// `pub(crate)` rather than `pub`: this module is reachable from outside
+// the crate, and a public `set_entry_at` would hand every
+// `#![forbid(unsafe_code)]` consumer the ability to write an arbitrary
+// u64 into an arbitrary HHDM-reachable frame.
+
+/// The HHDM view of the page-table frame at `phys`, as an entry array.
+#[inline]
+fn table_base_at(phys: PhysAddr) -> *mut u64 {
+    debug_assert!(!phys.is_null(), "page-table frame address must be non-null");
+    phys.to_virt().as_mut_ptr()
+}
+
+/// Write `entry` at `index` in the page-table frame at `phys`.
+#[inline]
+pub(crate) fn set_entry_at(phys: PhysAddr, index: usize, entry: PageTableEntry) {
+    debug_assert!(index < PAGE_TABLE_ENTRIES);
+    slopos_ostd::util::ptr_buf::with_atomic_u64_at(table_base_at(phys), index, |slot| {
+        slot.store(entry.as_raw(), core::sync::atomic::Ordering::Relaxed)
+    });
+}
+
+/// True when the page-table frame at `phys` holds no present entry — the
+/// condition under which the frame may be released.
+///
+/// Tests the PRESENT bit rather than the whole entry being zero: a
+/// cleared-but-flagged entry maps nothing, and it is mappings, not bit
+/// patterns, that decide whether a table is still doing work.
+#[inline]
+pub(crate) fn table_empty_at(phys: PhysAddr) -> bool {
+    let base = table_base_at(phys);
+    (0..PAGE_TABLE_ENTRIES).all(|index| {
+        slopos_ostd::util::ptr_buf::with_atomic_u64_at(base, index, |slot| {
+            !PageTableEntry::from_raw(slot.load(core::sync::atomic::Ordering::Relaxed)).is_present()
+        })
+    })
+}
+
+/// Clear every entry of a freshly allocated page-table frame.
+#[inline]
+pub(crate) fn zero_table_at(phys: PhysAddr) {
+    let base = table_base_at(phys);
+    for index in 0..PAGE_TABLE_ENTRIES {
+        slopos_ostd::util::ptr_buf::with_atomic_u64_at(base, index, |slot| {
+            slot.store(
+                PageTableEntry::EMPTY.as_raw(),
+                core::sync::atomic::Ordering::Relaxed,
+            )
+        });
+    }
+}

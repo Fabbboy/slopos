@@ -294,6 +294,43 @@ pub fn with_ref_mut<T, R>(ptr: *mut T, f: impl FnOnce(&mut T) -> R) -> R {
     f(unsafe { &mut *ptr })
 }
 
+/// View the `index`-th `u64` at `base` as an [`AtomicU64`] for the duration of
+/// `f`.
+///
+/// For memory a second agent may write between two of this program's accesses.
+/// A page-table entry is the motivating case: the hardware page walker stamps
+/// Accessed and Dirty into any entry it uses, at any instant, so a plain load
+/// is a race however the kernel serialises itself — and forming a `&u64`, or a
+/// `&mut` over the enclosing table, would be an exclusivity claim neither the
+/// machine nor another CPU honours. An atomic access is never torn, never
+/// coalesced with a neighbour, and never elided; and the shared `&AtomicU64`
+/// composes with itself, so two CPUs touching two slots of one table is not a
+/// claim either of them has to defend.
+///
+/// # Safety contract on the caller
+///
+/// `base.add(index)` must lie inside one live allocation and be 8-byte
+/// aligned.
+#[inline]
+pub fn with_atomic_u64_at<R>(
+    base: *mut u64,
+    index: usize,
+    f: impl FnOnce(&core::sync::atomic::AtomicU64) -> R,
+) -> R {
+    debug_assert!(!base.is_null(), "with_atomic_u64_at: base must be non-null");
+    debug_assert!(
+        base.align_offset(align_of::<u64>()) == 0,
+        "with_atomic_u64_at: base must be 8-byte aligned"
+    );
+    // SAFETY: caller upholds the contract above, so `slot` addresses an
+    // initialised, aligned `u64` inside a live allocation for the duration
+    // of `f`. `AtomicU64` has the same layout as `u64`.
+    unsafe {
+        let slot = base.add(index);
+        f(core::sync::atomic::AtomicU64::from_ptr(slot))
+    }
+}
+
 /// Offset a `NonNull<u8>` by `byte_offset` and return the resulting
 /// `NonNull<u8>`. Folds the slab/large-alloc pattern of "skip past a
 /// header at a fixed byte offset" into one helper so the kernel-heap

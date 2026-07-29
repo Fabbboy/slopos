@@ -15,7 +15,10 @@ use core::ffi::c_int;
 use core::ptr;
 use core::sync::atomic::{AtomicU64, Ordering};
 
-use super::page_table_defs::{PAGE_TABLE_ENTRIES, PageTable, PageTableEntry, PageTableLevel};
+use super::page_table_defs::{
+    PAGE_TABLE_ENTRIES, PageTable, PageTableEntry, PageTableLevel, set_entry_at, table_empty_at,
+    zero_table_at,
+};
 use crate::paging_defs::PageFlags;
 use slopos_abi::addr::{PhysAddr, VirtAddr};
 use slopos_ostd::{klog_debug, klog_info};
@@ -161,24 +164,21 @@ static KERNEL_PAGE_DIR: SyncUnsafeCell<ProcessPageDir> = SyncUnsafeCell::new(Pro
     mm_ctx_id: crate::mmu::MmContextId::INVALID,
 });
 
-fn table_empty(table: &PageTable) -> bool {
-    table.iter().all(|e| !e.is_present())
-}
-
-fn alloc_page_table() -> Option<(PhysAddr, *mut PageTable)> {
+/// Allocate a zeroed page-table frame.
+///
+/// `alloc_kernel_page` already hands back a zeroed frame — its typed
+/// allocation forces zeroing regardless of the runtime options — so the
+/// explicit clear is defence in depth rather than a load-bearing step.
+/// It is kept because the descent links a table into the live tree before
+/// it has written every entry, and that should not rest on an allocator
+/// contract alone.
+fn alloc_page_table() -> Option<PhysAddr> {
     let phys = alloc_kernel_page();
     if phys.is_null() {
         return None;
     }
-    let virt = phys.to_virt().as_mut_ptr::<PageTable>();
-    if virt.is_null() {
-        free_page_frame(phys);
-        return None;
-    }
-    // Freshly allocated, exclusively owned page-table page; the `&mut`
-    // reborrow lives in OSTD's `borrow_ref_mut` helper.
-    slopos_ostd::util::ptr_buf::borrow_ref_mut::<PageTable>(virt).zero();
-    Some((phys, virt))
+    zero_table_at(phys);
+    Some(phys)
 }
 
 fn intermediate_flags(user_mapping: bool) -> PageFlags {
@@ -210,51 +210,51 @@ fn table_flags_from_leaf(leaf_flags: PageFlags) -> PageFlags {
     flags
 }
 
-fn split_pdpt_huge(pdpt_entry: &mut PageTableEntry) -> Option<*mut PageTable> {
-    if !pdpt_entry.is_present() || !pdpt_entry.is_huge() {
-        return Some(phys_to_table(pdpt_entry.address()));
-    }
+/// Demote a 1 GiB leaf into a PD of 2 MiB leaves covering the same
+/// range. Returns the new PD's frame and the link the caller publishes in
+/// place of the leaf — the parent entry arrives by value, so nothing here
+/// holds a reference into the parent table.
+fn split_pdpt_huge(pdpt_entry: PageTableEntry) -> Option<(PhysAddr, PageTableEntry)> {
+    debug_assert!(pdpt_entry.is_present() && pdpt_entry.is_huge());
 
     let huge_phys = pdpt_entry.address();
     let huge_flags = pdpt_entry.flags();
-    let Some((pd_phys, pd_ptr)) = alloc_page_table() else {
-        return None;
-    };
+    let pd_phys = alloc_page_table()?;
 
-    // Freshly allocated `pd_ptr` is exclusively owned; the `&mut`
-    // reborrow lives in OSTD's `borrow_ref_mut`.
-    let pd_table = slopos_ostd::util::ptr_buf::borrow_ref_mut::<PageTable>(pd_ptr);
     for i in 0..PAGE_TABLE_ENTRIES {
         let phys = huge_phys.offset(i as u64 * PAGE_SIZE_2MB);
-        let entry = pd_table.entry_mut(i);
-        entry.set(phys, huge_flags | PageFlags::HUGE);
+        set_entry_at(
+            pd_phys,
+            i,
+            PageTableEntry::new(phys, huge_flags | PageFlags::HUGE),
+        );
     }
 
-    pdpt_entry.set(pd_phys, table_flags_from_leaf(huge_flags));
-    Some(pd_ptr)
+    Some((
+        pd_phys,
+        PageTableEntry::new(pd_phys, table_flags_from_leaf(huge_flags)),
+    ))
 }
 
-fn split_pd_huge(pd_entry: &mut PageTableEntry) -> Option<*mut PageTable> {
-    if !pd_entry.is_present() || !pd_entry.is_huge() {
-        return Some(phys_to_table(pd_entry.address()));
-    }
+/// Demote a 2 MiB leaf into a PT of 4 KiB leaves covering the same
+/// range. Same by-value shape as [`split_pdpt_huge`].
+fn split_pd_huge(pd_entry: PageTableEntry) -> Option<(PhysAddr, PageTableEntry)> {
+    debug_assert!(pd_entry.is_present() && pd_entry.is_huge());
 
     let huge_phys = pd_entry.address();
     let mut huge_flags = pd_entry.flags();
     huge_flags.remove(PageFlags::HUGE);
-    let Some((pt_phys, pt_ptr)) = alloc_page_table() else {
-        return None;
-    };
+    let pt_phys = alloc_page_table()?;
 
-    let pt_table = slopos_ostd::util::ptr_buf::borrow_ref_mut::<PageTable>(pt_ptr);
     for i in 0..PAGE_TABLE_ENTRIES {
         let phys = huge_phys.offset(i as u64 * PAGE_SIZE_4KB);
-        let entry = pt_table.entry_mut(i);
-        entry.set(phys, huge_flags);
+        set_entry_at(pt_phys, i, PageTableEntry::new(phys, huge_flags));
     }
 
-    pd_entry.set(pt_phys, table_flags_from_leaf(huge_flags));
-    Some(pt_ptr)
+    Some((
+        pt_phys,
+        PageTableEntry::new(pt_phys, table_flags_from_leaf(huge_flags)),
+    ))
 }
 
 #[inline]
@@ -333,7 +333,7 @@ pub(crate) fn map_page_in_directory(
 
     let pml4_entry = pml4_table.entry_mut(pml4_idx);
     let pdpt = if !pml4_entry.is_present() {
-        let Some((phys, ptr)) = alloc_page_table() else {
+        let Some(phys) = alloc_page_table() else {
             klog_info!(
                 "Paging: Failed to allocate PDPT for vaddr 0x{:x}",
                 vaddr.as_u64()
@@ -341,7 +341,7 @@ pub(crate) fn map_page_in_directory(
             return -1;
         };
         pml4_entry.set(phys, inter_flags);
-        ptr
+        phys_to_table(phys)
     } else {
         if pml4_entry.is_huge() {
             return -1;
@@ -356,7 +356,7 @@ pub(crate) fn map_page_in_directory(
     let pdpt_entry = pdpt_table.entry_mut(pdpt_idx);
 
     let pd = if !pdpt_entry.is_present() {
-        let Some((phys, ptr)) = alloc_page_table() else {
+        let Some(phys) = alloc_page_table() else {
             klog_info!(
                 "Paging: Failed to allocate PD for vaddr 0x{:x}",
                 vaddr.as_u64()
@@ -364,12 +364,13 @@ pub(crate) fn map_page_in_directory(
             return -1;
         };
         pdpt_entry.set(phys, inter_flags);
-        ptr
+        phys_to_table(phys)
     } else if pdpt_entry.is_huge() {
-        let Some(ptr) = split_pdpt_huge(pdpt_entry) else {
+        let Some((phys, link)) = split_pdpt_huge(*pdpt_entry) else {
             return -1;
         };
-        ptr
+        *pdpt_entry = link;
+        phys_to_table(phys)
     } else {
         if user_mapping && !pdpt_entry.is_user() {
             pdpt_entry.add_flags(PageFlags::USER);
@@ -393,7 +394,7 @@ pub(crate) fn map_page_in_directory(
     }
 
     let pt = if !pd_entry.is_present() {
-        let Some((phys, ptr)) = alloc_page_table() else {
+        let Some(phys) = alloc_page_table() else {
             klog_info!(
                 "Paging: Failed to allocate PT for vaddr 0x{:x}",
                 vaddr.as_u64()
@@ -401,12 +402,13 @@ pub(crate) fn map_page_in_directory(
             return -1;
         };
         pd_entry.set(phys, inter_flags);
-        ptr
+        phys_to_table(phys)
     } else if pd_entry.is_huge() {
-        let Some(ptr) = split_pd_huge(pd_entry) else {
+        let Some((phys, link)) = split_pd_huge(*pd_entry) else {
             return -1;
         };
-        ptr
+        *pd_entry = link;
+        phys_to_table(phys)
     } else {
         if user_mapping && !pd_entry.is_user() {
             pd_entry.add_flags(PageFlags::USER);
@@ -467,12 +469,7 @@ pub(crate) fn unmap_page_in_directory(page_dir: *mut ProcessPageDir, vaddr: Virt
         let phys = pdpt_entry.address();
         pdpt_entry.clear();
         flush_kernel_page_after_mod(vaddr);
-        // Re-borrow `pdpt_table` after dropping `pdpt_entry`.
-        let pdpt_empty = {
-            let t = slopos_ostd::util::ptr_buf::borrow_ref::<PageTable>(pdpt_ptr);
-            table_empty(t)
-        };
-        if pdpt_empty {
+        if table_empty_at(pml4_entry_phys) {
             pml4_entry.clear();
             free_page_frame(pml4_entry_phys);
         }
@@ -508,30 +505,18 @@ pub(crate) fn unmap_page_in_directory(page_dir: *mut ProcessPageDir, vaddr: Virt
         } else {
             unmapped_phys = PhysAddr::NULL;
         }
-        let pt_empty = {
-            let t = slopos_ostd::util::ptr_buf::borrow_ref::<PageTable>(pt_ptr);
-            table_empty(t)
-        };
-        if pt_empty {
+        if table_empty_at(pd_entry_phys) {
             pd_entry.clear();
             free_page_frame(pd_entry_phys);
         }
     }
 
-    let pd_empty = {
-        let t = slopos_ostd::util::ptr_buf::borrow_ref::<PageTable>(pd_ptr);
-        table_empty(t)
-    };
-    if pd_empty {
+    if table_empty_at(pdpt_entry_phys) {
         pdpt_entry.clear();
         free_page_frame(pdpt_entry_phys);
     }
 
-    let pdpt_empty = {
-        let t = slopos_ostd::util::ptr_buf::borrow_ref::<PageTable>(pdpt_ptr);
-        table_empty(t)
-    };
-    if pdpt_empty {
+    if table_empty_at(pml4_entry_phys) {
         pml4_entry.clear();
         free_page_frame(pml4_entry_phys);
     }
