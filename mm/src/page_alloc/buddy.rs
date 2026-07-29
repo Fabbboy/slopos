@@ -550,8 +550,11 @@ impl BuddyAllocator {
         debug_assert_eq!(self.lifecycle(), Lifecycle::Uninit);
 
         let typed_ptr = frames_ptr as *mut PageFrame;
+        // One-shot, and the `Lifecycle::Uninit` assertion above is what makes
+        // it so: the frame table is installed once from a boot-reserved region
+        // and lives as long as the machine, which is what `'static` says.
         let slice: &'static mut [PageFrame] =
-            slopos_ostd::util::ptr_buf::borrow_buf_mut(typed_ptr, max_frames as usize);
+            slopos_ostd::util::ptr_buf::install_buf_mut(typed_ptr, max_frames as usize);
         self.frame_table.install(slice);
 
         let mut inner = self.inner.lock();
@@ -1080,7 +1083,9 @@ fn paint_page_at_virt(ptr: *mut u8, value: u8) {
     if ptr.is_null() {
         return;
     }
-    slopos_ostd::util::ptr_buf::borrow_buf_mut(ptr, PAGE_SIZE_4KB as usize).fill(value);
+    slopos_ostd::util::ptr_buf::with_buf_mut(ptr, PAGE_SIZE_4KB as usize, |page: &mut [u8]| {
+        page.fill(value)
+    });
 }
 
 fn zero_physical_page(phys_addr: PhysAddr) -> i32 {

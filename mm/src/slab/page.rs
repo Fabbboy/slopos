@@ -80,17 +80,24 @@ impl SlabHeader {
         ))
     }
 
-    /// Mutable byte view of object `obj`'s body region (the bytes
-    /// after the inline link slot). Caller owns the slab page
-    /// exclusively.
+    /// Run `f` over object `obj`'s body region (the bytes after the inline
+    /// link slot). Caller owns the slab page exclusively.
+    ///
+    /// Scoped rather than returning the slice: the caller has only an address,
+    /// so a returned `&mut [u8]` would carry a lifetime the caller picks — and
+    /// two picks is two mutable views of one object.
     #[inline]
-    pub(crate) fn body_slice_mut<'a>(obj: NonNull<u8>, object_size: usize) -> Option<&'a mut [u8]> {
+    pub(crate) fn with_body_slice_mut<R>(
+        obj: NonNull<u8>,
+        object_size: usize,
+        f: impl FnOnce(&mut [u8]) -> R,
+    ) -> Option<R> {
         let link_bytes = core::mem::size_of::<*mut u8>();
         if object_size <= link_bytes {
             return None;
         }
         let body_len = object_size - link_bytes;
-        Some(ptr_buf::borrow_at_mut::<u8>(obj, link_bytes, body_len))
+        Some(ptr_buf::with_at_mut::<u8, _>(obj, link_bytes, body_len, f))
     }
 }
 
@@ -124,9 +131,13 @@ impl LargeAllocHeader {
     /// Mutable byte view spanning `len` bytes starting at the body of
     /// a large-alloc header.
     #[inline]
-    pub(crate) fn body_view_mut<'a>(header: NonNull<LargeAllocHeader>, len: usize) -> &'a mut [u8] {
+    pub(crate) fn with_body_view_mut<R>(
+        header: NonNull<LargeAllocHeader>,
+        len: usize,
+        f: impl FnOnce(&mut [u8]) -> R,
+    ) -> R {
         let body = Self::body_ptr(header);
-        ptr_buf::borrow_nonnull_mut(body, len)
+        ptr_buf::with_nonnull_mut(body, len, f)
     }
 }
 
@@ -181,8 +192,7 @@ fn read_u32_at(base: NonNull<u8>, off: usize) -> u32 {
     // exclusively by the owning class's lock holder during writes,
     // and `kfree` only reads after the writer published the header
     // via `Release` magic stores.
-    let slice: &mut [u32] = ptr_buf::borrow_at_mut::<u32>(base, off, 1);
-    slice[0]
+    ptr_buf::with_at_mut::<u32, _>(base, off, 1, |slice| slice[0])
 }
 
 /// Allocate a fresh, zero-initialised 4 KiB kernel page and return

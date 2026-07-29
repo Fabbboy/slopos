@@ -1400,7 +1400,7 @@ pub fn socket_sendto(
     let payload = if len == 0 {
         &[][..]
     } else {
-        slopos_ostd::util::ptr_buf::borrow_buf(data, len)
+        slopos_ostd::util::ptr_buf::anchored_buf(&len, data, len)
     };
 
     if is_udp {
@@ -1436,10 +1436,14 @@ pub fn socket_recvfrom(
         return errno_i32(ERRNO_EFAULT) as i64;
     }
 
+    let mut buf_anchor = ();
     let out = if len == 0 {
         &mut [][..]
     } else {
-        slopos_ostd::util::ptr_buf::borrow_buf_mut(buf, len)
+        // The borrow is anchored on a frame-local, so its lifetime is this
+        // call — which is exactly what a syscall entry point can promise about
+        // a user buffer it has already validated.
+        slopos_ostd::util::ptr_buf::anchored_buf_mut(&mut buf_anchor, buf, len)
     };
 
     let (nonblocking, timeout_ms) = {
@@ -2323,7 +2327,7 @@ pub fn socket_send(sock_idx: u32, data: *const u8, len: usize) -> i64 {
     let payload = if len == 0 {
         &[][..]
     } else {
-        slopos_ostd::util::ptr_buf::borrow_buf(data, len)
+        slopos_ostd::util::ptr_buf::anchored_buf(&len, data, len)
     };
 
     match target {
@@ -2718,10 +2722,14 @@ pub fn socket_recv(sock_idx: u32, buf: *mut u8, len: usize) -> i64 {
         return errno_i32(ERRNO_EFAULT) as i64;
     }
 
+    let mut buf_anchor = ();
     let out = if len == 0 {
         &mut [][..]
     } else {
-        slopos_ostd::util::ptr_buf::borrow_buf_mut(buf, len)
+        // The borrow is anchored on a frame-local, so its lifetime is this
+        // call — which is exactly what a syscall entry point can promise about
+        // a user buffer it has already validated.
+        slopos_ostd::util::ptr_buf::anchored_buf_mut(&mut buf_anchor, buf, len)
     };
 
     match socket_recv_resolve(sock_idx) {

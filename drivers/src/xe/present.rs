@@ -196,20 +196,22 @@ fn coalesce_damage(damage: *const DamageRect, count: u32, width: u32, height: u3
     }
 
     let len = (count as usize).min(MAX_DAMAGE_REGIONS);
-    let regions = ptr_buf::borrow_buf(damage, len);
-    let (mut min_x, mut min_y, mut max_seen_x, mut max_seen_y) =
-        (i32::MAX, i32::MAX, i32::MIN, i32::MIN);
-    let mut any = false;
-    for r in regions {
-        if !r.is_valid() {
-            continue;
+    let (any, min_x, min_y, max_seen_x, max_seen_y) = ptr_buf::with_buf(damage, len, |regions| {
+        let (mut min_x, mut min_y, mut max_seen_x, mut max_seen_y) =
+            (i32::MAX, i32::MAX, i32::MIN, i32::MIN);
+        let mut any = false;
+        for r in regions {
+            if !r.is_valid() {
+                continue;
+            }
+            any = true;
+            min_x = min_x.min(r.x0);
+            min_y = min_y.min(r.y0);
+            max_seen_x = max_seen_x.max(r.x1);
+            max_seen_y = max_seen_y.max(r.y1);
         }
-        any = true;
-        min_x = min_x.min(r.x0);
-        min_y = min_y.min(r.y0);
-        max_seen_x = max_seen_x.max(r.x1);
-        max_seen_y = max_seen_y.max(r.y1);
-    }
+        (any, min_x, min_y, max_seen_x, max_seen_y)
+    });
     if !any {
         return None;
     }

@@ -310,43 +310,43 @@ pub fn kdiag_hexdump(data: *const u8, length: usize, base_address: u64) {
         return;
     }
 
-    let bytes = crate::util::ptr_buf::borrow_buf(data, length);
+    crate::util::ptr_buf::with_buf(data, length, |bytes: &[u8]| {
+        let mut i = 0usize;
+        while i < length {
+            crate::klog_info!("0x{:x}: ", base_address + i as u64);
 
-    let mut i = 0usize;
-    while i < length {
-        crate::klog_info!("0x{:x}: ", base_address + i as u64);
-
-        let mut j = 0usize;
-        while j < 16 && i + j < length {
-            if j == 8 {
-                crate::klog_info!(" ");
+            let mut j = 0usize;
+            while j < 16 && i + j < length {
+                if j == 8 {
+                    crate::klog_info!(" ");
+                }
+                crate::klog_info!("{:02x} ", bytes[i + j]);
+                j += 1;
             }
-            crate::klog_info!("{:02x} ", bytes[i + j]);
-            j += 1;
-        }
 
-        while j < 16 {
-            if j == 8 {
-                crate::klog_info!(" ");
+            while j < 16 {
+                if j == 8 {
+                    crate::klog_info!(" ");
+                }
+                crate::klog_info!("   ");
+                j += 1;
             }
-            crate::klog_info!("   ");
-            j += 1;
-        }
 
-        crate::klog_info!(" |");
-        let mut j = 0usize;
-        while j < 16 && i + j < length {
-            let c = bytes[i + j];
-            let display = if (32..=126).contains(&c) {
-                c as char
-            } else {
-                '.'
-            };
-            crate::klog_info!("{}", display);
-            j += 1;
-        }
-        crate::klog_info!("|");
+            crate::klog_info!(" |");
+            let mut j = 0usize;
+            while j < 16 && i + j < length {
+                let c = bytes[i + j];
+                let display = if (32..=126).contains(&c) {
+                    c as char
+                } else {
+                    '.'
+                };
+                crate::klog_info!("{}", display);
+                j += 1;
+            }
+            crate::klog_info!("|");
 
-        i += 16;
-    }
+            i += 16;
+        }
+    });
 }

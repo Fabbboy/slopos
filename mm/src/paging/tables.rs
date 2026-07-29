@@ -87,7 +87,7 @@ impl ProcessPageDir {
         if page_dir.is_null() {
             return PhysAddr::NULL;
         }
-        slopos_ostd::util::ptr_buf::borrow_ref::<ProcessPageDir>(page_dir).pml4_phys
+        slopos_ostd::util::ptr_buf::with_ref::<ProcessPageDir, _>(page_dir, |dir| dir.pml4_phys)
     }
 
     /// Initialise the freshly `kmalloc`'d slot at `dst` with `init`.
@@ -106,8 +106,7 @@ impl ProcessPageDir {
     /// safe Rust.
     #[inline]
     fn pml4_ptr_from(page_dir: *mut ProcessPageDir) -> *mut PageTable {
-        let dir = slopos_ostd::util::ptr_buf::borrow_ref::<ProcessPageDir>(page_dir);
-        *dir.pml4
+        slopos_ostd::util::ptr_buf::with_ref::<ProcessPageDir, _>(page_dir, |dir| *dir.pml4)
     }
 
     /// Borrow the PML4 page-table at `page_dir`'s `pml4` field as a
@@ -129,6 +128,14 @@ impl ProcessPageDir {
     /// Mutable variant of [`Self::pml4_table`]. Caller is responsible
     /// for ensuring single-writer access to the PML4 (typically by
     /// holding the per-process slot lock in `process_vm.rs`).
+    ///
+    /// Still returns the borrow rather than scoping it, unlike the rest of the
+    /// pointer-borrow surface. The walks in this file hold `&mut` into the
+    /// PML4, the PDPT, the PD and the PT *simultaneously* — legitimately, they
+    /// are four different tables — and that only typechecks because each
+    /// borrow's lifetime is fabricated independently. Scoping them means
+    /// restructuring the walk to re-borrow at each mutation point instead, in
+    /// the unmap path. Worth doing; not worth doing as a rename.
     #[inline]
     pub fn pml4_table_mut<'a>(page_dir: *mut ProcessPageDir) -> Option<&'a mut PageTable> {
         if page_dir.is_null() {

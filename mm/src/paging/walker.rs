@@ -103,13 +103,18 @@ impl<M: PageTableFrameMapping> PageTableWalker<M> {
         // The mapping impl resolves `phys` to a live HHDM mapping owned
         // by the kernel page-table tree; OSTD's `borrow_ref` carries
         // the one `unsafe` deref so this consumer stays in safe Rust.
-        Ok(slopos_ostd::util::ptr_buf::borrow_ref::<PageTable>(ptr))
+        Ok(slopos_ostd::util::ptr_buf::anchored_ref::<_, PageTable>(
+            self, ptr,
+        ))
     }
 
     #[inline]
-    /// See [`next_table`](Self::next_table) for why the lifetime is `&self`'s.
+    /// See [`next_table`](Self::next_table) for why the lifetime is the
+    /// walker's. `&mut self` rather than `&self`: the exclusivity of the
+    /// returned table is the walker's exclusivity, so requiring it here is what
+    /// stops two mutable views of one table coexisting.
     pub fn next_table_mut(
-        &self,
+        &mut self,
         entry: &PageTableEntry,
         level: PageTableLevel,
     ) -> MmResult<&mut PageTable> {
@@ -129,9 +134,7 @@ impl<M: PageTableFrameMapping> PageTableWalker<M> {
             .phys_to_table_ptr(phys)
             .ok_or(MmError::InvalidPageTable)?;
 
-        // Mutable variant: caller owns the page-table tree exclusively
-        // for the lifetime of the returned `&mut PageTable`.
-        Ok(slopos_ostd::util::ptr_buf::borrow_ref_mut::<PageTable>(ptr))
+        Ok(slopos_ostd::util::ptr_buf::anchored_ref_mut::<_, PageTable>(self, ptr))
     }
 
     pub fn walk(&self, pml4: &PageTable, vaddr: VirtAddr) -> MmResult<WalkResult> {

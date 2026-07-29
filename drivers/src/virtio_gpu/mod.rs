@@ -929,8 +929,10 @@ impl VirtioGpuInner {
             }
         } else {
             let n = (count as usize).min(MAX_DAMAGE_REGIONS);
-            let regions = ptr_buf::borrow_buf(damage, n);
-            match coalesce_damage(regions, geom.width, geom.height) {
+            let coalesced = ptr_buf::with_buf(damage, n, |regions| {
+                coalesce_damage(regions, geom.width, geom.height)
+            });
+            match coalesced {
                 Some(r) => r,
                 None => return 0,
             }
@@ -1276,8 +1278,9 @@ pub mod test_support {
             free_page_frame(phys);
             return false;
         };
-        let img = ptr_buf::borrow_buf::<u8>(virt.as_u64() as *const u8, size);
-        let ok = dev.cursor_set_image(img, 0, 0) && dev.cursor_move(10, 10);
+        let ok = ptr_buf::with_buf::<u8, _>(virt.as_u64() as *const u8, size, |img| {
+            dev.cursor_set_image(img, 0, 0)
+        }) && dev.cursor_move(10, 10);
         free_page_frame(phys);
         ok
     }
@@ -1336,8 +1339,7 @@ pub fn cursor_set_image_raw(image: *const u8, len: usize, hot_x: u32, hot_y: u32
     if image.is_null() || len == 0 {
         return false;
     }
-    let bytes = ptr_buf::borrow_buf::<u8>(image, len);
-    cursor_set_image(bytes, hot_x, hot_y)
+    ptr_buf::with_buf::<u8, _>(image, len, |bytes| cursor_set_image(bytes, hot_x, hot_y))
 }
 
 /// Move the hardware cursor to absolute display coordinates `(x, y)`.

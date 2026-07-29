@@ -37,7 +37,7 @@ pub fn kmalloc(size: usize) -> *mut c_void {
     };
     // Zero exactly the requested size. Tail padding past `size` is
     // never read by the caller, so we don't scrub the rounded chunk.
-    ptr_buf::borrow_buf_mut(ptr.as_ptr(), size).fill(0);
+    ptr_buf::with_buf_mut(ptr.as_ptr(), size, |bytes: &mut [u8]| bytes.fill(0));
     ptr.as_ptr() as *mut c_void
 }
 

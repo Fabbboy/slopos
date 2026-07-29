@@ -346,9 +346,9 @@ impl<const SIZE: usize> SlabAllocator<SIZE> {
                 current = ByteChain::read_next(curr);
             }
             // Optional poison.
-            if let Some(body) = SlabHeader::body_slice_mut(ptr, object_size) {
-                poison_object_body(body, POISON_FREED);
-            }
+            SlabHeader::with_body_slice_mut(ptr, object_size, |body| {
+                poison_object_body(body, POISON_FREED)
+            });
             slab.free_list.push_front(ptr);
             slab.free_count = slab.free_count.saturating_add(1);
             true

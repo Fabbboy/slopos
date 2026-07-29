@@ -45,8 +45,9 @@ fn tty_read_with_attach_adapter(
     if buf.is_null() || max == 0 {
         return Ok(0);
     }
-    let slice = slopos_ostd::util::ptr_buf::borrow_buf_mut(buf, max);
-    tty::read_with_attach(tty_index, slice, nonblock, auto_attach)
+    slopos_ostd::util::ptr_buf::with_buf_mut(buf, max, |slice| {
+        tty::read_with_attach(tty_index, slice, nonblock, auto_attach)
+    })
 }
 
 fn tty_release_controlling_terminal_adapter(
@@ -119,8 +120,7 @@ fn tty_write_bytes_adapter(
     if buf.is_null() || len == 0 {
         return Ok(0);
     }
-    let data = slopos_ostd::util::ptr_buf::borrow_buf(buf, len);
-    tty::write(tty_index, data, nonblock)
+    slopos_ostd::util::ptr_buf::with_buf(buf, len, |data| tty::write(tty_index, data, nonblock))
 }
 
 fn tty_poll_sleep_on_adapter(slots: *const u8, count: usize) {
@@ -128,8 +128,7 @@ fn tty_poll_sleep_on_adapter(slots: *const u8, count: usize) {
         tty::poll_sleep();
         return;
     }
-    let slot_slice = slopos_ostd::util::ptr_buf::borrow_buf(slots, count);
-    tty::poll_sleep_on(slot_slice);
+    slopos_ostd::util::ptr_buf::with_buf(slots, count, tty::poll_sleep_on);
 }
 
 static TTY_SERVICES: TtyServices = TtyServices {

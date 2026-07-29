@@ -331,19 +331,20 @@ pub fn fb_flip_from_shm_damage(
     let max_regions = slopos_abi::damage::MAX_DAMAGE_REGIONS as u32;
     let region_count = damage_count.min(max_regions) as usize;
     // Kernel syscall path validates this pointer and length before calling us.
-    let regions = slopos_ostd::util::ptr_buf::borrow_buf(damage, region_count);
-
-    let mut any_failed = false;
-    for rect in regions {
-        if !rect.is_valid() {
-            continue;
+    let any_failed = slopos_ostd::util::ptr_buf::with_buf(damage, region_count, |regions| {
+        let mut any_failed = false;
+        for rect in regions {
+            if !rect.is_valid() {
+                continue;
+            }
+            if !copy_rect_from_shm(&fb, shm_ptr, copy_size, rect.x0, rect.y0, rect.x1, rect.y1) {
+                any_failed = true;
+                // Continue processing remaining rects instead of aborting —
+                // partial presentation is better than no presentation.
+            }
         }
-        if !copy_rect_from_shm(&fb, shm_ptr, copy_size, rect.x0, rect.y0, rect.x1, rect.y1) {
-            any_failed = true;
-            // Continue processing remaining rects instead of aborting —
-            // partial presentation is better than no presentation.
-        }
-    }
-    let flush = framebuffer_flush(regions.as_ptr(), region_count as u32);
+        any_failed
+    });
+    let flush = framebuffer_flush(damage, region_count as u32);
     if any_failed { -1 } else { flush }
 }

@@ -151,8 +151,9 @@ impl LargeAlloc {
             let total_bytes = (pages as usize) * PAGE_SIZE_4KB as usize;
             if total_bytes > hdr_sz {
                 let body_len = total_bytes - hdr_sz;
-                let body = LargeAllocHeader::body_view_mut(header_nn, body_len);
-                poison_object_body(body, POISON_FREED);
+                LargeAllocHeader::with_body_view_mut(header_nn, body_len, |body| {
+                    poison_object_body(body, POISON_FREED)
+                });
             }
         }
         let _ = pages;

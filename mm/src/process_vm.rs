@@ -930,7 +930,8 @@ fn apply_elf_relocations(
     // lifetime exceeds this call. Only the first `payload_len` bytes
     // are accessed; bounds are re-checked at every structured read
     // via `read_elf_pod`.
-    let payload_slice: &[u8] = slopos_ostd::util::ptr_buf::borrow_buf(payload, payload_len);
+    let payload_slice: &[u8] =
+        slopos_ostd::util::ptr_buf::anchored_buf(&payload_len, payload, payload_len);
 
     let ehdr: Elf64Ehdr = match read_elf_pod::<Elf64Ehdr>(payload_slice, 0) {
         Some(h) => h,

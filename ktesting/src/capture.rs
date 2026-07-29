@@ -83,7 +83,7 @@ impl RingSlot {
         let len = self.len.load(Ordering::Acquire).min(PER_CPU_RING_BYTES);
         // Bytes [0..len) were written under `lock` before `len` was
         // updated; reading via Acquire pairs with the Release in `append`.
-        slopos_ostd::util::ptr_buf::borrow_buf(self.buf.get() as *const u8, len)
+        slopos_ostd::util::ptr_buf::anchored_buf(self, self.buf.get() as *const u8, len)
     }
 
     fn dropped_bytes(&self) -> usize {

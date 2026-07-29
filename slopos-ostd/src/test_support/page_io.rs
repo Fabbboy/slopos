@@ -24,7 +24,7 @@ use crate::util::ptr_buf;
 /// Fill `len` bytes starting at `ptr` with `byte`.
 #[inline]
 pub fn fill_pattern(ptr: *mut u8, byte: u8, len: usize) {
-    ptr_buf::borrow_buf_mut(ptr, len).fill(byte);
+    ptr_buf::with_buf_mut(ptr, len, |slice: &mut [u8]| slice.fill(byte));
 }
 
 /// Verify every byte in `[ptr, ptr+len)` equals `byte`. Returns the
@@ -32,28 +32,31 @@ pub fn fill_pattern(ptr: *mut u8, byte: u8, len: usize) {
 /// matches.
 #[inline]
 pub fn verify_pattern(ptr: *const u8, byte: u8, len: usize) -> Option<usize> {
-    let slice = ptr_buf::borrow_buf(ptr, len);
-    slice.iter().position(|&b| b != byte)
+    ptr_buf::with_buf(ptr, len, |slice: &[u8]| {
+        slice.iter().position(|&b| b != byte)
+    })
 }
 
 /// Fill `len` bytes starting at `ptr` with `f(i)` for `i` in `0..len`.
 #[inline]
 pub fn fill_indexed(ptr: *mut u8, len: usize, f: impl Fn(usize) -> u8) {
-    let slice = ptr_buf::borrow_buf_mut(ptr, len);
-    for (i, b) in slice.iter_mut().enumerate() {
-        *b = f(i);
-    }
+    ptr_buf::with_buf_mut(ptr, len, |slice: &mut [u8]| {
+        for (i, b) in slice.iter_mut().enumerate() {
+            *b = f(i);
+        }
+    });
 }
 
 /// Verify every byte at offset `i` in `[ptr, ptr+len)` equals `f(i)`.
 /// Returns the offset of the first mismatching byte, or `None`.
 #[inline]
 pub fn verify_indexed(ptr: *const u8, len: usize, f: impl Fn(usize) -> u8) -> Option<usize> {
-    let slice = ptr_buf::borrow_buf(ptr, len);
-    slice
-        .iter()
-        .enumerate()
-        .find_map(|(i, &b)| if b == f(i) { None } else { Some(i) })
+    ptr_buf::with_buf(ptr, len, |slice: &[u8]| {
+        slice
+            .iter()
+            .enumerate()
+            .find_map(|(i, &b)| if b == f(i) { None } else { Some(i) })
+    })
 }
 
 /// Write a single byte at `ptr + offset`. Non-volatile.

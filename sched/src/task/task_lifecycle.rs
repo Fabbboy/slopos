@@ -1330,9 +1330,14 @@ pub fn task_fork(
     // facing contract on `parent_user_ctx` (null or valid snapshot)
     // is upheld by `task_fork`'s callers in the syscall layer;
     // OSTD's `try_borrow_ref` carries the one `unsafe` deref.
-    let parent_ctx_opt = slopos_ostd::util::ptr_buf::try_borrow_ref::<
+    // Anchored on a frame-local rather than scoped in a closure: these two
+    // builders sit within 100 bytes of the 2 KiB frame gate, and a closure's
+    // captures were enough to push them over.
+    let ctx_anchor = ();
+    let parent_ctx_opt = slopos_ostd::util::ptr_buf::try_anchored_ref::<
+        _,
         slopos_ostd::user::context::UserContext,
-    >(parent_user_ctx);
+    >(&ctx_anchor, parent_user_ctx);
     if let Some(parent_ctx) = parent_ctx_opt {
         let mut regs = *parent_ctx.regs();
         regs.rax = 0;
@@ -1546,9 +1551,11 @@ pub fn task_clone(
     // parent's `user_ctx` as the fallback when no live snapshot is
     // supplied.
     {
-        let parent_ctx_opt = slopos_ostd::util::ptr_buf::try_borrow_ref::<
+        let ctx_anchor = ();
+        let parent_ctx_opt = slopos_ostd::util::ptr_buf::try_anchored_ref::<
+            _,
             slopos_ostd::user::context::UserContext,
-        >(parent_user_ctx);
+        >(&ctx_anchor, parent_user_ctx);
         let mut regs = match parent_ctx_opt {
             Some(parent_ctx) => *parent_ctx.regs(),
             None => *child.user_ctx.get_mut().regs(),

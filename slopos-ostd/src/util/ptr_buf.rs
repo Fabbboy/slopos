@@ -84,52 +84,173 @@ pub fn read_pod_at<T: Copy>(payload: &[u8], offset: usize) -> Option<T> {
     Some(unsafe { core::ptr::read_unaligned(p) })
 }
 
-/// Borrow `len` elements of `T` starting at `ptr` as a `&[T]`.
+/// Borrow `len` elements of `T` starting at `ptr` for the duration of `f`.
 ///
 /// Companion of `core::slice::from_raw_parts`. See module-level
 /// safety contract.
+///
+/// # Why scoped rather than returning
+///
+/// A `fn(*const T, usize) -> &'a [T]` lets the *caller* pick `'a`, so two
+/// calls yield two references the compiler believes are unrelated — and for
+/// the `_mut` forms that is instant aliasing UB on the second call, with no
+/// `unsafe` block anywhere in sight at the call site. A closure's argument
+/// lifetime is higher-ranked: the caller cannot name it, so it cannot choose
+/// it, and the borrow cannot outlive the call.
 #[inline]
-pub fn borrow_buf<'a, T>(ptr: *const T, len: usize) -> &'a [T] {
+pub fn with_buf<T, R>(ptr: *const T, len: usize, f: impl FnOnce(&[T]) -> R) -> R {
     // SAFETY: caller upholds the module-level contract; this is the
     // single `from_raw_parts` call site for all kernel-half consumers
     // of the `*const T + len` pattern.
+    f(unsafe { core::slice::from_raw_parts(ptr, len) })
+}
+
+/// Mutable sibling of [`with_buf`].
+#[inline]
+pub fn with_buf_mut<T, R>(ptr: *mut T, len: usize, f: impl FnOnce(&mut [T]) -> R) -> R {
+    // SAFETY: caller upholds the module-level contract, including
+    // exclusive ownership of `[ptr, ptr+len)` for the duration of `f`.
+    f(unsafe { core::slice::from_raw_parts_mut(ptr, len) })
+}
+
+/// Borrow `len` elements of `T` at `ptr` for as long as `anchor` lives.
+///
+/// The other answer to check 8's shape, for the callers a closure cannot
+/// serve: an accessor that *returns* a reference, like
+/// `fn as_slice(&self) -> &[u8]` over a buffer the receiver owns. Here the
+/// lifetime is not fabricated and not caller-chosen — it is `anchor`'s, so the
+/// caller has to present something that genuinely outlives the borrow, and at
+/// such an accessor that something is `&self`.
+///
+/// # Safety contract on the caller
+///
+/// The module-level contract, plus: the mapping at `ptr` must stay valid and
+/// unaliased for at least as long as `anchor`.
+#[inline]
+pub fn anchored_buf<'a, A: ?Sized, T>(_anchor: &'a A, ptr: *const T, len: usize) -> &'a [T] {
+    // SAFETY: caller upholds the contract above; `anchor` bounds the lifetime.
     unsafe { core::slice::from_raw_parts(ptr, len) }
 }
 
-/// Mutable sibling of [`borrow_buf`].
+/// Mutable sibling of [`anchored_buf`]. Takes `&mut A`, so the exclusivity of
+/// the returned slice is the exclusivity of the anchor.
 #[inline]
-pub fn borrow_buf_mut<'a, T>(ptr: *mut T, len: usize) -> &'a mut [T] {
-    // SAFETY: caller upholds the module-level contract, including
-    // exclusive ownership of `[ptr, ptr+len)` for the returned lifetime.
+pub fn anchored_buf_mut<'a, A: ?Sized, T>(
+    _anchor: &'a mut A,
+    ptr: *mut T,
+    len: usize,
+) -> &'a mut [T] {
+    // SAFETY: caller upholds the contract above; `anchor` bounds the lifetime
+    // and its `&mut` bounds the aliasing.
     unsafe { core::slice::from_raw_parts_mut(ptr, len) }
 }
 
-/// Borrow `len` elements of `T` starting at `ptr` (a `NonNull`) as
-/// a `&[T]`. Equivalent to [`borrow_buf`] with the null-pointer
-/// branch elided.
+/// [`anchored_buf`] for a `NonNull`.
 #[inline]
-pub fn borrow_nonnull<'a, T>(ptr: NonNull<T>, len: usize) -> &'a [T] {
-    // SAFETY: `NonNull::as_ptr` returns a non-null pointer; remaining
-    // preconditions are the module-level contract.
-    unsafe { core::slice::from_raw_parts(ptr.as_ptr(), len) }
+pub fn anchored_nonnull<'a, A: ?Sized, T>(anchor: &'a A, ptr: NonNull<T>, len: usize) -> &'a [T] {
+    anchored_buf(anchor, ptr.as_ptr().cast_const(), len)
 }
 
-/// Mutable sibling of [`borrow_nonnull`].
+/// Mutable sibling of [`anchored_nonnull`].
 #[inline]
-pub fn borrow_nonnull_mut<'a, T>(ptr: NonNull<T>, len: usize) -> &'a mut [T] {
-    // SAFETY: `NonNull::as_ptr` returns a non-null pointer; remaining
-    // preconditions are the module-level contract.
-    unsafe { core::slice::from_raw_parts_mut(ptr.as_ptr(), len) }
+pub fn anchored_nonnull_mut<'a, A: ?Sized, T>(
+    anchor: &'a mut A,
+    ptr: NonNull<T>,
+    len: usize,
+) -> &'a mut [T] {
+    anchored_buf_mut(anchor, ptr.as_ptr(), len)
 }
 
-/// Borrow a single `T` value at `ptr` as `&T`. Companion of
+/// Take a `&'static mut [T]` over a region installed exactly once and never
+/// freed.
+///
+/// The escape hatch for a one-shot install — a boot-reserved table handed to
+/// the structure that owns it for the rest of the machine's life. `'static` is
+/// what such a region's lifetime actually is, and returning it means the caller
+/// cannot pick a shorter one and then pick it again.
+///
+/// # Safety contract on the caller
+///
+/// The module-level contract, plus: the region is never freed, and this is
+/// called **once** for it. A second call would hand out a second
+/// `&'static mut` to the same bytes, which is aliasing UB — the one-shot
+/// property has to come from the caller's own state machine, and there is no
+/// way to express it here.
+#[inline]
+pub fn install_buf_mut<T: 'static>(ptr: *mut T, len: usize) -> &'static mut [T] {
+    // SAFETY: caller upholds the contract above.
+    unsafe { core::slice::from_raw_parts_mut(ptr, len) }
+}
+
+/// [`with_buf`] for a `NonNull`, with the null-pointer branch elided.
+#[inline]
+pub fn with_nonnull<T, R>(ptr: NonNull<T>, len: usize, f: impl FnOnce(&[T]) -> R) -> R {
+    // SAFETY: `NonNull::as_ptr` returns a non-null pointer; remaining
+    // preconditions are the module-level contract.
+    f(unsafe { core::slice::from_raw_parts(ptr.as_ptr(), len) })
+}
+
+/// Mutable sibling of [`with_nonnull`].
+#[inline]
+pub fn with_nonnull_mut<T, R>(ptr: NonNull<T>, len: usize, f: impl FnOnce(&mut [T]) -> R) -> R {
+    // SAFETY: `NonNull::as_ptr` returns a non-null pointer; remaining
+    // preconditions are the module-level contract.
+    f(unsafe { core::slice::from_raw_parts_mut(ptr.as_ptr(), len) })
+}
+
+/// Borrow a single `T` value at `ptr` for the duration of `f`. Companion of
 /// `&*ptr` — the interior `unsafe` lives here.
 ///
 /// # Safety contract on the caller
 ///
 /// `ptr` must be non-null, aligned for `T`, point at an initialised
 /// `T`, and not be aliased by any concurrent mutable borrow for the
-/// returned lifetime.
+/// duration of `f`.
+#[inline]
+pub fn with_ref<T, R>(ptr: *const T, f: impl FnOnce(&T) -> R) -> R {
+    debug_assert!(!ptr.is_null(), "with_ref: ptr must be non-null");
+    // SAFETY: caller upholds the contract above.
+    f(unsafe { &*ptr })
+}
+
+/// Borrow a single `T` at `ptr` for as long as `anchor` lives.
+///
+/// [`anchored_buf`]'s single-value sibling, for accessors that return a
+/// reference rather than consuming one.
+///
+/// # Safety contract on the caller
+///
+/// [`with_ref`]'s contract, plus: the pointee must stay valid and unaliased
+/// for at least as long as `anchor`.
+#[inline]
+pub fn anchored_ref<'a, A: ?Sized, T>(_anchor: &'a A, ptr: *const T) -> &'a T {
+    debug_assert!(!ptr.is_null(), "anchored_ref: ptr must be non-null");
+    // SAFETY: caller upholds the contract above; `anchor` bounds the lifetime.
+    unsafe { &*ptr }
+}
+
+/// Mutable sibling of [`anchored_ref`]. Takes `&mut A`, so the exclusivity of
+/// the returned reference is the exclusivity of the anchor.
+#[inline]
+pub fn anchored_ref_mut<'a, A: ?Sized, T>(_anchor: &'a mut A, ptr: *mut T) -> &'a mut T {
+    debug_assert!(!ptr.is_null(), "anchored_ref_mut: ptr must be non-null");
+    // SAFETY: caller upholds the contract above; `anchor` bounds the lifetime
+    // and its `&mut` bounds the aliasing.
+    unsafe { &mut *ptr }
+}
+
+/// Borrow a single `T` at `ptr` with a caller-chosen lifetime.
+///
+/// **Prefer [`with_ref`] or [`anchored_ref`].** This form lets the caller pick
+/// the lifetime, so two calls yield two references the compiler believes are
+/// unrelated — and for the mutable sibling that is aliasing UB on the second
+/// call. It survives for `mm/src/paging/tables.rs`, whose walks hold `&mut`
+/// into four different tables at once and need restructuring before they can
+/// scope their borrows. No new caller.
+///
+/// # Safety contract on the caller
+///
+/// [`with_ref`]'s contract, for the whole of the caller-chosen lifetime.
 #[inline]
 pub fn borrow_ref<'a, T>(ptr: *const T) -> &'a T {
     debug_assert!(!ptr.is_null(), "borrow_ref: ptr must be non-null");
@@ -137,23 +258,40 @@ pub fn borrow_ref<'a, T>(ptr: *const T) -> &'a T {
     unsafe { &*ptr }
 }
 
-/// Nullable companion to [`borrow_ref`]. Returns `None` on null, else
-/// a borrow into the pointee with the same caller contract.
-#[inline]
-pub fn try_borrow_ref<'a, T>(ptr: *const T) -> Option<&'a T> {
-    if ptr.is_null() {
-        return None;
-    }
-    Some(borrow_ref(ptr))
-}
-
-/// Mutable sibling of [`borrow_ref`].
+/// Mutable sibling of [`borrow_ref`]. Same warning, more sharply.
 #[inline]
 pub fn borrow_ref_mut<'a, T>(ptr: *mut T) -> &'a mut T {
     debug_assert!(!ptr.is_null(), "borrow_ref_mut: ptr must be non-null");
     // SAFETY: caller upholds the contract above; exclusive access to
-    // `*ptr` for the returned lifetime.
+    // `*ptr` for the caller-chosen lifetime.
     unsafe { &mut *ptr }
+}
+
+/// Nullable companion to [`anchored_ref`]. `None` on null.
+#[inline]
+pub fn try_anchored_ref<'a, A: ?Sized, T>(anchor: &'a A, ptr: *const T) -> Option<&'a T> {
+    if ptr.is_null() {
+        return None;
+    }
+    Some(anchored_ref(anchor, ptr))
+}
+
+/// Nullable companion to [`with_ref`]. `None` on null, without running `f`.
+#[inline]
+pub fn try_with_ref<T, R>(ptr: *const T, f: impl FnOnce(&T) -> R) -> Option<R> {
+    if ptr.is_null() {
+        return None;
+    }
+    Some(with_ref(ptr, f))
+}
+
+/// Mutable sibling of [`with_ref`].
+#[inline]
+pub fn with_ref_mut<T, R>(ptr: *mut T, f: impl FnOnce(&mut T) -> R) -> R {
+    debug_assert!(!ptr.is_null(), "with_ref_mut: ptr must be non-null");
+    // SAFETY: caller upholds the contract above; exclusive access to
+    // `*ptr` for the duration of `f`.
+    f(unsafe { &mut *ptr })
 }
 
 /// Offset a `NonNull<u8>` by `byte_offset` and return the resulting
@@ -178,29 +316,35 @@ pub fn nonnull_byte_offset(base: NonNull<u8>, byte_offset: usize) -> NonNull<u8>
     }
 }
 
-/// Borrow `len` elements of `T` starting at `(base as *mut u8) + byte_offset`
-/// as `&mut [T]`. Folds the kernel-heap pattern of "advance a NonNull
-/// by a byte offset, then take a typed slice of `len` Ts" into one call.
+/// Borrow `len` elements of `T` at `(base as *mut u8) + byte_offset` for the
+/// duration of `f`. Folds the kernel-heap pattern of "advance a NonNull by a
+/// byte offset, then take a typed slice of `len` Ts" into one call.
 ///
 /// Used in `mm/src/kernel_heap.rs` to view a slab object's body or a
 /// large-alloc body that lives at a fixed byte offset past a header
 /// pointer.
 #[inline]
-pub fn borrow_at_mut<'a, T>(base: NonNull<u8>, byte_offset: usize, len: usize) -> &'a mut [T] {
+pub fn with_at_mut<T, R>(
+    base: NonNull<u8>,
+    byte_offset: usize,
+    len: usize,
+    f: impl FnOnce(&mut [T]) -> R,
+) -> R {
     // SAFETY: caller upholds the module-level contract; `base` is
     // NonNull and the byte arithmetic stays inside the caller-owned
     // allocation. Alignment for `T` is asserted below — Miri-detected
     // soundness gap: `from_raw_parts_mut::<T>` is UB on a pointer that
     // is not aligned for `T`, so we trap the buggy-caller case in
     // debug builds rather than silently producing an unaligned slice.
-    unsafe {
+    let slice = unsafe {
         let typed_ptr = base.as_ptr().add(byte_offset) as *mut T;
         debug_assert!(
             (typed_ptr as usize) % core::mem::align_of::<T>() == 0,
-            "borrow_at_mut::<T>: typed pointer is not aligned for T"
+            "with_at_mut::<T>: typed pointer is not aligned for T"
         );
         core::slice::from_raw_parts_mut(typed_ptr, len)
-    }
+    };
+    f(slice)
 }
 
 /// Write `value` to `out` if `out` is non-null; no-op when null.
@@ -344,45 +488,43 @@ mod tests {
     use super::*;
 
     #[test]
-    fn borrow_buf_round_trip() {
+    fn with_buf_round_trip() {
         let src = [10u32, 20, 30, 40];
-        let view = borrow_buf::<u32>(src.as_ptr(), src.len());
-        assert_eq!(view, &src[..]);
+        with_buf::<u32, _>(src.as_ptr(), src.len(), |view| {
+            assert_eq!(view, &src[..]);
+        });
     }
 
     #[test]
-    fn borrow_buf_mut_writes_visible_through_source() {
+    fn with_buf_mut_writes_visible_through_source() {
         let mut src = [0u32; 4];
         let ptr = src.as_mut_ptr();
-        {
-            let view: &mut [u32] = borrow_buf_mut(ptr, 4);
+        with_buf_mut::<u32, _>(ptr, 4, |view| {
             view[0] = 0xaa;
             view[3] = 0xbb;
-        }
+        });
         assert_eq!(src, [0xaa, 0, 0, 0xbb]);
     }
 
     #[test]
-    fn borrow_nonnull_round_trip() {
+    fn with_nonnull_round_trip() {
         let src = [1u8, 2, 3];
         let ptr = NonNull::new(src.as_ptr() as *mut u8).unwrap();
-        let view = borrow_nonnull::<u8>(ptr, src.len());
-        assert_eq!(view, &src[..]);
+        with_nonnull::<u8, _>(ptr, src.len(), |view| {
+            assert_eq!(view, &src[..]);
+        });
     }
 
     #[test]
-    fn borrow_nonnull_mut_writes_visible_through_source() {
+    fn with_nonnull_mut_writes_visible_through_source() {
         let mut src = [0u8; 3];
         let ptr = NonNull::new(src.as_mut_ptr()).unwrap();
-        {
-            let view: &mut [u8] = borrow_nonnull_mut(ptr, 3);
-            view.fill(0x42);
-        }
+        with_nonnull_mut::<u8, _>(ptr, 3, |view| view.fill(0x42));
         assert_eq!(src, [0x42; 3]);
     }
 
     #[test]
-    fn borrow_at_mut_advances_by_byte_offset() {
+    fn with_at_mut_advances_by_byte_offset() {
         // Use a u32-aligned backing storage so the `&mut [u32]` view at
         // byte_offset 4 is sound. A bare `[u8; 16]` only carries 1-byte
         // alignment at the type level and Miri's allocator may hand back
@@ -392,11 +534,10 @@ mod tests {
         struct AlignedBuf([u8; 16]);
         let mut wrap = AlignedBuf([0u8; 16]);
         let base = NonNull::new(wrap.0.as_mut_ptr()).unwrap();
-        {
-            let view: &mut [u32] = borrow_at_mut::<u32>(base, 4, 2);
+        with_at_mut::<u32, _>(base, 4, 2, |view| {
             view[0] = 0xdeadbeefu32;
             view[1] = 0x1234_5678u32;
-        }
+        });
         // First 4 bytes untouched, then u32 LE/BE pattern.
         assert_eq!(&wrap.0[0..4], &[0, 0, 0, 0]);
         assert_eq!(&wrap.0[4..8], &0xdeadbeefu32.to_ne_bytes());

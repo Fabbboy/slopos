@@ -66,12 +66,13 @@ impl MemfdBuffer {
 
     #[inline]
     pub fn as_slice(&self) -> &[u8] {
-        slopos_ostd::util::ptr_buf::borrow_nonnull::<u8>(self.ptr, self.size)
+        slopos_ostd::util::ptr_buf::anchored_nonnull::<_, u8>(self, self.ptr, self.size)
     }
 
     #[inline]
     pub fn as_mut_slice(&mut self) -> &mut [u8] {
-        slopos_ostd::util::ptr_buf::borrow_nonnull_mut::<u8>(self.ptr, self.size)
+        let (ptr, size) = (self.ptr, self.size);
+        slopos_ostd::util::ptr_buf::anchored_nonnull_mut::<_, u8>(self, ptr, size)
     }
 }
 
@@ -112,7 +113,7 @@ impl MappedMemfd {
 
     #[inline]
     pub fn as_slice(&self) -> &[u8] {
-        slopos_ostd::util::ptr_buf::borrow_buf::<u8>(self.ptr, self.size)
+        slopos_ostd::util::ptr_buf::anchored_buf::<_, u8>(self, self.ptr, self.size)
     }
 
     #[inline]
