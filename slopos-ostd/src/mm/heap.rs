@@ -501,9 +501,9 @@ impl<T> KBox<T> {
     /// relies on that to be sound.
     ///
     /// See [`KBox::leak_unsized`] for the `?Sized` case.
-    pub fn leak<T2: ?Sized>(b: KBox<T2>) -> &'static mut T2
+    pub fn leak(b: Self) -> &'static mut T
     where
-        T2: 'static,
+        T: 'static,
     {
         Box::leak(b.inner)
     }
