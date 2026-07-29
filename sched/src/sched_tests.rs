@@ -582,6 +582,87 @@ slopos_testing::stest!(
     suite = sched_core
 );
 
+/// The switch-tail hook releases a parked token too.
+///
+/// `cleanup_current_task_after_switch` is the *deferred* branch — the one a
+/// peer's `task_terminate` hands off to whenever the victim is executing, run
+/// on the victim's own CPU after the register swap. It is the branch that
+/// matters most, because `task_terminate`'s `is_current` path deliberately does
+/// not call `cleanup_terminated_task_resources`, so nothing else can release a
+/// token whose owner died while running.
+///
+/// Driven directly rather than by killing a running task: the kernel test phase
+/// runs in the `drivers` boot step, before `enter_scheduler`, so no task
+/// created here can actually be dispatched — and a test that cannot make its
+/// victim run cannot reach the branch any other way. What is under test is the
+/// hook, and this calls it with exactly the guard and the task state the switch
+/// tail does.
+pub fn test_parked_spawn_drained_by_the_switch_tail_hook() -> TestResult {
+    let _fixture = SchedFixture::new();
+
+    let parked_before = crate::task::parked_spawn_count();
+    let (live_before, _, _, _) = task_slot_census();
+
+    let owner_id = task_create(
+        b"ParkSwitchTail\0".as_ptr() as *const core::ffi::c_char,
+        dummy_task_entry,
+        core::ptr::null_mut(),
+        TaskPriority::Normal.as_u8(),
+        TASK_FLAG_KERNEL_MODE,
+    );
+    if owner_id == INVALID_TASK_ID {
+        klog_info!("SCHED_TEST: could not create the switch-tail owner");
+        return TestResult::Fail;
+    }
+
+    let Some(pending) = build_parkable_child() else {
+        let _ = task_terminate(owner_id);
+        klog_info!("SCHED_TEST: could not build the child to park");
+        return TestResult::Fail;
+    };
+    let Ok(guard) = crate::task::SpawnGuard::park_for_owner(owner_id, pending) else {
+        let _ = task_terminate(owner_id);
+        klog_info!("SCHED_TEST: the spawn spine was full");
+        return TestResult::Fail;
+    };
+    core::mem::forget(guard);
+
+    {
+        let Some(owner) = task_find_by_id(owner_id) else {
+            let _ = crate::task::drain_parked_spawns();
+            klog_info!("SCHED_TEST: the switch-tail owner vanished");
+            return TestResult::Fail;
+        };
+        // The state the switch tail finds: terminated, with its kernel stack
+        // still mapped. Anything else and the hook returns early.
+        owner.set_status(TaskStatus::Terminated);
+        crate::task::cleanup_current_task_after_switch(&owner);
+    }
+    crate::task::task_graveyard_drain();
+
+    if crate::task::parked_spawn_count() != parked_before {
+        klog_info!("SCHED_TEST: the switch-tail hook left the token parked");
+        let _ = crate::task::drain_parked_spawns();
+        return TestResult::Fail;
+    }
+    let (live_after, _, _, _) = task_slot_census();
+    if live_after != live_before {
+        klog_info!(
+            "SCHED_TEST: live task count {} -> {} across the switch-tail hook",
+            live_before,
+            live_after
+        );
+        return TestResult::Fail;
+    }
+
+    TestResult::Pass
+}
+
+slopos_testing::stest!(
+    name = test_parked_spawn_drained_by_the_switch_tail_hook,
+    suite = sched_core
+);
+
 /// A publication that fails leaves the task nascent, not reserved.
 ///
 /// `schedule_task`/`schedule_new_task` reserve scheduler ownership by CASing
