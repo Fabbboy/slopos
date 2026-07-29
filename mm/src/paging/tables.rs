@@ -305,7 +305,7 @@ pub fn virt_to_phys(vaddr: VirtAddr) -> PhysAddr {
     virt_to_phys_for_dir(KERNEL_PAGE_DIR.get(), vaddr)
 }
 
-fn map_page_in_directory(
+pub(crate) fn map_page_in_directory(
     page_dir: *mut ProcessPageDir,
     vaddr: VirtAddr,
     paddr: PhysAddr,
@@ -440,7 +440,7 @@ pub fn map_page_4kb(vaddr: VirtAddr, paddr: PhysAddr, flags: u64) -> c_int {
     map_page_in_directory(KERNEL_PAGE_DIR.get(), vaddr, paddr, flags, PAGE_SIZE_4KB)
 }
 
-fn unmap_page_in_directory(page_dir: *mut ProcessPageDir, vaddr: VirtAddr) -> PhysAddr {
+pub(crate) fn unmap_page_in_directory(page_dir: *mut ProcessPageDir, vaddr: VirtAddr) -> PhysAddr {
     let Some(pml4_table) = ProcessPageDir::pml4_table_mut(page_dir) else {
         return PhysAddr::NULL;
     };

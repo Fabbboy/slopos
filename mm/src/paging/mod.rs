@@ -10,7 +10,7 @@
 //! which routes through the OSTD cursor.
 
 pub mod page_table_defs;
-mod tables;
+pub(crate) mod tables;
 pub mod walker;
 
 pub use crate::error::{MmError, MmResult};
