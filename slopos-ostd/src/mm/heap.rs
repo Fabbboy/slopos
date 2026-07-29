@@ -493,12 +493,17 @@ impl<T> KBox<T> {
 
     /// Leak the boxed value into a static-lifetime reference.
     ///
-    /// Moved into [`KBox::leak_unsized`] for the unsized case. Kept
-    /// here for backward-compat call sites that hold `KBox<T>` with
-    /// `T: Sized`.
-    pub fn leak<'a>(b: Self) -> &'a mut T
+    /// `&'static mut T` rather than a caller-chosen `&'a mut T`: the allocation
+    /// is deliberately never freed, so `'static` is what it actually is, and a
+    /// lifetime the caller picks would be one it could pick twice. The box is
+    /// consumed, so a second call against the same allocation cannot be
+    /// written either — but saying `'static` means the signature no longer
+    /// relies on that to be sound.
+    ///
+    /// See [`KBox::leak_unsized`] for the `?Sized` case.
+    pub fn leak<T2: ?Sized>(b: KBox<T2>) -> &'static mut T2
     where
-        T: 'a,
+        T2: 'static,
     {
         Box::leak(b.inner)
     }

@@ -33,37 +33,41 @@ pub use devres::{Devres, DevresError, ResourceObject};
 ///
 /// - `ptr` is aligned for `Self`,
 /// - `ptr` is dereferenceable for `size_of::<Self>()` bytes,
-/// - the underlying allocation outlives `'a`,
-/// - for [`from_ptr`](FromRawPtr::from_ptr): no aliased `&mut Self`
-///   exists for the duration of `'a`,
-/// - for [`from_ptr_mut`](FromRawPtr::from_ptr_mut): no other live
-///   borrow (`&Self` or `&mut Self`) exists for the duration of `'a`.
+/// - the allocation is published once and never freed,
+/// - no aliased `&mut Self` ever exists.
 ///
-/// Mirrors the contract documented on
-/// [`crate::irq::interrupt_frame::InterruptFrame::from_ptr`]; the
-/// blanket impl absorbs the `unsafe { &*ptr }` deref so consumer
-/// crates stay in safe Rust.
-pub trait FromRawPtr: Sized {
-    fn from_ptr<'a>(ptr: *const Self) -> Option<&'a Self>;
-    fn from_ptr_mut<'a>(ptr: *mut Self) -> Option<&'a mut Self>;
+/// # Why `&'static`, and why there is no `_mut` form
+///
+/// Every user of this trait is a device handle whose backing pointer is
+/// published once at registration and outlives the machine, so `'static` is
+/// what the reference actually is. A caller-chosen `'a` would have been
+/// strictly worse than useless here: the caller picks it, so two calls yield
+/// two references the compiler believes are unrelated, and the blanket impl
+/// makes that available for *every* sized type in the kernel.
+///
+/// The mutable form is gone rather than made `'static`, because `'static`
+/// would not have fixed it — two `&'static mut` to one place is still instant
+/// aliasing UB. A future caller that needs one wants a scoped closure, not
+/// this trait.
+pub trait FromRawPtr: Sized + 'static {
+    fn from_ptr(ptr: *const Self) -> Option<&'static Self>;
 
     /// Reborrow `ptr` as `&Self` without a null check.
     ///
     /// Caller invariant: `ptr` is non-null, aligned, dereferenceable
     /// for `size_of::<Self>()` bytes, and no aliasing `&mut Self`
-    /// exists for the lifetime `'a`. Matches the standard
-    /// `&*ptr` precondition.
+    /// exists. Matches the standard `&*ptr` precondition.
     ///
     /// Used by device handles whose backing `*const Self` is published
     /// once at registration and outlives every consumer (e.g. the net
     /// `DeviceHandle::dev` pointer is valid for the device's
     /// registered lifetime).
-    fn from_ptr_unchecked<'a>(ptr: *const Self) -> &'a Self;
+    fn from_ptr_unchecked(ptr: *const Self) -> &'static Self;
 }
 
-impl<T> FromRawPtr for T {
+impl<T: 'static> FromRawPtr for T {
     #[inline]
-    fn from_ptr<'a>(ptr: *const Self) -> Option<&'a Self> {
+    fn from_ptr(ptr: *const Self) -> Option<&'static Self> {
         if ptr.is_null() {
             None
         } else {
@@ -74,17 +78,7 @@ impl<T> FromRawPtr for T {
     }
 
     #[inline]
-    fn from_ptr_mut<'a>(ptr: *mut Self) -> Option<&'a mut Self> {
-        if ptr.is_null() {
-            None
-        } else {
-            // SAFETY: as `from_ptr`, plus exclusive-access asserted.
-            Some(unsafe { &mut *ptr })
-        }
-    }
-
-    #[inline]
-    fn from_ptr_unchecked<'a>(ptr: *const Self) -> &'a Self {
+    fn from_ptr_unchecked(ptr: *const Self) -> &'static Self {
         // SAFETY: caller asserts the contract documented on
         // `from_ptr_unchecked` — non-null, aligned, dereferenceable,
         // no aliasing mutable borrow.
@@ -101,11 +95,11 @@ impl<T> FromRawPtr for T {
 ///
 /// # Safety
 ///
-/// Caller invariant: `ptr` is non-null, dereferenceable, and no
-/// aliasing `&mut T` exists for the lifetime `'a`. Matches the
-/// standard `&*ptr` precondition.
+/// Caller invariant: `ptr` is non-null, dereferenceable, published once and
+/// never freed, and no aliasing `&mut T` ever exists. Matches the standard
+/// `&*ptr` precondition.
 #[inline]
-pub fn borrow_dyn<'a, T: ?Sized>(ptr: *const T) -> &'a T {
+pub fn borrow_dyn<T: ?Sized + 'static>(ptr: *const T) -> &'static T {
     // SAFETY: caller upholds the contract documented above.
     unsafe { &*ptr }
 }

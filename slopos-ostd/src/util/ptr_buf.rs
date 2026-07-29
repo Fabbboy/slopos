@@ -213,8 +213,12 @@ pub fn borrow_at_mut<'a, T>(base: NonNull<u8>, byte_offset: usize, len: usize) -
 /// `__start_<section>` and `__stop_<section>` symbols flanking a
 /// contiguous array. Absorbs both the `*const T` pointer arithmetic
 /// (`stop.offset_from(start)`) and the slice construction.
+///
+/// `'static` because that is the honest lifetime of a linker section: it is
+/// part of the image and is never freed. A caller-chosen `'a` would have let
+/// two calls hand out two references the compiler believed were unrelated.
 #[inline]
-pub fn section_slice<'a, T>(start: *const T, stop: *const T) -> &'a [T] {
+pub fn section_slice<T: 'static>(start: *const T, stop: *const T) -> &'static [T] {
     // SAFETY: caller upholds the module-level contract: `start` and
     // `stop` flank a single contiguous array of `T` values (the linker
     // section). `offset_from` requires both pointers to land in the
@@ -292,34 +296,6 @@ pub fn zero_bytes_at_kernel_va(addr: u64, len: usize) {
     let p = addr as *mut u8;
     // SAFETY: caller upholds the per-helper contract above.
     unsafe { core::ptr::write_bytes(p, 0, len) };
-}
-
-/// Volatile-borrow a `core::sync::atomic::AtomicU32` at the user-space
-/// virtual address `addr` (already mapped into the current process's
-/// VmSpace by the caller's syscall validation). The interior `unsafe`
-/// (a `read_volatile` of the typed pointer to extract a borrow into
-/// the atomic) lives here.
-///
-/// Returns the borrow tied to lifetime `'a`. The futex hot path uses
-/// this to call `.load(Ordering::SeqCst)` on the in-place atomic;
-/// `read_volatile` semantics ensure the read is not cached across the
-/// surrounding `unsafe`-free Rust.
-///
-/// # Safety contract on the caller
-///
-/// `addr` must be a 4-byte-aligned, currently-mapped user-space
-/// address inside the process whose VmSpace is active on this CPU.
-/// The mapping must remain stable for the duration of `'a` — futex
-/// callers hold the per-bucket spin lock plus IRQs-off, which jointly
-/// satisfy that contract.
-#[inline]
-pub fn borrow_user_atomic_u32<'a>(addr: u64) -> &'a core::sync::atomic::AtomicU32 {
-    let p = addr as *const core::sync::atomic::AtomicU32;
-    // SAFETY: caller-supplied address is validated user-space,
-    // 4-byte aligned, mapped in the current process VmSpace, and the
-    // surrounding bucket-lock + IRQs-off pin the mapping during the
-    // borrow.
-    unsafe { &*p }
 }
 
 /// Append a NUL terminator at `buf[len]` after copying `len` bytes

@@ -75,11 +75,15 @@ impl<M: PageTableFrameMapping> PageTableWalker<M> {
     }
 
     #[inline]
-    pub fn next_table<'a>(
+    /// The lifetime is the walker's, not the caller's: the table lives in the
+    /// HHDM mapping `M` resolves against, which the walker holds, so tying the
+    /// borrow to `&self` is both honest and what stops two calls handing out
+    /// two independently-chosen references to the same table.
+    pub fn next_table(
         &self,
         entry: &PageTableEntry,
         level: PageTableLevel,
-    ) -> MmResult<&'a PageTable> {
+    ) -> MmResult<&PageTable> {
         if !entry.is_present() {
             return Err(MmError::NotMapped {
                 address: entry.address().as_u64(),
@@ -103,11 +107,12 @@ impl<M: PageTableFrameMapping> PageTableWalker<M> {
     }
 
     #[inline]
-    pub fn next_table_mut<'a>(
+    /// See [`next_table`](Self::next_table) for why the lifetime is `&self`'s.
+    pub fn next_table_mut(
         &self,
         entry: &PageTableEntry,
         level: PageTableLevel,
-    ) -> MmResult<&'a mut PageTable> {
+    ) -> MmResult<&mut PageTable> {
         if !entry.is_present() {
             return Err(MmError::NotMapped {
                 address: entry.address().as_u64(),

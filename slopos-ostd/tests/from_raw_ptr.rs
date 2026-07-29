@@ -26,27 +26,6 @@ fn from_ptr_returns_none_for_null() {
 }
 
 #[test]
-fn from_ptr_mut_round_trip_mutates_target() {
-    let mut p = Probe {
-        counter: 1,
-        label: 2,
-    };
-    {
-        let r = Probe::from_ptr_mut(&mut p as *mut Probe).expect("non-null mut pointer");
-        r.counter = 99;
-        r.label = 100;
-    }
-    assert_eq!(p.counter, 99);
-    assert_eq!(p.label, 100);
-}
-
-#[test]
-fn from_ptr_mut_returns_none_for_null() {
-    let null: *mut Probe = core::ptr::null_mut();
-    assert!(Probe::from_ptr_mut(null).is_none());
-}
-
-#[test]
 fn from_ptr_works_for_heap_box() {
     let boxed: Box<u64> = Box::new(0xDEAD_BEEF_DEAD_BEEF);
     let raw = Box::into_raw(boxed);
