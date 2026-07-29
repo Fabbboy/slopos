@@ -755,7 +755,8 @@ pub fn task_terminate(task_id: u32) -> c_int {
     // Holding it for the whole function is what lets the teardown below work
     // from a borrow: nothing it calls can be the last release.
     let target: Option<TaskRef> = if task_id == u32::MAX {
-        NonNull::new(scheduler::scheduler_get_current_task()).map(TaskRef::clone_of)
+        crate::task_struct::Current::get()
+            .and_then(|current| NonNull::new(current.as_ptr()).map(TaskRef::clone_of))
     } else {
         task_find_by_id(task_id)
     };

@@ -1,7 +1,6 @@
+use slopos_ostd::task::TaskAddr;
+
 use super::Task;
-use super::task_accessors::{
-    task_add_total_runtime, task_last_run_timestamp, task_set_last_run_timestamp,
-};
 use super::task_table::{try_with_task_manager, with_task_manager};
 
 pub fn get_task_stats(total_tasks: *mut u32, active_tasks: *mut u32, context_switches: *mut u64) {
@@ -13,23 +12,27 @@ pub fn get_task_stats(total_tasks: *mut u32, active_tasks: *mut u32, context_swi
     });
 }
 
-pub fn task_record_context_switch(from: *mut Task, to: *mut Task, timestamp: u64) {
-    if !from.is_null() {
-        let last = task_last_run_timestamp(from).unwrap_or(0);
+pub fn task_record_context_switch(from: Option<&Task>, to: Option<&Task>, timestamp: u64) {
+    if let Some(from) = from {
+        let last = from.last_run_timestamp();
         if last != 0 {
-            task_add_total_runtime(from, timestamp.saturating_sub(last));
+            from.add_total_runtime(timestamp.saturating_sub(last));
         }
-        task_set_last_run_timestamp(from, 0);
+        from.set_last_run_timestamp(0);
     }
 
-    if !to.is_null() {
-        task_set_last_run_timestamp(to, timestamp);
-    }
-
-    if !to.is_null() && to != from {
-        with_task_manager(|mgr| {
-            mgr.total_context_switches += 1;
-        });
+    if let Some(to) = to {
+        to.set_last_run_timestamp(timestamp);
+        // Task identity is an address question, not a value question, so this
+        // compares `TaskAddr` rather than reaching for a `PartialEq` on the
+        // task body — `TaskInner` deliberately has none. The `from == None`
+        // case counts as a switch, matching the null-`from` behaviour a raw
+        // pointer comparison gave.
+        if from.map(TaskAddr::of) != Some(TaskAddr::of(to)) {
+            with_task_manager(|mgr| {
+                mgr.total_context_switches += 1;
+            });
+        }
     }
 }
 

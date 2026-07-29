@@ -422,16 +422,6 @@ impl<K, U> IdleTask<K, U> {
     pub fn addr(&self) -> crate::task::TaskAddr {
         crate::task::TaskAddr::of(self.task())
     }
-
-    /// The underlying pointer.
-    ///
-    /// Transitional, exactly as [`CurrentTask::as_ptr`]: it exists so call
-    /// sites can migrate to the guard before the surfaces they feed have been
-    /// retyped, and goes away with the last of them.
-    #[inline]
-    pub fn as_ptr(&self) -> *mut TaskInner<K, U> {
-        self.ptr.as_ptr()
-    }
 }
 
 // ---------------------------------------------------------------------------

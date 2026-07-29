@@ -1,5 +1,4 @@
 use core::ffi::c_int;
-use core::ptr;
 use core::ptr::NonNull;
 use core::sync::atomic::{AtomicU64, Ordering};
 
@@ -220,10 +219,7 @@ fn reset_task_quantum(task: &Task) {
 // the departed CPU would make any later `AbortOnUnwind` drop there abort
 // a healthy kernel.
 #[inline]
-fn save_live_recovery_depth(task: *mut Task) {
-    if task.is_null() {
-        return;
-    }
+fn save_live_recovery_depth(task: &Task) {
     task_recovery_depth_store(task, slopos_arch::pcr::recovery_depth());
     task_panic_in_flight_store(task, slopos_arch::pcr::panic_in_flight_depth());
 }
@@ -351,11 +347,7 @@ pub fn dispatch_task_for_test(cpu_id: usize, task_id: u32) -> bool {
 /// publisher, rather than on every dispatch: the slot has a single production
 /// writer, so a property checked once at install holds for every later reader.
 #[inline]
-pub(super) fn install_idle_task(cpu_id: usize, task: *mut Task) {
-    debug_assert!(
-        !task.is_null(),
-        "install_idle_task() must receive a non-null task"
-    );
+pub(super) fn install_idle_task(cpu_id: usize, task: &Task) {
     debug_assert!(
         task_id_of(task) != Some(INVALID_TASK_ID),
         "install_idle_task() must receive a registered task"
@@ -372,7 +364,7 @@ pub(super) fn install_idle_task(cpu_id: usize, task: *mut Task) {
         task_name_looks_idle(task),
         "install_idle_task() must receive a task named idle/<n>"
     );
-    slopos_arch::pcr::set_idle_task(cpu_id, task as *mut ());
+    slopos_arch::pcr::set_idle_task(cpu_id, core::ptr::from_ref(task).cast::<()>().cast_mut());
 }
 
 fn switch_to_kernel_address_space() {
@@ -538,11 +530,7 @@ fn ensure_idle_switch_ctx_valid(idle_task: &Task) -> bool {
 
 fn switch_from_current_to_idle(cpu_id: usize, current: Option<&Task>, idle_task: &Task) {
     let timestamp = kdiag_timestamp();
-    task_record_context_switch(
-        current.map_or(core::ptr::null_mut(), |t| core::ptr::from_ref(t).cast_mut()),
-        core::ptr::from_ref(idle_task).cast_mut(),
-        timestamp,
-    );
+    task_record_context_switch(current, Some(idle_task), timestamp);
 
     // Validate the idle context BEFORE publishing it as current_task.
     // Otherwise, other CPUs could observe current_task pointing at an
@@ -563,7 +551,7 @@ fn switch_from_current_to_idle(cpu_id: usize, current: Option<&Task>, idle_task:
     // descheduled frame cannot unwind until its task resumes.
     let switch_abort_guard = slopos_ostd::panic::AbortOnUnwind::new();
     if let Some(current) = current {
-        save_live_recovery_depth(core::ptr::from_ref(current).cast_mut());
+        save_live_recovery_depth(current);
     }
 
     // Scheduler hot path: IRQs disabled by caller; the safe-fn shims
@@ -600,7 +588,7 @@ fn switch_from_current_to_idle(cpu_id: usize, current: Option<&Task>, idle_task:
 }
 
 #[inline]
-fn task_has_no_preempt_flag(task: *mut Task) -> bool {
+fn task_has_no_preempt_flag(task: &Task) -> bool {
     task_has_flag(task, TASK_FLAG_NO_PREEMPT)
 }
 
@@ -1174,11 +1162,7 @@ fn execute_task(cpu_id: usize, from_task: Option<&Task>, to_task: &Task) {
     }
 
     let timestamp = kdiag_timestamp();
-    task_record_context_switch(
-        from_task.map_or(core::ptr::null_mut(), |t| core::ptr::from_ref(t).cast_mut()),
-        core::ptr::from_ref(to_task).cast_mut(),
-        timestamp,
-    );
+    task_record_context_switch(from_task, Some(to_task), timestamp);
 
     // Mark task as physically on this CPU. The dispatcher's re-enqueue
     // check at run_ready_task_from_idle (below) reads this flag before
@@ -1193,7 +1177,7 @@ fn execute_task(cpu_id: usize, from_task: Option<&Task>, to_task: &Task) {
     let switch_abort_guard = slopos_ostd::panic::AbortOnUnwind::new();
     task_set_on_cpu(to_task, true);
     if let Some(from_task) = from_task {
-        save_live_recovery_depth(core::ptr::from_ref(from_task).cast_mut());
+        save_live_recovery_depth(from_task);
     }
 
     // Scheduler hot path: IRQs disabled by caller; switch_ctx pointers
@@ -1332,11 +1316,7 @@ pub(crate) fn run_ready_task_from_idle(cpu_id: usize, idle_task: &Task) -> bool 
     execute_task(cpu_id, Some(idle_task), next_task);
 
     let timestamp = kdiag_timestamp();
-    task_record_context_switch(
-        core::ptr::from_ref(next_task).cast_mut(),
-        core::ptr::from_ref(idle_task).cast_mut(),
-        timestamp,
-    );
+    task_record_context_switch(Some(next_task), Some(idle_task), timestamp);
 
     dispatch(cpu_id, idle_task);
     slopos_ostd::sync::rcu_note_qs();
@@ -2137,10 +2117,18 @@ pub fn unblock_task_id(task_id: u32) -> c_int {
 /// Unified task exit for all CPUs.
 /// Terminates the current task and switches to idle via schedule().
 pub fn scheduler_task_exit_impl() -> ! {
-    let current = scheduler_get_current_task();
     let cpu_id = slopos_arch::pcr::get_current_cpu();
 
-    if current.is_null() {
+    // Scoped, and never held across the `schedule()` below: by then the PCR
+    // names the successor and the guard would describe the wrong task.
+    let recorded = if let Some(current) = Current::get() {
+        task_record_context_switch(Some(current.task()), None, kdiag_timestamp());
+        true
+    } else {
+        false
+    };
+
+    if !recorded {
         klog_info!("scheduler_task_exit: No current task on CPU {}", cpu_id);
         // No current task - just schedule, which will switch to idle
         schedule();
@@ -2154,9 +2142,6 @@ pub fn scheduler_task_exit_impl() -> ! {
         slopos_arch::cpu::enable_interrupts();
         slopos_ostd::cpu::x86_64::core::halt_loop();
     }
-
-    let timestamp = kdiag_timestamp();
-    task_record_context_switch(current, ptr::null_mut(), timestamp);
 
     if crate::task::task_terminate(u32::MAX) != 0 {
         klog_info!("scheduler_task_exit: Failed to terminate current task");
@@ -2204,24 +2189,26 @@ fn deferred_reschedule_callback() {
         return;
     }
 
-    let current = scheduler_get_current_task();
-    if task_has_no_preempt_flag(current) {
-        return;
-    }
-
-    // SM_PREEMPT discipline: an
-    // involuntary reschedule must never park a task that has committed
-    // `Running → Blocked` but is still executing its blocking protocol.
-    // Every wait primitive CASes to Blocked under its queue lock and only
-    // afterwards re-checks the condition / arms its sleep timeout / calls
-    // the voluntary yield — and the queue guard's drop lands exactly here
-    // when a reschedule went pending during the locked section. Switching
-    // away at that point deschedules the task with no wake armed: a
-    // producer whose event landed in the gap finds no waiter to wake and
-    // no timeout exists yet, so the task is parked forever (the exec-time
-    // blk-read hang). The task's own voluntary `schedule()` is at most a
-    // few instructions away; skipping the preemption here costs nothing.
-    if matches!(task_status(current), Some(TaskStatus::Blocked)) {
+    // Both tests read the running task, and the guard is scoped to them:
+    // `schedule()` below republishes `PCR.current_task`, so a guard held
+    // across it would describe the successor. A CPU with no current task keeps
+    // today's behaviour and falls through to the reschedule.
+    //
+    // SM_PREEMPT discipline: an involuntary reschedule must never park a task
+    // that has committed `Running → Blocked` but is still executing its
+    // blocking protocol. Every wait primitive CASes to Blocked under its queue
+    // lock and only afterwards re-checks the condition / arms its sleep
+    // timeout / calls the voluntary yield — and the queue guard's drop lands
+    // exactly here when a reschedule went pending during the locked section.
+    // Switching away at that point deschedules the task with no wake armed: a
+    // producer whose event landed in the gap finds no waiter to wake and no
+    // timeout exists yet, so the task is parked forever (the exec-time
+    // blk-read hang). The task's own voluntary `schedule()` is at most a few
+    // instructions away; skipping the preemption here costs nothing.
+    let skip = Current::get().is_some_and(|current| {
+        task_has_no_preempt_flag(current.task()) || current.task().status() == TaskStatus::Blocked
+    });
+    if skip {
         return;
     }
 
@@ -2253,38 +2240,6 @@ pub fn install_reschedule_callback<'b>(token: &slopos_ostd::sync::BspToken<'b>) 
 
 pub fn scheduler_is_enabled() -> c_int {
     SCHEDULER_ENABLED.load(Ordering::Acquire) as c_int
-}
-
-pub fn scheduler_get_current_task() -> *mut Task {
-    // PCR.current_task is the source of truth; written by `dispatch()`
-    // on every context switch and read by SafeStack's naked
-    // `__safestack_pointer_address` on every instrumented prologue.
-    // Bootstrap stubs are filtered out — they are valid SafeStack
-    // slot targets (they carry a primed `unsafe_stack_sp`) but are
-    // semantically "no scheduled task" for scheduler-facing readers.
-    let ptr = slopos_arch::pcr::get_current_task() as *mut Task;
-    if super::safestack_rt::is_bootstrap_task_ptr(ptr.cast()) {
-        core::ptr::null_mut()
-    } else {
-        ptr
-    }
-}
-
-/// Cross-CPU variant — read `cpu_id`'s current task pointer.
-#[inline]
-pub fn scheduler_get_current_task_for(cpu_id: usize) -> *mut Task {
-    let ptr = slopos_arch::pcr::get_current_task_for(cpu_id) as *mut Task;
-    if super::safestack_rt::is_bootstrap_task_ptr(ptr.cast()) {
-        core::ptr::null_mut()
-    } else {
-        ptr
-    }
-}
-
-/// Cross-CPU idle-task getter.
-#[inline]
-pub fn scheduler_get_idle_task_for(cpu_id: usize) -> *mut Task {
-    slopos_arch::pcr::get_idle_task(cpu_id) as *mut Task
 }
 
 /// ID of the task running on this CPU, or 0 when there is none.
@@ -2445,7 +2400,7 @@ pub fn scheduler_timer_tick() {
         return;
     }
 
-    if task_has_no_preempt_flag(current.as_ptr()) {
+    if task_has_no_preempt_flag(current.task()) {
         return;
     }
 

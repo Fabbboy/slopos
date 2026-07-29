@@ -322,7 +322,7 @@ pub fn create_idle_task_for_cpu(cpu_id: usize) -> c_int {
     idle_guard.set_status(TaskStatus::Running);
     idle_guard.set_sched_placement(SchedPlacement::OnCpu);
 
-    super::scheduler::install_idle_task(cpu_id, idle_task);
+    super::scheduler::install_idle_task(cpu_id, &idle_guard);
 
     0
 }
