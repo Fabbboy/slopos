@@ -40,7 +40,6 @@ use slopos_ostd::klog_info;
 use slopos_ostd::mm::vm_space::VmSpace;
 use slopos_ostd::panic_recovery;
 use slopos_ostd::sync::once_lock::OnceLock;
-use slopos_ostd::user::context::UserContext;
 use slopos_ostd::user::mode::{ReturnReason, UserMode};
 
 use slopos_sched::scheduler::scheduler_task_exit_impl;
@@ -89,11 +88,12 @@ fn user_task_loop() -> ! {
     let current = Current::get().expect("user_task_loop: dispatched with no current task");
     let ctx_ptr = current.task().user_ctx_ptr(&current);
     loop {
-        let ctx_ref =
-            UserContext::from_ptr_mut(ctx_ptr).expect("user_task_loop: task has no user context");
-
+        // The borrow ends before `syscall_handle` runs, which still derives a
+        // `&mut UserContext` from `ctx_ptr`: that derivation retags every byte
+        // of the context as exclusive and would invalidate a borrow held
+        // across it.
         let reason = {
-            let user_mode = UserMode::new(ctx_ref, space);
+            let user_mode = UserMode::new(current.task().user_ctx(&current), space);
             user_mode.execute()
         };
 

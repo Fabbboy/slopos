@@ -890,9 +890,24 @@ impl<K, U> TaskInner<K, U> {
         unsafe { fpu_reset_in_place(self.fpu_state.get_ptr(witness)) };
     }
 
-    /// This task's user-mode register snapshot, authorised by `witness`. Raw
-    /// rather than `&mut` for the reason `TaskOwnCell::get_ptr` is: two
-    /// witnesses on one task may legitimately coexist.
+    /// This task's user-mode register snapshot, authorised by `witness`.
+    ///
+    /// Shared rather than exclusive: the register file lives in a cell, so a
+    /// shared borrow is all any writer needs, and two witnesses on one task —
+    /// an interrupt handler above a syscall — may legitimately coexist. The
+    /// borrow is the task's own, because the context lives inside it.
+    #[inline]
+    pub fn user_ctx(&self, witness: &impl TaskExclusive<K, U>) -> &UserContext {
+        debug_assert!(
+            core::ptr::eq(witness.witnessed(), self),
+            "witness names a different task"
+        );
+        crate::util::ptr_buf::anchored_ref(self, self.user_ctx.get_ptr(witness))
+    }
+
+    /// This task's user-mode register snapshot as a raw pointer, authorised by
+    /// `witness`. Raw rather than `&mut` for the reason `TaskOwnCell::get_ptr`
+    /// is: two witnesses on one task may legitimately coexist.
     #[inline]
     pub fn user_ctx_ptr(&self, witness: &impl TaskExclusive<K, U>) -> *mut UserContext {
         debug_assert!(
