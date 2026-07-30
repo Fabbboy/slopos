@@ -57,11 +57,11 @@ pub struct ProcessPageDir {
     pub pml4_phys: PhysAddr,
     pub ref_count: u32,
     pub process_id: u32,
-    /// Intrusive next-link. `KernelSync` wraps the raw pointer so the
-    /// surrounding struct auto-derives `Send + Sync`; a descriptor is
-    /// owned by one process and reached only through the per-process
-    /// `SpinLock` in `process_vm.rs`, so the link carries no lock of its
-    /// own.
+    /// Intrusive next-link, written when a descriptor is built and
+    /// traversed by nothing. `KernelSync` wraps the raw pointer so the
+    /// surrounding struct auto-derives `Send + Sync` — which it needs
+    /// because the descriptor handle itself is handed out raw by
+    /// `paging_get_kernel_directory` and `process_vm_get_page_dir`.
     pub next: slopos_ostd::sync::KernelSync<*mut ProcessPageDir>,
     pub kernel_mapping_gen: u64,
     pub mm_ctx_id: crate::mmu::MmContextId,
@@ -521,8 +521,8 @@ pub fn paging_get_kernel_directory() -> *mut ProcessPageDir {
 
 pub fn init_paging() {
     let cr3 = get_cr3();
-    // Every page-table frame is reached through the HHDM, so a CR3 the
-    // HHDM cannot translate is a tree these functions cannot walk.
+    // `to_virt` panics on its own if the HHDM is not up, so what is left
+    // to catch here is a null CR3 — a root the descent cannot start from.
     if cr3.to_virt().is_null() {
         panic!("Failed to translate kernel PML4 physical address");
     }

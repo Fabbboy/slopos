@@ -13,8 +13,6 @@
 //! prune forgets leaks a page, and one it tracks twice hands the same
 //! frame to the buddy on two paths.
 
-use core::sync::atomic::Ordering;
-
 use slopos_abi::addr::{PhysAddr, VirtAddr};
 use slopos_ostd::util::ptr_buf;
 use slopos_testing::TestResult;
@@ -41,16 +39,23 @@ fn free_pages() -> u32 {
     free
 }
 
-/// The HHDM view of the page-table frame at `table`, as an entry array.
+/// The HHDM view of the page-table frame at `table`, as a raw entry array.
 ///
-/// The three helpers below reach a frame through the same raw-pointer
-/// primitives `page_table_defs` uses, but compute the base and the index
-/// themselves rather than calling `entry_at` / `set_entry_at` /
-/// `zero_table_at`. That independence is what makes them an oracle: a
-/// descent that writes the wrong slot must not be able to hide behind a
-/// check that reads the same wrong slot.
+/// The three helpers below index that array as a `u64` slice: the slot
+/// address comes from rustc's bounds-checked slice indexing, not from the
+/// base-plus-index arithmetic `entry_at` / `set_entry_at` /
+/// `zero_table_at` perform. That is what makes them an oracle rather than
+/// a second opinion — a descent that writes the wrong slot must not be
+/// able to hide behind a check that computes the same wrong slot the same
+/// way. A whole-frame view is honest here and nowhere in production: a
+/// scratch tree is installed in no CR3, so no hardware walker and no
+/// other CPU can touch the frame while the borrow is live.
 fn table_base(table: PhysAddr) -> *mut u64 {
     table.to_virt().as_mut_ptr()
+}
+
+fn with_entries<R>(table: PhysAddr, f: impl FnOnce(&mut [u64]) -> R) -> R {
+    ptr_buf::with_buf_mut::<u64, _>(table_base(table), PAGE_TABLE_ENTRIES, f)
 }
 
 fn new_table() -> Option<PhysAddr> {
@@ -58,26 +63,18 @@ fn new_table() -> Option<PhysAddr> {
     if phys.is_null() {
         return None;
     }
-    // Linked into no tree and installed in no CR3, so this is the
-    // frame's only reachable name and a whole-frame view is honest here.
-    ptr_buf::with_buf_mut::<u64, _>(table_base(phys), PAGE_TABLE_ENTRIES, |entries| {
-        entries.fill(PageTableEntry::EMPTY.as_raw())
+    with_entries(phys, |entries| {
+        entries.fill(PageTableEntry::EMPTY.as_raw());
     });
     Some(phys)
 }
 
 fn set_entry(table: PhysAddr, index: usize, entry: PageTableEntry) {
-    debug_assert!(index < PAGE_TABLE_ENTRIES);
-    ptr_buf::with_atomic_u64_at(table_base(table), index, |slot| {
-        slot.store(entry.as_raw(), Ordering::Relaxed)
-    });
+    with_entries(table, |entries| entries[index] = entry.as_raw());
 }
 
 fn entry(table: PhysAddr, index: usize) -> PageTableEntry {
-    debug_assert!(index < PAGE_TABLE_ENTRIES);
-    ptr_buf::with_atomic_u64_at(table_base(table), index, |slot| {
-        PageTableEntry::from_raw(slot.load(Ordering::Relaxed))
-    })
+    with_entries(table, |entries| PageTableEntry::from_raw(entries[index]))
 }
 
 impl ScratchTree {

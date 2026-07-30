@@ -184,9 +184,19 @@ impl core::fmt::Debug for PageTableEntry {
 /// is exactly one 4 KiB page of 8-byte entries.
 pub const PAGE_TABLE_ENTRIES: usize = 512;
 
+// The accessors below reach a frame as `*mut u64` and read entries back
+// through `PageTableEntry::from_raw`, so the entry type has to be exactly
+// a `u64` in size and alignment for that pun to hold. A wider
+// `PageTableEntry`, or one that lost `repr(transparent)`, would leave
+// every accessor addressing the wrong bytes.
 const _: () = assert!(
-    PAGE_TABLE_ENTRIES * core::mem::size_of::<u64>() == PAGE_SIZE_4KB as usize,
-    "a page-table frame is one 4 KiB page of 8-byte entries"
+    core::mem::size_of::<PageTableEntry>() == core::mem::size_of::<u64>()
+        && core::mem::align_of::<PageTableEntry>() == core::mem::align_of::<u64>(),
+    "a page-table entry is exactly a u64"
+);
+const _: () = assert!(
+    PAGE_TABLE_ENTRIES * core::mem::size_of::<PageTableEntry>() == PAGE_SIZE_4KB as usize,
+    "a page-table frame is one 4 KiB page of entries"
 );
 
 // ---------------------------------------------------------------------
@@ -194,14 +204,14 @@ const _: () = assert!(
 // ---------------------------------------------------------------------
 //
 // The descent in `tables.rs` reaches page-table frames only through
-// these five, and none of them forms a reference into a frame. No type
-// names a whole page-table frame, so a reference to one cannot be
-// written. That is the point: such a reference would claim all 4096
-// bytes in order to touch eight, and two CPUs mapping different VAs
-// that share a table would each hold one. The hardware page walker also
-// stamps Accessed and Dirty into any entry it uses, so even a
-// single-CPU exclusive reference would claim exclusivity the machine
-// does not honour.
+// these five, and none of them forms a reference into a frame. That is
+// the point: a reference over a frame — even one scoped to a single
+// statement — claims all 4096 bytes in order to touch eight, and two
+// CPUs mapping different VAs that share a table would each hold one. The
+// hardware page walker also stamps Accessed and Dirty into any entry it
+// uses, so even a single-CPU exclusive reference claims exclusivity the
+// machine does not honour. No type names a page-table frame, so the
+// typed form of that mistake cannot be written at all.
 //
 // Access is therefore per-entry and atomic, which is what a page-table
 // entry actually is. This mirrors `slopos_ostd::mm::page_table`'s `Pte`,
@@ -215,9 +225,18 @@ const _: () = assert!(
 // u64 into an arbitrary HHDM-reachable frame.
 
 /// The HHDM view of the page-table frame at `phys`, as an entry array.
+///
+/// A frame holds `PAGE_TABLE_ENTRIES` entries starting at its base, so a
+/// `phys` that is not page-aligned would address a window straddling two
+/// frames. The buddy hands out page-aligned frames; this asserts the
+/// property the deleted whole-frame type used to carry in its alignment.
 #[inline]
 fn table_base_at(phys: PhysAddr) -> *mut u64 {
     debug_assert!(!phys.is_null(), "page-table frame address must be non-null");
+    debug_assert!(
+        phys.as_u64() % PAGE_SIZE_4KB == 0,
+        "page-table frame address must be page-aligned"
+    );
     phys.to_virt().as_mut_ptr()
 }
 
