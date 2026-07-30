@@ -17,8 +17,20 @@
 //! reference is invisible to Miri here — every test asserts strong counts and
 //! the parked tally explicitly. A double release is a double free, which Miri
 //! does catch.
+//!
+//! # Why every test takes the serial gate
+//!
+//! The parked tally is one process-global counter, while `cargo test` runs these
+//! `#[test]` items on parallel threads of a single process. A sibling's park
+//! landing between the tally test's baseline read and its next read is an
+//! observation the tally test cannot distinguish from the leak it exists to
+//! catch. So each test opens with [`serial`], and [`fresh_task`] refuses to hand
+//! out a task to a thread that does not hold it — a test that forgets the gate
+//! fails under its own name instead of flaking the tally test.
 
 use core::ptr::NonNull;
+use std::cell::Cell;
+use std::sync::{Mutex, MutexGuard};
 
 use slopos_ostd::KArc;
 use slopos_ostd::task::kernel_task::TaskInner;
@@ -29,7 +41,47 @@ use slopos_ostd::task::{
 
 type HostTask = TaskInner<(), ()>;
 
+/// Serialises every test in this binary, so the parked tally moves only by the
+/// operations of the thread reading it.
+static SERIAL: Mutex<()> = Mutex::new(());
+
+thread_local! {
+    /// Whether this thread holds [`SERIAL`] — the tripwire [`fresh_task`] reads.
+    static HOLDS_SERIAL: Cell<bool> = const { Cell::new(false) };
+}
+
+/// The exclusive gate, held for the remainder of the test.
+struct SerialGate {
+    _guard: MutexGuard<'static, ()>,
+}
+
+impl Drop for SerialGate {
+    fn drop(&mut self) {
+        HOLDS_SERIAL.set(false);
+    }
+}
+
+/// Take the serial gate.
+///
+/// Poison is taken over rather than propagated: a failing assertion in one test
+/// poisons the mutex, and propagating that would replace every later test's real
+/// result with a panic naming the wrong test. The state behind the gate is the
+/// tally, and a poisoning test leaves it balanced or has already reported the
+/// imbalance itself.
+fn serial() -> SerialGate {
+    let guard = SERIAL
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    HOLDS_SERIAL.set(true);
+    SerialGate { _guard: guard }
+}
+
 fn fresh_task() -> (KArc<HostTask>, NonNull<HostTask>) {
+    assert!(
+        HOLDS_SERIAL.get(),
+        "open the test with `let _gate = serial();`: parking a task off the gate \
+         moves the process-global tally under whichever test is reading it"
+    );
     let arc = KArc::try_new(HostTask::invalid()).expect("task allocation");
     let node = NonNull::new(KArc::as_ptr(&arc).cast_mut()).expect("KArc base is non-null");
     (arc, node)
@@ -40,6 +92,7 @@ fn fresh_task() -> (KArc<HostTask>, NonNull<HostTask>) {
 /// task no longer owns.
 #[test]
 fn park_then_release_round_trips_exactly_once() {
+    let _gate = serial();
     let (arc, node) = fresh_task();
     let before = task_placement_strong_count(node);
 
@@ -71,6 +124,7 @@ fn park_then_release_round_trips_exactly_once() {
 /// compare-exchange after the retain, so the loser undoes its own mint.
 #[test]
 fn parking_twice_mints_one_reference() {
+    let _gate = serial();
     let (arc, node) = fresh_task();
     let before = task_placement_strong_count(node);
 
@@ -96,6 +150,7 @@ fn parking_twice_mints_one_reference() {
 /// without first proving the task was ever published.
 #[test]
 fn release_without_park_yields_nothing() {
+    let _gate = serial();
     let (arc, node) = fresh_task();
     let before = task_placement_strong_count(node);
 
@@ -113,22 +168,39 @@ fn release_without_park_yields_nothing() {
 /// occupancy, so it has to return to its baseline across a park/release pair.
 #[test]
 fn parked_count_tracks_park_and_release() {
+    let _gate = serial();
     let baseline = task_existence_parked_count();
     let (arc, node) = fresh_task();
 
     assert!(task_existence_park(node));
-    assert_eq!(task_existence_parked_count(), baseline + 1);
+    assert_eq!(
+        task_existence_parked_count(),
+        baseline + 1,
+        "a park that mints a reference counts once"
+    );
 
     // A refused park must not be counted.
     assert!(!task_existence_park(node));
-    assert_eq!(task_existence_parked_count(), baseline + 1);
+    assert_eq!(
+        task_existence_parked_count(),
+        baseline + 1,
+        "a park that minted nothing must not be counted"
+    );
 
     let taken = task_existence_release(node).expect("release wins");
-    assert_eq!(task_existence_parked_count(), baseline);
+    assert_eq!(
+        task_existence_parked_count(),
+        baseline,
+        "the release that took the reference back returns the tally"
+    );
 
     // Nor must a refused release.
     assert!(task_existence_release(node).is_none());
-    assert_eq!(task_existence_parked_count(), baseline);
+    assert_eq!(
+        task_existence_parked_count(),
+        baseline,
+        "a release that took nothing back must not move the tally"
+    );
 
     drop(taken);
     drop(arc);
@@ -138,6 +210,7 @@ fn parked_count_tracks_park_and_release() {
 /// same pointer the placement links are keyed on.
 #[test]
 fn release_returns_a_handle_to_the_same_allocation() {
+    let _gate = serial();
     let (arc, node) = fresh_task();
     assert!(task_existence_park(node));
 
@@ -159,6 +232,7 @@ fn release_returns_a_handle_to_the_same_allocation() {
 /// the existence reference can be got wrong.
 #[test]
 fn a_cloned_task_does_not_inherit_the_parked_flag() {
+    let _gate = serial();
     let (parent, parent_node) = fresh_task();
     assert!(task_existence_park(parent_node));
     assert!(task_existence_is_parked(parent_node));
