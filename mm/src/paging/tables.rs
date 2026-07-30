@@ -23,7 +23,7 @@ use crate::paging_defs::PageFlags;
 use slopos_abi::addr::{PhysAddr, VirtAddr};
 use slopos_ostd::{klog_debug, klog_info};
 
-use super::walker::PageTableWalker;
+use super::walker::walk_phys;
 use crate::hhdm::{self, PhysAddrHhdm};
 use crate::memory_layout_defs::KERNEL_VIRTUAL_BASE;
 use crate::page_alloc::{alloc_kernel_page, free_page_frame};
@@ -305,19 +305,15 @@ pub fn paging_mark_kernel_global() {
     crate::kernel_mappings::mark_kernel_global();
 }
 
-fn virt_to_phys_for_dir(page_dir: *mut ProcessPageDir, vaddr: VirtAddr) -> PhysAddr {
-    let Some(pml4) = ProcessPageDir::pml4_table(page_dir) else {
+pub fn virt_to_phys(vaddr: VirtAddr) -> PhysAddr {
+    let pml4_phys = kernel_pml4_phys();
+    if pml4_phys.is_null() {
         return PhysAddr::NULL;
-    };
-    let walker = PageTableWalker::new();
-    match walker.walk(pml4, vaddr) {
+    }
+    match walk_phys(pml4_phys, vaddr) {
         Ok(result) => result.phys_addr,
         Err(_) => PhysAddr::NULL,
     }
-}
-
-pub fn virt_to_phys(vaddr: VirtAddr) -> PhysAddr {
-    virt_to_phys_for_dir(KERNEL_PAGE_DIR.get(), vaddr)
 }
 
 /// Map a 4 KiB page under the PML4 at `pml4_phys`, demoting any huge
@@ -549,15 +545,16 @@ pub fn paging_get_kernel_directory() -> *mut ProcessPageDir {
 
 pub fn init_paging() {
     let cr3 = get_cr3();
-    let kernel_dir =
-        slopos_ostd::util::ptr_buf::borrow_ref_mut::<ProcessPageDir>(KERNEL_PAGE_DIR.get());
-    kernel_dir.pml4_phys = cr3;
-
-    let pml4_ptr = phys_to_table(kernel_dir.pml4_phys);
+    let pml4_ptr = phys_to_table(cr3);
     if pml4_ptr.is_null() {
         panic!("Failed to translate kernel PML4 physical address");
     }
-    kernel_dir.pml4 = slopos_ostd::sync::KernelSync::new(pml4_ptr);
+    // Scoped so the exclusive borrow ends before `virt_to_phys` below,
+    // which reads the same static.
+    slopos_ostd::util::ptr_buf::with_ref_mut::<ProcessPageDir, _>(KERNEL_PAGE_DIR.get(), |dir| {
+        dir.pml4_phys = cr3;
+        dir.pml4 = slopos_ostd::sync::KernelSync::new(pml4_ptr);
+    });
 
     let kernel_phys = virt_to_phys(VirtAddr::new(KERNEL_VIRTUAL_BASE));
     if kernel_phys.is_null() {
@@ -592,11 +589,11 @@ pub fn is_mapped(vaddr: VirtAddr) -> c_int {
 }
 
 pub fn get_page_size(vaddr: VirtAddr) -> u64 {
-    let Some(pml4) = ProcessPageDir::pml4_table(KERNEL_PAGE_DIR.get()) else {
+    let pml4_phys = kernel_pml4_phys();
+    if pml4_phys.is_null() {
         return 0;
-    };
-    let walker = PageTableWalker::new();
-    match walker.walk(pml4, vaddr) {
+    }
+    match walk_phys(pml4_phys, vaddr) {
         Ok(result) => result.page_size,
         Err(_) => 0,
     }
