@@ -10,7 +10,7 @@
 # scripts/check_unsafe_outside_ostd.sh plays for the OSTD boundary.
 #
 # ---------------------------------------------------------------------
-# The seven checks
+# The eight checks
 # ---------------------------------------------------------------------
 #
 #   1. No raw task pointer in binding position — `: *mut Task`,
@@ -79,8 +79,8 @@
 #
 #      This catches the *shape*, not a list of names — which is the whole
 #      point of having it alongside check 4. Check 4 greps two identifiers,
-#      so a seventh function of the same shape could be added tomorrow and
-#      the gate would say nothing about it.
+#      so another function of the same shape could be added tomorrow and
+#      check 4 would say nothing about it. No exemptions.
 #
 #      ## What check 8 does and does not see
 #
@@ -104,22 +104,66 @@
 #          in principle be reported.
 #        - `'static` is excluded, being a fixed lifetime rather than a
 #          parameter the caller picks.
+#        - A shared receiver minting a mutable borrow is invisible, three
+#          times over. `fn slot(&self) -> &mut T` carries no generic list, so
+#          the joiner never considers the line; `fn slot<T>(&self) -> &mut T`
+#          declares only a type parameter, so the predicate collects no
+#          lifetime and returns early; `fn slot<'a>(&'a self) -> &'a mut T`
+#          does reach the predicate and is silent because `&'a self` names
+#          `'a`. All three are right about the lifetime and beside the point
+#          — `&self` is `Copy`, so two calls yield two live `&mut` to one
+#          place. The escalation from shared to exclusive is the defect, and
+#          no rule here reads mutability. Rust-for-Linux's `Opaque<T>` omits
+#          `get_mut` for this reason.
+#        - Substituting `'static` for a caller-chosen `'a` hides the shape
+#          rather than removing it: `'static` coerces to any shorter lifetime
+#          at the call site, so the caller still ends up with a borrow of its
+#          own choosing, and a second call still hands out another. It is
+#          honest only when the region truly is never freed and the call truly
+#          happens once, neither of which is in the signature. In-tree,
+#          `ptr_buf::install_buf_mut` (one-shot install) and `dev/mod.rs`'s
+#          `borrow_dyn` (published-once device handle) are both honest, and
+#          nothing here could tell them from a region that is later freed.
+#        - The argument scan tests whether a lifetime is *named* in the
+#          argument list, not whether an argument *supplies* it. A mention
+#          that supplies nothing — a closure bound written inline
+#          (`g: impl FnOnce(&'a T)`), a bare `fn(&'a ())`, a
+#          `PhantomData<&'a ()>` — therefore counts as constraining, while
+#          the callee still mints the reference from a raw pointer under a
+#          lifetime the caller picked. This is a bypass rather than a blind
+#          spot: the shape this check is named for passes once any such
+#          parameter is added. The sound spelling is the higher-ranked one,
+#          which the `Fn(&T)` sugar gives for free and an explicit `for<'a>`
+#          states — a lifetime the caller cannot name is one it cannot
+#          choose.
+#          Only an occurrence inside an argument's own type does this. The
+#          bound spellings `<'a, F: FnOnce(&'a T)>` and
+#          `where F: FnOnce(&'a T)` are both still reported, because neither
+#          the generic list nor the `where` clause is part of the argument
+#          list. `ret` is truncated at `where` deliberately, as a
+#          false-positive guard: without it,
+#          `fn f<'a, F>(x: u32, f: F) -> u32 where F: Fn(&'a u8)` would be
+#          reported for a function that returns no reference at all.
 #        - Elided lifetimes are not analysed at all. `fn f(x: &Task) -> &Foo`
 #          is tied to its argument by the elision rules and is silent here,
 #          which is the correct answer, but it is silent by not looking
 #          rather than by checking.
-#        - A signature longer than 20 lines is not joined, so it is skipped.
+#        - A signature longer than 20 lines is truncated at 20 and evaluated
+#          as-is rather than skipped. A truncation that loses the `->` reads
+#          as no return type and reports nothing.
 #        - The shape is sound when every input the caller could present
 #          again is consumed by value, because then the function cannot be
-#          called twice on the same referent. `KBox::leak<'a>(b: Self) ->
-#          &'a mut T` is std's `Box::leak` signature and is correct for
-#          exactly that reason: the box is moved in, the allocation is
-#          deliberately never freed, and no second call against it is
-#          possible. Check 8 reports it anyway — distinguishing "consumed
-#          owning handle" from "re-presentable raw pointer or address"
-#          needs type resolution, not a signature parse. One such case
-#          exists in the tree; the rest of the hits take a raw pointer,
-#          a `NonNull`, or a bare address, and are the real shape.
+#          called twice on the same referent. std's `Box::leak<'a>(b: Self)
+#          -> &'a mut T` is correct for exactly that reason: the box is moved
+#          in, the allocation is deliberately never freed, and no second call
+#          against it is possible. Check 8 would report it anyway —
+#          distinguishing "consumed owning handle" from "re-presentable raw
+#          pointer or address" needs type resolution, not a signature parse.
+#          The in-tree `KBox::leak` declares no generic list of its own, so
+#          the joiner skips it before any of this applies, and it says
+#          `&'static mut T` where std says `&'a mut T` — the substitution the
+#          bullet above calls a hiding move, honest here for the same reason
+#          the shape is sound: the box is gone.
 #
 # ---------------------------------------------------------------------
 # Sanctioned surfaces (exempt from checks 1 and 3)
@@ -232,7 +276,7 @@ is_sanctioned() {
 # The scan
 #
 # One awk pass per file emits `<check-tag>\t<file>:<line>: <text>` for
-# every finding, so a single traversal feeds all six source-level checks.
+# every finding, so a single traversal feeds all seven source-level checks.
 # ---------------------------------------------------------------------
 
 scan_sources() {
@@ -463,9 +507,11 @@ scan_sources() {
 
             # ---- check 8: output lifetime tied to no argument ---------
             # Runs in END rather than per-line because a signature can span
-            # several lines and the whole of it has to be seen at once —
-            # `task_exit_info_ref` in the tree is a three-line signature
-            # that a line-at-a-time scan misses entirely.
+            # several lines and the whole of it has to be seen at once. A
+            # three-line signature is what a line-at-a-time scan misses
+            # entirely; the spans_lines fixture in lifetimes_bad.rs pins
+            # that case. No apostrophe may appear anywhere in this awk
+            # program: it is single-quoted, and one would end it.
             #
             # Joining rule: start at a line carrying `fn <name><`, append
             # following lines until the accumulated text reaches the `{` or
@@ -565,7 +611,8 @@ fn counts() {
 }
 FIXTURE
 
-    # Check 8 gets its own fixture pair: the three dangerous shapes, and
+    # Check 8 gets its own fixture pair: five positive signatures — four
+    # dangerous shapes plus the multi-line join — and
     # the lookalikes that must stay silent. The negatives carry the weight
     # here — this is the check most able to produce false positives.
     # `Payload` rather than `Task` throughout, so these files exercise
@@ -757,52 +804,6 @@ fi
 
 findings="$(run_scan "$REPO_ROOT" "${scan_files[@]}")"
 
-# ---------------------------------------------------------------------
-# Check-8 residue
-# ---------------------------------------------------------------------
-#
-# Each entry below names a file whose check-8 shape needs a restructure
-# rather than a signature edit, and carries the reason. Anything not
-# listed fails.
-#
-#   slopos-ostd/src/util/ptr_buf.rs::borrow_ref{,_mut}
-#       The helpers the shape is named for. They stop tripping the check
-#       only by being deleted, and deleting them waits on their last
-#       callers.
-#
-# This list may only shrink. Adding to it means a new function of a shape
-# the whole gate exists to delete, and needs the same kind of written
-# reason this one carries.
-CHECK8_ALLOWLIST=(
-    "slopos-ostd/src/util/ptr_buf.rs"
-)
-
-filter_check8_allowlist() {
-    local line file allowed keep
-    while IFS= read -r line; do
-        [ -z "$line" ] && continue
-        if [[ "$line" != 8$'\t'* ]]; then
-            printf '%s\n' "$line"
-            continue
-        fi
-        file="${line#*$'\t'}"
-        file="${file%%:*}"
-        keep=1
-        for allowed in "${CHECK8_ALLOWLIST[@]}"; do
-            if [ "$file" = "$allowed" ]; then
-                keep=0
-                break
-            fi
-        done
-        if [ "$keep" = 1 ]; then
-            printf '%s\n' "$line"
-        fi
-    done
-    return 0
-}
-
-findings="$(printf '%s\n' "$findings" | filter_check8_allowlist)"
-
 CHECK_TAGS=(1 2 3a 3b 4 5 6 7 8)
 declare -A CHECK_DESC=(
     [1]="raw task pointer in binding position (: *mut/*const Task/TaskInner, *mut *mut Task)"
@@ -829,7 +830,7 @@ for tag in "${CHECK_TAGS[@]}"; do
 done
 
 if [ "$total" -eq 0 ]; then
-    echo "check_task_ownership: OK — no raw task pointers, c_void launders, borrow accessors, or fault-path lookups outside the sanctioned surfaces"
+    echo "check_task_ownership: OK — no declared output lifetime that no argument names, no borrow accessors, and no fault-path lookups; no raw task pointers or c_void launders outside the sanctioned surfaces"
     exit 0
 fi
 

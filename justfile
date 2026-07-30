@@ -379,6 +379,7 @@ check-framekernel-gates:
     scripts/check_stack_sizes.sh {{build_dir}}/kernel.elf
     scripts/check_kernel_softfloat.sh {{build_dir}}/kernel.elf
     scripts/check_wait_predicate_purity.sh
+    scripts/check_task_ownership.sh --self-test
     scripts/check_task_ownership.sh
     scripts/tcb_ratio.sh --max 1.0
 

@@ -33,7 +33,7 @@ The slopos-ostd lib unit tests + integration tests cover, among others:
 - **Uninitialized reads** — anywhere `MaybeUninit` is dereferenced
   prematurely.
 - **Alignment violations** — exactly the bug Miri caught in
-  `slopos-ostd/src/util/ptr_buf.rs::borrow_at_mut` during this phase.
+  `slopos-ostd/src/util/ptr_buf.rs::with_at_mut` during this phase.
 
 ## How to run
 
@@ -174,7 +174,7 @@ inline in `slopos-ostd/` source** and reported in the PR description rather
 than accumulated in a findings file. The findings recorded when the harness
 was first built were:
 
-1. **Real UB**: `slopos-ostd/src/util/ptr_buf.rs::borrow_at_mut` could
+1. **Real UB**: `slopos-ostd/src/util/ptr_buf.rs::with_at_mut` could
    construct an unaligned `&mut [T]` if a caller passed a misaligned
    byte offset. Fix: `debug_assert!` on alignment + the in-tree test
    now uses a `#[repr(align(4))]` backing buffer.

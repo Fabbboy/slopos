@@ -16,7 +16,8 @@
 //! - `ptr` is valid for reads (and writes, for the `_mut` variants) of
 //!   `len` consecutive `T` values,
 //! - `ptr` is aligned for `T`,
-//! - the chosen lifetime `'a` does not outlive the underlying storage,
+//! - the returned borrow's lifetime — the anchor's, or `'static` — does not
+//!   outlive the underlying storage,
 //! - while the returned `&[T]` / `&mut [T]` is live, no other code
 //!   creates an aliasing mutable / shared borrow of the same range,
 //! - reads through the returned slice see well-initialized `T` values
@@ -122,6 +123,12 @@ pub fn with_buf_mut<T, R>(ptr: *mut T, len: usize, f: impl FnOnce(&mut [T]) -> R
 /// caller has to present something that genuinely outlives the borrow, and at
 /// such an accessor that something is `&self`.
 ///
+/// A token anchor is the degenerate case. `&()`, or a reference to the caller's
+/// own `len` local, bounds the borrow to the caller's frame — honest, and
+/// machine-checked — but it stands in no relation to `ptr`, so it constrains
+/// nothing else: that the mapping stays valid across that frame remains
+/// entirely the caller's assertion.
+///
 /// # Safety contract on the caller
 ///
 /// The module-level contract, plus: the mapping at `ptr` must stay valid and
@@ -166,8 +173,9 @@ pub fn anchored_nonnull_mut<'a, A: ?Sized, T>(
 ///
 /// The escape hatch for a one-shot install — a boot-reserved table handed to
 /// the structure that owns it for the rest of the machine's life. `'static` is
-/// what such a region's lifetime actually is, and returning it means the caller
-/// cannot pick a shorter one and then pick it again.
+/// what such a region's lifetime actually is. It buys honesty, not safety:
+/// `'static` coerces to any shorter lifetime at the call site, so it does not
+/// stop a caller picking one and then picking it again.
 ///
 /// # Safety contract on the caller
 ///
@@ -236,34 +244,6 @@ pub fn anchored_ref_mut<'a, A: ?Sized, T>(_anchor: &'a mut A, ptr: *mut T) -> &'
     debug_assert!(!ptr.is_null(), "anchored_ref_mut: ptr must be non-null");
     // SAFETY: caller upholds the contract above; `anchor` bounds the lifetime
     // and its `&mut` bounds the aliasing.
-    unsafe { &mut *ptr }
-}
-
-/// Borrow a single `T` at `ptr` with a caller-chosen lifetime.
-///
-/// **Prefer [`with_ref`] or [`anchored_ref`].** This form lets the caller pick
-/// the lifetime, so two calls yield two references the compiler believes are
-/// unrelated — and for the mutable sibling that is aliasing UB on the second
-/// call. It survives for `mm/src/paging/tables.rs`, whose walks hold `&mut`
-/// into four different tables at once and need restructuring before they can
-/// scope their borrows. No new caller.
-///
-/// # Safety contract on the caller
-///
-/// [`with_ref`]'s contract, for the whole of the caller-chosen lifetime.
-#[inline]
-pub fn borrow_ref<'a, T>(ptr: *const T) -> &'a T {
-    debug_assert!(!ptr.is_null(), "borrow_ref: ptr must be non-null");
-    // SAFETY: caller upholds the contract above.
-    unsafe { &*ptr }
-}
-
-/// Mutable sibling of [`borrow_ref`]. Same warning, more sharply.
-#[inline]
-pub fn borrow_ref_mut<'a, T>(ptr: *mut T) -> &'a mut T {
-    debug_assert!(!ptr.is_null(), "borrow_ref_mut: ptr must be non-null");
-    // SAFETY: caller upholds the contract above; exclusive access to
-    // `*ptr` for the caller-chosen lifetime.
     unsafe { &mut *ptr }
 }
 
@@ -383,8 +363,6 @@ pub fn with_at_mut<T, R>(
     };
     f(slice)
 }
-
-/// Write `value` to `out` if `out` is non-null; no-op when null.
 
 /// Slice between two `*const T` anchors. Returns `&start[..(stop -
 /// start)]`. If `stop <= start`, returns an empty slice rather than
