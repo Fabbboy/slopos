@@ -150,18 +150,16 @@ pub fn test_demand_permission_allow_write() -> TestResult {
     pass!()
 }
 
-pub fn test_demand_handle_null_page_dir() -> TestResult {
+pub fn test_demand_dispatch_absent_for_unknown_pid() -> TestResult {
     // After the framekernel migration, `demand::handle_demand_fault`
-    // is reached only via `process_vm::process_vm_with_dual_paging`,
+    // is reached only via `process_vm::process_vm_with_vm_space`,
     // which filters out slots with no address space. Verify the
     // dispatcher returns `None` for an unknown PID — the failure path
     // `try_resolve_user_fault` actually hits.
-    let result = crate::process_vm::process_vm_with_dual_paging(
-        slopos_abi::task::INVALID_PROCESS_ID,
-        |_| (),
-    );
+    let result =
+        crate::process_vm::process_vm_with_vm_space(slopos_abi::task::INVALID_PROCESS_ID, |_| ());
     if result.is_some() {
-        return fail!("process_vm_with_dual_paging returned Some for INVALID_PROCESS_ID");
+        return fail!("process_vm_with_vm_space returned Some for INVALID_PROCESS_ID");
     }
     pass!()
 }
@@ -177,4 +175,7 @@ slopos_testing::stest!(
 slopos_testing::stest!(name = test_demand_permission_deny_exec, suite = demand);
 slopos_testing::stest!(name = test_demand_permission_allow_read, suite = demand);
 slopos_testing::stest!(name = test_demand_permission_allow_write, suite = demand);
-slopos_testing::stest!(name = test_demand_handle_null_page_dir, suite = demand);
+slopos_testing::stest!(
+    name = test_demand_dispatch_absent_for_unknown_pid,
+    suite = demand
+);

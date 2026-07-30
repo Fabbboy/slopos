@@ -18,13 +18,13 @@ pub fn try_resolve_user_fault(
     // for write — the read-only `&KArc<VmSpace>` deref + cursor query
     // does the job. If the address isn't COW we fall through to the
     // demand-fault check.
-    let is_cow = process_vm::process_vm_with_dual_paging(process_id, |vs| {
+    let is_cow = process_vm::process_vm_with_vm_space(process_id, |vs| {
         cow::is_cow_fault(error_code, vs, fault_addr)
     })
     .unwrap_or(false);
 
     if is_cow {
-        let result = process_vm::process_vm_with_dual_paging(process_id, |vs| {
+        let result = process_vm::process_vm_with_vm_space(process_id, |vs| {
             cow::handle_cow_fault(vs, fault_addr)
         });
 
@@ -43,7 +43,7 @@ pub fn try_resolve_user_fault(
     }
 
     if demand::is_demand_fault(error_code, process_id, fault_addr) {
-        let result = process_vm::process_vm_with_dual_paging_and_region(
+        let result = process_vm::process_vm_with_vm_space_and_region(
             process_id,
             fault_addr,
             |vs, region| {

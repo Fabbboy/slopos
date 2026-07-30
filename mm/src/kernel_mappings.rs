@@ -23,8 +23,8 @@ use slopos_ostd::mm::page_size::{Size1Gb, Size2Mb, Size4Kb};
 use slopos_ostd::mm::page_table::PageTableLevel;
 use slopos_ostd::mm::uframe::UFrame;
 
-use crate::dual_paging::{page_flags_to_property, property_to_page_flags};
 use crate::paging_defs::{PAGE_SIZE_1GB, PAGE_SIZE_2MB, PAGE_SIZE_4KB, PageFlags};
+use crate::user_mappings::{page_flags_to_property, property_to_page_flags};
 
 /// Map a 4 KiB kernel-half page at `va` to physical `pa` with the
 /// given legacy `PageFlags` bits. Returns 0 on success, -1 on any

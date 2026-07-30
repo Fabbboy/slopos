@@ -2,7 +2,7 @@
 //!
 //! This module consolidates error types that were previously scattered across
 //! `paging/error.rs`, `cow.rs`, and `demand.rs`. Those modules had significant
-//! variant overlap (AllocationFailed, MappingFailed, InvalidAddress, NullPageDir
+//! variant overlap (AllocationFailed, MappingFailed, InvalidAddress, NoAddressSpace
 //! appeared in 2-3 of them).
 //!
 //! Domain-specific error types (`ElfError`, `UserPtrError`) remain in their own
@@ -21,7 +21,7 @@ pub enum MmError {
     NoMemory,
     MappingFailed,
     InvalidAddress,
-    NullPageDir,
+    NoAddressSpace,
     NotAligned { address: u64, required: u64 },
     NotMapped { address: u64, level: PageTableLevel },
     AlreadyMapped { address: u64 },
@@ -40,7 +40,7 @@ impl fmt::Display for MmError {
             Self::NoMemory => write!(f, "out of memory for page allocation"),
             Self::MappingFailed => write!(f, "page mapping operation failed"),
             Self::InvalidAddress => write!(f, "invalid address"),
-            Self::NullPageDir => write!(f, "null page directory"),
+            Self::NoAddressSpace => write!(f, "process has no address space"),
             Self::NotAligned { address, required } => {
                 write!(f, "address {:#x} not aligned to {:#x}", address, required)
             }

@@ -19,7 +19,7 @@
 //! feature adds no `unsafe` anywhere.
 //!
 //! Only **anonymous** user memory is pinnable (the meta the page mapping uses,
-//! [`ostd_map_4kb_user`](crate::dual_paging::ostd_map_4kb_user)); file- and
+//! [`ostd_map_4kb_user`](crate::user_mappings::ostd_map_4kb_user)); file- and
 //! memfd-backed pages carry a different frame meta and are rejected with
 //! [`PinError::NotAnonymous`], matching `IORING_REGISTER_BUFFERS`.
 
@@ -98,10 +98,10 @@ impl PinnedUserBuffer {
         let mut page_va = first_page;
         for _ in 0..n_pages {
             let vaddr = VirtAddr::new(page_va);
-            if !crate::dual_paging::ostd_is_user_accessible_4kb(&vm_space, vaddr) {
+            if !crate::user_mappings::ostd_is_user_accessible_4kb(&vm_space, vaddr) {
                 return Err(PinError::NotUserAccessible);
             }
-            let pa = crate::dual_paging::ostd_virt_to_phys_4kb(&vm_space, vaddr);
+            let pa = crate::user_mappings::ostd_virt_to_phys_4kb(&vm_space, vaddr);
             if pa.as_u64() == 0 {
                 return Err(PinError::NotPresent);
             }

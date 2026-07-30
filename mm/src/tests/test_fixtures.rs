@@ -2,14 +2,14 @@ use slopos_abi::addr::{PhysAddr, VirtAddr};
 
 use crate::cow::handle_cow_fault;
 use crate::demand::handle_demand_fault;
-use crate::dual_paging::{ostd_get_pte_flags_4kb, ostd_map_4kb_user, ostd_mark_cow_4kb};
 use crate::error::MmError;
 use crate::page_alloc::{alloc_kernel_page, free_page_frame};
 use crate::paging_defs::PageFlags;
 use crate::process_vm::{
     create_process_vm, destroy_process_vm, init_process_vm, process_vm_clone_cow,
-    process_vm_user_va_to_paddr, process_vm_with_dual_paging,
+    process_vm_user_va_to_paddr, process_vm_with_vm_space,
 };
+use crate::user_mappings::{ostd_get_pte_flags_4kb, ostd_map_4kb_user, ostd_mark_cow_4kb};
 use slopos_abi::task::INVALID_PROCESS_ID;
 
 /// RAII guard: owns a process VM, calls `destroy_process_vm` on drop.
@@ -43,18 +43,18 @@ impl ProcessVmGuard {
 
     /// Drive `cow::handle_cow_fault` through the per-process lock.
     pub fn handle_cow_fault(&self, fault_addr: u64) -> Result<(), MmError> {
-        process_vm_with_dual_paging(self.pid, |vs| handle_cow_fault(vs, fault_addr))
-            .unwrap_or(Err(MmError::NullPageDir))
+        process_vm_with_vm_space(self.pid, |vs| handle_cow_fault(vs, fault_addr))
+            .unwrap_or(Err(MmError::NoAddressSpace))
     }
 
     /// Drive `demand::handle_demand_fault` through the per-process lock.
     pub fn handle_demand_fault(&self, fault_addr: u64, error_code: u64) -> Result<(), MmError> {
-        crate::process_vm::process_vm_with_dual_paging_and_region(
+        crate::process_vm::process_vm_with_vm_space_and_region(
             self.pid,
             fault_addr,
             |vs, region| handle_demand_fault(vs, self.pid, fault_addr, error_code, &region),
         )
-        .unwrap_or(Err(MmError::NullPageDir))
+        .unwrap_or(Err(MmError::NoAddressSpace))
     }
 
     /// Map a 4 KiB page at `vaddr` into the test process's OSTD
@@ -65,7 +65,7 @@ impl ProcessVmGuard {
         if phys.is_null() {
             return None;
         }
-        let result = process_vm_with_dual_paging(self.pid, |vs| {
+        let result = process_vm_with_vm_space(self.pid, |vs| {
             ostd_map_4kb_user(vs, VirtAddr::new(vaddr), phys, flags)
         });
         match result {
@@ -89,14 +89,14 @@ impl ProcessVmGuard {
     /// VmSpace (clears `WRITABLE`, sets the COW software bit). No-op
     /// if no leaf is present at that VA.
     pub fn mark_cow(&self, vaddr: u64) {
-        let _ = process_vm_with_dual_paging(self.pid, |vs| {
+        let _ = process_vm_with_vm_space(self.pid, |vs| {
             let _ = ostd_mark_cow_4kb(vs, VirtAddr::new(vaddr));
         });
     }
 
     /// Probe whether the 4 KiB leaf at `vaddr` carries the COW marker.
     pub fn is_cow(&self, vaddr: u64) -> bool {
-        process_vm_with_dual_paging(self.pid, |vs| {
+        process_vm_with_vm_space(self.pid, |vs| {
             ostd_get_pte_flags_4kb(vs, VirtAddr::new(vaddr))
                 .map_or(false, |f| f.contains(PageFlags::COW))
         })

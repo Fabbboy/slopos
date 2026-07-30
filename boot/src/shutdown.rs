@@ -35,8 +35,9 @@ fn flush_filesystems_for_shutdown() {
     klog_info!("Kernel shutdown: flushing filesystem caches");
     slopos_fs::ext2_vfs_shutdown_sync();
 }
-fn ensure_kernel_page_dir() {
-    // Ensure LAPIC/IOAPIC MMIO is mapped when shutting down from user context.
+/// Map LAPIC/IOAPIC MMIO before a shutdown path touches it — the
+/// caller may arrive from user context, where it is not mapped.
+fn ensure_shutdown_mmio_mapped() {
     activate_post_user_fault();
 }
 /// Parse the FADT (+ DSDT `\_S5`) for the platform's power-management
@@ -107,7 +108,7 @@ fn poweroff_hardware() {
     ostd_power::acpi_poweroff_broadcast();
 }
 pub fn kernel_quiesce_interrupts() {
-    ensure_kernel_page_dir();
+    ensure_shutdown_mmio_mapped();
     cpu::disable_interrupts();
     if !INTERRUPTS_QUIESCED.enter() {
         return;
@@ -135,7 +136,7 @@ pub fn kernel_drain_serial_output() {
     serial_flush();
 }
 pub fn kernel_shutdown(reason: *const c_char) -> ! {
-    ensure_kernel_page_dir();
+    ensure_shutdown_mmio_mapped();
     // Flush filesystem write-back caches to disk while interrupts are STILL
     // ENABLED — the virtio-blk completion path needs IRQs + the scheduler to
     // post the used-buffer event. Doing this before `disable_interrupts` is
@@ -226,7 +227,7 @@ const REBOOT_METHODS: &[(&str, fn())] = &[
 ];
 
 pub fn kernel_reboot(reason: *const c_char) -> ! {
-    ensure_kernel_page_dir();
+    ensure_shutdown_mmio_mapped();
     cpu::disable_interrupts();
 
     klog_info!("=== Kernel Reboot Requested ===");

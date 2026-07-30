@@ -1,22 +1,16 @@
-//! Dual-write helpers that drive both the legacy `mm/src/paging`
-//! `*_in_dir` surface and the OSTD `VmSpace` cursor over the same
-//! virtual address range. Used during the framekernel migration
-//! window: while the kernel still installs the legacy PML4 in CR3,
-//! every map / unmap / protect must propagate to OSTD's parallel
-//! page-table tree so the eventual reader-flip in [`process_vm`]'s
-//! `process_vm_get_cr3_phys` lands on a content-equivalent OSTD
-//! PML4.
+//! User-half mapping helpers, driving a process's OSTD `VmSpace`
+//! cursor over a virtual address range: map, unmap, protect, the COW
+//! marker pair, and the read-only queries the fault handlers ask.
+//! The kernel-half counterpart is [`crate::kernel_mappings`].
 //!
-//! The legacy half remains the sole owner of the underlying physical
-//! frame for the duration of the dual-write window; the OSTD half
-//! wraps each user-leaf paddr through
-//! [`UFrame::wrap_static`](slopos_ostd::mm::uframe::UFrame::wrap_static)
-//! so its leaked-into-PTE ref is a no-op on Drop and never
-//! double-frees against the legacy
-//! [`free_page_frame`](crate::page_alloc::free_page_frame).
+//! Every helper takes the address space it operates on, so the caller
+//! holds the per-process lock for exactly as long as the cursor is
+//! open — see `process_vm::process_vm_with_vm_space`.
 //!
-//! All public helpers here delete with the rest of the legacy paging
-//! surface; the only OSTD-side calls survive.
+//! A user leaf's paddr is wrapped through
+//! [`UFrame::wrap_static`](slopos_ostd::mm::uframe::UFrame::wrap_static),
+//! so the ref leaked into the PTE is a no-op on Drop: the frame's
+//! lifecycle belongs to its MetaSlot count, not to the mapping.
 
 use slopos_abi::addr::{PhysAddr, VirtAddr};
 use slopos_ostd::mm::KArc;
@@ -106,7 +100,7 @@ fn vm_space_get_mut(vm_space: &mut KArc<VmSpace>) -> Result<&mut VmSpace, MapErr
     }
 
     klog_info!(
-        "dual_paging: VmSpace mutation blocked by refs strong={} weak={}",
+        "user_mappings: VmSpace mutation blocked by refs strong={} weak={}",
         KArc::strong_count(vm_space),
         KArc::weak_count(vm_space)
     );

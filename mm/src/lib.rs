@@ -4,7 +4,6 @@
 pub mod aslr;
 pub mod cow;
 pub mod demand;
-pub mod dual_paging;
 pub mod elf;
 pub mod error;
 pub mod hhdm;
@@ -34,6 +33,7 @@ pub mod tests;
 pub mod tlb;
 pub mod user_copy;
 pub mod user_io_buf;
+pub mod user_mappings;
 pub mod user_ptr;
 pub mod vma_region;
 

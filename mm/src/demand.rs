@@ -7,12 +7,12 @@ use slopos_abi::addr::VirtAddr;
 use slopos_ostd::mm::KArc;
 use slopos_ostd::mm::vm_space::VmSpace;
 
-use crate::dual_paging::{ostd_map_4kb_user, ostd_virt_to_phys_4kb};
 use crate::error::MmError;
 use crate::page_alloc::{alloc_kernel_page, free_page_frame};
 use crate::paging_defs::PAGE_SIZE_4KB;
 use crate::process_vm;
 use crate::tlb;
+use crate::user_mappings::{ostd_map_4kb_user, ostd_virt_to_phys_4kb};
 use crate::vma_region::VmaRegion;
 
 pub fn is_demand_fault(error_code: u64, process_id: u32, fault_addr: u64) -> bool {

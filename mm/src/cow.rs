@@ -3,15 +3,15 @@ use slopos_ostd::mm::KArc;
 use slopos_ostd::mm::frame::{Paddr, reference_count_at};
 use slopos_ostd::mm::vm_space::VmSpace;
 
-use crate::dual_paging::{
-    ostd_get_pte_flags_4kb, ostd_map_4kb_user, ostd_resolve_cow_4kb, ostd_unmap_4kb_user,
-    ostd_virt_to_phys_4kb,
-};
 use crate::error::MmError;
 use crate::hhdm::PhysAddrHhdm;
 use crate::page_alloc::{alloc_kernel_page, free_page_frame};
 use crate::paging_defs::{PAGE_SIZE_4KB, PageFlags};
 use crate::tlb;
+use crate::user_mappings::{
+    ostd_get_pte_flags_4kb, ostd_map_4kb_user, ostd_resolve_cow_4kb, ostd_unmap_4kb_user,
+    ostd_virt_to_phys_4kb,
+};
 
 /// Copy a full 4 KiB page through the HHDM mapping. Both `src` and `dst`
 /// must be live HHDM-mapped virtual addresses pointing at distinct pages.

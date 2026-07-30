@@ -12,10 +12,6 @@ use slopos_ostd::sync::{LOCK_LEVEL_REGISTRY, LOCK_LEVEL_RESOURCE, SpinLock};
 use slopos_ostd::{align_down, align_up, klog_debug, klog_info};
 
 use crate::aslr;
-use crate::dual_paging::{
-    ostd_get_pte_flags_4kb, ostd_map_4kb_user, ostd_mark_cow_4kb, ostd_mark_range_user_4kb,
-    ostd_protect_range_4kb, ostd_unmap_4kb_user, ostd_virt_to_phys_4kb,
-};
 use crate::elf::{ElfError, ElfValidator, MAX_LOAD_SEGMENTS, PF_W, ValidatedSegment};
 use crate::hhdm::PhysAddrHhdm;
 use crate::memory_layout_defs::DEFAULT_PROCESS_LAYOUT;
@@ -23,6 +19,10 @@ use crate::memory_layout_defs::{KERNEL_VIRTUAL_BASE, MAX_PROCESSES};
 use crate::page_alloc::{alloc_kernel_page, free_page_frame};
 use crate::paging_defs::{PAGE_SIZE_4KB, PageFlags};
 use crate::tlb;
+use crate::user_mappings::{
+    ostd_get_pte_flags_4kb, ostd_map_4kb_user, ostd_mark_cow_4kb, ostd_mark_range_user_4kb,
+    ostd_protect_range_4kb, ostd_unmap_4kb_user, ostd_virt_to_phys_4kb,
+};
 use crate::vma_region::{Protection, RegionBacking, RegionPurpose, VmaMap, VmaRegion};
 use slopos_abi::task::INVALID_PROCESS_ID;
 
@@ -341,7 +341,7 @@ pub fn process_vm_user_va_to_paddr(process_id: u32, va: u64) -> u64 {
     let Some(vm_space) = guard.vm_space.as_ref() else {
         return 0;
     };
-    crate::dual_paging::ostd_virt_to_phys_4kb(vm_space, slopos_abi::addr::VirtAddr::new(va))
+    crate::user_mappings::ostd_virt_to_phys_4kb(vm_space, slopos_abi::addr::VirtAddr::new(va))
         .as_u64()
 }
 
@@ -381,7 +381,7 @@ pub fn process_vm_user_va_is_user_accessible(process_id: u32, va: u64) -> bool {
     let Some(vm_space) = guard.vm_space.as_ref() else {
         return false;
     };
-    crate::dual_paging::ostd_is_user_accessible_4kb(vm_space, slopos_abi::addr::VirtAddr::new(va))
+    crate::user_mappings::ostd_is_user_accessible_4kb(vm_space, slopos_abi::addr::VirtAddr::new(va))
 }
 
 /// Read the `VmSpace`'s PML4 paddr for `process_id`. Returns 0 if the
@@ -438,7 +438,7 @@ pub fn process_vm_activate(process_id: u32) -> bool {
 /// body fast. Used by the page-fault handlers
 /// (`cow::handle_cow_fault`, `demand::handle_demand_fault`), which
 /// need the address space and the lock that guards it in one step.
-pub fn process_vm_with_dual_paging<R>(
+pub fn process_vm_with_vm_space<R>(
     process_id: u32,
     f: impl FnOnce(&mut KArc<VmSpace>) -> R,
 ) -> Option<R> {
@@ -451,12 +451,12 @@ pub fn process_vm_with_dual_paging<R>(
     Some(f(vm_space))
 }
 
-/// Like [`process_vm_with_dual_paging`] but also resolves the
+/// Like [`process_vm_with_vm_space`] but also resolves the
 /// covering [`VmaRegion`] for `fault_addr` under the same lock — so
 /// the page-fault handlers can both dual-write and read the region
 /// without dropping and re-acquiring the per-process lock (which
 /// would deadlock recursive callers like the demand-fault path).
-pub fn process_vm_with_dual_paging_and_region<R>(
+pub fn process_vm_with_vm_space_and_region<R>(
     process_id: u32,
     fault_addr: u64,
     f: impl FnOnce(&mut KArc<VmSpace>, VmaRegion) -> R,
@@ -661,7 +661,7 @@ fn unmap_ring_range_dir(
     let mut unmapped = 0u32;
     let mut addr = start;
     while addr < end {
-        match crate::dual_paging::ostd_unmap_ring_4kb_user(vm_space, VirtAddr::new(addr)) {
+        match crate::user_mappings::ostd_unmap_ring_4kb_user(vm_space, VirtAddr::new(addr)) {
             Ok(true) => unmapped += 1,
             Ok(false) => {}
             Err(err) => {
@@ -1361,7 +1361,7 @@ pub fn process_vm_read_user_bytes(
         let page_off = (va & (PAGE_SIZE_4KB - 1)) as usize;
         let chunk = core::cmp::min(dst.len() - read, PAGE_SIZE_4KB as usize - page_off);
 
-        let phys = crate::dual_paging::ostd_virt_to_phys_4kb(vm_space, VirtAddr::new(page_va));
+        let phys = crate::user_mappings::ostd_virt_to_phys_4kb(vm_space, VirtAddr::new(page_va));
         if phys.is_null() {
             return Err(ElfError::NullPointer);
         }
@@ -1399,7 +1399,7 @@ fn write_user_bytes(vm_space: &KArc<VmSpace>, dst_addr: u64, data: &[u8]) -> Res
         let page_off = (va & (PAGE_SIZE_4KB - 1)) as usize;
         let chunk = core::cmp::min(data.len() - written, PAGE_SIZE_4KB as usize - page_off);
 
-        let phys = crate::dual_paging::ostd_virt_to_phys_4kb(vm_space, VirtAddr::new(page_va));
+        let phys = crate::user_mappings::ostd_virt_to_phys_4kb(vm_space, VirtAddr::new(page_va));
         if phys.is_null() {
             return Err(ElfError::NullPointer);
         }
@@ -1434,7 +1434,8 @@ fn load_segment_pages(
     while dst < page_end {
         // The cursor is what detects an existing mapping here — two ELF
         // segments can overlap within a page.
-        let existing_phys = crate::dual_paging::ostd_virt_to_phys_4kb(vm_space, VirtAddr::new(dst));
+        let existing_phys =
+            crate::user_mappings::ostd_virt_to_phys_4kb(vm_space, VirtAddr::new(dst));
         let phys = if !existing_phys.is_null() {
             if (map_flags & PageFlags::WRITABLE.bits()) != 0 {
                 ostd_mark_range_user_4kb(
@@ -1947,7 +1948,7 @@ pub fn process_vm_reset_stack(process_id: u32) -> c_int {
             let mut addr = stack_start;
             let mut ok = true;
             while addr < stack_end {
-                match crate::dual_paging::ostd_unmap_4kb_user_take(
+                match crate::user_mappings::ostd_unmap_4kb_user_take(
                     vm_space_ref,
                     VirtAddr::new(addr),
                 ) {
@@ -2178,7 +2179,7 @@ pub fn process_vm_mmap_shared(
 /// Returns the user virtual base address on success, or `0` on failure
 /// (no gap, or a cursor map error — partial maps are rolled back).
 pub fn process_vm_map_ring(process_id: u32, paddrs: &[PhysAddr]) -> u64 {
-    use crate::dual_paging::{ostd_map_ring_4kb_user, ostd_unmap_ring_4kb_user};
+    use crate::user_mappings::{ostd_map_ring_4kb_user, ostd_unmap_ring_4kb_user};
 
     if paddrs.is_empty() {
         return 0;
