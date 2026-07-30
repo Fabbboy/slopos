@@ -106,7 +106,7 @@
 #          parameter the caller picks.
 #        - A shared receiver minting a mutable borrow is invisible, three
 #          times over. `fn slot(&self) -> &mut T` carries no generic list, so
-#          the joiner never considers the line; `fn slot<T>(&self) -> &mut T`
+#          the predicate returns before collecting one; `fn slot<T>(&self) -> &mut T`
 #          declares only a type parameter, so the predicate collects no
 #          lifetime and returns early; `fn slot<'a>(&'a self) -> &'a mut T`
 #          does reach the predicate and is silent because `&'a self` names
@@ -191,7 +191,7 @@
 #          distinguishing "consumed owning handle" from "re-presentable raw
 #          pointer or address" needs type resolution, not a signature parse.
 #          The in-tree `KBox::leak` declares no generic list of its own, so
-#          the joiner skips it before any of this applies, and it says
+#          the predicate returns before any of this applies, and it says
 #          `&'static mut T` where std says `&'a mut T` — the substitution the
 #          bullet above calls a hiding move, honest here for the same reason
 #          the shape is sound: the box is gone.
