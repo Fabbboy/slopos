@@ -19,18 +19,16 @@ use slopos_testing::TestResult;
 use slopos_testing::{assert_test, fail, pass};
 
 use crate::hhdm::PhysAddrHhdm;
-use crate::mmu::MmContextId;
 use crate::page_alloc::{alloc_kernel_page, free_page_frame, get_page_allocator_stats};
 use crate::paging::page_table_defs::{PageTable, PageTableEntry, PageTableLevel};
-use crate::paging::tables::{ProcessPageDir, map_page_4kb_in, unmap_page_in_directory};
+use crate::paging::tables::{map_page_4kb_in, unmap_page_4kb_in};
 use crate::paging_defs::{PAGE_SIZE_2MB, PAGE_SIZE_4KB, PageFlags};
 
 /// A scratch tree rooted at a PML4 the kernel never installs, plus the
 /// frames it owns so a failing case can still hand them all back.
 struct ScratchTree {
-    dir: ProcessPageDir,
-    /// Frames this tree allocated, in allocation order. The descent
-    /// frees some of them; `release` skips whatever it already took.
+    /// Frames this tree allocated, in allocation order, root first. The
+    /// descent frees some of them; `release` skips whatever it took.
     owned: [PhysAddr; 8],
     owned_len: usize,
 }
@@ -61,14 +59,12 @@ fn entry(table: PhysAddr, index: usize) -> PageTableEntry {
 }
 
 impl ScratchTree {
-    /// A tree with just a PML4. `vaddr`'s levels are filled in by the
+    /// A tree with just a PML4. The levels below it are filled in by the
     /// `link_*` helpers.
     fn new() -> Option<Self> {
-        let pml4 = new_table()?;
         let mut owned = [PhysAddr::NULL; 8];
-        owned[0] = pml4;
+        owned[0] = new_table()?;
         Some(Self {
-            dir: ProcessPageDir::new(pml4.to_virt().as_mut_ptr(), pml4, 0, MmContextId::INVALID),
             owned,
             owned_len: 1,
         })
@@ -76,10 +72,6 @@ impl ScratchTree {
 
     fn root(&self) -> PhysAddr {
         self.owned[0]
-    }
-
-    fn dir_ptr(&mut self) -> *mut ProcessPageDir {
-        core::ptr::from_mut(&mut self.dir)
     }
 
     fn track(&mut self, phys: PhysAddr) {
@@ -170,7 +162,7 @@ pub fn test_paging_unmap_huge_1gib() -> TestResult {
         tree.link_huge_leaf(pdpt, l3, leaf);
 
         let before = free_pages();
-        let got = unmap_page_in_directory(tree.dir_ptr(), probe_va());
+        let got = unmap_page_4kb_in(tree.root(), probe_va());
         let after = free_pages();
 
         assert_test!(got == leaf, "1 GiB unmap returned the huge leaf phys");
@@ -208,7 +200,7 @@ pub fn test_paging_unmap_huge_2mib() -> TestResult {
         tree.link_huge_leaf(pd, l2, leaf);
 
         let before = free_pages();
-        let got = unmap_page_in_directory(tree.dir_ptr(), probe_va());
+        let got = unmap_page_4kb_in(tree.root(), probe_va());
         let after = free_pages();
 
         assert_test!(got == leaf, "2 MiB unmap returned the huge leaf phys");
@@ -253,7 +245,7 @@ pub fn test_paging_unmap_4kib_prunes_three_levels() -> TestResult {
         );
 
         let before = free_pages();
-        let got = unmap_page_in_directory(tree.dir_ptr(), probe_va());
+        let got = unmap_page_4kb_in(tree.root(), probe_va());
         let after = free_pages();
 
         assert_test!(got == leaf, "4 KiB unmap returned the leaf phys");
@@ -289,7 +281,7 @@ pub fn test_paging_unmap_absent_leaf_still_prunes() -> TestResult {
         }
 
         let before = free_pages();
-        let got = unmap_page_in_directory(tree.dir_ptr(), probe_va());
+        let got = unmap_page_4kb_in(tree.root(), probe_va());
         let after = free_pages();
 
         assert_test!(got.is_null(), "absent leaf unmaps to NULL");

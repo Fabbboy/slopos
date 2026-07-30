@@ -765,23 +765,15 @@ findings="$(run_scan "$REPO_ROOT" "${scan_files[@]}")"
 # rather than a signature edit, and carries the reason. Anything not
 # listed fails.
 #
-#   mm/src/paging/tables.rs::pml4_table{,_mut}
-#       The walks in that file hold `&mut` into the PML4, the PDPT, the PD
-#       and the PT simultaneously — four different tables, legitimately —
-#       and that only typechecks because each borrow's lifetime is
-#       fabricated independently. Scoping them means rewriting the unmap
-#       walk to re-borrow at each mutation point.
-#
 #   slopos-ostd/src/util/ptr_buf.rs::borrow_ref{,_mut}
 #       The helpers the shape is named for. They stop tripping the check
-#       only by being deleted, and their last callers are the page-table
-#       walks above.
+#       only by being deleted, and deleting them waits on their last
+#       callers.
 #
 # This list may only shrink. Adding to it means a new function of a shape
 # the whole gate exists to delete, and needs the same kind of written
-# reason these carry.
+# reason this one carries.
 CHECK8_ALLOWLIST=(
-    "mm/src/paging/tables.rs"
     "slopos-ostd/src/util/ptr_buf.rs"
 )
 

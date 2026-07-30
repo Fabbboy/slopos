@@ -17,7 +17,7 @@ use core::sync::atomic::{AtomicU64, Ordering};
 
 use super::page_table_defs::{
     PAGE_TABLE_ENTRIES, PageTable, PageTableEntry, PageTableLevel, entry_at, set_entry_at,
-    table_empty_at, zero_table_at,
+    table_empty_at, unlink_child, zero_table_at,
 };
 use crate::paging_defs::PageFlags;
 use slopos_abi::addr::{PhysAddr, VirtAddr};
@@ -32,6 +32,10 @@ use crate::paging_defs::{PAGE_SIZE_2MB, PAGE_SIZE_4KB};
 use crate::tlb;
 
 static KERNEL_MAPPING_GEN: AtomicU64 = AtomicU64::new(1);
+
+/// PML4, PDPT, PD, PT — the depth of the descent, and the width of the
+/// path array the prune walks back up.
+const PAGE_TABLE_LEVELS: usize = 4;
 
 /// Legacy per-process page-directory descriptor. The per-process
 /// paging surface is OSTD-only; this struct survives as a vestigial
@@ -100,57 +104,6 @@ impl ProcessPageDir {
     #[inline]
     pub fn init_in_kmalloc_slot(dst: *mut ProcessPageDir, init: ProcessPageDir) {
         slopos_ostd::util::ptr_buf::init_slot(dst, init);
-    }
-
-    /// Read the wrapped `pml4: *mut PageTable` for a non-null
-    /// `*mut ProcessPageDir`. Callers handle the null check on the
-    /// outer page-dir pointer; this routes through OSTD's
-    /// `borrow_ref::<ProcessPageDir>` so the field access stays in
-    /// safe Rust.
-    #[inline]
-    fn pml4_ptr_from(page_dir: *mut ProcessPageDir) -> *mut PageTable {
-        slopos_ostd::util::ptr_buf::with_ref::<ProcessPageDir, _>(page_dir, |dir| *dir.pml4)
-    }
-
-    /// Borrow the PML4 page-table at `page_dir`'s `pml4` field as a
-    /// shared `&PageTable`. Returns `None` if `page_dir` is null or
-    /// its `pml4` pointer is null. Folds the chain of raw-pointer
-    /// dereferences interior so callers walk in safe Rust.
-    #[inline]
-    pub fn pml4_table<'a>(page_dir: *mut ProcessPageDir) -> Option<&'a PageTable> {
-        if page_dir.is_null() {
-            return None;
-        }
-        let pml4 = Self::pml4_ptr_from(page_dir);
-        if pml4.is_null() {
-            return None;
-        }
-        Some(slopos_ostd::util::ptr_buf::borrow_ref::<PageTable>(pml4))
-    }
-
-    /// Mutable variant of [`Self::pml4_table`]. Caller is responsible
-    /// for ensuring single-writer access to the PML4 (typically by
-    /// holding the per-process slot lock in `process_vm.rs`).
-    ///
-    /// Still returns the borrow rather than scoping it, unlike the rest of the
-    /// pointer-borrow surface. The walks in this file hold `&mut` into the
-    /// PML4, the PDPT, the PD and the PT *simultaneously* — legitimately, they
-    /// are four different tables — and that only typechecks because each
-    /// borrow's lifetime is fabricated independently. Scoping them means
-    /// restructuring the walk to re-borrow at each mutation point instead, in
-    /// the unmap path. Worth doing; not worth doing as a rename.
-    #[inline]
-    pub fn pml4_table_mut<'a>(page_dir: *mut ProcessPageDir) -> Option<&'a mut PageTable> {
-        if page_dir.is_null() {
-            return None;
-        }
-        let pml4 = Self::pml4_ptr_from(page_dir);
-        if pml4.is_null() {
-            return None;
-        }
-        Some(slopos_ostd::util::ptr_buf::borrow_ref_mut::<PageTable>(
-            pml4,
-        ))
     }
 }
 
@@ -453,90 +406,121 @@ pub fn map_page_4kb(vaddr: VirtAddr, paddr: PhysAddr, flags: u64) -> c_int {
     map_page_4kb_in(kernel_pml4_phys(), vaddr, paddr, flags)
 }
 
-pub(crate) fn unmap_page_in_directory(page_dir: *mut ProcessPageDir, vaddr: VirtAddr) -> PhysAddr {
-    let Some(pml4_table) = ProcessPageDir::pml4_table_mut(page_dir) else {
-        return PhysAddr::NULL;
-    };
-
-    let pml4_idx = PageTableLevel::Four.index_of(vaddr);
-    let pdpt_idx = PageTableLevel::Three.index_of(vaddr);
-    let pd_idx = PageTableLevel::Two.index_of(vaddr);
-    let pt_idx = PageTableLevel::One.index_of(vaddr);
-
-    let pml4_entry = pml4_table.entry_mut(pml4_idx);
-    if !pml4_entry.is_present() {
+/// Unmap `vaddr` under the PML4 at `pml4_phys` and release whatever
+/// intermediate tables the cleared leaf emptied. Returns the physical
+/// address the leaf named, or NULL if nothing was mapped.
+///
+/// The descent records `(table, index)` per level on the way down and
+/// prunes off that array on the way back up, so at no point does a
+/// reference into a page-table frame exist.
+pub(crate) fn unmap_page_4kb_in(pml4_phys: PhysAddr, vaddr: VirtAddr) -> PhysAddr {
+    if pml4_phys.is_null() {
         return PhysAddr::NULL;
     }
-    let pml4_entry_phys = pml4_entry.address();
 
-    let pdpt_ptr = phys_to_table(pml4_entry_phys);
-    let pdpt_table = slopos_ostd::util::ptr_buf::borrow_ref_mut::<PageTable>(pdpt_ptr);
-    let pdpt_entry = pdpt_table.entry_mut(pdpt_idx);
+    let mut path = [(PhysAddr::NULL, 0usize); PAGE_TABLE_LEVELS];
+    let mut depth = 0usize;
+
+    path[depth] = (pml4_phys, PageTableLevel::Four.index_of(vaddr));
+    depth += 1;
+    let pml4_entry = entry_at(path[0].0, path[0].1);
+    if !pml4_entry.is_present() || pml4_entry.address().is_null() {
+        return PhysAddr::NULL;
+    }
+
+    path[depth] = (pml4_entry.address(), PageTableLevel::Three.index_of(vaddr));
+    depth += 1;
+    let pdpt_entry = entry_at(path[1].0, path[1].1);
     if !pdpt_entry.is_present() {
         return PhysAddr::NULL;
     }
 
-    if pdpt_entry.is_huge() {
-        let phys = pdpt_entry.address();
-        pdpt_entry.clear();
+    let unmapped_phys = if pdpt_entry.is_huge() {
+        set_entry_at(path[1].0, path[1].1, PageTableEntry::EMPTY);
         flush_kernel_page_after_mod(vaddr);
-        if table_empty_at(pml4_entry_phys) {
-            pml4_entry.clear();
-            free_page_frame(pml4_entry_phys);
-        }
-        return phys;
-    }
-
-    let pdpt_entry_phys = pdpt_entry.address();
-    let pd_ptr = phys_to_table(pdpt_entry_phys);
-    let pd_table = slopos_ostd::util::ptr_buf::borrow_ref_mut::<PageTable>(pd_ptr);
-    let pd_entry = pd_table.entry_mut(pd_idx);
-    if !pd_entry.is_present() {
+        pdpt_entry.address()
+    } else if pdpt_entry.address().is_null() {
         return PhysAddr::NULL;
-    }
-
-    let unmapped_phys;
-
-    if pd_entry.is_huge() {
-        unmapped_phys = pd_entry.address();
-        pd_entry.clear();
-        flush_kernel_page_after_mod(vaddr);
     } else {
-        let pd_entry_phys = pd_entry.address();
-        let pt_ptr = phys_to_table(pd_entry_phys);
-        if pt_ptr.is_null() {
+        path[depth] = (pdpt_entry.address(), PageTableLevel::Two.index_of(vaddr));
+        depth += 1;
+        let pd_entry = entry_at(path[2].0, path[2].1);
+        if !pd_entry.is_present() {
             return PhysAddr::NULL;
         }
-        let pt_table = slopos_ostd::util::ptr_buf::borrow_ref_mut::<PageTable>(pt_ptr);
-        let pt_entry = pt_table.entry_mut(pt_idx);
-        if pt_entry.is_present() {
-            unmapped_phys = pt_entry.address();
-            pt_entry.clear();
+
+        if pd_entry.is_huge() {
+            set_entry_at(path[2].0, path[2].1, PageTableEntry::EMPTY);
             flush_kernel_page_after_mod(vaddr);
+            pd_entry.address()
+        } else if pd_entry.address().is_null() {
+            return PhysAddr::NULL;
         } else {
-            unmapped_phys = PhysAddr::NULL;
+            path[depth] = (pd_entry.address(), PageTableLevel::One.index_of(vaddr));
+            depth += 1;
+            let pt_entry = entry_at(path[3].0, path[3].1);
+            if pt_entry.is_present() {
+                set_entry_at(path[3].0, path[3].1, PageTableEntry::EMPTY);
+                flush_kernel_page_after_mod(vaddr);
+                pt_entry.address()
+            } else {
+                PhysAddr::NULL
+            }
         }
-        if table_empty_at(pd_entry_phys) {
-            pd_entry.clear();
-            free_page_frame(pd_entry_phys);
-        }
-    }
+    };
 
-    if table_empty_at(pdpt_entry_phys) {
-        pdpt_entry.clear();
-        free_page_frame(pdpt_entry_phys);
-    }
-
-    if table_empty_at(pml4_entry_phys) {
-        pml4_entry.clear();
-        free_page_frame(pml4_entry_phys);
-    }
-
+    prune_empty_tables(&path, depth);
     unmapped_phys
 }
 
+/// Release the intermediate tables the cleared leaf emptied.
+///
+/// `path[k]` is the table entered at level `k`, PML4 first, paired with
+/// the index taken out of it — so `path[k]`'s table is exactly the child
+/// of `path[k - 1]`'s entry, and one step releases a child while clearing
+/// its single parent link. A non-empty child ends the walk: its parent
+/// still holds the present entry that named it, so no ancestor can be
+/// empty either.
+///
+/// Two conditions make the release safe, and both are conditions rather
+/// than proofs.
+///
+/// The first is invalidation. Freeing a page-table frame issues no
+/// invalidation of its own. It does not need to, because every leaf this
+/// subtree ever translated was cleared by an `unmap_page_4kb_in` that
+/// issued `invlpg` for that exact linear address on this CPU and, under
+/// SMP, on every other CPU before returning — and `invlpg` drops the
+/// paging-structure-cache entries a walk of that address would use, not
+/// just its final TLB entry. An empty table is therefore one whose every
+/// covered address has already been invalidated machine-wide. Batching
+/// those flushes, deferring one past this point, or loosening the
+/// emptiness test breaks that silently.
+///
+/// The second is single ownership. Nothing serialises this descent, and
+/// `KERNEL_PAGE_DIR` carries no lock — one cannot be added, because
+/// `alloc_page_table` reaches the buddy whose reuse path drains other
+/// CPUs, and that drain under a lock is a deadlock. `unlink_child` is
+/// what makes the release single-owner: two CPUs clearing the last leaf
+/// under one table can both find it empty, and only the one that wins the
+/// exchange clearing the parent link may hand the frame back.
+fn prune_empty_tables(path: &[(PhysAddr, usize); PAGE_TABLE_LEVELS], depth: usize) {
+    let mut level = depth;
+    while level > 1 {
+        let (child_phys, _) = path[level - 1];
+        if !table_empty_at(child_phys) {
+            break;
+        }
+        let (parent_phys, parent_idx) = path[level - 2];
+        if !unlink_child(parent_phys, parent_idx, child_phys) {
+            break;
+        }
+        free_page_frame(child_phys);
+        level -= 1;
+    }
+}
+
 pub fn unmap_page(vaddr: VirtAddr) -> PhysAddr {
-    unmap_page_in_directory(KERNEL_PAGE_DIR.get(), vaddr)
+    unmap_page_4kb_in(kernel_pml4_phys(), vaddr)
 }
 
 pub fn paging_get_kernel_directory() -> *mut ProcessPageDir {

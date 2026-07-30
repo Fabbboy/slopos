@@ -343,3 +343,42 @@ pub(crate) fn zero_table_at(phys: PhysAddr) {
         });
     }
 }
+
+/// Clear the entry at `index` in `table_phys`, but only while it still
+/// links `child_phys` as a table. Returns true for the CPU that cleared
+/// it, false if the entry no longer names that child — which is another
+/// CPU having got there first.
+///
+/// This is what makes releasing a pruned table single-owner. Nothing
+/// serialises the unmap descent, so two CPUs clearing the last leaf under
+/// one table can both find it empty; only the winner of this exchange may
+/// hand the frame back to the allocator.
+///
+/// A bare exchange failure is retried rather than reported: the hardware
+/// page walker stamps Accessed and Dirty into any entry it uses, so an
+/// entry can change without the link changing.
+#[inline]
+pub(crate) fn unlink_child(table_phys: PhysAddr, index: usize, child_phys: PhysAddr) -> bool {
+    debug_assert!(index < PAGE_TABLE_ENTRIES);
+    slopos_ostd::util::ptr_buf::with_atomic_u64_at(table_base_at(table_phys), index, |slot| {
+        use core::sync::atomic::Ordering;
+        loop {
+            let observed = slot.load(Ordering::Relaxed);
+            let entry = PageTableEntry::from_raw(observed);
+            if !entry.is_present() || entry.is_huge() || entry.address() != child_phys {
+                return false;
+            }
+            if slot
+                .compare_exchange(
+                    observed,
+                    PageTableEntry::EMPTY.as_raw(),
+                    Ordering::AcqRel,
+                    Ordering::Relaxed,
+                )
+                .is_ok()
+            {
+                return true;
+            }
+        }
+    })
+}
