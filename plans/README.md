@@ -14,7 +14,7 @@ editing.
 
 | Document | Scope |
 |----------|-------|
-| `CHECK8_SCAN_AND_PAGE_DIR_COLLAPSE.md` | Make check 8's argument scan test lifetime *supply* rather than mention; collapse `ProcessPageDir` to the one field anyone reads |
+| `CHECK8_SCAN_AND_PAGE_DIR_COLLAPSE.md` | Collapse `ProcessPageDir` to the one field anyone reads |
 | `KNOWN_ISSUES.md` | Working notes on open issues; verify before using as source of truth |
 | `driver-framework-base.html` | Driver-framework base: unified Bus model, platform/ACPI registry, deferred-probe/hotplug/unbind |
 | `microtransactions.md` | Kernel microtransaction layer on W/L currency; Phase 1 = pay-to-boot gate |

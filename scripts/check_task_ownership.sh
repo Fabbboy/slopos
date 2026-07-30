@@ -88,7 +88,7 @@
 #      its generic list, argument list and return type by counting angle
 #      brackets and parentheses (stepping over `->` so the arrow in a
 #      `Fn(A) -> B` bound does not close a generic list), then reports a
-#      declared lifetime the return type names and no argument does.
+#      declared lifetime the return type names and no argument supplies.
 #      Signatures spanning several lines are joined first, because the tree
 #      contains a three-line one that a line-at-a-time scan misses.
 #
@@ -124,26 +124,58 @@
 #          `ptr_buf::install_buf_mut` (one-shot install) and `dev/mod.rs`'s
 #          `borrow_dyn` (published-once device handle) are both honest, and
 #          nothing here could tell them from a region that is later freed.
-#        - The argument scan tests whether a lifetime is *named* in the
-#          argument list, not whether an argument *supplies* it. A mention
-#          that supplies nothing — a closure bound written inline
-#          (`g: impl FnOnce(&'a T)`), a bare `fn(&'a ())`, a
-#          `PhantomData<&'a ()>` — therefore counts as constraining, while
-#          the callee still mints the reference from a raw pointer under a
-#          lifetime the caller picked. This is a bypass rather than a blind
-#          spot: the shape this check is named for passes once any such
-#          parameter is added. The sound spelling is the higher-ranked one,
-#          which the `Fn(&T)` sugar gives for free and an explicit `for<'a>`
-#          states — a lifetime the caller cannot name is one it cannot
-#          choose.
-#          Only an occurrence inside an argument's own type does this. The
-#          bound spellings `<'a, F: FnOnce(&'a T)>` and
-#          `where F: FnOnce(&'a T)` are both still reported, because neither
-#          the generic list nor the `where` clause is part of the argument
-#          list. `ret` is truncated at `where` deliberately, as a
+#        - The argument scan tests whether an argument could *supply* a
+#          lifetime, not merely whether it names one. Four spellings mention
+#          a lifetime and supply nothing, and each is blanked out of the
+#          argument text before the scan reads it: a `PhantomData<&'a ()>`
+#          type argument, a bare `fn(&'a ())` type, an
+#          `Fn`/`FnMut`/`FnOnce`/`AsyncFn*(&'a T)` parameter list written in
+#          argument position, and an `+ 'a` outlives bound on an argument
+#          type. In each of the four the callee still mints the reference
+#          from a raw pointer under a lifetime the caller picked: a callable
+#          bound by the sugar is higher-ranked, and a `'static` value
+#          satisfies `T: 'a` for every `'a`. The sound spelling for a
+#          callback is the higher-ranked one, which the `Fn(&T)` sugar gives
+#          for free and an explicit `for<'a>` states — a lifetime the caller
+#          cannot name is one it cannot choose.
+#          Blanking is delimited by a closing bracket, so every mention that
+#          survives outside one is read as constraining whether or not it
+#          constrains. These spellings of the bypass are left standing:
+#          a callable's return type (`_f: fn() -> &'a T`,
+#          `g: impl Fn(u32) -> &'a T`); an argument head whose referent the
+#          caller can obtain at `'static` (`_w: &'a ()`, `_w: &'a str`,
+#          `g: &'a dyn Fn(..)`); a lifetime appearing only in a trait bound
+#          written in argument position (`g: impl Into<&'a T>`,
+#          `it: impl Iterator<Item = &'a T>`); and a nominal or aliased
+#          wrapper with public construction (`_m: Marker<'a>` where
+#          `Marker` is a pub tuple struct over `PhantomData`). Closing the
+#          first needs a scan to the next comma at argument depth rather
+#          than a bracket matcher; the rest need type resolution this scan
+#          does not have.
+#          An occurrence at an argument's head over a concrete referent
+#          (`&'a Payload`) or in a nominal type whose construction the
+#          caller cannot reach (`t: BspToken<'brand>`) does supply, and is
+#          left alone.
+#          Blanking needs a balanced bracket, so a signature truncated
+#          mid-region leaves the region unblanked and reads the mention as
+#          constraining — a truncation fails toward silence, never toward a
+#          report.
+#          The bound spellings `<'a, F: FnOnce(&'a T)>` and
+#          `where F: FnOnce(&'a T)` are reported, because neither the
+#          generic list nor the `where` clause is part of the argument list.
+#          That rule over-reports one shape: `fn first<'a, I: IntoIterator<
+#          Item = &'a u8>>(it: I) -> &'a u8` is sound — an associated-type
+#          equality bound does tie `'a` to the caller's data — and is
+#          reported anyway. `ret` is truncated at `where` deliberately, as a
 #          false-positive guard: without it,
 #          `fn f<'a, F>(x: u32, f: F) -> u32 where F: Fn(&'a u8)` would be
 #          reported for a function that returns no reference at all.
+#          The return type is scanned for mentions only. A signature
+#          returning `PhantomData<&'a T>`, `fn(&'a T)` or `impl Fn(&'a T)`
+#          mints nothing and is reported.
+#        - The generic list must open on the same physical line as the
+#          function name. `fn f\n<'a>(p: *const T) -> &'a T` is not
+#          considered at all — the joiner never starts.
 #        - Elided lifetimes are not analysed at all. `fn f(x: &Task) -> &Foo`
 #          is tied to its argument by the elision rules and is silent here,
 #          which is the correct answer, but it is silent by not looking
@@ -341,13 +373,71 @@ scan_sources() {
             function names_lifetime(s, lt) {
                 return (s ~ (lt "([^A-Za-z0-9_]|$)"))
             }
+            # Position p begins a token when the character before it is not
+            # a word character. A path separator qualifies, so the
+            # PhantomData in marker::PhantomData starts a token.
+            function token_start(s, p,   c) {
+                if (p <= 1) { return 1 }
+                c = substr(s, p - 1, 1)
+                return (c !~ /[A-Za-z0-9_]/)
+            }
+            # A bracketed region that mentions a lifetime without supplying
+            # it. Returns the index of the bracket closing the region that
+            # starts at p, or 0 when p starts no such region. The
+            # alternation is longest-first and each branch requires its
+            # opening bracket, so Fn cannot win against FnOnce(. An
+            # unbalanced bracket returns 0, leaving the region unmasked and
+            # the mention read as constraining.
+            function nonsupplying_end(s, p,   rest) {
+                rest = substr(s, p)
+                if (match(rest, /^PhantomData[[:space:]]*</)) {
+                    return match_angle(s, p + RLENGTH - 1)
+                }
+                if (match(rest, /^(AsyncFnOnce|AsyncFnMut|AsyncFn|FnOnce|FnMut|Fn|fn)[[:space:]]*\(/)) {
+                    return match_paren(s, p + RLENGTH - 1)
+                }
+                return 0
+            }
+            # The text with every non-supplying region replaced by blanks of
+            # the same width, so no two tokens are joined into a third and
+            # an inner region is consumed along with its outer one.
+            function mask_nonsupplying(s,   out, i, e, k) {
+                out = ""
+                i = 1
+                while (i <= length(s)) {
+                    if (token_start(s, i)) {
+                        e = nonsupplying_end(s, i)
+                        if (e > 0) {
+                            for (k = i; k <= e; k++) { out = out " " }
+                            i = e + 1
+                            continue
+                        }
+                    }
+                    out = out substr(s, i, 1)
+                    i++
+                }
+                return out
+            }
+            # An outlives bound on an argument type supplies nothing: a
+            # value of any longer region satisfies it, so the caller still
+            # picks the lifetime. Blank each one, same width.
+            function mask_outlives(s,   out, pad, k) {
+                out = s
+                while (match(out, ("\\+[[:space:]]*" Q "[A-Za-z_][A-Za-z0-9_]*"))) {
+                    pad = ""
+                    for (k = 1; k <= RLENGTH; k++) { pad = pad " " }
+                    out = substr(out, 1, RSTART - 1) pad substr(out, RSTART + RLENGTH)
+                }
+                return out
+            }
             # The check-8 predicate. Splits a joined signature into its
             # generic list, argument list and return type, then reports the
             # first declared lifetime that the return type names and no
             # argument does. Returns the lifetime, or "" for a clean
             # signature.
             function unconstrained_lifetime(sig,   i, gend, aend, generics, args,
-                                            ret, rest, tmp, lt, k, nlt, lts) {
+                                            supplying, ret, rest, tmp, lt, k,
+                                            nlt, lts) {
                 if (match(sig, /(^|[^A-Za-z0-9_])fn[[:space:]]+[A-Za-z0-9_]+/) == 0) {
                     return ""
                 }
@@ -373,6 +463,10 @@ scan_sources() {
                     ret = substr(ret, 1, RSTART - 1)
                 }
                 if (index(ret, "{")) { ret = substr(ret, 1, index(ret, "{") - 1) }
+                # Only the part of an argument that could supply a lifetime
+                # counts as constraining. Both helpers call match(), so this
+                # sits after every live RSTART in the code above.
+                supplying = mask_outlives(mask_nonsupplying(args))
 
                 nlt = 0
                 tmp = generics
@@ -383,7 +477,7 @@ scan_sources() {
                     lts[++nlt] = lt
                 }
                 for (k = 1; k <= nlt; k++) {
-                    if (names_lifetime(ret, lts[k]) && !names_lifetime(args, lts[k])) {
+                    if (names_lifetime(ret, lts[k]) && !names_lifetime(supplying, lts[k])) {
                         return lts[k]
                     }
                 }
@@ -611,8 +705,9 @@ fn counts() {
 }
 FIXTURE
 
-    # Check 8 gets its own fixture pair: five positive signatures — four
-    # dangerous shapes plus the multi-line join — and
+    # Check 8 gets its own fixture pair: twelve positive signatures — four
+    # dangerous shapes, the multi-line join, the five spellings that mention
+    # a lifetime without supplying it, and the two bound spellings — and
     # the lookalikes that must stay silent. The negatives carry the weight
     # here — this is the check most able to produce false positives.
     # `Payload` rather than `Task` throughout, so these files exercise
@@ -637,6 +732,30 @@ pub fn spans_lines<'a, K, U>(
     p: *const Payload<K, U>,
 ) -> Option<&'a crate::sync::AtomicCell<ExitInfo>> {
     None
+}
+pub fn phantom_bypass<'a, P>(p: *const P, _w: PhantomData<&'a ()>) -> &'a P {
+    todo!()
+}
+pub fn fnptr_bypass<'a, P>(p: *const P, _f: fn(&'a ())) -> &'a P {
+    todo!()
+}
+pub fn closure_bypass<'a, P>(p: *const P, g: impl FnOnce(&'a P)) -> &'a P {
+    todo!()
+}
+pub fn async_bypass<'a, P>(p: *const P, g: impl AsyncFnOnce(&'a P)) -> &'a P {
+    todo!()
+}
+pub fn outlives_bypass<'a, P>(p: *const P, g: KBox<dyn Fn(&'a P) + 'a>) -> &'a P {
+    todo!()
+}
+pub fn wherefn<'a, P, F>(p: *const P, g: F) -> &'a P
+where
+    F: FnOnce(&'a P),
+{
+    todo!()
+}
+pub fn boundfn<'a, P, F: FnOnce(&'a P)>(p: *const P, g: F) -> &'a P {
+    todo!()
 }
 FIXTURE
 
@@ -678,6 +797,23 @@ pub fn tied_multiline<'a, K, U>(
     p: &'a Payload<K, U>,
 ) -> Option<&'a crate::sync::AtomicCell<ExitInfo>> {
     None
+}
+// A brand token the caller cannot conjure: private fields, invariant in
+// 'brand, minted only inside a higher-ranked scope.
+pub fn from_token<'brand, P>(t: BspToken<'brand>, p: *const P) -> &'brand P {
+    todo!()
+}
+// An argument head supplies even when the same argument carries an
+// outlives bound the mask blanks.
+pub fn head_outlives<'a, P>(x: &'a P, g: impl Fn(&P) + 'a) -> &'a P {
+    x
+}
+// The `where` strip exists for this: no reference is returned at all.
+pub fn where_no_ref<'a, F>(x: u32, f: F) -> u32
+where
+    F: Fn(&'a u8),
+{
+    0
 }
 FIXTURE
 
@@ -755,7 +891,7 @@ FIXTURE
     expect 5  1   # Send impl justified by a task refcount
     expect 6  3   # task_inc_ref, task_dec_ref, refcnt
     expect 7  5   # five forbidden symbols on the fault path
-    expect 8  5   # Option<&'a mut T>, Option<&'a [u8]>, &'a mut T, &'a T, multi-line
+    expect 8  12  # 5 raw-pointer shapes, 5 bypass spellings, 2 bound spellings
 
     # Nothing in either negative fixture may fire, on any check. The
     # lifetime negatives are the load-bearing ones: check 8 is the check
@@ -772,7 +908,9 @@ FIXTURE
     if [ "$self_test_fail" -eq 0 ]; then
         echo "  negatives: no false positives (TaskEntry / entry_arg / TaskRef / TaskAddr clean)"
         echo "  lifetime negatives: no false positives (argument-tied, elided, 'static,"
-        echo "    Fn(..) -> .. bound, and for<'x> HRTB all stay silent)"
+        echo "    Fn(..) -> .. bound, for<'x> HRTB, a brand token the caller cannot"
+        echo "    conjure, an argument head beside an outlives bound, and a where-clause"
+        echo "    bound on a non-reference return all stay silent)"
     fi
 
     if [ "$self_test_fail" -ne 0 ]; then
