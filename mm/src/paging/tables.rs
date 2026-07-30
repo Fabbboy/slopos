@@ -552,14 +552,6 @@ pub fn init_paging() {
     klog_debug!("Paging system initialized successfully");
 }
 
-pub fn get_memory_layout_info(kernel_virt_base: *mut u64, kernel_phys_base: *mut u64) {
-    slopos_ostd::util::ptr_buf::nullable_write(kernel_virt_base, KERNEL_VIRTUAL_BASE);
-    slopos_ostd::util::ptr_buf::nullable_write(
-        kernel_phys_base,
-        virt_to_phys(VirtAddr::new(KERNEL_VIRTUAL_BASE)).as_u64(),
-    );
-}
-
 pub fn is_mapped(vaddr: VirtAddr) -> c_int {
     (!virt_to_phys(vaddr).is_null()) as c_int
 }

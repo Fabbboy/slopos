@@ -13,6 +13,8 @@
 //! prune forgets leaks a page, and one it tracks twice hands the same
 //! frame to the buddy on two paths.
 
+use core::sync::atomic::Ordering;
+
 use slopos_abi::addr::{PhysAddr, VirtAddr};
 use slopos_ostd::util::ptr_buf;
 use slopos_testing::TestResult;
@@ -20,7 +22,7 @@ use slopos_testing::{assert_test, fail, pass};
 
 use crate::hhdm::PhysAddrHhdm;
 use crate::page_alloc::{alloc_kernel_page, free_page_frame, get_page_allocator_stats};
-use crate::paging::page_table_defs::{PageTable, PageTableEntry, PageTableLevel};
+use crate::paging::page_table_defs::{PAGE_TABLE_ENTRIES, PageTableEntry, PageTableLevel};
 use crate::paging::tables::{map_page_4kb_in, unmap_page_4kb_in};
 use crate::paging_defs::{PAGE_SIZE_2MB, PAGE_SIZE_4KB, PageFlags};
 
@@ -39,23 +41,43 @@ fn free_pages() -> u32 {
     free
 }
 
+/// The HHDM view of the page-table frame at `table`, as an entry array.
+///
+/// The three helpers below reach a frame through the same raw-pointer
+/// primitives `page_table_defs` uses, but compute the base and the index
+/// themselves rather than calling `entry_at` / `set_entry_at` /
+/// `zero_table_at`. That independence is what makes them an oracle: a
+/// descent that writes the wrong slot must not be able to hide behind a
+/// check that reads the same wrong slot.
+fn table_base(table: PhysAddr) -> *mut u64 {
+    table.to_virt().as_mut_ptr()
+}
+
 fn new_table() -> Option<PhysAddr> {
     let phys = alloc_kernel_page();
     if phys.is_null() {
         return None;
     }
-    ptr_buf::with_ref_mut::<PageTable, _>(phys.to_virt().as_mut_ptr(), PageTable::zero);
+    // Linked into no tree and installed in no CR3, so this is the
+    // frame's only reachable name and a whole-frame view is honest here.
+    ptr_buf::with_buf_mut::<u64, _>(table_base(phys), PAGE_TABLE_ENTRIES, |entries| {
+        entries.fill(PageTableEntry::EMPTY.as_raw())
+    });
     Some(phys)
 }
 
 fn set_entry(table: PhysAddr, index: usize, entry: PageTableEntry) {
-    ptr_buf::with_ref_mut::<PageTable, _>(table.to_virt().as_mut_ptr(), |t| {
-        *t.entry_mut(index) = entry;
+    debug_assert!(index < PAGE_TABLE_ENTRIES);
+    ptr_buf::with_atomic_u64_at(table_base(table), index, |slot| {
+        slot.store(entry.as_raw(), Ordering::Relaxed)
     });
 }
 
 fn entry(table: PhysAddr, index: usize) -> PageTableEntry {
-    ptr_buf::with_ref::<PageTable, _>(table.to_virt().as_mut_ptr(), |t| *t.entry(index))
+    debug_assert!(index < PAGE_TABLE_ENTRIES);
+    ptr_buf::with_atomic_u64_at(table_base(table), index, |slot| {
+        PageTableEntry::from_raw(slot.load(Ordering::Relaxed))
+    })
 }
 
 impl ScratchTree {

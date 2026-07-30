@@ -133,11 +133,6 @@ impl PageTableEntry {
     }
 
     #[inline]
-    pub const fn is_unused(&self) -> bool {
-        self.0 == 0
-    }
-
-    #[inline]
     pub const fn address(&self) -> PhysAddr {
         PhysAddr(self.0 & PageFlags::ADDRESS_MASK)
     }
@@ -171,22 +166,6 @@ impl PageTableEntry {
     pub fn clear(&mut self) {
         self.0 = 0;
     }
-
-    #[inline]
-    pub const fn points_to_table(&self) -> bool {
-        self.is_present() && !self.is_huge()
-    }
-
-    /// If this entry points to a subtable (present, non-huge), return the
-    /// virtual pointer to that table via the HHDM. Returns null if the entry
-    /// is not present, is a huge-page mapping, or the address is null.
-    #[inline]
-    pub fn table_ptr(&self) -> *mut PageTable {
-        if !self.points_to_table() {
-            return core::ptr::null_mut();
-        }
-        self.address().to_virt().as_mut_ptr()
-    }
 }
 
 impl Default for PageTableEntry {
@@ -201,82 +180,28 @@ impl core::fmt::Debug for PageTableEntry {
     }
 }
 
+/// Entries in a page-table frame: one per index of a 9-bit level, which
+/// is exactly one 4 KiB page of 8-byte entries.
 pub const PAGE_TABLE_ENTRIES: usize = 512;
 
-/// A 512-entry page table, aligned to 4KB.
-#[repr(C, align(4096))]
-pub struct PageTable {
-    entries: [PageTableEntry; PAGE_TABLE_ENTRIES],
-}
-
-impl PageTable {
-    pub const EMPTY: Self = Self {
-        entries: [PageTableEntry::EMPTY; PAGE_TABLE_ENTRIES],
-    };
-
-    #[inline]
-    pub const fn new() -> Self {
-        Self::EMPTY
-    }
-
-    #[inline]
-    pub fn entry(&self, index: usize) -> &PageTableEntry {
-        &self.entries[index]
-    }
-
-    #[inline]
-    pub fn entry_mut(&mut self, index: usize) -> &mut PageTableEntry {
-        &mut self.entries[index]
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.entries.iter().all(|e| e.is_unused())
-    }
-
-    pub fn zero(&mut self) {
-        self.entries.fill(PageTableEntry::EMPTY);
-    }
-
-    #[inline]
-    pub fn iter(&self) -> impl Iterator<Item = &PageTableEntry> {
-        self.entries.iter()
-    }
-}
-
-impl core::ops::Index<usize> for PageTable {
-    type Output = PageTableEntry;
-
-    #[inline]
-    fn index(&self, index: usize) -> &Self::Output {
-        &self.entries[index]
-    }
-}
-
-impl core::ops::IndexMut<usize> for PageTable {
-    #[inline]
-    fn index_mut(&mut self, index: usize) -> &mut Self::Output {
-        &mut self.entries[index]
-    }
-}
-
-impl Default for PageTable {
-    fn default() -> Self {
-        Self::EMPTY
-    }
-}
+const _: () = assert!(
+    PAGE_TABLE_ENTRIES * core::mem::size_of::<u64>() == PAGE_SIZE_4KB as usize,
+    "a page-table frame is one 4 KiB page of 8-byte entries"
+);
 
 // ---------------------------------------------------------------------
 // Per-entry access to a page-table frame
 // ---------------------------------------------------------------------
 //
 // The descent in `tables.rs` reaches page-table frames only through
-// these five, and none of them forms a reference into a frame. That is
-// the point: a `&PageTable` — even one scoped to a single statement —
-// claims the whole 4096 bytes in order to touch eight, and two CPUs
-// mapping different VAs that share a table would each hold one. The
-// hardware page walker also stamps Accessed and Dirty into any entry it
-// uses, so even a single-CPU `&mut PageTable` claims exclusivity the
-// machine does not honour.
+// these five, and none of them forms a reference into a frame. No type
+// names a whole page-table frame, so a reference to one cannot be
+// written. That is the point: such a reference would claim all 4096
+// bytes in order to touch eight, and two CPUs mapping different VAs
+// that share a table would each hold one. The hardware page walker also
+// stamps Accessed and Dirty into any entry it uses, so even a
+// single-CPU exclusive reference would claim exclusivity the machine
+// does not honour.
 //
 // Access is therefore per-entry and atomic, which is what a page-table
 // entry actually is. This mirrors `slopos_ostd::mm::page_table`'s `Pte`,

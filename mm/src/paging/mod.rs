@@ -14,11 +14,11 @@ pub(crate) mod tables;
 pub mod walker;
 
 pub use crate::error::{MmError, MmResult};
-pub use page_table_defs::{PAGE_TABLE_ENTRIES, PageTable, PageTableEntry, PageTableLevel};
+pub use page_table_defs::{PAGE_TABLE_ENTRIES, PageTableEntry, PageTableLevel};
 pub use walker::{WalkResult, walk_phys};
 
 pub use tables::{
-    ProcessPageDir, get_memory_layout_info, get_page_size, init_paging, is_mapped, map_page_4kb,
+    ProcessPageDir, get_page_size, init_paging, is_mapped, map_page_4kb,
     paging_bump_kernel_mapping_gen, paging_get_kernel_directory, paging_mark_kernel_global,
     unmap_page, virt_to_phys,
 };

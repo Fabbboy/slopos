@@ -57,7 +57,7 @@ impl fmt::Display for MmError {
             Self::MappedToHugePage { level } => {
                 write!(f, "cannot traverse huge page at level {}", level)
             }
-            Self::InvalidPageTable => write!(f, "invalid page table pointer"),
+            Self::InvalidPageTable => write!(f, "null page table frame address"),
             Self::InvalidPhysicalAddress { address } => {
                 write!(f, "invalid physical address {:#x}", address)
             }
