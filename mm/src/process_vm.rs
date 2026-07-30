@@ -479,31 +479,25 @@ pub fn process_vm_activate(process_id: u32) -> bool {
     true
 }
 
-/// Run `f` under the per-process lock with mutable access to both the
-/// legacy `*mut ProcessPageDir` and the OSTD `KArc<VmSpace>` for
-/// `process_id`. Returns `None` if the slot is unbound or `vm_space`
-/// is missing.
+/// Run `f` under the per-process lock with mutable access to
+/// `process_id`'s OSTD `KArc<VmSpace>`. Returns `None` if the slot is
+/// unbound or `vm_space` is missing.
 ///
 /// The closure runs while the per-process lock is held — keep the
 /// body fast. Used by the page-fault handlers
-/// (`cow::handle_cow_fault`, `demand::handle_demand_fault`) so the
-/// dual-write window can drive both the legacy paging surface and
-/// the OSTD cursor in lockstep.
+/// (`cow::handle_cow_fault`, `demand::handle_demand_fault`), which
+/// need the address space and the lock that guards it in one step.
 pub fn process_vm_with_dual_paging<R>(
     process_id: u32,
-    f: impl FnOnce(*mut ProcessPageDir, &mut KArc<VmSpace>) -> R,
+    f: impl FnOnce(&mut KArc<VmSpace>) -> R,
 ) -> Option<R> {
     let slot = find_slot_for_pid(process_id)?;
     let mut guard = PROCESS_VMS[slot].lock();
     if guard.process_id != process_id {
         return None;
     }
-    let page_dir = *guard.page_dir;
-    if page_dir.is_null() {
-        return None;
-    }
     let vm_space = guard.vm_space.as_mut()?;
-    Some(f(page_dir, vm_space))
+    Some(f(vm_space))
 }
 
 /// Like [`process_vm_with_dual_paging`] but also resolves the
@@ -514,15 +508,11 @@ pub fn process_vm_with_dual_paging<R>(
 pub fn process_vm_with_dual_paging_and_region<R>(
     process_id: u32,
     fault_addr: u64,
-    f: impl FnOnce(*mut ProcessPageDir, &mut KArc<VmSpace>, VmaRegion) -> R,
+    f: impl FnOnce(&mut KArc<VmSpace>, VmaRegion) -> R,
 ) -> Option<R> {
     let slot = find_slot_for_pid(process_id)?;
     let mut guard = PROCESS_VMS[slot].lock();
     if guard.process_id != process_id {
-        return None;
-    }
-    let page_dir = *guard.page_dir;
-    if page_dir.is_null() {
         return None;
     }
     let region = {
@@ -530,7 +520,7 @@ pub fn process_vm_with_dual_paging_and_region<R>(
         region_ref.clone()
     };
     let vm_space = guard.vm_space.as_mut()?;
-    Some(f(page_dir, vm_space, region))
+    Some(f(vm_space, region))
 }
 
 /// Read the PML4 physical address for a process — the value
@@ -1274,8 +1264,7 @@ fn load_segments_and_tls(
             .vm_space
             .as_mut()
             .expect("load_segments_and_tls: vm_space present for live pid");
-        unmap_existing_code_region(page_dir, vm_space_ref, code_base)
-            .map_err(|_| ElfError::NullPointer)?;
+        unmap_existing_code_region(vm_space_ref, code_base).map_err(|_| ElfError::NullPointer)?;
     }
 
     let mut section_mappings = slopos_ostd::KVec::<(u64, u64, u64)>::zeroed(MAX_LOAD_SEGMENTS)
@@ -1398,16 +1387,13 @@ pub fn process_vm_translate_elf_address(addr: u64, min_vaddr: u64, code_base: u6
 }
 
 fn unmap_existing_code_region(
-    page_dir: *mut ProcessPageDir,
     vm_space: &mut KArc<VmSpace>,
     code_base: u64,
 ) -> Result<(), MapError> {
-    // Unmap exactly the code region [code_start, data_start).  The old
-    // implementation used wrong arithmetic that extended 1 MB below and
-    // above the actual region, potentially unmapping unrelated pages.
+    // Unmap exactly the code region [code_start, data_start) — no more,
+    // so a neighbouring region is never caught by the arithmetic.
     let data_start = crate::memory_layout_defs::PROCESS_DATA_START_VA;
     unmap_user_range(vm_space, code_base, data_start)?;
-    let _ = page_dir;
     Ok(())
 }
 

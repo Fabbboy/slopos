@@ -28,7 +28,7 @@ pub fn test_cow_read_not_cow_fault() -> TestResult {
 
     let error_code_read: u64 = 0x05;
     let cow_fault =
-        process_vm_with_dual_paging(vm.pid, |_pd, vs| is_cow_fault(error_code_read, vs, 0x2000))
+        process_vm_with_dual_paging(vm.pid, |vs| is_cow_fault(error_code_read, vs, 0x2000))
             .unwrap_or(false);
     assert_test!(!cow_fault, "is_cow_fault returned true for read access");
 
@@ -43,10 +43,9 @@ pub fn test_cow_not_present_not_cow() -> TestResult {
     let unmapped_addr: u64 = 0x5000_0000;
     let error_code: u64 = 0x02;
 
-    let cow_fault = process_vm_with_dual_paging(vm.pid, |_pd, vs| {
-        is_cow_fault(error_code, vs, unmapped_addr)
-    })
-    .unwrap_or(false);
+    let cow_fault =
+        process_vm_with_dual_paging(vm.pid, |vs| is_cow_fault(error_code, vs, unmapped_addr))
+            .unwrap_or(false);
     assert_test!(
         !cow_fault,
         "is_cow_fault returned true for not-present page"
@@ -58,7 +57,7 @@ pub fn test_cow_not_present_not_cow() -> TestResult {
 pub fn test_cow_handle_null_pagedir() -> TestResult {
     // Public dispatcher returns `None` for an unknown PID — that's the
     // failure path callers actually hit post-framekernel.
-    let result = crate::process_vm::process_vm_with_dual_paging(INVALID_PROCESS_ID, |_, _| ());
+    let result = crate::process_vm::process_vm_with_dual_paging(INVALID_PROCESS_ID, |_| ());
     if result.is_some() {
         return fail!("process_vm_with_dual_paging returned Some for INVALID_PROCESS_ID");
     }
@@ -311,7 +310,7 @@ pub fn test_cow_no_collateral_damage() -> TestResult {
         page_io::write_bytes(v2.as_mut_ptr::<u8>(), 0x22, PAGE_SIZE_4KB as usize);
     }
 
-    let map_addr1 = process_vm_with_dual_paging(vm.pid, |_pd, vs| {
+    let map_addr1 = process_vm_with_dual_paging(vm.pid, |vs| {
         ostd_map_4kb_user(vs, VirtAddr::new(addr1), phys1, PageFlags::USER_RO.bits())
     });
     if !matches!(map_addr1, Some(Ok(()))) {
@@ -319,7 +318,7 @@ pub fn test_cow_no_collateral_damage() -> TestResult {
         free_page_frame(phys2);
         return fail!("map page 1");
     }
-    let map_addr2 = process_vm_with_dual_paging(vm.pid, |_pd, vs| {
+    let map_addr2 = process_vm_with_dual_paging(vm.pid, |vs| {
         ostd_map_4kb_user(vs, VirtAddr::new(addr2), phys2, PageFlags::USER_RO.bits())
     });
     if !matches!(map_addr2, Some(Ok(()))) {

@@ -1530,7 +1530,7 @@ pub fn test_cow_page_isolation() -> TestResult {
     let phys = alloc_kernel_page();
     assert_not_null!(phys.as_u64() as *const u8, "alloc page frame");
 
-    let map_result = process_vm_with_dual_paging(parent.pid, |_pd, vs| {
+    let map_result = process_vm_with_dual_paging(parent.pid, |vs| {
         ostd_map_4kb_user(
             vs,
             VirtAddr::new(test_addr),
@@ -1591,7 +1591,7 @@ pub fn test_cow_fault_handling() -> TestResult {
     let phys = alloc_kernel_page();
     assert_not_null!(phys.as_u64() as *const u8, "alloc page frame");
 
-    let map_result = process_vm_with_dual_paging(vm.pid, |_pd, vs| {
+    let map_result = process_vm_with_dual_paging(vm.pid, |vs| {
         ostd_map_4kb_user(
             vs,
             VirtAddr::new(test_addr),
@@ -1609,9 +1609,8 @@ pub fn test_cow_fault_handling() -> TestResult {
 
     // Simulate a write fault - error code for write to present page = 0x03
     let error_code = 0x03u64;
-    let is_cow =
-        process_vm_with_dual_paging(vm.pid, |_pd, vs| is_cow_fault(error_code, vs, test_addr))
-            .unwrap_or(false);
+    let is_cow = process_vm_with_dual_paging(vm.pid, |vs| is_cow_fault(error_code, vs, test_addr))
+        .unwrap_or(false);
     assert_test!(is_cow, "is_cow_fault returned false for COW page");
 
     // Handle the COW fault

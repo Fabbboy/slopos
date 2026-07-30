@@ -197,7 +197,7 @@ fn map_user_rw_page(pid: u32) -> Option<u64> {
         return None;
     }
 
-    let mapped = slopos_mm::process_vm::process_vm_with_dual_paging(pid, |_pd, vs| {
+    let mapped = slopos_mm::process_vm::process_vm_with_dual_paging(pid, |vs| {
         slopos_mm::dual_paging::ostd_map_4kb_user(
             vs,
             slopos_abi::addr::VirtAddr::new(base),
