@@ -89,7 +89,9 @@ def main() -> None:
     fonts_dir = os.path.join(repo_root, "assets", "fonts")
     if os.path.isdir(fonts_dir):
         for fname in sorted(os.listdir(fonts_dir)):
-            if not fname.endswith(".ttf"):
+            # The OFL license texts ship beside the fonts they cover: the
+            # license requires each copy of the font to carry its notice.
+            if not fname.endswith((".ttf", "-OFL.txt")):
                 continue
             dest = b"/usr/share/fonts/" + fname.encode()
             entries.append((dest, MODE_DATA, read_file(os.path.join(fonts_dir, fname))))

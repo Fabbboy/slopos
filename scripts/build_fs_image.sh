@@ -69,11 +69,13 @@ if [ -d "$FONTS_DIR" ]; then
     debugfs -w -R "mkdir /usr/share" "$IMAGE_PATH" >/dev/null 2>&1 || true
     debugfs -w -R "mkdir /usr/share/fonts" "$IMAGE_PATH" >/dev/null 2>&1 || true
 
-    for font in "$FONTS_DIR"/*.ttf; do
+    # The OFL license texts ship beside the fonts they cover: the license
+    # requires each copy of the font to carry its notice.
+    for font in "$FONTS_DIR"/*.ttf "$FONTS_DIR"/*-OFL.txt; do
         [ -f "$font" ] || continue
         fname="$(basename "$font")"
         debugfs -w -R "write $font /usr/share/fonts/$fname" "$IMAGE_PATH" >/dev/null
-        echo "Installed font: /usr/share/fonts/$fname"
+        echo "Installed font asset: /usr/share/fonts/$fname"
     done
 fi
 

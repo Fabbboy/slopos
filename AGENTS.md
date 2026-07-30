@@ -40,6 +40,36 @@ These gates enforce the discipline. The source-scanning gates run via `just chec
 
 The in-place-init primitive (`slopos_ostd::Init<T, E>`, `Zeroable`, `init_from_closure`, `init_zeroed`) is **in-house** — defined in `slopos-ostd/src/mm/init.rs` with no external dependency on `pinned-init` or Rust-for-Linux's `pin-init`. Large structs must be constructed via `KBox::try_init(T::init_…())` / `PinBox::try_init(T::init_…())` so the `T` rvalue never materialises on the caller's stack. `check_stack_sizes.sh` enforces the upper bound from the other direction.
 
+### Licensing discipline
+
+SlopOS is `GPL-3.0-or-later`. Two rules keep it that way.
+
+**No verbatim code from a GPL-2.0-only source, ever.** GPL-2.0-only (Linux, the
+seL4 kernel, `rust/kernel/**`) and CDDL (illumos) are incompatible with the GPL
+version SlopOS ships under, and CDDL is incompatible with every GPL version.
+Concepts, algorithms and interface facts are free to take — ABI numbers, `errno`
+values, ioctl codes, struct layouts and hardware register offsets carry no
+copyright, which is why the ABI-compatibility work is sound. Upstream *prose* is
+not: never paste an upstream comment block, design essay or documentation
+paragraph. When citing an influence in a comment, name the **specification or
+the documented behaviour**, not the implementation file — "values follow the
+Linux x86-64 ABI" is an interoperability statement, "derived from
+`kernel/sched/fair.c`" is not. Keep the existing influence comments; they are
+contemporaneous evidence that what was borrowed was the concept.
+
+**Fonts load at runtime; never `include_bytes!` one into a shipped binary.**
+`assets/fonts/*.ttf` are SIL OFL 1.1 and ship as separate files in
+`/usr/share/fonts/`, which is aggregation and imposes nothing on the kernel.
+Baking a font into `kernel.elf` or a userland binary would put OFL §5 ("must be
+distributed entirely under this license") in direct conflict with GPLv3 §5(c)
+("license the entire work, as a whole, under this License"). The
+`include_bytes!` sites in `font/src/` are `#[cfg(test)]`-gated and must stay
+that way. Each font's license text ships beside it, in `assets/fonts/` and on
+the installed images.
+
+New third-party code linked into a shipped binary needs an entry in
+`NOTICE.md`; `MIT OR Apache-2.0` crates elect MIT there.
+
 ### Task-ownership discipline
 
 **`KArc<Task>` is the only owning handle for a task, and `TaskRef` is the only

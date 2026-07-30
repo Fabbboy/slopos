@@ -44,7 +44,7 @@ resolver = "2"
 [workspace.package]
 edition = "2024"
 version = "0.1.0"
-license = "GPL-3.0-only"
+license = "GPL-3.0-or-later"
 
 [workspace.lints.rust]
 warnings = "deny"

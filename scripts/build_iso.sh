@@ -70,6 +70,12 @@ cp "$LIMINE_DIR/limine-uefi-cd.bin" "$ISO_ROOT/boot/"
 cp "$LIMINE_DIR/BOOTX64.EFI" "$ISO_ROOT/EFI/BOOT/"
 cp "$LIMINE_DIR/BOOTIA32.EFI" "$ISO_ROOT/EFI/BOOT/" 2>/dev/null || true
 
+# Limine's BSD-2-Clause requires its copyright notice, condition list and
+# disclaimer to accompany any binary redistribution; NOTICE.md carries the
+# same for every other third-party component on the image.
+cp "$LIMINE_DIR/LICENSE" "$ISO_ROOT/boot/LICENSE.limine"
+cp "$REPO_ROOT/NOTICE.md" "$ISO_ROOT/boot/NOTICE.md"
+
 ISO_DIR="$(dirname "$OUTPUT")"
 mkdir -p "$ISO_DIR"
 

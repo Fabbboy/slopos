@@ -167,6 +167,85 @@ deterministic time-travel debugging (`just rr-record` / `just rr-replay`).
 
 <br/>
 
+## The Wizards Invented None Of This
+
+Nobody thinks up demand paging on a beach. Every genuinely hard problem in this
+repo — paging, preemption, wake races, TLB coherence, TCP over a network that
+hates you — was solved decades before we got here by people who wrote it down
+and gave it away. The wizards washed up on Sloptopia with no operating system
+and a spectacularly well-stocked library. **We studied and reimplemented. We
+did not copy.** The ideas are theirs; only the slop is ours.
+
+**[Asterinas](https://github.com/asterinas/asterinas)** — the shape of this
+entire kernel. The **framekernel** thesis is theirs: one trusted crate owns
+every line of `unsafe`, everything else is `#![forbid(unsafe_code)]`, and your
+TCB size is a number you are expected to defend in public. So is the name
+`slopos-ostd`, the vocabulary our memory manager speaks all day (`MetaSlot`,
+`Frame<M>`, `VmSpace` + cursors, `derive(Pod)`), and the 2 KiB stack ceiling CI
+fails builds over — Inv. 5′, out of §4.3 of [their ATC '25
+paper](https://arxiv.org/abs/2506.03876). Their KernMiri and
+[vostd](https://github.com/asterinas/vostd) work is why we believed the proofs
+above were worth attempting rather than merely hoping at.
+
+**[Linux](https://kernel.org)** — the largest debt by a distance. The errnos,
+signals, termios and `io_uring` ABI are the obvious part. The rest is everything
+we only got right because Linux got there first: `try_to_wake_up`'s totality
+discipline, the 16-slot PCID scheme from `arch/x86/mm/tlb.c`, `call_rcu`,
+lockdep, the `n_tty` line discipline, the VFS shape, the CSPRNG from
+`drivers/char/random.c`, NAPI ingress, and a TCP stack that inherited its timers
+from thirty years of other people's outages. Our tests speak KTAP; our stack
+gate is `CONFIG_FRAME_WARN` with the warning promoted to a build failure.
+
+**[Redox](https://www.redox-os.org)** — how a Rust OS models an address space
+without `unsafe`: a `BTreeMap` of regions with enum backings, which is what our
+VMA layer still is. Also the per-CPU control region, the PS/2 init sequence, and
+the standing proof that a from-scratch Rust OS is a thing people actually
+finish — load-bearing knowledge when your kernel has failed to boot nine times
+in an evening.
+
+**Also read closely, each for something specific** —
+[CortenMM](http://web.cs.ucla.edu/~tamir/papers/sosp25.pdf) (SOSP '25 best
+paper) for the page-table cursor and the invariants our proof discharges;
+[Fuchsia](https://fuchsia.dev) for SafeStack's pinned per-thread TLS offsets;
+[FreeBSD](https://www.freebsd.org) for WITNESS lock-order checking and
+`stop_cpus_hard`; [illumos](https://illumos.org) for `cv_wait_sig`'s return
+semantics; [seL4](https://sel4.systems) for the queued-bit discipline and the
+older idea that an invariant is a thing you *prove*;
+[Rust for Linux](https://rust-for-linux.com) for `Opaque<T>`, and for
+`pin-init`, read very closely before we wrote our own `Init<T, E>`;
+[musl](https://musl.libc.org) for the `__init_tls` auxv walk; and
+[smoltcp](https://github.com/smoltcp-rs/smoltcp) — still not a dependency, as
+advertised above — which settled typestate vs. enum for our TCP sockets.
+
+**Standards and tools** — [Wayland](https://wayland.freedesktop.org) (the memfd
++ `SCM_RIGHTS` buffer handoff is libwayland's trick), POSIX, VirtIO, the ext2
+on-disk format, a couple dozen IETF RFCs, VT100/xterm escapes, ACPI, UEFI and
+the Intel SDM; built and checked with
+[Limine](https://github.com/limine-bootloader/limine),
+[QEMU](https://www.qemu.org), OVMF,
+[Verus](https://github.com/verus-lang/verus), Miri,
+[rr](https://rr-project.org), [`just`](https://github.com/casey/just) and Go —
+and [Rust](https://www.rust-lang.org), without which this project's entire
+security argument, *the compiler won't let us*, would just be a wish.
+
+And the honest one, because leaving it out would be cowardly: SlopOS was built
+with an enormous amount of AI assistance, and the models doing that writing
+learned how kernels work by reading the projects credited above. When a model
+hands the wizards a wake path with the right totality argument, that is not
+magic — that is someone having gotten it right in public, years ago, at length.
+Same debt as always. It just arrives faster now.
+
+<p align="center">
+  <sub><i>To everyone whose work made this possible: thank you, sincerely — and
+  sorry. The house owes you a free spin.</i></sub>
+</p>
+
+<br/>
+
+---
+
+<br/>
+
 <p align="center">
   <sub>
     <i>"still no progress but ai said it works soo it has t be working :)"</i><br/>
@@ -175,5 +254,11 @@ deterministic time-travel debugging (`just rr-record` / `just rr-replay`).
 </p>
 
 <p align="center">
-  <b>GPL-3.0-only</b>
+  <b>GPL-3.0-or-later</b><br/>
+  <sub>
+    Copyright © 2025–2026 The SlopOS Authors. See <a href="LICENSE">LICENSE</a>.<br/>
+    Third-party components shipped with SlopOS are listed in
+    <a href="NOTICE.md">NOTICE.md</a>. SlopOS is an independent from-scratch
+    kernel and contains no code copied from any other operating system.
+  </sub>
 </p>
