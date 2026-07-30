@@ -16,8 +16,8 @@ use core::ptr;
 use core::sync::atomic::{AtomicU64, Ordering};
 
 use super::page_table_defs::{
-    PAGE_TABLE_ENTRIES, PageTable, PageTableEntry, PageTableLevel, set_entry_at, table_empty_at,
-    zero_table_at,
+    PAGE_TABLE_ENTRIES, PageTable, PageTableEntry, PageTableLevel, entry_at, set_entry_at,
+    table_empty_at, zero_table_at,
 };
 use crate::paging_defs::PageFlags;
 use slopos_abi::addr::{PhysAddr, VirtAddr};
@@ -262,6 +262,21 @@ fn phys_to_table(phys: PhysAddr) -> *mut PageTable {
     phys.to_virt().as_mut_ptr()
 }
 
+/// The PML4 frame backing the kernel-half tree these functions write.
+#[inline]
+fn kernel_pml4_phys() -> PhysAddr {
+    ProcessPageDir::pml4_phys_from_raw(KERNEL_PAGE_DIR.get())
+}
+
+/// `entry` with USER set, for promoting an intermediate a user mapping
+/// now has to pass through.
+#[inline]
+fn promoted_to_user(entry: PageTableEntry) -> PageTableEntry {
+    let mut promoted = entry;
+    promoted.add_flags(PageFlags::USER);
+    promoted
+}
+
 fn is_user_address(vaddr: VirtAddr) -> bool {
     let raw = vaddr.as_u64();
     raw < KERNEL_VIRTUAL_BASE && raw >= crate::memory_layout_defs::USER_SPACE_START_VA
@@ -305,14 +320,21 @@ pub fn virt_to_phys(vaddr: VirtAddr) -> PhysAddr {
     virt_to_phys_for_dir(KERNEL_PAGE_DIR.get(), vaddr)
 }
 
-pub(crate) fn map_page_in_directory(
-    page_dir: *mut ProcessPageDir,
+/// Map a 4 KiB page under the PML4 at `pml4_phys`, demoting any huge
+/// leaf in the way.
+///
+/// The descent carries `(PhysAddr, usize)` per level and moves entries by
+/// value, so no reference into a page-table frame exists at any point.
+pub(crate) fn map_page_4kb_in(
+    pml4_phys: PhysAddr,
     vaddr: VirtAddr,
     paddr: PhysAddr,
     flags: u64,
-    page_size: u64,
 ) -> c_int {
-    if !vaddr.is_aligned(page_size) || !paddr.is_aligned(page_size) {
+    if !vaddr.is_aligned(PAGE_SIZE_4KB) || !paddr.is_aligned(PAGE_SIZE_4KB) {
+        return -1;
+    }
+    if pml4_phys.is_null() {
         return -1;
     }
 
@@ -320,19 +342,13 @@ pub(crate) fn map_page_in_directory(
     let user_mapping = flags.contains(PageFlags::USER) && is_user_address(vaddr);
     let inter_flags = intermediate_flags(user_mapping);
 
-    // Single-writer access to the kernel-half PML4 tree; the `&mut`
-    // reborrows live in OSTD's `borrow_ref_mut`.
-    let Some(pml4_table) = ProcessPageDir::pml4_table_mut(page_dir) else {
-        return -1;
-    };
-
     let pml4_idx = PageTableLevel::Four.index_of(vaddr);
     let pdpt_idx = PageTableLevel::Three.index_of(vaddr);
     let pd_idx = PageTableLevel::Two.index_of(vaddr);
     let pt_idx = PageTableLevel::One.index_of(vaddr);
 
-    let pml4_entry = pml4_table.entry_mut(pml4_idx);
-    let pdpt = if !pml4_entry.is_present() {
+    let pml4_entry = entry_at(pml4_phys, pml4_idx);
+    let pdpt_phys = if !pml4_entry.is_present() {
         let Some(phys) = alloc_page_table() else {
             klog_info!(
                 "Paging: Failed to allocate PDPT for vaddr 0x{:x}",
@@ -340,22 +356,24 @@ pub(crate) fn map_page_in_directory(
             );
             return -1;
         };
-        pml4_entry.set(phys, inter_flags);
-        phys_to_table(phys)
+        set_entry_at(pml4_phys, pml4_idx, PageTableEntry::new(phys, inter_flags));
+        phys
     } else {
         if pml4_entry.is_huge() {
             return -1;
         }
         if user_mapping && !pml4_entry.is_user() {
-            pml4_entry.add_flags(PageFlags::USER);
+            set_entry_at(pml4_phys, pml4_idx, promoted_to_user(pml4_entry));
         }
-        phys_to_table(pml4_entry.address())
+        let child = pml4_entry.address();
+        if child.is_null() {
+            return -1;
+        }
+        child
     };
 
-    let pdpt_table = slopos_ostd::util::ptr_buf::borrow_ref_mut::<PageTable>(pdpt);
-    let pdpt_entry = pdpt_table.entry_mut(pdpt_idx);
-
-    let pd = if !pdpt_entry.is_present() {
+    let pdpt_entry = entry_at(pdpt_phys, pdpt_idx);
+    let pd_phys = if !pdpt_entry.is_present() {
         let Some(phys) = alloc_page_table() else {
             klog_info!(
                 "Paging: Failed to allocate PD for vaddr 0x{:x}",
@@ -363,37 +381,27 @@ pub(crate) fn map_page_in_directory(
             );
             return -1;
         };
-        pdpt_entry.set(phys, inter_flags);
-        phys_to_table(phys)
+        set_entry_at(pdpt_phys, pdpt_idx, PageTableEntry::new(phys, inter_flags));
+        phys
     } else if pdpt_entry.is_huge() {
-        let Some((phys, link)) = split_pdpt_huge(*pdpt_entry) else {
+        let Some((phys, link)) = split_pdpt_huge(pdpt_entry) else {
             return -1;
         };
-        *pdpt_entry = link;
-        phys_to_table(phys)
+        set_entry_at(pdpt_phys, pdpt_idx, link);
+        phys
     } else {
         if user_mapping && !pdpt_entry.is_user() {
-            pdpt_entry.add_flags(PageFlags::USER);
+            set_entry_at(pdpt_phys, pdpt_idx, promoted_to_user(pdpt_entry));
         }
-        phys_to_table(pdpt_entry.address())
-    };
-
-    let pd_table = slopos_ostd::util::ptr_buf::borrow_ref_mut::<PageTable>(pd);
-    let pd_entry = pd_table.entry_mut(pd_idx);
-
-    if page_size == PAGE_SIZE_2MB {
-        if pd_entry.is_present() {
+        let child = pdpt_entry.address();
+        if child.is_null() {
             return -1;
         }
-        pd_entry.set(
-            paddr,
-            leaf_flags_with_global(flags, user_mapping) | PageFlags::PRESENT | PageFlags::HUGE,
-        );
-        flush_kernel_page_after_mod(vaddr);
-        return 0;
-    }
+        child
+    };
 
-    let pt = if !pd_entry.is_present() {
+    let pd_entry = entry_at(pd_phys, pd_idx);
+    let pt_phys = if !pd_entry.is_present() {
         let Some(phys) = alloc_page_table() else {
             klog_info!(
                 "Paging: Failed to allocate PT for vaddr 0x{:x}",
@@ -401,45 +409,52 @@ pub(crate) fn map_page_in_directory(
             );
             return -1;
         };
-        pd_entry.set(phys, inter_flags);
-        phys_to_table(phys)
+        set_entry_at(pd_phys, pd_idx, PageTableEntry::new(phys, inter_flags));
+        phys
     } else if pd_entry.is_huge() {
-        let Some((phys, link)) = split_pd_huge(*pd_entry) else {
+        let Some((phys, link)) = split_pd_huge(pd_entry) else {
             return -1;
         };
-        *pd_entry = link;
-        phys_to_table(phys)
+        set_entry_at(pd_phys, pd_idx, link);
+        phys
     } else {
         if user_mapping && !pd_entry.is_user() {
-            pd_entry.add_flags(PageFlags::USER);
+            set_entry_at(pd_phys, pd_idx, promoted_to_user(pd_entry));
         }
-        phys_to_table(pd_entry.address())
+        let child = pd_entry.address();
+        if child.is_null() {
+            return -1;
+        }
+        child
     };
 
-    let pt_table = slopos_ostd::util::ptr_buf::borrow_ref_mut::<PageTable>(pt);
-    let pt_entry = pt_table.entry_mut(pt_idx);
-
-    let was_present = pt_entry.is_present();
-    if was_present {
-        let old_phys = pt_entry.address();
-        if !old_phys.is_null() {
-            free_page_frame(old_phys);
-        }
-    }
-
-    pt_entry.set(
-        paddr,
-        leaf_flags_with_global(flags, user_mapping) | PageFlags::PRESENT,
+    let displaced_leaf = entry_at(pt_phys, pt_idx);
+    set_entry_at(
+        pt_phys,
+        pt_idx,
+        PageTableEntry::new(
+            paddr,
+            leaf_flags_with_global(flags, user_mapping) | PageFlags::PRESENT,
+        ),
     );
 
-    if was_present {
+    if displaced_leaf.is_present() {
+        // Order is load-bearing: publish the new entry, invalidate the
+        // displaced translation machine-wide, and only then hand the frame
+        // it named back to the allocator. A CPU still holding the old
+        // writable entry would otherwise write into a page the buddy has
+        // already reissued.
         flush_kernel_page_after_mod(vaddr);
+        let displaced = displaced_leaf.address();
+        if !displaced.is_null() && displaced != paddr {
+            free_page_frame(displaced);
+        }
     }
     0
 }
 
 pub fn map_page_4kb(vaddr: VirtAddr, paddr: PhysAddr, flags: u64) -> c_int {
-    map_page_in_directory(KERNEL_PAGE_DIR.get(), vaddr, paddr, flags, PAGE_SIZE_4KB)
+    map_page_4kb_in(kernel_pml4_phys(), vaddr, paddr, flags)
 }
 
 pub(crate) fn unmap_page_in_directory(page_dir: *mut ProcessPageDir, vaddr: VirtAddr) -> PhysAddr {

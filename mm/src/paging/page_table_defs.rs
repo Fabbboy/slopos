@@ -296,6 +296,15 @@ fn table_base_at(phys: PhysAddr) -> *mut u64 {
     phys.to_virt().as_mut_ptr()
 }
 
+/// Read the entry at `index` in the page-table frame at `phys`.
+#[inline]
+pub(crate) fn entry_at(phys: PhysAddr, index: usize) -> PageTableEntry {
+    debug_assert!(index < PAGE_TABLE_ENTRIES);
+    slopos_ostd::util::ptr_buf::with_atomic_u64_at(table_base_at(phys), index, |slot| {
+        PageTableEntry::from_raw(slot.load(core::sync::atomic::Ordering::Relaxed))
+    })
+}
+
 /// Write `entry` at `index` in the page-table frame at `phys`.
 #[inline]
 pub(crate) fn set_entry_at(phys: PhysAddr, index: usize, entry: PageTableEntry) {

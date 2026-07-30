@@ -1,11 +1,11 @@
 //! Page-table descent tests for the kernel-half mapper.
 //!
-//! `map_page_4kb` is the only in-tree caller of the map descent and it
-//! always passes `PAGE_SIZE_4KB`, and every `unmap_page` caller unmaps a
-//! 4 KiB page the kernel VA allocator handed out. So the huge-leaf arms
-//! of the unmap descent and both huge-page splits are unreachable from
-//! any other test and from any boot — these drive them directly, over a
-//! scratch page-table tree that is never installed in CR3.
+//! Every `unmap_page` caller unmaps a 4 KiB page the kernel VA allocator
+//! handed out, and the kernel maps nothing but 4 KiB pages, so the
+//! huge-leaf arms of the unmap descent and both huge-page splits are
+//! unreachable from any other test and from any boot — these drive them
+//! directly, over a scratch page-table tree that is never installed in
+//! CR3.
 //!
 //! Every case brackets itself with the buddy's free-page count and
 //! asserts the exact delta. That is what catches the two ways the
@@ -22,7 +22,7 @@ use crate::hhdm::PhysAddrHhdm;
 use crate::mmu::MmContextId;
 use crate::page_alloc::{alloc_kernel_page, free_page_frame, get_page_allocator_stats};
 use crate::paging::page_table_defs::{PageTable, PageTableEntry, PageTableLevel};
-use crate::paging::tables::{ProcessPageDir, map_page_in_directory, unmap_page_in_directory};
+use crate::paging::tables::{ProcessPageDir, map_page_4kb_in, unmap_page_in_directory};
 use crate::paging_defs::{PAGE_SIZE_2MB, PAGE_SIZE_4KB, PageFlags};
 
 /// A scratch tree rooted at a PML4 the kernel never installs, plus the
@@ -328,12 +328,11 @@ pub fn test_paging_map_splits_1gib_leaf() -> TestResult {
         tree.track(target);
 
         let before = free_pages();
-        let rc = map_page_in_directory(
-            tree.dir_ptr(),
+        let rc = map_page_4kb_in(
+            tree.root(),
             probe_va(),
             target,
             (PageFlags::PRESENT | PageFlags::WRITABLE).bits(),
-            PAGE_SIZE_4KB,
         );
         let after = free_pages();
 
@@ -389,12 +388,11 @@ pub fn test_paging_map_splits_2mib_leaf() -> TestResult {
         tree.track(target);
 
         let before = free_pages();
-        let rc = map_page_in_directory(
-            tree.dir_ptr(),
+        let rc = map_page_4kb_in(
+            tree.root(),
             probe_va(),
             target,
             (PageFlags::PRESENT | PageFlags::WRITABLE).bits(),
-            PAGE_SIZE_4KB,
         );
         let after = free_pages();
 
