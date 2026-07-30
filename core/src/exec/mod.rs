@@ -25,8 +25,8 @@ use slopos_mm::elf::{ElfError, ElfExecInfo};
 use slopos_mm::memory_layout_defs::PROCESS_CODE_START_VA;
 use slopos_mm::paging_defs::PAGE_SIZE_4KB;
 use slopos_mm::process_vm::{
-    process_vm_get_page_dir, process_vm_get_stack_top, process_vm_get_vm_space,
-    process_vm_load_elf_data, process_vm_reset_stack, process_vm_write_user_bytes,
+    process_vm_get_stack_top, process_vm_get_vm_space, process_vm_load_elf_data,
+    process_vm_reset_stack, process_vm_write_user_bytes,
 };
 use slopos_ostd::klog_info;
 
@@ -507,12 +507,6 @@ fn setup_user_stack(
         return Err(ExecError::Fault);
     }
     let stack_top = stack_top_raw.wrapping_sub(8);
-
-    let page_dir = process_vm_get_page_dir(process_id);
-    if page_dir.is_null() {
-        return Err(ExecError::NoMem);
-    }
-    let _ = page_dir; // legacy non-null sentinel; OSTD reads route through process_id
 
     let argc = argv.map(|a| a.len()).unwrap_or(0);
     let envc = envp.map(|e| e.len()).unwrap_or(0);

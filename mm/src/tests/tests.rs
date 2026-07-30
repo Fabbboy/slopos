@@ -484,7 +484,7 @@ pub fn test_heap_fragmentation_behind_head() -> TestResult {
 // ============================================================================
 
 use crate::process_vm::{
-    create_process_vm, destroy_process_vm, init_process_vm, process_vm_get_page_dir,
+    create_process_vm, destroy_process_vm, init_process_vm, process_vm_get_ostd_pml4_paddr,
     process_vm_handle, process_vm_with_handle,
 };
 use slopos_abi::task::INVALID_PROCESS_ID;
@@ -502,8 +502,8 @@ pub fn test_process_vm_slot_reuse() -> TestResult {
         if pids[i] == INVALID_PROCESS_ID {
             return fail!("create process {}", i);
         }
-        if process_vm_get_page_dir(pids[i]).is_null() {
-            return fail!("page dir for process {}", i);
+        if process_vm_get_ostd_pml4_paddr(pids[i]) == 0 {
+            return fail!("address space for process {}", i);
         }
     }
 
@@ -514,13 +514,19 @@ pub fn test_process_vm_slot_reuse() -> TestResult {
     }
 
     for &idx in &[1usize, 2, 3] {
-        if !process_vm_get_page_dir(pids[idx]).is_null() {
-            return fail!("destroyed process {} should have null page dir", idx);
+        if process_vm_get_ostd_pml4_paddr(pids[idx]) != 0 {
+            return fail!("destroyed process {} should have no address space", idx);
         }
     }
 
-    assert_not_null!(process_vm_get_page_dir(pids[0]), "surviving process 0");
-    assert_not_null!(process_vm_get_page_dir(pids[4]), "surviving process 4");
+    assert_test!(
+        process_vm_get_ostd_pml4_paddr(pids[0]) != 0,
+        "surviving process 0"
+    );
+    assert_test!(
+        process_vm_get_ostd_pml4_paddr(pids[4]) != 0,
+        "surviving process 4"
+    );
 
     let mut new_pids = [0u32; 3];
     for i in 0..3 {
@@ -528,17 +534,17 @@ pub fn test_process_vm_slot_reuse() -> TestResult {
         if new_pids[i] == INVALID_PROCESS_ID {
             return fail!("create reuse process {}", i);
         }
-        if process_vm_get_page_dir(new_pids[i]).is_null() {
-            return fail!("reuse page dir {}", i);
+        if process_vm_get_ostd_pml4_paddr(new_pids[i]) == 0 {
+            return fail!("reuse address space {}", i);
         }
     }
 
-    assert_not_null!(
-        process_vm_get_page_dir(pids[0]),
+    assert_test!(
+        process_vm_get_ostd_pml4_paddr(pids[0]) != 0,
         "original process 0 still alive"
     );
-    assert_not_null!(
-        process_vm_get_page_dir(pids[4]),
+    assert_test!(
+        process_vm_get_ostd_pml4_paddr(pids[4]) != 0,
         "original process 4 still alive"
     );
 
@@ -1651,26 +1657,26 @@ pub fn test_multiple_process_vms() -> TestResult {
         }
     }
 
-    // Verify each has a unique page directory
-    let mut dirs = [ptr::null_mut(); NUM_PROCESSES];
+    // Verify each has its own address space
+    let mut roots = [0u64; NUM_PROCESSES];
     for i in 0..NUM_PROCESSES {
-        dirs[i] = process_vm_get_page_dir(pids[i]);
-        if dirs[i].is_null() {
+        roots[i] = process_vm_get_ostd_pml4_paddr(pids[i]);
+        if roots[i] == 0 {
             for j in 0..NUM_PROCESSES {
                 destroy_process_vm(pids[j]);
             }
-            return fail!("process {} has null page dir", i);
+            return fail!("process {} has no address space", i);
         }
     }
 
     // Check uniqueness
     for i in 0..NUM_PROCESSES {
         for j in (i + 1)..NUM_PROCESSES {
-            if dirs[i] == dirs[j] {
+            if roots[i] == roots[j] {
                 for k in 0..NUM_PROCESSES {
                     destroy_process_vm(pids[k]);
                 }
-                return fail!("processes {} and {} share same page dir!", i, j);
+                return fail!("processes {} and {} share an address space!", i, j);
             }
         }
     }

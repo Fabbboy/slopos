@@ -329,12 +329,10 @@ pub fn test_translate_address_user_passthrough() -> TestResult {
     TestResult::Pass
 }
 
-pub fn test_process_vm_null_page_dir() -> TestResult {
+pub fn test_process_vm_root_absent_for_unknown_pid() -> TestResult {
     let pid = 9999; // Invalid process ID
-    let page_dir = process_vm::process_vm_get_page_dir(pid);
-
-    if !page_dir.is_null() {
-        klog_info!("EXEC_TEST: BUG - Got non-null page dir for invalid process");
+    if process_vm::process_vm_get_ostd_pml4_paddr(pid) != 0 {
+        klog_info!("EXEC_TEST: BUG - Got an address space for an unknown process");
         return TestResult::Fail;
     }
     TestResult::Pass
@@ -704,7 +702,10 @@ slopos_testing::stest!(name = test_path_too_long, suite = exec);
 slopos_testing::stest!(name = test_path_empty, suite = exec);
 slopos_testing::stest!(name = test_translate_address_kernel_to_user, suite = exec);
 slopos_testing::stest!(name = test_translate_address_user_passthrough, suite = exec);
-slopos_testing::stest!(name = test_process_vm_null_page_dir, suite = exec);
+slopos_testing::stest!(
+    name = test_process_vm_root_absent_for_unknown_pid,
+    suite = exec
+);
 slopos_testing::stest!(name = test_elf_huge_segment_count, suite = exec);
 slopos_testing::stest!(name = test_elf_phentsize_mismatch, suite = exec);
 slopos_testing::stest!(name = test_exec_max_size_boundary, suite = exec);

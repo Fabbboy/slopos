@@ -37,8 +37,7 @@ use slopos_fs::fileio::{
 use slopos_kernel_services::syscall_services::tty;
 use slopos_mm::memory_layout_defs::PROCESS_CODE_START_VA;
 use slopos_mm::process_vm::{
-    create_process_vm, destroy_process_vm, process_vm_clone_cow, process_vm_get_page_dir,
-    process_vm_get_stack_top,
+    create_process_vm, destroy_process_vm, process_vm_clone_cow, process_vm_get_stack_top,
 };
 use slopos_mm::user_copy::copy_to_user;
 use slopos_mm::user_ptr::UserPtr;
@@ -1339,11 +1338,12 @@ pub fn task_fork(
     child.context_from_user.store(0, Ordering::Relaxed);
     child.context.get_mut().rax = 0;
 
-    let child_page_dir = process_vm_get_page_dir(child_process_id);
-    if !child_page_dir.is_null() {
-        child.context.get_mut().cr3 =
-            slopos_mm::process_vm::process_vm_get_ostd_pml4_paddr(child_process_id);
-    }
+    // `clone_from_raw` copied the parent's whole `TaskInner`, so `cr3`
+    // still names the parent's root until this write. A child with no
+    // address space gets 0, which the dispatcher and `task_find_by_cr3`
+    // both read as "no VM".
+    child.context.get_mut().cr3 =
+        slopos_mm::process_vm::process_vm_get_ostd_pml4_paddr(child_process_id);
 
     child.reset_runtime_state();
     let _ = child_process.disarm();
@@ -1566,12 +1566,12 @@ pub fn task_clone(
         child.fs_base.store(tls, Ordering::Release);
     }
 
+    // A VM-sharing child keeps the parent's root, which `clone_from_raw`
+    // already copied; only a child with its own address space is
+    // repointed at it.
     if !share_vm {
-        let child_page_dir = process_vm_get_page_dir(child_process_id);
-        if !child_page_dir.is_null() {
-            child.context.get_mut().cr3 =
-                slopos_mm::process_vm::process_vm_get_ostd_pml4_paddr(child_process_id);
-        }
+        child.context.get_mut().cr3 =
+            slopos_mm::process_vm::process_vm_get_ostd_pml4_paddr(child_process_id);
     }
 
     child.reset_runtime_state();
