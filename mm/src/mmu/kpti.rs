@@ -132,9 +132,8 @@ impl TrampolineDescriptor {
 /// called, both references resolve to the same backing page and the
 /// extra allocation is the cost we pay for being KPTI-ready.
 ///
-/// Stub: returns `Ok(())` without allocating a second PML4. The dual
-/// allocation lands together with the `MmContext` refactor that
-/// replaces `ProcessPageDir`.
+/// Stub: returns `Ok(())` without allocating a second PML4, and is
+/// currently unreferenced. It names the shape a KPTI build fills in.
 pub fn ensure_user_pml4() -> Result<(), ()> {
     if !kpti_enabled() {
         return Ok(());

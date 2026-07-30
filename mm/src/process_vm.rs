@@ -1,5 +1,4 @@
 use core::ffi::c_int;
-use core::ptr;
 use slopos_ostd::KVec;
 use slopos_ostd::handle::{Handle, HandleError};
 use slopos_ostd::mm::KArc;
@@ -9,7 +8,7 @@ use slopos_ostd::mm::vm_space::{MapError, VmSpace};
 use slopos_ostd::panic::AbortOnUnwind;
 
 use slopos_abi::addr::{PhysAddr, VirtAddr};
-use slopos_ostd::sync::{KernelSync, LOCK_LEVEL_REGISTRY, LOCK_LEVEL_RESOURCE, SpinLock};
+use slopos_ostd::sync::{LOCK_LEVEL_REGISTRY, LOCK_LEVEL_RESOURCE, SpinLock};
 use slopos_ostd::{align_down, align_up, klog_debug, klog_info};
 
 use crate::aslr;
@@ -22,24 +21,15 @@ use crate::hhdm::PhysAddrHhdm;
 use crate::memory_layout_defs::DEFAULT_PROCESS_LAYOUT;
 use crate::memory_layout_defs::{KERNEL_VIRTUAL_BASE, MAX_PROCESSES};
 use crate::page_alloc::{alloc_kernel_page, free_page_frame};
-use crate::paging::ProcessPageDir;
 use crate::paging_defs::{PAGE_SIZE_4KB, PageFlags};
-use crate::slab::{kfree, kmalloc};
 use crate::tlb;
 use crate::vma_region::{Protection, RegionBacking, RegionPurpose, VmaMap, VmaRegion};
 use slopos_abi::task::INVALID_PROCESS_ID;
 
-/// Per-process VM state, protected by the per-slot lock in `PROCESS_VMS`.
+/// Per-process VM slot, protected by the per-slot lock in `PROCESS_VMS`.
 ///
-/// `page_dir` is the legacy `mm/src/paging` ProcessPageDir handle —
-/// drives every user mapping today. `vm_space` is the
-/// framekernel-correct OSTD handle — allocated alongside but not yet
-/// used as the CR3 source. The pending consumer-migration work
-/// rewrites every user-mapping callsite onto `vm_space.cursor_mut()`
-/// and flips the reader; the legacy `page_dir` deletes after the
-/// migration completes.
-/// Per-process VM slot. Exposed as an opaque marker so other crates can
-/// name [`Handle<ProcessVm>`]; all fields stay private to this module.
+/// Exposed as an opaque marker so other crates can name
+/// [`Handle<ProcessVm>`]; all fields stay private to this module.
 pub struct ProcessVm {
     process_id: u32,
     /// Slot-reuse generation. A fresh, globally-unique value is stamped
@@ -49,14 +39,8 @@ pub struct ProcessVm {
     /// stale address-space reference becomes a typed `HandleError`
     /// rather than silently aliasing the new occupant.
     generation: u64,
-    /// Wrapped in `KernelSync` because `*mut ProcessPageDir` is `!Send`
-    /// by default; the actual page-dir is heap-allocated and shared
-    /// only through the per-slot `SpinLock<ProcessVm>` (so
-    /// concurrent access is serialised at the lock).
-    page_dir: KernelSync<*mut ProcessPageDir>,
-    /// Framekernel-correct address-space handle. `None` only between
-    /// `reset()` and the next `create_process_vm` re-init; populated
-    /// alongside `page_dir` for every live process.
+    /// The process's address space. `None` only between `reset()` and
+    /// the next `create_process_vm` re-init; every live process has one.
     vm_space: Option<KArc<VmSpace>>,
     vma_map: VmaMap,
     code_start: u64,
@@ -81,7 +65,6 @@ impl ProcessVm {
         Self {
             process_id: INVALID_PROCESS_ID,
             generation: 0,
-            page_dir: KernelSync::new(ptr::null_mut()),
             vm_space: None,
             vma_map: VmaMap::new(),
             code_start: 0,
@@ -98,7 +81,6 @@ impl ProcessVm {
 
     fn reset(&mut self) {
         self.process_id = INVALID_PROCESS_ID;
-        self.page_dir = KernelSync::new(ptr::null_mut());
         // Drop the OSTD VmSpace (and its KArc-counted PML4 +
         // user-half tree) here. `destroy_process_vm` clears the
         // Option before calling reset so this normally re-runs on
@@ -238,16 +220,6 @@ fn hhdm_fill_bytes(virt: VirtAddr, offset: usize, len: usize, value: u8) -> bool
     slopos_ostd::mm::hhdm_bytes::fill_bytes(virt, offset, len, value)
 }
 
-/// Read `pml4_phys` from a `*mut ProcessPageDir` without exposing the
-/// raw pointer to the caller. Returns `PhysAddr::NULL` if the handle is
-/// null. Delegates to `ProcessPageDir::pml4_phys_from_raw` so the
-/// interior `unsafe` (raw-pointer field deref) lives in
-/// `paging/tables.rs` alongside the type definition.
-#[inline]
-fn page_dir_pml4_phys(page_dir: *mut ProcessPageDir) -> PhysAddr {
-    ProcessPageDir::pml4_phys_from_raw(page_dir)
-}
-
 fn rollback_range(
     vm_space: &mut KArc<VmSpace>,
     mut current: u64,
@@ -299,11 +271,6 @@ fn slot_read_lock_free<R>(slot: &SpinLock<ProcessVm>, f: impl FnOnce(&ProcessVm)
 #[inline]
 fn slot_pid_lock_free(slot: &SpinLock<ProcessVm>) -> u32 {
     slot_read_lock_free(slot, |inner| inner.process_id)
-}
-
-#[inline]
-fn slot_page_dir_lock_free(slot: &SpinLock<ProcessVm>) -> *mut ProcessPageDir {
-    slot_read_lock_free(slot, |inner| *inner.page_dir)
 }
 
 /// Find the slot index for a given process ID using a lock-free scan.
@@ -359,18 +326,6 @@ pub fn process_vm_with_handle<R>(
         return Err(HandleError::Stale);
     }
     Ok(f(&mut guard))
-}
-
-/// Lock-free page-directory lookup.  The page_dir pointer is only cleared
-/// under the per-slot lock during `destroy_process_vm`, which is called after
-/// the process has been fully descheduled, so concurrent readers see either
-/// the valid pointer or null.
-pub fn process_vm_get_page_dir(process_id: u32) -> *mut ProcessPageDir {
-    let slot = match find_slot_for_pid(process_id) {
-        Some(s) => s,
-        None => return ptr::null_mut(),
-    };
-    slot_page_dir_lock_free(&PROCESS_VMS[slot])
 }
 
 /// Translate a user virtual address to its backing physical address
@@ -432,12 +387,11 @@ pub fn process_vm_user_va_is_user_accessible(process_id: u32, va: u64) -> bool {
     crate::dual_paging::ostd_is_user_accessible_4kb(vm_space, slopos_abi::addr::VirtAddr::new(va))
 }
 
-/// Read the OSTD `VmSpace`'s PML4 paddr for `process_id`. Returns 0
-/// if the slot is unbound or `vm_space` is missing. After
-/// [`VmSpace::activate`] writes CR3, this matches the hardware CR3 —
-/// callers that compare against the live CR3 (user-fault dispatcher,
-/// task-table lookup) must use this rather than the legacy
-/// `(*page_dir).pml4_phys` until the legacy half retires.
+/// Read the `VmSpace`'s PML4 paddr for `process_id`. Returns 0 if the
+/// slot is unbound, was rebound under the reader, or holds no address
+/// space — callers read 0 as "no VM". After [`VmSpace::activate`]
+/// writes CR3 this matches the hardware CR3, so it is also what the
+/// user-fault dispatcher and the task-table lookup compare against.
 pub fn process_vm_get_ostd_pml4_paddr(process_id: u32) -> u64 {
     let Some(slot) = find_slot_for_pid(process_id) else {
         return 0;
@@ -534,7 +488,7 @@ pub fn process_vm_get_cr3_phys(process_id: u32) -> u64 {
 /// Look up the stable 64-bit `MmContextId` associated with this process.
 ///
 /// Returns `MmContextId::INVALID` if the process slot has been freed or
-/// the page directory is not yet populated. The scheduler uses this value
+/// the address space is not yet populated. The scheduler uses this value
 /// to key the per-CPU ASID cache so PCID reuse survives `process_id`
 /// recycling and works across the pre-/post-`MmContext` transition.
 pub fn process_vm_get_mm_ctx_id(process_id: u32) -> crate::mmu::MmContextId {
@@ -1209,7 +1163,7 @@ pub fn process_vm_load_elf_data(
     let slot = find_slot_for_pid(process_id).ok_or(ElfError::NullPointer)?;
 
     // Heap-allocated section_mappings; `load_segments_and_tls` also
-    // holds the locked page dir and the ~9-field `ElfExecInfo` return
+    // holds the locked slot and the ~9-field `ElfExecInfo` return
     // value. Splitting that work into an `#[inline(never)]` helper
     // keeps this function's frame under the stack-safety gate.
     let info = load_segments_and_tls(
@@ -1224,7 +1178,7 @@ pub fn process_vm_load_elf_data(
     Ok(info)
 }
 
-/// Inner body of `process_vm_load_elf_data`: resolves page dir, runs
+/// Inner body of `process_vm_load_elf_data`: resolves the slot, runs
 /// the segment mapping + TLS + relocation passes, and assembles the
 /// [`ElfExecInfo`] result. Extracted to keep the outer function's
 /// frame small.
@@ -1252,8 +1206,7 @@ fn load_segments_and_tls(
     if guard.process_id != process_id {
         return Err(ElfError::NullPointer);
     }
-    let page_dir = *guard.page_dir;
-    if page_dir.is_null() {
+    if guard.vm_space.is_none() {
         return Err(ElfError::NullPointer);
     }
 
@@ -1500,10 +1453,8 @@ fn load_segment_pages(
     let mut pages_mapped = 0u32;
 
     while dst < page_end {
-        // After dual-write retirement in map_user_range, the legacy
-        // ProcessPageDir is empty for fresh processes. Use the OSTD
-        // cursor to detect existing mappings (e.g. overlapping ELF
-        // segments).
+        // The cursor is what detects an existing mapping here — two ELF
+        // segments can overlap within a page.
         let existing_phys = crate::dual_paging::ostd_virt_to_phys_4kb(vm_space, VirtAddr::new(dst));
         let phys = if !existing_phys.is_null() {
             if (map_flags & PageFlags::WRITABLE.bits()) != 0 {
@@ -1615,72 +1566,26 @@ pub fn create_process_vm() -> u32 {
     };
 
     // Phase 2: allocate physical resources (no locks held).
-    let pml4_phys = alloc_kernel_page();
-    if pml4_phys.is_null() {
-        klog_info!("create_process_vm: Failed to allocate PML4");
-        VM_SLOT_ALLOC.lock().num_processes -= 1;
-        return INVALID_PROCESS_ID;
-    }
-    let pml4_virt = pml4_phys.to_virt();
-    if pml4_virt.is_null() {
-        klog_info!("create_process_vm: No HHDM/identity map available for PML4");
-        free_page_frame(pml4_phys);
-        VM_SLOT_ALLOC.lock().num_processes -= 1;
-        return INVALID_PROCESS_ID;
-    }
-    let _ = hhdm_fill_bytes(pml4_virt, 0, PAGE_SIZE_4KB as usize, 0);
-
-    let page_dir_ptr = kmalloc(core::mem::size_of::<ProcessPageDir>()) as *mut ProcessPageDir;
-    if page_dir_ptr.is_null() {
-        klog_info!("create_process_vm: Failed to allocate page directory");
-        free_page_frame(pml4_phys);
-        VM_SLOT_ALLOC.lock().num_processes -= 1;
-        return INVALID_PROCESS_ID;
-    }
+    // `VmSpace::new` roots the address space on its own PML4 frame and
+    // populates the kernel half from the registered `KERNEL_MASTER_PML4`.
     let mm_ctx_id = crate::mmu::alloc_mm_context_id();
-    // Kernel-half mappings flow from `KERNEL_MASTER_PML4` via OSTD's
-    // `VmSpace::new` + `resync_kernel_half_if_stale`. The frame this
-    // descriptor accounts for stays empty and is never installed in CR3.
-    let page_dir_init = ProcessPageDir::new(pml4_phys, process_id, mm_ctx_id);
-    // `page_dir_ptr` came from `kmalloc(size_of::<ProcessPageDir>())`,
-    // so the slot is valid and exclusively owned. The OSTD-side
-    // `init_slot` helper performs the one `ptr::write` so this site
-    // stays in safe Rust.
-    ProcessPageDir::init_in_kmalloc_slot(page_dir_ptr, page_dir_init);
-
-    // Allocate the framekernel-correct OSTD VmSpace alongside the
-    // legacy ProcessPageDir (transitional dual-allocation). Both PML4
-    // frames are independent — the OSTD one gets its own kernel-half
-    // copy from the registered KERNEL_MASTER_PML4 via `VmSpace::new`.
-    // The OSTD handle is stashed in `ProcessVm.vm_space` but no
-    // user-side mapping flows through it yet; the consumer-migration
-    // pass that's still pending rewrites every map / unmap / activate
-    // callsite. On `VmSpace::new` failure we roll back exactly as the
-    // legacy path would: free the ProcessPageDir's own PML4, kfree the
-    // descriptor, decrement the slot count.
     let vm_space = match VmSpace::new() {
         Ok(s) => s,
         Err(_) => {
             klog_info!(
                 "create_process_vm: VmSpace::new failed (kernel-master / FrameAlloc not registered?)"
             );
-            free_page_frame(pml4_phys);
-            kfree(page_dir_ptr as *mut _);
             VM_SLOT_ALLOC.lock().num_processes -= 1;
             return INVALID_PROCESS_ID;
         }
     };
-    // Plumb the slopos-side mm_ctx_id into the OSTD handle so the
-    // (registered, but currently unwired) `CursorUnmapHook` /
-    // `on_activate` callbacks can route LUF policy. The legacy
-    // ProcessPageDir already carries its own copy.
+    // The `CursorUnmapHook` / `on_activate` callbacks route LUF policy by
+    // this handle, and treat 0 as "not a per-process space".
     vm_space.set_mm_ctx_handle(mm_ctx_id.raw());
     let vm_space_arc = match KArc::try_new(vm_space) {
         Ok(a) => a,
         Err(_) => {
             klog_info!("create_process_vm: KArc<VmSpace> heap alloc failed");
-            free_page_frame(pml4_phys);
-            kfree(page_dir_ptr as *mut _);
             VM_SLOT_ALLOC.lock().num_processes -= 1;
             return INVALID_PROCESS_ID;
         }
@@ -1691,7 +1596,6 @@ pub fn create_process_vm() -> u32 {
         let mut proc = PROCESS_VMS[slot].lock();
         proc.process_id = process_id;
         proc.generation = generation;
-        proc.page_dir = KernelSync::new(page_dir_ptr);
         proc.vm_space = Some(vm_space_arc);
         proc.vma_map.clear();
         proc.code_start = layout.code_start;
@@ -1701,7 +1605,7 @@ pub fn create_process_vm() -> u32 {
         proc.heap_break = layout.heap_start;
         proc.stack_start = layout.stack_top - layout.stack_size;
         proc.stack_end = layout.stack_top;
-        proc.total_pages = 1;
+        proc.total_pages = 0;
         proc.flags = 0;
 
         let code_s = proc.code_start;
@@ -1741,9 +1645,7 @@ pub fn create_process_vm() -> u32 {
         {
             klog_info!("create_process_vm: Failed to seed initial VMAs");
             teardown_inner_mappings(&mut proc);
-            free_page_frame(page_dir_pml4_phys(page_dir_ptr));
-            kfree(page_dir_ptr as *mut _);
-            proc.page_dir = KernelSync::new(ptr::null_mut());
+            proc.vm_space = None;
             proc.process_id = INVALID_PROCESS_ID;
             VM_SLOT_ALLOC.lock().num_processes -= 1;
             return INVALID_PROCESS_ID;
@@ -1765,7 +1667,7 @@ pub fn create_process_vm() -> u32 {
         let vm_space_for_map = proc
             .vm_space
             .as_mut()
-            .expect("create_process_vm: vm_space allocated alongside page_dir before stack map");
+            .expect("create_process_vm: vm_space present before stack map");
         if map_user_range(
             vm_space_for_map,
             stack_start,
@@ -1776,9 +1678,6 @@ pub fn create_process_vm() -> u32 {
         {
             klog_info!("create_process_vm: Failed to map process stack");
             teardown_inner_mappings(&mut proc);
-            free_page_frame(page_dir_pml4_phys(page_dir_ptr));
-            kfree(page_dir_ptr as *mut _);
-            proc.page_dir = KernelSync::new(ptr::null_mut());
             proc.vm_space = None;
             proc.process_id = INVALID_PROCESS_ID;
             VM_SLOT_ALLOC.lock().num_processes -= 1;
@@ -1853,16 +1752,7 @@ pub fn destroy_process_vm(process_id: u32) -> c_int {
         // Drop the OSTD VmSpace — its `Drop` walks the user half and
         // frees every leaf frame through META_SLOTS plus the
         // intermediate page tables.
-        let _ = proc.vm_space.take();
-        if !proc.page_dir.is_null() {
-            let pml4_phys = page_dir_pml4_phys(*proc.page_dir);
-            if !pml4_phys.is_null() {
-                free_page_frame(pml4_phys);
-            }
-            klog_debug!("destroy_process_vm({}): kfree(page_dir)", process_id);
-            kfree(*proc.page_dir as *mut _);
-            proc.page_dir = KernelSync::new(ptr::null_mut());
-        }
+        proc.vm_space = None;
         klog_debug!(
             "destroy_process_vm({}): page table cleanup done",
             process_id
@@ -2085,14 +1975,9 @@ pub fn process_vm_reset_stack(process_id: u32) -> c_int {
 
     let result = {
         let mut guard = PROCESS_VMS[slot].lock();
-        if guard.process_id != process_id || guard.page_dir.is_null() {
+        if guard.process_id != process_id {
             -1
-        } else {
-            let vm_space_ref = guard
-                .vm_space
-                .as_mut()
-                .expect("process_vm_reset_stack: vm_space present for live pid");
-
+        } else if let Some(vm_space_ref) = guard.vm_space.as_mut() {
             // Gather-unmap the old stack: suppress the per-page LUF
             // cross-CPU deferral (the cursor still invalidates locally),
             // collecting the freed frames so none is released yet.
@@ -2151,6 +2036,8 @@ pub fn process_vm_reset_stack(process_id: u32) -> c_int {
                     0
                 }
             }
+        } else {
+            -1
         }
         // per-process lock released here
     };
@@ -2834,7 +2721,7 @@ type CloneVmaEntry = (u64, u64, VmaRegion, KVec<ClonePageSnapshot>);
 /// every writable+user page in anonymous VMAs as COW in the parent's
 /// OSTD half before leaving the lock.
 ///
-/// Returns `None` if the parent slot has no page directory.
+/// Returns `None` if the parent slot has no address space.
 ///
 /// `#[inline(never)]` so the helper's stack frame doesn't fold into
 /// `process_vm_clone_cow`, which keeps the outer body under the
@@ -2845,8 +2732,8 @@ fn clone_cow_snapshot_parent(
     parent_id: u32,
 ) -> Option<(u64, u64, u64, u64, u64, u64, u64, u32, KVec<CloneVmaEntry>)> {
     let mut guard = PROCESS_VMS[parent_slot].lock();
-    if guard.process_id != parent_id || guard.page_dir.is_null() {
-        klog_info!("process_vm_clone_cow: Parent has no page directory");
+    if guard.process_id != parent_id || guard.vm_space.is_none() {
+        klog_info!("process_vm_clone_cow: Parent has no address space");
         return None;
     }
 
@@ -3043,44 +2930,10 @@ pub fn process_vm_clone_cow(parent_id: u32) -> u32 {
         (child_slot, child_id, child_generation)
     };
 
-    // Phase 2: allocate physical resources (no locks held).
-    let pml4_phys = alloc_kernel_page();
-    if pml4_phys.is_null() {
-        klog_info!("process_vm_clone_cow: Failed to allocate PML4");
-        VM_SLOT_ALLOC.lock().num_processes -= 1;
-        return INVALID_PROCESS_ID;
-    }
-    let pml4_virt = pml4_phys.to_virt();
-    if pml4_virt.is_null() {
-        klog_info!("process_vm_clone_cow: No HHDM mapping for PML4");
-        free_page_frame(pml4_phys);
-        VM_SLOT_ALLOC.lock().num_processes -= 1;
-        return INVALID_PROCESS_ID;
-    }
-    let _ = hhdm_fill_bytes(pml4_virt, 0, PAGE_SIZE_4KB as usize, 0);
-
-    let child_page_dir = kmalloc(core::mem::size_of::<ProcessPageDir>()) as *mut ProcessPageDir;
-    if child_page_dir.is_null() {
-        klog_info!("process_vm_clone_cow: Failed to allocate page directory struct");
-        free_page_frame(pml4_phys);
-        VM_SLOT_ALLOC.lock().num_processes -= 1;
-        return INVALID_PROCESS_ID;
-    }
+    // Phase 2: allocate physical resources (no locks held). OSTD
+    // `VmSpace::new` roots the child on its own PML4 and populates its
+    // kernel half via `KERNEL_MASTER_PML4`.
     let child_mm_ctx_id = crate::mmu::alloc_mm_context_id();
-    // OSTD `VmSpace::new` populates the child's kernel half via
-    // `KERNEL_MASTER_PML4`. The frame this descriptor accounts for stays
-    // empty and is never installed in CR3.
-    let child_init = ProcessPageDir::new(pml4_phys, child_id, child_mm_ctx_id);
-    // `child_page_dir` came from `kmalloc(size_of::<ProcessPageDir>())`
-    // — slot is valid and exclusively owned. OSTD's `init_slot`
-    // helper carries the one `ptr::write` so this site stays in safe Rust.
-    ProcessPageDir::init_in_kmalloc_slot(child_page_dir, child_init);
-
-    // Allocate the child's framekernel-correct OSTD VmSpace alongside
-    // the legacy ProcessPageDir (transitional dual-allocation). The
-    // child's mm_ctx_id was just alloc'd above; thread it into the
-    // OSTD handle for LUF hook routing. On VmSpace::new failure we
-    // roll back the legacy frames and the slot count.
     let child_vm_space = match VmSpace::new() {
         Ok(s) => s,
         Err(_) => {
@@ -3088,8 +2941,6 @@ pub fn process_vm_clone_cow(parent_id: u32) -> u32 {
                 "process_vm_clone_cow: VmSpace::new failed for child PID {}",
                 child_id
             );
-            free_page_frame(pml4_phys);
-            kfree(child_page_dir as *mut _);
             VM_SLOT_ALLOC.lock().num_processes -= 1;
             return INVALID_PROCESS_ID;
         }
@@ -3102,8 +2953,6 @@ pub fn process_vm_clone_cow(parent_id: u32) -> u32 {
                 "process_vm_clone_cow: KArc<VmSpace> heap alloc failed for child PID {}",
                 child_id
             );
-            free_page_frame(pml4_phys);
-            kfree(child_page_dir as *mut _);
             VM_SLOT_ALLOC.lock().num_processes -= 1;
             return INVALID_PROCESS_ID;
         }
@@ -3111,7 +2960,7 @@ pub fn process_vm_clone_cow(parent_id: u32) -> u32 {
 
     // Phase 3: initialize child slot and perform COW page walk.
     // We hold the child slot lock while building VMA map + page tables.
-    // The parent's page_dir pointer is stable (read from snapshot; parent
+    // The parent's address space is stable (read from snapshot; the parent
     // cannot be destroyed while fork is in progress -- scheduler guarantees).
     let mut cow_pages: u32 = 0;
     let mut clone_failed = false;
@@ -3120,7 +2969,6 @@ pub fn process_vm_clone_cow(parent_id: u32) -> u32 {
         let mut child = PROCESS_VMS[child_slot].lock();
         child.process_id = child_id;
         child.generation = child_generation;
-        child.page_dir = KernelSync::new(child_page_dir);
         child.vm_space = Some(child_vm_space_arc);
         child.vma_map.clear();
         child.code_start = parent_code_start;
@@ -3205,18 +3053,18 @@ pub fn process_vm_clone_cow(parent_id: u32) -> u32 {
     if clone_failed {
         klog_info!("process_vm_clone_cow: Clone failed, cleaning up");
         {
+            // One acquisition: a slot still bound to `child_id` must never
+            // be observable with its address space already released.
+            // `teardown_inner_mappings` reads `process_id` to target its
+            // TLB flush, so `reset` — which clears it — comes last.
             let mut child = PROCESS_VMS[child_slot].lock();
-            // Drop the child's OSTD VmSpace — Drop walks the partial
-            // user-half tree and reclaims every leaf frame.
+            // Dropping the child's VmSpace walks the partial COW tree and
+            // reclaims every leaf frame, the intermediate tables and the
+            // PML4.
             let _ = child.vm_space.take();
             teardown_inner_mappings(&mut child);
+            child.reset();
         }
-        let child_pml4 = page_dir_pml4_phys(child_page_dir);
-        if !child_pml4.is_null() {
-            free_page_frame(child_pml4);
-        }
-        kfree(child_page_dir as *mut _);
-        PROCESS_VMS[child_slot].lock().reset();
         VM_SLOT_ALLOC.lock().num_processes -= 1;
         return INVALID_PROCESS_ID;
     }

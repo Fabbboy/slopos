@@ -14,12 +14,11 @@ use slopos_abi::task::INVALID_PROCESS_ID;
 
 /// RAII guard: owns a process VM, calls `destroy_process_vm` on drop.
 ///
-/// The legacy `*mut ProcessPageDir` handle is no longer the
-/// load-bearing path for paging — every operation flows through the
-/// process's OSTD `KArc<VmSpace>`. The guard exposes thin helpers
-/// (`map_test_page`, `mark_cow`, `is_cow`, `virt_to_phys`, …) that
-/// drive the OSTD cursor under the per-process lock so test bodies
-/// don't have to thread the lock through themselves.
+/// Every paging operation flows through the process's OSTD
+/// `KArc<VmSpace>`. The guard exposes thin helpers (`map_test_page`,
+/// `mark_cow`, `is_cow`, `virt_to_phys`, …) that drive the OSTD cursor
+/// under the per-process lock so test bodies don't have to thread the
+/// lock through themselves.
 pub struct ProcessVmGuard {
     pub pid: u32,
 }

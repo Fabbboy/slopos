@@ -265,7 +265,7 @@ pub(crate) fn dispatch(cpu_id: usize, task: &Task) {
     restore_live_recovery_depth(task);
 
     // Keep PCR.syscall_pid in sync so copy_from_user always resolves
-    // the correct process page directory, even after preemption.
+    // the correct address space, even after preemption.
     let pid = task.process_id;
     // Safe surface: the local-CPU PCR lookup folds the GS resolution
     // behind a table read; the atomic store on `syscall_pid` is
