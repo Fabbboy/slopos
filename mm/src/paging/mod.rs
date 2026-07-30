@@ -18,7 +18,6 @@ pub use page_table_defs::{PAGE_TABLE_ENTRIES, PageTableEntry, PageTableLevel};
 pub use walker::{WalkResult, walk_phys};
 
 pub use tables::{
-    ProcessPageDir, get_page_size, init_paging, is_mapped, map_page_4kb,
-    paging_bump_kernel_mapping_gen, paging_get_kernel_directory, paging_mark_kernel_global,
-    unmap_page, virt_to_phys,
+    get_page_size, init_paging, is_mapped, kernel_pml4_phys, map_page_4kb,
+    paging_bump_kernel_mapping_gen, paging_mark_kernel_global, unmap_page, virt_to_phys,
 };

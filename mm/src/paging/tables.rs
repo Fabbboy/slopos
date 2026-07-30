@@ -1,18 +1,15 @@
-//! Surviving kernel-side paging surface.
+//! Kernel-half paging surface.
 //!
-//! Per-process paging functions (`*_in_dir`, COW marker, kernel-mapping
-//! sync, `MmTeardownGuard`) have been retired in favour of the OSTD
-//! `VmSpace` cursor. The functions in this module are kernel-half only
-//! — they write to `KERNEL_PAGE_DIR` (the same physical PML4 OSTD wraps
-//! via `KERNEL_VM_SPACE`) and are kept because the priority-10 boot
-//! path runs BEFORE `KERNEL_VM_SPACE` is installed at priority 55.
+//! A process's address space is an OSTD `VmSpace`; nothing per-process
+//! lives here. These functions descend the kernel half only — the same
+//! physical PML4 OSTD wraps via `KERNEL_VM_SPACE`, recorded in
+//! [`KERNEL_PML4_PHYS`] — and exist because the early boot path runs
+//! before `KERNEL_VM_SPACE` is installed at priority 55.
 //!
 //! Callers that run post-priority-55 should prefer
 //! `slopos_mm::kernel_mappings::*` which routes through OSTD's cursor.
 
-use core::cell::SyncUnsafeCell;
 use core::ffi::c_int;
-use core::ptr;
 use core::sync::atomic::{AtomicU64, Ordering};
 
 use super::page_table_defs::{
@@ -37,82 +34,12 @@ static KERNEL_MAPPING_GEN: AtomicU64 = AtomicU64::new(1);
 /// path array the prune walks back up.
 const PAGE_TABLE_LEVELS: usize = 4;
 
-/// Per-process page-directory descriptor: a PML4 frame's physical
-/// address plus the bookkeeping that tracks it.
-///
-/// The load-bearing per-process paging surface is the OSTD `VmSpace`;
-/// what survives here is frame accounting. A per-process descriptor
-/// lives in a `kmalloc(size_of::<ProcessPageDir>())` slot reached
-/// through `ProcessVm.page_dir`, and its `pml4_phys` frame is allocated
-/// with the process, zeroed, never installed in CR3, and freed back to
-/// the buddy at teardown. `KERNEL_PAGE_DIR` is the exception: its
-/// `pml4_phys` is CR3's own frame, recorded by [`init_paging`], and the
-/// kernel-half mapping functions in this module write into that tree.
-#[repr(C)]
-pub struct ProcessPageDir {
-    /// The PML4 frame this descriptor accounts for. The descent roots on
-    /// this physical address; nothing caches a pointer to the frame,
-    /// because every page-table access goes through the HHDM one entry
-    /// at a time (see `page_table_defs`).
-    pub pml4_phys: PhysAddr,
-    pub ref_count: u32,
-    pub process_id: u32,
-    /// Intrusive next-link, written when a descriptor is built and
-    /// traversed by nothing. `KernelSync` wraps the raw pointer so the
-    /// surrounding struct auto-derives `Send + Sync` — which it needs
-    /// because the descriptor handle itself is handed out raw by
-    /// `paging_get_kernel_directory` and `process_vm_get_page_dir`.
-    pub next: slopos_ostd::sync::KernelSync<*mut ProcessPageDir>,
-    pub kernel_mapping_gen: u64,
-    pub mm_ctx_id: crate::mmu::MmContextId,
-}
-
-impl ProcessPageDir {
-    /// Build a fresh per-process page-directory descriptor with default
-    /// fields. The caller writes the result into a freshly `kmalloc`'d
-    /// slot via [`init_in_kmalloc_slot`](Self::init_in_kmalloc_slot).
-    pub fn new(pml4_phys: PhysAddr, process_id: u32, mm_ctx_id: crate::mmu::MmContextId) -> Self {
-        Self {
-            pml4_phys,
-            ref_count: 1,
-            process_id,
-            next: slopos_ostd::sync::KernelSync::new(ptr::null_mut()),
-            kernel_mapping_gen: 0,
-            mm_ctx_id,
-        }
-    }
-
-    /// Read `pml4_phys` from a `*mut ProcessPageDir` whose backing slot
-    /// was produced by `kmalloc(size_of::<ProcessPageDir>())` +
-    /// [`Self::init_in_kmalloc_slot`]. Returns `PhysAddr::NULL` if the
-    /// handle is null. The raw-pointer deref is folded into OSTD's
-    /// `with_ref` helper so this site stays in safe Rust.
-    #[inline]
-    pub fn pml4_phys_from_raw(page_dir: *mut ProcessPageDir) -> PhysAddr {
-        if page_dir.is_null() {
-            return PhysAddr::NULL;
-        }
-        slopos_ostd::util::ptr_buf::with_ref::<ProcessPageDir, _>(page_dir, |dir| dir.pml4_phys)
-    }
-
-    /// Initialise the freshly `kmalloc`'d slot at `dst` with `init`.
-    /// Replaces the bare `core::ptr::write(dst, init)` callers used to
-    /// write so that the only `unsafe` is the OSTD helper internal to
-    /// `slopos_ostd::util::ptr_buf::init_slot`.
-    #[inline]
-    pub fn init_in_kmalloc_slot(dst: *mut ProcessPageDir, init: ProcessPageDir) {
-        slopos_ostd::util::ptr_buf::init_slot(dst, init);
-    }
-}
-
-static KERNEL_PAGE_DIR: SyncUnsafeCell<ProcessPageDir> = SyncUnsafeCell::new(ProcessPageDir {
-    pml4_phys: PhysAddr::NULL,
-    ref_count: 1,
-    process_id: 0,
-    next: slopos_ostd::sync::KernelSync::new(ptr::null_mut()),
-    kernel_mapping_gen: 0,
-    mm_ctx_id: crate::mmu::MmContextId::INVALID,
-});
+/// The PML4 frame CR3 holds — the root of the kernel-half tree the
+/// functions in this module descend. `0` until [`init_paging`] records
+/// it. Written once on the BSP before any AP exists; the `Release`
+/// store pairs with the `Acquire` load in [`kernel_pml4_phys`] so the
+/// frame is visible before any descent rooted on it.
+static KERNEL_PML4_PHYS: AtomicU64 = AtomicU64::new(0);
 
 /// Allocate a zeroed page-table frame.
 ///
@@ -208,9 +135,10 @@ fn split_pd_huge(pd_entry: PageTableEntry) -> Option<(PhysAddr, PageTableEntry)>
 }
 
 /// The PML4 frame backing the kernel-half tree these functions write.
+/// `PhysAddr::NULL` before [`init_paging`] records it.
 #[inline]
-fn kernel_pml4_phys() -> PhysAddr {
-    ProcessPageDir::pml4_phys_from_raw(KERNEL_PAGE_DIR.get())
+pub fn kernel_pml4_phys() -> PhysAddr {
+    PhysAddr::new(KERNEL_PML4_PHYS.load(Ordering::Acquire))
 }
 
 /// `entry` with USER set, for promoting an intermediate a user mapping
@@ -489,7 +417,7 @@ pub(crate) fn unmap_page_4kb_in(pml4_phys: PhysAddr, vaddr: VirtAddr) -> PhysAdd
 /// emptiness test breaks that silently.
 ///
 /// The second is single ownership. Nothing serialises this descent, and
-/// `KERNEL_PAGE_DIR` carries no lock — one cannot be added, because
+/// the kernel-half root carries no lock — one cannot be added, because
 /// `alloc_page_table` reaches the buddy whose reuse path drains other
 /// CPUs, and that drain under a lock is a deadlock. `unlink_child` is
 /// what makes the release single-owner: two CPUs clearing the last leaf
@@ -515,10 +443,6 @@ pub fn unmap_page(vaddr: VirtAddr) -> PhysAddr {
     unmap_page_4kb_in(kernel_pml4_phys(), vaddr)
 }
 
-pub fn paging_get_kernel_directory() -> *mut ProcessPageDir {
-    KERNEL_PAGE_DIR.get()
-}
-
 pub fn init_paging() {
     let cr3 = get_cr3();
     // `to_virt` panics on its own if the HHDM is not up, so what is left
@@ -526,11 +450,7 @@ pub fn init_paging() {
     if cr3.to_virt().is_null() {
         panic!("Failed to translate kernel PML4 physical address");
     }
-    // Scoped so the exclusive borrow ends before `virt_to_phys` below,
-    // which reads the same static.
-    slopos_ostd::util::ptr_buf::with_ref_mut::<ProcessPageDir, _>(KERNEL_PAGE_DIR.get(), |dir| {
-        dir.pml4_phys = cr3;
-    });
+    KERNEL_PML4_PHYS.store(cr3.as_u64(), Ordering::Release);
 
     let kernel_phys = virt_to_phys(VirtAddr::new(KERNEL_VIRTUAL_BASE));
     if kernel_phys.is_null() {

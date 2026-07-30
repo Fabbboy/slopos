@@ -215,9 +215,9 @@ const _: () = assert!(
 //
 // Access is therefore per-entry and atomic, which is what a page-table
 // entry actually is. This mirrors `slopos_ostd::mm::page_table`'s `Pte`,
-// hardened for the setting these walks run in: `KERNEL_PAGE_DIR` carries
-// no lock, and one cannot be added, because `alloc_page_table` reaches
-// the buddy whose reuse path performs a cross-CPU drain.
+// hardened for the setting these walks run in: the kernel-half root
+// carries no lock, and one cannot be added, because `alloc_page_table`
+// reaches the buddy whose reuse path performs a cross-CPU drain.
 //
 // `pub(crate)` rather than `pub`: this module is reachable from outside
 // the crate, and a public `set_entry_at` would hand every

@@ -525,7 +525,7 @@ fn display_memory_summary() {
 ///
 /// On success: HHDM is live, the memmap is parsed into the region
 /// store, the buddy allocator is up, the kernel-master PML4 is
-/// re-published into `KERNEL_PAGE_DIR`, and PAT is programmed. The
+/// re-published into `KERNEL_PML4_PHYS`, and PAT is programmed. The
 /// `memmap` and `hhdm_offset` arguments are stashed in
 /// `MEMORY_INIT_CTX` so the post-typestate half can reach them
 /// without re-plumbing through the boot-step API.

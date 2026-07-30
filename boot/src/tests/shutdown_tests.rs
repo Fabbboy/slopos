@@ -357,11 +357,20 @@ pub fn test_scheduler_reinit_after_shutdown() -> TestResult {
     TestResult::Pass
 }
 
-pub fn test_kernel_page_directory_available() -> TestResult {
-    use slopos_mm::paging::paging_get_kernel_directory;
+pub fn test_kernel_pml4_root_matches_ostd_master() -> TestResult {
+    use slopos_mm::paging::kernel_pml4_phys;
+    let recorded = kernel_pml4_phys();
+    assert_test!(!recorded.is_null(), "init_paging recorded no kernel PML4");
+
+    // The kernel-half descent in `slopos_mm::paging` and the OSTD
+    // cursor must root on the same frame, or a mapping written through
+    // one is invisible to the other.
+    let installed = slopos_kernel_services::kernel_vm_space::try_kernel_vm_space();
+    assert_test!(installed.is_some(), "kernel_vm_space not installed");
+    let ostd_master = installed.unwrap().lock().pml4_paddr();
     assert_test!(
-        !paging_get_kernel_directory().is_null(),
-        "kernel page dir null"
+        recorded == ostd_master,
+        "kernel PML4 disagrees with the OSTD kernel master"
     );
     TestResult::Pass
 }
@@ -685,7 +694,7 @@ slopos_testing::stest!(
     suite = shutdown
 );
 slopos_testing::stest!(
-    name = test_kernel_page_directory_available,
+    name = test_kernel_pml4_root_matches_ostd_master,
     suite = shutdown
 );
 slopos_testing::stest!(name = test_serial_flush_terminates, suite = shutdown);
