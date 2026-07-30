@@ -165,3 +165,16 @@ pub fn test_demand_handle_null_page_dir() -> TestResult {
     }
     pass!()
 }
+
+slopos_testing::stest!(name = test_demand_fault_present_page, suite = demand);
+slopos_testing::stest!(name = test_demand_fault_no_vma, suite = demand);
+slopos_testing::stest!(name = test_demand_fault_lazy_anon_vma, suite = demand);
+slopos_testing::stest!(name = test_demand_permission_deny_write_ro, suite = demand);
+slopos_testing::stest!(
+    name = test_demand_permission_deny_user_kernel,
+    suite = demand
+);
+slopos_testing::stest!(name = test_demand_permission_deny_exec, suite = demand);
+slopos_testing::stest!(name = test_demand_permission_allow_read, suite = demand);
+slopos_testing::stest!(name = test_demand_permission_allow_write, suite = demand);
+slopos_testing::stest!(name = test_demand_handle_null_page_dir, suite = demand);
