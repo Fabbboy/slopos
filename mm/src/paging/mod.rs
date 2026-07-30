@@ -19,5 +19,5 @@ pub use walker::{WalkResult, walk_phys};
 
 pub use tables::{
     get_page_size, init_paging, is_mapped, kernel_pml4_phys, map_page_4kb,
-    paging_bump_kernel_mapping_gen, paging_mark_kernel_global, unmap_page, virt_to_phys,
+    paging_mark_kernel_global, unmap_page, virt_to_phys,
 };

@@ -28,8 +28,6 @@ use crate::paging_defs::{PAGE_SIZE_2MB, PAGE_SIZE_4KB};
 
 use crate::tlb;
 
-static KERNEL_MAPPING_GEN: AtomicU64 = AtomicU64::new(1);
-
 /// PML4, PDPT, PD, PT — the depth of the descent, and the width of the
 /// path array the prune walks back up.
 const PAGE_TABLE_LEVELS: usize = 4;
@@ -163,10 +161,6 @@ fn flush_kernel_page_after_mod(vaddr: VirtAddr) {
 #[inline(always)]
 fn get_cr3() -> PhysAddr {
     crate::mmu::read_cr3_value().pml4_phys()
-}
-
-pub fn paging_bump_kernel_mapping_gen() {
-    KERNEL_MAPPING_GEN.fetch_add(1, Ordering::Release);
 }
 
 /// Walk the kernel half (PML4 indices 256..512) via the OSTD cursor

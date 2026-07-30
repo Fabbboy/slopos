@@ -76,8 +76,8 @@ allowed_stack_frame_max() {
         # SlopOS functions whose large temporaries are already heap-boxed; the
         # residual frame is inherent local/format-args state, still under the
         # 4 KiB guard page.
-        *slopos_mm10process_vm20process_vm_clone_cow*) echo 2680 ;;
-        *slopos_mm10process_vm17create_process_vm*) echo 2440 ;;
+        *slopos_mm10process_vm20process_vm_clone_cow*) echo 2200 ;;
+        *slopos_mm10process_vm17create_process_vm*) echo 2104 ;;
         *slopos_acpi3aml14process_device*) echo 2424 ;;
         *slopos_net4ipv49handle_rx*) echo 2344 ;;
         *slopos_fs4cpio19for_each_cpio_entry*unpack_cpio_into_root*) echo 2344 ;;

@@ -41,8 +41,6 @@ use core::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use slopos_ostd::mm::KernelHeapBackend;
 use slopos_ostd::sync::BspToken;
 
-use crate::paging::paging_bump_kernel_mapping_gen;
-
 pub use compat::{
     HeapStats, get_heap_stats, get_heap_stats_owned, kernel_heap_enable_diagnostics, kfree,
     kmalloc, kzalloc, print_heap_stats,
@@ -287,16 +285,14 @@ pub const HEAP_WARMUP_PAGES: u32 = 4;
 /// site for **framebuffer perf parity across soft reboot**.
 pub fn warmup_for_soft_reboot() {
     use slopos_ostd::mm::frame::{Frame, KernelMeta};
-    // Hold the temporary frames so they're freed when this function
-    // returns, after the bump_kernel_mapping_gen call. Holding them
-    // in a stack array (not a `KVec`) avoids any risk of the slab
-    // recursing into itself during warmup.
+    // Hold the temporary frames so they're all freed together when this
+    // function returns. Holding them in a stack array (not a `KVec`)
+    // avoids any risk of the slab recursing into itself during warmup.
     let mut held: [Option<Frame<KernelMeta>>; HEAP_WARMUP_PAGES as usize] =
         [const { None }; HEAP_WARMUP_PAGES as usize];
     for slot in held.iter_mut() {
         *slot = Frame::<KernelMeta>::alloc_zeroed();
     }
-    paging_bump_kernel_mapping_gen();
     // `held` drops here; the frames return to the buddy.
 }
 

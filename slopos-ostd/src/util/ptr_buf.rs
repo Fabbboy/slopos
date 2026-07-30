@@ -49,25 +49,6 @@ pub fn nullable_write<T>(out: *mut T, value: T) {
     unsafe { core::ptr::write(out, value) };
 }
 
-/// Initialise a freshly allocated slot at `dst` with `value`. Mirrors
-/// `core::ptr::write(dst, value)` but moves the `unsafe` into OSTD so
-/// kernel-half allocator code stays in safe Rust.
-///
-/// # Safety contract on the caller
-///
-/// `dst` must be non-null, aligned for `T`, exclusively owned (typically
-/// because it was just produced by an allocator like `kmalloc` or
-/// `KBox::leak_unsized`), and large enough for one `T`. The old contents
-/// (if any) are overwritten without being dropped, so the slot must
-/// either be uninitialised or hold a `T` whose drop is intentionally
-/// skipped.
-#[inline]
-pub fn init_slot<T>(dst: *mut T, value: T) {
-    debug_assert!(!dst.is_null(), "init_slot: dst must be non-null");
-    // SAFETY: caller upholds the contract above.
-    unsafe { core::ptr::write(dst, value) };
-}
-
 /// Read a possibly-unaligned `T: Copy` at byte `offset` of `payload`.
 /// Returns `None` if `offset + size_of::<T>()` exceeds `payload.len()`.
 /// Folds the "slice + byte-offset + `read_unaligned`" pattern (the ELF
@@ -207,20 +188,6 @@ pub fn with_nonnull_mut<T, R>(ptr: NonNull<T>, len: usize, f: impl FnOnce(&mut [
 }
 
 /// Borrow a single `T` value at `ptr` for the duration of `f`. Companion of
-/// `&*ptr` — the interior `unsafe` lives here.
-///
-/// # Safety contract on the caller
-///
-/// `ptr` must be non-null, aligned for `T`, point at an initialised
-/// `T`, and not be aliased by any concurrent mutable borrow for the
-/// duration of `f`.
-#[inline]
-pub fn with_ref<T, R>(ptr: *const T, f: impl FnOnce(&T) -> R) -> R {
-    debug_assert!(!ptr.is_null(), "with_ref: ptr must be non-null");
-    // SAFETY: caller upholds the contract above.
-    f(unsafe { &*ptr })
-}
-
 /// Borrow a single `T` at `ptr` for as long as `anchor` lives.
 ///
 /// [`anchored_buf`]'s single-value sibling, for accessors that return a
@@ -228,50 +195,13 @@ pub fn with_ref<T, R>(ptr: *const T, f: impl FnOnce(&T) -> R) -> R {
 ///
 /// # Safety contract on the caller
 ///
-/// [`with_ref`]'s contract, plus: the pointee must stay valid and unaliased
-/// for at least as long as `anchor`.
+/// `ptr` must be non-null, aligned for `T`, point at an initialised `T`,
+/// and stay valid and unaliased for at least as long as `anchor`.
 #[inline]
 pub fn anchored_ref<'a, A: ?Sized, T>(_anchor: &'a A, ptr: *const T) -> &'a T {
     debug_assert!(!ptr.is_null(), "anchored_ref: ptr must be non-null");
     // SAFETY: caller upholds the contract above; `anchor` bounds the lifetime.
     unsafe { &*ptr }
-}
-
-/// Mutable sibling of [`anchored_ref`]. Takes `&mut A`, so the exclusivity of
-/// the returned reference is the exclusivity of the anchor.
-#[inline]
-pub fn anchored_ref_mut<'a, A: ?Sized, T>(_anchor: &'a mut A, ptr: *mut T) -> &'a mut T {
-    debug_assert!(!ptr.is_null(), "anchored_ref_mut: ptr must be non-null");
-    // SAFETY: caller upholds the contract above; `anchor` bounds the lifetime
-    // and its `&mut` bounds the aliasing.
-    unsafe { &mut *ptr }
-}
-
-/// Nullable companion to [`anchored_ref`]. `None` on null.
-#[inline]
-pub fn try_anchored_ref<'a, A: ?Sized, T>(anchor: &'a A, ptr: *const T) -> Option<&'a T> {
-    if ptr.is_null() {
-        return None;
-    }
-    Some(anchored_ref(anchor, ptr))
-}
-
-/// Nullable companion to [`with_ref`]. `None` on null, without running `f`.
-#[inline]
-pub fn try_with_ref<T, R>(ptr: *const T, f: impl FnOnce(&T) -> R) -> Option<R> {
-    if ptr.is_null() {
-        return None;
-    }
-    Some(with_ref(ptr, f))
-}
-
-/// Mutable sibling of [`with_ref`].
-#[inline]
-pub fn with_ref_mut<T, R>(ptr: *mut T, f: impl FnOnce(&mut T) -> R) -> R {
-    debug_assert!(!ptr.is_null(), "with_ref_mut: ptr must be non-null");
-    // SAFETY: caller upholds the contract above; exclusive access to
-    // `*ptr` for the duration of `f`.
-    f(unsafe { &mut *ptr })
 }
 
 /// View the `index`-th `u64` at `base` as an [`AtomicU64`] for the duration of
