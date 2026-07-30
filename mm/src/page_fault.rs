@@ -51,10 +51,6 @@ pub fn try_resolve_user_fault(
             },
         );
         if matches!(result, Some(Ok(()))) {
-            // Page-count bookkeeping must happen OUTSIDE the
-            // per-process lock that `process_vm_with_dual_paging_*`
-            // holds (the increment helper takes the same lock).
-            process_vm::process_vm_increment_pages(process_id, 1);
             return true;
         }
     }
