@@ -105,10 +105,11 @@
 #        - `'static` is excluded, being a fixed lifetime rather than a
 #          parameter the caller picks.
 #        - A shared receiver minting a mutable borrow is invisible, three
-#          times over. `fn slot(&self) -> &mut T` carries no generic list, so
-#          the predicate returns before collecting one; `fn slot<T>(&self) -> &mut T`
-#          declares only a type parameter, so the predicate collects no
-#          lifetime and returns early; `fn slot<'a>(&'a self) -> &'a mut T`
+#          times over. `fn slot(&self) -> &mut T` carries no generic list,
+#          so the predicate returns before collecting one;
+#          `fn slot<T>(&self) -> &mut T` declares only a type parameter, so
+#          it collects no lifetime and returns early;
+#          `fn slot<'a>(&'a self) -> &'a mut T`
 #          does reach the predicate and is silent because `&'a self` names
 #          `'a`. All three are right about the lifetime and beside the point
 #          — `&self` is `Copy`, so two calls yield two live `&mut` to one
