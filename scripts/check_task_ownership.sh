@@ -170,12 +170,11 @@
 #          false-positive guard: without it,
 #          `fn f<'a, F>(x: u32, f: F) -> u32 where F: Fn(&'a u8)` would be
 #          reported for a function that returns no reference at all.
-#          The return type is scanned for mentions only. A signature
-#          returning `PhantomData<&'a T>`, `fn(&'a T)` or `impl Fn(&'a T)`
-#          mints nothing and is reported.
-#        - The generic list must open on the same physical line as the
-#          function name. `fn f\n<'a>(p: *const T) -> &'a T` is not
-#          considered at all — the joiner never starts.
+#          The return type is blanked the same way, because minting a
+#          `PhantomData<&'a T>` or an `fn(&'a T)` hands the caller no
+#          reference either. A callable's return type survives that
+#          blanking, so `-> impl Fn() -> &'a T` is still reported: what
+#          such a function hands back does yield a `&'a T`.
 #        - Elided lifetimes are not analysed at all. `fn f(x: &Task) -> &Foo`
 #          is tied to its argument by the elision rules and is silent here,
 #          which is the correct answer, but it is silent by not looking
@@ -467,6 +466,12 @@ scan_sources() {
                 # counts as constraining. Both helpers call match(), so this
                 # sits after every live RSTART in the code above.
                 supplying = mask_outlives(mask_nonsupplying(args))
+                # A return type can name a lifetime through the same
+                # spellings that supply nothing, and minting a PhantomData
+                # or a bare fn pointer hands the caller no reference. A
+                # callable return type survives the mask, so a signature
+                # returning impl Fn() -> a reference still reports.
+                ret = mask_nonsupplying(ret)
 
                 nlt = 0
                 tmp = generics
@@ -607,16 +612,20 @@ scan_sources() {
             # that case. No apostrophe may appear anywhere in this awk
             # program: it is single-quoted, and one would end it.
             #
-            # Joining rule: start at a line carrying `fn <name><`, append
+            # Joining rule: start at a line carrying `fn <name>`, append
             # following lines until the accumulated text reaches the `{` or
             # `;` that ends the signature, stripping trailing `//` comments
             # as it goes. Capped so an unterminated signature cannot run
-            # away over the rest of the file.
+            # away over the rest of the file. The trigger does not require
+            # the generic list to open on the same line as the name, so a
+            # signature whose angle bracket starts on the next line is
+            # joined like any other; the predicate returns early on the
+            # ones that declare no lifetime.
             END {
                 for (n = 1; n <= last; n++) {
                     line = lines[n]
                     if (line ~ /^[[:space:]]*(\/\/|\/\*|\*\/|\*[[:space:]])/) { continue }
-                    if (line !~ /(^|[^A-Za-z0-9_])fn[[:space:]]+[A-Za-z0-9_]+[[:space:]]*</) { continue }
+                    if (line !~ /(^|[^A-Za-z0-9_])fn[[:space:]]+[A-Za-z0-9_]+/) { continue }
                     if (cfg_gated(n)) { continue }
 
                     sig = ""
@@ -705,9 +714,10 @@ fn counts() {
 }
 FIXTURE
 
-    # Check 8 gets its own fixture pair: twelve positive signatures — four
-    # dangerous shapes, the multi-line join, the five spellings that mention
-    # a lifetime without supplying it, and the two bound spellings — and
+    # Check 8 gets its own fixture pair: fourteen positive signatures — four
+    # dangerous shapes, the multi-line join, the split generic list, the five
+    # spellings that mention a lifetime without supplying it, the callable
+    # return type that does supply, and the two bound spellings — and
     # the lookalikes that must stay silent. The negatives carry the weight
     # here — this is the check most able to produce false positives.
     # `Payload` rather than `Task` throughout, so these files exercise
@@ -755,6 +765,13 @@ where
     todo!()
 }
 pub fn boundfn<'a, P, F: FnOnce(&'a P)>(p: *const P, g: F) -> &'a P {
+    todo!()
+}
+pub fn split_generics
+<'a, P>(p: *const P) -> &'a P {
+    todo!()
+}
+pub fn ret_callable_ref<'a, P>(p: *const P) -> impl Fn() -> &'a P {
     todo!()
 }
 FIXTURE
@@ -814,6 +831,14 @@ where
     F: Fn(&'a u8),
 {
     0
+}
+// Returning a marker hands the caller no reference to anything.
+pub fn phantom_out<'a, P>(p: *const P) -> PhantomData<&'a P> {
+    PhantomData
+}
+// Returning a callable that *takes* the borrow mints nothing either.
+pub fn fnptr_out<'a, P>(p: *const P) -> fn(&'a P) {
+    todo!()
 }
 FIXTURE
 
@@ -891,7 +916,7 @@ FIXTURE
     expect 5  1   # Send impl justified by a task refcount
     expect 6  3   # task_inc_ref, task_dec_ref, refcnt
     expect 7  5   # five forbidden symbols on the fault path
-    expect 8  12  # 5 raw-pointer shapes, 5 bypass spellings, 2 bound spellings
+    expect 8  14  # 5 raw-pointer, split generics, 5 bypass, callable ret, 2 bound
 
     # Nothing in either negative fixture may fire, on any check. The
     # lifetime negatives are the load-bearing ones: check 8 is the check
@@ -909,8 +934,9 @@ FIXTURE
         echo "  negatives: no false positives (TaskEntry / entry_arg / TaskRef / TaskAddr clean)"
         echo "  lifetime negatives: no false positives (argument-tied, elided, 'static,"
         echo "    Fn(..) -> .. bound, for<'x> HRTB, a brand token the caller cannot"
-        echo "    conjure, an argument head beside an outlives bound, and a where-clause"
-        echo "    bound on a non-reference return all stay silent)"
+        echo "    conjure, an argument head beside an outlives bound, a where-clause"
+        echo "    bound on a non-reference return, and returns that mint nothing all"
+        echo "    stay silent)"
     fi
 
     if [ "$self_test_fail" -ne 0 ]; then
