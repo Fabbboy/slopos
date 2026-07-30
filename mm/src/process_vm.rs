@@ -22,7 +22,7 @@ use crate::hhdm::PhysAddrHhdm;
 use crate::memory_layout_defs::DEFAULT_PROCESS_LAYOUT;
 use crate::memory_layout_defs::{KERNEL_VIRTUAL_BASE, MAX_PROCESSES};
 use crate::page_alloc::{alloc_kernel_page, free_page_frame};
-use crate::paging::{PageTable, ProcessPageDir};
+use crate::paging::ProcessPageDir;
 use crate::paging_defs::{PAGE_SIZE_4KB, PageFlags};
 use crate::slab::{kfree, kmalloc};
 use crate::tlb;
@@ -1642,7 +1642,6 @@ pub fn create_process_vm() -> u32 {
         VM_SLOT_ALLOC.lock().num_processes -= 1;
         return INVALID_PROCESS_ID;
     }
-    let pml4 = pml4_virt.as_mut_ptr::<PageTable>();
     let _ = hhdm_fill_bytes(pml4_virt, 0, PAGE_SIZE_4KB as usize, 0);
 
     let page_dir_ptr = kmalloc(core::mem::size_of::<ProcessPageDir>()) as *mut ProcessPageDir;
@@ -1654,10 +1653,9 @@ pub fn create_process_vm() -> u32 {
     }
     let mm_ctx_id = crate::mmu::alloc_mm_context_id();
     // Kernel-half mappings flow from `KERNEL_MASTER_PML4` via OSTD's
-    // `VmSpace::new` + `resync_kernel_half_if_stale`. The legacy
-    // ProcessPageDir's PML4 stays empty — it is never installed in CR3
-    // anymore.
-    let page_dir_init = ProcessPageDir::new(pml4, pml4_phys, process_id, mm_ctx_id);
+    // `VmSpace::new` + `resync_kernel_half_if_stale`. The frame this
+    // descriptor accounts for stays empty and is never installed in CR3.
+    let page_dir_init = ProcessPageDir::new(pml4_phys, process_id, mm_ctx_id);
     // `page_dir_ptr` came from `kmalloc(size_of::<ProcessPageDir>())`,
     // so the slot is valid and exclusively owned. The OSTD-side
     // `init_slot` helper performs the one `ptr::write` so this site
@@ -3073,7 +3071,6 @@ pub fn process_vm_clone_cow(parent_id: u32) -> u32 {
         VM_SLOT_ALLOC.lock().num_processes -= 1;
         return INVALID_PROCESS_ID;
     }
-    let pml4 = pml4_virt.as_mut_ptr::<PageTable>();
     let _ = hhdm_fill_bytes(pml4_virt, 0, PAGE_SIZE_4KB as usize, 0);
 
     let child_page_dir = kmalloc(core::mem::size_of::<ProcessPageDir>()) as *mut ProcessPageDir;
@@ -3085,8 +3082,9 @@ pub fn process_vm_clone_cow(parent_id: u32) -> u32 {
     }
     let child_mm_ctx_id = crate::mmu::alloc_mm_context_id();
     // OSTD `VmSpace::new` populates the child's kernel half via
-    // `KERNEL_MASTER_PML4`. The legacy ProcessPageDir's PML4 stays empty.
-    let child_init = ProcessPageDir::new(pml4, pml4_phys, child_id, child_mm_ctx_id);
+    // `KERNEL_MASTER_PML4`. The frame this descriptor accounts for stays
+    // empty and is never installed in CR3.
+    let child_init = ProcessPageDir::new(pml4_phys, child_id, child_mm_ctx_id);
     // `child_page_dir` came from `kmalloc(size_of::<ProcessPageDir>())`
     // — slot is valid and exclusively owned. OSTD's `init_slot`
     // helper carries the one `ptr::write` so this site stays in safe Rust.

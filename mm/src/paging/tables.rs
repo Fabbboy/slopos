@@ -16,8 +16,8 @@ use core::ptr;
 use core::sync::atomic::{AtomicU64, Ordering};
 
 use super::page_table_defs::{
-    PAGE_TABLE_ENTRIES, PageTable, PageTableEntry, PageTableLevel, entry_at, set_entry_at,
-    table_empty_at, unlink_child, zero_table_at,
+    PAGE_TABLE_ENTRIES, PageTableEntry, PageTableLevel, entry_at, set_entry_at, table_empty_at,
+    unlink_child, zero_table_at,
 };
 use crate::paging_defs::PageFlags;
 use slopos_abi::addr::{PhysAddr, VirtAddr};
@@ -37,27 +37,31 @@ static KERNEL_MAPPING_GEN: AtomicU64 = AtomicU64::new(1);
 /// path array the prune walks back up.
 const PAGE_TABLE_LEVELS: usize = 4;
 
-/// Legacy per-process page-directory descriptor. The per-process
-/// paging surface is OSTD-only; this struct survives as a vestigial
-/// allocator bookkeeping handle on `ProcessVmInner.page_dir` (its
-/// `pml4_phys` is still freed back to the buddy when the process is
-/// torn down). The `pml4` pointer points at the legacy kernel-half-only
-/// PML4 used by `KERNEL_PAGE_DIR` at boot; per-process PML4s built via
-/// `kmalloc(size_of::<ProcessPageDir>())` are zeroed and never
-/// installed in CR3 (the OSTD `VmSpace` is the load-bearing half).
+/// Per-process page-directory descriptor: a PML4 frame's physical
+/// address plus the bookkeeping that tracks it.
+///
+/// The load-bearing per-process paging surface is the OSTD `VmSpace`;
+/// what survives here is frame accounting. A per-process descriptor
+/// lives in a `kmalloc(size_of::<ProcessPageDir>())` slot reached
+/// through `ProcessVm.page_dir`, and its `pml4_phys` frame is allocated
+/// with the process, zeroed, never installed in CR3, and freed back to
+/// the buddy at teardown. `KERNEL_PAGE_DIR` is the exception: its
+/// `pml4_phys` is CR3's own frame, recorded by [`init_paging`], and the
+/// kernel-half mapping functions in this module write into that tree.
 #[repr(C)]
 pub struct ProcessPageDir {
-    /// `KernelSync` wraps the raw pointer so the surrounding struct
-    /// auto-derives `Send + Sync`; PML4 ownership is single-process
-    /// and access is gated by the per-process `SpinLock` in
-    /// `process_vm.rs`.
-    pub pml4: slopos_ostd::sync::KernelSync<*mut PageTable>,
+    /// The PML4 frame this descriptor accounts for. The descent roots on
+    /// this physical address; nothing caches a pointer to the frame,
+    /// because every page-table access goes through the HHDM one entry
+    /// at a time (see `page_table_defs`).
     pub pml4_phys: PhysAddr,
     pub ref_count: u32,
     pub process_id: u32,
-    /// `KernelSync`-wrapped intrusive next-pointer. The lookup walk in
-    /// `kernel_page_dir_walk` runs single-writer pre-SMP for now;
-    /// post-SMP migrations use the OSTD `VmSpace` instead.
+    /// Intrusive next-link. `KernelSync` wraps the raw pointer so the
+    /// surrounding struct auto-derives `Send + Sync`; a descriptor is
+    /// owned by one process and reached only through the per-process
+    /// `SpinLock` in `process_vm.rs`, so the link carries no lock of its
+    /// own.
     pub next: slopos_ostd::sync::KernelSync<*mut ProcessPageDir>,
     pub kernel_mapping_gen: u64,
     pub mm_ctx_id: crate::mmu::MmContextId,
@@ -67,14 +71,8 @@ impl ProcessPageDir {
     /// Build a fresh per-process page-directory descriptor with default
     /// fields. The caller writes the result into a freshly `kmalloc`'d
     /// slot via [`init_in_kmalloc_slot`](Self::init_in_kmalloc_slot).
-    pub fn new(
-        pml4: *mut PageTable,
-        pml4_phys: PhysAddr,
-        process_id: u32,
-        mm_ctx_id: crate::mmu::MmContextId,
-    ) -> Self {
+    pub fn new(pml4_phys: PhysAddr, process_id: u32, mm_ctx_id: crate::mmu::MmContextId) -> Self {
         Self {
-            pml4: slopos_ostd::sync::KernelSync::new(pml4),
             pml4_phys,
             ref_count: 1,
             process_id,
@@ -108,7 +106,6 @@ impl ProcessPageDir {
 }
 
 static KERNEL_PAGE_DIR: SyncUnsafeCell<ProcessPageDir> = SyncUnsafeCell::new(ProcessPageDir {
-    pml4: slopos_ostd::sync::KernelSync::new(ptr::null_mut()),
     pml4_phys: PhysAddr::NULL,
     ref_count: 1,
     process_id: 0,
@@ -208,11 +205,6 @@ fn split_pd_huge(pd_entry: PageTableEntry) -> Option<(PhysAddr, PageTableEntry)>
         pt_phys,
         PageTableEntry::new(pt_phys, table_flags_from_leaf(huge_flags)),
     ))
-}
-
-#[inline]
-fn phys_to_table(phys: PhysAddr) -> *mut PageTable {
-    phys.to_virt().as_mut_ptr()
 }
 
 /// The PML4 frame backing the kernel-half tree these functions write.
@@ -529,15 +521,15 @@ pub fn paging_get_kernel_directory() -> *mut ProcessPageDir {
 
 pub fn init_paging() {
     let cr3 = get_cr3();
-    let pml4_ptr = phys_to_table(cr3);
-    if pml4_ptr.is_null() {
+    // Every page-table frame is reached through the HHDM, so a CR3 the
+    // HHDM cannot translate is a tree these functions cannot walk.
+    if cr3.to_virt().is_null() {
         panic!("Failed to translate kernel PML4 physical address");
     }
     // Scoped so the exclusive borrow ends before `virt_to_phys` below,
     // which reads the same static.
     slopos_ostd::util::ptr_buf::with_ref_mut::<ProcessPageDir, _>(KERNEL_PAGE_DIR.get(), |dir| {
         dir.pml4_phys = cr3;
-        dir.pml4 = slopos_ostd::sync::KernelSync::new(pml4_ptr);
     });
 
     let kernel_phys = virt_to_phys(VirtAddr::new(KERNEL_VIRTUAL_BASE));
