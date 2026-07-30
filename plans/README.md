@@ -15,7 +15,6 @@ editing.
 | Document | Scope |
 |----------|-------|
 | `KNOWN_ISSUES.md` | Working notes on open issues; verify before using as source of truth |
-| `RAW_PTR_TO_KARC_MIGRATION.md` | Delete `ptr_buf`'s two unconstrained-lifetime borrow helpers and the check-8 allowlist machinery with them; the task-ownership gate is otherwise hard and green |
 | `driver-framework-base.html` | Driver-framework base: unified Bus model, platform/ACPI registry, deferred-probe/hotplug/unbind |
 | `microtransactions.md` | Kernel microtransaction layer on W/L currency; Phase 1 = pay-to-boot gate |
 | `usb-xhci.md` | USB/xHCI stack: host controller, enumeration, HID input, mass storage |
