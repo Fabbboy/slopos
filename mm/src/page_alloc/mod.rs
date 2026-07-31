@@ -176,22 +176,43 @@ pub fn page_allocator_max_supported_frames() -> u32 {
     BUDDY_ALLOCATOR.max_supported_frames()
 }
 
-pub fn get_page_allocator_stats(total: *mut u32, free: *mut u32, allocated: *mut u32) {
-    let (t, f, a) = BUDDY_ALLOCATOR.stats();
-    slopos_ostd::util::ptr_buf::nullable_write(total, t);
-    slopos_ostd::util::ptr_buf::nullable_write(free, f);
-    slopos_ostd::util::ptr_buf::nullable_write(allocated, a);
+/// Frame counts across the whole buddy allocator.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct PageAllocatorStats {
+    pub total: u32,
+    pub free: u32,
+    pub allocated: u32,
 }
 
-pub fn get_pcp_stats(cpu: usize, count: *mut u32, allocs: *mut u32, frees: *mut u32) {
+/// One CPU's per-CPU page-cache counters.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct PcpStats {
+    pub count: u32,
+    pub allocs: u32,
+    pub frees: u32,
+}
+
+pub fn get_page_allocator_stats() -> PageAllocatorStats {
+    let (total, free, allocated) = BUDDY_ALLOCATOR.stats();
+    PageAllocatorStats {
+        total,
+        free,
+        allocated,
+    }
+}
+
+/// `None` for an out-of-range CPU, or one whose per-CPU cache is not up.
+pub fn get_pcp_stats(cpu: usize) -> Option<PcpStats> {
     if cpu >= MAX_CPUS {
-        return;
+        return None;
     }
-    if let Some((c, a, f)) = BUDDY_ALLOCATOR.pcp_stats(cpu) {
-        slopos_ostd::util::ptr_buf::nullable_write(count, c);
-        slopos_ostd::util::ptr_buf::nullable_write(allocs, a);
-        slopos_ostd::util::ptr_buf::nullable_write(frees, f);
-    }
+    BUDDY_ALLOCATOR
+        .pcp_stats(cpu)
+        .map(|(count, allocs, frees)| PcpStats {
+            count,
+            allocs,
+            frees,
+        })
 }
 
 pub fn page_frame_is_tracked(phys_addr: PhysAddr) -> c_int {

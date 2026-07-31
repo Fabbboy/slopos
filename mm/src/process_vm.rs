@@ -373,19 +373,22 @@ fn vma_range_valid(start: u64, end: u64) -> bool {
     start < end && (start & (PAGE_SIZE_4KB - 1)) == 0 && (end & (PAGE_SIZE_4KB - 1)) == 0
 }
 
+/// Map `[start_addr, end_addr)` into `vm_space`, returning the page count.
+///
+/// On failure the range is rolled back, so `Err` always means nothing was
+/// left mapped — which is why the error side carries no count.
 fn map_user_range(
     vm_space: &mut KArc<VmSpace>,
     start_addr: u64,
     end_addr: u64,
     map_flags: u64,
-    pages_mapped_out: *mut u32,
-) -> c_int {
+) -> Result<u32, c_int> {
     if (start_addr & (PAGE_SIZE_4KB - 1)) != 0
         || (end_addr & (PAGE_SIZE_4KB - 1)) != 0
         || end_addr <= start_addr
     {
         klog_info!("map_user_range: Unaligned or invalid range");
-        return -1;
+        return Err(-1);
     }
 
     let mut current = start_addr;
@@ -398,8 +401,7 @@ fn map_user_range(
             if let Err(err) = rollback_range(vm_space, current, start_addr, &mut mapped) {
                 klog_info!("map_user_range: rollback failed: {:?}", err);
             }
-            write_optional_u32(pages_mapped_out, 0);
-            return -1;
+            return Err(-1);
         }
         if let Err(err) = ostd_map_4kb_user(vm_space, VirtAddr::new(current), phys, map_flags) {
             klog_info!("map_user_range: OSTD cursor map failed: {:?}", err);
@@ -407,22 +409,13 @@ fn map_user_range(
             if let Err(rollback_err) = rollback_range(vm_space, current, start_addr, &mut mapped) {
                 klog_info!("map_user_range: rollback failed: {:?}", rollback_err);
             }
-            write_optional_u32(pages_mapped_out, 0);
-            return -1;
+            return Err(-1);
         }
         mapped += 1;
         current += PAGE_SIZE_4KB;
     }
 
-    write_optional_u32(pages_mapped_out, mapped);
-    0
-}
-
-/// Write `value` through `out` if non-null. Used for `*mut u32` C-ABI
-/// shim outputs that the legacy callers pass in.
-#[inline]
-fn write_optional_u32(out: *mut u32, value: u32) {
-    slopos_ostd::util::ptr_buf::nullable_write(out, value);
+    Ok(mapped)
 }
 
 /// Copy `src.len()` bytes through the HHDM mapping at `virt + offset`.
@@ -1931,7 +1924,7 @@ pub fn create_process_vm_ref() -> Option<ProcessVmRef> {
             purpose: RegionPurpose::Stack,
         }
         .to_page_flags();
-        let mut stack_pages: u32 = 0;
+
         let stack_start = proc.stack_start;
         let stack_end = proc.stack_end;
         let stack_flags_bits = stack_page_flags.bits();
@@ -1939,14 +1932,7 @@ pub fn create_process_vm_ref() -> Option<ProcessVmRef> {
             .vm_space
             .as_mut()
             .expect("create_process_vm: vm_space present before stack map");
-        if map_user_range(
-            vm_space_for_map,
-            stack_start,
-            stack_end,
-            stack_flags_bits,
-            &mut stack_pages,
-        ) != 0
-        {
+        if map_user_range(vm_space_for_map, stack_start, stack_end, stack_flags_bits).is_err() {
             klog_info!("create_process_vm: Failed to map process stack");
             teardown_inner_mappings(&mut proc, slot_tlb_key(slot));
             proc.vm_space = None;
@@ -1957,7 +1943,7 @@ pub fn create_process_vm_ref() -> Option<ProcessVmRef> {
         }
 
         // Map a single zero page to tolerate benign null accesses in early userland.
-        let mut null_pages: u32 = 0;
+
         let vm_space_for_null = proc
             .vm_space
             .as_mut()
@@ -1967,8 +1953,8 @@ pub fn create_process_vm_ref() -> Option<ProcessVmRef> {
             0,
             PAGE_SIZE_4KB,
             PageFlags::USER_RW.bits(),
-            &mut null_pages,
-        ) == 0
+        )
+        .is_ok()
         {
             let null_region = VmaRegion {
                 protection: Protection::RW,
@@ -2170,10 +2156,19 @@ pub fn init_process_vm() -> c_int {
     0
 }
 
-pub fn get_process_vm_stats(total_processes: *mut u32, active_processes: *mut u32) {
+/// Process-address-space slot occupancy.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct ProcessVmStats {
+    pub total_processes: u32,
+    pub active_processes: u32,
+}
+
+pub fn get_process_vm_stats() -> ProcessVmStats {
     let alloc = VM_SLOT_ALLOC.lock();
-    write_optional_u32(total_processes, MAX_PROCESSES as u32);
-    write_optional_u32(active_processes, alloc.num_processes);
+    ProcessVmStats {
+        total_processes: MAX_PROCESSES as u32,
+        active_processes: alloc.num_processes,
+    }
 }
 
 pub fn get_current_process_id() -> u32 {
@@ -2283,7 +2278,6 @@ pub fn process_vm_reset_stack(process_id: u32) -> c_int {
                     purpose: RegionPurpose::Stack,
                 }
                 .to_page_flags();
-                let mut pages: u32 = 0;
                 let vm_space_ref = guard
                     .vm_space
                     .as_mut()
@@ -2293,8 +2287,8 @@ pub fn process_vm_reset_stack(process_id: u32) -> c_int {
                     stack_start,
                     stack_end,
                     stack_page_flags.bits(),
-                    &mut pages,
-                ) != 0
+                )
+                .is_err()
                 {
                     -1
                 } else {
@@ -2371,19 +2365,11 @@ pub fn process_vm_brk(process_id: u32, new_brk: u64) -> u64 {
             return 0;
         }
 
-        let mut pages_mapped: u32 = 0;
         let vm_space_for_brk = proc
             .vm_space
             .as_mut()
             .expect("process_vm_brk: vm_space present for live pid");
-        if map_user_range(
-            vm_space_for_brk,
-            start_addr,
-            end_addr,
-            heap_map_flags,
-            &mut pages_mapped,
-        ) != 0
-        {
+        if map_user_range(vm_space_for_brk, start_addr, end_addr, heap_map_flags).is_err() {
             proc.vma_map
                 .remove_range(start_addr, end_addr, |_, _, _| {});
             return 0;

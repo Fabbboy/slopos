@@ -136,37 +136,24 @@ define_syscall!(syscall_user_read (ctx, buf: UserBytes) -> Result<u64, Errno> {
 });
 
 define_syscall!(syscall_sys_info (ctx, info_out: UserPtr<UserSysInfo>) -> Result<(), Errno> {
-    let mut info = UserSysInfo {
-        total_pages: 0,
-        free_pages: 0,
-        allocated_pages: 0,
-        total_tasks: 0,
-        active_tasks: 0,
-        task_context_switches: 0,
-        scheduler_context_switches: 0,
-        scheduler_yields: 0,
-        ready_tasks: 0,
-        schedule_calls: 0,
+    let pages = get_page_allocator_stats();
+    let tasks = get_task_stats();
+    let sched = get_scheduler_stats();
+
+    let info = UserSysInfo {
+        total_pages: pages.total,
+        free_pages: pages.free,
+        allocated_pages: pages.allocated,
+        total_tasks: tasks.total_tasks,
+        active_tasks: tasks.active_tasks,
+        task_context_switches: tasks.context_switches,
+        scheduler_context_switches: sched.context_switches,
+        scheduler_yields: sched.yields,
+        ready_tasks: sched.ready_tasks,
+        schedule_calls: sched.schedule_calls,
         wl_balance: slopos_ostd::wl_currency::check_balance(),
         boot_flags: slopos_ostd::boot_flags::get_flags(),
     };
-
-    get_page_allocator_stats(
-        &mut info.total_pages,
-        &mut info.free_pages,
-        &mut info.allocated_pages,
-    );
-    get_task_stats(
-        &mut info.total_tasks,
-        &mut info.active_tasks,
-        &mut info.task_context_switches,
-    );
-    get_scheduler_stats(
-        &mut info.scheduler_context_switches,
-        &mut info.scheduler_yields,
-        &mut info.ready_tasks,
-        &mut info.schedule_calls,
-    );
 
     copy_to_user(info_out.inner(), &info).map_err(|_| Errno::EFAULT)?;
     Ok(())

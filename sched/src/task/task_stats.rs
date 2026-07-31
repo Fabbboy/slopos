@@ -3,13 +3,22 @@ use slopos_ostd::task::TaskAddr;
 use super::Task;
 use super::task_table::{try_with_task_manager, with_task_manager};
 
-pub fn get_task_stats(total_tasks: *mut u32, active_tasks: *mut u32, context_switches: *mut u64) {
-    use slopos_ostd::util::ptr_buf::nullable_write;
-    with_task_manager(|mgr| {
-        nullable_write(total_tasks, mgr.tasks_created);
-        nullable_write(active_tasks, mgr.num_tasks);
-        nullable_write(context_switches, mgr.total_context_switches);
-    });
+/// Task-manager lifetime counters.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct TaskStats {
+    /// Tasks created over the machine's lifetime.
+    pub total_tasks: u32,
+    /// Tasks currently registered.
+    pub active_tasks: u32,
+    pub context_switches: u64,
+}
+
+pub fn get_task_stats() -> TaskStats {
+    with_task_manager(|mgr| TaskStats {
+        total_tasks: mgr.tasks_created,
+        active_tasks: mgr.num_tasks,
+        context_switches: mgr.total_context_switches,
+    })
 }
 
 pub fn task_record_context_switch(from: Option<&Task>, to: Option<&Task>, timestamp: u64) {

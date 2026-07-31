@@ -314,10 +314,9 @@ define_syscall!(syscall_roulette_result
     requires(task_id: task_id)
     -> SyscallResult
 {
-    let mut stored = FateResult { token: 0, value: 0 };
-    if fate_take_pending(task_id, &mut stored) != 0 {
+    let Some(stored) = fate_take_pending(task_id) else {
         return SyscallResult::Err(Errno::EINVAL);
-    }
+    };
 
     let token = (packed >> 32) as u32;
     if token != stored.token {

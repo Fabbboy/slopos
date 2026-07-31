@@ -32,25 +32,6 @@ use core::ptr::NonNull;
 
 use crate::sync::init_flag::InitFlag;
 
-/// Write `value` through `out` if non-null. Folds the kernel-half C-ABI
-/// idiom of "caller passes an optional `*mut T` output slot; write if
-/// present, else discard" into one helper so consumer crates need no
-/// raw-pointer write.
-///
-/// # Safety contract on the caller
-///
-/// When `out.is_null()` returns `false`, the caller must ensure `out`
-/// points at a valid, properly aligned, writable `T` and is not aliased
-/// for the duration of the write. The interior `unsafe` lives here.
-#[inline]
-pub fn nullable_write<T>(out: *mut T, value: T) {
-    if out.is_null() {
-        return;
-    }
-    // SAFETY: caller upholds the per-helper contract above.
-    unsafe { core::ptr::write(out, value) };
-}
-
 /// Read a possibly-unaligned `T: Copy` at byte `offset` of `payload`.
 /// Returns `None` if `offset + size_of::<T>()` exceeds `payload.len()`.
 /// Folds the "slice + byte-offset + `read_unaligned`" pattern (the ELF

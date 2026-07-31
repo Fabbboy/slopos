@@ -1192,12 +1192,7 @@ pub fn test_fork_cleanup_on_failure() -> TestResult {
 
     slopos_mm::process_vm::init_process_vm();
 
-    let mut free_before = 0u32;
-    slopos_mm::page_alloc::get_page_allocator_stats(
-        ptr::null_mut(),
-        &mut free_before,
-        ptr::null_mut(),
-    );
+    let free_before = slopos_mm::page_alloc::get_page_allocator_stats().free;
 
     let parent_pid = slopos_mm::process_vm::create_process_vm();
     assert_test!(parent_pid != slopos_abi::task::INVALID_PROCESS_ID);
@@ -1219,12 +1214,7 @@ pub fn test_fork_cleanup_on_failure() -> TestResult {
 
     slopos_mm::process_vm::destroy_process_vm(parent_pid);
 
-    let mut free_after = 0u32;
-    slopos_mm::page_alloc::get_page_allocator_stats(
-        ptr::null_mut(),
-        &mut free_after,
-        ptr::null_mut(),
-    );
+    let free_after = slopos_mm::page_alloc::get_page_allocator_stats().free;
 
     let leak = free_before.saturating_sub(free_after);
     assert_test!(leak <= 64, "memory leak after fork cleanup: {} pages", leak);
@@ -1414,12 +1404,7 @@ pub fn test_fork_memory_pressure() -> TestResult {
 
     let child_pid = slopos_mm::process_vm::process_vm_clone_cow(parent_pid);
 
-    let mut free_before = 0u32;
-    slopos_mm::page_alloc::get_page_allocator_stats(
-        ptr::null_mut(),
-        &mut free_before,
-        ptr::null_mut(),
-    );
+    let free_before = slopos_mm::page_alloc::get_page_allocator_stats().free;
 
     if child_pid != slopos_abi::task::INVALID_PROCESS_ID {
         slopos_mm::process_vm::destroy_process_vm(child_pid);
@@ -1430,12 +1415,7 @@ pub fn test_fork_memory_pressure() -> TestResult {
         free_page_frame(stress_pages[i]);
     }
 
-    let mut free_after = 0u32;
-    slopos_mm::page_alloc::get_page_allocator_stats(
-        ptr::null_mut(),
-        &mut free_after,
-        ptr::null_mut(),
-    );
+    let free_after = slopos_mm::page_alloc::get_page_allocator_stats().free;
 
     let leak = free_before.saturating_sub(free_after);
     assert_test!(leak <= 32, "memory leak under pressure: {} pages", leak);

@@ -20,9 +20,7 @@ use slopos_abi::task::INVALID_PROCESS_ID;
 use slopos_ostd::mm::frame::FrameAllocOptions;
 
 pub fn test_page_alloc_until_oom() -> TestResult {
-    let mut total = 0u32;
-    let mut free_before = 0u32;
-    get_page_allocator_stats(&mut total, &mut free_before, ptr::null_mut());
+    let free_before = get_page_allocator_stats().free;
 
     if free_before < 64 {
         klog_info!("OOM_TEST: Not enough free pages to test ({})", free_before);
@@ -55,8 +53,7 @@ pub fn test_page_alloc_until_oom() -> TestResult {
         free_page_frame(allocated[i]);
     }
 
-    let mut free_after = 0u32;
-    get_page_allocator_stats(ptr::null_mut(), &mut free_after, ptr::null_mut());
+    let free_after = get_page_allocator_stats().free;
 
     assert_test!(free_after >= free_before - 10, "memory leak after OOM test");
 
@@ -64,8 +61,7 @@ pub fn test_page_alloc_until_oom() -> TestResult {
 }
 
 pub fn test_page_alloc_fragmentation_oom() -> TestResult {
-    let mut free_before = 0u32;
-    get_page_allocator_stats(ptr::null_mut(), &mut free_before, ptr::null_mut());
+    let free_before = get_page_allocator_stats().free;
 
     if free_before < 32 {
         return pass!();
@@ -356,8 +352,7 @@ pub fn test_kzalloc_zeroed_under_pressure() -> TestResult {
 }
 
 pub fn test_alloc_free_cycles_no_leak() -> TestResult {
-    let mut free_start = 0u32;
-    get_page_allocator_stats(ptr::null_mut(), &mut free_start, ptr::null_mut());
+    let free_start = get_page_allocator_stats().free;
 
     const CYCLES: usize = 100;
     const PAGES_PER_CYCLE: usize = 4;
@@ -382,8 +377,7 @@ pub fn test_alloc_free_cycles_no_leak() -> TestResult {
         }
     }
 
-    let mut free_end = 0u32;
-    get_page_allocator_stats(ptr::null_mut(), &mut free_end, ptr::null_mut());
+    let free_end = get_page_allocator_stats().free;
 
     assert_test!(
         !(free_start > free_end && (free_start - free_end) > 16),

@@ -2574,13 +2574,7 @@ pub fn test_schedule_to_empty_queue() -> TestResult {
     }
 
     // Verify task is in queue by checking stats
-    let mut ready_count = 0u32;
-    get_scheduler_stats(
-        ptr::null_mut(),
-        ptr::null_mut(),
-        &mut ready_count,
-        ptr::null_mut(),
-    );
+    let ready_count = get_scheduler_stats().ready_tasks;
 
     if ready_count == 0 {
         klog_info!("SCHED_TEST: Task scheduled but ready count is 0");
@@ -2618,24 +2612,12 @@ pub fn test_schedule_duplicate_task() -> TestResult {
     // Schedule once
     schedule_task(&task_guard);
 
-    let mut ready_before = 0u32;
-    get_scheduler_stats(
-        ptr::null_mut(),
-        ptr::null_mut(),
-        &mut ready_before,
-        ptr::null_mut(),
-    );
+    let ready_before = get_scheduler_stats().ready_tasks;
 
     // Schedule again - should be idempotent
     schedule_task(&task_guard);
 
-    let mut ready_after = 0u32;
-    get_scheduler_stats(
-        ptr::null_mut(),
-        ptr::null_mut(),
-        &mut ready_after,
-        ptr::null_mut(),
-    );
+    let ready_after = get_scheduler_stats().ready_tasks;
 
     if ready_after != ready_before {
         klog_info!(
@@ -3238,13 +3220,7 @@ pub fn test_many_same_priority_tasks() -> TestResult {
         }
     }
 
-    let mut ready = 0u32;
-    get_scheduler_stats(
-        ptr::null_mut(),
-        ptr::null_mut(),
-        &mut ready,
-        ptr::null_mut(),
-    );
+    let ready = get_scheduler_stats().ready_tasks;
 
     klog_info!("SCHED_TEST: Scheduled {} tasks of same priority", ready);
 

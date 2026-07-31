@@ -30,15 +30,15 @@ pub fn fate_spin() -> FateResult {
 pub fn fate_set_pending(res: FateResult, task_id: u32) -> c_int {
     with_task(task_id, |t| t.set_fate(res.token, res.value))
 }
-pub fn fate_take_pending(task_id: u32, out: *mut FateResult) -> c_int {
-    let mut result = -1;
+/// Take `task_id`'s pending fate, if it has one and the task still exists.
+pub fn fate_take_pending(task_id: u32) -> Option<FateResult> {
+    let mut taken = None;
     let _ = with_task(task_id, |t| {
-        if let Some((token, value)) = t.take_fate() {
-            slopos_ostd::util::ptr_buf::nullable_write(out, FateResult { token, value });
-            result = 0;
-        }
+        taken = t
+            .take_fate()
+            .map(|(token, value)| FateResult { token, value });
     });
-    result
+    taken
 }
 pub fn fate_apply_outcome(res: *const FateResult, _resolution: u32, award: bool) {
     if res.is_null() {

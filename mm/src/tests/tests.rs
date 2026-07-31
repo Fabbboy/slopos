@@ -166,19 +166,16 @@ pub fn test_pinned_io_runs_at_offset() -> TestResult {
 
 /// Test 6: Stats accuracy check
 pub fn test_page_alloc_stats() -> TestResult {
-    let mut total = 0u32;
-    let mut free_before = 0u32;
-    let mut alloc_before = 0u32;
-    get_page_allocator_stats(&mut total, &mut free_before, &mut alloc_before);
+    let before = get_page_allocator_stats();
+    let (total, alloc_before) = (before.total, before.allocated);
 
     assert_test!(total != 0, "total frames is 0");
 
     let phys = alloc_kernel_pages(4);
     assert_not_null!(phys.as_u64() as *const u8, "alloc 4 pages for stats");
 
-    let mut free_after = 0u32;
-    let mut alloc_after = 0u32;
-    get_page_allocator_stats(ptr::null_mut(), &mut free_after, &mut alloc_after);
+    let after = get_page_allocator_stats();
+    let alloc_after = after.allocated;
 
     if alloc_after < alloc_before + 4 {
         free_page_frame(phys);
@@ -494,8 +491,7 @@ use slopos_ostd::handle::HandleError;
 pub fn test_process_vm_slot_reuse() -> TestResult {
     init_process_vm();
 
-    let mut initial_active: u32 = 0;
-    get_process_vm_stats(ptr::null_mut(), &mut initial_active);
+    let initial_active = get_process_vm_stats().active_processes;
 
     let mut pids = [0u32; 5];
     for i in 0..5 {
@@ -555,8 +551,7 @@ pub fn test_process_vm_slot_reuse() -> TestResult {
         destroy_process_vm(pid);
     }
 
-    let mut final_active: u32 = 0;
-    get_process_vm_stats(ptr::null_mut(), &mut final_active);
+    let final_active = get_process_vm_stats().active_processes;
     if final_active != initial_active {
         return fail!(
             "active count mismatch: {} != {}",
@@ -570,8 +565,7 @@ pub fn test_process_vm_slot_reuse() -> TestResult {
 pub fn test_process_vm_counter_reset() -> TestResult {
     init_process_vm();
 
-    let mut initial_active: u32 = 0;
-    get_process_vm_stats(ptr::null_mut(), &mut initial_active);
+    let initial_active = get_process_vm_stats().active_processes;
 
     let mut pids = [0u32; 10];
     for i in 0..10 {
@@ -584,8 +578,7 @@ pub fn test_process_vm_counter_reset() -> TestResult {
         }
     }
 
-    let mut active_after: u32 = 0;
-    get_process_vm_stats(ptr::null_mut(), &mut active_after);
+    let active_after = get_process_vm_stats().active_processes;
     if active_after != initial_active + 10 {
         for pid in pids {
             destroy_process_vm(pid);
@@ -603,8 +596,7 @@ pub fn test_process_vm_counter_reset() -> TestResult {
         }
     }
 
-    let mut final_active: u32 = 0;
-    get_process_vm_stats(ptr::null_mut(), &mut final_active);
+    let final_active = get_process_vm_stats().active_processes;
     if final_active != initial_active {
         return fail!(
             "final active {} != initial {}",

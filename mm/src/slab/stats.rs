@@ -1,10 +1,9 @@
 //! Aggregate heap statistics — the surface that test callers and
 //! diagnostic printers consume.
 //!
-//! `HeapStats` is `repr(C)` so the C-ABI-style
-//! `get_heap_stats(*mut HeapStats)` shim in `compat.rs` can hand off
-//! a snapshot to FFI-shaped callers. Safe-fn callers should prefer
-//! `get_heap_stats_owned()`.
+//! `get_heap_stats_owned()` in `compat.rs` is the accessor; `HeapStats`
+//! is `repr(C)` so its field order is pinned for the diagnostic dumps
+//! that read it.
 
 use core::sync::atomic::Ordering;
 

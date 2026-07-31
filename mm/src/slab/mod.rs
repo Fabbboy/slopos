@@ -42,8 +42,8 @@ use slopos_ostd::mm::KernelHeapBackend;
 use slopos_ostd::sync::BspToken;
 
 pub use compat::{
-    HeapStats, get_heap_stats, get_heap_stats_owned, kernel_heap_enable_diagnostics, kfree,
-    kmalloc, kzalloc, print_heap_stats,
+    HeapStats, get_heap_stats_owned, kernel_heap_enable_diagnostics, kfree, kmalloc, kzalloc,
+    print_heap_stats,
 };
 
 /// Lifecycle of [`KERNEL_SLAB`]. Encoded as an `AtomicU8` so the

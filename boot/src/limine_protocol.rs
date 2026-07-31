@@ -374,27 +374,6 @@ pub fn initramfs() -> Option<&'static [u8]> {
         .map(|module| module.data())
 }
 
-pub fn get_framebuffer_info(
-    addr: *mut u64,
-    width: *mut u32,
-    height: *mut u32,
-    pitch: *mut u32,
-    bpp: *mut u8,
-) -> i32 {
-    let info = sysinfo();
-    if let Some(boot_fb) = info.framebuffer {
-        use slopos_ostd::util::ptr_buf::nullable_write;
-        nullable_write(addr, *boot_fb.address as u64);
-        nullable_write(width, boot_fb.info.width);
-        nullable_write(height, boot_fb.info.height);
-        nullable_write(pitch, boot_fb.info.pitch);
-        nullable_write(bpp, boot_fb.info.format.bytes_per_pixel() * 8);
-        1
-    } else {
-        0
-    }
-}
-
 pub fn is_framebuffer_available() -> i32 {
     sysinfo().flags.framebuffer_available as i32
 }

@@ -38,8 +38,7 @@ fn scratch_va(slot: u64) -> VirtAddr {
 }
 
 fn free_pages() -> u32 {
-    let mut free = 0u32;
-    get_page_allocator_stats(core::ptr::null_mut(), &mut free, core::ptr::null_mut());
+    let free = get_page_allocator_stats().free;
     free
 }
 

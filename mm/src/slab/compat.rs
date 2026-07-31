@@ -58,12 +58,7 @@ pub fn kfree(ptr_in: *mut c_void) {
     super::KERNEL_SLAB.dealloc(nn);
 }
 
-/// Write a `HeapStats` snapshot to a C-ABI output slot if non-null.
-pub fn get_heap_stats(stats: *mut HeapStats) {
-    ptr_buf::nullable_write(stats, super::stats::snapshot());
-}
-
-/// Owned-return variant of [`get_heap_stats`] for safe-fn callers.
+/// Snapshot of the kernel heap's slab and large-tier counters.
 pub fn get_heap_stats_owned() -> HeapStats {
     super::stats::snapshot()
 }
