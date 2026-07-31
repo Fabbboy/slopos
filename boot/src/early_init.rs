@@ -840,6 +840,7 @@ fn panic_syscall_smoke_observer() {
     let pid = match slopos_core::exec::spawn_program_with_attrs(
         b"/bin/oops_smoke",
         None,
+        None,
         slopos_sched::task::TaskPriority::Normal,
         TASK_FLAG_USER_MODE,
         &[],

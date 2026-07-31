@@ -69,6 +69,10 @@ pub struct SpawnAttrs {
     pub actions_len: u64,
     /// Signals forced to `SIG_DFL` in the child (POSIX_SPAWN_SETSIGDEF).
     pub sigdefault_mask: u64,
+    /// User pointer to a NULL-terminated `envp` array, or 0 for no environment.
+    pub envp_ptr: u64,
+    /// Number of entries in `envp`, excluding the terminating NULL.
+    pub envp_len: u64,
 }
 
 /// Upper bound on the action-array length the kernel will read.
@@ -83,10 +87,12 @@ const _: () = assert!(core::mem::offset_of!(SpawnFdAction, open_path_ptr) == 16)
 const _: () = assert!(core::mem::offset_of!(SpawnFdAction, open_path_len) == 24);
 const _: () = assert!(core::mem::offset_of!(SpawnFdAction, open_flags) == 32);
 
-const _: () = assert!(core::mem::size_of::<SpawnAttrs>() == 32);
+const _: () = assert!(core::mem::size_of::<SpawnAttrs>() == 48);
 const _: () = assert!(core::mem::align_of::<SpawnAttrs>() == 8);
 const _: () = assert!(core::mem::offset_of!(SpawnAttrs, priority) == 0);
 const _: () = assert!(core::mem::offset_of!(SpawnAttrs, flags) == 4);
 const _: () = assert!(core::mem::offset_of!(SpawnAttrs, actions_ptr) == 8);
 const _: () = assert!(core::mem::offset_of!(SpawnAttrs, actions_len) == 16);
 const _: () = assert!(core::mem::offset_of!(SpawnAttrs, sigdefault_mask) == 24);
+const _: () = assert!(core::mem::offset_of!(SpawnAttrs, envp_ptr) == 32);
+const _: () = assert!(core::mem::offset_of!(SpawnAttrs, envp_len) == 40);

@@ -55,6 +55,8 @@ fn spawn_raw(path: &[u8], priority: u8, flags: u16, actions: &[SpawnFdAction]) -
         actions_ptr: actions.as_ptr() as u64,
         actions_len: actions.len() as u64,
         sigdefault_mask: 0,
+        envp_ptr: 0,
+        envp_len: 0,
     };
     let argv: [*const u8; 0] = [];
     unsafe {

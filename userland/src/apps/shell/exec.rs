@@ -3,7 +3,7 @@ use core::ptr;
 
 use crate::program_registry;
 use crate::syscall::{UserFsStat, core as sys_core, fs, process};
-use slopos_abi::fs::{O_APPEND, O_CREAT, O_RDONLY, O_WRONLY};
+use slopos_abi::fs::{O_APPEND, O_CREAT, O_RDONLY, O_TRUNC, O_WRONLY};
 
 use super::buffers::ParsedTokens;
 use super::builtins;
@@ -11,11 +11,11 @@ use super::display::{
     shell_clear_output_fd, shell_error, shell_error_named, shell_set_output_fd, shell_write,
 };
 use super::jobs;
-use super::parser::{SHELL_MAX_TOKENS, normalize_path};
+use super::parser::{SHELL_MAX_ARGS, normalize_path};
 use std::sync::atomic::{AtomicU32, Ordering};
 
 const MAX_PIPE_CMDS: usize = 8;
-const MAX_REDIRECTS: usize = 4;
+const MAX_REDIRECTS: usize = 8;
 
 /// The shell could not parse the line.  POSIX reserves 2 for the shell's own
 /// usage errors, distinct from any status a command could return.
@@ -40,25 +40,53 @@ enum RedirectKind {
     OutputAppend,
 }
 
+/// Where a redirection points: at a path, or at another descriptor (`2>&1`).
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum RedirectTarget {
+    /// Index into `ParsedTokens` of the path word.
+    Path(usize),
+    /// Descriptor to duplicate from.
+    Fd(i32),
+    /// `>&-` — close the descriptor.
+    Close,
+}
+
 #[derive(Clone, Copy)]
 struct Redirect {
     kind: RedirectKind,
-    target: usize, // index into ParsedTokens
+    /// Descriptor being redirected: 0 for `<`, 1 for `>`, or the IO number.
+    fd: i32,
+    target: RedirectTarget,
 }
 
 impl Redirect {
     const fn empty() -> Self {
         Self {
             kind: RedirectKind::Input,
-            target: 0,
+            fd: 0,
+            target: RedirectTarget::Path(0),
         }
     }
 }
 
+/// How a pipeline is joined to the one after it.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Connector {
+    /// `;` — run regardless.
+    Seq,
+    /// `&&` — run only if the previous pipeline succeeded.
+    And,
+    /// `||` — run only if the previous pipeline failed.
+    Or,
+}
+
 #[derive(Clone, Copy)]
 struct ParsedCommand {
-    argv: [usize; SHELL_MAX_TOKENS], // indices into ParsedTokens
+    argv: [usize; SHELL_MAX_ARGS], // indices into ParsedTokens
     argc: usize,
+    /// Leading `NAME=VALUE` words, as indices into `ParsedTokens`.
+    assigns: [usize; SHELL_MAX_ARGS],
+    assign_count: usize,
     redirects: [Redirect; MAX_REDIRECTS],
     redirect_count: usize,
 }
@@ -66,10 +94,61 @@ struct ParsedCommand {
 impl ParsedCommand {
     const fn empty() -> Self {
         Self {
-            argv: [0; SHELL_MAX_TOKENS],
+            argv: [0; SHELL_MAX_ARGS],
             argc: 0,
+            assigns: [0; SHELL_MAX_ARGS],
+            assign_count: 0,
             redirects: [Redirect::empty(); MAX_REDIRECTS],
             redirect_count: 0,
+        }
+    }
+}
+
+/// Split `NAME=VALUE` into its halves.
+///
+/// `NAME` must be a shell identifier, so `./a=b` and `-x=1` stay ordinary
+/// arguments and only a genuine assignment is treated as one.
+fn split_assignment(word: &[u8]) -> Option<(&[u8], &[u8])> {
+    let eq = word.iter().position(|&b| b == b'=')?;
+    if eq == 0 {
+        return None;
+    }
+    let name = &word[..eq];
+    if !(name[0].is_ascii_alphabetic() || name[0] == b'_') {
+        return None;
+    }
+    if !name.iter().all(|b| b.is_ascii_alphanumeric() || *b == b'_') {
+        return None;
+    }
+    Some((name, &word[eq + 1..]))
+}
+
+/// A variable's value before an assignment overrode it, so a one-shot
+/// `NAME=VALUE cmd` prefix can be undone once `cmd` has run.
+type SavedEnv = Vec<(Vec<u8>, Option<Vec<u8>>)>;
+
+fn apply_assignments(cmd: &ParsedCommand, tokens: &ParsedTokens, remember: bool) -> SavedEnv {
+    let mut saved = SavedEnv::new();
+    for i in 0..cmd.assign_count {
+        let Some((name, value)) = split_assignment(tokens.token(cmd.assigns[i])) else {
+            continue;
+        };
+        if remember {
+            let previous = super::env::get(name).map(|(buf, len)| buf[..len].to_vec());
+            saved.push((name.to_vec(), previous));
+        }
+        super::env::set(name, value);
+    }
+    saved
+}
+
+fn restore_assignments(saved: SavedEnv) {
+    for (name, previous) in saved {
+        match previous {
+            Some(value) => super::env::set(&name, &value),
+            None => {
+                super::env::unset(&name);
+            }
         }
     }
 }
@@ -174,21 +253,59 @@ pub fn leave_foreground() {
     clear_foreground_pgid();
 }
 
-fn parse_pipeline(tokens: &ParsedTokens, out: &mut ParsedPipeline) -> Result<(), ()> {
+/// Split a redirection operator token into (io number, kind, dup-or-path).
+///
+/// `2>`, `>>`, `<`, `2>&`, `<&`, `&>`.  Returns `None` when the token is not a
+/// redirection operator at all.
+fn classify_redirect(tok: &[u8]) -> Option<(i32, RedirectKind, bool)> {
+    if tok == b"&>" {
+        // `&>file` is stdout and stderr together; the stderr half is attached
+        // by the caller once the path is opened.
+        return Some((1, RedirectKind::OutputTruncate, false));
+    }
+
+    let digits = tok.iter().take_while(|b| b.is_ascii_digit()).count();
+    let arrow = tok.get(digits)?;
+    let dup = tok.get(digits + 1) == Some(&b'&');
+    let kind = match arrow {
+        b'<' => RedirectKind::Input,
+        b'>' if tok.get(digits + 1) == Some(&b'>') => RedirectKind::OutputAppend,
+        b'>' => RedirectKind::OutputTruncate,
+        _ => return None,
+    };
+
+    let fd = if digits == 0 {
+        if *arrow == b'<' { 0 } else { 1 }
+    } else {
+        let mut n = 0i32;
+        for &b in &tok[..digits] {
+            n = n.saturating_mul(10).saturating_add((b - b'0') as i32);
+        }
+        n
+    };
+    Some((fd, kind, dup))
+}
+
+/// Parse tokens `[start, end)` — one pipeline of the and-or list — into `out`.
+fn parse_pipeline(
+    tokens: &ParsedTokens,
+    start: usize,
+    end: usize,
+    out: &mut ParsedPipeline,
+) -> Result<(), ()> {
     *out = ParsedPipeline::empty();
-    let argc = tokens.count();
-    if argc == 0 {
+    if start >= end {
         return Err(());
     }
 
     let mut cmd_idx = 0usize;
-    let mut token_idx = 0usize;
+    let mut token_idx = start;
 
-    while token_idx < argc {
+    while token_idx < end {
         let tok = tokens.token(token_idx);
 
         if tok == b"&" {
-            if token_idx + 1 != argc {
+            if token_idx + 1 != end {
                 return Err(());
             }
             out.background = true;
@@ -208,35 +325,59 @@ fn parse_pipeline(tokens: &ParsedTokens, out: &mut ParsedPipeline) -> Result<(),
             continue;
         }
 
-        let mut redirect_kind = None;
-        if tok == b">" {
-            redirect_kind = Some(RedirectKind::OutputTruncate);
-        } else if tok == b">>" {
-            redirect_kind = Some(RedirectKind::OutputAppend);
-        } else if tok == b"<" {
-            redirect_kind = Some(RedirectKind::Input);
-        }
-
-        if let Some(kind) = redirect_kind {
-            if token_idx + 1 >= argc {
+        if let Some((fd, kind, dup)) = classify_redirect(tok) {
+            if token_idx + 1 >= end {
                 return Err(());
             }
-            if out.commands[cmd_idx].redirect_count >= MAX_REDIRECTS {
+            let cmd = &mut out.commands[cmd_idx];
+            if cmd.redirect_count >= MAX_REDIRECTS {
                 return Err(());
             }
-            let target_idx = token_idx + 1;
-            let redir_idx = out.commands[cmd_idx].redirect_count;
-            out.commands[cmd_idx].redirects[redir_idx] = Redirect {
-                kind,
-                target: target_idx,
+            let operand = tokens.token(token_idx + 1);
+            let target = if dup {
+                match parse_dup_operand(operand) {
+                    Some(t) => t,
+                    None => return Err(()),
+                }
+            } else {
+                RedirectTarget::Path(token_idx + 1)
             };
-            out.commands[cmd_idx].redirect_count += 1;
+            cmd.redirects[cmd.redirect_count] = Redirect { kind, fd, target };
+            cmd.redirect_count += 1;
+
+            // `&>path` is shorthand for `>path 2>&1`, so stderr follows stdout
+            // to the same place.
+            if tok == b"&>" {
+                if cmd.redirect_count >= MAX_REDIRECTS {
+                    return Err(());
+                }
+                cmd.redirects[cmd.redirect_count] = Redirect {
+                    kind: RedirectKind::OutputTruncate,
+                    fd: 2,
+                    target: RedirectTarget::Fd(1),
+                };
+                cmd.redirect_count += 1;
+            }
             token_idx += 2;
             continue;
         }
 
         let cmd = &mut out.commands[cmd_idx];
-        if cmd.argc >= SHELL_MAX_TOKENS - 1 {
+
+        // `NAME=VALUE` words before the command name are assignments, not
+        // arguments.  Once a real word has been seen they are ordinary
+        // arguments again, so `env FOO=bar` passes `FOO=bar` through.
+        if cmd.argc == 0 && split_assignment(tok).is_some() {
+            if cmd.assign_count >= SHELL_MAX_ARGS {
+                return Err(());
+            }
+            cmd.assigns[cmd.assign_count] = token_idx;
+            cmd.assign_count += 1;
+            token_idx += 1;
+            continue;
+        }
+
+        if cmd.argc >= SHELL_MAX_ARGS {
             return Err(());
         }
         cmd.argv[cmd.argc] = token_idx;
@@ -244,12 +385,28 @@ fn parse_pipeline(tokens: &ParsedTokens, out: &mut ParsedPipeline) -> Result<(),
         token_idx += 1;
     }
 
-    if out.commands[cmd_idx].argc == 0 {
+    let last = &out.commands[cmd_idx];
+    if last.argc == 0 && last.assign_count == 0 {
         return Err(());
     }
 
     out.command_count = cmd_idx + 1;
     Ok(())
+}
+
+/// The word after a `>&` / `<&`: a descriptor number, or `-` to close.
+fn parse_dup_operand(operand: &[u8]) -> Option<RedirectTarget> {
+    if operand == b"-" {
+        return Some(RedirectTarget::Close);
+    }
+    if operand.is_empty() || !operand.iter().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    let mut n = 0i32;
+    for &b in operand {
+        n = n.saturating_mul(10).saturating_add((b - b'0') as i32);
+    }
+    Some(RedirectTarget::Fd(n))
 }
 
 fn resolve_via_path(name: &[u8], tmp: &mut [u8; 256]) -> bool {
@@ -415,6 +572,43 @@ fn print_background_job_started(job_id: u16, pid: u32) {
     shell_write(b"\n");
 }
 
+/// Build a NUL-terminated `argv` for the exec/spawn ABI boundary.
+///
+/// Returns the owned strings alongside the pointer array: the kernel reads
+/// through those pointers during the syscall, so the backing bytes must outlive
+/// the call.
+fn build_c_argv(cmd: &ParsedCommand, tokens: &ParsedTokens) -> (Vec<Vec<u8>>, Vec<*const u8>) {
+    let owned: Vec<Vec<u8>> = (0..cmd.argc)
+        .map(|i| {
+            let tok = tokens.token(cmd.argv[i]);
+            let mut s = Vec::with_capacity(tok.len() + 1);
+            s.extend_from_slice(tok);
+            s.push(0);
+            s
+        })
+        .collect();
+    let mut ptrs: Vec<*const u8> = owned.iter().map(|s| s.as_ptr()).collect();
+    ptrs.push(ptr::null());
+    (owned, ptrs)
+}
+
+/// Build a NUL-terminated `envp` of `KEY=VALUE` strings from the shell's
+/// environment, so a child can actually observe what `export` set.
+fn build_c_envp() -> (Vec<Vec<u8>>, Vec<*const u8>) {
+    let mut owned: Vec<Vec<u8>> = Vec::new();
+    super::env::for_each(|key, value| {
+        let mut s = Vec::with_capacity(key.len() + value.len() + 2);
+        s.extend_from_slice(key);
+        s.push(b'=');
+        s.extend_from_slice(value);
+        s.push(0);
+        owned.push(s);
+    });
+    let mut ptrs: Vec<*const u8> = owned.iter().map(|s| s.as_ptr()).collect();
+    ptrs.push(ptr::null());
+    (owned, ptrs)
+}
+
 /// Wait for one child to exit and report its status.
 fn wait_for(pid: u32) -> i32 {
     loop {
@@ -454,19 +648,8 @@ fn execute_registry_spawn(
         spec.flags | slopos_abi::task::TASK_FLAG_NEW_PGRP | slopos_abi::task::TASK_FLAG_FOREGROUND
     };
 
-    // Build null-terminated argv copies for the syscall ABI boundary.
-    // Each token is copied into its own stack buffer so the kernel's
-    // copy_bytes_from_user (which reads up to EXEC_MAX_ARG_STRLEN bytes
-    // from the pointer) stays within mapped memory.
-    let mut arg_bufs = [[0u8; super::parser::SHELL_MAX_TOKEN_LENGTH]; SHELL_MAX_TOKENS];
-    let mut argv_ptrs = [ptr::null::<u8>(); SHELL_MAX_TOKENS + 1];
-    for i in 0..cmd.argc {
-        let tok = tokens.token(cmd.argv[i]);
-        let len = tok.len().min(super::parser::SHELL_MAX_TOKEN_LENGTH - 1);
-        arg_bufs[i][..len].copy_from_slice(&tok[..len]);
-        arg_bufs[i][len] = 0;
-        argv_ptrs[i] = arg_bufs[i].as_ptr();
-    }
+    let (argv_owned, argv_ptrs) = build_c_argv(cmd, tokens);
+    let (envp_owned, envp_ptrs) = build_c_envp();
 
     // The child's empty table inherits exactly the shell's own stdin, stdout
     // and stderr.  A foreground command writes straight to the terminal, so
@@ -477,14 +660,17 @@ fn execute_registry_spawn(
         process::clone_fd(1, 1),
         process::clone_fd(2, 2),
     ];
-    let tid = process::spawn_path_with_actions(
+    let tid = process::spawn_path_with_env(
         spec.path.as_bytes(),
         &argv_ptrs[..cmd.argc],
+        &envp_ptrs[..envp_owned.len()],
         spec.priority,
         spawn_flags,
         &actions,
         0,
     );
+    drop(argv_owned);
+    drop(envp_owned);
 
     if tid <= 0 {
         shell_error(b"sh: spawn failed\n");
@@ -518,35 +704,40 @@ fn execute_registry_spawn(
     Some(status)
 }
 
+/// What a redirection resolves to: the descriptor it replaces, and either a
+/// freshly opened file, an existing descriptor to duplicate, or a close.
+enum RedirectSource {
+    Opened(i32),
+    Dup(i32),
+    Close,
+}
+
 fn open_redirect_target(
     redir: Redirect,
     tokens: &ParsedTokens,
     path_buf: &mut [u8; 256],
-) -> Result<(i32, i32), ()> {
-    if normalize_path(tokens.token(redir.target), path_buf) != 0 {
+) -> Result<(i32, RedirectSource), ()> {
+    let path_idx = match redir.target {
+        RedirectTarget::Fd(src) => return Ok((redir.fd, RedirectSource::Dup(src))),
+        RedirectTarget::Close => return Ok((redir.fd, RedirectSource::Close)),
+        RedirectTarget::Path(idx) => idx,
+    };
+
+    if normalize_path(tokens.token(path_idx), path_buf) != 0 {
         return Err(());
     }
+    let path = path_buf.as_ptr() as *const c_char;
 
-    match redir.kind {
-        RedirectKind::Input => {
-            let fd = fs::open_path(path_buf.as_ptr() as *const c_char, O_RDONLY).map_err(|_| ())?;
-            Ok((0, fd.into_raw()))
-        }
-        RedirectKind::OutputTruncate => {
-            let _ = fs::unlink_path(path_buf.as_ptr() as *const c_char);
-            let fd = fs::open_path(path_buf.as_ptr() as *const c_char, O_WRONLY | O_CREAT)
-                .map_err(|_| ())?;
-            Ok((1, fd.into_raw()))
-        }
-        RedirectKind::OutputAppend => {
-            let fd = fs::open_path(
-                path_buf.as_ptr() as *const c_char,
-                O_WRONLY | O_CREAT | O_APPEND,
-            )
-            .map_err(|_| ())?;
-            Ok((1, fd.into_raw()))
-        }
-    }
+    let flags = match redir.kind {
+        RedirectKind::Input => O_RDONLY,
+        // Truncate the existing inode rather than unlinking and recreating it.
+        // Unlinking first destroys the file even when the open then fails, and
+        // it silently breaks every hard link and device node it is pointed at.
+        RedirectKind::OutputTruncate => O_WRONLY | O_CREAT | O_TRUNC,
+        RedirectKind::OutputAppend => O_WRONLY | O_CREAT | O_APPEND,
+    };
+    let fd = fs::open_path(path, flags).map_err(|_| ())?;
+    Ok((redir.fd, RedirectSource::Opened(fd.into_raw())))
 }
 
 fn apply_redirects_for_builtin(
@@ -559,35 +750,44 @@ fn apply_redirects_for_builtin(
     let mut save_count = 0usize;
 
     for redir in &cmd.redirects[..cmd.redirect_count] {
-        let Ok((target_fd, opened_fd)) = open_redirect_target(*redir, tokens, &mut path_buf) else {
+        let Ok((target_fd, source)) = open_redirect_target(*redir, tokens, &mut path_buf) else {
             shell_error(b"sh: cannot redirect\n");
             return false;
         };
 
-        if target_fd == 1 {
+        // A builtin runs in the shell's own process and writes through
+        // `shell_write`, so its stdout is redirected by pointing that at the
+        // opened file rather than by moving fd 1 out from under the shell.
+        if let (1, RedirectSource::Opened(opened_fd)) = (target_fd, &source) {
             if *output_fd >= 0 {
                 let _ = fs::close_fd_raw(*output_fd);
             }
-            *output_fd = opened_fd;
+            *output_fd = *opened_fd;
             continue;
         }
 
         let backup = match fs::dup(target_fd) {
             Ok(fd) => fd.into_raw(),
-            Err(_) => {
-                let _ = fs::close_fd_raw(opened_fd);
-                shell_error(b"sh: cannot redirect\n");
-                return false;
-            }
+            // A descriptor that is not open yet has nothing to restore.
+            Err(_) => -1,
         };
 
-        if fs::dup2(opened_fd, target_fd).is_err() {
-            let _ = fs::close_fd_raw(opened_fd);
-            let _ = fs::close_fd_raw(backup);
+        let applied = match source {
+            RedirectSource::Opened(opened_fd) => {
+                let ok = fs::dup2(opened_fd, target_fd).is_ok();
+                let _ = fs::close_fd_raw(opened_fd);
+                ok
+            }
+            RedirectSource::Dup(src) => fs::dup2(src, target_fd).is_ok(),
+            RedirectSource::Close => fs::close_fd_raw(target_fd).is_ok(),
+        };
+        if !applied {
+            if backup >= 0 {
+                let _ = fs::close_fd_raw(backup);
+            }
             shell_error(b"sh: cannot redirect\n");
             return false;
         }
-        let _ = fs::close_fd_raw(opened_fd);
 
         if save_count < saved.len() {
             saved[save_count] = SavedFd {
@@ -694,6 +894,10 @@ fn run_in_child(
     let _ = process::sigdefault(JOB_CONTROL_DEFAULT_SIGNALS);
     super::interrupt::mark_forked_child();
 
+    // This process runs exactly one command, so a `NAME=VALUE` prefix needs no
+    // undoing — the environment dies with the stage.
+    apply_assignments(cmd, tokens, false);
+
     if stdin_fd >= 0 {
         if fs::dup2(stdin_fd, 0).is_err() {
             let _ = shell_error(b"sh: cannot set up stdin\n");
@@ -717,32 +921,36 @@ fn run_in_child(
         let mut builtin_output_fd = 1;
         let mut path_buf = [0u8; 256];
         for redir in &cmd.redirects[..cmd.redirect_count] {
-            let Ok((target_fd, opened_fd)) = open_redirect_target(*redir, tokens, &mut path_buf)
+            let Ok((target_fd, source)) = open_redirect_target(*redir, tokens, &mut path_buf)
             else {
                 let _ = shell_error(b"sh: cannot redirect\n");
                 sys_core::exit_with_code(1);
             };
-            if target_fd == 1 {
+            if let (1, RedirectSource::Opened(opened_fd)) = (target_fd, &source) {
                 if builtin_output_fd != 1 {
                     let _ = fs::close_fd_raw(builtin_output_fd);
                 }
-                builtin_output_fd = opened_fd;
+                builtin_output_fd = *opened_fd;
                 continue;
             }
-            if fs::dup2(opened_fd, target_fd).is_err() {
+            let applied = match source {
+                RedirectSource::Opened(opened_fd) => {
+                    let ok = fs::dup2(opened_fd, target_fd).is_ok();
+                    let _ = fs::close_fd_raw(opened_fd);
+                    ok
+                }
+                RedirectSource::Dup(src) => fs::dup2(src, target_fd).is_ok(),
+                RedirectSource::Close => fs::close_fd_raw(target_fd).is_ok(),
+            };
+            if !applied {
                 let _ = shell_error(b"sh: cannot redirect\n");
-                let _ = fs::close_fd_raw(opened_fd);
                 sys_core::exit_with_code(1);
             }
-            let _ = fs::close_fd_raw(opened_fd);
         }
 
         shell_set_output_fd(builtin_output_fd);
-        let mut argv_slices: [&[u8]; SHELL_MAX_TOKENS] = [&[]; SHELL_MAX_TOKENS];
-        for i in 0..cmd.argc {
-            argv_slices[i] = tokens.token(cmd.argv[i]);
-        }
-        let code = (entry.func)(cmd.argc as i32, &argv_slices[..cmd.argc]);
+        let argv_slices: Vec<&[u8]> = (0..cmd.argc).map(|i| tokens.token(cmd.argv[i])).collect();
+        let code = (entry.func)(cmd.argc as i32, &argv_slices);
         shell_clear_output_fd();
         if builtin_output_fd != 1 {
             let _ = fs::close_fd_raw(builtin_output_fd);
@@ -752,16 +960,23 @@ fn run_in_child(
 
     let mut path_buf = [0u8; 256];
     for redir in &cmd.redirects[..cmd.redirect_count] {
-        let Ok((target_fd, opened_fd)) = open_redirect_target(*redir, tokens, &mut path_buf) else {
+        let Ok((target_fd, source)) = open_redirect_target(*redir, tokens, &mut path_buf) else {
             let _ = shell_error(b"sh: cannot redirect\n");
             sys_core::exit_with_code(1);
         };
-        if fs::dup2(opened_fd, target_fd).is_err() {
+        let applied = match source {
+            RedirectSource::Opened(opened_fd) => {
+                let ok = fs::dup2(opened_fd, target_fd).is_ok();
+                let _ = fs::close_fd_raw(opened_fd);
+                ok
+            }
+            RedirectSource::Dup(src) => fs::dup2(src, target_fd).is_ok(),
+            RedirectSource::Close => fs::close_fd_raw(target_fd).is_ok(),
+        };
+        if !applied {
             let _ = shell_error(b"sh: cannot redirect\n");
-            let _ = fs::close_fd_raw(opened_fd);
             sys_core::exit_with_code(1);
         }
-        let _ = fs::close_fd_raw(opened_fd);
     }
 
     let name = tokens.token(cmd.argv[0]);
@@ -770,24 +985,15 @@ fn run_in_child(
         sys_core::exit_with_code(STATUS_NOT_FOUND);
     }
 
-    // Build raw-pointer argv for the execve syscall ABI boundary.
-    // We write each token into null-terminated stack buffers so the pointers
-    // remain valid through the syscall.
-    let mut arg_bufs = [[0u8; super::parser::SHELL_MAX_TOKEN_LENGTH]; SHELL_MAX_TOKENS];
-    let mut argv_ptrs = [ptr::null::<u8>(); SHELL_MAX_TOKENS + 1];
-    for i in 0..cmd.argc {
-        let tok = tokens.token(cmd.argv[i]);
-        let len = tok.len().min(super::parser::SHELL_MAX_TOKEN_LENGTH - 1);
-        arg_bufs[i][..len].copy_from_slice(&tok[..len]);
-        arg_bufs[i][len] = 0;
-        argv_ptrs[i] = arg_bufs[i].as_ptr();
-    }
-    argv_ptrs[cmd.argc] = ptr::null();
+    let (argv_owned, argv_ptrs) = build_c_argv(cmd, tokens);
+    let (envp_owned, envp_ptrs) = build_c_envp();
 
     // The path resolved but the image would not run — a different failure from
     // "no such command", and POSIX gives it its own status so a caller can tell
     // a typo from an unexecutable file.
-    let rc = process::execve(path_buf.as_ptr(), argv_ptrs.as_ptr(), ptr::null());
+    let rc = process::execve(path_buf.as_ptr(), argv_ptrs.as_ptr(), envp_ptrs.as_ptr());
+    drop(argv_owned);
+    drop(envp_owned);
     if rc < 0 {
         shell_error_named(name, b"cannot execute");
     }
@@ -809,11 +1015,8 @@ fn execute_single_builtin(cmd: &ParsedCommand, tokens: &ParsedTokens) -> i32 {
         if output_fd >= 0 {
             shell_set_output_fd(output_fd);
         }
-        let mut argv_slices: [&[u8]; SHELL_MAX_TOKENS] = [&[]; SHELL_MAX_TOKENS];
-        for i in 0..cmd.argc {
-            argv_slices[i] = tokens.token(cmd.argv[i]);
-        }
-        let rc = (entry.func)(cmd.argc as i32, &argv_slices[..cmd.argc]);
+        let argv_slices: Vec<&[u8]> = (0..cmd.argc).map(|i| tokens.token(cmd.argv[i])).collect();
+        let rc = (entry.func)(cmd.argc as i32, &argv_slices);
         if output_fd >= 0 {
             shell_clear_output_fd();
         }
@@ -935,25 +1138,104 @@ fn execute_pipeline(pipeline: &ParsedPipeline, tokens: &ParsedTokens) -> i32 {
     status
 }
 
+/// Run one line: an and-or list of pipelines joined by `;`, `&&` and `||`.
+///
+/// The list is walked one pipeline at a time rather than parsed whole, so a
+/// long line costs no more memory than its longest single pipeline.  Joining is
+/// left-associative, as POSIX specifies: `a && b || c` is `(a && b) || c`, and
+/// a skipped pipeline leaves the status alone for the next connector to judge.
 pub fn execute_tokens(tokens: &ParsedTokens) -> i32 {
     super::interrupt::clear();
 
+    let count = tokens.count();
+    if count == 0 {
+        return 0;
+    }
+
+    let mut status = super::last_exit_code();
+    let mut skip = false;
+    let mut idx = 0usize;
+
+    while idx < count {
+        let (end, connector, next) = split_at_connector(tokens, idx);
+        if end == idx {
+            shell_error(b"sh: syntax error\n");
+            return STATUS_SYNTAX_ERROR;
+        }
+
+        if !skip {
+            status = execute_and_or_term(tokens, idx, end);
+            super::set_last_exit_code(status);
+            if super::exit_requested().is_some() {
+                return status;
+            }
+        }
+
+        skip = match connector {
+            Connector::Seq => false,
+            Connector::And => status != 0,
+            Connector::Or => status == 0,
+        };
+        idx = next;
+    }
+
+    status
+}
+
+/// Find where the pipeline starting at `start` ends.
+///
+/// Returns the exclusive end of the pipeline's tokens, the connector that
+/// follows it, and the index the next pipeline starts at.
+fn split_at_connector(tokens: &ParsedTokens, start: usize) -> (usize, Connector, usize) {
+    let count = tokens.count();
+    let mut idx = start;
+    while idx < count {
+        let connector = match tokens.token(idx) {
+            b";" => Connector::Seq,
+            b"&&" => Connector::And,
+            b"||" => Connector::Or,
+            _ => {
+                idx += 1;
+                continue;
+            }
+        };
+        return (idx, connector, idx + 1);
+    }
+    // A trailing pipeline with no connector after it: `;` is the identity.
+    (count, Connector::Seq, count)
+}
+
+fn execute_and_or_term(tokens: &ParsedTokens, start: usize, end: usize) -> i32 {
     let mut pipeline = ParsedPipeline::empty();
-    if parse_pipeline(tokens, &mut pipeline).is_err() {
+    if parse_pipeline(tokens, start, end, &mut pipeline).is_err() {
         shell_error(b"sh: syntax error\n");
         return STATUS_SYNTAX_ERROR;
     }
 
     simplify_pipeline(&mut pipeline, tokens);
 
+    // `NAME=VALUE` with no command sets a shell variable outright, rather than
+    // for the duration of something.
+    if pipeline.command_count == 1 && pipeline.commands[0].argc == 0 {
+        apply_assignments(&pipeline.commands[0], tokens, false);
+        return 0;
+    }
+
     if pipeline.command_count == 1 && !pipeline.background {
         let cmd = &pipeline.commands[0];
+        // A prefix on a command is that command's environment only, so it is
+        // put back once the command has run.
+        let saved = apply_assignments(cmd, tokens, true);
         if is_builtin_command(cmd, tokens) {
-            return execute_single_builtin(cmd, tokens);
-        }
-        if let Some(status) = execute_registry_spawn(cmd, tokens, false) {
+            let status = execute_single_builtin(cmd, tokens);
+            restore_assignments(saved);
             return status;
         }
+        if let Some(status) = execute_registry_spawn(cmd, tokens, false) {
+            restore_assignments(saved);
+            return status;
+        }
+        restore_assignments(saved);
     }
 
     if pipeline.command_count == 1
@@ -965,7 +1247,13 @@ pub fn execute_tokens(tokens: &ParsedTokens) -> i32 {
 
     for cmd in pipeline.commands.iter().take(pipeline.command_count) {
         if !command_resolves(cmd, tokens) {
-            shell_error_named(tokens.token(cmd.argv[0]), b"not found");
+            match command_name_bytes(cmd, tokens) {
+                Some(name) => shell_error_named(name, b"not found"),
+                // A stage with no command word at all — `FOO=bar | cat`.
+                None => {
+                    shell_error(b"sh: syntax error\n");
+                }
+            }
             return STATUS_NOT_FOUND;
         }
     }

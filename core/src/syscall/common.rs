@@ -11,6 +11,7 @@ use core::ffi::{c_char, c_int};
 use slopos_abi::Errno;
 use slopos_ostd::sync::KernelSync;
 
+use slopos_mm::paging_defs::PAGE_SIZE_4KB_USIZE;
 use slopos_mm::user_copy::{copy_bytes_from_user, copy_bytes_to_user};
 use slopos_mm::user_ptr::{UserBytes, UserPtrError};
 
@@ -50,22 +51,37 @@ pub struct SyscallEntry {
 // handful of handler bodies that still want explicit bounded copies).
 // ─────────────────────────────────────────────────────────────────────
 
+/// Copy a NUL-terminated string out of user memory, bounded by `dst`.
+///
+/// Copies a page at a time and stops at the first NUL, so the fault domain is
+/// the string rather than the caller's whole capacity.  Reading the capacity in
+/// one go would reject a perfectly valid short string that merely sits near the
+/// end of its mapping — which every `argv` entry a program builds on its own
+/// stack or heap can.
 pub fn syscall_copy_user_str(dst: &mut [u8], user_src: u64) -> Result<(), UserPtrError> {
     if dst.is_empty() {
         return Err(UserPtrError::Null);
     }
 
     let cap = dst.len().saturating_sub(1);
-    let user_bytes = UserBytes::try_new(user_src, cap)?;
-    copy_bytes_from_user(user_bytes, &mut dst[..cap])?;
-
     dst[cap] = 0;
-    for i in 0..cap {
-        if dst[i] == 0 {
+
+    let mut copied = 0usize;
+    while copied < cap {
+        let addr = user_src
+            .checked_add(copied as u64)
+            .ok_or(UserPtrError::Null)?;
+        let page_remaining = PAGE_SIZE_4KB_USIZE - (addr as usize % PAGE_SIZE_4KB_USIZE);
+        let chunk = page_remaining.min(cap - copied);
+
+        let user_bytes = UserBytes::try_new(addr, chunk)?;
+        copy_bytes_from_user(user_bytes, &mut dst[copied..copied + chunk])?;
+
+        if dst[copied..copied + chunk].contains(&0) {
             return Ok(());
         }
+        copied += chunk;
     }
-    dst[cap] = 0;
     Ok(())
 }
 

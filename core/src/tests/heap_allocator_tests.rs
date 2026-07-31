@@ -13,6 +13,7 @@ pub fn test_heap_allocator_suite() -> TestResult {
     let task_id = match spawn_program_with_attrs(
         HEAP_TEST_BIN,
         None,
+        None,
         TaskPriority::Normal,
         TASK_FLAG_USER_MODE,
         &[],

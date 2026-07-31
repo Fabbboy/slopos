@@ -16,10 +16,6 @@ pub struct ProgramSpec {
     /// instead.
     pub flags: u16,
     pub desc: &'static str,
-    /// If true, the program owns a display surface and should be spawned
-    /// directly via `spawn_path_with_attrs`. Text programs (gui=false) fall
-    /// through to the fork+execve pipeline so stdout is properly captured.
-    pub gui: bool,
 }
 
 const PROGRAM_REGISTRY: &[ProgramSpec] = &[
@@ -29,7 +25,6 @@ const PROGRAM_REGISTRY: &[ProgramSpec] = &[
         priority: TaskPriority::Normal,
         flags: TASK_FLAG_USER_MODE,
         desc: "",
-        gui: false,
     },
     ProgramSpec {
         name: "shell",
@@ -37,7 +32,6 @@ const PROGRAM_REGISTRY: &[ProgramSpec] = &[
         priority: TaskPriority::Normal,
         flags: TASK_FLAG_USER_MODE,
         desc: "",
-        gui: false,
     },
     ProgramSpec {
         name: "compositor",
@@ -45,7 +39,6 @@ const PROGRAM_REGISTRY: &[ProgramSpec] = &[
         priority: TaskPriority::Normal,
         flags: TASK_FLAG_USER_MODE,
         desc: "",
-        gui: true,
     },
     ProgramSpec {
         name: "terminal",
@@ -53,7 +46,6 @@ const PROGRAM_REGISTRY: &[ProgramSpec] = &[
         priority: TaskPriority::Normal,
         flags: TASK_FLAG_USER_MODE,
         desc: "",
-        gui: true,
     },
     ProgramSpec {
         name: "roulette",
@@ -61,7 +53,6 @@ const PROGRAM_REGISTRY: &[ProgramSpec] = &[
         priority: TaskPriority::Normal,
         flags: TASK_FLAG_USER_MODE,
         desc: "Spin the Wheel of Fate",
-        gui: true,
     },
     ProgramSpec {
         name: "file_manager",
@@ -69,7 +60,6 @@ const PROGRAM_REGISTRY: &[ProgramSpec] = &[
         priority: TaskPriority::Normal,
         flags: TASK_FLAG_USER_MODE,
         desc: "Browse filesystem",
-        gui: true,
     },
     ProgramSpec {
         name: "image_viewer",
@@ -77,7 +67,6 @@ const PROGRAM_REGISTRY: &[ProgramSpec] = &[
         priority: TaskPriority::Normal,
         flags: TASK_FLAG_USER_MODE,
         desc: "View PNG images",
-        gui: true,
     },
     ProgramSpec {
         name: "sysmon",
@@ -85,7 +74,6 @@ const PROGRAM_REGISTRY: &[ProgramSpec] = &[
         priority: TaskPriority::Normal,
         flags: TASK_FLAG_USER_MODE,
         desc: "System Monitor",
-        gui: true,
     },
     ProgramSpec {
         name: "nmap",
@@ -93,7 +81,6 @@ const PROGRAM_REGISTRY: &[ProgramSpec] = &[
         priority: TaskPriority::Low,
         flags: TASK_FLAG_USER_MODE,
         desc: "Scan network for hosts",
-        gui: false,
     },
     ProgramSpec {
         name: "ifconfig",
@@ -101,7 +88,6 @@ const PROGRAM_REGISTRY: &[ProgramSpec] = &[
         priority: TaskPriority::Normal,
         flags: TASK_FLAG_USER_MODE,
         desc: "Show network configuration",
-        gui: false,
     },
     ProgramSpec {
         name: "nc",
@@ -109,7 +95,6 @@ const PROGRAM_REGISTRY: &[ProgramSpec] = &[
         priority: TaskPriority::Normal,
         flags: TASK_FLAG_USER_MODE,
         desc: "Network Swiss army knife",
-        gui: false,
     },
     ProgramSpec {
         name: "curl",
@@ -117,7 +102,6 @@ const PROGRAM_REGISTRY: &[ProgramSpec] = &[
         priority: TaskPriority::Normal,
         flags: TASK_FLAG_USER_MODE,
         desc: "Transfer data from URLs",
-        gui: false,
     },
     ProgramSpec {
         name: "ping",
@@ -125,7 +109,6 @@ const PROGRAM_REGISTRY: &[ProgramSpec] = &[
         priority: TaskPriority::Low,
         flags: TASK_FLAG_USER_MODE,
         desc: "Send ICMP ECHO_REQUEST to network hosts",
-        gui: false,
     },
     #[cfg(feature = "testbins")]
     ProgramSpec {
@@ -134,7 +117,6 @@ const PROGRAM_REGISTRY: &[ProgramSpec] = &[
         priority: TaskPriority::Normal,
         flags: TASK_FLAG_USER_MODE,
         desc: "",
-        gui: false,
     },
     #[cfg(feature = "testbins")]
     ProgramSpec {
@@ -143,7 +125,6 @@ const PROGRAM_REGISTRY: &[ProgramSpec] = &[
         priority: TaskPriority::Normal,
         flags: TASK_FLAG_USER_MODE,
         desc: "",
-        gui: false,
     },
     #[cfg(feature = "testbins")]
     ProgramSpec {
@@ -152,7 +133,6 @@ const PROGRAM_REGISTRY: &[ProgramSpec] = &[
         priority: TaskPriority::Normal,
         flags: TASK_FLAG_USER_MODE,
         desc: "",
-        gui: false,
     },
 ];
 

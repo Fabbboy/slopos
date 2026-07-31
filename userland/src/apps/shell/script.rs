@@ -11,6 +11,8 @@
 
 use slopos_shell_core::{ByteSource, Line, ScriptReader, SourceError};
 
+use slopos_abi::fs::O_RDONLY;
+
 use crate::syscall::{SyscallError, fs};
 
 use super::buffers::ParsedTokens;
@@ -42,6 +44,53 @@ impl ByteSource for FdSource {
             Ok(n) => Ok(n),
             Err(SyscallError::EINTR) => Err(SourceError::Interrupted),
             Err(_) => Err(SourceError::Fatal),
+        }
+    }
+}
+
+/// A [`ByteSource`] over bytes already in memory, for `sh -c STRING`.
+pub struct SliceSource<'a> {
+    data: &'a [u8],
+    pos: usize,
+}
+
+impl<'a> SliceSource<'a> {
+    pub const fn new(data: &'a [u8]) -> Self {
+        Self { data, pos: 0 }
+    }
+}
+
+impl ByteSource for SliceSource<'_> {
+    fn read(&mut self, buf: &mut [u8]) -> Result<usize, SourceError> {
+        if self.pos >= self.data.len() || buf.is_empty() {
+            return Ok(0);
+        }
+        buf[0] = self.data[self.pos];
+        self.pos += 1;
+        Ok(1)
+    }
+}
+
+/// `sh -c STRING`.
+pub fn run_command_string(text: &[u8]) -> i32 {
+    run_script(&mut SliceSource::new(text))
+}
+
+/// `sh FILE` — run a script file.
+pub fn run_script_file(path: &[u8]) -> i32 {
+    let mut path_z = Vec::with_capacity(path.len() + 1);
+    path_z.extend_from_slice(path);
+    path_z.push(0);
+
+    match fs::open_path(path_z.as_ptr() as *const core::ffi::c_char, O_RDONLY) {
+        Ok(file) => {
+            let status = run_script(&mut FdSource::new(file.raw()));
+            drop(file);
+            status
+        }
+        Err(_) => {
+            shell_error_named(path, b"cannot open");
+            super::exec::STATUS_CANNOT_EXECUTE
         }
     }
 }

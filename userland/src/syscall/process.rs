@@ -65,6 +65,21 @@ pub fn spawn_path_with_actions(
     actions: &[SpawnFdAction],
     sigdefault_mask: SigSet,
 ) -> i32 {
+    spawn_path_with_env(path, argv, &[], priority, flags, actions, sigdefault_mask)
+}
+
+/// As [`spawn_path_with_actions`], but also handing the child an environment.
+#[inline(always)]
+#[allow(clippy::too_many_arguments)]
+pub fn spawn_path_with_env(
+    path: &[u8],
+    argv: &[*const u8],
+    envp: &[*const u8],
+    priority: TaskPriority,
+    flags: u16,
+    actions: &[SpawnFdAction],
+    sigdefault_mask: SigSet,
+) -> i32 {
     let attrs = SpawnAttrs {
         priority: priority.as_u8(),
         _pad: [0; 3],
@@ -73,6 +88,12 @@ pub fn spawn_path_with_actions(
         actions_ptr: actions.as_ptr() as u64,
         actions_len: actions.len() as u64,
         sigdefault_mask,
+        envp_ptr: if envp.is_empty() {
+            0
+        } else {
+            envp.as_ptr() as u64
+        },
+        envp_len: envp.len() as u64,
     };
     unsafe {
         syscall5(

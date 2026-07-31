@@ -90,6 +90,7 @@ pub fn launch_init() -> Result<u32, ExecError> {
     spawn_program_with_attrs(
         INIT_PATH,
         None,
+        None,
         TaskPriority::Normal,
         TASK_FLAG_USER_MODE | TASK_FLAG_SYSTEM,
         &[],
@@ -231,9 +232,11 @@ fn resolve_inherited_job_control(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn spawn_program_with_attrs(
     path: &[u8],
     argv: Option<&[&[u8]]>,
+    envp: Option<&[&[u8]]>,
     mut priority: TaskPriority,
     mut flags: u16,
     actions: &[FdAction],
@@ -299,7 +302,7 @@ pub fn spawn_program_with_attrs(
             process_id,
             normalized_path,
             argv,
-            None,
+            envp,
             &mut entry,
             &mut stack_ptr,
             &mut tls_tp,

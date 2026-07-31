@@ -253,6 +253,29 @@ define_syscall!(syscall_spawn_path
         None => None,
     };
 
+    // The environment the child sees, so `export` in a shell is observable by
+    // what it launches.  Same shape as `argv`, and bounded the same way.
+    let envp_storage = if attrs.envp_ptr != 0 && attrs.envp_len > 0 {
+        let envp_ptrs = read_user_ptr_array_count(
+            attrs.envp_ptr,
+            attrs.envp_len as usize,
+            exec::EXEC_MAX_ENVS,
+        )
+        .map_err(|_| Errno::EINVAL)?;
+        Some(read_user_cstr_list(envp_ptrs.as_slice()).map_err(|_| Errno::EFAULT)?)
+    } else {
+        None
+    };
+
+    let envp_refs = match envp_storage
+        .as_ref()
+        .map(|values| KVec::<&[u8]>::from_iter_fallible(values.iter().map(|v| v.as_slice())))
+    {
+        Some(Ok(refs)) => Some(refs),
+        Some(Err(_)) => return Err(Errno::ENOMEM),
+        None => None,
+    };
+
     let actions = read_user_spawn_actions(&attrs)?;
 
     let parent_pid = ctx.process_id();
@@ -260,6 +283,7 @@ define_syscall!(syscall_spawn_path
     match exec::spawn_program_with_attrs(
         &path_buf[..copied_len],
         argv_refs.as_deref(),
+        envp_refs.as_deref(),
         priority,
         flags,
         actions.as_slice(),

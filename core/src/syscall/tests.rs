@@ -3056,6 +3056,8 @@ pub fn test_spawn_path_rejects_bad_attrs() -> TestResult {
         actions_ptr: 0,
         actions_len: 0,
         sigdefault_mask: 0,
+        envp_ptr: 0,
+        envp_len: 0,
     };
     let attrs_addr = user_page + 512;
     assert_test!(
@@ -3151,6 +3153,8 @@ pub fn test_spawn_path_rejects_privileged_flags() -> TestResult {
             actions_ptr: 0,
             actions_len: 0,
             sigdefault_mask: 0,
+            envp_ptr: 0,
+            envp_len: 0,
         };
         if !user_copy_out(pid, attrs_addr, &attrs) {
             return NO_CONTEXT;

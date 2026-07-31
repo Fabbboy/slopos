@@ -205,6 +205,9 @@ struct EscParser {
     in_paste: bool,
     /// Accumulated literal paste bytes.
     paste_buf: Vec<u8>,
+    /// Last paste byte was `\r`, so a following `\n` is the other half of one
+    /// CRLF terminator rather than a second line break.
+    paste_last_cr: bool,
     /// In-progress UTF-8 multi-byte sequence (lead byte seen).
     utf8: [u8; 4],
     utf8_len: usize,
@@ -218,6 +221,7 @@ impl EscParser {
             pending: Vec::new(),
             in_paste: false,
             paste_buf: Vec::new(),
+            paste_last_cr: false,
             utf8: [0; 4],
             utf8_len: 0,
             utf8_need: 0,
@@ -329,9 +333,18 @@ impl EscParser {
 
     fn push_paste_literal(&mut self, b: u8) {
         // Tab, printable ASCII, and UTF-8 bytes (≥ 0x80) are literal paste
-        // content; C0 controls and DEL are stripped.
-        if b == b'\t' || (0x20..=0x7e).contains(&b) || b >= 0x80 {
-            self.paste_buf.push(b);
+        // content; C0 controls and DEL are stripped — except the line
+        // terminators, which carry the structure of a pasted script.  Dropping
+        // those silently glued two pasted lines into one wrong command.
+        let was_cr = core::mem::replace(&mut self.paste_last_cr, b == b'\r');
+        match b {
+            b'\r' => self.paste_buf.push(b'\n'),
+            // The `\n` half of a CRLF pair; its `\r` already ended the line.
+            b'\n' if was_cr => {}
+            b'\n' => self.paste_buf.push(b'\n'),
+            b'\t' | 0x20..=0x7e => self.paste_buf.push(b),
+            _ if b >= 0x80 => self.paste_buf.push(b),
+            _ => {}
         }
     }
 
@@ -487,7 +500,21 @@ async fn input_loop(
 
             let c = match decoded {
                 Decoded::Paste(text) => {
-                    overflowed |= !insert_text(&text, text.len(), &mut len, &mut cursor_pos);
+                    // A pasted line break ends a command, exactly as typing one
+                    // would.  Split at the first, insert what precedes it, and
+                    // put the remainder back at the head of the queue so the
+                    // next prompt continues where this one left off.
+                    if let Some(nl) = text.iter().position(|&b| b == b'\n') {
+                        let rest = text[nl + 1..].to_vec();
+                        if !rest.is_empty() {
+                            queue.push_front(Decoded::Paste(rest));
+                        }
+                        queue.push_front(Decoded::Key(b'\n'));
+                        let head = &text[..nl];
+                        overflowed |= !insert_text(head, head.len(), &mut len, &mut cursor_pos);
+                    } else {
+                        overflowed |= !insert_text(&text, text.len(), &mut len, &mut cursor_pos);
+                    }
                     redraw(prompt, len, cursor_pos, cols, &mut cur_row);
                     continue;
                 }

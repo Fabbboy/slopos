@@ -1,6 +1,7 @@
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU32, Ordering};
 
+pub mod args;
 mod banner;
 pub mod buffers;
 pub mod builtins;
@@ -257,31 +258,45 @@ pub struct ShellState {
 }
 
 /// Entry point.  Returns the shell's exit status.
-pub fn shell_user_main() -> i32 {
+pub fn shell_user_main(argv: &[&str]) -> i32 {
+    let invocation = match args::parse(argv) {
+        Ok(inv) => inv,
+        Err(args::UsageError(msg)) => {
+            display::shell_error_named(b"usage", msg.as_bytes());
+            return exec::STATUS_SYNTAX_ERROR;
+        }
+    };
+
     // POSIX's interactivity rule, as bash states it: stdin decides whether
     // there is a user typing, stderr decides whether there is anywhere to
     // complain to.  stdout is deliberately not consulted, so `shell > log`
-    // typed at a terminal still prompts — exactly as `bash | cat` does.
-    INTERACTIVE.store(
-        crate::syscall::fs::isatty(0) && crate::syscall::fs::isatty(2),
-        Ordering::Relaxed,
-    );
+    // typed at a terminal still prompts — exactly as `bash | cat` does.  A
+    // shell handed a script has a source that is not the user either way.
+    let interactive = invocation.force_interactive
+        || (matches!(invocation.source, args::Source::Stdin)
+            && crate::syscall::fs::isatty(0)
+            && crate::syscall::fs::isatty(2));
+    INTERACTIVE.store(interactive, Ordering::Relaxed);
 
     cwd_set(b"/");
     env::initialize_defaults();
     SHELL_PID.store(std::process::id(), Ordering::Relaxed);
     exec::initialize_job_control();
 
-    if is_interactive() {
+    if interactive {
         // Long-running builtins poll the recorded flag as their cancellation
         // point.  A non-interactive shell leaves SIGINT at SIG_DFL instead, so
         // Ctrl+C on `yes … | shell` kills it rather than being swallowed by a
         // handler nothing in the script loop ever consults.
         interrupt::install();
-        shell_interactive_main()
-    } else {
-        display::set_plain_output(true);
-        script::run_script(&mut script::FdSource::new(0))
+        return shell_interactive_main();
+    }
+
+    display::set_plain_output(true);
+    match invocation.source {
+        args::Source::CommandString(text) => script::run_command_string(&text),
+        args::Source::File(path) => script::run_script_file(&path),
+        args::Source::Stdin => script::run_script(&mut script::FdSource::new(0)),
     }
 }
 

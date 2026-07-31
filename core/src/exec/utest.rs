@@ -111,6 +111,7 @@ fn dispatch(bin: &str, argv: Option<&[&[u8]]>) -> TestResult {
     let pid = match spawn_program_with_attrs(
         bin.as_bytes(),
         argv,
+        None,
         TaskPriority::Normal,
         TASK_FLAG_USER_MODE | TASK_FLAG_SYSTEM,
         &stdio,

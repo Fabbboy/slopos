@@ -4,8 +4,6 @@ use std::sync::Mutex;
 
 use crate::syscall::UserFsEntry;
 
-use super::parser::{SHELL_MAX_TOKEN_LENGTH, SHELL_MAX_TOKENS};
-
 pub const SHELL_PATH_BUF: usize = 128;
 pub const EXPAND_BUF_SIZE: usize = 512;
 
@@ -17,56 +15,46 @@ static PATH_BUF: Mutex<[u8; SHELL_PATH_BUF]> = Mutex::new([0; SHELL_PATH_BUF]);
 
 static LIST_ENTRIES: Mutex<[UserFsEntry; 32]> = Mutex::new([UserFsEntry::new(); 32]);
 
-/// Parsed token storage: owns all token data as inline byte arrays.
+/// Parsed token storage.
+///
+/// One byte arena plus a span per token, so neither the number of words on a
+/// line nor the length of any one of them is capped.  Both used to be, and both
+/// truncated silently: a path longer than the slot was cut short and then acted
+/// on, which with `rm` or `>` means operating on a different file than the one
+/// that was typed.
 pub struct ParsedTokens {
-    data: [[u8; SHELL_MAX_TOKEN_LENGTH]; SHELL_MAX_TOKENS],
-    count: usize,
+    bytes: Vec<u8>,
+    spans: Vec<(usize, usize)>,
 }
 
 impl ParsedTokens {
     pub const fn new() -> Self {
         Self {
-            data: [[0; SHELL_MAX_TOKEN_LENGTH]; SHELL_MAX_TOKENS],
-            count: 0,
+            bytes: Vec::new(),
+            spans: Vec::new(),
         }
     }
 
-    /// Get a token as a byte slice (up to the null terminator).
     pub fn token(&self, idx: usize) -> &[u8] {
-        let slot = &self.data[idx];
-        let len = slot.iter().position(|&b| b == 0).unwrap_or(slot.len());
-        &slot[..len]
+        let (start, end) = self.spans[idx];
+        &self.bytes[start..end]
     }
 
-    /// Get a mutable reference to the raw slot at `idx`.
-    pub fn slot_mut(&mut self, idx: usize) -> &mut [u8; SHELL_MAX_TOKEN_LENGTH] {
-        &mut self.data[idx]
-    }
-
-    /// Write a token into the next slot. Returns the index written.
+    /// Append a token. Returns its index.
     pub fn push_token(&mut self, content: &[u8]) -> usize {
-        let idx = self.count;
-        let len = content.len().min(SHELL_MAX_TOKEN_LENGTH - 1);
-        self.data[idx][..len].copy_from_slice(&content[..len]);
-        self.data[idx][len] = 0;
-        self.count += 1;
-        idx
-    }
-
-    /// Increment count after manually writing into a slot.
-    pub fn advance(&mut self) {
-        self.count += 1;
+        let start = self.bytes.len();
+        self.bytes.extend_from_slice(content);
+        self.spans.push((start, self.bytes.len()));
+        self.spans.len() - 1
     }
 
     pub fn count(&self) -> usize {
-        self.count
+        self.spans.len()
     }
 
     pub fn clear(&mut self) {
-        self.count = 0;
-        for slot in &mut self.data {
-            slot[0] = 0;
-        }
+        self.bytes.clear();
+        self.spans.clear();
     }
 }
 

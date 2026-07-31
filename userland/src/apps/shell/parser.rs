@@ -2,8 +2,9 @@
 
 use super::buffers;
 
-pub const SHELL_MAX_TOKENS: usize = 16;
-pub const SHELL_MAX_TOKEN_LENGTH: usize = 64;
+/// Words one command may take.  The token arena itself is unbounded; this only
+/// sizes the fixed `argv` index array each parsed command carries.
+pub const SHELL_MAX_ARGS: usize = 64;
 
 #[inline(always)]
 pub fn is_space(b: u8) -> bool {
@@ -226,6 +227,24 @@ pub fn expand_variables(input: &[u8], input_len: usize, output: &mut [u8]) -> us
                 i += 2;
                 continue;
             }
+            if next == b'#' {
+                let val = super::args::positional_count() as i32;
+                out += format_int_into(&mut output[out..], val);
+                i += 2;
+                continue;
+            }
+            // `$0` is the shell's own name and `$1`..`$9` its operands.  They
+            // are not environment variables, so they are resolved before the
+            // name lookup below rather than through it.
+            if next.is_ascii_digit() {
+                let idx = (next - b'0') as usize;
+                if let Some(value) = super::args::positional(idx) {
+                    let len = value.len();
+                    emit_slice(output, &mut out, value.as_slice(), len);
+                }
+                i += 2;
+                continue;
+            }
             if next == b'{' {
                 i += 2;
                 let var_start = i;
@@ -241,7 +260,7 @@ pub fn expand_variables(input: &[u8], input_len: usize, output: &mut [u8]) -> us
                 }
                 continue;
             }
-            if is_var_char(next) && next != b'0' || next == b'_' || next.is_ascii_alphabetic() {
+            if is_var_char(next) {
                 i += 1;
                 let var_start = i;
                 while i < input_len && is_var_char(input[i]) {
@@ -266,18 +285,39 @@ pub fn expand_variables(input: &[u8], input_len: usize, output: &mut [u8]) -> us
 }
 
 fn is_operator(b: u8) -> bool {
-    b == b'|' || b == b'<' || b == b'>' || b == b'&'
+    b == b'|' || b == b'<' || b == b'>' || b == b'&' || b == b';'
+}
+
+/// Length of the redirection operator at the head of `s`, if there is one.
+///
+/// POSIX's IO_NUMBER rule: leading digits count as the redirected descriptor
+/// only when they touch the `<` or `>`.  So `2>err` redirects fd 2, while
+/// `echo 2 > out` passes `2` as an argument.
+fn scan_redirect(s: &[u8]) -> Option<usize> {
+    let mut i = 0usize;
+    while i < s.len() && s[i].is_ascii_digit() {
+        i += 1;
+    }
+    let arrow = *s.get(i)?;
+    if arrow != b'<' && arrow != b'>' {
+        return None;
+    }
+    Some(match s.get(i + 1) {
+        // `>>` appends; `>&`/`<&` name another descriptor instead of a path.
+        Some(b'>') if arrow == b'>' => i + 2,
+        Some(b'&') => i + 2,
+        _ => i + 1,
+    })
 }
 
 pub fn shell_parse_line(line: &[u8], tokens: &mut buffers::ParsedTokens) -> i32 {
     if line.is_empty() {
         return 0;
     }
-    let max_tokens = SHELL_MAX_TOKENS;
-    let mut count = 0usize;
     let mut cursor = 0usize;
+    let mut tok: Vec<u8> = Vec::new();
 
-    while cursor < line.len() && count < max_tokens {
+    while cursor < line.len() {
         while cursor < line.len() && is_space(line[cursor]) {
             cursor += 1;
         }
@@ -292,59 +332,56 @@ pub fn shell_parse_line(line: &[u8], tokens: &mut buffers::ParsedTokens) -> i32 
             break;
         }
 
-        if line[cursor] == b'|' || line[cursor] == b'<' || line[cursor] == b'&' {
-            let ch = line[cursor];
-            cursor += 1;
-            let slot = tokens.slot_mut(count);
-            slot[0] = ch;
-            slot[1] = 0;
-            tokens.advance();
-            count += 1;
-            continue;
-        }
-        if line[cursor] == b'>' {
-            cursor += 1;
-            let is_append = cursor < line.len() && line[cursor] == b'>';
-            if is_append {
-                cursor += 1;
-            }
-            let slot = tokens.slot_mut(count);
-            slot[0] = b'>';
-            if is_append {
-                slot[1] = b'>';
-                slot[2] = 0;
-            } else {
-                slot[1] = 0;
-            }
-            tokens.advance();
-            count += 1;
+        // Control operators, longest match first so `&&` is never read as two
+        // background operators and `||` never as two pipes.
+        let rest = &line[cursor..];
+        let control: Option<usize> = match (rest[0], rest.get(1)) {
+            (b'&', Some(b'&')) | (b'|', Some(b'|')) => Some(2),
+            (b'&', Some(b'>')) => None, // a redirection, handled below
+            (b';' | b'|' | b'&', _) => Some(1),
+            _ => None,
+        };
+        if let Some(n) = control {
+            tokens.push_token(&rest[..n]);
+            cursor += n;
             continue;
         }
 
-        let mut tok = [0u8; SHELL_MAX_TOKEN_LENGTH];
-        let mut tok_len = 0usize;
+        // Redirections, including `&>` and any IO number.
+        let redirect = if rest[0] == b'&' && rest.get(1) == Some(&b'>') {
+            Some(2)
+        } else {
+            scan_redirect(rest)
+        };
+        if let Some(n) = redirect {
+            tokens.push_token(&rest[..n]);
+            cursor += n;
+            continue;
+        }
+
+        tok.clear();
         let mut in_single = false;
         let mut in_double = false;
+        let mut quoted = false;
 
         while cursor < line.len() && line[cursor] != 0 {
             let c = line[cursor];
 
             if c == b'\'' && !in_double {
                 in_single = !in_single;
+                quoted = true;
                 cursor += 1;
                 continue;
             }
             if c == b'"' && !in_single {
                 in_double = !in_double;
+                quoted = true;
                 cursor += 1;
                 continue;
             }
 
             if in_single || in_double {
-                if tok_len < SHELL_MAX_TOKEN_LENGTH - 1 {
-                    tok[tok_len] = c;
-                    tok_len += 1;
-                }
+                tok.push(c);
                 cursor += 1;
                 continue;
             }
@@ -355,29 +392,21 @@ pub fn shell_parse_line(line: &[u8], tokens: &mut buffers::ParsedTokens) -> i32 
 
             if c == b'\\' && cursor + 1 < line.len() {
                 cursor += 1;
-                if tok_len < SHELL_MAX_TOKEN_LENGTH - 1 {
-                    tok[tok_len] = line[cursor];
-                    tok_len += 1;
-                }
+                tok.push(line[cursor]);
+                quoted = true;
                 cursor += 1;
                 continue;
             }
 
-            if tok_len < SHELL_MAX_TOKEN_LENGTH - 1 {
-                tok[tok_len] = c;
-                tok_len += 1;
-            }
+            tok.push(c);
             cursor += 1;
         }
 
-        if tok_len > 0 {
-            let slot = tokens.slot_mut(count);
-            slot[..tok_len].copy_from_slice(&tok[..tok_len]);
-            slot[tok_len] = 0;
-            tokens.advance();
-            count += 1;
+        // An explicitly quoted empty word is a real, empty argument.
+        if !tok.is_empty() || quoted {
+            tokens.push_token(&tok);
         }
     }
 
-    count as i32
+    tokens.count() as i32
 }

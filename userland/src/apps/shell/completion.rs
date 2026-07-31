@@ -180,8 +180,9 @@ fn complete_command(prefix: &[u8], prefix_len: usize, result: &mut CompletionRes
         }
 
         if common_len > prefix_len {
-            let remaining = common_len - prefix_len;
-            result.insertion[..remaining].copy_from_slice(&first_name[prefix_len..common_len]);
+            let remaining = (common_len - prefix_len).min(result.insertion.len());
+            let end = prefix_len + remaining;
+            result.insertion[..remaining].copy_from_slice(&first_name[prefix_len..end]);
             result.insertion_len = remaining;
         }
 
@@ -344,8 +345,12 @@ fn complete_path(
         }
 
         if common_len > file_prefix_len {
-            let remaining = common_len - file_prefix_len;
-            result.insertion[..remaining].copy_from_slice(&first.name[file_prefix_len..common_len]);
+            // `remaining` is derived from a filename, which the filesystem lets
+            // run far past this buffer.  Bounded like every sibling branch, or
+            // two long names sharing a prefix panic the shell on Tab.
+            let remaining = (common_len - file_prefix_len).min(result.insertion.len());
+            let end = file_prefix_len + remaining;
+            result.insertion[..remaining].copy_from_slice(&first.name[file_prefix_len..end]);
             result.insertion_len = remaining;
         }
 
