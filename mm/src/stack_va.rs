@@ -33,8 +33,9 @@
 //!
 //! The VA allocator itself is 100% safe Rust: it manipulates bitmap
 //! words and slot indices and never dereferences a stack pointer. The
-//! page-table sentinel install touches `mm::paging::map_page_4kb`,
-//! which is a safe wrapper. The per-CPU cache delegates to OSTD's
+//! page-table sentinel install touches
+//! `mm::kernel_mappings::kernel_map_4kb`, which is a safe wrapper over
+//! the kernel master's cursor. The per-CPU cache delegates to OSTD's
 //! `CpuLocal::get_pinned_mut`, which is itself a safe surface gated by
 //! `PreemptGuard` CPU pinning.
 
@@ -46,8 +47,8 @@ use slopos_arch::pcr::MAX_CPUS;
 use slopos_ostd::sync::cpu_local::{CacheAligned, CpuLocal};
 use slopos_ostd::sync::{LOCK_LEVEL_ALLOCATOR, PreemptGuard, SpinLock};
 
+use crate::kernel_mappings::kernel_map_4kb;
 use crate::page_alloc::alloc_kernel_page;
-use crate::paging::map_page_4kb;
 use crate::paging_defs::PAGE_SIZE_2MB;
 use crate::paging_defs::PageFlags;
 use crate::stack_region::StackRegion;
@@ -666,7 +667,7 @@ fn install_pt_sentinels<R: StackRegion, const WORDS: usize>(
             );
         }
         let va = VirtAddr::new(R::VA_BASE + sentinel_slot as u64 * R::STRIDE);
-        if map_page_4kb(va, pa, flags) != 0 {
+        if kernel_map_4kb(va, pa, flags) != 0 {
             panic!(
                 "stack_va::{}::init: failed to map sentinel at {:#x}",
                 R::NAME,

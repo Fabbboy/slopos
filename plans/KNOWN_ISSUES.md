@@ -2,43 +2,6 @@
 
 Last updated: 2026-07-30
 
-## Two writers mutate the kernel master PML4 with incompatible synchronisation
-
-**Status**: Open
-**Severity**: Low (no production instance of the race; the proof's stated premise
-is what is wrong)
-**Component**: `mm/src/paging/tables.rs`, `slopos-ostd/src/mm/vm_space.rs`,
-`verification/proofs/vm_space_cursor.rs`
-
-The kernel master PML4 (from `read_cr3()`) is wrapped as a `VmSpace`
-(`boot/src/boot_memory.rs:87`) and *also* recorded as
-`KERNEL_PML4_PHYS: AtomicU64` (`mm/src/paging/tables.rs:40,447`). The latter has a
-complete second walker with its own `PageTableLevel`, `PageTableEntry`, `PageFlags`
-and huge-page split, writing PTEs with `Ordering::Relaxed`
-(`page_table_defs.rs:245-259`).
-
-`verification/proofs/vm_space_cursor.rs:27-46` states its whole-system premise as:
-
-> SlopOS uses the **Rust borrow checker** — `CursorMut<'a>` holds `&'a mut VmSpace`,
-> so at most one mutator exists per address space at any time, statically, with no
-> SMT obligation.
-
-For the kernel half that premise does not hold: `sched/src/task_stack.rs:149,208`
-calls the raw `map_page_4kb`/`unmap_page` on every task create and exit,
-concurrently on any CPU.
-
-No production race exists today — the only live kernel-half `CursorMut` is
-`mark_kernel_global`, which runs at boot priority 55 on the BSP before SMP
-bring-up and before any task exists, and the runtime raw writers only store leaf
-PTEs into sentinel-preallocated tables. The defect is that a machine-checked proof
-states a premise the tree does not satisfy, which is how a future change silently
-invalidates the proof.
-
-Fix: route `sched::task_stack` through OSTD's `KERNEL_VM_SPACE` cursor —
-`mm/src/kernel_mappings.rs::kernel_map_4kb` already exists for this and is dead
-code — then delete the mutating half of `mm/src/paging/tables.rs` with its
-duplicate walker. Until that lands, amend the proof header to scope its exclusivity
-claim to user address spaces.
 
 ---
 

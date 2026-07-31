@@ -11,7 +11,7 @@
 //! its HHDM alias, so mapping both keeps `ResetSystem` reachable either way.
 
 use slopos_abi::addr::{PhysAddr, VirtAddr};
-use slopos_mm::paging::map_page_4kb;
+use slopos_mm::kernel_mappings::{kernel_is_mapped, kernel_map_io_4kb};
 use slopos_mm::paging_defs::{PAGE_SIZE_4KB, PageFlags};
 use slopos_ostd::klog_info;
 use slopos_ostd::util::packed_view::read_packed;
@@ -37,6 +37,21 @@ const EFI_MEMORY_MAPPED_IO_PORT_SPACE: u32 = 12;
 /// most; this bounds a pathological / corrupt descriptor without aborting
 /// the whole map. Truncation is logged rather than silently swallowed.
 const MAX_PAGES_PER_DESC: u64 = 0x10000; // 256 MiB
+
+/// Install one alias of a runtime-services page, unless the address
+/// already resolves.
+///
+/// Firmware memory is not allocator memory — the buddy has never owned
+/// these pages and must never be handed them — so the mapping owns no
+/// frame reference. A VA that already translates is left alone: the
+/// cursor refuses to overwrite a present leaf, and both aliases of a
+/// region the HHDM already covers are exactly that case.
+fn map_alias_if_absent(virt: VirtAddr, phys: PhysAddr, flags: u64) {
+    if kernel_is_mapped(virt) {
+        return;
+    }
+    let _ = kernel_map_io_4kb(virt, phys, flags);
+}
 
 /// Map every UEFI runtime region into the kernel page table (identity +
 /// HHDM aliases). Runs after paging/HHDM are up and while the EFI memory
@@ -95,9 +110,9 @@ pub fn map_runtime_regions(hhdm_offset: u64) {
             else {
                 break;
             };
-            let _ = map_page_4kb(VirtAddr::new(phys), PhysAddr::new(phys), flags);
+            map_alias_if_absent(VirtAddr::new(phys), PhysAddr::new(phys), flags);
             if let Some(hhdm_virt) = phys.checked_add(hhdm_offset) {
-                let _ = map_page_4kb(VirtAddr::new(hhdm_virt), PhysAddr::new(phys), flags);
+                map_alias_if_absent(VirtAddr::new(hhdm_virt), PhysAddr::new(phys), flags);
             }
             mapped_pages += 1;
         }

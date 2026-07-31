@@ -778,9 +778,9 @@ pub fn process_vm_with_vm_space<R>(
 
 /// Like [`process_vm_with_vm_space`] but also resolves the
 /// covering [`VmaRegion`] for `fault_addr` under the same lock — so
-/// the page-fault handlers can both dual-write and read the region
-/// without dropping and re-acquiring the per-process lock (which
-/// would deadlock recursive callers like the demand-fault path).
+/// the page-fault handlers can map and read the region without
+/// dropping and re-acquiring the per-process lock (which would
+/// deadlock recursive callers like the demand-fault path).
 pub fn process_vm_with_vm_space_and_region<R>(
     process_id: u32,
     fault_addr: u64,
@@ -854,15 +854,6 @@ pub fn process_vm_find_pid_by_cr3(cr3: u64) -> u32 {
     }
 
     INVALID_PROCESS_ID
-}
-
-pub fn process_vm_sync_kernel_mappings(process_id: u32) {
-    // Kernel-half resync now happens automatically inside
-    // `VmSpace::activate` via OSTD's `resync_kernel_half_if_stale`. The
-    // legacy `paging_sync_kernel_mappings` walk is gone; this entry
-    // point stays as a no-op so older callers keep compiling until
-    // they're cleaned up.
-    let _ = process_id;
 }
 
 /// Insert a VMA into the process address space.

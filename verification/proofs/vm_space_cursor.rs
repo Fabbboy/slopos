@@ -23,18 +23,32 @@
 // verified concurrent paging; `../notes/cortenmm.md` records the mapping.
 // CortenMM's transactional `AddrSpace::lock(r) -> RCursor` is exactly
 // SlopOS's `VmSpace::cursor_mut(range) -> CursorMut`. The one deliberate
-// divergence is concurrency control: where CortenMM uses per-PT-page locks +
-// an RCU monitor and proves fine-grained mutual exclusion (its P1), SlopOS
-// uses the **Rust borrow checker** — `CursorMut<'a>` holds `&'a mut VmSpace`,
-// so at most one mutator exists per address space at any time, statically,
-// with no SMT obligation. This is the *coarse lock-per-VmSpace* model — a
-// deliberate choice over CortenMM's fine-grained per-PT-page locking. It is
-// strictly more conservative than CortenMM's range-disjoint parallelism (it
-// serializes even disjoint ranges on one space), so it forbids strictly more
-// concurrency: a scalability gap, not a soundness one. What remains to prove
-// is therefore
-// CortenMM's P2 — page-table well-formedness and the functional correctness
-// of map/unmap under the serialized op stream the exclusive borrow produces.
+// divergence is concurrency control, and it has two tiers.
+//
+//   Tier 1 — one mutator per `VmSpace` *object*, statically. `CursorMut<'a>`
+//   holds `&'a mut VmSpace`, so the borrow checker admits at most one mutating
+//   cursor per object at a time, with no SMT obligation. This replaces
+//   CortenMM's per-PT-page locks + RCU monitor and its P1 mutual-exclusion
+//   proof.
+//
+//   Tier 2 — one `&mut` per *physical* page table, dynamically. Tier 1 alone
+//   is not the whole-system guarantee: it says nothing about a second walker
+//   over the same physical PML4 reached through some other path, and that gap
+//   is exactly where the kernel master bit. Every `VmSpace` shared across CPUs
+//   therefore lives behind a lock that is the sole minter of the `&mut`:
+//   `PROCESS_VMS[slot]` (`mm/src/process_vm.rs`) for a per-process space, and
+//   `KERNEL_VM_SPACE` (`kernel-services`) for the kernel master. What makes
+//   tier 2 hold for the master is that no other writer of those page tables
+//   exists — `mm/src/paging` is read-only, and
+//   `scripts/check_kernel_pml4_writer.sh` fails the build if a second one
+//   reappears. That gate, not this comment, is the enforcement.
+//
+// The composed model is *coarse lock-per-VmSpace*, strictly more conservative
+// than CortenMM's range-disjoint parallelism (it serializes even disjoint
+// ranges on one space), so it forbids strictly more concurrency: a scalability
+// gap, not a soundness one. What remains to prove is therefore CortenMM's
+// P2 — page-table well-formedness and the functional correctness of
+// map/unmap under the serialized op stream the exclusive borrow produces.
 //
 // Modelling strategy. As in `frame_refcount.rs` and `slab_lifetime.rs`, every
 // cursor mutation is a short critical section under the `&mut VmSpace` borrow.
@@ -52,12 +66,30 @@
 //   `pd_linked`     <-> the PDPT entry is present and points at a valid PD
 //   `pt_linked`     <-> the PD entry is present and points at a valid PT
 //   `leaf_present`  <-> the PT entry is present (a 4 KiB leaf is mapped)
-//   `pte_refs`      <-> the number of `UFrame` refs leaked into the leaf PTE
-//                       (`CursorMut::map` leaks one via `Frame::into_raw`;
-//                       `unmap` reclaims one via `Frame::from_raw_at`)
-//   `leaf_is_uframe`<-> the leaf, when present, holds an *insensitive* user
-//                       frame — the `map<S, M: AnyUFrameMeta>(UFrame<M>, ..)`
-//                       type guarantee (Inv. 4 + Inv. 5)
+//   `pte_refs`      <-> the number of frame refs leaked into the leaf PTE
+//                       (`CursorMut::map` / `map_kernel` leak one via
+//                       `Frame::into_raw`; `unmap` reclaims one via
+//                       `Frame::from_raw_at`; `map_io` leaks none)
+//   `leaf_owns_ref` <-> the leaf, when present, owns a reference the unmap
+//                       path must reclaim. False for a `map_io` leaf, which
+//                       records the fact in PTE bit 10
+//                       (`PageProperty::SOFTWARE_NO_FRAME_REF`) so `unmap`
+//                       reads it back out of the entry rather than trusting
+//                       the caller to remember
+//   `leaf_user_visible`
+//                   <-> the leaf carries the USER bit, i.e. ring 3 can reach
+//                       the frame behind it. `map` installs such leaves;
+//                       `map_kernel` and `map_io` refuse `prop.user` outright
+//   `leaf_is_uframe`<-> the leaf, when present, holds an *insensitive* frame.
+//                       For `map` the carrier is the type — `map<S, M:
+//                       AnyUFrameMeta>(UFrame<M>, ..)`. For `map_kernel` the
+//                       carrier is the `!prop.user` guard: Inv. 4 + Inv. 5
+//                       are hypothetically scoped to user-visible leaves, so
+//                       for a supervisor-only leaf the hypothesis is vacuous
+//                       and the guard discharges it directly. That is why
+//                       `map_kernel`'s `M` bound is only `AnyFrameMeta`, and
+//                       why `broken_map_kernel_user` below is the proof that
+//                       the guard is load-bearing rather than defensive
 
 use vstd::prelude::*;
 
@@ -83,11 +115,23 @@ pub struct PtPath {
     pub pt_linked: bool,
     /// PT[vaddr] present — a 4 KiB leaf is mapped here.
     pub leaf_present: bool,
-    /// Number of `UFrame` refs leaked into the leaf PTE. `map` leaks one;
-    /// `unmap` reclaims one. The quantity (REF) protects.
+    /// Number of frame refs leaked into the leaf PTE. `map` and `map_kernel`
+    /// leak one; `unmap` reclaims one; `map_io` leaks none. The quantity
+    /// (REF) protects.
     pub pte_refs: nat,
-    /// The leaf, when present, holds an insensitive user frame (`UFrame`).
-    /// The Inv. 4 + Inv. 5 carrier: only `UFrame<M>` ever reaches `map`.
+    /// The leaf, when present, owns a reference the unmap path must reclaim.
+    /// False for a `map_io` leaf, which names physical memory with no
+    /// `MetaSlot` and records that fact in the entry itself
+    /// (`PageProperty::SOFTWARE_NO_FRAME_REF`, PTE bit 10).
+    pub leaf_owns_ref: bool,
+    /// The leaf, when present, carries the USER bit — ring 3 can reach the
+    /// frame behind it. `map` installs such leaves; `map_kernel` and `map_io`
+    /// refuse `prop.user`.
+    pub leaf_user_visible: bool,
+    /// The leaf, when present, holds an insensitive frame. Carried by the
+    /// `UFrame<M>` argument type in `map`; irrelevant for a leaf that is not
+    /// user-visible, which is what lets `map_kernel` take a sensitive
+    /// `Frame<M>`.
     pub leaf_is_uframe: bool,
 }
 
@@ -102,27 +146,37 @@ pub open spec fn pt_inv(s: PtPath) -> bool {
     &&& (s.pt_linked ==> s.pd_linked)
     &&& (s.pd_linked ==> s.pdpt_linked)
     // (REF) Exactly-once leak accounting: the leaf PTE holds at most one
-    //       leaked `UFrame` ref, and it holds exactly one iff the leaf is
-    //       present. `map` is the only step that leaks (and refuses to leak
-    //       twice via the Overlap guard); `unmap` is the only step that
-    //       reclaims (and refuses to reclaim an absent leaf).
+    //       leaked frame ref, and it holds exactly one iff a present leaf
+    //       says it owns one. `map` and `map_kernel` are the only steps that
+    //       leak (and refuse to leak twice via the Overlap guard); `unmap` is
+    //       the only step that reclaims (and refuses to reclaim an absent
+    //       leaf, or one whose entry says it owns nothing).
     &&& (s.pte_refs <= 1)
-    &&& (s.leaf_present <==> s.pte_refs == 1)
-    // (REF / Inv. 4 + Inv. 5) A present leaf is always an insensitive user
-    //       frame — sensitive memory never reaches a user PTE.
-    &&& (s.leaf_present ==> s.leaf_is_uframe)
+    &&& ((s.leaf_present && s.leaf_owns_ref) <==> s.pte_refs == 1)
+    &&& (s.leaf_owns_ref ==> s.leaf_present)
+    // (Inv. 4 + Inv. 5) A present *user-visible* leaf is always an
+    //       insensitive frame — sensitive memory is never reachable from
+    //       ring 3. The hypothesis is scoped to user visibility on purpose:
+    //       that scoping is what `map_kernel`'s and `map_io`'s `!prop.user`
+    //       guards discharge, in place of the `UFrame` type carrier `map`
+    //       uses. `broken_map_kernel_user` below is the witness that the
+    //       guard is load-bearing rather than defensive.
+    &&& (s.leaf_present && s.leaf_user_visible ==> s.leaf_is_uframe)
 }
 
 /// A fresh `VmSpace` from `VmSpace::new`: a zeroed user-half PML4, no
 /// intermediates linked, no leaf, no leaked ref. (The kernel half 256..512 is
-/// copied from the master and is out of the user-cursor's range — cursors
-/// only touch indices 0..256.)
+/// copied from the master at construction and never resynced — every
+/// top-level kernel-half entry is linked before any address space exists, so
+/// there is no later transition for the copy to miss.)
 pub open spec fn pt_init(s: PtPath) -> bool {
     &&& s.pdpt_linked == false
     &&& s.pd_linked == false
     &&& s.pt_linked == false
     &&& s.leaf_present == false
     &&& s.pte_refs == 0
+    &&& s.leaf_owns_ref == false
+    &&& s.leaf_user_visible == false
     &&& s.leaf_is_uframe == false
 }
 
@@ -136,10 +190,25 @@ pub enum Step {
     /// leak. The argument is `UFrame<M>` by type, so the installed leaf is
     /// always an insensitive user frame.
     Map,
-    /// `CursorMut::unmap::<S, M>()`. If the leaf is present, clear the PTE
-    /// and reclaim exactly one leaked ref (`Frame::from_raw_at`). If the leaf
-    /// is absent the not-present guard refuses: no double-free. Intermediates
-    /// stay linked — SlopOS reclaims them only on `VmSpace::drop`.
+    /// `CursorMut::map_kernel::<S, M: AnyFrameMeta>(Frame<M>, prop)`. The
+    /// kernel-half sibling of `Map`: same walk, same `Overlap` guard, same
+    /// leak-exactly-one accounting, but the frame is a sensitive `Frame<M>`
+    /// and the leaf is supervisor-only. The `!prop.user` guard runs first,
+    /// so the leaf it installs is never user-visible — which is what makes
+    /// accepting a sensitive frame sound, and what
+    /// `broken_map_kernel_user_violates_inv45` proves is load-bearing.
+    MapKernel,
+    /// `CursorMut::map_io::<S>(paddr, prop)`. Installs a supervisor-only leaf
+    /// over physical memory with no `MetaSlot` — a device aperture, a
+    /// firmware region. Consumes no frame and leaks no ref, and records that
+    /// in the entry so `Unmap` reclaims nothing.
+    MapIo,
+    /// `CursorMut::unmap::<S, M>()`. If the leaf is present *and owns a ref*,
+    /// clear the PTE and reclaim exactly one (`Frame::from_raw_at`). If the
+    /// leaf is absent the not-present guard refuses: no double-free. If it
+    /// owns nothing the software bit short-circuits the reclaim: no free of a
+    /// slot that was never taken. Intermediates stay linked — SlopOS reclaims
+    /// them only on `VmSpace::drop`.
     Unmap,
     /// `CursorMut::protect::<S>(prop)`. Updates leaf access/cache flags in
     /// place. No structural change, no ref movement.
@@ -158,20 +227,67 @@ pub open spec fn step(s: PtPath, t: Step) -> PtPath {
                 // present leaf implies it via `pt_inv`).
                 PtPath { pdpt_linked: true, pd_linked: true, pt_linked: true, ..s }
             } else {
-                // Link intermediates, install the leaf, leak one UFrame ref.
+                // Link intermediates, install a user-visible leaf, leak one
+                // `UFrame` ref. The argument type makes it insensitive.
                 PtPath {
                     pdpt_linked: true,
                     pd_linked: true,
                     pt_linked: true,
                     leaf_present: true,
                     pte_refs: 1,
+                    leaf_owns_ref: true,
+                    leaf_user_visible: true,
                     leaf_is_uframe: true,
                 }
             },
-        Step::Unmap =>
-            // Reclaim exactly one ref iff a leaf is present; else no-op.
+        Step::MapKernel =>
             if s.leaf_present {
-                PtPath { leaf_present: false, pte_refs: 0, ..s }
+                // Same Overlap guard, same refusal.
+                PtPath { pdpt_linked: true, pd_linked: true, pt_linked: true, ..s }
+            } else {
+                // Supervisor-only leaf over a sensitive `Frame<M>`: not
+                // user-visible, so `leaf_is_uframe` is free to be false and
+                // Inv. 4 + Inv. 5's hypothesis never fires.
+                PtPath {
+                    pdpt_linked: true,
+                    pd_linked: true,
+                    pt_linked: true,
+                    leaf_present: true,
+                    pte_refs: 1,
+                    leaf_owns_ref: true,
+                    leaf_user_visible: false,
+                    leaf_is_uframe: false,
+                }
+            },
+        Step::MapIo =>
+            if s.leaf_present {
+                PtPath { pdpt_linked: true, pd_linked: true, pt_linked: true, ..s }
+            } else {
+                // Supervisor-only leaf that owns nothing: the ref count does
+                // not move, so `unmap` has nothing to reclaim.
+                PtPath {
+                    pdpt_linked: true,
+                    pd_linked: true,
+                    pt_linked: true,
+                    leaf_present: true,
+                    pte_refs: 0,
+                    leaf_owns_ref: false,
+                    leaf_user_visible: false,
+                    leaf_is_uframe: false,
+                }
+            },
+        Step::Unmap =>
+            // Clear the leaf, reclaiming a ref only if the entry says it
+            // owns one.
+            if s.leaf_present {
+                PtPath {
+                    leaf_present: false,
+                    pte_refs: 0,
+                    leaf_owns_ref: false,
+                    leaf_user_visible: false,
+                    leaf_is_uframe: false,
+                    ..s
+                }
             } else {
                 s
             },
@@ -262,15 +378,18 @@ pub proof fn wf_no_dangling_intermediate(s0: PtPath, trace: Seq<Step>)
 // (REF) Named corollaries: map leaks once, unmap reclaims once.
 // ---------------------------------------------------------------------------
 
-/// (REF) The leaf PTE holds at most one leaked `UFrame` ref in every
-/// reachable state, and holds exactly one iff a leaf is present — so no
-/// double-leak (Overlap-guarded `map`) and no stranded ref after `unmap`.
+/// (REF) The leaf PTE holds at most one leaked frame ref in every reachable
+/// state, and holds exactly one iff a present leaf says it owns one — so no
+/// double-leak (Overlap-guarded `map` / `map_kernel`), no stranded ref after
+/// `unmap`, and no ref fabricated for a leaf that never took one (`map_io`,
+/// whose entry records that it owns nothing).
 pub proof fn ref_leaf_holds_at_most_one(s0: PtPath, trace: Seq<Step>)
     requires
         pt_init(s0),
     ensures
         run(s0, trace).pte_refs <= 1,
-        run(s0, trace).leaf_present <==> run(s0, trace).pte_refs == 1,
+        (run(s0, trace).leaf_present && run(s0, trace).leaf_owns_ref)
+            <==> run(s0, trace).pte_refs == 1,
 {
     invariant_holds_on_every_trace(s0, trace);
 }
@@ -308,15 +427,18 @@ pub proof fn ref_map_then_unmap_roundtrips(s: PtPath)
 {
 }
 
-/// (Inv. 4 + Inv. 5) A present leaf is always an insensitive user frame in
-/// every reachable state: sensitive memory never lands in a user PTE. The
-/// `map<S, M: AnyUFrameMeta>(UFrame<M>, ..)` argument type is what makes this
-/// hold by construction.
+/// (Inv. 4 + Inv. 5) A present *user-visible* leaf is always an insensitive
+/// frame in every reachable state: sensitive memory is never reachable from
+/// ring 3. Two carriers hold this up, and the proof needs both: the
+/// `map<S, M: AnyUFrameMeta>(UFrame<M>, ..)` argument type for user leaves,
+/// and the `!prop.user` guard on `map_kernel` / `map_io` for the supervisor
+/// leaves whose frames are sensitive by design.
 pub proof fn inv45_leaf_is_uframe(s0: PtPath, trace: Seq<Step>)
     requires
         pt_init(s0),
     ensures
-        run(s0, trace).leaf_present ==> run(s0, trace).leaf_is_uframe,
+        run(s0, trace).leaf_present && run(s0, trace).leaf_user_visible
+            ==> run(s0, trace).leaf_is_uframe,
 {
     invariant_holds_on_every_trace(s0, trace);
 }
@@ -376,6 +498,8 @@ pub proof fn broken_double_leak_violates_refcount()
         pt_linked: true,
         leaf_present: true,
         pte_refs: 1,
+        leaf_owns_ref: true,
+        leaf_user_visible: true,
         leaf_is_uframe: true,
     };
     assert(pt_inv(mapped));
@@ -403,6 +527,8 @@ pub open spec fn broken_map_sensitive(s: PtPath) -> PtPath {
         pt_linked: true,
         leaf_present: true,
         pte_refs: 1,
+        leaf_owns_ref: true,
+        leaf_user_visible: true,
         leaf_is_uframe: false,
     }
 }
@@ -429,6 +555,8 @@ pub proof fn broken_map_sensitive_violates_inv45()
         pt_linked: false,
         leaf_present: false,
         pte_refs: 0,
+        leaf_owns_ref: false,
+        leaf_user_visible: false,
         leaf_is_uframe: false,
     };
     assert(pt_inv(empty));
@@ -443,6 +571,119 @@ pub proof fn broken_map_sensitive_violates_inv45()
     // The real (UFrame-typed) map preserves the invariant on every state.
     assert forall|s: PtPath| pt_inv(s) implies #[trigger] pt_inv(step(s, Step::Map)) by {
         step_preserves(s, Step::Map);
+    }
+}
+
+
+/// A *broken* `map_kernel` that forgot its `!prop.user` guard: it installs a
+/// sensitive `Frame<M>` — the meta bound on `map_kernel` is only
+/// `AnyFrameMeta`, so nothing about the argument makes the frame insensitive —
+/// behind a leaf that ring 3 can reach.
+pub open spec fn broken_map_kernel_user(s: PtPath) -> PtPath {
+    PtPath {
+        pdpt_linked: true,
+        pd_linked: true,
+        pt_linked: true,
+        leaf_present: true,
+        pte_refs: 1,
+        leaf_owns_ref: true,
+        leaf_user_visible: true,
+        leaf_is_uframe: false,
+    }
+}
+
+/// Witness that `map_kernel`'s `!prop.user` guard is load-bearing for
+/// Inv. 4 + Inv. 5.
+///
+/// `map_kernel` accepts any `M: AnyFrameMeta` — deliberately, because the
+/// obligation it has to discharge is scoped to user-visible leaves and a
+/// supervisor-only leaf makes that hypothesis vacuous. Remove the guard and
+/// the scoping goes with it: the very next state has a user-visible leaf over
+/// a sensitive frame, which is exactly what Inv. 4 + Inv. 5 forbid. So the
+/// weaker type bound is sound *because of* the runtime guard, not despite it,
+/// and the two cannot be traded off separately. The real, guarded `MapKernel`
+/// preserves the invariant on every state.
+pub proof fn broken_map_kernel_user_violates_inv45()
+    ensures
+        exists|s: PtPath|
+            #![trigger broken_map_kernel_user(s)]
+            pt_inv(s) && !pt_inv(broken_map_kernel_user(s)),
+        forall|s: PtPath| pt_inv(s) ==> #[trigger] pt_inv(step(s, Step::MapKernel)),
+{
+    let empty = PtPath {
+        pdpt_linked: false,
+        pd_linked: false,
+        pt_linked: false,
+        leaf_present: false,
+        pte_refs: 0,
+        leaf_owns_ref: false,
+        leaf_user_visible: false,
+        leaf_is_uframe: false,
+    };
+    assert(pt_inv(empty));
+    let leaked = broken_map_kernel_user(empty);
+    assert(leaked.leaf_present && leaked.leaf_user_visible && !leaked.leaf_is_uframe);
+    assert(!pt_inv(leaked));
+    assert(pt_inv(empty) && !pt_inv(broken_map_kernel_user(empty)));
+    assert(exists|s: PtPath| #![trigger broken_map_kernel_user(s)] pt_inv(s) && !pt_inv(broken_map_kernel_user(s)));
+    assert forall|s: PtPath| pt_inv(s) implies #[trigger] pt_inv(step(s, Step::MapKernel)) by {
+        step_preserves(s, Step::MapKernel);
+    }
+}
+
+/// A *broken* `unmap` that reclaims a reference from a `map_io` leaf — i.e.
+/// the branch on `PageProperty::SOFTWARE_NO_FRAME_REF` removed, so the
+/// entry's own record of owning nothing is ignored and `Frame::from_raw_at`
+/// runs anyway. It fabricates a handle out of a slot that was never claimed:
+/// the leaf goes away and a reference exists that no entry ever owned.
+pub open spec fn broken_unmap_reclaims_io(s: PtPath) -> PtPath {
+    PtPath {
+        leaf_present: false,
+        leaf_owns_ref: false,
+        leaf_user_visible: false,
+        leaf_is_uframe: false,
+        pte_refs: 1,
+        ..s
+    }
+}
+
+/// Witness that the software bit is load-bearing for (REF).
+///
+/// A `map_io` leaf is present and owns nothing. The real `Unmap` reads the
+/// bit, clears the entry and reclaims nothing, landing back in the invariant.
+/// The broken one produces a reference no entry ever held — a state where
+/// `pte_refs == 1` with no leaf, which the invariant rejects. On the machine
+/// that fabricated handle is a `Frame` over a paddr the page table never
+/// owned, and dropping it hands a device aperture or a firmware region to the
+/// frame allocator. The bit in the entry, rather than a convention about who
+/// calls which unmap, is what makes that unreachable.
+pub proof fn broken_unmap_reclaims_io_violates_refcount()
+    ensures
+        exists|s: PtPath|
+            #![trigger broken_unmap_reclaims_io(s)]
+            pt_inv(s) && !pt_inv(broken_unmap_reclaims_io(s)),
+        forall|s: PtPath| pt_inv(s) ==> #[trigger] pt_inv(step(s, Step::Unmap)),
+{
+    // Reachable: `MapIo` from the init state.
+    let io_leaf = PtPath {
+        pdpt_linked: true,
+        pd_linked: true,
+        pt_linked: true,
+        leaf_present: true,
+        pte_refs: 0,
+        leaf_owns_ref: false,
+        leaf_user_visible: false,
+        leaf_is_uframe: false,
+    };
+    assert(pt_inv(io_leaf));
+    let fabricated = broken_unmap_reclaims_io(io_leaf);
+    assert(!fabricated.leaf_present && fabricated.pte_refs == 1);
+    assert(!pt_inv(fabricated));
+    assert(pt_inv(io_leaf) && !pt_inv(broken_unmap_reclaims_io(io_leaf)));
+    assert(exists|s: PtPath| #![trigger broken_unmap_reclaims_io(s)] pt_inv(s) && !pt_inv(broken_unmap_reclaims_io(s)));
+    // The real, bit-reading unmap preserves the invariant on every state.
+    assert forall|s: PtPath| pt_inv(s) implies #[trigger] pt_inv(step(s, Step::Unmap)) by {
+        step_preserves(s, Step::Unmap);
     }
 }
 

@@ -10,10 +10,9 @@
 //! directly, no synthetic-frame adapter required.
 //!
 //! The address-space passed to `UserMode::new` is a single global
-//! placeholder: CR3 is still controlled by the legacy paging code
-//! outside OSTD, so the `&VmSpace` argument is never functionally
-//! activated.  Per-process `VmSpace`s will replace the placeholder
-//! once the OSTD paging migration lands.
+//! placeholder.  The scheduler installs the task's own `VmSpace` at
+//! dispatch, so the `&VmSpace` argument here is never functionally
+//! activated.
 //!
 //! Per the OSTD `UserModeBackend` contract, the trampoline writes the
 //! captured user state back through `pcr.user_ctx_ptr`, which we

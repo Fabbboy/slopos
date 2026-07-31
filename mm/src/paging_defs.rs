@@ -104,13 +104,12 @@ pub const PAGE_SIZE_1GB: u64 = 0x4000_0000;
 // =============================================================================
 // OSTD compatibility razors.
 //
-// While slopos-mm migrates onto OSTD's `VmSpace` / `PteFlags`, every
-// `PageFlags::*` value here must match
-// `slopos_ostd::mm::page_table::PteFlags::*` exactly so cursor `query` /
-// `protect` / `map` round-trip through both sides without flag drift.
-// These compile-time asserts fire at build time if the bitfield ever
-// drifts; they delete with this whole file once the legacy paging
-// surface is fully retired.
+// Every `PageFlags::*` value here must match
+// `slopos_ostd::mm::page_table::PteFlags::*` exactly: the kernel-half
+// mapping helpers convert one to the other on every call, so a drifted
+// bit would round-trip a mapping into a different set of permissions
+// with nothing to notice. These compile-time asserts fire at build time
+// if the bitfield ever moves.
 // =============================================================================
 
 const _: () = {

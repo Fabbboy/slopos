@@ -1,12 +1,10 @@
-//! Bridges `slopos_ostd::mm::io_mem::IoMemMapper` to the legacy
-//! kernel-virt allocator + `map_page_4kb` path in [`crate::mmio`].
+//! Bridges `slopos_ostd::mm::io_mem::IoMemMapper` to the kernel-virt
+//! MMIO window allocator and the kernel-half mapping path.
 //!
 //! Lives in `slopos-mm` (rather than `slopos-ostd`) so `slopos-ostd`
-//! has no dependency on `slopos-mm`. Defined but **not registered**:
-//! the kernel boot path will install it via
-//! `slopos_ostd::mm::register_io_mem_mapper` once OSTD is wired into
-//! boot. Until then, the shim exists so the trait surface is
-//! exercised by something concrete.
+//! has no dependency on `slopos-mm`. The boot path registers it with
+//! `slopos_ostd::mm::register_io_mem_mapper` before the init phases
+//! run, so it backs every `MmioRegion::map` in the kernel.
 //!
 //! Cache-policy mapping mirrors the firmware-default PAT layout
 //! described in [`crate::pat`]: WriteCombining sets PWT=1 (PA1 = WC),
@@ -20,8 +18,8 @@ use slopos_abi::addr::{PhysAddr, VirtAddr};
 use slopos_ostd::alignment::align_up_u64;
 use slopos_ostd::mm::io_mem::{IoMemCachePolicy, IoMemError, IoMemMapper};
 
+use crate::kernel_mappings::kernel_map_io_4kb;
 use crate::memory_layout_defs::{MMIO_VIRT_BASE, MMIO_VIRT_SIZE};
-use crate::paging::map_page_4kb;
 use crate::paging_defs::{PAGE_SIZE_4KB, PageFlags};
 
 static MMIO_NEXT_VIRT: AtomicU64 = AtomicU64::new(MMIO_VIRT_BASE);
@@ -87,7 +85,7 @@ impl IoMemMapper for LegacyIoMemMapperShim {
         for i in 0..num_pages {
             let page_phys = PhysAddr::new(aligned_phys + i * PAGE_SIZE_4KB);
             let page_virt = VirtAddr::new(virt_base + i * PAGE_SIZE_4KB);
-            if map_page_4kb(page_virt, page_phys, flags) != 0 {
+            if kernel_map_io_4kb(page_virt, page_phys, flags) != 0 {
                 return Err(IoMemError::MappingFailed);
             }
         }

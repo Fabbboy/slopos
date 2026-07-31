@@ -9,15 +9,17 @@
 //! # Soundness
 //!
 //! Page-table frames are sensitive: they are always typed
-//! `Frame<PageTableMeta>` and never reachable as `UFrame`. Volatile
-//! reads/writes go through the `Pte` wrapper so the compiler cannot
-//! reorder PTE accesses against surrounding atomics. The
+//! `Frame<PageTableMeta>` and never reachable as `UFrame`. Every PTE
+//! access goes through the `Pte` wrapper as a single relaxed atomic,
+//! which is what a page-table entry actually is — eight bytes the
+//! hardware walker on another core may read, and stamp Accessed and
+//! Dirty into, at any instant. The
 //! intermediate-allocator hand-off via [`Frame::into_raw`] /
 //! [`Frame::from_raw`] keeps the slot's ref count exact (one ref
 //! "owned by" the parent PTE), so no double-free or leak is possible
 //! across map / unmap.
 
-use core::sync::atomic::Ordering;
+use core::sync::atomic::{AtomicU64, Ordering};
 
 use bitflags::bitflags;
 use slopos_abi::addr::{PhysAddr, VirtAddr};
@@ -142,14 +144,23 @@ impl PteFlags {
 }
 
 // ---------------------------------------------------------------------------
-// Pte — a single 8-byte entry. Reads via `read_volatile`, writes via
-// `write_volatile` so the compiler cannot reorder the access against
-// surrounding atomics.
+// Pte — a single 8-byte entry, accessed as one relaxed atomic.
+//
+// A page-table entry is shared with the hardware page walker on every
+// other core, which reads it and stamps Accessed and Dirty into it
+// without asking. Kernel-half entries are additionally read by
+// `slopos_mm::paging`'s lock-free walker while a cursor writes them.
+// A non-atomic access to a location another agent touches concurrently
+// is a data race under the Rust memory model even when it lowers to the
+// same single `mov`, so every read and write below is an atomic op.
+// Relaxed is the right strength: the ordering that matters — a table's
+// contents being visible before the link that publishes it — is carried
+// by the invalidation the caller issues, not by the entry store.
 // ---------------------------------------------------------------------------
 
 /// Wrapper over a single PTE slot. Holds a raw `*mut u64` and goes
-/// through volatile reads/writes. Crate-private to keep pointers out
-/// of the safe API.
+/// through relaxed atomic reads/writes. Crate-private to keep pointers
+/// out of the safe API.
 #[derive(Clone, Copy)]
 pub(crate) struct Pte {
     raw: *mut u64,
@@ -157,7 +168,7 @@ pub(crate) struct Pte {
 
 // SAFETY: a `Pte` is a thin pointer to a single 8-byte slot inside a
 // page-table frame this OSTD invocation owns. Sharing/sending across
-// threads is sound because reads/writes go through volatile ops; the
+// threads is sound because every access is a relaxed atomic op; the
 // surrounding `CursorMut` discipline (one `&mut VmSpace` at a time)
 // serialises mutation.
 unsafe impl Send for Pte {}
@@ -168,16 +179,21 @@ impl Pte {
     pub(crate) fn read(self) -> u64 {
         // SAFETY: `self.raw` was constructed from a live page-table
         // frame's HHDM mapping (see `entry_in_table`); the slot is
-        // inside the page and properly aligned. Volatile read so the
-        // compiler does not assume the stored value is invariant.
-        unsafe { core::ptr::read_volatile(self.raw) }
+        // inside the page and 8-byte aligned, so it is a valid
+        // `AtomicU64` for the duration of this call.
+        unsafe {
+            let slot = AtomicU64::from_ptr(self.raw);
+            slot.load(Ordering::Relaxed)
+        }
     }
 
     #[inline]
     pub(crate) fn write(self, value: u64) {
-        // SAFETY: as `read`. Volatile write preserves ordering against
-        // surrounding atomic ops in the cursor.
-        unsafe { core::ptr::write_volatile(self.raw, value) }
+        // SAFETY: as `read`.
+        unsafe {
+            let slot = AtomicU64::from_ptr(self.raw);
+            slot.store(value, Ordering::Relaxed);
+        }
     }
 
     #[inline]
@@ -651,9 +667,6 @@ pub(crate) fn read_leaf(outcome: &WalkOutcome) -> Option<(Paddr, PageProperty, P
 fn meta_slot_for_paddr_ptr(paddr: Paddr) -> Option<*const MetaSlot> {
     meta_slot_for(paddr).map(|s| s as *const MetaSlot)
 }
-
-// Reference imports the linter would otherwise flag.
-const _: Ordering = Ordering::Acquire;
 
 #[cfg(test)]
 mod tests {

@@ -35,8 +35,9 @@
 //!
 //! # Safety
 //!
-//! The implementation is **safe Rust**.  `map_page_4kb` and
-//! `unmap_page` are safe wrappers in `mm::paging`, so no `unsafe`
+//! The implementation is **safe Rust**.  `kernel_map_4kb` and
+//! `kernel_unmap_4kb` are safe wrappers in `mm::kernel_mappings`,
+//! driving the kernel master's `VmSpace` cursor, so no `unsafe`
 //! blocks are needed here.  Correctness comes from:
 //!
 //! - Exclusive ownership of the slot (via [`StackSlot<R>`], which is
@@ -47,8 +48,8 @@
 //!   cannot be accidentally mapped.
 
 use slopos_abi::addr::{PhysAddr, VirtAddr};
+use slopos_mm::kernel_mappings::{kernel_map_4kb, kernel_unmap_4kb};
 use slopos_mm::page_alloc::{alloc_page_frames_pcp_batch, free_page_frame};
-use slopos_mm::paging::{map_page_4kb, unmap_page};
 use slopos_mm::paging_defs::PAGE_SIZE_4KB;
 use slopos_mm::stack_region::{KstackRegion, StackRegion, UstackRegion};
 use slopos_mm::stack_va::{self, StackSlot};
@@ -74,8 +75,9 @@ pub enum StackAllocError {
     OutOfVirtualSpace,
     /// The page allocator could not satisfy a frame request.
     OutOfPhysicalFrames,
-    /// `map_page_4kb` returned an error (typically out of memory for
-    /// intermediate page tables).
+    /// `kernel_map_4kb` returned an error (typically out of memory for
+    /// intermediate page tables).  The frame handed to the failing call
+    /// is consumed by it, so the rollback below skips it.
     MappingFailed,
 }
 
@@ -146,10 +148,13 @@ impl<R: StackRegion> TaskStack<R> {
 
         for i in 0..page_count {
             let va = VirtAddr::new(base + (i as u64) * PAGE_SIZE_4KB);
-            let map_rc = map_page_4kb(va, frames[i], R::PAGE_FLAGS);
+            let map_rc = kernel_map_4kb(va, frames[i], R::PAGE_FLAGS);
             if map_rc != 0 {
-                // Free the frames we have not mapped yet.
-                for j in i..page_count {
+                // Free the frames we have not handed over yet.
+                // `frames[i]` is not among them: `kernel_map_4kb` took
+                // ownership of it and returned it to the allocator when
+                // the mapping failed.
+                for j in (i + 1)..page_count {
                     free_page_frame(frames[j]);
                 }
                 // Unmap + free anything already installed.
@@ -201,14 +206,15 @@ impl<R: StackRegion> TaskStack<R> {
     /// Unmap & free the first `mapped` pages of `slot`.  Used by
     /// `allocate` on the error path (the slot's own Drop handles VA
     /// release).
+    ///
+    /// `kernel_unmap_4kb` frees the page it reclaims — the leaf owned
+    /// the frame, and taking the leaf away drops that ownership — so
+    /// there is nothing left here to hand back.
     fn cleanup_partial(slot: &StackSlot<R>, mapped: usize) {
         let base = slot.va_base().as_u64() + R::GUARD_SIZE;
         for i in 0..mapped {
             let va = VirtAddr::new(base + (i as u64) * PAGE_SIZE_4KB);
-            let pa: PhysAddr = unmap_page(va);
-            if !pa.is_null() {
-                free_page_frame(pa);
-            }
+            let _: PhysAddr = kernel_unmap_4kb(va);
         }
     }
 }

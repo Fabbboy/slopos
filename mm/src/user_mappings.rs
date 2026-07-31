@@ -8,9 +8,9 @@
 //! open — see `process_vm::process_vm_with_vm_space`.
 //!
 //! A user leaf's paddr is wrapped through
-//! [`UFrame::wrap_static`](slopos_ostd::mm::uframe::UFrame::wrap_static),
-//! so the ref leaked into the PTE is a no-op on Drop: the frame's
-//! lifecycle belongs to its MetaSlot count, not to the mapping.
+//! [`UFrame::wrap_user_paddr`](slopos_ostd::mm::uframe::UFrame::wrap_user_paddr),
+//! so the ref leaked into the PTE is accounted against the frame's
+//! MetaSlot count rather than against the mapping.
 
 use slopos_abi::addr::{PhysAddr, VirtAddr};
 use slopos_ostd::mm::KArc;
@@ -89,7 +89,7 @@ pub fn property_to_page_flags(prop: PageProperty) -> PageFlags {
 /// clones. Wait for those transient readers to drain instead of panicking in
 /// multithreaded processes. A remaining strong/weak ref after the bounded spin
 /// means a caller is holding an address-space handle across a mutation window,
-/// which violates the dual-write external-lock contract.
+/// which violates the external-lock contract this helper rests on.
 #[inline]
 fn vm_space_get_mut(vm_space: &mut KArc<VmSpace>) -> Result<&mut VmSpace, MapError> {
     for _ in 0..VM_SPACE_MUT_RETRY_SPINS {
@@ -108,11 +108,9 @@ fn vm_space_get_mut(vm_space: &mut KArc<VmSpace>) -> Result<&mut VmSpace, MapErr
 }
 
 /// Map a 4 KiB user page into `vm_space` at `va`, pointing at the
-/// already-allocated physical page `pa`. The legacy
-/// [`map_page_4kb_in_dir`](crate::paging::map_page_4kb_in_dir) caller
-/// is responsible for the legacy half; this helper drives only the
-/// OSTD half so existing legacy callers keep their semantics during
-/// the dual-write window.
+/// already-allocated physical page `pa`. The caller holds the
+/// per-process VM lock for the duration, which is what makes the
+/// `&mut VmSpace` this borrows the only live mutator of that space.
 ///
 /// # Errors
 ///

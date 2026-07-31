@@ -1,3 +1,4 @@
+use crate::kernel_mappings::{kernel_is_mapped, kernel_map_io_4kb};
 use crate::memory_layout::{init_kernel_bounds, kernel_image_bounds};
 use crate::memory_layout_defs::{
     BOOT_STACK_PHYS_ADDR, BOOT_STACK_SIZE, EARLY_PD_PHYS_ADDR, EARLY_PDPT_PHYS_ADDR,
@@ -12,7 +13,7 @@ use crate::memory_reservations::{
     mm_reservations_total_bytes,
 };
 use crate::page_alloc::{BUDDY_ALLOCATOR, page_allocator_descriptor_size};
-use crate::paging::{init_paging, map_page_4kb};
+use crate::paging::init_paging;
 use crate::paging_defs::{PAGE_SIZE_4KB, PageFlags};
 use crate::process_vm::init_process_vm;
 use core::ffi::{c_char, c_int};
@@ -271,12 +272,26 @@ fn record_kernel_core_reservations() {
     );
 }
 
+/// Make every ACPI-reclaimable region reachable through the HHDM, so
+/// the table parsers can read them. Limine revision 3 no longer maps
+/// these regions itself.
+///
+/// The pages are firmware memory, not allocator memory: the reservation
+/// store keeps them out of the buddy, and a leaf that owned one would
+/// hand ACPI tables back to the allocator the day something unmapped
+/// it. They go in through the no-ownership entry point for that reason.
+///
+/// A VA that already resolves is left exactly as it is. Re-installing
+/// an identical translation would mean demoting whatever huge leaf
+/// currently covers it, which costs page tables to change nothing, and
+/// the cursor refuses to overwrite a present leaf in any case.
 fn map_acpi_regions(memmap: *const LimineMemmapResponse, hhdm_offset: u64) {
     if memmap.is_null() {
         return;
     }
     let flags = PageFlags::KERNEL_RW.bits();
     let mut mapped_count = 0u32;
+    let mut present_count = 0u32;
     for entry in limine_memmap_iter(memmap) {
         if entry.length == 0 || entry.typ != LIMINE_MEMMAP_ACPI_RECLAIMABLE {
             continue;
@@ -285,15 +300,21 @@ fn map_acpi_regions(memmap: *const LimineMemmapResponse, hhdm_offset: u64) {
         let aligned_end = align_up_u64(entry.base + entry.length, PAGE_SIZE_4KB);
         let mut phys = aligned_base;
         while phys < aligned_end {
-            let virt = phys + hhdm_offset;
-            if map_page_4kb(VirtAddr::new(virt), PhysAddr::new(phys), flags) == 0 {
+            let virt = VirtAddr::new(phys + hhdm_offset);
+            if kernel_is_mapped(virt) {
+                present_count += 1;
+            } else if kernel_map_io_4kb(virt, PhysAddr::new(phys), flags) == 0 {
                 mapped_count += 1;
             }
             phys += PAGE_SIZE_4KB;
         }
     }
-    if mapped_count > 0 {
-        klog_debug!("MM: Mapped {} ACPI reclaimable pages to HHDM", mapped_count);
+    if mapped_count > 0 || present_count > 0 {
+        klog_debug!(
+            "MM: Mapped {} ACPI reclaimable pages to HHDM ({} already present)",
+            mapped_count,
+            present_count
+        );
     }
 }
 

@@ -62,7 +62,11 @@ impl AmlHost for HhdmHost {
         let mut page = virt & !0xfff;
         while page < end {
             if slopos_mm::paging::is_mapped(VirtAddr::new(page)) == 0 {
-                let _ = slopos_mm::paging::map_page_4kb(
+                // Firmware memory, not allocator memory: an
+                // OperationRegion can name BIOS-NVS or a reserved
+                // aperture, neither of which the buddy has ever owned
+                // and neither of which it may be handed.
+                let _ = slopos_mm::kernel_mappings::kernel_map_io_4kb(
                     VirtAddr::new(page),
                     PhysAddr::new(page.wrapping_sub(off)),
                     slopos_mm::paging_defs::PageFlags::KERNEL_RO.bits(),

@@ -59,6 +59,7 @@ use slopos_arch::arch::idt::{
     EXCEPTION_STACK_FAULT, IRQ_BASE_VECTOR,
 };
 use slopos_arch::{MAX_CPUS, get_current_cpu};
+use slopos_mm::kernel_mappings::kernel_map_4kb_frame;
 use slopos_mm::kernel_meta::KernelMeta;
 use slopos_mm::memory_layout_defs::{
     EMERGENCY_DSTACK_GUARD_SIZE, EMERGENCY_DSTACK_PAGES, EMERGENCY_DSTACK_REGION_BASE,
@@ -68,7 +69,7 @@ use slopos_mm::memory_layout_defs::{
     EXCEPTION_STACK_PAGES, EXCEPTION_STACK_REGION_BASE, EXCEPTION_STACK_REGION_STRIDE,
     EXCEPTION_STACK_SIZE,
 };
-use slopos_mm::paging::{get_page_size, map_page_4kb, virt_to_phys};
+use slopos_mm::paging::{get_page_size, virt_to_phys};
 use slopos_mm::paging_defs::{PAGE_SIZE_4KB, PageFlags};
 use slopos_ostd::mm::frame::Frame;
 use slopos_ostd::{klog_debug, klog_info};
@@ -400,22 +401,18 @@ fn map_stack_pages(stack: &IstStackConfig, stack_base: u64) {
     assert_bsp_is_mapping("an IST stack");
     for page in 0..EXCEPTION_STACK_PAGES {
         let virt_addr = stack_base + page * PAGE_SIZE_4KB;
-        // Allocate a zero-initialised kernel frame; the IST stack is mapped
-        // for the kernel image's lifetime, so we deliberately leak the
-        // `Frame` handle via `into_phys` and let the page stay outstanding.
+        // Allocate a zero-initialised kernel frame and hand the handle
+        // straight to the mapper. The IST stack lives for the lifetime
+        // of the kernel, so the reference the leaf entry takes is never
+        // released — but it is held by the page table rather than by
+        // nobody, which is what `into_phys` would have left behind.
         let frame = Frame::<KernelMeta>::alloc_zeroed().unwrap_or_else(|| {
             panic!(
                 "ist_stacks_init: Failed to allocate zeroed page for {} stack",
                 stack.name_str()
             )
         });
-        let phys_addr = frame.into_phys();
-        if map_page_4kb(
-            VirtAddr::new(virt_addr),
-            phys_addr,
-            PageFlags::KERNEL_RW.bits(),
-        ) != 0
-        {
+        if kernel_map_4kb_frame(VirtAddr::new(virt_addr), frame, PageFlags::KERNEL_RW.bits()) != 0 {
             let vaddr = VirtAddr::new(virt_addr);
             let mapped_phys = virt_to_phys(vaddr);
             let page_size = get_page_size(vaddr);
@@ -487,13 +484,7 @@ fn map_exc_dstack_pages(cpu_id: usize) {
                 cpu_id
             )
         });
-        let phys_addr = frame.into_phys();
-        if map_page_4kb(
-            VirtAddr::new(virt_addr),
-            phys_addr,
-            PageFlags::KERNEL_RW.bits(),
-        ) != 0
-        {
+        if kernel_map_4kb_frame(VirtAddr::new(virt_addr), frame, PageFlags::KERNEL_RW.bits()) != 0 {
             panic!(
                 "ist_stacks: failed to map exception data-stack page for CPU {}",
                 cpu_id
@@ -575,13 +566,7 @@ fn map_one_stack_region(usable_base: u64, pages: u64, what: &str, cpu_id: usize)
                 what, cpu_id
             )
         });
-        let phys_addr = frame.into_phys();
-        if map_page_4kb(
-            VirtAddr::new(virt_addr),
-            phys_addr,
-            PageFlags::KERNEL_RW.bits(),
-        ) != 0
-        {
+        if kernel_map_4kb_frame(VirtAddr::new(virt_addr), frame, PageFlags::KERNEL_RW.bits()) != 0 {
             panic!("ist_stacks: failed to map {} page for CPU {}", what, cpu_id);
         }
     }

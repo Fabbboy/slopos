@@ -181,8 +181,7 @@ pub(crate) fn is_scheduling_active() -> bool {
 
 use slopos_kernel_services::kernel_vm_space::kernel_vm_space;
 use slopos_mm::process_vm::{
-    process_vm_activate_by_handle, process_vm_get_cr3_phys_by_handle,
-    process_vm_sync_kernel_mappings, unpack_process_vm_handle,
+    process_vm_activate_by_handle, process_vm_get_cr3_phys_by_handle, unpack_process_vm_handle,
 };
 use slopos_mm::tlb;
 use slopos_ostd::handle::HandleError;
@@ -464,20 +463,21 @@ fn prepare_switch_to(
     // --- CR3 ---
     //
     // Routes through `VmSpace::activate`, the only sanctioned CR3 write
-    // path. `activate` lazily resyncs kernel-half from
-    // the master PML4 (KERNEL_MASTER_GEN bump propagation), fires the
-    // registered `CursorUnmapHook::on_activate` callback, and writes
-    // CR3 with PCID + NOFLUSH=1. Cold-path PCID rotation is OSTD's
-    // concern; consumers see only the activate call.
+    // path. `activate` fires the registered
+    // `CursorUnmapHook::on_activate` callback and writes CR3 with
+    // PCID + NOFLUSH=1. Cold-path PCID rotation is OSTD's concern;
+    // consumers see only the activate call. The kernel half needs no
+    // work here: every address space copied it from a master whose top
+    // level is fully linked and never changes again.
     //
     // `_ = cpu_id;` — `mmu::select_cr3` plumbing is unreachable from
-    // this hot path; the per-CPU ASID pool retires when the legacy
-    // paging surface deletes.
+    // this hot path.
     let _ = cpu_id;
     if let Some(handle) = next_vm {
-        process_vm_sync_kernel_mappings(new_pid);
-        // Scheduler-invariant safe entry: IRQs disabled by caller,
-        // kernel-half maintained by `activate`'s internal resync.
+        // Scheduler-invariant safe entry: IRQs disabled by caller. The
+        // kernel half needs no work here: every address space copied it
+        // from a master whose top level is fully linked and never changes
+        // again.
         // Falls back to kernel master if the slot holds no VmSpace or has
         // been rebound to another process since this task was built.
         if !matches!(process_vm_activate_by_handle(handle), Ok(true)) {

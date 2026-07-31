@@ -203,33 +203,35 @@ const _: () = assert!(
 // Per-entry access to a page-table frame
 // ---------------------------------------------------------------------
 //
-// The descent in `tables.rs` reaches page-table frames only through
-// these five, and none of them forms a reference into a frame. That is
-// the point: a reference over a frame — even one scoped to a single
-// statement — claims all 4096 bytes in order to touch eight, and two
-// CPUs mapping different VAs that share a table would each hold one. The
-// hardware page walker also stamps Accessed and Dirty into any entry it
-// uses, so even a single-CPU exclusive reference claims exclusivity the
-// machine does not honour. No type names a page-table frame, so the
-// typed form of that mistake cannot be written at all.
+// Read-only, and only two of them. Every kernel-half page-table write
+// goes through `slopos_ostd::mm::vm_space::CursorMut` under the
+// `KERNEL_VM_SPACE` lock; what is left here is the descent's read side,
+// which the walker in `walker.rs` and the translation helpers in
+// `tables.rs` share.
+//
+// Neither forms a reference into a frame. That is the point: a
+// reference over a frame — even one scoped to a single statement —
+// claims all 4096 bytes in order to touch eight, and two CPUs reading
+// different VAs that share a table would each hold one. The hardware
+// page walker also stamps Accessed and Dirty into any entry it uses, so
+// even a single-CPU shared reference claims a stability the machine does
+// not honour. No type names a page-table frame, so the typed form of
+// that mistake cannot be written at all.
 //
 // Access is therefore per-entry and atomic, which is what a page-table
-// entry actually is. This mirrors `slopos_ostd::mm::page_table`'s `Pte`,
-// hardened for the setting these walks run in: the kernel-half root
-// carries no lock, and one cannot be added, because `alloc_page_table`
-// reaches the buddy whose reuse path performs a cross-CPU drain.
+// entry actually is — and it is what makes reading an entry the cursor
+// may be writing well-defined rather than a race.
 //
 // `pub(crate)` rather than `pub`: this module is reachable from outside
-// the crate, and a public `set_entry_at` would hand every
-// `#![forbid(unsafe_code)]` consumer the ability to write an arbitrary
-// u64 into an arbitrary HHDM-reachable frame.
+// the crate, and the read surface is narrow enough that widening it has
+// to be a deliberate act.
 
 /// The HHDM view of the page-table frame at `phys`, as an entry array.
 ///
 /// A frame holds `PAGE_TABLE_ENTRIES` entries starting at its base, so a
 /// `phys` that is not page-aligned would address a window straddling two
-/// frames. The buddy hands out page-aligned frames; this asserts the
-/// property the deleted whole-frame type used to carry in its alignment.
+/// frames. The buddy hands out page-aligned frames; the assertion states
+/// the property rather than assuming it.
 #[inline]
 fn table_base_at(phys: PhysAddr) -> *mut u64 {
     debug_assert!(!phys.is_null(), "page-table frame address must be non-null");
@@ -246,83 +248,5 @@ pub(crate) fn entry_at(phys: PhysAddr, index: usize) -> PageTableEntry {
     debug_assert!(index < PAGE_TABLE_ENTRIES);
     slopos_ostd::util::ptr_buf::with_atomic_u64_at(table_base_at(phys), index, |slot| {
         PageTableEntry::from_raw(slot.load(core::sync::atomic::Ordering::Relaxed))
-    })
-}
-
-/// Write `entry` at `index` in the page-table frame at `phys`.
-#[inline]
-pub(crate) fn set_entry_at(phys: PhysAddr, index: usize, entry: PageTableEntry) {
-    debug_assert!(index < PAGE_TABLE_ENTRIES);
-    slopos_ostd::util::ptr_buf::with_atomic_u64_at(table_base_at(phys), index, |slot| {
-        slot.store(entry.as_raw(), core::sync::atomic::Ordering::Relaxed)
-    });
-}
-
-/// True when the page-table frame at `phys` holds no present entry — the
-/// condition under which the frame may be released.
-///
-/// Tests the PRESENT bit rather than the whole entry being zero: a
-/// cleared-but-flagged entry maps nothing, and it is mappings, not bit
-/// patterns, that decide whether a table is still doing work.
-#[inline]
-pub(crate) fn table_empty_at(phys: PhysAddr) -> bool {
-    let base = table_base_at(phys);
-    (0..PAGE_TABLE_ENTRIES).all(|index| {
-        slopos_ostd::util::ptr_buf::with_atomic_u64_at(base, index, |slot| {
-            !PageTableEntry::from_raw(slot.load(core::sync::atomic::Ordering::Relaxed)).is_present()
-        })
-    })
-}
-
-/// Clear every entry of a freshly allocated page-table frame.
-#[inline]
-pub(crate) fn zero_table_at(phys: PhysAddr) {
-    let base = table_base_at(phys);
-    for index in 0..PAGE_TABLE_ENTRIES {
-        slopos_ostd::util::ptr_buf::with_atomic_u64_at(base, index, |slot| {
-            slot.store(
-                PageTableEntry::EMPTY.as_raw(),
-                core::sync::atomic::Ordering::Relaxed,
-            )
-        });
-    }
-}
-
-/// Clear the entry at `index` in `table_phys`, but only while it still
-/// links `child_phys` as a table. Returns true for the CPU that cleared
-/// it, false if the entry no longer names that child — which is another
-/// CPU having got there first.
-///
-/// This is what makes releasing a pruned table single-owner. Nothing
-/// serialises the unmap descent, so two CPUs clearing the last leaf under
-/// one table can both find it empty; only the winner of this exchange may
-/// hand the frame back to the allocator.
-///
-/// A bare exchange failure is retried rather than reported: the hardware
-/// page walker stamps Accessed and Dirty into any entry it uses, so an
-/// entry can change without the link changing.
-#[inline]
-pub(crate) fn unlink_child(table_phys: PhysAddr, index: usize, child_phys: PhysAddr) -> bool {
-    debug_assert!(index < PAGE_TABLE_ENTRIES);
-    slopos_ostd::util::ptr_buf::with_atomic_u64_at(table_base_at(table_phys), index, |slot| {
-        use core::sync::atomic::Ordering;
-        loop {
-            let observed = slot.load(Ordering::Relaxed);
-            let entry = PageTableEntry::from_raw(observed);
-            if !entry.is_present() || entry.is_huge() || entry.address() != child_phys {
-                return false;
-            }
-            if slot
-                .compare_exchange(
-                    observed,
-                    PageTableEntry::EMPTY.as_raw(),
-                    Ordering::AcqRel,
-                    Ordering::Relaxed,
-                )
-                .is_ok()
-            {
-                return true;
-            }
-        }
     })
 }

@@ -126,6 +126,12 @@ if [ "${KERNEL_BUILD_GATES:-0}" = "1" ]; then
     "$SCRIPT_DIR/tcb_ratio.sh" --max 1.0
 fi
 
+# Single-writer gate for the kernel master PML4. A source scan, but a few
+# greps rather than a tree walk, and the regression it catches is silent:
+# a second raw writer over the master compiles, boots, and only loses a
+# leaf when two CPUs happen to line up.
+"$SCRIPT_DIR/check_kernel_pml4_writer.sh"
+
 # The stack-sizes and soft-float gates inspect the produced ELF, so they stay
 # on the build path. They apply to the production kernel only.
 # Test builds (`kernel/tests` feature) compile in per-subsystem regression

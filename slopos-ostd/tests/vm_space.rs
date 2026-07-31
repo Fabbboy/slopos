@@ -18,7 +18,8 @@ use std::sync::{Mutex, MutexGuard, OnceLock};
 use slopos_abi::addr::{PhysAddr, VirtAddr};
 use slopos_ostd::arch::x86_64::cr3::Pcid;
 use slopos_ostd::mm::frame::{
-    AnonymousMeta, FrameAlloc, FrameAllocOptions, MetaSlot, Paddr, init_meta_slots,
+    AnonymousMeta, Frame, FrameAlloc, FrameAllocOptions, KernelMeta, MetaSlot, Paddr,
+    init_meta_slots,
 };
 use slopos_ostd::mm::frame_alloc::register_frame_allocator;
 use slopos_ostd::mm::page_property::PageProperty;
@@ -27,7 +28,7 @@ use slopos_ostd::mm::page_table::{PageTableLevel, PteFlags};
 use slopos_ostd::mm::phys::init_phys_virt_offset;
 use slopos_ostd::mm::uframe::UFrame;
 use slopos_ostd::mm::vm_space::{
-    CursorUnmapHook, MapError, VmSpace, bump_kernel_master_gen, register_cursor_unmap_hook,
+    CursorUnmapHook, MapError, VmSpace, prepopulate_kernel_half, register_cursor_unmap_hook,
     register_kernel_master_pml4,
 };
 
@@ -371,8 +372,8 @@ fn map_seek_returns_to_same_entry() {
 }
 
 // ---------------------------------------------------------------------------
-// Huge-page cursor ops, wrap_existing, kernel-half resync,
-// drop walker, and the cursor-unmap hook.
+// Huge-page cursor ops, wrap_existing, the drop walker, and the
+// cursor-unmap hook.
 // ---------------------------------------------------------------------------
 
 #[test]
@@ -520,50 +521,6 @@ fn wrap_existing_round_trip() {
     // verify the slot is back to UNUSED and the contents are intact.
     let space2 = unsafe { VmSpace::wrap_existing(pml4_phys, Pcid::new(0)).unwrap() };
     assert_eq!(space2.pml4_paddr(), pml4_phys);
-}
-
-#[test]
-fn resync_kernel_half_propagates_master_mutation() {
-    let _g = setup();
-    // Two VmSpaces created at the same baseline gen.
-    let space_a = VmSpace::new().unwrap();
-    let _space_b = VmSpace::new().unwrap();
-
-    // Mutate the kernel-master directly via HHDM: write a sentinel
-    // PTE bit pattern at PML4 index 300 (somewhere in the kernel
-    // half). This is the same write `bump_kernel_master_gen` is
-    // meant to track.
-    let master_paddr = PhysAddr::new(0); // setup() registered page 0.
-    let entry_addr = unsafe {
-        let base = BACKING_BASE.load(Ordering::Acquire) as usize;
-        let virt: *mut u64 =
-            core::ptr::with_exposed_provenance_mut(base + master_paddr.as_u64() as usize);
-        virt.add(300)
-    };
-    let sentinel: u64 = 0x0000_DEAD_BEEF_0001;
-    unsafe { entry_addr.write_volatile(sentinel) };
-
-    bump_kernel_master_gen();
-
-    // Activate space_a (which calls resync_kernel_half_if_stale
-    // internally). For a host test we can't actually do CR3 install,
-    // so call the resync path directly.
-    let resynced = space_a.resync_kernel_half_if_stale();
-    assert!(resynced, "resync should have fired (gen advanced)");
-
-    // Read PML4 index 300 of space_a; must match the sentinel.
-    let space_a_phys = space_a.pml4_paddr();
-    let entry_after = unsafe {
-        let base = BACKING_BASE.load(Ordering::Acquire) as usize;
-        let virt: *const u64 =
-            core::ptr::with_exposed_provenance(base + space_a_phys.as_u64() as usize);
-        virt.add(300).read_volatile()
-    };
-    assert_eq!(entry_after, sentinel);
-
-    // A second resync without a gen bump must report no work.
-    let again = space_a.resync_kernel_half_if_stale();
-    assert!(!again, "resync should be a no-op when up-to-date");
 }
 
 #[test]
@@ -792,4 +749,340 @@ fn pte_software_bits_round_trip_through_cursor() {
     assert_eq!(bits & PteFlags::AVL_9.bits(), PteFlags::AVL_9.bits());
     assert_eq!(bits & PteFlags::AVL_10.bits(), 0);
     assert_eq!(bits & PteFlags::AVL_11.bits(), PteFlags::AVL_11.bits());
+}
+
+// ---------------------------------------------------------------------------
+// Huge-leaf demotion, and the kernel-half entry points.
+//
+// A create-mode walk that meets a huge leaf on its way to a smaller
+// target splits it. That has to preserve every translation the huge leaf
+// carried: the demoted children cover the same physical range, so a
+// neighbour inside it must resolve exactly where it did before, and only
+// the requested address may change. The two failure modes — a child
+// stride that is off, and a lost neighbour — are silent, so both are
+// asserted explicitly.
+// ---------------------------------------------------------------------------
+
+/// Raw pointer to entry `index` of the page-table frame at
+/// `table_phys`, through the test arena's "HHDM". Used to install a
+/// 1 GiB leaf by hand: the arena is 32 MiB, so no 1 GiB-aligned page can
+/// be allocated from it, and the leaf's physical range is never
+/// dereferenced.
+fn arena_entry_ptr(table_phys: PhysAddr, index: usize) -> *mut u64 {
+    let base = BACKING_BASE.load(Ordering::Acquire) as usize;
+    // SAFETY: `table_phys` is a page inside the arena, whose provenance
+    // was exposed once in `setup`; `index < 512` keeps the offset inside
+    // the 4 KiB frame.
+    unsafe {
+        let virt: *mut u64 =
+            core::ptr::with_exposed_provenance_mut(base + table_phys.as_u64() as usize);
+        virt.add(index)
+    }
+}
+
+fn resolve(space: &VmSpace, vaddr: VirtAddr) -> Option<Paddr> {
+    let cur = space
+        .cursor(vaddr..VirtAddr::new(vaddr.as_u64() + 0x1000))
+        .unwrap();
+    let entry = cur.query().unwrap();
+    let paddr = entry.paddr?;
+    let leaf_size = match entry.level {
+        PageTableLevel::One => 0x1000u64,
+        PageTableLevel::Two => 0x20_0000,
+        PageTableLevel::Three => 0x4000_0000,
+        PageTableLevel::Four => return None,
+    };
+    Some(PhysAddr::new(
+        paddr.as_u64() | (vaddr.as_u64() & (leaf_size - 1)),
+    ))
+}
+
+#[test]
+fn map_4kb_inside_2mb_leaf_demotes_and_keeps_translations() {
+    let _g = setup();
+    let mut space = VmSpace::new().unwrap();
+
+    let huge_base = alloc_2mb_aligned_paddr();
+    let huge_va = VirtAddr::new(0x0000_0005_0000_0000);
+    {
+        let mut cur = space
+            .cursor_mut(huge_va..VirtAddr::new(huge_va.as_u64() + 0x20_0000))
+            .unwrap();
+        let frame = UFrame::<AnonymousMeta>::from_unused(huge_base, AnonymousMeta::default())
+            .expect("huge frame");
+        cur.map::<Size2Mb, _>(frame, PageProperty::USER_RW).unwrap();
+    }
+    assert_eq!(
+        space
+            .cursor(huge_va..VirtAddr::new(huge_va.as_u64() + 0x1000))
+            .unwrap()
+            .query()
+            .unwrap()
+            .level,
+        PageTableLevel::Two,
+    );
+
+    // A 4 KiB target two pages into the huge leaf, and a neighbour that
+    // must keep the translation the huge leaf gave it.
+    let target = VirtAddr::new(huge_va.as_u64() + 0x2000);
+    let neighbour = VirtAddr::new(huge_va.as_u64() + 0x9000);
+
+    // The create-mode walk demotes the 2 MiB leaf into a page table of
+    // 4 KiB children covering the same range, and then refuses: the
+    // address is still mapped, and overwriting a present leaf would
+    // strand the reference it holds. Demotion is a structural change,
+    // not a licence to remap.
+    {
+        let mut cur = space
+            .cursor_mut(target..VirtAddr::new(target.as_u64() + 0x1000))
+            .unwrap();
+        assert_eq!(
+            cur.map::<Size4Kb, _>(fresh_user_frame(), PageProperty::USER_RW),
+            Err(MapError::Overlap)
+        );
+    }
+
+    assert_eq!(
+        space
+            .cursor(target..VirtAddr::new(target.as_u64() + 0x1000))
+            .unwrap()
+            .query()
+            .unwrap()
+            .level,
+        PageTableLevel::One,
+        "the blocking huge leaf was demoted to 4 KiB children",
+    );
+    assert_eq!(
+        resolve(&space, target),
+        Some(PhysAddr::new(huge_base.as_u64() + 0x2000)),
+        "the demoted child keeps the translation the huge leaf gave it",
+    );
+    assert_eq!(
+        resolve(&space, neighbour),
+        Some(PhysAddr::new(huge_base.as_u64() + 0x9000)),
+        "a neighbour inside the demoted range keeps its translation",
+    );
+}
+
+#[test]
+fn map_4kb_inside_1gb_leaf_demotes_and_keeps_translations() {
+    let _g = setup();
+    let mut space = VmSpace::new().unwrap();
+
+    // Force the PDPT into existence, then replace the PDPT entry that
+    // covers this 1 GiB region with a huge leaf.
+    let region = VirtAddr::new(0x0000_0006_0000_0000);
+    {
+        let mut cur = space
+            .cursor_mut(region..VirtAddr::new(region.as_u64() + 0x1000))
+            .unwrap();
+        cur.map::<Size4Kb, _>(fresh_user_frame(), PageProperty::USER_RW)
+            .unwrap();
+    }
+    let pml4_idx = PageTableLevel::Four.index_of(region);
+    let pdpt_idx = PageTableLevel::Three.index_of(region);
+    // SAFETY: both pointers address one entry inside a live page-table
+    // frame in the arena; this thread holds the setup gate.
+    let pdpt_phys = unsafe {
+        PhysAddr::new(
+            arena_entry_ptr(space.pml4_paddr(), pml4_idx).read_volatile() & PteFlags::ADDRESS_MASK,
+        )
+    };
+    // A 1 GiB-aligned physical base outside the arena. Only PTE values
+    // name it; nothing dereferences the range.
+    let huge_base = PhysAddr::new(0x4000_0000);
+    let huge_entry = huge_base.as_u64()
+        | (PteFlags::PRESENT | PteFlags::WRITABLE | PteFlags::USER | PteFlags::HUGE).bits();
+    // SAFETY: as above.
+    unsafe { arena_entry_ptr(pdpt_phys, pdpt_idx).write_volatile(huge_entry) };
+
+    let target = VirtAddr::new(region.as_u64() + 0x20_3000);
+    let neighbour = VirtAddr::new(region.as_u64() + 0x40_5000);
+
+    // Two demotions in one descent: PDPT huge leaf -> page directory of
+    // 2 MiB children, then the covering 2 MiB child -> a page table of
+    // 4 KiB children. Refused at the leaf for the same reason as above.
+    {
+        let mut cur = space
+            .cursor_mut(target..VirtAddr::new(target.as_u64() + 0x1000))
+            .unwrap();
+        assert_eq!(
+            cur.map::<Size4Kb, _>(fresh_user_frame(), PageProperty::USER_RW),
+            Err(MapError::Overlap)
+        );
+    }
+
+    assert_eq!(
+        space
+            .cursor(target..VirtAddr::new(target.as_u64() + 0x1000))
+            .unwrap()
+            .query()
+            .unwrap()
+            .level,
+        PageTableLevel::One,
+        "the 1 GiB leaf was demoted all the way to 4 KiB children",
+    );
+    assert_eq!(
+        resolve(&space, target),
+        Some(PhysAddr::new(huge_base.as_u64() + 0x20_3000)),
+        "the demoted child keeps the translation the huge leaf gave it",
+    );
+    assert_eq!(
+        resolve(&space, neighbour),
+        Some(PhysAddr::new(huge_base.as_u64() + 0x40_5000)),
+        "a neighbour still covered by a 2 MiB child keeps its translation",
+    );
+}
+
+/// The kernel entry point installs a supervisor leaf from a sensitive
+/// `Frame<KernelMeta>` and hands the same frame back on unmap.
+#[test]
+fn map_kernel_round_trips_a_sensitive_frame() {
+    let _g = setup();
+    let mut space = VmSpace::new().unwrap();
+    let vaddr = VirtAddr::new(0xFFFF_9000_0000_0000);
+    let end = VirtAddr::new(vaddr.as_u64() + 0x1000);
+
+    let paddr = BUMP_ALLOC
+        .alloc(FrameAllocOptions::single().zeroed())
+        .unwrap();
+    let frame = Frame::<KernelMeta>::from_unused(paddr, KernelMeta).unwrap();
+    {
+        let mut cur = space.cursor_mut(vaddr..end).unwrap();
+        cur.map_kernel::<Size4Kb, KernelMeta>(frame, PageProperty::KERNEL_RW)
+            .unwrap();
+    }
+
+    let entry = space.cursor(vaddr..end).unwrap().query().unwrap();
+    assert_eq!(entry.paddr, Some(paddr));
+    assert!(!entry.property.user);
+    assert!(entry.property.global);
+
+    let mut cur = space.cursor_mut(vaddr..end).unwrap();
+    let back = cur
+        .unmap_kernel::<Size4Kb, KernelMeta>()
+        .unwrap()
+        .expect("unmap_kernel yields the frame");
+    assert_eq!(back.paddr(), paddr);
+}
+
+/// Both `map_kernel` guards are refusals, not warnings — a user-visible
+/// leaf and a low-half address each fail before anything is written.
+#[test]
+fn map_kernel_refuses_user_property_and_low_half() {
+    let _g = setup();
+    let mut space = VmSpace::new().unwrap();
+
+    let kernel_va = VirtAddr::new(0xFFFF_9000_0001_0000);
+    let paddr = BUMP_ALLOC
+        .alloc(FrameAllocOptions::single().zeroed())
+        .unwrap();
+    {
+        let frame = Frame::<KernelMeta>::from_unused(paddr, KernelMeta).unwrap();
+        let mut cur = space
+            .cursor_mut(kernel_va..VirtAddr::new(kernel_va.as_u64() + 0x1000))
+            .unwrap();
+        assert_eq!(
+            cur.map_kernel::<Size4Kb, KernelMeta>(frame, PageProperty::USER_RW),
+            Err(MapError::NotKernelMapping)
+        );
+    }
+    assert_eq!(
+        space
+            .cursor(kernel_va..VirtAddr::new(kernel_va.as_u64() + 0x1000))
+            .unwrap()
+            .query()
+            .unwrap()
+            .paddr,
+        None
+    );
+
+    let low_va = VirtAddr::new(0x0000_0007_0000_0000);
+    let paddr2 = BUMP_ALLOC
+        .alloc(FrameAllocOptions::single().zeroed())
+        .unwrap();
+    let frame2 = Frame::<KernelMeta>::from_unused(paddr2, KernelMeta).unwrap();
+    let mut cur = space
+        .cursor_mut(low_va..VirtAddr::new(low_va.as_u64() + 0x1000))
+        .unwrap();
+    assert_eq!(
+        cur.map_kernel::<Size4Kb, KernelMeta>(frame2, PageProperty::KERNEL_RW),
+        Err(MapError::NotKernelMapping)
+    );
+}
+
+/// A `map_io` leaf owns nothing: unmapping it yields no frame, and the
+/// physical range it named never had a `MetaSlot` to reclaim from.
+#[test]
+fn map_io_owns_no_reference() {
+    let _g = setup();
+    let mut space = VmSpace::new().unwrap();
+    let vaddr = VirtAddr::new(0xFFFF_9000_0002_0000);
+    let end = VirtAddr::new(vaddr.as_u64() + 0x1000);
+    // Well past the arena — there is no MetaSlot for this address, which
+    // is exactly the case `map_io` exists for.
+    let device_pa = PhysAddr::new(0xFEE0_0000);
+
+    {
+        let mut cur = space.cursor_mut(vaddr..end).unwrap();
+        cur.map_io::<Size4Kb>(device_pa, PageProperty::KERNEL_RW)
+            .unwrap();
+    }
+
+    let entry = space.cursor(vaddr..end).unwrap().query().unwrap();
+    assert_eq!(entry.paddr, Some(device_pa));
+    assert_eq!(
+        entry.property.software & PageProperty::SOFTWARE_NO_FRAME_REF,
+        PageProperty::SOFTWARE_NO_FRAME_REF,
+        "the leaf records that it owns no reference"
+    );
+
+    let mut cur = space.cursor_mut(vaddr..end).unwrap();
+    assert!(
+        cur.unmap_kernel::<Size4Kb, KernelMeta>().unwrap().is_none(),
+        "unmapping a map_io leaf reclaims nothing"
+    );
+    drop(cur);
+    assert_eq!(
+        space.cursor(vaddr..end).unwrap().query().unwrap().paddr,
+        None
+    );
+}
+
+#[test]
+fn map_io_refuses_user_property() {
+    let _g = setup();
+    let mut space = VmSpace::new().unwrap();
+    let vaddr = VirtAddr::new(0xFFFF_9000_0003_0000);
+    let mut cur = space
+        .cursor_mut(vaddr..VirtAddr::new(vaddr.as_u64() + 0x1000))
+        .unwrap();
+    assert_eq!(
+        cur.map_io::<Size4Kb>(PhysAddr::new(0xFEE0_0000), PageProperty::USER_RW),
+        Err(MapError::NotKernelMapping)
+    );
+}
+
+/// Every kernel-half PML4 entry of the registered master is linked, so
+/// a fresh address space's one-shot copy of the top level can never go
+/// stale. Idempotent: a second call links nothing.
+#[test]
+fn prepopulate_kernel_half_links_every_top_level_entry() {
+    let _g = setup();
+    slopos_ostd::sync::run_bsp_init_for_test(|t| {
+        prepopulate_kernel_half(t).expect("prepopulate");
+    });
+
+    let master = PhysAddr::new(0);
+    for i in 256..512 {
+        // SAFETY: page 0 is the registered master, inside the arena.
+        let raw = unsafe { arena_entry_ptr(master, i).read_volatile() };
+        assert!(
+            raw & PteFlags::PRESENT.bits() != 0,
+            "kernel-half PML4 entry {i} is not linked"
+        );
+    }
+
+    let again = slopos_ostd::sync::run_bsp_init_for_test(|t| prepopulate_kernel_half(t).unwrap());
+    assert_eq!(again, 0, "prepopulation is idempotent");
 }

@@ -54,20 +54,18 @@ fn boot_step_register_frame_alloc_fn(ctx: &mut BootCtx<'_, BspInit>) {
 }
 
 fn boot_step_install_kernel_vm_space_fn(ctx: &mut BootCtx<'_, BspInit>) {
-    // Memory phase priority 55 — runs after meta_slots (priority 5)
-    // and frame_alloc (priority 6). The kernel master PML4 paddr was
-    // registered with OSTD at early-init time
-    // (`register_kernel_master_pml4(read_cr3())` in early_init.rs);
-    // CR3 has not been swapped since, so the same paddr is still the
-    // live PML4 and is safe to wrap.
+    // Memory phase priority 7 — after meta_slots (priority 5) and
+    // frame_alloc (priority 6), which are `wrap_kernel_master`'s only
+    // prerequisites, and *before* the first kernel-half mapping in the
+    // tree (priority 10). Every kernel-half page-table write in the
+    // kernel goes through this VmSpace's cursor, so it has to exist
+    // before the first one, not after.
     //
-    // The former `slopos_kernel_services::kernel_vm_space::install_kernel_vm_space`
-    // shim has been inlined here — the boot-step ordering established
-    // by this function is what `install_kernel_vm_space`'s doc
-    // contract referenced; rather than ferry a `&BspToken` through a
-    // wrapper, we touch the public `KERNEL_VM_SPACE` static directly.
-    use slopos_kernel_services::kernel_vm_space::{KERNEL_VM_SPACE, kernel_vm_space};
-    use slopos_ostd::mm::vm_space::VmSpace;
+    // The kernel master PML4 paddr was registered with OSTD at
+    // early-init time; CR3 has not been swapped since, so the same
+    // paddr is still the live PML4 and is safe to wrap.
+    use slopos_kernel_services::kernel_vm_space::KERNEL_VM_SPACE;
+    use slopos_ostd::mm::vm_space::{VmSpace, prepopulate_kernel_half};
     use slopos_ostd::sync::{LOCK_LEVEL_REGISTRY, SpinLock};
 
     let bsp = ctx.bsp_token();
@@ -94,25 +92,54 @@ fn boot_step_install_kernel_vm_space_fn(ctx: &mut BootCtx<'_, BspInit>) {
         SpinLock::new(space, LOCK_LEVEL_REGISTRY)
     });
 
-    // Stamp GLOBAL onto every kernel-half leaf via the OSTD cursor.
-    // This used to live inside `init_paging` (priority 10, legacy
-    // walker); routing through the cursor here exercises the
-    // huge-leaf-aware `protect::<S>` path on every 2 MiB HHDM entry.
-    // CR4.PGE is enabled at priority 1, so the bit is already
-    // meaningful on the leaves we're stamping.
+    // The kernel half now has two names — the root `slopos_mm::paging`
+    // walks and the root the cursor writes. They are the same frame,
+    // and that is a fact worth failing on rather than arguing about:
+    // a CR3 read that kept its PCID or PWT/PCD bits would give one of
+    // them a different value, and both are dereferenced as a table
+    // base.
+    assert_eq!(
+        slopos_mm::paging::kernel_pml4_phys(),
+        pml4_phys,
+        "kernel master PML4 disagreement: mm walker root vs. CR3",
+    );
+
+    // Link all 256 kernel-half PDPTs before any address space is built
+    // from this master, so a fresh `VmSpace`'s one-shot copy of the top
+    // level can never go stale.
+    let linked = prepopulate_kernel_half(&bsp)
+        .expect("boot_step_install_kernel_vm_space_fn: kernel-half prepopulation failed");
+
+    klog_info!(
+        "OSTD: KERNEL_VM_SPACE installed (pml4_phys=0x{:x}, pcid=0, {} kernel-half PDPTs linked)",
+        pml4_phys.as_u64(),
+        linked
+    );
+}
+
+fn boot_step_mark_kernel_global_fn(ctx: &mut BootCtx<'_, BspInit>) {
+    // Memory phase priority 55 — after every kernel-half mapping the
+    // memory phase installs (priority 10 and later). The order is
+    // load-bearing: this stamps GLOBAL onto leaves that already exist,
+    // so anything mapped afterwards would miss it.
+    use slopos_kernel_services::kernel_vm_space::kernel_vm_space;
+
+    let bsp = ctx.bsp_token();
+
+    // Stamp GLOBAL onto every kernel-half leaf via the OSTD cursor,
+    // which handles 4 KiB / 2 MiB / 1 GiB leaves uniformly through
+    // `protect::<S>`. CR4.PGE is enabled at priority 1, so the bit is
+    // already meaningful on the leaves being stamped.
     slopos_mm::paging::paging_mark_kernel_global();
 
     // Force the TLB to re-walk and re-tag kernel entries as global —
     // Intel SDM §4.10.2.4 says the CPU may have cached kernel entries
     // before the GLOBAL bit was set, so a CR3 reload drops the
-    // non-global entries. `activate_kernel_master` is the safe BSP-
-    // init wrapper around the otherwise-unsafe `activate`.
+    // non-global entries. `activate_kernel_master_bsp` is the safe
+    // BSP-init wrapper around the otherwise-unsafe `activate`.
     kernel_vm_space().lock().activate_kernel_master_bsp(&bsp);
 
-    klog_info!(
-        "OSTD: KERNEL_VM_SPACE installed (pml4_phys=0x{:x}, pcid=0)",
-        pml4_phys.as_u64()
-    );
+    klog_debug!("OSTD: kernel-half leaves stamped GLOBAL");
 }
 
 fn boot_step_register_luf_hook_fn(ctx: &mut BootCtx<'_, BspInit>) {
@@ -225,6 +252,13 @@ crate::boot_init!(
     flags = boot_init_priority(6)
 );
 crate::boot_init!(
+    BOOT_STEP_INSTALL_KERNEL_VM_SPACE,
+    memory,
+    b"ostd kernel_vm_space\0",
+    boot_step_install_kernel_vm_space_fn,
+    flags = boot_init_priority(7)
+);
+crate::boot_init!(
     BOOT_STEP_MEMORY_POST_TYPESTATE,
     memory,
     b"memory init post-typestate\0",
@@ -247,10 +281,10 @@ crate::boot_init!(
     flags = boot_init_priority(30)
 );
 crate::boot_init!(
-    BOOT_STEP_INSTALL_KERNEL_VM_SPACE,
+    BOOT_STEP_MARK_KERNEL_GLOBAL,
     memory,
-    b"ostd kernel_vm_space\0",
-    boot_step_install_kernel_vm_space_fn,
+    b"kernel-half GLOBAL stamp\0",
+    boot_step_mark_kernel_global_fn,
     flags = boot_init_priority(55)
 );
 crate::boot_init!(

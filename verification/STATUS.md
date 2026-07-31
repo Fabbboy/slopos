@@ -27,17 +27,33 @@ own doc-comments — not duplicated here.
 |---|---|---|
 | `slopos_ostd::mm::frame` | `proofs/frame_refcount.rs` | `Frame<M>` ref-count: no double-free, no use-after-free, `ref_count > 0` ⇒ allocated, free-listed ⇒ slot reset-before-free (I1–I4) |
 | `slopos_ostd::mm::slab` | `proofs/slab_lifetime.rs` | `HeapSlot` lifetime: a slot can't outlive its slab (Inv. 9); a cell fits any in-range type (Inv. 10) |
-| `slopos_ostd::mm::vm_space` | `proofs/vm_space_cursor.rs` | `Cursor`: page-table well-formedness, balanced map/unmap, user leaves are insensitive `UFrame`s (Inv. 4 + 5) |
+| `slopos_ostd::mm::vm_space` | `proofs/vm_space_cursor.rs` | `Cursor`: page-table well-formedness, balanced map/unmap/map_kernel/map_io, user-visible leaves are insensitive frames (Inv. 4 + 5) |
 | `slopos_ostd::task` ownership core **LOGIC** | `proofs/task_ownership.rs` | Task ownership: the existence reference is flag-elected and parked/released at most once (T1), container transitions conserve the strong count (T2), registered ⟺ holds its existence reference (T3), no use-after-free (T4), exactly one winner of the 1→0 release with destruction exactly once (T5), a reap never fires on a dispatch-pinned task (T6), destruction implies full detachment (T7) |
 | `slopos_ring` index/state-machine **LOGIC** | `proofs/ring_cursor.rs` + `proofs/ring_layout.rs` | SlopRing cursors: CQ no-overwrite, CQ-full correctness, overflow monotone-latch, cq_tail advance-exactly-one, in-flight cap, submit/consume bound; masked SQE/CQE indices in bounds + `locate` no-OOB/no-straddle |
 | `slopos_net::tcp` zero-copy send queue **LOGIC** | `proofs/tcp_zc_pin.rs` | TCP `MSG_ZEROCOPY` pin lifetime: every (re)transmit reads in-bounds of its pin (INV-TCPZC-PIN-IN-BOUNDS); a pin is held across retransmits and freed only on cumulative ACK / teardown, never mid-DMA (INV-TCPZC-HELD-UNTIL-ACK) |
 
-> `mm::vm_space` uses the coarse lock-per-`VmSpace` model (`CursorMut<'a>`
-> holds `&'a mut VmSpace`, so the borrow checker serializes all mutators —
-> Phase 3D.3's sanctioned fallback). This is a *scalability* gap vs.
-> CortenMM's range-disjoint parallelism, not a *soundness* one; see
-> `notes/cortenmm.md`. Re-attempt the fine-grained proof on each Verus bump
-> if SlopOS ever grows per-PT-page locking.
+> `mm::vm_space` uses the coarse lock-per-`VmSpace` model, in two tiers. The
+> borrow checker admits one `CursorMut` per `VmSpace` *object* (`CursorMut<'a>`
+> holds `&'a mut VmSpace`) — Phase 3D.3's sanctioned fallback. That alone is
+> not the whole-system guarantee: it says nothing about a second walker over
+> the same *physical* page tables reached some other way. So every `VmSpace`
+> shared across CPUs lives behind the lock that is the sole minter of the
+> `&mut` — `PROCESS_VMS[slot]` per process, `KERNEL_VM_SPACE` for the kernel
+> master — and no other writer of those tables exists.
+> `scripts/check_kernel_pml4_writer.sh` fails the build if one reappears; the
+> tier-2 argument is enforced there, not in prose.
+>
+> The Verus block covers all four mutators — `map`, `map_kernel`, `map_io`,
+> `unmap` — with `Inv. 4 + 5` conditioned on user visibility, plus three
+> broken-variant witnesses (`broken_double_leak`, `broken_map_kernel_user`,
+> `broken_unmap_reclaims_io`) showing the `Overlap` guard, `map_kernel`'s
+> `!prop.user` guard, and `unmap`'s software-bit branch are each
+> load-bearing. It does **not** read the surrounding prose: the two-tier
+> premise above is reviewed text, not a checked claim.
+>
+> This is a *scalability* gap vs. CortenMM's range-disjoint parallelism, not a
+> *soundness* one; see `notes/cortenmm.md`. Re-attempt the fine-grained proof
+> on each Verus bump if SlopOS ever grows per-PT-page locking.
 
 > `slopos_ring` verifies the **index/state-machine LOGIC only** — the
 > abstract SQ/CQ cursor arithmetic, overflow accounting, in-flight cap,

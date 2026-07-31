@@ -56,6 +56,19 @@ pub struct PageProperty {
 }
 
 impl PageProperty {
+    /// `software` bit meaning "this leaf owns no `MetaSlot` reference".
+    /// Set by [`CursorMut::map_io`] over physical memory that has no
+    /// slot at all — device apertures, firmware runtime regions — and
+    /// read back by [`CursorMut::unmap`], which then clears the entry
+    /// without attempting to reclaim a reference that was never taken.
+    ///
+    /// PTE bit 10. Bit 9 (`software & 1`) is the consumer's
+    /// copy-on-write marker and must stay free.
+    ///
+    /// [`CursorMut::map_io`]: crate::mm::vm_space::CursorMut::map_io
+    /// [`CursorMut::unmap`]: crate::mm::vm_space::CursorMut::unmap
+    pub const SOFTWARE_NO_FRAME_REF: u8 = 0b010;
+
     pub const KERNEL_RW: Self = Self {
         read: true,
         write: true,

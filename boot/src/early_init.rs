@@ -678,11 +678,14 @@ pub fn kernel_main_impl() {
         // Tell OSTD which PML4 was loaded by the bootloader. CR3 is a
         // pure CPU register read; the value persists for the lifetime
         // of the kernel since this PML4 holds the canonical kernel
-        // mappings.
+        // mappings. Mask off the low bits before handing it over —
+        // CR3 carries PCID (bits 0..11 with CR4.PCIDE) or PWT/PCD
+        // (bits 3 and 4 without it), and this value is dereferenced as
+        // a table base.
         let cr3 = slopos_arch::cpu::control_regs::read_cr3();
         slopos_ostd::mm::vm_space::register_kernel_master_pml4(
             token,
-            slopos_abi::addr::PhysAddr::new(cr3),
+            slopos_abi::addr::PhysAddr::new(cr3 & 0x000F_FFFF_FFFF_F000),
         );
 
         idt::idt_init(token);

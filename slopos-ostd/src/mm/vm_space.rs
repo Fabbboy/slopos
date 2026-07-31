@@ -7,9 +7,13 @@
 //!
 //! # Lifecycle
 //!
+//! - [`prepopulate_kernel_half`] links all 256 kernel-half PML4 entries
+//!   of the registered master at boot, before any address space exists.
 //! - [`VmSpace::new`] allocates a fresh PML4 via the registered
-//!   [`FrameAlloc`] and copies kernel-half mappings (indices 256..512)
-//!   from the registered [`register_kernel_master_pml4`] master.
+//!   [`FrameAlloc`] and copies those kernel-half entries (indices
+//!   256..512) once. No top-level kernel-half entry can appear
+//!   afterwards, so the copy never goes stale and nothing resynchronises
+//!   it.
 //! - Mutation happens through [`CursorMut`] held against
 //!   `&mut VmSpace`. One mutator at a time per `VmSpace`.
 //! - [`VmSpace::activate`] is the only sanctioned way to switch
@@ -24,34 +28,52 @@
 //! tell whether the address space has been mutated since a captured
 //! snapshot.
 //!
+//! # Map entry points
+//!
+//! Three, split by who owns the physical memory behind the leaf.
+//! [`CursorMut::map`] takes an untyped [`UFrame<M>`](crate::mm::uframe::UFrame)
+//! and installs a user leaf. [`CursorMut::map_kernel`] takes a sensitive
+//! [`Frame<M>`] and installs a supervisor-only kernel-half leaf; both
+//! leaves own one leaked reference that [`CursorMut::unmap`] reclaims.
+//! [`CursorMut::map_io`] takes a bare physical address with no
+//! `MetaSlot` behind it — a device aperture, a firmware region — owns
+//! nothing, and records that in the entry so `unmap` reclaims nothing.
+//!
 //! # Verification
 //!
 //! The page-table mutation path in this module ([`CursorMut::map`],
-//! [`CursorMut::unmap`], [`CursorMut::protect`]) is machine-checked under
-//! Verus. `verification/proofs/vm_space_cursor.rs` mirrors the
-//! cursor operations as an abstract page-table-path state machine and
-//! proves three obligations hold across every sequence of
-//! cursor calls (the lock-per-`VmSpace` model — `CursorMut<'a>` holds
-//! `&'a mut VmSpace`, so the borrow checker serializes all mutators on one
-//! address space):
+//! [`CursorMut::map_kernel`], [`CursorMut::map_io`], [`CursorMut::unmap`],
+//! [`CursorMut::protect`]) is machine-checked under Verus.
+//! `verification/proofs/vm_space_cursor.rs` mirrors the cursor operations
+//! as an abstract page-table-path state machine and proves three
+//! obligations hold across every sequence of cursor calls:
 //!
 //!   * (WF) cursor operations preserve page-table well-formedness — a
 //!     present leaf implies its whole intermediate chain (PT, PD, PDPT) is
 //!     present and valid, so no walk ever dereferences a dangling table
 //!     (CortenMM SOSP '25 Fig. 12, specialised to the 4-level x86_64 walk);
-//!   * (REF) [`CursorMut::map`] leaks exactly one `UFrame` ref into the
-//!     leaf PTE and [`CursorMut::unmap`] reclaims exactly one — no
-//!     double-leak (Overlap-guarded) and no double-free (not-present
-//!     guarded);
-//!   * (Inv. 4 + Inv. 5) a present user leaf is always an insensitive
-//!     `UFrame` — the `map::<S, M: AnyUFrameMeta>(UFrame<M>, ..)` argument
-//!     type is the carrier.
+//!   * (REF) a leaf that owns a reference holds exactly one, `map` /
+//!     `map_kernel` leak exactly that one and `unmap` reclaims it — no
+//!     double-leak (Overlap-guarded), no double-free (not-present
+//!     guarded), and no reference fabricated for a `map_io` leaf that
+//!     never took one;
+//!   * (Inv. 4 + Inv. 5) a present *user-visible* leaf is always an
+//!     insensitive frame. Two carriers: the
+//!     `map::<S, M: AnyUFrameMeta>(UFrame<M>, ..)` argument type, and the
+//!     `!prop.user` guard on `map_kernel` / `map_io`, which is what lets
+//!     those two accept a sensitive frame at all.
 //!
-//! The proof also encodes two *broken* variants — a second leak over a
-//! present leaf (Overlap guard removed) and a sensitive-frame map (raw
-//! `Frame` instead of `UFrame`) — and shows each violates the invariant,
-//! proving the Overlap guard and the `UFrame` boundary are load-bearing.
-//! The coarse lock-per-`VmSpace` model is a deliberate choice; see
+//! The proof encodes three *broken* variants — a second leak over a
+//! present leaf (Overlap guard removed), a sensitive-frame `map` (raw
+//! `Frame` instead of `UFrame`), and a `map_kernel` that forgot
+//! `!prop.user` — and shows each violates the invariant, so the Overlap
+//! guard, the `UFrame` boundary and the user guard are each
+//! load-bearing rather than defensive.
+//!
+//! The exclusivity model has two tiers: the borrow checker gives one
+//! `CursorMut` per `VmSpace` *object*, and the lock that owns a shared
+//! object is the sole minter of the `&mut` — `PROCESS_VMS[slot]` per
+//! process, `KERNEL_VM_SPACE` for the kernel master. See
 //! `verification/notes/cortenmm.md` and `verification/STATUS.md` for the
 //! gap vs. CortenMM's fine-grained per-PT-page locking. Verified against
 //! the pinned Verus toolchain in `verification/verus.toml`; run
@@ -65,7 +87,7 @@ use core::sync::atomic::{AtomicPtr, AtomicU64, Ordering};
 use slopos_abi::addr::{PhysAddr, VirtAddr};
 
 use crate::arch::x86_64::cr3::{Pcid, write_cr3_pcid};
-use crate::mm::frame::{Frame, FrameAllocOptions, Paddr, PageTableMeta};
+use crate::mm::frame::{AnyFrameMeta, Frame, FrameAllocOptions, Paddr, PageTableMeta};
 use crate::mm::frame_alloc::current_frame_allocator;
 use crate::mm::page_property::PageProperty;
 use crate::mm::page_size::PageSize;
@@ -80,21 +102,28 @@ use crate::sync::BspToken;
 const KERNEL_HALF_START_INDEX: usize = 256;
 const KERNEL_HALF_END_INDEX: usize = 512;
 
+/// Lowest canonical higher-half virtual address — PML4 index 256, the
+/// first entry of the kernel half. [`CursorMut::map_kernel`] and
+/// [`CursorMut::map_io`] refuse anything below it.
+const HIGHER_HALF_START: u64 = 0xFFFF_8000_0000_0000;
+
 /// Per-address-space page-table handle.
 ///
 /// `pml4` is intentionally private. The only mutation path is
 /// through [`Self::cursor_mut`].
 ///
-/// `kernel_gen` is the [`KERNEL_MASTER_GEN`] value this VmSpace's
-/// kernel-half (PML4 indices 256..512) was last synced against.
-/// `activate` calls [`resync_kernel_half_if_stale`] before installing
-/// CR3, so any post-construction kernel-master mutation propagates
-/// to every running address space at next context switch.
+/// The kernel half (PML4 indices 256..512) is copied from the
+/// registered master once, at construction, and never resynchronised.
+/// That is sufficient because [`prepopulate_kernel_half`] links all 256
+/// second-level tables on the master before any address space exists:
+/// a kernel-half PML4 entry can only ever *change* by being linked for
+/// the first time, and after pre-population there is no first time
+/// left. Every deeper kernel-half mutation lands in a table the copy
+/// already points at, so every address space sees it immediately.
 pub struct VmSpace {
     pml4: Frame<PageTableMeta>,
     pcid: Pcid,
     generation: AtomicU64,
-    kernel_gen: AtomicU64,
     /// Opaque handle the consumer (slopos-mm) attaches via
     /// [`Self::set_mm_ctx_handle`]; threaded through
     /// [`CursorUnmapHook`] callbacks so the consumer can route TLB /
@@ -137,6 +166,12 @@ pub enum MapError {
     /// The consumer attempted a mutating cursor operation while another
     /// externally-held handle still had the address space borrowed.
     ConcurrentAccess,
+    /// A kernel-half entry point ([`CursorMut::map_kernel`],
+    /// [`CursorMut::map_io`]) was handed `prop.user`, or a cursor
+    /// positioned below the canonical higher half. Both entry points
+    /// install supervisor-only leaves in the kernel's own half of the
+    /// address space; neither condition is recoverable by retrying.
+    NotKernelMapping,
 }
 
 /// Read-only walking handle over `[range.start, range.end)`.
@@ -180,45 +215,19 @@ const KERNEL_MASTER_UNINIT: u64 = u64::MAX;
 /// `VmSpace::new` into every fresh address space) and the mapping
 /// must persist for the static lifetime of the kernel.
 pub fn register_kernel_master_pml4<'brand>(_token: &BspToken<'brand>, paddr: PhysAddr) {
+    assert_eq!(
+        paddr.as_u64() & (PAGE_SIZE_4KB - 1),
+        0,
+        "register_kernel_master_pml4: paddr 0x{:x} is not 4 KiB-aligned — \
+         a raw CR3 read carries PCID and PWT/PCD in the low bits and must be \
+         masked before it names a table base",
+        paddr.as_u64(),
+    );
     let prev = KERNEL_MASTER_PML4.swap(paddr.as_u64(), Ordering::AcqRel);
     assert_eq!(
         prev, KERNEL_MASTER_UNINIT,
         "register_kernel_master_pml4 called twice"
     );
-}
-
-// ---------------------------------------------------------------------------
-// Kernel-master generation counter.
-// ---------------------------------------------------------------------------
-
-/// Monotonic counter bumped whenever the kernel master PML4 has its
-/// kernel-half mappings (indices 256..512) mutated. Per-VmSpace
-/// `kernel_gen` is compared against this value at activate time, and
-/// the kernel half is resynced lazily when it lags.
-///
-/// Starts at 0; the first user-VmSpace's `kernel_gen` is initialised
-/// to whatever value is current at construction. A boot-time bump
-/// before any VmSpace exists is therefore a no-op (intended).
-static KERNEL_MASTER_GEN: AtomicU64 = AtomicU64::new(0);
-
-/// Bump the kernel-master generation. Call from slopos-mm whenever
-/// the kernel master PML4's indices 256..512 are mutated (e.g. a new
-/// permanent kernel mapping is installed). Each running `VmSpace`
-/// observes the bump on its next [`VmSpace::activate`] call and
-/// re-copies its own kernel half from the master.
-pub fn bump_kernel_master_gen() {
-    KERNEL_MASTER_GEN.fetch_add(1, Ordering::AcqRel);
-}
-
-/// Current kernel-master generation. Mostly diagnostic; the lazy
-/// resync inside `activate` is the production consumer.
-pub fn kernel_master_gen() -> u64 {
-    KERNEL_MASTER_GEN.load(Ordering::Acquire)
-}
-
-#[cfg(any(test, feature = "test-helpers"))]
-pub fn reset_kernel_master_gen_for_test() {
-    KERNEL_MASTER_GEN.store(0, Ordering::Release);
 }
 
 // ---------------------------------------------------------------------------
@@ -335,7 +344,6 @@ impl VmSpace {
             pml4,
             pcid: alloc_pcid(),
             generation: AtomicU64::new(0),
-            kernel_gen: AtomicU64::new(KERNEL_MASTER_GEN.load(Ordering::Acquire)),
             mm_ctx_handle: AtomicU64::new(0),
         })
     }
@@ -377,7 +385,6 @@ impl VmSpace {
             pml4,
             pcid,
             generation: AtomicU64::new(0),
-            kernel_gen: AtomicU64::new(KERNEL_MASTER_GEN.load(Ordering::Acquire)),
             mm_ctx_handle: AtomicU64::new(0),
         })
     }
@@ -400,42 +407,6 @@ impl VmSpace {
         // SAFETY: token + boot ordering jointly discharge the four
         // clauses of `wrap_existing`'s contract (see fn-level docs).
         unsafe { Self::wrap_existing(pml4_phys, Pcid::KERNEL) }
-    }
-
-    /// Resync this VmSpace's kernel-half (PML4 indices 256..512) from
-    /// the registered master if [`KERNEL_MASTER_GEN`] has advanced
-    /// since the last sync. Cheap when up-to-date — single Acquire
-    /// load + compare. Returns whether a resync ran.
-    ///
-    /// Called automatically from [`Self::activate`]; safe to call
-    /// from any context (no `&mut self` needed because the kernel
-    /// half is the kernel's exclusive write domain — slopos-mm
-    /// updates the master before bumping the generation, and cursor
-    /// mutations only touch indices 0..256).
-    pub fn resync_kernel_half_if_stale(&self) -> bool {
-        let master_gen = KERNEL_MASTER_GEN.load(Ordering::Acquire);
-        let local_gen = self.kernel_gen.load(Ordering::Acquire);
-        if local_gen == master_gen {
-            return false;
-        }
-        let master = KERNEL_MASTER_PML4.load(Ordering::Acquire);
-        if master == KERNEL_MASTER_UNINIT {
-            // Race window during boot: master not yet registered.
-            // Leave the kernel half as-is; the next activate retry
-            // will pick up the resync once boot completes.
-            return false;
-        }
-        let master_phys = PhysAddr::new(master);
-        copy_kernel_half(master_phys, self.pml4.paddr());
-        // CAS the local gen up to the value we read; if a concurrent
-        // resync raced ahead and stored a higher value, leave it.
-        let _ = self.kernel_gen.compare_exchange(
-            local_gen,
-            master_gen,
-            Ordering::AcqRel,
-            Ordering::Acquire,
-        );
-        true
     }
 
     /// Physical address of the PML4 frame.
@@ -472,30 +443,15 @@ impl VmSpace {
         })
     }
 
-    /// Switch the current CPU to this address space. Only sanctioned
-    /// CR3 write path. Resyncs the kernel half from the registered
-    /// master if [`KERNEL_MASTER_GEN`] has advanced since the last
-    /// sync — cheap when up-to-date (single atomic load). Fires the
-    /// registered [`CursorUnmapHook::on_activate`] callback (if any)
-    /// so the consumer's per-CPU LUF state tracks the current
-    /// Activate this VmSpace as the running address space, intended
-    /// for the **kernel master** VmSpace (the singleton wrapping the
-    /// bootloader-installed PML4). Sound to call from kernel-only
-    /// contexts where the kernel-half invariant is trivially satisfied:
-    /// the master maps kernel-half indices 256..512 directly, and the
-    /// user-half is unused for kernel-side work.
-    ///
-    /// Wraps [`VmSpace::activate`] so callers don't write `unsafe`
-    /// blocks. Intended caller is the post-user-fault park path; the
-    /// scheduler hot path uses [`activate`] directly because it
-    /// activates per-process VmSpaces whose kernel-half is resynced
-    /// via [`resync_kernel_half_if_stale`].
     /// Safe wrapper around [`Self::activate`] for the kernel master
     /// VmSpace (the singleton wrapping the bootloader-installed PML4).
     /// Sound to call from kernel-only contexts where the kernel-half
     /// invariant is trivially satisfied: the master maps kernel-half
     /// indices 256..512 directly, and the user-half is unused for
     /// kernel-side work.
+    ///
+    /// Intended caller is the post-user-fault park path; the scheduler
+    /// hot path uses [`Self::activate_at_context_switch`].
     pub fn activate_kernel_master(&self) {
         // SAFETY: the kernel master VmSpace always satisfies the
         // kernel-half invariant; CR3 reload to it is sound from any
@@ -515,24 +471,23 @@ impl VmSpace {
 
     /// Safe activate for the scheduler context-switch path. The
     /// scheduler upholds the `activate` contract for every dispatch
-    /// (IRQs off, kernel-half invariant maintained by the resync that
-    /// runs inside `activate` itself). Centralising the safe-fn
-    /// surface here keeps the consumer free of `unsafe`.
+    /// (IRQs off, and the kernel half of every address space is a copy
+    /// of a master whose top level never changes after
+    /// [`prepopulate_kernel_half`]). Centralising the safe-fn surface
+    /// here keeps the consumer free of `unsafe`.
     #[inline]
     pub fn activate_at_context_switch(&self) {
         // SAFETY: scheduler invariant — context-switch runs with IRQs
-        // disabled on the local CPU; `activate` resyncs the kernel
-        // half before reloading CR3, satisfying the kernel-half
-        // contract for the new mm.
+        // disabled on the local CPU, and this VmSpace's kernel half is
+        // valid by construction.
         unsafe { self.activate() };
     }
 
+    /// Switch the current CPU to this address space. The only
+    /// sanctioned CR3 write path. Fires the registered
+    /// [`CursorUnmapHook::on_activate`] callback (if any) so the
+    /// consumer's per-CPU LUF state tracks the current address space.
     pub unsafe fn activate(&self) {
-        // Pick up any kernel-master mutation that happened since last
-        // activate. This is the framekernel-correct sync point: by
-        // the time CR3 holds this VmSpace's PML4, every kernel-half
-        // mapping the rest of the kernel has installed is visible.
-        let _ = self.resync_kernel_half_if_stale();
         if let Some(hook) = current_cursor_unmap_hook() {
             hook.on_activate(self.mm_ctx_handle.load(Ordering::Acquire));
         }
@@ -545,9 +500,10 @@ impl VmSpace {
             & crate::cpu::x86_64::control_regs::Cr4Flags::PCIDE.bits())
             != 0;
         // SAFETY: `self.pml4` is a live page-table frame whose
-        // kernel-half indices 256..512 were copied from the master
-        // at construction (and resynced just above); the caller
-        // upholds the rest of `write_cr3_pcid`'s contract.
+        // kernel-half indices 256..512 were copied from the master at
+        // construction, and the master's top level does not change
+        // after `prepopulate_kernel_half`; the caller upholds the rest
+        // of `write_cr3_pcid`'s contract.
         unsafe { write_cr3_pcid(self.pml4_paddr(), self.pcid, pcide_enabled) };
     }
 
@@ -594,6 +550,62 @@ fn copy_kernel_half(master_phys: PhysAddr, dest_phys: PhysAddr) {
         let dst = entry_in_table(dest_phys, i);
         dst.write(src.read());
     }
+}
+
+/// Link a zeroed PDPT under every kernel-half PML4 entry of the
+/// registered master that does not have one yet, so all 256 entries are
+/// present before any address space is created from it.
+///
+/// This is what makes the one-shot `copy_kernel_half` in
+/// [`VmSpace::new`] correct for the lifetime of the kernel. A copy of
+/// the master's top level goes stale only if a top-level entry changes
+/// afterwards, and the only change a kernel-half entry can undergo is
+/// absent → present: nothing unlinks one, because
+/// [`CursorMut::unmap`] deliberately does not prune. Filling them all in
+/// up front removes the only transition, and with it the whole
+/// generation-counter/resynchronise protocol — an atomic load and a 2
+/// KiB copy per context switch.
+///
+/// Costs 256 page-table frames, once, on the BSP.
+///
+/// The `&BspToken<'brand>` witnesses BSP-only init: this must run
+/// before the first `VmSpace::new` and while nothing else walks the
+/// master. Returns the number of entries it linked, or
+/// [`MapError::Uninitialised`] if the master or the frame allocator is
+/// not registered yet.
+pub fn prepopulate_kernel_half<'brand>(_token: &BspToken<'brand>) -> Result<usize, MapError> {
+    let alloc = current_frame_allocator().ok_or(MapError::Uninitialised)?;
+    let master = KERNEL_MASTER_PML4.load(Ordering::Acquire);
+    if master == KERNEL_MASTER_UNINIT {
+        return Err(MapError::Uninitialised);
+    }
+    let master_phys = PhysAddr::new(master);
+
+    let mut linked = 0usize;
+    for i in KERNEL_HALF_START_INDEX..KERNEL_HALF_END_INDEX {
+        let pte = entry_in_table(master_phys, i);
+        if pte.is_present() {
+            continue;
+        }
+        let pdpt_phys = alloc
+            .alloc(FrameAllocOptions::single().zeroed())
+            .ok_or(MapError::IntermediateAllocFailed)?;
+        let frame = Frame::<PageTableMeta>::from_unused(
+            pdpt_phys,
+            PageTableMeta {
+                level: PageTableLevel::Three as u8,
+                static_borrowed: false,
+            },
+        )
+        .map_err(|_| MapError::PathCorrupt)?;
+        // Leak the typed handle into the entry, exactly as `step_down`
+        // would have when the first mapping under this entry arrived.
+        // These tables live for the lifetime of the kernel.
+        let _slot = frame.into_raw();
+        pte.set(pdpt_phys, PteFlags::PRESENT | PteFlags::WRITABLE);
+        linked += 1;
+    }
+    Ok(linked)
 }
 
 // ---------------------------------------------------------------------------
@@ -788,10 +800,208 @@ impl<'a> CursorMut<'a> {
             return Err(MapError::UnalignedFrame);
         }
 
+        let (leaf_table_phys, leaf_index) = self.walk_to_leaf_for_map::<S>(prop.user)?;
+        let pte = entry_in_table(leaf_table_phys, leaf_index);
+        if pte.is_present() {
+            // VERIFIED: `verification/proofs/vm_space_cursor.rs` proves
+            // this Overlap guard is load-bearing for (REF) —
+            // `broken_double_leak_violates_refcount` shows that leaking a
+            // second ref over a present leaf drives `pte_refs` past 1,
+            // stranding a ref. Do not remove without re-proving.
+            return Err(MapError::Overlap);
+        }
+
+        // Leak the UFrame's ref into the PTE: the frame's ref count
+        // stays at 1, conceptually owned by the leaf entry.
+        // VERIFIED: the `frame: UFrame<M>` argument type is the Inv. 4 +
+        // Inv. 5 carrier — `vm_space_cursor.rs::broken_map_sensitive_
+        // violates_inv45` proves accepting a raw `Frame` here would let a
+        // sensitive frame land in a user PTE. (REF) `map` leaks exactly
+        // one ref; `unmap` reclaims exactly one.
+        let inner = frame.into_frame();
+        let paddr = inner.paddr();
+        let _slot = inner.into_raw();
+
+        let mut flags = prop.to_leaf_flags();
+        if !flags.contains(PteFlags::PRESENT) {
+            flags |= PteFlags::PRESENT;
+        }
+        if S::HUGE_BIT {
+            flags |= PteFlags::HUGE;
+        }
+        pte.set(paddr, flags);
+        self.dirty = true;
+        Ok(())
+    }
+
+    /// Map a kernel-owned `frame` at the cursor's current vaddr with
+    /// `prop`, at leaf size `S`. The kernel-half sibling of
+    /// [`Self::map`]: same walk, same `Overlap` guard, same
+    /// leak-exactly-one-ref accounting, but the frame is a sensitive
+    /// `Frame<M>` rather than an untyped `UFrame<M>`. Reverse via
+    /// [`Self::unmap_kernel::<S, M>`].
+    ///
+    /// Why `M` needs only [`AnyFrameMeta`]: Inv. 4 and Inv. 5 are
+    /// hypothetically scoped to *user-visible* leaves — sensitive memory
+    /// must never be reachable from ring 3. The two guards below make
+    /// that hypothesis vacuous for every leaf this installs, discharging
+    /// the obligation at run time instead of through the `UFrame`
+    /// type carrier that [`Self::map`] uses. Both guards are therefore
+    /// load-bearing, not defensive:
+    /// `verification/proofs/vm_space_cursor.rs`'s
+    /// `broken_map_kernel_user_violates_inv45` is the machine-checked
+    /// statement that dropping the `!prop.user` half violates the
+    /// invariant.
+    ///
+    /// Errors: as [`Self::map`], plus
+    /// [`MapError::NotKernelMapping`] when `prop.user` is set or the
+    /// cursor sits below the canonical higher half.
+    pub fn map_kernel<S: PageSize, M: AnyFrameMeta>(
+        &mut self,
+        frame: Frame<M>,
+        prop: PageProperty,
+    ) -> Result<(), MapError> {
+        if prop.user || self.cur.as_u64() < HIGHER_HALF_START {
+            crate::klog_warn!(
+                "vm_space::map_kernel: refused va=0x{:x} user={} -> NotKernelMapping",
+                self.cur.as_u64(),
+                prop.user,
+            );
+            return Err(MapError::NotKernelMapping);
+        }
+        if self.cur.as_u64() >= self.range.end.as_u64() {
+            return Err(MapError::OutOfBounds);
+        }
+        if self.cur.as_u64() & (S::BYTES - 1) != 0 {
+            return Err(MapError::UnalignedCursor);
+        }
+        let map_end = self
+            .cur
+            .as_u64()
+            .checked_add(S::BYTES)
+            .ok_or(MapError::OutOfBounds)?;
+        if map_end > self.range.end.as_u64() {
+            return Err(MapError::OutOfBounds);
+        }
+        if frame.paddr().as_u64() & (S::BYTES - 1) != 0 {
+            return Err(MapError::UnalignedFrame);
+        }
+
+        let (leaf_table_phys, leaf_index) = self.walk_to_leaf_for_map::<S>(false)?;
+        let pte = entry_in_table(leaf_table_phys, leaf_index);
+        if pte.is_present() {
+            // VERIFIED: `verification/proofs/vm_space_cursor.rs` proves
+            // this Overlap guard is load-bearing for (REF) —
+            // `broken_double_leak_violates_refcount` shows that leaking a
+            // second ref over a present leaf drives `pte_refs` past 1,
+            // stranding a ref. Do not remove without re-proving.
+            return Err(MapError::Overlap);
+        }
+
+        // Leak the Frame's ref into the PTE: the frame's ref count
+        // stays at 1, conceptually owned by the leaf entry.
+        let paddr = frame.paddr();
+        let _slot = frame.into_raw();
+
+        let mut flags = prop.to_leaf_flags();
+        if !flags.contains(PteFlags::PRESENT) {
+            flags |= PteFlags::PRESENT;
+        }
+        if S::HUGE_BIT {
+            flags |= PteFlags::HUGE;
+        }
+        pte.set(paddr, flags);
+        self.dirty = true;
+        Ok(())
+    }
+
+    /// Install a leaf over physical memory that has **no** `MetaSlot` —
+    /// device MMIO apertures, firmware runtime regions, anything outside
+    /// the RAM range `META_SLOTS` is sized for. No frame is consumed and
+    /// no reference is taken, so there is nothing for [`Self::unmap`] to
+    /// reclaim; the leaf carries
+    /// [`PageProperty::SOFTWARE_NO_FRAME_REF`] to say so in the entry
+    /// itself, and the unmap path reads that bit rather than trusting
+    /// the caller to remember.
+    ///
+    /// Guarded to supervisor-only leaves (`!prop.user`): a device
+    /// aperture reachable from ring 3 is the sensitive-memory exposure
+    /// Inv. 4 and Inv. 5 exist to forbid. Unlike [`Self::map_kernel`]
+    /// this does **not** additionally require the higher half — the
+    /// firmware runtime regions the UEFI `ResetSystem` path needs are
+    /// mapped at their physical address, which is a supervisor-only leaf
+    /// in the low half of the kernel master. Callers own the VA policy;
+    /// `slopos_mm::kernel_mappings::kernel_map_io_4kb` is the one that
+    /// states it.
+    ///
+    /// Errors: as [`Self::map_kernel`], minus the frame-alignment arm.
+    pub fn map_io<S: PageSize>(
+        &mut self,
+        paddr: Paddr,
+        prop: PageProperty,
+    ) -> Result<(), MapError> {
+        if prop.user {
+            crate::klog_warn!(
+                "vm_space::map_io: refused user leaf va=0x{:x} -> NotKernelMapping",
+                self.cur.as_u64(),
+            );
+            return Err(MapError::NotKernelMapping);
+        }
+        if self.cur.as_u64() >= self.range.end.as_u64() {
+            return Err(MapError::OutOfBounds);
+        }
+        if self.cur.as_u64() & (S::BYTES - 1) != 0 {
+            return Err(MapError::UnalignedCursor);
+        }
+        let map_end = self
+            .cur
+            .as_u64()
+            .checked_add(S::BYTES)
+            .ok_or(MapError::OutOfBounds)?;
+        if map_end > self.range.end.as_u64() {
+            return Err(MapError::OutOfBounds);
+        }
+        if paddr.as_u64() & (S::BYTES - 1) != 0 {
+            return Err(MapError::UnalignedFrame);
+        }
+
+        let (leaf_table_phys, leaf_index) = self.walk_to_leaf_for_map::<S>(false)?;
+        let pte = entry_in_table(leaf_table_phys, leaf_index);
+        if pte.is_present() {
+            // VERIFIED: `verification/proofs/vm_space_cursor.rs` proves
+            // this Overlap guard is load-bearing for (REF) —
+            // `broken_double_leak_violates_refcount` shows that leaking a
+            // second ref over a present leaf drives `pte_refs` past 1,
+            // stranding a ref. Do not remove without re-proving.
+            return Err(MapError::Overlap);
+        }
+
+        let prop = PageProperty {
+            software: prop.software | PageProperty::SOFTWARE_NO_FRAME_REF,
+            ..prop
+        };
+        let mut flags = prop.to_leaf_flags();
+        if !flags.contains(PteFlags::PRESENT) {
+            flags |= PteFlags::PRESENT;
+        }
+        if S::HUGE_BIT {
+            flags |= PteFlags::HUGE;
+        }
+        pte.set(paddr, flags);
+        self.dirty = true;
+        Ok(())
+    }
+
+    /// Shared create-mode descent for the three map entry points.
+    /// Returns the leaf table and the index within it.
+    fn walk_to_leaf_for_map<S: PageSize>(
+        &self,
+        user_mapping: bool,
+    ) -> Result<(Paddr, usize), MapError> {
         let outcome = walk_to_leaf(
             self.space.pml4_paddr(),
             self.cur,
-            prop.user,
+            user_mapping,
             WalkMode::Create,
             S::LEVEL,
         )
@@ -826,38 +1036,7 @@ impl<'a> CursorMut<'a> {
             );
             return Err(MapError::PathCorrupt);
         }
-
-        let pte = entry_in_table(leaf_table_phys, leaf_index);
-        if pte.is_present() {
-            // VERIFIED: `verification/proofs/vm_space_cursor.rs` proves
-            // this Overlap guard is load-bearing for (REF) —
-            // `broken_double_leak_violates_refcount` shows that leaking a
-            // second ref over a present leaf drives `pte_refs` past 1,
-            // stranding a ref. Do not remove without re-proving.
-            return Err(MapError::Overlap);
-        }
-
-        // Leak the UFrame's ref into the PTE: the frame's ref count
-        // stays at 1, conceptually owned by the leaf entry.
-        // VERIFIED: the `frame: UFrame<M>` argument type is the Inv. 4 +
-        // Inv. 5 carrier — `vm_space_cursor.rs::broken_map_sensitive_
-        // violates_inv45` proves accepting a raw `Frame` here would let a
-        // sensitive frame land in a user PTE. (REF) `map` leaks exactly
-        // one ref; `unmap` reclaims exactly one.
-        let inner = frame.into_frame();
-        let paddr = inner.paddr();
-        let _slot = inner.into_raw();
-
-        let mut flags = prop.to_leaf_flags();
-        if !flags.contains(PteFlags::PRESENT) {
-            flags |= PteFlags::PRESENT;
-        }
-        if S::HUGE_BIT {
-            flags |= PteFlags::HUGE;
-        }
-        pte.set(paddr, flags);
-        self.dirty = true;
-        Ok(())
+        Ok((leaf_table_phys, leaf_index))
     }
 
     /// Unmap the current entry at leaf size `S`. Returns the freed
@@ -869,6 +1048,22 @@ impl<'a> CursorMut<'a> {
     /// * [`MapError::SizeMismatch`] — leaf is present at a different
     ///   size than `S` (e.g. `unmap::<Size4Kb>` on a 2 MiB leaf).
     pub fn unmap<S: PageSize, M: AnyUFrameMeta>(&mut self) -> Result<Option<UFrame<M>>, MapError> {
+        Ok(self.unmap_inner::<S, M>()?.map(UFrame::<M>::from_frame))
+    }
+
+    /// Kernel-half sibling of [`Self::unmap`], yielding the sensitive
+    /// `Frame<M>` that [`Self::map_kernel`] leaked into the leaf.
+    /// Dropping it returns the page to the registered allocator.
+    ///
+    /// Returns `Ok(None)` for a leaf [`Self::map_io`] installed — that
+    /// entry owns no reference, so there is nothing to hand back.
+    pub fn unmap_kernel<S: PageSize, M: AnyFrameMeta>(
+        &mut self,
+    ) -> Result<Option<Frame<M>>, MapError> {
+        self.unmap_inner::<S, M>()
+    }
+
+    fn unmap_inner<S: PageSize, M: AnyFrameMeta>(&mut self) -> Result<Option<Frame<M>>, MapError> {
         if self.cur.as_u64() >= self.range.end.as_u64() {
             return Err(MapError::OutOfBounds);
         }
@@ -910,12 +1105,27 @@ impl<'a> CursorMut<'a> {
 
         let paddr = pte.address();
         let was_user = pte.flags().contains(PteFlags::USER);
+        let owns_no_ref = PageProperty::from_leaf_flags(pte.flags()).software
+            & PageProperty::SOFTWARE_NO_FRAME_REF
+            != 0;
         pte.clear();
         // Local TLB invalidation for the freed leaf. Cross-CPU
         // shootdown is the consumer's responsibility (slopos-mm wraps
         // these calls with `tlb_shootdown`).
         flush_leaf_local::<S>(self.cur);
         self.dirty = true;
+
+        if owns_no_ref {
+            // A `map_io` leaf. The physical range it named has no
+            // `MetaSlot` at all, so there is no ref to reclaim and
+            // `from_raw_at` below would either fail `OutOfRange` or —
+            // worse, on a machine whose RAM reaches past the aperture —
+            // succeed against a slot naming unrelated memory and hand
+            // a device window to the frame allocator. The bit in the
+            // entry is what makes that unreachable rather than
+            // remembered.
+            return Ok(None);
+        }
 
         // Fire the cursor-unmap hook for user-space leaves. Slopos-mm
         // dispatches this into its LUF queue; tests can observe it
@@ -942,7 +1152,7 @@ impl<'a> CursorMut<'a> {
         // without bumping the count, so accounting is exact.
         let frame: Frame<M> =
             unsafe { Frame::<M>::from_raw_at(paddr).map_err(|_| MapError::PathCorrupt)? };
-        Ok(Some(UFrame::<M>::from_frame(frame)))
+        Ok(Some(frame))
     }
 
     /// Update the access/cache properties of the current entry at

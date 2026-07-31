@@ -151,8 +151,9 @@ pub fn ensure_user_pml4() -> Result<(), ()> {
 /// to copying the full kernel upper half — preserving current
 /// behaviour so the system keeps booting.
 pub fn build_user_kernel_half_stub() {
-    // Intentionally empty. The actual copy/restrict happens inside
-    // `mm::paging::tables::paging_copy_kernel_mappings` today. This
-    // function is the hook for the future restricted variant; keeping
-    // the symbol exported means the transition is a one-file change.
+    // Intentionally empty. A fresh address space takes the whole kernel
+    // half by copying PML4 indices 256..512 from the registered master
+    // (`VmSpace::new`). This function is the hook for the restricted
+    // variant; keeping the symbol exported means the transition is a
+    // one-file change.
 }

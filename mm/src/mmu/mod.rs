@@ -7,7 +7,6 @@
 //!   - per-CPU ASID pools (Linux-style 16-slot dance) — [`asid`]
 //!   - TLB shootdown backend (`trait ShootdownBackend`) — [`rar`]
 //!   - Lazy Unmap Flush (LUF) ring + cross-CPU drain — [`luf`]
-//!   - typed kernel mappings (`KernelMapping`) — [`mapping`]
 //!   - CPU errata gating (PCID blacklist) — [`errata`]
 //!   - KPTI dual-PML4 scaffolding — [`kpti`]
 
@@ -17,11 +16,9 @@ pub mod errata;
 pub mod kpti;
 pub mod luf;
 pub mod luf_hook;
-pub mod mapping;
 pub mod rar;
 pub mod shootdown;
 
-pub use mapping::{KernelMapping, unmap_kernel_page_free};
 pub use rar::{IntelRar, ShootdownBackend, SoftwareIpi, backend as shootdown_backend};
 
 pub use asid::{init_ap, init_bsp};
