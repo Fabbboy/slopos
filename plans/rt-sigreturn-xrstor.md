@@ -22,28 +22,6 @@ memset(p, 0xFF, 8192);
 asm volatile("mov %0, %%rsp; mov $105, %%eax; syscall" :: "r"(p));
 ```
 
-## Phase 0 — the `rt_sigaction` bound (land today, independent)
-
-Two signal-number validators exist in the same file with different bounds.
-`parse_signum`, used by `kill`, bounds against `NSIG`
-(`core/src/syscall/signal.rs:26-32`). The `Signum` newtype used by
-`rt_sigaction` bounds against the literal 64 (`core/src/syscall/args.rs:196-202`)
-while `signal_actions` is `[SignalActionCell; NSIG]` with `NSIG == 32`
-(`slopos-ostd/src/task/kernel_task.rs:594`). `rt_sigaction` computes
-`idx = signum - 1` and indexes directly, so any signum in `33..=64` panics.
-
-A bounds-safe accessor for the same array already exists and is used elsewhere:
-`slopos-ostd/src/task/borrowed.rs:231-236`.
-
-Fix: make `Signum` bound against `NSIG`, route the sigaction path through the
-checked accessor, and add `const _: () = assert!(...)` tying the validator's
-bound to the array length so they cannot drift again. This is unrelated to the
-XSAVE work and should not wait for it.
-
-Note this panic aborts the whole `just test` run rather than failing one test:
-`production_recovery_enabled()` returns false whenever `BOOT_FLAG_TESTS_ENABLED`
-is set (`slopos-ostd/src/panic_recovery.rs:37-40`).
-
 ## What is already closed — do not re-fix
 
 The classic sigreturn RFLAGS escalation **is already handled**. sigreturn commits
@@ -55,6 +33,11 @@ deliberately permitted. The IRQ-exit delivery path applies the same mask
 (`core/src/syscall/signal.rs:465`). There is no `sigaltstack` and no
 ucontext/mcontext surface, so `rt_sigreturn` is the only syscall that restores
 CPU register state from user memory.
+
+Signal numbers reaching `rt_sigaction` are bounded against `NSIG` by the
+`Signum` newtype, and the sigaction path indexes the action table through the
+checked accessors on `TaskInner`. That is not a hazard this plan needs to
+carry.
 
 The exposure is the XSAVE image and nothing else.
 
@@ -157,7 +140,6 @@ comparisons it would replace.
 
 | # | Work | Done when |
 |---|---|---|
-| 0 | `Signum` bounds against `NSIG`; sigaction goes through the checked accessor; static assert ties them | `syscall(102, 33, 0, buf, 8)` returns EINVAL instead of panicking |
 | 1 | `validate_xsave_image` + call it in `restore_fpu_from_sigframe` before the XRSTOR; reset to init state on rejection | The three-line repro returns EFAULT and the machine survives |
 | 2 | Reorder sigreturn so the FPU image is validated before the GPR commit | A rejected sigreturn leaves the task's registers unchanged |
 | 3 | `xrstor64` moved to a `global_asm!` symbol band; `#GP` fixup consult in the dispatcher | An artificially-injected un-modelled `#GP` at that site is recovered rather than fatal |
@@ -176,7 +158,6 @@ comparisons it would replace.
 - `stest!` — poison a task's `fpu_state` through the sigreturn path, force a
   context switch, and assert `prepare_switch_to` does not fault. This is the test
   that proves the second XRSTOR site is covered.
-- `utest!` for Phase 0 — `rt_sigaction` with signum 33..=64 returns EINVAL.
 
 Use the real `size_of::<SignalFrame>()` in any offset arithmetic rather than a
 literal: it is 20 × `u64` = **160** bytes (`abi/src/signal.rs:200-228`).

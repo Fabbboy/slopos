@@ -41,7 +41,7 @@ use slopos_abi::task::{TaskExitReason, TaskFaultReason};
 use crate::sync::LinkError;
 use crate::sync::intrusive::Link;
 use crate::task::exit_info::ExitInfo;
-use crate::task::kernel_task::{SchedPlacement, TaskInner};
+use crate::task::kernel_task::{SchedPlacement, SignalAction, TaskInner};
 use crate::task::link_roles::{ReclaimRole, RemoteWakeRole};
 
 impl<K, U> TaskInner<K, U> {
@@ -233,6 +233,34 @@ impl<K, U> TaskInner<K, U> {
     #[inline]
     pub fn signal_handler(&self, idx: usize) -> Option<u64> {
         self.signal_actions.get(idx).map(|a| a.handler())
+    }
+
+    /// The whole disposition registered for signal index `idx`, or `None` when
+    /// `idx` names no slot.
+    ///
+    /// Owner-only for the same reason as
+    /// [`SignalActionCell::load_owner_only`](crate::task::kernel_task::SignalActionCell::load_owner_only):
+    /// the group is not read atomically, so a remote CPU must use
+    /// [`signal_handler`](Self::signal_handler) instead.
+    #[inline]
+    pub fn signal_action(&self, idx: usize) -> Option<SignalAction> {
+        self.signal_actions.get(idx).map(|a| a.load_owner_only())
+    }
+
+    /// Publish a whole disposition at signal index `idx`, reporting whether
+    /// `idx` named a slot.
+    ///
+    /// `false` means nothing was written. A caller that derived `idx` from user
+    /// input must map that to an error rather than treating the install as done.
+    #[inline]
+    pub fn set_signal_action(&self, idx: usize, action: SignalAction) -> bool {
+        match self.signal_actions.get(idx) {
+            Some(cell) => {
+                cell.store(action);
+                true
+            }
+            None => false,
+        }
     }
 
     // ── Diagnostic counters ───────────────────────────────────────────

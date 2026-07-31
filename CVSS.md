@@ -41,7 +41,6 @@ python3 scripts/cvss_calc.py "CVSS:3.1/AV:L/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H"
 | [SLOPOS-2026-0014](#slopos-2026-0014) | 5.9 | MEDIUM | TCP initial sequence numbers come from an invertible FNV chain |
 | [SLOPOS-2026-0040](#slopos-2026-0040) | 5.9 | MEDIUM | virtio-net's RX ring shrinks monotonically and never refills |
 | [SLOPOS-2026-0007](#slopos-2026-0007) | 5.5 | MEDIUM | Unvalidated XSAVE area in `rt_sigreturn` halts the machine |
-| [SLOPOS-2026-0008](#slopos-2026-0008) | 5.5 | MEDIUM | `rt_sigaction` validates the signal number against 64 and indexes a 32-entry array |
 | [SLOPOS-2026-0010](#slopos-2026-0010) | 5.5 | MEDIUM | Process ids are drawn from an unbounded counter that is also an array index, so the 256th process created since boot can never run |
 | [SLOPOS-2026-0016](#slopos-2026-0016) | 5.5 | MEDIUM | AF_UNIX SCM_RIGHTS has no cycle policy, permanently leaking socket slots |
 | [SLOPOS-2026-0029](#slopos-2026-0029) | 5.5 | MEDIUM | `klog` has no rate limiting and userland can drive it from a cli-held lock |
@@ -97,21 +96,6 @@ asm volatile("mov %0, %%rsp; mov $105, %%eax; syscall" :: "r"(p));
 `read_signal_frame` succeeds (the page is mapped and readable), the 2688-byte copy-in succeeds, and `fpu_xrstor` faults.
 - Remediation: Validate the XSAVE header before restoring, as Linux does in `copy_user_to_xstate`: reject reserved header bytes, XSTATE_BV bits outside the active XCR0, an XCOMP_BV that disagrees with the format in use, and reserved MXCSR bits. Add an exception-table fixup covering the `xrstor64` site so a #GP there becomes SIGSEGV to the task rather than a machine halt — Linux pairs the validation with `force_sig(SIGSEGV)` on failure.
 
-### SLOPOS-2026-0008
-- Title: `rt_sigaction` validates the signal number against 64 and indexes a 32-entry array
-- Status: open
-- Confidence: 93 — evidence 40 (the bound, the array and the index all read directly), exploitability 28 (one syscall, no precondition), reproducibility 25 (deterministic panic; whether it is contained by the per-task oops budget or escalates depends on the recovery guard state)
-- CVSS vector/score: `CVSS:3.1/AV:L/AC:L/PR:L/UI:N/S:U/C:N/I:N/A:H` — **5.5 MEDIUM**
-- Impact: An out-of-bounds index panic in the kernel, reachable from any process. Contained by the per-task oops ledger on the production kernel; past the oops budget it becomes a full-system panic.
-- Evidence:
-  - core/src/syscall/args.rs:193-203 — `impl SyscallArg for Signum`: `if v == 0 || v > 64 { return Err(EINVAL) }`, doc at :182 says 'validated to fall inside 1..=64'
-  - abi/src/signal.rs:8 — `pub const NSIG: usize = 32;`
-  - slopos-ostd/src/task/kernel_task.rs:594 — `pub signal_actions: [SignalActionCell; NSIG]` (32 elements)
-  - core/src/syscall/signal.rs:109-111 — `let signum = signum.raw(); let idx = (signum - 1) as usize;` with no clamp against NSIG
-  - core/src/syscall/signal.rs:115 — `task_ref.signal_actions[idx].load_owner_only()` on the `old_act_ptr != 0` path
-- Repro:
-  `syscall(102, sig, act, oldact, 8)` with `sig` in `33..=64` and at least one of `act`/`oldact` non-null and mapped. The read path with `sig=33`, `act=0`, `oldact=<32 writable bytes>` reaches `signal_actions[32]` on a `[SignalActionCell; 32]`.
-- Remediation: Make the validation bound and the array length one constant. Either raise the array to NSIG entries or reject `signum > 32` with EINVAL — and add a `const _: () = assert!(...)` tying the two together so they cannot drift again.
 
 ### SLOPOS-2026-0009
 - Title: `spawn_path` installs user-supplied `TASK_FLAG_*` bits unmasked
@@ -683,7 +667,7 @@ Ordered by what removes the most exposure per unit of work, not by score.
 
 1. **Mask the spawn flags** (SLOPOS-2026-0009). A two-line allow-list in `syscall_spawn_path` removes the only privilege-forging primitive in the system and the unprivileged per-CPU lockup with it. Everything else in the privilege model is design work; this is not. See `plans/privilege-model.md`.
 2. **Bound the process id** (SLOPOS-2026-0010, and the same root cause in 0034). The system stops being able to start programs after 255 process creations; nothing else on this list is that visible to a user. See `plans/process-identity.md`.
-3. **Validate the signal-return XSAVE area and fix the `rt_sigaction` bound** (0007, 0008). Two unprivileged kernel-halt primitives, both local and both cheap to close. See `plans/rt-sigreturn-xrstor.md`.
+3. **Validate the signal-return XSAVE area** (0007). An unprivileged kernel-halt primitive: the `xrstor64` in `rt_sigreturn` restores a user-supplied image with no header validation and no #GP fixup. See `plans/rt-sigreturn-xrstor.md`.
 4. **Wire the SYN queue that already exists** (0011). The defence is written and tested; it merely has no caller.
 5. **Reseed the DNS resolver and validate response provenance** (0012), then replace the ISN generator with a keyed PRF (0014) and add the RFC 793 §3.9 acceptability gate (0013). These three are the network-facing set and share a test harness.
 6. **The TLB correctness set** (0017, 0018, 0019). Stale writable translations across address spaces are the only findings here that could become memory corruption rather than denial of service.

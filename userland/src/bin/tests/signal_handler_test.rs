@@ -196,6 +196,38 @@ fn test_signal_preserves_vector_regs() -> bool {
     true
 }
 
+/// `rt_sigaction` must reject a signal number past `NSIG` with `EINVAL` rather
+/// than indexing off the end of the 32-entry action table.
+///
+/// Issued as a raw syscall because libc's `sigaction()` never produces one. The
+/// query-only form (`new == 0`, `old != 0`) reaches the table read before any
+/// other validation, which is what made it the shortest repro. Running it from
+/// userland also proves the *process* survives holding `-EINVAL`.
+fn test_sigaction_rejects_signum_past_nsig() -> bool {
+    let mut old = UserSigaction {
+        sa_handler: 0,
+        sa_flags: 0,
+        sa_restorer: 0,
+        sa_mask: 0,
+    };
+    for signum in [33u64, 64, 65] {
+        let ret = unsafe {
+            slopos_slibc::pal::raw::syscall4(
+                slopos_abi::syscall::SYSCALL_RT_SIGACTION,
+                signum,
+                0,
+                &mut old as *mut UserSigaction as u64,
+                core::mem::size_of::<u64>() as u64,
+            )
+        } as i64;
+        if ret != -22 {
+            eprintln!("signal_handler_test: rt_sigaction({signum}) returned {ret}, want -EINVAL");
+            return false;
+        }
+    }
+    true
+}
+
 const CASES: &[(&str, fn() -> bool)] = &[
     (
         "signal_installs_and_delivers",
@@ -208,6 +240,10 @@ const CASES: &[(&str, fn() -> bool)] = &[
     (
         "signal_preserves_vector_regs",
         test_signal_preserves_vector_regs,
+    ),
+    (
+        "sigaction_rejects_signum_past_nsig",
+        test_sigaction_rejects_signum_past_nsig,
     ),
 ];
 

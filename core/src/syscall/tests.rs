@@ -17,9 +17,9 @@ use crate::syscall::signal::{
 use slopos_abi::addr::PhysAddr;
 use slopos_abi::fs::O_RDONLY;
 use slopos_abi::signal::{
-    SA_NODEFER, SA_RESTART, SIG_DFL, SIG_IGN, SIG_SETMASK, SIG_UNBLOCK, SIGCHLD, SIGCONT, SIGHUP,
-    SIGINT, SIGKILL, SIGSTOP, SIGTERM, SIGTSTP, SIGTTIN, SIGTTOU, SIGUSR1, SIGUSR2, SIGWINCH,
-    SigDefault, SigSet, SignalFrame, UserSigaction, sig_bit, sig_default_action,
+    NSIG, SA_NODEFER, SA_RESTART, SIG_DFL, SIG_IGN, SIG_SETMASK, SIG_UNBLOCK, SIGCHLD, SIGCONT,
+    SIGHUP, SIGINT, SIGKILL, SIGSTOP, SIGTERM, SIGTSTP, SIGTTIN, SIGTTOU, SIGUSR1, SIGUSR2,
+    SIGWINCH, SigDefault, SigSet, SignalFrame, UserSigaction, sig_bit, sig_default_action,
     sig_default_ignores,
 };
 use slopos_abi::syscall::{
@@ -5948,7 +5948,102 @@ slopos_testing::stest!(
     name = test_fork_child_inherits_and_then_diverges_from_parent_cwd,
     suite = syscall_valid
 );
+/// `rt_sigaction` bounds the signal number against `NSIG`, not a literal 64.
+///
+/// `Task::signal_actions` is `[SignalActionCell; NSIG]` and the handler indexes
+/// it with `signum - 1`, so a signum in `33..=64` ran off the end of a 32-entry
+/// array. `syscall(102, 33, 0, buf, 8)` was the shortest repro: the `old_act`
+/// read happens before every other validation. Under `tests=on` that index is
+/// not a failed test — `production_recovery_enabled()` is false, so it takes the
+/// whole run with it.
+pub fn test_rt_sigaction_bounds_signum_at_nsig() -> TestResult {
+    let _fixture = SyscallFixture::new();
+
+    let task_id = create_test_user_task();
+    assert_test!(task_id != INVALID_TASK_ID, "failed to create user task");
+    let task_guard = assert_some!(task_find_by_id(task_id), "task lookup failed");
+    let pid = task_guard.process_id;
+
+    let page = match map_user_rw_page(pid) {
+        Some(v) => v,
+        None => {
+            task_terminate(task_id);
+            return TestResult::Fail;
+        }
+    };
+    let old_addr = page + 128;
+    let set_size = core::mem::size_of::<SigSet>() as u64;
+
+    // Query-only form (`new == 0`, `old != 0`): the shortest path to the table
+    // read, and the one the repro takes. A failed process-VM activation yields
+    // the sentinel rather than a silent pass.
+    const NO_CONTEXT: u64 = u64::MAX;
+    let query = |signum: u64| -> u64 {
+        let mut frame = zero_frame();
+        frame.regs_mut().rdi = signum;
+        frame.regs_mut().rsi = 0;
+        frame.regs_mut().rdx = old_addr;
+        frame.regs_mut().r10 = set_size;
+        with_user_process_context(pid, || {
+            crate::syscall::dispatch::dispatch_handler(
+                syscall_rt_sigaction,
+                &task_guard,
+                &mut frame,
+            )
+        })
+        .map(|_| frame.regs().rax)
+        .unwrap_or(NO_CONTEXT)
+    };
+
+    let einval = slopos_abi::Errno::EINVAL.as_u64();
+
+    // NSIG itself is a real slot — the last one. An off-by-one in the other
+    // direction would make this EINVAL.
+    assert_eq_test!(
+        query(NSIG as u64),
+        0,
+        "signal NSIG is the last table slot and must be queryable"
+    );
+    let at_nsig: UserSigaction = match user_copy_in(pid, old_addr) {
+        Some(v) => v,
+        None => {
+            task_terminate(task_id);
+            return TestResult::Fail;
+        }
+    };
+    assert_eq_test!(
+        at_nsig.sa_handler,
+        SIG_DFL,
+        "the last table slot must read back as SIG_DFL"
+    );
+
+    // One past the end — the repro.
+    assert_eq_test!(
+        query(NSIG as u64 + 1),
+        einval,
+        "signum NSIG+1 has no table slot and must be EINVAL"
+    );
+    // The old literal ceiling: accepted before, indexes 32 slots past the end.
+    assert_eq_test!(
+        query(64),
+        einval,
+        "signum 64 was the old literal bound and must now be EINVAL"
+    );
+    // Past even that, so the bound is not merely relocated.
+    assert_eq_test!(query(65), einval, "signum 65 must be EINVAL");
+    // Signal 0 is not a signal; `rt_sigaction` has no kill(2)-style
+    // existence-probe meaning for it.
+    assert_eq_test!(query(0), einval, "signum 0 must be EINVAL");
+
+    task_terminate(task_id);
+    TestResult::Pass
+}
+
 slopos_testing::stest!(
     name = test_rt_sigaction_round_trips_every_field,
+    suite = syscall_valid
+);
+slopos_testing::stest!(
+    name = test_rt_sigaction_bounds_signum_at_nsig,
     suite = syscall_valid
 );

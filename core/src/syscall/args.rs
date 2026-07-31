@@ -12,6 +12,7 @@
 
 use slopos_abi::Errno;
 use slopos_abi::fs::USER_PATH_MAX;
+use slopos_abi::signal::NSIG;
 use slopos_abi::task::{INVALID_PROCESS_ID, INVALID_TASK_ID};
 use slopos_mm::user_ptr::{UserPtr as MmUserPtr, UserSlice as MmUserSlice};
 
@@ -179,9 +180,27 @@ impl SyscallArg for SigPid {
     }
 }
 
-/// Signal number, validated to fall inside `1..=64`.
+/// Signal number, validated to fall inside `1..=NSIG`.
+///
+/// The bound is `NSIG` rather than a round number because the only
+/// consumer, `rt_sigaction`, turns the value into `signum - 1` and
+/// indexes `Task::signal_actions`, which is `[SignalActionCell; NSIG]`.
+/// A looser bound here is an out-of-range index there, and with
+/// `tests=on` `production_recovery_enabled()` is false, so that index
+/// takes the whole run down rather than failing one syscall.
+///
+/// `crate::syscall::signal::parse_signum` applies the same bound for
+/// `kill`, which takes a raw `u64` because signal 0 is meaningful there.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct Signum(u8);
+
+// `from_raw` narrows the validated value to `u8`. That is lossless only
+// while `NSIG` fits in a `u8`; a larger signal space needs a wider
+// newtype before it needs a wider bound.
+const _: () = assert!(
+    NSIG <= u8::MAX as usize,
+    "Signum stores the validated signal number in a u8"
+);
 
 impl Signum {
     #[inline]
@@ -195,7 +214,7 @@ impl SyscallArg for Signum {
     #[inline]
     fn from_raw(regs: &[u64], _ctx: &SyscallContext) -> Result<Self, Errno> {
         let v = regs[0];
-        if v == 0 || v > 64 {
+        if v == 0 || v as usize > NSIG {
             return Err(Errno::EINVAL);
         }
         Ok(Signum(v as u8))

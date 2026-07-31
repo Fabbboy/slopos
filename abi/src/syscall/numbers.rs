@@ -479,7 +479,7 @@ pub const SYSCALL_CLONE: u64 = 101;
 /// Install or query a signal handler for a given signal.
 ///
 /// # Arguments (via registers)
-/// * rdi (arg0): signal number (1-31)
+/// * rdi (arg0): signal number, `1..=NSIG` (32)
 /// * rsi (arg1): pointer to new `UserSigaction` (or 0 to query only)
 /// * rdx (arg2): pointer to old `UserSigaction` output (or 0 to skip)
 /// * r10 (arg3): size of signal set (must be 8)
@@ -506,7 +506,7 @@ pub const SYSCALL_RT_SIGPROCMASK: u64 = 103;
 ///
 /// # Arguments (via registers)
 /// * rdi (arg0): target task ID (or 0 for self)
-/// * rsi (arg1): signal number (1-31, or 0 to check task existence)
+/// * rsi (arg1): signal number, `1..=NSIG` (32), or 0 to check task existence
 ///
 /// # Returns
 /// * 0 on success

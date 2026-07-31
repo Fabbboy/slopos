@@ -112,7 +112,10 @@ define_syscall!(syscall_rt_sigaction
 
     if old_act_ptr != 0 {
         let old_ptr = MmUserPtr::<UserSigaction>::try_new(old_act_ptr).map_err(|_| Errno::EFAULT)?;
-        let old_action = action_to_user(&task_ref.signal_actions[idx].load_owner_only());
+        // `Signum` already bounded this. The checked read is what makes the
+        // bound structural rather than a promise kept at a distance.
+        let current = task_ref.signal_action(idx).ok_or(Errno::EINVAL)?;
+        let old_action = action_to_user(&current);
         copy_to_user(old_ptr, &old_action).map_err(|_| Errno::EFAULT)?;
     }
 
@@ -128,7 +131,9 @@ define_syscall!(syscall_rt_sigaction
         {
             return Err(Errno::EINVAL);
         }
-        task_ref.signal_actions[idx].store(action_from_user(new_action));
+        if !task_ref.set_signal_action(idx, action_from_user(new_action)) {
+            return Err(Errno::EINVAL);
+        }
     }
 
     Ok(())

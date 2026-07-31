@@ -7,6 +7,9 @@
 
 use core::mem::offset_of;
 
+use slopos_abi::signal::NSIG;
+use slopos_ostd::task::kernel_task::SignalActionCell;
+
 use crate::task_stack::{KernelStack, UnsafeStack};
 
 pub use slopos_abi::task::{
@@ -81,6 +84,23 @@ const _: () = {
 // Keep it bounded to a single page so its static array fits comfortably
 // in `.bss` and heap callers budget a single-page allocation.
 const _: () = assert!(core::mem::size_of::<Task>() <= 8192);
+
+// Razor: the per-signal disposition table has exactly one slot per signal.
+//
+// `Signum` (core/src/syscall/args.rs) and `parse_signum`
+// (core/src/syscall/signal.rs) both bound signal numbers at `NSIG` and hand
+// `signum - 1` to the table. This measures the field's real extent rather
+// than restating its declared length, so resizing the table without moving
+// `NSIG` with it is a build failure instead of an out-of-range index.
+//
+// `signal_actions` and `switch_ctx` are adjacent and both 8-aligned, so the
+// delta is exact. If this fires after a field was inserted between them, the
+// span is no longer the table and the razor needs a new neighbour — not a new
+// tolerance.
+const _: () = {
+    let span = offset_of!(Task, switch_ctx) - offset_of!(Task, signal_actions);
+    assert!(span == NSIG * core::mem::size_of::<SignalActionCell>());
+};
 
 // ABI razor: `abi: TaskAbi` must be field #0 of Task so the
 // OSTD-side `TASK_UNSAFE_STACK_SP_OFFSET` const (computed as
