@@ -251,7 +251,7 @@ const IRQ_KEYBOARD_VECTOR: u8 = IRQ_BASE_VECTOR + 1;
 const IRQ_MOUSE_VECTOR: u8 = IRQ_BASE_VECTOR + 12;
 
 /// Total number of IST stacks we configure.
-const IST_STACK_COUNT: usize = 6;
+pub(crate) const IST_STACK_COUNT: usize = 6;
 
 /// Static configuration for all IST stacks.
 ///
@@ -334,8 +334,10 @@ fn stack_region_base_for_cpu(cpu_id: usize, stack_idx: usize) -> u64 {
             * EXCEPTION_STACK_REGION_STRIDE
 }
 
+/// `(guard_start, guard_end, stack_base, stack_top)` of CPU `cpu_id`'s IST
+/// stack `stack_idx`. The guard page occupies `[guard_start, guard_end)`.
 #[inline]
-fn stack_bounds_for_cpu(cpu_id: usize, stack_idx: usize) -> (u64, u64, u64, u64) {
+pub(crate) fn stack_bounds_for_cpu(cpu_id: usize, stack_idx: usize) -> (u64, u64, u64, u64) {
     let guard_start = stack_region_base_for_cpu(cpu_id, stack_idx);
     let guard_end = guard_start + EXCEPTION_STACK_GUARD_SIZE;
     let stack_base = guard_end;
@@ -360,7 +362,42 @@ fn find_index_by_address(addr: u64) -> Option<(usize, usize)> {
     None
 }
 
+/// Enforces the single-writer rule every mapping site in this module obeys:
+/// only the BSP links these regions into the page tables, and it does so in
+/// [`premap_cpus`] before any AP is bootstrapped.
+///
+/// The regions are packed tightly enough that CPUs share the page-directory
+/// entries covering them — 32 stack slots to a leaf page table. Two CPUs
+/// mapping concurrently would each allocate a leaf table for a shared entry
+/// and each install it, so the last install silently discards the other's
+/// stack pages along with the table that held them. The CPU that lost then
+/// takes its first exception onto an unmapped IST stack, double-faults onto
+/// an unmapped double-fault stack, and resets.
+///
+/// A release build must catch that, because the failure it prevents is
+/// indistinguishable from a hardware fault.
+fn assert_bsp_is_mapping(region: &str) {
+    let cpu_id = get_current_cpu();
+    if cpu_id != 0 {
+        // A panic message does not reach the console from an AP this early in
+        // bring-up, but klog does. State the violation here, where it will be
+        // read; the assertion below only has to stop the machine.
+        klog_info!(
+            "IST: CPU {} is linking page tables for {}; these regions share \
+             page-directory entries across CPUs, so only the BSP may map them, \
+             from premap_cpus, before any AP is bootstrapped",
+            cpu_id,
+            region
+        );
+    }
+    assert!(
+        cpu_id == 0,
+        "ist_stacks: non-BSP CPU linked kernel page tables"
+    );
+}
+
 fn map_stack_pages(stack: &IstStackConfig, stack_base: u64) {
+    assert_bsp_is_mapping("an IST stack");
     for page in 0..EXCEPTION_STACK_PAGES {
         let virt_addr = stack_base + page * PAGE_SIZE_4KB;
         // Allocate a zero-initialised kernel frame; the IST stack is mapped
@@ -430,7 +467,7 @@ fn ensure_cpu_stacks_mapped(cpu_id: usize) {
 /// The guard page occupies `[guard_start, usable_base)`; the usable stack
 /// `[usable_base, top)` grows down from `top` into the guard on overflow.
 #[inline]
-fn exc_dstack_bounds_for_cpu(cpu_id: usize) -> (u64, u64, u64) {
+pub(crate) fn exc_dstack_bounds_for_cpu(cpu_id: usize) -> (u64, u64, u64) {
     let region_base = EXC_DSTACK_REGION_BASE + cpu_id as u64 * EXC_DSTACK_REGION_STRIDE;
     let usable_base = region_base + EXC_DSTACK_GUARD_SIZE;
     let top = region_base + EXC_DSTACK_REGION_STRIDE;
@@ -440,6 +477,7 @@ fn exc_dstack_bounds_for_cpu(cpu_id: usize) -> (u64, u64, u64) {
 /// Map the usable pages of CPU `cpu_id`'s exception data stack, leaving the
 /// guard page at the base unmapped.  Mirrors [`map_stack_pages`].
 fn map_exc_dstack_pages(cpu_id: usize) {
+    assert_bsp_is_mapping("an exception data stack");
     let (_guard_start, usable_base, _top) = exc_dstack_bounds_for_cpu(cpu_id);
     for page in 0..EXC_DSTACK_PAGES {
         let virt_addr = usable_base + page * PAGE_SIZE_4KB;
@@ -508,16 +546,18 @@ pub fn exc_dstack_guard_fault(fault_addr: u64) -> Option<usize> {
 // Reliable Abort Core — per-CPU emergency SAFE + DATA stacks
 // =============================================================================
 
+/// `(guard_start, usable_base, top)` of CPU `cpu_id`'s emergency data stack.
 #[inline]
-fn emergency_dstack_bounds_for_cpu(cpu_id: usize) -> (u64, u64, u64) {
+pub(crate) fn emergency_dstack_bounds_for_cpu(cpu_id: usize) -> (u64, u64, u64) {
     let region_base = EMERGENCY_DSTACK_REGION_BASE + cpu_id as u64 * EMERGENCY_DSTACK_REGION_STRIDE;
     let usable_base = region_base + EMERGENCY_DSTACK_GUARD_SIZE;
     let top = region_base + EMERGENCY_DSTACK_REGION_STRIDE;
     (region_base, usable_base, top)
 }
 
+/// `(guard_start, usable_base, top)` of CPU `cpu_id`'s emergency safe stack.
 #[inline]
-fn emergency_safe_bounds_for_cpu(cpu_id: usize) -> (u64, u64, u64) {
+pub(crate) fn emergency_safe_bounds_for_cpu(cpu_id: usize) -> (u64, u64, u64) {
     let region_base =
         EMERGENCY_SAFE_STACK_REGION_BASE + cpu_id as u64 * EMERGENCY_SAFE_STACK_REGION_STRIDE;
     let usable_base = region_base + EMERGENCY_SAFE_STACK_GUARD_SIZE;
@@ -526,6 +566,7 @@ fn emergency_safe_bounds_for_cpu(cpu_id: usize) -> (u64, u64, u64) {
 }
 
 fn map_one_stack_region(usable_base: u64, pages: u64, what: &str, cpu_id: usize) {
+    assert_bsp_is_mapping(what);
     for page in 0..pages {
         let virt_addr = usable_base + page * PAGE_SIZE_4KB;
         let frame = Frame::<KernelMeta>::alloc_zeroed().unwrap_or_else(|| {
@@ -654,6 +695,27 @@ pub fn ist_stacks_init<'b>(ctx: &mut slopos_hermetic::BootCtx<'b, slopos_hermeti
             .filter(|c| c.category == IstCategory::HighFreqIrq)
             .count()
     );
+}
+
+/// Maps the IST, exception and emergency stacks of CPUs `0..cpu_count`.
+///
+/// Linking these regions into the page tables is a single-writer operation and
+/// this is the writer: it runs on the BSP before the first AP is bootstrapped.
+/// Stacks are packed 64 KiB apart, so 32 of them share one leaf page table and
+/// the CPUs that own them share the page-directory entry that links it. CPUs
+/// mapping their own stacks concurrently would each allocate a leaf table for
+/// that shared entry and each install it; the last install wins and every
+/// earlier writer's stack pages disappear along with the table that held them.
+/// A CPU left that way takes its first exception onto an unmapped IST stack,
+/// double-faults, finds the double-fault stack unmapped too, and resets.
+///
+/// Every CPU still calls [`ensure_cpu_stacks_mapped`] through
+/// [`ist_bind_current_cpu`], where it finds the work already done and maps
+/// nothing.
+pub fn premap_cpus(cpu_count: usize) {
+    for cpu_id in 0..cpu_count.min(MAX_CPUS) {
+        ensure_cpu_stacks_mapped(cpu_id);
+    }
 }
 
 /// Bind preallocated IST stacks into the current CPU's TSS/IDT context.

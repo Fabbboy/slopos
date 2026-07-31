@@ -202,13 +202,28 @@ pub fn smp_init<'b>(ctx: &mut slopos_hermetic::BootCtx<'b, slopos_hermetic::BspI
     // `&BspToken` witness from `ctx.bsp_token()` carries that proof.
     pcr::init_ap_pcr_lookup(&ctx.bsp_token(), &ap_task_ptrs);
 
+    let ap_count = cpus
+        .iter()
+        .filter(|cpu| cpu.lapic_id != bsp_lapic)
+        .count()
+        .min(MAX_STATIC_APS);
+
+    if ap_count == 0 {
+        klog_info!("MP: no secondary CPUs to start");
+        return;
+    }
+
+    // Map every CPU's IST, exception and emergency stacks here, on the BSP,
+    // while it is the only CPU running. `premap_cpus` documents why that is
+    // the only safe place to link them.
+    ist_stacks::premap_cpus(1 + ap_count);
+
     // AP_SIGNALS is indexed uniformly by `ap_slot` (the 1-based
     // non-BSP-CPU counter that we also thread through
     // `cpu.bootstrap(..., ap_slot)`). The AP-side write at
     // `boot/src/smp.rs:116` uses `cpu_idx = ap_slot`; this BSP-side
     // zero/wait must match. Using the limine `enumerate` index here
     // would mis-align whenever the BSP isn't `cpus[0]`.
-    let mut ap_count = 0usize;
     let mut ap_slot = 0u64;
     for cpu in cpus.iter() {
         if cpu.lapic_id == bsp_lapic {
@@ -227,12 +242,6 @@ pub fn smp_init<'b>(ctx: &mut slopos_hermetic::BootCtx<'b, slopos_hermetic::BspI
 
         AP_SIGNALS[ap_slot as usize].store(0, Ordering::Release);
         cpu.bootstrap(ap_trampoline, ap_slot);
-        ap_count += 1;
-    }
-
-    if ap_count == 0 {
-        klog_info!("MP: no secondary CPUs to start");
-        return;
     }
 
     let mut started_count = 0usize;
