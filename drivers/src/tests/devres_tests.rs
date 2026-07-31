@@ -6,12 +6,20 @@
 //! when no mapper is registered). The binding-path integration (a probe that
 //! acquires through `BoundDevice` then fails, and the registry releasing the
 //! bag) lives in `pci_binding.rs`.
+//!
+//! The DMA release test asserts positively, on slot state and on frame
+//! accounting: the buddy absorbs a double free without faulting, so "it did
+//! not crash" is not evidence either way.
 
 use core::sync::atomic::{AtomicU32, Ordering};
 
+use slopos_abi::addr::PhysAddr;
+use slopos_mm::page_alloc::get_page_allocator_stats;
+use slopos_mm::paging_defs::PAGE_SIZE_4KB_USIZE;
 use slopos_ostd::dev::Devres;
 use slopos_ostd::irq::IrqAllocator;
 use slopos_ostd::mm::dma::{register_identity_dma_mapper_for_test, reset_for_test};
+use slopos_ostd::mm::frame::{SlotMetaKind, slot_snapshot};
 use slopos_ostd::mm::{DmaCoherent, DmaError};
 use slopos_testing::{TestResult, fail, pass};
 
@@ -116,27 +124,82 @@ pub fn test_devres_releases_irq_vector() -> TestResult {
 }
 
 // ---------------------------------------------------------------------------
-// DMA buffer release on bag drop (no double free; re-allocatable).
+// DMA buffer release on bag drop.
 // ---------------------------------------------------------------------------
+
+/// Pages per DMA run under test.
+const DMA_RUN_PAGES: usize = 2;
+
+/// Runs churned in the accounting phase. A leak costs
+/// `DMA_CHURN_ROUNDS * DMA_RUN_PAGES` frames, two orders of magnitude past
+/// `DMA_ACCOUNTING_SLACK`.
+const DMA_CHURN_ROUNDS: usize = 1024;
+
+/// Frames the free count may legitimately move by across the churn: another
+/// CPU's allocations and any slab growth the churn itself provokes.
+const DMA_ACCOUNTING_SLACK: u32 = 256;
+
+fn free_frames() -> u32 {
+    let mut free = 0u32;
+    get_page_allocator_stats(core::ptr::null_mut(), &mut free, core::ptr::null_mut());
+    free
+}
 
 pub fn test_devres_releases_dma() -> TestResult {
     register_identity_dma_mapper_for_test();
+
+    let head;
     {
         let mut res = Devres::new();
-        let dma = match DmaCoherent::alloc(2) {
+        let dma = match DmaCoherent::alloc(DMA_RUN_PAGES) {
             Ok(d) => d,
             Err(e) => return fail!("DMA alloc failed: {:?}", e),
         };
+        head = dma.phys_base();
         if res.attach(dma).is_err() {
             return fail!("attach out of memory");
         }
-        // Bag drops here: DmaCoherent unmaps and frees its frames.
+        // Bag drops here: DmaCoherent unmaps, resets every MetaSlot, then
+        // returns the run to the frame allocator.
     }
-    // Frames returned to the pool: a fresh allocation succeeds (and the prior
-    // drop did not double-free, or this would have faulted).
-    match DmaCoherent::alloc(2) {
-        Ok(d) => drop(d),
-        Err(e) => return fail!("DMA re-alloc after release failed: {:?}", e),
+
+    // Every slot in the run is claimable again. This is the ordering the
+    // next owner of these pages depends on — a page reaching the free lists
+    // while its slot still reads `DmaCoherent` would fail that owner's
+    // `from_unused`.
+    for i in 0..DMA_RUN_PAGES {
+        let paddr = PhysAddr::new(head.as_u64() + (i * PAGE_SIZE_4KB_USIZE) as u64);
+        let kind = slot_snapshot(paddr).kind;
+        if kind != SlotMetaKind::Unused {
+            return fail!(
+                "slot for page {} of the released run reads {:?}, want Unused",
+                i,
+                kind
+            );
+        }
+    }
+
+    // The pages themselves came back. One round trip proves nothing while
+    // the allocator still has free memory, so churn enough runs that a leak
+    // dwarfs the background noise a concurrent CPU can contribute.
+    let free_before = free_frames();
+    for round in 0..DMA_CHURN_ROUNDS {
+        match DmaCoherent::alloc(DMA_RUN_PAGES) {
+            Ok(d) => drop(d),
+            Err(e) => return fail!("DMA alloc failed at churn round {}: {:?}", round, e),
+        }
+    }
+    let free_after = free_frames();
+    let lost = free_before.saturating_sub(free_after);
+    if lost > DMA_ACCOUNTING_SLACK {
+        return fail!(
+            "{} DMA runs of {} pages lost {} frames (free {} -> {}); the runs are not being released",
+            DMA_CHURN_ROUNDS,
+            DMA_RUN_PAGES,
+            lost,
+            free_before,
+            free_after
+        );
     }
     pass!()
 }

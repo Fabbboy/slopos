@@ -100,37 +100,6 @@ implement.
 
 ---
 
-## `DmaCoherent` and `DmaStream` leak their physical pages on drop
-
-**Status**: Open
-**Severity**: Low (the API has no production callers today)
-**Component**: `slopos-ostd/src/mm/dma.rs`
-
-Both DMA metas declare `returns_frame_on_last_drop() == false`
-(`dma.rs:103-111`, `:122-128`), so `Frame::drop` never calls
-`return_frame_to_allocator` (`frame.rs:1571-1579`). Neither type's `Drop` supplies
-a compensating `dealloc` — `DmaCoherent::drop` (`:330-339`) and
-`DmaStream::drop` (`:453-459`) call `mapper.unmap` and nothing else. The two
-`alloc` error paths (`:281-284`) leak the same way.
-
-`BoundDevice::alloc_dma_coherent` and `alloc_dma_stream` have **zero callers
-anywhere in the tree**, so no page leaks in a production kernel; the exposure is
-roughly six pages per tests-ISO boot. It becomes a real leak the moment a driver
-uses the API, which is what the API is for.
-
-Note `drivers/src/tests/devres_tests.rs:133` carries the comment "Bag drops here:
-DmaCoherent unmaps and **frees its frames**" — asserting behaviour the code does
-not have. The test passes because the following `DmaCoherent::alloc(2)` succeeds
-from an allocator that still has free memory.
-
-Fix: give both types a `Drop` that, after `mapper.unmap`, calls
-`current_frame_allocator()?.dealloc(head_paddr, len_pages)` — the buddy recovers
-the order from its own descriptor (`mm/src/page_alloc/buddy.rs:809-812`), so a
-single head-paddr dealloc is correct. Cover both `alloc` error paths. Fix the test
-comment in the same change.
-
----
-
 ## Two writers mutate the kernel master PML4 with incompatible synchronisation
 
 **Status**: Open

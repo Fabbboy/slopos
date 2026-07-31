@@ -45,8 +45,6 @@ use crate::mm::pod::Pod;
 use crate::mm::uframe::{AnyUFrameMeta, UFrameError, USegment};
 use crate::sync::BspToken;
 
-const PAGE_SIZE: usize = 4096;
-
 // ---------------------------------------------------------------------------
 // Direction + errors.
 // ---------------------------------------------------------------------------
@@ -100,10 +98,10 @@ impl From<UFrameError> for DmaError {
 #[derive(Debug, Default)]
 pub struct DmaCoherentMeta;
 
-// SAFETY: ZST has no representation invariants. A DMA segment frame's page
-// is owned by the segment, not the per-frame lifecycle, so
-// `returns_frame_on_last_drop` is `false`: the last drop resets the slot
-// but does not return the page to the allocator.
+// SAFETY: ZST has no representation invariants. A DMA run's pages are owned
+// by its [`DmaRun`], not by the per-frame lifecycle, so
+// `returns_frame_on_last_drop` is `false`: the last drop resets the slot and
+// `RunRelease` returns the pages.
 unsafe impl AnyFrameMeta for DmaCoherentMeta {
     fn returns_frame_on_last_drop(&self) -> bool {
         false
@@ -119,8 +117,8 @@ unsafe impl AnyUFrameMeta for DmaCoherentMeta {}
 #[derive(Debug, Default)]
 pub struct DmaStreamMeta;
 
-// SAFETY: as `DmaCoherentMeta` — the segment owns the page, so the
-// per-frame lifecycle does not return it to the allocator.
+// SAFETY: as `DmaCoherentMeta` — the run owns the pages, so the per-frame
+// lifecycle does not return them to the allocator.
 unsafe impl AnyFrameMeta for DmaStreamMeta {
     fn returns_frame_on_last_drop(&self) -> bool {
         false
@@ -233,6 +231,92 @@ pub fn register_identity_dma_mapper_for_test() {
 }
 
 // ---------------------------------------------------------------------------
+// DmaRun: page ownership for a DMA segment.
+// ---------------------------------------------------------------------------
+
+/// Returns a contiguous run of physical pages to the registered
+/// [`FrameAlloc`](crate::mm::frame::FrameAlloc) on drop.
+///
+/// One `dealloc` at the head covers the whole run: the allocator recovers a
+/// run's extent from its own descriptor, so `len_pages` is a courtesy
+/// argument rather than the authority on how much comes back.
+struct RunRelease {
+    head: PhysAddr,
+    len_pages: usize,
+}
+
+impl Drop for RunRelease {
+    fn drop(&mut self) {
+        if let Some(allocator) = current_frame_allocator() {
+            allocator.dealloc(self.head, self.len_pages);
+        }
+    }
+}
+
+/// A contiguous run of DMA pages together with the release that hands them
+/// back to the frame allocator.
+///
+/// [`DmaCoherentMeta`] and [`DmaStreamMeta`] declare
+/// `returns_frame_on_last_drop() == false`, so the per-frame lifecycle resets
+/// each `MetaSlot` but leaves the pages allocated. This type owns the
+/// compensating `dealloc`.
+///
+/// **The field order is load-bearing.** Fields drop in declaration order, so
+/// `segment` — and with it every `MetaSlot` reset — completes before
+/// `release` makes the pages claimable again. That is the ordering
+/// [`Frame`](crate::mm::frame::Frame)'s own destructor establishes for metas
+/// that do return their page: a free-listed paddr always has a slot reading
+/// UNUSED, so the next claimant's `from_unused` cannot lose a race against a
+/// slot that is still TYPED.
+struct DmaRun<M: AnyUFrameMeta> {
+    segment: USegment<M>,
+    /// Reached only through its `Drop` glue, so tagged `#[allow(dead_code)]`.
+    #[allow(dead_code)]
+    release: RunRelease,
+}
+
+impl<M: AnyUFrameMeta> DmaRun<M> {
+    /// Allocate `npages` contiguous, zeroed pages and install `M` on each.
+    ///
+    /// The release is armed the instant the allocator hands over the run and,
+    /// being the first local declared, is the last local dropped. Every error
+    /// path from there on therefore returns the pages, and so does every
+    /// error path in the callers that take the run by value.
+    fn alloc(npages: usize) -> Result<Self, DmaError> {
+        let allocator = current_frame_allocator().ok_or(DmaError::NotInitialised)?;
+        let opts = FrameAllocOptions {
+            size_pages: npages,
+            zeroing: true,
+            align_pages: 1,
+            no_pcp: false,
+            dma: false,
+        };
+        let head = allocator.alloc(opts).ok_or(DmaError::Exhausted)?;
+        let release = RunRelease {
+            head,
+            len_pages: npages,
+        };
+        let segment = USegment::<M>::from_unused_run_inner(head, npages)?;
+        Ok(Self { segment, release })
+    }
+
+    #[inline]
+    fn head_paddr(&self) -> PhysAddr {
+        self.segment.head_paddr()
+    }
+
+    #[inline]
+    fn len_pages(&self) -> usize {
+        self.segment.len_pages()
+    }
+
+    #[inline]
+    fn len_bytes(&self) -> usize {
+        self.segment.len_bytes()
+    }
+}
+
+// ---------------------------------------------------------------------------
 // DmaCoherent.
 // ---------------------------------------------------------------------------
 
@@ -242,7 +326,7 @@ pub fn register_identity_dma_mapper_for_test() {
 /// and the underlying frames. See module-level docs for the in-flight
 /// DMA caveat — drivers must quiesce the device before drop.
 pub struct DmaCoherent {
-    segment: USegment<DmaCoherentMeta>,
+    run: DmaRun<DmaCoherentMeta>,
     iova: u64,
 }
 
@@ -250,7 +334,7 @@ impl core::fmt::Debug for DmaCoherent {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         f.debug_struct("DmaCoherent")
             .field("iova", &format_args!("{:#x}", self.iova))
-            .field("len_bytes", &self.segment.len_bytes())
+            .field("len_bytes", &self.run.len_bytes())
             .finish()
     }
 }
@@ -265,25 +349,13 @@ impl DmaCoherent {
             return Err(DmaError::Exhausted);
         }
         let mapper = current_iommu_mapper().ok_or(DmaError::NotInitialised)?;
-        let allocator = current_frame_allocator().ok_or(DmaError::NotInitialised)?;
-        let opts = FrameAllocOptions {
-            size_pages: npages,
-            zeroing: true,
-            align_pages: 1,
-            no_pcp: false,
-            dma: false,
-        };
-        let head = allocator.alloc(opts).ok_or(DmaError::Exhausted)?;
-        let segment = USegment::<DmaCoherentMeta>::from_unused_run_inner(head, npages)?;
-        let size = npages * PAGE_SIZE;
-        let iova = match mapper.map(head, size, DmaDirection::Bidirectional) {
-            Ok(iova) => iova,
-            Err(e) => {
-                drop(segment);
-                return Err(e);
-            }
-        };
-        Ok(Self { segment, iova })
+        let run = DmaRun::<DmaCoherentMeta>::alloc(npages)?;
+        let iova = mapper.map(
+            run.head_paddr(),
+            run.len_bytes(),
+            DmaDirection::Bidirectional,
+        )?;
+        Ok(Self { run, iova })
     }
 
     /// Device-visible IOVA base.
@@ -295,35 +367,35 @@ impl DmaCoherent {
     /// Total byte length.
     #[inline]
     pub fn len_bytes(&self) -> usize {
-        self.segment.len_bytes()
+        self.run.len_bytes()
     }
 
     /// Number of pages.
     #[inline]
     pub fn len_pages(&self) -> usize {
-        self.segment.len_pages()
+        self.run.len_pages()
     }
 
     /// Physical base address of the underlying contiguous run.
     #[inline]
     pub fn phys_base(&self) -> PhysAddr {
-        self.segment.head_paddr()
+        self.run.head_paddr()
     }
 
     pub fn read_pod<T: Pod>(&self, offset: usize) -> Result<T, UFrameError> {
-        self.segment.read_pod(offset)
+        self.run.segment.read_pod(offset)
     }
 
     pub fn write_pod<T: Pod>(&self, offset: usize, value: T) -> Result<(), UFrameError> {
-        self.segment.write_pod(offset, value)
+        self.run.segment.write_pod(offset, value)
     }
 
     pub fn read_bytes(&self, offset: usize, dst: &mut [u8]) -> Result<(), UFrameError> {
-        self.segment.read_bytes(offset, dst)
+        self.run.segment.read_bytes(offset, dst)
     }
 
     pub fn write_bytes(&self, offset: usize, src: &[u8]) -> Result<(), UFrameError> {
-        self.segment.write_bytes(offset, src)
+        self.run.segment.write_bytes(offset, src)
     }
 }
 
@@ -332,9 +404,10 @@ impl Drop for DmaCoherent {
         // Driver-side responsibility: device must be quiesced before
         // the handle drops. OSTD does not issue a DMA fence.
         if let Some(mapper) = current_iommu_mapper() {
-            mapper.unmap(self.iova, self.segment.len_bytes());
+            mapper.unmap(self.iova, self.run.len_bytes());
         }
-        // `segment` drops automatically, releasing each frame.
+        // `run` drops after this body: every `MetaSlot` resets, then the
+        // pages go back to the frame allocator.
     }
 }
 
@@ -349,7 +422,7 @@ impl Drop for DmaCoherent {
 /// architecture is cache-coherent for DMA); the API is preserved so
 /// drivers can be written portably for future ARM64 support.
 pub struct DmaStream {
-    segment: USegment<DmaStreamMeta>,
+    run: DmaRun<DmaStreamMeta>,
     iova: u64,
     direction: DmaDirection,
     _marker: PhantomData<()>,
@@ -359,7 +432,7 @@ impl core::fmt::Debug for DmaStream {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         f.debug_struct("DmaStream")
             .field("iova", &format_args!("{:#x}", self.iova))
-            .field("len_bytes", &self.segment.len_bytes())
+            .field("len_bytes", &self.run.len_bytes())
             .field("direction", &self.direction)
             .finish()
     }
@@ -373,26 +446,10 @@ impl DmaStream {
             return Err(DmaError::Exhausted);
         }
         let mapper = current_iommu_mapper().ok_or(DmaError::NotInitialised)?;
-        let allocator = current_frame_allocator().ok_or(DmaError::NotInitialised)?;
-        let opts = FrameAllocOptions {
-            size_pages: npages,
-            zeroing: true,
-            align_pages: 1,
-            no_pcp: false,
-            dma: false,
-        };
-        let head = allocator.alloc(opts).ok_or(DmaError::Exhausted)?;
-        let segment = USegment::<DmaStreamMeta>::from_unused_run_inner(head, npages)?;
-        let size = npages * PAGE_SIZE;
-        let iova = match mapper.map(head, size, direction) {
-            Ok(iova) => iova,
-            Err(e) => {
-                drop(segment);
-                return Err(e);
-            }
-        };
+        let run = DmaRun::<DmaStreamMeta>::alloc(npages)?;
+        let iova = mapper.map(run.head_paddr(), run.len_bytes(), direction)?;
         Ok(Self {
-            segment,
+            run,
             iova,
             direction,
             _marker: PhantomData,
@@ -411,17 +468,17 @@ impl DmaStream {
 
     #[inline]
     pub fn len_bytes(&self) -> usize {
-        self.segment.len_bytes()
+        self.run.len_bytes()
     }
 
     #[inline]
     pub fn len_pages(&self) -> usize {
-        self.segment.len_pages()
+        self.run.len_pages()
     }
 
     #[inline]
     pub fn phys_base(&self) -> PhysAddr {
-        self.segment.head_paddr()
+        self.run.head_paddr()
     }
 
     /// Flush CPU writes so the device sees them. No-op on x86_64.
@@ -434,27 +491,29 @@ impl DmaStream {
     pub fn sync_for_cpu(&self) {}
 
     pub fn read_pod<T: Pod>(&self, offset: usize) -> Result<T, UFrameError> {
-        self.segment.read_pod(offset)
+        self.run.segment.read_pod(offset)
     }
 
     pub fn write_pod<T: Pod>(&self, offset: usize, value: T) -> Result<(), UFrameError> {
-        self.segment.write_pod(offset, value)
+        self.run.segment.write_pod(offset, value)
     }
 
     pub fn read_bytes(&self, offset: usize, dst: &mut [u8]) -> Result<(), UFrameError> {
-        self.segment.read_bytes(offset, dst)
+        self.run.segment.read_bytes(offset, dst)
     }
 
     pub fn write_bytes(&self, offset: usize, src: &[u8]) -> Result<(), UFrameError> {
-        self.segment.write_bytes(offset, src)
+        self.run.segment.write_bytes(offset, src)
     }
 }
 
 impl Drop for DmaStream {
     fn drop(&mut self) {
         if let Some(mapper) = current_iommu_mapper() {
-            mapper.unmap(self.iova, self.segment.len_bytes());
+            mapper.unmap(self.iova, self.run.len_bytes());
         }
+        // `run` drops after this body: every `MetaSlot` resets, then the
+        // pages go back to the frame allocator.
     }
 }
 

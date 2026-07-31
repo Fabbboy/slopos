@@ -5,25 +5,52 @@
 //! gives per-frame ref-count slots, a multi-page `BumpAlloc`
 //! implements `FrameAlloc`, and a `RecordingMapper` impls
 //! `IommuMapper` while recording every map/unmap call.
+//!
+//! `BumpAlloc` never re-hands a page, so each `dealloc` it records names a
+//! paddr no other test can also have produced — which is what lets a test
+//! assert on the *last* recorded release. It snapshots the head page's
+//! `MetaSlot` at the instant of release, so a run that hands its pages back
+//! before the per-frame lifecycle has reset the slots is caught by the
+//! recorded kind rather than by a downstream mystery.
 
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Mutex, MutexGuard, OnceLock};
 
 use slopos_abi::addr::PhysAddr;
 use slopos_ostd::mm::dma::{
     self, DmaCoherent, DmaDirection, DmaError, DmaStream, IommuMapper, register_iommu_mapper,
 };
-use slopos_ostd::mm::frame::{FrameAlloc, FrameAllocOptions, MetaSlot, Paddr, init_meta_slots};
+use slopos_ostd::mm::frame::{
+    FrameAlloc, FrameAllocOptions, MetaSlot, Paddr, SlotMetaKind, init_meta_slots, slot_snapshot,
+};
 use slopos_ostd::mm::frame_alloc::{self, register_frame_allocator};
 use slopos_ostd::mm::phys::init_phys_virt_offset;
 
 const N_PAGES: usize = 64;
 const PAGE_SIZE: usize = 4096;
 
+/// A page-aligned address one page past the end of the `MetaSlot` array.
+/// [`BumpAlloc`] hands this out in poison mode so the caller's
+/// `Frame::from_unused` fails `OutOfRange`, which is the reachable shape of
+/// a segment-build failure.
+const OUT_OF_SLOT_RANGE_PADDR: u64 = (N_PAGES * PAGE_SIZE) as u64;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct DeallocCall {
+    paddr: u64,
+    size_pages: usize,
+    /// The head page's `MetaSlot` kind as it read when `dealloc` was
+    /// entered. `Unused` means the segment had already been torn down.
+    head_slot_kind: SlotMetaKind,
+}
+
 /// Bump allocator over the scratch arena. Supports multi-page
 /// requests so `DmaCoherent::alloc(npages > 1)` works in tests.
 struct BumpAlloc {
     next_page: AtomicU64,
+    /// While set, `alloc` hands out [`OUT_OF_SLOT_RANGE_PADDR`] instead of a
+    /// real page, without advancing the cursor.
+    poisoned: AtomicBool,
 }
 
 impl FrameAlloc for BumpAlloc {
@@ -31,6 +58,9 @@ impl FrameAlloc for BumpAlloc {
         let n = opts.size_pages as u64;
         if n == 0 {
             return None;
+        }
+        if self.poisoned.load(Ordering::Acquire) {
+            return Some(PhysAddr::new(OUT_OF_SLOT_RANGE_PADDR));
         }
         let page = self.next_page.fetch_add(n, Ordering::Relaxed);
         if (page + n) as usize > N_PAGES {
@@ -50,8 +80,14 @@ impl FrameAlloc for BumpAlloc {
         Some(paddr)
     }
 
-    fn dealloc(&self, _paddr: Paddr, _size_pages: usize) {
-        // Bump allocator: leak.
+    fn dealloc(&self, paddr: Paddr, size_pages: usize) {
+        // Bump allocator: the pages are not recycled, only recorded — the
+        // record is what the release tests assert on.
+        CALL_LOG.deallocs.lock().unwrap().push(DeallocCall {
+            paddr: paddr.as_u64(),
+            size_pages,
+            head_slot_kind: slot_snapshot(paddr).kind,
+        });
     }
 }
 
@@ -62,6 +98,7 @@ impl FrameAlloc for BumpAlloc {
 static BACKING_BASE: AtomicU64 = AtomicU64::new(0);
 static BUMP_ALLOC: BumpAlloc = BumpAlloc {
     next_page: AtomicU64::new(0),
+    poisoned: AtomicBool::new(false),
 };
 static BUMP_REF: &'static dyn FrameAlloc = &BUMP_ALLOC;
 
@@ -81,12 +118,14 @@ struct UnmapCall {
 struct CallLog {
     maps: Mutex<Vec<MapCall>>,
     unmaps: Mutex<Vec<UnmapCall>>,
+    deallocs: Mutex<Vec<DeallocCall>>,
     next_iova: AtomicU64,
 }
 
 static CALL_LOG: CallLog = CallLog {
     maps: Mutex::new(Vec::new()),
     unmaps: Mutex::new(Vec::new()),
+    deallocs: Mutex::new(Vec::new()),
     next_iova: AtomicU64::new(0x1_0000_0000),
 };
 
@@ -114,6 +153,29 @@ impl IommuMapper for RecordingMapper {
 
 static RECORDING_MAPPER: RecordingMapper = RecordingMapper;
 static RECORDING_MAPPER_REF: &'static dyn IommuMapper = &RECORDING_MAPPER;
+
+/// Refuses every mapping. Stands in for an IOMMU policy that rejects a
+/// physical range, the error path between "pages allocated" and "handle
+/// constructed".
+struct RefusingMapper;
+
+impl IommuMapper for RefusingMapper {
+    fn map(
+        &self,
+        _phys: PhysAddr,
+        _size: usize,
+        _direction: DmaDirection,
+    ) -> Result<u64, DmaError> {
+        Err(DmaError::Forbidden)
+    }
+
+    fn unmap(&self, _iova: u64, _size: usize) {
+        panic!("RefusingMapper::unmap called: nothing it mapped can exist");
+    }
+}
+
+static REFUSING_MAPPER: RefusingMapper = RefusingMapper;
+static REFUSING_MAPPER_REF: &'static dyn IommuMapper = &REFUSING_MAPPER;
 
 static SETUP: OnceLock<Mutex<()>> = OnceLock::new();
 
@@ -152,6 +214,35 @@ fn snapshot_unmap_count() -> usize {
 
 fn snapshot_last_unmap() -> Option<UnmapCall> {
     CALL_LOG.unmaps.lock().unwrap().last().copied()
+}
+
+fn snapshot_dealloc_count() -> usize {
+    CALL_LOG.deallocs.lock().unwrap().len()
+}
+
+fn snapshot_last_dealloc() -> Option<DeallocCall> {
+    CALL_LOG.deallocs.lock().unwrap().last().copied()
+}
+
+/// Run `f` with the mapper temporarily swapped for `mapper`, restoring the
+/// recording mapper afterwards. The `setup()` guard serialises tests, so the
+/// swap is never observed by another test.
+fn with_mapper<R>(mapper: &'static &'static dyn IommuMapper, f: impl FnOnce() -> R) -> R {
+    dma::reset_for_test();
+    slopos_ostd::sync::run_bsp_init_for_test(|t| register_iommu_mapper(t, mapper));
+    let out = f();
+    dma::reset_for_test();
+    slopos_ostd::sync::run_bsp_init_for_test(|t| register_iommu_mapper(t, &RECORDING_MAPPER_REF));
+    out
+}
+
+/// Run `f` with the frame allocator handing out an address outside the
+/// `MetaSlot` array, so segment construction fails.
+fn with_poisoned_allocator<R>(f: impl FnOnce() -> R) -> R {
+    BUMP_ALLOC.poisoned.store(true, Ordering::Release);
+    let out = f();
+    BUMP_ALLOC.poisoned.store(false, Ordering::Release);
+    out
 }
 
 #[test]
@@ -260,6 +351,139 @@ fn stream_sync_methods_are_noops() {
 #[test]
 fn coherent_alloc_zero_pages_returns_exhausted() {
     let _g = setup();
+    let before = snapshot_dealloc_count();
     let r = DmaCoherent::alloc(0);
     assert_eq!(r.unwrap_err(), DmaError::Exhausted);
+    // The zero-page rejection precedes the allocation, so there is nothing
+    // to hand back.
+    assert_eq!(snapshot_dealloc_count(), before);
+}
+
+// ---------------------------------------------------------------------------
+// Page release: the success path and all three post-allocation error paths.
+//
+// `DmaCoherentMeta` / `DmaStreamMeta` declare
+// `returns_frame_on_last_drop() == false`, so nothing in the per-frame
+// lifecycle returns these pages — the run's own release does. Each test
+// below pins one path from "the allocator handed over a run" to "the run
+// came back", and checks the head slot read `Unused` at the moment of
+// release, which is the ordering the next claimant's `from_unused` depends
+// on.
+// ---------------------------------------------------------------------------
+
+/// The paddr `BumpAlloc` will hand out next, so a test can name the run an
+/// about-to-fail `alloc` is going to take and give back.
+fn next_bump_paddr() -> u64 {
+    BUMP_ALLOC.next_page.load(Ordering::Relaxed) * PAGE_SIZE as u64
+}
+
+#[test]
+fn coherent_drop_returns_pages_to_allocator() {
+    let _g = setup();
+    let before = snapshot_dealloc_count();
+    let h = DmaCoherent::alloc(2).expect("alloc");
+    let head = h.phys_base().as_u64();
+    assert_eq!(
+        snapshot_dealloc_count(),
+        before,
+        "released while still held"
+    );
+    drop(h);
+    assert_eq!(snapshot_dealloc_count(), before + 1);
+    let last = snapshot_last_dealloc().expect("dealloc recorded");
+    assert_eq!(last.paddr, head);
+    assert_eq!(last.size_pages, 2);
+    assert_eq!(last.head_slot_kind, SlotMetaKind::Unused);
+}
+
+#[test]
+fn stream_drop_returns_pages_to_allocator() {
+    let _g = setup();
+    let before = snapshot_dealloc_count();
+    let s = DmaStream::alloc(2, DmaDirection::ToDevice).expect("alloc");
+    let head = s.phys_base().as_u64();
+    assert_eq!(
+        snapshot_dealloc_count(),
+        before,
+        "released while still held"
+    );
+    drop(s);
+    assert_eq!(snapshot_dealloc_count(), before + 1);
+    let last = snapshot_last_dealloc().expect("dealloc recorded");
+    assert_eq!(last.paddr, head);
+    assert_eq!(last.size_pages, 2);
+    assert_eq!(last.head_slot_kind, SlotMetaKind::Unused);
+}
+
+#[test]
+fn coherent_alloc_returns_pages_when_mapper_refuses() {
+    let _g = setup();
+    let before = snapshot_dealloc_count();
+    let head = next_bump_paddr();
+    let r = with_mapper(&REFUSING_MAPPER_REF, || DmaCoherent::alloc(2));
+    assert_eq!(r.unwrap_err(), DmaError::Forbidden);
+    assert_eq!(snapshot_dealloc_count(), before + 1);
+    let last = snapshot_last_dealloc().expect("dealloc recorded");
+    assert_eq!(last.paddr, head);
+    assert_eq!(last.size_pages, 2);
+    assert_eq!(last.head_slot_kind, SlotMetaKind::Unused);
+}
+
+#[test]
+fn stream_alloc_returns_pages_when_mapper_refuses() {
+    let _g = setup();
+    let before = snapshot_dealloc_count();
+    let head = next_bump_paddr();
+    let r = with_mapper(&REFUSING_MAPPER_REF, || {
+        DmaStream::alloc(2, DmaDirection::FromDevice)
+    });
+    assert_eq!(r.unwrap_err(), DmaError::Forbidden);
+    assert_eq!(snapshot_dealloc_count(), before + 1);
+    let last = snapshot_last_dealloc().expect("dealloc recorded");
+    assert_eq!(last.paddr, head);
+    assert_eq!(last.size_pages, 2);
+    assert_eq!(last.head_slot_kind, SlotMetaKind::Unused);
+}
+
+#[test]
+fn coherent_alloc_returns_pages_when_segment_build_fails() {
+    let _g = setup();
+    let before = snapshot_dealloc_count();
+    let r = with_poisoned_allocator(|| DmaCoherent::alloc(2));
+    assert_eq!(r.unwrap_err(), DmaError::Exhausted);
+    assert_eq!(snapshot_dealloc_count(), before + 1);
+    let last = snapshot_last_dealloc().expect("dealloc recorded");
+    assert_eq!(last.paddr, OUT_OF_SLOT_RANGE_PADDR);
+    assert_eq!(last.size_pages, 2);
+    // No slot was ever claimed for this run, so there is none to classify.
+    assert_eq!(last.head_slot_kind, SlotMetaKind::Unknown);
+}
+
+#[test]
+fn stream_alloc_returns_pages_when_segment_build_fails() {
+    let _g = setup();
+    let before = snapshot_dealloc_count();
+    let r = with_poisoned_allocator(|| DmaStream::alloc(2, DmaDirection::Bidirectional));
+    assert_eq!(r.unwrap_err(), DmaError::Exhausted);
+    assert_eq!(snapshot_dealloc_count(), before + 1);
+    let last = snapshot_last_dealloc().expect("dealloc recorded");
+    assert_eq!(last.paddr, OUT_OF_SLOT_RANGE_PADDR);
+    assert_eq!(last.size_pages, 2);
+    assert_eq!(last.head_slot_kind, SlotMetaKind::Unknown);
+}
+
+#[test]
+fn repeated_alloc_and_drop_returns_every_run() {
+    let _g = setup();
+    // Each round takes a fresh run from the bump cursor and must give it
+    // back: one release per round, naming exactly the paddr the round took.
+    for _ in 0..8 {
+        let before = snapshot_dealloc_count();
+        let head = next_bump_paddr();
+        let h = DmaCoherent::alloc(1).expect("alloc");
+        assert_eq!(h.phys_base().as_u64(), head);
+        drop(h);
+        assert_eq!(snapshot_dealloc_count(), before + 1);
+        assert_eq!(snapshot_last_dealloc().expect("recorded").paddr, head);
+    }
 }
