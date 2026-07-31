@@ -4,11 +4,11 @@
 cycle detection, a chain-hash cache, lock-free CAS bookkeeping. It is also
 deterministically disabled before the kernel finishes initialising memory.
 
-Every boot now says so — the four `GRAPH_OVERFLOW` latch sites emit a warning
-naming the lock and the pool counts, `kdiag_dump_lock_graph` prints validator
-state at the end of driver init, and `slopos_testing::zz_lockdep_tests` proves
-the cycle detector fires and reports whether the boot reached the end with the
-validator intact. What follows is the work that makes that report say `ACTIVE`.
+Every boot says so: the four `GRAPH_OVERFLOW` latch sites warn once with the
+lock and the pool counts, `kdiag_dump_lock_graph` prints validator state at the
+end of driver init, and `slopos_testing::zz_lockdep_tests` proves the cycle
+detector fires and reports whether the boot reached the end with the validator
+intact. The work below is what makes that report say `ACTIVE`.
 
 ## The mechanism
 
@@ -115,20 +115,18 @@ gate rather than rely on it.
 
 | # | Work | Done when |
 |---|---|---|
-| 3 | `&'static LockClassKey` on `SpinLock::new`, declaration-site keys for the array-of-locks statics | `kdiag_dump_lock_graph` reports `ACTIVE` with a class count in the tens; `lockdep_graph_overflow_clear_at_boot_end` passes instead of skipping |
-| 4 | Split `PANIC_BYPASS` so the recoverable-oops path clears it | A recovered test panic leaves validation enabled, and the ABBA self-test no longer needs `SelfTestGuard` to override the gate |
-| 5 | Re-measure and re-size `MAX_CLASSES`/`MAX_EDGES` against the real post-fix counts | The sizing comment matches measured reality rather than an estimate |
-
-The numbering is kept so cross-references elsewhere keep resolving.
+| 1 | `&'static LockClassKey` on `SpinLock::new`, declaration-site keys for the array-of-locks statics | `kdiag_dump_lock_graph` reports `ACTIVE` with a class count in the tens; `lockdep_graph_overflow_clear_at_boot_end` passes instead of skipping |
+| 2 | Split `PANIC_BYPASS` so the recoverable-oops path clears it | A recovered test panic leaves validation enabled, and the ABBA self-test needs no `SelfTestGuard` override |
+| 3 | Re-measure and re-size `MAX_CLASSES`/`MAX_EDGES` against the real counts | The sizing comment matches measured reality rather than an estimate |
 
 ## Risks
 
-- **Phase 3 touches every `SpinLock::new` call site.** It is mechanical but wide.
+- **Phase 1 touches every `SpinLock::new` call site.** It is mechanical but wide.
   A `Default`-keyed overload can keep unconverted sites compiling during the
   migration, as long as it is removed at the end rather than left as an escape
   hatch.
 - **A newly-alive validator will find real inversions.** That is the intended
-  outcome, but it means phase 3 may turn the suite red, and the findings are the
+  outcome, but it means phase 1 may turn the suite red, and the findings are the
   work rather than a regression. Budget for it — and note the two documented
   lock-order hazards in `KNOWN_ISSUES.md` are prime candidates to fire first.
   `RESERVED_TEST_CLASSES` holds four slots back from the registrable range, so

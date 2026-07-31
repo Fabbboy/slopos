@@ -4,11 +4,11 @@ SlopOS has no uid, no credential and no capability object to hang authority on.
 Choosing that shape is a real decision, and this document is the spike that has
 to make it.
 
-The syscall boundary no longer lets userland name its own privileges — a spawn
-request is filtered against a `SPAWN_USER_SETTABLE` mask, and the privileged
-bits a child ends up with come from a kernel-side table keyed on the program
-being loaded (`core/src/exec/grants.rs`). That is containment. It is not a
-privilege model, and the gaps below are not things a mask can fix.
+The spawn boundary is contained: a request is filtered against a
+`SPAWN_USER_SETTABLE` mask, and the privileged bits a child ends up with come
+from a kernel-side table keyed on the program being loaded
+(`core/src/exec/grants.rs`). That is containment, not a privilege model, and
+the gaps below are not things a mask can fix.
 
 ## What the spike must confront
 

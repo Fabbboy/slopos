@@ -16,13 +16,13 @@ editing.
 |----------|-------|
 | `KNOWN_ISSUES.md` | Working notes on open issues; verify before using as source of truth |
 | `process-identity.md` | Bounded, recycling process id + `Handle<ProcessVm>` as the identity token; fixes the 256-process wall |
-| `privilege-model.md` | Part 1: mask the user-settable spawn flags. Part 2 (spike): what authority should actually be |
+| `privilege-model.md` | Spike: what authority should actually be, given no uid and no credential object |
 | `rt-sigreturn-xrstor.md` | Validate the signal-return XSAVE image; make a ring-0 #GP survivable |
 | `resource-accounting.md` | Spike: per-process limits. Inventory + the reclaim fixes that need no framework |
 | `unsafe-enforcement-gap.md` | Macro-injected `unsafe` and safe-fn-with-prose-contract surface; correct the claim, then gate it |
 | `elf-gates-fail-closed.md` | The post-link ELF gates pass when they verify nothing; self-tests for every gate |
 | `deferred-work.md` | Per-CPU work list so RCU reclaim stops depending on CPU 0 being idle |
-| `lockdep-effectiveness.md` | The lock-order validator exhausts its class table during mm init and silently turns itself off |
+| `lockdep-effectiveness.md` | The lock-order validator exhausts its class table during mm init and turns itself off |
 | `kernel-teardown-model.md` | Spike: `panic=unwind` and cross-CPU abandon contradict each other; invariant I8 is the tax |
 | `driver-framework-base.html` | Driver-framework base: unified Bus model, platform/ACPI registry, deferred-probe/hotplug/unbind |
 | `microtransactions.md` | Kernel microtransaction layer on W/L currency; Phase 1 = pay-to-boot gate |

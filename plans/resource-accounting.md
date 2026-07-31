@@ -7,10 +7,10 @@ a fixed global array, and one unprivileged process can exhaust any of them.
 
 This is a spike, not a work plan, because the framework question is genuinely
 blocked on a decision the code cannot answer: *who is the principal?* SlopOS has
-no uid, no credential, no namespace, and — until `plans/privilege-model.md`
-Part 1 lands — not even a trustworthy privilege bit to exempt a system daemon
-with. A quota written today would be enforced against an unauthenticated
-principal and exempted by a forgeable flag.
+no uid, no credential and no namespace. A quota written today would be enforced
+against an unauthenticated principal: the spawn boundary refuses to mint
+`TASK_FLAG_SYSTEM`, but it remains a per-task bit that fork copies wholesale and
+exec never drops, so it identifies no principal a quota could bill.
 
 What follows is the inventory, the parts that can be fixed without answering
 that question, and the questions the design must answer.
@@ -101,8 +101,8 @@ removes an isolation bug. None requires deciding what a principal is.
 
 Both must land before quota work starts, not alongside it:
 
-- **`plans/privilege-model.md` Part 1** — a quota whose exemption keys on a
-  forgeable `TASK_FLAG_SYSTEM` is not a quota.
+- **`plans/privilege-model.md`** — a quota needs a principal to bill and an
+  exemption that survives fork and exec. `TASK_FLAG_SYSTEM` is neither.
 - **`plans/process-identity.md` phases 1–3** — a pid-keyed accounting row would
   inherit the monotonic-counter bug wholesale and stop resolving at process 256.
 
