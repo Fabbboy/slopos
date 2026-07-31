@@ -3,7 +3,9 @@ use slopos_abi::Errno;
 use slopos_abi::fs::FS_TYPE_DIRECTORY;
 use slopos_abi::spawn::{SPAWN_MAX_FD_ACTIONS, SpawnAttrs, SpawnFdAction, SpawnFdActionKind};
 use slopos_abi::syscall::{ARCH_GET_FS, ARCH_SET_FS, ENOSYS_RETURN, FUTEX_WAIT, FUTEX_WAKE};
-use slopos_abi::task::TaskPriority;
+use slopos_abi::task::{
+    SPAWN_PRIVILEGED, SPAWN_RESERVED, SPAWN_USER_SETTABLE, TASK_FLAG_KERNEL_MODE, TaskPriority,
+};
 use slopos_fs::vfs::traits::VfsError;
 use slopos_ostd::KVec;
 use slopos_ostd::task::{new_group_in_session, new_session_group};
@@ -164,6 +166,37 @@ fn read_user_spawn_actions(attrs: &SpawnAttrs) -> Result<KVec<exec::FdAction>, E
     Ok(out)
 }
 
+/// Classify the caller-supplied `SpawnAttrs::flags`, returning the subset the
+/// child is allowed to inherit from the request.
+///
+/// Order is load-bearing. An undefined bit is a malformed request and is
+/// answered as such before anything is said about privilege, so a caller that
+/// probes reserved bits never learns from an `EPERM` that a bit *means*
+/// something. `KERNEL_MODE` is answered explicitly here rather than left to
+/// `task_build`, which refuses the USER|KERNEL combination by returning `None`
+/// — a value the exec layer can only report as `NoMem`.
+///
+/// What survives is `flags & SPAWN_USER_SETTABLE` by construction. Nothing a
+/// caller writes can add a privileged bit: the privileged bits the child ends
+/// up with come from [`crate::exec::grants`], keyed on the program being
+/// loaded.
+fn validate_spawn_flags(flags: u16) -> Result<u16, Errno> {
+    if flags & SPAWN_RESERVED != 0 {
+        return Err(Errno::EINVAL);
+    }
+    if flags & TASK_FLAG_KERNEL_MODE != 0 {
+        return Err(Errno::EINVAL);
+    }
+    if flags & SPAWN_PRIVILEGED != 0 {
+        return Err(Errno::EPERM);
+    }
+    // `USER_MODE` reaches here intact and is dropped rather than refused: every
+    // `ProgramSpec` sets it and `spawn_program_with_attrs` ORs it back in
+    // unconditionally, so rejecting it would fail a request that asks for
+    // precisely what it is about to be given.
+    Ok(flags & SPAWN_USER_SETTABLE)
+}
+
 define_syscall!(syscall_spawn_path
     (ctx, path: UserBytes, argv_ptr: u64, argc_raw: u32, attrs_ptr: u64)
     -> Result<u64, Errno>
@@ -179,14 +212,19 @@ define_syscall!(syscall_spawn_path
     let attrs = copy_from_user(attrs_user).map_err(|_| Errno::EFAULT)?;
 
     let priority = TaskPriority::try_from_u8(attrs.priority).ok_or(Errno::EINVAL)?;
-    // KernelIo is reserved for kernel kthreads (NAPI, net-timer, …).
-    // User space must not be able to spawn at that tier or it would
-    // starve every other user task. The kernel-side spawn surface is
-    // `slopos_ostd::task::spawn_kernel_io`, which takes a typed
-    // `KernelIoToken` witness — there is no syscall analogue.
-    if matches!(priority, TaskPriority::KernelIo) {
+    // Userland picks between the two ordinary tiers and nothing else. `High`
+    // sits above every other user task and is the compositor's own tier — one
+    // the kernel hands out by program identity (`exec::grants`), never one a
+    // caller may request, or a `loop {}` binary at that tier starves the
+    // machine. `KernelIo` is reserved for kernel kthreads (NAPI, net-timer, …);
+    // its only sanctioned spawn surface is
+    // `slopos_ostd::task::spawn_kernel_io`, which takes a typed `KernelIoToken`
+    // witness and has no syscall analogue. `Idle` is the per-CPU idle loop's
+    // tier and, per its own doc comment, is never a user-spawned task's.
+    if !matches!(priority, TaskPriority::Normal | TaskPriority::Low) {
         return Err(Errno::EINVAL);
     }
+    let flags = validate_spawn_flags(attrs.flags)?;
     let argc = argc_raw as usize;
 
     let mut path_buf = [0u8; exec::EXEC_MAX_PATH];
@@ -223,7 +261,7 @@ define_syscall!(syscall_spawn_path
         &path_buf[..copied_len],
         argv_refs.as_deref(),
         priority,
-        attrs.flags,
+        flags,
         actions.as_slice(),
         attrs.sigdefault_mask,
         parent_pid,
@@ -458,13 +496,22 @@ define_syscall!(syscall_get_current_cpu (ctx) -> Result<u64, Errno> {
 
 define_syscall!(syscall_set_cpu_affinity
     (ctx, target: u32, new_affinity: u32)
-    requires(let task_id: task_id)
+    requires(let task_id: task_id, let process_id: process_id)
     -> Result<(), Errno>
 {
     let resolved = if target == 0 { task_id } else { target };
     let Some(task_ref) = task_find_by_id(resolved) else {
         return Err(Errno::ESRCH);
     };
+    // Pinning is a scheduling decision about someone else's task, and with no
+    // relation check it was one any task could make about any other: pin one
+    // `NO_PREEMPT` spinner per CPU and every core is wedged. Sharing an address
+    // space is the honest boundary — a sibling thread can already execute
+    // arbitrary code inside the target, so refusing it would buy nothing, while
+    // a task in another process has no standing to place this one at all.
+    if task_ref.process_id != process_id {
+        return Err(Errno::EPERM);
+    }
     task_ref.set_cpu_affinity(new_affinity);
     // Stamping the mask is not enough — re-place the task so the new mask
     // actually governs where it runs (Linux `sched_setaffinity` → migrate).
@@ -474,13 +521,18 @@ define_syscall!(syscall_set_cpu_affinity
 
 define_syscall!(syscall_get_cpu_affinity
     (ctx, target: u32)
-    requires(let task_id: task_id)
+    requires(let task_id: task_id, let process_id: process_id)
     -> Result<u64, Errno>
 {
     let resolved = if target == 0 { task_id } else { target };
     let Some(task_ref) = task_find_by_id(resolved) else {
         return Err(Errno::ESRCH);
     };
+    // Same boundary as the setter. Leaving the pair asymmetric is how the
+    // setter's missing check gets reintroduced.
+    if task_ref.process_id != process_id {
+        return Err(Errno::EPERM);
+    }
     Ok(task_ref.cpu_affinity() as u64)
 });
 

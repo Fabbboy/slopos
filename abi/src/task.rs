@@ -248,7 +248,6 @@ pub const TASK_FLAG_NO_PREEMPT: u16 = 0x04;
 pub const TASK_FLAG_SYSTEM: u16 = 0x08;
 pub const TASK_FLAG_COMPOSITOR: u16 = 0x10;
 pub const TASK_FLAG_DISPLAY_EXCLUSIVE: u16 = 0x20;
-pub const TASK_FLAG_FPU_INITIALIZED: u16 = 0x40;
 /// Place the spawned task into its own process group (`pgid = task_id`)
 /// instead of inheriting the parent's pgid.  Eliminates the SMP race
 /// between spawn and the parent's `setpgid` + `tcsetpgrp` calls.
@@ -263,6 +262,74 @@ pub const TASK_FLAG_NEW_PGRP: u16 = 0x80;
 /// first instruction.  Only honoured when the child's session matches the
 /// terminal's controlling session.
 pub const TASK_FLAG_FOREGROUND: u16 = 0x100;
+
+// --- Spawn-flag classification ---
+//
+// `task.flags` is the entirety of SlopOS's privilege model — `is_compositor`,
+// `is_display_exclusive` and `is_console_admin` are three reads of this word.
+// The four masks below partition it, so "may a caller set this bit?" is
+// answered once, here, for every bit, rather than at each spawn site.
+
+/// Flag bits a `spawn_path` caller may set for its own child.
+///
+/// `NEW_PGRP` only mints a group inside the parent's own session, and
+/// `FOREGROUND` is re-validated against the terminal's controlling session
+/// before it is honoured.  Neither hands the child authority the parent did
+/// not already hold, which is what makes them the only two bits that belong
+/// to the caller.
+pub const SPAWN_USER_SETTABLE: u16 = TASK_FLAG_NEW_PGRP | TASK_FLAG_FOREGROUND;
+
+/// Flag bits that name a privilege.  A spawn request carrying any of these is
+/// refused with `EPERM`: they are conferred by the kernel from the
+/// program-identity table in `slopos_core::exec::grants`, keyed on the binary
+/// being loaded, and are never accepted from user space.
+///
+/// `NO_PREEMPT` is here despite having no path that grants it — the timer tick
+/// and the deferred post-IRQ reschedule both return early for a task carrying
+/// it, so as an accepted spawn input it is an attack surface and nothing else.
+pub const SPAWN_PRIVILEGED: u16 =
+    TASK_FLAG_NO_PREEMPT | TASK_FLAG_SYSTEM | TASK_FLAG_COMPOSITOR | TASK_FLAG_DISPLAY_EXCLUSIVE;
+
+/// The two ring bits.  They describe where the task executes, not what it may
+/// do, which is why they are classified apart from the privileges.
+///
+/// `USER_MODE` is forced on by `spawn_program_with_attrs` regardless, so a
+/// caller that sets it is redundant rather than wrong and is accepted.
+/// `KERNEL_MODE` is refused with `EINVAL` at the syscall boundary: `task_build`
+/// already rejects the USER|KERNEL combination, but it reports the refusal as
+/// `None`, which the exec layer can only surface as `NoMem` — an out-of-memory
+/// diagnosis for a mode-flag mistake.
+pub const SPAWN_MODE_BITS: u16 = TASK_FLAG_USER_MODE | TASK_FLAG_KERNEL_MODE;
+
+/// Undefined flag bits.  Written as a literal on purpose: deriving it from the
+/// complement of the other three would make the partition assert below
+/// unfailable, which is the only reason that assert exists.
+///
+/// `0x0040` is the retired `TASK_FLAG_FPU_INITIALIZED` and must not be reused —
+/// a binary built against the old header may still set it.  `0x0200..=0x8000`
+/// have never been defined.  All of them fail closed with `EINVAL` so the ABI
+/// can grow a bit without a deployed caller having already assigned it a
+/// different meaning.
+///
+/// Adding a `TASK_FLAG_*` means clearing its bit here *and* adding it to
+/// exactly one of the three masks above.  The asserts fail until both are done.
+pub const SPAWN_RESERVED: u16 = 0xFE40;
+
+// The four classes partition the 16-bit flag word: every bit is in exactly one.
+const _: () = assert!(
+    (SPAWN_USER_SETTABLE | SPAWN_PRIVILEGED | SPAWN_MODE_BITS | SPAWN_RESERVED) == u16::MAX,
+    "spawn flag classes must cover all 16 bits",
+);
+const _: () = assert!((SPAWN_USER_SETTABLE & SPAWN_PRIVILEGED) == 0);
+const _: () = assert!((SPAWN_USER_SETTABLE & SPAWN_MODE_BITS) == 0);
+const _: () = assert!((SPAWN_PRIVILEGED & SPAWN_MODE_BITS) == 0);
+const _: () = assert!(
+    (SPAWN_RESERVED & (SPAWN_USER_SETTABLE | SPAWN_PRIVILEGED | SPAWN_MODE_BITS)) == 0,
+    "a defined flag bit is also marked reserved",
+);
+// Named separately because it is the one bit whose escalation reaches past the
+// requesting task: one non-preemptible spinner pinned per CPU wedges the machine.
+const _: () = assert!((SPAWN_USER_SETTABLE & TASK_FLAG_NO_PREEMPT) == 0);
 
 // --- Task Exit/Fault Reason ---
 

@@ -1,12 +1,19 @@
-use slopos_abi::task::{
-    TASK_FLAG_COMPOSITOR, TASK_FLAG_DISPLAY_EXCLUSIVE, TASK_FLAG_USER_MODE, TaskPriority,
-};
+use slopos_abi::task::{TASK_FLAG_USER_MODE, TaskPriority};
 
 #[derive(Clone, Copy)]
 pub struct ProgramSpec {
     pub name: &'static str,
     pub path: &'static str,
+    /// The tier this program is *requested* at. User space may name only
+    /// `Normal` and `Low`; anything else is `EINVAL` at the spawn boundary. A
+    /// program that needs a higher tier is given it kernel-side by program
+    /// identity — the compositor runs at `High` despite this field saying
+    /// `Normal`.
     pub priority: TaskPriority,
+    /// The *unprivileged* flags this program is spawned with. Privileged bits
+    /// (`SYSTEM`, `COMPOSITOR`, `DISPLAY_EXCLUSIVE`, `NO_PREEMPT`) are refused
+    /// with `EPERM` if named here; the kernel confers them by program identity
+    /// instead.
     pub flags: u16,
     pub desc: &'static str,
     /// If true, the program owns a display surface and should be spawned
@@ -35,8 +42,8 @@ const PROGRAM_REGISTRY: &[ProgramSpec] = &[
     ProgramSpec {
         name: "compositor",
         path: "/bin/compositor",
-        priority: TaskPriority::High,
-        flags: TASK_FLAG_USER_MODE | TASK_FLAG_COMPOSITOR,
+        priority: TaskPriority::Normal,
+        flags: TASK_FLAG_USER_MODE,
         desc: "",
         gui: true,
     },
@@ -52,7 +59,7 @@ const PROGRAM_REGISTRY: &[ProgramSpec] = &[
         name: "roulette",
         path: "/bin/roulette",
         priority: TaskPriority::Normal,
-        flags: TASK_FLAG_USER_MODE | TASK_FLAG_DISPLAY_EXCLUSIVE,
+        flags: TASK_FLAG_USER_MODE,
         desc: "Spin the Wheel of Fate",
         gui: true,
     },

@@ -27,7 +27,6 @@ python3 scripts/cvss_calc.py "CVSS:3.1/AV:L/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H"
 | ID | Score | Severity | Title |
 |---|---:|---|---|
 | [SLOPOS-2026-0012](#slopos-2026-0012) | 9.1 | CRITICAL | The in-kernel DNS resolver has effectively no anti-spoofing entropy and accepts responses from any host |
-| [SLOPOS-2026-0009](#slopos-2026-0009) | 8.8 | HIGH | `spawn_path` installs user-supplied `TASK_FLAG_*` bits unmasked |
 | [SLOPOS-2026-0017](#slopos-2026-0017) | 7.8 | HIGH | PCIDs are assigned from a wrapping 12-bit counter with no reuse tracking while every CR3 write is NOFLUSH |
 | [SLOPOS-2026-0018](#slopos-2026-0018) | 7.8 | HIGH | Multi-page buddy allocations bypass the LUF reuse drain, leaving stale writable TLB entries |
 | [SLOPOS-2026-0039](#slopos-2026-0039) | 7.6 | HIGH | Device-supplied PCI offsets are used to map MMIO without bounding them against the BAR |
@@ -44,7 +43,7 @@ python3 scripts/cvss_calc.py "CVSS:3.1/AV:L/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H"
 | [SLOPOS-2026-0010](#slopos-2026-0010) | 5.5 | MEDIUM | Process ids are drawn from an unbounded counter that is also an array index, so the 256th process created since boot can never run |
 | [SLOPOS-2026-0016](#slopos-2026-0016) | 5.5 | MEDIUM | AF_UNIX SCM_RIGHTS has no cycle policy, permanently leaking socket slots |
 | [SLOPOS-2026-0029](#slopos-2026-0029) | 5.5 | MEDIUM | `klog` has no rate limiting and userland can drive it from a cli-held lock |
-| [SLOPOS-2026-0030](#slopos-2026-0030) | 5.5 | MEDIUM | Ready-queue selection is strict priority with no aging, and userland can spawn at the top tier |
+| [SLOPOS-2026-0030](#slopos-2026-0030) | 5.5 | MEDIUM | Ready-queue selection is strict priority with no aging backstop |
 | [SLOPOS-2026-0031](#slopos-2026-0031) | 5.5 | MEDIUM | Futex buckets cap waiters at 16 and return ENOMEM, which every userland futex wrapper discards |
 | [SLOPOS-2026-0034](#slopos-2026-0034) | 5.5 | MEDIUM | The input-event map is indexed by a never-recycled task id and silently stops delivering past 16384 |
 | [SLOPOS-2026-0015](#slopos-2026-0015) | 4.8 | MEDIUM | The RFC 5961 challenge-ACK budget is a single global counter |
@@ -97,21 +96,6 @@ asm volatile("mov %0, %%rsp; mov $105, %%eax; syscall" :: "r"(p));
 - Remediation: Validate the XSAVE header before restoring, as Linux does in `copy_user_to_xstate`: reject reserved header bytes, XSTATE_BV bits outside the active XCR0, an XCOMP_BV that disagrees with the format in use, and reserved MXCSR bits. Add an exception-table fixup covering the `xrstor64` site so a #GP there becomes SIGSEGV to the task rather than a machine halt — Linux pairs the validation with `force_sig(SIGSEGV)` on failure.
 
 
-### SLOPOS-2026-0009
-- Title: `spawn_path` installs user-supplied `TASK_FLAG_*` bits unmasked
-- Status: open
-- Confidence: 92 — evidence 40 (the full chain read end to end: ABI struct, copy-in, unmasked pass-through, the flag consumers), exploitability 30 (one syscall, no precondition), reproducibility 22 (deterministic; the *consequence* of each bit varies by which subsystem reads it)
-- CVSS vector/score: `CVSS:3.1/AV:L/AC:L/PR:L/UI:N/S:C/C:H/I:H/A:H` — **8.8 HIGH**
-- Impact: `task.flags` is the entirety of SlopOS's privilege model — `is_compositor()`, `is_display_exclusive()` and `is_console_admin()` (the last documented as the `capable(CAP_SYS_TTY_CONFIG)` analogue) all read it. Any process can mint a child holding COMPOSITOR (screen and input capture), DISPLAY_EXCLUSIVE, SYSTEM (console administration), or NO_PREEMPT. NO_PREEMPT is honoured by the timer tick, giving a permanent per-CPU lockup from an unprivileged spin loop. KERNEL_MODE is rejected downstream, and SYSTEM does *not* make a user task's panics fatal — that check lives on the kernel-thread entry path only.
-- Evidence:
-  - abi/src/spawn.rs:57-70 — `SpawnAttrs { priority: u8, _pad, flags: u16, _pad2, actions_ptr, actions_len, sigdefault_mask }`, doc comment 'Task flags (`TASK_FLAG_*`)'
-  - core/src/syscall/process_handlers.rs:178-179 — `let attrs = copy_from_user(attrs_user)` reads the whole struct from user memory
-  - core/src/syscall/process_handlers.rs:181-189 — the *priority* field is validated (`TaskPriority::try_from_u8`, then `KernelIo` rejected with a written rationale about starving user tasks); the flags field gets no equivalent treatment
-  - core/src/syscall/process_handlers.rs:222-231 — `exec::spawn_program_with_attrs(&path_buf[..], argv_refs, priority, attrs.flags, ...)` passes the raw user word
-  - core/src/exec/mod.rs:233-265 — `spawn_program_with_attrs(..., mut flags: u16, ...)` does only `flags |= TASK_FLAG_USER_MODE;` then `task_build(name, entry, null, priority.as_u8(), flags)` — no mask anywhere
-- Repro:
-  One syscall from any process: `SpawnAttrs { priority: 2, flags: 0x10 /* TASK_FLAG_COMPOSITOR */, .. }` then `syscall(64, path_ptr, path_len, argv, argc, &attrs)` naming any executable. For the CPU lockup use `flags: 0x04` (NO_PREEMPT) and a `loop {}` binary; the timer tick returns early for that task and never preempts it.
-- Remediation: Immediate: mask `attrs.flags` against a `SPAWN_USER_SETTABLE` allow-list in `syscall_spawn_path` before it reaches `spawn_program_with_attrs`, rejecting the rest with EPERM. Structural: move privilege off `task.flags` onto a credential object that only a trusted spawner can grant.
 
 ### SLOPOS-2026-0010
 - Title: Process ids are drawn from an unbounded counter that is also an array index, so the 256th process created since boot can never run
@@ -436,20 +420,18 @@ asm volatile("mov %0, %%rsp; mov $105, %%eax; syscall" :: "r"(p));
 - Remediation: Add printk-style rate limiting (`printk_ratelimited` / `DEFINE_RATELIMIT_STATE` is the reference), demote userland-triggerable messages below the default level, and move the UART write out of the locked region into a buffered emitter.
 
 ### SLOPOS-2026-0030
-- Title: Ready-queue selection is strict priority with no aging, and userland can spawn at the top tier
+- Title: Ready-queue selection is strict priority with no aging backstop
 - Status: open
-- Confidence: 88 — evidence 38 (the dequeue order and the spawn validation read directly), exploitability 26 (one syscall plus a spin loop), reproducibility 24 (deterministic starvation)
+- Confidence: 84 — evidence 38 (the dequeue order and the absence of any boost/decay path read directly), exploitability 22 (a spin loop at the caller's own tier, now capped at Normal), reproducibility 24 (deterministic starvation of Low by Normal)
 - CVSS vector/score: `CVSS:3.1/AV:L/AC:L/PR:L/UI:N/S:U/C:N/I:N/A:H` — **5.5 MEDIUM**
-- Impact: Selection is strict fixed priority with FIFO within a tier and no aging backstop, and `syscall_spawn_path` rejects only `KernelIo`. Any process can create tasks at the `High` tier and starve every lower tier indefinitely — including kernel work that shares the machine.
+- Impact: Selection is strict fixed priority with FIFO within a tier and no aging backstop anywhere in the scheduler. A `Normal` task that never blocks starves every `Low` task indefinitely; nothing raises a starved task's effective priority over time. The escalation half of this finding is closed — `syscall_spawn_path` now admits only `Normal` and `Low`, so `High` and `Idle` are no longer user-requestable — but the missing backstop is not.
 - Evidence:
   - sched/src/per_cpu.rs:404-420 — `dequeue_highest_priority` is `for queue in &self.ready_queues { if let Some(task) = queue.dequeue() { return Some(task) } }`: a linear scan of priority levels 0..4, first non-empty wins, unconditionally
   - abi/src/task.rs:184-199 — `High = 0, KernelIo = 1, Normal = 2, Low = 3, Idle = 4`; the doc on KernelIo says "reserved for paths whose progress is required for correctness (delivering packets, draining TX rings, firing TCP retransmit timers)"
-  - core/src/syscall/process_handlers.rs:181-189 — the spawn syscall rejects only `TaskPriority::KernelIo`; `High` (numerically *above* KernelIo in the scan order) is accepted from userland with no privilege check
-  - abi/src/spawn.rs:58-62 — `pub struct SpawnAttrs { pub priority: u8, ... }`, a plain field the caller fills
   - sched/src/task/task_lifecycle.rs:631 — `task_ref.priority = TaskPriority::from_u8(priority);` is the only write to `priority`; no boost, decay or aging path exists anywhere in the crate
 - Repro:
-  Spawn a `loop {}` binary with `TaskPriority::High` via `spawn_path`. Everything at Normal and below stops running.
-- Remediation: Restrict the priority tiers userland may request (the KernelIo rejection is the precedent), and add an aging or bandwidth backstop so no tier can starve indefinitely — Linux's `RLIMIT_RTPRIO` plus RT throttling is the reference for the first half, EEVDF's lag accounting for the second.
+  Spawn a `loop {}` binary at `TaskPriority::Normal` via `spawn_path`, then spawn anything at `Low`. The `Low` task never runs.
+- Remediation: Add an aging or bandwidth backstop so no tier can starve indefinitely — EEVDF's lag accounting is the reference. The tier-restriction half is done.
 
 ### SLOPOS-2026-0031
 - Title: Futex buckets cap waiters at 16 and return ENOMEM, which every userland futex wrapper discards
@@ -665,11 +647,10 @@ Selected analogs:
 
 Ordered by what removes the most exposure per unit of work, not by score.
 
-1. **Mask the spawn flags** (SLOPOS-2026-0009). A two-line allow-list in `syscall_spawn_path` removes the only privilege-forging primitive in the system and the unprivileged per-CPU lockup with it. Everything else in the privilege model is design work; this is not. See `plans/privilege-model.md`.
-2. **Bound the process id** (SLOPOS-2026-0010, and the same root cause in 0034). The system stops being able to start programs after 255 process creations; nothing else on this list is that visible to a user. See `plans/process-identity.md`.
-3. **Validate the signal-return XSAVE area** (0007). An unprivileged kernel-halt primitive: the `xrstor64` in `rt_sigreturn` restores a user-supplied image with no header validation and no #GP fixup. See `plans/rt-sigreturn-xrstor.md`.
-4. **Wire the SYN queue that already exists** (0011). The defence is written and tested; it merely has no caller.
-5. **Reseed the DNS resolver and validate response provenance** (0012), then replace the ISN generator with a keyed PRF (0014) and add the RFC 793 §3.9 acceptability gate (0013). These three are the network-facing set and share a test harness.
-6. **The TLB correctness set** (0017, 0018, 0019). Stale writable translations across address spaces are the only findings here that could become memory corruption rather than denial of service.
-7. **The filesystem integrity set** (0021–0027, 0042, 0043). Individually low-scoring, collectively the reason the filesystem cannot yet be trusted with data that matters.
-8. **Resource accounting** (0016, 0035, 0030, 0031, 0034). These are instances of one absent mechanism; see `plans/resource-accounting.md` rather than patching them individually.
+1. **Bound the process id** (SLOPOS-2026-0010, and the same root cause in 0034). The system stops being able to start programs after 255 process creations; nothing else on this list is that visible to a user. See `plans/process-identity.md`.
+2. **Validate the signal-return XSAVE area** (0007). An unprivileged kernel-halt primitive: the `xrstor64` in `rt_sigreturn` restores a user-supplied image with no header validation and no #GP fixup. See `plans/rt-sigreturn-xrstor.md`.
+3. **Wire the SYN queue that already exists** (0011). The defence is written and tested; it merely has no caller.
+4. **Reseed the DNS resolver and validate response provenance** (0012), then replace the ISN generator with a keyed PRF (0014) and add the RFC 793 §3.9 acceptability gate (0013). These three are the network-facing set and share a test harness.
+5. **The TLB correctness set** (0017, 0018, 0019). Stale writable translations across address spaces are the only findings here that could become memory corruption rather than denial of service.
+6. **The filesystem integrity set** (0021–0027, 0042, 0043). Individually low-scoring, collectively the reason the filesystem cannot yet be trusted with data that matters.
+7. **Resource accounting** (0016, 0035, 0030, 0031, 0034). These are instances of one absent mechanism; see `plans/resource-accounting.md` rather than patching them individually.

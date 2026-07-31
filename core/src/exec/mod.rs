@@ -1,5 +1,6 @@
 //! exec() syscall implementation for loading and executing ELF binaries from filesystem.
 
+pub mod grants;
 #[cfg(feature = "test-hooks")]
 pub mod tests;
 #[cfg(feature = "test-hooks")]
@@ -233,7 +234,7 @@ fn resolve_inherited_job_control(
 pub fn spawn_program_with_attrs(
     path: &[u8],
     argv: Option<&[&[u8]]>,
-    priority: TaskPriority,
+    mut priority: TaskPriority,
     mut flags: u16,
     actions: &[FdAction],
     sigdefault_mask: u64,
@@ -244,6 +245,18 @@ pub fn spawn_program_with_attrs(
         let normalized_path = trim_nul_bytes(path);
         if normalized_path.is_empty() || normalized_path.len() > EXEC_MAX_PATH {
             return Err(ExecError::NameTooLong);
+        }
+
+        // Privilege enters a spawn here and nowhere else. The syscall boundary
+        // has already refused every privileged bit the caller asked for, so
+        // what the child holds is a function of which program is being loaded,
+        // not of who asked for it. Kernel callers (`launch_init`, the utest
+        // runner) pass their own flags in and are not reachable from a syscall,
+        // which is why `SYSTEM` is not in the table.
+        let (granted_flags, granted_priority) = grants::grant_for(normalized_path);
+        flags |= granted_flags;
+        if let Some(granted) = granted_priority {
+            priority = granted;
         }
 
         flags |= TASK_FLAG_USER_MODE;

@@ -720,3 +720,63 @@ slopos_testing::stest!(
     name = test_setup_user_stack_argv_string_content,
     suite = exec
 );
+
+/// The kernel confers privilege by program identity, and only for the two
+/// programs that need it.
+///
+/// The syscall boundary is purely subtractive — it strips every privileged bit
+/// a caller asks for — so this table is the sole source of `COMPOSITOR`,
+/// `DISPLAY_EXCLUSIVE` and the compositor's `High` tier for a user-initiated
+/// spawn. `/sbin/init` is the load-bearing negative case: `SYSTEM` comes from
+/// `launch_init`, a kernel caller, and naming init here would let any task
+/// re-spawn it and inherit console administration.
+pub fn test_program_grants_are_keyed_on_exact_path() -> TestResult {
+    use slopos_abi::task::{TASK_FLAG_COMPOSITOR, TASK_FLAG_DISPLAY_EXCLUSIVE, TaskPriority};
+    use slopos_testing::assert_test;
+
+    use super::grants::grant_for;
+
+    let (flags, priority) = grant_for(b"/bin/compositor");
+    assert_test!(
+        flags == TASK_FLAG_COMPOSITOR,
+        "the compositor must be granted COMPOSITOR"
+    );
+    assert_test!(
+        matches!(priority, Some(TaskPriority::High)),
+        "the compositor must be granted the High tier the syscall refuses"
+    );
+
+    let (flags, priority) = grant_for(b"/bin/roulette");
+    assert_test!(
+        flags == TASK_FLAG_DISPLAY_EXCLUSIVE,
+        "roulette must be granted DISPLAY_EXCLUSIVE"
+    );
+    assert_test!(
+        priority.is_none(),
+        "roulette needs no tier grant — Normal is user-requestable"
+    );
+
+    assert_test!(
+        grant_for(INIT_PATH) == (0, None),
+        "init must not be grantable: SYSTEM stays kernel-only"
+    );
+    assert_test!(
+        grant_for(b"/bin/shell") == (0, None),
+        "an ordinary program must get nothing"
+    );
+    assert_test!(
+        grant_for(b"/bin/./roulette") == (0, None),
+        "a non-canonical spelling must fail closed rather than be normalised"
+    );
+    assert_test!(
+        grant_for(b"") == (0, None),
+        "the empty path must get nothing"
+    );
+
+    TestResult::Pass
+}
+
+slopos_testing::stest!(
+    name = test_program_grants_are_keyed_on_exact_path,
+    suite = exec
+);

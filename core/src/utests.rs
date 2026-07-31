@@ -49,3 +49,7 @@ crate::utest!(name = utest_spin_signal, bin = "/bin/spin_signal_test");
 crate::utest!(name = utest_terminal_grid, bin = "/bin/terminal_grid_test");
 crate::utest!(name = utest_clipboard, bin = "/bin/clipboard_test");
 crate::utest!(name = utest_keymap, bin = "/bin/keymap_test");
+crate::utest!(
+    name = utest_spawn_privilege,
+    bin = "/bin/spawn_privilege_test"
+);

@@ -3048,6 +3048,227 @@ pub fn test_spawn_path_rejects_bad_attrs() -> TestResult {
     TestResult::Pass
 }
 
+/// A spawn request cannot name its own privileges.
+///
+/// `syscall_spawn_path` used to hand `attrs.flags` to `task_build` verbatim, so
+/// every privilege the kernel recognises — compositor, display-exclusive,
+/// console-admin — was a value userland wrote. `NO_PREEMPT` was the worst of
+/// them: it has no setter anywhere in the tree, and one non-preemptible spinner
+/// pinned per CPU wedges the machine.
+///
+/// The calling task here holds `TASK_FLAG_USER_MODE` and nothing else, which is
+/// exactly the principal the check is about.
+pub fn test_spawn_path_rejects_privileged_flags() -> TestResult {
+    use crate::syscall::handlers::syscall_spawn_path;
+    use slopos_abi::spawn::SpawnAttrs;
+    use slopos_abi::task::{
+        TASK_FLAG_COMPOSITOR, TASK_FLAG_DISPLAY_EXCLUSIVE, TASK_FLAG_NEW_PGRP,
+        TASK_FLAG_NO_PREEMPT, TASK_FLAG_SYSTEM,
+    };
+
+    let _fixture = SyscallFixture::new();
+
+    let task_id = create_test_user_task();
+    assert_test!(task_id != INVALID_TASK_ID, "failed to create user task");
+    let task_guard = assert_some!(task_find_by_id(task_id), "task lookup failed");
+    let pid = task_guard.process_id;
+
+    let user_page = match map_user_rw_page(pid) {
+        Some(v) => v,
+        None => {
+            task_terminate(task_id);
+            return TestResult::Fail;
+        }
+    };
+    // A path that fails at VFS open, so no case can create a live task.
+    let path = b"/bin/noent";
+    assert_test!(
+        user_copy_out(pid, user_page, path),
+        "failed to write path into user memory"
+    );
+    let attrs_addr = user_page + 512;
+
+    const NO_CONTEXT: u64 = u64::MAX;
+    let spawn = |priority: u8, flags: u16| -> u64 {
+        let attrs = SpawnAttrs {
+            priority,
+            _pad: [0; 3],
+            flags,
+            _pad2: 0,
+            actions_ptr: 0,
+            actions_len: 0,
+            sigdefault_mask: 0,
+        };
+        if !user_copy_out(pid, attrs_addr, &attrs) {
+            return NO_CONTEXT;
+        }
+        let mut frame = zero_frame();
+        frame.regs_mut().rdi = user_page;
+        frame.regs_mut().rsi = path.len() as u64;
+        frame.regs_mut().rdx = 0;
+        frame.regs_mut().r10 = 0;
+        frame.regs_mut().r8 = attrs_addr;
+        with_user_process_context(pid, || {
+            crate::syscall::dispatch::dispatch_handler(syscall_spawn_path, &task_guard, &mut frame)
+        })
+        .map(|_| frame.regs().rax)
+        .unwrap_or(NO_CONTEXT)
+    };
+
+    let eperm = slopos_abi::Errno::EPERM.as_u64();
+    let einval = slopos_abi::Errno::EINVAL.as_u64();
+    const NORMAL: u8 = 2;
+
+    // Privileged bits are refused, and refused as EPERM rather than as a
+    // malformed request — the caller is asking for something real that it may
+    // not have.
+    assert_eq_test!(
+        spawn(NORMAL, TASK_FLAG_COMPOSITOR),
+        eperm,
+        "spawning with COMPOSITOR must be EPERM"
+    );
+    assert_eq_test!(
+        spawn(NORMAL, TASK_FLAG_DISPLAY_EXCLUSIVE),
+        eperm,
+        "spawning with DISPLAY_EXCLUSIVE must be EPERM"
+    );
+    assert_eq_test!(
+        spawn(NORMAL, TASK_FLAG_SYSTEM),
+        eperm,
+        "spawning with SYSTEM must be EPERM"
+    );
+    assert_eq_test!(
+        spawn(NORMAL, TASK_FLAG_NO_PREEMPT),
+        eperm,
+        "spawning with NO_PREEMPT must be EPERM — it wedges a CPU"
+    );
+
+    // Undefined bits fail closed so the ABI can grow one without a deployed
+    // caller having already assigned it a different meaning.
+    assert_eq_test!(
+        spawn(NORMAL, 0x0200),
+        einval,
+        "an undefined flag bit must be EINVAL"
+    );
+    // The retired TASK_FLAG_FPU_INITIALIZED. Retired, not freed.
+    assert_eq_test!(
+        spawn(NORMAL, 0x0040),
+        einval,
+        "the retired FPU_INITIALIZED bit must stay refused"
+    );
+    // Explicitly EINVAL, not the NoMem that task_build's `None` used to become.
+    assert_eq_test!(
+        spawn(NORMAL, slopos_abi::task::TASK_FLAG_KERNEL_MODE),
+        einval,
+        "KERNEL_MODE must be diagnosed as EINVAL, not mislabelled NoMem"
+    );
+    // Check order: a reserved bit is answered before anything is said about
+    // privilege, so probing reserved bits cannot learn from an EPERM that a bit
+    // means something.
+    assert_eq_test!(
+        spawn(NORMAL, 0x0200 | TASK_FLAG_COMPOSITOR),
+        einval,
+        "a reserved bit must be answered before a privileged one"
+    );
+
+    // Tier restriction: only Normal and Low are user-requestable.
+    assert_eq_test!(spawn(0, TASK_FLAG_USER_MODE), einval, "High must be EINVAL");
+    assert_eq_test!(
+        spawn(1, TASK_FLAG_USER_MODE),
+        einval,
+        "KernelIo must be EINVAL"
+    );
+    assert_eq_test!(spawn(4, TASK_FLAG_USER_MODE), einval, "Idle must be EINVAL");
+    assert_eq_test!(
+        spawn(5, TASK_FLAG_USER_MODE),
+        einval,
+        "an out-of-range tier must be EINVAL"
+    );
+
+    // Control: legal attrs pass validation and reach exec, which reports the
+    // real load error. Without this the table above would also pass against a
+    // handler that refused everything.
+    assert_eq_test!(
+        spawn(NORMAL, TASK_FLAG_USER_MODE | TASK_FLAG_NEW_PGRP),
+        (-2i32) as u64,
+        "user-settable flags must pass validation and reach exec"
+    );
+
+    task_terminate(task_id);
+    TestResult::Pass
+}
+
+/// `set_cpu_affinity` accepted an arbitrary target task id with no
+/// caller-versus-target relation checked, which is what turned a per-task
+/// `NO_PREEMPT` spinner into a whole-machine wedge: pin one per CPU.
+///
+/// Sharing an address space is the boundary — a sibling thread can already
+/// execute arbitrary code inside the target.
+pub fn test_set_cpu_affinity_rejects_other_process() -> TestResult {
+    use crate::syscall::handlers::{syscall_get_cpu_affinity, syscall_set_cpu_affinity};
+
+    let _fixture = SyscallFixture::new();
+
+    let caller_id = create_test_user_task();
+    assert_test!(caller_id != INVALID_TASK_ID, "failed to create caller task");
+    let target_id = create_test_user_task();
+    assert_test!(target_id != INVALID_TASK_ID, "failed to create target task");
+
+    let caller = assert_some!(task_find_by_id(caller_id), "caller lookup failed");
+    let target = assert_some!(task_find_by_id(target_id), "target lookup failed");
+    assert_test!(
+        caller.process_id != target.process_id,
+        "the two fixture tasks must be in different processes"
+    );
+
+    let before = target.cpu_affinity();
+    let eperm = slopos_abi::Errno::EPERM.as_u64();
+
+    // One frame, reused. An `InterruptFrame` per case would put four of them
+    // live at once and push this past the 2 KiB stack-frame ceiling.
+    let mut frame = zero_frame();
+    let mut call = |handler: crate::syscall::common::SyscallHandler, rdi: u64, rsi: u64| -> u64 {
+        frame = zero_frame();
+        frame.regs_mut().rdi = rdi;
+        frame.regs_mut().rsi = rsi;
+        crate::syscall::dispatch::dispatch_handler(handler, &caller, &mut frame);
+        frame.regs().rax
+    };
+
+    assert_eq_test!(
+        call(syscall_set_cpu_affinity, target_id as u64, 0x2),
+        eperm,
+        "pinning another process's task must be EPERM"
+    );
+    assert_eq_test!(
+        target.cpu_affinity(),
+        before,
+        "a refused set_cpu_affinity must not have stamped the mask"
+    );
+    assert_eq_test!(
+        call(syscall_get_cpu_affinity, target_id as u64, 0),
+        eperm,
+        "reading another process's affinity must be EPERM"
+    );
+
+    // Self still works, so the restriction is a relation check and not a
+    // blanket refusal.
+    assert_eq_test!(
+        call(syscall_set_cpu_affinity, 0, 0x2),
+        0,
+        "pinning the caller's own task must work"
+    );
+    assert_eq_test!(
+        caller.cpu_affinity(),
+        0x2,
+        "the caller's own affinity mask must have been stamped"
+    );
+
+    task_terminate(target_id);
+    task_terminate(caller_id);
+    TestResult::Pass
+}
+
 /// execve resets caught handlers to SIG_DFL but preserves SIG_IGN and SIG_DFL
 /// (the stale-handler-pointer fix).
 pub fn test_execve_resets_caught_signals_keeps_ignored() -> TestResult {
@@ -6045,5 +6266,13 @@ slopos_testing::stest!(
 );
 slopos_testing::stest!(
     name = test_rt_sigaction_bounds_signum_at_nsig,
+    suite = syscall_valid
+);
+slopos_testing::stest!(
+    name = test_spawn_path_rejects_privileged_flags,
+    suite = syscall_valid
+);
+slopos_testing::stest!(
+    name = test_set_cpu_affinity_rejects_other_process,
     suite = syscall_valid
 );
