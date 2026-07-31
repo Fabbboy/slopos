@@ -69,12 +69,13 @@ pub use paste as __paste;
 /// the `#[derive(Pod)]` / `#[derive(Zeroable)]` expansions can
 /// resolve `::slopos_ostd::Pod` / `::slopos_ostd::Zeroable`.
 pub use mm::Pod;
-pub use slopos_ostd_derive::{Pod, Zeroable};
+pub use slopos_ostd_derive::{Pod, SlotFields, Zeroable};
 
 pub use mm::{
-    AllocError, FrameAlloc, FrameAllocOptions, Init, InitClosure, KArc, KBTreeMap, KBox, KVec,
-    KVecDeque, KWeak, KernelHeap, PinBox, Slab, SlotPtr, VmReader, VmWriter, Zeroable,
-    boxed_zeroed, init_from_closure, init_struct_with, init_zeroed, raw_alloc, raw_dealloc,
+    AllocError, Field, FrameAlloc, FrameAllocOptions, HasFields, Init, InitClosure, KArc,
+    KBTreeMap, KBox, KVec, KVecDeque, KWeak, KernelHeap, PinBox, Slab, SlotPtr, VmReader, VmWriter,
+    Zeroable, boxed_zeroed, init_from_closure, init_struct_with, init_zeroed, raw_alloc,
+    raw_dealloc,
 };
 
 pub use user::{

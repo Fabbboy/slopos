@@ -123,6 +123,7 @@ impl fmt::Display for RouteEntry {
 // =============================================================================
 
 /// Inner state of the routing table, behind [`SpinLock`].
+#[derive(slopos_ostd::SlotFields)]
 struct RouteTableInner {
     /// Routes bucketed by prefix length.  Index 0 = /0 (default routes),
     /// index 32 = /32 (host routes).  Within each bucket, routes are sorted
@@ -141,6 +142,7 @@ impl RouteTableInner {
 /// Prefix-length-bucketed IPv4 routing table with longest-prefix-match lookup.
 ///
 /// See [module documentation](self) for architecture details.
+#[derive(slopos_ostd::SlotFields)]
 pub struct RouteTable {
     inner: SpinLock<RouteTableInner>,
 }

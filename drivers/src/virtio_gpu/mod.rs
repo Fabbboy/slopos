@@ -414,6 +414,7 @@ impl CursorState {
 // Device state
 // ============================================================================
 
+#[derive(slopos_ostd::SlotFields)]
 struct VirtioGpuState {
     control: GpuQueue,
     cursor: GpuQueue,
@@ -443,6 +444,7 @@ impl VirtioGpuState {
     }
 }
 
+#[derive(slopos_ostd::SlotFields)]
 struct VirtioGpuInner {
     /// Queues + caps + geometry. `LOCK_LEVEL_RESOURCE` `SpinLock` (IRQs off
     /// while held) so the IRQ-side harvest and task-side submit/collect never

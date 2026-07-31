@@ -1,20 +1,36 @@
 //! Derive macros for `slopos-ostd`.
 //!
-//! Exports `#[derive(Pod)]` and `#[derive(Zeroable)]` for the
-//! `slopos_ostd::Pod` and `slopos_ostd::Zeroable` traits. Each derive
-//! enforces three rules:
-//!  1. The type must carry `#[repr(C)]` or `#[repr(transparent)]`.
-//!  2. `#[repr(packed)]` is rejected (alignment invariants conflict
-//!     with `read_pod` / `write_pod` alignment checks; for `Zeroable`,
-//!     hand-write the `unsafe impl` instead).
-//!  3. Enums are rejected; only structs (named, tuple, unit) are
-//!     accepted. Each field type acquires a `T: ::slopos_ostd::Pod`
-//!     (or `Zeroable`) `where`-bound so the type-checker enforces
-//!     field-level conformance.
+//! Exports `#[derive(Pod)]`, `#[derive(Zeroable)]` and
+//! `#[derive(SlotFields)]`.
+//!
+//! `#[derive(SlotFields)]` builds the compile-time field table that
+//! `write_field!` / `zero_field!` / `write_init_field!` /
+//! `write_array_field!` address a heap slot through. Every token it emits
+//! is safe: the offsets come from `core::mem::offset_of!` and each field's
+//! type is pinned by a never-called projection closure, so a consumer crate
+//! writes fields into uninitialised memory without an `unsafe` block
+//! appearing anywhere in its expansion.
+//!
+//! `#[derive(Pod)]` / `#[derive(Zeroable)]` implement the
+//! `slopos_ostd::Pod` and `slopos_ostd::Zeroable` traits. Both reject
+//! `#[repr(packed)]` and unions, and give every field type a
+//! `T: ::slopos_ostd::Pod` (or `Zeroable`) `where`-bound so the
+//! type-checker enforces field-level conformance. They differ where the
+//! two properties genuinely differ:
+//!
+//!  - `Pod` claims *every* bit pattern is a valid value, so it requires
+//!    `#[repr(C)]` or `#[repr(transparent)]` — the layout it reinterprets
+//!    has to be the declared one — and it rejects enums outright.
+//!  - `Zeroable` claims only that the all-zero value is valid. For a
+//!    struct that is the conjunction of the fields' own claims at whatever
+//!    offsets the compiler picks, which `#[repr(Rust)]` preserves, so no
+//!    `repr` is required. A fieldless enum with a primitive `repr` whose
+//!    first variant sits at discriminant 0 qualifies too, and both halves
+//!    of that are checked.
 
 use proc_macro::TokenStream;
 use proc_macro2::TokenStream as TokenStream2;
-use quote::quote;
+use quote::{ToTokens, quote};
 use syn::{
     Data, DeriveInput, Fields, ItemFn, Meta, Token, parse_macro_input, punctuated::Punctuated,
     spanned::Spanned,
@@ -36,6 +52,156 @@ pub fn derive_zeroable(input: TokenStream) -> TokenStream {
         Ok(ts) => ts.into(),
         Err(err) => err.to_compile_error().into(),
     }
+}
+
+/// Build the compile-time field table `SlotPtr`'s writers address a slot
+/// through.
+///
+/// For `struct DataState { iss: u32, sendmap: SendMap }` the expansion is a
+/// zero-sized `DataStateSlotFields` holding one
+/// `Field<DataState, T, { offset_of!(DataState, f) }>` per field, plus the
+/// `HasFields` impl carrying it as an associated `const`. `write_field!`
+/// resolves `slot.fields().iss`, so the field path is name-checked, the value
+/// type is inferred from the field, and the byte offset is a compile-time
+/// constant — with no `unsafe` token in the invoking crate.
+///
+/// Restrictions, each of which would otherwise make the emitted table wrong
+/// rather than merely unbuildable:
+///  1. Named-field structs only. Tuple and unit structs have no field
+///     identifiers to hang the table's members on.
+///  2. `#[repr(packed)]` is rejected: the projection closure `|t| &t.f` is
+///     E0793 on a packed field, and a `Field`-addressed write assumes the
+///     field is aligned for its type.
+///  3. Generic types are rejected: `offset_of!` in const-generic argument
+///     position needs `generic_const_exprs` once a type parameter is
+///     involved.
+#[proc_macro_derive(SlotFields)]
+pub fn derive_slot_fields(input: TokenStream) -> TokenStream {
+    let input = parse_macro_input!(input as DeriveInput);
+    match expand_slot_fields(&input) {
+        Ok(ts) => ts.into(),
+        Err(err) => err.to_compile_error().into(),
+    }
+}
+
+fn expand_slot_fields(input: &DeriveInput) -> syn::Result<TokenStream2> {
+    reject_packed(input)?;
+
+    if !input.generics.params.is_empty() {
+        return Err(syn::Error::new(
+            input.generics.span(),
+            "SlotFields cannot be derived for generic types: offset_of! in \
+             const-generic position requires generic_const_exprs",
+        ));
+    }
+
+    let named = match &input.data {
+        Data::Struct(s) => match &s.fields {
+            Fields::Named(n) => n,
+            other => {
+                return Err(syn::Error::new(
+                    other.span(),
+                    "SlotFields requires a struct with named fields",
+                ));
+            }
+        },
+        Data::Enum(e) => {
+            return Err(syn::Error::new(
+                e.enum_token.span(),
+                "SlotFields cannot be derived for enums",
+            ));
+        }
+        Data::Union(u) => {
+            return Err(syn::Error::new(
+                u.union_token.span(),
+                "SlotFields cannot be derived for unions",
+            ));
+        }
+    };
+
+    let name = &input.ident;
+    let vis = &input.vis;
+    let table = syn::Ident::new(&format!("{name}SlotFields"), name.span());
+
+    let mut members = Vec::new();
+    let mut initialisers = Vec::new();
+    let mut offsets = Vec::new();
+
+    for field in &named.named {
+        let ident = field.ident.as_ref().expect("named fields checked above");
+        // A field type may spell `Self` (e.g. `Bitmap<{ words_for(Self::N) }>`).
+        // Inside the generated table that would resolve to the table type, so
+        // substitute the concrete name.
+        let ty = substitute_self(field.ty.to_token_stream(), name);
+        members.push(quote! {
+            #vis #ident: ::slopos_ostd::mm::init::Field<
+                #name, #ty, { ::core::mem::offset_of!(#name, #ident) }
+            >
+        });
+        initialisers.push(quote! {
+            #ident: ::slopos_ostd::mm::init::Field::__new(|__t: &#name| &__t.#ident)
+        });
+        offsets.push(quote! { ::core::mem::offset_of!(#name, #ident) });
+    }
+
+    let field_count = named.named.len();
+
+    Ok(quote! {
+        #[doc = concat!("Compile-time field table for [`", stringify!(#name), "`].")]
+        #[doc(hidden)]
+        #vis struct #table {
+            #(#members),*
+        }
+
+        // Hand-written rather than derived: `#[derive(Clone, Copy)]` emits an
+        // `unsafe impl ::core::clone::TrivialClone`, which would put an
+        // `unsafe` token into the expansion of every crate that uses the
+        // table — the exact thing this derive exists to avoid.
+        impl ::core::clone::Clone for #table {
+            #[inline]
+            fn clone(&self) -> Self {
+                *self
+            }
+        }
+        impl ::core::marker::Copy for #table {}
+
+        impl ::slopos_ostd::mm::init::HasFields for #name {
+            type Fields = #table;
+            const FIELD_COUNT: usize = #field_count;
+            const FIELD_OFFSETS: &'static [usize] = &[#(#offsets),*];
+            const FIELDS: #table = #table {
+                #(#initialisers),*
+            };
+        }
+
+        const _: () = assert!(
+            ::core::mem::size_of::<#table>() == 0,
+            "SlotFields table must be zero-sized so it costs no stack frame",
+        );
+    })
+}
+
+/// Rewrite every `Self` ident in a field type to the concrete type name.
+///
+/// In a struct field position `Self` can only mean the struct itself, so the
+/// substitution is unconditional. It is needed because the generated field
+/// table is a *different* type, and a field spelled
+/// `Bitmap<{ words_for(Self::COUNT) }>` would otherwise resolve `Self` to the
+/// table.
+fn substitute_self(tokens: TokenStream2, name: &syn::Ident) -> TokenStream2 {
+    use proc_macro2::{Group, TokenTree};
+    tokens
+        .into_iter()
+        .map(|tt| match tt {
+            TokenTree::Ident(id) if id == "Self" => {
+                TokenTree::Ident(syn::Ident::new(&name.to_string(), id.span()))
+            }
+            TokenTree::Group(g) => {
+                TokenTree::Group(Group::new(g.delimiter(), substitute_self(g.stream(), name)))
+            }
+            other => other,
+        })
+        .collect()
 }
 
 /// Turn a free `fn(pkt: &mut PacketView<'_>) -> XdpAction` into a registrable
@@ -132,12 +298,22 @@ fn expand_marker(input: &DeriveInput, kind: MarkerKind) -> syn::Result<TokenStre
 
     let fields = match &input.data {
         Data::Struct(s) => collect_field_types(&s.fields),
-        Data::Enum(e) => {
-            return Err(syn::Error::new(
-                e.enum_token.span(),
-                format!("{} cannot be derived for enums", kind.name()),
-            ));
-        }
+        Data::Enum(e) => match kind {
+            // A fieldless enum with a primitive repr whose first variant sits
+            // at discriminant 0 has a valid all-zero representation, and both
+            // halves of that are checked below. `Pod` needs the stronger
+            // property that *every* bit pattern is valid, which no enum has.
+            MarkerKind::Zeroable => {
+                check_zeroable_enum(input, e)?;
+                Vec::new()
+            }
+            MarkerKind::Pod => {
+                return Err(syn::Error::new(
+                    e.enum_token.span(),
+                    "Pod cannot be derived for enums: an enum has invalid bit patterns",
+                ));
+            }
+        },
         Data::Union(u) => {
             return Err(syn::Error::new(
                 u.union_token.span(),
@@ -181,11 +357,16 @@ fn collect_field_types(fields: &Fields) -> Vec<syn::Type> {
     }
 }
 
-fn check_repr(input: &DeriveInput, kind: MarkerKind) -> syn::Result<()> {
-    let mut saw_c_or_transparent = false;
-    let mut saw_packed = false;
-    let mut packed_span = input.ident.span();
-
+/// Scan `#[repr(...)]` for the two properties the derives care about.
+fn scan_repr(input: &DeriveInput) -> syn::Result<ReprFacts> {
+    const PRIMITIVE: &[&str] = &[
+        "u8", "u16", "u32", "u64", "u128", "usize", "i8", "i16", "i32", "i64", "i128", "isize",
+    ];
+    let mut facts = ReprFacts {
+        c_or_transparent: false,
+        primitive: false,
+        packed_span: None,
+    };
     for attr in &input.attrs {
         if !attr.path().is_ident("repr") {
             continue;
@@ -193,16 +374,40 @@ fn check_repr(input: &DeriveInput, kind: MarkerKind) -> syn::Result<()> {
         let nested = attr.parse_args_with(Punctuated::<Meta, Token![,]>::parse_terminated)?;
         for meta in &nested {
             if meta.path().is_ident("C") || meta.path().is_ident("transparent") {
-                saw_c_or_transparent = true;
+                facts.c_or_transparent = true;
+            }
+            if PRIMITIVE.iter().any(|p| meta.path().is_ident(p)) {
+                facts.primitive = true;
             }
             if meta.path().is_ident("packed") {
-                saw_packed = true;
-                packed_span = meta.span();
+                facts.packed_span = Some(meta.span());
             }
         }
     }
+    Ok(facts)
+}
 
-    if saw_packed {
+struct ReprFacts {
+    c_or_transparent: bool,
+    primitive: bool,
+    packed_span: Option<proc_macro2::Span>,
+}
+
+fn reject_packed(input: &DeriveInput) -> syn::Result<()> {
+    match scan_repr(input)?.packed_span {
+        Some(span) => Err(syn::Error::new(
+            span,
+            "SlotFields cannot be derived for #[repr(packed)] types: the field \
+             projection closure is E0793 on a packed field",
+        )),
+        None => Ok(()),
+    }
+}
+
+fn check_repr(input: &DeriveInput, kind: MarkerKind) -> syn::Result<()> {
+    let facts = scan_repr(input)?;
+
+    if let Some(packed_span) = facts.packed_span {
         return Err(syn::Error::new(
             packed_span,
             format!(
@@ -211,14 +416,64 @@ fn check_repr(input: &DeriveInput, kind: MarkerKind) -> syn::Result<()> {
             ),
         ));
     }
-    if !saw_c_or_transparent {
+    // `Pod` reinterprets bytes, so the layout has to be the declared one.
+    // `Zeroable` only claims the all-zero value is valid, which is the
+    // conjunction of the fields' own claims at whatever offsets the compiler
+    // picks — a property `#[repr(Rust)]` preserves.
+    if matches!(kind, MarkerKind::Pod) && !facts.c_or_transparent {
         return Err(syn::Error::new(
             input.ident.span(),
-            format!(
-                "{} requires #[repr(C)] or #[repr(transparent)] on the type",
-                kind.name()
-            ),
+            "Pod requires #[repr(C)] or #[repr(transparent)] on the type",
         ));
     }
     Ok(())
+}
+
+/// A fieldless enum is `Zeroable` exactly when a zero discriminant names a
+/// real variant. Both halves of that are syntactically checkable.
+fn check_zeroable_enum(input: &DeriveInput, data: &syn::DataEnum) -> syn::Result<()> {
+    if !scan_repr(input)?.primitive {
+        return Err(syn::Error::new(
+            input.ident.span(),
+            "Zeroable requires a primitive representation (e.g. #[repr(u8)]) on an enum, \
+             so the discriminant encoding is defined",
+        ));
+    }
+
+    for variant in &data.variants {
+        if !matches!(variant.fields, Fields::Unit) {
+            return Err(syn::Error::new(
+                variant.span(),
+                "Zeroable can only be derived for fieldless enums: a variant payload \
+                 needs its own zero-validity argument",
+            ));
+        }
+    }
+
+    let Some(first) = data.variants.first() else {
+        return Err(syn::Error::new(
+            input.ident.span(),
+            "Zeroable cannot be derived for an empty enum: it has no valid value at all",
+        ));
+    };
+
+    // The first variant is discriminant 0 unless it says otherwise; a later
+    // variant cannot occupy 0 without the first one having a negative
+    // discriminant, which a `#[repr(uN)]` enum cannot have.
+    match &first.discriminant {
+        None => Ok(()),
+        Some((_, expr)) if is_zero_literal(expr) => Ok(()),
+        Some((_, expr)) => Err(syn::Error::new(
+            expr.span(),
+            "Zeroable requires the first variant to sit at discriminant 0",
+        )),
+    }
+}
+
+fn is_zero_literal(expr: &syn::Expr) -> bool {
+    matches!(
+        expr,
+        syn::Expr::Lit(syn::ExprLit { lit: syn::Lit::Int(i), .. })
+            if i.base10_digits() == "0"
+    )
 }

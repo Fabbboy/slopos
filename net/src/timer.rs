@@ -150,6 +150,7 @@ pub struct FiredTimer {
 // =============================================================================
 
 /// Internal mutable state of the timer wheel, protected by [`SpinLock`].
+#[derive(slopos_ostd::SlotFields)]
 struct TimerWheelInner {
     /// Pending timer entries, keyed by absolute `deadline_ms`.
     ///
@@ -189,6 +190,7 @@ struct TimerWheelInner {
 ///     }
 /// }
 /// ```
+#[derive(slopos_ostd::SlotFields)]
 pub struct NetTimerWheel {
     inner: SpinLock<TimerWheelInner>,
     /// Monotonically increasing token generator (lock-free).

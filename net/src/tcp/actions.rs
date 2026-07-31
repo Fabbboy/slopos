@@ -37,7 +37,7 @@ pub const MAX_TIMER_OPS: usize = 4;
 
 /// Everything `Pcb::on_segment` (and the other state-machine entry points)
 /// wants the glue layer to do after the table lock is released.
-#[derive(Default, Debug)]
+#[derive(Default, Debug, slopos_ostd::SlotFields)]
 pub struct Actions {
     /// Outbound segments, in emit order.  Use [`Actions::push_segment`] to
     /// append; use [`Actions::drain_segments`] to iterate in the glue layer.

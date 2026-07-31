@@ -364,6 +364,7 @@ impl ScrollbackBuf {
 // VConsole state
 // ---------------------------------------------------------------------------
 
+#[derive(slopos_ostd::SlotFields)]
 pub(crate) struct VConsoleState {
     pub(crate) cursor_row: u16,
     pub(crate) cursor_col: u16,

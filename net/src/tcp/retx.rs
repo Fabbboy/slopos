@@ -36,7 +36,7 @@ const DUP_THRESH: usize = 3;
 // ---------------------------------------------------------------------------
 
 /// Lifecycle state of a single in-flight segment.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, slopos_ostd::Zeroable)]
 #[repr(u8)]
 pub enum SegmentState {
     /// Sent, not yet acknowledged or SACKed by the peer. **Discriminant
@@ -65,7 +65,7 @@ impl Default for SegmentState {
 /// One in-flight segment's metadata.  The payload lives in the send ring
 /// buffer — this entry only records the sequence-space slice it covers
 /// and the wall time of its first transmission.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, slopos_ostd::Zeroable)]
 pub struct SendMapEntry {
     /// First sequence number covered by this entry.
     pub seq: SeqNum,
@@ -98,7 +98,7 @@ impl Default for SendMapEntry {
 /// Invariant: entries are stored in emit order (== sequence order) from
 /// index `0` to `len-1`.  Removing the head shifts the remainder down —
 /// O(n) but n ≤ 32 is negligible.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, slopos_ostd::Zeroable)]
 pub struct SendMap {
     entries: [SendMapEntry; SENDMAP_CAPACITY],
     len: u8,

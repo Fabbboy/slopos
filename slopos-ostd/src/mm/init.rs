@@ -16,18 +16,22 @@
 //!   expose only [`Init<T, E>`] — construct a `T` into a
 //!   caller-provided slot.
 //! - The two primitive constructors are [`init_from_closure`]
-//!   (hand-rolled, per-field `addr_of_mut!` writes — the one used
-//!   by large structs like `DataState` where the three-layer
-//!   stack-safety gate demands ≤ 1 KiB frames) and [`init_zeroed`]
-//!   (for `T: Zeroable`).
+//!   (hand-rolled per-field writes — the one used by large structs
+//!   like `DataState` where the three-layer stack-safety gate demands
+//!   small frames) and [`init_zeroed`] (for `T: Zeroable`).
 //! - We deliberately do not provide `try_init!` / `pin_init!`
 //!   macros. Their per-field closure capture materialises every
 //!   field's source expression on the closure's stack before
 //!   writing to the heap slot, which inflates frame size for
-//!   large structs (`DataState`'s init closure was ~2.3 KiB under
-//!   that shape). Hand-rolled `init_from_closure` callers control
-//!   their own capture set and write each field directly via
-//!   `addr_of_mut!` — the outer function's frame stays small.
+//!   large structs. Hand-rolled [`init_struct_with`] callers control
+//!   their own capture set and write each field straight into the
+//!   heap slot, so the outer function's frame stays small.
+//! - Field writes address the slot through a [`Field`] token carrying
+//!   the field's byte offset in its type. `#[derive(SlotFields)]`
+//!   mints those tokens from `core::mem::offset_of!` and a projection
+//!   closure, both of which are safe, so a `#![forbid(unsafe_code)]`
+//!   crate initialises a heap slot field by field with no `unsafe`
+//!   token anywhere in its expansion.
 
 use core::convert::Infallible;
 use core::marker::PhantomData;
@@ -241,15 +245,72 @@ impl_zeroable_tuple!(A, B, C, D, E, F, G, H, I, J, K, L);
 // SlotPtr<T> + safe field-writer helpers for in-place init closures.
 // ---------------------------------------------------------------------------
 
+/// Proof that `T` has a field of type `U` at byte offset `OFF`.
+///
+/// Zero-sized: the offset rides in the type, so a whole field table costs
+/// no stack frame and no code. The only constructor is [`Field::__new`],
+/// which takes a projection `fn(&T) -> &U` — a value the caller can only
+/// produce by naming a real field of `T`, which is what pins `U` and makes
+/// the token unforgeable in practice. `#[derive(SlotFields)]` is the
+/// intended way to build one; it pairs each projection with the matching
+/// `core::mem::offset_of!`.
+///
+/// Both halves are safe code, so a `#![forbid(unsafe_code)]` crate can
+/// address fields of an uninitialised heap slot with no `unsafe` token
+/// anywhere in its expansion.
+pub struct Field<T, U, const OFF: usize>(PhantomData<fn(*mut T) -> *mut U>);
+
+impl<T, U, const OFF: usize> Clone for Field<T, U, OFF> {
+    #[inline]
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+impl<T, U, const OFF: usize> Copy for Field<T, U, OFF> {}
+
+impl<T, U, const OFF: usize> Field<T, U, OFF> {
+    /// Mint the token from a field projection. The projection is never
+    /// called; it exists so the type-checker resolves `U` from `T`'s real
+    /// field and rejects a field name `T` does not have.
+    #[doc(hidden)]
+    #[inline]
+    pub const fn __new(_projection: fn(&T) -> &U) -> Self {
+        Self(PhantomData)
+    }
+
+    /// Byte offset of the field within `T`.
+    #[inline]
+    pub const fn offset(self) -> usize {
+        OFF
+    }
+}
+
+/// A type with a compile-time field table, as emitted by
+/// `#[derive(SlotFields)]`.
+///
+/// Safe to implement: every associated item is derived from
+/// `core::mem::offset_of!` and field projections, both of which the
+/// compiler checks. Nothing in OSTD trusts a hand-written impl for
+/// memory safety beyond what `Field`'s own construction already
+/// guarantees.
+pub trait HasFields: Sized {
+    /// The generated table type. Zero-sized.
+    type Fields: Copy;
+    /// Number of fields the table covers.
+    const FIELD_COUNT: usize;
+    /// Byte offset of each field, in declaration order.
+    const FIELD_OFFSETS: &'static [usize];
+    /// The table itself.
+    const FIELDS: Self::Fields;
+}
+
 /// Safe wrapper around `*mut T` for use inside [`Init::__init`]
 /// closures.
 ///
-/// Wraps the per-field `addr_of_mut!((*slot).field).write(value)`
-/// pattern behind a single safe method [`SlotPtr::write_field`], which
-/// takes a `FieldAccessor` closure returning `*mut U` and a `value: U`.
-/// The single `unsafe` interior to OSTD covers the `*mut U`
-/// dereference plus the `.write(value)` call; consumer crates stay
-/// `unsafe`-free.
+/// Field writes go through [`Field`] tokens: `slot.write(f, value)` takes a
+/// `Field<T, U, OFF>` and lands `value` at `OFF` bytes into the slot. The
+/// only `unsafe` involved is interior to OSTD; consumer crates stay
+/// `unsafe`-free, in source *and* in expansion.
 ///
 /// Construct via [`SlotPtr::from_raw`] inside an
 /// [`init_from_closure`]-style closure.
@@ -279,33 +340,77 @@ impl<T> SlotPtr<T> {
         self.raw
     }
 
-    /// Write `value` into the field reachable from `getter(slot.raw())`.
+    /// Write `value` into the field `f` names.
     ///
-    /// `getter` is a `fn(*mut T) -> *mut U` that computes a field's
-    /// address using `addr_of_mut!` — the macro itself does not
-    /// dereference, only the syntactic `(*slot).field` expression
-    /// inside it does. We accept that dereference inside the helper.
+    /// Reach for the [`write_field!`] macro rather than calling this
+    /// directly; it resolves the [`Field`] token out of the slot's
+    /// generated table:
+    /// ```ignore
+    /// write_field!(slot, next_token, AtomicU64::new(1));
+    /// ```
     ///
-    /// Typical use:
-    /// ```ignore
-    /// slot.write_field(
-    ///     |p| core::ptr::addr_of_mut!((*p).field) as *mut u32,
-    ///     0xdeadbeef,
-    /// );
-    /// ```
-    /// Or with the [`write_field!`] macro that fills in the closure:
-    /// ```ignore
-    /// write_field!(slot.field, 0xdeadbeef);
-    /// ```
+    /// Deliberately `#[inline]` and not `#[inline(always)]`. Under the
+    /// debug profile the stack-size gate measures, force-inlining gives
+    /// each call its own non-reused slots in the caller's frame: a
+    /// 28-field initialiser measures 248 bytes as written and 2 576 bytes
+    /// with `inline(always)`, which is over the 2 KiB ceiling. Release
+    /// folds both to nothing.
     #[inline]
-    pub fn write_field<U>(&self, getter: unsafe fn(*mut T) -> *mut U, value: U) {
-        // SAFETY: caller of `SlotPtr::from_raw` asserts the slot is
-        // writable for `size_of::<T>()` bytes; the `getter` returns a
-        // pointer into that slot, so the `.write(value)` lands inside
-        // the caller's slot.
+    pub fn write<U, const OFF: usize>(&self, _f: Field<T, U, OFF>, value: U) {
+        // SAFETY: `from_raw`'s contract makes the slot writable for
+        // `size_of::<T>()` bytes. `Field<T, U, OFF>` exists only if `T`
+        // really has a `U`-typed field at `OFF`, so `OFF + size_of::<U>()`
+        // is within the slot and the pointer is aligned for `U`.
         unsafe {
-            let p = getter(self.raw);
-            p.write(value);
+            self.raw.cast::<u8>().add(OFF).cast::<U>().write(value);
+        }
+    }
+
+    /// Zero-fill the field `f` names. `U: Zeroable` is the type-system
+    /// discharge of "the all-zero pattern is a valid `U`" — the obligation
+    /// that used to live in a comment at each call site.
+    #[inline]
+    pub fn zero<U: Zeroable, const OFF: usize>(&self, _f: Field<T, U, OFF>) {
+        // SAFETY: as `write`, plus `U: Zeroable` certifies the resulting
+        // bytes form a valid `U`.
+        unsafe {
+            core::ptr::write_bytes(self.raw.cast::<u8>().add(OFF), 0, core::mem::size_of::<U>());
+        }
+    }
+
+    /// Run a nested [`Init`] recipe directly into the field `f` names, so
+    /// the nested value never materialises on the caller's stack either.
+    #[inline]
+    pub fn write_init<U, E, const OFF: usize>(
+        &self,
+        _f: Field<T, U, OFF>,
+        init: impl Init<U, E>,
+    ) -> Result<(), E> {
+        // SAFETY: as `write` — the field slot is writable and aligned for
+        // `U`, which is exactly `Init::__init`'s precondition.
+        unsafe { Init::__init(init, self.raw.cast::<u8>().add(OFF).cast::<U>()) }
+    }
+
+    /// Write one element of an array-typed field, without materialising
+    /// the array. The index is checked against the array length carried in
+    /// the field's type.
+    #[inline]
+    pub fn write_elem<U, const N: usize, const OFF: usize>(
+        &self,
+        _f: Field<T, [U; N], OFF>,
+        index: usize,
+        value: U,
+    ) {
+        assert!(index < N, "SlotPtr::write_elem: index out of bounds");
+        // SAFETY: as `write`. The field is `[U; N]` at `OFF`, and `index`
+        // is bounds-checked above, so element `index` lies inside it.
+        unsafe {
+            self.raw
+                .cast::<u8>()
+                .add(OFF)
+                .cast::<U>()
+                .add(index)
+                .write(value);
         }
     }
 
@@ -321,20 +426,14 @@ impl<T> SlotPtr<T> {
             core::ptr::write_bytes(self.raw as *mut u8, 0, core::mem::size_of::<T>());
         }
     }
+}
 
-    /// Take a typed `*mut U` to the result of `getter(slot)` — for
-    /// the rare per-element-array-write loops that cannot fit the
-    /// `write_field` shape.
-    ///
-    /// # Safety
-    ///
-    /// Caller must use the returned pointer only to write `U` values
-    /// inside the slot, and must finish every required write before
-    /// the enclosing closure returns `Ok(())`.
+impl<T: HasFields> SlotPtr<T> {
+    /// The slot type's compile-time field table. Zero-sized, so this
+    /// returns by value at no cost.
     #[inline]
-    pub unsafe fn field_ptr<U>(&self, getter: unsafe fn(*mut T) -> *mut U) -> *mut U {
-        // SAFETY: caller forwards the safety contract.
-        unsafe { getter(self.raw) }
+    pub fn fields(&self) -> T::Fields {
+        T::FIELDS
     }
 }
 
@@ -377,9 +476,12 @@ where
     }
 }
 
-/// Sugar over [`SlotPtr::write_field`]: given a `slot: SlotPtr<T>`
-/// expression and `field` access path, write `value` into the field
-/// via `addr_of_mut!`.
+/// Sugar over [`SlotPtr::write`]: given a `slot: SlotPtr<T>` expression
+/// and a field name, write `value` into that field of the slot.
+///
+/// `T` must carry `#[derive(SlotFields)]`. The field name resolves against
+/// the generated table, so a name `T` does not have is a compile error and
+/// the value's type is inferred from the field's.
 ///
 /// ```ignore
 /// use slopos_ostd::write_field;
@@ -390,20 +492,14 @@ where
 #[macro_export]
 macro_rules! write_field {
     ($slot:expr, $field:tt, $value:expr) => {{
-        // SAFETY: the surrounding `init_struct_with` provides a
-        // `SlotPtr<T>` whose underlying slot is writable for
-        // `size_of::<T>()` bytes. `addr_of_mut!` computes a
-        // sub-pointer without reading, and `.write(value)` lands
-        // inside the slot.
-        unsafe {
-            let __slot_ptr = ($slot).raw();
-            core::ptr::addr_of_mut!((*__slot_ptr).$field).write($value);
-        }
+        let __slot = &$slot;
+        __slot.write(__slot.fields().$field, $value);
     }};
 }
 
 /// Sugar for writing every element of an array-typed field. Iterates
-/// `0..count` and writes `f(i)` to element `i`.
+/// `0..count` and writes `f(i)` to element `i`, so no array rvalue
+/// materialises on the caller's stack.
 ///
 /// ```ignore
 /// use slopos_ostd::write_array_field;
@@ -412,29 +508,18 @@ macro_rules! write_field {
 #[macro_export]
 macro_rules! write_array_field {
     ($slot:expr, $field:tt, $count:expr, $f:expr) => {{
-        // SAFETY: the surrounding `init_struct_with` closure has a
-        // valid `SlotPtr<T>` whose underlying slot is writable for
-        // `size_of::<T>()` bytes (covering the array field). The
-        // `addr_of_mut!` macro computes the array's base address
-        // without reading; we then write each element through the
-        // typed pointer.
-        unsafe {
-            let __array_ptr = core::ptr::addr_of_mut!((*($slot).raw()).$field);
-            let __closure = $f;
-            for __i in 0..$count {
-                // `addr_of_mut!((*array_ptr)[i])` yields the
-                // correctly-typed element pointer; `.write()` then
-                // takes the closure's return type without further
-                // inference hops.
-                core::ptr::addr_of_mut!((*__array_ptr)[__i]).write(__closure(__i));
-            }
+        let __slot = &$slot;
+        let __field = __slot.fields().$field;
+        let __closure = $f;
+        for __i in 0..$count {
+            __slot.write_elem(__field, __i, __closure(__i));
         }
     }};
 }
 
-/// Write `*mut T`-style raw fields when the value is an `Init` that
-/// must populate a nested slot (e.g. a `SpinLock<Inner>` whose
-/// `init_with(...)` recipe needs to be `__init`'d into the field).
+/// Write a field whose value is an [`Init`] recipe that must populate a
+/// nested slot (e.g. a `SpinLock<Inner>` whose `init_with(...)` needs to
+/// be `__init`'d into the field).
 ///
 /// ```ignore
 /// use slopos_ostd::write_init_field;
@@ -443,21 +528,14 @@ macro_rules! write_array_field {
 #[macro_export]
 macro_rules! write_init_field {
     ($slot:expr, $field:tt, $init:expr) => {{
-        let __init = $init;
-        // SAFETY: `init_struct_with` guarantees the slot is valid
-        // for `T`; the `addr_of_mut!` computes the field address
-        // and `Init::__init` writes a valid value into it.
-        let __res: Result<(), _> = unsafe {
-            let __field_ptr = core::ptr::addr_of_mut!((*($slot).raw()).$field);
-            $crate::mm::init::Init::__init(__init, __field_ptr)
-        };
-        __res
+        let __slot = &$slot;
+        __slot.write_init(__slot.fields().$field, $init)
     }};
 }
 
-/// Zero-fill a single field of a `SlotPtr<T>`. The caller asserts the
-/// resulting all-zero bytes form a representationally valid value for
-/// the field's type.
+/// Zero-fill a single field of a `SlotPtr<T>`. The field's type must be
+/// [`Zeroable`], which is what certifies the all-zero bytes form a valid
+/// value.
 ///
 /// Used for fields whose `new()` value is all-zero (`SendMap`,
 /// many `Option<…>` fields, etc.) to avoid materialising a by-value
@@ -470,31 +548,7 @@ macro_rules! write_init_field {
 #[macro_export]
 macro_rules! zero_field {
     ($slot:expr, $field:tt) => {{
-        // SAFETY: caller asserts the all-zero pattern is a valid
-        // value for the field's type. `addr_of_mut!` computes the
-        // field address without reading. `write_bytes` writes
-        // exactly N bytes where N is the field's size derived from
-        // the pointed-to type via the helper below.
-        unsafe {
-            let __field_ptr = core::ptr::addr_of_mut!((*($slot).raw()).$field);
-            $crate::mm::init::__zero_at_typed_ptr(__field_ptr);
-        }
+        let __slot = &$slot;
+        __slot.zero(__slot.fields().$field);
     }};
-}
-
-/// Internal helper for `zero_field!`: zero-fills exactly
-/// `size_of::<T>()` bytes starting at `ptr`.
-///
-/// # Safety
-///
-/// `ptr` must point to writable memory aligned for `T` and sized for
-/// `T`. The caller must additionally assert that the all-zero bit
-/// pattern is representationally valid for `T`.
-#[inline]
-#[doc(hidden)]
-pub unsafe fn __zero_at_typed_ptr<T>(ptr: *mut T) {
-    // SAFETY: caller of the surrounding macro upholds the contract.
-    unsafe {
-        core::ptr::write_bytes(ptr as *mut u8, 0, core::mem::size_of::<T>());
-    }
 }

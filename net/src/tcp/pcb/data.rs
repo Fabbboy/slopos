@@ -65,7 +65,7 @@ enum NextTransition {
 }
 
 /// State-specific payload for the Data variant.
-#[derive(Debug)]
+#[derive(Debug, slopos_ostd::SlotFields)]
 pub struct DataState {
     // -------- Sequence variables (RFC 793 §3.2) --------
     pub iss: SeqNum,

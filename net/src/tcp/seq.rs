@@ -59,7 +59,7 @@ pub fn seq_ge(a: u32, b: u32) -> bool {
 /// A TCP sequence number.  Wraps a `u32` so that `<`/`>`/`PartialOrd` route
 /// through the RFC 793 wrapping comparison instead of naive integer
 /// comparison.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, slopos_ostd::Zeroable)]
 #[repr(transparent)]
 pub struct SeqNum(pub u32);
 

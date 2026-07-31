@@ -141,6 +141,7 @@ enum Xfer<'a> {
 /// Combined device + MMIO caps + interrupt state under a single lock,
 /// ensuring ownership/claim state and the request path share one coherent
 /// synchronization model.
+#[derive(slopos_ostd::SlotFields)]
 struct VirtioBlkState {
     device: VirtioBlkDevice,
     caps: VirtioMmioCaps,
@@ -236,6 +237,7 @@ impl VirtioBlkState {
 /// `BLK_QUEUE_EVENT` / `BLK_REQUEST_IN_FLIGHT`) with per-device fields
 /// is what makes multi-device ownership — and thus exclusive write
 /// claims — possible.
+#[derive(slopos_ostd::SlotFields)]
 struct VirtioBlkInner {
     /// Device + caps + MSI-X state + request slots. `LOCK_LEVEL_RESOURCE`.
     /// `SpinLock` disables IRQs while held, so the IRQ-side harvest and

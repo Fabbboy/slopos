@@ -493,6 +493,7 @@ impl SlabSocketTable {
 ///
 /// this allocator and both old/new socket paths may use it.
 /// Access must be serialized by the outer lock (no internal atomics).
+#[derive(slopos_ostd::SlotFields)]
 pub struct EphemeralPortAllocator {
     bitmap: Bitmap<{ words_for(Self::EPHEMERAL_PORT_COUNT) }>,
     next_port: u16,
