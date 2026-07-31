@@ -231,19 +231,15 @@ pub fn pci_alloc_mmio(size: u64) -> Option<u64> {
 // iterates it during boot.
 // ---------------------------------------------------------------------------
 
-slopos_ostd::extern_block! {
-    #[allow(improper_ctypes)]
-    mod registry_externs {
-        static __start_driver_registry: super::PciDriverEntry;
-        static __stop_driver_registry: super::PciDriverEntry;
-    }
+impl slopos_ostd::ffi::registry::RegistryEntry for PciDriverEntry {
+    const REGISTRIES: &'static [slopos_ostd::ffi::registry::RegistryId] =
+        &[slopos_ostd::ffi::registry::RegistryId::PciDrivers];
 }
 
 /// Borrow the linker-built `[PciDriverEntry]` slice.
 pub fn driver_registry_iter() -> impl Iterator<Item = &'static PciDriverEntry> {
-    slopos_ostd::util::ptr_buf::section_slice::<PciDriverEntry>(
-        registry_externs::__start_driver_registry_addr(),
-        registry_externs::__stop_driver_registry_addr(),
+    slopos_ostd::ffi::registry::registry_slice::<PciDriverEntry>(
+        slopos_ostd::ffi::registry::RegistryId::PciDrivers,
     )
     .iter()
 }
@@ -260,7 +256,7 @@ macro_rules! __pci_driver_opt {
     };
 }
 
-/// Declarative wrapper around `link_section_static!` for emitting a
+/// Declarative wrapper around `registry_entry!` for emitting a
 /// [`PciDriverEntry`] into the `.driver_registry` link section. Each
 /// driver crate uses this macro exactly once per driver; the linker
 /// gathers all expansions into a single contiguous array.
@@ -289,10 +285,9 @@ macro_rules! pci_driver {
             probe: $probe:path $(,)?
         };
     ) => {
-        slopos_ostd::link_section_static! {
-            #[used]
+        slopos_ostd::registry_entry! {
+            pci_drivers,
             $(#[$attr])*
-            section = ".driver_registry";
             $vis static $name: $crate::pci::PciDriverEntry = $crate::pci::PciDriverEntry {
                 name: $drv_name,
                 match_table: $match_table,

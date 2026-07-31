@@ -27,21 +27,14 @@ use slopos_ostd::{AllocError, KVec};
 // compile unchanged.
 pub use slopos_ostd::test_support::hermetic::HermeticVTable;
 
-slopos_ostd::extern_block! {
-    #[allow(improper_ctypes)]
-    mod externs {
-        static __start_hermetic_state_registry: super::HermeticVTable;
-        static __stop_hermetic_state_registry: super::HermeticVTable;
-    }
-}
-
 /// Iterate every registered `HermeticVTable` in linker order. Order is
 /// fragile (depends on translation-unit link order); `topo_order` is
 /// the scope's actual capture-order source of truth.
 pub fn registry_iter() -> impl Iterator<Item = &'static HermeticVTable> {
-    let start = externs::__start_hermetic_state_registry_addr();
-    let stop = externs::__stop_hermetic_state_registry_addr();
-    slopos_ostd::util::ptr_buf::section_slice::<HermeticVTable>(start, stop).iter()
+    slopos_ostd::ffi::registry::registry_slice::<HermeticVTable>(
+        slopos_ostd::ffi::registry::RegistryId::HermeticStates,
+    )
+    .iter()
 }
 
 /// Errors from registry analysis.

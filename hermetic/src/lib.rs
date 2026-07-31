@@ -29,7 +29,6 @@
 #![forbid(unsafe_code)]
 
 mod boot_ctx;
-mod macros;
 mod registry;
 mod stack_top;
 mod trait_def;

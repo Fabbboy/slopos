@@ -151,7 +151,7 @@ invocations that need surrounding scaffolding). They are:
 | `arch/x86_64/cpuid.rs::XsaveFeatures` | "during boot" usage pattern |
 | `cpu/x86_64/control_regs.rs::stac` | tight `stac()` / user-page touch / `clac()` window |
 | `dev/mod.rs::FromRawPtr` | trait usage referencing user's `MyHandle` |
-| `ffi/mod.rs` (5×) | `extern_block!` / `link_section_static!` / `extern_c_entry!` macro syntax |
+| `ffi/mod.rs` (5×) | `extern_block!` / `limine_request!` / `extern_c_entry!` macro syntax |
 | `klog.rs` | driver-side `klog_register_backend` registration |
 | `mm/heap.rs::KernelHeap` | `#[global_allocator]` site (kernel `main.rs` is the only consumer) |
 | `mm/init.rs` (6×) | `write_field!` / `write_array_field!` / `write_init_field!` / `zero_field!` macro usage |

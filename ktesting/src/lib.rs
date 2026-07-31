@@ -82,9 +82,9 @@ macro_rules! stest {
                 $crate::execute_test($ident as fn() -> $crate::TestResult)
             }
 
-            #[used]
+            slopos_ostd::registry_entry! {
+            tests,
             #[allow(non_upper_case_globals)]
-            #[unsafe(link_section = ".test_registry")]
             pub static [<TEST_DESC_ $ident>]: $crate::TestDesc = $crate::TestDesc {
                 name: stringify!($ident),
                 module: module_path!(),
@@ -96,6 +96,7 @@ macro_rules! stest {
                 bin: None,
                 argv: &[],
             };
+            }
         }
     };
 
@@ -109,9 +110,9 @@ macro_rules! stest {
                 $crate::execute_test($ident as fn() -> $crate::TestResult)
             }
 
-            #[used]
+            slopos_ostd::registry_entry! {
+            tests,
             #[allow(non_upper_case_globals)]
-            #[unsafe(link_section = ".test_registry")]
             pub static [<TEST_DESC_ $suite _ $ident>]: $crate::TestDesc = $crate::TestDesc {
                 name: stringify!($ident),
                 module: module_path!(),
@@ -123,6 +124,7 @@ macro_rules! stest {
                 bin: None,
                 argv: &[],
             };
+            }
         }
     };
 }

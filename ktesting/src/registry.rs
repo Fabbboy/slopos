@@ -40,26 +40,17 @@ pub struct TestDesc {
 /// `EXPECTED_PANIC` suffix. Used by the bootstrap panic-isolation canary.
 pub const FLAG_EXPECTED_PANIC: u32 = 0x1;
 
-#[allow(improper_ctypes)]
-unsafe extern "C" {
-    static __start_test_registry: TestDesc;
-    static __stop_test_registry: TestDesc;
+impl slopos_ostd::ffi::registry::RegistryEntry for TestDesc {
+    const REGISTRIES: &'static [slopos_ostd::ffi::registry::RegistryId] =
+        &[slopos_ostd::ffi::registry::RegistryId::Tests];
 }
 
 /// Walk every entry in `.test_registry`.
 pub fn registry_iter() -> impl Iterator<Item = &'static TestDesc> {
-    let start: *const TestDesc = unsafe { &__start_test_registry };
-    let end: *const TestDesc = unsafe { &__stop_test_registry };
-    let count = if end >= start {
-        // SAFETY: section contains a contiguous run of `TestDesc` entries.
-        unsafe { end.offset_from(start) as usize }
-    } else {
-        0
-    };
-    (0..count).map(move |i| {
-        // SAFETY: `i < count` and the section is well-formed.
-        unsafe { &*start.add(i) }
-    })
+    slopos_ostd::ffi::registry::registry_slice::<TestDesc>(
+        slopos_ostd::ffi::registry::RegistryId::Tests,
+    )
+    .iter()
 }
 
 fn is_bootstrap(desc: &TestDesc) -> bool {

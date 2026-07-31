@@ -62,3 +62,8 @@ unsafe fn restore_thunk<S: HermeticState>(payload: NonNull<()>) {
     // SAFETY: scope contract — only called from KernelTestScope::Drop.
     unsafe { <S as HermeticState>::restore(snap) }
 }
+
+impl crate::ffi::registry::RegistryEntry for HermeticVTable {
+    const REGISTRIES: &'static [crate::ffi::registry::RegistryId] =
+        &[crate::ffi::registry::RegistryId::HermeticStates];
+}

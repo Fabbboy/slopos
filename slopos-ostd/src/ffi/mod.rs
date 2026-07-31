@@ -1,6 +1,10 @@
-//! FFI primitives. Currently hosts the `extern_block!` declarative
-//! macro that wraps `unsafe extern "C" { … }` declarations so the
-//! `unsafe extern` syntax lives only inside OSTD's macro expansion.
+//! FFI primitives: the surfaces a `#![forbid(unsafe_code)]` crate cannot
+//! spell for itself.
+//!
+//! Linker registries live in [`registry`]; this module hosts the
+//! `extern_block!` declarative macro that wraps `unsafe extern "C" { … }`
+//! declarations, the Edition-2024 `no_mangle` wrappers, and the Limine
+//! request placement macro.
 //!
 //! # `extern_block!` shape
 //!
@@ -41,44 +45,50 @@
 //! depends on the callee, not on its mere existence as a symbol. The
 //! macro's contract is solely to absorb the `unsafe extern` *syntax*.
 
+pub mod registry;
+
 #[doc(hidden)]
 pub use core::ptr;
 
-/// Declarative wrapper around `#[used] #[unsafe(link_section = "…")]`
-/// statics.
+/// Place a static in one of the three sections the Limine boot protocol
+/// reads.
 ///
-/// Edition 2024 spells the `link_section` attribute as
-/// `#[unsafe(link_section = "…")]` — the `unsafe` keyword is required
-/// by the attribute grammar even though the runtime semantics are
-/// inert (the linker reads the section label and emplaces the static
-/// at the configured offset). This macro absorbs the literal `unsafe`
-/// keyword so consumers don't spell it at the registration site.
+/// Distinct from [`registry_entry!`](crate::registry_entry): the Limine
+/// sections are an interop contract with the bootloader rather than a
+/// kernel-internal registry, they hold heterogeneous request types, and
+/// nothing walks them from inside the kernel — so there are no bracket
+/// symbols and no entry type to agree on. What they share is that the
+/// section label is OSTD's, not the caller's.
 ///
-/// Each invocation form:
 /// ```ignore
-/// slopos_ostd::link_section_static! {
-///     #[used]
-///     section = ".limine_requests";
-///     static FOO: FooT = FooT::new();
+/// slopos_ostd::limine_request! {
+///     request,
+///     static HHDM_REQUEST: HhdmRequest = HhdmRequest::new();
 /// }
 /// ```
-/// expands to:
-/// ```ignore
-/// #[used]
-/// #[unsafe(link_section = ".limine_requests")]
-/// static FOO: FooT = FooT::new();
-/// ```
-///
-/// `vis` and item-level attributes are forwarded; the visibility
-/// defaults to private (`static`) if omitted.
 #[macro_export]
-macro_rules! link_section_static {
+macro_rules! limine_request {
+    (start_marker, $($item:tt)*) => {
+        $crate::__limine_request!(".limine_requests_start_marker", $($item)*);
+    };
+    (request, $($item:tt)*) => {
+        $crate::__limine_request!(".limine_requests", $($item)*);
+    };
+    (end_marker, $($item:tt)*) => {
+        $crate::__limine_request!(".limine_requests_end_marker", $($item)*);
+    };
+}
+
+#[doc(hidden)]
+#[macro_export]
+macro_rules! __limine_request {
     (
+        $section:literal,
         $(#[$attr:meta])*
-        section = $section:literal;
         $vis:vis static $name:ident : $ty:ty = $init:expr ;
     ) => {
         $(#[$attr])*
+        #[used]
         #[unsafe(link_section = $section)]
         $vis static $name : $ty = $init;
     };

@@ -41,11 +41,12 @@ macro_rules! __hermetic_register {
     ($ty:ty) => {
         const _: () = {
             $crate::__paste::paste! {
-                #[used]
-                #[allow(non_upper_case_globals)]
-                #[unsafe(link_section = ".hermetic_state_registry")]
-                static [<__HVT_ $ty>]: $crate::test_support::hermetic::HermeticVTable =
-                    $crate::test_support::hermetic::HermeticVTable::new::<$ty>();
+                $crate::registry_entry! {
+                    hermetic_states,
+                    #[allow(non_upper_case_globals)]
+                    static [<__HVT_ $ty>]: $crate::test_support::hermetic::HermeticVTable =
+                        $crate::test_support::hermetic::HermeticVTable::new::<$ty>();
+                }
             }
         };
     };

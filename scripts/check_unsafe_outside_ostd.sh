@@ -31,15 +31,6 @@
 #                                   handler declarations (must name
 #                                   `alloc` directly; same exemption
 #                                   pattern as check_alloc_dep.sh).
-#   - hermetic/src/macros.rs        `macro_rules!` body containing the
-#                                   Edition-2024 `#[unsafe(link_section
-#                                   = "...")]` attribute used at
-#                                   expansion sites elsewhere. The
-#                                   keyword is required by the
-#                                   attribute grammar, not a runtime
-#                                   unsafe block. Allowlisted by file
-#                                   so a *new* unsafe block added to
-#                                   the same file still fails the gate.
 #
 # Userland-side crates (userland, slibc, slop-protocol, ktesting, appkit)
 # are out of scope per Phase-1 plan § A.
@@ -66,7 +57,6 @@ TCB_ANNEX_RE='^vendor/(unwinding|gimli)/'
 # Explicit file-level allowlist. Each entry is a repo-relative path.
 SOURCE_WHITELIST=(
     "kernel/src/main.rs"
-    "hermetic/src/macros.rs"
 )
 
 # Include tracked Rust sources, untracked Rust sources, and an explicit

@@ -24,10 +24,9 @@
 //!    gated on a `swap(true, SeqCst)` so the cell is written exactly
 //!    once, then exposed as a `*const` for life.
 //!
-//! 3. **`#[unsafe(link_section = "…")]` attributes.** These are Edition 2024
-//!    syntactic markers — they tell the linker where to place the Limine
-//!    request statics, and the `unsafe` keyword is required by the attribute
-//!    grammar. They are not runtime unsafe.
+//! 3. **Limine request placement.** The three section labels the boot
+//!    protocol reads belong to OSTD's `limine_request!`, so this module
+//!    names a placement rather than a section string.
 
 use core::{
     ffi::{c_char, c_void},
@@ -52,74 +51,60 @@ pub use slopos_ostd::boot_info::{
     MemoryRegionKind,
 };
 
-slopos_ostd::link_section_static! {
-    #[used]
-    section = ".limine_requests_start_marker";
+slopos_ostd::limine_request! {
+    start_marker,
     static LIMINE_REQUESTS_START_MARKER: [u64; 1] = [0];
 }
-slopos_ostd::link_section_static! {
-    #[used]
-    section = ".limine_requests";
+slopos_ostd::limine_request! {
+    request,
     static BASE_REVISION: BaseRevision = BaseRevision::new();
 }
-slopos_ostd::link_section_static! {
-    #[used]
-    section = ".limine_requests";
+slopos_ostd::limine_request! {
+    request,
     static HHDM_REQUEST: HhdmRequest = HhdmRequest::new();
 }
-slopos_ostd::link_section_static! {
-    #[used]
-    section = ".limine_requests";
+slopos_ostd::limine_request! {
+    request,
     static MEMMAP_REQUEST: MemmapRequest = MemmapRequest::new();
 }
-slopos_ostd::link_section_static! {
-    #[used]
-    section = ".limine_requests";
+slopos_ostd::limine_request! {
+    request,
     static FRAMEBUFFER_REQUEST: FramebufferRequest = FramebufferRequest::new();
 }
-slopos_ostd::link_section_static! {
-    #[used]
-    section = ".limine_requests";
+slopos_ostd::limine_request! {
+    request,
     static KERNEL_FILE_REQUEST: ExecutableFileRequest = ExecutableFileRequest::new();
 }
-slopos_ostd::link_section_static! {
-    #[used]
-    section = ".limine_requests";
+slopos_ostd::limine_request! {
+    request,
     static RSDP_REQUEST: RsdpRequest = RsdpRequest::new();
 }
-slopos_ostd::link_section_static! {
-    #[used]
-    section = ".limine_requests";
+slopos_ostd::limine_request! {
+    request,
     static BOOTLOADER_INFO_REQUEST: BootloaderInfoRequest = BootloaderInfoRequest::new();
 }
-slopos_ostd::link_section_static! {
-    #[used]
-    section = ".limine_requests";
+slopos_ostd::limine_request! {
+    request,
     static KERNEL_ADDRESS_REQUEST: ExecutableAddressRequest = ExecutableAddressRequest::new();
 }
-slopos_ostd::link_section_static! {
-    #[used]
-    section = ".limine_requests";
+slopos_ostd::limine_request! {
+    request,
     static MP_REQUEST: MpRequest = MpRequest::new(0);
 }
-slopos_ostd::link_section_static! {
-    #[used]
-    section = ".limine_requests";
+slopos_ostd::limine_request! {
+    request,
     static MODULES_REQUEST: ModulesRequest = ModulesRequest::new();
 }
-slopos_ostd::link_section_static! {
-    #[used]
-    section = ".limine_requests";
+slopos_ostd::limine_request! {
+    request,
     static EFI_REQUEST: EfiRequest = EfiRequest::new();
 }
-slopos_ostd::link_section_static! {
-    #[used]
-    section = ".limine_requests";
+slopos_ostd::limine_request! {
+    request,
     static EFI_MEMMAP_REQUEST: EfiMemmapRequest = EfiMemmapRequest::new();
 }
-slopos_ostd::link_section_static! {
-    #[used]
-    section = ".limine_requests_end_marker";
+slopos_ostd::limine_request! {
+    end_marker,
     static LIMINE_REQUESTS_END_MARKER: [u64; 1] = [0];
 }
 

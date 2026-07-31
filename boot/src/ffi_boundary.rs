@@ -37,25 +37,3 @@ slopos_ostd::extern_c_entry! {
 }
 
 // ============================================================================
-// Linker symbols (for boot init sections)
-// ============================================================================
-
-// Section-bracket symbols for boot-init phase arrays. Wrapped through
-// OSTD's `extern_block!` macro so the raw FFI-import syntax lives only
-// inside the macro expansion; callers read each address via the
-// generated safe `<symbol>_addr() -> *const BootInitStep` accessor.
-slopos_ostd::extern_block! {
-    #[allow(improper_ctypes)]
-    pub(crate) mod externs {
-        static __start_boot_init_early_hw: crate::early_init::BootInitStep;
-        static __stop_boot_init_early_hw: crate::early_init::BootInitStep;
-        static __start_boot_init_memory: crate::early_init::BootInitStep;
-        static __stop_boot_init_memory: crate::early_init::BootInitStep;
-        static __start_boot_init_drivers: crate::early_init::BootInitStep;
-        static __stop_boot_init_drivers: crate::early_init::BootInitStep;
-        static __start_boot_init_services: crate::early_init::BootInitStep;
-        static __stop_boot_init_services: crate::early_init::BootInitStep;
-        static __start_boot_init_optional: crate::early_init::BootInitStep;
-        static __stop_boot_init_optional: crate::early_init::BootInitStep;
-    }
-}

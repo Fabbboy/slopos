@@ -146,19 +146,15 @@ impl PlatformDriverEntry {
 // Link-section driver registry.
 // ---------------------------------------------------------------------------
 
-slopos_ostd::extern_block! {
-    #[allow(improper_ctypes)]
-    mod registry_externs {
-        static __start_platform_driver_registry: super::PlatformDriverEntry;
-        static __stop_platform_driver_registry: super::PlatformDriverEntry;
-    }
+impl slopos_ostd::ffi::registry::RegistryEntry for PlatformDriverEntry {
+    const REGISTRIES: &'static [slopos_ostd::ffi::registry::RegistryId] =
+        &[slopos_ostd::ffi::registry::RegistryId::PlatformDrivers];
 }
 
 /// Borrow the linker-built `[PlatformDriverEntry]` slice.
 pub fn driver_registry_iter() -> impl Iterator<Item = &'static PlatformDriverEntry> {
-    slopos_ostd::util::ptr_buf::section_slice::<PlatformDriverEntry>(
-        registry_externs::__start_platform_driver_registry_addr(),
-        registry_externs::__stop_platform_driver_registry_addr(),
+    slopos_ostd::ffi::registry::registry_slice::<PlatformDriverEntry>(
+        slopos_ostd::ffi::registry::RegistryId::PlatformDrivers,
     )
     .iter()
 }
@@ -199,10 +195,9 @@ macro_rules! platform_driver {
             probe: $probe:path $(,)?
         };
     ) => {
-        slopos_ostd::link_section_static! {
-            #[used]
+        slopos_ostd::registry_entry! {
+            platform_drivers,
             $(#[$attr])*
-            section = ".platform_driver_registry";
             $vis static $name: $crate::platform_bus::PlatformDriverEntry =
                 $crate::platform_bus::PlatformDriverEntry {
                     name: $drv_name,

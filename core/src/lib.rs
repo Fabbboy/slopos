@@ -47,10 +47,9 @@ macro_rules! utest {
                 $crate::exec::utest::run_thunk(&[<TEST_DESC_ $ident>])
             }
 
-            $crate::__ostd::link_section_static! {
-                #[used]
+            $crate::__ostd::registry_entry! {
+                tests,
                 #[allow(non_upper_case_globals)]
-                section = ".test_registry";
                 pub static [<TEST_DESC_ $ident>]: $crate::__testing::TestDesc =
                     $crate::__testing::TestDesc {
                         name: stringify!($ident),
