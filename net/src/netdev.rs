@@ -28,7 +28,7 @@ use bitflags::bitflags;
 use slopos_ostd::mm::frame::AnonymousMeta;
 use slopos_ostd::mm::uframe::UFrame;
 use slopos_ostd::sync::{LOCK_LEVEL_REGISTRY, LOCK_LEVEL_RESOURCE, SpinLock};
-use slopos_ostd::{KBox, KVec};
+use slopos_ostd::{KArc, KVec};
 use slopos_ostd::{TxReclaimToken, ZcNotifToken};
 
 use super::packetbuf::PacketBuf;
@@ -288,25 +288,22 @@ impl fmt::Display for NetDeviceFeatures {
 // 1C.4 — DeviceHandle
 // =============================================================================
 
-/// Stable reference to a registered network device for data-plane operations.
+/// Owning reference to a registered network device for data-plane operations.
 ///
-/// Obtained once via [`NetDeviceRegistry::register`] and held for the device's
-/// lifetime.  Bypasses the registry lock entirely:
+/// Obtained once via [`NetDeviceRegistry::register`] and held for as long as
+/// the holder needs the device.  Bypasses the registry lock entirely:
 ///
 /// - `tx()` acquires only the per-device TX lock (serializes concurrent senders).
 /// - `poll_rx()` requires no lock (single consumer: NAPI loop).
 /// - `mac()`, `mtu()`, `stats()`, `features()` are read-only and lock-free.
 ///
-/// # Safety
-///
-/// The raw `dev` pointer is valid as long as the device remains registered.
-/// Calling [`NetDeviceRegistry::unregister`] on a device whose handle is still
-/// in use is **undefined behavior**.  The caller must ensure that NAPI polling
-/// and all socket TX paths are drained before unregistration.
+/// The handle holds its own `KArc`, so [`NetDeviceRegistry::unregister`]
+/// drops only the registry's reference: a device stays alive for as long as
+/// any handle to it does, and the data plane cannot be left addressing freed
+/// memory by an unregistration it did not observe.
 pub struct DeviceHandle {
-    /// Stable pointer to the device, valid for its registered lifetime.
-    /// The pointed-to allocation is owned by the registry's `Box<dyn NetDevice>`.
-    dev: *const (dyn NetDevice + Send + Sync),
+    /// The device itself. Shared ownership with the registry slot.
+    dev: KArc<dyn NetDevice + Send + Sync>,
     /// Device index for identification and registry lookups.
     index: DevIndex,
     /// Per-device TX serialization.  Multiple sockets may transmit to the same
@@ -315,12 +312,6 @@ pub struct DeviceHandle {
     tx_lock: SpinLock<()>,
 }
 
-// SAFETY: DeviceHandle is designed for cross-thread use.  The raw pointer
-// targets a `dyn NetDevice + Send + Sync` allocation whose lifetime is
-// managed by the registry.  TX is serialized by `tx_lock`; RX is
-// single-consumer (NAPI loop).  Read-only accessors (mac, mtu, stats,
-// features) are inherently safe via the `Sync` bound on `NetDevice`.
-
 impl DeviceHandle {
     /// Transmit a packet through this device.
     ///
@@ -328,11 +319,7 @@ impl DeviceHandle {
     /// callers (socket TX paths) are serialized by this lock.
     pub fn tx(&self, pkt: PacketBuf) -> Result<(), NetError> {
         let _guard = self.tx_lock.lock();
-        // Caller invariant on `self.dev`: published by the registry,
-        // valid for the device's registered lifetime; the trait
-        // method takes `&self`, so no mutable aliasing.
-        let dev = slopos_ostd::dev::borrow_dyn(self.dev);
-        dev.tx(pkt)
+        self.dev.tx(pkt)
     }
 
     /// Poll for received packets.
@@ -341,10 +328,7 @@ impl DeviceHandle {
     /// Does not acquire any lock — the NAPI loop is the sole consumer of the
     /// RX ring for a given device.
     pub fn poll_rx(&self, budget: usize, pool: &'static PacketPool) -> KVec<PacketBuf> {
-        // Same lifetime/aliasing argument as `tx`; this is the single
-        // RX consumer.
-        let dev = slopos_ostd::dev::borrow_dyn(self.dev);
-        dev.poll_rx(budget, pool)
+        self.dev.poll_rx(budget, pool)
     }
 
     /// Device index.
@@ -355,26 +339,22 @@ impl DeviceHandle {
 
     /// Read the device's MAC address (lock-free).
     pub fn mac(&self) -> MacAddr {
-        // Pointer valid for device lifetime; mac() is read-only.
-        slopos_ostd::dev::borrow_dyn(self.dev).mac()
+        self.dev.mac()
     }
 
     /// Read the device's MTU (lock-free).
     pub fn mtu(&self) -> u16 {
-        // Pointer valid for device lifetime; mtu() is read-only.
-        slopos_ostd::dev::borrow_dyn(self.dev).mtu()
+        self.dev.mtu()
     }
 
     /// Read a snapshot of device statistics (lock-free).
     pub fn stats(&self) -> NetDeviceStats {
-        // Pointer valid for device lifetime; stats() is read-only.
-        slopos_ostd::dev::borrow_dyn(self.dev).stats()
+        self.dev.stats()
     }
 
     /// Read device feature flags (lock-free).
     pub fn features(&self) -> NetDeviceFeatures {
-        // Pointer valid for device lifetime; features() is read-only.
-        slopos_ostd::dev::borrow_dyn(self.dev).features()
+        self.dev.features()
     }
 }
 
@@ -401,12 +381,11 @@ const MAX_DEVICES: usize = 8;
 /// # Invariants
 ///
 /// - Each registered device occupies exactly one slot in the fixed-size array.
-/// - The `Box<dyn NetDevice>` heap allocation is stable: moving the `Box`
-///   (pointer-sized value) does not move the pointee.
-/// - [`DeviceHandle`] raw pointers remain valid until [`unregister`](Self::unregister)
-///   drops the corresponding `Box`.
-/// - The caller must drain all data-plane activity (NAPI, socket TX) before
-///   calling `unregister`.
+/// - The device outlives every [`DeviceHandle`] to it: registry and handles
+///   share ownership through `KArc`, so `unregister` frees the device only
+///   once the last handle is gone.
+/// - `unregister` sets the device down before releasing the registry's
+///   reference, so a surviving handle addresses a live but downed device.
 pub struct NetDeviceRegistry {
     pub(crate) inner: SpinLock<RegistryInner>,
 }
@@ -414,7 +393,7 @@ pub struct NetDeviceRegistry {
 /// Inner state behind the registry's `SpinLock`.
 pub(crate) struct RegistryInner {
     /// Device slots.  `None` = empty slot.
-    slots: [Option<KBox<dyn NetDevice + Send + Sync>>; MAX_DEVICES],
+    slots: [Option<KArc<dyn NetDevice + Send + Sync>>; MAX_DEVICES],
     /// Number of occupied slots.
     count: usize,
 }
@@ -449,22 +428,18 @@ impl NetDeviceRegistry {
     /// bypasses the registry lock for data-plane operations.
     ///
     /// Returns `None` if all `MAX_DEVICES` slots are occupied.
-    pub fn register(&self, dev: KBox<dyn NetDevice + Send + Sync>) -> Option<DeviceHandle> {
+    pub fn register(&self, dev: KArc<dyn NetDevice + Send + Sync>) -> Option<DeviceHandle> {
         let mut inner = self.inner.lock();
         for (i, slot) in inner.slots.iter_mut().enumerate() {
             if slot.is_none() {
-                // Extract the raw pointer BEFORE moving the Box into the slot.
-                // The Box heap allocation is stable — moving the Box (a pointer-
-                // sized value) does not move the pointee.  The raw pointer
-                // captures both the data address and the vtable.
-                let dev_ptr: *const (dyn NetDevice + Send + Sync) = &*dev;
-                *slot = Some(dev);
-                inner.count += 1;
-                return Some(DeviceHandle {
-                    dev: dev_ptr,
+                let handle = DeviceHandle {
+                    dev: KArc::clone(&dev),
                     index: DevIndex(i),
                     tx_lock: SpinLock::new((), LOCK_LEVEL_RESOURCE),
-                });
+                };
+                *slot = Some(dev);
+                inner.count += 1;
+                return Some(handle);
             }
         }
         None
@@ -472,9 +447,9 @@ impl NetDeviceRegistry {
 
     /// Unregister a network device.
     ///
-    /// Calls [`set_down()`](NetDevice::set_down) on the device, then frees the slot.
-    /// **The caller must ensure** that no [`DeviceHandle`] for this device is
-    /// still in use — any outstanding raw pointers become dangling after this call.
+    /// Calls [`set_down()`](NetDevice::set_down) on the device, then releases
+    /// the registry's reference. Outstanding [`DeviceHandle`]s keep the device
+    /// alive; they observe a downed device rather than freed memory.
     ///
     /// Returns `true` if a device was found and removed, `false` if the slot
     /// was already empty.
@@ -487,9 +462,8 @@ impl NetDeviceRegistry {
         if let Some(dev) = inner.slots[idx].take() {
             dev.set_down();
             inner.count -= 1;
-            // `dev` (Box) is dropped here, freeing the heap allocation.
-            // Any DeviceHandle raw pointers are now dangling — the caller
-            // must have drained all data-plane activity before this call.
+            // Drops the registry's reference only. The allocation goes away
+            // with the last `DeviceHandle`.
             true
         } else {
             false

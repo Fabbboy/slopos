@@ -121,10 +121,10 @@
 #          at the call site, so the caller still ends up with a borrow of its
 #          own choosing, and a second call still hands out another. It is
 #          honest only when the region truly is never freed and the call truly
-#          happens once, neither of which is in the signature. In-tree,
-#          `ptr_buf::install_buf_mut` (one-shot install) and `dev/mod.rs`'s
-#          `borrow_dyn` (published-once device handle) are both honest, and
-#          nothing here could tell them from a region that is later freed.
+#          happens once, neither of which is in the signature — which is why
+#          `ptr_buf::OneShotBuf` puts the once-ness in an `InitFlag` and a
+#          by-value handle rather than in a `'static` return, and why the
+#          net device registry hands out a `KArc` rather than a borrow.
 #        - The argument scan tests whether an argument could *supply* a
 #          lifetime, not merely whether it names one. Four spellings mention
 #          a lifetime and supply nothing, and each is blanked out of the

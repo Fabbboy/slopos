@@ -85,21 +85,3 @@ impl<T: 'static> FromRawPtr for T {
         unsafe { &*ptr }
     }
 }
-
-/// Reborrow a `*const T` (including fat trait-object pointers) as
-/// `&T` without a null check.
-///
-/// `?Sized` companion of [`FromRawPtr::from_ptr_unchecked`] — accepts
-/// `*const dyn Trait` for device handles whose backing pointer is
-/// published once and outlives every consumer.
-///
-/// # Safety
-///
-/// Caller invariant: `ptr` is non-null, dereferenceable, published once and
-/// never freed, and no aliasing `&mut T` ever exists. Matches the standard
-/// `&*ptr` precondition.
-#[inline]
-pub fn borrow_dyn<T: ?Sized + 'static>(ptr: *const T) -> &'static T {
-    // SAFETY: caller upholds the contract documented above.
-    unsafe { &*ptr }
-}

@@ -9,7 +9,7 @@
 use core::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
 
 use slopos_ostd::sync::{LOCK_LEVEL_RESOURCE, SpinLock};
-use slopos_ostd::{KBox, KVec};
+use slopos_ostd::{KArc, KBox, KVec};
 use slopos_testing::TestResult;
 use slopos_testing::{assert_eq_test, assert_test, pass};
 
@@ -145,7 +145,7 @@ fn ensure_pool_init() {
 /// Test device handle from a fresh leaked registry (mirrors the ingress tests).
 fn make_test_handle(mac: MacAddr) -> DeviceHandle {
     let registry = KBox::leak(KBox::try_new(NetDeviceRegistry::new()).expect("test alloc"));
-    let dev = KBox::try_new(MockNetDevice::new(mac)).expect("test alloc");
+    let dev = KArc::try_new(MockNetDevice::new(mac)).expect("test alloc");
     registry.register(dev).expect("register must succeed")
 }
 
@@ -357,7 +357,7 @@ pub fn test_xdp_redirect_action() -> TestResult {
     // Register the redirect target in the GLOBAL registry (net_rx's Redirect
     // arm transmits via DEVICE_REGISTRY.tx_by_index).
     let target_mac = MacAddr([0x02, 0x00, 0x00, 0x00, 0x00, 0x11]);
-    let target = KBox::try_new(MockNetDevice::new(target_mac)).expect("test alloc");
+    let target = KArc::try_new(MockNetDevice::new(target_mac)).expect("test alloc");
     let target_handle = match DEVICE_REGISTRY.register(target) {
         Some(h) => h,
         None => return slopos_testing::fail!("register target in global registry"),

@@ -3,7 +3,7 @@ use core::sync::atomic::{AtomicPtr, AtomicU32, Ordering};
 use slopos_ostd::dev::FromRawPtr;
 use slopos_ostd::mm::frame::AnonymousMeta;
 use slopos_ostd::mm::uframe::UFrame;
-use slopos_ostd::{KBox, KVec};
+use slopos_ostd::{KArc, KBox, KVec};
 use slopos_ostd::{TxReclaimToken, ZcNotifToken};
 
 use slopos_abi::net::{
@@ -1498,8 +1498,8 @@ fn virtio_net_acquire_dhcp_and_register(state: &mut VirtioNetState) -> bool {
     PACKET_POOL.init();
 
     use slopos_net::netdev::DEVICE_REGISTRY;
-    let dev: KBox<dyn slopos_net::netdev::NetDevice + Send + Sync> =
-        match KBox::try_new(VirtioNetDev) {
+    let dev: KArc<dyn slopos_net::netdev::NetDevice + Send + Sync> =
+        match KArc::try_new(VirtioNetDev) {
             Ok(d) => d,
             Err(_) => {
                 klog_info!("virtio-net: alloc failed");

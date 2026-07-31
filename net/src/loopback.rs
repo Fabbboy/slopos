@@ -17,7 +17,7 @@
 //! any socket context) and `poll_rx()` (from the NAPI loop) access it.
 
 use slopos_ostd::sync::{LOCK_LEVEL_RESOURCE, SpinLock};
-use slopos_ostd::{KBox, KVec, KVecDeque};
+use slopos_ostd::{KArc, KVec, KVecDeque};
 
 use super::netdev::{NetDevice, NetDeviceFeatures, NetDeviceStats};
 use super::packetbuf::PacketBuf;
@@ -146,7 +146,7 @@ pub fn init_loopback() {
     use super::route::ROUTE_TABLE;
     use super::types::Ipv4Addr;
 
-    let dev: KBox<dyn NetDevice + Send + Sync> = match KBox::try_new(LoopbackDev::new()) {
+    let dev: KArc<dyn NetDevice + Send + Sync> = match KArc::try_new(LoopbackDev::new()) {
         Ok(d) => d,
         Err(_) => {
             klog_info!("loopback: alloc failed");

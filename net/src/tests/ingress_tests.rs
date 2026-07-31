@@ -5,7 +5,7 @@
 //! - 1.T10: Ingress pipeline drops malformed / unknown frames
 
 use slopos_ostd::sync::{LOCK_LEVEL_RESOURCE, SpinLock};
-use slopos_ostd::{KBox, KVec};
+use slopos_ostd::{KArc, KBox, KVec};
 use slopos_testing::TestResult;
 use slopos_testing::pass;
 
@@ -92,7 +92,7 @@ fn ensure_pool_init() {
 /// The registry is leaked so the device allocation lives for the test.
 fn make_test_handle(mac: MacAddr) -> DeviceHandle {
     let registry = KBox::leak(KBox::try_new(NetDeviceRegistry::new()).expect("test alloc"));
-    let dev = KBox::try_new(MockNetDevice::new(mac, 1500)).expect("test alloc");
+    let dev = KArc::try_new(MockNetDevice::new(mac, 1500)).expect("test alloc");
     registry.register(dev).expect("register must succeed")
 }
 
