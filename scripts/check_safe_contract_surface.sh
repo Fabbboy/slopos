@@ -16,18 +16,27 @@
 # and fails if it grows. Shrinking it is free; each removal should lower
 # BASELINE in the same commit.
 #
-# Deliberately not a hard zero. Some contracts genuinely cannot be typed on
-# the pinned toolchain, and pretending otherwise would push them into
-# undocumented functions, which is strictly worse. The number going up is
-# the signal.
+# The baseline is zero, and that is a measurement rather than a target: every
+# contract this gate once counted turned out to be expressible. What retired
+# them was a small set of shapes, and a new one should reach for the same set
+# before asking for an exemption — a capability witness (`&IrqDisabled`,
+# `&BspToken`, `Osxsave`), a validated newtype (`Xcr0Mask`), a linear handle
+# (`OneShotBuf`), an owning reference (`KArc`), a sealed trait
+# (`ApTrampolineAbi`), a runtime-checked borrow (`PerCpuSlot`), or simply
+# taking a slice instead of a pointer and a length.
+#
+# Raising it is still allowed, because a contract that genuinely cannot be
+# typed on the pinned toolchain is better documented than pushed into an
+# undocumented function. But it is now an argument to make in the commit
+# message, not a budget to spend.
 
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 
-# Measured with this script. Lower it whenever a contract is retired.
-BASELINE="${SAFE_CONTRACT_BASELINE:-16}"
+# Measured with this script.
+BASELINE="${SAFE_CONTRACT_BASELINE:-0}"
 
 count_file() {
     awk '

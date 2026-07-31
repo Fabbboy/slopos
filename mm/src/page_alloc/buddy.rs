@@ -65,6 +65,7 @@ pub(super) const PAGE_FRAME_NEVER_REUSE: u8 = 0x06;
 
 pub(super) const INVALID_PAGE_FRAME: u32 = 0xFFFF_FFFF;
 pub(super) const MAX_ORDER: u32 = 24;
+
 /// One-shot guard for the frame-descriptor table's `&'static mut` handover.
 /// See `install_descriptor_table`.
 static FRAME_TABLE_CLAIMED: InitFlag = InitFlag::new();

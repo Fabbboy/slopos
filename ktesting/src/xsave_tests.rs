@@ -19,7 +19,7 @@
 
 use crate::TestResult;
 use crate::{fail, pass};
-use slopos_arch::cpu::control_regs::{read_cr4, xcr0_read, Cr4Flags, Xcr0Flags};
+use slopos_arch::cpu::control_regs::{read_cr4, xcr0_read, Cr4Flags, Osxsave, Xcr0Flags};
 use slopos_arch::cpu::cpuid::XsaveFeatures;
 use slopos_arch::cpu::xsave;
 use slopos_ostd::KBox;
@@ -141,7 +141,12 @@ pub fn test_cr4_osxsave_set() -> TestResult {
 /// Verify that the live XCR0 register matches what xsave::active_xcr0() reports.
 pub fn test_xcr0_matches_active() -> TestResult {
     let expected = xsave::active_xcr0();
-    let actual = xcr0_read();
+    // Observe CR4.OSXSAVE rather than assuming it: reading XCR0 without it
+    // is a #UD, and this test must not be the thing that takes it.
+    let Some(osxsave) = Osxsave::probe() else {
+        return fail!("CR4.OSXSAVE is clear; XCR0 is not readable");
+    };
+    let actual = xcr0_read(&osxsave);
 
     if actual != expected {
         return fail!(

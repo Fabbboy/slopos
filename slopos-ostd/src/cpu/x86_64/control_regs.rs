@@ -11,6 +11,7 @@
 use bitflags::bitflags;
 #[allow(unused_imports)]
 use core::arch::asm;
+use core::marker::PhantomData;
 
 #[cfg(not(target_os = "none"))]
 use core::sync::atomic::{AtomicU64, Ordering};
@@ -345,13 +346,73 @@ bitflags! {
     }
 }
 
-/// Read the Extended Control Register 0 (XCR0) via `XGETBV`.
+/// Witness that `CR4.OSXSAVE` is set on the current CPU.
 ///
-/// # Safety contract
-/// Caller must ensure `CR4.OSXSAVE` is set before calling this function.
-/// Reading XCR0 when OSXSAVE is clear triggers `#UD`.
+/// `XGETBV`/`XSETBV` raise `#UD` when it is clear, which is a fault in the
+/// trusted core caused by an ordinary safe call elsewhere — so the bit is a
+/// token rather than a doc paragraph. Both mint paths establish it for real:
+/// [`enable`](Osxsave::enable) sets it, [`probe`](Osxsave::probe) observes it.
+///
+/// `!Send`/`!Sync`, because `CR4` is per-CPU: a witness taken on a CPU that
+/// has enabled XSAVE says nothing about one that has not yet reached its
+/// `enable_on_current_cpu`.
+#[derive(Debug)]
+pub struct Osxsave(PhantomData<*const ()>);
+
+impl Osxsave {
+    /// Set `CR4.OSXSAVE` on this CPU and witness it.
+    #[inline]
+    pub fn enable() -> Self {
+        write_cr4(read_cr4() | Cr4Flags::OSXSAVE.bits());
+        Self(PhantomData)
+    }
+
+    /// Witness the bit if it is already set on this CPU, else `None`.
+    ///
+    /// For code that must not change control-register state — conformance
+    /// tests, diagnostics — and that would otherwise have to assert the bit
+    /// informally before reading XCR0.
+    #[inline]
+    pub fn probe() -> Option<Self> {
+        ((read_cr4() & Cr4Flags::OSXSAVE.bits()) != 0).then_some(Self(PhantomData))
+    }
+}
+
+/// An XCR0 value this CPU will actually accept.
+///
+/// `XSETBV` raises `#GP` on a value with bit 0 clear or with any bit the CPU
+/// does not report in `CPUID.0Dh:EAX|(EDX << 32)`. [`new`](Xcr0Mask::new)
+/// checks both against the CPU it runs on, so the obligation is discharged
+/// where the value is built rather than asserted where it is written.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Xcr0Mask(Xcr0Flags);
+
+impl Xcr0Mask {
+    /// `None` unless `flags` has `X87` set and names only CPUID-reported
+    /// components.
+    #[inline]
+    pub fn new(flags: Xcr0Flags) -> Option<Self> {
+        if !flags.contains(Xcr0Flags::X87) {
+            return None;
+        }
+        let supported = crate::arch::x86_64::cpuid::XsaveFeatures::detect().xcr0_supported;
+        (flags.bits() & !supported == 0).then_some(Self(flags))
+    }
+
+    #[inline]
+    pub fn bits(self) -> u64 {
+        self.0.bits()
+    }
+
+    #[inline]
+    pub fn flags(self) -> Xcr0Flags {
+        self.0
+    }
+}
+
+/// Read the Extended Control Register 0 (XCR0) via `XGETBV`.
 #[inline(always)]
-pub fn xcr0_read() -> u64 {
+pub fn xcr0_read(_osxsave: &Osxsave) -> u64 {
     #[cfg(target_os = "none")]
     {
         let lo: u32;
@@ -375,22 +436,18 @@ pub fn xcr0_read() -> u64 {
 }
 
 /// Read XCR0 and return typed [`Xcr0Flags`].
-///
-/// See [`xcr0_read`] for safety requirements.
 #[inline(always)]
-pub fn xcr0_read_flags() -> Xcr0Flags {
-    Xcr0Flags::from_bits_truncate(xcr0_read())
+pub fn xcr0_read_flags(osxsave: &Osxsave) -> Xcr0Flags {
+    Xcr0Flags::from_bits_truncate(xcr0_read(osxsave))
 }
 
 /// Write the Extended Control Register 0 (XCR0) via `XSETBV`.
 ///
-/// # Safety contract
-/// - `CR4.OSXSAVE` must be set.
-/// - `value` must have bit 0 (x87) set — hardware requires it.
-/// - Only bits reported as supported by `CPUID.0Dh:EAX` | `(EDX << 32)` may
-///   be set; setting unsupported bits triggers `#GP`.
+/// The two hardware conditions — `CR4.OSXSAVE` set, and a mask the CPU
+/// accepts — are the two arguments.
 #[inline(always)]
-pub fn xcr0_write(value: u64) {
+pub fn xcr0_write(_osxsave: &Osxsave, mask: Xcr0Mask) {
+    let value = mask.bits();
     #[cfg(target_os = "none")]
     {
         let lo = value as u32;
@@ -410,14 +467,6 @@ pub fn xcr0_write(value: u64) {
     {
         MOCK_XCR0.store(value, Ordering::Relaxed);
     }
-}
-
-/// Write XCR0 from typed [`Xcr0Flags`].
-///
-/// See [`xcr0_write`] for safety requirements.
-#[inline(always)]
-pub fn xcr0_write_flags(flags: Xcr0Flags) {
-    xcr0_write(flags.bits());
 }
 
 // Legacy-style constants for XCR0 bits (match CR0_*/CR4_* naming convention).

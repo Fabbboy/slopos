@@ -21,7 +21,7 @@
 
 use core::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 
-use super::control_regs::{Cr4Flags, Xcr0Flags, read_cr4, write_cr4, xcr0_write};
+use super::control_regs::{Osxsave, Xcr0Flags, Xcr0Mask, xcr0_write};
 use crate::arch::x86_64::cpuid::XsaveFeatures;
 
 // ---------------------------------------------------------------------------
@@ -137,9 +137,9 @@ pub fn init() -> i32 {
     // ------------------------------------------------------------------
     // 2. Enable XSAVE on the BSP: CR4.OSXSAVE then XCR0 write.
     // ------------------------------------------------------------------
-    let cr4 = read_cr4() | Cr4Flags::OSXSAVE.bits();
-    write_cr4(cr4);
-    xcr0_write(xcr0.bits());
+    let mask = Xcr0Mask::new(xcr0).expect("XCR0 mask built from this CPU's own CPUID report");
+    let osxsave = Osxsave::enable();
+    xcr0_write(&osxsave, mask);
 
     // ------------------------------------------------------------------
     // 3. Re-query CPUID for the actual save-area size *after* XCR0 is set.
@@ -175,10 +175,12 @@ pub fn enable_on_current_cpu() {
         return;
     }
 
-    // Set CR4.OSXSAVE on this AP.
-    let cr4 = read_cr4() | Cr4Flags::OSXSAVE.bits();
-    write_cr4(cr4);
-
-    // Write the identical XCR0 mask.
-    xcr0_write(xcr0);
+    // Re-validate the BSP's mask against *this* CPU's CPUID rather than
+    // trusting it: an asymmetric core that reports fewer XCR0 components
+    // would take a #GP on the write, and a panic naming the mask beats a
+    // fault in the AP bring-up path.
+    let mask = Xcr0Mask::new(Xcr0Flags::from_bits_truncate(xcr0))
+        .expect("AP does not support the XCR0 components the BSP enabled");
+    let osxsave = Osxsave::enable();
+    xcr0_write(&osxsave, mask);
 }
