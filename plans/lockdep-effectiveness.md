@@ -2,8 +2,13 @@
 
 `slopos-ostd/src/sync/lock_graph.rs` is a real lockdep: dependency-edge learning,
 cycle detection, a chain-hash cache, lock-free CAS bookkeeping. It is also
-deterministically disabled before the kernel finishes initialising memory, and
-nothing says so.
+deterministically disabled before the kernel finishes initialising memory.
+
+Every boot now says so — the four `GRAPH_OVERFLOW` latch sites emit a warning
+naming the lock and the pool counts, `kdiag_dump_lock_graph` prints validator
+state at the end of driver init, and `slopos_testing::zz_lockdep_tests` proves
+the cycle detector fires and reports whether the boot reached the end with the
+validator intact. What follows is the work that makes that report say `ACTIVE`.
 
 ## The mechanism
 
@@ -98,43 +103,23 @@ per-instance identity.
 With declaration-site classes, 256 is plausibly adequate again — but measure
 rather than assume, and see item 2.
 
-### 2. Make both kill switches loud
+### 2. Split the panic bypass
 
-- `klog_warn!` on the `GRAPH_OVERFLOW` transition, naming the class that
-  overflowed. A validator that disables itself must say so.
-- Export `CLASS_COUNT` / `EDGE_COUNT` / `CHAIN_COUNT` through the existing `kdiag`
-  surface so headroom is observable rather than inferred.
-- Split `PANIC_BYPASS` into a genuinely-fatal path (stays one-way) and the
-  recoverable-oops path (cleared when the oops is recovered). The current
-  conflation is what makes a survivable test panic disable validation for the
-  rest of the run.
-
-### 3. A self-test that proves it is alive
-
-The gate pattern this project already uses for `check_task_ownership.sh
---self-test` applies: a validator that has never been observed to fire has not
-been observed to work.
-
-Add an `stest!` that deliberately takes two locks in both orders and asserts the
-validator reports the inversion. If `GRAPH_OVERFLOW` is latched, that test fails
-— which is the point. It converts "the validator is configured" into "the
-validator is running".
-
-Add a second `stest!` asserting `GRAPH_OVERFLOW` is clear at the end of boot.
+`PANIC_BYPASS` conflates a genuinely-fatal abort with a recovered oops. Give the
+fatal path the one-way transition it wants and clear the flag when an oops is
+recovered. Until that lands, the fourth test in the suite disables ordering
+validation for the rest of the run, and `zz_lockdep_tests` has to override the
+gate rather than rely on it.
 
 ## Phases
 
 | # | Work | Done when |
 |---|---|---|
-| 1 | `klog_warn!` on overflow + `kdiag` counters for class/edge/chain usage | A boot log states whether the validator is alive and how much headroom is left |
-| 2 | ABBA self-test `stest!` + a boot-end assertion that `GRAPH_OVERFLOW` is clear | Both fail today; the first proves detection works, the second proves it is reached |
-| 3 | `&'static LockClassKey` on `SpinLock::new`, declaration-site keys for the array-of-locks statics | Class count after boot is in the tens, not 256; phase-2 tests pass |
-| 4 | Split `PANIC_BYPASS` so the recoverable-oops path clears it | A recovered test panic leaves validation enabled |
+| 3 | `&'static LockClassKey` on `SpinLock::new`, declaration-site keys for the array-of-locks statics | `kdiag_dump_lock_graph` reports `ACTIVE` with a class count in the tens; `lockdep_graph_overflow_clear_at_boot_end` passes instead of skipping |
+| 4 | Split `PANIC_BYPASS` so the recoverable-oops path clears it | A recovered test panic leaves validation enabled, and the ABBA self-test no longer needs `SelfTestGuard` to override the gate |
 | 5 | Re-measure and re-size `MAX_CLASSES`/`MAX_EDGES` against the real post-fix counts | The sizing comment matches measured reality rather than an estimate |
 
-Phases 1–2 are cheap and worth doing first even if 3 is deferred: they turn a
-silent failure into a visible one, and they establish whether anything else
-disables the validator that this analysis has not found.
+The numbering is kept so cross-references elsewhere keep resolving.
 
 ## Risks
 
@@ -146,6 +131,8 @@ disables the validator that this analysis has not found.
   outcome, but it means phase 3 may turn the suite red, and the findings are the
   work rather than a regression. Budget for it — and note the two documented
   lock-order hazards in `KNOWN_ISSUES.md` are prime candidates to fire first.
+  `RESERVED_TEST_CLASSES` holds four slots back from the registrable range, so
+  the self-test keeps working whatever the class count becomes.
 - **Per-acquire cost rises** once the validator is actually running, on every lock
   acquisition. Measure boot time and suite wall-clock before and after; if it is
   material, the answer is a build-time feature gate defaulting on for `just test`

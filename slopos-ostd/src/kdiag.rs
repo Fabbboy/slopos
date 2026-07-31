@@ -350,3 +350,59 @@ pub fn kdiag_hexdump(data: *const u8, length: usize, base_address: u64) {
         }
     });
 }
+
+/// One-line health report for the lock-order validator, plus pool headroom.
+///
+/// Answers "is lockdep actually running, and how close is it to turning itself
+/// off?" — a question the boot log could not previously answer, because the
+/// validator disables itself silently and stays that way for the rest of the
+/// boot.
+pub fn kdiag_dump_lock_graph() {
+    use crate::sync::lock_graph as lg;
+
+    let classes = lg::class_count();
+    let edges = lg::edge_count();
+    let chains = lg::chain_count();
+    let state = if !lg::tracking_enabled() {
+        "OFF (tracking never enabled)"
+    } else if lg::graph_overflowed() {
+        "DISABLED (pool overflow)"
+    } else if lg::panic_bypassed() {
+        "DISABLED (panic bypass latched)"
+    } else {
+        "ACTIVE"
+    };
+
+    crate::klog_info!(
+        "LOCKDEP: {} classes={}/{} ({}%) edges={}/{} chains={}/{} violations={}",
+        state,
+        classes,
+        lg::REGISTRABLE_CLASSES,
+        classes * 100 / lg::REGISTRABLE_CLASSES,
+        edges,
+        lg::MAX_EDGES,
+        chains,
+        lg::MAX_CHAINS,
+        lg::violations_reported(),
+    );
+}
+
+/// Dump up to `limit` registered lock classes.
+///
+/// Bounded so a full table cannot monopolise the serial line. The *run of
+/// contiguous addresses* is what identifies an array-of-locks static that ate
+/// the table (256 `PROCESS_VMS` slots, 544 event-bus wait queues, …); a single
+/// address, which is all the overflow warning can name, cannot show that.
+pub fn kdiag_dump_lock_classes(limit: usize) {
+    use crate::sync::lock_graph as lg;
+
+    let total = lg::class_count();
+    let n = total.min(limit);
+    crate::klog_info!("=== LOCK CLASSES ({} of {}) ===", n, total);
+    for i in 0..n {
+        if let Some(c) = lg::class_info(i) {
+            crate::klog_info!("  class {}: lock @ {:#x} level {}", i, c.addr, c.level);
+        }
+    }
+    crate::klog_info!("=== END LOCK CLASSES ===");
+}

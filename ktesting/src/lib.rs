@@ -24,6 +24,8 @@ pub mod exception_tests;
 pub mod fpu_tests;
 #[cfg(feature = "tests")]
 pub mod xsave_tests;
+#[cfg(feature = "tests")]
+pub mod zz_lockdep_tests;
 
 pub use config::{config_from_cmdline, TestConfig, Verbosity};
 pub use harness::{

@@ -59,6 +59,19 @@ use super::cpu_local::CacheAligned;
 /// Kernel currently has ~45 locks; 10× headroom for growth.
 pub const MAX_CLASSES: usize = 256;
 
+/// Class slots held back from [`register_class`] so the in-kernel lockdep
+/// self-test always has headroom, even after the table has otherwise
+/// overflowed.
+///
+/// Deliberately **not** `cfg`-gated: a test-build-only reservation would make
+/// the class index at which the table fills differ between `just test` and
+/// `just boot-log`, so the two boot logs could not be compared.
+pub const RESERVED_TEST_CLASSES: usize = 4;
+
+/// Slots [`register_class`] may allocate from. This, not [`MAX_CLASSES`], is
+/// the denominator that describes real headroom.
+pub const REGISTRABLE_CLASSES: usize = MAX_CLASSES - RESERVED_TEST_CLASSES;
+
 /// Maximum dependency edges in the class graph. Sized for ~16 edges per
 /// class on average; lockdep's default is 16384 for 8192 classes.
 pub const MAX_EDGES: usize = 4096;
@@ -348,6 +361,45 @@ static PANIC_BYPASS: AtomicBool = AtomicBool::new(false);
 /// to prevent secondary panics during fatal-abort.
 static GRAPH_OVERFLOW: AtomicBool = AtomicBool::new(false);
 
+/// One-shot guard so the four latch sites emit exactly one line per boot.
+static OVERFLOW_REPORTED: AtomicBool = AtomicBool::new(false);
+
+/// Ordering violations reported since boot (cycle + duplicate + epoch).
+/// Bumped in the `#[cold]` report paths, so it costs nothing on acquire.
+///
+/// A non-zero value in a kernel that is still running means a report fired
+/// while [`PANIC_BYPASS`] or the self-test override suppressed the panic —
+/// a real finding that nobody saw.
+static VIOLATION_COUNT: AtomicU32 = AtomicU32::new(0);
+
+/// The lockdep self-test owns the validator for the lifetime of a
+/// [`SelfTestGuard`]: the [`GRAPH_OVERFLOW`] and [`PANIC_BYPASS`] gates are
+/// overridden and violation reports become counter bumps plus a warn line
+/// instead of a `panic!`.
+///
+/// Overriding rather than clearing is deliberate. Clearing `GRAPH_OVERFLOW`
+/// would let any other CPU's first touch of any lock immediately re-latch it
+/// mid-test (the class table is full), making the self-test flaky; clearing
+/// `PANIC_BYPASS` would re-arm panics on every other CPU for the duration.
+/// Overriding leaves both latches at their true values, so the boot-end
+/// assertion still reads reality.
+#[cfg(any(test, feature = "test-helpers"))]
+static SELF_TEST_ACTIVE: AtomicBool = AtomicBool::new(false);
+
+#[cfg(any(test, feature = "test-helpers"))]
+#[inline]
+fn self_test_active() -> bool {
+    SELF_TEST_ACTIVE.load(Ordering::Relaxed)
+}
+
+/// Production builds const-fold this to `false`, so the gates that consult it
+/// compile to exactly the code they compiled to before it existed.
+#[cfg(not(any(test, feature = "test-helpers")))]
+#[inline(always)]
+fn self_test_active() -> bool {
+    false
+}
+
 // ===========================================================================
 // Public API — backwards-compatible with the old lock_tracking module
 // ===========================================================================
@@ -427,15 +479,14 @@ pub unsafe fn push_lock(lock_addr: *const (), poison_fn: PoisonUnlockFn, level: 
     if !TRACKING_ENABLED.load(Ordering::Relaxed) {
         return;
     }
-    if GRAPH_OVERFLOW.load(Ordering::Relaxed) {
+    if GRAPH_OVERFLOW.load(Ordering::Relaxed) && !self_test_active() {
         return;
     }
 
     let class_idx = match register_class(lock_addr, level) {
         Some(idx) => idx,
         None => {
-            // Class table full — disable validator gracefully.
-            GRAPH_OVERFLOW.store(true, Ordering::Relaxed);
+            latch_overflow("class table full", lock_addr, level);
             return;
         }
     };
@@ -447,7 +498,12 @@ pub unsafe fn push_lock(lock_addr: *const (), poison_fn: PoisonUnlockFn, level: 
     let new_chain_key = iterate_chain_key(stack.curr_chain_key, class_idx);
 
     // Panic mode: track for poison-walk, skip all ordering checks.
-    if PANIC_BYPASS.load(Ordering::Relaxed) {
+    //
+    // This gate, not just the reporting ones, is what a latched `PANIC_BYPASS`
+    // costs: no edge is learned and no cycle is looked for, so the graph stops
+    // growing as well as stops complaining. The self-test override has to cover
+    // it or the self-test observes a validator that never ran.
+    if PANIC_BYPASS.load(Ordering::Relaxed) && !self_test_active() {
         push_held(stack, class_idx, lock_addr, poison_fn, new_chain_key);
         return;
     }
@@ -502,14 +558,13 @@ pub unsafe fn push_lock(lock_addr: *const (), poison_fn: PoisonUnlockFn, level: 
     if stack.depth > 0 {
         let top_class = stack.entries[(stack.depth - 1) as usize].class_idx;
         if let Err(()) = add_edge(top_class, class_idx) {
-            GRAPH_OVERFLOW.store(true, Ordering::Relaxed);
+            latch_overflow("edge pool full", lock_addr, level);
         }
     }
 
     // Cache the validated chain so future acquisitions skip the check.
     if let Err(()) = chain_insert(new_chain_key) {
-        // Chain pool full — degrade to slow path for future chains.
-        GRAPH_OVERFLOW.store(true, Ordering::Relaxed);
+        latch_overflow("chain cache full", lock_addr, level);
     }
 
     push_held(stack, class_idx, lock_addr, poison_fn, new_chain_key);
@@ -586,14 +641,18 @@ pub unsafe fn push_epoch(epoch_addr: *const ()) {
     if !TRACKING_ENABLED.load(Ordering::Relaxed) {
         return;
     }
-    if GRAPH_OVERFLOW.load(Ordering::Relaxed) {
+    if GRAPH_OVERFLOW.load(Ordering::Relaxed) && !self_test_active() {
         return;
     }
 
     let class_idx = match register_class(epoch_addr, LOCK_LEVEL_EPOCH) {
         Some(idx) => idx,
         None => {
-            GRAPH_OVERFLOW.store(true, Ordering::Relaxed);
+            latch_overflow(
+                "class table full (epoch enter)",
+                epoch_addr,
+                LOCK_LEVEL_EPOCH,
+            );
             return;
         }
     };
@@ -655,6 +714,139 @@ pub unsafe fn poison_unlock_all_held() {
 }
 
 // ===========================================================================
+// Introspection
+// ===========================================================================
+
+/// Registrable class slots consumed, out of [`REGISTRABLE_CLASSES`].
+///
+/// **Clamped**: [`register_class`] bumps `CLASS_COUNT` before its bound check,
+/// so the raw counter overshoots by at least one the moment the table fills,
+/// and keeps climbing while allocation is still being attempted. Reporting the
+/// raw value would say 253 classes exist when 252 do.
+#[inline]
+pub fn class_count() -> usize {
+    (CLASS_COUNT.load(Ordering::Relaxed) as usize).min(REGISTRABLE_CLASSES)
+}
+
+/// Dependency edges learned. Same clamp rationale as [`class_count`]
+/// ([`add_edge`] bumps `EDGE_COUNT` before its bound check).
+#[inline]
+pub fn edge_count() -> usize {
+    (EDGE_COUNT.load(Ordering::Relaxed) as usize).min(MAX_EDGES)
+}
+
+/// Validated chain prefixes cached. Same clamp rationale as [`class_count`].
+#[inline]
+pub fn chain_count() -> usize {
+    (CHAIN_COUNT.load(Ordering::Relaxed) as usize).min(MAX_CHAINS)
+}
+
+/// `true` once any pool has filled. No ordering check runs after this.
+#[inline]
+pub fn graph_overflowed() -> bool {
+    GRAPH_OVERFLOW.load(Ordering::Relaxed)
+}
+
+/// `true` once the overflow warning has been emitted.
+///
+/// Lets a kernel test assert that a validator which disabled itself said so,
+/// without scraping the serial log.
+#[inline]
+pub fn overflow_reported() -> bool {
+    OVERFLOW_REPORTED.load(Ordering::Relaxed)
+}
+
+/// `true` once panic-mode bypass has been entered. Ordering checks are
+/// suppressed; the held-stack walk stays active.
+#[inline]
+pub fn panic_bypassed() -> bool {
+    PANIC_BYPASS.load(Ordering::Relaxed)
+}
+
+/// `true` once [`enable_lock_tracking`] has run.
+#[inline]
+pub fn tracking_enabled() -> bool {
+    TRACKING_ENABLED.load(Ordering::Relaxed)
+}
+
+/// Ordering violations reported since boot.
+#[inline]
+pub fn violations_reported() -> u32 {
+    VIOLATION_COUNT.load(Ordering::Relaxed)
+}
+
+/// Composite health: the validator is actually performing ordering checks.
+#[inline]
+pub fn validator_alive() -> bool {
+    tracking_enabled() && !graph_overflowed() && !panic_bypassed()
+}
+
+/// Snapshot of one registered class, for diagnostics.
+#[derive(Clone, Copy)]
+pub struct ClassInfo {
+    pub addr: u64,
+    pub level: u8,
+}
+
+/// Read class `idx` if a class has been registered there.
+///
+/// Bounded on [`MAX_CLASSES`] rather than [`class_count`] so the reserved
+/// self-test slots above the registrable range are dumpable too; the
+/// zero-address check filters slots nothing has claimed.
+pub fn class_info(idx: usize) -> Option<ClassInfo> {
+    if idx >= MAX_CLASSES {
+        return None;
+    }
+    let c = &CLASSES.0[idx];
+    let addr = c.addr.load(Ordering::Acquire);
+    if addr == 0 {
+        return None;
+    }
+    Some(ClassInfo {
+        addr,
+        level: c.level.load(Ordering::Relaxed),
+    })
+}
+
+/// Latch [`GRAPH_OVERFLOW`] and, once per boot, say so.
+///
+/// **Store-before-log is load-bearing.** `klog_warn!` reaches
+/// `klog::log_args` -> `klog::ring_capture`, which takes `KLOG_RING` — a
+/// `SpinLock`, whose `try_lock` calls back into [`push_lock`]. Setting the
+/// latch first makes that re-entrant call short-circuit at the
+/// `GRAPH_OVERFLOW` gate instead of re-running the path that brought us here.
+/// The `try_lock` also cannot deadlock against a `KLOG_RING` this CPU already
+/// holds: it fails the ticket CAS and drops the line. The serial backend below
+/// `ring_capture` is a bespoke ticket lock, not a `SpinLock`, so it never
+/// re-enters at all.
+///
+/// Kept `#[cold] #[inline(never)]` because [`push_lock`] is `#[inline]` and
+/// expands at every tracked lock-acquire site; an inline `klog_warn!` would
+/// push a `format_args!` frame into all of them.
+#[cold]
+#[inline(never)]
+fn latch_overflow(reason: &str, addr: *const (), level: u8) {
+    GRAPH_OVERFLOW.store(true, Ordering::Relaxed);
+    if OVERFLOW_REPORTED.swap(true, Ordering::Relaxed) {
+        return;
+    }
+    crate::klog_warn!(
+        "LOCKDEP: validator DISABLED — {} while handling lock @ {:#x} level {} \
+         (classes {}/{} edges {}/{} chains {}/{}); every subsequent lock \
+         acquisition is UNVALIDATED",
+        reason,
+        addr as usize,
+        level,
+        class_count(),
+        REGISTRABLE_CLASSES,
+        edge_count(),
+        MAX_EDGES,
+        chain_count(),
+        MAX_CHAINS,
+    );
+}
+
+// ===========================================================================
 // Helpers
 // ===========================================================================
 
@@ -682,11 +874,15 @@ fn push_held(
     // works, just not tracked beyond depth MAX_HELD_LOCKS.
 }
 
+#[inline]
+fn class_bucket(addr_u64: u64) -> usize {
+    ((addr_u64 as usize) >> 4).wrapping_mul(0x9E3779B97F4A7C15) as usize & (CLASS_HASH_BUCKETS - 1)
+}
+
 /// Lock-free class registration via address-keyed CAS.
 fn register_class(addr: *const (), level: u8) -> Option<u16> {
     let addr_u64 = addr as u64;
-    let bucket = ((addr_u64 as usize) >> 4).wrapping_mul(0x9E3779B97F4A7C15) as usize
-        & (CLASS_HASH_BUCKETS - 1);
+    let bucket = class_bucket(addr_u64);
 
     // Fast path: probe the hash bucket.
     let mut idx = CLASS_HASH.0[bucket].load(Ordering::Acquire);
@@ -700,7 +896,7 @@ fn register_class(addr: *const (), level: u8) -> Option<u16> {
 
     // Slow path: allocate a new slot. Bump CLASS_COUNT atomically.
     let new_idx = CLASS_COUNT.fetch_add(1, Ordering::Relaxed);
-    if (new_idx as usize) >= MAX_CLASSES {
+    if (new_idx as usize) >= REGISTRABLE_CLASSES {
         return None;
     }
     let cls = &CLASSES.0[new_idx as usize];
@@ -882,9 +1078,10 @@ unsafe fn noop_poison(_addr: *const ()) {}
 fn report_cycle(new_class: u16, new_addr: *const (), held: &[HeldLock]) {
     // Don't fire during panic — the bypass flag should have intercepted
     // us, but be defensive.
-    if PANIC_BYPASS.load(Ordering::Relaxed) {
+    if PANIC_BYPASS.load(Ordering::Relaxed) && !self_test_active() {
         return;
     }
+    VIOLATION_COUNT.fetch_add(1, Ordering::Relaxed);
     let new_lvl = CLASSES.0[new_class as usize].level.load(Ordering::Relaxed);
     let top = held.last();
     let (held_lvl, held_addr) = match top {
@@ -896,6 +1093,18 @@ fn report_cycle(new_class: u16, new_addr: *const (), held: &[HeldLock]) {
         }
         None => (0, core::ptr::null()),
     };
+    if self_test_active() {
+        crate::klog_warn!(
+            "LOCKDEP SELF-TEST: cycle detected — class {} (lock @ {:#x}, level {}) \
+             would close a cycle through held class (lock @ {:#x}, level {})",
+            new_class,
+            new_addr as usize,
+            new_lvl,
+            held_addr as usize,
+            held_lvl,
+        );
+        return;
+    }
     panic!(
         "LOCK DEPENDENCY CYCLE: acquiring class {} (lock @ {:#x}, level {}) would close a cycle through held class (lock @ {:#x}, level {})",
         new_class, new_addr as usize, new_lvl, held_addr as usize, held_lvl,
@@ -905,14 +1114,29 @@ fn report_cycle(new_class: u16, new_addr: *const (), held: &[HeldLock]) {
 #[cold]
 #[inline(never)]
 fn report_epoch_violation(new_class: u16, new_addr: *const (), held: &[HeldLock]) {
-    if PANIC_BYPASS.load(Ordering::Relaxed) {
+    if PANIC_BYPASS.load(Ordering::Relaxed) && !self_test_active() {
         return;
     }
+    VIOLATION_COUNT.fetch_add(1, Ordering::Relaxed);
     let new_lvl = CLASSES.0[new_class as usize].level.load(Ordering::Relaxed);
     let epoch_addr = held
         .last()
         .map(|h| h.lock_addr)
         .unwrap_or(core::ptr::null());
+    // Report-only while the self-test owns the validator: another CPU may hit a
+    // real violation inside the window, and a panic there would be attributed
+    // to the test.
+    if self_test_active() {
+        crate::klog_warn!(
+            "LOCKDEP SELF-TEST: epoch violation — class {} (lock @ {:#x}, level {}) \
+             acquired inside Epoch @ {:#x}",
+            new_class,
+            new_addr as usize,
+            new_lvl,
+            epoch_addr as usize,
+        );
+        return;
+    }
     panic!(
         "LOCK INSIDE EPOCH: acquiring class {} (lock @ {:#x}, level {}) while Epoch @ {:#x} is held — sleeping or holding a lock across a wake site inside an epoch breaks the atomic-publish invariant",
         new_class, new_addr as usize, new_lvl, epoch_addr as usize,
@@ -922,10 +1146,19 @@ fn report_epoch_violation(new_class: u16, new_addr: *const (), held: &[HeldLock]
 #[cold]
 #[inline(never)]
 fn report_duplicate(new_class: u16, new_addr: *const (), held: &[HeldLock]) {
-    if PANIC_BYPASS.load(Ordering::Relaxed) {
+    if PANIC_BYPASS.load(Ordering::Relaxed) && !self_test_active() {
         return;
     }
+    VIOLATION_COUNT.fetch_add(1, Ordering::Relaxed);
     let _ = held;
+    if self_test_active() {
+        crate::klog_warn!(
+            "LOCKDEP SELF-TEST: duplicate class {} (lock @ {:#x}) without LO_DUPOK",
+            new_class,
+            new_addr as usize,
+        );
+        return;
+    }
     panic!(
         "LOCK DUPLICATE CLASS: re-acquiring class {} (lock @ {:#x}) without LO_DUPOK",
         new_class, new_addr as usize,
@@ -936,6 +1169,68 @@ fn report_duplicate(new_class: u16, new_addr: *const (), held: &[HeldLock]) {
 // Test helpers
 // ===========================================================================
 
+/// Install `addr` into reserved class slot `slot` and link it into the class
+/// hash, so a later [`push_lock`] finds it on the fast path.
+///
+/// Idempotent: re-registering the same address returns the same index. Slots
+/// live above [`REGISTRABLE_CLASSES`], so [`register_class`] can never hand one
+/// out and memory init can never consume them — which is what lets the in-kernel
+/// self-test run against a class table that has otherwise overflowed.
+///
+/// Returns `None` if `slot` is out of range or already claimed by a different
+/// address.
+#[cfg(any(test, feature = "test-helpers"))]
+pub fn reserve_self_test_class(slot: usize, addr: *const (), level: u8) -> Option<u16> {
+    if slot >= RESERVED_TEST_CLASSES {
+        return None;
+    }
+    let idx = (REGISTRABLE_CLASSES + slot) as u16;
+    let addr_u64 = addr as u64;
+    let cls = &CLASSES.0[idx as usize];
+    let existing = cls.addr.load(Ordering::Acquire);
+    if existing == addr_u64 {
+        return Some(idx);
+    }
+    if existing != 0 {
+        return None;
+    }
+    cls.level.store(level, Ordering::Relaxed);
+    cls.addr.store(addr_u64, Ordering::Release);
+    let bucket = class_bucket(addr_u64);
+    loop {
+        let head = CLASS_HASH.0[bucket].load(Ordering::Relaxed);
+        cls.next_in_bucket.store(head, Ordering::Relaxed);
+        if CLASS_HASH.0[bucket]
+            .compare_exchange_weak(head, idx, Ordering::Release, Ordering::Relaxed)
+            .is_ok()
+        {
+            return Some(idx);
+        }
+    }
+}
+
+/// Hands the validator to the lockdep self-test for the guard's lifetime.
+///
+/// See [`SELF_TEST_ACTIVE`] for why this overrides the two kill switches rather
+/// than clearing them.
+#[cfg(any(test, feature = "test-helpers"))]
+pub struct SelfTestGuard(());
+
+#[cfg(any(test, feature = "test-helpers"))]
+impl SelfTestGuard {
+    pub fn begin() -> Self {
+        SELF_TEST_ACTIVE.store(true, Ordering::Release);
+        Self(())
+    }
+}
+
+#[cfg(any(test, feature = "test-helpers"))]
+impl Drop for SelfTestGuard {
+    fn drop(&mut self) {
+        SELF_TEST_ACTIVE.store(false, Ordering::Release);
+    }
+}
+
 /// Reset all global state. Test-only; production never resets.
 #[cfg(any(test, feature = "test-helpers"))]
 pub fn reset_for_test() {
@@ -943,6 +1238,9 @@ pub fn reset_for_test() {
     TRACKING_ENABLED.store(false, Relaxed);
     PANIC_BYPASS.store(false, Relaxed);
     GRAPH_OVERFLOW.store(false, Relaxed);
+    OVERFLOW_REPORTED.store(false, Relaxed);
+    SELF_TEST_ACTIVE.store(false, Relaxed);
+    VIOLATION_COUNT.store(0, Relaxed);
     CLASS_COUNT.store(0, Relaxed);
     EDGE_COUNT.store(0, Relaxed);
     CHAIN_COUNT.store(0, Relaxed);

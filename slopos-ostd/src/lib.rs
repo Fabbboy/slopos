@@ -96,7 +96,8 @@ pub use atomic_bitmap::AtomicBitmap;
 pub use bitmap::{Bitmap, words_for};
 pub use handle::{Handle, HandleError, HandleTable};
 pub use kdiag::{
-    KDIAG_STACK_TRACE_DEPTH, kdiag_dump_interrupt_frame, kdiag_stack_word_at, kdiag_timestamp,
+    KDIAG_STACK_TRACE_DEPTH, kdiag_dump_interrupt_frame, kdiag_dump_lock_graph,
+    kdiag_stack_word_at, kdiag_timestamp,
 };
 pub use klog::{
     KlogBackend, KlogLevel, klog_force_restore_default, klog_get_level, klog_init, klog_is_enabled,

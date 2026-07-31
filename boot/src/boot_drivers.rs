@@ -417,6 +417,10 @@ fn boot_step_run_tests_fn(_ctx: &mut BootCtx<'_, BspInit>) -> i32 {
         );
     }
 
+    // Post-suite counterpart to the priority-89 boot step. The delta between
+    // the two lines is what catches the test suite itself exhausting a pool.
+    slopos_ostd::kdiag::kdiag_dump_lock_graph();
+
     // Stash the kernel-phase summary so the userland-phase syscall
     // (`SYSCALL_RUN_USERLAND_TESTS`, invoked from /sbin/init) can merge
     // counters and decide shutdown. Shutdown is *always* deferred to that
@@ -581,6 +585,26 @@ crate::boot_init!(
     b"touchpad\0",
     boot_step_touchpad_init_fn,
     flags = boot_init_priority(82)
+);
+/// Report lock-order-validator health at the end of driver init.
+///
+/// Sits immediately before the test step (priority 90), so `just test` prints
+/// validator health above the KTAP stream and `just boot-log` (`tests=off`)
+/// prints it at the tail of driver bring-up. Every driver has taken its locks
+/// for the first time by now, so the counters reflect boot steady state.
+///
+/// This is the line that makes "the validator turned itself off during memory
+/// init" visible rather than inferred.
+fn boot_step_lockdep_report_fn(_ctx: &mut BootCtx<'_, BspInit>) {
+    slopos_ostd::kdiag::kdiag_dump_lock_graph();
+}
+
+crate::boot_init!(
+    BOOT_STEP_LOCKDEP_REPORT,
+    drivers,
+    b"lockdep report\0",
+    boot_step_lockdep_report_fn,
+    flags = boot_init_priority(89)
 );
 crate::boot_init!(
     BOOT_STEP_RUN_TESTS,

@@ -13,7 +13,7 @@ doctest = false
 default = []
 qemu-exit = []
 test-hooks = []
-tests = ["qemu-exit"]
+tests = ["qemu-exit", "slopos-ostd/test-helpers"]
 
 [dependencies]
 slopos-ostd = { workspace = true }
