@@ -32,16 +32,13 @@ permanently loses the ability to start a program, until reboot.
 Reaching it takes 255 ordinary process creations: a shell session running commands
 gets there without trying.
 
-The same shape appears twice more with different ceilings, both from an unbounded
+The same shape appears once more with a different ceiling, again from an unbounded
 monotonic id used as a direct array index:
 
 - `PROCESS_TLB_INFO` is `[ProcessTlbInfo; MAX_PROCESSES]` indexed by `process_id`
   (`mm/src/tlb.rs:400-412`), so `flush_all_for_process` silently no-ops past 256. The
   dispatch guard above is the only reason this is not a stale-TLB correctness bug: an
   address space with `pid >= 256` is never activated on any CPU.
-- The input-event map is a direct array indexed by the never-recycled task id with
-  `TASK_MAP_SIZE = 16384`, so once a boot session has allocated that many task ids no
-  process created afterwards can receive keyboard or pointer input.
 
 ### Why the test suite does not catch it
 

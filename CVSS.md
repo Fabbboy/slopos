@@ -45,7 +45,6 @@ python3 scripts/cvss_calc.py "CVSS:3.1/AV:L/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H"
 | [SLOPOS-2026-0029](#slopos-2026-0029) | 5.5 | MEDIUM | `klog` has no rate limiting and userland can drive it from a cli-held lock |
 | [SLOPOS-2026-0030](#slopos-2026-0030) | 5.5 | MEDIUM | Ready-queue selection is strict priority with no aging backstop |
 | [SLOPOS-2026-0031](#slopos-2026-0031) | 5.5 | MEDIUM | Futex buckets cap waiters at 16 and return ENOMEM, which every userland futex wrapper discards |
-| [SLOPOS-2026-0034](#slopos-2026-0034) | 5.5 | MEDIUM | The input-event map is indexed by a never-recycled task id and silently stops delivering past 16384 |
 | [SLOPOS-2026-0015](#slopos-2026-0015) | 4.8 | MEDIUM | The RFC 5961 challenge-ACK budget is a single global counter |
 | [SLOPOS-2026-0019](#slopos-2026-0019) | 4.7 | MEDIUM | `mprotect` issues no cross-CPU TLB shootdown |
 | [SLOPOS-2026-0033](#slopos-2026-0033) | 4.7 | MEDIUM | `synchronize_rcu` allocates infallibly and is `call_rcu`'s own out-of-memory fallback |
@@ -477,22 +476,6 @@ asm volatile("mov %0, %%rsp; mov $105, %%eax; syscall" :: "r"(p));
   Drive the kernel heap to exhaustion (anonymous faulting or task spawning until a slab refill fails), then have any task call `synchronize_rcu` or trigger a `call_rcu` whose node allocation fails.
 - Remediation: Make the snapshot allocation-free by using a fixed per-CPU array sized by MAX_CPUS, so the OOM fallback path cannot itself allocate. This is the general rule for a reclaim path: it must not require the resource it exists to reclaim.
 
-### SLOPOS-2026-0034
-- Title: The input-event map is indexed by a never-recycled task id and silently stops delivering past 16384
-- Status: open
-- Confidence: 85 — evidence 38 (the direct-map array and the monotonic task id read directly), exploitability 24 (spawn ~16400 processes), reproducibility 24 (deterministic)
-- CVSS vector/score: `CVSS:3.1/AV:L/AC:L/PR:L/UI:N/S:U/C:N/I:N/A:H` — **5.5 MEDIUM**
-- Impact: Input-event delivery is a direct array indexed by the monotonic, never-recycled task id. Once a boot session has allocated 16383 task ids, `resolve_queue`/`find_queue` silently fail and no process created afterwards can ever receive keyboard or pointer input. Same root cause as entry 0010: an unbounded id used as an array index.
-- Evidence:
-  - drivers/src/input_event.rs:100-108 — `const TASK_MAP_SIZE: usize = 16384;` and `task_to_slot: [u32; TASK_MAP_SIZE]`, described as "covers all plausible IDs"
-  - drivers/src/input_event.rs:159-162 — `resolve_queue` returns `None` when `task_id as usize >= TASK_MAP_SIZE`
-  - drivers/src/input_event.rs:206-209 — `find_queue` has the same cutoff
-  - sched/src/task/task_table.rs:728-733 — task ids come from `mgr.next_task_id`, a monotonically increasing counter bounded only by `INVALID_TASK_ID`; ids are never recycled (`num_tasks` is what is decremented on exit, not the id)
-  - abi/src/input.rs:7 — `MAX_INPUT_TASKS = 32`, so the backing queue array is tiny while the index map is 64 KiB
-- Repro:
-  Spawn ~16,400 short-lived processes, then start an interactive application. It receives no input, with no error reported.
-- Remediation: Key the map by a recycled handle rather than the raw task id, or hang the input queue off the task/process object directly so no side table is needed.
-
 ### SLOPOS-2026-0035
 - Title: The SlopRing registry is global with no per-process quota
 - Status: open
@@ -647,10 +630,10 @@ Selected analogs:
 
 Ordered by what removes the most exposure per unit of work, not by score.
 
-1. **Bound the process id** (SLOPOS-2026-0010, and the same root cause in 0034). The system stops being able to start programs after 255 process creations; nothing else on this list is that visible to a user. See `plans/process-identity.md`.
+1. **Bound the process id** (SLOPOS-2026-0010). The system stops being able to start programs after 255 process creations; nothing else on this list is that visible to a user. See `plans/process-identity.md`.
 2. **Validate the signal-return XSAVE area** (0007). An unprivileged kernel-halt primitive: the `xrstor64` in `rt_sigreturn` restores a user-supplied image with no header validation and no #GP fixup. See `plans/rt-sigreturn-xrstor.md`.
 3. **Wire the SYN queue that already exists** (0011). The defence is written and tested; it merely has no caller.
 4. **Reseed the DNS resolver and validate response provenance** (0012), then replace the ISN generator with a keyed PRF (0014) and add the RFC 793 §3.9 acceptability gate (0013). These three are the network-facing set and share a test harness.
 5. **The TLB correctness set** (0017, 0018, 0019). Stale writable translations across address spaces are the only findings here that could become memory corruption rather than denial of service.
 6. **The filesystem integrity set** (0021–0027, 0042, 0043). Individually low-scoring, collectively the reason the filesystem cannot yet be trusted with data that matters.
-7. **Resource accounting** (0016, 0035, 0030, 0031, 0034). These are instances of one absent mechanism; see `plans/resource-accounting.md` rather than patching them individually.
+7. **Resource accounting** (0016, 0035, 0030, 0031). These are instances of one absent mechanism; see `plans/resource-accounting.md` rather than patching them individually.

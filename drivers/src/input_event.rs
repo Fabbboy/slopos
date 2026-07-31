@@ -8,10 +8,12 @@
 //! Per-task event queues are individually locked with [`SpinLock`], so
 //! event delivery to one task never blocks delivery to another.
 //!
-//! Queue slot allocation uses a small global [`SpinLock`] touched only
-//! on task creation/destruction.
+//! Resolving a task id to its queue slot is a lock-free scan of
+//! [`SLOT_TASK_IDS`], which is what the event-routing path does per event at
+//! pointer rates. Claiming and releasing a slot is serialised by
+//! [`SLOT_REGISTRY`], touched only on task creation/destruction.
 
-use core::sync::atomic::{AtomicI32, AtomicU8, AtomicU32, AtomicU64, Ordering};
+use core::sync::atomic::{AtomicI32, AtomicU8, AtomicU32, Ordering};
 use slopos_ostd::RingBuffer;
 use slopos_ostd::sync::{LOCK_LEVEL_REGISTRY, LOCK_LEVEL_RESOURCE, SeqLock, SpinLock};
 
@@ -29,8 +31,12 @@ pub use slopos_abi::{
 // =============================================================================
 
 struct TaskEventQueue {
+    /// Task that owns this slot, or 0 when the slot is free. Mirrored in
+    /// [`SLOT_TASK_IDS`] so routing can find the slot without taking a lock.
+    /// This copy is the authoritative one: every operation re-reads it under
+    /// the queue lock, because the slot can be released and handed to another
+    /// task between a lock-free lookup and the lock that follows it.
     task_id: u32,
-    active: bool,
     events: RingBuffer<InputEvent, MAX_EVENTS_PER_TASK>,
 }
 
@@ -38,7 +44,6 @@ impl TaskEventQueue {
     const fn new() -> Self {
         Self {
             task_id: 0,
-            active: false,
             events: RingBuffer::new_with(InputEvent {
                 event_type: InputEventType::KeyPress,
                 _padding: [0; 3],
@@ -94,140 +99,119 @@ static POINTER_BUTTONS: AtomicU8 = AtomicU8::new(0);
 static KEYBOARD_FOCUS_FAST: AtomicU32 = AtomicU32::new(0);
 
 // =============================================================================
-// Queue Slot Allocation (global lock, rare — only task create/destroy)
+// Queue Slot Allocation
 // =============================================================================
 
-/// Lookup table size. Must cover any possible task_id. Using 16384 covers
-/// all plausible IDs with negligible memory (64 KiB for u32 entries).
-const TASK_MAP_SIZE: usize = 16384;
-
-struct QueueAllocState {
-    /// Maps task_id → queue slot index. 0 = unmapped.
-    /// Index is stored as slot + 1 (so 0 means "not mapped").
-    task_to_slot: [u32; TASK_MAP_SIZE],
-}
-
-impl QueueAllocState {
-    const fn new() -> Self {
-        Self {
-            task_to_slot: [0u32; TASK_MAP_SIZE],
-        }
-    }
-}
-
-static QUEUE_ALLOC: SpinLock<QueueAllocState> =
-    SpinLock::new(QueueAllocState::new(), LOCK_LEVEL_REGISTRY);
-
-/// Lock-free slot allocation bitmap. Bit i = 1 means slot i is occupied.
-/// Avoids holding QUEUE_ALLOC (L2) while locking TASK_QUEUES (L1).
-static SLOT_BITMAP: AtomicU64 = AtomicU64::new(0);
-
-/// Atomically claim a free slot from the bitmap. Returns slot index.
-fn atomic_alloc_slot() -> Option<usize> {
-    loop {
-        let bits = SLOT_BITMAP.load(Ordering::Relaxed);
-        let free = !bits;
-        if free == 0 {
-            return None; // All slots occupied
-        }
-        let slot = free.trailing_zeros() as usize;
-        if slot >= MAX_INPUT_TASKS {
-            return None;
-        }
-        let mask = 1u64 << slot;
-        if SLOT_BITMAP
-            .compare_exchange_weak(bits, bits | mask, Ordering::AcqRel, Ordering::Relaxed)
-            .is_ok()
-        {
-            return Some(slot);
-        }
-    }
-}
-
-/// Release a slot in the bitmap.
-fn atomic_free_slot(slot: usize) {
-    if slot < MAX_INPUT_TASKS {
-        SLOT_BITMAP.fetch_and(!(1u64 << slot), Ordering::Release);
-    }
-}
-
-/// Find or create a queue slot for a task. Returns slot index.
+/// Task id occupying each queue slot, or 0 when the slot is free. Mirrors
+/// [`TaskEventQueue::task_id`] so that resolving a task to its slot is a
+/// lock-free scan of two cache lines rather than a lock acquisition — which
+/// matters because the event-routing path resolves once per event and pointer
+/// devices report at up to 1000 Hz.
 ///
-/// Uses a lock-free bitmap for slot allocation to avoid nesting
-/// QUEUE_ALLOC (L2) inside TASK_QUEUES (L1). Locks are acquired
-/// in ascending order only: L1 (TASK_QUEUES) then L2 (QUEUE_ALLOC).
+/// The array is indexed by *slot*, so it is bounded by the queue pool it
+/// describes. Task ids are monotonic and never recycled, so any structure
+/// indexed by task id would instead carry a ceiling that a long-lived boot
+/// session eventually walks past.
+///
+/// # Ordering
+///
+/// A slot's mirror entry is always written **last**, after the queue behind it
+/// has been put into the state the entry advertises: on claim, after the queue
+/// is bound and drained; on release, after it is unbound and drained. The
+/// stores are `Release` and the scans `Acquire`, so a scan that observes an
+/// entry also observes the queue state that was published with it.
+///
+/// The mirror is a hint, never a proof: a scan is not atomic with the lock
+/// that follows it, so every operation re-reads `TaskEventQueue::task_id`
+/// under the queue lock and abandons the operation if the slot has since been
+/// rebound. That check, not the scan, is what keeps one task's events out of
+/// another task's queue.
+static SLOT_TASK_IDS: [AtomicU32; MAX_INPUT_TASKS] = [const { AtomicU32::new(0) }; MAX_INPUT_TASKS];
+
+/// Serialises claiming and releasing a slot, so a task owns at most one.
+///
+/// Held only on task creation and destruction, never on the event-routing
+/// path. Finding a task's slot needs no lock at all.
+///
+/// A queue lock is taken while this is held, and never the reverse: nothing
+/// acquires a second lock while holding a `TASK_QUEUES` entry, so the
+/// dependency graph over these two classes has a single edge and no cycle.
+static SLOT_REGISTRY: SpinLock<()> = SpinLock::new((), LOCK_LEVEL_REGISTRY);
+
+/// Find the slot a task's queue lives in, without taking any lock.
+fn find_queue(task_id: u32) -> Option<usize> {
+    if task_id == 0 {
+        return None;
+    }
+    SLOT_TASK_IDS
+        .iter()
+        .position(|slot| slot.load(Ordering::Acquire) == task_id)
+}
+
+/// Find the slot a task's queue lives in, claiming a free one if it has none.
+///
+/// Returns `None` only when the task id is invalid or all
+/// [`MAX_INPUT_TASKS`] slots are already spoken for.
 fn resolve_queue(task_id: u32) -> Option<usize> {
-    if task_id == 0 || task_id as usize >= TASK_MAP_SIZE {
+    if task_id == 0 {
         return None;
     }
 
-    // Fast path: check lookup table under QUEUE_ALLOC (L2 only).
-    {
-        let alloc = QUEUE_ALLOC.lock();
-        let mapped = alloc.task_to_slot[task_id as usize];
-        if mapped != 0 {
-            return Some((mapped - 1) as usize);
-        }
+    // Fast path: the task already has a slot. No lock, no store.
+    if let Some(slot) = find_queue(task_id) {
+        return Some(slot);
     }
 
-    // Slow path: claim a free slot via atomic bitmap (no locks held).
-    let slot = atomic_alloc_slot()?;
+    // Slow path: claim a slot. The registry lock makes "look, then claim"
+    // atomic against a concurrent registration of the same task, which is
+    // what stops one task from being handed two slots.
+    let _registry = SLOT_REGISTRY.lock();
 
-    // Initialize the slot (L1 only).
+    // Re-check: another CPU may have claimed a slot for this task while we
+    // were on our way to the lock.
+    if let Some(slot) = find_queue(task_id) {
+        return Some(slot);
+    }
+
+    let slot = SLOT_TASK_IDS
+        .iter()
+        .position(|slot| slot.load(Ordering::Acquire) == 0)?;
+
     {
         let mut queue = TASK_QUEUES[slot].lock();
         queue.task_id = task_id;
-        queue.active = true;
         queue.events.reset();
     }
-
-    // Register in lookup table (L2 only — L1 already released = ascending order).
-    {
-        let mut alloc = QUEUE_ALLOC.lock();
-        // Double-check: another CPU may have raced and registered this task.
-        let mapped = alloc.task_to_slot[task_id as usize];
-        if mapped != 0 {
-            // Lost the race — undo our slot claim.
-            {
-                let mut queue = TASK_QUEUES[slot].lock();
-                queue.active = false;
-                queue.task_id = 0;
-            }
-            atomic_free_slot(slot);
-            return Some((mapped - 1) as usize);
-        }
-        alloc.task_to_slot[task_id as usize] = (slot + 1) as u32;
-    }
+    SLOT_TASK_IDS[slot].store(task_id, Ordering::Release);
 
     Some(slot)
 }
 
-/// Find an existing queue slot for a task. Returns slot index.
-fn find_queue(task_id: u32) -> Option<usize> {
-    if task_id == 0 || task_id as usize >= TASK_MAP_SIZE {
+// =============================================================================
+// Internal: operate on a task's queue
+// =============================================================================
+
+/// Run `f` against a task's queue, having confirmed under the queue lock that
+/// `slot` still belongs to `task_id`. Returns `None` if it does not.
+#[inline]
+fn with_queue<R>(slot: usize, task_id: u32, f: impl FnOnce(&mut TaskEventQueue) -> R) -> Option<R> {
+    let queue = TASK_QUEUES.get(slot)?;
+    let mut queue = queue.lock();
+    if queue.task_id != task_id {
         return None;
     }
-    let alloc = QUEUE_ALLOC.lock();
-    let mapped = alloc.task_to_slot[task_id as usize];
-    if mapped != 0 {
-        Some((mapped - 1) as usize)
-    } else {
-        None
-    }
+    Some(f(&mut queue))
 }
 
-// =============================================================================
-// Internal: push event to a task's queue by slot index
-// =============================================================================
+/// Find a task's queue and run `f` against it. Does not create a queue.
+#[inline]
+fn with_task_queue<R>(task_id: u32, f: impl FnOnce(&mut TaskEventQueue) -> R) -> Option<R> {
+    with_queue(find_queue(task_id)?, task_id, f)
+}
 
 #[inline]
-fn push_event(slot: usize, event: InputEvent) {
-    if slot < MAX_INPUT_TASKS {
-        let mut queue = TASK_QUEUES[slot].lock();
-        if queue.active {
-            queue.events.push_overwrite(event);
-        }
-    }
+fn push_event(slot: usize, task_id: u32, event: InputEvent) {
+    with_queue(slot, task_id, |queue| queue.events.push_overwrite(event));
 }
 
 // =============================================================================
@@ -277,6 +261,7 @@ pub fn input_set_pointer_focus_with_offset(
         if let Some(slot) = find_queue(old_focus) {
             push_event(
                 slot,
+                old_focus,
                 InputEvent::pointer_enter_leave(false, x, y, timestamp_ms),
             );
         }
@@ -289,6 +274,7 @@ pub fn input_set_pointer_focus_with_offset(
             let local_y = y - offset_y;
             push_event(
                 slot,
+                task_id,
                 InputEvent::pointer_enter_leave(true, local_x, local_y, timestamp_ms),
             );
         }
@@ -300,7 +286,7 @@ pub fn input_request_close(task_id: u32, timestamp_ms: u64) -> bool {
         return false;
     }
     if let Some(slot) = resolve_queue(task_id) {
-        push_event(slot, InputEvent::close_request(timestamp_ms));
+        push_event(slot, task_id, InputEvent::close_request(timestamp_ms));
         true
     } else {
         false
@@ -312,7 +298,11 @@ pub fn input_send_configure(task_id: u32, width: u32, height: u32, timestamp_ms:
         return false;
     }
     if let Some(slot) = resolve_queue(task_id) {
-        push_event(slot, InputEvent::configure(width, height, timestamp_ms));
+        push_event(
+            slot,
+            task_id,
+            InputEvent::configure(width, height, timestamp_ms),
+        );
         true
     } else {
         false
@@ -386,6 +376,7 @@ pub fn input_route_key_full(
         };
         push_event(
             slot,
+            target,
             InputEvent::key_full(
                 event_type,
                 scancode,
@@ -409,7 +400,11 @@ pub fn input_route_pointer_motion(x: i32, y: i32, timestamp_ms: u64) {
     let comp_id = state.compositor_task_id;
     if comp_id != 0 {
         if let Some(slot) = resolve_queue(comp_id) {
-            push_event(slot, InputEvent::pointer_motion(x, y, timestamp_ms));
+            push_event(
+                slot,
+                comp_id,
+                InputEvent::pointer_motion(x, y, timestamp_ms),
+            );
         }
         return;
     }
@@ -424,6 +419,7 @@ pub fn input_route_pointer_motion(x: i32, y: i32, timestamp_ms: u64) {
     if let Some(slot) = resolve_queue(focus) {
         push_event(
             slot,
+            focus,
             InputEvent::pointer_motion(local_x, local_y, timestamp_ms),
         );
     }
@@ -443,6 +439,7 @@ pub fn input_route_pointer_button(button: u8, pressed: bool, timestamp_ms: u64) 
         if let Some(slot) = resolve_queue(comp_id) {
             push_event(
                 slot,
+                comp_id,
                 InputEvent::pointer_button(pressed, button, timestamp_ms),
             );
         }
@@ -456,6 +453,7 @@ pub fn input_route_pointer_button(button: u8, pressed: bool, timestamp_ms: u64) 
     if let Some(slot) = resolve_queue(focus) {
         push_event(
             slot,
+            focus,
             InputEvent::pointer_button(pressed, button, timestamp_ms),
         );
     }
@@ -468,6 +466,7 @@ pub fn input_route_pointer_axis(axis: u32, value_v120: i32, timestamp_ms: u64) {
         if let Some(slot) = resolve_queue(comp_id) {
             push_event(
                 slot,
+                comp_id,
                 InputEvent::pointer_axis(axis, value_v120, timestamp_ms),
             );
         }
@@ -481,6 +480,7 @@ pub fn input_route_pointer_axis(axis: u32, value_v120: i32, timestamp_ms: u64) {
     if let Some(slot) = resolve_queue(focus) {
         push_event(
             slot,
+            focus,
             InputEvent::pointer_axis(axis, value_v120, timestamp_ms),
         );
     }
@@ -503,9 +503,7 @@ pub fn input_register_compositor(task_id: u32) {
 // =============================================================================
 
 pub fn input_poll(task_id: u32) -> Option<InputEvent> {
-    let slot = find_queue(task_id)?;
-    let mut queue = TASK_QUEUES[slot].lock();
-    queue.events.try_pop()
+    with_task_queue(task_id, |queue| queue.events.try_pop())?
 }
 
 pub fn input_drain_batch(task_id: u32, out_buffer: *mut InputEvent, max_count: usize) -> usize {
@@ -518,41 +516,31 @@ pub fn input_drain_batch(task_id: u32, out_buffer: *mut InputEvent, max_count: u
         None => return 0,
     };
 
-    let mut queue = TASK_QUEUES[slot].lock();
-    let mut count = 0;
-    while count < max_count {
-        if let Some(event) = queue.events.try_pop() {
-            slopos_ostd::util::ptr_buf::write_at_index(out_buffer, count, event);
-            count += 1;
-        } else {
-            break;
+    with_queue(slot, task_id, |queue| {
+        let mut count = 0;
+        while count < max_count {
+            if let Some(event) = queue.events.try_pop() {
+                slopos_ostd::util::ptr_buf::write_at_index(out_buffer, count, event);
+                count += 1;
+            } else {
+                break;
+            }
         }
-    }
-    count
+        count
+    })
+    .unwrap_or(0)
 }
 
 pub fn input_peek(task_id: u32) -> Option<InputEvent> {
-    let slot = find_queue(task_id)?;
-    let queue = TASK_QUEUES[slot].lock();
-    queue.events.peek().copied()
+    with_task_queue(task_id, |queue| queue.events.peek().copied())?
 }
 
 pub fn input_has_events(task_id: u32) -> bool {
-    let slot = match find_queue(task_id) {
-        Some(s) => s,
-        None => return false,
-    };
-    let queue = TASK_QUEUES[slot].lock();
-    !queue.events.is_empty()
+    with_task_queue(task_id, |queue| !queue.events.is_empty()).unwrap_or(false)
 }
 
 pub fn input_event_count(task_id: u32) -> u32 {
-    let slot = match find_queue(task_id) {
-        Some(s) => s,
-        None => return 0,
-    };
-    let queue = TASK_QUEUES[slot].lock();
-    queue.events.len() as u32
+    with_task_queue(task_id, |queue| queue.events.len() as u32).unwrap_or(0)
 }
 
 // =============================================================================
@@ -615,22 +603,15 @@ pub fn input_cleanup_task(task_id: u32) {
         }
     }
 
-    // Free the queue slot.
-    if let Some(slot) = find_queue(task_id) {
-        let mut queue = TASK_QUEUES[slot].lock();
-        queue.active = false;
+    // Free the queue slot. The registry lock keeps a concurrent claim from
+    // taking the slot between the scan and the release.
+    let _registry = SLOT_REGISTRY.lock();
+    let Some(slot) = find_queue(task_id) else {
+        return;
+    };
+    with_queue(slot, task_id, |queue| {
         queue.task_id = 0;
         queue.events.reset();
-        drop(queue);
-
-        // Remove from lookup table.
-        let mut alloc = QUEUE_ALLOC.lock();
-        if (task_id as usize) < TASK_MAP_SIZE {
-            alloc.task_to_slot[task_id as usize] = 0;
-        }
-        drop(alloc);
-
-        // Release the bitmap slot (lock-free).
-        atomic_free_slot(slot);
-    }
+    });
+    SLOT_TASK_IDS[slot].store(0, Ordering::Release);
 }

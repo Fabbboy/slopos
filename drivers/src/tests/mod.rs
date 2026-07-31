@@ -6,6 +6,7 @@ pub mod devres_tests;
 pub mod ecam_tests;
 pub mod hpet_tests;
 pub mod i8042_tests;
+pub mod input_event_tests;
 pub mod keyboard_tests;
 pub mod madt_tests;
 pub mod msix_tests;
