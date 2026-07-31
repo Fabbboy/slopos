@@ -4,6 +4,7 @@ use slopos_testing::TestResult;
 use slopos_testing::{assert_eq_test, assert_test, pass};
 
 use crate::dns;
+use crate::types::{Ipv4Addr, Port, SockAddr};
 
 // =============================================================================
 // 5F.T1 — DNS name encoding
@@ -446,19 +447,12 @@ pub fn test_dns_t8_regression_network_stack() -> TestResult {
     socket_deliver_udp_from_dispatch([10, 0, 2, 1], [10, 0, 2, 15], 9999, 41053, &payload);
 
     let mut buf = [0u8; 16];
-    let mut src_ip = [0u8; 4];
-    let mut src_port = 0u16;
-    let got = socket_recvfrom(
-        sock,
-        buf.as_mut_ptr(),
-        buf.len(),
-        &mut src_ip as *mut _,
-        &mut src_port as *mut _,
-    );
+    let mut peer = SockAddr::new(Ipv4Addr::UNSPECIFIED, Port(0));
+    let got = socket_recvfrom(sock, &mut buf, Some(&mut peer));
     assert_eq_test!(got, 4, "received 4 bytes");
     assert_eq_test!(&buf[..4], &payload, "payload matches");
-    assert_eq_test!(src_ip, [10, 0, 2, 1], "source IP");
-    assert_eq_test!(src_port, 9999, "source port");
+    assert_eq_test!(peer.ip.0, [10, 0, 2, 1], "source IP");
+    assert_eq_test!(peer.port.0, 9999, "source port");
 
     let _ = socket_close(sock);
     pass!()

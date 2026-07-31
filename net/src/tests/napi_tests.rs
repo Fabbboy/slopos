@@ -118,7 +118,7 @@ pub fn test_blocking_recv() -> TestResult {
     let _ = socket::socket_set_nonblocking(sock, false);
     let _ = socket::socket_set_timeouts(sock, 1, 0);
     let mut buf = [0u8; 16];
-    let rc = socket::socket_recv(sock, buf.as_mut_ptr(), buf.len());
+    let rc = socket::socket_recv(sock, &mut buf);
     assert_test!(
         rc == errno_i64(ERRNO_EAGAIN),
         "blocking recv times out with eagain"
@@ -161,7 +161,7 @@ pub fn test_nonblocking_preserved() -> TestResult {
     };
     let _ = socket::socket_set_nonblocking(sock, true);
     let mut buf = [0u8; 32];
-    let rc = socket::socket_recv(sock, buf.as_mut_ptr(), buf.len());
+    let rc = socket::socket_recv(sock, &mut buf);
     assert_test!(
         rc == errno_i64(ERRNO_EAGAIN),
         "nonblocking recv returns eagain"
@@ -177,7 +177,7 @@ pub fn test_recv_timeout() -> TestResult {
     let _ = socket::socket_set_nonblocking(sock, false);
     let _ = socket::socket_set_timeouts(sock, 2, 0);
     let mut buf = [0u8; 8];
-    let rc = socket::socket_recv(sock, buf.as_mut_ptr(), buf.len());
+    let rc = socket::socket_recv(sock, &mut buf);
     assert_test!(rc == errno_i64(ERRNO_EAGAIN), "recv timeout expires");
     pass!()
 }
@@ -190,9 +190,9 @@ pub fn test_send_backpressure() -> TestResult {
     let _ = socket::socket_set_nonblocking(sock, true);
     let mut payload: KBox<[u8; 20000]> = KBox::zeroed().expect("alloc");
     payload.iter_mut().for_each(|b| *b = 0x42);
-    let first = socket::socket_send(sock, payload.as_ptr(), payload.len());
+    let first = socket::socket_send(sock, &payload[..]);
     assert_test!(first >= 0, "initial send makes forward progress");
-    let second = socket::socket_send(sock, payload.as_ptr(), payload.len());
+    let second = socket::socket_send(sock, &payload[..]);
     assert_test!(
         second == errno_i64(ERRNO_EAGAIN) || second >= 0,
         "backpressure is surfaced"

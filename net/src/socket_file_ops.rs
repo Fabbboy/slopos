@@ -46,7 +46,7 @@ impl FileOps for SocketFileOps {
             Err(_) => return Errno::ENOMEM.as_isize(),
         };
         let read_len = buf.len().min(tmp.len());
-        let n = socket::socket_recv(handle as u32, tmp.as_mut_ptr(), read_len);
+        let n = socket::socket_recv(handle as u32, &mut tmp[..read_len]);
         if n <= 0 {
             return n as isize;
         }
@@ -85,7 +85,7 @@ impl FileOps for SocketFileOps {
                     };
                 }
             };
-            let sent = socket::socket_send(handle as u32, staging.as_ptr(), n);
+            let sent = socket::socket_send(handle as u32, &staging[..n]);
             if sent <= 0 {
                 return if total > 0 {
                     total as isize

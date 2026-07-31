@@ -6,7 +6,7 @@ use slopos_testing::{assert_eq_test, assert_test, fail, pass};
 use crate::icmp::{self, ICMP_HEADER_LEN};
 use crate::route::{ROUTE_TABLE, RouteEntry};
 use crate::socket;
-use crate::types::{DevIndex, Ipv4Addr};
+use crate::types::{DevIndex, Ipv4Addr, Port, SockAddr};
 
 const GATEWAY_IP: [u8; 4] = [10, 0, 2, 2];
 
@@ -154,13 +154,12 @@ fn test_icmp_socket_sendto_recvfrom_e2e() -> TestResult {
         sequence,
         icmp_buf.len()
     );
-    let sent = socket::socket_sendto(sock, icmp_buf.as_ptr(), icmp_buf.len(), GATEWAY_IP, 0);
+    let sent = socket::socket_sendto(sock, &icmp_buf, GATEWAY_IP, 0);
     klog_info!("icmp_test: sendto returned {}", sent);
     assert_test!(sent > 0, "sendto failed: {}", sent);
 
     let mut recv_buf = [0u8; 256];
-    let mut src_ip = [0u8; 4];
-    let mut src_port: u16 = 0;
+    let mut peer = SockAddr::new(Ipv4Addr::UNSPECIFIED, Port(0));
 
     for attempt in 0..30u32 {
         slopos_kernel_services::driver_runtime::sleep_current_task_ms(100);
@@ -172,13 +171,8 @@ fn test_icmp_socket_sendto_recvfrom_e2e() -> TestResult {
         klog_info!("icmp_test: attempt {} readable={}", attempt, readable);
 
         if readable != 0 {
-            let n = socket::socket_recvfrom(
-                sock,
-                recv_buf.as_mut_ptr(),
-                recv_buf.len(),
-                &mut src_ip as *mut [u8; 4],
-                &mut src_port as *mut u16,
-            );
+            let n = socket::socket_recvfrom(sock, &mut recv_buf, Some(&mut peer));
+            let src_ip = peer.ip.0;
             klog_info!(
                 "icmp_test: recvfrom returned {} src={}.{}.{}.{}",
                 n,
@@ -260,7 +254,7 @@ fn test_icmp_napi_scheduling_e2e() -> TestResult {
         icmp_buf[i] = 0x42;
     }
 
-    let sent = socket::socket_sendto(sock, icmp_buf.as_ptr(), icmp_buf.len(), GATEWAY_IP, 0);
+    let sent = socket::socket_sendto(sock, &icmp_buf, GATEWAY_IP, 0);
     assert_test!(sent > 0, "sendto failed");
 
     // The kernel-test phase needs to drain the ring explicitly; the
@@ -273,15 +267,9 @@ fn test_icmp_napi_scheduling_e2e() -> TestResult {
         let readable = socket::socket_poll_readable(sock);
         if readable != 0 {
             let mut recv_buf = [0u8; 256];
-            let mut src_ip = [0u8; 4];
-            let mut src_port: u16 = 0;
-            let n = socket::socket_recvfrom(
-                sock,
-                recv_buf.as_mut_ptr(),
-                recv_buf.len(),
-                &mut src_ip as *mut _,
-                &mut src_port as *mut _,
-            );
+            let mut peer = SockAddr::new(Ipv4Addr::UNSPECIFIED, Port(0));
+            let n = socket::socket_recvfrom(sock, &mut recv_buf, Some(&mut peer));
+            let src_ip = peer.ip.0;
             klog_info!(
                 "icmp_napi: reply received attempt={} n={} src={}.{}.{}.{}",
                 attempt,

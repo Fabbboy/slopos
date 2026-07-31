@@ -30,6 +30,8 @@
 
 use core::ptr::NonNull;
 
+use crate::sync::init_flag::InitFlag;
+
 /// Write `value` through `out` if non-null. Folds the kernel-half C-ABI
 /// idiom of "caller passes an optional `*mut T` output slot; write if
 /// present, else discard" into one helper so consumer crates need no
@@ -97,49 +99,29 @@ pub fn with_buf_mut<T, R>(ptr: *mut T, len: usize, f: impl FnOnce(&mut [T]) -> R
 
 /// Borrow `len` elements of `T` at `ptr` for as long as `anchor` lives.
 ///
-/// The other answer to check 8's shape, for the callers a closure cannot
-/// serve: an accessor that *returns* a reference, like
-/// `fn as_slice(&self) -> &[u8]` over a buffer the receiver owns. Here the
-/// lifetime is not fabricated and not caller-chosen — it is `anchor`'s, so the
-/// caller has to present something that genuinely outlives the borrow, and at
-/// such an accessor that something is `&self`.
+/// The answer for the callers a closure cannot serve: an accessor that
+/// *returns* a reference, like `fn as_mut_slice(&mut self) -> &mut [u8]` over
+/// a buffer the receiver owns. Here the lifetime is not fabricated and not
+/// caller-chosen — it is `anchor`'s, so the caller has to present something
+/// that genuinely outlives the borrow, and at such an accessor that something
+/// is `&mut self`, whose exclusivity becomes the slice's.
 ///
-/// A token anchor is the degenerate case. `&()`, or a reference to the caller's
-/// own `len` local, bounds the borrow to the caller's frame — honest, and
-/// machine-checked — but it stands in no relation to `ptr`, so it constrains
-/// nothing else: that the mapping stays valid across that frame remains
-/// entirely the caller's assertion.
-///
-/// # Safety contract on the caller
-///
-/// The module-level contract, plus: the mapping at `ptr` must stay valid and
-/// unaliased for at least as long as `anchor`.
-#[inline]
-pub fn anchored_buf<'a, A: ?Sized, T>(_anchor: &'a A, ptr: *const T, len: usize) -> &'a [T] {
-    // SAFETY: caller upholds the contract above; `anchor` bounds the lifetime.
-    unsafe { core::slice::from_raw_parts(ptr, len) }
-}
-
-/// Mutable sibling of [`anchored_buf`]. Takes `&mut A`, so the exclusivity of
-/// the returned slice is the exclusivity of the anchor.
+/// Deliberately `&mut A` only. A shared form existed and every kernel caller
+/// passed a token — `&()`, or a reference to its own `len` local — which
+/// bounds the borrow to the caller's frame but stands in no relation to `ptr`,
+/// so it constrained nothing. Those callers take slices now.
 #[inline]
 pub fn anchored_buf_mut<'a, A: ?Sized, T>(
     _anchor: &'a mut A,
     ptr: *mut T,
     len: usize,
 ) -> &'a mut [T] {
-    // SAFETY: caller upholds the contract above; `anchor` bounds the lifetime
-    // and its `&mut` bounds the aliasing.
+    // SAFETY: caller upholds the module-level contract; `anchor` bounds the
+    // lifetime and its `&mut` bounds the aliasing.
     unsafe { core::slice::from_raw_parts_mut(ptr, len) }
 }
 
-/// [`anchored_buf`] for a `NonNull`.
-#[inline]
-pub fn anchored_nonnull<'a, A: ?Sized, T>(anchor: &'a A, ptr: NonNull<T>, len: usize) -> &'a [T] {
-    anchored_buf(anchor, ptr.as_ptr().cast_const(), len)
-}
-
-/// Mutable sibling of [`anchored_nonnull`].
+/// [`anchored_buf_mut`] for a `NonNull`.
 #[inline]
 pub fn anchored_nonnull_mut<'a, A: ?Sized, T>(
     anchor: &'a mut A,
@@ -149,26 +131,49 @@ pub fn anchored_nonnull_mut<'a, A: ?Sized, T>(
     anchored_buf_mut(anchor, ptr.as_ptr(), len)
 }
 
-/// Take a `&'static mut [T]` over a region installed exactly once and never
-/// freed.
+/// A region handed over exactly once, to be turned into a `&'static mut [T]`.
 ///
-/// The escape hatch for a one-shot install — a boot-reserved table handed to
+/// The shape a boot-time install actually has: a boot-reserved table given to
 /// the structure that owns it for the rest of the machine's life. `'static` is
-/// what such a region's lifetime actually is. It buys honesty, not safety:
-/// `'static` coerces to any shorter lifetime at the call site, so it does not
-/// stop a caller picking one and then picking it again.
+/// that region's real lifetime, and the danger is not the lifetime but the
+/// *repetition* — a second `&'static mut` to the same bytes is aliasing UB,
+/// and `'static` coerces to any shorter lifetime, so a plain function could
+/// not stop a caller taking one twice.
 ///
-/// # Safety contract on the caller
-///
-/// The module-level contract, plus: the region is never freed, and this is
-/// called **once** for it. A second call would hand out a second
-/// `&'static mut` to the same bytes, which is aliasing UB — the one-shot
-/// property has to come from the caller's own state machine, and there is no
-/// way to express it here.
-#[inline]
-pub fn install_buf_mut<T: 'static>(ptr: *mut T, len: usize) -> &'static mut [T] {
-    // SAFETY: caller upholds the contract above.
-    unsafe { core::slice::from_raw_parts_mut(ptr, len) }
+/// So the handle is linear. [`claim`](Self::claim) mints it only if the
+/// caller's [`InitFlag`] was still unset, and [`into_static_mut`] consumes it
+/// by value. Taking a second reference to a claimed region is not a thing that
+/// can be written.
+pub struct OneShotBuf<T: 'static> {
+    ptr: NonNull<T>,
+    len: usize,
+}
+
+impl<T: 'static> OneShotBuf<T> {
+    /// Claim `[ptr, ptr + len)` against `flag`, or `None` if `flag` was
+    /// already claimed.
+    ///
+    /// `flag` must be the one flag that guards this region — a `static` beside
+    /// the structure that owns it. Reusing one flag for two regions would
+    /// deny the second, which fails closed.
+    ///
+    /// Beyond that, the module-level contract: `ptr` is aligned for `T` and
+    /// valid for `len` consecutive `T` values that are never freed.
+    #[inline]
+    pub fn claim(flag: &'static InitFlag, ptr: NonNull<T>, len: usize) -> Option<Self> {
+        flag.init_once().then_some(Self { ptr, len })
+    }
+
+    /// Consume the handle for the region's one `&'static mut [T]`.
+    #[inline]
+    pub fn into_static_mut(self) -> &'static mut [T] {
+        // SAFETY: `claim` is the only constructor and it succeeds once per
+        // flag, `self` is consumed here, and `OneShotBuf` is neither `Copy`
+        // nor `Clone` — so this is the only `&'static mut` over these bytes
+        // that ever exists. Validity, alignment and length are the claim-time
+        // contract.
+        unsafe { core::slice::from_raw_parts_mut(self.ptr.as_ptr(), self.len) }
+    }
 }
 
 /// [`with_buf`] for a `NonNull`, with the null-pointer branch elided.
@@ -187,25 +192,12 @@ pub fn with_nonnull_mut<T, R>(ptr: NonNull<T>, len: usize, f: impl FnOnce(&mut [
     f(unsafe { core::slice::from_raw_parts_mut(ptr.as_ptr(), len) })
 }
 
-/// Borrow a single `T` value at `ptr` for the duration of `f`. Companion of
-/// Borrow a single `T` at `ptr` for as long as `anchor` lives.
-///
-/// [`anchored_buf`]'s single-value sibling, for accessors that return a
-/// reference rather than consuming one.
-///
-/// # Safety contract on the caller
-///
-/// `ptr` must be non-null, aligned for `T`, point at an initialised `T`,
-/// and stay valid and unaliased for at least as long as `anchor`.
-#[inline]
-pub fn anchored_ref<'a, A: ?Sized, T>(_anchor: &'a A, ptr: *const T) -> &'a T {
-    debug_assert!(!ptr.is_null(), "anchored_ref: ptr must be non-null");
-    // SAFETY: caller upholds the contract above; `anchor` bounds the lifetime.
-    unsafe { &*ptr }
-}
+/// Number of `u64` slots in a 4 KiB page — the bound
+/// [`with_atomic_u64_in_page`] holds its index to.
+const U64_SLOTS_PER_PAGE: usize = 4096 / core::mem::size_of::<u64>();
 
-/// View the `index`-th `u64` at `base` as an [`AtomicU64`] for the duration of
-/// `f`.
+/// View the `index`-th `u64` of the 4 KiB page at `page_base` as an
+/// [`AtomicU64`](core::sync::atomic::AtomicU64) for the duration of `f`.
 ///
 /// For memory a second agent may write between two of this program's accesses.
 /// A page-table entry is the motivating case: the hardware page walker stamps
@@ -217,46 +209,57 @@ pub fn anchored_ref<'a, A: ?Sized, T>(_anchor: &'a A, ptr: *const T) -> &'a T {
 /// composes with itself, so two CPUs touching two slots of one table is not a
 /// claim either of them has to defend.
 ///
-/// # Safety contract on the caller
-///
-/// `base.add(index)` must lie inside one live allocation and be 8-byte
-/// aligned.
+/// The page framing is what makes the arithmetic checkable rather than
+/// asserted: a page-aligned base plus an index bounded by the page's slot
+/// count cannot leave the page. Both are asserted here, in every build.
 #[inline]
-pub fn with_atomic_u64_at<R>(
-    base: *mut u64,
+pub fn with_atomic_u64_in_page<R>(
+    page_base: NonNull<u64>,
     index: usize,
     f: impl FnOnce(&core::sync::atomic::AtomicU64) -> R,
 ) -> R {
-    debug_assert!(!base.is_null(), "with_atomic_u64_at: base must be non-null");
-    debug_assert!(
-        base.align_offset(align_of::<u64>()) == 0,
-        "with_atomic_u64_at: base must be 8-byte aligned"
+    assert!(
+        page_base.as_ptr().align_offset(4096) == 0,
+        "with_atomic_u64_in_page: base must be 4 KiB aligned"
     );
-    // SAFETY: caller upholds the contract above, so `slot` addresses an
-    // initialised, aligned `u64` inside a live allocation for the duration
-    // of `f`. `AtomicU64` has the same layout as `u64`.
+    assert!(
+        index < U64_SLOTS_PER_PAGE,
+        "with_atomic_u64_in_page: index out of page"
+    );
+    // SAFETY: the asserts above put `slot` inside the page `page_base` opens,
+    // which the module-level contract says is one live allocation, so the
+    // offset stays in bounds and lands on an aligned, initialised `u64`.
+    // `AtomicU64` has the same layout as `u64`.
     unsafe {
-        let slot = base.add(index);
+        let slot = page_base.as_ptr().add(index);
         f(core::sync::atomic::AtomicU64::from_ptr(slot))
     }
 }
 
-/// Offset a `NonNull<u8>` by `byte_offset` and return the resulting
-/// `NonNull<u8>`. Folds the slab/large-alloc pattern of "skip past a
-/// header at a fixed byte offset" into one helper so the kernel-heap
-/// site stays in safe Rust.
+/// Offset a `NonNull<u8>` by `byte_offset` within a region of `region_len`
+/// bytes. Folds the slab/large-alloc pattern of "skip past a header at a fixed
+/// byte offset" into one helper so the kernel-heap site stays in safe Rust.
 ///
-/// # Safety contract on the caller
+/// `region_len` is what turns "stays inside the allocation" from a caller
+/// promise into an assertion: given a base that opens `region_len` bytes — the
+/// module-level contract — an offset within them cannot escape.
 ///
-/// `base + byte_offset` must lie inside the same allocation as `base`,
-/// and the returned pointer must be used only while that allocation is
-/// live. The interior `unsafe` (pointer arithmetic and the
-/// `NonNull::new_unchecked`) is sound under that contract.
+/// # Panics
+///
+/// If `byte_offset > region_len`.
 #[inline]
-pub fn nonnull_byte_offset(base: NonNull<u8>, byte_offset: usize) -> NonNull<u8> {
-    // SAFETY: caller upholds the contract above; `byte_offset` is
-    // non-negative and stays inside the caller-owned allocation, so
-    // the result is non-null.
+pub fn nonnull_byte_offset_in(
+    base: NonNull<u8>,
+    byte_offset: usize,
+    region_len: usize,
+) -> NonNull<u8> {
+    assert!(
+        byte_offset <= region_len,
+        "nonnull_byte_offset_in: offset past the end of the region"
+    );
+    // SAFETY: the assert keeps the offset inside the `region_len` bytes the
+    // module-level contract says `base` opens, so the arithmetic is in bounds
+    // and the result is non-null.
     unsafe {
         let raw = base.as_ptr().add(byte_offset);
         NonNull::new_unchecked(raw)

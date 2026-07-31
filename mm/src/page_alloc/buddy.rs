@@ -21,12 +21,14 @@
 //!    the call sites and `debug_assert!`-checked at the
 //!    method boundary.
 
+use core::ptr::NonNull;
 use core::sync::atomic::{AtomicU8, Ordering};
 
 use slopos_abi::addr::PhysAddr;
 use slopos_ostd::mm::frame::{FrameAlloc, FrameAllocOptions, Paddr};
 use slopos_ostd::panic::AbortOnUnwind;
-use slopos_ostd::sync::{LOCK_LEVEL_ALLOCATOR, PreemptGuard, RawTable, SpinLock};
+use slopos_ostd::sync::{InitFlag, LOCK_LEVEL_ALLOCATOR, PreemptGuard, RawTable, SpinLock};
+use slopos_ostd::util::ptr_buf::OneShotBuf;
 use slopos_ostd::{align_down_u64, align_up_u64, klog_debug, klog_info};
 
 use crate::hhdm::PhysAddrHhdm;
@@ -63,6 +65,10 @@ pub(super) const PAGE_FRAME_NEVER_REUSE: u8 = 0x06;
 
 pub(super) const INVALID_PAGE_FRAME: u32 = 0xFFFF_FFFF;
 pub(super) const MAX_ORDER: u32 = 24;
+/// One-shot guard for the frame-descriptor table's `&'static mut` handover.
+/// See `install_descriptor_table`.
+static FRAME_TABLE_CLAIMED: InitFlag = InitFlag::new();
+
 const INVALID_REGION_ID: u16 = 0xFFFF;
 const DMA_MEMORY_LIMIT: u64 = 0x0100_0000;
 
@@ -544,18 +550,21 @@ impl BuddyAllocator {
     /// memory-init code allocates and HHDM-maps this region just
     /// before calling.
     pub(crate) fn install_descriptor_table(&self, frames_ptr: *mut u8, max_frames: u32) {
-        if frames_ptr.is_null() || max_frames == 0 {
+        let Some(typed_ptr) =
+            NonNull::new(frames_ptr.cast::<PageFrame>()).filter(|_| max_frames > 0)
+        else {
             panic!("BuddyAllocator::install_descriptor_table: null pointer or zero frames");
-        }
+        };
         debug_assert_eq!(self.lifecycle(), Lifecycle::Uninit);
 
-        let typed_ptr = frames_ptr as *mut PageFrame;
-        // One-shot, and the `Lifecycle::Uninit` assertion above is what makes
-        // it so: the frame table is installed once from a boot-reserved region
-        // and lives as long as the machine, which is what `'static` says.
-        let slice: &'static mut [PageFrame] =
-            slopos_ostd::util::ptr_buf::install_buf_mut(typed_ptr, max_frames as usize);
-        self.frame_table.install(slice);
+        // The frame table is installed once, from a boot-reserved region that
+        // lives as long as the machine — which is what `'static` says, and
+        // what `FRAME_TABLE_CLAIMED` makes checked rather than asserted. A
+        // second install would otherwise hand out a second `&'static mut` to
+        // the same descriptors.
+        let claim = OneShotBuf::claim(&FRAME_TABLE_CLAIMED, typed_ptr, max_frames as usize)
+            .expect("BuddyAllocator::install_descriptor_table called twice");
+        self.frame_table.install(claim.into_static_mut());
 
         let mut inner = self.inner.lock();
         inner.total_frames = max_frames;

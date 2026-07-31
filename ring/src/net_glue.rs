@@ -24,6 +24,7 @@ use slopos_mm::user_ptr::{UserBytes, UserPtr};
 
 use slopos_fs::fileio::FileRef;
 use slopos_net::socket::ZcSendOutcome;
+use slopos_net::types::{Ipv4Addr, Port, SockAddr};
 use slopos_net::unix_socket::SocketHandle;
 use slopos_net::{socket, unix_socket, unix_socket_file_ops};
 
@@ -252,16 +253,9 @@ pub fn send_nonblock(file: &FileRef, addr: u64, len: u32, _op_flags: u32) -> Out
         outcome_from_rc(rc)
     } else {
         let idx = handle as u32;
-        // AF_INET takes a raw pointer — pass the *scratch* pointer (kernel
-        // memory the netstack can read safely), not the user VA.
-        let rc = with_inet_forced_nonblock(idx, || {
-            let ptr = if copied == 0 {
-                core::ptr::null()
-            } else {
-                scratch.as_ptr()
-            };
-            socket::socket_send(idx, ptr, copied)
-        });
+        // Pass the *scratch* slice — kernel memory the netstack can read
+        // safely — never the user VA.
+        let rc = with_inet_forced_nonblock(idx, || socket::socket_send(idx, &scratch[..copied]));
         // socket_send returns i64; collapse to the CQE's i32 res.
         if rc == EAGAIN as i64 {
             Outcome::WouldBlock
@@ -345,14 +339,8 @@ pub fn recvmsg_nonblock(pid: u32, file: &FileRef, addr: u64, _op_flags: u32) -> 
     } else {
         // AF_INET stream recv: fill data only, no control fds.
         let idx = handle as u32;
-        let rc = with_inet_forced_nonblock(idx, || {
-            let ptr = if data_len == 0 {
-                core::ptr::null_mut()
-            } else {
-                scratch.as_mut_ptr()
-            };
-            socket::socket_recv(idx, ptr, data_len)
-        });
+        let rc =
+            with_inet_forced_nonblock(idx, || socket::socket_recv(idx, &mut scratch[..data_len]));
         if rc == EAGAIN as i64 {
             return Outcome::WouldBlock;
         }
@@ -416,20 +404,9 @@ pub fn recvfrom_nonblock(file: &FileRef, addr: u64, len: u32, addr2: u64) -> Out
     };
 
     let idx = handle as u32;
-    let mut src_ip = [0u8; 4];
-    let mut src_port = 0u16;
+    let mut peer = SockAddr::new(Ipv4Addr::UNSPECIFIED, Port(0));
     let rc = with_inet_forced_nonblock(idx, || {
-        socket::socket_recvfrom(
-            idx,
-            if len == 0 {
-                core::ptr::null_mut()
-            } else {
-                scratch.as_mut_ptr()
-            },
-            len,
-            &mut src_ip as *mut [u8; 4],
-            &mut src_port as *mut u16,
-        )
+        socket::socket_recvfrom(idx, &mut scratch[..len], Some(&mut peer))
     });
     if rc == EAGAIN as i64 {
         return Outcome::WouldBlock;
@@ -456,8 +433,8 @@ pub fn recvfrom_nonblock(file: &FileRef, addr: u64, len: u32, addr2: u64) -> Out
     // Write the source SockAddrIn to the validated user out-pointer.
     let src = SockAddrIn {
         family: AF_INET,
-        port: src_port.to_be(),
-        addr: src_ip,
+        port: peer.port.0.to_be(),
+        addr: peer.ip.0,
         _pad: [0; 8],
     };
     let src_ptr = match UserPtr::<SockAddrIn>::try_new(addr2) {

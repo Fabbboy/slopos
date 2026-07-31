@@ -184,13 +184,7 @@ pub fn test_shutdown_read() -> TestResult {
     assert_eq_test!(socket_shutdown(sock_idx, SHUT_RD), 0);
 
     let mut buf = [0u8; 64];
-    let rc = socket_recvfrom(
-        sock_idx,
-        buf.as_mut_ptr(),
-        buf.len(),
-        core::ptr::null_mut(),
-        core::ptr::null_mut(),
-    );
+    let rc = socket_recvfrom(sock_idx, &mut buf, None);
     assert_eq_test!(rc, 0, "recv after SHUT_RD should return EOF");
 
     let _ = socket_close(sock_idx);
@@ -209,7 +203,7 @@ pub fn test_shutdown_write() -> TestResult {
     assert_eq_test!(socket_shutdown(sock_idx, SHUT_WR), 0);
 
     let data = b"hello";
-    let rc = socket_send(sock_idx, data.as_ptr(), data.len());
+    let rc = socket_send(sock_idx, &data[..]);
     assert_test!(rc < 0, "send after SHUT_WR should fail");
 
     let _ = socket_close(sock_idx);

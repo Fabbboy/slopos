@@ -1152,21 +1152,14 @@ fn read_elf_pod<T: Copy>(payload: &[u8], offset: usize) -> Option<T> {
 }
 
 fn apply_elf_relocations(
-    payload: *const u8,
-    payload_len: usize,
+    payload_slice: &[u8],
     vm_space: &KArc<VmSpace>,
     section_mappings: &[(u64, u64, u64)], // (kernel_va_start, kernel_va_end, user_va_start)
 ) -> c_int {
-    if payload.is_null() || payload_len == 0 {
+    if payload_slice.is_empty() {
         return -1;
     }
-    // Caller (process_vm_load_elf_data → exec) hands in a bootloader /
-    // file-loader-published byte buffer of `payload_len` bytes whose
-    // lifetime exceeds this call. Only the first `payload_len` bytes
-    // are accessed; bounds are re-checked at every structured read
-    // via `read_elf_pod`.
-    let payload_slice: &[u8] =
-        slopos_ostd::util::ptr_buf::anchored_buf(&payload_len, payload, payload_len);
+    let payload_len = payload_slice.len();
 
     let ehdr: Elf64Ehdr = match read_elf_pod::<Elf64Ehdr>(payload_slice, 0) {
         Some(h) => h,
@@ -1551,12 +1544,7 @@ fn load_segments_and_tls(
             .vm_space
             .as_ref()
             .expect("apply_elf_relocations: vm_space present for live pid");
-        let _ = apply_elf_relocations(
-            data.as_ptr(),
-            data.len(),
-            vm_space_ref,
-            &section_mappings[..mapping_count],
-        );
+        let _ = apply_elf_relocations(data, vm_space_ref, &section_mappings[..mapping_count]);
     }
 
     let user_entry = process_vm_translate_elf_address(header.e_entry, min_vaddr, code_base);

@@ -1,3 +1,5 @@
+use core::ptr::NonNull;
+
 use crate::hhdm::PhysAddrHhdm;
 use crate::paging_defs::{PAGE_SIZE_1GB, PAGE_SIZE_2MB, PAGE_SIZE_4KB, PageFlags};
 use slopos_abi::addr::{PhysAddr, VirtAddr};
@@ -233,20 +235,21 @@ const _: () = assert!(
 /// frames. The buddy hands out page-aligned frames; the assertion states
 /// the property rather than assuming it.
 #[inline]
-fn table_base_at(phys: PhysAddr) -> *mut u64 {
+fn table_base_at(phys: PhysAddr) -> NonNull<u64> {
     debug_assert!(!phys.is_null(), "page-table frame address must be non-null");
     debug_assert!(
         phys.as_u64() % PAGE_SIZE_4KB == 0,
         "page-table frame address must be page-aligned"
     );
-    phys.to_virt().as_mut_ptr()
+    NonNull::new(phys.to_virt().as_mut_ptr::<u64>())
+        .expect("page-table frame address must be non-null")
 }
 
 /// Read the entry at `index` in the page-table frame at `phys`.
 #[inline]
 pub(crate) fn entry_at(phys: PhysAddr, index: usize) -> PageTableEntry {
     debug_assert!(index < PAGE_TABLE_ENTRIES);
-    slopos_ostd::util::ptr_buf::with_atomic_u64_at(table_base_at(phys), index, |slot| {
+    slopos_ostd::util::ptr_buf::with_atomic_u64_in_page(table_base_at(phys), index, |slot| {
         PageTableEntry::from_raw(slot.load(core::sync::atomic::Ordering::Relaxed))
     })
 }

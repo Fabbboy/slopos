@@ -916,7 +916,12 @@ impl<K, U> TaskInner<K, U> {
             core::ptr::eq(witness.witnessed(), self),
             "witness names a different task"
         );
-        crate::util::ptr_buf::anchored_ref(self, self.user_ctx.get_ptr(witness))
+        // SAFETY: the cell lives inside `self`, so `&self` is exactly the bound
+        // the borrow needs — it cannot outlive the storage. The witness proves
+        // this CPU owns the task's register state, and the pointer comes from
+        // an `UnsafeCell`, so it is non-null, aligned and initialised, and the
+        // shared derivation composes with the other witnesses that may hold one.
+        unsafe { &*self.user_ctx.get_ptr(witness) }
     }
 
     /// Save `frame`'s register state into this task's context, authorised by

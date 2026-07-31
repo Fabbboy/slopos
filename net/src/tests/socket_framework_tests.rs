@@ -85,28 +85,15 @@ pub fn test_udp_demux_dispatch() -> TestResult {
     socket_deliver_udp_from_dispatch([2, 2, 2, 2], [10, 0, 2, 15], 2222, 42000, &[0xBB, 0xCC]);
 
     let mut out_a = [0u8; 4];
-    let mut src_a = [0u8; 4];
-    let mut src_port_a = 0u16;
-    let n_a = socket_recvfrom(
-        a,
-        out_a.as_mut_ptr(),
-        out_a.len(),
-        &mut src_a as *mut [u8; 4],
-        &mut src_port_a as *mut u16,
-    );
+    let mut peer_a = SockAddr::new(Ipv4Addr::UNSPECIFIED, Port(0));
+    let n_a = socket_recvfrom(a, &mut out_a, Some(&mut peer_a));
     assert_eq_test!(n_a, 1, "socket A got its datagram");
     assert_eq_test!(out_a[0], 0xAA);
-    assert_eq_test!(src_a, [1, 1, 1, 1]);
-    assert_eq_test!(src_port_a, 1111);
+    assert_eq_test!(peer_a.ip.0, [1, 1, 1, 1]);
+    assert_eq_test!(peer_a.port.0, 1111);
 
     let mut out_b = [0u8; 4];
-    let n_b = socket_recvfrom(
-        b,
-        out_b.as_mut_ptr(),
-        out_b.len(),
-        core::ptr::null_mut(),
-        core::ptr::null_mut(),
-    );
+    let n_b = socket_recvfrom(b, &mut out_b, None);
     assert_eq_test!(n_b, 2, "socket B got its datagram");
     assert_eq_test!(&out_b[..2], &[0xBB, 0xCC]);
     pass!()
@@ -126,13 +113,7 @@ pub fn test_inaddr_any_wildcard() -> TestResult {
     socket_deliver_udp_from_dispatch([9, 9, 9, 9], [10, 0, 2, 15], 3333, 43000, &[0x5A]);
 
     let mut out = [0u8; 2];
-    let n = socket_recvfrom(
-        sock,
-        out.as_mut_ptr(),
-        out.len(),
-        core::ptr::null_mut(),
-        core::ptr::null_mut(),
-    );
+    let n = socket_recvfrom(sock, &mut out, None);
     assert_eq_test!(n, 1, "wildcard socket receives destination-matched packet");
     assert_eq_test!(out[0], 0x5A);
     pass!()
@@ -250,24 +231,12 @@ pub fn test_shutdown_read_behavior() -> TestResult {
     assert_eq_test!(socket_shutdown(sock, SHUT_RD), 0);
 
     let mut out = [0u8; 8];
-    let rc = socket_recvfrom(
-        sock,
-        out.as_mut_ptr(),
-        out.len(),
-        core::ptr::null_mut(),
-        core::ptr::null_mut(),
-    );
+    let rc = socket_recvfrom(sock, &mut out, None);
     assert_eq_test!(rc, 0, "recvfrom after SHUT_RD returns EOF");
 
-    let recv_rc = socket_recv(sock, out.as_mut_ptr(), out.len());
+    let recv_rc = socket_recv(sock, &mut out);
     assert_eq_test!(recv_rc, 0, "recv after SHUT_RD returns EOF for UDP");
-    let eagain = socket_recvfrom(
-        sock,
-        out.as_mut_ptr(),
-        out.len(),
-        core::ptr::null_mut(),
-        core::ptr::null_mut(),
-    );
+    let eagain = socket_recvfrom(sock, &mut out, None);
     assert_test!(
         eagain == 0 || eagain == errno_i64(ERRNO_EAGAIN),
         "read side remains shut down"

@@ -7,6 +7,7 @@ use slopos_mm::user_copy::{
     copy_bytes_from_user, copy_bytes_to_user, copy_from_user, copy_to_user,
 };
 use slopos_mm::user_ptr::{UserBytes as MmUserBytes, UserPtr as MmUserPtr};
+use slopos_net::types::{Ipv4Addr, Port, SockAddr};
 use slopos_net::unix_socket::SocketHandle;
 use slopos_net::{dns, socket, unix_socket, unix_socket_file_ops};
 
@@ -305,9 +306,9 @@ define_syscall!(syscall_send
                 let user_data = MmUserBytes::try_new(buf.base_u64(), len).map_err(|_| Errno::EFAULT)?;
                 let copied = copy_bytes_from_user(user_data, &mut scratch[..len])
                     .map_err(|_| Errno::EFAULT)?;
-                return rc_i64_to_u64(socket::socket_send(sock_idx, scratch.as_ptr(), copied));
+                return rc_i64_to_u64(socket::socket_send(sock_idx, &scratch[..copied]));
             }
-            rc_i64_to_u64(socket::socket_send(sock_idx, core::ptr::null(), 0))
+            rc_i64_to_u64(socket::socket_send(sock_idx, &[]))
         }
     }
 });
@@ -340,7 +341,7 @@ define_syscall!(syscall_recv
             Ok(copied as u64)
         }
         SocketFd::Inet(sock_idx) => {
-            let rc = socket::socket_recv(sock_idx, scratch.as_mut_ptr(), len);
+            let rc = socket::socket_recv(sock_idx, &mut scratch[..len]);
             if rc < 0 {
                 return Err(errno_from_neg64(rc));
             }
@@ -391,8 +392,7 @@ define_syscall!(syscall_sendto
 
     rc_i64_to_u64(socket::socket_sendto(
         sock_idx,
-        if copied == 0 { core::ptr::null() } else { scratch.as_ptr() },
-        copied,
+        &scratch[..copied],
         sock_addr.addr,
         u16::from_be(sock_addr.port),
     ))
@@ -418,15 +418,12 @@ define_syscall!(syscall_recvfrom
 
     let len = buf.len().min(4096);
     let mut scratch = slopos_ostd::KVec::<u8>::zeroed(4096).map_err(|_| Errno::ENOMEM)?;
-    let mut src_ip = [0u8; 4];
-    let mut src_port = 0u16;
+    let mut src = SockAddr::new(Ipv4Addr::UNSPECIFIED, Port(0));
 
     let rc = socket::socket_recvfrom(
         sock_idx,
-        if len == 0 { core::ptr::null_mut() } else { scratch.as_mut_ptr() },
-        len,
-        if want_src { &mut src_ip as *mut [u8; 4] } else { core::ptr::null_mut() },
-        if want_src { &mut src_port as *mut u16 } else { core::ptr::null_mut() },
+        &mut scratch[..len],
+        want_src.then_some(&mut src),
     );
     if rc < 0 {
         return Err(errno_from_neg64(rc));
@@ -441,8 +438,8 @@ define_syscall!(syscall_recvfrom
     if want_src {
         let peer = SockAddrIn {
             family: AF_INET,
-            port: src_port.to_be(),
-            addr: src_ip,
+            port: src.port.0.to_be(),
+            addr: src.ip.0,
             _pad: [0; 8],
         };
         let user_peer = MmUserPtr::<SockAddrIn>::try_new(src_ptr).map_err(|_| Errno::EFAULT)?;

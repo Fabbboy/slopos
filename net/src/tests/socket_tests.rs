@@ -205,7 +205,7 @@ pub fn test_socket_send_returns_error_not_connected() -> TestResult {
     let sock = socket_create(AF_INET, SOCK_STREAM, 0) as u32;
     let payload = [1u8, 2, 3];
     assert_test!(
-        socket_send(sock, payload.as_ptr(), payload.len()) < 0,
+        socket_send(sock, &payload) < 0,
         "send without connect fails"
     );
     pass!()
@@ -216,7 +216,7 @@ pub fn test_socket_recv_returns_error_not_connected() -> TestResult {
     let sock = socket_create(AF_INET, SOCK_STREAM, 0) as u32;
     let mut buf = [0u8; 8];
     assert_test!(
-        socket_recv(sock, buf.as_mut_ptr(), buf.len()) < 0,
+        socket_recv(sock, &mut buf) < 0,
         "recv without connect fails"
     );
     pass!()
@@ -244,7 +244,7 @@ pub fn test_socket_recv_empty() -> TestResult {
         Err(m) => return fail!("{}", m),
     };
     let mut buf = [0u8; 16];
-    let n = socket_recv(sock, buf.as_mut_ptr(), buf.len());
+    let n = socket_recv(sock, &mut buf);
     assert_test!(n == 0 || n < 0, "recv empty returns 0 or error");
     pass!()
 }
@@ -558,7 +558,7 @@ pub fn test_tcp_send_on_established_returns_bytes() -> TestResult {
     };
     socket_set_nonblocking(sock, true);
     let payload = [0xAA_u8; 64];
-    let n = socket_send(sock, payload.as_ptr(), payload.len());
+    let n = socket_send(sock, &payload);
     assert_test!(n > 0, "send on established should return bytes written");
     assert_test!(
         n as usize <= payload.len(),
@@ -595,7 +595,7 @@ pub fn test_tcp_recv_after_peer_data() -> TestResult {
     let _ = tcp::input(tuple.remote_ip, tuple.local_ip, &data_hdr, &[], payload, 0);
 
     let mut buf = [0u8; 32];
-    let n = socket_recv(sock, buf.as_mut_ptr(), buf.len());
+    let n = socket_recv(sock, &mut buf);
     assert_test!(n > 0, "recv should return data");
     assert_eq_test!(n as usize, 5);
     assert_eq_test!(&buf[..5], b"hello");
@@ -654,7 +654,7 @@ pub fn test_tcp_shutdown_wr_recv_still_works() -> TestResult {
     );
 
     let mut buf = [0u8; 32];
-    let n = socket_recv(sock, buf.as_mut_ptr(), buf.len());
+    let n = socket_recv(sock, &mut buf);
     assert_test!(n > 0, "recv after SHUT_WR should still work");
     assert_eq_test!(n as usize, 8);
     pass!()
@@ -669,7 +669,7 @@ pub fn test_tcp_send_after_shutdown_wr_fails() -> TestResult {
     use slopos_abi::syscall::SHUT_WR;
     assert_eq_test!(socket_shutdown(sock, SHUT_WR), 0);
     let payload = [1u8; 4];
-    let n = socket_send(sock, payload.as_ptr(), payload.len());
+    let n = socket_send(sock, &payload);
     assert_test!(n < 0, "send after SHUT_WR should fail");
     pass!()
 }
@@ -732,7 +732,7 @@ pub fn test_tcp_send_after_blocking_connect() -> TestResult {
     // Socket state should now be Connected (via sync_socket_state or
     // notify path) — this is the state nc expects before send.
     let payload = b"Hello World\n";
-    let n = socket_send(sock, payload.as_ptr(), payload.len());
+    let n = socket_send(sock, &payload[..]);
     assert_test!(
         n > 0,
         "send after connect + 3WHS must succeed (was: broken pipe)"
@@ -771,7 +771,7 @@ pub fn test_tcp_send_before_handshake_complete() -> TestResult {
 
     // Try to send data BEFORE the 3WHS completes.
     let payload = b"Hello World\n";
-    let n = socket_send(sock, payload.as_ptr(), payload.len());
+    let n = socket_send(sock, &payload[..]);
     assert_test!(n < 0, "send before 3WHS completion must fail (ENOTCONN)");
 
     // Now complete the handshake.
@@ -797,7 +797,7 @@ pub fn test_tcp_send_before_handshake_complete() -> TestResult {
     socket_notify_tcp_activity(&result);
 
     // After 3WHS, send should now succeed.
-    let n2 = socket_send(sock, payload.as_ptr(), payload.len());
+    let n2 = socket_send(sock, &payload[..]);
     assert_test!(n2 > 0, "send after 3WHS completion must succeed");
 
     pass!()

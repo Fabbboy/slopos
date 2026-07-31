@@ -65,11 +65,6 @@ impl MemfdBuffer {
     }
 
     #[inline]
-    pub fn as_slice(&self) -> &[u8] {
-        slopos_ostd::util::ptr_buf::anchored_nonnull::<_, u8>(self, self.ptr, self.size)
-    }
-
-    #[inline]
     pub fn as_mut_slice(&mut self) -> &mut [u8] {
         let (ptr, size) = (self.ptr, self.size);
         slopos_ostd::util::ptr_buf::anchored_nonnull_mut::<_, u8>(self, ptr, size)
@@ -80,54 +75,5 @@ impl Drop for MemfdBuffer {
     fn drop(&mut self) {
         sys::munmap(self.ptr.as_ptr() as u64, self.size as u64);
         sys::close(self.fd);
-    }
-}
-
-/// Read-only mapping of a memfd received via SCM_RIGHTS (compositor side).
-pub struct MappedMemfd {
-    ptr: *const u8,
-    size: usize,
-}
-
-impl MappedMemfd {
-    pub fn map_readonly(fd: i32, size: usize) -> Option<Self> {
-        if fd < 0 || size == 0 {
-            return None;
-        }
-
-        let vaddr = sys::mmap(0, size as u64, PROT_READ, MAP_SHARED, fd as i64, 0);
-        if vaddr == 0 || (vaddr as i64) < 0 {
-            return None;
-        }
-
-        Some(Self {
-            ptr: vaddr as *const u8,
-            size,
-        })
-    }
-
-    #[inline]
-    pub fn size(&self) -> usize {
-        self.size
-    }
-
-    #[inline]
-    pub fn as_slice(&self) -> &[u8] {
-        slopos_ostd::util::ptr_buf::anchored_buf::<_, u8>(self, self.ptr, self.size)
-    }
-
-    #[inline]
-    pub fn slice(&self, start: usize, len: usize) -> Option<&[u8]> {
-        if start.saturating_add(len) <= self.size {
-            Some(&self.as_slice()[start..start + len])
-        } else {
-            None
-        }
-    }
-}
-
-impl Drop for MappedMemfd {
-    fn drop(&mut self) {
-        sys::munmap(self.ptr as u64, self.size as u64);
     }
 }

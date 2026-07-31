@@ -4,6 +4,7 @@ use slopos_testing::TestResult;
 use slopos_testing::{assert_eq_test, assert_test, fail, pass};
 
 use crate::socket::*;
+use crate::types::{Ipv4Addr, Port, SockAddr};
 
 fn reset() {
     socket_reset_all();
@@ -31,27 +32,14 @@ pub fn test_udp_t2_dispatch_delivery_and_unbound_drop() -> TestResult {
     socket_deliver_udp_from_dispatch([1, 1, 1, 1], [10, 0, 2, 15], 1234, 40000, &payload);
 
     let mut out = [0u8; 8];
-    let mut src_ip = [0u8; 4];
-    let mut src_port = 0u16;
-    let got = socket_recvfrom(
-        sock,
-        out.as_mut_ptr(),
-        out.len(),
-        &mut src_ip as *mut [u8; 4],
-        &mut src_port as *mut u16,
-    );
+    let mut peer = SockAddr::new(Ipv4Addr::UNSPECIFIED, Port(0));
+    let got = socket_recvfrom(sock, &mut out, Some(&mut peer));
     assert_eq_test!(got, payload.len() as i64, "bound port receives datagram");
-    assert_eq_test!(src_ip, [1, 1, 1, 1], "source ip propagated");
-    assert_eq_test!(src_port, 1234, "source port propagated");
+    assert_eq_test!(peer.ip.0, [1, 1, 1, 1], "source ip propagated");
+    assert_eq_test!(peer.port.0, 1234, "source port propagated");
 
     socket_deliver_udp_from_dispatch([2, 2, 2, 2], [10, 0, 2, 15], 5555, 49999, &payload);
-    let empty = socket_recvfrom(
-        sock,
-        out.as_mut_ptr(),
-        out.len(),
-        core::ptr::null_mut(),
-        core::ptr::null_mut(),
-    );
+    let empty = socket_recvfrom(sock, &mut out, None);
     assert_eq_test!(
         empty,
         errno_i64(ERRNO_EAGAIN),
@@ -83,17 +71,11 @@ pub fn test_udp_t4_sendto_recvfrom_kernel_level() -> TestResult {
     let sock = sock as u32;
 
     let payload = [9u8, 8, 7, 6];
-    let sent = socket_sendto(sock, payload.as_ptr(), payload.len(), [1, 1, 1, 1], 9999);
+    let sent = socket_sendto(sock, &payload, [1, 1, 1, 1], 9999);
     assert_test!(sent > 0, "sendto returns positive length");
 
     let mut out = [0u8; 16];
-    let rc = socket_recvfrom(
-        sock,
-        out.as_mut_ptr(),
-        out.len(),
-        core::ptr::null_mut(),
-        core::ptr::null_mut(),
-    );
+    let rc = socket_recvfrom(sock, &mut out, None);
     assert_eq_test!(rc, errno_i64(ERRNO_EAGAIN), "empty recvfrom returns EAGAIN");
 
     pass!()
@@ -111,7 +93,7 @@ pub fn test_udp_t5_connected_udp_send_and_peer_filter_recv() -> TestResult {
     assert_eq_test!(socket_connect(sock, [7, 7, 7, 7], 7000), 0);
 
     let tx = [1u8, 2, 3];
-    let sent = socket_send(sock, tx.as_ptr(), tx.len());
+    let sent = socket_send(sock, &tx);
     assert_eq_test!(
         sent,
         tx.len() as i64,
@@ -124,7 +106,7 @@ pub fn test_udp_t5_connected_udp_send_and_peer_filter_recv() -> TestResult {
     socket_deliver_udp(sock, [7, 7, 7, 7], 7000, &good);
 
     let mut out = [0u8; 8];
-    let got = socket_recv(sock, out.as_mut_ptr(), out.len());
+    let got = socket_recv(sock, &mut out);
     assert_eq_test!(
         got,
         good.len() as i64,
@@ -163,7 +145,7 @@ pub fn test_udp_t6_poll_readiness_for_udp() -> TestResult {
     );
 
     let mut out = [0u8; 4];
-    let _ = socket_recv(sock, out.as_mut_ptr(), out.len());
+    let _ = socket_recv(sock, &mut out);
     assert_eq_test!(
         socket_poll_readable(sock) & POLLIN as u32,
         0,
@@ -184,13 +166,7 @@ pub fn test_udp_t7_nonblocking_recvfrom_eagain() -> TestResult {
     assert_eq_test!(socket_set_nonblocking(sock, true), 0);
 
     let mut out = [0u8; 4];
-    let rc = socket_recvfrom(
-        sock,
-        out.as_mut_ptr(),
-        out.len(),
-        core::ptr::null_mut(),
-        core::ptr::null_mut(),
-    );
+    let rc = socket_recvfrom(sock, &mut out, None);
     assert_eq_test!(
         rc,
         errno_i64(ERRNO_EAGAIN),
@@ -210,7 +186,7 @@ pub fn test_udp_t8_sendto_auto_bind_ephemeral_port() -> TestResult {
     let sock = sock as u32;
 
     let payload = [0x10u8, 0x20];
-    let sent = socket_sendto(sock, payload.as_ptr(), payload.len(), [10, 0, 2, 1], 8080);
+    let sent = socket_sendto(sock, &payload, [10, 0, 2, 1], 8080);
     assert_test!(sent > 0, "sendto succeeds");
 
     let snap = match socket_snapshot(sock) {

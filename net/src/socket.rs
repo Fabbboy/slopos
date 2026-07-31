@@ -705,10 +705,10 @@ use slopos_abi::KernelErrno;
 use slopos_abi::event::{KernelEvent, SocketSlot};
 use slopos_abi::net::{AF_INET, IPPROTO_ICMP, MAX_SOCKETS, SOCK_DGRAM, SOCK_STREAM};
 use slopos_abi::syscall::{
-    ERRNO_EAFNOSUPPORT, ERRNO_EAGAIN, ERRNO_ECONNREFUSED, ERRNO_EDESTADDRREQ, ERRNO_EFAULT,
-    ERRNO_EINPROGRESS, ERRNO_EINTR, ERRNO_EINVAL, ERRNO_EIO, ERRNO_EISCONN, ERRNO_ENOMEM,
-    ERRNO_ENOTCONN, ERRNO_ENOTSOCK, ERRNO_EPIPE, ERRNO_EPROTONOSUPPORT, ERRNO_ETIMEDOUT, POLLERR,
-    POLLHUP, POLLIN, POLLOUT,
+    ERRNO_EAFNOSUPPORT, ERRNO_EAGAIN, ERRNO_ECONNREFUSED, ERRNO_EDESTADDRREQ, ERRNO_EINPROGRESS,
+    ERRNO_EINTR, ERRNO_EINVAL, ERRNO_EIO, ERRNO_EISCONN, ERRNO_ENOMEM, ERRNO_ENOTCONN,
+    ERRNO_ENOTSOCK, ERRNO_EPIPE, ERRNO_EPROTONOSUPPORT, ERRNO_ETIMEDOUT, POLLERR, POLLHUP, POLLIN,
+    POLLOUT,
 };
 use slopos_ostd::sync::BUS;
 
@@ -1289,16 +1289,13 @@ pub fn socket_create(domain: u16, sock_type: u16, protocol: u16) -> i32 {
     idx as i32
 }
 
-pub fn socket_sendto(
-    sock_idx: u32,
-    data: *const u8,
-    len: usize,
-    dst_ip: [u8; 4],
-    dst_port: u16,
-) -> i64 {
-    if data.is_null() && len != 0 {
-        return errno_i32(ERRNO_EFAULT) as i64;
-    }
+/// Send `payload` to `dst_ip:dst_port`.
+///
+/// `payload` is a kernel staging buffer — every caller stages user bytes
+/// through one before calling, so no user address reaches this function and
+/// the bytes cannot change under it.
+pub fn socket_sendto(sock_idx: u32, payload: &[u8], dst_ip: [u8; 4], dst_port: u16) -> i64 {
+    let len = payload.len();
     if len > UDP_DGRAM_MAX_PAYLOAD {
         return errno_i32(ERRNO_EINVAL) as i64;
     }
@@ -1400,12 +1397,6 @@ pub fn socket_sendto(
         return map_net_err(err) as i64;
     }
 
-    let payload = if len == 0 {
-        &[][..]
-    } else {
-        slopos_ostd::util::ptr_buf::anchored_buf(&len, data, len)
-    };
-
     if is_udp {
         match crate::udp::udp_sendto(local.ip.0, dst_ip, local.port.0, dst_port, payload) {
             Ok(n) => n as i64,
@@ -1428,27 +1419,11 @@ pub fn socket_sendto(
     }
 }
 
-pub fn socket_recvfrom(
-    sock_idx: u32,
-    buf: *mut u8,
-    len: usize,
-    src_ip: *mut [u8; 4],
-    src_port: *mut u16,
-) -> i64 {
-    if buf.is_null() && len != 0 {
-        return errno_i32(ERRNO_EFAULT) as i64;
-    }
-
-    let mut buf_anchor = ();
-    let out = if len == 0 {
-        &mut [][..]
-    } else {
-        // The borrow is anchored on a frame-local, so its lifetime is this
-        // call — which is exactly what a syscall entry point can promise about
-        // a user buffer it has already validated.
-        slopos_ostd::util::ptr_buf::anchored_buf_mut(&mut buf_anchor, buf, len)
-    };
-
+/// Receive one datagram into `out`, reporting the sender through `src_out`.
+///
+/// `out` is a kernel staging buffer — every caller copies to or from user
+/// memory itself, so no user address reaches this function.
+pub fn socket_recvfrom(sock_idx: u32, out: &mut [u8], src_out: Option<&mut SockAddr>) -> i64 {
     let (nonblocking, timeout_ms) = {
         let table = NEW_SOCKET_TABLE.lock();
         let Some(sock) = table.get(sock_idx as usize) else {
@@ -1480,8 +1455,9 @@ pub fn socket_recvfrom(
             let copy_len = cmp::min(out.len(), payload.len());
             out[..copy_len].copy_from_slice(&payload[..copy_len]);
 
-            slopos_ostd::util::ptr_buf::write_if_non_null(src_ip, src.ip.0);
-            slopos_ostd::util::ptr_buf::write_if_non_null(src_port, src.port.0);
+            if let Some(slot) = src_out {
+                *slot = src;
+            }
             return copy_len as i64;
         }
 
@@ -2317,20 +2293,15 @@ fn socket_send_tcp_pinned(
     total_wrote as i64
 }
 
-pub fn socket_send(sock_idx: u32, data: *const u8, len: usize) -> i64 {
-    if data.is_null() && len != 0 {
-        return errno_i32(ERRNO_EFAULT) as i64;
-    }
-
-    let target = match socket_send_resolve(sock_idx, len) {
+/// Send `payload` on a connected socket.
+///
+/// `payload` is a kernel staging buffer — every caller stages user bytes
+/// through one before calling, so no user address reaches this function and
+/// the bytes cannot change under it.
+pub fn socket_send(sock_idx: u32, payload: &[u8]) -> i64 {
+    let target = match socket_send_resolve(sock_idx, payload.len()) {
         Ok(t) => t,
         Err(e) => return e,
-    };
-
-    let payload = if len == 0 {
-        &[][..]
-    } else {
-        slopos_ostd::util::ptr_buf::anchored_buf(&len, data, len)
     };
 
     match target {
@@ -2720,21 +2691,9 @@ fn tcp_recv_loop(
     }
 }
 
-pub fn socket_recv(sock_idx: u32, buf: *mut u8, len: usize) -> i64 {
-    if buf.is_null() && len != 0 {
-        return errno_i32(ERRNO_EFAULT) as i64;
-    }
-
-    let mut buf_anchor = ();
-    let out = if len == 0 {
-        &mut [][..]
-    } else {
-        // The borrow is anchored on a frame-local, so its lifetime is this
-        // call — which is exactly what a syscall entry point can promise about
-        // a user buffer it has already validated.
-        slopos_ostd::util::ptr_buf::anchored_buf_mut(&mut buf_anchor, buf, len)
-    };
-
+/// Receive into `out`, which is a kernel staging buffer — every caller copies
+/// to user memory itself, so no user address reaches this function.
+pub fn socket_recv(sock_idx: u32, out: &mut [u8]) -> i64 {
     match socket_recv_resolve(sock_idx) {
         Err(e) => e,
         Ok(RecvKind::Eof) => 0,

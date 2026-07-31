@@ -75,8 +75,10 @@ impl SlabHeader {
         if off.checked_add(object_size)? > PAGE_SIZE_4KB as usize {
             return None;
         }
-        Some(slopos_ostd::util::ptr_buf::nonnull_byte_offset(
-            slab_base, off,
+        Some(ptr_buf::nonnull_byte_offset_in(
+            slab_base,
+            off,
+            PAGE_SIZE_4KB as usize,
         ))
     }
 
@@ -122,10 +124,17 @@ impl LargeAllocHeader {
     }
 
     /// Body pointer for a header `header`.
+    ///
+    /// The bound is one page rather than the region's real `pages * 4 KiB`:
+    /// the large tier only ever hands out whole pages, so a page is the
+    /// region's structural minimum, and reading `header.pages` to tighten it
+    /// would mean dereferencing the very pointer being validated. What the
+    /// assertion then catches is a `LargeAllocHeader` grown past a page — the
+    /// only way the body could land outside the allocation.
     #[inline]
     pub(crate) fn body_ptr(header: NonNull<LargeAllocHeader>) -> NonNull<u8> {
         let base = header.cast::<u8>();
-        slopos_ostd::util::ptr_buf::nonnull_byte_offset(base, Self::body_offset())
+        ptr_buf::nonnull_byte_offset_in(base, Self::body_offset(), PAGE_SIZE_4KB as usize)
     }
 
     /// Mutable byte view spanning `len` bytes starting at the body of
