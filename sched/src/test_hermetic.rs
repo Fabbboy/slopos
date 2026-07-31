@@ -17,6 +17,7 @@
 use core::sync::atomic::Ordering;
 
 use slopos_arch::pcr;
+use slopos_ostd::cpu::x86_64::interrupts::IrqDisabled;
 use slopos_ostd::hermetic_state;
 use slopos_ostd::test_support;
 
@@ -205,10 +206,10 @@ hermetic_state! {
     pub TssIstShadow {
         type Snapshot = [u64; 7];
         fn snapshot() -> Result<Self::Snapshot, AllocError> {
-            Ok(test_support::pcr::bsp_ist_snapshot().unwrap_or([0; 7]))
+            Ok(IrqDisabled::with(|irq| test_support::pcr::bsp_ist_snapshot(irq)).unwrap_or([0; 7]))
         }
         fn restore(snap: Self::Snapshot) {
-            test_support::pcr::bsp_ist_restore(snap);
+            IrqDisabled::with(|irq| test_support::pcr::bsp_ist_restore(irq, snap));
         }
     }
 }
@@ -226,10 +227,10 @@ hermetic_state! {
     pub TssRsp0Shadow {
         type Snapshot = u64;
         fn snapshot() -> Result<Self::Snapshot, AllocError> {
-            Ok(test_support::pcr::bsp_kernel_rsp_snapshot().unwrap_or(0))
+            Ok(IrqDisabled::with(|irq| test_support::pcr::bsp_kernel_rsp_snapshot(irq)).unwrap_or(0))
         }
         fn restore(snap: Self::Snapshot) {
-            test_support::pcr::bsp_kernel_rsp_restore(snap);
+            IrqDisabled::with(|irq| test_support::pcr::bsp_kernel_rsp_restore(irq, snap));
         }
     }
 }

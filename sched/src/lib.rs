@@ -1,7 +1,6 @@
 #![no_std]
 #![forbid(unsafe_code)]
 #![cfg_attr(feature = "test-hooks", feature(allocator_api))]
-#![feature(sync_unsafe_cell)]
 
 #[cfg(feature = "test-hooks")]
 pub mod context_tests;

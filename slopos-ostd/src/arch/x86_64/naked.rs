@@ -125,7 +125,7 @@ pub unsafe extern "C" fn ap_entry(_cpu_info: *const ()) -> ! {
 ///   in `slopos-core::scheduler::task_struct`).
 #[unsafe(naked)]
 #[unsafe(no_mangle)]
-pub extern "sysv64" fn __safestack_pointer_address() -> *mut *mut u8 {
+pub unsafe extern "sysv64" fn __safestack_pointer_address() -> *mut *mut u8 {
     naked_asm!(
         // Select the data-stack slot from the running stack (RSP).
         "mov rax, rsp",

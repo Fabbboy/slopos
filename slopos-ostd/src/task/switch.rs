@@ -26,7 +26,7 @@ use crate::task::kernel_task::TaskInner;
 use crate::task::task::TaskContext;
 
 // ---------------------------------------------------------------------------
-// switch_registers / init_current_context.
+// switch_registers.
 // ---------------------------------------------------------------------------
 
 /// Low-level register switch between two contexts.
@@ -244,9 +244,16 @@ pub fn pcr_round_trip_swap<K, U>(
 /// resolved exactly as a SafeStack-instrumented prologue resolves it.
 #[inline]
 fn current_data_stack_slot() -> *const u8 {
-    crate::arch::x86_64::naked::__safestack_pointer_address()
-        .cast::<u8>()
-        .cast_const()
+    // SAFETY: this runs on a CPU whose GS_BASE already names its PCR and whose
+    // `PCR.ist_unsafe_sp` is primed — both are established by
+    // `boot/limine_entry.s` (BSP) / `ap_entry` (AP) before any instrumented
+    // Rust runs, and every instrumented prologue on this CPU has already been
+    // calling the same symbol to get here.
+    unsafe {
+        crate::arch::x86_64::naked::__safestack_pointer_address()
+            .cast::<u8>()
+            .cast_const()
+    }
 }
 
 /// Open the switch window over both endpoints of a context switch, publish the
@@ -377,48 +384,6 @@ where
     // dispatch reference until the switch tail parks it.
     let prev_window = unsafe { SwitchWindow::new(prev) };
     prepare(Some(&prev_window), &next_window)
-}
-
-/// Initialise context from current CPU state (for boot/kernel context).
-///
-/// Captures the current callee-saved registers so the scheduler can
-/// switch back to this context later (e.g., return to kernel main
-/// after the scheduler stops).
-///
-/// # Safety
-///
-/// `ctx` must point to a writable, properly-aligned [`TaskContext`].
-#[unsafe(naked)]
-pub extern "sysv64" fn init_current_context(ctx: *mut TaskContext) {
-    naked_asm!(
-        // rdi = context pointer
-
-        "mov [rdi + {off_rbx}], rbx",
-        "mov [rdi + {off_r12}], r12",
-        "mov [rdi + {off_r13}], r13",
-        "mov [rdi + {off_r14}], r14",
-        "mov [rdi + {off_r15}], r15",
-        "mov [rdi + {off_rbp}], rbp",
-        "mov [rdi + {off_rsp}], rsp",
-
-        "pushfq",
-        "pop QWORD PTR [rdi + {off_rflags}]",
-
-        "mov rax, [rsp]",
-        "mov [rdi + {off_rip}], rax",
-
-        "ret",
-
-        off_rbx = const offset_of!(TaskContext, rbx),
-        off_r12 = const offset_of!(TaskContext, r12),
-        off_r13 = const offset_of!(TaskContext, r13),
-        off_r14 = const offset_of!(TaskContext, r14),
-        off_r15 = const offset_of!(TaskContext, r15),
-        off_rbp = const offset_of!(TaskContext, rbp),
-        off_rsp = const offset_of!(TaskContext, rsp),
-        off_rflags = const offset_of!(TaskContext, rflags),
-        off_rip = const offset_of!(TaskContext, rip),
-    );
 }
 
 // ---------------------------------------------------------------------------

@@ -14,10 +14,7 @@
 //!   level; the list itself uses interior atomics, but operations are
 //!   serialised by `queue_lock` since the linked-list primitive is not
 //!   lock-free across operations.
-//! - `return_context`: wrapped in `UnsafeCell`, only written during
-//!   single-threaded init and read by the owning CPU.
 
-use core::cell::SyncUnsafeCell;
 use core::ptr::{self, NonNull};
 use core::sync::atomic::{AtomicBool, AtomicPtr, AtomicU32, AtomicU64, AtomicUsize, Ordering};
 
@@ -41,7 +38,7 @@ pub fn fork_rr_counter_set(value: usize) {
 }
 
 use super::task::{TaskRef, task_put};
-use super::task_struct::{SwitchContext, Task};
+use super::task_struct::Task;
 use slopos_abi::task::TaskStatus;
 use slopos_arch::MAX_CPUS;
 use slopos_ostd::sync::intrusive::{IntrusiveLinkedList, LinkError};
@@ -213,7 +210,6 @@ pub struct PriorityRunQueue {
     pub total_yields: AtomicU64,
     pub schedule_calls: AtomicU32,
     initialized: AtomicBool,
-    pub return_context: SyncUnsafeCell<SwitchContext>,
     executing_task: AtomicBool,
     remote_inbox_head: AtomicPtr<Task>,
     inbox_count: AtomicU32,
@@ -234,7 +230,6 @@ impl PriorityRunQueue {
             total_yields: AtomicU64::new(0),
             schedule_calls: AtomicU32::new(0),
             initialized: AtomicBool::new(false),
-            return_context: SyncUnsafeCell::new(SwitchContext::zero()),
             executing_task: AtomicBool::new(false),
             remote_inbox_head: AtomicPtr::new(ptr::null_mut()),
             inbox_count: AtomicU32::new(0),
@@ -1150,14 +1145,6 @@ fn find_least_loaded_cpu(affinity: u32) -> Option<usize> {
     }
 
     best_cpu
-}
-
-/// Get the return context for an AP to use when no tasks are available.
-/// This is stored in the per-CPU scheduler and initialized during AP startup.
-pub fn get_ap_return_context(cpu_id: usize) -> *mut SwitchContext {
-    cpu_scheduler(cpu_id)
-        .map(|sched| sched.return_context.get())
-        .unwrap_or(ptr::null_mut())
 }
 
 /// Whether `task` is the idle task of any CPU.

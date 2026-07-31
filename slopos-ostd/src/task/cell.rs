@@ -116,12 +116,15 @@ impl<T> TaskOwnCell<T> {
     /// property rather than a caveat. The `task::cell` unit tests hold both
     /// aliasing models — Stacked and Tree Borrows — to that claim.
     ///
-    /// # Safety
+    /// # No precondition
     ///
-    /// The returned pointer is valid for as long as `self` is, and the caller
-    /// must not retain it past the witness. The witness must name the task this
-    /// cell belongs to; a debug assertion checks it at every call site inside
-    /// OSTD.
+    /// Forming a raw pointer is total: there is no way to call this that
+    /// causes UB, so it carries no caller obligation. Every obligation belongs
+    /// to the *dereference*, which is an `unsafe` block carrying its own
+    /// `SAFETY:` note — that the pointer is not retained past the witness, and
+    /// that the witness names the task this cell belongs to (debug-asserted at
+    /// every call site inside OSTD). The returned pointer is valid for as long
+    /// as `self` is.
     #[inline]
     pub(crate) fn get_ptr<K, U>(&self, _witness: &impl TaskExclusive<K, U>) -> *mut T {
         self.value.get()

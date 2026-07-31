@@ -27,6 +27,31 @@ use crate::sync::BspToken;
 /// to OSTD.
 pub type ApTrampolineFn = unsafe extern "C" fn(*const ()) -> !;
 
+mod sealed {
+    pub trait Sealed {}
+}
+
+/// A fn-pointer type ABI-identical to [`ApTrampolineFn`]: x86-64 SysV, one
+/// thin-pointer argument in `rdi`, divergent return.
+///
+/// The bound [`install_ap_trampoline_as`] needs, in place of a bare
+/// `F: Copy` that would admit any pointer-sized `Copy` type. A size assert
+/// checks width; only an implemented-here-and-nowhere-else trait checks
+/// *shape*. Sealed, so a consumer crate cannot widen it — the two impls
+/// below are the whole set, and each is a signature the SysV ABI makes
+/// register-for-register identical to the trampoline's.
+///
+/// `T` is `Sized` by default, and that is load-bearing: `&T` for an unsized
+/// `T` is a fat pointer and would not fit `rdi` alone.
+pub trait ApTrampolineAbi: Copy + sealed::Sealed {}
+
+impl sealed::Sealed for ApTrampolineFn {}
+impl ApTrampolineAbi for ApTrampolineFn {}
+
+// Covers limine's `MpGotoFunction = unsafe extern "C" fn(&MpInfo) -> !`.
+impl<T> sealed::Sealed for unsafe extern "C" fn(&T) -> ! {}
+impl<T> ApTrampolineAbi for unsafe extern "C" fn(&T) -> ! {}
+
 /// Install the LLVM SafeStack runtime hook.
 ///
 /// Today's implementation is a no-op — LLVM resolves
@@ -67,21 +92,16 @@ pub fn install_ap_trampoline<'brand>(_token: &BspToken<'brand>) -> ApTrampolineF
 }
 
 /// Like [`install_ap_trampoline`], but reinterprets the returned pointer
-/// as caller-supplied fn-pointer type `F`. The cast is sound when `F`
-/// describes the same x86-64 SysV ABI: a single `*const`-shaped pointer
-/// argument in `rdi` and a `-> !` divergent return. Limine's
-/// `MpGotoFunction = unsafe extern "C" fn(&MpInfo) -> !` qualifies — both
-/// `&MpInfo` and `*const ()` map to the same calling convention. Lets
-/// kernel boot code receive the trampoline already typed against the
-/// bootloader API without re-doing the transmute on the caller side
-/// (and therefore without spelling `unsafe` outside OSTD).
+/// as caller-supplied fn-pointer type `F`. Lets kernel boot code receive
+/// the trampoline already typed against the bootloader API without re-doing
+/// the transmute on the caller side (and therefore without spelling
+/// `unsafe` outside OSTD).
 ///
-/// # Safety contract (centralised here)
-/// `F` MUST be a `extern "C" fn(*const-shaped-pointer) -> !`-compatible
-/// fn-pointer type. `size_of::<F>() == size_of::<ApTrampolineFn>()` is
-/// asserted at compile time below; the SysV ABI guarantees identical
-/// register layout for any single-pointer-arg, divergent-return signature.
-pub fn install_ap_trampoline_as<'brand, F: Copy>(token: &BspToken<'brand>) -> F {
+/// The obligation "`F` describes the same ABI" is [`ApTrampolineAbi`],
+/// which is sealed and implemented only in this module — so it is
+/// discharged by whoever wrote the impl, not by whoever calls this. The
+/// size assert stays as belt-and-braces.
+pub fn install_ap_trampoline_as<'brand, F: ApTrampolineAbi>(token: &BspToken<'brand>) -> F {
     const {
         assert!(core::mem::size_of::<F>() == core::mem::size_of::<ApTrampolineFn>());
     }

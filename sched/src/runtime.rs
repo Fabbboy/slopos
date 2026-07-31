@@ -402,11 +402,6 @@ pub fn enter_scheduler(cpu_id: usize) -> ! {
         }
     };
 
-    let return_ctx = per_cpu::get_ap_return_context(cpu_id);
-    if !return_ctx.is_null() {
-        slopos_ostd::task::switch::init_current_context(return_ctx);
-    }
-
     // Hand SafeStack off from the bootstrap stub to the real idle
     // task here — once `dispatch()` stores `PCR.current_task`,
     // every subsequent instrumented prologue on this CPU reads
