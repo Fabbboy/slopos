@@ -49,17 +49,21 @@ pub type TaskEntry = extern "C" fn(*mut c_void);
 ///
 /// Used by the exec path to convert `PROCESS_CODE_START_VA` (a usize
 /// constant) into the function-pointer shape the scheduler expects.
-/// The transmute is sound because `TaskEntry` and `usize` have the
-/// same size + layout on x86_64; the value is a kernel-mapped
+/// The reinterpretation is sound because `TaskEntry` and `usize` have
+/// the same size + layout on x86_64; the value is a kernel-mapped
 /// instruction-pointer that the user-mode round-trip will jump to.
 ///
-/// SAFETY (caller, weakly): `addr` must point at a valid user/kernel
-/// instruction sequence reachable on next dispatch. All current
-/// callers pass a kernel-defined constant.
+/// Caller invariant: `addr` names a valid instruction sequence
+/// reachable on next dispatch. Every caller passes a kernel-defined
+/// constant.
+///
+/// # Panics
+///
+/// Panics if `addr` is zero. A null entry point would dispatch a task
+/// straight into address zero, so it is a programming error rather than
+/// a value to propagate.
 #[inline]
 pub fn task_entry_from_kernel_va(addr: u64) -> TaskEntry {
-    // OSTD's `fn_ptr_from_raw` folds the one `transmute` interior;
-    // `TaskEntry` is a `*mut ()`-sized fn-pointer per the SAFETY note
-    // above.
-    slopos_ostd::util::fn_ptr::fn_ptr_from_raw::<TaskEntry>(addr as *mut ())
+    slopos_ostd::util::fn_ptr::fn_ptr_decode_opt::<TaskEntry>(addr as *mut ())
+        .expect("task entry VA must be non-null")
 }

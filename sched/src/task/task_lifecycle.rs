@@ -422,7 +422,14 @@ extern "sysv64" fn kernel_task_entry_shim(task_id: u64) {
         );
         let task = current.task();
         let raw_entry = task.entry_point as usize as *mut ();
-        let entry = slopos_ostd::util::fn_ptr::fn_ptr_from_raw::<TaskEntry>(raw_entry);
+        let Some(entry) = slopos_ostd::util::fn_ptr::fn_ptr_decode_opt::<TaskEntry>(raw_entry)
+        else {
+            klog_info!(
+                "kernel_task_entry_shim: task {} has a null entry point",
+                task_id
+            );
+            return;
+        };
         let fatal_if_panics = crate::per_cpu::is_idle_task(slopos_ostd::task::TaskAddr::of(task))
             || (task.flags & TASK_FLAG_SYSTEM) != 0
             || !slopos_ostd::panic_recovery::production_recovery_enabled();

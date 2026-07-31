@@ -34,43 +34,46 @@ pub fn decode(ptr: *mut ()) -> Option<fn()> {
     Some(unsafe { core::mem::transmute::<*mut (), fn()>(ptr) })
 }
 
-/// Recover a typed `fn`-pointer of arbitrary ABI from a `*mut ()` slot.
-/// Generic over the function-pointer type `F` so callers can recover
-/// `fn(u8)`, `fn() -> i32`, etc. — panics if `F` is not exactly the
-/// size of a `*mut ()` (function pointers and data pointers must have
-/// the same layout on every supported target).
+/// Reinterpret a non-null `*mut ()` as an `F`-typed fn-pointer.
 ///
-/// # Safety contract on the caller
-///
-/// `ptr` must have been produced by a prior transmute of an `F`-typed
-/// function pointer into a `*mut ()` (typically via
-/// `core::mem::transmute` or a registered service-table cast). If
-/// `ptr.is_null()`, the function returns a zero-bit-pattern `F` which
-/// the caller should null-check before invoking; the safer entry
-/// points are crate-specific `Option<F>` wrappers (see
-/// [`fn_ptr_decode_opt`]).
+/// Private, and reachable only through [`fn_ptr_decode_opt`], because a
+/// null input would otherwise yield a zero-bit-pattern `F` — a null fn
+/// pointer handed to safe code, which calls straight into address zero.
+/// The null branch belongs to the recover site, so it lives there.
 #[inline]
-pub fn fn_ptr_from_raw<F: Copy + 'static>(ptr: *mut ()) -> F {
-    debug_assert_eq!(
-        core::mem::size_of::<F>(),
-        core::mem::size_of::<*mut ()>(),
-        "fn_ptr_from_raw: F must be pointer-sized"
-    );
+fn transmute_fn_ptr<F: Copy + 'static>(ptr: *mut ()) -> F {
+    // A wrong `F` is a compile error rather than a debug assertion: in a
+    // release build `transmute_copy` on an over-wide `F` reads past the
+    // eight bytes `ptr` actually occupies.
+    const {
+        assert!(
+            core::mem::size_of::<F>() == core::mem::size_of::<*mut ()>(),
+            "fn-pointer type must be pointer-sized"
+        );
+    }
     // SAFETY: `*mut ()` and any `fn(...) -> R` pointer share the same
     // size and alignment on supported targets; the caller asserts the
     // pointer was produced by a matching encode.
     unsafe { core::mem::transmute_copy::<*mut (), F>(&ptr) }
 }
 
-/// `Option<F>` sibling of [`fn_ptr_from_raw`]: returns `None` on null,
-/// `Some(F)` otherwise. Use when the caller wants a null-check at the
-/// recover site.
+/// Recover a typed `fn`-pointer of arbitrary ABI from a `*mut ()` slot.
+/// Generic over the function-pointer type `F` so callers can recover
+/// `fn(u8)`, `fn() -> i32`, etc.; `F` must be pointer-sized, which is
+/// checked at monomorphisation.
+///
+/// Returns `None` on null, so a slot that was never published cannot be
+/// mistaken for a callable function.
+///
+/// Caller invariant: a non-null `ptr` was produced by a prior transmute
+/// of an `F`-typed function pointer (typically via [`encode`] or a
+/// registered service-table cast).
 #[inline]
 pub fn fn_ptr_decode_opt<F: Copy + 'static>(ptr: *mut ()) -> Option<F> {
     if ptr.is_null() {
         None
     } else {
-        Some(fn_ptr_from_raw::<F>(ptr))
+        Some(transmute_fn_ptr::<F>(ptr))
     }
 }
 
