@@ -1180,16 +1180,17 @@ fn report_duplicate(new_class: u16, new_addr: *const (), held: &[HeldLock]) {
 /// Returns `None` if `slot` is out of range or already claimed by a different
 /// address.
 #[cfg(any(test, feature = "test-helpers"))]
-pub fn reserve_self_test_class(slot: usize, addr: *const (), level: u8) -> Option<u16> {
+pub fn reserve_self_test_class(slot: usize, addr: *const (), level: u8) -> Option<SelfTestClass> {
     if slot >= RESERVED_TEST_CLASSES {
         return None;
     }
     let idx = (REGISTRABLE_CLASSES + slot) as u16;
     let addr_u64 = addr as u64;
     let cls = &CLASSES.0[idx as usize];
+    let token = SelfTestClass { addr, level };
     let existing = cls.addr.load(Ordering::Acquire);
     if existing == addr_u64 {
-        return Some(idx);
+        return Some(token);
     }
     if existing != 0 {
         return None;
@@ -1204,7 +1205,7 @@ pub fn reserve_self_test_class(slot: usize, addr: *const (), level: u8) -> Optio
             .compare_exchange_weak(head, idx, Ordering::Release, Ordering::Relaxed)
             .is_ok()
         {
-            return Some(idx);
+            return Some(token);
         }
     }
 }
@@ -1216,12 +1217,48 @@ pub fn reserve_self_test_class(slot: usize, addr: *const (), level: u8) -> Optio
 #[cfg(any(test, feature = "test-helpers"))]
 pub struct SelfTestGuard(());
 
+/// Poison callback for reserved self-test classes.
+///
+/// Reached only by `poison_unlock_all_held` during a fatal abort, where
+/// there is no lock at a synthetic address to unlock. OSTD supplies it so
+/// the "nothing ever dereferences a self-test address" half of
+/// [`push_lock`]'s contract is not something a caller can get wrong.
+#[cfg(any(test, feature = "test-helpers"))]
+unsafe fn self_test_noop_poison(_addr: *const ()) {}
+
 #[cfg(any(test, feature = "test-helpers"))]
 impl SelfTestGuard {
     pub fn begin() -> Self {
         SELF_TEST_ACTIVE.store(true, Ordering::Release);
         Self(())
     }
+
+    /// Push a reserved self-test class onto the held stack.
+    ///
+    /// Safe because the address came from [`reserve_self_test_class`], which
+    /// only hands out slots above [`REGISTRABLE_CLASSES`] that no real lock
+    /// can occupy, and because the poison callback is OSTD's own no-op — so
+    /// the address is never dereferenced.
+    pub fn push(&self, class: SelfTestClass) {
+        // SAFETY: synthetic reserved-class address, never dereferenced; the
+        // caller pairs push/pop LIFO within this guard's scope.
+        unsafe { push_lock(class.addr, self_test_noop_poison, class.level) };
+    }
+
+    /// Pop a class pushed through [`SelfTestGuard::push`].
+    pub fn pop(&self, class: SelfTestClass) {
+        // SAFETY: as `push`; unwinds the held stack entry it created.
+        unsafe { pop_lock(class.addr) };
+    }
+}
+
+/// A reserved lockdep class standing in for a real lock during the
+/// self-test. Only [`reserve_self_test_class`] mints one.
+#[cfg(any(test, feature = "test-helpers"))]
+#[derive(Clone, Copy)]
+pub struct SelfTestClass {
+    addr: *const (),
+    level: u8,
 }
 
 #[cfg(any(test, feature = "test-helpers"))]

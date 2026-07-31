@@ -1,4 +1,5 @@
 #![no_std]
+#![forbid(unsafe_code)]
 #![feature(allocator_api)]
 #![feature(sync_unsafe_cell)]
 

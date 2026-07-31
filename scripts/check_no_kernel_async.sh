@@ -10,7 +10,7 @@
 # code review. The `forbid(unsafe_code)` lint has no `async`-forbidding
 # equivalent, so this script is the gate.
 #
-# Userland-side crates (userland, slibc, slop-protocol, ktesting, appkit)
+# Userland-side crates (userland, slibc, slop-protocol, appkit)
 # are *out of scope* — userland async is the whole point of the ring edge.
 #
 # Comment lines and `#[cfg(...)]`-gated occurrences are skipped using the
@@ -25,7 +25,7 @@ REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 # Userland-side crates are exempt (their whole job is to host async).
 # slopos-rt = the userland async runtime; userland-side, identical role to
 # userland/appkit which are already exempt.
-USERLAND_RE='^(userland|slibc|slop-protocol|ktesting|appkit|image|slopos-rt|verification)/'
+USERLAND_RE='^(userland|slibc|slop-protocol|appkit|image|slopos-rt|verification)/'
 TCB_ANNEX_RE='^vendor/(unwinding|gimli)/'
 
 file_list="$(

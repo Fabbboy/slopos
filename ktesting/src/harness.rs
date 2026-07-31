@@ -2,11 +2,11 @@
 //! `TestDesc` under `catch_panic!` with klog capture installed, and emits
 //! KTAP per-test lines plus a final `TESTS SUMMARY:` log line.
 
-use core::cell::SyncUnsafeCell;
-use core::sync::atomic::{AtomicBool, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use slopos_ostd::klog_info;
 use slopos_ostd::sync::StateFlag;
+use slopos_ostd::KVec;
 
 use crate::config::TestConfig;
 
@@ -43,18 +43,13 @@ impl TestRunSummary {
 // Time measurement utilities
 // =============================================================================
 
-static CACHED_CYCLES_PER_MS: SyncUnsafeCell<u64> = SyncUnsafeCell::new(0);
-
-fn cached_cycles_per_ms_mut() -> *mut u64 {
-    CACHED_CYCLES_PER_MS.get()
-}
+static CACHED_CYCLES_PER_MS: AtomicU64 = AtomicU64::new(0);
 
 /// Estimate CPU cycles per millisecond using CPUID if available.
 pub fn estimate_cycles_per_ms() -> u64 {
-    unsafe {
-        if *cached_cycles_per_ms_mut() != 0 {
-            return *cached_cycles_per_ms_mut();
-        }
+    let cached = CACHED_CYCLES_PER_MS.load(Ordering::Relaxed);
+    if cached != 0 {
+        return cached;
     }
 
     let (max_leaf, _, _, _) = slopos_arch::cpu::cpuid(0);
@@ -66,9 +61,7 @@ pub fn estimate_cycles_per_ms() -> u64 {
         }
     }
 
-    unsafe {
-        *cached_cycles_per_ms_mut() = cycles_per_ms;
-    }
+    CACHED_CYCLES_PER_MS.store(cycles_per_ms, Ordering::Relaxed);
     cycles_per_ms
 }
 
@@ -311,7 +304,7 @@ fn run_one(desc: &TestDesc, cfg: &TestConfig, idx: u32) -> OutcomeRecord {
     let truncated;
     let raw_outcome;
     let time_ms;
-    let captured_log: &[u8];
+    let log_cpu;
     {
         let _g = crate::capture::begin();
         let t0 = slopos_arch::tsc::rdtsc();
@@ -320,10 +313,10 @@ fn run_one(desc: &TestDesc, cfg: &TestConfig, idx: u32) -> OutcomeRecord {
         time_ms = measure_elapsed_ms(t0, t1);
         // Userland-test thunks run from `/sbin/init`'s syscall context and
         // can execute on any CPU; their klog (subtest emits, exit-record
-        // diagnostics) lands in *that* CPU's per-CPU ring, not CPU 0. Use
-        // `drain_current_cpu` so the YAML log block is populated regardless
-        // of which CPU dispatched the harness.
-        captured_log = crate::capture::drain_current_cpu();
+        // diagnostics) lands in *that* CPU's per-CPU ring, not CPU 0. Record
+        // which ring to read so the YAML log block is populated regardless of
+        // which CPU dispatched the harness.
+        log_cpu = crate::capture::current_cpu();
         truncated = crate::capture::truncated_bytes();
     }
 
@@ -357,7 +350,7 @@ fn run_one(desc: &TestDesc, cfg: &TestConfig, idx: u32) -> OutcomeRecord {
                 crate::ktap::emit_ok(idx, desc, time_ms, pass_suffix);
             }
             if matches!(cfg.verbosity, Verbosity::Verbose) {
-                emit_verbose_log(captured_log, truncated);
+                emit_verbose_log(log_cpu, truncated);
             }
         }
         TestResult::Skipped => {
@@ -366,7 +359,9 @@ fn run_one(desc: &TestDesc, cfg: &TestConfig, idx: u32) -> OutcomeRecord {
             }
         }
         TestResult::Fail | TestResult::Panic => {
-            crate::ktap::emit_not_ok(idx, desc, time_ms, final_outcome, captured_log, truncated);
+            crate::capture::with_log(log_cpu, |log| {
+                crate::ktap::emit_not_ok(idx, desc, time_ms, final_outcome, log, truncated)
+            });
         }
     }
 
@@ -378,40 +373,42 @@ fn run_one(desc: &TestDesc, cfg: &TestConfig, idx: u32) -> OutcomeRecord {
 }
 
 #[cfg(feature = "tests")]
-fn emit_verbose_log(cpu0_log: &[u8], truncated_bytes: usize) {
-    let has_foreign = crate::capture::drain_all().any(|(cpu, slice)| cpu != 0 && !slice.is_empty());
-    if cpu0_log.is_empty() && !has_foreign {
+fn emit_verbose_log(primary_cpu: usize, truncated_bytes: usize) {
+    let primary_empty = crate::capture::with_log(primary_cpu, |log| log.is_empty());
+    let has_foreign = crate::capture::nonempty_cpus().any(|cpu| cpu != primary_cpu);
+    if primary_empty && !has_foreign {
         return;
     }
     klog_info!("KTAP\t  ---");
     klog_info!("KTAP\t  log: |");
-    for line in cpu0_log.split(|&b| b == b'\n') {
-        if line.is_empty() {
-            continue;
-        }
-        let s = core::str::from_utf8(line).unwrap_or("<non-utf8 log line>");
-        klog_info!("KTAP\t   {}", s);
-    }
+    crate::capture::with_log(primary_cpu, emit_log_lines);
     if truncated_bytes > 0 {
         klog_info!(
             "KTAP\t   [cpu0 tail trimmed: {} bytes lost to ring overflow]",
             truncated_bytes
         );
     }
-    for (cpu, slice) in crate::capture::drain_all() {
-        if cpu == 0 || slice.is_empty() {
-            continue;
-        }
+    // Collected before the per-ring reads so no ring's lock is held while
+    // another is taken.
+    let foreign: KVec<usize> = crate::capture::nonempty_cpus()
+        .filter(|&cpu| cpu != primary_cpu)
+        .collect();
+    for cpu in foreign {
         klog_info!("KTAP\t   --- cpu{} ---", cpu);
-        for line in slice.split(|&b| b == b'\n') {
-            if line.is_empty() {
-                continue;
-            }
-            let s = core::str::from_utf8(line).unwrap_or("<non-utf8 log line>");
-            klog_info!("KTAP\t   {}", s);
-        }
+        crate::capture::with_log(cpu, emit_log_lines);
     }
     klog_info!("KTAP\t  ...");
+}
+
+#[cfg(feature = "tests")]
+fn emit_log_lines(log: &[u8]) {
+    for line in log.split(|&b| b == b'\n') {
+        if line.is_empty() {
+            continue;
+        }
+        let s = core::str::from_utf8(line).unwrap_or("<non-utf8 log line>");
+        klog_info!("KTAP\t   {}", s);
+    }
 }
 
 #[cfg(feature = "tests")]

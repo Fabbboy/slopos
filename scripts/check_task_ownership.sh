@@ -227,7 +227,7 @@
 #   slopos-ostd/src/mm/
 #
 # Scope: kernel crates only. Userland-side crates (userland, slibc,
-# slop-protocol, ktesting, appkit, slopos-rt, image, terminal-core,
+# slop-protocol, appkit, slopos-rt, image, terminal-core,
 # keymap-core) are out of scope, same as check_unsafe_outside_ostd.sh, as
 # are plans/, verification/, vendor/, and every non-`.rs` file. The scope
 # filter is a deny-list rather than an allow-list on purpose: a new kernel
@@ -255,7 +255,7 @@ if [ "${1:-}" = "--self-test" ]; then
 fi
 
 # Userland-side crates, planning docs, proofs, and vendored code.
-OUT_OF_SCOPE_RE='^(userland|slibc|slop-protocol|ktesting|appkit|slopos-rt|image|terminal-core|keymap-core|plans|verification|vendor|third_party|builddir|target)/'
+OUT_OF_SCOPE_RE='^(userland|slibc|slop-protocol|appkit|slopos-rt|image|terminal-core|keymap-core|plans|verification|vendor|third_party|builddir|target)/'
 
 # Exempt from checks 1 and 3 — see the header for each one's reason.
 SANCTIONED_SURFACES=(

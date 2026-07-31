@@ -32,8 +32,9 @@
 #                                   `alloc` directly; same exemption
 #                                   pattern as check_alloc_dep.sh).
 #
-# Userland-side crates (userland, slibc, slop-protocol, ktesting, appkit)
-# are out of scope per Phase-1 plan § A.
+# Userland-side crates (userland, slibc, slop-protocol, appkit) are out of
+# scope. `ktesting` is not one of them: it is an unconditional dependency of
+# nine kernel crates and ships in kernel.elf, so it is scanned like any other.
 #
 # Comment-line and `#[cfg(...)]`-gated occurrences are skipped using the
 # same lookback pattern as scripts/check_alloc_dep.sh so cfg-stubs that
@@ -51,7 +52,7 @@ REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 # other vendor crate is scanned, including untracked vendor/**/*.rs.
 # slopos-rt = the userland async runtime; userland-side, identical role to
 # userland/appkit which are already exempt and already carry unsafe.
-USERLAND_RE='^(userland|slibc|slop-protocol|ktesting|appkit|image|slopos-rt|slopos-ostd|slopos-ostd-derive)/'
+USERLAND_RE='^(userland|slibc|slop-protocol|appkit|image|slopos-rt|slopos-ostd|slopos-ostd-derive)/'
 TCB_ANNEX_RE='^vendor/(unwinding|gimli)/'
 
 # Explicit file-level allowlist. Each entry is a repo-relative path.
@@ -160,4 +161,54 @@ if [ -n "$source_offenders" ]; then
     exit 1
 fi
 
-echo "check_unsafe_outside_ostd: OK — no executable unsafe outside slopos-ostd and the named TCB annexes"
+# ---------------------------------------------------------------------------
+# Every kernel crate carries the lint attribute.
+#
+# The scan above finds `unsafe` that was written; this finds the crate that
+# could write it without anyone noticing. A new workspace member linked into
+# `kernel` starts with no lint attribute at all, and until it acquires one
+# the scan is the only thing standing between it and an `unsafe` block.
+#
+# The crate set is the kernel binary's own dependency closure, so a crate
+# joining the kernel image is covered the moment it is linked — there is no
+# list here to forget to update.
+# ---------------------------------------------------------------------------
+
+# Crates that legitimately author unsafe, and why:
+#   slopos-ostd         the OSTD itself
+#   slopos-ostd-derive  proc-macro emitting `unsafe impl` token text
+#   kernel              global allocator + alloc error handler
+# The named vendor TCB annexes are covered by TCB_ANNEX_RE as above.
+LINT_EXEMPT_RE='^(slopos-ostd|slopos-ostd-derive|kernel)$'
+
+missing_lint=""
+if crate_dirs="$("$SCRIPT_DIR/kernel_crates.sh" 2>/dev/null)"; then
+    while IFS= read -r dir; do
+        [ -z "$dir" ] && continue
+        [[ "$dir" =~ $LINT_EXEMPT_RE ]] && continue
+        [[ "$dir/" =~ $TCB_ANNEX_RE ]] && continue
+        root=""
+        for candidate in "$REPO_ROOT/$dir/src/lib.rs" "$REPO_ROOT/$dir/src/main.rs"; do
+            [ -f "$candidate" ] && root="$candidate" && break
+        done
+        if [ -z "$root" ]; then
+            missing_lint+="$dir (no crate root found)"$'\n'
+            continue
+        fi
+        if ! grep -qE '^#!\[forbid\(unsafe_code\)\]' "$root"; then
+            missing_lint+="$dir → ${root#"$REPO_ROOT"/}"$'\n'
+        fi
+    done <<< "$crate_dirs"
+else
+    echo "check_unsafe_outside_ostd: WARNING — kernel_crates.sh unavailable; skipped the lint-attribute scan" >&2
+fi
+
+if [ -n "$missing_lint" ]; then
+    echo "check_unsafe_outside_ostd: kernel crate without #![forbid(unsafe_code)]:" >&2
+    echo "$missing_lint" | sed 's/^/    /' >&2
+    echo "  Every crate the kernel binary links must carry the attribute at its crate root." >&2
+    exit 1
+fi
+
+echo "check_unsafe_outside_ostd: OK — no executable unsafe outside slopos-ostd and the named TCB annexes;"
+echo "check_unsafe_outside_ostd: every kernel crate carries #![forbid(unsafe_code)]"

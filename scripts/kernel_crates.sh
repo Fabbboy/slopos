@@ -6,10 +6,14 @@
 # binary transitively links via *normal* dependencies. This is exactly the
 # code that ends up in the kernel image, so it is the only honest
 # denominator for the TCB ratio. Userland (`userland`, `slibc`, `appkit`,
-# `slop-protocol`), test-only crates (`ktesting`, reached only via
-# dev-deps), proc-macro/build tooling, and the `verification` proofs all
-# fall out automatically because the kernel image does not normal-depend on
-# them — there is no list to keep in sync.
+# `slop-protocol`) and the `verification` proofs fall out automatically
+# because the kernel image does not normal-depend on them — there is no
+# list to keep in sync.
+#
+# `ktesting` (package `slopos-testing`) *is* emitted: `kernel/Cargo.toml`
+# and eight other kernel crates declare it as a plain dependency, so it
+# links into every image. It is a kernel crate and every gate treats it as
+# one.
 #
 # Output: one workspace-relative crate directory per line (e.g. `mm`,
 # `sched`, `slopos-ostd`), sorted. The directory is derived from each

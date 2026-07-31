@@ -67,14 +67,16 @@ fn bootstrap_bbb_capture_roundtrip() -> TestResult {
         let _g = crate::capture::begin();
         klog_info!("MARKER_X9 hello");
     }
-    let log = crate::capture::drain_cpu0();
     let needle = b"MARKER_X9";
-    if log.windows(needle.len()).any(|w| w == needle) {
+    let (found, log_len) = crate::capture::with_cpu0_log(|log| {
+        (log.windows(needle.len()).any(|w| w == needle), log.len())
+    });
+    if found {
         TestResult::Pass
     } else {
         klog_info!(
             "BOOTSTRAP: capture_roundtrip did not observe marker (log_len={})",
-            log.len()
+            log_len
         );
         TestResult::Fail
     }
@@ -116,11 +118,8 @@ fn bootstrap_ddd_isolation_check() -> TestResult {
         let _g = crate::capture::begin();
         klog_info!("MARKER_AFTER_PANIC");
     }
-    let log = crate::capture::drain_cpu0();
-    if log
-        .windows(b"MARKER_AFTER_PANIC".len())
-        .any(|w| w == b"MARKER_AFTER_PANIC")
-    {
+    let needle = b"MARKER_AFTER_PANIC";
+    if crate::capture::with_cpu0_log(|log| log.windows(needle.len()).any(|w| w == needle)) {
         TestResult::Pass
     } else {
         klog_info!("BOOTSTRAP isolation: post-panic capture roundtrip failed");

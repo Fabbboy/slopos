@@ -5,7 +5,6 @@
 use core::ffi::c_char;
 
 use slopos_kernel_services::platform;
-use slopos_ostd::io::port_consts::QEMU_DEBUG_EXIT;
 use slopos_ostd::klog_info;
 
 /// Request test harness shutdown via QEMU debug exit port.
@@ -16,7 +15,7 @@ use slopos_ostd::klog_info;
 pub fn qemu_signal_exit(failed_tests: i32) {
     klog_info!("TESTS: Requesting shutdown (failed={})", failed_tests);
     let exit_value: u8 = if failed_tests == 0 { 0 } else { 1 };
-    unsafe { QEMU_DEBUG_EXIT.write(exit_value) };
+    slopos_ostd::io::qemu_debug_exit(exit_value);
     platform::kernel_shutdown(if failed_tests == 0 {
         b"Tests completed successfully\0".as_ptr() as *const c_char
     } else {

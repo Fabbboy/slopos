@@ -85,9 +85,9 @@ found_violations=0
 # scope (they call `force_napi_poll` legitimately as a synchronous
 # poll, not inside a wait predicate).
 KERNEL_DIRS=(
-    abi acpi boot core drivers font fs gfx hermetic karch
-    kernel-services mm net sched service-core slopos-ostd
-    slopos-ostd-derive video windowing
+    abi acpi boot core drivers font fs gfx hermetic karch keymap-core
+    kernel-services ktesting mm net pidfd ring sched service-core signalfd
+    slopos-ostd slopos-ostd-derive video vt windowing
 )
 
 for pat in "${PATTERNS[@]}"; do

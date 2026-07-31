@@ -24,11 +24,6 @@ use crate::{assert_test, TestResult};
 const SELF_TEST_A: usize = 0x1000_0000_0000_1001;
 const SELF_TEST_B: usize = 0x1000_0000_0000_2002;
 
-/// Poison callback for the synthetic classes. Reached only by
-/// `poison_unlock_all_held` during a fatal abort, where there is no lock at
-/// these addresses to unlock.
-unsafe fn noop_poison(_addr: *const ()) {}
-
 /// Take two synthetic locks in both orders and assert the cycle detector
 /// reports the inversion.
 ///
@@ -52,28 +47,24 @@ fn lockdep_ab_ba_is_detected() -> TestResult {
     let a = core::ptr::without_provenance::<()>(SELF_TEST_A);
     let b = core::ptr::without_provenance::<()>(SELF_TEST_B);
 
-    let Some(_class_a) = lock_graph::reserve_self_test_class(0, a, lock_graph::LOCK_LEVEL_RESOURCE)
+    let Some(class_a) = lock_graph::reserve_self_test_class(0, a, lock_graph::LOCK_LEVEL_RESOURCE)
     else {
         return crate::fail!("could not reserve self-test class A");
     };
-    let Some(_class_b) = lock_graph::reserve_self_test_class(1, b, lock_graph::LOCK_LEVEL_RESOURCE)
+    let Some(class_b) = lock_graph::reserve_self_test_class(1, b, lock_graph::LOCK_LEVEL_RESOURCE)
     else {
         return crate::fail!("could not reserve self-test class B");
     };
 
     let before = lock_graph::violations_reported();
     {
-        let _session = lock_graph::SelfTestGuard::begin();
+        let session = lock_graph::SelfTestGuard::begin();
 
         // Chain 1: A then B. Learns the edge A -> B.
-        // SAFETY: synthetic addresses that are never dereferenced, paired
-        // LIFO, on a CPU running the test harness with no other guard live.
-        unsafe {
-            lock_graph::push_lock(a, noop_poison, lock_graph::LOCK_LEVEL_RESOURCE);
-            lock_graph::push_lock(b, noop_poison, lock_graph::LOCK_LEVEL_RESOURCE);
-            lock_graph::pop_lock(b);
-            lock_graph::pop_lock(a);
-        }
+        session.push(class_a);
+        session.push(class_b);
+        session.pop(class_b);
+        session.pop(class_a);
         assert_test!(
             lock_graph::held_lock_count() == 0,
             "held stack not drained after chain 1"
@@ -84,13 +75,10 @@ fn lockdep_ab_ba_is_detected() -> TestResult {
         // `report_cycle` fires on. Report-only mode counts and logs instead of
         // panicking, so the harness fixture is left clean and `PANIC_BYPASS`
         // is not latched by this test.
-        // SAFETY: as above.
-        unsafe {
-            lock_graph::push_lock(b, noop_poison, lock_graph::LOCK_LEVEL_RESOURCE);
-            lock_graph::push_lock(a, noop_poison, lock_graph::LOCK_LEVEL_RESOURCE);
-            lock_graph::pop_lock(a);
-            lock_graph::pop_lock(b);
-        }
+        session.push(class_b);
+        session.push(class_a);
+        session.pop(class_a);
+        session.pop(class_b);
     }
     let after = lock_graph::violations_reported();
 
