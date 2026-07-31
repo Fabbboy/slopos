@@ -43,14 +43,17 @@ fn bootstrap_console_fds(inner: &mut FileTableSlotInner, external_ops: &External
     inner.descriptors[0] = Some(FdEntry {
         open_file: stdin,
         cloexec: false,
+        close_on_fork: false,
     });
     inner.descriptors[1] = Some(FdEntry {
         open_file: stdout,
         cloexec: false,
+        close_on_fork: false,
     });
     inner.descriptors[2] = Some(FdEntry {
         open_file: stderr,
         cloexec: false,
+        close_on_fork: false,
     });
 }
 
@@ -149,10 +152,12 @@ pub fn fileio_destroy_table_for_process(process_id: u32) {
     drop(drained);
 }
 
-/// Fork-style clone: every valid descriptor is duplicated, including
-/// close-on-exec ones (POSIX fork keeps `FD_CLOEXEC` descriptors; only
-/// `exec` strips them). Spawn no longer clones tables — it builds the child's
-/// from an fd-action allow-list.
+/// Fork-style clone: every valid descriptor is duplicated except those
+/// marked [`FdFlags::close_on_fork`], which the child does not receive at
+/// all. Close-on-exec descriptors *are* duplicated (POSIX fork keeps
+/// `FD_CLOEXEC`; only `exec` strips them) — the two bits are independent.
+/// Spawn does not clone tables; it builds the child's from an fd-action
+/// allow-list.
 pub fn fileio_clone_table_for_process(src_process_id: u32, dst_process_id: u32) -> i32 {
     if src_process_id == INVALID_PROCESS_ID || dst_process_id == INVALID_PROCESS_ID {
         return -1;
@@ -178,6 +183,9 @@ pub fn fileio_clone_table_for_process(src_process_id: u32, dst_process_id: u32) 
         }
         for (i, src_fd) in guard.descriptors.iter().enumerate() {
             let Some(src_fd) = src_fd else { continue };
+            if src_fd.close_on_fork {
+                continue;
+            }
             if snapshot.push((i, src_fd.clone())).is_err() {
                 // Allocation failed mid-snapshot: drop the partial clones
                 // (decrement only — src keeps every `OpenFile` alive).

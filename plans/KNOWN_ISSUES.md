@@ -67,36 +67,6 @@ processes sequentially and asserts the last one runs.
 
 ---
 
-## Five comments assert a close-on-fork ring-fd policy that does not exist
-
-**Status**: Open
-**Severity**: Low (documentation drift; no authorization boundary is crossed)
-**Component**: `ring/`, `fs/src/fileio/`, `mm/src/process_vm.rs`
-
-Five in-tree comments state that SlopRing fds are close-on-fork, citing
-"SLOPRING § 14": `mm/src/process_vm.rs:2700-2702` and `:2934-2937`,
-`ring/src/registry.rs:9-11`, `ring/src/enter.rs:222`, and `ring/src/file_ops.rs:3-6`
-(which additionally claims exec teardown).
-
-No such mechanism exists. `fileio_clone_table_for_process`
-(`fs/src/fileio/fdtable.rs:152-155`) duplicates every valid descriptor with no
-`FileKind` filter, and `fileio_open_fd_with_ops` (`fs/src/fileio/fdops.rs:846-860`)
-passes `OpenMode::READ | OpenMode::WRITE`, so the `O_CLOEXEC` test at `fdops.rs:56`
-is false for every ring fd. Ring fds are inherited by fork and survive exec.
-
-This is contained: `registry::owner_is` gates `ring_enter` and all four register
-ops, the child gets no ring VMA (`process_vm.rs:2939`), and read/write/poll on an
-inherited ring fd return EINVAL/POLLNVAL. The consequence is ordinary inherited-fd
-resource retention, not an authorization hole.
-
-Fix: either make the claim true — a `close_on_fork` `FdEntry` bit honoured by
-`fileio_clone_table_for_process`, plus `O_CLOEXEC` on the ring fd to match
-io_uring — or delete the five comments and document `owner_pid` as the primary,
-load-bearing check. Do not leave a documented mechanism the code does not
-implement.
-
----
-
 ## Two writers mutate the kernel master PML4 with incompatible synchronisation
 
 **Status**: Open

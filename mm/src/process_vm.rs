@@ -2698,9 +2698,9 @@ fn clone_cow_snapshot_parent(
     for (vma_start, vma_end, region) in vmas_iter.iter() {
         let vma_start = *vma_start;
         let vma_end = *vma_end;
-        // SlopRing regions are not inherited (close-on-fork, SLOPRING
-        // § 14): capture an empty snapshot and never mark them COW. The
-        // child-side walk skips `is_ring()` VMAs entirely.
+        // SlopRing regions are not inherited (SLOPRING § 14): capture an
+        // empty snapshot and never mark them COW. The child-side walk
+        // skips `is_ring()` VMAs entirely.
         if region.is_ring() {
             vmas.push((vma_start, vma_end, region.clone(), KVec::new()))
                 .expect("clone_cow: vmas alloc");
@@ -2932,10 +2932,11 @@ pub fn process_vm_clone_cow(parent_id: u32) -> u32 {
         for (vma_start, vma_end, parent_region, snapshot) in parent_vmas.iter() {
             let vma_start = *vma_start;
             let vma_end = *vma_end;
-            // SlopRing regions are NOT inherited: the child's ring fd is
-            // close-on-fork (SLOPRING § 14), and the SQ/CQ is SPSC, so a
-            // second producer in the child is forbidden by construction.
-            // Skip the VMA entirely — the child gets no ring mapping.
+            // SlopRing regions are NOT inherited (SLOPRING § 14): the
+            // SQ/CQ is SPSC, so a second producer in the child is
+            // forbidden by construction. Skip the VMA entirely — the
+            // child gets no ring mapping, matching the ring fd, which is
+            // close-on-fork and so absent from the child's fd table.
             if parent_region.is_ring() {
                 continue;
             }

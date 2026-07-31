@@ -31,11 +31,16 @@ type ssize_t = isize;
 /// path the backing (or the `OpenFile` owning it) is dropped here —
 /// callers must not tear the subsystem object down on their own error
 /// arm.
+///
+/// `fd_flags` is the inheritance policy for the new descriptor. Callers
+/// carrying POSIX open flags spell close-on-exec as `O_CLOEXEC` inside
+/// `flags` instead; both spellings set the same bit.
 fn install_fd_entry(
     process_id: u32,
     ops: &'static dyn FileOps,
     handle: usize,
     mut flags: OpenMode,
+    fd_flags: FdFlags,
     call_tty_policy: Option<TtyIndex>,
     backing: Option<KArc<dyn FileBacking>>,
 ) -> c_int {
@@ -53,7 +58,8 @@ fn install_fd_entry(
         let _ = ops.set_status_flags(handle, flags.bits());
     }
 
-    let cloexec = (flags.bits() & O_CLOEXEC as u32) != 0;
+    let cloexec = fd_flags.cloexec || (flags.bits() & O_CLOEXEC as u32) != 0;
+    let close_on_fork = fd_flags.close_on_fork;
 
     // Build the single owner up front; from here the backing is owned by
     // `open_file` and torn down exactly once on its drop.
@@ -69,7 +75,11 @@ fn install_fd_entry(
     let slot_result = {
         match find_free_slot(&inner) {
             Some(slot_idx) => {
-                inner.descriptors[slot_idx] = Some(FdEntry { open_file, cloexec });
+                inner.descriptors[slot_idx] = Some(FdEntry {
+                    open_file,
+                    cloexec,
+                    close_on_fork,
+                });
                 Ok(slot_idx as c_int)
             }
             None => Err(open_file),
@@ -126,6 +136,7 @@ pub fn file_open_for_process(process_id: u32, path: &[u8], posix_flags: u32) -> 
             tty_ops,
             tty_idx.0 as usize,
             flags,
+            FdFlags::NONE,
             None,
             Some(backing),
         );
@@ -142,6 +153,7 @@ pub fn file_open_for_process(process_id: u32, path: &[u8], posix_flags: u32) -> 
             tty_ops,
             master_idx.0 as usize,
             flags.with_raw(O_NOCTTY as u32),
+            FdFlags::NONE,
             None,
             Some(backing),
         );
@@ -158,6 +170,7 @@ pub fn file_open_for_process(process_id: u32, path: &[u8], posix_flags: u32) -> 
             tty_ops,
             slave_idx.0 as usize,
             flags,
+            FdFlags::NONE,
             Some(slave_idx),
             Some(backing),
         );
@@ -185,6 +198,7 @@ pub fn file_open_for_process(process_id: u32, path: &[u8], posix_flags: u32) -> 
         &VFS_FILE_OPS,
         vfs_handle,
         flags,
+        FdFlags::NONE,
         None,
         Some(backing),
     )
@@ -524,6 +538,7 @@ pub fn file_open_tty_fd(
         tty_ops,
         tty_idx.0 as usize,
         flags,
+        FdFlags::NONE,
         Some(tty_idx),
         Some(backing),
     )
@@ -610,6 +625,7 @@ pub fn file_pipe_create(
         inner.descriptors[read_idx] = Some(FdEntry {
             open_file: read_of.clone(),
             cloexec,
+            close_on_fork: false,
         });
         let write_idx = match find_free_slot(&inner) {
             Some(idx) => idx,
@@ -621,6 +637,7 @@ pub fn file_pipe_create(
         inner.descriptors[write_idx] = Some(FdEntry {
             open_file: write_of.clone(),
             cloexec,
+            close_on_fork: false,
         });
         Ok((read_idx as c_int, write_idx as c_int))
     })();
@@ -655,9 +672,15 @@ fn file_dup_fd_min(process_id: u32, old_fd: c_int, min_fd: usize) -> c_int {
         let Some(src) = get_fd_entry(inner, old_fd) else {
             return Errno::EBADF.raw() as _;
         };
-        // Clone the shared open file (strong++); cloexec is per-fd and
-        // never copied by plain dup.
+        // Clone the shared open file (strong++). The two per-fd bits part
+        // company here, deliberately: a plain dup clears `cloexec`, but
+        // `close_on_fork` propagates to the alias. `cloexec` is a
+        // user-settable preference, so the new fd starts without one;
+        // `close_on_fork` is not settable at all and names the described
+        // object's affinity to the process that opened it, so an alias
+        // must not cross a process boundary its source would not.
         let open_file = src.open_file.clone();
+        let close_on_fork = src.close_on_fork;
 
         let Some(new_idx) = find_free_slot_from(inner, min_fd) else {
             // `open_file` drops here under the lock — decrement only, no
@@ -668,6 +691,7 @@ fn file_dup_fd_min(process_id: u32, old_fd: c_int, min_fd: usize) -> c_int {
         inner.descriptors[new_idx] = Some(FdEntry {
             open_file,
             cloexec: false,
+            close_on_fork,
         });
         new_idx as c_int
     })
@@ -694,8 +718,12 @@ pub fn file_dup3_fd(process_id: u32, old_fd: c_int, new_fd: c_int, flags: u32) -
 /// Shared implementation of `dup2`/`dup3` into an explicit target fd.
 /// dup2 with `old_fd == new_fd` is a validity check (no-op success);
 /// dup3 forbids it (handled by the caller). `cloexec` is the bit to
-/// install on the new fd. Any pre-existing entry at `new_fd` is detached
-/// under the lock and dropped *after* the lock is released.
+/// install on the new fd — a dup never copies the source's. `close_on_fork`
+/// does carry over from the source: it is not user-settable and names the
+/// described object's affinity to the process that opened it, so an alias
+/// must not cross a process boundary its source would not. Any
+/// pre-existing entry at `new_fd` is detached under the lock and dropped
+/// *after* the lock is released.
 fn dup_into(process_id: u32, old_fd: c_int, new_fd: c_int, cloexec: bool, is_dup3: bool) -> c_int {
     if new_fd < 0 || new_fd as usize >= FILEIO_MAX_OPEN_FILES {
         return Errno::EBADF.raw() as _;
@@ -716,10 +744,15 @@ fn dup_into(process_id: u32, old_fd: c_int, new_fd: c_int, cloexec: bool, is_dup
             return Err(Errno::EBADF);
         };
         let open_file = src.open_file.clone();
+        let close_on_fork = src.close_on_fork;
         // Detach any occupant of the target slot; it is dropped by the
         // caller after the lock is released.
         let displaced = inner.descriptors[new_fd as usize].take();
-        inner.descriptors[new_fd as usize] = Some(FdEntry { open_file, cloexec });
+        inner.descriptors[new_fd as usize] = Some(FdEntry {
+            open_file,
+            cloexec,
+            close_on_fork,
+        });
         Ok(displaced)
     });
 
@@ -837,23 +870,30 @@ pub fn fileio_open_socket_fd(
         socket_ops,
         socket_idx as usize,
         OpenMode::READ | OpenMode::WRITE,
+        FdFlags::NONE,
         None,
         backing,
     )
 }
 
 /// Open an FD using caller-supplied FileOps, handle, and owning backing.
+///
+/// `fd_flags` is mandatory: an fd minted from kernel-side ops carries no
+/// POSIX open flags, so its inheritance policy has no other source. The
+/// POSIX default is [`FdFlags::NONE`].
 pub fn fileio_open_fd_with_ops(
     process_id: u32,
     ops: &'static dyn FileOps,
     handle: usize,
     backing: Option<KArc<dyn FileBacking>>,
+    fd_flags: FdFlags,
 ) -> i32 {
     install_fd_entry(
         process_id,
         ops,
         handle,
         OpenMode::READ | OpenMode::WRITE,
+        fd_flags,
         None,
         backing,
     )
@@ -919,6 +959,7 @@ pub fn fileio_install_file_ref(process_id: u32, file: FileRef) -> c_int {
     inner.descriptors[idx] = Some(FdEntry {
         open_file: file.open_file,
         cloexec: false,
+        close_on_fork: false,
     });
     idx as c_int
 }
@@ -946,6 +987,7 @@ pub fn fileio_install_file_ref_at(
         inner.descriptors[target_fd as usize] = Some(FdEntry {
             open_file: file.open_file,
             cloexec,
+            close_on_fork: false,
         });
         displaced
     };

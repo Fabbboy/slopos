@@ -50,8 +50,8 @@ use slopos_abi::task::BlockReason;
 use slopos_fs::fileio::{
     file_close_fd, file_dup_fd, file_dup3_fd, file_fcntl_fd, file_open_for_process,
     file_open_tty_fd, file_pipe_create, file_poll_fd, file_read_fd, file_seek_fd, file_write_fd,
-    fileio_clone_table_for_process, fileio_create_empty_table_for_process,
-    fileio_destroy_table_for_process,
+    fileio_clone_table_for_process, fileio_close_on_exec, fileio_create_empty_table_for_process,
+    fileio_destroy_table_for_process, fileio_get_open_file_handle,
 };
 use slopos_mm::memory_layout_defs::PROCESS_CODE_START_VA;
 use slopos_sched::scheduler::unblock_task;
@@ -2761,6 +2761,96 @@ pub fn test_fork_clone_keeps_cloexec_fds() -> TestResult {
     TestResult::Pass
 }
 
+/// A SlopRing fd is process-private, so a fork-style clone leaves the
+/// child's table empty at that descriptor number. An ordinary pipe fd
+/// opened beside it is the control: it must still be inherited, proving
+/// the clone ran and the ring fd was filtered rather than the whole
+/// clone failing.
+pub fn test_ring_fd_not_inherited_by_fork() -> TestResult {
+    let _fixture = SyscallFixture::new();
+
+    let t1 = create_test_user_task();
+    let t2 = create_test_user_task();
+    assert_test!(
+        t1 != INVALID_TASK_ID && t2 != INVALID_TASK_ID,
+        "failed to create tasks"
+    );
+
+    let p1_guard = assert_some!(task_find_by_id(t1), "task1 lookup failed");
+    let p2_guard = assert_some!(task_find_by_id(t2), "task2 lookup failed");
+    let pid1 = p1_guard.process_id;
+    let pid2 = p2_guard.process_id;
+
+    let mut read_fd = -1;
+    let mut write_fd = -1;
+    assert_eq_test!(
+        file_pipe_create(pid1, O_NONBLOCK as u32, &mut read_fd, &mut write_fd),
+        0,
+        "pipe create failed"
+    );
+
+    let ring_fd = slopos_ring::ring_setup(pid1, 4, |_| Ok(()));
+    assert_test!(ring_fd >= 0, "ring_setup failed: {}", ring_fd);
+
+    fileio_destroy_table_for_process(pid2);
+    assert_eq_test!(
+        fileio_clone_table_for_process(pid1, pid2),
+        0,
+        "fork clone failed"
+    );
+
+    assert_test!(
+        fileio_get_open_file_handle(pid2, ring_fd).is_none(),
+        "fork must not carry the ring fd into the child"
+    );
+    assert_test!(
+        fileio_get_open_file_handle(pid2, read_fd).is_some(),
+        "fork must still inherit ordinary descriptors"
+    );
+
+    let _ = file_close_fd(pid2, read_fd);
+    let _ = file_close_fd(pid2, write_fd);
+    assert_eq_test!(file_close_fd(pid1, ring_fd), 0, "pid1 close ring failed");
+    assert_eq_test!(file_close_fd(pid1, write_fd), 0, "pid1 close write failed");
+    assert_eq_test!(file_close_fd(pid1, read_fd), 0, "pid1 close read failed");
+    task_terminate(t1);
+    task_terminate(t2);
+    TestResult::Pass
+}
+
+/// `exec` tears a SlopRing fd down: the ring's user mapping does not
+/// survive the image replacement, so neither does the descriptor naming
+/// it. Descriptors without `FD_CLOEXEC` are untouched.
+pub fn test_ring_fd_closed_on_exec() -> TestResult {
+    let _fixture = SyscallFixture::new();
+
+    let t = create_test_user_task();
+    assert_test!(t != INVALID_TASK_ID, "failed to create task");
+    let p_guard = assert_some!(task_find_by_id(t), "task lookup failed");
+    let pid = p_guard.process_id;
+
+    let ring_fd = slopos_ring::ring_setup(pid, 4, |_| Ok(()));
+    assert_test!(ring_fd >= 0, "ring_setup failed: {}", ring_fd);
+    assert_test!(
+        fileio_get_open_file_handle(pid, ring_fd).is_some(),
+        "ring fd absent right after setup"
+    );
+
+    fileio_close_on_exec(pid);
+
+    assert_test!(
+        fileio_get_open_file_handle(pid, ring_fd).is_none(),
+        "exec must tear the ring fd down"
+    );
+    assert_test!(
+        fileio_get_open_file_handle(pid, 1).is_some(),
+        "exec must keep descriptors without FD_CLOEXEC"
+    );
+
+    task_terminate(t);
+    TestResult::Pass
+}
+
 /// A spawned child with no actions starts with an empty fd table — no stdio.
 pub fn test_spawn_empty_table_unless_actions() -> TestResult {
     let _fixture = SyscallFixture::new();
@@ -3981,7 +4071,13 @@ pub fn test_dup_shares_offset() -> TestResult {
     let task_guard = assert_some!(task_find_by_id(task_id));
     let pid = task_guard.process_id;
 
-    let fd = slopos_fs::fileio::fileio_open_fd_with_ops(pid, &SEEK_PROBE_OPS, 0, None);
+    let fd = slopos_fs::fileio::fileio_open_fd_with_ops(
+        pid,
+        &SEEK_PROBE_OPS,
+        0,
+        None,
+        slopos_fs::fileio::FdFlags::NONE,
+    );
     assert_test!(fd >= 0, "synthetic open failed");
 
     let dup = file_dup_fd(pid, fd);
@@ -4135,6 +4231,11 @@ slopos_testing::stest!(
     name = test_fork_clone_keeps_cloexec_fds,
     suite = syscall_valid
 );
+slopos_testing::stest!(
+    name = test_ring_fd_not_inherited_by_fork,
+    suite = syscall_valid
+);
+slopos_testing::stest!(name = test_ring_fd_closed_on_exec, suite = syscall_valid);
 slopos_testing::stest!(
     name = test_spawn_empty_table_unless_actions,
     suite = syscall_valid
@@ -4437,6 +4538,7 @@ fn unix_create_connected_pair(pid: u32) -> Option<(i32, i32)> {
         &UNIX_SOCKET_FILE_OPS,
         accepted_handle.as_usize(),
         Some(srv_backing),
+        slopos_fs::fileio::FdFlags::NONE,
     );
     let cli_backing = slopos_net::unix_socket_file_ops::unix_socket_backing(cli_handle)?;
     let cli_fd = slopos_fs::fileio::fileio_open_fd_with_ops(
@@ -4444,6 +4546,7 @@ fn unix_create_connected_pair(pid: u32) -> Option<(i32, i32)> {
         &UNIX_SOCKET_FILE_OPS,
         cli_handle.as_usize(),
         Some(cli_backing),
+        slopos_fs::fileio::FdFlags::NONE,
     );
 
     unix_socket::unix_close(srv_handle);
@@ -5059,6 +5162,7 @@ pub fn test_compositor_handshake_listen_accept_send_poll() -> TestResult {
         &UNIX_SOCKET_FILE_OPS,
         cli_handle.as_usize(),
         Some(cli_backing),
+        slopos_fs::fileio::FdFlags::NONE,
     );
     assert_test!(cli_fd >= 0, "cli fd open");
 
@@ -5079,6 +5183,7 @@ pub fn test_compositor_handshake_listen_accept_send_poll() -> TestResult {
         &UNIX_SOCKET_FILE_OPS,
         accepted_handle.as_usize(),
         Some(srv_backing),
+        slopos_fs::fileio::FdFlags::NONE,
     );
     assert_test!(srv_fd >= 0, "srv fd open");
 
@@ -5424,8 +5529,13 @@ pub fn test_unix_scm_rights_atomic_delivery() -> TestResult {
             return fail!("memfd_create failed");
         }
     };
-    let mfd_fd =
-        slopos_fs::fileio::fileio_open_fd_with_ops(pid, mfd_ops, mfd_handle, Some(mfd_backing));
+    let mfd_fd = slopos_fs::fileio::fileio_open_fd_with_ops(
+        pid,
+        mfd_ops,
+        mfd_handle,
+        Some(mfd_backing),
+        slopos_fs::fileio::FdFlags::NONE,
+    );
     assert_test!(mfd_fd >= 0, "memfd fd install failed");
 
     let mut files: slopos_ostd::KVec<slopos_fs::FileRef> =
@@ -5500,8 +5610,13 @@ pub fn test_unix_scm_rights_anc_queue_full_no_partial() -> TestResult {
         Some(p_guard) => p_guard,
         None => return fail!("memfd_create failed"),
     };
-    let mfd_fd =
-        slopos_fs::fileio::fileio_open_fd_with_ops(pid, mfd_ops, mfd_handle, Some(mfd_backing));
+    let mfd_fd = slopos_fs::fileio::fileio_open_fd_with_ops(
+        pid,
+        mfd_ops,
+        mfd_handle,
+        Some(mfd_backing),
+        slopos_fs::fileio::FdFlags::NONE,
+    );
     assert_test!(mfd_fd >= 0, "memfd fd install failed");
 
     // Fill the anc queue up to capacity.
@@ -5584,8 +5699,13 @@ pub fn test_unix_scm_rights_error_returns_custody() -> TestResult {
         Some(p_guard) => p_guard,
         None => return fail!("memfd_create failed"),
     };
-    let mfd_fd =
-        slopos_fs::fileio::fileio_open_fd_with_ops(pid, mfd_ops, mfd_handle, Some(mfd_backing));
+    let mfd_fd = slopos_fs::fileio::fileio_open_fd_with_ops(
+        pid,
+        mfd_ops,
+        mfd_handle,
+        Some(mfd_backing),
+        slopos_fs::fileio::FdFlags::NONE,
+    );
     assert_test!(mfd_fd >= 0, "memfd fd install failed");
     assert_test!(
         slopos_mm::memfd::memfd_ftruncate(mfd_handle, 4096) == 0,

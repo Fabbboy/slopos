@@ -6,9 +6,12 @@
 //! the generation, so a closed-then-reused fd, a foreign `FileKind`, or
 //! a stale handle all resolve to a typed error — never UB.
 //!
-//! Each ring also carries its `owner_pid`; `ring_enter` rejects a ring
-//! entered from a process other than its creator (defence in depth on
-//! top of the close-on-fork fd policy, SLOPRING § 14).
+//! Each ring also carries its `owner_pid`. [`owner_is`] is the primary
+//! containment for a ring reached from the wrong process: `ring_enter`
+//! and all four register ops reject a handle whose owner is not the
+//! caller. It holds for every route to the handle — including an
+//! intra-process `dup`, which is a legitimate alias of a ring the caller
+//! does own, and a handle a process guessed rather than opened.
 
 use slopos_ostd::KArc;
 use slopos_ostd::handle::{Handle, HandleError, HandleTable};
@@ -116,9 +119,10 @@ pub fn remove(raw_handle: usize) {
 }
 
 /// `true` iff the packed handle resolves to a live ring owned by
-/// `pid`. Used by `ring_enter` to reject foreign / stale rings. Clones
-/// the slot under the table lock, releases it, then reads `owner_pid`
-/// under the per-ring lock — never holding both at once.
+/// `pid`. The primary check gating `ring_enter` and the four register
+/// ops against a foreign or stale ring. Clones the slot under the table
+/// lock, releases it, then reads `owner_pid` under the per-ring lock —
+/// never holding both at once.
 pub fn owner_is(raw_handle: usize, pid: u32) -> bool {
     match slot_for(raw_handle) {
         Ok(slot) => slot.lock().owner_pid == pid,

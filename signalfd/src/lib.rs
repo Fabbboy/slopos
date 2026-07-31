@@ -50,5 +50,6 @@ pub fn signalfd_create(process_id: u32, owner_task_id: u32, mask: u64) -> i32 {
         &file_ops::SIGNALFD_FILE_OPS,
         raw_handle,
         Some(backing),
+        slopos_fs::FdFlags::NONE,
     )
 }

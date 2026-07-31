@@ -94,6 +94,7 @@ pub fn accept_nonblock(pid: u32, file: &FileRef) -> Result<Option<i32>, Errno> {
                     &unix_socket_file_ops::UNIX_SOCKET_FILE_OPS,
                     accepted.as_usize(),
                     Some(backing),
+                    slopos_fs::FdFlags::NONE,
                 );
                 if new_fd < 0 {
                     return Err(Errno::ENOMEM);

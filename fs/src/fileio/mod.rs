@@ -209,14 +209,43 @@ impl FileRef {
     }
 }
 
-/// One file-descriptor-number → open-file mapping. `cloexec` is per-fd
-/// (never shared across dup aliases — it lives here, not on the shared
-/// [`OpenFile`]). Cloning an `FdEntry` bumps the `OpenFile` strong count
-/// (a dup/fork alias); dropping one is a close of that alias.
+/// Per-descriptor inheritance policy, chosen by whoever installs the fd.
+/// `cloexec` drops the descriptor across `exec`; `close_on_fork` drops it
+/// across `fork`. Both live on the fd number rather than the shared
+/// description, so two aliases of one description can differ.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct FdFlags {
+    pub cloexec: bool,
+    pub close_on_fork: bool,
+}
+
+impl FdFlags {
+    /// Inherited by both `fork` and `exec` — the POSIX default for a
+    /// descriptor opened without `O_CLOEXEC`.
+    pub const NONE: Self = Self {
+        cloexec: false,
+        close_on_fork: false,
+    };
+
+    /// Bound to the process that opened it: neither `fork` nor `exec`
+    /// carries it forward. For descriptors naming an object whose kernel
+    /// state is only meaningful to its creator.
+    pub const PROCESS_PRIVATE: Self = Self {
+        cloexec: true,
+        close_on_fork: true,
+    };
+}
+
+/// One file-descriptor-number → open-file mapping. `cloexec` and
+/// `close_on_fork` are per-fd (never shared across dup aliases — they
+/// live here, not on the shared [`OpenFile`]). Cloning an `FdEntry`
+/// bumps the `OpenFile` strong count (a dup/fork alias); dropping one is
+/// a close of that alias.
 #[derive(Clone)]
 pub(super) struct FdEntry {
     pub(super) open_file: KArc<OpenFile>,
     pub(super) cloexec: bool,
+    pub(super) close_on_fork: bool,
 }
 
 // ---------------------------------------------------------------------------

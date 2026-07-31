@@ -1,10 +1,12 @@
 //! `FileKind::Ring` file operations (SLOPRING § 3, § 14).
 //!
 //! A ring is an open file, so it inherits the fd lifecycle: `close`,
-//! `dup`, fork-inheritance, exec teardown. The fd's `handle: usize` is
-//! the packed ring [`Handle`](slopos_ostd::handle::Handle) from the
-//! registry. Read/write/poll on a ring fd are meaningless (use
-//! `ring_enter`), so they return `-EINVAL` / `POLLNVAL`.
+//! `dup`, and exec teardown. It is *not* inherited across `fork` — the
+//! descriptor is installed process-private, so the child's table has no
+//! entry for it. The fd's `handle: usize` is the packed ring
+//! [`Handle`](slopos_ostd::handle::Handle) from the registry.
+//! Read/write/poll on a ring fd are meaningless (use `ring_enter`), so
+//! they return `-EINVAL` / `POLLNVAL`.
 //!
 //! The fd's owning [`RingBacking`] removes the ring from the registry
 //! on last close, dropping the ring object — which releases the

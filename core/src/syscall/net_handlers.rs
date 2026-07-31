@@ -83,6 +83,7 @@ define_syscall!(syscall_socket
             &unix_socket_file_ops::UNIX_SOCKET_FILE_OPS,
             handle.as_usize(),
             Some(backing),
+            slopos_fs::FdFlags::NONE,
         );
         if fd < 0 {
             return Err(Errno::ENOMEM);
@@ -185,6 +186,7 @@ define_syscall!(syscall_accept
                 &unix_socket_file_ops::UNIX_SOCKET_FILE_OPS,
                 accepted_handle.as_usize(),
                 Some(backing),
+                slopos_fs::FdFlags::NONE,
             );
             if new_fd < 0 {
                 return Err(Errno::ENOMEM);

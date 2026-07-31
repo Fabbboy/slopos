@@ -143,11 +143,16 @@ pub fn ring_setup(
             slopos_mm::process_vm::process_vm_munmap(pid, user_addr, layout.region_bytes as u64);
         return eno(Errno::ENOMEM);
     };
+    // The ring fd is process-private (SLOPRING § 14): a ring's SQ/CQ is
+    // SPSC and its user mapping is not inherited, so neither `fork` nor
+    // `exec` carries the descriptor forward. Matches io_uring, whose ring
+    // fd is `O_CLOEXEC`.
     let fd = slopos_fs::fileio_open_fd_with_ops(
         pid,
         &file_ops::RING_FILE_OPS,
         raw_handle,
         Some(backing),
+        slopos_fs::FdFlags::PROCESS_PRIVATE,
     );
     if fd < 0 {
         let _ =
@@ -219,7 +224,8 @@ pub fn ring_enter(
     min_complete: u32,
     _flags: u32,
 ) -> i32 {
-    // Reject foreign / stale rings (defence in depth over close-on-fork).
+    // The ownership check that contains a foreign or stale ring. It holds
+    // for every alias of the fd, including intra-process `dup`s.
     if !registry::owner_is(raw_handle, pid) {
         return eno(Errno::EBADF);
     }

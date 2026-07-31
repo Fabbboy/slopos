@@ -42,5 +42,6 @@ pub fn pidfd_open(process_id: u32, caller_task_id: u32, target_task_id: u32) -> 
         &file_ops::PIDFD_FILE_OPS,
         target_task_id as usize,
         None,
+        slopos_fs::FdFlags::NONE,
     )
 }
