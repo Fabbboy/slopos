@@ -107,41 +107,6 @@ impl<T> Deref for KernelSync<T> {
     }
 }
 
-impl<T> KernelSync<core::cell::UnsafeCell<T>> {
-    /// Mutable per-CPU access to a `KernelSync<UnsafeCell<T>>` slot.
-    /// The wrapper pattern combines `Sync`-via-`KernelSync` with
-    /// interior mutability via `UnsafeCell`; per-CPU IRQs-off
-    /// single-writer discipline (held by the caller) is what makes
-    /// `&mut T` sound to expose.
-    ///
-    /// # Safety contract on the caller
-    ///
-    /// - Interrupts are disabled on the current CPU for the lifetime
-    ///   of the returned `&mut T`.
-    /// - No other code path will alias `*self.value.get()` on this
-    ///   CPU (this is the normal per-CPU storage idiom: only the
-    ///   CPU that owns the slot ever touches it, and the slot's
-    ///   `cpu_id` index is fixed at compile-time).
-    ///
-    /// Safe to call: the contract is documented and the only
-    /// `unsafe` is the one-line `&mut *get()` reborrow folded here.
-    #[inline]
-    pub fn cell_get_mut(&self) -> &mut T {
-        // SAFETY: caller upholds the per-CPU discipline above; the
-        // resulting `&mut T` lifetime is bounded by the call site.
-        unsafe { &mut *self.value.get() }
-    }
-
-    /// Read-only sibling of [`Self::cell_get_mut`]. Same caller
-    /// contract, but the returned `&T` is shareable across `f` so
-    /// cross-CPU diagnostic snapshots (read-only) are permitted.
-    #[inline]
-    pub fn cell_get(&self) -> &T {
-        // SAFETY: caller upholds the per-CPU discipline.
-        unsafe { &*self.value.get() }
-    }
-}
-
 impl<T> DerefMut for KernelSync<T> {
     #[inline]
     fn deref_mut(&mut self) -> &mut T {

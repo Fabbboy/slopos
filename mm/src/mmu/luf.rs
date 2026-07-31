@@ -20,7 +20,6 @@
 //! gracefully to a synchronous shootdown — that is, LUF never loses
 //! a flush, it only defers it.
 
-use core::cell::UnsafeCell;
 use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use slopos_abi::addr::{PhysAddr, VirtAddr};
@@ -28,6 +27,7 @@ use slopos_arch::cpu::IrqDisabled;
 use slopos_arch::pcr::MAX_CPUS;
 use slopos_ostd::klog_warn;
 use slopos_ostd::panic::AbortOnUnwind;
+use slopos_ostd::sync::PerCpuSlot;
 use slopos_ostd::sync::lock_tracking::LOCK_LEVEL_ALLOCATOR;
 use slopos_ostd::sync::spin::PreemptMutex;
 
@@ -105,15 +105,12 @@ impl PerCpuLuf {
     }
 }
 
-/// `KernelSync` wraps the `UnsafeCell` so the surrounding cell auto-derives
-/// `Sync`; single-writer-per-CPU via the owning CPU gates real access,
-/// and cross-CPU reads only touch the `AtomicU64` counters.
-struct PerCpuLufCell(slopos_ostd::sync::KernelSync<UnsafeCell<PerCpuLuf>>);
-
-static PER_CPU_LUF: [PerCpuLufCell; MAX_CPUS] = {
-    const INIT: PerCpuLufCell = PerCpuLufCell(slopos_ostd::sync::KernelSync::new(UnsafeCell::new(
-        PerCpuLuf::new(),
-    )));
+/// The ring is single-writer per CPU, but the writer is not the only party
+/// that can reach it: the LUF-drain IPI handler re-enters through the same
+/// index, and the diagnostic counters are read by whoever asks. `PerCpuSlot`
+/// checks that rather than requiring the caller to promise it.
+static PER_CPU_LUF: [PerCpuSlot<PerCpuLuf>; MAX_CPUS] = {
+    const INIT: PerCpuSlot<PerCpuLuf> = PerCpuSlot::new(PerCpuLuf::new());
     [INIT; MAX_CPUS]
 };
 
@@ -405,44 +402,46 @@ pub fn handle_drain_ipi(cpu: usize) {
             .fetch_or(1u64 << cpu, Ordering::Release);
     }
 
-    let Some(state) = state_for(cpu) else {
-        return;
-    };
-    if state.len == 0 {
-        return;
-    }
-    let needle = target.as_u64();
-    let mut hit = false;
-    for i in 0..state.len {
-        let idx = (state.head + i) % LUF_QUEUE_DEPTH;
-        if state.ring[idx].phys == needle {
-            hit = true;
-            break;
+    // A declined borrow here is the interrupted frame already holding this
+    // CPU's ring — it is mid-drain, so it will flush what we would have. The
+    // early ACK above has already been published, so skipping is correct.
+    with_luf_state(cpu, |state| {
+        if state.len == 0 {
+            return;
         }
-    }
-    if hit {
-        state.reuse_drains.fetch_add(1, Ordering::Relaxed);
-        drain_all(state, cpu);
-    }
+        let needle = target.as_u64();
+        let mut hit = false;
+        for i in 0..state.len {
+            let idx = (state.head + i) % LUF_QUEUE_DEPTH;
+            if state.ring[idx].phys == needle {
+                hit = true;
+                break;
+            }
+        }
+        if hit {
+            state.reuse_drains.fetch_add(1, Ordering::Relaxed);
+            drain_all(state, cpu);
+        }
+    });
 }
 
+/// Run `f` over CPU `cpu`'s ring, or return `None` if the index is out of
+/// range or the slot is already borrowed.
 #[inline]
-fn state_for(cpu: usize) -> Option<&'static mut PerCpuLuf> {
+fn with_luf_state<R>(cpu: usize, f: impl FnOnce(&mut PerCpuLuf) -> R) -> Option<R> {
     if cpu >= MAX_CPUS {
         return None;
     }
-    Some(PER_CPU_LUF[cpu].0.cell_get_mut())
+    IrqDisabled::with(|irq| PER_CPU_LUF[cpu].with_mut(irq, f))
 }
 
 fn drain_all(state: &mut PerCpuLuf, cpu: usize) {
-    // The per-CPU ring is single-writer-per-CPU. `handle_drain_ipi` re-
-    // acquires this CPU's `PerCpuLuf` via `cell_get_mut` and reenters
-    // `drain_all`; `flush_all` below spins in `wait_for_acks` WITHOUT
-    // disabling IRQs, so entered interrupts-on that LUF-drain IPI would
-    // take an aliasing second `&mut` and zero `state.len` mid-drain
-    // (underflowing `drained - 1`). Holding IRQs off across the whole
-    // `&mut`-live window restores the invariant; `flush_all` is still
-    // correct IRQs-off because `wait_for_acks` acks peers by polling
+    // `flush_all` below spins in `wait_for_acks` WITHOUT disabling IRQs, so
+    // entered interrupts-on, the LUF-drain IPI would reenter `handle_drain_ipi`
+    // for this CPU and zero `state.len` mid-drain (underflowing `drained - 1`).
+    // Holding IRQs off across the whole borrowed window keeps the handler out;
+    // it would in any case find the slot borrowed and decline. `flush_all` is
+    // still correct IRQs-off because `wait_for_acks` acks peers by polling
     // `service_local_shootdown_queue`, not the IRQ vector. `with` composes
     // re-entrantly, so callers already IRQs-off nest for free.
     IrqDisabled::with(|_irq| {
@@ -560,12 +559,8 @@ pub fn queue_unmap(vaddr: VirtAddr, phys: PhysAddr, ctx_id: MmContextId, pcid: u
     // invalidation that survives into frame reuse. Any fallback synchronous
     // shootdown is issued AFTER the window, once the `&mut` is released and
     // IRQs are restored (it broadcasts a shootdown of its own).
-    let fallback_flush = IrqDisabled::with(|_irq| {
-        let cpu = slopos_arch::pcr::get_current_cpu();
-        let Some(state) = state_for(cpu) else {
-            return true;
-        };
-
+    let cpu = slopos_arch::pcr::get_current_cpu();
+    let fallback_flush = with_luf_state(cpu, |state| {
         if state.len >= LUF_QUEUE_DEPTH {
             state.overflow_drains.fetch_add(1, Ordering::Relaxed);
             drain_all(state, cpu);
@@ -590,7 +585,10 @@ pub fn queue_unmap(vaddr: VirtAddr, phys: PhysAddr, ctx_id: MmContextId, pcid: u
             nonempty_mask_set(cpu);
         }
         false
-    });
+    })
+    // No slot, or one already held by an interposing frame: fall back to the
+    // synchronous flush rather than dropping the invalidation.
+    .unwrap_or(true);
 
     if fallback_flush {
         tlb::flush_page(vaddr);
@@ -604,15 +602,8 @@ pub fn queue_unmap(vaddr: VirtAddr, phys: PhysAddr, ctx_id: MmContextId, pcid: u
 /// syscalls in the future) — the subsequent flush subsumes all queued
 /// entries, and clearing the queue avoids a wasted re-flush later.
 pub fn drain_local() {
-    // IRQs-off so `state_for`'s `&mut` is never live with the LUF-drain IPI
-    // able to take an aliasing second one (see `drain_all`); `with` nests
-    // for free with `drain_all`'s own guard.
-    IrqDisabled::with(|_irq| {
-        let cpu = slopos_arch::pcr::get_current_cpu();
-        if let Some(state) = state_for(cpu) {
-            drain_all(state, cpu);
-        }
-    });
+    let cpu = slopos_arch::pcr::get_current_cpu();
+    with_luf_state(cpu, |state| drain_all(state, cpu));
 }
 
 /// Drain any deferred entry that aliases physical frame `phys`
@@ -636,31 +627,28 @@ pub fn drain_if_reusing_frame(phys: PhysAddr) -> bool {
         return true;
     }
     // Local half: scan + possibly drain our own ring before we consult
-    // the global mask. `drain_all` clears our bit via
-    // `nonempty_mask_clear`, so the cross-CPU check below naturally
-    // skips us. Runs IRQs-off so the scan + drain hold the per-CPU ring as
-    // the single writer (the LUF-drain IPI handler reenters via
-    // `cell_get_mut`); the window ends before the cross-CPU half, which
-    // MUST keep the caller's IRQ state — `drain_by_phys_cross_cpu` requires
-    // IRQs enabled (see the `DRAIN_LOCK` note).
-    IrqDisabled::with(|_irq| {
-        let cpu = slopos_arch::pcr::get_current_cpu();
-        if let Some(state) = state_for(cpu) {
-            if state.len > 0 {
-                let needle = phys.as_u64();
-                let mut hit = false;
-                for i in 0..state.len {
-                    let idx = (state.head + i) % LUF_QUEUE_DEPTH;
-                    if state.ring[idx].phys == needle {
-                        hit = true;
-                        break;
-                    }
-                }
-                if hit {
-                    state.reuse_drains.fetch_add(1, Ordering::Relaxed);
-                    drain_all(state, cpu);
-                }
+    // the global mask. `drain_all` clears our bit via `nonempty_mask_clear`,
+    // so the cross-CPU check below naturally skips us. The borrowed window
+    // ends before the cross-CPU half, which MUST keep the caller's IRQ state
+    // — `drain_by_phys_cross_cpu` requires IRQs enabled (see the `DRAIN_LOCK`
+    // note).
+    let cpu = slopos_arch::pcr::get_current_cpu();
+    with_luf_state(cpu, |state| {
+        if state.len == 0 {
+            return;
+        }
+        let needle = phys.as_u64();
+        let mut hit = false;
+        for i in 0..state.len {
+            let idx = (state.head + i) % LUF_QUEUE_DEPTH;
+            if state.ring[idx].phys == needle {
+                hit = true;
+                break;
             }
+        }
+        if hit {
+            state.reuse_drains.fetch_add(1, Ordering::Relaxed);
+            drain_all(state, cpu);
         }
     });
 
@@ -679,10 +667,8 @@ pub fn drain_if_reusing_frame(phys: PhysAddr) -> bool {
 /// When the ring is more than half full, convert the pending entries
 /// into a single `flush_all` IPI — amortises cost across many unmaps.
 pub fn drain_if_high_watermark() {
-    // IRQs-off for the same single-writer reason as `drain_local`.
-    IrqDisabled::with(|_irq| {
-        let cpu = slopos_arch::pcr::get_current_cpu();
-        let Some(state) = state_for(cpu) else { return };
+    let cpu = slopos_arch::pcr::get_current_cpu();
+    with_luf_state(cpu, |state| {
         if state.len >= LUF_QUEUE_DEPTH / 2 {
             drain_all(state, cpu);
         }
@@ -691,37 +677,28 @@ pub fn drain_if_high_watermark() {
 
 /// Read-only counter accessors for test harness / metrics line.
 pub fn queued_count(cpu: usize) -> u64 {
-    state_for_readonly(cpu)
-        .map(|s| s.queued.load(Ordering::Relaxed))
-        .unwrap_or(0)
+    with_luf_state_ref(cpu, |s| s.queued.load(Ordering::Relaxed)).unwrap_or(0)
 }
 
 pub fn deferred_saves_count(cpu: usize) -> u64 {
-    state_for_readonly(cpu)
-        .map(|s| s.deferred_saves.load(Ordering::Relaxed))
-        .unwrap_or(0)
+    with_luf_state_ref(cpu, |s| s.deferred_saves.load(Ordering::Relaxed)).unwrap_or(0)
 }
 
 pub fn reuse_drains_count(cpu: usize) -> u64 {
-    state_for_readonly(cpu)
-        .map(|s| s.reuse_drains.load(Ordering::Relaxed))
-        .unwrap_or(0)
+    with_luf_state_ref(cpu, |s| s.reuse_drains.load(Ordering::Relaxed)).unwrap_or(0)
 }
 
 pub fn overflow_drains_count(cpu: usize) -> u64 {
-    state_for_readonly(cpu)
-        .map(|s| s.overflow_drains.load(Ordering::Relaxed))
-        .unwrap_or(0)
+    with_luf_state_ref(cpu, |s| s.overflow_drains.load(Ordering::Relaxed)).unwrap_or(0)
 }
 
-fn state_for_readonly(cpu: usize) -> Option<&'static PerCpuLuf> {
+/// Read one CPU's counters. `None` for an out-of-range index, or while the
+/// slot's owner holds it — a diagnostic read is never worth waiting for.
+fn with_luf_state_ref<R>(cpu: usize, f: impl FnOnce(&PerCpuLuf) -> R) -> Option<R> {
     if cpu >= MAX_CPUS {
         return None;
     }
-    // Read-only sibling: per-CPU IRQs-off discipline gates writers;
-    // diagnostic snapshot is fine even from another CPU because the
-    // contained AtomicU64 counters tolerate concurrent reads.
-    Some(PER_CPU_LUF[cpu].0.cell_get())
+    PER_CPU_LUF[cpu].try_with_ref(f)
 }
 
 // =============================================================================

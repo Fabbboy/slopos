@@ -18,16 +18,17 @@
 //! every call returns `Cr3Value::kernel(phys)` and the hardware flushes
 //! the whole TLB on each CR3 reload — still correct, just slower.
 
-use core::cell::UnsafeCell;
 use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use slopos_abi::addr::PhysAddr;
+use slopos_arch::cpu::IrqDisabled;
 use slopos_arch::cpu::control_regs::{Cr4Flags, read_cr4, write_cr4};
 use slopos_arch::cpu::cpuid::{
     CPUID_FEAT_ECX_PCID, CPUID_LEAF_FEATURES, CPUID_LEAF_STRUCTURED_EXT, CPUID_SEXT_EBX_INVPCID,
     cpuid, cpuid_count,
 };
 use slopos_arch::pcr::MAX_CPUS;
+use slopos_ostd::sync::PerCpuSlot;
 use slopos_ostd::{klog_debug, klog_info};
 
 use super::cr3::{Cr3Value, MmContextId, Pcid};
@@ -93,15 +94,12 @@ impl PerCpuAsids {
     }
 }
 
-/// `KernelSync` wraps the `UnsafeCell` so the surrounding cell auto-derives
-/// `Sync`; per-CPU interrupts-off single-writer discipline gates real
-/// access. Cross-CPU reads touch only the `AtomicU64` counters above.
-struct PerCpuAsidsCell(slopos_ostd::sync::KernelSync<UnsafeCell<PerCpuAsids>>);
-
-static PER_CPU: [PerCpuAsidsCell; MAX_CPUS] = {
-    const INIT: PerCpuAsidsCell = PerCpuAsidsCell(slopos_ostd::sync::KernelSync::new(
-        UnsafeCell::new(PerCpuAsids::new()),
-    ));
+/// The slot table is written only by its owning CPU with interrupts off, but
+/// `forget_context_local` takes a caller-supplied index, so nothing about the
+/// signature confines a caller to its own slot. `PerCpuSlot` checks the
+/// exclusivity the discipline assumes.
+static PER_CPU: [PerCpuSlot<PerCpuAsids>; MAX_CPUS] = {
+    const INIT: PerCpuSlot<PerCpuAsids> = PerCpuSlot::new(PerCpuAsids::new());
     [INIT; MAX_CPUS]
 };
 
@@ -238,13 +236,9 @@ pub fn select_cr3(
     }
 
     if !pcid_enabled() {
-        // Per-CPU, IRQs off, single writer on the current core; the
-        // `cell_get_mut` helper folds the `&mut *get()` reborrow.
-        PER_CPU[cpu_id]
-            .0
-            .cell_get_mut()
-            .legacy
-            .fetch_add(1, Ordering::Relaxed);
+        with_asid_state(cpu_id, |state| {
+            state.legacy.fetch_add(1, Ordering::Relaxed);
+        });
         return Cr3Value::kernel(pml4_phys);
     }
 
@@ -253,57 +247,72 @@ pub fn select_cr3(
         return Cr3Value::new(pml4_phys, Pcid::KERNEL, true);
     }
 
-    // Per-CPU, IRQs off, single writer on the current core.
-    let state = PER_CPU[cpu_id].0.cell_get_mut();
-
-    // Fast path: slot currently loaded still valid.
-    if (state.last_loaded_slot as usize) < DYN_ASIDS_PER_CPU {
-        let slot = &state.slots[state.last_loaded_slot as usize];
-        if slot.ctx_id == ctx_id.raw() && slot.tlb_gen == ctx_tlb_gen {
-            state.hot_hits.fetch_add(1, Ordering::Relaxed);
-            let pcid = Pcid::new_unchecked(state.last_loaded_slot as u16 + 1);
-            return Cr3Value::new(pml4_phys, pcid, true);
-        }
-    }
-
-    // Linear scan for a pre-existing slot for this ctx_id.
-    for (i, slot) in state.slots.iter_mut().enumerate() {
-        if slot.ctx_id == ctx_id.raw() {
-            let pcid_raw = i as u16 + 1;
-            if slot.tlb_gen != ctx_tlb_gen {
-                flush_pcid(pcid_raw);
-                slot.tlb_gen = ctx_tlb_gen;
-                state.gen_refresh.fetch_add(1, Ordering::Relaxed);
-            } else {
+    with_asid_state(cpu_id, |state| {
+        // Fast path: slot currently loaded still valid.
+        if (state.last_loaded_slot as usize) < DYN_ASIDS_PER_CPU {
+            let slot = &state.slots[state.last_loaded_slot as usize];
+            if slot.ctx_id == ctx_id.raw() && slot.tlb_gen == ctx_tlb_gen {
                 state.hot_hits.fetch_add(1, Ordering::Relaxed);
+                let pcid = Pcid::new_unchecked(state.last_loaded_slot as u16 + 1);
+                return Cr3Value::new(pml4_phys, pcid, true);
             }
-            state.last_loaded_slot = i as u8;
-            return Cr3Value::new(pml4_phys, Pcid::new_unchecked(pcid_raw), true);
         }
-    }
 
-    // Miss: rotate into the next slot, evict prior contents.
-    let slot_idx = state.next_asid as usize;
-    state.next_asid = ((state.next_asid as usize + 1) % DYN_ASIDS_PER_CPU) as u8;
-    let pcid_raw = slot_idx as u16 + 1;
+        // Linear scan for a pre-existing slot for this ctx_id.
+        for (i, slot) in state.slots.iter_mut().enumerate() {
+            if slot.ctx_id == ctx_id.raw() {
+                let pcid_raw = i as u16 + 1;
+                if slot.tlb_gen != ctx_tlb_gen {
+                    flush_pcid(pcid_raw);
+                    slot.tlb_gen = ctx_tlb_gen;
+                    state.gen_refresh.fetch_add(1, Ordering::Relaxed);
+                } else {
+                    state.hot_hits.fetch_add(1, Ordering::Relaxed);
+                }
+                state.last_loaded_slot = i as u8;
+                return Cr3Value::new(pml4_phys, Pcid::new_unchecked(pcid_raw), true);
+            }
+        }
 
-    // Flush whatever the prior tenant left behind. Cheap on INVPCID-
-    // capable hardware; a full CR3 reload otherwise.
-    if state.slots[slot_idx].ctx_id != 0 {
-        flush_pcid(pcid_raw);
-    }
-    state.slots[slot_idx] = AsidSlot {
-        ctx_id: ctx_id.raw(),
-        tlb_gen: ctx_tlb_gen,
-    };
-    state.last_loaded_slot = slot_idx as u8;
-    state.misses.fetch_add(1, Ordering::Relaxed);
+        // Miss: rotate into the next slot, evict prior contents.
+        let slot_idx = state.next_asid as usize;
+        state.next_asid = ((state.next_asid as usize + 1) % DYN_ASIDS_PER_CPU) as u8;
+        let pcid_raw = slot_idx as u16 + 1;
 
-    // NOFLUSH=false because we must have the processor flush any stale
-    // non-global entries cached with this PCID value since we set the
-    // slot above. In practice INVPCID already did that, but pairing
-    // NOFLUSH=false with the allocation keeps correctness simple.
-    Cr3Value::new(pml4_phys, Pcid::new_unchecked(pcid_raw), false)
+        // Flush whatever the prior tenant left behind. Cheap on INVPCID-
+        // capable hardware; a full CR3 reload otherwise.
+        if state.slots[slot_idx].ctx_id != 0 {
+            flush_pcid(pcid_raw);
+        }
+        state.slots[slot_idx] = AsidSlot {
+            ctx_id: ctx_id.raw(),
+            tlb_gen: ctx_tlb_gen,
+        };
+        state.last_loaded_slot = slot_idx as u8;
+        state.misses.fetch_add(1, Ordering::Relaxed);
+
+        // NOFLUSH=false because we must have the processor flush any stale
+        // non-global entries cached with this PCID value since we set the
+        // slot above. In practice INVPCID already did that, but pairing
+        // NOFLUSH=false with the allocation keeps correctness simple.
+        Cr3Value::new(pml4_phys, Pcid::new_unchecked(pcid_raw), false)
+    })
+}
+
+/// Run `f` over CPU `cpu_id`'s ASID state.
+///
+/// Panics rather than returning on a declined borrow. Every caller reaches
+/// this either on the context-switch path or from a context-teardown, both of
+/// which run with interrupts off on the slot's own CPU — so a decline means
+/// two writers reached one slot, which is the bug the borrow word exists to
+/// surface rather than something to paper over with a skipped update.
+#[inline]
+fn with_asid_state<R>(cpu_id: usize, f: impl FnOnce(&mut PerCpuAsids) -> R) -> R {
+    IrqDisabled::with(|irq| {
+        PER_CPU[cpu_id]
+            .with_mut(irq, f)
+            .expect("asid: per-CPU slot already borrowed")
+    })
 }
 
 /// Invalidate all per-CPU slot bindings for a particular context.
@@ -316,17 +325,18 @@ pub fn forget_context_local(cpu_id: usize, ctx_id: MmContextId) {
     if cpu_id >= MAX_CPUS || !pcid_enabled() {
         return;
     }
-    let state = PER_CPU[cpu_id].0.cell_get_mut();
-    for (i, slot) in state.slots.iter_mut().enumerate() {
-        if slot.ctx_id == ctx_id.raw() {
-            flush_pcid(i as u16 + 1);
-            *slot = AsidSlot::EMPTY;
+    with_asid_state(cpu_id, |state| {
+        for (i, slot) in state.slots.iter_mut().enumerate() {
+            if slot.ctx_id == ctx_id.raw() {
+                flush_pcid(i as u16 + 1);
+                *slot = AsidSlot::EMPTY;
+            }
         }
-    }
-    if state.last_loaded_slot as usize != DYN_ASIDS_PER_CPU
-        && (state.last_loaded_slot as usize) < DYN_ASIDS_PER_CPU
-        && state.slots[state.last_loaded_slot as usize].ctx_id == 0
-    {
-        state.last_loaded_slot = u8::MAX;
-    }
+        if state.last_loaded_slot as usize != DYN_ASIDS_PER_CPU
+            && (state.last_loaded_slot as usize) < DYN_ASIDS_PER_CPU
+            && state.slots[state.last_loaded_slot as usize].ctx_id == 0
+        {
+            state.last_loaded_slot = u8::MAX;
+        }
+    });
 }

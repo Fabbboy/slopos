@@ -26,6 +26,7 @@ pub mod lock_tracking;
 pub mod mutex;
 pub mod once_lock;
 pub mod panic_recovery;
+pub mod per_cpu_slot;
 pub mod raw_link;
 pub mod raw_table;
 pub mod rcu;
@@ -57,6 +58,7 @@ pub use lock_tracking::{
 pub use mutex::{Mutex, MutexGuard};
 pub use once_lock::OnceLock;
 pub use panic_recovery::poison_all_held_locks;
+pub use per_cpu_slot::PerCpuSlot;
 pub use raw_link::{ByteChain, RawLink};
 pub use raw_table::RawTable;
 pub use rcu::{
