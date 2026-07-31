@@ -6,6 +6,7 @@ use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use slopos_ostd::klog_info;
 use slopos_ostd::sync::StateFlag;
+#[cfg(feature = "tests")]
 use slopos_ostd::KVec;
 
 use crate::config::TestConfig;

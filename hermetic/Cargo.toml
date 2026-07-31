@@ -18,3 +18,6 @@ slopos-ostd = { workspace = true }
 slopos-arch = { path = "../karch" }
 slopos-service-core = { path = "../service-core" }
 paste = { workspace = true }
+
+[lints]
+workspace = true

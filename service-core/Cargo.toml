@@ -11,3 +11,6 @@ doctest = false
 [dependencies]
 paste = "1"
 slopos-ostd = { path = "../slopos-ostd" }
+
+[lints]
+workspace = true

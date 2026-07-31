@@ -11,3 +11,6 @@ doctest = false
 
 [dependencies]
 slopos-ostd = { path = "../slopos-ostd" }
+
+[lints]
+workspace = true
