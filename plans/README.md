@@ -15,7 +15,6 @@ editing.
 | Document | Scope |
 |----------|-------|
 | `KNOWN_ISSUES.md` | Working notes on open issues; verify before using as source of truth |
-| `process-identity.md` | Bounded, recycling process id + `Handle<ProcessVm>` as the identity token; fixes the 256-process wall |
 | `privilege-model.md` | Spike: what authority should actually be, given no uid and no credential object |
 | `rt-sigreturn-xrstor.md` | Validate the signal-return XSAVE image; make a ring-0 #GP survivable |
 | `resource-accounting.md` | Spike: per-process limits. Inventory + the reclaim fixes that need no framework |

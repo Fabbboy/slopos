@@ -34,6 +34,16 @@ use core::marker::PhantomData;
 
 use crate::mm::heap::{AllocError, KVec};
 
+/// Slot width of the packed process-address-space handle a task carries.
+///
+/// The handle names a slot in a table this crate cannot see — the address
+/// space lives in `slopos_mm` — so it travels as a packed word and the
+/// two sides have to agree on where the slot ends and the generation
+/// begins. That agreement is this constant. 16 bits leaves 48 for the
+/// generation, and a packed word of 0 means "no address space", which is
+/// why the generation is never 0.
+pub const PROCESS_VM_SLOT_BITS: u32 = 16;
+
 /// A `Copy` token identifying one slot of a [`HandleTable`].
 ///
 /// The `PhantomData<fn() -> T>` marker makes `Handle<T>` unconditionally

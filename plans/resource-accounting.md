@@ -99,22 +99,21 @@ removes an isolation bug. None requires deciding what a principal is.
 
 ## Prerequisites for the framework
 
-Both must land before quota work starts, not alongside it:
+This must land before quota work starts, not alongside it:
 
 - **`plans/privilege-model.md`** — a quota needs a principal to bill and an
   exemption that survives fork and exec. `TASK_FLAG_SYSTEM` is neither.
-- **`plans/process-identity.md` phases 1–3** — a pid-keyed accounting row would
-  inherit the monotonic-counter bug wholesale and stop resolving at process 256.
 
 ## Questions the spike must answer
 
-**1. What is the principal?** The candidates in the tree are the pid (poisoned
-until process-identity lands), the `Session`/`ProcessGroup` KArc DAG, or a new
-object. The `ProcessGroup` option is interesting because it already exists, its
-lifetime is already exactly "at least one member alive", it is O(1)-reachable
-from `ctx.task()`, both its `Drop`s are documented safe under any lock, and it is
-immune to the pid bug. It is also coarser than a process and empty for kernel
-tasks. This choice determines everything else.
+**1. What is the principal?** The candidates in the tree are the pid, the
+`Session`/`ProcessGroup` KArc DAG, or a new object. The `ProcessGroup` option is
+interesting because it already exists, its lifetime is already exactly "at least
+one member alive", it is O(1)-reachable from `ctx.task()`, and both its `Drop`s
+are documented safe under any lock. It is also coarser than a process and empty
+for kernel tasks. A pid is bounded and recycles, so a pid-keyed row has to carry
+the same generation check a `Handle<ProcessVm>` does, or it names whichever
+process holds that id now. This choice determines everything else.
 
 **2. What are the numbers?** Every current cap is unmeasured. 256 rings across
 256 processes is one each. 32 AF_UNIX slots is fewer than the compositor's own 32

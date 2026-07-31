@@ -369,5 +369,19 @@ pub const DEFAULT_PROCESS_LAYOUT: ProcessMemoryLayout = ProcessMemoryLayout {
 /// Maximum number of processes.
 pub const MAX_PROCESSES: usize = 256;
 
+/// Highest process id the allocator ever hands out.
+///
+/// Ids start at 1, so the id space is `1..=MAX_PROCESS_ID`. It is as wide
+/// as the slot space because nothing indexes an array by process id: the
+/// per-process shootdown table is keyed by address-space slot, and every
+/// other per-process table resolves its slot by lookup.
+pub const MAX_PROCESS_ID: u32 = MAX_PROCESSES as u32;
+
+// The free-id ring is `MAX_PROCESSES` entries of `u16`, and every issued
+// id can be free at once.
+const _: () = assert!(MAX_PROCESS_ID as usize <= MAX_PROCESSES);
+const _: () = assert!(MAX_PROCESS_ID <= u16::MAX as u32);
+const _: () = assert!(MAX_PROCESS_ID > 0);
+
 // Note: INVALID_PROCESS_ID is defined in abi/src/task.rs as the canonical location.
 // Use `slopos_abi::task::INVALID_PROCESS_ID` directly.

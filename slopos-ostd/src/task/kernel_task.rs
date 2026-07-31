@@ -395,6 +395,20 @@ pub struct TaskInner<K, U> {
     pub kernel_stack: Option<K>,
     /// Owning handle to the SafeStack-sanitizer unsafe (data) stack.
     pub unsafe_stack: Option<U>,
+    /// Packed handle to this task's address space; 0 means it has none.
+    ///
+    /// The address space lives in a table this crate cannot name, so the
+    /// handle travels packed: [`PROCESS_VM_SLOT_BITS`] low bits of slot
+    /// index, the rest a generation stamped when the slot was bound.
+    ///
+    /// `process_id` cannot do this job. Ids are recycled, so a task
+    /// holding only an id can be handed the address space of whichever
+    /// process holds that id *now* — which on a page fault means
+    /// servicing the fault in a stranger's page tables. Resolving the
+    /// handle instead fails on a rebound slot.
+    ///
+    /// [`PROCESS_VM_SLOT_BITS`]: crate::handle::PROCESS_VM_SLOT_BITS
+    process_vm_handle: AtomicU64,
     /// Strong membership in this task's process group. The group (and, via
     /// it, the session) lives while any member holds this handle; dropping the
     /// task releases the membership. Empty for kernel-mode tasks.
@@ -1059,6 +1073,21 @@ impl<K, U> TaskInner<K, U> {
         self.parent_task_id.store(id, Ordering::Relaxed);
     }
 
+    /// Packed handle to this task's address space, or 0 for none.
+    ///
+    /// Acquire/Release: the handle is published once, before the task is
+    /// reachable, and read on another CPU's dispatch and fault paths.
+    #[inline]
+    pub fn process_vm_handle_raw(&self) -> u64 {
+        self.process_vm_handle.load(Ordering::Acquire)
+    }
+
+    /// See [`process_vm_handle_raw`](Self::process_vm_handle_raw).
+    #[inline]
+    pub fn set_process_vm_handle_raw(&self, packed: u64) {
+        self.process_vm_handle.store(packed, Ordering::Release);
+    }
+
     /// Bitmask of CPUs this task may run on. Relaxed: an affinity change races
     /// dispatch by nature, and the loser of that race is repatriated on the
     /// task's next switch-out.
@@ -1198,6 +1227,7 @@ impl<K, U> TaskInner<K, U> {
             fpu_state: TaskOwnCell::new(FpuState::new()),
             kernel_stack: None,
             unsafe_stack: None,
+            process_vm_handle: AtomicU64::new(0),
             process_group: RcuArcSlot::empty(),
             test_reports: SpinLock::new(None, LOCK_LEVEL_RESOURCE),
             parent_task_id: AtomicU32::new(INVALID_TASK_ID),

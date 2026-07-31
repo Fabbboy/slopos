@@ -483,6 +483,7 @@ pub fn test_heap_fragmentation_behind_head() -> TestResult {
 // PROCESS VM TESTS (existing)
 // ============================================================================
 
+use crate::memory_layout_defs::MAX_PROCESS_ID;
 use crate::process_vm::{
     create_process_vm, destroy_process_vm, init_process_vm, process_vm_get_ostd_pml4_paddr,
     process_vm_handle, process_vm_with_handle,
@@ -614,11 +615,83 @@ pub fn test_process_vm_counter_reset() -> TestResult {
     pass!()
 }
 
-/// A `Handle<ProcessVm>` from a destroyed process must not resolve to a
-/// process that later reuses the same slot: it returns a typed
-/// `HandleError`, never silently aliasing the new occupant.
+/// Spend the never-issued id space so the next `create_process_vm` draws
+/// a recycled id rather than a fresh one.
+///
+/// Returns `false` if a creation failed. One process is live at a time,
+/// so this also leaves slot 0 as the lowest free slot — every create that
+/// follows binds the same slot, which is what makes a recycled id land
+/// back on the slot its predecessor used.
+fn exhaust_fresh_process_ids() -> bool {
+    for _ in 0..MAX_PROCESS_ID {
+        let pid = create_process_vm();
+        if pid == INVALID_PROCESS_ID {
+            return false;
+        }
+        destroy_process_vm(pid);
+    }
+    true
+}
+
+/// A freed process id is not the next one handed out, and comes back only
+/// once every other free id has.
+///
+/// Ids return at the tail of the free list and are drawn from the head,
+/// so reuse order equals free order. That delay is the whole point: an id
+/// handed straight back to the next process is what turns a stale
+/// reference to its previous holder into a reference to a live stranger.
+/// A "simplification" to a LIFO, or to a bitmap scanned from zero, would
+/// have to delete this test on purpose.
+pub fn test_process_ids_are_reused_in_the_order_they_were_freed() -> TestResult {
+    init_process_vm();
+
+    if !exhaust_fresh_process_ids() {
+        return fail!("could not spend the never-issued id space");
+    }
+
+    // `marked` was freed last, so it is last in line.
+    let marked = create_process_vm();
+    if marked == INVALID_PROCESS_ID {
+        return fail!("create after the fresh id space was spent");
+    }
+    destroy_process_vm(marked);
+
+    for draw in 1..=MAX_PROCESS_ID {
+        let pid = create_process_vm();
+        if pid == INVALID_PROCESS_ID {
+            return fail!("create failed on draw {}", draw);
+        }
+        destroy_process_vm(pid);
+        if pid != marked {
+            continue;
+        }
+        if draw != MAX_PROCESS_ID {
+            return fail!(
+                "id {} was reissued on draw {} of {} — ahead of ids freed before it",
+                marked,
+                draw,
+                MAX_PROCESS_ID
+            );
+        }
+        return pass!();
+    }
+
+    fail!("id {} was never reissued", marked)
+}
+
+/// A `Handle<ProcessVm>` minted for one process never resolves to the
+/// process that later reuses its **id**.
+///
+/// Ids recycle, so "same pid" stops meaning "same process". The
+/// generation stamped on the slot is what separates the two: the old
+/// handle reports a typed `Stale` rather than handing its holder a
+/// stranger's address space to fault a page into.
 pub fn test_process_vm_handle_stale_after_reuse() -> TestResult {
     init_process_vm();
+
+    if !exhaust_fresh_process_ids() {
+        return fail!("could not spend the never-issued id space");
+    }
 
     let p1 = create_process_vm();
     if p1 == INVALID_PROCESS_ID {
@@ -640,13 +713,23 @@ pub fn test_process_vm_handle_stale_after_reuse() -> TestResult {
         return fail!("destroyed-slot handle should be NoEntry");
     }
 
-    // Create p2; with p1 gone, p2 reclaims p1's slot but with a fresh
-    // generation. The stale handle must now report Stale, and p2's own
-    // handle must resolve.
-    let p2 = create_process_vm();
-    if p2 == INVALID_PROCESS_ID {
-        return fail!("create p2");
+    // Cycle the id space until `p1`'s id comes back around. Reuse is
+    // FIFO, so that is exactly `MAX_PROCESS_ID` draws away.
+    let mut p2 = INVALID_PROCESS_ID;
+    for draw in 1..=MAX_PROCESS_ID {
+        p2 = create_process_vm();
+        if p2 == INVALID_PROCESS_ID {
+            return fail!("create failed on draw {}", draw);
+        }
+        if p2 == p1 {
+            break;
+        }
+        destroy_process_vm(p2);
     }
+    if p2 != p1 {
+        return fail!("id {} was never reissued", p1);
+    }
+
     let Some(h2) = process_vm_handle(p2) else {
         destroy_process_vm(p2);
         return fail!("handle for live p2");
@@ -656,12 +739,22 @@ pub fn test_process_vm_handle_stale_after_reuse() -> TestResult {
     let live = process_vm_with_handle(h2, |_| ());
     destroy_process_vm(p2);
 
-    if h1.slot() == h2.slot() && stale != Err(HandleError::Stale) {
-        return fail!("reused-slot stale handle should be Stale, got {:?}", stale);
+    // Same id, same slot, different generation — the case the handle
+    // exists for.
+    if h1.slot() != h2.slot() {
+        return fail!(
+            "the reissued id bound slot {}, not slot {} — the two handles no \
+             longer name the same slot and this test is not exercising reuse",
+            h2.slot(),
+            h1.slot()
+        );
     }
-    // If the slot was not reused, the stale handle is still not live.
-    if h1.slot() != h2.slot() && stale.is_ok() {
-        return fail!("stale handle must not resolve");
+    if stale != Err(HandleError::Stale) {
+        return fail!(
+            "a handle for the previous holder of pid {} resolved as {:?}",
+            p1,
+            stale
+        );
     }
     if live.is_err() {
         return fail!("p2 handle should resolve");
@@ -1749,6 +1842,10 @@ use slopos_testing::stest;
 stest!(name = test_process_vm_slot_reuse, suite = vm);
 stest!(name = test_process_vm_counter_reset, suite = vm);
 stest!(name = test_process_vm_handle_stale_after_reuse, suite = vm);
+stest!(
+    name = test_process_ids_are_reused_in_the_order_they_were_freed,
+    suite = vm
+);
 
 stest!(name = test_heap_free_list_search, suite = heap);
 stest!(name = test_heap_fragmentation_behind_head, suite = heap);

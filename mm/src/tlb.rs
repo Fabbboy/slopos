@@ -262,6 +262,14 @@ struct PerCpuTlbState {
     /// Process currently loaded on this CPU (or `INVALID_PROCESS_ID`).
     /// Read lock-free by `notify_mm_switch` and `current_process_on_cpu`.
     current_process_id: AtomicU32,
+    /// Shootdown key of the address space currently loaded on this CPU,
+    /// as `slot + 1`; 0 means none.
+    ///
+    /// Stored so that switching *away* from an address space costs no
+    /// lookup: `notify_mm_switch` runs on every context switch, and the
+    /// key the outgoing side needs is the one this CPU published when it
+    /// switched in.
+    current_process_key: AtomicU32,
 }
 
 impl PerCpuTlbState {
@@ -274,7 +282,22 @@ impl PerCpuTlbState {
             ack: AtomicBool::new(true),
             is_lazy: AtomicBool::new(false),
             current_process_id: AtomicU32::new(INVALID_PROCESS_ID),
+            current_process_key: AtomicU32::new(0),
         }
+    }
+
+    #[inline]
+    fn loaded_process_key(&self) -> Option<TlbProcessKey> {
+        match self.current_process_key.load(Ordering::Relaxed) {
+            0 => None,
+            encoded => TlbProcessKey::from_slot(encoded - 1),
+        }
+    }
+
+    #[inline]
+    fn store_process_key(&self, key: Option<TlbProcessKey>) {
+        let encoded = key.map_or(0, |k| k.slot() + 1);
+        self.current_process_key.store(encoded, Ordering::Relaxed);
     }
 }
 
@@ -402,47 +425,75 @@ static PROCESS_TLB_INFO: [ProcessTlbInfo; MAX_PROCESSES] = {
     [INIT; MAX_PROCESSES]
 };
 
-#[inline]
-fn process_tlb_info(process_id: u32) -> Option<&'static ProcessTlbInfo> {
-    let idx = process_id as usize;
-    if idx >= MAX_PROCESSES {
-        return None;
+/// A bounds-proved index into the per-process shootdown table.
+///
+/// The table is keyed by address-space *slot*, which is what it is as
+/// wide as, so a key that exists at all indexes it totally: there is no
+/// "no entry for this process" arm for a flush to mistake for "nothing to
+/// do". The only way to fail is at the mint, where a process id that
+/// names no live address space is a fact the caller can act on.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct TlbProcessKey(u32);
+
+impl TlbProcessKey {
+    /// Mint a key from an address-space slot index.
+    pub fn from_slot(slot: u32) -> Option<Self> {
+        if (slot as usize) < MAX_PROCESSES {
+            Some(Self(slot))
+        } else {
+            None
+        }
     }
-    Some(&PROCESS_TLB_INFO[idx])
+
+    #[inline]
+    pub fn slot(self) -> u32 {
+        self.0
+    }
 }
 
-pub fn register_process_tlb(process_id: u32) {
-    let Some(info) = process_tlb_info(process_id) else {
-        return;
-    };
-    info.cpumask.clear_all();
+#[inline]
+fn process_tlb_info(key: TlbProcessKey) -> &'static ProcessTlbInfo {
+    &PROCESS_TLB_INFO[key.0 as usize]
 }
 
-pub fn unregister_process_tlb(process_id: u32) {
-    let Some(info) = process_tlb_info(process_id) else {
-        return;
-    };
-    info.cpumask.clear_all();
+pub fn register_process_tlb(key: TlbProcessKey) {
+    process_tlb_info(key).cpumask.clear_all();
 }
 
-pub fn notify_mm_switch(old_process_id: u32, new_process_id: u32, cpu_id: usize) {
+pub fn unregister_process_tlb(key: TlbProcessKey) {
+    process_tlb_info(key).cpumask.clear_all();
+}
+
+/// How many CPUs currently hold a mapping for `process_id`.
+///
+/// The shootdown mask is otherwise write-only from outside this module;
+/// this is what lets a test assert that a destroyed process leaves no CPU
+/// behind for the next holder of its id to shoot down.
+#[cfg(feature = "test-hooks")]
+pub fn process_tlb_cpumask_count(key: TlbProcessKey) -> u32 {
+    process_tlb_info(key).cpumask.count()
+}
+
+/// Record that `cpu_id` is switching into `new_key`'s address space (or
+/// out of any address space, when it is `None`).
+///
+/// One lookup per switch, on the incoming side only: the outgoing side's
+/// key is the one this CPU stored the last time it switched in.
+pub fn notify_mm_switch(new_key: Option<TlbProcessKey>, new_process_id: u32, cpu_id: usize) {
     if cpu_id >= MAX_CPUS {
         return;
     }
+    let state = &TLB_STATE.cpu_state[cpu_id];
 
-    if old_process_id != INVALID_PROCESS_ID {
-        if let Some(old_info) = process_tlb_info(old_process_id) {
-            old_info.cpumask.clear(cpu_id);
-        }
+    if let Some(old_key) = state.loaded_process_key() {
+        process_tlb_info(old_key).cpumask.clear(cpu_id);
+    }
+    if let Some(key) = new_key {
+        process_tlb_info(key).cpumask.set(cpu_id);
     }
 
-    if new_process_id != INVALID_PROCESS_ID {
-        if let Some(new_info) = process_tlb_info(new_process_id) {
-            new_info.cpumask.set(cpu_id);
-        }
-    }
-
-    TLB_STATE.cpu_state[cpu_id]
+    state.store_process_key(new_key);
+    state
         .current_process_id
         .store(new_process_id, Ordering::Release);
 }
@@ -785,17 +836,14 @@ fn promote_remote_flush_type(flush_type: FlushType, start: u64, end: u64) -> Flu
     }
 }
 
-fn should_flush_tlb_for_process(cpu: usize, process_id: u32) -> bool {
-    if cpu >= MAX_CPUS || process_id == INVALID_PROCESS_ID {
+fn should_flush_tlb_for_process(cpu: usize, key: TlbProcessKey) -> bool {
+    if cpu >= MAX_CPUS {
         return false;
     }
     if !should_flush_tlb(cpu) {
         return false;
     }
-    let Some(info) = process_tlb_info(process_id) else {
-        return false;
-    };
-    info.cpumask.contains(cpu)
+    process_tlb_info(key).cpumask.contains(cpu)
 }
 
 pub fn should_flush_tlb(cpu: usize) -> bool {
@@ -830,14 +878,7 @@ pub fn exit_lazy_tlb(cpu: usize) {
     // handed out to a new owner.
 }
 
-fn queue_request_for_cpu(
-    cpu_idx: usize,
-    flush_type: FlushType,
-    start: u64,
-    end: u64,
-    asid: u64,
-    _process_id: u32,
-) {
+fn queue_request_for_cpu(cpu_idx: usize, flush_type: FlushType, start: u64, end: u64, asid: u64) {
     if cpu_idx >= MAX_CPUS {
         return;
     }
@@ -867,26 +908,24 @@ fn broadcast_flush_request(flush_type: FlushType, start: u64, end: u64, asid: u6
     let flush_type = promote_remote_flush_type(flush_type, start, end);
 
     for cpu_idx in TLB_STATE.online_cpus.iter_set() {
-        queue_request_for_cpu(cpu_idx, flush_type, start, end, asid, INVALID_PROCESS_ID);
+        queue_request_for_cpu(cpu_idx, flush_type, start, end, asid);
     }
 
     core::sync::atomic::fence(Ordering::SeqCst);
 }
 
 fn targeted_flush_request(
-    process_id: u32,
+    key: TlbProcessKey,
     flush_type: FlushType,
     start: u64,
     end: u64,
 ) -> TlbResult {
-    let Some(info) = process_tlb_info(process_id) else {
-        return Ok(());
-    };
+    let info = process_tlb_info(key);
 
     let flush_type = promote_remote_flush_type(flush_type, start, end);
     let initiator = slopos_arch::pcr::get_current_cpu();
 
-    if should_flush_tlb_for_process(initiator, process_id) {
+    if should_flush_tlb_for_process(initiator, key) {
         match flush_type {
             FlushType::SinglePage => flush_page_local(VirtAddr::new(start)),
             FlushType::Range => flush_range_local(VirtAddr::new(start), VirtAddr::new(end)),
@@ -915,7 +954,7 @@ fn targeted_flush_request(
             continue;
         }
 
-        queue_request_for_cpu(cpu_idx, flush_type, start, end, 0, process_id);
+        queue_request_for_cpu(cpu_idx, flush_type, start, end, 0);
         if target_count < MAX_CPUS {
             targets[target_count] = cpu_idx;
             target_count += 1;
@@ -1004,13 +1043,13 @@ pub fn flush_page(vaddr: VirtAddr) {
     handle_tlb_result(try_flush_page(vaddr), "flush_page");
 }
 
-pub fn try_flush_page_for_process(process_id: u32, vaddr: VirtAddr) -> TlbResult {
-    targeted_flush_request(process_id, FlushType::SinglePage, vaddr.as_u64(), 0)
+pub fn try_flush_page_for_process(key: TlbProcessKey, vaddr: VirtAddr) -> TlbResult {
+    targeted_flush_request(key, FlushType::SinglePage, vaddr.as_u64(), 0)
 }
 
-pub fn flush_page_for_process(process_id: u32, vaddr: VirtAddr) {
+pub fn flush_page_for_process(key: TlbProcessKey, vaddr: VirtAddr) {
     handle_tlb_result(
-        try_flush_page_for_process(process_id, vaddr),
+        try_flush_page_for_process(key, vaddr),
         "flush_page_for_process",
     );
 }
@@ -1037,13 +1076,17 @@ pub fn flush_range(start: VirtAddr, end: VirtAddr) {
     handle_tlb_result(try_flush_range(start, end), "flush_range");
 }
 
-pub fn try_flush_range_for_process(process_id: u32, start: VirtAddr, end: VirtAddr) -> TlbResult {
-    targeted_flush_request(process_id, FlushType::Range, start.as_u64(), end.as_u64())
+pub fn try_flush_range_for_process(
+    key: TlbProcessKey,
+    start: VirtAddr,
+    end: VirtAddr,
+) -> TlbResult {
+    targeted_flush_request(key, FlushType::Range, start.as_u64(), end.as_u64())
 }
 
-pub fn flush_range_for_process(process_id: u32, start: VirtAddr, end: VirtAddr) {
+pub fn flush_range_for_process(key: TlbProcessKey, start: VirtAddr, end: VirtAddr) {
     handle_tlb_result(
-        try_flush_range_for_process(process_id, start, end),
+        try_flush_range_for_process(key, start, end),
         "flush_range_for_process",
     );
 }
@@ -1070,15 +1113,12 @@ pub fn flush_all() {
     handle_tlb_result(try_flush_all(), "flush_all");
 }
 
-pub fn try_flush_all_for_process(process_id: u32) -> TlbResult {
-    targeted_flush_request(process_id, FlushType::Full, 0, 0)
+pub fn try_flush_all_for_process(key: TlbProcessKey) -> TlbResult {
+    targeted_flush_request(key, FlushType::Full, 0, 0)
 }
 
-pub fn flush_all_for_process(process_id: u32) {
-    handle_tlb_result(
-        try_flush_all_for_process(process_id),
-        "flush_all_for_process",
-    );
+pub fn flush_all_for_process(key: TlbProcessKey) {
+    handle_tlb_result(try_flush_all_for_process(key), "flush_all_for_process");
 }
 
 /// Flush TLB entries for a specific address space (ASID/CR3) on all CPUs.

@@ -12,11 +12,21 @@ use slopos_arch::MAX_CPUS;
 use slopos_ostd::klog_info;
 use slopos_testing::TestResult;
 
+use crate::process_vm::{create_process_vm, destroy_process_vm, process_vm_handle};
+use crate::tlb::TlbProcessKey;
 use crate::tlb::{
     CpuMask, FlushType, TLB_SHOOTDOWN_VECTOR, TlbFlushBatch, enter_lazy_tlb, exit_lazy_tlb,
     flush_all, flush_asid, flush_page, flush_range, get_active_cpu_count, handle_shootdown_ipi,
-    has_invpcid, has_pcid, is_smp_active, should_flush_tlb,
+    has_invpcid, has_pcid, is_smp_active, notify_mm_switch, process_tlb_cpumask_count,
+    should_flush_tlb,
 };
+use slopos_abi::task::INVALID_PROCESS_ID;
+
+/// Two CPU indices past anything this machine will bring online, so a test
+/// can drive the per-process shootdown mask without disturbing a live
+/// CPU's address-space bookkeeping or provoking a real IPI.
+const OFFLINE_CPU_A: usize = MAX_CPUS - 1;
+const OFFLINE_CPU_B: usize = MAX_CPUS - 2;
 
 // =============================================================================
 // BASIC FLUSH OPERATION TESTS
@@ -480,6 +490,107 @@ pub fn test_interleaved_flush_operations() -> TestResult {
     TestResult::Pass
 }
 
+// =============================================================================
+// PER-PROCESS SHOOTDOWN MASK TESTS
+// =============================================================================
+
+/// Destroying a process leaves no CPU in its shootdown mask.
+///
+/// Process ids are recycled, so a mask that outlives its process is
+/// inherited by the id's next holder: it would shoot down CPUs that never
+/// mapped the new address space, and — because the mask is the complete
+/// target list — say nothing about the CPUs that did.
+pub fn test_destroy_clears_the_process_shootdown_mask() -> TestResult {
+    let pid = create_process_vm();
+    if pid == INVALID_PROCESS_ID {
+        klog_info!("TLB_TEST: could not create a process VM");
+        return TestResult::Fail;
+    }
+    let Some(key) = process_vm_handle(pid).and_then(|h| TlbProcessKey::from_slot(h.slot())) else {
+        klog_info!("TLB_TEST: a live process has no shootdown key");
+        destroy_process_vm(pid);
+        return TestResult::Fail;
+    };
+
+    notify_mm_switch(Some(key), pid, OFFLINE_CPU_A);
+    notify_mm_switch(Some(key), pid, OFFLINE_CPU_B);
+    let masked = process_tlb_cpumask_count(key);
+    if masked != 2 {
+        klog_info!(
+            "TLB_TEST: notify_mm_switch left {} CPUs in pid {}'s mask, expected 2",
+            masked,
+            pid
+        );
+        destroy_process_vm(pid);
+        return TestResult::Fail;
+    }
+
+    destroy_process_vm(pid);
+
+    let after = process_tlb_cpumask_count(key);
+    if after != 0 {
+        klog_info!(
+            "TLB_TEST: destroyed pid {} left {} CPUs in its shootdown mask",
+            pid,
+            after
+        );
+        return TestResult::Fail;
+    }
+    TestResult::Pass
+}
+
+/// A targeted flush reaches every CPU the mask names.
+///
+/// `targeted_flush_request` skips offline CPUs, so an offline-only mask
+/// must still complete rather than hang waiting for an ack that cannot
+/// come — and the mask must survive the flush, because a live process
+/// keeps running on those CPUs afterwards.
+pub fn test_targeted_flush_covers_every_masked_cpu() -> TestResult {
+    let pid = create_process_vm();
+    if pid == INVALID_PROCESS_ID {
+        klog_info!("TLB_TEST: could not create a process VM");
+        return TestResult::Fail;
+    }
+    let Some(key) = process_vm_handle(pid).and_then(|h| TlbProcessKey::from_slot(h.slot())) else {
+        klog_info!("TLB_TEST: a live process has no shootdown key");
+        destroy_process_vm(pid);
+        return TestResult::Fail;
+    };
+
+    let live_cpu = slopos_arch::pcr::get_current_cpu();
+    notify_mm_switch(Some(key), pid, live_cpu);
+    notify_mm_switch(Some(key), pid, OFFLINE_CPU_A);
+    notify_mm_switch(Some(key), pid, OFFLINE_CPU_B);
+
+    let masked = process_tlb_cpumask_count(key);
+    if masked != 3 {
+        klog_info!(
+            "TLB_TEST: pid {} mask holds {} CPUs, expected 3",
+            pid,
+            masked
+        );
+        destroy_process_vm(pid);
+        return TestResult::Fail;
+    }
+
+    crate::tlb::flush_all_for_process(key);
+
+    let after = process_tlb_cpumask_count(key);
+    // Switch this CPU back off the address space, the way a real context
+    // switch would, before the process goes away.
+    notify_mm_switch(None, INVALID_PROCESS_ID, live_cpu);
+    destroy_process_vm(pid);
+    if after != 3 {
+        klog_info!(
+            "TLB_TEST: flushing pid {} dropped its mask to {} CPUs",
+            pid,
+            after
+        );
+        return TestResult::Fail;
+    }
+    TestResult::Pass
+}
+
 slopos_testing::stest!(name = test_flush_page_null_address, suite = tlb);
 slopos_testing::stest!(name = test_flush_page_kernel_address, suite = tlb);
 slopos_testing::stest!(name = test_flush_page_user_max_address, suite = tlb);
@@ -524,3 +635,11 @@ slopos_testing::stest!(name = test_should_flush_tlb_lazy_skips, suite = tlb);
 slopos_testing::stest!(name = test_rapid_flush_pages, suite = tlb);
 slopos_testing::stest!(name = test_rapid_flush_all, suite = tlb);
 slopos_testing::stest!(name = test_interleaved_flush_operations, suite = tlb);
+slopos_testing::stest!(
+    name = test_destroy_clears_the_process_shootdown_mask,
+    suite = tlb
+);
+slopos_testing::stest!(
+    name = test_targeted_flush_covers_every_masked_cpu,
+    suite = tlb
+);

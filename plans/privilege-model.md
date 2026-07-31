@@ -50,10 +50,11 @@ the gaps below are not things a mask can fix.
    shell and compositor need to launch privileged programs without themselves
    being able to mint arbitrary authority.
 3. **Is authority per-task or per-process?** `task.flags` is per-task today, but
-   privilege is conceptually per-process. This interacts directly with
-   `plans/process-identity.md`: a `Process` object is the natural home for a
-   credential, and building credentials before that object exists means building
-   them twice.
+   privilege is conceptually per-process. A `Process` object is the natural home
+   for a credential, and building credentials before that object exists means
+   building them twice. What a task carries today is a process id and a
+   `Handle<ProcessVm>` naming its address space — enough to identify a process,
+   not yet an object to hang a credential on.
 4. **What happens on exec and on fork?** Linux answers with `no_new_privs`,
    setuid semantics and explicit `cred` copying. SlopOS must answer explicitly
    rather than inheriting whatever the byte copy does.
@@ -101,6 +102,5 @@ capability table listing all 111 handlers with their required capability, and a
 migration sequence that keeps the tree green at each step. That note replaces
 this document and becomes the real plan.
 
-Do the spike **after** `plans/process-identity.md` phases 1–3, so the credential
-has an owner to live on rather than being retrofitted onto a task field and moved
-later.
+Do the spike **after** a `Process` object exists, so the credential has an owner
+to live on rather than being retrofitted onto a task field and moved later.

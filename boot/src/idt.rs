@@ -778,8 +778,8 @@ fn try_handle_page_fault(frame: *mut slopos_arch::InterruptFrame) -> bool {
     };
     // Recoverable user fault, not the panic path: `resolve_user_fault_task`
     // keeps its registry lookup and the guard derefs straight to the fields.
-    let pid = task_ref.process_id;
+    let vm_handle = task_ref.process_vm_handle_raw();
     let tid = task_ref.task_id;
 
-    slopos_mm::page_fault::try_resolve_user_fault(fault_addr, frame_ref.error_code, pid, tid)
+    slopos_mm::page_fault::try_resolve_user_fault(fault_addr, frame_ref.error_code, vm_handle, tid)
 }

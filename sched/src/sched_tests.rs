@@ -1036,6 +1036,139 @@ slopos_testing::stest!(
     suite = sched_core
 );
 
+/// Every user task the kernel can build, it can also run.
+///
+/// A task is refused dispatch and terminated if its process id is outside
+/// the range the process tables are indexed by, so an id allocator that
+/// can hand out an id past that range makes `task_build` succeed and the
+/// task die at its first dispatch — for that task and every one after it,
+/// until reboot.
+///
+/// This test does **not** call `init_process_vm`. Every other process test
+/// in the tree does, which resets the id allocator and is exactly why the
+/// suite cannot see a bounded id space. What is under test here is the
+/// allocator's state as the kernel actually accumulates it, so the churn
+/// has to run against whatever that state already is.
+pub fn test_every_user_task_built_since_boot_is_dispatchable() -> TestResult {
+    let _fixture = SchedFixture::new();
+
+    // Enough cycles to walk past the process-table bound from any starting
+    // point the suite could have left the allocator in.
+    const CYCLES: usize = slopos_mm::memory_layout_defs::MAX_PROCESSES + 64;
+
+    for i in 0..CYCLES {
+        let Some(mut pending) = task_build(
+            b"Churn\0".as_ptr() as *const c_char,
+            crate::task::task_entry_from_kernel_va(PROCESS_CODE_START_VA as u64),
+            ptr::null_mut(),
+            TaskPriority::Normal.as_u8(),
+            TASK_FLAG_USER_MODE,
+        ) else {
+            klog_info!("SCHED_TEST: task_build refused a user task at cycle {}", i);
+            return TestResult::Fail;
+        };
+        let process_id = pending.as_mut().process_id;
+        let dispatchable = scheduler::dispatch_pid_ok(process_id);
+        task_abandon(pending);
+
+        if process_id == INVALID_PROCESS_ID {
+            klog_info!("SCHED_TEST: user task at cycle {} has no address space", i);
+            return TestResult::Fail;
+        }
+        if !dispatchable {
+            klog_info!(
+                "SCHED_TEST: task built at cycle {} carries pid {}, which the \
+                 dispatcher refuses — it would be terminated at first dispatch",
+                i,
+                process_id
+            );
+            return TestResult::Fail;
+        }
+    }
+
+    TestResult::Pass
+}
+
+slopos_testing::stest!(
+    name = test_every_user_task_built_since_boot_is_dispatchable,
+    suite = sched_core
+);
+
+/// A task's address-space handle stops resolving once that address space
+/// is gone, and never resolves to whichever process takes its place.
+///
+/// This is the whole reason a task carries a handle and not just a
+/// process id. The id it held will be issued again, and the slot it used
+/// will be bound again; anything keyed on either alone would follow the
+/// task's page-fault and dispatch paths straight into a stranger's
+/// address space.
+pub fn test_a_dead_address_space_is_unreachable_through_its_task_handle() -> TestResult {
+    use slopos_mm::process_vm::{
+        create_process_vm, destroy_process_vm, process_vm_get_cr3_phys_by_handle,
+        unpack_process_vm_handle,
+    };
+
+    let _fixture = SchedFixture::new();
+
+    let Some(mut pending) = task_build(
+        b"HandleStale\0".as_ptr() as *const c_char,
+        crate::task::task_entry_from_kernel_va(PROCESS_CODE_START_VA as u64),
+        ptr::null_mut(),
+        TaskPriority::Normal.as_u8(),
+        TASK_FLAG_USER_MODE,
+    ) else {
+        klog_info!("SCHED_TEST: task_build refused a well-formed user task");
+        return TestResult::Fail;
+    };
+    let packed = pending.as_mut().process_vm_handle_raw();
+
+    let Some(handle) = unpack_process_vm_handle(packed) else {
+        klog_info!("SCHED_TEST: a built user task carries no address-space handle");
+        task_abandon(pending);
+        return TestResult::Fail;
+    };
+    if !matches!(process_vm_get_cr3_phys_by_handle(handle), Ok(cr3) if cr3 != 0) {
+        klog_info!("SCHED_TEST: a live task's handle does not name a live address space");
+        task_abandon(pending);
+        return TestResult::Fail;
+    }
+
+    // Abandoning the task tears its address space down.
+    task_abandon(pending);
+
+    if process_vm_get_cr3_phys_by_handle(handle).is_ok() {
+        klog_info!("SCHED_TEST: a torn-down address space still resolves through its handle");
+        return TestResult::Fail;
+    }
+
+    // Bind a fresh process to the slot the dead task used and re-check.
+    // The handle must still refuse — this is the case that would hand a
+    // dead task's fault path a live stranger's page tables.
+    let successor = create_process_vm();
+    if successor == INVALID_PROCESS_ID {
+        klog_info!("SCHED_TEST: could not create a successor process");
+        return TestResult::Fail;
+    }
+    let resolved = process_vm_get_cr3_phys_by_handle(handle);
+    destroy_process_vm(successor);
+
+    if let Ok(cr3) = resolved {
+        klog_info!(
+            "SCHED_TEST: a dead task's handle resolved to cr3 0x{:x} after the slot \
+             was rebound",
+            cr3
+        );
+        return TestResult::Fail;
+    }
+
+    TestResult::Pass
+}
+
+slopos_testing::stest!(
+    name = test_a_dead_address_space_is_unreachable_through_its_task_handle,
+    suite = sched_core
+);
+
 pub fn test_raw_ready_store_does_not_reserve_waking_placement() -> TestResult {
     let _fixture = SchedFixture::new();
 

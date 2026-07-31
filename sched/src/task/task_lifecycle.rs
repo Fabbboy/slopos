@@ -37,7 +37,8 @@ use slopos_fs::fileio::{
 use slopos_kernel_services::syscall_services::tty;
 use slopos_mm::memory_layout_defs::PROCESS_CODE_START_VA;
 use slopos_mm::process_vm::{
-    create_process_vm, destroy_process_vm, process_vm_clone_cow, process_vm_get_stack_top,
+    create_process_vm_ref, destroy_process_vm, pack_process_vm_handle, process_vm_clone_cow_ref,
+    process_vm_get_stack_top,
 };
 use slopos_mm::user_copy::copy_to_user;
 use slopos_mm::user_ptr::UserPtr;
@@ -56,6 +57,8 @@ fn user_entry_is_allowed(addr: u64) -> bool {
 
 struct TaskCreateResources {
     process_id: u32,
+    /// Packed handle to the task's address space; 0 for a kernel task.
+    process_vm_handle: u64,
     /// User-mode stack base (for user tasks, this lives in process VM;
     /// for kernel tasks, this aliases the kernel stack base).
     stack_base: u64,
@@ -69,6 +72,10 @@ struct TaskCreateResources {
 
 struct ProcessResourceLease {
     process_id: u32,
+    /// Packed handle to the address space this lease created, so the task
+    /// it is handed to can name that address space without a pid lookup —
+    /// and without mistaking a later holder of the same id for it.
+    process_vm_handle: u64,
     owns_vm: bool,
     owns_file_table: bool,
 }
@@ -77,6 +84,7 @@ impl ProcessResourceLease {
     const fn none() -> Self {
         Self {
             process_id: INVALID_PROCESS_ID,
+            process_vm_handle: 0,
             owns_vm: false,
             owns_file_table: false,
         }
@@ -87,38 +95,41 @@ impl ProcessResourceLease {
         self.process_id
     }
 
+    #[inline]
+    const fn process_vm_handle(&self) -> u64 {
+        self.process_vm_handle
+    }
+
     fn create_user_process() -> Option<Self> {
-        let process_id = create_process_vm();
-        if process_id == INVALID_PROCESS_ID {
+        let Some(vm) = create_process_vm_ref() else {
             klog_info!("task_create: Failed to create process VM");
             return None;
-        }
+        };
 
-        if fileio_create_table_for_process(process_id) != 0 {
-            destroy_process_vm(process_id);
+        if fileio_create_table_for_process(vm.process_id) != 0 {
+            destroy_process_vm(vm.process_id);
             return None;
         }
 
         Some(Self {
-            process_id,
+            process_id: vm.process_id,
+            process_vm_handle: pack_process_vm_handle(vm.handle),
             owns_vm: true,
             owns_file_table: true,
         })
     }
 
     fn clone_from_parent(parent_process_id: u32) -> Option<Self> {
-        let child_process_id = process_vm_clone_cow(parent_process_id);
-        if child_process_id == INVALID_PROCESS_ID {
-            return None;
-        }
+        let child = process_vm_clone_cow_ref(parent_process_id)?;
 
-        if fileio_clone_table_for_process(parent_process_id, child_process_id) != 0 {
-            destroy_process_vm(child_process_id);
+        if fileio_clone_table_for_process(parent_process_id, child.process_id) != 0 {
+            destroy_process_vm(child.process_id);
             return None;
         }
 
         Some(Self {
-            process_id: child_process_id,
+            process_id: child.process_id,
+            process_vm_handle: pack_process_vm_handle(child.handle),
             owns_vm: true,
             owns_file_table: true,
         })
@@ -178,6 +189,7 @@ fn allocate_kernel_task_resources() -> Option<TaskCreateResources> {
     let stack_base = kernel_stack.base().as_u64();
     Some(TaskCreateResources {
         process_id: INVALID_PROCESS_ID,
+        process_vm_handle: 0,
         stack_base,
         kernel_stack,
         unsafe_stack,
@@ -196,9 +208,11 @@ fn allocate_user_task_resources() -> Option<TaskCreateResources> {
 
     let kernel_stack = allocate_kernel_stack(TASK_KERNEL_STACK_SIZE, "kernel RSP0 stack")?;
     let unsafe_stack = allocate_unsafe_stack(TASK_UNSAFE_STACK_SIZE, "SafeStack data stack")?;
+    let process_vm_handle = process.process_vm_handle();
 
     Some(TaskCreateResources {
         process_id: process.disarm(),
+        process_vm_handle,
         stack_base: stack_top - TASK_STACK_SIZE,
         kernel_stack,
         unsafe_stack,
@@ -631,6 +645,7 @@ pub fn task_build(
     task_ref.priority = TaskPriority::from_u8(priority);
     task_ref.flags = flags;
     task_ref.process_id = resources.process_id;
+    task_ref.set_process_vm_handle_raw(resources.process_vm_handle);
     task_ref.tgid = task_id;
     task_ref.set_pgid(task_id);
     task_ref.set_sid(task_id);
@@ -1320,6 +1335,7 @@ pub fn task_fork(
 
     child.task_id = child_task_id;
     child.process_id = child_process_id;
+    child.set_process_vm_handle_raw(child_process.process_vm_handle());
     // The parent link and children-list membership are published together, after
     // registration, via `link_child` — never a bare field write.
     child.tgid = child_task_id;
@@ -1514,6 +1530,14 @@ pub fn task_clone(
 
     child.task_id = child_task_id;
     child.process_id = child_process_id;
+    // A `CLONE_VM` thread runs in the parent's address space, so it carries
+    // the parent's handle: same slot, same generation, same object. Anything
+    // else got its own address space from the lease.
+    child.set_process_vm_handle_raw(if share_vm {
+        parent.process_vm_handle_raw()
+    } else {
+        child_process.process_vm_handle()
+    });
     // The parent link and children-list membership are published together, after
     // registration, via `link_child` — never a bare field write.
 

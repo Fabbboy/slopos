@@ -9,6 +9,7 @@ use slopos_testing::{assert_test, fail, pass};
 
 use crate::hhdm::PhysAddrHhdm;
 use crate::memory_init::get_memory_statistics;
+use crate::memory_layout_defs::{MAX_PROCESS_ID, MAX_PROCESSES};
 use crate::page_alloc::{
     alloc_kernel_page_with, alloc_kernel_pages_with, free_page_frame, get_page_allocator_stats,
 };
@@ -220,34 +221,34 @@ pub fn test_heap_alloc_one_gib() -> TestResult {
     pass!()
 }
 
+/// Process creation keeps working, and keeps producing usable ids, past
+/// the point where every id has been issued once.
+///
+/// One process is live at a time: what is under pressure here is the id
+/// space, not the slot table. The id is checked per cycle rather than
+/// collected — an array of `MAX_PROCESSES + 64` ids would be 1280 bytes
+/// of stack frame against a 2 KiB budget.
 pub fn test_process_vm_creation_pressure() -> TestResult {
     init_process_vm();
 
-    let mut pids: [u32; 8] = [INVALID_PROCESS_ID; 8];
-    let mut created = 0usize;
+    const CYCLES: usize = MAX_PROCESSES + 64;
 
-    for i in 0..8 {
+    for i in 0..CYCLES {
         let pid = create_process_vm();
         if pid == INVALID_PROCESS_ID {
-            klog_info!("OOM_TEST: Process creation failed at {}", i);
-            break;
+            return fail!("process creation failed at cycle {}", i);
         }
-        pids[i] = pid;
-        created += 1;
+        if pid > MAX_PROCESS_ID {
+            destroy_process_vm(pid);
+            return fail!(
+                "cycle {} produced pid {}, past the {} the process tables can index",
+                i,
+                pid,
+                MAX_PROCESS_ID
+            );
+        }
+        destroy_process_vm(pid);
     }
-
-    assert_test!(created > 0, "couldn't create any processes");
-
-    for i in 0..created {
-        destroy_process_vm(pids[i]);
-    }
-
-    let pid = create_process_vm();
-    assert_test!(
-        pid != INVALID_PROCESS_ID,
-        "can't create process after cleanup"
-    );
-    destroy_process_vm(pid);
 
     pass!()
 }

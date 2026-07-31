@@ -15,17 +15,23 @@ use crate::tlb;
 use crate::user_mappings::{ostd_map_4kb_user, ostd_virt_to_phys_4kb};
 use crate::vma_region::VmaRegion;
 
-pub fn is_demand_fault(error_code: u64, process_id: u32, fault_addr: u64) -> bool {
+/// Whether a fault with `error_code` inside `region` is a demand-paging
+/// fault: the page is absent and the region is lazily-backed anonymous
+/// memory.
+pub fn is_demand_fault_in_region(error_code: u64, region: &VmaRegion) -> bool {
     let is_present = (error_code & 0x01) != 0;
     if is_present {
         return false;
     }
+    region.is_demand_paged() && region.is_anonymous()
+}
 
+/// [`is_demand_fault_in_region`] for a caller that has only a process id.
+pub fn is_demand_fault(error_code: u64, process_id: u32, fault_addr: u64) -> bool {
     let Some(region) = process_vm::process_vm_get_region(process_id, fault_addr) else {
         return false;
     };
-
-    region.is_demand_paged() && region.is_anonymous()
+    is_demand_fault_in_region(error_code, &region)
 }
 
 pub fn can_satisfy_fault(error_code: u64, region: &VmaRegion) -> bool {
@@ -50,7 +56,6 @@ pub fn can_satisfy_fault(error_code: u64, region: &VmaRegion) -> bool {
 
 pub fn handle_demand_fault(
     vm_space: &mut KArc<VmSpace>,
-    process_id: u32,
     fault_addr: u64,
     error_code: u64,
     region: &VmaRegion,
@@ -84,6 +89,5 @@ pub fn handle_demand_fault(
 
     tlb::flush_page(VirtAddr::new(aligned_addr));
 
-    let _ = process_id;
     Ok(())
 }

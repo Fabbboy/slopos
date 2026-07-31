@@ -40,7 +40,6 @@ python3 scripts/cvss_calc.py "CVSS:3.1/AV:L/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H"
 | [SLOPOS-2026-0014](#slopos-2026-0014) | 5.9 | MEDIUM | TCP initial sequence numbers come from an invertible FNV chain |
 | [SLOPOS-2026-0040](#slopos-2026-0040) | 5.9 | MEDIUM | virtio-net's RX ring shrinks monotonically and never refills |
 | [SLOPOS-2026-0007](#slopos-2026-0007) | 5.5 | MEDIUM | Unvalidated XSAVE area in `rt_sigreturn` halts the machine |
-| [SLOPOS-2026-0010](#slopos-2026-0010) | 5.5 | MEDIUM | Process ids are drawn from an unbounded counter that is also an array index, so the 256th process created since boot can never run |
 | [SLOPOS-2026-0016](#slopos-2026-0016) | 5.5 | MEDIUM | AF_UNIX SCM_RIGHTS has no cycle policy, permanently leaking socket slots |
 | [SLOPOS-2026-0029](#slopos-2026-0029) | 5.5 | MEDIUM | `klog` has no rate limiting and userland can drive it from a cli-held lock |
 | [SLOPOS-2026-0030](#slopos-2026-0030) | 5.5 | MEDIUM | Ready-queue selection is strict priority with no aging backstop |
@@ -95,23 +94,6 @@ asm volatile("mov %0, %%rsp; mov $105, %%eax; syscall" :: "r"(p));
 - Remediation: Validate the XSAVE header before restoring, as Linux does in `copy_user_to_xstate`: reject reserved header bytes, XSTATE_BV bits outside the active XCR0, an XCOMP_BV that disagrees with the format in use, and reserved MXCSR bits. Add an exception-table fixup covering the `xrstor64` site so a #GP there becomes SIGSEGV to the task rather than a machine halt — Linux pairs the validation with `force_sig(SIGSEGV)` on failure.
 
 
-
-### SLOPOS-2026-0010
-- Title: Process ids are drawn from an unbounded counter that is also an array index, so the 256th process created since boot can never run
-- Status: open
-- Confidence: 95 — evidence 40 (the allocator, the array bound and the dispatch guard all read directly), exploitability 30 (255 ordinary process creations — a shell session reaches it), reproducibility 30 (fully deterministic, no race, no timing)
-- CVSS vector/score: `CVSS:3.1/AV:L/AC:L/PR:L/UI:N/S:U/C:N/I:N/A:H` — **5.5 MEDIUM**
-- Impact: `create_process_vm` recycles process *slots* but draws `process_id` from a strictly monotonic counter that is never bounded or reused. `execute_task` refuses to dispatch any task whose `process_id >= MAX_PROCESSES` and terminates it. The 256th process created since boot is built successfully, killed at first dispatch, and so is every process after it — permanently, until reboot. Separately, the pid-indexed `PROCESS_TLB_INFO` array silently returns `None` past 256, so `flush_all_for_process` becomes a no-op for those ids; the dispatch guard is what keeps that from becoming a stale-TLB bug.
-- Evidence:
-  - mm/src/process_vm.rs:1541-1542 — `let process_id = alloc.next_process_id; alloc.next_process_id += 1;` — strictly monotonic, never recycled, never bounded
-  - sched/src/scheduler.rs:1071-1084 — `let pid_ok = pid == INVALID_PROCESS_ID || (pid as usize) < MAX_PROCESSES;` and on failure `task_terminate(to_id); return;`
-  - mm/src/memory_layout_defs.rs:370 — `pub const MAX_PROCESSES: usize = 256;`
-  - mm/src/tlb.rs:400-403 — `static PROCESS_TLB_INFO: [ProcessTlbInfo; MAX_PROCESSES]`
-  - mm/src/tlb.rs:406-412 — `fn process_tlb_info(process_id: u32) -> Option<&'static ProcessTlbInfo> { let idx = process_id as usize; if idx >= MAX_PROCESSES { return None; } ... }`
-  - mm/src/tlb.rs:876-885 — `fn targeted_flush_request(...) { let Some(info) = process_tlb_info(process_id) else { return Ok(()) }; ...}` — bails out *before* the local flush at :887-895 and before any remote queueing, returning success
-- Repro:
-  From any shell: run 255 short-lived commands (or a spawn loop). The 256th spawn produces `SCHED: refusing to dispatch task N with invalid pid 256` and the process never runs. No further program can be started until reboot.
-- Remediation: Allocate `process_id` from a recycling id allocator with a generation counter (Linux `idr` / pid bitmap; FreeBSD hashed `pfind`), or make every MAX_PROCESSES-sized array slot-indexed rather than pid-indexed. `VmSlotAlloc::alloc_generation` already exists beside the counter and provides the ABA protection a recycling allocator needs.
 
 ### SLOPOS-2026-0011
 - Title: Half-open TCP connections are never reclaimed, so ~64 SYNs wedge the whole stack
@@ -630,10 +612,9 @@ Selected analogs:
 
 Ordered by what removes the most exposure per unit of work, not by score.
 
-1. **Bound the process id** (SLOPOS-2026-0010). The system stops being able to start programs after 255 process creations; nothing else on this list is that visible to a user. See `plans/process-identity.md`.
-2. **Validate the signal-return XSAVE area** (0007). An unprivileged kernel-halt primitive: the `xrstor64` in `rt_sigreturn` restores a user-supplied image with no header validation and no #GP fixup. See `plans/rt-sigreturn-xrstor.md`.
-3. **Wire the SYN queue that already exists** (0011). The defence is written and tested; it merely has no caller.
-4. **Reseed the DNS resolver and validate response provenance** (0012), then replace the ISN generator with a keyed PRF (0014) and add the RFC 793 §3.9 acceptability gate (0013). These three are the network-facing set and share a test harness.
-5. **The TLB correctness set** (0017, 0018, 0019). Stale writable translations across address spaces are the only findings here that could become memory corruption rather than denial of service.
-6. **The filesystem integrity set** (0021–0027, 0042, 0043). Individually low-scoring, collectively the reason the filesystem cannot yet be trusted with data that matters.
-7. **Resource accounting** (0016, 0035, 0030, 0031). These are instances of one absent mechanism; see `plans/resource-accounting.md` rather than patching them individually.
+1. **Validate the signal-return XSAVE area** (0007). An unprivileged kernel-halt primitive: the `xrstor64` in `rt_sigreturn` restores a user-supplied image with no header validation and no #GP fixup. See `plans/rt-sigreturn-xrstor.md`.
+2. **Wire the SYN queue that already exists** (0011). The defence is written and tested; it merely has no caller.
+3. **Reseed the DNS resolver and validate response provenance** (0012), then replace the ISN generator with a keyed PRF (0014) and add the RFC 793 §3.9 acceptability gate (0013). These three are the network-facing set and share a test harness.
+4. **The TLB correctness set** (0017, 0018, 0019). Stale writable translations across address spaces are the only findings here that could become memory corruption rather than denial of service.
+5. **The filesystem integrity set** (0021–0027, 0042, 0043). Individually low-scoring, collectively the reason the filesystem cannot yet be trusted with data that matters.
+6. **Resource accounting** (0016, 0035, 0030, 0031). These are instances of one absent mechanism; see `plans/resource-accounting.md` rather than patching them individually.

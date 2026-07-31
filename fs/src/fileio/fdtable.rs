@@ -71,12 +71,19 @@ fn drain_descriptors(inner: &mut FileTableSlotInner) -> KVec<FdEntry> {
     drained
 }
 
+/// Create a console-bootstrapped fd table for `process_id`. Returns 0, or
+/// -1 if the pid is invalid, already has a table, or no slot is free.
+///
+/// A pid that already carries a table is a refusal rather than a silent
+/// success: process ids are recycled, so the second create names a
+/// *different* process than the one that bound the slot, and answering
+/// "done" would hand it the dead process's descriptors.
 pub fn fileio_create_table_for_process(process_id: u32) -> i32 {
     if process_id == INVALID_PROCESS_ID {
         return 0;
     }
     if slot_for_pid(process_id).is_some() {
-        return 0;
+        return -1;
     }
     // Claim a free slot via CAS so two concurrent creates can't pick
     // the same one.

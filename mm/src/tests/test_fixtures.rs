@@ -52,7 +52,7 @@ impl ProcessVmGuard {
         crate::process_vm::process_vm_with_vm_space_and_region(
             self.pid,
             fault_addr,
-            |vs, region| handle_demand_fault(vs, self.pid, fault_addr, error_code, &region),
+            |vs, region| handle_demand_fault(vs, fault_addr, error_code, &region),
         )
         .unwrap_or(Err(MmError::NoAddressSpace))
     }

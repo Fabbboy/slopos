@@ -181,9 +181,11 @@ pub(crate) fn is_scheduling_active() -> bool {
 
 use slopos_kernel_services::kernel_vm_space::kernel_vm_space;
 use slopos_mm::process_vm::{
-    process_vm_activate, process_vm_get_cr3_phys, process_vm_sync_kernel_mappings,
+    process_vm_activate_by_handle, process_vm_get_cr3_phys_by_handle,
+    process_vm_sync_kernel_mappings, unpack_process_vm_handle,
 };
 use slopos_mm::tlb;
+use slopos_ostd::handle::HandleError;
 
 use slopos_ostd::cpu::x86_64::xsave::active_xcr0;
 use slopos_ostd::task::switch::switch_context;
@@ -413,13 +415,22 @@ fn prepare_switch_to(
 
     // --- TLB / address-space switch ---
     let is_user_mode = next.flags & TASK_FLAG_USER_MODE != 0;
-    let old_pid = prev_window.map_or(INVALID_PROCESS_ID, |w| w.task().process_id);
     let new_pid = if is_user_mode {
         next.process_id
     } else {
         INVALID_PROCESS_ID
     };
-    tlb::notify_mm_switch(old_pid, new_pid, cpu_id);
+    // No address-space lookup anywhere on this path. The task carries a
+    // handle that names its slot outright, the shootdown key is that
+    // slot, and the outgoing side reads back the key this CPU stored when
+    // it switched in.
+    let next_vm = if is_user_mode {
+        slopos_mm::process_vm::unpack_process_vm_handle(next.process_vm_handle_raw())
+    } else {
+        None
+    };
+    let next_key = next_vm.and_then(|handle| tlb::TlbProcessKey::from_slot(handle.slot()));
+    tlb::notify_mm_switch(next_key, new_pid, cpu_id);
     if is_user_mode {
         tlb::exit_lazy_tlb(cpu_id);
     } else {
@@ -463,15 +474,13 @@ fn prepare_switch_to(
     // this hot path; the per-CPU ASID pool retires when the legacy
     // paging surface deletes.
     let _ = cpu_id;
-    let next_pid = next.process_id;
-    if next_pid != INVALID_PROCESS_ID {
-        process_vm_sync_kernel_mappings(next_pid);
+    if let Some(handle) = next_vm {
+        process_vm_sync_kernel_mappings(new_pid);
         // Scheduler-invariant safe entry: IRQs disabled by caller,
         // kernel-half maintained by `activate`'s internal resync.
-        // Falls back to kernel master if the process has no VmSpace
-        // bound (early creation, slot reset).
-        let activated = process_vm_activate(next_pid);
-        if !activated {
+        // Falls back to kernel master if the slot holds no VmSpace or has
+        // been rebound to another process since this task was built.
+        if !matches!(process_vm_activate_by_handle(handle), Ok(true)) {
             kernel_vm_space().lock().activate_kernel_master();
         }
     } else {
@@ -1065,24 +1074,32 @@ pub fn task_apply_affinity(task: &TaskRef, new_affinity: u32) {
     }
 }
 
+/// Whether `pid` is an id the process-VM allocator can have issued.
+///
+/// Nothing downstream indexes an array by process id any more, so this is
+/// a statement about the allocator rather than a bound anything depends
+/// on. It stays because it is the property a churn test can assert
+/// directly on a freshly built task, without dispatching it — and because
+/// an id outside this range would mean the allocator handed out something
+/// it has no record of.
+pub(crate) fn dispatch_pid_ok(pid: u32) -> bool {
+    pid == INVALID_PROCESS_ID || pid <= slopos_mm::memory_layout_defs::MAX_PROCESS_ID
+}
+
 /// Unified task execution for all CPUs.
 /// Handles switch_ctx validation, prepare_switch_to, and switch_registers.
 fn execute_task(cpu_id: usize, from_task: Option<&Task>, to_task: &Task) {
     let pid = to_task.process_id;
-    let pid_ok =
-        pid == INVALID_PROCESS_ID || (pid as usize) < slopos_mm::memory_layout_defs::MAX_PROCESSES;
-
     let to_id = to_task.task_id;
 
-    if !pid_ok {
-        klog_info!(
-            "SCHED: refusing to dispatch task {} with invalid pid {}",
-            to_id,
-            pid
-        );
-        let _ = crate::task::task_terminate(to_id);
-        return;
-    }
+    // The structural refusal for a task whose address space is gone is
+    // the CR3 check below, which asks the address space itself rather
+    // than reasoning about the id's numeric value. This is a tripwire on
+    // the allocator, not a guard the dispatch depends on.
+    debug_assert!(
+        dispatch_pid_ok(pid),
+        "the process-VM allocator issued an id outside its own space"
+    );
 
     // Validate switch_ctx.rip — must be in kernel .text (the OSTD
     // task-entry trampoline / user_task_first_run wrapper / a
@@ -1111,19 +1128,38 @@ fn execute_task(cpu_id: usize, from_task: Option<&Task>, to_task: &Task) {
         return;
     }
 
-    // Validate CR3 for tasks with a process VM.  cr3_phys == 0 means
-    // the process VM was destroyed or never created — switching into
-    // that address space would fault immediately.
+    // Validate the address space of a task that has one. Two distinct
+    // refusals, both fatal to the task: the handle no longer resolves —
+    // the slot it was built against now belongs to a different process —
+    // or it resolves to a slot with no address space, destroyed or never
+    // created. Switching into either would run this task in someone
+    // else's page tables or in none.
     if pid != INVALID_PROCESS_ID {
-        let cr3_phys = process_vm_get_cr3_phys(pid);
-        if cr3_phys == 0 {
-            klog_info!(
-                "SCHED: refusing to dispatch task {} (pid {}) with cr3_phys=0",
-                to_id,
-                pid,
-            );
-            let _ = crate::task::task_terminate(to_id);
-            return;
+        let resolved = match unpack_process_vm_handle(to_task.process_vm_handle_raw()) {
+            Some(handle) => process_vm_get_cr3_phys_by_handle(handle),
+            None => Err(HandleError::NoEntry),
+        };
+        match resolved {
+            Ok(cr3_phys) if cr3_phys != 0 => {}
+            Ok(_) => {
+                klog_info!(
+                    "SCHED: refusing to dispatch task {} (pid {}) with cr3_phys=0",
+                    to_id,
+                    pid,
+                );
+                let _ = crate::task::task_terminate(to_id);
+                return;
+            }
+            Err(err) => {
+                klog_info!(
+                    "SCHED: refusing to dispatch task {} (pid {}): address space handle {:?}",
+                    to_id,
+                    pid,
+                    err,
+                );
+                let _ = crate::task::task_terminate(to_id);
+                return;
+            }
         }
     }
 
