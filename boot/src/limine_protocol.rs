@@ -34,7 +34,7 @@ use core::{
 };
 
 use limine::{
-    BaseRevision, memmap,
+    BaseRevision, RequestsEndMarker, RequestsStartMarker, memmap,
     request::{
         BootloaderInfoRequest, EfiMemmapRequest, EfiRequest, ExecutableAddressRequest,
         ExecutableFileRequest, FramebufferRequest, HhdmRequest, MemmapRequest, ModulesRequest,
@@ -53,7 +53,7 @@ pub use slopos_ostd::boot_info::{
 
 slopos_ostd::limine_request! {
     start_marker,
-    static LIMINE_REQUESTS_START_MARKER: [u64; 1] = [0];
+    static LIMINE_REQUESTS_START_MARKER: RequestsStartMarker = RequestsStartMarker::new();
 }
 slopos_ostd::limine_request! {
     request,
@@ -105,7 +105,7 @@ slopos_ostd::limine_request! {
 }
 slopos_ostd::limine_request! {
     end_marker,
-    static LIMINE_REQUESTS_END_MARKER: [u64; 1] = [0];
+    static LIMINE_REQUESTS_END_MARKER: RequestsEndMarker = RequestsEndMarker::new();
 }
 
 fn convert_entry_type(entry_type: u64) -> MemoryRegionKind {
