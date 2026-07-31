@@ -172,7 +172,7 @@ impl KernelTestScope {
         // section. Drop's restore() walk puts back the pre-reset
         // values from the snapshots above.
         slopos_arch::pcr::park_bootstrap_task(
-            super::safestack_rt::BSP_BOOTSTRAP_TASK.get() as *mut ()
+            slopos_ostd::task::bootstrap::BSP_BOOTSTRAP_TASK.get() as *mut (),
         );
 
         task_shutdown_all();

@@ -301,7 +301,7 @@ impl<'brand> CpuInitWitness for ApToken<'brand> {
 static BSP_TOKEN_MINTED: InitFlag = InitFlag::new();
 
 /// Hard upper bound on per-AP mint slots. Matches `MAX_CPUS` in
-/// `boot/src/smp.rs`; `safestack_rt::MAX_STATIC_APS` (16) is the
+/// `boot/src/smp.rs`; `task::bootstrap::MAX_STATIC_APS` (16) is the
 /// soft cap actually exercised at boot.
 pub const MAX_APS: usize = 256;
 

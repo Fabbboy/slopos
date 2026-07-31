@@ -217,7 +217,7 @@
 #       The PCR `current_task` slot: offset 40, ABI-frozen (assembly and
 #       the switch path both hard-code it), type-erased to `*mut ()`.
 #
-#   sched/src/safestack_rt.rs
+#   slopos-ostd/src/task/bootstrap.rs
 #       The pre-heap `.bss` bootstrap stubs the SafeStack runtime seeds.
 #       These exist before the allocator does, so they cannot be `KArc`.
 #
@@ -262,7 +262,7 @@ SANCTIONED_SURFACES=(
     "slopos-ostd/src/task/placement.rs"
     "slopos-ostd/src/task/link_roles.rs"
     "slopos-ostd/src/cpu/x86_64/pcr.rs"
-    "sched/src/safestack_rt.rs"
+    "slopos-ostd/src/task/bootstrap.rs"
 )
 
 # Exempt from check 6 — the page-table / frame refcount domain.

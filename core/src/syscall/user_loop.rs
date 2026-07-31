@@ -64,17 +64,21 @@ fn placeholder_vm_space() -> &'static KArc<VmSpace> {
         .expect("placeholder_vm_space: OnceLock not populated after call_once")
 }
 
-slopos_ostd::extern_c_entry! {
-    /// Entry point used by the scheduler for new user tasks. The
-    /// kernel stack is set up so `switch_registers` rets here on first
-    /// dispatch; see
-    /// [`slopos_sched::task::task_lifecycle::build_user_task_entry_frame`].
-    ///
-    /// `extern "C"` because the address is taken and stored as a `u64`
-    /// on the kernel stack as a synthetic return address.
-    pub fn user_task_first_run() -> ! {
-        user_task_loop()
-    }
+/// Entry point used by the scheduler for new user tasks. The kernel stack
+/// is set up so `switch_registers` rets here on first dispatch; see
+/// [`slopos_sched::task::task_lifecycle::build_user_task_entry_frame`].
+///
+/// `extern "sysv64"` because the address is taken and stored as a `u64` on
+/// the kernel stack as a synthetic return address.
+extern "sysv64" fn user_task_first_run() -> ! {
+    user_task_loop()
+}
+
+/// Hand the first-run entry to OSTD so the scheduler can seed it without
+/// resolving a C symbol. One-shot; the `&BspToken<'brand>` witnesses
+/// BSP-only init.
+pub fn install_user_task_entry<'b>(token: &slopos_ostd::sync::BspToken<'b>) {
+    slopos_ostd::task::register_user_task_entry(token, user_task_first_run);
 }
 
 fn user_task_loop() -> ! {

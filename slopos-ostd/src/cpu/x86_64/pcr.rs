@@ -572,7 +572,7 @@ pub static AP_PCRS: SyncUnsafeCell<[ProcessorControlRegion; MAX_STATIC_APS]> =
 /// corresponding AP_PCRS entry pointer.  Populated once on the BSP in
 /// [`init_ap_pcr_lookup`] before any AP is started.  The AP bootstrap
 /// trampoline (which has to install GS_BASE *before* any instrumented
-/// Rust can run — see `karch::safestack_rt`) uses this table rather
+/// Rust can run — see `crate::task::bootstrap`) uses this table rather
 /// than reimplementing "multiply by sizeof(PCR)" in hand-rolled asm.
 ///
 /// Raw pointers are not `Sync`; wrapped in [`PcrPtrLookup`] for a
@@ -594,7 +594,7 @@ pub static AP_PCR_PTRS: SyncUnsafeCell<PcrPtrLookup> =
 /// 0-based AP slot (AP slot i ↔ PCR at `AP_PCRS[i]`).
 /// `bootstrap_tasks[i]` is a pointer to the AP's bootstrap Task stub
 /// whose `unsafe_stack_sp` has already been primed — see
-/// `slopos_sched::safestack_rt::init_bootstrap_tasks`.
+/// `crate::task::bootstrap::init_bootstrap_tasks`.
 ///
 /// The `&BspToken<'brand>` witnesses BSP-only init; single-writer
 /// (BSP in a sequential pre-SMP phase), must be called exactly once.

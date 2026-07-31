@@ -78,7 +78,7 @@ type SyscallFixture = slopos_sched::test_fixture::KernelTestScope;
 /// `BspCurrentTask` impl restores the original value on scope drop.
 fn park_bootstrap_on_current_cpu() {
     slopos_arch::pcr::park_bootstrap_task(
-        slopos_sched::safestack_rt::BSP_BOOTSTRAP_TASK.get() as *mut ()
+        slopos_ostd::task::bootstrap::BSP_BOOTSTRAP_TASK.get() as *mut ()
     );
 }
 

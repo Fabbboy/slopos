@@ -334,7 +334,9 @@ pub fn test_dispatch_publishes_current_priority() -> TestResult {
     }
 
     // Parking on the bootstrap stub is "this CPU runs nothing schedulable".
-    slopos_arch::pcr::park_bootstrap_task(super::safestack_rt::BSP_BOOTSTRAP_TASK.get() as *mut ());
+    slopos_arch::pcr::park_bootstrap_task(
+        slopos_ostd::task::bootstrap::BSP_BOOTSTRAP_TASK.get() as *mut ()
+    );
     let parked = slopos_arch::pcr::current_task_priority_for(cpu);
     if parked != slopos_arch::pcr::PRIORITY_NONE {
         klog_info!(
@@ -6083,7 +6085,9 @@ slopos_testing::stest!(
 // =============================================================================
 
 fn park_bootstrap_on_current_cpu() {
-    slopos_arch::pcr::park_bootstrap_task(super::safestack_rt::BSP_BOOTSTRAP_TASK.get() as *mut ());
+    slopos_arch::pcr::park_bootstrap_task(
+        slopos_ostd::task::bootstrap::BSP_BOOTSTRAP_TASK.get() as *mut ()
+    );
 }
 
 /// Make `task_id` this CPU's current task.
@@ -6407,7 +6411,7 @@ pub fn test_newcomer_outranks_current_preemption_gate() -> TestResult {
 /// which is asserted here so a growth of the struct fails by name rather than
 /// silently reducing this test's coverage to the first byte.
 pub fn test_bootstrap_task_ptr_rejects_interior_addresses() -> TestResult {
-    use super::safestack_rt::{
+    use slopos_ostd::task::bootstrap::{
         AP_BOOTSTRAP_TASKS, BSP_BOOTSTRAP_TASK, BootstrapTaskAbi, MAX_STATIC_APS,
         is_bootstrap_task_ptr,
     };

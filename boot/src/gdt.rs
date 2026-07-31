@@ -1,22 +1,9 @@
-use core::sync::atomic::{AtomicU64, Ordering};
-
 use slopos_arch::arch::gdt::IstSlot;
 use slopos_arch::pcr::{MAX_CPUS, get_current_cpu};
 use slopos_hermetic::KernelStackTop;
 use slopos_ostd::arch::x86_64::msr::{Msr, install_syscall_msrs, star_from_selectors, write_msr};
 use slopos_ostd::arch::x86_64::per_cpu_gdt;
 use slopos_ostd::klog_debug;
-
-// `SYSCALL_CPU_DATA_PTR` keeps the same C-ABI symbol the asm
-// trampoline reads via `gs:[16]` on CPU 0 before PCR is live. The
-// underlying per-CPU storage lives in
-// `slopos_ostd::arch::x86_64::per_cpu_gdt`; this atomic caches the
-// CPU-0 pointer for the syscall asm to load on entry. `AtomicU64`
-// has the same memory layout as a bare `u64`, so the asm side's
-// `gs:[16]` load sees the value verbatim.
-slopos_ostd::no_mangle_static! {
-    static SYSCALL_CPU_DATA_PTR: AtomicU64 = AtomicU64::new(0);
-}
 
 pub fn gdt_init() {
     gdt_init_for_cpu(0);
@@ -150,22 +137,12 @@ fn syscall_gs_base_init_for_cpu(cpu_id: usize) {
     let rsp0 = per_cpu_gdt::rsp0(cpu_id);
     per_cpu_gdt::set_syscall_kernel_rsp(cpu_id, rsp0);
     let cpu_data_ptr = per_cpu_gdt::syscall_data_ptr(cpu_id);
-    if cpu_id == 0 {
-        store_syscall_cpu_data_ptr(cpu_data_ptr);
-    }
     write_msr(Msr::KERNEL_GS_BASE, cpu_data_ptr);
     klog_debug!(
         "SYSCALL: CPU {} KERNEL_GS_BASE=0x{:016x}",
         cpu_id,
         cpu_data_ptr
     );
-}
-
-/// Store `cpu_data_ptr` into the `SYSCALL_CPU_DATA_PTR` cell. The
-/// asm syscall trampoline reads this address before PCR-based
-/// `gs:[…]` accessors come online.
-fn store_syscall_cpu_data_ptr(cpu_data_ptr: u64) {
-    SYSCALL_CPU_DATA_PTR.store(cpu_data_ptr, Ordering::Release);
 }
 
 pub fn syscall_update_kernel_rsp(rsp: u64) {

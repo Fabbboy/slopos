@@ -16,7 +16,7 @@
 use core::arch::naked_asm;
 use core::cell::UnsafeCell;
 use core::mem::{MaybeUninit, offset_of};
-use core::sync::atomic::{AtomicBool, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use crate::cpu::x86_64::pcr;
 use crate::sync::BspToken;
@@ -449,6 +449,42 @@ pub fn register_task_exit_hook<'brand>(_token: &BspToken<'brand>, hook: TaskExit
     unsafe {
         (*EXIT_HOOK_SLOT.0.get()).write(hook);
     }
+}
+
+/// The function a user task lands on the first time it is dispatched.
+///
+/// The scheduler seeds its address as a synthetic return address on the new
+/// task's kernel stack, so it needs the address as a value rather than a
+/// call. Registering it here rather than resolving a `#[unsafe(no_mangle)]`
+/// symbol keeps the C-ABI boundary out of the crate that defines it — the
+/// symbol only ever existed because `core` depends on `sched`, so `sched`
+/// cannot name `core`'s items directly.
+pub type UserTaskEntry = extern "sysv64" fn() -> !;
+
+static USER_TASK_ENTRY: AtomicUsize = AtomicUsize::new(0);
+
+/// One-shot wiring point for the user-task first-run entry. The
+/// `&BspToken<'brand>` witnesses BSP-only init.
+pub fn register_user_task_entry<'brand>(_token: &BspToken<'brand>, entry: UserTaskEntry) {
+    let addr = entry as usize;
+    let previous = USER_TASK_ENTRY.swap(addr, Ordering::AcqRel);
+    assert!(
+        previous == 0 || previous == addr,
+        "register_user_task_entry called twice with different entries",
+    );
+}
+
+/// Address of the registered user-task first-run entry.
+///
+/// Panics if no entry has been registered — a user task built before the
+/// registration would return into address zero on first dispatch.
+pub fn user_task_entry_addr() -> u64 {
+    let addr = USER_TASK_ENTRY.load(Ordering::Acquire);
+    assert!(
+        addr != 0,
+        "slopos_ostd::task: user task built with no first-run entry registered",
+    );
+    addr as u64
 }
 
 /// Internal: dispatch to the registered task-exit hook. Called from

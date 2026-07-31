@@ -467,7 +467,7 @@ impl PriorityRunQueue {
         let raw_current = slopos_arch::pcr::get_current_task_for(cpu_id);
         let current = TaskAddr::current_of(cpu_id);
         let running_real = current.is_some()
-            && !crate::safestack_rt::is_bootstrap_task_ptr(raw_current.cast_const())
+            && !slopos_ostd::task::bootstrap::is_bootstrap_task_ptr(raw_current.cast_const())
             && current != TaskAddr::idle_of(cpu_id);
         let load = queued.saturating_add(inbox);
         if running_real {

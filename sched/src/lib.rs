@@ -12,7 +12,6 @@ pub mod kthread;
 pub mod lifecycle;
 pub mod per_cpu;
 pub mod runtime;
-pub mod safestack_rt;
 #[cfg(feature = "test-hooks")]
 pub mod sched_tests;
 pub mod scheduler;

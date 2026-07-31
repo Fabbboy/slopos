@@ -58,7 +58,7 @@
 use core::cell::SyncUnsafeCell;
 use core::sync::atomic::{AtomicU64, Ordering};
 
-use super::task_struct::TASK_UNSAFE_STACK_SP_OFFSET;
+use crate::task::abi::TASK_UNSAFE_STACK_SP_OFFSET;
 
 /// Maximum number of statically-allocated AP bootstrap stubs.
 /// Matches `slopos_arch::pcr::MAX_STATIC_APS`.
@@ -69,7 +69,7 @@ pub const MAX_STATIC_APS: usize = 16;
 /// `kernel_main` / `ap_entry_rust`.
 pub const BOOTSTRAP_UNSAFE_STACK_SIZE: usize = 0x10000;
 
-slopos_ostd::no_mangle_static! {
+crate::no_mangle_static! {
     /// Linker-visible copy of [`TASK_UNSAFE_STACK_SP_OFFSET`] — the
     /// trampoline asm in `boot/limine_entry.s` and the AP naked
     /// trampoline need the value to stamp each bootstrap Task's
@@ -92,7 +92,7 @@ slopos_ostd::no_mangle_static! {
 #[repr(C, align(16))]
 pub struct BootstrapUnsafeStack(pub [u8; BOOTSTRAP_UNSAFE_STACK_SIZE]);
 
-slopos_ostd::no_mangle_static! {
+crate::no_mangle_static! {
     pub static BOOTSTRAP_UNSAFE_STACK: SyncUnsafeCell<BootstrapUnsafeStack> =
         SyncUnsafeCell::new(BootstrapUnsafeStack([0u8; BOOTSTRAP_UNSAFE_STACK_SIZE]));
 }
@@ -100,12 +100,12 @@ slopos_ostd::no_mangle_static! {
 #[repr(C, align(16))]
 pub struct ApBootstrapUnsafeStacks(pub [[u8; BOOTSTRAP_UNSAFE_STACK_SIZE]; MAX_STATIC_APS]);
 
-slopos_ostd::no_mangle_static! {
-    pub static APS_BOOTSTRAP_UNSAFE_STACKS: SyncUnsafeCell<ApBootstrapUnsafeStacks> =
-        SyncUnsafeCell::new(ApBootstrapUnsafeStacks(
-            [[0u8; BOOTSTRAP_UNSAFE_STACK_SIZE]; MAX_STATIC_APS],
-        ));
-}
+/// AP data stacks. Reached by address through `ap_unsafe_stack_top`, never
+/// by symbol name — the AP trampoline is OSTD's Rust naked function, not asm.
+pub static APS_BOOTSTRAP_UNSAFE_STACKS: SyncUnsafeCell<ApBootstrapUnsafeStacks> =
+    SyncUnsafeCell::new(ApBootstrapUnsafeStacks(
+        [[0u8; BOOTSTRAP_UNSAFE_STACK_SIZE]; MAX_STATIC_APS],
+    ));
 
 // ---------------------------------------------------------------------------
 // Bootstrap Task stubs
@@ -188,13 +188,12 @@ impl BootstrapTaskArrayCell {
     }
 }
 
-slopos_ostd::no_mangle_static! {
+crate::no_mangle_static! {
     pub static BSP_BOOTSTRAP_TASK: BootstrapTaskCell = BootstrapTaskCell::new();
 }
 
-slopos_ostd::no_mangle_static! {
-    pub static AP_BOOTSTRAP_TASKS: BootstrapTaskArrayCell = BootstrapTaskArrayCell::new();
-}
+/// AP bootstrap stubs. Same as the AP stacks: reached by address, not name.
+pub static AP_BOOTSTRAP_TASKS: BootstrapTaskArrayCell = BootstrapTaskArrayCell::new();
 
 // ---------------------------------------------------------------------------
 // LLVM SafeStack callback
@@ -202,15 +201,9 @@ slopos_ostd::no_mangle_static! {
 //
 // `__safestack_pointer_address` is the naked LLVM-callback that
 // returns `&current_task->abi.unsafe_stack_sp`. It lives in
-// [`slopos_ostd::arch::x86_64::naked::__safestack_pointer_address`]
+// [`crate::arch::x86_64::naked::__safestack_pointer_address`]
 // — the naked-fn attribute stays inside OSTD; the kernel side just
 // imports the behavioural contract via the symbol.
-//
-// The `TASK_UNSAFE_STACK_SP_OFFSET` constant in this module's `use`
-// list is a re-export of [`slopos_ostd::task::abi::TASK_UNSAFE_STACK_SP_OFFSET`];
-// it stays in this file as a convenience re-export so the asm in
-// `boot/limine_entry.s` can resolve `BOOTSTRAP_TASK_UNSAFE_SP_OFFSET`
-// without depending directly on the OSTD path.
 
 // ---------------------------------------------------------------------------
 // Bootstrap seeding helpers

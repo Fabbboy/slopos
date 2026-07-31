@@ -709,6 +709,7 @@ pub fn kernel_main_impl() {
         );
 
         slopos_sched::scheduler::install_ostd_task_exit_hook(token);
+        slopos_core::syscall::user_loop::install_user_task_entry(token);
 
         serial::write_line("BOOT: entering boot init");
         let mut boot_ctx = slopos_hermetic::take_for_boot(token);

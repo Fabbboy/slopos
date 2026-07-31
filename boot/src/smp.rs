@@ -8,7 +8,7 @@ use slopos_mm::tlb;
 use slopos_ostd::arch::x86_64::safestack::{install_ap_trampoline_as, install_safestack_runtime};
 use slopos_ostd::boot::smp::register_ap_late_entry;
 use slopos_ostd::klog_info;
-use slopos_sched::safestack_rt;
+use slopos_ostd::task::bootstrap as safestack_rt;
 use slopos_sched::scheduler::{enter_scheduler, init_scheduler_for_ap};
 
 use crate::gdt::syscall_msr_init;

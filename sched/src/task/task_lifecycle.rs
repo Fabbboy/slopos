@@ -44,12 +44,6 @@ use slopos_mm::user_copy::copy_to_user;
 use slopos_mm::user_ptr::UserPtr;
 use slopos_ostd::task::TaskAddr;
 
-slopos_ostd::extern_block! {
-    mod task_externs {
-        fn user_task_first_run();
-    }
-}
-
 fn user_entry_is_allowed(addr: u64) -> bool {
     const PROCESS_CODE_END: u64 = 0x0000_0000_0050_0000;
     addr >= PROCESS_CODE_START_VA && addr < PROCESS_CODE_END
@@ -370,7 +364,7 @@ const _: () = {
 /// `task_create` / `task_fork` / `task_clone` paths, where the
 /// kernel stack was just allocated and no other CPU can observe it.
 pub(crate) fn build_user_task_entry_frame(kernel_stack_top: u64) -> SwitchContext {
-    let entry = task_externs::user_task_first_run as *const () as u64;
+    let entry = slopos_ostd::task::user_task_entry_addr();
     let ret_addr_slot = kernel_stack_top - SUPERVISOR_RESERVE;
     // OSTD's `write_kernel_va` carries the one `unsafe`; the caller-
     // facing contract says the kernel stack was just allocated and no
