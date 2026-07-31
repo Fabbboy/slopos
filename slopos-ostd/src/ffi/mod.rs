@@ -67,6 +67,7 @@ pub use core::ptr;
 /// }
 /// ```
 #[macro_export]
+#[allow_internal_unsafe]
 macro_rules! limine_request {
     (start_marker, $($item:tt)*) => {
         $crate::__limine_request!(".limine_requests_start_marker", $($item)*);
@@ -81,6 +82,7 @@ macro_rules! limine_request {
 
 #[doc(hidden)]
 #[macro_export]
+#[allow_internal_unsafe]
 macro_rules! __limine_request {
     (
         $section:literal,
@@ -114,6 +116,7 @@ macro_rules! __limine_request {
 /// }
 /// ```
 #[macro_export]
+#[allow_internal_unsafe]
 macro_rules! extern_c_entry {
     (
         $(#[$attr:meta])*
@@ -139,6 +142,7 @@ macro_rules! extern_c_entry {
 /// `static` symbols that need the unmangled C-linkage name (e.g. the
 /// `SYSCALL_CPU_DATA_PTR` slot consumed by the asm syscall trampoline).
 #[macro_export]
+#[allow_internal_unsafe]
 macro_rules! no_mangle_static {
     (
         $(#[$attr:meta])*
@@ -166,6 +170,7 @@ macro_rules! no_mangle_static {
 /// Item-level attributes (`#[link_name = "…"]` on a static, etc.) are
 /// preserved verbatim. Outer attributes on the `mod` likewise survive.
 #[macro_export]
+#[allow_internal_unsafe]
 macro_rules! extern_block {
     (
         $(#[$outer:meta])*

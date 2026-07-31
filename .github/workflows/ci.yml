@@ -169,6 +169,5 @@ jobs:
       - name: Run Verus proofs
         # Any PR touching slopos-ostd/ must pass `just verify`. It
         # resolves + pins Verus via scripts/ensure_verus.sh, then checks
-        # every proof under verification/proofs/. It is a green no-op
-        # until the first proof lands.
+        # every proof under verification/proofs/.
         run: just verify

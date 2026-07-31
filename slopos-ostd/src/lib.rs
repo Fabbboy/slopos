@@ -4,6 +4,12 @@
 //! in the kernel lives here. All other kernel crates consume the
 //! safe APIs exposed from this crate.
 
+// `allow_internal_unsafe` marks the macros that intentionally expand
+// `unsafe` into a `#![forbid(unsafe_code)]` crate. rustc lints the
+// attribute itself under `unsafe_code`, so it can only live here — which
+// is the point: the injector set is greppable from the definitions.
+#![feature(allow_internal_unsafe)]
+#![allow(internal_features)]
 #![no_std]
 #![feature(
     allocator_api,

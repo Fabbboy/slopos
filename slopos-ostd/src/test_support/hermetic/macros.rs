@@ -37,6 +37,7 @@
 /// still call `slopos_ostd::__hermetic_register!(T)` directly).
 #[doc(hidden)]
 #[macro_export]
+#[allow_internal_unsafe]
 macro_rules! __hermetic_register {
     ($ty:ty) => {
         const _: () = {
@@ -58,6 +59,7 @@ macro_rules! __hermetic_register {
 /// `.hermetic_state_registry` linker-section entry. See module docs
 /// for usage shape.
 #[macro_export]
+#[allow_internal_unsafe]
 macro_rules! hermetic_state {
     (
         $(#[$meta:meta])*

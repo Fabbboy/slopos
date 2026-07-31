@@ -137,25 +137,83 @@ the POD/zeroable markers, boot-handoff data types, and the safe helper
 modules (`bitmap_slice`, `numfmt`, `wl_currency`, `kdiag`, `klog`,
 `test_support`).
 
-## Public claim
+## The soundness invariants
 
-> **SlopOS is the smallest verified-TCB Linux-ABI Rust kernel.**
+Every `// SAFETY:` comment and the whole *audited only* classification are
+written in this vocabulary, so it belongs somewhere readable rather than in
+the reader's head. The numbering follows Asterinas's ATC '25 §4.3, which
+SlopOS's framekernel structure is taken from; what each one means *in this
+tree* is:
 
-The claim is the conjunction of four adjectives; no other kernel meets all
-four at once:
+| | Invariant |
+|---|---|
+| **Inv. 1** | A frame slot is never handed out while already live, and its refcount tracks exactly the live handles. |
+| **Inv. 2** | Userland cannot forge privileged CPU state. `UserContext` masks every flag or register field that would let a user task step outside its sandbox. |
+| **Inv. 3** | An `asm!` block's operand widths and clobbers match the instruction it names. |
+| **Inv. 4** | Page-table walks stay well-formed: every present entry names a real table or frame, and map/unmap are balanced. |
+| **Inv. 5** | A user-visible leaf mapping only ever names an insensitive frame — never kernel-sensitive memory. |
+| **Inv. 5'** | No stack frame exceeds 2 KiB. Enforced by `check_stack_sizes.sh` against the final ELF. |
+| **Inv. 6** | A DMA or IOMMU mapping is only used through the handle that created it, for as long as the device may still read it. |
+| **Inv. 7** | Only I/O ports the platform has marked insensitive are reachable, and only through `IoPortRegistry`. |
+| **Inv. 8** | The calling CPU is the sole accessor of the task state it touches. |
+| **Inv. 9** | A slab slot cannot outlive the slab it came from; an outstanding cell pins its page. |
+| **Inv. 10** | A slab slot is only ever used for a type that fits its size class. |
 
-| Kernel | Small TCB | Verified | Linux-ABI | Rust |
-|---|:--:|:--:|:--:|:--:|
-| **SlopOS** | ✅ <1 % | ✅ critical path | ✅ | ✅ |
-| seL4 | ✅ | ✅ whole kernel | ❌ | ❌ C |
-| Asterinas | ➖ ~14 % | ➖ in progress (vostd) | ✅ | ✅ |
-| Theseus | ❌ ~62 % | ❌ | ❌ | ✅ |
-| Linux RFL | ❌ multi-MLoC | ❌ | ✅ | ➖ Rust-in-C |
-| Hubris | ✅ | ❌ | ❌ | ✅ |
+## What is enforced, and by what
 
-Sources: Asterinas (USENIX ATC '25, arXiv:2506.03876 — ~14 % TCB, vostd
-ongoing); seL4 (SOSP '09 — verified C, no Linux ABI); Theseus (OSDI '20 —
-~62 % TCB, unverified). SlopOS TCB ratio is measured live by
-`scripts/tcb_ratio.sh` over the `kernel` binary's actual dependency closure
-(`scripts/kernel_crates.sh`); the Linux-ABI syscall surface is in `abi/`. Full
-citation list in the plan's § 10 *References*.
+`#![forbid(unsafe_code)]` on every kernel crate is necessary but not
+sufficient. rustc drops any `unsafe_code` diagnostic whose primary span
+satisfies `in_external_macro`, and `UNSAFE_CODE` does not declare
+`report_in_external_macro` — so a macro defined in another crate expands
+`unsafe` into a forbid crate with zero diagnostics, and the call site holds
+no keyword for a source scan to find. `--force-warn unsafe_code` does not
+change this; it fires in the defining crate and stays silent at the call
+site. Asterinas has the same hole at larger scale and its ATC '25 paper
+names no enforcement mechanism at all.
+
+Three gates carry the claim between them:
+
+- `check_unsafe_outside_ostd.sh` — no `unsafe` keyword is *authored* outside
+  `slopos-ostd`, and every crate in the kernel binary's dependency closure
+  carries the lint attribute.
+- `check_unsafe_expansion.sh` — no `unsafe` *reaches the compiler* in a
+  kernel crate beyond an allowlisted `unsafe impl`, `link_section` or
+  `no_mangle`, each with a recorded reason. Run over each crate's feature
+  configurations, because the ~2 700 `stest!` registrations live behind
+  test features.
+- `check_registry_sections.sh` — `kernel.elf` holds only the sections
+  `link.ld` declares, each registry a whole number of entries. This is the
+  only gate that sees a *dependency's* `link_section`.
+
+## Trusted surface
+
+The honest measure is not how many times the keyword appears — folding
+`unsafe` behind a sound safe wrapper is the framekernel design, not an
+evasion. It is how much of OSTD's exported API has to be trusted by reading:
+
+| Surface | Count |
+|---|---:|
+| `pub unsafe fn` | 54 |
+| `pub unsafe trait` | 15 |
+| safe `pub fn` carrying a `# Safety` section | 16 |
+
+The last row is the one that matters most and the one being driven down:
+a `# Safety` section on a function that is not `unsafe fn` is a written
+admission that a safe caller can break it. `check_safe_contract_surface.sh`
+ratchets it.
+
+`scripts/tcb_ratio.sh` reports 0.52 % unsafe-line density over the kernel
+binary's dependency closure. Read it as a trend. It is **not** comparable to
+the TCB fractions other projects publish: Asterinas's ~14 % is LCS over
+post-LTO linked code including its dependency closure, while this
+denominator is raw first-party LoC — and 41 kLoC of it is the vendored DWARF
+reader, which contributes 20 unsafe lines.
+
+## Vendored annexes
+
+`vendor/unwinding` (3 308 LoC, 177 unsafe) and `vendor/gimli` (41 494 LoC,
+20 unsafe) link into `kernel.elf` and are exempt from every source gate.
+They are trusted code that is neither verified nor audited here; their
+integrity rests on `check_vendor_pin.sh`, which pins each to an upstream
+commit and a content hash. Both are counted in the TCB ratio's numerator
+and denominator.

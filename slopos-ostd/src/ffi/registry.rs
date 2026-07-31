@@ -203,6 +203,7 @@ pub fn registry_slice<T: RegistryEntry>(id: RegistryId) -> &'static [T] {
 /// }
 /// ```
 #[macro_export]
+#[allow_internal_unsafe]
 macro_rules! registry_entry {
     (boot_init_early_hw, $($item:tt)*) => {
         $crate::__registry_entry!(
@@ -236,6 +237,7 @@ macro_rules! registry_entry {
 
 #[doc(hidden)]
 #[macro_export]
+#[allow_internal_unsafe]
 macro_rules! __registry_entry {
     (
         $section:literal, $id:ident,

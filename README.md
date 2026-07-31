@@ -134,12 +134,24 @@ mechanic.
 ## Actually, The Slop Is Proven
 
 Under the goofy exterior, SlopOS is a **framekernel**: every line of
-`unsafe` in the entire kernel is confined to one trusted crate,
-`slopos-ostd`, held under a **≤1% TCB budget**. Every other kernel crate is
-`#![forbid(unsafe_code)]`, so the compiler itself refuses to let unsafety
-leak out of the trusted core — and CI gates inspect the final ELF to keep it
-honest: no stack frame over 2 KiB, no SSE instruction anywhere in the
-kernel, no `unsafe` outside the sanctum.
+`unsafe` in the entire kernel is authored in one trusted crate,
+`slopos-ostd`. Every other kernel crate is `#![forbid(unsafe_code)]`, and
+because a macro from another crate can expand `unsafe` past that lint
+without a diagnostic, CI also **expands every kernel crate and reads what
+the compiler actually saw** — zero executable `unsafe`, and `unsafe impl` /
+`link_section` / `no_mangle` only from a named list with a reason attached
+to each. Alongside it, gates inspect the final ELF: no stack frame over
+2 KiB, no SSE instruction anywhere in the kernel, every linker registry
+holding whole entries.
+
+The number worth defending is not the keyword count — folding `unsafe`
+behind a safe wrapper is the design, not a cheat. It is how much of OSTD's
+API you have to trust by reading rather than by type-checking: **54
+`pub unsafe fn`, 15 `pub unsafe trait`, and 16 safe functions that still
+carry a prose contract**, the last of which is ratcheted downward and
+cannot grow without CI noticing. `just tcb-ratio` reports the older
+unsafe-line-density figure (0.52 %) — useful as a trend, not comparable to
+other projects' TCB fractions, which are measured differently.
 
 The load-bearing invariants of that core are **machine-checked with
 [Verus](https://github.com/verus-lang/verus)**, an SMT-backed proof system

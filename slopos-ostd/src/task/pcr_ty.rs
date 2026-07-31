@@ -77,6 +77,7 @@ unsafe impl<K: PcrStackTy, U: PcrStackTy> PcrTaskType for TaskInner<K, U> {}
 ///
 /// The invoking crate asserts the [`PcrStackTy`] obligation for the named type.
 #[macro_export]
+#[allow_internal_unsafe]
 macro_rules! declare_pcr_stack_type {
     ($ty:ty) => {
         // SAFETY: the invoking crate asserts this is a stack-handle type the
