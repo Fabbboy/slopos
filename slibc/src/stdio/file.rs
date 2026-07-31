@@ -4,8 +4,9 @@ use core::ptr;
 use crate::pal::Pal;
 
 use super::{
-    _IOFBF, _IOLBF, _IONBF, BufferMode, EOF, FILE, FILE_FLAG_EOF, FILE_FLAG_ERR,
-    FILE_FLAG_OWNED_FD, FILE_FLAG_READABLE, FILE_FLAG_WRITABLE, SEEK_CUR, SEEK_SET,
+    _IOFBF, _IOLBF, _IONBF, BufferMode, EOF, FILE, FILE_FLAG_EOF, FILE_FLAG_ERR, FILE_FLAG_HEAP,
+    FILE_FLAG_OWNED_FD, FILE_FLAG_READABLE, FILE_FLAG_READING, FILE_FLAG_WRITABLE,
+    FILE_FLAG_WRITING, SEEK_CUR, SEEK_END, SEEK_SET, WalkMode, registry,
 };
 use crate::ffi::{O_APPEND, O_CREAT, O_RDONLY, O_RDWR, O_TRUNC, O_WRONLY};
 use crate::mem::malloc;
@@ -38,6 +39,32 @@ fn parse_mode(mode: *const u8) -> Option<(i32, u32)> {
     }
 }
 
+/// Allocate a `FILE` for `fd` and publish it on the open-stream list.
+///
+/// The allocation happens before the list lock is taken: no stdio lock is ever
+/// held across `malloc`.
+///
+/// # Safety
+/// `fd` must be open and must not already back another stream.
+unsafe fn new_stream(fd: i32, fflags: u32) -> *mut FILE {
+    let raw = malloc::alloc(core::mem::size_of::<FILE>()) as *mut FILE;
+    if raw.is_null() {
+        return ptr::null_mut();
+    }
+
+    // C11 §7.21.3: a stream refers to an interactive device or it does not,
+    // and only the former is line-buffered by default.
+    let buf_mode = if crate::io::shim::isatty(fd) != 0 {
+        BufferMode::Line
+    } else {
+        BufferMode::Full
+    };
+
+    FILE::init_at(raw, fd, buf_mode, fflags | FILE_FLAG_HEAP);
+    registry::link(raw);
+    raw
+}
+
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn fopen(path: *const u8, mode: *const u8) -> *mut FILE {
     let (oflags, fflags) = match parse_mode(mode) {
@@ -50,20 +77,32 @@ pub unsafe extern "C" fn fopen(path: *const u8, mode: *const u8) -> *mut FILE {
         Err(_) => return ptr::null_mut(),
     };
 
-    let buf_mode = if fflags & FILE_FLAG_WRITABLE != 0 {
-        BufferMode::Full
-    } else {
-        BufferMode::Full
-    };
-
-    let ptr = malloc::alloc(core::mem::size_of::<FILE>()) as *mut FILE;
-    if ptr.is_null() {
+    let stream = new_stream(fd, fflags | FILE_FLAG_OWNED_FD);
+    if stream.is_null() {
         let _ = Sys::close(fd);
+    }
+    stream
+}
+
+/// Associate a stream with an already-open descriptor.
+///
+/// POSIX: `fclose` on the result closes `fd`, and an append mode positions the
+/// descriptor at end-of-file.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn fdopen(fd: i32, mode: *const u8) -> *mut FILE {
+    if fd < 0 {
         return ptr::null_mut();
     }
+    let (oflags, fflags) = match parse_mode(mode) {
+        Some(v) => v,
+        None => return ptr::null_mut(),
+    };
 
-    ptr::write(ptr, FILE::new(fd, buf_mode, fflags | FILE_FLAG_OWNED_FD));
-    ptr
+    if oflags & O_APPEND != 0 {
+        let _ = Sys::lseek(fd, 0, SEEK_END);
+    }
+
+    new_stream(fd, fflags | FILE_FLAG_OWNED_FD)
 }
 
 #[unsafe(no_mangle)]
@@ -72,50 +111,38 @@ pub unsafe extern "C" fn fclose(stream: *mut FILE) -> i32 {
         return EOF;
     }
 
+    // Unlink first: a concurrent `fflush(NULL)` must never reach a node that is
+    // about to be freed.
+    registry::unlink(stream);
+
+    (*stream).lock.lock();
     let f = &mut *stream;
     let mut ret = 0i32;
 
-    if f.flags & FILE_FLAG_WRITABLE != 0 {
-        if f.flush_write_buf() == EOF {
-            ret = EOF;
-        }
+    if f.flags & FILE_FLAG_WRITING != 0 && f.flush_write_buf() == EOF {
+        ret = EOF;
+    }
+    if f.flags & FILE_FLAG_READING != 0 {
+        f.discard_read_ahead();
     }
 
-    if f.flags & FILE_FLAG_OWNED_FD != 0 {
-        if Sys::close(f.fd).is_err() {
-            ret = EOF;
-        }
+    if f.flags & FILE_FLAG_OWNED_FD != 0 && Sys::close(f.fd).is_err() {
+        ret = EOF;
     }
 
-    let is_static = is_standard_stream(stream);
-    if !is_static {
+    let heap = f.flags & FILE_FLAG_HEAP != 0;
+    (*stream).lock.unlock();
+
+    if heap {
         malloc::dealloc(stream as *mut c_void);
     }
 
     ret
 }
 
-fn is_standard_stream(stream: *mut FILE) -> bool {
-    unsafe {
-        stream == super::streams::stdin_file()
-            || stream == super::streams::stdout_file()
-            || stream == super::streams::stderr_file()
-    }
-}
-
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn fread(
-    ptr: *mut u8,
-    size: usize,
-    nmemb: usize,
-    stream: *mut FILE,
-) -> usize {
-    if ptr.is_null() || stream.is_null() || size == 0 || nmemb == 0 {
-        return 0;
-    }
-
+unsafe fn fread_core(ptr: *mut u8, size: usize, nmemb: usize, stream: *mut FILE) -> usize {
     let f = &mut *stream;
-    if f.flags & FILE_FLAG_READABLE == 0 {
+    if f.flags & FILE_FLAG_READABLE == 0 || !f.to_read() {
         f.flags |= FILE_FLAG_ERR;
         return 0;
     }
@@ -152,8 +179,8 @@ pub unsafe extern "C" fn fread(
 }
 
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn fwrite(
-    ptr: *const u8,
+pub unsafe extern "C" fn fread(
+    ptr: *mut u8,
     size: usize,
     nmemb: usize,
     stream: *mut FILE,
@@ -161,9 +188,32 @@ pub unsafe extern "C" fn fwrite(
     if ptr.is_null() || stream.is_null() || size == 0 || nmemb == 0 {
         return 0;
     }
+    (*stream).lock.lock();
+    let done = fread_core(ptr, size, nmemb, stream);
+    (*stream).lock.unlock();
+    done
+}
 
+/// `fread` without taking the stream lock (POSIX §2.5.1 unlocked variant).
+///
+/// # Safety
+/// The caller holds the stream lock, or the stream is thread-private.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn fread_unlocked(
+    ptr: *mut u8,
+    size: usize,
+    nmemb: usize,
+    stream: *mut FILE,
+) -> usize {
+    if ptr.is_null() || stream.is_null() || size == 0 || nmemb == 0 {
+        return 0;
+    }
+    fread_core(ptr, size, nmemb, stream)
+}
+
+unsafe fn fwrite_core(ptr: *const u8, size: usize, nmemb: usize, stream: *mut FILE) -> usize {
     let f = &mut *stream;
-    if f.flags & FILE_FLAG_WRITABLE == 0 {
+    if f.flags & FILE_FLAG_WRITABLE == 0 || !f.to_write() {
         f.flags |= FILE_FLAG_ERR;
         return 0;
     }
@@ -235,27 +285,72 @@ pub unsafe extern "C" fn fwrite(
 }
 
 #[unsafe(no_mangle)]
+pub unsafe extern "C" fn fwrite(
+    ptr: *const u8,
+    size: usize,
+    nmemb: usize,
+    stream: *mut FILE,
+) -> usize {
+    if ptr.is_null() || stream.is_null() || size == 0 || nmemb == 0 {
+        return 0;
+    }
+    (*stream).lock.lock();
+    let done = fwrite_core(ptr, size, nmemb, stream);
+    (*stream).lock.unlock();
+    done
+}
+
+/// `fwrite` without taking the stream lock (POSIX §2.5.1 unlocked variant).
+///
+/// # Safety
+/// The caller holds the stream lock, or the stream is thread-private.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn fwrite_unlocked(
+    ptr: *const u8,
+    size: usize,
+    nmemb: usize,
+    stream: *mut FILE,
+) -> usize {
+    if ptr.is_null() || stream.is_null() || size == 0 || nmemb == 0 {
+        return 0;
+    }
+    fwrite_core(ptr, size, nmemb, stream)
+}
+
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn fseek(stream: *mut FILE, offset: i64, whence: i32) -> i32 {
     if stream.is_null() {
         return -1;
     }
 
+    (*stream).lock.lock();
     let f = &mut *stream;
 
-    if f.flags & FILE_FLAG_WRITABLE != 0 {
+    if f.flags & FILE_FLAG_WRITING != 0 {
         f.flush_write_buf();
     }
 
-    // Discard read buffer
+    // A `SEEK_CUR` offset is relative to the stream position, but the fd sits
+    // `read_ahead_len()` bytes past it while the buffer holds read-ahead.
+    let effective = if whence == SEEK_CUR && f.flags & FILE_FLAG_READING != 0 {
+        offset - f.read_ahead_len()
+    } else {
+        offset
+    };
+
     f.buf_pos = 0;
     f.buf_len = 0;
     f.ungot = -1;
-    f.flags &= !(FILE_FLAG_EOF | FILE_FLAG_ERR);
+    // C11 §7.21.9.2: a successful `fseek` clears the end-of-file indicator and
+    // undoes `ungetc`. It says nothing about the error indicator.
+    f.flags &= !(FILE_FLAG_EOF | FILE_FLAG_READING | FILE_FLAG_WRITING);
 
-    match Sys::lseek(f.fd, offset, whence) {
+    let ret = match Sys::lseek(f.fd, effective, whence) {
         Ok(_) => 0,
         Err(_) => -1,
-    }
+    };
+    (*stream).lock.unlock();
+    ret
 }
 
 #[unsafe(no_mangle)]
@@ -263,50 +358,63 @@ pub unsafe extern "C" fn ftell(stream: *mut FILE) -> i64 {
     if stream.is_null() {
         return -1;
     }
+    (*stream).lock.lock();
     let f = &mut *stream;
-    match Sys::lseek(f.fd, 0, SEEK_CUR) {
+    let ret = match Sys::lseek(f.fd, 0, SEEK_CUR) {
+        // The fd offset trails the stream position by the bytes buffered for
+        // output, and leads it by the bytes buffered from input.
         Ok(pos) => {
-            // Adjust for buffered but unread data
-            let buffered_unread = f.buf_len as i64 - f.buf_pos as i64;
-            let ungot_adj = if f.ungot >= 0 { 1i64 } else { 0i64 };
-            pos - buffered_unread - ungot_adj
+            if f.flags & FILE_FLAG_WRITING != 0 {
+                pos + f.buf_pos as i64
+            } else if f.flags & FILE_FLAG_READING != 0 {
+                pos - f.read_ahead_len()
+            } else {
+                pos
+            }
         }
         Err(_) => -1,
-    }
+    };
+    (*stream).lock.unlock();
+    ret
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn rewind(stream: *mut FILE) {
     if !stream.is_null() {
+        // The stream lock is recursive, so the seek and the error-flag clear
+        // that C11 §7.21.9.5 specifies together are observed together.
+        (*stream).lock.lock();
         fseek(stream, 0, SEEK_SET);
         (*stream).flags &= !FILE_FLAG_ERR;
+        (*stream).lock.unlock();
     }
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn fflush(stream: *mut FILE) -> i32 {
     if stream.is_null() {
-        // Flush all standard streams
-        let mut ret = 0i32;
-        let out = super::streams::stdout_file();
-        if (*out).flags & FILE_FLAG_WRITABLE != 0 && (*out).flush_write_buf() == EOF {
-            ret = EOF;
-        }
-        let err = super::streams::stderr_file();
-        if (*err).flags & FILE_FLAG_WRITABLE != 0 && (*err).flush_write_buf() == EOF {
-            ret = EOF;
-        }
-        return ret;
+        return registry::flush_all(WalkMode::Blocking);
     }
 
+    (*stream).lock.lock();
     let f = &mut *stream;
-    if f.flags & FILE_FLAG_WRITABLE != 0 {
+    let ret = if f.flags & FILE_FLAG_WRITING != 0 {
         f.flush_write_buf()
+    } else if f.flags & FILE_FLAG_READING != 0 {
+        // POSIX: on an input stream, `fflush` gives back the read-ahead by
+        // repositioning the descriptor to the stream position and dropping it.
+        f.discard_read_ahead();
+        0
     } else {
         0
-    }
+    };
+    (*stream).lock.unlock();
+    ret
 }
 
+/// `feof` deliberately does not take the stream lock: the answer is a single
+/// aligned load, and POSIX §2.5.1's locking would only make a stale answer
+/// arrive later, not make it fresh.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn feof(stream: *mut FILE) -> i32 {
     if stream.is_null() {
@@ -319,6 +427,7 @@ pub unsafe extern "C" fn feof(stream: *mut FILE) -> i32 {
     }
 }
 
+/// Unlocked for the same reason as [`feof`].
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn ferror(stream: *mut FILE) -> i32 {
     if stream.is_null() {
@@ -334,7 +443,9 @@ pub unsafe extern "C" fn ferror(stream: *mut FILE) -> i32 {
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn clearerr(stream: *mut FILE) {
     if !stream.is_null() {
+        (*stream).lock.lock();
         (*stream).flags &= !(FILE_FLAG_EOF | FILE_FLAG_ERR);
+        (*stream).lock.unlock();
     }
 }
 
@@ -343,20 +454,51 @@ pub unsafe extern "C" fn setvbuf(stream: *mut FILE, _buf: *mut u8, mode: i32, _s
     if stream.is_null() {
         return -1;
     }
-    let f = &mut *stream;
-    f.mode = match mode {
+    let new_mode = match mode {
         _IOFBF => BufferMode::Full,
         _IOLBF => BufferMode::Line,
         _IONBF => BufferMode::None,
         _ => return -1,
     };
+    (*stream).lock.lock();
+    (*stream).mode = new_mode;
+    (*stream).lock.unlock();
     0
 }
 
+/// Unlocked for the same reason as [`feof`] — the descriptor never changes for
+/// the life of the stream.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn fileno(stream: *mut FILE) -> i32 {
     if stream.is_null() {
         return -1;
     }
     (*stream).fd
+}
+
+// ---------------------------------------------------------------------------
+// Explicit stream locking (POSIX §2.5.2)
+// ---------------------------------------------------------------------------
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn flockfile(stream: *mut FILE) {
+    if !stream.is_null() {
+        (*stream).lock.lock();
+    }
+}
+
+/// Returns 0 if the lock was acquired, non-zero otherwise.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ftrylockfile(stream: *mut FILE) -> i32 {
+    if stream.is_null() {
+        return -1;
+    }
+    if (*stream).lock.try_lock() { 0 } else { -1 }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn funlockfile(stream: *mut FILE) {
+    if !stream.is_null() {
+        (*stream).lock.unlock();
+    }
 }

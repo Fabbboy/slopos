@@ -168,6 +168,10 @@ path = "src/bin/tests/keymap_test.rs"
 name = "spawn_privilege_test"
 path = "src/bin/tests/spawn_privilege_test.rs"
 
+[[bin]]
+name = "stdio_stream_test"
+path = "src/bin/tests/stdio_stream_test.rs"
+
 [features]
 default = []
 testbins = []

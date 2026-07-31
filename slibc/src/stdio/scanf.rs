@@ -1,6 +1,6 @@
 use core::ffi::VaList;
 
-use super::chars::fgetc;
+use super::chars::{fgetc_unlocked, ungetc_unlocked};
 use super::streams;
 use super::{EOF, FILE};
 
@@ -244,6 +244,19 @@ unsafe fn vsscanf_impl(input: *const u8, fmt: *const u8, ap: &mut VaList<'_>) ->
 }
 
 unsafe fn vfscanf_impl(stream: *mut FILE, fmt: *const u8, ap: &mut VaList<'_>) -> i32 {
+    if stream.is_null() {
+        return EOF;
+    }
+    // One acquisition for the whole conversion, as in `vfprintf_impl`: the
+    // scan reads and pushes back bytes many times per directive, and every one
+    // of those would otherwise take the lock on its own.
+    (*stream).lock.lock();
+    let matched = vfscanf_core(stream, fmt, ap);
+    (*stream).lock.unlock();
+    matched
+}
+
+unsafe fn vfscanf_core(stream: *mut FILE, fmt: *const u8, ap: &mut VaList<'_>) -> i32 {
     let mut matched: i32 = 0;
     let mut fp = fmt;
 
@@ -251,12 +264,12 @@ unsafe fn vfscanf_impl(stream: *mut FILE, fmt: *const u8, ap: &mut VaList<'_>) -
         if is_whitespace(*fp) {
             fp = fp.add(1);
             loop {
-                let c = fgetc(stream);
+                let c = fgetc_unlocked(stream);
                 if c == EOF {
                     break;
                 }
                 if !is_whitespace(c as u8) {
-                    super::chars::ungetc(c, stream);
+                    ungetc_unlocked(c, stream);
                     break;
                 }
             }
@@ -264,7 +277,7 @@ unsafe fn vfscanf_impl(stream: *mut FILE, fmt: *const u8, ap: &mut VaList<'_>) -
         }
 
         if *fp != b'%' {
-            let c = fgetc(stream);
+            let c = fgetc_unlocked(stream);
             if c == EOF || c as u8 != *fp {
                 break;
             }
@@ -292,18 +305,18 @@ unsafe fn vfscanf_impl(stream: *mut FILE, fmt: *const u8, ap: &mut VaList<'_>) -
         match spec {
             b'd' | b'i' => {
                 loop {
-                    let c = fgetc(stream);
+                    let c = fgetc_unlocked(stream);
                     if c == EOF {
                         break;
                     }
                     if !is_whitespace(c as u8) {
-                        super::chars::ungetc(c, stream);
+                        ungetc_unlocked(c, stream);
                         break;
                     }
                 }
 
                 let mut neg = false;
-                let c = fgetc(stream);
+                let c = fgetc_unlocked(stream);
                 if c == EOF {
                     if matched == 0 {
                         return EOF;
@@ -314,26 +327,26 @@ unsafe fn vfscanf_impl(stream: *mut FILE, fmt: *const u8, ap: &mut VaList<'_>) -
                     neg = true;
                 } else if c as u8 == b'+' {
                 } else if (c as u8).is_ascii_digit() {
-                    super::chars::ungetc(c, stream);
+                    ungetc_unlocked(c, stream);
                 } else {
-                    super::chars::ungetc(c, stream);
+                    ungetc_unlocked(c, stream);
                     return matched;
                 }
 
-                let first = fgetc(stream);
+                let first = fgetc_unlocked(stream);
                 if first == EOF || !(first as u8).is_ascii_digit() {
                     if first != EOF {
-                        super::chars::ungetc(first, stream);
+                        ungetc_unlocked(first, stream);
                     }
                     return matched;
                 }
 
                 let mut val: i64 = (first as u8 - b'0') as i64;
                 loop {
-                    let d = fgetc(stream);
+                    let d = fgetc_unlocked(stream);
                     if d == EOF || !(d as u8).is_ascii_digit() {
                         if d != EOF {
-                            super::chars::ungetc(d, stream);
+                            ungetc_unlocked(d, stream);
                         }
                         break;
                     }
@@ -359,20 +372,20 @@ unsafe fn vfscanf_impl(stream: *mut FILE, fmt: *const u8, ap: &mut VaList<'_>) -
 
             b'u' => {
                 loop {
-                    let c = fgetc(stream);
+                    let c = fgetc_unlocked(stream);
                     if c == EOF {
                         break;
                     }
                     if !is_whitespace(c as u8) {
-                        super::chars::ungetc(c, stream);
+                        ungetc_unlocked(c, stream);
                         break;
                     }
                 }
 
-                let first = fgetc(stream);
+                let first = fgetc_unlocked(stream);
                 if first == EOF || !(first as u8).is_ascii_digit() {
                     if first != EOF {
-                        super::chars::ungetc(first, stream);
+                        ungetc_unlocked(first, stream);
                     }
                     if matched == 0 {
                         return EOF;
@@ -382,10 +395,10 @@ unsafe fn vfscanf_impl(stream: *mut FILE, fmt: *const u8, ap: &mut VaList<'_>) -
 
                 let mut val: u64 = (first as u8 - b'0') as u64;
                 loop {
-                    let d = fgetc(stream);
+                    let d = fgetc_unlocked(stream);
                     if d == EOF || !(d as u8).is_ascii_digit() {
                         if d != EOF {
-                            super::chars::ungetc(d, stream);
+                            ungetc_unlocked(d, stream);
                         }
                         break;
                     }
@@ -408,12 +421,12 @@ unsafe fn vfscanf_impl(stream: *mut FILE, fmt: *const u8, ap: &mut VaList<'_>) -
 
             b's' => {
                 loop {
-                    let c = fgetc(stream);
+                    let c = fgetc_unlocked(stream);
                     if c == EOF {
                         break;
                     }
                     if !is_whitespace(c as u8) {
-                        super::chars::ungetc(c, stream);
+                        ungetc_unlocked(c, stream);
                         break;
                     }
                 }
@@ -423,7 +436,7 @@ unsafe fn vfscanf_impl(stream: *mut FILE, fmt: *const u8, ap: &mut VaList<'_>) -
                     return matched;
                 }
 
-                let first = fgetc(stream);
+                let first = fgetc_unlocked(stream);
                 if first == EOF {
                     if matched == 0 {
                         return EOF;
@@ -436,10 +449,10 @@ unsafe fn vfscanf_impl(stream: *mut FILE, fmt: *const u8, ap: &mut VaList<'_>) -
                 i += 1;
 
                 loop {
-                    let c = fgetc(stream);
+                    let c = fgetc_unlocked(stream);
                     if c == EOF || is_whitespace(c as u8) {
                         if c != EOF {
-                            super::chars::ungetc(c, stream);
+                            ungetc_unlocked(c, stream);
                         }
                         break;
                     }
@@ -451,7 +464,7 @@ unsafe fn vfscanf_impl(stream: *mut FILE, fmt: *const u8, ap: &mut VaList<'_>) -
             }
 
             b'c' => {
-                let c = fgetc(stream);
+                let c = fgetc_unlocked(stream);
                 if c == EOF {
                     if matched == 0 {
                         return EOF;

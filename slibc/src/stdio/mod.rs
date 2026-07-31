@@ -2,18 +2,24 @@
 //!
 //! The Scroll of Output — every formatted byte is a spin of the Wheel of Fate.
 
+use core::ptr;
+
 use crate::pal::Pal;
 
 pub mod chars;
 pub mod file;
+pub mod lock;
 pub mod printf;
+pub mod registry;
 pub mod scanf;
-#[allow(dead_code)]
-pub(crate) mod shim;
+pub mod shim;
 pub mod streams;
 pub mod tests;
 
+pub use registry::WalkMode;
 pub use streams::{stderr, stdin, stdout};
+
+use lock::StreamLock;
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -46,6 +52,17 @@ pub const FILE_FLAG_READABLE: u32 = 4;
 pub const FILE_FLAG_WRITABLE: u32 = 8;
 /// FILE flag: fd should be closed on fclose.
 pub const FILE_FLAG_OWNED_FD: u32 = 16;
+/// FILE flag: the most recent operation was input, so the buffer holds
+/// read-ahead and the fd offset is ahead of the stream position.
+pub const FILE_FLAG_READING: u32 = 32;
+/// FILE flag: the most recent operation was output, so the buffer holds
+/// unwritten bytes and the fd offset is behind the stream position.
+pub const FILE_FLAG_WRITING: u32 = 64;
+/// FILE flag: the stream is on the open-stream list.
+pub const FILE_FLAG_LINKED: u32 = 128;
+/// FILE flag: the `FILE` itself was allocated by `fopen`/`fdopen` and must be
+/// released on `fclose`.
+pub const FILE_FLAG_HEAP: u32 = 256;
 
 /// Internal buffer size for FILE streams.
 pub const BUFSIZ: usize = 4096;
@@ -71,22 +88,34 @@ pub enum BufferMode {
 // ---------------------------------------------------------------------------
 
 /// The FILE stream abstraction — every read and write is a gamble.
+///
+/// One buffer serves both directions, so which direction it currently holds is
+/// state: `FILE_FLAG_READING` and `FILE_FLAG_WRITING` say whose bytes are in
+/// `buf`, and [`FILE::to_read`] / [`FILE::to_write`] are the only transitions
+/// between them. C11 §7.21.5.3 makes the transition the program's business on
+/// an update stream; making it the stream's business here means neither
+/// direction can silently eat the other's bytes.
 #[repr(C)]
 pub struct FILE {
     /// File descriptor.
     pub fd: i32,
-    /// Internal I/O buffer.
-    pub buf: [u8; BUFSIZ],
     /// Current position in the buffer (read or write cursor).
     pub buf_pos: usize,
     /// Number of valid bytes in buffer (meaningful for read buffers).
     pub buf_len: usize,
-    /// Stream state flags (EOF, ERR, READABLE, WRITABLE, OWNED_FD).
+    /// Stream state flags (EOF, ERR, READABLE, WRITABLE, OWNED_FD, direction,
+    /// list membership, allocation ownership).
     pub flags: u32,
     /// Buffering mode.
     pub mode: BufferMode,
     /// `ungetc` push-back slot (−1 = empty, 0–255 = pushed-back byte).
     pub ungot: i32,
+    /// Next stream on the open-stream list, or null.
+    pub next: *mut FILE,
+    /// Recursive per-stream lock (POSIX §2.5.1).
+    pub lock: StreamLock,
+    /// Internal I/O buffer. Last, so the scalars share cache lines.
+    pub buf: [u8; BUFSIZ],
 }
 
 #[allow(non_camel_case_types)]
@@ -97,18 +126,33 @@ impl FILE {
     pub const fn new_const(fd: i32, mode: BufferMode, flags: u32) -> FILE {
         FILE {
             fd,
-            buf: [0u8; BUFSIZ],
             buf_pos: 0,
             buf_len: 0,
             flags,
             mode,
             ungot: -1,
+            next: ptr::null_mut(),
+            lock: StreamLock::new(),
+            buf: [0u8; BUFSIZ],
         }
     }
 
-    /// Construct a FILE at runtime (same layout as `new_const`).
-    pub fn new(fd: i32, mode: BufferMode, flags: u32) -> FILE {
-        FILE::new_const(fd, mode, flags)
+    /// Initialise a FILE in place. Writing the fields through the destination
+    /// pointer keeps the 4 KiB buffer off the caller's stack.
+    ///
+    /// # Safety
+    /// `dst` must point at writable, suitably aligned storage of at least
+    /// `size_of::<FILE>()` bytes.
+    pub unsafe fn init_at(dst: *mut FILE, fd: i32, mode: BufferMode, flags: u32) {
+        ptr::write(&raw mut (*dst).fd, fd);
+        ptr::write(&raw mut (*dst).buf_pos, 0);
+        ptr::write(&raw mut (*dst).buf_len, 0);
+        ptr::write(&raw mut (*dst).flags, flags);
+        ptr::write(&raw mut (*dst).mode, mode);
+        ptr::write(&raw mut (*dst).ungot, -1);
+        ptr::write(&raw mut (*dst).next, ptr::null_mut());
+        ptr::write(&raw mut (*dst).lock, StreamLock::new());
+        ptr::write_bytes(&raw mut (*dst).buf as *mut u8, 0, BUFSIZ);
     }
 
     /// Flush the write buffer to the underlying fd.
@@ -163,4 +207,62 @@ impl FILE {
             }
         }
     }
+
+    /// Bytes buffered but not yet consumed by the program, including the
+    /// `ungetc` slot. The fd offset is this far ahead of the stream position.
+    pub fn read_ahead_len(&self) -> i64 {
+        let buffered = self.buf_len.saturating_sub(self.buf_pos) as i64;
+        buffered + if self.ungot >= 0 { 1 } else { 0 }
+    }
+
+    /// Rewind the fd over unconsumed read-ahead and drop it.
+    ///
+    /// Best effort: `ESPIPE` on a pipe or a terminal is the correct answer, and
+    /// the read-ahead is dropped either way.
+    pub fn discard_read_ahead(&mut self) {
+        let ahead = self.read_ahead_len();
+        if ahead > 0 {
+            let _ = crate::pal::Sys::lseek(self.fd, -ahead, SEEK_CUR);
+        }
+        self.buf_pos = 0;
+        self.buf_len = 0;
+        self.ungot = -1;
+    }
+
+    /// Enter the input direction. Returns `false` if a pending write could not
+    /// be delivered, in which case the caller must not read.
+    pub fn to_read(&mut self) -> bool {
+        if self.flags & FILE_FLAG_WRITING != 0 {
+            if self.flush_write_buf() == EOF {
+                return false;
+            }
+            self.flags &= !FILE_FLAG_WRITING;
+            self.buf_len = 0;
+        }
+        self.flags |= FILE_FLAG_READING;
+        true
+    }
+
+    /// Enter the output direction, giving back any read-ahead the program never
+    /// consumed.
+    pub fn to_write(&mut self) -> bool {
+        if self.flags & FILE_FLAG_READING != 0 {
+            self.discard_read_ahead();
+            self.flags &= !(FILE_FLAG_READING | FILE_FLAG_EOF);
+        }
+        self.flags |= FILE_FLAG_WRITING;
+        true
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Process teardown
+// ---------------------------------------------------------------------------
+
+/// Flush every open output stream on the way out of the process.
+///
+/// Bounded: a peer thread wedged in `write()` costs a few milliseconds and is
+/// then skipped, rather than turning a clean exit into a hang.
+pub fn __stdio_exit() -> i32 {
+    registry::flush_all(WalkMode::BestEffort)
 }

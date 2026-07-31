@@ -1,8 +1,7 @@
 //! Process lifecycle — the Rites of Birth and Death.
 
 pub mod atexit;
-#[allow(dead_code)]
-pub(crate) mod shim;
+pub mod shim;
 pub mod tests;
 pub mod wait;
 
@@ -143,13 +142,17 @@ pub unsafe extern "C" fn _exit(status: i32) -> ! {
 }
 
 /// Clean exit — flushes stdio, runs atexit handlers, then terminates.
+///
+/// The flush after the handlers is what C11 §7.22.4.4 requires: a handler that
+/// writes must have its bytes reach the descriptor. The flush before them is a
+/// deliberate superset, so a handler that faults or calls `_exit` cannot
+/// discard everything `main` buffered. Flushing is idempotent and
+/// order-preserving, so no conforming program can tell the two apart.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn exit(status: i32) -> ! {
-    unsafe extern "C" {
-        fn fflush(stream: *mut crate::stdio::FILE) -> i32;
-    }
-    fflush(ptr::null_mut());
+    crate::stdio::__stdio_exit();
     atexit::run_atexit_handlers();
+    crate::stdio::__stdio_exit();
     _exit(status)
 }
 

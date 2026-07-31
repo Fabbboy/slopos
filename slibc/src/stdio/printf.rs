@@ -1,7 +1,7 @@
 use core::ffi::VaList;
 
 use super::FILE;
-use super::chars::fputc;
+use super::chars::fputc_unlocked;
 use super::streams;
 
 const FLAG_LEFT: u32 = 1;
@@ -355,13 +355,22 @@ unsafe fn format_to_cb<F: FnMut(u8)>(out: &mut F, fmt: *const u8, ap: &mut VaLis
 // ---------------------------------------------------------------------------
 
 unsafe fn vfprintf_impl(stream: *mut FILE, fmt: *const u8, ap: &mut VaList<'_>) -> i32 {
-    format_to_cb(
+    if stream.is_null() {
+        return -1;
+    }
+    // One acquisition for the whole conversion: POSIX §2.5.1 requires the call
+    // to be atomic against other stdio on the stream, and taking the lock here
+    // rather than inside the emit callback keeps it off the per-byte path.
+    (*stream).lock.lock();
+    let count = format_to_cb(
         &mut |b: u8| {
-            fputc(b as i32, stream);
+            fputc_unlocked(b as i32, stream);
         },
         fmt,
         ap,
-    )
+    );
+    (*stream).lock.unlock();
+    count
 }
 
 unsafe fn vsnprintf_impl(buf: *mut u8, n: usize, fmt: *const u8, ap: &mut VaList<'_>) -> i32 {

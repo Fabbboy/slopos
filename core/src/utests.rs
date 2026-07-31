@@ -53,3 +53,4 @@ crate::utest!(
     name = utest_spawn_privilege,
     bin = "/bin/spawn_privilege_test"
 );
+crate::utest!(name = utest_stdio_stream, bin = "/bin/stdio_stream_test");

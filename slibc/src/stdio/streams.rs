@@ -3,7 +3,7 @@
 //! Three portals into the Wheel of Fate, each carrying bytes to or from
 //! the kernel's divine judgement.
 
-use super::{BufferMode, FILE, FILE_FLAG_READABLE, FILE_FLAG_WRITABLE};
+use super::{BufferMode, FILE, FILE_FLAG_LINKED, FILE_FLAG_READABLE, FILE_FLAG_WRITABLE, registry};
 
 // ---------------------------------------------------------------------------
 // Static FILE objects
@@ -27,30 +27,40 @@ pub static mut stderr: *mut FILE = &raw mut STDERR_FILE;
 // Initialization
 // ---------------------------------------------------------------------------
 
-/// Reset the standard streams to a clean state.
+/// Clear a standard stream's buffer state and flags, preserving its place on
+/// the open-stream list. Dropping `FILE_FLAG_LINKED` here would re-link an
+/// already-linked node and leave the walk spinning on `f.next == f`.
 ///
-/// Called from `__libc_start_main` (Phase 3A) to ensure buffer positions
-/// are zeroed and error flags are clear. Currently a no-op for TTY
-/// detection (stdout stays line-buffered unconditionally).
+/// # Safety
+/// `stream` must point at one of the three standard `FILE` statics.
+unsafe fn reset(stream: *mut FILE, flags: u32) {
+    let f = &mut *stream;
+    f.buf_pos = 0;
+    f.buf_len = 0;
+    f.flags = flags | (f.flags & FILE_FLAG_LINKED);
+    f.ungot = -1;
+}
+
+/// Reset the standard streams and put them on the open-stream list.
+///
+/// Called from the CRT before `main`. Buffering follows C11 §7.21.3: stdout is
+/// line-buffered when it refers to an interactive device and fully buffered
+/// otherwise; stderr is never fully buffered.
 pub fn stdio_init() {
     unsafe {
-        // Reset stdin
-        STDIN_FILE.buf_pos = 0;
-        STDIN_FILE.buf_len = 0;
-        STDIN_FILE.flags = FILE_FLAG_READABLE;
-        STDIN_FILE.ungot = -1;
+        reset(&raw mut STDIN_FILE, FILE_FLAG_READABLE);
+        reset(&raw mut STDOUT_FILE, FILE_FLAG_WRITABLE);
+        reset(&raw mut STDERR_FILE, FILE_FLAG_WRITABLE);
 
-        // Reset stdout
-        STDOUT_FILE.buf_pos = 0;
-        STDOUT_FILE.buf_len = 0;
-        STDOUT_FILE.flags = FILE_FLAG_WRITABLE;
-        STDOUT_FILE.ungot = -1;
+        STDOUT_FILE.mode = if crate::io::shim::isatty(1) != 0 {
+            BufferMode::Line
+        } else {
+            BufferMode::Full
+        };
 
-        // Reset stderr (always unbuffered)
-        STDERR_FILE.buf_pos = 0;
-        STDERR_FILE.buf_len = 0;
-        STDERR_FILE.flags = FILE_FLAG_WRITABLE;
-        STDERR_FILE.ungot = -1;
+        registry::link(&raw mut STDIN_FILE);
+        registry::link(&raw mut STDOUT_FILE);
+        registry::link(&raw mut STDERR_FILE);
     }
 }
 
@@ -58,29 +68,20 @@ pub fn stdio_init() {
 // Internal stream access helpers
 // ---------------------------------------------------------------------------
 
-/// Get a mutable reference to the static stdout FILE object.
-///
-/// # Safety
-/// Caller must ensure no concurrent access to stdout.
+/// Get a pointer to the static stdout FILE object.
 #[inline]
-pub(crate) unsafe fn stdout_file() -> *mut FILE {
+pub fn stdout_file() -> *mut FILE {
     &raw mut STDOUT_FILE
 }
 
-/// Get a mutable reference to the static stderr FILE object.
-///
-/// # Safety
-/// Caller must ensure no concurrent access to stderr.
+/// Get a pointer to the static stderr FILE object.
 #[inline]
-pub(crate) unsafe fn stderr_file() -> *mut FILE {
+pub fn stderr_file() -> *mut FILE {
     &raw mut STDERR_FILE
 }
 
-/// Get a mutable reference to the static stdin FILE object.
-///
-/// # Safety
-/// Caller must ensure no concurrent access to stdin.
+/// Get a pointer to the static stdin FILE object.
 #[inline]
-pub(crate) unsafe fn stdin_file() -> *mut FILE {
+pub fn stdin_file() -> *mut FILE {
     &raw mut STDIN_FILE
 }

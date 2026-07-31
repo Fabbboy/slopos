@@ -107,35 +107,6 @@ claim to user address spaces.
 
 ---
 
-## slibc keeps no open-stream list, so `exit()` loses buffered writes
-
-**Status**: Open
-**Severity**: Low (nothing in the tree calls `fopen`)
-**Component**: `slibc/src/stdio/`
-
-`fflush(NULL)` explicitly flushes only `stdout` and `stderr` and returns
-(`slibc/src/stdio/file.rs:287-300`); there is no registry of open streams to walk.
-`fopen` mallocs a `FILE` and never links it into a list (`:40-66`), and writable
-streams default to `BufferMode::Full`, holding up to 4096 bytes each. `exit()`
-calls `fflush(NULL)` (`slibc/src/process/mod.rs:147-153`), so every `fopen`'d write
-stream loses its buffer at process exit. This violates C11 §7.22.4.4.
-
-Latent today: nothing in the repository calls `fopen`/`fdopen`/`fclose`, slibc
-ships rlib-only with no C consumers, and the Rust userland's file, stdout and exit
-paths all bypass C stdio.
-
-Related and in the same module: stdio is completely unlocked while slibc ships
-`pthread_create` and backs Rust's `std::thread`, and a `FILE` shares one buffer
-between read and write cursors with no direction state, so an `r+`/`w+` direction
-switch loses writes or flushes read-ahead into the file.
-
-Fix: an intrusive open-stream list linked on `fopen`/`fdopen`, unlinked on
-`fclose`, walked by `fflush(NULL)` and by a new `__stdio_exit` called from `exit`.
-It needs the same lock as per-stream thread safety, so land the two together, and
-add the direction-state field while the file is open.
-
----
-
 ## Multi-CPU userland blocked by a buddy/slab cross-CPU TLB-shootdown deadlock
 
 **Status**: Open (thread-per-core *scheduler* half resolved; the *allocator* half is the blocker)  
