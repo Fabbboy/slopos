@@ -10,6 +10,29 @@ pub fn is_space(b: u8) -> bool {
     b == b' ' || b == b'\t' || b == b'\n' || b == b'\r'
 }
 
+/// Trim a `#` comment from `line`.
+///
+/// `#` only starts a comment at the beginning of a word and outside quotes, so
+/// `echo a#b` keeps its `#` and `echo "# not a comment"` keeps the whole
+/// string.  Run before expansion, so a variable's value can never be spliced
+/// out of a comment and back into the command.
+pub fn strip_comment(line: &[u8]) -> &[u8] {
+    let mut in_single = false;
+    let mut in_double = false;
+    let mut at_word_start = true;
+
+    for (i, &c) in line.iter().enumerate() {
+        match c {
+            b'\'' if !in_double => in_single = !in_single,
+            b'"' if !in_single => in_double = !in_double,
+            b'#' if at_word_start && !in_single && !in_double => return &line[..i],
+            _ => {}
+        }
+        at_word_start = is_space(c);
+    }
+    line
+}
+
 pub fn normalize_path(input: &[u8], buffer: &mut [u8]) -> i32 {
     let cwd = super::cwd_bytes();
     normalize_path_with_cwd(input, buffer, &cwd)
@@ -259,6 +282,13 @@ pub fn shell_parse_line(line: &[u8], tokens: &mut buffers::ParsedTokens) -> i32 
             cursor += 1;
         }
         if cursor >= line.len() || line[cursor] == 0 {
+            break;
+        }
+
+        // A word starting with `#` comments out the rest of the line.  Sitting
+        // before the operator and word branches, and after the whitespace skip,
+        // gives it the POSIX word-boundary rule without a special case.
+        if line[cursor] == b'#' {
             break;
         }
 

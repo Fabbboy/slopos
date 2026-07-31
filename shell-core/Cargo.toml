@@ -1,0 +1,17 @@
+[package]
+name = "slopos-shell-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Shell script-reading core: line framing that never over-reads its input, host-testable"
+
+[lints]
+workspace = true
+
+[lib]
+path = "src/lib.rs"
+crate-type = ["rlib"]
+
+doctest = false
+
+[dependencies]

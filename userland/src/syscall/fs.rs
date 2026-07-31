@@ -13,7 +13,7 @@ use super::error::{SyscallResult, demux};
 use super::numbers::*;
 use super::raw::{syscall1, syscall2, syscall3};
 use slopos_abi::syscall::{
-    TIOCGPTPEER, TIOCGWINSZ, TIOCSCTTY, TIOCSWINSZ, UserPollFd, UserTermios, UserTimeval,
+    TIOCGPTPEER, TIOCGSID, TIOCGWINSZ, TIOCSCTTY, TIOCSWINSZ, UserPollFd, UserTermios, UserTimeval,
     UserWinsize,
 };
 use slopos_abi::{UserFsList, UserFsStat};
@@ -291,6 +291,25 @@ pub fn tiocsctty(fd: RawFd) -> SyscallResult<()> {
     demux(result).map(|_| ())
 }
 
+/// Session id owning the terminal on `fd` (TIOCGSID ioctl).
+///
+/// Fails when `fd` is not a terminal or the terminal has no session — which is
+/// how a shell tells "nobody owns this yet, claiming it is mine to do" from
+/// "someone is already using it, taking it would strand them".
+#[inline(always)]
+pub fn tcgetsid(fd: RawFd) -> SyscallResult<u32> {
+    let mut sid = 0u32;
+    let result = unsafe {
+        syscall3(
+            SYSCALL_IOCTL,
+            fd as u64,
+            TIOCGSID,
+            (&mut sid as *mut u32) as u64,
+        )
+    };
+    demux(result).map(|_| sid)
+}
+
 /// Open the PTY slave peer of a master FD (TIOCGPTPEER ioctl). The new fd
 /// shares the slave's open state with every other slave fd.
 #[inline(always)]
@@ -312,6 +331,17 @@ pub fn tcgetattr(fd: RawFd) -> SyscallResult<UserTermios> {
         )
     };
     demux(result).map(|_| t)
+}
+
+/// POSIX `isatty(3)`: true when `fd` refers to a terminal.
+///
+/// A TCGETS probe is the whole implementation, and it is exact here rather than
+/// approximate: `syscall_ioctl` resolves the descriptor through
+/// `file_get_tty_index`, which yields nothing unless the file's kind is `Tty`,
+/// so a pipe or a regular file takes the `EINVAL` path.
+#[inline]
+pub fn isatty(fd: RawFd) -> bool {
+    tcgetattr(fd).is_ok()
 }
 
 #[inline(always)]

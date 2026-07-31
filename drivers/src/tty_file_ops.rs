@@ -54,8 +54,14 @@ impl FileOps for TtyFileOps {
         let Some(th) = TtyHandle::from_usize(handle) else {
             return Errno::EBADF.as_isize();
         };
+        if buf.is_empty() {
+            return 0;
+        }
         let nonblock = (flags & slopos_abi::syscall::O_NONBLOCK as u32) != 0;
-        let mut tmp = match slopos_ostd::KVec::<u8>::zeroed(IO_STAGING_SIZE) {
+        // Sized to the request, capped at the staging bound: a line editor
+        // reading keystrokes one byte at a time must not cost a 4 KiB kernel
+        // allocation per byte.
+        let mut tmp = match slopos_ostd::KVec::<u8>::zeroed(buf.len().min(IO_STAGING_SIZE)) {
             Ok(v) => v,
             Err(_) => return Errno::ENOMEM.as_isize(),
         };
@@ -82,8 +88,11 @@ impl FileOps for TtyFileOps {
         let Some(th) = TtyHandle::from_usize(handle) else {
             return Errno::EBADF.as_isize();
         };
+        if buf.is_empty() {
+            return 0;
+        }
         let nonblock = (flags & slopos_abi::syscall::O_NONBLOCK as u32) != 0;
-        let mut staging = match slopos_ostd::KVec::<u8>::zeroed(IO_STAGING_SIZE) {
+        let mut staging = match slopos_ostd::KVec::<u8>::zeroed(buf.len().min(IO_STAGING_SIZE)) {
             Ok(v) => v,
             Err(_) => return Errno::ENOMEM.as_isize(),
         };

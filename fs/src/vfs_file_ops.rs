@@ -101,7 +101,13 @@ impl FileOps for VfsFileOps {
             return Errno::EBADF.as_isize();
         };
 
-        let mut staging = match slopos_ostd::KVec::<u8>::zeroed(IO_STAGING_SIZE) {
+        if buf.is_empty() {
+            return 0;
+        }
+        // Sized to the request, capped at the staging bound: a shell reading a
+        // script one byte at a time must not cost a 4 KiB kernel allocation per
+        // byte. Larger requests still iterate the loop below at IO_STAGING_SIZE.
+        let mut staging = match slopos_ostd::KVec::<u8>::zeroed(buf.len().min(IO_STAGING_SIZE)) {
             Ok(v) => v,
             Err(_) => return Errno::ENOMEM.as_isize(),
         };
@@ -109,7 +115,7 @@ impl FileOps for VfsFileOps {
         let want = buf.len();
 
         while total < want {
-            let chunk = (want - total).min(IO_STAGING_SIZE);
+            let chunk = (want - total).min(staging.len());
             match fs.read(inode, offset + total as u64, &mut staging[..chunk]) {
                 Ok(0) => break,
                 Ok(n) => match buf.copy_in(total, &staging[..n]) {
@@ -144,7 +150,10 @@ impl FileOps for VfsFileOps {
             return Errno::EBADF.as_isize();
         };
 
-        let mut staging = match slopos_ostd::KVec::<u8>::zeroed(IO_STAGING_SIZE) {
+        if buf.is_empty() {
+            return 0;
+        }
+        let mut staging = match slopos_ostd::KVec::<u8>::zeroed(buf.len().min(IO_STAGING_SIZE)) {
             Ok(v) => v,
             Err(_) => return Errno::ENOMEM.as_isize(),
         };
@@ -152,7 +161,7 @@ impl FileOps for VfsFileOps {
         let want = buf.len();
 
         while total < want {
-            let chunk = (want - total).min(IO_STAGING_SIZE);
+            let chunk = (want - total).min(staging.len());
             let n = match buf.copy_out(total, &mut staging[..chunk]) {
                 Ok(n) if n > 0 => n,
                 Ok(_) => break,

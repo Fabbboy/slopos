@@ -42,6 +42,14 @@ pub fn mark_forked_child() {
     IN_FORKED_CHILD.store(true, Ordering::Release);
 }
 
+/// True in a process forked to run one pipeline stage.
+///
+/// Such a process is a subshell: a builtin that would end the shell ends only
+/// the stage, and one that would consult shell-wide state must not.
+pub fn in_forked_child() -> bool {
+    IN_FORKED_CHILD.load(Ordering::Acquire)
+}
+
 /// Cancellation point for long-running builtin loops.  Reports and consumes
 /// the interrupt flag set asynchronously by [`record_sigint`].
 pub fn take_pending() -> bool {

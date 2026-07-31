@@ -2,18 +2,28 @@ use core::ffi::c_char;
 use core::ptr;
 
 use crate::program_registry;
-use crate::syscall::{POLLIN, UserFsStat, UserPollFd, core as sys_core, fs, process};
+use crate::syscall::{UserFsStat, core as sys_core, fs, process};
 use slopos_abi::fs::{O_APPEND, O_CREAT, O_RDONLY, O_WRONLY};
 
 use super::buffers::ParsedTokens;
 use super::builtins;
-use super::display::{shell_clear_output_fd, shell_set_output_fd, shell_write};
+use super::display::{
+    shell_clear_output_fd, shell_error, shell_error_named, shell_set_output_fd, shell_write,
+};
 use super::jobs;
 use super::parser::{SHELL_MAX_TOKENS, normalize_path};
 use std::sync::atomic::{AtomicU32, Ordering};
 
 const MAX_PIPE_CMDS: usize = 8;
 const MAX_REDIRECTS: usize = 4;
+
+/// The shell could not parse the line.  POSIX reserves 2 for the shell's own
+/// usage errors, distinct from any status a command could return.
+pub const STATUS_SYNTAX_ERROR: i32 = 2;
+/// The command was found but could not be executed.
+pub const STATUS_CANNOT_EXECUTE: i32 = 126;
+/// No such command.
+pub const STATUS_NOT_FOUND: i32 = 127;
 
 /// Signals a forked job resets to SIG_DFL before running a command — the shell
 /// catches SIGINT and ignores SIGTTOU/SIGTTIN/SIGTSTP, none of which a launched
@@ -108,9 +118,26 @@ pub fn clear_foreground_pgid() {
     FOREGROUND_PGID.store(0, Ordering::Relaxed);
 }
 
+/// Claim the terminal and become a session leader — interactive shells only.
+///
+/// POSIX gives job control to the shell a user is typing at, and to no other.
+/// A shell running a script must stay in the process group its parent placed it
+/// in: that group is the terminal's foreground group, so a Ctrl+C the user
+/// aimed at the pipeline reaches the script *and* the commands it is running.
+/// Taking a session of its own would move it out of reach of the keyboard
+/// entirely.
 pub fn initialize_job_control() {
-    let _ = process::setsid();
-    let _ = fs::tiocsctty(0);
+    if !super::is_interactive() {
+        return;
+    }
+
+    // Only claim a session when there is no terminal to steal.  A successful
+    // TIOCGSID means some other session already owns this terminal, and
+    // detaching it from them would leave them unable to read their own input.
+    if fs::tcgetsid(0).is_err() {
+        let _ = process::setsid();
+        let _ = fs::tiocsctty(0);
+    }
 
     process::ignore_signal(slopos_abi::signal::SIGTTOU);
     process::ignore_signal(slopos_abi::signal::SIGTTIN);
@@ -129,7 +156,7 @@ fn shell_pgid() -> u32 {
 }
 
 pub fn enter_foreground(pgid: u32) {
-    if pgid == 0 {
+    if pgid == 0 || !super::is_interactive() {
         return;
     }
     set_foreground_pgid(pgid);
@@ -137,6 +164,9 @@ pub fn enter_foreground(pgid: u32) {
 }
 
 pub fn leave_foreground() {
+    if !super::is_interactive() {
+        return;
+    }
     let pgid = shell_pgid();
     if pgid != 0 {
         let _ = fs::tcsetpgrp(0, pgid);
@@ -373,11 +403,26 @@ fn command_resolves(cmd: &ParsedCommand, tokens: &ParsedTokens) -> bool {
 
 fn print_background_job_started(job_id: u16, pid: u32) {
     super::set_last_bg_pid(pid);
+    // Job bookkeeping is a message to the user, not program output: a script's
+    // stdout is somebody's data.
+    if !super::is_interactive() {
+        return;
+    }
     shell_write(b"[");
     jobs::write_u64(job_id as u64);
     shell_write(b"] ");
     jobs::write_u64(pid as u64);
     shell_write(b"\n");
+}
+
+/// Wait for one child to exit and report its status.
+fn wait_for(pid: u32) -> i32 {
+    loop {
+        if let Some(st) = process::waitpid_nohang(pid) {
+            return st;
+        }
+        sys_core::sleep_ms(5);
+    }
 }
 
 fn execute_registry_spawn(
@@ -389,23 +434,6 @@ fn execute_registry_spawn(
         return None;
     }
     let spec = registry_spec_for_command(cmd, tokens)?;
-    let capture = !spec.gui && !background;
-
-    // Capture jobs stream the child's stdout through a pipe the shell drains;
-    // non-capture jobs write straight to the shell's own stdout.
-    let mut read_fd = -1i32;
-    let mut write_fd = -1i32;
-    if capture {
-        let (r, w) = match fs::pipe() {
-            Ok(pair) => pair,
-            Err(_) => {
-                shell_write(b"pipe failed\n");
-                return Some(1);
-            }
-        };
-        read_fd = r.into_raw();
-        write_fd = w.into_raw();
-    }
 
     // Foreground jobs get their own pgrp AND the kernel-side atomic
     // foreground handoff: the child's pgrp becomes the terminal's
@@ -413,7 +441,14 @@ fn execute_registry_spawn(
     // fd-0 read can never lose the race against the parent's
     // `enter_foreground` below (which is kept as shell-side state
     // bookkeeping and is an idempotent re-set kernel-side).
-    let spawn_flags = if background {
+    // The kernel's foreground handoff resolves its target terminal from the
+    // task's inherited controlling tty, not from fd 0.  A shell running a
+    // script shares its parent's terminal, so asking for the handoff would
+    // hand the *user's* foreground process group to this child — and nothing
+    // would ever give it back, because a script shell's `tcsetpgrp` has a pipe
+    // on fd 0 and cannot restore it.  Only a shell that owns the terminal may
+    // ask.
+    let spawn_flags = if background || !super::is_interactive() {
         spec.flags
     } else {
         spec.flags | slopos_abi::task::TASK_FLAG_NEW_PGRP | slopos_abi::task::TASK_FLAG_FOREGROUND
@@ -433,13 +468,13 @@ fn execute_registry_spawn(
         argv_ptrs[i] = arg_bufs[i].as_ptr();
     }
 
-    // The child's empty table inherits exactly the shell's stdin/stderr plus a
-    // stdout taken from either the capture pipe or the shell's own fd 1. The
-    // pipe read end is never in the actions, so it does not leak into the child.
-    let stdout_src = if capture { write_fd } else { 1 };
+    // The child's empty table inherits exactly the shell's own stdin, stdout
+    // and stderr.  A foreground command writes straight to the terminal, so
+    // `isatty(1)` is true for it, its stdio stays line-buffered, and its output
+    // appears as it is produced rather than when it exits.
     let actions = [
         process::clone_fd(0, 0),
-        process::clone_fd(stdout_src, 1),
+        process::clone_fd(1, 1),
         process::clone_fd(2, 2),
     ];
     let tid = process::spawn_path_with_actions(
@@ -451,16 +486,8 @@ fn execute_registry_spawn(
         0,
     );
 
-    // Drop the shell's copy of the write end so the child holds the only
-    // writer — the drain loop then sees EOF when the child exits.
-    if capture {
-        let _ = fs::close_fd_raw(write_fd);
-    }
     if tid <= 0 {
-        if capture {
-            let _ = fs::close_fd_raw(read_fd);
-        }
-        shell_write(b"spawn failed\n");
+        shell_error(b"sh: spawn failed\n");
         return Some(1);
     }
     let pid = tid as u32;
@@ -475,65 +502,18 @@ fn execute_registry_spawn(
         if let Some(job_id) = jobs::add(pid, pid, &cmd_buf[..len]) {
             print_background_job_started(job_id, pid);
         } else {
-            shell_write(b"jobs: table full\n");
+            shell_error(b"sh: job table full\n");
         }
         return Some(0);
     }
 
     // Confirm pgid (child already has it via TASK_FLAG_NEW_PGRP) and set fg.
-    let _ = process::setpgid(pid, pid);
+    if super::is_interactive() {
+        let _ = process::setpgid(pid, pid);
+    }
     enter_foreground(pid);
 
-    // Stream child stdout to the shell display in real-time.
-    // The pipe read-end MUST be non-blocking so the inner drain loop
-    // returns EAGAIN when all available data is consumed instead of
-    // blocking forever (which would hang for long-running children like nc).
-    let status = if capture {
-        let _ = crate::syscall::fs::set_fd_nonblocking(read_fd);
-        let mut buf = [0u8; 512];
-        let exit_status;
-        loop {
-            let mut pfds = [UserPollFd {
-                fd: read_fd,
-                events: POLLIN,
-                revents: 0,
-            }];
-            let _ = fs::poll(&mut pfds, 10);
-
-            loop {
-                match fs::read_slice(read_fd, &mut buf) {
-                    Ok(0) => break,
-                    Ok(n) => {
-                        shell_write(&buf[..n]);
-                    }
-                    Err(_) => break,
-                }
-            }
-
-            if let Some(st) = process::waitpid_nohang(pid) {
-                loop {
-                    match fs::read_slice(read_fd, &mut buf) {
-                        Ok(0) => break,
-                        Ok(n) => {
-                            shell_write(&buf[..n]);
-                        }
-                        Err(_) => break,
-                    }
-                }
-                exit_status = st;
-                break;
-            }
-        }
-        let _ = fs::close_fd_raw(read_fd);
-        exit_status
-    } else {
-        loop {
-            if let Some(st) = process::waitpid_nohang(pid) {
-                break st;
-            }
-            sys_core::sleep_ms(5);
-        }
-    };
+    let status = wait_for(pid);
     leave_foreground();
     Some(status)
 }
@@ -580,7 +560,7 @@ fn apply_redirects_for_builtin(
 
     for redir in &cmd.redirects[..cmd.redirect_count] {
         let Ok((target_fd, opened_fd)) = open_redirect_target(*redir, tokens, &mut path_buf) else {
-            shell_write(b"redirection failed\n");
+            shell_error(b"sh: cannot redirect\n");
             return false;
         };
 
@@ -596,7 +576,7 @@ fn apply_redirects_for_builtin(
             Ok(fd) => fd.into_raw(),
             Err(_) => {
                 let _ = fs::close_fd_raw(opened_fd);
-                shell_write(b"redirection failed\n");
+                shell_error(b"sh: cannot redirect\n");
                 return false;
             }
         };
@@ -604,7 +584,7 @@ fn apply_redirects_for_builtin(
         if fs::dup2(opened_fd, target_fd).is_err() {
             let _ = fs::close_fd_raw(opened_fd);
             let _ = fs::close_fd_raw(backup);
-            shell_write(b"redirection failed\n");
+            shell_error(b"sh: cannot redirect\n");
             return false;
         }
         let _ = fs::close_fd_raw(opened_fd);
@@ -676,10 +656,17 @@ fn run_in_child(
     pgid: u32,
     foreground: bool,
 ) -> ! {
-    if pgid == 0 {
-        let _ = process::setpgid(0, 0);
-    } else {
-        let _ = process::setpgid(0, pgid);
+    // A script shell performs no job control: its children stay in the process
+    // group it was placed in, which is the terminal's foreground group, so a
+    // Ctrl+C aimed at the pipeline reaches them too.
+    let job_control = super::is_interactive();
+
+    if job_control {
+        if pgid == 0 {
+            let _ = process::setpgid(0, 0);
+        } else {
+            let _ = process::setpgid(0, pgid);
+        }
     }
 
     // Both-sides foreground handoff (foreground jobs only — a `&` pipeline
@@ -689,7 +676,7 @@ fn run_in_child(
     // the sigdefault reset below — at this point SIGTTOU is still
     // inherited-ignored from the shell, so the not-yet-foreground child's
     // tcsetpgrp proceeds instead of being denied.
-    if foreground {
+    if foreground && job_control {
         let fg_pgid = if pgid == 0 {
             process::getpid() as u32
         } else {
@@ -709,13 +696,13 @@ fn run_in_child(
 
     if stdin_fd >= 0 {
         if fs::dup2(stdin_fd, 0).is_err() {
-            let _ = crate::syscall::tty::write(b"dup2 stdin failed\n");
+            let _ = shell_error(b"sh: cannot set up stdin\n");
             sys_core::exit_with_code(1);
         }
     }
     if stdout_fd >= 0 {
         if fs::dup2(stdout_fd, 1).is_err() {
-            let _ = crate::syscall::tty::write(b"dup2 stdout failed\n");
+            let _ = shell_error(b"sh: cannot set up stdout\n");
             sys_core::exit_with_code(1);
         }
     }
@@ -732,7 +719,7 @@ fn run_in_child(
         for redir in &cmd.redirects[..cmd.redirect_count] {
             let Ok((target_fd, opened_fd)) = open_redirect_target(*redir, tokens, &mut path_buf)
             else {
-                let _ = crate::syscall::tty::write(b"redirection failed\n");
+                let _ = shell_error(b"sh: cannot redirect\n");
                 sys_core::exit_with_code(1);
             };
             if target_fd == 1 {
@@ -743,7 +730,7 @@ fn run_in_child(
                 continue;
             }
             if fs::dup2(opened_fd, target_fd).is_err() {
-                let _ = crate::syscall::tty::write(b"redirection failed\n");
+                let _ = shell_error(b"sh: cannot redirect\n");
                 let _ = fs::close_fd_raw(opened_fd);
                 sys_core::exit_with_code(1);
             }
@@ -766,11 +753,11 @@ fn run_in_child(
     let mut path_buf = [0u8; 256];
     for redir in &cmd.redirects[..cmd.redirect_count] {
         let Ok((target_fd, opened_fd)) = open_redirect_target(*redir, tokens, &mut path_buf) else {
-            let _ = crate::syscall::tty::write(b"redirection failed\n");
+            let _ = shell_error(b"sh: cannot redirect\n");
             sys_core::exit_with_code(1);
         };
         if fs::dup2(opened_fd, target_fd).is_err() {
-            let _ = crate::syscall::tty::write(b"redirection failed\n");
+            let _ = shell_error(b"sh: cannot redirect\n");
             let _ = fs::close_fd_raw(opened_fd);
             sys_core::exit_with_code(1);
         }
@@ -779,7 +766,8 @@ fn run_in_child(
 
     let name = tokens.token(cmd.argv[0]);
     if !resolve_exec_path(name, &mut path_buf) {
-        sys_core::exit_with_code(127);
+        shell_error_named(name, b"not found");
+        sys_core::exit_with_code(STATUS_NOT_FOUND);
     }
 
     // Build raw-pointer argv for the execve syscall ABI boundary.
@@ -796,11 +784,14 @@ fn run_in_child(
     }
     argv_ptrs[cmd.argc] = ptr::null();
 
+    // The path resolved but the image would not run — a different failure from
+    // "no such command", and POSIX gives it its own status so a caller can tell
+    // a typo from an unexecutable file.
     let rc = process::execve(path_buf.as_ptr(), argv_ptrs.as_ptr(), ptr::null());
     if rc < 0 {
-        let _ = crate::syscall::tty::write(b"exec failed\n");
+        shell_error_named(name, b"cannot execute");
     }
-    sys_core::exit_with_code(127);
+    sys_core::exit_with_code(STATUS_CANNOT_EXECUTE);
 }
 
 fn execute_single_builtin(cmd: &ParsedCommand, tokens: &ParsedTokens) -> i32 {
@@ -839,10 +830,11 @@ fn execute_single_builtin(cmd: &ParsedCommand, tokens: &ParsedTokens) -> i32 {
 }
 
 fn execute_pipeline(pipeline: &ParsedPipeline, tokens: &ParsedTokens) -> i32 {
+    // One pipe between each adjacent pair of stages, and nothing else: the last
+    // stage inherits the shell's own stdout, so its output reaches the terminal
+    // directly rather than through the shell.
     let inter_pipes = pipeline.command_count.saturating_sub(1);
-    let capture_output = !pipeline.background;
-
-    let total_pipes = inter_pipes + if capture_output { 1 } else { 0 };
+    let total_pipes = inter_pipes;
     let mut pipes = [[-1; 2]; MAX_PIPE_CMDS];
     for pair in pipes.iter_mut().take(total_pipes) {
         match fs::pipe() {
@@ -851,7 +843,7 @@ fn execute_pipeline(pipeline: &ParsedPipeline, tokens: &ParsedTokens) -> i32 {
                 pair[1] = w.into_raw();
             }
             Err(_) => {
-                shell_write(b"pipe failed\n");
+                shell_error(b"sh: cannot create pipe\n");
                 for p in pipes.iter().take(total_pipes) {
                     if p[0] >= 0 {
                         let _ = fs::close_fd_raw(p[0]);
@@ -870,17 +862,11 @@ fn execute_pipeline(pipeline: &ParsedPipeline, tokens: &ParsedTokens) -> i32 {
 
     for i in 0..pipeline.command_count {
         let stdin_fd = if i > 0 { pipes[i - 1][0] } else { -1 };
-        let stdout_fd = if i < inter_pipes {
-            pipes[i][1]
-        } else if capture_output {
-            pipes[inter_pipes][1]
-        } else {
-            -1
-        };
+        let stdout_fd = if i < inter_pipes { pipes[i][1] } else { -1 };
 
         let pid = process::fork();
         if pid < 0 {
-            shell_write(b"fork failed\n");
+            shell_error(b"sh: cannot fork\n");
             for pair in pipes.iter().take(total_pipes) {
                 let _ = fs::close_fd_raw(pair[0]);
                 let _ = fs::close_fd_raw(pair[1]);
@@ -903,8 +889,10 @@ fn execute_pipeline(pipeline: &ParsedPipeline, tokens: &ParsedTokens) -> i32 {
         let child_pid = pid as u32;
         if pgid == 0 {
             pgid = child_pid;
-            let _ = process::setpgid(child_pid, child_pid);
-        } else {
+            if super::is_interactive() {
+                let _ = process::setpgid(child_pid, child_pid);
+            }
+        } else if super::is_interactive() {
             let _ = process::setpgid(child_pid, pgid);
         }
         pids[i] = child_pid;
@@ -927,87 +915,20 @@ fn execute_pipeline(pipeline: &ParsedPipeline, tokens: &ParsedTokens) -> i32 {
         if let Some(job_id) = jobs::add(pgid, pgid, &cmd_buf[..cmd_len]) {
             print_background_job_started(job_id, pgid);
         } else {
-            shell_write(b"jobs: table full\n");
+            shell_error(b"sh: job table full\n");
         }
         return 0;
     }
 
     enter_foreground(pgid);
 
-    let capture_fd = pipes[inter_pipes][0];
-    if capture_fd >= 0 {
-        // Non-blocking read + poll so the drain loop returns promptly when
-        // all available data is consumed instead of blocking on a child that
-        // is still running.
-        let _ = crate::syscall::fs::set_fd_nonblocking(capture_fd);
-        let mut buf = [0u8; 512];
-        let mut all_exited = false;
-        let mut status = 0;
-        let cmd_count = pipeline.command_count;
-        let mut reaped = [false; 16];
-        loop {
-            let mut pfds = [UserPollFd {
-                fd: capture_fd,
-                events: POLLIN,
-                revents: 0,
-            }];
-            let _ = fs::poll(&mut pfds, 10);
-
-            loop {
-                match fs::read_slice(capture_fd, &mut buf) {
-                    Ok(0) => break,
-                    Ok(n) => {
-                        shell_write(&buf[..n]);
-                    }
-                    Err(_) => break,
-                }
-            }
-
-            if !all_exited {
-                let mut done = true;
-                for (idx, pid) in pids.iter().take(cmd_count).enumerate() {
-                    if reaped[idx] {
-                        continue;
-                    }
-                    if let Some(st) = process::waitpid_nohang(*pid) {
-                        reaped[idx] = true;
-                        if idx == cmd_count - 1 {
-                            status = st;
-                        }
-                    } else {
-                        done = false;
-                    }
-                }
-                if done {
-                    all_exited = true;
-                }
-            } else {
-                // Children exited -- drain remaining data then stop.
-                break;
-            }
-        }
-        loop {
-            match fs::read_slice(capture_fd, &mut buf) {
-                Ok(0) => break,
-                Ok(n) => {
-                    shell_write(&buf[..n]);
-                }
-                Err(_) => break,
-            }
-        }
-        let _ = fs::close_fd_raw(capture_fd);
-        leave_foreground();
-        return status;
-    }
-
+    // Every stage is waited for, so none is left a zombie, but the pipeline's
+    // status is the last stage's — that is the one whose output the caller saw.
     let mut status = 0;
-    for pid in pids.iter().take(pipeline.command_count) {
-        loop {
-            if let Some(st) = process::waitpid_nohang(*pid) {
-                status = st;
-                break;
-            }
-            sys_core::sleep_ms(5);
+    for (idx, pid) in pids.iter().take(pipeline.command_count).enumerate() {
+        let st = wait_for(*pid);
+        if idx == pipeline.command_count - 1 {
+            status = st;
         }
     }
     leave_foreground();
@@ -1019,8 +940,8 @@ pub fn execute_tokens(tokens: &ParsedTokens) -> i32 {
 
     let mut pipeline = ParsedPipeline::empty();
     if parse_pipeline(tokens, &mut pipeline).is_err() {
-        shell_write(b"syntax error\n");
-        return 1;
+        shell_error(b"sh: syntax error\n");
+        return STATUS_SYNTAX_ERROR;
     }
 
     simplify_pipeline(&mut pipeline, tokens);
@@ -1044,7 +965,8 @@ pub fn execute_tokens(tokens: &ParsedTokens) -> i32 {
 
     for cmd in pipeline.commands.iter().take(pipeline.command_count) {
         if !command_resolves(cmd, tokens) {
-            return 127;
+            shell_error_named(tokens.token(cmd.argv[0]), b"not found");
+            return STATUS_NOT_FOUND;
         }
     }
 

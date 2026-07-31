@@ -360,6 +360,14 @@ pub static BUILTINS: &[BuiltinEntry] = &[
         category: Process,
         func: process::cmd_exec,
     },
+    BuiltinEntry {
+        name: "exit",
+        desc: "Exit the shell",
+        usage: "exit [n]",
+        detail: "End the shell with status n, or with the status of\nthe last command when n is omitted.",
+        category: Process,
+        func: process::cmd_exit,
+    },
     // ── Environment ─────────────────────────────────────────────────────────
     BuiltinEntry {
         name: "export",

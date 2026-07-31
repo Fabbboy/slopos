@@ -21,6 +21,7 @@ use super::display::shell_write;
 use super::history;
 use super::parser::shell_parse_line;
 
+use std::collections::VecDeque;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -49,7 +50,14 @@ const CTRL_W: u8 = 0x17;
 const ESC: u8 = 0x1b;
 
 const STDIN_FD: i32 = 0;
-const READ_CHUNK: usize = 256;
+
+/// The editor reads one byte per `read(2)`, as GNU readline does, and for the
+/// same reason: fd 0 is shared with every command the shell launches, so
+/// anything read ahead of the newline is either dropped on the floor or stolen
+/// from the program about to run.  Type-ahead entered while `nc` is running
+/// belongs to `nc`.  A chunked read cannot express that; a one-byte read cannot
+/// violate it.
+const READ_CHUNK: usize = 1;
 
 /// Default editor width when `tiocgwinsz(0)` fails (no terminal wired).
 const DEFAULT_COLS: usize = 80;
@@ -62,7 +70,41 @@ const ESC_TIMEOUT_MS: u64 = 30;
 static PROMPT_COLORS: Mutex<[u8; super::PROMPT_BUF_MAX]> = Mutex::new([0; super::PROMPT_BUF_MAX]);
 static PROMPT_COLORS_LEN: AtomicUsize = AtomicUsize::new(0);
 
-pub fn read_command_line(tokens: &mut ParsedTokens, prompt: &[u8], prompt_colors: &[u8]) -> i32 {
+/// Events decoded from bytes already taken off fd 0 but not yet dispatched.
+///
+/// With one-byte reads this only ever holds the tail of a malformed escape
+/// sequence being replayed as literal keys, which the parser emits as a batch.
+/// Those bytes are already off the descriptor, so dropping them at the end of a
+/// prompt would lose input no other reader can recover.  It never holds bytes
+/// the editor has not read — that is what leaves type-ahead available to the
+/// command about to run.
+static PENDING_EVENTS: Mutex<VecDeque<Decoded>> = Mutex::new(VecDeque::new());
+
+/// Consecutive failures to build the editor's ring.  Bounded so a permanently
+/// broken ring ends the shell instead of spinning on the prompt.
+static RING_FAILURES: AtomicUsize = AtomicUsize::new(0);
+const RING_FAILURE_LIMIT: usize = 3;
+
+/// What one prompt produced.
+pub enum LineOutcome {
+    /// A parsed command line holding this many tokens.
+    Ready(usize),
+    /// Nothing to run: a blank line, or an editing action that consumed it.
+    Empty,
+    /// The line outgrew the editor's buffer.  Refused rather than truncated: a
+    /// shortened command line means something other than what was typed.
+    TooLong,
+    /// End of input — Ctrl+D on an empty line, or the terminal hung up.
+    Eof,
+    /// Ctrl+C: the line was abandoned.
+    Interrupted,
+}
+
+pub fn read_command_line(
+    tokens: &mut ParsedTokens,
+    prompt: &[u8],
+    prompt_colors: &[u8],
+) -> LineOutcome {
     {
         let mut colors = PROMPT_COLORS.lock().unwrap();
         let copy_len = prompt_colors.len().min(super::PROMPT_BUF_MAX);
@@ -100,12 +142,21 @@ pub fn read_command_line(tokens: &mut ParsedTokens, prompt: &[u8], prompt_colors
     let result = match Ring::setup(16) {
         Ok(ring) => slopfut::block_on(ring, input_loop(tokens, prompt, cols, winch.as_ref())),
         Err(_) => {
-            // Ring unavailable: cannot run the async editor.  Yield once and
-            // re-prompt (return 0 -> caller `continue`s) rather than wedging.
+            // Ring unavailable: cannot run the async editor.  Re-prompting
+            // forever would be a silent hot spin, so give up after a few
+            // consecutive failures and let the caller exit.
             crate::syscall::core::yield_now();
-            0
+            if RING_FAILURES.fetch_add(1, Ordering::Relaxed) + 1 >= RING_FAILURE_LIMIT {
+                super::display::shell_error(b"sh: cannot start the line editor\n");
+                LineOutcome::Eof
+            } else {
+                LineOutcome::Interrupted
+            }
         }
     };
+    if matches!(result, LineOutcome::Ready(_) | LineOutcome::Empty) {
+        RING_FAILURES.store(0, Ordering::Relaxed);
+    }
 
     // Restore canonical mode FIRST (ISIG back on), THEN write the
     // bracketed-paste-off sequence: the write can block on a full output
@@ -387,13 +438,15 @@ async fn input_loop(
     prompt: &[u8],
     cols: usize,
     winch: Option<&SignalListener>,
-) -> i32 {
+) -> LineOutcome {
     let mut cols = cols;
     let mut parser = EscParser::new();
     let mut winch_fut: Option<WinchFuture<'_>> =
         winch.map(|w| -> WinchFuture<'_> { Box::pin(w.recv()) });
-    // Decoded events not yet dispatched (one read can yield several).
-    let mut queue: std::collections::VecDeque<Decoded> = std::collections::VecDeque::new();
+    // Decoded events not yet dispatched, seeded with anything the previous
+    // prompt had already taken off fd 0 and not yet acted on.
+    let mut queue: VecDeque<Decoded> = std::mem::take(&mut *PENDING_EVENTS.lock().unwrap());
+    let mut overflowed = false;
 
     // Region-relative row the cursor currently sits on (see `redraw`). The
     // REPL pre-printed the prompt, so the first region starts at its first
@@ -410,18 +463,20 @@ async fn input_loop(
             let decoded = match queue.pop_front() {
                 Some(d) => d,
                 None => {
-                    if let Wake::Winch =
-                        next_decoded(&mut parser, &mut queue, winch_fut.as_mut()).await
-                    {
-                        // The resolved listener is spent: re-arm it before
-                        // anything else awaits, then refresh the width and
-                        // re-wrap the edit region under the new geometry.
-                        if let (Some(slot), Some(w)) = (winch_fut.as_mut(), winch) {
-                            *slot = Box::pin(w.recv());
+                    match next_decoded(&mut parser, &mut queue, winch_fut.as_mut()).await {
+                        Wake::Winch => {
+                            // The resolved listener is spent: re-arm it before
+                            // anything else awaits, then refresh the width and
+                            // re-wrap the edit region under the new geometry.
+                            if let (Some(slot), Some(w)) = (winch_fut.as_mut(), winch) {
+                                *slot = Box::pin(w.recv());
+                            }
+                            cols = query_cols();
+                            redraw(prompt, len, cursor_pos, cols, &mut cur_row);
+                            continue;
                         }
-                        cols = query_cols();
-                        redraw(prompt, len, cursor_pos, cols, &mut cur_row);
-                        continue;
+                        Wake::Eof => return LineOutcome::Eof,
+                        Wake::Input => {}
                     }
                     match queue.pop_front() {
                         Some(d) => d,
@@ -432,12 +487,12 @@ async fn input_loop(
 
             let c = match decoded {
                 Decoded::Paste(text) => {
-                    insert_text(&text, text.len(), &mut len, &mut cursor_pos);
+                    overflowed |= !insert_text(&text, text.len(), &mut len, &mut cursor_pos);
                     redraw(prompt, len, cursor_pos, cols, &mut cur_row);
                     continue;
                 }
                 Decoded::Char(seq, n) => {
-                    insert_text(&seq, n, &mut len, &mut cursor_pos);
+                    overflowed |= !insert_text(&seq, n, &mut len, &mut cursor_pos);
                     redraw(prompt, len, cursor_pos, cols, &mut cur_row);
                     continue;
                 }
@@ -596,12 +651,17 @@ async fn input_loop(
                     emit_cursor_move(end_row.saturating_sub(cur_row), b'B');
                     shell_write(b"^C\n");
                     history::reset_cursor();
-                    return 0;
+                    stash(&mut queue);
+                    return LineOutcome::Interrupted;
                 }
 
                 CTRL_D => {
                     if len == 0 {
-                        return -1;
+                        // Ctrl+D on an empty line is how a user says "done".
+                        // Echo what they would have typed, then end the shell.
+                        shell_write(b"exit\n");
+                        stash(&mut queue);
+                        return LineOutcome::Eof;
                     }
                     if cursor_pos < len {
                         delete_char_at_cursor(&mut len, cursor_pos);
@@ -666,8 +726,16 @@ async fn input_loop(
             }
         }
 
-        // The inner loop broke on Enter: assemble the line, parse it, and
-        // return the token count.
+        // The inner loop broke on Enter.  Anything still queued was decoded
+        // from bytes already taken off fd 0, so it belongs to the next prompt
+        // rather than to the command about to run.
+        stash(&mut queue);
+
+        if overflowed {
+            return LineOutcome::TooLong;
+        }
+
+        // Assemble the line, parse it, and report the token count.
         buffers::with_line_buf(|buf| {
             let capped = cmp::min(len, buf.len() - 1);
             buf[capped] = 0;
@@ -678,8 +746,9 @@ async fn input_loop(
                 .iter()
                 .position(|&b| b == 0)
                 .unwrap_or(line_buf.len());
+            let text = super::parser::strip_comment(&line_buf[..line_len]);
             buffers::with_expand_buf(|expand_buf| {
-                super::parser::expand_variables(line_buf, line_len, expand_buf)
+                super::parser::expand_variables(text, text.len(), expand_buf)
             })
         });
 
@@ -687,8 +756,20 @@ async fn input_loop(
         buffers::with_expand_buf(|expand_buf| {
             shell_parse_line(&expand_buf[..expanded_len], tokens)
         });
-        return tokens.count() as i32;
+        return match tokens.count() {
+            0 => LineOutcome::Empty,
+            n => LineOutcome::Ready(n),
+        };
     }
+}
+
+/// Park still-undispatched events for the next prompt.  See [`PENDING_EVENTS`].
+fn stash(queue: &mut VecDeque<Decoded>) {
+    if queue.is_empty() {
+        return;
+    }
+    let mut pending = PENDING_EVENTS.lock().unwrap();
+    pending.append(queue);
 }
 
 /// Why `next_decoded` returned: stdin made progress (bytes decoded, ESC
@@ -697,6 +778,7 @@ async fn input_loop(
 enum Wake {
     Input,
     Winch,
+    Eof,
 }
 
 /// Editor terminal width. Falls back to 80 columns when no terminal is
@@ -781,15 +863,20 @@ async fn next_decoded(
     let Some(r) = result else { return Wake::Input };
     if r.res == 0 {
         // Read of zero bytes = the PTY master hung up (the terminal closed
-        // it).  End of input: exit cleanly rather than busy-looping.  A
-        // deliberate Ctrl-D keypress arrives as the byte 0x04 in the stream
-        // and is handled by the editor's CTRL_D arm, not this path.
-        let _ = crate::syscall::tty::write(b"shell: stdin EOF, exiting\n");
-        std::process::exit(0);
+        // it).  End of input.  A deliberate Ctrl-D keypress arrives as the byte
+        // 0x04 in the stream and is handled by the editor's CTRL_D arm, not
+        // this path.  Report it so the REPL exits with the status of the last
+        // command it ran, rather than terminating the process from here.
+        return Wake::Eof;
     }
     if r.res < 0 {
-        // Transient read error: leave the queue empty so the caller re-arms.
-        return Wake::Input;
+        // Only a read that could succeed later is worth re-arming for.  Any
+        // other error would spin the editor at full speed against a descriptor
+        // that is never going to work.
+        let errno = -r.res as i32;
+        let retryable = errno == crate::syscall::SyscallError::EAGAIN.errno()
+            || errno == crate::syscall::SyscallError::EINTR.errno();
+        return if retryable { Wake::Input } else { Wake::Eof };
     }
     let n = r.res as usize;
     let mut out = Vec::new();
@@ -867,7 +954,10 @@ fn delete_char_at_cursor(len: &mut usize, cursor_pos: usize) {
     delete_byte_range(len, cursor_pos, end);
 }
 
-fn insert_text(text: &[u8], text_len: usize, len: &mut usize, cursor_pos: &mut usize) {
+/// Insert `text` at the cursor.  Returns `false` when the line buffer was too
+/// full to take all of it, so the caller can refuse the line rather than run a
+/// truncated version of what the user typed.
+fn insert_text(text: &[u8], text_len: usize, len: &mut usize, cursor_pos: &mut usize) -> bool {
     let max_len = buffers::with_line_buf(|buf| buf.len());
     let available = max_len.saturating_sub(*len + 1);
     let mut insert_len = text_len.min(available);
@@ -876,7 +966,7 @@ fn insert_text(text: &[u8], text_len: usize, len: &mut usize, cursor_pos: &mut u
         insert_len -= 1;
     }
     if insert_len == 0 {
-        return;
+        return text_len == 0;
     }
 
     buffers::with_line_buf(|buf| {
@@ -893,6 +983,7 @@ fn insert_text(text: &[u8], text_len: usize, len: &mut usize, cursor_pos: &mut u
     });
     *len += insert_len;
     *cursor_pos += insert_len;
+    insert_len == text_len
 }
 
 /// Cursor row within the edit region after printing `offset` cells, under

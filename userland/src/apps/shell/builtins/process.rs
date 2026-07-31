@@ -2,7 +2,7 @@ use slopos_abi::signal::{SIGCONT, SIGKILL};
 
 use crate::syscall::{UserSysInfo, core as sys_core, process};
 
-use super::super::display::{COLOR_ERROR_RED, shell_write, shell_write_idx};
+use super::super::display::{COLOR_ERROR_RED, shell_error_named, shell_write, shell_write_idx};
 use super::super::exec;
 use super::super::jobs;
 
@@ -140,6 +140,33 @@ pub fn cmd_wait(argc: i32, argv: &[&[u8]]) -> i32 {
         return 1;
     };
     process::waitpid(pid)
+}
+
+/// `exit [n]` — end the shell with status `n`, or with the status of the last
+/// command when no operand is given.
+///
+/// In a forked pipeline stage the returned status *is* the exit: `run_in_child`
+/// passes whatever a builtin returns straight to `exit_with_code`, so `exit | true`
+/// correctly ends only the subshell.  In the shell's own process the request is
+/// recorded and the command loop acts on it, so the redirect restore and the
+/// terminal handback that loop still owes both happen.
+pub fn cmd_exit(argc: i32, argv: &[&[u8]]) -> i32 {
+    let status = if argc >= 2 {
+        match jobs::parse_u32_arg(argv[1]) {
+            Some(n) => (n & 0xFF) as i32,
+            None => {
+                shell_error_named(b"exit", b"numeric argument required");
+                super::super::exec::STATUS_SYNTAX_ERROR
+            }
+        }
+    } else {
+        super::super::last_exit_code()
+    };
+
+    if !super::super::interrupt::in_forked_child() {
+        super::super::request_exit(status);
+    }
+    status
 }
 
 pub fn cmd_exec(argc: i32, argv: &[&[u8]]) -> i32 {

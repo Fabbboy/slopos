@@ -255,7 +255,7 @@ if [ "${1:-}" = "--self-test" ]; then
 fi
 
 # Userland-side crates, planning docs, proofs, and vendored code.
-OUT_OF_SCOPE_RE='^(userland|slibc|slop-protocol|appkit|slopos-rt|image|terminal-core|keymap-core|plans|verification|vendor|third_party|builddir|target)/'
+OUT_OF_SCOPE_RE='^(userland|slibc|slop-protocol|appkit|slopos-rt|image|terminal-core|keymap-core|shell-core|plans|verification|vendor|third_party|builddir|target)/'
 
 # Exempt from checks 1 and 3 — see the header for each one's reason.
 SANCTIONED_SURFACES=(

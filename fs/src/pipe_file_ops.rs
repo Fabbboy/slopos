@@ -144,7 +144,10 @@ impl FileOps for PipeReadOps {
         }
         let h = PipeHandle::from_usize(handle);
         let is_nonblock = (flags & slopos_abi::syscall::O_NONBLOCK as u32) != 0;
-        let mut local = match slopos_ostd::KVec::<u8>::zeroed(IO_STAGING_SIZE) {
+        // Sized to the request, capped at the staging bound: a shell reading a
+        // script one byte at a time must not cost a 4 KiB kernel allocation per
+        // byte. Larger requests still iterate the loop below at IO_STAGING_SIZE.
+        let mut local = match slopos_ostd::KVec::<u8>::zeroed(buf.len().min(IO_STAGING_SIZE)) {
             Ok(v) => v,
             Err(_) => return Errno::ENOMEM.as_isize(),
         };

@@ -1,5 +1,5 @@
 use std::sync::Mutex;
-use std::sync::atomic::{AtomicI32, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU32, Ordering};
 
 mod banner;
 pub mod buffers;
@@ -13,9 +13,9 @@ pub mod input;
 pub mod interrupt;
 pub mod jobs;
 pub mod parser;
+pub mod script;
 
 pub(crate) static NL: &str = "\n";
-pub(crate) static UNKNOWN_CMD: &str = "Unknown command. Type 'help'.\n";
 pub(crate) static PATH_TOO_LONG: &str = "path too long\n";
 pub(crate) static ERR_NO_SUCH: &str = "No such file or directory\n";
 pub(crate) static ERR_TOO_MANY_ARGS: &str = "too many arguments\n";
@@ -33,6 +33,34 @@ static CWD: Mutex<[u8; CWD_MAX]> = Mutex::new([0; CWD_MAX]);
 static LAST_EXIT_CODE: AtomicI32 = AtomicI32::new(0);
 static LAST_BG_PID: AtomicU32 = AtomicU32::new(0);
 static SHELL_PID: AtomicU32 = AtomicU32::new(0);
+
+/// Whether this shell has a user at a terminal.  Decided once, before anything
+/// else runs, and consulted by everything that only makes sense with one: the
+/// banner, the prompt, the line editor, colored output, and job control.
+static INTERACTIVE: AtomicBool = AtomicBool::new(false);
+
+pub fn is_interactive() -> bool {
+    INTERACTIVE.load(Ordering::Relaxed)
+}
+
+/// Set by the `exit` builtin so the command loop unwinds normally.
+///
+/// Calling `exit(2)` from inside a builtin would skip the redirect restore and
+/// the terminal handback its caller still owes, so `exit` records the request
+/// and the loop that owns those obligations acts on it.
+static EXIT_REQUESTED: AtomicBool = AtomicBool::new(false);
+static EXIT_STATUS: AtomicI32 = AtomicI32::new(0);
+
+pub fn request_exit(status: i32) {
+    EXIT_STATUS.store(status, Ordering::Relaxed);
+    EXIT_REQUESTED.store(true, Ordering::Relaxed);
+}
+
+pub fn exit_requested() -> Option<i32> {
+    EXIT_REQUESTED
+        .load(Ordering::Relaxed)
+        .then(|| EXIT_STATUS.load(Ordering::Relaxed))
+}
 
 pub fn cwd_bytes() -> [u8; CWD_MAX] {
     *CWD.lock().unwrap()
@@ -228,21 +256,39 @@ pub struct ShellState {
     pub prompt_len: usize,
 }
 
-pub fn shell_user_main() {
-    shell_interactive_main();
-}
+/// Entry point.  Returns the shell's exit status.
+pub fn shell_user_main() -> i32 {
+    // POSIX's interactivity rule, as bash states it: stdin decides whether
+    // there is a user typing, stderr decides whether there is anywhere to
+    // complain to.  stdout is deliberately not consulted, so `shell > log`
+    // typed at a terminal still prompts — exactly as `bash | cat` does.
+    INTERACTIVE.store(
+        crate::syscall::fs::isatty(0) && crate::syscall::fs::isatty(2),
+        Ordering::Relaxed,
+    );
 
-fn shell_interactive_main() {
-    // fd 0/1/2 are the PTY slave the parent terminal emulator provides.
-    // The shell is a pure slave-side process: all editing rides the raw fd0
-    // escape-sequence reader; all output is ANSI to fd1.
     cwd_set(b"/");
     env::initialize_defaults();
     SHELL_PID.store(std::process::id(), Ordering::Relaxed);
-
     exec::initialize_job_control();
-    interrupt::install();
 
+    if is_interactive() {
+        // Long-running builtins poll the recorded flag as their cancellation
+        // point.  A non-interactive shell leaves SIGINT at SIG_DFL instead, so
+        // Ctrl+C on `yes … | shell` kills it rather than being swallowed by a
+        // handler nothing in the script loop ever consults.
+        interrupt::install();
+        shell_interactive_main()
+    } else {
+        display::set_plain_output(true);
+        script::run_script(&mut script::FdSource::new(0))
+    }
+}
+
+fn shell_interactive_main() -> i32 {
+    // fd 0/1/2 are the PTY slave the parent terminal emulator provides.
+    // The shell is a pure slave-side process: all editing rides the raw fd0
+    // escape-sequence reader; all output is ANSI to fd1.
     banner::print_welcome_banner();
 
     let mut state = ShellState {
@@ -260,16 +306,28 @@ fn shell_interactive_main() {
 
         let mut tokens = buffers::ParsedTokens::new();
         let prompt_colors = &state.prompt_colors[..state.prompt_len];
-        let token_count = input::read_command_line(&mut tokens, prompt, prompt_colors);
 
-        if token_count <= 0 {
-            continue;
+        match input::read_command_line(&mut tokens, prompt, prompt_colors) {
+            input::LineOutcome::Ready(_) => {}
+            input::LineOutcome::Empty => continue,
+            input::LineOutcome::Interrupted => {
+                set_last_exit_code(interrupt::EXIT_INTERRUPTED);
+                continue;
+            }
+            input::LineOutcome::TooLong => {
+                display::shell_error(b"sh: line too long\n");
+                set_last_exit_code(exec::STATUS_SYNTAX_ERROR);
+                continue;
+            }
+            // End of input is how an interactive shell ends: exit with the
+            // status of the last command, as POSIX requires.
+            input::LineOutcome::Eof => return last_exit_code(),
         }
 
         let rc = exec::execute_tokens(&tokens);
         set_last_exit_code(rc);
-        if rc == 127 {
-            display::shell_write_idx(UNKNOWN_CMD.as_bytes(), display::COLOR_ERROR_RED);
+        if let Some(status) = exit_requested() {
+            return status;
         }
     }
 }

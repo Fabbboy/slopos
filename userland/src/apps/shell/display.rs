@@ -6,7 +6,7 @@
 //! interactive).  The terminal interprets the SGR sequences and renders the
 //! grid; this module never touches pixels.
 
-use std::sync::atomic::{AtomicI32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
 
 use slopos_abi::draw::Color32;
 
@@ -51,8 +51,23 @@ pub static PALETTE: [Color32; PALETTE_SIZE] = [
 /// no SGR color.  When `-1`, output is interactive on fd 1 with color.
 static OUTPUT_FD: AtomicI32 = AtomicI32::new(-1);
 
+/// When set, no SGR escape is ever emitted.
+///
+/// A separate flag rather than a reuse of [`OUTPUT_FD`], which the redirect
+/// machinery owns and clears after every builtin `>`: a shell running a script
+/// must stay plain for its whole life, not until the first redirect.
+static PLAIN: AtomicBool = AtomicBool::new(false);
+
 /// Standard-output file descriptor (the PTY slave when interactive).
 const STDOUT_FD: i32 = 1;
+
+/// Standard-error file descriptor. Diagnostics go here in both modes.
+const STDERR_FD: i32 = 2;
+
+/// Suppress every SGR escape for the rest of this process's life.
+pub fn set_plain_output(plain: bool) {
+    PLAIN.store(plain, Ordering::Relaxed);
+}
 
 #[inline]
 fn palette_color(color_idx: u8) -> Color32 {
@@ -73,6 +88,25 @@ fn palette_index_for(color: Color32) -> u8 {
 // fd 1 emit path
 // =============================================================================
 
+/// Write every byte of `bytes` to `fd`, or report failure.
+///
+/// A single `write(2)` is allowed to transfer less than it was given, and a
+/// pipe write genuinely does so whenever the ring fills or the reader goes
+/// away mid-transfer.  Treating that partial count as success silently drops
+/// the tail of the payload, so every write in the shell loops here.
+fn write_all(fd: i32, bytes: &[u8]) -> bool {
+    let mut written = 0usize;
+    while written < bytes.len() {
+        match fs::write_slice(fd, &bytes[written..]) {
+            Ok(0) => return false,
+            Ok(n) => written += n,
+            Err(e) if e == crate::syscall::SyscallError::EINTR => continue,
+            Err(_) => return false,
+        }
+    }
+    true
+}
+
 /// Write raw bytes to fd 1.  Returns `true` on success.  If the kernel write
 /// fails (e.g. EBADF in a test binary with no wired stdout), fall back to the
 /// serial console exactly once so diagnostic output still reaches a transcript.
@@ -80,11 +114,39 @@ fn emit_stdout(bytes: &[u8]) -> bool {
     if bytes.is_empty() {
         return true;
     }
-    if fs::write_slice(STDOUT_FD, bytes).is_ok() {
+    if write_all(STDOUT_FD, bytes) {
         return true;
     }
     let _ = crate::syscall::tty::write(bytes);
     false
+}
+
+/// Write a diagnostic to fd 2.
+///
+/// Deliberately blind to [`OUTPUT_FD`]: a builtin's `>` redirects its *output*,
+/// not its complaints, so `ls nosuch > out` must leave the error on the
+/// terminal rather than in `out`.
+pub fn shell_error(bytes: &[u8]) -> bool {
+    if bytes.is_empty() {
+        return true;
+    }
+    if write_all(STDERR_FD, bytes) {
+        return true;
+    }
+    let _ = crate::syscall::tty::write(bytes);
+    false
+}
+
+/// Emit a POSIX-shaped diagnostic: `sh: NAME: MSG\n`.
+pub fn shell_error_named(name: &[u8], msg: &[u8]) {
+    let mut buf = [0u8; 320];
+    let mut len = 0usize;
+    for part in [b"sh: ".as_slice(), name, b": ", msg, b"\n"] {
+        let n = part.len().min(buf.len() - len);
+        buf[len..len + n].copy_from_slice(&part[..n]);
+        len += n;
+    }
+    shell_error(&buf[..len]);
 }
 
 /// Format an SGR truecolor foreground-set sequence for `color` into `buf`.
@@ -129,7 +191,7 @@ fn write_u8_decimal(buf: &mut [u8], value: u8) -> usize {
 /// A broken fd 1 (EBADF in a test binary) falls back to the serial console
 /// exactly once per call, carrying the payload — never the SGR escapes.
 fn emit_colored(bytes: &[u8], color_idx: u8) -> bool {
-    if color_idx == COLOR_DEFAULT {
+    if color_idx == COLOR_DEFAULT || PLAIN.load(Ordering::Relaxed) {
         return emit_stdout(bytes);
     }
     let mut sgr = [0u8; 24];
@@ -157,7 +219,7 @@ fn emit_colored(bytes: &[u8], color_idx: u8) -> bool {
 pub fn shell_write(buf: &[u8]) -> bool {
     let redirected_fd = OUTPUT_FD.load(Ordering::Relaxed);
     if redirected_fd >= 0 {
-        return fs::write_slice(redirected_fd, buf).is_ok();
+        return write_all(redirected_fd, buf);
     }
     emit_stdout(buf)
 }
@@ -169,7 +231,7 @@ pub fn shell_write(buf: &[u8]) -> bool {
 pub fn shell_write_colored(buf: &[u8], fg: Color32) -> bool {
     let redirected_fd = OUTPUT_FD.load(Ordering::Relaxed);
     if redirected_fd >= 0 {
-        return fs::write_slice(redirected_fd, buf).is_ok();
+        return write_all(redirected_fd, buf);
     }
     emit_colored(buf, palette_index_for(fg))
 }
@@ -181,7 +243,7 @@ pub fn shell_write_colored(buf: &[u8], fg: Color32) -> bool {
 pub fn shell_write_idx(buf: &[u8], color_idx: u8) -> bool {
     let redirected_fd = OUTPUT_FD.load(Ordering::Relaxed);
     if redirected_fd >= 0 {
-        return fs::write_slice(redirected_fd, buf).is_ok();
+        return write_all(redirected_fd, buf);
     }
     emit_colored(buf, color_idx)
 }
