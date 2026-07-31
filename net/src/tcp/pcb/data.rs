@@ -27,7 +27,9 @@
 
 use core::mem;
 
-use slopos_ostd::{AllocError, Init, SlotPtr, init_struct_with, write_field, zero_field};
+use slopos_ostd::{
+    AllocError, Init, Initialised, SlotPtr, init_struct_with, write_field, zero_field,
+};
 
 use super::super::actions::{Actions, SocketNotify, TimerOp};
 use super::super::buffer::TcpBufferPair;
@@ -142,37 +144,39 @@ impl DataState {
         // Writes every field of `Self` exactly once via the safe
         // `write_field!` / `zero_field!` wrappers. No intermediate
         // `Self` rvalue is built.
-        init_struct_with(move |slot: SlotPtr<Self>| -> Result<(), AllocError> {
-            write_field!(slot, iss, iss);
-            write_field!(slot, irs, irs);
-            write_field!(slot, snd_una, snd_una);
-            write_field!(slot, snd_nxt, snd_nxt);
-            write_field!(slot, snd_wnd, snd_wnd);
-            write_field!(slot, rcv_nxt, rcv_nxt);
-            write_field!(slot, rcv_wnd, rcv_wnd);
-            write_field!(slot, peer_mss, peer_mss);
-            write_field!(slot, rcv_wscale, rcv_wscale);
-            write_field!(slot, snd_wscale, snd_wscale);
-            write_field!(slot, wscale_enabled, wscale_enabled);
-            write_field!(slot, sack_permitted, false);
-            write_field!(slot, nagle_enabled, true);
-            write_field!(slot, close_phase, ClosePhase::Established);
-            write_field!(slot, rtt, RttEstimator::new());
-            write_field!(slot, cc, CcAlgo::cubic(cc_mss));
-            // `SendMap` is all-zero-valid (see `SendMap::zero_init_slot`).
-            zero_field!(slot, sendmap);
-            write_field!(slot, retransmit_token, None);
-            write_field!(slot, keepalive_token, None);
-            write_field!(slot, keepalive_probes_sent, 0u8);
-            write_field!(slot, last_activity_tick, 0u64);
-            write_field!(slot, fin_wait2_token, None);
-            write_field!(slot, ts_enabled, ts_enabled);
-            write_field!(slot, ts_recent, 0u32);
-            write_field!(slot, last_ack_sent, 0u32);
-            write_field!(slot, reset_received, false);
-            write_field!(slot, peer_closed, false);
-            Ok(())
-        })
+        init_struct_with(
+            move |slot: SlotPtr<Self>| -> Result<Initialised<Self>, AllocError> {
+                write_field!(slot, iss, iss);
+                write_field!(slot, irs, irs);
+                write_field!(slot, snd_una, snd_una);
+                write_field!(slot, snd_nxt, snd_nxt);
+                write_field!(slot, snd_wnd, snd_wnd);
+                write_field!(slot, rcv_nxt, rcv_nxt);
+                write_field!(slot, rcv_wnd, rcv_wnd);
+                write_field!(slot, peer_mss, peer_mss);
+                write_field!(slot, rcv_wscale, rcv_wscale);
+                write_field!(slot, snd_wscale, snd_wscale);
+                write_field!(slot, wscale_enabled, wscale_enabled);
+                write_field!(slot, sack_permitted, false);
+                write_field!(slot, nagle_enabled, true);
+                write_field!(slot, close_phase, ClosePhase::Established);
+                write_field!(slot, rtt, RttEstimator::new());
+                write_field!(slot, cc, CcAlgo::cubic(cc_mss));
+                // `SendMap` is all-zero-valid (see `SendMap::zero_init_slot`).
+                zero_field!(slot, sendmap);
+                write_field!(slot, retransmit_token, None);
+                write_field!(slot, keepalive_token, None);
+                write_field!(slot, keepalive_probes_sent, 0u8);
+                write_field!(slot, last_activity_tick, 0u64);
+                write_field!(slot, fin_wait2_token, None);
+                write_field!(slot, ts_enabled, ts_enabled);
+                write_field!(slot, ts_recent, 0u32);
+                write_field!(slot, last_ack_sent, 0u32);
+                write_field!(slot, reset_received, false);
+                write_field!(slot, peer_closed, false);
+                Ok(slot.finish())
+            },
+        )
     }
 
     /// Heap-direct initialiser for the `SYN_RECV → ESTABLISHED`
@@ -200,37 +204,39 @@ impl DataState {
         let ts_enabled = s.ts_enabled;
         // Same field-by-field idiom as `init_new` — see there for the
         // overall invariant.
-        init_struct_with(move |slot: SlotPtr<Self>| -> Result<(), AllocError> {
-            write_field!(slot, iss, iss);
-            write_field!(slot, irs, irs);
-            write_field!(slot, snd_una, snd_una);
-            write_field!(slot, snd_nxt, snd_nxt);
-            write_field!(slot, snd_wnd, snd_wnd);
-            write_field!(slot, rcv_nxt, rcv_nxt);
-            write_field!(slot, rcv_wnd, rcv_wnd);
-            write_field!(slot, peer_mss, peer_mss);
-            write_field!(slot, rcv_wscale, rcv_wscale);
-            write_field!(slot, snd_wscale, snd_wscale);
-            write_field!(slot, wscale_enabled, wscale_enabled);
-            write_field!(slot, sack_permitted, sack_permitted);
-            write_field!(slot, nagle_enabled, true);
-            write_field!(slot, close_phase, ClosePhase::Established);
-            write_field!(slot, rtt, RttEstimator::new());
-            write_field!(slot, cc, CcAlgo::cubic(cc_mss));
-            // `SendMap` is all-zero-valid.
-            zero_field!(slot, sendmap);
-            write_field!(slot, retransmit_token, None);
-            write_field!(slot, keepalive_token, None);
-            write_field!(slot, keepalive_probes_sent, 0u8);
-            write_field!(slot, last_activity_tick, 0u64);
-            write_field!(slot, fin_wait2_token, None);
-            write_field!(slot, ts_enabled, ts_enabled);
-            write_field!(slot, ts_recent, ts_recent);
-            write_field!(slot, last_ack_sent, 0u32);
-            write_field!(slot, reset_received, false);
-            write_field!(slot, peer_closed, false);
-            Ok(())
-        })
+        init_struct_with(
+            move |slot: SlotPtr<Self>| -> Result<Initialised<Self>, AllocError> {
+                write_field!(slot, iss, iss);
+                write_field!(slot, irs, irs);
+                write_field!(slot, snd_una, snd_una);
+                write_field!(slot, snd_nxt, snd_nxt);
+                write_field!(slot, snd_wnd, snd_wnd);
+                write_field!(slot, rcv_nxt, rcv_nxt);
+                write_field!(slot, rcv_wnd, rcv_wnd);
+                write_field!(slot, peer_mss, peer_mss);
+                write_field!(slot, rcv_wscale, rcv_wscale);
+                write_field!(slot, snd_wscale, snd_wscale);
+                write_field!(slot, wscale_enabled, wscale_enabled);
+                write_field!(slot, sack_permitted, sack_permitted);
+                write_field!(slot, nagle_enabled, true);
+                write_field!(slot, close_phase, ClosePhase::Established);
+                write_field!(slot, rtt, RttEstimator::new());
+                write_field!(slot, cc, CcAlgo::cubic(cc_mss));
+                // `SendMap` is all-zero-valid.
+                zero_field!(slot, sendmap);
+                write_field!(slot, retransmit_token, None);
+                write_field!(slot, keepalive_token, None);
+                write_field!(slot, keepalive_probes_sent, 0u8);
+                write_field!(slot, last_activity_tick, 0u64);
+                write_field!(slot, fin_wait2_token, None);
+                write_field!(slot, ts_enabled, ts_enabled);
+                write_field!(slot, ts_recent, ts_recent);
+                write_field!(slot, last_ack_sent, 0u32);
+                write_field!(slot, reset_received, false);
+                write_field!(slot, peer_closed, false);
+                Ok(slot.finish())
+            },
+        )
     }
 
     /// Test-and-test-hooks-only by-value constructor. Materialises a `Self`

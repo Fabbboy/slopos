@@ -33,6 +33,8 @@
 //!   crate initialises a heap slot field by field with no `unsafe`
 //!   token anywhere in its expansion.
 
+#[cfg(debug_assertions)]
+use core::cell::Cell;
 use core::convert::Infallible;
 use core::marker::PhantomData;
 use core::mem::MaybeUninit;
@@ -314,10 +316,28 @@ pub trait HasFields: Sized {
 ///
 /// Construct via [`SlotPtr::from_raw`] inside an
 /// [`init_from_closure`]-style closure.
-#[repr(transparent)]
 pub struct SlotPtr<T> {
     raw: *mut T,
+    /// Which fields have been written, by index into
+    /// [`HasFields::FIELD_OFFSETS`]; bit 64 is the `zero_all` flag. Only
+    /// tracked under `debug_assertions` — see [`SlotPtr::finish`].
+    #[cfg(debug_assertions)]
+    covered: Cell<u64>,
 }
+
+/// Proof that a slot holds a fully initialised `T`.
+///
+/// [`init_struct_with`]'s closure must return one, and [`SlotPtr::finish`]
+/// is the only thing that mints one. That is what stops a
+/// `#![forbid(unsafe_code)]` crate writing
+/// `KBox::try_init(init_struct_with(|_slot| Ok(())))` and getting a `T`
+/// whose bytes were never written — a safe path to uninitialised memory
+/// that needed no `unsafe` token anywhere.
+pub struct Initialised<T>(PhantomData<fn() -> T>);
+
+/// Bit index of the `zero_all` flag in `SlotPtr::covered`.
+#[cfg(debug_assertions)]
+const ZEROED_BIT: u32 = 63;
 
 impl<T> SlotPtr<T> {
     /// Wrap a raw `*mut T` provided by `Init::__init`'s contract.
@@ -330,7 +350,32 @@ impl<T> SlotPtr<T> {
     /// into a context that outlives the slot.
     #[inline]
     pub unsafe fn from_raw(raw: *mut T) -> Self {
-        Self { raw }
+        Self {
+            raw,
+            #[cfg(debug_assertions)]
+            covered: Cell::new(0),
+        }
+    }
+
+    #[cfg(debug_assertions)]
+    #[inline]
+    fn mark(&self, offset: usize)
+    where
+        T: HasFields,
+    {
+        if let Some(index) = T::FIELD_OFFSETS.iter().position(|&o| o == offset)
+            && index < ZEROED_BIT as usize
+        {
+            self.covered.set(self.covered.get() | (1u64 << index));
+        }
+    }
+
+    #[cfg(not(debug_assertions))]
+    #[inline]
+    fn mark(&self, _offset: usize)
+    where
+        T: HasFields,
+    {
     }
 
     /// Raw `*mut T` for forwarding to nested
@@ -338,6 +383,30 @@ impl<T> SlotPtr<T> {
     #[inline]
     pub fn raw(&self) -> *mut T {
         self.raw
+    }
+
+    /// Zero every byte of the slot. Used as a first step before
+    /// patching select fields. Safe even when `T` is not `Zeroable` —
+    /// the caller commits to overwriting any non-zero-valid fields
+    /// before the closure returns.
+    #[inline]
+    pub fn zero_all(&self) {
+        // SAFETY: per `from_raw`'s contract the slot is writable for
+        // `size_of::<T>()` bytes; zero-fill never reads.
+        unsafe {
+            core::ptr::write_bytes(self.raw as *mut u8, 0, core::mem::size_of::<T>());
+        }
+        #[cfg(debug_assertions)]
+        self.covered.set(self.covered.get() | (1u64 << ZEROED_BIT));
+    }
+}
+
+impl<T: HasFields> SlotPtr<T> {
+    /// The slot type's compile-time field table. Zero-sized, so this
+    /// returns by value at no cost.
+    #[inline]
+    pub fn fields(&self) -> T::Fields {
+        T::FIELDS
     }
 
     /// Write `value` into the field `f` names.
@@ -364,6 +433,7 @@ impl<T> SlotPtr<T> {
         unsafe {
             self.raw.cast::<u8>().add(OFF).cast::<U>().write(value);
         }
+        self.mark(OFF);
     }
 
     /// Zero-fill the field `f` names. `U: Zeroable` is the type-system
@@ -376,6 +446,7 @@ impl<T> SlotPtr<T> {
         unsafe {
             core::ptr::write_bytes(self.raw.cast::<u8>().add(OFF), 0, core::mem::size_of::<U>());
         }
+        self.mark(OFF);
     }
 
     /// Run a nested [`Init`] recipe directly into the field `f` names, so
@@ -388,7 +459,11 @@ impl<T> SlotPtr<T> {
     ) -> Result<(), E> {
         // SAFETY: as `write` — the field slot is writable and aligned for
         // `U`, which is exactly `Init::__init`'s precondition.
-        unsafe { Init::__init(init, self.raw.cast::<u8>().add(OFF).cast::<U>()) }
+        let result = unsafe { Init::__init(init, self.raw.cast::<u8>().add(OFF).cast::<U>()) };
+        if result.is_ok() {
+            self.mark(OFF);
+        }
+        result
     }
 
     /// Write one element of an array-typed field, without materialising
@@ -412,66 +487,70 @@ impl<T> SlotPtr<T> {
                 .add(index)
                 .write(value);
         }
-    }
-
-    /// Zero every byte of the slot. Used as a first step before
-    /// patching select fields. Safe even when `T` is not `Zeroable` —
-    /// the caller commits to overwriting any non-zero-valid fields
-    /// before the closure returns.
-    #[inline]
-    pub fn zero_all(&self) {
-        // SAFETY: per `from_raw`'s contract the slot is writable for
-        // `size_of::<T>()` bytes; zero-fill never reads.
-        unsafe {
-            core::ptr::write_bytes(self.raw as *mut u8, 0, core::mem::size_of::<T>());
+        if index + 1 == N {
+            self.mark(OFF);
         }
     }
-}
 
-impl<T: HasFields> SlotPtr<T> {
-    /// The slot type's compile-time field table. Zero-sized, so this
-    /// returns by value at no cost.
+    /// Close the slot out and hand back the proof that `T` is initialised.
+    ///
+    /// Under `debug_assertions` — which covers the kernel's dev build and
+    /// therefore every `just test` run — this asserts that the closure
+    /// either zeroed the whole slot or wrote every field. Release builds
+    /// skip the check: the barrier that actually closes the hole is
+    /// [`Initialised`] being unforgeable, and per-write bookkeeping in the
+    /// hot path would buy nothing the test suite has not already proven.
+    ///
+    /// Types with more than 63 fields are not tracked; the coverage word is
+    /// one `u64` and the zero-flag takes the top bit.
     #[inline]
-    pub fn fields(&self) -> T::Fields {
-        T::FIELDS
+    pub fn finish(self) -> Initialised<T> {
+        #[cfg(debug_assertions)]
+        {
+            let covered = self.covered.get();
+            let zeroed = covered & (1u64 << ZEROED_BIT) != 0;
+            let count = T::FIELD_COUNT;
+            if !zeroed && count <= ZEROED_BIT as usize {
+                let expected = if count == 64 {
+                    u64::MAX
+                } else {
+                    (1u64 << count) - 1
+                };
+                assert!(
+                    covered & expected == expected,
+                    "SlotPtr::finish: init closure left fields unwritten",
+                );
+            }
+        }
+        Initialised(PhantomData)
     }
 }
 
 /// Build an [`Init<T, E>`] from a closure that operates on a
-/// [`SlotPtr<T>`]. This is the **safe** entry point preferred over
-/// the lower-level [`init_from_closure`] for closures that follow
-/// the "zero + patch a few fields" or "addr-of field-by-field" idiom.
+/// [`SlotPtr<T>`]. This is the entry point for the "zero + patch a few
+/// fields" and "write every field" idioms, and is preferred over the
+/// lower-level [`init_from_closure`].
 ///
-/// The closure is `FnOnce(SlotPtr<T>) -> Result<(), E>`. The wrapper
-/// constructs the `SlotPtr` from the slot pointer that `__init` is
-/// invoked with. The safety contract documented on `Init::__init`
-/// still applies: the closure must populate every byte of `T` (or
-/// rely on a prior `zero_all` + per-field writes) before returning
-/// `Ok(())`.
-///
-/// # Safety
-///
-/// The closure must uphold [`Init::__init`]'s contract — on `Ok(())`,
-/// `*slot` must hold a valid `T`. The wrapper itself is safe because
-/// the only unsafe op it introduces is `SlotPtr::from_raw`, which is
-/// internal and protected by `Init::__init`'s precondition.
+/// The closure returns [`Initialised<T>`], which only
+/// [`SlotPtr::finish`] mints. That is what makes this safe to export: a
+/// closure cannot claim success without having gone through the slot, so
+/// there is no way to hand a caller a `T` whose bytes were never written.
+/// `finish` additionally checks, under `debug_assertions`, that every
+/// field was covered.
 pub fn init_struct_with<T, E, F>(f: F) -> InitClosure<T, E, impl FnOnce(*mut T) -> Result<(), E>>
 where
-    F: FnOnce(SlotPtr<T>) -> Result<(), E>,
+    F: FnOnce(SlotPtr<T>) -> Result<Initialised<T>, E>,
 {
-    // SAFETY: the trampoline forwards the slot pointer that
-    // `Init::__init` provides through `SlotPtr::from_raw`; the
-    // closure operates on the wrapped slot. The slot validity
-    // precondition of `Init::__init` carries through.
+    // SAFETY: the trampoline forwards the slot pointer that `Init::__init`
+    // provides through `SlotPtr::from_raw`. `Init::__init`'s post-condition
+    // — a valid `T` on `Ok(())` — is discharged by the `Initialised<T>` the
+    // closure has to produce, which only `SlotPtr::finish` can mint.
     unsafe {
         init_from_closure(move |slot: *mut T| -> Result<(), E> {
-            // SAFETY: `slot` is writable for `size_of::<T>()` bytes
-            // by `Init::__init`'s precondition; the surrounding
-            // `init_from_closure` call certifies the closure's
-            // unsafety, so the `SlotPtr::from_raw` call inherits the
-            // already-asserted context.
+            // SAFETY: `slot` is writable for `size_of::<T>()` bytes by
+            // `Init::__init`'s precondition.
             let wrapper = SlotPtr::from_raw(slot);
-            f(wrapper)
+            f(wrapper).map(|_proof| ())
         })
     }
 }

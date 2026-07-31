@@ -13,7 +13,7 @@
 
 use core::sync::atomic::{AtomicBool, Ordering};
 use slopos_ostd::mm::AllocError;
-use slopos_ostd::mm::init::{Init, init_struct_with};
+use slopos_ostd::mm::init::{Init, Initialised, init_struct_with};
 use slopos_ostd::{KBox, KVec, write_field};
 
 use slopos_abi::unicode::is_double_width;
@@ -442,7 +442,7 @@ impl VConsoleState {
     #[allow(dead_code)] // production build uses the const `Self::new` for the static lock; this serves the test fixtures.
     pub(crate) fn init_default() -> impl Init<Self, AllocError> {
         init_struct_with(
-            |slot: slopos_ostd::mm::init::SlotPtr<Self>| -> Result<(), AllocError> {
+            |slot: slopos_ostd::mm::init::SlotPtr<Self>| -> Result<Initialised<Self>, AllocError> {
                 write_field!(slot, cursor_row, 0);
                 write_field!(slot, cursor_col, 0);
                 write_field!(slot, rows, DEFAULT_ROWS);
@@ -466,7 +466,7 @@ impl VConsoleState {
                 write_field!(slot, shadow, None);
                 write_field!(slot, shadow_pitch, 0);
                 write_field!(slot, dirty_rows, 0);
-                Ok(())
+                Ok(slot.finish())
             },
         )
     }

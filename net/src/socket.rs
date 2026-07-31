@@ -2,7 +2,7 @@ use core::fmt;
 
 use slopos_ostd::KVec;
 use slopos_ostd::mm::frame::AnonymousMeta;
-use slopos_ostd::mm::init::{Init, SlotPtr, init_struct_with};
+use slopos_ostd::mm::init::{Init, Initialised, SlotPtr, init_struct_with};
 use slopos_ostd::mm::uframe::UFrame;
 use slopos_ostd::mm::uframe::{coalesce_io_runs, copy_out_frames, redup_frames};
 use slopos_ostd::mm::{VmReader, VmWriter};
@@ -538,12 +538,14 @@ impl EphemeralPortAllocator {
         // Closure zero-fills the whole slot (a valid empty `Bitmap`)
         // and then writes the two scalar fields whose `new()` isn't
         // all-zero.
-        init_struct_with(|slot: SlotPtr<Self>| -> Result<(), AllocError> {
-            slot.zero_all();
-            write_field!(slot, next_port, Self::EPHEMERAL_PORT_START);
-            write_field!(slot, allocated_count, 0);
-            Ok(())
-        })
+        init_struct_with(
+            |slot: SlotPtr<Self>| -> Result<Initialised<Self>, AllocError> {
+                slot.zero_all();
+                write_field!(slot, next_port, Self::EPHEMERAL_PORT_START);
+                write_field!(slot, allocated_count, 0);
+                Ok(slot.finish())
+            },
+        )
     }
 
     /// Allocate one ephemeral port using round-robin selection.

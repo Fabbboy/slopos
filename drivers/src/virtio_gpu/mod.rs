@@ -31,7 +31,7 @@ use slopos_mm::page_alloc::{OwnedPageFrame, alloc_kernel_pages, free_page_frame}
 use slopos_mm::paging_defs::PAGE_SIZE_4KB;
 use slopos_ostd::KArc;
 use slopos_ostd::mm::AllocError;
-use slopos_ostd::mm::init::{Init, SlotPtr, init_struct_with};
+use slopos_ostd::mm::init::{Init, Initialised, SlotPtr, init_struct_with};
 use slopos_ostd::sync::wait_queue::WaitOutcome;
 use slopos_ostd::sync::{LOCK_LEVEL_REGISTRY, LOCK_LEVEL_RESOURCE, Mutex, SpinLock, WaitQueue};
 use slopos_ostd::util::ptr_buf;
@@ -429,18 +429,20 @@ struct VirtioGpuState {
 
 impl VirtioGpuState {
     fn init_empty() -> impl Init<Self, AllocError> {
-        init_struct_with(|slot: SlotPtr<Self>| -> Result<(), AllocError> {
-            write_field!(slot, control, GpuQueue::new(0));
-            write_field!(slot, cursor, GpuQueue::new(1));
-            write_field!(slot, caps, VirtioMmioCaps::empty());
-            write_field!(slot, msix_state, None);
-            write_field!(slot, ready, false);
-            write_field!(slot, num_scanouts, 0u32);
-            write_field!(slot, edid_supported, false);
-            write_field!(slot, geom, ScanoutGeom::empty());
-            write_field!(slot, cursor_state, CursorState::empty());
-            Ok(())
-        })
+        init_struct_with(
+            |slot: SlotPtr<Self>| -> Result<Initialised<Self>, AllocError> {
+                write_field!(slot, control, GpuQueue::new(0));
+                write_field!(slot, cursor, GpuQueue::new(1));
+                write_field!(slot, caps, VirtioMmioCaps::empty());
+                write_field!(slot, msix_state, None);
+                write_field!(slot, ready, false);
+                write_field!(slot, num_scanouts, 0u32);
+                write_field!(slot, edid_supported, false);
+                write_field!(slot, geom, ScanoutGeom::empty());
+                write_field!(slot, cursor_state, CursorState::empty());
+                Ok(slot.finish())
+            },
+        )
     }
 }
 
@@ -462,18 +464,20 @@ struct VirtioGpuInner {
 
 impl VirtioGpuInner {
     fn init_empty() -> impl Init<Self, AllocError> {
-        init_struct_with(|slot: SlotPtr<Self>| -> Result<(), AllocError> {
-            write_init_field!(
-                slot,
-                state,
-                SpinLock::init_with(LOCK_LEVEL_RESOURCE, VirtioGpuState::init_empty())
-            )?;
-            write_field!(slot, ctrl_lock, Mutex::new(()));
-            write_field!(slot, cursor_lock, Mutex::new(()));
-            write_field!(slot, ctrl_waiters, WaitQueue::new());
-            write_field!(slot, cursor_waiters, WaitQueue::new());
-            Ok(())
-        })
+        init_struct_with(
+            |slot: SlotPtr<Self>| -> Result<Initialised<Self>, AllocError> {
+                write_init_field!(
+                    slot,
+                    state,
+                    SpinLock::init_with(LOCK_LEVEL_RESOURCE, VirtioGpuState::init_empty())
+                )?;
+                write_field!(slot, ctrl_lock, Mutex::new(()));
+                write_field!(slot, cursor_lock, Mutex::new(()));
+                write_field!(slot, ctrl_waiters, WaitQueue::new());
+                write_field!(slot, cursor_waiters, WaitQueue::new());
+                Ok(slot.finish())
+            },
+        )
     }
 
     /// IRQ-side completion path. The shared MSI/MSI-X fallback delivers a

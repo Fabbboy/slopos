@@ -4,7 +4,7 @@ use slopos_fs::blockdev::{BlockDevice, BlockDeviceError, BlockDeviceIndex};
 use slopos_ostd::KArc;
 use slopos_ostd::handle::{Handle, HandleTable};
 use slopos_ostd::mm::AllocError;
-use slopos_ostd::mm::init::{Init, SlotPtr, init_struct_with};
+use slopos_ostd::mm::init::{Init, Initialised, SlotPtr, init_struct_with};
 use slopos_ostd::sync::wait_queue::WaitOutcome;
 use slopos_ostd::sync::{LOCK_LEVEL_REGISTRY, LOCK_LEVEL_RESOURCE, Mutex, SpinLock, WaitQueue};
 use slopos_ostd::{klog_debug, klog_info, write_field, write_init_field};
@@ -155,13 +155,15 @@ impl VirtioBlkState {
     /// field into the heap slot so the ~280-byte aggregate never lands on
     /// the prober's stack (the 2 KiB frame gate).
     fn init_empty() -> impl Init<Self, AllocError> {
-        init_struct_with(|slot: SlotPtr<Self>| -> Result<(), AllocError> {
-            write_field!(slot, device, VirtioBlkDevice::new());
-            write_field!(slot, caps, VirtioMmioCaps::empty());
-            write_field!(slot, msix_state, None);
-            write_field!(slot, slots, [RequestSlot::EMPTY; NUM_REQUEST_SLOTS]);
-            Ok(())
-        })
+        init_struct_with(
+            |slot: SlotPtr<Self>| -> Result<Initialised<Self>, AllocError> {
+                write_field!(slot, device, VirtioBlkDevice::new());
+                write_field!(slot, caps, VirtioMmioCaps::empty());
+                write_field!(slot, msix_state, None);
+                write_field!(slot, slots, [RequestSlot::EMPTY; NUM_REQUEST_SLOTS]);
+                Ok(slot.finish())
+            },
+        )
     }
 
     /// Consume every pending used-ring entry, transitioning the matching
@@ -260,16 +262,18 @@ impl VirtioBlkInner {
     /// [`KArc::try_init`] so neither the `VirtioBlkState` nor the
     /// surrounding `KArc` inner ever materialises on the caller's stack.
     fn init_empty() -> impl Init<Self, AllocError> {
-        init_struct_with(|slot: SlotPtr<Self>| -> Result<(), AllocError> {
-            write_init_field!(
-                slot,
-                state,
-                SpinLock::init_with(LOCK_LEVEL_RESOURCE, VirtioBlkState::init_empty())
-            )?;
-            write_field!(slot, io_lock, Mutex::new(()));
-            write_field!(slot, req_waiters, WaitQueue::new());
-            Ok(())
-        })
+        init_struct_with(
+            |slot: SlotPtr<Self>| -> Result<Initialised<Self>, AllocError> {
+                write_init_field!(
+                    slot,
+                    state,
+                    SpinLock::init_with(LOCK_LEVEL_RESOURCE, VirtioBlkState::init_empty())
+                )?;
+                write_field!(slot, io_lock, Mutex::new(()));
+                write_field!(slot, req_waiters, WaitQueue::new());
+                Ok(slot.finish())
+            },
+        )
     }
 
     /// IRQ-side completion path: harvest every pending used-ring entry

@@ -39,7 +39,7 @@ use core::sync::atomic::{AtomicU64, Ordering};
 use slopos_ostd::KVec;
 use slopos_ostd::klog_debug;
 use slopos_ostd::mm::AllocError;
-use slopos_ostd::mm::init::{Init, SlotPtr, init_struct_with};
+use slopos_ostd::mm::init::{Init, Initialised, SlotPtr, init_struct_with};
 use slopos_ostd::sync::{LOCK_LEVEL_REGISTRY, SpinLock};
 use slopos_ostd::{write_field, write_init_field};
 
@@ -220,20 +220,23 @@ impl NetTimerWheel {
     /// In-place [`Init`] recipe equivalent to [`Self::new`] for runtime
     /// heap allocation via `KBox::try_init(NetTimerWheel::init())`.
     pub fn init() -> impl Init<Self, AllocError> {
-        let inner_init =
-            init_struct_with(|slot: SlotPtr<TimerWheelInner>| -> Result<(), AllocError> {
+        let inner_init = init_struct_with(
+            |slot: SlotPtr<TimerWheelInner>| -> Result<Initialised<TimerWheelInner>, AllocError> {
                 write_field!(slot, entries, KVec::<TimerEntry>::new());
-                Ok(())
-            });
-        init_struct_with(move |slot: SlotPtr<Self>| -> Result<(), AllocError> {
-            write_init_field!(
-                slot,
-                inner,
-                SpinLock::<TimerWheelInner>::init_with(LOCK_LEVEL_REGISTRY, inner_init)
-            )?;
-            write_field!(slot, next_token, AtomicU64::new(1));
-            Ok(())
-        })
+                Ok(slot.finish())
+            },
+        );
+        init_struct_with(
+            move |slot: SlotPtr<Self>| -> Result<Initialised<Self>, AllocError> {
+                write_init_field!(
+                    slot,
+                    inner,
+                    SpinLock::<TimerWheelInner>::init_with(LOCK_LEVEL_REGISTRY, inner_init)
+                )?;
+                write_field!(slot, next_token, AtomicU64::new(1));
+                Ok(slot.finish())
+            },
+        )
     }
 
     // =========================================================================

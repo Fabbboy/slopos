@@ -20,7 +20,7 @@
 
 use bitflags::bitflags;
 use slopos_ostd::mm::AllocError;
-use slopos_ostd::mm::init::{Init, SlotPtr, init_struct_with};
+use slopos_ostd::mm::init::{Init, Initialised, SlotPtr, init_struct_with};
 use slopos_ostd::{write_array_field, write_field};
 
 use crate::timer::{TimerKind, TimerToken};
@@ -98,21 +98,23 @@ impl Actions {
         // field-writer wrappers. The `[Option<_>; N]` arrays are
         // initialised element-by-element so no by-value array literal
         // materialises in this closure.
-        init_struct_with(|slot: SlotPtr<Self>| -> Result<(), AllocError> {
-            write_array_field!(slot, segments, MAX_SEGMENTS, |_| -> Option<TcpOutSegment> {
-                None
-            });
-            write_field!(slot, segments_len, 0u8);
-            write_array_field!(slot, timer_ops, MAX_TIMER_OPS, |_| -> Option<TimerOp> {
-                None
-            });
-            write_field!(slot, timer_ops_len, 0u8);
-            write_field!(slot, notify, SocketNotify::empty());
-            write_field!(slot, conn_id, None);
-            write_field!(slot, accepted, None);
-            write_field!(slot, release, false);
-            Ok(())
-        })
+        init_struct_with(
+            |slot: SlotPtr<Self>| -> Result<Initialised<Self>, AllocError> {
+                write_array_field!(slot, segments, MAX_SEGMENTS, |_| -> Option<TcpOutSegment> {
+                    None
+                });
+                write_field!(slot, segments_len, 0u8);
+                write_array_field!(slot, timer_ops, MAX_TIMER_OPS, |_| -> Option<TimerOp> {
+                    None
+                });
+                write_field!(slot, timer_ops_len, 0u8);
+                write_field!(slot, notify, SocketNotify::empty());
+                write_field!(slot, conn_id, None);
+                write_field!(slot, accepted, None);
+                write_field!(slot, release, false);
+                Ok(slot.finish())
+            },
+        )
     }
 
     /// Append an outbound segment.  Panics in debug builds if the inline

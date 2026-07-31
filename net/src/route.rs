@@ -30,7 +30,7 @@ use core::fmt;
 use slopos_ostd::KVec;
 use slopos_ostd::klog_debug;
 use slopos_ostd::mm::AllocError;
-use slopos_ostd::mm::init::{Init, SlotPtr, init_struct_with};
+use slopos_ostd::mm::init::{Init, Initialised, SlotPtr, init_struct_with};
 use slopos_ostd::sync::{LOCK_LEVEL_REGISTRY, SpinLock};
 use slopos_ostd::{write_array_field, write_init_field};
 
@@ -166,22 +166,25 @@ impl RouteTable {
     /// `KBox::try_init(RouteTable::init())` keeps it on the heap.
     pub fn init() -> impl Init<Self, AllocError> {
         // Inner-state initialiser: populates each of the 33 buckets.
-        let inner_init =
-            init_struct_with(|slot: SlotPtr<RouteTableInner>| -> Result<(), AllocError> {
+        let inner_init = init_struct_with(
+            |slot: SlotPtr<RouteTableInner>| -> Result<Initialised<RouteTableInner>, AllocError> {
                 write_array_field!(slot, buckets, 33, |_| KVec::<RouteEntry>::new());
-                Ok(())
-            });
+                Ok(slot.finish())
+            },
+        );
         // Outer initialiser: the inner SpinLock is initialised in
         // place via `SpinLock::init_with`, which writes the lock
         // state and then forwards `inner_init` into the data slot.
-        init_struct_with(move |slot: SlotPtr<Self>| -> Result<(), AllocError> {
-            write_init_field!(
-                slot,
-                inner,
-                SpinLock::<RouteTableInner>::init_with(LOCK_LEVEL_REGISTRY, inner_init)
-            )?;
-            Ok(())
-        })
+        init_struct_with(
+            move |slot: SlotPtr<Self>| -> Result<Initialised<Self>, AllocError> {
+                write_init_field!(
+                    slot,
+                    inner,
+                    SpinLock::<RouteTableInner>::init_with(LOCK_LEVEL_REGISTRY, inner_init)
+                )?;
+                Ok(slot.finish())
+            },
+        )
     }
 
     pub fn reset(&self) {

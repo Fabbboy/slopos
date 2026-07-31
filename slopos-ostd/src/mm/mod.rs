@@ -26,8 +26,8 @@ pub use heap::{
     PinBox, boxed_zeroed, raw_alloc, raw_dealloc, register_kernel_slab_handle,
 };
 pub use init::{
-    Field, HasFields, Init, InitClosure, SlotPtr, Zeroable, init_from_closure, init_struct_with,
-    init_zeroed,
+    Field, HasFields, Init, InitClosure, Initialised, SlotPtr, Zeroable, init_from_closure,
+    init_struct_with, init_zeroed,
 };
 pub use io_mem::{
     IoMem, IoMemCachePolicy, IoMemError, IoMemMapper, IoMemRegistry, PhysRange,
