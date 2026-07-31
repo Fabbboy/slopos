@@ -1,0 +1,35 @@
+# check_kernel_softfloat allowlist — variant: dev
+#
+# Instructions touching XCR0-managed state (XMM/YMM/ZMM, x87, MMX, and the
+# xsave/xrstor pair) that are permitted, each capped at its measured
+# occurrence count in the named symbol.
+#
+#     scripts/check_kernel_softfloat.sh --variant dev --emit-allowlist builddir/kernel-dev.elf
+#
+# Every entry must match at least one hit. A dead entry fails the gate.
+
+# Liveness floors. A wrong --section, a stripped ELF, a triple mismatch or a
+# disassembler that errors after its header all yield zero of each, and a
+# zero-hit count then reads as a clean kernel. Measured 2026-07-31: dev 31098
+# returns / 31472 symbols, tests 44585 / 44970, release 3856 / 4068.
+min-returns 20000
+min-symbols 20000
+
+# See the stack allowlist for the rationale.
+expect-test-registry few
+
+# <max-hits> <TAB> <class-or-mnemonic> <TAB> <glob over the symbol>
+#
+# Middle field: vec | x87 | mmx | xsave, or a literal mnemonic. Prefer the
+# mnemonic — `1 x87 _start` would also excuse a `movups` landing there.
+
+# The one-time x87 init in the assembly entry trampoline (boot/limine_entry.s),
+# immediately after the CR0/CR4 setup and before any Rust runs. Not a fault
+# path: nothing has user state to clobber yet.
+1	fninit	_start
+
+# The scheduler's own FPU save/restore. This *is* the sanctioned save/restore
+# the rest of the gate exists to protect, so it is allowlisted rather than
+# excluded — the budget is what stops a second, unreviewed xrstor appearing
+# somewhere it would silently overwrite a live register file.
+3	xsave	*slopos_ostd4task3fpu*

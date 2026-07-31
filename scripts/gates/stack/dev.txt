@@ -1,0 +1,46 @@
+# check_stack_sizes allowlist — variant: dev
+#
+# Frames above STACK_SIZE_THRESHOLD (2048 B) that are permitted, each capped
+# at its measured size so growth still fails.
+#
+#     scripts/check_stack_sizes.sh --variant dev --emit-allowlist builddir/kernel-dev.elf
+#
+# Every entry must match at least one over-threshold frame: a dead exemption
+# fails the gate, so a frame that shrinks hands its exemption back. No entry
+# may exceed the 4096 B guard page — such a frame is a bug to fix.
+
+# min-records — the ELF must carry at least this many .stack_sizes entries;
+# llvm-readobj prints an empty `StackSizes [ ]` and exits 0 without the
+# section. Measured 2026-07-31: dev 31234, tests 44732, release 3830. The dev
+# floor sits deliberately above release's count, so `--variant dev` against a
+# release ELF trips here. Keep that relation when adjusting it.
+min-records 20000
+
+# few | many | any. A kernel/tests image links ~2742 104-byte .test_registry
+# entries; dev and release link 6. Cannot separate dev from release — that is
+# min-records' job.
+expect-test-registry few
+
+# <max-bytes> <TAB> <glob over the rustc-mangled symbol>
+
+# Vendored-unwinder frames: reached only while a panic unwinds, never on a
+# hot path. The DWARF CFI evaluation is inherently frame-heavy.
+3864	*CallFrameInstruction*E5parse*9unwinding*
+2744	*unwinding9panicking12catch_unwind8do_catch*slopos_ostd6unwind11KernelPanic*
+2616	*unwinding8unwinder5frame*Frame12from_context*
+2072	*unwinding8unwinder19force_unwind_phase2*
+2072	*UnwindTable*StoreInVec*E8evaluate*
+
+# SlopOS functions whose large temporaries are already heap-boxed; the
+# residual frame is inherent local/format-args state, still under the guard
+# page.
+2424	*slopos_acpi3aml14process_device*
+2344	*slopos_net4ipv49handle_rx*
+2200	*slopos_net3dns11dns_resolve*
+2200	*slopos_acpi3aml6interp*Interp4eval*
+2200	*slopos_core7syscall2fs19poll_ioctl_handlers14syscall_select*
+
+# Library smallsort monomorphizations: scratch is the element size, not
+# reducible without changing the sorted element type.
+2248	*sort4_stable*slopos_drivers3pci*MatchIndex14candidates_for*
+2248	*sort4_stable*slopos_drivers12platform_bus9matchmake*

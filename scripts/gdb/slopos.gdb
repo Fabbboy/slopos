@@ -14,7 +14,7 @@ set confirm off
 set architecture i386:x86-64
 
 # Kernel: fixed link address 0xFFFFFFFF80000000, full DWARF — symbols match runtime.
-file builddir/kernel.elf
+file builddir/kernel-tests.elf
 
 # Userland: ET_EXEC fixed at 0x400000 — add as-is (no relocation offset).
 python

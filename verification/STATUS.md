@@ -152,7 +152,7 @@ tree* is:
 | **Inv. 3** | An `asm!` block's operand widths and clobbers match the instruction it names. |
 | **Inv. 4** | Page-table walks stay well-formed: every present entry names a real table or frame, and map/unmap are balanced. |
 | **Inv. 5** | A user-visible leaf mapping only ever names an insensitive frame — never kernel-sensitive memory. |
-| **Inv. 5'** | No stack frame exceeds 2 KiB. Enforced by `check_stack_sizes.sh` against the final ELF. |
+| **Inv. 5'** | No stack frame exceeds 2 KiB. Enforced by `check_stack_sizes.sh` against the final ELF of every build variant, each against its own measured allowlist, with a second ceiling at the 4 KiB guard page that no allowlist can raise. |
 | **Inv. 6** | A DMA or IOMMU mapping is only used through the handle that created it, for as long as the device may still read it. |
 | **Inv. 7** | Only I/O ports the platform has marked insensitive are reachable, and only through `IoPortRegistry`. |
 | **Inv. 8** | The calling CPU is the sole accessor of the task state it touches. |

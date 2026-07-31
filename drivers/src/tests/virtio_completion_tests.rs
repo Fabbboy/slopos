@@ -9,9 +9,10 @@
 //!   slot tracking, IRQ-side used-ring harvest, multi-sector batching)
 
 use slopos_testing::TestResult;
-use slopos_testing::{assert_eq_test, assert_test, fail, pass};
+use slopos_testing::{assert_eq_test, assert_ok, assert_test, fail, pass};
 
 use slopos_fs::blockdev::{BlockDevice, BlockDeviceIndex};
+use slopos_ostd::mm::heap::KVec;
 use slopos_ostd::sync::Mutex;
 
 use crate::hpet;
@@ -318,9 +319,11 @@ pub fn test_virtio_blk_multisector_write_readback() -> TestResult {
     // 3 sectors, distinct per-byte pattern, at a sector-aligned offset far
     // from the single-sector test's region (sector 8192) and inside the
     // 8 MiB (16384-sector) scratch image.
+    // 3772 bytes of buffers in one frame would step past the 4 KiB guard page,
+    // which `stack-probes: none` gives no chance to catch.
     const SPAN: usize = 3 * 512;
     let offset = 2048u64 * 512;
-    let mut pattern = [0u8; SPAN];
+    let mut pattern = assert_ok!(KVec::<u8>::zeroed(SPAN), "pattern buffer");
     for (i, b) in pattern.iter_mut().enumerate() {
         *b = ((i * 7) ^ (i >> 8)) as u8;
     }
@@ -330,19 +333,19 @@ pub fn test_virtio_blk_multisector_write_readback() -> TestResult {
         "multi-sector write should succeed"
     );
 
-    let mut readback = [0u8; SPAN];
+    let mut readback = assert_ok!(KVec::<u8>::zeroed(SPAN), "readback buffer");
     assert_test!(
         token.read_at(offset, &mut readback).is_ok(),
         "multi-sector readback should succeed"
     );
     assert_test!(
-        readback == pattern,
+        readback[..] == pattern[..],
         "multi-sector readback should match the written pattern"
     );
 
     // Unaligned sub-span crossing two sector boundaries: exercises the
     // partial-head + aligned-middle + partial-tail split.
-    let mut sub = [0u8; 700];
+    let mut sub = assert_ok!(KVec::<u8>::zeroed(700), "sub-span buffer");
     assert_test!(
         token.read_at(offset + 100, &mut sub).is_ok(),
         "unaligned sub-span read should succeed"

@@ -114,7 +114,10 @@ pub fn test_vfs_cd_into_listed_dirs() -> TestResult {
 
     klog_info!("VFS_TEST: cd into every listed directory");
 
-    let mut entries = [UserFsEntry::new(); 32];
+    // 32 × 72 bytes of entries — more than the whole frame budget on its own.
+    let Ok(mut entries) = KVec::filled(UserFsEntry::new(), 32) else {
+        return TestResult::Fail;
+    };
     let count = match vfs_list(b"/", &mut entries) {
         Ok(count) => count,
         Err(_) => return TestResult::Fail,

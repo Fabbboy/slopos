@@ -1,0 +1,45 @@
+# check_kernel_softfloat allowlist — variant: tests
+#
+# Instructions touching XCR0-managed state (XMM/YMM/ZMM, x87, MMX, and the
+# xsave/xrstor pair) that are permitted, each capped at its measured
+# occurrence count in the named symbol.
+#
+#     scripts/check_kernel_softfloat.sh --variant tests --emit-allowlist builddir/kernel-tests.elf
+#
+# Every entry must match at least one hit. A dead entry fails the gate.
+
+# Liveness floors — see the dev allowlist. Measured 2026-07-31: 44585 returns
+# / 44970 symbols.
+min-returns 30000
+min-symbols 30000
+
+# The kernel/tests image registers thousands of tests.
+expect-test-registry many
+
+# <max-hits> <TAB> <class-or-mnemonic> <TAB> <glob over the symbol>
+
+# The xsave/AVX conformance helpers: each routes its payload through memory
+# with explicitly named registers, saves and restores around its own use, and
+# runs with interrupts disabled — never in a fault path.
+#
+# This replaces the whole-binary exemption the tests kernel used to carry.
+# Those helpers' own soundness argument is that the kernel never touches the
+# vector register file between their two halves — a claim about *this*
+# binary, left unchecked by exempting the whole image.
+78	vec	*slopos_ostd12test_support9cpu_state*
+2	xsave	*slopos_ostd12test_support9cpu_state*
+
+# The scheduler's own FPU save/restore — the sanctioned save/restore the rest
+# of the gate exists to protect. Allowlisted rather than excluded so the
+# budget still catches a second, unreviewed xrstor appearing elsewhere.
+3	xsave	*slopos_ostd4task3fpu*
+
+# The one-time x87 init in the assembly entry trampoline
+# (boot/limine_entry.s), immediately after the CR0/CR4 setup and before any
+# Rust runs. Not a fault path: nothing has user state to clobber yet.
+#
+# The symbol differs from the dev variant's. `_start` and the linker's
+# `_text_start` share an address, and llvm-objdump prints one header per
+# address; which one it prints follows the image layout. Each variant records
+# the name its own binary reports.
+1	fninit	_text_start

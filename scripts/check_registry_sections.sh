@@ -23,18 +23,23 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
-ELF="${1:-$REPO_ROOT/builddir/kernel.elf}"
 
-if [ ! -f "$ELF" ]; then
-    echo "check_registry_sections: $ELF not found — run 'just build' first" >&2
-    exit 2
-fi
+SELF_TEST=0
+ELF=""
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --self-test) SELF_TEST=1; shift ;;
+        -*) echo "check_registry_sections: unknown option $1" >&2; exit 2 ;;
+        *) ELF="$1"; shift ;;
+    esac
+done
+ELF="${ELF:-$REPO_ROOT/builddir/kernel-dev.elf}"
 
-READELF="$(command -v llvm-readelf || command -v readelf || true)"
-if [ -z "$READELF" ]; then
-    echo "check_registry_sections: readelf not found" >&2
-    exit 2
-fi
+# Pinned toolchain, not a host readelf: this gate reads column positions.
+READELF="$("$SCRIPT_DIR/llvm_tool.sh" llvm-readobj)"
+readelf_sections() {
+    "$READELF" --section-headers --elf-output-style=GNU -W "$1"
+}
 
 # Registries link.ld brackets, with the `size_of` of their entry type. A
 # change to an entry type that forgets this table shows up as a mismatch
@@ -56,7 +61,71 @@ declare -A ENTRY_SIZE=(
 # sections, debug info, or metadata the build produces.
 KNOWN_RE='^\.(limine_requests(_start_marker|_end_marker)?|text|rodata|data|bss|got|plt|init_array|fini_array|eh_frame(_hdr)?|gcc_except_table|stack_sizes|comment|note[.a-zA-Z_-]*|debug[._a-zA-Z-]*|symtab|strtab|shstrtab|relro_padding|dynamic|dynsym|dynstr|hash|gnu[.a-zA-Z_-]*|ARM[.a-zA-Z_-]*)'
 
-sections="$("$READELF" -SW "$ELF")"
+# ---------------------------------------------------------------------------
+# The gate has to be able to fail. `llc` places a global in an arbitrary
+# section — the exact shape of a dependency's own `#[unsafe(link_section)]`.
+# ---------------------------------------------------------------------------
+if [ "$SELF_TEST" -eq 1 ]; then
+    llc="$("$SCRIPT_DIR/llvm_tool.sh" llc)"
+    fixture_root="$(mktemp -d)"
+    trap 'rm -rf "$fixture_root"' EXIT INT TERM
+    self_test_fail=0
+
+    build_fixture() {
+        printf 'target triple = "x86_64-unknown-none"\n%s\n' "$2" > "$fixture_root/$1.ll"
+        "$llc" -mtriple=x86_64-unknown-none -filetype=obj \
+            -o "$fixture_root/$1.o" "$fixture_root/$1.ll"
+    }
+
+    expect() {
+        local label="$1" want_exit="$2" want_text="$3" obj="$4"
+        local out status
+        set +e
+        out="$("$0" "$fixture_root/$obj" 2>&1)"
+        status=$?
+        set -e
+        if [ "$status" -ne "$want_exit" ] \
+            || { [ -n "$want_text" ] && ! printf '%s\n' "$out" | grep -qF "$want_text"; }; then
+            echo "check_registry_sections --self-test: $label — expected exit $want_exit" >&2
+            echo "  mentioning '$want_text', got exit $status:" >&2
+            printf '%s\n' "$out" | sed 's/^/      /' >&2
+            self_test_fail=1
+            return
+        fi
+        echo "  $label: ok"
+    }
+
+    echo "check_registry_sections: self-test against synthesised objects"
+
+    build_fixture clean '@r = global [56 x i8] zeroinitializer, section ".driver_registry"'
+    expect "a whole number of entries is accepted" 0 "OK" clean.o
+
+    build_fixture ragged '@r = global [60 x i8] zeroinitializer, section ".driver_registry"'
+    expect "a partial entry is rejected" 1 "not a multiple" ragged.o
+
+    build_fixture unblessed '@r = global [8 x i8] zeroinitializer, section ".sneaky_registry"
+@k = global [56 x i8] zeroinitializer, section ".driver_registry"'
+    expect "an undeclared section is rejected" 1 ".sneaky_registry" unblessed.o
+
+    build_fixture bare '@r = global i64 0'
+    expect "an ELF with no registry at all is rejected" 2 "refusing to report OK" bare.o
+
+    rm -rf "$fixture_root"
+    trap - EXIT INT TERM
+    if [ "$self_test_fail" -ne 0 ]; then
+        echo "check_registry_sections: SELF-TEST FAILED — the gate cannot be trusted to reject" >&2
+        exit 1
+    fi
+    echo "check_registry_sections: self-test OK"
+    exit 0
+fi
+
+if [ ! -f "$ELF" ]; then
+    echo "check_registry_sections: $ELF not found — run 'just build' first" >&2
+    exit 2
+fi
+
+sections="$(readelf_sections "$ELF")"
 
 unknown=""
 while read -r name; do

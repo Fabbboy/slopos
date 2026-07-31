@@ -102,60 +102,83 @@ where
     let mut count = 0usize;
 
     loop {
-        let header_end = pos.checked_add(HEADER_LEN).ok_or(CpioError::Truncated)?;
-        if header_end > archive.len() {
-            return Err(CpioError::Truncated);
-        }
-        let header = &archive[pos..header_end];
-        if header[0..6] != *MAGIC {
-            return Err(CpioError::BadMagic);
-        }
-
-        let mode = parse_hex8(&header[OFF_MODE..OFF_MODE + 8])?;
-        let filesize = parse_hex8(&header[OFF_FILESIZE..OFF_FILESIZE + 8])? as usize;
-        let namesize = parse_hex8(&header[OFF_NAMESIZE..OFF_NAMESIZE + 8])? as usize;
-        if namesize == 0 {
-            return Err(CpioError::BadField);
-        }
-
-        let name_end = header_end
-            .checked_add(namesize)
-            .ok_or(CpioError::Truncated)?;
-        if name_end > archive.len() {
-            return Err(CpioError::Truncated);
-        }
-        let name = nul_terminated(&archive[header_end..name_end]);
-
-        if name == TRAILER {
+        let Some(record) = parse_record(archive, pos)? else {
             return Ok(count);
-        }
-
-        // File data starts after the header+name, padded (from the record
-        // start) to a 4-byte boundary; the data itself is padded likewise.
-        let after_name = HEADER_LEN
-            .checked_add(namesize)
+        };
+        f(&record.entry)?;
+        count += 1;
+        pos = pos
+            .checked_add(record.advance)
             .ok_or(CpioError::Truncated)?;
-        let data_rel = align4(after_name).ok_or(CpioError::Truncated)?;
-        let data_start = pos.checked_add(data_rel).ok_or(CpioError::Truncated)?;
-        let data_end = data_start
-            .checked_add(filesize)
-            .ok_or(CpioError::Truncated)?;
-        if data_end > archive.len() {
-            return Err(CpioError::Truncated);
-        }
-        let data = &archive[data_start..data_end];
+    }
+}
 
-        f(&CpioEntry {
+struct CpioRecord<'a> {
+    entry: CpioEntry<'a>,
+    advance: usize,
+}
+
+/// Decode one `newc` record, or `None` at the `TRAILER!!!` sentinel.
+///
+/// Out of line: the dozen `checked_*(…)?` chains are a stack slot each at
+/// opt-level 0, and inlined they were charged to every instantiation of the
+/// generic, putting all of them over the frame ceiling.
+#[inline(never)]
+fn parse_record(archive: &[u8], pos: usize) -> Result<Option<CpioRecord<'_>>, CpioError> {
+    let header_end = pos.checked_add(HEADER_LEN).ok_or(CpioError::Truncated)?;
+    if header_end > archive.len() {
+        return Err(CpioError::Truncated);
+    }
+    let header = &archive[pos..header_end];
+    if header[0..6] != *MAGIC {
+        return Err(CpioError::BadMagic);
+    }
+
+    let mode = parse_hex8(&header[OFF_MODE..OFF_MODE + 8])?;
+    let filesize = parse_hex8(&header[OFF_FILESIZE..OFF_FILESIZE + 8])? as usize;
+    let namesize = parse_hex8(&header[OFF_NAMESIZE..OFF_NAMESIZE + 8])? as usize;
+    if namesize == 0 {
+        return Err(CpioError::BadField);
+    }
+
+    let name_end = header_end
+        .checked_add(namesize)
+        .ok_or(CpioError::Truncated)?;
+    if name_end > archive.len() {
+        return Err(CpioError::Truncated);
+    }
+    let name = nul_terminated(&archive[header_end..name_end]);
+
+    if name == TRAILER {
+        return Ok(None);
+    }
+
+    // File data starts after the header+name, padded (from the record
+    // start) to a 4-byte boundary; the data itself is padded likewise.
+    let after_name = HEADER_LEN
+        .checked_add(namesize)
+        .ok_or(CpioError::Truncated)?;
+    let data_rel = align4(after_name).ok_or(CpioError::Truncated)?;
+    let data_start = pos.checked_add(data_rel).ok_or(CpioError::Truncated)?;
+    let data_end = data_start
+        .checked_add(filesize)
+        .ok_or(CpioError::Truncated)?;
+    if data_end > archive.len() {
+        return Err(CpioError::Truncated);
+    }
+    let data = &archive[data_start..data_end];
+
+    let padded = align4(filesize).ok_or(CpioError::Truncated)?;
+    let advance = data_rel.checked_add(padded).ok_or(CpioError::Truncated)?;
+
+    Ok(Some(CpioRecord {
+        entry: CpioEntry {
             path: name,
             mode,
             data,
-        })?;
-        count += 1;
-
-        let padded = align4(filesize).ok_or(CpioError::Truncated)?;
-        let advance = data_rel.checked_add(padded).ok_or(CpioError::Truncated)?;
-        pos = pos.checked_add(advance).ok_or(CpioError::Truncated)?;
-    }
+        },
+        advance,
+    }))
 }
 
 /// Unpack a `newc` cpio archive into the currently mounted root filesystem,

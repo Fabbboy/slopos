@@ -18,18 +18,25 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 
+. "$SCRIPT_DIR/lib/gate_common.sh"
+gate_parse_args check_alloc_dep "$@"
+
 # Crate names allowed to own an `alloc` dep line. Userland runs on big
 # stacks; slopos-ostd is the sanctioned allocation surface.
 USERLAND_RE='^(userland|terminal-core|slibc|slop-protocol|image|slopos-ostd)$'
 
-bad=0
-while IFS= read -r -d '' manifest; do
+# Findings carry a `<tag>\t` prefix so the self-test can count each pass
+# independently; the reports strip it back off.
+scan_manifests() {
+    local root="$1"
+    local manifest crate_dir rel_dir crate_name match
+    while IFS= read -r -d '' manifest; do
     crate_dir="$(dirname "$manifest")"
-    rel_dir="${crate_dir#"$REPO_ROOT/"}"
+    rel_dir="${crate_dir#"$root/"}"
     crate_name="$(basename "$crate_dir")"
 
     # Skip the workspace root itself.
-    if [ "$manifest" = "$REPO_ROOT/Cargo.toml" ]; then
+    if [ "$manifest" = "$root/Cargo.toml" ]; then
         continue
     fi
     # Skip third_party, build outputs, and the userland carve-out.
@@ -64,16 +71,20 @@ while IFS= read -r -d '' manifest; do
         }
     ' "$manifest")"
     if [ -n "$match" ]; then
-        echo "check_alloc_dep: $manifest declares an 'alloc' dependency:" >&2
-        echo "$match" | sed 's/^/    /' >&2
-        echo "  kernel crates must route heap allocation through slopos_ostd::mm::heap instead" >&2
-        bad=1
+        # One finding per offending line, not per manifest: two alloc deps in
+        # one file are two violations, and a count that collapses them makes
+        # the self-test's exact-count assertion meaningless.
+        printf '%s\n' "$match" | while IFS= read -r hit; do
+            [ -z "$hit" ] && continue
+            printf '1\t%s:%s\n' "$rel_dir/Cargo.toml" "$hit"
+        done
     fi
-done < <(find "$REPO_ROOT" -maxdepth 3 -name Cargo.toml \
-             -not -path "$REPO_ROOT/builddir/*" \
-             -not -path "$REPO_ROOT/third_party/*" \
-             -not -path "$REPO_ROOT/target/*" \
-             -print0)
+    done < <(find "$root" -maxdepth 3 -name Cargo.toml \
+                 -not -path "$root/builddir/*" \
+                 -not -path "$root/third_party/*" \
+                 -not -path "$root/target/*" \
+                 -print0)
+}
 
 # -----------------------------------------------------------------------
 # Source-level pass: catch `extern crate alloc;` / `use alloc::` / `use
@@ -98,29 +109,23 @@ SOURCE_WHITELIST="kernel/src/main.rs"
 # The source scan includes untracked files and an explicit vendor sweep.
 # Only the named TCB annexes are skipped; any other vendored Rust source
 # that directly names alloc is a gate failure.
-source_offenders="$(
-    cd "$REPO_ROOT"
-    {
-        if command -v git >/dev/null 2>&1 && git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
-            git ls-files '*.rs'
-            git ls-files --others --exclude-standard '*.rs'
-        else
-            find . -type f -name '*.rs' \
-                -not -path './builddir/*' \
-                -not -path './third_party/*' \
-                -not -path './target/*'
-        fi
-        find vendor -type f -name '*.rs' 2>/dev/null || true
-    } \
-      | sed 's|^\./||' \
-      | LC_ALL=C sort -u \
-      | grep -Ev '^(userland|terminal-core|slibc|slop-protocol|image|slopos-ostd)/' \
+filter_files() {
+    grep -Ev '^(userland|terminal-core|slibc|slop-protocol|image|slopos-ostd)/' \
       | grep -Ev '^vendor/(unwinding|gimli)/' \
       | grep -vxF "$SOURCE_WHITELIST" \
-      | while IFS= read -r file; do
+      || true
+}
+
+scan_sources() {
+    local root="$1"
+    shift
+    cd "$root"
+    local file
+    for file in "$@"; do
+            [ -z "$file" ] && continue
             [ -f "$file" ] || continue
-            awk '
-                BEGIN { bad = 0; n = 0 }
+            awk -v fname="$file" '
+                BEGIN { n = 0 }
                 {
                     lines[NR] = $0
                     if (n < NR) n = NR
@@ -139,14 +144,139 @@ source_offenders="$(
                                && lines[NR - 1] ~ /mod[[:space:]]+[A-Za-z0-9_]+[[:space:]]*\{/) {
                         gated = 1
                     }
-                    if (!gated) bad = 1
+                    if (!gated) printf "2\t%s:%d: %s\n", fname, NR, $0
                 }
-                END { if (bad) exit 1 }
-            ' "$file" || echo "$file"
-        done \
-      || true
-)"
+            ' "$file" || true
+    done
+}
 
+run_scan() {
+    local root="$1"
+    shift
+    (scan_sources "$root" "$@")
+}
+
+# ---------------------------------------------------------------------------
+# Self-test
+# ---------------------------------------------------------------------------
+if [ "$GATE_SELF_TEST" -eq 1 ]; then
+    gate_selftest_begin check_alloc_dep
+
+    # Manifest positives. `net/sub` reproduces the real nesting depth the
+    # `-maxdepth 3` walk has to reach, and the target section is spelled with
+    # a triple rather than a quoted cfg: the section regex uses `[^.]+`, so a
+    # `[target.'cfg(unix)'.dependencies]` header would not match. The triple
+    # form is the one this tree uses.
+    cat > "$(gate_fixture mm/Cargo.toml)" <<'FIXTURE'
+[package]
+name = "slopos-mm"
+
+[dependencies]
+alloc = "1"
+
+[target.x86_64-slos.dependencies]
+alloc = "1"
+FIXTURE
+    cat > "$(gate_fixture sched/Cargo.toml)" <<'FIXTURE'
+[dependencies]
+alloc.workspace = true
+FIXTURE
+    cat > "$(gate_fixture net/sub/Cargo.toml)" <<'FIXTURE'
+[dev-dependencies]
+alloc = "1"
+FIXTURE
+
+    # Manifest negatives.
+    cat > "$(gate_fixture Cargo.toml)" <<'FIXTURE'
+[workspace]
+members = ["mm"]
+
+[dependencies]
+alloc = "1"
+FIXTURE
+    cat > "$(gate_fixture gfx/Cargo.toml)" <<'FIXTURE'
+[features]
+alloc = ["dep:foo"]
+FIXTURE
+    cat > "$(gate_fixture userland/Cargo.toml)" <<'FIXTURE'
+[dependencies]
+alloc = "1"
+FIXTURE
+    cat > "$(gate_fixture slopos-ostd/Cargo.toml)" <<'FIXTURE'
+[dependencies]
+alloc = "1"
+FIXTURE
+    cat > "$(gate_fixture vendor/unwinding/Cargo.toml)" <<'FIXTURE'
+[dependencies]
+alloc = "1"
+FIXTURE
+    cat > "$(gate_fixture a/b/c/Cargo.toml)" <<'FIXTURE'
+[dependencies]
+alloc = "1"
+FIXTURE
+
+    GATE_FINDINGS="$(scan_manifests "$GATE_FIXTURE_ROOT")"
+    gate_expect 1 4 "a plain dep, a workspace dep, a target-section dep, and a dev-dep three levels down"
+    gate_expect_silent '	(Cargo\.toml|gfx/|userland/|slopos-ostd/|vendor/unwinding/|a/b/c/)' \
+        "the workspace root, a [features] alloc stanza, the userland and OSTD carve-outs, the pinned annex, and a manifest past -maxdepth 3 all stay silent"
+
+    # Source positives and negatives.
+    cat > "$(gate_fixture mm/src/lib.rs)" <<'FIXTURE'
+extern crate alloc;
+use alloc::vec::Vec;
+FIXTURE
+    cat > "$(gate_fixture mm/src/b.rs)" <<'FIXTURE'
+use ::alloc::boxed::Box;
+FIXTURE
+    cat > "$(gate_fixture mm/src/negatives.rs)" <<'FIXTURE'
+#[cfg(feature = "std")]
+use alloc::vec::Vec;
+#[cfg(test)]
+mod tests {
+    extern crate alloc;
+}
+fn quoted() { let s = "use alloc::vec::Vec;"; let _ = s; }
+FIXTURE
+    cat > "$(gate_fixture kernel/src/main.rs)" <<'FIXTURE'
+extern crate alloc;
+FIXTURE
+    cat > "$(gate_fixture terminal-core/src/x.rs)" <<'FIXTURE'
+use alloc::vec::Vec;
+FIXTURE
+    cat > "$(gate_fixture slopos-ostd/src/x.rs)" <<'FIXTURE'
+use alloc::vec::Vec;
+FIXTURE
+
+    fixture_files="$(gate_collect_rs_files "$GATE_FIXTURE_ROOT")"
+    gate_expect_enumerator "$GATE_FIXTURE_ROOT" "$fixture_files"
+    scanned="$(printf '%s\n' "$fixture_files" | filter_files)"
+    GATE_FINDINGS="$(run_scan "$GATE_FIXTURE_ROOT" $scanned)"
+
+    gate_expect 2 3 "extern crate alloc, use alloc::, and the path-absolute use ::alloc::"
+    gate_expect_silent 'negatives\.rs|kernel/src/main\.rs|terminal-core/|slopos-ostd/' \
+        "both cfg lookbacks, a string literal that merely contains the text, the whole-line source whitelist, and the crate carve-outs all stay silent"
+
+    gate_selftest_end
+fi
+
+# ---------------------------------------------------------------------------
+# Real run
+# ---------------------------------------------------------------------------
+bad=0
+
+manifest_offenders="$(scan_manifests "$REPO_ROOT" | cut -f2-)"
+if [ -n "$manifest_offenders" ]; then
+    echo "check_alloc_dep: crate manifest declares an 'alloc' dependency:" >&2
+    echo "$manifest_offenders" | sed 's/^/    /' >&2
+    echo "  kernel crates must route heap allocation through slopos_ostd::mm::heap instead" >&2
+    bad=1
+fi
+
+file_list="$(gate_collect_rs_files "$REPO_ROOT")"
+gate_require_nonempty check_alloc_dep "$REPO_ROOT" "$file_list"
+filtered="$(printf '%s\n' "$file_list" | filter_files)"
+
+source_offenders="$(run_scan "$REPO_ROOT" $filtered | cut -f2-)"
 if [ -n "$source_offenders" ]; then
     echo "check_alloc_dep: source-level 'alloc' usage detected:" >&2
     echo "$source_offenders" | sed 's/^/    /' >&2

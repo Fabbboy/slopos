@@ -45,9 +45,21 @@ if [ "$KERNEL_SAFESTACK" = "1" ]; then
 fi
 
 mkdir -p "$BUILD_DIR"
-rm -f "$BUILD_DIR/kernel" "$BUILD_DIR/kernel.elf"
 
 KERNEL_RELEASE="${KERNEL_RELEASE:-0}"
+
+# The build variant, resolved once: symbol table, ELF path, gate stamp and
+# the `--variant` the ELF gates are held to all key off it.
+if [[ "$FEATURES" == *"kernel/tests"* ]]; then
+    [ "$KERNEL_RELEASE" = "1" ] && VARIANT="release-tests" || VARIANT="tests"
+else
+    [ "$KERNEL_RELEASE" = "1" ] && VARIANT="release" || VARIANT="dev"
+fi
+
+# One ELF per variant: a shared path means whichever build ran last silently
+# answers for all three, to the gates, to gdb and to the ISO builder.
+KERNEL_ELF="$BUILD_DIR/kernel-${VARIANT}.elf"
+rm -f "$BUILD_DIR/kernel" "$KERNEL_ELF"
 
 # Persistent kernel symbol table embedded for symbolized panic backtraces.
 # Both build phases point `slopos-ostd`'s build script at this same file, and
@@ -56,10 +68,7 @@ KERNEL_RELEASE="${KERNEL_RELEASE:-0}"
 # hit instead of a forced two-phase recompile of the whole kernel. The file is
 # keyed by build variant so dev/release/tests kernels (with different symbol
 # sets) do not invalidate each other's table.
-KSYMS_TAG="dev"
-[ "$KERNEL_RELEASE" = "1" ] && KSYMS_TAG="release"
-[[ "$FEATURES" == *"kernel/tests"* ]] && KSYMS_TAG="${KSYMS_TAG}-tests"
-KSYMS_RS="$(cd "$BUILD_DIR" && pwd)/kallsyms-${KSYMS_TAG}.rs"
+KSYMS_RS="$(cd "$BUILD_DIR" && pwd)/kallsyms-${VARIANT}.rs"
 if [ ! -f "$KSYMS_RS" ]; then
     printf 'pub static KERNEL_SYMBOLS: &[crate::ksym::KernelSymbol] = &[];\n' > "$KSYMS_RS"
 fi
@@ -88,8 +97,8 @@ build_kernel_once() {
     "$CARGO" "${CARGO_ARGS[@]}"
 
     if [ -f "$BUILD_DIR/kernel" ]; then
-        if [ ! -e "$BUILD_DIR/kernel.elf" ] || [ ! "$BUILD_DIR/kernel" -ef "$BUILD_DIR/kernel.elf" ]; then
-            mv "$BUILD_DIR/kernel" "$BUILD_DIR/kernel.elf"
+        if [ ! -e "$KERNEL_ELF" ] || [ ! "$BUILD_DIR/kernel" -ef "$KERNEL_ELF" ]; then
+            mv "$BUILD_DIR/kernel" "$KERNEL_ELF"
         fi
     fi
 }
@@ -97,20 +106,15 @@ build_kernel_once() {
 # Phase 1: build against the previous (or empty) symbol table.
 build_kernel_once
 
-HOST_TRIPLE="$(rustc +"$RUST_CHANNEL" -vV | sed -n 's/^host: //p')"
-SYSROOT="$(rustc +"$RUST_CHANNEL" --print sysroot)"
-LLVM_NM="$SYSROOT/lib/rustlib/$HOST_TRIPLE/bin/llvm-nm"
-if [ ! -x "$LLVM_NM" ]; then
-    LLVM_NM="$(command -v llvm-nm || true)"
-fi
-if [ -z "$LLVM_NM" ]; then
-    echo "gen_kernel_symbols: llvm-nm not found; building without embedded symbol names" >&2
-else
-    # Refresh the symbol table from the phase-1 ELF (rewrites only on change),
-    # then rebuild. Phase 2 is a cache hit unless the symbols actually moved.
-    python3 "$SCRIPT_DIR/gen_kernel_symbols.py" "$LLVM_NM" "$BUILD_DIR/kernel.elf" "$KSYMS_RS"
-    build_kernel_once
-fi
+# Refresh the symbol table from the phase-1 ELF (rewrites only on change),
+# then rebuild. Phase 2 is a cache hit unless the symbols actually moved.
+# Fails closed: without llvm-nm the kernel's panic backtraces would carry
+# addresses and no names.
+LLVM_NM="$("$SCRIPT_DIR/llvm_tool.sh" llvm-nm)"
+python3 "$SCRIPT_DIR/gen_kernel_symbols.py" "$LLVM_NM" "$KERNEL_ELF" "$KSYMS_RS"
+build_kernel_once
+
+echo "build_kernel: ${VARIANT} kernel -> $KERNEL_ELF"
 
 # Source-discipline gates (vendor pin, unsafe-outside-ostd, no-async, alloc
 # dep, Drop-panic-free, TCB ratio) are NOT run here: they scan the whole tree
@@ -132,27 +136,45 @@ fi
 # leaf when two CPUs happen to line up.
 "$SCRIPT_DIR/check_kernel_pml4_writer.sh"
 
-# The stack-sizes and soft-float gates inspect the produced ELF, so they stay
-# on the build path. They apply to the production kernel only.
-# Test builds (`kernel/tests` feature) compile in per-subsystem regression
-# tests whose large stack frames are irrelevant to the real kernel image,
-# and `test_support/cpu_state.rs` carries deliberate XMM/AVX asm for the
-# xsave conformance tests.
-if [[ "$FEATURES" == *"kernel/tests"* ]]; then
-    echo "check_stack_sizes: skipped (kernel/tests feature enabled)"
-    echo "check_kernel_softfloat: skipped (kernel/tests feature enabled)"
-else
-    # These gates depend only on the ELF bytes; skip when the binary is
-    # unchanged since they last passed (soft-float disassembles the whole
-    # image, so re-running it on an identical rebuild is pure latency).
-    GATE_STAMP="$BUILD_DIR/.kernel-elf-gates.stamp"
-    ELF_HASH="$(sha256sum "$BUILD_DIR/kernel.elf" 2>/dev/null | awk '{print $1}')"
-    if [ -n "$ELF_HASH" ] && [ -f "$GATE_STAMP" ] && [ "$(cat "$GATE_STAMP" 2>/dev/null)" = "$ELF_HASH" ]; then
-        echo "check_stack_sizes: skipped (kernel.elf unchanged since last pass)"
-        echo "check_kernel_softfloat: skipped (kernel.elf unchanged since last pass)"
+# Both ELF gates run for every variant, including tests — that is the image
+# the whole suite executes on. The stamp key covers the gate scripts and
+# their allowlists as well as the ELF, so an edited gate re-runs instead of
+# waiting for the next unrelated kernel change.
+GATE_STAMP="$BUILD_DIR/.kernel-elf-gates-${VARIANT}.stamp"
+GATE_INPUTS=(
+    "$KERNEL_ELF"
+    "$SCRIPT_DIR/check_stack_sizes.sh"
+    "$SCRIPT_DIR/check_kernel_softfloat.sh"
+    "$SCRIPT_DIR/llvm_tool.sh"
+    "$SCRIPT_DIR/gates/stack/${VARIANT}.txt"
+    "$SCRIPT_DIR/gates/vector/${VARIANT}.txt"
+)
+
+# GNU coreutils on Linux, BSD `shasum` on macOS. An empty digest degrades to
+# always-run, never always-skip. The env line covers the two settings that
+# change a verdict without changing a tracked file.
+gate_input_digest() {
+    local hash
+    if command -v sha256sum >/dev/null 2>&1; then
+        hash="sha256sum"
+    elif command -v shasum >/dev/null 2>&1; then
+        hash="shasum -a 256"
     else
-        "$SCRIPT_DIR/check_stack_sizes.sh" "$BUILD_DIR/kernel.elf"
-        "$SCRIPT_DIR/check_kernel_softfloat.sh" "$BUILD_DIR/kernel.elf"
-        [ -n "$ELF_HASH" ] && printf '%s\n' "$ELF_HASH" > "$GATE_STAMP"
+        return 0
     fi
+    {
+        $hash "$@" 2>/dev/null
+        printf 'variant=%s threshold=%s channel=%s\n' \
+            "$VARIANT" "${STACK_SIZE_THRESHOLD:-2048}" "$RUST_CHANNEL"
+    } | $hash 2>/dev/null | awk '{print $1}'
+}
+
+GATE_KEY="$(gate_input_digest "${GATE_INPUTS[@]}")"
+if [ -n "$GATE_KEY" ] && [ "$(cat "$GATE_STAMP" 2>/dev/null)" = "$GATE_KEY" ]; then
+    echo "check_stack_sizes: skipped (${VARIANT} kernel + gates unchanged since last pass)"
+    echo "check_kernel_softfloat: skipped (${VARIANT} kernel + gates unchanged since last pass)"
+else
+    "$SCRIPT_DIR/check_stack_sizes.sh" --variant "$VARIANT" "$KERNEL_ELF"
+    "$SCRIPT_DIR/check_kernel_softfloat.sh" --variant "$VARIANT" "$KERNEL_ELF"
+    [ -n "$GATE_KEY" ] && printf '%s\n' "$GATE_KEY" > "$GATE_STAMP"
 fi

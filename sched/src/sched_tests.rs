@@ -415,7 +415,9 @@ pub fn test_scalar_field_identity() -> TestResult {
         ("tgid", arc.tgid as u64, 0xCCCC),
         ("parent_task_id", arc.parent_task_id() as u64, 0xDDDD),
     ];
-    for (name, got, want) in checks {
+    // By reference: `for … in checks` moves the table into `array::IntoIter`,
+    // whose own frame then carried several unmerged copies of it.
+    for &(name, got, want) in checks.iter() {
         if got != want {
             klog_info!(
                 "SCHED_TEST: field {} read 0x{:x}, expected 0x{:x}",

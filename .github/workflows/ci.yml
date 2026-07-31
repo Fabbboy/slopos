@@ -106,6 +106,43 @@ jobs:
           name: ci-test-log
           path: ci-test.log
 
+  # The `ci` job gates the opt-level-0 dev kernel. Release codegen inlines
+  # away roughly seven eighths of its functions, so the two images fail in
+  # opposite directions: dev verifies ~31k frames against ~3.8k here, and
+  # release is the only place an inlining decision that fuses small frames
+  # into one oversized frame can show up.
+  release-gates:
+    name: Release kernel ELF gates
+    runs-on: blacksmith-4vcpu-ubuntu-2404
+    timeout-minutes: 25
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+
+      - name: Install just
+        uses: extractions/setup-just@v4
+
+      - name: Setup Rust toolchain
+        run: scripts/ensure_toolchain.sh
+
+      - name: Cache Rust artifacts
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: ". -> builddir/target"
+          prefix-key: "v0-release"
+          cache-on-failure: true
+
+      # The stack and soft-float gates run from build_kernel.sh itself, on
+      # the ELF it just produced.
+      - name: Build and gate the release kernel
+        run: |
+          scripts/check_stack_sizes.sh --self-test
+          scripts/check_kernel_softfloat.sh --self-test
+          scripts/check_registry_sections.sh --self-test
+          KERNEL_RELEASE=1 just build-kernel-only
+          scripts/check_registry_sections.sh builddir/kernel-release.elf
+
   miri:
     name: KernMiri (OSTD UB detection)
     runs-on: blacksmith-4vcpu-ubuntu-2404

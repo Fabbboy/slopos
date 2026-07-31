@@ -21,6 +21,14 @@ fs_image_size    := env("FS_IMAGE_SIZE", "16M")
 initramfs        := build_dir / "initramfs.cpio"
 initramfs_tests  := build_dir / "initramfs-tests.cpio"
 
+# ── Kernel ELFs ──────────────────────────────────────────────────────────────
+# One artifact per build variant: a shared path would mean whichever build ran
+# last silently answers for all three — to the gates, to gdb, to the ISO.
+kernel_release   := env("KERNEL_RELEASE", "0")
+kernel_variant   := if kernel_release == "1" { "release" } else { "dev" }
+kernel_elf       := build_dir / ("kernel-" + kernel_variant + ".elf")
+kernel_elf_tests := build_dir / "kernel-tests.elf"
+
 # ── ISO outputs ──────────────────────────────────────────────────────────────
 
 iso          := build_dir / "slop.iso"
@@ -114,18 +122,26 @@ build: _fs-image
     KERNEL_RUSTFLAGS="{{kernel_rustflags}}" \
         scripts/build_kernel.sh "{{build_dir}}" "{{cargo_target_dir}}"
 
+# No `_fs-image` dependency: a gate-only job has no use for userland binaries,
+# and building them is most of the wall clock.
+[doc("Build the kernel ELF alone, skipping the fs image — for gate-only jobs")]
+build-kernel-only:
+    CARGO={{cargo}} RUST_CHANNEL={{rust_channel}} RUST_TARGET={{rust_target}} \
+    KERNEL_RUSTFLAGS="{{kernel_rustflags}}" \
+        scripts/build_kernel.sh "{{build_dir}}" "{{cargo_target_dir}}"
+
 # ── ISO images ───────────────────────────────────────────────────────────────
 
 [doc("Build default ISO (honors BOOT_CMDLINE, e.g. BOOT_CMDLINE='tests=off tp.debug=on')")]
 iso: build _initramfs
-    LIMINE_DIR={{limine_dir}} INITRAMFS_FILE={{initramfs}} \
+    KERNEL_ELF={{kernel_elf}} LIMINE_DIR={{limine_dir}} INITRAMFS_FILE={{initramfs}} \
     QEMU_FB_WIDTH={{qemu_fb_width}} QEMU_FB_HEIGHT={{qemu_fb_height}} \
     QEMU_FB_AUTO={{qemu_fb_auto}} QEMU_FB_AUTO_POLICY={{qemu_fb_auto_policy}} \
     QEMU_FB_AUTO_OUTPUT="{{qemu_fb_auto_output}}" \
         scripts/build_iso.sh "{{iso}}" "{{build_dir}}" "{{boot_cmdline_effective}}"
 
 _iso-notests: build _initramfs
-    LIMINE_DIR={{limine_dir}} INITRAMFS_FILE={{initramfs}} \
+    KERNEL_ELF={{kernel_elf}} LIMINE_DIR={{limine_dir}} INITRAMFS_FILE={{initramfs}} \
     QEMU_FB_WIDTH={{qemu_fb_width}} QEMU_FB_HEIGHT={{qemu_fb_height}} \
     QEMU_FB_AUTO={{qemu_fb_auto}} QEMU_FB_AUTO_POLICY={{qemu_fb_auto_policy}} \
     QEMU_FB_AUTO_OUTPUT="{{qemu_fb_auto_output}}" \
@@ -136,7 +152,7 @@ _iso-tests: _fs-image-tests _initramfs-tests
     KERNEL_RUSTFLAGS="{{kernel_rustflags}}" \
         scripts/build_kernel.sh "{{build_dir}}" "{{cargo_target_dir}}" \
             "slopos-testing/qemu-exit kernel/tests"
-    LIMINE_DIR={{limine_dir}} INITRAMFS_FILE={{initramfs_tests}} \
+    KERNEL_ELF={{kernel_elf_tests}} LIMINE_DIR={{limine_dir}} INITRAMFS_FILE={{initramfs_tests}} \
     QEMU_FB_WIDTH={{qemu_fb_width}} QEMU_FB_HEIGHT={{qemu_fb_height}} \
     QEMU_FB_AUTO={{qemu_fb_auto}} QEMU_FB_AUTO_POLICY={{qemu_fb_auto_policy}} \
     QEMU_FB_AUTO_OUTPUT="{{qemu_fb_auto_output}}" \
@@ -152,7 +168,7 @@ _iso-tests-userland-only: _fs-image-tests _initramfs-tests
     KERNEL_RUSTFLAGS="{{kernel_rustflags}}" \
         scripts/build_kernel.sh "{{build_dir}}" "{{cargo_target_dir}}" \
             "slopos-testing/qemu-exit kernel/tests"
-    LIMINE_DIR={{limine_dir}} INITRAMFS_FILE={{initramfs_tests}} \
+    KERNEL_ELF={{kernel_elf_tests}} LIMINE_DIR={{limine_dir}} INITRAMFS_FILE={{initramfs_tests}} \
     QEMU_FB_WIDTH={{qemu_fb_width}} QEMU_FB_HEIGHT={{qemu_fb_height}} \
     QEMU_FB_AUTO={{qemu_fb_auto}} QEMU_FB_AUTO_POLICY={{qemu_fb_auto_policy}} \
     QEMU_FB_AUTO_OUTPUT="{{qemu_fb_auto_output}}" \
@@ -225,9 +241,9 @@ boot-debug:
 
 [doc("Capture all-CPU backtraces from the running kernel (writes builddir/freeze-gdb.log)")]
 debug-bt:
-    @test -f {{build_dir}}/kernel.elf || { echo "missing {{build_dir}}/kernel.elf — run 'just iso' first" >&2; exit 1; }
+    @test -f {{kernel_elf}} || { echo "missing {{kernel_elf}} — run 'just iso' first" >&2; exit 1; }
     @echo "Attaching to QEMU GDB stub on :1234 — kernel must be running with 'just boot-debug'…"
-    gdb -q {{build_dir}}/kernel.elf \
+    gdb -q {{kernel_elf}} \
         -ex 'set pagination off' \
         -ex 'target remote :1234' \
         -ex 'info threads' \
@@ -238,8 +254,8 @@ debug-bt:
 
 [doc("Interactive GDB attached to the running kernel (Ctrl-D to exit)")]
 debug-gdb:
-    @test -f {{build_dir}}/kernel.elf || { echo "missing {{build_dir}}/kernel.elf — run 'just iso' first" >&2; exit 1; }
-    gdb -q {{build_dir}}/kernel.elf \
+    @test -f {{kernel_elf}} || { echo "missing {{kernel_elf}} — run 'just iso' first" >&2; exit 1; }
+    gdb -q {{kernel_elf}} \
         -ex 'set pagination off' \
         -ex 'target remote :1234'
 
@@ -366,29 +382,39 @@ check-no-kernel-async:
 # single source of truth for the gate list: CI calls this recipe directly
 # rather than duplicating the list inline, because `check-framekernel`
 # below also runs KernMiri and Verus, which are separate CI jobs.
-# Requires a prior `just build` so check_stack_sizes.sh has a kernel.elf
-# to inspect.
+# Requires a prior `just build` so the ELF gates have a kernel-dev.elf to
+# inspect.
 #
 [doc("Run the framekernel gate scripts only — no fmt, KernMiri, or Verus (requires a prior `just build`)")]
 check-framekernel-gates:
+    # Self-tests first: a gate whose patterns have rotted produces output
+    # nobody can trust, and each costs ~50 ms against a ~40 s recipe.
+    scripts/check_unsafe_outside_ostd.sh --self-test
+    scripts/check_alloc_dep.sh --self-test
+    scripts/check_no_kernel_async.sh --self-test
+    scripts/check_drop_panic_free.sh --self-test
+    scripts/check_wait_predicate_purity.sh --self-test
+    scripts/check_kernel_pml4_writer.sh --self-test
+    scripts/check_task_ownership.sh --self-test
+    scripts/check_stack_sizes.sh --self-test
+    scripts/check_kernel_softfloat.sh --self-test
+    scripts/check_registry_sections.sh --self-test
     scripts/check_vendor_pin.sh
     scripts/check_unsafe_outside_ostd.sh
     scripts/check_unsafe_expansion.sh
     scripts/check_no_kernel_async.sh
     scripts/check_alloc_dep.sh
     scripts/check_drop_panic_free.sh
-    scripts/check_kernel_pml4_writer.sh --self-test
-    scripts/check_stack_sizes.sh {{build_dir}}/kernel.elf
-    scripts/check_kernel_softfloat.sh {{build_dir}}/kernel.elf
-    scripts/check_registry_sections.sh {{build_dir}}/kernel.elf
+    scripts/check_stack_sizes.sh --variant dev {{build_dir}}/kernel-dev.elf
+    scripts/check_kernel_softfloat.sh --variant dev {{build_dir}}/kernel-dev.elf
+    scripts/check_registry_sections.sh {{build_dir}}/kernel-dev.elf
     scripts/check_wait_predicate_purity.sh
-    scripts/check_task_ownership.sh --self-test
     scripts/check_task_ownership.sh
     scripts/check_safe_contract_surface.sh
     scripts/tcb_ratio.sh --max 1.0
 
 # Run every framekernel-discipline gate in one shot. Requires a prior
-# `just build` so check_stack_sizes.sh has a kernel.elf to inspect.
+# `just build` so the ELF gates have a kernel-dev.elf to inspect.
 # A kernel-aware `cargo clippy -- -D warnings` gate is not included
 # here yet — SlopOS has no clippy config in tree and the custom
 # `no_std` target needs plumbing; track as a Phase 2 chore.
@@ -419,10 +445,10 @@ show-qemu-resolution:
 fmt:
     {{cargo}} +{{rust_channel}} fmt --all -- --check
 
-[doc("Enforce kernel allocation + stack-frame invariants against the current kernel.elf")]
+[doc("Enforce kernel allocation + stack-frame invariants against the dev kernel ELF")]
 check:
     scripts/check_alloc_dep.sh
-    scripts/check_stack_sizes.sh {{build_dir}}/kernel.elf
+    scripts/check_stack_sizes.sh --variant dev {{build_dir}}/kernel-dev.elf
 
 [doc("Heuristic audit: kernel `pub fn` returning large by-value types — slow, not part of `check`")]
 check-return-types:
@@ -432,16 +458,17 @@ check-return-types:
 stack-audit:
     #!/usr/bin/env bash
     set -euo pipefail
-    if [ ! -f "{{build_dir}}/kernel.elf" ]; then
-        echo "kernel.elf missing — run \`just build\` first" >&2
+    if [ ! -f "{{kernel_elf}}" ]; then
+        echo "{{kernel_elf}} missing — run \`just build\` first" >&2
         exit 1
     fi
     # Anything above 8 KiB eats into the call-depth budget on a 32 KiB
     # task stack.  See `clippy.toml` for the matching compile-time rail.
     THRESHOLD="${THRESHOLD:-8192}"
     echo "Kernel functions with frame > ${THRESHOLD} bytes:"
-    objdump -d --no-show-raw-insn --disassembler-options=intel \
-        "{{build_dir}}/kernel.elf" 2>/dev/null \
+    OBJDUMP="$(scripts/llvm_tool.sh llvm-objdump)"
+    "$OBJDUMP" -d --no-show-raw-insn --x86-asm-syntax=intel \
+        "{{kernel_elf}}" \
       | awk -v t="${THRESHOLD}" '
           /^ffffffff[0-9a-f]+ <.*>:/ { fn=$0 }
           /sub[[:space:]]+rsp,0x/ {
@@ -453,7 +480,7 @@ stack-audit:
 [doc("Clean build artifacts")]
 clean:
     {{cargo}} +{{rust_channel}} clean --target-dir {{cargo_target_dir}} || true
-    rm -f {{build_dir}}/kernel.elf
+    rm -f {{build_dir}}/kernel-*.elf
 
 [doc("Full clean including ISOs, images, and logs")]
 distclean: clean

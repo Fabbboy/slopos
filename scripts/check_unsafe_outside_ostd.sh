@@ -45,6 +45,9 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 
+. "$SCRIPT_DIR/lib/gate_common.sh"
+gate_parse_args check_unsafe_outside_ostd "$@"
+
 # Crate-name allowlist — everything userland-side, plus the trusted
 # core and its proc-macro support. Matches the leading directory
 # component of the path (relative to REPO_ROOT). The named TCB annexes
@@ -60,53 +63,41 @@ SOURCE_WHITELIST=(
     "kernel/src/main.rs"
 )
 
-# Include tracked Rust sources, untracked Rust sources, and an explicit
-# vendor/**/*.rs sweep. The explicit vendor pass is intentional: a new
-# untracked vendored crate must not be able to carry executable unsafe
-# unless it is a named TCB annex.
-file_list="$(
-    cd "$REPO_ROOT"
-    {
-        if command -v git >/dev/null 2>&1 && git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
-            git ls-files '*.rs'
-            git ls-files --others --exclude-standard '*.rs'
-        else
-            find . -type f -name '*.rs' \
-                -not -path './builddir/*' \
-                -not -path './third_party/*' \
-                -not -path './target/*'
-        fi
-        find vendor -type f -name '*.rs' 2>/dev/null || true
-    } | sed 's|^\./||' | LC_ALL=C sort -u
-)"
-
 # Filter out userland-side crates and explicit-file exemptions. Built
 # imperatively rather than with a piped grep-of-greps because the
 # nested-pipe form silently drops stdin in some shell versions and
 # would no-op the gate.
-filtered=""
-while IFS= read -r path; do
-    [ -z "$path" ] && continue
-    [[ "$path" =~ $USERLAND_RE ]] && continue
-    # Named TCB annexes. Other vendor crates are deliberately scanned.
-    [[ "$path" =~ $TCB_ANNEX_RE ]] && continue
-    skip=0
-    for exempt in "${SOURCE_WHITELIST[@]}"; do
-        if [ "$path" = "$exempt" ]; then
-            skip=1
-            break
-        fi
+filter_files() {
+    local path exempt skip
+    while IFS= read -r path; do
+        [ -z "$path" ] && continue
+        [[ "$path" =~ $USERLAND_RE ]] && continue
+        # Named TCB annexes. Other vendor crates are deliberately scanned.
+        [[ "$path" =~ $TCB_ANNEX_RE ]] && continue
+        skip=0
+        for exempt in "${SOURCE_WHITELIST[@]}"; do
+            if [ "$path" = "$exempt" ]; then
+                skip=1
+                break
+            fi
+        done
+        [ "$skip" -eq 1 ] && continue
+        printf '%s\n' "$path"
     done
-    [ "$skip" -eq 1 ] && continue
-    filtered+="$path"$'\n'
-done <<< "$file_list"
+}
 
 # awk pass per file: flag any `unsafe`-keyword line that is not a
 # comment and is not preceded by a `#[cfg(...)]` attribute (direct or
 # via an enclosing `mod ... {` declaration two lines back).
-source_offenders="$(
-    cd "$REPO_ROOT"
-    printf '%s' "$filtered" | while IFS= read -r file; do
+#
+# Findings carry a `<tag>\t` prefix so the self-test can count each check;
+# the reports strip it back off.
+scan_sources() {
+    local root="$1"
+    shift
+    cd "$root"
+    local file
+    for file in "$@"; do
         [ -z "$file" ] && continue
         [ -f "$file" ] || continue
         awk -v fname="$file" '
@@ -145,21 +136,12 @@ source_offenders="$(
                     gated = 1
                 }
                 if (!gated) {
-                    printf "%s:%d: %s\n", fname, NR, $0
+                    printf "1\t%s:%d: %s\n", fname, NR, $0
                 }
             }
         ' "$file" || true
     done
-)"
-
-if [ -n "$source_offenders" ]; then
-    echo "check_unsafe_outside_ostd: executable 'unsafe' detected outside slopos-ostd and the named TCB annexes:" >&2
-    echo "$source_offenders" | sed 's/^/    /' >&2
-    echo "  slopos-ostd is the kernel OSTD; vendor/unwinding and vendor/gimli are the named vendor TCB annexes." >&2
-    echo "  If a new file legitimately needs an unsafe attribute (e.g. #[unsafe(link_section)] in a" >&2
-    echo "  macro_rules! body) and you have audited it, add the file to SOURCE_WHITELIST in this script." >&2
-    exit 1
-fi
+}
 
 # ---------------------------------------------------------------------------
 # Every kernel crate carries the lint attribute.
@@ -181,27 +163,147 @@ fi
 # The named vendor TCB annexes are covered by TCB_ANNEX_RE as above.
 LINT_EXEMPT_RE='^(slopos-ostd|slopos-ostd-derive|kernel)$'
 
-missing_lint=""
-if crate_dirs="$("$SCRIPT_DIR/kernel_crates.sh" 2>/dev/null)"; then
-    while IFS= read -r dir; do
+# Takes the crate-dir list as arguments so the self-test can drive it over a
+# fixture tree; the real run pipes `kernel_crates.sh` into it.
+scan_crate_lints() {
+    local root="$1"
+    shift
+    local dir candidate crate_root
+    for dir in "$@"; do
         [ -z "$dir" ] && continue
         [[ "$dir" =~ $LINT_EXEMPT_RE ]] && continue
         [[ "$dir/" =~ $TCB_ANNEX_RE ]] && continue
-        root=""
-        for candidate in "$REPO_ROOT/$dir/src/lib.rs" "$REPO_ROOT/$dir/src/main.rs"; do
-            [ -f "$candidate" ] && root="$candidate" && break
+        crate_root=""
+        for candidate in "$root/$dir/src/lib.rs" "$root/$dir/src/main.rs"; do
+            [ -f "$candidate" ] && crate_root="$candidate" && break
         done
-        if [ -z "$root" ]; then
-            missing_lint+="$dir (no crate root found)"$'\n'
+        if [ -z "$crate_root" ]; then
+            printf '2\t%s (no crate root found)\n' "$dir"
             continue
         fi
-        if ! grep -qE '^#!\[forbid\(unsafe_code\)\]' "$root"; then
-            missing_lint+="$dir → ${root#"$REPO_ROOT"/}"$'\n'
+        if ! grep -qE '^#!\[forbid\(unsafe_code\)\]' "$crate_root"; then
+            printf '2\t%s → %s\n' "$dir" "${crate_root#"$root"/}"
         fi
-    done <<< "$crate_dirs"
-else
-    echo "check_unsafe_outside_ostd: WARNING — kernel_crates.sh unavailable; skipped the lint-attribute scan" >&2
+    done
+}
+
+run_scan() {
+    local root="$1"
+    shift
+    (scan_sources "$root" "$@")
+}
+
+# ---------------------------------------------------------------------------
+# Self-test
+# ---------------------------------------------------------------------------
+if [ "$GATE_SELF_TEST" -eq 1 ]; then
+    gate_selftest_begin check_unsafe_outside_ostd
+
+    cat > "$(gate_fixture sched/src/positives.rs)" <<'FIXTURE'
+fn raw() { unsafe { core::ptr::read(p) } }
+unsafe fn danger() {}
+unsafe impl Send for Foo {}
+unsafe extern "C" { fn ext(); }
+fn block() { let x = unsafe { *p }; }
+fn deref_assign() {
+    *out = unsafe { *src };
+}
+FIXTURE
+
+    cat > "$(gate_fixture vendor/othercrate/src/lib.rs)" <<'FIXTURE'
+unsafe fn vendored() {}
+FIXTURE
+
+    # Forms the gate deliberately accepts. The bare-`*` deref line is
+    # load-bearing in the other direction: unlike check_no_kernel_async, this
+    # gate must NOT skip it as a block-comment continuation.
+    cat > "$(gate_fixture sched/src/negatives.rs)" <<'FIXTURE'
+// unsafe { never_executed() }
+/* unsafe fn block_commented() {} */
+fn ident() { let unsafe_count = 0; let _ = unsafe_count; }
+fn make_unsafe_handle() {}
+#[unsafe(link_section = ".driver_registry")]
+static E: u8 = 0;
+fn trailing() { let v = 1; } // unsafe
+#[cfg(test)]
+unsafe fn cfg_gated() {}
+#[cfg(feature = "host")]
+mod gated {
+    unsafe fn inside() {}
+}
+FIXTURE
+
+    # `SOURCE_WHITELIST` is an exact whole-path compare; a basename or
+    # substring match would exempt every main.rs in the tree.
+    cat > "$(gate_fixture kernel/src/main.rs)" <<'FIXTURE'
+#[global_allocator]
+static A: KernelHeap = KernelHeap;
+unsafe fn allocator_support() {}
+FIXTURE
+    cat > "$(gate_fixture slopos-ostd/src/x.rs)" <<'FIXTURE'
+unsafe fn the_trusted_core_owns_this() {}
+FIXTURE
+    cat > "$(gate_fixture userland/src/main.rs)" <<'FIXTURE'
+unsafe fn userland_is_out_of_scope() {}
+FIXTURE
+    cat > "$(gate_fixture vendor/unwinding/src/lib.rs)" <<'FIXTURE'
+unsafe fn named_annex() {}
+FIXTURE
+
+    fixture_files="$(gate_collect_rs_files "$GATE_FIXTURE_ROOT")"
+    gate_expect_enumerator "$GATE_FIXTURE_ROOT" "$fixture_files"
+
+    scanned="$(printf '%s\n' "$fixture_files" | filter_files)"
+    GATE_FINDINGS="$(run_scan "$GATE_FIXTURE_ROOT" $scanned)"
+
+    gate_expect 1 7 "unsafe block, unsafe fn, unsafe impl, unsafe extern, a block in a let, a deref assignment, and a non-annex vendor crate"
+    gate_expect_silent 'negatives\.rs|kernel/src/main\.rs|slopos-ostd/|userland/|vendor/unwinding/' \
+        "comments, the #[unsafe(...)] attribute form, identifiers containing the keyword, a trailing comment, both cfg lookbacks, the whole-path source whitelist, the trusted core, userland, and the named TCB annexes all stay silent"
+
+    # Pass 2 over a synthetic crate list. The crate *set* resolution stays
+    # uncovered — that is kernel_crates.sh's job.
+    mkdir -p "$GATE_FIXTURE_ROOT/mm/src" "$GATE_FIXTURE_ROOT/newcrate"
+    printf '#![forbid(unsafe_code)]\n' > "$GATE_FIXTURE_ROOT/mm/src/lib.rs"
+    printf 'pub fn f() {}\n' > "$GATE_FIXTURE_ROOT/sched/src/lib.rs"
+    GATE_FINDINGS="$(scan_crate_lints "$GATE_FIXTURE_ROOT" \
+        mm sched newcrate slopos-ostd kernel vendor/unwinding)"
+    gate_expect 2 2 "a crate with no forbid attribute, and a crate with no crate root at all"
+    gate_expect_silent '	(mm|slopos-ostd|kernel|vendor/unwinding) ' \
+        "the forbidding crate and the three exempt crates stay silent"
+
+    gate_selftest_end
 fi
+
+# ---------------------------------------------------------------------------
+# Real run
+# ---------------------------------------------------------------------------
+file_list="$(gate_collect_rs_files "$REPO_ROOT")"
+gate_require_nonempty check_unsafe_outside_ostd "$REPO_ROOT" "$file_list"
+filtered="$(printf '%s\n' "$file_list" | filter_files)"
+
+source_offenders="$(run_scan "$REPO_ROOT" $filtered | cut -f2-)"
+
+if [ -n "$source_offenders" ]; then
+    echo "check_unsafe_outside_ostd: executable 'unsafe' detected outside slopos-ostd and the named TCB annexes:" >&2
+    echo "$source_offenders" | sed 's/^/    /' >&2
+    echo "  slopos-ostd is the kernel OSTD; vendor/unwinding and vendor/gimli are the named vendor TCB annexes." >&2
+    echo "  If a new file legitimately needs an unsafe attribute (e.g. #[unsafe(link_section)] in a" >&2
+    echo "  macro_rules! body) and you have audited it, add the file to SOURCE_WHITELIST in this script." >&2
+    exit 1
+fi
+
+# Fails closed. This used to warn and skip, so a runner without jq passed a
+# crate carrying no lint attribute at all; cargo and jq are already hard
+# requirements of tcb_ratio.sh, which runs beside this gate.
+if ! crate_dirs="$("$SCRIPT_DIR/kernel_crates.sh")"; then
+    echo "check_unsafe_outside_ostd: could not resolve the kernel crate set" >&2
+    echo "  (scripts/kernel_crates.sh needs cargo + jq). The lint-attribute scan is" >&2
+    echo "  half this gate; skipping it silently would pass a crate carrying no" >&2
+    echo "  #![forbid(unsafe_code)] at all." >&2
+    exit 2
+fi
+
+missing_lint="$(scan_crate_lints "$REPO_ROOT" $crate_dirs | cut -f2-)"
 
 if [ -n "$missing_lint" ]; then
     echo "check_unsafe_outside_ostd: kernel crate without #![forbid(unsafe_code)]:" >&2

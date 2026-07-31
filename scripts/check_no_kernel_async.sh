@@ -22,44 +22,39 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 
+. "$SCRIPT_DIR/lib/gate_common.sh"
+gate_parse_args check_no_kernel_async "$@"
+
 # Userland-side crates are exempt (their whole job is to host async).
 # slopos-rt = the userland async runtime; userland-side, identical role to
 # userland/appkit which are already exempt.
 USERLAND_RE='^(userland|slibc|slop-protocol|appkit|image|slopos-rt|verification)/'
 TCB_ANNEX_RE='^vendor/(unwinding|gimli)/'
 
-file_list="$(
-    cd "$REPO_ROOT"
-    {
-        if command -v git >/dev/null 2>&1 && git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
-            git ls-files '*.rs'
-            git ls-files --others --exclude-standard '*.rs'
-        else
-            find . -type f -name '*.rs' \
-                -not -path './builddir/*' \
-                -not -path './third_party/*' \
-                -not -path './target/*'
-        fi
-        find vendor -type f -name '*.rs' 2>/dev/null || true
-    } | sed 's|^\./||' | LC_ALL=C sort -u
-)"
-
-filtered=""
-while IFS= read -r path; do
-    [ -z "$path" ] && continue
-    [[ "$path" =~ $USERLAND_RE ]] && continue
-    # Named TCB annexes. Other vendor crates are deliberately scanned.
-    [[ "$path" =~ $TCB_ANNEX_RE ]] && continue
-    filtered+="$path"$'\n'
-done <<< "$file_list"
+filter_files() {
+    local path
+    while IFS= read -r path; do
+        [ -z "$path" ] && continue
+        [[ "$path" =~ $USERLAND_RE ]] && continue
+        # Named TCB annexes. Other vendor crates are deliberately scanned.
+        [[ "$path" =~ $TCB_ANNEX_RE ]] && continue
+        printf '%s\n' "$path"
+    done
+}
 
 # Flag any line introducing async in a kernel crate:
 #   - `async fn ...`
 #   - `async {` / `async move {` blocks
 # while skipping comment lines and `#[cfg(...)]`-gated lines.
-offenders="$(
-    cd "$REPO_ROOT"
-    printf '%s' "$filtered" | while IFS= read -r file; do
+#
+# Findings carry a `<tag>\t` prefix so the self-test can count each check;
+# the report strips it back off.
+scan_sources() {
+    local root="$1"
+    shift
+    cd "$root"
+    local file
+    for file in "$@"; do
         [ -z "$file" ] && continue
         [ -f "$file" ] || continue
         awk -v fname="$file" '
@@ -90,12 +85,87 @@ offenders="$(
                     gated = 1
                 }
                 if (!gated) {
-                    printf "%s:%d: %s\n", fname, NR, $0
+                    printf "1\t%s:%d: %s\n", fname, NR, $0
                 }
             }
         ' "$file" || true
     done
-)"
+}
+
+run_scan() {
+    local root="$1"
+    shift
+    (scan_sources "$root" "$@")
+}
+
+# ---------------------------------------------------------------------------
+# Self-test
+# ---------------------------------------------------------------------------
+if [ "$GATE_SELF_TEST" -eq 1 ]; then
+    gate_selftest_begin check_no_kernel_async
+
+    cat > "$(gate_fixture sched/src/positives.rs)" <<'FIXTURE'
+async fn a() {}
+pub async fn b() {}
+fn c() { let _f = async move { 1 }; }
+fn d() { let _g = async { 1 }; }
+fn e() { let _h = async || {}; }
+async gen fn f() {}
+FIXTURE
+
+    cat > "$(gate_fixture vendor/othercrate/src/lib.rs)" <<'FIXTURE'
+async fn vendored() {}
+FIXTURE
+
+    # Forms the gate deliberately accepts. Each is a live regression risk:
+    # awk has no `\b`, so the word-boundary emulation is hand-rolled.
+    cat > "$(gate_fixture sched/src/negatives.rs)" <<'FIXTURE'
+// async fn commented() {}
+/* async fn block_commented() {} */
+ * async fn continuation() {}
+fn asyncness_probe() { if sig.asyncness.is_some() { } }
+fn message() { klog_info!("no `async` here"); }
+fn ident() { let asynchronous = 1; let _ = asynchronous; }
+#[cfg(feature = "host")]
+async fn cfg_gated() {}
+#[cfg(test)]
+mod tests {
+    async fn inside_gated_mod() {}
+}
+FIXTURE
+
+    cat > "$(gate_fixture userland/src/lib.rs)" <<'FIXTURE'
+async fn userland_is_the_point() {}
+FIXTURE
+    cat > "$(gate_fixture verification/proofs/x.rs)" <<'FIXTURE'
+async fn proof_harness() {}
+FIXTURE
+    cat > "$(gate_fixture vendor/gimli/src/x.rs)" <<'FIXTURE'
+async fn annex() {}
+FIXTURE
+
+    fixture_files="$(gate_collect_rs_files "$GATE_FIXTURE_ROOT")"
+    gate_expect_enumerator "$GATE_FIXTURE_ROOT" "$fixture_files"
+
+    # The filter decides scope: a widened regex would exempt kernel crates.
+    scanned="$(printf '%s\n' "$fixture_files" | filter_files)"
+    GATE_FINDINGS="$(run_scan "$GATE_FIXTURE_ROOT" $scanned)"
+
+    gate_expect 1 7 "async fn, pub async fn, async move, async block, async closure, async gen, and a non-annex vendor crate"
+    gate_expect_silent 'negatives\.rs|userland/|verification/|vendor/gimli/' \
+        "comments, .asyncness, a backticked mention, an identifier, both cfg lookbacks, userland, verification, and the named TCB annexes all stay silent"
+
+    gate_selftest_end
+fi
+
+# ---------------------------------------------------------------------------
+# Real run
+# ---------------------------------------------------------------------------
+file_list="$(gate_collect_rs_files "$REPO_ROOT")"
+gate_require_nonempty check_no_kernel_async "$REPO_ROOT" "$file_list"
+filtered="$(printf '%s\n' "$file_list" | filter_files)"
+
+offenders="$(run_scan "$REPO_ROOT" $filtered | cut -f2-)"
 
 if [ -n "$offenders" ]; then
     echo "check_no_kernel_async: 'async' detected in a kernel crate:" >&2

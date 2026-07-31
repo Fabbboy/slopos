@@ -1,0 +1,23 @@
+# check_stack_sizes allowlist — variant: release
+#
+# Frames above STACK_SIZE_THRESHOLD (2048 B) that are permitted, each capped
+# at its measured size so growth still fails.
+#
+#     scripts/check_stack_sizes.sh --variant release --emit-allowlist builddir/kernel-release.elf
+#
+# No entries: at opt-level 3 the largest frame is well under the ceiling,
+# including the vendored unwinder frames that need exemptions in the dev
+# build. The two gates check different things — dev is the load-bearing
+# enforcement of Inv. 5' (~31k frames verified against ~3.8k here), and
+# release catches the opposite failure, an inlining decision that fuses
+# several small frames into one large one.
+#
+# No entry may exceed the 4096 B guard page.
+
+# Measured 2026-07-31: 3830 records, 0 frames over 2048 B. The floor is far
+# above zero so a dropped -Zemit-stack-sizes cannot read as a clean image.
+min-records 2000
+
+expect-test-registry few
+
+# <max-bytes> <TAB> <glob over the rustc-mangled symbol>

@@ -13,7 +13,7 @@
 set pagination off
 set confirm off
 set architecture i386:x86-64
-file builddir/kernel.elf
+file builddir/kernel-dev.elf
 
 python
 import os, gdb

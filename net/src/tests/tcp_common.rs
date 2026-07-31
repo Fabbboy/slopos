@@ -334,19 +334,42 @@ pub fn drain_transmit(id: ConnId) -> KVec<(TcpOutSegment, KVec<u8>)> {
 /// guard-binding block, not a closure), so `return` and `?` propagate
 /// to the enclosing function — test assertion macros like
 /// `assert_test!` keep working unchanged.
+/// The macro's three failure arms, out of line: their format-args state is
+/// charged to the caller's frame at opt-level 0, and `with_data_state!` is
+/// used several times per test.
+#[cold]
+#[inline(never)]
+pub fn wds_listener_id() -> ! {
+    panic!("with_data_state! requires a non-listener ConnId");
+}
+
+#[cold]
+#[inline(never)]
+pub fn wds_missing_pcb() -> ! {
+    panic!("PCB should exist");
+}
+
+#[cold]
+#[inline(never)]
+pub fn wds_wrong_state(name: &str) -> ! {
+    panic!("expected Data state, got {}", name);
+}
+
 #[macro_export]
 macro_rules! with_data_state {
     ($id:expr, |$d:ident| $body:expr) => {{
         let __wds_id: crate::tcp::ConnId = $id;
-        assert!(
-            !__wds_id.is_listener(),
-            "with_data_state! requires a non-listener ConnId"
-        );
+        if __wds_id.is_listener() {
+            crate::tests::tcp_common::wds_listener_id();
+        }
         let __wds_guard = crate::tcp::table::TCP_PCB_SLOTS[__wds_id.linear_slot()].lock();
-        let __wds_slot = __wds_guard.as_ref().expect("PCB should exist");
+        let __wds_slot = match __wds_guard.as_ref() {
+            Some(slot) => slot,
+            None => crate::tests::tcp_common::wds_missing_pcb(),
+        };
         match &__wds_slot.pcb.state {
             crate::tcp::PcbState::Data($d) => $body,
-            other => panic!("expected Data state, got {}", other.name()),
+            other => crate::tests::tcp_common::wds_wrong_state(other.name()),
         }
     }};
 }

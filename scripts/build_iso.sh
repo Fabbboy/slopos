@@ -6,6 +6,7 @@ set -euo pipefail
 # Usage: build_iso.sh <output> <build_dir> [cmdline]
 #
 # Environment:
+#   KERNEL_ELF - path to the kernel ELF to stage (required)
 #   LIMINE_DIR - path to Limine directory (default: third_party/limine)
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -16,7 +17,10 @@ BUILD_DIR="${2:?Usage: build_iso.sh <output> <build_dir> [cmdline]}"
 CMDLINE="${3:-}"
 
 LIMINE_DIR="${LIMINE_DIR:-${REPO_ROOT}/third_party/limine}"
-KERNEL="${BUILD_DIR}/kernel.elf"
+
+# Named by the caller, not defaulted: a default that happened to exist would
+# stage whichever variant was built last.
+KERNEL="${KERNEL_ELF:?build_iso: KERNEL_ELF must name the kernel ELF to stage}"
 
 if [ ! -f "$KERNEL" ]; then
     echo "Kernel not found at $KERNEL. Build the kernel first." >&2

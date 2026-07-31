@@ -1,4 +1,66 @@
 //! Type-safe assertion macros returning TestResult on failure.
+//!
+//! Failure arms live in `#[cold] #[inline(never)]` helpers. At opt-level 0
+//! each `klog_info!` puts its `Arguments` and argument array in the *caller's*
+//! frame, unmerged, whether or not the assertion fires — a dozen assertions
+//! cost a kilobyte of a test's 2 KiB frame budget. `&dyn Debug` rather than
+//! generics keeps it to one helper each instead of one per formatted type.
+
+use core::fmt::Debug;
+
+use slopos_ostd::klog_info;
+
+use crate::TestResult;
+
+#[cold]
+#[inline(never)]
+pub fn assert_eq_failed(msg: Option<&str>, expected: &dyn Debug, got: &dyn Debug) -> TestResult {
+    match msg {
+        Some(m) => klog_info!("ASSERT_EQ: {} - expected {:?}, got {:?}", m, expected, got),
+        None => klog_info!("ASSERT_EQ: expected {:?}, got {:?}", expected, got),
+    }
+    TestResult::Fail
+}
+
+#[cold]
+#[inline(never)]
+pub fn assert_ne_failed(msg: Option<&str>, both: &dyn Debug) -> TestResult {
+    match msg {
+        Some(m) => klog_info!("ASSERT_NE: {} - both are {:?}", m, both),
+        None => klog_info!("ASSERT_NE: values should differ, both are {:?}", both),
+    }
+    TestResult::Fail
+}
+
+#[cold]
+#[inline(never)]
+pub fn assert_failed(prefix: &str, msg: Option<&str>) -> TestResult {
+    match msg {
+        Some(m) => klog_info!("{}: {}", prefix, m),
+        None => klog_info!("{}", prefix),
+    }
+    TestResult::Fail
+}
+
+#[cold]
+#[inline(never)]
+pub fn assert_zero_failed(msg: Option<&str>, got: &dyn Debug) -> TestResult {
+    match msg {
+        Some(m) => klog_info!("ASSERT_ZERO: {} - got {:?}", m, got),
+        None => klog_info!("ASSERT_ZERO: expected 0, got {:?}", got),
+    }
+    TestResult::Fail
+}
+
+#[cold]
+#[inline(never)]
+pub fn assert_ok_failed(msg: Option<&str>, err: &dyn Debug) -> TestResult {
+    match msg {
+        Some(m) => klog_info!("ASSERT_OK: {} - got Err({:?})", m, err),
+        None => klog_info!("ASSERT_OK: got Err({:?})", err),
+    }
+    TestResult::Fail
+}
 
 #[macro_export]
 macro_rules! assert_eq_test {
@@ -6,16 +68,14 @@ macro_rules! assert_eq_test {
         let left = $left;
         let right = $right;
         if left != right {
-            slopos_ostd::klog_info!("ASSERT_EQ: expected {:?}, got {:?}", right, left);
-            return $crate::TestResult::Fail;
+            return $crate::assertions::assert_eq_failed(None, &right, &left);
         }
     }};
     ($left:expr, $right:expr, $msg:expr) => {{
         let left = $left;
         let right = $right;
         if left != right {
-            slopos_ostd::klog_info!("ASSERT_EQ: {} - expected {:?}, got {:?}", $msg, right, left);
-            return $crate::TestResult::Fail;
+            return $crate::assertions::assert_eq_failed(Some($msg), &right, &left);
         }
     }};
 }
@@ -26,16 +86,14 @@ macro_rules! assert_ne_test {
         let left = $left;
         let right = $right;
         if left == right {
-            slopos_ostd::klog_info!("ASSERT_NE: values should differ, both are {:?}", left);
-            return $crate::TestResult::Fail;
+            return $crate::assertions::assert_ne_failed(None, &left);
         }
     }};
     ($left:expr, $right:expr, $msg:expr) => {{
         let left = $left;
         let right = $right;
         if left == right {
-            slopos_ostd::klog_info!("ASSERT_NE: {} - both are {:?}", $msg, left);
-            return $crate::TestResult::Fail;
+            return $crate::assertions::assert_ne_failed(Some($msg), &left);
         }
     }};
 }
@@ -44,14 +102,12 @@ macro_rules! assert_ne_test {
 macro_rules! assert_not_null {
     ($ptr:expr) => {{
         if $ptr.is_null() {
-            slopos_ostd::klog_info!("ASSERT_NOT_NULL: pointer is null");
-            return $crate::TestResult::Fail;
+            return $crate::assertions::assert_failed("ASSERT_NOT_NULL: pointer is null", None);
         }
     }};
     ($ptr:expr, $msg:expr) => {{
         if $ptr.is_null() {
-            slopos_ostd::klog_info!("ASSERT_NOT_NULL: {}", $msg);
-            return $crate::TestResult::Fail;
+            return $crate::assertions::assert_failed("ASSERT_NOT_NULL", Some($msg));
         }
     }};
 }
@@ -66,8 +122,7 @@ macro_rules! assert_some {
         match $opt {
             Some(v) => v,
             None => {
-                slopos_ostd::klog_info!("ASSERT_SOME: value is None");
-                return $crate::TestResult::Fail;
+                return $crate::assertions::assert_failed("ASSERT_SOME: value is None", None);
             }
         }
     }};
@@ -75,8 +130,7 @@ macro_rules! assert_some {
         match $opt {
             Some(v) => v,
             None => {
-                slopos_ostd::klog_info!("ASSERT_SOME: {}", $msg);
-                return $crate::TestResult::Fail;
+                return $crate::assertions::assert_failed("ASSERT_SOME", Some($msg));
             }
         }
     }};
@@ -86,16 +140,17 @@ macro_rules! assert_some {
 macro_rules! assert_test {
     ($cond:expr) => {{
         if !$cond {
-            slopos_ostd::klog_info!("ASSERT: condition failed");
-            return $crate::TestResult::Fail;
+            return $crate::assertions::assert_failed("ASSERT: condition failed", None);
         }
     }};
     ($cond:expr, $msg:expr) => {{
         if !$cond {
-            slopos_ostd::klog_info!("ASSERT: {}", $msg);
-            return $crate::TestResult::Fail;
+            return $crate::assertions::assert_failed("ASSERT", Some($msg));
         }
     }};
+    // The variadic arm keeps its `format_args!` at the call site: the values
+    // being formatted live there, and there is no way to name their types
+    // through a non-generic helper.
     ($cond:expr, $fmt:expr, $($arg:tt)*) => {{
         if !$cond {
             slopos_ostd::klog_info!(concat!("ASSERT: ", $fmt), $($arg)*);
@@ -109,15 +164,13 @@ macro_rules! assert_zero {
     ($val:expr) => {{
         let val = $val;
         if val != 0 {
-            slopos_ostd::klog_info!("ASSERT_ZERO: expected 0, got {}", val);
-            return $crate::TestResult::Fail;
+            return $crate::assertions::assert_zero_failed(None, &val);
         }
     }};
     ($val:expr, $msg:expr) => {{
         let val = $val;
         if val != 0 {
-            slopos_ostd::klog_info!("ASSERT_ZERO: {} - got {}", $msg, val);
-            return $crate::TestResult::Fail;
+            return $crate::assertions::assert_zero_failed(Some($msg), &val);
         }
     }};
 }
@@ -128,8 +181,7 @@ macro_rules! assert_ok {
         match $result {
             Ok(v) => v,
             Err(e) => {
-                slopos_ostd::klog_info!("ASSERT_OK: got Err({:?})", e);
-                return $crate::TestResult::Fail;
+                return $crate::assertions::assert_ok_failed(None, &e);
             }
         }
     }};
@@ -137,8 +189,7 @@ macro_rules! assert_ok {
         match $result {
             Ok(v) => v,
             Err(e) => {
-                slopos_ostd::klog_info!("ASSERT_OK: {} - got Err({:?})", $msg, e);
-                return $crate::TestResult::Fail;
+                return $crate::assertions::assert_ok_failed(Some($msg), &e);
             }
         }
     }};

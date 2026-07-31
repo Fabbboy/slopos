@@ -390,6 +390,27 @@ impl UserContext {
         unsafe { (*self.regs.get()).rax = rax };
     }
 
+    /// Individual argument-register reads. `regs()` returns `UserRegs` by
+    /// value — 176 bytes of caller frame per read at opt-level 0, unmerged —
+    /// so prefer these unless the whole register file is wanted.
+    #[inline]
+    pub fn rdi(&self) -> u64 {
+        // SAFETY: see the write contract on `UserContext`.
+        unsafe { (*self.regs.get()).rdi }
+    }
+
+    #[inline]
+    pub fn rsi(&self) -> u64 {
+        // SAFETY: see the write contract on `UserContext`.
+        unsafe { (*self.regs.get()).rsi }
+    }
+
+    #[inline]
+    pub fn rdx(&self) -> u64 {
+        // SAFETY: see the write contract on `UserContext`.
+        unsafe { (*self.regs.get()).rdx }
+    }
+
     /// The six syscall argument registers in ABI order:
     /// `rdi`, `rsi`, `rdx`, `r10`, `r8`, `r9`.
     #[inline]

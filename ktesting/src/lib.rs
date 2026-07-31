@@ -12,7 +12,7 @@ pub mod registry;
 mod result;
 mod runner;
 
-mod assertions;
+pub mod assertions;
 #[cfg(feature = "qemu-exit")]
 pub mod qemu_signal;
 

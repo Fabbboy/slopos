@@ -141,6 +141,13 @@ fn zero_frame() -> UserContext {
     UserContext::const_zeroed()
 }
 
+/// A zeroed syscall frame on the heap. `UserContext` is 192 bytes with its
+/// own unmerged slot per local, so tests holding several at once take them
+/// off the stack.
+fn zero_frame_boxed() -> KBox<UserContext> {
+    KBox::zeroed().expect("frame alloc")
+}
+
 fn pts_path_for(number: u32) -> Option<[u8; 11]> {
     if number > 9 {
         return None;
@@ -382,7 +389,7 @@ pub fn test_process_group_session_syscalls_baseline() -> TestResult {
     let mut frame = zero_frame();
     let _ = crate::syscall::dispatch::dispatch_handler(syscall_getpgid, &parent_guard, &mut frame);
     assert_eq_test!(
-        frame.regs().rax as u32,
+        frame.rax() as u32,
         parent_guard.pgid(),
         "getpgid self mismatch"
     );
@@ -395,11 +402,7 @@ pub fn test_process_group_session_syscalls_baseline() -> TestResult {
         &parent_guard,
         &mut setpgid_frame,
     );
-    assert_eq_test!(
-        setpgid_frame.regs().rax,
-        0,
-        "setpgid should succeed for child"
-    );
+    assert_eq_test!(setpgid_frame.rax(), 0, "setpgid should succeed for child");
     assert_eq_test!(
         child_guard.pgid(),
         parent_id,
@@ -410,7 +413,7 @@ pub fn test_process_group_session_syscalls_baseline() -> TestResult {
     let _ =
         crate::syscall::dispatch::dispatch_handler(syscall_setsid, &child_guard, &mut setsid_frame);
     assert_eq_test!(
-        setsid_frame.regs().rax as u32,
+        setsid_frame.rax() as u32,
         child_id,
         "setsid should return child sid"
     );
@@ -450,11 +453,7 @@ pub fn test_kill_process_group_semantics() -> TestResult {
         &leader_guard,
         &mut setpgid_frame,
     );
-    assert_eq_test!(
-        setpgid_frame.regs().rax,
-        0,
-        "setpgid should succeed for member"
-    );
+    assert_eq_test!(setpgid_frame.rax(), 0, "setpgid should succeed for member");
 
     let leader_pid = leader_guard.process_id;
     let member_pid = member_guard.process_id;
@@ -465,11 +464,7 @@ pub fn test_kill_process_group_semantics() -> TestResult {
     let _ = with_user_process_context(leader_pid, || {
         crate::syscall::dispatch::dispatch_handler(syscall_kill, &leader_guard, &mut probe_frame)
     });
-    assert_eq_test!(
-        probe_frame.regs().rax,
-        0,
-        "kill(group, 0) probe should succeed"
-    );
+    assert_eq_test!(probe_frame.rax(), 0, "kill(group, 0) probe should succeed");
 
     leader_guard.set_signal_pending(0);
     member_guard.set_signal_pending(0);
@@ -484,11 +479,7 @@ pub fn test_kill_process_group_semantics() -> TestResult {
             &mut negative_group_frame,
         )
     });
-    assert_eq_test!(
-        negative_group_frame.regs().rax,
-        0,
-        "kill(-pgid, SIGUSR1) failed"
-    );
+    assert_eq_test!(negative_group_frame.rax(), 0, "kill(-pgid, SIGUSR1) failed");
 
     let pending_bit = sig_bit(SIGUSR1);
     let leader_pending = leader_guard.signal_pending();
@@ -515,7 +506,7 @@ pub fn test_kill_process_group_semantics() -> TestResult {
             &mut caller_group_frame,
         )
     });
-    assert_eq_test!(caller_group_frame.regs().rax, 0, "kill(0, SIGUSR1) failed");
+    assert_eq_test!(caller_group_frame.rax(), 0, "kill(0, SIGUSR1) failed");
 
     let leader_pending_after = leader_guard.signal_pending();
     let member_pending_after = member_guard.signal_pending();
@@ -633,7 +624,7 @@ pub fn test_process_group_slot_survives_republication() -> TestResult {
         &parent_guard,
         &mut setpgid_frame,
     );
-    assert_eq_test!(setpgid_frame.regs().rax, 0, "setpgid should succeed");
+    assert_eq_test!(setpgid_frame.rax(), 0, "setpgid should succeed");
 
     let replaced = child_guard
         .process_group
@@ -716,7 +707,7 @@ pub fn test_tiocsctty_session_leader_acquires_ctty() -> TestResult {
     frame.regs_mut().rdx = 0;
     let _ = crate::syscall::dispatch::dispatch_handler(syscall_ioctl, &task_guard, &mut frame);
     assert_eq_test!(
-        frame.regs().rax,
+        frame.rax(),
         0,
         "TIOCSCTTY should succeed for session leader"
     );
@@ -752,7 +743,7 @@ pub fn test_tiocsctty_non_leader_rejected() -> TestResult {
     frame.regs_mut().rdx = 0;
     let _ = crate::syscall::dispatch::dispatch_handler(syscall_ioctl, &child_guard, &mut frame);
     assert_test!(
-        frame.regs().rax != 0,
+        frame.rax() != 0,
         "TIOCSCTTY should fail for non-session leader"
     );
 
@@ -780,7 +771,7 @@ pub fn test_open_dev_tty_with_o_noctty_preserves_flag() -> TestResult {
     frame.regs_mut().rdx = 0;
     let _ = crate::syscall::dispatch::dispatch_handler(syscall_ioctl, &task_guard, &mut frame);
     assert_eq_test!(
-        frame.regs().rax,
+        frame.rax(),
         0,
         "TIOCSCTTY should succeed before /dev/tty open"
     );
@@ -818,7 +809,7 @@ pub fn test_setsid_child_preserves_parent_controlling_tty() -> TestResult {
     ioctl_frame.regs_mut().rdx = 0;
     let _ =
         crate::syscall::dispatch::dispatch_handler(syscall_ioctl, &parent_guard, &mut ioctl_frame);
-    assert_eq_test!(ioctl_frame.regs().rax, 0, "parent TIOCSCTTY should succeed");
+    assert_eq_test!(ioctl_frame.rax(), 0, "parent TIOCSCTTY should succeed");
 
     let child_id = task_fork(&parent_guard, None);
     assert_test!(child_id != INVALID_TASK_ID, "failed to fork child");
@@ -830,7 +821,7 @@ pub fn test_setsid_child_preserves_parent_controlling_tty() -> TestResult {
     let _ =
         crate::syscall::dispatch::dispatch_handler(syscall_setsid, &child_guard, &mut setsid_frame);
     assert_eq_test!(
-        setsid_frame.regs().rax as u32,
+        setsid_frame.rax() as u32,
         child_id,
         "setsid should succeed for child"
     );
@@ -871,7 +862,7 @@ pub fn test_hangup_clears_all_session_controlling_ttys() -> TestResult {
     ioctl_frame.regs_mut().rdx = 0;
     let _ =
         crate::syscall::dispatch::dispatch_handler(syscall_ioctl, &leader_guard, &mut ioctl_frame);
-    assert_eq_test!(ioctl_frame.regs().rax, 0, "leader TIOCSCTTY should succeed");
+    assert_eq_test!(ioctl_frame.rax(), 0, "leader TIOCSCTTY should succeed");
 
     let child_id = task_fork(&leader_guard, None);
     assert_test!(child_id != INVALID_TASK_ID, "failed to fork child");
@@ -1580,7 +1571,7 @@ pub fn test_futex_wait_mismatch_and_wake_no_waiters() -> TestResult {
         crate::syscall::dispatch::dispatch_handler(syscall_futex, &task_guard, &mut wait_frame)
     });
     assert_eq_test!(
-        wait_frame.regs().rax,
+        wait_frame.rax(),
         ERRNO_EAGAIN,
         "FUTEX_WAIT mismatch must return -EAGAIN"
     );
@@ -1593,7 +1584,7 @@ pub fn test_futex_wait_mismatch_and_wake_no_waiters() -> TestResult {
         crate::syscall::dispatch::dispatch_handler(syscall_futex, &task_guard, &mut wake_frame)
     });
     assert_eq_test!(
-        wake_frame.regs().rax,
+        wake_frame.rax(),
         0,
         "FUTEX_WAKE with no waiters must return 0"
     );
@@ -1630,7 +1621,7 @@ pub fn test_futex_lost_wakeup_regression() -> TestResult {
         crate::syscall::dispatch::dispatch_handler(syscall_futex, &task_guard, &mut wake_frame)
     });
     assert_eq_test!(
-        wake_frame.regs().rax,
+        wake_frame.rax(),
         0,
         "initial FUTEX_WAKE should wake no waiters"
     );
@@ -1644,7 +1635,7 @@ pub fn test_futex_lost_wakeup_regression() -> TestResult {
         crate::syscall::dispatch::dispatch_handler(syscall_futex, &task_guard, &mut wait_frame)
     });
     assert_eq_test!(
-        wait_frame.regs().rax,
+        wait_frame.rax(),
         ERRNO_EAGAIN,
         "post-wake mismatch must return -EAGAIN"
     );
@@ -1681,7 +1672,7 @@ pub fn test_futex_contention_path_stability() -> TestResult {
         let _ = with_user_process_context(pid, || {
             crate::syscall::dispatch::dispatch_handler(syscall_futex, &task_guard, &mut wake_frame)
         });
-        if wake_frame.regs().rax > wake_frame.regs().rdx {
+        if wake_frame.rax() > wake_frame.rdx() {
             task_terminate(task_id);
             return TestResult::Fail;
         }
@@ -1694,7 +1685,7 @@ pub fn test_futex_contention_path_stability() -> TestResult {
         let _ = with_user_process_context(pid, || {
             crate::syscall::dispatch::dispatch_handler(syscall_futex, &task_guard, &mut wait_frame)
         });
-        if wait_frame.regs().rax != ERRNO_EAGAIN {
+        if wait_frame.rax() != ERRNO_EAGAIN {
             task_terminate(task_id);
             return TestResult::Fail;
         }
@@ -1745,7 +1736,7 @@ pub fn test_signal_install_deliver_and_sigreturn() -> TestResult {
             &mut *action_frame,
         )
     });
-    assert_eq_test!(action_frame.regs().rax, 0, "rt_sigaction failed");
+    assert_eq_test!(action_frame.rax(), 0, "rt_sigaction failed");
 
     let old_action: UserSigaction = match user_copy_in(pid, old_action_addr) {
         Some(v) => v,
@@ -1770,7 +1761,7 @@ pub fn test_signal_install_deliver_and_sigreturn() -> TestResult {
     let _ = with_user_process_context(pid, || {
         crate::syscall::dispatch::dispatch_handler(syscall_kill, &task_guard, &mut *kill_frame)
     });
-    assert_eq_test!(kill_frame.regs().rax, 0, "kill(SIGUSR1) failed");
+    assert_eq_test!(kill_frame.rax(), 0, "kill(SIGUSR1) failed");
 
     let mut user_frame: KBox<UserContext> = KBox::zeroed().expect("alloc");
     user_frame.regs_mut().rip = original_rip;
@@ -1780,19 +1771,19 @@ pub fn test_signal_install_deliver_and_sigreturn() -> TestResult {
     deliver_pending_signal_as_current(task_id, pid, &user_frame);
 
     assert_eq_test!(
-        user_frame.regs().rip,
+        user_frame.rip(),
         new_action.sa_handler,
         "signal handler RIP not installed"
     );
     assert_eq_test!(
-        user_frame.regs().rdi,
+        user_frame.rdi(),
         SIGUSR1 as u64,
         "signal number not passed in RDI"
     );
 
     // The restorer address is pushed as a separate u64 at [rsp].
     // The SignalFrame starts at [rsp + 8].
-    let restorer_on_stack: u64 = match user_copy_in(pid, user_frame.regs().rsp) {
+    let restorer_on_stack: u64 = match user_copy_in(pid, user_frame.rsp()) {
         Some(v) => v,
         None => {
             task_terminate(task_id);
@@ -1805,7 +1796,7 @@ pub fn test_signal_install_deliver_and_sigreturn() -> TestResult {
         "signal restorer mismatch"
     );
 
-    let sigframe_addr = user_frame.regs().rsp.wrapping_add(8);
+    let sigframe_addr = user_frame.rsp().wrapping_add(8);
     let sigframe: SignalFrame = match user_copy_in(pid, sigframe_addr) {
         Some(v) => v,
         None => {
@@ -1826,7 +1817,7 @@ pub fn test_signal_install_deliver_and_sigreturn() -> TestResult {
 
     // Simulate handler's `ret`: it pops the restorer, advancing RSP by 8
     // so it now points at the SignalFrame — matching the real flow.
-    user_frame.regs_mut().rsp = user_frame.regs().rsp.wrapping_add(8);
+    user_frame.regs_mut().rsp = user_frame.rsp().wrapping_add(8);
     let _ = with_user_process_context(pid, || {
         crate::syscall::dispatch::dispatch_handler(
             syscall_rt_sigreturn,
@@ -1835,12 +1826,12 @@ pub fn test_signal_install_deliver_and_sigreturn() -> TestResult {
         )
     });
     assert_eq_test!(
-        user_frame.regs().rip,
+        user_frame.rip(),
         original_rip,
         "rt_sigreturn did not restore RIP"
     );
     assert_eq_test!(
-        user_frame.regs().rsp,
+        user_frame.rsp(),
         original_rsp,
         "rt_sigreturn did not restore RSP"
     );
@@ -1952,7 +1943,7 @@ pub fn test_signal_delivery_on_irq_exit_dispatch() -> TestResult {
             &mut install_frame,
         )
     });
-    assert_eq_test!(install_frame.regs().rax, 0, "SIGINT install failed");
+    assert_eq_test!(install_frame.rax(), 0, "SIGINT install failed");
 
     // Raise SIGINT directly (mirrors what kill() leaves pending).
     let _ = task::task_signal_raise(&*task_guard, sig_bit(SIGINT));
@@ -2103,7 +2094,7 @@ pub fn test_signal_delivery_on_irq_exit_copy_failure_rearms() -> TestResult {
             &mut install_frame,
         )
     });
-    assert_eq_test!(install_frame.regs().rax, 0, "SIGINT install failed");
+    assert_eq_test!(install_frame.rax(), 0, "SIGINT install failed");
 
     let _ = task::task_signal_raise(&*task_guard, sig_bit(SIGINT));
     make_task_current(task_id);
@@ -2181,7 +2172,7 @@ pub fn test_sigprocmask_block_then_unblock_delivery() -> TestResult {
             &mut install_frame,
         )
     });
-    assert_eq_test!(install_frame.regs().rax, 0, "sigaction install failed");
+    assert_eq_test!(install_frame.rax(), 0, "sigaction install failed");
 
     let block_set: SigSet = sig_bit(SIGUSR1);
     assert_test!(
@@ -2201,11 +2192,7 @@ pub fn test_sigprocmask_block_then_unblock_delivery() -> TestResult {
             &mut block_frame,
         )
     });
-    assert_eq_test!(
-        block_frame.regs().rax,
-        0,
-        "rt_sigprocmask(SIG_SETMASK) failed"
-    );
+    assert_eq_test!(block_frame.rax(), 0, "rt_sigprocmask(SIG_SETMASK) failed");
 
     let mut kill_frame = zero_frame();
     kill_frame.regs_mut().rdi = task_id as u64;
@@ -2213,7 +2200,7 @@ pub fn test_sigprocmask_block_then_unblock_delivery() -> TestResult {
     let _ = with_user_process_context(pid, || {
         crate::syscall::dispatch::dispatch_handler(syscall_kill, &task_guard, &mut kill_frame)
     });
-    assert_eq_test!(kill_frame.regs().rax, 0, "kill(SIGUSR1) failed");
+    assert_eq_test!(kill_frame.rax(), 0, "kill(SIGUSR1) failed");
 
     let stack_top = process_vm_get_stack_top(pid);
     let mut user_frame = zero_frame();
@@ -2221,7 +2208,7 @@ pub fn test_sigprocmask_block_then_unblock_delivery() -> TestResult {
     user_frame.regs_mut().rsp = stack_top.wrapping_sub(0x200);
     deliver_pending_signal_as_current(task_id, pid, &user_frame);
     assert_eq_test!(
-        user_frame.regs().rip,
+        user_frame.rip(),
         0x6000_1111,
         "blocked signal should not be delivered"
     );
@@ -2238,15 +2225,11 @@ pub fn test_sigprocmask_block_then_unblock_delivery() -> TestResult {
             &mut unblock_frame,
         )
     });
-    assert_eq_test!(
-        unblock_frame.regs().rax,
-        0,
-        "rt_sigprocmask(SIG_UNBLOCK) failed"
-    );
+    assert_eq_test!(unblock_frame.rax(), 0, "rt_sigprocmask(SIG_UNBLOCK) failed");
 
     deliver_pending_signal_as_current(task_id, pid, &user_frame);
     assert_eq_test!(
-        user_frame.regs().rip,
+        user_frame.rip(),
         action.sa_handler,
         "unblocked pending signal was not delivered"
     );
@@ -2332,7 +2315,7 @@ pub fn test_arch_prctl_set_get_fs_roundtrip() -> TestResult {
     let _ = with_user_process_context(pid, || {
         crate::syscall::dispatch::dispatch_handler(syscall_arch_prctl, &task_guard, &mut set_frame)
     });
-    assert_eq_test!(set_frame.regs().rax, 0, "ARCH_SET_FS failed");
+    assert_eq_test!(set_frame.rax(), 0, "ARCH_SET_FS failed");
 
     let mut get_frame = zero_frame();
     get_frame.regs_mut().rdi = ARCH_GET_FS;
@@ -2340,7 +2323,7 @@ pub fn test_arch_prctl_set_get_fs_roundtrip() -> TestResult {
     let _ = with_user_process_context(pid, || {
         crate::syscall::dispatch::dispatch_handler(syscall_arch_prctl, &task_guard, &mut get_frame)
     });
-    assert_eq_test!(get_frame.regs().rax, 0, "ARCH_GET_FS failed");
+    assert_eq_test!(get_frame.rax(), 0, "ARCH_GET_FS failed");
 
     let got_fs: u64 = match user_copy_in(pid, out_addr) {
         Some(v) => v,
@@ -3091,7 +3074,7 @@ pub fn test_spawn_path_rejects_bad_attrs() -> TestResult {
         crate::syscall::dispatch::dispatch_handler(syscall_spawn_path, &task_guard, &mut frame_bad)
     });
     assert_eq_test!(
-        frame_bad.regs().rax,
+        frame_bad.rax(),
         slopos_abi::Errno::EFAULT.as_u64(),
         "garbage attrs pointer must return EFAULT"
     );
@@ -3109,7 +3092,7 @@ pub fn test_spawn_path_rejects_bad_attrs() -> TestResult {
     // ExecError::NoEntry = -2, returned via ctx.ok(err as i32 as u64).
     let exec_no_entry = (-2i32) as u64;
     assert_eq_test!(
-        frame_ok.regs().rax,
+        frame_ok.rax(),
         exec_no_entry,
         "valid attrs with missing binary must reach exec and return NoEntry"
     );
@@ -3181,7 +3164,7 @@ pub fn test_spawn_path_rejects_privileged_flags() -> TestResult {
         with_user_process_context(pid, || {
             crate::syscall::dispatch::dispatch_handler(syscall_spawn_path, &task_guard, &mut frame)
         })
-        .map(|_| frame.regs().rax)
+        .map(|_| frame.rax())
         .unwrap_or(NO_CONTEXT)
     };
 
@@ -3302,7 +3285,7 @@ pub fn test_set_cpu_affinity_rejects_other_process() -> TestResult {
         frame.regs_mut().rdi = rdi;
         frame.regs_mut().rsi = rsi;
         crate::syscall::dispatch::dispatch_handler(handler, &caller, &mut frame);
-        frame.regs().rax
+        frame.rax()
     };
 
     assert_eq_test!(
@@ -3463,7 +3446,7 @@ pub fn test_dev_tty_with_ctty_succeeds() -> TestResult {
     frame.regs_mut().rsi = TIOCSCTTY;
     frame.regs_mut().rdx = 0;
     let _ = crate::syscall::dispatch::dispatch_handler(syscall_ioctl, &task_guard, &mut frame);
-    assert_eq_test!(frame.regs().rax, 0, "TIOCSCTTY should succeed");
+    assert_eq_test!(frame.rax(), 0, "TIOCSCTTY should succeed");
     assert_eq_test!(
         task_guard.controlling_tty(),
         Some(TtyIndex(0)),
@@ -3501,7 +3484,7 @@ pub fn test_setsid_then_dev_tty_returns_enxio() -> TestResult {
     frame.regs_mut().rsi = TIOCSCTTY;
     frame.regs_mut().rdx = 0;
     let _ = crate::syscall::dispatch::dispatch_handler(syscall_ioctl, &parent_guard, &mut frame);
-    assert_eq_test!(frame.regs().rax, 0, "TIOCSCTTY should succeed");
+    assert_eq_test!(frame.rax(), 0, "TIOCSCTTY should succeed");
 
     // Fork a child — it inherits the controlling terminal.
     let child_id = task_fork(&parent_guard, None);
@@ -3558,7 +3541,7 @@ pub fn test_fork_child_inherits_dev_tty() -> TestResult {
     frame.regs_mut().rsi = TIOCSCTTY;
     frame.regs_mut().rdx = 0;
     let _ = crate::syscall::dispatch::dispatch_handler(syscall_ioctl, &parent_guard, &mut frame);
-    assert_eq_test!(frame.regs().rax, 0, "TIOCSCTTY should succeed for parent");
+    assert_eq_test!(frame.rax(), 0, "TIOCSCTTY should succeed for parent");
 
     // Fork child.
     let child_id = task_fork(&parent_guard, None);
@@ -4996,19 +4979,19 @@ pub fn test_unix_socket_poll_syscall_e2e() -> TestResult {
     assert_test!(user_copy_out(pid, upage, &pfd), "copy pollfd to user");
 
     // Call syscall_poll: frame.regs_mut().rdi = pollfd_ptr, rsi = nfds, rdx = timeout_ms
-    let mut frame = zero_frame();
+    let mut frame = zero_frame_boxed();
     frame.regs_mut().rdi = upage; // pollfd array pointer
     frame.regs_mut().rsi = 1; // nfds = 1
     frame.regs_mut().rdx = 5000; // timeout_ms = 5000 (should not matter, data ready)
 
     let start = slopos_kernel_services::platform::get_time_ms();
     let _ = with_user_process_context(pid, || {
-        crate::syscall::dispatch::dispatch_handler(syscall_poll, &task_guard, &mut frame)
+        crate::syscall::dispatch::dispatch_handler(syscall_poll, &task_guard, &mut *frame)
     });
     let elapsed = slopos_kernel_services::platform::get_time_ms().wrapping_sub(start);
 
     // poll should return 1 (one fd ready)
-    assert_eq_test!(frame.regs().rax, 1, "poll should report 1 ready fd");
+    assert_eq_test!(frame.rax(), 1, "poll should report 1 ready fd");
     assert_test!(
         elapsed < 200,
         "poll with buffered data should return quickly"
@@ -5040,19 +5023,19 @@ pub fn test_unix_socket_poll_syscall_e2e() -> TestResult {
     };
     assert_test!(user_copy_out(pid, upage, &pfd_empty), "copy empty pollfd");
 
-    let mut frame2 = zero_frame();
+    let mut frame2 = zero_frame_boxed();
     frame2.regs_mut().rdi = upage;
     frame2.regs_mut().rsi = 1;
     frame2.regs_mut().rdx = 100; // 100ms timeout
 
     let start2 = slopos_kernel_services::platform::get_time_ms();
     let _ = with_user_process_context(pid, || {
-        crate::syscall::dispatch::dispatch_handler(syscall_poll, &task_guard, &mut frame2)
+        crate::syscall::dispatch::dispatch_handler(syscall_poll, &task_guard, &mut *frame2)
     });
     let elapsed2 = slopos_kernel_services::platform::get_time_ms().wrapping_sub(start2);
 
     // poll should return 0 (timeout, no data)
-    assert_eq_test!(frame2.regs().rax, 0, "poll with no data should timeout");
+    assert_eq_test!(frame2.rax(), 0, "poll with no data should timeout");
     // Should take roughly 100ms (allow 50-500ms margin for timer granularity)
     assert_test!(
         elapsed2 >= 50 && elapsed2 <= 500,
@@ -5076,18 +5059,18 @@ pub fn test_unix_socket_poll_syscall_e2e() -> TestResult {
     };
     assert_test!(user_copy_out(pid, upage, &pfd3), "copy pollfd3");
 
-    let mut frame3 = zero_frame();
+    let mut frame3 = zero_frame_boxed();
     frame3.regs_mut().rdi = upage;
     frame3.regs_mut().rsi = 1;
     frame3.regs_mut().rdx = 10_000; // 10s timeout (mimics compositor wait_recv)
 
     let start3 = slopos_kernel_services::platform::get_time_ms();
     let _ = with_user_process_context(pid, || {
-        crate::syscall::dispatch::dispatch_handler(syscall_poll, &task_guard, &mut frame3)
+        crate::syscall::dispatch::dispatch_handler(syscall_poll, &task_guard, &mut *frame3)
     });
     let elapsed3 = slopos_kernel_services::platform::get_time_ms().wrapping_sub(start3);
 
-    assert_eq_test!(frame3.regs().rax, 1, "poll should find data immediately");
+    assert_eq_test!(frame3.rax(), 1, "poll should find data immediately");
     assert_test!(
         elapsed3 < 200,
         "poll with pre-buffered data must not sleep (compositor handshake pattern)"
@@ -5894,7 +5877,7 @@ pub fn test_kill_default_ignored_sigwinch_target_survives() -> TestResult {
     let _ = with_user_process_context(pid, || {
         crate::syscall::dispatch::dispatch_handler(syscall_kill, &task_guard, &mut *kill_frame)
     });
-    assert_eq_test!(kill_frame.regs().rax, 0, "kill(SIGWINCH) must succeed");
+    assert_eq_test!(kill_frame.rax(), 0, "kill(SIGWINCH) must succeed");
     assert_eq_test!(
         task_guard.signal_pending(),
         0,
@@ -5909,7 +5892,7 @@ pub fn test_kill_default_ignored_sigwinch_target_survives() -> TestResult {
     user_frame.regs_mut().rip = original_rip;
     deliver_pending_signal_as_current(task_id, pid, &user_frame);
     assert_eq_test!(
-        user_frame.regs().rip,
+        user_frame.rip(),
         original_rip,
         "ignored delivery must not redirect RIP"
     );
@@ -5995,7 +5978,7 @@ pub fn test_kill_process_group_reaches_nascent_task_without_publishing() -> Test
     });
 
     assert_eq_test!(
-        frame.regs().rax,
+        frame.rax(),
         0,
         "kill(-pgid) must succeed for a task that exists, nascent or not"
     );
@@ -6126,26 +6109,26 @@ pub fn test_rt_sigaction_round_trips_every_field() -> TestResult {
         "failed to write the new sigaction"
     );
 
-    let mut install = zero_frame();
+    let mut install = zero_frame_boxed();
     install.regs_mut().rdi = SIGUSR1 as u64;
     install.regs_mut().rsi = new_addr;
     install.regs_mut().rdx = 0;
     install.regs_mut().r10 = set_size;
     let _ = with_user_process_context(pid, || {
-        crate::syscall::dispatch::dispatch_handler(syscall_rt_sigaction, &task_guard, &mut install)
+        crate::syscall::dispatch::dispatch_handler(syscall_rt_sigaction, &task_guard, &mut *install)
     });
-    assert_eq_test!(install.regs().rax, 0, "install failed");
+    assert_eq_test!(install.rax(), 0, "install failed");
 
     // Query-only form: a null `new` reads back without disturbing anything.
-    let mut query = zero_frame();
+    let mut query = zero_frame_boxed();
     query.regs_mut().rdi = SIGUSR1 as u64;
     query.regs_mut().rsi = 0;
     query.regs_mut().rdx = old_addr;
     query.regs_mut().r10 = set_size;
     let _ = with_user_process_context(pid, || {
-        crate::syscall::dispatch::dispatch_handler(syscall_rt_sigaction, &task_guard, &mut query)
+        crate::syscall::dispatch::dispatch_handler(syscall_rt_sigaction, &task_guard, &mut *query)
     });
-    assert_eq_test!(query.regs().rax, 0, "query-only rt_sigaction failed");
+    assert_eq_test!(query.rax(), 0, "query-only rt_sigaction failed");
 
     let read_back: UserSigaction = match user_copy_in(pid, old_addr) {
         Some(v) => v,
@@ -6176,15 +6159,15 @@ pub fn test_rt_sigaction_round_trips_every_field() -> TestResult {
     );
 
     // Per-signal independence: installing on SIGUSR1 must not touch SIGTERM.
-    let mut other = zero_frame();
+    let mut other = zero_frame_boxed();
     other.regs_mut().rdi = SIGTERM as u64;
     other.regs_mut().rsi = 0;
     other.regs_mut().rdx = old_addr;
     other.regs_mut().r10 = set_size;
     let _ = with_user_process_context(pid, || {
-        crate::syscall::dispatch::dispatch_handler(syscall_rt_sigaction, &task_guard, &mut other)
+        crate::syscall::dispatch::dispatch_handler(syscall_rt_sigaction, &task_guard, &mut *other)
     });
-    assert_eq_test!(other.regs().rax, 0, "query of SIGTERM failed");
+    assert_eq_test!(other.rax(), 0, "query of SIGTERM failed");
     let untouched: UserSigaction = match user_copy_in(pid, old_addr) {
         Some(v) => v,
         None => {
@@ -6199,22 +6182,26 @@ pub fn test_rt_sigaction_round_trips_every_field() -> TestResult {
     );
 
     // A wrong sigsetsize is EINVAL.
-    let mut bad_size = zero_frame();
+    let mut bad_size = zero_frame_boxed();
     bad_size.regs_mut().rdi = SIGUSR1 as u64;
     bad_size.regs_mut().rsi = 0;
     bad_size.regs_mut().rdx = old_addr;
     bad_size.regs_mut().r10 = set_size + 1;
     let _ = with_user_process_context(pid, || {
-        crate::syscall::dispatch::dispatch_handler(syscall_rt_sigaction, &task_guard, &mut bad_size)
+        crate::syscall::dispatch::dispatch_handler(
+            syscall_rt_sigaction,
+            &task_guard,
+            &mut *bad_size,
+        )
     });
     assert_eq_test!(
-        bad_size.regs().rax,
+        bad_size.rax(),
         slopos_abi::Errno::EINVAL.as_u64(),
         "a wrong sigsetsize must be EINVAL"
     );
 
     // Installing a disposition for an uncatchable signal is EINVAL.
-    let mut uncatchable = zero_frame();
+    let mut uncatchable = zero_frame_boxed();
     uncatchable.regs_mut().rdi = SIGKILL as u64;
     uncatchable.regs_mut().rsi = new_addr;
     uncatchable.regs_mut().rdx = 0;
@@ -6223,11 +6210,11 @@ pub fn test_rt_sigaction_round_trips_every_field() -> TestResult {
         crate::syscall::dispatch::dispatch_handler(
             syscall_rt_sigaction,
             &task_guard,
-            &mut uncatchable,
+            &mut *uncatchable,
         )
     });
     assert_eq_test!(
-        uncatchable.regs().rax,
+        uncatchable.rax(),
         slopos_abi::Errno::EINVAL.as_u64(),
         "installing a handler for SIGKILL must be EINVAL"
     );
@@ -6243,16 +6230,16 @@ pub fn test_rt_sigaction_round_trips_every_field() -> TestResult {
         user_copy_out(pid, new_addr, &no_restorer),
         "failed to write the restorer-less sigaction"
     );
-    let mut missing = zero_frame();
+    let mut missing = zero_frame_boxed();
     missing.regs_mut().rdi = SIGUSR2 as u64;
     missing.regs_mut().rsi = new_addr;
     missing.regs_mut().rdx = 0;
     missing.regs_mut().r10 = set_size;
     let _ = with_user_process_context(pid, || {
-        crate::syscall::dispatch::dispatch_handler(syscall_rt_sigaction, &task_guard, &mut missing)
+        crate::syscall::dispatch::dispatch_handler(syscall_rt_sigaction, &task_guard, &mut *missing)
     });
     assert_eq_test!(
-        missing.regs().rax,
+        missing.rax(),
         slopos_abi::Errno::EINVAL.as_u64(),
         "a catching handler with no restorer must be EINVAL"
     );
@@ -6312,7 +6299,7 @@ pub fn test_rt_sigaction_bounds_signum_at_nsig() -> TestResult {
                 &mut frame,
             )
         })
-        .map(|_| frame.regs().rax)
+        .map(|_| frame.rax())
         .unwrap_or(NO_CONTEXT)
     };
 

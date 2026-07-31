@@ -1,0 +1,41 @@
+# check_kernel_softfloat allowlist — variant: release
+#
+# Instructions touching XCR0-managed state (XMM/YMM/ZMM, x87, MMX, and the
+# xsave/xrstor pair) that are permitted, each capped at its measured
+# occurrence count in the named symbol.
+#
+#     scripts/check_kernel_softfloat.sh --variant release --emit-allowlist builddir/kernel-release.elf
+#
+# Every entry must match at least one hit. A dead entry fails the gate.
+#
+# This file shares no entry with the dev allowlist, and the two must never be
+# merged: at opt-level 3 the `slopos_ostd::task::fpu` wrappers are inlined
+# away entirely and the same instructions are attributed to their *callers*.
+
+# Liveness floors. Measured 2026-07-31: release 3856 returns / 4068 symbols
+# against dev's 31098 / 31472 — optimisation inlines away roughly seven
+# eighths of the functions, which is also why `--variant dev` against a
+# release ELF fails rather than passing on a list that happens to fit.
+min-returns 1200
+min-symbols 1200
+
+expect-test-registry few
+
+# <max-hits> <TAB> <class-or-mnemonic> <TAB> <glob over the symbol>
+
+# The sanctioned FPU save/restore, one entry per site the wrappers inline
+# into. Allowlisted rather than excluded, so a seventh site appearing is
+# something somebody has to look at.
+2	xsave	*slopos_core7syscall6signal20save_fpu_to_sigframe*
+2	xsave	*slopos_core7syscall6signal20syscall_rt_sigreturn*
+2	xsave	*slopos_core7syscall16process_handlers12syscall_exec*
+2	xsave	*slopos_sched4task14task_lifecycle9task_fork*
+2	xsave	*slopos_sched4task14task_lifecycle10task_clone*
+4	xsave	*slopos_sched9scheduler17prepare_switch_to*
+
+# The one-time x87 init in the assembly entry trampoline
+# (boot/limine_entry.s), immediately after the CR0/CR4 setup and before any
+# Rust runs. Not a fault path: nothing has user state to clobber yet. The
+# symbol is the linker's `_text_start` rather than `_start` because the two
+# share an address here and llvm-objdump prints one header per address.
+1	fninit	_text_start

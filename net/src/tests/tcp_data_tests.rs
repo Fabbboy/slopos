@@ -8,7 +8,7 @@ use slopos_ostd::mm::frame::AnonymousMeta;
 use slopos_ostd::mm::uframe::UFrame;
 use slopos_ostd::{KBox, KVec, ZcNotifToken};
 use slopos_testing::TestResult;
-use slopos_testing::{assert_eq_test, assert_test, fail, pass};
+use slopos_testing::{assert_eq_test, assert_ok, assert_test, fail, pass};
 
 use crate::tcp::cong::CongestionControl;
 use crate::tcp::{
@@ -872,8 +872,9 @@ pub fn test_fast_retransmit_triggers_on_3_dup_acks() -> TestResult {
         segs[i] = (seg.seq_num, seg.seq_num.wrapping_add(n as u32));
     }
 
-    let snd_una = with_data_state!(id, |d| d.snd_una.raw());
-    let snd_nxt_before = with_data_state!(id, |d| d.snd_nxt.raw());
+    // One PCB borrow per observation point, not one per field: each expands to
+    // a lock guard and a state match with their own slots.
+    let (snd_una, snd_nxt_before) = with_data_state!(id, |d| (d.snd_una.raw(), d.snd_nxt.raw()));
     assert_test!(snd_nxt_before > snd_una, "data in flight");
 
     // Inject dup ACK with SACK blocks covering segments 2, 3, 4
@@ -908,14 +909,14 @@ pub fn test_fast_retransmit_triggers_on_3_dup_acks() -> TestResult {
         &[],
     );
 
+    let (snd_nxt_after, in_recovery, has_lost) = with_data_state!(id, |d| (
+        d.snd_nxt.raw(),
+        d.cc.in_recovery(),
+        d.sendmap.has_lost()
+    ));
     // snd_nxt does NOT rewind (no go-back-N).
-    let snd_nxt_after = with_data_state!(id, |d| d.snd_nxt.raw());
     assert_eq_test!(snd_nxt_after, snd_nxt_before, "snd_nxt not rewound");
-
-    let in_recovery = with_data_state!(id, |d| d.cc.in_recovery());
     assert_test!(in_recovery, "entered fast recovery");
-
-    let has_lost = with_data_state!(id, |d| d.sendmap.has_lost());
     assert_test!(has_lost, "segment marked Lost");
 
     // poll_transmit selectively retransmits the Lost segment.
@@ -1341,7 +1342,8 @@ pub fn test_nagle_defers_sub_mss_when_inflight() -> TestResult {
     tcp::set_nodelay(id, false);
     // Send MSS bytes to create inflight data.
     let _ = tcp::send(id, &[0xAA; DEFAULT_MSS as usize]).unwrap();
-    let mut buf = [0u8; 1500];
+    // A full-MTU scratch buffer is most of the frame budget; keep it off the stack.
+    let mut buf = assert_ok!(KVec::<u8>::zeroed(1500), "tx scratch buffer");
     let _ = tcp::poll_transmit(id, &mut buf, 0).unwrap();
     // inflight = MSS now. Enqueue 10 more bytes (sub-MSS).
     let _ = tcp::send(id, &[0xBB; 10]).unwrap();
@@ -1358,7 +1360,8 @@ pub fn test_nagle_sends_when_nothing_inflight() -> TestResult {
     let (id, _, _) = establish_connection();
     // Nothing inflight. Send 10 bytes (sub-MSS).
     let _ = tcp::send(id, &[0xCC; 10]).unwrap();
-    let mut buf = [0u8; 1500];
+    // A full-MTU scratch buffer is most of the frame budget; keep it off the stack.
+    let mut buf = assert_ok!(KVec::<u8>::zeroed(1500), "tx scratch buffer");
     let result = tcp::poll_transmit(id, &mut buf, 0);
     assert_test!(result.is_some(), "sends sub-MSS when nothing inflight");
     let (_, n, _) = result.unwrap();
@@ -1372,7 +1375,8 @@ pub fn test_tcp_nodelay_disables_nagle() -> TestResult {
     // Verify the toggle: enable Nagle, check defer, disable, check send.
     tcp::set_nodelay(c.id, false);
     let _ = tcp::send(c.id, b"x").unwrap();
-    let mut buf = [0u8; 1500];
+    // A full-MTU scratch buffer is most of the frame budget; keep it off the stack.
+    let mut buf = assert_ok!(KVec::<u8>::zeroed(1500), "tx scratch buffer");
     let _ = tcp::poll_transmit(c.id, &mut buf, 0).unwrap(); // sends 1 byte
     let _ = tcp::send(c.id, b"y").unwrap(); // sub-MSS with inflight
     // Nagle ON: deferred.
