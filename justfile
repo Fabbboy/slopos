@@ -373,12 +373,14 @@ check-no-kernel-async:
 check-framekernel-gates:
     scripts/check_vendor_pin.sh
     scripts/check_unsafe_outside_ostd.sh
+    scripts/check_unsafe_expansion.sh
     scripts/check_no_kernel_async.sh
     scripts/check_alloc_dep.sh
     scripts/check_drop_panic_free.sh
     scripts/check_kernel_pml4_writer.sh --self-test
     scripts/check_stack_sizes.sh {{build_dir}}/kernel.elf
     scripts/check_kernel_softfloat.sh {{build_dir}}/kernel.elf
+    scripts/check_registry_sections.sh {{build_dir}}/kernel.elf
     scripts/check_wait_predicate_purity.sh
     scripts/check_task_ownership.sh --self-test
     scripts/check_task_ownership.sh
@@ -389,7 +391,7 @@ check-framekernel-gates:
 # A kernel-aware `cargo clippy -- -D warnings` gate is not included
 # here yet — SlopOS has no clippy config in tree and the custom
 # `no_std` target needs plumbing; track as a Phase 2 chore.
-[doc("Run every framekernel-discipline gate: vendor pin / unsafe / async / alloc / Drop / stack / task ownership / TCB ratio / fmt / KernMiri / Verus (requires a prior `just build`)")]
+[doc("Run every framekernel-discipline gate: vendor pin / unsafe source + expansion / async / alloc / Drop / stack / registry sections / task ownership / TCB ratio / fmt / KernMiri / Verus (requires a prior `just build`)")]
 check-framekernel: check-framekernel-gates
     {{cargo}} +{{rust_channel}} fmt --all -- --check
     just check-miri
