@@ -208,40 +208,39 @@ drain. See the related latent notes on synchronous cross-CPU shootdown on the bu
 
 ---
 
-## Performance: Compositor Frame Rate During Task Termination
+## A task on an AP can stall behind three unbounded or O(CPUs) scheduler waits
 
-**Status**: Open - Minor  
-**Severity**: Low  
-**Component**: `sched/`
+**Status**: Open
+**Severity**: Low (latency only; no correctness consequence)
+**Component**: `sched/src/scheduler.rs`, `sched/src/task/task_reclaim.rs`
 
-### Description
+Task termination itself does not stall an AP — `task_terminate` serialises with a
+local `PreemptGuard` (`sched/src/task/task_lifecycle.rs:836`), and the AP pause is
+reached only from `task_shutdown_all` (`:1177`), whose sole production caller is
+`kernel_shutdown` (`boot/src/shutdown.rs:165`). Three other waits on the ordinary
+scheduling path can, and a latency-sensitive task such as the compositor is where
+they would be seen.
 
-When a task terminates, `pause_all_aps()` is called which blocks all AP scheduler loops. While this is necessary for safe task cleanup, it can cause brief stalls in compositor frame rendering if the compositor happens to be scheduled on an AP.
+**The `on_cpu` handover spin** (`scheduler.rs:1240-1242`) is the one genuinely
+unbounded wait a dispatching AP can hit. Having dequeued a task whose prior CPU
+has not finished its switch-out tail, the AP spins on that CPU's Release store of
+`on_cpu` with no bound and no fallback. The window is short by construction — it
+is the tail of a context switch — but a prior CPU that takes an interrupt inside
+it extends the spin by exactly that handler's duration.
 
-### Current Behavior
+**`unschedule_task`'s per-CPU sweep** (`scheduler.rs:1017-1026`) takes every
+CPU's scheduler in turn on every termination, to find the one queue the task
+might be on. O(CPUs) lock acquisitions per termination, on a path a
+spawn-heavy workload runs constantly.
 
-1. Task calls `task_terminate()`
-2. `pause_all_aps()` sets `AP_PAUSED = true` and waits for APs to stop executing
-3. `release_task_dependents()` unblocks waiting tasks
-4. `resume_all_aps()` sets `AP_PAUSED = false` and sends wake IPIs
+**The task graveyard drains only from the idle dispatcher**
+(`task_reclaim.rs:174-208`), so under sustained load dead tasks' kernel stacks and
+address spaces accumulate until some CPU goes idle. Already tracked as item 2 of
+`plans/deferred-work.md`; recorded here only because it shares this shape.
 
-During steps 2-3, any task on an AP (including compositor) is paused.
-
-### Impact
-
-- Brief frame drops (1-2 frames) during task termination
-- More noticeable with frequent task spawning/termination
-
-### Potential Optimizations
-
-1. **Fine-grained locking**: Instead of pausing all APs, use per-task locks
-2. **RCU-style cleanup**: Defer task cleanup to a dedicated kernel thread
-3. **Lock-free dependent release**: Use atomic operations instead of global pause
-
-### Related Files
-
-- `sched/src/task/task_lifecycle.rs` - task teardown invoking the pause
-- `sched/src/per_cpu.rs` - `pause_all_aps()`, `resume_all_aps()`
+Fixes for the first two: bound the `on_cpu` spin, re-enqueueing rather than
+spinning past a threshold; and record the owning CPU on the task so
+`unschedule_task` takes one lock instead of `n`. Neither is scheduled work.
 
 ---
 

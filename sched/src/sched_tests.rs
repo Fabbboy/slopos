@@ -6433,6 +6433,155 @@ pub fn test_task_ids_are_never_reused() -> TestResult {
     TestResult::Pass
 }
 
+/// The AP pause nests on a depth, so a release only resumes the APs when it is
+/// the last one outstanding — and the holders are independent, so releasing in
+/// acquire order has to work as well as releasing in reverse.
+///
+/// A flag gets the second half wrong: the earlier release lifts the pause while
+/// a holder is still standing, and that holder then runs its critical section
+/// against live APs believing they are parked.
+///
+/// Deliberately runs without a fixture. `KernelTestScope` holds a pause for the
+/// whole of any test that uses one, and the transition being pinned here is the
+/// one at depth zero.
+pub fn test_ap_pause_nests_on_a_depth_count() -> TestResult {
+    if crate::per_cpu::ap_pause_depth() != 0 {
+        klog_info!("SCHED_TEST: entered with an AP pause already held");
+        return TestResult::Fail;
+    }
+
+    let first = match crate::per_cpu::pause_all_aps() {
+        Ok(token) => token,
+        Err(err) => {
+            klog_info!("SCHED_TEST: pause_all_aps failed: {:?}", err);
+            return TestResult::Fail;
+        }
+    };
+    let second = match crate::per_cpu::pause_all_aps() {
+        Ok(token) => token,
+        Err(err) => {
+            crate::per_cpu::resume_all_aps_if_not_nested(first);
+            klog_info!("SCHED_TEST: nested pause_all_aps failed: {:?}", err);
+            return TestResult::Fail;
+        }
+    };
+
+    // Every observation is recorded before it is judged, so no failure path can
+    // return while a token is still outstanding and leave the APs parked.
+    let depth_nested = crate::per_cpu::ap_pause_depth();
+    let paused_nested = crate::per_cpu::are_aps_paused();
+
+    crate::per_cpu::resume_all_aps_if_not_nested(first);
+    let depth_after_first = crate::per_cpu::ap_pause_depth();
+    let paused_after_first = crate::per_cpu::are_aps_paused();
+
+    crate::per_cpu::resume_all_aps_if_not_nested(second);
+    let depth_after_second = crate::per_cpu::ap_pause_depth();
+    let paused_after_second = crate::per_cpu::are_aps_paused();
+
+    if depth_nested != 2 || !paused_nested {
+        klog_info!(
+            "SCHED_TEST: two pauses gave depth {} paused {}",
+            depth_nested,
+            paused_nested
+        );
+        return TestResult::Fail;
+    }
+    if depth_after_first != 1 || !paused_after_first {
+        klog_info!(
+            "SCHED_TEST: one release gave depth {} paused {} — the surviving holder lost its pause",
+            depth_after_first,
+            paused_after_first
+        );
+        return TestResult::Fail;
+    }
+    if depth_after_second != 0 || paused_after_second {
+        klog_info!(
+            "SCHED_TEST: last release gave depth {} paused {}",
+            depth_after_second,
+            paused_after_second
+        );
+        return TestResult::Fail;
+    }
+
+    TestResult::Pass
+}
+
+/// A pause that cannot be established is an error the caller has to handle, and
+/// the failed attempt leaves no depth behind. Both halves are load-bearing: a
+/// silent success would let `KernelTestScope` run a test body against APs that
+/// are still free to race it, and a leaked depth would park every AP for the
+/// rest of the boot.
+///
+/// Provokes the timeout through the executing flag itself, which is the only
+/// state `pause_all_aps` waits on and which nothing else reads. An AP may clear
+/// the forced flag by passing through its dispatch path underneath the attempt,
+/// so the provocation gets a bounded number of tries before the test reports it
+/// unreproducible rather than silently passing.
+pub fn test_ap_pause_timeout_is_reported_and_rolled_back() -> TestResult {
+    if slopos_arch::pcr::get_cpu_count() < 2 {
+        klog_info!("SCHED_TEST: uniprocessor boot has no AP to hold a pause off");
+        return TestResult::Skipped;
+    }
+    if crate::per_cpu::ap_pause_depth() != 0 {
+        klog_info!("SCHED_TEST: entered with an AP pause already held");
+        return TestResult::Fail;
+    }
+
+    const ATTEMPTS: usize = 3;
+    const HELD_CPU: usize = 1;
+    let mut blamed_cpu = None;
+    for _ in 0..ATTEMPTS {
+        if crate::per_cpu::with_cpu_scheduler(HELD_CPU, |sched| sched.set_executing_task(true))
+            .is_none()
+        {
+            klog_info!("SCHED_TEST: CPU {} has no per-CPU scheduler", HELD_CPU);
+            return TestResult::Fail;
+        }
+        let outcome = crate::per_cpu::pause_all_aps();
+        crate::per_cpu::with_cpu_scheduler(HELD_CPU, |sched| sched.set_executing_task(false));
+        match outcome {
+            Err(crate::per_cpu::ApPauseError::Timeout { cpu_id }) => {
+                blamed_cpu = Some(cpu_id);
+                break;
+            }
+            Ok(token) => crate::per_cpu::resume_all_aps_if_not_nested(token),
+        }
+    }
+
+    let Some(cpu_id) = blamed_cpu else {
+        klog_info!("SCHED_TEST: pause_all_aps never observed the held AP");
+        return TestResult::Fail;
+    };
+    if cpu_id != HELD_CPU {
+        klog_info!(
+            "SCHED_TEST: timeout blamed CPU {} instead of CPU {}",
+            cpu_id,
+            HELD_CPU
+        );
+        return TestResult::Fail;
+    }
+
+    let leftover_depth = crate::per_cpu::ap_pause_depth();
+    if leftover_depth != 0 || crate::per_cpu::are_aps_paused() {
+        klog_info!(
+            "SCHED_TEST: failed pause left depth {} behind",
+            leftover_depth
+        );
+        return TestResult::Fail;
+    }
+
+    TestResult::Pass
+}
+
+slopos_testing::stest!(
+    name = test_ap_pause_nests_on_a_depth_count,
+    suite = sched_core
+);
+slopos_testing::stest!(
+    name = test_ap_pause_timeout_is_reported_and_rolled_back,
+    suite = sched_core
+);
 slopos_testing::stest!(
     name = test_wake_against_reaped_waiter_is_inert,
     suite = sched_core

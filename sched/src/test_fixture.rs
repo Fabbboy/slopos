@@ -77,7 +77,8 @@ fn panic_clear_test_scope() {
 }
 
 use super::per_cpu::{
-    clear_all_cpu_queues, pause_all_aps, resume_all_aps_if_not_nested, with_cpu_scheduler,
+    ApPauseToken, clear_all_cpu_queues, pause_all_aps, resume_all_aps_if_not_nested,
+    with_cpu_scheduler,
 };
 use super::scheduler::{init_scheduler, scheduler_shutdown};
 use super::task::{init_task_manager, task_shutdown_all};
@@ -86,7 +87,7 @@ use super::task::{init_task_manager, task_shutdown_all};
 /// state. Embed this as a field in a fixture; do not implement Drop on
 /// the wrapper — the scope's Drop handles teardown.
 pub struct KernelTestScope {
-    aps_paused: bool,
+    aps_paused: Option<ApPauseToken>,
     captured: KVec<(&'static HermeticVTable, core::ptr::NonNull<()>)>,
     boot_ctx: Option<BootCtx<'static, TestInit>>,
     /// !Send !Sync: scope is pinned to the constructing CPU (BSP).
@@ -100,6 +101,8 @@ impl KernelTestScope {
     ///
     /// Panics if:
     /// - a previous scope is still alive (BootCtx slot empty),
+    /// - the APs will not park, since the scope's whole contract is that
+    ///   they cannot race the test body,
     /// - `init_task_manager` or `init_scheduler` returns non-zero,
     /// - the registry has a dependency cycle,
     /// - snapshot allocation fails.
@@ -111,7 +114,16 @@ impl KernelTestScope {
         // scope is still alive (panicked test that didn't drop).
         let boot_ctx = slopos_hermetic::take_for_test();
 
-        let aps_paused = pause_all_aps();
+        // Hermeticity is not a best effort here: every snapshot below reads
+        // kernel-wide state that an AP is free to mutate, so a scope entered
+        // over running APs would report results from a run it did not control.
+        let aps_paused = match pause_all_aps() {
+            Ok(token) => token,
+            Err(err) => {
+                slopos_hermetic::return_after_test(boot_ctx);
+                panic!("KernelTestScope: AP pause failed: {:?}", err);
+            }
+        };
 
         // Drain in-flight wake-IPIs that were issued before the pause
         // flag became visible to APs.
@@ -204,7 +216,7 @@ impl KernelTestScope {
         }
 
         Self {
-            aps_paused,
+            aps_paused: Some(aps_paused),
             captured,
             boot_ctx: Some(boot_ctx),
             _not_send: PhantomData,
@@ -243,6 +255,8 @@ impl Drop for KernelTestScope {
             slopos_hermetic::return_after_test(ctx);
         }
 
-        resume_all_aps_if_not_nested(self.aps_paused);
+        if let Some(token) = self.aps_paused.take() {
+            resume_all_aps_if_not_nested(token);
+        }
     }
 }

@@ -1174,45 +1174,128 @@ pub fn is_idle_task(task: TaskAddr) -> bool {
 }
 
 // =============================================================================
-// AP Pause Mechanism for Test Reinitialization
+// AP Pause Mechanism
 // =============================================================================
+//
+// Parks every AP at its scheduler-loop poll point so the BSP can mutate
+// kernel-wide scheduler state with nothing racing it — kernel shutdown's task
+// sweep, and the hermetic test scope's snapshot/reset window.
 
-/// Global flag to pause all AP scheduler loops during test reinitialization.
-/// When set, APs will spin-wait instead of processing tasks.
-static AP_PAUSED: AtomicBool = AtomicBool::new(false);
+/// Nesting depth of the AP pause. Non-zero parks every AP's scheduler loop at
+/// its poll point. A count rather than a flag because the holders are
+/// independent: two overlapping pauses that did not nest lexically would, under
+/// a flag, have the first release lift the second holder's pause out from under
+/// it.
+static AP_PAUSE_DEPTH: AtomicU32 = AtomicU32::new(0);
 
-pub fn pause_all_aps() -> bool {
-    let was_paused = AP_PAUSED.swap(true, Ordering::SeqCst);
-    if !was_paused {
-        core::sync::atomic::fence(Ordering::SeqCst);
-        let cpu_count = slopos_arch::pcr::get_cpu_count();
-        let max_wait_iterations = 100_000;
-        for iteration in 0..max_wait_iterations {
-            let mut all_idle = true;
-            for cpu_id in 1..cpu_count {
-                if let Some(executing) =
-                    with_cpu_scheduler(cpu_id, |sched| sched.is_executing_task())
-                {
-                    if executing {
-                        all_idle = false;
-                        break;
-                    }
-                }
-            }
-            if all_idle {
-                break;
-            }
-            if iteration < 1000 {
-                core::hint::spin_loop();
-            }
-        }
-    }
-    was_paused
+/// Spin budget the pause wait spends polling the APs before it gives up. Each
+/// iteration is one scan of the online APs plus a `spin_loop` hint, so this
+/// bounds work rather than wall-clock time.
+const AP_PAUSE_SPIN_BUDGET: u32 = 100_000;
+
+/// Spin iterations between reschedule-IPI re-sends while waiting. An IPI that
+/// is lost or coalesced against a pending one would otherwise leave the wait
+/// back where it started — spinning for an AP that has not been provoked.
+const AP_PAUSE_NUDGE_INTERVAL: u32 = 16_384;
+
+/// Proof that one AP pause is held.
+///
+/// Minted only by a successful [`pause_all_aps`] and released by
+/// [`resume_all_aps_if_not_nested`], so the two cannot be written apart. Its
+/// `Drop` performs the same release as the explicit call, which is what keeps a
+/// panic between acquire and release from parking every AP permanently.
+#[must_use = "the pause is held until the token is released"]
+pub struct ApPauseToken {
+    _private: (),
 }
 
-pub fn resume_all_aps() {
+impl Drop for ApPauseToken {
+    fn drop(&mut self) {
+        release_ap_pause_depth();
+    }
+}
+
+/// Why an AP pause could not be established.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ApPauseError {
+    /// `cpu_id` was still executing a task after the whole spin budget. The
+    /// depth increment is rolled back before this is returned, so no AP is
+    /// parked on the failed caller's behalf and there is nothing to release.
+    Timeout { cpu_id: usize },
+}
+
+/// Park every AP's scheduler loop and wait until none is executing a task.
+///
+/// Nests: an inner call joins the pause already in effect and returns without
+/// waiting, and the APs stay parked until the last token is released.
+///
+/// Returns `Err` if an AP is still executing after the spin budget. A caller
+/// whose correctness rests on the APs being quiescent — a hermetic test scope,
+/// say — must treat that as a hard failure, because the alternative is to
+/// proceed against APs that are still free to race it.
+pub fn pause_all_aps() -> Result<ApPauseToken, ApPauseError> {
+    let outermost = AP_PAUSE_DEPTH.fetch_add(1, Ordering::SeqCst) == 0;
+    if !outermost {
+        return Ok(ApPauseToken { _private: () });
+    }
+
+    // The depth increment must be visible to an AP before this CPU reads that
+    // AP's executing flag; otherwise a CPU that dispatched just ahead of the
+    // increment reads back as parked and the wait ends early.
     core::sync::atomic::fence(Ordering::SeqCst);
-    AP_PAUSED.store(false, Ordering::SeqCst);
+
+    match wait_for_aps_to_park(slopos_arch::pcr::get_cpu_count()) {
+        Ok(()) => Ok(ApPauseToken { _private: () }),
+        Err(err) => {
+            release_ap_pause_depth();
+            Err(err)
+        }
+    }
+}
+
+/// The lowest-numbered AP currently executing a task, if any.
+fn executing_ap(cpu_count: usize) -> Option<usize> {
+    (1..cpu_count)
+        .find(|&cpu_id| with_cpu_scheduler(cpu_id, |sched| sched.is_executing_task()) == Some(true))
+}
+
+fn wait_for_aps_to_park(cpu_count: usize) -> Result<(), ApPauseError> {
+    if executing_ap(cpu_count).is_none() {
+        return Ok(());
+    }
+
+    // An AP holds `executing_task` for as long as its task runs, so waiting for
+    // it to reach its poll point unprovoked is a wait on that task yielding.
+    // The reschedule IPI turns it into a wait on interrupt latency.
+    nudge_aps_to_poll_point(cpu_count);
+
+    for iteration in 0..AP_PAUSE_SPIN_BUDGET {
+        if executing_ap(cpu_count).is_none() {
+            return Ok(());
+        }
+        if iteration != 0 && iteration % AP_PAUSE_NUDGE_INTERVAL == 0 {
+            nudge_aps_to_poll_point(cpu_count);
+        }
+        core::hint::spin_loop();
+    }
+
+    match executing_ap(cpu_count) {
+        Some(cpu_id) => Err(ApPauseError::Timeout { cpu_id }),
+        None => Ok(()),
+    }
+}
+
+fn nudge_aps_to_poll_point(cpu_count: usize) {
+    for cpu_id in 1..cpu_count {
+        crate::lifecycle::send_reschedule_ipi(cpu_id);
+    }
+}
+
+/// Drop one level of pause depth, waking the APs when the last one goes.
+fn release_ap_pause_depth() {
+    if AP_PAUSE_DEPTH.fetch_sub(1, Ordering::SeqCst) != 1 {
+        return;
+    }
 
     let cpu_count = slopos_arch::pcr::get_cpu_count();
     for cpu_id in 1..cpu_count {
@@ -1224,27 +1307,28 @@ pub fn resume_all_aps() {
             (sched.total_ready_count(), sched.inbox_count())
         }) {
             if ready > 0 || inbox > 0 {
-                if let Some(apic_id) = slopos_arch::pcr::apic_id_from_cpu_index(cpu_id) {
-                    slopos_arch::pcr::send_ipi_to_cpu(
-                        apic_id,
-                        slopos_arch::arch::idt::RESCHEDULE_IPI_VECTOR,
-                    );
-                }
+                crate::lifecycle::send_reschedule_ipi(cpu_id);
             }
         }
     }
 }
 
-pub fn resume_all_aps_if_not_nested(was_already_paused: bool) {
-    if !was_already_paused {
-        resume_all_aps();
-    }
+/// Release the pause `token` stands for. The APs resume only once the last
+/// outstanding token is released.
+pub fn resume_all_aps_if_not_nested(token: ApPauseToken) {
+    drop(token);
 }
 
 /// Check if APs should be paused.
 #[inline]
 pub fn are_aps_paused() -> bool {
-    AP_PAUSED.load(Ordering::Acquire)
+    AP_PAUSE_DEPTH.load(Ordering::Acquire) != 0
+}
+
+/// How many AP pauses are outstanding. Zero means the APs are running.
+#[inline]
+pub fn ap_pause_depth() -> u32 {
+    AP_PAUSE_DEPTH.load(Ordering::Acquire)
 }
 
 #[inline]

@@ -1175,7 +1175,20 @@ fn refresh_num_tasks_after_shutdown() {
 }
 
 pub fn task_shutdown_all() -> c_int {
-    let was_paused = crate::per_cpu::pause_all_aps();
+    // A pause that cannot be taken is reported and stepped over rather than
+    // propagated: the two callers are kernel shutdown, where refusing to tear
+    // tasks down leaves the machine up with no way forward, and the test scope,
+    // which already holds a pause of its own and so takes the nesting path.
+    let ap_pause = match crate::per_cpu::pause_all_aps() {
+        Ok(token) => Some(token),
+        Err(crate::per_cpu::ApPauseError::Timeout { cpu_id }) => {
+            klog_info!(
+                "SCHED: CPU {} would not park; shutting tasks down with the APs running",
+                cpu_id
+            );
+            None
+        }
+    };
     let tasks_to_terminate = collect_shutdown_task_ids(slopos_ostd::task::TaskAddr::current());
     let result = terminate_task_ids(&tasks_to_terminate);
 
@@ -1188,7 +1201,9 @@ pub fn task_shutdown_all() -> c_int {
     let _ = super::pending_spawn::drain_parked_spawns();
     refresh_num_tasks_after_shutdown();
 
-    crate::per_cpu::resume_all_aps_if_not_nested(was_paused);
+    if let Some(token) = ap_pause {
+        crate::per_cpu::resume_all_aps_if_not_nested(token);
+    }
     // Queue teardown releases every parked reference, so this is where the last
     // one usually lands. Drain now — with the APs resumed and no lock held —
     // rather than leaving corpses for an idle pass that may never come.
