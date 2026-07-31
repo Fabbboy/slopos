@@ -89,7 +89,7 @@ pub fn is_enabled() -> bool {
 
 fn get_random() -> u64 {
     // Use hardware RDRAND directly — no lock contention, per-core, no init dependency.
-    if let Some(val) = slopos_arch::cpu::rdrand::rdrand64() {
+    if let Some(val) = slopos_arch::cpu::rdrand::RdRand::probe().and_then(|rd| rd.next()) {
         return val;
     }
     // TSC fallback with mixing

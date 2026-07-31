@@ -384,6 +384,7 @@ check-framekernel-gates:
     scripts/check_wait_predicate_purity.sh
     scripts/check_task_ownership.sh --self-test
     scripts/check_task_ownership.sh
+    scripts/check_safe_contract_surface.sh
     scripts/tcb_ratio.sh --max 1.0
 
 # Run every framekernel-discipline gate in one shot. Requires a prior

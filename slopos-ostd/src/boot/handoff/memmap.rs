@@ -26,7 +26,7 @@ pub struct MemmapEntry {
 /// Borrow the bootloader-published memmap entry array as a typed
 /// `&'static [MemmapEntry]`.
 ///
-/// # Safety (interior)
+/// # Why this is safe to call
 ///
 /// The bootloader keeps the memmap response struct alive for the
 /// kernel's lifetime, so a `'static` borrow is sound. Callers are

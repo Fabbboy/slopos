@@ -203,9 +203,9 @@ fn emergency_seed() -> [u8; 32] {
 
     let mut seed = [0u8; 32];
 
-    if rdrand::has_rdrand() {
+    if let Some(rd) = rdrand::RdRand::probe() {
         for chunk in seed.chunks_exact_mut(8) {
-            if let Some(val) = rdrand::rdrand64() {
+            if let Some(val) = rd.next() {
                 chunk.copy_from_slice(&val.to_le_bytes());
             }
         }

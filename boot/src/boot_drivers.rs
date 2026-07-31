@@ -486,18 +486,18 @@ fn boot_step_csprng_seed_fn(_ctx: &mut BootCtx<'_, BspInit>) -> i32 {
     let mut source = "tsc";
 
     // Primary: RDRAND (available on all modern x86-64, emulated by QEMU)
-    if rdrand::has_rdrand() {
+    if let Some(rd) = rdrand::RdRand::probe() {
         source = "rdrand";
         for chunk in seed.chunks_exact_mut(8) {
-            if let Some(val) = rdrand::rdrand64() {
+            if let Some(val) = rd.next() {
                 chunk.copy_from_slice(&val.to_le_bytes());
             }
         }
         // Bonus: XOR in RDSEED if available
-        if rdrand::has_rdseed() {
+        if let Some(rs) = rdrand::RdSeed::probe() {
             source = "rdrand+rdseed";
             for chunk in seed.chunks_exact_mut(8) {
-                if let Some(val) = rdrand::rdseed64() {
+                if let Some(val) = rs.next() {
                     let existing = u64::from_le_bytes(chunk.try_into().unwrap());
                     let mixed = existing ^ val;
                     chunk.copy_from_slice(&mixed.to_le_bytes());

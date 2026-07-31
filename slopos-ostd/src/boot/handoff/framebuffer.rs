@@ -53,7 +53,7 @@ impl Framebuffer {
     /// Mutable byte slice covering the framebuffer's `pitch * height`
     /// bytes.
     ///
-    /// # Safety (interior)
+    /// # Why this is safe to call
     ///
     /// The bootloader pre-maps the framebuffer with read/write
     /// permission for the kernel's lifetime. The returned slice is

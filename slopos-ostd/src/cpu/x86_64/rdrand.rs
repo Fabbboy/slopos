@@ -25,15 +25,50 @@ pub fn has_rdseed() -> bool {
     (ebx & CPUID_SEXT_EBX_RDSEED) != 0
 }
 
-/// Execute RDRAND and return a 64-bit random value, or `None` on failure.
+/// Witness that CPUID reports RDRAND on this CPU.
 ///
+/// [`RdRand::probe`] is the only way to get one, so a caller cannot reach
+/// the instruction without having asked — the obligation that used to read
+/// "caller must verify `has_rdrand()`" and that `mm::aslr` did not.
+#[derive(Clone, Copy)]
+pub struct RdRand(());
+
+impl RdRand {
+    /// `Some` when CPUID reports the instruction.
+    #[inline]
+    pub fn probe() -> Option<Self> {
+        has_rdrand().then_some(Self(()))
+    }
+
+    /// A 64-bit random value, or `None` if the DRBG underflowed ten times.
+    #[inline]
+    pub fn next(self) -> Option<u64> {
+        rdrand64_raw()
+    }
+}
+
+/// Witness that CPUID reports RDSEED on this CPU.
+#[derive(Clone, Copy)]
+pub struct RdSeed(());
+
+impl RdSeed {
+    /// `Some` when CPUID reports the instruction.
+    #[inline]
+    pub fn probe() -> Option<Self> {
+        has_rdseed().then_some(Self(()))
+    }
+
+    /// A 64-bit entropy value, or `None` after ten failed attempts.
+    #[inline]
+    pub fn next(self) -> Option<u64> {
+        rdseed64_raw()
+    }
+}
+
 /// Retries up to 10 times per Intel's recommendation. Each attempt checks
 /// the carry flag: CF=1 means valid output, CF=0 means underflow (retry).
-///
-/// # Safety
-/// Caller must verify `has_rdrand()` before calling.
 #[inline]
-pub fn rdrand64() -> Option<u64> {
+fn rdrand64_raw() -> Option<u64> {
     for _ in 0..10 {
         let value: u64;
         let ok: u8;
@@ -53,15 +88,10 @@ pub fn rdrand64() -> Option<u64> {
     None
 }
 
-/// Execute RDSEED and return a 64-bit entropy value, or `None` on failure.
-///
 /// Retries up to 10 times. RDSEED can fail more often than RDRAND because
 /// it draws from the raw entropy source rather than a conditioned DRBG.
-///
-/// # Safety
-/// Caller must verify `has_rdseed()` before calling.
 #[inline]
-pub fn rdseed64() -> Option<u64> {
+fn rdseed64_raw() -> Option<u64> {
     for _ in 0..10 {
         let value: u64;
         let ok: u8;

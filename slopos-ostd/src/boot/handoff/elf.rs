@@ -45,7 +45,7 @@ impl<'a> ElfImage<'a> {
 /// Returns `None` if the payload is empty or fails the ELF magic-byte
 /// probe.
 ///
-/// # Safety (interior)
+/// # Why this is safe to call
 ///
 /// The payload buffer must outlive the kernel — today's callers
 /// (`exec` / `process_vm_load_elf_data`) thread through bootloader-

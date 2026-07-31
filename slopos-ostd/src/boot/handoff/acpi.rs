@@ -21,7 +21,7 @@ use crate::boot::hhdm;
 /// - the table-length field in the SDT header disagrees with `len`
 /// - the 8-bit additive checksum is non-zero
 ///
-/// # Safety (interior)
+/// # Why this is safe to call
 ///
 /// The bootloader publishes ACPI tables in firmware-reserved memory
 /// that the kernel keeps mapped for its lifetime. The interior
@@ -46,7 +46,7 @@ pub fn acpi_handoff(phys: PhysAddr, len: usize) -> Option<AcpiTable<'static>> {
 /// `acpi/src/tables.rs`) that need to probe RSDP / SDT-header prefixes
 /// at multiple lengths before re-borrowing the full table.
 ///
-/// # Safety (interior)
+/// # Why this is safe to call
 ///
 /// The bootloader publishes ACPI tables in firmware-reserved memory
 /// that the kernel keeps mapped for its lifetime. The interior

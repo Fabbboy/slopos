@@ -43,7 +43,6 @@ pub mod irq;
 pub mod kdiag;
 pub mod klog;
 pub mod ksym;
-pub mod memory;
 pub mod mm;
 pub mod numfmt;
 pub mod panic;

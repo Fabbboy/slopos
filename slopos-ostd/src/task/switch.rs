@@ -42,7 +42,7 @@ use crate::task::task::TaskContext;
 /// - Caller handles FPU state save/restore separately.
 /// - Inv. 8 — the calling CPU is the sole accessor of both contexts.
 #[unsafe(naked)]
-pub extern "sysv64" fn switch_registers(prev: *mut TaskContext, next: *const TaskContext) {
+pub unsafe extern "sysv64" fn switch_registers(prev: *mut TaskContext, next: *const TaskContext) {
     naked_asm!(
         // rdi = prev context pointer (nullable)
         // rsi = next context pointer
@@ -152,9 +152,11 @@ pub fn switch_context(prev: *mut TaskContext, next: *const TaskContext) {
     let restored = unsafe { (*next).preempt_count } as u32;
     pcr::preempt_count_set(restored);
 
-    // `switch_registers` has a safe signature (its preconditions match
-    // ours and are documented on its own item); forward the swap.
-    switch_registers(prev, next);
+    // SAFETY: `switch_registers` and this function have the same
+    // preconditions — IRQs off, sole accessor, both contexts valid — and
+    // they are this function's own documented obligations, forwarded by the
+    // caller above.
+    unsafe { switch_registers(prev, next) };
 }
 
 // ---------------------------------------------------------------------------
@@ -520,7 +522,7 @@ extern "sysv64" fn dispatch_task_exit() -> ! {
 /// Reachable only via [`switch_registers`] dispatching a context built
 /// by [`TaskContext::new_for_task`].
 #[unsafe(naked)]
-pub extern "sysv64" fn task_entry_trampoline() {
+pub unsafe extern "sysv64" fn task_entry_trampoline() {
     naked_asm!(
         // r12 = entry point function pointer
         // r13 = argument
