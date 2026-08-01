@@ -37,6 +37,10 @@ pub const DEFAULT_MISS_THRESHOLD: u32 = 100;
 /// Multiple of the miss threshold at which a breach becomes fatal.
 const FATAL_MULTIPLE: u32 = 5;
 
+/// The same, once the wait-for chain has closed on itself. A cycle cannot
+/// resolve on its own, so waiting longer only delays the report.
+const FATAL_MULTIPLE_CYCLE: u32 = 1;
+
 /// No CPU. `u32::MAX` rather than 0, which is a real CPU index.
 const NO_CPU: u32 = u32::MAX;
 
@@ -90,6 +94,31 @@ struct CpuSlot {
     /// Disposition of the NMI this CPU is being sent, and the interlock
     /// that stops a second one arriving while the first is being handled.
     probe: AtomicU32,
+    /// Odd while this CPU is spinning on a lock, bumped on entry and exit.
+    /// A walker records it per hop and re-reads it afterwards, so a chain
+    /// assembled out of links that were released and re-taken underneath
+    /// it is rejected rather than reported as a cycle.
+    wait_seq: AtomicU64,
+    /// Holder CPU of the lock this one is spinning on; `NO_CPU` otherwise.
+    blocked_on: AtomicU32,
+    /// Address of that lock. Printed, never dereferenced — a `SpinLock` can
+    /// live in a heap allocation the spinner frees the moment it wins, and
+    /// the fault a walker would take is one an NMI handler cannot afford.
+    waiting_on: AtomicU64,
+}
+
+/// Longest wait-for chain the walker will follow.
+///
+/// A real deadlock cycle is short; a chain this long is contention, and
+/// bounding it keeps the walker's frame small enough to run from a stalled
+/// spin loop.
+const MAX_WAIT_HOPS: usize = 8;
+
+#[derive(Clone, Copy)]
+struct WaitHop {
+    cpu: u32,
+    seq: u64,
+    lock: u64,
 }
 
 impl CpuSlot {
@@ -101,6 +130,9 @@ impl CpuSlot {
             max_stale: AtomicU32::new(0),
             target: AtomicU32::new(NO_CPU),
             probe: AtomicU32::new(NmiDisposition::Unsolicited as u32),
+            wait_seq: AtomicU64::new(0),
+            blocked_on: AtomicU32::new(NO_CPU),
+            waiting_on: AtomicU64::new(0),
         }
     }
 }
@@ -268,7 +300,12 @@ fn reset(slot: &CpuSlot, beat: u64) {
 /// Announce the stall and NMI the target so it dumps its own context —
 /// nobody else can see its registers.
 fn report_stalled_cpu(me: usize, target: usize, stale: u32) {
-    let fatal_at = miss_threshold().saturating_mul(FATAL_MULTIPLE);
+    let cycle = wait_chain_closes_cycle(target);
+    let fatal_at = miss_threshold().saturating_mul(if cycle {
+        FATAL_MULTIPLE_CYCLE
+    } else {
+        FATAL_MULTIPLE
+    });
     let disposition = if PANIC_ENABLED.load(Ordering::Acquire) && stale >= fatal_at {
         NmiDisposition::Fatal
     } else {
@@ -288,10 +325,149 @@ fn report_stalled_cpu(me: usize, target: usize, stale: u32) {
     nmi_emit(" samples (watcher cpu ");
     nmi_emit_dec(me as u64);
     nmi_emit_line(")");
+    dump_wait_chain(target);
 
     match pcr::apic_id_from_cpu_index(target) {
         Some(apic_id) => pcr::send_nmi_to_cpu(apic_id),
         None => release_probe(target),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Wait-for graph
+// ---------------------------------------------------------------------------
+//
+// The graph is over CPU indices, never over lock pointers. A spinner holds
+// `&self` on the lock it is waiting for, so reading that lock's holder is
+// sound — but a *walker* on another CPU following a published pointer is
+// not: the spinner can win, release and free the lock between the walker's
+// two loads. The fault that would follow lands in an NMI handler, whose own
+// `iretq` unblocks NMI mid-handler. Publishing the holder's CPU index
+// instead makes the walk a bounded array traversal with nothing to
+// dereference.
+
+/// Publish that this CPU has begun spinning on the lock at `lock_addr`.
+///
+/// Returns `false` if a wait is already published. The contended-spin relax
+/// hook takes a lock of its own, and it is the outer wait that describes
+/// why this CPU is stuck.
+pub fn begin_wait(lock_addr: u64) -> bool {
+    let Some(slot) = SLOTS.get(pcr::get_current_cpu()) else {
+        return false;
+    };
+    let seq = slot.wait_seq.load(Ordering::Relaxed);
+    if seq % 2 == 1 {
+        return false;
+    }
+    slot.waiting_on.store(lock_addr, Ordering::Relaxed);
+    slot.blocked_on.store(NO_CPU, Ordering::Relaxed);
+    slot.wait_seq.store(seq.wrapping_add(1), Ordering::Release);
+    true
+}
+
+/// Republish which CPU holds the lock this one is waiting for. Called as
+/// the spin progresses, because the holder changes as the queue drains.
+pub fn publish_wait_holder(holder: Option<usize>) {
+    if let Some(slot) = SLOTS.get(pcr::get_current_cpu()) {
+        slot.blocked_on
+            .store(holder.map_or(NO_CPU, |cpu| cpu as u32), Ordering::Release);
+    }
+}
+
+/// Retract this CPU's wait.
+pub fn end_wait() {
+    if let Some(slot) = SLOTS.get(pcr::get_current_cpu()) {
+        slot.blocked_on.store(NO_CPU, Ordering::Relaxed);
+        slot.waiting_on.store(0, Ordering::Relaxed);
+        let seq = slot.wait_seq.load(Ordering::Relaxed);
+        slot.wait_seq.store(seq.wrapping_add(1), Ordering::Release);
+    }
+}
+
+fn collect_wait_chain(start: usize, hops: &mut [WaitHop; MAX_WAIT_HOPS]) -> (usize, bool) {
+    let mut cpu = start;
+    let mut len = 0;
+    while len < MAX_WAIT_HOPS {
+        let Some(slot) = SLOTS.get(cpu) else {
+            break;
+        };
+        let seq = slot.wait_seq.load(Ordering::Acquire);
+        if seq % 2 == 0 {
+            // Not spinning: this CPU is stuck somewhere the graph cannot
+            // describe, or is running normally.
+            break;
+        }
+        let next = slot.blocked_on.load(Ordering::Acquire);
+        if next == NO_CPU {
+            break;
+        }
+        hops[len] = WaitHop {
+            cpu: cpu as u32,
+            seq,
+            lock: slot.waiting_on.load(Ordering::Relaxed),
+        };
+        len += 1;
+        cpu = next as usize;
+        if cpu == start {
+            return (len, true);
+        }
+    }
+    (len, false)
+}
+
+/// Whether the wait-for chain from `start` returns to `start` with every
+/// link still in the wait it was read in.
+///
+/// The re-read is what separates a proof from a coincidence: each hop is
+/// two unsynchronised loads, so a chain can otherwise be assembled from
+/// links that never existed at the same instant.
+pub fn wait_chain_closes_cycle(start: usize) -> bool {
+    let mut hops = [WaitHop {
+        cpu: 0,
+        seq: 0,
+        lock: 0,
+    }; MAX_WAIT_HOPS];
+    let (len, closed) = collect_wait_chain(start, &mut hops);
+    closed
+        && hops[..len].iter().all(|hop| {
+            SLOTS
+                .get(hop.cpu as usize)
+                .map(|slot| slot.wait_seq.load(Ordering::Acquire) == hop.seq)
+                .unwrap_or(false)
+        })
+}
+
+/// Print the wait-for chain from `start`.
+///
+/// Ends with an explicit terminator rather than trailing off: a chain can
+/// leave the graph entirely, because `PreemptMutex`, `IrqRwLock` (whose
+/// readers are a count, not an owner), `Mutex` and the klog ticket pair
+/// publish no holder. "Holder unknown" and "no cycle" are different
+/// answers and the reader is entitled to know which one this is.
+pub fn dump_wait_chain(start: usize) {
+    let mut hops = [WaitHop {
+        cpu: 0,
+        seq: 0,
+        lock: 0,
+    }; MAX_WAIT_HOPS];
+    let (len, closed) = collect_wait_chain(start, &mut hops);
+    if len == 0 {
+        nmi_emit_line("WATCHDOG:   not spinning on a tracked lock");
+        return;
+    }
+    for hop in &hops[..len] {
+        nmi_emit("WATCHDOG:   cpu ");
+        nmi_emit_dec(hop.cpu as u64);
+        nmi_emit(" waits on lock ");
+        nmi_emit_hex(hop.lock);
+        nmi_emit_line("");
+    }
+    if closed {
+        nmi_emit_line("WATCHDOG:   chain closes on itself — deadlock cycle");
+    } else if len == MAX_WAIT_HOPS {
+        nmi_emit_line("WATCHDOG:   chain truncated, no cycle within the bound");
+    } else {
+        nmi_emit_line("WATCHDOG:   chain ends: holder unknown");
     }
 }
 
@@ -436,6 +612,32 @@ pub mod test_support {
         stale
     }
 
+    /// Plant a wait-for edge as if `cpu` were spinning on a lock held by
+    /// `blocked_on`. The real publishers only ever describe the CPU they
+    /// run on, so a graph with more than one node has no other way to
+    /// exist in a single-threaded test.
+    pub fn plant_wait(cpu: usize, blocked_on: Option<usize>, lock: u64) {
+        let slot = &SLOTS[cpu];
+        slot.waiting_on.store(lock, Ordering::Relaxed);
+        slot.blocked_on
+            .store(blocked_on.map_or(NO_CPU, |c| c as u32), Ordering::Relaxed);
+        let seq = slot.wait_seq.load(Ordering::Relaxed);
+        if seq % 2 == 0 {
+            slot.wait_seq.store(seq + 1, Ordering::Relaxed);
+        }
+    }
+
+    /// Retract a planted edge, as leaving the wait would.
+    pub fn clear_wait(cpu: usize) {
+        let slot = &SLOTS[cpu];
+        slot.blocked_on.store(NO_CPU, Ordering::Relaxed);
+        slot.waiting_on.store(0, Ordering::Relaxed);
+        let seq = slot.wait_seq.load(Ordering::Relaxed);
+        if seq % 2 == 1 {
+            slot.wait_seq.store(seq + 1, Ordering::Relaxed);
+        }
+    }
+
     pub fn reset_slot(watcher: usize) {
         let slot = &SLOTS[watcher];
         slot.last_seen.store(0, Ordering::Relaxed);
@@ -445,5 +647,8 @@ pub mod test_support {
         slot.target.store(NO_CPU, Ordering::Relaxed);
         slot.probe
             .store(NmiDisposition::Unsolicited as u32, Ordering::Relaxed);
+        slot.blocked_on.store(NO_CPU, Ordering::Relaxed);
+        slot.waiting_on.store(0, Ordering::Relaxed);
+        slot.wait_seq.store(0, Ordering::Relaxed);
     }
 }

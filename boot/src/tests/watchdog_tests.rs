@@ -149,8 +149,93 @@ pub fn test_probe_admits_one_at_a_time() -> TestResult {
     TestResult::Pass
 }
 
+/// A lock names its holder only while it is held.
+///
+/// `holder` is written on acquisition and never cleared, so both halves of
+/// the validation carry weight: an untaken lock's zeroed field would
+/// otherwise decode as "CPU 0, ticket 0", and a released one would keep
+/// naming whoever had it last.
+pub fn test_holder_is_named_only_while_held() -> TestResult {
+    use slopos_ostd::sync::{LOCK_LEVEL_UNORDERED, SpinLock};
+
+    let lock: SpinLock<u32> = SpinLock::new(0, LOCK_LEVEL_UNORDERED);
+    let me = pcr::get_current_cpu();
+
+    assert_test!(
+        lock.holder_cpu_for_test().is_none(),
+        "an untaken lock named a holder"
+    );
+    {
+        let mut guard = lock.lock();
+        *guard += 1;
+        assert_test!(
+            lock.holder_cpu_for_test() == Some(me),
+            "a held lock did not name this CPU"
+        );
+    }
+    assert_test!(
+        lock.holder_cpu_for_test().is_none(),
+        "a released lock still named a holder"
+    );
+
+    let guard = lock.try_lock().expect("uncontended try_lock must succeed");
+    assert_test!(
+        lock.holder_cpu_for_test() == Some(me),
+        "try_lock left a hole in the wait-for graph"
+    );
+    drop(guard);
+    assert_test!(
+        lock.holder_cpu_for_test().is_none(),
+        "a released try_lock still named a holder"
+    );
+    TestResult::Pass
+}
+
+/// A force-unlock releases one holder, not the whole queue.
+///
+/// Storing `next_ticket` would jump past every ticket already taken, and
+/// each of those waiters would spin forever on a number that is never
+/// served — manufacturing the lockup the detector exists to report.
+pub fn test_force_unlock_releases_exactly_one() -> TestResult {
+    use slopos_ostd::sync::{LOCK_LEVEL_UNORDERED, SpinLock};
+
+    let lock: SpinLock<u32> = SpinLock::new(0, LOCK_LEVEL_UNORDERED);
+
+    // A holder plus one queued waiter. Storing `next_ticket` would free the
+    // lock in one step and leave the waiter's ticket unreachable forever.
+    lock.abandon_for_test();
+    lock.abandon_for_test();
+    assert_test!(lock.is_locked(), "two tickets taken but lock reads free");
+
+    lock.release_leaked_guard_for_test();
+    assert_test!(
+        lock.is_locked(),
+        "one release freed the lock and stranded the queued waiter"
+    );
+
+    lock.release_leaked_guard_for_test();
+    assert_test!(!lock.is_locked(), "the queue did not drain");
+
+    // Idempotent: a release on a free lock must not run `now_serving` ahead
+    // of `next_ticket`, which would wedge every future acquirer.
+    lock.release_leaked_guard_for_test();
+    assert_test!(!lock.is_locked(), "a free lock was over-released");
+
+    // The proof it is still usable: a fresh acquisition must be served.
+    drop(lock.lock());
+    TestResult::Pass
+}
+
 slopos_testing::stest!(
     name = test_heartbeat_advances_on_timer_tick,
+    suite = watchdog
+);
+slopos_testing::stest!(
+    name = test_holder_is_named_only_while_held,
+    suite = watchdog
+);
+slopos_testing::stest!(
+    name = test_force_unlock_releases_exactly_one,
     suite = watchdog
 );
 slopos_testing::stest!(name = test_touch_advances_heartbeat, suite = watchdog);
