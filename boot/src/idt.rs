@@ -280,12 +280,29 @@ fn handle_luf_drain_ipi() {
 // duplicate the inc/dec body; now it just borrows the canonical guard
 // type.
 
-/// NMI watchdog handler -- invoked when a neighbouring CPU sends an NMI
-/// because this CPU has not recorded a timer tick for >500 ms.
+/// Answer an NMI: the lockup detector's probe, the TLB ladder's, or one
+/// nobody armed.
 ///
-/// Dumps the faulting context, reports held-lock state, force-unlocks all
-/// tracked locks (so other CPUs are not permanently blocked), and panics.
-fn nmi_watchdog_handler(frame: &slopos_arch::InterruptFrame) {
+/// # Vector 2 stays on `ist = 0`
+///
+/// The fatal branch's `%rbp` walk deliberately faults, and the recovery
+/// rewrites RIP and returns through the page-fault handler's `iretq` — and
+/// on x86-64 *any* `IRET` unblocks NMI, not only the one leaving this
+/// handler. With no IST a nested NMI merely pushes deeper on the same
+/// stack; with one it would reset RSP to the IST top and overwrite the
+/// frame this handler is still using.
+///
+/// # Nothing here may take a lock
+///
+/// `klog!`'s serial backend spins on a blocking ticket lock the interrupted
+/// CPU may already hold, and `early_console::write_bytes` funnels through
+/// `fblog::capture`, whose `try_lock` runs `push_lock` — a `&mut` on a
+/// per-CPU cell this NMI may have interrupted mid-update. Output goes
+/// through the watchdog's own byte-at-a-time emitter, which touches
+/// neither.
+fn nmi_handler(frame: &slopos_arch::InterruptFrame) {
+    use slopos_ostd::watchdog::{self, NmiDisposition};
+
     let cpu_id = slopos_arch::pcr::get_current_cpu();
 
     // Reliable Abort Core — panic stop-the-world. If a peer CPU has won the
@@ -309,49 +326,98 @@ fn nmi_watchdog_handler(frame: &slopos_arch::InterruptFrame) {
         slopos_arch::cpu::halt_loop();
     }
 
-    // Use serial logging directly to avoid lock recursion.
-    klog_info!(
-        "NMI WATCHDOG: CPU {} locked up! RIP={:#x} RSP={:#x} CS={:#x} RBP={:#x}",
-        cpu_id,
-        frame.rip,
-        frame.rsp,
-        frame.cs,
-        frame.rbp
-    );
+    // Registers only. The wait-for chain is the watcher's to print: it
+    // reads the same per-CPU slots and it runs whether or not this NMI is
+    // ever delivered.
+    let disposition = watchdog::probe_disposition(cpu_id);
+    nmi_emit_context(cpu_id, frame, disposition);
 
-    let held = slopos_ostd::sync::held_lock_count();
-    klog_info!("NMI WATCHDOG: CPU {} holds {} lock(s)", cpu_id, held);
+    if disposition == NmiDisposition::Fatal {
+        nmi_die(cpu_id, frame);
+    }
+
+    // An unsolicited NMI is not evidence of a fault on this CPU and must
+    // not spend the recovered-fault budget `panic.oops_limit=` bounds.
+    if disposition != NmiDisposition::Unsolicited {
+        let (count, _limit_reached) = slopos_ostd::panic_recovery::oops_record();
+        watchdog::nmi_emit("NMI: oops ");
+        watchdog::nmi_emit_dec(count);
+        watchdog::nmi_emit_line(" recorded, resuming");
+    }
+
+    // Last act, so the next check can arm a fresh probe. Until this runs,
+    // the detector will not re-send — which is what lets a stalled CPU
+    // finish its dump instead of restarting it 100 times a second.
+    watchdog::release_probe(cpu_id);
+}
+
+/// Emit the interrupted context. Format-free and fault-free: a returning
+/// NMI must take no page fault, because that fault's own `iretq` would
+/// unblock NMI while this handler is still running.
+fn nmi_emit_context(
+    cpu_id: usize,
+    frame: &slopos_arch::InterruptFrame,
+    disposition: slopos_ostd::watchdog::NmiDisposition,
+) {
+    use slopos_ostd::watchdog::{
+        NmiDisposition, nmi_emit, nmi_emit_dec, nmi_emit_hex, nmi_emit_line,
+    };
+
+    nmi_emit("NMI: cpu ");
+    nmi_emit_dec(cpu_id as u64);
+    nmi_emit(match disposition {
+        NmiDisposition::Report => " stalled",
+        NmiDisposition::Fatal => " stalled (fatal)",
+        NmiDisposition::TlbLadder => " never acked a TLB shootdown",
+        NmiDisposition::Unsolicited => " took an unsolicited NMI",
+    });
+    nmi_emit(" rip=");
+    nmi_emit_hex(frame.rip);
+    nmi_emit(" rsp=");
+    nmi_emit_hex(frame.rsp);
+    nmi_emit(" rbp=");
+    nmi_emit_hex(frame.rbp);
+    nmi_emit(" cs=");
+    nmi_emit_hex(frame.cs);
+    nmi_emit_line("");
+}
+
+/// Terminal branch. Everything destructive lives here and nowhere else:
+/// `set_panic_cpu_state` arms a one-shot that seeds the *next* panic's
+/// backtrace, and `poison_all_held_locks_no_halt` force-releases locks a
+/// still-running context is holding and latches the lock-order validator
+/// off machine-wide. Both are corrections on the way out, not diagnostics.
+fn nmi_die(cpu_id: usize, frame: &slopos_arch::InterruptFrame) -> ! {
+    use slopos_ostd::watchdog::{nmi_emit, nmi_emit_dec, nmi_emit_hex, nmi_emit_line};
 
     // Walk the saved-frame chain via %rbp. Each frame: [saved_rbp][return_addr][...].
     // Stop on null/non-canonical/misaligned pointer or after 16 frames.
     //
-    // We're in NMI watchdog context — a fault on the read_volatile here
-    // would nest a #PF under an NMI panic and risk a triple-fault. Defend
-    // by validating each rbp before the read:
-    //   - canonical kernel half  (high 17 bits all 1)
-    //   - 8-byte aligned         (frame pointer ABI requirement)
-    //   - room for two u64 reads (rbp + 16 must remain canonical)
-    // This isn't a tight bounds check (we can't cheaply prove rbp lies
-    // inside the interrupted task's kernel stack from NMI context, where
-    // we're on an IST stack), but it eliminates the obvious fault classes
-    // — null, user-half, unaligned, and end-of-canonical-space wrap-around.
+    // Validate before each read — canonical kernel half, 8-byte aligned,
+    // room for two u64s. Not a tight bounds check (we cannot cheaply prove
+    // rbp lies inside the interrupted task's kernel stack), but it
+    // eliminates the obvious fault classes: null, user-half, unaligned, and
+    // end-of-canonical-space wrap-around. A fault that does slip through is
+    // recoverable, which is why this runs only where we are already dying.
     {
         use slopos_ostd::arch::x86_64::kernel_ptr::read_volatile_canonical_kernel_u64;
         let mut rbp = frame.rbp;
-        klog_info!("NMI WATCHDOG: CPU {} backtrace:", cpu_id);
-        klog_info!("  [0] {:#x}", frame.rip);
-        for depth in 1..=16u32 {
-            // Validate-then-read inside `read_volatile_canonical_kernel_u64`:
-            // canonical-kernel, 8-byte-aligned, 8-byte headroom on each
-            // word. The second read needs an extra 8 bytes of canonical
-            // headroom — re-validate by asking for the +8 offset.
+        nmi_emit("NMI: cpu ");
+        nmi_emit_dec(cpu_id as u64);
+        nmi_emit_line(" backtrace:");
+        nmi_emit("  ");
+        nmi_emit_hex(frame.rip);
+        nmi_emit_line("");
+        for _ in 1..=16u32 {
             let Some(next_rbp) = read_volatile_canonical_kernel_u64(rbp) else {
                 break;
             };
             let Some(ret_addr) = read_volatile_canonical_kernel_u64(rbp.wrapping_add(8)) else {
                 break;
             };
-            klog_info!("  [{}] {:#x}", depth, ret_addr);
+            nmi_emit("  ");
+            nmi_emit_hex(ret_addr);
+            nmi_emit_line("");
             if next_rbp <= rbp {
                 break;
             }
@@ -362,29 +428,12 @@ fn nmi_watchdog_handler(frame: &slopos_arch::InterruptFrame) {
     // Surface the locked-up CPU's RIP/RSP/RBP on the panic screen (not just
     // the serial log) so the wedge site is visible without a serial console.
     crate::panic::set_panic_cpu_state(frame.rip, frame.rsp, frame.rbp);
-
-    // A lockup is usually one CPU spinning on a lock some OTHER CPU holds:
-    // dump every CPU's tracked held locks and last-tick stamp so the holder
-    // is identifiable from the log (addresses match `nm kernel.elf`).
-    for cpu in 0..slopos_arch::MAX_CPUS {
-        let mut addrs = [0u64; 8];
-        let n = slopos_ostd::sync::held_lock_addrs_for_cpu(cpu, &mut addrs);
-        let last_tick = slopos_arch::pcr::heartbeat_for_cpu(cpu);
-        if n > 0 || last_tick != 0 {
-            klog_info!(
-                "NMI WATCHDOG: cpu {} last_tick={} holds {}: {:#x?}",
-                cpu,
-                last_tick,
-                n,
-                &addrs[..n]
-            );
-        }
-    }
-
     // Force-release all tracked locks so other CPUs can make progress.
     slopos_ostd::sync::panic_recovery::poison_all_held_locks_no_halt();
 
-    panic!("NMI WATCHDOG: CPU {} not responding for >500ms", cpu_id);
+    // Not `panic!`: the panic strategy is `unwind`, and the interrupt-entry
+    // asm frame below carries no unwind information.
+    crate::panic::panic_abort_raw("NMI watchdog: CPU made no progress, sustained")
 }
 
 /// `int 0x80` is not a SlopOS syscall ABI.
@@ -408,7 +457,6 @@ pub fn common_exception_handler_impl(frame: *mut slopos_arch::InterruptFrame) {
     // The frame lives for exactly this handler invocation, so a frame-local
     // is the honest anchor for a borrow of it.
     let mut frame_anchor = ();
-    let mut irq_nest = IrqNestHold::enter();
     let frame_ref = slopos_arch::InterruptFrame::from_ptr_mut(&mut frame_anchor, frame)
         .expect("common_exception_handler_impl: null frame ptr");
     let vector = (frame_ref.vector & 0xFF) as u8;
@@ -428,14 +476,19 @@ pub fn common_exception_handler_impl(frame: *mut slopos_arch::InterruptFrame) {
     // All CPU exceptions (vectors 0-31) use IST stacks in SlopOS.
     let _ist_hold = IstPreemptHold::new(vector < 32);
 
-    ist_stacks::ist_record_usage(vector, frame as u64);
-
-    // NMI watchdog: vector 2 is used by the cross-CPU deadlock detector.
-    // Handle it before any other dispatch to keep the path minimal.
+    // NMI is answered before `IrqNestHold`, and `IstPreemptHold` is kept.
+    // `interrupt_nesting_enter` stores `in_interrupt` and bumps the depth
+    // as two instructions; an NMI landing between them runs a whole
+    // enter/exit pair whose exit clears `in_interrupt` under a context that
+    // is still nested one deep. `IstPreemptHold` is a single gs-relative
+    // increment and has no such window.
     if vector == EXCEPTION_NMI {
-        nmi_watchdog_handler(frame_ref);
+        nmi_handler(frame_ref);
         return;
     }
+
+    let mut irq_nest = IrqNestHold::enter();
+    ist_stacks::ist_record_usage(vector, frame as u64);
 
     if vector == SYSCALL_VECTOR {
         answer_legacy_syscall(frame_ref);

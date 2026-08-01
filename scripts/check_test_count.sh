@@ -21,7 +21,7 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 
-BASELINE="${TEST_COUNT_BASELINE:-2750}"
+BASELINE="${TEST_COUNT_BASELINE:-2761}"
 TMP="$(mktemp)"
 trap 'rm -f "$TMP"' EXIT INT TERM
 

@@ -226,6 +226,57 @@ pub fn test_force_unlock_releases_exactly_one() -> TestResult {
     TestResult::Pass
 }
 
+/// A real wedge is detected, reported, and survived.
+///
+/// This CPU stops taking timer interrupts for long enough that its watcher
+/// must report it. The machine reaching the end of this function is the
+/// assertion that matters: before the escalation ladder existed, every
+/// detection ended in `panic!`, which is the force that made both of the
+/// old thresholds grow until they stopped detecting anything.
+pub fn test_a_wedged_cpu_is_reported_and_survives() -> TestResult {
+    if slopos_arch::pcr::get_online_cpu_count() < 2 {
+        // Nobody is watching, so there is nothing to observe.
+        return TestResult::Skipped;
+    }
+
+    let cpu = pcr::get_current_cpu();
+    let original = watchdog::miss_threshold();
+
+    // Three samples, so the stall need only outlast ~30 ms of the watcher's
+    // ticks rather than the full second the default asks for. The delay
+    // lets the watcher take at least one sample under the new threshold —
+    // it latches the report point when the heartbeat last moved.
+    watchdog::set_miss_threshold(3);
+    hpet::delay_ms(50);
+
+    if watchdog::watcher_of(cpu).is_none() {
+        watchdog::set_miss_threshold(original);
+        // No AP has started its timer yet, so nothing is sampling us.
+        return TestResult::Skipped;
+    }
+
+    let oops_before = slopos_ostd::panic_recovery::oops_count();
+    let flags = slopos_arch::cpu::save_flags_cli();
+    hpet::delay_ms(150);
+    slopos_arch::cpu::restore_flags(flags);
+
+    watchdog::set_miss_threshold(original);
+
+    assert_test!(
+        slopos_ostd::panic_recovery::oops_count() > oops_before,
+        "a CPU that stopped ticking for 150 ms was never reported"
+    );
+    assert_test!(
+        watchdog::probe_disposition(cpu) == watchdog::NmiDisposition::Unsolicited,
+        "the handler did not release its probe"
+    );
+    TestResult::Pass
+}
+
+slopos_testing::stest!(
+    name = test_a_wedged_cpu_is_reported_and_survives,
+    suite = watchdog
+);
 slopos_testing::stest!(
     name = test_heartbeat_advances_on_timer_tick,
     suite = watchdog

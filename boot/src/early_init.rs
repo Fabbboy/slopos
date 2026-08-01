@@ -560,6 +560,38 @@ fn boot_step_boot_config_fn(_ctx: &mut BootCtx<'_, BspInit>) {
         }
     }
 
+    // Lockup detector. `watchdog=off` disables it outright,
+    // `watchdog.miss_threshold=` sets the consecutive unchanged samples a
+    // CPU may accumulate before it is reported (100 = 1 s at the 100 Hz
+    // tick), and `watchdog.panic=off` keeps every detection non-fatal.
+    for token in cmdline.split_whitespace() {
+        match token {
+            "watchdog=off" => {
+                slopos_ostd::watchdog::set_enabled(false);
+                boot_info(b"Boot option: watchdog disabled\0");
+            }
+            "watchdog=on" => slopos_ostd::watchdog::set_enabled(true),
+            "watchdog.panic=off" => {
+                slopos_ostd::watchdog::set_panic_enabled(false);
+                boot_info(b"Boot option: watchdog.panic disabled\0");
+            }
+            "watchdog.panic=on" => slopos_ostd::watchdog::set_panic_enabled(true),
+            _ => {
+                if let Some(value) = token.strip_prefix("watchdog.miss_threshold=") {
+                    let accepted = value
+                        .parse::<u32>()
+                        .ok()
+                        .is_some_and(slopos_ostd::watchdog::set_miss_threshold);
+                    if accepted {
+                        boot_info(b"Boot option: watchdog.miss_threshold set\0");
+                    } else {
+                        boot_info(b"Boot option: watchdog.miss_threshold ignored\0");
+                    }
+                }
+            }
+        }
+    }
+
     // Root filesystem backing: `root=initramfs` forces the RAM-resident root,
     // `root=virtio` forces the ext2 disk, and the default (`root=auto`) uses the
     // initramfs when Limine loaded a module and falls back to the disk.

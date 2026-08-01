@@ -257,6 +257,14 @@ pub(crate) const IST_STACK_COUNT: usize = 6;
 /// Static configuration for all IST stacks.
 ///
 /// Order matters: index determines virtual address placement.
+///
+/// The NMI (vector 2) is deliberately absent, and must stay absent. On
+/// x86-64 *any* `IRET` unblocks NMI, not only the one leaving the NMI
+/// handler — and the handler's backtrace walk deliberately faults, so the
+/// page-fault handler's own `iretq` re-opens the window mid-handler. With
+/// no IST a nested NMI pushes deeper on the same stack and survives; with
+/// one it would reset RSP to the IST top and overwrite the frame the outer
+/// handler is still using.
 static IST_CONFIGS: [IstStackConfig; IST_STACK_COUNT] = [
     // Critical exceptions - must have dedicated stacks
     IstStackConfig::new(

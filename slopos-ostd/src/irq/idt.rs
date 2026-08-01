@@ -637,12 +637,18 @@ pub unsafe fn handle_corrupt_iret_frame(iret_frame: *const u64) -> ! {
 // IST-handler entry guard.
 // ---------------------------------------------------------------------------
 
-/// Predicate: does the given vector enter the kernel via an IST stack
-/// in SlopOS?
+/// Predicate: must the given vector hold off deferred rescheduling?
 ///
-/// All x86-64 architectural exception vectors (0..=31) use IST stacks
-/// in SlopOS so that handlers run on a known-good stack regardless of
-/// the faulting context. Hardware IRQs (32..) do not.
+/// Every architectural exception vector (0..=31) does, whether or not it
+/// is one of the few that actually carries an IST assignment: a guard drop
+/// inside any of them could otherwise context-switch out of an exception
+/// handler. Hardware IRQs (32..) do not — they are the paths a reschedule
+/// is *supposed* to leave from.
+///
+/// Named for the IST because that is the case that made it necessary. The
+/// predicate is deliberately wider than the IST table; narrowing it to the
+/// vectors that really use one would let a `SpinLockGuard` drop inside a
+/// page-fault handler run the deferred reschedule from exception context.
 #[inline]
 pub const fn vector_uses_ist(vector: u8) -> bool {
     vector < 32

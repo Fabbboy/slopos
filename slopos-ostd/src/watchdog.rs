@@ -291,6 +291,16 @@ fn check_neighbour(me: usize) {
     report_stalled_cpu(me, target, stale);
 }
 
+/// Which CPU, if any, is currently watching `target`.
+pub fn watcher_of(target: usize) -> Option<usize> {
+    let count = pcr::get_cpu_count().min(MAX_CPUS);
+    (0..count).find(|&cpu| {
+        SLOTS
+            .get(cpu)
+            .is_some_and(|slot| slot.target.load(Ordering::Relaxed) == target as u32)
+    })
+}
+
 fn reset(slot: &CpuSlot, beat: u64) {
     slot.last_seen.store(beat, Ordering::Relaxed);
     slot.stale.store(0, Ordering::Relaxed);

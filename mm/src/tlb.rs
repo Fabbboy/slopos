@@ -732,8 +732,19 @@ fn wait_for_acks(targets: impl IntoIterator<Item = usize>, initiator_cpu: usize)
                             held[3],
                         );
                     }
-                    if let Some(apic_id) = slopos_arch::pcr::apic_id_from_cpu_index(cpu_idx) {
-                        slopos_arch::pcr::send_nmi_to_cpu(apic_id);
+                    // Arm the probe before sending, so the target's handler
+                    // reports the shootdown it owes rather than classifying
+                    // the NMI as unsolicited. A refused arm means a
+                    // watchdog probe is already in flight and will produce
+                    // the same dump.
+                    if slopos_ostd::watchdog::arm_probe(
+                        cpu_idx,
+                        slopos_ostd::watchdog::NmiDisposition::TlbLadder,
+                    ) {
+                        match slopos_arch::pcr::apic_id_from_cpu_index(cpu_idx) {
+                            Some(apic_id) => slopos_arch::pcr::send_nmi_to_cpu(apic_id),
+                            None => slopos_ostd::watchdog::release_probe(cpu_idx),
+                        }
                     }
                     result = Err(TlbShootdownTimeout { cpu_idx, resends });
                     break 'targets;
