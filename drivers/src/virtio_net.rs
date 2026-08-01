@@ -201,14 +201,16 @@ static DHCP_RX_EVENT: IrqEdgeEvent = IrqEdgeEvent::new();
 /// Wake the NAPI kthread when the NIC IRQ fires. Replaces the
 /// pre-refactor `NAPI_EVENT: IrqEdgeEvent` + `sleep_current_task_ms(1)`
 /// polling loop with an IRQ-driven park-and-wake.
-static NAPI_WAKER: slopos_net::napi_waker::NapiWaker = slopos_net::napi_waker::NapiWaker::new();
+static NAPI_WAKER: slopos_net::napi_waker::NapiWaker =
+    slopos_net::napi_waker::NapiWaker::new("netpoll");
 /// Wake the net-timer kthread when a sooner deadline is armed.
 /// Used by code that schedules a fresh timer wheel entry it needs
 /// fired before the next periodic 50 ms slice. Currently the
 /// production callers do not arm this signal (the 50 ms periodic
 /// cadence is enough for ARP/TCP retx latency); the signal is
 /// wired up for completeness and future optimisation.
-static TIMER_WAKER: slopos_net::napi_waker::NapiWaker = slopos_net::napi_waker::NapiWaker::new();
+static TIMER_WAKER: slopos_net::napi_waker::NapiWaker =
+    slopos_net::napi_waker::NapiWaker::new("net-timer");
 static NAPI_CONTEXT: NapiContext = NapiContext::new(NAPI_BUDGET);
 static DNS_RX_EVENT: IrqEdgeEvent = IrqEdgeEvent::new();
 /// Buffer for the most recent DNS response payload (UDP body only).
@@ -1368,9 +1370,15 @@ pub fn virtnet_wake_napi() {
 /// any equal-or-higher-priority task gets a chance to run before the
 /// next burst.
 fn napi_thread_entry(token: slopos_ostd::sync::kernel_io_task::KernelIoToken<'static>) {
-    use slopos_ostd::sync::kernel_io_task::{Deadline, yield_with_deadline};
+    use slopos_ostd::sync::kernel_io_task::{Deadline, KthreadWait, yield_with_deadline};
     loop {
-        NAPI_WAKER.wait();
+        let waited = NAPI_WAKER.wait(&token);
+        if waited == KthreadWait::Stop {
+            // One last drain: packets the IRQ already committed are in the
+            // used ring, and nothing else will collect them.
+            let _ = run_napi_burst();
+            break;
+        }
         let processed = run_napi_burst();
         slopos_net::socket::socket_process_timers();
 
@@ -1386,6 +1394,7 @@ fn napi_thread_entry(token: slopos_ostd::sync::kernel_io_task::KernelIoToken<'st
             yield_with_deadline(&token, Deadline::Immediate);
         }
     }
+    NAPI_WAKER.stop().note_exited();
 }
 
 /// Lock-free pending-RX peek. Reads the virtio used-ring `idx` and
@@ -1417,13 +1426,15 @@ fn has_pending_rx() -> bool {
 /// user tasks) so ARP aging, TCP retransmit, IP-reassembly expire,
 /// and delayed-ACK fire on time even when user-space is busy.
 fn net_timer_thread_entry(token: slopos_ostd::sync::kernel_io_task::KernelIoToken<'static>) {
-    use slopos_ostd::sync::kernel_io_task::{Deadline, yield_with_deadline};
+    use slopos_ostd::sync::kernel_io_task::{Deadline, KthreadWait, yield_with_deadline};
     const NET_TIMER_PERIOD_MS: u32 = 50;
     loop {
         // Wait either for the period to expire or for an explicit
         // wake from `TIMER_WAKER.arm_and_wake()`. Either way, run
         // one round of timer processing.
-        let _woken_early = TIMER_WAKER.wait_timeout_ms(NET_TIMER_PERIOD_MS);
+        if TIMER_WAKER.wait_timeout_ms(&token, NET_TIMER_PERIOD_MS) == KthreadWait::Stop {
+            break;
+        }
         slopos_net::timer::net_timer_process();
         slopos_net::socket::socket_process_timers();
         // Yield with deadline so any equal-priority task gets a
@@ -1431,6 +1442,7 @@ fn net_timer_thread_entry(token: slopos_ostd::sync::kernel_io_task::KernelIoToke
         // `wait_timeout_ms` parks again.
         yield_with_deadline(&token, Deadline::Immediate);
     }
+    TIMER_WAKER.stop().note_exited();
 }
 
 /// Per-queue interrupt handler for virtio-net.
@@ -1690,6 +1702,7 @@ fn virtio_net_probe(bound: &mut BoundDevice<'_>) -> Result<ProbeOutcome, PciProb
     // every yield in the kthread must name a `Deadline` so the
     // pre-refactor "sleep_current_task_ms(1) in a tight loop"
     // starvation pattern is structurally unreachable.
+    slopos_ostd::sync::kernel_io_task::register_kernel_io_stop(NAPI_WAKER.stop());
     if let Err(err) = slopos_ostd::spawn_kernel_io!("netpoll", napi_thread_entry) {
         klog_info!(
             "virtio-net: failed to spawn netpoll kernel thread ({:?})",
@@ -1703,6 +1716,7 @@ fn virtio_net_probe(bound: &mut BoundDevice<'_>) -> Result<ProbeOutcome, PciProb
     // for `net_timer_process` cost and timer-driven work (ARP aging,
     // TCP retransmit, delayed-ACK, IP-reassembly expire) fires on its
     // own cadence regardless of NIC activity.
+    slopos_ostd::sync::kernel_io_task::register_kernel_io_stop(TIMER_WAKER.stop());
     if let Err(err) = slopos_ostd::spawn_kernel_io!("net-timer", net_timer_thread_entry) {
         klog_info!(
             "virtio-net: failed to spawn net-timer kernel thread ({:?})",

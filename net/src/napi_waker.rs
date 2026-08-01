@@ -35,7 +35,7 @@
 
 use core::sync::atomic::{AtomicBool, Ordering};
 
-use slopos_ostd::sync::WaitQueue;
+use slopos_ostd::sync::kernel_io_task::{KernelIoStop, KernelIoToken, KthreadWait};
 
 /// IRQ-safe edge-triggered wake primitive.
 ///
@@ -52,16 +52,32 @@ pub struct NapiWaker {
     armed: AtomicBool,
     /// The kthread parks here. `wait_event_*` is documented to be
     /// safe to nest with `wake_*` from IRQ context.
-    wq: WaitQueue,
+    stop: KernelIoStop,
 }
 
 impl NapiWaker {
-    /// `const`-fn constructor so this type can live in a `static`.
-    pub const fn new() -> Self {
+    /// `const`-fn constructor so this type can live in a `static`. `name`
+    /// identifies the parked thread in the shutdown report.
+    pub const fn new(name: &'static str) -> Self {
         Self {
             armed: AtomicBool::new(false),
-            wq: WaitQueue::new(),
+            stop: KernelIoStop::new(name),
         }
+    }
+
+    /// The stop signal this waker parks on. Register it so shutdown can reach
+    /// the thread.
+    #[inline]
+    pub const fn stop(&self) -> &KernelIoStop {
+        &self.stop
+    }
+
+    /// Consume one armed edge, if there is one.
+    #[inline]
+    fn consume_edge(&self) -> bool {
+        self.armed
+            .compare_exchange(true, false, Ordering::AcqRel, Ordering::Acquire)
+            .is_ok()
     }
 
     /// **IRQ-safe.** Set the armed flag with `Release` and wake every
@@ -74,39 +90,21 @@ impl NapiWaker {
     #[inline]
     pub fn arm_and_wake(&self) {
         self.armed.store(true, Ordering::Release);
-        let _ = self.wq.wake_all();
+        let _ = self.stop.queue().wake_all();
     }
 
-    /// Park the calling kthread until an [`arm_and_wake`] runs.
-    /// Returns when the armed flag is observed true; the predicate
-    /// atomically consumes the edge so reentrancy with another
-    /// [`arm_and_wake`] mid-wake re-arms naturally.
-    pub fn wait(&self) {
-        // A kernel task is neither killable nor signallable, and this park has
-        // no deadline, so the armed edge is the only way out.
-        let _ = self.wq.wait_event(|| {
-            self.armed
-                .compare_exchange(true, false, Ordering::AcqRel, Ordering::Acquire)
-                .is_ok()
-        });
+    /// Park the calling kthread until an [`arm_and_wake`] runs or a stop is
+    /// requested. The predicate atomically consumes the edge, so reentrancy
+    /// with another [`arm_and_wake`] mid-wake re-arms naturally.
+    pub fn wait(&self, token: &KernelIoToken<'_>) -> KthreadWait {
+        token.park(&self.stop, || self.consume_edge())
     }
 
-    /// Park for at most `timeout_ms` milliseconds. Returns `true` if
-    /// the predicate fired (armed edge consumed), `false` on
-    /// timeout. Used by the net-timer kthread which needs to wake
-    /// either on `arm_and_wake` (a sooner deadline was scheduled) or
-    /// on its computed next-deadline-ms timeout.
-    pub fn wait_timeout_ms(&self, timeout_ms: u32) -> bool {
-        self.wq
-            .wait_event_timeout(
-                || {
-                    self.armed
-                        .compare_exchange(true, false, Ordering::AcqRel, Ordering::Acquire)
-                        .is_ok()
-                },
-                timeout_ms as u64,
-            )
-            .is_ok()
+    /// Park for at most `timeout_ms` milliseconds. Used by the net-timer
+    /// kthread, which wakes either on `arm_and_wake` (a sooner deadline was
+    /// scheduled) or on its computed next-deadline-ms timeout.
+    pub fn wait_timeout_ms(&self, token: &KernelIoToken<'_>, timeout_ms: u32) -> KthreadWait {
+        token.park_timeout(&self.stop, || self.consume_edge(), timeout_ms as u64)
     }
 
     /// Force-arm without waking. Used after a post-burst recheck
@@ -117,10 +115,12 @@ impl NapiWaker {
     pub fn rearm(&self) {
         self.armed.store(true, Ordering::Release);
     }
-}
 
-impl Default for NapiWaker {
-    fn default() -> Self {
-        Self::new()
+    /// See [`consume_edge`](Self::consume_edge). Lets a test observe the
+    /// armed-edge handoff without a [`KernelIoToken`], which only the kthread
+    /// spawn trampoline can mint.
+    #[cfg(feature = "test-hooks")]
+    pub fn consume_edge_for_test(&self) -> bool {
+        self.consume_edge()
     }
 }

@@ -226,3 +226,217 @@ macro_rules! spawn_kernel_io {
         )
     }};
 }
+
+// ---------------------------------------------------------------------------
+// Cooperative stop
+// ---------------------------------------------------------------------------
+
+use crate::sync::spin::SpinLock;
+use crate::sync::wait_queue::WaitQueue;
+use core::sync::atomic::AtomicBool;
+
+/// Cooperative stop signal for one kernel-I/O thread.
+///
+/// Kernel tasks are structurally excluded from signals, and the resources
+/// these threads drive — a NIC's RX path, a touchpad's interrupt line, an
+/// ext2 writeback cache — outlive any one user process, so they are not
+/// killable. What they need instead is a stop they can *finish* on: the ext2
+/// flusher's last act is a full sync, which a kill semantic would discard.
+///
+/// The queue lives inside the token rather than beside it so the park and the
+/// stop-wake cannot drift into two objects that disagree about which queue is
+/// the live one.
+pub struct KernelIoStop {
+    name: &'static str,
+    requested: AtomicBool,
+    exited: AtomicBool,
+    wq: WaitQueue,
+}
+
+impl KernelIoStop {
+    pub const fn new(name: &'static str) -> Self {
+        Self {
+            name,
+            requested: AtomicBool::new(false),
+            exited: AtomicBool::new(false),
+            wq: WaitQueue::new(),
+        }
+    }
+
+    /// The thread's name, for the shutdown report.
+    #[inline]
+    pub const fn name(&self) -> &'static str {
+        self.name
+    }
+
+    /// The queue the thread parks on. Producers wake it to hand over work.
+    #[inline]
+    pub const fn queue(&self) -> &WaitQueue {
+        &self.wq
+    }
+
+    /// Whether a stop has been asked for.
+    #[inline]
+    pub fn requested(&self) -> bool {
+        self.requested.load(Ordering::Acquire)
+    }
+
+    /// Ask the thread to stop, and wake it so it notices.
+    ///
+    /// Fused for the same reason the kill flag is: the flag alone leaves a
+    /// parked thread that never re-evaluates it.
+    pub fn request(&self) {
+        self.requested.store(true, Ordering::Release);
+        let _ = self.wq.wake_all();
+    }
+
+    /// Called by the thread once its loop has ended and its final work is done.
+    #[inline]
+    pub fn note_exited(&self) {
+        self.exited.store(true, Ordering::Release);
+    }
+
+    /// Whether the thread has reported that it finished.
+    #[inline]
+    pub fn has_exited(&self) -> bool {
+        self.exited.load(Ordering::Acquire)
+    }
+}
+
+/// Why a kernel-I/O park ended.
+///
+/// `#[must_use]` so adding a stop to a thread turns each of its parks into a
+/// compile error until the `Stop` arm is written.
+#[must_use = "a kernel-I/O park that ignores Stop cannot be shut down"]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum KthreadWait {
+    /// The caller's condition held.
+    Ready,
+    /// The deadline elapsed, or there was no blocking surface.
+    Timeout,
+    /// A stop was requested. Finish what must be finished, then return.
+    Stop,
+}
+
+impl KernelIoToken<'_> {
+    /// Park until `condition` holds or a stop is requested.
+    ///
+    /// The stop probe is folded into the predicate so a `request` issued
+    /// between the caller's last check and the park is not lost: `request`
+    /// stores the flag before waking, and the predicate reads it under the
+    /// same queue-lock pairing the wait protocol already establishes.
+    pub fn park<F: FnMut() -> bool>(&self, stop: &KernelIoStop, mut condition: F) -> KthreadWait {
+        if stop.requested() {
+            return KthreadWait::Stop;
+        }
+        let outcome = stop.wq.wait_event(|| stop.requested() || condition());
+        Self::classify(stop, outcome.is_ok())
+    }
+
+    /// Park until `condition` holds, a stop is requested, or `timeout_ms`
+    /// elapses.
+    pub fn park_timeout<F: FnMut() -> bool>(
+        &self,
+        stop: &KernelIoStop,
+        mut condition: F,
+        timeout_ms: u64,
+    ) -> KthreadWait {
+        if stop.requested() {
+            return KthreadWait::Stop;
+        }
+        let outcome = stop
+            .wq
+            .wait_event_timeout(|| stop.requested() || condition(), timeout_ms);
+        Self::classify(stop, outcome.is_ok())
+    }
+
+    #[inline]
+    fn classify(stop: &KernelIoStop, satisfied: bool) -> KthreadWait {
+        if stop.requested() {
+            KthreadWait::Stop
+        } else if satisfied {
+            KthreadWait::Ready
+        } else {
+            KthreadWait::Timeout
+        }
+    }
+}
+
+/// Every kernel-I/O thread that can be asked to stop.
+///
+/// A fixed array rather than a linker registry: the set is small, known at
+/// boot, and a registry would put a new section in `link.ld` for four entries.
+const MAX_KERNEL_IO_STOPS: usize = 8;
+
+struct StopRegistry {
+    entries: [Option<&'static KernelIoStop>; MAX_KERNEL_IO_STOPS],
+    count: usize,
+}
+
+static STOP_REGISTRY: SpinLock<StopRegistry> = SpinLock::new(
+    StopRegistry {
+        entries: [None; MAX_KERNEL_IO_STOPS],
+        count: 0,
+    },
+    crate::sync::lock_tracking::LOCK_LEVEL_REGISTRY,
+);
+
+/// Make `stop` visible to [`request_kernel_io_stop_all`]. A thread that never
+/// registers simply cannot be asked to stop, which shutdown reports by name.
+pub fn register_kernel_io_stop(stop: &'static KernelIoStop) {
+    let mut registry = STOP_REGISTRY.lock();
+    if registry.count >= MAX_KERNEL_IO_STOPS {
+        crate::klog_info!(
+            "kernel-io: stop registry full, '{}' cannot be stopped",
+            stop.name()
+        );
+        return;
+    }
+    let idx = registry.count;
+    registry.entries[idx] = Some(stop);
+    registry.count += 1;
+}
+
+/// Ask every registered kernel-I/O thread to stop, in reverse registration
+/// order so a later thread that feeds an earlier one drains first. Returns how
+/// many were asked.
+///
+/// Only asks. The caller owns the bounded wait, because waiting needs a
+/// scheduler and this crate sits below it.
+pub fn request_kernel_io_stop_all() -> usize {
+    let stops = {
+        let registry = STOP_REGISTRY.lock();
+        let mut copy: [Option<&'static KernelIoStop>; MAX_KERNEL_IO_STOPS] =
+            [None; MAX_KERNEL_IO_STOPS];
+        copy[..registry.count].copy_from_slice(&registry.entries[..registry.count]);
+        copy
+    };
+    let mut asked = 0usize;
+    for stop in stops.iter().rev().flatten() {
+        stop.request();
+        asked += 1;
+    }
+    asked
+}
+
+/// Registered kernel-I/O threads that have not yet reported that they
+/// finished. Zero means every one of them ran its own exit path.
+pub fn kernel_io_stops_pending() -> usize {
+    let registry = STOP_REGISTRY.lock();
+    registry.entries[..registry.count]
+        .iter()
+        .flatten()
+        .filter(|stop| !stop.has_exited())
+        .count()
+}
+
+/// Names of the kernel-I/O threads that have not finished, for the shutdown
+/// report. Calls `report` once per outstanding thread.
+pub fn for_each_unstopped_kernel_io(mut report: impl FnMut(&'static str)) {
+    let registry = STOP_REGISTRY.lock();
+    for stop in registry.entries[..registry.count].iter().flatten() {
+        if !stop.has_exited() {
+            report(stop.name());
+        }
+    }
+}

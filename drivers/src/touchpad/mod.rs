@@ -23,8 +23,10 @@ use core::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 
 use slopos_acpi::aml::{self, AcpiI2cHid, HhdmHost};
 use slopos_acpi::tables::AcpiTables;
-use slopos_ostd::sync::kernel_io_task::{Deadline, KernelIoToken, yield_with_deadline};
-use slopos_ostd::sync::{LOCK_LEVEL_RESOURCE, OnceLock, SpinLock, WaitQueue};
+use slopos_ostd::sync::kernel_io_task::{
+    Deadline, KernelIoStop, KernelIoToken, KthreadWait, yield_with_deadline,
+};
+use slopos_ostd::sync::{LOCK_LEVEL_RESOURCE, OnceLock, SpinLock};
 use slopos_ostd::{KArc, klog_info, klog_warn};
 
 use crate::hpet;
@@ -156,30 +158,31 @@ const GPIO_DEFAULT_GSI: u32 = 14;
 /// `WaitQueue::wake_*` is IRQ-safe; the armed flag closes the wake/park race.
 struct TouchpadWaker {
     armed: AtomicBool,
-    wq: WaitQueue,
+    stop: KernelIoStop,
 }
 
 impl TouchpadWaker {
     const fn new() -> Self {
         Self {
             armed: AtomicBool::new(false),
-            wq: WaitQueue::new(),
+            stop: KernelIoStop::new("touchpad-irq"),
         }
+    }
+    const fn stop(&self) -> &KernelIoStop {
+        &self.stop
     }
     /// IRQ-context: arm the edge and wake the drain thread.
     fn arm_and_wake(&self) {
         self.armed.store(true, Ordering::Release);
-        let _ = self.wq.wake_all();
+        let _ = self.stop.queue().wake_all();
     }
-    /// Park until armed; consumes one edge.
-    fn wait(&self) {
-        // A kernel task is neither killable nor signallable, and this park has
-        // no deadline, so the armed edge is the only way out.
-        let _ = self.wq.wait_event(|| {
+    /// Park until armed or a stop is requested; consumes one edge.
+    fn wait(&self, token: &KernelIoToken<'_>) -> KthreadWait {
+        token.park(&self.stop, || {
             self.armed
                 .compare_exchange(true, false, Ordering::AcqRel, Ordering::Acquire)
                 .is_ok()
-        });
+        })
     }
 }
 
@@ -213,6 +216,7 @@ fn try_interrupt_mode(found: &AcpiI2cHid, force_poll: bool) -> bool {
         );
         return false;
     }
+    slopos_ostd::sync::kernel_io_task::register_kernel_io_stop(TOUCHPAD_WAKER.stop());
     if let Err(e) = slopos_ostd::spawn_kernel_io!("touchpad-irq", irq_thread) {
         klog_warn!("touchpad: failed to spawn irq thread: {:?}; polling", e);
         return false;
@@ -281,11 +285,13 @@ fn register_cascade(gsi: u32, edge: bool, active_low: bool) -> bool {
 /// Interrupt drain thread: park until the GPIO ISR signals, read every
 /// pending input report (which de-asserts the device's DRDY line), then
 /// re-enable the pad interrupt.
-fn irq_thread(_token: KernelIoToken<'static>) {
+fn irq_thread(token: KernelIoToken<'static>) {
     let mut buf = [0u8; 256];
     let mut first_report = true;
     loop {
-        TOUCHPAD_WAKER.wait();
+        if TOUCHPAD_WAKER.wait(&token) == KthreadWait::Stop {
+            break;
+        }
         if let Some(rt) = TOUCHPAD.get() {
             loop {
                 match rt.hid.read_input_report(&mut buf) {
@@ -315,6 +321,11 @@ fn irq_thread(_token: KernelIoToken<'static>) {
         }
         pinctrl::pad_irq_unmask();
     }
+    // Leave the pad masked: `mem::forget` on the IRQ handle keeps the line
+    // configured, so a late GPIO edge would otherwise wake a thread that is
+    // gone and leave the interrupt asserted with nobody to drain it.
+    pinctrl::pad_irq_mask();
+    TOUCHPAD_WAKER.stop().note_exited();
 }
 
 /// Update cursor bounds after a resolution change.

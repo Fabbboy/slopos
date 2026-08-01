@@ -71,15 +71,24 @@ pub fn test_napi_budget_limiting() -> TestResult {
 /// in that window would lose the wake-up.
 pub fn test_napi_waker_rearm_short_circuits() -> TestResult {
     use crate::napi_waker::NapiWaker;
-    static WAKER: NapiWaker = NapiWaker::new();
+    static WAKER: NapiWaker = NapiWaker::new("test-waker");
     WAKER.rearm();
-    // The wait predicate consumes the armed flag on success; if
-    // rearm worked, the wait returns without blocking.
-    WAKER.wait();
-    // Second wait would block forever — instead, arm and wake from
-    // here (mimicking IRQ) and verify the same.
+    // The park predicate consumes the armed flag, so an edge left by `rearm`
+    // is what makes the next park return without blocking.
+    assert_test!(
+        WAKER.consume_edge_for_test(),
+        "rearm must leave an edge to consume"
+    );
+    assert_test!(
+        !WAKER.consume_edge_for_test(),
+        "an armed edge is consumed exactly once"
+    );
+    // The IRQ path arms the same flag.
     WAKER.arm_and_wake();
-    WAKER.wait();
+    assert_test!(
+        WAKER.consume_edge_for_test(),
+        "arm_and_wake must leave an edge to consume"
+    );
     pass!()
 }
 

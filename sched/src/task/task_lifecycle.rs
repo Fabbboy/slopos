@@ -1207,6 +1207,45 @@ fn refresh_num_tasks_after_shutdown() {
     });
 }
 
+/// How long shutdown gives the kernel-I/O threads to finish, and how long it
+/// yields between checks. A thread that has not stopped by then is torn down
+/// with everything else and named in the log.
+const KERNEL_IO_JOIN_MS: u64 = 250;
+
+/// Ask every kernel-I/O thread to stop and wait, bounded, for it to say it
+/// finished.
+///
+/// A step of kernel shutdown rather than of the task sweep: it must run while
+/// every CPU is still scheduling, because a thread parked on a paused CPU
+/// cannot reach its own exit point — and its last act is the one that matters,
+/// the ext2 flusher's final sync being what puts dirty blocks on the device.
+/// The task sweep also runs per test scope, where stopping the machine's
+/// service threads would be both wrong and slow.
+pub fn stop_kernel_io_tasks() {
+    use slopos_ostd::sync::kernel_io_task::{
+        for_each_unstopped_kernel_io, kernel_io_stops_pending, request_kernel_io_stop_all,
+    };
+
+    if request_kernel_io_stop_all() == 0 {
+        return;
+    }
+
+    let deadline =
+        slopos_kernel_services::platform::get_time_ms().saturating_add(KERNEL_IO_JOIN_MS);
+    while kernel_io_stops_pending() > 0 {
+        if slopos_kernel_services::platform::get_time_ms() >= deadline {
+            break;
+        }
+        crate::scheduler::yield_();
+    }
+
+    // Naming the stragglers is the point: this log line is the list of threads
+    // whose park is not stop-aware, which is otherwise invisible.
+    for_each_unstopped_kernel_io(|name| {
+        klog_info!("SCHED: kernel-io task '{}' did not stop in time", name);
+    });
+}
+
 pub fn task_shutdown_all() -> c_int {
     // A pause that cannot be taken is reported and stepped over rather than
     // propagated: the two callers are kernel shutdown, where refusing to tear

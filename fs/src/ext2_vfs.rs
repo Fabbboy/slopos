@@ -1,12 +1,11 @@
-use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use core::sync::atomic::{AtomicUsize, Ordering};
 
 use crate::blockdev::BlockDevice;
 use crate::ext2::cache::BlockCache;
 use crate::ext2::{Ext2Error, Ext2Fs, Ext2Inode, Ext2Superblock};
 use crate::vfs::{FileStat, FileSystem, FileType, InodeId, VfsError, VfsResult};
 use slopos_ostd::KBox;
-use slopos_ostd::sync::kernel_io_task::KernelIoToken;
-use slopos_ostd::sync::wait_queue::WaitQueue;
+use slopos_ostd::sync::kernel_io_task::{KernelIoStop, KernelIoToken, KthreadWait};
 use slopos_ostd::sync::{InitFlag, Mutex};
 
 const EXT2_ROOT_INODE: u32 = 2;
@@ -55,11 +54,10 @@ static EXT2_VFS_INIT: InitFlag = InitFlag::new();
 
 /// Best-effort count of dirty cache blocks awaiting writeback, published by
 /// each mutating op and the flusher. The flusher's wait predicate reads only
-/// this (and `FLUSH_SHUTDOWN`) — it performs no I/O and takes no lock, so it
-/// stays a pure observer (`check_wait_predicate_purity.sh`).
+/// this and the stop flag — it performs no I/O and takes no lock, so it stays
+/// a pure observer.
 static DIRTY_PENDING: AtomicUsize = AtomicUsize::new(0);
-static FLUSH_SHUTDOWN: AtomicBool = AtomicBool::new(false);
-static FLUSH_WQ: WaitQueue = WaitQueue::new();
+static FLUSH_STOP: KernelIoStop = KernelIoStop::new("ext2-flush");
 static FLUSH_THREAD_STARTED: InitFlag = InitFlag::new();
 
 /// Periodic writeback cadence — analog of Linux `dirty_writeback_centisecs`
@@ -133,7 +131,7 @@ impl StaticExt2Vfs {
 fn note_dirty(dirty: usize) {
     DIRTY_PENDING.store(dirty, Ordering::Relaxed);
     if dirty >= FLUSH_EAGER_THRESHOLD {
-        FLUSH_WQ.wake_one();
+        FLUSH_STOP.queue().wake_one();
     }
 }
 
@@ -356,8 +354,7 @@ pub fn ext2_vfs_sync() -> VfsResult<()> {
 /// while interrupts are still enabled (the virtio-blk completion path needs
 /// IRQs) — see `boot::shutdown::kernel_shutdown`. Best-effort.
 pub fn ext2_vfs_shutdown_sync() {
-    FLUSH_SHUTDOWN.store(true, Ordering::Relaxed);
-    FLUSH_WQ.wake_all();
+    FLUSH_STOP.request();
     let _ = ext2_vfs_sync();
 }
 
@@ -365,6 +362,7 @@ fn start_flusher() {
     if !FLUSH_THREAD_STARTED.init_once() {
         return;
     }
+    slopos_ostd::sync::kernel_io_task::register_kernel_io_stop(&FLUSH_STOP);
     if slopos_ostd::spawn_kernel_io!("ext2-flush", ext2_flusher_entry).is_err() {
         // Roll back so a later mount attempt can retry the spawn; durability
         // is unaffected (eviction/sync/shutdown still persist).
@@ -387,35 +385,34 @@ fn start_flusher() {
 /// exponentially ([`FLUSH_BACKOFF_MIN_MS`] → [`FLUSH_BACKOFF_MAX_MS`]),
 /// ignoring dirty-counter wakes until the backoff sleep elapses (cf. Linux
 /// writeback's congestion backoff).
-fn ext2_flusher_entry(_token: KernelIoToken<'static>) {
+fn ext2_flusher_entry(token: KernelIoToken<'static>) {
     let mut backoff_ms: u64 = 0;
     loop {
-        if backoff_ms > 0 {
-            // The flag re-read below ends this loop, not the wait outcome: an
-            // early wake and an elapsed deadline both mean "look again", and a
-            // kernel task is neither killable nor signallable.
-            let _ =
-                FLUSH_WQ.wait_event_timeout(|| FLUSH_SHUTDOWN.load(Ordering::Relaxed), backoff_ms);
+        // A backoff pass ignores the dirty counter: the device just failed a
+        // write, so a dirty block is not a reason to try again sooner.
+        let waited = if backoff_ms > 0 {
+            token.park_timeout(&FLUSH_STOP, || false, backoff_ms)
         } else {
-            let _ = FLUSH_WQ.wait_event_timeout(
-                || {
-                    DIRTY_PENDING.load(Ordering::Relaxed) > 0
-                        || FLUSH_SHUTDOWN.load(Ordering::Relaxed)
-                },
+            token.park_timeout(
+                &FLUSH_STOP,
+                || DIRTY_PENDING.load(Ordering::Relaxed) > 0,
                 FLUSH_INTERVAL_MS,
-            );
-        }
-        let shutting_down = FLUSH_SHUTDOWN.load(Ordering::Relaxed);
+            )
+        };
+
+        // One last sync either way, and on the stop path it is the whole point:
+        // dirty blocks that never reach the device are lost.
         let result = ext2_vfs_sync();
         backoff_ms = if result.is_err() {
             (backoff_ms * 2).clamp(FLUSH_BACKOFF_MIN_MS, FLUSH_BACKOFF_MAX_MS)
         } else {
             0
         };
-        if shutting_down {
+        if waited == KthreadWait::Stop {
             break;
         }
     }
+    FLUSH_STOP.note_exited();
 }
 
 pub fn ext2_vfs_is_initialized() -> bool {

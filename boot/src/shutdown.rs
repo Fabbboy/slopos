@@ -23,7 +23,7 @@ use slopos_mm::page_alloc::{page_allocator_paint_all, pcp_drain_all};
 use slopos_mm::stack_region::KstackRegion;
 use slopos_mm::stack_va::pcp_drain_all as stack_pcp_drain_all;
 use slopos_sched::scheduler::scheduler_shutdown;
-use slopos_sched::task::task_shutdown_all;
+use slopos_sched::task::{stop_kernel_io_tasks, task_shutdown_all};
 
 fn serial_flush() {
     ostd_power::drain_serial_tx(|| cpu::pause(), 1024);
@@ -162,6 +162,11 @@ pub fn kernel_shutdown(reason: *const c_char) -> ! {
     // waits on synchronous cross-CPU TLB drains. Running that with interrupts
     // off is the slab/buddy deadlock, and `Task`'s destructor asserts against
     // it rather than hanging.
+    // Before the task sweep and before the APs park: a thread parked on a
+    // paused CPU never reaches its own exit point, and these threads have work
+    // to finish on the way out.
+    stop_kernel_io_tasks();
+
     if task_shutdown_all() != 0 {
         klog_info!("Warning: Failed to terminate one or more tasks");
     }
