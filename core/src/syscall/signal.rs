@@ -3,7 +3,7 @@ use core::sync::atomic::Ordering;
 use slopos_abi::Errno;
 use slopos_abi::signal::{
     NSIG, SA_NODEFER, SIG_DFL, SIG_IGN, SIG_SETMASK, SIG_UNBLOCK, SIG_UNCATCHABLE, SIGKILL,
-    SigDefault, SigSet, SignalFrame, UserSigaction, sig_bit, sig_default_action,
+    SIGNAL_MASK, SigDefault, SigSet, SignalFrame, UserSigaction, sig_bit, sig_default_action,
 };
 use slopos_abi::task::{INVALID_TASK_ID, TASK_FLAG_USER_MODE, TaskExitReason, TaskFaultReason};
 use slopos_mm::user_copy::{
@@ -508,7 +508,7 @@ fn claim_pending_signal(task_ref: &Task) -> SignalDisposition {
     }
 
     let pending = task_ref.signal_pending.load(Ordering::Acquire);
-    let deliverable = pending & !task_ref.signal_blocked();
+    let deliverable = pending & SIGNAL_MASK & !task_ref.signal_blocked();
     if deliverable == 0 {
         return SignalDisposition::Done;
     }

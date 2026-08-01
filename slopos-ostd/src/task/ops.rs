@@ -17,7 +17,7 @@
 
 use crate::sync::BUS;
 use slopos_abi::event::{KernelEvent, TaskSlot};
-use slopos_abi::signal::{NSIG, SIG_DFL, SIG_IGN, SigSet, sig_bit};
+use slopos_abi::signal::{NSIG, SIG_DFL, SIG_IGN, SIGNAL_MASK, SigSet, sig_bit};
 
 use crate::task::kernel_task::TaskInner;
 
@@ -232,5 +232,5 @@ pub fn task_clone_from<K, U>(dest: &mut TaskInner<K, U>, other: &TaskInner<K, U>
 /// i.e. there is at least one deliverable signal.
 #[inline]
 pub fn task_has_deliverable_signal<K, U>(task: &TaskInner<K, U>) -> bool {
-    (task.signal_pending() & !task.signal_blocked()) != 0
+    (task.signal_pending() & SIGNAL_MASK & !task.signal_blocked()) != 0
 }

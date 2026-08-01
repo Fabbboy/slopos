@@ -6367,3 +6367,80 @@ slopos_testing::stest!(
     name = test_set_cpu_affinity_rejects_other_process,
     suite = syscall_valid
 );
+
+/// A kernel-private pending bit is invisible to signal delivery, and no public
+/// writer can disturb it.
+///
+/// `claim_pending_signal` derives `signum` from the lowest deliverable bit and
+/// then indexes a `[SignalActionCell; NSIG]` with `signum - 1`. An unmasked bit
+/// at or above `NSIG` yields `signum = NSIG + 1`, for which `sig_bit` returns
+/// 0 — so the clearing `fetch_and(!0)` is a no-op and the bit re-delivers
+/// forever — and the index is one past the end of that table.
+pub fn test_kernel_private_pending_bit_is_not_a_signal() -> TestResult {
+    let _fixture = SyscallFixture::new();
+
+    let task_id = create_test_user_task();
+    assert_test!(task_id != INVALID_TASK_ID, "failed to create user task");
+    let task_guard = assert_some!(task_find_by_id(task_id), "task lookup failed");
+    let pid = task_guard.process_id;
+
+    let private_bit: SigSet = 1u64 << NSIG;
+    task_guard
+        .signal_pending
+        .fetch_or(private_bit, core::sync::atomic::Ordering::AcqRel);
+
+    assert_test!(
+        !task::task_has_deliverable_signal(&*task_guard),
+        "a kernel-private bit must not read as a deliverable signal"
+    );
+
+    let original_rip = 0x5000_8765u64;
+    let mut user_frame: KBox<UserContext> = KBox::zeroed().expect("alloc");
+    user_frame.regs_mut().rip = original_rip;
+    deliver_pending_signal_as_current(task_id, pid, &user_frame);
+    assert_eq_test!(
+        user_frame.rip(),
+        original_rip,
+        "a kernel-private bit must not redirect RIP"
+    );
+    assert_eq_test!(
+        task_guard.signal_pending() & private_bit,
+        private_bit,
+        "delivery must leave a kernel-private bit set"
+    );
+    let state = task_guard.status();
+    assert_test!(
+        state != TaskStatus::Zombie && state != TaskStatus::Terminated,
+        "a kernel-private bit must not terminate the target"
+    );
+
+    // The public writers own the signal range only.
+    task_guard.set_signal_pending(0);
+    assert_eq_test!(
+        task_guard.signal_pending(),
+        private_bit,
+        "set_signal_pending must preserve kernel-private bits"
+    );
+    task_guard.clear_signal_pending(private_bit);
+    assert_eq_test!(
+        task_guard.signal_pending(),
+        private_bit,
+        "clear_signal_pending must not reach kernel-private bits"
+    );
+    task_guard
+        .signal_pending
+        .fetch_and(!private_bit, core::sync::atomic::Ordering::AcqRel);
+    assert_test!(
+        task_guard.raise_signal_pending(private_bit) & private_bit == 0
+            && task_guard.signal_pending() & private_bit == 0,
+        "raise_signal_pending must not reach kernel-private bits"
+    );
+
+    task_terminate(task_id);
+    pass!()
+}
+
+slopos_testing::stest!(
+    name = test_kernel_private_pending_bit_is_not_a_signal,
+    suite = syscall_signal
+);

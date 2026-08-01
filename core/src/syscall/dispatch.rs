@@ -1,7 +1,7 @@
 use core::sync::atomic::Ordering;
 
 use slopos_abi::Errno;
-use slopos_abi::signal::{SA_RESTART, SIG_DFL, SIG_IGN};
+use slopos_abi::signal::{SA_RESTART, SIG_DFL, SIG_IGN, SIGNAL_MASK};
 use slopos_abi::syscall::ERRNO_ERESTARTSYS;
 use slopos_abi::task::TASK_FLAG_USER_MODE;
 use slopos_ostd::klog_info;
@@ -91,7 +91,7 @@ fn handle_erestartsys(task_ref: &Task, user_ctx: &UserContext, sysno: u64) {
 
     let pending = task_ref.signal_pending.load(Ordering::Acquire);
     let blocked = task_ref.signal_blocked();
-    let deliverable = pending & !blocked;
+    let deliverable = pending & SIGNAL_MASK & !blocked;
     let (handler, flags) = if deliverable == 0 {
         (0u64, 0u64)
     } else {

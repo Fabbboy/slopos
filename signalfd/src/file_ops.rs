@@ -49,7 +49,7 @@ impl Drop for SignalfdBacking {
 /// Signals in `state.mask` currently pending for the owner task.
 fn pending_masked(state: &SignalfdState) -> u64 {
     task_find_by_id(state.owner_task_id)
-        .map(|task| task.signal_pending() & state.mask)
+        .map(|task| task.signal_pending() & slopos_abi::signal::SIGNAL_MASK & state.mask)
         .unwrap_or(0)
 }
 

@@ -35,7 +35,7 @@
 
 use core::sync::atomic::Ordering;
 
-use slopos_abi::signal::SigSet;
+use slopos_abi::signal::{SIGNAL_MASK, SigSet};
 use slopos_abi::task::{TaskExitReason, TaskFaultReason};
 
 use crate::sync::LinkError;
@@ -225,22 +225,42 @@ impl<K, U> TaskInner<K, U> {
         self.signal_pending.load(Ordering::Acquire)
     }
 
-    /// Overwrite the pending-signal bitmask.
+    /// Overwrite the signal portion of the pending bitmask.
+    ///
+    /// Bits outside [`SIGNAL_MASK`] are kernel-private and are preserved: this
+    /// is otherwise the one writer that could clear them wholesale.
     #[inline]
     pub fn set_signal_pending(&self, value: SigSet) {
-        self.signal_pending.store(value, Ordering::Release);
+        let want = value & SIGNAL_MASK;
+        let mut current = self.signal_pending.load(Ordering::Relaxed);
+        loop {
+            let next = (current & !SIGNAL_MASK) | want;
+            match self.signal_pending.compare_exchange_weak(
+                current,
+                next,
+                Ordering::AcqRel,
+                Ordering::Relaxed,
+            ) {
+                Ok(_) => return,
+                Err(observed) => current = observed,
+            }
+        }
     }
 
-    /// Clear `bits` from the pending set, returning the previous value.
+    /// Clear `bits` from the pending set, returning the previous value. Bits
+    /// outside [`SIGNAL_MASK`] are ignored.
     #[inline]
     pub fn clear_signal_pending(&self, bits: SigSet) -> SigSet {
-        self.signal_pending.fetch_and(!bits, Ordering::AcqRel)
+        self.signal_pending
+            .fetch_and(!(bits & SIGNAL_MASK), Ordering::AcqRel)
     }
 
-    /// Raise `bits` in the pending set, returning the previous value.
+    /// Raise `bits` in the pending set, returning the previous value. Bits
+    /// outside [`SIGNAL_MASK`] are ignored.
     #[inline]
     pub fn raise_signal_pending(&self, bits: SigSet) -> SigSet {
-        self.signal_pending.fetch_or(bits, Ordering::AcqRel)
+        self.signal_pending
+            .fetch_or(bits & SIGNAL_MASK, Ordering::AcqRel)
     }
 
     /// The handler registered for signal index `idx`, or `None` when out of

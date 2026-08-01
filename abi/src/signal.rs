@@ -86,6 +86,15 @@ pub const fn sig_bit(signum: u8) -> SigSet {
     }
 }
 
+/// Every bit `sig_bit` can produce: signals `1..=NSIG` occupy bits `0..NSIG`.
+///
+/// Bits at and above `NSIG` are reserved for kernel-private state and must be
+/// masked off before any code derives a signal number from a pending set. An
+/// unmasked one yields `signum = NSIG + 1`, for which [`sig_bit`] returns 0 —
+/// so the clearing `fetch_and(!0)` is a no-op and the bit re-delivers forever —
+/// and then indexes one past the end of a `[_; NSIG]` action table.
+pub const SIGNAL_MASK: SigSet = (1u64 << NSIG) - 1;
+
 /// Signals that cannot be caught, blocked, or ignored.
 pub const SIG_UNCATCHABLE: SigSet = sig_bit(SIGKILL) | sig_bit(SIGSTOP);
 

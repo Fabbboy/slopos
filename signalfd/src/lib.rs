@@ -28,7 +28,9 @@ use slopos_abi::Errno;
 pub fn signalfd_create(process_id: u32, owner_task_id: u32, mask: u64) -> i32 {
     let Some(raw_handle) = registry::insert(registry::SignalfdState {
         owner_task_id,
-        mask,
+        // `mask` is user-supplied. Bits outside the signal range name
+        // kernel-private state, which a signalfd must never observe or drain.
+        mask: mask & slopos_abi::signal::SIGNAL_MASK,
     }) else {
         return Errno::ENOMEM.raw();
     };
