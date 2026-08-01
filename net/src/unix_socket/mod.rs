@@ -38,8 +38,8 @@ mod slot;
 use slopos_abi::event::{KernelEvent, UnixSocketSlot};
 use slopos_abi::syscall::{POLLHUP, POLLIN, POLLOUT};
 use slopos_ostd::handle::HandleTable;
-use slopos_ostd::sync::{BUS, LOCK_LEVEL_REGISTRY, LOCK_LEVEL_RESOURCE, SpinLock};
-use slopos_ostd::{KBTreeMap, KVec, KVecDeque};
+use slopos_ostd::sync::{BUS, LOCK_LEVEL_REGISTRY, SpinLock};
+use slopos_ostd::{KVec, KVecDeque};
 
 use pair::{PairSide, PairTable};
 use slopos_fs::FileRef;
@@ -643,15 +643,9 @@ pub fn unix_sendmsg(handle: SocketHandle, data: &[u8], files: &mut KVec<FileRef>
                 return -11; // EAGAIN
             }
             Err(false) => {
-                // Block until peer drains, slot reuses, or peer closes.
-                // Move the files into the per-task custodian for exactly
-                // the duration of the park: a task killed while blocked
-                // never unwinds this stack, so anything owned here would
-                // leak — the custodian (or its task-death hook) is the
-                // owner until the wake moves them back for the next
-                // iteration's capacity check + atomic publish.
-                let task_id = slopos_kernel_services::driver_runtime::current_task_id();
-                inflight_park(task_id, files);
+                // Block until peer drains, slot reuses, or peer closes. The
+                // frame keeps the files across the park: an abort returns
+                // through here, and `files` belongs to the caller either way.
                 let waited = BUS.subscribe(unix_ev(wq_idx)).wait_event(|| {
                     let state = UNIX_STATE.lock();
                     match state.slots.get(handle.handle()) {
@@ -675,10 +669,6 @@ pub fn unix_sendmsg(handle: SocketHandle, data: &[u8], files: &mut KVec<FileRef>
                         },
                     }
                 });
-                // Unpark before anything else: the custodian owns the files
-                // for exactly the duration of the park, and an abort must not
-                // strand them there.
-                inflight_unpark(task_id, files);
                 if waited.is_err() {
                     return -4; // EINTR
                 }
@@ -737,67 +727,6 @@ pub fn unix_send_from(handle: SocketHandle, reader: &mut slopos_ostd::mm::VmRead
         BUS.publish(unix_ev(peer_idx));
     }
     n
-}
-
-// ── In-flight SCM_RIGHTS file custody across a blocking send ────────────────
-//
-// `unix_sendmsg` owns `FileRef` aliases until it commits them to the peer or
-// returns them to its caller. On the blocking path it parks in `wait_event`.
-// SlopOS tears a blocked task down asynchronously — its `schedule()` never
-// returns, so no stack cleanup runs — which would leak anything the parked
-// frame owned if the sender is SIGKILL'd while blocked.
-//
-// So the files are MOVED into this per-task custodian for exactly the
-// duration of the park (`inflight_park` before the wait, `inflight_unpark`
-// after it wakes): the parked frame owns nothing, and ownership is always in
-// exactly one place. On a normal wake the files move back for the next loop
-// iteration; if the sender dies while parked, `unix_inflight_cleanup_task`
-// (a task-termination hook) drops the custody entry, closing the aliases —
-// mirroring the poll/futex/waitpid teardown hooks.
-
-static SENDMSG_INFLIGHT: SpinLock<KBTreeMap<u32, KVec<FileRef>>> =
-    SpinLock::new(KBTreeMap::new(), LOCK_LEVEL_RESOURCE);
-
-fn inflight_park(task_id: u32, files: &mut KVec<FileRef>) {
-    if task_id == 0 || files.is_empty() {
-        return;
-    }
-    let held = core::mem::replace(files, KVec::new());
-    let stale = {
-        let mut map = SENDMSG_INFLIGHT.lock();
-        map.insert(task_id, held)
-    };
-    // A prior custody entry for this task would be a bug (a task can only be
-    // parked in one send at a time); dropping it here — outside the map lock —
-    // closes those aliases rather than leaking them.
-    drop(stale);
-}
-
-fn inflight_unpark(task_id: u32, files: &mut KVec<FileRef>) {
-    if task_id == 0 {
-        return;
-    }
-    let held = { SENDMSG_INFLIGHT.lock().remove(&task_id) };
-    if let Some(held) = held {
-        if files.is_empty() {
-            *files = held;
-        } else {
-            // Unreachable by construction (the park emptied the caller's
-            // vec); dropping `held` here would close live aliases, so keep
-            // the caller's view authoritative and drop the duplicates.
-            drop(held);
-        }
-    }
-}
-
-/// Task-termination hook: close any in-flight SCM_RIGHTS files a task was
-/// holding across a blocking `unix_sendmsg` when it died. Registered via
-/// `register_task_resource_cleanup_hook` at boot. No-op for tasks holding none.
-pub fn unix_inflight_cleanup_task(task_id: u32) {
-    let held = { SENDMSG_INFLIGHT.lock().remove(&task_id) };
-    // Dropped outside the map lock: closing an alias can recurse into
-    // arbitrary file teardown.
-    drop(held);
 }
 
 /// Drain this side's pending SCM_RIGHTS files: up to `max_fds` move into

@@ -17,8 +17,7 @@ use slopos_abi::ring::{
 use slopos_abi::syscall::{POLLERR, POLLHUP, POLLNVAL};
 
 use slopos_fs::fileio::{
-    FileRef, file_poll_clear_registrations, file_poll_fused_ref, file_poll_track_registrations,
-    file_poll_unfused_by_token, fileio_clone_file_ref,
+    FileRef, file_poll_fused_ref, file_poll_unfused_by_token, fileio_clone_file_ref,
 };
 use slopos_kernel_services::driver_runtime::{
     block_current_task_with_timeout, current_task_wait_aborted,
@@ -217,10 +216,9 @@ fn write_initial_region(
 
 /// `ring_enter(ring_fd, to_submit, min_complete, flags)` core
 /// (SLOPRING § 6.2). Returns the submission count (`>= 0`) or a negated
-/// errno. `pid` / `task_id` identify the calling task (the waiter).
+/// errno. `pid` identifies the calling process.
 pub fn ring_enter(
     pid: u32,
-    task_id: u32,
     raw_handle: usize,
     to_submit: u32,
     min_complete: u32,
@@ -247,7 +245,7 @@ pub fn ring_enter(
 
     // ---- Complete phase (block the caller; lock dropped while parked) ----
     if min_complete > 0 {
-        let rc = harvest(pid, task_id, raw_handle, min_complete);
+        let rc = harvest(pid, raw_handle, min_complete);
         // On signal with nothing submitted → EINTR; otherwise return the
         // submit count (never discard a submission — SLOPRING § 6.2).
         if rc == eno(Errno::EINTR) && n_submitted == 0 {
@@ -484,7 +482,7 @@ fn do_cancel(ring: &mut Ring, sqe: &Sqe) {
 /// `min_complete` CQEs are available, a signal arrives, or a deadline
 /// elapses (SLOPRING § 7.1, § 8.3). Returns 0 on progress, or
 /// `-EINTR` on signal.
-fn harvest(pid: u32, task_id: u32, raw_handle: usize, min_complete: u32) -> i32 {
+fn harvest(pid: u32, raw_handle: usize, min_complete: u32) -> i32 {
     loop {
         // Step 1: snapshot the distinct in-flight files (by reference
         // identity) + the nearest OP_TIMEOUT deadline under the lock (quick,
@@ -503,9 +501,6 @@ fn harvest(pid: u32, task_id: u32, raw_handle: usize, min_complete: u32) -> i32 
         // closes the lost-wakeup window: a producer that publishes after
         // this point has already enqueued our wait node).
         let tokens = register_files(&files);
-        if !tokens.is_empty() {
-            file_poll_track_registrations(task_id, tokens.as_slice());
-        }
 
         // Step 3: re-probe every in-flight row, post ready CQEs, and
         // check whether we now have enough. Retired rows are moved out to
@@ -517,13 +512,13 @@ fn harvest(pid: u32, task_id: u32, raw_handle: usize, min_complete: u32) -> i32 
         let (enough, reaped) = match step {
             Ok(v) => v,
             Err(_) => {
-                unregister(task_id, &tokens);
+                unregister(&tokens);
                 return eno(Errno::EBADF);
             }
         };
         drop(reaped);
         if enough {
-            unregister(task_id, &tokens);
+            unregister(&tokens);
             return 0;
         }
 
@@ -536,7 +531,7 @@ fn harvest(pid: u32, task_id: u32, raw_handle: usize, min_complete: u32) -> i32 
         // loop. (A timeout deadline elapsing is handled by the next
         // harvest_step posting -ETIME, which may then satisfy
         // min_complete.)
-        unregister(task_id, &tokens);
+        unregister(&tokens);
         if current_task_wait_aborted() {
             return eno(Errno::EINTR);
         }
@@ -544,12 +539,9 @@ fn harvest(pid: u32, task_id: u32, raw_handle: usize, min_complete: u32) -> i32 
 }
 
 /// Unregister the calling task from every queue it registered on.
-fn unregister(task_id: u32, tokens: &KVec<u64>) {
+fn unregister(tokens: &KVec<u64>) {
     for &tok in tokens.iter() {
         file_poll_unfused_by_token(tok);
-    }
-    if !tokens.is_empty() {
-        file_poll_clear_registrations(task_id);
     }
 }
 

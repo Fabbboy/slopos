@@ -57,14 +57,7 @@ define_syscall!(syscall_ring_enter
         return Err(Errno::EBADF);
     }
 
-    let rc = slopos_ring::ring_enter(
-        process_id,
-        task_id,
-        handle,
-        to_submit,
-        min_complete,
-        flags,
-    );
+    let rc = slopos_ring::ring_enter(process_id, handle, to_submit, min_complete, flags);
     if rc < 0 {
         return Err(Errno::from_raw(rc).unwrap_or(Errno::EINVAL));
     }

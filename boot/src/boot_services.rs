@@ -45,20 +45,6 @@ fn register_fs_hooks() {
     }
     slopos_fs::fileio_register_tty_ops(&slopos_drivers::tty_file_ops::TTY_FILE_OPS);
     slopos_fs::fileio_register_socket_ops(&slopos_net::socket_file_ops::SOCKET_FILE_OPS);
-
-    // Release any poll/select wait-queue references a task still holds when it
-    // dies. A task SIGKILL'd while blocked in poll() never runs its own
-    // unregister path, so without this its registered OpenFiles would keep an
-    // extra refcount forever and their backends (e.g. unix_close → peer EOF)
-    // would never fire. Tied to task termination, mirroring the futex cleanup.
-    slopos_sched::task::register_task_resource_cleanup_hook(slopos_fs::fileio_poll_cleanup_task);
-
-    // Release any in-flight SCM_RIGHTS fd refs a task was holding across a
-    // blocking unix_sendmsg() when it was killed. Same abandon-stack rationale
-    // as the poll hook above.
-    slopos_sched::task::register_task_resource_cleanup_hook(
-        slopos_net::unix_socket::unix_inflight_cleanup_task,
-    );
 }
 
 /// Bring up the RAM-resident root from a Limine-loaded initramfs (cpio) module.

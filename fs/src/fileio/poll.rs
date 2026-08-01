@@ -2,7 +2,7 @@ use core::ffi::c_int;
 use core::sync::atomic::{AtomicU64, Ordering};
 
 use slopos_ostd::sync::{LOCK_LEVEL_RESOURCE, SpinLock};
-use slopos_ostd::{KArc, KBTreeMap, KVec, KWeak};
+use slopos_ostd::{KArc, KBTreeMap, KWeak};
 
 use super::*;
 
@@ -178,67 +178,6 @@ pub fn file_poll_unfused_by_token(open_file_token: u64) {
     };
     if let Some(open_file) = weak.upgrade() {
         open_file.ops.poll_unwait(open_file.handle);
-    }
-}
-
-// ── Poll-registration leak guard (task-lifecycle teardown) ──────────────────
-//
-// `poll`/`select`/`ring` register fds on wait queues via `file_poll_fused` and
-// normally unregister via `file_poll_unfused_by_token` the moment the task wakes.
-// A task that is SIGKILL'd *while blocked* never resumes its syscall, so that
-// unregister is skipped and a stale wait-queue entry would linger. Every
-// outstanding registration token is recorded per-task here; the registered
-// cleanup hook (`fileio_poll_cleanup_task`) drains them during task
-// termination. Because the token only carries a `KWeak`, this is purely
-// wait-queue hygiene — it can never drive a refcount underflow or a premature
-// backing release.
-static POLL_REGISTRATIONS: SpinLock<KBTreeMap<u32, KVec<u64>>> =
-    SpinLock::new(KBTreeMap::new(), LOCK_LEVEL_RESOURCE);
-
-/// Record the set of registration tokens `task_id` holds for poll,
-/// replacing any previously-recorded set. Called immediately before the
-/// task blocks.
-pub fn file_poll_track_registrations(task_id: u32, tokens: &[u64]) {
-    let mut map = POLL_REGISTRATIONS.lock();
-    match map.get_mut(&task_id) {
-        Some(existing) => {
-            existing.clear();
-            let _ = existing.extend_from_slice(tokens);
-        }
-        None => {
-            if let Ok(mut v) = KVec::with_capacity(tokens.len()) {
-                let _ = v.extend_from_slice(tokens);
-                let _ = map.insert(task_id, v);
-            }
-        }
-    }
-}
-
-/// Clear `task_id`'s recorded registrations after the task has released
-/// them itself (the normal poll/select wake path). The (now-empty) entry
-/// is kept so its capacity is reused on the next poll iteration.
-pub fn file_poll_clear_registrations(task_id: u32) {
-    let mut map = POLL_REGISTRATIONS.lock();
-    if let Some(existing) = map.get_mut(&task_id) {
-        existing.clear();
-    }
-}
-
-/// Task-resource cleanup hook: unregister any poll tokens a dying task
-/// never got to release. Registered via `register_task_resource_cleanup_hook`
-/// at fs init. Safe to call for any task (no-op if it had none).
-pub fn fileio_poll_cleanup_task(task_id: u32) {
-    // Take the token list out under the tracker lock, then drop the lock
-    // before reaching into the registration table (RESOURCE) to keep the
-    // two locks from ever being held simultaneously.
-    let tokens = {
-        let mut map = POLL_REGISTRATIONS.lock();
-        map.remove(&task_id)
-    };
-    if let Some(tokens) = tokens {
-        for &token in tokens.iter() {
-            file_poll_unfused_by_token(token);
-        }
     }
 }
 
