@@ -119,7 +119,6 @@ fn panic_handler_for(vector: u8) -> ExceptionHandler {
     handler_tables::panic_for(vector).unwrap_or(exception_default_panic)
 }
 
-use slopos_core::syscall::syscall_handle;
 use slopos_drivers::apic::send_eoi;
 use slopos_mm::tlb;
 
@@ -388,79 +387,20 @@ fn nmi_watchdog_handler(frame: &slopos_arch::InterruptFrame) {
     panic!("NMI WATCHDOG: CPU {} not responding for >500ms", cpu_id);
 }
 
-fn handle_legacy_syscall(frame_ref: &mut slopos_arch::InterruptFrame, irq_nest: &mut IrqNestHold) {
-    // Legacy `int 0x80` syscall path. SlopOS userland uses the
-    // SYSCALL instruction (LSTAR -> `__ostd_user_return`) for every
-    // real syscall, so this trap is rarely taken in practice. We
-    // still bridge the InterruptFrame here onto a transient OSTD
-    // `UserContext` so any caller that does take this path observes
-    // identical syscall semantics.
-    use slopos_ostd::user::context::{FpuStateRef, UserContext, UserRegs};
-
-    let mut user_regs = UserRegs::default();
-    user_regs.r15 = frame_ref.r15;
-    user_regs.r14 = frame_ref.r14;
-    user_regs.r13 = frame_ref.r13;
-    user_regs.r12 = frame_ref.r12;
-    user_regs.r11 = frame_ref.r11;
-    user_regs.r10 = frame_ref.r10;
-    user_regs.r9 = frame_ref.r9;
-    user_regs.r8 = frame_ref.r8;
-    user_regs.rbp = frame_ref.rbp;
-    user_regs.rdi = frame_ref.rdi;
-    user_regs.rsi = frame_ref.rsi;
-    user_regs.rdx = frame_ref.rdx;
-    user_regs.rcx = frame_ref.rcx;
-    user_regs.rbx = frame_ref.rbx;
-    user_regs.rax = frame_ref.rax;
-    user_regs.rip = frame_ref.rip;
-    user_regs.rsp = frame_ref.rsp;
-    user_regs.rflags_user_subset = frame_ref.rflags;
-
-    let user_ctx = UserContext::new(user_regs, FpuStateRef::empty());
-    irq_nest.leave();
-    if slopos_ostd::panic_recovery::production_recovery_enabled() {
-        match slopos_ostd::panic_recovery::run_recoverable(|| {
-            syscall_handle(&user_ctx);
-        }) {
-            Ok(()) => {}
-            Err(oops) => {
-                klog_info!(
-                    "panic recovery: int80 task={} {}:{}:{}: {} (oops total={})",
-                    oops.task_id,
-                    oops.file.as_str(),
-                    oops.line,
-                    oops.column,
-                    oops.reason.as_str(),
-                    slopos_ostd::panic_recovery::oops_count(),
-                );
-                slopos_sched::scheduler::scheduler_task_exit_impl();
-            }
-        }
-    } else {
-        syscall_handle(&user_ctx);
-    }
-    irq_nest.reenter();
-
-    let new_regs = user_ctx.regs();
-    frame_ref.r15 = new_regs.r15;
-    frame_ref.r14 = new_regs.r14;
-    frame_ref.r13 = new_regs.r13;
-    frame_ref.r12 = new_regs.r12;
-    frame_ref.r11 = new_regs.r11;
-    frame_ref.r10 = new_regs.r10;
-    frame_ref.r9 = new_regs.r9;
-    frame_ref.r8 = new_regs.r8;
-    frame_ref.rbp = new_regs.rbp;
-    frame_ref.rdi = new_regs.rdi;
-    frame_ref.rsi = new_regs.rsi;
-    frame_ref.rdx = new_regs.rdx;
-    frame_ref.rcx = new_regs.rcx;
-    frame_ref.rbx = new_regs.rbx;
-    frame_ref.rax = new_regs.rax;
-    frame_ref.rip = new_regs.rip;
-    frame_ref.rsp = new_regs.rsp;
-    frame_ref.rflags = new_regs.rflags_user_subset;
+/// `int 0x80` is not a SlopOS syscall ABI.
+///
+/// Userland issues every syscall through the `SYSCALL` instruction, which
+/// enters via `LSTAR` -> `__ostd_user_return` and runs on the task's own
+/// persistent `UserContext`. This vector used to bridge the interrupt frame
+/// onto a transient one and re-run the syscall dispatcher behind a second copy
+/// of the panic-recovery policy — a copy free to drift from the real path, and
+/// one whose transient context carried no FPU state, so a signal delivered
+/// from it saved and restored the wrong register file.
+///
+/// The gate stays present and user-reachable so the trap is answered rather
+/// than escalating, but the answer is the truthful one.
+fn answer_legacy_syscall(frame_ref: &mut slopos_arch::InterruptFrame) {
+    frame_ref.rax = slopos_abi::syscall::ENOSYS_RETURN;
 }
 
 /// Implementation of common_exception_handler - called from FFI boundary
@@ -498,7 +438,7 @@ pub fn common_exception_handler_impl(frame: *mut slopos_arch::InterruptFrame) {
     }
 
     if vector == SYSCALL_VECTOR {
-        handle_legacy_syscall(frame_ref, &mut irq_nest);
+        answer_legacy_syscall(frame_ref);
         return;
     }
 
