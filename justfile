@@ -394,6 +394,7 @@ check-framekernel-gates:
     scripts/check_no_kernel_async.sh --self-test
     scripts/check_drop_panic_free.sh --self-test
     scripts/check_wait_predicate_purity.sh --self-test
+    scripts/check_wait_result_handling.sh --self-test
     scripts/check_kernel_pml4_writer.sh --self-test
     scripts/check_task_ownership.sh --self-test
     scripts/check_stack_sizes.sh --self-test
@@ -409,6 +410,7 @@ check-framekernel-gates:
     scripts/check_kernel_softfloat.sh --variant dev {{build_dir}}/kernel-dev.elf
     scripts/check_registry_sections.sh {{build_dir}}/kernel-dev.elf
     scripts/check_wait_predicate_purity.sh
+    scripts/check_wait_result_handling.sh
     scripts/check_task_ownership.sh
     scripts/check_safe_contract_surface.sh
     scripts/tcb_ratio.sh --max 1.0
