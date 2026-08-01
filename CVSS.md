@@ -39,7 +39,6 @@ python3 scripts/cvss_calc.py "CVSS:3.1/AV:L/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H"
 | [SLOPOS-2026-0022](#slopos-2026-0022) | 6.3 | MEDIUM | ramfs recycles inode ids immediately on unlink while descriptors still name them |
 | [SLOPOS-2026-0014](#slopos-2026-0014) | 5.9 | MEDIUM | TCP initial sequence numbers come from an invertible FNV chain |
 | [SLOPOS-2026-0040](#slopos-2026-0040) | 5.9 | MEDIUM | virtio-net's RX ring shrinks monotonically and never refills |
-| [SLOPOS-2026-0007](#slopos-2026-0007) | 5.5 | MEDIUM | Unvalidated XSAVE area in `rt_sigreturn` halts the machine |
 | [SLOPOS-2026-0016](#slopos-2026-0016) | 5.5 | MEDIUM | AF_UNIX SCM_RIGHTS has no cycle policy, permanently leaking socket slots |
 | [SLOPOS-2026-0029](#slopos-2026-0029) | 5.5 | MEDIUM | `klog` has no rate limiting and userland can drive it from a cli-held lock |
 | [SLOPOS-2026-0030](#slopos-2026-0030) | 5.5 | MEDIUM | Ready-queue selection is strict priority with no aging backstop |
@@ -71,29 +70,6 @@ These are **candidate CVE-style records** for internal tracking. They are not of
 - Impact: malformed-image-triggered out-of-bounds slice index. Because `fs/` is `#![forbid(unsafe_code)]`, this is a bounded-slice **panic** (DoS), never memory unsafety/UB.
 - CVSS vector/score: not assigned because confidence is below 80.
 - Remediation (proposed): validate `effective_inode_size() as u32 <= block_size` and bound each `within + size` against the containing block before slicing. Note that SLOPOS-2026-0043 covers the adjacent absence of a feature-compatibility gate on the same mount path.
-
-### SLOPOS-2026-0007
-- Title: Unvalidated XSAVE area in `rt_sigreturn` halts the machine
-- Status: open
-- Confidence: 95 — evidence 40 (every step read and quoted, from the syscall entry to the bare `xrstor64` asm), exploitability 30 (two syscalls, no precondition, no signal need ever be delivered), reproducibility 25 (deterministic; the exact fault depends on which reserved bit the CPU objects to first)
-- CVSS vector/score: `CVSS:3.1/AV:L/AC:L/PR:L/UI:N/S:U/C:N/I:N/A:H` — **5.5 MEDIUM**
-- Impact: `xrstor64` executes in ring 0 on an attacker-written buffer. A malformed XSTATE_BV/XCOMP_BV/MXCSR raises #GP, which has no fixup entry and routes to `exception_fatal` — the whole machine stops. Not memory corruption: XRSTOR targets the task's own fixed-size 2688-byte FpuState and writes only CPU registers.
-- Evidence:
-  - core/src/syscall/signal.rs:326-371 — `syscall_rt_sigreturn` reads the frame from the raw user `rsp` and then unconditionally calls `restore_fpu_from_sigframe(&current, rsp)` at :364-366; there is no cookie, magic, or 'a signal was actually delivered' check anywhere on this path
-  - core/src/syscall/signal.rs:306-324 — `restore_fpu_from_sigframe` does `copy_bytes_from_user(bytes, data)` into `&mut [u8; FPU_STATE_SIZE]` and then `current.task().fpu_restore_to_cpu(current, xcr0)`, with no inspection of the copied bytes
-  - slopos-ostd/src/task/kernel_task.rs:770-784 — `fpu_restore_to_cpu` goes straight to `fpu_xrstor(self.fpu_state.get_ptr(witness), xcr0_mask)`
-  - slopos-ostd/src/task/fpu.rs:161-175 — `fpu_xrstor` is `asm!("xrstor64 [{}]", ...)` with EDX:EAX = ACTIVE_XCR0 and no validation of XSTATE_BV / XCOMP_BV / reserved header bytes / MXCSR
-  - slopos-ostd/src/task/fpu.rs:19,35 — `FPU_STATE_SIZE = 2688`, `FpuState { data: [u8; 2688] }`, i.e. all 2688 bytes including the 64-byte XSTATE header at offset 512 come from user memory
-- Repro:
-```c
-void *p = mmap(NULL, 8192, PROT_READ|PROT_WRITE, MAP_ANON|MAP_PRIVATE, -1, 0);
-memset(p, 0xFF, 8192);
-asm volatile("mov %0, %%rsp; mov $105, %%eax; syscall" :: "r"(p));
-```
-`read_signal_frame` succeeds (the page is mapped and readable), the 2688-byte copy-in succeeds, and `fpu_xrstor` faults.
-- Remediation: Validate the XSAVE header before restoring, as Linux does in `copy_user_to_xstate`: reject reserved header bytes, XSTATE_BV bits outside the active XCR0, an XCOMP_BV that disagrees with the format in use, and reserved MXCSR bits. Add an exception-table fixup covering the `xrstor64` site so a #GP there becomes SIGSEGV to the task rather than a machine halt — Linux pairs the validation with `force_sig(SIGSEGV)` on failure.
-
-
 
 ### SLOPOS-2026-0011
 - Title: Half-open TCP connections are never reclaimed, so ~64 SYNs wedge the whole stack

@@ -8,7 +8,7 @@ use slopos_ostd::sync::BUS;
 use slopos_ostd::sync::PreemptGuard;
 
 use slopos_ostd::kdiag_timestamp;
-use slopos_ostd::klog_info;
+use slopos_ostd::{klog_info, klog_warn};
 
 use slopos_kernel_services::platform;
 
@@ -486,7 +486,18 @@ fn prepare_switch_to(
     // Safe wrapper: `&FpuState` keeps the buffer read-only borrowed;
     // XRSTOR64 only reads. Scheduler upholds Inv. 8 (no concurrent
     // mutator on another CPU).
-    next_window.task().fpu_restore_to_cpu(next_window, xcr0);
+    //
+    // A rejected image has already been repaired to the init state by the time
+    // this returns, so the switch completes either way. Continuing is the point:
+    // the CPU is mid-switch with interrupts off, and stopping here would be the
+    // machine-wide halt the fault-recoverable restore exists to prevent.
+    if !next_window.task().fpu_restore_to_cpu(next_window, xcr0) {
+        klog_warn!(
+            "SCHED: CPU {} rejected task {} FPU image; reset to init state",
+            cpu_id,
+            next.task_id
+        );
+    }
 }
 
 /// Validate that the idle task's switch_ctx has a sane RIP (in kernel .text)

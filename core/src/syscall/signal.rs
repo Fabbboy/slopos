@@ -329,32 +329,45 @@ fn save_fpu_to_sigframe(current: &slopos_sched::task_struct::Current, sigframe_a
     task.with_fpu_bytes_mut(current, |data| copy_bytes_to_user(bytes, data).is_ok())
 }
 
-/// Restore the FPU/vector state saved by [`save_fpu_to_sigframe`]. The
-/// copy-in and `xrstor` run under an IRQ-off critical section so a
-/// context switch cannot overwrite the task's `fpu_state` slot between
-/// the two steps (the scheduler also saves/restores that same slot).
-/// Returns false on a user-copy fault, leaving the prior FPU state.
+/// Copy the image written by [`save_fpu_to_sigframe`] back into the task's
+/// save area and check that `XRSTOR64` will accept it. Returns false on a
+/// user-copy fault or a malformed image.
+///
+/// The bytes land in the save area before they can be checked — the area is
+/// 2.6 KiB against a 2 KiB stack-frame ceiling, so it is borrowed in place
+/// rather than staged through a scratch buffer. Rejection therefore leaves the
+/// task owning a buffer it did not author, and the reset is what takes it back:
+/// no other kernel path should have to reason about whether a task's save area
+/// is attacker-supplied, and the guarantee costs one `write_bytes`.
+///
+/// It is not what keeps the *scheduler* safe. Reaching a restore of this slot
+/// means switching to this task, which means having switched away from it
+/// first, and switch-out saves the live registers over whatever is here.
+///
+/// `xcr0` comes from the caller rather than a second read, so the mask the
+/// image is validated against is the one it is then restored under.
 ///
 /// Takes the FPU area by reference for the same reason as
 /// [`save_fpu_to_sigframe`].
-fn restore_fpu_from_sigframe(
+fn stage_fpu_from_sigframe(
     current: &slopos_sched::task_struct::Current,
     sigframe_addr: u64,
+    xcr0: u64,
 ) -> bool {
     let Ok(bytes) = UserBytes::try_new(sigframe_fpu_addr(sigframe_addr), FPU_STATE_SIZE) else {
         return false;
     };
-    let xcr0 = slopos_ostd::cpu::x86_64::xsave::active_xcr0();
-    slopos_ostd::cpu::x86_64::interrupts::IrqDisabled::with(|_irq| {
-        if !current
-            .task()
-            .with_fpu_bytes_mut(current, |data| copy_bytes_from_user(bytes, data).is_ok())
-        {
-            return false;
-        }
-        current.task().fpu_restore_to_cpu(current, xcr0);
-        true
-    })
+    let mxcsr_mask = slopos_ostd::cpu::x86_64::xsave::mxcsr_feature_mask();
+
+    let task = current.task();
+    let staged = task.with_fpu_bytes_mut(current, |data| {
+        copy_bytes_from_user(bytes, data).is_ok()
+            && slopos_ostd::task::validate_xsave_image(data, xcr0, mxcsr_mask).is_ok()
+    });
+    if !staged {
+        task.fpu_reset(current);
+    }
+    staged
 }
 
 define_syscall!(syscall_rt_sigreturn (ctx) -> SyscallResult {
@@ -366,37 +379,60 @@ define_syscall!(syscall_rt_sigreturn (ctx) -> SyscallResult {
         None => return SyscallResult::Err(Errno::EFAULT),
     };
 
-    // Rebuild the user GPR snapshot from the SignalFrame and commit
-    // through `set_regs` (re-applies CS/SS selectors and RFLAGS mask).
-    let mut regs = ctx.user_ctx().regs();
-    regs.rax = sigframe.rax;
-    regs.rbx = sigframe.rbx;
-    regs.rcx = sigframe.rcx;
-    regs.rdx = sigframe.rdx;
-    regs.rsi = sigframe.rsi;
-    regs.rdi = sigframe.rdi;
-    regs.rbp = sigframe.rbp;
-    regs.rsp = sigframe.rsp;
-    regs.r8 = sigframe.r8;
-    regs.r9 = sigframe.r9;
-    regs.r10 = sigframe.r10;
-    regs.r11 = sigframe.r11;
-    regs.r12 = sigframe.r12;
-    regs.r13 = sigframe.r13;
-    regs.r14 = sigframe.r14;
-    regs.r15 = sigframe.r15;
-    regs.rip = sigframe.rip;
-    regs.rflags_user_subset = sigframe.rflags;
-    ctx.user_ctx().set_regs(regs);
+    // The sigreturn caller is this CPU's current task, so the guard is the
+    // witness the FPU accessors want.
+    let Some(current) = slopos_sched::task_struct::Current::get() else {
+        return SyscallResult::Err(Errno::EFAULT);
+    };
+    let xcr0 = slopos_ostd::cpu::x86_64::xsave::active_xcr0();
 
-    ctx.task()
-        .set_signal_blocked(sigframe.saved_mask & !SIG_UNCATCHABLE);
+    // Everything the frame supplies is committed in one IRQ-off window, FPU
+    // first. The two orderings are both load-bearing:
+    //
+    // * The copy-in and the XRSTOR cannot be split by interrupts. A context
+    //   switch between them saves the live register file over the staged image
+    //   and the restore then reinstates nothing.
+    // * The FPU image is committed before the GPRs, so a frame this syscall
+    //   refuses leaves the task exactly where it was rather than resumed at the
+    //   frame's RIP and RSP with unrestored vector state.
+    let committed = slopos_ostd::cpu::x86_64::interrupts::IrqDisabled::with(|_irq| {
+        if !stage_fpu_from_sigframe(&current, rsp, xcr0) {
+            return false;
+        }
+        if !current.task().fpu_restore_to_cpu(&current, xcr0) {
+            return false;
+        }
 
-    // Restore the FPU/vector state saved at delivery (best-effort: a faulted
-    // save area leaves the current vector registers in place). The sigreturn
-    // caller is this CPU's current task, so the guard is the witness.
-    if let Some(current) = slopos_sched::task_struct::Current::get() {
-        let _ = restore_fpu_from_sigframe(&current, rsp);
+        // Rebuild the user GPR snapshot from the SignalFrame and commit
+        // through `set_regs` (re-applies CS/SS selectors and RFLAGS mask).
+        let mut regs = ctx.user_ctx().regs();
+        regs.rax = sigframe.rax;
+        regs.rbx = sigframe.rbx;
+        regs.rcx = sigframe.rcx;
+        regs.rdx = sigframe.rdx;
+        regs.rsi = sigframe.rsi;
+        regs.rdi = sigframe.rdi;
+        regs.rbp = sigframe.rbp;
+        regs.rsp = sigframe.rsp;
+        regs.r8 = sigframe.r8;
+        regs.r9 = sigframe.r9;
+        regs.r10 = sigframe.r10;
+        regs.r11 = sigframe.r11;
+        regs.r12 = sigframe.r12;
+        regs.r13 = sigframe.r13;
+        regs.r14 = sigframe.r14;
+        regs.r15 = sigframe.r15;
+        regs.rip = sigframe.rip;
+        regs.rflags_user_subset = sigframe.rflags;
+        ctx.user_ctx().set_regs(regs);
+
+        ctx.task()
+            .set_signal_blocked(sigframe.saved_mask & !SIG_UNCATCHABLE);
+        true
+    });
+
+    if !committed {
+        return SyscallResult::Err(Errno::EFAULT);
     }
 
     // sigreturn fully replaced the user-mode register state — the

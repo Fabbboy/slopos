@@ -34,6 +34,19 @@ expect-test-registry many
 # budget still catches a second, unreviewed xrstor appearing elsewhere.
 3	xsave	*slopos_ostd4task3fpu*
 
+# The restore half of that pair, in its own `global_asm!` symbol band so a #GP
+# from a user-supplied XSAVE image lands on a fault tail instead of killing the
+# machine. One instruction is the whole point of the band: the RIP range the
+# #GP handler matches has to contain nothing else.
+1	xrstor64	__ostd_fpu_xrstor*
+
+# One `fxsave64` at boot, reading this CPU's MXCSR_MASK out of the legacy
+# region — the value is published by no other instruction and by no CPUID leaf,
+# and validating a user-supplied MXCSR needs it. FXSAVE reads the register file
+# and writes memory, so it disturbs nothing; it runs once on the BSP, before
+# any user task exists.
+1	fxsave64	*detect_mxcsr_feature_mask*
+
 # The one-time x87 init in the assembly entry trampoline
 # (boot/limine_entry.s), immediately after the CR0/CR4 setup and before any
 # Rust runs. Not a fault path: nothing has user state to clobber yet.

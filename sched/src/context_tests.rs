@@ -532,33 +532,43 @@ pub fn test_fpu_per_task_slot_isolation() -> TestResult {
     let pat_a = patterns_a();
     let pat_b = patterns_b();
 
-    let outcome = slopos_ostd::cpu::x86_64::interrupts::IrqDisabled::with(|_irq| {
+    let (outcome, accepted) = slopos_ostd::cpu::x86_64::interrupts::IrqDisabled::with(|_irq| {
         let saved = snapshot_live_fpu(xcr0);
 
+        // Every image restored below is one this test authored, so a rejection
+        // is a defect in the save path rather than a hostile image — worth
+        // failing on rather than absorbing.
+        let mut accepted = true;
+
         // Give A the register file, then park pattern A in its slot.
-        a.fpu_restore_to_cpu_mut(xcr0);
+        accepted &= a.fpu_restore_to_cpu_mut(xcr0);
         cpu::xmm_load_4(&pat_a);
         a.fpu_save_in_place_mut(xcr0);
 
         // Same for B, with a disjoint pattern. If the two slots aliased, this
         // is the write that would destroy A's.
-        b.fpu_restore_to_cpu_mut(xcr0);
+        accepted &= b.fpu_restore_to_cpu_mut(xcr0);
         cpu::xmm_load_4(&pat_b);
         b.fpu_save_in_place_mut(xcr0);
 
         // Zero first, so a pass proves the restore did the work rather than the
         // pattern never having left the registers.
         cpu::xmm_zero_4();
-        a.fpu_restore_to_cpu_mut(xcr0);
+        accepted &= a.fpu_restore_to_cpu_mut(xcr0);
         let readback = cpu::xmm_read_4();
 
         // Leave no CPU naming a task that is about to be freed, and put the
         // running task's own vector state back exactly as found.
         slopos_ostd::task::fpu_owner_forget(&*a);
         slopos_ostd::task::fpu_owner_forget(&*b);
-        saved.restore_to_cpu(xcr0);
-        readback
+        accepted &= saved.restore_to_cpu(xcr0);
+        (readback, accepted)
     });
+
+    assert_test!(
+        accepted,
+        "a task-authored FPU image was rejected by XRSTOR64"
+    );
 
     for i in 0..4 {
         if outcome[i] != pat_a[i] {
@@ -621,11 +631,12 @@ pub fn test_fpu_switch_saves_prev_and_restores_next() -> TestResult {
     let pat_prev = patterns_a();
     let pat_next = patterns_b();
 
-    let (live_after_switch, prev_slot, published) =
+    let (live_after_switch, prev_slot, published, accepted) =
         slopos_ostd::cpu::x86_64::interrupts::IrqDisabled::with(|_irq| {
             let saved = snapshot_live_fpu(xcr0);
             let prev_ref: &Task = &prev;
             let mut published = false;
+            let mut accepted = true;
 
             // `run_switch` is the only way to obtain a `SwitchWindow`. The
             // publication it takes as an argument is the condition this test
@@ -667,7 +678,7 @@ pub fn test_fpu_switch_saves_prev_and_restores_next() -> TestResult {
                     if let Some(prev_window) = prev_window {
                         prev_window.task().fpu_save_current(prev_window, xcr0);
                     }
-                    next_window.task().fpu_restore_to_cpu(next_window, xcr0);
+                    accepted &= next_window.task().fpu_restore_to_cpu(next_window, xcr0);
                 },
             );
 
@@ -675,18 +686,22 @@ pub fn test_fpu_switch_saves_prev_and_restores_next() -> TestResult {
             let live_after_switch = cpu::xmm_read_4();
             // ...and the outgoing task's live state must have landed in its slot.
             cpu::xmm_zero_4();
-            prev.fpu_restore_to_cpu_mut(xcr0);
+            accepted &= prev.fpu_restore_to_cpu_mut(xcr0);
             let prev_slot = cpu::xmm_read_4();
 
             slopos_ostd::task::fpu_owner_forget(&*prev);
-            saved.restore_to_cpu(xcr0);
-            (live_after_switch, prev_slot, published)
+            accepted &= saved.restore_to_cpu(xcr0);
+            (live_after_switch, prev_slot, published, accepted)
         });
 
     drop(next_guard);
     task_terminate(next_id);
 
     assert_test!(published, "incoming task vanished before dispatch");
+    assert_test!(
+        accepted,
+        "a task-authored FPU image was rejected by XRSTOR64"
+    );
 
     for i in 0..4 {
         if live_after_switch[i] != pat_next[i] {
@@ -736,21 +751,27 @@ pub fn test_fpu_avx_upper_halves_survive_task_slot() -> TestResult {
         [0xF0F0_E0E0_D0D0_C0C0, 0xA0A0_B0B0_9090_8080],
     ];
 
-    let readback = slopos_ostd::cpu::x86_64::interrupts::IrqDisabled::with(|_irq| {
+    let (readback, accepted) = slopos_ostd::cpu::x86_64::interrupts::IrqDisabled::with(|_irq| {
         let saved = snapshot_live_fpu(xcr0);
+        let mut accepted = true;
 
-        task.fpu_restore_to_cpu_mut(xcr0);
+        accepted &= task.fpu_restore_to_cpu_mut(xcr0);
         cpu::ymm_load_2(&patterns);
         task.fpu_save_in_place_mut(xcr0);
 
         cpu::ymm_zero_2();
-        task.fpu_restore_to_cpu_mut(xcr0);
+        accepted &= task.fpu_restore_to_cpu_mut(xcr0);
         let readback = cpu::ymm_read_2();
 
         slopos_ostd::task::fpu_owner_forget(&*task);
-        saved.restore_to_cpu(xcr0);
-        readback
+        accepted &= saved.restore_to_cpu(xcr0);
+        (readback, accepted)
     });
+
+    assert_test!(
+        accepted,
+        "a task-authored FPU image was rejected by XRSTOR64"
+    );
 
     let labels = ["YMM0 lower", "YMM0 UPPER", "YMM1 lower", "YMM1 UPPER"];
     for i in 0..4 {
@@ -765,6 +786,59 @@ pub fn test_fpu_avx_upper_halves_survive_task_slot() -> TestResult {
             return TestResult::Fail;
         }
     }
+    TestResult::Pass
+}
+
+/// A save area the hardware refuses is repaired underneath the restore.
+///
+/// `prepare_switch_to` XRSTORs the incoming task's slot with interrupts off,
+/// mid-switch, with nowhere to report a failure — so the repair has to happen
+/// below it or the switch is the thing that stops the CPU. This drives the
+/// exact call that path makes, on a slot poisoned the way a signal frame from
+/// user memory could poison one.
+pub fn test_fpu_poisoned_slot_is_repaired() -> TestResult {
+    use slopos_ostd::task::XSTATE_RESERVED_OFFSET;
+
+    let xcr0 = slopos_ostd::cpu::x86_64::xsave::active_xcr0();
+    let mut task: KBox<Task> = KBox::try_init(Task::init_invalid()).expect("alloc");
+
+    // A non-zero byte in the XSTATE header's reserved tail faults in both the
+    // standard and the compacted form, so the fault does not depend on which
+    // XSAVE features the CPU implements.
+    task.fpu_state.get_mut().data[XSTATE_RESERVED_OFFSET] = 1;
+
+    let (accepted, poison_after, accepted_again, restored) =
+        slopos_ostd::cpu::x86_64::interrupts::IrqDisabled::with(|_irq| {
+            let saved = snapshot_live_fpu(xcr0);
+
+            let accepted = task.fpu_restore_to_cpu_mut(xcr0);
+            let poison_after = task.fpu_state.get_mut().data[XSTATE_RESERVED_OFFSET];
+            // The repair has to hold: a second switch to this task must not
+            // walk into the same fault.
+            let accepted_again = task.fpu_restore_to_cpu_mut(xcr0);
+
+            slopos_ostd::task::fpu_owner_forget(&*task);
+            let restored = saved.restore_to_cpu(xcr0);
+            (accepted, poison_after, accepted_again, restored)
+        });
+
+    assert_test!(
+        restored,
+        "could not put the running task's own FPU state back"
+    );
+    assert_test!(
+        !accepted,
+        "xrstor64 accepted an image with a dirty reserved header byte"
+    );
+    assert_eq_test!(
+        poison_after,
+        0,
+        "the rejected save area was left poisoned for the next context switch"
+    );
+    assert_test!(
+        accepted_again,
+        "the repaired save area was rejected a second time"
+    );
     TestResult::Pass
 }
 
@@ -789,3 +863,4 @@ slopos_testing::stest!(
     name = test_fpu_avx_upper_halves_survive_task_slot,
     suite = context
 );
+slopos_testing::stest!(name = test_fpu_poisoned_slot_is_repaired, suite = context);

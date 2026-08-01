@@ -23,6 +23,15 @@ use slopos_slibc::signal::{self, SIG_DFL, SIGUSR1, SIGUSR2};
 static SIGUSR1_COUNT: AtomicU32 = AtomicU32::new(0);
 static SIGUSR2_COUNT: AtomicU32 = AtomicU32::new(0);
 static CLOBBER_RAN: AtomicU32 = AtomicU32::new(0);
+static MXCSR_CLOBBER_RAN: AtomicU32 = AtomicU32::new(0);
+
+/// Backing store for a hand-built signal frame. Static rather than a local so
+/// pointing RSP at it cannot put the kernel's view of the stack inside this
+/// function's own frame.
+#[repr(C, align(16))]
+struct SigreturnScratch([u8; 4096]);
+
+static mut SIGRETURN_SCRATCH: SigreturnScratch = SigreturnScratch([0; 4096]);
 
 extern "C" fn on_sigusr1(_sig: i32) {
     SIGUSR1_COUNT.fetch_add(1, Ordering::SeqCst);
@@ -196,6 +205,132 @@ fn test_signal_preserves_vector_regs() -> bool {
     true
 }
 
+/// Signal handler that leaves MXCSR at the plain default, so a test can tell
+/// whether sigreturn put the interrupted code's own value back.
+extern "C" fn on_clobber_mxcsr(_sig: i32) {
+    MXCSR_CLOBBER_RAN.fetch_add(1, Ordering::SeqCst);
+    let plain: u32 = 0x1F80;
+    // SAFETY: `plain` is a live, 4-byte-aligned u32; MXCSR is caller-saved.
+    unsafe {
+        core::arch::asm!("ldmxcsr [{}]", in(reg) &plain, options(nostack));
+    }
+}
+
+/// This CPU's `MXCSR_MASK`, read the way the kernel reads it.
+fn mxcsr_mask() -> u32 {
+    #[repr(C, align(16))]
+    struct FxsaveArea([u8; 512]);
+
+    let mut area = FxsaveArea([0u8; 512]);
+    // SAFETY: a live, exclusively-borrowed, 16-byte-aligned 512-byte buffer,
+    // which is exactly what `fxsave64` writes.
+    unsafe {
+        core::arch::asm!("fxsave64 [{}]", in(reg) area.0.as_mut_ptr(), options(nostack));
+    }
+    let mask = u32::from_le_bytes([area.0[28], area.0[29], area.0[30], area.0[31]]);
+    if mask == 0 { 0xFFBF } else { mask }
+}
+
+/// `rt_sigreturn` must reject a signal frame it never wrote, rather than
+/// feeding the bytes that follow it to `XRSTOR64` in ring 0.
+///
+/// Every byte of the frame is `0xFF`, so the XSTATE header names components
+/// XCR0 does not enable and the MXCSR word is nothing but reserved bits — the
+/// shortest path to a fault the kernel has no way to unwind out of. Issued as a
+/// raw syscall with RSP pointed at the frame, because that is the only way to
+/// reach `rt_sigreturn` without a signal having been delivered.
+///
+/// The process surviving is half the assertion: the syscall must return EFAULT
+/// *without* having committed the frame's registers, or execution would resume
+/// at an all-ones RIP instead of the instruction after `syscall`.
+fn test_sigreturn_rejects_poisoned_frame() -> bool {
+    let frame = &raw mut SIGRETURN_SCRATCH as *mut u8;
+    // SAFETY: `frame` names a live static of exactly this size, and nothing
+    // else refers to it.
+    unsafe {
+        core::ptr::write_bytes(frame, 0xFF, core::mem::size_of::<SigreturnScratch>());
+    }
+
+    let ret: i64;
+    // SAFETY: RSP is pointed at the crafted frame only for the duration of the
+    // syscall and restored from a callee-saved register immediately after. The
+    // kernel reads the frame and never writes the user stack on this path.
+    unsafe {
+        core::arch::asm!(
+            "mov r12, rsp",
+            "mov rsp, {frame}",
+            "syscall",
+            "mov rsp, r12",
+            frame = in(reg) frame,
+            inout("rax") slopos_abi::syscall::SYSCALL_RT_SIGRETURN => ret,
+            out("rcx") _,
+            out("r11") _,
+            out("r12") _,
+        );
+    }
+
+    if ret != -14 {
+        eprintln!("signal_handler_test: rt_sigreturn(poisoned frame) returned {ret}, want -EFAULT");
+        return false;
+    }
+    true
+}
+
+/// A *valid* sigreturn must round-trip MXCSR, including the bits this CPU
+/// implements beyond the classic mask.
+///
+/// The kernel validates the MXCSR word in the signal frame against the CPU's
+/// own `MXCSR_MASK`. Assuming a fixed mask instead would clear DAZ, and this
+/// case is what notices: the handler resets MXCSR to the plain default, so the
+/// value only comes back if sigreturn accepted the frame and restored it.
+fn test_signal_preserves_mxcsr() -> bool {
+    MXCSR_CLOBBER_RAN.store(0, Ordering::SeqCst);
+    let prev = unsafe { signal::signal(SIGUSR1, on_clobber_mxcsr as *const () as usize) };
+    if prev == usize::MAX {
+        eprintln!("signal_handler_test: mxcsr-clobber handler install rejected");
+        return false;
+    }
+
+    // All exceptions masked, plus DAZ and FTZ where the CPU implements them.
+    let want: u32 = (0x1F80 | (1 << 6) | (1 << 15)) & mxcsr_mask();
+    let pid = unsafe { slopos_slibc::process::getpid() } as u64;
+    let mut saved: u32 = 0;
+    let mut readback: u32 = 0;
+
+    // SAFETY: one asm block so MXCSR stays live across delivery — set it, run
+    // kill(pid, SIGUSR1) inline (rax=104), read it back, then put the
+    // caller's value back before returning to compiled code.
+    unsafe {
+        core::arch::asm!(
+            "stmxcsr [{saved}]",
+            "ldmxcsr [{want}]",
+            "syscall",
+            "stmxcsr [{res}]",
+            "ldmxcsr [{saved}]",
+            saved = in(reg) &mut saved,
+            want = in(reg) &want,
+            res = in(reg) &mut readback,
+            inout("rax") 104u64 => _,
+            in("rdi") pid,
+            in("rsi") SIGUSR1 as u64,
+            out("rcx") _,
+            out("r11") _,
+        );
+    }
+
+    let _ = unsafe { signal::signal(SIGUSR1, SIG_DFL) };
+
+    if MXCSR_CLOBBER_RAN.load(Ordering::SeqCst) != 1 {
+        eprintln!("signal_handler_test: mxcsr-clobber handler did not run exactly once");
+        return false;
+    }
+    if readback != want {
+        eprintln!("signal_handler_test: MXCSR came back {readback:#06x}, want {want:#06x}");
+        return false;
+    }
+    true
+}
+
 /// `rt_sigaction` must reject a signal number past `NSIG` with `EINVAL` rather
 /// than indexing off the end of the 32-entry action table.
 ///
@@ -245,6 +380,11 @@ const CASES: &[(&str, fn() -> bool)] = &[
         "sigaction_rejects_signum_past_nsig",
         test_sigaction_rejects_signum_past_nsig,
     ),
+    (
+        "sigreturn_rejects_poisoned_frame",
+        test_sigreturn_rejects_poisoned_frame,
+    ),
+    ("signal_preserves_mxcsr", test_signal_preserves_mxcsr),
 ];
 
 fn main() {

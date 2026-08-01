@@ -1818,6 +1818,10 @@ pub fn test_signal_install_deliver_and_sigreturn() -> TestResult {
     // Simulate handler's `ret`: it pops the restorer, advancing RSP by 8
     // so it now points at the SignalFrame — matching the real flow.
     user_frame.regs_mut().rsp = user_frame.rsp().wrapping_add(8);
+    // As current, the way production reaches this syscall: sigreturn restores
+    // the FPU image through the `CurrentTask` witness and refuses the whole
+    // frame without one.
+    make_task_current(task_id);
     let _ = with_user_process_context(pid, || {
         crate::syscall::dispatch::dispatch_handler(
             syscall_rt_sigreturn,
@@ -1825,6 +1829,7 @@ pub fn test_signal_install_deliver_and_sigreturn() -> TestResult {
             &mut *user_frame,
         )
     });
+    park_bootstrap_on_current_cpu();
     assert_eq_test!(
         user_frame.rip(),
         original_rip,
@@ -1834,6 +1839,62 @@ pub fn test_signal_install_deliver_and_sigreturn() -> TestResult {
         user_frame.rsp(),
         original_rsp,
         "rt_sigreturn did not restore RSP"
+    );
+
+    // The same frame, with one byte of its XSAVE image turned into a component
+    // XCR0 does not enable. `XRSTOR64` faults on that in ring 0, so sigreturn
+    // has to refuse the whole frame — and refuse it before committing any
+    // register, or the task would resume at the frame's RIP with the vector
+    // state unrestored.
+    let poison_addr = sigframe_addr
+        .wrapping_add(core::mem::size_of::<SignalFrame>() as u64)
+        .wrapping_add(slopos_ostd::task::XSTATE_BV_OFFSET as u64 + 7);
+    assert_test!(
+        user_copy_out(pid, poison_addr, &0x80u8),
+        "failed to poison the frame's XSAVE image"
+    );
+
+    let handler_rip = 0x4003_0000;
+    user_frame.regs_mut().rip = handler_rip;
+    user_frame.regs_mut().rsp = sigframe_addr;
+
+    make_task_current(task_id);
+    let _ = with_user_process_context(pid, || {
+        crate::syscall::dispatch::dispatch_handler(
+            syscall_rt_sigreturn,
+            &task_guard,
+            &mut *user_frame,
+        )
+    });
+    // The poison must not survive in the task's own save area either: the
+    // scheduler restores that slot on the next context switch.
+    let leftover = {
+        let current = assert_some!(Current::get(), "current task after dispatch");
+        current.task().with_fpu_bytes_mut(&current, |data| {
+            data[slopos_ostd::task::XSTATE_BV_OFFSET + 7]
+        })
+    };
+    park_bootstrap_on_current_cpu();
+
+    assert_eq_test!(
+        user_frame.rax(),
+        slopos_abi::Errno::EFAULT.as_u64(),
+        "a malformed FPU image did not fail rt_sigreturn"
+    );
+    assert_eq_test!(
+        user_frame.rip(),
+        handler_rip,
+        "a rejected sigreturn moved RIP anyway"
+    );
+    assert_eq_test!(
+        user_frame.rsp(),
+        sigframe_addr,
+        "a rejected sigreturn moved RSP anyway"
+    );
+    assert_eq_test!(
+        leftover,
+        0,
+        "the rejected image was left in the task's save area"
     );
 
     task_terminate(task_id);

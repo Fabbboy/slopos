@@ -501,7 +501,8 @@ define_syscall!(syscall_exec
                 // derivation, and both maintain the FPU owner tag.
                 if let Some(current) = slopos_sched::task_struct::Current::get() {
                     current.task().fpu_reset(&current);
-                    current.task().fpu_restore_to_cpu(&current, xcr0);
+                    let restored = current.task().fpu_restore_to_cpu(&current, xcr0);
+                    debug_assert!(restored, "XRSTOR64 rejected the FPU init image");
                 }
             });
             SyscallResult::NoReturn

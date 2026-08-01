@@ -33,7 +33,7 @@ use crate::sync::{AtomicCell, LOCK_LEVEL_RESOURCE, RcuArcSlot, SpinLock};
 use crate::task::abi::TaskAbi;
 use crate::task::cell::{TaskExclusive, TaskOwnCell};
 use crate::task::exit_info::ExitInfo;
-use crate::task::fpu::{FPU_STATE_SIZE, FpuState};
+use crate::task::fpu::{FPU_STATE_SIZE, FpuState, LEGACY_FCW_OFFSET, LEGACY_MXCSR_OFFSET};
 use crate::task::fpu_owner::{
     FPU_CPU_NONE, fpu_owner_assert_may_take, fpu_owner_take, fpu_owner_yield_after_save,
 };
@@ -128,11 +128,6 @@ pub type SwitchContext = crate::task::TaskContext;
 
 /// Capacity of a task's working-directory buffer, NUL terminator included.
 pub const CWD_MAX: usize = 256;
-
-/// x87 FPU Control Word offset within both FXSAVE and XSAVE legacy region.
-const LEGACY_FCW_OFFSET: usize = 0;
-/// MXCSR offset within both FXSAVE and XSAVE legacy region.
-const LEGACY_MXCSR_OFFSET: usize = 24;
 
 /// Initialise an [`FpuState`] directly at `ptr` without materialising the
 /// 2.6 KiB rvalue on the caller's stack.  Equivalent to writing the result
@@ -780,7 +775,7 @@ impl<K, U> TaskInner<K, U> {
     /// Unconditional, and it must stay that way at this entry point. The owner
     /// tag records *which task* the register file belongs to, not whether the
     /// file still agrees with the save area — signal delivery saves via
-    /// [`fpu_save_current_keep`](Self::fpu_save_current_keep) and keeps
+    /// [`fpu_save_in_place`](Self::fpu_save_in_place) and keeps
     /// ownership, so a handler clobbers the live registers without disturbing
     /// either half of the tag. Skipping the reload on a tag hit would then
     /// discard the saved state that `sigreturn` exists to reinstate.
@@ -788,21 +783,39 @@ impl<K, U> TaskInner<K, U> {
     /// [`fpu_state_valid`](crate::task::fpu_owner::fpu_state_valid) is
     /// therefore an opt-in predicate for callers that can rule out an
     /// intervening write, not a precondition of this function.
+    ///
+    /// Returns `false` if the hardware rejected the save area. The save area is
+    /// reset to the init image in that case and that image is reloaded, so the
+    /// caller only has to decide what to tell *its* caller — a later restore of
+    /// this task cannot fault for the same reason.
+    #[must_use]
     #[inline]
-    pub fn fpu_restore_to_cpu(&self, witness: &impl TaskExclusive<K, U>, xcr0_mask: u64) {
+    pub fn fpu_restore_to_cpu(&self, witness: &impl TaskExclusive<K, U>, xcr0_mask: u64) -> bool {
         debug_assert!(
             core::ptr::eq(witness.witnessed(), self),
             "witness names a different task"
         );
         let cpu = crate::task::fpu_owner::fpu_current_cpu();
+        let slot = self.fpu_state.get_ptr(witness);
         // No precondition: a restore defines the register file's new contents,
         // and is not always preceded by a save on this CPU — see
         // `fpu_owner_assert_may_take`.
         // SAFETY: as `fpu_save_current`; XRSTOR64 only reads the buffer.
-        unsafe {
-            crate::task::fpu::fpu_xrstor(self.fpu_state.get_ptr(witness).cast_const(), xcr0_mask)
-        };
+        let accepted = unsafe { crate::task::fpu::fpu_xrstor(slot.cast_const(), xcr0_mask) };
+        if !accepted {
+            // SAFETY: the witness proves exclusive access, and
+            // `fpu_reset_in_place` writes a whole valid `FpuState`.
+            let repaired = unsafe {
+                fpu_reset_in_place(slot);
+                crate::task::fpu::fpu_xrstor(slot.cast_const(), xcr0_mask)
+            };
+            // The init image satisfies every rule XRSTOR64 checks. A rejection
+            // here would mean the register file is still the undefined state
+            // the first fault left, which nothing downstream can repair.
+            debug_assert!(repaired, "XRSTOR64 rejected the FPU init image");
+        }
         fpu_owner_take(self, cpu);
+        accepted
     }
 
     /// Capture the live registers into the save area **without** handing the
@@ -861,14 +874,28 @@ impl<K, U> TaskInner<K, U> {
         });
     }
 
-    /// See [`fpu_save_in_place_mut`](Self::fpu_save_in_place_mut).
+    /// See [`fpu_save_in_place_mut`](Self::fpu_save_in_place_mut). Repairs a
+    /// rejected save area exactly as [`fpu_restore_to_cpu`](Self::fpu_restore_to_cpu)
+    /// does.
+    #[must_use]
     #[inline]
-    pub fn fpu_restore_to_cpu_mut(&mut self, xcr0_mask: u64) {
+    pub fn fpu_restore_to_cpu_mut(&mut self, xcr0_mask: u64) -> bool {
         let cpu = crate::task::fpu_owner::fpu_current_cpu();
+        let slot: *mut FpuState = self.fpu_state.get_mut();
         // Restore side takes no precondition — see `fpu_restore_to_cpu`.
         // SAFETY: `&mut self` is exclusive access to the whole task.
-        unsafe { crate::task::fpu::fpu_xrstor(self.fpu_state.get_mut(), xcr0_mask) };
+        let accepted = unsafe { crate::task::fpu::fpu_xrstor(slot, xcr0_mask) };
+        if !accepted {
+            // SAFETY: as above; `fpu_reset_in_place` writes a whole valid
+            // `FpuState` into the slot.
+            let repaired = unsafe {
+                fpu_reset_in_place(slot);
+                crate::task::fpu::fpu_xrstor(slot, xcr0_mask)
+            };
+            debug_assert!(repaired, "XRSTOR64 rejected the FPU init image");
+        }
         fpu_owner_take(self, cpu);
+        accepted
     }
 
     /// Borrow this task's FPU save area as bytes, authorised by `witness`.
@@ -896,11 +923,14 @@ impl<K, U> TaskInner<K, U> {
     /// Reset the FPU save area to the kernel default (x87/SSE exceptions
     /// masked, XSTATE header zeroed), authorised by `witness`.
     ///
-    /// The execve disposition reset: the old image's vector state must not
-    /// survive into the new one. Paired with
+    /// This redefines the *save area* only. A caller that also means to
+    /// redefine the live registers — execve, where the old image's vector state
+    /// must not survive into the new one — must pair it with
     /// [`fpu_restore_to_cpu`](Self::fpu_restore_to_cpu) under one IRQ-off
     /// window, so a context switch cannot re-save the old image's live
-    /// registers over the reset before the new image runs.
+    /// registers over the reset before the new image runs. A caller discarding
+    /// a save area whose live registers are already the ones it wants — a
+    /// signal return the kernel refused — pairs it with nothing.
     #[inline]
     pub fn fpu_reset(&self, witness: &impl TaskExclusive<K, U>) {
         debug_assert!(

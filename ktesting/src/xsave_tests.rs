@@ -409,6 +409,71 @@ pub fn test_xsave_variant_flags_consistent() -> TestResult {
 }
 
 // =============================================================================
+// 6. Image validation
+// =============================================================================
+
+/// The MXCSR mask read at boot must at least cover the kernel's own default.
+///
+/// If it did not, `validate_xsave_image` would reject the init image the kernel
+/// itself writes into every new task, and no signal return could ever succeed.
+pub fn test_mxcsr_feature_mask_covers_kernel_default() -> TestResult {
+    let mask = xsave::mxcsr_feature_mask();
+
+    if mask == 0 {
+        return fail!("mxcsr_feature_mask() is zero — boot detection did not run");
+    }
+    if slopos_ostd::task::MXCSR_DEFAULT & !mask != 0 {
+        return fail!(
+            "mxcsr_feature_mask() {:#x} does not cover the kernel default {:#x}",
+            mask,
+            slopos_ostd::task::MXCSR_DEFAULT
+        );
+    }
+    pass!()
+}
+
+/// The image `xsave64` itself produces must pass `validate_xsave_image`.
+///
+/// The validator gates every signal return, so a rule strict enough to reject
+/// the hardware's own output would break signal delivery rather than harden it.
+pub fn test_validate_accepts_live_xsave_image() -> TestResult {
+    let mut area: KBox<XsaveArea> = KBox::zeroed().expect("alloc");
+    let xcr0 = xsave::active_xcr0();
+
+    slopos_ostd::cpu::x86_64::interrupts::IrqDisabled::with(|_irq| {
+        slopos_ostd::test_support::cpu_state::xsave_to(&mut area.data, xcr0);
+    });
+
+    match slopos_ostd::task::validate_xsave_image(&area.data, xcr0, xsave::mxcsr_feature_mask()) {
+        Ok(()) => pass!(),
+        Err(err) => fail!(
+            "validate_xsave_image rejected a live xsave64 image: {:?}",
+            err
+        ),
+    }
+}
+
+/// ...and must reject that same image once its XSTATE header is poisoned.
+///
+/// A validator that accepts everything would also accept a live image, so the
+/// test above proves nothing on its own.
+pub fn test_validate_rejects_poisoned_live_image() -> TestResult {
+    let mut area: KBox<XsaveArea> = KBox::zeroed().expect("alloc");
+    let xcr0 = xsave::active_xcr0();
+
+    slopos_ostd::cpu::x86_64::interrupts::IrqDisabled::with(|_irq| {
+        slopos_ostd::test_support::cpu_state::xsave_to(&mut area.data, xcr0);
+    });
+
+    area.data[slopos_ostd::task::XCOMP_BV_OFFSET + 7] = 0x80;
+
+    match slopos_ostd::task::validate_xsave_image(&area.data, xcr0, xsave::mxcsr_feature_mask()) {
+        Err(slopos_ostd::task::XsaveImageError::Compacted) => pass!(),
+        other => fail!("a compacted-format XCOMP_BV was not rejected: {:?}", other),
+    }
+}
+
+// =============================================================================
 // Suite Registration
 // =============================================================================
 
@@ -432,3 +497,13 @@ crate::stest!(name = test_xsave_area_size_matches_cpuid, suite = xsave);
 crate::stest!(name = test_xsave_area_size_covers_avx, suite = xsave);
 // Variant flags
 crate::stest!(name = test_xsave_variant_flags_consistent, suite = xsave);
+// Image validation
+crate::stest!(
+    name = test_mxcsr_feature_mask_covers_kernel_default,
+    suite = xsave
+);
+crate::stest!(name = test_validate_accepts_live_xsave_image, suite = xsave);
+crate::stest!(
+    name = test_validate_rejects_poisoned_live_image,
+    suite = xsave
+);

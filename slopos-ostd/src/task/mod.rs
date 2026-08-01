@@ -51,7 +51,10 @@ pub use placement::{
 pub use state::{TaskState, TaskStateView};
 pub use test_reports::{TestReport, TestReportRing, alloc_ring, empty_report};
 
-pub use fpu::{FPU_STATE_SIZE, FXSAVE_AREA_SIZE, FpuState, MXCSR_DEFAULT, fpu_xrstor, fpu_xsave};
+pub use fpu::{
+    FPU_STATE_SIZE, FXSAVE_AREA_SIZE, FpuState, MXCSR_DEFAULT, XCOMP_BV_OFFSET, XSTATE_BV_OFFSET,
+    XSTATE_RESERVED_OFFSET, XsaveImageError, fpu_xrstor, fpu_xsave, validate_xsave_image,
+};
 pub use fpu_owner::{
     FPU_CPU_NONE, fpu_current_cpu, fpu_owner_assert_may_take, fpu_owner_forget, fpu_owner_take,
     fpu_owner_yield_after_save, fpu_state_valid,

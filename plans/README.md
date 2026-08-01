@@ -16,7 +16,6 @@ editing.
 |----------|-------|
 | `KNOWN_ISSUES.md` | Working notes on open issues; verify before using as source of truth |
 | `privilege-model.md` | Spike: what authority should actually be, given no uid and no credential object |
-| `rt-sigreturn-xrstor.md` | Validate the signal-return XSAVE image; make a ring-0 #GP survivable |
 | `resource-accounting.md` | Spike: per-process limits. Inventory + the reclaim fixes that need no framework |
 | `deferred-work.md` | Per-CPU work list so RCU reclaim stops depending on CPU 0 being idle |
 | `lockdep-effectiveness.md` | The lock-order validator exhausts its class table during mm init and turns itself off |

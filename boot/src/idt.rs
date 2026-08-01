@@ -587,6 +587,10 @@ pub fn common_exception_handler_impl(frame: *mut slopos_arch::InterruptFrame) {
         }
     }
 
+    if vector == EXCEPTION_GENERAL_PROTECTION && try_handle_general_protection(frame) {
+        return;
+    }
+
     let cr2 = cpu::read_cr2();
     klog_debug!(
         "EXCEPTION: vec={} rip=0x{:x} err=0x{:x} cs=0x{:x} ss=0x{:x} cr2=0x{:x}",
@@ -734,6 +738,27 @@ pub(crate) fn handle_corrupt_iret_frame(iret_frame: *const u64) -> ! {
     // User-mode IRET corruption is fatal — a corrupted frame cannot be
     // recovered and the panic below fires regardless.
     panic!("Unrecoverable IRET frame corruption");
+}
+
+/// Kernel-mode #GP inside the fault-recoverable XRSTOR64 band: redirect RIP to
+/// the failure tail, which reports the rejection to the Rust caller.
+///
+/// A ring-0 #GP is otherwise terminal — `exception_general_protection` routes it
+/// to `exception_fatal`, and panic recovery cannot unwind out of interrupt
+/// context. The RIP-range match is exact, so this masks no other fault.
+fn try_handle_general_protection(frame: *mut slopos_arch::InterruptFrame) -> bool {
+    // The frame lives for exactly this handler invocation, so a frame-local
+    // is the honest anchor for a borrow of it.
+    let mut frame_anchor = ();
+    let frame_ref = slopos_arch::InterruptFrame::from_ptr_mut(&mut frame_anchor, frame)
+        .expect("try_handle_general_protection: null frame ptr");
+
+    if !in_user(frame_ref) && slopos_ostd::task::fpu::is_fpu_xrstor_ip(frame_ref.rip) {
+        frame_ref.rip = slopos_ostd::task::fpu::fpu_xrstor_fault_ip();
+        return true;
+    }
+
+    false
 }
 
 fn try_handle_page_fault(frame: *mut slopos_arch::InterruptFrame) -> bool {

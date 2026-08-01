@@ -8,21 +8,24 @@
 //! x86-64 CPU since Intel Nehalem (2008) and AMD Bulldozer (2011) supports
 //! XSAVE, and QEMU always exposes it.
 //!
-//! The module exposes two pieces of global state consumed by the context
-//! switch assembly (`core/context_switch.s`):
+//! The module records three pieces of global state, all read through the
+//! accessors below:
 //!
 //! * **`XSAVE_AREA_SIZE`** — runtime-detected save-area size (bytes).
-//! * **`ACTIVE_XCR0`** — the XCR0 value written to every CPU.
-//!   Read by `context_switch.s` via `#[no_mangle]` for xsave64/xrstor64.
+//! * **`ACTIVE_XCR0`** — the XCR0 value written to every CPU, and the RFBM
+//!   every `xsave64`/`xrstor64` in the kernel is issued with.
+//! * **`MXCSR_FEATURE_MASK`** — the MXCSR bits this CPU implements, which is
+//!   what an MXCSR word arriving from user memory is validated against.
 //!
 //! The `init()` entry point is called once on the BSP (via a boot step at
 //! priority 42, before SMP).  Each AP then calls `enable_on_current_cpu()` to
 //! replicate the same CR4 + XCR0 configuration.
 
-use core::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering};
 
 use super::control_regs::{Osxsave, Xcr0Flags, Xcr0Mask, xcr0_write};
 use crate::arch::x86_64::cpuid::XsaveFeatures;
+use crate::task::FXSAVE_AREA_SIZE;
 
 // ---------------------------------------------------------------------------
 // Global state (set by BSP `init`, read by APs + task creation)
@@ -34,18 +37,26 @@ use crate::arch::x86_64::cpuid::XsaveFeatures;
 static XSAVE_AREA_SIZE: AtomicUsize = AtomicUsize::new(0);
 
 /// XCR0 value computed by the BSP — every AP writes the same mask.
-///
-/// # Assembly access
-/// `context_switch.s` loads this into `EDX:EAX` before `xsave64`/`xrstor64`
-/// to specify which state components to save/restore.
-#[unsafe(no_mangle)]
-pub static ACTIVE_XCR0: AtomicU64 = AtomicU64::new(0);
+static ACTIVE_XCR0: AtomicU64 = AtomicU64::new(0);
 
 /// `true` when `XSAVEC` is available (compact save format, no gaps).
 static XSAVEC_AVAILABLE: AtomicBool = AtomicBool::new(false);
 
 /// `true` when `XSAVEOPT` is available (optimised — only writes dirty state).
 static XSAVEOPT_AVAILABLE: AtomicBool = AtomicBool::new(false);
+
+/// The set of MXCSR bits this CPU implements. Every bit outside it is
+/// reserved, and loading one raises `#GP` — which is what makes this the
+/// authority for validating an MXCSR word that came from user memory.
+///
+/// Seeded with [`MXCSR_MASK_DEFAULT`] rather than zero so a read before
+/// `init()` rejects reserved bits instead of rejecting everything.
+static MXCSR_FEATURE_MASK: AtomicU32 = AtomicU32::new(MXCSR_MASK_DEFAULT);
+
+/// The MXCSR mask to assume when the FXSAVE image reports zero, which is how
+/// pre-Pentium-4 parts spell "no mask field". Bit 6 (DAZ) is clear: a CPU old
+/// enough to omit the field is old enough not to implement denormals-are-zero.
+pub const MXCSR_MASK_DEFAULT: u32 = 0xFFBF;
 
 // ---------------------------------------------------------------------------
 // Public queries
@@ -87,6 +98,55 @@ pub fn has_xsavec() -> bool {
 #[inline]
 pub fn has_xsaveopt() -> bool {
     XSAVEOPT_AVAILABLE.load(Ordering::Relaxed)
+}
+
+/// The MXCSR bits the BSP implements — read once during `init()` and, like
+/// XCR0, taken to hold for every CPU. An MXCSR word carrying anything outside
+/// this mask faults on restore.
+#[inline]
+pub fn mxcsr_feature_mask() -> u32 {
+    MXCSR_FEATURE_MASK.load(Ordering::Relaxed)
+}
+
+// ---------------------------------------------------------------------------
+// MXCSR feature-mask detection
+// ---------------------------------------------------------------------------
+
+/// Byte offset of `MXCSR_MASK` within the FXSAVE image.
+const FXSAVE_MXCSR_MASK_OFFSET: usize = 28;
+
+/// Read this CPU's `MXCSR_MASK` out of a scratch FXSAVE image.
+///
+/// The value is reported nowhere in CPUID; FXSAVE is the only instruction that
+/// publishes it. `fxsave64` reads the register file and writes memory, so it
+/// disturbs no live state — the soft-float guarantee is about writes to the
+/// XCR0-managed registers, and this performs none.
+///
+/// `#[inline(never)]` so the enclosing symbol stays the same across build
+/// variants: the vector gate keys its allowlist on that name, and an inlined
+/// copy would attribute the instruction to whichever caller absorbed it.
+#[inline(never)]
+fn detect_mxcsr_feature_mask() -> u32 {
+    #[repr(C, align(16))]
+    struct FxsaveArea([u8; FXSAVE_AREA_SIZE]);
+
+    let mut area = FxsaveArea([0u8; FXSAVE_AREA_SIZE]);
+    // SAFETY: `area` is a live, exclusively-borrowed, 16-byte-aligned buffer of
+    // exactly the size `fxsave64` writes.
+    unsafe {
+        core::arch::asm!(
+            "fxsave64 [{}]",
+            in(reg) area.0.as_mut_ptr(),
+            options(nostack),
+        );
+    }
+
+    let mut raw = [0u8; 4];
+    raw.copy_from_slice(&area.0[FXSAVE_MXCSR_MASK_OFFSET..FXSAVE_MXCSR_MASK_OFFSET + 4]);
+    match u32::from_le_bytes(raw) {
+        0 => MXCSR_MASK_DEFAULT,
+        mask => mask,
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -153,6 +213,12 @@ pub fn init() -> i32 {
     // ------------------------------------------------------------------
     XSAVEC_AVAILABLE.store(features.xsavec, Ordering::Release);
     XSAVEOPT_AVAILABLE.store(features.xsaveopt, Ordering::Release);
+
+    // ------------------------------------------------------------------
+    // 5. Record which MXCSR bits this CPU implements, for validating an
+    //    MXCSR word that arrives from user memory.
+    // ------------------------------------------------------------------
+    MXCSR_FEATURE_MASK.store(detect_mxcsr_feature_mask(), Ordering::Release);
 
     let _ = (area_size, supported);
     0
