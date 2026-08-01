@@ -6385,7 +6385,14 @@ pub fn test_kernel_private_pending_bit_is_not_a_signal() -> TestResult {
     let task_guard = assert_some!(task_find_by_id(task_id), "task lookup failed");
     let pid = task_guard.process_id;
 
-    let private_bit: SigSet = 1u64 << NSIG;
+    // One bit above the kill flag: a kernel-private bit with no meaning
+    // attached, so this exercises the masking alone rather than kill
+    // semantics.
+    let private_bit: SigSet = 1u64 << (NSIG + 1);
+    assert_test!(
+        private_bit != slopos_abi::signal::SIGNAL_KILLED,
+        "the probe bit must not be the kill flag"
+    );
     task_guard
         .signal_pending
         .fetch_or(private_bit, core::sync::atomic::Ordering::AcqRel);
@@ -6503,5 +6510,58 @@ pub fn test_broadcast_kill_spares_kernel_tasks() -> TestResult {
 
 slopos_testing::stest!(
     name = test_broadcast_kill_spares_kernel_tasks,
+    suite = syscall_signal
+);
+
+/// A task marked for death exits at its next return-to-user boundary.
+///
+/// The kill flag is not a signal — it is deliberately outside the deliverable
+/// range, so `claim_pending_signal` never sees it. Something on the way back
+/// to CPL3 has to act on it, or a killed task simply resumes in userland.
+pub fn test_killed_task_exits_at_return_to_user() -> TestResult {
+    let _fixture = SyscallFixture::new();
+
+    let task_id = create_test_user_task();
+    assert_test!(task_id != INVALID_TASK_ID, "failed to create user task");
+    let task_guard = assert_some!(task_find_by_id(task_id), "task lookup failed");
+    let pid = task_guard.process_id;
+
+    assert_test!(
+        !task_guard.is_killed(),
+        "a fresh task must not be marked for death"
+    );
+    assert_test!(
+        task::task_kill_and_wake(&*task_guard),
+        "the first mark must report that it did the marking"
+    );
+    assert_test!(
+        !task::task_kill_and_wake(&*task_guard),
+        "a second mark must report that the task was already marked"
+    );
+    assert_test!(task_guard.is_killed(), "the mark must be observable");
+
+    // The kill bit must stay invisible to signal delivery itself.
+    assert_test!(
+        !task::task_has_deliverable_signal(&*task_guard),
+        "the kill bit must not read as a deliverable signal"
+    );
+
+    let mut user_frame: KBox<UserContext> = KBox::zeroed().expect("alloc");
+    user_frame.regs_mut().rip = 0x5000_1111;
+    deliver_pending_signal_as_current(task_id, pid, &user_frame);
+
+    let status = task_guard.status();
+    assert_test!(
+        status == TaskStatus::Zombie || status == TaskStatus::Terminated,
+        "a marked task must not return to userland"
+    );
+
+    drop(task_guard);
+    task_terminate(task_id);
+    pass!()
+}
+
+slopos_testing::stest!(
+    name = test_killed_task_exits_at_return_to_user,
     suite = syscall_signal
 );

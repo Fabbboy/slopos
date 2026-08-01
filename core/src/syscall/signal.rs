@@ -579,6 +579,22 @@ fn deliver_pending_signal_core(
     regs: &mut impl UserRegView,
 ) {
     let task_ref = current.task();
+
+    // A task marked for death returns to its own exit path rather than to
+    // userland. Every caller has already established that this frame returns
+    // to CPL3 and is not on an exception stack, so what it abandons is a
+    // register save area plus the IRET payload on this task's own kernel
+    // stack — memory the exit path is about to free, owning no Rust value.
+    // That is why abandoning it is sound here and is not sound at an
+    // arbitrary kernel blocking point.
+    if task_ref.is_killed() {
+        let task_id = task_ref.task_id;
+        if task_terminate(task_id) == 0 {
+            schedule();
+        }
+        return;
+    }
+
     let (signum, bit, action, saved_mask) = match claim_pending_signal(task_ref) {
         SignalDisposition::Done => return,
         SignalDisposition::Terminate(task_id) => {

@@ -91,6 +91,13 @@ fn user_task_loop() -> ! {
     let current = Current::get().expect("user_task_loop: dispatched with no current task");
     let user_ctx = current.task().user_ctx(&current);
     loop {
+        // Marked for death before this task ever reached userland, or between
+        // a syscall exit and here: leave through its own exit path rather than
+        // entering user mode to be stopped at the next boundary.
+        if current.task().is_killed() {
+            scheduler_task_exit_impl();
+        }
+
         let reason = {
             let user_mode = UserMode::new(user_ctx, space);
             user_mode.execute()
