@@ -784,7 +784,11 @@ define_syscall!(syscall_futex
     }
 
     let rc = match op {
-        FUTEX_WAIT => slopos_sched::futex::futex_wait(uaddr, val, timeout),
+        // 0 means no timeout, per the syscall's documented contract.
+        FUTEX_WAIT => {
+            let deadline = if timeout == 0 { None } else { Some(timeout) };
+            slopos_sched::futex::futex_wait(uaddr, val, deadline)
+        }
         FUTEX_WAKE => slopos_sched::futex::futex_wake(uaddr, val),
         _ => ENOSYS_RETURN as i64,
     };

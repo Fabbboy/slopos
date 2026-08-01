@@ -6965,3 +6965,93 @@ slopos_testing::stest!(
     name = test_terminal_task_is_not_restored_to_running,
     suite = sched_core
 );
+
+// =============================================================================
+// Futex dequeue contract
+// =============================================================================
+
+/// A futex waiter always leaves its bucket, and the dequeue reports *who*
+/// dequeued it.
+///
+/// The bucket slot holds a strong reference to the waiter. `futex_wake` takes
+/// the slot when it is the one that wakes a task, so a slot still present
+/// after a wait ends means something else ended it — a signal, a kill, or the
+/// deadline. Without an unconditional self-dequeue that reference is stranded
+/// until teardown or an unrelated wake on the same address, and the return
+/// value is also what distinguishes a real wake from every other way out.
+pub fn test_futex_waiter_always_leaves_its_bucket() -> TestResult {
+    let _fixture = SchedFixture::new();
+
+    let task_id = task_create(
+        b"FutexPark\0".as_ptr() as *const c_char,
+        dummy_task_entry,
+        ptr::null_mut(),
+        TaskPriority::Normal.as_u8(),
+        TASK_FLAG_KERNEL_MODE,
+    );
+    if task_id == INVALID_TASK_ID {
+        return TestResult::Fail;
+    }
+    if !scheduler::clear_nascent_for_test(task_id) || !dispatch_as_current(task_id) {
+        park_bootstrap_on_current_cpu();
+        let _ = task_terminate(task_id);
+        return TestResult::Fail;
+    }
+
+    let uaddr = 0x1234_5000u64;
+    let other = 0x1234_6000u64;
+    let mut outcome = TestResult::Pass;
+
+    if !crate::futex::futex_park_for_test(uaddr) {
+        klog_info!("SCHED_TEST: could not park a futex waiter");
+        outcome = TestResult::Fail;
+    }
+    if crate::futex::futex_waiters_for_test(uaddr) != 1 {
+        klog_info!("SCHED_TEST: parked waiter is not in its bucket");
+        outcome = TestResult::Fail;
+    }
+
+    // A dequeue keyed on a different address must not claim this entry.
+    if crate::futex::futex_remove_self_for_test(other, task_id) {
+        klog_info!("SCHED_TEST: dequeue matched an unrelated futex address");
+        outcome = TestResult::Fail;
+    }
+
+    // The waiter's own dequeue finds it: nothing else woke it.
+    if !crate::futex::futex_remove_self_for_test(uaddr, task_id) {
+        klog_info!("SCHED_TEST: self-dequeue did not find its own entry");
+        outcome = TestResult::Fail;
+    }
+    if crate::futex::futex_waiters_for_test(uaddr) != 0 {
+        klog_info!("SCHED_TEST: bucket still holds the entry after dequeue");
+        outcome = TestResult::Fail;
+    }
+    // Idempotent, and reports that someone else got there first.
+    if crate::futex::futex_remove_self_for_test(uaddr, task_id) {
+        klog_info!("SCHED_TEST: a second dequeue claimed to find an entry");
+        outcome = TestResult::Fail;
+    }
+
+    // A real wake takes the slot, so the self-dequeue reports "not mine".
+    if !crate::futex::futex_park_for_test(uaddr) {
+        klog_info!("SCHED_TEST: could not re-park the futex waiter");
+        outcome = TestResult::Fail;
+    }
+    if crate::futex::futex_wake(uaddr, 1) != 1 {
+        klog_info!("SCHED_TEST: futex_wake did not report one waiter");
+        outcome = TestResult::Fail;
+    }
+    if crate::futex::futex_remove_self_for_test(uaddr, task_id) {
+        klog_info!("SCHED_TEST: self-dequeue claimed an entry futex_wake had taken");
+        outcome = TestResult::Fail;
+    }
+
+    park_bootstrap_on_current_cpu();
+    let _ = task_terminate(task_id);
+    outcome
+}
+
+slopos_testing::stest!(
+    name = test_futex_waiter_always_leaves_its_bucket,
+    suite = sched_core
+);
