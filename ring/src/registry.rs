@@ -95,7 +95,13 @@ pub fn insert(ring: Ring) -> Option<usize> {
 /// lock; the caller drops it before sleeping (see `enter.rs`).
 pub fn with_ring<R>(raw_handle: usize, f: impl FnOnce(&mut Ring) -> R) -> Result<R, HandleError> {
     let slot = slot_for(raw_handle)?;
-    let mut ring = slot.lock();
+    // A task aborted while contending for the per-ring lock never runs `f`.
+    // Reported as `Stale` because that is what the caller can act on — this
+    // handle will not resolve for you — rather than widening a handle-table
+    // error with a scheduling concern no other table consumer can observe.
+    let Ok(mut ring) = slot.lock() else {
+        return Err(HandleError::Stale);
+    };
     Ok(f(&mut ring))
 }
 
@@ -125,7 +131,8 @@ pub fn remove(raw_handle: usize) {
 /// never holding both at once.
 pub fn owner_is(raw_handle: usize, pid: u32) -> bool {
     match slot_for(raw_handle) {
-        Ok(slot) => slot.lock().owner_pid == pid,
+        // An abort denies the ring, which is the safe direction.
+        Ok(slot) => slot.lock().is_ok_and(|ring| ring.owner_pid == pid),
         Err(_) => false,
     }
 }

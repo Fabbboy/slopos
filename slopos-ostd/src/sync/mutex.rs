@@ -14,7 +14,7 @@ use core::cell::UnsafeCell;
 use core::ops::{Deref, DerefMut};
 use core::sync::atomic::{AtomicBool, Ordering};
 
-use crate::sync::wait_queue::WaitQueue;
+use crate::sync::wait_queue::{WaitAbort, WaitQueue, WaitResult};
 
 /// A sleeping mutex.
 pub struct Mutex<T> {
@@ -54,31 +54,38 @@ impl<T> Mutex<T> {
 
     /// Acquire the lock, blocking the current task if necessary.
     ///
-    /// If the wait queue backend is unregistered the lock degrades to
-    /// busy-waiting on the atomic flag.
-    pub fn lock(&self) -> MutexGuard<'_, T> {
+    /// Fails with [`WaitAbort::Killed`] when the current task is marked for
+    /// death while contending. A dying task must return through its own frames
+    /// rather than park on a lock whose holder may itself be dying: this type
+    /// is released only by `MutexGuard::drop`, which never runs on a stack
+    /// nobody unwinds, so a task abandoned here holds the lock forever.
+    ///
+    /// With no wait-queue backend registered — the pre-scheduler device-probe
+    /// paths — there is no blocking surface at all and the acquire degrades to
+    /// busy-waiting on the flag.
+    ///
+    /// Killable rather than interruptible: a `SIGINT` must not abandon a
+    /// filesystem operation midway.
+    #[must_use = "an unacquired lock guards nothing"]
+    pub fn lock(&self) -> WaitResult<MutexGuard<'_, T>> {
         loop {
-            if self
-                .locked
-                .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
-                .is_ok()
-            {
-                return MutexGuard { mutex: self };
+            if let Some(guard) = self.try_lock() {
+                return Ok(guard);
             }
 
             // Slow path: enqueue under inner lock, then block until a
             // waker calls `wake_one`. The condition closure re-checks the
             // atomic flag so we don't park if the holder released between
             // our CAS attempt above and the enqueue.
-            // Every abort simply retries the CAS. With no runtime there is no
-            // blocking surface at all, so the acquire degrades to a spin on
-            // the flag.
-            if self
+            match self
                 .waiters
                 .wait_event(|| !self.locked.load(Ordering::Acquire))
-                .is_err()
             {
-                core::hint::spin_loop();
+                Ok(()) => {}
+                Err(abort @ (WaitAbort::Killed | WaitAbort::Interrupted)) => return Err(abort),
+                // `Timeout` cannot arise on an untimed wait; treating it as a
+                // spin rather than a panic keeps this path panic-free.
+                Err(_) => core::hint::spin_loop(),
             }
         }
     }

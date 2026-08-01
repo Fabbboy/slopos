@@ -143,17 +143,23 @@ pub fn test_edge_event_wait_timeout() -> TestResult {
 pub fn test_sleep_mutex_lock_unlock() -> TestResult {
     let m = Mutex::new(7u32);
     {
-        let mut g = m.lock();
+        let Ok(mut g) = m.lock() else {
+            return fail!("uncontended lock must succeed");
+        };
         *g += 1;
     }
-    let g = m.lock();
+    let Ok(g) = m.lock() else {
+        return fail!("uncontended relock must succeed");
+    };
     assert_eq_test!(*g, 8, "mutated value must persist across lock cycles");
     pass!()
 }
 
 pub fn test_sleep_mutex_try_lock_contention() -> TestResult {
     let m = Mutex::new(0u32);
-    let g = m.lock();
+    let Ok(g) = m.lock() else {
+        return fail!("uncontended lock must succeed");
+    };
     assert_test!(
         m.try_lock().is_none(),
         "try_lock must fail while the mutex is held"
@@ -176,7 +182,9 @@ pub fn test_sleep_mutex_relock_after_try() -> TestResult {
         *g = 2;
     }
     // A blocking lock after a try_lock release must observe the write.
-    let g = m.lock();
+    let Ok(g) = m.lock() else {
+        return fail!("uncontended lock must succeed");
+    };
     assert_eq_test!(*g, 2, "lock after try_lock must observe the mutation");
     pass!()
 }

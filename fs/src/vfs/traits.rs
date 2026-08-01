@@ -155,6 +155,8 @@ pub enum VfsError {
     BadFileDescriptor,
     /// Resource busy (EBUSY)
     Busy,
+    /// The calling task was aborted while waiting for the filesystem (EINTR).
+    Interrupted,
 }
 
 impl VfsError {
@@ -179,6 +181,7 @@ impl VfsError {
             Self::InvalidArgument => Errno::EINVAL,
             Self::BadFileDescriptor => Errno::EBADF,
             Self::Busy => Errno::EBUSY,
+            Self::Interrupted => Errno::EINTR,
         }
     }
 }

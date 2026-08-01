@@ -82,7 +82,7 @@ impl StaticExt2Vfs {
         if !EXT2_VFS_INIT.is_set() {
             return Err(VfsError::IoError);
         }
-        let mut guard = CACHED_EXT2.lock();
+        let mut guard = CACHED_EXT2.lock().map_err(|_| VfsError::Interrupted)?;
         let cached = guard.as_mut().ok_or(VfsError::IoError)?;
         let (superblock, block_size, inode_size) =
             (cached.superblock, cached.block_size, cached.inode_size);
@@ -291,7 +291,10 @@ pub fn ext2_vfs_init_with_device(device: KBox<dyn BlockDevice + Send + Sync>) ->
         }
     };
 
-    let mut guard = CACHED_EXT2.lock();
+    let Ok(mut guard) = CACHED_EXT2.lock() else {
+        EXT2_VFS_INIT.reset();
+        return Err(VfsError::Interrupted);
+    };
     *guard = Some(CachedExt2 {
         device,
         superblock,
@@ -318,7 +321,9 @@ pub fn ext2_vfs_sync() -> VfsResult<()> {
     if !EXT2_VFS_INIT.is_set() {
         return Ok(());
     }
-    let mut guard = CACHED_EXT2.lock();
+    let Ok(mut guard) = CACHED_EXT2.lock() else {
+        return Err(VfsError::Interrupted);
+    };
     let Some(cached) = guard.as_mut() else {
         return Ok(());
     };

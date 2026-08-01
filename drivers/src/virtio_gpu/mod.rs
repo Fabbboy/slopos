@@ -589,7 +589,9 @@ impl VirtioGpuInner {
         cmd_len: u32,
         resp_len: u32,
     ) -> Option<OwnedPageFrame> {
-        let _g = self.ctrl_lock.lock();
+        let Ok(_g) = self.ctrl_lock.lock() else {
+            return None;
+        };
         let phys = page.phys_u64();
         let segs = [
             (phys, cmd_len, 0u16),
@@ -602,7 +604,9 @@ impl VirtioGpuInner {
     /// Submit a single-descriptor cursor command (no response) and block until
     /// the device reclaims the descriptor.
     fn cursor_submit_page(&self, page: OwnedPageFrame, cmd_len: u32) -> bool {
-        let _g = self.cursor_lock.lock();
+        let Ok(_g) = self.cursor_lock.lock() else {
+            return false;
+        };
         let phys = page.phys_u64();
         let segs = [(phys, cmd_len, 0u16)];
         match self.submit_and_notify(QSel::Cursor, page, &segs) {

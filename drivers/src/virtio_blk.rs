@@ -496,7 +496,12 @@ impl VirtioBlkInner {
             return false;
         }
 
-        let _io = self.io_lock.lock();
+        // Serialises the whole request against the other in-flight slot. An
+        // abort here means the caller is dying and must not start a DMA it
+        // will never harvest.
+        let Ok(_io) = self.io_lock.lock() else {
+            return false;
+        };
 
         let buffers = match RequestBuffers::allocate() {
             Some(b) => b,
@@ -562,7 +567,9 @@ impl VirtioBlkInner {
     /// successful no-op. The request is a 2-descriptor chain — header + status,
     /// no data phase — distinct from `do_request`'s 3-descriptor layout.
     fn do_flush(&self) -> bool {
-        let _io = self.io_lock.lock();
+        let Ok(_io) = self.io_lock.lock() else {
+            return false;
+        };
 
         {
             let state = self.state.lock();
