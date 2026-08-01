@@ -20,7 +20,9 @@ use slopos_fs::fileio::{
     FileRef, file_poll_clear_registrations, file_poll_fused_ref, file_poll_track_registrations,
     file_poll_unfused_by_token, fileio_clone_file_ref,
 };
-use slopos_kernel_services::driver_runtime::{block_current_task_with_timeout, has_pending_signal};
+use slopos_kernel_services::driver_runtime::{
+    block_current_task_with_timeout, current_task_wait_aborted,
+};
 use slopos_kernel_services::platform::get_time_ms;
 use slopos_ostd::KVec;
 
@@ -535,7 +537,7 @@ fn harvest(pid: u32, task_id: u32, raw_handle: usize, min_complete: u32) -> i32 
         // harvest_step posting -ETIME, which may then satisfy
         // min_complete.)
         unregister(task_id, &tokens);
-        if has_pending_signal() {
+        if current_task_wait_aborted() {
             return eno(Errno::EINTR);
         }
     }

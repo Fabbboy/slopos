@@ -354,7 +354,7 @@ define_syscall!(syscall_poll
             slopos_fs::fileio::file_poll_clear_registrations(task_id);
         }
 
-        if slopos_kernel_services::driver_runtime::has_pending_signal() {
+        if slopos_kernel_services::driver_runtime::current_task_wait_aborted() {
             return Err(Errno::EINTR);
         }
     }
@@ -560,7 +560,7 @@ define_syscall!(syscall_select
             slopos_fs::fileio::file_poll_clear_registrations(task_id);
         }
 
-        if slopos_kernel_services::driver_runtime::has_pending_signal() {
+        if slopos_kernel_services::driver_runtime::current_task_wait_aborted() {
             return Err(Errno::EINTR);
         }
     }

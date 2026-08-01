@@ -1807,7 +1807,7 @@ pub fn socket_connect(sock_idx: u32, addr: [u8; 4], port: u16) -> i32 {
     let deadline_ms = slopos_kernel_services::clock::uptime_ms().saturating_add(30_000);
 
     loop {
-        if slopos_kernel_services::driver_runtime::has_pending_signal() {
+        if slopos_kernel_services::driver_runtime::current_task_wait_aborted() {
             let _ = tcp::abort(tcp_idx);
             let mut table = NEW_SOCKET_TABLE.lock();
             if let Some(sock) = table.get_mut(sock_idx as usize) {

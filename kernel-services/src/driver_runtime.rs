@@ -31,6 +31,7 @@ slopos_service_core::define_service! {
         unblock_task(task_id: u32) -> c_int;
         swap_parked_wait_queue(queue: *mut core::ffi::c_void) -> *mut core::ffi::c_void;
         current_task_is_killed() -> bool;
+        current_task_wait_aborted() -> bool;
         register_idle_wakeup_callback(callback: Option<fn() -> c_int>);
         signal_process_group(pgid: u32, signum: u8) -> bool;
         signal_session(sid: u32, signum: u8) -> bool;

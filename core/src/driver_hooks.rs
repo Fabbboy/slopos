@@ -142,6 +142,21 @@ fn runtime_current_task_is_killed() -> bool {
     Current::get().is_some_and(|current| current.task().is_killed())
 }
 
+/// Whether the current task must stop waiting, for any reason.
+///
+/// The pair, not either half: a kill is deliberately not a signal — it sits
+/// outside the deliverable range so no delivery path can consume or mask it —
+/// so a loop that polls only for signals never notices one. This is what a
+/// hand-rolled polling loop uses in place of the abort probe the wait
+/// primitives run for their callers.
+fn runtime_current_task_wait_aborted() -> bool {
+    Current::get().is_some_and(|current| {
+        let task = current.task();
+        task.is_killed()
+            || ((task.flags & TASK_FLAG_USER_MODE) != 0 && task_has_deliverable_signal(task))
+    })
+}
+
 // ---------------------------------------------------------------------------
 // Publish which wait queue the current task is parked on, so teardown can
 // unlink its stack-pinned wait node.
@@ -235,6 +250,7 @@ static DRIVER_RUNTIME_SERVICES: DriverRuntimeServices = DriverRuntimeServices {
     unblock_task: runtime_unblock_task,
     swap_parked_wait_queue: runtime_swap_parked_wait_queue,
     current_task_is_killed: runtime_current_task_is_killed,
+    current_task_wait_aborted: runtime_current_task_wait_aborted,
     register_idle_wakeup_callback: scheduler::scheduler_register_idle_wakeup_callback,
     signal_process_group: runtime_signal_process_group,
     signal_session: runtime_signal_session,
