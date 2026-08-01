@@ -6477,6 +6477,25 @@ pub fn test_broadcast_kill_spares_kernel_tasks() -> TestResult {
     );
     drop(kernel_guard);
 
+    // The damaging arm: SIGKILL is not signal-gated, so an explicitly named
+    // kernel task would be torn down outright. process_list reports every
+    // registered task's id, so naming one is not a guess.
+    let mut named_frame: KBox<UserContext> = KBox::zeroed().expect("alloc");
+    named_frame.regs_mut().rdi = kernel_id as u64;
+    named_frame.regs_mut().rsi = SIGKILL as u64;
+    let _ = with_user_process_context(pid, || {
+        crate::syscall::dispatch::dispatch_handler(syscall_kill, &user_guard, &mut *named_frame)
+    });
+    assert_eq_test!(
+        named_frame.rax(),
+        slopos_abi::Errno::ESRCH.as_u64(),
+        "kill() must not name a kernel task"
+    );
+    assert_test!(
+        task_find_by_id(kernel_id).is_some(),
+        "a named SIGKILL tore down a kernel task"
+    );
+
     task_terminate(kernel_id);
     task_terminate(user_id);
     pass!()

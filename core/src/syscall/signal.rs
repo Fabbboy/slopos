@@ -65,21 +65,25 @@ impl TargetSet {
     }
 }
 
-/// Whether a broadcast `kill` may name this task.
+/// Whether `kill` may name this task at all.
 ///
-/// Kernel tasks are structurally excluded from signals — `claim_pending_signal`
-/// returns `Done` for them before it even reads the pending mask — so naming
-/// one in a fanout can only ever reach a path that is *not* signal-gated. That
-/// is how `kill(-1, SIGKILL)` reached the driver threads, which own device
-/// state and hardware interrupt lines and have no way to shut down cleanly on
-/// demand.
-fn broadcast_may_signal(flags: u16) -> bool {
+/// Kernel tasks are structurally excluded from signal *delivery* —
+/// `claim_pending_signal` returns `Done` for them before it even reads the
+/// pending mask — so naming one can only ever reach the SIGKILL arm, which is
+/// not signal-gated and terminates by id. That put the driver threads, which
+/// own device state and hardware interrupt lines and have no way to stop
+/// cleanly on demand, one `kill` away from teardown.
+///
+/// This gates the explicitly-named target as well as the fanouts, because
+/// `process_list` reports every registered task's id and name, kernel tasks
+/// included, so naming one is not a guess.
+fn signal_may_name(flags: u16) -> bool {
     (flags & TASK_FLAG_USER_MODE) != 0
 }
 
 fn collect_targets_for_group(pgid: u32, targets: &mut TargetSet) {
     task_for_each_active(|task| {
-        if broadcast_may_signal(task.flags) && task.pgid() == pgid {
+        if signal_may_name(task.flags) && task.pgid() == pgid {
             targets.push(task.task_id);
         }
     });
@@ -87,7 +91,7 @@ fn collect_targets_for_group(pgid: u32, targets: &mut TargetSet) {
 
 fn collect_targets_for_all(exclude_task_id: u32, targets: &mut TargetSet) {
     task_for_each_active(|task| {
-        if broadcast_may_signal(task.flags)
+        if signal_may_name(task.flags)
             && task.task_id != INVALID_TASK_ID
             && task.task_id != exclude_task_id
         {
@@ -198,8 +202,11 @@ define_syscall!(syscall_kill
     let mut targets = TargetSet::new();
     if pid > 0 {
         let target_id = pid as u32;
-        if task_find_by_id(target_id).is_none() {
-            return SyscallResult::Err(Errno::ESRCH);
+        // A kernel task is not a process, so ESRCH rather than EPERM: naming
+        // one is not a permission question, it is a category error.
+        match task_find_by_id(target_id) {
+            Some(target) if signal_may_name(target.flags) => {}
+            _ => return SyscallResult::Err(Errno::ESRCH),
         }
         targets.push(target_id);
     } else if pid == 0 {
