@@ -998,7 +998,6 @@ fn mark_task_terminated(task: &Task, resolved_id: u32) {
     let plan = stamp_exit_state(task, resolved_id, now);
 
     scheduler::cancel_sleep(resolved_id);
-    crate::futex::futex_remove_task(resolved_id);
 
     // Unlink the wait node of a task parked in `wait_event*`. The node lives on
     // the dying task's kernel stack, and that stack slot is recycled rather
@@ -1006,12 +1005,6 @@ fn mark_task_terminated(task: &Task, resolved_id: u32) {
     // next wake on that queue — after the memory has been handed to another
     // task.
     slopos_ostd::sync::wait_queue::purge_parked_wait_node(task.parked_wait_queue(), resolved_id);
-
-    // Release any waitpid wait-reference this task held on its target. A task
-    // SIGKILL'd while parked in `task_wait_for` never unwinds its own stack,
-    // so the reference it took on the target must be dropped here or the
-    // target cannot be destroyed.
-    scheduler::release_wait_ref(resolved_id);
 
     if let Some(clear_tid) = plan.clear_tid {
         if let Ok(clear_ptr) = UserPtr::<u32>::try_new(clear_tid) {

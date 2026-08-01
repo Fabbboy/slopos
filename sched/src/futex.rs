@@ -292,35 +292,6 @@ pub fn futex_wake(uaddr: u64, max_wake: u32) -> i64 {
     woken as i64
 }
 
-/// Remove a specific task from all futex wait queues.
-///
-/// Called when a task is terminated or exits abnormally while
-/// blocked on a futex. This prevents dangling pointers in the
-/// wait queue.
-///
-/// Keyed by id, not by address: the buckets store ids, so an id is the only
-/// thing this needs to match against them.
-pub fn futex_remove_task(target_id: u32) {
-    for bucket_mutex in FUTEX_TABLE.iter() {
-        let mut bucket = bucket_mutex.lock();
-        let mut removed = 0usize;
-        for waiter in bucket.waiters.iter_mut() {
-            if waiter.is_empty() || waiter.task_id != target_id {
-                continue;
-            }
-            let taken = core::mem::replace(waiter, FutexWaiter::empty());
-            removed += 1;
-            // Drop the bucket's owning reference. Never the last one — the
-            // task's own existence reference outlives it — so this is a bare decrement under
-            // the bucket lock, and any retirement it triggers self-defers.
-            if let Some(waiter) = taken.task.into_inner() {
-                task_put(waiter);
-            }
-        }
-        bucket.count = bucket.count.saturating_sub(removed);
-    }
-}
-
 /// Wake one waiter on the given futex address.
 ///
 /// Convenience function used by the thread-exit path for
