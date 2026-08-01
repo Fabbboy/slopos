@@ -6816,3 +6816,71 @@ slopos_testing::stest!(
     name = test_terminated_waiter_leaves_no_wait_node,
     suite = sched_core
 );
+
+/// A terminal task running on a CPU is descheduled at the next tick.
+///
+/// Every arm of the tick handler that declines to preempt — the no-preempt
+/// flag, an unspent time slice, an empty ready queue — returns without
+/// requesting a reschedule. A task killed from a peer CPU is left `Zombie`
+/// while still executing, so without a terminal-status escape above those arms
+/// it keeps running as a Zombie for as long as it likes, and the deferred
+/// cleanup that runs in the switch tail never happens.
+pub fn test_terminal_task_is_descheduled_at_the_tick() -> TestResult {
+    let _fixture = SchedFixture::new();
+
+    let task_id = task_create(
+        b"TickExit\0".as_ptr() as *const c_char,
+        dummy_task_entry,
+        ptr::null_mut(),
+        TaskPriority::Normal.as_u8(),
+        TASK_FLAG_KERNEL_MODE,
+    );
+    if task_id == INVALID_TASK_ID {
+        return TestResult::Fail;
+    }
+    if !scheduler::clear_nascent_for_test(task_id) || !dispatch_as_current(task_id) {
+        park_bootstrap_on_current_cpu();
+        let _ = task_terminate(task_id);
+        klog_info!("SCHED_TEST: could not dispatch the tick fixture task");
+        return TestResult::Fail;
+    }
+
+    let mut outcome = TestResult::Pass;
+
+    // The fixture leaves the scheduler disabled, and the tick's first arm
+    // returns on that — without this every check below would pass vacuously.
+    scheduler::set_scheduler_enabled_for_test(true);
+
+    // Control: a live task with a full quantum and an empty ready queue is
+    // left alone, which is what makes the escape below load-bearing.
+    PreemptGuard::clear_reschedule_pending();
+    scheduler_timer_tick();
+    if PreemptGuard::is_reschedule_pending() {
+        klog_info!("SCHED_TEST: a live task was preempted with an empty ready queue");
+        outcome = TestResult::Fail;
+    }
+
+    // Terminal status, still this CPU's current: the tick must deschedule it.
+    if task_set_state(task_id, TaskStatus::Zombie) != 0 {
+        klog_info!("SCHED_TEST: could not publish Zombie on the fixture task");
+        outcome = TestResult::Fail;
+    } else {
+        PreemptGuard::clear_reschedule_pending();
+        scheduler_timer_tick();
+        if !PreemptGuard::is_reschedule_pending() {
+            klog_info!("SCHED_TEST: a Zombie task kept the CPU past a tick");
+            outcome = TestResult::Fail;
+        }
+    }
+
+    scheduler::set_scheduler_enabled_for_test(false);
+    PreemptGuard::clear_reschedule_pending();
+    park_bootstrap_on_current_cpu();
+    let _ = task_terminate(task_id);
+    outcome
+}
+
+slopos_testing::stest!(
+    name = test_terminal_task_is_descheduled_at_the_tick,
+    suite = sched_core
+);

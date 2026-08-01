@@ -173,6 +173,13 @@ pub(crate) fn set_scheduler_enabled(enabled: bool) {
     SCHEDULER_ENABLED.store(value, Ordering::Release);
 }
 
+/// Drive `SCHEDULER_ENABLED` from a test. `init_scheduler` leaves it clear, so
+/// a test that means to exercise the tick handler has to turn it on.
+#[cfg(feature = "test-hooks")]
+pub fn set_scheduler_enabled_for_test(enabled: bool) {
+    set_scheduler_enabled(enabled);
+}
+
 #[inline]
 pub(crate) fn is_scheduling_active() -> bool {
     SCHEDULER_ENABLED.load(Ordering::Acquire) != 0
@@ -2380,6 +2387,26 @@ pub fn scheduler_timer_tick() {
 
     if running_idle {
         mark_preempt_if_ready(cpu_id);
+        return;
+    }
+
+    // A task whose status is already terminal must stop running, and no arm
+    // below will notice: the no-preempt flag, an unspent time slice and an
+    // empty ready queue each return without a reschedule, so a killed task
+    // alone on a CPU keeps executing as a Zombie indefinitely. Requesting the
+    // reschedule is enough — a terminal task is not schedulable, so the
+    // dispatcher picks idle and the switch tail reaches
+    // `cleanup_current_task_after_switch`.
+
+    // A task whose status is already terminal must stop running, and no arm
+    // below will notice: the no-preempt flag, an unspent time slice and an
+    // empty ready queue each return without a reschedule, so a killed task
+    // alone on a CPU keeps executing as a Zombie indefinitely. Requesting the
+    // reschedule is enough — a terminal task is not schedulable, so the
+    // dispatcher picks idle and the switch tail reaches
+    // `cleanup_current_task_after_switch`.
+    if current.task().is_exited() {
+        scheduler_request_reschedule(RescheduleReason::TimerTick);
         return;
     }
 

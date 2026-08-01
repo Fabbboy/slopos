@@ -853,6 +853,14 @@ pub fn task_terminate(task_id: u32) -> c_int {
     mark_task_terminated(task, resolved_id);
 
     let defer_cleanup_to_running_cpu = !is_current && task.on_cpu();
+    if defer_cleanup_to_running_cpu {
+        // The victim is executing on a peer CPU and its status is now terminal.
+        // Without a nudge it keeps running until that CPU's next timer tick,
+        // which on an otherwise-idle CPU it may reach only after a full
+        // quantum. The tick handler's terminal-status escape is what turns the
+        // interrupt into a deschedule.
+        crate::lifecycle::send_reschedule_ipi(task.last_cpu() as usize);
+    }
     if is_current {
         cleanup_task_process_resources(task, resolved_id, TaskProcessCleanupMode::KeepVm);
     } else if !defer_cleanup_to_running_cpu {
