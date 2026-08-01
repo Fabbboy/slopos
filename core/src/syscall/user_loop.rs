@@ -93,8 +93,11 @@ fn user_task_loop() -> ! {
     loop {
         // Marked for death before this task ever reached userland, or between
         // a syscall exit and here: leave through its own exit path rather than
-        // entering user mode to be stopped at the next boundary.
+        // entering user mode to be stopped at the next boundary. Routed
+        // through delivery so the exit code comes from the pending signal's
+        // own disposition rather than being invented here.
         if current.task().is_killed() {
+            crate::syscall::signal::deliver_pending_signal(&current, user_ctx);
             scheduler_task_exit_impl();
         }
 

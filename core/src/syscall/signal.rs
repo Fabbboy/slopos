@@ -19,7 +19,9 @@ use slopos_ostd::user::context::{
 use crate::syscall::args::{Signum, UserPtr};
 use crate::syscall::result::SyscallResult;
 use slopos_sched::scheduler::{schedule, unblock_task};
-use slopos_sched::task::{task_find_by_id, task_for_each_active, task_signal_post, task_terminate};
+use slopos_sched::task::{
+    task_find_by_id, task_for_each_active, task_kill_and_wake, task_signal_post, task_terminate,
+};
 use slopos_sched::task_struct::{SignalAction, Task};
 use slopos_sched::trap::trap_running_on_exception_stack;
 
@@ -250,7 +252,6 @@ define_syscall!(syscall_kill
     };
 
     let mut signaled = 0usize;
-    let mut caller_terminated = false;
 
     for target_id in targets.iter() {
         let Some(target) = task_find_by_id(*target_id) else {
@@ -258,12 +259,20 @@ define_syscall!(syscall_kill
         };
 
         if signum == SIGKILL {
-            if task_terminate(*target_id) == 0 {
-                signaled += 1;
-                if *target_id == caller_id {
-                    caller_terminated = true;
-                }
-            }
+            // An ordinary post, plus the flag that makes a *blocked* target
+            // act on it. It stays reliably fatal without a special case:
+            // SIG_UNCATCHABLE is stripped from every sa_mask and from
+            // set_signal_blocked, so SIGKILL is always deliverable, and
+            // rt_sigaction refuses a handler for it — so the disposition is
+            // always SIG_DFL, whose default is Terminate.
+            //
+            // The flag is what a task parked in a blocking primitive sees: it
+            // aborts the wait, the target returns through its own frames
+            // running their destructors, and it exits at its next
+            // return-to-user boundary rather than being abandoned mid-stack.
+            let _ = task_signal_post(&target, SIGKILL);
+            task_kill_and_wake(&target);
+            signaled += 1;
             continue;
         }
 
@@ -279,11 +288,9 @@ define_syscall!(syscall_kill
         return SyscallResult::Err(Errno::ESRCH);
     }
 
-    if caller_terminated {
-        schedule();
-        return SyscallResult::NoReturn;
-    }
-
+    // A self-kill returns normally and dies one frame later, in the signal
+    // delivery at the end of syscall_handle: same CPU, same stack, after this
+    // frame has been left rather than through it.
     SyscallResult::Ok(0)
 });
 
@@ -580,23 +587,26 @@ fn deliver_pending_signal_core(
 ) {
     let task_ref = current.task();
 
-    // A task marked for death returns to its own exit path rather than to
-    // userland. Every caller has already established that this frame returns
-    // to CPL3 and is not on an exception stack, so what it abandons is a
-    // register save area plus the IRET payload on this task's own kernel
-    // stack — memory the exit path is about to free, owning no Rust value.
-    // That is why abandoning it is sound here and is not sound at an
-    // arbitrary kernel blocking point.
-    if task_ref.is_killed() {
-        let task_id = task_ref.task_id;
-        if task_terminate(task_id) == 0 {
-            schedule();
-        }
-        return;
-    }
-
     let (signum, bit, action, saved_mask) = match claim_pending_signal(task_ref) {
-        SignalDisposition::Done => return,
+        SignalDisposition::Done => {
+            // Nothing to deliver. A task marked for death still leaves here
+            // rather than returning to userland — the mark is deliberately not
+            // a signal, so no disposition covers it.
+            //
+            // Every caller has already established that this frame returns to
+            // CPL3 and is not on an exception stack, so what it abandons is a
+            // register save area plus the IRET payload on this task's own
+            // kernel stack: memory the exit path is about to free, owning no
+            // Rust value. That is why abandoning it is sound here and is not
+            // sound at an arbitrary kernel blocking point.
+            if task_ref.is_killed() {
+                let task_id = task_ref.task_id;
+                if task_terminate(task_id) == 0 {
+                    schedule();
+                }
+            }
+            return;
+        }
         SignalDisposition::Terminate(task_id) => {
             // Terminate re-enters the task through the registry and then
             // context-switches. The guard is a borrow, not an owning handle, so

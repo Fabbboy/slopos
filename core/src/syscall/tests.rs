@@ -6565,3 +6565,70 @@ slopos_testing::stest!(
     name = test_killed_task_exits_at_return_to_user,
     suite = syscall_signal
 );
+
+/// SIGKILL marks its target and lets the target exit from its own context.
+///
+/// It used to terminate by id from the caller's CPU, which abandoned the
+/// victim's kernel stack mid-frame — no destructor ran, so every resource
+/// class held across a blocking call needed a hand-written release keyed on
+/// the dying task's id. It also never went through a disposition, so the exit
+/// code stayed at the default 0 rather than the 128 + signal POSIX specifies.
+pub fn test_sigkill_marks_the_target_and_exits_with_the_signal() -> TestResult {
+    let _fixture = SyscallFixture::new();
+
+    let victim_id = create_test_user_task();
+    assert_test!(victim_id != INVALID_TASK_ID, "failed to create the victim");
+    let victim = assert_some!(task_find_by_id(victim_id), "victim lookup failed");
+    let victim_pid = victim.process_id;
+
+    let caller_id = create_test_user_task();
+    assert_test!(caller_id != INVALID_TASK_ID, "failed to create the caller");
+    let caller = assert_some!(task_find_by_id(caller_id), "caller lookup failed");
+    let caller_pid = caller.process_id;
+
+    let mut frame: KBox<UserContext> = KBox::zeroed().expect("alloc");
+    frame.regs_mut().rdi = victim_id as u64;
+    frame.regs_mut().rsi = SIGKILL as u64;
+    let _ = with_user_process_context(caller_pid, || {
+        crate::syscall::dispatch::dispatch_handler(syscall_kill, &caller, &mut *frame)
+    });
+    assert_eq_test!(frame.rax(), 0, "kill(SIGKILL) must succeed");
+
+    assert_test!(victim.is_killed(), "SIGKILL must mark the target for death");
+    assert_test!(
+        (victim.signal_pending() & sig_bit(SIGKILL)) != 0,
+        "SIGKILL must also pend as an ordinary signal, which carries the exit code"
+    );
+    let status = victim.status();
+    assert_test!(
+        status != TaskStatus::Zombie && status != TaskStatus::Terminated,
+        "the caller must not tear the victim down from its own CPU"
+    );
+
+    // The victim reaches its own return-to-user boundary and leaves there.
+    let mut victim_frame: KBox<UserContext> = KBox::zeroed().expect("alloc");
+    deliver_pending_signal_as_current(victim_id, victim_pid, &victim_frame);
+    victim_frame.regs_mut().rax = 0;
+
+    let status = victim.status();
+    assert_test!(
+        status == TaskStatus::Zombie || status == TaskStatus::Terminated,
+        "the victim must exit at its own boundary"
+    );
+    assert_eq_test!(
+        victim.exit_code.load(core::sync::atomic::Ordering::Acquire),
+        128 + SIGKILL as u32,
+        "a signalled exit reports 128 + the signal"
+    );
+
+    drop(victim);
+    drop(caller);
+    task_terminate(victim_id);
+    task_terminate(caller_id);
+    pass!()
+}
+
+slopos_testing::stest!(
+    name = test_sigkill_marks_the_target_and_exits_with_the_signal,
+    suite = syscall_signal
+);
