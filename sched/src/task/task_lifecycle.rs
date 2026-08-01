@@ -906,7 +906,7 @@ struct ExitPlan {
 /// readers do not exist. Every field this writes is therefore atomic or behind
 /// a lock, which is also what lets the teardown tail below keep using this one
 /// borrow rather than re-deriving one per call.
-fn stamp_exit_state(task: &Task, resolved_id: u32, now: u64) -> ExitPlan {
+fn stamp_exit_state(task: &Task, now: u64) -> ExitPlan {
     let last_run = task.last_run_timestamp();
     if last_run != 0 && now >= last_run {
         task.add_total_runtime(now - last_run);
@@ -915,24 +915,6 @@ fn stamp_exit_state(task: &Task, resolved_id: u32, now: u64) -> ExitPlan {
     if TaskExitReason::from_u16(task.exit_reason.load(Ordering::Acquire)) == TaskExitReason::None {
         task.exit_reason
             .store(TaskExitReason::Kernel.as_u16(), Ordering::Release);
-    }
-
-    // Stash the per-task test-report ring (if any) so the userland-test
-    // runner can drain reports even after slot recycle. Exit info no
-    // longer needs an out-of-slot copy: `Task::exit_info` is the single
-    // source of truth, kept stable until either `waitpid` consumes the
-    // Zombie or the parent itself dies and auto-reaps.
-    // One `take` under the lock rather than `is_some()` then `take()`: the
-    // ring is installed by the owning task on its first report, so the old
-    // two-step could observe `Some` and then take `None`. The guard is a
-    // temporary, so it is released before `stash_pending_drain` runs and the
-    // `KBox` never travels under the lock.
-    let reports = task.test_reports.lock().take();
-    if reports.is_some() {
-        crate::test_reports::stash_pending_drain(
-            resolved_id,
-            crate::test_reports::PendingDrain { reports },
-        );
     }
 
     // Publish exit_info BEFORE the status transition so any racing
@@ -995,7 +977,7 @@ fn stamp_exit_state(task: &Task, resolved_id: u32, now: u64) -> ExitPlan {
 fn mark_task_terminated(task: &Task, resolved_id: u32) {
     let now = kdiag_timestamp();
 
-    let plan = stamp_exit_state(task, resolved_id, now);
+    let plan = stamp_exit_state(task, now);
 
     scheduler::cancel_sleep(resolved_id);
 

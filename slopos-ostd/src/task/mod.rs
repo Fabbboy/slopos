@@ -49,10 +49,7 @@ pub use placement::{
     task_placement_strong_count, task_release_strong, with_parked, with_parked_node,
 };
 pub use state::{TaskState, TaskStateView};
-pub use test_reports::{
-    PendingDrain, TestReport, TestReportRing, alloc_ring, consume_pending_drain, empty_report,
-    pending_drain_present, stash_pending_drain,
-};
+pub use test_reports::{TestReport, TestReportRing, alloc_ring, empty_report};
 
 pub use fpu::{FPU_STATE_SIZE, FXSAVE_AREA_SIZE, FpuState, MXCSR_DEFAULT, fpu_xrstor, fpu_xsave};
 pub use fpu_owner::{

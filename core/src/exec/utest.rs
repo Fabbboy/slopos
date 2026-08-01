@@ -19,9 +19,7 @@ use slopos_testing::{TestDesc, TestResult, ktap};
 use crate::exec::{FdAction, spawn_program_with_attrs};
 use slopos_sched::scheduler::{sleep_current_task_ms, task_wait_for};
 use slopos_sched::task::{task_consume_zombie, task_find_by_id, task_peek_exit_info};
-use slopos_sched::test_reports::{
-    PendingDrain, TestReport, consume_pending_drain, pending_drain_present,
-};
+use slopos_sched::test_reports::TestReport;
 
 /// Per-utest entry point installed in every `TestDesc::run` produced by the
 /// [`utest!`](crate::utest) macro. Spawns the binary, waits for it to
@@ -130,49 +128,29 @@ fn dispatch(bin: &str, argv: Option<&[&[u8]]>) -> TestResult {
         }
     };
 
-    // Wait for the child to terminate. The pending-drain cache is the
-    // ground truth — `mark_task_terminated` writes the entry there before
-    // releasing waiters. The wait pattern below combines two strategies:
-    //
-    //   1. `task_wait_for(pid)` — the standard scheduler-blocking wait.
-    //      Wakes when the target exits via the existing `waiting_on`
-    //      protocol. This works for the common case where the runner-side
-    //      registration beats the target's termination.
-    //
-    //   2. A short polling loop afterward — re-checks `pending_drain_present`
-    //      and `task_find_by_id(pid)`. This covers two scenarios that
-    //      `task_wait_for` alone does NOT cover:
-    //
-    //        a. The runner missed the wake because of the wake-before-park
-    //           race in `task_wait_for` (target terminated before our
-    //           `waiting_on` was published, and the wake was issued against
-    //           a `waiting_on=INVALID` we hadn't set yet).
-    //        b. The runner was woken spuriously by some other path before
-    //           the target had actually run and stashed its drain. (We have
-    //           empirically observed this on this kernel: `task_wait_for`
-    //           returns within ~10ms of spawn even when the target hasn't
-    //           been dispatched yet, well before any termination.)
-    //
-    //      The poll terminates on three conditions: drain present, slot
-    //      reset (task gone), or the iteration cap. The 1 ms `sleep_ms`
-    //      step lets other CPUs make progress without burning the runner's
-    //      CPU; the cap (5000 ms) is a safety bound — a real test
-    //      shouldn't take that long.
-    if !pending_drain_present(pid) {
+    // Hold an owning handle on the child for the whole wait. That is what
+    // keeps its report ring readable after it exits: the ring lives on the
+    // Task, and this reference is what stops the slot being recycled out from
+    // under the read.
+    let Some(child) = task_find_by_id(pid) else {
+        klog_info!("UTEST: '{}' pid={} vanished before the wait", bin, pid);
+        return TestResult::Fail;
+    };
+
+    // `task_wait_for` has been observed returning before the target has run
+    // at all, so the exit cell — not the wait's return — is the ground truth.
+    // The poll covers that, and terminates on the cell being set or on the
+    // cap; 5000 ms is a safety bound, not an expected duration.
+    if !child.exit_info_is_set() {
         let _ = task_wait_for(pid);
     }
     let mut polled_ms: u32 = 0;
     const POLL_STEP_MS: u32 = 1;
     const POLL_LIMIT_MS: u32 = 5000;
-    while !pending_drain_present(pid) {
-        if task_find_by_id(pid).is_none() {
-            // Slot reset under us with no drain stashed — task crashed or
-            // was terminated by an external path that bypassed our stash.
-            break;
-        }
+    while !child.exit_info_is_set() {
         if polled_ms >= POLL_LIMIT_MS {
             klog_info!(
-                "UTEST: '{}' pid={} exceeded {}ms poll cap with no drain entry",
+                "UTEST: '{}' pid={} exceeded {}ms poll cap with no exit value",
                 bin,
                 pid,
                 POLL_LIMIT_MS
@@ -184,32 +162,22 @@ fn dispatch(bin: &str, argv: Option<&[&[u8]]>) -> TestResult {
     }
 
     // Snapshot exit info from the Task's durable `exit_info` cell before
-    // we go on to drain reports — the snapshot transitions the slot from
-    // Zombie to Terminated (or peeks if some other path already reaped),
-    // which is needed before the slot can be tier-2 reused.
+    // draining reports — the snapshot transitions the slot from Zombie to
+    // Terminated (or peeks if some other path already reaped), which is
+    // needed before the slot can be tier-2 reused.
     let exit_info = task_consume_zombie(pid).or_else(|| task_peek_exit_info(pid));
 
-    let drain = match consume_pending_drain(pid) {
-        Some(d) => d,
-        None => {
-            // No drain entry was stashed. The task either:
-            //   - never lazy-allocated `test_reports` (binary crashed before
-            //     calling `SYSCALL_TEST_REPORT` / never reached its first
-            //     reportable test case), OR
-            //   - somehow bypassed `mark_task_terminated`'s stash path.
-            // In either case there are no subtest results to surface.
-            klog_info!(
-                "UTEST: '{}' pid={} produced no drain entry — binary crashed before reporting?",
-                bin,
-                pid
-            );
-            return TestResult::Fail;
-        }
-    };
-
-    let PendingDrain {
-        reports: maybe_ring,
-    } = drain;
+    let maybe_ring = child.take_test_reports();
+    if maybe_ring.is_none() {
+        // The binary crashed before its first `SYSCALL_TEST_REPORT`, so it
+        // never lazy-allocated the ring and there are no subtest results.
+        klog_info!(
+            "UTEST: '{}' pid={} produced no reports — binary crashed before reporting?",
+            bin,
+            pid
+        );
+        return TestResult::Fail;
+    }
 
     // Move the entries out of the heap-resident ring so we can release the
     // ring's KBox before the (potentially many) per-subtest klog emissions.
