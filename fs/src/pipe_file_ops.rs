@@ -216,11 +216,19 @@ impl FileOps for PipeReadOps {
             // ad-hoc state CAS. The closure re-checks data/EOF under
             // the slot lock so the wake-up condition is observed
             // atomically with respect to the producer's slot store.
-            BUS.subscribe(read_ev(h)).wait_event(|| {
-                // Slot evaporated under us → fall out of the wait so the
-                // next iteration's lookup reports EBADF.
-                pipe::with_pipe(h, |slot| slot.len > 0 || slot.writers == 0).unwrap_or(true)
-            });
+            if BUS
+                .subscribe(read_ev(h))
+                .wait_event(|| {
+                    // Slot evaporated under us → fall out of the wait so the
+                    // next iteration's lookup reports EBADF.
+                    pipe::with_pipe(h, |slot| slot.len > 0 || slot.writers == 0).unwrap_or(true)
+                })
+                .is_err()
+            {
+                // Nothing has been transferred — the short-count return above
+                // already took that case.
+                return Errno::EINTR.as_isize();
+            }
         }
     }
 
@@ -326,7 +334,17 @@ impl FileOps for PipeWriteOps {
                 if scheduler_is_enabled() == 0 {
                     return Errno::EAGAIN.as_isize();
                 }
-                BUS.subscribe(write_ev(h)).wait_event(drain_or_close);
+                if BUS
+                    .subscribe(write_ev(h))
+                    .wait_event(drain_or_close)
+                    .is_err()
+                {
+                    return if total > 0 {
+                        total as isize
+                    } else {
+                        Errno::EINTR.as_isize()
+                    };
+                }
                 continue;
             }
 
@@ -433,7 +451,17 @@ impl FileOps for PipeWriteOps {
             }
             // Buffer drained partially but the whole staged batch
             // didn't fit — wait for room and resume the loop.
-            BUS.subscribe(write_ev(h)).wait_event(drain_or_close);
+            if BUS
+                .subscribe(write_ev(h))
+                .wait_event(drain_or_close)
+                .is_err()
+            {
+                return if total > 0 {
+                    total as isize
+                } else {
+                    Errno::EINTR.as_isize()
+                };
+            }
         }
     }
 

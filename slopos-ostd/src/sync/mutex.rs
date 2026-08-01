@@ -70,8 +70,16 @@ impl<T> Mutex<T> {
             // waker calls `wake_one`. The condition closure re-checks the
             // atomic flag so we don't park if the holder released between
             // our CAS attempt above and the enqueue.
-            self.waiters
-                .wait_event(|| !self.locked.load(Ordering::Acquire));
+            // Every abort simply retries the CAS. With no runtime there is no
+            // blocking surface at all, so the acquire degrades to a spin on
+            // the flag.
+            if self
+                .waiters
+                .wait_event(|| !self.locked.load(Ordering::Acquire))
+                .is_err()
+            {
+                core::hint::spin_loop();
+            }
         }
     }
 

@@ -386,9 +386,13 @@ fn ext2_flusher_entry(_token: KernelIoToken<'static>) {
     let mut backoff_ms: u64 = 0;
     loop {
         if backoff_ms > 0 {
-            FLUSH_WQ.wait_event_timeout(|| FLUSH_SHUTDOWN.load(Ordering::Relaxed), backoff_ms);
+            // The flag re-read below ends this loop, not the wait outcome: an
+            // early wake and an elapsed deadline both mean "look again", and a
+            // kernel task is neither killable nor signallable.
+            let _ =
+                FLUSH_WQ.wait_event_timeout(|| FLUSH_SHUTDOWN.load(Ordering::Relaxed), backoff_ms);
         } else {
-            FLUSH_WQ.wait_event_timeout(
+            let _ = FLUSH_WQ.wait_event_timeout(
                 || {
                     DIRTY_PENDING.load(Ordering::Relaxed) > 0
                         || FLUSH_SHUTDOWN.load(Ordering::Relaxed)

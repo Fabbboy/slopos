@@ -32,7 +32,7 @@ use slopos_mm::paging_defs::PAGE_SIZE_4KB;
 use slopos_ostd::KArc;
 use slopos_ostd::mm::AllocError;
 use slopos_ostd::mm::init::{Init, Initialised, SlotPtr, init_struct_with};
-use slopos_ostd::sync::wait_queue::WaitOutcome;
+use slopos_ostd::sync::WaitAbort;
 use slopos_ostd::sync::{LOCK_LEVEL_REGISTRY, LOCK_LEVEL_RESOURCE, Mutex, SpinLock, WaitQueue};
 use slopos_ostd::util::ptr_buf;
 use slopos_ostd::{klog_info, klog_warn, write_field, write_init_field};
@@ -540,8 +540,8 @@ impl VirtioGpuInner {
             QSel::Cursor => &self.cursor_waiters,
         };
         match waiters.wait_event_timeout_until(collect, CMD_TIMEOUT_MS as u64) {
-            WaitOutcome::Ready(page) => Some(page),
-            WaitOutcome::NoRuntime => {
+            Ok(page) => Some(page),
+            Err(WaitAbort::NoRuntime) => {
                 virtio::hpet_poll_wait(
                     &|| {
                         let mut st = self.state.lock();
@@ -556,7 +556,11 @@ impl VirtioGpuInner {
                 );
                 self.finish_or_orphan(which, slot_idx)
             }
-            WaitOutcome::Timeout => self.finish_or_orphan(which, slot_idx),
+            // Same as the block path: quarantine rather than free a chain the
+            // device may still be writing into.
+            Err(WaitAbort::Timeout | WaitAbort::Killed | WaitAbort::Interrupted) => {
+                self.finish_or_orphan(which, slot_idx)
+            }
         }
     }
 

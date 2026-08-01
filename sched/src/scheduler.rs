@@ -1910,13 +1910,19 @@ pub fn task_wait_for(task_id: u32) -> c_int {
     // Zombie/Terminated via a path that has not (yet) published exit_info —
     // defensive, but cheap. The exit-cell re-check also makes a colliding
     // `ChildExit` bucket harmless.
-    let _ = BUS
+    let waited = BUS
         .subscribe(KernelEvent::ChildExit {
             task: TaskSlot(target_id),
         })
         .wait_event(|| slopos_ostd::task::parked_task_has_exited(target));
 
+    // Released before the abort return as well as the success one: the entry
+    // is what pins the target, and an abort that skipped it would pin the
+    // target for as long as this task lives.
     wait_ref_release(waiter_id);
+    if waited.is_err() {
+        return -(slopos_abi::Errno::EINTR.raw());
+    }
     0
 }
 

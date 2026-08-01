@@ -24,7 +24,7 @@ use slopos_abi::event::{
 };
 use slopos_abi::net::MAX_SOCKETS;
 
-use crate::sync::wait_queue::WaitQueue;
+use crate::sync::wait_queue::{WaitQueue, WaitResult};
 
 /// The kernel's single typed event bus. See the module docs.
 pub struct EventBus {
@@ -154,17 +154,38 @@ pub struct Subscription {
 }
 
 impl Subscription {
-    /// Block the current task until `condition()` returns `true`.
+    /// Killable block until `condition()` returns `true`.
     #[inline]
-    pub fn wait_event<F: FnMut() -> bool>(&self, condition: F) -> bool {
+    pub fn wait_event<F: FnMut() -> bool>(&self, condition: F) -> WaitResult<()> {
         self.queue.wait_event(condition)
     }
 
-    /// Block the current task until `condition()` returns `true` or
-    /// `timeout_ms` milliseconds elapse. Returns `true` if the condition was
-    /// observed before the deadline.
+    /// Killable block until `condition()` returns `true` or the deadline
+    /// elapses.
     #[inline]
-    pub fn wait_event_timeout<F: FnMut() -> bool>(&self, condition: F, timeout_ms: u64) -> bool {
+    pub fn wait_event_timeout<F: FnMut() -> bool>(
+        &self,
+        condition: F,
+        timeout_ms: u64,
+    ) -> WaitResult<()> {
         self.queue.wait_event_timeout(condition, timeout_ms)
+    }
+
+    /// Block until `condition()` returns `true`, aborting on a kill or on any
+    /// deliverable signal.
+    #[inline]
+    pub fn wait_event_interruptible<F: FnMut() -> bool>(&self, condition: F) -> WaitResult<()> {
+        self.queue.wait_event_interruptible(condition)
+    }
+
+    /// Timed [`wait_event_interruptible`](Self::wait_event_interruptible).
+    #[inline]
+    pub fn wait_event_interruptible_timeout<F: FnMut() -> bool>(
+        &self,
+        condition: F,
+        timeout_ms: u64,
+    ) -> WaitResult<()> {
+        self.queue
+            .wait_event_interruptible_timeout(condition, timeout_ms)
     }
 }

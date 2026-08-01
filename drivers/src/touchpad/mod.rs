@@ -173,7 +173,9 @@ impl TouchpadWaker {
     }
     /// Park until armed; consumes one edge.
     fn wait(&self) {
-        self.wq.wait_event(|| {
+        // A kernel task is neither killable nor signallable, and this park has
+        // no deadline, so the armed edge is the only way out.
+        let _ = self.wq.wait_event(|| {
             self.armed
                 .compare_exchange(true, false, Ordering::AcqRel, Ordering::Acquire)
                 .is_ok()

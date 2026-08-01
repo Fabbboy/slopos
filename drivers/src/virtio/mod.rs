@@ -8,8 +8,8 @@ pub mod queue;
 
 use core::sync::atomic::{AtomicBool, Ordering};
 use slopos_mm::mmio::MmioRegion;
+use slopos_ostd::sync::WaitAbort;
 use slopos_ostd::sync::WaitQueue;
-use slopos_ostd::sync::wait_queue::WaitOutcome;
 
 // =============================================================================
 // VirtIO PCI Capability Types
@@ -264,10 +264,10 @@ impl IrqEdgeEvent {
             || if self.try_consume() { Some(()) } else { None },
             timeout_ms as u64,
         ) {
-            WaitOutcome::Ready(()) => true,
-            WaitOutcome::Timeout => false,
+            Ok(()) => true,
             // Pre-scheduler context (probe paths): fall back to polling.
-            WaitOutcome::NoRuntime => hpet_poll_wait(&|| self.try_consume(), timeout_ms),
+            Err(WaitAbort::NoRuntime) => hpet_poll_wait(&|| self.try_consume(), timeout_ms),
+            Err(_) => false,
         }
     }
 }

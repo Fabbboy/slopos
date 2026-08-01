@@ -14,20 +14,20 @@
 //! The host-side suite here verifies the parts that touch no
 //! privileged state:
 //!
-//! - `WaitOutcome<R>` API surface — `is_ready`, `into_ready`, derive
-//!   correctness.
+//! - `WaitResult<R>` / `WaitAbort` API surface — the payload is carried out
+//!   of `Ok`, and every abort is distinguishable.
 //! - `WaitQueue::has_waiters()` is **lock-free**; it must read the
 //!   queue's intrusive-list head atom without entering the
 //!   `SpinLock`. Verifying a fresh queue reports `false` proves the
 //!   lock-free read path doesn't crash.
 //! - `WaitQueue::generation()` is a plain atomic load.
-//! - `WaitOutcome` exhibits `Debug + Clone + Copy + PartialEq + Eq`
+//! - `WaitAbort` exhibits `Debug + Clone + Copy + PartialEq + Eq`
 //!   as declared (regression guard against accidental derive drift
 //!   in future refactors).
 
 use std::sync::Mutex;
 
-use slopos_ostd::sync::wait_queue::{WaitOutcome, WaitQueue};
+use slopos_ostd::sync::wait_queue::{WaitAbort, WaitQueue, WaitResult};
 
 /// Serializes every test that touches a `WaitQueue`. `cargo test`
 /// parallelizes `#[test]` items by default, and even though our
@@ -36,68 +36,75 @@ use slopos_ostd::sync::wait_queue::{WaitOutcome, WaitQueue};
 static TEST_LOCK: Mutex<()> = Mutex::new(());
 
 // ----------------------------------------------------------------------------
-// WaitOutcome API
+// WaitResult / WaitAbort API
 // ----------------------------------------------------------------------------
 
 #[test]
-fn waitoutcome_is_ready_returns_true_only_for_ready() {
+fn waitresult_is_ok_only_when_the_condition_held() {
     let _g = TEST_LOCK.lock().unwrap();
-    let ready: WaitOutcome<u32> = WaitOutcome::Ready(42);
-    let timeout: WaitOutcome<u32> = WaitOutcome::Timeout;
-    let no_runtime: WaitOutcome<u32> = WaitOutcome::NoRuntime;
-    assert!(ready.is_ready());
-    assert!(!timeout.is_ready());
-    assert!(!no_runtime.is_ready());
+    let ready: WaitResult<u32> = Ok(42);
+    let timeout: WaitResult<u32> = Err(WaitAbort::Timeout);
+    let no_runtime: WaitResult<u32> = Err(WaitAbort::NoRuntime);
+    let killed: WaitResult<u32> = Err(WaitAbort::Killed);
+    let interrupted: WaitResult<u32> = Err(WaitAbort::Interrupted);
+    assert!(ready.is_ok());
+    assert!(timeout.is_err());
+    assert!(no_runtime.is_err());
+    assert!(killed.is_err());
+    assert!(interrupted.is_err());
 }
 
 #[test]
-fn waitoutcome_into_ready_unwraps_ready_only() {
+fn waitresult_carries_its_payload_out() {
     let _g = TEST_LOCK.lock().unwrap();
-    assert_eq!(WaitOutcome::Ready(7).into_ready(), Some(7));
-    let timeout: WaitOutcome<u32> = WaitOutcome::Timeout;
-    assert_eq!(timeout.into_ready(), None);
-    let no_runtime: WaitOutcome<u32> = WaitOutcome::NoRuntime;
-    assert_eq!(no_runtime.into_ready(), None);
+    assert_eq!(Ok::<u32, WaitAbort>(7).ok(), Some(7));
+    let timeout: WaitResult<u32> = Err(WaitAbort::Timeout);
+    assert_eq!(timeout.ok(), None);
 }
 
 #[test]
-fn waitoutcome_carries_non_copy_payload() {
+fn waitresult_carries_non_copy_payload() {
     let _g = TEST_LOCK.lock().unwrap();
-    // String is !Copy; WaitOutcome's derive bounds shouldn't require
-    // R: Copy. (R: Clone is implied by the derive on the enum.)
-    let r: WaitOutcome<String> = WaitOutcome::Ready(String::from("hello"));
+    // String is !Copy; the abort type's derives must not force R: Copy.
+    let r: WaitResult<String> = Ok(String::from("hello"));
     let cloned = r.clone();
-    assert!(matches!(cloned, WaitOutcome::Ready(ref s) if s == "hello"));
+    assert!(matches!(cloned, Ok(ref s) if s == "hello"));
     drop(r);
 }
 
 #[test]
-fn waitoutcome_derives_are_present() {
+fn waitabort_variants_are_all_distinct() {
     let _g = TEST_LOCK.lock().unwrap();
-    // Force-compile-check that Debug, Clone, Copy, PartialEq, Eq are
-    // all derived (Copy implies the trait, etc.). If any derive drops
-    // in a future refactor this test breaks at compile time.
+    // Collapsing any two of these is what the type exists to prevent: a
+    // caller must be able to tell "you are dying" from "the deadline passed".
+    let all = [
+        WaitAbort::Killed,
+        WaitAbort::Interrupted,
+        WaitAbort::Timeout,
+        WaitAbort::NoRuntime,
+    ];
+    for (i, a) in all.iter().enumerate() {
+        for (j, b) in all.iter().enumerate() {
+            assert_eq!(i == j, a == b, "{a:?} vs {b:?}");
+        }
+    }
+}
+
+#[test]
+fn waitabort_derives_are_present() {
+    let _g = TEST_LOCK.lock().unwrap();
+    // Force-compile-check that Debug, Clone, Copy, PartialEq, Eq are all
+    // derived. If any drops in a future refactor this breaks at compile time.
     fn assert_debug<T: core::fmt::Debug>() {}
     fn assert_clone<T: Clone>() {}
     fn assert_copy<T: Copy>() {}
     fn assert_partial_eq<T: PartialEq>() {}
     fn assert_eq_<T: Eq>() {}
-    assert_debug::<WaitOutcome<u32>>();
-    assert_clone::<WaitOutcome<u32>>();
-    assert_copy::<WaitOutcome<u32>>();
-    assert_partial_eq::<WaitOutcome<u32>>();
-    assert_eq_::<WaitOutcome<u32>>();
-
-    // PartialEq cross-variant comparisons.
-    let a: WaitOutcome<u32> = WaitOutcome::Ready(1);
-    let b: WaitOutcome<u32> = WaitOutcome::Ready(1);
-    let c: WaitOutcome<u32> = WaitOutcome::Ready(2);
-    let d: WaitOutcome<u32> = WaitOutcome::Timeout;
-    let e: WaitOutcome<u32> = WaitOutcome::NoRuntime;
-    assert_eq!(a, b);
-    assert_ne!(a, c);
-    assert_ne!(a, d);
-    assert_ne!(d, e);
+    assert_debug::<WaitAbort>();
+    assert_clone::<WaitAbort>();
+    assert_copy::<WaitAbort>();
+    assert_partial_eq::<WaitAbort>();
+    assert_eq_::<WaitAbort>();
 }
 
 // ----------------------------------------------------------------------------

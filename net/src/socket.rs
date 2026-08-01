@@ -710,7 +710,7 @@ use slopos_abi::syscall::{
     ERRNO_ENOTSOCK, ERRNO_EPIPE, ERRNO_EPROTONOSUPPORT, ERRNO_ETIMEDOUT, POLLERR, POLLHUP, POLLIN,
     POLLOUT,
 };
-use slopos_ostd::sync::BUS;
+use slopos_ostd::sync::{BUS, WaitAbort};
 
 use crate as net;
 use crate::tcp::{TCP_HEADER_LEN, TcpError, TcpOutSegment, TcpState};
@@ -1010,21 +1010,18 @@ fn wait_socket_event<F: FnMut() -> bool>(
         // kick is a no-op when no NIC driver is registered.
         // Allowlisted in `scripts/check_wait_predicate_purity.sh`.
         crate::napi::kick();
-        slopos_kernel_services::driver_runtime::has_pending_signal() || pred()
+        pred()
     };
     let sub = BUS.subscribe(ev);
     let observed = if timeout_ms > 0 {
-        sub.wait_event_timeout(&mut predicate, timeout_ms)
+        sub.wait_event_interruptible_timeout(&mut predicate, timeout_ms)
     } else {
-        sub.wait_event(&mut predicate)
+        sub.wait_event_interruptible(&mut predicate)
     };
-    if slopos_kernel_services::driver_runtime::has_pending_signal() {
-        return SockWait::Signal;
-    }
-    if observed {
-        SockWait::Ready
-    } else {
-        SockWait::Timeout
+    match observed {
+        Ok(()) => SockWait::Ready,
+        Err(WaitAbort::Killed | WaitAbort::Interrupted) => SockWait::Signal,
+        Err(WaitAbort::Timeout | WaitAbort::NoRuntime) => SockWait::Timeout,
     }
 }
 
@@ -2592,29 +2589,28 @@ fn udp_recv_loop(
             return errno_i32(ERRNO_EAGAIN) as i64;
         }
 
-        let wait_ok = if timeout_ms > 0 {
-            BUS.subscribe(sock_recv_ev(sock_idx)).wait_event_timeout(
-                || {
-                    let table = NEW_SOCKET_TABLE.lock();
-                    table
-                        .get(sock_idx as usize)
-                        .map(|sock| !sock.recv_queue.is_empty())
-                        .unwrap_or(true)
-                },
-                timeout_ms,
-            )
+        let queued = || {
+            let table = NEW_SOCKET_TABLE.lock();
+            table
+                .get(sock_idx as usize)
+                .map(|sock| !sock.recv_queue.is_empty())
+                .unwrap_or(true)
+        };
+        let sub = BUS.subscribe(sock_recv_ev(sock_idx));
+        let observed = if timeout_ms > 0 {
+            sub.wait_event_interruptible_timeout(queued, timeout_ms)
         } else {
-            BUS.subscribe(sock_recv_ev(sock_idx)).wait_event(|| {
-                let table = NEW_SOCKET_TABLE.lock();
-                table
-                    .get(sock_idx as usize)
-                    .map(|sock| !sock.recv_queue.is_empty())
-                    .unwrap_or(true)
-            })
+            sub.wait_event_interruptible(queued)
         };
 
-        if !wait_ok {
-            return errno_i32(ERRNO_EAGAIN) as i64;
+        match observed {
+            Ok(()) => {}
+            Err(WaitAbort::Killed | WaitAbort::Interrupted) => {
+                return errno_i32(ERRNO_EINTR) as i64;
+            }
+            Err(WaitAbort::Timeout | WaitAbort::NoRuntime) => {
+                return errno_i32(ERRNO_EAGAIN) as i64;
+            }
         }
     }
 }

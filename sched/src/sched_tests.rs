@@ -5690,83 +5690,78 @@ slopos_testing::stest!(
 // unwinding paths and runs implicitly on every successful wait.
 // =============================================================================
 
-use slopos_ostd::sync::wait_queue::{ParkedTestNode, WaitOutcome, WaitQueue};
+use slopos_ostd::sync::wait_queue::{ParkedTestNode, WaitAbort, WaitQueue};
 
 /// `wait_event_until` returns the closure's `Some(R)` immediately via
 /// the pre-check fast path, without touching the scheduler backend.
 pub fn test_wait_event_until_pre_check_returns_carried_value() -> TestResult {
     let _fixture = SchedFixture::new();
     let wq = WaitQueue::new();
-    let r: Option<u32> = wq.wait_event_until(|| Some(0xCAFE_F00D_u32));
-    if r == Some(0xCAFE_F00D_u32) {
+    let r = wq.wait_event_until(|| Some(0xCAFE_F00D_u32));
+    if r == Ok(0xCAFE_F00D_u32) {
         TestResult::Pass
     } else {
         klog_info!(
-            "WAIT_QUEUE_TEST: pre-check returned {:?}, expected Some(0xCAFE_F00D)",
+            "WAIT_QUEUE_TEST: pre-check returned {:?}, expected Ok(0xCAFE_F00D)",
             r
         );
         TestResult::Fail
     }
 }
 
-/// `wait_event_timeout_until` returns `WaitOutcome::Ready(R)` on
-/// the pre-check fast path.
+/// `wait_event_timeout_until` carries the closure's value out on the
+/// pre-check fast path.
 pub fn test_wait_event_timeout_until_pre_check_ready() -> TestResult {
     let _fixture = SchedFixture::new();
     let wq = WaitQueue::new();
-    let r: WaitOutcome<u32> = wq.wait_event_timeout_until(|| Some(7u32), 100);
-    if matches!(r, WaitOutcome::Ready(7)) {
+    let r = wq.wait_event_timeout_until(|| Some(7u32), 100);
+    if r == Ok(7u32) {
         TestResult::Pass
     } else {
         klog_info!(
-            "WAIT_QUEUE_TEST: pre-check returned {:?}, expected Ready(7)",
+            "WAIT_QUEUE_TEST: pre-check returned {:?}, expected Ok(7)",
             r
         );
         TestResult::Fail
     }
 }
 
-/// `wait_event_timeout_until` with an always-`None` closure does NOT
-/// return `Ready` — it must end in either `Timeout` (real wait
-/// elapsed) or `NoRuntime` (current task null / backend not yet
-/// fully wired in this test fixture). Both are acceptable
-/// soundness-preserving outcomes; the property we care about is
-/// "the call returns without hanging or panicking and produces a
-/// non-Ready outcome when the condition is unsatisfiable."
+/// An unsatisfiable closure never yields a value: the wait must end in
+/// `Timeout` (the deadline elapsed) or `NoRuntime` (no current task, which is
+/// what this fixture leaves behind), and must not hang or panic.
 pub fn test_wait_event_timeout_until_does_not_return_ready_on_none() -> TestResult {
     let _fixture = SchedFixture::new();
     let wq = WaitQueue::new();
-    let r: WaitOutcome<u32> = wq.wait_event_timeout_until(|| None, 1);
+    let r = wq.wait_event_timeout_until(|| None::<u32>, 1);
     match r {
-        WaitOutcome::Timeout | WaitOutcome::NoRuntime => TestResult::Pass,
-        WaitOutcome::Ready(_) => {
+        Err(WaitAbort::Timeout | WaitAbort::NoRuntime) => TestResult::Pass,
+        other => {
             klog_info!(
                 "WAIT_QUEUE_TEST: timeout test returned {:?}, expected Timeout or NoRuntime",
-                r
+                other
             );
             TestResult::Fail
         }
     }
 }
 
-/// `wait_event` (backwards-compat bool wrapper) returns `true` on
-/// the pre-check fast path.
+/// `wait_event` succeeds on the pre-check fast path.
 pub fn test_wait_event_bool_wrapper_pre_check_true() -> TestResult {
     let _fixture = SchedFixture::new();
     let wq = WaitQueue::new();
-    if wq.wait_event(|| true) {
+    if wq.wait_event(|| true).is_ok() {
         TestResult::Pass
     } else {
         TestResult::Fail
     }
 }
 
-/// `wait_event_timeout` (backwards-compat bool wrapper) returns
-/// `false` on timeout.
+/// `wait_event_timeout` reports an abort rather than success when the
+/// condition never holds.
 pub fn test_wait_event_timeout_bool_wrapper_times_out() -> TestResult {
     let _fixture = SchedFixture::new();
     let wq = WaitQueue::new();
-    if !wq.wait_event_timeout(|| false, 1) {
+    if wq.wait_event_timeout(|| false, 1).is_err() {
         TestResult::Pass
     } else {
         TestResult::Fail

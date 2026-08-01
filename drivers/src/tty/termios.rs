@@ -10,9 +10,8 @@ use slopos_abi::signal::{SIGTTOU, SIGWINCH};
 use slopos_abi::syscall::{B0, CBAUD, CcIndex, InputFlags, UserTermios, UserWinsize};
 
 use slopos_kernel_services::driver_runtime::{
-    current_task_id, current_task_pgid, current_task_sid, has_pending_signal,
-    is_current_signal_blocked_or_ignored, is_pgrp_orphaned, scheduler_is_enabled,
-    signal_process_group,
+    current_task_id, current_task_pgid, current_task_sid, is_current_signal_blocked_or_ignored,
+    is_pgrp_orphaned, scheduler_is_enabled, signal_process_group,
 };
 
 use super::driver::{TtyDriverKind, write_driver_unlocked};
@@ -22,7 +21,7 @@ use super::pty;
 use super::session::ForegroundCheck;
 use super::table::{TTY_OUTPUT_INFLIGHT, TTY_SLOTS, TTY_WRITE_LOCKS, tty_output_event};
 use super::{MAX_TTYS, PostLockWork, TtyError, TtyFlags, TtyIndex};
-use slopos_ostd::sync::BUS;
+use slopos_ostd::sync::{BUS, WaitAbort};
 
 // ---------------------------------------------------------------------------
 // Internal types
@@ -177,21 +176,26 @@ fn wait_output_idle(idx: TtyIndex) -> Result<(), TtyError> {
 
     // Slow path: wait until drain completes.
     if scheduler_is_enabled() != 0 {
-        BUS.subscribe(tty_output_event(slot)).wait_event(|| {
-            if has_pending_signal() {
-                return true;
-            }
-            if TTY_OUTPUT_INFLIGHT[slot].load(Ordering::Acquire) != 0 {
-                return false;
-            }
-            let guard = TTY_SLOTS[slot].lock();
-            match guard.as_ref() {
-                Some(tty) => tty.flags.contains(TtyFlags::HUNG_UP) || !tty.driver.output_pending(),
-                None => true, // slot gone — drain vacuously satisfied
-            }
-        });
-        if has_pending_signal() {
-            return Err(TtyError::Restart);
+        match BUS
+            .subscribe(tty_output_event(slot))
+            .wait_event_interruptible(|| {
+                if TTY_OUTPUT_INFLIGHT[slot].load(Ordering::Acquire) != 0 {
+                    return false;
+                }
+                let guard = TTY_SLOTS[slot].lock();
+                match guard.as_ref() {
+                    Some(tty) => {
+                        tty.flags.contains(TtyFlags::HUNG_UP) || !tty.driver.output_pending()
+                    }
+                    None => true, // slot gone — drain vacuously satisfied
+                }
+            }) {
+            Ok(()) | Err(WaitAbort::NoRuntime) => {}
+            Err(WaitAbort::Interrupted) => return Err(TtyError::Restart),
+            // Never Restart for a dying task: the killed bit is not
+            // deliverable, so the syscall would restart forever.
+            Err(WaitAbort::Killed) => return Err(TtyError::SignalInterrupt),
+            Err(WaitAbort::Timeout) => {}
         }
     } else {
         // Pre-scheduler fallback: busy-poll (very early boot only).

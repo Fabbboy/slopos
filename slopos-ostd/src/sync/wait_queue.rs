@@ -145,56 +145,67 @@ pub type WaitTaskHandle = u32;
 const NULL_HANDLE: WaitTaskHandle = INVALID_TASK_ID;
 
 // ---------------------------------------------------------------------------
-// WaitOutcome — the canonical result type for generic-return waits.
+// WaitAbort / WaitResult — how a wait ends.
 // ---------------------------------------------------------------------------
 
-/// Outcome of a generic-return wait (see [`WaitQueue::wait_event_until`]
-/// and [`WaitQueue::wait_event_timeout_until`]).
+/// Why a wait ended without its predicate being satisfied.
 ///
-/// Modelled on illumos's `cv_wait_sig` return semantics: the caller wants
-/// to distinguish a satisfied condition (carrying its result) from a
-/// timeout or an unavailable-runtime early-exit, without re-checking
-/// task state afterwards. This eliminates a class of "I forgot to
-/// re-check the timeout / signal-pending state after wait_event returned
-/// `false`" bugs that the bool-returning API admits.
-///
-/// The variant set is deliberately small. Signal-pending is intentionally
-/// **not** an outcome — callers check `has_pending_signal()` themselves
-/// after the wait returns, matching the existing SlopOS discipline used
-/// by `PipeReadOps::read`, the TTY input path, and the poll/select loop.
-/// Adding `Signal` here would invite double-checking and is left for a
-/// future API revision if a caller-driven need emerges.
+/// A `Result` rather than a wider enum for one reason: `core::result::Result`
+/// is `#[must_use]` and `bool`/`Option` are not, so every blocking call site
+/// has to say what it does about each way the wait can end. Adding a variant
+/// later is a compile error at each of them rather than a silent new path.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum WaitOutcome<R> {
-    /// Condition observed true; the closure's return value is carried.
-    Ready(R),
-    /// Deadline elapsed without the condition becoming true. Only emitted
-    /// by [`WaitQueue::wait_event_timeout_until`].
+pub enum WaitAbort {
+    /// The task has been marked for death. Every caller's answer is the same:
+    /// release what you hold and return.
+    Killed,
+    /// A signal the task can act on is pending. Raised only by the
+    /// `wait_event_interruptible*` tier.
+    Interrupted,
+    /// The deadline elapsed. Raised only by the `*_timeout*` entry points.
     Timeout,
-    /// Wait queue backend is not registered yet, or the current task
-    /// handle is null (idle CPU / pre-init / test harness reset). The
-    /// unbounded [`WaitQueue::wait_event_until`] returns `None` rather
-    /// than this variant; this is only surfaced by the timeout flavour.
+    /// No wait-queue backend is registered, or there is no current task —
+    /// a pre-scheduler probe path, an idle CPU, or a harness reset. There is
+    /// no blocking surface, so the caller must poll or fail rather than park.
     NoRuntime,
 }
 
-impl<R> WaitOutcome<R> {
-    /// `true` iff the outcome is `Ready(_)`.
-    #[inline]
-    pub const fn is_ready(&self) -> bool {
-        matches!(self, WaitOutcome::Ready(_))
-    }
+/// The result of every blocking entry point on [`WaitQueue`].
+pub type WaitResult<R> = Result<R, WaitAbort>;
 
-    /// Unwrap to `Option<R>`, discarding the `Timeout` / `NoRuntime`
-    /// distinction.
+/// Which non-predicate conditions abort a wait. A compile-time constant at
+/// each public entry point, so the probe the tier does not want folds away.
+#[derive(Clone, Copy)]
+struct AbortMask {
+    on_kill: bool,
+    on_signal: bool,
+}
+
+impl AbortMask {
+    const KILLABLE: Self = Self {
+        on_kill: true,
+        on_signal: false,
+    };
+    const INTERRUPTIBLE: Self = Self {
+        on_kill: true,
+        on_signal: true,
+    };
+
     #[inline]
-    pub fn into_ready(self) -> Option<R> {
-        match self {
-            WaitOutcome::Ready(r) => Some(r),
-            _ => None,
+    fn probe(self, bk: &dyn WaitQueueBackend) -> Option<WaitAbort> {
+        if self.on_kill && bk.current_task_is_killed() {
+            return Some(WaitAbort::Killed);
         }
+        if self.on_signal && bk.current_task_has_deliverable_signal() {
+            return Some(WaitAbort::Interrupted);
+        }
+        None
     }
 }
+
+/// Longest single sleep a timed wait takes before re-evaluating, so a lost
+/// wake costs a bounded delay rather than the whole remaining budget.
+const TIMEOUT_CHUNK_MS: u64 = 500;
 
 // ---------------------------------------------------------------------------
 // WaitQueueBackend trait + one-shot registration.
@@ -616,166 +627,205 @@ impl WaitQueue {
 
     /// Block the current task until `condition()` returns `true`.
     ///
-    /// # Race-close protocol (post-AB-BA fix)
-    ///
-    /// The closure is **deliberately never** evaluated while the
-    /// queue's internal `SpinLock` is held. Linux's `wait_event`
-    /// works this way too (see `___wait_event` +
-    /// `prepare_to_wait_event` in `kernel/sched/wait.c`); SlopOS's
-    /// earlier "re-check condition under the lock" shortcut leaked
-    /// whatever lock the closure took (typically a per-resource
-    /// data lock such as the pipe slot lock) into the wait-queue's
-    /// lock hierarchy. Combined with any producer that briefly held
-    /// the same data lock around its `wake_*` call (e.g.
-    /// `PipeWriteOps::write` doing `slot.lock(); write_from;
-    /// wake_one()`), the two paths formed a classical AB-BA
-    /// (`PS → WQ` on the wake side, `WQ → PS` on the wait side)
-    /// that froze two CPUs on busy-spinning ticket locks with IRQs
-    /// disabled.
-    ///
-    /// The new protocol:
-    ///
-    /// 1. Pre-check condition outside any lock (fast path).
-    /// 2. Under the queue's SpinLock: unlink any stale node, push a
-    ///    fresh one, CAS `Running → Blocked`. Then drop the lock.
-    /// 3. Re-check condition **outside** any lock.
-    /// 4. If true: force state back to `Running` (via
-    ///    [`WaitQueueBackend::set_current_runnable`]), unlink, return.
-    /// 5. Else: yield. [`WaitQueueBackend::yield_blocked_task`] is
-    ///    state-aware and silently no-ops if a wake raced in between
-    ///    step 2 and step 5, so a producer that fires `wake_*`
-    ///    between WQ-unlock and our yield does not lose its wake.
-    ///
-    /// # Memory-ordering proof
-    ///
-    /// The producer's contract is: store the wake-signal data, then
-    /// call `wake_*()`. `wake_*()` acquires this queue's SpinLock.
-    /// Two cases for the producer's WQ-acquire timing relative to
-    /// our step 2 WQ-acquire:
-    ///
-    /// - Producer **before** our step 2: lock-pair release/acquire
-    ///   establishes producer-store → our step 2 WQ.acquire →
-    ///   our step 2 WQ.release → our step 3 condition check. The
-    ///   condition closure observes the producer's data (any per-
-    ///   resource lock the closure also takes only sharpens the
-    ///   happens-before).
-    /// - Producer **after** our step 2: producer sees our queued
-    ///   node + `Blocked` state. `unblock_task` CAS `Blocked → Ready`
-    ///   succeeds. Either:
-    ///   - Our step 3 sees the data → we cancel-block, return true.
-    ///     The producer's prior `schedule_task` enqueue is benign
-    ///     (the runqueue is idempotent on duplicate push).
-    ///   - Our step 3 doesn't see the data → step 5 yield is a no-op
-    ///     (state is `Ready` not `Blocked`), we loop, fast-path's
-    ///     condition check (next iteration step 1) sees the data
-    ///     because the producer's WQ-acquire/release pair preceded
-    ///     it.
-    ///
-    /// Producers do NOT need to issue an explicit memory fence
-    /// between their data store and `wake_*()`. The SpinLock acquire
-    /// supplies the necessary release-barrier paired with our
-    /// matching acquire when we next take the queue's lock or run
-    /// any other piece of code that takes the data lock the producer
-    /// also used.
-    pub fn wait_event<F: FnMut() -> bool>(&self, mut condition: F) -> bool {
-        self.wait_event_until(|| if condition() { Some(()) } else { None })
-            .is_some()
-    }
-
-    /// Block the current task until `condition()` returns `Some(R)`,
-    /// returning the carried value. The Asterinas-style generic-return
-    /// variant; `wait_event` is now a thin wrapper around this.
-    ///
-    /// Returns `None` only when the wait-queue backend is unregistered
-    /// (pre-init, test-harness reset) or the current task handle is
-    /// null (idle CPU calling wait, which should not happen but is
-    /// defended against).
+    /// Killable: aborts with [`WaitAbort::Killed`] if the task is marked for
+    /// death, and otherwise only when the condition holds. See
+    /// [`wait_event_interruptible`](Self::wait_event_interruptible) for the
+    /// tier that also aborts on a signal.
     ///
     /// # Race-close protocol
     ///
-    /// The closure is **deliberately never** evaluated while the
-    /// queue's internal `SpinLock` is held. Linux's `wait_event`
-    /// works this way too (see `___wait_event` +
-    /// `prepare_to_wait_event` in `kernel/sched/wait.c`); SlopOS's
-    /// earlier "re-check condition under the lock" shortcut leaked
-    /// whatever lock the closure took (typically a per-resource
-    /// data lock such as the pipe slot lock) into the wait-queue's
-    /// lock hierarchy. Combined with any producer that briefly held
-    /// the same data lock around its `wake_*` call (e.g.
-    /// `PipeWriteOps::write` doing `slot.lock(); write_from;
-    /// wake_one()`), the two paths formed a classical AB-BA
-    /// (`PS → WQ` on the wake side, `WQ → PS` on the wait side)
-    /// that froze two CPUs on busy-spinning ticket locks with IRQs
-    /// disabled.
+    /// The closure is **deliberately never** evaluated while the queue's
+    /// internal `SpinLock` is held. Linux's `wait_event` works this way too
+    /// (see `___wait_event` + `prepare_to_wait_event` in `kernel/sched/wait.c`);
+    /// re-checking the condition under the lock leaks whatever lock the closure
+    /// takes — typically a per-resource data lock such as the pipe slot lock —
+    /// into the wait queue's lock hierarchy. Combined with any producer that
+    /// briefly holds the same data lock around its `wake_*` call (e.g.
+    /// `PipeWriteOps::write` doing `slot.lock(); write_from; wake_one()`), the
+    /// two paths form a classical AB-BA (`PS -> WQ` on the wake side,
+    /// `WQ -> PS` on the wait side) that freezes two CPUs on busy-spinning
+    /// ticket locks with interrupts disabled.
     ///
-    /// The protocol per iteration:
+    /// The protocol per iteration is documented on [`wait_core`](Self::wait_core).
     ///
-    /// 1. Pre-check condition outside any lock (fast path). If
-    ///    `Some(r)`, return `Some(r)` immediately.
-    /// 2. Under the queue's SpinLock: unlink any stale node, push a
-    ///    fresh one (which also resets `has_woken` and sets the queue
-    ///    back-pointer — see `push_node`), CAS `Running → Blocked`.
-    ///    Drop the lock.
-    /// 3. Re-check condition **outside** any lock, and Acquire-load
-    ///    `has_woken` to detect a producer wake that raced our
-    ///    decision to yield.
-    /// 4. Three-way decision:
-    ///    - `Some(r)`: return `Some(r)` (cancelling our Blocked CAS
-    ///      via `set_current_runnable`). The producer's wake — if any
-    ///      — already dequeued our node and `unblock_task` raced
-    ///      `Blocked → Ready`; force-Running through this path is
-    ///      sound because `set_current_runnable` is unconditional
-    ///      (Linux's `__set_current_state(TASK_RUNNING)` model — see
-    ///      `WaitQueueBackend::set_current_runnable`).
-    ///    - `None` but `woke == true`: a spurious wake fired before
-    ///      our recheck observed the data (e.g. the producer's data
-    ///      lock is not the data lock our closure takes, so the
-    ///      lock-pair barrier across the producer's data store and
-    ///      our condition load is not yet established). Cancel the
-    ///      block and loop — do NOT yield, because our state is
-    ///      already `Ready` and a yield would deschedule us into
-    ///      a permanently-blocked state.
-    ///    - `None` and `woke == false`: yield. The state-aware
-    ///      [`WaitQueueBackend::yield_blocked_task`] handles the
-    ///      rare race where a wake fires between our load of
-    ///      `has_woken` and our yield call (state is `Ready` at
-    ///      that point; yield observes it and short-circuits).
-    pub fn wait_event_until<F, R>(&self, mut condition: F) -> Option<R>
+    /// # Memory-ordering proof
+    ///
+    /// The producer's contract is: store the wake-signal data, then call
+    /// `wake_*()`, which acquires this queue's `SpinLock`. Two cases for the
+    /// producer's acquire relative to our enqueue:
+    ///
+    /// - Producer **before** our enqueue: the lock pair establishes
+    ///   producer-store -> our acquire -> our release -> our condition recheck.
+    ///   The closure observes the producer's data; any per-resource lock the
+    ///   closure also takes only sharpens the happens-before.
+    /// - Producer **after** our enqueue: it sees our queued node and `Blocked`
+    ///   state, and its `unblock_task` CAS `Blocked -> Ready` succeeds. Either
+    ///   our recheck sees the data and we cancel the block, or it does not and
+    ///   the yield is a no-op (our state is `Ready`, not `Blocked`), we loop,
+    ///   and the next pre-check sees the data because the producer's
+    ///   acquire/release pair preceded it.
+    ///
+    /// Producers do not need an explicit fence between their data store and
+    /// `wake_*()`.
+    #[inline]
+    pub fn wait_event<F: FnMut() -> bool>(&self, mut condition: F) -> WaitResult<()> {
+        self.wait_core(|| condition().then_some(()), None, AbortMask::KILLABLE)
+    }
+
+    /// Block until `condition()` returns `Some(R)`, carrying the value out.
+    /// Killable; see [`wait_event`](Self::wait_event).
+    #[inline]
+    pub fn wait_event_until<F, R>(&self, condition: F) -> WaitResult<R>
+    where
+        F: FnMut() -> Option<R>,
+    {
+        self.wait_core(condition, None, AbortMask::KILLABLE)
+    }
+
+    /// Block until `condition()` returns `true` or the deadline elapses.
+    /// Killable; see [`wait_event`](Self::wait_event).
+    #[inline]
+    pub fn wait_event_timeout<F: FnMut() -> bool>(
+        &self,
+        mut condition: F,
+        timeout_ms: u64,
+    ) -> WaitResult<()> {
+        self.wait_core(
+            || condition().then_some(()),
+            Some(timeout_ms),
+            AbortMask::KILLABLE,
+        )
+    }
+
+    /// Block until `condition()` returns `Some(R)` or the deadline elapses.
+    /// Killable; see [`wait_event`](Self::wait_event).
+    #[inline]
+    pub fn wait_event_timeout_until<F, R>(&self, condition: F, timeout_ms: u64) -> WaitResult<R>
+    where
+        F: FnMut() -> Option<R>,
+    {
+        self.wait_core(condition, Some(timeout_ms), AbortMask::KILLABLE)
+    }
+
+    /// Block until `condition()` returns `true`, aborting on a kill or on any
+    /// deliverable signal.
+    ///
+    /// A caller that returns [`WaitAbort::Interrupted`] to userland owes it an
+    /// `EINTR` or a restart; a caller that cannot express either wants
+    /// [`wait_event`](Self::wait_event) instead.
+    #[inline]
+    pub fn wait_event_interruptible<F: FnMut() -> bool>(&self, mut condition: F) -> WaitResult<()> {
+        self.wait_core(|| condition().then_some(()), None, AbortMask::INTERRUPTIBLE)
+    }
+
+    /// Generic-return [`wait_event_interruptible`](Self::wait_event_interruptible).
+    #[inline]
+    pub fn wait_event_interruptible_until<F, R>(&self, condition: F) -> WaitResult<R>
+    where
+        F: FnMut() -> Option<R>,
+    {
+        self.wait_core(condition, None, AbortMask::INTERRUPTIBLE)
+    }
+
+    /// Timed [`wait_event_interruptible`](Self::wait_event_interruptible).
+    #[inline]
+    pub fn wait_event_interruptible_timeout<F: FnMut() -> bool>(
+        &self,
+        mut condition: F,
+        timeout_ms: u64,
+    ) -> WaitResult<()> {
+        self.wait_core(
+            || condition().then_some(()),
+            Some(timeout_ms),
+            AbortMask::INTERRUPTIBLE,
+        )
+    }
+
+    /// Timed generic-return
+    /// [`wait_event_interruptible`](Self::wait_event_interruptible).
+    #[inline]
+    pub fn wait_event_interruptible_timeout_until<F, R>(
+        &self,
+        condition: F,
+        timeout_ms: u64,
+    ) -> WaitResult<R>
+    where
+        F: FnMut() -> Option<R>,
+    {
+        self.wait_core(condition, Some(timeout_ms), AbortMask::INTERRUPTIBLE)
+    }
+
+    /// The one wait loop. `timeout: None` is the unbounded flavour.
+    ///
+    /// Per iteration:
+    ///
+    /// 1. **Abort probe.** On the first iteration this is the pre-wait probe;
+    ///    on every later one it is the post-wake probe, because a return from
+    ///    `yield_blocked_task*` lands here. It runs before the predicate, so a
+    ///    task that is dying never re-enters the caller's closure.
+    /// 2. Pre-check the condition outside every lock.
+    /// 3. Check that a runtime and a current task exist; compute the remaining
+    ///    budget against a deadline fixed on the first pass, so a wait that
+    ///    loops does not silently extend itself.
+    /// 4. Under the queue lock: unlink any stale node, push a fresh one, and
+    ///    commit `Running -> Blocked`. The condition is **not** evaluated here.
+    /// 5. Re-check the condition, probe again, and load `has_woken`, all
+    ///    outside the lock. Any of the three cancels the committed block via
+    ///    `set_current_runnable` — an abort observed here must cancel it just
+    ///    as a satisfied condition does, or the caller returns marked `Blocked`
+    ///    and the next `schedule()` strands it in no runqueue.
+    /// 6. Otherwise yield, with or without a deadline.
+    ///
+    /// Every exit leaves through the single `unlink_if_linked` below the loop;
+    /// there is no `return` inside it. That is what makes a task woken by its
+    /// own kill unlink its node on its own stack, before the frame returns.
+    fn wait_core<F, R>(
+        &self,
+        mut condition: F,
+        timeout: Option<u64>,
+        aborts: AbortMask,
+    ) -> WaitResult<R>
     where
         F: FnMut() -> Option<R>,
     {
         let bk = backend();
         let _parked = ParkedQueueScope::enter(self);
         let node = core::pin::pin!(WaitNode::new());
+        let mut deadline_ms: Option<u64> = None;
 
-        loop {
-            // Step 1: pre-check condition (no locks).
+        let result = loop {
+            if let Some(abort) = aborts.probe(bk) {
+                break Err(abort);
+            }
+
             if let Some(r) = condition() {
-                self.unlink_if_linked(node.as_ref());
-                return Some(r);
+                break Ok(r);
             }
 
             if !bk.is_runtime_initialised() {
-                self.unlink_if_linked(node.as_ref());
-                return None;
+                break Err(WaitAbort::NoRuntime);
             }
-
             let task = bk.current_task_handle();
             if task == NULL_HANDLE {
-                self.unlink_if_linked(node.as_ref());
-                return None;
+                break Err(WaitAbort::NoRuntime);
             }
 
-            // Step 2: enqueue and commit Blocked under the queue lock.
-            // `push_node` resets `has_woken=false` and sets the queue
-            // back-pointer under this same critical section, so any
-            // wake from this moment on will swap `has_woken=true`
-            // (visible to step 3 via Acquire) and clear the back-pointer
-            // (visible to a racing Drop via Acquire).
-            //
-            // We do NOT call `condition()` here — that would pull the
-            // closure's data-lock into the queue's lock hierarchy and
-            // re-introduce the AB-BA documented above.
+            // Sampled after the runtime check so the clock is never read
+            // through the unregistered backend, which answers 0 and would make
+            // every deadline instantly expired.
+            let sleep_ms = match timeout {
+                None => None,
+                Some(budget) => {
+                    let deadline =
+                        *deadline_ms.get_or_insert_with(|| bk.get_time_ms().saturating_add(budget));
+                    let now = bk.get_time_ms();
+                    if now >= deadline {
+                        break Err(WaitAbort::Timeout);
+                    }
+                    Some(deadline.saturating_sub(now).min(TIMEOUT_CHUNK_MS) as u32)
+                }
+            };
+
             let marked_blocked = {
                 let inner = self.inner.lock();
                 self.unlink_locked(node.as_ref(), &inner);
@@ -784,155 +834,40 @@ impl WaitQueue {
                 bk.mark_current_blocked()
             };
 
-            // Step 3: re-check condition outside the queue lock, and
-            // also observe `has_woken` to catch a wake that raced our
-            // decision to yield. The (Ready) and (spurious-wake) arms
-            // share their cleanup — cancel block + unlink — and only
-            // differ in whether we return immediately or loop.
             let condition_ready = condition();
+            let abort = aborts.probe(bk);
             let woke = node.as_ref().has_woken_load();
-            if condition_ready.is_some() || woke {
+            if condition_ready.is_some() || abort.is_some() || woke {
                 bk.set_current_runnable();
+                // Unlinked here as well as at the funnel: a node left linked
+                // across the retry could absorb a wake aimed at another waiter.
                 self.unlink_if_linked(node.as_ref());
                 if let Some(r) = condition_ready {
-                    return Some(r);
+                    break Ok(r);
                 }
-                // Spurious wake: loop. The next iteration's pre-check
-                // observes the producer's data via the data lock's own
-                // happens-before chain (not the WQ-lock-pair).
+                if let Some(abort) = abort {
+                    break Err(abort);
+                }
                 continue;
             }
 
             if !marked_blocked {
-                // The CAS failed, but the condition and this iteration's wake
-                // bit do not explain it. In practice this is the Linux
-                // "wake before schedule" case: a prior wake made the current
-                // task Ready while it is still executing. Consume that wake by
-                // restoring Running and retrying; otherwise the task can run
-                // for a while as Ready and later appear stranded to the idle
-                // rescue backstop.
+                // The CAS failed and neither the condition nor this iteration's
+                // wake bit explains it: the Linux "wake before schedule" case,
+                // where a prior wake made this task Ready while it is still
+                // executing. Consume it and retry, or the task runs on as Ready
+                // and later looks stranded to the idle rescue backstop.
                 bk.set_current_runnable();
                 self.unlink_if_linked(node.as_ref());
                 continue;
             }
 
-            // Step 4: neither condition nor wake — yield (state-aware).
-            bk.yield_blocked_task();
-        }
-    }
-
-    /// Block the current task until `condition()` returns `true` or
-    /// `timeout_ms` milliseconds elapse. Returns `true` iff the
-    /// condition was observed true; `false` on timeout or runtime
-    /// not initialised.
-    ///
-    /// Carries the same race-close protocol as
-    /// [`wait_event`](Self::wait_event): `condition()` is never
-    /// evaluated under the queue's internal SpinLock, eliminating
-    /// the AB-BA risk between this queue and whatever lock the
-    /// closure takes. The timeout is implemented by
-    /// `yield_blocked_task_with_timeout` arming a sleep-queue entry
-    /// that fires `unblock_task` after the deadline; if a peer
-    /// `wake_*` arrives first, that path's `cancel_sleep` removes
-    /// the entry to keep the timer from firing spuriously against
-    /// the (now-`Ready`) task.
-    pub fn wait_event_timeout<F: FnMut() -> bool>(
-        &self,
-        mut condition: F,
-        timeout_ms: u64,
-    ) -> bool {
-        matches!(
-            self.wait_event_timeout_until(
-                || if condition() { Some(()) } else { None },
-                timeout_ms,
-            ),
-            WaitOutcome::Ready(_)
-        )
-    }
-
-    /// Block the current task until `condition()` returns `Some(R)` or
-    /// `timeout_ms` milliseconds elapse. Generic-return analogue of
-    /// [`wait_event_timeout`]; carries the same race-close protocol as
-    /// [`wait_event_until`] including the three-way recheck logic
-    /// (`Some` → Ready, spurious wake → cancel + loop, neither →
-    /// yield-with-timeout).
-    ///
-    /// Returns:
-    /// - `WaitOutcome::Ready(R)` if the condition was observed before
-    ///   the deadline.
-    /// - `WaitOutcome::Timeout` if the deadline elapsed first.
-    /// - `WaitOutcome::NoRuntime` if the backend is unregistered or
-    ///   the current task is null.
-    pub fn wait_event_timeout_until<F, R>(
-        &self,
-        mut condition: F,
-        timeout_ms: u64,
-    ) -> WaitOutcome<R>
-    where
-        F: FnMut() -> Option<R>,
-    {
-        let bk = backend();
-        if let Some(r) = condition() {
-            return WaitOutcome::Ready(r);
-        }
-
-        if !bk.is_runtime_initialised() {
-            return WaitOutcome::NoRuntime;
-        }
-
-        let task = bk.current_task_handle();
-        if task == NULL_HANDLE {
-            return WaitOutcome::NoRuntime;
-        }
-
-        let _parked = ParkedQueueScope::enter(self);
-        let node = core::pin::pin!(WaitNode::new());
-        node.as_ref().set_task(task);
-
-        let deadline_ms = bk.get_time_ms().saturating_add(timeout_ms);
-
-        let result = loop {
-            let now = bk.get_time_ms();
-            if now >= deadline_ms {
-                break WaitOutcome::Timeout;
+            match sleep_ms {
+                None => bk.yield_blocked_task(),
+                Some(ms) => bk.yield_blocked_task_with_timeout(ms),
             }
-
-            let remaining = deadline_ms.saturating_sub(now);
-            let sleep_ms = remaining.min(500) as u32;
-
-            // Enqueue + commit Blocked under the queue lock. Condition
-            // is NOT evaluated here (see wait_event_until for rationale).
-            // `push_node` also resets `has_woken` and sets the queue
-            // back-pointer under the same critical section.
-            let marked_blocked = {
-                let inner = self.inner.lock();
-                self.unlink_locked(node.as_ref(), &inner);
-                self.push_node(&inner, node.as_ref());
-                bk.mark_current_blocked()
-            };
-
-            // Three-way recheck: condition / has_woken / neither. See
-            // `wait_event_until` for the rationale.
-            let condition_ready = condition();
-            let woke = node.as_ref().has_woken_load();
-            if condition_ready.is_some() || woke {
-                bk.set_current_runnable();
-                self.unlink_if_linked(node.as_ref());
-                if let Some(r) = condition_ready {
-                    break WaitOutcome::Ready(r);
-                }
-                continue; // spurious wake — loop, deadline still applies.
-            }
-            if !marked_blocked {
-                bk.set_current_runnable();
-                self.unlink_if_linked(node.as_ref());
-                continue;
-            }
-            bk.yield_blocked_task_with_timeout(sleep_ms);
         };
 
-        // Always unlink before returning so the stack-pinned node
-        // isn't left dangling on the queue's list.
         self.unlink_if_linked(node.as_ref());
         result
     }

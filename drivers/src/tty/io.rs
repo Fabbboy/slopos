@@ -22,9 +22,8 @@ use slopos_abi::signal::{SIGTTIN, SIGTTOU};
 use slopos_abi::syscall::LocalFlags;
 
 use slopos_kernel_services::driver_runtime::{
-    current_task_id, current_task_pgid, current_task_sid, has_pending_signal,
-    is_current_signal_blocked_or_ignored, is_pgrp_orphaned, register_idle_wakeup_callback,
-    scheduler_is_enabled, signal_process_group,
+    current_task_id, current_task_pgid, current_task_sid, is_current_signal_blocked_or_ignored,
+    is_pgrp_orphaned, register_idle_wakeup_callback, scheduler_is_enabled, signal_process_group,
 };
 use slopos_ostd::KArc;
 use slopos_ostd::task::ProcessGroup;
@@ -37,7 +36,7 @@ use super::table::{
     tty_output_event,
 };
 use super::{MAX_TTYS, PacketEvents, PostLockWork, Tty, TtyError, TtyFlags, TtyIndex};
-use slopos_ostd::sync::BUS;
+use slopos_ostd::sync::{BUS, WaitAbort};
 
 // ---------------------------------------------------------------------------
 // Tty helper method — hardware drain
@@ -577,9 +576,6 @@ pub fn read_with_attach(
         }
 
         let wait_condition = || {
-            if has_pending_signal() {
-                return true;
-            }
             let mut wd = PostLockWork::new();
             let result = {
                 let mut guard = TTY_SLOTS[slot].lock();
@@ -608,24 +604,37 @@ pub fn read_with_attach(
             result
         };
 
-        let wait_ok = match wait_timeout_ms {
+        let waited = match wait_timeout_ms {
             Some(timeout_ms) => BUS
                 .subscribe(tty_input_event(slot))
-                .wait_event_timeout(wait_condition, timeout_ms),
+                .wait_event_interruptible_timeout(wait_condition, timeout_ms),
             None => BUS
                 .subscribe(tty_input_event(slot))
-                .wait_event(wait_condition),
+                .wait_event_interruptible(wait_condition),
         };
-        if !wait_ok {
-            return if total > 0 { Ok(total) } else { Ok(0) };
-        }
-
-        if has_pending_signal() {
-            return if total > 0 {
-                Ok(total)
-            } else {
-                Err(TtyError::Restart)
-            };
+        match waited {
+            Ok(()) => {}
+            // VTIME expiry, or no blocking surface at all: a short read.
+            Err(WaitAbort::Timeout | WaitAbort::NoRuntime) => {
+                return if total > 0 { Ok(total) } else { Ok(0) };
+            }
+            Err(WaitAbort::Interrupted) => {
+                return if total > 0 {
+                    Ok(total)
+                } else {
+                    Err(TtyError::Restart)
+                };
+            }
+            // Never Restart for a dying task: the killed bit is not
+            // deliverable, so handle_erestartsys would restart unconditionally
+            // and the syscall would loop forever.
+            Err(WaitAbort::Killed) => {
+                return if total > 0 {
+                    Ok(total)
+                } else {
+                    Err(TtyError::SignalInterrupt)
+                };
+            }
         }
     }
 }
@@ -714,25 +723,28 @@ fn wait_for_write_ready(
                 return Err(TtyError::WouldBlock);
             }
         } else {
-            BUS.subscribe(tty_output_event(peer_slot)).wait_event(|| {
-                if has_pending_signal() {
-                    return true;
-                }
-                let guard = TTY_SLOTS[peer_slot].lock();
-                match guard.as_ref() {
-                    Some(tty) => {
-                        !tty.flags.contains(TtyFlags::THROTTLED)
-                            || tty.flags.contains(TtyFlags::HUNG_UP)
-                            || tty.flags.contains(TtyFlags::PEER_CLOSED)
-                            || next_priority_byte
-                                .map(|byte| tty.ldisc.priority_control_input(byte))
-                                .unwrap_or(false)
+            match BUS
+                .subscribe(tty_output_event(peer_slot))
+                .wait_event_interruptible(|| {
+                    let guard = TTY_SLOTS[peer_slot].lock();
+                    match guard.as_ref() {
+                        Some(tty) => {
+                            !tty.flags.contains(TtyFlags::THROTTLED)
+                                || tty.flags.contains(TtyFlags::HUNG_UP)
+                                || tty.flags.contains(TtyFlags::PEER_CLOSED)
+                                || next_priority_byte
+                                    .map(|byte| tty.ldisc.priority_control_input(byte))
+                                    .unwrap_or(false)
+                        }
+                        None => true,
                     }
-                    None => true,
-                }
-            });
-            if has_pending_signal() {
-                return Err(TtyError::Restart);
+                }) {
+                Ok(()) | Err(WaitAbort::NoRuntime) => {}
+                Err(WaitAbort::Interrupted) => return Err(TtyError::Restart),
+                // Never Restart for a dying task: the killed bit is not
+                // deliverable, so the syscall would restart forever.
+                Err(WaitAbort::Killed) => return Err(TtyError::SignalInterrupt),
+                Err(WaitAbort::Timeout) => {}
             }
 
             let guard = TTY_SLOTS[peer_slot].lock();
@@ -774,22 +786,25 @@ fn wait_for_write_ready(
             // Ctrl-C — the wait predicate alone can stay false forever if
             // the master side stops draining, and delivery only happens at
             // syscall exit, which this wait would otherwise never reach.
-            BUS.subscribe(tty_output_event(master_slot)).wait_event(|| {
-                if has_pending_signal() {
-                    return true;
-                }
-                let guard = TTY_SLOTS[master_slot].lock();
-                match guard.as_ref() {
-                    Some(tty) => {
-                        !tty.ldisc.input_full()
-                            || tty.flags.contains(TtyFlags::HUNG_UP)
-                            || tty.flags.contains(TtyFlags::PEER_CLOSED)
+            match BUS
+                .subscribe(tty_output_event(master_slot))
+                .wait_event_interruptible(|| {
+                    let guard = TTY_SLOTS[master_slot].lock();
+                    match guard.as_ref() {
+                        Some(tty) => {
+                            !tty.ldisc.input_full()
+                                || tty.flags.contains(TtyFlags::HUNG_UP)
+                                || tty.flags.contains(TtyFlags::PEER_CLOSED)
+                        }
+                        None => true,
                     }
-                    None => true,
-                }
-            });
-            if has_pending_signal() {
-                return Err(TtyError::Restart);
+                }) {
+                Ok(()) | Err(WaitAbort::NoRuntime) => {}
+                Err(WaitAbort::Interrupted) => return Err(TtyError::Restart),
+                // Never Restart for a dying task: the killed bit is not
+                // deliverable, so the syscall would restart forever.
+                Err(WaitAbort::Killed) => return Err(TtyError::SignalInterrupt),
+                Err(WaitAbort::Timeout) => {}
             }
         }
 
@@ -812,20 +827,23 @@ fn wait_for_write_ready(
             return Err(TtyError::WouldBlock);
         }
     } else {
-        BUS.subscribe(tty_output_event(slot)).wait_event(|| {
-            if has_pending_signal() {
-                return true;
-            }
-            let guard = TTY_SLOTS[slot].lock();
-            match guard.as_ref() {
-                Some(tty) => {
-                    !tty.ldisc.is_stopped() && !tty.flags.contains(TtyFlags::OUTPUT_STOPPED)
+        match BUS
+            .subscribe(tty_output_event(slot))
+            .wait_event_interruptible(|| {
+                let guard = TTY_SLOTS[slot].lock();
+                match guard.as_ref() {
+                    Some(tty) => {
+                        !tty.ldisc.is_stopped() && !tty.flags.contains(TtyFlags::OUTPUT_STOPPED)
+                    }
+                    None => true,
                 }
-                None => true,
-            }
-        });
-        if has_pending_signal() {
-            return Err(TtyError::Restart);
+            }) {
+            Ok(()) | Err(WaitAbort::NoRuntime) => {}
+            Err(WaitAbort::Interrupted) => return Err(TtyError::Restart),
+            // Never Restart for a dying task: the killed bit is not
+            // deliverable, so the syscall would restart forever.
+            Err(WaitAbort::Killed) => return Err(TtyError::SignalInterrupt),
+            Err(WaitAbort::Timeout) => {}
         }
     }
 

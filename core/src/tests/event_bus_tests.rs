@@ -98,18 +98,18 @@ pub fn test_event_subscription_pre_check_paths() -> TestResult {
     // A condition already true returns immediately via the pre-check, without
     // needing a task to block.
     assert_test!(
-        BUS.subscribe(ev).wait_event(|| true),
+        BUS.subscribe(ev).wait_event(|| true).is_ok(),
         "wait_event pre-check returns true"
     );
     assert_test!(
-        BUS.subscribe(ev).wait_event_timeout(|| true, 100),
+        BUS.subscribe(ev).wait_event_timeout(|| true, 100).is_ok(),
         "wait_event_timeout pre-check returns true"
     );
     // An unsatisfiable condition with no task context returns `false`
     // (Timeout or NoRuntime) — never spuriously true — and leaves the queue
     // empty.
     assert_test!(
-        !BUS.subscribe(ev).wait_event_timeout(|| false, 1),
+        BUS.subscribe(ev).wait_event_timeout(|| false, 1).is_err(),
         "unsatisfiable timed wait does not report success"
     );
     assert_test!(!BUS.has_waiters(ev), "no waiter left behind");

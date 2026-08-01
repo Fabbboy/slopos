@@ -73,7 +73,9 @@ pub use spin::{
 };
 pub use spin::{SpinLock, SpinLockGuard};
 pub use wait_node::WaitNode;
-pub use wait_queue::{WaitQueue, WaitQueueBackend, WaitTaskHandle, register_wait_queue_backend};
+pub use wait_queue::{
+    WaitAbort, WaitQueue, WaitQueueBackend, WaitResult, WaitTaskHandle, register_wait_queue_backend,
+};
 
 // PCR-backed preempt guards re-exported here so the sync surface
 // stays self-contained.

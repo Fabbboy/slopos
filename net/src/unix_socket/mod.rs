@@ -203,7 +203,7 @@ pub fn unix_accept(handle: SocketHandle) -> Result<SocketHandle, i32> {
             return Err(-11); // EAGAIN
         }
 
-        BUS.subscribe(unix_ev(wq_idx)).wait_event(|| {
+        let waited = BUS.subscribe(unix_ev(wq_idx)).wait_event(|| {
             let state = UNIX_STATE.lock();
             match state.slots.get(handle.handle()) {
                 Err(_) => true, // slot reused/gone — bail out
@@ -213,6 +213,9 @@ pub fn unix_accept(handle: SocketHandle) -> Result<SocketHandle, i32> {
                 },
             }
         });
+        if waited.is_err() {
+            return Err(-4); // EINTR
+        }
     }
 }
 
@@ -382,7 +385,7 @@ pub fn unix_recv(handle: SocketHandle, buf: &mut [u8]) -> i32 {
             }
             Err(true) => return -11, // EAGAIN
             Err(false) => {
-                BUS.subscribe(unix_ev(wq_idx)).wait_event(|| {
+                let waited = BUS.subscribe(unix_ev(wq_idx)).wait_event(|| {
                     let state = UNIX_STATE.lock();
                     match state.slots.get(handle.handle()) {
                         Err(_) => true, // slot reused/gone — bail out
@@ -405,6 +408,9 @@ pub fn unix_recv(handle: SocketHandle, buf: &mut [u8]) -> i32 {
                         },
                     }
                 });
+                if waited.is_err() {
+                    return -4; // EINTR
+                }
             }
         }
     }
@@ -462,7 +468,7 @@ pub fn unix_recv_into(handle: SocketHandle, writer: &mut slopos_ostd::mm::VmWrit
             }
             Err(true) => return -11, // EAGAIN
             Err(false) => {
-                BUS.subscribe(unix_ev(wq_idx)).wait_event(|| {
+                let waited = BUS.subscribe(unix_ev(wq_idx)).wait_event(|| {
                     let state = UNIX_STATE.lock();
                     match state.slots.get(handle.handle()) {
                         Err(_) => true, // slot reused/gone — bail out
@@ -485,6 +491,9 @@ pub fn unix_recv_into(handle: SocketHandle, writer: &mut slopos_ostd::mm::VmWrit
                         },
                     }
                 });
+                if waited.is_err() {
+                    return -4; // EINTR
+                }
             }
         }
     }
@@ -643,7 +652,7 @@ pub fn unix_sendmsg(handle: SocketHandle, data: &[u8], files: &mut KVec<FileRef>
                 // iteration's capacity check + atomic publish.
                 let task_id = slopos_kernel_services::driver_runtime::current_task_id();
                 inflight_park(task_id, files);
-                BUS.subscribe(unix_ev(wq_idx)).wait_event(|| {
+                let waited = BUS.subscribe(unix_ev(wq_idx)).wait_event(|| {
                     let state = UNIX_STATE.lock();
                     match state.slots.get(handle.handle()) {
                         Err(_) => true, // slot reused/gone — bail out
@@ -666,7 +675,13 @@ pub fn unix_sendmsg(handle: SocketHandle, data: &[u8], files: &mut KVec<FileRef>
                         },
                     }
                 });
+                // Unpark before anything else: the custodian owns the files
+                // for exactly the duration of the park, and an abort must not
+                // strand them there.
                 inflight_unpark(task_id, files);
+                if waited.is_err() {
+                    return -4; // EINTR
+                }
             }
         }
     }

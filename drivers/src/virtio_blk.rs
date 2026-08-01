@@ -5,7 +5,7 @@ use slopos_ostd::KArc;
 use slopos_ostd::handle::{Handle, HandleTable};
 use slopos_ostd::mm::AllocError;
 use slopos_ostd::mm::init::{Init, Initialised, SlotPtr, init_struct_with};
-use slopos_ostd::sync::wait_queue::WaitOutcome;
+use slopos_ostd::sync::WaitAbort;
 use slopos_ostd::sync::{LOCK_LEVEL_REGISTRY, LOCK_LEVEL_RESOURCE, Mutex, SpinLock, WaitQueue};
 use slopos_ostd::{klog_debug, klog_info, write_field, write_init_field};
 
@@ -441,8 +441,8 @@ impl VirtioBlkInner {
             .req_waiters
             .wait_event_timeout_until(collect, REQUEST_TIMEOUT_MS as u64)
         {
-            WaitOutcome::Ready(buffers) => Some(buffers),
-            WaitOutcome::NoRuntime => {
+            Ok(buffers) => Some(buffers),
+            Err(WaitAbort::NoRuntime) => {
                 // Pre-scheduler context (probe / early boot): poll the
                 // used ring directly under the HPET deadline.
                 virtio::hpet_poll_wait(
@@ -455,7 +455,12 @@ impl VirtioBlkInner {
                 );
                 self.finish_or_orphan(slot_idx)
             }
-            WaitOutcome::Timeout => self.finish_or_orphan(slot_idx),
+            // A killed or signalled requester must not free a chain the
+            // device may still be writing into; quarantine it exactly as a
+            // timeout does.
+            Err(WaitAbort::Timeout | WaitAbort::Killed | WaitAbort::Interrupted) => {
+                self.finish_or_orphan(slot_idx)
+            }
         }
     }
 

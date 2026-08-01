@@ -82,7 +82,9 @@ impl NapiWaker {
     /// atomically consumes the edge so reentrancy with another
     /// [`arm_and_wake`] mid-wake re-arms naturally.
     pub fn wait(&self) {
-        self.wq.wait_event(|| {
+        // A kernel task is neither killable nor signallable, and this park has
+        // no deadline, so the armed edge is the only way out.
+        let _ = self.wq.wait_event(|| {
             self.armed
                 .compare_exchange(true, false, Ordering::AcqRel, Ordering::Acquire)
                 .is_ok()
@@ -95,14 +97,16 @@ impl NapiWaker {
     /// either on `arm_and_wake` (a sooner deadline was scheduled) or
     /// on its computed next-deadline-ms timeout.
     pub fn wait_timeout_ms(&self, timeout_ms: u32) -> bool {
-        self.wq.wait_event_timeout(
-            || {
-                self.armed
-                    .compare_exchange(true, false, Ordering::AcqRel, Ordering::Acquire)
-                    .is_ok()
-            },
-            timeout_ms as u64,
-        )
+        self.wq
+            .wait_event_timeout(
+                || {
+                    self.armed
+                        .compare_exchange(true, false, Ordering::AcqRel, Ordering::Acquire)
+                        .is_ok()
+                },
+                timeout_ms as u64,
+            )
+            .is_ok()
     }
 
     /// Force-arm without waking. Used after a post-burst recheck
