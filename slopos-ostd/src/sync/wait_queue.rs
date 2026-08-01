@@ -304,6 +304,18 @@ pub unsafe trait WaitQueueBackend: Send + Sync + 'static {
     ///
     /// Must be a no-op returning null when there is no current task.
     fn swap_parked_queue(&self, queue: *mut c_void) -> *mut c_void;
+
+    /// Whether the task running on this CPU has been marked for death.
+    ///
+    /// Must return `false` when there is no current task: a wait on an idle
+    /// CPU or a pre-init probe path is not killed, it is `NoRuntime`, and
+    /// conflating the two would fail every boot-time acquire instead of
+    /// degrading it to a spin.
+    fn current_task_is_killed(&self) -> bool;
+
+    /// Whether the task running on this CPU has a signal it can act on.
+    /// Consulted only by the interruptible wait tier.
+    fn current_task_has_deliverable_signal(&self) -> bool;
 }
 
 // ---------------------------------------------------------------------------
@@ -334,6 +346,12 @@ unsafe impl WaitQueueBackend for UnregisteredBackend {
     }
     fn swap_parked_queue(&self, _queue: *mut c_void) -> *mut c_void {
         core::ptr::null_mut()
+    }
+    fn current_task_is_killed(&self) -> bool {
+        false
+    }
+    fn current_task_has_deliverable_signal(&self) -> bool {
+        false
     }
 }
 
@@ -367,6 +385,10 @@ pub struct WaitQueueOps {
     pub get_time_ms: fn() -> u64,
     /// See [`WaitQueueBackend::swap_parked_queue`].
     pub swap_parked_queue: fn(*mut c_void) -> *mut c_void,
+    /// See [`WaitQueueBackend::current_task_is_killed`].
+    pub current_task_is_killed: fn() -> bool,
+    /// See [`WaitQueueBackend::current_task_has_deliverable_signal`].
+    pub current_task_has_deliverable_signal: fn() -> bool,
 }
 
 struct OpsBackend(&'static WaitQueueOps);
@@ -401,6 +423,12 @@ unsafe impl WaitQueueBackend for OpsBackend {
     }
     fn swap_parked_queue(&self, queue: *mut c_void) -> *mut c_void {
         (self.0.swap_parked_queue)(queue)
+    }
+    fn current_task_is_killed(&self) -> bool {
+        (self.0.current_task_is_killed)()
+    }
+    fn current_task_has_deliverable_signal(&self) -> bool {
+        (self.0.current_task_has_deliverable_signal)()
     }
 }
 
@@ -438,6 +466,18 @@ fn backend() -> &'static dyn WaitQueueBackend {
     // SAFETY: paired Release in `register_wait_queue_backend`; the
     // Acquire load above synchronises with the publishing write.
     unsafe { (*BACKEND_SLOT.0.get()).assume_init_ref() }
+}
+
+/// Wake a task by id through the registered wait-queue backend.
+///
+/// Crate-visible so the kill path can issue the wake half of a kill without a
+/// second registration point. This is the call `wake_one` and `wake_all`
+/// already make, with the same contract: id-keyed, registry-resolved, tolerant
+/// of an id whose task is already gone, and a no-op on a task that is not
+/// blocked.
+#[inline]
+pub(crate) fn unblock_task_by_id(task: WaitTaskHandle) -> i32 {
+    backend().unblock_task(task)
 }
 
 /// Publishes "the current task is parked on this queue" for as long as a

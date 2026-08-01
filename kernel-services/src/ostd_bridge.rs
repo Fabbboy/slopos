@@ -34,6 +34,8 @@ pub static WAIT_QUEUE_OPS: WaitQueueOps = WaitQueueOps {
     unblock_task: driver_runtime::unblock_task,
     get_time_ms: platform::get_time_ms,
     swap_parked_queue: driver_runtime::swap_parked_wait_queue,
+    current_task_is_killed: driver_runtime::current_task_is_killed,
+    current_task_has_deliverable_signal: driver_runtime::has_pending_signal,
 };
 
 /// Ops table threaded into `slopos_ostd::sync::rcu::register_rcu_backend`.

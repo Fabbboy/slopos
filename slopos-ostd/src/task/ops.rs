@@ -17,7 +17,7 @@
 
 use crate::sync::BUS;
 use slopos_abi::event::{KernelEvent, TaskSlot};
-use slopos_abi::signal::{NSIG, SIG_DFL, SIG_IGN, SIGNAL_MASK, SigSet, sig_bit};
+use slopos_abi::signal::{NSIG, SIG_DFL, SIG_IGN, SIGNAL_KILLED, SIGNAL_MASK, SigSet, sig_bit};
 
 use crate::task::kernel_task::TaskInner;
 
@@ -116,9 +116,33 @@ pub fn task_wake_all_waiters<K, U>(task: &TaskInner<K, U>) {
 pub fn task_signal_raise<K, U>(task: &TaskInner<K, U>, mask: u64) -> u64 {
     let prev = task
         .signal_pending
-        .fetch_or(mask, core::sync::atomic::Ordering::AcqRel);
+        .fetch_or(mask & SIGNAL_MASK, core::sync::atomic::Ordering::AcqRel);
     BUS.publish(signal_pending_event(task.task_id));
     prev
+}
+
+/// Mark `task` for death and make it observe that fact.
+///
+/// The only writer of [`SIGNAL_KILLED`]. The two halves are fused
+/// deliberately: setting the bit without a wake leaves a task parked in a
+/// blocking primitive that will never re-run its abort probe, and waking
+/// without the bit is a spurious wake. Every other path through this file goes
+/// via `sig_bit`, which cannot produce the bit.
+///
+/// Returns `true` if this call did the marking, `false` if the task was
+/// already marked. The wake is issued either way — a redundant unblock on a
+/// task that is not blocked is a documented no-op, a lost one is not.
+///
+/// Does not preempt a *running* victim: the wake is a blocked-to-ready
+/// transition, so a killed task spinning in userland keeps running until its
+/// next return-to-user boundary.
+pub fn task_kill_and_wake<K, U>(task: &TaskInner<K, U>) -> bool {
+    let prev = task
+        .signal_pending
+        .fetch_or(SIGNAL_KILLED, core::sync::atomic::Ordering::AcqRel);
+    BUS.publish(signal_pending_event(task.task_id));
+    let _ = crate::sync::wait_queue::unblock_task_by_id(task.task_id);
+    (prev & SIGNAL_KILLED) == 0
 }
 
 /// Post `signum` to `task`, honouring its disposition at the send site.

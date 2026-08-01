@@ -1,6 +1,7 @@
 use core::ops::ControlFlow;
 
 use slopos_abi::signal::{SIG_IGN, sig_bit};
+use slopos_abi::task::TASK_FLAG_USER_MODE;
 use slopos_kernel_services::driver_runtime::{
     DriverRuntimeServices, register_driver_runtime_services,
 };
@@ -127,7 +128,18 @@ fn runtime_is_current_signal_blocked_or_ignored(signum: u8) -> bool {
 // ---------------------------------------------------------------------------
 
 fn runtime_has_pending_signal() -> bool {
-    Current::get().is_some_and(|current| task_has_deliverable_signal(current.task()))
+    Current::get().is_some_and(|current| {
+        let task = current.task();
+        // Kernel tasks are structurally excluded from delivery, so a bit
+        // pending on one has no consumer. Reporting it would abort every
+        // interruptible wait they take, forever, with nothing able to clear it.
+        (task.flags & TASK_FLAG_USER_MODE) != 0 && task_has_deliverable_signal(task)
+    })
+}
+
+/// Whether the current task has been marked for death.
+fn runtime_current_task_is_killed() -> bool {
+    Current::get().is_some_and(|current| current.task().is_killed())
 }
 
 // ---------------------------------------------------------------------------
@@ -222,6 +234,7 @@ static DRIVER_RUNTIME_SERVICES: DriverRuntimeServices = DriverRuntimeServices {
     set_current_runnable: scheduler::set_current_runnable,
     unblock_task: runtime_unblock_task,
     swap_parked_wait_queue: runtime_swap_parked_wait_queue,
+    current_task_is_killed: runtime_current_task_is_killed,
     register_idle_wakeup_callback: scheduler::scheduler_register_idle_wakeup_callback,
     signal_process_group: runtime_signal_process_group,
     signal_session: runtime_signal_session,

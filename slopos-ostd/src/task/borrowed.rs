@@ -35,7 +35,7 @@
 
 use core::sync::atomic::Ordering;
 
-use slopos_abi::signal::{SIGNAL_MASK, SigSet};
+use slopos_abi::signal::{SIGNAL_KILLED, SIGNAL_MASK, SigSet};
 use slopos_abi::task::{TaskExitReason, TaskFaultReason};
 
 use crate::sync::LinkError;
@@ -245,6 +245,15 @@ impl<K, U> TaskInner<K, U> {
                 Err(observed) => current = observed,
             }
         }
+    }
+
+    /// Whether this task has been marked for death.
+    ///
+    /// Deliberately does not consult `signal_blocked`: kill is not maskable,
+    /// and consulting the blocked set would let `sigprocmask` defeat it.
+    #[inline]
+    pub fn is_killed(&self) -> bool {
+        (self.signal_pending.load(Ordering::Acquire) & SIGNAL_KILLED) != 0
     }
 
     /// Clear `bits` from the pending set, returning the previous value. Bits

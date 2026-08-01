@@ -95,6 +95,20 @@ pub const fn sig_bit(signum: u8) -> SigSet {
 /// and then indexes one past the end of a `[_; NSIG]` action table.
 pub const SIGNAL_MASK: SigSet = (1u64 << NSIG) - 1;
 
+/// Kernel-private: the task has been marked for death, and every blocking
+/// primitive must abort rather than park.
+///
+/// Outside [`SIGNAL_MASK`] deliberately, so it is invisible to `kill`,
+/// `sigprocmask`, `sigaction`, `signalfd` and the delivery path, and costs no
+/// new word on the task — the fatal probe is free inside any predicate that
+/// already loads the pending set. Unreachable from userland: [`sig_bit`]
+/// cannot produce it, and every user-supplied `SigSet` is masked at its entry
+/// point.
+pub const SIGNAL_KILLED: SigSet = 1u64 << NSIG;
+
+const _: () = assert!(SIGNAL_KILLED & SIGNAL_MASK == 0);
+const _: () = assert!(sig_bit(NSIG as u8) & SIGNAL_MASK != 0);
+
 /// Signals that cannot be caught, blocked, or ignored.
 pub const SIG_UNCATCHABLE: SigSet = sig_bit(SIGKILL) | sig_bit(SIGSTOP);
 
