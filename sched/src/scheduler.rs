@@ -2397,14 +2397,6 @@ pub fn scheduler_timer_tick() {
     // reschedule is enough — a terminal task is not schedulable, so the
     // dispatcher picks idle and the switch tail reaches
     // `cleanup_current_task_after_switch`.
-
-    // A task whose status is already terminal must stop running, and no arm
-    // below will notice: the no-preempt flag, an unspent time slice and an
-    // empty ready queue each return without a reschedule, so a killed task
-    // alone on a CPU keeps executing as a Zombie indefinitely. Requesting the
-    // reschedule is enough — a terminal task is not schedulable, so the
-    // dispatcher picks idle and the switch tail reaches
-    // `cleanup_current_task_after_switch`.
     if current.task().is_exited() {
         scheduler_request_reschedule(RescheduleReason::TimerTick);
         return;
@@ -2554,8 +2546,19 @@ pub(crate) fn task_is_dispatch_pinned(task: &Task) -> bool {
 /// and [`TaskAddr`] is the compare-only view of one, so nothing here can
 /// dereference a foreign CPU's task even by accident.
 fn task_is_current_on_any_cpu(addr: TaskAddr) -> bool {
+    cpu_running_task(addr).is_some()
+}
+
+/// The CPU currently executing `addr`, if any.
+///
+/// Reads each CPU's published current-task slot rather than the task's
+/// `last_cpu`, which is an enqueue-time placement hint: nothing stamps it at
+/// dispatch, and a wake that races a still-running task re-aims it at whatever
+/// CPU the waker picked. Only teardown asks this, so the scan is off the hot
+/// path.
+pub(crate) fn cpu_running_task(addr: TaskAddr) -> Option<usize> {
     let cpu_count = slopos_arch::pcr::get_cpu_count();
-    (0..cpu_count).any(|cpu_id| TaskAddr::current_of(cpu_id) == Some(addr))
+    (0..cpu_count).find(|&cpu_id| TaskAddr::current_of(cpu_id) == Some(addr))
 }
 
 fn rescue_check_task(guard: &crate::task::TaskRef) {

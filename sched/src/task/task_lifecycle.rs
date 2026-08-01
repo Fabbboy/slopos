@@ -859,7 +859,9 @@ pub fn task_terminate(task_id: u32) -> c_int {
         // which on an otherwise-idle CPU it may reach only after a full
         // quantum. The tick handler's terminal-status escape is what turns the
         // interrupt into a deschedule.
-        crate::lifecycle::send_reschedule_ipi(task.last_cpu() as usize);
+        if let Some(cpu) = scheduler::cpu_running_task(TaskAddr::of(task)) {
+            crate::lifecycle::send_reschedule_ipi(cpu);
+        }
     }
     if is_current {
         cleanup_task_process_resources(task, resolved_id, TaskProcessCleanupMode::KeepVm);
