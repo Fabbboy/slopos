@@ -506,6 +506,11 @@ impl Drop for ParkedTestNode {
 /// [`WaitQueueBackend::swap_parked_queue`], or null. A queue that has had a
 /// waiter linked into it is required to outlive that waiter — the same contract
 /// `Drop for WaitNode` already relies on to reach `drop_unlink`.
+///
+/// Reaches the innermost wait only. A predicate that itself blocks would park a
+/// second node and overwrite the back-pointer, hiding the outer one; no
+/// predicate in the tree does, because every lock they take is a `SpinLock`
+/// rather than the sleeping [`Mutex`](super::mutex::Mutex).
 pub fn purge_parked_wait_node(queue: *mut c_void, task: WaitTaskHandle) -> usize {
     if queue.is_null() || task == NULL_HANDLE {
         return 0;
@@ -1183,8 +1188,15 @@ impl WaitQueue {
     /// many were found. See [`purge_parked_wait_node`] for why this exists
     /// where [`remove_task`](Self::remove_task) declines.
     fn purge_task(&self, task: WaitTaskHandle) -> usize {
+        // The lock is dropped between nodes so a heap-owned one can be freed
+        // outside it, which leaves a window for the task to link a fresh node.
+        // A correct waiter holds one node per queue, so the second pass is
+        // already the defensive one; the cap is what stops a task that is still
+        // running from trading pushes with a killer spinning here with
+        // preemption disabled.
+        const MAX_NODES_PER_TASK: usize = 8;
         let mut purged = 0usize;
-        loop {
+        while purged < MAX_NODES_PER_TASK {
             let removed = {
                 let inner = self.inner.lock();
                 let mut found: Option<(NonNull<WaitNode>, bool)> = None;
@@ -1222,6 +1234,12 @@ impl WaitQueue {
                 }
             }
         }
+        debug_assert!(
+            false,
+            "wait-queue purge hit its per-task node cap; a task is linking nodes \
+             as fast as teardown removes them"
+        );
+        purged
     }
 
     /// Park a node for the current task and publish the park back-pointer —
