@@ -281,16 +281,12 @@ pub fn spawn_program_with_attrs(
         ) else {
             return Err(ExecError::NoMem);
         };
-        // Parked before the first blocking call below. The token is the only
-        // reference to a child that already owns its kernel stack, data stack
-        // and process VM, and this frame is about to block: a `SIGKILL` here
-        // reaps the spawner without unwinding, so a token left on the stack is
-        // never released and nothing afterwards can find the orphan. Every exit
-        // from here on — `?`, an early `return`, or an asynchronous kill that
-        // never returns at all — releases it.
-        let Ok(mut spawn) = SpawnGuard::park(pending) else {
-            return Err(ExecError::NoMem);
-        };
+        // The token is the only reference to a child that already owns its
+        // kernel stack, data stack and process VM, and it is unregistered, so
+        // nothing else can find the orphan if this frame loses it. Every exit
+        // from here on — `?`, an early return, a panic, or a kill that aborts
+        // the blocking calls below — releases it through the guard.
+        let mut spawn = SpawnGuard::new(pending);
         let task_id = spawn.child_id();
         let process_id = spawn.child_process_id();
 

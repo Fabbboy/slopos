@@ -456,213 +456,6 @@ fn build_parkable_child() -> Option<crate::task::PendingTask> {
     )
 }
 
-/// A builder torn down off-CPU releases the child it was half-way through.
-///
-/// `core::mem::forget` on the guard is the whole point: it is exactly what an
-/// asynchronous kill does to a frame that never unwinds, and without the
-/// teardown hook the child's kernel stack, data stack, process VM and fd table
-/// stay allocated with nothing able to name them.
-///
-/// The deterministic half of the pair: it drives
-/// `cleanup_terminated_task_resources`, the branch `task_terminate` takes for a
-/// victim that is not executing, and it reaches that branch on any topology.
-/// The deferred branch needs a real peer CPU and is covered separately.
-pub fn test_parked_spawn_drained_when_owner_terminated_off_cpu() -> TestResult {
-    let _fixture = SchedFixture::new();
-
-    // Taken before the owner exists, so the comparison at the end covers both
-    // the owner's own teardown and the child's: a leaked child is the only way
-    // the count can fail to return.
-    let (live_before, _, _, _) = task_slot_census();
-
-    let owner_id = task_create(
-        b"ParkOwner\0".as_ptr() as *const core::ffi::c_char,
-        dummy_task_entry,
-        core::ptr::null_mut(),
-        TaskPriority::Normal.as_u8(),
-        TASK_FLAG_KERNEL_MODE,
-    );
-    if owner_id == INVALID_TASK_ID {
-        klog_info!("SCHED_TEST: could not create the parking owner");
-        return TestResult::Fail;
-    }
-
-    let Some(pending) = build_parkable_child() else {
-        let _ = task_terminate(owner_id);
-        klog_info!("SCHED_TEST: could not build the child to park");
-        return TestResult::Fail;
-    };
-    let child_id = pending.id();
-    let Ok(guard) = crate::task::SpawnGuard::park_for_owner(owner_id, pending) else {
-        let _ = task_terminate(owner_id);
-        klog_info!("SCHED_TEST: the spawn spine was full");
-        return TestResult::Fail;
-    };
-    // The frame that never unwinds.
-    core::mem::forget(guard);
-
-    if crate::task::parked_spawn_count() == 0 {
-        klog_info!("SCHED_TEST: the token was not parked");
-        let _ = task_terminate(owner_id);
-        return TestResult::Fail;
-    }
-
-    if task_terminate(owner_id) != 0 {
-        klog_info!("SCHED_TEST: could not terminate the parking owner");
-        return TestResult::Fail;
-    }
-    crate::task::task_graveyard_drain();
-
-    if crate::task::parked_spawn_count() != 0 {
-        klog_info!("SCHED_TEST: teardown left the token parked");
-        return TestResult::Fail;
-    }
-    // The direct leak signature: `allocate_task` bumps `num_tasks` and only the
-    // token's release brings it back down, so a lost token shows up here and
-    // nowhere else — the child never registered, so no walk can see it.
-    let (live_after, _, _, _) = task_slot_census();
-    if live_after != live_before {
-        klog_info!(
-            "SCHED_TEST: live task count {} -> {} across a torn-down builder",
-            live_before,
-            live_after
-        );
-        return TestResult::Fail;
-    }
-    if task_find_by_id(child_id).is_some() {
-        klog_info!("SCHED_TEST: the abandoned child became reachable");
-        return TestResult::Fail;
-    }
-
-    TestResult::Pass
-}
-
-slopos_testing::stest!(
-    name = test_parked_spawn_drained_when_owner_terminated_off_cpu,
-    suite = sched_core
-);
-
-/// The spine drains at shutdown, where nothing else can reach a parked token.
-///
-/// `collect_shutdown_task_ids` walks the registry, and a parked token has no
-/// registry entry, so the shutdown sweep is blind to it by construction — the
-/// drain has to be an explicit call. It also has to run *before* the
-/// `num_tasks` recount, which recomputes from that same registry and would
-/// otherwise paper over the accounting without returning the memory.
-pub fn test_parked_spawn_drained_at_shutdown() -> TestResult {
-    let _fixture = SchedFixture::new();
-
-    let Some(pending) = build_parkable_child() else {
-        klog_info!("SCHED_TEST: could not build the child to park");
-        return TestResult::Fail;
-    };
-    let Ok(guard) = crate::task::SpawnGuard::park_for_owner(0xDEAD_BEEF, pending) else {
-        klog_info!("SCHED_TEST: the spawn spine was full");
-        return TestResult::Fail;
-    };
-    core::mem::forget(guard);
-
-    let drained = crate::task::drain_parked_spawns();
-    if drained != 1 {
-        klog_info!(
-            "SCHED_TEST: shutdown drain released {} tokens, expected 1",
-            drained
-        );
-        return TestResult::Fail;
-    }
-    if crate::task::parked_spawn_count() != 0 {
-        klog_info!("SCHED_TEST: the drain left a token behind");
-        return TestResult::Fail;
-    }
-    TestResult::Pass
-}
-
-slopos_testing::stest!(
-    name = test_parked_spawn_drained_at_shutdown,
-    suite = sched_core
-);
-
-/// The switch-tail hook releases a parked token too.
-///
-/// `cleanup_current_task_after_switch` is the *deferred* branch — the one a
-/// peer's `task_terminate` hands off to whenever the victim is executing, run
-/// on the victim's own CPU after the register swap. It is the branch that
-/// matters most, because `task_terminate`'s `is_current` path deliberately does
-/// not call `cleanup_terminated_task_resources`, so nothing else can release a
-/// token whose owner died while running.
-///
-/// Driven directly rather than by killing a running task: the kernel test phase
-/// runs in the `drivers` boot step, before `enter_scheduler`, so no task
-/// created here can actually be dispatched — and a test that cannot make its
-/// victim run cannot reach the branch any other way. What is under test is the
-/// hook, and this calls it with exactly the guard and the task state the switch
-/// tail does.
-pub fn test_parked_spawn_drained_by_the_switch_tail_hook() -> TestResult {
-    let _fixture = SchedFixture::new();
-
-    let parked_before = crate::task::parked_spawn_count();
-    let (live_before, _, _, _) = task_slot_census();
-
-    let owner_id = task_create(
-        b"ParkSwitchTail\0".as_ptr() as *const core::ffi::c_char,
-        dummy_task_entry,
-        core::ptr::null_mut(),
-        TaskPriority::Normal.as_u8(),
-        TASK_FLAG_KERNEL_MODE,
-    );
-    if owner_id == INVALID_TASK_ID {
-        klog_info!("SCHED_TEST: could not create the switch-tail owner");
-        return TestResult::Fail;
-    }
-
-    let Some(pending) = build_parkable_child() else {
-        let _ = task_terminate(owner_id);
-        klog_info!("SCHED_TEST: could not build the child to park");
-        return TestResult::Fail;
-    };
-    let Ok(guard) = crate::task::SpawnGuard::park_for_owner(owner_id, pending) else {
-        let _ = task_terminate(owner_id);
-        klog_info!("SCHED_TEST: the spawn spine was full");
-        return TestResult::Fail;
-    };
-    core::mem::forget(guard);
-
-    {
-        let Some(owner) = task_find_by_id(owner_id) else {
-            let _ = crate::task::drain_parked_spawns();
-            klog_info!("SCHED_TEST: the switch-tail owner vanished");
-            return TestResult::Fail;
-        };
-        // The state the switch tail finds: terminated, with its kernel stack
-        // still mapped. Anything else and the hook returns early.
-        let _ = owner.set_status(TaskStatus::Terminated);
-        crate::task::cleanup_current_task_after_switch(&owner);
-    }
-    crate::task::task_graveyard_drain();
-
-    if crate::task::parked_spawn_count() != parked_before {
-        klog_info!("SCHED_TEST: the switch-tail hook left the token parked");
-        let _ = crate::task::drain_parked_spawns();
-        return TestResult::Fail;
-    }
-    let (live_after, _, _, _) = task_slot_census();
-    if live_after != live_before {
-        klog_info!(
-            "SCHED_TEST: live task count {} -> {} across the switch-tail hook",
-            live_before,
-            live_after
-        );
-        return TestResult::Fail;
-    }
-
-    TestResult::Pass
-}
-
-slopos_testing::stest!(
-    name = test_parked_spawn_drained_by_the_switch_tail_hook,
-    suite = sched_core
-);
-
 /// A publication that fails leaves the task nascent, not reserved.
 ///
 /// `schedule_task`/`schedule_new_task` reserve scheduler ownership by CASing
@@ -7053,5 +6846,55 @@ pub fn test_futex_waiter_always_leaves_its_bucket() -> TestResult {
 
 slopos_testing::stest!(
     name = test_futex_waiter_always_leaves_its_bucket,
+    suite = sched_core
+);
+
+/// A builder that loses its frame releases the child it was building.
+///
+/// A `PendingTask` is deliberately unregistered — no lookup, no active-task
+/// walk, no census and no shutdown sweep can see it — so a token lost with its
+/// frame is unrecoverable, and the only trace is `allocate_task`'s `num_tasks`
+/// bump never coming back down. The guard's `Drop` is what returns it, which
+/// works because a killed builder now aborts out of whatever it is blocked in
+/// and returns through its own frames.
+pub fn test_spawn_guard_releases_its_child_when_dropped() -> TestResult {
+    let _fixture = SchedFixture::new();
+
+    let (live_before, _, _, _) = task_slot_census();
+
+    let Some(pending) = build_parkable_child() else {
+        klog_info!("SCHED_TEST: could not build the child");
+        return TestResult::Fail;
+    };
+    let child_id = pending.id();
+    {
+        let guard = crate::task::SpawnGuard::new(pending);
+        if guard.child_id() != child_id {
+            klog_info!("SCHED_TEST: the guard named the wrong child");
+            return TestResult::Fail;
+        }
+        if task_find_by_id(child_id).is_some() {
+            klog_info!("SCHED_TEST: a child under construction must not be reachable");
+            return TestResult::Fail;
+        }
+    }
+    crate::task::task_graveyard_drain();
+
+    // The direct leak signature: nothing registered the child, so no walk can
+    // see it and only the census moves.
+    let (live_after, _, _, _) = task_slot_census();
+    if live_after != live_before {
+        klog_info!(
+            "SCHED_TEST: live task count {} -> {} across a dropped builder",
+            live_before,
+            live_after
+        );
+        return TestResult::Fail;
+    }
+    TestResult::Pass
+}
+
+slopos_testing::stest!(
+    name = test_spawn_guard_releases_its_child_when_dropped,
     suite = sched_core
 );

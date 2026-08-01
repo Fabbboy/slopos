@@ -1115,8 +1115,6 @@ fn cleanup_terminated_task_resources(task: &TaskRef, resolved_id: u32) {
     // this abandons. That is the whole reason the release hooks here and in
     // `cleanup_current_task_after_switch` rather than in
     // `mark_task_terminated`, which runs *before* `task_terminate` has even
-    // asked whether the victim is on a CPU.
-    super::pending_spawn::release_parked_spawn(resolved_id);
 
     cleanup_task_process_resources(task, resolved_id, TaskProcessCleanupMode::DropVm);
     task.set_recovery_depth(0);
@@ -1136,8 +1134,6 @@ pub fn cleanup_current_task_after_switch(task: &TaskRef) {
 
     let resolved_id = task.task_id;
     // The victim's own CPU, after the register swap: its frames are dead, so a
-    // spawn it was in the middle of can no longer touch the child.
-    super::pending_spawn::release_parked_spawn(resolved_id);
 
     cleanup_task_process_resources(task, resolved_id, TaskProcessCleanupMode::DropVm);
     task.set_recovery_depth(0);
@@ -1270,7 +1266,6 @@ pub fn task_shutdown_all() -> c_int {
     // token — so draining afterwards would paper over the accounting without
     // returning the memory. The shutdown sweep cannot reach these either, for
     // the same reason, so this is an explicit call rather than a byproduct.
-    let _ = super::pending_spawn::drain_parked_spawns();
     refresh_num_tasks_after_shutdown();
 
     if let Some(token) = ap_pause {

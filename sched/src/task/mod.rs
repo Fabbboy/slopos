@@ -22,9 +22,7 @@ pub use slopos_abi::task::{
 };
 pub use slopos_arch::arch::idt::IdtEntry;
 
-pub use pending_spawn::{
-    SpawnGuard, drain_parked_spawns, parked_spawn_count, parked_spawn_high_water,
-};
+pub use pending_spawn::SpawnGuard;
 pub use task_cleanup_hooks::*;
 pub use task_family::*;
 pub use task_lifecycle::*;
