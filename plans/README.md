@@ -20,7 +20,8 @@ editing.
 | `resource-accounting.md` | Spike: per-process limits. Inventory + the reclaim fixes that need no framework |
 | `deferred-work.md` | Per-CPU work list so RCU reclaim stops depending on CPU 0 being idle |
 | `lockdep-effectiveness.md` | The lock-order validator exhausts its class table during mm init and turns itself off |
-| `kernel-teardown-model.md` | Spike: `panic=unwind` and cross-CPU abandon contradict each other; invariant I8 is the tax |
+| `kernel-teardown-model.md` | A task only ever exits from its own context; kill becomes a flag, invariant I8 and the 8 parking spines delete |
+| `lockup-detector.md` | The watchdog's two time graces are defects, not tuning; index the unwinder, then measure progress instead of elapsed time |
 | `driver-framework-base.html` | Driver-framework base: unified Bus model, platform/ACPI registry, deferred-probe/hotplug/unbind |
 | `microtransactions.md` | Kernel microtransaction layer on W/L currency; Phase 1 = pay-to-boot gate |
 | `usb-xhci.md` | USB/xHCI stack: host controller, enumeration, HID input, mass storage |

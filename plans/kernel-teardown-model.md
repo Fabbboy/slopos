@@ -14,8 +14,8 @@ unwind by *returning*, so destructors run on the task's own stack at a point the
 task chose. Remote teardown disappears, and with it invariant I8 and the eight
 spines.
 
-Panic strategy is a **separate axis** and is not part of this work. See
-[Panic strategy](#panic-strategy-separate-axis).
+Panic strategy is a **separate axis**, settled: unwinding stays. See
+[Panic strategy](#panic-strategy-settled).
 
 ## What forces it
 
@@ -216,14 +216,13 @@ part of the ~305 shipped lines the spines return. Sequence against
 `deferred-work.md` phase 5, which migrates the graveyard onto a per-CPU work-list
 substrate.
 
-## Panic strategy (separate axis)
+## Panic strategy (settled)
 
-Not part of this work, and cheaper than it looks. Recorded here so it is not
-re-litigated mid-migration.
+`panic=unwind` stays. Do not re-litigate this mid-migration.
 
 - Kill-as-flag buys nothing for exception-context panics; the unwinder buys
   nothing for the kill path. `AbortOnUnwind` already declares nine regions where
-  unwinding is unsurvivable.
+  unwinding is unsurvivable. The axes are independent.
 - 100% of panics originating in exception or interrupt context are already
   fatal — `IrqNestHold::enter()` is the second statement of
   `common_exception_handler_impl` (`boot/src/idt.rs:471`), before the frame
@@ -231,23 +230,20 @@ re-litigated mid-migration.
   timer tick, all four IPI handlers and the NMI watchdog.
 - The shipped cost is small: `kernel-release.elf` carries `.eh_frame` 177,180 B
   and `.gcc_except_table` 95,056 B against a 2.22 MB `.text`. The 1.5 MB figure
-  belongs to `kernel-tests.elf`.
+  sometimes quoted belongs to `kernel-tests.elf`.
 - There is no Inv. 5' problem to fix: `scripts/gates/stack/release.txt` has zero
-  function entries, and `scripts/check_stack_sizes.sh:38` is 2048. The unwinder
+  function entries and `scripts/check_stack_sizes.sh:38` is 2048. The unwinder
   exemptions exist only in the dev build.
-- Diagnostics do not depend on it. The oops record, the message and the
-  symbolized backtrace all run at `boot/src/panic.rs:207-273`, *before*
-  `begin_panic` at `:275`, and the backtrace is an rbp walk with kallsyms, not
-  DWARF.
-- Abort semantics already ships as a boot mode: `panic.on_oops=on` makes
-  `production_recovery_enabled()` false.
-- The real asset is test isolation across 2743 registered tests
+- The asset is test isolation across 2743 registered tests
   (`ktesting/src/runner.rs:19`, baseline at `scripts/check_test_count.sh:24`).
-  Per-variant strategy — `unwind` for tests, `abort` for dev/release — keeps it.
-  `-Cpanic` overrides a target spec in both directions, so this needs a cargo
-  profile or a `KERNEL_RUSTFLAGS` token, not a second target JSON.
 
-Revisit after step 8, when the choice is genuinely free.
+The one real cost — `WATCHDOG_RECOVERY_GRACE_MULT = 16`
+(`sched/src/runtime.rs:502`), a ~40 s hole in deadlock detection granted because
+the unwinder runs long with interrupts disabled — is not a property of
+unwinding. It is a missing `.eh_frame_hdr` index making the unwinder roughly
+four orders of magnitude slower than it should be. Fix the index and the grace
+deletes. That work, and the deeper repairs to the detector it exposes, is
+`plans/lockup-detector.md`.
 
 ## Fix regardless
 
