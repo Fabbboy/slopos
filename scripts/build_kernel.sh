@@ -136,8 +136,8 @@ fi
 # leaf when two CPUs happen to line up.
 "$SCRIPT_DIR/check_kernel_pml4_writer.sh"
 
-# Both ELF gates run for every variant, including tests — that is the image
-# the whole suite executes on. The stamp key covers the gate scripts and
+# All three ELF gates run for every variant, including tests — that is the
+# image the whole suite executes on. The stamp key covers the gate scripts and
 # their allowlists as well as the ELF, so an edited gate re-runs instead of
 # waiting for the next unrelated kernel change.
 GATE_STAMP="$BUILD_DIR/.kernel-elf-gates-${VARIANT}.stamp"
@@ -145,6 +145,7 @@ GATE_INPUTS=(
     "$KERNEL_ELF"
     "$SCRIPT_DIR/check_stack_sizes.sh"
     "$SCRIPT_DIR/check_kernel_softfloat.sh"
+    "$SCRIPT_DIR/check_registry_sections.sh"
     "$SCRIPT_DIR/llvm_tool.sh"
     "$SCRIPT_DIR/gates/stack/${VARIANT}.txt"
     "$SCRIPT_DIR/gates/vector/${VARIANT}.txt"
@@ -173,8 +174,10 @@ GATE_KEY="$(gate_input_digest "${GATE_INPUTS[@]}")"
 if [ -n "$GATE_KEY" ] && [ "$(cat "$GATE_STAMP" 2>/dev/null)" = "$GATE_KEY" ]; then
     echo "check_stack_sizes: skipped (${VARIANT} kernel + gates unchanged since last pass)"
     echo "check_kernel_softfloat: skipped (${VARIANT} kernel + gates unchanged since last pass)"
+    echo "check_registry_sections: skipped (${VARIANT} kernel + gates unchanged since last pass)"
 else
     "$SCRIPT_DIR/check_stack_sizes.sh" --variant "$VARIANT" "$KERNEL_ELF"
     "$SCRIPT_DIR/check_kernel_softfloat.sh" --variant "$VARIANT" "$KERNEL_ELF"
+    "$SCRIPT_DIR/check_registry_sections.sh" "$KERNEL_ELF"
     [ -n "$GATE_KEY" ] && printf '%s\n' "$GATE_KEY" > "$GATE_STAMP"
 fi

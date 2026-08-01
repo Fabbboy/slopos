@@ -24,6 +24,7 @@ expect-test-registry many
 
 # Vendored-unwinder frames: reached only while a panic unwinds, never on a
 # hot path. The DWARF CFI evaluation is inherently frame-heavy.
+2216	*9unwinding8unwinder8find_fde16gnu_eh_frame_hdr*find_fde*
 3864	*CallFrameInstruction*E5parse*9unwinding*
 2744	*unwinding9panicking12catch_unwind8do_catch*slopos_ostd6unwind11KernelPanic*
 2616	*unwinding8unwinder5frame*Frame12from_context*

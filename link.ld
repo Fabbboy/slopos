@@ -43,6 +43,17 @@ SECTIONS
     _rodata_end = .;
   } :rodata
 
+  /* Binary-search index over .eh_frame, consumed by the unwinder's
+     fde-gnu-eh-frame-hdr finder. Emitted only when the target spec sets
+     "eh-frame-header": true; the ASSERT turns a missing index into a link
+     failure rather than a silent fall back to a linear .eh_frame scan. */
+  .eh_frame_hdr ALIGN(8) : {
+    __GNU_EH_FRAME_HDR = .;
+    KEEP(*(.eh_frame_hdr))
+  } :rodata
+  ASSERT(SIZEOF(.eh_frame_hdr) >= 12,
+    "link.ld: .eh_frame_hdr is empty - set eh-frame-header true in targets/x86_64-slos.json")
+
   .eh_frame ALIGN(8) : {
     __eh_frame = .;
     KEEP(*(.eh_frame))

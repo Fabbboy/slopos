@@ -94,7 +94,7 @@ slopos-vt = { path = "vt" }
 slopos-windowing = { path = "windowing" }
 slopos-hermetic = { path = "hermetic" }
 paste = { version = "1.0", default-features = false }
-unwinding = { path = "vendor/unwinding", default-features = false, features = ["unwinder", "fde-static", "personality", "panic", "hide-trace"] }
+unwinding = { path = "vendor/unwinding", default-features = false, features = ["unwinder", "fde-gnu-eh-frame-hdr", "personality", "panic", "hide-trace"] }
 x86_64 = { version = "0.15.4", default-features = false, features = ["instructions"] }
 syn = { version = "2", features = ["full"] }
 quote = "1"

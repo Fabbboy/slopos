@@ -14,3 +14,4 @@ pub mod hermetic;
 pub mod page_io;
 pub mod pcr;
 pub mod serial;
+pub mod unwind_index;
