@@ -65,9 +65,21 @@ impl TargetSet {
     }
 }
 
+/// Whether a broadcast `kill` may name this task.
+///
+/// Kernel tasks are structurally excluded from signals — `claim_pending_signal`
+/// returns `Done` for them before it even reads the pending mask — so naming
+/// one in a fanout can only ever reach a path that is *not* signal-gated. That
+/// is how `kill(-1, SIGKILL)` reached the driver threads, which own device
+/// state and hardware interrupt lines and have no way to shut down cleanly on
+/// demand.
+fn broadcast_may_signal(flags: u16) -> bool {
+    (flags & TASK_FLAG_USER_MODE) != 0
+}
+
 fn collect_targets_for_group(pgid: u32, targets: &mut TargetSet) {
     task_for_each_active(|task| {
-        if task.pgid() == pgid {
+        if broadcast_may_signal(task.flags) && task.pgid() == pgid {
             targets.push(task.task_id);
         }
     });
@@ -75,7 +87,10 @@ fn collect_targets_for_group(pgid: u32, targets: &mut TargetSet) {
 
 fn collect_targets_for_all(exclude_task_id: u32, targets: &mut TargetSet) {
     task_for_each_active(|task| {
-        if task.task_id != INVALID_TASK_ID && task.task_id != exclude_task_id {
+        if broadcast_may_signal(task.flags)
+            && task.task_id != INVALID_TASK_ID
+            && task.task_id != exclude_task_id
+        {
             targets.push(task.task_id);
         }
     });

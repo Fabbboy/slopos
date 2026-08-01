@@ -5952,8 +5952,9 @@ pub fn test_kill_process_group_reaches_nascent_task_without_publishing() -> Test
     let caller_guard = assert_some!(task_find_by_id(caller_id), "caller lookup failed");
     let caller_pid = caller_guard.process_id;
 
-    // Straight out of `task_create`: registered, Blocked, Nascent.
-    let target_id = create_test_kernel_task();
+    // Straight out of `task_create`: registered, Blocked, Nascent. User-mode
+    // because a broadcast kill only ever names user tasks.
+    let target_id = create_test_user_task();
     assert_test!(target_id != INVALID_TASK_ID, "failed to create target task");
     let target_guard = assert_some!(task_find_by_id(target_id), "target lookup failed");
 
@@ -6442,5 +6443,46 @@ pub fn test_kernel_private_pending_bit_is_not_a_signal() -> TestResult {
 
 slopos_testing::stest!(
     name = test_kernel_private_pending_bit_is_not_a_signal,
+    suite = syscall_signal
+);
+
+/// A broadcast `kill` never names a kernel task.
+///
+/// Kernel tasks are structurally excluded from signal *delivery*, but the
+/// SIGKILL path is not signal-gated: it terminates by id. Collecting one into
+/// a fanout therefore tore down the driver threads, which own device state and
+/// interrupt lines, with no chance to shut down cleanly.
+pub fn test_broadcast_kill_spares_kernel_tasks() -> TestResult {
+    let _fixture = SyscallFixture::new();
+
+    let kernel_id = create_test_kernel_task();
+    assert_test!(kernel_id != INVALID_TASK_ID, "failed to create kernel task");
+    let user_id = create_test_user_task();
+    assert_test!(user_id != INVALID_TASK_ID, "failed to create user task");
+    let user_guard = assert_some!(task_find_by_id(user_id), "task lookup failed");
+    let pid = user_guard.process_id;
+
+    let mut kill_frame: KBox<UserContext> = KBox::zeroed().expect("alloc");
+    kill_frame.regs_mut().rdi = (-1i64) as u64;
+    kill_frame.regs_mut().rsi = SIGTERM as u64;
+    let _ = with_user_process_context(pid, || {
+        crate::syscall::dispatch::dispatch_handler(syscall_kill, &user_guard, &mut *kill_frame)
+    });
+
+    let kernel_guard = assert_some!(task_find_by_id(kernel_id), "kernel task vanished");
+    assert_eq_test!(
+        kernel_guard.signal_pending(),
+        0,
+        "a broadcast kill must not pend a signal on a kernel task"
+    );
+    drop(kernel_guard);
+
+    task_terminate(kernel_id);
+    task_terminate(user_id);
+    pass!()
+}
+
+slopos_testing::stest!(
+    name = test_broadcast_kill_spares_kernel_tasks,
     suite = syscall_signal
 );
