@@ -33,9 +33,15 @@ expect-test-registry few
 2	xsave	*slopos_sched4task14task_lifecycle10task_clone*
 4	xsave	*slopos_sched9scheduler17prepare_switch_to*
 
-# The one-time x87 init in the assembly entry trampoline
-# (boot/limine_entry.s), immediately after the CR0/CR4 setup and before any
-# Rust runs. Not a fault path: nothing has user state to clobber yet. The
-# symbol is the linker's `_text_start` rather than `_start` because the two
-# share an address here and llvm-objdump prints one header per address.
-1	fninit	_text_start
+# The one-time x87 init in the assembly entry trampoline (boot/limine_entry.s),
+# immediately after the CR0/CR4 setup and before any Rust runs. Not a fault
+# path: nothing has user state to clobber yet.
+#
+# The glob spans the aliases the site can be reported under. `_start`,
+# `_text_start` and `_kernel_start` can all sit at the head of .text,
+# llvm-objdump prints one header per address, and which alias it picks follows
+# the image layout — a property of the link, not of the build variant, so
+# pinning one name breaks whenever a different toolchain lays the image out
+# differently. The literal `fninit` and the budget of one are what keep the
+# exemption exact: a second x87 instruction in that symbol still fails.
+1	fninit	_*start

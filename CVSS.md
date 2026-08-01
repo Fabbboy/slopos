@@ -29,6 +29,7 @@ python3 scripts/cvss_calc.py "CVSS:3.1/AV:L/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H"
 | [SLOPOS-2026-0012](#slopos-2026-0012) | 9.1 | CRITICAL | The in-kernel DNS resolver has effectively no anti-spoofing entropy and accepts responses from any host |
 | [SLOPOS-2026-0017](#slopos-2026-0017) | 7.8 | HIGH | PCIDs are assigned from a wrapping 12-bit counter with no reuse tracking while every CR3 write is NOFLUSH |
 | [SLOPOS-2026-0018](#slopos-2026-0018) | 7.8 | HIGH | Multi-page buddy allocations bypass the LUF reuse drain, leaving stale writable TLB entries |
+| [SLOPOS-2026-0044](#slopos-2026-0044) | 7.8 | HIGH | A task killed while blocked leaves a stack-pinned `WaitNode` linked into a static wait queue, and the stack is then recycled |
 | [SLOPOS-2026-0039](#slopos-2026-0039) | 7.6 | HIGH | Device-supplied PCI offsets are used to map MMIO without bounding them against the BAR |
 | [SLOPOS-2026-0011](#slopos-2026-0011) | 7.5 | HIGH | Half-open TCP connections are never reclaimed, so ~64 SYNs wedge the whole stack |
 | [SLOPOS-2026-0013](#slopos-2026-0013) | 7.4 | HIGH | No RFC 793 §3.9 sequence-acceptability check: a blind SYN tears down an established connection |
@@ -589,6 +590,29 @@ asm volatile("mov %0, %%rsp; mov $105, %%eax; syscall" :: "r"(p));
 - Repro:
   Mount an ext4 image with extents enabled. It mounts read-write, and any write corrupts it.
 - Remediation: Check `s_feature_incompat` against the set actually implemented and refuse to mount otherwise; check `s_feature_ro_compat` and mount read-only when an unsupported read-only-compatible feature is present. This is exactly the gate Linux's `ext4_feature_set_ok` performs.
+
+### SLOPOS-2026-0044
+- Title: A task killed while blocked leaves a stack-pinned `WaitNode` linked into a static wait queue, and the stack is then recycled
+- Status: open
+- Confidence: 82 — evidence 40 (every link in the chain read directly, exact lines below), exploitability 22 (unprivileged local sequence, but corruption is a 1-byte write plus list damage at an uncontrolled offset), reproducibility 20 (deterministic step-by-step plausible; not yet reproduced)
+- CVSS vector/score: `CVSS:3.1/AV:L/AC:H/PR:L/UI:N/S:C/C:H/I:H/A:H` — **7.8 HIGH**
+- Impact: `WaitQueue::wait_event_until` pins its wait node on the caller's kernel stack. Teardown of a remotely-killed task has no path that unlinks it, and the node's `Drop` — the only mechanism that would — never runs on an abandoned stack. The kernel stack slot is deliberately recycled rather than quarantined, so the node's memory is zeroed and handed to a new task while it is still linked into a `static` wait queue. A subsequent wake dereferences and writes through it, corrupting the intrusive list inside `slopos-ostd` and writing into another task's live kernel stack. This is the `unsafe` block's stated premise being false, not a missing check.
+- Evidence:
+  - slopos-ostd/src/sync/wait_queue.rs:607 — `let node = core::pin::pin!(WaitNode::new());`, on the caller's stack
+  - sched/src/task/task_lifecycle.rs:985 — `mark_task_terminated` cancels sleep, strips futex waiters and releases wait refs; it touches no wait queue
+  - slopos-ostd/src/sync/wait_queue.rs:1035 — `remove_task` declines by contract: "stack-pinned `wait_event` nodes manage their own lifecycle and are left alone here"
+  - sched/src/task_stack.rs:222 — `Drop for TaskStack` intentionally does not unmap, "let the next allocation reuse this slot"
+  - sched/src/task_stack.rs:128 — `allocate` zeroes a `was_backed()` slot and returns it to a new task
+  - slopos-ostd/src/sync/wait_queue.rs:880 — the `unsafe` deref is justified by "stack waiters are blocked / will block before freeing their frame"; an abandoned waiter's frame is freed *while* blocked and still linked
+  - slopos-ostd/src/sync/wait_queue.rs:885 — `wake_one` writes through the popped node via `has_woken_swap_true()`
+  - Every `unsubscribe_current` caller is a normal-return path in the waiter's own code (fs/src/pipe_file_ops.rs:254, net/src/socket.rs:2905, net/src/unix_socket/mod.rs:1068), so nothing covers the killed case
+- Repro:
+  1. Block a task in a stack-pinned wait — a read on an empty pipe reaches `fs/src/pipe_file_ops.rs:219`.
+  2. Ensure a second live waiter on the same queue so the list is not trivially empty.
+  3. `kill -9` the blocked task.
+  4. Spawn tasks until the graveyard drains and the victim's kernel stack slot is reallocated.
+  5. Write to the pipe. `wake_one` pops the stale node and writes through it.
+- Remediation: Reached structurally by making every blocking primitive return through its own unlink — see `plans/kernel-teardown-model.md`, whose step 0 is this finding. The stopgap is a by-id wait-node registry with a teardown hook in `mark_task_terminated`; the durable fix is step 8, after which a killed task always returns from its wait rather than being abandoned in it.
 
 ## Relevant NVD CVE Analogs (fetched)
 
