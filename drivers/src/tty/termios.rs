@@ -130,9 +130,9 @@ pub fn get_termios(idx: TtyIndex) -> Result<UserTermios, TtyError> {
 ///
 ///   - **Invalid index** (`>= MAX_TTYS`): returns `Err(InvalidIndex)`.
 ///   - **Unallocated slot**: returns `Err(NotAllocated)`.
-///   - **Signal interruption**: the current implementation does NOT check
-///     for pending signals; drain is NOT interruptible.  Callers that
-///     need interruptibility should add `wait_event_interruptible`.
+///   - **Signal interruption**: drain waits on the interruptible tier, so a
+///     pending signal ends it with `Restart` and a kill with
+///     `SignalInterrupt`.
 ///
 /// ## Synchronous vs asynchronous drivers
 ///

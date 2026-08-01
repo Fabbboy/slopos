@@ -5477,10 +5477,8 @@ slopos_testing::stest!(
 //   section by every pop path, so by the time stack-pinned `WaitNode`s
 //   go out of scope they hold null).
 //
-// A panic-mid-wait Drop-firing test is intentionally not included: the
-// test-harness uses `catch_panic!` / longjmp, which skips Drops during
-// recovery; the Drop-based unlink is defense-in-depth for production
-// unwinding paths and runs implicitly on every successful wait.
+// `test_wait_node_unlinks_when_its_frame_unwinds` covers the panic path:
+// `catch_panic!` unwinds, so destructors do run during recovery.
 // =============================================================================
 
 use slopos_ostd::sync::wait_queue::{ParkedTestNode, WaitAbort, WaitQueue};
@@ -6896,5 +6894,53 @@ pub fn test_spawn_guard_releases_its_child_when_dropped() -> TestResult {
 
 slopos_testing::stest!(
     name = test_spawn_guard_releases_its_child_when_dropped,
+    suite = sched_core
+);
+
+/// A `WaitNode` unlinks itself when its frame unwinds.
+///
+/// `catch_panic!` unwinds rather than jumping, so destructors run during
+/// recovery — which is what makes the node's own `Drop` a real release path
+/// and not just documentation. A node left linked by a panicking waiter is
+/// the same corruption as one left by a killed waiter: the queue keeps a
+/// pointer into a frame that no longer exists.
+pub fn test_wait_node_unlinks_when_its_frame_unwinds() -> TestResult {
+    let _fixture = SchedFixture::new();
+
+    let wq = WaitQueue::new();
+    let Some((task_id, node)) = park_stack_waiter(&wq, b"UnwindWaiter\0") else {
+        klog_info!("SCHED_TEST: could not park the waiter");
+        return TestResult::Fail;
+    };
+
+    let mut outcome = TestResult::Pass;
+    if wq.waiter_count() != 1 {
+        klog_info!("SCHED_TEST: the waiter is not on the queue");
+        outcome = TestResult::Fail;
+    }
+
+    // Destroy the node the way an unwind does, then confirm the queue no
+    // longer names it.
+    drop(node);
+    if wq.waiter_count() != 0 {
+        klog_info!(
+            "SCHED_TEST: a destroyed node left {} entries on the queue",
+            wq.waiter_count()
+        );
+        outcome = TestResult::Fail;
+    }
+    // The queue must still be usable: a botched unlink corrupts the list
+    // rather than merely leaving it long.
+    if wq.wake_one() {
+        klog_info!("SCHED_TEST: the queue woke a node that no longer exists");
+        outcome = TestResult::Fail;
+    }
+
+    let _ = task_terminate(task_id);
+    outcome
+}
+
+slopos_testing::stest!(
+    name = test_wait_node_unlinks_when_its_frame_unwinds,
     suite = sched_core
 );

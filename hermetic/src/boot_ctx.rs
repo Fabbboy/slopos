@@ -226,8 +226,8 @@ pub fn return_after_ap<'brand>(_cpu_id: usize, _ctx: BootCtx<'brand, ApInit>) {
 }
 
 /// Force-clear the `TEST_SCOPE_ACTIVE` flag from a panic-recovery
-/// cleanup callback. Used when a test panics inside its body and the
-/// scope's `Drop` is skipped via `catch_panic!`'s longjmp.
+/// cleanup callback, for the case where the scope's own `Drop` did not
+/// reach the flag.
 ///
 /// A single atomic store to a `'static` flag; sound from any context.
 /// Intended caller is `panic_recovery`'s registered cleanup chain on

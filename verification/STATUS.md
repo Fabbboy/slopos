@@ -195,7 +195,7 @@ evasion. It is how much of OSTD's exported API has to be trusted by reading:
 |---|---:|
 | `pub unsafe fn` | 54 |
 | `pub unsafe trait` | 15 |
-| safe `pub fn` carrying a `# Safety` section | 16 |
+| safe `pub fn` carrying a `# Safety` section | 0 |
 
 The last row is the one that matters most and the one being driven down:
 a `# Safety` section on a function that is not `unsafe fn` is a written

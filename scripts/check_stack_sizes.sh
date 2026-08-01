@@ -6,17 +6,27 @@
 # heuristic, so inline expansion, NRVO failures, and trait-object dispatch are
 # all accounted for.
 #
-# This 2 KiB ceiling is the load-bearing enforcement of **Inv. 5'**
-# (framekernel soundness invariant): an OSTD client's stack frame cannot grow
-# large enough to puncture the kernel guard page in a single function entry.
-# Derived from Asterinas paper §4.3 Inv. 5 + the per-task stack guard frame
-# requirement.
+# This 2 KiB ceiling is the load-bearing enforcement of SlopOS invariant
+# **S-5**: an OSTD client's stack frame cannot grow large enough to puncture a
+# stack guard page in a single function entry. Derived from the Asterinas
+# paper §4.3 Inv. 5 plus the per-task stack guard frame requirement, and named
+# S-5 rather than "Inv. 5'" because the paper's own Inv. 5 is a different
+# claim (sensitive memory cannot be tampered with by user programs).
 #
-# Above it sits a second limit no allowlist can raise: the 4096 B guard page
-# (mm/src/memory_layout_defs.rs, KSTACK_GUARD_SIZE). The target sets
-# "stack-probes": {"kind": "none"}, so a larger frame steps clean over the
+# Above it sits a second limit no allowlist can raise: a 4096 B guard page.
+# There are two of them, one per stack — KSTACK_GUARD_SIZE below the kernel
+# (safe) stack and USTACK_GUARD_SIZE below the data (unsafe) stack, both in
+# mm/src/memory_layout_defs.rs. The target sets
+# "stack-probes": {"kind": "none"}, so a larger frame steps clean over its
 # guard in one instruction — a measured cap says how big a frame is, not
 # whether that size is survivable.
+#
+# What this gate measures under -Z sanitizer=safestack is *not* established.
+# `.stack_sizes` carries one number per function while a split frame has two
+# allocations, and nothing here or in the compiler's documentation says which
+# it records. Treat the threshold as covering the larger of the two only if
+# that is confirmed; until then the 2 KiB cap against a 4 KiB guard is the
+# margin that absorbs the uncertainty.
 #
 # Each variant gets its own allowlist under scripts/gates/stack/: codegen
 # differs, and a union would hide a regression in whichever is looser. The

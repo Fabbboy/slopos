@@ -238,9 +238,9 @@ pub fn klog_swap_backend(new: Option<KlogBackend>) -> Option<KlogBackend> {
 
 /// Force the backend back to the early-boot fallback.
 ///
-/// Intended for the panic-recovery cleanup path: if a panicking test
-/// longjmps out of `catch_panic!`, its `CaptureGuard` never runs, so
-/// the buffering backend would otherwise stay installed forever.
+/// Intended for the panic-recovery cleanup path: a `CaptureGuard` whose
+/// frame is destroyed by something other than an ordinary return leaves the
+/// buffering backend installed, and nothing else would take it out.
 pub fn klog_force_restore_default() {
     BACKEND.store(core::ptr::null_mut(), Ordering::Release);
 }
