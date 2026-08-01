@@ -206,6 +206,47 @@ impl TaskState {
         }
     }
 
+    /// Publish `status`, refusing any transition out of a terminal state back
+    /// into a live one. Returns `false`, having written nothing, when it
+    /// refuses.
+    ///
+    /// Deliberately narrower than [`TaskStatus::can_transition_to`], which has
+    /// no self-edges and no `Invalid -> Blocked`, and so would reject the
+    /// `Running -> Running` re-publish in dispatch, the `Ready -> Ready`
+    /// publication rollback, and slot init. This closes the one hole that
+    /// matters: a task stamped `Zombie` by a peer and then force-restored to
+    /// `Running` never reaches deferred cleanup, so its fd table, its process
+    /// VM and its reap never run while it lives on with a published exit value
+    /// and reparented children.
+    ///
+    /// The status is re-read inside the CAS loop, so the check is not a
+    /// time-of-check gap the way reading it once outside would be.
+    #[inline]
+    #[must_use = "a refused publish means the task is already dead; take the terminal path"]
+    pub fn set_status_checked(&self, status: TaskStatus, reason: BlockReason) -> bool {
+        loop {
+            let current_word = self.0.load(Ordering::Acquire);
+            let current = TaskStateView::unpack(current_word);
+            if is_terminal(current.status) && is_live(status) {
+                return false;
+            }
+            let next = TaskStateView {
+                status,
+                reason,
+                epoch: current.epoch.wrapping_add(1),
+            };
+            match self.0.compare_exchange_weak(
+                current_word,
+                next.pack(),
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            ) {
+                Ok(_) => return true,
+                Err(_) => continue,
+            }
+        }
+    }
+
     /// Bump only the epoch field, preserving status and reason.
     /// Used when a slot is recycled but its terminal state is also
     /// the next initial state (e.g. Terminated → Terminated on
@@ -291,6 +332,21 @@ impl TaskState {
             }
         }
     }
+}
+
+/// A status a task never comes back from.
+#[inline]
+const fn is_terminal(status: TaskStatus) -> bool {
+    matches!(status, TaskStatus::Zombie | TaskStatus::Terminated)
+}
+
+/// A status in which a task can still be dispatched or woken.
+#[inline]
+const fn is_live(status: TaskStatus) -> bool {
+    matches!(
+        status,
+        TaskStatus::Ready | TaskStatus::Running | TaskStatus::Blocked
+    )
 }
 
 impl Default for TaskState {

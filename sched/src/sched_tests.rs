@@ -635,7 +635,7 @@ pub fn test_parked_spawn_drained_by_the_switch_tail_hook() -> TestResult {
         };
         // The state the switch tail finds: terminated, with its kernel stack
         // still mapped. Anything else and the hook returns early.
-        owner.set_status(TaskStatus::Terminated);
+        let _ = owner.set_status(TaskStatus::Terminated);
         crate::task::cleanup_current_task_after_switch(&owner);
     }
     crate::task::task_graveyard_drain();
@@ -1593,7 +1593,7 @@ pub fn test_unpublished_task_is_terminable() -> TestResult {
         let Some(task) = task_find_by_id(id) else {
             return TestResult::Fail;
         };
-        task.set_status(TaskStatus::Invalid);
+        let _ = task.set_status(TaskStatus::Invalid);
     }
 
     if task_terminate(id) != 0 {
@@ -6891,5 +6891,82 @@ pub fn test_terminal_task_is_descheduled_at_the_tick() -> TestResult {
 
 slopos_testing::stest!(
     name = test_terminal_task_is_descheduled_at_the_tick,
+    suite = sched_core
+);
+
+/// A task that goes terminal while parked is not restored to Running.
+///
+/// The wait protocol cancels its own `Running -> Blocked` commit whenever a
+/// wake, a satisfied condition or a runtime teardown beats it to the yield,
+/// and that cancellation is a force-store. A task stamped `Zombie` by a peer
+/// CPU while parked would be force-restored to `Running` by it — after which
+/// the status gate in `cleanup_current_task_after_switch` makes deferred
+/// cleanup a permanent no-op, so the fd table, the process VM and the reap
+/// never run while the task lives on with a published exit value.
+pub fn test_terminal_task_is_not_restored_to_running() -> TestResult {
+    let _fixture = SchedFixture::new();
+
+    let task_id = task_create(
+        b"NoResurrect\0".as_ptr() as *const c_char,
+        dummy_task_entry,
+        ptr::null_mut(),
+        TaskPriority::Normal.as_u8(),
+        TASK_FLAG_KERNEL_MODE,
+    );
+    if task_id == INVALID_TASK_ID {
+        return TestResult::Fail;
+    }
+    if !scheduler::clear_nascent_for_test(task_id) || !dispatch_as_current(task_id) {
+        park_bootstrap_on_current_cpu();
+        let _ = task_terminate(task_id);
+        return TestResult::Fail;
+    }
+
+    let mut outcome = TestResult::Pass;
+
+    // Control: a live task is restored, which is the whole point of the call.
+    if let Some(current) = slopos_sched_current_for_test() {
+        if !scheduler::consume_ready_wake_for_current_for_test(&current) {
+            klog_info!("SCHED_TEST: a live task was refused a Running publish");
+            outcome = TestResult::Fail;
+        }
+    } else {
+        klog_info!("SCHED_TEST: no current task after dispatch");
+        outcome = TestResult::Fail;
+    }
+
+    if task_set_state(task_id, TaskStatus::Zombie) != 0 {
+        klog_info!("SCHED_TEST: could not publish Zombie");
+        outcome = TestResult::Fail;
+    } else if let Some(current) = slopos_sched_current_for_test() {
+        if scheduler::consume_ready_wake_for_current_for_test(&current) {
+            klog_info!("SCHED_TEST: a Zombie task was restored to Running");
+            outcome = TestResult::Fail;
+        }
+        let status = current.task().status();
+        if status != TaskStatus::Zombie {
+            klog_info!(
+                "SCHED_TEST: terminal status was overwritten, now {:?}",
+                status
+            );
+            outcome = TestResult::Fail;
+        }
+        if current.task().sched_placement() != SchedPlacement::None {
+            klog_info!("SCHED_TEST: a refused task kept a scheduler owner");
+            outcome = TestResult::Fail;
+        }
+    }
+
+    park_bootstrap_on_current_cpu();
+    let _ = task_terminate(task_id);
+    outcome
+}
+
+fn slopos_sched_current_for_test() -> Option<crate::task_struct::Current> {
+    crate::task_struct::Current::get()
+}
+
+slopos_testing::stest!(
+    name = test_terminal_task_is_not_restored_to_running,
     suite = sched_core
 );

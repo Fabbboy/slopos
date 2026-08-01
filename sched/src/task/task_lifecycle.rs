@@ -969,7 +969,7 @@ fn stamp_exit_state(task: &Task, resolved_id: u32, now: u64) -> ExitPlan {
     } else {
         TaskStatus::Terminated
     };
-    task.set_status(final_status);
+    let _ = task.set_status(final_status);
     task.clear_fate();
 
     // The futex clear is ours only when we are the running task. The swap is

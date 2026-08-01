@@ -743,7 +743,7 @@ pub(super) fn allocate_task() -> Result<PendingTask, TaskAllocError> {
     };
     let value = KArc::get_mut(&mut task).expect("fresh task allocation must be unique");
     value.task_id = id;
-    value.set_status(TaskStatus::Blocked);
+    let _ = value.set_status(TaskStatus::Blocked);
     Ok(PendingTask {
         task: Some(task),
         id,

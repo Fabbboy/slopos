@@ -310,7 +310,11 @@ pub(crate) fn dispatch(cpu_id: usize, task: &Task) {
         return;
     }
     let _ = task.sched_placement_compare_exchange(SchedPlacement::None, SchedPlacement::OnCpu);
-    task.set_status(TaskStatus::Running);
+    // Terminal between the gate above and here: same fallback as a task that
+    // was never runnable — skip the dispatch and let the caller pick another.
+    if !task.set_status(TaskStatus::Running) {
+        return;
+    }
 }
 
 /// Cross-crate, test-only entry point into [`dispatch`] for hermetic
@@ -1018,14 +1022,17 @@ pub fn publish_new_task(task: &TaskRef) -> c_int {
         }
     };
     let previous_status = body.status();
-    body.set_status(TaskStatus::Ready);
+    if !body.set_status(TaskStatus::Ready) {
+        let _ = body.sched_placement_compare_exchange(SchedPlacement::Waking, reserved_from);
+        return -1;
+    }
     let rc = schedule_task_from_placement(task, SchedPlacement::Waking, true);
     if rc != 0 {
         // Roll back to whichever unpublished state we reserved from, so a
         // failed publication leaves "never published" still spelled `Nascent`
         // and a retry — or a later `task_terminate` — sees a coherent state.
         let _ = body.sched_placement_compare_exchange(SchedPlacement::Waking, reserved_from);
-        body.set_status(previous_status);
+        let _ = body.set_status(previous_status);
     }
     rc
 }
@@ -1698,13 +1705,29 @@ fn assert_switch_preempt_safe() {
 /// ready entry or a remote-inbox node. Local ready entries are removed here;
 /// stale remote-inbox nodes are harmless because the owner CPU will unlink/drop
 /// them when it drains and observes placement != `RemoteWake`.
-pub(crate) fn consume_ready_wake_for_current(current: &Current) {
+///
+/// Returns `false` when the task went terminal while it was parked. It is then
+/// left stripped of every scheduler owner instead of restored: restoring
+/// `Running` over a published `Zombie` is what made deferred cleanup a
+/// permanent no-op, so the fd table, the process VM and the reap never ran.
+pub(crate) fn consume_ready_wake_for_current(current: &Current) -> bool {
     // The guard already proves this CPU is running the task, so every read
     // below comes off it directly.
     let body = current.task();
-    current.task().set_status(TaskStatus::Running);
+    if !body.set_status(TaskStatus::Running) {
+        unschedule_task(body);
+        body.set_sched_placement(SchedPlacement::None);
+        return false;
+    }
     unschedule_task(body);
     body.set_sched_placement(SchedPlacement::OnCpu);
+    true
+}
+
+/// Drive [`consume_ready_wake_for_current`] from a test.
+#[cfg(feature = "test-hooks")]
+pub fn consume_ready_wake_for_current_for_test(current: &Current) -> bool {
+    consume_ready_wake_for_current(current)
 }
 
 /// Defence: at entry, `unschedule_task` strips us from every
@@ -1745,7 +1768,7 @@ pub(crate) fn commit_blocked_deschedule(current: &Current) -> bool {
     let body = current.task();
     unschedule_task(body);
     if body.status() != TaskStatus::Blocked {
-        consume_ready_wake_for_current(current);
+        let _ = consume_ready_wake_for_current(current);
         return false;
     }
     true
@@ -1824,7 +1847,7 @@ pub fn set_current_runnable() {
         // Remove any runqueue presence a racing wake may have added and
         // restore the scheduler owner to OnCpu — we are about to keep running
         // on this CPU, the task must not also be eligible for dispatch.
-        consume_ready_wake_for_current(&current);
+        let _ = consume_ready_wake_for_current(&current);
     });
 }
 

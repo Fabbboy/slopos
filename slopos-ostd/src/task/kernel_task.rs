@@ -1371,17 +1371,16 @@ impl<K, U> TaskInner<K, U> {
         self.state.status()
     }
 
-    /// Force-publish a new status without changing the block reason.
+    /// Publish a new status, keeping the current block reason.
+    ///
+    /// Refuses to bring a terminal task back to life; see
+    /// [`TaskState::set_status_checked`]. Returns `false` when it refuses, and
+    /// the caller must then take its own terminal path.
     #[inline]
-    pub fn set_status(&self, status: TaskStatus) {
+    #[must_use = "a refused publish means the task is already dead; take the terminal path"]
+    pub fn set_status(&self, status: TaskStatus) -> bool {
         let reason = self.state.reason();
-        self.state.force_set(status, reason);
-    }
-
-    /// Force-publish (status, reason) atomically. Single-owner only.
-    #[inline]
-    pub fn force_set_state(&self, status: TaskStatus, reason: BlockReason) {
-        self.state.force_set(status, reason);
+        self.state.set_status_checked(status, reason)
     }
 
     #[inline]
