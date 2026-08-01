@@ -67,17 +67,35 @@ define_syscall!(syscall_reboot (ctx) -> SyscallResult {
 });
 
 define_syscall!(syscall_sleep_ms (ctx, ms: u64) -> Result<(), Errno> {
-    let mut ms = ms;
-    if ms > 60000 {
-        ms = 60000;
+    let ms = ms.min(60000);
+    if ms == 0 {
+        return Ok(());
     }
-    let rc = if scheduler_is_preemption_enabled() != 0 {
-        sleep_current_task_ms(ms as u32)
-    } else {
+    if scheduler_is_preemption_enabled() == 0 {
         slopos_kernel_services::platform::timer_poll_delay_ms(ms as u32);
-        0
-    };
-    if rc == 0 { Ok(()) } else { Err(Errno::EINVAL) }
+        return Ok(());
+    }
+
+    // An absolute deadline, re-derived each pass. Anything that wakes the task
+    // early — a signal's unblock, a kill's — used to end the sleep reporting
+    // success, so a signalled `sleep(10)` returned immediately and claimed to
+    // have slept. EINTR rather than ERESTARTSYS: a restart re-arms the whole
+    // original duration.
+    let deadline_ms = slopos_kernel_services::platform::get_time_ms().saturating_add(ms);
+    loop {
+        let now_ms = slopos_kernel_services::platform::get_time_ms();
+        if now_ms >= deadline_ms {
+            return Ok(());
+        }
+        let task = ctx.task();
+        if task.is_killed() || slopos_sched::task::task_has_deliverable_signal(task) {
+            return Err(Errno::EINTR);
+        }
+        let remaining = deadline_ms.saturating_sub(now_ms).min(u32::MAX as u64) as u32;
+        if sleep_current_task_ms(remaining) != 0 {
+            return Err(Errno::EINVAL);
+        }
+    }
 });
 
 define_syscall!(syscall_exit (ctx, code: u32) -> SyscallResult {

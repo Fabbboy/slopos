@@ -83,11 +83,32 @@ const SYSCALL_INSN_SIZE: u64 = 2;
 /// Inspect the syscall return value and, if it is `ERESTARTSYS`,
 /// decide whether to transparently restart the syscall or convert to
 /// `EINTR`.
+/// Syscalls that carry a caller-supplied timeout.
+///
+/// `ERESTARTSYS` restarts from argument zero — the rewind below reloads `rax`
+/// with the syscall number and steps `rip` back onto the `syscall`
+/// instruction — so a restart re-arms the *original* timeout. Under signal
+/// pressure that livelocks: each delivery restarts a fresh full-length wait.
+/// These must report `EINTR` and let userland re-derive the remainder, or
+/// carry an absolute deadline in their own loop.
+const TIMEOUT_BEARING: &[u64] = &[
+    slopos_abi::syscall::SYSCALL_SLEEP_MS,
+    slopos_abi::syscall::SYSCALL_POLL,
+    slopos_abi::syscall::SYSCALL_SELECT,
+    slopos_abi::syscall::SYSCALL_FUTEX,
+    slopos_abi::syscall::SYSCALL_RING_ENTER,
+];
+
 fn handle_erestartsys(task_ref: &Task, user_ctx: &UserContext, sysno: u64) {
     let result = user_ctx.rax();
     if result != ERRNO_ERESTARTSYS {
         return;
     }
+    debug_assert!(
+        !TIMEOUT_BEARING.contains(&sysno),
+        "syscall {sysno} returned ERESTARTSYS with a caller-supplied timeout; \
+         it must return EINTR so the remaining time is not re-armed"
+    );
 
     let pending = task_ref.signal_pending.load(Ordering::Acquire);
     let blocked = task_ref.signal_blocked();
