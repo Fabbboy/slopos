@@ -214,6 +214,7 @@ pub fn timer_start(initial_count: u32) {
         return;
     }
     write_register(LAPIC_TIMER_ICR, initial_count);
+    republish_timer_armed(initial_count != 0);
 }
 
 pub fn timer_stop() {
@@ -221,6 +222,18 @@ pub fn timer_stop() {
         return;
     }
     write_register(LAPIC_TIMER_ICR, 0);
+    // A zero initial count stops the countdown whatever the LVT says, so
+    // this CPU stops ticking and the lockup detector must stop watching it.
+    republish_timer_armed(false);
+}
+
+/// Publish whether this CPU still receives periodic timer interrupts.
+/// `counting` is the caller's knowledge of the initial count; the LVT
+/// supplies the rest.
+fn republish_timer_armed(counting: bool) {
+    let lvt = read_register(LAPIC_LVT_TIMER);
+    let ticking = counting && (lvt & LAPIC_TIMER_PERIODIC) != 0 && (lvt & LAPIC_LVT_MASKED) == 0;
+    slopos_arch::pcr::set_timer_armed(ticking);
 }
 
 pub fn timer_get_current_count() -> u32 {

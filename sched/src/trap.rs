@@ -52,6 +52,11 @@ pub fn scheduler_request_reschedule_from_interrupt() {
 }
 
 pub fn scheduler_handle_timer_interrupt(frame: *mut InterruptFrame) {
+    // Ahead of `scheduler_timer_tick` so the heartbeat is recorded before
+    // any lock is taken, and here rather than inside it so the tests that
+    // call `scheduler_timer_tick` synthetically do not drive the detector's
+    // sample counter with no wall time elapsed.
+    slopos_ostd::watchdog::tick();
     save_preempt_context(frame);
     scheduler_timer_tick();
 }

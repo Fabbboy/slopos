@@ -336,30 +336,23 @@ hermetic_state! {
 }
 
 // =============================================================================
-// WatchdogTicksShadow — per-CPU NMI watchdog tick counters
+// WatchdogHeartbeatShadow — per-CPU lockup-detector progress counter
 // =============================================================================
 //
-// Counters that drift between tests don't cause functional bugs (the
-// watchdog only checks against the live tick counter, not a delta), but
-// snapshot/restore makes the leak surface uniform and lets future
-// audit reasoning be simpler.
+// The detector compares a heartbeat against a watcher's own previous
+// reading, so drift between tests changes nothing. Captured anyway so the
+// audit gate sees the state covered.
 
 hermetic_state! {
-    pub WatchdogTicksShadow {
-        type Snapshot = u64; // hash; full bitmap is too large for a Send Snapshot
+    pub WatchdogHeartbeatShadow {
+        type Snapshot = u64;
         fn snapshot() -> Result<Self::Snapshot, AllocError> {
-            // Snapshot is the BSP-only watchdog tick — full restore is
-            // unnecessary because the watchdog tolerates arbitrary
-            // drift. We capture this so a future test that reasons
-            // about watchdog ticks has a stable baseline.
-            Ok(super::scheduler::watchdog_last_tick(0))
+            Ok(slopos_arch::pcr::heartbeat_for_cpu(0))
         }
         fn restore(_snap: Self::Snapshot) {
-            // The per-CPU AtomicU64 array is private to scheduler.rs
-            // and there's no public reset. The watchdog auto-corrects
-            // from any drift, so a no-op restore is functionally safe;
-            // the impl exists primarily so the audit gate sees this
-            // state covered.
+            // The counter is monotonic by construction and only ever read
+            // as a difference against the reader's own last sample, so
+            // there is nothing a restore could make more correct.
         }
     }
 }

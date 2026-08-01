@@ -388,6 +388,9 @@ pub fn enter_scheduler(cpu_id: usize) -> ! {
         Err(IdleStackResolveError::MissingIdleTask) => {
             klog_info!("SCHED: CPU {} has no idle task, halting", cpu_id);
             slopos_mm::tlb::notify_cpu_offline();
+            // Leaving `online` latched on a CPU that parks forever would
+            // have the lockup detector watch a CPU that can never tick.
+            slopos_arch::pcr::mark_cpu_offline(cpu_id);
             slopos_arch::cpu::disable_interrupts();
             slopos_ostd::cpu::x86_64::core::halt_loop();
         }
@@ -397,6 +400,9 @@ pub fn enter_scheduler(cpu_id: usize) -> ! {
                 cpu_id
             );
             slopos_mm::tlb::notify_cpu_offline();
+            // Leaving `online` latched on a CPU that parks forever would
+            // have the lockup detector watch a CPU that can never tick.
+            slopos_arch::pcr::mark_cpu_offline(cpu_id);
             slopos_arch::cpu::disable_interrupts();
             slopos_ostd::cpu::x86_64::core::halt_loop();
         }
@@ -467,102 +473,11 @@ fn deferred_start_ap_timer(cpu_id: usize) {
     }
 }
 
-// ---------------------------------------------------------------------------
-// NMI watchdog: cross-CPU deadlock detection
-// ---------------------------------------------------------------------------
-
-/// Per-CPU watchdog threshold in timer ticks. 250 ticks at 100Hz / 4 CPUs
-/// = 2.5s wall time before a CPU is presumed deadlocked. The global timer
-/// counter is incremented by ALL CPUs, so the actual threshold used is
-/// `WATCHDOG_PER_CPU_THRESHOLD * num_online_cpus`.
-///
-/// The previous 500ms threshold tripped on the legitimate path
-/// `notify_font_changed -> redraw_all` which holds `VCONSOLE_STATE.lock()`
-/// (IRQ-disabling SpinLock) across a full-screen framebuffer redraw —
-/// 8.3M pixels at 4K resolution takes ~700ms on TCG. Raising the
-/// threshold past worst-case legitimate sections; deadlock detection
-/// stays sharp because a real deadlock holds forever.
-const WATCHDOG_PER_CPU_THRESHOLD: u64 = 250;
-
-/// Grace period after boot before the watchdog activates.  The global
-/// counter must reach this value before any checks run, giving all CPUs
-/// time to start their LAPIC timers and begin ticking.
-const WATCHDOG_WARMUP_TICKS: u64 = 200;
-
-/// Threshold multiplier granted to a CPU that is inside a panic-recovery
-/// (`run_recoverable`) scope. A caught panic runs the DWARF unwinder — and,
-/// before it, a symbolized serial backtrace dump over the polled UART — with
-/// interrupts disabled whenever the panic originated under an IRQ-disabling
-/// lock, so that CPU's per-CPU timer tick legitimately freezes for far longer
-/// than a normal IRQ-off section. Bounding the grace (rather than skipping the
-/// check) keeps deadlock detection alive: a genuine wedge inside a recovery
-/// scope still NMIs, at ~`WATCHDOG_PER_CPU_THRESHOLD * num_cpus * this` ticks
-/// (~40 s at 4 CPUs) — long enough for the slowest unwind, yet well inside the
-/// test harness's 180 s abort.
-const WATCHDOG_RECOVERY_GRACE_MULT: u64 = 16;
-
-/// Each CPU monitors the next CPU in round-robin order.  If the target has
-/// not recorded a timer tick within the scaled threshold, it is presumed
-/// stuck with interrupts disabled (deadlocked spinlock) and receives an NMI.
-fn check_watchdog_for_neighbor(my_cpu: usize) {
-    let num_cpus = slopos_arch::pcr::get_online_cpu_count();
-    if num_cpus < 2 {
-        return;
-    }
-
-    let current_tick = slopos_kernel_services::clock::get_timer_ticks();
-
-    // Don't arm the watchdog during early boot while CPUs are still
-    // starting their LAPIC timers.
-    if current_tick < WATCHDOG_WARMUP_TICKS {
-        return;
-    }
-
-    // Find the next online CPU to monitor.
-    let target = (my_cpu + 1) % num_cpus;
-    if target == my_cpu {
-        return;
-    }
-    if !slopos_arch::pcr::is_cpu_online(target) {
-        return;
-    }
-
-    let target_tick = super::scheduler::watchdog_last_tick(target);
-
-    // Don't trigger if the target hasn't started ticking yet.
-    if target_tick == 0 {
-        return;
-    }
-
-    // Scale threshold by number of online CPUs since the global tick
-    // counter is incremented by every CPU's LAPIC timer.
-    let mut threshold = WATCHDOG_PER_CPU_THRESHOLD * num_cpus as u64;
-
-    // A CPU inside a `run_recoverable` scope may be running the DWARF unwinder
-    // for a caught panic with interrupts disabled — a legitimately long IRQ-off
-    // section during which its per-CPU tick cannot advance. Grant it a bounded
-    // grace so the unwind completes; a genuine wedge is still caught, later.
-    if slopos_arch::pcr::recovery_depth_for_cpu(target) > 0 {
-        threshold = threshold.saturating_mul(WATCHDOG_RECOVERY_GRACE_MULT);
-    }
-
-    if current_tick.saturating_sub(target_tick) > threshold {
-        // Target CPU hasn't ticked within the (possibly grace-extended)
-        // threshold -- presumed stuck with interrupts disabled.
-        if let Some(apic_id) = slopos_arch::pcr::apic_id_from_cpu_index(target) {
-            slopos_arch::pcr::send_nmi_to_cpu(apic_id);
-        }
-    }
-}
-
 fn scheduler_loop(cpu_id: usize) -> ! {
     loop {
         // Start the LAPIC timer on this AP once the boot layer registers
         // the callback (after calibration).  No-op after the first success.
         deferred_start_ap_timer(cpu_id);
-
-        // NMI watchdog: each CPU monitors the next one in round-robin.
-        check_watchdog_for_neighbor(cpu_id);
 
         per_cpu::with_cpu_scheduler(cpu_id, |sched| {
             sched.drain_remote_inbox();

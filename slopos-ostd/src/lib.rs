@@ -65,6 +65,7 @@ pub mod uefi;
 pub mod unwind;
 pub mod user;
 pub mod util;
+pub mod watchdog;
 pub mod wl_currency;
 
 #[doc(hidden)]

@@ -130,7 +130,7 @@ pub fn set_periodic_ms(vector: u8, ms: u32) -> bool {
 
     timer_set_divisor(LAPIC_TIMER_DIV_16);
     let lvt = (vector as u32) | LAPIC_TIMER_PERIODIC;
-    write_register(LAPIC_LVT_TIMER, lvt);
+    write_timer_lvt(lvt);
     write_register(LAPIC_TIMER_ICR, count as u32);
 
     klog_debug!(
@@ -172,7 +172,7 @@ pub fn set_oneshot_ms(vector: u8, ms: u32) -> bool {
 
     timer_set_divisor(LAPIC_TIMER_DIV_16);
     let lvt = (vector as u32) | LAPIC_TIMER_ONESHOT;
-    write_register(LAPIC_LVT_TIMER, lvt);
+    write_timer_lvt(lvt);
     write_register(LAPIC_TIMER_ICR, count as u32);
     true
 }
@@ -191,6 +191,22 @@ pub fn is_calibrated() -> bool {
     LAPIC_TIMER_FREQ_HZ.load(Ordering::Acquire) != 0
 }
 
+/// Write the timer LVT and republish whether this CPU still receives
+/// periodic ticks.
+///
+/// The lockup detector watches for a CPU whose progress counter has
+/// stopped moving, and the counter moves on the timer interrupt. A CPU
+/// whose timer is masked, one-shot or mid-calibration is not wedged — it
+/// simply has no timer — so it must not be watched. Keeping the flag on
+/// the register write means no caller has to remember, including the
+/// LAPIC-timer tests, which stop the timer on purpose and leave it stopped
+/// across the tests that follow.
+fn write_timer_lvt(lvt: u32) {
+    write_register(LAPIC_LVT_TIMER, lvt);
+    let ticking = (lvt & LAPIC_TIMER_PERIODIC) != 0 && (lvt & LAPIC_LVT_MASKED) == 0;
+    slopos_arch::pcr::set_timer_armed(ticking);
+}
+
 /// Mask the LAPIC timer LVT entry (suppress interrupts without stopping the counter).
 #[inline]
 pub fn mask() {
@@ -198,7 +214,7 @@ pub fn mask() {
         return;
     }
     let lvt = read_register(LAPIC_LVT_TIMER);
-    write_register(LAPIC_LVT_TIMER, lvt | LAPIC_LVT_MASKED);
+    write_timer_lvt(lvt | LAPIC_LVT_MASKED);
 }
 
 /// Unmask the LAPIC timer LVT entry (resume delivering interrupts).
@@ -208,7 +224,7 @@ pub fn unmask() {
         return;
     }
     let lvt = read_register(LAPIC_LVT_TIMER);
-    write_register(LAPIC_LVT_TIMER, lvt & !LAPIC_LVT_MASKED);
+    write_timer_lvt(lvt & !LAPIC_LVT_MASKED);
 }
 
 // ---------------------------------------------------------------------------
@@ -267,7 +283,7 @@ fn calibrate_against(reference: ReferenceTimer) -> u64 {
         // Configure one-shot mode, masked (no interrupt fires during
         // calibration).  One-shot is the default when PERIODIC/TSC-deadline
         // bits are clear.
-        write_register(LAPIC_LVT_TIMER, LAPIC_TIMER_ONESHOT | LAPIC_LVT_MASKED);
+        write_timer_lvt(LAPIC_TIMER_ONESHOT | LAPIC_LVT_MASKED);
         timer_set_divisor(LAPIC_TIMER_DIV_16);
 
         // Load maximum initial count so we never underflow to zero.

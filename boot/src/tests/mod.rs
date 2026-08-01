@@ -8,3 +8,4 @@ pub mod panic_recovery_tests;
 pub mod safestack_dstack_tests;
 pub mod shutdown_tests;
 pub mod unwind_index_tests;
+pub mod watchdog_tests;

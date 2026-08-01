@@ -116,6 +116,11 @@ pub fn kernel_quiesce_interrupts() {
 
     klog_info!("Kernel shutdown: quiescing interrupt controllers");
 
+    // The worst interrupts-off section each CPU was observed in, before the
+    // timers stop. This is the measurement the detector's threshold should
+    // be sized from.
+    slopos_ostd::watchdog::report_max_stalls();
+
     if apic::is_available() {
         // Send shutdown IPIs to all processors before disabling APIC
         apic::send_ipi_halt_all();

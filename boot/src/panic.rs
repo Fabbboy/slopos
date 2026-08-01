@@ -72,6 +72,14 @@ fn panic_serial_write(s: &str) {
     // directly, so it is safe from any context.
     slopos_ostd::early_console::write_bytes(s.as_bytes());
     slopos_ostd::early_console::write_bytes(b"\n");
+    // One emitted line is real progress, and a panic report — up to 16
+    // symbolized backtrace frames over a polled UART, two port traps per
+    // byte — runs long enough to outlast a timer tick when the panic
+    // originated under an interrupt-disabling lock. The loop above is
+    // bounded by the string already in hand and waits on nothing, so the
+    // touch cannot mask a wedge: a dead UART stops it inside `write_bytes`,
+    // before this line.
+    slopos_ostd::watchdog::touch();
 }
 
 /// Last-resort, **format-free** abort: print a fixed `&'static str` and halt

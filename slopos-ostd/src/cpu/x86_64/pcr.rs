@@ -267,6 +267,32 @@ pub struct ProcessorControlRegion {
     /// comparison needs — the sentinel is for "this CPU has never dispatched",
     /// not for "this CPU is idle".
     pub current_task_priority: AtomicU8,
+
+    /// Monotonic progress counter for the lockup detector.
+    ///
+    /// Bumped from the timer tick before any lock is taken, and from
+    /// [`crate::watchdog::touch`] inside the few bounded loops that run
+    /// long enough to outlast a tick. A watcher compares it against its own
+    /// previous reading, so the detector does no clock arithmetic and
+    /// cannot be fooled by emulation or host steal time.
+    ///
+    /// Appended at the tail with the rest: every asm-critical offset
+    /// (`<= 184`) stays byte-identical and the 4096-byte alignment the
+    /// razors pin is untouched.
+    pub heartbeat: AtomicU64,
+
+    /// Whether this CPU's LAPIC timer is running periodically.
+    ///
+    /// A CPU is marked online before it starts its timer — APs boot ahead
+    /// of calibration and start theirs from the scheduler loop — so
+    /// `online` alone would have the detector watch a CPU that cannot yet
+    /// tick. A zero heartbeat cannot stand in for this: [`crate::watchdog::touch`]
+    /// makes it non-zero without a timer ever having fired.
+    pub timer_armed: AtomicBool,
+
+    /// Set while this CPU is deliberately running without timer ticks, by
+    /// a [`crate::watchdog::Suppress`] token.
+    pub watchdog_suppressed: AtomicBool,
 }
 
 /// `current_task_priority` for a CPU that is running nothing schedulable.
@@ -383,6 +409,9 @@ impl ProcessorControlRegion {
             recovery_depth: AtomicU32::new(0),
             current_task_id: AtomicU32::new(u32::MAX),
             current_task_priority: AtomicU8::new(PRIORITY_NONE),
+            heartbeat: AtomicU64::new(0),
+            timer_armed: AtomicBool::new(false),
+            watchdog_suppressed: AtomicBool::new(false),
         }
     }
 
@@ -1412,6 +1441,55 @@ pub fn mark_cpu_offline(cpu_id: usize) {
 pub fn is_cpu_online(cpu_id: usize) -> bool {
     get_pcr(cpu_id)
         .map(|pcr| pcr.online.load(Ordering::Acquire))
+        .unwrap_or(false)
+}
+
+/// Record progress on this CPU. See [`ProcessorControlRegion::heartbeat`].
+#[inline]
+pub fn heartbeat_bump() {
+    if let Some(pcr) = current_pcr_local() {
+        pcr.heartbeat.fetch_add(1, Ordering::Relaxed);
+    }
+}
+
+/// Read `cpu_id`'s progress counter; `0` for an unknown CPU.
+#[inline]
+pub fn heartbeat_for_cpu(cpu_id: usize) -> u64 {
+    get_pcr(cpu_id)
+        .map(|pcr| pcr.heartbeat.load(Ordering::Relaxed))
+        .unwrap_or(0)
+}
+
+/// Publish whether this CPU's LAPIC timer is delivering periodic ticks,
+/// which is what makes it eligible to be watched.
+#[inline]
+pub fn set_timer_armed(armed: bool) {
+    if let Some(pcr) = current_pcr_local() {
+        pcr.timer_armed.store(armed, Ordering::Release);
+    }
+}
+
+/// Whether `cpu_id` has a running periodic timer.
+#[inline]
+pub fn timer_is_armed(cpu_id: usize) -> bool {
+    get_pcr(cpu_id)
+        .map(|pcr| pcr.timer_armed.load(Ordering::Acquire))
+        .unwrap_or(false)
+}
+
+/// Set or clear this CPU's watchdog suppression, returning the old value.
+#[inline]
+pub fn set_watchdog_suppressed(suppressed: bool) -> bool {
+    current_pcr_local()
+        .map(|pcr| pcr.watchdog_suppressed.swap(suppressed, Ordering::AcqRel))
+        .unwrap_or(false)
+}
+
+/// Whether `cpu_id` has asked not to be watched.
+#[inline]
+pub fn watchdog_is_suppressed(cpu_id: usize) -> bool {
+    get_pcr(cpu_id)
+        .map(|pcr| pcr.watchdog_suppressed.load(Ordering::Acquire))
         .unwrap_or(false)
 }
 

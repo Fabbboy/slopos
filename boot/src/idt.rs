@@ -369,7 +369,7 @@ fn nmi_watchdog_handler(frame: &slopos_arch::InterruptFrame) {
     for cpu in 0..slopos_arch::MAX_CPUS {
         let mut addrs = [0u64; 8];
         let n = slopos_ostd::sync::held_lock_addrs_for_cpu(cpu, &mut addrs);
-        let last_tick = slopos_sched::scheduler::watchdog_last_tick(cpu);
+        let last_tick = slopos_arch::pcr::heartbeat_for_cpu(cpu);
         if n > 0 || last_tick != 0 {
             klog_info!(
                 "NMI WATCHDOG: cpu {} last_tick={} holds {}: {:#x?}",

@@ -1,6 +1,6 @@
 use core::ffi::c_int;
 use core::ptr::NonNull;
-use core::sync::atomic::{AtomicU64, Ordering};
+use core::sync::atomic::Ordering;
 
 use slopos_abi::event::{KernelEvent, TaskSlot};
 use slopos_arch::cpu;
@@ -106,21 +106,6 @@ fn restore_periodic_if_armed() {
     }
     if ONESHOT_ARMED[cpu_id].swap(false, Ordering::AcqRel) {
         platform::timer_restore_periodic();
-    }
-}
-
-static WATCHDOG_TICKS: [AtomicU64; slopos_arch::MAX_CPUS] = {
-    const ZERO: AtomicU64 = AtomicU64::new(0);
-    [ZERO; slopos_arch::MAX_CPUS]
-};
-
-/// Returns the last timer-tick timestamp recorded by `cpu_id`.
-/// Used by the cross-CPU watchdog monitor in the scheduler idle loop.
-pub fn watchdog_last_tick(cpu_id: usize) -> u64 {
-    if cpu_id < WATCHDOG_TICKS.len() {
-        WATCHDOG_TICKS[cpu_id].load(Ordering::Relaxed)
-    } else {
-        0
     }
 }
 
@@ -2273,12 +2258,6 @@ pub fn scheduler_timer_tick() {
     if cpu_id == 0 {
         slopos_ostd::fblog::on_timer_tick();
     }
-
-    // NMI watchdog: record that this CPU is alive before touching any lock.
-    WATCHDOG_TICKS[cpu_id].store(
-        slopos_kernel_services::clock::get_timer_ticks(),
-        Ordering::Relaxed,
-    );
 
     // Conditional QS. A read-side critical section disables preemption but
     // NOT interrupts, so the timer ISR can land in the middle of one — which
