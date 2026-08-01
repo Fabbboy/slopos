@@ -378,10 +378,23 @@ pub fn begin_wait(lock_addr: u64) -> bool {
 /// Republish which CPU holds the lock this one is waiting for. Called as
 /// the spin progresses, because the holder changes as the queue drains.
 pub fn publish_wait_holder(holder: Option<usize>) {
-    if let Some(slot) = SLOTS.get(pcr::get_current_cpu()) {
-        slot.blocked_on
-            .store(holder.map_or(NO_CPU, |cpu| cpu as u32), Ordering::Release);
+    let Some(slot) = SLOTS.get(pcr::get_current_cpu()) else {
+        return;
+    };
+    let next = holder.map_or(NO_CPU, |cpu| cpu as u32);
+    if slot.blocked_on.load(Ordering::Relaxed) == next {
+        return;
     }
+    // A seqlock write: `wait_seq` goes even for the duration, so a walker
+    // spanning the update either breaks on the even parity or sees a
+    // changed sequence and rejects. Without it `wait_seq` would prove only
+    // that each CPU stayed in *some* wait, not that the edges it published
+    // were current at one instant — and a cycle assembled from two edges a
+    // spin iteration apart is not a proof.
+    let seq = slot.wait_seq.load(Ordering::Relaxed);
+    slot.wait_seq.store(seq.wrapping_add(1), Ordering::Release);
+    slot.blocked_on.store(next, Ordering::Release);
+    slot.wait_seq.store(seq.wrapping_add(2), Ordering::Release);
 }
 
 /// Retract this CPU's wait.
@@ -403,8 +416,9 @@ fn collect_wait_chain(start: usize, hops: &mut [WaitHop; MAX_WAIT_HOPS]) -> (usi
         };
         let seq = slot.wait_seq.load(Ordering::Acquire);
         if seq % 2 == 0 {
-            // Not spinning: this CPU is stuck somewhere the graph cannot
-            // describe, or is running normally.
+            // Either not spinning — stuck somewhere the graph cannot
+            // describe, or running normally — or mid-update, whose edge is
+            // not safe to read.
             break;
         }
         let next = slot.blocked_on.load(Ordering::Acquire);
@@ -633,6 +647,17 @@ pub mod test_support {
             .store(blocked_on.map_or(NO_CPU, |c| c as u32), Ordering::Relaxed);
         let seq = slot.wait_seq.load(Ordering::Relaxed);
         if seq % 2 == 0 {
+            slot.wait_seq.store(seq + 1, Ordering::Relaxed);
+        }
+    }
+
+    /// Leave `cpu` in the middle of republishing its edge, the state
+    /// [`publish_wait_holder`] passes through.
+    pub fn plant_mid_update(cpu: usize, blocked_on: usize) {
+        let slot = &SLOTS[cpu];
+        slot.blocked_on.store(blocked_on as u32, Ordering::Relaxed);
+        let seq = slot.wait_seq.load(Ordering::Relaxed);
+        if seq % 2 == 1 {
             slot.wait_seq.store(seq + 1, Ordering::Relaxed);
         }
     }

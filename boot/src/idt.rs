@@ -292,7 +292,7 @@ fn handle_luf_drain_ipi() {
 /// stack; with one it would reset RSP to the IST top and overwrite the
 /// frame this handler is still using.
 ///
-/// # Nothing here may take a lock
+/// # The returning path may take no lock
 ///
 /// `klog!`'s serial backend spins on a blocking ticket lock the interrupted
 /// CPU may already hold, and `early_console::write_bytes` funnels through
@@ -300,6 +300,12 @@ fn handle_luf_drain_ipi() {
 /// per-CPU cell this NMI may have interrupted mid-update. Output goes
 /// through the watchdog's own byte-at-a-time emitter, which touches
 /// neither.
+///
+/// [`nmi_die`] does reach `write_bytes`, through `panic_abort_raw`. That is
+/// the constraint relaxing where it stops mattering: nothing resumes, so a
+/// corrupted held-lock stack has no reader and a wedged UART only costs the
+/// last line. The constraint is about what a *returning* handler leaves
+/// behind.
 fn nmi_handler(frame: &slopos_arch::InterruptFrame) {
     use slopos_ostd::watchdog::{self, NmiDisposition};
 

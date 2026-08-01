@@ -1,6 +1,6 @@
 # SlopOS Known Issues
 
-Last updated: 2026-07-30
+Last updated: 2026-08-01
 
 
 ---
@@ -25,7 +25,7 @@ The remaining blocker is in the **allocator**, exposed (not caused) by the distr
 now produces: under sustained concurrent allocation on multiple CPUs, a `SlabAllocator::alloc_one`
 running under a per-CPU `CpuLocal::get_pinned_mut` pin (interrupts off) can reach the buddy reuse
 path, whose synchronous cross-CPU TLB shootdown spins with interrupts off — stopping that CPU's timer
-tick until the NMI watchdog fires (`NMI WATCHDOG: CPU N not responding`). This is the latent
+tick until the lockup detector reports it (`WATCHDOG: cpu N made no progress`). This is the latent
 "heap-alloc under a cli-lock / LUF reuse-drain is a hidden cross-CPU wait" hazard. It is intermittent
 (~2/12 with 4 strictly-pinned workers) and does **not** occur co-located, so `percore_reactor_test`
 ships with the co-located `(1 << idx) | 1` mask and the full suite is reliably green.
@@ -80,6 +80,50 @@ address spaces accumulate until some CPU goes idle. Already tracked as item 2 of
 Fixes for the first two: bound the `on_cpu` spin, re-enqueueing rather than
 spinning past a threshold; and record the owning CPU on the task so
 `unschedule_task` takes one lock instead of `n`. Neither is scheduled work.
+
+---
+
+## Tickless idle never arms, and advertises a wake it does not deliver
+
+**Status**: Open (unreachable code, not a regression)
+**Severity**: Low (the 100 Hz periodic tick is what actually runs)
+**Component**: `sched/src/scheduler.rs` (`arm_tickless_idle_if_due`, `restore_periodic_if_armed`)
+
+`arm_tickless_idle_if_due` converts the next sleep-queue deadline to milliseconds
+and returns early unless it is *under* the 10 ms periodic period. The sleep queue
+counts in timer ticks and `platform::timer_frequency()` is 100 on every path, so
+one tick converts to exactly 10 ms and the `>=` returns. `delta == 0` returns
+earlier. There is no reachable input that reaches
+`timer_program_next_wakeup_ms`, so `ONESHOT_ARMED` is never set and
+`restore_periodic_if_armed` always takes its false branch.
+
+Two claims rest on it and are false today: the doc comment promising a
+`KernelIo` task that sleeps 1 ms wakes at 1 ms, and the comment at
+`scheduler_timer_tick`'s head saying an unrelated IRQ restores periodic mode —
+`scheduler_timer_tick` is reached only from the LAPIC timer vector.
+
+The honest fix is a sub-10 ms unit for the sleep queue, not patching the
+comparison. Sequence it **after** the lockup detector: the detector's eligibility
+model assumes a CPU either ticks at a flat 100 Hz or is marked not-armed, and a
+real one-shot path would need to bump the heartbeat from the one-shot ISR too.
+
+---
+
+## `slopos-ostd` host tests flake on interrupt-state assertions
+
+**Status**: Open (test-harness only, no kernel impact)
+**Severity**: Low
+**Component**: `slopos-ostd/src/task/`, `cargo test -p slopos-ostd --lib`
+
+`task::fpu_owner::tests::restoring_over_an_unsaved_task_is_refused` fails
+intermittently with "Task dropped with interrupts disabled" from
+`slopos-ostd/src/task/drop_context.rs`. The interrupt-state mock it consults is
+process-global and `cargo test` runs the lib tests on parallel threads, so
+another test's state reaches it. Reproduces roughly one run in ten and passes
+five-for-five in isolation.
+
+Same shape as the serialisation already applied elsewhere for a process-global
+counter: the assertion needs a serial gate, not a wider tolerance.
 
 ---
 

@@ -9,7 +9,7 @@
 //! array and `cargo test` runs integration tests on parallel threads.
 
 use slopos_ostd::sync::{LOCK_LEVEL_UNORDERED, SpinLock};
-use slopos_ostd::watchdog::test_support::{clear_wait, plant_wait, reset_slot};
+use slopos_ostd::watchdog::test_support::{clear_wait, plant_mid_update, plant_wait, reset_slot};
 use slopos_ostd::watchdog::wait_chain_closes_cycle;
 
 #[test]
@@ -84,6 +84,27 @@ fn a_link_that_left_its_wait_breaks_the_cycle() {
     assert!(!wait_chain_closes_cycle(A));
 
     clear_wait(A);
+}
+
+#[test]
+fn an_edge_being_republished_is_not_believed() {
+    const A: usize = 40;
+    const B: usize = 41;
+    reset_slot(A);
+    reset_slot(B);
+
+    plant_wait(A, Some(B), 1);
+    plant_wait(B, Some(A), 2);
+    assert!(wait_chain_closes_cycle(A));
+
+    // B is between publishing one holder and the next. Its edge names A,
+    // and believing it would close a cycle out of a value that is mid-flight
+    // — which is the difference between a proof and a coincidence.
+    plant_mid_update(B, A);
+    assert!(!wait_chain_closes_cycle(A));
+
+    clear_wait(A);
+    clear_wait(B);
 }
 
 #[test]

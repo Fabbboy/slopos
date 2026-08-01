@@ -86,6 +86,23 @@ It also means a green 2716-test suite carries less information than it appears
 to: no ABBA inversion introduced anywhere after mm init can fail a test, because
 nothing is checking.
 
+## Relationship to the lockup detector
+
+The two are complements, not alternatives. The lockup detector catches cycles
+that actually happen, at the moment they happen, with a printed proof: a spinner
+publishes the holder of the lock it wants (`SpinLock`'s `LockCore.holder`) and
+its own CPU index (`slopos_ostd::watchdog`'s `blocked_on` / `wait_seq`), and
+`wait_chain_closes_cycle` walks that graph. Lockdep catches the ones that merely
+*could*, before they ever do. Neither subsumes the other, and the detector works
+while the validator is off — which it is in every boot today.
+
+Sequence this work against that plumbing: the detector already answers "who holds
+this lock" per instance, which is a strictly weaker fact than the class identity
+phase 1 needs, but the same acquisition site publishes both. Two things it
+deliberately does not cover, and which the validator would: locks with no owner
+to publish (`Mutex`, `IrqRwLock`'s readers, the klog ticket pair), and inversions
+between locks that are never contended at the same instant.
+
 ## Fix
 
 ### 1. Static class keys (the real fix)
