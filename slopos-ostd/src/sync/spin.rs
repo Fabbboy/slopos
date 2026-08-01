@@ -159,20 +159,29 @@ impl LockCore {
         }
     }
 
-    /// Record this CPU as the holder of `ticket` and register the
-    /// acquisition with the lock-order validator.
+    /// Complete an acquisition that has already taken `my_ticket`: wait for
+    /// it to be served, publish the holder, and register with the
+    /// lock-order validator.
     ///
-    /// Out of line and non-generic for the same reason as
-    /// [`LockCore::await_ticket`]: this runs on the uncontended path, so it
-    /// is inlined into all ~850 `lock()` call sites, and at `-O3` its
-    /// register pressure lands in each caller's frame.
+    /// One out-of-line non-generic call, deliberately covering the
+    /// uncontended path too. `SpinLock::lock` is inlined at ~850 call
+    /// sites, and at `-O3` everything it keeps inline lands in each
+    /// caller's frame — `check_stack_sizes.sh --variant release` exists to
+    /// catch exactly that fusion, and has no allowlist to absorb it.
+    /// Splitting the wait from the publish left `my_ticket` live across two
+    /// calls and cost `virtio_blk_probe` 656 bytes; folding them leaves the
+    /// inlined part a preempt guard, a `cli` and one `fetch_add`, with
+    /// nothing live across the call but `&self`.
     #[inline(never)]
-    fn acquired(&self, ticket: u16) {
+    fn acquire(&self, my_ticket: u16) {
+        if self.now_serving.load(Ordering::Acquire) != my_ticket {
+            self.await_ticket(my_ticket);
+        }
         let cpu = crate::cpu::x86_64::pcr::get_current_cpu() as u32;
         self.holder
-            .store((cpu << 16) | ticket as u32, Ordering::Relaxed);
-        // SAFETY: the caller holds the lock and `self` outlives the guard
-        // it is about to build.
+            .store((cpu << 16) | my_ticket as u32, Ordering::Relaxed);
+        // SAFETY: this CPU holds the lock, and `self` outlives the guard
+        // the caller is about to build.
         unsafe {
             lock_tracking::push_lock(
                 self as *const _ as *const (),
@@ -462,10 +471,7 @@ impl<T> SpinLock<T> {
         // Take a ticket. fetch_add wraps at u16::MAX → 0; equality checks are
         // wrap-safe so this is correct for any number of acquisitions.
         let my_ticket = self.core.next_ticket.fetch_add(1, Ordering::Relaxed);
-        if self.core.now_serving.load(Ordering::Acquire) != my_ticket {
-            self.core.await_ticket(my_ticket);
-        }
-        self.core.acquired(my_ticket);
+        self.core.acquire(my_ticket);
 
         SpinLockGuard {
             mutex: self,
@@ -491,10 +497,11 @@ impl<T> SpinLock<T> {
             )
             .is_ok()
         {
-            // The `try_lock`-only locks are the ones the reporter itself
-            // takes; skipping the holder here would leave a hole in the
-            // graph exactly where the diagnostics run.
-            self.core.acquired(current);
+            // `current` was `now_serving`, so the wait inside `acquire`
+            // completes immediately. The `try_lock`-only locks are the ones
+            // the reporter itself takes; skipping the holder here would
+            // leave a hole in the graph exactly where the diagnostics run.
+            self.core.acquire(current);
             Some(SpinLockGuard {
                 mutex: self,
                 saved_flags,
