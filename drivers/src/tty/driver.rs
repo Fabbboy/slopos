@@ -245,6 +245,23 @@ pub enum DriverId {
 ///
 /// PTY variants pass the weak peer link to `master_write` / `slave_write`,
 /// which pin the peer before touching its slot.
+/// Whether a write to `driver` can leave work that must run outside the
+/// TTY write lock. Sampled before the write, which consumes the id.
+pub fn defers_console_work(driver: &DriverId) -> bool {
+    matches!(driver, DriverId::VConsole)
+}
+
+/// Run console work a [`write_driver_unlocked`] call deferred.
+///
+/// Call with `TTY_WRITE_LOCKS[slot]` released. That lock serialises byte
+/// streams and disables interrupts; a full-screen vconsole repaint takes
+/// the console lock in bands precisely so interrupts are not masked across
+/// the whole screen, which holds only if the write lock is not wrapped
+/// around it.
+pub fn settle_console_output() {
+    super::vconsole::run_pending_repaint();
+}
+
 pub fn write_driver_unlocked(driver: DriverId, data: &[u8]) -> usize {
     match driver {
         DriverId::SerialConsole => {

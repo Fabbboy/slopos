@@ -107,6 +107,10 @@ impl CellGrid {
         }
     }
 
+    /// Size the grid in place. Production sizing allocates outside the
+    /// console lock and hands the buffer over via [`Self::adopt`]; the test
+    /// fixtures build a grid directly.
+    #[cfg(feature = "test-hooks")]
     pub(crate) fn allocate(&mut self, rows: usize, cols: usize) {
         let total = rows.saturating_mul(cols);
         if total == 0 {
@@ -171,6 +175,24 @@ impl CellGrid {
             }
         }
     }
+
+    /// Take ownership of a grid allocated by the caller.
+    fn adopt(&mut self, cells: Option<KVec<Cell>>, cols: usize) {
+        self.cells = cells;
+        self.cols = cols;
+    }
+}
+
+/// Grid dimensions for a framebuffer of `width` x `height` pixels at the
+/// given cell size. Depends on nothing behind the console lock, so a caller
+/// can size and allocate the grids before taking it.
+fn grid_dims(width: u32, height: u32, cell_w: i32, cell_h: i32) -> (u16, u16) {
+    let cols = (width / (cell_w.max(1) as u32)).max(1) as usize;
+    let rows = (height / (cell_h.max(1) as u32)).max(1) as usize;
+    (
+        core::cmp::min(rows, VCONSOLE_MAX_ROWS) as u16,
+        core::cmp::min(cols, VCONSOLE_MAX_COLS) as u16,
+    )
 }
 
 #[derive(Clone, Copy)]
@@ -392,6 +414,14 @@ pub(crate) struct VConsoleState {
     shadow_pitch: usize,
     /// Bitmask of rows modified since last flush. Bit N = row N is dirty.
     dirty_rows: u128,
+    /// A full-screen repaint is owed. Run by [`run_pending_repaint`] with
+    /// the console lock released between row bands, so the repaint never
+    /// becomes one long interrupts-off section.
+    repaint_pending: bool,
+    /// Bumped whenever the grid geometry or the active screen changes.
+    /// A banded repaint that observes a different epoch abandons itself —
+    /// whatever moved the grid requested its own repaint.
+    layout_epoch: u32,
 }
 
 /// Framebuffer ownership flag (Linux DRM/KMS master model).
@@ -431,6 +461,8 @@ impl VConsoleState {
             shadow: None,
             shadow_pitch: 0,
             dirty_rows: 0,
+            repaint_pending: false,
+            layout_epoch: 0,
         }
     }
 
@@ -466,6 +498,8 @@ impl VConsoleState {
                 write_field!(slot, shadow, None);
                 write_field!(slot, shadow_pitch, 0);
                 write_field!(slot, dirty_rows, 0);
+                write_field!(slot, repaint_pending, false);
+                write_field!(slot, layout_epoch, 0);
                 Ok(slot.finish())
             },
         )
@@ -742,9 +776,7 @@ impl VConsoleState {
     }
 
     fn scroll_up_n(&mut self, n: u16) {
-        for _ in 0..n {
-            self.scroll_up();
-        }
+        self.scroll_up_lines(n as usize);
     }
 
     fn scroll_down_n(&mut self, n: u16) {
@@ -897,6 +929,7 @@ impl VConsoleState {
         self.cursor_row = 0;
         self.cursor_col = 0;
         self.in_alt_screen = true;
+        self.bump_layout_epoch();
         if let Some(ref mut shadow) = self.shadow {
             let row_bytes = (self.cell_h as usize).saturating_mul(self.shadow_pitch);
             let byte_count = rows.saturating_mul(row_bytes);
@@ -922,7 +955,8 @@ impl VConsoleState {
         self.cursor_row = self.alt_screen_cursor_row;
         self.cursor_col = self.alt_screen_cursor_col;
         self.in_alt_screen = false;
-        self.render_all_cells();
+        self.bump_layout_epoch();
+        self.request_repaint();
         self.mark_all_dirty();
     }
 
@@ -1158,10 +1192,7 @@ impl VConsoleState {
         }
         let sr_bottom = self.effective_scroll_bottom();
         if self.cursor_row > sr_bottom {
-            let n = self.cursor_row - sr_bottom;
-            for _ in 0..n {
-                self.scroll_up();
-            }
+            self.scroll_up_lines((self.cursor_row - sr_bottom) as usize);
             self.cursor_row = sr_bottom;
         }
     }
@@ -1178,10 +1209,45 @@ impl VConsoleState {
         for c in 0..cols {
             self.cells.set(row, c, clear_cell);
         }
-        for c in 0..cols {
-            self.render_cell(row as u16, c as u16);
+        if !self.fill_shadow_row(row, attr.bg) {
+            for c in 0..cols {
+                self.render_cell(row as u16, c as u16);
+            }
         }
         self.mark_row_dirty(row as u16);
+    }
+
+    /// Paint one text row's pixel band in `color`, returning whether it
+    /// happened.
+    ///
+    /// A blank cell is background everywhere — the space glyph has no
+    /// coverage, so `blend_coverage_u32` returns `bg` for each of its
+    /// pixels. Writing the colour straight in is the same image without
+    /// the per-pixel atlas lookup and blend, which is what a full-screen
+    /// `ESC[2J` pays 4 M times over.
+    fn fill_shadow_row(&mut self, row: usize, color: u32) -> bool {
+        let pitch = self.shadow_pitch;
+        let width = (self.cols as usize).saturating_mul(self.cell_w as usize);
+        let y0 = row.saturating_mul(self.cell_h as usize);
+        let ch = self.cell_h as usize;
+        let Some(ref mut shadow) = self.shadow else {
+            return false;
+        };
+        if pitch == 0 || width == 0 {
+            return false;
+        }
+        let bytes = color.to_ne_bytes();
+        for y in y0..y0 + ch {
+            let start = y.saturating_mul(pitch);
+            let end = start.saturating_add(width.saturating_mul(4));
+            if end > shadow.len() {
+                break;
+            }
+            for pixel in shadow[start..end].chunks_exact_mut(4) {
+                pixel.copy_from_slice(&bytes);
+            }
+        }
+        true
     }
 
     fn render_row_range(&mut self, row: usize, col_start: usize, col_end: usize) {
@@ -1253,41 +1319,51 @@ impl VConsoleState {
     // Scroll / render primitives
     // -----------------------------------------------------------------------
 
-    pub(crate) fn scroll_up(&mut self) {
+    /// Scroll the active region up by `n` lines in one shift.
+    ///
+    /// The shadow memmove spans the whole scroll region — 19 MB at 4K —
+    /// regardless of `n`, so scrolling N lines one at a time costs N times
+    /// what one N-line scroll does, all of it with interrupts disabled.
+    pub(crate) fn scroll_up_lines(&mut self, n: usize) {
         let cols = self.cols as usize;
         let sr_top = self.scroll_top as usize;
         let sr_bottom = self.effective_scroll_bottom() as usize;
-        if sr_bottom <= sr_top || cols == 0 {
+        if n == 0 || sr_bottom <= sr_top || cols == 0 {
             return;
         }
+        let shift = n.min(sr_bottom - sr_top + 1);
 
         let full_screen = sr_top == 0 && sr_bottom == (self.rows as usize).saturating_sub(1);
         if full_screen && !self.in_alt_screen {
             if let Some(ref mut sb) = *SCROLLBACK.lock() {
-                sb.push_row(&self.cells, sr_top, cols);
+                for row in sr_top..sr_top + shift {
+                    sb.push_row(&self.cells, row, cols);
+                }
                 sb.reset_view();
             }
         }
 
-        for row in (sr_top + 1)..=sr_bottom {
-            self.cells.row_copy(row - 1, row, cols);
+        for row in (sr_top + shift)..=sr_bottom {
+            self.cells.row_copy(row - shift, row, cols);
         }
-        for c in 0..cols {
-            self.cells.set(sr_bottom, c, Cell::blank());
+        for row in (sr_bottom + 1 - shift)..=sr_bottom {
+            for c in 0..cols {
+                self.cells.set(row, c, Cell::blank());
+            }
         }
 
         if let Some(ref mut shadow) = self.shadow {
             let row_px = self.cell_h as usize;
             let row_bytes = row_px.saturating_mul(self.shadow_pitch);
+            let shift_bytes = shift.saturating_mul(row_bytes);
             let region_start = sr_top.saturating_mul(row_bytes);
-            let region_end = (sr_bottom + 1).saturating_mul(row_bytes);
-            if row_bytes < region_end.saturating_sub(region_start) && row_bytes > 0 {
-                shadow.copy_within(region_start + row_bytes..region_end, region_start);
+            let region_end = (sr_bottom + 1).saturating_mul(row_bytes).min(shadow.len());
+            if shift_bytes < region_end.saturating_sub(region_start) && row_bytes > 0 {
+                shadow.copy_within(region_start + shift_bytes..region_end, region_start);
             }
-            let clear_start = region_end.saturating_sub(row_bytes).min(shadow.len());
-            let clear_end = region_end.min(shadow.len());
-            if clear_start < clear_end {
-                shadow[clear_start..clear_end].fill(0);
+            let clear_start = region_end.saturating_sub(shift_bytes);
+            if clear_start < region_end {
+                shadow[clear_start..region_end].fill(0);
             }
             self.mark_all_dirty();
         } else if self.fb.is_some() {
@@ -1299,53 +1375,53 @@ impl VConsoleState {
         }
     }
 
-    fn redraw_from_scrollback(&mut self) {
-        let guard = SCROLLBACK.lock();
-        let Some(ref sb) = *guard else { return };
-        if !sb.viewing_history() {
-            self.redraw_all();
+    /// Render screen rows `[start, end)` from whatever is on screen: the
+    /// scrollback view for the rows history occupies, the live grid below.
+    ///
+    /// The split is recomputed per band because the view can move while the
+    /// console lock is released between bands.
+    fn repaint_band(&mut self, start: u16, end: u16) {
+        let cols = self.cols as usize;
+        let end = end.min(self.rows);
+        if start >= end || cols == 0 {
             return;
         }
 
-        let rows = self.rows as usize;
-        let cols = self.cols as usize;
-        let sb_lines = sb.view_offset.min(rows);
-        let live_lines = rows - sb_lines;
+        let guard = SCROLLBACK.lock();
+        let sb_lines = match *guard {
+            Some(ref sb) if sb.viewing_history() => sb.view_offset.min(self.rows as usize) as u16,
+            _ => 0,
+        };
+        if let Some(ref sb) = *guard {
+            for r in start..end.min(sb_lines) {
+                let Some(sb_row) = sb.get_row(sb.view_offset - r as usize) else {
+                    continue;
+                };
+                for c in 0..cols {
+                    let cell = sb_row.get(c).copied().unwrap_or_else(Cell::blank);
+                    self.render_cell_direct(r, c as u16, &cell);
+                }
+            }
+        }
+        drop(guard);
 
-        for r in 0..sb_lines {
-            let sb_row_offset = sb.view_offset - r;
-            if let Some(sb_row) = sb.get_row(sb_row_offset) {
-                for c in 0..cols.min(sb_row.len()) {
-                    self.render_cell_direct(r as u16, c as u16, &sb_row[c]);
-                }
-                for c in sb_row.len()..cols {
-                    self.render_cell_direct(r as u16, c as u16, &Cell::blank());
-                }
-            }
-        }
-        for r in 0..live_lines {
+        for r in start.max(sb_lines)..end {
             for c in 0..cols {
-                self.render_cell((sb_lines + r) as u16, c as u16);
+                self.render_cell(r, c as u16);
             }
         }
-        self.mark_all_dirty();
-        self.flush_dirty();
+        self.mark_rows_dirty(start, end - 1);
     }
 
-    fn redraw_all(&mut self) {
-        self.render_all_cells();
-        self.mark_all_dirty();
-        self.flush_dirty();
+    /// Ask for a full-screen repaint. Runs at the next
+    /// [`run_pending_repaint`], outside the console lock.
+    fn request_repaint(&mut self) {
+        self.repaint_pending = true;
     }
 
-    fn render_all_cells(&mut self) {
-        let rows = self.rows as usize;
-        let cols = self.cols as usize;
-        for r in 0..rows {
-            for c in 0..cols {
-                self.render_cell(r as u16, c as u16);
-            }
-        }
+    /// Invalidate any repaint already in flight over the old geometry.
+    fn bump_layout_epoch(&mut self) {
+        self.layout_epoch = self.layout_epoch.wrapping_add(1);
     }
 
     fn render_cell_direct(&mut self, row: u16, col: u16, cell: &Cell) {
@@ -1368,6 +1444,9 @@ impl VConsoleState {
         if r >= self.rows as usize || c >= self.cols as usize {
             return;
         }
+        if !self.atlas_matches_grid(&atlas) {
+            return;
+        }
         let cp = if cell.codepoint == CONTINUATION_CODEPOINT {
             b' ' as u32
         } else {
@@ -1387,6 +1466,19 @@ impl VConsoleState {
         }
     }
 
+    /// Whether `atlas`'s cell geometry is the one the grid was laid out
+    /// for.
+    ///
+    /// `atlas::replace_global` swaps the atlas without holding the console
+    /// lock, so a glyph's coverage buffer can be sized for a cell this
+    /// state has not adopted yet — the row slices below would then read
+    /// past its end. `notify_font_changed` repaints once it has, so
+    /// skipping the glyph costs nothing.
+    #[inline]
+    fn atlas_matches_grid(&self, atlas: &atlas::AtlasGuard) -> bool {
+        atlas.cell_width() == self.cell_w && atlas.cell_height() == self.cell_h
+    }
+
     fn render_cell_direct_to_shadow(&mut self, row: u16, col: u16, cell: &Cell) {
         let (r, c) = (row as usize, col as usize);
         if r >= self.rows as usize || c >= self.cols as usize {
@@ -1399,6 +1491,9 @@ impl VConsoleState {
         let Some(atlas) = atlas::global() else {
             return;
         };
+        if atlas.cell_width() != self.cell_w || atlas.cell_height() != self.cell_h {
+            return;
+        }
         let cp = if cell.codepoint == CONTINUATION_CODEPOINT {
             b' ' as u32
         } else {
@@ -1454,6 +1549,9 @@ impl VConsoleState {
         let row_usize = row as usize;
         let col_usize = col as usize;
         if row_usize >= self.rows as usize || col_usize >= self.cols as usize {
+            return;
+        }
+        if !self.atlas_matches_grid(&atlas) {
             return;
         }
 
@@ -1547,25 +1645,10 @@ impl VConsoleState {
         slopos_ostd::arch::x86_64::mem_fence::sfence();
     }
 
-    pub(crate) fn recalculate_dimensions(&mut self) {
-        if let Some(atlas) = atlas::global() {
-            self.cell_w = atlas.cell_width();
-            self.cell_h = atlas.cell_height();
-        }
-        if let Some(fb) = self.fb {
-            let calc_cols = (fb.width / self.cell_w as u32).max(1) as usize;
-            let calc_rows = (fb.height / self.cell_h as u32).max(1) as usize;
-
-            self.cols = core::cmp::min(calc_cols, VCONSOLE_MAX_COLS) as u16;
-            self.rows = core::cmp::min(calc_rows, VCONSOLE_MAX_ROWS) as u16;
-        } else {
-            self.cols = DEFAULT_COLS;
-            self.rows = DEFAULT_ROWS;
-        }
-
-        self.cells.allocate(self.rows as usize, self.cols as usize);
-        self.alt_cells
-            .allocate(self.rows as usize, self.cols as usize);
+    /// Common tail of every geometry change: invalidate in-flight repaints,
+    /// reset the scroll region and clamp the cursor into the new grid.
+    fn settle_geometry(&mut self) {
+        self.bump_layout_epoch();
         self.mark_all_dirty();
 
         self.scroll_top = 0;
@@ -1646,6 +1729,49 @@ static VCONSOLE_STATE: SpinLock<VConsoleState> =
     SpinLock::new(VConsoleState::new(), LOCK_LEVEL_RESOURCE);
 static SCROLLBACK: SpinLock<Option<KBox<ScrollbackBuf>>> = SpinLock::new(None, LOCK_LEVEL_RESOURCE);
 
+/// Screen rows repainted per console-lock hold.
+const REPAINT_BAND_ROWS: u16 = 4;
+
+/// Run an owed full-screen repaint, releasing the console lock between row
+/// bands.
+///
+/// Callers that reach the console through the TTY layer must invoke this
+/// with `TTY_WRITE_LOCKS` released. That lock serialises byte streams; a
+/// repaint emits no bytes, and holding it here would mask interrupts for
+/// the whole screen no matter how finely the console lock is banded.
+///
+/// `VCONSOLE_STATE` is an IRQ-disabling lock and a full-screen glyph
+/// rasterisation is 8.3 M pixels at 4K, so doing it under one hold masks
+/// interrupts for hundreds of milliseconds. Banding bounds that to a few
+/// rows' worth of work.
+///
+/// Concurrent output is not lost: a row written before the band reaches it
+/// is rendered with its new content, and one written after the band has
+/// passed paints itself and marks itself dirty. A repaint that outlives the
+/// geometry it started on abandons itself — whatever moved the grid asked
+/// for its own repaint.
+pub fn run_pending_repaint() {
+    let epoch = {
+        let mut state = VCONSOLE_STATE.lock();
+        if !core::mem::take(&mut state.repaint_pending) {
+            return;
+        }
+        state.layout_epoch
+    };
+
+    let mut row: u16 = 0;
+    loop {
+        let mut state = VCONSOLE_STATE.lock();
+        if state.layout_epoch != epoch || row >= state.rows {
+            return;
+        }
+        let end = row.saturating_add(REPAINT_BAND_ROWS).min(state.rows);
+        state.repaint_band(row, end);
+        state.flush_dirty();
+        row = end;
+    }
+}
+
 pub fn register_framebuffer(
     base: *mut u8,
     pitch: u32,
@@ -1659,26 +1785,19 @@ pub fn register_framebuffer(
 
     atlas::register_font_change_callback(notify_font_changed);
 
+    // Every allocation happens before the SpinLock is taken — allocating
+    // with interrupts disabled trips UB checks in the global allocator, and
+    // the buddy allocator's reuse path can wait on a cross-CPU TLB drain.
+    // Cell geometry and grid extents need only the atlas and the
+    // framebuffer, neither of which is behind the console lock.
+    let (cell_w, cell_h) = atlas::global().map_or((8, 16), |a| (a.cell_width(), a.cell_height()));
+    let (rows, cols) = grid_dims(width, height, cell_w, cell_h);
+    let grid_len = (rows as usize).saturating_mul(cols as usize);
+    let cells = KVec::filled(Cell::blank(), grid_len).ok();
+    let alt_cells = KVec::filled(Cell::blank(), grid_len).ok();
+    let scrollback =
+        KBox::try_new(ScrollbackBuf::new(cols as usize)).expect("vconsole: scrollback alloc");
     let shadow_size = (pitch as usize).saturating_mul(height as usize);
-    let cols = {
-        let mut state = VCONSOLE_STATE.lock();
-        state.fb = Some(VConsoleFbInfo {
-            base: base as u64,
-            pitch,
-            width,
-            height,
-            bytes_per_pixel,
-        });
-        state.recalculate_dimensions();
-        // Don't clear_row() — would paint over the active splash screen.
-        state.cursor_row = 0;
-        state.cursor_col = 0;
-        state.cols as usize
-    };
-
-    // Heap allocation outside the SpinLock — allocating with interrupts
-    // disabled triggers UB checks in the global allocator.
-    let scrollback = KBox::try_new(ScrollbackBuf::new(cols)).expect("vconsole: scrollback alloc");
     let shadow = if shadow_size > 0 {
         KVec::<u8>::zeroed(shadow_size).ok()
     } else {
@@ -1687,12 +1806,25 @@ pub fn register_framebuffer(
 
     {
         let mut state = VCONSOLE_STATE.lock();
+        state.fb = Some(VConsoleFbInfo {
+            base: base as u64,
+            pitch,
+            width,
+            height,
+            bytes_per_pixel,
+        });
+        state.cell_w = cell_w;
+        state.cell_h = cell_h;
+        state.rows = rows;
+        state.cols = cols;
+        state.cells.adopt(cells, cols as usize);
+        state.alt_cells.adopt(alt_cells, cols as usize);
+        state.settle_geometry();
+        // Don't clear_row() — would paint over the active splash screen.
+        state.cursor_row = 0;
+        state.cursor_col = 0;
+        state.shadow_pitch = if shadow.is_some() { pitch as usize } else { 0 };
         state.shadow = shadow;
-        state.shadow_pitch = if state.shadow.is_some() {
-            pitch as usize
-        } else {
-            0
-        };
     }
     *SCROLLBACK.lock() = Some(scrollback);
 }
@@ -1727,7 +1859,7 @@ pub fn write(data: &[u8]) {
     }
 
     if was_viewing_history {
-        state.redraw_all();
+        state.request_repaint();
     }
 
     for &b in data {
@@ -1839,26 +1971,29 @@ pub fn notify_font_changed() {
     } else {
         0
     };
-    state.redraw_all();
+    state.bump_layout_epoch();
+    state.request_repaint();
     drop(state);
 
     *SCROLLBACK.lock() = Some(new_scrollback);
+
+    run_pending_repaint();
 }
 
 pub fn scroll_view_up(lines: usize) {
     if let Some(ref mut sb) = *SCROLLBACK.lock() {
         sb.scroll_up(lines);
     }
-    let mut state = VCONSOLE_STATE.lock();
-    state.redraw_from_scrollback();
+    VCONSOLE_STATE.lock().request_repaint();
+    run_pending_repaint();
 }
 
 pub fn scroll_view_down(lines: usize) {
     if let Some(ref mut sb) = *SCROLLBACK.lock() {
         sb.scroll_down(lines);
     }
-    let mut state = VCONSOLE_STATE.lock();
-    state.redraw_from_scrollback();
+    VCONSOLE_STATE.lock().request_repaint();
+    run_pending_repaint();
 }
 
 /// Transfer framebuffer ownership to the compositor (Linux `DRM_IOCTL_SET_MASTER` equivalent).

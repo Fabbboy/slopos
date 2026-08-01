@@ -245,12 +245,16 @@ pub fn push_input_batch(idx: TtyIndex, events: &[InputEvent]) {
     }
 
     if let Some((driver_id, out, out_len)) = route {
+        let settle = super::driver::defers_console_work(&driver_id);
         let _write_guard = TTY_WRITE_LOCKS[slot].lock();
         let _inflight = InflightGuard::new(slot, out_len);
         write_driver_unlocked(driver_id, &out[..out_len]);
         drop(_inflight);
         drop(_write_guard);
         drop(out);
+        if settle {
+            super::driver::settle_console_output();
+        }
         BUS.publish(tty_output_event(slot));
     }
 
@@ -990,12 +994,16 @@ pub fn write(idx: TtyIndex, data: &[u8], nonblock: bool) -> Result<usize, TtyErr
         }
         // Per-TTY lock dropped — acquire per-slot write lock to serialize
         // with concurrent echo output (POSIX §11.1.9 echo serialization).
+        let settle = super::driver::defers_console_work(&driver_id);
         let driver_written = {
             let _write_guard = TTY_WRITE_LOCKS[slot].lock();
             let _inflight = InflightGuard::new(slot, out_len);
             let written = write_driver_unlocked(driver_id, &out_buf[..out_len]);
             written
         };
+        if settle {
+            super::driver::settle_console_output();
+        }
         if driver_written < out_len {
             break;
         }

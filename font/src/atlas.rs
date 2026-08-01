@@ -503,15 +503,27 @@ impl GlyphAtlas {
 // Blending helpers
 // ---------------------------------------------------------------------------
 
+/// `(num + 128) / 255`, without a divide.
+///
+/// Exact over the whole range a channel blend can produce: `a + inv == 255`
+/// and both components are `u8`, so `num <= 255 * 255`. The kernel builds at
+/// opt-level 0, where each `/ 255` is a real `divl` executed three times per
+/// pixel — 25 M of them for one 4K full-screen repaint.
+#[inline]
+fn blend_div255(num: u32) -> u32 {
+    let x = num + 128;
+    (x + 1 + (x >> 8)) >> 8
+}
+
 /// Blend fg and bg Color32 values by coverage (0-255).
 #[inline]
 pub fn blend_color32(cov: u8, fg: Color32, bg: Color32) -> Color32 {
     let a = cov as u32;
     let inv = 255 - a;
-    let r = (fg.red() as u32 * a + bg.red() as u32 * inv + 128) / 255;
-    let g = (fg.green() as u32 * a + bg.green() as u32 * inv + 128) / 255;
-    let b = (fg.blue() as u32 * a + bg.blue() as u32 * inv + 128) / 255;
-    let al = (fg.alpha() as u32 * a + bg.alpha() as u32 * inv + 128) / 255;
+    let r = blend_div255(fg.red() as u32 * a + bg.red() as u32 * inv);
+    let g = blend_div255(fg.green() as u32 * a + bg.green() as u32 * inv);
+    let b = blend_div255(fg.blue() as u32 * a + bg.blue() as u32 * inv);
+    let al = blend_div255(fg.alpha() as u32 * a + bg.alpha() as u32 * inv);
     Color32::new(r as u8, g as u8, b as u8, al as u8)
 }
 
@@ -527,9 +539,9 @@ pub fn blend_coverage_u32(cov: u8, fg: u32, bg: u32) -> u32 {
     }
     let a = cov as u32;
     let inv = 255 - a;
-    let r = (((fg >> 16) & 0xFF) * a + ((bg >> 16) & 0xFF) * inv + 128) / 255;
-    let g = (((fg >> 8) & 0xFF) * a + ((bg >> 8) & 0xFF) * inv + 128) / 255;
-    let b = ((fg & 0xFF) * a + (bg & 0xFF) * inv + 128) / 255;
+    let r = blend_div255(((fg >> 16) & 0xFF) * a + ((bg >> 16) & 0xFF) * inv);
+    let g = blend_div255(((fg >> 8) & 0xFF) * a + ((bg >> 8) & 0xFF) * inv);
+    let b = blend_div255((fg & 0xFF) * a + (bg & 0xFF) * inv);
     (r << 16) | (g << 8) | b
 }
 
@@ -660,6 +672,35 @@ pub use global_atlas::*;
 mod tests {
     use super::GlyphAtlas;
     use crate::FontSource;
+
+    #[test]
+    fn blend_div255_matches_the_divide_it_replaces() {
+        // Every numerator a channel blend can produce, exhaustively.
+        for num in 0..=(255u32 * 255 + 128) {
+            assert_eq!(
+                super::blend_div255(num),
+                (num + 128) / 255,
+                "div255_round diverged at {num}"
+            );
+        }
+    }
+
+    #[test]
+    fn blend_coverage_u32_is_exact_at_the_endpoints() {
+        assert_eq!(
+            super::blend_coverage_u32(0, 0x00FF_FFFF, 0x0012_3456),
+            0x0012_3456
+        );
+        assert_eq!(
+            super::blend_coverage_u32(255, 0x00FF_FFFF, 0x0012_3456),
+            0x00FF_FFFF
+        );
+        assert_eq!(super::blend_coverage_u32(128, 0x0000_0000, 0x0000_0000), 0);
+        assert_eq!(
+            super::blend_coverage_u32(128, 0x00FF_FFFF, 0x00FF_FFFF),
+            0x00FF_FFFF
+        );
+    }
 
     #[test]
     fn from_raw_coverage_accepts_valid_buffers() {
