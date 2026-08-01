@@ -16,7 +16,10 @@ doctest = false
 
 [features]
 default = []
-test-hooks = []
+# `slopos-ostd/test-helpers` because `sched_tests` drives OSTD-side test
+# surfaces (the parked wait node). Without it, any build that turns on
+# `test-hooks` alone fails to compile this crate's test module.
+test-hooks = ["slopos-ostd/test-helpers"]
 
 [dependencies]
 slopos-abi = { workspace = true }

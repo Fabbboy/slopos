@@ -649,6 +649,14 @@ pub struct TaskInner<K, U> {
     /// cross-role gate that prevents a task from being in a ready queue and a
     /// remote wake inbox at the same time.
     pub sched_placement: AtomicU8,
+    /// The `WaitQueue` this task is currently parked on, or null.
+    ///
+    /// Erased to `*mut c_void` because `WaitQueue` cannot name a `TaskInner`
+    /// monomorphisation and this module cannot name `WaitQueue`. Written by
+    /// the wait protocol on the task's own CPU, read by teardown from any CPU,
+    /// so a task torn down while parked can have its stack-pinned wait node
+    /// unlinked before the stack slot is recycled.
+    pub(crate) parked_wait_queue: AtomicPtr<c_void>,
     /// Panic-recovery nesting depth saved while this task is not running; the
     /// live value lives in `PCR.recovery_depth` (read directly by the panic
     /// handler), and context-switch code saves/restores it here so recovery
@@ -1277,6 +1285,7 @@ impl<K, U> TaskInner<K, U> {
             sibling_link: DLink::new(),
             reclaim_link: Link::new(),
             sched_placement: AtomicU8::new(SchedPlacement::Nascent.as_u8()),
+            parked_wait_queue: AtomicPtr::new(ptr::null_mut()),
             recovery_depth: AtomicU32::new(0),
             panic_in_flight: AtomicU32::new(0),
             exit_cleanup_flags: AtomicU8::new(0),
@@ -1522,6 +1531,8 @@ impl<K, U> TaskInner<K, U> {
         // has not been published, and None is also a blocked task's placement.
         self.sched_placement
             .store(SchedPlacement::Nascent.as_u8(), Ordering::Release);
+        self.parked_wait_queue
+            .store(ptr::null_mut(), Ordering::Release);
         self.recovery_depth.store(0, Ordering::Release);
         self.exit_cleanup_flags.store(0, Ordering::Release);
     }
@@ -1575,6 +1586,10 @@ impl<K, U> TaskInner<K, U> {
         // + children-list membership) via `link_child` after registration.
         self.set_parent_task_id(INVALID_TASK_ID);
         self.sched_placement = AtomicU8::new(SchedPlacement::Nascent.as_u8());
+        // The bytewise copy duplicated the parent's park back-pointer. A fresh
+        // child is parked on nothing; inheriting it would aim the parent's
+        // teardown purge at a queue the child never joined.
+        self.parked_wait_queue = AtomicPtr::new(ptr::null_mut());
         self.recovery_depth = AtomicU32::new(0);
         self.exit_cleanup_flags = AtomicU8::new(0);
         self.signal_pending = AtomicU64::new(0);

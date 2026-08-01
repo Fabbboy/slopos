@@ -293,6 +293,17 @@ pub unsafe trait WaitQueueBackend: Send + Sync + 'static {
 
     /// Current monotonic time in milliseconds.
     fn get_time_ms(&self) -> u64;
+
+    /// Record which queue the *current* task is parked on, returning the
+    /// previous value. Null means "parked on nothing".
+    ///
+    /// The queue is erased to `*mut c_void` because neither side can name the
+    /// other's type. Teardown reads the recorded pointer back and hands it to
+    /// [`purge_parked_wait_node`], which is the only thing that can reach a
+    /// stack-pinned node belonging to a task that will never run again.
+    ///
+    /// Must be a no-op returning null when there is no current task.
+    fn swap_parked_queue(&self, queue: *mut c_void) -> *mut c_void;
 }
 
 // ---------------------------------------------------------------------------
@@ -320,6 +331,9 @@ unsafe impl WaitQueueBackend for UnregisteredBackend {
     }
     fn get_time_ms(&self) -> u64 {
         0
+    }
+    fn swap_parked_queue(&self, _queue: *mut c_void) -> *mut c_void {
+        core::ptr::null_mut()
     }
 }
 
@@ -351,6 +365,8 @@ pub struct WaitQueueOps {
     pub unblock_task: fn(WaitTaskHandle) -> i32,
     /// See [`WaitQueueBackend::get_time_ms`].
     pub get_time_ms: fn() -> u64,
+    /// See [`WaitQueueBackend::swap_parked_queue`].
+    pub swap_parked_queue: fn(*mut c_void) -> *mut c_void,
 }
 
 struct OpsBackend(&'static WaitQueueOps);
@@ -382,6 +398,9 @@ unsafe impl WaitQueueBackend for OpsBackend {
     }
     fn get_time_ms(&self) -> u64 {
         (self.0.get_time_ms)()
+    }
+    fn swap_parked_queue(&self, queue: *mut c_void) -> *mut c_void {
+        (self.0.swap_parked_queue)(queue)
     }
 }
 
@@ -419,6 +438,83 @@ fn backend() -> &'static dyn WaitQueueBackend {
     // SAFETY: paired Release in `register_wait_queue_backend`; the
     // Acquire load above synchronises with the publishing write.
     unsafe { (*BACKEND_SLOT.0.get()).assume_init_ref() }
+}
+
+/// Publishes "the current task is parked on this queue" for as long as a
+/// stack-pinned node may be linked into it.
+///
+/// A guard rather than a matched pair of calls because a `wait_event*` body has
+/// many exits and one of them is an unwind. The previous value is restored
+/// rather than cleared so a nested wait — a predicate that itself blocks —
+/// leaves the outer park visible again on the way out.
+struct ParkedQueueScope {
+    previous: *mut c_void,
+}
+
+impl ParkedQueueScope {
+    #[inline]
+    fn enter(queue: &WaitQueue) -> Self {
+        let previous = backend().swap_parked_queue(queue as *const WaitQueue as *mut c_void);
+        Self { previous }
+    }
+}
+
+impl Drop for ParkedQueueScope {
+    #[inline]
+    fn drop(&mut self) {
+        let _ = backend().swap_parked_queue(self.previous);
+    }
+}
+
+/// A parked wait node the queue does not own, which is the shape a
+/// `wait_event*` caller's stack-pinned node has.
+///
+/// Heap-backed rather than pinned at the call site because `core::pin::pin!`
+/// expands to `unsafe`, and no crate outside this one may contain `unsafe`
+/// even by macro expansion. The node is deliberately *not* flagged heap-owned,
+/// so the queue's wake and purge paths treat it exactly as they treat a
+/// stack-pinned one and this guard remains its sole owner.
+#[cfg(any(test, feature = "test-helpers"))]
+pub struct ParkedTestNode {
+    node: NonNull<WaitNode>,
+}
+
+#[cfg(any(test, feature = "test-helpers"))]
+impl Drop for ParkedTestNode {
+    fn drop(&mut self) {
+        // SAFETY: minted in `park_unowned_node_for_test` from `KBox::into_raw`
+        // and never handed out; no queue path reclaims it, because the node is
+        // not flagged heap-owned. `Drop for WaitNode` unlinks it first if it is
+        // somehow still linked.
+        unsafe {
+            drop(KBox::from_raw(self.node.as_ptr()));
+        }
+    }
+}
+
+/// Unlink every node naming `task` from the queue `queue` points at, including
+/// stack-pinned ones, and report how many were found.
+///
+/// The teardown counterpart to [`WaitQueue::remove_task`], which declines
+/// stack-pinned nodes because in steady state their owner unlinks them on the
+/// way out of `wait_event*`. This exists for the one case where the owner never
+/// will: a task torn down from another CPU without unwinding its stack. The
+/// node's memory is then recycled with the stack slot while still linked, and
+/// the next wake writes through it.
+///
+/// `queue` must be a pointer previously published by
+/// [`WaitQueueBackend::swap_parked_queue`], or null. A queue that has had a
+/// waiter linked into it is required to outlive that waiter — the same contract
+/// `Drop for WaitNode` already relies on to reach `drop_unlink`.
+pub fn purge_parked_wait_node(queue: *mut c_void, task: WaitTaskHandle) -> usize {
+    if queue.is_null() || task == NULL_HANDLE {
+        return 0;
+    }
+    // SAFETY: `swap_parked_queue` is only ever handed
+    // `&WaitQueue as *const _ as *mut c_void`, and the queue outlives any node
+    // linked into it.
+    let queue = unsafe { &*(queue as *const WaitQueue) };
+    queue.purge_task(task)
 }
 
 // ---------------------------------------------------------------------------
@@ -604,6 +700,7 @@ impl WaitQueue {
         F: FnMut() -> Option<R>,
     {
         let bk = backend();
+        let _parked = ParkedQueueScope::enter(self);
         let node = core::pin::pin!(WaitNode::new());
 
         loop {
@@ -743,6 +840,7 @@ impl WaitQueue {
             return WaitOutcome::NoRuntime;
         }
 
+        let _parked = ParkedQueueScope::enter(self);
         let node = core::pin::pin!(WaitNode::new());
         node.as_ref().set_task(task);
 
@@ -1079,6 +1177,79 @@ impl WaitQueue {
                 drop(KBox::from_raw(nn.as_ptr()));
             }
         }
+    }
+
+    /// Remove every node naming `task`, whatever its flavour, and report how
+    /// many were found. See [`purge_parked_wait_node`] for why this exists
+    /// where [`remove_task`](Self::remove_task) declines.
+    fn purge_task(&self, task: WaitTaskHandle) -> usize {
+        let mut purged = 0usize;
+        loop {
+            let removed = {
+                let inner = self.inner.lock();
+                let mut found: Option<(NonNull<WaitNode>, bool)> = None;
+                for nn in inner.list.iter() {
+                    // SAFETY: `nn` is a live element of `inner.list`; the
+                    // `Linked` contract guarantees address stability for the
+                    // duration of its membership, which we hold via the
+                    // SpinLock.
+                    let n = unsafe { nn.as_ref() };
+                    if n.task() == task {
+                        found = Some((nn, n.is_heap_owned()));
+                        break;
+                    }
+                }
+                if let Some((nn, _)) = found {
+                    // SAFETY: `nn` came from `iter()` on this same list, held
+                    // under the lock for the whole sequence.
+                    let _ = inner.list.remove(nn);
+                    let n = unsafe { nn.as_ref() };
+                    let _ = n.has_woken_swap_true();
+                    n.queue_clear();
+                }
+                found
+            };
+
+            let Some((nn, heap_owned)) = removed else {
+                return purged;
+            };
+            purged += 1;
+            if heap_owned {
+                // SAFETY: `is_heap_owned` was true under the lock, so this node
+                // came from `enqueue_current` via `KBox::into_raw`.
+                unsafe {
+                    drop(KBox::from_raw(nn.as_ptr()));
+                }
+            }
+        }
+    }
+
+    /// Park a node for the current task and publish the park back-pointer —
+    /// the two steps `wait_event*` takes before it yields, without yielding.
+    ///
+    /// Lets a test build the state a task torn down mid-wait leaves behind
+    /// without the test also having to *be* that task. The back-pointer is
+    /// deliberately not restored: an abandoned wait is exactly one that never
+    /// reached its own cleanup.
+    #[cfg(any(test, feature = "test-helpers"))]
+    pub fn park_unowned_node_for_test(&self) -> Option<ParkedTestNode> {
+        let bk = backend();
+        let task = bk.current_task_handle();
+        if task == NULL_HANDLE {
+            return None;
+        }
+        let raw = KBox::into_raw(KBox::try_new(WaitNode::new()).ok()?);
+        let nn = NonNull::new(raw)?;
+        let _ = bk.swap_parked_queue(self as *const WaitQueue as *mut c_void);
+        {
+            let inner = self.inner.lock();
+            // SAFETY: the allocation was just made here, is owned by the
+            // `ParkedTestNode` this returns, and is never moved out of it.
+            let node = unsafe { Pin::new_unchecked(nn.as_ref()) };
+            node.set_task(task);
+            self.push_node(&inner, node);
+        }
+        Some(ParkedTestNode { node: nn })
     }
 
     /// Test-only reset of the registration state.

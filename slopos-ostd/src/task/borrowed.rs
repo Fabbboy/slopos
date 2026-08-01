@@ -98,6 +98,21 @@ impl<K, U> TaskInner<K, U> {
             .is_ok()
     }
 
+    /// The `WaitQueue` this task is parked on, erased to `*mut c_void`, or
+    /// null. Resolve it with
+    /// [`slopos_ostd::sync::wait_queue::purge_parked_wait_node`].
+    #[inline]
+    pub fn parked_wait_queue(&self) -> *mut core::ffi::c_void {
+        self.parked_wait_queue.load(Ordering::Acquire)
+    }
+
+    /// Publish or clear the park back-pointer. Written only by the wait
+    /// protocol, on the task's own CPU.
+    #[inline]
+    pub fn set_parked_wait_queue(&self, queue: *mut core::ffi::c_void) {
+        self.parked_wait_queue.store(queue, Ordering::Release);
+    }
+
     // ── Panic-recovery depths ─────────────────────────────────────────
 
     /// Saved panic-recovery nesting depth. The live value lives in

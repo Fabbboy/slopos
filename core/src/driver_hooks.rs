@@ -131,6 +131,23 @@ fn runtime_has_pending_signal() -> bool {
 }
 
 // ---------------------------------------------------------------------------
+// Publish which wait queue the current task is parked on, so teardown can
+// unlink its stack-pinned wait node.
+// ---------------------------------------------------------------------------
+
+fn runtime_swap_parked_wait_queue(queue: *mut core::ffi::c_void) -> *mut core::ffi::c_void {
+    match Current::get() {
+        Some(current) => {
+            let task = current.task();
+            let previous = task.parked_wait_queue();
+            task.set_parked_wait_queue(queue);
+            previous
+        }
+        None => core::ptr::null_mut(),
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Check if a process group is orphaned within a session.
 //
 // A process group is orphaned if no member of the group has a parent that is
@@ -204,6 +221,7 @@ static DRIVER_RUNTIME_SERVICES: DriverRuntimeServices = DriverRuntimeServices {
     yield_blocked_task_with_timeout: scheduler::yield_blocked_task_with_timeout,
     set_current_runnable: scheduler::set_current_runnable,
     unblock_task: runtime_unblock_task,
+    swap_parked_wait_queue: runtime_swap_parked_wait_queue,
     register_idle_wakeup_callback: scheduler::scheduler_register_idle_wakeup_callback,
     signal_process_group: runtime_signal_process_group,
     signal_session: runtime_signal_session,

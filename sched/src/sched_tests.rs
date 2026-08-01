@@ -5690,7 +5690,7 @@ slopos_testing::stest!(
 // unwinding paths and runs implicitly on every successful wait.
 // =============================================================================
 
-use slopos_ostd::sync::wait_queue::{WaitOutcome, WaitQueue};
+use slopos_ostd::sync::wait_queue::{ParkedTestNode, WaitOutcome, WaitQueue};
 
 /// `wait_event_until` returns the closure's `Some(R)` immediately via
 /// the pre-check fast path, without touching the scheduler backend.
@@ -6710,3 +6710,109 @@ slopos_testing::stest!(
     suite = sched_core
 );
 slopos_testing::stest!(name = test_task_ids_are_never_reused, suite = sched_core);
+
+// =============================================================================
+// Teardown of a task parked in a stack-pinned wait
+// =============================================================================
+
+/// Create a kernel task and park a wait node for it on `wq`, leaving the park
+/// back-pointer published.
+///
+/// `park_unowned_node_for_test` reads the waiter's identity from the PCR, so
+/// making the task this CPU's current for exactly the duration of the link is
+/// the only way to park a *chosen* task from a test. The bootstrap stub is
+/// restored before returning: a task that is still some CPU's current is
+/// dispatch-pinned, and teardown would refuse it.
+fn park_stack_waiter(wq: &WaitQueue, name: &'static [u8]) -> Option<(u32, ParkedTestNode)> {
+    let task_id = task_create(
+        name.as_ptr() as *const c_char,
+        dummy_task_entry,
+        ptr::null_mut(),
+        TaskPriority::Normal.as_u8(),
+        TASK_FLAG_KERNEL_MODE,
+    );
+    if task_id == INVALID_TASK_ID {
+        return None;
+    }
+    let parked = if scheduler::clear_nascent_for_test(task_id) && dispatch_as_current(task_id) {
+        wq.park_unowned_node_for_test()
+    } else {
+        None
+    };
+    park_bootstrap_on_current_cpu();
+    match parked {
+        Some(node) => Some((task_id, node)),
+        None => {
+            let _ = task_terminate(task_id);
+            None
+        }
+    }
+}
+
+/// A task torn down while parked in `wait_event` leaves no node behind.
+///
+/// The node lives on the victim's kernel stack, and `TaskStack` recycles a slot
+/// rather than quarantining it — so a node still linked after teardown is
+/// dereferenced and written through by the next wake, at an address that by
+/// then belongs to a different task. The keeper is what makes that wake
+/// happen: a queue with no other waiter is never woken again.
+pub fn test_terminated_waiter_leaves_no_wait_node() -> TestResult {
+    let _fixture = SchedFixture::new();
+
+    // Declared before the nodes so it outlives them: a node still linked at
+    // drop reaches back through its queue pointer to unlink itself.
+    let wq = WaitQueue::new();
+
+    let Some((victim, _victim_node)) = park_stack_waiter(&wq, b"ParkVictim\0") else {
+        klog_info!("SCHED_TEST: could not park the victim");
+        return TestResult::Fail;
+    };
+    let Some((keeper, _keeper_node)) = park_stack_waiter(&wq, b"ParkKeeper\0") else {
+        klog_info!("SCHED_TEST: could not park the keeper");
+        let _ = task_terminate(victim);
+        return TestResult::Fail;
+    };
+
+    let mut outcome = TestResult::Pass;
+    if wq.waiter_count() != 2 {
+        klog_info!(
+            "SCHED_TEST: expected 2 parked waiters, found {}",
+            wq.waiter_count()
+        );
+        outcome = TestResult::Fail;
+    }
+
+    // `remove_task` declines an unowned node by contract, so this is the
+    // control: teardown must not be relying on it.
+    wq.remove_task(victim);
+    if wq.waiter_count() != 2 {
+        klog_info!("SCHED_TEST: remove_task unlinked an unowned node");
+        outcome = TestResult::Fail;
+    }
+
+    if task_terminate(victim) != 0 {
+        klog_info!("SCHED_TEST: terminating the parked victim failed");
+        outcome = TestResult::Fail;
+    }
+    if wq.waiter_count() != 1 {
+        klog_info!(
+            "SCHED_TEST: victim left {} node(s) linked after teardown, want 1 (keeper only)",
+            wq.waiter_count()
+        );
+        outcome = TestResult::Fail;
+    }
+
+    // The surviving node must still be the keeper's, reachable by a wake.
+    if !wq.wake_one() {
+        klog_info!("SCHED_TEST: the keeper's node did not survive the purge");
+        outcome = TestResult::Fail;
+    }
+
+    let _ = task_terminate(keeper);
+    outcome
+}
+
+slopos_testing::stest!(
+    name = test_terminated_waiter_leaves_no_wait_node,
+    suite = sched_core
+);
