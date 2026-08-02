@@ -8,6 +8,7 @@
 //! small fixed-capacity list of waiting tasks.
 
 use core::ptr::NonNull;
+use slopos_ostd::lock_class;
 
 use slopos_abi::task::BlockReason;
 use slopos_mm::user_ptr::UserPtr;
@@ -72,7 +73,10 @@ impl FutexBucket {
 // Wrap each bucket in an SpinLock for interrupt-safe locking.
 static FUTEX_TABLE: [SpinLock<FutexBucket>; FUTEX_HASH_BUCKETS] = {
     // const-init all buckets
-    const BUCKET: SpinLock<FutexBucket> = SpinLock::new(FutexBucket::new(), LOCK_LEVEL_RESOURCE);
+    const BUCKET: SpinLock<FutexBucket> = SpinLock::new(
+        FutexBucket::new(),
+        lock_class!("FUTEX_TABLE", LOCK_LEVEL_RESOURCE),
+    );
     [BUCKET; FUTEX_HASH_BUCKETS]
 };
 

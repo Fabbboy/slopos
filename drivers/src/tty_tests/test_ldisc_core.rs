@@ -1256,8 +1256,13 @@ pub fn test_per_tty_lock_independence() -> TestResult {
     tty::table::tty_table_init();
 
     // Lock slot 0 and, while holding it, verify we can lock slot 1.
+    //
+    // Two instances of one declaration held at once. Ascending slot index
+    // is the order, so the inner one takes a subclass: lockdep keeps
+    // checking the direction instead of the pair reading as an unordered
+    // same-class nesting.
     let guard0 = TTY_SLOTS[0].lock();
-    let guard1 = TTY_SLOTS[1].lock();
+    let guard1 = TTY_SLOTS[1].lock_nested(1);
 
     let ok0 = guard0.is_some();
     let ok1 = guard1.is_some();

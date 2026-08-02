@@ -1,5 +1,6 @@
 use core::ffi::c_void;
 use core::ptr;
+use slopos_ostd::lock_class;
 
 use slopos_ostd::KVec;
 use slopos_ostd::test_support::page_io;
@@ -963,7 +964,8 @@ pub fn test_ring_buffer_capacity() -> TestResult {
 pub fn test_irqmutex_basic() -> TestResult {
     use slopos_ostd::sync::{LOCK_LEVEL_RESOURCE, SpinLock};
 
-    let mutex: SpinLock<u32> = SpinLock::new(42, LOCK_LEVEL_RESOURCE);
+    let mutex: SpinLock<u32> =
+        SpinLock::new(42, lock_class!("test.irqmutex_basic", LOCK_LEVEL_RESOURCE));
 
     {
         let guard = mutex.lock();
@@ -982,7 +984,10 @@ pub fn test_irqmutex_basic() -> TestResult {
 pub fn test_irqmutex_mutation() -> TestResult {
     use slopos_ostd::sync::{LOCK_LEVEL_RESOURCE, SpinLock};
 
-    let mutex: SpinLock<u32> = SpinLock::new(0, LOCK_LEVEL_RESOURCE);
+    let mutex: SpinLock<u32> = SpinLock::new(
+        0,
+        lock_class!("test.irqmutex_mutation", LOCK_LEVEL_RESOURCE),
+    );
 
     {
         let mut guard = mutex.lock();
@@ -1003,7 +1008,10 @@ pub fn test_irqmutex_mutation() -> TestResult {
 pub fn test_irqmutex_try_lock() -> TestResult {
     use slopos_ostd::sync::{LOCK_LEVEL_RESOURCE, SpinLock};
 
-    let mutex: SpinLock<u32> = SpinLock::new(55, LOCK_LEVEL_RESOURCE);
+    let mutex: SpinLock<u32> = SpinLock::new(
+        55,
+        lock_class!("test.irqmutex_try_lock", LOCK_LEVEL_RESOURCE),
+    );
 
     {
         let maybe_guard = mutex.try_lock();

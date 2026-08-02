@@ -1,4 +1,5 @@
 use crate::vfs::traits::{FileSystem, VfsError, VfsResult};
+use slopos_ostd::lock_class;
 use slopos_ostd::sync::{IrqRwLock, LOCK_LEVEL_REGISTRY};
 
 use crate::MAX_PATH_LEN;
@@ -194,7 +195,10 @@ impl MountTable {
     }
 }
 
-static MOUNT_TABLE: IrqRwLock<MountTable> = IrqRwLock::new(MountTable::new(), LOCK_LEVEL_REGISTRY);
+static MOUNT_TABLE: IrqRwLock<MountTable> = IrqRwLock::new(
+    MountTable::new(),
+    lock_class!("MOUNT_TABLE", LOCK_LEVEL_REGISTRY),
+);
 
 pub fn mount(path: &[u8], fs: &'static dyn FileSystem, flags: u32) -> VfsResult<()> {
     MOUNT_TABLE.write().mount(path, fs, flags)

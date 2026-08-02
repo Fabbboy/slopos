@@ -16,6 +16,7 @@
 //! The internal queue is protected by an [`SpinLock`] since both `tx()` (from
 //! any socket context) and `poll_rx()` (from the NAPI loop) access it.
 
+use slopos_ostd::lock_class;
 use slopos_ostd::sync::{LOCK_LEVEL_RESOURCE, SpinLock};
 use slopos_ostd::{KArc, KVec, KVecDeque};
 
@@ -33,6 +34,11 @@ struct LoopbackInner {
     queue: KVecDeque<PacketBuf>,
     /// Cumulative statistics.
     stats: NetDeviceStats,
+    /// Cleared by `set_down`. Shares the lock with `queue` so a send racing
+    /// retirement either lands before the drain and is cleared by it, or
+    /// observes the device down and is rejected — never left queued on a
+    /// device nothing will poll again.
+    up: bool,
 }
 
 /// The loopback network device (`lo`).
@@ -53,8 +59,9 @@ impl LoopbackDev {
                 LoopbackInner {
                     queue: KVecDeque::with_capacity(64).expect("loopback: alloc"),
                     stats: NetDeviceStats::new(),
+                    up: true,
                 },
-                LOCK_LEVEL_RESOURCE,
+                lock_class!("LoopbackDev.inner", LOCK_LEVEL_RESOURCE),
             ),
         }
     }
@@ -64,6 +71,10 @@ impl NetDevice for LoopbackDev {
     fn tx(&self, pkt: PacketBuf) -> Result<(), NetError> {
         {
             let mut inner = self.inner.lock();
+            if !inner.up {
+                inner.stats.tx_dropped += 1;
+                return Err(NetError::NetworkUnreachable);
+            }
             if inner.queue.len() >= LOOPBACK_QUEUE_CAPACITY {
                 inner.stats.tx_dropped += 1;
                 return Err(NetError::NoBufferSpace);
@@ -86,6 +97,9 @@ impl NetDevice for LoopbackDev {
 
     fn poll_rx(&self, budget: usize, _pool: &'static PacketPool) -> KVec<PacketBuf> {
         let mut inner = self.inner.lock();
+        if !inner.up {
+            return KVec::new();
+        }
         let count = budget.min(inner.queue.len());
         let mut packets = KVec::with_capacity(count).unwrap_or_else(|_| KVec::new());
         for _ in 0..count {
@@ -99,11 +113,12 @@ impl NetDevice for LoopbackDev {
     }
 
     fn set_up(&self) {
-        // Loopback is always up — nothing to do.
+        self.inner.lock().up = true;
     }
 
     fn set_down(&self) {
         let mut inner = self.inner.lock();
+        inner.up = false;
         inner.queue.clear();
     }
 

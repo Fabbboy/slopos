@@ -115,13 +115,24 @@ pub fn truncate_cleanup_handlers(count: usize) {
 }
 
 pub fn call_panic_cleanup() {
+    call_panic_cleanup_above(0);
+}
+
+/// [`call_panic_cleanup`] scoped to the locks acquired above `held_mark`.
+///
+/// This is the *recovered* path: it drains and runs the cleanup handlers
+/// but deliberately does not enter the fatal bypass, because the kernel
+/// resumes. Latching here would leave every later acquisition on every CPU
+/// unvalidated for the rest of the boot — a single recovered oops would
+/// switch the validator off.
+pub fn call_panic_cleanup_above(held_mark: u32) {
     // SAFETY: invoked after catch_panic! catches a kernel-test unwind.
     // Rust Drops should already have released normal guards; poison-unlock
     // remains as a defensive cleanup for legacy paths and partially
     // constructed lock guards. Single-writer: the panicking CPU is the only
     // accessor.
     unsafe {
-        crate::sync::lock_tracking::poison_unlock_all_held();
+        crate::sync::lock_tracking::poison_unlock_held_above(held_mark);
     }
 
     let count = PANIC_CLEANUP_COUNT
@@ -160,12 +171,27 @@ pub fn recovery_exit() -> u32 {
 #[doc(hidden)]
 pub struct RecoveryGuard {
     active: bool,
+    /// Held-lock depth on entry. The unwind releases only what this scope
+    /// acquired: an inner recovery that drained the whole stack would
+    /// poison-release locks the outer frame still holds, and the outer
+    /// guard's `Drop` would then release them a second time — which on a
+    /// ticket lock admits two holders.
+    held_mark: u32,
 }
 
 impl RecoveryGuard {
     pub fn enter() -> Self {
+        let held_mark = crate::sync::lock_tracking::held_depth_mark();
         crate::cpu::x86_64::pcr::recovery_depth_enter();
-        Self { active: true }
+        Self {
+            active: true,
+            held_mark,
+        }
+    }
+
+    /// Held-lock depth this scope started at.
+    pub fn held_mark(&self) -> u32 {
+        self.held_mark
     }
 
     pub fn exit(mut self) {
@@ -191,6 +217,7 @@ where
     F: FnOnce(),
 {
     let recovery_guard = RecoveryGuard::enter();
+    let held_mark = recovery_guard.held_mark();
     let result = crate::unwind::catch_unwind(|| {
         f();
     });
@@ -199,7 +226,7 @@ where
     match result {
         Ok(()) => Ok(()),
         Err(payload) => {
-            call_panic_cleanup();
+            call_panic_cleanup_above(held_mark);
             Err(payload.info)
         }
     }
@@ -208,16 +235,17 @@ where
 #[macro_export]
 macro_rules! catch_panic {
     ($code:block) => {{
-        use $crate::panic_recovery::{RecoveryGuard, call_panic_cleanup};
+        use $crate::panic_recovery::{RecoveryGuard, call_panic_cleanup_above};
 
         let recovery_guard = RecoveryGuard::enter();
+        let held_mark = recovery_guard.held_mark();
         let result = $crate::unwind::catch_unwind(|| -> i32 { $code });
         recovery_guard.exit();
 
         match result {
             Ok(ret) => ret,
             Err(_) => {
-                call_panic_cleanup();
+                call_panic_cleanup_above(held_mark);
                 -1
             }
         }

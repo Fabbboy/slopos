@@ -21,6 +21,7 @@ use slopos_abi::DisplayInfo;
 use slopos_mm::mmio::MmioRegion;
 use slopos_mm::page_alloc::free_page_frame;
 use slopos_mm::paging_defs::PAGE_SIZE_4KB;
+use slopos_ostd::lock_class;
 use slopos_ostd::sync::{LOCK_LEVEL_RESOURCE, SpinLock};
 use slopos_ostd::util::ptr_buf;
 
@@ -78,7 +79,8 @@ struct CursorState {
 
 /// Installed by [`init`]; consulted by the cursor entry points. `None` until the
 /// cursor plane is bound.
-static CURSOR_STATE: SpinLock<Option<CursorState>> = SpinLock::new(None, LOCK_LEVEL_RESOURCE);
+static CURSOR_STATE: SpinLock<Option<CursorState>> =
+    SpinLock::new(None, lock_class!("CURSOR_STATE", LOCK_LEVEL_RESOURCE));
 
 /// Allocate the cursor surface and record the binding the cursor plane will drive.
 ///

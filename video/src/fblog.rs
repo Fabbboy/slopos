@@ -18,6 +18,7 @@
 //! wedged. All shared state is taken with `try_lock`, so it is interrupt-safe.
 
 use core::sync::atomic::{AtomicU64, Ordering};
+use slopos_ostd::lock_class;
 
 use slopos_abi::draw::{Canvas, Color32};
 use slopos_font::atlas::GlyphAtlas;
@@ -34,8 +35,10 @@ const MARGIN: i32 = 8;
 
 /// Scratch for the copied ring tail, kept off the stack (2 KiB frame cap).
 const SCRATCH_LEN: usize = 24 * 1024;
-static SCRATCH: SpinLock<[u8; SCRATCH_LEN]> =
-    SpinLock::new([0u8; SCRATCH_LEN], LOCK_LEVEL_UNORDERED);
+static SCRATCH: SpinLock<[u8; SCRATCH_LEN]> = SpinLock::new(
+    [0u8; SCRATCH_LEN],
+    lock_class!("fblog.SCRATCH", LOCK_LEVEL_UNORDERED),
+);
 
 /// Ring seq at the last repaint — repaint again only when it changes (or on an
 /// ESC toggle, signalled separately via `take_render_dirty`).

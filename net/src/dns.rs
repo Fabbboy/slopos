@@ -6,6 +6,7 @@
 //! handler.
 
 use core::sync::atomic::{AtomicU16, Ordering};
+use slopos_ostd::lock_class;
 
 use slopos_ostd::klog_debug;
 use slopos_ostd::sync::{LOCK_LEVEL_REGISTRY, SpinLock};
@@ -583,7 +584,10 @@ fn fnv1a_hash(data: &[u8]) -> u32 {
     hash
 }
 
-static DNS_CACHE: SpinLock<DnsCache> = SpinLock::new(DnsCache::new(), LOCK_LEVEL_REGISTRY);
+static DNS_CACHE: SpinLock<DnsCache> = SpinLock::new(
+    DnsCache::new(),
+    lock_class!("DNS_CACHE", LOCK_LEVEL_REGISTRY),
+);
 
 /// Look up a hostname in the DNS cache.
 pub fn dns_cache_lookup(hostname: &[u8]) -> Option<[u8; 4]> {

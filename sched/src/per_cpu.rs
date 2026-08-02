@@ -17,6 +17,7 @@
 
 use core::ptr::{self, NonNull};
 use core::sync::atomic::{AtomicBool, AtomicPtr, AtomicU32, AtomicU64, AtomicUsize, Ordering};
+use slopos_ostd::lock_class;
 
 /// Round-robin counter for fork/spawn CPU placement.  Rotates the starting
 /// position in `find_idlest_cpu()` so sequential forks spread across CPUs
@@ -220,7 +221,10 @@ impl PriorityRunQueue {
         Self {
             cpu_id_atom: AtomicUsize::new(0),
             ready_queues: [EMPTY_QUEUE; NUM_PRIORITY_LEVELS],
-            queue_lock: SpinLock::new((), LOCK_LEVEL_SCHEDULER),
+            queue_lock: SpinLock::new(
+                (),
+                lock_class!("PriorityRunQueue.queue_lock", LOCK_LEVEL_SCHEDULER),
+            ),
             enabled: AtomicBool::new(false),
             time_slice_atom: AtomicU32::new(10),
             total_switches: AtomicU64::new(0),

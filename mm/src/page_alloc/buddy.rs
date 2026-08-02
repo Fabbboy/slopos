@@ -23,6 +23,7 @@
 
 use core::ptr::NonNull;
 use core::sync::atomic::{AtomicU8, Ordering};
+use slopos_ostd::lock_class;
 
 use slopos_abi::addr::PhysAddr;
 use slopos_ostd::mm::frame::{FrameAlloc, FrameAllocOptions, Paddr};
@@ -521,7 +522,10 @@ impl BuddyAllocator {
     /// frame-allocator registration site reads from it.
     pub const fn new_uninit() -> Self {
         Self {
-            inner: SpinLock::new(BuddyInner::new(), LOCK_LEVEL_ALLOCATOR),
+            inner: SpinLock::new(
+                BuddyInner::new(),
+                lock_class!("BUDDY_ALLOCATOR", LOCK_LEVEL_ALLOCATOR),
+            ),
             frame_table: RawTable::empty(),
             state: AtomicU8::new(Lifecycle::Uninit as u8),
         }

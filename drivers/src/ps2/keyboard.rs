@@ -16,6 +16,7 @@
 //! legacy-byte bridge).
 
 use slopos_arch::cpu;
+use slopos_ostd::lock_class;
 use slopos_ostd::sync::{LOCK_LEVEL_RESOURCE, SpinLock};
 use slopos_ostd::{KBox, klog_info, klog_warn};
 
@@ -61,7 +62,10 @@ impl KeyboardState {
     }
 }
 
-static STATE: SpinLock<KeyboardState> = SpinLock::new(KeyboardState::new(), LOCK_LEVEL_RESOURCE);
+static STATE: SpinLock<KeyboardState> = SpinLock::new(
+    KeyboardState::new(),
+    lock_class!("ps2kbd.STATE", LOCK_LEVEL_RESOURCE),
+);
 
 pub fn init() {
     klog_info!("PS/2 keyboard: initialising device");

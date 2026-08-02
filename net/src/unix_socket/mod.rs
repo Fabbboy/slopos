@@ -38,6 +38,7 @@ mod slot;
 use slopos_abi::event::{KernelEvent, UnixSocketSlot};
 use slopos_abi::syscall::{POLLHUP, POLLIN, POLLOUT};
 use slopos_ostd::handle::HandleTable;
+use slopos_ostd::lock_class;
 use slopos_ostd::sync::{BUS, LOCK_LEVEL_REGISTRY, SpinLock};
 use slopos_ostd::{KVec, KVecDeque};
 
@@ -81,8 +82,10 @@ impl UnixSocketState {
     }
 }
 
-static UNIX_STATE: SpinLock<UnixSocketState> =
-    SpinLock::new(UnixSocketState::new(), LOCK_LEVEL_REGISTRY);
+static UNIX_STATE: SpinLock<UnixSocketState> = SpinLock::new(
+    UnixSocketState::new(),
+    lock_class!("UNIX_STATE", LOCK_LEVEL_REGISTRY),
+);
 
 // ---------------------------------------------------------------------------
 // Public API

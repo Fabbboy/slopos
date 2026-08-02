@@ -2,6 +2,7 @@ use core::{
     ffi::{CStr, c_char},
     ptr,
 };
+use slopos_ostd::lock_class;
 
 use core::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering};
 use slopos_drivers::serial;
@@ -217,8 +218,10 @@ impl BootRuntimeContext {
     }
 }
 
-static BOOT_RUNTIME: SpinLock<BootRuntimeContext> =
-    SpinLock::new(BootRuntimeContext::new(), LOCK_LEVEL_RESOURCE);
+static BOOT_RUNTIME: SpinLock<BootRuntimeContext> = SpinLock::new(
+    BootRuntimeContext::new(),
+    lock_class!("BOOT_RUNTIME", LOCK_LEVEL_RESOURCE),
+);
 static BOOT_INITIALIZED: AtomicBool = AtomicBool::new(false);
 
 static BOOT_TOTAL_STEPS: AtomicUsize = AtomicUsize::new(0);
@@ -556,6 +559,36 @@ fn boot_step_boot_config_fn(_ctx: &mut BootCtx<'_, BspInit>) {
                 boot_info(b"Boot option: panic.oops_limit set\0");
             } else {
                 boot_info(b"Boot option: panic.oops_limit ignored (not a u64)\0");
+            }
+        }
+    }
+
+    // Lock-order validator policy. `lockdep=warn` reports every distinct
+    // finding once and keeps booting, which enumerates the whole tree in one
+    // boot; `lockdep=off` keeps the held-lock walk that panic recovery needs
+    // but runs no ordering checks.
+    for token in cmdline.split_whitespace() {
+        if let Some(value) = token.strip_prefix("lockdep=") {
+            match value {
+                "off" => {
+                    slopos_ostd::sync::set_lockdep_mode(
+                        slopos_ostd::sync::lock_tracking::LockdepMode::Off,
+                    );
+                    boot_info(b"Boot option: lockdep=off (ordering checks disabled)\0");
+                }
+                "warn" => {
+                    slopos_ostd::sync::set_lockdep_mode(
+                        slopos_ostd::sync::lock_tracking::LockdepMode::Warn,
+                    );
+                    boot_info(b"Boot option: lockdep=warn (report, do not panic)\0");
+                }
+                "panic" | "on" => {
+                    slopos_ostd::sync::set_lockdep_mode(
+                        slopos_ostd::sync::lock_tracking::LockdepMode::Panic,
+                    );
+                    boot_info(b"Boot option: lockdep=panic\0");
+                }
+                _ => boot_info(b"Boot option: lockdep= ignored (want off|warn|panic)\0"),
             }
         }
     }

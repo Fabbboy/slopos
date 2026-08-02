@@ -562,7 +562,7 @@ pub fn test_tcp_abort_listen_no_rst() -> TestResult {
 
 pub fn test_tcp_close_not_found() -> TestResult {
     reset();
-    match tcp::close(ConnId(999)) {
+    match tcp::close(ConnId::from_raw(999)) {
         Err(TcpError::NotFound) => {}
         other => return fail!("expected NotFound, got {:?}", other),
     }
@@ -1149,7 +1149,7 @@ pub fn test_tcp_time_wait_expiry() -> TestResult {
 
     // Fire the TIME_WAIT timer directly (the timer wheel approach replaced
     // the old `tcp_timer_tick` sweep).
-    tcp::on_time_wait_expire(id.0);
+    tcp::on_time_wait_expire(id.raw());
     assert_eq_test!(tcp::get_state(id), None, "released");
     assert_eq_test!(tcp::active_count(), 0, "released");
     pass!()
@@ -1234,7 +1234,7 @@ pub fn test_tcp_retransmit_timer() -> TestResult {
     assert_test!(has_retransmit_token, "retransmit timer scheduled");
 
     let rto_before = with_data_state!(id, |d| d.rtt.rto_ms());
-    let result = tcp::on_retransmit(id.0);
+    let result = tcp::on_retransmit(id.raw());
     assert_test!(result.is_some(), "retransmit handler returned conn id");
     assert_eq_test!(result.unwrap(), id, "correct conn_id");
 
@@ -1283,7 +1283,7 @@ pub fn test_tcp_time_wait_timer() -> TestResult {
 
     assert_eq_test!(tcp::get_state(id), Some(TcpState::TimeWait), "in TIME_WAIT");
 
-    tcp::on_time_wait_expire(id.0);
+    tcp::on_time_wait_expire(id.raw());
 
     assert_eq_test!(tcp::get_state(id), None, "connection released");
     assert_eq_test!(tcp::active_count(), 0, "no active connections");
@@ -1589,7 +1589,7 @@ pub fn test_tcp_multiple_connections() -> TestResult {
     let local_ip = [10, 0, 0, 1];
 
     // Create 10 connections to different servers.
-    let mut ids = [ConnId(0); 10];
+    let mut ids = [ConnId::SENTINEL; 10];
     for i in 0..10 {
         let remote = [10, 0, (i / 256) as u8, (i % 256 + 1) as u8];
         let (id, _) = tcp::connect(local_ip, remote, (80 + i) as u16).unwrap();

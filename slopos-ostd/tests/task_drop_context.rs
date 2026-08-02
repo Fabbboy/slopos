@@ -1,3 +1,4 @@
+use slopos_ostd::lock_class;
 use std::panic::{self, AssertUnwindSafe};
 use std::sync::Mutex;
 
@@ -49,7 +50,11 @@ fn task_drop_rejects_held_lock_context() {
     let lock_addr = core::ptr::without_provenance::<()>(0xD04D_C07E);
 
     unsafe {
-        push_lock(lock_addr, noop_poison, LOCK_LEVEL_RESOURCE);
+        push_lock(
+            lock_addr,
+            noop_poison,
+            lock_class!("tdc.a", LOCK_LEVEL_RESOURCE),
+        );
     }
     let result = panic::catch_unwind(AssertUnwindSafe(|| drop(task)));
     unsafe {

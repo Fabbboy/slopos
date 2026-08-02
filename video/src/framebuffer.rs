@@ -1,4 +1,5 @@
 use core::ffi::c_int;
+use slopos_ostd::lock_class;
 
 use slopos_abi::addr::{PhysAddr, VirtAddr};
 use slopos_abi::damage::DamageRect;
@@ -74,14 +75,16 @@ impl FramebufferState {
     }
 }
 
-static FRAMEBUFFER: SpinLock<FramebufferState> =
-    SpinLock::new(FramebufferState::new(), LOCK_LEVEL_RESOURCE);
+static FRAMEBUFFER: SpinLock<FramebufferState> = SpinLock::new(
+    FramebufferState::new(),
+    lock_class!("FRAMEBUFFER", LOCK_LEVEL_RESOURCE),
+);
 /// Backend present hook. Receives the damaged region (or `(null, 0)` for a
 /// full-frame present) so a GPU backend can scope its transfer/flush.
 type FlushCallback = fn(*const DamageRect, u32) -> c_int;
 
 static FRAMEBUFFER_FLUSH: SpinLock<Option<FlushCallback>> =
-    SpinLock::new(None, LOCK_LEVEL_RESOURCE);
+    SpinLock::new(None, lock_class!("FRAMEBUFFER_FLUSH", LOCK_LEVEL_RESOURCE));
 
 fn init_state_from_raw(addr: u64, width: u32, height: u32, pitch: u32, bpp: u8) -> i32 {
     if addr == 0 || width < MIN_FRAMEBUFFER_WIDTH || width > DisplayInfo::MAX_DIMENSION {

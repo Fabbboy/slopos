@@ -542,8 +542,9 @@ pub fn release_probe(cpu: usize) {
 /// Deliberately not `klog!` and not `early_console::write_bytes`. The
 /// former's serial backend spins on a blocking ticket lock that the
 /// interrupted CPU may already hold; the latter funnels through
-/// `fblog::capture`, whose `try_lock` runs `push_lock`, which takes a
-/// `&mut` on a per-CPU cell this NMI may have interrupted mid-update.
+/// `fblog::capture`, whose `try_lock` runs `push_lock` — and `cli` does not
+/// mask an NMI, so the held-stack update it performs is the one thing on that
+/// path this context cannot be made atomic against.
 /// `early_console::write_byte` polls the UART and touches nothing else.
 pub fn nmi_emit(text: &str) {
     for byte in text.as_bytes() {

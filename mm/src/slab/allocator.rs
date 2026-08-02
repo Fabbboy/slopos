@@ -31,7 +31,7 @@ use core::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use slopos_arch::pcr::{MAX_CPUS, get_current_cpu};
 use slopos_ostd::panic::AbortOnUnwind;
 use slopos_ostd::sync::cpu_local::{CacheAligned, CpuLocal};
-use slopos_ostd::sync::{ByteChain, IrqPreemptGuard, LOCK_LEVEL_ALLOCATOR, RawLink, SpinLock};
+use slopos_ostd::sync::{ByteChain, IrqPreemptGuard, LockClassKey, RawLink, SpinLock};
 use slopos_ostd::{klog_info, mm::Slab};
 
 use super::magazine::{MAGAZINE_CAPACITY, Magazine};
@@ -94,11 +94,18 @@ pub struct SlabAllocator<const SIZE: usize> {
 impl<const SIZE: usize> SlabAllocator<SIZE> {
     /// Const constructor with the size-class index. Used only by
     /// [`super::KernelSlab::new_uninit`] which hardcodes the eight
-    /// `(SIZE, class_idx)` pairs.
-    pub(crate) const fn new_with_class(class_idx: u8) -> Self {
+    /// `(SIZE, class_idx, lock class)` triples.
+    ///
+    /// The lock class comes from the caller because a `lock_class!` minted
+    /// here would be one class shared by all eight size classes — the key is
+    /// its declaration site, and a generic function has one of those however
+    /// many times it is instantiated. Merged, an inversion between two size
+    /// classes could not be seen and their legitimate nesting could not be
+    /// told from an error.
+    pub(crate) const fn new_with_class(class_idx: u8, class: &'static LockClassKey) -> Self {
         const INIT: CacheAligned<Magazine> = CacheAligned(Magazine::new());
         Self {
-            inner: SpinLock::new(SlabClassState::new(), LOCK_LEVEL_ALLOCATOR),
+            inner: SpinLock::new(SlabClassState::new(), class),
             magazines: CpuLocal::new_with([INIT; MAX_CPUS]),
             stats: SlabClassStats::new(),
             class_idx,

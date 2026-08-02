@@ -112,6 +112,23 @@ where
     InitClosure(f, PhantomData)
 }
 
+/// An [`Init`] that moves an already-owned `value` into the slot.
+///
+/// The point is placement, not construction: it lets a large `T` the
+/// caller already holds be handed to `KArc::try_init` / `KBox::try_init`
+/// without the extra whole-`T` temporary that passing it to `try_new`
+/// would materialise on the stack.
+pub fn init_from_owned<T, E>(value: T) -> InitClosure<T, E, impl FnOnce(*mut T) -> Result<(), E>> {
+    // SAFETY: the closure writes the slot exactly once, from an owned
+    // value it consumes, so no `T` is duplicated or dropped twice.
+    unsafe {
+        init_from_closure(move |slot: *mut T| -> Result<(), E> {
+            slot.write(value);
+            Ok(())
+        })
+    }
+}
+
 /// An [`Init<T, Infallible>`] that fills `T`'s slot with all-zero
 /// bytes. Safe because `T: Zeroable` certifies that pattern is a
 /// valid `T`.

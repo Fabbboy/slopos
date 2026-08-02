@@ -165,11 +165,16 @@ impl CsprngState {
 
 static CSPRNG: OnceLock<SpinLock<CsprngState>> = OnceLock::new();
 
+/// Shared by both `call_once` closures: whichever wins the race must
+/// install the same class.
+const CSPRNG_CLASS: &slopos_ostd::sync::lock_tracking::LockClassKey =
+    slopos_ostd::lock_class!("CSPRNG", LOCK_LEVEL_REGISTRY);
+
 /// Initialize the CSPRNG with a 32-byte seed. Called once during boot.
 ///
 /// If called more than once, the second call is a no-op (OnceLock semantics).
 pub fn init_csprng(seed: &[u8; 32]) {
-    CSPRNG.call_once(|| SpinLock::new(CsprngState::from_seed(seed), LOCK_LEVEL_REGISTRY));
+    CSPRNG.call_once(|| SpinLock::new(CsprngState::from_seed(seed), CSPRNG_CLASS));
 }
 
 /// Fill `buf` with cryptographically secure random bytes.
@@ -180,7 +185,7 @@ pub fn csprng_fill(buf: &mut [u8]) {
     // Ensure the CSPRNG is initialized even if called before the boot step.
     CSPRNG.call_once(|| {
         let seed = emergency_seed();
-        SpinLock::new(CsprngState::from_seed(&seed), LOCK_LEVEL_REGISTRY)
+        SpinLock::new(CsprngState::from_seed(&seed), CSPRNG_CLASS)
     });
 
     let rng = CSPRNG.get().expect("CSPRNG not initialized");

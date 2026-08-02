@@ -1,4 +1,5 @@
 use core::ffi::{c_char, c_int};
+use slopos_ostd::lock_class;
 
 use slopos_ostd::sync::{LOCK_LEVEL_RESOURCE, SpinLock};
 use slopos_ostd::util::cstr::cstr_from_kernel_ptr;
@@ -73,7 +74,7 @@ static REGION_STORE: SpinLock<RegionStoreInner> = SpinLock::new(
         count: 0,
         overflows: 0,
     },
-    LOCK_LEVEL_RESOURCE,
+    lock_class!("REGION_STORE", LOCK_LEVEL_RESOURCE),
 );
 
 fn with_store<R>(f: impl FnOnce(&mut RegionStoreInner) -> R) -> R {

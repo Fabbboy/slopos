@@ -15,6 +15,7 @@
 //! is the same shape as the kernel-side panic recovery.
 
 use core::sync::atomic::{AtomicUsize, Ordering};
+use slopos_ostd::lock_class;
 use std::sync::Mutex;
 
 use slopos_ostd::sync::lock_tracking::{
@@ -83,8 +84,8 @@ fn poison_walk_fires_each_held_lock_callback() {
     let addr_b = core::ptr::without_provenance::<()>(0xBBBB_BBBB);
 
     unsafe {
-        push_lock(addr_a, poison_a, LOCK_LEVEL_UNORDERED);
-        push_lock(addr_b, poison_b, LOCK_LEVEL_UNORDERED);
+        push_lock(addr_a, poison_a, lock_class!("pr.a", LOCK_LEVEL_UNORDERED));
+        push_lock(addr_b, poison_b, lock_class!("pr.b", LOCK_LEVEL_UNORDERED));
     }
     assert_eq!(held_lock_count(), 2);
 

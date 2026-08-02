@@ -10,6 +10,7 @@
 //! plain `Copy` value and no per-entry lock is needed.
 
 use slopos_ostd::handle::{Handle, HandleTable};
+use slopos_ostd::lock_class;
 use slopos_ostd::sync::{LOCK_LEVEL_REGISTRY, SpinLock};
 
 /// Maximum concurrent signalfds system-wide (fixed-capacity table).
@@ -28,7 +29,7 @@ pub struct SignalfdState {
 }
 
 static REGISTRY: SpinLock<Option<HandleTable<SignalfdState>>> =
-    SpinLock::new(None, LOCK_LEVEL_REGISTRY);
+    SpinLock::new(None, lock_class!("signalfd.REGISTRY", LOCK_LEVEL_REGISTRY));
 
 fn with_registry<R>(f: impl FnOnce(&mut HandleTable<SignalfdState>) -> R) -> R {
     let mut guard = REGISTRY.lock();

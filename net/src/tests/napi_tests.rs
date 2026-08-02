@@ -1,7 +1,9 @@
 use slopos_abi::net::{AF_INET, SOCK_STREAM};
 use slopos_abi::syscall::{ERRNO_EAGAIN, POLLOUT};
 use slopos_ostd::KBox;
+use slopos_ostd::lock_class;
 use slopos_ostd::sync::WaitQueue;
+use slopos_ostd::sync::lock_tracking::LOCK_LEVEL_RESOURCE;
 use slopos_testing::TestResult;
 use slopos_testing::{assert_test, pass};
 
@@ -71,7 +73,10 @@ pub fn test_napi_budget_limiting() -> TestResult {
 /// in that window would lose the wake-up.
 pub fn test_napi_waker_rearm_short_circuits() -> TestResult {
     use crate::napi_waker::NapiWaker;
-    static WAKER: NapiWaker = NapiWaker::new("test-waker");
+    static WAKER: NapiWaker = NapiWaker::new(
+        "test-waker",
+        lock_class!("test.napi_waker.waiters", LOCK_LEVEL_RESOURCE),
+    );
     WAKER.rearm();
     // The park predicate consumes the armed flag, so an edge left by `rearm`
     // is what makes the next park return without blocking.
@@ -106,7 +111,7 @@ pub fn test_tx_fire_and_forget() -> TestResult {
 }
 
 pub fn test_waitqueue_basic() -> TestResult {
-    static TEST_WQ: WaitQueue = WaitQueue::new();
+    static TEST_WQ: WaitQueue = WaitQueue::new(lock_class!("TEST_WQ.waiters", LOCK_LEVEL_RESOURCE));
     let before = TEST_WQ.generation();
     assert_test!(
         !TEST_WQ.wake_one(),

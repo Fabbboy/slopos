@@ -8,8 +8,10 @@ pub mod queue;
 
 use core::sync::atomic::{AtomicBool, Ordering};
 use slopos_mm::mmio::MmioRegion;
+use slopos_ostd::lock_class;
 use slopos_ostd::sync::WaitAbort;
 use slopos_ostd::sync::WaitQueue;
+use slopos_ostd::sync::lock_tracking::LOCK_LEVEL_RESOURCE;
 
 // =============================================================================
 // VirtIO PCI Capability Types
@@ -234,7 +236,7 @@ impl IrqEdgeEvent {
     pub const fn new() -> Self {
         Self {
             signaled: AtomicBool::new(false),
-            waiters: WaitQueue::new(),
+            waiters: WaitQueue::new(lock_class!("IrqEdgeEvent.waiters", LOCK_LEVEL_RESOURCE)),
         }
     }
 

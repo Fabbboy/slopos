@@ -8,13 +8,15 @@
 //! Each test owns distinct CPU indices: the graph is a process-global
 //! array and `cargo test` runs integration tests on parallel threads.
 
+use slopos_ostd::lock_class;
 use slopos_ostd::sync::{LOCK_LEVEL_UNORDERED, SpinLock};
 use slopos_ostd::watchdog::test_support::{clear_wait, plant_mid_update, plant_wait, reset_slot};
 use slopos_ostd::watchdog::wait_chain_closes_cycle;
 
 #[test]
 fn an_untaken_lock_names_no_holder() {
-    let lock: SpinLock<u32> = SpinLock::new(0, LOCK_LEVEL_UNORDERED);
+    let lock: SpinLock<u32> =
+        SpinLock::new(0, lock_class!("test.wait_chain", LOCK_LEVEL_UNORDERED));
     // A zeroed holder field decodes as "CPU 0, ticket 0", which is exactly
     // what a virgin lock's ticket pair also reads as. Both conjuncts of the
     // validation exist to reject this.

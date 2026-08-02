@@ -1,3 +1,4 @@
+use slopos_ostd::lock_class;
 use slopos_ostd::sync::{LOCK_LEVEL_RESOURCE, SpinLock};
 
 use crate::framebuffer;
@@ -43,7 +44,10 @@ impl SplashState {
     }
 }
 
-static STATE: SpinLock<SplashState> = SpinLock::new(SplashState::new(), LOCK_LEVEL_RESOURCE);
+static STATE: SpinLock<SplashState> = SpinLock::new(
+    SplashState::new(),
+    lock_class!("splash.STATE", LOCK_LEVEL_RESOURCE),
+);
 
 struct SplashLayout {
     center_x: i32,

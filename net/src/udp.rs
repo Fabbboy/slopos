@@ -1,4 +1,5 @@
 use slopos_ostd::klog_debug;
+use slopos_ostd::lock_class;
 use slopos_ostd::sync::{LOCK_LEVEL_REGISTRY, SpinLock};
 
 use super::packetbuf::PacketBuf;
@@ -158,15 +159,19 @@ impl UdpDemuxTable {
 
 /// Per-bucket locks for the UDP demux table.
 static UDP_DEMUX_BUCKETS_TABLE: [SpinLock<UdpDemuxBucket>; UDP_DEMUX_BUCKETS] = {
-    const BUCKET: SpinLock<UdpDemuxBucket> =
-        SpinLock::new(UdpDemuxBucket::new(), LOCK_LEVEL_REGISTRY);
+    const BUCKET: SpinLock<UdpDemuxBucket> = SpinLock::new(
+        UdpDemuxBucket::new(),
+        lock_class!("UDP_DEMUX_BUCKETS", LOCK_LEVEL_REGISTRY),
+    );
     [BUCKET; UDP_DEMUX_BUCKETS]
 };
 
 /// Compatibility shim: existing code locks this to call register/unregister/lookup.
 /// The actual per-bucket locking happens inside the method implementations.
-pub static UDP_DEMUX: SpinLock<UdpDemuxTable> =
-    SpinLock::new(UdpDemuxTable::new(), LOCK_LEVEL_REGISTRY);
+pub static UDP_DEMUX: SpinLock<UdpDemuxTable> = SpinLock::new(
+    UdpDemuxTable::new(),
+    lock_class!("UDP_DEMUX", LOCK_LEVEL_REGISTRY),
+);
 
 pub(crate) fn parse_udp_header(payload: &[u8]) -> Option<(u16, u16, &[u8])> {
     if payload.len() < 8 {

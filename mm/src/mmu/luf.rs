@@ -21,6 +21,7 @@
 //! a flush, it only defers it.
 
 use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use slopos_ostd::lock_class;
 
 use slopos_abi::addr::{PhysAddr, VirtAddr};
 use slopos_arch::cpu::IrqDisabled;
@@ -206,7 +207,8 @@ static DRAIN_REQUEST: LufDrainRequest = LufDrainRequest::new();
 /// spinners can service incoming IPIs and break the cycle. Safe because
 /// `DRAIN_LOCK` is never acquired from an IRQ handler (only from frame
 /// allocation paths). `handle_drain_ipi` reads `DRAIN_REQUEST` lock-free.
-static DRAIN_LOCK: PreemptMutex<()> = PreemptMutex::new((), LOCK_LEVEL_ALLOCATOR);
+static DRAIN_LOCK: PreemptMutex<()> =
+    PreemptMutex::new((), lock_class!("DRAIN_LOCK", LOCK_LEVEL_ALLOCATOR));
 
 /// Broadcast a "drain any entries referencing this phys" request to
 /// every CPU whose bit is set in `cpu_mask`. Blocks until every

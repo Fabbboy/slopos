@@ -7,6 +7,7 @@
 
 use slopos_arch::pcr;
 use slopos_drivers::{apic, hpet};
+use slopos_ostd::lock_class;
 use slopos_ostd::watchdog;
 use slopos_testing::{TestResult, assert_test};
 
@@ -158,7 +159,8 @@ pub fn test_probe_admits_one_at_a_time() -> TestResult {
 pub fn test_holder_is_named_only_while_held() -> TestResult {
     use slopos_ostd::sync::{LOCK_LEVEL_UNORDERED, SpinLock};
 
-    let lock: SpinLock<u32> = SpinLock::new(0, LOCK_LEVEL_UNORDERED);
+    let lock: SpinLock<u32> =
+        SpinLock::new(0, lock_class!("test.watchdog_holder", LOCK_LEVEL_UNORDERED));
     let me = pcr::get_current_cpu();
 
     assert_test!(
@@ -199,7 +201,10 @@ pub fn test_holder_is_named_only_while_held() -> TestResult {
 pub fn test_force_unlock_releases_exactly_one() -> TestResult {
     use slopos_ostd::sync::{LOCK_LEVEL_UNORDERED, SpinLock};
 
-    let lock: SpinLock<u32> = SpinLock::new(0, LOCK_LEVEL_UNORDERED);
+    let lock: SpinLock<u32> = SpinLock::new(
+        0,
+        lock_class!("test.watchdog_force_unlock", LOCK_LEVEL_UNORDERED),
+    );
 
     // A holder plus one queued waiter. Storing `next_ticket` would free the
     // lock in one step and leave the waiter's ticket unreachable forever.

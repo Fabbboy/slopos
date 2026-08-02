@@ -22,6 +22,7 @@
 //! is **not** held during data-path operations, and backing `Drop` bodies
 //! never take it.
 
+use slopos_ostd::lock_class;
 use slopos_ostd::sync::{LOCK_LEVEL_REGISTRY, SpinLock};
 use slopos_ostd::{KArc, KWeak};
 
@@ -42,7 +43,8 @@ use slopos_ostd::sync::BUS;
 /// initialise must be atomic against other allocators). Frees don't need
 /// it: a slot's backing `Drop` is its sole freer, and the allocation
 /// bitmap bit is cleared only after the slot is fully empty.
-static PTY_ALLOC_LOCK: SpinLock<()> = SpinLock::new((), LOCK_LEVEL_REGISTRY);
+static PTY_ALLOC_LOCK: SpinLock<()> =
+    SpinLock::new((), lock_class!("PTY_ALLOC_LOCK", LOCK_LEVEL_REGISTRY));
 
 // ---------------------------------------------------------------------------
 // Pair allocation

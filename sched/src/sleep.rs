@@ -1,5 +1,6 @@
 use core::ffi::c_int;
 use core::sync::atomic::{AtomicU32, Ordering};
+use slopos_ostd::lock_class;
 
 use slopos_abi::task::BlockReason;
 use slopos_ostd::KVec;
@@ -246,7 +247,10 @@ impl SleepQueue {
     }
 }
 
-static SLEEP_QUEUE: SpinLock<SleepQueue> = SpinLock::new(SleepQueue::new(), LOCK_LEVEL_REGISTRY);
+static SLEEP_QUEUE: SpinLock<SleepQueue> = SpinLock::new(
+    SleepQueue::new(),
+    lock_class!("SLEEP_QUEUE", LOCK_LEVEL_REGISTRY),
+);
 
 /// External mirror of `SleepQueue::active_count`, maintained under
 /// the `SLEEP_QUEUE` mutex but readable without it. Lets the

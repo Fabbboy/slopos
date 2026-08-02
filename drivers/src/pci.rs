@@ -1,4 +1,5 @@
 use core::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use slopos_ostd::lock_class;
 
 use slopos_abi::PhysAddr;
 use slopos_acpi::mcfg::{Mcfg, McfgEntry};
@@ -185,7 +186,10 @@ impl PciEnumState {
 }
 
 static PCI_INIT: InitFlag = InitFlag::new();
-static ENUM_STATE: SpinLock<PciEnumState> = SpinLock::new(PciEnumState::new(), LOCK_LEVEL_REGISTRY);
+static ENUM_STATE: SpinLock<PciEnumState> = SpinLock::new(
+    PciEnumState::new(),
+    lock_class!("ENUM_STATE", LOCK_LEVEL_REGISTRY),
+);
 static DEVICE_COUNT_CACHE: AtomicUsize = AtomicUsize::new(0);
 
 /// Bump-allocator cursor for assigning MMIO regions to PCI BARs the firmware
@@ -1416,7 +1420,10 @@ impl ClaimTable {
 
 // RESOURCE(1) < REGISTRY(2): never nested with `ENUM_STATE`, so the lock graph
 // stays acyclic regardless of which numeric level is larger.
-static CLAIMED_BY: SpinLock<ClaimTable> = SpinLock::new(ClaimTable::new(), LOCK_LEVEL_RESOURCE);
+static CLAIMED_BY: SpinLock<ClaimTable> = SpinLock::new(
+    ClaimTable::new(),
+    lock_class!("pci.CLAIMED_BY", LOCK_LEVEL_RESOURCE),
+);
 
 /// Records device claims for the matchmaker, abstracting the live `CLAIMED_BY`
 /// static (boot) from a heap-backed map (unit tests) so the matchmaker core is

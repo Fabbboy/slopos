@@ -20,6 +20,7 @@ pub mod i2c_hid;
 pub mod report;
 
 use core::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use slopos_ostd::lock_class;
 
 use slopos_acpi::aml::{self, AcpiI2cHid, HhdmHost};
 use slopos_acpi::tables::AcpiTables;
@@ -131,7 +132,7 @@ pub fn init(rsdp_phys: u64, width: u32, height: u32, debug: bool, force_poll: bo
     let rt = TouchpadRuntime {
         hid,
         format,
-        gesture: SpinLock::new(engine, LOCK_LEVEL_RESOURCE),
+        gesture: SpinLock::new(engine, lock_class!("TOUCHPAD", LOCK_LEVEL_RESOURCE)),
         debug,
     };
     TOUCHPAD.call_once(move || rt);
@@ -165,7 +166,10 @@ impl TouchpadWaker {
     const fn new() -> Self {
         Self {
             armed: AtomicBool::new(false),
-            stop: KernelIoStop::new("touchpad-irq"),
+            stop: KernelIoStop::new(
+                "touchpad-irq",
+                lock_class!("TOUCHPAD_IRQ_STOP.waiters", LOCK_LEVEL_RESOURCE),
+            ),
         }
     }
     const fn stop(&self) -> &KernelIoStop {

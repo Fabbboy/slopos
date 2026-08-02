@@ -26,6 +26,7 @@
 //! slopos_ostd::klog::klog_register_backend(my_backend_fn);
 //! ```
 
+use crate::lock_class;
 use core::ffi::c_int;
 use core::fmt;
 use core::sync::atomic::{AtomicPtr, AtomicU8, Ordering};
@@ -174,7 +175,10 @@ impl KlogRing {
     }
 }
 
-static KLOG_RING: SpinLock<KlogRing> = SpinLock::new(KlogRing::new(), LOCK_LEVEL_UNORDERED);
+static KLOG_RING: SpinLock<KlogRing> = SpinLock::new(
+    KlogRing::new(),
+    lock_class!("KLOG_RING", LOCK_LEVEL_UNORDERED),
+);
 
 struct RingWriter<'a>(&'a mut KlogRing);
 

@@ -1,5 +1,6 @@
 use slopos_hermetic::{BootCtx, BspInit};
 use slopos_ostd::klog::{self, KlogLevel};
+use slopos_ostd::lock_class;
 use slopos_ostd::{klog_debug, klog_info};
 
 use crate::early_init::{boot_get_hhdm_offset, boot_get_memmap, boot_init_priority};
@@ -89,7 +90,7 @@ fn boot_step_install_kernel_vm_space_fn(ctx: &mut BootCtx<'_, BspInit>) {
         // resource (per-process state) and allocator levels — they
         // touch the kernel master PML4 which is shared registry-style
         // across every address space.
-        SpinLock::new(space, LOCK_LEVEL_REGISTRY)
+        SpinLock::new(space, lock_class!("KERNEL_VM_SPACE", LOCK_LEVEL_REGISTRY))
     });
 
     // The kernel half now has two names — the root `slopos_mm::paging`

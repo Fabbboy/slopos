@@ -678,21 +678,21 @@ impl SocketAllocBitmap {
 pub static SOCKET_ALLOC: slopos_ostd::sync::SpinLock<SocketAllocBitmap> =
     slopos_ostd::sync::SpinLock::new(
         SocketAllocBitmap::new(),
-        slopos_ostd::sync::LOCK_LEVEL_REGISTRY,
+        slopos_ostd::lock_class!("SOCKET_ALLOC", slopos_ostd::sync::LOCK_LEVEL_REGISTRY),
     );
 
 /// Global slab-based socket table.
 pub static NEW_SOCKET_TABLE: slopos_ostd::sync::SpinLock<SlabSocketTable> =
     slopos_ostd::sync::SpinLock::new(
         SlabSocketTable::empty(),
-        slopos_ostd::sync::LOCK_LEVEL_REGISTRY,
+        slopos_ostd::lock_class!("NEW_SOCKET_TABLE", slopos_ostd::sync::LOCK_LEVEL_REGISTRY),
     );
 
 /// Ephemeral port allocator.
 pub static EPHEMERAL_PORTS: slopos_ostd::sync::SpinLock<EphemeralPortAllocator> =
     slopos_ostd::sync::SpinLock::new(
         EphemeralPortAllocator::new(),
-        slopos_ostd::sync::LOCK_LEVEL_REGISTRY,
+        slopos_ostd::lock_class!("EPHEMERAL_PORTS", slopos_ostd::sync::LOCK_LEVEL_REGISTRY),
     );
 
 // =============================================================================

@@ -225,7 +225,7 @@ fn input_process_established(
                         key: _,
                         delay_ms,
                     } => {
-                        let token = NET_TIMER_WHEEL.schedule(delay_ms, kind, id.0);
+                        let token = NET_TIMER_WHEEL.schedule(delay_ms, kind, id.raw());
                         match kind {
                             TimerKind::TcpRetransmit => {
                                 set_retransmit_token(pcb, Some(token));
@@ -267,20 +267,6 @@ fn input_process_established(
             *buffer_slot = None;
         }
 
-        // Schedule initial keepalive timer for newly-established connections.
-        if actions.notify.contains(SocketNotify::NEW_ESTABLISHED) {
-            let keepalive_enabled = pcb
-                .socket_id
-                .map(|sid| crate::socket::socket_keepalive_enabled_by_index(sid.0 as usize))
-                .unwrap_or(false);
-            if let PcbState::Data(d) = &mut pcb.state {
-                if let Some(delay) = d.schedule_initial_keepalive(keepalive_enabled) {
-                    let token = NET_TIMER_WHEEL.schedule(delay, TimerKind::TcpKeepalive, id.0);
-                    d.keepalive_token = Some(token);
-                }
-            }
-        }
-
         // Reset keepalive timer on data activity.
         if !actions.release
             && actions
@@ -290,7 +276,7 @@ fn input_process_established(
             if let PcbState::Data(d) = &mut pcb.state {
                 if let Some((old_token, delay)) = d.reset_keepalive_on_activity() {
                     NET_TIMER_WHEEL.cancel(old_token);
-                    let token = NET_TIMER_WHEEL.schedule(delay, TimerKind::TcpKeepalive, id.0);
+                    let token = NET_TIMER_WHEEL.schedule(delay, TimerKind::TcpKeepalive, id.raw());
                     d.keepalive_token = Some(token);
                 }
             }
@@ -298,6 +284,32 @@ fn input_process_established(
 
         actions
     });
+
+    // Schedule the initial keepalive timer for a newly-established
+    // connection, outside the PCB lock.
+    //
+    // The option lives in the socket table, and the socket layer takes that
+    // table before calling down into a PCB — so reading it from under the
+    // PCB lock would invert the socket -> tcp order. Establishment happens
+    // once per connection, so the extra lock round-trip is not on any hot
+    // path.
+    if actions
+        .as_ref()
+        .is_some_and(|a| a.notify.contains(SocketNotify::NEW_ESTABLISHED))
+    {
+        let socket_id = table::with_pcb(id, |pcb| pcb.socket_id).flatten();
+        let keepalive_enabled = socket_id
+            .map(|sid| crate::socket::socket_keepalive_enabled_by_index(sid.0 as usize))
+            .unwrap_or(false);
+        table::with_pcb_mut(id, |pcb| {
+            if let PcbState::Data(d) = &mut pcb.state {
+                if let Some(delay) = d.schedule_initial_keepalive(keepalive_enabled) {
+                    let token = NET_TIMER_WHEEL.schedule(delay, TimerKind::TcpKeepalive, id.raw());
+                    d.keepalive_token = Some(token);
+                }
+            }
+        });
+    }
 
     let actions = actions.unwrap_or_else(|| {
         let mut a = Actions::new();
@@ -359,7 +371,7 @@ pub fn connect(
         local_port,
         remote_port,
         iss,
-        id.0
+        id
     );
 
     let seg =
@@ -381,7 +393,7 @@ pub fn listen(local_ip: [u8; 4], local_port: u16) -> Result<ConnId, TcpError> {
     };
     let id = table::install_listener(tuple, PcbState::Listen(pcb::ListenState::new()), |_| {})?;
 
-    klog_debug!("tcp: LISTEN on port {} id={}", local_port, id.0);
+    klog_debug!("tcp: LISTEN on port {} id={}", local_port, id);
     Ok(id)
 }
 
@@ -392,7 +404,7 @@ pub fn close(id: ConnId) -> Result<Option<TcpOutSegment>, TcpError> {
     if id.is_listener() {
         let name = table::with_pcb(id, |pcb| pcb.state.name()).ok_or(TcpError::NotFound)?;
         table::release(id);
-        klog_debug!("tcp: CLOSE id={} from {} — released", id.0, name);
+        klog_debug!("tcp: CLOSE id={} from {} — released", id, name);
         return Ok(None);
     }
 
@@ -407,7 +419,7 @@ pub fn close(id: ConnId) -> Result<Option<TcpOutSegment>, TcpError> {
             return Ok(Outcome::Release(pcb.state.name()));
         }
         if matches!(pcb.state, PcbState::TimeWait(_)) {
-            klog_debug!("tcp: CLOSE id={} TIME_WAIT — no-op", id.0);
+            klog_debug!("tcp: CLOSE id={} TIME_WAIT — no-op", id);
             return Ok(Outcome::NoOp);
         }
         // SynRecv → Data(FinWait1): allocate buffer before transition.
@@ -433,7 +445,7 @@ pub fn close(id: ConnId) -> Result<Option<TcpOutSegment>, TcpError> {
                         pcb.assert_invariants();
                         klog_debug!(
                             "tcp: CLOSE id={} ESTABLISHED -> FIN_WAIT_1, FIN seq={}",
-                            id.0,
+                            id,
                             seq
                         );
                         Ok(Outcome::Segment(seg))
@@ -449,17 +461,13 @@ pub fn close(id: ConnId) -> Result<Option<TcpOutSegment>, TcpError> {
                         pcb.assert_invariants();
                         klog_debug!(
                             "tcp: CLOSE id={} CLOSE_WAIT -> LAST_ACK, FIN seq={}",
-                            id.0,
+                            id,
                             seq
                         );
                         Ok(Outcome::Segment(seg))
                     }
                     _ => {
-                        klog_debug!(
-                            "tcp: CLOSE id={} already closing ({:?})",
-                            id.0,
-                            d.close_phase
-                        );
+                        klog_debug!("tcp: CLOSE id={} already closing ({:?})", id, d.close_phase);
                         Ok(Outcome::NoOp)
                     }
                 }
@@ -473,7 +481,7 @@ pub fn close(id: ConnId) -> Result<Option<TcpOutSegment>, TcpError> {
         Some(Err(e)) => Err(e),
         Some(Ok(Outcome::Release(name))) => {
             table::release(id);
-            klog_debug!("tcp: CLOSE id={} from {} — released", id.0, name);
+            klog_debug!("tcp: CLOSE id={} from {} — released", id, name);
             Ok(None)
         }
         Some(Ok(Outcome::NoOp)) => Ok(None),
@@ -514,7 +522,7 @@ fn close_syn_recv_transition(
     pcb.assert_invariants();
     let mut seg = SegmentBuilder::fin_ack(tuple, seq, ack, window);
     seg.timestamp = ts;
-    klog_debug!("tcp: CLOSE id={} SYN_RECV -> FIN_WAIT_1", id.0);
+    klog_debug!("tcp: CLOSE id={} SYN_RECV -> FIN_WAIT_1", id);
     Ok(Some(seg))
 }
 
@@ -522,13 +530,13 @@ fn close_syn_recv_transition(
 pub fn abort(id: ConnId) -> Result<Option<TcpOutSegment>, TcpError> {
     if id.is_listener() {
         let name = table::with_pcb(id, |pcb| pcb.state.name()).ok_or(TcpError::NotFound)?;
-        klog_debug!("tcp: ABORT id={} from {}", id.0, name);
+        klog_debug!("tcp: ABORT id={} from {}", id, name);
         table::release(id);
         return Ok(None);
     }
 
     let seg = table::with_pcb(id, |pcb| {
-        klog_debug!("tcp: ABORT id={} from {}", id.0, pcb.state.name());
+        klog_debug!("tcp: ABORT id={} from {}", id, pcb.state.name());
         match &pcb.state {
             PcbState::Listen(_) => None,
             PcbState::SynSent(s) => Some(SegmentBuilder::bare_rst(pcb.tuple, s.snd_nxt.raw())),
@@ -573,7 +581,7 @@ pub fn shutdown_write(id: ConnId) -> Result<Option<TcpOutSegment>, TcpError> {
                                 SegmentBuilder::fin_ack(tuple, seq, d.rcv_nxt.raw(), d.rcv_wnd);
                             seg.timestamp = d.ts_option(clock::now_ms());
                             pcb.assert_invariants();
-                            klog_debug!("tcp: SHUTDOWN_WR id={} ESTABLISHED -> FIN_WAIT_1", id.0);
+                            klog_debug!("tcp: SHUTDOWN_WR id={} ESTABLISHED -> FIN_WAIT_1", id);
                             Ok(Some(seg))
                         }
                         ClosePhase::CloseWait => {
@@ -585,13 +593,13 @@ pub fn shutdown_write(id: ConnId) -> Result<Option<TcpOutSegment>, TcpError> {
                                 SegmentBuilder::fin_ack(tuple, seq, d.rcv_nxt.raw(), d.rcv_wnd);
                             seg.timestamp = d.ts_option(clock::now_ms());
                             pcb.assert_invariants();
-                            klog_debug!("tcp: SHUTDOWN_WR id={} CLOSE_WAIT -> LAST_ACK", id.0);
+                            klog_debug!("tcp: SHUTDOWN_WR id={} CLOSE_WAIT -> LAST_ACK", id);
                             Ok(Some(seg))
                         }
                         _ => {
                             klog_debug!(
                                 "tcp: SHUTDOWN_WR id={} already closing ({:?})",
-                                id.0,
+                                id,
                                 d.close_phase
                             );
                             Ok(None)
@@ -641,7 +649,7 @@ fn shutdown_write_syn_recv_transition(
     pcb.assert_invariants();
     let mut seg = SegmentBuilder::fin_ack(tuple, seq, ack, window);
     seg.timestamp = ts;
-    klog_debug!("tcp: SHUTDOWN_WR id={} SYN_RECV -> FIN_WAIT_1", id.0);
+    klog_debug!("tcp: SHUTDOWN_WR id={} SYN_RECV -> FIN_WAIT_1", id);
     Ok(Some(seg))
 }
 
@@ -660,7 +668,7 @@ pub fn recv_discard(id: ConnId) {
     })
     .unwrap_or(false);
     if cleared {
-        klog_debug!("tcp: RECV_DISCARD id={} — recv buffer cleared", id.0);
+        klog_debug!("tcp: RECV_DISCARD id={} — recv buffer cleared", id);
     }
 }
 
@@ -1046,7 +1054,7 @@ pub fn poll_transmit(
                                 let token = NET_TIMER_WHEEL.schedule(
                                     rto_ms.max(1),
                                     TimerKind::TcpRetransmit,
-                                    id.0,
+                                    id.raw(),
                                 );
                                 d.retransmit_token = Some(token);
                             }
@@ -1099,7 +1107,7 @@ pub fn poll_transmit(
                 bufs.send.rto_deadline_ms = now_ms.saturating_add(rto_ms);
                 if d.retransmit_token.is_none() {
                     let token =
-                        NET_TIMER_WHEEL.schedule(rto_ms.max(1), TimerKind::TcpRetransmit, id.0);
+                        NET_TIMER_WHEEL.schedule(rto_ms.max(1), TimerKind::TcpRetransmit, id.raw());
                     d.retransmit_token = Some(token);
                 }
             }
@@ -1121,7 +1129,7 @@ pub fn poll_transmit(
 
 /// Handle a retransmit timer firing for connection `conn_id`.
 pub fn on_retransmit(conn_id: u32) -> Option<ConnId> {
-    let id = ConnId(conn_id);
+    let id = ConnId::from_raw(conn_id);
     if id.is_listener() {
         return None;
     }
@@ -1179,7 +1187,7 @@ pub fn on_retransmit(conn_id: u32) -> Option<ConnId> {
 
 /// Handle a keepalive timer firing.
 pub fn on_keepalive(conn_id: u32) -> Option<TcpOutSegment> {
-    let id = ConnId(conn_id);
+    let id = ConnId::from_raw(conn_id);
     if id.is_listener() {
         return None;
     }
@@ -1228,7 +1236,7 @@ pub fn on_keepalive(conn_id: u32) -> Option<TcpOutSegment> {
 
 /// Handle a TIME_WAIT timer expiry.
 pub fn on_time_wait_expire(conn_id: u32) {
-    let id = ConnId(conn_id);
+    let id = ConnId::from_raw(conn_id);
     if id.is_listener() {
         return;
     }
@@ -1242,7 +1250,7 @@ pub fn on_time_wait_expire(conn_id: u32) {
 
 /// Handle a FIN_WAIT_2 timer expiry.
 pub fn on_fin_wait2_timeout(conn_id: u32) {
-    let id = ConnId(conn_id);
+    let id = ConnId::from_raw(conn_id);
     if id.is_listener() {
         return;
     }

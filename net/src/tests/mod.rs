@@ -20,6 +20,7 @@ pub mod socket_framework_tests;
 pub mod socket_option_tests;
 pub mod socket_tests;
 pub mod tcp_cong_cubic_tests;
+pub mod tcp_connid_generation_tests;
 pub mod tcp_data_tests;
 pub mod tcp_demux_concurrent_tests;
 pub mod tcp_keepalive_tests;

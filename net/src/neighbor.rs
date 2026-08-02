@@ -31,6 +31,7 @@
 //! - `DeviceHandle::tx_lock` (packet transmission)
 
 use core::fmt;
+use slopos_ostd::lock_class;
 
 use slopos_ostd::KVec;
 use slopos_ostd::klog_debug;
@@ -181,7 +182,7 @@ impl NeighborCache {
                     entries: KVec::new(),
                     next_entry_id: 1,
                 },
-                LOCK_LEVEL_REGISTRY,
+                lock_class!("NEIGHBOR_CACHE", LOCK_LEVEL_REGISTRY),
             ),
         }
     }

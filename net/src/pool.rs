@@ -18,6 +18,7 @@
 //! lock-ordering cycle).
 
 use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use slopos_ostd::lock_class;
 
 use slopos_ostd::KVec;
 use slopos_ostd::mm::frame::{Frame, PacketMeta};
@@ -75,7 +76,7 @@ pub struct PacketPool {
 ///
 /// Call [`PacketPool::init`] once before any networking code runs.
 pub static PACKET_POOL: PacketPool = PacketPool {
-    inner: SpinLock::new(None, LOCK_LEVEL_RESOURCE),
+    inner: SpinLock::new(None, lock_class!("PACKET_POOL", LOCK_LEVEL_RESOURCE)),
     initialized: AtomicBool::new(false),
     count: AtomicUsize::new(0),
 };

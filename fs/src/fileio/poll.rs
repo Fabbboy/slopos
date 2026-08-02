@@ -1,5 +1,6 @@
 use core::ffi::c_int;
 use core::sync::atomic::{AtomicU64, Ordering};
+use slopos_ostd::lock_class;
 
 use slopos_ostd::sync::{LOCK_LEVEL_RESOURCE, SpinLock};
 use slopos_ostd::{KArc, KBTreeMap, KWeak};
@@ -107,7 +108,10 @@ static POLL_REG_TABLE: PollRegTable = PollRegTable {
     // Start at 1 so 0 stays a never-registered sentinel (matching the
     // `open_file_token: 0` default the backends return).
     next_id: AtomicU64::new(1),
-    entries: SpinLock::new(KBTreeMap::new(), LOCK_LEVEL_RESOURCE),
+    entries: SpinLock::new(
+        KBTreeMap::new(),
+        lock_class!("POLL_REG_TABLE", LOCK_LEVEL_RESOURCE),
+    ),
 };
 
 /// Record a weak handle to `open_file` and return its opaque token.

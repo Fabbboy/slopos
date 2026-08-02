@@ -21,6 +21,8 @@
 use core::sync::atomic::{AtomicBool, AtomicPtr, AtomicU32, AtomicU64, Ordering};
 
 #[cfg(target_os = "none")]
+use crate::lock_class;
+#[cfg(target_os = "none")]
 use crate::sync::{LOCK_LEVEL_UNORDERED, SpinLock};
 
 // ---------------------------------------------------------------------------
@@ -46,7 +48,7 @@ static RING: SpinLock<Ring> = SpinLock::new(
         buf: [0u8; RING_SIZE],
         written: 0,
     },
-    LOCK_LEVEL_UNORDERED,
+    lock_class!("fblog.RING", LOCK_LEVEL_UNORDERED),
 );
 
 /// Lock-free mirror of `Ring::written` so the renderer can cheaply detect

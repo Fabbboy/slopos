@@ -52,7 +52,10 @@ impl MemoryBlockDevice {
         Some(Self {
             buffer: slopos_ostd::sync::SpinLock::new(
                 buffer,
-                slopos_ostd::sync::LOCK_LEVEL_RESOURCE,
+                slopos_ostd::lock_class!(
+                    "MemoryBlockDevice.data",
+                    slopos_ostd::sync::LOCK_LEVEL_RESOURCE
+                ),
             ),
         })
     }

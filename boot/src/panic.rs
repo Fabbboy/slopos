@@ -98,6 +98,9 @@ fn panic_serial_write(s: &str) {
 /// halt.
 pub fn panic_abort_raw(msg: &'static str) -> ! {
     cpu::disable_interrupts();
+    // Fatal by construction, and the degrade target for a re-entered
+    // reporter: ordering validation off before anything below acquires.
+    slopos_ostd::sync::enter_fatal_bypass();
     // Best-effort: become the panic owner so a concurrent normal panic on
     // another CPU does not interleave; ignore the result either way.
     let _ = slopos_ostd::panic::claim_panic_owner(slopos_arch::get_current_cpu() as u32);
@@ -293,6 +296,12 @@ pub fn panic_handler_impl(info: &PanicInfo) -> ! {
 
     // --- Fatal (uncaught) path: the Reliable Abort Core. ---
     cpu::disable_interrupts();
+    // One-way, and *before* the reporter runs. Everything below — the
+    // emergency-stack report, the panic screen, the shutdown ritual —
+    // acquires locks while this CPU still holds whatever it held at the
+    // fault, and the held-stack walk does not run until the very end of
+    // `emergency_report`. A cycle report here would panic inside the panic.
+    slopos_ostd::sync::enter_fatal_bypass();
 
     // (1) Per-CPU recursion guard. A non-zero prior depth means the fatal path
     // itself faulted (e.g. the emergency stack overflowed). Do not recurse

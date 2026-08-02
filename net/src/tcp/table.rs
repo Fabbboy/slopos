@@ -37,12 +37,21 @@
 //! ## ConnId encoding
 //!
 //! ```text
-//! Bit 31:      1 = listener, 0 = shard
-//! Bits [11:8]: shard index (0..15) — only when bit 31 = 0
-//! Bits  [7:0]: slot index within shard (0..3) or listener table (0..15)
+//! Bit 31:       1 = listener, 0 = shard
+//! Bits [30:16]: generation of the occupant this id names, never 0
+//! Bits  [15:8]: shard index (0..15) — only when bit 31 = 0
+//! Bits   [7:0]: slot index within shard (0..3) or listener table (0..15)
 //! ```
+//!
+//! Every lookup checks the generation against the slot's current occupant, so
+//! an id that outlived its connection resolves to nothing rather than to
+//! whichever connection was installed in its place.
 
-use core::sync::atomic::{AtomicU16, Ordering};
+use core::fmt;
+use core::sync::atomic::{AtomicU16, AtomicU32, Ordering};
+
+use slopos_ostd::klog_debug;
+use slopos_ostd::lock_class;
 
 use slopos_ostd::KBox;
 use slopos_ostd::sync::{Epoch, LOCK_LEVEL_RESOURCE, RcuCell, SpinLock};
@@ -73,28 +82,74 @@ pub const TOTAL_PCB_SLOTS: usize = NUM_SHARDS * SLOTS_PER_SHARD;
 // =============================================================================
 
 /// Type-safe handle to a connection slot. Encodes whether the
-/// connection is in a shard or in the listener table, plus the
-/// shard/slot indices.
+/// connection is in a shard or in the listener table, the shard/slot
+/// indices, and the generation of the occupant it names.
+///
+/// ```text
+/// bit 31     1 = listener, 0 = shard
+/// bits 30:16 generation, never 0
+/// bits 15:8  shard index      (shard ids only)
+/// bits  7:0  slot index within the shard or the listener table
+/// ```
+///
+/// The generation is what makes an id name a *connection* rather than a
+/// slot. Slots are recycled — 64 established and 16 listening — and without
+/// it a released-and-refilled slot answers to the previous occupant's id, so
+/// a timer that outlived its connection fires on the connection that replaced
+/// it and a `close` on a stale socket tears down someone else's.
+///
+/// 15 bits gives 32767 generations per slot. Aliasing an id needs the slot
+/// released and refilled that many times while the id is still held, and the
+/// only holders are a timer payload (bounded by the longest TCP timer), a
+/// socket's `conn_id` (cleared at close) and a local across a dropped lock.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 #[repr(transparent)]
-pub struct ConnId(pub u32);
+pub struct ConnId(u32);
 
 impl ConnId {
     const LISTENER_BIT: u32 = 1 << 31;
+    const GENERATION_SHIFT: u32 = 16;
+    const GENERATION_MASK: u32 = 0x7FFF;
 
-    /// Sentinel "no connection" value.
+    /// Sentinel "no connection" value. Not well-formed: the listener bit is
+    /// set and the slot index is past the listener table.
     pub const SENTINEL: Self = Self(u32::MAX);
 
     /// Create a ConnId for an established connection in a shard.
     #[inline]
-    pub fn new_shard(shard: usize, slot: usize) -> Self {
-        Self(((shard as u32) << 8) | (slot as u32))
+    pub fn new_shard(shard: usize, slot: usize, generation: u16) -> Self {
+        Self(Self::encode_generation(generation) | ((shard as u32) << 8) | (slot as u32))
     }
 
     /// Create a ConnId for a listener.
     #[inline]
-    pub fn new_listener(slot: usize) -> Self {
-        Self(Self::LISTENER_BIT | (slot as u32))
+    pub fn new_listener(slot: usize, generation: u16) -> Self {
+        Self(Self::LISTENER_BIT | Self::encode_generation(generation) | (slot as u32))
+    }
+
+    /// Rebuild an id from a value carried through an interface that only
+    /// speaks `u32` — a timer-wheel payload. The generation is what makes
+    /// such a value self-invalidating once its slot has moved on.
+    #[inline]
+    pub const fn from_raw(value: u32) -> Self {
+        Self(value)
+    }
+
+    /// The packed value, for storing in a timer payload.
+    #[inline]
+    pub const fn raw(self) -> u32 {
+        self.0
+    }
+
+    /// Generation of the occupant this id names.
+    #[inline]
+    pub const fn generation(self) -> u16 {
+        ((self.0 >> Self::GENERATION_SHIFT) & Self::GENERATION_MASK) as u16
+    }
+
+    #[inline]
+    const fn encode_generation(generation: u16) -> u32 {
+        ((generation as u32) & Self::GENERATION_MASK) << Self::GENERATION_SHIFT
     }
 
     /// Whether this id refers to a listener-table entry.
@@ -135,6 +190,26 @@ impl ConnId {
     }
 }
 
+impl fmt::Display for ConnId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        if self.is_listener() {
+            write!(f, "L:{}@{}", self.slot(), self.generation())
+        } else {
+            write!(f, "{}:{}@{}", self.shard(), self.slot(), self.generation())
+        }
+    }
+}
+
+/// Generations start at 1 and skip 0 on wrap, so a zeroed slot record cannot
+/// be mistaken for a live generation.
+#[inline]
+const fn next_generation(current: u16) -> u16 {
+    match current.wrapping_add(1) & (ConnId::GENERATION_MASK as u16) {
+        0 => 1,
+        next => next,
+    }
+}
+
 // =============================================================================
 // Hash function — FNV-1a → masked to NUM_SHARDS
 // =============================================================================
@@ -164,12 +239,18 @@ pub(super) fn tcp_hash(tuple: &TcpTuple) -> usize {
 #[derive(Clone, Default)]
 pub struct TcpShardIndex {
     pub tuples: [Option<TcpTuple>; SLOTS_PER_SHARD],
+    /// Generation of each slot's current occupant. Published in the same RCU
+    /// snapshot as `tuples` so a wait-free `find` reads a tuple and the
+    /// generation of the connection that owns it in one coherent step —
+    /// a separate array would let it mint an id for the wrong occupant.
+    pub generations: [u16; SLOTS_PER_SHARD],
 }
 
 impl TcpShardIndex {
     pub const fn empty() -> Self {
         Self {
             tuples: [const { None }; SLOTS_PER_SHARD],
+            generations: [1; SLOTS_PER_SHARD],
         }
     }
 
@@ -221,12 +302,15 @@ pub struct ListenerKey {
 #[derive(Clone, Default)]
 pub struct ListenerIndex {
     pub entries: [Option<ListenerKey>; MAX_LISTENERS],
+    /// As [`TcpShardIndex::generations`].
+    pub generations: [u16; MAX_LISTENERS],
 }
 
 impl ListenerIndex {
     pub const fn empty() -> Self {
         Self {
             entries: [const { None }; MAX_LISTENERS],
+            generations: [1; MAX_LISTENERS],
         }
     }
 
@@ -280,6 +364,16 @@ impl ListenerIndex {
 pub struct PcbSlot {
     pub pcb: Pcb,
     pub buffer: Option<TcpBufferPair>,
+    /// Copy of the index's generation for this slot, so a lookup holding the
+    /// slot lock can reject a stale id without reading the RCU index.
+    pub generation: u16,
+}
+
+/// A listening PCB and its generation. Mirrors [`PcbSlot`]; listeners carry no
+/// buffer.
+pub struct ListenerSlot {
+    pub pcb: Pcb,
+    pub generation: u16,
 }
 
 // =============================================================================
@@ -289,7 +383,7 @@ pub struct PcbSlot {
 /// Net-stack epoch. Held across `find` / `port_in_use` /
 /// `active_count` lookups so RCU grace periods are scoped to the net
 /// stack rather than a kernel-wide implicit read-side.
-pub static NET_EPOCH: Epoch = Epoch::new();
+pub static NET_EPOCH: Epoch = Epoch::new(slopos_ostd::epoch_class!("NET_EPOCH"));
 
 /// RCU-published per-shard tuple indices. Empty after boot; populated
 /// by the first install into each shard.
@@ -301,27 +395,66 @@ pub static TCP_LISTENERS_INDEX: RcuCell<ListenerIndex> = RcuCell::empty();
 
 /// Per-slot PCB locks. Index = `shard * SLOTS_PER_SHARD + slot`.
 pub static TCP_PCB_SLOTS: [SpinLock<Option<PcbSlot>>; TOTAL_PCB_SLOTS] = {
-    const SLOT: SpinLock<Option<PcbSlot>> = SpinLock::new(None, LOCK_LEVEL_RESOURCE);
+    const SLOT: SpinLock<Option<PcbSlot>> =
+        SpinLock::new(None, lock_class!("TCP_PCB_SLOTS", LOCK_LEVEL_RESOURCE));
     [SLOT; TOTAL_PCB_SLOTS]
 };
 
 /// Per-listener-slot locks.
-pub static TCP_LISTENER_SLOTS: [SpinLock<Option<Pcb>>; MAX_LISTENERS] = {
-    const SLOT: SpinLock<Option<Pcb>> = SpinLock::new(None, LOCK_LEVEL_RESOURCE);
+pub static TCP_LISTENER_SLOTS: [SpinLock<Option<ListenerSlot>>; MAX_LISTENERS] = {
+    const SLOT: SpinLock<Option<ListenerSlot>> =
+        SpinLock::new(None, lock_class!("TCP_LISTENER_SLOTS", LOCK_LEVEL_RESOURCE));
     [SLOT; MAX_LISTENERS]
 };
+
+/// Lookups rejected because the id named an occupant the slot no longer
+/// holds. Non-zero means slot reuse is racing a holder of a stale id — the
+/// condition the generation exists to make survivable, and countable so a
+/// test can prove it fired.
+static STALE_LOOKUPS: AtomicU32 = AtomicU32::new(0);
+
+/// Number of lookups rejected on a generation mismatch since boot.
+pub fn stale_lookup_count() -> u32 {
+    STALE_LOOKUPS.load(Ordering::Relaxed)
+}
+
+/// Whether the occupant under a slot lock is the one `id` names.
+///
+/// Deliberately not reached for a malformed id or an empty slot: the first is
+/// a caller error and the second is the ordinary "connection gone" answer.
+#[inline]
+fn generation_matches(id: ConnId, slot_generation: u16) -> bool {
+    if id.generation() == slot_generation {
+        return true;
+    }
+    note_stale_lookup(id, slot_generation);
+    false
+}
+
+#[cold]
+#[inline(never)]
+fn note_stale_lookup(id: ConnId, live_generation: u16) {
+    STALE_LOOKUPS.fetch_add(1, Ordering::Relaxed);
+    klog_debug!(
+        "tcp: rejected stale id {} against slot generation {}",
+        id,
+        live_generation
+    );
+}
 
 /// Per-shard write-serialisation locks. Held only during the
 /// "pick-slot → install/clear PCB → publish new index" critical
 /// section. Mutation-only paths (input/send/recv/timers) do not
 /// acquire this.
 static TCP_SHARDS_WRITE: [SpinLock<()>; NUM_SHARDS] = {
-    const WL: SpinLock<()> = SpinLock::new((), LOCK_LEVEL_RESOURCE);
+    const WL: SpinLock<()> =
+        SpinLock::new((), lock_class!("TCP_SHARDS_WRITE", LOCK_LEVEL_RESOURCE));
     [WL; NUM_SHARDS]
 };
 
 /// Listener-side write-serialisation lock.
-static TCP_LISTENERS_WRITE: SpinLock<()> = SpinLock::new((), LOCK_LEVEL_RESOURCE);
+static TCP_LISTENERS_WRITE: SpinLock<()> =
+    SpinLock::new((), lock_class!("TCP_LISTENERS_WRITE", LOCK_LEVEL_RESOURCE));
 
 /// Global ephemeral port counter (RFC 6335 range 49152–65535).
 static NEXT_EPHEMERAL_PORT: AtomicU16 = AtomicU16::new(49152);
@@ -339,13 +472,13 @@ pub fn find(tuple: &TcpTuple) -> Option<ConnId> {
     let shard_idx = tcp_hash(tuple);
     if let Some(idx) = TCP_SHARDS_INDEX[shard_idx].load() {
         if let Some(slot) = idx.find_exact(tuple) {
-            return Some(ConnId::new_shard(shard_idx, slot));
+            return Some(ConnId::new_shard(shard_idx, slot, idx.generations[slot]));
         }
     }
 
     if let Some(idx) = TCP_LISTENERS_INDEX.load() {
         if let Some(slot) = idx.find_by_port(tuple.local_ip, tuple.local_port) {
-            return Some(ConnId::new_listener(slot));
+            return Some(ConnId::new_listener(slot, idx.generations[slot]));
         }
     }
 
@@ -429,6 +562,9 @@ pub fn install_established(
 
     let mut idx = load_shard_index(shard_idx);
     let free_slot = idx.first_free().ok_or(TcpError::TableFull)?;
+    // The generation was advanced by whichever `release` vacated this slot,
+    // so the installing side only copies it.
+    let generation = idx.generations[free_slot];
 
     // Install PCB in the per-slot lock. Held briefly; no nested
     // acquire while it's live other than the outer write lock.
@@ -440,7 +576,11 @@ pub fn install_established(
         );
         let mut pcb = Pcb::new(tuple, state);
         init(&mut pcb);
-        *slot = Some(PcbSlot { pcb, buffer: None });
+        *slot = Some(PcbSlot {
+            pcb,
+            buffer: None,
+            generation,
+        });
     }
 
     // Publish the new index. `RcuCell::replace` schedules the displaced
@@ -450,7 +590,7 @@ pub fn install_established(
     let new_box = KBox::try_new(idx)?;
     TCP_SHARDS_INDEX[shard_idx].replace(new_box);
 
-    Ok(ConnId::new_shard(shard_idx, free_slot))
+    Ok(ConnId::new_shard(shard_idx, free_slot, generation))
 }
 
 /// Install a LISTEN socket.
@@ -463,6 +603,7 @@ pub fn install_listener(
 
     let mut idx = load_listener_index();
     let free_slot = idx.first_free().ok_or(TcpError::TableFull)?;
+    let generation = idx.generations[free_slot];
 
     {
         let mut slot = TCP_LISTENER_SLOTS[free_slot].lock();
@@ -472,7 +613,7 @@ pub fn install_listener(
         );
         let mut pcb = Pcb::new(tuple, state);
         init(&mut pcb);
-        *slot = Some(pcb);
+        *slot = Some(ListenerSlot { pcb, generation });
     }
 
     idx.entries[free_slot] = Some(ListenerKey {
@@ -482,12 +623,16 @@ pub fn install_listener(
     let new_box = KBox::try_new(idx)?;
     TCP_LISTENERS_INDEX.replace(new_box);
 
-    Ok(ConnId::new_listener(free_slot))
+    Ok(ConnId::new_listener(free_slot, generation))
 }
 
-/// Release a connection by id. Idempotent on a stale id (no-op if the
-/// slot is already empty). Returns early on a malformed id (e.g. a
-/// hand-crafted ConnId from a negative-path test).
+/// Release the connection `id` names. A no-op on a malformed id, on an
+/// already-empty slot, and on an id whose connection is gone — the last is
+/// what stops a `close` on a stale socket from tearing down whichever
+/// connection took over the slot.
+///
+/// Advancing the generation is what makes every id issued for this slot dead
+/// from here on, whether or not the slot is ever refilled.
 pub fn release(id: ConnId) {
     if !id.is_well_formed() {
         return;
@@ -495,13 +640,17 @@ pub fn release(id: ConnId) {
     if id.is_listener() {
         let _w = TCP_LISTENERS_WRITE.lock();
         let mut idx = load_listener_index();
+        if !generation_matches(id, idx.generations[id.slot()]) {
+            return;
+        }
         idx.entries[id.slot()] = None;
+        idx.generations[id.slot()] = next_generation(idx.generations[id.slot()]);
         if let Ok(new_box) = KBox::try_new(idx) {
             TCP_LISTENERS_INDEX.replace(new_box);
         }
         let mut slot = TCP_LISTENER_SLOTS[id.slot()].lock();
-        if let Some(pcb) = slot.as_ref() {
-            cancel_pcb_timers(pcb);
+        if let Some(s) = slot.as_ref() {
+            cancel_pcb_timers(&s.pcb);
         }
         *slot = None;
         return;
@@ -510,7 +659,11 @@ pub fn release(id: ConnId) {
     let shard_idx = id.shard();
     let _w = TCP_SHARDS_WRITE[shard_idx].lock();
     let mut idx = load_shard_index(shard_idx);
+    if !generation_matches(id, idx.generations[id.slot()]) {
+        return;
+    }
     idx.tuples[id.slot()] = None;
+    idx.generations[id.slot()] = next_generation(idx.generations[id.slot()]);
     if let Ok(new_box) = KBox::try_new(idx) {
         TCP_SHARDS_INDEX[shard_idx].replace(new_box);
     }
@@ -532,10 +685,16 @@ pub fn with_pcb<T>(id: ConnId, f: impl FnOnce(&Pcb) -> T) -> Option<T> {
     }
     if id.is_listener() {
         let guard = TCP_LISTENER_SLOTS[id.slot()].lock();
-        guard.as_ref().map(f)
+        guard
+            .as_ref()
+            .filter(|s| generation_matches(id, s.generation))
+            .map(|s| f(&s.pcb))
     } else {
         let guard = TCP_PCB_SLOTS[id.linear_slot()].lock();
-        guard.as_ref().map(|s| f(&s.pcb))
+        guard
+            .as_ref()
+            .filter(|s| generation_matches(id, s.generation))
+            .map(|s| f(&s.pcb))
     }
 }
 
@@ -546,10 +705,16 @@ pub fn with_pcb_mut<T>(id: ConnId, f: impl FnOnce(&mut Pcb) -> T) -> Option<T> {
     }
     if id.is_listener() {
         let mut guard = TCP_LISTENER_SLOTS[id.slot()].lock();
-        guard.as_mut().map(f)
+        guard
+            .as_mut()
+            .filter(|s| generation_matches(id, s.generation))
+            .map(|s| f(&mut s.pcb))
     } else {
         let mut guard = TCP_PCB_SLOTS[id.linear_slot()].lock();
-        guard.as_mut().map(|s| f(&mut s.pcb))
+        guard
+            .as_mut()
+            .filter(|s| generation_matches(id, s.generation))
+            .map(|s| f(&mut s.pcb))
     }
 }
 
@@ -568,13 +733,19 @@ pub fn with_pcb_and_bufs<T>(
     }
     if id.is_listener() {
         let mut guard = TCP_LISTENER_SLOTS[id.slot()].lock();
-        guard.as_mut().map(|pcb| {
-            let mut none_buf: Option<TcpBufferPair> = None;
-            f(pcb, &mut none_buf)
-        })
+        guard
+            .as_mut()
+            .filter(|s| generation_matches(id, s.generation))
+            .map(|s| {
+                let mut none_buf: Option<TcpBufferPair> = None;
+                f(&mut s.pcb, &mut none_buf)
+            })
     } else {
         let mut guard = TCP_PCB_SLOTS[id.linear_slot()].lock();
-        guard.as_mut().map(|s| f(&mut s.pcb, &mut s.buffer))
+        guard
+            .as_mut()
+            .filter(|s| generation_matches(id, s.generation))
+            .map(|s| f(&mut s.pcb, &mut s.buffer))
     }
 }
 
@@ -585,7 +756,10 @@ pub fn with_bufs<T>(id: ConnId, f: impl FnOnce(&TcpBufferPair) -> T) -> Option<T
         return None;
     }
     let guard = TCP_PCB_SLOTS[id.linear_slot()].lock();
-    guard.as_ref().and_then(|s| s.buffer.as_ref().map(f))
+    guard
+        .as_ref()
+        .filter(|s| generation_matches(id, s.generation))
+        .and_then(|s| s.buffer.as_ref().map(f))
 }
 
 /// True if `id` is established and currently has a buffer allocated.
@@ -594,7 +768,10 @@ pub fn has_buffer(id: ConnId) -> bool {
         return false;
     }
     let guard = TCP_PCB_SLOTS[id.linear_slot()].lock();
-    guard.as_ref().is_some_and(|s| s.buffer.is_some())
+    guard
+        .as_ref()
+        .filter(|s| generation_matches(id, s.generation))
+        .is_some_and(|s| s.buffer.is_some())
 }
 
 // =============================================================================
@@ -613,7 +790,7 @@ pub fn snapshot_shard_conn_ids(out: &mut [Option<ConnId>; TOTAL_PCB_SLOTS]) -> u
         if let Some(idx) = cell.load() {
             for (slot, entry) in idx.tuples.iter().enumerate() {
                 if entry.is_some() && n < out.len() {
-                    out[n] = Some(ConnId::new_shard(shard_idx, slot));
+                    out[n] = Some(ConnId::new_shard(shard_idx, slot, idx.generations[slot]));
                     n += 1;
                 }
             }
@@ -627,6 +804,10 @@ pub fn snapshot_shard_conn_ids(out: &mut [Option<ConnId>; TOTAL_PCB_SLOTS]) -> u
 // =============================================================================
 
 /// Clear every PCB slot and reset the index cells. Test-only.
+///
+/// Generations advance rather than reset: republishing an empty index would
+/// hand every slot back its starting generation and revalidate ids the
+/// cleared connections had already issued.
 pub fn clear_all() {
     for shard_idx in 0..NUM_SHARDS {
         let _w = TCP_SHARDS_WRITE[shard_idx].lock();
@@ -637,7 +818,12 @@ pub fn clear_all() {
             }
             *guard = None;
         }
-        if let Ok(new_box) = KBox::try_new(TcpShardIndex::empty()) {
+        let mut idx = load_shard_index(shard_idx);
+        for s in 0..SLOTS_PER_SHARD {
+            idx.tuples[s] = None;
+            idx.generations[s] = next_generation(idx.generations[s]);
+        }
+        if let Ok(new_box) = KBox::try_new(idx) {
             TCP_SHARDS_INDEX[shard_idx].replace(new_box);
         }
     }
@@ -645,12 +831,17 @@ pub fn clear_all() {
         let _w = TCP_LISTENERS_WRITE.lock();
         for s in 0..MAX_LISTENERS {
             let mut guard = TCP_LISTENER_SLOTS[s].lock();
-            if let Some(pcb) = guard.as_ref() {
-                cancel_pcb_timers(pcb);
+            if let Some(slot) = guard.as_ref() {
+                cancel_pcb_timers(&slot.pcb);
             }
             *guard = None;
         }
-        if let Ok(new_box) = KBox::try_new(ListenerIndex::empty()) {
+        let mut idx = load_listener_index();
+        for s in 0..MAX_LISTENERS {
+            idx.entries[s] = None;
+            idx.generations[s] = next_generation(idx.generations[s]);
+        }
+        if let Ok(new_box) = KBox::try_new(idx) {
             TCP_LISTENERS_INDEX.replace(new_box);
         }
     }

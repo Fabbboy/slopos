@@ -1,6 +1,7 @@
 use core::ffi::c_int;
 use core::ptr;
 use core::sync::atomic::{AtomicPtr, Ordering};
+use slopos_ostd::lock_class;
 
 use slopos_ostd::KVec;
 use slopos_ostd::handle::{Handle, HandleError, PROCESS_VM_SLOT_BITS};
@@ -333,14 +334,19 @@ pub struct ProcessVmRef {
 /// Per-process VM locks.  Each slot is independently lockable so that
 /// independent processes never contend on each other's VM operations.
 static PROCESS_VMS: [SpinLock<ProcessVm>; MAX_PROCESSES] = {
-    const INIT: SpinLock<ProcessVm> = SpinLock::new(ProcessVm::new(), LOCK_LEVEL_RESOURCE);
+    const INIT: SpinLock<ProcessVm> = SpinLock::new(
+        ProcessVm::new(),
+        lock_class!("PROCESS_VMS", LOCK_LEVEL_RESOURCE),
+    );
     [INIT; MAX_PROCESSES]
 };
 
 /// Global slot allocator -- only taken for fork/exit/init to find free slots
 /// and update the process count.
-static VM_SLOT_ALLOC: SpinLock<VmSlotAlloc> =
-    SpinLock::new(VmSlotAlloc::new(), LOCK_LEVEL_REGISTRY);
+static VM_SLOT_ALLOC: SpinLock<VmSlotAlloc> = SpinLock::new(
+    VmSlotAlloc::new(),
+    lock_class!("VM_SLOT_ALLOC", LOCK_LEVEL_REGISTRY),
+);
 
 /// Releases the descriptor table bound to a process id.
 ///

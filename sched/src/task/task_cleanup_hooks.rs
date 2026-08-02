@@ -1,4 +1,5 @@
 use slopos_ostd::klog_info;
+use slopos_ostd::lock_class;
 use slopos_ostd::sync::{LOCK_LEVEL_REGISTRY, SpinLock};
 
 // =============================================================================
@@ -30,8 +31,10 @@ impl TaskResourceCleanupHooks {
     }
 }
 
-static TASK_RESOURCE_HOOKS: SpinLock<TaskResourceCleanupHooks> =
-    SpinLock::new(TaskResourceCleanupHooks::new(), LOCK_LEVEL_REGISTRY);
+static TASK_RESOURCE_HOOKS: SpinLock<TaskResourceCleanupHooks> = SpinLock::new(
+    TaskResourceCleanupHooks::new(),
+    lock_class!("TASK_RESOURCE_HOOKS", LOCK_LEVEL_REGISTRY),
+);
 
 /// Register a cleanup hook called whenever task-bound resources must be released.
 ///

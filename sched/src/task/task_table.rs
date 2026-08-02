@@ -2,6 +2,7 @@ use core::ffi::c_int;
 use core::ops::{ControlFlow, Deref};
 use core::ptr::NonNull;
 use core::sync::atomic::{AtomicBool, Ordering};
+use slopos_ostd::lock_class;
 
 use slopos_ostd::handle::Handle;
 use slopos_ostd::string::bytes_as_str;
@@ -345,8 +346,10 @@ impl TaskManagerInner {
     }
 }
 
-static TASK_MANAGER: SpinLock<TaskManagerInner> =
-    SpinLock::new(TaskManagerInner::new(), LOCK_LEVEL_REGISTRY);
+static TASK_MANAGER: SpinLock<TaskManagerInner> = SpinLock::new(
+    TaskManagerInner::new(),
+    lock_class!("TASK_MANAGER", LOCK_LEVEL_REGISTRY),
+);
 
 #[inline]
 pub(super) fn with_task_manager<R>(f: impl FnOnce(&mut TaskManagerInner) -> R) -> R {

@@ -27,7 +27,7 @@ static KERNEL_SUMMARY: SpinLock<TestRunSummary> = SpinLock::new(
         panics: 0,
         elapsed_ms: 0,
     },
-    slopos_ostd::sync::lock_graph::LOCK_LEVEL_RESOURCE,
+    slopos_ostd::lock_class!("KERNEL_SUMMARY", slopos_ostd::sync::LOCK_LEVEL_RESOURCE),
 );
 
 static KERNEL_RC: AtomicI32 = AtomicI32::new(0);
@@ -42,7 +42,7 @@ static KERNEL_CONFIG: SpinLock<TestConfig> = SpinLock::new(
         run_globs: KVec::new(),
         skip_globs: KVec::new(),
     },
-    slopos_ostd::sync::lock_graph::LOCK_LEVEL_RESOURCE,
+    slopos_ostd::lock_class!("KERNEL_CONFIG", slopos_ostd::sync::LOCK_LEVEL_RESOURCE),
 );
 
 /// Whether `tests.shutdown=on` was set on the boot command line. Read by

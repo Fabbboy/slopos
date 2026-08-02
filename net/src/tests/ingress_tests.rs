@@ -4,6 +4,8 @@
 //! - 1.T9:  Ingress pipeline correctly dispatches IPv4 frames
 //! - 1.T10: Ingress pipeline drops malformed / unknown frames
 
+use slopos_ostd::lock_class;
+use slopos_ostd::sync::lock_tracking::LOCK_LEVEL_REGISTRY;
 use slopos_ostd::sync::{LOCK_LEVEL_RESOURCE, SpinLock};
 use slopos_ostd::{KArc, KBox, KVec};
 use slopos_testing::TestResult;
@@ -37,9 +39,18 @@ impl MockNetDevice {
             mac_addr: mac,
             dev_mtu: mtu,
             feats: NetDeviceFeatures::empty(),
-            stats: SpinLock::new(NetDeviceStats::new(), LOCK_LEVEL_RESOURCE),
-            tx_count: SpinLock::new(0, LOCK_LEVEL_RESOURCE),
-            is_up: SpinLock::new(false, LOCK_LEVEL_RESOURCE),
+            stats: SpinLock::new(
+                NetDeviceStats::new(),
+                lock_class!("test.ingress_dev.stats", LOCK_LEVEL_RESOURCE),
+            ),
+            tx_count: SpinLock::new(
+                0,
+                lock_class!("test.ingress_dev.tx_count", LOCK_LEVEL_RESOURCE),
+            ),
+            is_up: SpinLock::new(
+                false,
+                lock_class!("test.ingress_dev.is_up", LOCK_LEVEL_RESOURCE),
+            ),
         }
     }
 }
@@ -91,7 +102,13 @@ fn ensure_pool_init() {
 /// Create a test device handle with a given MAC address.
 /// The registry is leaked so the device allocation lives for the test.
 fn make_test_handle(mac: MacAddr) -> DeviceHandle {
-    let registry = KBox::leak(KBox::try_new(NetDeviceRegistry::new()).expect("test alloc"));
+    let registry = KBox::leak(
+        KBox::try_new(NetDeviceRegistry::new(lock_class!(
+            "test.ingress_registry",
+            LOCK_LEVEL_REGISTRY
+        )))
+        .expect("test alloc"),
+    );
     let dev = KArc::try_new(MockNetDevice::new(mac, 1500)).expect("test alloc");
     registry.register(dev).expect("register must succeed")
 }

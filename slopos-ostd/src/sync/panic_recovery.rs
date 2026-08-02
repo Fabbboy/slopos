@@ -28,10 +28,12 @@
 /// fatal NMI watchdog) — both of which already obey the single-writer
 /// invariant the held-lock list assumes.
 pub fn poison_all_held_locks() -> ! {
+    // Fatal: one-way. The diagnostics below this point (SERIAL, the panic
+    // screen, the shutdown ritual) acquire locks in an order nothing has
+    // validated, on a CPU that may still hold locks from the fault site.
+    super::lock_tracking::enter_fatal_bypass();
     // SAFETY: per-CPU held-lock list is sound to walk from the
-    // panicking CPU itself (single-writer). Lock addresses are
-    // statics → always valid. Inv. 9 covers the lifetime relaxation
-    // during fatal abort.
+    // panicking CPU itself (single-writer).
     unsafe {
         super::lock_tracking::poison_unlock_all_held();
     }
@@ -48,10 +50,11 @@ pub fn poison_all_held_locks() -> ! {
 ///
 /// Safe-fn surface: same contract as [`poison_all_held_locks`].
 pub fn poison_all_held_locks_no_halt() {
-    // SAFETY: per-CPU held-lock list is sound to walk from the
-    // panicking CPU itself (single-writer). Lock addresses are
-    // statics → always valid. Inv. 9 covers the lifetime relaxation
-    // during fatal abort.
+    // Fatal: one-way. The diagnostics below this point (SERIAL, the panic
+    // screen, the shutdown ritual) acquire locks in an order nothing has
+    // validated, on a CPU that may still hold locks from the fault site.
+    super::lock_tracking::enter_fatal_bypass();
+    // SAFETY: as `poison_all_held_locks`.
     unsafe {
         super::lock_tracking::poison_unlock_all_held();
     }

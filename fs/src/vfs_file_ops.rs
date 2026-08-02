@@ -5,6 +5,7 @@ use slopos_abi::io::{IO_STAGING_SIZE, IoBufRead, IoBufWrite};
 use slopos_abi::syscall::{POLLIN, POLLOUT};
 use slopos_ostd::KArc;
 use slopos_ostd::handle::{Handle, HandleTable};
+use slopos_ostd::lock_class;
 use slopos_ostd::sync::{LOCK_LEVEL_REGISTRY, SpinLock};
 
 use crate::vfs::{FileSystem, InodeId};
@@ -24,7 +25,7 @@ struct OpenVnode {
 }
 
 static OPEN_VNODES: SpinLock<Option<HandleTable<OpenVnode>>> =
-    SpinLock::new(None, LOCK_LEVEL_REGISTRY);
+    SpinLock::new(None, lock_class!("OPEN_VNODES", LOCK_LEVEL_REGISTRY));
 
 fn with_table<R>(f: impl FnOnce(&mut HandleTable<OpenVnode>) -> R) -> R {
     let mut guard = OPEN_VNODES.lock();

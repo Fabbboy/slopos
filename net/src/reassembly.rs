@@ -1,4 +1,5 @@
 use core::sync::atomic::{AtomicU32, Ordering};
+use slopos_ostd::lock_class;
 
 use slopos_ostd::KVec;
 use slopos_ostd::sync::{LOCK_LEVEL_REGISTRY, SpinLock};
@@ -79,8 +80,10 @@ pub struct ReassemblyTable {
     groups: [ReassemblyGroup; MAX_REASSEMBLY_GROUPS],
 }
 
-pub static REASSEMBLY_TABLE: SpinLock<ReassemblyTable> =
-    SpinLock::new(ReassemblyTable::new(), LOCK_LEVEL_REGISTRY);
+pub static REASSEMBLY_TABLE: SpinLock<ReassemblyTable> = SpinLock::new(
+    ReassemblyTable::new(),
+    lock_class!("REASSEMBLY_TABLE", LOCK_LEVEL_REGISTRY),
+);
 
 // Size tripwires: catch any future struct bloat that would bring
 // back large kernel-stack frames along the ingress / reassembly path.

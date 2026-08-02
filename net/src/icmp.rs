@@ -1,5 +1,6 @@
 use slopos_abi::net::MAX_SOCKETS;
 use slopos_ostd::klog_debug;
+use slopos_ostd::lock_class;
 use slopos_ostd::sync::{LOCK_LEVEL_REGISTRY, SpinLock};
 
 use super::packetbuf::PacketBuf;
@@ -84,8 +85,10 @@ impl IcmpDemuxTable {
     }
 }
 
-pub static ICMP_DEMUX: SpinLock<IcmpDemuxTable> =
-    SpinLock::new(IcmpDemuxTable::new(), LOCK_LEVEL_REGISTRY);
+pub static ICMP_DEMUX: SpinLock<IcmpDemuxTable> = SpinLock::new(
+    IcmpDemuxTable::new(),
+    lock_class!("ICMP_DEMUX", LOCK_LEVEL_REGISTRY),
+);
 
 pub fn icmp_checksum(data: &[u8]) -> u16 {
     super::checksum::internet_checksum(data)

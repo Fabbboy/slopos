@@ -27,7 +27,7 @@ pub use heap::{
 };
 pub use init::{
     Field, HasFields, Init, InitClosure, Initialised, SlotPtr, Zeroable, init_from_closure,
-    init_struct_with, init_zeroed,
+    init_from_owned, init_struct_with, init_zeroed,
 };
 pub use io_mem::{
     IoMem, IoMemCachePolicy, IoMemError, IoMemMapper, IoMemRegistry, PhysRange,

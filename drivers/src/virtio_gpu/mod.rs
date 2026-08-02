@@ -22,6 +22,7 @@ mod protocol;
 
 use core::ffi::c_int;
 use core::mem::size_of;
+use slopos_ostd::lock_class;
 
 use slopos_abi::addr::PhysAddr;
 use slopos_abi::damage::{DamageRect, MAX_DAMAGE_REGIONS};
@@ -469,12 +470,34 @@ impl VirtioGpuInner {
                 write_init_field!(
                     slot,
                     state,
-                    SpinLock::init_with(LOCK_LEVEL_RESOURCE, VirtioGpuState::init_empty())
+                    SpinLock::init_with(
+                        lock_class!("VirtioGpu.state", LOCK_LEVEL_RESOURCE),
+                        VirtioGpuState::init_empty()
+                    )
                 )?;
-                write_field!(slot, ctrl_lock, Mutex::new(()));
-                write_field!(slot, cursor_lock, Mutex::new(()));
-                write_field!(slot, ctrl_waiters, WaitQueue::new());
-                write_field!(slot, cursor_waiters, WaitQueue::new());
+                write_field!(
+                    slot,
+                    ctrl_lock,
+                    Mutex::new((), lock_class!("VirtioGpu.ctrl_lock", LOCK_LEVEL_RESOURCE))
+                );
+                write_field!(
+                    slot,
+                    cursor_lock,
+                    Mutex::new(
+                        (),
+                        lock_class!("VirtioGpu.cursor_lock", LOCK_LEVEL_RESOURCE)
+                    )
+                );
+                write_field!(
+                    slot,
+                    ctrl_waiters,
+                    WaitQueue::new(lock_class!("VirtioGpu.ctrl_waiters", LOCK_LEVEL_RESOURCE))
+                );
+                write_field!(
+                    slot,
+                    cursor_waiters,
+                    WaitQueue::new(lock_class!("VirtioGpu.cursor_waiters", LOCK_LEVEL_RESOURCE))
+                );
                 Ok(slot.finish())
             },
         )
@@ -1310,7 +1333,7 @@ pub mod test_support {
 // ============================================================================
 
 static VIRTIO_GPU: SpinLock<Option<KArc<VirtioGpuInner>>> =
-    SpinLock::new(None, LOCK_LEVEL_REGISTRY);
+    SpinLock::new(None, lock_class!("VIRTIO_GPU", LOCK_LEVEL_REGISTRY));
 
 fn current_device() -> Option<KArc<VirtioGpuInner>> {
     VIRTIO_GPU.lock().clone()

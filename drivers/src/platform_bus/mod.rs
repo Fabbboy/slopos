@@ -18,6 +18,7 @@ use slopos_acpi::aml::{self, AcpiPlatformDevice, HhdmHost};
 use slopos_acpi::fadt::Fadt;
 use slopos_acpi::tables::AcpiTables;
 use slopos_ostd::dev::Devres;
+use slopos_ostd::lock_class;
 use slopos_ostd::sync::{LOCK_LEVEL_RESOURCE, SpinLock};
 use slopos_ostd::{AllocError, KVec, klog_info, klog_warn};
 
@@ -335,7 +336,10 @@ impl ClaimTable {
     }
 }
 
-static CLAIMED_BY: SpinLock<ClaimTable> = SpinLock::new(ClaimTable::new(), LOCK_LEVEL_RESOURCE);
+static CLAIMED_BY: SpinLock<ClaimTable> = SpinLock::new(
+    ClaimTable::new(),
+    lock_class!("platform.CLAIMED_BY", LOCK_LEVEL_RESOURCE),
+);
 
 /// Records device claims for the matchmaker, abstracting the live `CLAIMED_BY`
 /// static (boot) from a heap-backed sink (unit tests).

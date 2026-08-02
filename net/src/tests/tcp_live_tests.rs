@@ -177,7 +177,7 @@ fn test_tcp_syn_transmit() -> TestResult {
 
     klog_info!(
         "tcp_live: SYN built id={} seq={} local_port={}",
-        tcp_id.0,
+        tcp_id,
         syn.seq_num,
         syn.tuple.local_port,
     );

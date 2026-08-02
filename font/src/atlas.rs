@@ -579,7 +579,13 @@ mod global_atlas {
     static ATLAS_GENERATION: AtomicU64 = AtomicU64::new(0);
 
     static FONT_CHANGE_CALLBACK: slopos_ostd::sync::SpinLock<Option<fn()>> =
-        slopos_ostd::sync::SpinLock::new(None, slopos_ostd::sync::LOCK_LEVEL_RESOURCE);
+        slopos_ostd::sync::SpinLock::new(
+            None,
+            slopos_ostd::lock_class!(
+                "FONT_CHANGE_CALLBACK",
+                slopos_ostd::sync::LOCK_LEVEL_RESOURCE
+            ),
+        );
 
     pub fn register_font_change_callback(cb: fn()) {
         *FONT_CHANGE_CALLBACK.lock() = Some(cb);

@@ -16,6 +16,7 @@
 
 use core::ptr::NonNull;
 use core::sync::atomic::{AtomicU64, Ordering};
+use slopos_ostd::lock_class;
 
 use slopos_ostd::sync::{LOCK_LEVEL_ALLOCATOR, RawLink, SpinLock};
 
@@ -48,7 +49,10 @@ pub struct LargeAlloc {
 impl LargeAlloc {
     pub(crate) const fn new() -> Self {
         Self {
-            inner: SpinLock::new(LargeInner::new(), LOCK_LEVEL_ALLOCATOR),
+            inner: SpinLock::new(
+                LargeInner::new(),
+                lock_class!("LARGE_ALLOC", LOCK_LEVEL_ALLOCATOR),
+            ),
             total_bytes_allocated: AtomicU64::new(0),
             total_bytes_freed: AtomicU64::new(0),
         }

@@ -357,7 +357,10 @@ pub fn kdiag_hexdump(data: *const u8, length: usize, base_address: u64) {
 /// off?" — a question the boot log could not previously answer, because the
 /// validator disables itself silently and stays that way for the rest of the
 /// boot.
-pub fn kdiag_dump_lock_graph() {
+/// `phase` names the boot point so a log with several of these lines can be
+/// read without counting: positional parsing is wrong in whichever mode
+/// emits a different number of them, and rots silently when one is added.
+pub fn kdiag_dump_lock_graph(phase: &str) {
     use crate::sync::lock_graph as lg;
 
     let classes = lg::class_count();
@@ -367,14 +370,19 @@ pub fn kdiag_dump_lock_graph() {
         "OFF (tracking never enabled)"
     } else if lg::graph_overflowed() {
         "DISABLED (pool overflow)"
-    } else if lg::panic_bypassed() {
-        "DISABLED (panic bypass latched)"
+    } else if lg::fatal_bypassed() {
+        "DISABLED (fatal bypass latched)"
+    } else if lg::lockdep_mode() == lg::LockdepMode::Off {
+        "OFF (lockdep=off)"
     } else {
         "ACTIVE"
     };
 
     crate::klog_info!(
-        "LOCKDEP: {} classes={}/{} ({}%) edges={}/{} chains={}/{} violations={}",
+        "LOCKDEP[{}]: {} classes={}/{} ({}%) edges={}/{} chains={}/{} \
+         held_max={}/{} held_drops={} chain_hit={} chain_miss={} \
+         violations={} reports={} collisions={} mode={:?}",
+        phase,
         state,
         classes,
         lg::REGISTRABLE_CLASSES,
@@ -383,7 +391,15 @@ pub fn kdiag_dump_lock_graph() {
         lg::MAX_EDGES,
         chains,
         lg::MAX_CHAINS,
+        lg::held_depth_max(),
+        lg::MAX_HELD_LOCKS,
+        lg::held_depth_overflows(),
+        lg::chain_hits(),
+        lg::chain_misses(),
         lg::violations_reported(),
+        lg::violation_reports(),
+        lg::class_collisions(),
+        lg::lockdep_mode(),
     );
 }
 
@@ -401,7 +417,20 @@ pub fn kdiag_dump_lock_classes(limit: usize) {
     crate::klog_info!("=== LOCK CLASSES ({} of {}) ===", n, total);
     for i in 0..n {
         if let Some(c) = lg::class_info(i) {
-            crate::klog_info!("  class {}: lock @ {:#x} level {}", i, c.addr, c.level);
+            crate::klog_info!(
+                "  class {}: {}{} ({}) level {}{} first-inst {:#x}",
+                i,
+                c.name,
+                if c.subclass != 0 { "/nested" } else { "" },
+                c.site,
+                c.level,
+                if c.flags & lg::LO_DUPOK != 0 {
+                    " DUPOK"
+                } else {
+                    ""
+                },
+                c.first_addr,
+            );
         }
     }
     crate::klog_info!("=== END LOCK CLASSES ===");

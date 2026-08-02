@@ -25,6 +25,8 @@
 //!   as declared (regression guard against accidental derive drift
 //!   in future refactors).
 
+use slopos_ostd::lock_class;
+use slopos_ostd::sync::lock_tracking::LOCK_LEVEL_RESOURCE;
 use std::sync::Mutex;
 
 use slopos_ostd::sync::wait_queue::{WaitAbort, WaitQueue, WaitResult};
@@ -119,22 +121,22 @@ fn fresh_queue_has_waiters_is_false_without_taking_the_spinlock() {
     // SpinLock — otherwise it would execute `cli` and crash this
     // user-space test. A successful return is therefore proof that
     // the lock-free path is correctly wired.
-    let wq = WaitQueue::new();
+    let wq = WaitQueue::new(lock_class!("test.hostwq1", LOCK_LEVEL_RESOURCE));
     assert!(!wq.has_waiters());
 }
 
 #[test]
 fn fresh_queue_generation_is_zero() {
     let _g = TEST_LOCK.lock().unwrap();
-    let wq = WaitQueue::new();
+    let wq = WaitQueue::new(lock_class!("test.hostwq2", LOCK_LEVEL_RESOURCE));
     assert_eq!(wq.generation(), 0);
 }
 
 #[test]
 fn wait_queue_default_constructor_matches_new() {
     let _g = TEST_LOCK.lock().unwrap();
-    let wq1 = WaitQueue::new();
-    let wq2 = WaitQueue::default();
+    let wq1 = WaitQueue::new(lock_class!("test.hostwq3", LOCK_LEVEL_RESOURCE));
+    let wq2 = WaitQueue::new(lock_class!("test.hostwq_default", LOCK_LEVEL_RESOURCE));
     assert_eq!(wq1.has_waiters(), wq2.has_waiters());
     assert_eq!(wq1.generation(), wq2.generation());
 }
@@ -142,8 +144,8 @@ fn wait_queue_default_constructor_matches_new() {
 #[test]
 fn multiple_fresh_queues_are_independent() {
     let _g = TEST_LOCK.lock().unwrap();
-    let wq1 = WaitQueue::new();
-    let wq2 = WaitQueue::new();
+    let wq1 = WaitQueue::new(lock_class!("test.hostwq4", LOCK_LEVEL_RESOURCE));
+    let wq2 = WaitQueue::new(lock_class!("test.hostwq5", LOCK_LEVEL_RESOURCE));
     assert!(!wq1.has_waiters());
     assert!(!wq2.has_waiters());
     // generations are independent atomics — both at 0.

@@ -8,6 +8,8 @@
 //! - Integration tests through live virtio-blk after probe (per-request
 //!   slot tracking, IRQ-side used-ring harvest, multi-sector batching)
 
+use slopos_ostd::lock_class;
+use slopos_ostd::sync::lock_tracking::LOCK_LEVEL_RESOURCE;
 use slopos_testing::TestResult;
 use slopos_testing::{assert_eq_test, assert_ok, assert_test, fail, pass};
 
@@ -141,7 +143,7 @@ pub fn test_edge_event_wait_timeout() -> TestResult {
 // =============================================================================
 
 pub fn test_sleep_mutex_lock_unlock() -> TestResult {
-    let m = Mutex::new(7u32);
+    let m = Mutex::new(7u32, lock_class!("test.virtio_mutex1", LOCK_LEVEL_RESOURCE));
     {
         let Ok(mut g) = m.lock() else {
             return fail!("uncontended lock must succeed");
@@ -156,7 +158,7 @@ pub fn test_sleep_mutex_lock_unlock() -> TestResult {
 }
 
 pub fn test_sleep_mutex_try_lock_contention() -> TestResult {
-    let m = Mutex::new(0u32);
+    let m = Mutex::new(0u32, lock_class!("test.virtio_mutex2", LOCK_LEVEL_RESOURCE));
     let Ok(g) = m.lock() else {
         return fail!("uncontended lock must succeed");
     };
@@ -173,7 +175,7 @@ pub fn test_sleep_mutex_try_lock_contention() -> TestResult {
 }
 
 pub fn test_sleep_mutex_relock_after_try() -> TestResult {
-    let m = Mutex::new(1u32);
+    let m = Mutex::new(1u32, lock_class!("test.virtio_mutex3", LOCK_LEVEL_RESOURCE));
     {
         let mut g = match m.try_lock() {
             Some(g) => g,

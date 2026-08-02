@@ -22,6 +22,7 @@
 //! can never disturb the pipe, transcoder, or eDP link.
 
 use core::ffi::c_int;
+use slopos_ostd::lock_class;
 
 use slopos_abi::damage::{DamageRect, MAX_DAMAGE_REGIONS};
 use slopos_mm::mmio::MmioRegion;
@@ -65,7 +66,8 @@ struct PresentState {
 
 /// Installed by [`install`]; consulted by [`present`]. `None` until xe owns the
 /// double-buffered scanout.
-static PRESENT_STATE: SpinLock<Option<PresentState>> = SpinLock::new(None, LOCK_LEVEL_RESOURCE);
+static PRESENT_STATE: SpinLock<Option<PresentState>> =
+    SpinLock::new(None, lock_class!("PRESENT_STATE", LOCK_LEVEL_RESOURCE));
 
 /// Record the register window, the plane-group program, the draw buffer, and the
 /// two scanout buffers the present path will own. The integrator has already

@@ -24,6 +24,7 @@
 use slopos_abi::syscall::{POLLERR, POLLHUP, POLLIN, POLLOUT, POLLPRI};
 use slopos_ostd::KVec;
 use slopos_ostd::handle::{Handle, HandleTable};
+use slopos_ostd::lock_class;
 use slopos_ostd::sync::{LOCK_LEVEL_RESOURCE, SpinLock};
 
 pub(crate) use slopos_abi::event::MAX_PIPES;
@@ -174,8 +175,10 @@ impl Pipe {
 /// All live pipes. A growable [`HandleTable`] capped at [`MAX_PIPES`] live
 /// entries by [`alloc_slot`]; the cap keeps slot indices within the
 /// [`SLOT_BITS`]-wide field of [`PipeHandle`] and the event-bus key.
-static PIPE_TABLE: SpinLock<HandleTable<Pipe>> =
-    SpinLock::new(HandleTable::new(), LOCK_LEVEL_RESOURCE);
+static PIPE_TABLE: SpinLock<HandleTable<Pipe>> = SpinLock::new(
+    HandleTable::new(),
+    lock_class!("PIPE_TABLE", LOCK_LEVEL_RESOURCE),
+);
 
 /// Allocate a new pipe, returning its packed [`PipeHandle`].
 ///

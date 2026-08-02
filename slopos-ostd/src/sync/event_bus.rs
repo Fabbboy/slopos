@@ -19,6 +19,8 @@
 //! same contract a bare `WaitQueue::wake_all` carries — the bus only changes
 //! how the queue is named, not the ordering rules.
 
+use crate::lock_class;
+use crate::sync::lock_tracking::LOCK_LEVEL_RESOURCE;
 use slopos_abi::event::{
     CHILD_EXIT_BUCKETS, KernelEvent, MAX_PIPES, MAX_TTYS, MAX_UNIX_SOCKETS, SIGNAL_PENDING_BUCKETS,
 };
@@ -46,16 +48,26 @@ pub struct EventBus {
 /// constructor for this large value — the backing queues are laid out as
 /// zero-initialised statics, never built on a stack frame.
 pub static BUS: EventBus = EventBus {
-    socket_recv: [const { WaitQueue::new() }; MAX_SOCKETS],
-    socket_send: [const { WaitQueue::new() }; MAX_SOCKETS],
-    socket_accept: [const { WaitQueue::new() }; MAX_SOCKETS],
-    pipe_read: [const { WaitQueue::new() }; MAX_PIPES],
-    pipe_write: [const { WaitQueue::new() }; MAX_PIPES],
-    tty_input: [const { WaitQueue::new() }; MAX_TTYS],
-    tty_output: [const { WaitQueue::new() }; MAX_TTYS],
-    unix_socket: [const { WaitQueue::new() }; MAX_UNIX_SOCKETS],
-    child_exit: [const { WaitQueue::new() }; CHILD_EXIT_BUCKETS],
-    signal_pending: [const { WaitQueue::new() }; SIGNAL_PENDING_BUCKETS],
+    socket_recv: [const { WaitQueue::new(lock_class!("evbus.socket_recv", LOCK_LEVEL_RESOURCE)) };
+        MAX_SOCKETS],
+    socket_send: [const { WaitQueue::new(lock_class!("evbus.socket_send", LOCK_LEVEL_RESOURCE)) };
+        MAX_SOCKETS],
+    socket_accept: [const { WaitQueue::new(lock_class!("evbus.socket_accept", LOCK_LEVEL_RESOURCE)) };
+        MAX_SOCKETS],
+    pipe_read: [const { WaitQueue::new(lock_class!("evbus.pipe_read", LOCK_LEVEL_RESOURCE)) };
+        MAX_PIPES],
+    pipe_write: [const { WaitQueue::new(lock_class!("evbus.pipe_write", LOCK_LEVEL_RESOURCE)) };
+        MAX_PIPES],
+    tty_input: [const { WaitQueue::new(lock_class!("evbus.tty_input", LOCK_LEVEL_RESOURCE)) };
+        MAX_TTYS],
+    tty_output: [const { WaitQueue::new(lock_class!("evbus.tty_output", LOCK_LEVEL_RESOURCE)) };
+        MAX_TTYS],
+    unix_socket: [const { WaitQueue::new(lock_class!("evbus.unix_socket", LOCK_LEVEL_RESOURCE)) };
+        MAX_UNIX_SOCKETS],
+    child_exit: [const { WaitQueue::new(lock_class!("evbus.child_exit", LOCK_LEVEL_RESOURCE)) };
+        CHILD_EXIT_BUCKETS],
+    signal_pending: [const { WaitQueue::new(lock_class!("evbus.signal_pending", LOCK_LEVEL_RESOURCE)) };
+        SIGNAL_PENDING_BUCKETS],
 };
 
 impl EventBus {

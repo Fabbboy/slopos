@@ -41,6 +41,7 @@
 
 use core::marker::PhantomData;
 use core::sync::atomic::{AtomicU32, Ordering};
+use slopos_ostd::lock_class;
 
 use slopos_abi::addr::VirtAddr;
 use slopos_arch::pcr::MAX_CPUS;
@@ -767,7 +768,10 @@ mod kstack {
     };
 
     pub(super) static GLOBAL: SpinLock<StackVaAllocator<KstackRegion, BITMAP_WORDS>> =
-        SpinLock::new(StackVaAllocator::new_uninit(), LOCK_LEVEL_ALLOCATOR);
+        SpinLock::new(
+            StackVaAllocator::new_uninit(),
+            lock_class!("kstack.GLOBAL", LOCK_LEVEL_ALLOCATOR),
+        );
 
     pub(super) static PCP: PcpArray<KstackRegion, REGION_PCP_CAPACITY> = PcpArray::new({
         const INIT: CacheAligned<PerCpuStackCache<KstackRegion, REGION_PCP_CAPACITY>> =
@@ -858,7 +862,10 @@ mod ustack {
     };
 
     pub(super) static GLOBAL: SpinLock<StackVaAllocator<UstackRegion, BITMAP_WORDS>> =
-        SpinLock::new(StackVaAllocator::new_uninit(), LOCK_LEVEL_ALLOCATOR);
+        SpinLock::new(
+            StackVaAllocator::new_uninit(),
+            lock_class!("ustack.GLOBAL", LOCK_LEVEL_ALLOCATOR),
+        );
 
     pub(super) static PCP: PcpArray<UstackRegion, REGION_PCP_CAPACITY> = PcpArray::new({
         const INIT: CacheAligned<PerCpuStackCache<UstackRegion, REGION_PCP_CAPACITY>> =

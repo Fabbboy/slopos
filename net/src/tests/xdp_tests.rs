@@ -7,6 +7,8 @@
 //! guard where acquiring a tracked lock is forbidden.
 
 use core::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
+use slopos_ostd::lock_class;
+use slopos_ostd::sync::lock_tracking::LOCK_LEVEL_REGISTRY;
 
 use slopos_ostd::sync::{LOCK_LEVEL_RESOURCE, SpinLock};
 use slopos_ostd::{KArc, KBox, KVec};
@@ -100,8 +102,14 @@ impl MockNetDevice {
             mac_addr: mac,
             dev_mtu: 1500,
             feats: NetDeviceFeatures::empty(),
-            stats: SpinLock::new(NetDeviceStats::new(), LOCK_LEVEL_RESOURCE),
-            is_up: SpinLock::new(false, LOCK_LEVEL_RESOURCE),
+            stats: SpinLock::new(
+                NetDeviceStats::new(),
+                lock_class!("test.xdp_dev.is_up", LOCK_LEVEL_RESOURCE),
+            ),
+            is_up: SpinLock::new(
+                false,
+                lock_class!("test.xdp_dev.tx_count", LOCK_LEVEL_RESOURCE),
+            ),
         }
     }
 }
@@ -144,7 +152,13 @@ fn ensure_pool_init() {
 
 /// Test device handle from a fresh leaked registry (mirrors the ingress tests).
 fn make_test_handle(mac: MacAddr) -> DeviceHandle {
-    let registry = KBox::leak(KBox::try_new(NetDeviceRegistry::new()).expect("test alloc"));
+    let registry = KBox::leak(
+        KBox::try_new(NetDeviceRegistry::new(lock_class!(
+            "test.xdp_registry",
+            LOCK_LEVEL_REGISTRY
+        )))
+        .expect("test alloc"),
+    );
     let dev = KArc::try_new(MockNetDevice::new(mac)).expect("test alloc");
     registry.register(dev).expect("register must succeed")
 }

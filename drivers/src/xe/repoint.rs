@@ -23,6 +23,7 @@
 //! primary scanout.
 
 use core::ffi::c_int;
+use slopos_ostd::lock_class;
 
 use slopos_abi::damage::DamageRect;
 use slopos_abi::{DisplayInfo, FramebufferData, PixelFormat};
@@ -69,7 +70,8 @@ struct XeState {
 
 /// Installed when a repoint commits; consulted by [`flush`]. `None` until xe owns
 /// the scanout.
-static XE_STATE: SpinLock<Option<XeState>> = SpinLock::new(None, LOCK_LEVEL_RESOURCE);
+static XE_STATE: SpinLock<Option<XeState>> =
+    SpinLock::new(None, lock_class!("XE_STATE", LOCK_LEVEL_RESOURCE));
 
 /// Run the inherit-and-repoint sequence for the active display.
 ///

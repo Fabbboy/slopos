@@ -25,6 +25,7 @@
 //! externally-anchored root (kernel cmdline) is a localized change isolated to
 //! [`crc32`] + [`parse_trailer`].
 
+use slopos_ostd::lock_class;
 use slopos_ostd::sync::{LOCK_LEVEL_RESOURCE, SpinLock};
 use slopos_ostd::{KBox, KVec, klog_info};
 
@@ -205,7 +206,10 @@ pub fn build_verified(
         inner: device,
         block_size,
         hashes,
-        written: SpinLock::new(written, LOCK_LEVEL_RESOURCE),
+        written: SpinLock::new(
+            written,
+            lock_class!("VerifiedBlockDevice.written", LOCK_LEVEL_RESOURCE),
+        ),
     }) {
         Ok(boxed) => boxed,
         // Unreachable in practice: the much larger hash-array allocation in

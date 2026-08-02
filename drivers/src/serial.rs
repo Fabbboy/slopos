@@ -16,6 +16,7 @@ use slopos_ostd::io::port_consts::{
     UART_MCR_DTR as MCR_DTR, UART_MCR_RTS as MCR_RTS,
 };
 use slopos_ostd::io::raw_port::Port;
+use slopos_ostd::lock_class;
 use slopos_ostd::ring_buffer::RingBuffer;
 use slopos_ostd::sync::{LOCK_LEVEL_UNORDERED, SpinLock};
 
@@ -44,13 +45,18 @@ pub struct UartCapabilities {
 // check so panic-time `panic_serial_write` cannot trip a recursive
 // ordering violation. Self-deadlock (same lock re-acquired) is still
 // caught by the ticket mechanism in SpinLock.
-static SERIAL: SpinLock<SerialPort> = SpinLock::new(SerialPort::new(COM1), LOCK_LEVEL_UNORDERED);
+static SERIAL: SpinLock<SerialPort> = SpinLock::new(
+    SerialPort::new(COM1),
+    lock_class!("SERIAL", LOCK_LEVEL_UNORDERED),
+);
 const BUF_SIZE: usize = 256;
 
 type SerialBuffer = RingBuffer<u8, BUF_SIZE>;
 
-static INPUT_BUFFER: SpinLock<SerialBuffer> =
-    SpinLock::new(SerialBuffer::new_with(0), LOCK_LEVEL_UNORDERED);
+static INPUT_BUFFER: SpinLock<SerialBuffer> = SpinLock::new(
+    SerialBuffer::new_with(0),
+    lock_class!("INPUT_BUFFER", LOCK_LEVEL_UNORDERED),
+);
 
 pub fn init() {
     let mut port = SERIAL.lock();

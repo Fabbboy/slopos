@@ -1,5 +1,6 @@
 use core::ffi::{c_char, c_int, c_void};
 use core::ptr;
+use slopos_ostd::lock_class;
 
 use slopos_ostd::klog_info;
 use slopos_ostd::sync::{LOCK_LEVEL_REGISTRY, OnceLock, SpinLock};
@@ -35,7 +36,12 @@ impl IdleCallbacks {
 static IDLE_CBS: OnceLock<SpinLock<IdleCallbacks>> = OnceLock::new();
 
 pub fn scheduler_register_idle_wakeup_callback(callback: Option<fn() -> c_int>) {
-    IDLE_CBS.call_once(|| SpinLock::new(IdleCallbacks::new(), LOCK_LEVEL_REGISTRY));
+    IDLE_CBS.call_once(|| {
+        SpinLock::new(
+            IdleCallbacks::new(),
+            lock_class!("IDLE_CBS", LOCK_LEVEL_REGISTRY),
+        )
+    });
     let Some(cb) = callback else { return };
     if let Some(mutex) = IDLE_CBS.get() {
         let mut cbs = mutex.lock();

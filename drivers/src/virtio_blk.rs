@@ -1,4 +1,5 @@
 use core::mem::size_of;
+use slopos_ostd::lock_class;
 
 use slopos_fs::blockdev::{BlockDevice, BlockDeviceError, BlockDeviceIndex};
 use slopos_ostd::KArc;
@@ -267,10 +268,21 @@ impl VirtioBlkInner {
                 write_init_field!(
                     slot,
                     state,
-                    SpinLock::init_with(LOCK_LEVEL_RESOURCE, VirtioBlkState::init_empty())
+                    SpinLock::init_with(
+                        lock_class!("VirtioBlk.state", LOCK_LEVEL_RESOURCE),
+                        VirtioBlkState::init_empty()
+                    )
                 )?;
-                write_field!(slot, io_lock, Mutex::new(()));
-                write_field!(slot, req_waiters, WaitQueue::new());
+                write_field!(
+                    slot,
+                    io_lock,
+                    Mutex::new((), lock_class!("VirtioBlk.io_lock", LOCK_LEVEL_RESOURCE))
+                );
+                write_field!(
+                    slot,
+                    req_waiters,
+                    WaitQueue::new(lock_class!("VirtioBlk.req_waiters", LOCK_LEVEL_RESOURCE))
+                );
                 Ok(slot.finish())
             },
         )
@@ -797,7 +809,7 @@ pub struct DevState {
 }
 
 static BLK_REGISTRY: SpinLock<Option<HandleTable<DevState>>> =
-    SpinLock::new(None, LOCK_LEVEL_REGISTRY);
+    SpinLock::new(None, lock_class!("BLK_REGISTRY", LOCK_LEVEL_REGISTRY));
 
 fn with_registry<R>(f: impl FnOnce(&mut HandleTable<DevState>) -> R) -> R {
     let mut guard = BLK_REGISTRY.lock();

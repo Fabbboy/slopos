@@ -12,6 +12,7 @@
 //! SGR, bracketed paste, DECAWM, DECCKM, DECOM, double-width CJK handling.
 
 use core::sync::atomic::{AtomicBool, Ordering};
+use slopos_ostd::lock_class;
 use slopos_ostd::mm::AllocError;
 use slopos_ostd::mm::init::{Init, Initialised, init_struct_with};
 use slopos_ostd::{KBox, KVec, write_field};
@@ -1725,9 +1726,12 @@ fn fb_put_pixel(base: u64, offset: usize, bytes_per_pixel: u8, color: u32) {
     }
 }
 
-static VCONSOLE_STATE: SpinLock<VConsoleState> =
-    SpinLock::new(VConsoleState::new(), LOCK_LEVEL_RESOURCE);
-static SCROLLBACK: SpinLock<Option<KBox<ScrollbackBuf>>> = SpinLock::new(None, LOCK_LEVEL_RESOURCE);
+static VCONSOLE_STATE: SpinLock<VConsoleState> = SpinLock::new(
+    VConsoleState::new(),
+    lock_class!("VCONSOLE_STATE", LOCK_LEVEL_RESOURCE),
+);
+static SCROLLBACK: SpinLock<Option<KBox<ScrollbackBuf>>> =
+    SpinLock::new(None, lock_class!("SCROLLBACK", LOCK_LEVEL_RESOURCE));
 
 /// Screen rows repainted per console-lock hold.
 const REPAINT_BAND_ROWS: u16 = 4;

@@ -8,12 +8,14 @@
 //! `panic.oops_limit=1 panic.recover_smoke=on` boot-log check instead.
 
 use core::sync::atomic::{AtomicBool, Ordering};
+use slopos_ostd::lock_class;
 
 use slopos_ostd::panic_recovery;
 use slopos_ostd::sync::{LOCK_LEVEL_UNORDERED, SpinLock};
 use slopos_testing::{TestResult, assert_test};
 
-static RECOVERY_LOCK: SpinLock<u32> = SpinLock::new(0, LOCK_LEVEL_UNORDERED);
+static RECOVERY_LOCK: SpinLock<u32> =
+    SpinLock::new(0, lock_class!("test.recovery_lock", LOCK_LEVEL_UNORDERED));
 static CANARY_DROPPED: AtomicBool = AtomicBool::new(false);
 
 struct UnwindCanary;

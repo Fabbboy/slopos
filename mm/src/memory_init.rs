@@ -18,6 +18,7 @@ use crate::paging_defs::{PAGE_SIZE_4KB, PageFlags};
 use crate::process_vm::init_process_vm;
 use core::ffi::{c_char, c_int};
 use slopos_abi::addr::{PhysAddr, VirtAddr};
+use slopos_ostd::lock_class;
 
 use slopos_abi::DisplayInfo;
 use slopos_arch::cpu;
@@ -69,7 +70,7 @@ static INIT_STATS: SpinLock<MemoryInitStats> = SpinLock::new(
         tracked_page_frames: 0,
         allocator_metadata_bytes: 0,
     },
-    LOCK_LEVEL_RESOURCE,
+    lock_class!("INIT_STATS", LOCK_LEVEL_RESOURCE),
 );
 
 fn init_stats_snapshot() -> MemoryInitStats {
@@ -85,8 +86,10 @@ struct FramebufferReservation {
     height: u64,
 }
 
-static FRAMEBUFFER_RESERVATION: SpinLock<Option<FramebufferReservation>> =
-    SpinLock::new(None, LOCK_LEVEL_RESOURCE);
+static FRAMEBUFFER_RESERVATION: SpinLock<Option<FramebufferReservation>> = SpinLock::new(
+    None,
+    lock_class!("FRAMEBUFFER_RESERVATION", LOCK_LEVEL_RESOURCE),
+);
 
 /// Plumbing for the pre-typestate / post-typestate boot-step split. The
 /// pre step receives `memmap` and `hhdm_offset` from Limine; the post

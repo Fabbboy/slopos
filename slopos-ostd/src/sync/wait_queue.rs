@@ -112,6 +112,7 @@
 //! uses `wait_event(|| condition_holds())`. Don't add a `compiler_fence`
 //! or `atomic::fence` "just in case"; it is dead code.
 
+use crate::sync::lock_tracking::LockClassKey;
 use core::cell::UnsafeCell;
 use core::ffi::c_void;
 use core::mem::MaybeUninit;
@@ -124,7 +125,6 @@ use slopos_abi::task::INVALID_TASK_ID;
 use crate::mm::KBox;
 use crate::sync::BspToken;
 use crate::sync::intrusive::IntrusiveLinkedList;
-use crate::sync::lock_tracking::LOCK_LEVEL_RESOURCE;
 use crate::sync::spin::SpinLock;
 use crate::sync::wait_node::WaitNode;
 use crate::sync::wait_node::WaitQueueRole;
@@ -614,9 +614,14 @@ unsafe impl Send for WaitQueue {}
 
 impl WaitQueue {
     /// Create a new empty wait queue.
-    pub const fn new() -> Self {
+    ///
+    /// The class comes from the caller because `wait_core` reaches
+    /// `TASK_MANAGER` while holding this lock: one class shared by every
+    /// queue in the kernel would make any wait-under-manager path close a
+    /// cycle that is an artefact of the merge rather than a real inversion.
+    pub const fn new(class: &'static LockClassKey) -> Self {
         Self {
-            inner: SpinLock::new(WaitQueueInner::new(), LOCK_LEVEL_RESOURCE),
+            inner: SpinLock::new(WaitQueueInner::new(), class),
             generation: AtomicU32::new(0),
         }
     }
@@ -1388,11 +1393,5 @@ impl Drop for WaitNode {
         // an already-woken sentinel and elide the spurious unblock.
         // Pure defense-in-depth; not load-bearing.
         let _ = self.has_woken_swap_true();
-    }
-}
-
-impl Default for WaitQueue {
-    fn default() -> Self {
-        Self::new()
     }
 }

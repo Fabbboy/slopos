@@ -13,6 +13,7 @@ use slopos_kernel_services::syscall_services::video::{
     VideoServices, compositor_task_id, is_video_initialized, register_video_services,
     set_compositor_task_id,
 };
+use slopos_ostd::lock_class;
 use slopos_ostd::sync::{LOCK_LEVEL_RESOURCE, SpinLock};
 use slopos_ostd::{klog_info, klog_warn};
 use slopos_sched::task::register_task_resource_cleanup_hook;
@@ -63,7 +64,8 @@ struct GpuControl {
     set_mode: fn(u32, u32) -> Option<FramebufferData>,
 }
 
-static GPU_CONTROL: SpinLock<Option<GpuControl>> = SpinLock::new(None, LOCK_LEVEL_RESOURCE);
+static GPU_CONTROL: SpinLock<Option<GpuControl>> =
+    SpinLock::new(None, lock_class!("GPU_CONTROL", LOCK_LEVEL_RESOURCE));
 
 /// Register the GPU control backend (called by boot once virtio-gpu is adopted).
 pub fn register_gpu_control(

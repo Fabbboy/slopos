@@ -203,6 +203,10 @@ pub struct NetTimerWheel {
 // SAFETY: All mutable state is behind SpinLock (ticket lock with IRQ disable)
 // or AtomicU64.  No unsynchronized shared mutation.
 
+/// Shared by `new` and `init_with`, which build the same logical lock.
+const NET_TIMER_WHEEL_CLASS: &slopos_ostd::sync::lock_tracking::LockClassKey =
+    slopos_ostd::lock_class!("NET_TIMER_WHEEL", LOCK_LEVEL_REGISTRY);
+
 impl NetTimerWheel {
     /// Create a new, empty timer wheel.
     pub const fn new() -> Self {
@@ -211,7 +215,7 @@ impl NetTimerWheel {
                 TimerWheelInner {
                     entries: KVec::new(),
                 },
-                LOCK_LEVEL_REGISTRY,
+                NET_TIMER_WHEEL_CLASS,
             ),
             next_token: AtomicU64::new(1),
         }
@@ -231,7 +235,7 @@ impl NetTimerWheel {
                 write_init_field!(
                     slot,
                     inner,
-                    SpinLock::<TimerWheelInner>::init_with(LOCK_LEVEL_REGISTRY, inner_init)
+                    SpinLock::<TimerWheelInner>::init_with(NET_TIMER_WHEEL_CLASS, inner_init)
                 )?;
                 write_field!(slot, next_token, AtomicU64::new(1));
                 Ok(slot.finish())

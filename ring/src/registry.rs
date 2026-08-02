@@ -15,6 +15,8 @@
 
 use slopos_ostd::KArc;
 use slopos_ostd::handle::{Handle, HandleError, HandleTable};
+use slopos_ostd::lock_class;
+use slopos_ostd::sync::lock_tracking::LOCK_LEVEL_RESOURCE;
 use slopos_ostd::sync::{LOCK_LEVEL_REGISTRY, Mutex, SpinLock};
 
 use crate::ring_obj::Ring;
@@ -55,7 +57,8 @@ type RingSlot = KArc<Mutex<Ring>>;
 /// never held while a per-ring lock is held — that decoupling is what
 /// keeps the close path (`FILEIO_SLOT → REGISTRY`) from forming a cycle
 /// with the enter path (per-ring lock → `FILEIO_SLOT`).
-static REGISTRY: SpinLock<Option<HandleTable<RingSlot>>> = SpinLock::new(None, LOCK_LEVEL_REGISTRY);
+static REGISTRY: SpinLock<Option<HandleTable<RingSlot>>> =
+    SpinLock::new(None, lock_class!("ring.REGISTRY", LOCK_LEVEL_REGISTRY));
 
 fn with_registry<R>(f: impl FnOnce(&mut HandleTable<RingSlot>) -> R) -> R {
     let mut guard = REGISTRY.lock();
@@ -77,7 +80,11 @@ fn slot_for(raw_handle: usize) -> Result<RingSlot, HandleError> {
 /// Insert a fresh ring; returns the packed fd-handle value, or `None`
 /// if the registry is full or the per-ring allocation fails.
 pub fn insert(ring: Ring) -> Option<usize> {
-    let slot = KArc::try_new(Mutex::new(ring)).ok()?;
+    let slot = KArc::try_init(Mutex::init_owned(
+        ring,
+        lock_class!("Ring.inner", LOCK_LEVEL_RESOURCE),
+    ))
+    .ok()?;
     with_registry(|t| t.insert(slot).ok().map(|h| h.pack(SLOT_BITS)))
 }
 

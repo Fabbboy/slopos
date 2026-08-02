@@ -2,6 +2,7 @@ pub(crate) mod regs;
 #[cfg(feature = "test-hooks")]
 pub mod tests;
 
+use slopos_ostd::lock_class;
 use slopos_ostd::sync::{InitFlag, LOCK_LEVEL_REGISTRY, SpinLock, StateFlag};
 use slopos_ostd::{klog_debug, klog_info};
 
@@ -103,9 +104,14 @@ impl IoapicIsoTable {
     }
 }
 
-static IOAPIC_TABLE: SpinLock<IoapicTable> = SpinLock::new(IoapicTable::new(), LOCK_LEVEL_REGISTRY);
-static ISO_TABLE: SpinLock<IoapicIsoTable> =
-    SpinLock::new(IoapicIsoTable::new(), LOCK_LEVEL_REGISTRY);
+static IOAPIC_TABLE: SpinLock<IoapicTable> = SpinLock::new(
+    IoapicTable::new(),
+    lock_class!("IOAPIC_TABLE", LOCK_LEVEL_REGISTRY),
+);
+static ISO_TABLE: SpinLock<IoapicIsoTable> = SpinLock::new(
+    IoapicIsoTable::new(),
+    lock_class!("ISO_TABLE", LOCK_LEVEL_REGISTRY),
+);
 static IOAPIC_READY: InitFlag = InitFlag::new();
 static IOAPIC_INIT_IN_PROGRESS: StateFlag = StateFlag::new();
 

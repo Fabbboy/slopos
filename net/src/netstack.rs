@@ -22,6 +22,7 @@
 //! - TODO: add routing table updates triggered by `configure()`.
 
 use core::fmt;
+use slopos_ostd::lock_class;
 
 use slopos_ostd::KVec;
 use slopos_ostd::klog_debug;
@@ -152,7 +153,7 @@ impl NetStack {
                 NetStackInner {
                     ifaces: KVec::new(),
                 },
-                LOCK_LEVEL_REGISTRY,
+                lock_class!("NET_STACK", LOCK_LEVEL_REGISTRY),
             ),
         }
     }

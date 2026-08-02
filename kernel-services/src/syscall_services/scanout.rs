@@ -15,11 +15,12 @@
 //! [`run_scanout_install`].
 
 use core::ffi::c_int;
+use slopos_ostd::lock_class;
 
 use slopos_abi::damage::DamageRect;
 use slopos_abi::{DisplayInfo, FramebufferData};
 use slopos_ostd::klog_info;
-use slopos_ostd::sync::{SpinLock, LOCK_LEVEL_RESOURCE};
+use slopos_ostd::sync::{LockClassKey, SpinLock, LOCK_LEVEL_RESOURCE};
 
 /// Outcome of a [`SingletonResource::claim`] reservation attempt.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -56,14 +57,18 @@ pub struct SingletonResource<P: Copy + 'static> {
 }
 
 impl<P: Copy + 'static> SingletonResource<P> {
-    pub const fn new(name: &'static str) -> Self {
+    /// The lock class comes from the caller for the same reason `name` does.
+    /// Minted here it would merge every arbiter — including the scratch ones
+    /// the tests declare — into one class, and a test's nesting would then be
+    /// indistinguishable from the production resource's.
+    pub const fn new(name: &'static str, class: &'static LockClassKey) -> Self {
         Self {
             state: SpinLock::new(
                 ArbiterState {
                     owner: None,
                     reserved: None,
                 },
-                LOCK_LEVEL_RESOURCE,
+                class,
             ),
             name,
         }
@@ -168,7 +173,8 @@ pub struct ScanoutProvider {
 }
 
 /// The one display-scanout arbiter.
-pub static SCANOUT: SingletonResource<ScanoutProvider> = SingletonResource::new("scanout");
+pub static SCANOUT: SingletonResource<ScanoutProvider> =
+    SingletonResource::new("scanout", lock_class!("SCANOUT.state", LOCK_LEVEL_RESOURCE));
 
 // Single source of truth for the claim priority ladder. Lower providers are
 // always losable; a cmdline hint folds into priority rather than gating a probe.
@@ -182,7 +188,7 @@ pub const PRIO_CMDLINE_HINT_BUMP: i32 = 100;
 // The `video`-side install logic, reached by `drivers` through a fn-pointer so
 // no `drivers -> video` dependency edge is needed.
 static SCANOUT_INSTALLER: SpinLock<Option<fn(&InstallCtx) -> bool>> =
-    SpinLock::new(None, LOCK_LEVEL_RESOURCE);
+    SpinLock::new(None, lock_class!("SCANOUT_INSTALLER", LOCK_LEVEL_RESOURCE));
 
 /// Register the install callback. Called once by `video::init`.
 pub fn register_scanout_installer(installer: fn(&InstallCtx) -> bool) {
@@ -203,7 +209,8 @@ pub fn run_scanout_install(ctx: &InstallCtx) -> bool {
 // the backing address it copies the existing image across from). Stored as an
 // integer address + `DisplayInfo` so the static stays `Send`/`Sync` without
 // holding a raw pointer.
-static CURRENT_FB: SpinLock<Option<(u64, DisplayInfo)>> = SpinLock::new(None, LOCK_LEVEL_RESOURCE);
+static CURRENT_FB: SpinLock<Option<(u64, DisplayInfo)>> =
+    SpinLock::new(None, lock_class!("CURRENT_FB", LOCK_LEVEL_RESOURCE));
 
 /// Record the framebuffer a subsequent provider should seed from.
 pub fn set_current_framebuffer(fb: FramebufferData) {

@@ -39,6 +39,7 @@
 //! task got starved" a compile-time / CI failure, not a runtime
 //! debugging exercise.
 
+use crate::sync::lock_tracking::LOCK_LEVEL_REGISTRY;
 use core::marker::PhantomData;
 
 /// Witness type carried by every `KernelIo`-priority kthread.
@@ -231,6 +232,7 @@ macro_rules! spawn_kernel_io {
 // Cooperative stop
 // ---------------------------------------------------------------------------
 
+use crate::sync::lock_graph::LockClassKey;
 use crate::sync::spin::SpinLock;
 use crate::sync::wait_queue::WaitQueue;
 use core::sync::atomic::AtomicBool;
@@ -254,12 +256,15 @@ pub struct KernelIoStop {
 }
 
 impl KernelIoStop {
-    pub const fn new(name: &'static str) -> Self {
+    /// The lock class comes from the caller for the same reason `name` does:
+    /// these threads serve unrelated subsystems, and a class minted here
+    /// would merge all of them under whichever name was written down first.
+    pub const fn new(name: &'static str, class: &'static LockClassKey) -> Self {
         Self {
             name,
             requested: AtomicBool::new(false),
             exited: AtomicBool::new(false),
-            wq: WaitQueue::new(),
+            wq: WaitQueue::new(class),
         }
     }
 
@@ -378,7 +383,7 @@ static STOP_REGISTRY: SpinLock<StopRegistry> = SpinLock::new(
         entries: [None; MAX_KERNEL_IO_STOPS],
         count: 0,
     },
-    crate::sync::lock_tracking::LOCK_LEVEL_REGISTRY,
+    crate::lock_class!("STOP_REGISTRY", LOCK_LEVEL_REGISTRY),
 );
 
 /// Make `stop` visible to [`request_kernel_io_stop_all`]. A thread that never

@@ -152,11 +152,15 @@ pub struct RouteTable {
 /// The global routing table.
 pub static ROUTE_TABLE: RouteTable = RouteTable::new();
 
+/// Shared by `new` and `init_with`, which build the same logical lock.
+const ROUTE_TABLE_CLASS: &slopos_ostd::sync::lock_tracking::LockClassKey =
+    slopos_ostd::lock_class!("ROUTE_TABLE", LOCK_LEVEL_REGISTRY);
+
 impl RouteTable {
     /// Create an empty routing table.
     pub const fn new() -> Self {
         Self {
-            inner: SpinLock::new(RouteTableInner::new(), LOCK_LEVEL_REGISTRY),
+            inner: SpinLock::new(RouteTableInner::new(), ROUTE_TABLE_CLASS),
         }
     }
 
@@ -180,7 +184,7 @@ impl RouteTable {
                 write_init_field!(
                     slot,
                     inner,
-                    SpinLock::<RouteTableInner>::init_with(LOCK_LEVEL_REGISTRY, inner_init)
+                    SpinLock::<RouteTableInner>::init_with(ROUTE_TABLE_CLASS, inner_init)
                 )?;
                 Ok(slot.finish())
             },

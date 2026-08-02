@@ -9,6 +9,7 @@
 
 use core::ffi::{c_char, c_void};
 use core::ptr;
+use slopos_ostd::lock_class;
 
 use slopos_ostd::KArc;
 use slopos_ostd::klog_info;
@@ -3797,9 +3798,14 @@ pub fn test_sleep_entry_survives_unparked_wake() -> TestResult {
         TASK_FLAG_KERNEL_MODE,
     );
     if task_id == INVALID_TASK_ID {
+        klog_info!("SCHED_TEST: task_create failed (table full or allocation refused)");
         return TestResult::Fail;
     }
     let Some(task_guard) = task_find_by_id(task_id) else {
+        klog_info!(
+            "SCHED_TEST: task {} not in the registry after create",
+            task_id
+        );
         task_terminate(task_id);
         return TestResult::Fail;
     };
@@ -5487,7 +5493,7 @@ use slopos_ostd::sync::wait_queue::{ParkedTestNode, WaitAbort, WaitQueue};
 /// the pre-check fast path, without touching the scheduler backend.
 pub fn test_wait_event_until_pre_check_returns_carried_value() -> TestResult {
     let _fixture = SchedFixture::new();
-    let wq = WaitQueue::new();
+    let wq = WaitQueue::new(lock_class!("test.wq1", LOCK_LEVEL_RESOURCE));
     let r = wq.wait_event_until(|| Some(0xCAFE_F00D_u32));
     if r == Ok(0xCAFE_F00D_u32) {
         TestResult::Pass
@@ -5504,7 +5510,7 @@ pub fn test_wait_event_until_pre_check_returns_carried_value() -> TestResult {
 /// pre-check fast path.
 pub fn test_wait_event_timeout_until_pre_check_ready() -> TestResult {
     let _fixture = SchedFixture::new();
-    let wq = WaitQueue::new();
+    let wq = WaitQueue::new(lock_class!("test.wq2", LOCK_LEVEL_RESOURCE));
     let r = wq.wait_event_timeout_until(|| Some(7u32), 100);
     if r == Ok(7u32) {
         TestResult::Pass
@@ -5522,7 +5528,7 @@ pub fn test_wait_event_timeout_until_pre_check_ready() -> TestResult {
 /// what this fixture leaves behind), and must not hang or panic.
 pub fn test_wait_event_timeout_until_does_not_return_ready_on_none() -> TestResult {
     let _fixture = SchedFixture::new();
-    let wq = WaitQueue::new();
+    let wq = WaitQueue::new(lock_class!("test.wq3", LOCK_LEVEL_RESOURCE));
     let r = wq.wait_event_timeout_until(|| None::<u32>, 1);
     match r {
         Err(WaitAbort::Timeout | WaitAbort::NoRuntime) => TestResult::Pass,
@@ -5539,7 +5545,7 @@ pub fn test_wait_event_timeout_until_does_not_return_ready_on_none() -> TestResu
 /// `wait_event` succeeds on the pre-check fast path.
 pub fn test_wait_event_bool_wrapper_pre_check_true() -> TestResult {
     let _fixture = SchedFixture::new();
-    let wq = WaitQueue::new();
+    let wq = WaitQueue::new(lock_class!("test.wq4", LOCK_LEVEL_RESOURCE));
     if wq.wait_event(|| true).is_ok() {
         TestResult::Pass
     } else {
@@ -5551,7 +5557,7 @@ pub fn test_wait_event_bool_wrapper_pre_check_true() -> TestResult {
 /// condition never holds.
 pub fn test_wait_event_timeout_bool_wrapper_times_out() -> TestResult {
     let _fixture = SchedFixture::new();
-    let wq = WaitQueue::new();
+    let wq = WaitQueue::new(lock_class!("test.wq5", LOCK_LEVEL_RESOURCE));
     if wq.wait_event_timeout(|| false, 1).is_err() {
         TestResult::Pass
     } else {
@@ -5565,7 +5571,7 @@ pub fn test_wait_event_timeout_bool_wrapper_times_out() -> TestResult {
 /// from the plan would be violated).
 pub fn test_has_waiters_fresh_queue_is_false() -> TestResult {
     let _fixture = SchedFixture::new();
-    let wq = WaitQueue::new();
+    let wq = WaitQueue::new(lock_class!("test.wq6", LOCK_LEVEL_RESOURCE));
     if !wq.has_waiters() {
         TestResult::Pass
     } else {
@@ -5573,10 +5579,10 @@ pub fn test_has_waiters_fresh_queue_is_false() -> TestResult {
     }
 }
 
-/// `WaitQueue::new()` produces a queue with `generation == 0`.
+/// `WaitQueue::new(lock_class!("test.wq7", LOCK_LEVEL_RESOURCE))` produces a queue with `generation == 0`.
 pub fn test_wait_queue_initial_generation() -> TestResult {
     let _fixture = SchedFixture::new();
-    let wq = WaitQueue::new();
+    let wq = WaitQueue::new(lock_class!("test.wq8", LOCK_LEVEL_RESOURCE));
     if wq.generation() == 0 {
         TestResult::Pass
     } else {
@@ -5589,7 +5595,7 @@ pub fn test_wait_queue_initial_generation() -> TestResult {
 /// the empty-pop branch cleanly.
 pub fn test_wake_one_on_empty_queue() -> TestResult {
     let _fixture = SchedFixture::new();
-    let wq = WaitQueue::new();
+    let wq = WaitQueue::new(lock_class!("test.wq9", LOCK_LEVEL_RESOURCE));
     if !wq.wake_one() {
         TestResult::Pass
     } else {
@@ -5600,7 +5606,7 @@ pub fn test_wake_one_on_empty_queue() -> TestResult {
 /// `wake_all` on an empty queue returns 0 without panicking.
 pub fn test_wake_all_on_empty_queue() -> TestResult {
     let _fixture = SchedFixture::new();
-    let wq = WaitQueue::new();
+    let wq = WaitQueue::new(lock_class!("test.wq10", LOCK_LEVEL_RESOURCE));
     if wq.wake_all() == 0 {
         TestResult::Pass
     } else {
@@ -5613,7 +5619,7 @@ pub fn test_wake_all_on_empty_queue() -> TestResult {
 /// least one waiter was actually woken.
 pub fn test_generation_unchanged_when_no_waiters() -> TestResult {
     let _fixture = SchedFixture::new();
-    let wq = WaitQueue::new();
+    let wq = WaitQueue::new(lock_class!("test.wq11", LOCK_LEVEL_RESOURCE));
     let gen_before = wq.generation();
     let _ = wq.wake_one();
     let _ = wq.wake_all();
@@ -5802,7 +5808,8 @@ fn test_preempt_reschedule_pending_deferred_not_lost() -> TestResult {
 }
 
 fn test_preempt_count_balanced_under_guard_churn() -> TestResult {
-    static CHURN_LOCK: SpinLock<u64> = SpinLock::new(0, LOCK_LEVEL_RESOURCE);
+    static CHURN_LOCK: SpinLock<u64> =
+        SpinLock::new(0, lock_class!("test.churn_lock", LOCK_LEVEL_RESOURCE));
 
     let baseline = slopos_ostd::sync::preempt_count();
     for i in 0..20_000u32 {
@@ -5932,7 +5939,7 @@ pub fn test_wake_against_reaped_waiter_is_inert() -> TestResult {
     };
     let weak = victim.downgrade_for_test();
 
-    let wq = WaitQueue::new();
+    let wq = WaitQueue::new(lock_class!("test.wq12", LOCK_LEVEL_RESOURCE));
     if !park_task_on_queue(&wq, victim_id) {
         klog_info!("SCHED_TEST: could not park the victim on a wait queue");
         let _ = task_terminate(victim_id);
@@ -6012,7 +6019,7 @@ pub fn test_wake_against_reaped_waiter_is_inert() -> TestResult {
     if live_id == INVALID_TASK_ID {
         return TestResult::Fail;
     }
-    let control = WaitQueue::new();
+    let control = WaitQueue::new(lock_class!("test.wq13", LOCK_LEVEL_RESOURCE));
     if !park_task_on_queue(&control, live_id) {
         let _ = task_terminate(live_id);
         return TestResult::Fail;
@@ -6547,7 +6554,7 @@ pub fn test_terminated_waiter_leaves_no_wait_node() -> TestResult {
 
     // Declared before the nodes so it outlives them: a node still linked at
     // drop reaches back through its queue pointer to unlink itself.
-    let wq = WaitQueue::new();
+    let wq = WaitQueue::new(lock_class!("test.wq14", LOCK_LEVEL_RESOURCE));
 
     let Some((victim, _victim_node)) = park_stack_waiter(&wq, b"ParkVictim\0") else {
         klog_info!("SCHED_TEST: could not park the victim");
@@ -6907,7 +6914,7 @@ slopos_testing::stest!(
 pub fn test_wait_node_unlinks_when_its_frame_unwinds() -> TestResult {
     let _fixture = SchedFixture::new();
 
-    let wq = WaitQueue::new();
+    let wq = WaitQueue::new(lock_class!("test.wq15", LOCK_LEVEL_RESOURCE));
     let Some((task_id, node)) = park_stack_waiter(&wq, b"UnwindWaiter\0") else {
         klog_info!("SCHED_TEST: could not park the waiter");
         return TestResult::Fail;

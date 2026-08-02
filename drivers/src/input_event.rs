@@ -15,6 +15,7 @@
 
 use core::sync::atomic::{AtomicI32, AtomicU8, AtomicU32, Ordering};
 use slopos_ostd::RingBuffer;
+use slopos_ostd::lock_class;
 use slopos_ostd::sync::{LOCK_LEVEL_REGISTRY, LOCK_LEVEL_RESOURCE, SeqLock, SpinLock};
 
 /// Monotonic millisecond timestamp for input events.
@@ -55,8 +56,12 @@ impl TaskEventQueue {
 }
 
 /// Per-task event queues — each independently locked.
-static TASK_QUEUES: [SpinLock<TaskEventQueue>; MAX_INPUT_TASKS] =
-    [const { SpinLock::new(TaskEventQueue::new(), LOCK_LEVEL_RESOURCE) }; MAX_INPUT_TASKS];
+static TASK_QUEUES: [SpinLock<TaskEventQueue>; MAX_INPUT_TASKS] = [const {
+    SpinLock::new(
+        TaskEventQueue::new(),
+        lock_class!("TASK_QUEUES", LOCK_LEVEL_RESOURCE),
+    )
+}; MAX_INPUT_TASKS];
 
 // =============================================================================
 // Focus State (SeqLock — lock-free reads from ISR, rare writes by compositor)
@@ -136,7 +141,8 @@ static SLOT_TASK_IDS: [AtomicU32; MAX_INPUT_TASKS] = [const { AtomicU32::new(0) 
 /// A queue lock is taken while this is held, and never the reverse: nothing
 /// acquires a second lock while holding a `TASK_QUEUES` entry, so the
 /// dependency graph over these two classes has a single edge and no cycle.
-static SLOT_REGISTRY: SpinLock<()> = SpinLock::new((), LOCK_LEVEL_REGISTRY);
+static SLOT_REGISTRY: SpinLock<()> =
+    SpinLock::new((), lock_class!("SLOT_REGISTRY", LOCK_LEVEL_REGISTRY));
 
 /// Find the slot a task's queue lives in, without taking any lock.
 fn find_queue(task_id: u32) -> Option<usize> {
@@ -561,8 +567,10 @@ impl ClipboardState {
     }
 }
 
-static CLIPBOARD: SpinLock<ClipboardState> =
-    SpinLock::new(ClipboardState::new(), LOCK_LEVEL_RESOURCE);
+static CLIPBOARD: SpinLock<ClipboardState> = SpinLock::new(
+    ClipboardState::new(),
+    lock_class!("CLIPBOARD", LOCK_LEVEL_RESOURCE),
+);
 
 pub fn clipboard_copy(src: &[u8]) -> usize {
     let mut clip = CLIPBOARD.lock();

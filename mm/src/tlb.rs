@@ -21,6 +21,7 @@
 
 use core::ptr;
 use core::sync::atomic::{AtomicBool, AtomicPtr, AtomicU32, AtomicU64, Ordering};
+use slopos_ostd::lock_class;
 
 use slopos_abi::addr::VirtAddr;
 use slopos_abi::task::INVALID_PROCESS_ID;
@@ -275,7 +276,10 @@ struct PerCpuTlbState {
 impl PerCpuTlbState {
     const fn new() -> Self {
         Self {
-            queue: SpinLock::new(PendingTlbReq::new(), LOCK_LEVEL_UNORDERED),
+            queue: SpinLock::new(
+                PendingTlbReq::new(),
+                lock_class!("PerCpuTlbState.queue", LOCK_LEVEL_UNORDERED),
+            ),
             // Start "ack=true" so a `wait_for_acks` issued before any push
             // returns immediately (cf. asterinas `ACK_REMOTE_FLUSH = true`
             // initial value). Real waits always queue+clear first.

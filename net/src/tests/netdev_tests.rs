@@ -7,6 +7,10 @@
 //! - Additional coverage: features bitflags, registry register/unregister/enumerate,
 //!   handle data-plane ops, registry capacity exhaustion.
 
+use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+
+use slopos_ostd::lock_class;
+use slopos_ostd::sync::lock_tracking::LOCK_LEVEL_REGISTRY;
 use slopos_ostd::sync::{LOCK_LEVEL_RESOURCE, SpinLock};
 use slopos_ostd::{KArc, KVec};
 use slopos_testing::TestResult;
@@ -30,6 +34,7 @@ struct MockNetDevice {
     feats: NetDeviceFeatures,
     stats: SpinLock<NetDeviceStats>,
     tx_count: SpinLock<u64>,
+    poll_tx_count: SpinLock<u64>,
     is_up: SpinLock<bool>,
 }
 
@@ -38,10 +43,23 @@ impl MockNetDevice {
         Self {
             mac_addr: mac,
             dev_mtu: mtu,
+            poll_tx_count: SpinLock::new(
+                0,
+                lock_class!("test.netdev_dev.poll_tx_count", LOCK_LEVEL_RESOURCE),
+            ),
             feats: NetDeviceFeatures::empty(),
-            stats: SpinLock::new(NetDeviceStats::new(), LOCK_LEVEL_RESOURCE),
-            tx_count: SpinLock::new(0, LOCK_LEVEL_RESOURCE),
-            is_up: SpinLock::new(false, LOCK_LEVEL_RESOURCE),
+            stats: SpinLock::new(
+                NetDeviceStats::new(),
+                lock_class!("test.netdev_dev.stats", LOCK_LEVEL_RESOURCE),
+            ),
+            tx_count: SpinLock::new(
+                0,
+                lock_class!("test.netdev_dev.tx_count", LOCK_LEVEL_RESOURCE),
+            ),
+            is_up: SpinLock::new(
+                true,
+                lock_class!("test.netdev_dev.is_up", LOCK_LEVEL_RESOURCE),
+            ),
         }
     }
 
@@ -53,11 +71,19 @@ impl MockNetDevice {
 
 impl NetDevice for MockNetDevice {
     fn tx(&self, _pkt: PacketBuf) -> Result<(), NetError> {
+        // Models the `set_down` contract: a downed device rejects sends.
+        if !*self.is_up.lock() {
+            return Err(NetError::NetworkUnreachable);
+        }
         let mut count = self.tx_count.lock();
         *count += 1;
         let mut stats = self.stats.lock();
         stats.tx_packets += 1;
         Ok(())
+    }
+
+    fn poll_tx(&self) {
+        *self.poll_tx_count.lock() += 1;
     }
 
     fn poll_rx(&self, _budget: usize, _pool: &'static PacketPool) -> KVec<PacketBuf> {
@@ -238,7 +264,7 @@ pub fn test_features_default_is_empty() -> TestResult {
 // =============================================================================
 
 pub fn test_registry_register_and_enumerate() -> TestResult {
-    let registry = NetDeviceRegistry::new();
+    let registry = NetDeviceRegistry::new(lock_class!("test.netdev_registry", LOCK_LEVEL_REGISTRY));
     assert_eq_test!(registry.device_count(), 0, "empty registry has 0 devices");
     assert_test!(
         registry.enumerate().is_empty(),
@@ -266,7 +292,7 @@ pub fn test_registry_register_and_enumerate() -> TestResult {
 }
 
 pub fn test_registry_register_multiple() -> TestResult {
-    let registry = NetDeviceRegistry::new();
+    let registry = NetDeviceRegistry::new(lock_class!("test.netdev_registry", LOCK_LEVEL_REGISTRY));
 
     let mac1 = MacAddr([0x02, 0x00, 0x00, 0x00, 0x00, 0x01]);
     let mac2 = MacAddr([0x02, 0x00, 0x00, 0x00, 0x00, 0x02]);
@@ -297,7 +323,7 @@ pub fn test_registry_register_multiple() -> TestResult {
 }
 
 pub fn test_registry_unregister() -> TestResult {
-    let registry = NetDeviceRegistry::new();
+    let registry = NetDeviceRegistry::new(lock_class!("test.netdev_registry", LOCK_LEVEL_REGISTRY));
 
     let mac = MacAddr([0x02, 0x00, 0x00, 0x00, 0x00, 0xAA]);
     let _handle =
@@ -318,25 +344,82 @@ pub fn test_registry_unregister() -> TestResult {
     pass!()
 }
 
+/// A retained handle outlives unregistration, so it is the one path that can
+/// still reach a retired device. Its send failing is what proves `set_down`
+/// actually ran, which the previous "no panic" assertion could not.
 pub fn test_registry_unregister_calls_set_down() -> TestResult {
-    let registry = NetDeviceRegistry::new();
+    ensure_pool_init();
+    let registry = NetDeviceRegistry::new(lock_class!("test.netdev_registry", LOCK_LEVEL_REGISTRY));
     let mac = MacAddr([0x02, 0x00, 0x00, 0x00, 0x00, 0xBB]);
     let dev = MockNetDevice::new(mac, 1500);
-    // set_up before registering (simulating a driver that brought the link up).
     dev.set_up();
 
-    // We need to check set_down was called after unregister.
-    // Since we can't access the device after unregister (it's dropped),
-    // we verify indirectly: set_down() is called during unregister as
-    // a design contract. The test proves unregister succeeds without panic.
-    let _handle = registry.register(KArc::try_new(dev).expect("test alloc"));
+    let handle = registry
+        .register(KArc::try_new(dev).expect("test alloc"))
+        .expect("register");
+    let pkt = PacketBuf::alloc().expect("alloc pkt");
+    assert_test!(handle.tx(pkt).is_ok(), "a live device accepts a send");
+
     let removed = registry.unregister(DevIndex(0));
-    assert_test!(removed, "unregister succeeded (set_down called)");
+    assert_test!(removed, "unregister succeeded");
+
+    let pkt = PacketBuf::alloc().expect("alloc pkt");
+    assert_test!(
+        handle.tx(pkt).is_err(),
+        "a retained handle must not drive a retired device"
+    );
+    pass!()
+}
+
+/// The registry stops resolving a device the moment retirement begins, so an
+/// index-addressed send cannot reach one that is going away.
+pub fn test_registry_unregister_rejects_tx_by_index() -> TestResult {
+    ensure_pool_init();
+    let registry = NetDeviceRegistry::new(lock_class!("test.netdev_registry", LOCK_LEVEL_REGISTRY));
+    let mac = MacAddr([0x02, 0x00, 0x00, 0x00, 0x00, 0xBC]);
+    let _handle = registry
+        .register(KArc::try_new(MockNetDevice::new(mac, 1500)).expect("test alloc"))
+        .expect("register");
+
+    registry.unregister(DevIndex(0));
+
+    let pkt = PacketBuf::alloc().expect("alloc pkt");
+    assert_test!(
+        registry.tx_by_index(DevIndex(0), pkt).is_err(),
+        "an unregistered index must not transmit"
+    );
+    assert_test!(
+        registry.mac_by_index(DevIndex(0)).is_none(),
+        "an unregistered index resolves to nothing"
+    );
+    pass!()
+}
+
+/// At capacity every device must be polled. The previous snapshot pushed into
+/// a `KVec` and dropped a device on allocation failure, which stalls that
+/// device's TX reclaim with nothing to report.
+pub fn test_registry_poll_tx_all_visits_every_device() -> TestResult {
+    let registry = NetDeviceRegistry::new(lock_class!("test.netdev_registry", LOCK_LEVEL_REGISTRY));
+    let mut devices = KVec::new();
+    for i in 0..8u8 {
+        let mac = MacAddr([0x02, 0x00, 0x00, 0x00, 0x00, i]);
+        let dev = KArc::try_new(MockNetDevice::new(mac, 1500)).expect("test alloc");
+        let cloned = KArc::clone(&dev);
+        registry.register(cloned).expect("register");
+        devices.push(dev).expect("test alloc");
+    }
+    assert_eq_test!(registry.device_count(), 8, "registry at capacity");
+
+    registry.poll_tx_all();
+
+    for dev in devices.iter() {
+        assert_eq_test!(*dev.poll_tx_count.lock(), 1, "every device polled once");
+    }
     pass!()
 }
 
 pub fn test_registry_slot_reuse() -> TestResult {
-    let registry = NetDeviceRegistry::new();
+    let registry = NetDeviceRegistry::new(lock_class!("test.netdev_registry", LOCK_LEVEL_REGISTRY));
 
     let mac1 = MacAddr([0x02, 0x00, 0x00, 0x00, 0x00, 0x01]);
     let mac2 = MacAddr([0x02, 0x00, 0x00, 0x00, 0x00, 0x02]);
@@ -357,8 +440,86 @@ pub fn test_registry_slot_reuse() -> TestResult {
     pass!()
 }
 
+/// The window `unregister` opens: the slot must stay occupied until `set_down`
+/// returns. Free it first and `register` hands the same index to a different
+/// device while the old one is still shutting down, after which an
+/// index-addressed send reaches the wrong NIC.
+///
+/// `set_down` re-enters the registry from inside that window, which is the
+/// only vantage point the invariant is observable from.
+static RETIRE_PROBE_REGISTRY: NetDeviceRegistry =
+    NetDeviceRegistry::new(lock_class!("test.netdev_retire_probe", LOCK_LEVEL_REGISTRY));
+
+/// Index handed out by a `register` racing the retirement, or `usize::MAX` if
+/// the registry refused.
+static RETIRE_PROBE_REISSUED: AtomicUsize = AtomicUsize::new(usize::MAX);
+/// Whether the retiring index still resolved to a device mid-retirement.
+static RETIRE_PROBE_RESOLVED: AtomicBool = AtomicBool::new(true);
+
+struct RetireProbeDevice;
+
+impl NetDevice for RetireProbeDevice {
+    fn tx(&self, _pkt: PacketBuf) -> Result<(), NetError> {
+        Ok(())
+    }
+
+    fn poll_rx(&self, _budget: usize, _pool: &'static PacketPool) -> KVec<PacketBuf> {
+        KVec::new()
+    }
+
+    fn set_up(&self) {}
+
+    fn set_down(&self) {
+        let mac = MacAddr([0x02, 0x00, 0x00, 0x00, 0x00, 0xEE]);
+        let dev = KArc::try_new(MockNetDevice::new(mac, 1500)).expect("test alloc");
+        let reissued = RETIRE_PROBE_REGISTRY
+            .register(dev)
+            .map(|h| h.index().0)
+            .unwrap_or(usize::MAX);
+        RETIRE_PROBE_REISSUED.store(reissued, Ordering::Relaxed);
+        RETIRE_PROBE_RESOLVED.store(
+            RETIRE_PROBE_REGISTRY.mac_by_index(DevIndex(0)).is_some(),
+            Ordering::Relaxed,
+        );
+    }
+
+    fn mtu(&self) -> u16 {
+        1500
+    }
+
+    fn mac(&self) -> MacAddr {
+        MacAddr([0x02, 0x00, 0x00, 0x00, 0x00, 0xED])
+    }
+
+    fn stats(&self) -> NetDeviceStats {
+        NetDeviceStats::new()
+    }
+
+    fn features(&self) -> NetDeviceFeatures {
+        NetDeviceFeatures::empty()
+    }
+}
+
+pub fn test_registry_retiring_slot_is_not_reissued() -> TestResult {
+    let probe = KArc::try_new(RetireProbeDevice).expect("test alloc");
+    let handle = RETIRE_PROBE_REGISTRY.register(probe).expect("register");
+    assert_eq_test!(handle.index(), DevIndex(0), "probe at index 0");
+
+    RETIRE_PROBE_REGISTRY.unregister(DevIndex(0));
+
+    assert_test!(
+        RETIRE_PROBE_REISSUED.load(Ordering::Relaxed) != 0,
+        "index 0 was reissued while its device was still shutting down"
+    );
+    assert_test!(
+        !RETIRE_PROBE_RESOLVED.load(Ordering::Relaxed),
+        "a retiring index must resolve to nothing"
+    );
+    pass!()
+}
+
 pub fn test_registry_unregister_out_of_range() -> TestResult {
-    let registry = NetDeviceRegistry::new();
+    let registry = NetDeviceRegistry::new(lock_class!("test.netdev_registry", LOCK_LEVEL_REGISTRY));
     let removed = registry.unregister(DevIndex(999));
     assert_test!(!removed, "unregister out-of-range returns false");
     pass!()
@@ -371,7 +532,7 @@ pub fn test_registry_unregister_out_of_range() -> TestResult {
 pub fn test_handle_tx() -> TestResult {
     ensure_pool_init();
 
-    let registry = NetDeviceRegistry::new();
+    let registry = NetDeviceRegistry::new(lock_class!("test.netdev_registry", LOCK_LEVEL_REGISTRY));
     let mac = MacAddr([0x02, 0xCA, 0xFE, 0x00, 0x00, 0x01]);
     let dev = KArc::try_new(MockNetDevice::new(mac, 1500)).expect("test alloc");
     let handle = match registry.register(dev) {
@@ -397,7 +558,7 @@ pub fn test_handle_tx() -> TestResult {
 pub fn test_handle_poll_rx_empty() -> TestResult {
     ensure_pool_init();
 
-    let registry = NetDeviceRegistry::new();
+    let registry = NetDeviceRegistry::new(lock_class!("test.netdev_registry", LOCK_LEVEL_REGISTRY));
     let mac = MacAddr([0x02, 0xDE, 0xAD, 0x00, 0x00, 0x01]);
     let dev = KArc::try_new(MockNetDevice::new(mac, 1500)).expect("test alloc");
     let handle = match registry.register(dev) {
@@ -411,7 +572,7 @@ pub fn test_handle_poll_rx_empty() -> TestResult {
 }
 
 pub fn test_handle_stats() -> TestResult {
-    let registry = NetDeviceRegistry::new();
+    let registry = NetDeviceRegistry::new(lock_class!("test.netdev_registry", LOCK_LEVEL_REGISTRY));
     let mac = MacAddr([0x02, 0x00, 0x00, 0x00, 0x00, 0x55]);
     let dev = KArc::try_new(MockNetDevice::new(mac, 1500)).expect("test alloc");
     let handle = match registry.register(dev) {
@@ -425,7 +586,7 @@ pub fn test_handle_stats() -> TestResult {
 }
 
 pub fn test_handle_features() -> TestResult {
-    let registry = NetDeviceRegistry::new();
+    let registry = NetDeviceRegistry::new(lock_class!("test.netdev_registry", LOCK_LEVEL_REGISTRY));
     let mac = MacAddr([0x02, 0x00, 0x00, 0x00, 0x00, 0x66]);
     let dev = KArc::try_new(
         MockNetDevice::new(mac, 1500)
@@ -459,7 +620,7 @@ pub fn test_handle_features() -> TestResult {
 pub fn test_handle_tx_does_not_acquire_registry_lock() -> TestResult {
     ensure_pool_init();
 
-    let registry = NetDeviceRegistry::new();
+    let registry = NetDeviceRegistry::new(lock_class!("test.netdev_registry", LOCK_LEVEL_REGISTRY));
     let mac = MacAddr([0x02, 0x00, 0x00, 0x00, 0x00, 0x77]);
     let dev = KArc::try_new(MockNetDevice::new(mac, 1500)).expect("test alloc");
     let handle = match registry.register(dev) {
@@ -514,6 +675,18 @@ slopos_testing::stest!(
     suite = netdev
 );
 slopos_testing::stest!(name = test_registry_slot_reuse, suite = netdev);
+slopos_testing::stest!(
+    name = test_registry_unregister_rejects_tx_by_index,
+    suite = netdev
+);
+slopos_testing::stest!(
+    name = test_registry_poll_tx_all_visits_every_device,
+    suite = netdev
+);
+slopos_testing::stest!(
+    name = test_registry_retiring_slot_is_not_reissued,
+    suite = netdev
+);
 slopos_testing::stest!(name = test_registry_unregister_out_of_range, suite = netdev);
 // DeviceHandle data-plane
 slopos_testing::stest!(name = test_handle_tx, suite = netdev);

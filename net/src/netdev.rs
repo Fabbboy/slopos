@@ -23,6 +23,8 @@
 //! RX without aliasing `&mut` references through the raw pointer in `DeviceHandle`.
 
 use core::fmt;
+use slopos_ostd::lock_class;
+use slopos_ostd::sync::lock_tracking::LockClassKey;
 
 use bitflags::bitflags;
 use slopos_ostd::mm::frame::AnonymousMeta;
@@ -63,7 +65,9 @@ pub struct CsumOffload {
 /// - `tx()`: May be called from multiple socket contexts concurrently.
 ///   The [`DeviceHandle`] serializes TX via a per-device lock.
 /// - `poll_rx()`: Single consumer only (the NAPI loop).  No external lock needed.
-/// - `set_up()`/`set_down()`: Control plane only, called under the registry lock.
+/// - `set_up()`/`set_down()`: Control plane only, called *outside* the registry
+///   lock — a driver registers itself while holding its own state lock, so the
+///   registry must not call into a device while holding its.
 /// - `mtu()`, `mac()`, `stats()`, `features()`: Read-only, safe from any context.
 pub trait NetDevice: Send + Sync {
     /// Transmit one packet.  The packet is consumed (moved into the driver's TX ring).
@@ -135,8 +139,15 @@ pub trait NetDevice: Send + Sync {
 
     /// Bring the link down (drain queues, disable interrupt delivery).
     ///
-    /// Must be called before unregistration.  After this returns, the driver
-    /// must not access any shared resources (DMA rings, interrupt vectors).
+    /// After this returns, `tx`/`tx_zerocopy*` must fail and `poll_rx` must
+    /// yield nothing. The device enforces that under its own state lock, which
+    /// is what orders a send that resolved the device just before retirement
+    /// against the retirement itself — the registry has already stopped
+    /// resolving this device by the time it calls here, so nothing else can.
+    ///
+    /// A [`DeviceHandle`] outlives unregistration and keeps addressing a live
+    /// allocation, so this is also what stops a retained handle from driving a
+    /// retired device.
     fn set_down(&self);
 
     /// Maximum transmission unit (payload bytes, excluding Ethernet header).
@@ -384,16 +395,26 @@ const MAX_DEVICES: usize = 8;
 /// - The device outlives every [`DeviceHandle`] to it: registry and handles
 ///   share ownership through `KArc`, so `unregister` frees the device only
 ///   once the last handle is gone.
-/// - `unregister` sets the device down before releasing the registry's
-///   reference, so a surviving handle addresses a live but downed device.
+/// - A retiring slot stays occupied until `set_down` returns, so its index
+///   cannot be reissued to a different device while the old one is still
+///   shutting down. The registry stops resolving it the moment retirement
+///   begins, so no new call reaches a device that is going away.
 pub struct NetDeviceRegistry {
     pub(crate) inner: SpinLock<RegistryInner>,
+}
+
+/// One registry slot.
+pub(crate) struct DeviceSlot {
+    dev: KArc<dyn NetDevice + Send + Sync>,
+    /// Set for the window between `unregister` deciding to remove this device
+    /// and `set_down` returning. The slot is neither resolvable nor free.
+    retiring: bool,
 }
 
 /// Inner state behind the registry's `SpinLock`.
 pub(crate) struct RegistryInner {
     /// Device slots.  `None` = empty slot.
-    slots: [Option<KArc<dyn NetDevice + Send + Sync>>; MAX_DEVICES],
+    slots: [Option<DeviceSlot>; MAX_DEVICES],
     /// Number of occupied slots.
     count: usize,
 }
@@ -404,20 +425,25 @@ pub(crate) struct RegistryInner {
 ///
 /// Drivers call [`register`](NetDeviceRegistry::register) during probe to add
 /// themselves, and receive a [`DeviceHandle`] for data-plane operations.
-pub static DEVICE_REGISTRY: NetDeviceRegistry = NetDeviceRegistry::new();
+pub static DEVICE_REGISTRY: NetDeviceRegistry =
+    NetDeviceRegistry::new(lock_class!("DEVICE_REGISTRY", LOCK_LEVEL_REGISTRY));
 
 impl NetDeviceRegistry {
     /// Create an empty registry.
     ///
     /// No heap allocation occurs until the first [`register`](Self::register) call.
-    pub const fn new() -> Self {
+    /// The class comes from the caller so a scratch registry built by a
+    /// test is a different lockdep class from the global one — the two are
+    /// genuinely different locks, and a test that deliberately inverts its
+    /// own order must not teach that order about the production registry.
+    pub const fn new(class: &'static LockClassKey) -> Self {
         Self {
             inner: SpinLock::new(
                 RegistryInner {
                     slots: [const { None }; MAX_DEVICES],
                     count: 0,
                 },
-                LOCK_LEVEL_REGISTRY,
+                class,
             ),
         }
     }
@@ -431,13 +457,21 @@ impl NetDeviceRegistry {
     pub fn register(&self, dev: KArc<dyn NetDevice + Send + Sync>) -> Option<DeviceHandle> {
         let mut inner = self.inner.lock();
         for (i, slot) in inner.slots.iter_mut().enumerate() {
+            // A retiring slot is still `Some`, so it cannot be selected here
+            // while its previous device is shutting down.
             if slot.is_none() {
                 let handle = DeviceHandle {
                     dev: KArc::clone(&dev),
                     index: DevIndex(i),
-                    tx_lock: SpinLock::new((), LOCK_LEVEL_RESOURCE),
+                    tx_lock: SpinLock::new(
+                        (),
+                        lock_class!("DeviceHandle.tx_lock", LOCK_LEVEL_RESOURCE),
+                    ),
                 };
-                *slot = Some(dev);
+                *slot = Some(DeviceSlot {
+                    dev,
+                    retiring: false,
+                });
                 inner.count += 1;
                 return Some(handle);
             }
@@ -447,26 +481,70 @@ impl NetDeviceRegistry {
 
     /// Unregister a network device.
     ///
-    /// Calls [`set_down()`](NetDevice::set_down) on the device, then releases
-    /// the registry's reference. Outstanding [`DeviceHandle`]s keep the device
-    /// alive; they observe a downed device rather than freed memory.
+    /// Retirement runs in two phases so the index is never reissued while the
+    /// old device is still shutting down: the slot is marked retiring under
+    /// the lock, [`set_down()`](NetDevice::set_down) runs outside it, and only
+    /// then is the slot freed. Calling out with the registry lock held would
+    /// close a registry/device-state cycle, because a driver registers itself
+    /// while holding the same state lock its methods take.
     ///
-    /// Returns `true` if a device was found and removed, `false` if the slot
-    /// was already empty.
+    /// Outstanding [`DeviceHandle`]s keep the device alive; they observe a
+    /// downed device rather than freed memory.
+    ///
+    /// Returns `true` if a device was found and retired, `false` if the slot
+    /// was already empty or another caller is already retiring it.
     pub fn unregister(&self, index: DevIndex) -> bool {
-        let mut inner = self.inner.lock();
         let idx = index.0;
         if idx >= MAX_DEVICES {
             return false;
         }
-        if let Some(dev) = inner.slots[idx].take() {
-            dev.set_down();
+        let dev = {
+            let mut inner = self.inner.lock();
+            let Some(slot) = inner.slots[idx].as_mut() else {
+                return false;
+            };
+            if slot.retiring {
+                return false;
+            }
+            slot.retiring = true;
+            let dev = KArc::clone(&slot.dev);
             inner.count -= 1;
-            // Drops the registry's reference only. The allocation goes away
-            // with the last `DeviceHandle`.
-            true
-        } else {
-            false
+            dev
+        };
+
+        dev.set_down();
+
+        // Freeing the slot last is what makes the index safe to reissue: no
+        // resolve has handed this device out since the retiring mark, and it
+        // is now down.
+        self.inner.lock().slots[idx] = None;
+        true
+    }
+
+    /// Clone the device at `index` out of the registry and release the lock.
+    ///
+    /// Every call *into* a device must go through this, for the lock-order
+    /// reason [`Self::unregister`] gives. A retiring slot resolves to `None`,
+    /// so a device that is going away receives no new work.
+    fn device_at(&self, index: DevIndex) -> Option<KArc<dyn NetDevice + Send + Sync>> {
+        let inner = self.inner.lock();
+        let slot = inner.slots.get(index.0)?.as_ref()?;
+        (!slot.retiring).then(|| KArc::clone(&slot.dev))
+    }
+
+    /// Snapshot every resolvable device, releasing the lock before the caller
+    /// touches any of them. Same rationale as [`Self::device_at`].
+    ///
+    /// Fills a caller-provided array rather than allocating: this runs on the
+    /// TX-completion polling path, where an allocation failure would silently
+    /// drop a device and stall its reclaim with nothing to report.
+    fn snapshot_devices(&self, out: &mut [Option<KArc<dyn NetDevice + Send + Sync>>; MAX_DEVICES]) {
+        let inner = self.inner.lock();
+        for (dst, slot) in out.iter_mut().zip(inner.slots.iter()) {
+            *dst = slot
+                .as_ref()
+                .filter(|s| !s.retiring)
+                .map(|s| KArc::clone(&s.dev));
         }
     }
 
@@ -476,10 +554,16 @@ impl NetDeviceRegistry {
     /// `is_up` is always `true` for registered devices (link-state tracking
     /// is deferred).
     pub fn enumerate(&self) -> KVec<(DevIndex, MacAddr, bool)> {
-        let inner = self.inner.lock();
-        let mut result = KVec::new();
-        for (i, slot) in inner.slots.iter().enumerate() {
-            if let Some(dev) = slot {
+        let mut devices = [const { None }; MAX_DEVICES];
+        self.snapshot_devices(&mut devices);
+        // Reserved up front so no device is lost to a mid-loop allocation
+        // failure; a failed reserve yields an empty list, which is the
+        // existing total-failure answer.
+        let Ok(mut result) = KVec::with_capacity(MAX_DEVICES) else {
+            return KVec::new();
+        };
+        for (i, dev) in devices.iter().enumerate() {
+            if let Some(dev) = dev {
                 let _ = result.push((DevIndex(i), dev.mac(), true));
             }
         }
@@ -494,25 +578,24 @@ impl NetDeviceRegistry {
 
     /// Transmit a packet through a device identified by index.
     ///
-    /// Takes the registry lock briefly.  The device's `tx()` method uses
-    /// `&self` with interior mutability, so concurrent TX calls are safe
-    /// (serialized by the device's own internal lock).
+    /// Resolves the device under the registry lock and releases it before
+    /// transmitting, so no registry/device-state edge is created. The
+    /// device's `tx()` takes `&self` with interior mutability, so concurrent
+    /// TX calls are serialised by the device's own lock.
     ///
     /// For hot-path TX where a [`DeviceHandle`] is already available,
     /// prefer [`DeviceHandle::tx`] which bypasses the registry lock.
     pub fn tx_by_index(&self, index: DevIndex, pkt: PacketBuf) -> Result<(), NetError> {
-        let inner = self.inner.lock();
-        match inner.slots.get(index.0) {
-            Some(Some(dev)) => dev.tx(pkt),
-            _ => Err(NetError::NetworkUnreachable),
+        match self.device_at(index) {
+            Some(dev) => dev.tx(pkt),
+            None => Err(NetError::NetworkUnreachable),
         }
     }
 
     /// Zero-copy transmit through a device identified by index (see
     /// [`NetDevice::tx_zerocopy`]). Mirrors [`tx_by_index`](Self::tx_by_index)'s
-    /// registry-lock shape so the SlopRing `OP_SEND_ZC` path keeps the exact
-    /// lock ordering of the copy path (ring → registry → device state) — no new
-    /// cross-lock edge.
+    /// resolve-then-release shape, so the SlopRing `OP_SEND_ZC` path keeps
+    /// the exact lock ordering of the copy path and adds no cross-lock edge.
     pub fn tx_zerocopy_by_index(
         &self,
         index: DevIndex,
@@ -522,10 +605,9 @@ impl NetDeviceRegistry {
         keepalive: KVec<UFrame<AnonymousMeta>>,
         token: TxReclaimToken,
     ) -> Result<(), NetError> {
-        let inner = self.inner.lock();
-        match inner.slots.get(index.0) {
-            Some(Some(dev)) => dev.tx_zerocopy(net_hdr, runs, csum, keepalive, token),
-            _ => Err(NetError::NetworkUnreachable),
+        match self.device_at(index) {
+            Some(dev) => dev.tx_zerocopy(net_hdr, runs, csum, keepalive, token),
+            None => Err(NetError::NetworkUnreachable),
         }
     }
 
@@ -541,10 +623,9 @@ impl NetDeviceRegistry {
         keepalive: KVec<UFrame<AnonymousMeta>>,
         token: ZcNotifToken,
     ) -> Result<(), NetError> {
-        let inner = self.inner.lock();
-        match inner.slots.get(index.0) {
-            Some(Some(dev)) => dev.tx_zerocopy_notif(net_hdr, runs, csum, keepalive, token),
-            _ => Err(NetError::NetworkUnreachable),
+        match self.device_at(index) {
+            Some(dev) => dev.tx_zerocopy_notif(net_hdr, runs, csum, keepalive, token),
+            None => Err(NetError::NetworkUnreachable),
         }
     }
 
@@ -552,14 +633,13 @@ impl NetDeviceRegistry {
     /// [`NetDevice::poll_tx`]). The SlopRing harvest calls this when it has
     /// in-flight zero-copy sends so the deferred `SLOPRING_CQE_F_NOTIF` makes
     /// progress without relying on a TX-completion interrupt — the waiter drives
-    /// its own reclaim (caller-as-waiter). Takes only the registry lock; each
-    /// device's `poll_tx` takes its own state lock.
+    /// its own reclaim (caller-as-waiter). The registry lock is released before
+    /// any device's `poll_tx` runs.
     pub fn poll_tx_all(&self) {
-        let inner = self.inner.lock();
-        for slot in inner.slots.iter() {
-            if let Some(dev) = slot {
-                dev.poll_tx();
-            }
+        let mut devices = [const { None }; MAX_DEVICES];
+        self.snapshot_devices(&mut devices);
+        for dev in devices.iter().flatten() {
+            dev.poll_tx();
         }
     }
 
@@ -567,32 +647,29 @@ impl NetDeviceRegistry {
     ///
     /// Returns `None` if the device is not registered.
     pub fn mac_by_index(&self, index: DevIndex) -> Option<MacAddr> {
-        let inner = self.inner.lock();
-        inner.slots.get(index.0)?.as_ref().map(|dev| dev.mac())
+        Some(self.device_at(index)?.mac())
     }
 
     /// Read the feature flags of a device by index.
     ///
     /// Returns `None` if the device is not registered.
     pub fn features_by_index(&self, index: DevIndex) -> Option<NetDeviceFeatures> {
-        let inner = self.inner.lock();
-        inner.slots.get(index.0)?.as_ref().map(|dev| dev.features())
+        Some(self.device_at(index)?.features())
     }
 
     /// Poll RX packets from a device by index.
     ///
-    /// Takes the registry lock briefly.  Returns an empty Vec if the device
-    /// is not registered.
+    /// Resolves under the registry lock and releases it before polling.
+    /// Returns an empty Vec if the device is not registered.
     pub fn poll_rx_by_index(
         &self,
         index: DevIndex,
         budget: usize,
         pool: &'static super::pool::PacketPool,
     ) -> KVec<PacketBuf> {
-        let inner = self.inner.lock();
-        match inner.slots.get(index.0) {
-            Some(Some(dev)) => dev.poll_rx(budget, pool),
-            _ => KVec::new(),
+        match self.device_at(index) {
+            Some(dev) => dev.poll_rx(budget, pool),
+            None => KVec::new(),
         }
     }
 }

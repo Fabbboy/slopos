@@ -35,6 +35,7 @@
 
 use core::sync::atomic::{AtomicBool, Ordering};
 
+use slopos_ostd::sync::LockClassKey;
 use slopos_ostd::sync::kernel_io_task::{KernelIoStop, KernelIoToken, KthreadWait};
 
 /// IRQ-safe edge-triggered wake primitive.
@@ -58,10 +59,10 @@ pub struct NapiWaker {
 impl NapiWaker {
     /// `const`-fn constructor so this type can live in a `static`. `name`
     /// identifies the parked thread in the shutdown report.
-    pub const fn new(name: &'static str) -> Self {
+    pub const fn new(name: &'static str, class: &'static LockClassKey) -> Self {
         Self {
             armed: AtomicBool::new(false),
-            stop: KernelIoStop::new(name),
+            stop: KernelIoStop::new(name, class),
         }
     }
 

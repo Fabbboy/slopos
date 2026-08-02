@@ -419,7 +419,7 @@ fn boot_step_run_tests_fn(_ctx: &mut BootCtx<'_, BspInit>) -> i32 {
 
     // Post-suite counterpart to the priority-89 boot step. The delta between
     // the two lines is what catches the test suite itself exhausting a pool.
-    slopos_ostd::kdiag::kdiag_dump_lock_graph();
+    slopos_ostd::kdiag::kdiag_dump_lock_graph("post-kernel-tests");
 
     // Stash the kernel-phase summary so the userland-phase syscall
     // (`SYSCALL_RUN_USERLAND_TESTS`, invoked from /sbin/init) can merge
@@ -596,7 +596,7 @@ crate::boot_init!(
 /// This is the line that makes "the validator turned itself off during memory
 /// init" visible rather than inferred.
 fn boot_step_lockdep_report_fn(_ctx: &mut BootCtx<'_, BspInit>) {
-    slopos_ostd::kdiag::kdiag_dump_lock_graph();
+    slopos_ostd::kdiag::kdiag_dump_lock_graph("boot");
 }
 
 crate::boot_init!(

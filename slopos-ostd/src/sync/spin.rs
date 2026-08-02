@@ -27,6 +27,7 @@ use crate::cpu::x86_64 as cpu;
 use crate::mm::AllocError;
 use crate::mm::init::{Init, init_from_closure};
 use crate::sync::lock_tracking;
+use crate::sync::lock_tracking::LockClassKey;
 
 // =============================================================================
 // Contended-spin relax hook
@@ -129,9 +130,9 @@ pub struct LockCore {
     /// has no window to get wrong.
     holder: AtomicU32,
     poisoned: AtomicBool,
-    /// Lock ordering level for deadlock prevention. Acquiring a lock at
-    /// level N while holding a lock at level >= N is a violation.
-    level: u8,
+    /// Declaration-site class. Carries the advisory level too, so two
+    /// instances of one site cannot disagree about their own rank.
+    class: &'static LockClassKey,
 }
 
 /// `holder` for a lock nobody has taken. Not zero: zero decodes as "CPU 0
@@ -149,13 +150,13 @@ const SPIN_STALL_ROUNDS: u32 = 1_000_000;
 
 impl LockCore {
     #[inline]
-    const fn new(level: u8) -> Self {
+    const fn new(class: &'static LockClassKey) -> Self {
         Self {
             next_ticket: AtomicU16::new(0),
             now_serving: AtomicU16::new(0),
             holder: AtomicU32::new(NO_HOLDER),
             poisoned: AtomicBool::new(false),
-            level,
+            class,
         }
     }
 
@@ -174,6 +175,13 @@ impl LockCore {
     /// nothing live across the call but `&self`.
     #[inline(never)]
     fn acquire(&self, my_ticket: u16) {
+        self.acquire_nested(my_ticket, 0)
+    }
+
+    /// [`LockCore::acquire`] registering under `subclass`, which gives this
+    /// acquisition a class distinct from the same declaration's subclass 0.
+    #[inline(never)]
+    fn acquire_nested(&self, my_ticket: u16, subclass: u8) {
         if self.now_serving.load(Ordering::Acquire) != my_ticket {
             self.await_ticket(my_ticket);
         }
@@ -183,10 +191,12 @@ impl LockCore {
         // SAFETY: this CPU holds the lock, and `self` outlives the guard
         // the caller is about to build.
         unsafe {
-            lock_tracking::push_lock(
+            lock_tracking::push_lock_ex(
                 self as *const _ as *const (),
                 lock_core_poison_fn,
-                self.level,
+                self.class,
+                subclass,
+                lock_tracking::ACQ_NONE,
             );
         }
     }
@@ -309,7 +319,7 @@ pub struct SpinLockGuard<'a, T> {
 pub struct PreemptMutex<T> {
     next_ticket: AtomicU16,
     now_serving: AtomicU16,
-    level: u8,
+    class: &'static LockClassKey,
     data: UnsafeCell<T>,
 }
 
@@ -325,9 +335,9 @@ pub struct PreemptMutexGuard<'a, T> {
 
 impl<T> SpinLock<T> {
     #[inline]
-    pub const fn new(data: T, level: u8) -> Self {
+    pub const fn new(data: T, class: &'static LockClassKey) -> Self {
         Self {
-            core: LockCore::new(level),
+            core: LockCore::new(class),
             data: UnsafeCell::new(data),
         }
     }
@@ -336,9 +346,12 @@ impl<T> SpinLock<T> {
     /// the heap slot, threading the caller's `data_init` recipe through
     /// to the inner `UnsafeCell<T>`. Lets large `T` (e.g. a 256-slot
     /// timer wheel) avoid materialising on the caller's stack between
-    /// allocation and the `SpinLock::new(data, ...)` call. Used via
-    /// `KBox::try_init(SpinLock::init_with(level, T::init_default()))`.
-    pub fn init_with<E>(level: u8, data_init: impl Init<T, E>) -> impl Init<Self, E>
+    /// allocation and the `SpinLock::new(data, class)` call. Used via
+    /// `KBox::try_init(SpinLock::init_with(class, T::init_default()))`.
+    pub fn init_with<E>(
+        class: &'static LockClassKey,
+        data_init: impl Init<T, E>,
+    ) -> impl Init<Self, E>
     where
         E: From<AllocError>,
     {
@@ -350,7 +363,7 @@ impl<T> SpinLock<T> {
         // same heap slot via `addr_of_mut!((*slot).data) as *mut T`.
         unsafe {
             init_from_closure(move |slot: *mut Self| -> Result<(), E> {
-                addr_of_mut!((*slot).core).write(LockCore::new(level));
+                addr_of_mut!((*slot).core).write(LockCore::new(class));
                 let data_ptr = addr_of_mut!((*slot).data) as *mut T;
                 data_init.__init(data_ptr)?;
                 Ok(())
@@ -361,7 +374,7 @@ impl<T> SpinLock<T> {
     /// Returns the lock ordering level.
     #[inline]
     pub const fn level(&self) -> u8 {
-        self.core.level
+        self.core.class.level()
     }
 
     /// Force unlock the mutex without proper guard handling.
@@ -472,6 +485,28 @@ impl<T> SpinLock<T> {
         // wrap-safe so this is correct for any number of acquisitions.
         let my_ticket = self.core.next_ticket.fetch_add(1, Ordering::Relaxed);
         self.core.acquire(my_ticket);
+
+        SpinLockGuard {
+            mutex: self,
+            saved_flags,
+            _preempt: preempt,
+        }
+    }
+
+    /// Acquire under `subclass`, splitting this declaration site into
+    /// distinct lockdep classes.
+    ///
+    /// For a site that legitimately holds two of its own instances at once
+    /// in a fixed order: giving the inner acquisition a different subclass
+    /// keeps that order *checked*, where `LO_DUPOK` would discard the check
+    /// for the whole class.
+    #[inline]
+    pub fn lock_nested(&self, subclass: u8) -> SpinLockGuard<'_, T> {
+        let preempt = PreemptGuard::new();
+        let saved_flags = cpu::save_flags_cli();
+
+        let my_ticket = self.core.next_ticket.fetch_add(1, Ordering::Relaxed);
+        self.core.acquire_nested(my_ticket, subclass);
 
         SpinLockGuard {
             mutex: self,
@@ -592,11 +627,11 @@ unsafe fn lock_core_poison_fn(addr: *const ()) {
 
 impl<T> PreemptMutex<T> {
     #[inline]
-    pub const fn new(data: T, level: u8) -> Self {
+    pub const fn new(data: T, class: &'static LockClassKey) -> Self {
         Self {
             next_ticket: AtomicU16::new(0),
             now_serving: AtomicU16::new(0),
-            level,
+            class,
             data: UnsafeCell::new(data),
         }
     }
@@ -622,7 +657,7 @@ impl<T> PreemptMutex<T> {
             lock_tracking::push_lock(
                 self as *const _ as *const (),
                 preempt_mutex_poison_fn::<T>,
-                self.level,
+                self.class,
             );
         }
 
@@ -651,7 +686,7 @@ impl<T> PreemptMutex<T> {
                 lock_tracking::push_lock(
                     self as *const _ as *const (),
                     preempt_mutex_poison_fn::<T>,
-                    self.level,
+                    self.class,
                 );
             }
             Some(PreemptMutexGuard {
@@ -734,7 +769,7 @@ pub struct IrqRwLock<T> {
     /// Number of writers waiting for access. When > 0, new readers yield
     /// to prevent writer starvation under continuous read traffic.
     writer_waiting: AtomicU32,
-    level: u8,
+    class: &'static LockClassKey,
     data: UnsafeCell<T>,
 }
 
@@ -760,11 +795,11 @@ pub struct IrqRwLockWriteGuard<'a, T> {
 impl<T> IrqRwLock<T> {
     /// Create a new IrqRwLock protecting the given data.
     #[inline]
-    pub const fn new(data: T, level: u8) -> Self {
+    pub const fn new(data: T, class: &'static LockClassKey) -> Self {
         Self {
             state: core::sync::atomic::AtomicI32::new(0),
             writer_waiting: AtomicU32::new(0),
-            level,
+            class,
             data: UnsafeCell::new(data),
         }
     }
@@ -785,11 +820,15 @@ impl<T> IrqRwLock<T> {
                     .is_ok()
                 {
                     // SAFETY: Preemption is disabled, self is a static lock.
+                    // Readers are recursive: nesting two read acquisitions
+                    // of one instance is legal here and is not a deadlock.
                     unsafe {
-                        lock_tracking::push_lock(
+                        lock_tracking::push_lock_ex(
                             self as *const _ as *const (),
                             irq_rwlock_poison_fn::<T>,
-                            self.level,
+                            self.class,
+                            0,
+                            lock_tracking::ACQ_RECURSIVE,
                         );
                     }
                     return IrqRwLockReadGuard {
@@ -819,11 +858,14 @@ impl<T> IrqRwLock<T> {
                 .is_ok()
             {
                 // SAFETY: Preemption is disabled, self is a static lock.
+                // Recursive for the same reason as `read`.
                 unsafe {
-                    lock_tracking::push_lock(
+                    lock_tracking::push_lock_ex(
                         self as *const _ as *const (),
                         irq_rwlock_poison_fn::<T>,
-                        self.level,
+                        self.class,
+                        0,
+                        lock_tracking::ACQ_RECURSIVE,
                     );
                 }
                 return Some(IrqRwLockReadGuard {
@@ -859,7 +901,7 @@ impl<T> IrqRwLock<T> {
                     lock_tracking::push_lock(
                         self as *const _ as *const (),
                         irq_rwlock_poison_fn::<T>,
-                        self.level,
+                        self.class,
                     );
                 }
                 return IrqRwLockWriteGuard {
@@ -890,7 +932,7 @@ impl<T> IrqRwLock<T> {
                 lock_tracking::push_lock(
                     self as *const _ as *const (),
                     irq_rwlock_poison_fn::<T>,
-                    self.level,
+                    self.class,
                 );
             }
             return Some(IrqRwLockWriteGuard {

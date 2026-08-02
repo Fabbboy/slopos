@@ -31,6 +31,7 @@ mod snapshot;
 mod watchdog;
 
 use slopos_ostd::klog_info;
+use slopos_ostd::lock_class;
 use slopos_ostd::sync::{LOCK_LEVEL_RESOURCE, SpinLock};
 
 use crate::driver_core::bound::BoundDevice;
@@ -41,7 +42,8 @@ use crate::xe_logic::platform::{self, PCI_VENDOR_INTEL};
 
 /// Command-line configuration parsed by boot before probe runs. `None` until
 /// [`set_config`] installs the parsed knobs; readers fall back to the defaults.
-static XE_CONFIG: SpinLock<Option<XeConfig>> = SpinLock::new(None, LOCK_LEVEL_RESOURCE);
+static XE_CONFIG: SpinLock<Option<XeConfig>> =
+    SpinLock::new(None, lock_class!("XE_CONFIG", LOCK_LEVEL_RESOURCE));
 
 /// Install the boot-parsed `xe.*` configuration. Called once from the PCI-init
 /// boot step before driver probe so [`xe_probe`] can read it back.

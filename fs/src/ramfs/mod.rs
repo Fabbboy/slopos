@@ -1,7 +1,8 @@
 use slopos_ostd::KVec;
 
 use crate::vfs::{FileStat, FileSystem, FileType, InodeId, VfsError, VfsResult};
-use slopos_ostd::sync::{LOCK_LEVEL_RESOURCE, SpinLock};
+use slopos_ostd::sync::SpinLock;
+use slopos_ostd::sync::lock_tracking::LockClassKey;
 
 const RAMFS_MAX_FILE_SIZE: usize = 16 * 1024 * 1024; // 16 MB per file
 use crate::MAX_NAME_LEN;
@@ -120,15 +121,6 @@ struct RamFsInner {
 }
 
 impl RamFsInner {
-    fn new() -> Self {
-        let mut inner = Self {
-            inodes: KVec::new(),
-            initialized: false,
-        };
-        inner.ensure_initialized();
-        inner
-    }
-
     fn ensure_initialized(&mut self) {
         if self.initialized {
             return;
@@ -196,22 +188,20 @@ pub struct RamFs {
 }
 
 impl RamFs {
-    pub fn new() -> Self {
-        Self {
-            inner: SpinLock::new(RamFsInner::new(), LOCK_LEVEL_RESOURCE),
-        }
-    }
-
-    /// Const-constructible version for statics. Inode storage is allocated
-    /// lazily on first access via `ensure_initialized`.
-    pub const fn new_const() -> Self {
+    /// Inode storage is allocated lazily on first access via
+    /// `ensure_initialized`.
+    ///
+    /// The class comes from the caller: a path walk that crosses a mount
+    /// point holds one mount's lock while taking another's, and two mounts
+    /// sharing a class would make that legal-but-unordered nesting.
+    pub const fn new_const(class: &'static LockClassKey) -> Self {
         Self {
             inner: SpinLock::new(
                 RamFsInner {
                     inodes: KVec::new(),
                     initialized: false,
                 },
-                LOCK_LEVEL_RESOURCE,
+                class,
             ),
         }
     }
@@ -226,12 +216,6 @@ impl RamFs {
         let mut inner = self.inner.lock();
         inner.ensure_initialized();
         f(&mut *inner)
-    }
-}
-
-impl Default for RamFs {
-    fn default() -> Self {
-        Self::new()
     }
 }
 

@@ -13,6 +13,8 @@
 use core::sync::atomic::{AtomicU32, Ordering};
 
 use slopos_kernel_services::syscall_services::scanout::{ClaimOutcome, SingletonResource};
+use slopos_ostd::lock_class;
+use slopos_ostd::sync::LOCK_LEVEL_RESOURCE;
 use slopos_testing::{TestResult, fail, pass};
 
 #[derive(Clone, Copy)]
@@ -32,7 +34,10 @@ fn noop_evict() {}
 /// A higher-priority claimant wins and takes ownership over a lower-priority
 /// committed owner.
 pub fn test_higher_priority_wins() -> TestResult {
-    static A: SingletonResource<DummyProvider> = SingletonResource::new("test-prio");
+    static A: SingletonResource<DummyProvider> = SingletonResource::new(
+        "test-prio",
+        lock_class!("test.arbiter_prio.state", LOCK_LEVEL_RESOURCE),
+    );
 
     if A.claim(0) != ClaimOutcome::Won {
         return fail!("base claim should win the empty arbiter");
@@ -67,7 +72,10 @@ pub fn test_higher_priority_wins() -> TestResult {
 /// A lower-priority claim loses; an equal-priority claim loses the tie. Neither
 /// disturbs the committed owner.
 pub fn test_lower_and_equal_priority_lose() -> TestResult {
-    static A: SingletonResource<DummyProvider> = SingletonResource::new("test-tie");
+    static A: SingletonResource<DummyProvider> = SingletonResource::new(
+        "test-tie",
+        lock_class!("test.arbiter_tie.state", LOCK_LEVEL_RESOURCE),
+    );
 
     A.claim(50);
     A.commit_install(
@@ -96,7 +104,10 @@ pub fn test_lower_and_equal_priority_lose() -> TestResult {
 /// proving reserve-before-reset: a loser learns to stay passive before any
 /// hardware is touched.
 pub fn test_reservation_blocks_before_commit() -> TestResult {
-    static A: SingletonResource<DummyProvider> = SingletonResource::new("test-reserve");
+    static A: SingletonResource<DummyProvider> = SingletonResource::new(
+        "test-reserve",
+        lock_class!("test.arbiter_reserve.state", LOCK_LEVEL_RESOURCE),
+    );
 
     if A.claim(30) != ClaimOutcome::Won {
         return fail!("first claim should win the empty arbiter");
@@ -114,7 +125,10 @@ pub fn test_reservation_blocks_before_commit() -> TestResult {
 /// `abort_claim` (a winner whose bring-up failed) clears the reservation and
 /// leaves the prior owner intact, and a fresh claim can win afterwards.
 pub fn test_abort_claim_restores_prior_owner() -> TestResult {
-    static A: SingletonResource<DummyProvider> = SingletonResource::new("test-abort");
+    static A: SingletonResource<DummyProvider> = SingletonResource::new(
+        "test-abort",
+        lock_class!("test.arbiter_abort.state", LOCK_LEVEL_RESOURCE),
+    );
 
     A.claim(0);
     A.commit_install(
@@ -144,7 +158,10 @@ pub fn test_abort_claim_restores_prior_owner() -> TestResult {
 /// Committing a higher-priority provider evicts the displaced one exactly once;
 /// the first commit (no prior owner) evicts nothing.
 pub fn test_eviction_calls_displaced_evict_once() -> TestResult {
-    static A: SingletonResource<DummyProvider> = SingletonResource::new("test-evict");
+    static A: SingletonResource<DummyProvider> = SingletonResource::new(
+        "test-evict",
+        lock_class!("test.arbiter_evict.state", LOCK_LEVEL_RESOURCE),
+    );
 
     EVICT_COUNT.store(0, Ordering::Relaxed);
 

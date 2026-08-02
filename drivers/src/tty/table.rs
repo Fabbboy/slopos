@@ -33,6 +33,7 @@
 //! lock (the condition closure locks the slot internally to check for data).
 
 use core::sync::atomic::{AtomicU32, Ordering};
+use slopos_ostd::lock_class;
 
 use super::backing::TtyBacking;
 use super::driver::{SerialConsoleDriver, TtyDriverKind, VConsoleDriver};
@@ -79,7 +80,7 @@ pub(crate) fn tty_output_event(slot: usize) -> KernelEvent {
 ///
 /// Access a slot by index: `TTY_SLOTS[idx].lock()`.
 pub static TTY_SLOTS: [SpinLock<Option<PinBox<Tty>>>; MAX_TTYS] =
-    [const { SpinLock::new(None, LOCK_LEVEL_RESOURCE) }; MAX_TTYS];
+    [const { SpinLock::new(None, lock_class!("TTY_SLOTS", LOCK_LEVEL_RESOURCE)) }; MAX_TTYS];
 
 /// Per-TTY output-in-flight **byte** counter.  Tracks the number of
 /// bytes that have been processed through the line discipline but have
@@ -112,8 +113,17 @@ pub static TTY_OUTPUT_INFLIGHT: [AtomicU32; MAX_TTYS] = [const { AtomicU32::new(
 /// in `drain_hw_input_locked` acquires the write lock while the slot lock
 /// is still held — both orderings are safe because no code path ever
 /// acquires the slot lock while holding the write lock.
+/// Subclass for the echo-side acquisition of [`TTY_WRITE_LOCKS`].
+///
+/// A PTY master write holds the master's write lock (subclass 0) and, while
+/// pushing the bytes into the slave as input, takes the slave's write lock
+/// to emit the echo. Both are instances of one declaration, so without a
+/// subclass the pair is indistinguishable from an unordered same-class
+/// nesting. `0 -> 1` is the only legal direction and lockdep enforces it.
+pub const TTY_WRITE_ECHO_SUBCLASS: u8 = 1;
+
 pub static TTY_WRITE_LOCKS: [SpinLock<()>; MAX_TTYS] =
-    [const { SpinLock::new((), LOCK_LEVEL_RESOURCE) }; MAX_TTYS];
+    [const { SpinLock::new((), lock_class!("TTY_WRITE_LOCKS", LOCK_LEVEL_RESOURCE)) }; MAX_TTYS];
 
 /// Per-slot weak handle to the live [`TtyBacking`] — the open-by-index
 /// registry (`/dev/pts/N`, `/dev/tty`, bootstrap console fds). Weak by
@@ -121,13 +131,22 @@ pub static TTY_WRITE_LOCKS: [SpinLock<()>; MAX_TTYS] =
 /// fails means the backing (and with it the slot's lifetime) is gone.
 ///
 /// Lock ordering: `TTY_BACKINGS[i]` → `TTY_SLOTS[j]` (never the reverse).
-pub(crate) static TTY_BACKINGS: [SpinLock<KWeak<TtyBacking>>; MAX_TTYS] =
-    [const { SpinLock::new(KWeak::new(), LOCK_LEVEL_REGISTRY) }; MAX_TTYS];
+pub(crate) static TTY_BACKINGS: [SpinLock<KWeak<TtyBacking>>; MAX_TTYS] = [const {
+    SpinLock::new(
+        KWeak::new(),
+        lock_class!("TTY_BACKINGS", LOCK_LEVEL_REGISTRY),
+    )
+}; MAX_TTYS];
 
 /// Per-slot weak handle to the shared [`TtySlaveOpen`] — alive while any
 /// slave fd is open. Same ordering rules as [`TTY_BACKINGS`].
-pub(crate) static TTY_SLAVE_OPENS: [SpinLock<KWeak<super::backing::TtySlaveOpen>>; MAX_TTYS] =
-    [const { SpinLock::new(KWeak::new(), LOCK_LEVEL_REGISTRY) }; MAX_TTYS];
+pub(crate) static TTY_SLAVE_OPENS: [SpinLock<KWeak<super::backing::TtySlaveOpen>>; MAX_TTYS] = [const {
+    SpinLock::new(
+        KWeak::new(),
+        lock_class!("TTY_SLAVE_OPENS", LOCK_LEVEL_REGISTRY),
+    )
+};
+    MAX_TTYS];
 
 /// Free a PTY slot after its backing dropped: take the `Tty` out, run its
 /// drop (ldisc flush + session detach) outside the lock, clear the

@@ -1,6 +1,7 @@
 use core::mem::size_of;
 use core::sync::atomic::{AtomicPtr, AtomicU32, Ordering};
 use slopos_ostd::dev::FromRawPtr;
+use slopos_ostd::lock_class;
 use slopos_ostd::mm::frame::AnonymousMeta;
 use slopos_ostd::mm::uframe::UFrame;
 use slopos_ostd::{KArc, KBox, KVec};
@@ -195,26 +196,35 @@ impl VirtioNetState {
 }
 
 static DEVICE_CLAIMED: InitFlag = InitFlag::new();
-static VIRTIO_NET_STATE: SpinLock<VirtioNetState> =
-    SpinLock::new(VirtioNetState::new(), LOCK_LEVEL_RESOURCE);
+static VIRTIO_NET_STATE: SpinLock<VirtioNetState> = SpinLock::new(
+    VirtioNetState::new(),
+    lock_class!("VIRTIO_NET_STATE", LOCK_LEVEL_RESOURCE),
+);
 static DHCP_RX_EVENT: IrqEdgeEvent = IrqEdgeEvent::new();
 /// Wake the NAPI kthread when the NIC IRQ fires. Replaces the
 /// pre-refactor `NAPI_EVENT: IrqEdgeEvent` + `sleep_current_task_ms(1)`
 /// polling loop with an IRQ-driven park-and-wake.
-static NAPI_WAKER: slopos_net::napi_waker::NapiWaker =
-    slopos_net::napi_waker::NapiWaker::new("netpoll");
+static NAPI_WAKER: slopos_net::napi_waker::NapiWaker = slopos_net::napi_waker::NapiWaker::new(
+    "netpoll",
+    lock_class!("NETPOLL_WAKER.waiters", LOCK_LEVEL_RESOURCE),
+);
 /// Wake the net-timer kthread when a sooner deadline is armed.
 /// Used by code that schedules a fresh timer wheel entry it needs
 /// fired before the next periodic 50 ms slice. Currently the
 /// production callers do not arm this signal (the 50 ms periodic
 /// cadence is enough for ARP/TCP retx latency); the signal is
 /// wired up for completeness and future optimisation.
-static TIMER_WAKER: slopos_net::napi_waker::NapiWaker =
-    slopos_net::napi_waker::NapiWaker::new("net-timer");
+static TIMER_WAKER: slopos_net::napi_waker::NapiWaker = slopos_net::napi_waker::NapiWaker::new(
+    "net-timer",
+    lock_class!("NET_TIMER_WAKER.waiters", LOCK_LEVEL_RESOURCE),
+);
 static NAPI_CONTEXT: NapiContext = NapiContext::new(NAPI_BUDGET);
 static DNS_RX_EVENT: IrqEdgeEvent = IrqEdgeEvent::new();
 /// Buffer for the most recent DNS response payload (UDP body only).
-static DNS_RX_BUF: SpinLock<DnsRxBuf> = SpinLock::new(DnsRxBuf::new(), LOCK_LEVEL_RESOURCE);
+static DNS_RX_BUF: SpinLock<DnsRxBuf> = SpinLock::new(
+    DnsRxBuf::new(),
+    lock_class!("DNS_RX_BUF", LOCK_LEVEL_RESOURCE),
+);
 
 static DEVICE_HANDLE_PTR: AtomicPtr<DeviceHandle> = AtomicPtr::new(core::ptr::null_mut());
 
@@ -300,11 +310,17 @@ impl NetDevice for VirtioNetDev {
         // SlopRing harvest calls this so a deferred F_NOTIF progresses even with
         // no TX interrupt while the waiter is parked.
         let mut state = VIRTIO_NET_STATE.lock();
+        if !state.device.ready {
+            return;
+        }
         let _ = virtnet_clean_tx(&mut state);
     }
 
     fn poll_rx(&self, budget: usize, _pool: &'static PacketPool) -> KVec<PacketBuf> {
         let mut state = VIRTIO_NET_STATE.lock();
+        if !state.device.ready {
+            return KVec::new();
+        }
         let _ = virtnet_clean_tx(&mut state);
 
         let mut packets = KVec::with_capacity(budget.min(64)).unwrap_or_else(|_| KVec::new());

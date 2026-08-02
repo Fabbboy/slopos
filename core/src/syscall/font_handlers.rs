@@ -5,8 +5,10 @@ use slopos_abi::syscall::{FONT_FORMAT_BITMAP, FONT_FORMAT_COVERAGE};
 use slopos_mm::user_io_buf::memdup_user;
 use slopos_ostd::klog_info;
 
-static FONT_WRITER_LOCK: slopos_ostd::sync::SpinLock<()> =
-    slopos_ostd::sync::SpinLock::new((), slopos_ostd::sync::LOCK_LEVEL_RESOURCE);
+static FONT_WRITER_LOCK: slopos_ostd::sync::SpinLock<()> = slopos_ostd::sync::SpinLock::new(
+    (),
+    slopos_ostd::lock_class!("FONT_WRITER_LOCK", slopos_ostd::sync::LOCK_LEVEL_RESOURCE),
+);
 
 fn replace_and_schedule_free(new_atlas: slopos_font::atlas::GlyphAtlas) {
     {

@@ -35,23 +35,23 @@ use core::marker::PhantomData;
 
 use crate::mm::KBox;
 use crate::sync::lock_graph;
+use crate::sync::lock_graph::LockClassKey;
 use crate::sync::rcu;
 
 /// Scoped RCU epoch.
 ///
-/// `Epoch` is a zero-sized typed entry point. The address of a static
-/// `Epoch` instance is used as the synthetic-class key in
-/// [`lock_graph`] so multiple `Epoch` instances are distinct under
-/// lockdep.
+/// Each declaration carries its own [`LockClassKey`], so distinct epochs
+/// are distinct synthetic classes in [`lock_graph`]. Mint one with
+/// [`epoch_class!`](crate::epoch_class).
 pub struct Epoch {
-    _private: (),
+    class: &'static LockClassKey,
 }
 
 impl Epoch {
     /// Construct an empty epoch. Suitable for `pub static` declarations.
     #[inline]
-    pub const fn new() -> Self {
-        Self { _private: () }
+    pub const fn new(class: &'static LockClassKey) -> Self {
+        Self { class }
     }
 
     /// Open an epoch read-side critical section.
@@ -66,12 +66,13 @@ impl Epoch {
         let rcu_guard = rcu::rcu_read_lock();
         let addr = self as *const _ as *const ();
         // SAFETY: preemption is disabled by `rcu_read_lock`'s embedded
-        // `PreemptGuard`; per-CPU held-stack writes are sound. `addr`
-        // is the address of a `pub static Epoch` (caller responsibility:
-        // do not invoke on a stack-allocated `Epoch`). The matching
-        // `pop_epoch` runs in `EpochGuard::drop`.
+        // `PreemptGuard`, which pins the CPU whose held stack is updated;
+        // `push_epoch` masks interrupts itself, because this path acquires
+        // with them enabled. `addr` is the address of a `pub static Epoch`
+        // (caller responsibility: do not invoke on a stack-allocated
+        // `Epoch`). The matching `pop_epoch` runs in `EpochGuard::drop`.
         unsafe {
-            lock_graph::push_epoch(addr);
+            lock_graph::push_epoch(addr, self.class);
         }
         EpochGuard {
             _rcu: rcu_guard,
@@ -93,13 +94,6 @@ impl Epoch {
     #[inline]
     pub fn defer_kbox<T: Send + 'static>(&self, value: KBox<T>) {
         rcu::rcu_call_typed::<T>(value, drop_typed::<T>);
-    }
-}
-
-impl Default for Epoch {
-    #[inline]
-    fn default() -> Self {
-        Self::new()
     }
 }
 

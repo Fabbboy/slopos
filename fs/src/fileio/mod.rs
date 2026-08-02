@@ -1,5 +1,6 @@
 use core::ffi::c_int;
 use core::sync::atomic::{AtomicU32, AtomicU64, Ordering};
+use slopos_ostd::lock_class;
 
 use slopos_abi::KernelErrno;
 use slopos_abi::file_ops::{FileBacking, FileKind, FileOps};
@@ -11,7 +12,7 @@ use slopos_abi::io::{IO_STAGING_SIZE, IoBufRead, IoBufWrite};
 use slopos_abi::syscall::{O_NOCTTY, O_NONBLOCK, POLLIN, POLLNVAL, POLLOUT, TtyIndex};
 use slopos_ostd::KArc;
 use slopos_ostd::sync::{
-    InitFlag, LOCK_LEVEL_REGISTRY, LOCK_LEVEL_RESOURCE, SpinLock, SpinLockGuard,
+    InitFlag, LOCK_LEVEL_REGISTRY, LOCK_LEVEL_RESOURCE, LockClassKey, SpinLock, SpinLockGuard,
 };
 
 use slopos_abi::task::INVALID_PROCESS_ID;
@@ -274,7 +275,12 @@ pub(super) struct FileTableSlotInner {
 }
 
 impl FileTableSlot {
-    pub(super) const fn new(in_use: bool) -> Self {
+    /// The lock class comes from the caller. Minted here it would be one
+    /// class for both statics below, and the kernel table is not one of the
+    /// process tables: an inversion between it and a process's own could not
+    /// be seen. The process tables do share a class — one declaration, many
+    /// like instances — which is what declaration-site keying is for.
+    pub(super) const fn new(in_use: bool, class: &'static LockClassKey) -> Self {
         Self {
             process_id: AtomicU32::new(INVALID_PROCESS_ID),
             inner: SpinLock::new(
@@ -282,7 +288,7 @@ impl FileTableSlot {
                     in_use,
                     descriptors: [const { None }; FILEIO_MAX_OPEN_FILES],
                 },
-                LOCK_LEVEL_REGISTRY,
+                class,
             ),
         }
     }
@@ -321,11 +327,18 @@ impl OpenFilesState {
     }
 }
 
-pub(super) static KERNEL_TABLE: FileTableSlot = FileTableSlot::new(true);
-pub(super) static PROCESS_TABLES: [FileTableSlot; MAX_PROCESSES] =
-    [const { FileTableSlot::new(false) }; MAX_PROCESSES];
-pub(super) static OPEN_FILES_STATE: SpinLock<OpenFilesState> =
-    SpinLock::new(OpenFilesState::uninitialized(), LOCK_LEVEL_RESOURCE);
+pub(super) static KERNEL_TABLE: FileTableSlot =
+    FileTableSlot::new(true, lock_class!("KERNEL_FILE_TABLE", LOCK_LEVEL_REGISTRY));
+pub(super) static PROCESS_TABLES: [FileTableSlot; MAX_PROCESSES] = [const {
+    FileTableSlot::new(
+        false,
+        lock_class!("PROCESS_FILE_TABLE", LOCK_LEVEL_REGISTRY),
+    )
+}; MAX_PROCESSES];
+pub(super) static OPEN_FILES_STATE: SpinLock<OpenFilesState> = SpinLock::new(
+    OpenFilesState::uninitialized(),
+    lock_class!("OPEN_FILES_STATE", LOCK_LEVEL_RESOURCE),
+);
 pub(super) static FILEIO_INIT: InitFlag = InitFlag::new();
 
 /// Lock-free scan: return the slot whose `process_id` matches `pid`.

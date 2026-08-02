@@ -704,6 +704,11 @@ impl<K, U> Drop for TaskInner<K, U> {
 /// bulk-zeroes, and a zero sentinel would silently mean "TTY 0".
 pub const TTY_INDEX_NONE: u16 = u16::MAX;
 
+/// One class for every task's `test_reports`, shared by all three
+/// constructors so a task's class does not depend on which one built it.
+const TEST_REPORTS_CLASS: &crate::sync::lock_tracking::LockClassKey =
+    crate::lock_class!("Task.test_reports", LOCK_LEVEL_RESOURCE);
+
 impl<K, U> TaskInner<K, U> {
     /// This task's FS segment base (TLS pointer).
     ///
@@ -1272,7 +1277,7 @@ impl<K, U> TaskInner<K, U> {
             unsafe_stack: None,
             process_vm_handle: AtomicU64::new(0),
             process_group: RcuArcSlot::empty(),
-            test_reports: SpinLock::new(None, LOCK_LEVEL_RESOURCE),
+            test_reports: SpinLock::new(None, TEST_REPORTS_CLASS),
             parent_task_id: AtomicU32::new(INVALID_TASK_ID),
             fs_base: AtomicU64::new(0),
             tgid: INVALID_TASK_ID,
@@ -1378,7 +1383,7 @@ impl<K, U> TaskInner<K, U> {
                 addr_of_mut!((*slot).kernel_stack).write(None);
                 addr_of_mut!((*slot).unsafe_stack).write(None);
                 addr_of_mut!((*slot).process_group).write(RcuArcSlot::empty());
-                addr_of_mut!((*slot).test_reports).write(SpinLock::new(None, LOCK_LEVEL_RESOURCE));
+                addr_of_mut!((*slot).test_reports).write(SpinLock::new(None, TEST_REPORTS_CLASS));
                 addr_of_mut!((*slot).abi.unsafe_stack_sp).write(0);
 
                 addr_of_mut!((*slot).signal_blocked).write(AtomicU64::new(SIG_EMPTY));
@@ -1590,7 +1595,7 @@ impl<K, U> TaskInner<K, U> {
             core::ptr::write(&mut self.process_group as *mut _, RcuArcSlot::empty());
             core::ptr::write(
                 &mut self.test_reports as *mut _,
-                SpinLock::new(None, LOCK_LEVEL_RESOURCE),
+                SpinLock::new(None, TEST_REPORTS_CLASS),
             );
             self.abi.unsafe_stack_sp = 0;
             core::ptr::write(&mut self.exit_info as *mut _, AtomicCell::empty());

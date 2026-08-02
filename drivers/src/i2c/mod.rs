@@ -10,6 +10,7 @@ pub mod designware;
 pub mod pci;
 
 pub use designware::{DesignWareI2c, I2cError, I2cSegment, Mmio32};
+use slopos_ostd::lock_class;
 
 use core::sync::atomic::{AtomicBool, Ordering};
 
@@ -78,8 +79,10 @@ impl I2cBus {
 
 const MAX_I2C_BUSES: usize = 8;
 
-static I2C_BUSES: SpinLock<[Option<KArc<I2cBus>>; MAX_I2C_BUSES]> =
-    SpinLock::new([const { None }; MAX_I2C_BUSES], LOCK_LEVEL_REGISTRY);
+static I2C_BUSES: SpinLock<[Option<KArc<I2cBus>>; MAX_I2C_BUSES]> = SpinLock::new(
+    [const { None }; MAX_I2C_BUSES],
+    lock_class!("I2C_BUSES", LOCK_LEVEL_REGISTRY),
+);
 
 /// Record a claimed controller in the registry. Called from the PCI probe.
 pub fn register_bus(bus: KArc<I2cBus>) {

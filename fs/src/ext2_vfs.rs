@@ -1,4 +1,6 @@
 use core::sync::atomic::{AtomicUsize, Ordering};
+use slopos_ostd::lock_class;
+use slopos_ostd::sync::lock_tracking::LOCK_LEVEL_RESOURCE;
 
 use crate::blockdev::BlockDevice;
 use crate::ext2::cache::BlockCache;
@@ -47,7 +49,8 @@ struct CachedExt2 {
 /// scheduling entirely, which is exactly how a stalled flush froze the
 /// whole system. Linux holds sleeping inode/fs mutexes across block I/O
 /// for the same reason.
-static CACHED_EXT2: Mutex<Option<CachedExt2>> = Mutex::new(None);
+static CACHED_EXT2: Mutex<Option<CachedExt2>> =
+    Mutex::new(None, lock_class!("CACHED_EXT2", LOCK_LEVEL_RESOURCE));
 static EXT2_VFS_INIT: InitFlag = InitFlag::new();
 
 // ---- Background writeback (flusher) plumbing ----
@@ -57,7 +60,10 @@ static EXT2_VFS_INIT: InitFlag = InitFlag::new();
 /// this and the stop flag — it performs no I/O and takes no lock, so it stays
 /// a pure observer.
 static DIRTY_PENDING: AtomicUsize = AtomicUsize::new(0);
-static FLUSH_STOP: KernelIoStop = KernelIoStop::new("ext2-flush");
+static FLUSH_STOP: KernelIoStop = KernelIoStop::new(
+    "ext2-flush",
+    lock_class!("EXT2_FLUSH_STOP.waiters", LOCK_LEVEL_RESOURCE),
+);
 static FLUSH_THREAD_STARTED: InitFlag = InitFlag::new();
 
 /// Periodic writeback cadence — analog of Linux `dirty_writeback_centisecs`

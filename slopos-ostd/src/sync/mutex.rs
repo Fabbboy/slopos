@@ -10,10 +10,14 @@
 //! registered, `lock()` falls back to spin-acquiring the inner spinlock
 //! repeatedly (no blocking surface available).
 
+use crate::sync::lock_tracking::LockClassKey;
 use core::cell::UnsafeCell;
 use core::ops::{Deref, DerefMut};
+use core::ptr::addr_of_mut;
 use core::sync::atomic::{AtomicBool, Ordering};
 
+use crate::mm::AllocError;
+use crate::mm::init::{Init, init_from_closure, init_from_owned};
 use crate::sync::wait_queue::{WaitAbort, WaitQueue, WaitResult};
 
 /// A sleeping mutex.
@@ -31,11 +35,51 @@ unsafe impl<T: Send> Sync for Mutex<T> {}
 
 impl<T> Mutex<T> {
     /// Create a new mutex protecting the given data.
-    pub const fn new(data: T) -> Self {
+    ///
+    /// `class` names the inner wait queue, which is the tracked lock here —
+    /// the `Mutex` itself sleeps and so cannot live on the per-CPU held
+    /// stack.
+    pub const fn new(data: T, class: &'static LockClassKey) -> Self {
         Self {
             locked: AtomicBool::new(false),
-            waiters: WaitQueue::new(),
+            waiters: WaitQueue::new(class),
             data: UnsafeCell::new(data),
+        }
+    }
+
+    /// Place an already-owned `data` directly into the destination.
+    ///
+    /// `KArc::try_new(Mutex::new(big, class))` copies `big` twice — once
+    /// into the `Mutex`, once into the allocation — and both copies are
+    /// stack frames. This writes it to the heap slot once. The error type
+    /// is fixed rather than generic so consumer crates never have to name
+    /// `AllocError`, which is `allocator_api`-unstable.
+    pub fn init_owned(data: T, class: &'static LockClassKey) -> impl Init<Self, AllocError> {
+        Self::init_with(class, init_from_owned::<T, AllocError>(data))
+    }
+
+    /// In-place [`Init`] recipe, so a large `T` never materialises on the
+    /// caller's stack between allocation and construction. Used via
+    /// `KArc::try_init(Mutex::init_with(class, T::init_…()))`.
+    pub fn init_with<E>(
+        class: &'static LockClassKey,
+        data_init: impl Init<T, E>,
+    ) -> impl Init<Self, E>
+    where
+        E: From<AllocError>,
+    {
+        // SAFETY: the closure writes every field of `slot`. The `locked`
+        // and `waiters` shapes replicate `Self::new`'s byte pattern by
+        // hand so no `Self` rvalue is built; `data_init.__init` writes the
+        // inner `T` straight into the same heap slot.
+        unsafe {
+            init_from_closure(move |slot: *mut Self| -> Result<(), E> {
+                addr_of_mut!((*slot).locked).write(AtomicBool::new(false));
+                addr_of_mut!((*slot).waiters).write(WaitQueue::new(class));
+                let data_ptr = addr_of_mut!((*slot).data) as *mut T;
+                data_init.__init(data_ptr)?;
+                Ok(())
+            })
         }
     }
 
@@ -93,12 +137,6 @@ impl<T> Mutex<T> {
     /// Consume the mutex and return the inner data.
     pub fn into_inner(self) -> T {
         self.data.into_inner()
-    }
-}
-
-impl<T: Default> Default for Mutex<T> {
-    fn default() -> Self {
-        Self::new(T::default())
     }
 }
 

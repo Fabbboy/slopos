@@ -10,6 +10,7 @@
 
 use core::ffi::c_int;
 use core::sync::atomic::{AtomicU32, AtomicU64, Ordering};
+use slopos_ostd::lock_class;
 
 use slopos_abi::addr::PhysAddr;
 use slopos_abi::file_ops::{FileKind, FileOps};
@@ -80,7 +81,7 @@ pub struct MemfdObject {
 // ---------------------------------------------------------------------------
 
 static MEMFD_REGISTRY: SpinLock<Option<HandleTable<MemfdObject>>> =
-    SpinLock::new(None, LOCK_LEVEL_RESOURCE);
+    SpinLock::new(None, lock_class!("MEMFD_REGISTRY", LOCK_LEVEL_RESOURCE));
 
 fn with_registry<R>(f: impl FnOnce(&mut HandleTable<MemfdObject>) -> R) -> R {
     let mut guard = MEMFD_REGISTRY.lock();

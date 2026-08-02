@@ -88,7 +88,7 @@ fn dispatch_next_keepalive_for_conn(
     tcp_id: ConnId,
     advance_ms: u64,
 ) -> Option<Option<TcpOutSegment>> {
-    let key = tcp_id.0;
+    let key = tcp_id.raw();
     crate::clock::MockClock::advance(advance_ms);
     let fired = NET_TIMER_WHEEL.process_due();
     for timer in fired {
