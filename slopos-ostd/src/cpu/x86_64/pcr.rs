@@ -614,10 +614,19 @@ unsafe impl Sync for PcrPtrLookup {}
 pub static AP_PCR_PTRS: SyncUnsafeCell<PcrPtrLookup> =
     SyncUnsafeCell::new(PcrPtrLookup([ptr::null_mut(); MAX_STATIC_APS]));
 
-/// Pre-populate [`AP_PCR_PTRS`] and prime each AP PCR's `self_ref`
-/// + `current_task` fields so the naked AP trampoline can install
+/// Pre-populate [`AP_PCR_PTRS`] and prime each AP PCR's `self_ref`,
+/// `cpu_id` + `current_task` fields so the naked AP trampoline can install
 /// GS_BASE and have `__safestack_pointer_address` find a valid
 /// bootstrap task on the very first instrumented call of `ap_entry`.
+///
+/// `cpu_id` is primed here rather than left to [`init_ap_pcr`] because the
+/// trampoline installs GS_BASE before any of that runs, and
+/// [`current_cpu_id`] reads the field straight out of the installed PCR. A
+/// slot still holding its static zero answers "CPU 0" — the BSP — for every
+/// per-CPU lookup the AP makes between the trampoline and `init_ap_pcr`,
+/// which is a window that logs. The AP then attributes its work to the BSP's
+/// per-CPU state; lockdep sees the BSP's held-lock stack gain the AP's klog
+/// acquire and reports a recursive acquisition that never happened.
 ///
 /// Must run on the BSP *before* any AP is started.  Indexed by
 /// 0-based AP slot (AP slot i ↔ PCR at `AP_PCRS[i]`).
@@ -637,6 +646,9 @@ pub fn init_ap_pcr_lookup<'brand>(_token: &BspToken<'brand>, bootstrap_tasks: &[
         for (i, task) in bootstrap_tasks.iter().enumerate() {
             let pcr = &raw mut (*pcrs)[i];
             (*pcr).self_ref = pcr;
+            // AP slot `i` is CPU `i + 1`; `init_ap_pcr` writes the same value
+            // later from the AP itself, so this only moves it earlier.
+            (*pcr).cpu_id = (i + 1) as u32;
             (*pcr)
                 .current_task
                 .store(*task, core::sync::atomic::Ordering::Release);
