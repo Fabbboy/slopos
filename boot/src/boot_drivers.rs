@@ -222,6 +222,13 @@ fn boot_step_lapic_timer_start_fn(_ctx: &mut BootCtx<'_, BspInit>) {
         1000 / LAPIC_TIMER_PERIOD_MS,
     );
 
+    // The frame quarantine can only be armed once something is able to ack a
+    // quiesce epoch, and the tick is what does that. Before this point the BSP
+    // is the only CPU and freeing goes straight back to the free lists — early
+    // boot allocates heavily and would otherwise park memory with no way to
+    // release it.
+    slopos_mm::mmu::quiesce::activate();
+
     // Register a callback so APs can start their LAPIC timers from their
     // scheduler loops.  APs boot before calibration (SMP priority 45 <
     // HPET priority 55 < calibration priority 57), so they defer timer
@@ -391,29 +398,18 @@ fn boot_step_run_tests_fn(_ctx: &mut BootCtx<'_, BspInit>) -> i32 {
     #[cfg(feature = "test-hooks")]
     slopos_net::clock::MockClock::clear();
 
-    // LUF (Lazy Unmap Flush) counters aggregated over all CPUs — proves
-    // that cross-CPU coherence is actually flowing through the ring
-    // and the drain IPI, not silently short-circuiting. Non-zero
-    // `queued` on a fork-heavy or munmap-heavy run means the migration
-    // is live; `reuse_drains` reflects how many times a frame was
-    // reclaimed while still carrying a deferred entry.
+    // TLB-quiesce state. `epoch` counts how many times every CPU has agreed to
+    // invalidate since boot, and a non-zero `quarantined` says the allocator is
+    // currently holding freed memory back — the mechanism that lets frame
+    // allocation stay free of cross-CPU waits.
     {
-        let mut q = 0u64;
-        let mut d = 0u64;
-        let mut r = 0u64;
-        let mut o = 0u64;
-        for cpu in 0..slopos_arch::pcr::MAX_CPUS {
-            q = q.saturating_add(slopos_mm::mmu::luf::queued_count(cpu));
-            d = d.saturating_add(slopos_mm::mmu::luf::deferred_saves_count(cpu));
-            r = r.saturating_add(slopos_mm::mmu::luf::reuse_drains_count(cpu));
-            o = o.saturating_add(slopos_mm::mmu::luf::overflow_drains_count(cpu));
-        }
+        let (epoch, advance_requested, deferred) = slopos_mm::mmu::quiesce::stats();
         klog_info!(
-            "LUF SUMMARY: queued={} reuse_drains={} overflow_drains={} deferred_saves={}",
-            q,
-            r,
-            o,
-            d,
+            "QUIESCE SUMMARY: epoch={} quarantined_frames={} advance_requested={} last_deferred_epoch={}",
+            epoch,
+            slopos_mm::page_alloc::quarantine_frames(),
+            advance_requested,
+            deferred,
         );
     }
 

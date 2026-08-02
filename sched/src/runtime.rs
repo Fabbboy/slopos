@@ -253,6 +253,13 @@ extern "C" fn unified_idle_loop(_: *mut c_void) {
             slopos_ostd::sync::rcu_process_callbacks();
         }
         slopos_ostd::sync::rcu_note_qs();
+        // The cheapest place to ack: an idle CPU has no working set to lose.
+        slopos_mm::mmu::quiesce::tick();
+        // Bounded: each block coalesces under the allocator's cli-lock.
+        if slopos_mm::page_alloc::quarantine_has_releasable() {
+            slopos_mm::page_alloc::quarantine_release_some(64);
+            continue;
+        }
         // Tickless-idle: arm a one-shot LAPIC if the next sleep-queue
         // deadline falls inside the current periodic tick window. The
         // next timer ISR restores periodic mode. See

@@ -13,8 +13,8 @@ pub use slopos_ostd::irq::{
     EXCEPTION_INVALID_TSS, EXCEPTION_MACHINE_CHECK, EXCEPTION_NMI, EXCEPTION_OVERFLOW,
     EXCEPTION_PAGE_FAULT, EXCEPTION_SEGMENT_NOT_PRES, EXCEPTION_SIMD_FP_EXCEPTION,
     EXCEPTION_STACK_FAULT, IRQ_BASE_VECTOR, IdtBuilder, IdtEntry, IstPreemptHold,
-    LAPIC_TIMER_VECTOR, LUF_DRAIN_IPI_VECTOR, RCU_QS_IPI_VECTOR, RESCHEDULE_IPI_VECTOR,
-    SYSCALL_VECTOR, TLB_SHOOTDOWN_VECTOR,
+    LAPIC_TIMER_VECTOR, RCU_QS_IPI_VECTOR, RESCHEDULE_IPI_VECTOR, SYSCALL_VECTOR,
+    TLB_SHOOTDOWN_VECTOR,
 };
 use slopos_ostd::{kdiag_dump_interrupt_frame, klog_debug, klog_info};
 
@@ -262,19 +262,6 @@ fn handle_tlb_shootdown_ipi() {
     send_eoi();
 }
 
-fn handle_luf_drain_ipi() {
-    let apic_id = slopos_drivers::apic::get_id();
-    if let Some(cpu_idx) = slopos_arch::pcr::cpu_index_from_apic_id(apic_id) {
-        slopos_mm::mmu::luf::handle_drain_ipi(cpu_idx);
-    } else {
-        klog_debug!(
-            "LUF: Missing CPU index for APIC 0x{:x}; cannot ack drain",
-            apic_id
-        );
-    }
-    send_eoi();
-}
-
 // `IstPreemptHold` is provided by OSTD's `slopos_ostd::irq` module —
 // see the import at the top of this file. The boot-side path used to
 // duplicate the inc/dec body; now it just borrows the canonical guard
@@ -503,11 +490,6 @@ pub fn common_exception_handler_impl(frame: *mut slopos_arch::InterruptFrame) {
 
     if vector == TLB_SHOOTDOWN_VECTOR {
         handle_tlb_shootdown_ipi();
-        return;
-    }
-
-    if vector == LUF_DRAIN_IPI_VECTOR {
-        handle_luf_drain_ipi();
         return;
     }
 

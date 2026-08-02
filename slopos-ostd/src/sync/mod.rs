@@ -72,7 +72,7 @@ pub use rcu::{
 pub use seqlock::{SeqLock, SeqLockWriteGuard};
 pub use spin::{
     IrqRwLock, IrqRwLockReadGuard, IrqRwLockWriteGuard, PreemptMutex, PreemptMutexGuard,
-    register_spin_relax_hook,
+    register_spin_relax_hook, spin_relax,
 };
 pub use spin::{SpinLock, SpinLockGuard};
 pub use wait_node::WaitNode;

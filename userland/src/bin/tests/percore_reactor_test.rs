@@ -13,13 +13,12 @@
 //! Hard assertions (PASS requires all, no hang/deadlock): (a) every squared
 //! result is correct, (b) no lost or duplicated items — exactly K replies, each
 //! index seen once, delivered across N independent per-thread reactors over the
-//! cross-core channel. The CPU each worker runs on is recorded and printed but
-//! is INFORMATIONAL: the kernel honors affinity at task creation and wake but
-//! does not yet migrate a runnable thread off CPU 0 at a slice boundary nor
-//! re-dispatch a ring_enter-parked thread woken cross-core onto a strict
-//! non-zero pin, so workers co-locate on CPU 0 in practice. True physical
-//! cross-core distribution is a documented kernel follow-up; this test proves
-//! the per-thread-reactor + cross-core-channel model, not physical placement.
+//! cross-core channel, and (c) the workers really did run on distinct physical
+//! CPUs, each on the one it pinned itself to. Each worker takes a strict
+//! `1 << idx` affinity mask, so (c) is a placement assertion and not a
+//! description of where the scheduler happened to put things: a reactor parked
+//! in `ring_enter` and woken cross-core must be re-dispatched on its pinned CPU,
+//! and sustained concurrent allocation from N CPUs must not wedge the machine.
 
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -83,21 +82,20 @@ fn test_percore_roundtrip() -> bool {
             let work_senders = std::sync::Arc::clone(&work_senders);
             let ready = std::sync::Arc::clone(&ready);
             let handle = std::thread::spawn(move || {
-                // Request affinity to a distinct CPU, keeping CPU 0 in the mask
-                // ((1 << worker_idx) | 1) so a cross-core wake can never
-                // dead-end. The kernel honors affinity at task creation and at
-                // wake, but does not yet migrate an already-runnable thread off
-                // CPU 0 at a slice boundary, nor re-dispatch a ring_enter-parked
-                // thread woken cross-core onto a strictly-pinned non-zero CPU, so
-                // the workers co-locate on CPU 0 in practice. The recorded CPU is
-                // informational; true physical cross-core distribution is a
-                // documented kernel follow-up. The cross-core channel + the
-                // per-thread reactors are exercised regardless of placement.
-                let _ = sys_core::set_cpu_affinity(0, (1u32 << worker_idx) | 1);
+                // Strict pin. Keeping CPU 0 in the mask would let every worker
+                // fall back to it, hiding both the cross-core re-dispatch path
+                // and the concurrent multi-CPU allocation load.
+                let _ = sys_core::set_cpu_affinity(0, 1u32 << worker_idx);
                 std::thread::yield_now();
                 let pinned_cpu = sys_core::get_current_cpu();
 
+                // Still count ready on failure: otherwise the collector waits
+                // for a handshake that never completes and the test hangs until
+                // the harness gives up, reporting nothing. An empty sender slot
+                // makes it an ordinary failure instead.
                 let Ok(ring) = Ring::setup(64) else {
+                    eprintln!("percore_reactor: worker {} Ring::setup failed", worker_idx);
+                    ready.fetch_add(1, Ordering::Release);
                     return;
                 };
                 slopfut::block_on(ring, async move {
@@ -200,18 +198,13 @@ fn test_percore_roundtrip() -> bool {
         // (c) every item seen exactly once.
         let all_seen = seen.iter().all(|&b| b);
 
-        // INFORMATIONAL: the distinct CPUs work was observed on. The N workers
-        // are independent per-thread reactors communicating purely cross-core;
-        // physical multi-CPU spread is NOT asserted because the kernel does not
-        // yet distribute pinned userland threads across cores (documented
-        // follow-up) — so in practice this is [0].
+        // A single-worker boot has nothing to spread across.
         let mut distinct = cpus.clone();
         distinct.sort_unstable();
         distinct.dedup();
-        let multi_cpu = distinct.len() >= 2;
+        let multi_cpu = distinct.len() >= workers.min(2);
 
-        // INFORMATIONAL: whether each worker ran on exactly its requested CPU.
-        // Not asserted — see the cross-core placement follow-up above.
+        // (e) each worker ran on exactly the CPU it pinned itself to.
         let each_on_pinned_cpu = worker_cpu
             .iter()
             .enumerate()
@@ -231,10 +224,9 @@ fn test_percore_roundtrip() -> bool {
 
         // Hard requirements: (a) every result correct, (b) no lost or duplicated
         // items (exactly TOTAL_ITEMS replies, each index seen once), delivered
-        // across N independent per-thread reactors over the cross-core channel.
-        // multi_cpu / each_on_pinned_cpu are informational (printed above), not
-        // asserted — physical cross-core placement is a documented follow-up.
-        correct && all_seen && received == TOTAL_ITEMS
+        // across N independent per-thread reactors over the cross-core channel,
+        // and (c) each worker ran on its own pinned CPU.
+        correct && all_seen && received == TOTAL_ITEMS && multi_cpu && each_on_pinned_cpu
     })
 }
 

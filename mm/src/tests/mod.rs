@@ -3,6 +3,7 @@
 
 pub mod kernel_mapping_tests;
 pub mod mmio_tests;
+pub mod quiesce_tests;
 pub mod test_fixtures;
 pub mod tests;
 pub mod tests_cow_edge;

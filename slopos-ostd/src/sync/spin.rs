@@ -63,6 +63,17 @@ pub fn register_spin_relax_hook(hook: fn()) {
     SPIN_RELAX_HOOK.store(hook as usize, Ordering::Release);
 }
 
+/// Service pending cross-CPU work once from a hand-rolled interrupts-off spin.
+///
+/// The lock primitives call this for you. Anything that spins waiting on
+/// another CPU *without* going through a lock — a handover flag, a state
+/// machine's ready bit — has to call it explicitly, or it becomes a CPU that
+/// waits for a peer while refusing to acknowledge the peer's shootdown.
+#[inline]
+pub fn spin_relax() {
+    spin_relax_fire();
+}
+
 /// Fire the relax hook once, with per-CPU re-entrancy suppression. Called
 /// from IRQs-off contended spin loops; the hook must be safe in that
 /// context (the TLB service path only takes its own per-CPU queue lock and

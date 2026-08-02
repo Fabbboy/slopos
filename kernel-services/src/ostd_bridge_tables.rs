@@ -13,8 +13,8 @@
 
 use slopos_abi::addr::PhysAddr;
 use slopos_arch::arch::idt::{
-    LAPIC_TIMER_VECTOR, LUF_DRAIN_IPI_VECTOR, RCU_QS_IPI_VECTOR, RESCHEDULE_IPI_VECTOR,
-    SYSCALL_VECTOR, TLB_SHOOTDOWN_VECTOR,
+    LAPIC_TIMER_VECTOR, RCU_QS_IPI_VECTOR, RESCHEDULE_IPI_VECTOR, SYSCALL_VECTOR,
+    TLB_SHOOTDOWN_VECTOR,
 };
 use slopos_ostd::io::port::PortRange;
 use slopos_ostd::mm::io_mem::PhysRange;
@@ -74,7 +74,6 @@ pub static PORT_RANGES: &[PortRange] = &[
 
 pub static RESERVED_VECTORS: &[u8] = &[
     SYSCALL_VECTOR,
-    LUF_DRAIN_IPI_VECTOR,
     RCU_QS_IPI_VECTOR,
     RESCHEDULE_IPI_VECTOR,
     TLB_SHOOTDOWN_VECTOR,

@@ -22,7 +22,7 @@
 //!    method boundary.
 
 use core::ptr::NonNull;
-use core::sync::atomic::{AtomicU8, Ordering};
+use core::sync::atomic::{AtomicU8, AtomicU32, Ordering};
 use slopos_ostd::lock_class;
 
 use slopos_abi::addr::PhysAddr;
@@ -63,6 +63,8 @@ pub(super) const PAGE_FRAME_KERNEL: u8 = 0x03;
 pub(super) const PAGE_FRAME_DMA: u8 = 0x04;
 pub(super) const PAGE_FRAME_PCP: u8 = 0x05;
 pub(super) const PAGE_FRAME_NEVER_REUSE: u8 = 0x06;
+/// Freed, but parked until every CPU has invalidated. See [`crate::mmu::quiesce`].
+pub(super) const PAGE_FRAME_QUIESCE: u8 = 0x07;
 
 pub(super) const INVALID_PAGE_FRAME: u32 = 0xFFFF_FFFF;
 pub(super) const MAX_ORDER: u32 = 24;
@@ -73,6 +75,21 @@ static FRAME_TABLE_CLAIMED: InitFlag = InitFlag::new();
 
 const INVALID_REGION_ID: u16 = 0xFFFF;
 const DMA_MEMORY_LIMIT: u64 = 0x0100_0000;
+
+/// Closing an epoch costs one all-context invalidation per CPU, so amortise it
+/// over a batch rather than paying per free. 1024 frames is 4 MiB held.
+const QUARANTINE_ADVANCE_FRAMES: u32 = 1024;
+
+/// Coalescing scans a free list to find the buddy, so bound how long one
+/// release pass holds the allocator's cli-lock.
+const QUARANTINE_RELEASE_BATCH: u32 = 64;
+
+/// Greater than one so the backlog converges rather than merely keeping pace.
+const QUARANTINE_RELEASE_PER_FREE: u32 = 2;
+
+/// Written under the buddy lock, read from the timer tick — which must not take
+/// the allocator's lock 100 times a second to ask a yes/no question.
+pub(super) static QUARANTINE_FRAMES: AtomicU32 = AtomicU32::new(0);
 
 // ---------------------------------------------------------------------------
 // Lifecycle.
@@ -125,6 +142,26 @@ pub(super) struct BuddyInner {
     pub(super) allocated_frames: u32,
     pub(super) free_lists: [u32; (MAX_ORDER as usize) + 1],
     pub(super) max_order: u32,
+
+    /// Blocks freed during the open epoch. Chained through `next_free`, same
+    /// as a free list — a quarantined block is one that has been unlinked from
+    /// its owner but is not yet eligible to be handed out.
+    pub(super) quarantine_incoming: u32,
+    pub(super) quarantine_incoming_tail: u32,
+    /// Blocks freed during the previous epoch. These become eligible the
+    /// moment the open epoch closes; see [`crate::mmu::quiesce`] for why it is
+    /// the *second* closure and not the first that proves them safe.
+    pub(super) quarantine_draining: u32,
+    pub(super) quarantine_draining_tail: u32,
+    /// Blocks the epoch has already proven safe, waiting to be spliced back
+    /// into the free lists. Separated from `draining` so closing an epoch is
+    /// three pointer writes: the splice itself is O(blocks × free-list length)
+    /// and must never run to completion inside the timer interrupt that
+    /// happens to close the epoch.
+    pub(super) quarantine_releasable: u32,
+    pub(super) quarantine_releasable_tail: u32,
+    /// Frames held across all three lists.
+    pub(super) quarantine_frames: u32,
 }
 
 impl BuddyInner {
@@ -136,6 +173,13 @@ impl BuddyInner {
             allocated_frames: 0,
             free_lists: [INVALID_PAGE_FRAME; (MAX_ORDER as usize) + 1],
             max_order: 0,
+            quarantine_incoming: INVALID_PAGE_FRAME,
+            quarantine_incoming_tail: INVALID_PAGE_FRAME,
+            quarantine_draining: INVALID_PAGE_FRAME,
+            quarantine_draining_tail: INVALID_PAGE_FRAME,
+            quarantine_releasable: INVALID_PAGE_FRAME,
+            quarantine_releasable_tail: INVALID_PAGE_FRAME,
+            quarantine_frames: 0,
         }
     }
 
@@ -292,6 +336,107 @@ impl BuddyInner {
         INVALID_PAGE_FRAME
     }
 
+    /// Park a just-freed block. Deliberately does not coalesce: merging with a
+    /// free buddy would splice a not-yet-reusable frame into a handout-eligible
+    /// block. Coalescing happens on release.
+    fn quarantine_push(&mut self, table: &RawTable<PageFrame>, frame_num: u32, order: u32) {
+        let head = self.quarantine_incoming;
+        if let Some(frame) = self.frame_desc_mut(table, frame_num) {
+            frame.next_free = head;
+            frame.order = order as u16;
+            frame.state = PAGE_FRAME_QUIESCE;
+            frame.flags = 0;
+            self.quarantine_incoming = frame_num;
+            if self.quarantine_incoming_tail == INVALID_PAGE_FRAME {
+                self.quarantine_incoming_tail = frame_num;
+            }
+            self.quarantine_frames = self
+                .quarantine_frames
+                .saturating_add(Self::order_block_pages(order));
+            QUARANTINE_FRAMES.store(self.quarantine_frames, Ordering::Relaxed);
+        }
+    }
+
+    /// O(1) concat — the entire point of tracking tails.
+    fn quarantine_concat(
+        table: &RawTable<PageFrame>,
+        src: (u32, u32),
+        dest: (u32, u32),
+    ) -> (u32, u32) {
+        let (src_head, src_tail) = src;
+        let (dest_head, dest_tail) = dest;
+        if src_head == INVALID_PAGE_FRAME {
+            return dest;
+        }
+        if dest_head == INVALID_PAGE_FRAME {
+            return src;
+        }
+        if let Some(tail) = table.get_mut(src_tail as usize) {
+            tail.next_free = dest_head;
+        }
+        (src_head, dest_tail)
+    }
+
+    /// Close one epoch: `draining` joins the releasable backlog, `incoming`
+    /// takes its place.
+    ///
+    /// Splices nothing. This runs from whichever CPU's timer interrupt observes
+    /// the last ack, and a splice is O(blocks × free-list length); thousands of
+    /// those under the allocator's cli-lock inside an interrupt handler stall
+    /// every allocating CPU and stop this one ticking — a silent machine-wide
+    /// wedge with no watchdog report, since no CPU is left to file one.
+    fn quarantine_rotate(&mut self, table: &RawTable<PageFrame>) {
+        let releasable = Self::quarantine_concat(
+            table,
+            (self.quarantine_draining, self.quarantine_draining_tail),
+            (self.quarantine_releasable, self.quarantine_releasable_tail),
+        );
+        self.quarantine_releasable = releasable.0;
+        self.quarantine_releasable_tail = releasable.1;
+
+        self.quarantine_draining = self.quarantine_incoming;
+        self.quarantine_draining_tail = self.quarantine_incoming_tail;
+        self.quarantine_incoming = INVALID_PAGE_FRAME;
+        self.quarantine_incoming_tail = INVALID_PAGE_FRAME;
+    }
+
+    /// Splice at most `limit` blocks from the releasable backlog into the free
+    /// lists. Returns the number of frames released.
+    fn quarantine_release_some(&mut self, table: &RawTable<PageFrame>, limit: u32) -> u32 {
+        let mut released = 0u32;
+        let mut done = 0u32;
+        while done < limit {
+            let cursor = self.quarantine_releasable;
+            if cursor == INVALID_PAGE_FRAME {
+                self.quarantine_releasable_tail = INVALID_PAGE_FRAME;
+                break;
+            }
+            let Some(frame) = self.frame_desc_mut(table, cursor) else {
+                self.quarantine_releasable = INVALID_PAGE_FRAME;
+                self.quarantine_releasable_tail = INVALID_PAGE_FRAME;
+                break;
+            };
+            let next = frame.next_free;
+            let order = frame.order as u32;
+            // Mark free before coalescing: a block still labelled QUIESCE must
+            // not be merged into.
+            frame.state = PAGE_FRAME_FREE;
+            frame.next_free = INVALID_PAGE_FRAME;
+            self.quarantine_releasable = next;
+            if next == INVALID_PAGE_FRAME {
+                self.quarantine_releasable_tail = INVALID_PAGE_FRAME;
+            }
+            self.insert_block_coalescing(table, cursor, order);
+            released = released.saturating_add(Self::order_block_pages(order));
+            done += 1;
+        }
+        if released > 0 {
+            self.quarantine_frames = self.quarantine_frames.saturating_sub(released);
+            QUARANTINE_FRAMES.store(self.quarantine_frames, Ordering::Relaxed);
+        }
+        released
+    }
+
     fn insert_block_coalescing(&mut self, table: &RawTable<PageFrame>, frame_num: u32, order: u32) {
         if !self.is_valid_frame(frame_num) {
             return;
@@ -319,6 +464,15 @@ impl BuddyInner {
             if !self.free_list_detach(table, curr_order, buddy) {
                 break;
             }
+
+            // The buddy's pages are already in `free_frames`; the single push
+            // below re-adds them as part of the merged block, so drop the old
+            // count here. Without this every coalesce inflates `free_frames`
+            // by the buddy's size, and the counter drifts upward for the life
+            // of the boot.
+            self.free_frames = self
+                .free_frames
+                .saturating_sub(Self::order_block_pages(curr_order));
 
             curr_frame = curr_frame.min(buddy);
             curr_order += 1;
@@ -757,6 +911,7 @@ impl BuddyAllocator {
             && pcp::is_live();
 
         let mut attempts = 0u32;
+        let mut quiesce_recovered = false;
         loop {
             let frame_num = if use_pcp {
                 let _no_migrate = PreemptGuard::new();
@@ -785,6 +940,23 @@ impl BuddyAllocator {
             };
 
             if frame_num == INVALID_PAGE_FRAME {
+                // Memory may just be parked awaiting a quiesce — and a
+                // quarantined block is an uncoalesced one, so a backlog
+                // fragments the free lists and fails a multi-page request long
+                // before a single-page one. Drain the whole backlog (coalescing
+                // is what a higher-order request needs), then ack, which closes
+                // the epoch outright if the peers already have. Never waits on a
+                // peer: failing and letting the caller retry is the price of
+                // keeping cross-CPU waits off this path.
+                if !quiesce_recovered && crate::mmu::quiesce::is_active() {
+                    quiesce_recovered = true;
+                    let mut released = self.quarantine_drain_backlog();
+                    crate::mmu::quiesce::ack_now();
+                    released += self.quarantine_drain_backlog();
+                    if released > 0 {
+                        continue;
+                    }
+                }
                 klog_info!("BuddyAllocator::alloc_raw: no suitable block available");
                 return PhysAddr::NULL;
             }
@@ -846,6 +1018,24 @@ impl BuddyAllocator {
             }
 
             let order = frame.order as u32;
+
+            // Ahead of the PCP magazine as well as the free lists: the magazine
+            // is a reuse path too, and a frame freed and re-handed-out from it
+            // never touches the buddy at all.
+            if crate::mmu::quiesce::quarantine_required() {
+                let pages = BuddyInner::order_block_pages(order);
+                inner.allocated_frames = inner.allocated_frames.saturating_sub(pages);
+                inner.quarantine_push(table, frame_num, order);
+                // Pay down the release debt on every free so the backlog drains
+                // as fast as it fills; otherwise a workload that never idles
+                // parks memory until allocations start failing.
+                inner.quarantine_release_some(table, QUARANTINE_RELEASE_PER_FREE);
+                if inner.quarantine_frames >= QUARANTINE_ADVANCE_FRAMES {
+                    crate::mmu::quiesce::request_advance();
+                }
+                return 0;
+            }
+
             let is_pcp_candidate =
                 order == 0 && frame.state == PAGE_FRAME_ALLOCATED && pcp::is_live();
 
@@ -892,6 +1082,45 @@ impl BuddyAllocator {
             }
             0
         })
+    }
+
+    /// Promote the proven-safe batch into the releasable backlog. O(1); the
+    /// splicing is [`Self::quarantine_release_some`]'s job.
+    pub fn quarantine_rotate(&self) {
+        self.with_locked(|inner, table| inner.quarantine_rotate(table));
+    }
+
+    /// Splice up to `limit` proven-safe blocks back into the free lists.
+    /// Returns the number of frames released.
+    pub fn quarantine_release_some(&self, limit: u32) -> u32 {
+        self.with_locked(|inner, table| inner.quarantine_release_some(table, limit))
+    }
+
+    /// Drain the whole backlog in bounded steps. For the allocator's recovery
+    /// path, where leaving memory parked means failing a satisfiable request.
+    pub fn quarantine_drain_backlog(&self) -> u32 {
+        let mut total = 0u32;
+        loop {
+            let released = self.quarantine_release_some(QUARANTINE_RELEASE_BATCH);
+            if released == 0 {
+                return total;
+            }
+            total = total.saturating_add(released);
+        }
+    }
+
+    /// Is there proven-safe memory waiting to be spliced back?
+    pub fn quarantine_has_releasable(&self) -> bool {
+        self.with_locked(|inner, _table| inner.quarantine_releasable != INVALID_PAGE_FRAME)
+    }
+
+    /// Reads the lock-free mirror; called from the timer tick.
+    pub fn quarantine_is_occupied(&self) -> bool {
+        QUARANTINE_FRAMES.load(Ordering::Relaxed) > 0
+    }
+
+    pub fn quarantine_frames(&self) -> u32 {
+        QUARANTINE_FRAMES.load(Ordering::Relaxed)
     }
 
     pub fn quarantine_allocated_phys(&self, phys_addr: PhysAddr) {
@@ -1068,18 +1297,12 @@ impl FrameAlloc for BuddyAllocator {
         if opts.dma {
             flags |= ALLOC_FLAG_DMA;
         }
+        // No cross-CPU work here, by construction: a frame reaches a free list
+        // only after `mmu::quiesce` proved every CPU invalidated since it was
+        // unmapped. `alloc` is reachable from page-fault handlers and from under
+        // interrupt-disabling locks, so a rendezvous here deadlocks against its
+        // own callers.
         let phys = self.alloc_raw(count, flags);
-        // LUF reuse-drain hook: if the frame is still referenced by a
-        // deferred TLB flush on this CPU, drain the queue before the
-        // new owner installs a mapping. Single-page allocations only,
-        // matching the pre-refactor behaviour (multi-page callers do
-        // their own TLB management).
-        if !phys.is_null() && count == 1 {
-            if !crate::mmu::luf::drain_if_reusing_frame(phys) {
-                self.quarantine_allocated_phys(phys);
-                return None;
-            }
-        }
         if phys.is_null() { None } else { Some(phys) }
     }
 

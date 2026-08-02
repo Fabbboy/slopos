@@ -33,6 +33,10 @@ use slopos_ostd::{klog_debug, klog_info};
 
 use super::cr3::{Cr3Value, MmContextId, Pcid};
 
+/// `INVPCID` descriptor type 3: all-context invalidation, excluding globals.
+/// SDM Vol 2A §3.2.
+const INVPCID_ALL_CONTEXT_NO_GLOBALS: u64 = 3;
+
 /// Number of dynamic per-CPU PCID slots.
 ///
 /// Linux uses `TLB_NR_DYN_ASIDS = 6`; we have enough headroom and cheap
@@ -198,13 +202,49 @@ fn set_cr4_pcide_local() {
 /// stale generation forces us to drop the slot's prior TLB caches.
 pub fn flush_pcid(pcid: u16) {
     if !invpcid_available() {
-        // Fallback: full flush via CR3 reload. Correct — just more
-        // expensive because it takes out the other PCIDs too.
-        let cr3 = slopos_arch::cpu::read_cr3();
-        slopos_arch::cpu::write_cr3(cr3);
+        // No INVPCID: widen to every context rather than reloading CR3.
+        // A CR3 reload drops only the tag it loads, so with `CR4.PCIDE`
+        // set it would leave `pcid` itself untouched whenever `pcid` is
+        // not the one currently in CR3 — which is exactly the eviction
+        // case this function exists to serve.
+        flush_local_all_contexts();
         return;
     }
     slopos_ostd::cpu::x86_64::tlb::invpcid(1, pcid, 0);
+}
+
+/// Invalidate every non-global TLB entry on this CPU, across **all** PCIDs.
+///
+/// `mov cr3` is not this operation. With `CR4.PCIDE` set it invalidates only
+/// the entries tagged with the PCID in the value being loaded, so every other
+/// address space this CPU has cached survives — and [`select_cr3`] hands back
+/// `NOFLUSH` CR3 values, so those survivors go live again the next time this
+/// CPU switches to one of those contexts. A frame handed to a new owner while
+/// such an entry exists is readable and writable through the old mapping.
+///
+/// Three implementations, in preference order:
+///
+///   1. `INVPCID` type 3 — all-context, excluding globals. Exactly right: the
+///      kernel's global mappings are preserved and every user tag is dropped.
+///   2. Toggling `CR4.PGE` — a `MOV to CR4` that *changes* PGE invalidates the
+///      whole TLB including global entries, so flipping it and flipping it back
+///      works whichever way round it started. Coarser (it takes the kernel's
+///      global entries with it) and it costs two flushes, but it needs no
+///      instruction the CPU might not have.
+///   3. A CR3 reload — correct only because PCID is off, which makes CR3's tag
+///      space a single context.
+pub fn flush_local_all_contexts() {
+    if !pcid_enabled() {
+        slopos_arch::cpu::flush_tlb_all();
+        return;
+    }
+    if invpcid_available() {
+        slopos_ostd::cpu::x86_64::tlb::invpcid(INVPCID_ALL_CONTEXT_NO_GLOBALS, 0, 0);
+        return;
+    }
+    let cr4 = read_cr4();
+    write_cr4(cr4 ^ Cr4Flags::PGE.bits());
+    write_cr4(cr4);
 }
 
 /// Choose a CR3 value for the next address space to load on this CPU.

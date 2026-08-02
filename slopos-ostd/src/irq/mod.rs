@@ -24,9 +24,9 @@ pub use idt::{
     EXCEPTION_PAGE_FAULT, EXCEPTION_RESERVED_15, EXCEPTION_SEGMENT_NOT_PRES,
     EXCEPTION_SIMD_FP_EXCEPTION, EXCEPTION_STACK_FAULT, EXCEPTION_VIRTUALIZATION, ExceptionMode,
     IDT_ENTRIES, IDT_GATE_INTERRUPT, IDT_GATE_TRAP, IRQ_BASE_VECTOR, IdtBuilder, IdtEntry,
-    IrqEntryGuard, IstPreemptHold, LAPIC_TIMER_VECTOR, LUF_DRAIN_IPI_VECTOR, MSI_VECTOR_BASE,
-    MSI_VECTOR_COUNT, MSI_VECTOR_END, RCU_QS_IPI_VECTOR, RESCHEDULE_IPI_VECTOR, SYSCALL_VECTOR,
-    TLB_SHOOTDOWN_VECTOR, handle_corrupt_iret_frame, register_diagnostic_sink, vector_uses_ist,
+    IrqEntryGuard, IstPreemptHold, LAPIC_TIMER_VECTOR, MSI_VECTOR_BASE, MSI_VECTOR_COUNT,
+    MSI_VECTOR_END, RCU_QS_IPI_VECTOR, RESCHEDULE_IPI_VECTOR, SYSCALL_VECTOR, TLB_SHOOTDOWN_VECTOR,
+    handle_corrupt_iret_frame, register_diagnostic_sink, vector_uses_ist,
 };
 pub use interrupt_frame::InterruptFrame;
 pub use line::{

@@ -2228,12 +2228,9 @@ pub fn process_vm_reset_stack(process_id: u32) -> c_int {
     }
     let page_count = ((stack_end - stack_start) / PAGE_SIZE_4KB) as usize;
 
-    // Hold every unmapped frame until the cross-CPU shootdown completes,
-    // so a freed frame can't be reused while a peer CPU still caches a
-    // stale translation. The shootdown then runs AFTER the lock is
-    // dropped, with interrupts enabled — never the synchronous broadcast
-    // under the IRQs-off per-process lock that wedges a CPU on a
-    // non-acking peer.
+    // Collect the unmapped frames so the whole stack is torn down as one
+    // operation and the replacement mapping is installed against a settled
+    // address space, rather than racing page-by-page teardown.
     let mut gathered: KVec<UFrame<AnonymousMeta>> = match KVec::with_capacity(page_count) {
         Ok(v) => v,
         Err(_) => return -1,
@@ -2244,10 +2241,6 @@ pub fn process_vm_reset_stack(process_id: u32) -> c_int {
         if guard.process_id != process_id {
             -1
         } else if let Some(vm_space_ref) = guard.vm_space.as_mut() {
-            // Gather-unmap the old stack: suppress the per-page LUF
-            // cross-CPU deferral (the cursor still invalidates locally),
-            // collecting the freed frames so none is released yet.
-            crate::mmu::luf::suppress_cross_cpu_drain();
             let mut addr = stack_start;
             let mut ok = true;
             while addr < stack_end {
@@ -2270,7 +2263,6 @@ pub fn process_vm_reset_stack(process_id: u32) -> c_int {
                 }
                 addr += PAGE_SIZE_4KB;
             }
-            crate::mmu::luf::unsuppress_cross_cpu_drain();
 
             if !ok {
                 -1

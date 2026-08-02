@@ -13,7 +13,6 @@
 //! hardware probe + descriptor layout land when real RAR hardware is
 //! plumbed through.
 
-use super::luf;
 use crate::tlb;
 use slopos_abi::addr::VirtAddr;
 
@@ -50,7 +49,6 @@ impl ShootdownBackend for SoftwareIpi {
 
     #[inline]
     fn flush_all(&self) {
-        luf::drain_local();
         tlb::flush_all();
     }
 

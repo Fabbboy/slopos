@@ -57,6 +57,9 @@ pub fn scheduler_handle_timer_interrupt(frame: *mut InterruptFrame) {
     // call `scheduler_timer_tick` synthetically do not drive the detector's
     // sample counter with no wall time elapsed.
     slopos_ostd::watchdog::tick();
+    // Invalidate locally and ack an open epoch. Waits on nothing, which is why
+    // it is safe from an interrupt handler.
+    slopos_mm::mmu::quiesce::tick();
     save_preempt_context(frame);
     scheduler_timer_tick();
 }

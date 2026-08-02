@@ -197,9 +197,9 @@ struct RegistryEntry {
 /// are not. The spine is allocated once outside the manager lock
 /// ([`ensure_registry_allocated`]) and never grows: every mutation under the
 /// cli-spinlock is a plain slot write, so registration and retirement never
-/// touch the heap while the lock is held (the buddy's LUF reuse drain is a
-/// hidden cross-CPU wait; allocating under a cli-lock is the known
-/// slab/LUF deadlock).
+/// touch the heap while the lock is held. Allocating under a cli-lock is a
+/// standing hazard: the allocator is the one place every subsystem meets, so
+/// anything it can block on becomes something every lock holder can block on.
 struct TaskRegistry {
     slots: KVec<Option<KernelSync<RegistryEntry>>>,
     /// Occupied-slot count.
@@ -882,8 +882,8 @@ pub fn task_try_for_each_active(mut f: impl FnMut(&TaskRef) -> ControlFlow<()>) 
     // The buffer is sized in one lock section and filled in another, so the
     // registry can gain an entry in between. `KVec::with_capacity` reserves
     // exactly, so an overflowing `push` would reallocate *under* the registry
-    // cli-spinlock — the buddy's reuse drain is a cross-CPU wait, and
-    // allocating under a cli-lock is the known slab/LUF deadlock. So the fill
+    // cli-spinlock, and allocating under a cli-lock is a standing hazard. So
+    // the fill
     // never grows the buffer: it reports how many entries it saw and the retry
     // re-reserves off-lock. Truncating instead would silently drop tasks from a
     // walk that feeds the stranded-task rescue and the shutdown sweep. The spine

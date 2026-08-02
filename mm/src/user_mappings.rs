@@ -171,10 +171,9 @@ pub fn ostd_unmap_4kb_user(vm_space: &mut KArc<VmSpace>, va: VirtAddr) -> Result
 /// drop (and free) inline. The caller holds the returned [`UFrame`]
 /// until after a cross-CPU TLB shootdown of the range, so a freed frame
 /// can't be reused while a peer CPU still caches a stale translation.
-/// The cursor performs the local invalidation; pair with
-/// [`crate::mmu::luf::suppress_cross_cpu_drain`] to skip the per-page
-/// cross-CPU deferral and issue a single explicit shootdown after the
-/// lock drops.
+/// The cursor performs the local invalidation, so the caller's job is the
+/// remote half: hold the frames, drop the lock, then issue one shootdown for
+/// the whole range instead of one per page.
 pub fn ostd_unmap_4kb_user_take(
     vm_space: &mut KArc<VmSpace>,
     va: VirtAddr,

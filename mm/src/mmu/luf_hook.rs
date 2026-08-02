@@ -19,7 +19,6 @@
 use slopos_abi::addr::{PhysAddr, VirtAddr};
 use slopos_ostd::mm::vm_space::CursorUnmapHook;
 
-use super::cr3::MmContextId;
 use super::luf;
 
 /// Zero-sized hook implementation. Holds no state — every callback
@@ -39,11 +38,8 @@ impl CursorUnmapHook for LufHook {
         if mm_ctx_handle == 0 {
             return;
         }
-        // PCID `0` here is a placeholder — the LUF drain consults the
-        // active PCID via the per-CPU slot binding (see `luf::drain_*`
-        // call sites). The plumbing accepts a `u16` for symmetry with
-        // future `INVPCID type 0` per-entry refinement.
-        luf::queue_unmap(vaddr, paddr, MmContextId::from_raw(mm_ctx_handle), 0);
+        let _ = paddr;
+        luf::queue_unmap(vaddr);
     }
 
     fn on_activate(&self, mm_ctx_handle: u64) {

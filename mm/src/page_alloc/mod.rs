@@ -94,17 +94,10 @@ pub fn __alloc_page_frames_raw(count: u32, flags: u32) -> PhysAddr {
 }
 
 /// Raw single-page buddy entry point. See [`__alloc_page_frames_raw`]
-/// for the audit-point rationale. Always runs the LUF reuse-drain.
+/// for the audit-point rationale.
 #[doc(hidden)]
 pub fn __alloc_page_frame_raw(flags: u32) -> PhysAddr {
-    let phys = BUDDY_ALLOCATOR.alloc_raw(1, flags);
-    if !phys.is_null() {
-        if !crate::mmu::luf::drain_if_reusing_frame(phys) {
-            BUDDY_ALLOCATOR.quarantine_allocated_phys(phys);
-            return PhysAddr::NULL;
-        }
-    }
-    phys
+    BUDDY_ALLOCATOR.alloc_raw(1, flags)
 }
 
 /// Typestate-checked single-page kernel allocation, zeroed.
@@ -162,6 +155,34 @@ pub fn free_page_frame(phys_addr: PhysAddr) -> c_int {
 /// Drain every CPU's PCP cache into the buddy. Shutdown only.
 pub fn pcp_drain_all() {
     BUDDY_ALLOCATOR.drain_pcp_all();
+}
+
+/// Promote the batch the closing epoch proved safe. Called by
+/// [`crate::mmu::quiesce`] from whichever CPU closes the epoch — so it must
+/// stay O(1); see `BuddyAllocator::quarantine_rotate`.
+pub fn quarantine_rotate() {
+    BUDDY_ALLOCATOR.quarantine_rotate();
+}
+
+/// Splice up to `limit` proven-safe blocks back into the free lists, from
+/// ordinary context. Returns the frames released.
+pub fn quarantine_release_some(limit: u32) -> u32 {
+    BUDDY_ALLOCATOR.quarantine_release_some(limit)
+}
+
+/// Is there proven-safe memory waiting to be spliced back into the free lists?
+pub fn quarantine_has_releasable() -> bool {
+    BUDDY_ALLOCATOR.quarantine_has_releasable()
+}
+
+/// Is any memory currently parked awaiting a TLB quiesce?
+pub fn quarantine_is_occupied() -> bool {
+    BUDDY_ALLOCATOR.quarantine_is_occupied()
+}
+
+/// Frames currently parked awaiting a TLB quiesce.
+pub fn quarantine_frames() -> u32 {
+    BUDDY_ALLOCATOR.quarantine_frames()
 }
 
 // ---------------------------------------------------------------------------

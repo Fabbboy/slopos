@@ -342,8 +342,6 @@ isr_lapic_timer:
 isr_tlb_shootdown:  INTERRUPT_HANDLER 253, 0   # 0xFD
 .global isr_rcu_qs_ipi
 isr_rcu_qs_ipi:     INTERRUPT_HANDLER 251, 0   # 0xFB
-.global isr_luf_drain_ipi
-isr_luf_drain_ipi:  INTERRUPT_HANDLER 250, 0   # 0xFA
 .global isr_shutdown_ipi
 isr_shutdown_ipi:   INTERRUPT_HANDLER 254, 0   # 0xFE
 .global isr_spurious

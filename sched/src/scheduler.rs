@@ -1283,7 +1283,12 @@ pub(crate) fn run_ready_task_from_idle(cpu_id: usize, idle_task: &Task) -> bool 
     // still completing the switch-out tail. The dequeue already transferred
     // scheduler placement to this CPU, so wait for the prior CPU's Release
     // store instead of publishing a second queue membership.
+    //
+    // Dispatch runs interrupts-off, so this spin cannot take an IPI — service
+    // pending cross-CPU work by hand, as a contended `SpinLock` does. The prior
+    // CPU may be stalled behind a shootdown it needs *us* to acknowledge.
     while next_task.on_cpu() {
+        slopos_ostd::sync::spin_relax();
         core::hint::spin_loop();
     }
 

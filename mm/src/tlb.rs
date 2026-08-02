@@ -559,9 +559,11 @@ impl TlbShootdownState {
 
 static TLB_STATE: TlbShootdownState = TlbShootdownState::new();
 
+/// Every non-global translation in every cached address space, not just the one
+/// CR3 names — see [`crate::mmu::asid::flush_local_all_contexts`].
 #[inline(always)]
 fn flush_tlb_local_full() {
-    cpu::flush_tlb_all();
+    crate::mmu::asid::flush_local_all_contexts();
 }
 
 /// Flush this CPU's entire TLB locally (no IPI). Used by an AP joining
@@ -885,12 +887,10 @@ pub fn exit_lazy_tlb(cpu: usize) {
     let state = &TLB_STATE.cpu_state[cpu];
     state.is_lazy.store(false, Ordering::Release);
 
-    // Cross-CPU coherence for user-space unmaps is driven entirely
-    // by `mm::mmu::luf::drain_by_phys_cross_cpu` at frame reuse. No
-    // generation-based catch-up needed on lazy-TLB exit — if this
-    // CPU held a stale translation pointing at a now-freed frame,
-    // the drain IPI already invalidated it before the frame was
-    // handed out to a new owner.
+    // No generation-based catch-up is needed on lazy-TLB exit. Frame reuse is
+    // gated on `mm::mmu::quiesce`, and this CPU cannot have acked the epoch
+    // that released a frame without having invalidated first, so it holds no
+    // stale translation to a frame that has since changed hands.
 }
 
 fn queue_request_for_cpu(cpu_idx: usize, flush_type: FlushType, start: u64, end: u64, asid: u64) {
@@ -949,16 +949,12 @@ fn targeted_flush_request(
         }
     }
 
-    // Allocate the per-CPU target list on the heap: a stack-resident
-    // `[usize; MAX_CPUS]` is 2 KiB on its own and pushes this function
-    // over the stack-sizes gate.
-    let mut targets = match slopos_ostd::KVec::<usize>::zeroed(MAX_CPUS) {
-        Ok(v) => v,
-        Err(_) => {
-            klog_warn!("tlb: targeted_flush_request alloc failed; falling back to local");
-            return Ok(());
-        }
-    };
+    // A bitmap, not a heap vector. `[usize; MAX_CPUS]` is 2 KiB and blows the
+    // stack-sizes gate, but allocating here is worse: callers hold an
+    // interrupt-disabling lock, and there is no honest behaviour on allocation
+    // failure — reporting a shootdown that reached no peer leaves a stale
+    // translation, erroring aborts a caller mid-unmap.
+    let targets = CpuMask::new();
     let mut target_count = 0usize;
 
     for cpu_idx in info.cpumask.iter_set() {
@@ -970,10 +966,8 @@ fn targeted_flush_request(
         }
 
         queue_request_for_cpu(cpu_idx, flush_type, start, end, 0);
-        if target_count < MAX_CPUS {
-            targets[target_count] = cpu_idx;
-            target_count += 1;
-        }
+        targets.set(cpu_idx);
+        target_count += 1;
     }
 
     if target_count == 0 {
@@ -981,10 +975,10 @@ fn targeted_flush_request(
     }
 
     core::sync::atomic::fence(Ordering::SeqCst);
-    for cpu_idx in targets.iter().take(target_count) {
-        send_shootdown_ipi_to_cpu(*cpu_idx);
+    for cpu_idx in targets.iter_set() {
+        send_shootdown_ipi_to_cpu(cpu_idx);
     }
-    wait_for_acks(targets[..target_count].iter().copied(), initiator)
+    wait_for_acks(targets.iter_set(), initiator)
 }
 
 // =============================================================================

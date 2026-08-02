@@ -28,7 +28,6 @@ python3 scripts/cvss_calc.py "CVSS:3.1/AV:L/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H"
 |---|---:|---|---|
 | [SLOPOS-2026-0012](#slopos-2026-0012) | 9.1 | CRITICAL | The in-kernel DNS resolver has effectively no anti-spoofing entropy and accepts responses from any host |
 | [SLOPOS-2026-0017](#slopos-2026-0017) | 7.8 | HIGH | PCIDs are assigned from a wrapping 12-bit counter with no reuse tracking while every CR3 write is NOFLUSH |
-| [SLOPOS-2026-0018](#slopos-2026-0018) | 7.8 | HIGH | Multi-page buddy allocations bypass the LUF reuse drain, leaving stale writable TLB entries |
 | [SLOPOS-2026-0039](#slopos-2026-0039) | 7.6 | HIGH | Device-supplied PCI offsets are used to map MMIO without bounding them against the BAR |
 | [SLOPOS-2026-0011](#slopos-2026-0011) | 7.5 | HIGH | Half-open TCP connections are never reclaimed, so ~64 SYNs wedge the whole stack |
 | [SLOPOS-2026-0013](#slopos-2026-0013) | 7.4 | HIGH | No RFC 793 §3.9 sequence-acceptability check: a blind SYN tears down an established connection |
@@ -47,7 +46,6 @@ python3 scripts/cvss_calc.py "CVSS:3.1/AV:L/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H"
 | [SLOPOS-2026-0019](#slopos-2026-0019) | 4.7 | MEDIUM | `mprotect` issues no cross-CPU TLB shootdown |
 | [SLOPOS-2026-0033](#slopos-2026-0033) | 4.7 | MEDIUM | `synchronize_rcu` allocates infallibly and is `call_rcu`'s own out-of-memory fallback |
 | [SLOPOS-2026-0038](#slopos-2026-0038) | 4.7 | MEDIUM | Runtime display mode-set frees the old scanout while the vconsole still points at it |
-| [SLOPOS-2026-0041](#slopos-2026-0041) | 4.7 | MEDIUM | The page-fault handler runs on a non-reentrant IST stack with interrupts disabled, then calls an allocator path that re-enables them and spins for cross-CPU acks |
 | [SLOPOS-2026-0023](#slopos-2026-0023) | 4.4 | MEDIUM | ramfs `rename` has no ancestor check and leaks the displaced target |
 | [SLOPOS-2026-0025](#slopos-2026-0025) | 4.4 | MEDIUM | ext2 `create` performs no duplicate-name check |
 | [SLOPOS-2026-0042](#slopos-2026-0042) | 4.4 | MEDIUM | The reboot path never flushes the filesystem and the ext2 image carries no dirty-state word |
@@ -183,21 +181,6 @@ These are **candidate CVE-style records** for internal tracking. They are not of
   On a CPU where CR4.PCIDE is enabled at boot, spawn or fork 4096 times; each `create_process_vm` consumes one PCID. Note this interacts with entry 0010 — the pid ceiling is hit first, so the pid fix must land alongside this one.
 - Remediation: Use the existing ASID pool: allocate PCIDs from it, track which CPU last loaded each, and flush on reuse (or drop NOFLUSH when handing out a recycled PCID). Linux's `tlb_state`/`ctx_id` generation scheme is the reference.
 
-### SLOPOS-2026-0018
-- Title: Multi-page buddy allocations bypass the LUF reuse drain, leaving stale writable TLB entries
-- Status: open
-- Confidence: 85 — evidence 36 (the drain path and the count>1 branch read directly), exploitability 24 (needs SMP plus a specific brk-shrink or teardown sequence), reproducibility 22 (racy; window is real but timing-dependent)
-- CVSS vector/score: `CVSS:3.1/AV:L/AC:H/PR:L/UI:N/S:C/C:H/I:H/A:H` — **7.8 HIGH**
-- Impact: Allocations of more than one page skip the LUF reuse drain, and the drain matches only the block's base frame. On the un-drained brk-shrink and `process_vm_free` unmap paths a remote CPU can retain a writable translation to a physical page that has already been returned to the buddy allocator and handed to another address space.
-- Evidence:
-  - mm/src/page_alloc/buddy.rs:1058-1068 — `// LUF reuse-drain hook: ... Single-page allocations only, matching the pre-refactor behaviour (multi-page callers do their own TLB management). if !phys.is_null() && count == 1 { if !crate::mmu::luf::drain_if_reusing_frame(phys) { ... } }`
-  - mm/src/page_alloc/mod.rs:92-94 — `__alloc_page_frames_raw(count, flags)` calls `alloc_raw` with no drain at all
-  - mm/src/memfd.rs:212 — `let phys = alloc_kernel_pages(page_count);` where `page_count = aligned_size / 4096` comes straight from a userland `ftruncate` on a memfd
-  - mm/src/slab/page.rs:213-226 — `alloc_large_pages(pages)` -> `alloc_kernel_pages(pages)` backs the slab's large-allocation tier
-  - mm/src/mmu/luf.rs:648-660 — the local scan compares `state.ring[idx].phys == needle` for a single `needle`; `drain_by_phys_cross_cpu` (:221) likewise carries one `target_phys`
-- Repro:
-  SMP required. Two threads share a VmSpace; T1 on CPU1 faults in and writes heap page P, caching a writable translation. T0 on CPU0 shrinks `brk` past P. P returns to the buddy allocator as part of a multi-page block and is reallocated to another process; CPU1's stale entry still permits writes to it.
-- Remediation: Make the reuse drain cover every frame of a multi-page block, not just the base, and run it on the count>1 path. The munmap path already drains correctly and is the model.
 
 ### SLOPOS-2026-0019
 - Title: `mprotect` issues no cross-CPU TLB shootdown
@@ -210,7 +193,7 @@ These are **candidate CVE-style records** for internal tracking. They are not of
   - slopos-ostd/src/mm/vm_space.rs:920-931 — `CursorUnmapHook::after_unmap` is fired only from `unmap`, only `if was_user`. `protect` has no hook of any kind, so a consumer gets no notification that a permission downgrade needs a shootdown
   - mm/src/user_mappings.rs:268-300 `ostd_protect_range_4kb` — loops `cursor.protect::<Size4Kb>(prop)` and returns `Ok(())`; no TLB call
   - mm/src/process_vm.rs:2634-2650 `process_vm_mprotect` — calls `ostd_protect_range_4kb` then `return 0`; no `tlb::flush_all_for_process`, no `tlb::flush_all`
-  - core/src/syscall/memory_handlers.rs:79-90 `syscall_mprotect` — no flush; contrast `syscall_munmap` at :62-77, which explicitly calls `slopos_mm::mmu::luf::drain_local()` with a comment about closing the UAF window
+  - core/src/syscall/memory_handlers.rs:79-90 `syscall_mprotect` — no flush of any kind. Note that the frame-reuse quarantine does not help here: the frame is still mapped and still owned by this process, so nothing frees it and nothing gates its reuse. Permission downgrades need an actual shootdown.
 - Repro:
   Two threads sharing a VmSpace on different CPUs. T1 writes page P (caching a writable entry on CPU1). T0 calls `mprotect(P, PROT_READ)`. T1's next write to P still succeeds.
 - Remediation: Fire the same shootdown hook the unmap path uses. `CursorMut::protect` is the right place, so every consumer inherits it.
@@ -526,18 +509,6 @@ These are **candidate CVE-style records** for internal tracking. They are not of
   Drive the kernel into memory pressure while receiving traffic so an RX buffer allocation fails. Each failure permanently removes a descriptor.
 - Remediation: Repost RX buffers on every completion, and retry failed allocations on the next NAPI poll instead of retiring the descriptor. Linux's `virtnet_receive` refills in the poll loop and schedules a delayed refill when allocation fails.
 
-### SLOPOS-2026-0041
-- Title: The page-fault handler runs on a non-reentrant IST stack with interrupts disabled, then calls an allocator path that re-enables them and spins for cross-CPU acks
-- Status: open
-- Confidence: 82 — evidence 36 (the IST assignment and the force-enable in the drain both read directly; the composition inferred from the call chain), exploitability 22 (needs a fault that reaches the drain on a loaded SMP system), reproducibility 22 (timing-dependent)
-- CVSS vector/score: `CVSS:3.1/AV:L/AC:H/PR:L/UI:N/S:U/C:N/I:N/A:H` — **4.7 MEDIUM**
-- Impact: #PF is assigned an IST slot, and IST stacks are not reentrant — a nested fault reloads RSP to the same stack top and destroys the outer frame. The fault handler reaches an allocator path whose cross-CPU drain unconditionally executes `sti` and spins for acknowledgements, which both permits a nested fault on the same IST stack and holds an IRQ-off caller's lock across an interrupt-enabling wait.
-- Evidence:
-  - boot/src/idt.rs — #PF and #GP are assigned IST slots
-  - mm/src/mmu/luf.rs:221 `drain_by_phys_cross_cpu(phys, cpu_mask)` — the cross-CPU rendezvous the fault path can reach; it enables interrupts and spins for acknowledgements
-- Repro:
-  A demand fault that reaches the buddy reuse drain on an SMP system under allocation pressure. This is the same hazard family as the documented buddy/slab shootdown deadlock in `plans/KNOWN_ISSUES.md`, reached from the fault path rather than the slab path.
-- Remediation: Either move #PF off IST onto the per-task kernel stack (which is what Linux does — only #DF, NMI, #MC and #DB use IST), or make the fault path incapable of reaching a drain that enables interrupts. The first is the real fix; the second is a containment.
 
 ### SLOPOS-2026-0042
 - Title: `kernel_reboot` never flushes the filesystem (`kernel_shutdown` does), and the ext2 image carries no dirty-state word

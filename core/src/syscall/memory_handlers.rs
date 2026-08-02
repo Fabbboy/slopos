@@ -64,11 +64,9 @@ define_syscall!(syscall_munmap
     requires(let process_id: process_id)
     -> Result<(), Errno>
 {
+    // Each page was invalidated locally as it went, and the freed frames cannot
+    // be reallocated until every CPU has quiesced.
     let rc = slopos_mm::process_vm::process_vm_munmap(process_id, addr, length);
-    // Drain any LUF entries this unmap queued on the current CPU before
-    // returning to userspace — the initiator-UAF window closes when
-    // the local drain runs.
-    slopos_mm::mmu::luf::drain_local();
     if rc < 0 {
         Err(Errno::from_raw(rc).unwrap_or(Errno::EINVAL))
     } else {

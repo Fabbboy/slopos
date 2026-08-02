@@ -9,9 +9,9 @@
 //! # Why a witness rather than a lock
 //!
 //! These fields are written on the context-switch path, which runs with
-//! interrupts off and must not acquire anything: the allocator's reuse path
-//! performs synchronous cross-CPU work, and a lock taken in the switch window
-//! is the shape of the known slab/LUF deadlock. Exclusivity here is not
+//! interrupts off and must not acquire anything: a lock taken in the switch
+//! window is held by a CPU that cannot answer an interrupt, which is the shape
+//! every cross-CPU stall in this kernel has taken. Exclusivity here is not
 //! *arranged* by taking a lock, it is a fact about the CPU that already holds:
 //! only the CPU running a task touches that task's registers, and only the CPU
 //! performing a switch touches either endpoint's. The witness makes that fact

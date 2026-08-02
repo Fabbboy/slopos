@@ -126,10 +126,6 @@ pub const RESCHEDULE_IPI_VECTOR: u8 = 0xFC;
 /// RCU quiescent-state IPI vector (0xFB). Bumps the per-CPU RCU QS counter.
 pub const RCU_QS_IPI_VECTOR: u8 = 0xFB;
 
-/// LUF drain-by-phys IPI vector (0xFA). Flushes stale LUF translations
-/// before a freed frame is reused by a different VMA.
-pub const LUF_DRAIN_IPI_VECTOR: u8 = 0xFA;
-
 /// LAPIC timer vector (0xEC). Each CPU's local APIC timer fires here for
 /// scheduler preemption.
 pub const LAPIC_TIMER_VECTOR: u8 = 0xEC;
@@ -380,7 +376,6 @@ impl IdtBuilder {
             // IPI / spurious / timer custom stubs.
             fn isr_reschedule_ipi();
             fn isr_rcu_qs_ipi();
-            fn isr_luf_drain_ipi();
             fn isr_tlb_shootdown();
             fn isr_shutdown_ipi();
             fn isr_spurious();
@@ -480,12 +475,6 @@ impl IdtBuilder {
         self.set_gate(
             RCU_QS_IPI_VECTOR,
             fp(isr_rcu_qs_ipi),
-            cs,
-            IDT_GATE_INTERRUPT,
-        );
-        self.set_gate(
-            LUF_DRAIN_IPI_VECTOR,
-            fp(isr_luf_drain_ipi),
             cs,
             IDT_GATE_INTERRUPT,
         );

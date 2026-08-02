@@ -14,9 +14,8 @@
 //!   died.
 //! - **No owning handle.** Upgrading to a `KArc` means a matching drop, and
 //!   that drop can win the one-to-zero transition and run the allocator-heavy
-//!   destructor — from inside a fault handler, possibly on an IST stack. That
-//!   is the slab/LUF deadlock, reached from the one context that cannot
-//!   recover from it.
+//!   destructor — from inside a fault handler, possibly on an IST stack, which
+//!   is the one context that cannot recover from getting it wrong.
 //! - **No borrow.** A `&TaskInner` asserts the task is there for the
 //!   reference's whole life. A fault path cannot honestly promise that: it may
 //!   have arrived *because* something is corrupt, and the task may be

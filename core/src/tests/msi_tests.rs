@@ -384,8 +384,14 @@ pub fn test_exception_vectors_intact() -> TestResult {
 }
 
 pub fn test_ipi_vectors_intact() -> TestResult {
-    // 0xEC = LAPIC_TIMER, 0xFA..=0xFF = IPIs / shutdown / spurious.
-    for &v in &[0xECu8, 0xFA, 0xFB, 0xFC, 0xFD, 0xFE, 0xFF] {
+    // 0xEC = LAPIC_TIMER, 0xFB..=0xFF = IPIs / shutdown / spurious.
+    //
+    // 0xFA is deliberately absent, and this list is what pins that: frame
+    // reuse is gated on the TLB-quiesce epoch, which needs no IPI, so the
+    // kernel runs exactly one cross-CPU rendezvous protocol (0xFD). A second
+    // one is what makes an interrupts-off CPU unable to answer — it can only
+    // poll for the protocol the spin-relax hook services.
+    for &v in &[0xECu8, 0xFB, 0xFC, 0xFD, 0xFE, 0xFF] {
         let entry = match load_idt_entry(v) {
             Ok(e) => e,
             Err(r) => return r,
