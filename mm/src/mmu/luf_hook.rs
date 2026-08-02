@@ -27,18 +27,13 @@ pub struct LufHook;
 
 impl CursorUnmapHook for LufHook {
     fn after_unmap(&self, vaddr: VirtAddr, paddr: PhysAddr, mm_ctx_handle: u64) {
-        // Hook fires for kernel-master cursor mutations too — the kernel
-        // master's `mm_ctx_handle` is `0` (unset), since
-        // `set_mm_ctx_handle` is only called from `create_process_vm`.
-        // LUF entries are useful only for per-process address spaces
-        // whose deferred flush rides the per-CPU PCID rotation; kernel-
-        // master leaves are GLOBAL and would never sit in the queue
-        // anyway, so the early-out below also keeps the queue free of
-        // entries that drain logic could not interpret.
-        if mm_ctx_handle == 0 {
-            return;
-        }
-        let _ = paddr;
+        // Unconditional, including the kernel master (`mm_ctx_handle == 0`,
+        // since `set_mm_ctx_handle` runs only from `create_process_vm`).
+        // Gating on the handle would mean an address space that never got one
+        // silently skips arming the quarantine, and the errors are not
+        // symmetric: quarantining a frame that needed no protection costs a
+        // little memory, while releasing one that did is a use-after-free.
+        let _ = (paddr, mm_ctx_handle);
         luf::queue_unmap(vaddr);
     }
 
