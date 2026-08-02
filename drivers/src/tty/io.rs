@@ -32,7 +32,7 @@ use super::driver::{InputEvent, TtyDriverKind, write_driver_unlocked};
 use super::ldisc::{self, BatchResult, OutputAction};
 use super::session::ForegroundCheck;
 use super::table::{
-    InflightGuard, TTY_OUTPUT_INFLIGHT, TTY_SLOTS, TTY_WRITE_ECHO_SUBCLASS, TTY_WRITE_LOCKS,
+    InflightGuard, TTY_OUTPUT_INFLIGHT, TTY_SLOTS, TTY_WRITE_LOCKS, TTY_WRITE_PEER_SUBCLASS,
     tty_input_event, tty_output_event,
 };
 use super::{MAX_TTYS, PacketEvents, PostLockWork, Tty, TtyError, TtyFlags, TtyIndex};
@@ -246,13 +246,9 @@ pub fn push_input_batch(idx: TtyIndex, events: &[InputEvent]) {
 
     if let Some((driver_id, out, out_len)) = route {
         let settle = super::driver::defers_console_work(&driver_id);
-        // Subclass 1: a PTY master write reaches here through
-        // `pty::master_write` while already holding the *master's* write
-        // lock at subclass 0, so this is a second instance of one array.
-        // The direction is fixed (master's write lock outer, peer's echo
-        // lock inner), and a subclass keeps lockdep checking that order
-        // instead of `LO_DUPOK` discarding the check for the whole class.
-        let _write_guard = TTY_WRITE_LOCKS[slot].lock_nested(TTY_WRITE_ECHO_SUBCLASS);
+        // The peer's instance, taken inside the master's: see
+        // `TTY_WRITE_PEER_SUBCLASS`.
+        let _write_guard = TTY_WRITE_LOCKS[slot].lock_nested(TTY_WRITE_PEER_SUBCLASS);
         let _inflight = InflightGuard::new(slot, out_len);
         write_driver_unlocked(driver_id, &out[..out_len]);
         drop(_inflight);

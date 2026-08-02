@@ -651,6 +651,7 @@ slopos_testing::stest!(name = test_imaxbel_not_set_buffer_full_silent, suite = t
 slopos_testing::stest!(name = test_imaxbel_buffer_not_full_normal, suite = tty);
 slopos_testing::stest!(name = test_imaxbel_raw_mode_buffer_full, suite = tty);
 slopos_testing::stest!(name = test_ixoff_high_water_sends_xoff, suite = tty);
+slopos_testing::stest!(name = test_pty_ixoff_nests_peer_write_lock, suite = tty);
 slopos_testing::stest!(name = test_ixoff_low_water_sends_xon, suite = tty);
 slopos_testing::stest!(name = test_ixoff_not_set_no_flow_control, suite = tty);
 slopos_testing::stest!(name = test_cread_flag_value, suite = tty);

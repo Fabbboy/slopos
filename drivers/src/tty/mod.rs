@@ -68,7 +68,7 @@ use slopos_abi::syscall::UserWinsize;
 use self::driver::{DriverId, TtyDriverKind, write_driver_unlocked};
 use self::ldisc::LdiscKind;
 use self::session::TtySession;
-use self::table::{TTY_WRITE_LOCKS, tty_input_event, tty_output_event};
+use self::table::{TTY_WRITE_LOCKS, TTY_WRITE_PEER_SUBCLASS, tty_input_event, tty_output_event};
 use slopos_ostd::KArc;
 use slopos_ostd::sync::BUS;
 use slopos_ostd::task::ProcessGroup;
@@ -289,7 +289,12 @@ impl PostLockWork {
         }
 
         if let Some((driver_id, byte, slot)) = self.ixoff_byte.take() {
-            let _wg = (slot < MAX_TTYS).then(|| TTY_WRITE_LOCKS[slot].lock());
+            // The peer's instance, taken inside the master's: a PTY master
+            // write reaches here through `pty::master_write` ->
+            // `push_input_batch`, still holding the master's write lock.
+            // See `TTY_WRITE_PEER_SUBCLASS`.
+            let _wg = (slot < MAX_TTYS)
+                .then(|| TTY_WRITE_LOCKS[slot].lock_nested(TTY_WRITE_PEER_SUBCLASS));
             write_driver_unlocked(driver_id, &[byte]);
         }
 
