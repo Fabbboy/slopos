@@ -16,20 +16,37 @@ set -euo pipefail
 #
 # Usage:
 #     scripts/check_test_count.sh
+#     scripts/check_test_count.sh --log captured-raw.log
 #     TEST_COUNT_BASELINE=2500 scripts/check_test_count.sh
+#
+# `--log` parses a capture instead of booting, so CI can take one raw run and
+# feed it to every boot-based ratchet rather than paying for a QEMU boot each.
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 
-BASELINE="${TEST_COUNT_BASELINE:-2766}"
-TMP="$(mktemp)"
-trap 'rm -f "$TMP"' EXIT INT TERM
+BASELINE="${TEST_COUNT_BASELINE:-2781}"
+
+LOG=""
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --log) LOG="$2"; shift 2 ;;
+        -h|--help) sed -n '4,24p' "$0"; exit 0 ;;
+        *) echo "unknown argument: $1" >&2; exit 2 ;;
+    esac
+done
 
 cd "$REPO_ROOT"
 
-# --raw passes through QEMU stdout; --no-color keeps the stream parseable
-# (no ANSI escapes from the wrapper itself).
-builddir/run_tests --raw --no-color > "$TMP" 2>&1 || true
+if [ -n "$LOG" ]; then
+    TMP="$LOG"
+else
+    TMP="$(mktemp)"
+    trap 'rm -f "$TMP"' EXIT INT TERM
+    # --raw passes through QEMU stdout; --no-color keeps the stream parseable
+    # (no ANSI escapes from the wrapper itself).
+    builddir/run_tests --raw --no-color > "$TMP" 2>&1 || true
+fi
 
 # Sum the plan numbers across all phases.
 total=0

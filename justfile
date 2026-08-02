@@ -345,6 +345,10 @@ check-tests-host:
 check-test-count: _build-run-tests
     scripts/check_test_count.sh
 
+[doc("Lockdep ratchet: assert the validator boots ACTIVE and no pool nears its ceiling")]
+check-lockdep-headroom: _build-run-tests
+    scripts/check_lockdep_headroom.sh
+
 # Two passes, because the two aliasing models disagree about exactly the
 # thing the task cells rely on. `TaskOwnCell::get_ptr` hands out `*mut T`
 # rather than `&mut T` so that two witnesses for one task may hold live
@@ -400,6 +404,7 @@ check-framekernel-gates:
     scripts/check_stack_sizes.sh --self-test
     scripts/check_kernel_softfloat.sh --self-test
     scripts/check_registry_sections.sh --self-test
+    scripts/check_lockdep_headroom.sh --self-test
     scripts/check_vendor_pin.sh
     scripts/check_unsafe_outside_ostd.sh
     scripts/check_unsafe_expansion.sh

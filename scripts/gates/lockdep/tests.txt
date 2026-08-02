@@ -1,0 +1,57 @@
+# check_lockdep_headroom gate data — variant: tests
+#
+# The lock-order validator must be ACTIVE at every phase it reports, must
+# report no violation, and must keep every pool clear of its ceiling. An entry
+# records what a pool *is*, not that the value is acceptable.
+#
+#     scripts/check_lockdep_headroom.sh --variant tests --emit-allowlist
+#
+# Every require-phase and every cap must be matched by a LOCKDEP[...] line: a
+# cap matching nothing is a dead entry and fails the gate, because a phase that
+# stopped reporting looks exactly like a phase that passed. Raise a cap only
+# with a fresh --emit-allowlist in the same commit, and say in the message what
+# added the locks.
+#
+# Measured 2026-08-02 over 8 consecutive runs of the tests ISO.
+
+# Classes must be well clear of the pool before the validator would disable
+# itself. 70% mirrors MAX_POOL_FILL_PCT in ktesting/src/zz_lockdep_tests.rs;
+# the failure it catches is a new array-of-locks static landing without a class
+# key, which adds classes by the hundred.
+max-fill-pct 70
+
+# Without a floor, "0 classes" satisfies every ceiling and a validator that
+# stopped registering reports as maximally healthy — the hole `min-records`
+# plugs in the stack-size gate. Mirrors MIN_CLASSES in zz_lockdep_tests.rs.
+min-classes 32
+
+require-phase boot
+require-phase post-kernel-tests
+require-phase post-userland-tests
+
+# <phase> <TAB> <pool> <TAB> <cap>
+#
+# Class counts were identical in all 8 runs, so their caps are the measured
+# value with no margin: a class is registered on the first acquire of a
+# declaration site, and by the end of a phase every site the phase reaches has
+# been reached. One extra class is a new lock, which is exactly what should
+# require a deliberate bump.
+boot	classes	65
+post-kernel-tests	classes	165
+post-userland-tests	classes	176
+
+# Edges and chains depend on which *orders* were observed, so they move with
+# scheduling. Measured spread was 0 at boot, 2 across the kernel phase and 8
+# across the userland phase; each cap is the observed maximum plus that phase's
+# spread, so ordinary interleaving cannot trip the gate while a new nesting —
+# which arrives in tens, not ones — still does.
+#
+# edges  measured: boot 48, kernel 157-159, userland 189-197
+boot	edges	48
+post-kernel-tests	edges	161
+post-userland-tests	edges	205
+
+# chains measured: boot 112, kernel 339-341, userland 383-391
+boot	chains	112
+post-kernel-tests	chains	343
+post-userland-tests	chains	399

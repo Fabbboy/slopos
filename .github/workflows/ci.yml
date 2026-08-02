@@ -94,10 +94,24 @@ jobs:
       - name: Framekernel gates (vendor pin + unsafe/async/alloc/Drop/stack + wait purity + task ownership + TCB ratio)
         run: just check-framekernel-gates
 
+      # `--raw` rather than `just test`: the progress-bar renderer only surfaces
+      # klog on failure, so a green run's log carries no `LOCKDEP[...]` lines for
+      # the ratchets below to read. The verdict is unchanged — `ClassifyRun` sets
+      # the exit code independently of which renderer ran.
       - name: Run tests
         run: |
           set -o pipefail
-          just test 2>&1 | tee ci-test.log
+          just _build-run-tests
+          builddir/run_tests --raw --no-color 2>&1 | tee ci-test.log
+
+      # Both boot-based ratchets parse the capture above rather than booting
+      # again: three QEMU boots for one question each is two boots wasted, and a
+      # second boot could disagree with the one that was actually graded.
+      - name: Test-count ratchet
+        run: scripts/check_test_count.sh --log ci-test.log
+
+      - name: Lockdep headroom ratchet
+        run: scripts/check_lockdep_headroom.sh --log ci-test.log
 
       - name: Upload test log on failure
         if: failure()

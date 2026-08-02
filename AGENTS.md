@@ -141,6 +141,9 @@ The kernel ships a per-test harness that boots under QEMU, runs every `stest!`/`
 - `just test-userland-only` — skip the kernel phase; run only the userland (`utest!`) phase.
 - `just check-tests-host` — run the Go wrapper's own unit tests via `go test ./tools/run_tests/...` (host-side, no QEMU).
 - `just check-test-count` — count-regression CI guard; fails if total planned tests across phases drops below `TEST_COUNT_BASELINE`. The default lives in `scripts/check_test_count.sh` and is written down only there — read it from the script rather than restating it here, and bump it there when the suite grows. Measure the new value with `TEST_COUNT_BASELINE=0 scripts/check_test_count.sh`; never guess it.
+- `just check-lockdep-headroom` — lock-order ratchet; boots the test ISO and fails unless every phase the kernel reports (`boot`, `post-kernel-tests`, `post-userland-tests`) says `ACTIVE`, reports no violation, and keeps each pool under its recorded cap and the gate file's `max-fill-pct`. Gate data lives in `scripts/gates/lockdep/<variant>.txt` in the same measured-and-tracked style as the stack/vector gates, and a cap matching nothing fails as a dead entry. Class counts are deterministic so their caps are exact; edge and chain counts move with scheduling, so those caps carry the measured spread as margin — re-measure over several runs, not one, when raising them. `--emit-allowlist` writes a fresh baseline, `--log FILE` parses a capture instead of booting, and `--self-test` (run from `check-framekernel-gates`) drives ten crafted logs through the parser to prove the gate still rejects.
+
+Both boot-based ratchets accept `--log`, and CI feeds them one `builddir/run_tests --raw --no-color` capture rather than booting QEMU once per question.
 
 ### Cmdline knobs
 The kernel parses these from the Limine cmdline (threaded through `scripts/build_iso.sh`'s third positional arg, controlled by the `test_cmdline` justfile constant or the `TEST_CMDLINE=…` env override). For manual `just boot-log` invocations, set `BOOT_CMDLINE='tests=on tests.run=mm::*'` to run a subset.
@@ -153,6 +156,14 @@ The kernel parses these from the Limine cmdline (threaded through `scripts/build
 | `tests.warn_ms` | integer | mark slower tests as `OVER_TIME` |
 | `tests.run` | comma-separated globs | only run matching tests |
 | `tests.skip` | comma-separated globs | skip matching tests |
+| `lockdep` | `off` / `warn` / `panic` | lock-order validator policy; default `panic` |
+
+`lockdep=warn` reports each distinct finding once (deduped per class pair) and
+keeps booting, so one boot enumerates every ordering finding in the tree instead
+of stopping at the first. `lockdep=off` keeps the held-lock stack — the poison
+walk, the TLB ack-wait diagnostic and the watchdog all read it — but runs no
+ordering checks, which is how the validator's own per-acquire cost is measured
+without a separate build.
 
 ### Output format and JSONL events
 The public KTAP docs describe the wire grammar and the JSONL event schema. The wire format is stable; the JSONL schema is a strict superset suitable for downstream JUnit XML conversion or test-history regression detection.
