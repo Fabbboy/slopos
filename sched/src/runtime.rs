@@ -265,9 +265,7 @@ fn scheduler_loop_bottom_half() -> bool {
         }
     }
 
-    if slopos_arch::pcr::get_current_cpu() == 0 {
-        slopos_ostd::sync::rcu_process_callbacks();
-    }
+    slopos_ostd::sync::rcu_process_callbacks();
 
     // The cheapest place to ack: an idle CPU has no working set to lose.
     slopos_mm::mmu::quiesce::tick();

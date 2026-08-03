@@ -7,4 +7,5 @@ pub mod irq_tests;
 pub mod msi_tests;
 pub mod ostd_arc_tests;
 pub mod process_identity_tests;
+pub mod rcu_cb_tests;
 pub mod rcu_qs_tests;

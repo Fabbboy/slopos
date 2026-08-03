@@ -219,14 +219,12 @@ pub fn test_rcu_arc_slot_load_mints_one_reference() -> TestResult {
     // allocation must not be gone yet; what this pins down is that the reader
     // handles were released rather than leaked.
     slot.store(None);
-    // `call_rcu` only queues; it is the timer tick that arms the drain via
-    // `rcu_raise_softirq`. Arm it by hand rather than waiting a tick, so the
-    // test is deterministic. `rcu_process_callbacks` takes the grace period
-    // itself, inside `drain_and_invoke`.
-    slopos_ostd::sync::rcu_raise_softirq();
-    slopos_ostd::sync::rcu_process_callbacks();
+    // `call_rcu` only queues. Drive the drain, but poll for the effect: an idle
+    // CPU drains concurrently, and one that has already detached the chain
+    // leaves nothing for a manual call to find while the invocation is still in
+    // flight.
     assert_test!(
-        observer.upgrade().is_none(),
+        crate::tests::rcu_cb_tests::drain_until(|| observer.upgrade().is_none()),
         "every reference the slot handed out was released exactly once"
     );
     TestResult::Pass

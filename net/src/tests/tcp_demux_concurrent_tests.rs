@@ -194,6 +194,10 @@ impl Drop for DropProbe {
     }
 }
 
+/// Bound on waiting for a deferred drop that another CPU may be invoking.
+const DRAIN_DEADLINE_MS: u32 = 400;
+const DRAIN_POLL_MS: u32 = 10;
+
 pub fn test_epoch_defer_runs_after_grace_period() -> TestResult {
     DROP_COUNTER.store(0, Ordering::Release);
 
@@ -206,14 +210,23 @@ pub fn test_epoch_defer_runs_after_grace_period() -> TestResult {
     // run synchronously — `rcu_call_typed` enqueues the callback.
     NET_EPOCH.defer_kbox::<DropProbe>(boxed);
 
-    // Force the deferred callback to drain by completing a grace
-    // period and processing pending callbacks (the production
-    // scheduler does this on the idle path; tests invoke it directly).
     NET_EPOCH.wait();
-    slopos_ostd::sync::rcu::rcu_process_callbacks();
 
-    // After the grace period + callback drain, the probe must have
-    // dropped exactly once.
+    // Drive the drain, but poll for the effect rather than assuming this call
+    // performed it: an idle CPU drains concurrently, and one that has already
+    // detached the chain leaves nothing for a manual call to find while the
+    // invocation is still in flight.
+    let mut waited = 0;
+    while DROP_COUNTER.load(Ordering::Acquire) == 0 && waited < DRAIN_DEADLINE_MS {
+        slopos_ostd::sync::rcu::rcu_raise_softirq();
+        slopos_ostd::sync::rcu::rcu_process_callbacks();
+        if DROP_COUNTER.load(Ordering::Acquire) != 0 {
+            break;
+        }
+        slopos_kernel_services::platform::timer_poll_delay_ms(DRAIN_POLL_MS);
+        waited += DRAIN_POLL_MS;
+    }
+
     let drops = DROP_COUNTER.load(Ordering::Acquire);
     assert_eq_test!(drops, 1, "deferred drop ran after grace period");
     pass!()

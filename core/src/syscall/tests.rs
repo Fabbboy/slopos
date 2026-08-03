@@ -642,11 +642,10 @@ pub fn test_process_group_slot_survives_republication() -> TestResult {
         "the displaced group is still readable through the handle"
     );
 
-    // Retire whatever the store deferred. Whether the idle loop already drained
-    // it or this call does, the reckoning is the same: exactly one reference —
-    // the child slot's — must have gone, and the reader's must not have.
-    slopos_ostd::sync::rcu_raise_softirq();
-    slopos_ostd::sync::rcu_process_callbacks();
+    // Retire whatever the store deferred. Whichever CPU ends up invoking the
+    // callback, the reckoning is the same: exactly one reference — the child
+    // slot's — must have gone, and the reader's must not have.
+    crate::tests::rcu_cb_tests::drain_until(|| KArc::strong_count(&held) == count_before - 1);
     assert_eq_test!(
         KArc::strong_count(&held),
         count_before - 1,

@@ -2286,11 +2286,10 @@ pub fn scheduler_timer_tick() {
     // a CPU that is preempt-disabled here simply reports at its next switch.
     slopos_ostd::sync::rcu_note_qs_from_interrupt();
 
-    // Raise the deferred-callback softirq flag on CPU 0 only.
-    // rcu_process_callbacks() runs later from the idle loop, not here.
-    if cpu_id == 0 {
-        slopos_ostd::sync::rcu_raise_softirq();
-    }
+    // Arm the deferred-callback drain from every CPU's tick. Invocation itself
+    // happens later, from a CPU that finds nothing to dispatch; the tick only
+    // notices that there is something to invoke.
+    slopos_ostd::sync::rcu_raise_softirq();
 
     let idle = Idle::current();
     let current = Current::get();
