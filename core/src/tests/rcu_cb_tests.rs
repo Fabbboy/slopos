@@ -8,7 +8,7 @@
 
 use core::sync::atomic::{AtomicU32, Ordering};
 
-use slopos_kernel_services::platform::timer_poll_delay_ms;
+use slopos_kernel_services::platform::{clock_monotonic_ns, timer_poll_delay_ms};
 use slopos_ostd::KArc;
 use slopos_ostd::sync::RcuArcSlot;
 use slopos_testing::TestResult;
@@ -129,10 +129,78 @@ pub fn test_synchronize_rcu_completes_a_grace_period() -> TestResult {
     TestResult::Pass
 }
 
+/// A drain pass invokes what is ready and returns; it never takes a grace
+/// period inline.
+///
+/// This is the invariant the segmented list exists to establish, and the one a
+/// refactor is most likely to lose — putting the wait back would still pass
+/// every correctness test, and only show up as latency on whatever path drains.
+/// Timing the passes is what notices.
+pub fn test_rcu_drain_never_waits_for_a_grace_period() -> TestResult {
+    const PASSES: u32 = 32;
+    // 32 passes each taking a grace period would be seconds, not milliseconds.
+    const BUDGET_MS: u64 = 50;
+
+    // Queue work so the passes have something to tag and retire rather than
+    // early-returning on an empty backlog.
+    for _ in 0..8 {
+        let slot = RcuArcSlot::<DropCounted>::empty();
+        let Ok(value) = KArc::try_new(DropCounted) else {
+            return fail!("KArc allocation failed");
+        };
+        slot.store(Some(value));
+        slot.store(None);
+    }
+
+    let start = clock_monotonic_ns();
+    for _ in 0..PASSES {
+        slopos_ostd::sync::rcu_raise_softirq();
+        slopos_ostd::sync::rcu_process_callbacks();
+    }
+    let elapsed_ms = clock_monotonic_ns().saturating_sub(start) / 1_000_000;
+
+    if elapsed_ms > BUDGET_MS {
+        return fail!(
+            "{} drain passes took {}ms (budget {}ms) — the invoke step is waiting again",
+            PASSES,
+            elapsed_ms,
+            BUDGET_MS
+        );
+    }
+    TestResult::Pass
+}
+
+/// `rcu_barrier` waits for invocation, not merely for a grace period.
+///
+/// Once the drain is asynchronous those stop being the same fact, and a caller
+/// tearing down the thing a callback is about to touch needs the second one.
+pub fn test_rcu_barrier_waits_for_invocation() -> TestResult {
+    let before = DROPPED.load(Ordering::Acquire);
+
+    let slot = RcuArcSlot::<DropCounted>::empty();
+    let Ok(value) = KArc::try_new(DropCounted) else {
+        return fail!("KArc allocation failed");
+    };
+    slot.store(Some(value));
+    slot.store(None);
+
+    slopos_ostd::sync::rcu_barrier();
+
+    if DROPPED.load(Ordering::Acquire) == before {
+        return fail!("rcu_barrier returned with a callback still pending");
+    }
+    TestResult::Pass
+}
+
 slopos_testing::stest!(
     name = test_rcu_callbacks_are_invoked_without_a_manual_drain,
     suite = rcu_cb
 );
+slopos_testing::stest!(
+    name = test_rcu_drain_never_waits_for_a_grace_period,
+    suite = rcu_cb
+);
+slopos_testing::stest!(name = test_rcu_barrier_waits_for_invocation, suite = rcu_cb);
 slopos_testing::stest!(
     name = test_synchronize_rcu_allocates_nothing,
     suite = rcu_cb

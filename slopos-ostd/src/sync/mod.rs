@@ -65,9 +65,10 @@ pub use per_cpu_slot::PerCpuSlot;
 pub use raw_link::{ByteChain, RawLink};
 pub use raw_table::RawTable;
 pub use rcu::{
-    RcuArcSlot, RcuBackend, RcuCell, RcuCellGuard, RcuReadGuard, call_rcu, rcu_gp_poll, rcu_gp_seq,
-    rcu_note_qs, rcu_note_qs_from_interrupt, rcu_process_callbacks, rcu_qs_counter,
-    rcu_raise_softirq, rcu_read_lock, register_rcu_backend, synchronize_rcu,
+    RcuArcSlot, RcuBackend, RcuCell, RcuCellGuard, RcuReadGuard, call_rcu, rcu_barrier,
+    rcu_gp_poll, rcu_gp_seq, rcu_note_cpu_idle_enter, rcu_note_cpu_idle_exit, rcu_note_qs,
+    rcu_note_qs_from_interrupt, rcu_process_callbacks, rcu_qs_counter, rcu_raise_softirq,
+    rcu_read_lock, register_rcu_backend, synchronize_rcu,
 };
 pub use seqlock::{SeqLock, SeqLockWriteGuard};
 pub use spin::{

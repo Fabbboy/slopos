@@ -132,6 +132,48 @@ pub fn rcu_note_qs_from_interrupt() -> bool {
     true
 }
 
+/// Whether each CPU is parked in its idle loop with interrupts enabled.
+///
+/// A halted CPU stops reporting, so a grace period that starts after one goes
+/// to sleep would wait on it until something unrelated woke it. It is also
+/// provably not inside a read-side critical section — reaching the halt means
+/// passing through the idle loop, which is a quiescent state by construction —
+/// so the wait would be for nothing. Marking the state lets a period complete
+/// across a sleeping CPU instead of stalling on it.
+static RCU_CPU_IDLE: [QsSlot; MAX_CPUS] = [const { QsSlot(AtomicU64::new(0)) }; MAX_CPUS];
+
+/// Enter the extended quiescent state: this CPU is about to halt.
+#[inline]
+pub fn rcu_note_cpu_idle_enter() {
+    let cpu = get_current_cpu();
+    if cpu < MAX_CPUS {
+        RCU_CPU_IDLE[cpu].0.store(1, Ordering::Release);
+    }
+}
+
+/// Leave the extended quiescent state, and report: the stretch just ended was
+/// one, and a period that starts before the next report must still see it.
+#[inline]
+pub fn rcu_note_cpu_idle_exit() {
+    let cpu = get_current_cpu();
+    if cpu < MAX_CPUS {
+        RCU_CPU_IDLE[cpu].0.store(0, Ordering::Release);
+    }
+    rcu_note_qs();
+}
+
+/// Has `cpu` satisfied the in-flight period — by reporting, or by being asleep?
+#[inline]
+fn cpu_is_quiescent(cpu: usize) -> bool {
+    if RCU_CPU_IDLE[cpu].0.load(Ordering::Acquire) != 0 {
+        return true;
+    }
+    qs_counter_advanced(
+        RCU_QS_CTR[cpu].0.load(Ordering::Acquire),
+        GP_SNAP[cpu].0.load(Ordering::Acquire),
+    )
+}
+
 const RCU_IPI_THRESHOLD: u32 = 1_000;
 
 /// RCU stall timeout in nanoseconds (500 ms).
@@ -226,11 +268,7 @@ pub fn rcu_gp_poll() {
         return; // claimed, snapshot not yet published
     }
     for cpu in 0..get_cpu_count().min(MAX_CPUS) {
-        if !is_cpu_online(cpu) {
-            continue;
-        }
-        let current = RCU_QS_CTR[cpu].0.load(Ordering::Acquire);
-        if !qs_counter_advanced(current, GP_SNAP[cpu].0.load(Ordering::Acquire)) {
+        if is_cpu_online(cpu) && !cpu_is_quiescent(cpu) {
             return;
         }
     }
@@ -254,8 +292,7 @@ fn kick_holdouts() {
         if cpu == this_cpu || !is_cpu_online(cpu) {
             continue;
         }
-        let current = RCU_QS_CTR[cpu].0.load(Ordering::Acquire);
-        if qs_counter_advanced(current, GP_SNAP[cpu].0.load(Ordering::Acquire)) {
+        if cpu_is_quiescent(cpu) {
             continue;
         }
         if let Some(apic_id) = apic_id_from_cpu_index(cpu) {
@@ -266,13 +303,7 @@ fn kick_holdouts() {
 
 /// Name a CPU that has not reported, for the stall report.
 fn holdout_cpu() -> Option<usize> {
-    (0..get_cpu_count().min(MAX_CPUS)).find(|&cpu| {
-        is_cpu_online(cpu)
-            && !qs_counter_advanced(
-                RCU_QS_CTR[cpu].0.load(Ordering::Acquire),
-                GP_SNAP[cpu].0.load(Ordering::Acquire),
-            )
-    })
+    (0..get_cpu_count().min(MAX_CPUS)).find(|&cpu| is_cpu_online(cpu) && !cpu_is_quiescent(cpu))
 }
 
 // ---------------------------------------------------------------------------
@@ -622,65 +653,199 @@ pub fn rcu_call_typed<T: Send + 'static>(arg: crate::mm::KBox<T>, drop_fn: fn(cr
     }
 }
 
+/// Callbacks are parked in [`CB_BATCHES`] that a drain has not finished with.
+///
+/// The tick cannot take the batch lock to find that out, so the drain publishes
+/// it here. Without it a backlog left by a limited pass would rest entirely on
+/// that pass having re-armed, and one dropped arm would strand it until the next
+/// `call_rcu`.
+static CB_BACKLOG: AtomicBool = AtomicBool::new(false);
+
 /// Check from the timer tick whether deferred callbacks need processing.
 ///
 /// Hardirq-safe; analogous to Linux's `rcu_sched_clock_irq()` raising
 /// `RCU_SOFTIRQ`.
 #[inline]
 pub fn rcu_raise_softirq() {
-    if !PENDING_HEAD.load(Ordering::Relaxed).is_null() {
+    if !PENDING_HEAD.load(Ordering::Relaxed).is_null() || CB_BACKLOG.load(Ordering::Relaxed) {
         RCU_CB_PENDING.store(true, Ordering::Release);
     }
 }
 
-/// Drain the Treiber stack and invoke all callbacks after a grace period.
-fn drain_and_invoke() -> bool {
-    let head = PENDING_HEAD.swap(core::ptr::null_mut(), Ordering::AcqRel);
-    if head.is_null() {
-        return false;
+/// The two segments only the drain touches.
+///
+/// [`PENDING_HEAD`] is the third and holds newly queued callbacks; it stays a
+/// lock-free stack so `call_rcu` gains no context constraint from any of this.
+///
+/// `wait` is a separate list from the pending stack because it carries a
+/// sequence number, and a single list has nowhere to record which grace period
+/// its callbacks are waiting for. That missing field is what forced the
+/// invocation step to take a grace period inline.
+struct CbBatches {
+    /// Queued before `wait_seq` was chosen; not yet invocable.
+    wait: *mut RcuCallbackNode,
+    wait_seq: u64,
+    /// Past their grace period, waiting only for a drain to pick them up.
+    done: *mut RcuCallbackNode,
+}
+
+// SAFETY: every access goes through `CB_BATCHES`, and a node reaches `wait`
+// only after the atomic swap that detached it from `PENDING_HEAD` gave this
+// caller exclusive ownership of the chain.
+unsafe impl Send for CbBatches {}
+
+static CB_BATCHES: crate::sync::SpinLock<CbBatches> = crate::sync::SpinLock::new(
+    CbBatches {
+        wait: core::ptr::null_mut(),
+        wait_seq: 0,
+        done: core::ptr::null_mut(),
+    },
+    crate::lock_class!("RCU_CB_BATCHES", crate::sync::LOCK_LEVEL_RESOURCE),
+);
+
+/// Callbacks invoked per drain pass.
+///
+/// A pass runs on a CPU that has other things to do next, so the remainder goes
+/// back on `done` and the drain re-arms rather than running the whole backlog at
+/// once. Linux calls this `blimit`.
+const RCU_BLIMIT: usize = 64;
+
+/// Detach at most `limit` nodes from `*head`.
+fn split_off(head: &mut *mut RcuCallbackNode, limit: usize) -> *mut RcuCallbackNode {
+    let taken = *head;
+    if taken.is_null() {
+        return taken;
     }
+    let mut tail = taken;
+    let mut count = 1;
+    loop {
+        // SAFETY: `tail` is a node this caller owns exclusively; the chain is
+        // null-terminated.
+        let next = unsafe { (*tail).next };
+        if next.is_null() || count == limit {
+            *head = next;
+            // SAFETY: as above; cutting the chain at the node this pass keeps.
+            unsafe { (*tail).next = core::ptr::null_mut() };
+            return taken;
+        }
+        tail = next;
+        count += 1;
+    }
+}
 
-    synchronize_rcu();
-
-    let mut current = head;
+/// Invoke and release every node in `chain`.
+fn invoke_chain(chain: *mut RcuCallbackNode) {
+    let mut current = chain;
     while !current.is_null() {
-        // SAFETY: each node was allocated via try_alloc_callback_node in
-        // call_rcu and is exclusively ours after the atomic swap above.
+        // SAFETY: each node was allocated by `try_alloc_callback_node` and is
+        // exclusively owned by this caller — it left every shared list before
+        // reaching here.
         let next = unsafe { (*current).next };
         let ptr = unsafe { (*current).ptr };
         let callback = unsafe { (*current).callback };
         // SAFETY: symmetric dealloc with the same Layout used in allocation.
-        unsafe {
-            dealloc_callback_node(current);
-        }
-        // SAFETY: the grace period has elapsed — the callback contract
-        // guarantees this is safe to invoke.
-        unsafe {
-            callback(ptr);
-        }
+        unsafe { dealloc_callback_node(current) };
+        // SAFETY: the node reached `done` only after its grace period elapsed,
+        // which is the callback's contract.
+        unsafe { callback(ptr) };
         current = next;
     }
-    true
 }
 
-/// Process all pending RCU callbacks from non-IRQ context.
+/// One drain pass: retire an elapsed batch, tag a fresh one, invoke up to
+/// `limit` callbacks. Returns whether anything remains.
 ///
-/// # Context
+/// Never waits. That is the invariant the segments exist to establish: a pass
+/// invokes exactly those callbacks already observed to be past their grace
+/// period, and returns. A drain that took the grace period itself could not run
+/// anywhere a CPU has other work to get back to.
 ///
-/// Must be called from process context (idle task, kernel thread) —
-/// **never** from a timer tick or other IRQ handler.
+/// The lock is `try_lock`ed and released before any callback runs, so a second
+/// CPU skips rather than spins, and a callback that itself calls `call_rcu` only
+/// pushes to the lock-free stack.
+fn drain_ready(limit: usize) -> bool {
+    let Some(mut batches) = CB_BATCHES.try_lock() else {
+        // Hand the flag back. The CPU holding the lock re-arms for what it
+        // leaves behind, but it may have computed that before this swap, and a
+        // dropped arm is a backlog nothing comes back for.
+        RCU_CB_PENDING.store(true, Ordering::Release);
+        return false;
+    };
+
+    // Retire an elapsed batch. Only into an empty `done`, which keeps this
+    // O(1): a non-empty `done` means the previous pass hit its limit, and the
+    // caller comes straight back for it.
+    if batches.done.is_null()
+        && !batches.wait.is_null()
+        && gp_done(GP_SEQ.load(Ordering::Acquire), batches.wait_seq)
+    {
+        batches.done = core::mem::replace(&mut batches.wait, core::ptr::null_mut());
+    }
+
+    // Tag a fresh batch with the period it has to outlive.
+    if batches.wait.is_null() {
+        let head = PENDING_HEAD.swap(core::ptr::null_mut(), Ordering::AcqRel);
+        if !head.is_null() {
+            batches.wait = head;
+            batches.wait_seq = gp_snap(GP_SEQ.load(Ordering::Acquire));
+        }
+    }
+
+    let batch = split_off(&mut batches.done, limit);
+    let ready = !batches.done.is_null();
+    let more = ready || !batches.wait.is_null();
+    CB_BACKLOG.store(more, Ordering::Release);
+    drop(batches);
+
+    // Outside the lock: callbacks free to the heap, and one of them may queue
+    // another.
+    invoke_chain(batch);
+
+    // A batch was tagged but its period may not have started, and nothing else
+    // starts one on the callback path.
+    gp_start_if_idle();
+
+    if more || !PENDING_HEAD.load(Ordering::Acquire).is_null() {
+        RCU_CB_PENDING.store(true, Ordering::Release);
+    }
+    ready
+}
+
+/// Invoke every callback whose grace period has already elapsed.
+///
+/// Called from a CPU that has found nothing to dispatch, so it keeps going while
+/// callbacks are ready rather than leaving a backlog for the next pass: the
+/// batch limit is there to bound one pass, not to ration a CPU that has nothing
+/// else to do. Callbacks whose period has *not* elapsed are left alone — this
+/// never waits for one.
 pub fn rcu_process_callbacks() {
     if !RCU_CB_PENDING.swap(false, Ordering::Acquire) {
         return;
     }
+    while drain_ready(RCU_BLIMIT) {}
+}
 
-    loop {
-        if !drain_and_invoke() {
-            break;
-        }
-        if PENDING_HEAD.load(Ordering::Acquire).is_null() {
-            break;
-        }
+/// Wait until every callback queued before this call has been *invoked*.
+///
+/// [`synchronize_rcu`] says a grace period elapsed; once invocation is
+/// asynchronous that no longer says the callbacks ran, and those are two
+/// different facts a caller tearing something down needs to keep apart.
+///
+/// Drives the drain itself rather than waiting on a peer, so it makes progress
+/// from a context that will not go idle.
+pub fn rcu_barrier() {
+    // Everything queued before this point is either on the pending stack or in
+    // a batch, and one full drain of both is what the caller is waiting for.
+    while !PENDING_HEAD.load(Ordering::Acquire).is_null() || CB_BACKLOG.load(Ordering::Acquire) {
+        RCU_CB_PENDING.store(true, Ordering::Release);
+        rcu_process_callbacks();
+        // Unconditional, for the reason [`synchronize_rcu`] gives: a spinning
+        // CPU reaches no switch of its own, so a declined report leaves it
+        // waiting on itself.
+        rcu_note_qs();
+        rcu_gp_poll();
+        crate::sync::spin_relax();
+        core::hint::spin_loop();
     }
 }
 

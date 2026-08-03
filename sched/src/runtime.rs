@@ -513,7 +513,9 @@ fn scheduler_loop(cpu_id: usize) -> ! {
             // CPU is holding drains on the iteration after the pause lifts.
             slopos_ostd::sync::rcu_note_qs();
             crate::scheduler::arm_tickless_idle_if_due();
+            slopos_ostd::sync::rcu_note_cpu_idle_enter();
             slopos_ostd::cpu::x86_64::core::sti_hlt_cli_atomic();
+            slopos_ostd::sync::rcu_note_cpu_idle_exit();
             continue;
         }
 
@@ -539,7 +541,9 @@ fn scheduler_loop(cpu_id: usize) -> ! {
             slopos_arch::cpu::restore_flags(irq_flags);
             slopos_ostd::sync::rcu_note_qs();
             crate::scheduler::arm_tickless_idle_if_due();
+            slopos_ostd::sync::rcu_note_cpu_idle_enter();
             slopos_ostd::cpu::x86_64::core::sti_hlt_cli_atomic();
+            slopos_ostd::sync::rcu_note_cpu_idle_exit();
             continue;
         };
         let dispatched = run_ready_task_from_idle(cpu_id, idle.task());
@@ -566,6 +570,13 @@ fn scheduler_loop(cpu_id: usize) -> ! {
         // registry walk costs idle time only.
         crate::scheduler::rescue_stranded_ready_tasks();
 
+        // Before the bottom half, and unconditionally: reaching here proves
+        // this CPU holds no read-side section, and the bottom half can loop for
+        // as long as it keeps finding work. A report placed after it would be
+        // skipped exactly while this CPU is busiest reclaiming — stalling the
+        // grace period that the reclamation is itself waiting on.
+        slopos_ostd::sync::rcu_note_qs();
+
         // Nothing to run, nothing to steal: the deferred work runs here rather
         // than at the top of the loop, where it would cost a lock acquisition
         // and a TTY slot walk on every dispatch.
@@ -573,15 +584,13 @@ fn scheduler_loop(cpu_id: usize) -> ! {
             continue;
         }
 
-        // idle_time is now incremented per-tick in scheduler_timer_tick(),
-        // not per-idle-loop-iteration, keeping it in lockstep with total_ticks.
-        slopos_ostd::sync::rcu_note_qs();
-
         // Tickless-idle: arm one-shot LAPIC for the soonest pending
         // sleep-queue deadline if it falls inside the next periodic
         // tick. See `sched::scheduler::arm_tickless_idle_if_due`.
         crate::scheduler::arm_tickless_idle_if_due();
 
+        slopos_ostd::sync::rcu_note_cpu_idle_enter();
         slopos_ostd::cpu::x86_64::core::sti_hlt_cli_atomic();
+        slopos_ostd::sync::rcu_note_cpu_idle_exit();
     }
 }

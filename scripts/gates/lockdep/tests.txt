@@ -12,7 +12,10 @@
 # with a fresh --emit-allowlist in the same commit, and say in the message what
 # added the locks.
 #
-# Measured 2026-08-02 over 8 consecutive runs of the tests ISO.
+# Measured 2026-08-02 over 8 consecutive runs of the tests ISO. Re-measured
+# 2026-08-03 over 4 runs when RCU's callback-batch lock added one class to the
+# kernel phase; the edge and chain caps below still bound the new measurement
+# with room to spare and are left at their 8-run values.
 
 # Classes must be well clear of the pool before the validator would disable
 # itself. 70% mirrors MAX_POOL_FILL_PCT in ktesting/src/zz_lockdep_tests.rs;
@@ -37,7 +40,7 @@ require-phase post-userland-tests
 # been reached. One extra class is a new lock, which is exactly what should
 # require a deliberate bump.
 boot	classes	65
-post-kernel-tests	classes	165
+post-kernel-tests	classes	166
 post-userland-tests	classes	176
 
 # Edges and chains depend on which *orders* were observed, so they move with
