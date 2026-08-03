@@ -92,7 +92,52 @@ pub fn test_rcu_callbacks_are_invoked_without_a_manual_drain() -> TestResult {
     )
 }
 
+/// `synchronize_rcu` reaches no allocator.
+///
+/// It is called from the reclaim path, including `call_rcu`'s own
+/// out-of-memory fallback, so an allocation here is a failure exactly when
+/// there is nothing to allocate from.
+pub fn test_synchronize_rcu_allocates_nothing() -> TestResult {
+    let before = slopos_mm::slab::get_heap_stats_owned();
+    slopos_ostd::sync::synchronize_rcu();
+    let after = slopos_mm::slab::get_heap_stats_owned();
+
+    if after.allocation_count != before.allocation_count {
+        return fail!(
+            "synchronize_rcu allocated {} time(s)",
+            after.allocation_count - before.allocation_count
+        );
+    }
+    TestResult::Pass
+}
+
+/// A grace period elapses, and the caller observes it having elapsed.
+///
+/// The counterpart to the arithmetic tests in `slopos_ostd::sync::rcu`: those
+/// say the target is computed correctly, this says a real machine reaches it.
+pub fn test_synchronize_rcu_completes_a_grace_period() -> TestResult {
+    let before = slopos_ostd::sync::rcu_gp_seq();
+    slopos_ostd::sync::synchronize_rcu();
+    let after = slopos_ostd::sync::rcu_gp_seq();
+
+    if after.wrapping_sub(before) < 2 {
+        return fail!(
+            "grace-period sequence advanced {} (want >= 2)",
+            after - before
+        );
+    }
+    TestResult::Pass
+}
+
 slopos_testing::stest!(
     name = test_rcu_callbacks_are_invoked_without_a_manual_drain,
+    suite = rcu_cb
+);
+slopos_testing::stest!(
+    name = test_synchronize_rcu_allocates_nothing,
+    suite = rcu_cb
+);
+slopos_testing::stest!(
+    name = test_synchronize_rcu_completes_a_grace_period,
     suite = rcu_cb
 );

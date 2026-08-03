@@ -2286,6 +2286,11 @@ pub fn scheduler_timer_tick() {
     // a CPU that is preempt-disabled here simply reports at its next switch.
     slopos_ostd::sync::rcu_note_qs_from_interrupt();
 
+    // Advance the grace period if this CPU is the one that notices every peer
+    // has reported. Loads plus at most one compare-exchange — no lock, no
+    // allocation, no wait — so it is legal here.
+    slopos_ostd::sync::rcu_gp_poll();
+
     // Arm the deferred-callback drain from every CPU's tick. Invocation itself
     // happens later, from a CPU that finds nothing to dispatch; the tick only
     // notices that there is something to invoke.

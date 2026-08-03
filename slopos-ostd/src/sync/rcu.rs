@@ -24,11 +24,22 @@
 //! The two unconditional sites are what carry liveness: a tick that declines
 //! only delays a grace period, because the next switch reports regardless.
 //!
-//! ## Stall detection
+//! ## The grace period is a number
 //!
-//! [`synchronize_rcu`] uses a 500 ms TSC-based timeout per CPU. If a
-//! holdout CPU fails to report after an IPI, the grace period is
-//! declared complete with a warning emitted via the registered logger.
+//! `GP_SEQ` counts completed periods, with bit 0 set while one is in flight.
+//! Starting a period snapshots every CPU's quiescent-state counter;
+//! [`rcu_gp_poll`], driven from every CPU's timer tick, completes it once each
+//! online CPU has advanced past its snapshot. That check is a handful of loads,
+//! so no site has to wait to learn whether a period has elapsed —
+//! [`synchronize_rcu`] is the only thing that waits, and only because its
+//! callers ask it to.
+//!
+//! ## Stall reporting
+//!
+//! A CPU that has not reported after 500 ms is named in a warning and the wait
+//! continues. Declaring the period complete instead would free memory a reader
+//! may still be dereferencing, and would say so only through a logger that is a
+//! no-op in production.
 //!
 //! ## Deferred callbacks (`call_rcu`)
 //!
@@ -56,7 +67,7 @@ use crate::cpu::x86_64::pcr::{
     send_ipi_to_cpu,
 };
 use crate::irq::idt::RCU_QS_IPI_VECTOR;
-use crate::mm::{KVec, raw_alloc, raw_dealloc};
+use crate::mm::{raw_alloc, raw_dealloc};
 use crate::sync::BspToken;
 
 #[repr(C, align(64))]
@@ -130,6 +141,138 @@ const RCU_STALL_TIMEOUT_NS: u64 = 500_000_000;
 #[inline]
 fn qs_counter_advanced(current: u64, snapshot: u64) -> bool {
     (current.wrapping_sub(snapshot)) as i64 > 0
+}
+
+// ---------------------------------------------------------------------------
+// Grace-period sequence
+// ---------------------------------------------------------------------------
+
+/// Grace-period sequence. Bit 0 set means a period is in flight; the rest
+/// counts completions. One word, so a reader learns which period and whether it
+/// is running from a single load.
+static GP_SEQ: AtomicU64 = AtomicU64::new(0);
+
+/// Per-CPU quiescent-state counters as of the in-flight period's start.
+///
+/// A static rather than a stack array or a `KVec`: `[u64; MAX_CPUS]` is exactly
+/// the stack gate's 2 KiB threshold, and reclamation must not be able to fail an
+/// allocation. Exactly one CPU ever writes it — whichever wins the claim in
+/// [`gp_start_if_idle`].
+static GP_SNAP: [QsSlot; MAX_CPUS] = [const { QsSlot(AtomicU64::new(0)) }; MAX_CPUS];
+
+/// Which sequence [`GP_SNAP`] currently describes.
+///
+/// The claim and the snapshot cannot be one atomic step, so this is what says
+/// the snapshot is ready. Without it a peer polling between the two would read
+/// the *previous* period's snapshot, find every counter long since advanced, and
+/// declare a period complete that never ran — freeing under live readers.
+static GP_SNAP_SEQ: AtomicU64 = AtomicU64::new(0);
+
+const GP_IN_FLIGHT: u64 = 1;
+
+/// The sequence at which a period started *now* would be complete.
+///
+/// Rounds past an in-flight period: that one may have begun before the caller
+/// unpublished its object, so waiting for it is not sufficient.
+#[inline]
+fn gp_snap(seq: u64) -> u64 {
+    (seq + 3) & !GP_IN_FLIGHT
+}
+
+/// Wrapping-safe: has `seq` reached `target`?
+#[inline]
+fn gp_done(seq: u64, target: u64) -> bool {
+    seq.wrapping_sub(target) as i64 >= 0
+}
+
+/// Start a grace period if none is in flight.
+///
+/// Interrupts stay off across claim and publish so the window in which peers
+/// decline to poll is a few hundred cycles rather than a scheduling quantum.
+/// Correctness rests on [`GP_SNAP_SEQ`], not on this.
+fn gp_start_if_idle() {
+    crate::cpu::x86_64::interrupts::IrqDisabled::with(|_irq| {
+        let seq = GP_SEQ.load(Ordering::Acquire);
+        if seq & GP_IN_FLIGHT != 0 {
+            return;
+        }
+        if GP_SEQ
+            .compare_exchange(seq, seq + 1, Ordering::AcqRel, Ordering::Relaxed)
+            .is_err()
+        {
+            return; // a peer started one; its snapshot is as good as ours
+        }
+        for cpu in 0..get_cpu_count().min(MAX_CPUS) {
+            GP_SNAP[cpu]
+                .0
+                .store(RCU_QS_CTR[cpu].0.load(Ordering::Acquire), Ordering::Relaxed);
+        }
+        GP_SNAP_SEQ.store(seq + 1, Ordering::Release);
+    });
+}
+
+/// Advance the grace-period state machine if every online CPU has reported.
+///
+/// Loads plus at most one compare-exchange: no lock, no allocation, no wait, so
+/// it is legal from a hard IRQ handler by the same argument
+/// [`crate::sync`]'s other tick-driven pollers make. Driven from every CPU's
+/// timer tick, so a period completes on whichever CPU notices first.
+pub fn rcu_gp_poll() {
+    let seq = GP_SEQ.load(Ordering::Acquire);
+    if seq & GP_IN_FLIGHT == 0 {
+        return;
+    }
+    if GP_SNAP_SEQ.load(Ordering::Acquire) != seq {
+        return; // claimed, snapshot not yet published
+    }
+    for cpu in 0..get_cpu_count().min(MAX_CPUS) {
+        if !is_cpu_online(cpu) {
+            continue;
+        }
+        let current = RCU_QS_CTR[cpu].0.load(Ordering::Acquire);
+        if !qs_counter_advanced(current, GP_SNAP[cpu].0.load(Ordering::Acquire)) {
+            return;
+        }
+    }
+    let _ = GP_SEQ.compare_exchange(seq, seq + 1, Ordering::AcqRel, Ordering::Relaxed);
+}
+
+/// The grace-period sequence: completions in the high bits, in-flight in bit 0.
+#[inline]
+pub fn rcu_gp_seq() -> u64 {
+    GP_SEQ.load(Ordering::Acquire)
+}
+
+/// Nudge CPUs that have not yet reported for the in-flight period.
+///
+/// The IPI handler reports a quiescent state if it did not land inside a
+/// reader, which is what breaks a CPU that is busy in a long kernel path with
+/// no context switch of its own.
+fn kick_holdouts() {
+    let this_cpu = get_current_cpu();
+    for cpu in 0..get_cpu_count().min(MAX_CPUS) {
+        if cpu == this_cpu || !is_cpu_online(cpu) {
+            continue;
+        }
+        let current = RCU_QS_CTR[cpu].0.load(Ordering::Acquire);
+        if qs_counter_advanced(current, GP_SNAP[cpu].0.load(Ordering::Acquire)) {
+            continue;
+        }
+        if let Some(apic_id) = apic_id_from_cpu_index(cpu) {
+            send_ipi_to_cpu(apic_id, RCU_QS_IPI_VECTOR);
+        }
+    }
+}
+
+/// Name a CPU that has not reported, for the stall report.
+fn holdout_cpu() -> Option<usize> {
+    (0..get_cpu_count().min(MAX_CPUS)).find(|&cpu| {
+        is_cpu_online(cpu)
+            && !qs_counter_advanced(
+                RCU_QS_CTR[cpu].0.load(Ordering::Acquire),
+                GP_SNAP[cpu].0.load(Ordering::Acquire),
+            )
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -241,66 +384,72 @@ fn monotonic_ns() -> u64 {
     crate::arch::x86_64::tsc::rdtsc()
 }
 
-/// Block until every online CPU has passed through at least one
-/// quiescent state since this call.
+/// Block until a grace period that began after this call has elapsed.
+///
+/// Snap the target first, then poll: concurrent callers land on the same target
+/// and share one period rather than each forcing their own. Allocates nothing.
+///
+/// A stall is reported and waited through rather than declared complete. The
+/// alternative — giving up and letting the caller free — hands memory back while
+/// a reader may still be dereferencing it, and says so only through a logger
+/// that is a no-op in production. A CPU that never reports is a bug the watchdog
+/// can name; a use-after-free is not.
 pub fn synchronize_rcu() {
-    rcu_note_qs();
+    let target = gp_snap(GP_SEQ.load(Ordering::Acquire));
+    gp_start_if_idle();
 
-    let this_cpu = get_current_cpu();
-    let n = get_cpu_count().min(MAX_CPUS);
+    let mut spins: u32 = 0;
+    let mut ipi_sent = false;
+    let mut next_warn = monotonic_ns().wrapping_add(RCU_STALL_TIMEOUT_NS);
 
-    // Heap-allocate the per-CPU snapshot vector rather than placing a
-    // 2 KiB `[u64; MAX_CPUS]` on the stack — stack-safety gate forbids
-    // frames that large. It is per-call because concurrent callers are
-    // waiting on different instants.
-    let mut snaps = KVec::<u64>::zeroed(n).expect("rcu: snaps alloc");
-    for cpu in 0..n {
-        snaps[cpu] = RCU_QS_CTR[cpu].0.load(Ordering::Acquire);
-    }
+    while !gp_done(GP_SEQ.load(Ordering::Acquire), target) {
+        // Report unconditionally. A CPU spinning here reaches no switch of its
+        // own, so a declined report makes the caller its own permanent holdout;
+        // and the guarded variant declines for any preemption guard, not just a
+        // read-side section, so an ordinary spinlock held across this call would
+        // wedge the machine. Waiting for a grace period from inside a read-side
+        // section is a self-deadlock the caller must not write, which is the
+        // same assumption that lets the poll below treat this CPU as quiescent.
+        rcu_note_qs();
 
-    for cpu in 0..n {
-        if cpu == this_cpu || !is_cpu_online(cpu) {
-            continue;
+        // The period this caller is waiting for may not have started yet: its
+        // target rounds past whichever period was in flight at the snap.
+        gp_start_if_idle();
+        rcu_gp_poll();
+
+        spins = spins.saturating_add(1);
+        if !ipi_sent && spins > RCU_IPI_THRESHOLD {
+            kick_holdouts();
+            ipi_sent = true;
         }
 
-        let mut ipi_sent = false;
-        let mut spins: u32 = 0;
-        let deadline = monotonic_ns().wrapping_add(RCU_STALL_TIMEOUT_NS);
-        loop {
-            let current = RCU_QS_CTR[cpu].0.load(Ordering::Acquire);
-            if qs_counter_advanced(current, snaps[cpu]) {
-                break;
-            }
-
-            spins = spins.saturating_add(1);
-
-            if !ipi_sent && spins > RCU_IPI_THRESHOLD {
-                if let Some(apic_id) = apic_id_from_cpu_index(cpu) {
-                    send_ipi_to_cpu(apic_id, RCU_QS_IPI_VECTOR);
-                }
-                ipi_sent = true;
-            }
-
-            if (spins & 0xFFFF) == 0 {
-                let now = monotonic_ns();
-                if now.wrapping_sub(deadline) < u64::MAX / 2 {
-                    backend().log_warn(format_args!(
-                        "RCU stall: CPU {} failed to report QS after {}ms (snap={}, cur={})",
+        if (spins & 0xFFFF) == 0 {
+            let now = monotonic_ns();
+            if now.wrapping_sub(next_warn) < u64::MAX / 2 {
+                match holdout_cpu() {
+                    Some(cpu) => backend().log_warn(format_args!(
+                        "RCU stall: CPU {} has not reported a quiescent state in {}ms (seq={}, target={})",
                         cpu,
                         RCU_STALL_TIMEOUT_NS / 1_000_000,
-                        snaps[cpu],
-                        RCU_QS_CTR[cpu].0.load(Ordering::Relaxed),
-                    ));
-                    break;
+                        GP_SEQ.load(Ordering::Relaxed),
+                        target,
+                    )),
+                    None => backend().log_warn(format_args!(
+                        "RCU stall: no holdout but seq={} has not reached target={}",
+                        GP_SEQ.load(Ordering::Relaxed),
+                        target,
+                    )),
                 }
+                next_warn = now.wrapping_add(RCU_STALL_TIMEOUT_NS);
+                ipi_sent = false;
             }
-
-            // A CPU spinning on a peer must keep acknowledging that peer's
-            // shootdowns; `spin_relax` is the service call and carries no
-            // `pause` of its own.
-            crate::sync::spin_relax();
-            core::hint::spin_loop();
         }
+
+        // A CPU spinning on a peer must keep acknowledging that peer's
+        // shootdowns; `spin_relax` is the service call and carries no
+        // `pause` of its own.
+        crate::sync::spin_relax();
+        core::hint::spin_loop();
     }
 }
 
@@ -818,4 +967,62 @@ pub fn rcu_qs_counter(cpu: usize) -> u64 {
 #[cfg(any(test, feature = "test-helpers"))]
 pub fn reset_backend_for_test() {
     BACKEND_INSTALLED.store(false, Ordering::Release);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{GP_IN_FLIGHT, gp_done, gp_snap};
+
+    /// From an idle sequence, the next period to run is the one to wait for.
+    #[test]
+    fn snap_from_idle_targets_the_next_completion() {
+        assert_eq!(gp_snap(0), 2);
+        assert_eq!(gp_snap(2), 4);
+        assert_eq!(gp_snap(100), 102);
+    }
+
+    /// From an in-flight sequence, the running period does not count: it may
+    /// have begun before the caller unpublished, so a reader that entered
+    /// before the caller's store can still be inside it.
+    #[test]
+    fn snap_rounds_past_an_in_flight_period() {
+        assert_eq!(gp_snap(1), 4);
+        assert_eq!(gp_snap(3), 6);
+        assert_eq!(gp_snap(101), 104);
+    }
+
+    /// Every target names a completion, never a period in flight.
+    #[test]
+    fn snap_is_always_a_completed_sequence() {
+        for seq in 0u64..64 {
+            assert_eq!(gp_snap(seq) & GP_IN_FLIGHT, 0, "seq={seq}");
+        }
+    }
+
+    /// A target is always strictly ahead, so no caller returns without waiting.
+    #[test]
+    fn snap_is_strictly_ahead_of_the_snapped_sequence() {
+        for seq in 0u64..64 {
+            assert!(gp_snap(seq) > seq, "seq={seq}");
+        }
+    }
+
+    #[test]
+    fn done_is_reached_at_and_after_the_target() {
+        assert!(!gp_done(0, 2));
+        assert!(!gp_done(1, 2));
+        assert!(gp_done(2, 2));
+        assert!(gp_done(4, 2));
+    }
+
+    /// The sequence is a wrapping counter, so the comparison has to be a signed
+    /// difference. A plain `>=` reads a wrapped counter as permanently behind
+    /// and every waiter hangs.
+    #[test]
+    fn done_survives_wrapping() {
+        let target = gp_snap(u64::MAX - 3);
+        assert!(!gp_done(u64::MAX - 3, target));
+        assert!(gp_done(target, target));
+        assert!(gp_done(target.wrapping_add(2), target));
+    }
 }
