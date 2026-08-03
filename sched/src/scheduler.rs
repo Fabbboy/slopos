@@ -1456,13 +1456,13 @@ pub(crate) fn run_ready_task_from_idle(cpu_id: usize, idle_task: &Task) -> bool 
 /// open the required interruptible drop window and then restore the loop's
 /// prior state without an IRQ-driven migration moving that state to another
 /// CPU.
-struct RestoreInterruptState {
+pub(crate) struct RestoreInterruptState {
     disable_on_drop: bool,
 }
 
 impl RestoreInterruptState {
     #[inline]
-    fn open_window() -> Self {
+    pub(crate) fn open_window() -> Self {
         let was_enabled = slopos_ostd::cpu::x86_64::interrupts::are_interrupts_enabled();
         if !was_enabled {
             slopos_arch::cpu::enable_interrupts();

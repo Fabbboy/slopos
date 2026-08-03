@@ -228,45 +228,57 @@ pub fn kernel_io_yield_backend() -> slopos_ostd::sync::kernel_io_task::YieldBack
     KERNEL_IO_YIELD_BACKEND
 }
 
-extern "C" fn unified_idle_loop(_: *mut c_void) {
-    loop {
-        let mut any_work = false;
-        if let Some(mutex) = IDLE_CBS.get() {
-            let cbs = mutex.lock();
-            for slot in &cbs.slots[..cbs.count] {
-                if let Some(cb) = slot {
-                    if cb() != 0 {
-                        any_work = true;
-                    }
-                }
-            }
-        }
-        if any_work {
-            r#yield();
-            continue;
-        }
-        let cpu_id = slopos_arch::pcr::get_current_cpu();
-        // idle_time is now incremented per-tick in scheduler_timer_tick(),
-        // not per-idle-loop-iteration, so the counter stays in lockstep
-        // with total_ticks.
-        if cpu_id == 0 {
-            slopos_ostd::sync::rcu_process_callbacks();
-        }
-        slopos_ostd::sync::rcu_note_qs();
-        // The cheapest place to ack: an idle CPU has no working set to lose.
-        slopos_mm::mmu::quiesce::tick();
-        // Bounded: each block coalesces under the allocator's cli-lock.
-        if slopos_mm::page_alloc::quarantine_has_releasable() {
-            slopos_mm::page_alloc::quarantine_release_some(64);
-            continue;
-        }
-        // Tickless-idle: arm a one-shot LAPIC if the next sleep-queue
-        // deadline falls inside the current periodic tick window. The
-        // next timer ISR restores periodic mode. See
-        // `sched::scheduler::arm_tickless_idle_if_due`.
-        crate::scheduler::arm_tickless_idle_if_due();
-        slopos_ostd::cpu::x86_64::core::sti_hlt_cli_atomic();
+/// The idle task's entry point.
+///
+/// A CPU normally reaches [`scheduler_loop`] through the stack switch in
+/// [`enter_scheduler`] rather than through this trampoline. Both routes land in
+/// the same loop on the same stack, so a switch that resumes the idle task from
+/// its seeded context runs the CPU's real idle loop rather than a second one.
+extern "C" fn idle_task_entry(_: *mut c_void) {
+    scheduler_loop(slopos_arch::pcr::get_current_cpu())
+}
+
+/// Deferred work an idle CPU is the cheapest place to run.
+///
+/// Every callee here takes a lock, frees to the allocator, or both, so the
+/// interrupt window is not optional: the idle loop's tail runs with interrupts
+/// disabled because `sti_hlt_cli_atomic` ends in `cli`.
+///
+/// Returns whether it did anything, so the caller can re-run the loop rather
+/// than halt.
+fn scheduler_loop_bottom_half() -> bool {
+    let _window = crate::scheduler::RestoreInterruptState::open_window();
+
+    // Copied out rather than invoked under the lock: the callbacks reach TTY
+    // and driver locks, and holding a registry-level lock across them would
+    // order the whole driver tree under this one.
+    let mut callbacks = [None; MAX_IDLE_CALLBACKS];
+    if let Some(mutex) = IDLE_CBS.get() {
+        let cbs = mutex.lock();
+        callbacks[..cbs.count].copy_from_slice(&cbs.slots[..cbs.count]);
     }
+
+    let mut any_work = false;
+    for cb in callbacks.into_iter().flatten() {
+        if cb() != 0 {
+            any_work = true;
+        }
+    }
+
+    if slopos_arch::pcr::get_current_cpu() == 0 {
+        slopos_ostd::sync::rcu_process_callbacks();
+    }
+
+    // The cheapest place to ack: an idle CPU has no working set to lose.
+    slopos_mm::mmu::quiesce::tick();
+
+    // Bounded: each block coalesces under the allocator's cli-lock.
+    if slopos_mm::page_alloc::quarantine_has_releasable() {
+        slopos_mm::page_alloc::quarantine_release_some(64);
+        any_work = true;
+    }
+
+    any_work
 }
 
 pub fn create_idle_task() -> c_int {
@@ -311,7 +323,7 @@ pub fn create_idle_task_for_cpu(cpu_id: usize) -> c_int {
     let name = idle_task_name(cpu_id);
     let idle_task_id = crate::task::task_create(
         name.as_ptr() as *const i8,
-        unified_idle_loop,
+        idle_task_entry,
         ptr::null_mut(),
         TaskPriority::Idle.as_u8(),
         TASK_FLAG_KERNEL_MODE,
@@ -497,6 +509,10 @@ fn scheduler_loop(cpu_id: usize) -> ! {
         });
 
         if per_cpu::should_pause_scheduler_loop(cpu_id) {
+            // Deliberately no reclaim and no bottom half: the pause exists so
+            // its holder can act against quiescent APs, and both would take
+            // allocator and registry locks on this CPU's behalf. Whatever this
+            // CPU is holding drains on the iteration after the pause lifts.
             slopos_ostd::sync::rcu_note_qs();
             crate::scheduler::arm_tickless_idle_if_due();
             slopos_ostd::cpu::x86_64::core::sti_hlt_cli_atomic();
@@ -551,6 +567,13 @@ fn scheduler_loop(cpu_id: usize) -> ! {
         // CPU is fully idle (nothing to run, nothing to steal), so the
         // registry walk costs idle time only.
         crate::scheduler::rescue_stranded_ready_tasks();
+
+        // Nothing to run, nothing to steal: the deferred work runs here rather
+        // than at the top of the loop, where it would cost a lock acquisition
+        // and a TTY slot walk on every dispatch.
+        if scheduler_loop_bottom_half() {
+            continue;
+        }
 
         // idle_time is now incremented per-tick in scheduler_timer_tick(),
         // not per-idle-loop-iteration, keeping it in lockstep with total_ticks.

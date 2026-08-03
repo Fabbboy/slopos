@@ -251,7 +251,8 @@ pub fn synchronize_rcu() {
 
     // Heap-allocate the per-CPU snapshot vector rather than placing a
     // 2 KiB `[u64; MAX_CPUS]` on the stack — stack-safety gate forbids
-    // frames that large.
+    // frames that large. It is per-call because concurrent callers are
+    // waiting on different instants.
     let mut snaps = KVec::<u64>::zeroed(n).expect("rcu: snaps alloc");
     for cpu in 0..n {
         snaps[cpu] = RCU_QS_CTR[cpu].0.load(Ordering::Acquire);
@@ -294,6 +295,10 @@ pub fn synchronize_rcu() {
                 }
             }
 
+            // A CPU spinning on a peer must keep acknowledging that peer's
+            // shootdowns; `spin_relax` is the service call and carries no
+            // `pause` of its own.
+            crate::sync::spin_relax();
             core::hint::spin_loop();
         }
     }
