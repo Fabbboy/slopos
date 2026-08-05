@@ -487,6 +487,9 @@ pub fn task_reap_pending() -> bool {
 #[inline]
 pub fn arm_deferred_reap() {
     REAP_BLOCKED_BY_DISPATCH.store(true, Ordering::Release);
+    // The latch says there is work; this says where to notice it. The switch
+    // tail arms this with interrupts off, so a byte store is the whole budget.
+    slopos_ostd::sync::bh::raise();
 }
 
 /// Reap terminated tasks whose reap was refused while they were dispatch-pinned.

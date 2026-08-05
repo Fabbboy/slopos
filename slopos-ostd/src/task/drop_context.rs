@@ -2,7 +2,42 @@
 //! kernel allocator.
 
 use crate::cpu::x86_64::interrupts;
-use crate::sync::lock_tracking::held_lock_snapshot;
+use crate::sync::lock_tracking::{held_lock_count, held_lock_snapshot};
+
+/// Whether preemption is disabled on this CPU.
+///
+/// The kernel reads the PCR field directly, which is a single gs-relative load
+/// but faults anywhere GS_BASE is not a control region. Host builds have no
+/// PCR, so they read the backend counter they actually maintain — the same
+/// split `IrqDisabled` makes for RFLAGS.
+#[inline]
+fn preemption_disabled() -> bool {
+    #[cfg(target_os = "none")]
+    {
+        crate::cpu::preempt::PreemptGuard::is_active()
+    }
+    #[cfg(not(target_os = "none"))]
+    {
+        crate::cpu::preempt::is_preempt_disabled()
+    }
+}
+
+/// Whether the calling context may run a destructor that returns memory to the
+/// allocator.
+///
+/// Three facts about the calling CPU right now, never anything about a
+/// reference count: a count-based test cannot be made race-free, and these can.
+/// Interrupts must be on and no tracked lock held because the buddy's reuse
+/// path spins on cross-CPU shootdowns; preemption must be enabled because a
+/// caller holding a whole-sequence guard is asking for the region to stay free
+/// of destructors.
+///
+/// Both the deferral decision and the tripwire that catches it being wrong read
+/// this, so the two cannot drift apart.
+#[inline]
+pub fn drop_context_is_safe() -> bool {
+    interrupts::are_interrupts_enabled() && held_lock_count() == 0 && !preemption_disabled()
+}
 
 /// Assert that a task destructor is running in a context where allocator and
 /// synchronous TLB-reclaim work may safely execute.
@@ -22,8 +57,11 @@ pub fn assert_task_drop_context() {
     );
 }
 
-/// Run `operation` after verifying that interrupts are enabled and no tracked
-/// lock is held.
+/// Run `operation` after verifying the context a deferred drop needs.
+///
+/// The assertions are [`drop_context_is_safe`] taken apart, so each names which
+/// fact failed; the predicate is what the deferral decision reads, and this is
+/// what catches it having been read wrong.
 #[inline]
 pub fn run_off_lock<R>(operation: impl FnOnce() -> R) -> R {
     debug_assert!(
@@ -35,6 +73,10 @@ pub fn run_off_lock<R>(operation: impl FnOnce() -> R) -> R {
         held == 0,
         "deferred drop attempted while the current CPU holds a tracked lock: {:?}",
         innermost
+    );
+    debug_assert!(
+        !preemption_disabled(),
+        "deferred drop attempted with preemption disabled"
     );
     operation()
 }

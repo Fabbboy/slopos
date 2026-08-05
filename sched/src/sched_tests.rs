@@ -182,6 +182,55 @@ slopos_testing::stest!(
     suite = sched_core
 );
 
+/// A parked corpse is collected at the next bottom-half point, with no idle CPU
+/// and nobody calling the drain.
+///
+/// This is what stops dead tasks accumulating under sustained fork/exit load: a
+/// machine whose CPUs never run out of work never reaches the idle dispatcher,
+/// and before the push armed the bottom half that was the only collector. The
+/// outermost preemption release used here is the same edge every unlock takes.
+pub fn test_graveyard_drains_at_a_bottom_half_point() -> TestResult {
+    crate::task::task_graveyard_drain();
+    if crate::task::task_graveyard_pending() {
+        klog_info!("SCHED_TEST: graveyard non-empty after a drain");
+        return TestResult::Fail;
+    }
+
+    let arc = match KArc::try_init(Task::init_invalid()) {
+        Ok(arc) => arc,
+        Err(_) => return TestResult::Fail,
+    };
+
+    // Interrupts off, so the release defers rather than destroying inline.
+    let flags = slopos_arch::cpu::save_flags_cli();
+    crate::task::task_put(TaskRef::from_arc_for_test(arc));
+    let parked = crate::task::task_graveyard_pending();
+    slopos_arch::cpu::restore_flags(flags);
+
+    if !parked {
+        klog_info!("SCHED_TEST: final release with interrupts off was not deferred");
+        return TestResult::Fail;
+    }
+
+    // The bottom-half point, reached the way ordinary code reaches it. No
+    // `task_graveyard_drain()` here — that is the whole assertion.
+    {
+        let _guard = slopos_ostd::sync::PreemptGuard::new();
+    }
+
+    if crate::task::task_graveyard_pending() {
+        klog_info!("SCHED_TEST: corpse survived a bottom-half point");
+        crate::task::task_graveyard_drain();
+        return TestResult::Fail;
+    }
+    TestResult::Pass
+}
+
+slopos_testing::stest!(
+    name = test_graveyard_drains_at_a_bottom_half_point,
+    suite = sched_core
+);
+
 /// The mirror image: a final release in a context that *does* allow the
 /// destructor must destroy inline and leave nothing parked, so a task freed on
 /// a safe path never waits on an idle pass.

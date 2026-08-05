@@ -3,11 +3,12 @@
 //!
 //! # Why a graveyard
 //!
-//! `Task`'s destructor is allocator-heavy: it frees the kernel stack, the FPU
-//! area and the address space back to the buddy allocator, whose reuse path
-//! performs synchronous cross-CPU TLB shootdowns. Running it with interrupts
-//! disabled, under a lock, or on the dying task's own stack is the known
-//! slab/buddy deadlock — not a latency blip.
+//! `Task`'s destructor is allocator-heavy: it returns the FPU area, the address
+//! space and the stack slots to the allocator, and takes its locks to do it.
+//! (The stack's *frames* stay mapped — `TaskStack::drop` deliberately unmaps
+//! nothing, so the slot can be reused without a broadcast shootdown.) Running
+//! that with interrupts disabled, under a lock, or on the dying task's own
+//! stack is the known slab/buddy deadlock — not a latency blip.
 //!
 //! But the *last* reference to a task can legitimately be released from exactly
 //! those contexts: a registry lookup guard dropped inside the registry
@@ -17,8 +18,10 @@
 //!
 //! So [`task_put`] splits the two halves. The decrement always happens
 //! immediately; the destruction happens inline only when the context provably
-//! allows it, and otherwise the (now uniquely owned) allocation is parked here
-//! for the idle dispatcher to destroy with interrupts on and no lock held.
+//! allows it, and otherwise the (now uniquely owned) allocation is parked here.
+//! A push arms the bottom-half point, so the corpse is collected at the next
+//! outermost unlock or syscall return rather than waiting for a CPU to run out
+//! of work — which under sustained fork/exit load it never does.
 //!
 //! This is `put_task_struct` with PREEMPT_RT's `call_rcu` escape hatch, and the
 //! two properties copied from it matter: finality is decided by the decrement
@@ -50,8 +53,6 @@ use core::ptr::NonNull;
 use core::sync::atomic::{AtomicPtr, Ordering};
 
 use slopos_ostd::KArc;
-use slopos_ostd::cpu::preempt::PreemptGuard;
-use slopos_ostd::sync::held_lock_count;
 use slopos_ostd::task::{
     ParkedTask, task_destroy_parked, task_parked_leak, task_parked_reclaim, task_release_strong,
     with_parked, with_parked_node,
@@ -112,15 +113,10 @@ pub(super) fn release_arc(arc: KArc<Task>) {
 /// strong count is already zero sound rather than merely intended, and holding
 /// the token by reference is what keeps the body alive across the read.
 fn destroy_context_is_safe(parked: &ParkedTaskRef) -> bool {
-    // The first two mirror `Task::drop`'s own assertions, so the predicate and
-    // the tripwire can never disagree.
-    if !slopos_ostd::cpu::x86_64::interrupts::are_interrupts_enabled() || held_lock_count() != 0 {
-        return false;
-    }
-    // `task_terminate` holds a whole-sequence preempt guard, and the buddy's
-    // reuse path can spin on cross-CPU shootdowns; keep the guarded region free
-    // of destructors.
-    if PreemptGuard::is_active() {
+    // Interrupts on, no tracked lock, preemption enabled — shared with
+    // `run_off_lock`'s assertions, so the decision and the tripwire that
+    // catches it being wrong read the same three facts.
+    if !slopos_ostd::task::drop_context_is_safe() {
         return false;
     }
     // Never free the stack a CPU is running on, and never free one another CPU
@@ -155,6 +151,11 @@ fn graveyard_push(parked: ParkedTaskRef) {
             .compare_exchange_weak(head, node.as_ptr(), Ordering::AcqRel, Ordering::Acquire)
             .is_ok()
         {
+            // One byte store, which is all this context affords: the push
+            // happens under the registry lock and with interrupts off. Without
+            // it the corpse waits for a CPU to run out of work, which under
+            // sustained fork/exit load never happens.
+            slopos_ostd::sync::bh::raise();
             return;
         }
         core::hint::spin_loop();
