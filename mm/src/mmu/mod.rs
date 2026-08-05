@@ -6,7 +6,7 @@
 //!   - typed CR3 primitives (`Cr3Value`, `Pcid`, `MmContextId`)
 //!   - per-CPU ASID pools (Linux-style 16-slot dance) — [`asid`]
 //!   - TLB shootdown backend (`trait ShootdownBackend`) — [`rar`]
-//!   - Lazy Unmap Flush (LUF) ring + cross-CPU drain — [`luf`]
+//!   - Lazy Unmap Flush (LUF): the local half of an unmap — [`luf`]
 //!   - CPU errata gating (PCID blacklist) — [`errata`]
 //!   - KPTI dual-PML4 scaffolding — [`kpti`]
 
