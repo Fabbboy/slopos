@@ -443,16 +443,22 @@ impl Drop for PreemptGuard {
         // CPU's current task, is the right party to act on. The cheap
         // load gates the (implicitly locked) `xchg` take so the common
         // no-pending unlock path stays a plain read.
-        if prev == 1
-            && crate::cpu::x86_64::interrupts::are_interrupts_enabled()
-            && pcr::reschedule_pending_get() != 0
-            && pcr::reschedule_pending_take() != 0
-        {
-            let fn_ptr = RESCHEDULE_CALLBACK.load(Ordering::Acquire);
-            if !fn_ptr.is_null() {
-                // SAFETY: fn_ptr was set via register_reschedule_callback with a valid fn().
-                let callback: fn() = unsafe { core::mem::transmute(fn_ptr) };
-                callback();
+        if prev == 1 && crate::cpu::x86_64::interrupts::are_interrupts_enabled() {
+            // Bottom half first, reschedule second — Linux's `local_bh_enable`
+            // before `preempt_enable`. The drain is bounded and does not switch,
+            // and a reschedule request survives it; the other order would switch
+            // away and leave the work for an arbitrary later moment. This is the
+            // only point a lock-taking kernel task that never returns to
+            // userland reaches.
+            crate::sync::bh::run_pending_if_due();
+
+            if pcr::reschedule_pending_get() != 0 && pcr::reschedule_pending_take() != 0 {
+                let fn_ptr = RESCHEDULE_CALLBACK.load(Ordering::Acquire);
+                if !fn_ptr.is_null() {
+                    // SAFETY: fn_ptr was set via register_reschedule_callback with a valid fn().
+                    let callback: fn() = unsafe { core::mem::transmute(fn_ptr) };
+                    callback();
+                }
             }
         }
     }

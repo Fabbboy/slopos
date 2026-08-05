@@ -576,6 +576,9 @@ pub unsafe fn call_rcu(ptr: *mut u8, callback: RcuCallback) {
             .compare_exchange_weak(head, node, Ordering::Release, Ordering::Relaxed)
             .is_ok()
         {
+            // One byte store. This path runs from under cli-spinlocks, so it
+            // cannot do anything that takes a lock or allocates.
+            crate::sync::bh::raise();
             return;
         }
         core::hint::spin_loop();
@@ -823,6 +826,18 @@ pub fn rcu_process_callbacks() {
         return;
     }
     while drain_ready(RCU_BLIMIT) {}
+}
+
+/// Invoke one bounded batch from the bottom-half point.
+///
+/// The witness is what distinguishes this from [`rcu_process_callbacks`]: the
+/// caller is a CPU on its way back to real work rather than one that has run
+/// out of it, so this takes a single pass and re-arms for the rest.
+pub(crate) fn invoke_callbacks(_bh: &crate::sync::bh::BhContext<'_>) {
+    if !RCU_CB_PENDING.swap(false, Ordering::Acquire) {
+        return;
+    }
+    drain_ready(RCU_BLIMIT);
 }
 
 /// Wait until every callback queued before this call has been *invoked*.

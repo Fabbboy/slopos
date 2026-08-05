@@ -13,8 +13,8 @@
 # added the locks.
 #
 # Measured 2026-08-02 over 8 consecutive runs of the tests ISO. Re-measured
-# 2026-08-03 over 4 runs when RCU's callback-batch lock added one class to the
-# kernel phase; the edge and chain caps below still bound the new measurement
+# 2026-08-03 when RCU's callback-batch lock and the bottom-half tests' probe lock
+# each added a class; the edge and chain caps below still bound the new measurement
 # with room to spare and are left at their 8-run values.
 
 # Classes must be well clear of the pool before the validator would disable
@@ -40,21 +40,26 @@ require-phase post-userland-tests
 # been reached. One extra class is a new lock, which is exactly what should
 # require a deliberate bump.
 boot	classes	65
-post-kernel-tests	classes	166
-post-userland-tests	classes	176
+post-kernel-tests	classes	167
+post-userland-tests	classes	177
 
 # Edges and chains depend on which *orders* were observed, so they move with
-# scheduling. Measured spread was 0 at boot, 2 across the kernel phase and 8
-# across the userland phase; each cap is the observed maximum plus that phase's
-# spread, so ordinary interleaving cannot trip the gate while a new nesting —
-# which arrives in tens, not ones — still does.
+# scheduling. Each cap is the observed maximum plus that phase's spread, so
+# ordinary interleaving cannot trip the gate while a new nesting — which arrives
+# in tens, not ones — still does.
 #
-# edges  measured: boot 48, kernel 157-159, userland 189-197
+# The kernel phase's chain spread went from 2 to 7 when the bottom-half point
+# gave deferred work more contexts to run in: the same orderings are reached,
+# but which of them a given run has observed by the end of the phase now varies
+# more. The edge caps still bound the new measurement and keep their 8-run
+# values.
+#
+# edges  measured: boot 48, kernel 155-157, userland 182-187
 boot	edges	48
 post-kernel-tests	edges	161
 post-userland-tests	edges	205
 
-# chains measured: boot 112, kernel 339-341, userland 383-391
+# chains measured: boot 112, kernel 337-344, userland 375-383
 boot	chains	112
-post-kernel-tests	chains	343
+post-kernel-tests	chains	351
 post-userland-tests	chains	399

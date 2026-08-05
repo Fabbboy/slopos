@@ -12,6 +12,7 @@
 
 pub mod append_log;
 pub mod atomic_cell;
+pub mod bh;
 pub mod cpu_local;
 pub mod epoch;
 pub mod event_bus;

@@ -246,12 +246,30 @@ extern "C" fn idle_task_entry(_: *mut c_void) {
 ///
 /// Returns whether it did anything, so the caller can re-run the loop rather
 /// than halt.
-fn scheduler_loop_bottom_half() -> bool {
-    let _window = crate::scheduler::RestoreInterruptState::open_window();
+/// The relaxed half of the bottom half: what needs preemption *enabled*.
+///
+/// Registered with OSTD's bottom-half point, which runs it after releasing its
+/// own preemption guard — the graveyard's push-side predicate refuses to
+/// destroy a task while preemption is disabled, so running it inside would park
+/// corpses in a context their pusher already declined.
+///
+/// Returns whether it left more to do.
+fn relaxed_bottom_half() -> bool {
+    crate::scheduler::drain_deferred_task_reclaim();
+    run_idle_callbacks()
+}
 
-    // Copied out rather than invoked under the lock: the callbacks reach TTY
-    // and driver locks, and holding a registry-level lock across them would
-    // order the whole driver tree under this one.
+/// Give OSTD's bottom-half point the work that needs preemption enabled.
+pub fn arm_bottom_half(token: &slopos_ostd::sync::BspToken<'_>) {
+    slopos_ostd::sync::bh::arm(token, relaxed_bottom_half);
+}
+
+/// Poll every registered idle callback, reporting whether any found work.
+///
+/// Copied out rather than invoked under the lock: the callbacks reach TTY and
+/// driver locks, and holding a registry-level lock across them would order the
+/// whole driver tree under this one.
+fn run_idle_callbacks() -> bool {
     let mut callbacks = [None; MAX_IDLE_CALLBACKS];
     if let Some(mutex) = IDLE_CBS.get() {
         let cbs = mutex.lock();
@@ -264,6 +282,13 @@ fn scheduler_loop_bottom_half() -> bool {
             any_work = true;
         }
     }
+    any_work
+}
+
+fn scheduler_loop_bottom_half() -> bool {
+    let _window = crate::scheduler::RestoreInterruptState::open_window();
+
+    let mut any_work = run_idle_callbacks();
 
     slopos_ostd::sync::rcu_process_callbacks();
 

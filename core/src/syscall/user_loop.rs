@@ -91,6 +91,12 @@ fn user_task_loop() -> ! {
     let current = Current::get().expect("user_task_loop: dispatched with no current task");
     let user_ctx = current.task().user_ctx(&current);
     loop {
+        // The return-to-user tail. Interrupts are on, no lock is held, and the
+        // preempt count is back at its baseline, so this is where a task under
+        // sustained load pays for the deferred work its syscalls queued —
+        // without it, reclamation would wait for a CPU to go idle.
+        slopos_ostd::sync::bh::run_pending_if_due();
+
         // Marked for death before this task ever reached userland, or between
         // a syscall exit and here: leave through its own exit path rather than
         // entering user mode to be stopped at the next boundary. Routed

@@ -79,7 +79,16 @@ pub struct ProcessorControlRegion {
     /// Currently executing in interrupt/exception context.
     pub in_interrupt: AtomicBool, // offset 36
 
-    _pad1: [u8; 3], // offset 37-39
+    /// This CPU has bottom-half work waiting for a legal place to run it.
+    ///
+    /// Set by `sync::bh::raise` — one `gs`-relative byte store, so it is legal
+    /// from a hard IRQ handler and from under a cli-spinlock.
+    pub bh_pending: AtomicBool, // offset 37
+
+    /// A bottom-half drain is in progress on this CPU.
+    pub bh_active: AtomicBool, // offset 38
+
+    _pad1: [u8; 1], // offset 39
 
     /// Pointer to currently running task (opaque).
     ///
@@ -310,6 +319,11 @@ const _: () = {
     assert!(core::mem::offset_of!(ProcessorControlRegion, cpu_id) == 24);
     assert!(core::mem::offset_of!(ProcessorControlRegion, apic_id) == 28);
     assert!(core::mem::offset_of!(ProcessorControlRegion, preempt_count) == 32);
+    // The bottom-half bytes share `preempt_count`'s cache line: they are read
+    // on the same edge, at every outermost unlock.
+    assert!(core::mem::offset_of!(ProcessorControlRegion, in_interrupt) == 36);
+    assert!(core::mem::offset_of!(ProcessorControlRegion, bh_pending) == 37);
+    assert!(core::mem::offset_of!(ProcessorControlRegion, bh_active) == 38);
     assert!(core::mem::offset_of!(ProcessorControlRegion, reschedule_pending) == 60);
     assert!(core::mem::offset_of!(ProcessorControlRegion, syscall_pid) == 88);
     assert!(core::mem::offset_of!(ProcessorControlRegion, current_task) == 40);
@@ -371,7 +385,9 @@ impl ProcessorControlRegion {
             apic_id: 0,
             preempt_count: AtomicU32::new(0),
             in_interrupt: AtomicBool::new(false),
-            _pad1: [0; 3],
+            bh_pending: AtomicBool::new(false),
+            bh_active: AtomicBool::new(false),
+            _pad1: [0; 1],
             current_task: AtomicPtr::new(ptr::null_mut()),
             idle_task: AtomicPtr::new(ptr::null_mut()),
             online: AtomicBool::new(false),
@@ -493,6 +509,10 @@ pub mod offsets {
     /// (`preempt_count_inc` and friends) so the count is always
     /// manipulated on the CPU executing the instruction.
     pub const PREEMPT_COUNT: usize = 32;
+    /// Offset of the `bh_pending` field (`AtomicBool`). Read on every
+    /// outermost unlock, so it is consumed as a `const` operand by a
+    /// single-instruction load rather than reached through the PCR table.
+    pub const BH_PENDING: usize = 37;
     /// Offset of the `reschedule_pending` field (`AtomicU32`). Consumed
     /// as a `const` operand by the single-instruction per-CPU ops.
     pub const RESCHEDULE_PENDING: usize = 60;
@@ -1295,6 +1315,64 @@ pub fn in_interrupt_context() -> bool {
                 || pcr.in_interrupt.load(Ordering::Acquire)
         })
         .unwrap_or(false)
+}
+
+/// Mark that this CPU has bottom-half work (single gs-relative store).
+///
+/// Reached from hard-IRQ handlers and from under cli-spinlocks, so it must stay
+/// one instruction: no table lookup, no bounds check, nothing that could take a
+/// lock.
+#[inline(always)]
+pub fn bh_pending_set() {
+    // SAFETY: single gs-relative store to this CPU's PCR field; GS_BASE is
+    // installed by the entry trampolines before any caller runs.
+    unsafe {
+        core::arch::asm!(
+            "mov byte ptr gs:[{off}], 1",
+            off = const offsets::BH_PENDING,
+            options(nostack, preserves_flags),
+        );
+    }
+}
+
+/// Read this CPU's bottom-half flag (single gs-relative load).
+///
+/// This is the whole cost of the point when there is nothing to do, and it sits
+/// on every outermost unlock, so it is one instruction rather than a call
+/// through the PCR table — which would inflate the frame of every function that
+/// releases a lock.
+#[inline(always)]
+pub fn bh_pending_get() -> bool {
+    let pending: u8;
+    // SAFETY: single gs-relative load from this CPU's PCR field.
+    unsafe {
+        core::arch::asm!(
+            "mov {pending}, byte ptr gs:[{off}]",
+            off = const offsets::BH_PENDING,
+            pending = out(reg_byte) pending,
+            options(nostack, preserves_flags, readonly),
+        );
+    }
+    pending != 0
+}
+
+/// Clear the flag and report whether it was set.
+#[inline]
+pub fn bh_pending_take() -> bool {
+    current_pcr_local().is_some_and(|pcr| pcr.bh_pending.swap(false, Ordering::AcqRel))
+}
+
+/// Claim the drain for this CPU; returns whether it was already claimed.
+#[inline]
+pub fn bh_active_swap(active: bool) -> bool {
+    current_pcr_local().is_some_and(|pcr| pcr.bh_active.swap(active, Ordering::AcqRel))
+}
+
+#[inline]
+pub fn bh_active_clear() {
+    if let Some(pcr) = current_pcr_local() {
+        pcr.bh_active.store(false, Ordering::Release);
+    }
 }
 
 /// Enter a panic-recovery scope on this CPU, returning the previous recovery

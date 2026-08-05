@@ -262,6 +262,13 @@ fn boot_step_register_spawner_fn(ctx: &mut BootCtx<'_, BspInit>) {
         slopos_sched::runtime::kernel_io_yield_backend(),
     );
     klog_debug!("OSTD: KernelIoToken yield backend registered (sched/runtime)");
+
+    // The bottom-half point: OSTD owns where deferred work may run, sched owns
+    // what runs there. Armed here rather than earlier because the drain frees
+    // to the allocator and walks the task registry, neither of which is a thing
+    // to do on a half-built kernel.
+    slopos_sched::runtime::arm_bottom_half(&ctx.bsp_token());
+    klog_debug!("OSTD: bottom-half point armed (sched/runtime)");
 }
 
 fn boot_step_identity_dma_fn(ctx: &mut BootCtx<'_, BspInit>) {
