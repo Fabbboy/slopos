@@ -35,8 +35,9 @@ spawn-heavy workload runs constantly.
 
 **The task graveyard drains only from the idle dispatcher**
 (`task_reclaim.rs:174-208`), so under sustained load dead tasks' kernel stacks and
-address spaces accumulate until some CPU goes idle. Already tracked as item 2 of
-`plans/deferred-work.md`; recorded here only because it shares this shape.
+address spaces accumulate until some CPU goes idle. The fix is a per-CPU deferred-work
+list so reclaim stops depending on CPU 0 being idle; recorded here because it shares this
+shape.
 
 Fixes for the first two: bound the `on_cpu` spin, re-enqueueing rather than
 spinning past a threshold; and record the owning CPU on the task so
