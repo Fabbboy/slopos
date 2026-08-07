@@ -35,8 +35,20 @@ slopos_ostd::kcommand! {
     run = run_locks,
 }
 
+slopos_ostd::kcommand! {
+    name = probe,
+    key = b'p',
+    help = "NMI every other CPU for its registers; unwind this one",
+    flags = KCMD_INFORMATIONAL,
+    run = run_probe,
+}
+
 fn run_help(kc: &mut KConsole<'_>) {
     help_body(kc);
+}
+
+fn run_probe(kc: &mut KConsole<'_>) {
+    slopos_ostd::kconsole::probe::fan_out(kc);
 }
 
 /// The watchdog's view: who has been stalled, and who is waiting on whom now.

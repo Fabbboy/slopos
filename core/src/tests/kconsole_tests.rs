@@ -301,7 +301,59 @@ pub fn test_kcon_kernel_text_symbolizes() -> TestResult {
     }
 }
 
+/// The probe's slot protocol, exercised without sending an NMI.
+///
+/// Two properties matter and neither is visible from the command's output: a
+/// CPU already being probed is left alone, and a slot the watchdog has since
+/// re-armed is never cleared by our reaper. The second is the one that would
+/// kill the machine if it were wrong — a stale probe NMI arriving at a slot
+/// armed `Fatal` takes it down.
+pub fn test_kcon_probe_slot_protocol() -> TestResult {
+    use slopos_ostd::watchdog::{self, NmiDisposition};
+
+    // A CPU index no CPU occupies has no slot at all.
+    let cpus = slopos_ostd::cpu::x86_64::pcr::get_cpu_count();
+    let Some(victim) = (0..cpus).find(|c| *c != slopos_ostd::cpu::x86_64::pcr::get_current_cpu())
+    else {
+        // Uniprocessor: the fan-out has nothing to probe, which is itself the
+        // property worth holding.
+        return TestResult::Pass;
+    };
+
+    if watchdog::probe_disposition(victim) != NmiDisposition::Unsolicited {
+        return fail!("cpu {} already had a probe armed before the test", victim);
+    }
+
+    if !watchdog::arm_probe(victim, NmiDisposition::Probe) {
+        return fail!("arming a free probe slot failed");
+    }
+    // A second claim must fail, or a per-tick check would storm a CPU that is
+    // still emitting its dump.
+    if watchdog::arm_probe(victim, NmiDisposition::Probe) {
+        watchdog::release_probe(victim);
+        return fail!("a busy probe slot was claimed twice");
+    }
+
+    // The reaper only takes back what it left.
+    if watchdog::release_probe_if(victim, NmiDisposition::Fatal) {
+        return fail!("the conditional release cleared a slot it did not own");
+    }
+    if watchdog::probe_disposition(victim) != NmiDisposition::Probe {
+        watchdog::release_probe(victim);
+        return fail!("a failed conditional release still changed the slot");
+    }
+    if !watchdog::release_probe_if(victim, NmiDisposition::Probe) {
+        watchdog::release_probe(victim);
+        return fail!("the conditional release did not take back its own slot");
+    }
+    if watchdog::probe_disposition(victim) != NmiDisposition::Unsolicited {
+        return fail!("the slot was not freed");
+    }
+    TestResult::Pass
+}
+
 slopos_testing::stest!(name = test_kcon_registry_is_populated, suite = kconsole);
+slopos_testing::stest!(name = test_kcon_probe_slot_protocol, suite = kconsole);
 slopos_testing::stest!(name = test_kcon_keys_are_unique, suite = kconsole);
 slopos_testing::stest!(name = test_kcon_flags_are_exclusive, suite = kconsole);
 slopos_testing::stest!(

@@ -43,6 +43,7 @@ use core::fmt;
 use crate::ffi::registry::{RegistryEntry, RegistryId, registry_slice};
 
 pub mod config;
+pub mod probe;
 
 pub use config::{KConfig, current as policy, enabled, install};
 
