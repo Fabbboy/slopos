@@ -119,6 +119,12 @@ SECTIONS
     __stop_hermetic_state_registry = .;
   } :rodata
 
+  .kconsole_registry ALIGN(8) : {
+    __start_kconsole_registry = .;
+    KEEP(*(.kconsole_registry))
+    __stop_kconsole_registry = .;
+  } :rodata
+
   .data ALIGN(4096) : {
     _data_start = .;
     *(.data .data.*)

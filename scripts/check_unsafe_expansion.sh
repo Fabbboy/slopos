@@ -82,14 +82,14 @@ TRAIT_ALLOWLIST=(
     '::core::clone::TrivialClone'
 )
 
-# The nine sections link.ld brackets, plus the three the Limine boot
+# The ten sections link.ld brackets, plus the three the Limine boot
 # protocol reads. OSTD's registry_entry! / limine_request! own every one of
 # these labels; a crate cannot name a section that is not on this list.
 SECTION_ALLOWLIST=(
     '.boot_init_early_hw' '.boot_init_memory' '.boot_init_drivers'
     '.boot_init_services' '.boot_init_optional'
     '.driver_registry' '.platform_driver_registry'
-    '.test_registry' '.hermetic_state_registry'
+    '.test_registry' '.hermetic_state_registry' '.kconsole_registry'
     '.limine_requests' '.limine_requests_start_marker'
     '.limine_requests_end_marker'
 )

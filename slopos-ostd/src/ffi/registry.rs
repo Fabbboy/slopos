@@ -45,6 +45,8 @@ pub enum RegistryId {
     Tests,
     /// `.hermetic_state_registry`
     HermeticStates,
+    /// `.kconsole_registry`
+    KConsole,
 }
 
 impl RegistryId {
@@ -62,6 +64,7 @@ impl RegistryId {
             RegistryId::PlatformDrivers => ".platform_driver_registry",
             RegistryId::Tests => ".test_registry",
             RegistryId::HermeticStates => ".hermetic_state_registry",
+            RegistryId::KConsole => ".kconsole_registry",
         }
     }
 }
@@ -117,6 +120,8 @@ unsafe extern "C" {
     static __stop_test_registry: u8;
     static __start_hermetic_state_registry: u8;
     static __stop_hermetic_state_registry: u8;
+    static __start_kconsole_registry: u8;
+    static __stop_kconsole_registry: u8;
 }
 
 fn bounds(id: RegistryId) -> (*const u8, *const u8) {
@@ -156,6 +161,10 @@ fn bounds(id: RegistryId) -> (*const u8, *const u8) {
         RegistryId::HermeticStates => (
             &raw const __start_hermetic_state_registry,
             &raw const __stop_hermetic_state_registry,
+        ),
+        RegistryId::KConsole => (
+            &raw const __start_kconsole_registry,
+            &raw const __stop_kconsole_registry,
         ),
     }
 }
@@ -232,6 +241,9 @@ macro_rules! registry_entry {
     };
     (hermetic_states, $($item:tt)*) => {
         $crate::__registry_entry!(".hermetic_state_registry", HermeticStates, $($item)*);
+    };
+    (kconsole, $($item:tt)*) => {
+        $crate::__registry_entry!(".kconsole_registry", KConsole, $($item)*);
     };
 }
 
