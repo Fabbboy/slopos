@@ -329,9 +329,11 @@ fn nmi_handler(frame: &slopos_arch::InterruptFrame) {
         nmi_die(cpu_id, frame);
     }
 
-    // An unsolicited NMI is not evidence of a fault on this CPU and must
-    // not spend the recovered-fault budget `panic.oops_limit=` bounds.
-    if disposition != NmiDisposition::Unsolicited {
+    // Neither an unsolicited NMI nor an operator-requested probe is evidence
+    // of a fault on this CPU, so neither may spend the recovered-fault budget
+    // `panic.oops_limit=` bounds — otherwise reading the machine's state
+    // enough times would eventually take it down.
+    if disposition != NmiDisposition::Unsolicited && disposition != NmiDisposition::Probe {
         let (count, _limit_reached) = slopos_ostd::panic_recovery::oops_record();
         watchdog::nmi_emit("NMI: oops ");
         watchdog::nmi_emit_dec(count);
@@ -362,10 +364,22 @@ fn nmi_emit_context(
         NmiDisposition::Report => " stalled",
         NmiDisposition::Fatal => " stalled (fatal)",
         NmiDisposition::TlbLadder => " never acked a TLB shootdown",
+        NmiDisposition::Probe => " probed",
         NmiDisposition::Unsolicited => " took an unsolicited NMI",
     });
     nmi_emit(" rip=");
     nmi_emit_hex(frame.rip);
+    // Symbolizing is a binary search over a `'static` rodata array: no lock,
+    // no allocation, and no dereference of anything the fault could have
+    // corrupted. It is the one thing that makes this line readable without
+    // the matching ELF in hand.
+    if let Some(sym) = slopos_ostd::ksym::lookup(frame.rip) {
+        nmi_emit(" <");
+        nmi_emit(sym.symbol);
+        nmi_emit("+0x");
+        nmi_emit_hex(sym.offset);
+        nmi_emit(">");
+    }
     nmi_emit(" rsp=");
     nmi_emit_hex(frame.rsp);
     nmi_emit(" rbp=");

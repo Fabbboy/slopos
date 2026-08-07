@@ -60,6 +60,13 @@ pub enum NmiDisposition {
     Fatal = 2,
     /// The TLB shootdown ladder gave up on this CPU and wants its context.
     TlbLadder = 3,
+    /// An operator asked, through the diagnostic console, for this CPU to
+    /// describe itself. Dump context and resume.
+    ///
+    /// Distinct from [`Self::Report`] because it is not evidence of a fault:
+    /// it must not spend the recovered-fault budget `panic.oops_limit=`
+    /// bounds, or reading the machine's state would eventually kill it.
+    Probe = 4,
 }
 
 impl NmiDisposition {
@@ -68,6 +75,7 @@ impl NmiDisposition {
             1 => Self::Report,
             2 => Self::Fatal,
             3 => Self::TlbLadder,
+            4 => Self::Probe,
             _ => Self::Unsolicited,
         }
     }
@@ -564,6 +572,28 @@ pub fn probe_disposition(cpu: usize) -> NmiDisposition {
         .get(cpu)
         .map(|slot| NmiDisposition::from_raw(slot.probe.load(Ordering::Acquire)))
         .unwrap_or(NmiDisposition::Unsolicited)
+}
+
+/// Free `cpu`'s probe slot only if it still holds `expected`.
+///
+/// For reaping a probe whose target never answered. A plain
+/// [`release_probe`] would be wrong there: between the timeout and the
+/// release the detector may have armed [`NmiDisposition::Fatal`] on the same
+/// slot, and clearing that would let a stale NMI arrive at a slot the
+/// watchdog has since re-armed. A failed exchange means the slot is no longer
+/// ours to touch.
+pub fn release_probe_if(cpu: usize, expected: NmiDisposition) -> bool {
+    let Some(slot) = SLOTS.get(cpu) else {
+        return false;
+    };
+    slot.probe
+        .compare_exchange(
+            expected as u32,
+            NmiDisposition::Unsolicited as u32,
+            Ordering::AcqRel,
+            Ordering::Relaxed,
+        )
+        .is_ok()
 }
 
 /// Free `cpu`'s probe slot. The handler's last act, so the next check can
