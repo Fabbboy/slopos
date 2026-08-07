@@ -5,6 +5,7 @@ pub mod bh_tests;
 pub mod event_bus_tests;
 pub mod helpers;
 pub mod irq_tests;
+pub mod kconsole_tests;
 pub mod msi_tests;
 pub mod ostd_arc_tests;
 pub mod process_identity_tests;
