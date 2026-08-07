@@ -256,7 +256,11 @@ extern "C" fn idle_task_entry(_: *mut c_void) {
 /// Returns whether it left more to do.
 fn relaxed_bottom_half() -> bool {
     crate::scheduler::drain_deferred_task_reclaim();
-    run_idle_callbacks()
+    // Here rather than inside the guarded phase: a console dump can run for
+    // seconds against a 115200-baud UART, and this is the one part of the
+    // bottom half that runs with preemption enabled.
+    let console = slopos_ostd::kconsole::drain();
+    run_idle_callbacks() || console
 }
 
 /// Give OSTD's bottom-half point the work that needs preemption enabled.

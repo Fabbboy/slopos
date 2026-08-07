@@ -60,6 +60,10 @@ pub fn scheduler_handle_timer_interrupt(frame: *mut InterruptFrame) {
     // Invalidate locally and ack an open epoch. Waits on nothing, which is why
     // it is safe from an interrupt handler.
     slopos_mm::mmu::quiesce::tick();
+    // Two relaxed loads. `bh::raise` marks only the calling CPU, so a console
+    // request made from the keyboard IRQ would otherwise be answerable solely
+    // by the CPU that took it — the one most likely to be the wedged one.
+    slopos_ostd::kconsole::poll_from_timer();
     save_preempt_context(frame);
     scheduler_timer_tick();
 }

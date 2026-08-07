@@ -635,6 +635,15 @@ fn boot_step_boot_config_fn(_ctx: &mut BootCtx<'_, BspInit>) {
         crate::boot_services::set_root_mode(crate::boot_services::ROOT_VIRTIO);
         boot_info(b"Boot option: root=virtio\0");
     }
+
+    // Diagnostic console: `kconsole=off|on|<hex mask>` plus its sub-knobs. A
+    // typed parser rather than more `contains` arms, so a malformed value
+    // degrades to the shipped policy instead of to a disabled console.
+    let kconsole = slopos_ostd::kconsole::config::parse(cmdline);
+    slopos_ostd::kconsole::install(kconsole);
+    if kconsole.mask == 0 {
+        boot_info(b"Boot option: kconsole=off\0");
+    }
 }
 
 boot_init!(

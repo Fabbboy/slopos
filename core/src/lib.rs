@@ -6,6 +6,7 @@
 pub mod driver_hooks;
 pub mod exec;
 pub mod irq;
+pub mod kconsole;
 #[cfg(feature = "test-hooks")]
 pub mod tests;
 #[macro_use]
