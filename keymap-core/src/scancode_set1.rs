@@ -176,6 +176,10 @@ fn base_usage(make: u8) -> Option<u16> {
         0x51 => KEY_KP_3,
         0x52 => KEY_KP_0,
         0x53 => KEY_KP_DOT,
+        // PrintScreen with Alt held. The keyboard reports it as its own bare
+        // make code rather than as PrintScreen's `E0 2A E0 37` sequence, so it
+        // decodes here and not in `ext_usage`.
+        0x54 => KEY_SYSRQ,
         0x56 => KEY_NONUS_BACKSLASH,
         0x57 => KEY_F11,
         0x58 => KEY_F12,
@@ -314,6 +318,35 @@ mod tests {
                 pressed: true
             })
         );
+    }
+
+    #[test]
+    fn sysrq_is_a_bare_make_code() {
+        // Alt+PrintScreen: the keyboard reports SysRq as bare 0x54 / 0xD4, with
+        // no E0 prefix and no fake-shift wrapper.
+        let mut d = Set1Decoder::new();
+        assert_eq!(
+            d.feed(0x54),
+            Some(DecodeStep {
+                usage: KEY_SYSRQ,
+                pressed: true
+            })
+        );
+        assert_eq!(
+            d.feed(0xD4),
+            Some(DecodeStep {
+                usage: KEY_SYSRQ,
+                pressed: false
+            })
+        );
+    }
+
+    #[test]
+    fn sysrq_does_not_shadow_the_keypad_asterisk() {
+        // Bare 0x37 is the keypad `*`; only the E0-prefixed form is
+        // PrintScreen, and neither is SysRq.
+        let mut d = Set1Decoder::new();
+        assert_eq!(d.feed(0x37).unwrap().usage, KEY_KP_ASTERISK);
     }
 
     #[test]

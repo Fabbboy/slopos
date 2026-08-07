@@ -128,6 +128,10 @@ pub const KEY_KP_DOT: u16 = 0x63;
 pub const KEY_NONUS_BACKSLASH: u16 = 0x64;
 pub const KEY_APPLICATION: u16 = 0x65; // "menu" / context key
 pub const KEY_MENU: u16 = 0x76;
+/// System Request / Attention. On an AT keyboard this is what PrintScreen
+/// reports while Alt is held, and it is distinct from [`KEY_PRINTSCREEN`]:
+/// the hardware sends a different make code, not PrintScreen plus a modifier.
+pub const KEY_SYSRQ: u16 = 0x9A;
 
 // --- Modifier keys (0xE0..=0xE7) --------------------------------------------
 pub const KEY_LEFTCTRL: u16 = 0xE0;

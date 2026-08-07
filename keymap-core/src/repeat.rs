@@ -90,6 +90,7 @@ fn key_repeats(usage: u16) -> bool {
             | KEY_NUMLOCK
             | KEY_SCROLLLOCK
             | KEY_PRINTSCREEN
+            | KEY_SYSRQ
             | KEY_PAUSE
             | KEY_MENU
             | KEY_APPLICATION
