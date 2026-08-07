@@ -46,6 +46,7 @@ pub mod ffi;
 pub mod handle;
 pub mod io;
 pub mod irq;
+pub mod kconsole;
 pub mod kdiag;
 pub mod klog;
 pub mod ksym;

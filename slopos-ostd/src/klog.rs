@@ -282,6 +282,22 @@ pub fn log_args(level: KlogLevel, args: fmt::Arguments<'_>) {
     dispatch(args);
 }
 
+/// Emit one line regardless of the current level.
+///
+/// For output an operator asked for directly, where the level filter is not
+/// the right question: a diagnostic dump that prints nothing because the boot
+/// left the level at `Error` is indistinguishable from a broken one.
+///
+/// Raising [`CURRENT_LEVEL`] around the caller would be the other way to do
+/// it, and is wrong twice over: it is a global, so it changes every other
+/// CPU's logging for the duration, and restoring it races a concurrent
+/// [`klog_set_level`]. Emitting at `Error` instead would be wrong once — a
+/// dump is not an error, and counting it as one poisons error triage.
+pub fn log_forced(args: fmt::Arguments<'_>) {
+    ring_capture(args);
+    dispatch(args);
+}
+
 // ---------------------------------------------------------------------------
 // Macros
 // ---------------------------------------------------------------------------
