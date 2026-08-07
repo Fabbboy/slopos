@@ -6,9 +6,12 @@
 //! and that a request made from a trigger reaches a command through the real
 //! bottom-half path rather than through a witness a test forged.
 //!
-//! Everything here asserts on *state a probe command recorded*, never on klog
-//! text. Output capture is a process-global swap, so a test that read it would
-//! be reading every other CPU's logging too.
+//! These assert on *state a probe command recorded* rather than on log text,
+//! because swapping the klog backend to capture output is process-global and
+//! would pull in every other CPU's logging. The one exception reads the log
+//! ring directly and searches it, which tolerates that interleaving — it has
+//! to, because "the command ran" and "the command's output reached a backend"
+//! are different claims and only one of them is what an operator sees.
 
 use core::sync::atomic::{AtomicU32, Ordering};
 
@@ -301,6 +304,44 @@ pub fn test_kcon_kernel_text_symbolizes() -> TestResult {
     }
 }
 
+/// A command's output actually reaches the log ring.
+///
+/// Everything else here asserts on state a probe recorded, which proves the
+/// dispatch worked but says nothing about whether `log_forced` reaches a
+/// backend. A console whose commands run and emit nothing is the failure this
+/// catches — and `log_forced` deliberately bypasses the level filter, so it
+/// has to be checked rather than assumed.
+pub fn test_kcon_output_reaches_the_log_ring() -> TestResult {
+    const MARKER: &[u8] = b"kconsole probe line 0";
+    const WINDOW: usize = 8192;
+
+    with_policy(KConfig::defaults(), || {
+        let Ok(mut buf) = slopos_ostd::KBox::<[u8; WINDOW]>::zeroed() else {
+            return fail!("could not allocate the read window");
+        };
+        let before = slopos_ostd::klog::klog_len();
+
+        PROBE_EMIT.store(1, Ordering::Relaxed);
+        kconsole::request(b'z');
+        pump();
+
+        let read = slopos_ostd::klog::klog_read(before, &mut buf[..]);
+        if read == 0 {
+            return fail!("the ring gained nothing while a command was running");
+        }
+        // Concurrent logging from other CPUs lands in the same window, so this
+        // searches rather than compares.
+        if buf[..read].windows(MARKER.len()).any(|w| w == MARKER) {
+            TestResult::Pass
+        } else {
+            fail!(
+                "the command's output never reached the ring ({} bytes scanned)",
+                read
+            )
+        }
+    })
+}
+
 /// The probe's slot protocol, exercised without sending an NMI.
 ///
 /// Two properties matter and neither is visible from the command's output: a
@@ -354,6 +395,10 @@ pub fn test_kcon_probe_slot_protocol() -> TestResult {
 
 slopos_testing::stest!(name = test_kcon_registry_is_populated, suite = kconsole);
 slopos_testing::stest!(name = test_kcon_probe_slot_protocol, suite = kconsole);
+slopos_testing::stest!(
+    name = test_kcon_output_reaches_the_log_ring,
+    suite = kconsole
+);
 slopos_testing::stest!(name = test_kcon_keys_are_unique, suite = kconsole);
 slopos_testing::stest!(name = test_kcon_flags_are_exclusive, suite = kconsole);
 slopos_testing::stest!(

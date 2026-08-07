@@ -209,6 +209,14 @@ pub fn klog_read(offset: usize, out: &mut [u8]) -> usize {
     KLOG_RING.lock().read_at(offset, out)
 }
 
+/// Logical bytes the ring currently holds.
+///
+/// The offset a reader passes to [`klog_read`] to mean "from here on", so a
+/// caller can bracket a window of output rather than re-reading the whole ring.
+pub fn klog_len() -> usize {
+    KLOG_RING.lock().len
+}
+
 // ---------------------------------------------------------------------------
 // Public API
 // ---------------------------------------------------------------------------
