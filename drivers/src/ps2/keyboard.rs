@@ -24,6 +24,7 @@ use slopos_abi::Errno;
 use slopos_abi::input::{KEY_FLAG_FROM_KEYPAD, KEY_FLAG_HAS_CANONICAL};
 use slopos_keymap_core::keycode::{self, NamedKey};
 use slopos_keymap_core::keymap::KeyOutcome;
+use slopos_keymap_core::sysrq::{SysrqFsm, Verdict};
 use slopos_keymap_core::{
     DeadKeyState, LOCK_CAPS, LOCK_NUM, LOCK_SCROLL, LayoutTable, ModSnapshot, ModTracker, Resolved,
     SERIALIZED_LEN, Set1Decoder, US_QWERTY, deserialize, resolve,
@@ -48,6 +49,7 @@ struct KeyboardState {
     decoder: Set1Decoder,
     mods: ModTracker,
     dead: DeadKeyState,
+    sysrq: SysrqFsm,
     layout: Option<KBox<LayoutTable>>,
 }
 
@@ -57,6 +59,7 @@ impl KeyboardState {
             decoder: Set1Decoder::new(),
             mods: ModTracker::new(),
             dead: DeadKeyState::new(),
+            sysrq: SysrqFsm::new(),
             layout: None,
         }
     }
@@ -105,6 +108,9 @@ pub fn init() {
 
 /// IRQ entry point: process one raw scancode byte from the controller.
 pub fn handle_scancode(byte: u8) {
+    // Sampled before the lock: the diagnostic console's arm window needs it,
+    // and so does every event this routes, so one read off-lock serves both.
+    let ts = slopos_kernel_services::clock::uptime_ms();
     let mut state = STATE.lock();
 
     let step = match state.decoder.feed(byte) {
@@ -133,6 +139,27 @@ pub fn handle_scancode(byte: u8) {
             keycode::KEY_CAPSLOCK | keycode::KEY_NUMLOCK | keycode::KEY_SCROLLLOCK
         );
 
+    // The diagnostic console's chord, recognised ahead of the layout. Two
+    // reasons it cannot move below `resolve`: its command key is a physical
+    // position rather than a glyph, so consulting a layout would make the
+    // bindings depend on which one is loaded; and feeding a command key
+    // through `resolve` would compose it with any pending dead key and
+    // silently swallow the accent. Consumed keys never reach the TTY or the
+    // focused GUI application, which is what keeps the console reachable only
+    // from the physical console.
+    if slopos_ostd::kconsole::enabled() {
+        let arm_ms = slopos_ostd::kconsole::policy().arm_ms;
+        match state.sysrq.feed(usage, pressed, mods, ts, arm_ms) {
+            Verdict::Pass => {}
+            Verdict::Eat => return,
+            Verdict::Run(key) => {
+                drop(state);
+                slopos_ostd::kconsole::request(key);
+                return;
+            }
+        }
+    }
+
     // Resolve through the active layout while the lock is held (pure + fast: no
     // allocation, no blocking). Modifier/lock keys and releases produce no text;
     // only a fresh press runs the layout + dead-key state machine.
@@ -160,8 +187,6 @@ pub fn handle_scancode(byte: u8) {
     if lock_toggled {
         set_leds(snap);
     }
-
-    let ts = slopos_kernel_services::clock::uptime_ms();
 
     // Dead-key flush: a pending accent that did not compose with this key is
     // emitted as its own text event, ahead of the key's own event.

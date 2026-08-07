@@ -24,6 +24,7 @@ pub mod modifiers;
 pub mod parse;
 pub mod repeat;
 pub mod scancode_set1;
+pub mod sysrq;
 
 pub use keymap::{
     DeadKeyState, KeyOutcome, Layout, Locks, Mods, Resolved, UiKey, UsQwerty, char_for,
