@@ -112,13 +112,14 @@ struct CpuSlot {
 /// A real deadlock cycle is short; a chain this long is contention, and
 /// bounding it keeps the walker's frame small enough to run from a stalled
 /// spin loop.
-const MAX_WAIT_HOPS: usize = 8;
+pub const MAX_WAIT_HOPS: usize = 8;
 
+/// One step of a wait-for chain: `cpu` is spinning on `lock`.
 #[derive(Clone, Copy)]
-struct WaitHop {
-    cpu: u32,
-    seq: u64,
-    lock: u64,
+pub struct WaitHop {
+    pub cpu: u32,
+    pub seq: u64,
+    pub lock: u64,
 }
 
 impl CpuSlot {
@@ -468,6 +469,47 @@ pub fn wait_chain_closes_cycle(start: usize) -> bool {
 /// readers are a count, not an owner), `Mutex` and the klog ticket pair
 /// publish no holder. "Holder unknown" and "no cycle" are different
 /// answers and the reader is entitled to know which one this is.
+/// How a wait-for chain ended.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ChainEnd {
+    /// Not spinning on a lock the graph tracks.
+    NotWaiting,
+    /// The chain returns to a CPU already on it: a deadlock cycle.
+    Cycle,
+    /// Stopped at [`MAX_WAIT_HOPS`] without closing. Contention, not a cycle.
+    Truncated,
+    /// Ran out of holders. `PreemptMutex`, `IrqRwLock`, `Mutex` and the klog
+    /// ticket pair publish none, so this is "unknown", not "none".
+    HolderUnknown,
+}
+
+/// Snapshot the wait-for chain from `start` without printing it.
+///
+/// The data-returning form of [`dump_wait_chain`], for a caller that formats
+/// through a console rather than through the NMI-safe emitters.
+pub fn wait_chain_snapshot(start: usize, out: &mut [WaitHop; MAX_WAIT_HOPS]) -> (usize, ChainEnd) {
+    let (len, closed) = collect_wait_chain(start, out);
+    let end = if len == 0 {
+        ChainEnd::NotWaiting
+    } else if closed {
+        ChainEnd::Cycle
+    } else if len == MAX_WAIT_HOPS {
+        ChainEnd::Truncated
+    } else {
+        ChainEnd::HolderUnknown
+    };
+    (len, end)
+}
+
+/// The worst stall `watcher` ever observed, in samples, and who it was watching.
+///
+/// `None` when that watcher has never seen its target stall.
+pub fn max_stall(watcher: usize) -> Option<(usize, u32)> {
+    let slot = SLOTS.get(watcher)?;
+    let max = slot.max_stale.load(Ordering::Relaxed);
+    (max != 0).then(|| (slot.target.load(Ordering::Relaxed) as usize, max))
+}
+
 pub fn dump_wait_chain(start: usize) {
     let mut hops = [WaitHop {
         cpu: 0,
