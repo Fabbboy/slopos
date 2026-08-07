@@ -45,6 +45,12 @@ pub const UART_FCR_CLEAR_RX: u8 = 0x02;
 pub const UART_FCR_CLEAR_TX: u8 = 0x04;
 pub const UART_FCR_14_BYTE_THRESHOLD: u8 = 0xC0;
 pub const UART_LSR_DATA_READY: u8 = 0x01;
+/// Break interrupt: the line was held at spacing for longer than a full frame.
+///
+/// Out of band by construction — no byte pattern can produce it — which is why
+/// the diagnostic console uses it as its serial trigger. The UART also pushes a
+/// framing-error `0x00` into the FIFO alongside it, which the reader discards.
+pub const UART_LSR_BREAK: u8 = 0x10;
 pub const UART_LSR_TX_EMPTY: u8 = 0x20;
 pub const UART_MCR_DTR: u8 = 0x01;
 pub const UART_MCR_RTS: u8 = 0x02;

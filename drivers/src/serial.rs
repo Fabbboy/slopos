@@ -12,8 +12,8 @@ use slopos_ostd::io::port_consts::{
     COM1, UART_FCR_14_BYTE_THRESHOLD as FCR_14_BYTE_THRESHOLD, UART_FCR_CLEAR_RX as FCR_CLEAR_RX,
     UART_FCR_CLEAR_TX as FCR_CLEAR_TX, UART_FCR_ENABLE_FIFO as FCR_ENABLE_FIFO,
     UART_IIR_FIFO_ENABLED as IIR_FIFO_ENABLED, UART_IIR_FIFO_MASK as IIR_FIFO_MASK,
-    UART_LCR_DLAB as LCR_DLAB, UART_LSR_DATA_READY as LSR_DATA_READY, UART_MCR_AUX2 as MCR_AUX2,
-    UART_MCR_DTR as MCR_DTR, UART_MCR_RTS as MCR_RTS,
+    UART_LCR_DLAB as LCR_DLAB, UART_LSR_BREAK as LSR_BREAK, UART_LSR_DATA_READY as LSR_DATA_READY,
+    UART_MCR_AUX2 as MCR_AUX2, UART_MCR_DTR as MCR_DTR, UART_MCR_RTS as MCR_RTS,
 };
 use slopos_ostd::io::raw_port::Port;
 use slopos_ostd::lock_class;
@@ -195,12 +195,78 @@ pub fn print_args(args: fmt::Arguments<'_>) {
     let _ = SERIAL.lock().write_fmt(args);
 }
 
+/// What the reader should do with one received byte.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SerialAction {
+    /// Ordinary input: hand it to the line discipline.
+    Deliver(u8),
+    /// A break condition. Its framing byte carries no data.
+    Consumed,
+    /// The key that followed a break: a diagnostic-console command.
+    Command(u8),
+}
+
+/// Whether a break is waiting for its command key.
+///
+/// Serial-only state, so it lives with the reader that produces it rather than
+/// in the console.
+static BREAK_ARMED: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+
+/// Classify one `(LSR, byte)` pair against the break-armed state.
+///
+/// The window is one byte rather than a deadline: the reader is polled from
+/// contexts that exist before the clock service does, and reading a clock that
+/// may not be registered is a worse failure than a trigger that expires on the
+/// next character instead of after five seconds. It also matches what an
+/// operator does — send a break, press a key.
+pub(crate) fn serial_console_step(
+    lsr: u8,
+    byte: u8,
+    armed: &mut bool,
+    trigger_enabled: bool,
+) -> SerialAction {
+    if lsr & LSR_BREAK != 0 {
+        // A break cannot be forged by any byte pattern, which is what makes it
+        // usable as a trigger on a line that also carries data. The UART pairs
+        // it with a framing-error byte that is not input.
+        *armed = trigger_enabled;
+        return SerialAction::Consumed;
+    }
+    if core::mem::replace(armed, false) {
+        return SerialAction::Command(byte);
+    }
+    SerialAction::Deliver(byte)
+}
+
 pub fn serial_poll_receive(base: u16) {
+    use core::sync::atomic::Ordering;
+
     let regs = UartRegs::new(Port::<u8>::new(base));
-    while regs.read_lsr() & LSR_DATA_READY != 0 {
+    loop {
+        // One read: LSR's error bits are cleared by reading it, so the break
+        // flag has to be taken from the same read that reports the byte.
+        let lsr = regs.read_lsr();
+        if lsr & LSR_DATA_READY == 0 {
+            break;
+        }
         let byte = regs.read_rbr();
-        let mut buf = INPUT_BUFFER.lock();
-        let _ = buf.try_push(byte);
+
+        let trigger_enabled =
+            slopos_ostd::kconsole::enabled() && slopos_ostd::kconsole::policy().serial;
+        let mut armed = BREAK_ARMED.load(Ordering::Acquire);
+        let action = serial_console_step(lsr, byte, &mut armed, trigger_enabled);
+        BREAK_ARMED.store(armed, Ordering::Release);
+
+        match action {
+            SerialAction::Deliver(b) => {
+                let mut buf = INPUT_BUFFER.lock();
+                let _ = buf.try_push(b);
+            }
+            SerialAction::Consumed => {}
+            // Requested rather than run: this is the polled reader, which the
+            // per-TTY lock is held across on one of its two call paths.
+            SerialAction::Command(key) => slopos_ostd::kconsole::request(key),
+        }
     }
 }
 
