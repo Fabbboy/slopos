@@ -36,7 +36,6 @@ python3 scripts/cvss_calc.py "CVSS:3.1/AV:L/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H"
 | [SLOPOS-2026-0037](#slopos-2026-0037) | 7.1 | HIGH | The compositor clipboard has no authorization |
 | [SLOPOS-2026-0043](#slopos-2026-0043) | 6.6 | MEDIUM | ext2 mounts and writes any image whose magic and geometry are sane, with no feature-compatibility gate |
 | [SLOPOS-2026-0022](#slopos-2026-0022) | 6.3 | MEDIUM | ramfs recycles inode ids immediately on unlink while descriptors still name them |
-| [SLOPOS-2026-0044](#slopos-2026-0044) | 6.1 | MEDIUM | The SysRq task dump has no privilege boundary — any process holding a PTY master triggers it |
 | [SLOPOS-2026-0014](#slopos-2026-0014) | 5.9 | MEDIUM | TCP initial sequence numbers come from an invertible FNV chain |
 | [SLOPOS-2026-0040](#slopos-2026-0040) | 5.9 | MEDIUM | virtio-net's RX ring shrinks monotonically and never refills |
 | [SLOPOS-2026-0016](#slopos-2026-0016) | 5.5 | MEDIUM | AF_UNIX SCM_RIGHTS has no cycle policy, permanently leaking socket slots |
@@ -537,25 +536,6 @@ These are **candidate CVE-style records** for internal tracking. They are not of
 - Repro:
   Mount an ext4 image with extents enabled. It mounts read-write, and any write corrupts it.
 - Remediation: Check `s_feature_incompat` against the set actually implemented and refuse to mount otherwise; check `s_feature_ro_compat` and mount read-only when an unsupported read-only-compatible feature is present. This is exactly the gate Linux's `ext4_feature_set_ok` performs.
-
-### SLOPOS-2026-0044
-- Title: The SysRq task dump has no privilege boundary — any process holding a PTY master triggers it
-- Status: open
-- Confidence: 95 — evidence 40 (every call edge from the PTY master write to the registry walk read directly, no guard anywhere on the path), exploitability 29 (one `write(2)` of one byte from any process that has opened a PTY), reproducibility 26 (deterministic; the dump appears on the console and in `/dev/kmsg` on every trigger)
-- CVSS vector/score: `CVSS:3.1/AV:L/AC:L/PR:L/UI:N/S:U/C:L/I:N/A:H` — **6.1 MEDIUM**
-- Impact: The Ctrl+T diagnostic dump is detected on the shared raw-input path, which is also the path a PTY master write takes. Writing `0x14` to a PTY master therefore makes the kernel walk the whole task registry — a heap allocation plus the task-manager cli-spinlock — and emit one klog line per task, plus twelve more per blocked task, byte-at-a-time through the polled 115200-baud UART under the cli-held klog ticket lock. There is no console check, no capability check, and no rate limiting; the trigger byte is not even consumed, so it is delivered to the foreground application as well. A loop stalls every CPU that touches the log lock for as long as it runs. The dump also prints kernel text addresses (`frame rip=0x…`) into a `/dev/kmsg` that devfs exposes with no permission model at all, so any process can read them back.
-- Evidence:
-  - drivers/src/tty/io.rs:119 — `const SYSRQ_DUMP_BYTE: u8 = 0x14;`
-  - drivers/src/tty/io.rs:127-133 — `push_input_batch` marks the dump pending for any batch containing that byte, with no check of where the batch came from
-  - drivers/src/tty/pty.rs:162,178 — the PTY master write path calls `push_input_batch`, so a userland `write(2)` reaches the same check as the keyboard ISR
-  - drivers/src/tty/io.rs:1119-1120 — `input_available_cb` fires `debug_dump_tasks()` with no gate
-  - sched/src/task/task_table.rs:959-1008 — `debug_dump_tasks_klog` walks `task_for_each_active` and emits one `klog_info!` per task plus up to twelve frame lines per blocked task
-  - sched/src/task/task_table.rs:884-919 — the walk allocates a `KVec<TaskRef>` and takes the task-manager cli-spinlock
-  - drivers/src/tty/ldisc.rs — the default `c_cc` table has no `0x14` entry, so the byte also flows on to the foreground application
-  - fs/src/devfs/mod.rs:50,114 — `/dev/kmsg` is registered with no mode/uid/gid; `stat` returns only `FileStat::new_char_device(inode, major, minor)`
-- Repro:
-  Open a PTY pair, then `for (;;) write(master_fd, "\x14", 1);` — each iteration forces a full task-registry walk and a klog burst.
-- Remediation: Remove the trigger from the shared input path entirely, so no userland write path has a call edge to it, and re-introduce the facility behind a physical-console trigger only. See `plans/`-tracked `kconsole` work; this entry is deleted when that lands.
 
 ## Relevant NVD CVE Analogs (fetched)
 
