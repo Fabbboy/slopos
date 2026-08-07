@@ -71,6 +71,11 @@ just boot           # spins the wheel
 | `just test` | Run the 2,500+ test suite under QEMU |
 | `just --list` | Everything else (there's a lot) |
 
+When it wedges, ask it why: press **SysRq** (Alt+PrintScreen) — or send a
+**BREAK** on the serial line — then a command key. `h` lists them; `t` dumps
+every task with a symbolized park site. Only the physical console can trigger
+it, and `kconsole=off` on the kernel cmdline turns it off entirely.
+
 <details>
 <summary><b>Advanced knobs</b></summary>
 

@@ -157,6 +157,11 @@ The kernel parses these from the Limine cmdline (threaded through `scripts/build
 | `tests.run` | comma-separated globs | only run matching tests |
 | `tests.skip` | comma-separated globs | skip matching tests |
 | `lockdep` | `off` / `warn` / `panic` | lock-order validator policy; default `panic` |
+| `kconsole` | `off` / `on` / `<hex mask>` | diagnostic-console permission mask; default `on` (informational only) |
+| `kconsole.serial` | `on` / `off` | serial BREAK trigger; default `on` |
+| `kconsole.arm_ms` | integer | how long the keyboard chord stays armed; default 3000 |
+| `kconsole.max_lines` | integer | per-command line budget; default 512 |
+| `kconsole.probe_ms` | integer | per-CPU answer budget for the all-CPU probe; default 250 |
 
 `lockdep=warn` reports each distinct finding once (deduped per class pair) and
 keeps booting, so one boot enumerates every ordering finding in the tree instead
@@ -164,6 +169,43 @@ of stopping at the first. `lockdep=off` keeps the held-lock stack — the poison
 walk, the TLB ack-wait diagnostic and the watchdog all read it — but runs no
 ordering checks, which is how the validator's own per-acquire cost is measured
 without a separate build.
+
+### Diagnostic console
+
+`slopos_ostd::kconsole` is the kernel's magic-key facility: a key pressed on the
+**physical console** makes the kernel describe itself. Press SysRq
+(Alt+PrintScreen) to arm and one command key to run, or send a serial BREAK and
+then the command key. Press the trigger then `h` for the list.
+
+Commands live in the `.kconsole_registry` linker registry, so the crate that
+owns a subsystem's data owns the command that prints it — `kcommand!` in `mm/`,
+`sched/`, `core/`, `boot/`. OSTD defines the registry and never names an entry;
+registration must happen in a crate only the kernel links, because OSTD is
+linked into userland binaries too and their linker script brackets no kernel
+section.
+
+Three properties are load-bearing:
+
+- **Only the physical console triggers it.** The keyboard hook sits in the IRQ
+  handler ahead of layout resolution and consumes its keys, so they reach
+  neither the TTY nor the focused GUI application; the serial trigger is a BREAK
+  condition, which no byte pattern can forge. There is no call edge from any
+  userland write path to `kconsole::request`, and that is the point — the
+  facility this replaced was reachable by any process holding a PTY master.
+- **One execution tier.** Every command runs at the bottom-half point with
+  interrupts and preemption enabled. No command runs in NMI context and none may
+  assume it can: a *returning* NMI handler must be fault-free, and the
+  frame-pointer walk a backtrace needs is only fault-*recoverable*. The all-CPU
+  probe therefore asks each CPU to describe itself from its own NMI handler
+  rather than walking a peer.
+- **Triggers only queue.** `request` is one `fetch_or` and one `gs`-relative
+  byte store — what `bh::raise` permits from a hard IRQ and from under a
+  cli-spinlock. The pending set is global rather than per-CPU because
+  `bh::raise` marks only the calling CPU, and every CPU's timer tick pokes its
+  own bottom half while anything is queued.
+
+`KCMD_DESTRUCTIVE` commands are registered but refused unless the mask names
+their bit, which the default does not: boot `kconsole=0x3` to enable them.
 
 ### Output format and JSONL events
 The public KTAP docs describe the wire grammar and the JSONL event schema. The wire format is stable; the JSONL schema is a strict superset suitable for downstream JUnit XML conversion or test-history regression detection.
