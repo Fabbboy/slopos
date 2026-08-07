@@ -79,6 +79,26 @@ pub fn init() {
 static KLOG_NEXT_TICKET: AtomicU16 = AtomicU16::new(0);
 static KLOG_NOW_SERVING: AtomicU16 = AtomicU16::new(0);
 
+/// A taken ticket, released in a destructor.
+///
+/// The release is owed from the moment `KLOG_NEXT_TICKET` is bumped, and a
+/// panic while the lock is held unwinds past any release written as a tail
+/// statement. A ticket that is never served leaves `KLOG_NOW_SERVING`
+/// permanently short of it, and every later `klog_*!` on every CPU then spins
+/// on it forever with interrupts disabled — one recoverable panic becomes a
+/// silent whole-machine stop, on the exact path that would have reported it.
+struct KlogTicket {
+    saved_flags: u64,
+}
+
+impl Drop for KlogTicket {
+    #[inline]
+    fn drop(&mut self) {
+        KLOG_NOW_SERVING.fetch_add(1, Ordering::Release);
+        cpu::restore_flags(self.saved_flags);
+    }
+}
+
 /// Acquire the COM1 ticket lock with interrupts disabled, run `f` while
 /// holding exclusive access to the UART, then release.
 #[inline]
@@ -86,11 +106,17 @@ fn with_klog_lock<F: FnOnce()>(f: F) {
     let saved_flags = cpu::save_flags_cli();
     // Take a ticket and spin until served (FIFO order, wrapping-safe).
     let my_ticket = KLOG_NEXT_TICKET.fetch_add(1, Ordering::Relaxed);
+    let _ticket = KlogTicket { saved_flags };
     loop {
         let serving = KLOG_NOW_SERVING.load(Ordering::Acquire);
         if serving == my_ticket {
             break;
         }
+        // This is a hand-rolled interrupts-off wait on a peer CPU, so it owes
+        // the same shootdown service the lock primitives perform for their own
+        // waiters: without it, a holder blocked on this CPU's TLB ack and this
+        // CPU blocked on that holder's ticket are a closed cycle.
+        slopos_ostd::sync::spin_relax();
         // Proportional backoff: pause more when further from being served.
         let distance = my_ticket.wrapping_sub(serving) as u32;
         for _ in 0..distance.min(64) {
@@ -99,9 +125,6 @@ fn with_klog_lock<F: FnOnce()>(f: F) {
     }
 
     f();
-
-    KLOG_NOW_SERVING.fetch_add(1, Ordering::Release);
-    cpu::restore_flags(saved_flags);
 }
 
 fn serial_klog_backend(args: fmt::Arguments<'_>) {
