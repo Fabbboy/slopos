@@ -28,6 +28,7 @@ use slopos_ostd::{KArc, KWeak};
 
 use super::backing::TtyBacking;
 use super::driver::{InputEvent, TtyDriverKind};
+use super::output::WriteNesting;
 use super::table::{
     TTY_BACKINGS, TTY_SLOTS, find_free_slot, find_free_slot_excluding, mark_slot_allocated,
     tty_input_event,
@@ -159,7 +160,11 @@ pub fn master_write(peer: &KWeak<TtyBacking>, data: &[u8]) -> usize {
 
     if allow_single_priority {
         let event = InputEvent::normal(data[0]);
-        super::push_input_batch(slave_idx, core::slice::from_ref(&event));
+        super::io::push_input_batch_nested(
+            slave_idx,
+            core::slice::from_ref(&event),
+            WriteNesting::PeerNested,
+        );
         return 1;
     }
 
@@ -175,7 +180,11 @@ pub fn master_write(peer: &KWeak<TtyBacking>, data: &[u8]) -> usize {
         for (i, &byte) in chunk.iter().enumerate() {
             events[i] = InputEvent::normal(byte);
         }
-        super::push_input_batch(slave_idx, &events[..chunk.len()]);
+        super::io::push_input_batch_nested(
+            slave_idx,
+            &events[..chunk.len()],
+            WriteNesting::PeerNested,
+        );
         written += chunk.len();
 
         // Re-check throttle after processing the batch.  If the slave

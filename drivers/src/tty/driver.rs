@@ -8,9 +8,11 @@
 //! - `VConsoleDriver`      — wraps PS/2 keyboard + framebuffer text output
 //! - `PtyMaster` / `PtySlave` — pseudo-terminal pair endpoints
 //!
-//! adds `DriverId` for lock-free I/O dispatch: the TTY core clones
-//! the driver identifier while holding the per-TTY lock, drops the lock, and
-//! then writes the processed output via `write_driver_unlocked`.
+//! `DriverId` is the lock-free dispatch handle: the TTY core clones the
+//! driver identifier while holding the per-TTY lock, drops the lock, and hands
+//! the id to `super::output`, the only module that emits.  Neither
+//! `TtyDriverKind` nor the `TtyDriver` trait exposes a write, so a frame
+//! holding a slot guard cannot reach a driver.
 //!
 //! PTY peer references are `KWeak<TtyBacking>` links: the write site
 //! upgrades the link, which pins the peer's slot for the duration of the
@@ -23,7 +25,6 @@ use slopos_ostd::io::port_consts::COM1;
 
 use crate::serial;
 use crate::tty::backing::TtyBacking;
-use crate::tty::pty;
 
 #[derive(Clone, Copy, Debug)]
 pub struct InputEvent {
@@ -56,18 +57,9 @@ impl From<u8> for InputEvent {
     }
 }
 
-/// Backend driver operations for a TTY.
-///
-/// Implementors provide the hardware-level write and optional input polling.
-/// The TTY core calls these methods — the driver never touches the line
-/// discipline directly.
+/// Backend operations for a TTY, none of which emit: output goes through
+/// `super::output`.  A driver never touches the line discipline directly.
 pub trait TtyDriver {
-    /// Write processed output bytes to the terminal hardware.
-    ///
-    /// Returns the number of bytes accepted.  Synchronous drivers always
-    /// return `buf.len()`; PTY drivers may return less (short write).
-    fn write_output(&self, buf: &[u8]) -> usize;
-
     /// Poll for pending hardware input, returning bytes read into `out`.
     /// Called by `Tty::drain_hw_input_locked`.  May return 0 if no data is available
     /// (e.g. PS/2 input comes via interrupt, not polling).
@@ -78,7 +70,7 @@ pub trait TtyDriver {
 
     /// Returns `true` if the driver has output bytes that have been accepted
     /// but not yet fully transmitted to the hardware.  Synchronous (polling)
-    /// drivers always return `false` because `write_output` blocks until the
+    /// drivers always return `false` because their emission blocks until the
     /// byte is on the wire.  Async / interrupt-driven drivers should return
     /// `true` while the TX FIFO is non-empty.
     ///
@@ -87,16 +79,10 @@ pub trait TtyDriver {
         false
     }
 
-    /// Returns the number of bytes that have been accepted by the driver but
-    /// not yet fully transmitted to the hardware.  Defaults to `0` or `1`
-    /// based on [`output_pending`](TtyDriver::output_pending), since most
-    /// synchronous drivers only know "pending or not".
-    ///
-    /// Async / interrupt-driven drivers with FIFO depth visibility should
-    /// override this to return the actual byte count for accurate
-    /// `TIOCOUTQ` reporting.
-    ///
-    /// Stronger per-driver pending-byte semantics.
+    /// Bytes accepted by the driver but not yet transmitted.  Defaults to
+    /// `0`/`1` from [`output_pending`](TtyDriver::output_pending), since most
+    /// synchronous drivers only know "pending or not"; a driver with FIFO
+    /// depth visibility overrides it so `TIOCOUTQ` reports the real count.
     fn output_pending_bytes(&self) -> usize {
         if self.output_pending() { 1 } else { 0 }
     }
@@ -125,15 +111,6 @@ pub enum TtyDriverKind {
 }
 
 impl TtyDriverKind {
-    pub fn write_output(&self, buf: &[u8]) -> usize {
-        match self {
-            Self::SerialConsole(d) => d.write_output(buf),
-            Self::VConsole(d) => d.write_output(buf),
-            Self::PtyMaster { peer } => pty::master_write(peer, buf),
-            Self::PtySlave { peer } => pty::slave_write(peer, buf),
-        }
-    }
-
     /// Delegate `drain_input` to the inner driver.
     pub fn drain_input(&self, out: &mut [u8]) -> usize {
         match self {
@@ -189,15 +166,10 @@ impl TtyDriverKind {
         !matches!(self, Self::PtyMaster { .. })
     }
 
-    /// Return a lightweight, clonable identifier for this driver variant.
-    ///
-    /// Used by the split-write path: the caller clones the `DriverId` while
-    /// holding the per-TTY lock, drops the lock, and then calls
-    /// [`write_driver_unlocked`] to perform the (slow) hardware I/O without
-    /// holding any TTY lock.
-    ///
-    /// PTY variants carry the `KWeak<TtyBacking>` peer link through the
-    /// `DriverId`, so the write site pins the peer before touching it.
+    /// A clonable identifier for this variant: the caller clones it while
+    /// holding the per-TTY lock, drops the lock, and hands it to
+    /// `super::output`.  PTY variants carry the `KWeak<TtyBacking>` peer link
+    /// through, so the write site pins the peer before touching it.
     pub fn id(&self) -> DriverId {
         match self {
             Self::SerialConsole(_) => DriverId::SerialConsole,
@@ -230,64 +202,6 @@ pub enum DriverId {
     PtySlave { peer: KWeak<TtyBacking> },
 }
 
-/// Write processed output bytes to the hardware **without** holding any TTY
-/// lock.
-///
-/// This is the second step of the split-write pattern:
-///
-/// 1. **Under per-TTY lock** — process output through the line discipline
-///    into a local stack buffer, copy `DriverId`, drop the lock.
-/// 2. **Without lock** — call this function to send the buffered bytes to the
-///    hardware driver.
-///
-/// This separation ensures that slow serial I/O (~86 μs/byte at 115200 baud)
-/// does not block operations on other TTYs.
-///
-/// PTY variants pass the weak peer link to `master_write` / `slave_write`,
-/// which pin the peer before touching its slot.
-/// Whether a write to `driver` can leave work that must run outside the
-/// TTY write lock. Sampled before the write, which consumes the id.
-pub fn defers_console_work(driver: &DriverId) -> bool {
-    matches!(driver, DriverId::VConsole)
-}
-
-/// Run console work a [`write_driver_unlocked`] call deferred.
-///
-/// Call with `TTY_WRITE_LOCKS[slot]` released. That lock serialises byte
-/// streams and disables interrupts; a full-screen vconsole repaint takes
-/// the console lock in bands precisely so interrupts are not masked across
-/// the whole screen, which holds only if the write lock is not wrapped
-/// around it.
-pub fn settle_console_output() {
-    super::vconsole::run_pending_repaint();
-}
-
-pub fn write_driver_unlocked(driver: DriverId, data: &[u8]) -> usize {
-    match driver {
-        DriverId::SerialConsole => {
-            // Klog-lock-coordinated; same rationale as the VConsole mirror
-            // below. Without the lock, TTY 0 writes byte-interleave with
-            // any concurrent klog output and corrupt KTAP wire format
-            // during tests.
-            serial::serial_locked_write_bytes(data);
-            data.len()
-        }
-        DriverId::VConsole => {
-            super::vconsole::write(data);
-            if super::vconsole::serial_mirror_enabled() {
-                // Atomic w.r.t. concurrent klog output. The previous
-                // `serial_write_batch` path was lock-free and would
-                // byte-interleave with `klog_info!` callers from any CPU,
-                // corrupting the test harness's KTAP wire format.
-                serial::serial_locked_write_bytes(data);
-            }
-            data.len()
-        }
-        DriverId::PtyMaster { peer } => pty::master_write(&peer, data),
-        DriverId::PtySlave { peer } => pty::slave_write(&peer, data),
-    }
-}
-
 // ---------------------------------------------------------------------------
 // Serial console driver — wraps COM1 UART polling-based I/O
 // ---------------------------------------------------------------------------
@@ -302,11 +216,6 @@ pub fn write_driver_unlocked(driver: DriverId, data: &[u8]) -> usize {
 pub struct SerialConsoleDriver;
 
 impl TtyDriver for SerialConsoleDriver {
-    fn write_output(&self, buf: &[u8]) -> usize {
-        serial::serial_locked_write_bytes(buf);
-        buf.len()
-    }
-
     fn drain_input(&self, out: &mut [u8]) -> usize {
         // Poll the UART first — moves bytes from hardware FIFO into
         // INPUT_BUFFER.
@@ -334,24 +243,53 @@ impl TtyDriver for SerialConsoleDriver {
 
 /// Driver backend for a virtual console (PS/2 keyboard + framebuffer).
 ///
-/// Input arrives via interrupt (`tty::push_input`), so `drain_input` returns 0.
+/// Input arrives via interrupt (`tty::push_input`), so `drain_input` returns
+/// nothing beyond what a test has injected.
 pub struct VConsoleDriver;
 
-impl TtyDriver for VConsoleDriver {
-    fn write_output(&self, buf: &[u8]) -> usize {
-        super::vconsole::write(buf);
-        if super::vconsole::serial_mirror_enabled() {
-            // See note in `write_driver_unlocked` above — must be
-            // klog-lock-coordinated to avoid byte-interleaving on the
-            // wire.
-            serial::serial_locked_write_bytes(buf);
-        }
-        buf.len()
-    }
+/// Bytes a test has queued as if the vconsole's hardware had produced them.
+///
+/// The polled drain — the path that stages echo under the slot lock —
+/// otherwise has no in-harness driver behind it: the serial console reads a
+/// real UART and both PTY ends return nothing. Injecting here lets a test walk
+/// it with the serial mirror off, so the echo cannot reach the wire the
+/// harness is parsing.
+#[cfg(feature = "test-hooks")]
+static VCONSOLE_INJECT: slopos_ostd::sync::SpinLock<slopos_ostd::ring_buffer::RingBuffer<u8, 64>> =
+    slopos_ostd::sync::SpinLock::new(
+        slopos_ostd::ring_buffer::RingBuffer::new_zeroed(),
+        slopos_ostd::lock_class!("VCONSOLE_INJECT", slopos_ostd::sync::LOCK_LEVEL_RESOURCE),
+    );
 
+/// Queue `bytes` for the next virtual-console drain.
+#[cfg(feature = "test-hooks")]
+pub fn inject_vconsole_input(bytes: &[u8]) {
+    let mut buf = VCONSOLE_INJECT.lock();
+    for &b in bytes {
+        let _ = buf.try_push(b);
+    }
+}
+
+impl TtyDriver for VConsoleDriver {
     fn drain_input(&self, _out: &mut [u8]) -> usize {
         // PS/2 keyboard input comes via interrupt → tty::push_input.
         // No polling needed.
+        #[cfg(feature = "test-hooks")]
+        {
+            let mut buf = VCONSOLE_INJECT.lock();
+            let mut n = 0usize;
+            while n < _out.len() {
+                match buf.try_pop() {
+                    Some(b) => {
+                        _out[n] = b;
+                        n += 1;
+                    }
+                    None => break,
+                }
+            }
+            return n;
+        }
+        #[cfg(not(feature = "test-hooks"))]
         0
     }
 }

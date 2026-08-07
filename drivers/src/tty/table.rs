@@ -4,35 +4,32 @@
 //!
 //! Each TTY slot has its own `SpinLock`, enabling fully independent
 //! operations on different TTYs.  There is no global table lock — each slot
-//! in `TTY_SLOTS` is independently locked.
-//!
-//! This replaces the previous `TTY_TABLE: SpinLock<[Option<Tty>; MAX_TTYS]>`
-//! where a single lock protected **all** 8 TTY slots.  Under the old scheme,
-//! any operation on TTY 0 blocked all operations on TTY 1–7.  A 1 KB serial
-//! write held the global lock for ~86 ms.
+//! in `TTY_SLOTS` is independently locked, so a 1 KB serial write on TTY 0
+//! never blocks TTY 1.
 //!
 //! ## Lock Ordering Rules
 //!
-//! Strict lock hierarchy to prevent deadlock:
-//!
 //! 1. **`TTY_SLOTS[i]`** (per-TTY) — held for ldisc/session/termios
 //!    operations.  **Never hold two per-TTY locks simultaneously.**
-//! 2. **Blocking waits** go through the kernel event bus
+//!    Functions that iterate all slots (like `detach_session_by_id`) acquire
+//!    and release each lock in turn.
+//! 2. **Output** goes through `super::output`, whose `TTY_WRITE_LOCKS[i]` is
+//!    strictly **outside** every `TTY_SLOTS[j]` — a driver write for a PTY
+//!    end delivers into the peer's slot.  A slot guard is therefore never
+//!    live across an emission: every output path copies the `DriverId` out
+//!    from under the slot lock, drops it, and only then emits.
+//! 3. **Blocking waits** go through the kernel event bus
 //!    (`KernelEvent::TtyInput` / `KernelEvent::TtyOutput`) — never hold a
 //!    per-TTY slot lock across a blocking wait.  The `wait_event` condition
 //!    closure may transiently acquire the same per-TTY lock (this is safe
 //!    because `wait_event` releases its internal lock before calling the
 //!    closure).
 //!
-//! Rule: **Never acquire `TTY_SLOTS[j]` while holding `TTY_SLOTS[i]`**
-//!       (for `i ≠ j`).  Functions that iterate all slots (like
-//!       `detach_session_by_id`) acquire and release each lock in turn.
-//!
 //! Blocking and wakeups are keyed by TTY slot through the event bus, so a
 //! sleeper never holds the slot lock while a waker holds the wait-queue
 //! lock (the condition closure locks the slot internally to check for data).
 
-use core::sync::atomic::{AtomicU32, Ordering};
+use core::sync::atomic::AtomicU32;
 use slopos_ostd::lock_class;
 
 use super::backing::TtyBacking;
@@ -69,18 +66,17 @@ pub(crate) fn tty_output_event(slot: usize) -> KernelEvent {
 // Per-TTY slots
 // ---------------------------------------------------------------------------
 
-/// Per-TTY locked slots.  Each element is an independently-locked
-/// `Option<Tty>` — operations on TTY 0 never contend with TTY 1–7.
-///
-/// Slots 0 and 1 are pre-allocated at init time:
-/// - 0 → serial console (COM1)
-/// - 1 → virtual console (PS/2 keyboard + framebuffer)
-///
-/// The remaining slots are reserved for future PTY support.
-///
-/// Access a slot by index: `TTY_SLOTS[idx].lock()`.
+/// Lockdep class of every [`TTY_SLOTS`] instance.  Named so its ordering can
+/// be declared at init rather than discovered from whichever direction happens
+/// to execute first.
+pub(crate) const TTY_SLOTS_CLASS: &slopos_ostd::sync::LockClassKey =
+    lock_class!("TTY_SLOTS", LOCK_LEVEL_RESOURCE);
+
+/// Per-TTY locked slots.  Each element is independently locked, so operations
+/// on TTY 0 never contend with TTY 1–7.  Slot 0 is the serial console (COM1)
+/// and slot 1 the virtual console; the rest are PTY ends.
 pub static TTY_SLOTS: [SpinLock<Option<PinBox<Tty>>>; MAX_TTYS] =
-    [const { SpinLock::new(None, lock_class!("TTY_SLOTS", LOCK_LEVEL_RESOURCE)) }; MAX_TTYS];
+    [const { SpinLock::new(None, TTY_SLOTS_CLASS) }; MAX_TTYS];
 
 /// Per-TTY output-in-flight **byte** counter.  Tracks the number of
 /// bytes that have been processed through the line discipline but have
@@ -89,44 +85,8 @@ pub static TTY_SLOTS: [SpinLock<Option<PinBox<Tty>>>; MAX_TTYS] =
 /// in-flight output reaches the hardware, and by `TIOCOUTQ` to report
 /// accurate queue depth.
 ///
-/// Increment by the chunk byte count **before** `write_driver_unlocked`,
-/// decrement by the same count **after**, then publish
-/// `KernelEvent::TtyOutput` so drain waiters re-check.
+/// Maintained by `output::InflightGuard`, which wraps every emission.
 pub static TTY_OUTPUT_INFLIGHT: [AtomicU32; MAX_TTYS] = [const { AtomicU32::new(0) }; MAX_TTYS];
-
-/// Per-TTY write serialization locks.
-///
-/// Serializes all output to a TTY's hardware driver — both echo output
-/// (from `push_input_batch` / `drain_hw_input_locked`) and user writes
-/// (from `write()`).  Without this, concurrent echo and user writes can
-/// interleave bytes at the driver level, causing corrupted terminal output.
-///
-/// This is the Rust equivalent of Linux's `atomic_write_lock` on
-/// `tty_struct`.  POSIX §11.1.9 requires echo to be indistinguishable
-/// from terminal-generated output, implying proper serialization.
-///
-/// # Lock Ordering
-///
-/// `TTY_SLOTS[i]` → `TTY_WRITE_LOCKS[i]` (the write lock may be acquired
-/// while holding the slot lock, but **NEVER** the reverse).  The user-write
-/// path drops the slot lock before acquiring the write lock; the echo path
-/// in `drain_hw_input_locked` acquires the write lock while the slot lock
-/// is still held — both orderings are safe because no code path ever
-/// acquires the slot lock while holding the write lock.
-/// Subclass for the *peer's* acquisition of [`TTY_WRITE_LOCKS`].
-///
-/// A PTY master write holds the master's write lock (subclass 0) and, while
-/// pushing the bytes into the slave as input, takes the slave's write lock —
-/// to emit the echo, and again to emit XOFF once the slave's input passes its
-/// IXOFF high-water mark. Both are instances of one declaration, so without a
-/// subclass the pair is indistinguishable from an unordered same-class
-/// nesting. `0 -> 1` is the only legal direction and lockdep enforces it; the
-/// two peer-side acquisitions are sequential, never nested, so they share the
-/// subclass.
-pub const TTY_WRITE_PEER_SUBCLASS: u8 = 1;
-
-pub static TTY_WRITE_LOCKS: [SpinLock<()>; MAX_TTYS] =
-    [const { SpinLock::new((), lock_class!("TTY_WRITE_LOCKS", LOCK_LEVEL_RESOURCE)) }; MAX_TTYS];
 
 /// Per-slot weak handle to the live [`TtyBacking`] — the open-by-index
 /// registry (`/dev/pts/N`, `/dev/tty`, bootstrap console fds). Weak by
@@ -186,6 +146,15 @@ pub(crate) static TTY_ALLOC_BITMAP: AtomicBitmap<{ words_for(MAX_TTYS) }> = Atom
 /// - TTY 0  → SerialConsoleDriver (COM1)
 /// - TTY 1  → VConsoleDriver (PS/2 + framebuffer)
 pub fn tty_table_init() {
+    // Before the first TTY lock, so a driver write reached with a slot guard
+    // live is a finding on any boot — not only on one that happened to
+    // exercise the legal direction first.
+    if let Err(err) =
+        slopos_ostd::sync::declare_order(super::output::TTY_WRITE_CLASS, TTY_SLOTS_CLASS)
+    {
+        panic!("TTY lock order rejected by the validator: {err:?}");
+    }
+
     for i in 0..MAX_TTYS {
         *TTY_BACKINGS[i].lock() = KWeak::new();
         *TTY_SLAVE_OPENS[i].lock() = KWeak::new();
@@ -355,63 +324,4 @@ pub(crate) fn mark_slot_free(slot: usize) {
 #[inline]
 pub(crate) fn active_slots_bitmap() -> usize {
     TTY_ALLOC_BITMAP.load_word(0)
-}
-
-// ---------------------------------------------------------------------------
-// RAII guard for TTY_OUTPUT_INFLIGHT
-// ---------------------------------------------------------------------------
-
-/// RAII guard that decrements `TTY_OUTPUT_INFLIGHT[slot]` on drop.
-///
-/// Prevents counter drift if a future code change introduces an early return
-/// or panic between the increment and decrement.  Matches the discipline
-/// already established by [`super::PostLockWork`] for deferred actions.
-///
-/// # Usage
-///
-/// ```ignore
-/// let _inflight = InflightGuard::new(slot, byte_count);
-/// write_driver_unlocked(driver_id, &buf[..byte_count]);
-/// // guard drops here — counter decremented automatically
-/// ```
-pub(crate) struct InflightGuard {
-    slot: usize,
-    count: u32,
-}
-
-impl InflightGuard {
-    /// Increment `TTY_OUTPUT_INFLIGHT[slot]` by `count` and return a guard
-    /// that will decrement it on drop.
-    #[inline]
-    pub(crate) fn new(slot: usize, count: usize) -> Self {
-        let count = count as u32;
-        TTY_OUTPUT_INFLIGHT[slot].fetch_add(count, Ordering::Release);
-        Self { slot, count }
-    }
-}
-
-impl Drop for InflightGuard {
-    #[inline]
-    fn drop(&mut self) {
-        // Underflow-safe decrement: a concurrent flush (`store(0)` in the
-        // signal-flush / TCOFLUSH / TCIOFLUSH paths) can zero the counter
-        // between this guard's `fetch_add` and this `Drop`. A plain
-        // `fetch_sub` would then wrap the `AtomicU32` to ~u32::MAX, wedging
-        // `wait_output_idle()` (tcdrain / TCSETSW / TCSETSF) and poisoning
-        // `output_queued_bytes()` (TIOCOUTQ). Saturate at 0 instead — the
-        // flush already accounts for the discarded output.
-        let mut cur = TTY_OUTPUT_INFLIGHT[self.slot].load(Ordering::Relaxed);
-        loop {
-            let next = cur.saturating_sub(self.count);
-            match TTY_OUTPUT_INFLIGHT[self.slot].compare_exchange_weak(
-                cur,
-                next,
-                Ordering::Release,
-                Ordering::Relaxed,
-            ) {
-                Ok(_) => break,
-                Err(observed) => cur = observed,
-            }
-        }
-    }
 }

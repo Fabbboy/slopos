@@ -380,7 +380,7 @@ pub fn kdiag_dump_lock_graph(phase: &str) {
 
     crate::klog_info!(
         "LOCKDEP[{}]: {} classes={}/{} ({}%) edges={}/{} chains={}/{} \
-         held_max={}/{} held_drops={} chain_hit={} chain_miss={} \
+         declared={}/{} held_max={}/{} held_drops={} chain_hit={} chain_miss={} \
          violations={} reports={} collisions={} mode={:?}",
         phase,
         state,
@@ -391,6 +391,8 @@ pub fn kdiag_dump_lock_graph(phase: &str) {
         lg::MAX_EDGES,
         chains,
         lg::MAX_CHAINS,
+        lg::declared_observed(),
+        lg::declared_count(),
         lg::held_depth_max(),
         lg::MAX_HELD_LOCKS,
         lg::held_depth_overflows(),

@@ -294,6 +294,7 @@ pub fn test_isig_vintr_echoes_caret() -> TestResult {
     let mut ld = LineDisc::new();
     // Default termios already has ECHO|ECHOCTL set.
     let batch = ld.receive_buf(&[InputEvent::normal(0x03)]);
+    let echo = EchoScratch::drain(&mut ld);
 
     match batch.signal {
         Some((sig, _)) if sig == SIGINT => {}
@@ -303,10 +304,10 @@ pub fn test_isig_vintr_echoes_caret() -> TestResult {
         }
     }
 
-    if batch.echo.as_slice() != b"^C" {
+    if echo.as_slice() != b"^C" {
         klog_info!(
             "TTY_TEST: BUG - expected echo \"^C\", got {:?}",
-            batch.echo.as_slice()
+            echo.as_slice()
         );
         return TestResult::Fail;
     }
@@ -318,10 +319,11 @@ pub fn test_isig_vintr_echoes_caret() -> TestResult {
 pub fn test_isig_vquit_vsusp_echo_caret() -> TestResult {
     let mut ld = LineDisc::new();
     let quit = ld.receive_buf(&[InputEvent::normal(0x1C)]);
-    if quit.echo.as_slice() != b"^\\" {
+    let quit_echo = EchoScratch::drain(&mut ld);
+    if quit_echo.as_slice() != b"^\\" {
         klog_info!(
             "TTY_TEST: BUG - VQUIT expected echo \"^\\\", got {:?}",
-            quit.echo.as_slice()
+            quit_echo.as_slice()
         );
         return TestResult::Fail;
     }
@@ -335,10 +337,11 @@ pub fn test_isig_vquit_vsusp_echo_caret() -> TestResult {
 
     let mut ld = LineDisc::new();
     let susp = ld.receive_buf(&[InputEvent::normal(0x1A)]);
-    if susp.echo.as_slice() != b"^Z" {
+    let susp_echo = EchoScratch::drain(&mut ld);
+    if susp_echo.as_slice() != b"^Z" {
         klog_info!(
             "TTY_TEST: BUG - VSUSP expected echo \"^Z\", got {:?}",
-            susp.echo.as_slice()
+            susp_echo.as_slice()
         );
         return TestResult::Fail;
     }
@@ -373,10 +376,11 @@ pub fn test_isig_no_echo_without_echoctl() -> TestResult {
         }
     }
 
-    if !batch.echo.is_empty() {
+    let echo = EchoScratch::drain(&mut ld);
+    if !echo.is_empty() {
         klog_info!(
             "TTY_TEST: BUG - no caret should echo without ECHOCTL, got {:?}",
-            batch.echo.as_slice()
+            echo.as_slice()
         );
         return TestResult::Fail;
     }
@@ -400,10 +404,11 @@ pub fn test_isig_caret_echo_with_noflsh() -> TestResult {
     let batch = ld.receive_buf(&[InputEvent::normal(0x03)]);
 
     // Caret still echoes.
-    if batch.echo.as_slice() != b"^C" {
+    let echo = EchoScratch::drain(&mut ld);
+    if echo.as_slice() != b"^C" {
         klog_info!(
             "TTY_TEST: BUG - NOFLSH should not suppress caret echo, got {:?}",
-            batch.echo.as_slice()
+            echo.as_slice()
         );
         return TestResult::Fail;
     }

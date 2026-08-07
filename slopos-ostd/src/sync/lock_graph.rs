@@ -808,6 +808,33 @@ static GRAPH_OVERFLOW: AtomicBool = AtomicBool::new(false);
 /// One-shot guard so the four latch sites emit exactly one line per boot.
 static OVERFLOW_REPORTED: AtomicBool = AtomicBool::new(false);
 
+/// Small because a declaration is a deliberate claim about two named classes,
+/// not a per-site annotation.
+const MAX_DECLARED_ORDERS: usize = 32;
+
+/// One asserted `outer -> inner` ordering.
+struct DeclaredOrder {
+    outer: AtomicU16,
+    inner: AtomicU16,
+    /// Set once an acquisition took the pair in the declared direction.  A
+    /// declaration never observed is a dead declaration.
+    observed: AtomicBool,
+}
+
+impl DeclaredOrder {
+    const fn empty() -> Self {
+        Self {
+            outer: AtomicU16::new(NONE_IDX),
+            inner: AtomicU16::new(NONE_IDX),
+            observed: AtomicBool::new(false),
+        }
+    }
+}
+
+static DECLARED: [DeclaredOrder; MAX_DECLARED_ORDERS] =
+    [const { DeclaredOrder::empty() }; MAX_DECLARED_ORDERS];
+static DECLARED_COUNT: AtomicU16 = AtomicU16::new(0);
+
 /// Ordering violations reported since boot (cycle + nesting + recursion +
 /// epoch). Bumped in the `#[cold]` report paths, so it costs nothing on
 /// acquire.
@@ -1199,6 +1226,7 @@ pub unsafe fn push_lock_ex(
                 if let Err(()) = add_edge(top_class, class_idx) {
                     latch_overflow("edge pool full", lock_addr, class.level());
                 }
+                mark_declared_observed(top_class, class_idx);
             }
         }
         if let Err(()) = chain_insert(new_chain_key) {
@@ -1465,6 +1493,119 @@ pub fn chain_count() -> usize {
 #[inline]
 pub fn graph_overflowed() -> bool {
     GRAPH_OVERFLOW.load(Ordering::Relaxed)
+}
+
+/// Why a [`declare_order`] call did not take.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DeclareOrderError {
+    /// The graph already reaches `outer` from `inner`. The edge is **not**
+    /// inserted: doing so would make the graph cyclic and drown every later
+    /// finding in derived noise.
+    Contradicted,
+    /// The class table, the edge pool, or the declaration table is full.
+    Full,
+}
+
+/// Assert that `outer` is always acquired before `inner`.
+///
+/// Without a declaration, the polarity of a class pair is whatever ran first
+/// this boot: a subsystem exercised in only one direction on a headless boot
+/// teaches the graph that direction, and the opposite one is not reported
+/// until something happens to execute it. Declaring the intended order at
+/// init makes the first wrong-way acquisition a finding on **every** boot.
+///
+/// Both classes are registered eagerly at subclass 0, so the declaration is
+/// live before either lock is first taken.
+///
+/// Returns `Ok(())` when tracking is disabled or the graph has overflowed —
+/// there is nothing to declare against.
+pub fn declare_order(
+    outer: &'static LockClassKey,
+    inner: &'static LockClassKey,
+) -> Result<(), DeclareOrderError> {
+    if !TRACKING_ENABLED.load(Ordering::Relaxed)
+        || GRAPH_OVERFLOW.load(Ordering::Relaxed)
+        || matches!(lockdep_mode(), LockdepMode::Off)
+    {
+        return Ok(());
+    }
+
+    let (Some(outer_idx), Some(inner_idx)) = (register_class(outer, 0), register_class(inner, 0))
+    else {
+        return Err(DeclareOrderError::Full);
+    };
+    if outer_idx == inner_idx {
+        return Err(DeclareOrderError::Contradicted);
+    }
+
+    // Idempotent: a re-initialised subsystem declares the same pair again,
+    // and burning a slot per call would fill the table and turn a correct
+    // declaration into a failure.
+    let already = DECLARED_COUNT.load(Ordering::Relaxed) as usize;
+    for entry in &DECLARED[..already.min(MAX_DECLARED_ORDERS)] {
+        if entry.outer.load(Ordering::Relaxed) == outer_idx
+            && entry.inner.load(Ordering::Acquire) == inner_idx
+        {
+            return Ok(());
+        }
+    }
+
+    if path_exists(inner_idx, outer_idx) {
+        crate::klog_warn!(
+            "LOCKDEP: declared order contradicted\n  declared   {} ({}) -> {} ({})\n  but the graph already reaches the declared outer class from the inner one",
+            outer.name(),
+            outer.site(),
+            inner.name(),
+            inner.site(),
+        );
+        print_path(inner_idx, outer_idx);
+        return Err(DeclareOrderError::Contradicted);
+    }
+
+    let slot = DECLARED_COUNT.fetch_add(1, Ordering::Relaxed) as usize;
+    if slot >= MAX_DECLARED_ORDERS {
+        return Err(DeclareOrderError::Full);
+    }
+    DECLARED[slot].outer.store(outer_idx, Ordering::Relaxed);
+    DECLARED[slot].inner.store(inner_idx, Ordering::Release);
+
+    if add_edge(outer_idx, inner_idx).is_err() {
+        return Err(DeclareOrderError::Full);
+    }
+    Ok(())
+}
+
+/// Called from the learn path only, so it costs nothing once the chain cache
+/// is warm.
+#[inline]
+fn mark_declared_observed(outer_idx: u16, inner_idx: u16) {
+    let n = (DECLARED_COUNT.load(Ordering::Relaxed) as usize).min(MAX_DECLARED_ORDERS);
+    for entry in &DECLARED[..n] {
+        if entry.inner.load(Ordering::Acquire) == inner_idx
+            && entry.outer.load(Ordering::Relaxed) == outer_idx
+        {
+            entry.observed.store(true, Ordering::Relaxed);
+            return;
+        }
+    }
+}
+
+/// Orderings declared via [`declare_order`].
+#[inline]
+pub fn declared_count() -> usize {
+    (DECLARED_COUNT.load(Ordering::Relaxed) as usize).min(MAX_DECLARED_ORDERS)
+}
+
+/// Declared orderings some acquisition has actually exercised.
+///
+/// A gate reads this against [`declared_count`]: a declaration nothing ever
+/// takes is describing code that no longer runs.
+#[inline]
+pub fn declared_observed() -> usize {
+    DECLARED[..declared_count()]
+        .iter()
+        .filter(|e| e.observed.load(Ordering::Relaxed))
+        .count()
 }
 
 /// `true` once the overflow warning has been emitted.

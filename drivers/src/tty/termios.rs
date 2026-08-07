@@ -1,8 +1,5 @@
 //! TTY termios configuration — get/set termios, window size, line discipline,
 //! output drain, and control ioctls (TCFLSH, TCSBRK, TCXONC).
-//!
-//! decomposition: extracted from `mod.rs` to group all terminal
-//! attribute management into a single focused module.
 
 use core::sync::atomic::Ordering;
 
@@ -14,12 +11,13 @@ use slopos_kernel_services::driver_runtime::{
     is_pgrp_orphaned, scheduler_is_enabled, signal_process_group,
 };
 
-use super::driver::{TtyDriverKind, write_driver_unlocked};
+use super::driver::TtyDriverKind;
 use super::ldisc::LdiscKind;
 use super::lifecycle::hangup;
+use super::output::{self, WriteNesting};
 use super::pty;
 use super::session::ForegroundCheck;
-use super::table::{TTY_OUTPUT_INFLIGHT, TTY_SLOTS, TTY_WRITE_LOCKS, tty_output_event};
+use super::table::{TTY_OUTPUT_INFLIGHT, TTY_SLOTS, tty_output_event};
 use super::{MAX_TTYS, PostLockWork, TtyError, TtyFlags, TtyIndex};
 use slopos_ostd::sync::{BUS, WaitAbort};
 
@@ -591,6 +589,20 @@ pub fn set_winsize(idx: TtyIndex, ws: &UserWinsize) -> Result<(), TtyError> {
 ///     async/interrupt-driven drivers must implement `flush_output()` on
 ///     `TtyDriverKind` and call it here.
 ///   - `TCIOFLUSH` (2): flush both.
+/// Drop everything queued for output on `slot`: the discipline's staged echo
+/// and the in-flight accounting that tracks it.  Echo that has not reached a
+/// driver is still pending output; leaving it staged would put discarded bytes
+/// on the wire at the next flush point.
+fn discard_pending_output(slot: usize) {
+    {
+        let mut guard = TTY_SLOTS[slot].lock();
+        if let Some(tty) = guard.as_mut() {
+            tty.ldisc.echo_discard();
+        }
+    }
+    TTY_OUTPUT_INFLIGHT[slot].store(0, Ordering::Release);
+}
+
 pub fn tcflush(idx: TtyIndex, queue: i32) -> Result<(), TtyError> {
     use slopos_abi::syscall::{TCIFLUSH, TCIOFLUSH, TCOFLUSH};
     let slot = idx.0 as usize;
@@ -624,12 +636,11 @@ pub fn tcflush(idx: TtyIndex, queue: i32) -> Result<(), TtyError> {
                 }
             }
             if queue == TCIOFLUSH {
-                TTY_OUTPUT_INFLIGHT[slot].store(0, Ordering::Release);
+                discard_pending_output(slot);
             }
         }
         TCOFLUSH => {
-            // See doc comment above — only resets the in-flight counter.
-            TTY_OUTPUT_INFLIGHT[slot].store(0, Ordering::Release);
+            discard_pending_output(slot);
         }
         _ => return Err(TtyError::InvalidArg),
     }
@@ -749,8 +760,7 @@ pub fn tcxonc(idx: TtyIndex, action: i32) -> Result<(), TtyError> {
                 let stop = tty.ldisc.termios().c_cc[CcIndex::Vstop.as_usize()];
                 (tty.driver.id(), stop)
             };
-            let _write_guard = TTY_WRITE_LOCKS[slot].lock();
-            write_driver_unlocked(driver_id, &[stop_byte]);
+            output::write_processed(slot, driver_id, &[stop_byte], WriteNesting::Toplevel);
             Ok(())
         }
         TCION => {
@@ -760,8 +770,7 @@ pub fn tcxonc(idx: TtyIndex, action: i32) -> Result<(), TtyError> {
                 let start = tty.ldisc.termios().c_cc[CcIndex::Vstart.as_usize()];
                 (tty.driver.id(), start)
             };
-            let _write_guard = TTY_WRITE_LOCKS[slot].lock();
-            write_driver_unlocked(driver_id, &[start_byte]);
+            output::write_processed(slot, driver_id, &[start_byte], WriteNesting::Toplevel);
             Ok(())
         }
         _ => Err(TtyError::InvalidArg),

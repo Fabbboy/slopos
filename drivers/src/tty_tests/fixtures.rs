@@ -30,6 +30,7 @@ pub(super) use crate::tty::driver::{
     DriverId, InputEvent, InputStatus, SerialConsoleDriver, TtyDriverKind, VConsoleDriver,
 };
 pub(super) use crate::tty::ldisc::{InputAction, LdiscKind, LineDisc, OutputAction, RawDisc};
+pub(super) use crate::tty::output::WriteNesting;
 pub(super) use crate::tty::session::ForegroundCheck;
 pub(super) use crate::tty::session::TtySession;
 pub(super) use crate::tty::table::{TTY_OUTPUT_INFLIGHT, TTY_SLOTS};
@@ -43,6 +44,32 @@ pub(super) use slopos_abi::file_ops::FileBacking;
 pub(super) use slopos_ostd::task::{ProcessGroup, Session};
 
 pub(super) use slopos_ostd::{KArc, KWeak};
+
+/// Scratch for reading a discipline's staged echo back out.
+///
+/// Echo lives in the discipline's queue rather than in the `receive_buf`
+/// return value, because the TTY core has to emit it after the slot guard
+/// drops.  A test asserts on it by draining it the same way the emitter does.
+pub(super) struct EchoScratch {
+    buf: [u8; 512],
+    len: usize,
+}
+
+impl EchoScratch {
+    pub(super) fn drain(ld: &mut LineDisc) -> Self {
+        let mut buf = [0u8; 512];
+        let len = ld.echo_take(&mut buf);
+        Self { buf, len }
+    }
+
+    pub(super) fn as_slice(&self) -> &[u8] {
+        &self.buf[..self.len]
+    }
+
+    pub(super) fn is_empty(&self) -> bool {
+        self.len == 0
+    }
+}
 
 /// Holds strong session + foreground-group refs alive so that a `TtySession`'s
 /// weak links resolve for the duration of a test. A `TtySession` only stores

@@ -2669,9 +2669,13 @@ pub fn test_receive_buf_accumulates_echo() -> TestResult {
         InputEvent::normal(b'b'),
         InputEvent::normal(b'c'),
     ];
-    let result = ld.receive_buf(&events);
-    if result.echo.is_empty() {
-        klog_info!("TTY_TEST: BUG - receive_buf should accumulate echo bytes");
+    let _ = ld.receive_buf(&events);
+    let echo = EchoScratch::drain(&mut ld);
+    if echo.as_slice() != b"abc" {
+        klog_info!(
+            "TTY_TEST: BUG - receive_buf should stage echo bytes, got {:?}",
+            echo.as_slice()
+        );
         return TestResult::Fail;
     }
     TestResult::Pass
@@ -2831,7 +2835,9 @@ pub fn test_p21_postlockwork_signal_makes_nonempty() -> TestResult {
     let scope = SessionScope::new(42, 42);
     let mut plw = PostLockWork::new();
     plw.add_signal(scope.pgrp.clone(), slopos_abi::signal::SIGINT);
-    if plw.is_empty() {
+    let empty = plw.is_empty();
+    plw.discard();
+    if empty {
         klog_info!("TTY_TEST: BUG - PostLockWork with signal should not be empty");
         return TestResult::Fail;
     }
@@ -2849,10 +2855,11 @@ pub fn test_p21_postlockwork_execute_completes() -> TestResult {
     TestResult::Pass
 }
 
-pub fn test_p21_postlockwork_ixoff_byte() -> TestResult {
+pub fn test_p21_postlockwork_echo_flush_request() -> TestResult {
     let mut plw = PostLockWork::new();
-    plw.add_ixoff_byte(DriverId::SerialConsole, 0x13, 0);
+    plw.request_echo_flush(0, WriteNesting::Toplevel);
     if plw.is_empty() {
+        plw.discard();
         return TestResult::Fail;
     }
     plw.execute();
@@ -2863,6 +2870,7 @@ pub fn test_p21_postlockwork_packet_event() -> TestResult {
     let mut plw = PostLockWork::new();
     plw.add_packet_event(TtyIndex(0), slopos_abi::syscall::TIOCPKT_STOP);
     if plw.is_empty() {
+        plw.discard();
         return TestResult::Fail;
     }
     plw.execute();
@@ -2874,6 +2882,7 @@ pub fn test_p21_postlockwork_packet_event_merge() -> TestResult {
     plw.add_packet_event(TtyIndex(0), slopos_abi::syscall::TIOCPKT_STOP);
     plw.add_packet_event(TtyIndex(0), slopos_abi::syscall::TIOCPKT_FLUSHREAD);
     if plw.is_empty() {
+        plw.discard();
         return TestResult::Fail;
     }
     plw.execute();
@@ -2885,6 +2894,7 @@ pub fn test_p21_postlockwork_wake_helpers() -> TestResult {
     plw.wake_output_and_poll(5);
     plw.wake_input_and_poll(3);
     if plw.is_empty() {
+        plw.discard();
         return TestResult::Fail;
     }
     plw.execute();
@@ -3387,7 +3397,7 @@ slopos_testing::stest!(
     suite = tty_test_ldisc_regression
 );
 slopos_testing::stest!(
-    name = test_p21_postlockwork_ixoff_byte,
+    name = test_p21_postlockwork_echo_flush_request,
     suite = tty_test_ldisc_regression
 );
 slopos_testing::stest!(

@@ -1,19 +1,14 @@
 //! TTY I/O paths — read, write, push_input, hardware drain, data queries,
 //! and the idle-loop input callback.
 //!
-//! decomposition: extracted from `mod.rs` to isolate the hot data
-//! paths (read/write/push_input) from termios configuration, lifecycle
-//! management, job control, and poll readiness.
-//!
 //! # Echo serialisation
 //!
-//! Unlike Linux, which uses a separate echo buffer + deferred processing,
-//! SlopOS accumulates echo bytes into `EchoBuf` during `receive_buf()` and
-//! writes them atomically under `TTY_WRITE_LOCKS[slot]`.  User writes also
-//! acquire the same per-slot write lock, so echo and user output never
-//! interleave at the byte level.  A separate echo buffer is therefore not
-//! needed for correctness — the write lock provides the POSIX §11.1.9
-//! serialisation guarantee.
+//! The line discipline stages echo in its own queue while the slot lock is
+//! held; `super::output` drains it under `TTY_WRITE_LOCKS[slot]` once the
+//! guard drops.  User writes take the same per-slot write lock, so echo and
+//! user output never interleave at the byte level — that is the POSIX
+//! §11.1.9 serialisation guarantee.  The staging step is what keeps the write
+//! lock outside every slot lock, which a driver write for a PTY end requires.
 
 use core::ffi::c_int;
 use core::sync::atomic::Ordering;
@@ -21,21 +16,16 @@ use core::sync::atomic::Ordering;
 use slopos_abi::signal::{SIGTTIN, SIGTTOU};
 use slopos_abi::syscall::LocalFlags;
 
+use super::driver::{InputEvent, TtyDriverKind};
+use super::ldisc::{self, BatchResult, OutputAction};
+use super::output::{self, WriteNesting};
+use super::session::ForegroundCheck;
+use super::table::{TTY_OUTPUT_INFLIGHT, TTY_SLOTS, tty_input_event, tty_output_event};
+use super::{MAX_TTYS, PacketEvents, PostLockWork, Tty, TtyError, TtyFlags, TtyIndex};
 use slopos_kernel_services::driver_runtime::{
     current_task_id, current_task_pgid, current_task_sid, is_current_signal_blocked_or_ignored,
     is_pgrp_orphaned, register_idle_wakeup_callback, scheduler_is_enabled, signal_process_group,
 };
-use slopos_ostd::KArc;
-use slopos_ostd::task::ProcessGroup;
-
-use super::driver::{InputEvent, TtyDriverKind, write_driver_unlocked};
-use super::ldisc::{self, BatchResult, OutputAction};
-use super::session::ForegroundCheck;
-use super::table::{
-    InflightGuard, TTY_OUTPUT_INFLIGHT, TTY_SLOTS, TTY_WRITE_LOCKS, TTY_WRITE_PEER_SUBCLASS,
-    tty_input_event, tty_output_event,
-};
-use super::{MAX_TTYS, PacketEvents, PostLockWork, Tty, TtyError, TtyFlags, TtyIndex};
 use slopos_ostd::sync::{BUS, WaitAbort};
 
 // ---------------------------------------------------------------------------
@@ -45,14 +35,12 @@ use slopos_ostd::sync::{BUS, WaitAbort};
 impl Tty {
     /// Drain pending hardware input into the line discipline.
     ///
-    /// Called while holding the per-TTY lock.  Feeds bytes from the hardware
-    /// driver through `ldisc.input_char()`, echoing output via the driver.
-    ///
-    /// Returns a deferred signal `(foreground group, signum)` if signal
-    /// generation was triggered (e.g. Ctrl+C on serial) and a live foreground
-    /// group exists.  The caller **must** deliver the signal **after** dropping
-    /// the per-TTY lock to avoid deadlock.
-    pub(crate) fn drain_hw_input_locked(&mut self) -> Option<(KArc<ProcessGroup>, u8)> {
+    /// Called while holding the per-TTY lock.  Whatever the discipline echoes,
+    /// plus any IXOFF byte its water mark demands, is staged in the
+    /// discipline's queue and registered with `deferred` for emission once the
+    /// caller drops the slot guard.  A generated signal goes the same way, so
+    /// no caller can drop one.
+    pub(crate) fn drain_hw_input_locked(&mut self, deferred: &mut PostLockWork) {
         let mut scratch = [0u8; 64];
         let count = self.driver.drain_input(&mut scratch);
         let mut events = [InputEvent::normal(0); 64];
@@ -68,20 +56,27 @@ impl Tty {
         }
 
         let batch = self.ldisc.receive_buf(&events[..count]);
-        let xoff = self.ldisc.ixoff_check_xoff();
-        if !batch.echo.is_empty() || xoff.is_some() {
-            let slot = self.index.0 as usize;
-            let _write_guard = TTY_WRITE_LOCKS[slot].lock();
-            if !batch.echo.is_empty() {
-                self.driver.write_output(batch.echo.as_slice());
-            }
-            if let Some(xoff_byte) = xoff {
-                self.driver.write_output(&[xoff_byte]);
+        if let Some(xoff) = self.ldisc.ixoff_check_xoff() {
+            self.ldisc.echo_stage(&[xoff]);
+        }
+        self.queue_echo_flush(deferred, WriteNesting::Toplevel);
+
+        if let Some((sig, _)) = batch.signal {
+            if let Some(pg) = self.session.fg_pgrp_handle() {
+                deferred.add_signal(pg, sig);
             }
         }
-        batch
-            .signal
-            .and_then(|(sig, _)| self.session.fg_pgrp_handle().map(|pg| (pg, sig)))
+    }
+
+    /// Register any staged echo for emission after the slot guard drops.
+    ///
+    /// Registering inside the producer is what makes the flush unforgettable:
+    /// no call site has to know whether a drain or a push echoed.
+    #[inline]
+    pub(crate) fn queue_echo_flush(&self, deferred: &mut PostLockWork, nesting: WriteNesting) {
+        if !self.ldisc.echo_is_empty() {
+            deferred.request_echo_flush(self.index.0 as usize, nesting);
+        }
     }
 }
 
@@ -99,30 +94,30 @@ pub use super::pty::{
 // ---------------------------------------------------------------------------
 
 /// Push a raw input byte to a specific TTY.
-///
-/// Called from interrupt context (keyboard ISR) or from `drain_hw_input_locked`.
-/// Feeds the byte through the line discipline and handles echo/signal actions.
 pub fn push_input<E: Into<InputEvent>>(idx: TtyIndex, event: E) {
     let event = event.into();
     push_input_batch(idx, core::slice::from_ref(&event));
 }
 
+/// Feed input to a TTY with no TTY write lock held — the keyboard ISR, a test.
 pub fn push_input_batch(idx: TtyIndex, events: &[InputEvent]) {
+    push_input_batch_nested(idx, events, WriteNesting::Toplevel);
+}
+
+/// [`push_input_batch`] for a PTY master write, which reaches the slave with
+/// the master's own write lock still held — so the slave's echo of these bytes
+/// is the acquisition [`WriteNesting::PeerNested`] names.
+pub(crate) fn push_input_batch_nested(idx: TtyIndex, events: &[InputEvent], nesting: WriteNesting) {
     let slot = idx.0 as usize;
     if slot >= MAX_TTYS || events.is_empty() {
         return;
     }
 
     let mut deferred = PostLockWork::new();
-    // Echo payload is routed via a heap-allocated 256-byte buffer so
-    // the 256 B inline array never lands in this function's stack
-    // frame. `KBox::zeroed()` is only invoked in the `if echo_len > 0`
-    // arm below — the no-echo hot path stays allocation-free.
-    let mut route: Option<(super::driver::DriverId, slopos_ostd::KBox<[u8; 256]>, usize)> = None;
     // ISIG output-flush request (NOFLSH clear): the slave's undelivered
     // output lives in the peer master's read buffer; it is discarded after
     // the slave lock drops (peer lock ordering) and before the caret echo
-    // is routed, so `^C` lands in an empty buffer and is immediately
+    // is emitted, so `^C` lands in an empty buffer and is immediately
     // visible even when a flooding foreground job had filled it. The held
     // backing pins the master's slot until the flush lands.
     let mut signal_flush_master: Option<slopos_ostd::KArc<super::backing::TtyBacking>> = None;
@@ -141,7 +136,7 @@ pub fn push_input_batch(idx: TtyIndex, events: &[InputEvent]) {
 
         let batch: BatchResult = tty.ldisc.receive_buf(events);
         if let Some(xoff) = tty.ldisc.ixoff_check_xoff() {
-            deferred.add_ixoff_byte(tty.driver.id(), xoff, slot);
+            tty.ldisc.echo_stage(&[xoff]);
         }
 
         if was_stopped && !tty.ldisc.is_stopped() {
@@ -161,16 +156,7 @@ pub fn push_input_batch(idx: TtyIndex, events: &[InputEvent]) {
             tty.flags.insert(TtyFlags::THROTTLED);
         }
 
-        let echo_len = batch.echo.len();
-        if echo_len > 0 {
-            if let Ok(mut out) = slopos_ostd::KBox::<[u8; 256]>::zeroed() {
-                out[..echo_len].copy_from_slice(batch.echo.as_slice());
-                route = Some((tty.driver.id(), out, echo_len));
-            }
-            // Echo drop on alloc failure is not a correctness issue:
-            // the next input tick re-echoes if the terminal is still
-            // live.
-        }
+        tty.queue_echo_flush(&mut deferred, nesting);
 
         if let Some((sig, flush)) = batch.signal {
             if let Some(pg) = tty.session.fg_pgrp_handle() {
@@ -223,22 +209,6 @@ pub fn push_input_batch(idx: TtyIndex, events: &[InputEvent]) {
             // that the queue is empty.
             deferred.wake_output_and_poll(master_slot);
         }
-    }
-
-    if let Some((driver_id, out, out_len)) = route {
-        let settle = super::driver::defers_console_work(&driver_id);
-        // The peer's instance, taken inside the master's: see
-        // `TTY_WRITE_PEER_SUBCLASS`.
-        let _write_guard = TTY_WRITE_LOCKS[slot].lock_nested(TTY_WRITE_PEER_SUBCLASS);
-        let _inflight = InflightGuard::new(slot, out_len);
-        write_driver_unlocked(driver_id, &out[..out_len]);
-        drop(_inflight);
-        drop(_write_guard);
-        drop(out);
-        if settle {
-            super::driver::settle_console_output();
-        }
-        BUS.publish(tty_output_event(slot));
     }
 
     if wake {
@@ -372,7 +342,8 @@ fn try_read_packet_mode(
     buf[0] = slopos_abi::syscall::TIOCPKT_DATA;
     let slot = tty.index.0 as usize;
     if let Some(xon) = tty.ldisc.ixoff_check_xon() {
-        deferred.add_ixoff_byte(tty.driver.id(), xon, slot);
+        tty.ldisc.echo_stage(&[xon]);
+        tty.queue_echo_flush(deferred, WriteNesting::Toplevel);
     }
     let _ = drain_and_recover(tty, slot, was_full, deferred);
     Some(Ok(1 + got))
@@ -466,9 +437,7 @@ pub fn read_with_attach(
                 }
             }
 
-            if let Some((pg, sig)) = tty.drain_hw_input_locked() {
-                deferred.add_signal(pg, sig);
-            }
+            tty.drain_hw_input_locked(&mut deferred);
 
             if tty.flags.contains(TtyFlags::PACKET_MODE) && total == 0 {
                 if let Some(result) = try_read_packet_mode(tty, buf, &mut deferred) {
@@ -482,7 +451,8 @@ pub fn read_with_attach(
                 total = total.saturating_add(got);
                 if got > 0 {
                     if let Some(xon) = tty.ldisc.ixoff_check_xon() {
-                        deferred.add_ixoff_byte(tty.driver.id(), xon, slot);
+                        tty.ldisc.echo_stage(&[xon]);
+                        tty.queue_echo_flush(&mut deferred, WriteNesting::Toplevel);
                     }
                     let _ = drain_and_recover(tty, slot, was_full, &mut deferred);
                 }
@@ -537,12 +507,15 @@ pub fn read_with_attach(
                 }
             }
 
-            if tty.flags.contains(TtyFlags::PEER_CLOSED) && !tty.ldisc.has_data() {
-                return Ok(0);
-            }
-
-            if tty.flags.contains(TtyFlags::HUNG_UP) && !tty.ldisc.has_data() {
-                return Ok(0);
+            // Peer close and hangup end the read without discarding what this
+            // iteration collected, nor the signal, XON byte and wakes it
+            // staged — those still have to land.
+            if (tty.flags.contains(TtyFlags::PEER_CLOSED) || tty.flags.contains(TtyFlags::HUNG_UP))
+                && !tty.ldisc.has_data()
+            {
+                drop(guard);
+                deferred.execute();
+                return Ok(total);
             }
 
             if !is_canonical && !should_wait && total > 0 {
@@ -562,29 +535,32 @@ pub fn read_with_attach(
             };
         }
 
+        // `wait_core` releases the queue's own lock before calling this, so
+        // it may drain the hardware and emit the echo — per invocation, never
+        // accumulated across them. Single fall-through so no early exit can
+        // skip `wd.execute()`.
         let wait_condition = || {
             let mut wd = PostLockWork::new();
             let result = {
                 let mut guard = TTY_SLOTS[slot].lock();
                 match guard.as_mut() {
                     Some(tty) => {
-                        if enforce_access {
-                            if matches!(
+                        let denied = enforce_access
+                            && matches!(
                                 tty.session.check_read(caller_pgid, caller_sid),
                                 ForegroundCheck::BackgroundRead
                                     | ForegroundCheck::DeniedCrossSession
-                            ) {
-                                return false;
-                            }
+                            );
+                        if denied {
+                            false
+                        } else {
+                            tty.drain_hw_input_locked(&mut wd);
+                            tty.flags.contains(TtyFlags::HUNG_UP)
+                                || tty.flags.contains(TtyFlags::PEER_CLOSED)
+                                || tty.ldisc.has_data()
                         }
-                        if let Some((pg, signum)) = tty.drain_hw_input_locked() {
-                            wd.add_signal(pg, signum);
-                        }
-                        tty.flags.contains(TtyFlags::HUNG_UP)
-                            || tty.flags.contains(TtyFlags::PEER_CLOSED)
-                            || tty.ldisc.has_data()
                     }
-                    None => return true,
+                    None => true,
                 }
             };
             wd.execute();
@@ -975,22 +951,13 @@ pub fn write(idx: TtyIndex, data: &[u8], nonblock: bool) -> Result<usize, TtyErr
                 }
             }
         }
-        // Per-TTY lock dropped — acquire per-slot write lock to serialize
-        // with concurrent echo output (POSIX §11.1.9 echo serialization).
-        let settle = super::driver::defers_console_work(&driver_id);
-        let driver_written = {
-            let _write_guard = TTY_WRITE_LOCKS[slot].lock();
-            let _inflight = InflightGuard::new(slot, out_len);
-            let written = write_driver_unlocked(driver_id, &out_buf[..out_len]);
-            written
-        };
-        if settle {
-            super::driver::settle_console_output();
-        }
+        // Slot lock dropped: the write lock is outside it, and the emission
+        // serialises against concurrent echo (POSIX §11.1.9).
+        let driver_written =
+            output::write_processed(slot, driver_id, &out_buf[..out_len], WriteNesting::Toplevel);
         if driver_written < out_len {
             break;
         }
-        BUS.publish(tty_output_event(slot));
         if admission == WriteAdmission::PriorityControlOnly {
             return Ok(pos);
         }
@@ -1016,9 +983,7 @@ pub fn has_data(idx: TtyIndex) -> bool {
     let result = {
         let mut guard = TTY_SLOTS[slot].lock();
         if let Some(tty) = guard.as_mut() {
-            if let Some((pg, sig)) = tty.drain_hw_input_locked() {
-                deferred.add_signal(pg, sig);
-            }
+            tty.drain_hw_input_locked(&mut deferred);
             tty.ldisc.has_data()
         } else {
             return false;
@@ -1042,9 +1007,7 @@ pub fn bytes_available(idx: TtyIndex) -> Result<usize, TtyError> {
     let count = {
         let mut guard = TTY_SLOTS[slot].lock();
         if let Some(tty) = guard.as_mut() {
-            if let Some((pg, sig)) = tty.drain_hw_input_locked() {
-                deferred.add_signal(pg, sig);
-            }
+            tty.drain_hw_input_locked(&mut deferred);
             tty.ldisc.bytes_available()
         } else {
             return Err(TtyError::NotAllocated);
@@ -1103,9 +1066,7 @@ fn input_available_cb() -> c_int {
         let has_data = {
             let mut guard = TTY_SLOTS[i].lock();
             if let Some(tty) = guard.as_mut() {
-                if let Some((pg, sig)) = tty.drain_hw_input_locked() {
-                    deferred.add_signal(pg, sig);
-                }
+                tty.drain_hw_input_locked(&mut deferred);
                 tty.ldisc.has_data()
             } else {
                 false

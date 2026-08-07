@@ -11,17 +11,18 @@
 //! Everything here is a `pub use`; no logic lives in this file.
 
 pub use super::lock_graph::{
-    ACQ_NONE, ACQ_RECURSIVE, ClassInfo, LO_BLESSED, LO_DUPOK, LOCK_LEVEL_ALLOCATOR,
-    LOCK_LEVEL_EPOCH, LOCK_LEVEL_REGISTRY, LOCK_LEVEL_RESOURCE, LOCK_LEVEL_SCHEDULER,
-    LOCK_LEVEL_UNORDERED, LockClassKey, LockdepMode, MAX_CHAINS, MAX_CLASSES, MAX_EDGES,
-    MAX_HELD_LOCKS, PoisonUnlockFn, REGISTRABLE_CLASSES, chain_count, chain_hits, chain_misses,
-    class_collisions, class_count, class_info, class_slots_leaked, edge_count,
-    enable_lock_tracking, enter_fatal_bypass, fatal_bypassed, graph_overflowed, held_depth_mark,
-    held_depth_max, held_depth_overflows, held_lock_addrs, held_lock_addrs_for_cpu,
-    held_lock_count, held_lock_snapshot, innermost_held_lock, lockdep_mode, overflow_reported,
-    poison_drained, poison_unlock_all_held, poison_unlock_held_above, pop_lock, pop_misses,
-    push_lock, push_lock_ex, report_only_violations, set_lockdep_mode, tracking_enabled,
-    validator_alive, violation_reports, violations_reported,
+    ACQ_NONE, ACQ_RECURSIVE, ClassInfo, DeclareOrderError, LO_BLESSED, LO_DUPOK,
+    LOCK_LEVEL_ALLOCATOR, LOCK_LEVEL_EPOCH, LOCK_LEVEL_REGISTRY, LOCK_LEVEL_RESOURCE,
+    LOCK_LEVEL_SCHEDULER, LOCK_LEVEL_UNORDERED, LockClassKey, LockdepMode, MAX_CHAINS, MAX_CLASSES,
+    MAX_EDGES, MAX_HELD_LOCKS, PoisonUnlockFn, REGISTRABLE_CLASSES, chain_count, chain_hits,
+    chain_misses, class_collisions, class_count, class_info, class_slots_leaked, declare_order,
+    declared_count, declared_observed, edge_count, enable_lock_tracking, enter_fatal_bypass,
+    fatal_bypassed, graph_overflowed, held_depth_mark, held_depth_max, held_depth_overflows,
+    held_lock_addrs, held_lock_addrs_for_cpu, held_lock_count, held_lock_snapshot,
+    innermost_held_lock, lockdep_mode, overflow_reported, poison_drained, poison_unlock_all_held,
+    poison_unlock_held_above, pop_lock, pop_misses, push_lock, push_lock_ex,
+    report_only_violations, set_lockdep_mode, tracking_enabled, validator_alive, violation_reports,
+    violations_reported,
 };
 
 #[cfg(any(test, feature = "test-helpers"))]

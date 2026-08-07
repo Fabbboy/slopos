@@ -5,10 +5,9 @@ use crate::tty::driver::SerialConsoleDriver;
 // TtyDriverKind tests
 // ===========================================================================
 
-/// TtyDriverKind::SerialConsole(SerialConsoleDriver) does not panic on write/drain.
+/// TtyDriverKind::SerialConsole(SerialConsoleDriver) does not panic on drain.
 pub fn test_driver_none_no_panic() -> TestResult {
     let driver = TtyDriverKind::SerialConsole(SerialConsoleDriver);
-    driver.write_output(b"test");
     let mut buf = [0u8; 16];
     let n = driver.drain_input(&mut buf);
     if n != 0 {

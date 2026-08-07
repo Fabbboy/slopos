@@ -138,56 +138,107 @@ pub enum OutputAction {
     Suppress,
 }
 
-const ECHO_BUF_CAP: usize = 256;
+/// Holds one full `VREPRINT` redisplay — a newline plus the whole edit buffer
+/// — with headroom, so a redisplay of a full line is never clipped.
+const ECHO_QUEUE_CAP: usize = EDIT_BUF_SIZE + 512;
 
-pub struct EchoBuf {
-    buf: [u8; ECHO_BUF_CAP],
+/// Bytes the discipline has echoed but not yet handed to a driver.
+///
+/// Echo is produced under the per-TTY slot lock and emitted after it drops,
+/// because a driver write for a PTY end delivers into the peer's slot. A ring
+/// rather than a linear buffer: the emitter takes a bounded chunk at a time,
+/// and a producer may append while it is between chunks.
+#[derive(Zeroable)]
+#[repr(C)]
+pub struct EchoQueue {
+    ring: [u8; ECHO_QUEUE_CAP],
+    /// Index of the next byte to emit.
+    head: usize,
+    /// Bytes staged, starting at `head`.
     len: usize,
+    /// Bytes refused for want of room.  Diagnostic-only: a terminal whose
+    /// echo outruns its own driver has already lost the display.
+    dropped: u32,
+    /// Set while one CPU is draining, so a second cannot interleave chunks.
+    draining: bool,
 }
 
-impl EchoBuf {
-    const fn new() -> Self {
-        Self {
-            buf: [0; ECHO_BUF_CAP],
-            len: 0,
-        }
+impl EchoQueue {
+    #[inline]
+    fn room(&self) -> usize {
+        ECHO_QUEUE_CAP - self.len
     }
 
-    pub fn push(&mut self, byte: u8) -> bool {
-        if self.len < ECHO_BUF_CAP {
-            self.buf[self.len] = byte;
-            self.len += 1;
-            true
-        } else {
-            false
+    /// Append `bytes`, returning how many were accepted.
+    fn extend(&mut self, bytes: &[u8]) -> usize {
+        let n = core::cmp::min(self.room(), bytes.len());
+        for (i, &b) in bytes[..n].iter().enumerate() {
+            self.ring[(self.head + self.len + i) % ECHO_QUEUE_CAP] = b;
         }
-    }
-
-    pub fn extend(&mut self, bytes: &[u8]) -> usize {
-        let remaining = ECHO_BUF_CAP.saturating_sub(self.len);
-        let n = core::cmp::min(remaining, bytes.len());
-        if n > 0 {
-            self.buf[self.len..self.len + n].copy_from_slice(&bytes[..n]);
-            self.len += n;
-        }
+        self.len += n;
+        self.dropped = self.dropped.saturating_add((bytes.len() - n) as u32);
         n
     }
 
-    pub fn as_slice(&self) -> &[u8] {
-        &self.buf[..self.len]
+    #[inline]
+    fn push(&mut self, byte: u8) -> bool {
+        self.extend(&[byte]) == 1
     }
 
-    pub fn len(&self) -> usize {
-        self.len
+    /// Move up to `out.len()` staged bytes into `out`, oldest first.
+    fn take(&mut self, out: &mut [u8]) -> usize {
+        let n = core::cmp::min(out.len(), self.len);
+        for (i, slot) in out[..n].iter_mut().enumerate() {
+            *slot = self.ring[(self.head + i) % ECHO_QUEUE_CAP];
+        }
+        self.head = (self.head + n) % ECHO_QUEUE_CAP;
+        self.len -= n;
+        n
     }
 
-    pub fn is_empty(&self) -> bool {
+    /// Put bytes a short driver write did not accept back at the front.
+    ///
+    /// Prepends rather than rewinding `head`: a producer may have appended
+    /// into the space this chunk vacated while the slot lock was released.
+    fn unread(&mut self, bytes: &[u8]) {
+        let n = core::cmp::min(self.room(), bytes.len());
+        self.dropped = self.dropped.saturating_add((bytes.len() - n) as u32);
+        for &b in bytes[..n].iter().rev() {
+            self.head = (self.head + ECHO_QUEUE_CAP - 1) % ECHO_QUEUE_CAP;
+            self.ring[self.head] = b;
+        }
+        self.len += n;
+    }
+
+    #[inline]
+    fn is_empty(&self) -> bool {
         self.len == 0
+    }
+
+    #[inline]
+    fn discard(&mut self) {
+        self.head = 0;
+        self.len = 0;
+    }
+
+    /// `false` means another CPU is already draining.
+    #[inline]
+    fn claim_drain(&mut self) -> bool {
+        if self.draining {
+            false
+        } else {
+            self.draining = true;
+            true
+        }
+    }
+
+    #[inline]
+    fn release_drain(&mut self) {
+        self.draining = false;
     }
 }
 
 pub struct BatchResult {
-    pub echo: EchoBuf,
     pub signal: Option<(u8, bool)>,
     pub should_wake: bool,
     pub throttle_check: bool,
@@ -196,7 +247,6 @@ pub struct BatchResult {
 impl BatchResult {
     const fn new() -> Self {
         Self {
-            echo: EchoBuf::new(),
             signal: None,
             should_wake: false,
             throttle_check: false,
@@ -427,6 +477,11 @@ pub struct LineDisc {
     /// FLUSHO state — when `true`, output is discarded until toggled off
     /// by another VDISCARD press.  Mirrors Linux's `FLUSHO` c_lflag behavior.
     flushing_output: bool,
+
+    // -- Echo staged for emission --
+    /// Bytes this discipline echoed, waiting for the TTY core to hand them to
+    /// the driver once the slot lock has dropped.
+    echo: EchoQueue,
 }
 
 impl LineDisc {
@@ -748,6 +803,53 @@ impl LineDisc {
         self.no_room = false;
         self.overflow_count = 0;
         self.flushing_output = false;
+        self.echo.discard();
+    }
+
+    // -- Echo staging: the discipline deposits here and never calls a driver --
+
+    /// Stage `bytes` for emission.  Bytes that do not fit are counted as
+    /// dropped: a terminal whose echo outruns its own driver has already lost
+    /// the display, and stalling input to preserve it would be worse.
+    #[inline]
+    pub fn echo_stage(&mut self, bytes: &[u8]) {
+        self.echo.extend(bytes);
+    }
+
+    #[inline]
+    pub fn echo_take(&mut self, out: &mut [u8]) -> usize {
+        self.echo.take(out)
+    }
+
+    #[inline]
+    pub fn echo_unread(&mut self, bytes: &[u8]) {
+        self.echo.unread(bytes);
+    }
+
+    #[inline]
+    pub fn echo_is_empty(&self) -> bool {
+        self.echo.is_empty()
+    }
+
+    #[inline]
+    pub fn echo_discard(&mut self) {
+        self.echo.discard();
+    }
+
+    #[inline]
+    pub fn echo_claim_drain(&mut self) -> bool {
+        self.echo.claim_drain()
+    }
+
+    #[inline]
+    pub fn echo_release_drain(&mut self) {
+        self.echo.release_drain();
+    }
+
+    /// Bytes the echo queue has refused for want of room.
+    #[inline]
+    pub fn echo_dropped(&self) -> u32 {
+        self.echo.dropped
     }
 
     pub fn flush_input(&mut self) {
@@ -1754,28 +1856,31 @@ impl LineDisc {
         self.line_count += 1;
     }
 
-    /// Process a batch of input events, collecting echo output and at most
-    /// one signal.  Stops on the first signal-generating character — if
+    /// Process a batch of input events, staging echo output and capturing at
+    /// most one signal.  Stops on the first signal-generating character — if
     /// multiple signal chars arrive in one batch (rare in practice), only the
     /// first is captured.  This is acceptable because keyboard input rarely
     /// produces multiple signal chars per ISR batch.
+    ///
+    /// Echo goes into this discipline's own queue, not to a driver: the caller
+    /// holds the slot lock, and emission has to wait until it drops.
     pub fn receive_buf(&mut self, events: &[InputEvent]) -> BatchResult {
         let mut result = BatchResult::new();
         for &event in events {
             match self.input_char(event) {
                 InputAction::Echo { buf, len } => {
-                    result.echo.extend(&buf[..len as usize]);
+                    self.echo.extend(&buf[..len as usize]);
                 }
                 InputAction::Bell => {
-                    result.echo.push(0x07);
+                    self.echo.push(0x07);
                 }
                 InputAction::Signal(sig) => {
                     let lflag = self.termios.local_flags();
                     // Linux n_tty parity: when a signal char is typed and
                     // ECHO|ECHOCTL are set, echo its caret form (^C/^\/^Z)
-                    // before the signal is delivered. The TTY core writes
-                    // `result.echo` ahead of dispatching `result.signal`, so
-                    // the caret reaches the terminal first. Break-condition
+                    // before the signal is delivered. The TTY core drains the
+                    // echo queue ahead of dispatching `result.signal`, so the
+                    // caret reaches the terminal first. Break-condition
                     // SIGINTs (InputStatus::Break) carry no keypress, so they
                     // are excluded.
                     if lflag.contains(LocalFlags::ECHO | LocalFlags::ECHOCTL)
@@ -1783,19 +1888,27 @@ impl LineDisc {
                     {
                         let c = event.byte;
                         if c < 0x20 && c != b'\t' && c != b'\n' {
-                            result.echo.extend(&[b'^', c | 0x40]);
+                            self.echo.extend(&[b'^', c | 0x40]);
                         }
                     }
                     result.signal = Some((sig, !lflag.contains(LocalFlags::NOFLSH)));
                     break;
                 }
                 InputAction::ReprintLine => {
-                    result.echo.push(b'\n');
-                    result.echo.extend(self.edit_content());
+                    self.echo.push(b'\n');
+                    // Split borrow: the redisplay reads a field of the same
+                    // struct as the queue it feeds.
+                    let Self {
+                        edit_buf,
+                        edit_len,
+                        echo,
+                        ..
+                    } = self;
+                    echo.extend(&edit_buf[..*edit_len]);
                 }
                 InputAction::KillLineEcho { columns } => {
                     for _ in 0..columns {
-                        result.echo.extend(&[0x08, 0x20, 0x08]);
+                        self.echo.extend(&[0x08, 0x20, 0x08]);
                     }
                 }
                 InputAction::None => {}
@@ -2099,6 +2212,72 @@ impl LdiscKind {
         match self {
             LdiscKind::NTty(inner) => inner.receive_buf(events),
             LdiscKind::Raw(inner) => inner.receive_buf(events),
+        }
+    }
+
+    // -- Echo staging.  `RawDisc` never echoes, so its arms are inert. --
+
+    #[inline]
+    pub fn echo_stage(&mut self, bytes: &[u8]) {
+        match self {
+            LdiscKind::NTty(inner) => inner.echo_stage(bytes),
+            LdiscKind::Raw(_) => {}
+        }
+    }
+
+    #[inline]
+    pub fn echo_take(&mut self, out: &mut [u8]) -> usize {
+        match self {
+            LdiscKind::NTty(inner) => inner.echo_take(out),
+            LdiscKind::Raw(_) => 0,
+        }
+    }
+
+    #[inline]
+    pub fn echo_unread(&mut self, bytes: &[u8]) {
+        match self {
+            LdiscKind::NTty(inner) => inner.echo_unread(bytes),
+            LdiscKind::Raw(_) => {}
+        }
+    }
+
+    #[inline]
+    pub fn echo_is_empty(&self) -> bool {
+        match self {
+            LdiscKind::NTty(inner) => inner.echo_is_empty(),
+            LdiscKind::Raw(_) => true,
+        }
+    }
+
+    #[inline]
+    pub fn echo_discard(&mut self) {
+        match self {
+            LdiscKind::NTty(inner) => inner.echo_discard(),
+            LdiscKind::Raw(_) => {}
+        }
+    }
+
+    #[inline]
+    pub fn echo_claim_drain(&mut self) -> bool {
+        match self {
+            LdiscKind::NTty(inner) => inner.echo_claim_drain(),
+            LdiscKind::Raw(_) => false,
+        }
+    }
+
+    #[inline]
+    pub fn echo_release_drain(&mut self) {
+        match self {
+            LdiscKind::NTty(inner) => inner.echo_release_drain(),
+            LdiscKind::Raw(_) => {}
+        }
+    }
+
+    #[inline]
+    pub fn echo_dropped(&self) -> u32 {
+        match self {
+            LdiscKind::NTty(inner) => inner.echo_dropped(),
+            LdiscKind::Raw(_) => 0,
         }
     }
 

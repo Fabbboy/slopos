@@ -1,7 +1,5 @@
-//! SlopOS TTY subsystem — per-terminal TTY abstraction.
-//!
-//! This module replaces the old global singleton TTY with a proper per-terminal
-//! architecture modeled after Linux's `tty_struct` + `n_tty` line discipline.
+//! SlopOS TTY subsystem — per-terminal TTY abstraction, modelled after
+//! Linux's `tty_struct` + `n_tty` line discipline.
 //!
 //! # Architecture
 //!
@@ -39,7 +37,6 @@
 //! - [`lifecycle`] — hangup, vhangup, active TTY routing, init
 //! - [`poll`] — poll readiness, poll sleep, compositor focus
 
-// Existing sub-modules (unchanged)
 pub mod backing;
 pub mod driver;
 pub mod ldisc;
@@ -55,20 +52,21 @@ pub mod vtparser {
     pub use slopos_vt::{Direction, EraseMode, SgrAttr, VtAction, VtParser};
 }
 
-// Decomposed sub-modules
 pub(crate) mod io;
 mod job_control;
 mod lifecycle;
+pub(crate) mod output;
 mod poll;
 mod termios;
 
 use bitflags::bitflags;
 use slopos_abi::syscall::UserWinsize;
 
-use self::driver::{DriverId, TtyDriverKind, write_driver_unlocked};
+use self::driver::TtyDriverKind;
 use self::ldisc::LdiscKind;
+use self::output::WriteNesting;
 use self::session::TtySession;
-use self::table::{TTY_WRITE_LOCKS, TTY_WRITE_PEER_SUBCLASS, tty_input_event, tty_output_event};
+use self::table::{tty_input_event, tty_output_event};
 use slopos_ostd::KArc;
 use slopos_ostd::sync::BUS;
 use slopos_ostd::task::ProcessGroup;
@@ -147,28 +145,26 @@ impl Drop for Tty {
 // PostLockWork — RAII helper for deferred actions after lock release
 // ---------------------------------------------------------------------------
 
-/// Accumulates work that must be performed **after** dropping the per-TTY
-/// lock, to avoid deadlock or lock-ordering violations.
-///
-/// The repeated pattern of "capture signal/IXOFF byte/packet event inside
-/// lock → deliver after lock drop" appears ~8 times in `io.rs` alone and
-/// in `poll.rs`, `lifecycle.rs`, and `termios.rs`.  `PostLockWork` replaces
-/// all manual deferred-delivery boilerplate with a single RAII struct:
+/// Accumulates work that must run **after** the per-TTY lock drops, because it
+/// emits output, delivers a signal, or wakes a waiter.
 ///
 /// ```ignore
 /// let mut deferred = PostLockWork::new();
 /// {
 ///     let mut guard = TTY_SLOTS[slot].lock();
 ///     // ... work under lock, accumulate into `deferred` ...
-///     deferred.add_signal(pgid, signum);
 /// }
-/// deferred.execute();  // delivers everything outside the lock
+/// deferred.execute();
 /// ```
 pub(crate) struct PostLockWork {
     /// Foreground group to signal, pinned strongly so the group's identity
     /// survives across the off-lock delivery scan (no reused-pid window).
     signal: Option<(KArc<ProcessGroup>, u8)>,
-    ixoff_byte: Option<(DriverId, u8, usize)>,
+    /// Slots whose line discipline has echo staged for emission.
+    echo_flush: u32,
+    /// Nesting the staged emissions run under.  One value covers the mask:
+    /// a peer-nested batch reaches exactly one slot, the peer's.
+    echo_nesting: WriteNesting,
     packet_event: Option<(TtyIndex, u8)>,
     wake_input: u32,
     wake_output: u32,
@@ -177,12 +173,18 @@ pub(crate) struct PostLockWork {
     executed: bool,
 }
 
+const _: () = assert!(
+    MAX_TTYS <= u32::BITS as usize,
+    "PostLockWork tracks slots in a u32 bitmask"
+);
+
 impl PostLockWork {
     /// Create a new empty deferred work accumulator.
     pub(crate) const fn new() -> Self {
         Self {
             signal: None,
-            ixoff_byte: None,
+            echo_flush: 0,
+            echo_nesting: WriteNesting::Toplevel,
             packet_event: None,
             wake_input: 0,
             wake_output: 0,
@@ -198,7 +200,7 @@ impl PostLockWork {
     )]
     pub(crate) fn is_empty(&self) -> bool {
         self.signal.is_none()
-            && self.ixoff_byte.is_none()
+            && self.echo_flush == 0
             && self.packet_event.is_none()
             && self.wake_input == 0
             && self.wake_output == 0
@@ -211,9 +213,19 @@ impl PostLockWork {
         self.signal = Some((pgrp, signum));
     }
 
+    /// Ask for `slot`'s staged echo to be emitted once its guard drops.
+    ///
+    /// Only ever the slot whose own guard the caller holds: flushing a peer
+    /// would take its write lock while holding this one's, the inverse of the
+    /// single legal nesting direction.
     #[inline]
-    pub(crate) fn add_ixoff_byte(&mut self, driver_id: DriverId, byte: u8, slot: usize) {
-        self.ixoff_byte = Some((driver_id, byte, slot));
+    pub(crate) fn request_echo_flush(&mut self, slot: usize, nesting: WriteNesting) {
+        if slot < MAX_TTYS {
+            self.echo_flush |= 1 << slot;
+            if nesting == WriteNesting::PeerNested {
+                self.echo_nesting = nesting;
+            }
+        }
     }
 
     /// Queue a packet event to deliver to a slave's paired master.
@@ -264,6 +276,19 @@ impl PostLockWork {
         self.wake_poll_slot(slot);
     }
 
+    /// Throw the accumulated work away without running it, for a test that
+    /// built an accumulator only to inspect it.  Dropping staged work silently
+    /// is the failure mode the `Drop` assertion exists to catch, so production
+    /// code has no reason to reach for this.
+    #[cfg(feature = "test-hooks")]
+    pub(crate) fn discard(mut self) {
+        #[cfg(debug_assertions)]
+        {
+            self.executed = true;
+        }
+        let _ = &mut self;
+    }
+
     pub(crate) fn execute(mut self) {
         // `mut` is needed in debug builds for the assertion tracking below.
         // In release the cfg block is stripped, making `mut` appear unused.
@@ -274,18 +299,17 @@ impl PostLockWork {
         }
         use slopos_kernel_services::driver_runtime::signal_process_group;
 
-        if let Some((pgrp, sig)) = self.signal.take() {
-            let _ = signal_process_group(pgrp.id(), sig);
+        // Echo first: a signal character echoes its caret form, and `^C` has
+        // to reach the terminal before the SIGINT it announces.
+        let mut bits = self.echo_flush;
+        while bits != 0 {
+            let slot = bits.trailing_zeros() as usize;
+            output::flush_echo(slot, self.echo_nesting);
+            bits &= bits - 1;
         }
 
-        if let Some((driver_id, byte, slot)) = self.ixoff_byte.take() {
-            // The peer's instance, taken inside the master's: a PTY master
-            // write reaches here through `pty::master_write` ->
-            // `push_input_batch`, still holding the master's write lock.
-            // See `TTY_WRITE_PEER_SUBCLASS`.
-            let _wg = (slot < MAX_TTYS)
-                .then(|| TTY_WRITE_LOCKS[slot].lock_nested(TTY_WRITE_PEER_SUBCLASS));
-            write_driver_unlocked(driver_id, &[byte]);
+        if let Some((pgrp, sig)) = self.signal.take() {
+            let _ = signal_process_group(pgrp.id(), sig);
         }
 
         if let Some((slave_idx, event_bits)) = self.packet_event {
@@ -316,7 +340,7 @@ impl PostLockWork {
     }
 }
 
-#[cfg(all(debug_assertions, not(feature = "test-hooks")))]
+#[cfg(debug_assertions)]
 impl Drop for PostLockWork {
     fn drop(&mut self) {
         debug_assert!(

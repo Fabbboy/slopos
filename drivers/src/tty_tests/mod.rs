@@ -64,6 +64,7 @@ pub(crate) fn drain_tty_nonblock(idx: TtyIndex) {
 
 pub mod fixtures;
 pub mod test_driver;
+pub mod test_echo_defer;
 pub mod test_integration;
 pub mod test_ioctls;
 pub mod test_ioctls_ext;
@@ -87,6 +88,7 @@ pub mod test_vconsole;
 pub mod test_vtparser;
 
 pub use test_driver::*;
+pub use test_echo_defer::*;
 pub use test_integration::*;
 pub use test_ioctls::*;
 pub use test_ioctls_ext::*;
@@ -652,6 +654,10 @@ slopos_testing::stest!(name = test_imaxbel_buffer_not_full_normal, suite = tty);
 slopos_testing::stest!(name = test_imaxbel_raw_mode_buffer_full, suite = tty);
 slopos_testing::stest!(name = test_ixoff_high_water_sends_xoff, suite = tty);
 slopos_testing::stest!(name = test_pty_ixoff_nests_peer_write_lock, suite = tty);
+slopos_testing::stest!(name = test_drain_echo_defers_write_lock, suite = tty);
+slopos_testing::stest!(name = test_drain_ixoff_defers_peer_write, suite = tty);
+slopos_testing::stest!(name = test_echo_queue_ring_semantics, suite = tty);
+slopos_testing::stest!(name = test_tty_lock_order_is_declared, suite = tty);
 slopos_testing::stest!(name = test_ixoff_low_water_sends_xon, suite = tty);
 slopos_testing::stest!(name = test_ixoff_not_set_no_flow_control, suite = tty);
 slopos_testing::stest!(name = test_cread_flag_value, suite = tty);
@@ -1084,7 +1090,7 @@ slopos_testing::stest!(
     suite = tty
 );
 slopos_testing::stest!(name = test_p21_postlockwork_execute_completes, suite = tty);
-slopos_testing::stest!(name = test_p21_postlockwork_ixoff_byte, suite = tty);
+slopos_testing::stest!(name = test_p21_postlockwork_echo_flush_request, suite = tty);
 slopos_testing::stest!(name = test_p21_postlockwork_packet_event, suite = tty);
 slopos_testing::stest!(name = test_p21_postlockwork_packet_event_merge, suite = tty);
 slopos_testing::stest!(name = test_p21_postlockwork_wake_helpers, suite = tty);
