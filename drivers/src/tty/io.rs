@@ -55,12 +55,6 @@ impl Tty {
     pub(crate) fn drain_hw_input_locked(&mut self) -> Option<(KArc<ProcessGroup>, u8)> {
         let mut scratch = [0u8; 64];
         let count = self.driver.drain_input(&mut scratch);
-        // SysRq (Ctrl+T) on the serial path: runs under the per-TTY lock, so
-        // only mark it pending here — `PostLockWork::execute` fires the dump
-        // after every lock is dropped.
-        if scratch[..count].contains(&SYSRQ_DUMP_BYTE) {
-            super::sysrq_mark_pending();
-        }
         let mut events = [InputEvent::normal(0); 64];
         // Feed raw hardware bytes directly to the line discipline.
         // The ldisc handles all input mapping via c_iflag processing:
@@ -113,23 +107,10 @@ pub fn push_input<E: Into<InputEvent>>(idx: TtyIndex, event: E) {
     push_input_batch(idx, core::slice::from_ref(&event));
 }
 
-/// SysRq trigger byte: Ctrl+T. Checked on the raw input path *before* ldisc
-/// processing, so the dump works even when every userland input consumer is
-/// wedged (the exact situation it exists to diagnose).
-const SYSRQ_DUMP_BYTE: u8 = 0x14;
-
 pub fn push_input_batch(idx: TtyIndex, events: &[InputEvent]) {
     let slot = idx.0 as usize;
     if slot >= MAX_TTYS || events.is_empty() {
         return;
-    }
-
-    if events.iter().any(|e| e.byte == SYSRQ_DUMP_BYTE) {
-        // Mark only — `push_input_batch` runs in keyboard-ISR context, where
-        // the dump's task-pool walk (manager lock + scratch alloc + klog
-        // storm) must not run. The idle-loop input callback fires it from
-        // task context within a tick.
-        super::sysrq_mark_pending();
     }
 
     let mut deferred = PostLockWork::new();
@@ -1112,13 +1093,6 @@ pub fn output_queued_bytes(idx: TtyIndex) -> Result<usize, TtyError> {
 /// Properly captures and delivers deferred signals from
 /// `drain_hw_input_locked()` instead of silently discarding them.
 fn input_available_cb() -> c_int {
-    // SysRq (Ctrl+T) marked on an input path: fire the task dump here — the
-    // idle-loop callback runs in task context with no TTY locks held, the
-    // one place every input path (ISR, serial drain, PTY) can safely defer
-    // the pool walk to.
-    if super::SYSRQ_PENDING.swap(false, core::sync::atomic::Ordering::AcqRel) {
-        slopos_kernel_services::driver_runtime::debug_dump_tasks();
-    }
     let mut any_data = false;
     let mut bits = super::table::active_slots_bitmap();
     while bits != 0 {

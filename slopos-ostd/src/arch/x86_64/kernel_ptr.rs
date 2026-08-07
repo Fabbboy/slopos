@@ -74,9 +74,9 @@ pub const fn is_canonical_kernel(addr: u64, align: u64, extra: u64) -> bool {
 // ---------------------------------------------------------------------------
 // Fault-recoverable kernel probe read (Linux `probe_kernel_read` analogue).
 //
-// Diagnostic walkers (the NMI-watchdog backtrace, the SysRq parked-task
-// stack walk, panic-time frame chases) must read kernel addresses they
-// cannot prove are mapped — a canonical address can still be a stack
+// Diagnostic walkers (the NMI-watchdog backtrace, panic-time frame chases)
+// must read kernel addresses they cannot prove are mapped — a canonical
+// address can still be a stack
 // guard page or a freed region. The probe routes the load through a
 // known RIP range; the page-fault handler recognises a kernel-mode
 // fault inside `__ostd_probe_read_start..end` and redirects RIP to

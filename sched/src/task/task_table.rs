@@ -5,11 +5,11 @@ use core::sync::atomic::{AtomicBool, Ordering};
 use slopos_ostd::lock_class;
 
 use slopos_ostd::handle::Handle;
+use slopos_ostd::klog_debug;
 use slopos_ostd::string::bytes_as_str;
 use slopos_ostd::sync::{KernelSync, LOCK_LEVEL_REGISTRY, SpinLock};
 use slopos_ostd::task::{task_existence_park, task_existence_release};
 use slopos_ostd::{KArc, KVec, KWeak};
-use slopos_ostd::{klog_debug, klog_info};
 
 use super::{INVALID_TASK_ID, MAX_TASKS, Task, TaskStatus, task_put};
 use crate::exit_info::ExitInfo;
@@ -954,55 +954,4 @@ pub fn task_drain_test_reports(task_id: u32) -> KVec<crate::test_reports::TestRe
         None => return KVec::new(),
     };
     ring.drain().unwrap_or_else(|_| KVec::new())
-}
-
-pub fn debug_dump_tasks_klog() {
-    klog_info!("SYSRQ: ---- task dump ----");
-    task_for_each_active(|guard| dump_one_task(guard));
-    klog_info!("SYSRQ: ---- end task dump ----");
-}
-
-fn dump_one_task(t: &Task) {
-    let reason = t.load_block_reason();
-    let placement = t.sched_placement();
-    let on_cpu = t.on_cpu();
-    let last_run = t.last_run_timestamp();
-    klog_info!(
-        "SYSRQ: task {:>3} '{}' status={:?} reason={:?} placement={:?} on_cpu={} pid={} pgid={} sid={} last_run={}",
-        t.task_id,
-        bytes_as_str(&t.name),
-        t.status(),
-        reason,
-        placement,
-        on_cpu,
-        t.process_id,
-        t.pgid(),
-        t.sid(),
-        last_run,
-    );
-    if t.status() == TaskStatus::Blocked {
-        let (ctx_rip, ctx_rsp) = t.switch_ctx_rip_rsp();
-        let ctx_rbp = t.switch_ctx_rbp();
-        klog_info!(
-            "SYSRQ:   parked at rip=0x{:x} rsp=0x{:x} rbp=0x{:x}",
-            ctx_rip,
-            ctx_rsp,
-            ctx_rbp
-        );
-        if ctx_rbp != 0 {
-            let mut entries: [slopos_ostd::stacktrace::StacktraceEntry; 12] =
-                [slopos_ostd::stacktrace::StacktraceEntry {
-                    frame_pointer: 0,
-                    return_address: 0,
-                }; 12];
-            let captured = slopos_ostd::stacktrace::stacktrace_capture_from(
-                ctx_rbp,
-                entries.as_mut_ptr(),
-                entries.len() as core::ffi::c_int,
-            );
-            for entry in entries.iter().take(captured.max(0) as usize) {
-                klog_info!("SYSRQ:   frame rip=0x{:x}", entry.return_address);
-            }
-        }
-    }
 }

@@ -42,7 +42,6 @@ slopos_service_core::define_service! {
         is_current_signal_blocked_or_ignored(signum: u8) -> bool;
         is_pgrp_orphaned(pgid: u32, sid: u32) -> bool;
         has_pending_signal() -> bool;
-        debug_dump_tasks();
 
         irq_init();
         irq_set_route(irq_line: u8, gsi: u32);
