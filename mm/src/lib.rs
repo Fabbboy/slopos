@@ -8,6 +8,7 @@ pub mod elf;
 pub mod error;
 pub mod hhdm;
 pub mod io_mem_mapper_shim;
+pub mod kconsole;
 pub mod kernel_mappings;
 pub mod kernel_meta;
 pub mod memfd;

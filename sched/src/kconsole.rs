@@ -31,6 +31,49 @@ slopos_ostd::kcommand! {
     run = run_blocked,
 }
 
+slopos_ostd::kcommand! {
+    name = sched,
+    key = b's',
+    help = "scheduler counters, per-CPU and total",
+    flags = KCMD_INFORMATIONAL,
+    run = run_sched,
+}
+
+fn run_sched(kc: &mut KConsole<'_>) {
+    let stats = crate::lifecycle::get_scheduler_stats();
+    let tasks = crate::task::get_task_stats();
+    kline!(
+        kc,
+        "sched: switches={} yields={} ready={} schedule_calls={}",
+        stats.context_switches,
+        stats.yields,
+        stats.ready_tasks,
+        stats.schedule_calls
+    );
+    kline!(
+        kc,
+        "tasks: created={} active={} switches={}",
+        tasks.total_tasks,
+        tasks.active_tasks,
+        tasks.context_switches
+    );
+    // Bounded by CPU count, so this command cannot itself become the storm the
+    // line budget exists to stop.
+    for cpu in 0..slopos_ostd::cpu::x86_64::pcr::get_cpu_count() {
+        let Some(per) = crate::lifecycle::get_percpu_scheduler_stats(cpu) else {
+            continue;
+        };
+        kline!(
+            kc,
+            "  cpu {}: switches={} preemptions={} ready={}",
+            cpu,
+            per.switches,
+            per.preemptions,
+            per.ready_tasks
+        );
+    }
+}
+
 fn run_tasks(kc: &mut KConsole<'_>) {
     dump(kc, false);
 }
