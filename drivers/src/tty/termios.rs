@@ -118,11 +118,18 @@ pub fn get_termios(idx: TtyIndex) -> Result<UserTermios, TtyError> {
 ///   - The TTY is hung up (`tty.flags.contains(TtyFlags::HUNG_UP) == true`).  Hangup discards all
 ///     pending output, so the drain is vacuously complete.
 ///   - The slot has been deallocated (`None`).  Same reasoning.
-///   - BOTH of these hold simultaneously:
-///     1. `TTY_OUTPUT_INFLIGHT[slot] == 0` — no `write()` is between
+///   - ALL of these hold simultaneously:
+///     1. The discipline has no staged echo — nothing is queued for a driver
+///        that has not reached one.
+///     2. `TTY_OUTPUT_INFLIGHT[slot] == 0` — no `write()` is between
 ///        ldisc processing and driver transmission.
-///     2. `!tty.driver.output_pending()` — the driver backend has no
+///     3. `!tty.driver.output_pending()` — the driver backend has no
 ///        un-transmitted bytes in its hardware FIFO.
+///
+/// Staged echo has no drainer of its own — whichever CPU stages it flushes it,
+/// and a flush that lost the drain claim leaves the queue for the next producer
+/// — so this drives the flush itself rather than waiting on work nobody is
+/// committed to doing.
 ///
 /// ## Edge-case behavior
 ///
@@ -159,63 +166,58 @@ fn wait_output_idle(idx: TtyIndex) -> Result<(), TtyError> {
         }
     }
 
-    // Fast path: if nothing is in-flight and driver has no pending output,
-    // return immediately without touching the wait queue.
-    if TTY_OUTPUT_INFLIGHT[slot].load(Ordering::Acquire) == 0 {
-        let guard = TTY_SLOTS[slot].lock();
-        if let Some(tty) = guard.as_ref() {
-            if tty.flags.contains(TtyFlags::HUNG_UP) || !tty.driver.output_pending() {
+    if scheduler_is_enabled() != 0 {
+        loop {
+            // Subscribed before the flush, so the event the flush publishes
+            // cannot land in the gap between flushing and parking.
+            let waiter = BUS.subscribe(tty_output_event(slot));
+            output::flush_echo(slot, WriteNesting::Toplevel);
+            match waiter.wait_event_interruptible(|| output_settled(slot)) {
+                Ok(()) | Err(WaitAbort::Timeout) => {}
+                // No blocking surface at all — nothing can make progress on
+                // this task's behalf, so the drain is as complete as it gets.
+                Err(WaitAbort::NoRuntime) => return Ok(()),
+                Err(WaitAbort::Interrupted) => return Err(TtyError::Restart),
+                // Never Restart for a dying task: the killed bit is not
+                // deliverable, so the syscall would restart forever.
+                Err(WaitAbort::Killed) => return Err(TtyError::SignalInterrupt),
+            }
+            if output_settled(slot) {
                 return Ok(());
             }
-        } else {
-            return Ok(()); // slot gone — drain vacuously satisfied
         }
     }
 
-    // Slow path: wait until drain completes.
-    if scheduler_is_enabled() != 0 {
-        match BUS
-            .subscribe(tty_output_event(slot))
-            .wait_event_interruptible(|| {
-                if TTY_OUTPUT_INFLIGHT[slot].load(Ordering::Acquire) != 0 {
-                    return false;
-                }
-                let guard = TTY_SLOTS[slot].lock();
-                match guard.as_ref() {
-                    Some(tty) => {
-                        tty.flags.contains(TtyFlags::HUNG_UP) || !tty.driver.output_pending()
-                    }
-                    None => true, // slot gone — drain vacuously satisfied
-                }
-            }) {
-            Ok(()) | Err(WaitAbort::NoRuntime) => {}
-            Err(WaitAbort::Interrupted) => return Err(TtyError::Restart),
-            // Never Restart for a dying task: the killed bit is not
-            // deliverable, so the syscall would restart forever.
-            Err(WaitAbort::Killed) => return Err(TtyError::SignalInterrupt),
-            Err(WaitAbort::Timeout) => {}
+    // Pre-scheduler fallback: busy-poll (very early boot only).
+    loop {
+        output::flush_echo(slot, WriteNesting::Toplevel);
+        if output_settled(slot) {
+            return Ok(());
         }
-    } else {
-        // Pre-scheduler fallback: busy-poll (very early boot only).
-        loop {
-            if TTY_OUTPUT_INFLIGHT[slot].load(Ordering::Acquire) == 0 {
-                let guard = TTY_SLOTS[slot].lock();
-                match guard.as_ref() {
-                    Some(tty)
-                        if tty.flags.contains(TtyFlags::HUNG_UP)
-                            || !tty.driver.output_pending() =>
-                    {
-                        break;
-                    }
-                    None => break,
-                    _ => {}
-                }
-            }
-            core::hint::spin_loop();
-        }
+        core::hint::spin_loop();
     }
+}
 
-    Ok(())
+/// Whether every byte this TTY owes a driver has reached one.
+///
+/// Three places hold output, and a drain that skipped any of them would report
+/// complete while bytes were still queued: the discipline's staged echo, the
+/// in-flight count covering bytes between the queue and the driver, and the
+/// driver's own backlog. A vanished slot settles vacuously, as does a hangup —
+/// hangup discards pending output.
+///
+/// The staged count and the in-flight count are read in one critical section
+/// because a byte moves between them under this very lock. Sampling either one
+/// outside it would let a flush that is mid-hand-off show both as empty, and
+/// report a drain complete with the byte on another CPU's stack.
+fn output_settled(slot: usize) -> bool {
+    let guard = TTY_SLOTS[slot].lock();
+    let drained_locally = match guard.as_ref() {
+        Some(tty) if tty.flags.contains(TtyFlags::HUNG_UP) => return true,
+        Some(tty) => tty.ldisc.echo_staged() == 0 && !tty.driver.output_pending(),
+        None => return true,
+    };
+    drained_locally && TTY_OUTPUT_INFLIGHT[slot].load(Ordering::Acquire) == 0
 }
 
 /// Internal helper that applies termios changes with optional drain and
@@ -375,14 +377,13 @@ pub fn is_output_idle(idx: TtyIndex) -> Result<bool, TtyError> {
     if slot >= MAX_TTYS {
         return Err(TtyError::InvalidIndex);
     }
-    if TTY_OUTPUT_INFLIGHT[slot].load(Ordering::Acquire) != 0 {
-        return Ok(false);
+    {
+        let guard = TTY_SLOTS[slot].lock();
+        if guard.as_ref().is_none() {
+            return Err(TtyError::NotAllocated);
+        }
     }
-    let guard = TTY_SLOTS[slot].lock();
-    match guard.as_ref() {
-        Some(tty) => Ok(tty.flags.contains(TtyFlags::HUNG_UP) || !tty.driver.output_pending()),
-        None => Err(TtyError::NotAllocated),
-    }
+    Ok(output_settled(slot))
 }
 
 // ---------------------------------------------------------------------------
@@ -593,11 +594,24 @@ pub fn set_winsize(idx: TtyIndex, ws: &UserWinsize) -> Result<(), TtyError> {
 /// and the in-flight accounting that tracks it.  Echo that has not reached a
 /// driver is still pending output; leaving it staged would put discarded bytes
 /// on the wire at the next flush point.
+///
+/// The IXOFF stop is re-armed rather than simply dropped with the rest: it is
+/// the one staged byte whose loss the peer cannot recover from. The stop
+/// latches when it is generated, so discarding it silently would leave the peer
+/// never told to stop and — the latch still set — never told to resume either.
+/// An output flush leaves the input queue alone, so it is still over the water
+/// mark and the next check re-sends the stop.
+///
+/// Zeroing the in-flight count also discards bytes a concurrent emission still
+/// owns, so while that emission runs the drain queries under-report this slot.
+/// `TCOFLUSH` is a discard: the caller asked for pending output to stop
+/// existing, and a drain racing one gets whatever the flush left behind.
 fn discard_pending_output(slot: usize) {
     {
         let mut guard = TTY_SLOTS[slot].lock();
         if let Some(tty) = guard.as_mut() {
             tty.ldisc.echo_discard();
+            tty.ldisc.ixoff_rearm();
         }
     }
     TTY_OUTPUT_INFLIGHT[slot].store(0, Ordering::Release);

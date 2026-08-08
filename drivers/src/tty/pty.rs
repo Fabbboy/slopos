@@ -228,6 +228,14 @@ pub fn slave_write(peer: &KWeak<TtyBacking>, data: &[u8]) -> usize {
             return 0;
         }
 
+        // A reader parks only while `has_data()` is false — that is the
+        // predicate its wait re-runs — so the false→true edge is the one wake
+        // that cannot be skipped. `should_wake_reader`'s byte batching sits on
+        // top of it and may only suppress redundant wakes: alone it needs
+        // `WAKEUP_CHARS` bytes, and a lone flow-control byte never reaches
+        // that, so a blocked reader would sleep through it.
+        let was_idle = !master.ldisc.has_data();
+
         let mut count = 0usize;
         for &byte in data {
             if master.ldisc.input_full() {
@@ -237,8 +245,8 @@ pub fn slave_write(peer: &KWeak<TtyBacking>, data: &[u8]) -> usize {
             count += 1;
         }
 
-        // Use batched wake policy.
-        (count, master.ldisc.should_wake_reader())
+        let woke = master.ldisc.should_wake_reader();
+        (count, woke || (was_idle && master.ldisc.has_data()))
     };
 
     if should_wake {

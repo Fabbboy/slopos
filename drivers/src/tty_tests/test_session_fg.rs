@@ -1239,7 +1239,7 @@ pub fn test_hangup_detaches_session() -> TestResult {
             return TestResult::Fail;
         }
     }
-    tty::hangup(idx);
+    let _hangup = HangupScope::hang_up(idx);
     // Post-condition: TTY is hung up and session is detached.
     if !tty::is_hung_up(idx) {
         klog_info!("TTY_TEST: BUG - TTY should be hung up after hangup()");
@@ -1431,7 +1431,7 @@ pub fn test_hangup_no_session_safe() -> TestResult {
     tty::table::tty_table_init();
     let idx = TtyIndex(0);
     // No session attached — hangup should not panic.
-    tty::hangup(idx);
+    let _hangup = HangupScope::hang_up(idx);
     if !tty::is_hung_up(idx) {
         klog_info!("TTY_TEST: BUG - TTY should be hung up even with no session");
         return TestResult::Fail;
@@ -2099,6 +2099,7 @@ pub fn test_vhangup_triggers_hangup() -> TestResult {
     }
 
     // Call vhangup.
+    let _hangup = HangupScope::guard(idx);
     tty::vhangup(idx);
 
     // TTY should now be hung up.

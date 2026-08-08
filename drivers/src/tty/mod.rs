@@ -386,6 +386,8 @@ pub use self::job_control::{
 pub use self::backing::{TtyBacking, TtySlaveOpen, open_tty, pty_open_peer, pty_open_slave};
 
 // lifecycle.rs: hangup, active TTY, init, exclusive mode
+#[cfg(feature = "test-hooks")]
+pub use self::lifecycle::clear_hangup;
 pub use self::lifecycle::{
     active_tty, default_console_tty, get_exclusive, hangup, init, is_hung_up, set_active_tty,
     set_default_console_tty, set_exclusive, switch_active_tty, vhangup,

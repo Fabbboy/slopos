@@ -413,7 +413,7 @@ pub fn test_hangup_read_returns_eof() -> TestResult {
     tty::table::tty_table_init();
     let idx = TtyIndex(0);
     let con = tty::open_tty(idx).unwrap();
-    tty::hangup(idx);
+    let _hangup = HangupScope::hang_up(idx);
 
     let mut out = [0u8; 8];
     // Nonblocking read on hung-up TTY.
@@ -440,7 +440,7 @@ pub fn test_hangup_write_returns_eio() -> TestResult {
     tty::table::tty_table_init();
     let idx = TtyIndex(0);
     let con = tty::open_tty(idx).unwrap();
-    tty::hangup(idx);
+    let _hangup = HangupScope::hang_up(idx);
 
     let result = tty::write(idx, b"hello", false);
 
@@ -464,7 +464,7 @@ pub fn test_hangup_poll_returns_pollhup_pollin() -> TestResult {
     tty::table::tty_table_init();
     let idx = TtyIndex(0);
     drain_tty_nonblock(idx);
-    tty::hangup(idx);
+    let _hangup = HangupScope::hang_up(idx);
 
     let revents = tty::poll_events(
         idx,
@@ -494,7 +494,7 @@ pub fn test_hangup_set_termios_returns_eio() -> TestResult {
     tty::table::tty_table_init();
     let idx = TtyIndex(0);
     let con = tty::open_tty(idx).unwrap();
-    tty::hangup(idx);
+    let _hangup = HangupScope::hang_up(idx);
 
     let termios = tty::get_termios(idx);
     let result = match termios {
@@ -527,7 +527,7 @@ pub fn test_hangup_set_winsize_returns_eio() -> TestResult {
     tty::table::tty_table_init();
     let idx = TtyIndex(0);
     let con = tty::open_tty(idx).unwrap();
-    tty::hangup(idx);
+    let _hangup = HangupScope::hang_up(idx);
 
     let ws = slopos_abi::syscall::UserWinsize {
         ws_row: 25,
@@ -557,7 +557,7 @@ pub fn test_hangup_set_ldisc_returns_eio() -> TestResult {
     tty::table::tty_table_init();
     let idx = TtyIndex(0);
     let con = tty::open_tty(idx).unwrap();
-    tty::hangup(idx);
+    let _hangup = HangupScope::hang_up(idx);
 
     let result = tty::set_ldisc(idx, 0);
 
@@ -584,7 +584,7 @@ pub fn test_hangup_get_fg_pgrp_still_works() -> TestResult {
     let con = tty::open_tty(idx).unwrap();
     // Set a foreground pgrp before hangup.
     let _ = tty::set_foreground_pgrp(idx, 42);
-    tty::hangup(idx);
+    let _hangup = HangupScope::hang_up(idx);
 
     // get_foreground_pgrp should still succeed after hangup.
     let result = tty::get_foreground_pgrp(idx);
@@ -670,7 +670,7 @@ pub fn test_hangup_permanent_eof() -> TestResult {
     tty::table::tty_table_init();
     let idx = TtyIndex(0);
     let con = tty::open_tty(idx).unwrap();
-    tty::hangup(idx);
+    let _hangup = HangupScope::hang_up(idx);
 
     let mut out = [0u8; 8];
     let r1 = tty::read(idx, &mut out, true);
@@ -2127,6 +2127,7 @@ pub fn test_excl_hupcl_exclusive_unallocated_slot() -> TestResult {
 pub fn test_excl_hupcl_hupcl_last_close_triggers_hangup() -> TestResult {
     tty::table::tty_table_init();
     let idx = TtyIndex(0);
+    let _hangup = HangupScope::guard(idx);
     let con = match tty::open_tty(idx) {
         Ok(c) => c,
         Err(_) => return TestResult::Fail,
@@ -2154,6 +2155,7 @@ pub fn test_excl_hupcl_hupcl_last_close_triggers_hangup() -> TestResult {
 pub fn test_excl_hupcl_no_hupcl_last_close_no_hangup() -> TestResult {
     tty::table::tty_table_init();
     let idx = TtyIndex(0);
+    let _hangup = HangupScope::guard(idx);
     let con = match tty::open_tty(idx) {
         Ok(c) => c,
         Err(_) => return TestResult::Fail,
@@ -2241,6 +2243,7 @@ pub fn test_ttyflags_insert_remove_contains() -> TestResult {
 
 pub fn test_mark_hung_up_clears_output_stopped() -> TestResult {
     tty::table::tty_table_init();
+    let _hangup = HangupScope::guard(TtyIndex(0));
     let result = tty::table::with_tty(TtyIndex(0), |tty| {
         tty.flags.insert(TtyFlags::OUTPUT_STOPPED);
         tty.mark_hung_up();

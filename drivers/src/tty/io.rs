@@ -273,6 +273,11 @@ pub(crate) fn background_read_surface(nonblock: bool) -> TtyError {
 /// without this, large slave output stalled until an unrelated master write (a
 /// keystroke) happened to publish the event. Wake those writers on the
 /// full→not-full edge here.
+///
+/// The slave's own output queue parks on the same edge from the other side: a
+/// `tcdrain` on the slave waits for its staged echo to reach the master, and a
+/// full master is exactly what stops that echo leaving. So the edge wakes both
+/// slots, not only this one.
 fn drain_and_recover(
     tty: &mut Tty,
     slot: usize,
@@ -281,9 +286,14 @@ fn drain_and_recover(
 ) -> bool {
     let mut woke_peers = false;
 
-    if master_was_full && matches!(tty.driver, TtyDriverKind::PtyMaster { .. }) {
-        deferred.wake_output_and_poll(slot);
-        woke_peers = true;
+    if master_was_full {
+        if let TtyDriverKind::PtyMaster { peer } = &tty.driver {
+            deferred.wake_output_and_poll(slot);
+            if let Some(slave) = peer.upgrade() {
+                deferred.wake_output_and_poll(slave.index().0 as usize);
+            }
+            woke_peers = true;
+        }
     }
 
     if tty.flags.contains(TtyFlags::THROTTLED)
@@ -1020,28 +1030,36 @@ pub fn bytes_available(idx: TtyIndex) -> Result<usize, TtyError> {
 /// Get the number of bytes queued for output on a TTY.
 ///
 /// Used by the `TIOCOUTQ` ioctl.  Returns the sum of:
-///   1. The per-TTY inflight byte counter (`TTY_OUTPUT_INFLIGHT`) — the
+///   1. Echo the line discipline has staged but not yet handed to the output
+///      boundary — queued for a driver, and not yet at one.
+///   2. The per-TTY inflight byte counter (`TTY_OUTPUT_INFLIGHT`) — the
 ///      exact number of processed bytes currently between ldisc output
 ///      and hardware driver completion.
-///   2. Driver-level pending output (for async/interrupt-driven drivers).
+///   3. Driver-level pending output (for async/interrupt-driven drivers).
 #[must_use]
 pub fn output_queued_bytes(idx: TtyIndex) -> Result<usize, TtyError> {
     let slot = idx.0 as usize;
     if slot >= MAX_TTYS {
         return Err(TtyError::InvalidIndex);
     }
-    let inflight = TTY_OUTPUT_INFLIGHT[slot].load(Ordering::Acquire) as usize;
-    let driver_pending = {
+    // Staged and in-flight are read in one critical section: a byte moves from
+    // one to the other under this lock, so sampling them apart could miss it in
+    // both counts and under-report the queue depth.
+    let (staged, inflight, driver_pending) = {
         let guard = TTY_SLOTS[slot].lock();
         if let Some(tty) = guard.as_ref() {
             // use output_pending_bytes() for finer-grained
             // queue depth reporting (defaults to 0/1 for bool-only drivers).
-            tty.driver.output_pending_bytes()
+            (
+                tty.ldisc.echo_staged(),
+                TTY_OUTPUT_INFLIGHT[slot].load(Ordering::Acquire) as usize,
+                tty.driver.output_pending_bytes(),
+            )
         } else {
             return Err(TtyError::NotAllocated);
         }
     };
-    Ok(inflight + driver_pending)
+    Ok(staged + inflight + driver_pending)
 }
 
 // ---------------------------------------------------------------------------

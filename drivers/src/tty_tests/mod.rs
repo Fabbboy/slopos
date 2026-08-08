@@ -52,6 +52,13 @@ pub(crate) fn boxed_vconsole_state() -> slopos_ostd::KBox<VConsoleState> {
     state
 }
 
+/// Leave `idx`'s input queue empty.
+///
+/// The reads take whatever a reader would see; the flush takes what one would
+/// not. A canonical discipline hands back only complete lines, so an
+/// unterminated tail survives every read and then reappears the moment
+/// something clears `ICANON` — which is how one test's half-typed line becomes
+/// the next test's phantom input.
 pub(crate) fn drain_tty_nonblock(idx: TtyIndex) {
     let mut scratch = [0u8; 64];
     loop {
@@ -60,6 +67,7 @@ pub(crate) fn drain_tty_nonblock(idx: TtyIndex) {
             Ok(_) => continue,
         }
     }
+    let _ = tty::tcflush(idx, slopos_abi::syscall::TCIFLUSH);
 }
 
 pub mod fixtures;
@@ -656,6 +664,11 @@ slopos_testing::stest!(name = test_ixoff_high_water_sends_xoff, suite = tty);
 slopos_testing::stest!(name = test_pty_ixoff_nests_peer_write_lock, suite = tty);
 slopos_testing::stest!(name = test_drain_echo_defers_write_lock, suite = tty);
 slopos_testing::stest!(name = test_drain_ixoff_defers_peer_write, suite = tty);
+slopos_testing::stest!(name = test_tcoflush_rearms_ixoff, suite = tty);
+slopos_testing::stest!(
+    name = test_staged_echo_counts_as_pending_output,
+    suite = tty
+);
 slopos_testing::stest!(name = test_echo_queue_ring_semantics, suite = tty);
 slopos_testing::stest!(name = test_tty_lock_order_is_declared, suite = tty);
 slopos_testing::stest!(name = test_ixoff_low_water_sends_xon, suite = tty);

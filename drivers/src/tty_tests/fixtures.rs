@@ -71,6 +71,51 @@ impl EchoScratch {
     }
 }
 
+/// Returns a TTY to service when it goes out of scope.
+///
+/// A hangup is terminal for the slot, and TTY 0 is the serial console every
+/// later test — and the kernel's own log — writes through. A test that hangs
+/// one up owes the rest of the boot a working console, and owes it on the
+/// failure paths too, which is why it is a guard rather than a closing call.
+///
+/// Termios is restored alongside the flag because a hangup is reachable
+/// through it: a `B0` baud rate hangs the line up, and clearing the flag
+/// without putting the speed back would leave the next `tcsetattr` hanging it
+/// up again.
+pub(super) struct HangupScope {
+    idx: TtyIndex,
+    saved: Option<slopos_abi::syscall::UserTermios>,
+}
+
+impl HangupScope {
+    /// Guard `idx` across a hangup the caller is about to perform itself —
+    /// `vhangup`, a `B0` `tcsetattr`, or `mark_hung_up` reached through the
+    /// slot directly. Construct it *before* the hangup, so the termios it
+    /// snapshots is the healthy one.
+    pub(super) fn guard(idx: TtyIndex) -> Self {
+        Self {
+            idx,
+            saved: tty::get_termios(idx).ok(),
+        }
+    }
+
+    /// Hang `idx` up for the lifetime of the returned guard.
+    pub(super) fn hang_up(idx: TtyIndex) -> Self {
+        let scope = Self::guard(idx);
+        tty::hangup(idx);
+        scope
+    }
+}
+
+impl Drop for HangupScope {
+    fn drop(&mut self) {
+        tty::clear_hangup(self.idx);
+        if let Some(saved) = self.saved {
+            let _ = tty::set_termios(self.idx, &saved);
+        }
+    }
+}
+
 /// Holds strong session + foreground-group refs alive so that a `TtySession`'s
 /// weak links resolve for the duration of a test. A `TtySession` only stores
 /// `KWeak`s; keep the owning `SessionScope` in scope across the assertions.
@@ -129,6 +174,13 @@ pub(super) fn boxed_vconsole_state() -> slopos_ostd::KBox<VConsoleState> {
     state
 }
 
+/// Leave `idx`'s input queue empty.
+///
+/// The reads take whatever a reader would see; the flush takes what one would
+/// not. A canonical discipline hands back only complete lines, so an
+/// unterminated tail survives every read and then reappears the moment
+/// something clears `ICANON` — which is how one test's half-typed line becomes
+/// the next test's phantom input.
 pub(super) fn drain_tty_nonblock(idx: TtyIndex) {
     let mut scratch = [0u8; 64];
     loop {
@@ -137,6 +189,33 @@ pub(super) fn drain_tty_nonblock(idx: TtyIndex) {
             Ok(_) => continue,
         }
     }
+    let _ = tty::tcflush(idx, slopos_abi::syscall::TCIFLUSH);
+}
+
+/// Drain `stage`, then take one byte off `peer`, expecting `byte`.
+///
+/// `tcdrain` is the barrier: it returns once `stage` owes its driver nothing,
+/// which puts the byte in `peer`. Two things sit outside what it can promise,
+/// so the pair is retried rather than asserted once. A `TCOFLUSH` racing an
+/// emission zeroes the in-flight count that emission still owns, and a drain
+/// crossing that window sees a slot that is momentarily settled; and the
+/// water-mark crossing that produces the byte is a one-shot any CPU may
+/// consume, so `stage` is re-drained each round to re-offer whatever is left.
+/// The bound is what keeps a genuinely lost byte a failure rather than a hang.
+pub(super) fn drain_then_read_byte(stage: TtyIndex, peer: TtyIndex, byte: u8) -> bool {
+    const ROUNDS: usize = 64;
+    for _ in 0..ROUNDS {
+        let _ = tty::bytes_available(stage);
+        if tty::tcsbrk(stage, 1).is_err() {
+            return false;
+        }
+        let mut back = [0u8; 8];
+        if matches!(tty::read(peer, &mut back, true), Ok(1) if back[0] == byte) {
+            return true;
+        }
+        crate::hpet::delay_ns(50_000);
+    }
+    false
 }
 
 /// A live PTY master/slave pair with both ends open.

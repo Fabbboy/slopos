@@ -119,7 +119,7 @@ pub fn test_poll_events_pollhup_on_hangup() -> TestResult {
     drain_tty_nonblock(idx);
 
     // Hang up TTY 0.
-    tty::hangup(idx);
+    let _hangup = HangupScope::hang_up(idx);
 
     let revents = tty::poll_events(
         idx,
@@ -269,7 +269,7 @@ pub fn test_pollhup_always_reported() -> TestResult {
     let idx = TtyIndex(0);
     drain_tty_nonblock(idx);
 
-    tty::hangup(idx);
+    let _hangup = HangupScope::hang_up(idx);
 
     // Request only POLLIN -- POLLHUP should still appear.
     let revents = tty::poll_events(idx, slopos_abi::syscall::POLLIN);

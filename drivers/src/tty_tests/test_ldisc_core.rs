@@ -911,7 +911,7 @@ pub fn test_tty_hangup_sets_flag_and_detaches_session() -> TestResult {
     tty::push_input(TtyIndex(0), b'x');
     tty::push_input(TtyIndex(0), b'\n');
 
-    tty::hangup(TtyIndex(0));
+    let _hangup = HangupScope::hang_up(TtyIndex(0));
     let sid = tty::get_session_id(TtyIndex(0)).unwrap_or(0);
     let hung = tty::is_hung_up(TtyIndex(0));
     let has_data = tty::has_data(TtyIndex(0));
@@ -939,7 +939,7 @@ pub fn test_tty_hangup_sets_flag_and_detaches_session() -> TestResult {
 pub fn test_tty_hangup_nonblock_read_eio() -> TestResult {
     tty::table::tty_table_init();
     let _con = tty::open_tty(TtyIndex(0));
-    tty::hangup(TtyIndex(0));
+    let _hangup = HangupScope::hang_up(TtyIndex(0));
 
     let mut out = [0u8; 8];
     let rc = tty::read(TtyIndex(0), &mut out, true);
@@ -957,7 +957,7 @@ pub fn test_tty_hangup_nonblock_read_eio() -> TestResult {
 pub fn test_tty_hangup_blocking_read_eof() -> TestResult {
     tty::table::tty_table_init();
     let _con = tty::open_tty(TtyIndex(0));
-    tty::hangup(TtyIndex(0));
+    let _hangup = HangupScope::hang_up(TtyIndex(0));
 
     let mut out = [0u8; 8];
     let rc = tty::read(TtyIndex(0), &mut out, false);
@@ -1227,7 +1227,7 @@ pub fn test_set_fg_pgrp_checked_permission_denied() -> TestResult {
 pub fn test_hangup_read_returns_hung_up() -> TestResult {
     tty::table::tty_table_init();
     let _con = tty::open_tty(TtyIndex(0));
-    tty::hangup(TtyIndex(0));
+    let _hangup = HangupScope::hang_up(TtyIndex(0));
 
     let mut out = [0u8; 8];
     let result = tty::read(TtyIndex(0), &mut out, true);

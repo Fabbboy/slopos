@@ -215,6 +215,13 @@ impl EchoQueue {
         self.len == 0
     }
 
+    /// Staged bytes, counted as pending output: they are queued for a driver
+    /// and have not reached one.
+    #[inline]
+    fn staged(&self) -> usize {
+        self.len
+    }
+
     #[inline]
     fn discard(&mut self) {
         self.head = 0;
@@ -829,6 +836,12 @@ impl LineDisc {
     #[inline]
     pub fn echo_is_empty(&self) -> bool {
         self.echo.is_empty()
+    }
+
+    /// Staged bytes, for the output-completion queries.
+    #[inline]
+    pub fn echo_staged(&self) -> usize {
+        self.echo.staged()
     }
 
     #[inline]
@@ -1810,6 +1823,18 @@ impl LineDisc {
         }
     }
 
+    /// Allow the IXOFF stop to be generated again.
+    ///
+    /// `ixoff_check_xoff` latches at generation time, so a stop discarded
+    /// before it reached the peer would otherwise never be re-sent and the
+    /// peer would never be told to stop *or* to resume. The input queue is
+    /// untouched here — it is still over the water mark — which is why the
+    /// stop is re-armed rather than cancelled, unlike the input flushes.
+    #[inline]
+    pub fn ixoff_rearm(&mut self) {
+        self.xoff_sent = false;
+    }
+
     /// IXOFF — check if input buffer dropped below low-water mark.
     /// Returns the XON byte (VSTART) if IXOFF is enabled and we should send XON.
     pub fn ixoff_check_xon(&mut self) -> Option<u8> {
@@ -2250,9 +2275,25 @@ impl LdiscKind {
     }
 
     #[inline]
+    pub fn echo_staged(&self) -> usize {
+        match self {
+            LdiscKind::NTty(inner) => inner.echo_staged(),
+            LdiscKind::Raw(_) => 0,
+        }
+    }
+
+    #[inline]
     pub fn echo_discard(&mut self) {
         match self {
             LdiscKind::NTty(inner) => inner.echo_discard(),
+            LdiscKind::Raw(_) => {}
+        }
+    }
+
+    #[inline]
+    pub fn ixoff_rearm(&mut self) {
+        match self {
+            LdiscKind::NTty(inner) => inner.ixoff_rearm(),
             LdiscKind::Raw(_) => {}
         }
     }

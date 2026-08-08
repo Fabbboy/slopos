@@ -52,13 +52,14 @@ pub fn test_pty_ixoff_nests_peer_write_lock() -> TestResult {
     }
 
     // Reading the byte back is what proves the path ran; without it the test
-    // passes whether or not the flag ever reached the driver.
-    let mut back = [0u8; 8];
-    let got = tty::read(pair.master, &mut back, false);
+    // passes whether or not the flag ever reached the driver. The read is
+    // non-blocking because a lone flow-control byte is under `WAKEUP_CHARS`, so
+    // its arrival publishes no input event a blocking read could park on.
+    let arrived = fixtures::drain_then_read_byte(pair.slave, pair.master, 0x13);
 
     let _ = tty::set_termios(pair.slave, &saved);
 
-    if !matches!(got, Ok(n) if n >= 1 && back[..n].contains(&0x13)) {
+    if !arrived {
         klog_info!("TTY_TEST: BUG - IXOFF never reached the peer write path");
         return TestResult::Fail;
     }

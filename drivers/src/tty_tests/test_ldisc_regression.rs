@@ -501,7 +501,7 @@ pub fn test_review_pollerr_on_hangup() -> TestResult {
     tty::table::tty_table_init();
     let idx = TtyIndex(0);
     drain_tty_nonblock(idx);
-    tty::hangup(idx);
+    let _hangup = HangupScope::hang_up(idx);
 
     let revents = tty::poll_events(
         idx,
@@ -2024,7 +2024,7 @@ pub fn test_drain_hangup_vacuously_complete() -> TestResult {
     drain_tty_nonblock(TtyIndex(0));
 
     // Hang up TTY 0.
-    tty::hangup(TtyIndex(0));
+    let _hangup = HangupScope::hang_up(TtyIndex(0));
 
     // is_output_idle should return true — drain is vacuously complete.
     match tty::is_output_idle(TtyIndex(0)) {
@@ -2045,7 +2045,7 @@ pub fn test_tcsbrk_hangup_returns_error() -> TestResult {
     let idx = TtyIndex(0);
 
     // Hang up TTY 0.
-    tty::hangup(idx);
+    let _hangup = HangupScope::hang_up(idx);
 
     // tcsbrk on hung-up TTY should return HungUp.
     match tty::tcsbrk(idx, 1) {
@@ -2064,7 +2064,7 @@ pub fn test_tcsbrk_hangup_returns_error() -> TestResult {
 pub fn test_tcsbrk_zero_hangup_returns_error() -> TestResult {
     tty::table::tty_table_init();
     let idx = TtyIndex(0);
-    tty::hangup(idx);
+    let _hangup = HangupScope::hang_up(idx);
 
     match tty::tcsbrk(idx, 0) {
         Err(TtyError::HungUp) => TestResult::Pass,
@@ -2293,7 +2293,7 @@ pub fn test_tcsetsw_hangup_returns_error() -> TestResult {
     drain_tty_nonblock(idx);
 
     let t = tty::get_termios(idx).unwrap();
-    tty::hangup(idx);
+    let _hangup = HangupScope::hang_up(idx);
 
     match tty::set_termios_wait(idx, &t) {
         Err(TtyError::HungUp) => TestResult::Pass,
@@ -2314,7 +2314,7 @@ pub fn test_tcsetsf_hangup_returns_error() -> TestResult {
     drain_tty_nonblock(idx);
 
     let t = tty::get_termios(idx).unwrap();
-    tty::hangup(idx);
+    let _hangup = HangupScope::hang_up(idx);
 
     match tty::set_termios_flush(idx, &t) {
         Err(TtyError::HungUp) => TestResult::Pass,
@@ -2524,6 +2524,7 @@ pub fn test_grantpt_unlocks_slave() -> TestResult {
 pub fn test_b0_hangup() -> TestResult {
     tty::table::tty_table_init();
     let idx = TtyIndex(0);
+    let _hangup = HangupScope::guard(idx);
     let mut t = tty::get_termios(idx).unwrap();
     t.c_cflag = ControlFlags::from_bits_retain(
         (t.c_cflag.bits() & !slopos_abi::syscall::CBAUD) | slopos_abi::syscall::B0,

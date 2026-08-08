@@ -139,6 +139,26 @@ pub(crate) fn hangup_notify(idx: TtyIndex, session_id: u32) {
     }
 }
 
+/// Return a hung-up slot to service.
+///
+/// A hangup is terminal for the slot in production — a real terminal comes
+/// back by being reopened, and the kernel's own consoles are never closed — so
+/// the only caller is a test that hung one up and owes the rest of the boot a
+/// working console. Confined to the slot lock, which is what makes it safe to
+/// run while every idle CPU is sweeping the table.
+#[cfg(feature = "test-hooks")]
+pub fn clear_hangup(idx: TtyIndex) {
+    let slot = idx.0 as usize;
+    if slot >= MAX_TTYS {
+        return;
+    }
+    let mut guard = TTY_SLOTS[slot].lock();
+    if let Some(tty) = guard.as_mut() {
+        tty.flags.remove(TtyFlags::HUNG_UP | TtyFlags::PEER_CLOSED);
+        tty.ldisc.flush_all();
+    }
+}
+
 pub fn is_hung_up(idx: TtyIndex) -> bool {
     let slot = idx.0 as usize;
     if slot >= MAX_TTYS {

@@ -29,7 +29,7 @@
 //! sleeper never holds the slot lock while a waker holds the wait-queue
 //! lock (the condition closure locks the slot internally to check for data).
 
-use core::sync::atomic::AtomicU32;
+use core::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use slopos_ostd::lock_class;
 
 use super::backing::TtyBacking;
@@ -139,13 +139,25 @@ pub(crate) static TTY_ALLOC_BITMAP: AtomicBitmap<{ words_for(MAX_TTYS) }> = Atom
 // Initialisation
 // ---------------------------------------------------------------------------
 
-/// Initialise the TTY table.  Must be called once during early boot, after
-/// the serial port is ready.
+/// Initialise the TTY table.  Runs once, during early boot, after the serial
+/// port is ready; later calls return without touching the table.
 ///
 /// Allocates:
 /// - TTY 0  → SerialConsoleDriver (COM1)
 /// - TTY 1  → VConsoleDriver (PS/2 + framebuffer)
+///
+/// The once-only guard is load-bearing rather than a convenience for repeat
+/// callers. The body drops every live `Tty` and clears the whole allocation
+/// bitmap while every idle CPU is sweeping those same slots through
+/// `input_available_cb`, and while a drainer may hold a slot's echo claim.
+/// There is no point after boot at which that is safe, so there is no second
+/// time it runs.
 pub fn tty_table_init() {
+    static INITIALISED: AtomicBool = AtomicBool::new(false);
+    if INITIALISED.swap(true, Ordering::AcqRel) {
+        return;
+    }
+
     // Before the first TTY lock, so a driver write reached with a slot guard
     // live is a finding on any boot — not only on one that happened to
     // exercise the legal direction first.
