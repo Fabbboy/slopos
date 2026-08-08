@@ -72,8 +72,8 @@ boot_cmdline_effective := trim(boot_cmdline + " " + debug_flag)
 
 # ── Userland binaries ───────────────────────────────────────────────────────
 
-userland_bins      := "init shell terminal compositor roulette file_manager image_viewer sysmon nmap ifconfig nc curl ping oops_smoke"
-test_userland_bins := userland_bins + " fork_test io_capture_test heap_allocator_test image_test curl_recv_repro_test curl_e2e_test cd_test ring_test pidfd_e2e_test signalfd_test slopfut_test multishot_test tls_independence_test percore_reactor_test signal_handler_test sigwinch_default_test ctrlc_flood_test pty_flow_test mm_stress_test spin_signal_test terminal_grid_test clipboard_test keymap_test spawn_privilege_test stdio_stream_test shell_script_test"
+userland_bins      := "init shell terminal compositor roulette file_manager image_viewer sysmon nmap ip ss nc curl ping oops_smoke"
+test_userland_bins := userland_bins + " fork_test io_capture_test heap_allocator_test image_test curl_recv_repro_test curl_e2e_test cd_test ring_test pidfd_e2e_test signalfd_test slopfut_test multishot_test tls_independence_test percore_reactor_test signal_handler_test sigwinch_default_test ctrlc_flood_test pty_flow_test mm_stress_test spin_signal_test terminal_grid_test clipboard_test keymap_test spawn_privilege_test stdio_stream_test shell_script_test ip_e2e_test"
 
 # ═════════════════════════════════════════════════════════════════════════════
 #  Recipes
@@ -333,9 +333,9 @@ test-json PATH: _build-run-tests
 test-userland-only: _iso-tests-userland-only _build-run-tests
     {{build_dir}}/run_tests --no-build --iso "{{iso_tests}}" --fs-image "{{fs_image_tests}}"
 
-[doc("Run host-side unit tests: abi, gfx, font, keymap-core, terminal-core, plus the slopos-ostd suite natively (same tests KernMiri interprets, seconds instead of minutes — catches assertion drift early; UB detection still needs `just check-miri`)")]
+[doc("Run host-side unit tests: abi, gfx, font, keymap-core, terminal-core, shell-core, net-core, plus the slopos-ostd suite natively (same tests KernMiri interprets, seconds instead of minutes — catches assertion drift early; UB detection still needs `just check-miri`)")]
 test-host:
-    {{cargo}} +{{rust_channel}} test -p slopos-abi -p slopos-gfx -p slopos-font -p slopos-keymap-core -p slopos-terminal-core -p slopos-shell-core -p slopos-ostd
+    {{cargo}} +{{rust_channel}} test -p slopos-abi -p slopos-gfx -p slopos-font -p slopos-keymap-core -p slopos-terminal-core -p slopos-shell-core -p slopos-net-core -p slopos-chrome-core -p slopos-ostd
 
 [doc("Run the Go-based wrapper's own unit tests (host-side, no QEMU)")]
 check-tests-host:

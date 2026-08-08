@@ -143,6 +143,17 @@ pub fn handle_rx(src_ip: [u8; 4], dst_ip: [u8; 4], pkt: &PacketBuf) {
                 klog_debug!("icmp: drop echo reply with code {}", code);
                 return;
             }
+            // Passive connectivity evidence, recorded before the demux: a reply
+            // from the gateway confirms the first hop whether it was answering
+            // this stack's own probe or somebody's `ping`, and a reply that
+            // belongs to no socket is dropped a few lines below. Two atomic
+            // loads and a store — nothing here takes a lock, which is what
+            // makes it legal on the receive path.
+            crate::connectivity::note_gateway_answer(crate::types::Ipv4Addr(src_ip));
+            // An echo reply from off-link is direct proof the path beyond the
+            // gateway works — the same class of evidence as a TCP connection
+            // reaching ESTABLISHED.
+            crate::connectivity::note_wan_peer(crate::types::Ipv4Addr(src_ip));
             klog_debug!(
                 "icmp: echo reply from {}.{}.{}.{} id={} seq={}",
                 src_ip[0],
@@ -193,8 +204,7 @@ pub fn send_echo_request(
     sequence: u16,
     payload: &[u8],
 ) -> Result<usize, NetError> {
-    let src_ip = crate::netstack::NET_STACK
-        .source_ip_for(crate::types::Ipv4Addr(dst_ip))
+    let src_ip = crate::iface::source_ip_for(crate::types::Ipv4Addr(dst_ip))
         .map(|ip| ip.0)
         .unwrap_or([0; 4]);
     send_echo(
@@ -271,8 +281,7 @@ pub fn send_echo_request_from(
     sequence: u16,
     reader: &mut slopos_ostd::mm::VmReader<'_>,
 ) -> Result<usize, NetError> {
-    let src_ip = crate::netstack::NET_STACK
-        .source_ip_for(crate::types::Ipv4Addr(dst_ip))
+    let src_ip = crate::iface::source_ip_for(crate::types::Ipv4Addr(dst_ip))
         .map(|ip| ip.0)
         .unwrap_or([0; 4]);
 
@@ -356,8 +365,7 @@ pub fn send_echo_request_zerocopy(
     let Some(src_mac) = DEVICE_REGISTRY.mac_by_index(dev) else {
         return ZcSendOutcome::NotEligible;
     };
-    let src_ip = crate::netstack::NET_STACK
-        .source_ip_for(Ipv4Addr(dst_ip))
+    let src_ip = crate::iface::source_ip_for(Ipv4Addr(dst_ip))
         .map(|ip| ip.0)
         .unwrap_or([0; 4]);
 

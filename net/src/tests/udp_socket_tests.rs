@@ -21,7 +21,7 @@ fn errno_i64(errno: u64) -> i64 {
 pub fn test_udp_t2_dispatch_delivery_and_unbound_drop() -> TestResult {
     reset();
 
-    let sock = socket_create(AF_INET, SOCK_DGRAM, 0);
+    let sock = socket_create(AF_INET, SOCK_DGRAM, 0, SocketOwner::UNOWNED);
     if sock < 0 {
         return fail!("socket create failed");
     }
@@ -64,7 +64,7 @@ pub fn test_udp_t3_generic_udp_tx_no_crash() -> TestResult {
 pub fn test_udp_t4_sendto_recvfrom_kernel_level() -> TestResult {
     reset();
 
-    let sock = socket_create(AF_INET, SOCK_DGRAM, 0);
+    let sock = socket_create(AF_INET, SOCK_DGRAM, 0, SocketOwner::UNOWNED);
     if sock < 0 {
         return fail!("socket create failed");
     }
@@ -84,7 +84,7 @@ pub fn test_udp_t4_sendto_recvfrom_kernel_level() -> TestResult {
 pub fn test_udp_t5_connected_udp_send_and_peer_filter_recv() -> TestResult {
     reset();
 
-    let sock = socket_create(AF_INET, SOCK_DGRAM, 0);
+    let sock = socket_create(AF_INET, SOCK_DGRAM, 0, SocketOwner::UNOWNED);
     if sock < 0 {
         return fail!("socket create failed");
     }
@@ -124,7 +124,7 @@ pub fn test_udp_t5_connected_udp_send_and_peer_filter_recv() -> TestResult {
 pub fn test_udp_t6_poll_readiness_for_udp() -> TestResult {
     reset();
 
-    let sock = socket_create(AF_INET, SOCK_DGRAM, 0);
+    let sock = socket_create(AF_INET, SOCK_DGRAM, 0, SocketOwner::UNOWNED);
     if sock < 0 {
         return fail!("socket create failed");
     }
@@ -158,7 +158,7 @@ pub fn test_udp_t6_poll_readiness_for_udp() -> TestResult {
 pub fn test_udp_t7_nonblocking_recvfrom_eagain() -> TestResult {
     reset();
 
-    let sock = socket_create(AF_INET, SOCK_DGRAM, 0);
+    let sock = socket_create(AF_INET, SOCK_DGRAM, 0, SocketOwner::UNOWNED);
     if sock < 0 {
         return fail!("socket create failed");
     }
@@ -179,7 +179,7 @@ pub fn test_udp_t7_nonblocking_recvfrom_eagain() -> TestResult {
 pub fn test_udp_t8_sendto_auto_bind_ephemeral_port() -> TestResult {
     reset();
 
-    let sock = socket_create(AF_INET, SOCK_DGRAM, 0);
+    let sock = socket_create(AF_INET, SOCK_DGRAM, 0, SocketOwner::UNOWNED);
     if sock < 0 {
         return fail!("socket create failed");
     }
@@ -230,7 +230,7 @@ pub fn test_udp_t9_parse_udp_header_valid_invalid() -> TestResult {
 pub fn test_udp_t10_reset_clears_udp_queues() -> TestResult {
     reset();
 
-    let sock = socket_create(AF_INET, SOCK_DGRAM, 0);
+    let sock = socket_create(AF_INET, SOCK_DGRAM, 0, SocketOwner::UNOWNED);
     if sock < 0 {
         return fail!("socket create failed");
     }
@@ -244,7 +244,7 @@ pub fn test_udp_t10_reset_clears_udp_queues() -> TestResult {
 
     socket_reset_all();
 
-    let fresh = socket_create(AF_INET, SOCK_DGRAM, 0);
+    let fresh = socket_create(AF_INET, SOCK_DGRAM, 0, SocketOwner::UNOWNED);
     if fresh < 0 {
         return fail!("socket recreate failed");
     }

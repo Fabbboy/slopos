@@ -45,6 +45,11 @@ pub enum FileKind {
     /// Created by `signalfd(2)`. Lets a reactor block its signals and harvest
     /// them as in-band ring/poll events instead of out-of-band interrupts.
     Signalfd = 8,
+    /// Network-state monitor. Becomes `POLLIN`-ready when the stack's
+    /// configuration changes; `read` drains whole `NetEvent` records. Created
+    /// by `net_monitor`. Lets a status indicator react to a lease, a carrier
+    /// transition or an admin change instead of polling for one.
+    Netmon = 9,
 }
 
 /// Owned per-open backing object of a file description.

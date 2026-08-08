@@ -758,20 +758,17 @@ pub fn dns_resolve(hostname: &[u8]) -> Result<[u8; 4], DnsResolveError> {
         return Ok(addr);
     }
 
-    // Get DNS server IP from DHCP lease.
-    let dns_server = crate::net_driver_service::net_driver()
-        .and_then(|d| (d.virtio_net_dns)())
-        .ok_or(DnsResolveError::NoDnsServer)?;
+    // The resolver configuration is the authority: an operator's static
+    // override outranks anything DHCP learned, and a second interface's lease
+    // can contribute a server the first NIC never sees.
+    let dns_server = crate::resolver::primary_octets().ok_or(DnsResolveError::NoDnsServer)?;
     if dns_server == [0; 4] {
         klog_debug!("dns: no DNS server configured");
         return Err(DnsResolveError::NoDnsServer);
     }
 
     // Get our IP for the source address.
-    let src_ip = crate::netstack::NET_STACK
-        .first_ipv4()
-        .map(|ip| ip.0)
-        .unwrap_or([0; 4]);
+    let src_ip = crate::iface::first_ipv4().map(|ip| ip.0).unwrap_or([0; 4]);
 
     // Both buffers live on the heap (KVec): 512 + DNS_MAX_RESPONSE on the stack
     // would push this function past the stack-safety gate.
@@ -792,6 +789,10 @@ pub fn dns_resolve(hostname: &[u8]) -> Result<[u8; 4], DnsResolveError> {
                     addr[3],
                     ttl
                 );
+                // Passive connectivity evidence. Only this arm counts: the
+                // cache hit and the IP-literal shortcut above return without a
+                // packet, so neither says anything about the network now.
+                crate::connectivity::note_dns_success();
                 dns_cache_insert(hostname, addr, ttl);
                 return Ok(addr);
             }

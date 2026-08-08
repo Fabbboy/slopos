@@ -37,7 +37,12 @@ fn restore_boot_routes() {
 
 fn test_icmp_socket_create() -> TestResult {
     socket::socket_reset_all();
-    let fd = socket::socket_create(AF_INET, SOCK_DGRAM, IPPROTO_ICMP);
+    let fd = socket::socket_create(
+        AF_INET,
+        SOCK_DGRAM,
+        IPPROTO_ICMP,
+        socket::SocketOwner::UNOWNED,
+    );
     assert_test!(fd >= 0, "ICMP socket create failed: {}", fd);
     let _ = socket::socket_close(fd as u32);
     pass!()
@@ -45,7 +50,12 @@ fn test_icmp_socket_create() -> TestResult {
 
 fn test_icmp_socket_bind() -> TestResult {
     socket::socket_reset_all();
-    let fd = socket::socket_create(AF_INET, SOCK_DGRAM, IPPROTO_ICMP);
+    let fd = socket::socket_create(
+        AF_INET,
+        SOCK_DGRAM,
+        IPPROTO_ICMP,
+        socket::SocketOwner::UNOWNED,
+    );
     assert_test!(fd >= 0, "create failed");
     let sock = fd as u32;
 
@@ -127,7 +137,12 @@ fn test_icmp_socket_sendto_recvfrom_e2e() -> TestResult {
         return pass!();
     }
 
-    let fd = socket::socket_create(AF_INET, SOCK_DGRAM, IPPROTO_ICMP);
+    let fd = socket::socket_create(
+        AF_INET,
+        SOCK_DGRAM,
+        IPPROTO_ICMP,
+        socket::SocketOwner::UNOWNED,
+    );
     assert_test!(fd >= 0, "socket create failed");
     let sock = fd as u32;
 
@@ -236,7 +251,12 @@ fn test_icmp_napi_scheduling_e2e() -> TestResult {
         return pass!();
     };
 
-    let fd = socket::socket_create(AF_INET, SOCK_DGRAM, IPPROTO_ICMP);
+    let fd = socket::socket_create(
+        AF_INET,
+        SOCK_DGRAM,
+        IPPROTO_ICMP,
+        socket::SocketOwner::UNOWNED,
+    );
     assert_test!(fd >= 0, "socket create failed");
     let sock = fd as u32;
 

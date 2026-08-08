@@ -33,6 +33,7 @@ use slopos_ostd::sync::{LOCK_LEVEL_REGISTRY, LOCK_LEVEL_RESOURCE, SpinLock};
 use slopos_ostd::{KArc, KVec};
 use slopos_ostd::{TxReclaimToken, ZcNotifToken};
 
+use super::iface::IfaceKind;
 use super::packetbuf::PacketBuf;
 use super::pool::PacketPool;
 use super::types::{DevIndex, MacAddr, NetError};
@@ -161,6 +162,35 @@ pub trait NetDevice: Send + Sync {
 
     /// Capability/feature flags advertised by the driver.
     fn features(&self) -> NetDeviceFeatures;
+
+    /// What kind of interface this device presents. Defaults to Ethernet,
+    /// which is what every real NIC is; loopback overrides it.
+    fn kind(&self) -> IfaceKind {
+        IfaceKind::Ethernet
+    }
+
+    /// Current link state.
+    ///
+    /// **Must be a lock-free read** — an atomic the driver refreshes, never a
+    /// query that takes the driver's state lock. The registry calls this while
+    /// enumerating and the interface layer calls it from contexts that hold
+    /// their own locks; a driver that reached for a lock here would create
+    /// exactly the registry-to-device edge the two-phase retirement exists to
+    /// avoid.
+    ///
+    /// The default is `true`, paired with a `carrier_detect` of `false`: a
+    /// device that cannot observe its link says so rather than claiming a
+    /// state it does not know.
+    fn carrier(&self) -> bool {
+        true
+    }
+
+    /// Whether [`carrier`](Self::carrier) is an observation rather than an
+    /// assumption. Surfaced to userland as `IFF_SLOP_CARRIER_ASSUMED` so a UI
+    /// can be honest about not knowing.
+    fn carrier_detect(&self) -> bool {
+        false
+    }
 }
 
 // =============================================================================
@@ -526,7 +556,11 @@ impl NetDeviceRegistry {
     /// Every call *into* a device must go through this, for the lock-order
     /// reason [`Self::unregister`] gives. A retiring slot resolves to `None`,
     /// so a device that is going away receives no new work.
-    fn device_at(&self, index: DevIndex) -> Option<KArc<dyn NetDevice + Send + Sync>> {
+    ///
+    /// Public because the interface control plane calls `set_up`/`set_down`
+    /// during an administrative transition, and must do so with the registry
+    /// lock released.
+    pub fn device_at(&self, index: DevIndex) -> Option<KArc<dyn NetDevice + Send + Sync>> {
         let inner = self.inner.lock();
         let slot = inner.slots.get(index.0)?.as_ref()?;
         (!slot.retiring).then(|| KArc::clone(&slot.dev))
@@ -550,9 +584,10 @@ impl NetDeviceRegistry {
 
     /// Enumerate all registered devices.
     ///
-    /// Returns a list of `(DevIndex, MacAddr, is_up)` tuples.  Currently
-    /// `is_up` is always `true` for registered devices (link-state tracking
-    /// is deferred).
+    /// Returns a list of `(DevIndex, MacAddr, carrier)` tuples. `carrier` is
+    /// the device's real link state, read after `snapshot_devices` has released
+    /// the registry lock — which is safe precisely because
+    /// [`NetDevice::carrier`] is required to be a lock-free read.
     pub fn enumerate(&self) -> KVec<(DevIndex, MacAddr, bool)> {
         let mut devices = [const { None }; MAX_DEVICES];
         self.snapshot_devices(&mut devices);
@@ -564,7 +599,7 @@ impl NetDeviceRegistry {
         };
         for (i, dev) in devices.iter().enumerate() {
             if let Some(dev) = dev {
-                let _ = result.push((DevIndex(i), dev.mac(), true));
+                let _ = result.push((DevIndex(i), dev.mac(), dev.carrier()));
             }
         }
         result
@@ -655,6 +690,20 @@ impl NetDeviceRegistry {
     /// Returns `None` if the device is not registered.
     pub fn features_by_index(&self, index: DevIndex) -> Option<NetDeviceFeatures> {
         Some(self.device_at(index)?.features())
+    }
+
+    /// Read a device's counters by index.
+    ///
+    /// `device_at` resolves and releases the registry lock before the driver is
+    /// touched, so this never calls into a device while holding it.
+    pub fn stats_by_index(&self, index: DevIndex) -> Option<NetDeviceStats> {
+        Some(self.device_at(index)?.stats())
+    }
+
+    /// Read a device's link state by index. Lock-free on the driver side, by
+    /// the [`NetDevice::carrier`] contract.
+    pub fn carrier_by_index(&self, index: DevIndex) -> Option<bool> {
+        Some(self.device_at(index)?.carrier())
     }
 
     /// Poll RX packets from a device by index.

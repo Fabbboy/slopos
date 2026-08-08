@@ -21,7 +21,7 @@ fn reset() {
 }
 
 fn connect_and_establish() -> Option<(u32, tcp::ConnId)> {
-    let sock = socket::socket_create(AF_INET, SOCK_STREAM, 0);
+    let sock = socket::socket_create(AF_INET, SOCK_STREAM, 0, socket::SocketOwner::UNOWNED);
     if sock < 0 {
         return None;
     }
@@ -142,7 +142,7 @@ pub fn test_blocking_recv() -> TestResult {
 
 pub fn test_blocking_accept() -> TestResult {
     reset();
-    let sock = socket::socket_create(AF_INET, SOCK_STREAM, 0) as u32;
+    let sock = socket::socket_create(AF_INET, SOCK_STREAM, 0, socket::SocketOwner::UNOWNED) as u32;
     let _ = socket::socket_bind(sock, [0, 0, 0, 0], 8080);
     let _ = socket::socket_listen(sock, 4);
     let _ = socket::socket_set_nonblocking(sock, false);

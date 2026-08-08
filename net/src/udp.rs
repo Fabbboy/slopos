@@ -1,9 +1,11 @@
 use slopos_ostd::klog_debug;
 use slopos_ostd::lock_class;
-use slopos_ostd::sync::{LOCK_LEVEL_REGISTRY, SpinLock};
+use slopos_ostd::sync::{LOCK_LEVEL_REGISTRY, LOCK_LEVEL_RESOURCE, SpinLock};
 
 use super::packetbuf::PacketBuf;
-use super::types::{Ipv4Addr, NetError, Port};
+
+pub const UDP_HEADER_LEN: usize = 8;
+use super::types::{DevIndex, Ipv4Addr, MacAddr, NetError, Port};
 
 // =============================================================================
 // Hash-bucket UDP demux table
@@ -189,6 +191,73 @@ pub(crate) fn parse_udp_header(payload: &[u8]) -> Option<(u16, u16, &[u8])> {
     Some((src_port, dst_port, &payload[8..udp_len]))
 }
 
+// =============================================================================
+// Kernel port listeners
+// =============================================================================
+
+/// A kernel-internal consumer of one UDP port.
+///
+/// Runs on the receive path under the NAPI thread with the packet still in
+/// hand: it must not block, must not allocate, and must not take a network
+/// table lock.
+pub type UdpListener = fn(src_ip: [u8; 4], src_port: u16, payload: &[u8]);
+
+/// Ports the kernel itself listens on.
+///
+/// Separate from [`UDP_DEMUX`] and consulted first, because these are not
+/// sockets: there is no fd, no owning process, no receive buffer and nobody to
+/// block. DHCP needs a listener on port 68 before the machine has an address —
+/// before there is anything for a socket to bind *to*.
+///
+/// Two entries cover the foreseeable need, so a fixed array beats a map.
+const MAX_PORT_LISTENERS: usize = 2;
+
+struct PortListeners {
+    slots: [Option<(u16, UdpListener)>; MAX_PORT_LISTENERS],
+}
+
+static PORT_LISTENERS: SpinLock<PortListeners> = SpinLock::new(
+    PortListeners {
+        slots: [const { None }; MAX_PORT_LISTENERS],
+    },
+    lock_class!("UDP_PORT_LISTENERS", LOCK_LEVEL_RESOURCE),
+);
+
+/// Claim a port for a kernel listener. Returns `false` if the port is already
+/// claimed or the table is full.
+pub fn register_port_listener(port: u16, listener: UdpListener) -> bool {
+    let mut table = PORT_LISTENERS.lock();
+    if table.slots.iter().flatten().any(|(p, _)| *p == port) {
+        return false;
+    }
+    let Some(free) = table.slots.iter_mut().find(|s| s.is_none()) else {
+        return false;
+    };
+    *free = Some((port, listener));
+    true
+}
+
+pub fn unregister_port_listener(port: u16) {
+    let mut table = PORT_LISTENERS.lock();
+    for slot in table.slots.iter_mut() {
+        if slot.is_some_and(|(p, _)| p == port) {
+            *slot = None;
+        }
+    }
+}
+
+/// The listener for `port`, if any. The lock is released before the listener
+/// runs, so a listener may do anything a receive path may do.
+fn port_listener(port: u16) -> Option<UdpListener> {
+    let table = PORT_LISTENERS.lock();
+    table
+        .slots
+        .iter()
+        .flatten()
+        .find(|(p, _)| *p == port)
+        .map(|(_, f)| *f)
+}
+
 pub fn handle_rx(src_ip: [u8; 4], dst_ip: [u8; 4], pkt: &PacketBuf) {
     let Some((src_port, dst_port, udp_payload)) = parse_udp_header(pkt.payload()) else {
         return;
@@ -198,6 +267,13 @@ pub fn handle_rx(src_ip: [u8; 4], dst_ip: [u8; 4], pkt: &PacketBuf) {
         if let Some(d) = crate::net_driver_service::net_driver() {
             (d.dns_intercept_response)(udp_payload);
         }
+    }
+
+    // Kernel listeners come first: they exist for traffic that arrives before,
+    // or instead of, a socket being able to receive it.
+    if let Some(listener) = port_listener(dst_port) {
+        listener(src_ip, src_port, udp_payload);
+        return;
     }
 
     let sock_idx = UDP_DEMUX.lock().lookup(Ipv4Addr(dst_ip), Port(dst_port));
@@ -214,6 +290,91 @@ pub fn handle_rx(src_ip: [u8; 4], dst_ip: [u8; 4], pkt: &PacketBuf) {
         dst_ip[3],
         dst_port
     );
+}
+
+/// Send a datagram out one named device, bypassing the routing table.
+///
+/// DHCP DISCOVER must go out *before* the machine has an address, a prefix or
+/// a route, and [`ipv4::send`](crate::ipv4::send) against an empty table
+/// returns `NetworkUnreachable`. Naming the device instead of a destination is
+/// what a bootstrap protocol needs, and a separate entry point keeps it off the
+/// path every ordinary datagram takes.
+///
+/// The frame is broadcast at L2 as well as L3: there is no neighbour entry for
+/// a server the machine has never spoken to and no address to ARP from. The
+/// source MAC comes from the device registry, so this works for whichever
+/// interface is asking rather than only for the NIC the driver service fronts.
+pub fn udp_broadcast_on_dev(
+    dev: DevIndex,
+    src_ip: [u8; 4],
+    src_port: u16,
+    dst_port: u16,
+    payload: &[u8],
+) -> Result<(), NetError> {
+    send_on_dev(
+        dev,
+        src_ip,
+        [255, 255, 255, 255],
+        src_port,
+        dst_port,
+        payload,
+        MacAddr::BROADCAST,
+    )
+}
+
+/// Unicast a datagram out one named device to a known neighbour MAC.
+///
+/// The renewal counterpart of [`udp_broadcast_on_dev`]: a renewing client has an
+/// address and a route, but sending through the route table would resolve the
+/// gateway rather than the DHCP server, which are not always the same host.
+pub fn udp_unicast_on_dev(
+    dev: DevIndex,
+    src_ip: [u8; 4],
+    dst_ip: [u8; 4],
+    src_port: u16,
+    dst_port: u16,
+    payload: &[u8],
+    dst_mac: MacAddr,
+) -> Result<(), NetError> {
+    send_on_dev(dev, src_ip, dst_ip, src_port, dst_port, payload, dst_mac)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn send_on_dev(
+    dev: DevIndex,
+    src_ip: [u8; 4],
+    dst_ip: [u8; 4],
+    src_port: u16,
+    dst_port: u16,
+    payload: &[u8],
+    dst_mac: MacAddr,
+) -> Result<(), NetError> {
+    use super::netdev::DEVICE_REGISTRY;
+
+    let src_mac = DEVICE_REGISTRY
+        .mac_by_index(dev)
+        .ok_or(NetError::InvalidArgument)?;
+
+    let mut pkt = PacketBuf::alloc().ok_or(NetError::NoBufferSpace)?;
+    pkt.append(payload)?;
+
+    let udp_len = UDP_HEADER_LEN + payload.len();
+    {
+        let hdr = pkt.push_header(UDP_HEADER_LEN)?;
+        hdr[0..2].copy_from_slice(&src_port.to_be_bytes());
+        hdr[2..4].copy_from_slice(&dst_port.to_be_bytes());
+        hdr[4..6].copy_from_slice(&(udp_len as u16).to_be_bytes());
+        // A zero checksum is legal for IPv4 UDP and means "not computed", which
+        // is what a DHCP client must send: at DISCOVER time it has no address
+        // to build the pseudo-header from.
+        hdr[6..8].copy_from_slice(&0u16.to_be_bytes());
+    }
+
+    pkt.prepend_ipv4(src_ip, dst_ip, super::IpProtocol::Udp.as_u8(), udp_len)?;
+    pkt.prepend_eth(src_mac.0, dst_mac.0)?;
+    pkt.set_ipv4_offsets();
+
+    DEVICE_REGISTRY.tx_by_index(dev, pkt)
 }
 
 pub fn udp_bind(

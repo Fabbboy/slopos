@@ -11,7 +11,7 @@ fn reset() {
 }
 
 fn connect_and_establish() -> Result<(u32, tcp::ConnId), &'static str> {
-    let sock = socket_create(AF_INET, SOCK_STREAM, 0);
+    let sock = socket_create(AF_INET, SOCK_STREAM, 0, SocketOwner::UNOWNED);
     if sock < 0 {
         return Err("socket_create failed");
     }
@@ -59,28 +59,28 @@ fn connect_and_establish() -> Result<(u32, tcp::ConnId), &'static str> {
 
 pub fn test_socket_create_tcp() -> TestResult {
     reset();
-    let idx = socket_create(AF_INET, SOCK_STREAM, 0);
+    let idx = socket_create(AF_INET, SOCK_STREAM, 0, SocketOwner::UNOWNED);
     assert_test!(idx >= 0, "tcp socket create succeeds");
     pass!()
 }
 
 pub fn test_socket_create_udp() -> TestResult {
     reset();
-    let idx = socket_create(AF_INET, SOCK_DGRAM, 0);
+    let idx = socket_create(AF_INET, SOCK_DGRAM, 0, SocketOwner::UNOWNED);
     assert_test!(idx >= 0, "udp socket create succeeds");
     pass!()
 }
 
 pub fn test_socket_create_invalid_domain() -> TestResult {
     reset();
-    let idx = socket_create(1, SOCK_STREAM, 0);
+    let idx = socket_create(1, SOCK_STREAM, 0, SocketOwner::UNOWNED);
     assert_test!(idx < 0, "invalid domain fails");
     pass!()
 }
 
 pub fn test_socket_create_invalid_type() -> TestResult {
     reset();
-    let idx = socket_create(AF_INET, 99, 0);
+    let idx = socket_create(AF_INET, 99, 0, SocketOwner::UNOWNED);
     assert_test!(idx < 0, "invalid type fails");
     pass!()
 }
@@ -90,13 +90,13 @@ pub fn test_socket_table_full() -> TestResult {
     // SlabSocketTable grows on demand up to MAX_CAPACITY (1024).
     // Verify we can allocate beyond the initial 64-slot capacity.
     for i in 0..128 {
-        if socket_create(AF_INET, SOCK_STREAM, 0) < 0 {
+        if socket_create(AF_INET, SOCK_STREAM, 0, SocketOwner::UNOWNED) < 0 {
             return fail!("socket allocation failed at index {}", i);
         }
     }
     // 129th socket should still succeed (table grows to 256).
     assert_test!(
-        socket_create(AF_INET, SOCK_STREAM, 0) >= 0,
+        socket_create(AF_INET, SOCK_STREAM, 0, SocketOwner::UNOWNED) >= 0,
         "129th socket succeeds (growable table)"
     );
     pass!()
@@ -104,14 +104,14 @@ pub fn test_socket_table_full() -> TestResult {
 
 pub fn test_socket_bind_valid() -> TestResult {
     reset();
-    let idx = socket_create(AF_INET, SOCK_STREAM, 0) as u32;
+    let idx = socket_create(AF_INET, SOCK_STREAM, 0, SocketOwner::UNOWNED) as u32;
     assert_eq_test!(socket_bind(idx, [0, 0, 0, 0], 8080), 0);
     pass!()
 }
 
 pub fn test_socket_bind_specific_addr() -> TestResult {
     reset();
-    let idx = socket_create(AF_INET, SOCK_STREAM, 0) as u32;
+    let idx = socket_create(AF_INET, SOCK_STREAM, 0, SocketOwner::UNOWNED) as u32;
     assert_eq_test!(socket_bind(idx, [10, 0, 0, 1], 80), 0);
     pass!()
 }
@@ -127,7 +127,7 @@ pub fn test_socket_bind_invalid_idx() -> TestResult {
 
 pub fn test_socket_bind_already_bound() -> TestResult {
     reset();
-    let idx = socket_create(AF_INET, SOCK_STREAM, 0) as u32;
+    let idx = socket_create(AF_INET, SOCK_STREAM, 0, SocketOwner::UNOWNED) as u32;
     assert_eq_test!(socket_bind(idx, [0, 0, 0, 0], 8080), 0);
     assert_test!(
         socket_bind(idx, [0, 0, 0, 0], 8081) < 0,
@@ -138,7 +138,7 @@ pub fn test_socket_bind_already_bound() -> TestResult {
 
 pub fn test_socket_listen_after_bind() -> TestResult {
     reset();
-    let idx = socket_create(AF_INET, SOCK_STREAM, 0) as u32;
+    let idx = socket_create(AF_INET, SOCK_STREAM, 0, SocketOwner::UNOWNED) as u32;
     assert_eq_test!(socket_bind(idx, [0, 0, 0, 0], 8080), 0);
     assert_eq_test!(socket_listen(idx, 16), 0);
     pass!()
@@ -146,7 +146,7 @@ pub fn test_socket_listen_after_bind() -> TestResult {
 
 pub fn test_socket_listen_without_bind() -> TestResult {
     reset();
-    let idx = socket_create(AF_INET, SOCK_STREAM, 0) as u32;
+    let idx = socket_create(AF_INET, SOCK_STREAM, 0, SocketOwner::UNOWNED) as u32;
     assert_test!(socket_listen(idx, 16) < 0, "listen without bind fails");
     pass!()
 }
@@ -166,7 +166,7 @@ pub fn test_socket_listen_on_connected() -> TestResult {
 
 pub fn test_socket_connect_creates_tcp_connection() -> TestResult {
     reset();
-    let sock = socket_create(AF_INET, SOCK_STREAM, 0) as u32;
+    let sock = socket_create(AF_INET, SOCK_STREAM, 0, SocketOwner::UNOWNED) as u32;
     socket_set_nonblocking(sock, true);
     let rc = socket_connect(sock, [10, 0, 0, 2], 80);
     assert_test!(
@@ -189,7 +189,7 @@ pub fn test_socket_connect_invalid_socket() -> TestResult {
 
 pub fn test_socket_connect_already_connected() -> TestResult {
     reset();
-    let sock = socket_create(AF_INET, SOCK_STREAM, 0) as u32;
+    let sock = socket_create(AF_INET, SOCK_STREAM, 0, SocketOwner::UNOWNED) as u32;
     socket_set_nonblocking(sock, true);
     let rc = socket_connect(sock, [10, 0, 0, 2], 80);
     assert_test!(rc == 0 || rc == -115, "first non-blocking connect");
@@ -202,7 +202,7 @@ pub fn test_socket_connect_already_connected() -> TestResult {
 
 pub fn test_socket_send_returns_error_not_connected() -> TestResult {
     reset();
-    let sock = socket_create(AF_INET, SOCK_STREAM, 0) as u32;
+    let sock = socket_create(AF_INET, SOCK_STREAM, 0, SocketOwner::UNOWNED) as u32;
     let payload = [1u8, 2, 3];
     assert_test!(
         socket_send(sock, &payload) < 0,
@@ -213,7 +213,7 @@ pub fn test_socket_send_returns_error_not_connected() -> TestResult {
 
 pub fn test_socket_recv_returns_error_not_connected() -> TestResult {
     reset();
-    let sock = socket_create(AF_INET, SOCK_STREAM, 0) as u32;
+    let sock = socket_create(AF_INET, SOCK_STREAM, 0, SocketOwner::UNOWNED) as u32;
     let mut buf = [0u8; 8];
     assert_test!(
         socket_recv(sock, &mut buf) < 0,
@@ -251,7 +251,7 @@ pub fn test_socket_recv_empty() -> TestResult {
 
 pub fn test_socket_close_valid() -> TestResult {
     reset();
-    let sock = socket_create(AF_INET, SOCK_STREAM, 0) as u32;
+    let sock = socket_create(AF_INET, SOCK_STREAM, 0, SocketOwner::UNOWNED) as u32;
     assert_eq_test!(socket_close(sock), 0);
     pass!()
 }
@@ -264,16 +264,16 @@ pub fn test_socket_close_invalid() -> TestResult {
 
 pub fn test_socket_close_frees_slot() -> TestResult {
     reset();
-    let sock = socket_create(AF_INET, SOCK_STREAM, 0);
+    let sock = socket_create(AF_INET, SOCK_STREAM, 0, SocketOwner::UNOWNED);
     assert_eq_test!(socket_close(sock as u32), 0);
-    let next = socket_create(AF_INET, SOCK_STREAM, 0);
+    let next = socket_create(AF_INET, SOCK_STREAM, 0, SocketOwner::UNOWNED);
     assert_eq_test!(next, sock);
     pass!()
 }
 
 pub fn test_socket_poll_readable_not_connected() -> TestResult {
     reset();
-    let sock = socket_create(AF_INET, SOCK_STREAM, 0) as u32;
+    let sock = socket_create(AF_INET, SOCK_STREAM, 0, SocketOwner::UNOWNED) as u32;
     assert_eq_test!(socket_poll_readable(sock), 0);
     pass!()
 }
@@ -293,14 +293,14 @@ pub fn test_socket_poll_writable_connected() -> TestResult {
 
 pub fn test_socket_state_after_create() -> TestResult {
     reset();
-    let sock = socket_create(AF_INET, SOCK_STREAM, 0) as u32;
+    let sock = socket_create(AF_INET, SOCK_STREAM, 0, SocketOwner::UNOWNED) as u32;
     assert_eq_test!(socket_get_state(sock), Some(SocketState::Unbound));
     pass!()
 }
 
 pub fn test_socket_state_after_bind() -> TestResult {
     reset();
-    let sock = socket_create(AF_INET, SOCK_STREAM, 0) as u32;
+    let sock = socket_create(AF_INET, SOCK_STREAM, 0, SocketOwner::UNOWNED) as u32;
     assert_eq_test!(socket_bind(sock, [0, 0, 0, 0], 8080), 0);
     assert_eq_test!(socket_get_state(sock), Some(SocketState::Bound));
     pass!()
@@ -308,8 +308,8 @@ pub fn test_socket_state_after_bind() -> TestResult {
 
 pub fn test_socket_reset_all() -> TestResult {
     reset();
-    let _ = socket_create(AF_INET, SOCK_STREAM, 0);
-    let _ = socket_create(AF_INET, SOCK_DGRAM, 0);
+    let _ = socket_create(AF_INET, SOCK_STREAM, 0, SocketOwner::UNOWNED);
+    let _ = socket_create(AF_INET, SOCK_DGRAM, 0, SocketOwner::UNOWNED);
     assert_test!(socket_count_active() >= 2, "active before reset");
     socket_reset_all();
     assert_eq_test!(socket_count_active(), 0);
@@ -319,7 +319,7 @@ pub fn test_socket_reset_all() -> TestResult {
 
 pub fn test_socket_accept_no_pending_returns_eagain() -> TestResult {
     reset();
-    let sock = socket_create(AF_INET, SOCK_STREAM, 0) as u32;
+    let sock = socket_create(AF_INET, SOCK_STREAM, 0, SocketOwner::UNOWNED) as u32;
     assert_eq_test!(socket_bind(sock, [0, 0, 0, 0], 8080), 0);
     assert_eq_test!(socket_listen(sock, 8), 0);
     assert_test!(
@@ -380,10 +380,13 @@ pub fn test_bounded_queue_clear_and_resize() -> TestResult {
 pub fn test_slab_socket_table_alloc_free_get_get_mut() -> TestResult {
     let mut table = SlabSocketTable::new(2, 8);
     let idx = table
-        .alloc(SocketInner::Tcp(TcpSocketInner {
-            conn_id: None,
-            listen: None,
-        }))
+        .alloc(
+            SocketInner::Tcp(TcpSocketInner {
+                conn_id: None,
+                listen: None,
+            }),
+            SocketOwner::UNOWNED,
+        )
         .unwrap();
 
     assert_eq_test!(idx, 0);
@@ -407,13 +410,15 @@ pub fn test_slab_socket_table_grows_and_enforces_max() -> TestResult {
     assert_eq_test!(table.capacity(), 2);
 
     for _ in 0..4 {
-        let idx = table.alloc(SocketInner::Udp(UdpSocketInner));
+        let idx = table.alloc(SocketInner::Udp(UdpSocketInner), SocketOwner::UNOWNED);
         assert_test!(idx.is_some(), "allocation within max should succeed");
     }
 
     assert_eq_test!(table.capacity(), 4);
     assert_test!(
-        table.alloc(SocketInner::Raw(RawSocketInner)).is_none(),
+        table
+            .alloc(SocketInner::Raw(RawSocketInner), SocketOwner::UNOWNED)
+            .is_none(),
         "allocation beyond max must fail"
     );
     pass!()
@@ -685,7 +690,7 @@ pub fn test_tcp_send_after_shutdown_wr_fails() -> TestResult {
 pub fn test_tcp_send_after_blocking_connect() -> TestResult {
     reset();
 
-    let sock = socket_create(AF_INET, SOCK_STREAM, 0);
+    let sock = socket_create(AF_INET, SOCK_STREAM, 0, SocketOwner::UNOWNED);
     assert_test!(sock >= 0, "socket_create succeeds");
     let sock = sock as u32;
 
@@ -747,7 +752,7 @@ pub fn test_tcp_send_after_blocking_connect() -> TestResult {
 pub fn test_tcp_send_before_handshake_complete() -> TestResult {
     reset();
 
-    let sock = socket_create(AF_INET, SOCK_STREAM, 0);
+    let sock = socket_create(AF_INET, SOCK_STREAM, 0, SocketOwner::UNOWNED);
     assert_test!(sock >= 0, "socket_create succeeds");
     let sock = sock as u32;
 
@@ -805,7 +810,7 @@ pub fn test_tcp_send_before_handshake_complete() -> TestResult {
 
 pub fn test_tcp_listen_accept_incoming_syn() -> TestResult {
     reset();
-    let listen_sock = socket_create(AF_INET, SOCK_STREAM, 0) as u32;
+    let listen_sock = socket_create(AF_INET, SOCK_STREAM, 0, SocketOwner::UNOWNED) as u32;
     assert_eq_test!(socket_bind(listen_sock, [10, 0, 0, 1], 80), 0);
     assert_eq_test!(socket_listen(listen_sock, 4), 0);
 

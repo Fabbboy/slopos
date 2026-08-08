@@ -1,5 +1,5 @@
 use core::mem::size_of;
-use core::sync::atomic::{AtomicPtr, AtomicU32, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicPtr, AtomicU32, Ordering};
 use slopos_ostd::dev::FromRawPtr;
 use slopos_ostd::lock_class;
 use slopos_ostd::mm::frame::AnonymousMeta;
@@ -7,9 +7,6 @@ use slopos_ostd::mm::uframe::UFrame;
 use slopos_ostd::{KArc, KBox, KVec};
 use slopos_ostd::{TxReclaimToken, ZcNotifToken};
 
-use slopos_abi::net::{
-    USER_NET_MEMBER_FLAG_ARP, USER_NET_MEMBER_FLAG_IPV4, UserNetInfo, UserNetMember,
-};
 use slopos_net as net;
 use slopos_ostd::sync::{InitFlag, LOCK_LEVEL_RESOURCE, SpinLock};
 use slopos_ostd::{klog_debug, klog_info};
@@ -26,13 +23,12 @@ use crate::virtio::{
     queue::{self, DEFAULT_QUEUE_SIZE, VirtqDesc, Virtqueue},
 };
 use slopos_net::{
-    self, PACKET_POOL, dhcp, ingress,
+    self, PACKET_POOL, ingress,
     napi::NapiContext,
     net_driver_service::{NetDriverServices, register_net_driver_services},
     netdev::{CsumOffload, DeviceHandle, NetDevice, NetDeviceFeatures, NetDeviceStats},
     packetbuf::PacketBuf,
     pool::PacketPool,
-    socket, tcp,
     types::{MacAddr, NetError},
 };
 
@@ -56,24 +52,14 @@ const DEV_CFG_MAC_OFFSET: usize = 0x00;
 const DEV_CFG_STATUS_OFFSET: usize = 0x06;
 const DEV_CFG_MTU_OFFSET: usize = 0x0A;
 
-const DHCP_REQUEST_TIMEOUT_MS: u32 = 5000;
 /// Short timeout for ARP probe / scan operations (ms).  ARP replies on a
 /// local LAN arrive in < 10 ms; 150 ms is generous while keeping the scan
 /// responsive enough that it doesn't block the compositor for seconds.
-const SCAN_RX_TIMEOUT_MS: u32 = 150;
 const DEFAULT_MTU: u16 = 1500;
 const PACKET_BUFFER_SIZE: usize = 2048;
-const MAX_NET_MEMBERS: usize = 32;
 
 const UDP_HEADER_LEN: usize = 8;
-const ARP_HEADER_LEN: usize = 28;
-const ARP_HTYPE_ETHERNET: u16 = 1;
-const ARP_PTYPE_IPV4: u16 = net::EtherType::Ipv4.as_u16();
-const ARP_HLEN_ETHERNET: u8 = 6;
-const ARP_PLEN_IPV4: u8 = 4;
-const ARP_OPER_REQUEST: u16 = 1;
 
-const DHCP_RX_MAX_POLLS: usize = 64;
 const RX_RING_SIZE: usize = 64;
 const TX_RING_SIZE: usize = 64;
 const NAPI_BUDGET: u32 = 64;
@@ -86,8 +72,6 @@ const MAX_TX_SG_DESCS: usize = 4;
 /// `virtio_net_hdr.flags`: the driver pre-seeded a partial L4 checksum and the
 /// device must complete it over `[csum_start..]` (the `NEEDS_CSUM` offload).
 const VIRTIO_NET_HDR_F_NEEDS_CSUM: u8 = 1;
-
-static DHCP_XID_COUNTER: AtomicU32 = AtomicU32::new(0x534c_4f50);
 
 #[repr(C)]
 #[derive(Clone, Copy, Default, slopos_ostd::Pod)]
@@ -155,12 +139,6 @@ struct VirtioNetState {
     device: VirtioNetDevice,
     caps: VirtioMmioCaps,
     msix_state: Option<VirtioMsixState>,
-    ipv4_addr: [u8; 4],
-    subnet_mask: [u8; 4],
-    router: [u8; 4],
-    dns: [u8; 4],
-    members: [UserNetMember; MAX_NET_MEMBERS],
-    member_count: usize,
     rx_buffers: [Option<OwnedPageFrame>; RX_RING_SIZE],
     /// Per-head TX chain bookkeeping (`used.id` indexes this on reclaim).
     tx_chains: [Option<TxChain>; TX_RING_SIZE],
@@ -177,16 +155,6 @@ impl VirtioNetState {
             device: VirtioNetDevice::new(),
             caps: VirtioMmioCaps::empty(),
             msix_state: None,
-            ipv4_addr: [0; 4],
-            subnet_mask: [0; 4],
-            router: [0; 4],
-            dns: [0; 4],
-            members: [UserNetMember {
-                ipv4: [0; 4],
-                mac: [0; 6],
-                flags: 0,
-            }; MAX_NET_MEMBERS],
-            member_count: 0,
             rx_buffers: [const { None }; RX_RING_SIZE],
             tx_chains: [const { None }; TX_RING_SIZE],
             tx_busy: [false; TX_RING_SIZE],
@@ -200,7 +168,6 @@ static VIRTIO_NET_STATE: SpinLock<VirtioNetState> = SpinLock::new(
     VirtioNetState::new(),
     lock_class!("VIRTIO_NET_STATE", LOCK_LEVEL_RESOURCE),
 );
-static DHCP_RX_EVENT: IrqEdgeEvent = IrqEdgeEvent::new();
 /// Wake the NAPI kthread when the NIC IRQ fires. Replaces the
 /// pre-refactor `NAPI_EVENT: IrqEdgeEvent` + `sleep_current_task_ms(1)`
 /// polling loop with an IRQ-driven park-and-wake.
@@ -228,6 +195,22 @@ static DNS_RX_BUF: SpinLock<DnsRxBuf> = SpinLock::new(
 
 static DEVICE_HANDLE_PTR: AtomicPtr<DeviceHandle> = AtomicPtr::new(core::ptr::null_mut());
 
+/// Link state as of the last carrier poll.
+///
+/// An atomic rather than a field of [`VIRTIO_NET_STATE`] because
+/// [`NetDevice::carrier`] must not take a lock: the device registry calls it
+/// while enumerating, and the interface layer calls it from contexts holding
+/// their own locks, so reaching for the driver lock here would create exactly
+/// the registry-to-device edge the two-phase retirement exists to prevent.
+/// `true` until the first poll, matching the trait's own default for a device
+/// that has not yet said otherwise.
+static LINK_UP: AtomicBool = AtomicBool::new(true);
+
+/// Whether the device negotiated `VIRTIO_NET_F_STATUS`, i.e. whether
+/// [`LINK_UP`] is an observation or an assumption. Surfaced as
+/// `IFF_SLOP_CARRIER_ASSUMED` when it is the latter.
+static LINK_OBSERVABLE: AtomicBool = AtomicBool::new(false);
+
 pub fn get_device_handle() -> Option<&'static DeviceHandle> {
     DeviceHandle::from_ptr(DEVICE_HANDLE_PTR.load(Ordering::Acquire))
 }
@@ -252,32 +235,68 @@ impl DnsRxBuf {
     }
 }
 
+/// Interface counters.
+///
+/// Plain relaxed atomics rather than fields on `VirtioNetState`: every bump
+/// happens on a path that already holds the state lock, but `stats()` is called
+/// from a query syscall that must not take a driver lock to answer, and a
+/// counter is the one thing that is always safe to read torn-free without one.
+///
+/// Byte counts are payload only — the virtio header is driver framing and is
+/// not what an interface counter means.
+mod counters {
+    use core::sync::atomic::{AtomicU64, Ordering};
+
+    pub static RX_PACKETS: AtomicU64 = AtomicU64::new(0);
+    pub static TX_PACKETS: AtomicU64 = AtomicU64::new(0);
+    pub static RX_BYTES: AtomicU64 = AtomicU64::new(0);
+    pub static TX_BYTES: AtomicU64 = AtomicU64::new(0);
+    pub static RX_ERRORS: AtomicU64 = AtomicU64::new(0);
+    pub static TX_ERRORS: AtomicU64 = AtomicU64::new(0);
+    pub static RX_DROPPED: AtomicU64 = AtomicU64::new(0);
+    pub static TX_DROPPED: AtomicU64 = AtomicU64::new(0);
+
+    #[inline]
+    pub fn bump(counter: &AtomicU64, by: u64) {
+        counter.fetch_add(by, Ordering::Relaxed);
+    }
+}
+
 pub struct VirtioNetDev;
 
 impl NetDevice for VirtioNetDev {
     fn tx(&self, pkt: PacketBuf) -> Result<(), NetError> {
         let mut state = VIRTIO_NET_STATE.lock();
         if !state.device.ready || !link_is_up(&state) {
+            // Refused before it reached the ring: a drop, not an error. This is
+            // the counter that moves when the cable is out.
+            counters::bump(&counters::TX_DROPPED, 1);
             return Err(NetError::NoBufferSpace);
         }
 
         let payload = pkt.payload();
         let hdr_len = size_of::<VirtioNetHdrV1>();
         if payload.len() + hdr_len > PACKET_BUFFER_SIZE {
+            counters::bump(&counters::TX_ERRORS, 1);
             return Err(NetError::NoBufferSpace);
         }
 
         let Some(tx_page) = alloc_tx_page() else {
+            counters::bump(&counters::TX_DROPPED, 1);
             return Err(NetError::NoBufferSpace);
         };
 
         if !tx_page.write_slice(hdr_len, payload) {
+            counters::bump(&counters::TX_ERRORS, 1);
             return Err(NetError::NoBufferSpace);
         }
 
         if submit_tx(&mut state, tx_page, (hdr_len + payload.len()) as u32) {
+            counters::bump(&counters::TX_PACKETS, 1);
+            counters::bump(&counters::TX_BYTES, payload.len() as u64);
             Ok(())
         } else {
+            counters::bump(&counters::TX_DROPPED, 1);
             Err(NetError::NoBufferSpace)
         }
     }
@@ -333,17 +352,32 @@ impl NetDevice for VirtioNetDev {
 
             let idx = (used.id as usize) % RX_RING_SIZE;
             let Some(page) = state.rx_buffers[idx].take() else {
+                // The ring handed back a descriptor whose page we do not hold.
+                counters::bump(&counters::RX_ERRORS, 1);
                 continue;
             };
 
             let hdr_len = size_of::<VirtioNetHdrV1>();
             if (used.len as usize) > hdr_len {
                 let payload_len = (used.len as usize) - hdr_len;
-                if let Some(frame) = page.slice_at(hdr_len, payload_len) {
-                    if let Some(pkt) = PacketBuf::from_raw_copy(frame) {
-                        let _ = packets.push(pkt);
+                match page
+                    .slice_at(hdr_len, payload_len)
+                    .and_then(PacketBuf::from_raw_copy)
+                {
+                    Some(pkt) => {
+                        if packets.push(pkt).is_err() {
+                            counters::bump(&counters::RX_DROPPED, 1);
+                        } else {
+                            counters::bump(&counters::RX_PACKETS, 1);
+                            counters::bump(&counters::RX_BYTES, payload_len as u64);
+                        }
                     }
+                    // Out of packet buffers, or a length the page cannot back.
+                    None => counters::bump(&counters::RX_DROPPED, 1),
                 }
+            } else {
+                // Shorter than the virtio header: nothing decodable arrived.
+                counters::bump(&counters::RX_ERRORS, 1);
             }
 
             if let Some(new_page) = OwnedPageFrame::alloc_zeroed() {
@@ -374,7 +408,18 @@ impl NetDevice for VirtioNetDev {
         packets
     }
 
-    fn set_up(&self) {}
+    /// Bring the device back into service after a [`set_down`](Self::set_down).
+    ///
+    /// Restoring `ready` is not enough on its own: `poll_rx` consumes a
+    /// descriptor's page on every receive and only `virtnet_prepost_rx_buffers`
+    /// puts one back, so a ring drained while the device was down stays empty
+    /// and the NIC receives nothing ever again. Re-posting here is what keeps
+    /// an administrative down/up cycle reversible.
+    fn set_up(&self) {
+        let mut state = VIRTIO_NET_STATE.lock();
+        state.device.ready = true;
+        virtnet_prepost_rx_buffers(&mut state);
+    }
 
     fn set_down(&self) {
         let mut state = VIRTIO_NET_STATE.lock();
@@ -390,7 +435,17 @@ impl NetDevice for VirtioNetDev {
     }
 
     fn stats(&self) -> NetDeviceStats {
-        NetDeviceStats::new()
+        use core::sync::atomic::Ordering;
+        let mut out = NetDeviceStats::new();
+        out.rx_packets = counters::RX_PACKETS.load(Ordering::Relaxed);
+        out.tx_packets = counters::TX_PACKETS.load(Ordering::Relaxed);
+        out.rx_bytes = counters::RX_BYTES.load(Ordering::Relaxed);
+        out.tx_bytes = counters::TX_BYTES.load(Ordering::Relaxed);
+        out.rx_errors = counters::RX_ERRORS.load(Ordering::Relaxed);
+        out.tx_errors = counters::TX_ERRORS.load(Ordering::Relaxed);
+        out.rx_dropped = counters::RX_DROPPED.load(Ordering::Relaxed);
+        out.tx_dropped = counters::TX_DROPPED.load(Ordering::Relaxed);
+        out
     }
 
     fn features(&self) -> NetDeviceFeatures {
@@ -404,6 +459,40 @@ impl NetDevice for VirtioNetDev {
         }
         flags
     }
+
+    /// Lock-free by contract — see [`LINK_UP`].
+    fn carrier(&self) -> bool {
+        LINK_UP.load(Ordering::Acquire)
+    }
+
+    fn carrier_detect(&self) -> bool {
+        LINK_OBSERVABLE.load(Ordering::Acquire)
+    }
+}
+
+/// Sample the link and hand any transition to the interface layer.
+///
+/// Two phases, and the split is the whole point: reading the status register
+/// needs the driver lock, while `iface::set_carrier` takes the interface table
+/// and then posts a monitor event. Releasing before the second half is what
+/// keeps the driver lock free of out-edges into the network tables.
+///
+/// No edge state is kept here. `set_carrier` returns `Some` only on a real
+/// transition, so calling this every tick with an unchanged link records
+/// nothing and announces nothing.
+fn poll_carrier() {
+    let up = {
+        let state = VIRTIO_NET_STATE.lock();
+        link_status_up(&state)
+    };
+    LINK_UP.store(up, Ordering::Release);
+
+    // Before the device is registered there is no interface to carry the
+    // transition; the state attach reads is this atomic, so nothing is lost.
+    let Some(handle) = get_device_handle() else {
+        return;
+    };
+    let _ = slopos_net::iface::set_carrier(handle.index(), up);
 }
 
 pub fn dns_intercept_response(payload: &[u8]) {
@@ -413,11 +502,6 @@ pub fn dns_intercept_response(payload: &[u8]) {
     dns_buf.len = copy_len;
     drop(dns_buf);
     DNS_RX_EVENT.signal();
-}
-
-pub fn sniff_packet_for_members(frame: &[u8]) {
-    let mut state = VIRTIO_NET_STATE.lock();
-    sniff_frame_for_members(&mut state, frame);
 }
 
 // =============================================================================
@@ -449,11 +533,30 @@ fn read_mtu(caps: &VirtioMmioCaps, negotiated_features: u64) -> u16 {
     caps.device_cfg.read::<u16>(DEV_CFG_MTU_OFFSET)
 }
 
-fn link_is_up(state: &VirtioNetState) -> bool {
-    if !state.device.ready {
-        return false;
-    }
+/// This device's IPv4 address, read from the interface table.
+///
+/// The table is the authority. A driver-side copy has no way to learn about a
+/// renewal, a static reconfiguration or a second address.
+fn our_ipv4(_state: &VirtioNetState) -> [u8; 4] {
+    get_device_handle()
+        .and_then(|h| slopos_net::iface::our_ip(h.index()))
+        .map(|ip| ip.0)
+        .unwrap_or([0; 4])
+}
 
+/// The link state the device reports, independent of whether the driver is in
+/// service.
+///
+/// Kept apart from [`link_is_up`] because carrier is a statement about the
+/// cable and `ready` is a statement about us: folding them together would make
+/// an administrative down look like somebody had unplugged the machine, and the
+/// interface layer renders those two conditions differently
+/// (`IFF_SLOP_NO_CARRIER` against a cleared `IFF_UP`).
+///
+/// A device that did not negotiate `VIRTIO_NET_F_STATUS` reports up, because it
+/// has nothing better to say; `carrier_detect` is what tells a UI that answer
+/// was a guess.
+fn link_status_up(state: &VirtioNetState) -> bool {
     if (state.device.negotiated_features & VIRTIO_NET_F_STATUS) == 0
         || !state.caps.has_device_cfg()
         || state.caps.device_cfg_len < (DEV_CFG_STATUS_OFFSET as u32 + 2)
@@ -464,72 +567,8 @@ fn link_is_up(state: &VirtioNetState) -> bool {
     (state.caps.device_cfg.read::<u16>(DEV_CFG_STATUS_OFFSET) & VIRTIO_NET_S_LINK_UP) != 0
 }
 
-// =============================================================================
-// Network member tracking
-// =============================================================================
-
-fn add_or_update_member(state: &mut VirtioNetState, mac: [u8; 6], ipv4: [u8; 4], flag: u16) {
-    if mac == [0; 6] {
-        return;
-    }
-
-    for entry in &mut state.members[..state.member_count] {
-        if entry.mac == mac || (ipv4 != [0; 4] && entry.ipv4 == ipv4) {
-            entry.mac = mac;
-            if ipv4 != [0; 4] {
-                entry.ipv4 = ipv4;
-            }
-            entry.flags |= flag;
-            return;
-        }
-    }
-
-    if state.member_count < state.members.len() {
-        state.members[state.member_count] = UserNetMember {
-            ipv4,
-            mac,
-            flags: flag,
-        };
-        state.member_count += 1;
-    }
-}
-
-/// Inspect an incoming Ethernet frame and record any new MAC/IP associations.
-fn sniff_frame_for_members(state: &mut VirtioNetState, frame: &[u8]) {
-    if frame.len() < net::ETH_HEADER_LEN {
-        return;
-    }
-
-    let src_mac: [u8; 6] = frame[6..12].try_into().unwrap();
-    let ethertype = u16::from_be_bytes([frame[12], frame[13]]);
-
-    if ethertype == net::EtherType::Arp.as_u16() {
-        if frame.len() < net::ETH_HEADER_LEN + ARP_HEADER_LEN {
-            return;
-        }
-        let arp = &frame[net::ETH_HEADER_LEN..net::ETH_HEADER_LEN + ARP_HEADER_LEN];
-        let htype = u16::from_be_bytes([arp[0], arp[1]]);
-        let ptype = u16::from_be_bytes([arp[2], arp[3]]);
-        if htype != ARP_HTYPE_ETHERNET
-            || ptype != ARP_PTYPE_IPV4
-            || arp[4] != ARP_HLEN_ETHERNET
-            || arp[5] != ARP_PLEN_IPV4
-        {
-            return;
-        }
-        let sender_mac: [u8; 6] = arp[8..14].try_into().unwrap();
-        let sender_ip: [u8; 4] = arp[14..18].try_into().unwrap();
-        add_or_update_member(state, sender_mac, sender_ip, USER_NET_MEMBER_FLAG_ARP);
-        return;
-    }
-
-    if ethertype == net::EtherType::Ipv4.as_u16() {
-        if frame.len() < net::ETH_HEADER_LEN + net::IPV4_HEADER_LEN {
-            return;
-        }
-        let src_ip: [u8; 4] = frame[26..30].try_into().unwrap();
-        add_or_update_member(state, src_mac, src_ip, USER_NET_MEMBER_FLAG_IPV4);
-    }
+fn link_is_up(state: &VirtioNetState) -> bool {
+    state.device.ready && link_status_up(state)
 }
 
 // =============================================================================
@@ -620,6 +659,13 @@ fn submit_tx_zerocopy(
         state.caps.notify_off_multiplier,
         &state.device.tx_queue,
         VIRTIO_NET_QUEUE_TX,
+    );
+    // Payload only: `net_hdr` is virtio framing, and the runs are what actually
+    // goes on the wire.
+    counters::bump(&counters::TX_PACKETS, 1);
+    counters::bump(
+        &counters::TX_BYTES,
+        runs.iter().map(|(_, len)| *len as u64).sum::<u64>(),
     );
     Ok(())
 }
@@ -797,55 +843,6 @@ fn alloc_tx_page() -> Option<OwnedPageFrame> {
     page.write_at::<VirtioNetHdrV1>(0, &VirtioNetHdrV1::default());
     Some(page)
 }
-
-// =============================================================================
-// ARP
-// =============================================================================
-
-fn transmit_arp_request(state: &mut VirtioNetState, target_ip: [u8; 4]) -> bool {
-    if !state.device.ready || !state.device.tx_queue.is_ready() {
-        return false;
-    }
-
-    let Some(mut tx_page) = alloc_tx_page() else {
-        return false;
-    };
-
-    let hdr_len = size_of::<VirtioNetHdrV1>();
-    let frame_len = net::ETH_HEADER_LEN + ARP_HEADER_LEN;
-    let total_len = hdr_len + frame_len;
-
-    if total_len > PACKET_BUFFER_SIZE {
-        return false;
-    }
-
-    {
-        let Some(frame) = tx_page.slice_at_mut(hdr_len, frame_len) else {
-            return false;
-        };
-
-        // Ethernet header
-        frame[0..net::ETH_ADDR_LEN].copy_from_slice(&net::MacAddr::BROADCAST.0);
-        frame[net::ETH_ADDR_LEN..net::ETH_ADDR_LEN * 2].copy_from_slice(&state.device.mac);
-        frame[net::ETH_ADDR_LEN * 2..net::ETH_HEADER_LEN]
-            .copy_from_slice(&net::EtherType::Arp.to_be_bytes());
-
-        // ARP payload
-        let a = net::ETH_HEADER_LEN;
-        frame[a..a + 2].copy_from_slice(&ARP_HTYPE_ETHERNET.to_be_bytes());
-        frame[a + 2..a + 4].copy_from_slice(&ARP_PTYPE_IPV4.to_be_bytes());
-        frame[a + 4] = ARP_HLEN_ETHERNET;
-        frame[a + 5] = ARP_PLEN_IPV4;
-        frame[a + 6..a + 8].copy_from_slice(&ARP_OPER_REQUEST.to_be_bytes());
-        frame[a + 8..a + 14].copy_from_slice(&state.device.mac);
-        frame[a + 14..a + 18].copy_from_slice(&state.ipv4_addr);
-        frame[a + 18..a + 24].copy_from_slice(&[0; net::ETH_ADDR_LEN]);
-        frame[a + 24..a + 28].copy_from_slice(&target_ip);
-    }
-
-    submit_tx(state, tx_page, total_len as u32)
-}
-
 // =============================================================================
 // Receive path
 // =============================================================================
@@ -881,202 +878,6 @@ fn virtnet_prepost_rx_buffers(state: &mut VirtioNetState) {
             &state.device.rx_queue,
             VIRTIO_NET_QUEUE_RX,
         );
-    }
-}
-
-fn parse_udp_header(payload: &[u8]) -> Option<(u16, u16, &[u8])> {
-    if payload.len() < UDP_HEADER_LEN {
-        return None;
-    }
-
-    let src_port = u16::from_be_bytes([payload[0], payload[1]]);
-    let dst_port = u16::from_be_bytes([payload[2], payload[3]]);
-    let udp_len = u16::from_be_bytes([payload[4], payload[5]]) as usize;
-
-    if udp_len < UDP_HEADER_LEN || udp_len > payload.len() {
-        return None;
-    }
-
-    Some((src_port, dst_port, &payload[UDP_HEADER_LEN..udp_len]))
-}
-
-fn dispatch_rx_frame(state: &mut VirtioNetState, frame: &[u8]) {
-    sniff_frame_for_members(state, frame);
-    if frame.len() < net::ETH_HEADER_LEN {
-        return;
-    }
-
-    let ethertype = u16::from_be_bytes([frame[12], frame[13]]);
-    if ethertype != net::EtherType::Ipv4.as_u16() {
-        return;
-    }
-    if frame.len() < net::ETH_HEADER_LEN + net::IPV4_HEADER_LEN {
-        return;
-    }
-
-    let ip_off = net::ETH_HEADER_LEN;
-    let ihl = ((frame[ip_off] & 0x0f) as usize) * 4;
-    if ihl < net::IPV4_HEADER_LEN || frame.len() < ip_off + ihl {
-        return;
-    }
-
-    let proto = frame[ip_off + 9];
-    let src_ip: [u8; 4] = frame[ip_off + 12..ip_off + 16].try_into().unwrap_or([0; 4]);
-    let dst_ip: [u8; 4] = frame[ip_off + 16..ip_off + 20].try_into().unwrap_or([0; 4]);
-    let ip_payload = &frame[ip_off + ihl..];
-
-    match proto {
-        p if p == net::IpProtocol::Tcp.as_u8() => {
-            let Some(hdr) = tcp::parse_header(ip_payload) else {
-                return;
-            };
-            let hdr_len = hdr.header_len();
-            if hdr_len < tcp::TCP_HEADER_LEN || ip_payload.len() < hdr_len {
-                return;
-            }
-            let options = &ip_payload[tcp::TCP_HEADER_LEN..hdr_len];
-            let payload = &ip_payload[hdr_len..];
-            let now_ms = slopos_kernel_services::clock::uptime_ms();
-            let actions = tcp::input(src_ip, dst_ip, &hdr, options, payload, now_ms);
-            for seg in actions.segments() {
-                let _ = socket::socket_send_tcp_segment(seg, &[]);
-            }
-            socket::socket_notify_tcp_activity(&actions);
-        }
-        p if p == net::IpProtocol::Udp.as_u8() => {
-            if let Some((src_port, dst_port, udp_payload)) = parse_udp_header(ip_payload) {
-                // Intercept DNS responses (src port 53) for the in-kernel resolver
-                if src_port == net::dns::DNS_PORT {
-                    let copy_len = udp_payload.len().min(512);
-                    let mut dns_buf = DNS_RX_BUF.lock();
-                    dns_buf.data[..copy_len].copy_from_slice(&udp_payload[..copy_len]);
-                    dns_buf.len = copy_len;
-                    drop(dns_buf);
-                    DNS_RX_EVENT.signal();
-                }
-                // Always deliver to socket table too (userland might have a UDP
-                // socket bound to port 53 for its own purposes).
-                socket::socket_deliver_udp_from_dispatch(
-                    src_ip,
-                    dst_ip,
-                    src_port,
-                    dst_port,
-                    udp_payload,
-                );
-            }
-        }
-        p if p == net::IpProtocol::Icmp.as_u8() => {
-            let _ = (src_ip, dst_ip, ip_payload);
-        }
-        _ => {}
-    }
-}
-
-fn virtnet_poll(state: &mut VirtioNetState, budget: u32) -> usize {
-    let mut processed = 0usize;
-    let mut posted = 0usize;
-    let _ = virtnet_clean_tx(state);
-
-    while (processed as u32) < budget {
-        let Some(used) = state.device.rx_queue.try_pop_used() else {
-            break;
-        };
-
-        let idx = (used.id as usize) % RX_RING_SIZE;
-        let Some(page) = state.rx_buffers[idx].take() else {
-            continue;
-        };
-
-        let hdr_len = size_of::<VirtioNetHdrV1>();
-        if (used.len as usize) > hdr_len {
-            let payload_len = (used.len as usize) - hdr_len;
-            if let Some(frame) = page.slice_at(hdr_len, payload_len) {
-                dispatch_rx_frame(state, frame);
-            }
-        }
-
-        processed += 1;
-
-        if let Some(new_page) = OwnedPageFrame::alloc_zeroed() {
-            state.device.rx_queue.write_desc(
-                idx as u16,
-                VirtqDesc {
-                    addr: new_page.phys_u64(),
-                    len: PACKET_BUFFER_SIZE as u32,
-                    flags: VIRTQ_DESC_F_WRITE,
-                    next: 0,
-                },
-            );
-            state.rx_buffers[idx] = Some(new_page);
-            state.device.rx_queue.submit(idx as u16);
-            posted += 1;
-        }
-    }
-
-    if posted > 0 {
-        queue::notify_queue(
-            &state.caps.notify_cfg,
-            state.caps.notify_off_multiplier,
-            &state.device.rx_queue,
-            VIRTIO_NET_QUEUE_RX,
-        );
-    }
-
-    processed
-}
-
-fn poll_one_rx_frame(state: &mut VirtioNetState, out_payload: Option<&mut [u8]>) -> Option<usize> {
-    poll_one_rx_frame_timeout(state, out_payload, DHCP_REQUEST_TIMEOUT_MS)
-}
-
-fn poll_one_rx_frame_timeout(
-    state: &mut VirtioNetState,
-    out_payload: Option<&mut [u8]>,
-    timeout_ms: u32,
-) -> Option<usize> {
-    let rx_page = OwnedPageFrame::alloc_zeroed()?;
-    let rx_phys = rx_page.phys_u64();
-
-    state.device.rx_queue.write_desc(
-        0,
-        VirtqDesc {
-            addr: rx_phys,
-            len: PACKET_BUFFER_SIZE as u32,
-            flags: VIRTQ_DESC_F_WRITE,
-            next: 0,
-        },
-    );
-
-    state.device.rx_queue.submit(0);
-    queue::notify_queue(
-        &state.caps.notify_cfg,
-        state.caps.notify_off_multiplier,
-        &state.device.rx_queue,
-        VIRTIO_NET_QUEUE_RX,
-    );
-
-    if !DHCP_RX_EVENT.wait_timeout_ms(timeout_ms) {
-        // Intentional leak: device may still be DMA-ing.
-        let _ = rx_page.into_phys();
-        return None;
-    }
-    let used = state.device.rx_queue.try_pop_used()?;
-
-    let hdr_len = size_of::<VirtioNetHdrV1>();
-    if (used.len as usize) <= hdr_len {
-        return Some(0);
-    }
-
-    let payload_len = (used.len as usize) - hdr_len;
-    let frame = rx_page.slice_at(hdr_len, payload_len)?;
-    sniff_frame_for_members(state, frame);
-
-    if let Some(dst) = out_payload {
-        let copy_len = payload_len.min(dst.len());
-        dst[..copy_len].copy_from_slice(&frame[..copy_len]);
-        Some(copy_len)
-    } else {
-        Some(payload_len)
     }
 }
 
@@ -1158,111 +959,6 @@ pub fn transmit_udp_packet(
 // DHCP client
 // =============================================================================
 
-fn transmit_dhcp_packet(state: &mut VirtioNetState, payload: &[u8]) -> bool {
-    transmit_udp_packet_locked(
-        state,
-        [0; 4],
-        net::Ipv4Addr::BROADCAST.0,
-        dhcp::UDP_PORT_CLIENT,
-        dhcp::UDP_PORT_SERVER,
-        payload,
-    )
-}
-
-fn parse_dhcp_reply(frame: &[u8], xid: u32, expected_type: u8) -> Option<dhcp::DhcpOffer> {
-    let min_len =
-        net::ETH_HEADER_LEN + net::IPV4_HEADER_LEN + UDP_HEADER_LEN + dhcp::BOOTP_HEADER_LEN;
-    if frame.len() < min_len {
-        return None;
-    }
-    if u16::from_be_bytes([frame[12], frame[13]]) != net::EtherType::Ipv4.as_u16() {
-        return None;
-    }
-
-    let ip_off = net::ETH_HEADER_LEN;
-    let ihl = ((frame[ip_off] & 0x0f) as usize) * 4;
-    if ihl < net::IPV4_HEADER_LEN
-        || frame.len() < ip_off + ihl + UDP_HEADER_LEN + dhcp::BOOTP_HEADER_LEN
-    {
-        return None;
-    }
-    if frame[ip_off + 9] != net::IpProtocol::Udp.as_u8() {
-        return None;
-    }
-
-    let udp_off = ip_off + ihl;
-    let src_port = u16::from_be_bytes([frame[udp_off], frame[udp_off + 1]]);
-    let dst_port = u16::from_be_bytes([frame[udp_off + 2], frame[udp_off + 3]]);
-    if src_port != dhcp::UDP_PORT_SERVER || dst_port != dhcp::UDP_PORT_CLIENT {
-        return None;
-    }
-
-    let udp_len = u16::from_be_bytes([frame[udp_off + 4], frame[udp_off + 5]]) as usize;
-    if udp_len < UDP_HEADER_LEN + dhcp::BOOTP_HEADER_LEN || frame.len() < udp_off + udp_len {
-        return None;
-    }
-
-    let payload = &frame[udp_off + UDP_HEADER_LEN..udp_off + udp_len];
-    dhcp::parse_bootp_reply(payload, xid, expected_type)
-}
-
-fn wait_for_dhcp_reply(
-    state: &mut VirtioNetState,
-    xid: u32,
-    expected_type: u8,
-) -> Option<dhcp::DhcpOffer> {
-    // Heap-allocate the receive buffer. An inline
-    // `[u8; PACKET_BUFFER_SIZE]` would add ~2 KiB to this function's
-    // stack frame, over the stack-safety gate.
-    let mut frame = slopos_ostd::KVec::<u8>::zeroed(PACKET_BUFFER_SIZE).ok()?;
-    for _ in 0..DHCP_RX_MAX_POLLS {
-        let len = poll_one_rx_frame(state, Some(frame.as_mut()))?;
-        if len > 0
-            && let Some(reply) = parse_dhcp_reply(&frame[..len], xid, expected_type)
-        {
-            return Some(reply);
-        }
-    }
-    None
-}
-
-/// Use the preferred value unless it's zeroed, in which case fall back.
-fn or_fallback(preferred: [u8; 4], fallback: [u8; 4]) -> [u8; 4] {
-    if preferred != [0; 4] {
-        preferred
-    } else {
-        fallback
-    }
-}
-
-fn dhcp_acquire_lease(state: &mut VirtioNetState) -> Option<dhcp::DhcpLease> {
-    let xid = DHCP_XID_COUNTER
-        .fetch_add(1, Ordering::Relaxed)
-        .wrapping_add(1);
-    let mut packet = [0u8; 320];
-
-    let discover_len = dhcp::build_discover(state.device.mac, xid, &mut packet);
-    if !transmit_dhcp_packet(state, &packet[..discover_len]) {
-        return None;
-    }
-
-    let offer = wait_for_dhcp_reply(state, xid, dhcp::MSG_OFFER)?;
-    let request_len = dhcp::build_request(state.device.mac, xid, offer, &mut packet);
-    if !transmit_dhcp_packet(state, &packet[..request_len]) {
-        return None;
-    }
-
-    let ack = wait_for_dhcp_reply(state, xid, dhcp::MSG_ACK)?;
-
-    let lease = dhcp::DhcpLease {
-        ipv4: ack.yiaddr,
-        subnet_mask: or_fallback(ack.subnet_mask, offer.subnet_mask),
-        router: or_fallback(ack.router, offer.router),
-        dns: or_fallback(ack.dns, offer.dns),
-    };
-    if lease.is_valid() { Some(lease) } else { None }
-}
-
 // =============================================================================
 // PCI probe
 // =============================================================================
@@ -1290,7 +986,6 @@ fn run_napi_burst() -> u32 {
     let packets = handle.poll_rx(NAPI_CONTEXT.budget() as usize, &PACKET_POOL);
     let processed = packets.len() as u32;
     for pkt in packets {
-        sniff_packet_for_members(pkt.payload());
         ingress::net_rx(handle, pkt);
     }
     NAPI_CONTEXT.add_processed(processed);
@@ -1453,6 +1148,12 @@ fn net_timer_thread_entry(token: slopos_ostd::sync::kernel_io_task::KernelIoToke
         }
         slopos_net::timer::net_timer_process();
         slopos_net::socket::socket_process_timers();
+        // Carrier is polled from here rather than driven from the virtio
+        // config-change interrupt because reading the status register needs the
+        // driver lock and acting on a transition needs four more plus an
+        // allocation — none of which a hard IRQ may do. 50 ms is well inside
+        // what a person perceives as immediate for a cable event.
+        poll_carrier();
         // Yield with deadline so any equal-priority task gets a
         // chance to run between ticks. The next iteration's
         // `wait_timeout_ms` parks again.
@@ -1473,7 +1174,6 @@ fn net_timer_thread_entry(token: slopos_ostd::sync::kernel_io_task::KernelIoToke
 fn virtio_net_irq_handler(queue_idx: u8) {
     match queue_idx {
         0 => {
-            DHCP_RX_EVENT.signal();
             NAPI_WAKER.arm_and_wake();
         }
         1 => {
@@ -1483,49 +1183,52 @@ fn virtio_net_irq_handler(queue_idx: u8) {
     }
 }
 
-/// Single 12-arg `klog_info!` pulled out so its `format_args!` scratch
-/// stays local.
+/// Prepost RX buffers and seed the lock-free link state, with
+/// `VIRTIO_NET_STATE` held.
+///
+/// **Non-blocking**: nothing here waits for a network round trip. That lock
+/// disables interrupts and preemption, so anything that allocates, takes
+/// another subsystem's lock or deschedules belongs in
+/// [`virtio_net_publish_device`] instead — address configuration included.
 #[inline(never)]
-fn virtio_net_log_dhcp_lease(lease: &dhcp::DhcpLease) {
-    klog_info!(
-        "virtio-net: DHCP lease ip={}.{}.{}.{} gw={}.{}.{}.{} dns={}.{}.{}.{}",
-        lease.ipv4[0],
-        lease.ipv4[1],
-        lease.ipv4[2],
-        lease.ipv4[3],
-        lease.router[0],
-        lease.router[1],
-        lease.router[2],
-        lease.router[3],
-        lease.dns[0],
-        lease.dns[1],
-        lease.dns[2],
-        lease.dns[3]
+fn virtio_net_register_device(state: &mut VirtioNetState) -> bool {
+    virtnet_prepost_rx_buffers(state);
+
+    // Seed the lock-free link state before the device is visible to anything
+    // that reads it. `carrier()` is answerable from the moment `register`
+    // returns, and the registry enumerates devices without asking us first.
+    LINK_OBSERVABLE.store(
+        (state.device.negotiated_features & VIRTIO_NET_F_STATUS) != 0,
+        Ordering::Release,
     );
+    LINK_UP.store(link_status_up(state), Ordering::Release);
+    true
 }
 
-/// DHCP acquire + lease-field propagation + prepost-RX + PACKET_POOL init
-/// + netstack configuration. Extracted from `virtio_net_probe` so its
-/// locked-state block scratch doesn't inflate the probe's frame.
-/// Returns `false` on `KBox::try_new(VirtioNetDev)` allocation failure.
-#[inline(never)]
-fn virtio_net_acquire_dhcp_and_register(state: &mut VirtioNetState) -> bool {
-    let dhcp_lease = dhcp_acquire_lease(state);
-    if let Some(ref lease) = dhcp_lease {
-        state.ipv4_addr = lease.ipv4;
-        state.subnet_mask = lease.subnet_mask;
-        state.router = lease.router;
-        state.dns = lease.dns;
-        virtio_net_log_dhcp_lease(lease);
-    } else {
-        klog_info!("virtio-net: DHCP lease unavailable");
-    }
-
-    virtnet_prepost_rx_buffers(state);
+/// Publish the device: initialise the packet pool, register it, attach its
+/// interface, and start acquiring an address.
+///
+/// **Runs with `VIRTIO_NET_STATE` released.** Every step here either allocates
+/// or can re-enter this driver, and neither is permissible under a lock that
+/// disables interrupts and preemption:
+///
+/// * `PACKET_POOL.init()` and `KArc::try_new` reach the allocator, which is
+///   where every subsystem meets — hence the tree's rule never to allocate
+///   under a cli-lock.
+/// * `iface::attach` takes the interface table. Nesting it under the driver
+///   lock is an ordering edge pointing the wrong way against `iface_ctl`'s
+///   one-lock-at-a-time discipline, which takes the interface table *then* the
+///   registry.
+/// * `dhcp::start` transmits, and a transmit lands back in this driver's own
+///   `tx()`: under the lock that is a re-entrant acquire, and it hangs the
+///   machine before userland.
+///
+/// Returns `false` only on allocation failure.
+fn virtio_net_publish_device(mac: [u8; 6], mtu: u16) -> bool {
+    use slopos_net::netdev::DEVICE_REGISTRY;
 
     PACKET_POOL.init();
 
-    use slopos_net::netdev::DEVICE_REGISTRY;
     let dev: KArc<dyn slopos_net::netdev::NetDevice + Send + Sync> =
         match KArc::try_new(VirtioNetDev) {
             Ok(d) => d,
@@ -1534,28 +1237,42 @@ fn virtio_net_acquire_dhcp_and_register(state: &mut VirtioNetState) -> bool {
                 return false;
             }
         };
-    if let Some(handle) = DEVICE_REGISTRY.register(dev) {
-        let actual_idx = handle.index();
-        klog_info!(
-            "virtio-net: registered as dev {} in device registry",
-            actual_idx
-        );
-
-        if let Some(ref lease) = dhcp_lease {
-            use slopos_net::netstack::NET_STACK;
-            use slopos_net::types::Ipv4Addr;
-            NET_STACK.configure(
-                actual_idx,
-                Ipv4Addr::from_bytes(lease.ipv4),
-                Ipv4Addr::from_bytes(lease.subnet_mask),
-                Ipv4Addr::from_bytes(lease.router),
-                [Ipv4Addr::from_bytes(lease.dns), Ipv4Addr::UNSPECIFIED],
-            );
-        }
-
-        set_device_handle(handle);
-    } else {
+    let Some(handle) = DEVICE_REGISTRY.register(dev) else {
         klog_info!("virtio-net: failed to register in device registry");
+        return true;
+    };
+
+    let actual_idx = handle.index();
+    klog_info!(
+        "virtio-net: registered as dev {} in device registry",
+        actual_idx
+    );
+
+    match slopos_net::iface::attach(
+        actual_idx,
+        slopos_net::iface::IfaceKind::Ethernet,
+        slopos_net::types::MacAddr(mac),
+        mtu,
+        // The same value `carrier()` will report, so the row and the driver
+        // agree from the first instant and the first poll finds no transition
+        // to invent.
+        LINK_UP.load(Ordering::Acquire),
+        // The device negotiated VIRTIO_NET_F_STATUS, so its link state is
+        // observed rather than assumed.
+        LINK_OBSERVABLE.load(Ordering::Acquire),
+    ) {
+        Ok(ifindex) => klog_info!("virtio-net: attached interface {}", ifindex),
+        Err(err) => klog_info!("virtio-net: failed to attach interface: {:?}", err),
+    }
+
+    set_device_handle(handle);
+
+    // Only queues a DISCOVER and arms a timer; the conversation runs on the
+    // network timer thread, so probe returns whether or not a server ever
+    // answers, and a late or absent server is retried forever instead of
+    // leaving the machine unaddressed until the next reboot.
+    if !slopos_net::dhcp::start(actual_idx) {
+        klog_info!("virtio-net: could not start the DHCP client");
     }
     true
 }
@@ -1672,14 +1389,18 @@ fn virtio_net_probe(bound: &mut BoundDevice<'_>) -> Result<ProbeOutcome, PciProb
         state.device.ready = true;
         state.caps = caps;
         state.msix_state = msix_state;
-        state.ipv4_addr = [0; 4];
-        state.subnet_mask = [0; 4];
-        state.router = [0; 4];
-        state.dns = [0; 4];
 
-        if !virtio_net_acquire_dhcp_and_register(&mut state) {
+        if !virtio_net_register_device(&mut state) {
             return Err(PciProbeError::OutOfMemory);
         }
+    }
+
+    // Everything that allocates, takes another subsystem's lock, or can
+    // re-enter this driver happens here — with `VIRTIO_NET_STATE` released.
+    // `mac` and `mtu` were read from the device configuration above, so this
+    // needs nothing back out of the locked block.
+    if !virtio_net_publish_device(mac, mtu) {
+        return Err(PciProbeError::OutOfMemory);
     }
 
     // Sync-kick: user-task syscall paths call `napi::kick` to drain
@@ -1702,9 +1423,6 @@ fn virtio_net_probe(bound: &mut BoundDevice<'_>) -> Result<ProbeOutcome, PciProb
         virtio_net_is_ready,
         virtio_net_transmit,
         virtnet_force_napi_poll,
-        scan_members: virtio_net_scan_members,
-        is_ready: virtio_net_is_ready,
-        get_info: virtio_net_get_info,
     };
     register_net_driver_services(&NET_DRIVER_SVC);
 
@@ -1786,90 +1504,6 @@ pub fn virtio_net_link_up() -> bool {
     link_is_up(&state)
 }
 
-pub fn virtio_net_scan_members(out: &mut [UserNetMember], active_probe: bool) -> usize {
-    if out.is_empty() {
-        return 0;
-    }
-
-    // Snapshot config, register self, and gather probe targets under a
-    // SHORT lock. The `VIRTIO_NET_STATE` SpinLock disables preemption while
-    // held, so it MUST NOT be held across the probe sleeps below: a task
-    // that deschedules with a preempt-disabling lock held strands the lock
-    // on the blocked task and unbalances the per-CPU preempt count. The
-    // lock is therefore re-acquired in short windows around each sleep.
-    let mut targets = [[0u8; 4]; 3];
-    let mut target_count = 0usize;
-    {
-        let mut state = VIRTIO_NET_STATE.lock();
-        if !state.device.ready || !link_is_up(&state) {
-            return 0;
-        }
-
-        let self_mac = state.device.mac;
-        let self_ipv4 = state.ipv4_addr;
-        if self_ipv4 != [0; 4] {
-            add_or_update_member(&mut state, self_mac, self_ipv4, USER_NET_MEMBER_FLAG_IPV4);
-        }
-
-        if active_probe {
-            if state.router != [0; 4] {
-                targets[target_count] = state.router;
-                target_count += 1;
-            }
-
-            // Probe .2 and .3 in the local subnet as simple neighbor discovery
-            for last_octet in [2u8, 3] {
-                if state.ipv4_addr != [0; 4] && target_count < targets.len() {
-                    let mut t = state.ipv4_addr;
-                    t[3] = last_octet;
-                    targets[target_count] = t;
-                    target_count += 1;
-                }
-            }
-        }
-    }
-
-    if active_probe {
-        for target in &targets[..target_count] {
-            // Transmit the ARP under the lock, then release it before sleeping.
-            {
-                let mut state = VIRTIO_NET_STATE.lock();
-                let _ = transmit_arp_request(&mut state, *target);
-            }
-            // The NAPI kthread (TaskPriority::KernelIo) wakes on each RX IRQ
-            // via NAPI_WAKER and drains the ring inline. We wait for it to
-            // make progress with NO lock held so this task can deschedule
-            // safely — a short sleep is enough on the local segment.
-            slopos_kernel_services::driver_runtime::sleep_current_task_ms(SCAN_RX_TIMEOUT_MS);
-            {
-                let mut state = VIRTIO_NET_STATE.lock();
-                let _ = virtnet_poll(&mut state, NAPI_BUDGET);
-            }
-        }
-
-        // Drain any remaining rx frames from the above probes (no sleep here).
-        let mut state = VIRTIO_NET_STATE.lock();
-        for _ in 0..8 {
-            if virtnet_poll(&mut state, NAPI_BUDGET) == 0 {
-                break;
-            }
-        }
-    }
-
-    let state = VIRTIO_NET_STATE.lock();
-    let copy_count = out.len().min(state.member_count);
-    out[..copy_count].copy_from_slice(&state.members[..copy_count]);
-    copy_count
-}
-
-pub fn virtio_net_queue_sizes() -> Option<(u16, u16)> {
-    let state = VIRTIO_NET_STATE.lock();
-    if !state.device.ready {
-        return None;
-    }
-    Some((state.device.rx_queue.size, state.device.tx_queue.size))
-}
-
 pub fn virtio_net_mac() -> Option<[u8; 6]> {
     let state = VIRTIO_NET_STATE.lock();
     if !state.device.ready {
@@ -1888,32 +1522,11 @@ pub fn virtio_net_mtu() -> Option<u16> {
 
 pub fn virtio_net_ipv4_addr() -> Option<[u8; 4]> {
     let state = VIRTIO_NET_STATE.lock();
-    if !state.device.ready || state.ipv4_addr == [0; 4] {
+    if !state.device.ready {
         return None;
     }
-    Some(state.ipv4_addr)
-}
-
-pub fn virtio_net_get_info(out: &mut UserNetInfo) {
-    let state = VIRTIO_NET_STATE.lock();
-    out.nic_ready = u8::from(state.device.ready);
-    out.link_up = u8::from(state.device.ready && link_is_up(&state));
-    out.mac = state.device.mac;
-    out.mtu = state.device.mtu;
-
-    // prefer NetStack as the source of truth for IP config.
-    if let Some(iface) = slopos_net::netstack::NET_STACK.first_iface() {
-        out.ipv4 = iface.ipv4_addr.0;
-        out.subnet_mask = iface.netmask.0;
-        out.gateway = iface.gateway.0;
-        out.dns = iface.dns[0].0;
-    } else {
-        // Legacy fallback — still read from VirtioNetState.
-        out.ipv4 = state.ipv4_addr;
-        out.subnet_mask = state.subnet_mask;
-        out.gateway = state.router;
-        out.dns = state.dns;
-    }
+    let addr = our_ipv4(&state);
+    if addr == [0; 4] { None } else { Some(addr) }
 }
 
 pub fn virtio_net_transmit(packet: &[u8]) -> bool {
@@ -1949,10 +1562,10 @@ pub fn virtio_net_transmit(packet: &[u8]) -> bool {
 /// Return the DHCP-provided DNS server address, or `None` if not configured.
 pub fn virtio_net_dns() -> Option<[u8; 4]> {
     let state = VIRTIO_NET_STATE.lock();
-    if !state.device.ready || state.dns == [0; 4] {
+    if !state.device.ready {
         return None;
     }
-    Some(state.dns)
+    slopos_net::resolver::primary().map(|ip| ip.0)
 }
 
 /// Clear any stale DNS response buffer.

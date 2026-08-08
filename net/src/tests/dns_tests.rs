@@ -435,7 +435,7 @@ pub fn test_dns_t8_regression_network_stack() -> TestResult {
 
     socket_reset_all();
 
-    let sock = socket_create(AF_INET, SOCK_DGRAM, 0);
+    let sock = socket_create(AF_INET, SOCK_DGRAM, 0, SocketOwner::UNOWNED);
     assert_test!(sock >= 0, "create UDP socket");
     let sock = sock as u32;
 

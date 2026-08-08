@@ -134,6 +134,24 @@ impl fmt::Debug for NeighborEntry {
     }
 }
 
+/// One neighbour-cache entry, flattened for enumeration.
+#[derive(Clone, Copy)]
+pub struct NeighborSnapshot {
+    pub dev: DevIndex,
+    pub ip: Ipv4Addr,
+    /// All-zero while the entry is `Incomplete` or `Failed`.
+    pub mac: MacAddr,
+    /// `NET_NEIGH_*`.
+    pub state: u8,
+    pub queued_pkts: u32,
+    /// How long ago the entry's MAC was last confirmed, in milliseconds.
+    ///
+    /// `Reachable` measures from the ARP reply, `Stale` from the last use.
+    /// `Incomplete` and `Failed` have never been confirmed and report 0, which
+    /// a renderer distinguishes by the state rather than by the age.
+    pub confirmed_ms_ago: u32,
+}
+
 /// Actions to execute *outside* the neighbor cache lock.
 ///
 /// The cache methods collect these under the lock and return them.  The caller
@@ -203,6 +221,156 @@ impl NeighborCache {
         inner.next_entry_id = 1;
     }
 
+    /// Drop every entry belonging to `dev`, returning the packets that were
+    /// queued waiting for resolution.
+    ///
+    /// The packets come back to the caller rather than being dropped here:
+    /// `PacketBuf::drop` returns the buffer to [`PACKET_POOL`], which takes the
+    /// pool's own lock, so dropping them inside would nest the packet pool
+    /// under the neighbour cache. The caller drops them once the cache lock is
+    /// gone.
+    ///
+    /// [`PACKET_POOL`]: crate::pool::PACKET_POOL
+    pub fn flush_device(&self, dev: DevIndex) -> KVec<PacketBuf> {
+        let mut orphans = KVec::new();
+        let mut inner = self.inner.lock();
+        let mut i = 0usize;
+        while i < inner.entries.len() {
+            if inner.entries[i].dev != dev {
+                i += 1;
+                continue;
+            }
+            let mut entry = inner.entries.remove(i);
+            if let Some(token) = entry.timer_token.take() {
+                NET_TIMER_WHEEL.cancel(token);
+            }
+            if let NeighborState::Incomplete { pending, .. } = &mut entry.state {
+                while let Some(pkt) = pending.pop() {
+                    // A failed push drops the packet here — the same outcome
+                    // the caller would produce.
+                    let _ = orphans.push(pkt);
+                }
+            }
+        }
+        orphans
+    }
+
+    /// Drop one entry, returning any packets it had queued.
+    ///
+    /// Same packet-ownership contract as [`flush_device`](Self::flush_device).
+    pub fn remove(&self, dev: DevIndex, ip: Ipv4Addr) -> Option<KVec<PacketBuf>> {
+        let mut inner = self.inner.lock();
+        let pos = inner
+            .entries
+            .iter()
+            .position(|e| e.dev == dev && e.ip == ip)?;
+        let mut entry = inner.entries.remove(pos);
+        if let Some(token) = entry.timer_token.take() {
+            NET_TIMER_WHEEL.cancel(token);
+        }
+        let mut orphans = KVec::new();
+        if let NeighborState::Incomplete { pending, .. } = &mut entry.state {
+            while let Some(pkt) = pending.pop() {
+                let _ = orphans.push(pkt);
+            }
+        }
+        Some(orphans)
+    }
+
+    /// Snapshot the cache into a fresh vector, returning `(entries, total)`.
+    ///
+    /// The [`all_routes`](crate::route::RouteTable::all_routes) idiom: the
+    /// caller gets a vector it owns with no net lock held, so a consumer
+    /// outside this crate never has to name a `DevIndex` or a `MacAddr` to
+    /// build a placeholder. Capacity is reserved before the lock is taken,
+    /// because the allocator is where every subsystem meets.
+    pub fn snapshot_owned(&self, dev: Option<DevIndex>) -> (KVec<NeighborSnapshot>, usize) {
+        let mut out = match KVec::with_capacity(MAX_ENTRIES) {
+            Ok(out) => out,
+            Err(_) => return (KVec::new(), 0),
+        };
+        let blank = NeighborSnapshot {
+            dev: DevIndex(0),
+            ip: Ipv4Addr::UNSPECIFIED,
+            mac: MacAddr::ZERO,
+            state: slopos_abi::net::NET_NEIGH_INCOMPLETE,
+            queued_pkts: 0,
+            confirmed_ms_ago: 0,
+        };
+        for _ in 0..MAX_ENTRIES {
+            if out.push(blank).is_err() {
+                return (KVec::new(), 0);
+            }
+        }
+        let (written, total) = self.snapshot(dev, out.as_mut_slice());
+        out.truncate(written);
+        (out, total)
+    }
+
+    /// Copy the cache into `out`, returning `(written, total)`.
+    ///
+    /// Reports `(ip, mac, state, queued)` per entry; the MAC is all-zero while
+    /// the entry is `Incomplete` or `Failed`, because there is nothing else
+    /// truthful to report.
+    pub fn snapshot(&self, dev: Option<DevIndex>, out: &mut [NeighborSnapshot]) -> (usize, usize) {
+        // Sampled before the lock: reading the clock is the one thing in here
+        // that is not a field load, and the ages only need to be approximate.
+        let now = current_tick_approx();
+        let inner = self.inner.lock();
+        let mut total = 0usize;
+        let mut written = 0usize;
+        for entry in inner.entries.iter() {
+            if let Some(want) = dev
+                && entry.dev != want
+            {
+                continue;
+            }
+            total += 1;
+            if written >= out.len() {
+                continue;
+            }
+            let (mac, state, queued, since_tick) = match &entry.state {
+                NeighborState::Incomplete { pending, .. } => (
+                    MacAddr::ZERO,
+                    slopos_abi::net::NET_NEIGH_INCOMPLETE,
+                    pending.len() as u32,
+                    None,
+                ),
+                NeighborState::Reachable {
+                    mac,
+                    confirmed_tick,
+                } => (
+                    *mac,
+                    slopos_abi::net::NET_NEIGH_REACHABLE,
+                    0,
+                    Some(*confirmed_tick),
+                ),
+                NeighborState::Stale {
+                    mac,
+                    last_used_tick,
+                } => (
+                    *mac,
+                    slopos_abi::net::NET_NEIGH_STALE,
+                    0,
+                    Some(*last_used_tick),
+                ),
+                NeighborState::Failed => {
+                    (MacAddr::ZERO, slopos_abi::net::NET_NEIGH_FAILED, 0, None)
+                }
+            };
+            out[written] = NeighborSnapshot {
+                dev: entry.dev,
+                ip: entry.ip,
+                mac,
+                state,
+                queued_pkts: queued,
+                confirmed_ms_ago: since_tick.map_or(0, |t| ticks_to_ms(now.saturating_sub(t))),
+            };
+            written += 1;
+        }
+        (written, total)
+    }
+
     // =========================================================================
     // 2B.2 — lookup
     // =========================================================================
@@ -222,6 +390,20 @@ impl NeighborCache {
                 NeighborState::Stale { mac, .. } => Some(*mac),
                 _ => None,
             })
+    }
+
+    /// Whether a neighbour is currently `Reachable`.
+    ///
+    /// Narrower than [`lookup`](Self::lookup), which also answers for `Stale`
+    /// because a stale MAC is still worth sending to. The connectivity
+    /// classifier needs the stricter question: a stale entry means nobody has
+    /// confirmed the first hop recently, which is precisely the condition it
+    /// reports as `Limited`.
+    pub fn is_reachable(&self, dev: DevIndex, ip: Ipv4Addr) -> bool {
+        let inner = self.inner.lock();
+        inner.entries.iter().any(|e| {
+            e.dev == dev && e.ip == ip && matches!(e.state, NeighborState::Reachable { .. })
+        })
     }
 
     // =========================================================================
@@ -558,14 +740,6 @@ impl NeighborCache {
         self.inner.lock().entries.len()
     }
 
-    /// Dump all entries for debugging.
-    pub fn dump(&self) {
-        let inner = self.inner.lock();
-        for entry in &inner.entries {
-            klog_debug!("  {:?}", entry);
-        }
-    }
-
     // =========================================================================
     // Internal helpers
     // =========================================================================
@@ -638,4 +812,20 @@ pub enum ResolveOutcome {
 /// actual tick may advance between reading and storing.
 fn current_tick_approx() -> u64 {
     slopos_kernel_services::platform::timer_ticks()
+}
+
+/// Convert a tick span to milliseconds, saturating at `u32::MAX`.
+///
+/// Answers 0 when the timer frequency is not known yet rather than dividing by
+/// zero; an entry cannot be older than the timer that would have aged it.
+fn ticks_to_ms(ticks: u64) -> u32 {
+    let freq = slopos_kernel_services::platform::timer_frequency() as u64;
+    if freq == 0 {
+        return 0;
+    }
+    ticks
+        .saturating_mul(1000)
+        .checked_div(freq)
+        .unwrap_or(0)
+        .min(u32::MAX as u64) as u32
 }

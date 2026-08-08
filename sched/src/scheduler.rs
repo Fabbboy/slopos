@@ -121,7 +121,7 @@ pub use super::runtime::{
     scheduler_register_idle_wakeup_callback,
 };
 pub use super::sleep::{block_current_task_with_timeout, cancel_sleep, sleep_current_task_ms};
-use super::sleep::{reset_sleep_queue, sleep_queue_next_deadline_ticks, wake_due_sleepers};
+use super::sleep::{sleep_queue_next_deadline_ticks, wake_due_sleepers};
 use super::task::{
     INVALID_PROCESS_ID, INVALID_TASK_ID, TASK_FLAG_KERNEL_MODE, TASK_FLAG_NO_PREEMPT,
     TASK_FLAG_USER_MODE, Task, TaskPriority, TaskRef, TaskStatus, task_record_context_switch,
@@ -1804,13 +1804,36 @@ pub fn yield_blocked_task_with_timeout(timeout_ms: u32) {
     };
     let task_id = current.id();
     assert_not_blocking_while_atomic();
-    super::sleep::arm_blocked_timeout(task_id, timeout_ms);
+    if !super::sleep::arm_blocked_timeout(task_id, timeout_ms) {
+        // No deadline is armed, and the caller committed `Running → Blocked`
+        // before calling in: descheduling now would park the task with nothing
+        // able to wake it. Undoing the commit sends the caller back around its
+        // wait loop, which re-checks both its condition and its own deadline,
+        // so the wait degrades to a yield loop rather than a lost wake.
+        report_unarmed_timeout(task_id);
+        set_current_runnable();
+        yield_();
+        return;
+    }
     slopos_ostd::cpu::x86_64::interrupts::IrqDisabled::with(|_irq| {
         if commit_blocked_deschedule(&current) {
             schedule();
         }
     });
     super::sleep::cancel_sleep(task_id);
+}
+
+/// Report the first timed wait that could not arm a deadline. Once per boot:
+/// the condition is systemic rather than per-task, and the degraded wait spins,
+/// so a per-occurrence log would bury the one line that matters.
+fn report_unarmed_timeout(task_id: u32) {
+    static REPORTED: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+    if !REPORTED.swap(true, Ordering::Relaxed) {
+        slopos_ostd::klog_info!(
+            "SCHED: task {} timed wait could not arm a deadline; wait degraded to a yield loop",
+            task_id
+        );
+    }
 }
 
 /// Force the current task's state back to `Running` and remove any
@@ -2164,7 +2187,12 @@ pub fn init_scheduler() -> c_int {
     PREEMPTION_ENABLED.store(SCHEDULER_PREEMPTION_DEFAULT, Ordering::Release);
 
     per_cpu::init_all_percpu_schedulers();
-    reset_sleep_queue();
+    // Ensure rather than reset: this runs in the `services` boot phase, behind
+    // kthreads that parked on deadlines back in `drivers`. Test reinit gets a
+    // clean queue from `init_task_manager`'s reinit branch.
+    if !super::sleep::ensure_sleep_queue_allocated() {
+        return -1;
+    }
 
     0
 }

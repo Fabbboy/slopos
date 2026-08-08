@@ -1,0 +1,19 @@
+[package]
+name = "slopos-chrome-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Desktop-chrome core: system-bar status-item layout, indicator geometry and the network indicator model, host-testable"
+
+[lints]
+workspace = true
+
+[lib]
+path = "src/lib.rs"
+crate-type = ["rlib"]
+
+doctest = false
+
+[dependencies]
+slopos-abi = { workspace = true }
+slopos-net-core = { workspace = true }

@@ -1,6 +1,8 @@
 use slopos_abi::InputEvent;
 use slopos_abi::input::MODIFIER_SUPER;
 use slopos_abi::task::TaskPriority;
+use slopos_chrome_core::Rect as ChromeRect;
+use slopos_chrome_core::status::StatusKind;
 
 use crate::program_registry;
 use crate::syscall::{UserWindowInfo, input, process, tty};
@@ -14,6 +16,25 @@ use super::decorations;
 use super::dock::LauncherShelf;
 use super::menu_bar::SystemBar;
 use super::output::WINDOW_STATE_MINIMIZED;
+
+/// What a press on compositor chrome asks the frame loop to do.
+///
+/// The input dispatch runs against an immutable view of the chrome — it is
+/// handed `&SystemBar` and a popover rect, not the whole `WindowManager` — so
+/// a press records its intent here and `render_frame` applies it, in the same
+/// shape `pending_close_tasks` already uses for window closes. At most one is
+/// outstanding: two presses inside one 16 ms batch mean the second is what the
+/// person meant.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum ChromeRequest {
+    /// Open the popover for this status item, or close it if it is already the
+    /// open one.
+    PopoverToggle(StatusKind),
+    /// A press landed outside the open popover: close it.
+    PopoverDismiss,
+    /// A press landed inside the open popover, at these screen coordinates.
+    PopoverPress { x: i32, y: i32 },
+}
 
 const WINDOW_STATE_NORMAL: u8 = 0;
 const CLOSE_REQUEST_GRACE_MS: u64 = 1500;
@@ -80,8 +101,17 @@ impl ResizeEdge {
 /// click routing all derive from this one answer, so they always agree.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum CursorPart {
-    /// The top system bar (compositor UI).
-    SystemBar,
+    /// Inside an open popover. The popover holds a pointer grab, so this
+    /// outranks every window beneath it.
+    Popover,
+    /// A press with a popover open that landed anywhere else — the
+    /// light-dismiss case. Distinct from [`CursorPart::Desktop`] because it
+    /// means "close this", not "you clicked the desktop": the press is
+    /// consumed by the dismissal and must not also reach whatever is under it.
+    PopoverOutside,
+    /// The top system bar (compositor UI), and which status item the pointer
+    /// is over, if any.
+    SystemBar(Option<StatusKind>),
     /// A launcher entry on the shelf/dock (carries its index).
     Shelf(usize),
     /// A window's resize grab zone (carries the edge).
@@ -130,6 +160,9 @@ pub struct InputHandler {
     pub mouse_x: i32,
     pub mouse_y: i32,
     pub mouse_buttons: u8,
+
+    /// A chrome press awaiting the frame loop; see [`ChromeRequest`].
+    chrome_request: Option<ChromeRequest>,
 
     pub dragging: bool,
     drag_task: u32,
@@ -197,6 +230,7 @@ impl InputHandler {
             restore_geometry: [(0, 0, 0, 0, 0); MAX_WINDOWS],
             focused_task: 0,
             needs_full_redraw: false,
+            chrome_request: None,
             cursor_trail: [(0, 0); MAX_CURSOR_TRAIL],
             cursor_trail_count: 0,
             pending_close_tasks: [0; MAX_WINDOWS],
@@ -355,6 +389,9 @@ impl InputHandler {
         windows: &[UserWindowInfo; MAX_WINDOWS],
         window_count: u32,
         shelf: &LauncherShelf,
+        popover: Option<ChromeRect>,
+        screen_width: u32,
+        bar: &SystemBar,
         mut proto: Option<&mut ProtocolBridge>,
     ) -> bool {
         self.mouse_buttons |= button;
@@ -373,10 +410,33 @@ impl InputHandler {
             self.stop_resize(proto.as_deref_mut());
         }
 
-        let hit = self.resolve_cursor_hit(windows, window_count, shelf);
+        let hit = self.resolve_cursor_hit(windows, window_count, shelf, popover, screen_width, bar);
         match hit.part {
-            // System bar consumes the click (no action).
-            CursorPart::SystemBar => false,
+            // A press inside the popover belongs to the popover. Coordinates
+            // travel with it: the widget under them is resolved by the panel's
+            // own hit test, from the same rect the renderer drew.
+            CursorPart::Popover => {
+                self.chrome_request = Some(ChromeRequest::PopoverPress {
+                    x: self.mouse_x,
+                    y: self.mouse_y,
+                });
+                false
+            }
+            // Light dismiss. The press is spent closing the popover and does
+            // not also reach what is underneath, which is what stops a
+            // dismissing click from raising a window or activating a control.
+            CursorPart::PopoverOutside => {
+                self.chrome_request = Some(ChromeRequest::PopoverDismiss);
+                false
+            }
+            // The bar consumes every click. An item that opens a popover says
+            // so by name; the rest are inert.
+            CursorPart::SystemBar(item) => {
+                if let Some(kind) = item {
+                    self.chrome_request = Some(ChromeRequest::PopoverToggle(kind));
+                }
+                false
+            }
             CursorPart::Shelf(idx) => {
                 self.handle_shelf_click(idx, shelf, windows, window_count, &mut proto);
                 false
@@ -714,6 +774,11 @@ impl InputHandler {
         self.resize_edges = ResizeEdge::NONE;
     }
 
+    /// Take the chrome press this frame accumulated, if any.
+    pub fn take_chrome_request(&mut self) -> Option<ChromeRequest> {
+        self.chrome_request.take()
+    }
+
     /// Resolve what the pointer is over, top of z-order first, stopping at the
     /// first hit. The single source of truth for cursor-shape selection,
     /// pointer focus, hover feedback, and click routing. A window's whole
@@ -724,13 +789,29 @@ impl InputHandler {
         windows: &[UserWindowInfo; MAX_WINDOWS],
         window_count: u32,
         shelf: &LauncherShelf,
+        popover: Option<ChromeRect>,
+        screen_width: u32,
+        bar: &SystemBar,
     ) -> CursorHit {
         let (mx, my) = (self.mouse_x, self.mouse_y);
 
+        // An open popover holds a pointer grab: the answer is either "inside
+        // it" or "dismiss it", and nothing below is consulted. Resolving that
+        // at the top of this one walk, rather than at each call site, keeps
+        // cursor shape, pointer focus, hover feedback and click routing
+        // agreeing, and gives the client underneath a correct `PointerLeave` —
+        // `sync_pointer_focus` drops focus for any part that is not `Content`.
+        if let Some(rect) = popover {
+            if rect.contains(mx, my) {
+                return CursorHit::ui(CursorPart::Popover);
+            }
+            return CursorHit::ui(CursorPart::PopoverOutside);
+        }
+
         // Compositor chrome wins over windows: the system bar is a top strip
         // and the shelf is a bottom dock, both drawn above all windows.
-        if SystemBar::hit_test(mx, my) {
-            return CursorHit::ui(CursorPart::SystemBar);
+        if SystemBar::covers(my) {
+            return CursorHit::ui(CursorPart::SystemBar(bar.hit_test(screen_width, mx, my)));
         }
         if let Some(idx) = shelf.hit_test(mx, my) {
             return CursorHit::ui(CursorPart::Shelf(idx));
@@ -796,8 +877,10 @@ impl InputHandler {
             // and the desktop are the compositor's.
             CursorPart::Content => windows[hit.window_idx].cursor_shape,
             CursorPart::SignalButton(_)
-            | CursorPart::SystemBar
+            | CursorPart::SystemBar(_)
             | CursorPart::Shelf(_)
+            | CursorPart::Popover
+            | CursorPart::PopoverOutside
             | CursorPart::Desktop => CURSOR_SHAPE_DEFAULT,
         }
     }

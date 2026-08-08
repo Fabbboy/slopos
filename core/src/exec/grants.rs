@@ -26,8 +26,16 @@
 //! protection on `/bin`, and SlopOS has no file permissions — a task that can
 //! overwrite `/bin/roulette` still obtains `DISPLAY_EXCLUSIVE`. That is
 //! strictly narrower than accepting any bit from any caller for any binary.
+//!
+//! `NET_ADMIN` on `/bin/ip` is containment in that same sense, not a
+//! capability. It does not restrict **who** may reconfigure the network — any
+//! task can spawn any path — it restricts **how**: every reconfiguration
+//! arrives through one argument grammar, with one place that decides what `dev`
+//! may name and what an address may be.
 
-use slopos_abi::task::{TASK_FLAG_COMPOSITOR, TASK_FLAG_DISPLAY_EXCLUSIVE, TaskPriority};
+use slopos_abi::task::{
+    TASK_FLAG_COMPOSITOR, TASK_FLAG_DISPLAY_EXCLUSIVE, TASK_FLAG_NET_ADMIN, TaskPriority,
+};
 
 /// One program's kernel-conferred attributes.
 struct ProgramGrant {
@@ -62,10 +70,18 @@ const PROGRAM_GRANTS: &[ProgramGrant] = &[
         flags: TASK_FLAG_DISPLAY_EXCLUSIVE,
         priority: None,
     },
+    // The sanctioned mutator of the network configuration: every mutating net
+    // syscall is gated on this bit, so the whole control plane has one argument
+    // grammar in front of it.
+    ProgramGrant {
+        path: b"/bin/ip",
+        flags: TASK_FLAG_NET_ADMIN,
+        priority: None,
+    },
 ];
 
 /// The flags and tier the kernel adds for `path`: `(0, None)` for every program
-/// not named above, which is all of them but two.
+/// not named above, which is all of them but three.
 pub fn grant_for(path: &[u8]) -> (u16, Option<TaskPriority>) {
     match PROGRAM_GRANTS.iter().find(|grant| grant.path == path) {
         Some(grant) => (grant.flags, grant.priority),

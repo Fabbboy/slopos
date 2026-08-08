@@ -1,30 +1,107 @@
 use super::RawFd;
 use super::error::{SyscallError, SyscallResult};
-use super::numbers::{SYSCALL_NET_INFO, SYSCALL_NET_SCAN, SYSCALL_RESOLVE};
-use super::raw::{syscall1, syscall3};
-use slopos_abi::net::{SockAddrIn, UserNetInfo, UserNetMember};
+use super::numbers::{
+    SYSCALL_NET_ADDR_CTL, SYSCALL_NET_IFACE_CTL, SYSCALL_NET_MONITOR, SYSCALL_NET_QUERY,
+    SYSCALL_NET_RESOLVER_SET, SYSCALL_NET_ROUTE_CTL, SYSCALL_RESOLVE,
+};
+use super::raw::{syscall2, syscall3, syscall4};
+use slopos_abi::net::{
+    NET_ADDROP_ADD, NET_ADDROP_DEL, NET_ROUTEOP_ADD, NET_ROUTEOP_DEL, SockAddrIn, UserAddrReq,
+    UserResolverReq, UserRouteReq,
+};
 use slopos_abi::syscall::{F_GETFL, F_SETFL, O_NONBLOCK};
 use slopos_slibc::pal::{Pal, Sys};
 
-#[inline(always)]
-pub fn net_scan(out: &mut [UserNetMember], active_probe: bool) -> i64 {
-    if out.is_empty() {
-        return 0;
-    }
+// ---------------------------------------------------------------------------
+// Network management
+// ---------------------------------------------------------------------------
 
-    unsafe {
-        syscall3(
-            SYSCALL_NET_SCAN,
-            out.as_mut_ptr() as u64,
-            out.len() as u64,
-            if active_probe { 1 } else { 0 },
-        ) as i64
+/// Turn a raw syscall return into a result. Every syscall below reports failure
+/// as a negated errno, so the sign test is the whole protocol.
+#[inline]
+fn checked(raw: i64) -> SyscallResult<u64> {
+    if raw < 0 {
+        Err(SyscallError::from_errno((-raw) as i32))
+    } else {
+        Ok(raw as u64)
     }
 }
 
-#[inline(always)]
-pub fn net_info(out: &mut UserNetInfo) -> i64 {
-    unsafe { syscall1(SYSCALL_NET_INFO, out as *mut UserNetInfo as u64) as i64 }
+/// Enumerate one class of network state into `buf`.
+///
+/// Returns the bytes written. `buf` receives a `UserNetQueryHdr` followed by
+/// `record_count` records of `record_size` bytes; whether the answer was
+/// complete is read from the header's `total_count`, not from this return
+/// value, so a header-sized buffer is the sizing query.
+pub fn net_query(what: u32, ifindex: u32, buf: &mut [u8]) -> SyscallResult<usize> {
+    let raw = unsafe {
+        syscall4(
+            SYSCALL_NET_QUERY,
+            what as u64,
+            ifindex as u64,
+            buf.as_mut_ptr() as u64,
+            buf.len() as u64,
+        ) as i64
+    };
+    checked(raw).map(|n| n as usize)
+}
+
+/// Per-interface control, and the two global operations addressed to
+/// `NET_IFINDEX_GLOBAL`. Requires `TASK_FLAG_NET_ADMIN`.
+pub fn net_iface_ctl(ifindex: u32, op: u32, arg: u64) -> SyscallResult<()> {
+    let raw = unsafe { syscall3(SYSCALL_NET_IFACE_CTL, ifindex as u64, op as u64, arg) as i64 };
+    checked(raw).map(|_| ())
+}
+
+/// Add (`add == true`) or remove an interface address. Requires
+/// `TASK_FLAG_NET_ADMIN`.
+pub fn net_addr_ctl(req: &UserAddrReq, add: bool) -> SyscallResult<()> {
+    let raw = unsafe {
+        syscall3(
+            SYSCALL_NET_ADDR_CTL,
+            u64::from(if add { NET_ADDROP_ADD } else { NET_ADDROP_DEL }),
+            req as *const UserAddrReq as u64,
+            core::mem::size_of::<UserAddrReq>() as u64,
+        ) as i64
+    };
+    checked(raw).map(|_| ())
+}
+
+/// Add (`add == true`) or remove a route. Requires `TASK_FLAG_NET_ADMIN`.
+pub fn net_route_ctl(req: &UserRouteReq, add: bool) -> SyscallResult<()> {
+    let raw = unsafe {
+        syscall3(
+            SYSCALL_NET_ROUTE_CTL,
+            u64::from(if add {
+                NET_ROUTEOP_ADD
+            } else {
+                NET_ROUTEOP_DEL
+            }),
+            req as *const UserRouteReq as u64,
+            core::mem::size_of::<UserRouteReq>() as u64,
+        ) as i64
+    };
+    checked(raw).map(|_| ())
+}
+
+/// Replace the resolver configuration. Requires `TASK_FLAG_NET_ADMIN`.
+pub fn net_resolver_set(req: &UserResolverReq) -> SyscallResult<()> {
+    let raw = unsafe {
+        syscall2(
+            SYSCALL_NET_RESOLVER_SET,
+            req as *const UserResolverReq as u64,
+            core::mem::size_of::<UserResolverReq>() as u64,
+        ) as i64
+    };
+    checked(raw).map(|_| ())
+}
+
+/// Open a network-state monitor. The fd becomes `POLLIN`-ready whenever the
+/// stack's configuration changes and reads drain whole `NetEvent` records.
+pub fn net_monitor(mask: u32, flags: u32) -> SyscallResult<super::OwnedFd> {
+    let raw = unsafe { syscall2(SYSCALL_NET_MONITOR, mask as u64, flags as u64) as i64 };
+    // SAFETY: a non-negative return is an fd the kernel just allocated to us.
+    checked(raw).map(|fd| unsafe { super::OwnedFd::from_raw(fd as i32) })
 }
 
 pub fn socket(domain: u16, sock_type: u16, protocol: u16) -> SyscallResult<super::OwnedFd> {

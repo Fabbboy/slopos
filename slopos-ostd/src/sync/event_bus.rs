@@ -22,7 +22,8 @@
 use crate::lock_class;
 use crate::sync::lock_tracking::LOCK_LEVEL_RESOURCE;
 use slopos_abi::event::{
-    CHILD_EXIT_BUCKETS, KernelEvent, MAX_PIPES, MAX_TTYS, MAX_UNIX_SOCKETS, SIGNAL_PENDING_BUCKETS,
+    CHILD_EXIT_BUCKETS, KernelEvent, MAX_NETMON, MAX_PIPES, MAX_TTYS, MAX_UNIX_SOCKETS,
+    SIGNAL_PENDING_BUCKETS,
 };
 use slopos_abi::net::MAX_SOCKETS;
 
@@ -40,6 +41,7 @@ pub struct EventBus {
     unix_socket: [WaitQueue; MAX_UNIX_SOCKETS],
     child_exit: [WaitQueue; CHILD_EXIT_BUCKETS],
     signal_pending: [WaitQueue; SIGNAL_PENDING_BUCKETS],
+    netmon: [WaitQueue; MAX_NETMON],
 }
 
 /// The kernel-wide event bus.
@@ -68,6 +70,8 @@ pub static BUS: EventBus = EventBus {
         CHILD_EXIT_BUCKETS],
     signal_pending: [const { WaitQueue::new(lock_class!("evbus.signal_pending", LOCK_LEVEL_RESOURCE)) };
         SIGNAL_PENDING_BUCKETS],
+    netmon: [const { WaitQueue::new(lock_class!("evbus.netmon", LOCK_LEVEL_RESOURCE)) };
+        MAX_NETMON],
 };
 
 impl EventBus {
@@ -97,6 +101,7 @@ impl EventBus {
             KernelEvent::SignalPending { task } => {
                 &self.signal_pending[(task.0 as usize) % SIGNAL_PENDING_BUCKETS]
             }
+            KernelEvent::NetMonitor { mon } => &self.netmon[(mon.0 as usize) % MAX_NETMON],
         }
     }
 

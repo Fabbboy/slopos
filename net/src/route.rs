@@ -18,7 +18,7 @@
 //!
 //! # Integration
 //!
-//! - **DHCP**: calls [`RouteTable::add`] via [`super::netstack::NetStack::configure`]
+//! - **DHCP**: calls [`RouteTable::add`] via [`super::iface_ctl::configure_ipv4`]
 //!   when a lease is obtained, adding both the connected-subnet route and the
 //!   default gateway route.
 //! - **IPv4 egress**: calls [`RouteTable::lookup`] to determine the outgoing
@@ -27,6 +27,10 @@
 
 use core::fmt;
 
+use slopos_abi::net::{
+    NET_EV_ROUTE_ADDED, NET_EV_ROUTE_REMOVED, NET_IFINDEX_NONE, NET_ROUTE_ORIGIN_KERNEL,
+    NET_ROUTE_ORIGIN_STATIC, NetEvent,
+};
 use slopos_ostd::KVec;
 use slopos_ostd::klog_debug;
 use slopos_ostd::mm::AllocError;
@@ -35,6 +39,7 @@ use slopos_ostd::sync::{LOCK_LEVEL_REGISTRY, SpinLock};
 use slopos_ostd::{write_array_field, write_init_field};
 
 use super::types::{DevIndex, Ipv4Addr};
+use crate::netmon::netmon_post;
 
 // =============================================================================
 // 3B.1 — RouteEntry
@@ -261,31 +266,67 @@ impl RouteTable {
     /// If multiple routes match (different devices/metrics), removes the first
     /// match.  Returns `true` if a route was removed.
     pub fn remove(&self, prefix: Ipv4Addr, prefix_len: u8) -> bool {
+        self.remove_entry(prefix, prefix_len).is_some()
+    }
+
+    /// [`remove`](Self::remove), handing back the entry that went so a caller
+    /// can describe it after this returns — the removal record needs the
+    /// gateway and metric, which are gone once the route is.
+    pub fn remove_entry(&self, prefix: Ipv4Addr, prefix_len: u8) -> Option<RouteEntry> {
         let mut inner = self.inner.lock();
         let bucket = &mut inner.buckets[prefix_len as usize];
-        if let Some(pos) = bucket.iter().position(|r| r.prefix == prefix) {
-            let removed = bucket.remove(pos);
-            klog_debug!("route: removed {:?}", removed);
-            true
-        } else {
-            false
-        }
+        let pos = bucket.iter().position(|r| r.prefix == prefix)?;
+        let removed = bucket.remove(pos);
+        klog_debug!("route: removed {:?}", removed);
+        Some(removed)
     }
 
     /// Remove all routes associated with a specific device.
     ///
     /// Called before reconfiguring an interface (e.g., DHCP re-lease).
-    pub fn remove_device_routes(&self, dev: DevIndex) {
+    /// Returns how many went.
+    pub fn remove_device_routes(&self, dev: DevIndex) -> usize {
+        let mut nothing: [RouteEntry; 0] = [];
+        self.remove_device_routes_into(dev, &mut nothing).1
+    }
+
+    /// Remove all routes associated with a specific device, copying what was
+    /// removed into `out`. Returns `(written, removed)`.
+    ///
+    /// The entries come back rather than being announced from in here because
+    /// this runs under the table lock, and the monitor post a caller makes with
+    /// them must not: a wake site reached from under this lock would give the
+    /// route table an out-edge it does not otherwise have. `written` may be
+    /// short of `removed` only if a caller supplies a buffer smaller than one
+    /// device's route count — with at most
+    /// [`NET_MAX_ADDRS_PER_IFACE`](slopos_abi::net::NET_MAX_ADDRS_PER_IFACE)
+    /// connected routes plus a default, that does not arise for the callers in
+    /// this tree, which is why it is reported rather than asserted.
+    pub fn remove_device_routes_into(
+        &self,
+        dev: DevIndex,
+        out: &mut [RouteEntry],
+    ) -> (usize, usize) {
         let mut inner = self.inner.lock();
-        let mut count = 0usize;
+        let mut written = 0usize;
+        let mut removed = 0usize;
         for bucket in inner.buckets.iter_mut() {
-            let before = bucket.len();
-            bucket.retain(|r| r.dev != dev);
-            count += before - bucket.len();
+            bucket.retain(|r| {
+                if r.dev != dev {
+                    return true;
+                }
+                if written < out.len() {
+                    out[written] = *r;
+                    written += 1;
+                }
+                removed += 1;
+                false
+            });
         }
-        if count > 0 {
-            klog_debug!("route: removed {} routes for dev {}", count, dev);
+        if removed > 0 {
+            klog_debug!("route: removed {} routes for dev {}", removed, dev);
         }
+        (written, removed)
     }
 
     /// Longest-prefix-match lookup.
@@ -313,16 +354,6 @@ impl RouteTable {
         inner.buckets.iter().map(|b| b.len()).sum()
     }
 
-    /// Dump all routes for debugging.
-    pub fn dump(&self) {
-        let inner = self.inner.lock();
-        for (prefix_len, bucket) in inner.buckets.iter().enumerate() {
-            for route in bucket {
-                klog_debug!("  /{}: {:?}", prefix_len, route);
-            }
-        }
-    }
-
     /// Collect all routes into a Vec (for ifconfig/diagnostic display).
     pub fn all_routes(&self) -> KVec<RouteEntry> {
         let inner = self.inner.lock();
@@ -332,6 +363,105 @@ impl RouteTable {
         }
         routes
     }
+}
+
+// =============================================================================
+// Kernel-table shorthands
+// =============================================================================
+//
+// Mirrors [`crate::iface`]'s shorthands, and for the same reason: these wrap
+// the locked mutator and announce what it did once the lock is gone. A post
+// from inside [`RouteTable`] would be a wake site under a `LOCK_LEVEL_REGISTRY`
+// lock, which is exactly what the monitor's leaf-with-no-out-edges shape exists
+// to keep out of the tree.
+
+/// Routes reported from a single device removal.
+///
+/// One connected route per address plus a default is the most any interface in
+/// this tree carries, so this is headroom rather than a limit anything reaches.
+const REMOVAL_REPORT_SLOTS: usize = MAX_ROUTES_PER_BUCKET;
+
+const UNROUTED: RouteEntry = RouteEntry {
+    prefix: Ipv4Addr::UNSPECIFIED,
+    prefix_len: 0,
+    gateway: Ipv4Addr::UNSPECIFIED,
+    dev: DevIndex(0),
+    metric: 0,
+};
+
+/// The origin a route's own shape implies.
+///
+/// [`RouteEntry`] does not record who installed it, and inventing an answer
+/// would be worse than a coarse one: a route with no gateway is by construction
+/// the connected route derived from an address's prefix, and anything else was
+/// installed deliberately. [`add_with_origin`] is how a caller that *does* know
+/// — the DHCP path — says so.
+fn implied_origin(entry: &RouteEntry) -> u8 {
+    if entry.gateway.is_unspecified() {
+        NET_ROUTE_ORIGIN_KERNEL
+    } else {
+        NET_ROUTE_ORIGIN_STATIC
+    }
+}
+
+fn post_route_event(kind: u16, entry: &RouteEntry, origin: u8) {
+    // Resolving the interface takes the interface table — legal here because
+    // the route table's lock was released before this was called, and neither
+    // is ever held across the other.
+    let ifindex = crate::iface::get_by_dev(entry.dev)
+        .map(|i| i.ifindex)
+        .unwrap_or(NET_IFINDEX_NONE);
+    netmon_post(
+        kind,
+        ifindex,
+        NetEvent::route_payload(
+            entry.prefix.0,
+            entry.gateway.0,
+            entry.prefix_len,
+            origin,
+            entry.metric,
+        ),
+    );
+}
+
+/// Install a route in the kernel table and announce it.
+///
+/// Only a genuinely new route is announced: [`RouteTable::add`] reports `false`
+/// both for an in-place update and for a full bucket, and a monitor record
+/// claiming a route was added when the table refused it would be a lie a
+/// renderer would act on.
+pub fn add(entry: RouteEntry) -> bool {
+    add_with_origin(entry, implied_origin(&entry))
+}
+
+/// [`add`], with the origin stated by a caller that knows it.
+pub fn add_with_origin(entry: RouteEntry, origin: u8) -> bool {
+    let added = ROUTE_TABLE.add(entry);
+    if added {
+        post_route_event(NET_EV_ROUTE_ADDED, &entry, origin);
+    }
+    added
+}
+
+/// Withdraw one route from the kernel table and announce it.
+pub fn remove(prefix: Ipv4Addr, prefix_len: u8) -> bool {
+    match ROUTE_TABLE.remove_entry(prefix, prefix_len) {
+        Some(entry) => {
+            post_route_event(NET_EV_ROUTE_REMOVED, &entry, implied_origin(&entry));
+            true
+        }
+        None => false,
+    }
+}
+
+/// Withdraw every route belonging to `dev` and announce each one.
+pub fn remove_device_routes(dev: DevIndex) -> usize {
+    let mut removed = [UNROUTED; REMOVAL_REPORT_SLOTS];
+    let (written, total) = ROUTE_TABLE.remove_device_routes_into(dev, &mut removed);
+    for entry in &removed[..written] {
+        post_route_event(NET_EV_ROUTE_REMOVED, entry, implied_origin(entry));
+    }
+    total
 }
 
 // =============================================================================

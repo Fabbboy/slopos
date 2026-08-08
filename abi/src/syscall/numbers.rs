@@ -69,8 +69,9 @@ pub const SYSCALL_FS_LIST: u64 = 21;
 
 pub const SYSCALL_SYS_INFO: u64 = 22;
 pub const SYSCALL_HALT: u64 = 23;
-pub const SYSCALL_NET_SCAN: u64 = 120;
-pub const SYSCALL_NET_INFO: u64 = 123;
+// 120, 123 retired: `net_scan` and `net_info`. Enumeration is `net_query`
+// (`NET_Q_IFACES`, `NET_Q_ADDRS`, `NET_Q_NEIGH`); discovery is a userland probe
+// that lets the ordinary neighbour-resolution path do the ARP.
 pub const SYSCALL_TTY_SET_FOCUS: u64 = 28;
 pub const SYSCALL_OPENPTY: u64 = 145;
 // 146-148 retired: index-addressed TTY I/O. TTY access is fd-only now
@@ -853,7 +854,107 @@ pub const SYSCALL_KEYMAP_GET_NAME: u64 = 166;
 /// recovery).
 pub const SYSCALL_TEST_PANIC: u64 = 167;
 
-pub const SYSCALL_TABLE_SIZE: usize = 168;
+// =============================================================================
+// Network management
+// =============================================================================
+
+/// Enumerate one class of network state.
+///
+/// `net_query(what, index, buf, len)` writes a [`UserNetQueryHdr`] followed by
+/// `record_count` fixed-stride records, and returns the bytes written.
+/// Truncation is read from the header (`total_count > record_count`), not from
+/// the return value, so a **header-sized** buffer is the sizing query: pass
+/// `size_of::<UserNetQueryHdr>()` bytes, read `total_count`, then allocate.
+/// A buffer too small for the header is `EINVAL`: the counts live *in* the
+/// header, so a zero-length query has nowhere to put its answer.
+///
+/// [`UserNetQueryHdr`]: crate::net::UserNetQueryHdr
+///
+/// # Arguments (via registers)
+/// * rdi (arg0): `NET_Q_*` — which class to enumerate
+/// * rsi (arg1): ifindex filter, or `NET_IFINDEX_NONE` for all
+/// * rdx (arg2): output buffer
+/// * r10 (arg3): output buffer length in bytes
+///
+/// # Returns
+/// * bytes written (`>= 0`)
+/// * -EINVAL: unknown `what`, or a buffer too small for the header
+/// * -EFAULT: invalid pointer
+///
+/// Unprivileged, and every `what` returns every record. `NET_Q_SOCKETS`
+/// redacts one field rather than withholding rows: `owner_pid` is named only
+/// for the caller's own sockets, or for all of them to a caller holding
+/// `TASK_FLAG_NET_ADMIN`.
+pub const SYSCALL_NET_QUERY: u64 = 168;
+
+/// Per-interface control: admin up/down, MTU, DHCP lifecycle, neighbour and
+/// address flushes, plus the two global operations (master switch and
+/// connectivity recheck, both addressed to `NET_IFINDEX_GLOBAL`).
+///
+/// Every operand fits in the two scalar arguments, which is why this family is
+/// multiplexed while the three below are not: there is no user memory to
+/// reinterpret, so there is no per-op length table to get wrong.
+///
+/// # Arguments (via registers)
+/// * rdi (arg0): ifindex, or `NET_IFINDEX_GLOBAL`
+/// * rsi (arg1): `NET_IFOP_*`
+/// * rdx (arg2): operation-specific scalar
+///
+/// # Returns
+/// * 0 on success
+/// * -EPERM: caller lacks `TASK_FLAG_NET_ADMIN`
+/// * -ENODEV: no such interface
+/// * -EBUSY: another admin transition is in flight on that interface
+/// * -EINVAL: unknown op, or a global op addressed to an interface
+pub const SYSCALL_NET_IFACE_CTL: u64 = 169;
+
+/// Add or remove an interface address.
+///
+/// `(op, ptr, len)`, where `op` is `NET_ADDROP_ADD` or `NET_ADDROP_DEL` and
+/// `ptr` points at exactly one [`UserAddrReq`](crate::net::UserAddrReq) whose
+/// size `len` must equal. The operation is an op code rather than a boolean so
+/// a third one can be added without changing the shape of the call.
+/// Requires `TASK_FLAG_NET_ADMIN`.
+pub const SYSCALL_NET_ADDR_CTL: u64 = 170;
+
+/// Add or remove a route.
+///
+/// `(op, ptr, len)`, where `op` is `NET_ROUTEOP_ADD` or `NET_ROUTEOP_DEL` and
+/// `ptr` points at exactly one [`UserRouteReq`](crate::net::UserRouteReq) whose
+/// size `len` must equal. Requires `TASK_FLAG_NET_ADMIN`.
+pub const SYSCALL_NET_ROUTE_CTL: u64 = 171;
+
+/// Replace the resolver configuration.
+///
+/// `(ptr, len)` — there is no op code, because clearing the static override is
+/// expressed as a request naming zero servers rather than as a second
+/// operation. `ptr` points at exactly one
+/// [`UserResolverReq`](crate::net::UserResolverReq) whose size `len` must
+/// equal. Requires `TASK_FLAG_NET_ADMIN`.
+pub const SYSCALL_NET_RESOLVER_SET: u64 = 172;
+
+/// Open a network-state monitor.
+///
+/// `net_monitor(mask, flags)` returns an fd that becomes `POLLIN`-ready
+/// whenever the stack's configuration changes; `read` drains whole
+/// [`NetEvent`](crate::net::NetEvent) records. Pollable via `poll(2)` and
+/// SlopRing `OP_POLL_ADD`, so an indicator reacts to a lease or a carrier
+/// transition instead of polling for one.
+///
+/// A dropped record is reported **in band**, as a single
+/// `NET_EV_OVERFLOW` ordered before the records that followed the drop, so a
+/// reader never loses its position in the stream.
+///
+/// # Returns
+/// * the new fd (`>= 0`)
+/// * -EINVAL: empty mask
+/// * -EMFILE: this process already holds the per-process monitor limit
+/// * -ENOMEM: the monitor registry is full
+///
+/// Unprivileged.
+pub const SYSCALL_NET_MONITOR: u64 = 173;
+
+pub const SYSCALL_TABLE_SIZE: usize = 174;
 
 const _: () = assert!((SYSCALL_PIDFD_OPEN as usize) < SYSCALL_TABLE_SIZE);
 const _: () = assert!((SYSCALL_SIGNALFD as usize) < SYSCALL_TABLE_SIZE);
@@ -862,6 +963,12 @@ const _: () = assert!((SYSCALL_SET_DISPLAY_MODE as usize) < SYSCALL_TABLE_SIZE);
 const _: () = assert!((SYSCALL_KEYMAP_LOAD as usize) < SYSCALL_TABLE_SIZE);
 const _: () = assert!((SYSCALL_KEYMAP_GET_NAME as usize) < SYSCALL_TABLE_SIZE);
 const _: () = assert!((SYSCALL_TEST_PANIC as usize) < SYSCALL_TABLE_SIZE);
+const _: () = assert!((SYSCALL_NET_QUERY as usize) < SYSCALL_TABLE_SIZE);
+const _: () = assert!((SYSCALL_NET_IFACE_CTL as usize) < SYSCALL_TABLE_SIZE);
+const _: () = assert!((SYSCALL_NET_ADDR_CTL as usize) < SYSCALL_TABLE_SIZE);
+const _: () = assert!((SYSCALL_NET_ROUTE_CTL as usize) < SYSCALL_TABLE_SIZE);
+const _: () = assert!((SYSCALL_NET_RESOLVER_SET as usize) < SYSCALL_TABLE_SIZE);
+const _: () = assert!((SYSCALL_NET_MONITOR as usize) < SYSCALL_TABLE_SIZE);
 
 /// Standard return value for unimplemented syscalls: -ENOSYS (negated errno 38).
 pub const ENOSYS_RETURN: u64 = (-38i64) as u64;

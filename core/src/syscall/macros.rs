@@ -164,6 +164,12 @@ macro_rules! define_syscall {
         }
         $($crate::define_syscall!(@reqs $ctx, $($rest)*);)?
     };
+    (@reqs $ctx:ident, net_admin $(, $($rest:tt)*)?) => {
+        if let Err(e) = $ctx.require_net_admin() {
+            return $crate::syscall::result::SyscallResult::Err(e);
+        }
+        $($crate::define_syscall!(@reqs $ctx, $($rest)*);)?
+    };
 
     // ─────────────────────────────────────────────────────────────────
     // Internal: typed-argument parser (TT muncher with const-cursor)

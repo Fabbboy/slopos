@@ -1,5 +1,3 @@
-use slopos_abi::net::{USER_NET_MAX_MEMBERS, UserNetMember};
-use slopos_ostd::klog_info;
 use slopos_testing::TestResult;
 use slopos_testing::assert_test;
 
@@ -21,32 +19,6 @@ pub fn test_virtio_net_ready_and_link_up() -> TestResult {
 
     let ipv4 = virtio_net::virtio_net_ipv4_addr().unwrap_or([0; 4]);
     assert_test!(ipv4 != [0; 4], "virtio-net should acquire IPv4 via DHCP");
-    TestResult::Pass
-}
-
-pub fn test_virtio_net_scan_discovers_network_members() -> TestResult {
-    let mut members = [UserNetMember::default(); USER_NET_MAX_MEMBERS];
-    let mut count = 0usize;
-
-    for _ in 0..6 {
-        count = virtio_net::virtio_net_scan_members(&mut members, true);
-        if count > 0 {
-            break;
-        }
-    }
-
-    if count == 0 {
-        klog_info!("virtio-net-test: no members discovered after active probing");
-        return TestResult::Fail;
-    }
-
-    let found_nonzero_ip = members[..count].iter().any(|m| m.ipv4 != [0; 4]);
-
-    assert_test!(
-        found_nonzero_ip,
-        "virtio-net scan should return at least one IPv4 member"
-    );
-
     TestResult::Pass
 }
 
@@ -93,7 +65,3 @@ pub fn test_build_tx_chain_links_runs() -> TestResult {
 
 slopos_testing::stest!(name = test_build_tx_chain_links_runs, suite = virtio_net);
 slopos_testing::stest!(name = test_virtio_net_ready_and_link_up, suite = virtio_net);
-slopos_testing::stest!(
-    name = test_virtio_net_scan_discovers_network_members,
-    suite = virtio_net
-);

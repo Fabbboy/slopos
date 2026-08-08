@@ -2,15 +2,16 @@
 //!
 //! Covers:
 //! - 3.T6: Loopback device tx/poll_rx delivery without VirtIO
-//! - 3.T7: DHCP lease (NetStack::configure) populates route table correctly
-//! - 3.T8: IfaceConfig readable via NetStack after configure
+//! - an address assignment populates the route table correctly
+//! - a reconfiguration replaces the previous device routes
+//!
+//! Interface-table behaviour lives in `iface_tests`, not here.
 
 use slopos_testing::TestResult;
 use slopos_testing::{assert_eq_test, assert_test, pass};
 
 use crate::loopback::LoopbackDev;
 use crate::netdev::{NetDevice, NetDeviceFeatures};
-use crate::netstack::NetStack;
 use crate::packetbuf::PacketBuf;
 use crate::pool::PACKET_POOL;
 use crate::route::RouteTable;
@@ -166,31 +167,25 @@ pub fn test_loopback_queue_capacity() -> TestResult {
 }
 
 // =============================================================================
-// 3.T7 — DHCP lease populates NetStack and route table correctly
+// An address assignment populates the route table correctly
 // =============================================================================
 
 pub fn test_configure_populates_route_table() -> TestResult {
-    // Heap-allocate so neither the 33-bucket RouteTable nor the
-    // SpinLock-wrapped NetStack materialise on the test fn's stack.
-    let ns: slopos_ostd::KBox<NetStack> =
-        slopos_ostd::KBox::try_new(NetStack::new()).expect("alloc");
+    // Heap-allocate so the 33-bucket RouteTable does not materialise on the
+    // test fn's stack.
     let rt: slopos_ostd::KBox<RouteTable> =
         slopos_ostd::KBox::try_init(RouteTable::init()).expect("alloc");
 
-    // We can't easily test the global ROUTE_TABLE integration without side effects,
-    // so we verify the NetStack::configure() logic by checking what the global
-    // NET_STACK + ROUTE_TABLE would do.  Since configure() calls ROUTE_TABLE.add()
-    // internally, we test the route table population by using the global singletons
-    // through a fresh NetStack and the global route table.
-    //
-    // Instead, let's test the route table logic independently:
-    // Simulate what configure() does — add connected route + default gateway route.
+    // Mirror what `iface_ctl::configure_ipv4` installs for a lease: a connected
+    // route for the prefix, and a default route through the gateway. Driving a
+    // scratch table keeps the assertions free of whatever the live boot
+    // configured.
     let dev = DevIndex(1);
     let addr = Ipv4Addr([10, 0, 0, 50]);
     let netmask = Ipv4Addr([255, 255, 255, 0]);
     let gateway = Ipv4Addr([10, 0, 0, 1]);
 
-    // Compute prefix_len and prefix (same logic as configure()).
+    // Compute prefix_len and prefix (same logic as configure_ipv4()).
     let prefix_len = netmask.to_u32_be().leading_ones() as u8;
     let prefix = Ipv4Addr::from_u32_be(addr.to_u32_be() & netmask.to_u32_be());
 
@@ -231,21 +226,6 @@ pub fn test_configure_populates_route_table() -> TestResult {
     let (r2_dev, r2_hop) = r2.unwrap();
     assert_eq_test!(r2_dev, DevIndex(1), "should route through dev 1");
     assert_eq_test!(r2_hop.0, [10, 0, 0, 1], "default route: next_hop = gateway");
-
-    // Also verify NetStack stored the config.
-    ns.configure(
-        dev,
-        addr,
-        netmask,
-        gateway,
-        [Ipv4Addr([8, 8, 8, 8]), Ipv4Addr([8, 8, 4, 4])],
-    );
-    let iface = ns.iface_for_dev(dev);
-    assert_test!(iface.is_some(), "iface_for_dev should return Some");
-    let cfg = iface.unwrap();
-    assert_eq_test!(cfg.ipv4_addr.0, [10, 0, 0, 50], "ip matches");
-    assert_eq_test!(cfg.netmask.0, [255, 255, 255, 0], "netmask matches");
-    assert_eq_test!(cfg.gateway.0, [10, 0, 0, 1], "gateway matches");
 
     pass!()
 }
@@ -309,98 +289,6 @@ pub fn test_reconfigure_replaces_routes() -> TestResult {
 }
 
 // =============================================================================
-// 3.T8 — ifconfig reads IfaceConfig correctly
-// =============================================================================
-
-pub fn test_iface_config_readable() -> TestResult {
-    let ns = NetStack::new();
-
-    // Configure an interface.
-    ns.configure(
-        DevIndex(1),
-        Ipv4Addr([10, 0, 0, 50]),
-        Ipv4Addr([255, 255, 255, 0]),
-        Ipv4Addr([10, 0, 0, 1]),
-        [Ipv4Addr([8, 8, 8, 8]), Ipv4Addr([8, 8, 4, 4])],
-    );
-
-    // Read it back (this is what `ifconfig` does).
-    let cfg = ns.iface_for_dev(DevIndex(1)).expect("should have config");
-
-    assert_eq_test!(cfg.dev_index, DevIndex(1), "dev_index matches");
-    assert_eq_test!(cfg.ipv4_addr.0, [10, 0, 0, 50], "ipv4_addr matches");
-    assert_eq_test!(cfg.netmask.0, [255, 255, 255, 0], "netmask matches");
-    assert_eq_test!(cfg.gateway.0, [10, 0, 0, 1], "gateway matches");
-    assert_eq_test!(cfg.dns[0].0, [8, 8, 8, 8], "dns[0] matches");
-    assert_eq_test!(cfg.dns[1].0, [8, 8, 4, 4], "dns[1] matches");
-    assert_test!(cfg.up, "interface should be up");
-
-    // Derived fields.
-    assert_eq_test!(cfg.prefix_len(), 24, "prefix_len should be 24");
-    assert_eq_test!(
-        cfg.broadcast().0,
-        [10, 0, 0, 255],
-        "broadcast should be .255"
-    );
-    assert_test!(
-        cfg.is_local(Ipv4Addr([10, 0, 0, 1])),
-        "10.0.0.1 should be local"
-    );
-    assert_test!(
-        !cfg.is_local(Ipv4Addr([192, 168, 1, 1])),
-        "192.168.1.1 should not be local"
-    );
-
-    pass!()
-}
-
-pub fn test_iface_config_multiple_interfaces() -> TestResult {
-    let ns = NetStack::new();
-
-    // Configure loopback.
-    ns.configure(
-        DevIndex(0),
-        Ipv4Addr::LOCALHOST,
-        Ipv4Addr([255, 0, 0, 0]),
-        Ipv4Addr::UNSPECIFIED,
-        [Ipv4Addr::UNSPECIFIED, Ipv4Addr::UNSPECIFIED],
-    );
-
-    // Configure eth0.
-    ns.configure(
-        DevIndex(1),
-        Ipv4Addr([10, 0, 0, 50]),
-        Ipv4Addr([255, 255, 255, 0]),
-        Ipv4Addr([10, 0, 0, 1]),
-        [Ipv4Addr([8, 8, 8, 8]), Ipv4Addr::UNSPECIFIED],
-    );
-
-    assert_eq_test!(ns.iface_count(), 2, "should have 2 interfaces");
-
-    // Both should be queryable.
-    let lo = ns.iface_for_dev(DevIndex(0)).expect("loopback config");
-    assert_eq_test!(lo.ipv4_addr.0, [127, 0, 0, 1], "loopback ip");
-    assert_eq_test!(lo.prefix_len(), 8, "loopback /8");
-
-    let eth = ns.iface_for_dev(DevIndex(1)).expect("eth0 config");
-    assert_eq_test!(eth.ipv4_addr.0, [10, 0, 0, 50], "eth0 ip");
-    assert_eq_test!(eth.prefix_len(), 24, "eth0 /24");
-
-    // is_our_addr checks.
-    assert_test!(ns.is_our_addr(Ipv4Addr::LOCALHOST), "127.0.0.1 is our addr");
-    assert_test!(
-        ns.is_our_addr(Ipv4Addr([10, 0, 0, 50])),
-        "10.0.0.50 is our addr"
-    );
-    assert_test!(
-        !ns.is_our_addr(Ipv4Addr([10, 0, 0, 1])),
-        "gateway is not our addr"
-    );
-
-    pass!()
-}
-
-// =============================================================================
 // Test suite registration
 // =============================================================================
 
@@ -410,15 +298,9 @@ slopos_testing::stest!(name = test_loopback_multiple_tx_poll, suite = loopback);
 slopos_testing::stest!(name = test_loopback_stats, suite = loopback);
 slopos_testing::stest!(name = test_loopback_properties, suite = loopback);
 slopos_testing::stest!(name = test_loopback_queue_capacity, suite = loopback);
-// 3.T7 — DHCP/configure populates route table
+// route-table population and replacement
 slopos_testing::stest!(
     name = test_configure_populates_route_table,
     suite = loopback
 );
 slopos_testing::stest!(name = test_reconfigure_replaces_routes, suite = loopback);
-// 3.T8 — ifconfig reads IfaceConfig
-slopos_testing::stest!(name = test_iface_config_readable, suite = loopback);
-slopos_testing::stest!(
-    name = test_iface_config_multiple_interfaces,
-    suite = loopback
-);

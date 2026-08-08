@@ -79,6 +79,16 @@ pub enum TimerKind {
     TcpFinWait2,
     /// IP reassembly timeout for a fragment group.
     ReassemblyTimeout,
+    /// Connectivity re-evaluation, and the one active gateway probe.
+    ConnProbe,
+    /// A DHCP message went unanswered; send it again.
+    DhcpRetransmit,
+    /// T1 — time to renew with the server that granted the lease.
+    DhcpT1,
+    /// T2 — the granting server has stopped answering; ask anybody.
+    DhcpT2,
+    /// The lease ran out.
+    DhcpExpire,
 }
 
 // =============================================================================
@@ -380,6 +390,10 @@ pub static NET_TIMER_WHEEL: NetTimerWheel = NetTimerWheel::new();
 /// - The NAPI poll loop (fires during active networking)
 /// - The idle wakeup callback (fires during idle periods)
 pub fn net_timer_process() {
+    // The classifier's tick arms itself here because the first call to this
+    // function is when both the wheel and the thread draining it exist.
+    super::connectivity::ensure_armed();
+
     let fired = NET_TIMER_WHEEL.process_due();
 
     for timer in &fired {
@@ -443,6 +457,21 @@ fn dispatch_fired_timer(timer: &FiredTimer) {
             super::reassembly::REASSEMBLY_TABLE
                 .lock()
                 .on_timeout(timer.key);
+        }
+        TimerKind::ConnProbe => {
+            super::connectivity::on_timer();
+        }
+        TimerKind::DhcpRetransmit => {
+            super::dhcp::on_retransmit_timer(timer.key);
+        }
+        TimerKind::DhcpT1 => {
+            super::dhcp::on_t1_timer(timer.key);
+        }
+        TimerKind::DhcpT2 => {
+            super::dhcp::on_t2_timer(timer.key);
+        }
+        TimerKind::DhcpExpire => {
+            super::dhcp::on_expire_timer(timer.key);
         }
     }
 }

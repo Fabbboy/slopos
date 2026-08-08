@@ -2,30 +2,21 @@
 //! string into an IPv4 address routes through [`resolve_host`];
 //! [`syscall::net::resolve`](crate::syscall::net) is `pub(crate)` so
 //! there is no bypass path.
+//!
+//! The address types themselves live in `slopos-net-core`, which is host
+//! testable, and are re-exported here so a tool needs one import for "the
+//! userland network types".
 
 use core::fmt;
 
 use slopos_slibc::SyscallError;
 
+pub use slopos_net_core::{Cidr, Ipv4, Mac};
+
 use crate::syscall::net as syscall_net;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-#[repr(transparent)]
-pub struct Ipv4Addr(pub [u8; 4]);
-
-impl Ipv4Addr {
-    #[inline]
-    pub const fn octets(self) -> [u8; 4] {
-        self.0
-    }
-}
-
-impl fmt::Display for Ipv4Addr {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let o = &self.0;
-        write!(f, "{}.{}.{}.{}", o[0], o[1], o[2], o[3])
-    }
-}
+/// Spelling used by tools that also name `std::net::Ipv4Addr`.
+pub type Ipv4Addr = Ipv4;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ResolveError {
@@ -60,41 +51,15 @@ impl fmt::Display for ResolveError {
     }
 }
 
-fn parse_ipv4_literal(host: &str) -> Option<[u8; 4]> {
-    let mut out = [0u8; 4];
-    let mut iter = host.split('.');
-    for slot in out.iter_mut() {
-        let piece = iter.next()?;
-        if piece.is_empty() || piece.len() > 3 {
-            return None;
-        }
-        let mut val: u32 = 0;
-        for b in piece.bytes() {
-            if !b.is_ascii_digit() {
-                return None;
-            }
-            val = val * 10 + (b - b'0') as u32;
-            if val > 255 {
-                return None;
-            }
-        }
-        *slot = val as u8;
-    }
-    if iter.next().is_some() {
-        return None;
-    }
-    Some(out)
-}
-
 pub fn resolve_host(host: &str) -> Result<Ipv4Addr, ResolveError> {
     if host.is_empty() {
         return Err(ResolveError::InvalidHostname);
     }
-    if let Some(octets) = parse_ipv4_literal(host) {
-        return Ok(Ipv4Addr(octets));
+    if let Some(addr) = Ipv4::from_str_bytes(host.as_bytes()) {
+        return Ok(addr);
     }
     syscall_net::resolve(host.as_bytes())
-        .map(Ipv4Addr)
+        .map(Ipv4)
         .map_err(ResolveError::from)
 }
 
@@ -105,24 +70,6 @@ pub fn resolve_host_raw(host: &str) -> Result<[u8; 4], ResolveError> {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn parse_ipv4_literal_accepts_standard() {
-        assert_eq!(parse_ipv4_literal("10.0.0.1"), Some([10, 0, 0, 1]));
-        assert_eq!(parse_ipv4_literal("0.0.0.0"), Some([0, 0, 0, 0]));
-        assert_eq!(parse_ipv4_literal("255.255.255.255"), Some([255; 4]));
-    }
-
-    #[test]
-    fn parse_ipv4_literal_rejects_malformed() {
-        assert_eq!(parse_ipv4_literal(""), None);
-        assert_eq!(parse_ipv4_literal("10.0.0"), None);
-        assert_eq!(parse_ipv4_literal("10.0.0.1.2"), None);
-        assert_eq!(parse_ipv4_literal("10.0.0.256"), None);
-        assert_eq!(parse_ipv4_literal("abc.def.ghi.jkl"), None);
-        assert_eq!(parse_ipv4_literal("10..0.1"), None);
-        assert_eq!(parse_ipv4_literal("10.0.0.1 "), None);
-    }
 
     #[test]
     fn resolve_error_display_messages() {

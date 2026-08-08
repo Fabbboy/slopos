@@ -263,6 +263,16 @@ pub const TASK_FLAG_NEW_PGRP: u16 = 0x80;
 /// terminal's controlling session.
 pub const TASK_FLAG_FOREGROUND: u16 = 0x100;
 
+/// May mutate network configuration: interface admin state, addresses, routes,
+/// the resolver, the DHCP client, and the master networking switch. Reading
+/// that state needs nothing — `net_query` and `net_monitor` are unprivileged,
+/// because a status indicator should not have to be trusted to render one.
+///
+/// Conferred on exactly one program, `/bin/ip`. That does not restrict *who*
+/// may reconfigure the network, since any task can spawn any path; it restricts
+/// *how*, to one argument grammar with one set of validation.
+pub const TASK_FLAG_NET_ADMIN: u16 = 0x200;
+
 // --- Spawn-flag classification ---
 //
 // `task.flags` is the entirety of SlopOS's privilege model — `is_compositor`,
@@ -287,8 +297,11 @@ pub const SPAWN_USER_SETTABLE: u16 = TASK_FLAG_NEW_PGRP | TASK_FLAG_FOREGROUND;
 /// `NO_PREEMPT` is here despite having no path that grants it — the timer tick
 /// and the deferred post-IRQ reschedule both return early for a task carrying
 /// it, so as an accepted spawn input it is an attack surface and nothing else.
-pub const SPAWN_PRIVILEGED: u16 =
-    TASK_FLAG_NO_PREEMPT | TASK_FLAG_SYSTEM | TASK_FLAG_COMPOSITOR | TASK_FLAG_DISPLAY_EXCLUSIVE;
+pub const SPAWN_PRIVILEGED: u16 = TASK_FLAG_NO_PREEMPT
+    | TASK_FLAG_SYSTEM
+    | TASK_FLAG_COMPOSITOR
+    | TASK_FLAG_DISPLAY_EXCLUSIVE
+    | TASK_FLAG_NET_ADMIN;
 
 /// The two ring bits.  They describe where the task executes, not what it may
 /// do, which is why they are classified apart from the privileges.
@@ -306,14 +319,14 @@ pub const SPAWN_MODE_BITS: u16 = TASK_FLAG_USER_MODE | TASK_FLAG_KERNEL_MODE;
 /// unfailable, which is the only reason that assert exists.
 ///
 /// `0x0040` is the retired `TASK_FLAG_FPU_INITIALIZED` and must not be reused —
-/// a binary built against the old header may still set it.  `0x0200..=0x8000`
+/// a binary built against the old header may still set it.  `0x0400..=0x8000`
 /// have never been defined.  All of them fail closed with `EINVAL` so the ABI
 /// can grow a bit without a deployed caller having already assigned it a
 /// different meaning.
 ///
 /// Adding a `TASK_FLAG_*` means clearing its bit here *and* adding it to
 /// exactly one of the three masks above.  The asserts fail until both are done.
-pub const SPAWN_RESERVED: u16 = 0xFE40;
+pub const SPAWN_RESERVED: u16 = 0xFC40;
 
 // The four classes partition the 16-bit flag word: every bit is in exactly one.
 const _: () = assert!(

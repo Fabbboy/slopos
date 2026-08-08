@@ -294,6 +294,47 @@ pub fn test_neighbor_expire_reachable_to_stale() -> TestResult {
     pass!()
 }
 
+/// `snapshot_owned` reports what the cache holds, with a truthful age.
+///
+/// This is what `NET_Q_NEIGH` reads, so `ip neigh` shows exactly what this
+/// returns. It reports every state, not just the resolved ones — an
+/// `INCOMPLETE` entry with packets queued behind it is the single most useful
+/// row when a segment has gone quiet, and filtering it out here would make that
+/// case invisible from userland.
+pub fn test_neighbor_snapshot_owned_reports_every_state() -> TestResult {
+    ensure_pool_init();
+    let cache = fresh_cache();
+    let dev = DevIndex(7);
+    let reachable_ip = Ipv4Addr([10, 0, 2, 2]);
+    let mac = MacAddr([0x52, 0x54, 0x00, 0x12, 0x34, 0x56]);
+
+    let (empty, total) = cache.snapshot_owned(Some(dev));
+    assert_test!(empty.is_empty() && total == 0, "fresh cache is not empty");
+
+    let _ = cache.insert_or_update(dev, reachable_ip, mac, 0);
+
+    let (entries, total) = cache.snapshot_owned(Some(dev));
+    assert_eq_test!(total, 1, "one entry inserted, one expected");
+    assert_eq_test!(entries.len(), 1, "snapshot dropped the entry it counted");
+    assert_eq_test!(entries[0].ip.0, reachable_ip.0, "wrong address reported");
+    assert_eq_test!(entries[0].mac.0, mac.0, "wrong MAC reported");
+    assert_eq_test!(
+        entries[0].state,
+        slopos_abi::net::NET_NEIGH_REACHABLE,
+        "an ARP-confirmed entry is REACHABLE"
+    );
+
+    // A different device sees none of it: the filter is what makes
+    // `ip neigh show dev X` mean anything.
+    let (other, other_total) = cache.snapshot_owned(Some(DevIndex(8)));
+    assert_test!(
+        other.is_empty() && other_total == 0,
+        "the device filter leaked an entry from another device"
+    );
+
+    pass!()
+}
+
 // =============================================================================
 // Test suite registration
 // =============================================================================
@@ -312,5 +353,9 @@ slopos_testing::stest!(
 );
 slopos_testing::stest!(
     name = test_neighbor_expire_reachable_to_stale,
+    suite = neighbor
+);
+slopos_testing::stest!(
+    name = test_neighbor_snapshot_owned_reports_every_state,
     suite = neighbor
 );

@@ -14,12 +14,21 @@ pub const fn argb(c: Color32, a: u8) -> u32 {
 // Dimensions -- System Bar
 // ===========================================================================
 
-pub const SYSTEM_BAR_HEIGHT: i32 = 24;
-pub const SYSTEM_BAR_PADDING_X: i32 = 12;
+// The three dimensions `slopos_chrome_core::status` lays status items out with
+// are defined there and only named here. That crate computes the bar's damage
+// rects and hit regions, so a second declaration that drifted would put an
+// item's pixels and its clickable area in different places.
+pub const SYSTEM_BAR_HEIGHT: i32 = slopos_chrome_core::BAR_HEIGHT;
+pub const SYSTEM_BAR_PADDING_X: i32 = slopos_chrome_core::BAR_PADDING_X;
 pub const SYSTEM_BAR_ICON_SIZE: i32 = 8;
 pub const SYSTEM_BAR_ICON_GAP: i32 = 8;
 pub const SYSTEM_BAR_MAX_APP_NAME_WIDTH: i32 = 200;
-pub const SYSTEM_BAR_CLOCK_GAP: i32 = 16;
+/// Gap between two adjacent status items on the right of the bar.
+pub const SYSTEM_BAR_CLOCK_GAP: i32 = slopos_chrome_core::BAR_ITEM_GAP;
+
+/// Scale of the network indicator's unit grid. 1 keeps every edge on a pixel
+/// boundary, which is the whole reason the glyph is axis-aligned geometry.
+pub const STATUS_GLYPH_SCALE: i32 = 1;
 
 // ===========================================================================
 // Dimensions -- Window Decorations / Title Bar
@@ -102,6 +111,12 @@ pub const CLOSE_GRACE_MS: u32 = 1500;
 pub const PANEL_BG: Color32 = Color32::rgb(0x1A, 0x1A, 0x1C);
 pub const PANEL_BG_ALPHA: u8 = 0xCC;
 
+/// The panel background with its transparency removed. Anti-aliased ink on
+/// the bar blends towards this rather than reading the semi-transparent panel
+/// back, which would sample whatever the desktop put behind it.
+pub const PANEL_BG_OPAQUE: Color32 =
+    Color32::new(PANEL_BG.red(), PANEL_BG.green(), PANEL_BG.blue(), 0xFF);
+
 /// System bar bottom border line (opaque).
 pub const PANEL_BORDER: Color32 = Color32::rgb(0x2A, 0x2A, 0x2C);
 pub const PANEL_BORDER_ALPHA: u8 = 0xFF;
@@ -177,6 +192,20 @@ pub const TEXT_PRIMARY_ALPHA: u8 = 0xFF;
 /// Inactive/secondary text.
 pub const TEXT_SECONDARY: Color32 = Color32::rgb(0x90, 0x90, 0x90);
 pub const TEXT_SECONDARY_ALPHA: u8 = 0xFF;
+
+/// Text and glyph ink for something switched off or unusable. Dim enough to
+/// read as "not available" beside SECONDARY, light enough to stay legible on
+/// the panel background.
+pub const TEXT_DISABLED: Color32 = Color32::rgb(0x5A, 0x5A, 0x5C);
+pub const TEXT_DISABLED_ALPHA: u8 = 0xFF;
+
+// ===========================================================================
+// Colors -- System Bar Status Items
+// ===========================================================================
+
+/// Backdrop behind a status item the pointer is over.
+pub const STATUS_ITEM_HOVER_BG: Color32 = Color32::rgb(0x2E, 0x2E, 0x32);
+pub const STATUS_ITEM_HOVER_BG_ALPHA: u8 = 0xFF;
 
 // ===========================================================================
 // Colors -- Shadow

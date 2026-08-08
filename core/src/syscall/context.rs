@@ -11,7 +11,8 @@
 
 use slopos_abi::Errno;
 use slopos_abi::task::{
-    INVALID_PROCESS_ID, TASK_FLAG_COMPOSITOR, TASK_FLAG_DISPLAY_EXCLUSIVE, TASK_FLAG_SYSTEM,
+    INVALID_PROCESS_ID, TASK_FLAG_COMPOSITOR, TASK_FLAG_DISPLAY_EXCLUSIVE, TASK_FLAG_NET_ADMIN,
+    TASK_FLAG_SYSTEM,
 };
 use slopos_ostd::KArc;
 use slopos_ostd::mm::vm_space::VmSpace;
@@ -173,6 +174,15 @@ impl<'a> SyscallContext<'a> {
         self.has_flag(TASK_FLAG_SYSTEM)
     }
 
+    /// Network-administration privilege — modelled on Linux's
+    /// `capable(CAP_NET_ADMIN)`. Conferred by path identity at spawn, so it
+    /// names the one program allowed to reconfigure the stack rather than a
+    /// class of callers.
+    #[inline]
+    pub fn is_net_admin(&self) -> bool {
+        self.has_flag(TASK_FLAG_NET_ADMIN)
+    }
+
     #[inline]
     pub fn require_compositor(&self) -> Result<(), Errno> {
         if self.is_compositor() {
@@ -194,6 +204,15 @@ impl<'a> SyscallContext<'a> {
     #[inline]
     pub fn require_console_admin(&self) -> Result<(), Errno> {
         if self.is_console_admin() {
+            Ok(())
+        } else {
+            Err(Errno::EPERM)
+        }
+    }
+
+    #[inline]
+    pub fn require_net_admin(&self) -> Result<(), Errno> {
+        if self.is_net_admin() {
             Ok(())
         } else {
             Err(Errno::EPERM)

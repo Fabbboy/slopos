@@ -270,20 +270,14 @@ pub fn set_dst_mac_in_eth_header(pkt: &mut PacketBuf, mac: MacAddr) {
 // Helpers
 // =============================================================================
 
-/// Get our IPv4 address from the centralised [`NetStack`].
+/// Our IPv4 address, for deciding which ARP requests to answer and what to
+/// put in the sender field of the ones we send.
 ///
-/// Tries the NetStack first; falls back to the legacy
-/// `virtio_net_ipv4_addr()` if the NetStack has not been configured yet.
+/// `UNSPECIFIED` when no interface is configured yet, which is the correct
+/// answer during early boot: an ARP reply claiming `0.0.0.0` is never sent,
+/// because every caller checks first.
 fn get_our_ip() -> Ipv4Addr {
-    if let Some(ip) = super::netstack::NET_STACK.first_ipv4() {
-        return ip;
-    }
-    // Legacy fallback — will be removed once all callers use NetStack.
-    Ipv4Addr(
-        crate::net_driver_service::net_driver()
-            .and_then(|d| (d.virtio_net_ipv4_addr)())
-            .unwrap_or([0; 4]),
-    )
+    super::iface::first_ipv4().unwrap_or(Ipv4Addr::UNSPECIFIED)
 }
 
 // =============================================================================

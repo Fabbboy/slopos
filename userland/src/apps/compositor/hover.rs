@@ -12,6 +12,7 @@ const MAX_HOVER_REGIONS: usize = 64;
 // ── Hover ID namespace constants ────────────────────────────────────────────
 
 pub const HOVER_SIGNAL_GROUP_BASE: u32 = 0x0006_0000; // + task_id
+pub const HOVER_STATUS_ITEM_BASE: u32 = 0x0007_0000; // + StatusKind discriminant
 
 // ── Region ──────────────────────────────────────────────────────────────────
 

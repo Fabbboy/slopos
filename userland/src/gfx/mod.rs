@@ -13,6 +13,14 @@ pub use slopos_gfx::canvas_ops::{
     line as draw_line, rect as draw_rect,
 };
 
+/// Height of one line of text in the chrome font.
+///
+/// Layout must ask for this rather than hardcode a line height, which drifts
+/// the moment the font changes.
+pub fn cell_height() -> i32 {
+    font::cell_height()
+}
+
 pub fn draw_char_clipped<T: Canvas>(
     target: &mut T,
     x: i32,

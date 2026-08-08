@@ -111,11 +111,23 @@ pub struct FrameMetrics {
     frame_times: [u64; FRAME_METRICS_WINDOW],
     frame_times_count: usize,
     frame_times_cursor: usize,
+    /// Counters as of the last report, so [`FrameMetrics::take_window`] can
+    /// answer in deltas.
+    reported_frames: u64,
+    reported_bytes: u64,
+    /// Whether [`take_window`](FrameMetrics::take_window) ever answers. The
+    /// report goes to the TTY, so it is opt-in; recording stays on either way,
+    /// keeping the accounting identical between a reporting run and a quiet one.
+    reporting: bool,
+    reported_at_ms: u64,
 }
 
 impl FrameMetrics {
-    pub fn new() -> Self {
+    /// `reporting` decides only whether [`take_window`](Self::take_window)
+    /// answers; every counter is kept either way.
+    pub fn new(reporting: bool) -> Self {
         Self {
+            reporting,
             full_redraw_frames: 0,
             partial_redraw_frames: 0,
             total_bytes_copied: 0,
@@ -124,6 +136,9 @@ impl FrameMetrics {
             frame_times: [0; FRAME_METRICS_WINDOW],
             frame_times_count: 0,
             frame_times_cursor: 0,
+            reported_frames: 0,
+            reported_bytes: 0,
+            reported_at_ms: 0,
         }
     }
 
@@ -150,10 +165,40 @@ impl FrameMetrics {
         }
 
         self.frame_times[self.frame_times_cursor] = frame_time_ms;
+
         self.frame_times_cursor = (self.frame_times_cursor + 1) % FRAME_METRICS_WINDOW;
         if self.frame_times_count < FRAME_METRICS_WINDOW {
             self.frame_times_count += 1;
         }
+    }
+
+    /// Frames drawn and bytes copied since the previous report, once per
+    /// `interval_ms`.
+    ///
+    /// Deltas rather than totals: the question this answers is "what does a
+    /// steady desktop cost per frame", and cumulative counters are dominated
+    /// by the full redraws of the first second, which hides exactly the
+    /// regression this exists to catch.
+    ///
+    /// A frame that painted nothing is not counted at all — `record` is only
+    /// reached inside `needs_redraw()` — so `frames=0` over a window is the
+    /// signal that the compositor was genuinely idle.
+    pub fn take_window(&mut self, now_ms: u64, interval_ms: u64) -> Option<(u64, u64)> {
+        if !self.reporting {
+            return None;
+        }
+        if now_ms.saturating_sub(self.reported_at_ms) < interval_ms {
+            return None;
+        }
+        let frames = self.full_redraw_frames + self.partial_redraw_frames;
+        let report = (
+            frames.saturating_sub(self.reported_frames),
+            self.total_bytes_copied.saturating_sub(self.reported_bytes),
+        );
+        self.reported_frames = frames;
+        self.reported_bytes = self.total_bytes_copied;
+        self.reported_at_ms = now_ms;
+        Some(report)
     }
 }
 

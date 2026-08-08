@@ -22,6 +22,16 @@
 # boot edge for the declared pair) instead of on its first acquire, and the
 # vconsole input-injection hook a test-hooks build carries adds one class to
 # both test phases. Edge and chain caps still bound the new measurement.
+#
+# Re-measured 2026-08-09 over 4 runs for the network-management change. Boot
+# gains exactly five classes, one per new lock the kernel now takes:
+# NET_IFACES (the interface table), NETMON (the monitor registry),
+# evbus.netmon (the wait queues a monitor fd blocks on, one class for the
+# whole array), UDP_PORT_LISTENERS (the kernel-side port table DHCP binds 68
+# on) and DHCP_CLIENTS. The test phases add those plus the scratch tables and
+# mock locks the new iface, netmon and DHCP tests declare. Only the class caps
+# move: every edge and chain measurement still falls under the caps below, and
+# they keep their earlier values.
 
 # Classes must be well clear of the pool before the validator would disable
 # itself. 70% mirrors MAX_POOL_FILL_PCT in ktesting/src/zz_lockdep_tests.rs;
@@ -45,9 +55,9 @@ require-phase post-userland-tests
 # declaration site, and by the end of a phase every site the phase reaches has
 # been reached. One extra class is a new lock, which is exactly what should
 # require a deliberate bump.
-boot	classes	66
-post-kernel-tests	classes	168
-post-userland-tests	classes	178
+boot	classes	71
+post-kernel-tests	classes	176
+post-userland-tests	classes	185
 
 # Edges and chains depend on which *orders* were observed, so they move with
 # scheduling. Each cap is the observed maximum plus that phase's spread, so
@@ -60,12 +70,12 @@ post-userland-tests	classes	178
 # more. The edge caps still bound the new measurement and keep their 8-run
 # values.
 #
-# edges  measured: boot 49, kernel 153-157, userland 182-187
+# edges  measured: boot 43, kernel 148-152, userland 181-185
 boot	edges	49
 post-kernel-tests	edges	161
 post-userland-tests	edges	205
 
-# chains measured: boot 112, kernel 336-344, userland 375-383
+# chains measured: boot 110, kernel 335-343, userland 379-386
 boot	chains	112
 post-kernel-tests	chains	351
 post-userland-tests	chains	399

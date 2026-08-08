@@ -2,8 +2,8 @@ use slopos_ostd::klog_info;
 use slopos_testing::TestResult;
 use slopos_testing::{assert_test, fail, pass};
 
+use crate::iface;
 use crate::neighbor::NEIGHBOR_CACHE;
-use crate::netstack::NET_STACK;
 use crate::route::ROUTE_TABLE;
 use crate::socket;
 use crate::tcp;
@@ -14,6 +14,13 @@ const GATEWAY_PORT: u16 = 7;
 
 fn restore_boot_routes() {
     use crate::route::RouteEntry;
+    // Capture the default route before the reset wipes it: the route table is
+    // the only record of the DHCP-learned gateway.
+    let saved_gateway = ROUTE_TABLE
+        .all_routes()
+        .iter()
+        .find(|r| r.prefix_len == 0 && !r.gateway.is_unspecified())
+        .map(|r| r.gateway);
     ROUTE_TABLE.reset();
     ROUTE_TABLE.add(RouteEntry {
         prefix: Ipv4Addr([127, 0, 0, 0]),
@@ -22,22 +29,25 @@ fn restore_boot_routes() {
         dev: DevIndex(0),
         metric: 0,
     });
-    if let Some(cfg) = NET_STACK.iface_for_dev(DevIndex(1)) {
-        let mask_u32 = cfg.netmask.to_u32_be();
-        let prefix_len = mask_u32.leading_ones() as u8;
-        let prefix = Ipv4Addr::from_u32_be(cfg.ipv4_addr.to_u32_be() & mask_u32);
+    // The NIC's own routes are rebuilt from its interface's address, which is
+    // the only place that address lives. The gateway comes from the saved
+    // default route rather than from the interface, because the route table is
+    // the authority for forwarding.
+    if let Some(nic) = iface::get_by_dev(DevIndex(1))
+        && let Some(addr) = nic.primary_addr()
+    {
         ROUTE_TABLE.add(RouteEntry {
-            prefix,
-            prefix_len,
+            prefix: addr.network(),
+            prefix_len: addr.prefix_len,
             gateway: Ipv4Addr::UNSPECIFIED,
             dev: DevIndex(1),
             metric: 0,
         });
-        if !cfg.gateway.is_unspecified() {
+        if let Some(gw) = saved_gateway {
             ROUTE_TABLE.add(RouteEntry {
                 prefix: Ipv4Addr::UNSPECIFIED,
                 prefix_len: 0,
-                gateway: cfg.gateway,
+                gateway: gw,
                 dev: DevIndex(1),
                 metric: 100,
             });
@@ -57,8 +67,8 @@ fn test_route_table_has_default() -> TestResult {
     pass!()
 }
 
-fn test_netstack_has_ipv4() -> TestResult {
-    let ip = NET_STACK.first_ipv4();
+fn test_iface_has_ipv4() -> TestResult {
+    let ip = iface::first_ipv4();
     klog_info!("tcp_live: our_ipv4={:?}", ip);
     assert_test!(ip.is_some(), "no IPv4 address configured");
     let addr = ip.unwrap().0;
@@ -111,21 +121,17 @@ fn test_arp_resolve_gateway() -> TestResult {
     fail!("ARP for gateway {} did not resolve in 2s", gw_ip)
 }
 
-/// Regression test for the curl-times-out bug.
+/// An external destination must take its source IP from the NIC.
 ///
-/// Before the fix, `socket_connect` (and `socket_send` for UDP/ICMP)
-/// picked the local source IP via `NET_STACK.first_ipv4()`, which
-/// returns the first iface in registration order. The loopback iface
-/// is registered before any NIC, so external connections went out
-/// with `src_ip = 127.0.0.1` — QEMU SLIRP's TCP forwarder ignores
-/// replies to 127.0.0.1, surfacing as a 5 s recv timeout in curl
-/// after the std-side `decode_error_kind` patch translated EAGAIN to
-/// `ErrorKind::TimedOut`. After the fix, `source_ip_for(dst)` does
-/// a route lookup and returns the egress device's IP — the NIC's
+/// `first_ipv4()` returns the first iface in registration order and loopback
+/// registers before any NIC, so selecting a source that way sends external
+/// traffic with `src_ip = 127.0.0.1`; QEMU SLIRP's TCP forwarder drops replies
+/// to 127.0.0.1, which surfaces as a recv timeout in curl. `source_ip_for(dst)`
+/// route-looks-up instead and returns the egress device's IP — the NIC's
 /// DHCP-assigned address for external traffic.
 fn test_source_ip_for_external_uses_nic() -> TestResult {
     let external = Ipv4Addr(GATEWAY_IP);
-    let src = match NET_STACK.source_ip_for(external) {
+    let src = match iface::source_ip_for(external) {
         Some(ip) => ip,
         None => return fail!("source_ip_for({}) returned None", external),
     };
@@ -151,7 +157,7 @@ fn test_source_ip_for_external_uses_nic() -> TestResult {
 /// rather than blanket-blacklisting loopback.
 fn test_source_ip_for_loopback_uses_loopback() -> TestResult {
     let lo = Ipv4Addr([127, 0, 0, 1]);
-    let src = match NET_STACK.source_ip_for(lo) {
+    let src = match iface::source_ip_for(lo) {
         Some(ip) => ip,
         None => return fail!("source_ip_for(127.0.0.1) returned None"),
     };
@@ -165,7 +171,7 @@ fn test_source_ip_for_loopback_uses_loopback() -> TestResult {
 }
 
 fn test_tcp_syn_transmit() -> TestResult {
-    let our_ip = match NET_STACK.first_ipv4() {
+    let our_ip = match iface::first_ipv4() {
         Some(ip) => ip.0,
         None => return fail!("no local IP"),
     };
@@ -194,7 +200,7 @@ fn test_tcp_syn_transmit() -> TestResult {
 fn test_tcp_nonblocking_connect_returns_einprogress() -> TestResult {
     use slopos_abi::net::{AF_INET, SOCK_STREAM};
 
-    let sock_fd = socket::socket_create(AF_INET, SOCK_STREAM, 0);
+    let sock_fd = socket::socket_create(AF_INET, SOCK_STREAM, 0, socket::SocketOwner::UNOWNED);
     if sock_fd < 0 {
         return fail!("socket_create failed: {}", sock_fd);
     }
@@ -215,7 +221,7 @@ fn test_tcp_nonblocking_connect_returns_einprogress() -> TestResult {
 }
 
 slopos_testing::stest!(name = test_route_table_has_default, suite = tcp_live);
-slopos_testing::stest!(name = test_netstack_has_ipv4, suite = tcp_live);
+slopos_testing::stest!(name = test_iface_has_ipv4, suite = tcp_live);
 slopos_testing::stest!(name = test_arp_resolve_gateway, suite = tcp_live);
 slopos_testing::stest!(
     name = test_source_ip_for_external_uses_nic,

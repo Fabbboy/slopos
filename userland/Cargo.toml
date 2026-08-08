@@ -50,8 +50,12 @@ name = "nmap"
 path = "src/bin/nmap.rs"
 
 [[bin]]
-name = "ifconfig"
-path = "src/bin/ifconfig.rs"
+name = "ip"
+path = "src/bin/ip.rs"
+
+[[bin]]
+name = "ss"
+path = "src/bin/ss.rs"
 
 [[bin]]
 name = "nc"
@@ -176,6 +180,10 @@ path = "src/bin/tests/shell_script_test.rs"
 name = "stdio_stream_test"
 path = "src/bin/tests/stdio_stream_test.rs"
 
+[[bin]]
+name = "ip_e2e_test"
+path = "src/bin/tests/ip_e2e_test.rs"
+
 [features]
 default = []
 testbins = []
@@ -183,9 +191,11 @@ testbins = []
 [dependencies]
 slopos-abi = { workspace = true }
 slopos-appkit = { workspace = true }
+slopos-chrome-core = { workspace = true }
 slopos-font = { workspace = true }
 slopos-keymap-core = { workspace = true }
 slopos-gfx = { workspace = true }
+slopos-net-core = { workspace = true }
 slopos-image = { workspace = true }
 slopos-protocol = { workspace = true }
 slopos-rt = { workspace = true }

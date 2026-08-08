@@ -1,5 +1,4 @@
 use core::ffi::c_char;
-use core::mem::size_of;
 use core::ops::ControlFlow;
 use core::sync::atomic::Ordering as AtomicOrdering;
 
@@ -7,7 +6,6 @@ use slopos_abi::Errno;
 use slopos_abi::syscall::{CLOCK_MONOTONIC, CLOCK_REALTIME, Timespec, TtyIndex, UserSysInfo};
 use slopos_abi::task::{TaskExitReason, TaskFaultReason};
 use slopos_abi::tty_error::TtyError;
-use slopos_abi::{USER_NET_MAX_MEMBERS, UserNetInfo, UserNetMember};
 use slopos_ostd::klog_debug;
 
 use crate::syscall::args::{UserBytes, UserPtr};
@@ -172,45 +170,6 @@ define_syscall!(syscall_sys_info (ctx, info_out: UserPtr<UserSysInfo>) -> Result
         wl_balance: slopos_ostd::wl_currency::check_balance(),
         boot_flags: slopos_ostd::boot_flags::get_flags(),
     };
-
-    copy_to_user(info_out.inner(), &info).map_err(|_| Errno::EFAULT)?;
-    Ok(())
-});
-
-define_syscall!(syscall_net_scan
-    (ctx, buf: UserPtr<UserNetMember>, max: u64, refresh: u64) -> Result<u64, Errno>
-{
-    let max_members = (max as usize).min(USER_NET_MAX_MEMBERS);
-    if max_members == 0 {
-        return Ok(0);
-    }
-
-    let mut scratch = [UserNetMember::default(); USER_NET_MAX_MEMBERS];
-    let discovered = slopos_net::netinfo::net_scan_members(&mut scratch[..max_members], refresh != 0)
-        .min(max_members)
-        .min(USER_NET_MAX_MEMBERS);
-
-    let mut i = 0usize;
-    while i < discovered {
-        let dst = buf.as_u64().wrapping_add((i * size_of::<UserNetMember>()) as u64);
-        let user_ptr = slopos_mm::user_ptr::UserPtr::<UserNetMember>::try_new(dst)
-            .map_err(|_| Errno::EFAULT)?;
-        copy_to_user(user_ptr, &scratch[i]).map_err(|_| Errno::EFAULT)?;
-        i += 1;
-    }
-
-    slopos_ostd::wl_currency::adjust_balance(slopos_ostd::wl_currency::WL_DELTA);
-    Ok(discovered as u64)
-});
-
-define_syscall!(syscall_net_info (ctx, info_out: UserPtr<UserNetInfo>) -> Result<(), Errno> {
-    let ready = slopos_net::netinfo::net_is_ready();
-    let mut info = UserNetInfo::default();
-    info.nic_ready = u8::from(ready);
-
-    if ready {
-        let _ = slopos_net::netinfo::net_get_info(&mut info);
-    }
 
     copy_to_user(info_out.inner(), &info).map_err(|_| Errno::EFAULT)?;
     Ok(())

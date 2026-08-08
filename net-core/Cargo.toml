@@ -1,0 +1,18 @@
+[package]
+name = "slopos-net-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Network address/CLI core: IPv4, MAC, CIDR, ABI renderers and the `ip` grammar, host-testable"
+
+[lints]
+workspace = true
+
+[lib]
+path = "src/lib.rs"
+crate-type = ["rlib"]
+
+doctest = false
+
+[dependencies]
+slopos-abi = { workspace = true }

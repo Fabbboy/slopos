@@ -63,7 +63,7 @@ fn socket_fd_for(process_id: u32, fd: i32) -> Result<SocketFd, Errno> {
 
 define_syscall!(syscall_socket
     (ctx, domain: u32, sock_type: u32, protocol: u32)
-    requires(let process_id: process_id)
+    requires(let process_id: process_id, let task_id: task_id)
     -> Result<u64, Errno>
 {
     let domain = domain as u16;
@@ -100,7 +100,11 @@ define_syscall!(syscall_socket
     }
     let _icmp_datagram = sock_type == SOCK_DGRAM && protocol == IPPROTO_ICMP;
 
-    let sock_idx = socket::socket_create(domain, sock_type, protocol);
+    // Both halves of the owner come from the syscall context, never from
+    // userland: `net_query` gates owner disclosure by comparing against it, so a
+    // caller able to name its own owner could name someone else's.
+    let owner = socket::SocketOwner { process_id, task_id };
+    let sock_idx = socket::socket_create(domain, sock_type, protocol, owner);
     if sock_idx < 0 {
         return Err(errno_from_neg(sock_idx));
     }

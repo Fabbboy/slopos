@@ -3,18 +3,30 @@ pub mod dock;
 mod hover;
 mod input;
 pub mod menu_bar;
+mod net_glyph;
 mod output;
+mod popover;
 pub mod protocol;
 mod region;
 mod renderer;
+mod status_item;
 mod surface_cache;
 
 use crate::gfx::DamageRect;
+use crate::net_query;
 use crate::ring::{Ring, slopfut};
 use crate::syscall::{DisplayInfo, UserWindowInfo, core as sys_core, tty, window};
 use crate::theme::*;
 use region::Region;
+use slopos_abi::net::{
+    NET_EVENT_LEN, NET_IFINDEX_NONE, NET_MON_DEFAULT, NET_Q_ADDRS, NET_Q_GLOBAL, NET_Q_IFACES,
+    UserAddr, UserIface, UserNetGlobal,
+};
 use slopos_abi::syscall::POLLIN;
+use slopos_chrome_core::status::MAX_STATUS_ITEMS;
+use slopos_chrome_core::{
+    IfaceKind, IfaceRow, NetIndicatorState, NetPanelModel, indicator_state_for,
+};
 use slopos_protocol::server::MAX_CLIENTS;
 use std::time::Instant;
 use std::vec::Vec;
@@ -44,6 +56,9 @@ struct WindowManager {
 
     system_bar: menu_bar::SystemBar,
     shelf: dock::LauncherShelf,
+    /// The bar's popover: compositor-owned chrome holding a pointer grab while
+    /// it is open.
+    popover: popover::Popover,
 
     /// Protocol bridge for AF_UNIX socket-based clients (None if bind failed).
     protocol: Option<Box<ProtocolBridge>>,
@@ -71,8 +86,22 @@ struct WindowManager {
     /// snapshot keeps its dirty flag and is exported next frame.
     frame_dirty_surfaces: Vec<u32>,
     prev_window_bounds: [WindowBounds; MAX_WINDOWS],
-    prev_uptime_secs: u64,
     prev_cursor_shape: u8,
+    /// Everything the network panel would show, as of the last poll.
+    net_cache: NetPanelModel,
+    /// The one state the bar's indicator draws, derived from `net_cache`.
+    net_indicator: NetIndicatorState,
+    /// When the network was last queried; `None` until the first poll. Only
+    /// consulted on the fallback path — see [`WindowManager::net_event_driven`].
+    net_last_poll: Option<Instant>,
+    /// Whether a `net_monitor` fd is driving refreshes.
+    ///
+    /// When it is, the timer below is switched off entirely rather than kept
+    /// as a backstop. A backstop would mask a monitor that had stopped firing:
+    /// the bar would still update, a little late, and the broken fd would go
+    /// unnoticed. Every event triggers a full re-query, including the in-band
+    /// overflow record, so a dropped event cannot desync the model.
+    net_event_driven: bool,
     /// Hardware-cursor state: `None` = not yet probed, `Some(true)` = the
     /// virtio-gpu overlay owns the pointer (software cursor suppressed),
     /// `Some(false)` = unavailable (software cursor in use).
@@ -101,6 +130,7 @@ impl WindowManager {
             surface_cache: ClientSurfaceCache::new(),
             system_bar: menu_bar::SystemBar::new(),
             shelf,
+            popover: popover::Popover::new(),
             protocol,
             protocol_serial: 0,
             protocol_pointer_focus: 0,
@@ -111,8 +141,11 @@ impl WindowManager {
             pending_full: false,
             frame_dirty_surfaces: Vec::new(),
             prev_window_bounds: [WindowBounds::default(); MAX_WINDOWS],
-            prev_uptime_secs: u64::MAX, // force first-frame clock damage
             prev_cursor_shape: 0,
+            net_cache: NetPanelModel::EMPTY,
+            net_indicator: NetIndicatorState::Disconnected,
+            net_last_poll: None,
+            net_event_driven: false,
             hw_cursor: None,
             hw_cursor_shape: -1,
             hw_cursor_last_x: i32::MIN,
@@ -153,6 +186,26 @@ impl WindowManager {
         } else {
             true
         }
+    }
+
+    /// Rebuild the network model from the kernel and republish the indicator.
+    ///
+    /// The single seam between the compositor and how the kernel reports the
+    /// network. Everything downstream reads `net_cache` and `net_indicator`,
+    /// and the bar republishes only when the *drawn* state changes, so what
+    /// this body queries is invisible to the rest of the compositor.
+    ///
+    /// A failed query leaves the previous model in place rather than falling
+    /// back to `EMPTY`. A transient `ENOMEM` mid-frame is not evidence that
+    /// the network went away, and flashing the indicator to Disconnected and
+    /// back is worse than showing state one poll old.
+    fn refresh_from_kernel(&mut self) {
+        let Some(model) = read_net_model() else {
+            return;
+        };
+        self.net_indicator = indicator_state_for(&model);
+        self.net_cache = model;
+        self.system_bar.set_network(true, self.net_indicator);
     }
 
     fn refresh_windows(&mut self) {
@@ -312,6 +365,18 @@ impl WindowManager {
             );
         }
 
+        // Status items, from the same layout the bar draws from.
+        let mut status_regions = [(0u32, DamageRect::invalid(), false); MAX_STATUS_ITEMS];
+        let status_count = self.system_bar.hover_regions(
+            self.renderer.output_width,
+            self.input.mouse_x,
+            self.input.mouse_y,
+            &mut status_regions,
+        );
+        for &(id, rect, hovered) in &status_regions[..status_count] {
+            self.hover_registry.register(id, rect, hovered);
+        }
+
         let mut hover_damage = [DamageRect::invalid(); 32];
         let hover_damage_count = self.hover_registry.changed_regions(&mut hover_damage);
         for i in 0..hover_damage_count {
@@ -381,6 +446,8 @@ impl WindowManager {
                 }
                 InputEventType::PointerButtonPress => {
                     let button = event.data.data0 as u8;
+                    let popover_rect = self.popover.rect();
+                    let screen_w = self.renderer.output_width;
                     let should_forward = self.input.on_button_press(
                         button,
                         fb_width,
@@ -389,6 +456,9 @@ impl WindowManager {
                         &self.windows,
                         self.window_count,
                         &self.shelf,
+                        popover_rect,
+                        screen_w,
+                        &self.system_bar,
                         proto_box.as_deref_mut(),
                     );
                     if should_forward && self.protocol_pointer_focus != 0 {
@@ -469,9 +539,14 @@ impl WindowManager {
     /// its content; decorations and the desktop belong to the compositor, so a
     /// non-`Content` hit drops focus to none.
     fn sync_pointer_focus(&mut self, proto: Option<&mut ProtocolBridge>) {
-        let hit = self
-            .input
-            .resolve_cursor_hit(&self.windows, self.window_count, &self.shelf);
+        let hit = self.input.resolve_cursor_hit(
+            &self.windows,
+            self.window_count,
+            &self.shelf,
+            self.popover.rect(),
+            self.renderer.output_width,
+            &self.system_bar,
+        );
         let new_ptr_focus = match hit.part {
             input::CursorPart::Content => hit.task_id,
             _ => 0,
@@ -659,9 +734,14 @@ impl WindowManager {
         // Resolve what the pointer is over once; the cursor shape and the
         // signal-button hover both read this single hit, against this window
         // snapshot, before the post-input resync can reorder the array.
-        let cursor_hit = wm
-            .input
-            .resolve_cursor_hit(&wm.windows, wm.window_count, &wm.shelf);
+        let cursor_hit = wm.input.resolve_cursor_hit(
+            &wm.windows,
+            wm.window_count,
+            &wm.shelf,
+            wm.popover.rect(),
+            wm.renderer.output_width,
+            &wm.system_bar,
+        );
         let cursor_shape = wm.input.cursor_shape_for(&cursor_hit, &wm.windows);
         let signal_hovered_task =
             wm.input
@@ -696,24 +776,80 @@ impl WindowManager {
         if focus_after != focus_before {
             wm.add_title_bar_damage_for_task(focus_before);
             wm.add_title_bar_damage_for_task(focus_after);
+            // The bar names the focused application, and the title-bar damage
+            // above covers the windows only — nothing else in the frame
+            // touches the bar strip, so the name would stay stale until some
+            // unrelated change repainted `y < 24`.
+            let name_rect = wm.system_bar.app_name_damage(output.width);
+            wm.output_damage
+                .add_rect(name_rect.x0, name_rect.y0, name_rect.x1, name_rect.y1);
         }
 
         wm.resync_windows_post_input();
 
-        // Compute uptime for the system bar clock.
-        let uptime_secs = time_origin.elapsed().as_secs();
+        // Fallback path only: with a `net_monitor` fd armed, refreshes are
+        // driven by the kernel telling us something changed, and this timer
+        // never runs. It exists for the case where the monitor could not be
+        // opened at all.
+        if !wm.net_event_driven
+            && wm
+                .net_last_poll
+                .is_none_or(|last| last.elapsed().as_millis() >= NET_POLL_INTERVAL_MS)
+        {
+            wm.net_last_poll = Some(Instant::now());
+            wm.refresh_from_kernel();
+        }
 
-        // Add system bar clock damage each second.
-        if uptime_secs != wm.prev_uptime_secs {
-            wm.prev_uptime_secs = uptime_secs;
-            if let Some(clock_rect) = wm.system_bar.clock_damage(output.width) {
-                wm.output_damage.add_rect(
-                    clock_rect.x0,
-                    clock_rect.y0,
-                    clock_rect.x1,
-                    clock_rect.y1,
-                );
+        // Apply the press the input dispatch recorded. Done here rather than
+        // in the dispatch because that path is handed an immutable view of the
+        // chrome; this is the same shape `process_pending_close_requests` uses.
+        if let Some(request) = wm.input.take_chrome_request() {
+            let screen_w = output.width;
+            let screen_h = output.height;
+            match request {
+                input::ChromeRequest::PopoverToggle(kind) => {
+                    if let Some(item) = wm.system_bar.item_rect(screen_w, kind) {
+                        // The model must be read out first: `toggle` sizes the
+                        // panel from it, and `wm` is borrowed mutably below.
+                        let model = wm.net_cache;
+                        wm.popover.toggle(kind, item, &model, screen_w, screen_h);
+                    }
+                }
+                input::ChromeRequest::PopoverDismiss => wm.popover.dismiss(),
+                // A press the panel does not claim is still swallowed by the
+                // grab rather than falling through to a window.
+                input::ChromeRequest::PopoverPress { x, y } => {
+                    let _ = wm.popover.press(x, y, &wm.net_cache);
+                }
             }
+        }
+        // Settle or abandon an outstanding switch request before the panel is
+        // measured, so a request that timed out this frame reverts in the same
+        // frame it expires rather than one later.
+        wm.popover.settle(&wm.net_cache);
+        wm.popover
+            .fit_to(&wm.net_cache, output.width, output.height);
+
+        // Whatever the popover covered and now covers. Emitted only when the
+        // two differ, so an open popover over an idle network is free.
+        let mut popover_damage = [DamageRect::invalid(); 2];
+        let popover_damage_count = wm.popover.take_damage(&mut popover_damage);
+        for rect in &popover_damage[..popover_damage_count] {
+            wm.output_damage
+                .add_rect(rect.x0, rect.y0, rect.x1, rect.y1);
+        }
+
+        // System-bar damage: the clock ticking over, an indicator changing
+        // state, or the items moving. A frame where none of those happened
+        // reports nothing.
+        let uptime_secs = time_origin.elapsed().as_secs();
+        let mut bar_damage = [DamageRect::invalid(); menu_bar::MAX_BAR_DAMAGE];
+        let bar_damage_count =
+            wm.system_bar
+                .take_damage(output.width, uptime_secs, &mut bar_damage);
+        for rect in &bar_damage[..bar_damage_count] {
+            wm.output_damage
+                .add_rect(rect.x0, rect.y0, rect.x1, rect.y1);
         }
 
         if wm.needs_redraw() {
@@ -753,10 +889,11 @@ impl WindowManager {
                     wm.input.mouse_y,
                     cursor_shape,
                     &mut wm.surface_cache,
-                    &mut wm.system_bar,
+                    &wm.system_bar,
                     &mut wm.shelf,
+                    &mut wm.popover,
+                    &wm.net_cache,
                     active_app_name,
-                    uptime_secs,
                     &frame_damage,
                     hw_cursor,
                 );
@@ -814,6 +951,18 @@ impl WindowManager {
             wm.input.needs_full_redraw = false;
             wm.force_full_redraw = false;
             wm.first_frame = false;
+        }
+
+        // What the last window of frames cost. Deltas, so a steady desktop
+        // reads as `frames=0 bytes=0` and a regression in damage shows up as a
+        // number rather than as a feeling about the frame rate.
+        if let Some((frames, bytes)) =
+            metrics.take_window(time_origin.elapsed().as_millis() as u64, METRICS_REPORT_MS)
+        {
+            let mut line = std::string::String::new();
+            use core::fmt::Write;
+            let _ = write!(line, "COMPOSITOR: frames={frames} bytes={bytes}\n");
+            tty::write(line.as_bytes());
         }
 
         // Parse + reap + flush once per frame.
@@ -893,6 +1042,32 @@ pub fn compositor_user_main() {
 
 const TARGET_FRAME_MS: u64 = 16;
 
+/// How often the compositor asks the kernel about the network **when it has no
+/// monitor fd**. Two seconds is slow enough that the syscall is free at 60 Hz
+/// and fast enough that a cable pulled out is reflected before anyone looks
+/// twice at the bar. With a monitor fd this never runs.
+const NET_POLL_INTERVAL_MS: u128 = 2000;
+
+/// How often the compositor reports what its frames cost.
+///
+/// `FrameMetrics` is otherwise write-only: `record` accumulates and nothing
+/// reads it back, so "did this change make the compositor busier" is not a
+/// question anyone can answer from a boot log. Five seconds is long enough that
+/// the line is rare and short enough that a capture of ordinary length contains
+/// several.
+///
+/// Off unless `SLOPOS_COMPOSITOR_METRICS` is set, because the report goes to the
+/// TTY: on by default it writes over whatever the user is doing, every five
+/// seconds, forever.
+const METRICS_REPORT_MS: u64 = 5000;
+
+/// Whether to print the periodic damage report. Read once — the environment
+/// does not change under a running compositor, and this is consulted every
+/// frame.
+fn metrics_reporting_enabled() -> bool {
+    std::env::var("SLOPOS_COMPOSITOR_METRICS").is_ok_and(|v| v != "0")
+}
+
 /// Maximum rect count handed to the kernel flip per frame. The precise damage
 /// region is coalesced down to this many bounding rects (a superset of what was
 /// painted) so the back-buffer → scanout copy stays bounded while still covering
@@ -965,6 +1140,13 @@ async fn compositor_async(
         n.signal_ready();
     }
 
+    // Network indicator: driven by a monitor fd when one can be opened, and by
+    // the per-frame timer when one cannot.
+    {
+        let event_driven = spawn_net_monitor_task(wm.clone());
+        wm.borrow_mut().net_event_driven = event_driven;
+    }
+
     // Accept task: a multishot listen-readiness stream. Each yield drains the
     // full backlog and spawns a per-client task per new connection. Runs
     // concurrently with the frame timer, so newly-connected clients are
@@ -1008,7 +1190,7 @@ async fn compositor_async(
     // synchronously under a short `borrow_mut` that is dropped before the next
     // timer await — so per-client/accept tasks observe no overlapping borrow.
     let mut frame_count: u32 = 0;
-    let mut metrics = FrameMetrics::new();
+    let mut metrics = FrameMetrics::new(metrics_reporting_enabled());
     let time_origin = Instant::now();
     loop {
         let frame_start = Instant::now();
@@ -1056,6 +1238,60 @@ async fn compositor_async(
             slopfut::yield_now().await;
         }
     }
+}
+
+/// Drive the network indicator from a `net_monitor` fd instead of a timer.
+///
+/// The fd is used purely as a change *notification*: every wake re-reads the
+/// whole model through `net_query` rather than applying the event's payload as
+/// a delta. That is what makes a dropped event harmless — the in-band
+/// `NET_EV_OVERFLOW` record wakes us like any other, and the re-query is
+/// authoritative regardless of what was missed. Applying deltas would need the
+/// `seq`-based handoff the ABI documents, to no benefit for a model this small.
+///
+/// The monitor is opened, then the first query issued, in that order: an
+/// interface that appears between the two shows up as an event rather than
+/// being missed by both.
+///
+/// Returns whether the fd was opened. A failure leaves the caller on the
+/// timer.
+fn spawn_net_monitor_task(wm: std::rc::Rc<std::cell::RefCell<WindowManager>>) -> bool {
+    let fd = match crate::syscall::net::net_monitor(NET_MON_DEFAULT, 0) {
+        Ok(fd) => fd,
+        Err(_) => {
+            tty::write(b"COMPOSITOR: net_monitor unavailable; polling instead\n");
+            return false;
+        }
+    };
+    // The task outlives this frame, so the descriptor is handed to it rather
+    // than closed here; it lives until the compositor exits.
+    let raw = fd.into_raw();
+
+    wm.borrow_mut().refresh_from_kernel();
+
+    slopfut::spawn(async move {
+        let mut buf = [0u8; NET_EVENT_LEN * 16];
+        loop {
+            let mut stream = slopfut::poll_add_multishot(raw, POLLIN);
+            while stream.next().await.is_some() {
+                // Drain to empty, or POLLIN stays asserted and the stream
+                // spins. An empty netmon read is `EAGAIN`, never a block.
+                while crate::syscall::fs::read_slice(raw, &mut buf).unwrap_or(0) > 0 {}
+                wm.borrow_mut().refresh_from_kernel();
+            }
+            // A multishot row can die on a transient error; the fd outlives
+            // it, so re-arm rather than treating stream-end as permanent.
+            //
+            // Logged rather than silent: there is no polling backstop, and a
+            // monitor that dies and quietly resurrects looks exactly like one
+            // that never died. A healthy stream never ends, so the line costs
+            // nothing.
+            tty::write(b"COMPOSITOR: net_monitor stream ended; re-arming\n");
+            // Paced so a persistently failing arm cannot become a hot loop.
+            slopfut::time::sleep_ms(500).await;
+        }
+    });
+    true
 }
 
 /// Spawn a per-client task that services `idx` (socket `fd`, connection
@@ -1123,6 +1359,48 @@ fn spawn_client_task(
         }
         // `stream` drops here → its armed ring row is cancelled (`OP_CANCEL`).
     });
+}
+
+/// Read the whole network model out of `net_query`.
+///
+/// Three queries, joined on `ifindex`: the interface table, the addresses, and
+/// the one global record. The resolver is not among them — nothing the bar or
+/// the panel draws reads the model's nameserver list, so it stays empty.
+///
+/// `None` if any query failed, which the caller reads as "keep what you had".
+fn read_net_model() -> Option<NetPanelModel> {
+    let ifaces = net_query::fetch::<UserIface>(NET_Q_IFACES, NET_IFINDEX_NONE).ok()?;
+    let addrs = net_query::fetch::<UserAddr>(NET_Q_ADDRS, NET_IFINDEX_NONE).ok()?;
+    let global = net_query::fetch::<UserNetGlobal>(NET_Q_GLOBAL, NET_IFINDEX_NONE).ok()?;
+    let global = global.records.first()?;
+
+    let mut model = NetPanelModel::EMPTY;
+    model.enabled = global.enabled != 0;
+    model.connectivity = global.connectivity;
+    model.gateway = global.default_gateway;
+
+    for iface in &ifaces.records {
+        let mut row = IfaceRow::named(
+            net_query::name_of(iface).as_bytes(),
+            IfaceKind::from_abi(iface.kind),
+        );
+        row.admin_up = iface.admin_up != 0;
+        row.carrier = iface.carrier != 0;
+        row.oper = iface.oper_state;
+        // The first address on the interface. The indicator asks only whether
+        // there is one; which one it picks matters to the panel, and the panel
+        // reads the full list from `net_cache` rather than this summary.
+        if let Some(addr) = addrs
+            .records
+            .iter()
+            .find(|addr| addr.ifindex == iface.ifindex)
+        {
+            row.ipv4 = addr.addr;
+            row.prefix_len = addr.prefix_len;
+        }
+        model.push_iface(row);
+    }
+    Some(model)
 }
 
 /// Return the title of the focused window as a `&str`, or `""` if none.

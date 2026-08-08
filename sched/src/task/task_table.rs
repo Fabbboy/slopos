@@ -546,7 +546,14 @@ pub fn init_task_manager() -> c_int {
     if !was_initialized {
         with_task_manager(|mgr| mgr.initialized = true);
         TASK_MANAGER.clear_poison();
-        crate::sleep::init_sleep_queue();
+        // Ensure, not reset. Boot brings the scheduler up in the `drivers`
+        // phase and reaches this step in `services`, so kernel-I/O kthreads are
+        // already parked on deadlines by the time it runs; wiping the queue
+        // here would unarm them. The reset below is the reinit path, which
+        // retires those tasks anyway.
+        if !crate::sleep::ensure_sleep_queue_allocated() {
+            return -1;
+        }
         return 0;
     }
 
@@ -719,6 +726,13 @@ impl Drop for PendingTask {
 /// Reserve capacity and allocate one task without publishing it to lookups.
 pub(super) fn allocate_task() -> Result<PendingTask, TaskAllocError> {
     if !ensure_registry_allocated() {
+        return Err(TaskAllocError::NoFreeSlot);
+    }
+    // Every task comes into existence through here, so this is the one point
+    // that necessarily precedes any park: a task cannot block on a deadline
+    // before it exists. Arming a timeout against a queue with no backing store
+    // silently arms nothing.
+    if !crate::sleep::ensure_sleep_queue_allocated() {
         return Err(TaskAllocError::NoFreeSlot);
     }
     let id = with_task_manager(|mgr| {

@@ -12,9 +12,14 @@
 // crate, exactly as it does from external crates.
 extern crate self as slopos_net;
 
+pub mod iface;
+pub mod iface_ctl;
+pub mod kconsole;
 pub mod net_driver_service;
 pub mod netdev;
-pub mod netinfo;
+pub mod netmon;
+pub mod netmon_file_ops;
+pub mod netseq;
 pub mod packetbuf;
 pub mod pool;
 #[cfg(feature = "test-hooks")]
@@ -24,6 +29,7 @@ pub mod types;
 pub mod arp;
 pub mod checksum;
 pub mod clock;
+pub mod connectivity;
 pub mod dhcp;
 pub mod dns;
 pub mod icmp;
@@ -33,8 +39,8 @@ pub mod loopback;
 pub mod napi;
 pub mod napi_waker;
 pub mod neighbor;
-pub mod netstack;
 pub mod reassembly;
+pub mod resolver;
 pub mod route;
 pub mod socket;
 pub mod socket_file_ops;
@@ -46,8 +52,8 @@ pub mod unix_socket_file_ops;
 pub mod xdp;
 
 // Re-export key type-safe primitives for convenient access.
+pub use iface::{Iface, IfaceAddr, IfaceKind, OperState};
 pub use netdev::{DEVICE_REGISTRY, DeviceHandle, NetDevice, NetDeviceFeatures, NetDeviceStats};
-pub use netstack::{IfaceConfig, NET_STACK, NetStack};
 pub use packetbuf::PacketBuf;
 pub use pool::{PACKET_POOL, PacketPool};
 pub use route::{ROUTE_TABLE, RouteEntry, RouteTable};

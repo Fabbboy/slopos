@@ -610,18 +610,74 @@ pub fn cancel_sleep(task_id: u32) {
 /// recognises this as a sleep-queue wake when the deadline fires
 /// (it gates on reason==Sleep to avoid spurious wakes on a task
 /// that has since re-blocked for a different reason).
-pub fn arm_blocked_timeout(task_id: u32, timeout_ms: u32) {
+///
+/// Returns whether a deadline is actually armed. `false` means the queue could
+/// not take the entry — it has no backing store yet, or every slot is taken.
+/// The caller has already committed `Running → Blocked` by the time it gets
+/// here, so on `false` it **must not deschedule**: nothing would ever wake the
+/// task again.
+#[must_use = "a caller that deschedules on a failed arm parks its task forever"]
+pub fn arm_blocked_timeout(task_id: u32, timeout_ms: u32) -> bool {
     if task_id == INVALID_TASK_ID {
-        return;
+        return false;
     }
+    let now_tick = platform::timer_ticks();
+    let wake_tick = now_tick.wrapping_add(ms_to_sleep_ticks(timeout_ms));
+    if !SLEEP_QUEUE.lock().upsert(task_id, wake_tick) {
+        return false;
+    }
+    // Stamped only once the entry is in, which keeps `Blocked(Sleep) ⇔ a
+    // deadline is armed` true in both directions. A tick that collects the
+    // entry in the window before the stamp reads the owner as not sleep-parked
+    // and leaves it armed for the next tick — the retry `collect_due`'s
+    // peek-then-wake discipline exists to provide.
     if let Some(task) = task_find_by_id(task_id) {
         // The guard derefs to `&Task`; the store is a relaxed atomic on the
         // fused state word.
         task.store_block_reason(BlockReason::Sleep);
     }
-    let now_tick = platform::timer_ticks();
-    let wake_tick = now_tick.wrapping_add(ms_to_sleep_ticks(timeout_ms));
-    SLEEP_QUEUE.lock().upsert(task_id, wake_tick);
+    true
+}
+
+/// Give the sleep queue its backing store if it has none, leaving any entries
+/// it already holds alone.
+///
+/// Called from the task-allocation path, which is the one point that
+/// necessarily precedes any park: a task cannot block on a deadline before it
+/// exists. Arming against a queue with no backing store arms nothing, and the
+/// arming task has already committed to `Blocked` by then.
+///
+/// The entries are built outside the lock and installed under it, and the
+/// displaced buffer is dropped after the guard: `SLEEP_QUEUE` is cli-disabling
+/// and the allocator is where every subsystem meets.
+pub(crate) fn ensure_sleep_queue_allocated() -> bool {
+    if SLEEP_QUEUE.lock().entries.len() == MAX_TASKS {
+        return true;
+    }
+    let mut entries = match KVec::with_capacity(MAX_TASKS) {
+        Ok(entries) => entries,
+        Err(_) => return false,
+    };
+    for _ in 0..MAX_TASKS {
+        if entries.push(SleepEntry::empty()).is_err() {
+            return false;
+        }
+    }
+    let leftover = {
+        let mut queue = SLEEP_QUEUE.lock();
+        if queue.entries.len() == MAX_TASKS {
+            // Lost the race; the winner's store is the live one and ours is
+            // what gets freed.
+            entries
+        } else {
+            queue.active_count = 0;
+            queue.active_high_water = 0;
+            SLEEP_ACTIVE_COUNT.store(0, Ordering::Release);
+            core::mem::replace(&mut queue.entries, entries)
+        }
+    };
+    drop(leftover);
+    true
 }
 
 pub fn sleep_current_task_ms(ms: u32) -> c_int {

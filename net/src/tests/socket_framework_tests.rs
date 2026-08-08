@@ -21,7 +21,7 @@ pub fn test_slab_alloc_free_cycle() -> TestResult {
 
     let mut sockets: KVec<u32> = KVec::new();
     for _ in 0..100 {
-        let idx = socket_create(AF_INET, SOCK_DGRAM, 0);
+        let idx = socket_create(AF_INET, SOCK_DGRAM, 0, SocketOwner::UNOWNED);
         if idx < 0 {
             return fail!("socket_create failed before reaching 100 allocations");
         }
@@ -35,7 +35,7 @@ pub fn test_slab_alloc_free_cycle() -> TestResult {
     assert_eq_test!(socket_count_active(), 50, "50 active after closing half");
 
     for _ in 0..50 {
-        let idx = socket_create(AF_INET, SOCK_DGRAM, 0);
+        let idx = socket_create(AF_INET, SOCK_DGRAM, 0, SocketOwner::UNOWNED);
         assert_test!(idx >= 0, "re-allocation succeeds");
     }
     assert_eq_test!(socket_count_active(), 100, "count restored to 100");
@@ -68,8 +68,8 @@ pub fn test_ephemeral_port_exhaustion() -> TestResult {
 pub fn test_udp_demux_dispatch() -> TestResult {
     reset();
 
-    let a = socket_create(AF_INET, SOCK_DGRAM, 0);
-    let b = socket_create(AF_INET, SOCK_DGRAM, 0);
+    let a = socket_create(AF_INET, SOCK_DGRAM, 0, SocketOwner::UNOWNED);
+    let b = socket_create(AF_INET, SOCK_DGRAM, 0, SocketOwner::UNOWNED);
     if a < 0 || b < 0 {
         return fail!("socket_create failed");
     }
@@ -102,7 +102,7 @@ pub fn test_udp_demux_dispatch() -> TestResult {
 pub fn test_inaddr_any_wildcard() -> TestResult {
     reset();
 
-    let sock = socket_create(AF_INET, SOCK_DGRAM, 0);
+    let sock = socket_create(AF_INET, SOCK_DGRAM, 0, SocketOwner::UNOWNED);
     if sock < 0 {
         return fail!("socket_create failed");
     }
@@ -123,7 +123,7 @@ pub fn test_recv_queue_overflow() -> TestResult {
     reset();
 
     let mut table = NEW_SOCKET_TABLE.lock();
-    let Some(idx) = table.alloc(SocketInner::Udp(UdpSocketInner)) else {
+    let Some(idx) = table.alloc(SocketInner::Udp(UdpSocketInner), SocketOwner::UNOWNED) else {
         return fail!("slab alloc failed");
     };
     let Some(sock) = table.get_mut(idx) else {
@@ -166,8 +166,8 @@ pub fn test_recv_queue_overflow() -> TestResult {
 pub fn test_so_reuseaddr() -> TestResult {
     reset();
 
-    let a = socket_create(AF_INET, SOCK_DGRAM, 0);
-    let b = socket_create(AF_INET, SOCK_DGRAM, 0);
+    let a = socket_create(AF_INET, SOCK_DGRAM, 0, SocketOwner::UNOWNED);
+    let b = socket_create(AF_INET, SOCK_DGRAM, 0, SocketOwner::UNOWNED);
     if a < 0 || b < 0 {
         return fail!("socket_create failed");
     }
@@ -192,7 +192,7 @@ pub fn test_so_reuseaddr() -> TestResult {
 pub fn test_so_rcvbuf_resize() -> TestResult {
     reset();
 
-    let sock = socket_create(AF_INET, SOCK_DGRAM, 0);
+    let sock = socket_create(AF_INET, SOCK_DGRAM, 0, SocketOwner::UNOWNED);
     if sock < 0 {
         return fail!("socket_create failed");
     }
@@ -220,7 +220,7 @@ pub fn test_so_rcvbuf_resize() -> TestResult {
 pub fn test_shutdown_read_behavior() -> TestResult {
     reset();
 
-    let sock = socket_create(AF_INET, SOCK_DGRAM, 0);
+    let sock = socket_create(AF_INET, SOCK_DGRAM, 0, SocketOwner::UNOWNED);
     if sock < 0 {
         return fail!("socket_create failed");
     }

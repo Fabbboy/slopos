@@ -41,6 +41,23 @@ impl Ipv4Addr {
         u32::from_be_bytes(self.0)
     }
 
+    /// The network address of `self` under a `prefix_len`-bit mask.
+    ///
+    /// Normalising is what makes `10.0.2.15/24` and `10.0.2.0/24` name the same
+    /// route, so a delete finds what an add stored. A prefix of 0 masks to
+    /// `0.0.0.0` and 32 returns the address unchanged; both are special-cased
+    /// because shifting a `u32` by 32 overflows.
+    #[inline]
+    pub const fn masked(self, prefix_len: u8) -> Self {
+        if prefix_len == 0 {
+            return Self::UNSPECIFIED;
+        }
+        if prefix_len >= 32 {
+            return self;
+        }
+        Self::from_u32_be(self.to_u32_be() & (u32::MAX << (32 - prefix_len)))
+    }
+
     /// `true` if the address is in the `127.0.0.0/8` loopback range.
     #[inline]
     pub const fn is_loopback(&self) -> bool {

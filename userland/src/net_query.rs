@@ -1,0 +1,169 @@
+//! Reading `net_query`'s fixed-stride buffers.
+//!
+//! Shared rather than owned by one program: `/bin/ip` renders this state as
+//! text and the compositor's status indicator renders it as a glyph, and both
+//! have to walk the same buffers. Keeping the walker here rather than inside
+//! either one stops the second consumer from depending on the first's
+//! internals.
+//!
+//! Every query answers in the same shape — a [`UserNetQueryHdr`] followed by an
+//! array of one record type — so there is one walker rather than one per
+//! object.
+//!
+//! **The header's `record_size` is the stride, not this build's `size_of`.**
+//! That is the ABI's forward-compatibility lever: a newer kernel may grow a
+//! record, and a client that strides by the kernel's number keeps reading the
+//! prefix it understands instead of walking off into the middle of a struct.
+//!
+//! Sizing is a two-call protocol: a header-sized buffer returns
+//! `record_count == 0` and `total_count == N`, so the caller learns the size
+//! without guessing a capacity and without a fixed cap that silently truncates.
+
+use std::vec::Vec;
+
+use slopos_abi::net::{NET_IFINDEX_NONE, NET_IFNAMSIZ, NET_Q_IFACES, UserIface, UserNetQueryHdr};
+
+use crate::syscall::SyscallResult;
+use crate::syscall::net::net_query;
+
+/// One query's answer.
+pub struct Query<T> {
+    pub hdr: UserNetQueryHdr,
+    pub records: Vec<T>,
+}
+
+impl<T> Query<T> {
+    /// Whether the kernel had more to say than fit. Not an error: the state can
+    /// grow between the sizing call and the reading call, and showing what
+    /// arrived beats failing.
+    pub fn truncated(&self) -> bool {
+        self.hdr.total_count as usize > self.records.len()
+    }
+}
+
+/// Copy one record out of a byte buffer.
+///
+/// Byte-wise rather than a typed load because the record starts at
+/// `header + i * record_size`, and neither the kernel's stride nor this build's
+/// alignment for `T` is something the other side promised. A stride longer than
+/// `T` keeps the prefix; a shorter one leaves the tail at its `Default` value.
+fn decode<T: Copy + Default>(bytes: &[u8]) -> T {
+    let mut out = T::default();
+    let n = bytes.len().min(core::mem::size_of::<T>());
+    // SAFETY: `T` is a `#[repr(C)]` ABI struct of plain integers and byte
+    // arrays, so every bit pattern of its first `n` bytes is a valid value;
+    // `out` is uniquely borrowed and at least `size_of::<T>() >= n` bytes long;
+    // and `bytes` is a distinct slice of at least `n` bytes.
+    unsafe {
+        core::ptr::copy_nonoverlapping(bytes.as_ptr(), (&raw mut out).cast::<u8>(), n);
+    }
+    out
+}
+
+/// Run one query to completion.
+///
+/// `ifindex` filters to a single interface, or [`NET_IFINDEX_NONE`] for all.
+pub fn fetch<T: Copy + Default>(what: u32, ifindex: u32) -> SyscallResult<Query<T>> {
+    const HDR: usize = core::mem::size_of::<UserNetQueryHdr>();
+
+    // Sizing call: the smallest buffer the kernel accepts holds the header and
+    // no records, so it reports `total_count` without transferring anything.
+    let mut probe = [0u8; HDR];
+    net_query(what, ifindex, &mut probe)?;
+    let sizing = decode::<UserNetQueryHdr>(&probe);
+
+    let want = sizing.total_count as usize;
+    if want == 0 {
+        return Ok(Query {
+            hdr: sizing,
+            records: Vec::new(),
+        });
+    }
+
+    let stride = (sizing.record_size as usize).max(1);
+    let mut buf = std::vec![0u8; HDR + want * stride];
+    net_query(what, ifindex, &mut buf)?;
+
+    // Re-read the header: this is a second snapshot, and its counts and stride
+    // are the ones that describe the bytes actually in `buf`.
+    let hdr = decode::<UserNetQueryHdr>(&buf);
+    let stride = (hdr.record_size as usize).max(1);
+    let count = (hdr.record_count as usize).min(buf.len().saturating_sub(HDR) / stride);
+
+    let mut records = Vec::with_capacity(count);
+    for i in 0..count {
+        let start = HDR + i * stride;
+        records.push(decode::<T>(&buf[start..start + stride]));
+    }
+    Ok(Query { hdr, records })
+}
+
+/// The whole interface table, which nearly every renderer needs: routes and
+/// addresses name an interface by index, and a person reads names.
+///
+/// Deliberately unfiltered even when a `dev` operand is present. Resolving a
+/// name to an index needs every row, and the per-object query that follows does
+/// the filtering kernel-side, where every `NET_Q_*` honours the ifindex it
+/// takes.
+pub struct Ifaces {
+    pub rows: Vec<UserIface>,
+    /// How many interfaces the kernel had, which may exceed what fit.
+    pub total: u32,
+}
+
+impl Ifaces {
+    pub fn fetch() -> SyscallResult<Ifaces> {
+        let q = fetch::<UserIface>(NET_Q_IFACES, NET_IFINDEX_NONE)?;
+        Ok(Ifaces {
+            total: q.hdr.total_count,
+            rows: q.records,
+        })
+    }
+
+    /// Whether the kernel had more interfaces than fit in one read.
+    pub fn truncated(&self) -> bool {
+        self.total as usize > self.rows.len()
+    }
+
+    /// The name of `ifindex`, or `None` if this snapshot does not have it.
+    pub fn name_of(&self, ifindex: u32) -> Option<&str> {
+        self.rows
+            .iter()
+            .find(|row| row.ifindex == ifindex)
+            .map(name_of)
+    }
+
+    /// The interface called `name`.
+    ///
+    /// Exact match, never a prefix: device names come from outside the program,
+    /// so abbreviating one would mean a command's meaning changes when a new
+    /// interface appears.
+    pub fn find(&self, name: &[u8]) -> Option<&UserIface> {
+        self.rows.iter().find(|row| name_of(row).as_bytes() == name)
+    }
+}
+
+/// An interface's name as text.
+///
+/// The ABI field is NUL-*padded* and not NUL-terminated when the name fills it
+/// exactly, so the length is "up to the first NUL, else the whole field".
+pub fn name_of(iface: &UserIface) -> &str {
+    let end = iface
+        .name
+        .iter()
+        .position(|&b| b == 0)
+        .unwrap_or(NET_IFNAMSIZ);
+    core::str::from_utf8(&iface.name[..end]).unwrap_or("?")
+}
+
+/// How a record's interface is named.
+///
+/// Falls back to `if#N` when the table does not have the index: a route can
+/// name an interface that went away between two queries, which is racy rather
+/// than broken, and printing the index says more than printing nothing.
+pub fn name_or_index(ifaces: &Ifaces, ifindex: u32) -> std::string::String {
+    match ifaces.name_of(ifindex) {
+        Some(name) => std::string::String::from(name),
+        None => std::format!("if#{ifindex}"),
+    }
+}

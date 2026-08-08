@@ -282,6 +282,34 @@ impl<T> fmt::Debug for BoundedQueue<T> {
     }
 }
 
+/// Who opened a socket.
+///
+/// Two identifiers, because "may this caller be told who owns it" and "what
+/// number names that owner" have different right answers.
+///
+/// `process_id` is the address space, and it decides disclosure: tasks sharing
+/// one address space share the descriptor table that names this socket, so
+/// withholding the owner from a sibling task would protect a fact the sibling
+/// can read directly.
+///
+/// `task_id` is what is reported, because it is the number the rest of the
+/// userland ABI speaks — `getpid` returns it, `kill` and `waitpid` accept it.
+/// An address-space id names nothing any other syscall would take, so a tool
+/// that printed one would produce a pid nobody could act on.
+#[derive(Clone, Copy)]
+pub struct SocketOwner {
+    pub process_id: u32,
+    pub task_id: u32,
+}
+
+impl SocketOwner {
+    /// A socket no process opened, which in practice means one a test made.
+    pub const UNOWNED: Self = Self {
+        process_id: INVALID_PROCESS_ID,
+        task_id: INVALID_PROCESS_ID,
+    };
+}
+
 pub struct Socket {
     /// Protocol-specific socket state.
     pub inner: SocketInner,
@@ -299,8 +327,8 @@ pub struct Socket {
     pub recv_queue: BoundedQueue<(PacketBuf, SockAddr)>,
     /// Deferred error reported on next operation.
     pub pending_error: Option<NetError>,
-    /// Owning process identifier.
-    pub process_id: u32,
+    /// Who opened it. Set once, at the single allocation site.
+    pub owner: SocketOwner,
 }
 
 impl Socket {
@@ -318,7 +346,11 @@ impl Socket {
             remote_addr: None,
             recv_queue: BoundedQueue::new(Self::RECV_QUEUE_DEFAULT_CAPACITY),
             pending_error: None,
-            process_id: 0,
+            // Unowned until the allocation site says otherwise. Not `0`, which
+            // is an id a real task can hold: a default that names a live task
+            // would attribute a socket to one that never opened it, and
+            // attribution is the field's whole purpose.
+            owner: SocketOwner::UNOWNED,
         }
     }
 
@@ -405,18 +437,29 @@ impl SlabSocketTable {
         }
     }
 
-    /// Allocate a new socket slot.
+    /// Allocate a new socket slot owned by `owner`.
     ///
     /// Returns the socket index on success. If no free slots are available,
     /// attempts to grow capacity (doubling, capped at `max_capacity`).
     /// Also marks the index in the allocation bitmap.
-    pub fn alloc(&mut self, inner: SocketInner) -> Option<usize> {
+    ///
+    /// The owner is taken here rather than assigned afterwards because this is
+    /// the only place a socket comes into existence — both `socket_create` and
+    /// `socket_accept` pass through it. An owner set after the fact is one an
+    /// allocation path can forget, and the one that would forget is `accept`:
+    /// its socket would answer to nobody while the connection it names is live.
+    ///
+    /// [`SocketOwner`] is what `net_query` redacts against, so a wrong value
+    /// here is a wrong disclosure rather than a cosmetic slip.
+    pub fn alloc(&mut self, inner: SocketInner, owner: SocketOwner) -> Option<usize> {
         self.init_if_needed();
         if self.freelist.is_empty() {
             self.grow();
         }
         let idx = self.freelist.pop()?;
-        self.slots[idx] = Some(Socket::new(inner));
+        let mut socket = Socket::new(inner);
+        socket.owner = owner;
+        self.slots[idx] = Some(socket);
         {
             let mut alloc = SOCKET_ALLOC.lock();
             alloc.bitmap.set(idx);
@@ -703,7 +746,14 @@ use core::cmp;
 
 use slopos_abi::KernelErrno;
 use slopos_abi::event::{KernelEvent, SocketSlot};
-use slopos_abi::net::{AF_INET, IPPROTO_ICMP, MAX_SOCKETS, SOCK_DGRAM, SOCK_STREAM};
+use slopos_abi::net::{
+    AF_INET, IPPROTO_ICMP, MAX_SOCKETS, NET_SOCK_CLOSE_WAIT, NET_SOCK_CLOSED, NET_SOCK_CLOSING,
+    NET_SOCK_ESTABLISHED, NET_SOCK_FIN_WAIT1, NET_SOCK_FIN_WAIT2, NET_SOCK_LAST_ACK,
+    NET_SOCK_LISTEN, NET_SOCK_SYN_RECV, NET_SOCK_SYN_SENT, NET_SOCK_TIME_WAIT, NET_SOCK_UNCONN,
+    SOCK_DGRAM, SOCK_RAW, SOCK_STREAM,
+};
+use slopos_abi::task::INVALID_PROCESS_ID;
+
 use slopos_abi::syscall::{
     ERRNO_EAFNOSUPPORT, ERRNO_EAGAIN, ERRNO_ECONNREFUSED, ERRNO_EDESTADDRREQ, ERRNO_EINPROGRESS,
     ERRNO_EINTR, ERRNO_EINVAL, ERRNO_EIO, ERRNO_EISCONN, ERRNO_ENOMEM, ERRNO_ENOTCONN,
@@ -1111,7 +1161,12 @@ pub fn socket_notify_tcp_activity(actions: &tcp::Actions) {
         // install time, so we read it directly instead of looking up
         // the old TCP_DEMUX table.
         if actions.notify.contains(tcp::SocketNotify::NEW_ESTABLISHED) {
-            if let Some(_tuple) = tcp::with_pcb(conn_id, |pcb| pcb.tuple) {
+            if let Some(tuple) = tcp::with_pcb(conn_id, |pcb| pcb.tuple) {
+                // Passive connectivity evidence: a completed handshake with an
+                // off-link peer is proof the path beyond the gateway works,
+                // and it cost no packet of its own. Atomics only, so it is
+                // safe here despite the locks this path takes around it.
+                crate::connectivity::note_tcp_established(crate::types::Ipv4Addr(tuple.remote_ip));
                 let listener_sock_idx =
                     tcp::with_pcb(conn_id, |pcb| pcb.socket_id.map(|s| s.0)).flatten();
                 if let Some(listener_idx) = listener_sock_idx {
@@ -1255,7 +1310,7 @@ pub fn socket_deliver_udp_from_dispatch(
     }
 }
 
-pub fn socket_create(domain: u16, sock_type: u16, protocol: u16) -> i32 {
+pub fn socket_create(domain: u16, sock_type: u16, protocol: u16, owner: SocketOwner) -> i32 {
     if domain != AF_INET {
         return errno_i32(ERRNO_EAFNOSUPPORT);
     }
@@ -1276,7 +1331,7 @@ pub fn socket_create(domain: u16, sock_type: u16, protocol: u16) -> i32 {
     };
 
     let mut table = NEW_SOCKET_TABLE.lock();
-    let Some(idx) = table.alloc(inner) else {
+    let Some(idx) = table.alloc(inner, owner) else {
         return errno_i32(ERRNO_ENOMEM);
     };
     if let Some(sock) = table.get_mut(idx) {
@@ -1322,8 +1377,7 @@ pub fn socket_sendto(sock_idx: u32, payload: &[u8], dst_ip: [u8; 4], dst_port: u
             let Some(port) = alloc_ephemeral_port() else {
                 return errno_i32(ERRNO_ENOMEM) as i64;
             };
-            let local_ip = crate::netstack::NET_STACK
-                .source_ip_for(Ipv4Addr(dst_ip))
+            let local_ip = crate::iface::source_ip_for(Ipv4Addr(dst_ip))
                 .map(|ip| ip.0)
                 .unwrap_or([0; 4]);
             let bind_addr = SockAddr::new(Ipv4Addr(local_ip), port);
@@ -1603,6 +1657,9 @@ pub fn socket_accept(sock_idx: u32, peer_addr: *mut [u8; 4], peer_port: *mut u16
             let Some(listen_sock) = table.get_mut(sock_idx as usize) else {
                 return errno_i32(ERRNO_ENOTSOCK);
             };
+            // Captured before the accepted socket is allocated: `alloc` takes
+            // `&mut table`, so the listener borrow cannot still be live.
+            let listen_owner = listen_sock.owner;
             let listen_opts = SocketOptions {
                 reuse_addr: listen_sock.options.reuse_addr,
                 recv_buf_size: listen_sock.options.recv_buf_size,
@@ -1641,10 +1698,16 @@ pub fn socket_accept(sock_idx: u32, peer_addr: *mut [u8; 4], peer_port: *mut u16
                     continue;
                 }
 
-                let Some(new_idx) = table.alloc(SocketInner::Tcp(TcpSocketInner {
-                    conn_id: Some(tcp_idx),
-                    listen: None,
-                })) else {
+                // The accepted socket belongs to whoever owns the listener:
+                // nobody else was ever in a position to ask for it.
+                let owner = listen_owner;
+                let Some(new_idx) = table.alloc(
+                    SocketInner::Tcp(TcpSocketInner {
+                        conn_id: Some(tcp_idx),
+                        listen: None,
+                    }),
+                    owner,
+                ) else {
                     return errno_i32(ERRNO_ENOMEM);
                 };
 
@@ -1742,8 +1805,7 @@ fn connect_initiate_tcp_locked(
     port: u16,
 ) -> Result<(tcp::ConnId, bool, TcpOutSegment), i32> {
     let local_ip = sock.local_addr.map(|a| a.ip.0).unwrap_or_else(|| {
-        crate::netstack::NET_STACK
-            .source_ip_for(Ipv4Addr(addr))
+        crate::iface::source_ip_for(Ipv4Addr(addr))
             .map(|ip| ip.0)
             .unwrap_or([0; 4])
     });
@@ -2000,8 +2062,7 @@ fn socket_send_resolve(sock_idx: u32, payload_len: usize) -> Result<SendTarget, 
                     .remote_addr
                     .map(|a| a.ip)
                     .unwrap_or(Ipv4Addr::UNSPECIFIED);
-                let local_ip = crate::netstack::NET_STACK
-                    .source_ip_for(remote_for_src)
+                let local_ip = crate::iface::source_ip_for(remote_for_src)
                     .map(|ip| ip.0)
                     .unwrap_or([0; 4]);
                 let local = SockAddr::new(Ipv4Addr(local_ip), port);
@@ -3044,6 +3105,149 @@ pub struct SocketSnapshot {
     pub remote_ip: [u8; 4],
     pub remote_port: u16,
     pub nonblocking: bool,
+}
+
+/// How many slots the socket table currently has.
+///
+/// The bound a caller must size a [`collect_sockets`] buffer to. Not
+/// `MAX_SOCKETS`: that is the ABI's idea of a reasonable number, while the slab
+/// grows from 64 to 1024 as sockets are opened, and the two diverge on exactly
+/// the busy system where the answer matters most.
+pub fn socket_table_capacity() -> usize {
+    NEW_SOCKET_TABLE.lock().capacity()
+}
+
+/// One row of `NET_Q_SOCKETS`, in network-domain terms.
+///
+/// `conn` is not part of the answer — it is how the two collection phases hand
+/// a TCP connection to each other without either holding the other's lock.
+#[derive(Clone, Copy)]
+pub struct SocketRow {
+    pub sock_idx: u32,
+    pub owner: SocketOwner,
+    pub local_ip: [u8; 4],
+    pub local_port: u16,
+    pub remote_ip: [u8; 4],
+    pub remote_port: u16,
+    pub sock_type: u8,
+    pub protocol: u8,
+    pub state: u8,
+    pub rx_queue: u32,
+    pub tx_queue: u32,
+    conn: Option<tcp::ConnId>,
+}
+
+/// Collect every socket in the table into `out`.
+///
+/// **Two phases, and the split is load-bearing.** `NEW_SOCKET_TABLE` is a
+/// `LOCK_LEVEL_REGISTRY` lock and the TCP PCB slots are `LOCK_LEVEL_RESOURCE`;
+/// resolving a connection's state from inside the table lock would nest one
+/// under the other for no reason. Phase one copies what the socket table
+/// itself knows and remembers the `ConnId`; phase two resolves those with the
+/// table lock released. Same shape as `poll_carrier`'s read-then-announce
+/// split.
+///
+/// `out` must be pre-allocated by the caller — nothing here allocates, because
+/// phase one runs under a lock and the allocator is where every subsystem
+/// meets. Rows beyond its capacity are dropped; the caller sizes it from
+/// [`socket_table_capacity`].
+pub fn collect_sockets(out: &mut KVec<SocketRow>) {
+    {
+        let table = NEW_SOCKET_TABLE.lock();
+        // The table's *current* capacity, not `MAX_SOCKETS`: a constant bound
+        // silently stops enumerating exactly when a busy system has the most to
+        // report, and a missing row reads as "no such socket".
+        let capacity = table.capacity();
+        for idx in 0..capacity {
+            let Some(sock) = table.get(idx) else {
+                continue;
+            };
+            if out.len() == out.capacity() {
+                break;
+            }
+            let local = sock
+                .local_addr
+                .unwrap_or(SockAddr::new(Ipv4Addr::UNSPECIFIED, Port(0)));
+            let remote = sock
+                .remote_addr
+                .unwrap_or(SockAddr::new(Ipv4Addr::UNSPECIFIED, Port(0)));
+            let (sock_type, protocol, conn) = match &sock.inner {
+                SocketInner::Udp(_) => (SOCK_DGRAM as u8, 0, None),
+                SocketInner::Icmp(_) => (SOCK_DGRAM as u8, IPPROTO_ICMP as u8, None),
+                SocketInner::Tcp(tcp_inner) => (SOCK_STREAM as u8, 0, tcp_inner.conn_id),
+                SocketInner::Raw(_) => (SOCK_RAW as u8, 0, None),
+                // AF_UNIX sockets are not part of the AF_INET answer.
+                SocketInner::Unix(_) => continue,
+            };
+            // A listening socket's state is the socket's, not a connection's:
+            // its `conn_id` names the listener, and `LISTEN` is already the
+            // answer.
+            let state = match sock.state {
+                SocketState::Listening => NET_SOCK_LISTEN,
+                SocketState::Closed => NET_SOCK_CLOSED,
+                _ if sock_type == SOCK_STREAM as u8 => NET_SOCK_CLOSED,
+                _ => NET_SOCK_UNCONN,
+            };
+            let _ = out.push(SocketRow {
+                sock_idx: idx as u32,
+                owner: sock.owner,
+                local_ip: local.ip.0,
+                local_port: local.port.0,
+                remote_ip: remote.ip.0,
+                remote_port: remote.port.0,
+                sock_type,
+                protocol,
+                state,
+                rx_queue: sock.recv_queue.len() as u32,
+                tx_queue: 0,
+                conn: if sock.state == SocketState::Listening {
+                    None
+                } else {
+                    conn
+                },
+            });
+        }
+    }
+
+    // Phase two: the socket table lock is released. A `ConnId` may have gone
+    // stale in between — `with_pcb` returns `None` for a slot whose occupant
+    // changed, which leaves the row at the state phase one recorded rather
+    // than reporting another connection's.
+    for row in out.iter_mut() {
+        let Some(conn) = row.conn else {
+            continue;
+        };
+        if let Some(state) = tcp::table::with_pcb(conn, |pcb| pcb.state.tcp_state()) {
+            row.state = tcp_state_to_abi(state);
+        }
+        // What `ss` calls Recv-Q and Send-Q: bytes a reader has not taken, and
+        // bytes the stack has not yet handed to the network.
+        if let Some((rx, tx)) = tcp::table::with_bufs(conn, |bufs| {
+            (
+                bufs.recv().available() as u32,
+                bufs.send().buffered_len() as u32,
+            )
+        }) {
+            row.rx_queue = rx;
+            row.tx_queue = tx;
+        }
+    }
+}
+
+/// Map a TCP state to its `NET_SOCK_*` value.
+const fn tcp_state_to_abi(state: tcp::TcpState) -> u8 {
+    match state {
+        tcp::TcpState::Listen => NET_SOCK_LISTEN,
+        tcp::TcpState::SynSent => NET_SOCK_SYN_SENT,
+        tcp::TcpState::SynReceived => NET_SOCK_SYN_RECV,
+        tcp::TcpState::Established => NET_SOCK_ESTABLISHED,
+        tcp::TcpState::FinWait1 => NET_SOCK_FIN_WAIT1,
+        tcp::TcpState::FinWait2 => NET_SOCK_FIN_WAIT2,
+        tcp::TcpState::CloseWait => NET_SOCK_CLOSE_WAIT,
+        tcp::TcpState::Closing => NET_SOCK_CLOSING,
+        tcp::TcpState::LastAck => NET_SOCK_LAST_ACK,
+        tcp::TcpState::TimeWait => NET_SOCK_TIME_WAIT,
+    }
 }
 
 pub fn socket_snapshot(sock_idx: u32) -> Option<SocketSnapshot> {

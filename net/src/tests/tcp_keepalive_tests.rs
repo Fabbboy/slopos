@@ -31,7 +31,7 @@ fn keepalive_setup() -> crate::clock::MockClockGuard {
 }
 
 fn connect_and_establish(keepalive_enabled: bool) -> Result<(u32, ConnId), &'static str> {
-    let sock = socket::socket_create(AF_INET, SOCK_STREAM, 0);
+    let sock = socket::socket_create(AF_INET, SOCK_STREAM, 0, socket::SocketOwner::UNOWNED);
     if sock < 0 {
         return Err("socket_create failed");
     }

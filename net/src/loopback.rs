@@ -138,6 +138,20 @@ impl NetDevice for LoopbackDev {
         // Loopback never needs checksum computation — packets stay in memory.
         NetDeviceFeatures::CHECKSUM_TX | NetDeviceFeatures::CHECKSUM_RX
     }
+
+    fn kind(&self) -> crate::iface::IfaceKind {
+        crate::iface::IfaceKind::Loopback
+    }
+
+    /// Loopback has no lower layer, so its carrier is a constant rather than an
+    /// assumption — reporting it as *detected* is the honest answer.
+    fn carrier(&self) -> bool {
+        true
+    }
+
+    fn carrier_detect(&self) -> bool {
+        true
+    }
 }
 
 // =============================================================================
@@ -146,19 +160,20 @@ impl NetDevice for LoopbackDev {
 
 use slopos_ostd::klog_info;
 
-/// Register the loopback device in the global device registry and configure
-/// its IPv4 address and route.
+/// Register the loopback device in the global device registry, give it an
+/// interface, and configure its IPv4 address and route.
 ///
 /// **Must be called before any physical NIC registration** so that loopback
 /// gets `DevIndex(0)` by convention.
 ///
 /// Sets up:
-/// - `127.0.0.1/8` on the loopback interface
+/// - The `lo` interface
+/// - `127.0.0.1/8` on it, with host scope
 /// - Connected route `127.0.0.0/8 → DevIndex(0)`
 pub fn init_loopback() {
+    use super::iface::{self, AddrOrigin, AddrScope, IfaceAddr, IfaceKind};
     use super::netdev::DEVICE_REGISTRY;
-    use super::netstack::NET_STACK;
-    use super::route::ROUTE_TABLE;
+    use super::route::{ROUTE_TABLE, RouteEntry};
     use super::types::Ipv4Addr;
 
     let dev: KArc<dyn NetDevice + Send + Sync> = match KArc::try_new(LoopbackDev::new()) {
@@ -176,18 +191,44 @@ pub fn init_loopback() {
     let lo_index = handle.index();
     klog_info!("loopback: registered as dev {}", lo_index);
 
-    // Configure 127.0.0.1/8 on the loopback interface.
-    // Use configure() which also adds routes, but loopback's "gateway" is
-    // UNSPECIFIED (no default route through loopback).
-    NET_STACK.configure(
+    // Attach the interface *after* registration returns, never from inside it:
+    // an administrative down takes the interface table and then the registry,
+    // so creating the row under the registry lock would close a lock cycle.
+    let ifindex = match iface::attach(
         lo_index,
-        Ipv4Addr::LOCALHOST,                            // 127.0.0.1
-        Ipv4Addr::from_bytes([255, 0, 0, 0]),           // /8 netmask
-        Ipv4Addr::UNSPECIFIED,                          // no gateway
-        [Ipv4Addr::UNSPECIFIED, Ipv4Addr::UNSPECIFIED], // no DNS
-    );
+        IfaceKind::Loopback,
+        super::types::MacAddr::ZERO,
+        65535,
+        true,
+        true,
+    ) {
+        Ok(idx) => idx,
+        Err(err) => {
+            klog_info!("loopback: failed to attach interface: {:?}", err);
+            return;
+        }
+    };
 
-    // Verify the loopback route was added by configure().
+    // 127.0.0.1/8, host scope: the address is meaningful only to this machine,
+    // which is also why `first_ipv4` skips it when picking a source address.
+    if let Err(err) = iface::add_addr(
+        ifindex,
+        IfaceAddr::permanent(Ipv4Addr::LOCALHOST, 8, AddrScope::Host, AddrOrigin::Static),
+    ) {
+        klog_info!("loopback: failed to assign 127.0.0.1/8: {:?}", err);
+    }
+
+    // The connected route, added with the interface-table lock already dropped
+    // (`add_addr` released it) — the route table is never taken while holding
+    // the interface table.
+    ROUTE_TABLE.add(RouteEntry {
+        prefix: Ipv4Addr::from_bytes([127, 0, 0, 0]),
+        prefix_len: 8,
+        gateway: Ipv4Addr::UNSPECIFIED,
+        dev: lo_index,
+        metric: 0,
+    });
+
     if let Some((dev, _next_hop)) = ROUTE_TABLE.lookup(Ipv4Addr::LOCALHOST) {
         klog_info!("loopback: route 127.0.0.0/8 -> dev {} confirmed", dev);
     } else {

@@ -1,6 +1,6 @@
 # SlopOS Known Issues
 
-Last updated: 2026-08-01
+Last updated: 2026-08-08
 
 
 ---
@@ -86,6 +86,59 @@ five-for-five in isolation.
 
 Same shape as the serialisation already applied elsewhere for a process-global
 counter: the assertion needs a serial gate, not a wider tolerance.
+
+---
+
+## The terminal reports damage far larger than it changes, on every cursor blink
+
+**Status**: Open
+**Severity**: Low (throughput only; nothing renders incorrectly)
+**Component**: `userland/src/apps/terminal/`
+
+An idle desktop — nothing typed, nothing moving, no window focused or resized —
+copies **821,867 bytes per frame at 3 frames per second**, about 2.4 MB/s, to
+change **304 pixels**.
+
+The compositor is not at fault: it copies exactly the region it is told changed.
+The over-report is upstream, in what the terminal marks dirty when its cursor
+blinks.
+
+**Measured**, twelve consecutive five-second windows on an untouched desktop:
+
+```
+COMPOSITOR: frames=15 bytes=12328000
+COMPOSITOR: frames=15 bytes=12328000        (identical across all twelve)
+```
+
+Two screendumps 340 ms apart differ in 304 pixels, in exactly two clusters:
+
+- **220 px** at x≈280-320, y≈320-360 — one 10x22 character cell inside the
+  terminal window. The cursor blink.
+- **84 px** at x≈1240-1280, y≈0-40 — the system bar clock's seconds digit.
+
+The clock's share is correct and bounded: it damages its own measured slot. The
+terminal's is not — a one-cell blink should damage one cell.
+
+**The compositor is ruled out rather than assumed innocent.**
+`estimate_present_bytes` sums the areas of the rects actually handed to the
+flip, and `Region::to_bounded` merges pairs only once the rect count exceeds
+`MAX_DAMAGE_REGIONS` — which two or three rects never do. So no coalescing runs
+at these counts and the byte total is the sum of what was reported, not an
+artefact of merging. 821,867 / 4 bytes-per-pixel is 205,467 px, about one
+640x321 region: a single window-sized rect, which is what
+`add_window_damage` produces from either a large client-reported region or the
+`damage_count == u8::MAX` "all of it" sentinel.
+
+**Method, because it is what makes this reproducible.** Boot, leave the desktop
+untouched for a minute, and read the `COMPOSITOR: frames=/bytes=` lines the
+frame loop emits every five seconds (`userland/src/apps/compositor/mod.rs`,
+`FrameMetrics::take_window`). Then take two QMP screendumps a few hundred
+milliseconds apart and diff them: the pixels that differ are, by definition,
+what is repainting when nothing is happening. The gap between the two numbers is
+the defect.
+
+Not in `CVSS.md`: there is no attacker trigger, and that ledger is for
+attacker-reachable findings.
 
 ---
 

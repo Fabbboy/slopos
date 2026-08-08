@@ -3,6 +3,7 @@ use std::string::String;
 
 use slopos_abi::PAGE_SIZE;
 use slopos_abi::draw::Color32;
+use slopos_net_core::{Ipv4, Mac};
 use slopos_slibc::mem::malloc::heap_stats;
 
 use crate::syscall::process as sys_proc;
@@ -430,38 +431,22 @@ impl SysmonApp {
 
         // NETWORK
         children.push(label("NETWORK"));
-        let net_status = if self.net_info.nic_ready != 0 {
-            if self.net_info.link_up != 0 {
-                "Online"
-            } else {
-                "No link"
+        match &self.net {
+            Some(net) => {
+                children.push(kv_row(
+                    "Status",
+                    slopos_net_core::render::oper_state(net.oper_state),
+                ));
+                children.push(kv_row(
+                    "IP",
+                    &format!("{}/{}", Ipv4(net.addr), net.prefix_len),
+                ));
+                children.push(kv_row("MAC", &format!("{}", Mac(net.mac))));
             }
-        } else {
-            "Offline"
-        };
-        children.push(kv_row("Status", net_status));
-        children.push(kv_row(
-            "IP",
-            &format!(
-                "{}.{}.{}.{}",
-                self.net_info.ipv4[0],
-                self.net_info.ipv4[1],
-                self.net_info.ipv4[2],
-                self.net_info.ipv4[3]
-            ),
-        ));
-        children.push(kv_row(
-            "MAC",
-            &format!(
-                "{:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}",
-                self.net_info.mac[0],
-                self.net_info.mac[1],
-                self.net_info.mac[2],
-                self.net_info.mac[3],
-                self.net_info.mac[4],
-                self.net_info.mac[5]
-            ),
-        ));
+            // No interface at all is a different fact from one that is down,
+            // and saying "Offline" for both would hide a missing driver.
+            None => children.push(kv_row("Status", "unavailable")),
+        }
         children.push(Node::Divider);
 
         // BOOT

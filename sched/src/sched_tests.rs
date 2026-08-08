@@ -3893,7 +3893,12 @@ pub fn test_sleep_entry_survives_unparked_wake() -> TestResult {
     // Phase 2 — once the task is genuinely sleep-parked (reason stamped,
     // deadline armed), the next tick must deliver the wake and only then
     // clear the entry.
-    super::sleep::arm_blocked_timeout(task_id, 0);
+    if !super::sleep::arm_blocked_timeout(task_id, 0) {
+        klog_info!("SCHED_TEST: could not arm a deadline for the parked task");
+        super::sleep::cancel_sleep(task_id);
+        task_terminate(task_id);
+        return TestResult::Fail;
+    }
     super::sleep::wake_due_sleepers(u64::MAX / 2);
     if task_ptr.is_blocked() {
         klog_info!("SCHED_TEST: parked task not woken by due entry");
@@ -3908,6 +3913,58 @@ pub fn test_sleep_entry_survives_unparked_wake() -> TestResult {
         return TestResult::Fail;
     }
 
+    task_terminate(task_id);
+    TestResult::Pass
+}
+
+/// Ensuring the sleep queue has a backing store must never disturb the entries
+/// it already holds.
+///
+/// `ensure_sleep_queue_allocated` runs from `allocate_task`, so it fires on
+/// every task creation, long after the first sleeper has armed: an
+/// implementation that reset the queue would unarm every live sleeper each
+/// time a task spawned.
+pub fn test_ensure_sleep_queue_allocated_preserves_entries() -> TestResult {
+    let _fixture = SchedFixture::new();
+    super::sleep::reset_sleep_queue();
+
+    let task_id = task_create(
+        b"SleepEnsure\0".as_ptr() as *const c_char,
+        dummy_task_entry,
+        ptr::null_mut(),
+        TaskPriority::Normal.as_u8(),
+        TASK_FLAG_KERNEL_MODE,
+    );
+    if task_id == INVALID_TASK_ID {
+        return TestResult::Fail;
+    }
+
+    // Far enough out that a real timer tick cannot collect it mid-test.
+    const FAR_FUTURE: u64 = u64::MAX / 2;
+    if !super::sleep::test_insert_sleep_entry(task_id, FAR_FUTURE) {
+        klog_info!("SCHED_TEST: could not arm the entry to protect");
+        task_terminate(task_id);
+        return TestResult::Fail;
+    }
+
+    for round in 0..4 {
+        if !super::sleep::ensure_sleep_queue_allocated() {
+            klog_info!("SCHED_TEST: ensure failed at round {}", round);
+            super::sleep::cancel_sleep(task_id);
+            task_terminate(task_id);
+            return TestResult::Fail;
+        }
+        if !super::sleep::test_sleep_entry_armed(task_id) {
+            klog_info!(
+                "SCHED_TEST: ensure unarmed a live sleeper at round {}",
+                round
+            );
+            task_terminate(task_id);
+            return TestResult::Fail;
+        }
+    }
+
+    super::sleep::cancel_sleep(task_id);
     task_terminate(task_id);
     TestResult::Pass
 }
@@ -5461,6 +5518,10 @@ slopos_testing::stest!(
     suite = sched_core
 );
 slopos_testing::stest!(name = test_sleep_wake_race_regression, suite = sched_core);
+slopos_testing::stest!(
+    name = test_ensure_sleep_queue_allocated_preserves_entries,
+    suite = sched_core
+);
 slopos_testing::stest!(
     name = test_sleep_entry_survives_unparked_wake,
     suite = sched_core

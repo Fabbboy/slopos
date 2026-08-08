@@ -5,8 +5,8 @@ use slopos_abi::syscall::*;
 use crate::syscall::common::SyscallEntry;
 pub use crate::syscall::core_handlers::{
     syscall_clock_gettime, syscall_cpu_info, syscall_exit, syscall_get_time_ms, syscall_halt,
-    syscall_net_info, syscall_net_scan, syscall_percpu_stats, syscall_process_list, syscall_reboot,
-    syscall_sleep_ms, syscall_sys_info, syscall_user_read, syscall_user_write, syscall_yield,
+    syscall_percpu_stats, syscall_process_list, syscall_reboot, syscall_sleep_ms, syscall_sys_info,
+    syscall_user_read, syscall_user_write, syscall_yield,
 };
 use crate::syscall::font_handlers::syscall_font_set;
 use crate::syscall::fs::{
@@ -20,12 +20,17 @@ pub use crate::syscall::memory_handlers::{
     syscall_brk, syscall_ftruncate, syscall_memfd_create, syscall_mmap, syscall_mprotect,
     syscall_munmap,
 };
+use crate::syscall::net_config_handlers::{
+    syscall_net_addr_ctl, syscall_net_iface_ctl, syscall_net_monitor, syscall_net_resolver_set,
+    syscall_net_route_ctl,
+};
 use crate::syscall::net_handlers::{
     syscall_accept, syscall_bind, syscall_connect, syscall_getpeername, syscall_getsockname,
     syscall_getsockopt, syscall_listen, syscall_recv, syscall_recvfrom, syscall_recvmsg,
     syscall_resolve, syscall_send, syscall_sendmsg, syscall_sendto, syscall_setsockopt,
     syscall_shutdown, syscall_socket,
 };
+use crate::syscall::net_query_handlers::syscall_net_query;
 pub use crate::syscall::pidfd_handlers::syscall_pidfd_open;
 pub use crate::syscall::process_handlers::{
     syscall_arch_prctl, syscall_chdir, syscall_clone, syscall_exec, syscall_fork, syscall_futex,
@@ -86,8 +91,12 @@ static SYSCALL_TABLE: [SyscallEntry; SYSCALL_TABLE_SIZE] = syscall_table! {
     [SYSCALL_FB_INFO]        => syscall_fb_info,        "fb_info";
     [SYSCALL_GET_TIME_MS]    => syscall_get_time_ms,    "get_time_ms";
     [SYSCALL_SYS_INFO]       => syscall_sys_info,       "sys_info";
-    [SYSCALL_NET_SCAN]       => syscall_net_scan,       "net_scan";
-    [SYSCALL_NET_INFO]       => syscall_net_info,       "net_info";
+    [SYSCALL_NET_QUERY]      => syscall_net_query,      "net_query";
+    [SYSCALL_NET_MONITOR]    => syscall_net_monitor,    "net_monitor";
+    [SYSCALL_NET_IFACE_CTL]  => syscall_net_iface_ctl,  "net_iface_ctl";
+    [SYSCALL_NET_ADDR_CTL]   => syscall_net_addr_ctl,   "net_addr_ctl";
+    [SYSCALL_NET_ROUTE_CTL]  => syscall_net_route_ctl,  "net_route_ctl";
+    [SYSCALL_NET_RESOLVER_SET] => syscall_net_resolver_set, "net_resolver_set";
     [SYSCALL_HALT]           => syscall_halt,            "halt";
     [SYSCALL_REBOOT]         => syscall_reboot,          "reboot";
     [SYSCALL_CLOCK_GETTIME]  => syscall_clock_gettime,  "clock_gettime";

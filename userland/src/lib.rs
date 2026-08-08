@@ -4,6 +4,7 @@ pub mod apps;
 pub mod gfx;
 pub mod keymap;
 pub mod net;
+pub mod net_query;
 pub mod program_registry;
 pub mod readiness;
 pub use slopos_rt as ring;

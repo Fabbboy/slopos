@@ -54,6 +54,11 @@ RUST_CHANNEL="${RUST_CHANNEL:-$(grep -oP 'channel = "\K[^"]+' rust-toolchain.tom
 RUST_TARGET="${RUST_TARGET:-targets/x86_64-slos.json}"
 CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-builddir/target}"
 
+# Where an expansion's stderr lands, so a failure can be reported instead of
+# read as an empty expansion. See expand_first_error.
+EXPAND_STDERR="$(mktemp)"
+trap 'rm -f "$EXPAND_STDERR"' EXIT
+
 # Crates that legitimately author unsafe. Same set as
 # check_unsafe_outside_ostd.sh's lint-attribute scan.
 EXPAND_EXEMPT_RE='^(slopos-ostd|slopos-ostd-derive|kernel|vendor/.*)$'
@@ -150,7 +155,22 @@ PY
         "$CARGO" "+$RUST_CHANNEL" rustc \
         -Zbuild-std=core,alloc -Zbuild-std-features=compiler-builtins-mem \
         -Zunstable-options --target "$RUST_TARGET" \
-        -p "$pkg" $flags -- -Zunpretty=expanded 2>/dev/null
+        -p "$pkg" $flags -- -Zunpretty=expanded 2>"$EXPAND_STDERR"
+}
+
+# The first compiler error from the most recent expand_crate, or empty.
+#
+# Expansion stderr is captured rather than discarded because an empty
+# expansion has two very different causes that otherwise look identical: a
+# crate that genuinely expands to nothing, and a crate that failed to compile
+# — most often because something it depends on is mid-edit. Reporting only
+# "expansion produced no output" sends the reader looking at the wrong crate,
+# which is exactly what happened once: nine dependent configurations were
+# reported and every one of them was a single unrelated crate failing to
+# build. One line of the real error points straight at the cause.
+expand_first_error() {
+    [ -s "$EXPAND_STDERR" ] || return 0
+    grep -m1 -E "^error" "$EXPAND_STDERR" 2>/dev/null || true
 }
 
 # Drop doc comments — they survive expansion verbatim and 40-odd of them in
@@ -192,7 +212,8 @@ for dir in $("$SCRIPT_DIR/kernel_crates.sh"); do
     while IFS= read -r flags; do
         expanded="$(expand_crate "$dir" "$flags" || true)"
         if [ -z "$expanded" ]; then
-            offenders+="$dir${flags:+ [$flags]}: expansion produced no output"$'\n'
+            why="$(expand_first_error)"
+            offenders+="$dir${flags:+ [$flags]}: expansion produced no output${why:+ — $why}"$'\n'
             continue
         fi
         crates_scanned=$((crates_scanned + 1))

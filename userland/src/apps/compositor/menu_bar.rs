@@ -1,12 +1,26 @@
 //! System bar rendering and state for the SlopOS compositor.
 //!
-//! The system bar is the 24 px strip at the top of the screen. It displays
-//! the active application name on the left and an uptime clock on the right,
-//! separated by a small system icon (green dot).
+//! The system bar is the 24 px strip at the top of the screen: a system icon
+//! and the active application's name on the left, status items packed against
+//! the right edge.
+//!
+//! Placement, hit-testing and damage all go through
+//! [`slopos_chrome_core::status::layout_status_items`], never through a
+//! rectangle cached from the last draw: a press and the motion that brought the
+//! pointer there can arrive in the same frame batch, so a hit test against the
+//! previous frame's geometry answers for where the cursor *was*.
+//!
+//! Damage comes in three tiers: a layout change repaints from the leftmost item
+//! to the screen edge, a content change repaints that slot alone, and hover
+//! repaints nothing here — [`super::hover::HoverRegistry`] already emits both
+//! the old and the new rect when a hover flips.
 
 use slopos_abi::draw::Color32;
+use slopos_chrome_core::status::{StatusKind, StatusLayout, hit_status_item, layout_status_items};
 use slopos_font::FontRenderer;
 
+use super::hover::HOVER_STATUS_ITEM_BASE;
+use super::status_item::{STATUS_ITEM_COUNT, StatusItems, hover_rect};
 use crate::gfx::{self, DamageRect, DrawBuffer};
 use crate::theme::*;
 
@@ -17,17 +31,8 @@ use crate::theme::*;
 /// Font size used when rendering with the TrueType font renderer.
 const BAR_FONT_SIZE: u16 = 13;
 
-/// Fixed width reserved for the clock damage region on the right side.
-const CLOCK_DAMAGE_WIDTH: i32 = 80;
-
 /// Radius of the system icon circle (half of SYSTEM_BAR_ICON_SIZE).
 const ICON_RADIUS: i32 = SYSTEM_BAR_ICON_SIZE / 2;
-
-/// Opaque background colour derived from PANEL_BG for anti-alias blending
-/// (used as the `bg` parameter in font rendering where read-back from a
-/// semi-transparent panel would be inaccurate).
-const OPAQUE_BAR_BG: Color32 =
-    Color32::new(PANEL_BG.red(), PANEL_BG.green(), PANEL_BG.blue(), 0xFF);
 
 /// Semi-transparent panel background colour (PANEL_BG + PANEL_BG_ALPHA).
 const BAR_BG: Color32 = Color32::new(
@@ -40,33 +45,69 @@ const BAR_BG: Color32 = Color32::new(
 /// Ellipsis string for truncation.
 const ELLIPSIS: &str = "...";
 
+/// Damage rects [`SystemBar::take_damage`] can emit in one frame: one per
+/// item, or the single spanning rect a layout change produces.
+pub const MAX_BAR_DAMAGE: usize = STATUS_ITEM_COUNT;
+
+/// A cursor position no bar pixel can hold, for layouts taken purely for their
+/// geometry.
+const NO_CURSOR: i32 = i32::MIN;
+
 // ---------------------------------------------------------------------------
 // SystemBar
 // ---------------------------------------------------------------------------
 
 /// System bar state (lives in the compositor's main struct).
 pub struct SystemBar {
-    /// Cached clock string to detect changes for damage.
-    last_clock: [u8; 8], // "HH:MM:SS"
+    items: StatusItems,
+    /// Layout digest as of the last damage pass. A change means items moved.
+    last_signature: u64,
+    /// Per-item content revisions as of the last damage pass.
+    last_revision: [u32; STATUS_ITEM_COUNT],
+    /// Left edge of the leftmost item as of the last damage pass, so a layout
+    /// change repaints the strip the items *used* to occupy as well as the one
+    /// they occupy now.
+    last_leftmost: i32,
+    /// Screen width the last damage pass laid out against. Every slot moves
+    /// with it, so a change is a layout change even at an equal signature.
+    last_screen_width: i32,
 }
 
 impl SystemBar {
     pub fn new() -> Self {
         Self {
-            last_clock: [0u8; 8],
+            items: StatusItems::new(),
+            last_signature: 0,
+            last_revision: [0; STATUS_ITEM_COUNT],
+            last_leftmost: i32::MAX,
+            last_screen_width: 0,
         }
+    }
+
+    /// Publish the network indicator's state. A poll that finds the rendered
+    /// state unchanged bumps no revision and therefore produces no damage.
+    pub fn set_network(&mut self, present: bool, state: slopos_chrome_core::NetIndicatorState) {
+        self.items.set_network(present, state);
+    }
+
+    /// Where the status items sit for this screen width and cursor position.
+    /// The single geometry source: draw, hit-test, hover and damage all come
+    /// from here.
+    fn layout(&self, screen_width: u32, cursor_x: i32, cursor_y: i32) -> StatusLayout {
+        layout_status_items(self.items.specs(), screen_width as i32, cursor_x, cursor_y)
     }
 
     /// Render the system bar onto the buffer.
     ///
     /// `active_app_name`: title of the focused window, or "SlopOS" if none.
-    /// `uptime_secs`: seconds since boot (from HPET or tick count).
+    /// `cursor_x` / `cursor_y`: the pointer, for the hovered item's backdrop.
     pub fn draw(
-        &mut self,
+        &self,
         buf: &mut DrawBuffer,
         screen_width: u32,
         active_app_name: &str,
-        uptime_secs: u64,
+        cursor_x: i32,
+        cursor_y: i32,
         font: Option<&mut FontRenderer>,
         clip: Option<DamageRect>,
     ) {
@@ -87,76 +128,191 @@ impl SystemBar {
         // -- Bottom border (1 px, opaque) -------------------------------------
         gfx::fill_rect_clipped(buf, 0, bar_h, sw, 1, PANEL_BORDER, &clip);
 
+        let layout = self.layout(screen_width, cursor_x, cursor_y);
+
         // -- Left section -----------------------------------------------------
-        let mut cursor_x = SYSTEM_BAR_PADDING_X;
+        let mut cursor = SYSTEM_BAR_PADDING_X;
 
         // System icon: filled green circle, 8 px diameter, centred vertically.
-        let icon_cx = cursor_x + ICON_RADIUS;
+        let icon_cx = cursor + ICON_RADIUS;
         let icon_cy = bar_h / 2;
         gfx::draw_circle_filled(buf, icon_cx, icon_cy, ICON_RADIUS, SIGNAL_EXPAND);
-        cursor_x += SYSTEM_BAR_ICON_SIZE + SYSTEM_BAR_ICON_GAP;
+        cursor += SYSTEM_BAR_ICON_SIZE + SYSTEM_BAR_ICON_GAP;
 
-        // Active app name (or "SlopOS").
+        // Active app name (or "SlopOS"), never crossing the leftmost item.
         let name = if active_app_name.is_empty() {
             "SlopOS"
         } else {
             active_app_name
         };
         let text_y = (bar_h - BAR_FONT_SIZE as i32) / 2;
+        let name_budget = (layout.app_name_limit - cursor).min(SYSTEM_BAR_MAX_APP_NAME_WIDTH);
 
-        if let Some(font) = font {
-            draw_name_ttf(buf, font, cursor_x, text_y, name, &clip);
-        } else {
-            draw_name_bitmap(buf, cursor_x, text_y, name, &clip);
+        if name_budget > 0 {
+            if let Some(font) = font {
+                draw_name_ttf(buf, font, cursor, text_y, name, name_budget);
+            } else {
+                draw_name_bitmap(buf, cursor, text_y, name, name_budget, &clip);
+            }
         }
 
-        // -- Right section (clock) --------------------------------------------
-        let clock = format_clock(uptime_secs);
-        self.last_clock = clock;
-
-        let clock_str = core::str::from_utf8(&clock).unwrap_or("00:00:00");
-        let clock_x = sw - SYSTEM_BAR_PADDING_X - clock_text_width(clock_str);
-        let clock_y = text_y;
-
-        gfx::draw_str_clipped(
-            buf,
-            clock_x,
-            clock_y,
-            clock_str,
-            TEXT_PRIMARY,
-            OPAQUE_BAR_BG,
-            &clip,
-        );
+        // -- Right section (status items, rightmost first) --------------------
+        for (index, slot) in layout.slots().iter().enumerate() {
+            self.items
+                .draw(buf, slot, layout.hovered == Some(index), &clip);
+        }
     }
 
-    /// Returns true if (`px`, `py`) is inside the system bar region.
-    pub fn hit_test(px: i32, py: i32) -> bool {
-        let _ = px; // x is always valid (full-width bar)
+    /// Whether `py` falls inside the bar strip.
+    ///
+    /// The bar spans the full width, so x says nothing about whether the
+    /// pointer is on it; which *item* it is over is [`Self::hit_test`].
+    pub fn covers(py: i32) -> bool {
         py >= 0 && py < SYSTEM_BAR_HEIGHT
     }
 
-    /// Returns the damage rect for the clock area (right side) if the
-    /// clock text changed since the last draw.
-    pub fn clock_damage(&self, screen_width: u32) -> Option<DamageRect> {
-        let clock = self.last_clock;
-        // If the cached clock is all zeros, no draw has happened yet -- no
-        // damage to report.
-        if clock == [0u8; 8] {
-            return None;
+    /// Which status item `(px, py)` lands on.
+    ///
+    /// Lays out at the passed position rather than reusing the last draw
+    /// pass's geometry, so a click batched with the motion that brought the
+    /// cursor here is tested against where the cursor now is.
+    pub fn hit_test(&self, screen_width: u32, px: i32, py: i32) -> Option<StatusKind> {
+        let layout = self.layout(screen_width, px, py);
+        hit_status_item(&layout, px, py)
+    }
+
+    /// The screen rect a status item occupies, for anchoring a popover to it.
+    ///
+    /// Laid out through the same path as `draw` and `hit_test`, so a popover
+    /// cannot be anchored to a rectangle the item is not drawn in.
+    pub fn item_rect(&self, screen_width: u32, kind: StatusKind) -> Option<DamageRect> {
+        let layout = self.layout(screen_width, NO_CURSOR, NO_CURSOR);
+        layout.slot_for(kind).map(|slot| DamageRect {
+            x0: slot.x,
+            y0: 0,
+            x1: slot.x + slot.w - 1,
+            y1: SYSTEM_BAR_HEIGHT,
+        })
+    }
+
+    /// The hover regions to register for this frame: one `(id, rect, hovered)`
+    /// per placed item, from the same layout [`Self::draw`] uses. Returns how
+    /// many were written.
+    pub fn hover_regions(
+        &self,
+        screen_width: u32,
+        cursor_x: i32,
+        cursor_y: i32,
+        out: &mut [(u32, DamageRect, bool)],
+    ) -> usize {
+        let layout = self.layout(screen_width, cursor_x, cursor_y);
+        let mut count = 0usize;
+        for (index, slot) in layout.slots().iter().enumerate() {
+            if count >= out.len() {
+                break;
+            }
+            out[count] = (
+                HOVER_STATUS_ITEM_BASE | slot.kind as u32,
+                hover_rect(slot),
+                layout.hovered == Some(index),
+            );
+            count += 1;
+        }
+        count
+    }
+
+    /// The strip the system icon and the app-name text occupy.
+    ///
+    /// The bar's name changes with keyboard focus, and nothing else in the
+    /// frame damages `y < 24` when focus moves — the title-bar damage covers
+    /// the windows, not the bar — so without this the name stays stale until
+    /// something unrelated repaints the strip.
+    ///
+    /// Bounded by the name's own width cap as well as by the leftmost status
+    /// item: the text is truncated at [`SYSTEM_BAR_MAX_APP_NAME_WIDTH`], so
+    /// repainting all the way out to `app_name_limit` would be most of a
+    /// 1920 px bar to redraw a 200 px label.
+    pub fn app_name_damage(&self, screen_width: u32) -> DamageRect {
+        let layout = self.layout(screen_width, NO_CURSOR, NO_CURSOR);
+        let text_x = SYSTEM_BAR_PADDING_X + SYSTEM_BAR_ICON_SIZE + SYSTEM_BAR_ICON_GAP;
+        let budget = (layout.app_name_limit - text_x)
+            .min(SYSTEM_BAR_MAX_APP_NAME_WIDTH)
+            .max(0);
+        DamageRect {
+            x0: SYSTEM_BAR_PADDING_X,
+            y0: 0,
+            x1: text_x + budget,
+            y1: SYSTEM_BAR_HEIGHT,
+        }
+    }
+
+    /// Fold `uptime_secs` into the clock and report what changed since the
+    /// previous call. Returns how many rects were written to `out`, which must
+    /// hold at least [`MAX_BAR_DAMAGE`].
+    ///
+    /// Three tiers, cheapest last:
+    ///
+    /// - **Layout change** — an item appeared, vanished, changed width, or the
+    ///   screen resized. Everything left of the changed item moved, so one rect
+    ///   spans from the leftmost of (previous, current) to the right edge.
+    /// - **Content change** — that item's slot alone.
+    /// - **Nothing** — no rects.
+    pub fn take_damage(
+        &mut self,
+        screen_width: u32,
+        uptime_secs: u64,
+        out: &mut [DamageRect],
+    ) -> usize {
+        self.items.set_uptime(uptime_secs);
+
+        let sw = screen_width as i32;
+        let layout = self.layout(screen_width, NO_CURSOR, NO_CURSOR);
+        let leftmost = layout
+            .slots()
+            .iter()
+            .map(|slot| slot.x)
+            .min()
+            .unwrap_or(sw - SYSTEM_BAR_PADDING_X);
+
+        let mut count = 0usize;
+        let layout_changed =
+            layout.signature != self.last_signature || sw != self.last_screen_width;
+
+        if layout_changed {
+            let x0 = leftmost.min(self.last_leftmost).max(0);
+            push(
+                out,
+                &mut count,
+                DamageRect {
+                    x0,
+                    y0: 0,
+                    x1: sw - 1,
+                    y1: SYSTEM_BAR_HEIGHT,
+                },
+            );
+        } else {
+            let revisions = self.items.revisions();
+            for slot in layout.slots() {
+                if revisions[slot.idx] != self.last_revision[slot.idx] {
+                    push(
+                        out,
+                        &mut count,
+                        DamageRect {
+                            x0: slot.x,
+                            y0: 0,
+                            x1: slot.x + slot.w - 1,
+                            y1: SYSTEM_BAR_HEIGHT,
+                        },
+                    );
+                }
+            }
         }
 
-        // The clock occupies the rightmost CLOCK_DAMAGE_WIDTH pixels of the
-        // bar.  We always report this region so the compositor can repaint it
-        // when the second ticks over.  The caller is responsible for comparing
-        // the current uptime with the previous value; this method simply
-        // exposes the geometry.
-        let sw = screen_width as i32;
-        Some(DamageRect {
-            x0: (sw - CLOCK_DAMAGE_WIDTH).max(0),
-            y0: 0,
-            x1: sw - 1,
-            y1: SYSTEM_BAR_HEIGHT, // include border row
-        })
+        self.last_signature = layout.signature;
+        self.last_screen_width = sw;
+        self.last_leftmost = leftmost;
+        self.last_revision = self.items.revisions();
+        count
     }
 }
 
@@ -164,71 +320,63 @@ impl SystemBar {
 // Private helpers
 // ---------------------------------------------------------------------------
 
-/// Format `uptime_secs` into an 8-byte "HH:MM:SS" buffer without allocation.
-fn format_clock(secs: u64) -> [u8; 8] {
-    let h = (secs / 3600) % 100; // cap at 99 hours for display
-    let m = (secs % 3600) / 60;
-    let s = secs % 60;
-
-    let mut buf = [0u8; 8];
-    buf[0] = b'0' + (h / 10) as u8;
-    buf[1] = b'0' + (h % 10) as u8;
-    buf[2] = b':';
-    buf[3] = b'0' + (m / 10) as u8;
-    buf[4] = b'0' + (m % 10) as u8;
-    buf[5] = b':';
-    buf[6] = b'0' + (s / 10) as u8;
-    buf[7] = b'0' + (s % 10) as u8;
-    buf
-}
-
-/// Approximate pixel width of a clock string using the bitmap font.
-fn clock_text_width(text: &str) -> i32 {
-    gfx::font::string_width(text)
+fn push(out: &mut [DamageRect], count: &mut usize, rect: DamageRect) {
+    if *count < out.len() {
+        out[*count] = rect;
+        *count += 1;
+    }
 }
 
 /// Draw the active app name using the TrueType font, truncating with "..."
-/// if it exceeds `SYSTEM_BAR_MAX_APP_NAME_WIDTH`.
+/// if it exceeds `max_w`.
 fn draw_name_ttf(
     buf: &mut DrawBuffer,
     font: &mut FontRenderer,
     x: i32,
     y: i32,
     name: &str,
-    _clip: &DamageRect,
+    max_w: i32,
 ) {
-    let max_w = SYSTEM_BAR_MAX_APP_NAME_WIDTH;
     let (full_w, _) = font.measure_text(name, BAR_FONT_SIZE);
 
     if full_w <= max_w {
-        font.draw_text(buf, x, y, name, BAR_FONT_SIZE, TEXT_PRIMARY, OPAQUE_BAR_BG);
-    } else {
-        // Find the longest prefix that fits together with "...".
-        let (ell_w, _) = font.measure_text(ELLIPSIS, BAR_FONT_SIZE);
-        let budget = max_w - ell_w;
-        let prefix_len = find_prefix_len(font, name, budget);
-        let prefix = &name[..prefix_len];
-
         font.draw_text(
             buf,
             x,
             y,
-            prefix,
+            name,
             BAR_FONT_SIZE,
             TEXT_PRIMARY,
-            OPAQUE_BAR_BG,
+            PANEL_BG_OPAQUE,
         );
-        let (pw, _) = font.measure_text(prefix, BAR_FONT_SIZE);
-        font.draw_text(
-            buf,
-            x + pw,
-            y,
-            ELLIPSIS,
-            BAR_FONT_SIZE,
-            TEXT_PRIMARY,
-            OPAQUE_BAR_BG,
-        );
+        return;
     }
+
+    // Find the longest prefix that fits together with "...".
+    let (ell_w, _) = font.measure_text(ELLIPSIS, BAR_FONT_SIZE);
+    let budget = max_w - ell_w;
+    let prefix_len = find_prefix_len(font, name, budget);
+    let prefix = &name[..prefix_len];
+
+    font.draw_text(
+        buf,
+        x,
+        y,
+        prefix,
+        BAR_FONT_SIZE,
+        TEXT_PRIMARY,
+        PANEL_BG_OPAQUE,
+    );
+    let (pw, _) = font.measure_text(prefix, BAR_FONT_SIZE);
+    font.draw_text(
+        buf,
+        x + pw,
+        y,
+        ELLIPSIS,
+        BAR_FONT_SIZE,
+        TEXT_PRIMARY,
+        PANEL_BG_OPAQUE,
+    );
 }
 
 /// Find the longest byte-aligned prefix of `name` whose rendered width
@@ -249,23 +397,38 @@ fn find_prefix_len(font: &FontRenderer, name: &str, budget: i32) -> usize {
 }
 
 /// Draw the active app name using the bitmap fallback font, truncating with
-/// "..." if it exceeds `SYSTEM_BAR_MAX_APP_NAME_WIDTH`.
-fn draw_name_bitmap(buf: &mut DrawBuffer, x: i32, y: i32, name: &str, clip: &DamageRect) {
-    let max_w = SYSTEM_BAR_MAX_APP_NAME_WIDTH;
+/// "..." if it exceeds `max_w`.
+fn draw_name_bitmap(
+    buf: &mut DrawBuffer,
+    x: i32,
+    y: i32,
+    name: &str,
+    max_w: i32,
+    clip: &DamageRect,
+) {
     let full_w = gfx::font::string_width(name);
 
     if full_w <= max_w {
-        gfx::draw_str_clipped(buf, x, y, name, TEXT_PRIMARY, OPAQUE_BAR_BG, clip);
-    } else {
-        let ell_w = gfx::font::string_width(ELLIPSIS);
-        let budget = max_w - ell_w;
-        let prefix_len = find_bitmap_prefix_len(name, budget);
-        let prefix = &name[..prefix_len];
-
-        gfx::draw_str_clipped(buf, x, y, prefix, TEXT_PRIMARY, OPAQUE_BAR_BG, clip);
-        let pw = gfx::font::string_width(prefix);
-        gfx::draw_str_clipped(buf, x + pw, y, ELLIPSIS, TEXT_PRIMARY, OPAQUE_BAR_BG, clip);
+        gfx::draw_str_clipped(buf, x, y, name, TEXT_PRIMARY, PANEL_BG_OPAQUE, clip);
+        return;
     }
+
+    let ell_w = gfx::font::string_width(ELLIPSIS);
+    let budget = max_w - ell_w;
+    let prefix_len = find_bitmap_prefix_len(name, budget);
+    let prefix = &name[..prefix_len];
+
+    gfx::draw_str_clipped(buf, x, y, prefix, TEXT_PRIMARY, PANEL_BG_OPAQUE, clip);
+    let pw = gfx::font::string_width(prefix);
+    gfx::draw_str_clipped(
+        buf,
+        x + pw,
+        y,
+        ELLIPSIS,
+        TEXT_PRIMARY,
+        PANEL_BG_OPAQUE,
+        clip,
+    );
 }
 
 /// Find the longest byte-aligned prefix whose bitmap-font width fits in

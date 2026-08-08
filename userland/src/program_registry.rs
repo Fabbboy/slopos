@@ -83,11 +83,39 @@ const PROGRAM_REGISTRY: &[ProgramSpec] = &[
         desc: "Scan network for hosts",
     },
     ProgramSpec {
-        name: "ifconfig",
-        path: "/bin/ifconfig",
+        name: "ip",
+        path: "/bin/ip",
         priority: TaskPriority::Normal,
         flags: TASK_FLAG_USER_MODE,
-        desc: "Show network configuration",
+        desc: "Show and configure networking",
+    },
+    ProgramSpec {
+        name: "ss",
+        path: "/bin/ss",
+        priority: TaskPriority::Normal,
+        flags: TASK_FLAG_USER_MODE,
+        desc: "Show socket statistics",
+    },
+    // Aliases below: the shell passes the typed name through as `argv[0]`, so
+    // one binary renders whichever name was asked for. A canonical entry must
+    // precede its aliases — `resolve_program_path` returns the first match, so
+    // a lookup by path never reports an alias.
+    //
+    // `netstat` also carries `-r` (routing table) and `-i` (interface
+    // counters), which are different questions rather than different spellings.
+    ProgramSpec {
+        name: "netstat",
+        path: "/bin/ss",
+        priority: TaskPriority::Normal,
+        flags: TASK_FLAG_USER_MODE,
+        desc: "Show sockets, routes and interface counters",
+    },
+    ProgramSpec {
+        name: "ifconfig",
+        path: "/bin/ip",
+        priority: TaskPriority::Normal,
+        flags: TASK_FLAG_USER_MODE,
+        desc: "Show network configuration (alias for `ip addr`)",
     },
     ProgramSpec {
         name: "nc",

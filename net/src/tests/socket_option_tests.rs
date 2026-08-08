@@ -11,7 +11,7 @@ fn reset() {
 
 pub fn test_so_reuseaddr_roundtrip() -> TestResult {
     reset();
-    let idx = socket_create(AF_INET, SOCK_DGRAM, 0);
+    let idx = socket_create(AF_INET, SOCK_DGRAM, 0, SocketOwner::UNOWNED);
     if idx < 0 {
         return fail!("socket_create failed");
     }
@@ -37,7 +37,7 @@ pub fn test_so_reuseaddr_roundtrip() -> TestResult {
 
 pub fn test_socket_option_roundtrips() -> TestResult {
     reset();
-    let idx = socket_create(AF_INET, SOCK_STREAM, 0);
+    let idx = socket_create(AF_INET, SOCK_STREAM, 0, SocketOwner::UNOWNED);
     if idx < 0 {
         return fail!("socket_create failed");
     }
@@ -127,7 +127,7 @@ pub fn test_socket_option_roundtrips() -> TestResult {
 
 pub fn test_so_rcvbuf_validation() -> TestResult {
     reset();
-    let idx = socket_create(AF_INET, SOCK_DGRAM, 0);
+    let idx = socket_create(AF_INET, SOCK_DGRAM, 0, SocketOwner::UNOWNED);
     if idx < 0 {
         return fail!("socket_create failed");
     }
@@ -150,7 +150,7 @@ pub fn test_so_rcvbuf_validation() -> TestResult {
 
 pub fn test_so_error_clear_on_read() -> TestResult {
     reset();
-    let idx = socket_create(AF_INET, SOCK_DGRAM, 0);
+    let idx = socket_create(AF_INET, SOCK_DGRAM, 0, SocketOwner::UNOWNED);
     if idx < 0 {
         return fail!("socket_create failed");
     }
@@ -174,7 +174,7 @@ pub fn test_so_error_clear_on_read() -> TestResult {
 
 pub fn test_shutdown_read() -> TestResult {
     reset();
-    let idx = socket_create(AF_INET, SOCK_DGRAM, 0);
+    let idx = socket_create(AF_INET, SOCK_DGRAM, 0, SocketOwner::UNOWNED);
     if idx < 0 {
         return fail!("socket_create failed");
     }
@@ -193,7 +193,7 @@ pub fn test_shutdown_read() -> TestResult {
 
 pub fn test_shutdown_write() -> TestResult {
     reset();
-    let idx = socket_create(AF_INET, SOCK_DGRAM, 0);
+    let idx = socket_create(AF_INET, SOCK_DGRAM, 0, SocketOwner::UNOWNED);
     if idx < 0 {
         return fail!("socket_create failed");
     }
@@ -212,7 +212,7 @@ pub fn test_shutdown_write() -> TestResult {
 
 pub fn test_unknown_option_returns_einval() -> TestResult {
     reset();
-    let idx = socket_create(AF_INET, SOCK_DGRAM, 0);
+    let idx = socket_create(AF_INET, SOCK_DGRAM, 0, SocketOwner::UNOWNED);
     if idx < 0 {
         return fail!("socket_create failed");
     }

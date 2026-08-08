@@ -26,9 +26,9 @@ use slopos_abi::syscall::{
     ARCH_GET_FS, ARCH_SET_FS, CLONE_SETTLS, CLONE_SIGHAND, CLONE_THREAD, CLONE_VM, ERRNO_EAGAIN,
     F_GETFL, F_SETFD, FD_CLOEXEC, FUTEX_WAIT, FUTEX_WAKE, MAP_ANONYMOUS, MAP_PRIVATE, O_NOCTTY,
     O_NONBLOCK, POLLIN, SYSCALL_ARCH_PRCTL, SYSCALL_CLONE, SYSCALL_FUTEX, SYSCALL_GETPGID,
-    SYSCALL_IOCTL, SYSCALL_KILL, SYSCALL_NET_SCAN, SYSCALL_PIPE, SYSCALL_PIPE2, SYSCALL_POLL,
-    SYSCALL_RT_SIGACTION, SYSCALL_RT_SIGPROCMASK, SYSCALL_RT_SIGRETURN, SYSCALL_SELECT,
-    SYSCALL_SETPGID, SYSCALL_SETSID, SYSCALL_TABLE_SIZE, SYSCALL_VHANGUP, TIOCSCTTY, TtyIndex,
+    SYSCALL_IOCTL, SYSCALL_KILL, SYSCALL_PIPE, SYSCALL_PIPE2, SYSCALL_POLL, SYSCALL_RT_SIGACTION,
+    SYSCALL_RT_SIGPROCMASK, SYSCALL_RT_SIGRETURN, SYSCALL_SELECT, SYSCALL_SETPGID, SYSCALL_SETSID,
+    SYSCALL_TABLE_SIZE, SYSCALL_VHANGUP, TIOCSCTTY, TtyIndex,
 };
 use slopos_abi::task::{INVALID_TASK_ID, TASK_FLAG_KERNEL_MODE, TASK_FLAG_USER_MODE, TaskStatus};
 use slopos_mm::page_alloc::{alloc_kernel_page, free_page_frame};
@@ -324,12 +324,18 @@ pub fn test_io_syscall_lookup_valid() -> TestResult {
     TestResult::Pass
 }
 
-pub fn test_net_scan_syscall_lookup_valid() -> TestResult {
-    let Some(entry) = syscall_lookup(SYSCALL_NET_SCAN) else {
-        klog_info!("net_scan syscall missing from table");
-        return TestResult::Fail;
-    };
-    assert_test!(entry.handler.is_some(), "net_scan syscall has no handler");
+/// Syscall numbers 120 and 123 are retired and must stay unhandled: reusing
+/// either would hand a binary built against them a different call under a
+/// number it already knows. Written as literals because the constants are gone.
+pub fn test_retired_net_syscalls_stay_unhandled() -> TestResult {
+    for number in [120u64, 123] {
+        if let Some(entry) = syscall_lookup(number)
+            && entry.handler.is_some()
+        {
+            klog_info!("retired syscall {} has a handler again", number);
+            return TestResult::Fail;
+        }
+    }
     TestResult::Pass
 }
 
@@ -3259,11 +3265,16 @@ pub fn test_spawn_path_rejects_privileged_flags() -> TestResult {
         eperm,
         "spawning with NO_PREEMPT must be EPERM — it wedges a CPU"
     );
+    assert_eq_test!(
+        spawn(NORMAL, slopos_abi::task::TASK_FLAG_NET_ADMIN),
+        eperm,
+        "spawning with NET_ADMIN must be EPERM — it is conferred by program identity"
+    );
 
     // Undefined bits fail closed so the ABI can grow one without a deployed
     // caller having already assigned it a different meaning.
     assert_eq_test!(
-        spawn(NORMAL, 0x0200),
+        spawn(NORMAL, 0x0400),
         einval,
         "an undefined flag bit must be EINVAL"
     );
@@ -3283,7 +3294,7 @@ pub fn test_spawn_path_rejects_privileged_flags() -> TestResult {
     // privilege, so probing reserved bits cannot learn from an EPERM that a bit
     // means something.
     assert_eq_test!(
-        spawn(NORMAL, 0x0200 | TASK_FLAG_COMPOSITOR),
+        spawn(NORMAL, 0x0400 | TASK_FLAG_COMPOSITOR),
         einval,
         "a reserved bit must be answered before a privileged one"
     );
@@ -4165,7 +4176,7 @@ slopos_testing::stest!(
 );
 slopos_testing::stest!(name = test_io_syscall_lookup_valid, suite = syscall_valid);
 slopos_testing::stest!(
-    name = test_net_scan_syscall_lookup_valid,
+    name = test_retired_net_syscalls_stay_unhandled,
     suite = syscall_valid
 );
 slopos_testing::stest!(name = test_fork_kernel_task, suite = syscall_valid);
@@ -4392,7 +4403,7 @@ slopos_testing::stest!(
     suite = syscall_compat_smoke
 );
 slopos_testing::stest!(
-    name = test_net_scan_syscall_lookup_valid,
+    name = test_retired_net_syscalls_stay_unhandled,
     suite = syscall_compat_smoke
 );
 slopos_testing::stest!(

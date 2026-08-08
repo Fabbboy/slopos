@@ -4,15 +4,21 @@
 pub mod tcp_common;
 
 pub mod checksum_tests;
+pub mod connectivity_tests;
+pub mod dhcp_client_tests;
+pub mod dhcp_transport_tests;
 pub mod dns_tests;
 pub mod icmp_tests;
+pub mod iface_ctl_tests;
+pub mod iface_tests;
 pub mod ingress_tests;
 pub mod loopback_tests;
 pub mod napi_tests;
 pub mod neighbor_tests;
 pub mod net_types_tests;
 pub mod netdev_tests;
-pub mod netstack_tests;
+pub mod netmon_producer_tests;
+pub mod netmon_tests;
 pub mod packetbuf_tests;
 pub mod reassembly_tests;
 pub mod route_tests;

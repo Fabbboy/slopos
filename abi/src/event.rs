@@ -54,6 +54,15 @@ pub struct UnixSocketSlot(pub u32);
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct TaskSlot(pub u32);
 
+/// Maximum number of open network-state monitors. Each carries its own fixed
+/// ring, so this bounds the subsystem's whole memory footprint.
+pub const MAX_NETMON: usize = 8;
+
+/// Network-monitor slot, in `0..MAX_NETMON`.
+#[repr(transparent)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct NetMonSlot(pub u32);
+
 /// A typed kernel wakeup.
 ///
 /// Every blocking/waking interaction in the kernel names the resource it
@@ -86,4 +95,8 @@ pub enum KernelEvent {
     /// signal-raise site so a signal becomes an in-band ring/poll event
     /// instead of an out-of-band interrupt.
     SignalPending { task: TaskSlot },
+    /// A network-state change was queued into a monitor's ring; a poller on
+    /// that fd should re-check. Published after the ring lock is released, so
+    /// the producer holds nothing when it wakes.
+    NetMonitor { mon: NetMonSlot },
 }

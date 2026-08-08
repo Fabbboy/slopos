@@ -12,6 +12,7 @@ use super::decorations;
 use super::dock::LauncherShelf;
 use super::menu_bar::SystemBar;
 use super::output::WINDOW_STATE_MINIMIZED;
+use super::popover::Popover;
 use super::region::Region;
 use super::surface_cache::ClientSurfaceCache;
 
@@ -206,10 +207,11 @@ impl Renderer {
         mouse_y: i32,
         cursor_shape: u8,
         surface_cache: &mut ClientSurfaceCache,
-        system_bar: &mut SystemBar,
+        system_bar: &SystemBar,
         shelf: &mut LauncherShelf,
+        popover: &mut Popover,
+        net_model: &slopos_chrome_core::NetPanelModel,
         active_app_name: &str,
-        uptime_secs: u64,
         frame_damage: &Region,
         hw_cursor: bool,
     ) {
@@ -344,11 +346,16 @@ impl Renderer {
                     buf,
                     self.output_width,
                     active_app_name,
-                    uptime_secs,
+                    mouse_x,
+                    mouse_y,
                     self.ttf_font.as_mut(),
                     Some(*rect),
                 );
             }
+            // The popover sits above every other piece of chrome: it holds a
+            // pointer grab while open, so anything drawn over it would be
+            // clickable-looking and not clickable.
+            popover.draw(buf, net_model, rect);
             buf.set_scissor(None);
         }
 

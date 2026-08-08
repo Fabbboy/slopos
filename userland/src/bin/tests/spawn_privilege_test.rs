@@ -23,8 +23,8 @@ use slopos_userland as _;
 use slopos_abi::spawn::{SpawnAttrs, SpawnFdAction};
 use slopos_abi::syscall::SYSCALL_SPAWN_PATH;
 use slopos_abi::task::{
-    TASK_FLAG_COMPOSITOR, TASK_FLAG_DISPLAY_EXCLUSIVE, TASK_FLAG_KERNEL_MODE, TASK_FLAG_NEW_PGRP,
-    TASK_FLAG_NO_PREEMPT, TASK_FLAG_SYSTEM, TASK_FLAG_USER_MODE,
+    TASK_FLAG_COMPOSITOR, TASK_FLAG_DISPLAY_EXCLUSIVE, TASK_FLAG_KERNEL_MODE, TASK_FLAG_NET_ADMIN,
+    TASK_FLAG_NEW_PGRP, TASK_FLAG_NO_PREEMPT, TASK_FLAG_SYSTEM, TASK_FLAG_USER_MODE,
 };
 use slopos_userland::syscall::process;
 use slopos_userland::syscall::raw::syscall5;
@@ -100,6 +100,10 @@ fn privileged_flags_are_eperm() -> bool {
         "NO_PREEMPT",
         spawn_raw(MISSING, PRIORITY_NORMAL, TASK_FLAG_NO_PREEMPT, &[]),
         EPERM,
+    ) && expect(
+        "NET_ADMIN",
+        spawn_raw(MISSING, PRIORITY_NORMAL, TASK_FLAG_NET_ADMIN, &[]),
+        EPERM,
     )
 }
 
@@ -113,8 +117,8 @@ fn privileged_flags_are_eperm() -> bool {
 /// means something.
 fn malformed_flags_are_einval() -> bool {
     expect(
-        "undefined bit 0x0200",
-        spawn_raw(MISSING, PRIORITY_NORMAL, 0x0200, &[]),
+        "undefined bit 0x0400",
+        spawn_raw(MISSING, PRIORITY_NORMAL, 0x0400, &[]),
         EINVAL,
     ) && expect(
         "retired FPU_INITIALIZED bit 0x0040",
@@ -126,7 +130,7 @@ fn malformed_flags_are_einval() -> bool {
         EINVAL,
     ) && expect(
         "reserved bit alongside a privileged one",
-        spawn_raw(MISSING, PRIORITY_NORMAL, 0x0200 | TASK_FLAG_COMPOSITOR, &[]),
+        spawn_raw(MISSING, PRIORITY_NORMAL, 0x0400 | TASK_FLAG_COMPOSITOR, &[]),
         EINVAL,
     )
 }
@@ -177,14 +181,12 @@ fn ordinary_spawn_still_works() -> bool {
         process::clone_fd(1, 1),
         process::clone_fd(2, 2),
     ];
-    let tid = spawn_raw(
-        b"/bin/ifconfig",
-        PRIORITY_NORMAL,
-        TASK_FLAG_USER_MODE,
-        &stdio,
-    );
+    // `nc` with no arguments prints its usage and exits, and the kernel
+    // confers no privilege on it by identity — which is what makes it the
+    // control for "ordinary".
+    let tid = spawn_raw(b"/bin/nc", PRIORITY_NORMAL, TASK_FLAG_USER_MODE, &stdio);
     if tid <= 0 {
-        eprintln!("spawn_privilege_test: ordinary spawn of /bin/ifconfig returned {tid}");
+        eprintln!("spawn_privilege_test: ordinary spawn of /bin/nc returned {tid}");
         return false;
     }
     process::waitpid(tid as u32);

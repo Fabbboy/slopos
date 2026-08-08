@@ -7,12 +7,54 @@ use core::option::Option::{self, None, Some};
 /// `process_list` syscall truncates to this many entries.
 pub(crate) const MAX_TASKS: usize = 256;
 
-use crate::syscall::{
-    UserCpuInfo, UserNetInfo, UserPerCpuStats, UserSysInfo, UserTaskEntry, core as sys_core,
-    net as sys_net,
-};
+use crate::syscall::{UserCpuInfo, UserPerCpuStats, UserSysInfo, UserTaskEntry, core as sys_core};
 
 use super::{MAX_CPUS, REFRESH_INTERVAL_MS, is_idle_task, task_name_bytes};
+
+/// The network facts the overview shows, read from `net_query` so sysmon and
+/// `ip` cannot disagree about what "online" means.
+#[derive(Clone, Copy)]
+pub(crate) struct NetSummary {
+    pub(crate) oper_state: u8,
+    pub(crate) mac: [u8; 6],
+    pub(crate) addr: [u8; 4],
+    pub(crate) prefix_len: u8,
+}
+
+impl NetSummary {
+    /// The first non-loopback interface, and the first global address on it.
+    ///
+    /// `None` means the query itself failed or there is no such interface,
+    /// which the panel renders as "unavailable" rather than as "offline".
+    fn fetch() -> Option<Self> {
+        use slopos_abi::net::{
+            NET_ADDR_SCOPE_GLOBAL, NET_IFINDEX_NONE, NET_IFKIND_LOOPBACK, NET_Q_ADDRS,
+            NET_Q_IFACES, UserAddr, UserIface,
+        };
+        let ifaces = crate::net_query::fetch::<UserIface>(NET_Q_IFACES, NET_IFINDEX_NONE).ok()?;
+        let iface = ifaces
+            .records
+            .iter()
+            .find(|i| i.kind != NET_IFKIND_LOOPBACK)?;
+
+        let mut out = Self {
+            oper_state: iface.oper_state,
+            mac: iface.mac,
+            addr: [0; 4],
+            prefix_len: 0,
+        };
+        if let Ok(addrs) = crate::net_query::fetch::<UserAddr>(NET_Q_ADDRS, iface.ifindex)
+            && let Some(addr) = addrs
+                .records
+                .iter()
+                .find(|a| a.scope == NET_ADDR_SCOPE_GLOBAL as u8)
+        {
+            out.addr = addr.addr;
+            out.prefix_len = addr.prefix_len;
+        }
+        Some(out)
+    }
+}
 
 #[derive(Clone, Copy, PartialEq)]
 pub(crate) enum Tab {
@@ -40,7 +82,7 @@ pub(crate) struct SysmonApp {
     pub(crate) task_count: usize,
     pub(crate) percpu: [UserPerCpuStats; MAX_CPUS],
     pub(crate) cpu_count: usize,
-    pub(crate) net_info: UserNetInfo,
+    pub(crate) net: Option<NetSummary>,
     pub(crate) prev_tasks: [UserTaskEntry; MAX_TASKS],
     pub(crate) prev_task_count: usize,
     pub(crate) prev_percpu: [UserPerCpuStats; MAX_CPUS],
@@ -65,7 +107,7 @@ impl SysmonApp {
             task_count: 0,
             percpu: [UserPerCpuStats::default(); MAX_CPUS],
             cpu_count: 0,
-            net_info: UserNetInfo::default(),
+            net: None,
             prev_tasks: [UserTaskEntry::default(); MAX_TASKS],
             prev_task_count: 0,
             prev_percpu: [UserPerCpuStats::default(); MAX_CPUS],
@@ -126,7 +168,7 @@ impl SysmonApp {
             let _ = sys_core::cpu_info(&mut self.cpu_info);
         }
 
-        let _ = sys_net::net_info(&mut self.net_info);
+        self.net = NetSummary::fetch();
 
         self.compute_cpu_usage();
         self.compute_task_cpu(elapsed_ms);
