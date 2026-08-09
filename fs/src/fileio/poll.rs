@@ -114,12 +114,42 @@ static POLL_REG_TABLE: PollRegTable = PollRegTable {
     ),
 };
 
-/// Record a weak handle to `open_file` and return its opaque token.
+/// Live registrations the table will hold at once.
+///
+/// An entry leaves only through [`poll_reg_take`], so a caller that never hands
+/// its token back holds one for the rest of the boot. A bound turns that into a
+/// refusal the caller can act on rather than growth nothing reclaims.
+const POLL_REG_MAX: usize = 4096;
+
+/// Record a weak handle to `open_file` and return its opaque token, or 0 when
+/// the table is full.
 fn poll_reg_insert(open_file: &KArc<OpenFile>) -> u64 {
     let id = POLL_REG_TABLE.next_id.fetch_add(1, Ordering::Relaxed);
     let mut entries = POLL_REG_TABLE.entries.lock();
-    let _ = entries.insert(id, KArc::downgrade(open_file));
+    if entries.len() >= POLL_REG_MAX {
+        return 0;
+    }
+    entries.insert(id, KArc::downgrade(open_file));
     id
+}
+
+/// Hand back a token for a registration that was just made, undoing the
+/// registration when the table had no room for it.
+///
+/// Reporting `registered` without a token would leave the caller parked on a
+/// wait queue with no way to name the entry that takes it off again.
+fn poll_reg_token_or_unwait(
+    result: &mut slopos_abi::file_ops::FusedPollResult,
+    open_file: &KArc<OpenFile>,
+) {
+    if !result.registered {
+        return;
+    }
+    result.open_file_token = poll_reg_insert(open_file);
+    if result.open_file_token == 0 {
+        open_file.ops.poll_unwait(open_file.handle);
+        result.registered = false;
+    }
 }
 
 /// Remove a registration by token, returning the weak handle it held (if
@@ -152,9 +182,7 @@ pub fn file_poll_fused(
         // Hand the caller an opaque registration token backed by a weak
         // reference. The weak does not keep the open file alive; if the
         // fd is closed before unregister, the token upgrades to None.
-        if r.registered {
-            r.open_file_token = poll_reg_insert(&open_file);
-        }
+        poll_reg_token_or_unwait(&mut r, &open_file);
         r
     })
     .unwrap_or(invalid)
@@ -166,9 +194,7 @@ pub fn file_poll_fused(
 /// by an fd number that may have been closed or reused.
 pub fn file_poll_fused_ref(file: &FileRef, events: u16) -> slopos_abi::file_ops::FusedPollResult {
     let mut r = file.open_file.ops.poll_fused(file.open_file.handle, events);
-    if r.registered {
-        r.open_file_token = poll_reg_insert(&file.open_file);
-    }
+    poll_reg_token_or_unwait(&mut r, &file.open_file);
     r
 }
 
