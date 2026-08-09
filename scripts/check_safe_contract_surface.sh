@@ -34,6 +34,9 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+# shellcheck source=lib/gate_common.sh
+. "$SCRIPT_DIR/lib/gate_common.sh"
+gate_parse_args check_safe_contract_surface "$@"
 
 # Measured with this script.
 BASELINE="${SAFE_CONTRACT_BASELINE:-0}"
@@ -63,12 +66,72 @@ count_file() {
     ' "$1"
 }
 
-findings=""
-while IFS= read -r file; do
-    [ -f "$file" ] || continue
-    findings+="$(count_file "$file")"$'\n'
-done < <(find "$REPO_ROOT/slopos-ostd/src" -name '*.rs' | LC_ALL=C sort)
+# One tagged line per finding, so the self-test can count this check alone.
+scan_tree() {
+    local root="$1" file list
+    list="$(find "$root" -name '*.rs' | LC_ALL=C sort)"
+    gate_require_nonempty check_safe_contract_surface "$root" "$list"
+    while IFS= read -r file; do
+        [ -f "$file" ] || continue
+        count_file "$file"
+    done <<< "$list"
+}
 
+if [ "$GATE_SELF_TEST" -eq 1 ]; then
+    gate_selftest_begin check_safe_contract_surface
+    root="$GATE_FIXTURE_ROOT/src"
+    mkdir -p "$root"
+
+    # Must fire: the whole point of the gate.
+    cat > "$(gate_fixture src/positives.rs)" <<'RS'
+/// Does a thing.
+///
+/// # Safety
+///
+/// The caller must not do the other thing.
+pub fn safe_fn_with_contract(x: usize) -> usize { x }
+
+/// # Safety
+///
+/// Caller obligation.
+pub(crate) fn crate_visible_with_contract() {}
+RS
+
+    # Must not fire.
+    cat > "$(gate_fixture src/negatives.rs)" <<'RS'
+/// # Safety
+///
+/// Documented obligation, taken on in the type system.
+pub unsafe fn properly_unsafe() {}
+
+/// # Correctness
+///
+/// A deliberate blind spot: this gate tracks `# Safety` only.
+pub fn correctness_section() {}
+
+/// # Safety
+///
+/// Blank line below resets the tracker, so this fn is not attributed.
+
+pub fn separated_from_the_block() {}
+
+/// Ordinary documentation with no section at all.
+pub fn plain_fn() {}
+
+/// # Safety
+///
+/// An obligation on an unsafe trait implementation.
+pub unsafe trait UnsafeTrait {}
+RS
+
+    GATE_FINDINGS="$(scan_tree "$root" | sed 's/^/1	/')"
+    gate_expect 1 2 "a safe pub fn and a pub(crate) fn, each carrying a '# Safety' section"
+    gate_expect_silent 'negatives\.rs' \
+        "an unsafe fn, a '# Correctness' section, a blank-line-separated block, and an undocumented fn"
+    gate_selftest_end
+fi
+
+findings="$(scan_tree "$REPO_ROOT/slopos-ostd/src")"
 findings="$(grep -c . <<< "$findings" || true)"
 
 if [ "$findings" -gt "$BASELINE" ]; then
