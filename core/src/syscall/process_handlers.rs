@@ -314,6 +314,16 @@ define_syscall!(syscall_waitpid
         return Err(Errno::EINVAL);
     }
 
+    // Reaping is the parent's alone. `task_consume_zombie` unlinks the target
+    // from whoever its parent is and drops that owning reference, so a
+    // stranger's wait would take the exit code *and* leave the real parent
+    // with `ECHILD` for a child it is still waiting on.
+    let caller_id = ctx.task_id();
+    match task_find_by_id(target_id) {
+        Some(t) if t.parent_task_id() == caller_id => {}
+        _ => return Err(Errno::ECHILD),
+    }
+
     if let Some(info) = task_consume_zombie(target_id) {
         return Ok(info.exit_code as u64);
     }

@@ -6712,12 +6712,74 @@ pub fn test_broadcast_kill_spares_privileged_tasks() -> TestResult {
     pass!()
 }
 
+/// Only the parent reaps. `task_consume_zombie` unlinks the target from
+/// whoever its parent is and drops that owning reference, so a stranger's wait
+/// takes the exit code *and* leaves the real parent with `ECHILD`.
+pub fn test_waitpid_refuses_a_task_that_is_not_a_child() -> TestResult {
+    let _fixture = SyscallFixture::new();
+
+    let child_id = create_test_user_task();
+    assert_test!(child_id != INVALID_TASK_ID, "failed to create child task");
+    let stranger_id = create_test_user_task();
+    assert_test!(
+        stranger_id != INVALID_TASK_ID,
+        "failed to create stranger task"
+    );
+
+    let stranger_guard = assert_some!(task_find_by_id(stranger_id), "task lookup failed");
+    let stranger_pid = stranger_guard.process_id;
+
+    // WNOHANG so the permitted case reports "alive, nothing to reap" instead
+    // of blocking the test on a task that never exits.
+    let mut frame: KBox<UserContext> = KBox::zeroed().expect("alloc");
+    frame.regs_mut().rdi = child_id as u64;
+    frame.regs_mut().rsi = 1;
+    let _ = with_user_process_context(stranger_pid, || {
+        crate::syscall::dispatch::dispatch_handler(syscall_waitpid, &stranger_guard, &mut *frame)
+    });
+    assert_eq_test!(
+        frame.rax(),
+        slopos_abi::Errno::ECHILD.as_u64(),
+        "a non-parent was allowed to wait on a foreign task"
+    );
+
+    // The same call from the real parent gets past the relation check.
+    {
+        let child_guard = assert_some!(task_find_by_id(child_id), "child task vanished");
+        child_guard.set_parent_task_id(stranger_id);
+    }
+    let mut parent_frame: KBox<UserContext> = KBox::zeroed().expect("alloc");
+    parent_frame.regs_mut().rdi = child_id as u64;
+    parent_frame.regs_mut().rsi = 1;
+    let _ = with_user_process_context(stranger_pid, || {
+        crate::syscall::dispatch::dispatch_handler(
+            syscall_waitpid,
+            &stranger_guard,
+            &mut *parent_frame,
+        )
+    });
+    assert_eq_test!(
+        parent_frame.rax(),
+        slopos_abi::Errno::EAGAIN.as_u64(),
+        "the parent's own wait was refused"
+    );
+
+    drop(stranger_guard);
+    task_terminate(child_id);
+    task_terminate(stranger_id);
+    pass!()
+}
+
 slopos_testing::stest!(
     name = test_kill_refuses_a_more_privileged_target,
     suite = syscall_signal
 );
 slopos_testing::stest!(
     name = test_broadcast_kill_spares_privileged_tasks,
+    suite = syscall_signal
+);
+slopos_testing::stest!(
+    name = test_waitpid_refuses_a_task_that_is_not_a_child,
     suite = syscall_signal
 );
 
