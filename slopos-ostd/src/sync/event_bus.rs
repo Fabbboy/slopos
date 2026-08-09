@@ -75,11 +75,19 @@ pub static BUS: EventBus = EventBus {
 };
 
 impl EventBus {
-    /// Map an event to its backing wait queue. The `% CAP` keeps the index in
-    /// range; for socket/pipe/tty/unix slots the id is already `< CAP`, so the
-    /// modulo is the identity. For child-exit, task ids exceed the bucket
-    /// count and several tasks share a bucket (collisions are benign — the
-    /// waiter re-checks its own exit condition).
+    /// Map an event to its backing wait queue.
+    ///
+    /// The `% CAP` folds the id into a bucket. For pipes, TTYs and AF_UNIX the
+    /// id is already `< CAP`, so the modulo is the identity. For child-exit,
+    /// signal-pending and AF_INET sockets it is not: task ids are unbounded and
+    /// the socket slab grows past `MAX_SOCKETS`, so several ids share a bucket.
+    ///
+    /// A collision is benign in every case, and for the same reason: a bucket
+    /// is a place to be woken, not a statement about what happened. Every
+    /// waiter parks with `wait_event` on a predicate over its *own* state and
+    /// re-evaluates it on each wake, so a wake meant for a bucket-mate costs a
+    /// re-check and nothing else. What a collision cannot do is lose a wake —
+    /// publish folds by the same rule.
     #[inline]
     fn queue_for(&'static self, ev: KernelEvent) -> &'static WaitQueue {
         match ev {

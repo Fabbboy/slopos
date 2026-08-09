@@ -8,14 +8,14 @@
 //! caller asked for. The syscall boundary is purely subtractive — it can reject
 //! or strip, never confer.
 //!
-//! Keying on the program rather than on the caller is what keeps the three
-//! legitimate launch paths working. `roulette` is started by init, by the shell
-//! and by the compositor's shelf; under a "a caller may pass a bit it already
-//! holds" rule the last two fail, because neither the shell nor the compositor
-//! holds `DISPLAY_EXCLUSIVE` — and the first fails too, because init holds
-//! `SYSTEM`, not `DISPLAY_EXCLUSIVE`. Keying on the program also closes a
-//! channel that rule would open: a task holding `COMPOSITOR` could otherwise
-//! stamp it onto any binary it launches.
+//! Keying on the program rather than on the caller is what keeps the
+//! legitimate launch paths working. `roulette` is started by init, and by the
+//! shell when it is named by path rather than run as the builtin; under a
+//! "a caller may pass a bit it already holds" rule both fail, because the
+//! shell holds nothing and init holds `SYSTEM`, not `DISPLAY_EXCLUSIVE`.
+//! Keying on the program also closes a channel that rule would open: a task
+//! holding `COMPOSITOR` could otherwise stamp it onto any binary it launches —
+//! which is exactly how the compositor launches its shelf entries.
 //!
 //! `SYSTEM` deliberately appears nowhere below. `/sbin/init` gets it from
 //! `launch_init` and utest binaries from the kernel-side runner — both kernel

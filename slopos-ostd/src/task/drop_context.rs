@@ -27,10 +27,13 @@ fn preemption_disabled() -> bool {
 ///
 /// Three facts about the calling CPU right now, never anything about a
 /// reference count: a count-based test cannot be made race-free, and these can.
-/// Interrupts must be on and no tracked lock held because the buddy's reuse
-/// path spins on cross-CPU shootdowns; preemption must be enabled because a
-/// caller holding a whole-sequence guard is asking for the region to stay free
-/// of destructors.
+/// Interrupts must be on and no tracked lock held because freeing takes the
+/// allocator's own locks, and taking them from inside another lock or with
+/// interrupts masked is how the allocator — where every subsystem meets —
+/// becomes an ordering hazard for all of them. Preemption must be enabled
+/// because a caller holding a whole-sequence guard is asking for the region to
+/// stay free of destructors, and because the dying task's stack is pinned to
+/// the dispatching CPU until the switch completes.
 ///
 /// Both the deferral decision and the tripwire that catches it being wrong read
 /// this, so the two cannot drift apart.
