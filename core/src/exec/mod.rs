@@ -8,6 +8,7 @@ pub mod utest;
 
 use core::ffi::{c_char, c_int};
 use core::ptr;
+use core::sync::atomic::{AtomicU32, Ordering};
 
 use slopos_abi::Errno;
 use slopos_ostd::KVec;
@@ -86,8 +87,22 @@ fn trim_nul_bytes(bytes: &[u8]) -> &[u8] {
     &bytes[..len]
 }
 
+/// The task id `launch_init` handed to `/sbin/init`, or [`INVALID_TASK_ID`]
+/// before it runs.
+static INIT_TASK_ID: AtomicU32 = AtomicU32::new(INVALID_TASK_ID);
+
+/// Which task is init.
+///
+/// Init has no structural marker: task ids are monotonic and never recycled,
+/// so it is whatever the boot sequence handed it, and `TASK_FLAG_SYSTEM` is
+/// shared with the userland test runner. Recording the id at launch is the
+/// only way to name it later.
+pub fn init_task_id() -> u32 {
+    INIT_TASK_ID.load(Ordering::Acquire)
+}
+
 pub fn launch_init() -> Result<u32, ExecError> {
-    spawn_program_with_attrs(
+    let task_id = spawn_program_with_attrs(
         INIT_PATH,
         None,
         None,
@@ -97,7 +112,9 @@ pub fn launch_init() -> Result<u32, ExecError> {
         0,
         INVALID_PROCESS_ID,
         INVALID_TASK_ID,
-    )
+    )?;
+    INIT_TASK_ID.store(task_id, Ordering::Release);
+    Ok(task_id)
 }
 
 /// Apply the spawn fd-action allow-list to the child's empty, unpublished

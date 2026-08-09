@@ -9,6 +9,7 @@ use core::ptr;
 use crate::syscall::fs::syscall_ioctl;
 use crate::syscall::handlers::{
     syscall_arch_prctl, syscall_futex, syscall_getpgid, syscall_setpgid, syscall_setsid,
+    syscall_waitpid,
 };
 use crate::syscall::signal::{
     deliver_pending_signal, deliver_pending_signal_on_irq_exit, syscall_kill, syscall_rt_sigaction,
@@ -30,7 +31,10 @@ use slopos_abi::syscall::{
     SYSCALL_RT_SIGPROCMASK, SYSCALL_RT_SIGRETURN, SYSCALL_SELECT, SYSCALL_SETPGID, SYSCALL_SETSID,
     SYSCALL_TABLE_SIZE, SYSCALL_VHANGUP, TIOCSCTTY, TtyIndex,
 };
-use slopos_abi::task::{INVALID_TASK_ID, TASK_FLAG_KERNEL_MODE, TASK_FLAG_USER_MODE, TaskStatus};
+use slopos_abi::task::{
+    INVALID_TASK_ID, TASK_FLAG_COMPOSITOR, TASK_FLAG_KERNEL_MODE, TASK_FLAG_NET_ADMIN,
+    TASK_FLAG_USER_MODE, TaskStatus,
+};
 use slopos_mm::page_alloc::{alloc_kernel_page, free_page_frame};
 use slopos_mm::paging_defs::PageFlags;
 use slopos_mm::process_vm::{process_vm_alloc, process_vm_get_stack_top};
@@ -122,15 +126,18 @@ fn create_test_kernel_task() -> u32 {
 }
 
 fn create_test_user_task() -> u32 {
+    create_test_user_task_with(TASK_FLAG_USER_MODE)
+}
+
+fn create_test_user_task_with(flags: u16) -> u32 {
     let user_entry = slopos_sched::task::task_entry_from_kernel_va(PROCESS_CODE_START_VA as u64);
-    let id = task_create(
+    task_create(
         b"UserTest\0".as_ptr() as *const c_char,
         user_entry,
         ptr::null_mut(),
         1,
-        TASK_FLAG_USER_MODE,
-    );
-    id
+        flags,
+    )
 }
 
 /// Build a zero-initialised `UserContext` for tests. Direct GPR
@@ -6581,6 +6588,136 @@ pub fn test_broadcast_kill_spares_kernel_tasks() -> TestResult {
 
 slopos_testing::stest!(
     name = test_broadcast_kill_spares_kernel_tasks,
+    suite = syscall_signal
+);
+
+/// A task may not signal one holding a privilege it does not hold itself.
+///
+/// `task.flags` is the whole privilege model, so this is the relation POSIX
+/// expresses with user ids. Without it the compositor, `/bin/roulette` and
+/// `/bin/ip` are one `kill` away from any process on the machine — and their
+/// ids come free from `process_list`.
+pub fn test_kill_refuses_a_more_privileged_target() -> TestResult {
+    let _fixture = SyscallFixture::new();
+
+    let plain_id = create_test_user_task();
+    assert_test!(plain_id != INVALID_TASK_ID, "failed to create user task");
+    let privileged_id = create_test_user_task_with(TASK_FLAG_USER_MODE | TASK_FLAG_COMPOSITOR);
+    assert_test!(
+        privileged_id != INVALID_TASK_ID,
+        "failed to create privileged task"
+    );
+
+    let plain_guard = assert_some!(task_find_by_id(plain_id), "task lookup failed");
+    let plain_pid = plain_guard.process_id;
+    let privileged_guard = assert_some!(task_find_by_id(privileged_id), "task lookup failed");
+    let privileged_pid = privileged_guard.process_id;
+
+    // Upward: refused, and nothing is pended.
+    let mut up: KBox<UserContext> = KBox::zeroed().expect("alloc");
+    up.regs_mut().rdi = privileged_id as u64;
+    up.regs_mut().rsi = SIGTERM as u64;
+    let _ = with_user_process_context(plain_pid, || {
+        crate::syscall::dispatch::dispatch_handler(syscall_kill, &plain_guard, &mut *up)
+    });
+    assert_eq_test!(
+        up.rax(),
+        slopos_abi::Errno::EPERM.as_u64(),
+        "an unprivileged task named a compositor-flagged one"
+    );
+    assert_eq_test!(
+        privileged_guard.signal_pending(),
+        0,
+        "a refused kill still pended a signal"
+    );
+
+    // `kill(pid, 0)` is the existence-and-permission probe, so it answers the
+    // permission question too rather than reporting the target as reachable.
+    let mut probe: KBox<UserContext> = KBox::zeroed().expect("alloc");
+    probe.regs_mut().rdi = privileged_id as u64;
+    probe.regs_mut().rsi = 0;
+    let _ = with_user_process_context(plain_pid, || {
+        crate::syscall::dispatch::dispatch_handler(syscall_kill, &plain_guard, &mut *probe)
+    });
+    assert_eq_test!(
+        probe.rax(),
+        slopos_abi::Errno::EPERM.as_u64(),
+        "kill(pid, 0) reported a target the caller may not signal as reachable"
+    );
+
+    // Downward: a privileged sender reaches an unprivileged target, exactly as
+    // one user's processes reach each other.
+    let mut down: KBox<UserContext> = KBox::zeroed().expect("alloc");
+    down.regs_mut().rdi = plain_id as u64;
+    down.regs_mut().rsi = SIGTERM as u64;
+    let _ = with_user_process_context(privileged_pid, || {
+        crate::syscall::dispatch::dispatch_handler(syscall_kill, &privileged_guard, &mut *down)
+    });
+    assert_eq_test!(down.rax(), 0, "a privileged sender was refused a peer");
+    assert_test!(
+        plain_guard.signal_pending() != 0,
+        "a permitted kill pended nothing"
+    );
+
+    drop(plain_guard);
+    drop(privileged_guard);
+    task_terminate(plain_id);
+    task_terminate(privileged_id);
+    pass!()
+}
+
+/// The broadcast arm applies the same relation to every target it collects.
+pub fn test_broadcast_kill_spares_privileged_tasks() -> TestResult {
+    let _fixture = SyscallFixture::new();
+
+    let sender_id = create_test_user_task();
+    assert_test!(sender_id != INVALID_TASK_ID, "failed to create user task");
+    let peer_id = create_test_user_task();
+    assert_test!(peer_id != INVALID_TASK_ID, "failed to create peer task");
+    let privileged_id = create_test_user_task_with(TASK_FLAG_USER_MODE | TASK_FLAG_NET_ADMIN);
+    assert_test!(
+        privileged_id != INVALID_TASK_ID,
+        "failed to create privileged task"
+    );
+
+    let sender_guard = assert_some!(task_find_by_id(sender_id), "task lookup failed");
+    let sender_pid = sender_guard.process_id;
+
+    let mut frame: KBox<UserContext> = KBox::zeroed().expect("alloc");
+    frame.regs_mut().rdi = (-1i64) as u64;
+    frame.regs_mut().rsi = SIGTERM as u64;
+    let _ = with_user_process_context(sender_pid, || {
+        crate::syscall::dispatch::dispatch_handler(syscall_kill, &sender_guard, &mut *frame)
+    });
+
+    let privileged_guard = assert_some!(task_find_by_id(privileged_id), "privileged task vanished");
+    assert_eq_test!(
+        privileged_guard.signal_pending(),
+        0,
+        "a broadcast kill reached a task holding a privilege the sender lacks"
+    );
+    drop(privileged_guard);
+
+    let peer_guard = assert_some!(task_find_by_id(peer_id), "peer task vanished");
+    assert_test!(
+        peer_guard.signal_pending() != 0,
+        "a broadcast kill missed an equally-privileged peer"
+    );
+    drop(peer_guard);
+
+    drop(sender_guard);
+    task_terminate(sender_id);
+    task_terminate(peer_id);
+    task_terminate(privileged_id);
+    pass!()
+}
+
+slopos_testing::stest!(
+    name = test_kill_refuses_a_more_privileged_target,
+    suite = syscall_signal
+);
+slopos_testing::stest!(
+    name = test_broadcast_kill_spares_privileged_tasks,
     suite = syscall_signal
 );
 

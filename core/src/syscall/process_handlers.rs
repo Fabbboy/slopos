@@ -350,6 +350,11 @@ define_syscall!(syscall_terminate_task
     if target_id == caller_id {
         return Err(Errno::EINVAL);
     }
+    // The compositor bit admits the caller to this syscall; it does not make
+    // every task reachable through it. Same rule as `kill`.
+    if !crate::syscall::signal::may_signal(ctx.task().flags, target_id) {
+        return Err(Errno::EPERM);
+    }
     if task_terminate(target_id) != 0 {
         return Err(Errno::EINVAL);
     }

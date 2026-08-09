@@ -5,7 +5,9 @@ use slopos_abi::signal::{
     NSIG, SA_NODEFER, SIG_DFL, SIG_IGN, SIG_SETMASK, SIG_UNBLOCK, SIG_UNCATCHABLE, SIGKILL,
     SIGNAL_MASK, SigDefault, SigSet, SignalFrame, UserSigaction, sig_bit, sig_default_action,
 };
-use slopos_abi::task::{INVALID_TASK_ID, TASK_FLAG_USER_MODE, TaskExitReason, TaskFaultReason};
+use slopos_abi::task::{
+    INVALID_TASK_ID, SPAWN_PRIVILEGED, TASK_FLAG_USER_MODE, TaskExitReason, TaskFaultReason,
+};
 use slopos_mm::user_copy::{
     copy_bytes_from_user, copy_bytes_to_user, copy_from_user, copy_to_user,
 };
@@ -83,23 +85,89 @@ fn signal_may_name(flags: u16) -> bool {
     (flags & TASK_FLAG_USER_MODE) != 0
 }
 
-fn collect_targets_for_group(pgid: u32, targets: &mut TargetSet) {
-    task_for_each_active(|task| {
-        if signal_may_name(task.flags) && task.pgid() == pgid {
-            targets.push(task.task_id);
-        }
-    });
+/// Whether a task holding `caller_flags` may signal one holding `target_flags`.
+///
+/// `task.flags` is the whole of SlopOS's privilege model, so this is the
+/// question POSIX answers with user ids, asked of the thing that actually
+/// carries authority here: a sender may name a task whose privileges it
+/// already holds, and no other. Peers reach each other exactly as one user's
+/// processes do — a task manager still ends a shell job — while nothing
+/// unprivileged reaches the compositor, `/bin/roulette`, `/bin/ip` or init.
+fn signal_dominates(caller_flags: u16, target_flags: u16) -> bool {
+    target_flags & SPAWN_PRIVILEGED & !caller_flags == 0
 }
 
-fn collect_targets_for_all(exclude_task_id: u32, targets: &mut TargetSet) {
+/// Init is never a signal target.
+///
+/// Modelled on Linux's `SIGNAL_UNKILLABLE` for the global init, which ignores
+/// terminating signals outright because delivering one takes the system down
+/// with no way to debug it. Dominance already covers init while it is the only
+/// `TASK_FLAG_SYSTEM` task outside the test runner, but the guarantee should
+/// not rest on that staying true.
+fn signal_is_init(task_id: u32) -> bool {
+    let init = crate::exec::init_task_id();
+    init != INVALID_TASK_ID && task_id == init
+}
+
+/// Whether `target` may be named by a sender holding `caller_flags`, ignoring
+/// the category check that answers `ESRCH` on its own.
+fn signal_permitted(caller_flags: u16, target_id: u32, target_flags: u16) -> bool {
+    !signal_is_init(target_id) && signal_dominates(caller_flags, target_flags)
+}
+
+/// Whether a sender holding `caller_flags` may act on the live task `target_id`.
+///
+/// The same relation `kill` applies, for the other primitive that ends a task.
+/// A target that does not exist answers `true`; the caller's own lookup
+/// reports that.
+pub(crate) fn may_signal(caller_flags: u16, target_id: u32) -> bool {
+    match task_find_by_id(target_id) {
+        Some(target) => signal_permitted(caller_flags, target_id, target.flags),
+        None => true,
+    }
+}
+
+/// Outcome of a fanout collection, so an empty result can say *why*.
+struct Fanout {
+    /// A task matched the selector but the caller may not signal it.
+    denied: bool,
+}
+
+fn collect_targets_for_group(pgid: u32, caller_flags: u16, targets: &mut TargetSet) -> Fanout {
+    let mut denied = false;
     task_for_each_active(|task| {
-        if signal_may_name(task.flags)
-            && task.task_id != INVALID_TASK_ID
-            && task.task_id != exclude_task_id
-        {
+        if !signal_may_name(task.flags) || task.pgid() != pgid {
+            return;
+        }
+        if signal_permitted(caller_flags, task.task_id, task.flags) {
             targets.push(task.task_id);
+        } else {
+            denied = true;
         }
     });
+    Fanout { denied }
+}
+
+fn collect_targets_for_all(
+    exclude_task_id: u32,
+    caller_flags: u16,
+    targets: &mut TargetSet,
+) -> Fanout {
+    let mut denied = false;
+    task_for_each_active(|task| {
+        if !signal_may_name(task.flags)
+            || task.task_id == INVALID_TASK_ID
+            || task.task_id == exclude_task_id
+        {
+            return;
+        }
+        if signal_permitted(caller_flags, task.task_id, task.flags) {
+            targets.push(task.task_id);
+        } else {
+            denied = true;
+        }
+    });
+    Fanout { denied }
 }
 
 fn action_from_user(new_action: UserSigaction) -> SignalAction {
@@ -201,14 +269,21 @@ define_syscall!(syscall_kill
     }
     let pid = raw_pid_arg as i32;
 
+    let caller_flags = ctx.task().flags;
+
     let mut targets = TargetSet::new();
+    let mut fanout = Fanout { denied: false };
     if pid > 0 {
         let target_id = pid as u32;
         // A kernel task is not a process, so ESRCH rather than EPERM: naming
-        // one is not a permission question, it is a category error.
-        match task_find_by_id(target_id) {
-            Some(target) if signal_may_name(target.flags) => {}
+        // one is not a permission question, it is a category error. The
+        // privilege check comes after, so the two answers stay distinct.
+        let target_flags = match task_find_by_id(target_id) {
+            Some(target) if signal_may_name(target.flags) => target.flags,
             _ => return SyscallResult::Err(Errno::ESRCH),
+        };
+        if !signal_permitted(caller_flags, target_id, target_flags) {
+            return SyscallResult::Err(Errno::EPERM);
         }
         targets.push(target_id);
     } else if pid == 0 {
@@ -222,12 +297,12 @@ define_syscall!(syscall_kill
         if caller_pgid == INVALID_TASK_ID {
             return SyscallResult::Err(Errno::ESRCH);
         }
-        collect_targets_for_group(caller_pgid, &mut targets);
+        fanout = collect_targets_for_group(caller_pgid, caller_flags, &mut targets);
     } else if pid == -1 {
         if caller_id == INVALID_TASK_ID {
             return SyscallResult::Err(Errno::ESRCH);
         }
-        collect_targets_for_all(caller_id, &mut targets);
+        fanout = collect_targets_for_all(caller_id, caller_flags, &mut targets);
     } else {
         if pid == i32::MIN {
             return SyscallResult::Err(Errno::ESRCH);
@@ -236,13 +311,21 @@ define_syscall!(syscall_kill
         if group_id == INVALID_TASK_ID {
             return SyscallResult::Err(Errno::ESRCH);
         }
-        collect_targets_for_group(group_id, &mut targets);
+        fanout = collect_targets_for_group(group_id, caller_flags, &mut targets);
     }
 
     if targets.len() == 0 {
-        return SyscallResult::Err(Errno::ESRCH);
+        // A selector that matched tasks the caller may not signal is a
+        // permission answer; one that matched nothing at all is not.
+        return SyscallResult::Err(if fanout.denied {
+            Errno::EPERM
+        } else {
+            Errno::ESRCH
+        });
     }
 
+    // Deliberately after the permission check: `kill(pid, 0)` is the
+    // existence-and-permission probe, so it must be able to answer EPERM.
     if sig == 0 {
         return SyscallResult::Ok(0);
     }
