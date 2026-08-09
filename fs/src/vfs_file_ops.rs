@@ -10,11 +10,22 @@ use slopos_ostd::sync::{LOCK_LEVEL_REGISTRY, SpinLock};
 
 use crate::vfs::{FileSystem, InodeId};
 
-const MAX_OPEN_VNODES: usize = 256;
+/// Open vnodes system-wide — this kernel's `fs.file-max`.
+///
+/// Must stay well above the per-process descriptor limit. At parity, one
+/// process opening its full allowance exhausts the table for every other
+/// process on the machine, which turns a per-process bound into a
+/// system-wide denial. `SLOT_BITS` caps it at 1024.
+const MAX_OPEN_VNODES: usize = 1024;
 
 /// Slot-index bit width in the packed fd handle; the remaining bits hold the
 /// generation (see [`Handle::pack`]).
 const SLOT_BITS: u32 = 10;
+
+const _: () = assert!(
+    MAX_OPEN_VNODES <= 1 << SLOT_BITS,
+    "MAX_OPEN_VNODES exceeds what SLOT_BITS can address in a packed handle"
+);
 
 /// One open vnode: the filesystem it lives on and its inode. The slot index
 /// and generation are owned by the [`HandleTable`], so a handle left over

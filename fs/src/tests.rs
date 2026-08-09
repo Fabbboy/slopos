@@ -1279,3 +1279,63 @@ slopos_testing::stest!(name = test_cpio_parse_basic);
 slopos_testing::stest!(name = test_cpio_truncated_header);
 slopos_testing::stest!(name = test_cpio_bad_magic);
 slopos_testing::stest!(name = test_cpio_truncated_data);
+
+/// A process may hold `FILEIO_MAX_OPEN_FILES` descriptors and no more.
+///
+/// The bound is the length of the table the process was given, so this also
+/// pins that the heap-backed array is built at its full size rather than
+/// growing under whatever lock happens to be held when a descriptor arrives.
+pub fn test_fileio_open_file_limit() -> TestResult {
+    use crate::fileio::{
+        FILEIO_MAX_OPEN_FILES, file_open_for_process, fileio_create_empty_table_for_process,
+        fileio_destroy_table_for_process,
+    };
+    use slopos_abi::fs::O_RDONLY;
+
+    let _ = vfs_mkdir(b"/fileio_test");
+    let handle = match vfs_open(b"/fileio_test/limit.txt", true) {
+        Ok(h) => h,
+        Err(_) => return TestResult::Fail,
+    };
+    if handle.write(0, b"x").is_err() {
+        return TestResult::Fail;
+    }
+
+    const PID: u32 = 0x5A03;
+    fileio_destroy_table_for_process(PID);
+    if fileio_create_empty_table_for_process(PID) != 0 {
+        return TestResult::Fail;
+    }
+
+    let mut opened = 0usize;
+    let mut first_failure = 0i32;
+    for _ in 0..FILEIO_MAX_OPEN_FILES + 1 {
+        let fd = file_open_for_process(PID, b"/fileio_test/limit.txt", O_RDONLY as u32);
+        if fd < 0 {
+            first_failure = fd;
+            break;
+        }
+        opened += 1;
+    }
+    fileio_destroy_table_for_process(PID);
+
+    if opened != FILEIO_MAX_OPEN_FILES {
+        return slopos_testing::fail!(
+            "opened {} descriptors, want {}; first failure {}",
+            opened,
+            FILEIO_MAX_OPEN_FILES,
+            first_failure
+        );
+    }
+    if first_failure != slopos_abi::Errno::EMFILE.raw() {
+        return slopos_testing::fail!(
+            "descriptor {} failed with {}, want EMFILE ({})",
+            opened,
+            first_failure,
+            slopos_abi::Errno::EMFILE.raw()
+        );
+    }
+    TestResult::Pass
+}
+
+slopos_testing::stest!(name = test_fileio_open_file_limit);

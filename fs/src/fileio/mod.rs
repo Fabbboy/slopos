@@ -11,6 +11,7 @@ use slopos_abi::fs::{
 use slopos_abi::io::{IO_STAGING_SIZE, IoBufRead, IoBufWrite};
 use slopos_abi::syscall::{O_NOCTTY, O_NONBLOCK, POLLIN, POLLNVAL, POLLOUT, TtyIndex};
 use slopos_ostd::KArc;
+use slopos_ostd::KVec;
 use slopos_ostd::sync::{
     InitFlag, LOCK_LEVEL_REGISTRY, LOCK_LEVEL_RESOURCE, LockClassKey, SpinLock, SpinLockGuard,
 };
@@ -23,7 +24,9 @@ use slopos_kernel_services::driver_runtime::{
 use slopos_kernel_services::syscall_services::tty;
 use slopos_mm::memory_layout_defs::MAX_PROCESSES;
 
-pub(super) const FILEIO_MAX_OPEN_FILES: usize = 32;
+/// Descriptors a process may hold at once — the `RLIMIT_NOFILE` of this
+/// kernel, and the length of every per-process descriptor table.
+pub(super) const FILEIO_MAX_OPEN_FILES: usize = 256;
 
 /// Internal open-mode flags for `OpenFileEntry`.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -271,7 +274,24 @@ pub(super) struct FileTableSlot {
 
 pub(super) struct FileTableSlotInner {
     pub(super) in_use: bool,
-    pub(super) descriptors: [Option<FdEntry>; FILEIO_MAX_OPEN_FILES],
+    /// Empty until the slot is claimed. Heap-backed rather than inline so the
+    /// spine of `PROCESS_TABLES` stays a few KiB of `.data` instead of scaling
+    /// the whole descriptor capacity by `MAX_PROCESSES`, and so the array is
+    /// built and freed away from the slot lock.
+    pub(super) descriptors: KVec<Option<FdEntry>>,
+}
+
+/// A zero-filled descriptor array, built before any slot lock is taken.
+///
+/// The one allocation a table costs. Every caller is a process-creation path
+/// that already fails creation when it cannot get a slot, so there is nowhere
+/// this has to succeed.
+pub(super) fn new_descriptor_table() -> Option<KVec<Option<FdEntry>>> {
+    let mut table = KVec::with_capacity(FILEIO_MAX_OPEN_FILES).ok()?;
+    for _ in 0..FILEIO_MAX_OPEN_FILES {
+        table.push(None).ok()?;
+    }
+    Some(table)
 }
 
 impl FileTableSlot {
@@ -286,7 +306,7 @@ impl FileTableSlot {
             inner: SpinLock::new(
                 FileTableSlotInner {
                     in_use,
-                    descriptors: [const { None }; FILEIO_MAX_OPEN_FILES],
+                    descriptors: KVec::new(),
                 },
                 class,
             ),
@@ -435,14 +455,14 @@ pub(super) fn snapshot_fd(inner: &FileTableSlotInner, fd: c_int) -> Option<FdSna
 }
 
 pub(super) fn get_fd_entry(inner: &FileTableSlotInner, fd: c_int) -> Option<&FdEntry> {
-    if fd < 0 || fd as usize >= FILEIO_MAX_OPEN_FILES {
+    if fd < 0 || fd as usize >= inner.descriptors.len() {
         return None;
     }
     inner.descriptors[fd as usize].as_ref()
 }
 
 pub(super) fn get_fd_entry_mut(inner: &mut FileTableSlotInner, fd: c_int) -> Option<&mut FdEntry> {
-    if fd < 0 || fd as usize >= FILEIO_MAX_OPEN_FILES {
+    if fd < 0 || fd as usize >= inner.descriptors.len() {
         return None;
     }
     inner.descriptors[fd as usize].as_mut()
@@ -453,7 +473,7 @@ pub(super) fn find_free_slot(inner: &FileTableSlotInner) -> Option<usize> {
 }
 
 pub(super) fn find_free_slot_from(inner: &FileTableSlotInner, min_fd: usize) -> Option<usize> {
-    for idx in min_fd..FILEIO_MAX_OPEN_FILES {
+    for idx in min_fd..inner.descriptors.len() {
         if inner.descriptors[idx].is_none() {
             return Some(idx);
         }

@@ -16,7 +16,7 @@ pub const MAX_PIPES: usize = 64;
 pub const MAX_TTYS: usize = 32;
 
 /// Maximum number of concurrent AF_UNIX sockets.
-pub const MAX_UNIX_SOCKETS: usize = 32;
+pub const MAX_UNIX_SOCKETS: usize = 128;
 
 /// Hash-bucket count for child-exit wait queues. Task ids exceed this count,
 /// so several tasks share a bucket; a wakeup that lands on an unrelated task

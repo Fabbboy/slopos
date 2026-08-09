@@ -86,17 +86,20 @@ pub fn fileio_create_table_for_process(process_id: u32) -> i32 {
     if slot_for_pid(process_id).is_some() {
         return -1;
     }
+    // Built before the slot is claimed: the array is the table's one
+    // allocation, and it must not happen under the slot lock.
+    let Some(descriptors) = new_descriptor_table() else {
+        return -1;
+    };
     // Claim a free slot via CAS so two concurrent creates can't pick
     // the same one.
     let Some(slot) = claim_free_process_slot(process_id) else {
         return -1;
     };
+    let external_ops = with_open_files(|state| state.external_ops);
     let mut inner = slot.inner.lock();
     inner.in_use = true;
-    for entry in inner.descriptors.iter_mut() {
-        *entry = None;
-    }
-    let external_ops = with_open_files(|state| state.external_ops);
+    inner.descriptors = descriptors;
     bootstrap_console_fds(&mut inner, &external_ops);
     0
 }
@@ -127,14 +130,15 @@ pub fn fileio_create_empty_table_for_process(process_id: u32) -> i32 {
     if slot_for_pid(process_id).is_some() {
         return -1;
     }
+    let Some(descriptors) = new_descriptor_table() else {
+        return -1;
+    };
     let Some(slot) = claim_free_process_slot(process_id) else {
         return -1;
     };
     let mut inner = slot.inner.lock();
     inner.in_use = true;
-    for entry in inner.descriptors.iter_mut() {
-        *entry = None;
-    }
+    inner.descriptors = descriptors;
     0
 }
 
@@ -157,7 +161,11 @@ pub fn fileio_destroy_table_for_process(process_id: u32) {
     while let Some(entry) = take_next_descriptor(slot) {
         drop(entry);
     }
+    // The array itself goes back to the heap off-lock, for the same reason it
+    // was built off-lock.
+    let released = core::mem::take(&mut slot.inner.lock().descriptors);
     slot.process_id.store(INVALID_PROCESS_ID, Ordering::Release);
+    drop(released);
 }
 
 /// Fork-style clone: every valid descriptor is duplicated except those
@@ -202,7 +210,11 @@ pub fn fileio_clone_table_for_process(src_process_id: u32, dst_process_id: u32) 
         }
     }
 
-    // Step 2: claim a free slot for the destination.
+    // Step 2: build the destination array and claim its slot, both off-lock.
+    let Some(descriptors) = new_descriptor_table() else {
+        drop(snapshot);
+        return -1;
+    };
     let Some(dst_slot) = claim_free_process_slot(dst_process_id) else {
         // No free slot: drop the cloned aliases (decrement only).
         drop(snapshot);
@@ -213,6 +225,7 @@ pub fn fileio_clone_table_for_process(src_process_id: u32, dst_process_id: u32) 
     {
         let mut dst_inner = dst_slot.inner.lock();
         dst_inner.in_use = true;
+        dst_inner.descriptors = descriptors;
         for (fd, entry) in snapshot {
             dst_inner.descriptors[fd] = Some(entry);
         }
