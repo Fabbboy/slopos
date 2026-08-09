@@ -35,6 +35,7 @@ mod handle;
 mod pair;
 mod slot;
 
+use slopos_abi::Errno;
 use slopos_abi::event::{KernelEvent, UnixSocketSlot};
 use slopos_abi::syscall::{POLLHUP, POLLIN, POLLOUT};
 use slopos_ostd::handle::HandleTable;
@@ -108,24 +109,24 @@ pub fn unix_create() -> Option<SocketHandle> {
 /// Bind a socket to an abstract namespace path.
 pub fn unix_bind(handle: SocketHandle, path: &[u8]) -> i32 {
     if path.is_empty() || path.len() > UNIX_PATH_MAX {
-        return -22; // EINVAL
+        return Errno::EINVAL.raw();
     }
 
     // Pre-allocate the path buffer outside the lock.
     let mut owned_path = match KVec::<u8>::with_capacity(path.len()) {
         Ok(v) => v,
-        Err(_) => return -12, // ENOMEM
+        Err(_) => return Errno::ENOMEM.raw(),
     };
     if owned_path.extend_from_slice(path).is_err() {
-        return -12;
+        return Errno::ENOMEM.raw();
     }
 
     let mut state = UNIX_STATE.lock();
     let h = handle.handle();
     match state.slots.get(h) {
         Ok(slot) if matches!(slot.state, SlotState::Created) => {}
-        Ok(_) => return -22, // EINVAL — must be Created
-        Err(_) => return -9, // EBADF
+        Ok(_) => return Errno::EINVAL.raw(),
+        Err(_) => return Errno::EBADF.raw(),
     }
 
     // Check for duplicate path among other sockets.
@@ -139,7 +140,7 @@ pub fn unix_bind(handle: SocketHandle, path: &[u8]) -> i32 {
             _ => continue,
         };
         if other_path == path {
-            return -98; // EADDRINUSE
+            return Errno::EADDRINUSE.raw();
         }
     }
 
@@ -154,12 +155,12 @@ pub fn unix_listen(handle: SocketHandle, _backlog: u32) -> i32 {
     // Pre-allocate the backlog deque outside the lock.
     let backlog: KVecDeque<SocketHandle> = match KVecDeque::with_capacity(MAX_BACKLOG) {
         Ok(d) => d,
-        Err(_) => return -12, // ENOMEM
+        Err(_) => return Errno::ENOMEM.raw(),
     };
 
     let mut state = UNIX_STATE.lock();
     let Ok(slot) = state.slots.get_mut(handle.handle()) else {
-        return -9;
+        return Errno::EBADF.raw();
     };
 
     // Take ownership of the existing path by swapping in the neutral
@@ -169,7 +170,7 @@ pub fn unix_listen(handle: SocketHandle, _backlog: u32) -> i32 {
         other => {
             // Not Bound — restore and reject.
             slot.state = other;
-            return -22; // EINVAL
+            return Errno::EINVAL.raw();
         }
     };
     slot.state = SlotState::Listening { path, backlog };
@@ -181,19 +182,19 @@ pub fn unix_listen(handle: SocketHandle, _backlog: u32) -> i32 {
 /// Blocks the caller until a connection arrives (unless non-blocking).
 pub fn unix_accept(handle: SocketHandle) -> Result<SocketHandle, i32> {
     let Some(wq_idx) = handle.slot_for_wq() else {
-        return Err(-9);
+        return Err(Errno::EBADF.raw());
     };
 
     loop {
         let (nonblocking, got) = {
             let mut state = UNIX_STATE.lock();
             let Ok(slot) = state.slots.get_mut(handle.handle()) else {
-                return Err(-9);
+                return Err(Errno::EBADF.raw());
             };
             let nb = slot.nonblocking;
             let accepted = match &mut slot.state {
                 SlotState::Listening { backlog, .. } => backlog.pop_front(),
-                _ => return Err(-22), // EINVAL
+                _ => return Err(Errno::EINVAL.raw()),
             };
             (nb, accepted)
         };
@@ -203,7 +204,7 @@ pub fn unix_accept(handle: SocketHandle) -> Result<SocketHandle, i32> {
         }
 
         if nonblocking {
-            return Err(-11); // EAGAIN
+            return Err(Errno::EAGAIN.raw());
         }
 
         let waited = BUS.subscribe(unix_ev(wq_idx)).wait_event(|| {
@@ -217,7 +218,7 @@ pub fn unix_accept(handle: SocketHandle) -> Result<SocketHandle, i32> {
             }
         });
         if waited.is_err() {
-            return Err(-4); // EINTR
+            return Err(Errno::EINTR.raw());
         }
     }
 }
@@ -230,7 +231,7 @@ pub fn unix_accept(handle: SocketHandle) -> Result<SocketHandle, i32> {
 /// to dequeue.
 pub fn unix_connect(handle: SocketHandle, path: &[u8]) -> i32 {
     if path.is_empty() || path.len() > UNIX_PATH_MAX {
-        return -22; // EINVAL
+        return Errno::EINVAL.raw();
     }
 
     let mut state = UNIX_STATE.lock();
@@ -240,10 +241,10 @@ pub fn unix_connect(handle: SocketHandle, path: &[u8]) -> i32 {
     match state.slots.get(h_a) {
         Ok(slot) => match slot.state {
             SlotState::Created | SlotState::Bound { .. } => {}
-            SlotState::Connected { .. } => return -106, // EISCONN
-            SlotState::Listening { .. } => return -95,  // EOPNOTSUPP
+            SlotState::Connected { .. } => return Errno::EISCONN.raw(),
+            SlotState::Listening { .. } => return Errno::EOPNOTSUPP.raw(),
         },
-        Err(_) => return -9,
+        Err(_) => return Errno::EBADF.raw(),
     }
 
     // Find the listener and verify backlog has space.
@@ -256,7 +257,7 @@ pub fn unix_connect(handle: SocketHandle, path: &[u8]) -> i32 {
         {
             if listener_path.as_slice() == path {
                 if backlog.len() >= MAX_BACKLOG {
-                    return -11; // EAGAIN — backlog full
+                    return Errno::EAGAIN.raw();
                 }
                 listener = Some(lh);
                 break;
@@ -264,28 +265,29 @@ pub fn unix_connect(handle: SocketHandle, path: &[u8]) -> i32 {
         }
     }
     let Some(h_listener) = listener else {
-        return -111; // ECONNREFUSED
+        return Errno::ECONNREFUSED.raw();
     };
 
     // Reserve room for the accepted side (side B) before committing.
     if state.slots.len() >= MAX_UNIX_SOCKETS {
-        return -23; // ENFILE — no free slots
+        return Errno::ENFILE.raw();
     }
 
     // Allocate a pair entry; this is where the 16 KiB×2 FIFO heap allocations happen.
     let pair_handle = match state.pairs.allocate() {
         Ok(Some(ph)) => ph,
-        Ok(None) => return -23, // ENFILE — pair table full
-        Err(_) => return -12,   // ENOMEM
+        Ok(None) => return Errno::ENFILE.raw(),
+        Err(_) => return Errno::ENOMEM.raw(),
     };
 
     let Ok(h_b) = state.slots.insert(UnixSlot::created()) else {
         // Capacity was checked above; if the insert nonetheless fails, drop
-        // both endpoint refs of the just-allocated pair rather than leak it.
-        // Its queues are still empty, so the in-lock drop is inert.
-        let _ = state.pairs.release(pair_handle);
+        // both endpoint refs of the just-allocated pair rather than leak it —
+        // `ConnectionPair::new` starts at a refcount of two. Its queues are
+        // still empty, so the in-lock drop is inert.
         drop(state.pairs.release(pair_handle));
-        return -23;
+        drop(state.pairs.release(pair_handle));
+        return Errno::ENFILE.raw();
     };
     let a_handle = SocketHandle::from_handle(h_a);
     let b_handle = SocketHandle::from_handle(h_b);
@@ -345,7 +347,7 @@ pub fn unix_recv(handle: SocketHandle, buf: &mut [u8]) -> i32 {
         return 0;
     }
     let Some(wq_idx) = handle.slot_for_wq() else {
-        return -9;
+        return Errno::EBADF.raw();
     };
 
     loop {
@@ -360,14 +362,20 @@ pub fn unix_recv(handle: SocketHandle, buf: &mut [u8]) -> i32 {
                             peer,
                             peer_closed,
                         } => (slot.nonblocking, pair, side, peer.slot(), peer_closed),
-                        _ => return -107,
+                        _ => return Errno::ENOTCONN.raw(),
                     },
-                    Err(_) => return -107,
+                    Err(_) => return Errno::ENOTCONN.raw(),
                 };
 
             let pair = match state.pairs.get_mut(pair_handle) {
                 Some(p) => p,
-                None => return if peer_closed { 0 } else { -107 },
+                None => {
+                    return if peer_closed {
+                        0
+                    } else {
+                        Errno::ENOTCONN.raw()
+                    };
+                }
             };
             let rbuf = pair.recv_fifo(side);
             if !rbuf.is_empty() {
@@ -386,7 +394,7 @@ pub fn unix_recv(handle: SocketHandle, buf: &mut [u8]) -> i32 {
                 }
                 return n as i32;
             }
-            Err(true) => return -11, // EAGAIN
+            Err(true) => return Errno::EAGAIN.raw(),
             Err(false) => {
                 let waited = BUS.subscribe(unix_ev(wq_idx)).wait_event(|| {
                     let state = UNIX_STATE.lock();
@@ -412,7 +420,7 @@ pub fn unix_recv(handle: SocketHandle, buf: &mut [u8]) -> i32 {
                     }
                 });
                 if waited.is_err() {
-                    return -4; // EINTR
+                    return Errno::EINTR.raw();
                 }
             }
         }
@@ -428,7 +436,7 @@ pub fn unix_recv_into(handle: SocketHandle, writer: &mut slopos_ostd::mm::VmWrit
         return 0;
     }
     let Some(wq_idx) = handle.slot_for_wq() else {
-        return -9;
+        return Errno::EBADF.raw();
     };
 
     loop {
@@ -443,14 +451,20 @@ pub fn unix_recv_into(handle: SocketHandle, writer: &mut slopos_ostd::mm::VmWrit
                             peer,
                             peer_closed,
                         } => (slot.nonblocking, pair, side, peer.slot(), peer_closed),
-                        _ => return -107,
+                        _ => return Errno::ENOTCONN.raw(),
                     },
-                    Err(_) => return -107,
+                    Err(_) => return Errno::ENOTCONN.raw(),
                 };
 
             let pair = match state.pairs.get_mut(pair_handle) {
                 Some(p) => p,
-                None => return if peer_closed { 0 } else { -107 },
+                None => {
+                    return if peer_closed {
+                        0
+                    } else {
+                        Errno::ENOTCONN.raw()
+                    };
+                }
             };
             let rbuf = pair.recv_fifo(side);
             if !rbuf.is_empty() {
@@ -469,7 +483,7 @@ pub fn unix_recv_into(handle: SocketHandle, writer: &mut slopos_ostd::mm::VmWrit
                 }
                 return n as i32;
             }
-            Err(true) => return -11, // EAGAIN
+            Err(true) => return Errno::EAGAIN.raw(),
             Err(false) => {
                 let waited = BUS.subscribe(unix_ev(wq_idx)).wait_event(|| {
                     let state = UNIX_STATE.lock();
@@ -495,7 +509,7 @@ pub fn unix_recv_into(handle: SocketHandle, writer: &mut slopos_ostd::mm::VmWrit
                     }
                 });
                 if waited.is_err() {
-                    return -4; // EINTR
+                    return Errno::EINTR.raw();
                 }
             }
         }
@@ -562,7 +576,7 @@ pub fn unix_recv_into(handle: SocketHandle, writer: &mut slopos_ostd::mm::VmWrit
 /// safe.
 pub fn unix_sendmsg(handle: SocketHandle, data: &[u8], files: &mut KVec<FileRef>) -> i32 {
     let Some(wq_idx) = handle.slot_for_wq() else {
-        return -9; // EBADF
+        return Errno::EBADF.raw();
     };
 
     loop {
@@ -576,27 +590,27 @@ pub fn unix_sendmsg(handle: SocketHandle, data: &[u8], files: &mut KVec<FileRef>
                         peer,
                         peer_closed,
                     } => Ok((slot.nonblocking, pair, side, peer.slot(), peer_closed)),
-                    _ => Err(-107), // ENOTCONN
+                    _ => Err(Errno::ENOTCONN.raw()),
                 },
-                Err(_) => Err(-107),
+                Err(_) => Err(Errno::ENOTCONN.raw()),
             };
             let (nonblocking, pair_handle, side, peer_idx, peer_closed) = match conn {
                 Ok(t) => t,
                 Err(e) => return e,
             };
             if peer_closed {
-                return -32; // EPIPE
+                return Errno::EPIPE.raw();
             }
 
             let pair = match state.pairs.get_mut(pair_handle) {
                 Some(p) => p,
-                None => return -32, // EPIPE — pair already freed
+                None => return Errno::EPIPE.raw(),
             };
 
             // Ancillary capacity check first: all-or-nothing fds.
             let fd_count = files.len();
             if fd_count > 0 && pair.send_anc(side).len() + fd_count > pair::MAX_INFLIGHT_FDS {
-                return -12; // ENOMEM
+                return Errno::ENOMEM.raw();
             }
 
             // Data capacity check. Empty data trivially fits;
@@ -643,7 +657,7 @@ pub fn unix_sendmsg(handle: SocketHandle, data: &[u8], files: &mut KVec<FileRef>
                 // Non-blocking with no data space; capacity check
                 // failed in the same iteration so no fds were
                 // committed — they stay with the caller.
-                return -11; // EAGAIN
+                return Errno::EAGAIN.raw();
             }
             Err(false) => {
                 // Block until peer drains, slot reuses, or peer closes. The
@@ -673,7 +687,7 @@ pub fn unix_sendmsg(handle: SocketHandle, data: &[u8], files: &mut KVec<FileRef>
                     }
                 });
                 if waited.is_err() {
-                    return -4; // EINTR
+                    return Errno::EINTR.raw();
                 }
             }
         }
@@ -699,24 +713,24 @@ pub fn unix_send_from(handle: SocketHandle, reader: &mut slopos_ostd::mm::VmRead
                     peer_closed,
                 } => {
                     if peer_closed {
-                        return -32; // EPIPE
+                        return Errno::EPIPE.raw();
                     }
                     (pair, side, peer.slot())
                 }
-                _ => return -107,
+                _ => return Errno::ENOTCONN.raw(),
             },
-            Err(_) => return -107, // ENOTCONN
+            Err(_) => return Errno::ENOTCONN.raw(),
         };
 
         let pair = match state.pairs.get_mut(pair_handle) {
             Some(p) => p,
-            None => return -32, // EPIPE — pair already freed
+            None => return Errno::EPIPE.raw(),
         };
 
         let empty = !reader.has_remain();
         let data_has_space = empty || pair.send_fifo(side).has_space();
         if !data_has_space {
-            return -11; // EAGAIN (forced-nonblock path)
+            return Errno::EAGAIN.raw();
         }
         let n = if empty {
             0
@@ -848,7 +862,7 @@ fn close_listener_backlog(
 /// and their side-A peers are notified.
 pub fn unix_close(handle: SocketHandle) -> i32 {
     let Some(wq_idx) = handle.slot_for_wq() else {
-        return -9;
+        return Errno::EBADF.raw();
     };
 
     // Wakeup targets collected under the lock; wakes happen after release.
@@ -864,7 +878,7 @@ pub fn unix_close(handle: SocketHandle) -> i32 {
     // freed pairs never allocates under the state lock.
     let mut freed_pairs = match KVec::with_capacity(MAX_BACKLOG + 1) {
         Ok(v) => v,
-        Err(_) => return -12, // ENOMEM
+        Err(_) => return Errno::ENOMEM.raw(),
     };
 
     {
@@ -874,7 +888,7 @@ pub fn unix_close(handle: SocketHandle) -> i32 {
         // Remove the closing slot, taking ownership of its state (the table
         // bumps the slot's generation, so any leftover handle goes stale).
         let Ok(closed) = slots.remove(handle.handle()) else {
-            return -9;
+            return Errno::EBADF.raw();
         };
 
         match closed.state {
@@ -1019,7 +1033,7 @@ pub fn unix_poll_unregister(handle: SocketHandle) {
 pub fn unix_set_nonblocking(handle: SocketHandle, nonblocking: bool) -> i32 {
     let mut state = UNIX_STATE.lock();
     let Ok(slot) = state.slots.get_mut(handle.handle()) else {
-        return -9;
+        return Errno::EBADF.raw();
     };
     slot.nonblocking = nonblocking;
     0
