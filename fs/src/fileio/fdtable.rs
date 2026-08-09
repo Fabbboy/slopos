@@ -57,18 +57,19 @@ fn bootstrap_console_fds(inner: &mut FileTableSlotInner, external_ops: &External
     });
 }
 
-/// Take every descriptor out of `inner` under the caller-held lock and
-/// return them so the caller can drop them *after* releasing the slot
-/// lock (detach-then-drop: the `OpenFile` `Drop` → backing release must
-/// not run while the fileio table lock is held).
-fn drain_descriptors(inner: &mut FileTableSlotInner) -> KVec<FdEntry> {
-    let mut drained: KVec<FdEntry> = KVec::new();
-    for slot in inner.descriptors.iter_mut() {
-        if let Some(entry) = slot.take() {
-            let _ = drained.push(entry);
-        }
-    }
-    drained
+/// Lift the lowest-numbered descriptor out of `slot`, holding its lock for
+/// exactly that long.
+///
+/// One entry per acquisition rather than a collected batch: an `OpenFile`
+/// teardown reaches an arbitrary backing release — a socket passed over a
+/// socket recurses back into this module — so none of it may run under the
+/// table lock, and collecting the entries first would mean growing a vector
+/// under a cli-lock, which puts the whole heap path beneath the descriptor
+/// table. Teardown is not a hot path; a bounded run of uncontended
+/// acquisitions is the cheaper half of that trade.
+fn take_next_descriptor(slot: &'static FileTableSlot) -> Option<FdEntry> {
+    let mut inner = slot.inner.lock();
+    inner.descriptors.iter_mut().find_map(|entry| entry.take())
 }
 
 /// Create a console-bootstrapped fd table for `process_id`. Returns 0, or
@@ -144,19 +145,19 @@ pub fn fileio_destroy_table_for_process(process_id: u32) {
     let Some(slot) = slot_for_pid(process_id) else {
         return;
     };
-    let drained = {
+    {
         let mut inner = slot.inner.lock();
         if !inner.in_use {
             return;
         }
-        let drained = drain_descriptors(&mut inner);
+        // Closed to new installs before the first descriptor leaves, so the
+        // drain below can release the lock between entries without racing one.
         inner.in_use = false;
-        drained
-    };
+    }
+    while let Some(entry) = take_next_descriptor(slot) {
+        drop(entry);
+    }
     slot.process_id.store(INVALID_PROCESS_ID, Ordering::Release);
-    // Drop the table lock above before dropping the entries here so each
-    // `OpenFile` teardown runs lock-free (detach-then-drop).
-    drop(drained);
 }
 
 /// Fork-style clone: every valid descriptor is duplicated except those
