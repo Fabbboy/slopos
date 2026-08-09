@@ -9,7 +9,7 @@ use core::ptr;
 use crate::syscall::fs::syscall_ioctl;
 use crate::syscall::handlers::{
     syscall_arch_prctl, syscall_futex, syscall_getpgid, syscall_setpgid, syscall_setsid,
-    syscall_waitpid,
+    syscall_user_read, syscall_waitpid,
 };
 use crate::syscall::signal::{
     deliver_pending_signal, deliver_pending_signal_on_irq_exit, syscall_kill, syscall_rt_sigaction,
@@ -735,6 +735,50 @@ pub fn test_tiocsctty_session_leader_acquires_ctty() -> TestResult {
     task_terminate(task_id);
     TestResult::Pass
 }
+
+/// The console read resolves the caller's controlling terminal.
+///
+/// It used to read `TtyIndex(0)` unconditionally, so any task could pull the
+/// operator's cooked keystrokes out of the system console regardless of which
+/// terminal — if any — it owned.
+pub fn test_console_read_without_a_controlling_tty_is_refused() -> TestResult {
+    let _fixture = SyscallFixture::new();
+
+    let task_id = create_test_user_task();
+    assert_test!(task_id != INVALID_TASK_ID, "failed to create user task");
+    let task_guard = assert_some!(task_find_by_id(task_id), "task lookup failed");
+    let pid = task_guard.process_id;
+    assert_eq_test!(
+        task_guard.controlling_tty(),
+        None,
+        "fixture task already owns a terminal"
+    );
+
+    let Some(user_buf) = map_user_rw_page(pid) else {
+        return fail!("could not map a user page");
+    };
+
+    let mut frame: KBox<UserContext> = KBox::zeroed().expect("alloc");
+    frame.regs_mut().rdi = user_buf;
+    frame.regs_mut().rsi = 16;
+    let _ = with_user_process_context(pid, || {
+        crate::syscall::dispatch::dispatch_handler(syscall_user_read, &task_guard, &mut *frame)
+    });
+    assert_eq_test!(
+        frame.rax(),
+        slopos_abi::Errno::ENXIO.as_u64(),
+        "a task with no controlling terminal was served a read"
+    );
+
+    drop(task_guard);
+    task_terminate(task_id);
+    pass!()
+}
+
+slopos_testing::stest!(
+    name = test_console_read_without_a_controlling_tty_is_refused,
+    suite = syscall_core
+);
 
 pub fn test_tiocsctty_non_leader_rejected() -> TestResult {
     let _fixture = SyscallFixture::new();

@@ -3,7 +3,7 @@ use core::ops::ControlFlow;
 use core::sync::atomic::Ordering as AtomicOrdering;
 
 use slopos_abi::Errno;
-use slopos_abi::syscall::{CLOCK_MONOTONIC, CLOCK_REALTIME, Timespec, TtyIndex, UserSysInfo};
+use slopos_abi::syscall::{CLOCK_MONOTONIC, CLOCK_REALTIME, Timespec, UserSysInfo};
 use slopos_abi::task::{TaskExitReason, TaskFaultReason};
 use slopos_abi::tty_error::TtyError;
 use slopos_ostd::klog_debug;
@@ -119,6 +119,17 @@ define_syscall!(syscall_exit (ctx, code: u32) -> SyscallResult {
     SyscallResult::NoReturn
 });
 
+// Write a diagnostic line to the kernel console. Takes no descriptor.
+//
+// This is not the `write(2)` a C program reaches through libc — that is
+// `SYSCALL_FS_WRITE`, which goes through the caller's fd table. This one exists
+// for output that must survive a broken or absent fd 1: boot tracing from a
+// compositor that never came up, a panic hook with nowhere else to go, and the
+// terminal's mirror of shell output into the serial transcript.
+//
+// Deliberately unprivileged, like Linux's `/dev/kmsg`. It reaches the same
+// serialised writer klog uses, so a caller cannot interleave into a klog line
+// or into the test harness's KTAP framing.
 define_syscall!(syscall_user_write (ctx, buf: UserBytes) -> Result<u64, Errno> {
     if buf.base_u64() == 0 {
         return Err(Errno::EFAULT);
@@ -131,17 +142,24 @@ define_syscall!(syscall_user_write (ctx, buf: UserBytes) -> Result<u64, Errno> {
         USER_IO_MAX_BYTES,
     )
     .map_err(|_| Errno::EFAULT)?;
-    platform::console_puts(&tmp[..write_len]);
+    platform::console_write_serialized(&tmp[..write_len]);
     Ok(write_len as u64)
 });
 
+// Read cooked input from the caller's controlling terminal.
+//
+// `/dev/tty` semantics: the terminal resolves per process, so a task in a PTY
+// session reads its own PTY, and one with no controlling terminal reads
+// nothing rather than the operator's console. `ENXIO` is what opening
+// `/dev/tty` answers with no controlling terminal.
 define_syscall!(syscall_user_read (ctx, buf: UserBytes) -> Result<u64, Errno> {
     if buf.base_u64() == 0 || buf.len() == 0 {
         return Err(Errno::EFAULT);
     }
+    let tty_idx = ctx.task().controlling_tty().ok_or(Errno::ENXIO)?;
     let mut tmp = [0u8; USER_IO_MAX_BYTES];
     let max_len = buf.len().min(USER_IO_MAX_BYTES);
-    let read_len = tty::read_cooked(TtyIndex(0), tmp.as_mut_ptr(), max_len, false);
+    let read_len = tty::read_cooked(tty_idx, tmp.as_mut_ptr(), max_len, false);
     let n = match read_len {
         Ok(n) => n,
         Err(TtyError::Restart) => return Err(Errno::ERESTARTSYS),

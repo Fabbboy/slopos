@@ -57,6 +57,7 @@ static PLATFORM_SERVICES: PlatformServices = PlatformServices {
             serial::serial_putc_com1(c);
         }
     },
+    console_write_serialized: serial::serial_locked_write_bytes,
     rng_next: || random::random_next(),
     gdt_set_kernel_rsp0: gdt::gdt_set_kernel_rsp0,
     kernel_shutdown: kernel_shutdown_fn,
