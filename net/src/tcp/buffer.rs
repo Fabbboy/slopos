@@ -517,10 +517,37 @@ pub struct TcpBufferPair {
     pub(crate) ooo: super::reasm::Assembler,
 }
 
+/// Connection-buffer allocations still owed a synthetic failure.
+#[cfg(feature = "test-hooks")]
+static INJECTED_ALLOC_FAILURES: core::sync::atomic::AtomicU32 =
+    core::sync::atomic::AtomicU32::new(0);
+
+/// Fail the next `count` connection-buffer allocations.
+///
+/// The path a remote peer drives into this allocation runs under a
+/// cli-spinlock, so the behaviour on failure is worth a test — and exhausting
+/// the real heap to reach it is neither hermetic nor repeatable.
+#[cfg(feature = "test-hooks")]
+pub fn inject_buffer_alloc_failures(count: u32) {
+    INJECTED_ALLOC_FAILURES.store(count, core::sync::atomic::Ordering::Relaxed);
+}
+
+#[cfg(feature = "test-hooks")]
+fn take_injected_alloc_failure() -> bool {
+    use core::sync::atomic::Ordering;
+    INJECTED_ALLOC_FAILURES
+        .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |n| n.checked_sub(1))
+        .is_ok()
+}
+
 impl TcpBufferPair {
     /// Allocate a fresh buffer pair.  Both ring buffers are zero-filled
     /// via `slopos-ostd::KBox::zeroed`; the whole chain is heap-direct.
     pub(crate) fn new(cap: usize) -> Result<Self, AllocError> {
+        #[cfg(feature = "test-hooks")]
+        if take_injected_alloc_failure() {
+            return Err(AllocError);
+        }
         Ok(Self {
             send: TcpSendState::new(cap)?,
             recv: TcpRecvState::new(cap)?,

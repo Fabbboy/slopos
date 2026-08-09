@@ -196,6 +196,56 @@ fn install_accepted_child(
     });
 }
 
+/// Give `id` the send/receive rings its next transition assumes, if it does not
+/// already have them.
+///
+/// The pair is 2 x 32 KiB and is allocated outside the PCB lock: the allocator
+/// is where every subsystem meets, and a slab refill under the
+/// `TCP_PCB_SLOTS` cli-spinlock — a lock an unauthenticated remote peer drives
+/// — is the shape that deadlocks. A PCB is installed in `SynRecv` and never
+/// re-enters it, so a peek that says "will not need rings" cannot go stale in
+/// the direction that matters; the reverse only wastes an allocation.
+///
+/// Kept out of the state closures on purpose: a `TcpBufferPair` rvalue on one
+/// of those frames costs more than the 2 KiB stack gate allows.
+#[inline(never)]
+fn ensure_connection_buffer(id: ConnId) -> Result<(), TcpError> {
+    let wanted = table::with_pcb_and_bufs(id, |pcb, buf| {
+        buf.is_none() && matches!(pcb.state, PcbState::SynRecv(_) | PcbState::SynSent(_))
+    });
+    if wanted != Some(true) {
+        return Ok(());
+    }
+    let pair = TcpBufferPair::new(buffer::TCP_BUFFER_SIZE)?;
+    table::with_pcb_and_bufs(id, |_, slot| {
+        if slot.is_none() {
+            *slot = Some(pair);
+        }
+    });
+    Ok(())
+}
+
+/// Abandon a connection that reached `Data` with no rings to serve it.
+///
+/// Nothing downstream is told it established, the peer is reset rather than
+/// left holding a handshake this side cannot honour, and the slot goes back.
+#[inline(never)]
+fn reset_for_no_buffer(actions: &mut Actions, tuple: &TcpTuple, hdr: &TcpHeader) {
+    klog_debug!("tcp: no memory for a new connection's buffers; resetting peer");
+    for seg in actions.segments.iter_mut() {
+        *seg = None;
+    }
+    actions.segments_len = 0;
+    actions.notify = SocketNotify::empty();
+    actions.accepted = None;
+    actions.push_segment(SegmentBuilder::rst_for(
+        hdr,
+        tuple.local_ip,
+        tuple.remote_ip,
+    ));
+    actions.release = true;
+}
+
 /// Process a segment for an established/transient connection. Takes the
 /// per-slot lock for the PCB+buffer mutation; releases it before
 /// dispatching `table::release` to avoid recursive lock acquisition.
@@ -211,6 +261,8 @@ fn input_process_established(
     payload: &[u8],
     now_ms: u64,
 ) -> Actions {
+    let _ = ensure_connection_buffer(id);
+
     let actions = table::with_pcb_and_bufs(id, |pcb, buffer_slot| {
         let mut actions = pcb.on_segment(buffer_slot.as_mut(), hdr, options, payload, now_ms);
         actions.conn_id = Some(id);
@@ -255,11 +307,12 @@ fn input_process_established(
             }
         }
 
-        // Allocate buffer on NEW_ESTABLISHED (SynRecv/SynSent → Data).
+        // Install the buffer on NEW_ESTABLISHED (SynRecv/SynSent → Data). A
+        // connection that reaches Data without one has no send or receive ring,
+        // so a peer that cannot be given memory is reset rather than left
+        // holding a handshake this side cannot honour.
         if actions.notify.contains(SocketNotify::NEW_ESTABLISHED) && buffer_slot.is_none() {
-            let buf = TcpBufferPair::new(buffer::TCP_BUFFER_SIZE)
-                .expect("tcp: kernel OOM allocating connection buffer");
-            *buffer_slot = Some(buf);
+            reset_for_no_buffer(&mut actions, &pcb.tuple, hdr);
         }
 
         // Free buffer on Data → TimeWait.
@@ -414,6 +467,8 @@ pub fn close(id: ConnId) -> Result<Option<TcpOutSegment>, TcpError> {
         NoOp,
     }
 
+    ensure_connection_buffer(id)?;
+
     let result = table::with_pcb_and_bufs(id, |pcb, buffer_slot| -> Result<Outcome, TcpError> {
         if matches!(pcb.state, PcbState::Listen(_) | PcbState::SynSent(_)) {
             return Ok(Outcome::Release(pcb.state.name()));
@@ -422,11 +477,9 @@ pub fn close(id: ConnId) -> Result<Option<TcpOutSegment>, TcpError> {
             klog_debug!("tcp: CLOSE id={} TIME_WAIT — no-op", id);
             return Ok(Outcome::NoOp);
         }
-        // SynRecv → Data(FinWait1): allocate buffer before transition.
+        // SynRecv → Data(FinWait1) needs the rings the transition assumes.
         if matches!(pcb.state, PcbState::SynRecv(_)) && buffer_slot.is_none() {
-            let buf = TcpBufferPair::new(buffer::TCP_BUFFER_SIZE)
-                .expect("tcp: kernel OOM allocating connection buffer on close");
-            *buffer_slot = Some(buf);
+            return Err(TcpError::OutOfMemory);
         }
         match &mut pcb.state {
             PcbState::SynRecv(_) => close_syn_recv_transition(pcb, id)
@@ -559,14 +612,14 @@ pub fn shutdown_write(id: ConnId) -> Result<Option<TcpOutSegment>, TcpError> {
         return Err(TcpError::InvalidState);
     }
 
+    ensure_connection_buffer(id)?;
+
     let result = table::with_pcb_and_bufs(
         id,
         |pcb, buffer_slot| -> Result<Option<TcpOutSegment>, TcpError> {
-            // SynRecv → Data(FinWait1): allocate buffer before transition.
+            // SynRecv → Data(FinWait1) needs the rings the transition assumes.
             if matches!(pcb.state, PcbState::SynRecv(_)) && buffer_slot.is_none() {
-                let buf = TcpBufferPair::new(buffer::TCP_BUFFER_SIZE)
-                    .expect("tcp: kernel OOM allocating connection buffer on shutdown_write");
-                *buffer_slot = Some(buf);
+                return Err(TcpError::OutOfMemory);
             }
             match &mut pcb.state {
                 PcbState::Data(d) => {
@@ -802,7 +855,9 @@ pub fn send(id: ConnId, data: &[u8]) -> Result<usize, TcpError> {
                 ) => {}
             _ => return Err(TcpError::InvalidState),
         }
-        let bufs = buf.as_mut().expect("Data state must have a buffer");
+        let Some(bufs) = buf.as_mut() else {
+            return Err(TcpError::InvalidState);
+        };
         Ok(bufs.send.enqueue(data))
     });
     match result {
@@ -830,7 +885,9 @@ pub fn send_from(
                 ) => {}
             _ => return Err(TcpError::InvalidState),
         }
-        let bufs = buf.as_mut().expect("Data state must have a buffer");
+        let Some(bufs) = buf.as_mut() else {
+            return Err(TcpError::InvalidState);
+        };
         Ok(bufs.send.enqueue_from(reader))
     });
     match result {

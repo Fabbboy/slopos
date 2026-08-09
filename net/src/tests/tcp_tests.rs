@@ -1800,3 +1800,135 @@ slopos_testing::stest!(
 );
 slopos_testing::stest!(name = test_tcp_isn_varies_by_tuple, suite = tcp);
 slopos_testing::stest!(name = test_tcp_isn_not_monotonic_counter, suite = tcp);
+
+// =============================================================================
+// Connection-buffer allocation failure
+// =============================================================================
+
+/// A handshake that completes with no memory for the connection's rings resets
+/// the peer instead of panicking.
+///
+/// The allocation is 2 x 32 KiB and used to run under the `TCP_PCB_SLOTS`
+/// cli-spinlock with `.expect()`, in softirq, driven by an unauthenticated
+/// remote peer — a kernel panic with interrupts off and a lock held.
+pub fn test_tcp_buffer_alloc_failure_resets_peer() -> TestResult {
+    reset();
+    let server_ip = [10, 0, 0, 1];
+    let client_ip = [10, 0, 0, 2];
+
+    tcp::listen(server_ip, 80).unwrap();
+
+    let client_iss = 3000u32;
+    let syn = TcpHeader {
+        src_port: 50001,
+        dst_port: 80,
+        seq_num: client_iss,
+        ack_num: 0,
+        data_offset: 5,
+        flags: TCP_FLAG_SYN,
+        window_size: 32768,
+        checksum: 0,
+        urgent_ptr: 0,
+    };
+    let syn_result = tcp::input(client_ip, server_ip, &syn, &[], &[], 0);
+    let syn_ack = match syn_result.segments().next() {
+        Some(s) => s.clone(),
+        None => return fail!("no SYN+ACK for the opening SYN"),
+    };
+    let server_iss = syn_ack.seq_num;
+
+    let child_tuple = TcpTuple {
+        local_ip: server_ip,
+        local_port: 80,
+        remote_ip: client_ip,
+        remote_port: 50001,
+    };
+    let child_id = match tcp::find(&child_tuple) {
+        Some(id) => id,
+        None => return fail!("child PCB was not installed"),
+    };
+
+    // The final ACK drives SYN_RECEIVED -> ESTABLISHED, which is where the
+    // rings are needed.
+    crate::tcp::buffer::inject_buffer_alloc_failures(1);
+    let ack = TcpHeader {
+        src_port: 50001,
+        dst_port: 80,
+        seq_num: client_iss.wrapping_add(1),
+        ack_num: server_iss.wrapping_add(1),
+        data_offset: 5,
+        flags: TCP_FLAG_ACK,
+        window_size: 32768,
+        checksum: 0,
+        urgent_ptr: 0,
+    };
+    let result = tcp::input(client_ip, server_ip, &ack, &[], &[], 0);
+    crate::tcp::buffer::inject_buffer_alloc_failures(0);
+
+    let reset_sent = result
+        .segments()
+        .any(|seg| seg.flags & TCP_FLAG_RST != 0 && seg.tuple.remote_port == 50001);
+    assert_test!(reset_sent, "a peer that cannot be served was not reset");
+    assert_test!(
+        tcp::get_state(child_id).is_none(),
+        "the unserviceable connection kept its table slot"
+    );
+    // The tuple falls back to the listener's wildcard entry; what must be gone
+    // is the connection's own slot.
+    assert_test!(
+        tcp::find(&child_tuple).map(|id| id.is_listener()) != Some(false),
+        "the unserviceable connection kept its demux entry"
+    );
+
+    // The injection is spent, so the next handshake on the same listener
+    // establishes normally.
+    let syn2 = TcpHeader {
+        src_port: 50002,
+        dst_port: 80,
+        seq_num: client_iss,
+        ack_num: 0,
+        data_offset: 5,
+        flags: TCP_FLAG_SYN,
+        window_size: 32768,
+        checksum: 0,
+        urgent_ptr: 0,
+    };
+    let syn2_result = tcp::input(client_ip, server_ip, &syn2, &[], &[], 0);
+    let syn_ack2 = match syn2_result.segments().next() {
+        Some(s) => s.clone(),
+        None => return fail!("no SYN+ACK for the second SYN"),
+    };
+    let ack2 = TcpHeader {
+        src_port: 50002,
+        dst_port: 80,
+        seq_num: client_iss.wrapping_add(1),
+        ack_num: syn_ack2.seq_num.wrapping_add(1),
+        data_offset: 5,
+        flags: TCP_FLAG_ACK,
+        window_size: 32768,
+        checksum: 0,
+        urgent_ptr: 0,
+    };
+    let _ = tcp::input(client_ip, server_ip, &ack2, &[], &[], 0);
+    let second_tuple = TcpTuple {
+        local_ip: server_ip,
+        local_port: 80,
+        remote_ip: client_ip,
+        remote_port: 50002,
+    };
+    let second_id = match tcp::find(&second_tuple) {
+        Some(id) => id,
+        None => return fail!("second connection was not installed"),
+    };
+    assert_eq_test!(
+        tcp::get_state(second_id),
+        Some(TcpState::Established),
+        "a later connection was refused after a spent injection"
+    );
+    pass!()
+}
+
+slopos_testing::stest!(
+    name = test_tcp_buffer_alloc_failure_resets_peer,
+    suite = tcp
+);
