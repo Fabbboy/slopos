@@ -1,5 +1,6 @@
 use core::fmt;
 
+use slopos_ostd::AllocError;
 use slopos_ostd::KVec;
 use slopos_ostd::mm::frame::AnonymousMeta;
 use slopos_ostd::mm::init::{Init, Initialised, SlotPtr, init_struct_with};
@@ -248,20 +249,22 @@ impl<T> BoundedQueue<T> {
         self.len = 0;
     }
 
-    /// Resize queue capacity, preserving item order.
+    /// Resize queue capacity, preserving item order. The queue is left
+    /// untouched if either allocation fails.
     ///
     /// If `new_capacity` is smaller than current length, oldest items are kept
     /// until capacity is reached and the rest are dropped.
-    pub fn resize(&mut self, new_capacity: usize) {
-        let mut drained: KVec<T> =
-            KVec::with_capacity(self.len).expect("BoundedQueue::resize: alloc");
+    pub fn resize(&mut self, new_capacity: usize) -> Result<(), AllocError> {
+        let mut drained: KVec<T> = KVec::with_capacity(self.len)?;
+        let mut slots: KVec<Option<T>> = KVec::with_capacity(new_capacity)?;
+        for _ in 0..new_capacity {
+            slots.push(None)?;
+        }
+
         while let Some(item) = self.pop() {
             let _ = drained.push(item);
         }
-
-        self.slots = core::iter::repeat_with(|| None)
-            .take(new_capacity)
-            .collect::<KVec<Option<T>>>();
+        self.slots = slots;
         self.head = 0;
         self.len = 0;
 
@@ -270,6 +273,7 @@ impl<T> BoundedQueue<T> {
                 break;
             }
         }
+        Ok(())
     }
 }
 
@@ -776,6 +780,17 @@ pub enum SocketState {
     Connecting,
     Connected,
     Closed,
+}
+
+/// How many datagram slots a `SO_RCVBUF` of `bytes` buys.
+///
+/// The queue holds `PacketBuf`s, and every one of those is a buffer from the
+/// global [`crate::pool::POOL_SIZE`] pool — so a queue longer than the pool
+/// describes a depth no socket can ever reach while costing real memory per
+/// slot, on every socket at once.
+fn recv_queue_slots(bytes: usize) -> usize {
+    let by_size = bytes / crate::pool::BUF_SIZE;
+    by_size.clamp(1, crate::pool::POOL_SIZE)
 }
 
 /// The recv-readiness event for a socket table slot.
@@ -3307,8 +3322,10 @@ pub fn socket_setsockopt(sock_idx: u32, level: i32, optname: i32, val: &[u8]) ->
                 let Ok(size) = SocketOptions::validate_recv_buf_size(v) else {
                     return errno_i32(ERRNO_EINVAL);
                 };
+                if sock.recv_queue.resize(recv_queue_slots(size)).is_err() {
+                    return errno_i32(ERRNO_ENOMEM);
+                }
                 sock.options.recv_buf_size = size;
-                sock.recv_queue.resize(size);
                 if let SocketInner::Tcp(tcp_inner) = &sock.inner {
                     if let Some(conn_id) = tcp_inner.conn_id {
                         tcp::set_rcvbuf(conn_id, size);

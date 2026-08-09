@@ -130,7 +130,7 @@ pub fn test_recv_queue_overflow() -> TestResult {
         return fail!("allocated socket missing");
     };
 
-    sock.recv_queue.resize(2);
+    let _ = sock.recv_queue.resize(2);
     let p1 = PacketBuf::from_raw_copy(&[1])
         .ok_or(())
         .map_err(|_| TestResult::Fail)
@@ -198,6 +198,10 @@ pub fn test_so_rcvbuf_resize() -> TestResult {
     }
     let sock = sock as u32;
 
+    // `SO_RCVBUF` is a byte count; the queue holds whole datagrams, and every
+    // one of those occupies a buffer from the global packet pool. One byte of
+    // buffer therefore does not buy one slot, and no byte count buys more
+    // slots than the pool has buffers.
     let size: u32 = 256;
     assert_eq_test!(
         socket_setsockopt(sock, SOL_SOCKET, SO_RCVBUF, &size.to_ne_bytes()),
@@ -209,11 +213,34 @@ pub fn test_so_rcvbuf_resize() -> TestResult {
     assert_eq_test!(got, 4);
     assert_eq_test!(u32::from_ne_bytes(out), 256);
 
+    {
+        let table = NEW_SOCKET_TABLE.lock();
+        let Some(sock_ref) = table.get(sock as usize) else {
+            return fail!("socket missing");
+        };
+        assert_eq_test!(
+            sock_ref.recv_queue.capacity(),
+            1,
+            "a sub-datagram buffer still holds one datagram"
+        );
+    }
+
+    let max: u32 = SocketOptions::RECV_BUF_MAX as u32;
+    assert_eq_test!(
+        socket_setsockopt(sock, SOL_SOCKET, SO_RCVBUF, &max.to_ne_bytes()),
+        0
+    );
     let table = NEW_SOCKET_TABLE.lock();
     let Some(sock_ref) = table.get(sock as usize) else {
         return fail!("socket missing");
     };
-    assert_eq_test!(sock_ref.recv_queue.capacity(), 256, "recv_queue resized");
+    let expected =
+        (SocketOptions::RECV_BUF_MAX / crate::pool::BUF_SIZE).min(crate::pool::POOL_SIZE);
+    assert_eq_test!(
+        sock_ref.recv_queue.capacity(),
+        expected,
+        "the largest buffer is still bounded by the packet pool"
+    );
     pass!()
 }
 

@@ -368,7 +368,7 @@ pub fn test_bounded_queue_clear_and_resize() -> TestResult {
     let _ = q.push(4);
     let _ = q.push(5);
     let _ = q.push(6);
-    q.resize(2);
+    let _ = q.resize(2);
     assert_eq_test!(q.capacity(), 2);
     assert_eq_test!(q.len(), 2);
     assert_eq_test!(q.pop(), Some(4));
