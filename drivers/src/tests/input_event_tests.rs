@@ -11,7 +11,8 @@ use slopos_abi::input::{InputEventType, MAX_INPUT_TASKS};
 use slopos_testing::{TestResult, fail, pass};
 
 use crate::input_event::{
-    input_cleanup_task, input_event_count, input_poll, input_request_close, input_send_configure,
+    input_cleanup_task, input_compositor_task_id, input_event_count, input_poll,
+    input_register_compositor, input_request_close, input_send_configure,
 };
 
 /// Comfortably past any id a test boot allocates, and past the ceiling a
@@ -126,8 +127,73 @@ pub fn test_input_slot_release_drops_queued_events() -> TestResult {
     }
 }
 
+/// The input sink is released when its holder exits. A sink left naming a dead
+/// task swallows every key and pointer event for the rest of the boot, and
+/// re-claims a queue slot for the dead task on each one.
+pub fn test_input_sink_is_released_on_exit() -> TestResult {
+    let first = HIGH_TASK_ID + 300;
+    let second = HIGH_TASK_ID + 301;
+    let restore = input_compositor_task_id();
+
+    input_register_compositor(first);
+    if input_compositor_task_id() != first {
+        input_cleanup_task(first);
+        input_register_compositor(restore);
+        return fail!("sink did not accept task {}", first);
+    }
+
+    input_cleanup_task(first);
+    let after_exit = input_compositor_task_id();
+
+    input_register_compositor(second);
+    let after_reclaim = input_compositor_task_id();
+    input_cleanup_task(second);
+    input_register_compositor(restore);
+
+    if after_exit != 0 {
+        return fail!("sink still names {} after its holder exited", after_exit);
+    }
+    if after_reclaim != second {
+        return fail!(
+            "second task could not claim the sink (got {})",
+            after_reclaim
+        );
+    }
+    pass!()
+}
+
+/// Cleanup for an unrelated task leaves the sink alone.
+pub fn test_input_sink_survives_an_unrelated_exit() -> TestResult {
+    let holder = HIGH_TASK_ID + 310;
+    let other = HIGH_TASK_ID + 311;
+    let restore = input_compositor_task_id();
+
+    input_register_compositor(holder);
+    input_cleanup_task(other);
+    let still_held = input_compositor_task_id();
+
+    input_cleanup_task(holder);
+    input_register_compositor(restore);
+
+    if still_held != holder {
+        return fail!(
+            "sink lost its holder to an unrelated exit (now {})",
+            still_held
+        );
+    }
+    pass!()
+}
+
 slopos_testing::stest!(
     name = test_input_queue_serves_high_task_id,
+    suite = input_event
+);
+slopos_testing::stest!(
+    name = test_input_sink_is_released_on_exit,
+    suite = input_event
+);
+slopos_testing::stest!(
+    name = test_input_sink_survives_an_unrelated_exit,
     suite = input_event
 );
 slopos_testing::stest!(

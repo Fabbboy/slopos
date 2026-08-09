@@ -504,6 +504,11 @@ pub fn input_register_compositor(task_id: u32) {
     guard.get_mut().compositor_task_id = task_id;
 }
 
+/// The task every raw input event is routed to, or 0 when the sink is free.
+pub fn input_compositor_task_id() -> u32 {
+    FOCUS.read().compositor_task_id
+}
+
 // =============================================================================
 // Public API - Client Operations (Syscalls)
 // =============================================================================
@@ -595,10 +600,15 @@ pub fn clipboard_paste(dst: &mut [u8]) -> usize {
 // =============================================================================
 
 pub fn input_cleanup_task(task_id: u32) {
-    // Clear focus if this task had it.
+    // Clear focus and the global input sink if this task held either. A stale
+    // `compositor_task_id` would keep routing every key and pointer event to a
+    // dead task, and `resolve_queue` would keep re-claiming a slot for it.
     {
         let current = FOCUS.read();
-        if current.keyboard_focus == task_id || current.pointer_focus == task_id {
+        if current.keyboard_focus == task_id
+            || current.pointer_focus == task_id
+            || current.compositor_task_id == task_id
+        {
             let mut guard = FOCUS.write_lock();
             let s = guard.get_mut();
             if s.keyboard_focus == task_id {
@@ -607,6 +617,9 @@ pub fn input_cleanup_task(task_id: u32) {
             }
             if s.pointer_focus == task_id {
                 s.pointer_focus = 0;
+            }
+            if s.compositor_task_id == task_id {
+                s.compositor_task_id = 0;
             }
         }
     }
