@@ -78,6 +78,11 @@ pub fn vfs_open_flags(path: &[u8], flags: VfsOpenFlags) -> VfsResult<VfsHandle> 
             if stat.file_type == FileType::Directory {
                 return Err(VfsError::IsDirectory);
             }
+            // Refused at open, not at the first write: a descriptor obtained
+            // before the check is a descriptor that outlives it.
+            if stat.sealed && flags.writable {
+                return Err(VfsError::PermissionDenied);
+            }
             if flags.truncate && flags.writable && stat.file_type == FileType::Regular {
                 resolved.fs.truncate(resolved.inode, 0)?;
             }
@@ -122,12 +127,36 @@ pub fn vfs_set_mode(path: &[u8], mode: u16) -> VfsResult<()> {
     resolved.fs.set_mode(resolved.inode, mode)
 }
 
+/// Seal `path` against every future mutation. One-way and un-clearable.
+pub fn vfs_set_sealed(path: &[u8]) -> VfsResult<()> {
+    let resolved = resolve_path(path)?;
+    resolved.fs.set_sealed(resolved.inode)
+}
+
+/// Whether `path` names a sealed inode. A path that resolves to nothing is not
+/// sealed — the caller's own lookup reports that.
+fn path_is_sealed(path: &[u8]) -> bool {
+    resolve_path(path)
+        .and_then(|r| r.fs.stat(r.inode))
+        .map(|s| s.sealed)
+        .unwrap_or(false)
+}
+
 pub fn vfs_unlink(path: &[u8]) -> VfsResult<()> {
+    if path_is_sealed(path) {
+        return Err(VfsError::PermissionDenied);
+    }
     let (parent, name) = resolve_parent(path)?;
     parent.fs.unlink(parent.inode, name)
 }
 
 pub fn vfs_rename(old_path: &[u8], new_path: &[u8]) -> VfsResult<()> {
+    // Both ends: renaming a sealed file moves it out from under the path its
+    // privilege is keyed on, and renaming over one replaces it just as a write
+    // would.
+    if path_is_sealed(old_path) || path_is_sealed(new_path) {
+        return Err(VfsError::PermissionDenied);
+    }
     let (old_parent, old_name) = resolve_parent(old_path)?;
     let (new_parent, new_name) = resolve_parent(new_path)?;
 

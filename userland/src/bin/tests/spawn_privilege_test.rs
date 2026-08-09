@@ -198,6 +198,38 @@ fn ordinary_spawn_still_works() -> bool {
     true
 }
 
+/// The binary a grant is keyed on cannot be rewritten.
+///
+/// Program identity is a path, so the table in `exec::grants` is only worth
+/// anything while the file at that path is the one the image shipped. Every
+/// inode the initramfs unpacks is sealed, which is what makes the key stable.
+fn granted_binaries_are_sealed() -> bool {
+    use std::fs::OpenOptions;
+
+    let mut ok = true;
+    for path in ["/bin/compositor", "/bin/roulette", "/bin/ip", "/sbin/init"] {
+        if OpenOptions::new().write(true).open(path).is_ok() {
+            eprintln!("spawn_privilege_test: {path} opened for write");
+            ok = false;
+        }
+        if OpenOptions::new().read(true).open(path).is_err() {
+            eprintln!("spawn_privilege_test: {path} stopped being readable");
+            ok = false;
+        }
+        if std::fs::remove_file(path).is_ok() {
+            eprintln!("spawn_privilege_test: {path} was unlinked");
+            ok = false;
+        }
+    }
+    // A path the image never shipped is unaffected.
+    if std::fs::write("/tmp/spawn_priv_probe", b"x").is_err() {
+        eprintln!("spawn_privilege_test: the seal reached an ordinary path");
+        ok = false;
+    }
+    let _ = std::fs::remove_file("/tmp/spawn_priv_probe");
+    ok
+}
+
 const CASES: &[(&str, fn() -> bool)] = &[
     ("privileged_flags_are_eperm", privileged_flags_are_eperm),
     ("malformed_flags_are_einval", malformed_flags_are_einval),
@@ -207,6 +239,7 @@ const CASES: &[(&str, fn() -> bool)] = &[
         user_settable_flags_reach_exec,
     ),
     ("ordinary_spawn_still_works", ordinary_spawn_still_works),
+    ("granted_binaries_are_sealed", granted_binaries_are_sealed),
 ];
 
 fn main() {

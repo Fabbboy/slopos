@@ -195,6 +195,8 @@ impl<T: Ext2VfsBackend + Send + Sync> FileSystem for T {
                 ctime: ext2_inode.ctime as u64,
                 dev_major: 0,
                 dev_minor: 0,
+                // No inode-attribute mutator, so nothing can ever set it.
+                sealed: false,
             })
         })
     }

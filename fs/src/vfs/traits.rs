@@ -55,6 +55,17 @@ pub struct FileStat {
     pub dev_major: u32,
     /// Minor device number (for device files)
     pub dev_minor: u32,
+    /// The inode refuses every mutation: write, truncate, unlink, rename,
+    /// being renamed over, and any change to its mode.
+    ///
+    /// Set once, when the initramfs is unpacked, and never cleared — there is
+    /// no `chattr`. Program-identity privilege is keyed on a binary's path, so
+    /// without this any task could overwrite `/bin/compositor` and spawn the
+    /// replacement into the grant.
+    ///
+    /// Carried in the stat rather than behind its own trait method so a
+    /// filesystem cannot forget to answer: `stat` has no default.
+    pub sealed: bool,
 }
 
 impl FileStat {
@@ -73,6 +84,7 @@ impl FileStat {
             ctime: 0,
             dev_major: 0,
             dev_minor: 0,
+            sealed: false,
         }
     }
 
@@ -91,6 +103,7 @@ impl FileStat {
             ctime: 0,
             dev_major: 0,
             dev_minor: 0,
+            sealed: false,
         }
     }
 
@@ -109,6 +122,7 @@ impl FileStat {
             ctime: 0,
             dev_major: major,
             dev_minor: minor,
+            sealed: false,
         }
     }
 }
@@ -320,6 +334,19 @@ pub trait FileSystem: Send + Sync {
     /// Create a symbolic link.
     fn symlink(&self, parent: InodeId, name: &[u8], target: &[u8]) -> VfsResult<InodeId> {
         let _ = (parent, name, target);
+        Err(VfsError::NotSupported)
+    }
+
+    /// Seal an inode against every future mutation.
+    ///
+    /// One-way: there is no unseal, because the point is that a binary's
+    /// contents cannot change under a privilege grant keyed on its path.
+    ///
+    /// Defaults to a refusal rather than a no-op. A filesystem that cannot
+    /// store the bit must say so — reporting success without storing it would
+    /// leave the caller believing a file is protected when nothing is.
+    fn set_sealed(&self, inode: InodeId) -> VfsResult<()> {
+        let _ = inode;
         Err(VfsError::NotSupported)
     }
 

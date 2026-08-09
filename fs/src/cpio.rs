@@ -18,7 +18,7 @@
 
 use slopos_ostd::klog_info;
 
-use crate::vfs::{VfsError, VfsOpenFlags, vfs_mkdir, vfs_open_flags, vfs_set_mode};
+use crate::vfs::{VfsError, VfsOpenFlags, vfs_mkdir, vfs_open_flags, vfs_set_mode, vfs_set_sealed};
 use crate::{MAX_NAME_LEN, MAX_PATH_LEN};
 
 /// Fixed `newc` header size: 6-byte magic + 13 fields × 8 ASCII-hex chars.
@@ -309,5 +309,10 @@ fn write_file(path: &[u8], data: &[u8], mode: u32) -> Result<(), CpioError> {
     // Restore the permission bits (notably the exec bit on binaries; the VFS
     // create path defaults regular files to 0o644).
     vfs_set_mode(path, (mode & 0o7777) as u16).map_err(CpioError::Vfs)?;
+    // Sealed last, after the contents and the mode are final. Program-identity
+    // privilege is keyed on a path, so an unpacked `/bin` that stayed writable
+    // would hand every grant to whoever overwrote the binary. A root that
+    // cannot store the bit fails the unpack rather than booting unprotected.
+    vfs_set_sealed(path).map_err(CpioError::Vfs)?;
     Ok(())
 }

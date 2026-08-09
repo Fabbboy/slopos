@@ -8,8 +8,8 @@ use crate::cpio::{CpioError, for_each_cpio_entry};
 use crate::ext2::cache::BlockCache;
 use crate::ext2::{Ext2Error, Ext2Fs};
 use crate::vfs::{
-    vfs_init_builtin_filesystems, vfs_is_initialized, vfs_list, vfs_mkdir, vfs_open, vfs_stat,
-    vfs_unlink,
+    vfs_init_builtin_filesystems, vfs_is_initialized, vfs_list, vfs_mkdir, vfs_open, vfs_rename,
+    vfs_set_mode, vfs_stat, vfs_unlink,
 };
 
 /// Test helper: mount an in-memory image over an owned, stack-local
@@ -1339,3 +1339,106 @@ pub fn test_fileio_open_file_limit() -> TestResult {
 }
 
 slopos_testing::stest!(name = test_fileio_open_file_limit);
+
+/// A sealed inode refuses every mutation, and an unsealed one in the same
+/// mount refuses none of them.
+///
+/// Both files live in `/tmp`, one filesystem instance, so this cannot pass by
+/// accident on a per-filesystem flag.
+pub fn test_sealed_inode_refuses_mutation() -> TestResult {
+    use crate::vfs::{VfsError, VfsOpenFlags, vfs_open_flags, vfs_set_sealed};
+
+    const SEALED: &[u8] = b"/tmp/seal_sealed";
+    const PLAIN: &[u8] = b"/tmp/seal_plain";
+    let _ = vfs_unlink(SEALED);
+    let _ = vfs_unlink(PLAIN);
+
+    let writable = || VfsOpenFlags {
+        create: true,
+        exclusive: false,
+        truncate: false,
+        writable: true,
+    };
+    let Ok(sealed) = vfs_open_flags(SEALED, writable()) else {
+        return slopos_testing::fail!("could not create the sealed fixture");
+    };
+    if sealed.write(0, b"original").is_err() {
+        return slopos_testing::fail!("could not populate the sealed fixture");
+    }
+    let Ok(plain) = vfs_open_flags(PLAIN, writable()) else {
+        return slopos_testing::fail!("could not create the unsealed fixture");
+    };
+    if plain.write(0, b"original").is_err() {
+        return slopos_testing::fail!("could not populate the unsealed fixture");
+    }
+    if vfs_set_sealed(SEALED).is_err() {
+        return slopos_testing::fail!("sealing failed");
+    }
+
+    // Every mutator refuses on the sealed inode.
+    if !matches!(sealed.write(0, b"x"), Err(VfsError::PermissionDenied)) {
+        return slopos_testing::fail!("a sealed inode accepted a write");
+    }
+    if !matches!(
+        sealed.fs.truncate(sealed.inode, 0),
+        Err(VfsError::PermissionDenied)
+    ) {
+        return slopos_testing::fail!("a sealed inode accepted a truncate");
+    }
+    if !matches!(vfs_set_mode(SEALED, 0o777), Err(VfsError::PermissionDenied)) {
+        return slopos_testing::fail!("a sealed inode accepted a mode change");
+    }
+    if !matches!(vfs_unlink(SEALED), Err(VfsError::PermissionDenied)) {
+        return slopos_testing::fail!("a sealed inode accepted an unlink");
+    }
+    if !matches!(
+        vfs_rename(SEALED, b"/tmp/seal_moved"),
+        Err(VfsError::PermissionDenied)
+    ) {
+        return slopos_testing::fail!("a sealed inode accepted being renamed");
+    }
+    if !matches!(vfs_rename(PLAIN, SEALED), Err(VfsError::PermissionDenied)) {
+        return slopos_testing::fail!("a sealed inode accepted being renamed over");
+    }
+    // The open that would have produced a writable handle never returns one.
+    if !matches!(
+        vfs_open_flags(SEALED, writable()),
+        Err(VfsError::PermissionDenied)
+    ) {
+        return slopos_testing::fail!("a sealed path opened for write");
+    }
+    // Reading is untouched — `do_exec` still has to load the binary.
+    let mut buf = [0u8; 8];
+    if sealed.read(0, &mut buf) != Ok(8) || &buf != b"original" {
+        return slopos_testing::fail!("a sealed inode stopped being readable");
+    }
+
+    // The unsealed neighbour in the same mount accepts all of it.
+    if plain.write(0, b"y").is_err() {
+        return slopos_testing::fail!("the seal reached an unsealed neighbour's write");
+    }
+    if vfs_set_mode(PLAIN, 0o755).is_err() {
+        return slopos_testing::fail!("the seal reached an unsealed neighbour's mode");
+    }
+    if vfs_rename(PLAIN, b"/tmp/seal_moved").is_err() {
+        return slopos_testing::fail!("the seal reached an unsealed neighbour's rename");
+    }
+    if vfs_unlink(b"/tmp/seal_moved").is_err() {
+        return slopos_testing::fail!("the seal reached an unsealed neighbour's unlink");
+    }
+    TestResult::Pass
+}
+
+/// A filesystem that cannot store the bit refuses to be asked, rather than
+/// reporting success and leaving the caller believing a file is protected.
+pub fn test_set_sealed_defaults_closed() -> TestResult {
+    use crate::vfs::{VfsError, vfs_set_sealed};
+
+    match vfs_set_sealed(b"/dev/null") {
+        Err(VfsError::NotSupported) => TestResult::Pass,
+        other => slopos_testing::fail!("devfs answered {:?}, want NotSupported", other),
+    }
+}
+
+slopos_testing::stest!(name = test_sealed_inode_refuses_mutation);
+slopos_testing::stest!(name = test_set_sealed_defaults_closed);

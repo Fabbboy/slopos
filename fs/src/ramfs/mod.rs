@@ -39,6 +39,8 @@ struct RamInode {
     parent: InodeId,
     mode: u16,
     nlink: u32,
+    /// Refuses every mutation once set; never cleared while the inode lives.
+    sealed: bool,
 }
 
 impl RamInode {
@@ -51,6 +53,7 @@ impl RamInode {
             parent: 0,
             mode: 0o644,
             nlink: 1,
+            sealed: false,
         }
     }
 
@@ -64,6 +67,7 @@ impl RamInode {
         self.parent = 0;
         self.mode = 0o644;
         self.nlink = 1;
+        self.sealed = false;
     }
 
     fn data_len(&self) -> usize {
@@ -257,6 +261,7 @@ impl FileSystem for RamFs {
                 ctime: 0,
                 dev_major: 0,
                 dev_minor: 0,
+                sealed: ram_inode.sealed,
             })
         })
     }
@@ -285,6 +290,9 @@ impl FileSystem for RamFs {
         self.with_inner_mut(|inner| {
             let ram_inode = inner.get_inode_mut(inode)?;
 
+            if ram_inode.sealed {
+                return Err(VfsError::PermissionDenied);
+            }
             if ram_inode.file_type == FileType::Directory {
                 return Err(VfsError::IsDirectory);
             }
@@ -421,6 +429,9 @@ impl FileSystem for RamFs {
         self.with_inner_mut(|inner| {
             let ram_inode = inner.get_inode_mut(inode)?;
 
+            if ram_inode.sealed {
+                return Err(VfsError::PermissionDenied);
+            }
             if ram_inode.file_type == FileType::Directory {
                 return Err(VfsError::IsDirectory);
             }
@@ -504,7 +515,17 @@ impl FileSystem for RamFs {
     fn set_mode(&self, inode: InodeId, mode: u16) -> VfsResult<()> {
         self.with_inner_mut(|inner| {
             let ram_inode = inner.get_inode_mut(inode)?;
+            if ram_inode.sealed {
+                return Err(VfsError::PermissionDenied);
+            }
             ram_inode.mode = mode & 0o7777;
+            Ok(())
+        })
+    }
+
+    fn set_sealed(&self, inode: InodeId) -> VfsResult<()> {
+        self.with_inner_mut(|inner| {
+            inner.get_inode_mut(inode)?.sealed = true;
             Ok(())
         })
     }
