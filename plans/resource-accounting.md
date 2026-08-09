@@ -23,7 +23,7 @@ over-committed ceilings, the charge lives in the object, refund is atomics-only,
 id is generation-stamped so a stale refund is a defined no-op.*
 
 **Depends on `plans/process-object.md` phases 1–3** for the account's owner and for a
-process identity that does not recycle. `plans/kernel-hardening.md` lands first, because
+process identity that does not recycle. The kernel-hardening pass landed first, because
 two of its items are what stop the tables lying about their capacity.
 
 ---
@@ -67,7 +67,7 @@ explicitly so an operator can derive a limit, the other tracks a running maximum
 ledger entries.
 
 **3. `RLIMIT_NOFILE`?** `FILEIO_MAX_OPEN_FILES = 32` is already below what this tree's
-own compositor needs, so it is raised in `plans/kernel-hardening.md` item 3 *before*
+own compositor needs, so it was raised to 256 *before*
 anything is declared or charged. Then: soft 64, hard 256, published through `prlimit64`
 — **but never before the enforcement point exists.** A limit that reports success and
 enforces nothing actively defeats userland self-limiting; Asterinas ships a 16-entry
@@ -81,7 +81,7 @@ an attacker can consume every port before a single message reaches a user proces
 Charging it to the listener's principal converts a SYN flood into a remote exhaustion of
 that principal's entire budget. So: the SYN queue keeps a fixed cap charged to nobody, and
 a connection joins the accepting process's account **at accept**. Wiring that queue is
-`plans/kernel-hardening.md` item 5 and is a precondition, not a parallel task.
+the bounded SYN queue, which has landed and was a precondition, not a parallel task.
 
 **5. Where does the storage live?** Three-way split.
 *Pure data* — `ResourceKind`, `KIND_COUNT`, the sealed axis marker types, default limits,
@@ -134,7 +134,7 @@ count, adjusting `num_tasks` at `exit_cleanup_mark(TASK_EXIT_CLEANUP_ACCOUNTED)`
 charge is adjusted at the same latch.
 
 **9. Compositor limits?** Not special-cased. The three-way numeric inconsistency that
-makes them look special is fixed in `plans/kernel-hardening.md` item 3. One thing must be
+makes them look special is fixed by the heap-backed descriptor table. One thing must be
 recorded rather than discovered: **`unix_connect` already implements client-donates-to-
 server by accident** — the *connecting client's* syscall allocates side B's slot, the pair
 entry and both 16 KiB FIFOs (`net/src/unix_socket/mod.rs:271-288`). Make that donation
@@ -172,7 +172,7 @@ desktop OS has a hard 256-process, 16-mount, 64-pipe, 256-open-file ceiling.
     and `.bss` because "nothing here may allocate". Reshaped to the same
     allocate-spine-off-lock pattern so the `.bss` contract holds at a boot-sized width.
   - `EventBus`'s static `WaitQueue` arrays — genuinely fixed, and they need restructuring
-    regardless (`plans/kernel-hardening.md` item 12: `queue_for` does `% MAX_SOCKETS`, so
+    regardless (`queue_for` does `% MAX_SOCKETS`, so
     AF_INET sockets 0 and 64 share a wait queue once the slab grows past 64).
   - `PACKET_POOL` — correct as it stands, charged to the root at boot.
 
@@ -419,12 +419,12 @@ process-scoped principal outlived the sender.
 
 | Resource | Rule | Reason |
 |---|---|---|
-| descriptor table | SLOT → holder | raised first in `plans/kernel-hardening.md` |
+| descriptor table | SLOT → holder | capacity already raised, table heap-backed |
 | process address spaces | `Process` kind → spawner's account | boot-sized spine; the account bounds it |
 | tasks | `Task` kind → the process's account, **adjusted at the exit latch** | the graveyard defers destruction; a Drop-refund gives spurious `EAGAIN` |
 | TCP established PCBs | OBJECT → the **accepting** process, at accept | remote-triggered; inheriting the *listener's* principal is a wart not to copy |
 | TCP listeners | OBJECT → the `listen()` caller | a local principal exists |
-| TCP connection buffers | OBJECT → same account as the PCB | de-panic first (`plans/kernel-hardening.md` item 4) |
+| TCP connection buffers | OBJECT → same account as the PCB | allocation already fallible |
 | SYN queue entries | **no account**; fixed cap at demux | charging a local principal is a remote denial of it |
 | SlopRing registry | OBJECT → creator | — |
 | AF_UNIX sockets / pairs | OBJECT → creator; **the pair and both FIFOs → the connecting client** | already donated by accident; record it or a cleanup flips it onto the compositor |

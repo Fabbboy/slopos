@@ -1,31 +1,34 @@
-//! TCP socket layer — Two-Queue Listen Model.
+//! TCP listen model — a SYN queue and an accept queue, per Linux.
 //!
-//! Implements the SYN queue / accept queue split for TCP listening sockets,
-//! following the Linux two-queue model that prevents SYN floods from blocking
-//! legitimate connections.
+//! The split is what keeps a flood of unanswered SYNs from denying service to
+//! connections that complete. Half-open state lives in [`SynQueue`], bounded
+//! at [`SYN_QUEUE_MAX`] *per listener* and held inside the listener's own PCB;
+//! completed connections live in [`TcpListenState`]'s accept queue in the
+//! socket layer, bounded by the `listen(fd, backlog)` backlog.
 //!
-//! # Architecture
+//! A SYN arriving on a listening socket therefore costs one queue entry, not a
+//! slot in the machine-wide connection table. Only the final ACK promotes a
+//! connection into that table.
 //!
-//! When a SYN arrives on a listening socket:
-//! 1. A [`SynRecvEntry`] is created in the SYN queue (half-open connections)
-//! 2. A SYN-ACK is sent and a retransmit timer is scheduled
-//! 3. When the final ACK arrives, the entry moves to the accept queue
-//! 4. `accept()` dequeues completed connections
+//! 1. A SYN admits a [`SynRecvEntry`] to the SYN queue and emits a SYN-ACK.
+//! 2. The final ACK removes the entry and yields an [`AcceptedConn`].
+//! 3. `accept()` dequeues from the accept queue.
 //!
-//! If the SYN queue is full, new SYNs are silently dropped (no RST — that
-//! would help attackers confirm their flood is working). If the accept queue
-//! is full, completed connections stay in the SYN queue until space opens.
+//! A full SYN queue drops new SYNs silently. No RST: it would confirm to the
+//! sender that the flood is working.
 //!
-//! # Timer Integration
+//! # Timers
 //!
-//! SYN-ACK retransmission uses [`TimerKind::TcpRetransmit`] with a per-entry
-//! key. Exponential backoff: 1s, 2s, 4s, 8s, 16s. After [`SYN_RETRIES_MAX`]
-//! (5) failed attempts, the entry is silently removed.
+//! SYN-ACK retransmission uses [`TimerKind::TcpSynAck`] with a per-entry key,
+//! backing off 1s, 2s, 4s, 8s, 16s. After [`SYN_RETRIES_MAX`] attempts the
+//! entry is dropped, again silently. The kind is distinct from
+//! `TcpRetransmit` because these keys come from a counter of their own and
+//! would otherwise collide with the `ConnId`s an established connection uses.
 
 use core::sync::atomic::{AtomicU32, Ordering};
 
 use slopos_ostd::klog_debug;
-use slopos_ostd::{KVec, KVecDeque};
+use slopos_ostd::{AllocError, KVec, KVecDeque};
 
 use crate::tcp::{
     self, DEFAULT_MSS, DEFAULT_WINDOW_SIZE, TCP_FLAG_ACK, TCP_FLAG_SYN, TcpOutSegment, TcpTuple,
@@ -58,7 +61,12 @@ pub const SYN_ACK_BASE_DELAY_MS: u64 = 1_000;
 pub const BACKLOG_MIN: usize = 1;
 
 /// Maximum listen backlog.
-pub const BACKLOG_MAX: usize = 128;
+///
+/// Every entry in the accept queue is a connection already installed in the
+/// machine-wide shard table, so a backlog larger than that table describes a
+/// depth no listener can reach — and one listener promising it would be
+/// promising every other listener's slots.
+pub const BACKLOG_MAX: usize = crate::tcp::table::TOTAL_PCB_SLOTS / 2;
 
 // =============================================================================
 // Key generator for timer dispatch
@@ -66,9 +74,9 @@ pub const BACKLOG_MAX: usize = 128;
 
 /// Monotonically increasing key generator for SYN queue timer entries.
 ///
-/// Each [`SynRecvEntry`] gets a unique key so that timer dispatch can find
-/// the correct entry.  Keys are never reused — the generator wraps at u32::MAX
-/// which is acceptable for a hobby OS.
+/// Each [`SynRecvEntry`] gets a unique key so timer dispatch can find it. This
+/// space is disjoint from `ConnId`, which is why the entries carry
+/// [`TimerKind::TcpSynAck`] rather than sharing `TcpRetransmit`.
 static NEXT_SYN_ENTRY_KEY: AtomicU32 = AtomicU32::new(1);
 
 fn alloc_syn_entry_key() -> u32 {
@@ -193,67 +201,62 @@ pub struct AcceptedConn {
 }
 
 // =============================================================================
-// 5A.2 — TcpListenState
+// SynQueue — half-open connections, bounded per listener
 // =============================================================================
 
-/// Two-queue listen model for TCP listening sockets.
+/// The half-open connections of one listening socket.
 ///
-/// Separates half-open connections (SYN queue) from fully established
-/// connections (accept queue), following the Linux `inet_csk_reqsk_queue` model.
+/// Lives inside the listener's own PCB, so the LISTEN state machine can admit
+/// a SYN under the lock it already holds and nothing half-open ever reaches
+/// the shared connection table. That table has [`crate::tcp::table`]'s
+/// `TOTAL_PCB_SLOTS` entries for the whole machine; a per-listener bound is
+/// what keeps one unanswered flood from spending them all.
 ///
-/// # SYN Flood Protection
-///
-/// - SYN queue has a separate, larger bound ([`SYN_QUEUE_MAX`] = 128)
-/// - When full, new SYNs are silently dropped (no RST)
-/// - Accept queue overflow keeps connections in SYN queue until space opens
-/// - SYN-ACK retransmit uses exponential backoff with bounded retries
-pub struct TcpListenState {
-    /// Half-open connections: SYN received, SYN-ACK sent, waiting for ACK.
-    ///
-    /// Keyed by four-tuple for O(n) lookup (n ≤ 128, linear scan is fine).
-    syn_queue: KVec<(TcpFourTuple, SynRecvEntry)>,
-
-    /// Completed connections waiting for `accept()`.
-    ///
-    /// Capacity is bounded by the listen `backlog`.
-    accept_queue: KVecDeque<AcceptedConn>,
-
-    /// Maximum accept queue size (from `listen(fd, backlog)`).
-    backlog: usize,
-
-    /// Local address this listener is bound to.
+/// Entries leave on the final ACK, on RST, or when the retransmit budget runs
+/// out. A full queue drops new SYNs silently — a RST would tell the sender its
+/// flood is working.
+pub struct SynQueue {
+    /// Keyed by four-tuple for an O(n) scan; `n <= SYN_QUEUE_MAX`, and the
+    /// alternative is a hash table whose insert allocates under a cli-lock.
+    entries: KVec<(TcpFourTuple, SynRecvEntry)>,
     local: SockAddr,
 }
 
-impl TcpListenState {
-    /// Create a new listen state with the given backlog and local address.
-    ///
-    /// Backlog is clamped to [`BACKLOG_MIN`]..=[`BACKLOG_MAX`].
-    pub fn new(backlog: usize, local: SockAddr) -> Self {
-        let backlog = backlog.clamp(BACKLOG_MIN, BACKLOG_MAX);
+impl SynQueue {
+    /// An empty queue with no capacity, for a PCB that is not listening.
+    pub const fn new() -> Self {
         Self {
-            syn_queue: KVec::with_capacity(core::cmp::min(SYN_QUEUE_MAX, 32))
-                .expect("listener: alloc"),
-            accept_queue: KVecDeque::with_capacity(backlog).expect("listener: alloc"),
-            backlog,
-            local,
+            entries: KVec::new(),
+            local: SockAddr::new(Ipv4Addr::UNSPECIFIED, Port(0)),
         }
     }
 
-    // =========================================================================
-    // SYN handling
-    // =========================================================================
+    /// A queue with room for [`SYN_QUEUE_MAX`] entries reserved up front.
+    ///
+    /// Built before the listener PCB is installed. `on_syn` runs under the
+    /// listener's cli-spinlock, and a `push` that grows the backing buffer
+    /// there would put the allocator beneath a lock a remote peer drives.
+    pub fn with_capacity(local: SockAddr) -> Result<Self, AllocError> {
+        Ok(Self {
+            entries: KVec::with_capacity(SYN_QUEUE_MAX)?,
+            local,
+        })
+    }
 
-    /// Handle an incoming SYN segment.
+    fn four_tuple(&self, remote: SockAddr) -> TcpFourTuple {
+        TcpFourTuple {
+            local_ip: self.local.ip,
+            local_port: self.local.port,
+            remote_ip: remote.ip,
+            remote_port: remote.port,
+        }
+    }
+
+    /// Admit a SYN, returning the SYN-ACK to send.
     ///
-    /// Creates a [`SynRecvEntry`] in the SYN queue, generates an ISS, and
-    /// returns the SYN-ACK segment to send.  Schedules a retransmit timer.
-    ///
-    /// Returns `None` if the SYN queue is full (silently dropped — no RST,
-    /// per anti-SYN-flood design).
-    ///
-    /// If a duplicate SYN arrives for an existing four-tuple, the existing
-    /// SYN-ACK is retransmitted.
+    /// `None` means the SYN was dropped: the queue is full. A duplicate SYN
+    /// for a tuple already queued retransmits the original SYN-ACK rather than
+    /// taking a second slot.
     pub fn on_syn(
         &mut self,
         remote: SockAddr,
@@ -263,20 +266,13 @@ impl TcpListenState {
         timestamp: u64,
         peer_tsval: Option<u32>,
     ) -> Option<TcpOutSegment> {
-        let four_tuple = TcpFourTuple {
-            local_ip: self.local.ip,
-            local_port: self.local.port,
-            remote_ip: remote.ip,
-            remote_port: remote.port,
-        };
+        let four_tuple = self.four_tuple(remote);
 
-        // Duplicate SYN — retransmit existing SYN-ACK.
-        if let Some((_, entry)) = self.syn_queue.iter().find(|(ft, _)| *ft == four_tuple) {
-            return Some(self.build_syn_ack(entry, &four_tuple));
+        if let Some((_, entry)) = self.entries.iter().find(|(ft, _)| *ft == four_tuple) {
+            return Some(build_syn_ack_from(entry, &four_tuple));
         }
 
-        // SYN queue full — drop silently (no RST).
-        if self.syn_queue.len() >= SYN_QUEUE_MAX {
+        if self.entries.len() >= SYN_QUEUE_MAX {
             klog_debug!(
                 "tcp_listen: SYN queue full ({}), dropping SYN from {}:{}",
                 SYN_QUEUE_MAX,
@@ -289,11 +285,8 @@ impl TcpListenState {
         let child_tuple = four_tuple.to_tcp_tuple();
         let iss = tcp::isn::generate_isn(&child_tuple);
         let key = alloc_syn_entry_key();
-
-        // Schedule initial SYN-ACK retransmit timer.
         let timer_token =
-            NET_TIMER_WHEEL.schedule(SYN_ACK_BASE_DELAY_MS, TimerKind::TcpRetransmit, key);
-
+            NET_TIMER_WHEEL.schedule(SYN_ACK_BASE_DELAY_MS, TimerKind::TcpSynAck, key);
         let effective_mss = if peer_mss == 0 { DEFAULT_MSS } else { peer_mss };
 
         let entry = SynRecvEntry {
@@ -310,8 +303,13 @@ impl TcpListenState {
             peer_tsval,
         };
 
-        let syn_ack = self.build_syn_ack(&entry, &four_tuple);
-        let _ = self.syn_queue.push((four_tuple, entry));
+        let syn_ack = build_syn_ack_from(&entry, &four_tuple);
+        // Reserved at construction, so this cannot grow the buffer. A failure
+        // here would mean the reservation was skipped.
+        if self.entries.push((four_tuple, entry)).is_err() {
+            NET_TIMER_WHEEL.cancel(timer_token);
+            return None;
+        }
 
         klog_debug!(
             "tcp_listen: SYN from {}:{} -> SYN_RECEIVED (key={}, iss={}, irs={})",
@@ -325,59 +323,20 @@ impl TcpListenState {
         Some(syn_ack)
     }
 
-    // =========================================================================
-    // ACK handling (3WHS completion)
-    // =========================================================================
-
-    /// Handle an incoming ACK that may complete a three-way handshake.
+    /// Complete a handshake: match the final ACK against a queued entry and
+    /// hand back everything the connection needs.
     ///
-    /// Looks up the matching SYN queue entry by four-tuple and validates that
-    /// the ACK number acknowledges our SYN-ACK (ack_num == iss + 1).
-    ///
-    /// If the accept queue has room, the entry is moved from SYN queue to
-    /// accept queue and the completed connection info is returned.
-    ///
-    /// If the accept queue is full, the entry **stays in the SYN queue** — it
-    /// is not dropped or RST'd.  The next `accept()` call will free space.
-    ///
-    /// Returns `None` if no matching entry is found or the accept queue is full.
+    /// `None` means no entry matched — the caller answers that with a RST, as
+    /// an ACK naming no connection always has been.
     pub fn on_ack(&mut self, remote: SockAddr, ack_num: u32) -> Option<AcceptedConn> {
-        let four_tuple = TcpFourTuple {
-            local_ip: self.local.ip,
-            local_port: self.local.port,
-            remote_ip: remote.ip,
-            remote_port: remote.port,
-        };
-
-        // Find matching SYN queue entry.
+        let four_tuple = self.four_tuple(remote);
         let idx = self
-            .syn_queue
+            .entries
             .iter()
             .position(|(ft, entry)| *ft == four_tuple && ack_num == entry.iss.wrapping_add(1))?;
 
-        // Accept queue full — keep in SYN queue (don't RST, don't drop).
-        if self.accept_queue.len() >= self.backlog {
-            klog_debug!(
-                "tcp_listen: accept queue full (backlog={}), keeping in SYN queue",
-                self.backlog
-            );
-            return None;
-        }
-
-        // Remove from SYN queue (swap_remove is O(1)).
-        let (_, entry) = self.syn_queue.swap_remove(idx);
-
-        // Cancel the retransmit timer.
+        let (_, entry) = self.entries.swap_remove(idx);
         NET_TIMER_WHEEL.cancel(entry.timer_token);
-
-        let accepted = AcceptedConn {
-            tuple: four_tuple.to_tcp_tuple(),
-            iss: entry.iss,
-            irs: entry.irs,
-            peer_mss: entry.peer_mss,
-            sack_permitted: entry.sack_permitted,
-            peer_tsval: entry.peer_tsval,
-        };
 
         klog_debug!(
             "tcp_listen: 3WHS complete for {}:{} (iss={}, irs={})",
@@ -387,34 +346,29 @@ impl TcpListenState {
             entry.irs
         );
 
-        let _ = self.accept_queue.push_back(accepted);
-        Some(accepted)
+        Some(AcceptedConn {
+            tuple: four_tuple.to_tcp_tuple(),
+            iss: entry.iss,
+            irs: entry.irs,
+            peer_mss: entry.peer_mss,
+            sack_permitted: entry.sack_permitted,
+            peer_tsval: entry.peer_tsval,
+        })
     }
 
-    // =========================================================================
-    // 5A.3 — SYN-ACK retransmission
-    // =========================================================================
-
-    /// Handle a SYN-ACK retransmission timer firing.
+    /// A SYN-ACK retransmit timer fired for `key`.
     ///
-    /// Looks up the SYN queue entry by its unique `key`.  If found:
-    /// - If retries < [`SYN_RETRIES_MAX`]: retransmit SYN-ACK with exponential
-    ///   backoff (1s, 2s, 4s, 8s, 16s) and schedule the next timer.
-    /// - If retries >= [`SYN_RETRIES_MAX`]: remove the entry silently (no RST).
-    ///
-    /// Returns the SYN-ACK segment to retransmit, or `None` if the entry was
-    /// removed or not found.
+    /// Retransmits with exponential backoff until [`SYN_RETRIES_MAX`], then
+    /// drops the entry silently — again, no RST.
     pub fn on_retransmit(&mut self, key: u32) -> Option<TcpOutSegment> {
-        let idx = self.syn_queue.iter().position(|(_, e)| e.key == key)?;
+        let idx = self.entries.iter().position(|(_, e)| e.key == key)?;
 
-        let (four_tuple, entry) = &mut self.syn_queue[idx];
+        let (four_tuple, entry) = &mut self.entries[idx];
         entry.retries += 1;
 
         if entry.retries > SYN_RETRIES_MAX {
-            // Max retries exceeded — remove silently (no RST to avoid aiding attackers).
             let four_tuple_copy = *four_tuple;
-            let (_, removed) = self.syn_queue.swap_remove(idx);
-
+            let (_, removed) = self.entries.swap_remove(idx);
             klog_debug!(
                 "tcp_listen: SYN-ACK retransmit exhausted for {}:{} (key={}, retries={})",
                 four_tuple_copy.remote_ip,
@@ -422,18 +376,12 @@ impl TcpListenState {
                 removed.key,
                 removed.retries
             );
-
-            // Timer already fired, no need to cancel.
             return None;
         }
 
-        // Build retransmit SYN-ACK.
         let syn_ack = build_syn_ack_from(entry, four_tuple);
-
-        // Schedule next retransmit with exponential backoff.
-        // retries=1 → 1s, retries=2 → 2s, retries=3 → 4s, retries=4 → 8s, retries=5 → 16s
         let delay = SYN_ACK_BASE_DELAY_MS * (1u64 << (entry.retries as u64 - 1));
-        entry.timer_token = NET_TIMER_WHEEL.schedule(delay, TimerKind::TcpRetransmit, key);
+        entry.timer_token = NET_TIMER_WHEEL.schedule(delay, TimerKind::TcpSynAck, key);
 
         klog_debug!(
             "tcp_listen: SYN-ACK retransmit #{} for {}:{} (key={}, next_delay={})",
@@ -447,37 +395,107 @@ impl TcpListenState {
         Some(syn_ack)
     }
 
-    // =========================================================================
-    // Accept queue operations
-    // =========================================================================
+    /// Forget a half-open connection the peer reset.
+    pub fn remove(&mut self, remote: SockAddr) -> bool {
+        let four_tuple = self.four_tuple(remote);
+        let Some(idx) = self.entries.iter().position(|(ft, _)| *ft == four_tuple) else {
+            return false;
+        };
+        let (_, entry) = self.entries.swap_remove(idx);
+        NET_TIMER_WHEEL.cancel(entry.timer_token);
+        true
+    }
 
-    /// Dequeue a completed connection from the accept queue.
+    /// Half-open connections currently queued.
+    pub fn len(&self) -> usize {
+        self.entries.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
+
+    /// Whether `key` names an entry here — the timer wheel's routing question.
+    pub fn has_key(&self, key: u32) -> bool {
+        self.entries.iter().any(|(_, e)| e.key == key)
+    }
+
+    /// Drop every entry, cancelling its retransmit timer.
+    pub fn clear(&mut self) {
+        for (_, entry) in self.entries.drain(..) {
+            NET_TIMER_WHEEL.cancel(entry.timer_token);
+        }
+    }
+}
+
+impl Default for SynQueue {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Drop for SynQueue {
+    fn drop(&mut self) {
+        self.clear();
+    }
+}
+
+impl core::fmt::Debug for SynQueue {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("SynQueue")
+            .field("local", &self.local)
+            .field("len", &self.entries.len())
+            .finish()
+    }
+}
+
+// =============================================================================
+// TcpListenState — completed connections waiting for accept()
+// =============================================================================
+
+/// The accept queue of one listening socket.
+///
+/// The other half of the Linux two-queue model; the half-open side is
+/// [`SynQueue`], in the listener's PCB. This side lives in the socket layer
+/// because `accept()` is a socket call, and an entry only arrives here once
+/// the handshake is complete.
+pub struct TcpListenState {
+    /// Completed connections waiting for `accept()`.
+    accept_queue: KVecDeque<AcceptedConn>,
+
+    /// Maximum accept queue size (from `listen(fd, backlog)`).
+    backlog: usize,
+
+    /// Local address this listener is bound to.
+    local: SockAddr,
+}
+
+impl TcpListenState {
+    /// Create a new listen state with the given backlog and local address.
     ///
-    /// Returns `None` if no connections are ready.
+    /// Backlog is clamped to [`BACKLOG_MIN`]..=[`BACKLOG_MAX`]. `None` on
+    /// allocation failure — `listen` reports it rather than panicking.
+    pub fn new(backlog: usize, local: SockAddr) -> Option<Self> {
+        let backlog = backlog.clamp(BACKLOG_MIN, BACKLOG_MAX);
+        Some(Self {
+            accept_queue: KVecDeque::with_capacity(backlog).ok()?,
+            backlog,
+            local,
+        })
+    }
+
+    /// Dequeue a completed connection.
     pub fn accept(&mut self) -> Option<AcceptedConn> {
         self.accept_queue.pop_front()
     }
 
-    /// Push a completed connection directly into the accept queue.
-    ///
-    /// Used by `socket_notify_tcp_activity()` when a server-side child connection
-    /// completes the 3WHS (SYN_RECEIVED → Established) in the TCP state machine.
-    /// Returns `true` if the connection was enqueued, `false` if the accept queue is full.
+    /// Enqueue a completed connection. `false` if the accept queue is full.
     pub fn push_accepted(&mut self, conn: AcceptedConn) -> bool {
         if self.accept_queue.len() >= self.backlog {
             return false;
         }
         let _ = self.accept_queue.push_back(conn);
         true
-    }
-
-    // =========================================================================
-    // Diagnostics
-    // =========================================================================
-
-    /// Number of half-open connections in the SYN queue.
-    pub fn syn_queue_len(&self) -> usize {
-        self.syn_queue.len()
     }
 
     /// Number of completed connections waiting in the accept queue.
@@ -500,37 +518,9 @@ impl TcpListenState {
         self.local
     }
 
-    /// Find a SYN queue entry by its timer key (for timer dispatch).
-    pub fn has_syn_entry_for_key(&self, key: u32) -> bool {
-        self.syn_queue.iter().any(|(_, e)| e.key == key)
-    }
-
-    /// Clear all SYN queue entries, cancelling their timers.
-    pub fn clear_syn_queue(&mut self) {
-        for (_, entry) in self.syn_queue.drain(..) {
-            NET_TIMER_WHEEL.cancel(entry.timer_token);
-        }
-    }
-
-    /// Clear both queues.
+    /// Drop every queued connection.
     pub fn clear(&mut self) {
-        self.clear_syn_queue();
         self.accept_queue.clear();
-    }
-
-    // =========================================================================
-    // Internal helpers
-    // =========================================================================
-
-    fn build_syn_ack(&self, entry: &SynRecvEntry, ft: &TcpFourTuple) -> TcpOutSegment {
-        build_syn_ack_from(entry, ft)
-    }
-}
-
-impl Drop for TcpListenState {
-    fn drop(&mut self) {
-        // Cancel all pending retransmit timers.
-        self.clear_syn_queue();
     }
 }
 
@@ -539,7 +529,6 @@ impl core::fmt::Debug for TcpListenState {
         f.debug_struct("TcpListenState")
             .field("local", &self.local)
             .field("backlog", &self.backlog)
-            .field("syn_queue_len", &self.syn_queue.len())
             .field("accept_queue_len", &self.accept_queue.len())
             .finish()
     }

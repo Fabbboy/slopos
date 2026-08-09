@@ -778,6 +778,18 @@ pub fn has_buffer(id: ConnId) -> bool {
 // Iteration helpers (timers / housekeeping)
 // =============================================================================
 
+/// Run `f` against listener slot `slot`, if it holds one.
+///
+/// By slot rather than by `ConnId` because the SYN-queue timer keys carry no
+/// connection id — the owning listener has to be found by looking.
+pub fn with_listener_slot_mut<T>(slot: usize, f: impl FnOnce(&mut Pcb) -> T) -> Option<T> {
+    if slot >= MAX_LISTENERS {
+        return None;
+    }
+    let mut guard = TCP_LISTENER_SLOTS[slot].lock();
+    guard.as_mut().map(|s| f(&mut s.pcb))
+}
+
 /// Snapshot the currently-live shard ConnIds from the published
 /// indices. Lock-free (one `Epoch::enter` + `NUM_SHARDS` RCU loads).
 /// Returned ConnIds may become stale before the caller acts on them —

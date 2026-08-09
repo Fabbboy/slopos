@@ -1200,13 +1200,37 @@ pub fn socket_notify_tcp_activity(actions: &tcp::Actions) {
                     })
                     .flatten();
                     if let Some(accepted) = accepted_meta {
-                        let mut table = NEW_SOCKET_TABLE.lock();
-                        if let Some(listener_sock) = table.get_mut(listener_idx as usize)
-                            && listener_sock.state == SocketState::Listening
-                            && let SocketInner::Tcp(ref mut tcp_inner) = listener_sock.inner
-                            && let Some(ref mut listen_state) = tcp_inner.listen
-                        {
-                            listen_state.push_accepted(accepted);
+                        // `None` means the named socket is not a listener at
+                        // all — this is a client's own `connect` completing,
+                        // and there is no accept queue in play. `Some(false)`
+                        // means it *is* a listener and its backlog is full.
+                        let queued = {
+                            let mut table = NEW_SOCKET_TABLE.lock();
+                            match table.get_mut(listener_idx as usize) {
+                                Some(listener_sock)
+                                    if listener_sock.state == SocketState::Listening =>
+                                {
+                                    match &mut listener_sock.inner {
+                                        SocketInner::Tcp(tcp_inner) => tcp_inner
+                                            .listen
+                                            .as_mut()
+                                            .map(|ls| ls.push_accepted(accepted)),
+                                        _ => None,
+                                    }
+                                }
+                                _ => None,
+                            }
+                        };
+                        // A completed handshake nothing will ever accept still
+                        // holds a shard slot, so reset the peer rather than
+                        // leak it.
+                        if queued == Some(false) {
+                            let rst = tcp::SegmentBuilder::bare_rst(
+                                accepted.tuple,
+                                accepted.iss.wrapping_add(1),
+                            );
+                            tcp::table::release(conn_id);
+                            let _ = socket_send_tcp_segment(&rst, &[]);
                         }
                     }
                 }
@@ -1637,7 +1661,11 @@ pub fn socket_listen(sock_idx: u32, backlog: u32) -> i32 {
             if let SocketInner::Tcp(tcp_inner) = &mut sock.inner {
                 tcp_inner.conn_id = Some(tcp_idx);
                 // Create TcpListenState with two-queue model.
-                tcp_inner.listen = Some(tcp_listener::TcpListenState::new(backlog as usize, local));
+                let Some(listen_state) = tcp_listener::TcpListenState::new(backlog as usize, local)
+                else {
+                    return errno_i32(ERRNO_ENOMEM);
+                };
+                tcp_inner.listen = Some(listen_state);
             }
             sock.state = SocketState::Listening;
 
@@ -2814,7 +2842,7 @@ pub fn socket_recv_pinned(sock_idx: u32, writer: &mut VmWriter<'_>) -> i64 {
 }
 
 pub fn socket_close(sock_idx: u32) -> i32 {
-    let (tcp_idx, udp_unbind, icmp_unbind, _was_listener) = {
+    let (tcp_idx, udp_unbind, icmp_unbind, was_listener) = {
         let mut table = NEW_SOCKET_TABLE.lock();
         let Some(sock) = table.get_mut(sock_idx as usize) else {
             return errno_i32(ERRNO_ENOTSOCK);
@@ -2838,7 +2866,8 @@ pub fn socket_close(sock_idx: u32) -> i32 {
         let was_listener = sock.state == SocketState::Listening;
         sock.recv_queue.clear();
 
-        // Clean up TcpListenState (cancels SYN-ACK retransmit timers).
+        // Drop the accept queue. The SYN queue lives in the listener PCB and
+        // goes with it when `tcp::close` releases the slot.
         if let SocketInner::Tcp(ref mut tcp_inner) = sock.inner {
             if let Some(ref mut listen_state) = tcp_inner.listen {
                 listen_state.clear();
@@ -2849,6 +2878,17 @@ pub fn socket_close(sock_idx: u32) -> i32 {
         table.free(sock_idx as usize);
         (tcp_idx, udp_unbind, icmp_unbind, was_listener)
     };
+
+    // A listener's established children hold shard slots and name it as their
+    // socket. Nothing else reclaims them once it is gone — they would sit
+    // until a RST, a FIN or TIME_WAIT expiry — so release them here and reset
+    // the peers that were still talking to them.
+    if was_listener {
+        for (tuple, seq) in tcp::release_children_of(tcp::SocketId(sock_idx)) {
+            let rst = tcp::SegmentBuilder::bare_rst(tuple, seq);
+            let _ = socket_send_tcp_segment(&rst, &[]);
+        }
+    }
 
     // Release the TCP connection (if any).  The sharded table handles
     // cleanup internally via release(); no separate demux unregister needed.
@@ -3571,25 +3611,6 @@ pub fn socket_process_timers() {
     if let Some((_idx, seg)) = tcp::delayed_ack_check(now_ms) {
         let _ = socket_send_tcp_segment(&seg, &[]);
     }
-}
-
-/// Dispatch a SYN-ACK retransmit timer to the correct listening socket.
-/// Returns the SYN-ACK segment to retransmit, or None if not found.
-pub fn socket_dispatch_syn_ack_retransmit(key: u32) -> Option<tcp::TcpOutSegment> {
-    let mut table = NEW_SOCKET_TABLE.lock();
-    for sock in table.slots.iter_mut().flatten() {
-        if sock.state != SocketState::Listening {
-            continue;
-        }
-
-        if let SocketInner::Tcp(ref mut tcp_inner) = sock.inner
-            && let Some(ref mut listen_state) = tcp_inner.listen
-            && listen_state.has_syn_entry_for_key(key)
-        {
-            return listen_state.on_retransmit(key);
-        }
-    }
-    None
 }
 
 /// Public wrapper for socket_from_tcp_idx (used by timer dispatch).

@@ -69,6 +69,11 @@ pub enum TimerKind {
     ArpRetransmit,
     /// TCP retransmission timer fired.
     TcpRetransmit,
+    /// SYN-ACK retransmission for a half-open connection in a listener's SYN
+    /// queue. Distinct from [`TimerKind::TcpRetransmit`] because its keys come
+    /// from the SYN queue's own counter and would otherwise be indistinguishable
+    /// from the `ConnId`s established connections use.
+    TcpSynAck,
     /// TCP delayed ACK timer fired.
     TcpDelayedAck,
     /// TCP TIME_WAIT 2×MSL has elapsed.
@@ -427,9 +432,14 @@ fn dispatch_fired_timer(timer: &FiredTimer) {
         }
         TimerKind::TcpRetransmit => {
             klog_debug!("net_timer: TCP retransmit fired, key={}", timer.key);
-            let handled_by_listen = dispatch_tcp_syn_ack_retransmit(timer.key);
-            if !handled_by_listen && let Some(idx) = super::tcp::on_retransmit(timer.key) {
+            if let Some(idx) = super::tcp::on_retransmit(timer.key) {
                 dispatch_tcp_retransmit_send(idx);
+            }
+        }
+        TimerKind::TcpSynAck => {
+            klog_debug!("net_timer: SYN-ACK retransmit fired, key={}", timer.key);
+            if let Some(seg) = super::tcp::on_syn_ack_retransmit(timer.key) {
+                let _ = super::socket::socket_send_tcp_segment(&seg, &[]);
             }
         }
         TimerKind::TcpDelayedAck => {
@@ -474,17 +484,6 @@ fn dispatch_fired_timer(timer: &FiredTimer) {
             super::dhcp::on_expire_timer(timer.key);
         }
     }
-}
-
-fn dispatch_tcp_syn_ack_retransmit(key: u32) -> bool {
-    use super::socket;
-
-    if let Some(seg) = socket::socket_dispatch_syn_ack_retransmit(key) {
-        let _ = socket::socket_send_tcp_segment(&seg, &[]);
-        return true;
-    }
-
-    false
 }
 
 fn dispatch_tcp_retransmit_send(id: super::tcp::ConnId) {

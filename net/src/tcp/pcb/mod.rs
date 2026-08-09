@@ -97,9 +97,15 @@ impl Pcb {
     /// state's handler routes through here.  Invariants are checked
     /// before and after the transition in debug builds; release builds
     /// compile the check away.
+    /// Apply an incoming segment.
+    ///
+    /// `incoming` is the segment's real four-tuple. For every state but
+    /// `Listen` it equals `self.tuple`; a listener's tuple carries a wildcard
+    /// remote, so the peer's address has to come from the IPv4 layer.
     pub fn on_segment(
         &mut self,
         bufs: Option<&mut TcpBufferPair>,
+        incoming: &TcpTuple,
         hdr: &TcpHeader,
         options: &[u8],
         payload: &[u8],
@@ -107,7 +113,9 @@ impl Pcb {
     ) -> Actions {
         self.assert_invariants();
         let actions = match &mut self.state {
-            PcbState::Listen(_) => listen::ListenState::on_segment(self, hdr, options, now_ms),
+            PcbState::Listen(_) => {
+                listen::ListenState::on_segment(self, incoming, hdr, options, now_ms)
+            }
             PcbState::SynSent(_) => syn_sent::SynSentState::on_segment(self, hdr, options, now_ms),
             PcbState::SynRecv(_) => syn_recv::SynRecvState::on_segment(self, hdr, now_ms),
             PcbState::Data(_) => {
@@ -180,6 +188,17 @@ pub enum PcbState {
 }
 
 impl PcbState {
+    /// The next sequence number this side would send, or 0 for a state that
+    /// has none. The sequence a RST must carry to be accepted by the peer.
+    pub fn snd_nxt_raw(&self) -> u32 {
+        match self {
+            Self::SynSent(s) => s.snd_nxt.raw(),
+            Self::SynRecv(s) => s.snd_nxt.raw(),
+            Self::Data(d) => d.snd_nxt.raw(),
+            Self::Listen(_) | Self::TimeWait(_) => 0,
+        }
+    }
+
     /// Coarse-grained label used by the socket layer to decide which
     /// POSIX state to advertise.  Replaces the old `sync_socket_state`
     /// polling loop.

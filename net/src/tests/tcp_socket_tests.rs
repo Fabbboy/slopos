@@ -5,10 +5,23 @@
 
 use slopos_ostd::KBox;
 use slopos_testing::TestResult;
-use slopos_testing::{assert_eq_test, assert_test, pass};
+use slopos_testing::{assert_eq_test, assert_test, fail, pass};
 
-use crate::tcp::listener::{SYN_QUEUE_MAX, SYN_RETRIES_MAX, TcpListenState, reset_syn_entry_keys};
+use crate::tcp::listener::{
+    SYN_QUEUE_MAX, SYN_RETRIES_MAX, SynQueue, TcpListenState, reset_syn_entry_keys,
+};
 use crate::types::{Ipv4Addr, Port, SockAddr};
+
+/// Helper: a SYN queue bound to [`local_addr`], capacity reserved.
+fn make_syn_queue() -> SynQueue {
+    SynQueue::with_capacity(local_addr()).expect("syn queue alloc")
+}
+
+/// Helper: an accept queue with the given backlog.
+fn make_listen(backlog: usize) -> TcpListenState {
+    TcpListenState::new(backlog, local_addr()).expect("listen state alloc")
+}
+
 /// Helper: create a local listening address.
 fn local_addr() -> SockAddr {
     SockAddr {
@@ -31,27 +44,23 @@ fn client_addr(n: u16) -> SockAddr {
 
 pub fn test_syn_queue_overflow() -> TestResult {
     reset_syn_entry_keys();
-    let mut listen = TcpListenState::new(64, local_addr());
+    let mut syn = make_syn_queue();
 
     // Fill the SYN queue to capacity.
     for i in 0..SYN_QUEUE_MAX as u16 {
         let client = client_addr(i);
-        let result = listen.on_syn(client, 1000 + i as u32, 1460, false, 0, None);
+        let result = syn.on_syn(client, 1000 + i as u32, 1460, false, 0, None);
         assert_test!(
             result.is_some(),
             "SYN {} should succeed (queue not full yet)"
         );
     }
 
-    assert_eq_test!(
-        listen.syn_queue_len(),
-        SYN_QUEUE_MAX,
-        "SYN queue at capacity"
-    );
+    assert_eq_test!(syn.len(), SYN_QUEUE_MAX, "SYN queue at capacity");
 
     // Next SYN should be silently dropped (no RST).
     let overflow_client = client_addr(SYN_QUEUE_MAX as u16);
-    let overflow_result = listen.on_syn(overflow_client, 9999, 1460, false, 0, None);
+    let overflow_result = syn.on_syn(overflow_client, 9999, 1460, false, 0, None);
     assert_test!(
         overflow_result.is_none(),
         "SYN queue full -> silently dropped (no RST)"
@@ -59,7 +68,7 @@ pub fn test_syn_queue_overflow() -> TestResult {
 
     // Queue length unchanged.
     assert_eq_test!(
-        listen.syn_queue_len(),
+        syn.len(),
         SYN_QUEUE_MAX,
         "SYN queue still at capacity after overflow"
     );
@@ -68,71 +77,53 @@ pub fn test_syn_queue_overflow() -> TestResult {
 }
 
 // =============================================================================
-// T2: Accept queue overflow — backlog=2, complete 3 connections, 3rd stays in
-//     SYN queue
+// T2: A matching final ACK always completes the handshake; whether the result
+//     can be queued for accept() is the socket layer's separate bound.
 // =============================================================================
 
 pub fn test_accept_queue_overflow() -> TestResult {
     reset_syn_entry_keys();
     let backlog = 2usize;
-    let mut listen = TcpListenState::new(backlog, local_addr());
+    let mut syn = make_syn_queue();
+    let mut listen = make_listen(backlog);
 
-    // Send 3 SYNs.
     for i in 0..3u16 {
         let client = client_addr(i);
-        let syn_ack = listen.on_syn(client, 1000 + i as u32, 1460, false, 0, None);
+        let syn_ack = syn.on_syn(client, 1000 + i as u32, 1460, false, 0, None);
         assert_test!(syn_ack.is_some(), "SYN should succeed");
     }
-    assert_eq_test!(listen.syn_queue_len(), 3, "3 entries in SYN queue");
+    assert_eq_test!(syn.len(), 3, "3 entries in SYN queue");
 
-    // Complete first two with ACK (should move to accept queue).
-    for i in 0..2u16 {
+    // A duplicate SYN hands the ISS back so each final ACK can be built.
+    let mut queued = 0usize;
+    let mut refused = 0usize;
+    for i in 0..3u16 {
         let client = client_addr(i);
-        // The SYN-ACK's ack_num will be iss+1; we need to know the ISS.
-        // Each on_syn generates a unique ISS. We need to get the ISS from the
-        // returned SYN-ACK. But we already consumed those. Re-approach: send a
-        // duplicate SYN to get the SYN-ACK back (which retransmits existing).
-        let retransmit = listen.on_syn(client, 1000 + i as u32, 1460, false, 0, None);
-        let syn_ack = retransmit.expect("duplicate SYN retransmits SYN-ACK");
-        let iss = syn_ack.seq_num;
-        let ack_num = iss.wrapping_add(1);
+        let syn_ack = syn
+            .on_syn(client, 1000 + i as u32, 1460, false, 0, None)
+            .expect("duplicate SYN retransmits SYN-ACK");
+        let ack_num = syn_ack.seq_num.wrapping_add(1);
 
-        let accepted = listen.on_ack(client, ack_num);
+        let accepted = syn.on_ack(client, ack_num);
         assert_test!(
             accepted.is_some(),
-            "connection should complete (accept queue has room)"
+            "a matching final ACK always completes the handshake"
         );
+        if listen.push_accepted(accepted.unwrap()) {
+            queued += 1;
+        } else {
+            refused += 1;
+        }
     }
 
-    assert_eq_test!(listen.accept_queue_len(), 2, "accept queue has 2");
-    assert_eq_test!(listen.syn_queue_len(), 1, "1 remaining in SYN queue");
+    assert_eq_test!(syn.len(), 0, "every entry left the SYN queue");
+    assert_eq_test!(queued, backlog, "the backlog took exactly its capacity");
+    assert_eq_test!(refused, 1, "the connection past the backlog was refused");
+    assert_eq_test!(listen.accept_queue_len(), backlog, "accept queue full");
 
-    // Complete third — accept queue is full, should stay in SYN queue.
-    let client2 = client_addr(2);
-    let retransmit2 = listen.on_syn(client2, 1002, 1460, false, 0, None);
-    let syn_ack2 = retransmit2.expect("duplicate SYN retransmits SYN-ACK");
-    let iss2 = syn_ack2.seq_num;
-    let ack_num2 = iss2.wrapping_add(1);
-
-    let overflow = listen.on_ack(client2, ack_num2);
-    assert_test!(
-        overflow.is_none(),
-        "accept queue full -> connection stays in SYN queue"
-    );
-    assert_eq_test!(listen.syn_queue_len(), 1, "still 1 in SYN queue");
-    assert_eq_test!(listen.accept_queue_len(), 2, "accept queue still full");
-
-    // Drain one from accept queue, then retry ACK — should succeed now.
-    let _ = listen.accept();
+    assert_test!(listen.accept().is_some(), "accept dequeues");
     assert_eq_test!(listen.accept_queue_len(), 1, "accept queue drained to 1");
-
-    let accepted_now = listen.on_ack(client2, ack_num2);
-    assert_test!(
-        accepted_now.is_some(),
-        "after draining accept queue, 3rd connection completes"
-    );
-    assert_eq_test!(listen.accept_queue_len(), 2, "accept queue back to 2");
-    assert_eq_test!(listen.syn_queue_len(), 0, "SYN queue drained");
+    assert_test!(listen.accept_queue_has_room(), "room after draining");
 
     pass!()
 }
@@ -144,12 +135,12 @@ pub fn test_accept_queue_overflow() -> TestResult {
 
 pub fn test_syn_ack_retransmit_exhaustion() -> TestResult {
     reset_syn_entry_keys();
-    let mut listen = TcpListenState::new(16, local_addr());
+    let mut syn = make_syn_queue();
 
     let client = client_addr(0);
-    let syn_ack = listen.on_syn(client, 5000, 1460, false, 0, None);
+    let syn_ack = syn.on_syn(client, 5000, 1460, false, 0, None);
     assert_test!(syn_ack.is_some(), "initial SYN accepted");
-    assert_eq_test!(listen.syn_queue_len(), 1, "1 entry in SYN queue");
+    assert_eq_test!(syn.len(), 1, "1 entry in SYN queue");
 
     // The SYN-ACK returned by on_syn tells us the ISS.
     let syn_ack = syn_ack.unwrap();
@@ -161,7 +152,7 @@ pub fn test_syn_ack_retransmit_exhaustion() -> TestResult {
 
     // Simulate 5 retransmit timer firings — each should return a SYN-ACK.
     for _retry in 1..=SYN_RETRIES_MAX {
-        let retransmit = listen.on_retransmit(entry_key);
+        let retransmit = syn.on_retransmit(entry_key);
         assert_test!(retransmit.is_some(), "retransmit should succeed on retry");
         let seg = retransmit.unwrap();
         assert_eq_test!(
@@ -169,17 +160,17 @@ pub fn test_syn_ack_retransmit_exhaustion() -> TestResult {
             original_iss,
             "ISS unchanged across retransmits"
         );
-        assert_eq_test!(listen.syn_queue_len(), 1, "entry still in SYN queue");
+        assert_eq_test!(syn.len(), 1, "entry still in SYN queue");
     }
 
     // 6th retransmit (retry > SYN_RETRIES_MAX) — entry should be removed.
-    let exhausted = listen.on_retransmit(entry_key);
+    let exhausted = syn.on_retransmit(entry_key);
     assert_test!(
         exhausted.is_none(),
         "retransmit returns None after max retries"
     );
     assert_eq_test!(
-        listen.syn_queue_len(),
+        syn.len(),
         0,
         "entry removed from SYN queue after exhaustion"
     );
@@ -193,15 +184,15 @@ pub fn test_syn_ack_retransmit_exhaustion() -> TestResult {
 
 pub fn test_duplicate_syn_retransmits() -> TestResult {
     reset_syn_entry_keys();
-    let mut listen = TcpListenState::new(16, local_addr());
+    let mut syn = make_syn_queue();
 
     let client = client_addr(42);
-    let first = listen.on_syn(client, 7000, 1460, false, 0, None);
+    let first = syn.on_syn(client, 7000, 1460, false, 0, None);
     assert_test!(first.is_some(), "first SYN accepted");
     let first_iss = first.unwrap().seq_num;
 
     // Send duplicate SYN — should retransmit the same SYN-ACK.
-    let dup = listen.on_syn(client, 7000, 1460, false, 100, None);
+    let dup = syn.on_syn(client, 7000, 1460, false, 100, None);
     assert_test!(dup.is_some(), "duplicate SYN triggers SYN-ACK retransmit");
     let dup_iss = dup.unwrap().seq_num;
 
@@ -210,7 +201,7 @@ pub fn test_duplicate_syn_retransmits() -> TestResult {
         dup_iss,
         "duplicate SYN returns same ISS (same entry)"
     );
-    assert_eq_test!(listen.syn_queue_len(), 1, "no duplicate entry created");
+    assert_eq_test!(syn.len(), 1, "no duplicate entry created");
 
     pass!()
 }
@@ -221,7 +212,7 @@ pub fn test_duplicate_syn_retransmits() -> TestResult {
 
 pub fn test_push_accepted_basic() -> TestResult {
     reset_syn_entry_keys();
-    let mut listen = TcpListenState::new(4, local_addr());
+    let mut listen = make_listen(4);
 
     // Push an accepted connection directly.
     let accepted = crate::tcp::listener::AcceptedConn {
@@ -274,7 +265,7 @@ pub fn test_push_accepted_basic() -> TestResult {
 pub fn test_push_accepted_respects_backlog() -> TestResult {
     reset_syn_entry_keys();
     let backlog = 2usize;
-    let mut listen = TcpListenState::new(backlog, local_addr());
+    let mut listen = make_listen(backlog);
 
     // Fill to backlog.
     for i in 0..backlog as u16 {
@@ -352,15 +343,15 @@ pub fn test_listen_state_backlog_clamping() -> TestResult {
     reset_syn_entry_keys();
 
     // Backlog 0 should clamp to BACKLOG_MIN (1).
-    let listen_min = TcpListenState::new(0, local_addr());
+    let listen_min = make_listen(0);
     assert_eq_test!(
         listen_min.backlog(),
         crate::tcp::listener::BACKLOG_MIN,
         "backlog=0 should clamp to BACKLOG_MIN"
     );
 
-    // Backlog 999 should clamp to BACKLOG_MAX (128).
-    let listen_max = TcpListenState::new(999, local_addr());
+    // Backlog 999 should clamp to BACKLOG_MAX.
+    let listen_max = make_listen(999);
     assert_eq_test!(
         listen_max.backlog(),
         crate::tcp::listener::BACKLOG_MAX,
@@ -368,7 +359,7 @@ pub fn test_listen_state_backlog_clamping() -> TestResult {
     );
 
     // Normal backlog should pass through.
-    let listen_normal = TcpListenState::new(16, local_addr());
+    let listen_normal = make_listen(16);
     assert_eq_test!(
         listen_normal.backlog(),
         16,
@@ -384,7 +375,7 @@ pub fn test_listen_state_backlog_clamping() -> TestResult {
 
 pub fn test_accept_fifo_order() -> TestResult {
     reset_syn_entry_keys();
-    let mut listen = TcpListenState::new(8, local_addr());
+    let mut listen = make_listen(8);
 
     // Push 3 connections with distinct remote ports.
     for i in 0..3u16 {
@@ -428,11 +419,12 @@ pub fn test_accept_fifo_order() -> TestResult {
 
 pub fn test_listen_state_clear() -> TestResult {
     reset_syn_entry_keys();
-    let mut listen = TcpListenState::new(16, local_addr());
+    let mut syn = make_syn_queue();
+    let mut listen = make_listen(16);
 
     // Add something to SYN queue.
-    let _ = listen.on_syn(client_addr(0), 1000, 1460, false, 0, None);
-    assert_eq_test!(listen.syn_queue_len(), 1, "SYN queue has 1 entry");
+    let _ = syn.on_syn(client_addr(0), 1000, 1460, false, 0, None);
+    assert_eq_test!(syn.len(), 1, "SYN queue has 1 entry");
 
     // Push to accept queue.
     let accepted = crate::tcp::listener::AcceptedConn {
@@ -451,9 +443,10 @@ pub fn test_listen_state_clear() -> TestResult {
     listen.push_accepted(accepted);
     assert_eq_test!(listen.accept_queue_len(), 1, "accept queue has 1 entry");
 
-    // Clear both queues.
+    // Each queue clears its own half now.
+    syn.clear();
     listen.clear();
-    assert_eq_test!(listen.syn_queue_len(), 0, "SYN queue cleared");
+    assert_eq_test!(syn.len(), 0, "SYN queue cleared");
     assert_eq_test!(listen.accept_queue_len(), 0, "accept queue cleared");
 
     pass!()
@@ -859,3 +852,81 @@ slopos_testing::stest!(
 slopos_testing::stest!(name = test_tcp_data_roundtrip, suite = tcp_socket);
 slopos_testing::stest!(name = test_tcp_send_buffer_space, suite = tcp_socket);
 slopos_testing::stest!(name = test_fin_full_teardown, suite = tcp_socket);
+
+/// A listener's established children are released with it.
+///
+/// A child installed on the final ACK holds a shard slot and names its
+/// listener as its socket. Nothing else reclaims those once the listener is
+/// gone — they would sit until a RST, a FIN or TIME_WAIT expiry, which is a
+/// slow leak of the machine-wide table driven entirely by a remote peer.
+pub fn test_listener_release_reclaims_its_children() -> TestResult {
+    use crate::tcp::SocketId;
+
+    tcp_common::reset_all();
+
+    let server_ip = [10, 0, 0, 1];
+    let client_ip = [10, 0, 0, 2];
+    let owner = SocketId(7);
+
+    let listen_id = match tcp::listen(server_ip, 8080) {
+        Ok(id) => id,
+        Err(e) => return fail!("listen failed: {:?}", e),
+    };
+    // Children inherit the listener's socket, which is the link the release
+    // walks.
+    tcp::set_socket_idx(listen_id, Some(owner));
+    let before = tcp::active_count();
+
+    for i in 0..2u16 {
+        let port = 51000 + i;
+        let syn = TcpHeader {
+            src_port: port,
+            dst_port: 8080,
+            seq_num: 1000 + i as u32,
+            ack_num: 0,
+            data_offset: 5,
+            flags: crate::tcp::TCP_FLAG_SYN,
+            window_size: 32768,
+            checksum: 0,
+            urgent_ptr: 0,
+        };
+        let r = tcp::input(client_ip, server_ip, &syn, &[], &[], 0);
+        let Some(syn_ack) = r.segments().next().cloned() else {
+            return fail!("no SYN+ACK for handshake {}", i);
+        };
+        let ack = TcpHeader {
+            src_port: port,
+            dst_port: 8080,
+            seq_num: 1001 + i as u32,
+            ack_num: syn_ack.seq_num.wrapping_add(1),
+            data_offset: 5,
+            flags: TCP_FLAG_ACK,
+            window_size: 32768,
+            checksum: 0,
+            urgent_ptr: 0,
+        };
+        let _ = tcp::input(client_ip, server_ip, &ack, &[], &[], 0);
+    }
+
+    if tcp::active_count() != before + 2 {
+        return fail!(
+            "expected {} active connections after two handshakes, got {}",
+            before + 2,
+            tcp::active_count()
+        );
+    }
+
+    let orphans = tcp::release_children_of(owner);
+    assert_eq_test!(orphans.len(), 2, "both children reported for reset");
+    assert_eq_test!(
+        tcp::active_count(),
+        before,
+        "the children kept their table slots"
+    );
+    pass!()
+}
+
+slopos_testing::stest!(
+    name = test_listener_release_reclaims_its_children,
+    suite = tcp_socket
+);

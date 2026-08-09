@@ -756,6 +756,7 @@ pub fn test_tcp_passive_handshake_complete() -> TestResult {
 
     // Step 1: Server listens.
     let listen_id = tcp::listen(server_ip, 80).unwrap();
+    let before = tcp::active_count();
 
     // Step 2: Client sends SYN.
     let client_iss = 3000u32;
@@ -773,20 +774,24 @@ pub fn test_tcp_passive_handshake_complete() -> TestResult {
     let mss_opt = [tcp::TCP_OPT_MSS, tcp::TCP_OPT_MSS_LEN, 0x05, 0xB4]; // 1460
 
     let result = tcp::input(client_ip, server_ip, &syn, &mss_opt, &[], 0);
-    assert_test!(result.accepted.is_some(), "new connection accepted");
 
-    // Find the child's ConnId via its tuple.
+    // The SYN buys a SYN-queue entry and a SYN+ACK, and nothing else. Half-open
+    // state must not reach the machine-wide connection table, which is what
+    // makes a flood of unanswered SYNs survivable.
+    assert_test!(
+        result.accepted.is_none(),
+        "a SYN must not produce an accepted connection"
+    );
     let child_tuple = TcpTuple {
         local_ip: server_ip,
         local_port: 80,
         remote_ip: client_ip,
         remote_port: 50000,
     };
-    let child_id = tcp::find(&child_tuple).expect("child should be in table");
     assert_eq_test!(
-        tcp::get_state(child_id),
-        Some(TcpState::SynReceived),
-        "SYN_RECEIVED"
+        tcp::active_count(),
+        before,
+        "a SYN must not consume a connection-table slot"
     );
 
     // Should respond with SYN+ACK.
@@ -808,7 +813,7 @@ pub fn test_tcp_passive_handshake_complete() -> TestResult {
         "listen still active"
     );
 
-    // Step 3: Client completes handshake with ACK.
+    // Step 3: the final ACK is what promotes the connection into the table.
     let ack = TcpHeader {
         src_port: 50000,
         dst_port: 80,
@@ -822,16 +827,17 @@ pub fn test_tcp_passive_handshake_complete() -> TestResult {
     };
 
     let _result = tcp::input(client_ip, server_ip, &ack, &[], &[], 0);
+    let child_id = tcp::find(&child_tuple).expect("child should be in table");
+    assert_test!(!child_id.is_listener(), "the tuple names a connection");
     assert_eq_test!(
         tcp::get_state(child_id),
         Some(TcpState::Established),
         "ESTABLISHED"
     );
-
     assert_eq_test!(
         with_data_state!(child_id, |d| d.peer_mss),
         1460,
-        "peer MSS from options"
+        "peer MSS from the SYN's options survived the queue"
     );
     assert_eq_test!(
         tcp::with_pcb(child_id, |pcb| pcb.tuple.remote_port).unwrap(),
@@ -851,9 +857,10 @@ pub fn test_tcp_passive_rst_in_syn_received() -> TestResult {
     let server_ip = [10, 0, 0, 1];
     let client_ip = [10, 0, 0, 2];
 
-    tcp::listen(server_ip, 80).unwrap();
+    let listen_id = tcp::listen(server_ip, 80).unwrap();
+    let before = tcp::active_count();
 
-    // Client SYN.
+    // Client SYN — queued half-open, no table slot.
     let syn = TcpHeader {
         src_port: 50000,
         dst_port: 80,
@@ -866,15 +873,14 @@ pub fn test_tcp_passive_rst_in_syn_received() -> TestResult {
         urgent_ptr: 0,
     };
     let _result = tcp::input(client_ip, server_ip, &syn, &[], &[], 0);
-    let child_tuple = TcpTuple {
-        local_ip: server_ip,
-        local_port: 80,
-        remote_ip: client_ip,
-        remote_port: 50000,
-    };
-    let child_id = tcp::find(&child_tuple).expect("child should be in table");
+    assert_eq_test!(
+        tcp::active_count(),
+        before,
+        "a SYN must not consume a connection-table slot"
+    );
 
-    // Client sends RST.
+    // Client abandons the handshake. The listener retires the entry; there is
+    // no PCB to reset and nothing to answer.
     let rst = TcpHeader {
         src_port: 50000,
         dst_port: 80,
@@ -887,15 +893,35 @@ pub fn test_tcp_passive_rst_in_syn_received() -> TestResult {
         urgent_ptr: 0,
     };
     let result = tcp::input(client_ip, server_ip, &rst, &[], &[], 0);
-    assert_test!(
-        result.notify.contains(SocketNotify::RESET_RECEIVED),
-        "reset flag"
+    assert_eq_test!(result.segments_len, 0, "a RST at LISTEN is never answered");
+    assert_eq_test!(
+        tcp::active_count(),
+        before,
+        "no connection-table slot was consumed or leaked"
     );
-    // Released PCB = None.
-    assert_eq_test!(tcp::get_state(child_id), None, "child released");
+    assert_eq_test!(
+        tcp::get_state(listen_id),
+        Some(TcpState::Listen),
+        "listen still active"
+    );
 
-    // Child connection released, listen still active.
-    assert_test!(tcp::get_state(child_id).is_none(), "child released");
+    // The abandoned handshake left no state: its final ACK now names nothing.
+    let stale_ack = TcpHeader {
+        src_port: 50000,
+        dst_port: 80,
+        seq_num: 1001,
+        ack_num: 12345,
+        data_offset: 5,
+        flags: TCP_FLAG_ACK,
+        window_size: 8192,
+        checksum: 0,
+        urgent_ptr: 0,
+    };
+    let late = tcp::input(client_ip, server_ip, &stale_ack, &[], &[], 0);
+    assert_test!(
+        late.accepted.is_none(),
+        "a retired handshake cannot be completed"
+    );
     pass!()
 }
 
@@ -1817,6 +1843,7 @@ pub fn test_tcp_buffer_alloc_failure_resets_peer() -> TestResult {
     let client_ip = [10, 0, 0, 2];
 
     tcp::listen(server_ip, 80).unwrap();
+    let before = tcp::active_count();
 
     let client_iss = 3000u32;
     let syn = TcpHeader {
@@ -1837,19 +1864,8 @@ pub fn test_tcp_buffer_alloc_failure_resets_peer() -> TestResult {
     };
     let server_iss = syn_ack.seq_num;
 
-    let child_tuple = TcpTuple {
-        local_ip: server_ip,
-        local_port: 80,
-        remote_ip: client_ip,
-        remote_port: 50001,
-    };
-    let child_id = match tcp::find(&child_tuple) {
-        Some(id) => id,
-        None => return fail!("child PCB was not installed"),
-    };
-
-    // The final ACK drives SYN_RECEIVED -> ESTABLISHED, which is where the
-    // rings are needed.
+    // The final ACK is where the connection is installed and its rings are
+    // allocated, so that is where the failure has to land.
     crate::tcp::buffer::inject_buffer_alloc_failures(1);
     let ack = TcpHeader {
         src_port: 50001,
@@ -1869,15 +1885,10 @@ pub fn test_tcp_buffer_alloc_failure_resets_peer() -> TestResult {
         .segments()
         .any(|seg| seg.flags & TCP_FLAG_RST != 0 && seg.tuple.remote_port == 50001);
     assert_test!(reset_sent, "a peer that cannot be served was not reset");
-    assert_test!(
-        tcp::get_state(child_id).is_none(),
+    assert_eq_test!(
+        tcp::active_count(),
+        before,
         "the unserviceable connection kept its table slot"
-    );
-    // The tuple falls back to the listener's wildcard entry; what must be gone
-    // is the connection's own slot.
-    assert_test!(
-        tcp::find(&child_tuple).map(|id| id.is_listener()) != Some(false),
-        "the unserviceable connection kept its demux entry"
     );
 
     // The injection is spent, so the next handshake on the same listener

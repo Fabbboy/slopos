@@ -46,13 +46,13 @@ pub use pcb::data::{ClosePhase, DataState};
 pub use pcb::{ObservedSocketState, PcbState, TcpState};
 pub use pcb::{Pcb, SocketId};
 pub use reasm::Assembler;
-pub use segment::{TcpOutSegment, write_tcp_segment};
+pub use segment::{SegmentBuilder, TcpOutSegment, write_tcp_segment};
 pub use seq::{SeqDelta, SeqNum, seq_ge, seq_gt, seq_le, seq_lt};
 pub use table::ConnId;
 
 use self::cong::CongestionControl;
-use self::segment::SegmentBuilder;
 use crate::timer::{NET_TIMER_WHEEL, TimerKind, TimerToken};
+use crate::types::{Ipv4Addr, Port, SockAddr};
 
 use slopos_ostd::klog_debug;
 use slopos_ostd::mm::frame::AnonymousMeta;
@@ -124,17 +124,36 @@ pub fn input(
     };
 
     if id.is_listener() {
-        let (mut actions, parent_sock) = input_process_listener(id, hdr, options, payload, now_ms);
-        // Install child PCB from LISTEN accept. Runs *outside* the
-        // listener's per-slot lock (already dropped) so install can
-        // freely acquire the matching shard's write lock.
+        let (mut actions, parent_sock) =
+            input_process_listener(id, &incoming_tuple, hdr, options, now_ms);
+        // `accepted` means the listener's SYN queue matched this segment as
+        // the final ACK of a handshake. Installing the child runs *outside*
+        // the listener's per-slot lock (already dropped) so it can take the
+        // matching shard's write lock.
+        if actions.accepted.is_some()
+            && let Some(child_id) =
+                install_accepted_child(&incoming_tuple, &actions, hdr, parent_sock)
+        {
+            // Hand the child its own ACK. Its SynRecv handler runs the
+            // transition to Data, which is where the connection buffers and
+            // the NEW_ESTABLISHED notify come from — the same path every
+            // other segment takes, rather than a second copy of it here.
+            let mut child_actions =
+                input_process_established(child_id, &incoming_tuple, hdr, options, payload, now_ms);
+            child_actions.merge_segments_from(&mut actions);
+            return child_actions;
+        }
         if actions.accepted.is_some() {
-            install_accepted_child(&incoming_tuple, &actions, hdr, parent_sock);
+            // The table had no room. The peer believes the handshake
+            // completed, so it has to be told otherwise.
+            actions.accepted = None;
+            actions.notify = SocketNotify::empty();
+            actions.push_segment(SegmentBuilder::rst_for(hdr, dst_ip, src_ip));
         }
         actions.conn_id = Some(id);
         actions
     } else {
-        input_process_established(id, hdr, options, payload, now_ms)
+        input_process_established(id, &incoming_tuple, hdr, options, payload, now_ms)
     }
 }
 
@@ -144,13 +163,13 @@ pub fn input(
 #[inline(never)]
 fn input_process_listener(
     id: ConnId,
+    incoming: &TcpTuple,
     hdr: &TcpHeader,
     options: &[u8],
-    payload: &[u8],
     now_ms: u64,
 ) -> (Actions, Option<pcb::SocketId>) {
     table::with_pcb_mut(id, |pcb| {
-        let mut actions = pcb.on_segment(None, hdr, options, payload, now_ms);
+        let mut actions = pcb.on_segment(None, incoming, hdr, options, &[], now_ms);
         actions.conn_id = Some(id);
         (actions, pcb.socket_id)
     })
@@ -175,10 +194,10 @@ fn install_accepted_child(
     actions: &Actions,
     hdr: &TcpHeader,
     parent_sock: Option<pcb::SocketId>,
-) {
+) -> Option<ConnId> {
     let accepted = match &actions.accepted {
         Some(a) => a,
-        None => return,
+        None => return None,
     };
     let child_iss = SeqNum::new(accepted.iss);
     let child_irs = SeqNum::new(accepted.irs);
@@ -191,9 +210,62 @@ fn install_accepted_child(
         child_state.peer_tsval = tsval;
     }
 
-    let _ = table::install_established(*incoming_tuple, PcbState::SynRecv(child_state), |child| {
+    // The failure is not discarded: the peer completed a handshake, and a
+    // connection it cannot be given has to be reset rather than left open on
+    // its side alone.
+    table::install_established(*incoming_tuple, PcbState::SynRecv(child_state), |child| {
         child.socket_id = parent_sock;
-    });
+    })
+    .ok()
+}
+
+/// A SYN-ACK retransmit timer fired for `key`.
+///
+/// The key belongs to a SYN-queue entry, not to a `ConnId`, so the owning
+/// listener is found by scanning the listener slots — there are
+/// `MAX_LISTENERS` of them and this runs once per timer, not per segment.
+pub fn on_syn_ack_retransmit(key: u32) -> Option<TcpOutSegment> {
+    for slot in 0..table::MAX_LISTENERS {
+        let found = table::with_listener_slot_mut(slot, |pcb| {
+            let PcbState::Listen(listen) = &mut pcb.state else {
+                return None;
+            };
+            if !listen.syn_queue().has_key(key) {
+                return None;
+            }
+            listen.syn_queue_mut().on_retransmit(key)
+        });
+        if let Some(Some(seg)) = found {
+            return Some(seg);
+        }
+    }
+    None
+}
+
+/// Release every established child a closing listener still owns.
+///
+/// A child installed by [`install_accepted_child`] carries its parent's
+/// `socket_id` and holds a shard slot. Nothing else reclaims those when the
+/// listener goes away — they would sit until a RST, a FIN or `TIME_WAIT`
+/// expiry — so the close releases them, and returns their tuples for the
+/// caller to reset the peers it was still speaking to.
+pub fn release_children_of(socket_id: pcb::SocketId) -> KVec<(TcpTuple, u32)> {
+    let mut ids = [None; table::TOTAL_PCB_SLOTS];
+    let count = table::snapshot_shard_conn_ids(&mut ids);
+    let mut orphans = KVec::new();
+    for id in ids.iter().take(count).flatten() {
+        let owned = table::with_pcb(*id, |pcb| {
+            (pcb.socket_id == Some(socket_id)).then(|| (pcb.tuple, pcb.state.snd_nxt_raw()))
+        })
+        .flatten();
+        if let Some(entry) = owned {
+            if orphans.push(entry).is_err() {
+                break;
+            }
+            table::release(*id);
+        }
+    }
+    orphans
 }
 
 /// Give `id` the send/receive rings its next transition assumes, if it does not
@@ -256,6 +328,7 @@ fn reset_for_no_buffer(actions: &mut Actions, tuple: &TcpTuple, hdr: &TcpHeader)
 #[inline(never)]
 fn input_process_established(
     id: ConnId,
+    incoming: &TcpTuple,
     hdr: &TcpHeader,
     options: &[u8],
     payload: &[u8],
@@ -264,7 +337,14 @@ fn input_process_established(
     let _ = ensure_connection_buffer(id);
 
     let actions = table::with_pcb_and_bufs(id, |pcb, buffer_slot| {
-        let mut actions = pcb.on_segment(buffer_slot.as_mut(), hdr, options, payload, now_ms);
+        let mut actions = pcb.on_segment(
+            buffer_slot.as_mut(),
+            incoming,
+            hdr,
+            options,
+            payload,
+            now_ms,
+        );
         actions.conn_id = Some(id);
 
         // Apply timer operations. State handlers emit `key: 0` as a
@@ -444,7 +524,16 @@ pub fn listen(local_ip: [u8; 4], local_port: u16) -> Result<ConnId, TcpError> {
         remote_ip: [0; 4],
         remote_port: 0,
     };
-    let id = table::install_listener(tuple, PcbState::Listen(pcb::ListenState::new()), |_| {})?;
+    // The queue is built here, before the listener slot lock is taken: a
+    // `push` that grew it inside `on_syn` would run the allocator beneath a
+    // cli-spinlock an unauthenticated peer drives.
+    let local = SockAddr::new(Ipv4Addr(local_ip), Port(local_port));
+    let syn_queue = listener::SynQueue::with_capacity(local)?;
+    let id = table::install_listener(
+        tuple,
+        PcbState::Listen(pcb::ListenState::with_syn_queue(syn_queue)),
+        |_| {},
+    )?;
 
     klog_debug!("tcp: LISTEN on port {} id={}", local_port, id);
     Ok(id)

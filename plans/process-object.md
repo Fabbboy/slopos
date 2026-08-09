@@ -101,7 +101,7 @@ all already exist.
 - `pick_pid_slot_locked`'s kernel-descriptor-table fallback (`fs/src/fileio/mod.rs:425`)
   stops being reachable by construction rather than by a returned `None`. A slot is
   found by generation-checked handle or not at all.
-  (`plans/kernel-hardening.md` item 2 makes it `None` first, because that isolation
+  (the descriptor-table lookup already answers `None` there, because that isolation
   break should not wait for this plan.)
 - The recycled-id hazard collapses. A stale handle fails the generation check instead of
   resolving to a stranger — the argument mm has already written for its own handle

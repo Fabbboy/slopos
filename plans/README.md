@@ -15,7 +15,6 @@ editing.
 | Document | Scope |
 |----------|-------|
 | `KNOWN_ISSUES.md` | Working notes on open issues; verify before using as source of truth |
-| `kernel-hardening.md` | Twelve defects reachable from an unprivileged process; each a local fix needing no framework. Land first |
 | `process-object.md` | The `Process` object and the re-key of the address-space and descriptor tables off the recycled pid. Prerequisite for the two below |
 | `resource-accounting.md` | Per-principal accounting: the `Account` tree, the linear `Charge` token, who pays per resource class |
 | `authority-model.md` | What authority is: a flat per-process capability set, total by compile-time construction, with rights on objects |
@@ -23,7 +22,7 @@ editing.
 | `microtransactions.md` | Kernel microtransaction layer on W/L currency; Phase 1 = pay-to-boot gate |
 | `usb-xhci.md` | USB/xHCI stack: host controller, enumeration, HID input, mass storage |
 
-`kernel-hardening.md` → `process-object.md` → {`resource-accounting.md`,
+`process-object.md` → {`resource-accounting.md`,
 `authority-model.md`} is a dependency order, not a suggestion: the latter two both need an
 owner for their state, and the first two carry the fixes that would otherwise be hidden
 rather than fixed by the frameworks above them.

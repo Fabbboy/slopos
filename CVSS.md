@@ -1,7 +1,7 @@
 # SlopOS Vulnerability Audit and CVSS Scoring
 
 Date: 2026-03-17 (original); last reviewed 2026-08-08.
-Method: repository-wide static review (`grep`, `ast-grep`, targeted source inspection), plus NVD CVE lookups via `curl` + `jq`. The 2026-07-30 pass added a structured sweep: six reference briefs on proven kernel designs, fifteen per-subsystem auditors, then one adversarial verifier per candidate finding (two independent lenses for the most severe), each instructed to default to REFUTED and to locate the guard that would disprove the claim. Only findings that survived verification with a concrete attacker trigger are recorded here. The 2026-08-08 pass swept the authorization and resource-accounting surfaces specifically, over twelve prior-art clusters and seven adversarial lenses, and added 0044–0052; its remediation lives in `plans/kernel-hardening.md`, `plans/process-object.md`, `plans/resource-accounting.md` and `plans/authority-model.md`.
+Method: repository-wide static review (`grep`, `ast-grep`, targeted source inspection), plus NVD CVE lookups via `curl` + `jq`. The 2026-07-30 pass added a structured sweep: six reference briefs on proven kernel designs, fifteen per-subsystem auditors, then one adversarial verifier per candidate finding (two independent lenses for the most severe), each instructed to default to REFUTED and to locate the guard that would disprove the claim. Only findings that survived verification with a concrete attacker trigger are recorded here. The 2026-08-08 pass swept the authorization and resource-accounting surfaces specifically, over twelve prior-art clusters and seven adversarial lenses, and added 0044–0052; its remediation lives in `plans/process-object.md`, `plans/resource-accounting.md` and `plans/authority-model.md`; the nine findings that had no framework dependency have since been fixed and removed under the policy below.
 
 > **Pre-alpha ledger policy.** SlopOS is pre-alpha with no backwards-compatibility or audit-trail obligations, so this ledger tracks **open findings only**. When a finding is resolved it is **removed** from this file (not retained as a `fixed` historical record). Internal IDs stay stable for findings that remain open, so gaps in the numbering are expected.
 
@@ -29,20 +29,11 @@ python3 scripts/cvss_calc.py "CVSS:3.1/AV:L/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H"
 | [SLOPOS-2026-0012](#slopos-2026-0012) | 9.1 | CRITICAL | The in-kernel DNS resolver has effectively no anti-spoofing entropy and accepts responses from any host |
 | [SLOPOS-2026-0017](#slopos-2026-0017) | 7.8 | HIGH | PCIDs are assigned from a wrapping 12-bit counter with no reuse tracking while every CR3 write is NOFLUSH |
 | [SLOPOS-2026-0039](#slopos-2026-0039) | 7.6 | HIGH | Device-supplied PCI offsets are used to map MMIO without bounding them against the BAR |
-| [SLOPOS-2026-0044](#slopos-2026-0044) | 7.8 | HIGH | `/bin` is writable, so the program-identity grant hands any process the privileges of any privileged binary |
-| [SLOPOS-2026-0011](#slopos-2026-0011) | 7.5 | HIGH | Half-open TCP connections are never reclaimed, so ~64 SYNs wedge the whole stack |
 | [SLOPOS-2026-0013](#slopos-2026-0013) | 7.4 | HIGH | No RFC 793 §3.9 sequence-acceptability check: a blind SYN tears down an established connection |
 | [SLOPOS-2026-0020](#slopos-2026-0020) | 7.1 | HIGH | `execve` is not an address-space boundary |
 | [SLOPOS-2026-0021](#slopos-2026-0021) | 7.1 | HIGH | Mount resolution is a textual prefix match on the unnormalised user path |
 | [SLOPOS-2026-0037](#slopos-2026-0037) | 7.1 | HIGH | The compositor clipboard has no authorization |
-| [SLOPOS-2026-0051](#slopos-2026-0051) | 7.1 | HIGH | An exhausted descriptor-table allocator installs a userland process's descriptors into the kernel's own table |
-| [SLOPOS-2026-0047](#slopos-2026-0047) | 6.1 | MEDIUM | `read` and `write` bypass the descriptor layer to the global console and a hardcoded TTY 0 |
-| [SLOPOS-2026-0052](#slopos-2026-0052) | 5.9 | MEDIUM | An unauthenticated remote peer panics the kernel from softirq under a cli-spinlock |
-| [SLOPOS-2026-0050](#slopos-2026-0050) | 5.6 | MEDIUM | Any task rewrites the global keyboard layout |
-| [SLOPOS-2026-0045](#slopos-2026-0045) | 5.5 | MEDIUM | `kill` and `terminate_task` perform no caller-versus-target authorization |
-| [SLOPOS-2026-0046](#slopos-2026-0046) | 5.5 | MEDIUM | The global input sink is acquired at frame rate and never released |
 | [SLOPOS-2026-0049](#slopos-2026-0049) | 5.5 | MEDIUM | `halt` and `reboot` have no authorization check, by three separate paths |
-| [SLOPOS-2026-0048](#slopos-2026-0048) | 4.4 | MEDIUM | `waitpid` reaps any zombie in the system |
 | [SLOPOS-2026-0043](#slopos-2026-0043) | 6.6 | MEDIUM | ext2 mounts and writes any image whose magic and geometry are sane, with no feature-compatibility gate |
 | [SLOPOS-2026-0022](#slopos-2026-0022) | 6.3 | MEDIUM | ramfs recycles inode ids immediately on unlink while descriptors still name them |
 | [SLOPOS-2026-0014](#slopos-2026-0014) | 5.9 | MEDIUM | TCP initial sequence numbers come from an invertible FNV chain |
@@ -77,22 +68,6 @@ These are **candidate CVE-style records** for internal tracking. They are not of
 - Impact: malformed-image-triggered out-of-bounds slice index. Because `fs/` is `#![forbid(unsafe_code)]`, this is a bounded-slice **panic** (DoS), never memory unsafety/UB.
 - CVSS vector/score: not assigned because confidence is below 80.
 - Remediation (proposed): validate `effective_inode_size() as u32 <= block_size` and bound each `within + size` against the containing block before slicing. Note that SLOPOS-2026-0043 covers the adjacent absence of a feature-compatibility gate on the same mount path.
-
-### SLOPOS-2026-0011
-- Title: Half-open TCP connections are never reclaimed, so ~64 SYNs wedge the whole stack
-- Status: open
-- Confidence: 92 — evidence 40 (the accept path, the table bound, the timer enum and the retransmit guard all read directly), exploitability 30 (remote, unauthenticated, 64 packets), reproducibility 22 (needs a listening socket, which the audit confirmed is the only precondition)
-- CVSS vector/score: `CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:N/A:H` — **7.5 HIGH**
-- Impact: Server-side SYN_RECV PCBs occupy one of 64 global connection slots with no SYN_RECV timeout and no SYN-ACK retransmit on that path, and nothing sweeps the table. TCP is denied to the whole system until reboot. The bounded two-queue SYN defence in `net/src/tcp/listener.rs` — SYN_QUEUE_MAX, SYN_RETRIES_MAX, real retransmit timers, fully tested — has no production caller; `on_syn` is dead code.
-- Evidence:
-  - net/src/tcp/pcb/listen.rs:98-105 — a SYN fills `actions.accepted` unconditionally; there is no backlog check, no queue, no drop policy
-  - net/src/tcp/mod.rs:194-197 — `install_accepted_child` calls `table::install_established(...)`, permanently consuming a shard slot, and discards the `Result` with `let _ =`
-  - net/src/tcp/table.rs:60-69 — `NUM_SHARDS = 16`, `SLOTS_PER_SHARD = 4`; total established-connection capacity for the whole kernel is 64
-  - net/src/timer.rs:65-83 — the complete `TimerKind` enum: `ArpExpire, ArpRetransmit, TcpRetransmit, TcpDelayedAck, TcpTimeWait, TcpKeepalive, TcpFinWait2, ReassemblyTimeout`. There is no SYN_RECV or SYN_SENT kind.
-  - net/src/tcp/mod.rs:1135-1141 — `on_retransmit` returns `Outcome::Skip` unless `PcbState::Data`, so the one retransmit timer that exists never touches a half-open PCB
-- Repro:
-  Against any listening port, send 64 SYNs from distinct source ports and never complete the handshake. `tcp_hash` is an unkeyed FNV-1a over the four-tuple, so the shard placement is computable offline and exactly 4 ports per shard suffice. Every subsequent connection attempt, inbound or outbound, fails with TableFull.
-- Remediation: Wire the existing `TcpListenState::on_syn` SYN queue into the input path — the defence is already built and merely unreachable. Add a SYN_RECV timeout kind to the timer enum and evict half-open entries when a shard fills.
 
 ### SLOPOS-2026-0012
 - Title: The in-kernel DNS resolver has effectively no anti-spoofing entropy and accepts responses from any host
@@ -546,84 +521,6 @@ These are **candidate CVE-style records** for internal tracking. They are not of
   Mount an ext4 image with extents enabled. It mounts read-write, and any write corrupts it.
 - Remediation: Check `s_feature_incompat` against the set actually implemented and refuse to mount otherwise; check `s_feature_ro_compat` and mount read-only when an unsupported read-only-compatible feature is present. This is exactly the gate Linux's `ext4_feature_set_ok` performs.
 
-### SLOPOS-2026-0044
-- Title: `/bin` is writable, so the program-identity grant hands any process the privileges of any privileged binary
-- Status: open
-- Confidence: 95 — evidence 40 (the unpack path, the write path, the missing permission checks and the exec gate all read directly), exploitability 30 (one `open` with `O_TRUNC`, one write, one `spawn_path`), reproducibility 25 (deterministic; the replacement binary must be a valid ELF)
-- CVSS vector/score: `CVSS:3.1/AV:L/AC:L/PR:L/UI:N/S:U/C:H/I:H/A:H` — **7.8 HIGH**
-- Impact: Privilege in SlopOS is conferred by `core/src/exec/grants.rs` keyed on the binary's path. The path names a file in a writable filesystem with no permissions, so any process replaces `/bin/compositor` with its own ELF, spawns it, and the kernel grants the replacement `TASK_FLAG_COMPOSITOR` and `TaskPriority::High` — which carries the display, the input sink and the clipboard. `/bin/roulette` yields `TASK_FLAG_DISPLAY_EXCLUSIVE` the same way. `grants.rs:25-28` states the dependency ("only as strong as write protection on `/bin`, and SlopOS has no file permissions"); this entry records that the dependency is unmet, not theoretical.
-- Evidence:
-  - boot/src/boot_services.rs:87 → fs/src/cpio.rs:187 — `unpack_cpio_into_root` unpacks the archive *into* the root filesystem rather than retaining it as a read-only image.
-  - fs/src/cpio.rs:286 — `write_file` creates each entry with `create`, `truncate` and `writable` all set.
-  - fs/src/vfs/init.rs:23,25 — the root is ext2 when initialised, otherwise `RamFs`; neither implements a permission check on `write`, `create`, `truncate`, `unlink` or `rename`.
-  - core/src/syscall/fs/path_handlers.rs:97 — `syscall_fs_unlink` carries no `requires` clause of any kind.
-  - core/src/exec/mod.rs:455-457 — `do_exec`'s only integrity gate is `(file_stat.mode & 0o111) == 0`, and the execute bit survives a rewrite.
-  - core/src/exec/mod.rs:259-261 — `flags |= grants::grant_for(normalized_path).0`, computed with no reference to the spawner, and `syscall_spawn_path` (core/src/syscall/process_handlers.rs:200) has no `requires` clause.
-- Repro:
-  `open("/bin/compositor", O_WRONLY|O_TRUNC)`, write any ELF with mode `0755`, then `spawn_path("/bin/compositor")` and observe the child holding `TASK_FLAG_COMPOSITOR`.
-- Remediation: A per-inode `sealed` bit set by `unpack_cpio_into_root`, refused by `write`, `create`, `truncate`, `unlink` and `rename`, covering both root filesystems. Then bound the grant with a `Launch` capability so a grant is not reachable from an arbitrary spawner. See `plans/kernel-hardening.md` item 1 and `plans/authority-model.md`.
-
-### SLOPOS-2026-0045
-- Title: `kill` and `terminate_task` perform no caller-versus-target authorization
-- Status: open
-- Confidence: 92 — evidence 38 (the whole authorization predicate and all three target-collection arms read), exploitability 28 (one syscall; target ids come free from an unauthenticated oracle), reproducibility 26 (deterministic)
-- CVSS vector/score: `CVSS:3.1/AV:L/AC:L/PR:L/UI:N/S:U/C:N/I:N/A:H` — **5.5 MEDIUM**
-- Impact: Any task terminates any other task, including init and the compositor. The `pid < -1` arm is the worst of the three and is cheaper than the broadcast: it accepts an arbitrary process-group id with no session and no membership test, so a targeted cross-session kill needs one call and no enumeration of individual tasks.
-- Evidence:
-  - core/src/syscall/signal.rs:82-84 — the entire authorization is `signal_may_name(flags) = (flags & TASK_FLAG_USER_MODE) != 0`, a category check that names init and the compositor as readily as a sibling.
-  - core/src/syscall/signal.rs:86 — `collect_targets_for_group(pgid, …)` accepts an arbitrary pgid with no session or membership test.
-  - core/src/syscall/signal.rs:94 — `collect_targets_for_all` walks every active user task and exempts nothing, including init.
-  - core/src/syscall/process_handlers.rs:340-357 — `syscall_terminate_task` is a second kill primitive: `requires(compositor)` and then `task_terminate(target_id)` with only a self-exclusion, so it terminates init. Reachable by any process via SLOPOS-2026-0044.
-  - core/src/syscall/core_handlers.rs — the module containing `process_list` has zero `requires` clauses across its thirteen handlers, so target enumeration is unauthenticated.
-  - Contrast core/src/syscall/process_handlers.rs:604-611,630 — `setpgid` in the same file *does* enforce parent-or-self and same-session both ways, so the relation this needs is already expressible.
-- Repro:
-  From an unprivileged task, `kill(-2, SIGKILL)` naming init's process group, or `kill(init_pid, SIGKILL)` with the pid read from `process_list`.
-- Remediation: Same-process, same-`ProcessGroup` or same-`Session` allows; otherwise `EPERM`; init never a target; the `pid == -1` and `pid < -1` arms apply the relation to every target they collect. Session equality is sound as the relation because `setsid` refuses an existing leader and `setpgid` requires same-session both ways, so a task can leave a session but never join another's. See `plans/kernel-hardening.md` item 7; the capability and the resolve-once handle that remove the pid designation are in `plans/authority-model.md`.
-
-### SLOPOS-2026-0046
-- Title: The global input sink is acquired at frame rate and never released
-- Status: open
-- Confidence: 90 — evidence 38 (the single write site, all five read sites, and the cleanup hook that omits it, all read; the correct pattern exists in a sibling subsystem), exploitability 26 (needs `TASK_FLAG_COMPOSITOR`, which SLOPOS-2026-0044 supplies to any process), reproducibility 26 (deterministic and irreversible without a reboot)
-- CVSS vector/score: `CVSS:3.1/AV:L/AC:L/PR:L/UI:N/S:U/C:N/I:N/A:H` — **5.5 MEDIUM**
-- Impact: `compositor_task_id` routes every keyboard and pointer event. A task that becomes the sink and exits takes all input with it, permanently, with no recovery short of a reboot — the machine remains running and drawing but accepts no input at all. Chained with SLOPOS-2026-0044 to obtain the flag and SLOPOS-2026-0045 to remove the real compositor, this is a ten-line program.
-- Evidence:
-  - drivers/src/input_event.rs:504 — `guard.get_mut().compositor_task_id = task_id`, the only write.
-  - core/src/syscall/ui_handlers.rs:44-57 — `syscall_input_poll_batch` carries only `requires(task_id: task_id)` and calls `input::register_compositor(task_id)` whenever `ctx.is_compositor()`, on every call, at frame rate. It is a re-arm, not an acquire.
-  - drivers/src/input_event.rs:365,366,406,443,470 — every input-routing decision reads it.
-  - drivers/src/input_event.rs:597-611 — `input_cleanup_task` clears `keyboard_focus` and `pointer_focus` and frees the queue slot. It never clears `compositor_task_id`.
-  - Contrast video/src/lib.rs:120-122 — the video side reads its equivalent and clears it on the departing task, which is the missing three lines.
-- Repro:
-  From a task holding `TASK_FLAG_COMPOSITOR`, call `input_poll_batch` once, then `exit`. All keyboard and pointer input stops.
-- Remediation: Clear `compositor_task_id` in `input_cleanup_task` when it names the departing task (`plans/kernel-hardening.md` item 6). The structural fix — a single-holder input seat released by arbiter revocation rather than by the holder — is `plans/authority-model.md` phase 1.
-
-### SLOPOS-2026-0047
-- Title: `read` and `write` bypass the descriptor layer to the global console and a hardcoded TTY 0
-- Status: open
-- Confidence: 88 — evidence 38 (both handlers read in full; neither carries a `requires` clause and neither consults a descriptor), exploitability 26 (one syscall, no setup), reproducibility 24 (deterministic, though the disclosure depends on the operator typing)
-- CVSS vector/score: `CVSS:3.1/AV:L/AC:L/PR:L/UI:N/S:U/C:H/I:L/A:N` — **6.1 MEDIUM**
-- Impact: `syscall_user_read` reads cooked input from TTY 0 rather than the caller's controlling terminal, so any task reads the operator's keystrokes — a keylogger with no privilege and no descriptor. `syscall_user_write` writes the global kernel console directly, so any task injects text into the operator's view of kernel output.
-- Evidence:
-  - core/src/syscall/core_handlers.rs:140 — `syscall_user_read` has no `requires` clause and calls `tty::read_cooked(TtyIndex(0), …)` with the index hardcoded, not resolved from the caller.
-  - core/src/syscall/core_handlers.rs:124 — `syscall_user_write` has no `requires` clause and calls `platform::console_puts`, with no descriptor involved.
-  - Contrast fs/src/fileio/mod.rs:549 — the controlling-terminal resolution the two handlers should use already exists, via `current_task_pgrp_handle`.
-- Repro:
-  From any unprivileged task, `read(0, buf, n)` while the operator types at the physical console.
-- Remediation: Route both through the caller's controlling TTY descriptor, returning `ENOTTY` when there is none. See `plans/kernel-hardening.md` item 10.
-
-### SLOPOS-2026-0048
-- Title: `waitpid` reaps any zombie in the system
-- Status: open
-- Confidence: 85 — evidence 36 (the handler carries no relation check and the zombie consumer checks only status), exploitability 24 (a race against the real parent, or simply first), reproducibility 25 (deterministic when the attacker wins)
-- CVSS vector/score: `CVSS:3.1/AV:L/AC:L/PR:L/UI:N/S:U/C:L/I:N/A:L` — **4.4 MEDIUM**
-- Impact: Any task consumes any zombie's `ExitInfo`, learning another process's exit status and fault reason, and the real parent then receives `ECHILD` — a denial of the exit-status protocol that a supervisor cannot distinguish from a child that never existed.
-- Evidence:
-  - core/src/syscall/process_handlers.rs:308 — `syscall_waitpid` carries no `requires` clause beyond existence and no parent relation.
-  - `task_consume_zombie` checks only `status() == Zombie`.
-  - The `parent_task_id` field needed for the check already exists on the task and is re-established in `clone_from_raw`.
-- Repro:
-  Spawn a child from process A; from unrelated process B call `waitpid` on the child's pid after it exits; B receives the status and A's subsequent `waitpid` returns `ECHILD`.
-- Remediation: Require the parent relation; `ECHILD` otherwise. See `plans/kernel-hardening.md` item 8.
-
 ### SLOPOS-2026-0049
 - Title: `halt` and `reboot` have no authorization check, by three separate paths
 - Status: open
@@ -638,51 +535,6 @@ These are **candidate CVE-style records** for internal tracking. They are not of
 - Repro:
   `syscall_halt()` from the shell. Or `roulette_spin()` followed by `roulette_result()` until the loss arm is taken.
 - Remediation: A `Power` capability on `halt` and `reboot`, with the terminal primitives moved into `slopos-ostd` behind a witness so an unchecked call site does not compile; the roulette loss arm additionally gated on a boot-mask bit in the idiom `syscall_test_panic` already uses (core/src/syscall/test_handlers.rs:123-129). A reachability gate covers the kernel-initiated callers. See `plans/authority-model.md` phase 3.
-
-### SLOPOS-2026-0050
-- Title: Any task rewrites the global keyboard layout
-- Status: open
-- Confidence: 85 — evidence 38 (the handler carries no `requires` clause while its sibling in the same subsystem does), exploitability 22 (needs the operator to type for the effect to land), reproducibility 26 (deterministic)
-- CVSS vector/score: `CVSS:3.1/AV:L/AC:L/PR:L/UI:R/S:U/C:N/I:H/A:L` — **5.6 MEDIUM**
-- Impact: The layout table is global and kernel-authoritative, so any task redefines what every keystroke means for every application, including the shell. An attacker chooses the mapping and the operator's next command is not the one they typed. The validator answers integrity of the uploaded table, not authority to install it.
-- Evidence:
-  - core/src/syscall/keymap_handlers.rs:18 — `syscall_keymap_load` carries no `requires` clause of any kind.
-  - Contrast core/src/syscall/font_handlers.rs:23 — `syscall_font_set`, the sibling console-configuration syscall, carries `requires(console_admin)`.
-  - The handler's doc comment justifies being unprivileged on a per-session premise that a single global layout table does not satisfy.
-- Repro:
-  From an unprivileged task, upload a layout swapping two characters, then observe the shell receiving the swapped codepoints.
-- Remediation: `requires(console_admin)` now, matching `font_set`, and correct the doc comment's per-session claim (`plans/kernel-hardening.md` item 9). The `ConsoleConfig` capability that subsumes both, and its eventual move to an ioctl on the console descriptor, are in `plans/authority-model.md`.
-
-### SLOPOS-2026-0051
-- Title: An exhausted descriptor-table allocator installs a userland process's descriptors into the kernel's own table
-- Status: open
-- Confidence: 90 — evidence 40 (the fallback arm and all three call sites read directly), exploitability 26 (a fork loop past 256 address spaces), reproducibility 24 (deterministic once the slots are exhausted)
-- CVSS vector/score: `CVSS:3.1/AV:L/AC:L/PR:L/UI:N/S:U/C:H/I:H/A:N` — **7.1 HIGH**
-- Impact: Once the 256 per-process slots are taken, `pick_pid_slot_locked` hands back the kernel's own descriptor table, so a userland process's descriptors are installed into it — shared with the kernel and with every other process that also fell back. Descriptor numbers then collide across processes: one process reads and writes another's files, sockets and memfds by number, and the kernel's own descriptors are in the same table. `MAX_PROCESSES` is 256 against `MAX_TASKS` 8192, so the precondition is a fork loop.
-- Evidence:
-  - fs/src/fileio/mod.rs:401-425 — `pick_pid_slot_locked` scans for a free slot and, failing, returns `Some(KERNEL_TABLE.inner.lock())` at :425.
-  - fs/src/fileio/fdops.rs:70,613,950 — the three call sites: the generic descriptor install, pipe creation, and the fd-passing receive path.
-  - mm/src/memory_layout_defs.rs:370 — `MAX_PROCESSES = 256`; abi/src/task.rs:22 — `MAX_TASKS = 8192`.
-  - fs/src/fileio/mod.rs:347-350 — the *lookup* path maps `INVALID_PROCESS_ID` to `KERNEL_TABLE` deliberately and correctly; only the allocation fallback is wrong.
-- Repro:
-  Fork past 256 live address spaces, then `open` any file from two distinct processes and observe both descriptors resolving in the kernel table.
-- Remediation: Return `None` so the call sites return `EMFILE`/`ENFILE`. Raising the capacity instead *hides* this: a table whose exhaustion path redirects into a more privileged domain is an isolation bug, not a sizing bug, and the redirect must be removed before the resize. See `plans/kernel-hardening.md` item 2; the generation-checked process handle that makes the fallback unrepresentable is `plans/process-object.md`.
-
-### SLOPOS-2026-0052
-- Title: An unauthenticated remote peer panics the kernel from softirq under a cli-spinlock
-- Status: open
-- Confidence: 85 — evidence 38 (all three `.expect()` sites and the enclosing lock and context read directly), exploitability 24 (requires driving the kernel to allocation failure, which a connection flood does), reproducibility 23 (probabilistic in timing, deterministic in outcome once allocation fails)
-- CVSS vector/score: `CVSS:3.1/AV:N/AC:H/PR:N/UI:N/S:U/C:N/I:N/A:H` — **5.9 MEDIUM**
-- Impact: A 32 KiB × 2 connection buffer is allocated with `.expect()` inside `with_pcb_and_bufs` — under the `TCP_PCB_SLOTS` cli-spinlock, in softirq context, driven by an unauthenticated remote peer. Allocation failure is a kernel panic with interrupts disabled and a lock held, so the panic path itself runs in the context least able to recover.
-- Evidence:
-  - net/src/tcp/mod.rs:261 — `.expect("tcp: kernel OOM allocating connection buffer")`.
-  - net/src/tcp/mod.rs:428 — the same on the close path.
-  - net/src/tcp/mod.rs:568 — the same on the `shutdown_write` path.
-  - `TcpError::OutOfMemory` already exists and maps to `ENOMEM` (net/src/tcp/tuple.rs:60), so the failure is representable without a panic.
-  - Contrast net/src/unix_socket/mod.rs:865 — the pre-reserve-before-locking pattern this path needs is three files away.
-- Repro:
-  Open connections until the buddy allocator refuses a 64 KiB allocation, with the final SYN arriving while memory is exhausted.
-- Remediation: Allocate before taking the lock and propagate `TcpError::OutOfMemory`, dropping the segment. See `plans/kernel-hardening.md` item 4.
 
 ## Relevant NVD CVE Analogs (fetched)
 
@@ -706,11 +558,9 @@ Selected analogs:
 
 Ordered by what removes the most exposure per unit of work, not by score.
 
-0. **Seal `/bin`** (0044). Every other authorization finding is downstream of it: while the binary that names a privilege can be rewritten, no capability model, credential or check means anything. One flag and five refusals, and it is the cheapest item on this list. Then the rest of `plans/kernel-hardening.md`, whose twelve items include 0045, 0046, 0047, 0048, 0051 and 0052 and need no new mechanism at all.
 1. **Validate the signal-return XSAVE area** (0007). An unprivileged kernel-halt primitive: the `xrstor64` in `rt_sigreturn` restores a user-supplied image with no header validation and no #GP fixup.
-2. **Wire the SYN queue that already exists** (0011). The defence is written and tested; it merely has no caller. `plans/kernel-hardening.md` item 5.
-3. **Reseed the DNS resolver and validate response provenance** (0012), then replace the ISN generator with a keyed PRF (0014) and add the RFC 793 §3.9 acceptability gate (0013). These three are the network-facing set and share a test harness.
-4. **The TLB correctness set** (0017, 0018, 0019). Stale writable translations across address spaces are the only findings here that could become memory corruption rather than denial of service.
-5. **The filesystem integrity set** (0021–0027, 0042, 0043). Individually low-scoring, collectively the reason the filesystem cannot yet be trusted with data that matters.
-6. **Resource accounting** (0016, 0035, 0030, 0031). These are instances of one absent mechanism; see `plans/resource-accounting.md` rather than patching them individually. 0016's fix is a type restriction on what may be passed over a socket, not a smarter collector — the same place io_uring landed after five years.
-7. **Authorization** (0049, 0050, and the structural halves of 0045 and 0046). A relation check lands in `plans/kernel-hardening.md`; the capability set, the witness that makes a missing check a compile error, and the display and input seats are `plans/authority-model.md`, which depends on `plans/process-object.md`.
+2. **Reseed the DNS resolver and validate response provenance** (0012), then replace the ISN generator with a keyed PRF (0014) and add the RFC 793 §3.9 acceptability gate (0013). These three are the network-facing set and share a test harness.
+3. **The TLB correctness set** (0017, 0018, 0019). Stale writable translations across address spaces are the only findings here that could become memory corruption rather than denial of service.
+4. **The filesystem integrity set** (0021–0027, 0042, 0043). Individually low-scoring, collectively the reason the filesystem cannot yet be trusted with data that matters.
+5. **Resource accounting** (0016, 0035, 0030, 0031). These are instances of one absent mechanism; see `plans/resource-accounting.md` rather than patching them individually. 0016's fix is a type restriction on what may be passed over a socket, not a smarter collector — the same place io_uring landed after five years.
+6. **Authorization** (0049, and the structural halves of the fixed authorization findings). The relation checks have landed; the capability set, the witness that makes a missing check a compile error, and the display and input seats are `plans/authority-model.md`, which depends on `plans/process-object.md`.

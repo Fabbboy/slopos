@@ -18,7 +18,7 @@ against arguments, which is ambient by the standard definition. What is new is t
 forgetting the check is a compile error rather than a review miss.
 
 **Depends on `plans/process-object.md`** for an owner to hang a credential on, and on its
-phase 4 for a pid that is a sound designator. `plans/kernel-hardening.md` lands first and
+phase 4 for a pid that is a sound designator. The kernel-hardening pass landed first and
 carries every fix that needs no capability system at all.
 
 ---
@@ -95,7 +95,7 @@ programs. The verified launcher set is two: init (`userland/src/apps/init_proces
 and the shell (`userland/src/apps/shell/exec.rs:540,622,663` over
 `userland/src/program_registry.rs:51-52`). `grants.rs:11-18` names the compositor's shelf
 as a third; it contains no spawn call, and correcting that comment is
-`plans/kernel-hardening.md` item 12 — the launcher set is what bounds `Launch`.
+the launcher set is what bounds `Launch`.
 
 An authority-raising spawn accepts **no** caller-supplied descriptor actions, argv, envp or
 cwd. Handing a privileged child an attacker-chosen environment is the other half of the
@@ -239,7 +239,7 @@ no relation between caller and target answers it.** Eleven entries. No `Admin`, 
 `ConsoleIo` exists because of two slots that read as unprivileged under naive
 classification: `syscall_user_write` writes the global kernel console with no descriptor,
 and `syscall_user_read` reads a **hardcoded** TTY 0 rather than the caller's controlling
-terminal. Both are fixed in `plans/kernel-hardening.md` item 10, and `ConsoleIo` is the
+terminal. Both are fixed — `read` resolves the controlling terminal — and `ConsoleIo` is the
 belt while that lands.
 
 **The three `None` classes are counted separately** — `NoneSelf`, `NoneFd`,
@@ -453,8 +453,8 @@ Migrations, in priority order:
 
 1. **`kill` and `terminate_task` → `Signalable`**, resolved once at the top of the handler.
    The relation check that must not wait for this plan is
-   `plans/kernel-hardening.md` item 7.
-2. **`waitpid` → parent relation** (`plans/kernel-hardening.md` item 8).
+   landed as the privilege-dominance rule in `syscall_kill`.
+2. **`waitpid` → parent relation** (landed).
 3. **`pidfd_open` must be authorized at mint time before anything moves onto it.** It
    carries two existence checks and no relation (`core/src/syscall/pidfd_handlers.rs:9-19`),
    so today it is a pid in a different encoding — routing `kill` through it would launder the
@@ -462,8 +462,8 @@ Migrations, in priority order:
    `pidfd_send_signal`.
 4. **The pid table** — `plans/process-object.md` phase 4.
 5. **`write`/`read` → controlling TTY**, which deletes `ConsoleIo`
-   (`plans/kernel-hardening.md` item 10).
-6. **The path namespace** — the seal, `plans/kernel-hardening.md` item 1.
+   (landed).
+6. **The path namespace** — the initramfs seal (landed).
 
 **Rights on handles, when they land: in the table slot, never in the token.**
 `Handle::from_parts` is `pub const` and its doc says forging is harmless because the table
@@ -678,7 +678,7 @@ Three cross-plan constraints:
   `Process` holds both side by side.
 - **Fixing a capacity does not fix an authority bug.** The descriptor-table exhaustion
   fallback redirects into a more privileged domain; growing the table hides it. The redirect
-  goes first (`plans/kernel-hardening.md` item 2).
+  goes first (landed: the lookup refuses a pid with no table).
 
 ---
 

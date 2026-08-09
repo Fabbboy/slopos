@@ -117,6 +117,35 @@ impl Actions {
         )
     }
 
+    /// Prepend `other`'s segments to this set, emptying `other`.
+    ///
+    /// Used where one arriving segment is handled by two PCBs in turn — the
+    /// listener that completed a handshake and the child that took it over.
+    /// The listener's output goes first because it was produced first, and a
+    /// full inline array drops the tail rather than growing.
+    pub fn merge_segments_from(&mut self, other: &mut Self) {
+        if other.segments_len == 0 {
+            return;
+        }
+        let mut merged: [Option<TcpOutSegment>; MAX_SEGMENTS] = [None, None, None];
+        let mut len = 0usize;
+        for seg in other
+            .segments
+            .iter_mut()
+            .take(other.segments_len as usize)
+            .chain(self.segments.iter_mut().take(self.segments_len as usize))
+        {
+            if len >= MAX_SEGMENTS {
+                break;
+            }
+            merged[len] = seg.take();
+            len += 1;
+        }
+        self.segments = merged;
+        self.segments_len = len as u8;
+        other.segments_len = 0;
+    }
+
     /// Append an outbound segment.  Panics in debug builds if the inline
     /// capacity is exceeded — a state transition emitting more than
     /// [`MAX_SEGMENTS`] is a bug.
