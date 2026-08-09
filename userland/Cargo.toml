@@ -54,6 +54,10 @@ name = "ip"
 path = "src/bin/ip.rs"
 
 [[bin]]
+name = "keymap"
+path = "src/bin/keymap.rs"
+
+[[bin]]
 name = "ss"
 path = "src/bin/ss.rs"
 

@@ -3,11 +3,17 @@
 //! Thin forwarders to the keymap service the keyboard driver registers (the
 //! active layout lives in the driver, which `core` cannot depend on directly).
 //! `keymap_load` installs a validated `LayoutTable` blob; `keymap_get_name`
-//! queries the active layout's name. Both are unprivileged: the keyboard layout
-//! is a per-session user preference (like `setxkbmap`, not the root-only kernel
-//! `loadkeys`), and the real safety boundary is the binary validator the kernel
-//! runs on every upload — not a capability check. A bad blob is rejected with
-//! `EINVAL`, never installed.
+//! queries the active layout's name.
+//!
+//! Loading needs console administration. There is one layout table in the
+//! keyboard driver, and it feeds every TTY and the compositor's input path —
+//! so this is `loadkeys` writing the kernel console keymap, which Linux gates
+//! on `CAP_SYS_TTY_CONFIG`, not `setxkbmap` rearranging one client's own view
+//! of a seat. The binary validator answers integrity, which is a different
+//! question: a blob can be well-formed and still not be this machine's
+//! operator's idea of where the keys are.
+//!
+//! Reading the name is unprivileged.
 
 use slopos_abi::Errno;
 use slopos_abi::input::layout::LAYOUT_NAME_LEN;
@@ -17,6 +23,7 @@ use slopos_mm::user_ptr::UserBytes;
 
 define_syscall!(syscall_keymap_load
     (ctx, data_ptr: u64, len: u64)
+    requires(console_admin)
     -> Result<(), Errno>
 {
     keymap::load(data_ptr, len as usize)

@@ -48,6 +48,13 @@ const PROGRAM_REGISTRY: &[ProgramSpec] = &[
         desc: "",
     },
     ProgramSpec {
+        name: "keymap",
+        path: "/bin/keymap",
+        priority: TaskPriority::Normal,
+        flags: TASK_FLAG_USER_MODE,
+        desc: "Query or switch the keyboard layout",
+    },
+    ProgramSpec {
         name: "roulette",
         path: "/bin/roulette",
         priority: TaskPriority::Normal,

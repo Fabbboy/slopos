@@ -31,10 +31,13 @@ fn get_name_respects_buflen() -> bool {
     n == 1 && one[0] == b'u'
 }
 
-/// Full end-to-end switch from an ordinary (non-console-admin) process: load
-/// Swiss German, confirm the active layout changed, then restore US. Proves the
-/// whole `keymap <name>` pipeline (file → parse → serialise → syscall → install)
-/// works without elevated privilege.
+/// Full end-to-end switch: load Swiss German, confirm the active layout
+/// changed, then restore US. Proves the whole `keymap <name>` pipeline
+/// (file → parse → serialise → syscall → install).
+///
+/// This binary runs with `TASK_FLAG_SYSTEM`, like every utest binary, so it
+/// says nothing about whether an unprivileged caller may install a layout —
+/// that gate is asserted kernel-side.
 fn load_switches_layout_and_restores() -> bool {
     let de_ok = load_layout_file("de_CH") && current().as_deref() == Some("de_CH");
     // Always restore US, whatever happened above, so the desktop/other tests are

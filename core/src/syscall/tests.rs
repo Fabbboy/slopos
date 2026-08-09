@@ -11,6 +11,7 @@ use crate::syscall::handlers::{
     syscall_arch_prctl, syscall_futex, syscall_getpgid, syscall_setpgid, syscall_setsid,
     syscall_user_read, syscall_waitpid,
 };
+use crate::syscall::keymap_handlers::syscall_keymap_load;
 use crate::syscall::signal::{
     deliver_pending_signal, deliver_pending_signal_on_irq_exit, syscall_kill, syscall_rt_sigaction,
     syscall_rt_sigprocmask, syscall_rt_sigreturn,
@@ -32,8 +33,8 @@ use slopos_abi::syscall::{
     SYSCALL_TABLE_SIZE, SYSCALL_VHANGUP, TIOCSCTTY, TtyIndex,
 };
 use slopos_abi::task::{
-    INVALID_TASK_ID, TASK_FLAG_COMPOSITOR, TASK_FLAG_KERNEL_MODE, TASK_FLAG_NET_ADMIN,
-    TASK_FLAG_USER_MODE, TaskStatus,
+    INVALID_TASK_ID, TASK_FLAG_COMPOSITOR, TASK_FLAG_CONSOLE_ADMIN, TASK_FLAG_KERNEL_MODE,
+    TASK_FLAG_NET_ADMIN, TASK_FLAG_USER_MODE, TaskStatus,
 };
 use slopos_mm::page_alloc::{alloc_kernel_page, free_page_frame};
 use slopos_mm::paging_defs::PageFlags;
@@ -3321,13 +3322,24 @@ pub fn test_spawn_path_rejects_privileged_flags() -> TestResult {
         eperm,
         "spawning with NET_ADMIN must be EPERM — it is conferred by program identity"
     );
+    assert_eq_test!(
+        spawn(NORMAL, slopos_abi::task::TASK_FLAG_CONSOLE_ADMIN),
+        eperm,
+        "spawning with CONSOLE_ADMIN must be EPERM — it is conferred by program identity"
+    );
 
     // Undefined bits fail closed so the ABI can grow one without a deployed
-    // caller having already assigned it a different meaning.
+    // caller having already assigned it a different meaning. Any bit in
+    // SPAWN_RESERVED does; 0x0800 is the lowest that has never been defined.
     assert_eq_test!(
-        spawn(NORMAL, 0x0400),
+        spawn(NORMAL, 0x0800),
         einval,
         "an undefined flag bit must be EINVAL"
+    );
+    assert_eq_test!(
+        spawn(NORMAL, 0x0040),
+        einval,
+        "the retired FPU_INITIALIZED bit must stay EINVAL"
     );
     // The retired TASK_FLAG_FPU_INITIALIZED. Retired, not freed.
     assert_eq_test!(
@@ -3345,7 +3357,7 @@ pub fn test_spawn_path_rejects_privileged_flags() -> TestResult {
     // privilege, so probing reserved bits cannot learn from an EPERM that a bit
     // means something.
     assert_eq_test!(
-        spawn(NORMAL, 0x0400 | TASK_FLAG_COMPOSITOR),
+        spawn(NORMAL, 0x0800 | TASK_FLAG_COMPOSITOR),
         einval,
         "a reserved bit must be answered before a privileged one"
     );
@@ -6945,4 +6957,76 @@ pub fn test_sigkill_marks_the_target_and_exits_with_the_signal() -> TestResult {
 slopos_testing::stest!(
     name = test_sigkill_marks_the_target_and_exits_with_the_signal,
     suite = syscall_signal
+);
+
+/// Installing a keyboard layout needs console administration.
+///
+/// There is one layout table in the keyboard driver and it feeds every TTY and
+/// the compositor's input path, so this is `loadkeys` writing the kernel
+/// console keymap rather than `setxkbmap` rearranging one client's view of a
+/// seat. The blob validator answers integrity, which is a different question.
+pub fn test_keymap_load_requires_console_admin() -> TestResult {
+    let _fixture = SyscallFixture::new();
+
+    let plain_id = create_test_user_task();
+    assert_test!(plain_id != INVALID_TASK_ID, "failed to create user task");
+    let admin_id = create_test_user_task_with(TASK_FLAG_USER_MODE | TASK_FLAG_CONSOLE_ADMIN);
+    assert_test!(admin_id != INVALID_TASK_ID, "failed to create admin task");
+
+    let plain_guard = assert_some!(task_find_by_id(plain_id), "task lookup failed");
+    let plain_pid = plain_guard.process_id;
+    let admin_guard = assert_some!(task_find_by_id(admin_id), "task lookup failed");
+    let admin_pid = admin_guard.process_id;
+
+    let Some(user_buf) = map_user_rw_page(plain_pid) else {
+        return fail!("could not map a user page");
+    };
+
+    let mut plain_frame: KBox<UserContext> = KBox::zeroed().expect("alloc");
+    plain_frame.regs_mut().rdi = user_buf;
+    plain_frame.regs_mut().rsi = 16;
+    let _ = with_user_process_context(plain_pid, || {
+        crate::syscall::dispatch::dispatch_handler(
+            syscall_keymap_load,
+            &plain_guard,
+            &mut *plain_frame,
+        )
+    });
+    assert_eq_test!(
+        plain_frame.rax(),
+        slopos_abi::Errno::EPERM.as_u64(),
+        "an unprivileged task installed a keyboard layout"
+    );
+
+    // The privileged caller gets past the gate and is stopped by the validator
+    // instead — a different refusal, which is what proves the gate is the only
+    // thing between them.
+    let Some(admin_buf) = map_user_rw_page(admin_pid) else {
+        return fail!("could not map a user page");
+    };
+    let mut admin_frame: KBox<UserContext> = KBox::zeroed().expect("alloc");
+    admin_frame.regs_mut().rdi = admin_buf;
+    admin_frame.regs_mut().rsi = 16;
+    let _ = with_user_process_context(admin_pid, || {
+        crate::syscall::dispatch::dispatch_handler(
+            syscall_keymap_load,
+            &admin_guard,
+            &mut *admin_frame,
+        )
+    });
+    assert_test!(
+        admin_frame.rax() != slopos_abi::Errno::EPERM.as_u64(),
+        "console administration was refused the syscall"
+    );
+
+    drop(plain_guard);
+    drop(admin_guard);
+    task_terminate(plain_id);
+    task_terminate(admin_id);
+    pass!()
+}
+
+slopos_testing::stest!(
+    name = test_keymap_load_requires_console_admin,
+    suite = syscall_core
 );

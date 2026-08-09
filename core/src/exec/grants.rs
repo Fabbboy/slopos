@@ -34,7 +34,8 @@
 //! may name and what an address may be.
 
 use slopos_abi::task::{
-    TASK_FLAG_COMPOSITOR, TASK_FLAG_DISPLAY_EXCLUSIVE, TASK_FLAG_NET_ADMIN, TaskPriority,
+    TASK_FLAG_COMPOSITOR, TASK_FLAG_CONSOLE_ADMIN, TASK_FLAG_DISPLAY_EXCLUSIVE,
+    TASK_FLAG_NET_ADMIN, TaskPriority,
 };
 
 /// One program's kernel-conferred attributes.
@@ -70,6 +71,14 @@ const PROGRAM_GRANTS: &[ProgramGrant] = &[
         flags: TASK_FLAG_DISPLAY_EXCLUSIVE,
         priority: None,
     },
+    // The one writer of the kernel keyboard layout, which is a single global
+    // table feeding every TTY and the compositor's input path. Reading the
+    // active layout needs nothing.
+    ProgramGrant {
+        path: b"/bin/keymap",
+        flags: TASK_FLAG_CONSOLE_ADMIN,
+        priority: None,
+    },
     // The sanctioned mutator of the network configuration: every mutating net
     // syscall is gated on this bit, so the whole control plane has one argument
     // grammar in front of it.
@@ -81,7 +90,7 @@ const PROGRAM_GRANTS: &[ProgramGrant] = &[
 ];
 
 /// The flags and tier the kernel adds for `path`: `(0, None)` for every program
-/// not named above, which is all of them but three.
+/// not named above, which is all of them but four.
 pub fn grant_for(path: &[u8]) -> (u16, Option<TaskPriority>) {
     match PROGRAM_GRANTS.iter().find(|grant| grant.path == path) {
         Some(grant) => (grant.flags, grant.priority),

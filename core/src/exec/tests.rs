@@ -756,6 +756,16 @@ pub fn test_program_grants_are_keyed_on_exact_path() -> TestResult {
         "roulette needs no tier grant — Normal is user-requestable"
     );
 
+    let (flags, priority) = grant_for(b"/bin/keymap");
+    assert_test!(
+        flags == slopos_abi::task::TASK_FLAG_CONSOLE_ADMIN,
+        "the keymap program must be granted CONSOLE_ADMIN"
+    );
+    assert_test!(
+        priority.is_none(),
+        "keymap needs no tier grant — Normal is user-requestable"
+    );
+
     assert_test!(
         grant_for(INIT_PATH) == (0, None),
         "init must not be grantable: SYSTEM stays kernel-only"

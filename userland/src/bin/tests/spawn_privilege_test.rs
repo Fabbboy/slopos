@@ -23,8 +23,9 @@ use slopos_userland as _;
 use slopos_abi::spawn::{SpawnAttrs, SpawnFdAction};
 use slopos_abi::syscall::SYSCALL_SPAWN_PATH;
 use slopos_abi::task::{
-    TASK_FLAG_COMPOSITOR, TASK_FLAG_DISPLAY_EXCLUSIVE, TASK_FLAG_KERNEL_MODE, TASK_FLAG_NET_ADMIN,
-    TASK_FLAG_NEW_PGRP, TASK_FLAG_NO_PREEMPT, TASK_FLAG_SYSTEM, TASK_FLAG_USER_MODE,
+    TASK_FLAG_COMPOSITOR, TASK_FLAG_CONSOLE_ADMIN, TASK_FLAG_DISPLAY_EXCLUSIVE,
+    TASK_FLAG_KERNEL_MODE, TASK_FLAG_NET_ADMIN, TASK_FLAG_NEW_PGRP, TASK_FLAG_NO_PREEMPT,
+    TASK_FLAG_SYSTEM, TASK_FLAG_USER_MODE,
 };
 use slopos_userland::syscall::process;
 use slopos_userland::syscall::raw::syscall5;
@@ -104,6 +105,10 @@ fn privileged_flags_are_eperm() -> bool {
         "NET_ADMIN",
         spawn_raw(MISSING, PRIORITY_NORMAL, TASK_FLAG_NET_ADMIN, &[]),
         EPERM,
+    ) && expect(
+        "CONSOLE_ADMIN",
+        spawn_raw(MISSING, PRIORITY_NORMAL, TASK_FLAG_CONSOLE_ADMIN, &[]),
+        EPERM,
     )
 }
 
@@ -117,8 +122,8 @@ fn privileged_flags_are_eperm() -> bool {
 /// means something.
 fn malformed_flags_are_einval() -> bool {
     expect(
-        "undefined bit 0x0400",
-        spawn_raw(MISSING, PRIORITY_NORMAL, 0x0400, &[]),
+        "undefined bit 0x0800",
+        spawn_raw(MISSING, PRIORITY_NORMAL, 0x0800, &[]),
         EINVAL,
     ) && expect(
         "retired FPU_INITIALIZED bit 0x0040",
@@ -130,7 +135,7 @@ fn malformed_flags_are_einval() -> bool {
         EINVAL,
     ) && expect(
         "reserved bit alongside a privileged one",
-        spawn_raw(MISSING, PRIORITY_NORMAL, 0x0400 | TASK_FLAG_COMPOSITOR, &[]),
+        spawn_raw(MISSING, PRIORITY_NORMAL, 0x0800 | TASK_FLAG_COMPOSITOR, &[]),
         EINVAL,
     )
 }

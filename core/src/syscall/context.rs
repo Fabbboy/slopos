@@ -11,8 +11,8 @@
 
 use slopos_abi::Errno;
 use slopos_abi::task::{
-    INVALID_PROCESS_ID, TASK_FLAG_COMPOSITOR, TASK_FLAG_DISPLAY_EXCLUSIVE, TASK_FLAG_NET_ADMIN,
-    TASK_FLAG_SYSTEM,
+    INVALID_PROCESS_ID, TASK_FLAG_COMPOSITOR, TASK_FLAG_CONSOLE_ADMIN, TASK_FLAG_DISPLAY_EXCLUSIVE,
+    TASK_FLAG_NET_ADMIN, TASK_FLAG_SYSTEM,
 };
 use slopos_ostd::KArc;
 use slopos_ostd::mm::vm_space::VmSpace;
@@ -167,11 +167,12 @@ impl<'a> SyscallContext<'a> {
     }
 
     /// Console-administration privilege — modelled on Linux's
-    /// `capable(CAP_SYS_TTY_CONFIG)`. Uses `TASK_FLAG_SYSTEM` as the
-    /// SlopOS equivalent until a proper capability bitfield exists.
+    /// `capable(CAP_SYS_TTY_CONFIG)`. Conferred by path identity on
+    /// `/bin/keymap`; `TASK_FLAG_SYSTEM` implies it, the way root implies
+    /// every capability, so init still applies the persisted layout at boot.
     #[inline]
     pub fn is_console_admin(&self) -> bool {
-        self.has_flag(TASK_FLAG_SYSTEM)
+        self.has_flag(TASK_FLAG_SYSTEM) || self.has_flag(TASK_FLAG_CONSOLE_ADMIN)
     }
 
     /// Network-administration privilege — modelled on Linux's

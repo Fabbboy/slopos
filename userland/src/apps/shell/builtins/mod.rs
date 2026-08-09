@@ -2,7 +2,6 @@
 
 pub mod env;
 pub mod fs;
-pub mod keymap;
 pub mod process;
 pub mod system;
 pub mod utils;
@@ -157,14 +156,6 @@ pub static BUILTINS: &[BuiltinEntry] = &[
         detail: "Print the effective user name. SlopOS always runs\nas root (uid 0).",
         category: System,
         func: system::cmd_whoami,
-    },
-    BuiltinEntry {
-        name: "keymap",
-        desc: "Get/set the keyboard layout",
-        usage: "keymap [list | <name>]",
-        detail: "Query, list, or switch the active keyboard layout.\n  keymap          Print the active layout name.\n  keymap list     List available layouts (active marked *).\n  keymap <name>   Load /usr/share/keymaps/<name>.layout.\nLayouts (e.g. us, de_CH) are parsed in userland and\nuploaded to the kernel; the change is live immediately.",
-        category: System,
-        func: keymap::cmd_keymap,
     },
     // ── Filesystem ──────────────────────────────────────────────────────────
     BuiltinEntry {

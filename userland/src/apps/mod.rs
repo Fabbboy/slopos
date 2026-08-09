@@ -4,6 +4,7 @@ pub mod file_manager;
 pub mod image_viewer;
 pub mod init_process;
 pub mod ip;
+pub mod keymap;
 pub mod nc;
 pub mod nmap;
 pub mod ping;
