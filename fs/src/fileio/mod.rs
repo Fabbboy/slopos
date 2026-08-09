@@ -381,9 +381,14 @@ pub(super) fn with_pid_slot<R>(
     Some(f(&mut *guard))
 }
 
-/// Acquire the per-process slot lock and return the guard. Used by hot
-/// paths that snapshot a single FD then drop the lock before further
-/// work.
+/// Acquire the per-process slot lock and return the guard, or `None` when
+/// `pid` owns no live table.
+///
+/// A lookup, never an allocation: every table is minted by an explicit
+/// create/clone that fails process creation when no slot is free, so a pid
+/// reaching here without one names a process that does not exist. Answering
+/// with the kernel's own table instead would install a user process's
+/// descriptors into the domain shared by every kernel task.
 pub(super) fn lock_pid_slot(pid: u32) -> Option<SpinLockGuard<'static, FileTableSlotInner>> {
     let slot = slot_for_pid(pid)?;
     let guard = slot.inner.lock();
@@ -391,38 +396,6 @@ pub(super) fn lock_pid_slot(pid: u32) -> Option<SpinLockGuard<'static, FileTable
         return None;
     }
     Some(guard)
-}
-
-/// Find or claim the per-process slot for `pid`, returning its lock
-/// guard already held. Used by `file_open_for_process` and pipe-create
-/// where the caller may need to lazily allocate a table.
-///
-/// Falls back to the kernel table only when no free slot is available.
-pub(super) fn pick_pid_slot_locked(pid: u32) -> Option<SpinLockGuard<'static, FileTableSlotInner>> {
-    if pid == INVALID_PROCESS_ID {
-        return Some(KERNEL_TABLE.inner.lock());
-    }
-    if let Some(slot) = slot_for_pid(pid) {
-        let guard = slot.inner.lock();
-        if guard.in_use {
-            return Some(guard);
-        }
-    }
-    for slot in PROCESS_TABLES.iter() {
-        if slot
-            .process_id
-            .compare_exchange(INVALID_PROCESS_ID, pid, Ordering::AcqRel, Ordering::Acquire)
-            .is_ok()
-        {
-            let mut guard = slot.inner.lock();
-            guard.in_use = true;
-            for entry in guard.descriptors.iter_mut() {
-                *entry = None;
-            }
-            return Some(guard);
-        }
-    }
-    Some(KERNEL_TABLE.inner.lock())
 }
 
 /// Snapshot of a file descriptor's open-file state. Holds a strong

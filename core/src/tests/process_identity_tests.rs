@@ -7,8 +7,14 @@
 //! property that keeps a recycled id from inheriting its predecessor's
 //! open files.
 
+use core::ffi::c_int;
+
+use slopos_abi::fs::O_RDONLY;
 use slopos_abi::task::INVALID_PROCESS_ID;
-use slopos_fs::fileio::{fileio_create_table_for_process, fileio_destroy_table_for_process};
+use slopos_fs::fileio::{
+    file_open_for_process, file_pipe_create, fileio_create_table_for_process,
+    fileio_destroy_table_for_process, fileio_get_open_file_handle,
+};
 use slopos_mm::process_vm::{create_process_vm, destroy_process_vm, init_process_vm};
 use slopos_ostd::klog_info;
 use slopos_testing::TestResult;
@@ -76,8 +82,65 @@ pub fn test_init_process_vm_releases_fd_tables() -> TestResult {
     TestResult::Pass
 }
 
+/// Descriptors are never installed into the kernel's table on behalf of a
+/// process that has none of its own.
+///
+/// The kernel table is shared by every kernel task. A user process whose
+/// descriptors landed there would hand them to all of them, and would see
+/// theirs — so the answer to "this pid owns no table" has to be a refusal,
+/// never a redirect into a more privileged domain.
+pub fn test_fileio_refuses_a_pid_with_no_table() -> TestResult {
+    let pid = create_process_vm();
+    if pid == INVALID_PROCESS_ID {
+        klog_info!("PROC_ID_TEST: could not create a process VM");
+        return TestResult::Fail;
+    }
+    // Deliberately no `fileio_create_table_for_process`.
+
+    let before = kernel_table_open_fds();
+
+    let mut read_fd: c_int = -1;
+    let mut write_fd: c_int = -1;
+    let pipe_rc = file_pipe_create(pid, 0, &mut read_fd, &mut write_fd);
+    let open_rc = file_open_for_process(pid, b"/", O_RDONLY);
+
+    let after = kernel_table_open_fds();
+    destroy_process_vm(pid);
+
+    assert_test!(
+        pipe_rc == ESRCH_RC,
+        "pipe create for an unregistered pid returned {pipe_rc}, want ESRCH"
+    );
+    assert_test!(
+        open_rc < 0,
+        "open for an unregistered pid returned fd {open_rc} instead of failing"
+    );
+    assert_test!(
+        before == after,
+        "kernel fd table grew from {before} to {after} descriptors while \
+         serving a process that owns no table"
+    );
+    TestResult::Pass
+}
+
+/// Occupied descriptor count in the kernel's own table.
+fn kernel_table_open_fds() -> usize {
+    (0..MAX_PROBE_FD)
+        .filter(|fd| fileio_get_open_file_handle(INVALID_PROCESS_ID, *fd).is_some())
+        .count()
+}
+
+/// Past any per-process descriptor bound; out-of-range probes read as unused.
+const MAX_PROBE_FD: c_int = 1024;
+
+const ESRCH_RC: c_int = -3;
+
 slopos_testing::stest!(
     name = test_fileio_create_table_rejects_a_bound_pid,
+    suite = process_identity
+);
+slopos_testing::stest!(
+    name = test_fileio_refuses_a_pid_with_no_table,
     suite = process_identity
 );
 slopos_testing::stest!(

@@ -67,7 +67,7 @@ fn install_fd_entry(
         return Errno::ENFILE.raw();
     };
 
-    let Some(mut inner) = pick_pid_slot_locked(process_id) else {
+    let Some(mut inner) = lock_pid_slot(process_id) else {
         // `open_file` drops here → backing released once.
         return Errno::ESRCH.raw();
     };
@@ -610,7 +610,7 @@ pub fn file_pipe_create(
         return Errno::ENFILE.raw() as _;
     };
 
-    let Some(mut inner) = pick_pid_slot_locked(process_id) else {
+    let Some(mut inner) = lock_pid_slot(process_id) else {
         drop(read_of);
         drop(write_of);
         return Errno::ESRCH.raw() as _;
@@ -947,7 +947,7 @@ pub fn fileio_clone_file_ref(process_id: u32, fd: i32) -> Option<FileRef> {
 /// (cloexec clear, POSIX default for received fds); on failure it drops
 /// here, closing that alias.
 pub fn fileio_install_file_ref(process_id: u32, file: FileRef) -> c_int {
-    let Some(mut inner) = pick_pid_slot_locked(process_id) else {
+    let Some(mut inner) = lock_pid_slot(process_id) else {
         return Errno::ESRCH.raw() as _;
     };
     let Some(idx) = find_free_slot(&inner) else {

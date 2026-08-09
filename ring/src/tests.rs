@@ -1031,25 +1031,47 @@ fn read_cqe_at(ring: &Ring, idx: u32) -> Cqe {
     Cqe::from_bytes(&bytes)
 }
 
+/// Run `body` against a private descriptor table for `pid`, torn down
+/// afterwards however `body` exits.
+///
+/// A pid with no table of its own is refused a descriptor, so a test that
+/// opens files has to mint one the same way process creation does.
+fn with_fd_table(pid: u32, body: fn(u32) -> TestResult) -> TestResult {
+    use slopos_fs::fileio::{
+        fileio_create_empty_table_for_process, fileio_destroy_table_for_process,
+    };
+
+    fileio_destroy_table_for_process(pid);
+    if fileio_create_empty_table_for_process(pid) != 0 {
+        return slopos_testing::fail!("fd table create failed for pid {:#x}", pid);
+    }
+    let result = body(pid);
+    fileio_destroy_table_for_process(pid);
+    result
+}
+
 /// An in-flight op keeps operating against its held backing after userland
 /// closes the fd, and releases that reference on completion (no leak).
 fn op_survives_fd_close() -> TestResult {
+    with_fd_table(0x51D0_0001, op_survives_fd_close_body)
+}
+
+fn op_survives_fd_close_body(pid: u32) -> TestResult {
     use core::ffi::c_int;
     use slopos_abi::syscall::POLLIN;
     use slopos_fs::fileio::{file_close_fd, file_pipe_create, fileio_clone_file_ref};
 
-    const PID: u32 = 0x51D0_0001;
     let mut ring = make_ring(8);
-    ring.owner_pid = PID;
+    ring.owner_pid = pid;
 
     let mut rfd: c_int = -1;
     let mut wfd: c_int = -1;
-    if file_pipe_create(PID, 0, &mut rfd, &mut wfd) != 0 {
+    if file_pipe_create(pid, 0, &mut rfd, &mut wfd) != 0 {
         return slopos_testing::fail!("pipe create failed");
     }
 
     // Our own alias to the read end, to observe the ring's reference count.
-    let probe_ref = match fileio_clone_file_ref(PID, rfd) {
+    let probe_ref = match fileio_clone_file_ref(pid, rfd) {
         Some(f) => f,
         None => return slopos_testing::fail!("clone read-end ref failed"),
     };
@@ -1063,7 +1085,7 @@ fn op_survives_fd_close() -> TestResult {
     sqe.fd = rfd;
     sqe.op_flags = POLLIN as u32;
     sqe.user_data = 0xA1;
-    crate::enter::process_sqe_for_test(PID, &mut ring, &sqe);
+    crate::enter::process_sqe_for_test(pid, &mut ring, &sqe);
     if ring.inflight.len() != 1 {
         return slopos_testing::fail!("poll should defer, inflight={}", ring.inflight.len());
     }
@@ -1075,11 +1097,11 @@ fn op_survives_fd_close() -> TestResult {
     }
 
     // Close the read fd. The held reference keeps the read end alive.
-    let _ = file_close_fd(PID, rfd);
+    let _ = file_close_fd(pid, rfd);
 
     // Still no readiness (peer write end open) → op stays in flight against the
     // held backing rather than resolving to a closed-fd error.
-    let done = crate::enter::harvest_step_for_test(PID, &mut ring, 1);
+    let done = crate::enter::harvest_step_for_test(pid, &mut ring, 1);
     drop(core::mem::take(&mut ring.pending_reap));
     if done || ring.inflight.len() != 1 {
         return slopos_testing::fail!(
@@ -1089,8 +1111,8 @@ fn op_survives_fd_close() -> TestResult {
     }
 
     // Close the write end → the read end reports POLLHUP → the op completes.
-    let _ = file_close_fd(PID, wfd);
-    let _ = crate::enter::harvest_step_for_test(PID, &mut ring, 1);
+    let _ = file_close_fd(pid, wfd);
+    let _ = crate::enter::harvest_step_for_test(pid, &mut ring, 1);
     // Drop the retired row's reference exactly as ring_enter would, off-lock.
     drop(core::mem::take(&mut ring.pending_reap));
 
@@ -1115,16 +1137,19 @@ stest!(name = op_survives_fd_close, suite = slopring);
 /// Closing an in-flight op's fd and reusing its number for a different file
 /// does not retarget the op: it stays bound to the original open file (D5).
 fn no_reuse_aliasing() -> TestResult {
+    with_fd_table(0x51D0_0002, no_reuse_aliasing_body)
+}
+
+fn no_reuse_aliasing_body(pid: u32) -> TestResult {
     use slopos_abi::syscall::POLLIN;
     use slopos_fs::fileio::{file_close_fd, file_pipe_create};
 
-    const PID: u32 = 0x51D0_0002;
     let mut ring = make_ring(8);
-    ring.owner_pid = PID;
+    ring.owner_pid = pid;
 
     // Pipe A.
     let (mut rfd_a, mut wfd_a) = (-1i32, -1i32);
-    if file_pipe_create(PID, 0, &mut rfd_a, &mut wfd_a) != 0 {
+    if file_pipe_create(pid, 0, &mut rfd_a, &mut wfd_a) != 0 {
         return slopos_testing::fail!("pipe A create failed");
     }
 
@@ -1134,15 +1159,15 @@ fn no_reuse_aliasing() -> TestResult {
     sqe.fd = rfd_a;
     sqe.op_flags = POLLIN as u32;
     sqe.user_data = 0xB1;
-    crate::enter::process_sqe_for_test(PID, &mut ring, &sqe);
+    crate::enter::process_sqe_for_test(pid, &mut ring, &sqe);
     if ring.inflight.len() != 1 {
         return slopos_testing::fail!("poll A should defer");
     }
 
     // Close A's read fd, then open pipe B — B's read end reuses A's fd number.
-    let _ = file_close_fd(PID, rfd_a);
+    let _ = file_close_fd(pid, rfd_a);
     let (mut rfd_b, mut wfd_b) = (-1i32, -1i32);
-    if file_pipe_create(PID, 0, &mut rfd_b, &mut wfd_b) != 0 {
+    if file_pipe_create(pid, 0, &mut rfd_b, &mut wfd_b) != 0 {
         return slopos_testing::fail!("pipe B create failed");
     }
     if rfd_b != rfd_a {
@@ -1155,10 +1180,10 @@ fn no_reuse_aliasing() -> TestResult {
 
     // Make the HELD file (A) ready via POLLHUP while the reused number (B)
     // stays not-ready (B's write end open, buffer empty).
-    let _ = file_close_fd(PID, wfd_a);
+    let _ = file_close_fd(pid, wfd_a);
 
     // The op must complete: it polls the held A, not the reused number → B.
-    let _ = crate::enter::harvest_step_for_test(PID, &mut ring, 1);
+    let _ = crate::enter::harvest_step_for_test(pid, &mut ring, 1);
     drop(core::mem::take(&mut ring.pending_reap));
     if ring.inflight.len() != 0 {
         return slopos_testing::fail!("op must target held file A, not reused B");
@@ -1168,8 +1193,8 @@ fn no_reuse_aliasing() -> TestResult {
         return slopos_testing::fail!("wrong completion: {:?}", cqe);
     }
 
-    let _ = file_close_fd(PID, rfd_b);
-    let _ = file_close_fd(PID, wfd_b);
+    let _ = file_close_fd(pid, rfd_b);
+    let _ = file_close_fd(pid, wfd_b);
     TestResult::Pass
 }
 stest!(name = no_reuse_aliasing, suite = slopring);

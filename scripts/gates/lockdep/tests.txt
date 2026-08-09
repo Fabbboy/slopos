@@ -32,6 +32,13 @@
 # mock locks the new iface, netmon and DHCP tests declare. Only the class caps
 # move: every edge and chain measurement still falls under the caps below, and
 # they keep their earlier values.
+#
+# Re-measured 2026-08-09 for the descriptor-table isolation test. Both test
+# phases gain exactly one class, KERNEL_FILE_TABLE. The test asserts that a
+# process owning no table never has descriptors installed into the kernel's,
+# and reading that table to prove it is the only acquire of that lock anywhere
+# in the tree — measured by disabling the probe, which returns both phases to
+# 176/185. Boot is unchanged; edges and chains stay under their caps.
 
 # Classes must be well clear of the pool before the validator would disable
 # itself. 70% mirrors MAX_POOL_FILL_PCT in ktesting/src/zz_lockdep_tests.rs;
@@ -56,8 +63,8 @@ require-phase post-userland-tests
 # been reached. One extra class is a new lock, which is exactly what should
 # require a deliberate bump.
 boot	classes	71
-post-kernel-tests	classes	176
-post-userland-tests	classes	185
+post-kernel-tests	classes	177
+post-userland-tests	classes	186
 
 # Edges and chains depend on which *orders* were observed, so they move with
 # scheduling. Each cap is the observed maximum plus that phase's spread, so
