@@ -55,6 +55,7 @@ pub mod numfmt;
 pub mod panic;
 pub mod panic_recovery;
 pub mod pci;
+pub mod process;
 pub mod ring_buffer;
 pub mod stacktrace;
 pub mod string;

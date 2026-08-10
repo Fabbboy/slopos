@@ -367,7 +367,12 @@ pub const DEFAULT_PROCESS_LAYOUT: ProcessMemoryLayout = ProcessMemoryLayout {
 // =============================================================================
 
 /// Maximum number of processes.
-pub const MAX_PROCESSES: usize = 256;
+///
+/// Re-exported from `abi` rather than declared here: the process registry,
+/// this crate's address-space table and the descriptor tables key on each
+/// other's slot indices, so the bound is one number in the one crate all
+/// three can see.
+pub use slopos_abi::task::MAX_PROCESSES;
 
 /// Highest process id the allocator ever hands out.
 ///

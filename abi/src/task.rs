@@ -50,6 +50,16 @@ pub const TASK_NAME_MAX_LEN: usize = 32;
 pub const INVALID_TASK_ID: u32 = 0xFFFF_FFFF;
 pub const INVALID_PROCESS_ID: u32 = 0xFFFF_FFFF;
 
+/// Maximum number of concurrently live processes.
+///
+/// Three fixed tables are sized by this — the process registry in
+/// `slopos_ostd::process`, the address-space table in `slopos_mm`, and the
+/// descriptor tables in `slopos_fs` — and they key on each other's slot
+/// indices, so the bound has to be one number rather than three that happen
+/// to agree. It lives here for the reason [`INVALID_PROCESS_ID`] does: `abi`
+/// is the only crate all three can see.
+pub const MAX_PROCESSES: usize = 256;
+
 // --- TaskStatus ---
 
 /// Type-safe task status with explicit state-machine semantics.
