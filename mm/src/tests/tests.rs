@@ -481,7 +481,6 @@ pub fn test_heap_fragmentation_behind_head() -> TestResult {
 // PROCESS VM TESTS (existing)
 // ============================================================================
 
-use crate::memory_layout_defs::MAX_PROCESS_ID;
 use crate::process_vm::{
     create_process_vm, destroy_process_vm, init_process_vm, process_vm_get_ostd_pml4_paddr,
     process_vm_handle, process_vm_with_handle,
@@ -608,68 +607,44 @@ pub fn test_process_vm_counter_reset() -> TestResult {
     pass!()
 }
 
-/// Spend the never-issued id space so the next `create_process_vm` draws
-/// a recycled id rather than a fresh one.
+/// A process id is reissued promptly, and that is now safe.
 ///
-/// Returns `false` if a creation failed. One process is live at a time,
-/// so this also leaves slot 0 as the lowest free slot — every create that
-/// follows binds the same slot, which is what makes a recycled id land
-/// back on the slot its predecessor used.
-fn exhaust_fresh_process_ids() -> bool {
-    for _ in 0..MAX_PROCESS_ID {
-        let pid = create_process_vm();
-        if pid == INVALID_PROCESS_ID {
-            return false;
-        }
-        destroy_process_vm(pid);
-    }
-    true
-}
-
-/// A freed process id is not the next one handed out, and comes back only
-/// once every other free id has.
+/// This replaces a test that asserted the opposite. The id allocator used to
+/// be a FIFO whose reuse order equalled its free order, so a freed id came
+/// back only after every other free id had — damage control for a hazard the
+/// id could not fix, because a stale reference to a recycled id resolved to a
+/// live stranger.
 ///
-/// Ids return at the tail of the free list and are drawn from the head,
-/// so reuse order equals free order. That delay is the whole point: an id
-/// handed straight back to the next process is what turns a stale
-/// reference to its previous holder into a reference to a live stranger.
-/// A "simplification" to a LIFO, or to a bitmap scanned from zero, would
-/// have to delete this test on purpose.
-pub fn test_process_ids_are_reused_in_the_order_they_were_freed() -> TestResult {
+/// The designator carries a generation now, so a stale reference fails the
+/// check outright (see
+/// [`test_process_vm_handle_stale_after_reuse`]) and the delay buys nothing.
+/// The allocator draws lowest-free, which is what this pins: an id freed and
+/// immediately redrawn is the *expected* behaviour, not a regression. A
+/// re-introduced FIFO would fail here.
+pub fn test_a_freed_process_id_is_reissued_promptly() -> TestResult {
     init_process_vm();
 
-    if !exhaust_fresh_process_ids() {
-        return fail!("could not spend the never-issued id space");
+    let first = create_process_vm();
+    if first == INVALID_PROCESS_ID {
+        return fail!("create");
     }
+    destroy_process_vm(first);
 
-    // `marked` was freed last, so it is last in line.
-    let marked = create_process_vm();
-    if marked == INVALID_PROCESS_ID {
-        return fail!("create after the fresh id space was spent");
+    let second = create_process_vm();
+    if second == INVALID_PROCESS_ID {
+        return fail!("create after free");
     }
-    destroy_process_vm(marked);
+    destroy_process_vm(second);
 
-    for draw in 1..=MAX_PROCESS_ID {
-        let pid = create_process_vm();
-        if pid == INVALID_PROCESS_ID {
-            return fail!("create failed on draw {}", draw);
-        }
-        destroy_process_vm(pid);
-        if pid != marked {
-            continue;
-        }
-        if draw != MAX_PROCESS_ID {
-            return fail!(
-                "id {} was reissued on draw {} of {} — ahead of ids freed before it",
-                marked,
-                draw,
-                MAX_PROCESS_ID
-            );
-        }
-        return pass!();
+    if second != first {
+        return fail!(
+            "id {} was freed but the next draw was {} — the allocator is \
+             delaying reuse, which the generation check made unnecessary",
+            first,
+            second
+        );
     }
-
-    fail!("id {} was never reissued", marked)
+    pass!()
 }
 
 /// A `Handle<ProcessVm>` minted for one process never resolves to the
@@ -681,10 +656,6 @@ pub fn test_process_ids_are_reused_in_the_order_they_were_freed() -> TestResult 
 /// stranger's address space to fault a page into.
 pub fn test_process_vm_handle_stale_after_reuse() -> TestResult {
     init_process_vm();
-
-    if !exhaust_fresh_process_ids() {
-        return fail!("could not spend the never-issued id space");
-    }
 
     let p1 = create_process_vm();
     if p1 == INVALID_PROCESS_ID {
@@ -706,21 +677,15 @@ pub fn test_process_vm_handle_stale_after_reuse() -> TestResult {
         return fail!("destroyed-slot handle should be NoEntry");
     }
 
-    // Cycle the id space until `p1`'s id comes back around. Reuse is
-    // FIFO, so that is exactly `MAX_PROCESS_ID` draws away.
-    let mut p2 = INVALID_PROCESS_ID;
-    for draw in 1..=MAX_PROCESS_ID {
-        p2 = create_process_vm();
-        if p2 == INVALID_PROCESS_ID {
-            return fail!("create failed on draw {}", draw);
-        }
-        if p2 == p1 {
-            break;
-        }
-        destroy_process_vm(p2);
+    // Redraw. The allocator is lowest-free, so `p1`'s id comes straight back
+    // — which is precisely the case the generation exists to make safe, and
+    // the one a FIFO used to hide behind a `MAX_PROCESS_ID`-long delay.
+    let p2 = create_process_vm();
+    if p2 == INVALID_PROCESS_ID {
+        return fail!("create p2");
     }
     if p2 != p1 {
-        return fail!("id {} was never reissued", p1);
+        return fail!("id {} was not reissued (got {})", p1, p2);
     }
 
     let Some(h2) = process_vm_handle(p2) else {
@@ -1843,7 +1808,7 @@ stest!(name = test_process_vm_slot_reuse, suite = vm);
 stest!(name = test_process_vm_counter_reset, suite = vm);
 stest!(name = test_process_vm_handle_stale_after_reuse, suite = vm);
 stest!(
-    name = test_process_ids_are_reused_in_the_order_they_were_freed,
+    name = test_a_freed_process_id_is_reissued_promptly,
     suite = vm
 );
 

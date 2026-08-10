@@ -1,6 +1,4 @@
 use core::ffi::c_int;
-use core::ptr;
-use core::sync::atomic::{AtomicPtr, Ordering};
 use slopos_ostd::lock_class;
 
 use slopos_ostd::KVec;
@@ -10,16 +8,17 @@ use slopos_ostd::mm::frame::AnonymousMeta;
 use slopos_ostd::mm::uframe::UFrame;
 use slopos_ostd::mm::vm_space::{MapError, VmSpace};
 use slopos_ostd::panic::AbortOnUnwind;
+use slopos_ostd::process::Process;
 
 use slopos_abi::addr::{PhysAddr, VirtAddr};
-use slopos_ostd::sync::{LOCK_LEVEL_REGISTRY, LOCK_LEVEL_RESOURCE, SpinLock};
+use slopos_ostd::sync::{LOCK_LEVEL_RESOURCE, SpinLock};
 use slopos_ostd::{align_down, align_up, klog_debug, klog_info};
 
 use crate::aslr;
 use crate::elf::{ElfError, ElfValidator, MAX_LOAD_SEGMENTS, PF_W, ValidatedSegment};
 use crate::hhdm::PhysAddrHhdm;
 use crate::memory_layout_defs::DEFAULT_PROCESS_LAYOUT;
-use crate::memory_layout_defs::{KERNEL_VIRTUAL_BASE, MAX_PROCESS_ID, MAX_PROCESSES};
+use crate::memory_layout_defs::{KERNEL_VIRTUAL_BASE, MAX_PROCESSES};
 use crate::page_alloc::{alloc_kernel_page, free_page_frame};
 use crate::paging_defs::{PAGE_SIZE_4KB, PageFlags};
 use crate::tlb;
@@ -36,13 +35,30 @@ use slopos_abi::task::INVALID_PROCESS_ID;
 /// Exposed as an opaque marker so other crates can name
 /// [`Handle<ProcessVm>`]; all fields stay private to this module.
 pub struct ProcessVm {
+    /// The process this address space belongs to — the slot's identity.
+    ///
+    /// Owning, so a slot that is bound keeps its process resolvable: the
+    /// address space and the object naming it are torn down together or not
+    /// at all. `None` exactly when the slot is free.
+    ///
+    /// This is the re-key. The slot used to be found by scanning for a
+    /// matching `process_id`, which cannot distinguish two processes that
+    /// held the same recycled id; it is now indexed by the process's own slot
+    /// and validated by its generation.
+    process: Option<KArc<Process>>,
+    /// Display copy of [`process`](Self::process)'s id.
+    ///
+    /// Kept as a plain scalar because the lock-free slot peek reads it
+    /// (`read_atomic_field` permits a naturally-aligned scalar and nothing
+    /// else — a `KArc` behind it could not be dereferenced without the lock).
+    /// Never an identity: every check that decides whether this slot is the
+    /// caller's compares generations.
     process_id: u32,
-    /// Slot-reuse generation. A fresh, globally-unique value is stamped
-    /// each time this slot is bound to a process; it is the generation
-    /// half of the slot's [`Handle`]. A handle minted for a previous
-    /// occupant fails to resolve once the slot has been rebound, so a
-    /// stale address-space reference becomes a typed `HandleError`
-    /// rather than silently aliasing the new occupant.
+    /// Generation half of the slot's [`Handle`], copied from the bound
+    /// process's handle so a resolution can check it without following the
+    /// `KArc`. A handle minted for a previous occupant fails to resolve once
+    /// the slot has been rebound, so a stale address-space reference becomes
+    /// a typed `HandleError` rather than silently aliasing the new occupant.
     generation: u64,
     /// The process's address space. `None` only between `reset()` and
     /// the next `create_process_vm` re-init; every live process has one.
@@ -67,6 +83,7 @@ pub struct ProcessVm {
 impl ProcessVm {
     const fn new() -> Self {
         Self {
+            process: None,
             process_id: INVALID_PROCESS_ID,
             generation: 0,
             vm_space: None,
@@ -83,7 +100,9 @@ impl ProcessVm {
     }
 
     fn reset(&mut self) {
+        self.process = None;
         self.process_id = INVALID_PROCESS_ID;
+        self.generation = 0;
         // Drop the OSTD VmSpace (and its KArc-counted PML4 +
         // user-half tree) here. `destroy_process_vm` clears the
         // Option before calling reset so this normally re-runs on
@@ -101,222 +120,72 @@ impl ProcessVm {
     }
 }
 
-/// Words in the claimed-slot bitmap.
-const SLOT_WORDS: usize = MAX_PROCESSES.div_ceil(64);
-
-/// Highest generation value before the counter wraps.
+/// A slot reserved for a new address space, and the process that owns it.
 ///
-/// A slot's generation is published beside its 16-bit slot index inside a
-/// single packed word, which leaves 48 bits for the generation. It wraps
-/// to 1 rather than 0 because zero is the encoding for "no address
-/// space": a packed handle must never collide with it.
-const GENERATION_MAX: u64 = (1u64 << (64 - PROCESS_VM_SLOT_BITS)) - 1;
-
-/// A slot, a process id and a generation, reserved together and released
-/// together.
+/// The slot index is not allocated here — it *is* the process's registry slot,
+/// so the two tables are the same slot space and the address space for a
+/// process is found by indexing rather than by scanning for a matching id.
+/// What this type carries is the claim: the reservation exists only while the
+/// slot is spoken for, and is given back on every mid-creation failure path.
 ///
-/// Both halves are taken in one critical section, and the slot's bitmap
-/// bit is set at the instant the id is drawn — not later, when the slot's
-/// `process_id` field is written. That is what makes the claim atomic
-/// against a concurrent creator: two creators cannot pick the same slot
-/// and have the loser's address space dropped out from under a live id.
+/// The generation comes from the process's handle rather than from a counter
+/// here. One generation for the identity means a `Handle<ProcessVm>` and a
+/// `Handle<Process>` for the same process agree by construction; two counters
+/// could drift, and the drift would be invisible until a stale handle resolved
+/// against the wrong one.
 struct VmReservation {
     slot: usize,
     process_id: u32,
     generation: u64,
+    process: KArc<Process>,
 }
 
-/// Slot and id allocation for the process VM table.
-///
-/// Two independent allocators share one lock. Slots are a bitmap because
-/// a slot is just a table index and any free one will do. Ids are a FIFO
-/// because *which* free id comes back matters: an id handed straight back
-/// to the next process is what makes a stale reference to the previous
-/// one resolve to something live. Returning at the tail and drawing from
-/// the head means an id is not reissued until every other free id has
-/// been — reuse order equals free order, which is a property a test can
-/// state without knowing anything about the allocator's internals.
-///
-/// All of it is `.bss`. Nothing here may allocate: `VM_SLOT_ALLOC` is a
-/// cli-lock, and the buddy allocator's reuse path performs a synchronous
-/// cross-CPU shootdown.
-struct VmSlotAlloc {
-    /// Slots spoken for by a live or in-flight process.
-    slots: [u64; SLOT_WORDS],
-    /// Live process count. Derived from `slots`; kept as a scalar because
-    /// `get_process_vm_stats` reports it.
-    num_processes: u32,
-    /// How many ids have been drawn from never-issued space. While it is
-    /// below `MAX_PROCESS_ID` the next id is `fresh_issued + 1` and the
-    /// ring stays empty, so a fresh boot issues 1, 2, 3, … in order.
-    fresh_issued: u32,
-    /// Returned ids, oldest first.
-    free_pids: [u16; MAX_PROCESSES],
-    free_head: u16,
-    free_tail: u16,
-    free_len: u16,
-    /// Monotonic source of per-slot generations. Each slot binding draws
-    /// a fresh value so a handle never collides with a later occupant of
-    /// the same slot.
-    next_generation: u64,
-}
-
-impl VmSlotAlloc {
-    const fn new() -> Self {
-        Self {
-            slots: [0; SLOT_WORDS],
-            num_processes: 0,
-            fresh_issued: 0,
-            free_pids: [0; MAX_PROCESSES],
-            free_head: 0,
-            free_tail: 0,
-            free_len: 0,
-            next_generation: 1,
-        }
-    }
-
-    /// Clear every claim and both id allocators, in place.
+impl VmReservation {
+    /// Claim the slot `process` occupies in the process registry.
     ///
-    /// Never `*self = Self::new()`: this struct is around 570 bytes, and
-    /// materialising one as an rvalue would put all of it on the caller's
-    /// frame against a 2 KiB budget.
-    ///
-    /// `next_generation` deliberately survives. Generations are the only
-    /// thing separating a handle minted before the reset from the slot's
-    /// next occupant, so they stay globally monotonic across one.
-    fn reset(&mut self) {
-        for word in self.slots.iter_mut() {
-            *word = 0;
+    /// `None` when the process carries no handle (it was never registered) or
+    /// its slot is already bound — the latter being a caller bug rather than a
+    /// capacity limit: a process gets exactly one address space, and a second
+    /// create for the same process would drop the first out from under
+    /// whatever is running in it.
+    fn claim(process: KArc<Process>) -> Option<Self> {
+        let handle = process.handle()?;
+        let slot = handle.slot() as usize;
+        if slot >= MAX_PROCESSES {
+            return None;
         }
-        self.num_processes = 0;
-        self.fresh_issued = 0;
-        self.free_head = 0;
-        self.free_tail = 0;
-        self.free_len = 0;
-    }
-
-    /// Draw a fresh, never-reused generation value.
-    fn alloc_generation(&mut self) -> u64 {
-        let g = self.next_generation;
-        self.next_generation = if self.next_generation >= GENERATION_MAX {
-            1
-        } else {
-            self.next_generation + 1
-        };
-        g
-    }
-
-    /// Claim the lowest free slot.
-    fn claim_slot(&mut self) -> Option<usize> {
-        for (word_idx, word) in self.slots.iter_mut().enumerate() {
-            if *word == u64::MAX {
-                continue;
-            }
-            let bit = word.trailing_ones() as usize;
-            let slot = word_idx * 64 + bit;
-            if slot >= MAX_PROCESSES {
+        {
+            let guard = PROCESS_VMS[slot].lock();
+            if guard.process_id != INVALID_PROCESS_ID {
+                klog_info!(
+                    "process_vm: slot {} is already bound to process {}",
+                    slot,
+                    guard.process_id
+                );
                 return None;
             }
-            *word |= 1u64 << bit;
-            return Some(slot);
         }
-        None
-    }
-
-    fn release_slot(&mut self, slot: usize) {
-        if slot >= MAX_PROCESSES {
-            return;
-        }
-        self.slots[slot / 64] &= !(1u64 << (slot % 64));
-    }
-
-    /// Draw an id: never-issued space first, then the oldest returned id.
-    fn draw_pid(&mut self) -> Option<u32> {
-        if self.fresh_issued < MAX_PROCESS_ID {
-            self.fresh_issued += 1;
-            return Some(self.fresh_issued);
-        }
-        if self.free_len == 0 {
-            return None;
-        }
-        let process_id = self.free_pids[self.free_head as usize] as u32;
-        self.free_head = (self.free_head + 1) % MAX_PROCESSES as u16;
-        self.free_len -= 1;
-        Some(process_id)
-    }
-
-    fn return_pid(&mut self, process_id: u32) {
-        if process_id == INVALID_PROCESS_ID
-            || process_id > MAX_PROCESS_ID
-            || self.free_len as usize >= MAX_PROCESSES
-        {
-            return;
-        }
-        self.free_pids[self.free_tail as usize] = process_id as u16;
-        self.free_tail = (self.free_tail + 1) % MAX_PROCESSES as u16;
-        self.free_len += 1;
-    }
-
-    /// Reserve an id and a slot together.
-    ///
-    /// Id first: failing the slot after drawing the id returns it, so a
-    /// full table never spends one.
-    fn reserve(&mut self) -> Option<VmReservation> {
-        let process_id = self.draw_pid()?;
-        let Some(slot) = self.claim_slot() else {
-            self.return_pid(process_id);
-            return None;
-        };
-        self.num_processes += 1;
-        let generation = self.alloc_generation();
-        self.debug_assert_count_matches();
-        Some(VmReservation {
+        Some(Self {
             slot,
-            process_id,
-            generation,
+            process_id: process.id(),
+            generation: handle.generation(),
+            process,
         })
     }
-
-    fn release(&mut self, slot: usize, process_id: u32) {
-        self.release_slot(slot);
-        self.return_pid(process_id);
-        self.num_processes = self.num_processes.saturating_sub(1);
-        self.debug_assert_count_matches();
-    }
-
-    /// `num_processes` is derived from the bitmap; a divergence would
-    /// present as a phantom "no free process id or slot" long after the
-    /// bookkeeping error that caused it.
-    fn debug_assert_count_matches(&self) {
-        debug_assert_eq!(
-            self.num_processes,
-            self.slots.iter().map(|w| w.count_ones()).sum::<u32>(),
-            "process count diverged from the claimed-slot bitmap"
-        );
-    }
 }
 
-/// Reserve an id, a slot and a generation for a new process.
-fn alloc_pid_and_slot() -> Option<VmReservation> {
-    VM_SLOT_ALLOC.lock().reserve()
-}
-
-/// Give back a reservation whose slot was never fully bound, or was
-/// bound and has since been unbound again — the mid-creation failure
-/// paths.
-fn release_reservation(reservation: VmReservation) {
-    VM_SLOT_ALLOC
-        .lock()
-        .release(reservation.slot, reservation.process_id);
-}
-
-/// Give back a torn-down process's slot and id.
+/// The number of bound address-space slots.
 ///
-/// The last step of teardown: by the time this runs the slot carries
-/// `INVALID_PROCESS_ID` and the shootdown mask is clear, so the id's next
-/// holder inherits nothing.
-fn free_pid_and_slot(slot: usize, process_id: u32) {
-    VM_SLOT_ALLOC.lock().release(slot, process_id);
+/// Derived by counting rather than kept as a scalar: the previous counter was
+/// maintained alongside a bitmap and could diverge from it, which presented as
+/// a phantom "no free process id or slot" long after the bookkeeping error.
+/// There is no bitmap now — occupancy is the slot's own `process_id` — so the
+/// only way to keep a count honest is to read the thing it counts. Called from
+/// `get_process_vm_stats`, which is a diagnostic path.
+fn count_bound_slots() -> u32 {
+    (0..MAX_PROCESSES)
+        .filter(|&i| slot_pid_lock_free(&PROCESS_VMS[i]) != INVALID_PROCESS_ID)
+        .count() as u32
 }
 
 /// A live process address space, named both ways.
@@ -340,40 +209,6 @@ static PROCESS_VMS: [SpinLock<ProcessVm>; MAX_PROCESSES] = {
     );
     [INIT; MAX_PROCESSES]
 };
-
-/// Global slot allocator -- only taken for fork/exit/init to find free slots
-/// and update the process count.
-static VM_SLOT_ALLOC: SpinLock<VmSlotAlloc> = SpinLock::new(
-    VmSlotAlloc::new(),
-    lock_class!("VM_SLOT_ALLOC", LOCK_LEVEL_REGISTRY),
-);
-
-/// Releases the descriptor table bound to a process id.
-///
-/// A process's fd table is part of its identity, exactly as its address
-/// space is: an id whose address space has been torn down but whose
-/// descriptor table is still bound would hand the next holder of that id
-/// a dead process's open files. mm sits below fs in the crate graph and
-/// cannot name it, so fs registers its own teardown here at boot.
-static PROCESS_FD_TABLE_TEARDOWN: AtomicPtr<()> = AtomicPtr::new(ptr::null_mut());
-
-/// Register the descriptor-table teardown that runs alongside a process
-/// VM teardown in [`init_process_vm`]. Append-once; the last registration
-/// wins.
-pub fn register_process_fd_table_teardown(hook: fn(u32)) {
-    PROCESS_FD_TABLE_TEARDOWN.store(hook as *mut (), Ordering::Release);
-    klog_info!("Process VM: fd-table teardown registered");
-}
-
-/// Run the registered descriptor-table teardown for `process_id`. A no-op
-/// before fs has registered, which is every teardown that runs during
-/// memory bring-up.
-fn release_process_fd_table(process_id: u32) {
-    let raw = PROCESS_FD_TABLE_TEARDOWN.load(Ordering::Acquire);
-    if let Some(hook) = slopos_ostd::util::fn_ptr::fn_ptr_decode_opt::<fn(u32)>(raw) {
-        hook(process_id);
-    }
-}
 
 fn vma_range_valid(start: u64, end: u64) -> bool {
     start < end && (start & (PAGE_SIZE_4KB - 1)) == 0 && (end & (PAGE_SIZE_4KB - 1)) == 0
@@ -502,7 +337,14 @@ fn slot_pid_lock_free(slot: &SpinLock<ProcessVm>) -> u32 {
     slot_read_lock_free(slot, |inner| inner.process_id)
 }
 
-/// Find the slot index for a given process ID using a lock-free scan.
+/// The slot holding `process_id`'s address space.
+///
+/// Still a scan, and still keyed on the id — but the id is now resolved
+/// through the process registry first, so what comes back is a slot whose
+/// *generation* matched a live process rather than whichever slot happens to
+/// carry that number. The scan is gone from every caller that has a handle;
+/// this is the compatibility path for the pid-taking entry points, which
+/// phase 3b converts.
 fn find_slot_for_pid(process_id: u32) -> Option<usize> {
     if process_id == INVALID_PROCESS_ID {
         return None;
@@ -513,6 +355,23 @@ fn find_slot_for_pid(process_id: u32) -> Option<usize> {
         }
     }
     None
+}
+
+/// The slot `handle` names, if it is still bound to the same process.
+///
+/// The generation check is the whole point: a slot rebound since the handle
+/// was minted answers `None` rather than handing back a stranger's address
+/// space. One index, no scan.
+fn slot_for_handle(handle: Handle<Process>) -> Option<usize> {
+    let slot = handle.slot() as usize;
+    if slot >= MAX_PROCESSES {
+        return None;
+    }
+    let guard = PROCESS_VMS[slot].lock();
+    if guard.process_id == INVALID_PROCESS_ID || guard.generation != handle.generation() {
+        return None;
+    }
+    Some(slot)
 }
 
 /// The shootdown-mask key for a VM slot.
@@ -566,24 +425,69 @@ pub fn process_vm_with_handle<R>(
     Ok(f(&mut guard))
 }
 
+/// Run `f` with mutable access to the address space `process` owns.
+///
+/// The handle-keyed counterpart to the pid-taking accessors, and the shape
+/// every caller should reach for: the slot is an index rather than a scan,
+/// and a process whose slot has been rebound answers `Stale` instead of
+/// handing back a stranger's page tables.
+pub fn process_vm_with_process<R>(
+    process: Handle<Process>,
+    f: impl FnOnce(&mut ProcessVm) -> R,
+) -> Result<R, HandleError> {
+    let slot = slot_for_handle(process).ok_or(HandleError::Stale)?;
+    let mut guard = PROCESS_VMS[slot].lock();
+    // Re-checked under the lock: `slot_for_handle` released it between the
+    // resolution and this acquisition, and a teardown can land in that window.
+    if guard.process_id == INVALID_PROCESS_ID {
+        return Err(HandleError::NoEntry);
+    }
+    if guard.generation != process.generation() {
+        return Err(HandleError::Stale);
+    }
+    Ok(f(&mut guard))
+}
+
+/// The address-space handle for `process`, if its slot is still bound to it.
+///
+/// Both handles name the same slot with the same generation — they are two
+/// views of one identity, not two allocations that have to be kept in step.
+pub fn process_vm_handle_for(process: Handle<Process>) -> Option<Handle<ProcessVm>> {
+    let slot = slot_for_handle(process)?;
+    Some(Handle::from_parts(slot as u32, process.generation()))
+}
+
 /// Pack a process-VM handle into the single word a task carries.
 ///
 /// The task struct lives in `slopos_ostd`, which cannot name
 /// [`ProcessVm`], so the handle crosses the boundary as a `u64` and the
 /// two sides agree on the layout through [`PROCESS_VM_SLOT_BITS`].
+/// The slot is stored **biased by one**, so slot 0 at generation 0 does not
+/// pack to zero and collide with "no address space".
+///
+/// This used to rest on the generation instead: mm drew its own generations
+/// from a counter starting at 1, so no live handle could pack to zero. That
+/// premise is gone — the generation now comes from the process registry, and
+/// the *first* process is slot 0 generation 0. Biasing the slot makes the
+/// encoding total on its own rather than dependent on an allocator policy in
+/// another crate, which is where a total encoding belongs. Matches
+/// `slopos_ostd::process::pack_process_handle`.
 pub fn pack_process_vm_handle(handle: Handle<ProcessVm>) -> u64 {
-    handle.pack(PROCESS_VM_SLOT_BITS) as u64
+    Handle::<ProcessVm>::from_parts(handle.slot() + 1, handle.generation())
+        .pack(PROCESS_VM_SLOT_BITS) as u64
 }
 
-/// Inverse of [`pack_process_vm_handle`].
-///
-/// Zero is "no address space": generations start at 1 and never wrap to
-/// 0, so no live handle packs to it.
+/// Inverse of [`pack_process_vm_handle`]. Zero is "no address space".
 pub fn unpack_process_vm_handle(packed: u64) -> Option<Handle<ProcessVm>> {
     if packed == 0 {
         return None;
     }
-    Some(Handle::unpack(packed as usize, PROCESS_VM_SLOT_BITS))
+    let biased = Handle::<ProcessVm>::unpack(packed as usize, PROCESS_VM_SLOT_BITS);
+    // A packed word whose slot field is 0 was not produced by the packer:
+    // every real slot is stored biased. Refuse it rather than unbiasing to
+    // `u32::MAX`.
+    let slot = biased.slot().checked_sub(1)?;
+    Some(Handle::from_parts(slot, biased.generation()))
 }
 
 /// Install the address space named by `handle` as the current CPU's CR3.
@@ -1814,6 +1718,24 @@ pub fn create_process_vm() -> u32 {
     create_process_vm_ref().map_or(INVALID_PROCESS_ID, |p| p.process_id)
 }
 
+/// Register a process and give it an address space, for callers that have no
+/// process object of their own.
+///
+/// Every in-kernel caller of the pid-taking `create_process_vm` is one of
+/// these: a test, or a boot path. A real spawn goes through the scheduler's
+/// lease, which mints the process against its spawner so the accounting edge
+/// names the right parent.
+fn create_process_vm_standalone() -> Option<ProcessVmRef> {
+    let process = slopos_ostd::process::process_spawn_root().ok()?;
+    let vm = create_process_vm_for(process.clone());
+    if vm.is_none() {
+        if let Some(handle) = process.handle() {
+            slopos_ostd::process::process_retire(handle);
+        }
+    }
+    vm
+}
+
 /// Create a process address space and return it named both ways.
 ///
 /// The handle costs nothing here — the reservation already holds the slot
@@ -1821,14 +1743,21 @@ pub fn create_process_vm() -> u32 {
 /// space later without a pid scan and without mistaking a recycled id for
 /// the process it was minted against.
 pub fn create_process_vm_ref() -> Option<ProcessVmRef> {
+    create_process_vm_standalone()
+}
+
+/// Give `process` an address space, in the slot its registry handle names.
+///
+/// The slot is not allocated: it is the process's own, so the address-space
+/// table and the process registry share one slot space and one generation.
+pub fn create_process_vm_for(process: KArc<Process>) -> Option<ProcessVmRef> {
     let layout = aslr::randomize_process_layout(&DEFAULT_PROCESS_LAYOUT);
 
-    // Phase 1: reserve an id, a slot and a generation together under the
-    // global lock. The slot is claimed here, not when `proc.process_id`
-    // is written below, so nothing else can pick it in the unlocked
-    // window that follows.
-    let Some(reservation) = alloc_pid_and_slot() else {
-        klog_info!("create_process_vm: no free process id or slot");
+    // Phase 1: claim the process's slot. Nothing else can bind it — a process
+    // has exactly one address space — so the claim is a refusal on an already
+    // bound slot rather than a search for a free one.
+    let Some(reservation) = VmReservation::claim(process) else {
+        klog_info!("create_process_vm: could not claim the process's VM slot");
         return None;
     };
     let slot = reservation.slot;
@@ -1845,7 +1774,7 @@ pub fn create_process_vm_ref() -> Option<ProcessVmRef> {
             klog_info!(
                 "create_process_vm: VmSpace::new failed (kernel-master / FrameAlloc not registered?)"
             );
-            release_reservation(reservation);
+            drop(reservation);
             return None;
         }
     };
@@ -1856,7 +1785,7 @@ pub fn create_process_vm_ref() -> Option<ProcessVmRef> {
         Ok(a) => a,
         Err(_) => {
             klog_info!("create_process_vm: KArc<VmSpace> heap alloc failed");
-            release_reservation(reservation);
+            drop(reservation);
             return None;
         }
     };
@@ -1864,6 +1793,7 @@ pub fn create_process_vm_ref() -> Option<ProcessVmRef> {
     // Phase 3: initialize the per-process slot under its own lock.
     {
         let mut proc = PROCESS_VMS[slot].lock();
+        proc.process = Some(reservation.process.clone());
         proc.process_id = process_id;
         proc.generation = generation;
         proc.vm_space = Some(vm_space_arc);
@@ -1915,9 +1845,14 @@ pub fn create_process_vm_ref() -> Option<ProcessVmRef> {
             klog_info!("create_process_vm: Failed to seed initial VMAs");
             teardown_inner_mappings(&mut proc, slot_tlb_key(slot));
             proc.vm_space = None;
+            // Unbind fully: clearing only the display id would leave the slot
+            // owning a process reference and still answering the generation
+            // check, so the next `claim` would refuse a slot nothing uses.
+            proc.process = None;
             proc.process_id = INVALID_PROCESS_ID;
+            proc.generation = 0;
             drop(proc);
-            release_reservation(reservation);
+            drop(reservation);
             return None;
         }
 
@@ -1942,9 +1877,14 @@ pub fn create_process_vm_ref() -> Option<ProcessVmRef> {
             klog_info!("create_process_vm: Failed to map process stack");
             teardown_inner_mappings(&mut proc, slot_tlb_key(slot));
             proc.vm_space = None;
+            // Unbind fully: clearing only the display id would leave the slot
+            // owning a process reference and still answering the generation
+            // check, so the next `claim` would refuse a slot nothing uses.
+            proc.process = None;
             proc.process_id = INVALID_PROCESS_ID;
+            proc.generation = 0;
             drop(proc);
-            release_reservation(reservation);
+            drop(reservation);
             return None;
         }
 
@@ -2000,6 +1940,7 @@ pub fn destroy_process_vm(process_id: u32) -> c_int {
     klog_info!("Destroying process VM space for PID {}", process_id);
     // The authoritative cross-CPU flush is issued inside
     // `teardown_inner_mappings` by `MmTeardownGuard::begin`.
+    let released: Option<KArc<Process>>;
 
     // Teardown under the per-process lock.
     {
@@ -2040,12 +1981,29 @@ pub fn destroy_process_vm(process_id: u32) -> c_int {
         proc.vm_space = None;
 
         proc.process_id = INVALID_PROCESS_ID;
+        proc.generation = 0;
         proc.flags = 0;
+        // Taken out here and released below, off the slot lock: this can be
+        // the process's last reference, and `Process::drop` returns the id to
+        // an allocator no lock here covers.
+        released = proc.process.take();
     }
 
-    // Last: the slot is unbound and the shootdown mask is clear, so both
-    // the slot and the id are safe to hand out again.
-    free_pid_and_slot(slot, process_id);
+    // Last: the slot is unbound and the shootdown mask is clear, so it is safe
+    // to bind again.
+    //
+    // Destroying a process's address space is destroying the process: nothing
+    // survives it that a later caller could name. So the registration is
+    // retired here, which is what ultimately returns the id — via
+    // `Process::drop`, once this reference and every resolved clone have gone.
+    // Retiring after the unbind, rather than before, is what keeps the id
+    // outliving every translation to the address space it named.
+    if let Some(process) = released.as_ref()
+        && let Some(handle) = process.handle()
+    {
+        slopos_ostd::process::process_retire(handle);
+    }
+    drop(released);
     0
 }
 
@@ -2138,22 +2096,23 @@ pub fn process_vm_free(process_id: u32, vaddr: u64, size: u64) -> c_int {
     0
 }
 
-/// Return every process VM slot and every id to the allocator.
+/// Tear down every bound address space.
 ///
-/// A process id names an address space *and* a descriptor table, so both
-/// go together: releasing the VM while fs still holds a table bound to
-/// that id would let the id's next holder open the dead process's files.
+/// A process id names an address space *and* a descriptor table, and both go
+/// with the process: releasing the VM while fs still held a table bound to
+/// that id would let the id's next holder open the dead process's files. That
+/// used to need a runtime-installed hook here, because mm sits below fs and
+/// cannot name `fileio_destroy_table_for_process`. It no longer does — the
+/// descriptor table is keyed on the process too, and retiring the process is
+/// what releases both. mm does not have to reach fs to say so.
 pub fn init_process_vm() -> c_int {
     for i in 0..MAX_PROCESSES {
-        // SAFETY: lock-free read of naturally-aligned u32 sentinel.
         let pid = slot_pid_lock_free(&PROCESS_VMS[i]);
         if pid != INVALID_PROCESS_ID {
-            release_process_fd_table(pid);
             destroy_process_vm(pid);
         }
     }
 
-    VM_SLOT_ALLOC.lock().reset();
     for i in 0..MAX_PROCESSES {
         PROCESS_VMS[i].lock().reset();
     }
@@ -2170,10 +2129,9 @@ pub struct ProcessVmStats {
 }
 
 pub fn get_process_vm_stats() -> ProcessVmStats {
-    let alloc = VM_SLOT_ALLOC.lock();
     ProcessVmStats {
         total_processes: MAX_PROCESSES as u32,
-        active_processes: alloc.num_processes,
+        active_processes: count_bound_slots(),
     }
 }
 
@@ -3105,9 +3063,23 @@ pub fn process_vm_clone_cow(parent_id: u32) -> u32 {
     process_vm_clone_cow_ref(parent_id).map_or(INVALID_PROCESS_ID, |p| p.process_id)
 }
 
-/// Clone address space with COW for fork(), returning the child named
-/// both ways. Handle-returning counterpart to [`create_process_vm_ref`].
+/// Clone address space with COW for fork(), registering a fresh process for
+/// the child. For callers that have no process object; a real fork goes
+/// through [`process_vm_clone_cow_for`] so the child's accounting edge names
+/// its actual spawner.
 pub fn process_vm_clone_cow_ref(parent_id: u32) -> Option<ProcessVmRef> {
+    let child = slopos_ostd::process::process_spawn_root().ok()?;
+    let vm = process_vm_clone_cow_for(parent_id, child.clone());
+    if vm.is_none() {
+        if let Some(handle) = child.handle() {
+            slopos_ostd::process::process_retire(handle);
+        }
+    }
+    vm
+}
+
+/// Clone `parent_id`'s address space with COW into `child`'s slot.
+pub fn process_vm_clone_cow_for(parent_id: u32, child: KArc<Process>) -> Option<ProcessVmRef> {
     let parent_slot = match find_slot_for_pid(parent_id) {
         Some(s) => s,
         None => {
@@ -3140,9 +3112,11 @@ pub fn process_vm_clone_cow_ref(parent_id: u32) -> Option<ProcessVmRef> {
         None => return None,
     };
 
-    // Phase 1: reserve the child's id, slot and generation together.
-    let Some(reservation) = alloc_pid_and_slot() else {
-        klog_info!("process_vm_clone_cow: no free process id or slot");
+    // Phase 1: claim the child's own registry slot. Not an allocation — the
+    // child already exists as a process; this binds an address space into the
+    // slot it occupies.
+    let Some(reservation) = VmReservation::claim(child) else {
+        klog_info!("process_vm_clone_cow: could not claim the child's VM slot");
         return None;
     };
     let child_slot = reservation.slot;
@@ -3160,7 +3134,7 @@ pub fn process_vm_clone_cow_ref(parent_id: u32) -> Option<ProcessVmRef> {
                 "process_vm_clone_cow: VmSpace::new failed for child PID {}",
                 child_id
             );
-            release_reservation(reservation);
+            drop(reservation);
             return None;
         }
     };
@@ -3172,7 +3146,7 @@ pub fn process_vm_clone_cow_ref(parent_id: u32) -> Option<ProcessVmRef> {
                 "process_vm_clone_cow: KArc<VmSpace> heap alloc failed for child PID {}",
                 child_id
             );
-            release_reservation(reservation);
+            drop(reservation);
             return None;
         }
     };
@@ -3186,6 +3160,7 @@ pub fn process_vm_clone_cow_ref(parent_id: u32) -> Option<ProcessVmRef> {
 
     {
         let mut child = PROCESS_VMS[child_slot].lock();
+        child.process = Some(reservation.process.clone());
         child.process_id = child_id;
         child.generation = child_generation;
         child.vm_space = Some(child_vm_space_arc);
@@ -3281,7 +3256,7 @@ pub fn process_vm_clone_cow_ref(parent_id: u32) -> Option<ProcessVmRef> {
             tlb::unregister_process_tlb(slot_tlb_key(child_slot));
             child.reset();
         }
-        release_reservation(reservation);
+        drop(reservation);
         return None;
     }
 

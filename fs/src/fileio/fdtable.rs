@@ -3,6 +3,8 @@ use core::sync::atomic::Ordering;
 use slopos_abi::task::INVALID_PROCESS_ID;
 use slopos_kernel_services::syscall_services::tty;
 use slopos_ostd::KVec;
+use slopos_ostd::handle::Handle;
+use slopos_ostd::process::Process;
 
 use super::*;
 
@@ -72,28 +74,20 @@ fn take_next_descriptor(slot: &'static FileTableSlot) -> Option<FdEntry> {
     inner.descriptors.iter_mut().find_map(|entry| entry.take())
 }
 
-/// Create a console-bootstrapped fd table for `process_id`. Returns 0, or
-/// -1 if the pid is invalid, already has a table, or no slot is free.
+/// Create a console-bootstrapped fd table for `process`. Returns 0, or -1 if
+/// it already has one or its handle no longer resolves.
 ///
-/// A pid that already carries a table is a refusal rather than a silent
-/// success: process ids are recycled, so the second create names a
-/// *different* process than the one that bound the slot, and answering
-/// "done" would hand it the dead process's descriptors.
-pub fn fileio_create_table_for_process(process_id: u32) -> i32 {
-    if process_id == INVALID_PROCESS_ID {
-        return 0;
-    }
-    if slot_for_pid(process_id).is_some() {
-        return -1;
-    }
+/// A process that already carries a table is a refusal rather than a silent
+/// success: answering "done" would hand the caller the existing table's
+/// descriptors.
+pub fn fileio_create_table_for_process_handle(process: Handle<Process>) -> i32 {
     // Built before the slot is claimed: the array is the table's one
     // allocation, and it must not happen under the slot lock.
     let Some(descriptors) = new_descriptor_table() else {
         return -1;
     };
-    // Claim a free slot via CAS so two concurrent creates can't pick
-    // the same one.
-    let Some(slot) = claim_free_process_slot(process_id) else {
+    // CAS-claim so two concurrent creates for the same process cannot both win.
+    let Some(slot) = claim_process_slot(process) else {
         return -1;
     };
     let external_ops = with_open_files(|state| state.external_ops);
@@ -104,42 +98,102 @@ pub fn fileio_create_table_for_process(process_id: u32) -> i32 {
     0
 }
 
-/// CAS-claim a free process-table slot for `pid`; the caller then locks it and
-/// sets `in_use`. `None` if every slot is in use.
-fn claim_free_process_slot(pid: u32) -> Option<&'static FileTableSlot> {
-    for slot in PROCESS_TABLES.iter() {
-        if slot
-            .process_id
-            .compare_exchange(INVALID_PROCESS_ID, pid, Ordering::AcqRel, Ordering::Acquire)
-            .is_ok()
-        {
-            return Some(slot);
-        }
+/// Claim `process`'s own table slot; the caller then locks it and sets
+/// `in_use`. `None` if the slot is already bound.
+///
+/// Not a search. The slot index is the process's registry slot, so there is
+/// exactly one slot a given process may have, and a failed claim means that
+/// process already has a table — a caller bug — rather than a full table. The
+/// CAS still carries the claim, so two concurrent creates for the same process
+/// cannot both win.
+fn claim_process_slot(process: Handle<Process>) -> Option<&'static FileTableSlot> {
+    let slot = PROCESS_TABLES.get(process.slot() as usize)?;
+    // Generation first: a reader that observes an occupied `process_id` must
+    // already be able to see the matching generation.
+    slot.generation
+        .store(process.generation(), Ordering::Release);
+    if slot
+        .process_id
+        .compare_exchange(
+            INVALID_PROCESS_ID,
+            process_id_of(process),
+            Ordering::AcqRel,
+            Ordering::Acquire,
+        )
+        .is_err()
+    {
+        return None;
     }
-    None
+    Some(slot)
 }
 
-/// Create an empty fd table for `process_id` — no console bootstrap. Spawn's
+/// The numeric id of the process `handle` names, for the slot's display field.
+/// `INVALID_PROCESS_ID` if it no longer resolves — which makes the claim above
+/// fail closed rather than binding a slot to a process that has gone.
+fn process_id_of(handle: Handle<Process>) -> u32 {
+    slopos_ostd::process::process_for_handle(handle)
+        .map_or(INVALID_PROCESS_ID, |process| process.id())
+}
+
+/// Create an empty fd table for `process` — no console bootstrap. Spawn's
 /// fd-action allow-list installs every descriptor the child inherits, so it
-/// starts from nothing. Returns 0, or -1 if the pid is invalid, already has a
-/// table, or no slot is free.
-pub fn fileio_create_empty_table_for_process(process_id: u32) -> i32 {
-    if process_id == INVALID_PROCESS_ID {
-        return -1;
-    }
-    if slot_for_pid(process_id).is_some() {
-        return -1;
-    }
+/// starts from nothing. Returns 0, or -1 as above.
+pub fn fileio_create_empty_table_for_process_handle(process: Handle<Process>) -> i32 {
     let Some(descriptors) = new_descriptor_table() else {
         return -1;
     };
-    let Some(slot) = claim_free_process_slot(process_id) else {
+    let Some(slot) = claim_process_slot(process) else {
         return -1;
     };
     let mut inner = slot.inner.lock();
     inner.in_use = true;
     inner.descriptors = descriptors;
     0
+}
+
+/// Create a console-bootstrapped table for the process carrying `process_id`.
+///
+/// The pid-taking form, kept for callers that still hold only an id. It
+/// resolves the id through the process registry, so a pid naming no live
+/// process is refused rather than binding a table to a number.
+pub fn fileio_create_table_for_process(process_id: u32) -> i32 {
+    if process_id == INVALID_PROCESS_ID {
+        return 0;
+    }
+    match handle_for_pid(process_id) {
+        Some(process) => fileio_create_table_for_process_handle(process),
+        None => -1,
+    }
+}
+
+/// Pid-taking counterpart to
+/// [`fileio_create_empty_table_for_process_handle`].
+pub fn fileio_create_empty_table_for_process(process_id: u32) -> i32 {
+    if process_id == INVALID_PROCESS_ID {
+        return -1;
+    }
+    match handle_for_pid(process_id) {
+        Some(process) => fileio_create_empty_table_for_process_handle(process),
+        None => -1,
+    }
+}
+
+/// The handle of the live process carrying `process_id`.
+///
+/// The bridge every pid-taking entry point crosses. It is a registry lookup
+/// rather than a table scan, so the answer is a generation-stamped designator:
+/// a pid whose process has been reaped resolves to `None` instead of to
+/// whichever process holds that number now.
+fn handle_for_pid(process_id: u32) -> Option<Handle<Process>> {
+    slopos_ostd::process::process_find_by_id(process_id)?.handle()
+}
+
+/// Release the descriptor table `process` owns.
+pub fn fileio_destroy_table_for_process_handle(process: Handle<Process>) {
+    let Some(slot) = slot_for_process(process) else {
+        return;
+    };
+    destroy_table_in_slot(slot);
 }
 
 pub fn fileio_destroy_table_for_process(process_id: u32) {
@@ -149,6 +203,31 @@ pub fn fileio_destroy_table_for_process(process_id: u32) {
     let Some(slot) = slot_for_pid(process_id) else {
         return;
     };
+    destroy_table_in_slot(slot);
+}
+
+/// Release every bound descriptor table. Fixture reset only.
+///
+/// The counterpart to `slopos_mm::process_vm::init_process_vm`, and the reason
+/// mm no longer needs a runtime-installed hook to reach fs: a reset that
+/// releases address spaces has to release descriptor tables too, and fs sits
+/// *above* mm in the crate graph, so the call goes this way round without an
+/// indirection. The hook existed only because the dependency pointed the
+/// wrong way for a pid-keyed teardown.
+pub fn fileio_reset_all_tables() {
+    for slot in PROCESS_TABLES.iter() {
+        if slot.process_id.load(Ordering::Acquire) != INVALID_PROCESS_ID {
+            destroy_table_in_slot(slot);
+        }
+    }
+}
+
+/// Drain and release a bound table slot.
+///
+/// Split from the two entry points above so the drain protocol — close to new
+/// installs, drain off-lock one entry at a time, free the array off-lock — has
+/// one implementation rather than one per way of naming the slot.
+fn destroy_table_in_slot(slot: &'static FileTableSlot) {
     {
         let mut inner = slot.inner.lock();
         if !inner.in_use {
@@ -164,7 +243,11 @@ pub fn fileio_destroy_table_for_process(process_id: u32) {
     // The array itself goes back to the heap off-lock, for the same reason it
     // was built off-lock.
     let released = core::mem::take(&mut slot.inner.lock().descriptors);
+    // Id first, then generation: a reader checks occupancy before the
+    // generation, so clearing in this order never shows an occupied slot with
+    // a cleared generation.
     slot.process_id.store(INVALID_PROCESS_ID, Ordering::Release);
+    slot.generation.store(0, Ordering::Release);
     drop(released);
 }
 
@@ -181,7 +264,14 @@ pub fn fileio_clone_table_for_process(src_process_id: u32, dst_process_id: u32) 
     if src_process_id == dst_process_id {
         return 0;
     }
+    let Some(dst_process) = handle_for_pid(dst_process_id) else {
+        return -1;
+    };
+    fileio_clone_table_for_process_handle(src_process_id, dst_process)
+}
 
+/// Clone `src_process_id`'s table into `dst`'s own slot.
+pub fn fileio_clone_table_for_process_handle(src_process_id: u32, dst: Handle<Process>) -> i32 {
     // Step 1: snapshot src descriptors into a heap `KVec` (NOT a stack
     // array — a `[Option<FdEntry>; 32]` on the frame blows the 2 KiB
     // stack gate). Each clone bumps a `KArc<OpenFile>` strong count
@@ -215,7 +305,7 @@ pub fn fileio_clone_table_for_process(src_process_id: u32, dst_process_id: u32) 
         drop(snapshot);
         return -1;
     };
-    let Some(dst_slot) = claim_free_process_slot(dst_process_id) else {
+    let Some(dst_slot) = claim_process_slot(dst) else {
         // No free slot: drop the cloned aliases (decrement only).
         drop(snapshot);
         return -1;

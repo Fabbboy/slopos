@@ -23,6 +23,8 @@ use slopos_kernel_services::driver_runtime::{
 };
 use slopos_kernel_services::syscall_services::tty;
 use slopos_mm::memory_layout_defs::MAX_PROCESSES;
+use slopos_ostd::handle::Handle;
+use slopos_ostd::process::Process;
 
 /// Descriptors a process may hold at once — the `RLIMIT_NOFILE` of this
 /// kernel, and the length of every per-process descriptor table.
@@ -255,11 +257,20 @@ pub(super) struct FdEntry {
 // ---------------------------------------------------------------------------
 // Per-process slot layout.
 //
-// Each `FileTableSlot` lives in a top-level static array. Its `process_id`
-// is an `AtomicU32` outside the lock, supporting lock-free scans via
-// `slot_for_pid`. The mutable per-slot state — `in_use` plus the
-// `descriptors` array — is wrapped in a `SpinLock<FileTableSlotInner>` at
-// `LOCK_LEVEL_REGISTRY`.
+// Each `FileTableSlot` lives in a top-level static array, and its index *is*
+// the owning process's registry slot — the same slot space `slopos_ostd`'s
+// process registry and `slopos_mm`'s address-space table use. A table is
+// therefore found by indexing the process rather than by scanning for a
+// matching id, and `generation` is what makes that sound: a slot rebound
+// since a handle was minted fails the check instead of handing the holder a
+// stranger's open files.
+//
+// `process_id` survives as a display value and as the occupancy sentinel for
+// the lock-free peek. It is not an identity: ids recycle, so two processes can
+// carry the same number and only the generation separates them.
+//
+// The mutable per-slot state — `in_use` plus the `descriptors` array — is
+// wrapped in a `SpinLock<FileTableSlotInner>` at `LOCK_LEVEL_REGISTRY`.
 //
 // Lock order: per-process `slot.inner` (REGISTRY=2) is acquired first;
 // the shared `OPEN_FILES_STATE` (RESOURCE=1) is acquired second. Holders
@@ -269,6 +280,10 @@ pub(super) struct FdEntry {
 
 pub(super) struct FileTableSlot {
     pub(super) process_id: AtomicU32,
+    /// Generation of the process bound to this slot, mirroring its handle's.
+    /// Written before `process_id` is published and cleared after it, so a
+    /// reader that sees an occupied slot sees the matching generation.
+    pub(super) generation: AtomicU64,
     pub(super) inner: SpinLock<FileTableSlotInner>,
 }
 
@@ -303,6 +318,7 @@ impl FileTableSlot {
     pub(super) const fn new(in_use: bool, class: &'static LockClassKey) -> Self {
         Self {
             process_id: AtomicU32::new(INVALID_PROCESS_ID),
+            generation: AtomicU64::new(0),
             inner: SpinLock::new(
                 FileTableSlotInner {
                     in_use,
@@ -361,9 +377,32 @@ pub(super) static OPEN_FILES_STATE: SpinLock<OpenFilesState> = SpinLock::new(
 );
 pub(super) static FILEIO_INIT: InitFlag = InitFlag::new();
 
+/// The descriptor table `process` owns — one index, no scan.
+///
+/// The generation check is what this buys: a slot rebound since the handle was
+/// minted answers `None` rather than handing back the new occupant's table.
+pub(super) fn slot_for_process(process: Handle<Process>) -> Option<&'static FileTableSlot> {
+    let slot = PROCESS_TABLES.get(process.slot() as usize)?;
+    if slot.process_id.load(Ordering::Acquire) == INVALID_PROCESS_ID
+        || slot.generation.load(Ordering::Acquire) != process.generation()
+    {
+        return None;
+    }
+    Some(slot)
+}
+
 /// Lock-free scan: return the slot whose `process_id` matches `pid`.
 ///
-/// `INVALID_PROCESS_ID` (the kernel pid) maps to [`KERNEL_TABLE`].
+/// The compatibility path for the pid-taking entry points. It resolves the id
+/// through the process registry first, so what comes back is a slot whose
+/// generation matched a live process rather than whichever slot carries that
+/// number — the scan remains only because the callers still pass an id.
+///
+/// `INVALID_PROCESS_ID` (the kernel pid) maps to [`KERNEL_TABLE`]. That is a
+/// sentinel comparison rather than a lookup, and deliberately so: the kernel's
+/// own descriptors belong to no process, so there is no handle to name them
+/// with. What matters is that it is unreachable from a *user* pid — a user
+/// process that owns no table is refused, never redirected here.
 pub(super) fn slot_for_pid(pid: u32) -> Option<&'static FileTableSlot> {
     if pid == INVALID_PROCESS_ID {
         return Some(&KERNEL_TABLE);

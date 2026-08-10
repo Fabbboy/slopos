@@ -36,13 +36,13 @@ use crate::scheduler;
 use crate::task_stack::{KernelStack, UnsafeStack};
 use crate::task_struct::SwitchContext;
 use slopos_fs::fileio::{
-    fileio_clone_table_for_process, fileio_create_table_for_process,
+    fileio_clone_table_for_process_handle, fileio_create_table_for_process_handle,
     fileio_destroy_table_for_process,
 };
 use slopos_kernel_services::syscall_services::tty;
 use slopos_mm::memory_layout_defs::PROCESS_CODE_START_VA;
 use slopos_mm::process_vm::{
-    create_process_vm_ref, destroy_process_vm, pack_process_vm_handle, process_vm_clone_cow_ref,
+    create_process_vm_for, destroy_process_vm, pack_process_vm_handle, process_vm_clone_cow_for,
     process_vm_get_stack_top,
 };
 use slopos_mm::user_copy::copy_to_user;
@@ -148,12 +148,17 @@ impl ProcessResourceLease {
     fn create_user_process(parent: Option<&Process>) -> Option<Self> {
         let process = Self::mint_process(parent)?;
 
-        let Some(vm) = create_process_vm_ref() else {
+        // Into *this* process's slot: the address-space table and the process
+        // registry are one slot space, so the address space is found by
+        // indexing the process rather than by scanning for its id.
+        let Some(vm) = create_process_vm_for(process.clone()) else {
             klog_info!("task_create: Failed to create process VM");
             return None;
         };
 
-        if fileio_create_table_for_process(vm.process_id) != 0 {
+        // By handle, into the process's own slot — the same slot its address
+        // space occupies. All three tables are now one slot space.
+        if process.handle().map(fileio_create_table_for_process_handle) != Some(0) {
             destroy_process_vm(vm.process_id);
             return None;
         }
@@ -170,9 +175,13 @@ impl ProcessResourceLease {
     fn clone_from_parent(parent: &Task) -> Option<Self> {
         let parent_process_id = parent.process_id;
         let process = Self::mint_process(parent.process().as_deref())?;
-        let child = process_vm_clone_cow_ref(parent_process_id)?;
+        let child = process_vm_clone_cow_for(parent_process_id, process.clone())?;
 
-        if fileio_clone_table_for_process(parent_process_id, child.process_id) != 0 {
+        if process
+            .handle()
+            .map(|handle| fileio_clone_table_for_process_handle(parent_process_id, handle))
+            != Some(0)
+        {
             destroy_process_vm(child.process_id);
             return None;
         }
@@ -215,14 +224,17 @@ impl ProcessResourceLease {
 
 impl Drop for ProcessResourceLease {
     fn drop(&mut self) {
+        // Order matters: `cleanup_owned_process` unbinds the address-space
+        // slot and retires the registration as its last step, and the two
+        // share a slot space. Retiring first would free the registry slot
+        // while the old page tables were still bound to it.
         Self::cleanup_owned_process(self.process_id, self.owns_vm, self.owns_file_table);
-        // Retire the registration before the reference goes, so the slot's
-        // generation is bumped while this is still provably the only owner —
-        // a build that never published the process has no other handle to it.
-        if let Some(process) = self.process.take() {
-            if let Some(handle) = process.handle() {
-                process_retire(handle);
-            }
+        // A lease that never got as far as an address space still holds a
+        // registration, and only this can retire it.
+        if let Some(process) = self.process.take()
+            && let Some(handle) = process.handle()
+        {
+            process_retire(handle);
         }
     }
 }
@@ -314,11 +326,14 @@ fn cleanup_task_create_resources(resources: TaskCreateResources) {
         unsafe_stack,
         ..
     } = resources;
+    // Teardown first, retire second — the two tables share a slot space, so a
+    // registry slot freed ahead of the unbind would be handed out while the
+    // old address space still occupied it.
     ProcessResourceLease::cleanup_owned_process(process_id, true, true);
-    if let Some(process) = process {
-        if let Some(handle) = process.handle() {
-            process_retire(handle);
-        }
+    if let Some(process) = process
+        && let Some(handle) = process.handle()
+    {
+        process_retire(handle);
     }
     drop(kernel_stack);
     drop(unsafe_stack);
@@ -367,10 +382,12 @@ fn cleanup_task_process_resources(task: &Task, resolved_id: u32, mode: TaskProce
 /// was reaped, so somebody else already did the teardown, and doing it again
 /// against a recycled id is the exact confusion this plan removes.
 ///
-/// The last leaver also retires the registration, which is what returns the id
-/// — via `Process::drop`, once every resolved clone has gone. Retiring here
-/// rather than at some later reap keeps the id allocated for exactly the
-/// interval the address space is being torn down in.
+/// The registration is **not** retired here. Retiring frees the registry slot,
+/// and the address-space table is keyed on that same slot — so retiring before
+/// the caller has torn the address space down would hand the slot to the next
+/// process while the old occupant's page tables were still bound to it, and
+/// that spawn would be refused for a slot nothing owns. `destroy_process_vm`
+/// retires as its own last step, after the unbind.
 fn task_leaves_process(task: &Task) -> bool {
     if task.exit_cleanup_mark(TASK_EXIT_CLEANUP_CHARGES) & TASK_EXIT_CLEANUP_CHARGES == 0 {
         return false;
@@ -382,9 +399,6 @@ fn task_leaves_process(task: &Task) -> bool {
         return false;
     }
     process.mark_exited();
-    if let Some(handle) = process.handle() {
-        process_retire(handle);
-    }
     true
 }
 

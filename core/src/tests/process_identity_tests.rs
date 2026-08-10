@@ -48,14 +48,18 @@ pub fn test_fileio_create_table_rejects_a_bound_pid() -> TestResult {
     TestResult::Pass
 }
 
-/// `init_process_vm` releases descriptor tables along with address spaces.
+/// A fixture reset releases descriptor tables along with address spaces.
 ///
-/// It returns every process id to the allocator, so anything still keyed
-/// on those ids has to go with them. The registered fs teardown is what
-/// makes that true; without it the ids come back bound to tables their
-/// new holders never opened, and the very next `task_build` is refused a
-/// descriptor table.
-pub fn test_init_process_vm_releases_fd_tables() -> TestResult {
+/// A process id names both, so returning one has to return the other. That
+/// used to depend on a function pointer mm had installed at boot, because mm
+/// sits below fs and could not name the teardown; it now depends on the two
+/// resets being called together, which is a call the test can make directly
+/// and a reader can see.
+///
+/// The failure this catches is unchanged: a leftover binding means the ids
+/// come back bound to tables their new holders never opened, and the very
+/// next `task_build` is refused a descriptor table.
+pub fn test_a_fixture_reset_releases_fd_tables() -> TestResult {
     let pid = create_process_vm();
     if pid == INVALID_PROCESS_ID {
         klog_info!("PROC_ID_TEST: could not create a process VM");
@@ -68,16 +72,23 @@ pub fn test_init_process_vm_releases_fd_tables() -> TestResult {
         return TestResult::Fail;
     }
 
+    slopos_fs::fileio_reset_all_tables();
     init_process_vm();
 
-    // The id is free again, so a fresh holder must be able to claim a
-    // table under it. A leftover binding shows up here as a refusal.
-    let rebound = fileio_create_table_for_process(pid);
-    fileio_destroy_table_for_process(pid);
+    // The slot is free again, so a fresh holder must be able to claim a table
+    // in it. A leftover binding shows up here as a refusal.
+    let fresh = create_process_vm();
+    if fresh == INVALID_PROCESS_ID {
+        klog_info!("PROC_ID_TEST: could not create a process VM after the reset");
+        return TestResult::Fail;
+    }
+    let rebound = fileio_create_table_for_process(fresh);
+    fileio_destroy_table_for_process(fresh);
+    destroy_process_vm(fresh);
 
     assert_test!(
         rebound == 0,
-        "init_process_vm left an fd table bound to a released process id"
+        "the reset left an fd table bound to a released process slot"
     );
     TestResult::Pass
 }
@@ -144,6 +155,6 @@ slopos_testing::stest!(
     suite = process_identity
 );
 slopos_testing::stest!(
-    name = test_init_process_vm_releases_fd_tables,
+    name = test_a_fixture_reset_releases_fd_tables,
     suite = process_identity
 );

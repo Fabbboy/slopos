@@ -1036,24 +1036,35 @@ fn read_cqe_at(ring: &Ring, idx: u32) -> Cqe {
 ///
 /// A pid with no table of its own is refused a descriptor, so a test that
 /// opens files has to mint one the same way process creation does.
-fn with_fd_table(pid: u32, body: fn(u32) -> TestResult) -> TestResult {
+fn with_fd_table(body: fn(u32) -> TestResult) -> TestResult {
     use slopos_fs::fileio::{
-        fileio_create_empty_table_for_process, fileio_destroy_table_for_process,
+        fileio_create_empty_table_for_process_handle, fileio_destroy_table_for_process_handle,
     };
 
-    fileio_destroy_table_for_process(pid);
-    if fileio_create_empty_table_for_process(pid) != 0 {
-        return slopos_testing::fail!("fd table create failed for pid {:#x}", pid);
+    // A real registration, not a made-up number. A descriptor table lives in
+    // its process's own registry slot, so there is no table to be had without
+    // a process — which is the point: a synthetic pid used to get one, and
+    // that is exactly how a table ends up bound to an id nothing owns.
+    let Ok(process) = slopos_ostd::process::process_spawn_root() else {
+        return slopos_testing::fail!("could not register a scratch process");
+    };
+    let Some(handle) = process.handle() else {
+        return slopos_testing::fail!("a registered process carries no handle");
+    };
+    if fileio_create_empty_table_for_process_handle(handle) != 0 {
+        slopos_ostd::process::process_retire(handle);
+        return slopos_testing::fail!("fd table create failed for pid {}", process.id());
     }
-    let result = body(pid);
-    fileio_destroy_table_for_process(pid);
+    let result = body(process.id());
+    fileio_destroy_table_for_process_handle(handle);
+    slopos_ostd::process::process_retire(handle);
     result
 }
 
 /// An in-flight op keeps operating against its held backing after userland
 /// closes the fd, and releases that reference on completion (no leak).
 fn op_survives_fd_close() -> TestResult {
-    with_fd_table(0x51D0_0001, op_survives_fd_close_body)
+    with_fd_table(op_survives_fd_close_body)
 }
 
 fn op_survives_fd_close_body(pid: u32) -> TestResult {
@@ -1137,7 +1148,7 @@ stest!(name = op_survives_fd_close, suite = slopring);
 /// Closing an in-flight op's fd and reusing its number for a different file
 /// does not retarget the op: it stays bound to the original open file (D5).
 fn no_reuse_aliasing() -> TestResult {
-    with_fd_table(0x51D0_0002, no_reuse_aliasing_body)
+    with_fd_table(no_reuse_aliasing_body)
 }
 
 fn no_reuse_aliasing_body(pid: u32) -> TestResult {

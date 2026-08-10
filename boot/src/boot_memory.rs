@@ -160,18 +160,6 @@ fn boot_step_register_luf_hook_fn(ctx: &mut BootCtx<'_, BspInit>) {
     klog_info!("OSTD: cursor_unmap_hook registered (LufHook)");
 }
 
-fn boot_step_register_fd_table_teardown_fn(_ctx: &mut BootCtx<'_, BspInit>) {
-    // A process id names an address space and a descriptor table together,
-    // so returning the id has to release both. mm sits below fs in the
-    // crate graph and cannot name `fileio_destroy_table_for_process`; this
-    // is the registration that closes the gap. It lands in the memory
-    // phase because the kernel-test phase runs in `drivers`, ahead of the
-    // fs bring-up in `services`.
-    slopos_mm::process_vm::register_process_fd_table_teardown(
-        slopos_fs::fileio_destroy_table_for_process,
-    );
-}
-
 fn boot_step_memory_pre_typestate(_ctx: &mut BootCtx<'_, BspInit>) -> i32 {
     let memmap = boot_get_memmap();
     if memmap.is_null() {
@@ -294,11 +282,4 @@ crate::boot_init!(
     b"ostd cursor_unmap_hook\0",
     boot_step_register_luf_hook_fn,
     flags = boot_init_priority(56)
-);
-crate::boot_init!(
-    BOOT_STEP_REGISTER_FD_TABLE_TEARDOWN,
-    memory,
-    b"process fd-table teardown\0",
-    boot_step_register_fd_table_teardown_fn,
-    flags = boot_init_priority(57)
 );
