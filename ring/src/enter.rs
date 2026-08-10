@@ -15,6 +15,7 @@ use slopos_abi::ring::{
     SLOPRING_SQE_MULTISHOT, Sqe,
 };
 use slopos_abi::syscall::{POLLERR, POLLHUP, POLLNVAL};
+use slopos_fs::fileio::FdTable;
 
 use slopos_fs::fileio::{
     FileRef, file_poll_fused_ref, file_poll_unfused_by_token, fileio_clone_file_ref,
@@ -48,11 +49,11 @@ fn eno(e: Errno) -> i32 {
 // ---------------------------------------------------------------------------
 
 /// `ring_setup(entries, params*)` core (SLOPRING § 6.1). Returns the
-/// ring fd (`>= 0`) or a negated errno. `pid` is the caller; the
+/// ring fd (`>= 0`) or a negated errno. `table` is the caller; the
 /// `out_params` closure receives the populated `RingParams` to copy to
 /// the user out-pointer (so the syscall layer owns user-copy).
 pub fn ring_setup(
-    pid: u32,
+    table: FdTable,
     entries: u32,
     mut out_params: impl FnMut(&slopos_abi::ring::RingParams) -> Result<(), Errno>,
 ) -> i32 {
@@ -88,7 +89,7 @@ pub fn ring_setup(
 
     // Map the region into the caller's address space.
     let paddrs = region.paddrs();
-    let user_addr = slopos_mm::process_vm::process_vm_map_ring(pid, paddrs.as_slice());
+    let user_addr = slopos_mm::process_vm::process_vm_map_ring(table.id(), paddrs.as_slice());
     if user_addr == 0 {
         return eno(Errno::ENOMEM);
     }
@@ -107,7 +108,7 @@ pub fn ring_setup(
         Ok(v) => v,
         Err(_) => {
             let _ = slopos_mm::process_vm::process_vm_munmap(
-                pid,
+                table.id(),
                 user_addr,
                 layout.region_bytes as u64,
             );
@@ -121,7 +122,7 @@ pub fn ring_setup(
         cq_tail: 0,
         inflight: InFlightVec::with_capacity(cq_cap),
         user_addr,
-        owner_pid: pid,
+        owner: table,
         cq_overflow: 0,
         buffers,
         pending_reap,
@@ -131,8 +132,11 @@ pub fn ring_setup(
     let Some(raw_handle) = registry::insert(ring) else {
         // Registry full. The mapping + frames are cleaned up when the
         // process exits or unmaps; for a clean failure, unmap now.
-        let _ =
-            slopos_mm::process_vm::process_vm_munmap(pid, user_addr, layout.region_bytes as u64);
+        let _ = slopos_mm::process_vm::process_vm_munmap(
+            table.id(),
+            user_addr,
+            layout.region_bytes as u64,
+        );
         return eno(Errno::ENOMEM);
     };
 
@@ -140,8 +144,11 @@ pub fn ring_setup(
     // registry entry from here: a failed install drops it, removing the
     // ring — only the mapping still needs explicit rollback.
     let Some(backing) = file_ops::ring_backing(raw_handle) else {
-        let _ =
-            slopos_mm::process_vm::process_vm_munmap(pid, user_addr, layout.region_bytes as u64);
+        let _ = slopos_mm::process_vm::process_vm_munmap(
+            table.id(),
+            user_addr,
+            layout.region_bytes as u64,
+        );
         return eno(Errno::ENOMEM);
     };
     // The ring fd is process-private (SLOPRING § 14): a ring's SQ/CQ is
@@ -149,24 +156,30 @@ pub fn ring_setup(
     // `exec` carries the descriptor forward. Matches io_uring, whose ring
     // fd is `O_CLOEXEC`.
     let fd = slopos_fs::fileio_open_fd_with_ops(
-        pid,
+        table,
         &file_ops::RING_FILE_OPS,
         raw_handle,
         Some(backing),
         slopos_fs::FdFlags::PROCESS_PRIVATE,
     );
     if fd < 0 {
-        let _ =
-            slopos_mm::process_vm::process_vm_munmap(pid, user_addr, layout.region_bytes as u64);
+        let _ = slopos_mm::process_vm::process_vm_munmap(
+            table.id(),
+            user_addr,
+            layout.region_bytes as u64,
+        );
         return fd;
     }
 
     // Copy the params out to the user pointer.
     if out_params(&params).is_err() {
         // Roll back: close the fd (which removes the ring) + unmap.
-        let _ = slopos_fs::fileio::file_close_fd(pid, fd);
-        let _ =
-            slopos_mm::process_vm::process_vm_munmap(pid, user_addr, layout.region_bytes as u64);
+        let _ = slopos_fs::fileio::file_close_fd(table, fd);
+        let _ = slopos_mm::process_vm::process_vm_munmap(
+            table.id(),
+            user_addr,
+            layout.region_bytes as u64,
+        );
         return eno(Errno::EFAULT);
     }
 
@@ -216,9 +229,9 @@ fn write_initial_region(
 
 /// `ring_enter(ring_fd, to_submit, min_complete, flags)` core
 /// (SLOPRING § 6.2). Returns the submission count (`>= 0`) or a negated
-/// errno. `pid` identifies the calling process.
+/// errno. `table` identifies the calling process.
 pub fn ring_enter(
-    pid: u32,
+    table: FdTable,
     raw_handle: usize,
     to_submit: u32,
     min_complete: u32,
@@ -226,13 +239,13 @@ pub fn ring_enter(
 ) -> i32 {
     // The ownership check that contains a foreign or stale ring. It holds
     // for every alias of the fd, including intra-process `dup`s.
-    if !registry::owner_is(raw_handle, pid) {
+    if !registry::owner_is(raw_handle, table) {
         return eno(Errno::EBADF);
     }
 
     // ---- Submit phase (under the per-ring lock only) ----
     let submit_result = registry::with_ring(raw_handle, |ring| {
-        let n = submit(pid, ring, to_submit);
+        let n = submit(table, ring, to_submit);
         (n, core::mem::take(&mut ring.pending_reap))
     });
     let (n_submitted, reaped) = match submit_result {
@@ -245,7 +258,7 @@ pub fn ring_enter(
 
     // ---- Complete phase (block the caller; lock dropped while parked) ----
     if min_complete > 0 {
-        let rc = harvest(pid, raw_handle, min_complete);
+        let rc = harvest(table, raw_handle, min_complete);
         // On signal with nothing submitted → EINTR; otherwise return the
         // submit count (never discard a submission — SLOPRING § 6.2).
         if rc == eno(Errno::EINTR) && n_submitted == 0 {
@@ -259,7 +272,7 @@ pub fn ring_enter(
 /// Submit phase: consume up to `to_submit` SQEs, clamped by the SQ
 /// occupancy and `sq_entries` (SLOPRING § 7, § 13.6). Returns the count
 /// of SQEs consumed.
-fn submit(pid: u32, ring: &mut Ring, to_submit: u32) -> u32 {
+fn submit(table: FdTable, ring: &mut Ring, to_submit: u32) -> u32 {
     let sq_tail = match ring.read_sq_tail() {
         Ok(t) => t,
         Err(_) => return 0,
@@ -278,7 +291,7 @@ fn submit(pid: u32, ring: &mut Ring, to_submit: u32) -> u32 {
         ring.sq_head = ring.sq_head.wrapping_add(1);
         consumed += 1;
         let sqe = Sqe::from_bytes(&bytes);
-        process_sqe(pid, ring, &sqe);
+        process_sqe(table, ring, &sqe);
     }
     let _ = ring.publish_sq_head();
     consumed
@@ -287,7 +300,7 @@ fn submit(pid: u32, ring: &mut Ring, to_submit: u32) -> u32 {
 /// Process one submitted SQE: dispatch the special opcodes inline, run
 /// the probe for the rest, and either post a CQE or record an in-flight
 /// row.
-fn process_sqe(pid: u32, ring: &mut Ring, sqe: &Sqe) {
+fn process_sqe(table: FdTable, ring: &mut Ring, sqe: &Sqe) {
     match sqe.opcode {
         OP_CANCEL => {
             do_cancel(ring, sqe);
@@ -321,7 +334,7 @@ fn process_sqe(pid: u32, ring: &mut Ring, sqe: &Sqe) {
     // (never the last alias — the fd is still open in this synchronous submit
     // span); a would-block moves it into the row.
     let file: Option<FileRef> = if opcode::needs_file_ref(sqe.opcode) {
-        fileio_clone_file_ref(pid, sqe.fd)
+        fileio_clone_file_ref(table, sqe.fd)
     } else {
         None
     };
@@ -374,7 +387,7 @@ fn process_sqe(pid: u32, ring: &mut Ring, sqe: &Sqe) {
         return;
     }
 
-    match opcode::probe(pid, sqe, file.as_ref(), &mut *ring.buffers) {
+    match opcode::probe(table, sqe, file.as_ref(), &mut *ring.buffers) {
         Outcome::Inline(res) => {
             let _ = ring.post_cqe(sqe.user_data, res, 0);
             release_fixed(ring, sel);
@@ -440,15 +453,15 @@ fn multishot_supported(opcode: u8) -> bool {
 /// Test hook: drive `process_sqe` against a fabricated ring without a
 /// process context.
 #[cfg(feature = "test-hooks")]
-pub fn process_sqe_for_test(pid: u32, ring: &mut Ring, sqe: &Sqe) {
-    process_sqe(pid, ring, sqe);
+pub fn process_sqe_for_test(table: FdTable, ring: &mut Ring, sqe: &Sqe) {
+    process_sqe(table, ring, sqe);
 }
 
 /// Test hook: drive one `harvest_step` pass against a fabricated ring.
 /// Returns whether `min_complete` CQEs are now available.
 #[cfg(feature = "test-hooks")]
-pub fn harvest_step_for_test(pid: u32, ring: &mut Ring, min_complete: u32) -> bool {
-    harvest_step(pid, ring, min_complete)
+pub fn harvest_step_for_test(table: FdTable, ring: &mut Ring, min_complete: u32) -> bool {
+    harvest_step(table, ring, min_complete)
 }
 
 /// `OP_CANCEL`: walk the in-flight table for the target `user_data`
@@ -482,7 +495,7 @@ fn do_cancel(ring: &mut Ring, sqe: &Sqe) {
 /// `min_complete` CQEs are available, a signal arrives, or a deadline
 /// elapses (SLOPRING § 7.1, § 8.3). Returns 0 on progress, or
 /// `-EINTR` on signal.
-fn harvest(pid: u32, raw_handle: usize, min_complete: u32) -> i32 {
+fn harvest(table: FdTable, raw_handle: usize, min_complete: u32) -> i32 {
     loop {
         // Step 1: snapshot the distinct in-flight files (by reference
         // identity) + the nearest OP_TIMEOUT deadline under the lock (quick,
@@ -506,7 +519,7 @@ fn harvest(pid: u32, raw_handle: usize, min_complete: u32) -> i32 {
         // check whether we now have enough. Retired rows are moved out to
         // drop after the ring lock is released.
         let step = registry::with_ring(raw_handle, |ring| {
-            let enough = harvest_step(pid, ring, min_complete);
+            let enough = harvest_step(table, ring, min_complete);
             (enough, core::mem::take(&mut ring.pending_reap))
         });
         let (enough, reaped) = match step {
@@ -602,7 +615,7 @@ fn sleep_budget(deadline: Option<u64>) -> u32 {
 /// `inflight.snapshot()` below and every reprobe + CQE post observe one
 /// atomic instant, with no concurrent submit/cancel mutating the table
 /// or the indices mid-pass.
-fn harvest_step(pid: u32, ring: &mut Ring, min_complete: u32) -> bool {
+fn harvest_step(table: FdTable, ring: &mut Ring, min_complete: u32) -> bool {
     let now = get_time_ms();
     // Re-probe each row; collect indices to remove + CQEs to post.
     let snapshot = ring.inflight.snapshot();
@@ -619,7 +632,7 @@ fn harvest_step(pid: u32, ring: &mut Ring, min_complete: u32) -> bool {
             if row.opcode == OP_POLL_ADD {
                 harvest_poll_multishot(ring, row);
             } else {
-                harvest_consuming_multishot(pid, ring, row);
+                harvest_consuming_multishot(table, ring, row);
             }
             continue;
         }
@@ -635,7 +648,7 @@ fn harvest_step(pid: u32, ring: &mut Ring, min_complete: u32) -> bool {
                 continue;
             }
         }
-        match opcode::reprobe(pid, row, &mut *ring.buffers) {
+        match opcode::reprobe(table, row, &mut *ring.buffers) {
             Outcome::Inline(res) => retire_row(ring, row.user_data, res, 0, false, true),
             Outcome::InlineBuf(res, cqe_flags) => {
                 retire_row(ring, row.user_data, res, cqe_flags, false, true)
@@ -683,7 +696,7 @@ fn harvest_step(pid: u32, ring: &mut Ring, min_complete: u32) -> bool {
 /// row. The ownership-op CQE-slot reserve (SLOPRING § 11) is re-checked
 /// before *each* post, so a full CQ leaves the row armed for the next
 /// harvest rather than consuming-without-a-slot.
-fn harvest_consuming_multishot(pid: u32, ring: &mut Ring, row: &InFlight) {
+fn harvest_consuming_multishot(table: FdTable, ring: &mut Ring, row: &InFlight) {
     let ownership = opcode::is_ownership_op(row.opcode);
     loop {
         // Re-check the live row still exists (a concurrent cancel could
@@ -702,7 +715,7 @@ fn harvest_consuming_multishot(pid: u32, ring: &mut Ring, row: &InFlight) {
         // A multishot row never carries a registered/provided buffer
         // (rejected at submit), so reprobe's InlineBuf and Inline collapse to
         // one signed result; WouldBlock means drained.
-        let res = match opcode::reprobe(pid, row, &mut *ring.buffers) {
+        let res = match opcode::reprobe(table, row, &mut *ring.buffers) {
             // A multishot row never carries OP_SEND_ZC (not multishot-supported),
             // so InlineNotif/DeferredNotif are unreachable here; collapse them
             // for exhaustiveness.

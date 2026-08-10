@@ -9,8 +9,7 @@
 //! `stest!` macros).
 
 use slopos_abi::task::{
-    INVALID_PROCESS_ID, INVALID_TASK_ID, TASK_FLAG_SYSTEM, TASK_FLAG_USER_MODE, TaskExitReason,
-    TaskPriority,
+    INVALID_TASK_ID, TASK_FLAG_SYSTEM, TASK_FLAG_USER_MODE, TaskExitReason, TaskPriority,
 };
 use slopos_ostd::KVec;
 use slopos_ostd::{catch_panic, klog_info};
@@ -83,9 +82,15 @@ fn dispatch(bin: &str, argv: Option<&[&[u8]]>) -> TestResult {
     // Pull init's pid/tid out of the current task so a spawned utest resolves
     // its stdio clone-actions against init's console fds and gets a real
     // `parent_task_id` (so `notify_parent_of_child_exit` can deliver SIGCHLD).
-    let (parent_pid, parent_tid) = match slopos_sched::task_struct::Current::get() {
-        Some(cur) => (cur.task().process_id, cur.id()),
-        None => (INVALID_PROCESS_ID, INVALID_TASK_ID),
+    let (parent_table, parent_tid) = match slopos_sched::task_struct::Current::get() {
+        Some(cur) => (
+            cur.task()
+                .process()
+                .as_deref()
+                .and_then(slopos_fs::fileio::FdTable::of),
+            cur.id(),
+        ),
+        None => (None, INVALID_TASK_ID),
     };
 
     klog_info!("UTEST: starting '{}'", bin);
@@ -114,7 +119,7 @@ fn dispatch(bin: &str, argv: Option<&[&[u8]]>) -> TestResult {
         TASK_FLAG_USER_MODE | TASK_FLAG_SYSTEM,
         &stdio,
         0,
-        parent_pid,
+        parent_table,
         parent_tid,
     ) {
         Ok(pid) => pid,

@@ -22,6 +22,13 @@ use super::task_table::{PendingTask, TaskRef};
 pub struct SpawnGuard {
     child_id: u32,
     child_process_id: u32,
+    /// The child's descriptor table, captured at construction.
+    ///
+    /// Captured rather than resolved on demand: `child_process_id` is a
+    /// number, and by the time a caller asked, a failed spawn could have
+    /// returned it to the allocator. The table designator cannot drift that
+    /// way — it fails closed instead.
+    child_table: Option<slopos_fs::fileio::FdTable>,
     /// `None` once [`commit`](Self::commit) has taken it.
     pending: Option<PendingTask>,
 }
@@ -30,10 +37,18 @@ impl SpawnGuard {
     /// Take ownership of `pending` for the length of the build.
     pub fn new(mut pending: PendingTask) -> Self {
         let child_id = pending.id();
-        let child_process_id = pending.as_mut().process_id;
+        let (child_process_id, child_table) = {
+            let task = pending.as_mut();
+            let table = task
+                .process()
+                .as_deref()
+                .and_then(slopos_fs::fileio::FdTable::of);
+            (task.process_id, table)
+        };
         Self {
             child_id,
             child_process_id,
+            child_table,
             pending: Some(pending),
         }
     }
@@ -46,6 +61,12 @@ impl SpawnGuard {
     #[inline]
     pub fn child_process_id(&self) -> u32 {
         self.child_process_id
+    }
+
+    /// The child's descriptor table. `None` for a kernel task.
+    #[inline]
+    pub fn child_table(&self) -> Option<slopos_fs::fileio::FdTable> {
+        self.child_table
     }
 
     /// Exclusive access to the child under construction.

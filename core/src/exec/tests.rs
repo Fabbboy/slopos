@@ -423,7 +423,10 @@ pub fn test_setup_user_stack_contract_layout() -> TestResult {
         tls_tp: 0,
     };
 
-    let result = super::setup_user_stack(pid, Some(&args), Some(&envs), &exec_info);
+    let Some(table) = slopos_fs::fileio::FdTable::resolve(pid) else {
+        return TestResult::Fail;
+    };
+    let result = super::setup_user_stack(table, Some(&args), Some(&envs), &exec_info);
     let sp = match result {
         Ok(v) => v,
         Err(_) => {
@@ -487,7 +490,10 @@ pub fn test_setup_user_stack_auxv_required_entries() -> TestResult {
         tls_tp: 0,
     };
 
-    let sp = match super::setup_user_stack(pid, Some(&args), Some(&envs), &exec_info) {
+    let Some(table) = slopos_fs::fileio::FdTable::resolve(pid) else {
+        return TestResult::Fail;
+    };
+    let sp = match super::setup_user_stack(table, Some(&args), Some(&envs), &exec_info) {
         Ok(v) => v,
         Err(_) => {
             klog_info!("EXEC_TEST: setup_user_stack returned error in auxv test");
@@ -578,7 +584,10 @@ pub fn test_setup_user_stack_argv_string_content() -> TestResult {
         tls_tp: 0,
     };
 
-    let sp = match super::setup_user_stack(pid, Some(&args), Some(&envs), &exec_info) {
+    let Some(table) = slopos_fs::fileio::FdTable::resolve(pid) else {
+        return TestResult::Fail;
+    };
+    let sp = match super::setup_user_stack(table, Some(&args), Some(&envs), &exec_info) {
         Ok(v) => v,
         Err(_) => {
             klog_info!("EXEC_TEST: setup_user_stack failed in argv string test");

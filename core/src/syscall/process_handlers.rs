@@ -6,6 +6,7 @@ use slopos_abi::syscall::{ARCH_GET_FS, ARCH_SET_FS, ENOSYS_RETURN, FUTEX_WAIT, F
 use slopos_abi::task::{
     SPAWN_PRIVILEGED, SPAWN_RESERVED, SPAWN_USER_SETTABLE, TASK_FLAG_KERNEL_MODE, TaskPriority,
 };
+use slopos_fs::fileio::FdTable;
 use slopos_fs::vfs::traits::VfsError;
 use slopos_ostd::KVec;
 use slopos_ostd::task::{new_group_in_session, new_session_group};
@@ -278,7 +279,9 @@ define_syscall!(syscall_spawn_path
 
     let actions = read_user_spawn_actions(&attrs)?;
 
-    let parent_pid = ctx.process_id();
+    // The spawner's own table, so the child's fd actions clone from the
+    // process that asked — not from whoever holds its number by then.
+    let parent_table = ctx.require_process().ok();
     let parent_tid = ctx.task_id();
     match exec::spawn_program_with_attrs(
         &path_buf[..copied_len],
@@ -288,7 +291,7 @@ define_syscall!(syscall_spawn_path
         flags,
         actions.as_slice(),
         attrs.sigdefault_mask,
-        parent_pid,
+        parent_table,
         parent_tid,
     ) {
         Ok(task_id) => Ok(task_id as u64),
@@ -549,7 +552,9 @@ define_syscall!(syscall_set_cpu_affinity
     // space is the honest boundary — a sibling thread can already execute
     // arbitrary code inside the target, so refusing it would buy nothing, while
     // a task in another process has no standing to place this one at all.
-    if task_ref.process_id != process_id {
+    // Compared as tables, not as numbers: a recycled id would let a task in a
+    // *later* process pass a check meant for a sibling of the target's.
+    if task_ref.process().as_deref().and_then(FdTable::of) != Some(process_id) {
         return Err(Errno::EPERM);
     }
     task_ref.set_cpu_affinity(new_affinity);
@@ -570,7 +575,9 @@ define_syscall!(syscall_get_cpu_affinity
     };
     // Same boundary as the setter. Leaving the pair asymmetric is how the
     // setter's missing check gets reintroduced.
-    if task_ref.process_id != process_id {
+    // Compared as tables, not as numbers: a recycled id would let a task in a
+    // *later* process pass a check meant for a sibling of the target's.
+    if task_ref.process().as_deref().and_then(FdTable::of) != Some(process_id) {
         return Err(Errno::EPERM);
     }
     Ok(task_ref.cpu_affinity() as u64)

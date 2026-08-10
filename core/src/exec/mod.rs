@@ -9,14 +9,13 @@ pub mod utest;
 use core::ffi::{c_char, c_int};
 use core::ptr;
 use core::sync::atomic::{AtomicU32, Ordering};
+use slopos_fs::fileio::FdTable;
 
 use slopos_abi::Errno;
 use slopos_ostd::KVec;
 
 use slopos_abi::auxv::{AT_ENTRY, AT_NULL, AT_PAGESZ, AT_PHDR, AT_PHENT, AT_PHNUM};
-use slopos_abi::task::{
-    INVALID_PROCESS_ID, TASK_FLAG_SYSTEM, TASK_FLAG_USER_MODE, TASK_NAME_MAX_LEN, TaskPriority,
-};
+use slopos_abi::task::{TASK_FLAG_SYSTEM, TASK_FLAG_USER_MODE, TASK_NAME_MAX_LEN, TaskPriority};
 use slopos_fs::fileio::{
     FileRef, file_close_fd, fileio_clone_file_ref, fileio_create_empty_table_for_process,
     fileio_destroy_table_for_process, fileio_install_file_ref_at, fileio_open_at_fd,
@@ -110,7 +109,7 @@ pub fn launch_init() -> Result<u32, ExecError> {
         TASK_FLAG_USER_MODE | TASK_FLAG_SYSTEM,
         &[],
         0,
-        INVALID_PROCESS_ID,
+        None,
         INVALID_TASK_ID,
     )?;
     INIT_TASK_ID.store(task_id, Ordering::Release);
@@ -124,8 +123,8 @@ pub fn launch_init() -> Result<u32, ExecError> {
 /// parent slot only after the whole list has applied, so the caller tears the
 /// child down (all-or-nothing) while the parent keeps every descriptor.
 pub(crate) fn apply_fd_actions(
-    parent_process_id: u32,
-    child_process_id: u32,
+    parent_table: FdTable,
+    child_table: FdTable,
     actions: &[FdAction],
 ) -> Result<(), ExecError> {
     let mut transfers: KVec<(i32, FileRef)> =
@@ -133,19 +132,16 @@ pub(crate) fn apply_fd_actions(
     for action in actions {
         let rc: c_int = match action {
             FdAction::Clone { src_fd, target_fd } => {
-                match fileio_clone_file_ref(parent_process_id, *src_fd) {
-                    Some(file) => {
-                        fileio_install_file_ref_at(child_process_id, *target_fd, file, false)
-                    }
+                match fileio_clone_file_ref(parent_table, *src_fd) {
+                    Some(file) => fileio_install_file_ref_at(child_table, *target_fd, file, false),
                     None => Errno::EBADF.raw(),
                 }
             }
             FdAction::Transfer { src_fd, target_fd } => {
-                match fileio_clone_file_ref(parent_process_id, *src_fd) {
+                match fileio_clone_file_ref(parent_table, *src_fd) {
                     Some(file) => {
                         let moved = file.alias();
-                        let rc =
-                            fileio_install_file_ref_at(child_process_id, *target_fd, file, false);
+                        let rc = fileio_install_file_ref_at(child_table, *target_fd, file, false);
                         if rc >= 0 && transfers.push((*src_fd, moved)).is_err() {
                             return Err(ExecError::NoMem);
                         }
@@ -155,7 +151,7 @@ pub(crate) fn apply_fd_actions(
                 }
             }
             FdAction::Close { target_fd } => {
-                let rc = file_close_fd(child_process_id, *target_fd);
+                let rc = file_close_fd(child_table, *target_fd);
                 // A fresh child table holds nothing at most fds; closing an
                 // absent one is a no-op success.
                 if rc == Errno::EBADF.raw() { 0 } else { rc }
@@ -164,7 +160,7 @@ pub(crate) fn apply_fd_actions(
                 target_fd,
                 path,
                 flags,
-            } => fileio_open_at_fd(child_process_id, *target_fd, path.as_slice(), *flags),
+            } => fileio_open_at_fd(child_table, *target_fd, path.as_slice(), *flags),
         };
         if rc < 0 {
             return Err(match Errno::from_raw(rc) {
@@ -179,11 +175,7 @@ pub(crate) fn apply_fd_actions(
     // The identity match skips a slot the parent concurrently closed or
     // repopulated; the taken alias drops here, lock-free.
     for (src_fd, moved) in transfers.iter() {
-        drop(fileio_take_file_ref_matching(
-            parent_process_id,
-            *src_fd,
-            moved,
-        ));
+        drop(fileio_take_file_ref_matching(parent_table, *src_fd, moved));
     }
     Ok(())
 }
@@ -258,7 +250,7 @@ pub fn spawn_program_with_attrs(
     mut flags: u16,
     actions: &[FdAction],
     sigdefault_mask: u64,
-    parent_process_id: u32,
+    parent_table: Option<FdTable>,
     parent_task_id: u32,
 ) -> Result<u32, ExecError> {
     let result = (|| {
@@ -305,14 +297,19 @@ pub fn spawn_program_with_attrs(
         // the blocking calls below — releases it through the guard.
         let mut spawn = SpawnGuard::new(pending);
         let task_id = spawn.child_id();
-        let process_id = spawn.child_process_id();
 
         let mut entry = 0u64;
         let mut stack_ptr = 0u64;
         let mut tls_tp = 0u64;
 
+        // Refused rather than defaulted: a child with no table of its own must
+        // not be exec'd against the kernel's, which every kernel task shares.
+        let Some(child_table) = spawn.child_table() else {
+            return Err(ExecError::NoMem);
+        };
+
         do_exec(
-            process_id,
+            child_table,
             normalized_path,
             argv,
             envp,
@@ -325,12 +322,18 @@ pub fn spawn_program_with_attrs(
         // starts empty; each action installs exactly what it inherits. A caller
         // with no parent process (`launch_init`) keeps its console bootstrap
         // table untouched.
-        if parent_process_id != INVALID_PROCESS_ID {
-            fileio_destroy_table_for_process(process_id);
-            if fileio_create_empty_table_for_process(process_id) != 0 {
+        if let Some(parent_table) = parent_table {
+            // The child's own table, taken from the guard rather than
+            // re-resolved: its id could have been returned to the allocator by
+            // a failure between the two lookups.
+            let Some(FdTable::Process(child_process)) = spawn.child_table() else {
+                return Err(ExecError::NoMem);
+            };
+            fileio_destroy_table_for_process(child_process.handle());
+            if fileio_create_empty_table_for_process(child_process.handle()) != 0 {
                 return Err(ExecError::NoMem);
             }
-            apply_fd_actions(parent_process_id, process_id, actions)?;
+            apply_fd_actions(parent_table, FdTable::Process(child_process), actions)?;
         }
 
         // Job control is inherited from the parent task so spawned children
@@ -446,7 +449,7 @@ pub fn spawn_program_with_attrs(
 }
 
 pub fn do_exec(
-    process_id: u32,
+    table: FdTable,
     path: &[u8],
     argv: Option<&[&[u8]]>,
     envp: Option<&[&[u8]]>,
@@ -500,23 +503,23 @@ pub fn do_exec(
         elf_data.truncate(offset as usize);
     }
 
-    let exec_info = process_vm_load_elf_data(process_id, elf_data.as_slice(), entry_out)
+    let exec_info = process_vm_load_elf_data(table.id(), elf_data.as_slice(), entry_out)
         .map_err(ExecError::from)?;
 
-    if process_vm_reset_stack(process_id) != 0 {
+    if process_vm_reset_stack(table.id()) != 0 {
         return Err(ExecError::NoMem);
     }
 
-    let stack_top = setup_user_stack(process_id, argv, envp, &exec_info)?;
+    let stack_top = setup_user_stack(table, argv, envp, &exec_info)?;
     *stack_ptr_out = stack_top;
     *tls_tp_out = exec_info.tls_tp;
 
     // POSIX: close all FDs with FD_CLOEXEC set after point of no return.
-    slopos_fs::fileio_close_on_exec(process_id);
+    slopos_fs::fileio_close_on_exec(table);
 
     klog_info!(
         "exec: loaded ELF for process {}, entry={:#x}, stack={:#x}, tls_tp={:#x}",
-        process_id,
+        table.id(),
         *entry_out,
         stack_top,
         *tls_tp_out,
@@ -526,12 +529,12 @@ pub fn do_exec(
 }
 
 fn setup_user_stack(
-    process_id: u32,
+    table: FdTable,
     argv: Option<&[&[u8]]>,
     envp: Option<&[&[u8]]>,
     exec_info: &ElfExecInfo,
 ) -> Result<u64, ExecError> {
-    let stack_top_raw = process_vm_get_stack_top(process_id);
+    let stack_top_raw = process_vm_get_stack_top(table.id());
     if stack_top_raw == 0 {
         return Err(ExecError::Fault);
     }
@@ -556,8 +559,8 @@ fn setup_user_stack(
             let len = arg.len() + 1;
             sp = sp.wrapping_sub(len as u64);
             sp &= !0x7;
-            write_to_user_stack(process_id, sp, arg)?;
-            write_byte_to_user_stack(process_id, sp + arg.len() as u64, 0)?;
+            write_to_user_stack(table, sp, arg)?;
+            write_byte_to_user_stack(table, sp + arg.len() as u64, 0)?;
             string_ptrs.push(sp).map_err(|_| ExecError::NoMem)?;
         }
     }
@@ -569,8 +572,8 @@ fn setup_user_stack(
             let len = env.len() + 1;
             sp = sp.wrapping_sub(len as u64);
             sp &= !0x7;
-            write_to_user_stack(process_id, sp, env)?;
-            write_byte_to_user_stack(process_id, sp + env.len() as u64, 0)?;
+            write_to_user_stack(table, sp, env)?;
+            write_byte_to_user_stack(table, sp + env.len() as u64, 0)?;
             string_ptrs.push(sp).map_err(|_| ExecError::NoMem)?;
         }
     }
@@ -599,42 +602,42 @@ fn setup_user_stack(
     sp = sp.wrapping_sub(aux_size as u64);
     for (idx, (a_type, a_val)) in auxv.iter().enumerate() {
         let slot = sp + (idx as u64) * 16;
-        write_u64_to_user_stack(process_id, slot, *a_type)?;
-        write_u64_to_user_stack(process_id, slot + 8, *a_val)?;
+        write_u64_to_user_stack(table, slot, *a_type)?;
+        write_u64_to_user_stack(table, slot + 8, *a_val)?;
     }
 
     sp = sp.wrapping_sub(8);
-    write_u64_to_user_stack(process_id, sp, 0)?;
+    write_u64_to_user_stack(table, sp, 0)?;
 
     for i in (argv_start..string_ptrs.len()).rev() {
         sp = sp.wrapping_sub(8);
-        write_u64_to_user_stack(process_id, sp, string_ptrs[i])?;
+        write_u64_to_user_stack(table, sp, string_ptrs[i])?;
     }
 
     sp = sp.wrapping_sub(8);
-    write_u64_to_user_stack(process_id, sp, 0)?;
+    write_u64_to_user_stack(table, sp, 0)?;
 
     for i in (0..argv_start).rev() {
         sp = sp.wrapping_sub(8);
-        write_u64_to_user_stack(process_id, sp, string_ptrs[i])?;
+        write_u64_to_user_stack(table, sp, string_ptrs[i])?;
     }
 
     sp = sp.wrapping_sub(8);
-    write_u64_to_user_stack(process_id, sp, argc as u64)?;
+    write_u64_to_user_stack(table, sp, argc as u64)?;
 
     Ok(sp)
 }
 
-fn write_to_user_stack(process_id: u32, addr: u64, data: &[u8]) -> Result<(), ExecError> {
-    let vm_space = process_vm_get_vm_space(process_id).ok_or(ExecError::Fault)?;
+fn write_to_user_stack(table: FdTable, addr: u64, data: &[u8]) -> Result<(), ExecError> {
+    let vm_space = process_vm_get_vm_space(table.id()).ok_or(ExecError::Fault)?;
     process_vm_write_user_bytes(&vm_space, addr, data).map_err(|_| ExecError::Fault)
 }
 
-fn write_byte_to_user_stack(process_id: u32, addr: u64, byte: u8) -> Result<(), ExecError> {
-    write_to_user_stack(process_id, addr, &[byte])
+fn write_byte_to_user_stack(table: FdTable, addr: u64, byte: u8) -> Result<(), ExecError> {
+    write_to_user_stack(table, addr, &[byte])
 }
 
-fn write_u64_to_user_stack(process_id: u32, addr: u64, value: u64) -> Result<(), ExecError> {
+fn write_u64_to_user_stack(table: FdTable, addr: u64, value: u64) -> Result<(), ExecError> {
     let bytes = value.to_le_bytes();
-    write_to_user_stack(process_id, addr, &bytes)
+    write_to_user_stack(table, addr, &bytes)
 }

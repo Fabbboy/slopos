@@ -80,7 +80,7 @@ fn take_next_descriptor(slot: &'static FileTableSlot) -> Option<FdEntry> {
 /// A process that already carries a table is a refusal rather than a silent
 /// success: answering "done" would hand the caller the existing table's
 /// descriptors.
-pub fn fileio_create_table_for_process_handle(process: Handle<Process>) -> i32 {
+pub fn fileio_create_table_for_process(process: Handle<Process>) -> i32 {
     // Built before the slot is claimed: the array is the table's one
     // allocation, and it must not happen under the slot lock.
     let Some(descriptors) = new_descriptor_table() else {
@@ -138,7 +138,7 @@ fn process_id_of(handle: Handle<Process>) -> u32 {
 /// Create an empty fd table for `process` — no console bootstrap. Spawn's
 /// fd-action allow-list installs every descriptor the child inherits, so it
 /// starts from nothing. Returns 0, or -1 as above.
-pub fn fileio_create_empty_table_for_process_handle(process: Handle<Process>) -> i32 {
+pub fn fileio_create_empty_table_for_process(process: Handle<Process>) -> i32 {
     let Some(descriptors) = new_descriptor_table() else {
         return -1;
     };
@@ -151,56 +151,9 @@ pub fn fileio_create_empty_table_for_process_handle(process: Handle<Process>) ->
     0
 }
 
-/// Create a console-bootstrapped table for the process carrying `process_id`.
-///
-/// The pid-taking form, kept for callers that still hold only an id. It
-/// resolves the id through the process registry, so a pid naming no live
-/// process is refused rather than binding a table to a number.
-pub fn fileio_create_table_for_process(process_id: u32) -> i32 {
-    if process_id == INVALID_PROCESS_ID {
-        return 0;
-    }
-    match handle_for_pid(process_id) {
-        Some(process) => fileio_create_table_for_process_handle(process),
-        None => -1,
-    }
-}
-
-/// Pid-taking counterpart to
-/// [`fileio_create_empty_table_for_process_handle`].
-pub fn fileio_create_empty_table_for_process(process_id: u32) -> i32 {
-    if process_id == INVALID_PROCESS_ID {
-        return -1;
-    }
-    match handle_for_pid(process_id) {
-        Some(process) => fileio_create_empty_table_for_process_handle(process),
-        None => -1,
-    }
-}
-
-/// The handle of the live process carrying `process_id`.
-///
-/// The bridge every pid-taking entry point crosses. It is a registry lookup
-/// rather than a table scan, so the answer is a generation-stamped designator:
-/// a pid whose process has been reaped resolves to `None` instead of to
-/// whichever process holds that number now.
-fn handle_for_pid(process_id: u32) -> Option<Handle<Process>> {
-    slopos_ostd::process::process_find_by_id(process_id)?.handle()
-}
-
 /// Release the descriptor table `process` owns.
-pub fn fileio_destroy_table_for_process_handle(process: Handle<Process>) {
+pub fn fileio_destroy_table_for_process(process: Handle<Process>) {
     let Some(slot) = slot_for_process(process) else {
-        return;
-    };
-    destroy_table_in_slot(slot);
-}
-
-pub fn fileio_destroy_table_for_process(process_id: u32) {
-    if process_id == INVALID_PROCESS_ID {
-        return;
-    }
-    let Some(slot) = slot_for_pid(process_id) else {
         return;
     };
     destroy_table_in_slot(slot);
@@ -265,28 +218,14 @@ fn destroy_table_in_slot(slot: &'static FileTableSlot) {
 /// `FD_CLOEXEC`; only `exec` strips them) — the two bits are independent.
 /// Spawn does not clone tables; it builds the child's from an fd-action
 /// allow-list.
-pub fn fileio_clone_table_for_process(src_process_id: u32, dst_process_id: u32) -> i32 {
-    if src_process_id == INVALID_PROCESS_ID || dst_process_id == INVALID_PROCESS_ID {
-        return -1;
-    }
-    if src_process_id == dst_process_id {
-        return 0;
-    }
-    let Some(dst_process) = handle_for_pid(dst_process_id) else {
-        return -1;
-    };
-    fileio_clone_table_for_process_handle(src_process_id, dst_process)
-}
-
-/// Clone `src_process_id`'s table into `dst`'s own slot.
-pub fn fileio_clone_table_for_process_handle(src_process_id: u32, dst: Handle<Process>) -> i32 {
+pub fn fileio_clone_table_for_process(src: FdTable, dst: Handle<Process>) -> i32 {
     // Step 1: snapshot src descriptors into a heap `KVec` (NOT a stack
     // array — a `[Option<FdEntry>; 32]` on the frame blows the 2 KiB
     // stack gate). Each clone bumps a `KArc<OpenFile>` strong count
     // (safe under the lock: a clone never runs teardown), tagged with its
     // fd number.
-    let src_slot = match slot_for_pid(src_process_id) {
-        Some(s) => s,
+    let src_slot = match slot_for_table(src) {
+        Some(slot) => slot,
         None => return -1,
     };
     let mut snapshot: KVec<(usize, FdEntry)> = KVec::new();
@@ -331,11 +270,8 @@ pub fn fileio_clone_table_for_process_handle(src_process_id: u32, dst: Handle<Pr
     0
 }
 
-pub fn fileio_close_on_exec(process_id: u32) {
-    if process_id == INVALID_PROCESS_ID {
-        return;
-    }
-    let Some(slot) = slot_for_pid(process_id) else {
+pub fn fileio_close_on_exec(table: FdTable) {
+    let Some(slot) = slot_for_table(table) else {
         return;
     };
     // Collect the cloexec entries under the lock, clear their slots, drop

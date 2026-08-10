@@ -304,6 +304,123 @@ pub fn process_lookup(handle: Handle<Process>) -> Result<crate::KArc<Process>, H
     process_resolve(handle)
 }
 
+/// A process named by both halves of its identity: the generation-checked
+/// handle that every table keys on, and the numeric id the ABI shows userland.
+///
+/// This is the type kernel entry points should take instead of a bare `u32`.
+/// A `u32` is a *number* — it says nothing about whether the process it named
+/// still exists, and ids recycle, so a stale one silently designates whichever
+/// process holds that number now. Every such parameter is a confused-deputy
+/// surface waiting for a caller to hold one a moment too long.
+///
+/// The two fields cannot disagree, because the only way to build one outside
+/// this module is [`resolve`](Self::resolve), which reads both from the same
+/// live process under one lookup. `id` is therefore safe to hand to a log line
+/// or a syscall return without a second thought, and `handle` is what every
+/// lookup actually uses.
+///
+/// # Size
+///
+/// Two `u64`s, and deliberately so. The obvious layout — a [`Handle`] plus a
+/// `u32` — is 24 bytes, and this type replaces a `u32` in the argument list of
+/// most of the syscall surface. Three frames crossed the 2 KiB stack gate at
+/// 24 bytes; the packed form keeps every one of them under it. Storing the
+/// handle in its packed encoding rather than as a struct is what buys that,
+/// and costs one shift-and-mask per access on paths that are already doing a
+/// table lookup.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub struct ProcessId {
+    /// The handle in its [`pack_process_handle`] encoding. Never zero: a
+    /// `ProcessId` names a real process, and the "none" case is `Option`.
+    packed: u64,
+    id: u32,
+}
+
+impl ProcessId {
+    /// The identity of a live process.
+    ///
+    /// The only constructor that consults the registry, and the reason the two
+    /// halves are always consistent.
+    #[inline]
+    pub fn of(process: &Process) -> Option<Self> {
+        let packed = process.handle_raw();
+        if packed == PROCESS_HANDLE_NONE {
+            return None;
+        }
+        Some(Self {
+            packed,
+            id: process.id(),
+        })
+    }
+
+    /// Resolve a numeric id to a live process identity.
+    ///
+    /// The bridge for the ABI boundary, where userland hands over a number and
+    /// nothing else. `None` for an id naming no live process — which is the
+    /// whole point: the failure is at the boundary, once, instead of being
+    /// carried inward as a `u32` that later resolves to a stranger.
+    #[inline]
+    pub fn resolve(id: u32) -> Option<Self> {
+        let process = process_find_by_id(id)?;
+        Self::of(process.as_ref())
+    }
+
+    /// The generation-checked handle. What every table lookup keys on.
+    ///
+    /// Total: `packed` is non-zero by construction and only
+    /// [`pack_process_handle`] ever wrote it, so the unpack always succeeds.
+    /// The `unwrap_or` is unreachable and resolves to nothing — slot `u32::MAX`
+    /// is outside every table.
+    #[inline]
+    pub fn handle(self) -> Handle<Process> {
+        unpack_process_handle(self.packed).unwrap_or(Handle::from_parts(u32::MAX, u64::MAX))
+    }
+
+    /// The numeric id. Display and ABI only — never a lookup key.
+    #[inline]
+    pub const fn id(self) -> u32 {
+        self.id
+    }
+
+    /// The process itself, if it is still live.
+    ///
+    /// Returns `None` once the process has been reaped, even though `self`
+    /// still names it: holding a `ProcessId` does not keep a process alive, by
+    /// design. It is a designator, not a reference — an owning one would make
+    /// every syscall argument a lifetime-extending edge on the process it
+    /// mentions.
+    #[inline]
+    pub fn get(self) -> Option<crate::KArc<Process>> {
+        process_for_handle(self.handle())
+    }
+
+    /// Whether the process is still live.
+    #[inline]
+    pub fn is_live(self) -> bool {
+        self.get().is_some()
+    }
+}
+
+impl core::fmt::Debug for ProcessId {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        write!(
+            f,
+            "ProcessId({}, slot {}, gen {})",
+            self.id,
+            self.handle().slot(),
+            self.handle().generation()
+        )
+    }
+}
+
+impl core::fmt::Display for ProcessId {
+    /// The numeric id alone, so a `{}` in a log line reads the way the old
+    /// `u32` did.
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        write!(f, "{}", self.id)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

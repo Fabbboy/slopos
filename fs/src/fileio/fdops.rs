@@ -36,7 +36,7 @@ type ssize_t = isize;
 /// carrying POSIX open flags spell close-on-exec as `O_CLOEXEC` inside
 /// `flags` instead; both spellings set the same bit.
 fn install_fd_entry(
-    process_id: u32,
+    table: FdTable,
     ops: &'static dyn FileOps,
     handle: usize,
     mut flags: OpenMode,
@@ -67,7 +67,7 @@ fn install_fd_entry(
         return Errno::ENFILE.raw();
     };
 
-    let Some(mut inner) = lock_pid_slot(process_id) else {
+    let Some(mut inner) = lock_table_slot(table) else {
         // `open_file` drops here → backing released once.
         return Errno::ESRCH.raw();
     };
@@ -112,7 +112,7 @@ fn current_socket_ops() -> Option<&'static dyn FileOps> {
     with_open_files(|state| external_socket_ops(&state.external_ops))
 }
 
-pub fn file_open_for_process(process_id: u32, path: &[u8], posix_flags: u32) -> c_int {
+pub fn file_open_for_process(table: FdTable, path: &[u8], posix_flags: u32) -> c_int {
     let flags = posix_to_open_mode(posix_flags);
     if !flags.intersects(OpenMode::READ | OpenMode::WRITE) {
         return Errno::EINVAL.raw() as _;
@@ -132,7 +132,7 @@ pub fn file_open_for_process(process_id: u32, path: &[u8], posix_flags: u32) -> 
         };
         let tty_ops = current_tty_ops();
         return install_fd_entry(
-            process_id,
+            table,
             tty_ops,
             tty_idx.0 as usize,
             flags,
@@ -149,7 +149,7 @@ pub fn file_open_for_process(process_id: u32, path: &[u8], posix_flags: u32) -> 
         };
         let tty_ops = current_tty_ops();
         return install_fd_entry(
-            process_id,
+            table,
             tty_ops,
             master_idx.0 as usize,
             flags.with_raw(O_NOCTTY as u32),
@@ -166,7 +166,7 @@ pub fn file_open_for_process(process_id: u32, path: &[u8], posix_flags: u32) -> 
         };
         let tty_ops = current_tty_ops();
         return install_fd_entry(
-            process_id,
+            table,
             tty_ops,
             slave_idx.0 as usize,
             flags,
@@ -194,7 +194,7 @@ pub fn file_open_for_process(process_id: u32, path: &[u8], posix_flags: u32) -> 
         return Errno::ENOMEM.raw() as _;
     };
     install_fd_entry(
-        process_id,
+        table,
         &VFS_FILE_OPS,
         vfs_handle,
         flags,
@@ -217,9 +217,9 @@ fn tty_open_errno(e: TtyError) -> Errno {
     }
 }
 
-pub fn file_read_fd(process_id: u32, fd: c_int, buf: &mut dyn IoBufWrite) -> ssize_t {
+pub fn file_read_fd(table: FdTable, fd: c_int, buf: &mut dyn IoBufWrite) -> ssize_t {
     let open_file = {
-        let Some(inner) = lock_pid_slot(process_id) else {
+        let Some(inner) = lock_table_slot(table) else {
             return Errno::EBADF.raw() as _;
         };
         match snapshot_fd(&inner, fd) {
@@ -276,9 +276,9 @@ pub fn file_read_ref_nonblock(file: &FileRef, buf: &mut dyn IoBufWrite) -> ssize
     read_open_file(&file.open_file, buf, true)
 }
 
-pub fn file_write_fd(process_id: u32, fd: c_int, buf: &dyn IoBufRead) -> ssize_t {
+pub fn file_write_fd(table: FdTable, fd: c_int, buf: &dyn IoBufRead) -> ssize_t {
     let open_file = {
-        let Some(inner) = lock_pid_slot(process_id) else {
+        let Some(inner) = lock_table_slot(table) else {
             return Errno::EBADF.raw() as _;
         };
         match snapshot_fd(&inner, fd) {
@@ -363,11 +363,11 @@ impl Drop for ForcedNonblockGuard {
     }
 }
 
-pub fn file_close_fd(process_id: u32, fd: c_int) -> c_int {
+pub fn file_close_fd(table: FdTable, fd: c_int) -> c_int {
     // Detach-then-drop: take the entry out of the slot under the table
     // lock, release the lock, then drop the entry so the `OpenFile`
     // teardown (last alias → backing release) runs lock-free.
-    let taken = with_pid_slot(process_id, |inner| {
+    let taken = with_table_slot(table, |inner| {
         if fd < 0 || fd as usize >= FILEIO_MAX_OPEN_FILES {
             return Err(Errno::EBADF);
         }
@@ -386,9 +386,9 @@ pub fn file_close_fd(process_id: u32, fd: c_int) -> c_int {
     }
 }
 
-pub fn file_seek_fd(process_id: u32, fd: c_int, offset: i64, whence: u32) -> i64 {
+pub fn file_seek_fd(table: FdTable, fd: c_int, offset: i64, whence: u32) -> i64 {
     let snap = {
-        let Some(inner) = lock_pid_slot(process_id) else {
+        let Some(inner) = lock_table_slot(table) else {
             return Errno::ESRCH.raw() as i64;
         };
         match snapshot_fd(&inner, fd) {
@@ -423,9 +423,9 @@ pub fn file_seek_fd(process_id: u32, fd: c_int, offset: i64, whence: u32) -> i64
     new_pos
 }
 
-pub fn file_get_size_fd(process_id: u32, fd: c_int) -> usize {
+pub fn file_get_size_fd(table: FdTable, fd: c_int) -> usize {
     let snap = {
-        let Some(inner) = lock_pid_slot(process_id) else {
+        let Some(inner) = lock_table_slot(table) else {
             return usize::MAX;
         };
         match snapshot_fd(&inner, fd) {
@@ -490,9 +490,9 @@ pub fn file_list_path(path: &[u8], entries: &mut [UserFsEntry], out_count: &mut 
     }
 }
 
-pub fn file_is_console_fd(process_id: u32, fd: c_int) -> bool {
+pub fn file_is_console_fd(table: FdTable, fd: c_int) -> bool {
     let snap = {
-        let Some(inner) = lock_pid_slot(process_id) else {
+        let Some(inner) = lock_table_slot(table) else {
             return false;
         };
         match snapshot_fd(&inner, fd) {
@@ -503,9 +503,9 @@ pub fn file_is_console_fd(process_id: u32, fd: c_int) -> bool {
     kind_is_tty(snap.ops().kind())
 }
 
-pub fn file_get_tty_index(process_id: u32, fd: c_int) -> Option<TtyIndex> {
+pub fn file_get_tty_index(table: FdTable, fd: c_int) -> Option<TtyIndex> {
     let snap = {
-        let Some(inner) = lock_pid_slot(process_id) else {
+        let Some(inner) = lock_table_slot(table) else {
             return None;
         };
         snapshot_fd(&inner, fd)?
@@ -524,7 +524,7 @@ pub fn file_get_tty_index(process_id: u32, fd: c_int) -> Option<TtyIndex> {
 /// consumes it via [`install_fd_entry`], so on failure the open is
 /// undone by the backing's drop.
 pub fn file_open_tty_fd(
-    process_id: u32,
+    table: FdTable,
     tty_idx: TtyIndex,
     posix_flags: u32,
     backing: KArc<dyn FileBacking>,
@@ -534,7 +534,7 @@ pub fn file_open_tty_fd(
     let kept = posix_flags & (O_CLOEXEC as u32 | O_NOCTTY as u32 | O_NONBLOCK as u32);
     let flags = if kept != 0 { base.with_raw(kept) } else { base };
     install_fd_entry(
-        process_id,
+        table,
         tty_ops,
         tty_idx.0 as usize,
         flags,
@@ -545,7 +545,7 @@ pub fn file_open_tty_fd(
 }
 
 pub fn file_pipe_create(
-    process_id: u32,
+    table: FdTable,
     flags: u32,
     out_read_fd: &mut c_int,
     out_write_fd: &mut c_int,
@@ -610,7 +610,7 @@ pub fn file_pipe_create(
         return Errno::ENFILE.raw() as _;
     };
 
-    let Some(mut inner) = lock_pid_slot(process_id) else {
+    let Some(mut inner) = lock_table_slot(table) else {
         drop(read_of);
         drop(write_of);
         return Errno::ESRCH.raw() as _;
@@ -663,12 +663,12 @@ pub fn file_pipe_create(
     }
 }
 
-pub fn file_dup_fd(process_id: u32, old_fd: c_int) -> c_int {
-    file_dup_fd_min(process_id, old_fd, 0)
+pub fn file_dup_fd(table: FdTable, old_fd: c_int) -> c_int {
+    file_dup_fd_min(table, old_fd, 0)
 }
 
-fn file_dup_fd_min(process_id: u32, old_fd: c_int, min_fd: usize) -> c_int {
-    with_pid_slot(process_id, |inner| {
+fn file_dup_fd_min(table: FdTable, old_fd: c_int, min_fd: usize) -> c_int {
+    with_table_slot(table, |inner| {
         let Some(src) = get_fd_entry(inner, old_fd) else {
             return Errno::EBADF.raw() as _;
         };
@@ -698,16 +698,16 @@ fn file_dup_fd_min(process_id: u32, old_fd: c_int, min_fd: usize) -> c_int {
     .unwrap_or(Errno::ESRCH.raw() as _)
 }
 
-pub fn file_dup2_fd(process_id: u32, old_fd: c_int, new_fd: c_int) -> c_int {
-    dup_into(process_id, old_fd, new_fd, false, false)
+pub fn file_dup2_fd(table: FdTable, old_fd: c_int, new_fd: c_int) -> c_int {
+    dup_into(table, old_fd, new_fd, false, false)
 }
 
-pub fn file_dup3_fd(process_id: u32, old_fd: c_int, new_fd: c_int, flags: u32) -> c_int {
+pub fn file_dup3_fd(table: FdTable, old_fd: c_int, new_fd: c_int, flags: u32) -> c_int {
     if old_fd == new_fd {
         return Errno::EINVAL.raw() as _;
     }
     dup_into(
-        process_id,
+        table,
         old_fd,
         new_fd,
         (flags & FD_CLOEXEC as u32) != 0,
@@ -724,12 +724,12 @@ pub fn file_dup3_fd(process_id: u32, old_fd: c_int, new_fd: c_int, flags: u32) -
 /// must not cross a process boundary its source would not. Any
 /// pre-existing entry at `new_fd` is detached under the lock and dropped
 /// *after* the lock is released.
-fn dup_into(process_id: u32, old_fd: c_int, new_fd: c_int, cloexec: bool, is_dup3: bool) -> c_int {
+fn dup_into(table: FdTable, old_fd: c_int, new_fd: c_int, cloexec: bool, is_dup3: bool) -> c_int {
     if new_fd < 0 || new_fd as usize >= FILEIO_MAX_OPEN_FILES {
         return Errno::EBADF.raw() as _;
     }
     if old_fd == new_fd && !is_dup3 {
-        let Some(inner) = lock_pid_slot(process_id) else {
+        let Some(inner) = lock_table_slot(table) else {
             return Errno::ESRCH.raw() as _;
         };
         return if get_fd_entry(&inner, old_fd).is_some() {
@@ -739,7 +739,7 @@ fn dup_into(process_id: u32, old_fd: c_int, new_fd: c_int, cloexec: bool, is_dup
         };
     }
 
-    let outcome = with_pid_slot(process_id, |inner| {
+    let outcome = with_table_slot(table, |inner| {
         let Some(src) = get_fd_entry(inner, old_fd) else {
             return Err(Errno::EBADF);
         };
@@ -766,11 +766,11 @@ fn dup_into(process_id: u32, old_fd: c_int, new_fd: c_int, cloexec: bool, is_dup
     }
 }
 
-pub fn file_fcntl_fd(process_id: u32, fd: c_int, cmd: u64, arg: u64) -> i64 {
+pub fn file_fcntl_fd(table: FdTable, fd: c_int, cmd: u64, arg: u64) -> i64 {
     match cmd {
-        F_DUPFD => file_dup_fd_min(process_id, fd, arg as usize) as i64,
+        F_DUPFD => file_dup_fd_min(table, fd, arg as usize) as i64,
         F_GETFD => {
-            let Some(inner) = lock_pid_slot(process_id) else {
+            let Some(inner) = lock_table_slot(table) else {
                 return Errno::ESRCH.raw() as i64;
             };
             match get_fd_entry(&inner, fd) {
@@ -785,7 +785,7 @@ pub fn file_fcntl_fd(process_id: u32, fd: c_int, cmd: u64, arg: u64) -> i64 {
             }
         }
         F_SETFD => {
-            let Some(mut inner) = lock_pid_slot(process_id) else {
+            let Some(mut inner) = lock_table_slot(table) else {
                 return Errno::ESRCH.raw() as i64;
             };
             match get_fd_entry_mut(&mut inner, fd) {
@@ -798,7 +798,7 @@ pub fn file_fcntl_fd(process_id: u32, fd: c_int, cmd: u64, arg: u64) -> i64 {
         }
         F_GETFL => {
             let snap = {
-                let Some(inner) = lock_pid_slot(process_id) else {
+                let Some(inner) = lock_table_slot(table) else {
                     return Errno::ESRCH.raw() as i64;
                 };
                 match snapshot_fd(&inner, fd) {
@@ -810,7 +810,7 @@ pub fn file_fcntl_fd(process_id: u32, fd: c_int, cmd: u64, arg: u64) -> i64 {
         }
         F_SETFL => {
             let snap = {
-                let Some(inner) = lock_pid_slot(process_id) else {
+                let Some(inner) = lock_table_slot(table) else {
                     return Errno::ESRCH.raw() as i64;
                 };
                 match snapshot_fd(&inner, fd) {
@@ -841,12 +841,12 @@ pub fn file_fcntl_fd(process_id: u32, fd: c_int, cmd: u64, arg: u64) -> i64 {
 }
 
 pub fn file_fstat_fd(
-    process_id: u32,
+    table: FdTable,
     fd: c_int,
     out_stat: &mut slopos_abi::fs::UserFsStat,
 ) -> c_int {
     let snap = {
-        let Some(inner) = lock_pid_slot(process_id) else {
+        let Some(inner) = lock_table_slot(table) else {
             return Errno::ESRCH.raw() as _;
         };
         match snapshot_fd(&inner, fd) {
@@ -858,7 +858,7 @@ pub fn file_fstat_fd(
 }
 
 pub fn fileio_open_socket_fd(
-    process_id: u32,
+    table: FdTable,
     socket_idx: u32,
     backing: Option<KArc<dyn FileBacking>>,
 ) -> i32 {
@@ -866,7 +866,7 @@ pub fn fileio_open_socket_fd(
         return Errno::ENOTSOCK.raw() as _;
     };
     install_fd_entry(
-        process_id,
+        table,
         socket_ops,
         socket_idx as usize,
         OpenMode::READ | OpenMode::WRITE,
@@ -882,14 +882,14 @@ pub fn fileio_open_socket_fd(
 /// POSIX open flags, so its inheritance policy has no other source. The
 /// POSIX default is [`FdFlags::NONE`].
 pub fn fileio_open_fd_with_ops(
-    process_id: u32,
+    table: FdTable,
     ops: &'static dyn FileOps,
     handle: usize,
     backing: Option<KArc<dyn FileBacking>>,
     fd_flags: FdFlags,
 ) -> i32 {
     install_fd_entry(
-        process_id,
+        table,
         ops,
         handle,
         OpenMode::READ | OpenMode::WRITE,
@@ -899,9 +899,9 @@ pub fn fileio_open_fd_with_ops(
     )
 }
 
-pub fn fileio_get_open_file_handle(process_id: u32, fd: i32) -> Option<(FileKind, usize)> {
+pub fn fileio_get_open_file_handle(table: FdTable, fd: i32) -> Option<(FileKind, usize)> {
     let snap = {
-        let inner = lock_pid_slot(process_id)?;
+        let inner = lock_table_slot(table)?;
         snapshot_fd(&inner, fd)?
     };
     Some((snap.ops().kind(), snap.handle()))
@@ -911,12 +911,9 @@ pub fn fileio_get_open_file_handle(process_id: u32, fd: i32) -> Option<(FileKind
 /// lookup for dispatch (e.g. ring ops routing on `kind()` /
 /// `is_unix_socket()`). Confers no ownership: the caller's fd keeps the
 /// file alive for the duration of its own operation.
-pub fn fileio_get_handle_and_ops(
-    process_id: u32,
-    fd: i32,
-) -> Option<(usize, &'static dyn FileOps)> {
+pub fn fileio_get_handle_and_ops(table: FdTable, fd: i32) -> Option<(usize, &'static dyn FileOps)> {
     let snap = {
-        let inner = lock_pid_slot(process_id)?;
+        let inner = lock_table_slot(table)?;
         snapshot_fd(&inner, fd)?
     };
     Some((snap.handle(), snap.ops()))
@@ -932,9 +929,9 @@ pub fn fileio_handle_and_ops_from_ref(file: &FileRef) -> (usize, &'static dyn Fi
 /// Mint a [`FileRef`] alias of an open fd — the SCM_RIGHTS send side.
 /// The returned reference shares the open-file description (offset,
 /// status flags, backing) and keeps it alive until dropped or installed.
-pub fn fileio_clone_file_ref(process_id: u32, fd: i32) -> Option<FileRef> {
+pub fn fileio_clone_file_ref(table: FdTable, fd: i32) -> Option<FileRef> {
     let snap = {
-        let inner = lock_pid_slot(process_id)?;
+        let inner = lock_table_slot(table)?;
         snapshot_fd(&inner, fd)?
     };
     Some(FileRef {
@@ -946,8 +943,8 @@ pub fn fileio_clone_file_ref(process_id: u32, fd: i32) -> Option<FileRef> {
 /// SCM_RIGHTS receive side. The alias transfers into the table entry
 /// (cloexec clear, POSIX default for received fds); on failure it drops
 /// here, closing that alias.
-pub fn fileio_install_file_ref(process_id: u32, file: FileRef) -> c_int {
-    let Some(mut inner) = lock_pid_slot(process_id) else {
+pub fn fileio_install_file_ref(table: FdTable, file: FileRef) -> c_int {
+    let Some(mut inner) = lock_table_slot(table) else {
         return Errno::ESRCH.raw() as _;
     };
     let Some(idx) = find_free_slot(&inner) else {
@@ -968,7 +965,7 @@ pub fn fileio_install_file_ref(process_id: u32, file: FileRef) -> c_int {
 /// (detach-then-drop). Generalises [`fileio_install_file_ref`] for the spawn
 /// fd-action allow-list. On failure the alias drops here — lock-free — closing it.
 pub fn fileio_install_file_ref_at(
-    process_id: u32,
+    table: FdTable,
     target_fd: c_int,
     file: FileRef,
     cloexec: bool,
@@ -978,7 +975,7 @@ pub fn fileio_install_file_ref_at(
         return Errno::EBADF.raw() as _;
     }
     let displaced = {
-        let Some(mut inner) = lock_pid_slot(process_id) else {
+        let Some(mut inner) = lock_table_slot(table) else {
             // No table: no lock held here, so close the alias lock-free.
             drop(file);
             return Errno::ESRCH.raw() as _;
@@ -999,8 +996,8 @@ pub fn fileio_install_file_ref_at(
 /// Detach the description at `fd` and return it as a [`FileRef`] — the spawn
 /// `TransferFd` move. The parent slot is emptied and the caller owns the
 /// returned alias. `None` if `fd` is absent or the table is missing.
-pub fn fileio_take_file_ref(process_id: u32, fd: c_int) -> Option<FileRef> {
-    let entry = with_pid_slot(process_id, |inner| {
+pub fn fileio_take_file_ref(table: FdTable, fd: c_int) -> Option<FileRef> {
+    let entry = with_table_slot(table, |inner| {
         if fd < 0 || fd as usize >= FILEIO_MAX_OPEN_FILES {
             return None;
         }
@@ -1016,11 +1013,11 @@ pub fn fileio_take_file_ref(process_id: u32, fd: c_int) -> Option<FileRef> {
 /// repopulated is left untouched. The taken alias returns to the caller
 /// so its teardown runs lock-free (detach-then-drop).
 pub fn fileio_take_file_ref_matching(
-    process_id: u32,
+    table: FdTable,
     fd: c_int,
     expected: &FileRef,
 ) -> Option<FileRef> {
-    let entry = with_pid_slot(process_id, |inner| {
+    let entry = with_table_slot(table, |inner| {
         if fd < 0 || fd as usize >= FILEIO_MAX_OPEN_FILES {
             return None;
         }
@@ -1038,23 +1035,18 @@ pub fn fileio_take_file_ref_matching(
 /// Open `path` and install its description at exactly `target_fd`, displacing
 /// any occupant — the spawn `Open` action. Composed from the next-free open
 /// plus a relocate, so the inherited fd is never close-on-exec.
-pub fn fileio_open_at_fd(
-    process_id: u32,
-    target_fd: c_int,
-    path: &[u8],
-    posix_flags: u32,
-) -> c_int {
+pub fn fileio_open_at_fd(table: FdTable, target_fd: c_int, path: &[u8], posix_flags: u32) -> c_int {
     if target_fd < 0 || target_fd as usize >= FILEIO_MAX_OPEN_FILES {
         return Errno::EBADF.raw() as _;
     }
-    let opened = file_open_for_process(process_id, path, posix_flags & !(O_CLOEXEC as u32));
+    let opened = file_open_for_process(table, path, posix_flags & !(O_CLOEXEC as u32));
     if opened < 0 {
         return opened;
     }
     if opened == target_fd {
         return target_fd;
     }
-    let rc = file_dup2_fd(process_id, opened, target_fd);
-    let _ = file_close_fd(process_id, opened);
+    let rc = file_dup2_fd(table, opened, target_fd);
+    let _ = file_close_fd(table, opened);
     if rc < 0 { rc } else { target_fd }
 }

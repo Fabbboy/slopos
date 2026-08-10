@@ -10,12 +10,11 @@
 use core::ffi::c_int;
 
 use slopos_abi::fs::O_RDONLY;
-use slopos_abi::task::INVALID_PROCESS_ID;
 use slopos_fs::fileio::{
     file_open_for_process, file_pipe_create, fileio_create_table_for_process,
     fileio_destroy_table_for_process, fileio_get_open_file_handle,
 };
-use slopos_mm::process_vm::{create_process_vm, destroy_process_vm, init_process_vm};
+use slopos_mm::process_vm::{destroy_process_vm, init_process_vm};
 use slopos_ostd::klog_info;
 use slopos_testing::TestResult;
 use slopos_testing::assert_test;
@@ -26,20 +25,26 @@ use slopos_testing::assert_test;
 /// ids are never reused. Once they are, the second caller is a different
 /// process, and it would start life holding the first one's descriptors —
 /// including its stdin, its sockets and its open files.
-pub fn test_fileio_create_table_rejects_a_bound_pid() -> TestResult {
-    let pid = create_process_vm();
-    if pid == INVALID_PROCESS_ID {
-        klog_info!("PROC_ID_TEST: could not create a process VM");
+pub fn test_fileio_create_table_rejects_a_bound_process() -> TestResult {
+    let Ok(process) = slopos_ostd::process::process_spawn_root() else {
+        klog_info!("PROC_ID_TEST: could not register a process");
         return TestResult::Fail;
-    }
+    };
+    let Some(handle) = process.handle() else {
+        klog_info!("PROC_ID_TEST: a registered process carries no handle");
+        return TestResult::Fail;
+    };
 
-    let first = fileio_create_table_for_process(pid);
-    let second = fileio_create_table_for_process(pid);
+    let first = fileio_create_table_for_process(handle);
+    let second = fileio_create_table_for_process(handle);
 
-    fileio_destroy_table_for_process(pid);
-    destroy_process_vm(pid);
+    fileio_destroy_table_for_process(handle);
+    slopos_ostd::process::process_retire(handle);
 
-    assert_test!(first == 0, "first fd-table create for a fresh pid failed");
+    assert_test!(
+        first == 0,
+        "first fd-table create for a fresh process failed"
+    );
     assert_test!(
         second == -1,
         "a second fd-table create for a bound pid reported success without \
@@ -60,15 +65,16 @@ pub fn test_fileio_create_table_rejects_a_bound_pid() -> TestResult {
 /// come back bound to tables their new holders never opened, and the very
 /// next `task_build` is refused a descriptor table.
 pub fn test_a_fixture_reset_releases_fd_tables() -> TestResult {
-    let pid = create_process_vm();
-    if pid == INVALID_PROCESS_ID {
-        klog_info!("PROC_ID_TEST: could not create a process VM");
+    let Ok(process) = slopos_ostd::process::process_spawn_root() else {
+        klog_info!("PROC_ID_TEST: could not register a process");
         return TestResult::Fail;
-    }
-    if fileio_create_table_for_process(pid) != 0 {
-        klog_info!("PROC_ID_TEST: could not create an fd table for pid {}", pid);
-        fileio_destroy_table_for_process(pid);
-        destroy_process_vm(pid);
+    };
+    let Some(handle) = process.handle() else {
+        return TestResult::Fail;
+    };
+    if fileio_create_table_for_process(handle) != 0 {
+        klog_info!("PROC_ID_TEST: could not create an fd table");
+        fileio_destroy_table_for_process(handle);
         return TestResult::Fail;
     }
 
@@ -77,14 +83,16 @@ pub fn test_a_fixture_reset_releases_fd_tables() -> TestResult {
 
     // The slot is free again, so a fresh holder must be able to claim a table
     // in it. A leftover binding shows up here as a refusal.
-    let fresh = create_process_vm();
-    if fresh == INVALID_PROCESS_ID {
-        klog_info!("PROC_ID_TEST: could not create a process VM after the reset");
+    let Ok(fresh) = slopos_ostd::process::process_spawn_root() else {
+        klog_info!("PROC_ID_TEST: could not register a process after the reset");
         return TestResult::Fail;
-    }
-    let rebound = fileio_create_table_for_process(fresh);
-    fileio_destroy_table_for_process(fresh);
-    destroy_process_vm(fresh);
+    };
+    let Some(fresh_handle) = fresh.handle() else {
+        return TestResult::Fail;
+    };
+    let rebound = fileio_create_table_for_process(fresh_handle);
+    fileio_destroy_table_for_process(fresh_handle);
+    slopos_ostd::process::process_retire(fresh_handle);
 
     assert_test!(
         rebound == 0,
@@ -121,7 +129,7 @@ pub fn test_a_recycled_pid_does_not_resolve_to_the_prior_principal() -> TestResu
         klog_info!("PROC_ID_TEST: could not give the first process an address space");
         return TestResult::Fail;
     }
-    if slopos_fs::fileio::fileio_create_table_for_process_handle(stale) != 0 {
+    if slopos_fs::fileio::fileio_create_table_for_process(stale) != 0 {
         klog_info!("PROC_ID_TEST: could not give the first process a descriptor table");
         destroy_process_vm(first_id);
         return TestResult::Fail;
@@ -129,7 +137,7 @@ pub fn test_a_recycled_pid_does_not_resolve_to_the_prior_principal() -> TestResu
 
     // Tear the first process down completely, then drop the last reference so
     // its id returns to the allocator.
-    slopos_fs::fileio::fileio_destroy_table_for_process_handle(stale);
+    slopos_fs::fileio::fileio_destroy_table_for_process(stale);
     destroy_process_vm(first_id);
     process_retire(stale);
     drop(first);
@@ -177,31 +185,35 @@ pub fn test_a_recycled_pid_does_not_resolve_to_the_prior_principal() -> TestResu
 /// descriptors landed there would hand them to all of them, and would see
 /// theirs — so the answer to "this pid owns no table" has to be a refusal,
 /// never a redirect into a more privileged domain.
-pub fn test_fileio_refuses_a_pid_with_no_table() -> TestResult {
-    let pid = create_process_vm();
-    if pid == INVALID_PROCESS_ID {
-        klog_info!("PROC_ID_TEST: could not create a process VM");
+pub fn test_fileio_refuses_a_process_with_no_table() -> TestResult {
+    let Ok(process) = slopos_ostd::process::process_spawn_root() else {
+        klog_info!("PROC_ID_TEST: could not register a process");
         return TestResult::Fail;
-    }
+    };
+    let Some(table) = slopos_fs::fileio::FdTable::of(&process) else {
+        return TestResult::Fail;
+    };
     // Deliberately no `fileio_create_table_for_process`.
 
     let before = kernel_table_open_fds();
 
     let mut read_fd: c_int = -1;
     let mut write_fd: c_int = -1;
-    let pipe_rc = file_pipe_create(pid, 0, &mut read_fd, &mut write_fd);
-    let open_rc = file_open_for_process(pid, b"/", O_RDONLY);
+    let pipe_rc = file_pipe_create(table, 0, &mut read_fd, &mut write_fd);
+    let open_rc = file_open_for_process(table, b"/", O_RDONLY);
 
     let after = kernel_table_open_fds();
-    destroy_process_vm(pid);
+    if let Some(handle) = process.handle() {
+        slopos_ostd::process::process_retire(handle);
+    }
 
     assert_test!(
         pipe_rc == ESRCH_RC,
-        "pipe create for an unregistered pid returned {pipe_rc}, want ESRCH"
+        "pipe create for a process with no table returned {pipe_rc}, want ESRCH"
     );
     assert_test!(
         open_rc < 0,
-        "open for an unregistered pid returned fd {open_rc} instead of failing"
+        "open for a process with no table returned fd {open_rc} instead of failing"
     );
     assert_test!(
         before == after,
@@ -214,7 +226,7 @@ pub fn test_fileio_refuses_a_pid_with_no_table() -> TestResult {
 /// Occupied descriptor count in the kernel's own table.
 fn kernel_table_open_fds() -> usize {
     (0..MAX_PROBE_FD)
-        .filter(|fd| fileio_get_open_file_handle(INVALID_PROCESS_ID, *fd).is_some())
+        .filter(|fd| fileio_get_open_file_handle(slopos_fs::fileio::FdTable::Kernel, *fd).is_some())
         .count()
 }
 
@@ -224,11 +236,11 @@ const MAX_PROBE_FD: c_int = 1024;
 const ESRCH_RC: c_int = -3;
 
 slopos_testing::stest!(
-    name = test_fileio_create_table_rejects_a_bound_pid,
+    name = test_fileio_create_table_rejects_a_bound_process,
     suite = process_identity
 );
 slopos_testing::stest!(
-    name = test_fileio_refuses_a_pid_with_no_table,
+    name = test_fileio_refuses_a_process_with_no_table,
     suite = process_identity
 );
 slopos_testing::stest!(

@@ -21,11 +21,12 @@ pub mod registry;
 pub use file_ops::SIGNALFD_FILE_OPS;
 
 use slopos_abi::Errno;
+use slopos_fs::fileio::FdTable;
 
-/// Create a signalfd owned by `owner_task_id` (the caller) in `process_id`,
+/// Create a signalfd owned by `owner_task_id` (the caller) in `table`,
 /// watching the signals in `mask`. Returns the new fd (`>= 0`) or a negated
 /// errno (`-ENOMEM` if the registry is full, or an fd-table error).
-pub fn signalfd_create(process_id: u32, owner_task_id: u32, mask: u64) -> i32 {
+pub fn signalfd_create(table: FdTable, owner_task_id: u32, mask: u64) -> i32 {
     let Some(raw_handle) = registry::insert(registry::SignalfdState {
         owner_task_id,
         // `mask` is user-supplied. Bits outside the signal range name
@@ -48,7 +49,7 @@ pub fn signalfd_create(process_id: u32, owner_task_id: u32, mask: u64) -> i32 {
     // On install failure the fd layer drops the backing, which removes the
     // registry entry — no manual cleanup on the error arm.
     slopos_fs::fileio_open_fd_with_ops(
-        process_id,
+        table,
         &file_ops::SIGNALFD_FILE_OPS,
         raw_handle,
         Some(backing),

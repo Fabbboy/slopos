@@ -12,6 +12,7 @@
 //! a new blocking primitive.
 
 use core::ffi::c_int;
+use slopos_fs::fileio::FdTable;
 
 use slopos_abi::Errno;
 use slopos_abi::ring::{
@@ -107,14 +108,19 @@ pub fn inflight_from(sqe: &Sqe, deadline_ms: u64, file: Option<FileRef>) -> InFl
     }
 }
 
-/// Run the non-blocking probe for one SQE in process `pid`. Pure
+/// Run the non-blocking probe for one SQE in process `table`. Pure
 /// dispatch — never blocks. `file` is the reference resolved at submit for
 /// fd-driven opcodes (`None` for the path/fd-number/no-fd opcodes, or a
 /// closed fd, which the fd-driven arms report as `-EBADF` *after* the
 /// static buffer-selection check). `OP_CANCEL` / `OP_TIMEOUT` are handled
 /// by the caller (they touch ring state), so this returns `Inline(EINVAL)`
 /// for them if it ever sees them (defence in depth).
-pub fn probe(pid: u32, sqe: &Sqe, file: Option<&FileRef>, buffers: &mut BufferRegistry) -> Outcome {
+pub fn probe(
+    table: FdTable,
+    sqe: &Sqe,
+    file: Option<&FileRef>,
+    buffers: &mut BufferRegistry,
+) -> Outcome {
     let sel = buf_sel(sqe);
     match sqe.opcode {
         OP_NOP => reject_buf(sel).unwrap_or(Outcome::Inline(0)),
@@ -150,12 +156,12 @@ pub fn probe(pid: u32, sqe: &Sqe, file: Option<&FileRef>, buffers: &mut BufferRe
             None | Some(BufSel::Provided { .. }) => Outcome::Inline(Errno::EINVAL.raw()),
         }),
         OP_RECVMSG => with_file(file, |f| match sel {
-            None => crate::net_glue::recvmsg_nonblock(pid, f, sqe.addr, sqe.op_flags),
+            None => crate::net_glue::recvmsg_nonblock(table, f, sqe.addr, sqe.op_flags),
             Some(BufSel::Fixed { index }) => {
                 crate::net_glue::recvmsg_fixed(f, index, sqe.op_flags, buffers)
             }
             Some(BufSel::Provided { group }) => {
-                crate::net_glue::recvmsg_provided(pid, f, group, sqe.op_flags, buffers)
+                crate::net_glue::recvmsg_provided(table, f, group, sqe.op_flags, buffers)
             }
         }),
         OP_RECVFROM => reject_buf(sel).unwrap_or_else(|| {
@@ -165,9 +171,9 @@ pub fn probe(pid: u32, sqe: &Sqe, file: Option<&FileRef>, buffers: &mut BufferRe
         }),
         // Path-addressed (opens a new fd) and fd-number-addressed (closes a
         // number): these hold no target reference.
-        OP_OPENAT => reject_buf(sel).unwrap_or_else(|| probe_openat(pid, sqe)),
-        OP_CLOSE => reject_buf(sel).unwrap_or_else(|| probe_close(pid, sqe)),
-        OP_ACCEPT => reject_buf(sel).unwrap_or_else(|| with_file(file, |f| probe_accept(pid, f))),
+        OP_OPENAT => reject_buf(sel).unwrap_or_else(|| probe_openat(table, sqe)),
+        OP_CLOSE => reject_buf(sel).unwrap_or_else(|| probe_close(table, sqe)),
+        OP_ACCEPT => reject_buf(sel).unwrap_or_else(|| with_file(file, |f| probe_accept(table, f))),
         OP_CONNECT => reject_buf(sel).unwrap_or_else(|| with_file(file, |f| probe_connect(f, sqe))),
         OP_POLL_ADD => reject_buf(sel).unwrap_or_else(|| with_file(file, |f| probe_poll(f, sqe))),
         // OP_TIMEOUT / OP_CANCEL are handled in enter.rs (they touch the
@@ -197,7 +203,7 @@ fn reject_buf(sel: Option<BufSel>) -> Option<Outcome> {
 /// Re-probe an in-flight row at harvest time. Same dispatch as `probe`,
 /// reconstructed from the stored row (re-validating the user buffer via
 /// a fresh `UserReadBuf`/`UserWriteBuf` each time — SLOPRING § 9).
-pub fn reprobe(pid: u32, row: &InFlight, buffers: &mut BufferRegistry) -> Outcome {
+pub fn reprobe(table: FdTable, row: &InFlight, buffers: &mut BufferRegistry) -> Outcome {
     let sqe = Sqe {
         opcode: row.opcode,
         // Carry the buffer-selection flags + indices so the deferred reprobe
@@ -220,7 +226,7 @@ pub fn reprobe(pid: u32, row: &InFlight, buffers: &mut BufferRegistry) -> Outcom
         _resv0: 0,
         _resv1: 0,
     };
-    probe(pid, &sqe, row.file.as_ref(), buffers)
+    probe(table, &sqe, row.file.as_ref(), buffers)
 }
 
 fn probe_read(file: &FileRef, sqe: &Sqe) -> Outcome {
@@ -253,7 +259,7 @@ fn probe_write(file: &FileRef, sqe: &Sqe) -> Outcome {
 /// from `addr`/`len`, open with `op_flags`, return the new fd (`>= 0`) or
 /// a negated errno. It is an ownership op (installs an fd), so the caller
 /// reserves a CQE slot first. Null `addr` → `-EFAULT` inline.
-fn probe_openat(pid: u32, sqe: &Sqe) -> Outcome {
+fn probe_openat(table: FdTable, sqe: &Sqe) -> Outcome {
     if sqe.addr == 0 {
         return Outcome::Inline(Errno::EFAULT.raw());
     }
@@ -276,21 +282,21 @@ fn probe_openat(pid: u32, sqe: &Sqe) -> Outcome {
         Some(n) => &buf[..n],
         None => &buf[..copied],
     };
-    Outcome::Inline(file_open_for_process(pid, path, sqe.op_flags))
+    Outcome::Inline(file_open_for_process(table, path, sqe.op_flags))
 }
 
 /// `OP_CLOSE`: close `fd` via the ring (SLOPRING § 12). Inline; mirrors
 /// `syscall_fs_close` / `file_close_fd`. Returns `0` or a negated errno
 /// (`-EBADF` for a bad fd).
-fn probe_close(pid: u32, sqe: &Sqe) -> Outcome {
+fn probe_close(table: FdTable, sqe: &Sqe) -> Outcome {
     if sqe.fd < 0 {
         return Outcome::Inline(Errno::EBADF.raw());
     }
-    Outcome::Inline(file_close_fd(pid, sqe.fd as c_int))
+    Outcome::Inline(file_close_fd(table, sqe.fd as c_int))
 }
 
-fn probe_accept(pid: u32, file: &FileRef) -> Outcome {
-    match crate::net_glue::accept_nonblock(pid, file) {
+fn probe_accept(table: FdTable, file: &FileRef) -> Outcome {
+    match crate::net_glue::accept_nonblock(table, file) {
         Ok(Some(new_fd)) => Outcome::Inline(new_fd),
         Ok(None) => Outcome::WouldBlock,
         Err(e) => Outcome::Inline(e.raw()),

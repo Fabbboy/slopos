@@ -16,6 +16,7 @@ use slopos_abi::net::{AF_INET, AF_UNIX, SockAddrIn};
 use slopos_abi::ring::{SLOPRING_CQE_BUFFER_SHIFT, SLOPRING_CQE_F_BUFFER};
 use slopos_abi::syscall::{CmsgHdr, MsgHdr, SCM_MAX_FDS, SCM_RIGHTS, SOL_SOCKET};
 use slopos_abi::unix::{SockAddrUn, UNIX_PATH_MAX};
+use slopos_fs::fileio::FdTable;
 
 use slopos_mm::user_copy::{
     copy_bytes_from_user, copy_bytes_to_user, copy_from_user, copy_to_user,
@@ -65,7 +66,7 @@ fn with_inet_forced_nonblock<T>(idx: u32, f: impl FnOnce() -> T) -> T {
     out
 }
 
-/// Non-blocking accept on `fd` for process `pid`. Returns:
+/// Non-blocking accept on `fd` for process `table`. Returns:
 ///   * `Ok(Some(new_fd))` — a connection was accepted and installed;
 ///   * `Ok(None)`         — would block (no pending connection);
 ///   * `Err(errno)`       — a real error (`ENOTSOCK`, `ENOMEM`, …).
@@ -73,7 +74,7 @@ fn with_inet_forced_nonblock<T>(idx: u32, f: impl FnOnce() -> T) -> T {
 /// Reserve-before-side-effect (SLOPRING § 11) is the *caller's*
 /// responsibility — by the time we install the fd here the CQE slot is
 /// already reserved, so the accepted fd can always be reported.
-pub fn accept_nonblock(pid: u32, file: &FileRef) -> Result<Option<i32>, Errno> {
+pub fn accept_nonblock(table: FdTable, file: &FileRef) -> Result<Option<i32>, Errno> {
     let (handle, ops) = socket_handle_from_ref(file)?;
 
     if ops.is_unix_socket() {
@@ -91,7 +92,7 @@ pub fn accept_nonblock(pid: u32, file: &FileRef) -> Result<Option<i32>, Errno> {
                     return Err(Errno::ENOMEM);
                 };
                 let new_fd = slopos_fs::fileio_open_fd_with_ops(
-                    pid,
+                    table,
                     &unix_socket_file_ops::UNIX_SOCKET_FILE_OPS,
                     accepted.as_usize(),
                     Some(backing),
@@ -120,7 +121,7 @@ pub fn accept_nonblock(pid: u32, file: &FileRef) -> Result<Option<i32>, Errno> {
         let Some(backing) = slopos_net::socket_file_ops::socket_backing(accepted as u32) else {
             return Err(Errno::ENOMEM);
         };
-        let new_fd = slopos_fs::fileio_open_socket_fd(pid, accepted as u32, Some(backing));
+        let new_fd = slopos_fs::fileio_open_socket_fd(table, accepted as u32, Some(backing));
         if new_fd < 0 {
             return Err(Errno::ENOMEM);
         }
@@ -275,7 +276,7 @@ pub fn send_nonblock(file: &FileRef, addr: u64, len: u32, _op_flags: u32) -> Out
 /// match (R12). AF_INET fills data only (no SCM_RIGHTS), which is
 /// correct, not an error. This is an ownership op (it installs fds), so
 /// the caller reserves a CQE slot before dispatch (SLOPRING § 11).
-pub fn recvmsg_nonblock(pid: u32, file: &FileRef, addr: u64, _op_flags: u32) -> Outcome {
+pub fn recvmsg_nonblock(table: FdTable, file: &FileRef, addr: u64, _op_flags: u32) -> Outcome {
     let (handle, ops) = match socket_handle_from_ref(file) {
         Ok(v) => v,
         Err(e) => return Outcome::Inline(e.raw()),
@@ -331,7 +332,7 @@ pub fn recvmsg_nonblock(pid: u32, file: &FileRef, addr: u64, _op_flags: u32) -> 
             }
         }
         if n_fds > 0 {
-            if let Err(e) = recvmsg_writeback_cmsg(pid, &msg, received, msg_ptr) {
+            if let Err(e) = recvmsg_writeback_cmsg(table, &msg, received, msg_ptr) {
                 return Outcome::Inline(e.raw());
             }
         }
@@ -457,7 +458,7 @@ pub fn recvfrom_nonblock(file: &FileRef, addr: u64, len: u32, addr2: u64) -> Out
 /// caller (which never learns the fd numbers) cannot orphan them — an
 /// fd-table-exhaustion DoS over repeated calls.
 fn recvmsg_writeback_cmsg(
-    pid: u32,
+    table: FdTable,
     msg: &MsgHdr,
     mut received: slopos_ostd::KVec<slopos_fs::FileRef>,
     msg_ptr: UserPtr<MsgHdr>,
@@ -486,13 +487,13 @@ fn recvmsg_writeback_cmsg(
     debug_assert!(n_fds <= SCM_MAX_FDS);
     let mut fd_nums = [0i32; SCM_MAX_FDS];
     for (j, file) in received.drain(..).enumerate() {
-        let new_fd = slopos_fs::fileio::fileio_install_file_ref(pid, file);
+        let new_fd = slopos_fs::fileio::fileio_install_file_ref(table, file);
         if new_fd < 0 {
             // The failed install dropped its alias; the drain drops the
             // rest. Roll back the fds installed so far (a partial install
             // with no surviving cmsg writeback would orphan them).
             for &fd in fd_nums.iter().take(j) {
-                let _ = slopos_fs::fileio::file_close_fd(pid, fd);
+                let _ = slopos_fs::fileio::file_close_fd(table, fd);
             }
             return Err(Errno::ENOMEM);
         }
@@ -529,7 +530,7 @@ fn recvmsg_writeback_cmsg(
 
     if let Err(e) = writeback() {
         for &fd in fd_nums.iter().take(n_fds) {
-            let _ = slopos_fs::fileio::file_close_fd(pid, fd);
+            let _ = slopos_fs::fileio::file_close_fd(table, fd);
         }
         return Err(e);
     }
@@ -771,7 +772,7 @@ pub fn recvmsg_fixed(
 /// is consumed off the ring only once data actually lands (a would-block leaves
 /// the ring untouched), and the ring head advances atomically with the fill.
 pub fn recvmsg_provided(
-    pid: u32,
+    table: FdTable,
     file: &FileRef,
     group: u16,
     _op_flags: u32,
@@ -790,7 +791,7 @@ pub fn recvmsg_provided(
     // straight from the socket via a volatile writer — no kernel scratch. The
     // pin is validated *before* any socket consume, so a bad buffer can't lose
     // data (unlike the old consume-then-publish-fault path).
-    let pin = match BufferRegistry::provided_pin(pid, buf.addr, buf.len as usize) {
+    let pin = match BufferRegistry::provided_pin(table.id(), buf.addr, buf.len as usize) {
         Ok(p) => p,
         Err(e) => return Outcome::Inline(e.raw()),
     };

@@ -58,6 +58,7 @@ use slopos_abi::net::{
     NET_MON_ADDR, NET_MON_CONN, NET_MON_DHCP, NET_MON_GLOBAL, NET_MON_IFACE, NET_MON_NEIGH,
     NET_MON_RESOLV, NET_MON_ROUTE, NetEvent,
 };
+use slopos_fs::fileio::FdTable;
 use slopos_ostd::handle::Handle;
 use slopos_ostd::lock_class;
 use slopos_ostd::sync::event_bus::BUS;
@@ -119,7 +120,12 @@ pub const fn mask_bit_for_kind(kind: u16) -> u32 {
 struct Monitor {
     live: bool,
     generation: u64,
-    process_id: u32,
+    /// The table this monitor belongs to, and the key the per-process cap
+    /// counts against. An [`FdTable`] rather than a raw pid because the cap
+    /// must not be inherited: a recycled id would hand the next process its
+    /// predecessor's outstanding monitors and refuse it at `NETMON_MAX_PER_PROCESS`
+    /// it never reached.
+    owner: Option<FdTable>,
     mask: u32,
     ring: [NetEvent; NETMON_RING_CAP],
     head: usize,
@@ -137,7 +143,7 @@ struct Monitor {
 const FREE_MONITOR: Monitor = Monitor {
     live: false,
     generation: 1,
-    process_id: 0,
+    owner: None,
     mask: 0,
     ring: [NetEvent::new(0, 0, 0, [0u8; 16]); NETMON_RING_CAP],
     head: 0,
@@ -260,14 +266,14 @@ impl NetMonTable {
         }
     }
 
-    /// Open a monitor for `process_id` subscribed to `mask`, returning the
+    /// Open a monitor for `owner` subscribed to `mask`, returning the
     /// packed handle an fd stores.
     ///
     /// * `EINVAL` — an empty mask, which would produce an fd that can never
     ///   become ready.
     /// * `EMFILE` — this process already holds [`NETMON_MAX_PER_PROCESS`].
     /// * `ENOMEM` — every registry slot is taken.
-    pub fn open(&self, process_id: u32, mask: u32) -> Result<usize, Errno> {
+    pub fn open(&self, owner: FdTable, mask: u32) -> Result<usize, Errno> {
         if mask == 0 {
             return Err(Errno::EINVAL);
         }
@@ -276,7 +282,7 @@ impl NetMonTable {
         let held = table
             .slots
             .iter()
-            .filter(|m| m.live && m.process_id == process_id)
+            .filter(|m| m.live && m.owner == Some(owner))
             .count();
         if held >= NETMON_MAX_PER_PROCESS {
             return Err(Errno::EMFILE);
@@ -290,7 +296,7 @@ impl NetMonTable {
             .ok_or(Errno::ENOMEM)?;
 
         monitor.live = true;
-        monitor.process_id = process_id;
+        monitor.owner = Some(owner);
         monitor.mask = mask;
         monitor.head = 0;
         monitor.len = 0;
@@ -315,7 +321,7 @@ impl NetMonTable {
         monitor.live = false;
         monitor.generation = monitor.generation.wrapping_add(1);
         monitor.mask = 0;
-        monitor.process_id = 0;
+        monitor.owner = None;
         monitor.head = 0;
         monitor.len = 0;
         monitor.overflow_seq = 0;
@@ -451,7 +457,7 @@ impl NetMonTable {
             }
             monitor.live = false;
             monitor.mask = 0;
-            monitor.process_id = 0;
+            monitor.owner = None;
             monitor.head = 0;
             monitor.len = 0;
             monitor.overflow_seq = 0;
@@ -476,8 +482,8 @@ pub fn netmon_post(kind: u16, ifindex: u32, payload: [u8; 16]) -> u64 {
 
 /// Open a monitor in the kernel registry. See [`NetMonTable::open`].
 #[inline]
-pub fn netmon_open(process_id: u32, mask: u32) -> Result<usize, Errno> {
-    NETMON_TABLE.open(process_id, mask)
+pub fn netmon_open(owner: FdTable, mask: u32) -> Result<usize, Errno> {
+    NETMON_TABLE.open(owner, mask)
 }
 
 /// Release a monitor from the kernel registry. See [`NetMonTable::close`].

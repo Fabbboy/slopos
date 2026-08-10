@@ -6,13 +6,14 @@
 //! the generation, so a closed-then-reused fd, a foreign `FileKind`, or
 //! a stale handle all resolve to a typed error — never UB.
 //!
-//! Each ring also carries its `owner_pid`. [`owner_is`] is the primary
+//! Each ring also carries its `owner`. [`owner_is`] is the primary
 //! containment for a ring reached from the wrong process: `ring_enter`
 //! and all four register ops reject a handle whose owner is not the
 //! caller. It holds for every route to the handle — including an
 //! intra-process `dup`, which is a legitimate alias of a ring the caller
 //! does own, and a handle a process guessed rather than opened.
 
+use slopos_fs::fileio::FdTable;
 use slopos_ostd::KArc;
 use slopos_ostd::handle::{Handle, HandleError, HandleTable};
 use slopos_ostd::lock_class;
@@ -131,15 +132,19 @@ pub fn remove(raw_handle: usize) {
     drop(removed);
 }
 
-/// `true` iff the packed handle resolves to a live ring owned by
-/// `pid`. The primary check gating `ring_enter` and the four register
-/// ops against a foreign or stale ring. Clones the slot under the table
-/// lock, releases it, then reads `owner_pid` under the per-ring lock —
-/// never holding both at once.
-pub fn owner_is(raw_handle: usize, pid: u32) -> bool {
+/// `true` iff the packed handle resolves to a live ring owned by `table`.
+///
+/// The primary check gating `ring_enter` and the four register ops against a
+/// foreign or stale ring. Clones the slot under the table lock, releases it,
+/// then reads the owner under the per-ring lock — never holding both at once.
+///
+/// Comparing [`FdTable`]s rather than pids is what makes "foreign" mean the
+/// process and not the number: a caller that inherited the creator's recycled
+/// id compares unequal, because its generation differs.
+pub fn owner_is(raw_handle: usize, table: FdTable) -> bool {
     match slot_for(raw_handle) {
         // An abort denies the ring, which is the safe direction.
-        Ok(slot) => slot.lock().is_ok_and(|ring| ring.owner_pid == pid),
+        Ok(slot) => slot.lock().is_ok_and(|ring| ring.owner == table),
         Err(_) => false,
     }
 }

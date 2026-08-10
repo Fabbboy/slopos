@@ -1,6 +1,7 @@
 #![allow(clippy::too_many_arguments)]
 
 use core::ffi::c_int;
+use slopos_fs::fileio::FdTable;
 
 use slopos_abi::Errno;
 use slopos_abi::signal::SIGTTOU;
@@ -84,7 +85,12 @@ fn ioctl_winsize(tty_idx: slopos_abi::syscall::TtyIndex, cmd: u64, arg: u64) -> 
 }
 
 #[inline(never)]
-fn ioctl_pty(tty_idx: slopos_abi::syscall::TtyIndex, cmd: u64, arg: u64, pid: u32) -> IoctlResult {
+fn ioctl_pty(
+    tty_idx: slopos_abi::syscall::TtyIndex,
+    cmd: u64,
+    arg: u64,
+    table: FdTable,
+) -> IoctlResult {
     match cmd {
         TIOCGPTN => {
             if arg == 0 {
@@ -97,7 +103,7 @@ fn ioctl_pty(tty_idx: slopos_abi::syscall::TtyIndex, cmd: u64, arg: u64, pid: u3
         }
         TIOCGPTPEER => {
             let (peer_tty, backing) = tty::open_pty_peer(tty_idx).map_err(|_| ())?;
-            let new_fd = file_open_tty_fd(pid, peer_tty, arg as u32, backing);
+            let new_fd = file_open_tty_fd(table, peer_tty, arg as u32, backing);
             if new_fd < 0 {
                 Err(())
             } else {

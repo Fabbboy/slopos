@@ -7,6 +7,7 @@
 //! into the shared page on each advance.
 
 use slopos_abi::ring::{Cqe, RingLayout, SLOPRING_CQ_OVERFLOW};
+use slopos_fs::fileio::FdTable;
 use slopos_fs::fileio::FileRef;
 
 use crate::region::{RegionError, RingRegion};
@@ -99,8 +100,14 @@ pub struct Ring {
     /// User VA the region was mapped at (for teardown bookkeeping).
     #[allow(dead_code)]
     pub user_addr: u64,
-    /// Owning process id (the only process allowed to enter this ring).
-    pub owner_pid: u32,
+    /// The owning process — the only one allowed to enter this ring.
+    ///
+    /// An [`FdTable`] rather than a raw pid because this is a *permission*
+    /// key. A recycled id would let whichever process next holds that number
+    /// enter a ring it never created, which is the confused deputy with the
+    /// kernel as the deputy: the ring's in-flight ops act on the creator's
+    /// descriptors.
+    pub owner: FdTable,
     /// Count of CQEs dropped on overflow (mirrors shared `cq_overflow`).
     pub cq_overflow: u32,
     /// Registered / provided buffer registry (ABI v2 zero-copy path). Shares

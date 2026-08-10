@@ -1,4 +1,5 @@
 use core::fmt;
+use slopos_fs::fileio::FdTable;
 
 use slopos_ostd::AllocError;
 use slopos_ostd::KVec;
@@ -291,10 +292,12 @@ impl<T> fmt::Debug for BoundedQueue<T> {
 /// Two identifiers, because "may this caller be told who owns it" and "what
 /// number names that owner" have different right answers.
 ///
-/// `process_id` is the address space, and it decides disclosure: tasks sharing
-/// one address space share the descriptor table that names this socket, so
+/// `process` is the owning process, and it decides disclosure: tasks sharing
+/// one process share the descriptor table that names this socket, so
 /// withholding the owner from a sibling task would protect a fact the sibling
-/// can read directly.
+/// can read directly. An [`FdTable`] rather than a pid because a disclosure
+/// decision must not be inheritable: a recycled id would let the next holder
+/// of that number read the previous one's socket ownership.
 ///
 /// `task_id` is what is reported, because it is the number the rest of the
 /// userland ABI speaks — `getpid` returns it, `kill` and `waitpid` accept it.
@@ -302,14 +305,14 @@ impl<T> fmt::Debug for BoundedQueue<T> {
 /// that printed one would produce a pid nobody could act on.
 #[derive(Clone, Copy)]
 pub struct SocketOwner {
-    pub process_id: u32,
+    pub process: Option<FdTable>,
     pub task_id: u32,
 }
 
 impl SocketOwner {
     /// A socket no process opened, which in practice means one a test made.
     pub const UNOWNED: Self = Self {
-        process_id: INVALID_PROCESS_ID,
+        process: None,
         task_id: INVALID_PROCESS_ID,
     };
 }

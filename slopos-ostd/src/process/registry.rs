@@ -693,6 +693,37 @@ mod tests {
         assert!(new_process(None, AccountId::NONE).is_ok());
     }
 
+    /// A `ProcessId` keeps naming its own process across an id recycle.
+    ///
+    /// The property the newtype exists for: the two halves are read from one
+    /// live process, so a designator minted for the first cannot resolve to
+    /// the second even though the numbers match.
+    #[test]
+    fn a_process_id_does_not_follow_a_recycled_number() {
+        with_table(|t| {
+            let (first, handle) = spawn_into(t);
+            let stale = super::super::ProcessId::of(&first).expect("identity");
+            assert_eq!(stale.id(), first.id());
+            assert_eq!(stale.handle(), handle);
+
+            drop(t.retire(handle));
+            drop(first);
+
+            let (second, _) = spawn_into(t);
+            assert_eq!(
+                second.id(),
+                stale.id(),
+                "the number must recycle or this proves nothing"
+            );
+            // Same number, different principal. The designator says so.
+            assert_eq!(
+                resolve(t, stale.handle()).err(),
+                Some(HandleError::Stale),
+                "a ProcessId must not follow its number onto a new process"
+            );
+        });
+    }
+
     #[test]
     fn drain_empties_the_table() {
         with_table(|t| {

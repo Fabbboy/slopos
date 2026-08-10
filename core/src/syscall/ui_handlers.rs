@@ -194,9 +194,9 @@ define_syscall!(syscall_fb_flip
     let fd = fd as i32;
     let damage_count = damage_count as usize;
 
-    let process_id = ctx.process_id();
-    let (kind, handle) = slopos_fs::fileio::fileio_get_open_file_handle(process_id, fd)
-        .ok_or(Errno::EBADF)?;
+    let table = ctx.require_process()?;
+    let (kind, handle) =
+        slopos_fs::fileio::fileio_get_open_file_handle(table, fd).ok_or(Errno::EBADF)?;
     if kind != slopos_abi::file_ops::FileKind::Memfd {
         return Err(Errno::EINVAL);
     }

@@ -17,9 +17,10 @@ pub mod file_ops;
 pub use file_ops::PIDFD_FILE_OPS;
 
 use slopos_abi::Errno;
+use slopos_fs::fileio::FdTable;
 
 /// Open a pidfd for `target_task_id` on behalf of caller task `caller_task_id`
-/// in process `process_id`.
+/// in `table`.
 ///
 /// Returns the new fd (`>= 0`) or a negated errno:
 /// - `-ESRCH` if no such task exists (e.g. already reaped),
@@ -27,7 +28,7 @@ use slopos_abi::Errno;
 ///
 /// On success the fd is `FileKind::Pidfd` with the target task id as its
 /// opaque handle (see [`file_ops`]).
-pub fn pidfd_open(process_id: u32, caller_task_id: u32, target_task_id: u32) -> i32 {
+pub fn pidfd_open(table: FdTable, caller_task_id: u32, target_task_id: u32) -> i32 {
     let Some(task) = slopos_sched::task::task_find_by_id(target_task_id) else {
         return Errno::ESRCH.raw();
     };
@@ -38,7 +39,7 @@ pub fn pidfd_open(process_id: u32, caller_task_id: u32, target_task_id: u32) -> 
     }
     // A pidfd carries no per-open kernel state, so it has no backing to drop.
     slopos_fs::fileio_open_fd_with_ops(
-        process_id,
+        table,
         &file_ops::PIDFD_FILE_OPS,
         target_task_id as usize,
         None,

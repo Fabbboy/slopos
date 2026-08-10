@@ -24,7 +24,7 @@ use slopos_kernel_services::driver_runtime::{
 use slopos_kernel_services::syscall_services::tty;
 use slopos_mm::memory_layout_defs::MAX_PROCESSES;
 use slopos_ostd::handle::Handle;
-use slopos_ostd::process::Process;
+use slopos_ostd::process::{Process, ProcessId};
 
 /// Descriptors a process may hold at once — the `RLIMIT_NOFILE` of this
 /// kernel, and the length of every per-process descriptor table.
@@ -391,28 +391,79 @@ pub(super) fn slot_for_process(process: Handle<Process>) -> Option<&'static File
     Some(slot)
 }
 
-/// Lock-free scan: return the slot whose `process_id` matches `pid`.
+/// Which descriptor table an operation acts on.
 ///
-/// The compatibility path for the pid-taking entry points. It resolves the id
-/// through the process registry first, so what comes back is a slot whose
-/// generation matched a live process rather than whichever slot carries that
-/// number — the scan remains only because the callers still pass an id.
+/// Replaces `process_id: u32` at every fileio entry point. The two cases used
+/// to be one `u32` with `INVALID_PROCESS_ID` meaning "the kernel's table",
+/// which is a sentinel a caller reaches by *omission* — a pid that failed to
+/// resolve, a zeroed field, a forgotten argument — and the consequence was
+/// installing a user process's descriptors into the domain every kernel task
+/// shares. As a variant it has to be named, and nothing produces it by
+/// accident.
 ///
-/// `INVALID_PROCESS_ID` (the kernel pid) maps to [`KERNEL_TABLE`]. That is a
-/// sentinel comparison rather than a lookup, and deliberately so: the kernel's
-/// own descriptors belong to no process, so there is no handle to name them
-/// with. What matters is that it is unreachable from a *user* pid — a user
-/// process that owns no table is refused, never redirected here.
-pub(super) fn slot_for_pid(pid: u32) -> Option<&'static FileTableSlot> {
-    if pid == INVALID_PROCESS_ID {
-        return Some(&KERNEL_TABLE);
+/// The process case carries a [`ProcessId`], so the lookup is a
+/// generation-checked index rather than a scan for a matching number.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FdTable {
+    /// The kernel's own descriptors, shared by every kernel task.
+    Kernel,
+    /// One user process's descriptors.
+    Process(ProcessId),
+}
+
+impl FdTable {
+    /// The table a live process owns.
+    #[inline]
+    pub fn of(process: &Process) -> Option<Self> {
+        ProcessId::of(process).map(Self::Process)
     }
-    for slot in PROCESS_TABLES.iter() {
-        if slot.process_id.load(Ordering::Acquire) == pid {
-            return Some(slot);
+
+    /// Resolve a numeric id to the table its process owns.
+    ///
+    /// The ABI-boundary constructor: userland hands over a number, and this is
+    /// where it stops being one. `None` for an id naming no live process —
+    /// never [`FdTable::Kernel`], which is the redirect that would hand a user
+    /// process the kernel's descriptors.
+    #[inline]
+    pub fn resolve(id: u32) -> Option<Self> {
+        ProcessId::resolve(id).map(Self::Process)
+    }
+
+    /// The owning process's handle, or `None` for the kernel table.
+    ///
+    /// The table-creation entry points take this rather than an `FdTable`,
+    /// because there is no such thing as creating the kernel's table: it is a
+    /// static, and a caller reaching those functions is always naming a
+    /// process.
+    #[inline]
+    pub fn handle(self) -> Option<Handle<Process>> {
+        match self {
+            Self::Kernel => None,
+            Self::Process(process) => Some(process.handle()),
         }
     }
-    None
+
+    /// The numeric id, for logs and the syscall ABI. `INVALID_PROCESS_ID` for
+    /// the kernel table, which owns no process id.
+    #[inline]
+    pub fn id(self) -> u32 {
+        match self {
+            Self::Kernel => INVALID_PROCESS_ID,
+            Self::Process(process) => process.id(),
+        }
+    }
+}
+
+/// The slot backing `table`.
+///
+/// One index for a process, one static for the kernel — no scan either way.
+/// A process whose slot has been rebound since its [`ProcessId`] was minted
+/// answers `None` rather than the new occupant's table.
+pub(super) fn slot_for_table(table: FdTable) -> Option<&'static FileTableSlot> {
+    match table {
+        FdTable::Kernel => Some(&KERNEL_TABLE),
+        FdTable::Process(process) => slot_for_process(process.handle()),
+    }
 }
 
 /// Lazy-initialise the open-files registry and run `f` with it locked.
@@ -425,14 +476,13 @@ pub(super) fn with_open_files<R>(f: impl FnOnce(&mut OpenFilesState) -> R) -> R 
     f(&mut *guard)
 }
 
-/// Lock the per-process slot for `pid` and run `f` with mutable access
-/// to its descriptor table. Returns `None` if no slot owns `pid` or if
-/// the slot was claimed but is not yet `in_use`.
-pub(super) fn with_pid_slot<R>(
-    pid: u32,
+/// Lock `table`'s slot and run `f` with mutable access to its descriptors.
+/// `None` if the table does not exist or was claimed but is not yet `in_use`.
+pub(super) fn with_table_slot<R>(
+    table: FdTable,
     f: impl FnOnce(&mut FileTableSlotInner) -> R,
 ) -> Option<R> {
-    let slot = slot_for_pid(pid)?;
+    let slot = slot_for_table(table)?;
     let mut guard = slot.inner.lock();
     if !guard.in_use {
         return None;
@@ -440,16 +490,19 @@ pub(super) fn with_pid_slot<R>(
     Some(f(&mut *guard))
 }
 
-/// Acquire the per-process slot lock and return the guard, or `None` when
-/// `pid` owns no live table.
+/// Acquire the slot lock and return the guard, or `None` when the table does
+/// not exist.
 ///
 /// A lookup, never an allocation: every table is minted by an explicit
-/// create/clone that fails process creation when no slot is free, so a pid
-/// reaching here without one names a process that does not exist. Answering
-/// with the kernel's own table instead would install a user process's
-/// descriptors into the domain shared by every kernel task.
-pub(super) fn lock_pid_slot(pid: u32) -> Option<SpinLockGuard<'static, FileTableSlotInner>> {
-    let slot = slot_for_pid(pid)?;
+/// create/clone that fails process creation when no slot is free, so a process
+/// reaching here without one does not exist. Answering with the kernel's own
+/// table instead would install a user process's descriptors into the domain
+/// shared by every kernel task — which is now unrepresentable, because
+/// [`FdTable::Kernel`] is a variant a caller has to name.
+pub(super) fn lock_table_slot(
+    table: FdTable,
+) -> Option<SpinLockGuard<'static, FileTableSlotInner>> {
+    let slot = slot_for_table(table)?;
     let guard = slot.inner.lock();
     if !guard.in_use {
         return None;

@@ -15,6 +15,7 @@ use slopos_abi::ring::{
     SLOPRING_CQE_BUFFER_SHIFT, SLOPRING_CQE_F_BUFFER, SLOPRING_CQE_F_MORE, SLOPRING_CQE_F_NOTIF,
     SLOPRING_SQE_BUFFER_SELECT, SLOPRING_SQE_FIXED_BUFFER, SLOPRING_SQE_MULTISHOT, Sqe,
 };
+use slopos_fs::fileio::FdTable;
 use slopos_mm::pinned_user_buffer::PinnedUserBuffer;
 use slopos_ostd::KVec;
 use slopos_ostd::{TxReclaimToken, ZcNotifToken};
@@ -57,7 +58,7 @@ fn make_ring(entries: u32) -> Ring {
         cq_tail: 0,
         inflight: InFlightVec::with_capacity(layout.cq_entries as usize),
         user_addr: 0,
-        owner_pid: 0,
+        owner: FdTable::Kernel,
         cq_overflow: 0,
         buffers: slopos_ostd::KBox::try_new(crate::buffers::BufferRegistry::new())
             .expect("ring test: buffer registry alloc"),
@@ -307,7 +308,7 @@ fn cancel_pending_posts_ecanceled() -> TestResult {
         _resv0: 0,
         _resv1: 0,
     };
-    crate::enter::process_sqe_for_test(0, &mut ring, &cancel);
+    crate::enter::process_sqe_for_test(FdTable::Kernel, &mut ring, &cancel);
     // The cancelled op's row is gone.
     if ring.inflight.find_user_data(0xaaaa).is_some() {
         return slopos_testing::fail!("cancelled row not removed");
@@ -340,7 +341,7 @@ fn cancel_missing_returns_enoent() -> TestResult {
         _resv0: 0,
         _resv1: 0,
     };
-    crate::enter::process_sqe_for_test(0, &mut ring, &cancel);
+    crate::enter::process_sqe_for_test(FdTable::Kernel, &mut ring, &cancel);
     // One CQE posted: the cancel result (-ENOENT).
     if ring.cq_tail != 1 {
         return slopos_testing::fail!("expected 1 CQE, cq_tail={}", ring.cq_tail);
@@ -384,7 +385,7 @@ fn cancel_all_removes_every_match() -> TestResult {
         _resv0: 0,
         _resv1: 0,
     };
-    crate::enter::process_sqe_for_test(0, &mut ring, &cancel);
+    crate::enter::process_sqe_for_test(FdTable::Kernel, &mut ring, &cancel);
     if ring.inflight.find_user_data(0x77).is_some() {
         return slopos_testing::fail!("cancel_all left a row");
     }
@@ -419,7 +420,7 @@ fn nop_completes_inline() -> TestResult {
         _resv0: 0,
         _resv1: 0,
     };
-    crate::enter::process_sqe_for_test(0, &mut ring, &nop);
+    crate::enter::process_sqe_for_test(FdTable::Kernel, &mut ring, &nop);
     if ring.cq_tail != 1 {
         return slopos_testing::fail!("NOP did not post a CQE");
     }
@@ -528,7 +529,7 @@ fn multishot_cancel_clears_more() -> TestResult {
         _resv0: 0,
         _resv1: 0,
     };
-    crate::enter::process_sqe_for_test(0, &mut ring, &cancel);
+    crate::enter::process_sqe_for_test(FdTable::Kernel, &mut ring, &cancel);
     if ring.inflight.find_user_data(0xabcd).is_some() {
         return slopos_testing::fail!("cancelled multishot row not removed");
     }
@@ -708,7 +709,7 @@ fn send_zc_deferred_notif_lifecycle() -> TestResult {
     ring.buffers.push_deferred(0xDEF, token.clone(), snap, 0);
 
     // Before reclaim: the harvest posts nothing and the buffer stays held.
-    let _ = crate::enter::harvest_step_for_test(0, &mut ring, 1);
+    let _ = crate::enter::harvest_step_for_test(FdTable::Kernel, &mut ring, 1);
     if ring.cq_tail != 0 {
         return slopos_testing::fail!(
             "no CQE should post before reclaim (cq_tail={})",
@@ -721,7 +722,7 @@ fn send_zc_deferred_notif_lifecycle() -> TestResult {
 
     // Driver reclaims (NIC done): the next harvest posts F_NOTIF and checks in.
     token.signal_reclaimed();
-    let _ = crate::enter::harvest_step_for_test(0, &mut ring, 1);
+    let _ = crate::enter::harvest_step_for_test(FdTable::Kernel, &mut ring, 1);
     if ring.cq_tail != 1 {
         return slopos_testing::fail!("exactly one F_NOTIF expected (cq_tail={})", ring.cq_tail);
     }
@@ -773,7 +774,7 @@ fn tcp_zc_pin_held_across_retransmit_and_ack() -> TestResult {
     ring.buffers.push_deferred_notif(0x7C90, token.clone(), 0);
 
     // Before any reclaim/ACK: nothing posts, the buffer stays held.
-    let _ = crate::enter::harvest_step_for_test(0, &mut ring, 1);
+    let _ = crate::enter::harvest_step_for_test(FdTable::Kernel, &mut ring, 1);
     if ring.cq_tail != 0 {
         return slopos_testing::fail!("no CQE before reclaim (cq_tail={})", ring.cq_tail);
     }
@@ -785,7 +786,7 @@ fn tcp_zc_pin_held_across_retransmit_and_ack() -> TestResult {
     // pin survives the whole retransmit window.
     token.acquire(); // retransmit DMA (refs = chunk + 2)
     token.release(); // first DMA reclaimed (refs = chunk + 1)
-    let _ = crate::enter::harvest_step_for_test(0, &mut ring, 1);
+    let _ = crate::enter::harvest_step_for_test(FdTable::Kernel, &mut ring, 1);
     if ring.cq_tail != 0 {
         return slopos_testing::fail!("no CQE while a DMA is still in flight");
     }
@@ -796,7 +797,7 @@ fn tcp_zc_pin_held_across_retransmit_and_ack() -> TestResult {
     // Second DMA reclaimed, but the bytes are not yet ACKed: the chunk reference
     // still holds the buffer.
     token.release(); // refs = chunk (1)
-    let _ = crate::enter::harvest_step_for_test(0, &mut ring, 1);
+    let _ = crate::enter::harvest_step_for_test(FdTable::Kernel, &mut ring, 1);
     if ring.cq_tail != 0 {
         return slopos_testing::fail!("chunk reference must hold until cumulative ACK");
     }
@@ -806,7 +807,7 @@ fn tcp_zc_pin_held_across_retransmit_and_ack() -> TestResult {
 
     // Cumulative ACK drops the chunk reference → count reaches zero → reusable.
     token.mark_acked_and_release();
-    let _ = crate::enter::harvest_step_for_test(0, &mut ring, 1);
+    let _ = crate::enter::harvest_step_for_test(FdTable::Kernel, &mut ring, 1);
     if ring.cq_tail != 1 {
         return slopos_testing::fail!("exactly one F_NOTIF expected (cq_tail={})", ring.cq_tail);
     }
@@ -852,7 +853,7 @@ fn connect_probe_dispatch_idempotent() -> TestResult {
     bad_fd.opcode = OP_CONNECT;
     bad_fd.fd = -1;
     bad_fd.user_data = 0xC0;
-    crate::enter::process_sqe_for_test(0, &mut ring, &bad_fd);
+    crate::enter::process_sqe_for_test(FdTable::Kernel, &mut ring, &bad_fd);
     if ring.cq_tail != 1 {
         return slopos_testing::fail!("expected one CQE for fd<0 (cq_tail={})", ring.cq_tail);
     }
@@ -862,7 +863,7 @@ fn connect_probe_dispatch_idempotent() -> TestResult {
     }
 
     // Re-probe idempotency: the same SQE yields the same stable result.
-    crate::enter::process_sqe_for_test(0, &mut ring, &bad_fd);
+    crate::enter::process_sqe_for_test(FdTable::Kernel, &mut ring, &bad_fd);
     if ring.cq_tail != 2 {
         return slopos_testing::fail!("re-run must post a second CQE (cq_tail={})", ring.cq_tail);
     }
@@ -878,7 +879,7 @@ fn connect_probe_dispatch_idempotent() -> TestResult {
     prov.fd = 3;
     prov.flags = SLOPRING_SQE_BUFFER_SELECT;
     prov.user_data = 0xC1;
-    crate::enter::process_sqe_for_test(0, &mut ring, &prov);
+    crate::enter::process_sqe_for_test(FdTable::Kernel, &mut ring, &prov);
     if read_cqe(&ring, 2).res != Errno::EINVAL.raw() {
         return slopos_testing::fail!("provided-buffer OP_CONNECT must be -EINVAL");
     }
@@ -889,7 +890,7 @@ fn connect_probe_dispatch_idempotent() -> TestResult {
     fixed.fd = 3;
     fixed.flags = SLOPRING_SQE_FIXED_BUFFER;
     fixed.user_data = 0xC2;
-    crate::enter::process_sqe_for_test(0, &mut ring, &fixed);
+    crate::enter::process_sqe_for_test(FdTable::Kernel, &mut ring, &fixed);
     if read_cqe(&ring, 3).res != Errno::EINVAL.raw() {
         return slopos_testing::fail!("fixed-buffer OP_CONNECT must be -EINVAL");
     }
@@ -1036,9 +1037,9 @@ fn read_cqe_at(ring: &Ring, idx: u32) -> Cqe {
 ///
 /// A pid with no table of its own is refused a descriptor, so a test that
 /// opens files has to mint one the same way process creation does.
-fn with_fd_table(body: fn(u32) -> TestResult) -> TestResult {
+fn with_fd_table(body: fn(FdTable) -> TestResult) -> TestResult {
     use slopos_fs::fileio::{
-        fileio_create_empty_table_for_process_handle, fileio_destroy_table_for_process_handle,
+        fileio_create_empty_table_for_process, fileio_destroy_table_for_process,
     };
 
     // A real registration, not a made-up number. A descriptor table lives in
@@ -1051,12 +1052,14 @@ fn with_fd_table(body: fn(u32) -> TestResult) -> TestResult {
     let Some(handle) = process.handle() else {
         return slopos_testing::fail!("a registered process carries no handle");
     };
-    if fileio_create_empty_table_for_process_handle(handle) != 0 {
+    if fileio_create_empty_table_for_process(handle) != 0 {
         slopos_ostd::process::process_retire(handle);
         return slopos_testing::fail!("fd table create failed for pid {}", process.id());
     }
-    let result = body(process.id());
-    fileio_destroy_table_for_process_handle(handle);
+    let result = body(FdTable::Process(
+        slopos_ostd::process::ProcessId::of(&process).expect("registered"),
+    ));
+    fileio_destroy_table_for_process(handle);
     slopos_ostd::process::process_retire(handle);
     result
 }
@@ -1067,22 +1070,22 @@ fn op_survives_fd_close() -> TestResult {
     with_fd_table(op_survives_fd_close_body)
 }
 
-fn op_survives_fd_close_body(pid: u32) -> TestResult {
+fn op_survives_fd_close_body(table: FdTable) -> TestResult {
     use core::ffi::c_int;
     use slopos_abi::syscall::POLLIN;
     use slopos_fs::fileio::{file_close_fd, file_pipe_create, fileio_clone_file_ref};
 
     let mut ring = make_ring(8);
-    ring.owner_pid = pid;
+    ring.owner = table;
 
     let mut rfd: c_int = -1;
     let mut wfd: c_int = -1;
-    if file_pipe_create(pid, 0, &mut rfd, &mut wfd) != 0 {
+    if file_pipe_create(table, 0, &mut rfd, &mut wfd) != 0 {
         return slopos_testing::fail!("pipe create failed");
     }
 
     // Our own alias to the read end, to observe the ring's reference count.
-    let probe_ref = match fileio_clone_file_ref(pid, rfd) {
+    let probe_ref = match fileio_clone_file_ref(table, rfd) {
         Some(f) => f,
         None => return slopos_testing::fail!("clone read-end ref failed"),
     };
@@ -1096,7 +1099,7 @@ fn op_survives_fd_close_body(pid: u32) -> TestResult {
     sqe.fd = rfd;
     sqe.op_flags = POLLIN as u32;
     sqe.user_data = 0xA1;
-    crate::enter::process_sqe_for_test(pid, &mut ring, &sqe);
+    crate::enter::process_sqe_for_test(table, &mut ring, &sqe);
     if ring.inflight.len() != 1 {
         return slopos_testing::fail!("poll should defer, inflight={}", ring.inflight.len());
     }
@@ -1108,11 +1111,11 @@ fn op_survives_fd_close_body(pid: u32) -> TestResult {
     }
 
     // Close the read fd. The held reference keeps the read end alive.
-    let _ = file_close_fd(pid, rfd);
+    let _ = file_close_fd(table, rfd);
 
     // Still no readiness (peer write end open) → op stays in flight against the
     // held backing rather than resolving to a closed-fd error.
-    let done = crate::enter::harvest_step_for_test(pid, &mut ring, 1);
+    let done = crate::enter::harvest_step_for_test(table, &mut ring, 1);
     drop(core::mem::take(&mut ring.pending_reap));
     if done || ring.inflight.len() != 1 {
         return slopos_testing::fail!(
@@ -1122,8 +1125,8 @@ fn op_survives_fd_close_body(pid: u32) -> TestResult {
     }
 
     // Close the write end → the read end reports POLLHUP → the op completes.
-    let _ = file_close_fd(pid, wfd);
-    let _ = crate::enter::harvest_step_for_test(pid, &mut ring, 1);
+    let _ = file_close_fd(table, wfd);
+    let _ = crate::enter::harvest_step_for_test(table, &mut ring, 1);
     // Drop the retired row's reference exactly as ring_enter would, off-lock.
     drop(core::mem::take(&mut ring.pending_reap));
 
@@ -1151,16 +1154,16 @@ fn no_reuse_aliasing() -> TestResult {
     with_fd_table(no_reuse_aliasing_body)
 }
 
-fn no_reuse_aliasing_body(pid: u32) -> TestResult {
+fn no_reuse_aliasing_body(table: FdTable) -> TestResult {
     use slopos_abi::syscall::POLLIN;
     use slopos_fs::fileio::{file_close_fd, file_pipe_create};
 
     let mut ring = make_ring(8);
-    ring.owner_pid = pid;
+    ring.owner = table;
 
     // Pipe A.
     let (mut rfd_a, mut wfd_a) = (-1i32, -1i32);
-    if file_pipe_create(pid, 0, &mut rfd_a, &mut wfd_a) != 0 {
+    if file_pipe_create(table, 0, &mut rfd_a, &mut wfd_a) != 0 {
         return slopos_testing::fail!("pipe A create failed");
     }
 
@@ -1170,15 +1173,15 @@ fn no_reuse_aliasing_body(pid: u32) -> TestResult {
     sqe.fd = rfd_a;
     sqe.op_flags = POLLIN as u32;
     sqe.user_data = 0xB1;
-    crate::enter::process_sqe_for_test(pid, &mut ring, &sqe);
+    crate::enter::process_sqe_for_test(table, &mut ring, &sqe);
     if ring.inflight.len() != 1 {
         return slopos_testing::fail!("poll A should defer");
     }
 
     // Close A's read fd, then open pipe B — B's read end reuses A's fd number.
-    let _ = file_close_fd(pid, rfd_a);
+    let _ = file_close_fd(table, rfd_a);
     let (mut rfd_b, mut wfd_b) = (-1i32, -1i32);
-    if file_pipe_create(pid, 0, &mut rfd_b, &mut wfd_b) != 0 {
+    if file_pipe_create(table, 0, &mut rfd_b, &mut wfd_b) != 0 {
         return slopos_testing::fail!("pipe B create failed");
     }
     if rfd_b != rfd_a {
@@ -1191,10 +1194,10 @@ fn no_reuse_aliasing_body(pid: u32) -> TestResult {
 
     // Make the HELD file (A) ready via POLLHUP while the reused number (B)
     // stays not-ready (B's write end open, buffer empty).
-    let _ = file_close_fd(pid, wfd_a);
+    let _ = file_close_fd(table, wfd_a);
 
     // The op must complete: it polls the held A, not the reused number → B.
-    let _ = crate::enter::harvest_step_for_test(pid, &mut ring, 1);
+    let _ = crate::enter::harvest_step_for_test(table, &mut ring, 1);
     drop(core::mem::take(&mut ring.pending_reap));
     if ring.inflight.len() != 0 {
         return slopos_testing::fail!("op must target held file A, not reused B");
@@ -1204,8 +1207,8 @@ fn no_reuse_aliasing_body(pid: u32) -> TestResult {
         return slopos_testing::fail!("wrong completion: {:?}", cqe);
     }
 
-    let _ = file_close_fd(pid, rfd_b);
-    let _ = file_close_fd(pid, wfd_b);
+    let _ = file_close_fd(table, rfd_b);
+    let _ = file_close_fd(table, wfd_b);
     TestResult::Pass
 }
 stest!(name = no_reuse_aliasing, suite = slopring);

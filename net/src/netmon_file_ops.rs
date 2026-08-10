@@ -24,6 +24,7 @@ use slopos_abi::file_ops::{FileBacking, FileKind, FileOps, FusedPollResult};
 use slopos_abi::io::{IoBufRead, IoBufWrite};
 use slopos_abi::net::NET_EVENT_LEN;
 use slopos_abi::syscall::{POLLIN, POLLNVAL};
+use slopos_fs::fileio::FdTable;
 use slopos_ostd::KArc;
 use slopos_ostd::sync::event_bus::BUS;
 
@@ -135,11 +136,11 @@ impl FileOps for NetmonFileOps {
     }
 }
 
-/// Open a network-state monitor for `process_id` subscribed to `mask`, and
+/// Open a network-state monitor for `table`'s owner subscribed to `mask`, and
 /// install it as an fd. Returns the fd (`>= 0`) or a negated errno — see
 /// [`NetMonTable::open`](crate::netmon::NetMonTable::open) for which.
-pub fn netmon_create(process_id: u32, mask: u32) -> i32 {
-    let raw_handle = match NETMON_TABLE.open(process_id, mask) {
+pub fn netmon_create(table: FdTable, mask: u32) -> i32 {
+    let raw_handle = match NETMON_TABLE.open(table, mask) {
         Ok(handle) => handle,
         Err(e) => return e.raw(),
     };
@@ -156,7 +157,7 @@ pub fn netmon_create(process_id: u32, mask: u32) -> i32 {
     // On install failure the fd layer drops the backing, which releases the
     // entry — no manual cleanup on the error arm.
     slopos_fs::fileio_open_fd_with_ops(
-        process_id,
+        table,
         &NETMON_FILE_OPS,
         raw_handle,
         Some(backing),

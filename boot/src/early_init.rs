@@ -909,7 +909,7 @@ fn panic_recover_smoke_observer() {
 /// outlived it; the transcript's `panic recovery: syscall` line is the
 /// positive assertion.
 fn panic_syscall_smoke_observer() {
-    use slopos_sched::task::{INVALID_PROCESS_ID, INVALID_TASK_ID, TASK_FLAG_USER_MODE};
+    use slopos_sched::task::{INVALID_TASK_ID, TASK_FLAG_USER_MODE};
 
     let pid = match slopos_core::exec::spawn_program_with_attrs(
         b"/bin/oops_smoke",
@@ -919,7 +919,7 @@ fn panic_syscall_smoke_observer() {
         TASK_FLAG_USER_MODE,
         &[],
         0,
-        INVALID_PROCESS_ID,
+        None,
         INVALID_TASK_ID,
     ) {
         Ok(pid) => pid,

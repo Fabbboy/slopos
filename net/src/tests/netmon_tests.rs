@@ -4,6 +4,7 @@
 //! another misbehaves, so most of these run two rings side by side: a ring that
 //! stops reading must not cost the ring that keeps up a single record.
 
+use slopos_fs::fileio::FdTable;
 use slopos_testing::TestResult;
 use slopos_testing::{assert_eq_test, assert_test, fail, pass};
 
@@ -44,7 +45,13 @@ static TEST_MONITORS: NetMonTable = NetMonTable::new(slopos_ostd::lock_class!(
 
 /// A process id no real process carries, for the tests that must touch the
 /// kernel registry.
-const TEST_PID: u32 = 0xDEAD_BEEF;
+/// The owner these tests register monitors under.
+///
+/// The kernel's table rather than a synthetic pid: a monitor's owner is a
+/// permission key, and a made-up number is not one any process could hold.
+/// What the tests need is a *nameable, distinguishable* owner, which this is
+/// without registering a process.
+const TEST_OWNER: FdTable = FdTable::Kernel;
 
 /// Empty the scratch registry and hand it back ready to use.
 fn fresh() -> &'static NetMonTable {
@@ -98,7 +105,7 @@ fn drain_count(table: &NetMonTable, handle: usize) -> usize {
 /// state with.
 fn test_netmon_fifo_order_and_rising_seq() -> TestResult {
     let table = fresh();
-    let handle = match table.open(TEST_PID, NET_MON_DEFAULT) {
+    let handle = match table.open(TEST_OWNER, NET_MON_DEFAULT) {
         Ok(h) => h,
         Err(_) => return fail!("open must succeed on an empty registry"),
     };
@@ -131,11 +138,11 @@ fn test_netmon_fifo_order_and_rising_seq() -> TestResult {
 /// both.
 fn test_netmon_seq_is_global_across_rings() -> TestResult {
     let table = fresh();
-    let ifaces = match table.open(TEST_PID, NET_MON_IFACE) {
+    let ifaces = match table.open(TEST_OWNER, NET_MON_IFACE) {
         Ok(h) => h,
         Err(_) => return fail!("open ifaces ring"),
     };
-    let addrs = match table.open(TEST_PID, NET_MON_ADDR) {
+    let addrs = match table.open(TEST_OWNER, NET_MON_ADDR) {
         Ok(h) => h,
         Err(_) => return fail!("open addrs ring"),
     };
@@ -199,7 +206,7 @@ fn test_netmon_post_without_subscribers_bumps_seq() -> TestResult {
 /// query, then discard what the snapshot already contains.
 fn test_netmon_snapshot_then_drain_handoff() -> TestResult {
     let table = fresh();
-    let handle = match table.open(TEST_PID, NET_MON_DEFAULT) {
+    let handle = match table.open(TEST_OWNER, NET_MON_DEFAULT) {
         Ok(h) => h,
         Err(_) => return fail!("open"),
     };
@@ -237,7 +244,7 @@ fn test_netmon_snapshot_then_drain_handoff() -> TestResult {
 /// A monitor receives only what it asked for.
 fn test_netmon_mask_filters_kinds() -> TestResult {
     let table = fresh();
-    let handle = match table.open(TEST_PID, NET_MON_IFACE) {
+    let handle = match table.open(TEST_OWNER, NET_MON_IFACE) {
         Ok(h) => h,
         Err(_) => return fail!("open"),
     };
@@ -263,7 +270,7 @@ fn test_netmon_mask_filters_kinds() -> TestResult {
     assert_test!(kinds_ok, "and it is the interface record");
 
     // The same table, a ring that asked for routes instead.
-    let routes = match table.open(TEST_PID, NET_MON_ROUTE) {
+    let routes = match table.open(TEST_OWNER, NET_MON_ROUTE) {
         Ok(h) => h,
         Err(_) => return fail!("open routes ring"),
     };
@@ -296,7 +303,7 @@ fn test_netmon_default_mask_excludes_neigh() -> TestResult {
     );
 
     let table = fresh();
-    let handle = match table.open(TEST_PID, NET_MON_DEFAULT) {
+    let handle = match table.open(TEST_OWNER, NET_MON_DEFAULT) {
         Ok(h) => h,
         Err(_) => return fail!("open"),
     };
@@ -333,7 +340,7 @@ fn test_netmon_default_mask_excludes_neigh() -> TestResult {
 fn test_netmon_overflow_collapses_to_one_record() -> TestResult {
     const EXTRA: u32 = 6;
     let table = fresh();
-    let handle = match table.open(TEST_PID, NET_MON_IFACE) {
+    let handle = match table.open(TEST_OWNER, NET_MON_IFACE) {
         Ok(h) => h,
         Err(_) => return fail!("open"),
     };
@@ -408,11 +415,11 @@ fn test_netmon_overflow_collapses_to_one_record() -> TestResult {
 fn test_netmon_overflow_is_per_subscriber() -> TestResult {
     const POSTS: u32 = 100;
     let table = fresh();
-    let attentive = match table.open(TEST_PID, NET_MON_IFACE) {
+    let attentive = match table.open(TEST_OWNER, NET_MON_IFACE) {
         Ok(h) => h,
         Err(_) => return fail!("open attentive ring"),
     };
-    let neglected = match table.open(TEST_PID, NET_MON_IFACE) {
+    let neglected = match table.open(TEST_OWNER, NET_MON_IFACE) {
         Ok(h) => h,
         Err(_) => return fail!("open neglected ring"),
     };
@@ -472,7 +479,7 @@ fn test_netmon_overflow_ignores_mask() -> TestResult {
 
     let table = fresh();
     // A mask that selects nothing else this test posts.
-    let handle = match table.open(TEST_PID, NET_MON_NEIGH) {
+    let handle = match table.open(TEST_OWNER, NET_MON_NEIGH) {
         Ok(h) => h,
         Err(_) => return fail!("open"),
     };
@@ -522,18 +529,32 @@ fn test_netmon_open_is_bounded() -> TestResult {
     let table = fresh();
 
     assert_eq_test!(
-        table.open(TEST_PID, 0).err(),
+        table.open(TEST_OWNER, 0).err(),
         Some(Errno::EINVAL),
         "an empty mask would produce an fd that can never be ready"
     );
 
+    // A distinct *process* per pair, so the registry — not the quota — is what
+    // eventually refuses. Real registrations rather than a synthetic pid plus
+    // an offset: an owner is a permission key, and `FdTable`s are only
+    // distinguishable if the processes behind them are.
+    let mut owners: slopos_ostd::KVec<slopos_ostd::KArc<slopos_ostd::process::Process>> =
+        slopos_ostd::KVec::new();
+    let owner_count = slopos_abi::event::MAX_NETMON.div_ceil(NETMON_MAX_PER_PROCESS) + 1;
+    for _ in 0..owner_count {
+        let Ok(process) = slopos_ostd::process::process_spawn_root() else {
+            return fail!("could not register a scratch process");
+        };
+        if owners.push(process).is_err() {
+            return fail!("could not hold the scratch processes");
+        }
+    }
+    let owner_table = |i: usize| FdTable::of(&owners[i]).expect("registered");
+
     let mut handles = [0usize; slopos_abi::event::MAX_NETMON];
     let mut n = 0usize;
     for slot in 0..slopos_abi::event::MAX_NETMON {
-        // A distinct process per pair, so the registry — not the quota — is
-        // what eventually refuses.
-        let pid = TEST_PID + (slot / NETMON_MAX_PER_PROCESS) as u32;
-        match table.open(pid, NET_MON_DEFAULT) {
+        match table.open(owner_table(slot / NETMON_MAX_PER_PROCESS), NET_MON_DEFAULT) {
             Ok(h) => {
                 handles[n] = h;
                 n += 1;
@@ -544,12 +565,14 @@ fn test_netmon_open_is_bounded() -> TestResult {
     assert_eq_test!(table.count(), slopos_abi::event::MAX_NETMON, "all live");
 
     assert_eq_test!(
-        table.open(TEST_PID, NET_MON_DEFAULT).err(),
+        table.open(owner_table(0), NET_MON_DEFAULT).err(),
         Some(Errno::EMFILE),
         "a process at its quota is refused before the registry is consulted"
     );
     assert_eq_test!(
-        table.open(TEST_PID + 999, NET_MON_DEFAULT).err(),
+        table
+            .open(owner_table(owner_count - 1), NET_MON_DEFAULT)
+            .err(),
         Some(Errno::ENOMEM),
         "a fresh process is refused because the registry is full"
     );
@@ -560,21 +583,21 @@ fn test_netmon_open_is_bounded() -> TestResult {
     assert_eq_test!(table.count(), 0, "every slot comes back");
 
     // The quota counts live monitors, not opens: closing one makes room.
-    let first = match table.open(TEST_PID, NET_MON_DEFAULT) {
+    let first = match table.open(TEST_OWNER, NET_MON_DEFAULT) {
         Ok(h) => h,
         Err(_) => return fail!("reopen"),
     };
-    let second = match table.open(TEST_PID, NET_MON_DEFAULT) {
+    let second = match table.open(TEST_OWNER, NET_MON_DEFAULT) {
         Ok(h) => h,
         Err(_) => return fail!("reopen"),
     };
     assert_eq_test!(
-        table.open(TEST_PID, NET_MON_DEFAULT).err(),
+        table.open(TEST_OWNER, NET_MON_DEFAULT).err(),
         Some(Errno::EMFILE),
         "two is the quota"
     );
     table.close(first);
-    let third = match table.open(TEST_PID, NET_MON_DEFAULT) {
+    let third = match table.open(TEST_OWNER, NET_MON_DEFAULT) {
         Ok(h) => h,
         Err(_) => return fail!("a closed monitor must free its quota"),
     };
@@ -586,7 +609,7 @@ fn test_netmon_open_is_bounded() -> TestResult {
 /// A stale handle resolves to a typed miss, never to whoever recycled the slot.
 fn test_netmon_stale_handle_is_ebadf() -> TestResult {
     let table = fresh();
-    let handle = match table.open(TEST_PID, NET_MON_DEFAULT) {
+    let handle = match table.open(TEST_OWNER, NET_MON_DEFAULT) {
         Ok(h) => h,
         Err(_) => return fail!("open"),
     };
@@ -604,7 +627,7 @@ fn test_netmon_stale_handle_is_ebadf() -> TestResult {
     );
 
     // The recycled slot is a different monitor, and the old handle misses it.
-    let recycled = match table.open(TEST_PID, NET_MON_DEFAULT) {
+    let recycled = match table.open(TEST_OWNER, NET_MON_DEFAULT) {
         Ok(h) => h,
         Err(_) => return fail!("reopen"),
     };
@@ -640,7 +663,7 @@ fn test_netmon_stale_handle_is_ebadf() -> TestResult {
 fn test_netmon_ring_freed_when_backing_drops() -> TestResult {
     let before = NETMON_TABLE.count();
 
-    let handle = match NETMON_TABLE.open(TEST_PID, NET_MON_DEFAULT) {
+    let handle = match NETMON_TABLE.open(TEST_OWNER, NET_MON_DEFAULT) {
         Ok(h) => h,
         Err(_) => return fail!("the kernel registry must have a free slot"),
     };
@@ -674,7 +697,7 @@ fn test_netmon_read_is_a_record_stride() -> TestResult {
     // mid-test would be an extra record in this ring and these assertions count
     // exactly. The fd contract under test is indifferent to which kind carries
     // it.
-    let handle = match NETMON_TABLE.open(TEST_PID, NET_MON_NEIGH) {
+    let handle = match NETMON_TABLE.open(TEST_OWNER, NET_MON_NEIGH) {
         Ok(h) => h,
         Err(_) => return fail!("the kernel registry must have a free slot"),
     };
@@ -780,7 +803,7 @@ fn test_netmon_read_is_a_record_stride() -> TestResult {
 /// `POLLNVAL` once the monitor is gone.
 fn test_netmon_poll_tracks_readiness() -> TestResult {
     // A kind no production path emits — see `test_netmon_read_is_a_record_stride`.
-    let handle = match NETMON_TABLE.open(TEST_PID, NET_MON_NEIGH) {
+    let handle = match NETMON_TABLE.open(TEST_OWNER, NET_MON_NEIGH) {
         Ok(h) => h,
         Err(_) => return fail!("the kernel registry must have a free slot"),
     };

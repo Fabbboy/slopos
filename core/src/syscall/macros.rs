@@ -132,7 +132,7 @@ macro_rules! define_syscall {
     };
     (@reqs $ctx:ident, let $binding:ident : process_id $(, $($rest:tt)*)?) => {
         #[allow(unused_variables)]
-        let $binding = match $ctx.require_process_id() {
+        let $binding = match $ctx.require_process() {
             Ok(v) => v,
             Err(e) => return $crate::syscall::result::SyscallResult::Err(e),
         };
@@ -140,7 +140,7 @@ macro_rules! define_syscall {
     };
     (@reqs $ctx:ident, $binding:ident : process_id $(, $($rest:tt)*)?) => {
         #[allow(unused_variables)]
-        let $binding = match $ctx.require_process_id() {
+        let $binding = match $ctx.require_process() {
             Ok(v) => v,
             Err(e) => return $crate::syscall::result::SyscallResult::Err(e),
         };

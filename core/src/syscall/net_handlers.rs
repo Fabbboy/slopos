@@ -3,6 +3,7 @@ use slopos_abi::file_ops::FileKind;
 use slopos_abi::net::{AF_INET, AF_UNIX, IPPROTO_ICMP, SOCK_DGRAM, SOCK_STREAM, SockAddrIn};
 use slopos_abi::syscall::SOL_SOCKET;
 use slopos_abi::unix::SockAddrUn;
+use slopos_fs::fileio::FdTable;
 use slopos_mm::user_copy::{
     copy_bytes_from_user, copy_bytes_to_user, copy_from_user, copy_to_user,
 };
@@ -47,8 +48,8 @@ enum SocketFd {
 }
 
 /// Retrieve the socket handle for `fd`, distinguishing AF_UNIX from AF_INET.
-fn socket_fd_for(process_id: u32, fd: i32) -> Result<SocketFd, Errno> {
-    let Some((handle, ops)) = slopos_fs::fileio::fileio_get_handle_and_ops(process_id, fd) else {
+fn socket_fd_for(table: FdTable, fd: i32) -> Result<SocketFd, Errno> {
+    let Some((handle, ops)) = slopos_fs::fileio::fileio_get_handle_and_ops(table, fd) else {
         return Err(Errno::ENOTSOCK);
     };
     if ops.kind() != FileKind::Socket {
@@ -103,7 +104,10 @@ define_syscall!(syscall_socket
     // Both halves of the owner come from the syscall context, never from
     // userland: `net_query` gates owner disclosure by comparing against it, so a
     // caller able to name its own owner could name someone else's.
-    let owner = socket::SocketOwner { process_id, task_id };
+    let owner = socket::SocketOwner {
+        process: Some(process_id),
+        task_id,
+    };
     let sock_idx = socket::socket_create(domain, sock_type, protocol, owner);
     if sock_idx < 0 {
         return Err(errno_from_neg(sock_idx));
@@ -635,7 +639,7 @@ define_syscall!(syscall_sendmsg
 
 #[inline(never)]
 fn recvmsg_writeback_cmsg(
-    process_id: u32,
+    table: FdTable,
     msg: &slopos_abi::syscall::MsgHdr,
     mut received: slopos_ostd::KVec<slopos_fs::FileRef>,
     msg_ptr: UserPtr<slopos_abi::syscall::MsgHdr>,
@@ -665,13 +669,13 @@ fn recvmsg_writeback_cmsg(
     debug_assert!(n_fds <= SCM_MAX_FDS);
     let mut fd_nums = [0i32; SCM_MAX_FDS];
     for (j, file) in received.drain(..).enumerate() {
-        let new_fd = slopos_fs::fileio_install_file_ref(process_id, file);
+        let new_fd = slopos_fs::fileio_install_file_ref(table, file);
         if new_fd < 0 {
             // The failed install dropped its alias; ending the drain drops
             // the rest. Roll back the fds installed so far (a partial
             // install with no surviving cmsg writeback would orphan them).
             for &fd in fd_nums.iter().take(j) {
-                let _ = slopos_fs::fileio::file_close_fd(process_id, fd);
+                let _ = slopos_fs::fileio::file_close_fd(table, fd);
             }
             return Err(Errno::ENOMEM);
         }
@@ -708,7 +712,7 @@ fn recvmsg_writeback_cmsg(
 
     if let Err(e) = writeback() {
         for &fd in fd_nums.iter().take(n_fds) {
-            let _ = slopos_fs::fileio::file_close_fd(process_id, fd);
+            let _ = slopos_fs::fileio::file_close_fd(table, fd);
         }
         return Err(e);
     }
@@ -717,13 +721,13 @@ fn recvmsg_writeback_cmsg(
 
 #[inline(never)]
 fn recvmsg_impl(
-    process_id: u32,
+    table: FdTable,
     fd: Fd,
     msg_ptr: UserPtr<slopos_abi::syscall::MsgHdr>,
 ) -> Result<u64, Errno> {
     use slopos_abi::syscall::{MsgHdr, SCM_MAX_FDS};
 
-    let sh = match socket_fd_for(process_id, fd.raw())? {
+    let sh = match socket_fd_for(table, fd.raw())? {
         SocketFd::Unix(sh) => sh,
         SocketFd::Inet(_) => return Err(Errno::ENOTSOCK),
     };
@@ -750,7 +754,7 @@ fn recvmsg_impl(
     }
 
     if n_fds > 0 {
-        recvmsg_writeback_cmsg(process_id, &msg, received, msg_ptr)?;
+        recvmsg_writeback_cmsg(table, &msg, received, msg_ptr)?;
     }
 
     Ok(copied as u64)

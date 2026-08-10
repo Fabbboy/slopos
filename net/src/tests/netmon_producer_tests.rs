@@ -20,6 +20,7 @@
 //! record in the ring would be asserting on the machine's weather.
 
 use core::sync::atomic::{AtomicBool, Ordering};
+use slopos_fs::fileio::FdTable;
 
 use slopos_testing::TestResult;
 use slopos_testing::{assert_eq_test, assert_test, fail, pass};
@@ -48,7 +49,13 @@ use crate::route;
 use crate::types::{DevIndex, Ipv4Addr, MacAddr, NetError};
 
 /// A process id no real process carries, for the monitors these open.
-const TEST_PID: u32 = 0xCAFE_F00D;
+/// The owner these tests register monitors under.
+///
+/// The kernel's table rather than a synthetic pid: a monitor's owner is a
+/// permission key, and a made-up number is not one any process could hold.
+/// What the tests need is a *nameable, distinguishable* owner, which this is
+/// without registering a process.
+const TEST_OWNER: FdTable = FdTable::Kernel;
 
 /// A device whose link state a test can move.
 ///
@@ -141,7 +148,7 @@ struct Monitor {
 impl Monitor {
     fn open(mask: u32) -> Option<Self> {
         NETMON_TABLE
-            .open(TEST_PID, mask)
+            .open(TEST_OWNER, mask)
             .ok()
             .map(|handle| Self { handle })
     }

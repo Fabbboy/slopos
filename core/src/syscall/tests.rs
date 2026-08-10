@@ -5,6 +5,7 @@
 
 use core::ffi::c_char;
 use core::ptr;
+use slopos_fs::fileio::FdTable;
 
 use crate::syscall::fs::syscall_ioctl;
 use crate::syscall::handlers::{
@@ -105,11 +106,11 @@ fn make_task_current(task_id: u32) {
 /// signal frame. Restores the bootstrap current-task afterwards so a later
 /// `task_terminate` does not take the is-current Zombie path against the
 /// test task.
-fn deliver_pending_signal_as_current(task_id: u32, pid: u32, ctx: &UserContext) {
+fn deliver_pending_signal_as_current(task_id: u32, table: FdTable, ctx: &UserContext) {
     make_task_current(task_id);
     {
         let current = Current::get().expect("current task after dispatch");
-        let _ = with_user_process_context(pid, || deliver_pending_signal(&current, ctx));
+        let _ = with_user_process_context(table, || deliver_pending_signal(&current, ctx));
     }
     park_bootstrap_on_current_cpu();
 }
@@ -165,7 +166,8 @@ fn pts_path_for(number: u32) -> Option<[u8; 11]> {
     Some(path)
 }
 
-fn with_user_process_context<R>(pid: u32, f: impl FnOnce() -> R) -> Option<R> {
+fn with_user_process_context<R>(table: FdTable, f: impl FnOnce() -> R) -> Option<R> {
+    let pid = table.id();
     if slopos_mm::process_vm::process_vm_get_ostd_pml4_paddr(pid) == 0 {
         return None;
     }
@@ -183,8 +185,8 @@ fn with_user_process_context<R>(pid: u32, f: impl FnOnce() -> R) -> Option<R> {
     Some(out)
 }
 
-fn user_copy_out<T: Copy>(pid: u32, addr: u64, value: &T) -> bool {
-    with_user_process_context(pid, || {
+fn user_copy_out<T: Copy>(table: FdTable, addr: u64, value: &T) -> bool {
+    with_user_process_context(table, || {
         let ptr = match UserPtr::<T>::try_new(addr) {
             Ok(p_guard) => p_guard,
             Err(_) => return false,
@@ -194,14 +196,15 @@ fn user_copy_out<T: Copy>(pid: u32, addr: u64, value: &T) -> bool {
     .unwrap_or(false)
 }
 
-fn user_copy_in<T: Copy>(pid: u32, addr: u64) -> Option<T> {
-    with_user_process_context(pid, || {
+fn user_copy_in<T: Copy>(table: FdTable, addr: u64) -> Option<T> {
+    with_user_process_context(table, || {
         let ptr = UserPtr::<T>::try_new(addr).ok()?;
         copy_from_user(ptr).ok()
     })?
 }
 
-fn map_user_rw_page(pid: u32) -> Option<u64> {
+fn map_user_rw_page(table: FdTable) -> Option<u64> {
+    let pid = table.id();
     let base = process_vm_alloc(pid, 4096, PageFlags::USER_RW.bits() as u32);
     if base == 0 {
         return None;
@@ -353,7 +356,13 @@ pub fn test_pipe_poll_eof_baseline() -> TestResult {
     let task_id = create_test_user_task();
     assert_test!(task_id != INVALID_TASK_ID);
     let task_guard = assert_some!(task_find_by_id(task_id));
-    let pid = task_guard.process_id;
+    let Some(pid) = task_guard
+        .process()
+        .as_deref()
+        .and_then(slopos_fs::fileio::FdTable::of)
+    else {
+        return TestResult::Fail;
+    };
 
     let mut read_fd = -1;
     let mut write_fd = -1;
@@ -469,8 +478,20 @@ pub fn test_kill_process_group_semantics() -> TestResult {
     );
     assert_eq_test!(setpgid_frame.rax(), 0, "setpgid should succeed for member");
 
-    let leader_pid = leader_guard.process_id;
-    let member_pid = member_guard.process_id;
+    let Some(leader_pid) = leader_guard
+        .process()
+        .as_deref()
+        .and_then(slopos_fs::fileio::FdTable::of)
+    else {
+        return TestResult::Fail;
+    };
+    let Some(member_pid) = member_guard
+        .process()
+        .as_deref()
+        .and_then(slopos_fs::fileio::FdTable::of)
+    else {
+        return TestResult::Fail;
+    };
 
     let mut probe_frame = zero_frame();
     probe_frame.regs_mut().rdi = (-(leader_id as i32) as i64) as u64;
@@ -748,7 +769,13 @@ pub fn test_console_read_without_a_controlling_tty_is_refused() -> TestResult {
     let task_id = create_test_user_task();
     assert_test!(task_id != INVALID_TASK_ID, "failed to create user task");
     let task_guard = assert_some!(task_find_by_id(task_id), "task lookup failed");
-    let pid = task_guard.process_id;
+    let Some(pid) = task_guard
+        .process()
+        .as_deref()
+        .and_then(slopos_fs::fileio::FdTable::of)
+    else {
+        return TestResult::Fail;
+    };
     assert_eq_test!(
         task_guard.controlling_tty(),
         None,
@@ -833,7 +860,13 @@ pub fn test_open_dev_tty_with_o_noctty_preserves_flag() -> TestResult {
         "TIOCSCTTY should succeed before /dev/tty open"
     );
 
-    let pid = task_guard.process_id;
+    let Some(pid) = task_guard
+        .process()
+        .as_deref()
+        .and_then(slopos_fs::fileio::FdTable::of)
+    else {
+        return TestResult::Fail;
+    };
     make_task_current(task_id);
     let fd = file_open_for_process(pid, b"/dev/tty", O_RDONLY | O_NOCTTY as u32);
     park_bootstrap_on_current_cpu();
@@ -979,7 +1012,13 @@ pub fn test_pts_open_acquires_controlling_tty_without_o_noctty() -> TestResult {
     // Unlock slave so /dev/pts/N open succeeds.
     let _ = slopos_kernel_services::syscall_services::tty::set_pty_lock(master_idx, false);
 
-    let pid = task_guard.process_id;
+    let Some(pid) = task_guard
+        .process()
+        .as_deref()
+        .and_then(slopos_fs::fileio::FdTable::of)
+    else {
+        return TestResult::Fail;
+    };
     make_task_current(task_id);
     let fd = file_open_for_process(pid, &path[..path.len() - 1], O_RDONLY);
     park_bootstrap_on_current_cpu();
@@ -1031,7 +1070,13 @@ pub fn test_pts_open_with_o_noctty_skips_controlling_tty_acquire() -> TestResult
     // Unlock slave so /dev/pts/N open succeeds.
     let _ = slopos_kernel_services::syscall_services::tty::set_pty_lock(master_idx, false);
 
-    let pid = task_guard.process_id;
+    let Some(pid) = task_guard
+        .process()
+        .as_deref()
+        .and_then(slopos_fs::fileio::FdTable::of)
+    else {
+        return TestResult::Fail;
+    };
     make_task_current(task_id);
     let fd = file_open_for_process(pid, &path[..path.len() - 1], O_RDONLY | O_NOCTTY as u32);
     park_bootstrap_on_current_cpu();
@@ -1083,7 +1128,13 @@ pub fn test_tty_poll_after_close_reuse_no_crossobject() -> TestResult {
     };
     let _ = slopos_kernel_services::syscall_services::tty::set_pty_lock(master_idx, false);
 
-    let pid = task_guard.process_id;
+    let Some(pid) = task_guard
+        .process()
+        .as_deref()
+        .and_then(slopos_fs::fileio::FdTable::of)
+    else {
+        return TestResult::Fail;
+    };
     // file_poll_register_fd registers the current task as the waiter, so the
     // FD-owning task must be PCR.current_task (mirrors the real poll path).
     make_task_current(task_id);
@@ -1138,11 +1189,17 @@ pub fn test_vm_mmap_munmap_stress_baseline() -> TestResult {
     let task_id = create_test_user_task();
     assert_test!(task_id != INVALID_TASK_ID);
     let task_guard = assert_some!(task_find_by_id(task_id));
-    let pid = task_guard.process_id;
+    let Some(pid) = task_guard
+        .process()
+        .as_deref()
+        .and_then(slopos_fs::fileio::FdTable::of)
+    else {
+        return TestResult::Fail;
+    };
 
     for _ in 0..128 {
         let addr = slopos_mm::process_vm::process_vm_mmap(
-            pid,
+            pid.id(),
             0,
             4096,
             slopos_abi::syscall::PROT_READ | slopos_abi::syscall::PROT_WRITE,
@@ -1154,7 +1211,7 @@ pub fn test_vm_mmap_munmap_stress_baseline() -> TestResult {
             task_terminate(task_id);
             return TestResult::Fail;
         }
-        if slopos_mm::process_vm::process_vm_munmap(pid, addr, 4096) != 0 {
+        if slopos_mm::process_vm::process_vm_munmap(pid.id(), addr, 4096) != 0 {
             task_terminate(task_id);
             return TestResult::Fail;
         }
@@ -1605,7 +1662,13 @@ pub fn test_futex_wait_mismatch_and_wake_no_waiters() -> TestResult {
     let task_id = create_test_user_task();
     assert_test!(task_id != INVALID_TASK_ID, "failed to create user task");
     let task_guard = assert_some!(task_find_by_id(task_id), "task lookup failed");
-    let pid = task_guard.process_id;
+    let Some(pid) = task_guard
+        .process()
+        .as_deref()
+        .and_then(slopos_fs::fileio::FdTable::of)
+    else {
+        return TestResult::Fail;
+    };
 
     let uaddr = match map_user_rw_page(pid) {
         Some(v) => v,
@@ -1656,7 +1719,13 @@ pub fn test_futex_lost_wakeup_regression() -> TestResult {
     let task_id = create_test_user_task();
     assert_test!(task_id != INVALID_TASK_ID, "failed to create user task");
     let task_guard = assert_some!(task_find_by_id(task_id), "task lookup failed");
-    let pid = task_guard.process_id;
+    let Some(pid) = task_guard
+        .process()
+        .as_deref()
+        .and_then(slopos_fs::fileio::FdTable::of)
+    else {
+        return TestResult::Fail;
+    };
 
     let uaddr = match map_user_rw_page(pid) {
         Some(v) => v,
@@ -1707,7 +1776,13 @@ pub fn test_futex_contention_path_stability() -> TestResult {
     let task_id = create_test_user_task();
     assert_test!(task_id != INVALID_TASK_ID, "failed to create user task");
     let task_guard = assert_some!(task_find_by_id(task_id), "task lookup failed");
-    let pid = task_guard.process_id;
+    let Some(pid) = task_guard
+        .process()
+        .as_deref()
+        .and_then(slopos_fs::fileio::FdTable::of)
+    else {
+        return TestResult::Fail;
+    };
 
     let uaddr = match map_user_rw_page(pid) {
         Some(v) => v,
@@ -1758,7 +1833,13 @@ pub fn test_signal_install_deliver_and_sigreturn() -> TestResult {
     let task_id = create_test_user_task();
     assert_test!(task_id != INVALID_TASK_ID, "failed to create user task");
     let task_guard = assert_some!(task_find_by_id(task_id), "task lookup failed");
-    let pid = task_guard.process_id;
+    let Some(pid) = task_guard
+        .process()
+        .as_deref()
+        .and_then(slopos_fs::fileio::FdTable::of)
+    else {
+        return TestResult::Fail;
+    };
 
     let page = match map_user_rw_page(pid) {
         Some(v) => v,
@@ -1808,7 +1889,7 @@ pub fn test_signal_install_deliver_and_sigreturn() -> TestResult {
         "initial old action should be SIG_DFL"
     );
 
-    let stack_top = process_vm_get_stack_top(pid);
+    let stack_top = process_vm_get_stack_top(pid.id());
     let original_rsp = stack_top.wrapping_sub(0x200);
     let original_rip = 0x5000_1234;
 
@@ -2028,7 +2109,13 @@ pub fn test_signal_delivery_on_irq_exit_dispatch() -> TestResult {
     let task_id = create_test_user_task();
     assert_test!(task_id != INVALID_TASK_ID, "failed to create user task");
     let task_guard = assert_some!(task_find_by_id(task_id), "task lookup failed");
-    let pid = task_guard.process_id;
+    let Some(pid) = task_guard
+        .process()
+        .as_deref()
+        .and_then(slopos_fs::fileio::FdTable::of)
+    else {
+        return TestResult::Fail;
+    };
 
     let page = match map_user_rw_page(pid) {
         Some(v) => v,
@@ -2069,7 +2156,7 @@ pub fn test_signal_delivery_on_irq_exit_dispatch() -> TestResult {
     // The IRQ-exit path resolves the task via scheduler_get_current_task().
     make_task_current(task_id);
 
-    let stack_top = process_vm_get_stack_top(pid);
+    let stack_top = process_vm_get_stack_top(pid.id());
     let original_rip = 0x5500_2222;
     let original_rsp = stack_top.wrapping_sub(0x200);
     let mut frame = user_irq_frame(original_rip, original_rsp);
@@ -2180,7 +2267,13 @@ pub fn test_signal_delivery_on_irq_exit_copy_failure_rearms() -> TestResult {
     let task_id = create_test_user_task();
     assert_test!(task_id != INVALID_TASK_ID, "failed to create user task");
     let task_guard = assert_some!(task_find_by_id(task_id), "task lookup failed");
-    let pid = task_guard.process_id;
+    let Some(pid) = task_guard
+        .process()
+        .as_deref()
+        .and_then(slopos_fs::fileio::FdTable::of)
+    else {
+        return TestResult::Fail;
+    };
 
     let page = match map_user_rw_page(pid) {
         Some(v) => v,
@@ -2254,7 +2347,13 @@ pub fn test_sigprocmask_block_then_unblock_delivery() -> TestResult {
     let task_id = create_test_user_task();
     assert_test!(task_id != INVALID_TASK_ID, "failed to create user task");
     let task_guard = assert_some!(task_find_by_id(task_id), "task lookup failed");
-    let pid = task_guard.process_id;
+    let Some(pid) = task_guard
+        .process()
+        .as_deref()
+        .and_then(slopos_fs::fileio::FdTable::of)
+    else {
+        return TestResult::Fail;
+    };
 
     let page = match map_user_rw_page(pid) {
         Some(v) => v,
@@ -2320,7 +2419,7 @@ pub fn test_sigprocmask_block_then_unblock_delivery() -> TestResult {
     });
     assert_eq_test!(kill_frame.rax(), 0, "kill(SIGUSR1) failed");
 
-    let stack_top = process_vm_get_stack_top(pid);
+    let stack_top = process_vm_get_stack_top(pid.id());
     let mut user_frame = zero_frame();
     user_frame.regs_mut().rip = 0x6000_1111;
     user_frame.regs_mut().rsp = stack_top.wrapping_sub(0x200);
@@ -2416,7 +2515,13 @@ pub fn test_arch_prctl_set_get_fs_roundtrip() -> TestResult {
     let task_id = create_test_user_task();
     assert_test!(task_id != INVALID_TASK_ID, "failed to create user task");
     let task_guard = assert_some!(task_find_by_id(task_id), "task lookup failed");
-    let pid = task_guard.process_id;
+    let Some(pid) = task_guard
+        .process()
+        .as_deref()
+        .and_then(slopos_fs::fileio::FdTable::of)
+    else {
+        return TestResult::Fail;
+    };
 
     let out_addr = match map_user_rw_page(pid) {
         Some(v) => v,
@@ -2493,7 +2598,13 @@ pub fn test_pipe_write_read_basic() -> TestResult {
     let task_id = create_test_user_task();
     assert_test!(task_id != INVALID_TASK_ID, "failed to create user task");
     let task_guard = assert_some!(task_find_by_id(task_id), "task lookup failed");
-    let pid = task_guard.process_id;
+    let Some(pid) = task_guard
+        .process()
+        .as_deref()
+        .and_then(slopos_fs::fileio::FdTable::of)
+    else {
+        return TestResult::Fail;
+    };
 
     let mut read_fd = -1;
     let mut write_fd = -1;
@@ -2533,7 +2644,13 @@ pub fn test_pipe_eof_returns_zero() -> TestResult {
     let task_id = create_test_user_task();
     assert_test!(task_id != INVALID_TASK_ID, "failed to create user task");
     let task_guard = assert_some!(task_find_by_id(task_id), "task lookup failed");
-    let pid = task_guard.process_id;
+    let Some(pid) = task_guard
+        .process()
+        .as_deref()
+        .and_then(slopos_fs::fileio::FdTable::of)
+    else {
+        return TestResult::Fail;
+    };
 
     let mut read_fd = -1;
     let mut write_fd = -1;
@@ -2575,7 +2692,13 @@ pub fn test_pipe_broken_pipe() -> TestResult {
     let task_id = create_test_user_task();
     assert_test!(task_id != INVALID_TASK_ID, "failed to create user task");
     let task_guard = assert_some!(task_find_by_id(task_id), "task lookup failed");
-    let pid = task_guard.process_id;
+    let Some(pid) = task_guard
+        .process()
+        .as_deref()
+        .and_then(slopos_fs::fileio::FdTable::of)
+    else {
+        return TestResult::Fail;
+    };
 
     let mut read_fd = -1;
     let mut write_fd = -1;
@@ -2604,7 +2727,13 @@ pub fn test_pipe_multi_write_read() -> TestResult {
     let task_id = create_test_user_task();
     assert_test!(task_id != INVALID_TASK_ID, "failed to create user task");
     let task_guard = assert_some!(task_find_by_id(task_id), "task lookup failed");
-    let pid = task_guard.process_id;
+    let Some(pid) = task_guard
+        .process()
+        .as_deref()
+        .and_then(slopos_fs::fileio::FdTable::of)
+    else {
+        return TestResult::Fail;
+    };
 
     let mut read_fd = -1;
     let mut write_fd = -1;
@@ -2640,7 +2769,13 @@ pub fn test_pipe_partial_read() -> TestResult {
     let task_id = create_test_user_task();
     assert_test!(task_id != INVALID_TASK_ID, "failed to create user task");
     let task_guard = assert_some!(task_find_by_id(task_id), "task lookup failed");
-    let pid = task_guard.process_id;
+    let Some(pid) = task_guard
+        .process()
+        .as_deref()
+        .and_then(slopos_fs::fileio::FdTable::of)
+    else {
+        return TestResult::Fail;
+    };
 
     let mut read_fd = -1;
     let mut write_fd = -1;
@@ -2690,7 +2825,13 @@ pub fn test_pipe_buffer_full() -> TestResult {
     let task_id = create_test_user_task();
     assert_test!(task_id != INVALID_TASK_ID, "failed to create user task");
     let task_guard = assert_some!(task_find_by_id(task_id), "task lookup failed");
-    let pid = task_guard.process_id;
+    let Some(pid) = task_guard
+        .process()
+        .as_deref()
+        .and_then(slopos_fs::fileio::FdTable::of)
+    else {
+        return TestResult::Fail;
+    };
 
     // Create pipe with O_NONBLOCK so writes don't block when full.
     let mut read_fd = -1;
@@ -2752,8 +2893,20 @@ pub fn test_exit_current_task_releases_pipe_refs() -> TestResult {
     let p1_guard = assert_some!(task_find_by_id(t1), "task1 lookup failed");
     let p2_guard = assert_some!(task_find_by_id(t2), "task2 lookup failed");
 
-    let pid1 = p1_guard.process_id;
-    let pid2 = p2_guard.process_id;
+    let Some(pid1) = p1_guard
+        .process()
+        .as_deref()
+        .and_then(slopos_fs::fileio::FdTable::of)
+    else {
+        return TestResult::Fail;
+    };
+    let Some(pid2) = p2_guard
+        .process()
+        .as_deref()
+        .and_then(slopos_fs::fileio::FdTable::of)
+    else {
+        return TestResult::Fail;
+    };
 
     let mut read_fd = -1;
     let mut write_fd = -1;
@@ -2764,9 +2917,9 @@ pub fn test_exit_current_task_releases_pipe_refs() -> TestResult {
     );
 
     // Replace pid2's default console table with a clone of pid1.
-    fileio_destroy_table_for_process(pid2);
+    fileio_destroy_table_for_process(pid2.handle().expect("a user process"));
     assert_eq_test!(
-        fileio_clone_table_for_process(pid1, pid2),
+        fileio_clone_table_for_process(pid1, pid2.handle().expect("a user process")),
         0,
         "file table clone failed"
     );
@@ -2806,8 +2959,20 @@ pub fn test_fork_clone_keeps_cloexec_fds() -> TestResult {
     let p1_guard = assert_some!(task_find_by_id(t1), "task1 lookup failed");
     let p2_guard = assert_some!(task_find_by_id(t2), "task2 lookup failed");
 
-    let pid1 = p1_guard.process_id;
-    let pid2 = p2_guard.process_id;
+    let Some(pid1) = p1_guard
+        .process()
+        .as_deref()
+        .and_then(slopos_fs::fileio::FdTable::of)
+    else {
+        return TestResult::Fail;
+    };
+    let Some(pid2) = p2_guard
+        .process()
+        .as_deref()
+        .and_then(slopos_fs::fileio::FdTable::of)
+    else {
+        return TestResult::Fail;
+    };
 
     let mut read_fd = -1;
     let mut write_fd = -1;
@@ -2822,9 +2987,9 @@ pub fn test_fork_clone_keeps_cloexec_fds() -> TestResult {
         "set cloexec failed"
     );
 
-    fileio_destroy_table_for_process(pid2);
+    fileio_destroy_table_for_process(pid2.handle().expect("a user process"));
     assert_eq_test!(
-        fileio_clone_table_for_process(pid1, pid2),
+        fileio_clone_table_for_process(pid1, pid2.handle().expect("a user process")),
         0,
         "fork clone failed"
     );
@@ -2859,8 +3024,20 @@ pub fn test_ring_fd_not_inherited_by_fork() -> TestResult {
 
     let p1_guard = assert_some!(task_find_by_id(t1), "task1 lookup failed");
     let p2_guard = assert_some!(task_find_by_id(t2), "task2 lookup failed");
-    let pid1 = p1_guard.process_id;
-    let pid2 = p2_guard.process_id;
+    let Some(pid1) = p1_guard
+        .process()
+        .as_deref()
+        .and_then(slopos_fs::fileio::FdTable::of)
+    else {
+        return TestResult::Fail;
+    };
+    let Some(pid2) = p2_guard
+        .process()
+        .as_deref()
+        .and_then(slopos_fs::fileio::FdTable::of)
+    else {
+        return TestResult::Fail;
+    };
 
     let mut read_fd = -1;
     let mut write_fd = -1;
@@ -2873,9 +3050,9 @@ pub fn test_ring_fd_not_inherited_by_fork() -> TestResult {
     let ring_fd = slopos_ring::ring_setup(pid1, 4, |_| Ok(()));
     assert_test!(ring_fd >= 0, "ring_setup failed: {}", ring_fd);
 
-    fileio_destroy_table_for_process(pid2);
+    fileio_destroy_table_for_process(pid2.handle().expect("a user process"));
     assert_eq_test!(
-        fileio_clone_table_for_process(pid1, pid2),
+        fileio_clone_table_for_process(pid1, pid2.handle().expect("a user process")),
         0,
         "fork clone failed"
     );
@@ -2908,7 +3085,13 @@ pub fn test_ring_fd_closed_on_exec() -> TestResult {
     let t = create_test_user_task();
     assert_test!(t != INVALID_TASK_ID, "failed to create task");
     let p_guard = assert_some!(task_find_by_id(t), "task lookup failed");
-    let pid = p_guard.process_id;
+    let Some(pid) = p_guard
+        .process()
+        .as_deref()
+        .and_then(slopos_fs::fileio::FdTable::of)
+    else {
+        return TestResult::Fail;
+    };
 
     let ring_fd = slopos_ring::ring_setup(pid, 4, |_| Ok(()));
     assert_test!(ring_fd >= 0, "ring_setup failed: {}", ring_fd);
@@ -2939,12 +3122,18 @@ pub fn test_spawn_empty_table_unless_actions() -> TestResult {
     let t = create_test_user_task();
     assert_test!(t != INVALID_TASK_ID, "failed to create task");
     let p_guard = assert_some!(task_find_by_id(t), "task lookup failed");
-    let pid = p_guard.process_id;
+    let Some(pid) = p_guard
+        .process()
+        .as_deref()
+        .and_then(slopos_fs::fileio::FdTable::of)
+    else {
+        return TestResult::Fail;
+    };
 
     // The bootstrap console table is replaced with an empty one.
-    fileio_destroy_table_for_process(pid);
+    fileio_destroy_table_for_process(pid.handle().expect("a user process"));
     assert_eq_test!(
-        fileio_create_empty_table_for_process(pid),
+        fileio_create_empty_table_for_process(pid.handle().expect("a user process")),
         0,
         "create empty failed"
     );
@@ -2970,8 +3159,20 @@ pub fn test_spawn_clone_fd_shares_backing() -> TestResult {
     );
     let p1_guard = assert_some!(task_find_by_id(t1), "task1 lookup failed");
     let p2_guard = assert_some!(task_find_by_id(t2), "task2 lookup failed");
-    let pid1 = p1_guard.process_id;
-    let pid2 = p2_guard.process_id;
+    let Some(pid1) = p1_guard
+        .process()
+        .as_deref()
+        .and_then(slopos_fs::fileio::FdTable::of)
+    else {
+        return TestResult::Fail;
+    };
+    let Some(pid2) = p2_guard
+        .process()
+        .as_deref()
+        .and_then(slopos_fs::fileio::FdTable::of)
+    else {
+        return TestResult::Fail;
+    };
 
     let mut read_fd = -1;
     let mut write_fd = -1;
@@ -2981,9 +3182,9 @@ pub fn test_spawn_clone_fd_shares_backing() -> TestResult {
         "pipe create failed"
     );
 
-    fileio_destroy_table_for_process(pid2);
+    fileio_destroy_table_for_process(pid2.handle().expect("a user process"));
     assert_eq_test!(
-        fileio_create_empty_table_for_process(pid2),
+        fileio_create_empty_table_for_process(pid2.handle().expect("a user process")),
         0,
         "create empty failed"
     );
@@ -3030,8 +3231,20 @@ pub fn test_spawn_transfer_fd_moves() -> TestResult {
     );
     let p1_guard = assert_some!(task_find_by_id(t1), "task1 lookup failed");
     let p2_guard = assert_some!(task_find_by_id(t2), "task2 lookup failed");
-    let pid1 = p1_guard.process_id;
-    let pid2 = p2_guard.process_id;
+    let Some(pid1) = p1_guard
+        .process()
+        .as_deref()
+        .and_then(slopos_fs::fileio::FdTable::of)
+    else {
+        return TestResult::Fail;
+    };
+    let Some(pid2) = p2_guard
+        .process()
+        .as_deref()
+        .and_then(slopos_fs::fileio::FdTable::of)
+    else {
+        return TestResult::Fail;
+    };
 
     let mut read_fd = -1;
     let mut write_fd = -1;
@@ -3041,9 +3254,9 @@ pub fn test_spawn_transfer_fd_moves() -> TestResult {
         "pipe create failed"
     );
 
-    fileio_destroy_table_for_process(pid2);
+    fileio_destroy_table_for_process(pid2.handle().expect("a user process"));
     assert_eq_test!(
-        fileio_create_empty_table_for_process(pid2),
+        fileio_create_empty_table_for_process(pid2.handle().expect("a user process")),
         0,
         "create empty failed"
     );
@@ -3086,8 +3299,20 @@ pub fn test_spawn_actions_all_or_nothing() -> TestResult {
     );
     let p1_guard = assert_some!(task_find_by_id(t1), "task1 lookup failed");
     let p2_guard = assert_some!(task_find_by_id(t2), "task2 lookup failed");
-    let pid1 = p1_guard.process_id;
-    let pid2 = p2_guard.process_id;
+    let Some(pid1) = p1_guard
+        .process()
+        .as_deref()
+        .and_then(slopos_fs::fileio::FdTable::of)
+    else {
+        return TestResult::Fail;
+    };
+    let Some(pid2) = p2_guard
+        .process()
+        .as_deref()
+        .and_then(slopos_fs::fileio::FdTable::of)
+    else {
+        return TestResult::Fail;
+    };
 
     let mut read_fd = -1;
     let mut write_fd = -1;
@@ -3097,9 +3322,9 @@ pub fn test_spawn_actions_all_or_nothing() -> TestResult {
         "pipe create failed"
     );
 
-    fileio_destroy_table_for_process(pid2);
+    fileio_destroy_table_for_process(pid2.handle().expect("a user process"));
     assert_eq_test!(
-        fileio_create_empty_table_for_process(pid2),
+        fileio_create_empty_table_for_process(pid2.handle().expect("a user process")),
         0,
         "create empty failed"
     );
@@ -3122,7 +3347,7 @@ pub fn test_spawn_actions_all_or_nothing() -> TestResult {
 
     // The aborted spawn tears the child table down; the parent must still
     // hold a live write end, so the reader sees no EOF.
-    fileio_destroy_table_for_process(pid2);
+    fileio_destroy_table_for_process(pid2.handle().expect("a user process"));
     let mut one = [0u8; 1];
     let r = file_read_fd(pid1, read_fd, &mut KernelIoBuf::new(&mut one));
     assert_test!(r != 0, "parent write end must survive the aborted transfer");
@@ -3150,7 +3375,13 @@ pub fn test_spawn_path_rejects_bad_attrs() -> TestResult {
     let task_id = create_test_user_task();
     assert_test!(task_id != INVALID_TASK_ID, "failed to create user task");
     let task_guard = assert_some!(task_find_by_id(task_id), "task lookup failed");
-    let pid = task_guard.process_id;
+    let Some(pid) = task_guard
+        .process()
+        .as_deref()
+        .and_then(slopos_fs::fileio::FdTable::of)
+    else {
+        return TestResult::Fail;
+    };
 
     // Map a user page; write a path that will fail at VFS open plus a valid
     // attrs struct (Normal priority, no fd actions) at a non-overlapping offset.
@@ -3244,7 +3475,13 @@ pub fn test_spawn_path_rejects_privileged_flags() -> TestResult {
     let task_id = create_test_user_task();
     assert_test!(task_id != INVALID_TASK_ID, "failed to create user task");
     let task_guard = assert_some!(task_find_by_id(task_id), "task lookup failed");
-    let pid = task_guard.process_id;
+    let Some(pid) = task_guard
+        .process()
+        .as_deref()
+        .and_then(slopos_fs::fileio::FdTable::of)
+    else {
+        return TestResult::Fail;
+    };
 
     let user_page = match map_user_rw_page(pid) {
         Some(v) => v,
@@ -3554,7 +3791,13 @@ pub fn test_dev_tty_no_ctty_returns_enxio() -> TestResult {
         "fresh task should have no controlling_tty"
     );
 
-    let pid = task_guard.process_id;
+    let Some(pid) = task_guard
+        .process()
+        .as_deref()
+        .and_then(slopos_fs::fileio::FdTable::of)
+    else {
+        return TestResult::Fail;
+    };
     make_task_current(task_id);
     let fd = file_open_for_process(pid, b"/dev/tty", O_RDONLY);
     park_bootstrap_on_current_cpu();
@@ -3592,7 +3835,13 @@ pub fn test_dev_tty_with_ctty_succeeds() -> TestResult {
     );
 
     // Now open /dev/tty — should succeed.
-    let pid = task_guard.process_id;
+    let Some(pid) = task_guard
+        .process()
+        .as_deref()
+        .and_then(slopos_fs::fileio::FdTable::of)
+    else {
+        return TestResult::Fail;
+    };
     make_task_current(task_id);
     let fd = file_open_for_process(pid, b"/dev/tty", O_RDONLY);
     park_bootstrap_on_current_cpu();
@@ -3648,7 +3897,13 @@ pub fn test_setsid_then_dev_tty_returns_enxio() -> TestResult {
     );
 
     // Now child tries to open /dev/tty — should fail with ENXIO.
-    let child_pid = child_guard.process_id;
+    let Some(child_pid) = child_guard
+        .process()
+        .as_deref()
+        .and_then(slopos_fs::fileio::FdTable::of)
+    else {
+        return TestResult::Fail;
+    };
     make_task_current(child_id);
     let fd = file_open_for_process(child_pid, b"/dev/tty", O_RDONLY);
     park_bootstrap_on_current_cpu();
@@ -3697,7 +3952,13 @@ pub fn test_fork_child_inherits_dev_tty() -> TestResult {
     );
 
     // Child opens /dev/tty — should succeed (inherits parent's ctty).
-    let child_pid = child_guard.process_id;
+    let Some(child_pid) = child_guard
+        .process()
+        .as_deref()
+        .and_then(slopos_fs::fileio::FdTable::of)
+    else {
+        return TestResult::Fail;
+    };
     make_task_current(child_id);
     let fd = file_open_for_process(child_pid, b"/dev/tty", O_RDONLY);
     park_bootstrap_on_current_cpu();
@@ -3736,7 +3997,13 @@ pub fn test_dup_does_not_copy_cloexec() -> TestResult {
     let task_id = create_test_user_task();
     assert_test!(task_id != INVALID_TASK_ID);
     let task_guard = assert_some!(task_find_by_id(task_id));
-    let pid = task_guard.process_id;
+    let Some(pid) = task_guard
+        .process()
+        .as_deref()
+        .and_then(slopos_fs::fileio::FdTable::of)
+    else {
+        return TestResult::Fail;
+    };
 
     let mut read_fd = -1;
     let mut write_fd = -1;
@@ -3803,7 +4070,13 @@ pub fn test_close_twice_is_safe() -> TestResult {
     let task_id = create_test_user_task();
     assert_test!(task_id != INVALID_TASK_ID);
     let task_guard = assert_some!(task_find_by_id(task_id));
-    let pid = task_guard.process_id;
+    let Some(pid) = task_guard
+        .process()
+        .as_deref()
+        .and_then(slopos_fs::fileio::FdTable::of)
+    else {
+        return TestResult::Fail;
+    };
 
     let mut read_fd = -1;
     let mut write_fd = -1;
@@ -3838,7 +4111,13 @@ pub fn test_close_while_dup_keeps_object_alive() -> TestResult {
     let task_id = create_test_user_task();
     assert_test!(task_id != INVALID_TASK_ID);
     let task_guard = assert_some!(task_find_by_id(task_id));
-    let pid = task_guard.process_id;
+    let Some(pid) = task_guard
+        .process()
+        .as_deref()
+        .and_then(slopos_fs::fileio::FdTable::of)
+    else {
+        return TestResult::Fail;
+    };
 
     let mut read_fd = -1;
     let mut write_fd = -1;
@@ -3896,7 +4175,13 @@ pub fn test_open_tty_fd_emfile_no_double_teardown() -> TestResult {
     let task_id = create_test_user_task();
     assert_test!(task_id != INVALID_TASK_ID);
     let task_guard = assert_some!(task_find_by_id(task_id));
-    let pid = task_guard.process_id;
+    let Some(pid) = task_guard
+        .process()
+        .as_deref()
+        .and_then(slopos_fs::fileio::FdTable::of)
+    else {
+        return TestResult::Fail;
+    };
 
     // Open a PTY master to get a real, independently-tracked tty index.
     let master_fd = file_open_for_process(pid, b"/dev/ptmx", O_RDONLY);
@@ -3971,9 +4256,13 @@ pub fn test_tty_ioctl_never_changes_open_state() -> TestResult {
 
     let task_id = create_test_user_task();
     assert_test!(task_id != INVALID_TASK_ID);
-    let pid = task_find_by_id(task_id)
-        .map(|task| task.process_id)
-        .unwrap_or(0);
+    let Some(pid) = task_find_by_id(task_id)
+        .and_then(|task| task.process())
+        .as_deref()
+        .and_then(FdTable::of)
+    else {
+        return TestResult::Fail;
+    };
 
     let master_fd = file_open_for_process(pid, b"/dev/ptmx", O_RDONLY);
     assert_test!(master_fd >= 0, "ptmx open failed");
@@ -4035,9 +4324,13 @@ pub fn test_scm_rights_tty_balanced() -> TestResult {
 
     let task_id = create_test_user_task();
     assert_test!(task_id != INVALID_TASK_ID);
-    let pid = task_find_by_id(task_id)
-        .map(|task| task.process_id)
-        .unwrap_or(0);
+    let Some(pid) = task_find_by_id(task_id)
+        .and_then(|task| task.process())
+        .as_deref()
+        .and_then(FdTable::of)
+    else {
+        return TestResult::Fail;
+    };
 
     let (srv, cli) = match unix_create_connected_pair_raw() {
         Some(pair) => pair,
@@ -4170,7 +4463,13 @@ pub fn test_dup_shares_offset() -> TestResult {
     let task_id = create_test_user_task();
     assert_test!(task_id != INVALID_TASK_ID);
     let task_guard = assert_some!(task_find_by_id(task_id));
-    let pid = task_guard.process_id;
+    let Some(pid) = task_guard
+        .process()
+        .as_deref()
+        .and_then(slopos_fs::fileio::FdTable::of)
+    else {
+        return TestResult::Fail;
+    };
 
     let fd = slopos_fs::fileio::fileio_open_fd_with_ops(
         pid,
@@ -4600,7 +4899,7 @@ slopos_testing::stest!(
 // AF_UNIX Socket Tests
 // =============================================================================
 
-fn unix_create_connected_pair(pid: u32) -> Option<(i32, i32)> {
+fn unix_create_connected_pair(table: FdTable) -> Option<(i32, i32)> {
     use slopos_net::unix_socket;
     use slopos_net::unix_socket_file_ops::UNIX_SOCKET_FILE_OPS;
 
@@ -4635,7 +4934,7 @@ fn unix_create_connected_pair(pid: u32) -> Option<(i32, i32)> {
 
     let srv_backing = slopos_net::unix_socket_file_ops::unix_socket_backing(accepted_handle)?;
     let srv_fd = slopos_fs::fileio::fileio_open_fd_with_ops(
-        pid,
+        table,
         &UNIX_SOCKET_FILE_OPS,
         accepted_handle.as_usize(),
         Some(srv_backing),
@@ -4643,7 +4942,7 @@ fn unix_create_connected_pair(pid: u32) -> Option<(i32, i32)> {
     );
     let cli_backing = slopos_net::unix_socket_file_ops::unix_socket_backing(cli_handle)?;
     let cli_fd = slopos_fs::fileio::fileio_open_fd_with_ops(
-        pid,
+        table,
         &UNIX_SOCKET_FILE_OPS,
         cli_handle.as_usize(),
         Some(cli_backing),
@@ -4662,9 +4961,13 @@ pub fn test_unix_socket_send_recv_basic() -> TestResult {
     let _fixture = SyscallFixture::new();
     let task_id = create_test_user_task();
     assert_test!(task_id != INVALID_TASK_ID, "task creation failed");
-    let pid = task_find_by_id(task_id)
-        .map(|task| task.process_id)
-        .unwrap_or(0);
+    let Some(pid) = task_find_by_id(task_id)
+        .and_then(|task| task.process())
+        .as_deref()
+        .and_then(FdTable::of)
+    else {
+        return TestResult::Fail;
+    };
 
     let (srv_fd, cli_fd) = match unix_create_connected_pair(pid) {
         Some(pair) => pair,
@@ -4694,9 +4997,13 @@ pub fn test_unix_socket_poll_after_send() -> TestResult {
     let _fixture = SyscallFixture::new();
     let task_id = create_test_user_task();
     assert_test!(task_id != INVALID_TASK_ID, "task creation failed");
-    let pid = task_find_by_id(task_id)
-        .map(|task| task.process_id)
-        .unwrap_or(0);
+    let Some(pid) = task_find_by_id(task_id)
+        .and_then(|task| task.process())
+        .as_deref()
+        .and_then(FdTable::of)
+    else {
+        return TestResult::Fail;
+    };
 
     let (srv_fd, cli_fd) = match unix_create_connected_pair(pid) {
         Some(pair) => pair,
@@ -4724,7 +5031,13 @@ pub fn test_unix_socket_poll_before_send() -> TestResult {
     let task_id = create_test_user_task();
     assert_test!(task_id != INVALID_TASK_ID, "task creation failed");
     let task_guard = assert_some!(task_find_by_id(task_id), "task lookup failed");
-    let pid = task_guard.process_id;
+    let Some(pid) = task_guard
+        .process()
+        .as_deref()
+        .and_then(slopos_fs::fileio::FdTable::of)
+    else {
+        return TestResult::Fail;
+    };
 
     let (srv_fd, cli_fd) = match unix_create_connected_pair(pid) {
         Some(pair) => pair,
@@ -5083,7 +5396,13 @@ pub fn test_unix_socket_poll_syscall_e2e() -> TestResult {
     let task_id = create_test_user_task();
     assert_test!(task_id != INVALID_TASK_ID, "create task");
     let task_guard = assert_some!(task_find_by_id(task_id), "task ptr");
-    let pid = task_guard.process_id;
+    let Some(pid) = task_guard
+        .process()
+        .as_deref()
+        .and_then(slopos_fs::fileio::FdTable::of)
+    else {
+        return TestResult::Fail;
+    };
 
     // Need a user-space page for the pollfd struct.
     let upage = match map_user_rw_page(pid) {
@@ -5238,9 +5557,13 @@ pub fn test_compositor_handshake_listen_accept_send_poll() -> TestResult {
     let _fixture = SyscallFixture::new();
     let task_id = create_test_user_task();
     assert_test!(task_id != INVALID_TASK_ID, "create task");
-    let pid = task_find_by_id(task_id)
-        .map(|task| task.process_id)
-        .unwrap_or(0);
+    let Some(pid) = task_find_by_id(task_id)
+        .and_then(|task| task.process())
+        .as_deref()
+        .and_then(FdTable::of)
+    else {
+        return TestResult::Fail;
+    };
 
     let path = b"/test/compositor-handshake";
 
@@ -5336,7 +5659,13 @@ pub fn test_unix_send_wakes_blocked_poll_waiter() -> TestResult {
     let task_id = create_test_user_task();
     assert_test!(task_id != INVALID_TASK_ID, "create task");
     let task_guard = assert_some!(task_find_by_id(task_id), "task lookup failed");
-    let pid = task_guard.process_id;
+    let Some(pid) = task_guard
+        .process()
+        .as_deref()
+        .and_then(slopos_fs::fileio::FdTable::of)
+    else {
+        return TestResult::Fail;
+    };
 
     let (srv_fd, cli_fd) = match unix_create_connected_pair(pid) {
         Some(pair) => pair,
@@ -5399,7 +5728,13 @@ pub fn test_poll_fused_gap_demonstrates_race() -> TestResult {
     let task_id = create_test_user_task();
     assert_test!(task_id != INVALID_TASK_ID, "create task");
     let task_guard = assert_some!(task_find_by_id(task_id), "task lookup failed");
-    let pid = task_guard.process_id;
+    let Some(pid) = task_guard
+        .process()
+        .as_deref()
+        .and_then(slopos_fs::fileio::FdTable::of)
+    else {
+        return TestResult::Fail;
+    };
 
     let (srv_fd, cli_fd) = match unix_create_connected_pair(pid) {
         Some(pair) => pair,
@@ -5458,7 +5793,13 @@ pub fn test_poll_fused_register_first_catches_wakeup() -> TestResult {
     let task_id = create_test_user_task();
     assert_test!(task_id != INVALID_TASK_ID, "create task");
     let task_guard = assert_some!(task_find_by_id(task_id), "task lookup failed");
-    let pid = task_guard.process_id;
+    let Some(pid) = task_guard
+        .process()
+        .as_deref()
+        .and_then(slopos_fs::fileio::FdTable::of)
+    else {
+        return TestResult::Fail;
+    };
 
     let (srv_fd, cli_fd) = match unix_create_connected_pair(pid) {
         Some(pair) => pair,
@@ -5611,9 +5952,13 @@ pub fn test_unix_scm_rights_atomic_delivery() -> TestResult {
 
     let task_id = create_test_user_task();
     assert_test!(task_id != INVALID_TASK_ID, "task creation failed");
-    let pid = task_find_by_id(task_id)
-        .map(|task| task.process_id)
-        .unwrap_or(0);
+    let Some(pid) = task_find_by_id(task_id)
+        .and_then(|task| task.process())
+        .as_deref()
+        .and_then(FdTable::of)
+    else {
+        return TestResult::Fail;
+    };
 
     let (srv, cli) = match unix_create_connected_pair_raw() {
         Some(pair) => pair,
@@ -5697,9 +6042,13 @@ pub fn test_unix_scm_rights_anc_queue_full_no_partial() -> TestResult {
 
     let task_id = create_test_user_task();
     assert_test!(task_id != INVALID_TASK_ID, "task creation failed");
-    let pid = task_find_by_id(task_id)
-        .map(|task| task.process_id)
-        .unwrap_or(0);
+    let Some(pid) = task_find_by_id(task_id)
+        .and_then(|task| task.process())
+        .as_deref()
+        .and_then(FdTable::of)
+    else {
+        return TestResult::Fail;
+    };
 
     let (srv, cli) = match unix_create_connected_pair_raw() {
         Some(pair) => pair,
@@ -5784,9 +6133,13 @@ pub fn test_unix_scm_rights_error_returns_custody() -> TestResult {
 
     let task_id = create_test_user_task();
     assert_test!(task_id != INVALID_TASK_ID, "task creation failed");
-    let pid = task_find_by_id(task_id)
-        .map(|task| task.process_id)
-        .unwrap_or(0);
+    let Some(pid) = task_find_by_id(task_id)
+        .and_then(|task| task.process())
+        .as_deref()
+        .and_then(FdTable::of)
+    else {
+        return TestResult::Fail;
+    };
 
     // Build a pair, close the peer immediately → next send sees
     // EPIPE because peer_closed is set.
@@ -6005,7 +6358,13 @@ pub fn test_kill_default_ignored_sigwinch_target_survives() -> TestResult {
     let task_id = create_test_user_task();
     assert_test!(task_id != INVALID_TASK_ID, "failed to create user task");
     let task_guard = assert_some!(task_find_by_id(task_id), "task lookup failed");
-    let pid = task_guard.process_id;
+    let Some(pid) = task_guard
+        .process()
+        .as_deref()
+        .and_then(slopos_fs::fileio::FdTable::of)
+    else {
+        return TestResult::Fail;
+    };
 
     // kill() reports success even though the disposition discards the
     // signal at the send site.
@@ -6084,7 +6443,13 @@ pub fn test_kill_process_group_reaches_nascent_task_without_publishing() -> Test
     let caller_id = create_test_user_task();
     assert_test!(caller_id != INVALID_TASK_ID, "failed to create caller task");
     let caller_guard = assert_some!(task_find_by_id(caller_id), "caller lookup failed");
-    let caller_pid = caller_guard.process_id;
+    let Some(caller_pid) = caller_guard
+        .process()
+        .as_deref()
+        .and_then(slopos_fs::fileio::FdTable::of)
+    else {
+        return TestResult::Fail;
+    };
 
     // Straight out of `task_create`: registered, Blocked, Nascent. User-mode
     // because a broadcast kill only ever names user tasks.
@@ -6223,7 +6588,13 @@ pub fn test_rt_sigaction_round_trips_every_field() -> TestResult {
     let task_id = create_test_user_task();
     assert_test!(task_id != INVALID_TASK_ID, "failed to create user task");
     let task_guard = assert_some!(task_find_by_id(task_id), "task lookup failed");
-    let pid = task_guard.process_id;
+    let Some(pid) = task_guard
+        .process()
+        .as_deref()
+        .and_then(slopos_fs::fileio::FdTable::of)
+    else {
+        return TestResult::Fail;
+    };
 
     let page = match map_user_rw_page(pid) {
         Some(v) => v,
@@ -6409,7 +6780,13 @@ pub fn test_rt_sigaction_bounds_signum_at_nsig() -> TestResult {
     let task_id = create_test_user_task();
     assert_test!(task_id != INVALID_TASK_ID, "failed to create user task");
     let task_guard = assert_some!(task_find_by_id(task_id), "task lookup failed");
-    let pid = task_guard.process_id;
+    let Some(pid) = task_guard
+        .process()
+        .as_deref()
+        .and_then(slopos_fs::fileio::FdTable::of)
+    else {
+        return TestResult::Fail;
+    };
 
     let page = match map_user_rw_page(pid) {
         Some(v) => v,
@@ -6517,7 +6894,13 @@ pub fn test_kernel_private_pending_bit_is_not_a_signal() -> TestResult {
     let task_id = create_test_user_task();
     assert_test!(task_id != INVALID_TASK_ID, "failed to create user task");
     let task_guard = assert_some!(task_find_by_id(task_id), "task lookup failed");
-    let pid = task_guard.process_id;
+    let Some(pid) = task_guard
+        .process()
+        .as_deref()
+        .and_then(slopos_fs::fileio::FdTable::of)
+    else {
+        return TestResult::Fail;
+    };
 
     // One bit above the kill flag: a kernel-private bit with no meaning
     // attached, so this exercises the masking alone rather than kill
@@ -6601,7 +6984,13 @@ pub fn test_broadcast_kill_spares_kernel_tasks() -> TestResult {
     let user_id = create_test_user_task();
     assert_test!(user_id != INVALID_TASK_ID, "failed to create user task");
     let user_guard = assert_some!(task_find_by_id(user_id), "task lookup failed");
-    let pid = user_guard.process_id;
+    let Some(pid) = user_guard
+        .process()
+        .as_deref()
+        .and_then(slopos_fs::fileio::FdTable::of)
+    else {
+        return TestResult::Fail;
+    };
 
     let mut kill_frame: KBox<UserContext> = KBox::zeroed().expect("alloc");
     kill_frame.regs_mut().rdi = (-1i64) as u64;
@@ -6665,9 +7054,21 @@ pub fn test_kill_refuses_a_more_privileged_target() -> TestResult {
     );
 
     let plain_guard = assert_some!(task_find_by_id(plain_id), "task lookup failed");
-    let plain_pid = plain_guard.process_id;
+    let Some(plain_pid) = plain_guard
+        .process()
+        .as_deref()
+        .and_then(slopos_fs::fileio::FdTable::of)
+    else {
+        return TestResult::Fail;
+    };
     let privileged_guard = assert_some!(task_find_by_id(privileged_id), "task lookup failed");
-    let privileged_pid = privileged_guard.process_id;
+    let Some(privileged_pid) = privileged_guard
+        .process()
+        .as_deref()
+        .and_then(slopos_fs::fileio::FdTable::of)
+    else {
+        return TestResult::Fail;
+    };
 
     // Upward: refused, and nothing is pended.
     let mut up: KBox<UserContext> = KBox::zeroed().expect("alloc");
@@ -6737,7 +7138,13 @@ pub fn test_broadcast_kill_spares_privileged_tasks() -> TestResult {
     );
 
     let sender_guard = assert_some!(task_find_by_id(sender_id), "task lookup failed");
-    let sender_pid = sender_guard.process_id;
+    let Some(sender_pid) = sender_guard
+        .process()
+        .as_deref()
+        .and_then(slopos_fs::fileio::FdTable::of)
+    else {
+        return TestResult::Fail;
+    };
 
     let mut frame: KBox<UserContext> = KBox::zeroed().expect("alloc");
     frame.regs_mut().rdi = (-1i64) as u64;
@@ -6783,7 +7190,13 @@ pub fn test_waitpid_refuses_a_task_that_is_not_a_child() -> TestResult {
     );
 
     let stranger_guard = assert_some!(task_find_by_id(stranger_id), "task lookup failed");
-    let stranger_pid = stranger_guard.process_id;
+    let Some(stranger_pid) = stranger_guard
+        .process()
+        .as_deref()
+        .and_then(slopos_fs::fileio::FdTable::of)
+    else {
+        return TestResult::Fail;
+    };
 
     // WNOHANG so the permitted case reports "alive, nothing to reap" instead
     // of blocking the test on a task that never exits.
@@ -6850,7 +7263,13 @@ pub fn test_killed_task_exits_at_return_to_user() -> TestResult {
     let task_id = create_test_user_task();
     assert_test!(task_id != INVALID_TASK_ID, "failed to create user task");
     let task_guard = assert_some!(task_find_by_id(task_id), "task lookup failed");
-    let pid = task_guard.process_id;
+    let Some(pid) = task_guard
+        .process()
+        .as_deref()
+        .and_then(slopos_fs::fileio::FdTable::of)
+    else {
+        return TestResult::Fail;
+    };
 
     assert_test!(
         !task_guard.is_killed(),
@@ -6905,12 +7324,24 @@ pub fn test_sigkill_marks_the_target_and_exits_with_the_signal() -> TestResult {
     let victim_id = create_test_user_task();
     assert_test!(victim_id != INVALID_TASK_ID, "failed to create the victim");
     let victim = assert_some!(task_find_by_id(victim_id), "victim lookup failed");
-    let victim_pid = victim.process_id;
+    let Some(victim_pid) = victim
+        .process()
+        .as_deref()
+        .and_then(slopos_fs::fileio::FdTable::of)
+    else {
+        return TestResult::Fail;
+    };
 
     let caller_id = create_test_user_task();
     assert_test!(caller_id != INVALID_TASK_ID, "failed to create the caller");
     let caller = assert_some!(task_find_by_id(caller_id), "caller lookup failed");
-    let caller_pid = caller.process_id;
+    let Some(caller_pid) = caller
+        .process()
+        .as_deref()
+        .and_then(slopos_fs::fileio::FdTable::of)
+    else {
+        return TestResult::Fail;
+    };
 
     let mut frame: KBox<UserContext> = KBox::zeroed().expect("alloc");
     frame.regs_mut().rdi = victim_id as u64;
@@ -6974,9 +7405,21 @@ pub fn test_keymap_load_requires_console_admin() -> TestResult {
     assert_test!(admin_id != INVALID_TASK_ID, "failed to create admin task");
 
     let plain_guard = assert_some!(task_find_by_id(plain_id), "task lookup failed");
-    let plain_pid = plain_guard.process_id;
+    let Some(plain_pid) = plain_guard
+        .process()
+        .as_deref()
+        .and_then(slopos_fs::fileio::FdTable::of)
+    else {
+        return TestResult::Fail;
+    };
     let admin_guard = assert_some!(task_find_by_id(admin_id), "task lookup failed");
-    let admin_pid = admin_guard.process_id;
+    let Some(admin_pid) = admin_guard
+        .process()
+        .as_deref()
+        .and_then(slopos_fs::fileio::FdTable::of)
+    else {
+        return TestResult::Fail;
+    };
 
     let Some(user_buf) = map_user_rw_page(plain_pid) else {
         return fail!("could not map a user page");

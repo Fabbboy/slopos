@@ -1026,26 +1026,27 @@ struct ScratchProcess {
 
 impl ScratchProcess {
     fn new() -> Option<Self> {
-        use crate::fileio::fileio_create_empty_table_for_process_handle;
+        use crate::fileio::fileio_create_empty_table_for_process;
         let process = slopos_ostd::process::process_spawn_root().ok()?;
         let handle = process.handle()?;
-        if fileio_create_empty_table_for_process_handle(handle) != 0 {
+        if fileio_create_empty_table_for_process(handle) != 0 {
             slopos_ostd::process::process_retire(handle);
             return None;
         }
         Some(Self { process })
     }
 
-    fn pid(&self) -> u32 {
-        self.process.id()
+    /// The descriptor table this process owns.
+    fn table(&self) -> crate::fileio::FdTable {
+        crate::fileio::FdTable::of(&self.process).expect("a registered process has a table")
     }
 }
 
 impl Drop for ScratchProcess {
     fn drop(&mut self) {
-        use crate::fileio::fileio_destroy_table_for_process_handle;
+        use crate::fileio::fileio_destroy_table_for_process;
         if let Some(handle) = self.process.handle() {
-            fileio_destroy_table_for_process_handle(handle);
+            fileio_destroy_table_for_process(handle);
             slopos_ostd::process::process_retire(handle);
         }
     }
@@ -1072,12 +1073,12 @@ pub fn test_fileio_open_at_fd() -> TestResult {
     let Some(scratch) = ScratchProcess::new() else {
         return TestResult::Fail;
     };
-    let pid = scratch.pid();
+    let table = scratch.table();
 
     // Next-free would be fd 0; opening at fd 5 must relocate off it.
-    let rc = fileio_open_at_fd(pid, 5, b"/fileio_test/open_at.txt", O_RDONLY as u32);
-    let present = rc == 5 && file_close_fd(pid, 5) == 0;
-    let low_absent = file_close_fd(pid, 0) != 0;
+    let rc = fileio_open_at_fd(table, 5, b"/fileio_test/open_at.txt", O_RDONLY as u32);
+    let present = rc == 5 && file_close_fd(table, 5) == 0;
+    let low_absent = file_close_fd(table, 0) != 0;
 
     if present && low_absent {
         TestResult::Pass
@@ -1105,29 +1106,29 @@ pub fn test_fileio_file_ref_move() -> TestResult {
     let Some(scratch) = ScratchProcess::new() else {
         return TestResult::Fail;
     };
-    let pid = scratch.pid();
-    if fileio_open_at_fd(pid, 2, b"/fileio_test/refmove.txt", O_RDONLY as u32) != 2 {
+    let table = scratch.table();
+    if fileio_open_at_fd(table, 2, b"/fileio_test/refmove.txt", O_RDONLY as u32) != 2 {
         return TestResult::Fail;
     }
 
     // Clone fd 2 → install a shared alias at fd 7.
     let outcome = (|| {
-        let cloned = fileio_clone_file_ref(pid, 2)?;
-        if fileio_install_file_ref_at(pid, 7, cloned, false) != 7 {
+        let cloned = fileio_clone_file_ref(table, 2)?;
+        if fileio_install_file_ref_at(table, 7, cloned, false) != 7 {
             return None;
         }
         // Move fd 2 → fd 9; fd 2 is emptied by the take.
-        let taken = fileio_take_file_ref(pid, 2)?;
-        if fileio_install_file_ref_at(pid, 9, taken, false) != 9 {
+        let taken = fileio_take_file_ref(table, 2)?;
+        if fileio_install_file_ref_at(table, 9, taken, false) != 9 {
             return None;
         }
         Some(())
     })();
 
     let ok = outcome.is_some()
-        && file_close_fd(pid, 2) != 0
-        && file_close_fd(pid, 7) == 0
-        && file_close_fd(pid, 9) == 0;
+        && file_close_fd(table, 2) != 0
+        && file_close_fd(table, 7) == 0
+        && file_close_fd(table, 9) == 0;
 
     if ok {
         TestResult::Pass
@@ -1329,12 +1330,12 @@ pub fn test_fileio_open_file_limit() -> TestResult {
     let Some(scratch) = ScratchProcess::new() else {
         return TestResult::Fail;
     };
-    let pid = scratch.pid();
+    let table = scratch.table();
 
     let mut opened = 0usize;
     let mut first_failure = 0i32;
     for _ in 0..FILEIO_MAX_OPEN_FILES + 1 {
-        let fd = file_open_for_process(pid, b"/fileio_test/limit.txt", O_RDONLY as u32);
+        let fd = file_open_for_process(table, b"/fileio_test/limit.txt", O_RDONLY as u32);
         if fd < 0 {
             first_failure = fd;
             break;

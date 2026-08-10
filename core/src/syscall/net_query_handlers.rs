@@ -35,6 +35,7 @@ use slopos_abi::net::{
     UserNetGlobal, UserNetQueryHdr, UserResolver, UserRoute, UserSockInfo,
 };
 use slopos_abi::task::INVALID_PROCESS_ID;
+use slopos_fs::fileio::FdTable;
 use slopos_mm::user_copy::copy_to_user;
 use slopos_net::iface::{self, Iface, IfaceAddr};
 use slopos_net::neighbor::NEIGHBOR_CACHE;
@@ -246,7 +247,12 @@ fn query_routes(buf: u64, len: usize, ifindex: u32) -> Result<u64, Errno> {
 ///
 /// So `total_count` is the number of sockets that exist, and a truncated read
 /// means the buffer was short rather than that rows were withheld.
-fn query_sockets(buf: u64, len: usize, caller_pid: u32, net_admin: bool) -> Result<u64, Errno> {
+fn query_sockets(
+    buf: u64,
+    len: usize,
+    caller_table: FdTable,
+    net_admin: bool,
+) -> Result<u64, Errno> {
     // Allocated before anything is taken: the collector fills it under the
     // socket table lock, and the allocator is where every subsystem meets.
     // Sized from the table's live capacity rather than `MAX_SOCKETS`: the slab
@@ -262,14 +268,14 @@ fn query_sockets(buf: u64, len: usize, caller_pid: u32, net_admin: bool) -> Resu
     let written = total.min(capacity_for(len, size));
     let base = write_header(buf, len, NET_Q_SOCKETS, size, written, total)?;
     for (i, row) in staging.iter().take(written).enumerate() {
-        write_record(base, i, &render_sock(row, caller_pid, net_admin))?;
+        write_record(base, i, &render_sock(row, caller_table, net_admin))?;
     }
     Ok(core::mem::size_of::<UserNetQueryHdr>() as u64 + (written * size) as u64)
 }
 
 fn render_sock(
     src: &slopos_net::socket::SocketRow,
-    caller_pid: u32,
+    caller_table: FdTable,
     net_admin: bool,
 ) -> UserSockInfo {
     // Field by field from a zeroed value: the ABI has no implicit padding, so
@@ -290,7 +296,7 @@ fn render_sock(
     // `getpid` returns and `kill` takes. A caller that may not have it gets the
     // same sentinel an unowned socket carries, so "not disclosed to you" is not
     // itself a disclosure.
-    out.owner_pid = if net_admin || src.owner.process_id == caller_pid {
+    out.owner_pid = if net_admin || src.owner.process == Some(caller_table) {
         src.owner.task_id
     } else {
         INVALID_PROCESS_ID

@@ -7,9 +7,9 @@ use slopos_ostd::{KArc, KBTreeMap, KWeak};
 
 use super::*;
 
-pub fn file_poll_register_pipes(process_id: u32, fds: &[(c_int, u16)]) -> usize {
+pub fn file_poll_register_pipes(table: FdTable, fds: &[(c_int, u16)]) -> usize {
     let mut registered = 0usize;
-    let _ = with_pid_slot(process_id, |inner| {
+    let _ = with_table_slot(table, |inner| {
         for &(fd, events) in fds {
             let Some(open_file) = snapshot_open_file(inner, fd) else {
                 continue;
@@ -33,8 +33,8 @@ pub fn file_poll_register_pipes(process_id: u32, fds: &[(c_int, u16)]) -> usize 
     registered
 }
 
-pub fn file_poll_unregister_pipes(process_id: u32, fds: &[(c_int, u16)]) {
-    let _ = with_pid_slot(process_id, |inner| {
+pub fn file_poll_unregister_pipes(table: FdTable, fds: &[(c_int, u16)]) {
+    let _ = with_table_slot(table, |inner| {
         for &(fd, events) in fds {
             let Some(open_file) = snapshot_open_file(inner, fd) else {
                 continue;
@@ -56,8 +56,8 @@ fn snapshot_open_file(inner: &FileTableSlotInner, fd: c_int) -> Option<KArc<Open
     Some(get_fd_entry(inner, fd)?.open_file.clone())
 }
 
-pub fn file_poll_register_fd(process_id: u32, fd: c_int, events: u16) -> PollRegInfo {
-    with_pid_slot(process_id, |inner| {
+pub fn file_poll_register_fd(table: FdTable, fd: c_int, events: u16) -> PollRegInfo {
+    with_table_slot(table, |inner| {
         let Some(open_file) = snapshot_open_file(inner, fd) else {
             return PollRegInfo::none();
         };
@@ -164,7 +164,7 @@ fn poll_reg_take(token: u64) -> Option<KWeak<OpenFile>> {
 
 /// Fused poll: register waiter + check readiness in one call.
 pub fn file_poll_fused(
-    process_id: u32,
+    table: FdTable,
     fd: c_int,
     events: u16,
 ) -> slopos_abi::file_ops::FusedPollResult {
@@ -174,7 +174,7 @@ pub fn file_poll_fused(
         registered: false,
         open_file_token: 0,
     };
-    with_pid_slot(process_id, |inner| {
+    with_table_slot(table, |inner| {
         let Some(open_file) = snapshot_open_file(inner, fd) else {
             return invalid;
         };
@@ -211,8 +211,8 @@ pub fn file_poll_unfused_by_token(open_file_token: u64) {
     }
 }
 
-pub fn file_poll_fd(process_id: u32, fd: c_int, events: u16) -> u16 {
-    with_pid_slot(process_id, |inner| {
+pub fn file_poll_fd(table: FdTable, fd: c_int, events: u16) -> u16 {
+    with_table_slot(table, |inner| {
         let Some(open_file) = snapshot_open_file(inner, fd) else {
             return POLLNVAL;
         };

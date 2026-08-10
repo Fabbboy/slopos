@@ -16,6 +16,7 @@
 //! interface registers its own mock device and removes it again.
 
 use core::sync::atomic::{AtomicBool, Ordering};
+use slopos_fs::fileio::FdTable;
 
 use slopos_testing::TestResult;
 use slopos_testing::{assert_eq_test, assert_test, fail, pass};
@@ -34,7 +35,13 @@ use crate::packetbuf::PacketBuf;
 use crate::pool::PacketPool;
 use crate::types::{DevIndex, MacAddr, NetError};
 
-const TEST_PID: u32 = 0xC0FF_EE01;
+/// The owner these tests register monitors under.
+///
+/// The kernel's table rather than a synthetic pid: a monitor's owner is a
+/// permission key, and a made-up number is not one any process could hold.
+/// What the tests need is a *nameable, distinguishable* owner, which this is
+/// without registering a process.
+const TEST_OWNER: FdTable = FdTable::Kernel;
 
 /// A scratch classifier. Never [`CONNECTIVITY`]: that one describes the machine
 /// this test is running on, and rewriting it would make every later reader —
@@ -304,7 +311,7 @@ fn test_conn_off_link_needs_a_cached_prefix() -> TestResult {
 /// A transition announces itself to the monitors exactly once, with the states
 /// either side in the payload.
 fn test_conn_transition_posts_one_event() -> TestResult {
-    let handle = match NETMON_TABLE.open(TEST_PID, NET_MON_CONN) {
+    let handle = match NETMON_TABLE.open(TEST_OWNER, NET_MON_CONN) {
         Ok(h) => h,
         Err(_) => return fail!("the kernel registry must have a free slot"),
     };

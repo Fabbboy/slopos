@@ -36,7 +36,7 @@ use crate::scheduler;
 use crate::task_stack::{KernelStack, UnsafeStack};
 use crate::task_struct::SwitchContext;
 use slopos_fs::fileio::{
-    fileio_clone_table_for_process_handle, fileio_create_table_for_process_handle,
+    FdTable, fileio_clone_table_for_process, fileio_create_table_for_process,
     fileio_destroy_table_for_process,
 };
 use slopos_kernel_services::syscall_services::tty;
@@ -158,7 +158,7 @@ impl ProcessResourceLease {
 
         // By handle, into the process's own slot — the same slot its address
         // space occupies. All three tables are now one slot space.
-        if process.handle().map(fileio_create_table_for_process_handle) != Some(0) {
+        if process.handle().map(fileio_create_table_for_process) != Some(0) {
             destroy_process_vm(vm.process_id);
             return None;
         }
@@ -177,9 +177,13 @@ impl ProcessResourceLease {
         let process = Self::mint_process(parent.process().as_deref())?;
         let child = process_vm_clone_cow_for(parent_process_id, process.clone())?;
 
+        let Some(parent_table) = parent.process().and_then(|p| FdTable::of(&p)) else {
+            destroy_process_vm(child.process_id);
+            return None;
+        };
         if process
             .handle()
-            .map(|handle| fileio_clone_table_for_process_handle(parent_process_id, handle))
+            .map(|handle| fileio_clone_table_for_process(parent_table, handle))
             != Some(0)
         {
             destroy_process_vm(child.process_id);
@@ -208,16 +212,25 @@ impl ProcessResourceLease {
         (process_id, self.process.take())
     }
 
-    fn cleanup_owned_process(process_id: u32, owns_vm: bool, owns_file_table: bool) {
-        if process_id == INVALID_PROCESS_ID {
+    /// Release the address space and descriptor table a process owns.
+    ///
+    /// Takes the process rather than its id: both tables are keyed on the
+    /// handle, and a pid argument here would have to be re-resolved — which is
+    /// the lookup that cannot distinguish a recycled number from the process
+    /// this lease actually created.
+    fn cleanup_owned_process(
+        process: Option<&KArc<Process>>,
+        owns_vm: bool,
+        owns_file_table: bool,
+    ) {
+        let Some(process) = process else {
             return;
-        }
-
-        if owns_file_table {
-            fileio_destroy_table_for_process(process_id);
+        };
+        if owns_file_table && let Some(handle) = process.handle() {
+            fileio_destroy_table_for_process(handle);
         }
         if owns_vm {
-            destroy_process_vm(process_id);
+            destroy_process_vm(process.id());
         }
     }
 }
@@ -228,7 +241,7 @@ impl Drop for ProcessResourceLease {
         // slot and retires the registration as its last step, and the two
         // share a slot space. Retiring first would free the registry slot
         // while the old page tables were still bound to it.
-        Self::cleanup_owned_process(self.process_id, self.owns_vm, self.owns_file_table);
+        Self::cleanup_owned_process(self.process.as_ref(), self.owns_vm, self.owns_file_table);
         // A lease that never got as far as an address space still holds a
         // registration, and only this can retire it.
         if let Some(process) = self.process.take()
@@ -320,7 +333,6 @@ fn allocate_task_create_resources(flags: u16) -> Option<TaskCreateResources> {
 /// halves were released.
 fn cleanup_task_create_resources(resources: TaskCreateResources) {
     let TaskCreateResources {
-        process_id,
         process,
         kernel_stack,
         unsafe_stack,
@@ -329,8 +341,8 @@ fn cleanup_task_create_resources(resources: TaskCreateResources) {
     // Teardown first, retire second — the two tables share a slot space, so a
     // registry slot freed ahead of the unbind would be handed out while the
     // old address space still occupied it.
-    ProcessResourceLease::cleanup_owned_process(process_id, true, true);
-    if let Some(process) = process
+    ProcessResourceLease::cleanup_owned_process(process.as_ref(), true, true);
+    if let Some(process) = process.as_ref()
         && let Some(handle) = process.handle()
     {
         process_retire(handle);
@@ -349,20 +361,23 @@ fn cleanup_task_process_resources(task: &Task, resolved_id: u32, mode: TaskProce
         run_task_resource_cleanup_hooks(resolved_id);
     }
 
-    let process_id = task.process_id;
-    if process_id == INVALID_PROCESS_ID {
+    // The task's own process, not a re-resolution of its id: this is the exit
+    // path, so the id may already name somebody else by the time a lookup ran.
+    let Some(process) = task.process() else {
         return;
-    }
+    };
 
     if !task_leaves_process(task) {
         return;
     }
 
-    fileio_destroy_table_for_process(process_id);
+    if let Some(handle) = process.handle() {
+        fileio_destroy_table_for_process(handle);
+    }
     if matches!(mode, TaskProcessCleanupMode::DropVm)
         && task.exit_cleanup_mark(TASK_EXIT_CLEANUP_VM) & TASK_EXIT_CLEANUP_VM != 0
     {
-        destroy_process_vm(process_id);
+        destroy_process_vm(process.id());
     }
 }
 
@@ -859,16 +874,15 @@ pub fn task_commit(pending: PendingTask) -> Option<TaskRef> {
 /// share keeps the address space; a task whose handle is stale names a process
 /// somebody already tore down, and answers `false`.
 pub fn task_abandon(mut pending: PendingTask) {
-    let process_id = {
+    let process = {
         let task = pending.as_mut();
-        if task_leaves_process(task) {
-            task.process_id
-        } else {
-            INVALID_PROCESS_ID
-        }
+        task_leaves_process(task).then(|| task.process()).flatten()
     };
-    if process_id != INVALID_PROCESS_ID {
-        ProcessResourceLease::cleanup_owned_process(process_id, true, true);
+    if let Some(process) = process.as_ref() {
+        ProcessResourceLease::cleanup_owned_process(Some(process), true, true);
+        if let Some(handle) = process.handle() {
+            process_retire(handle);
+        }
     }
     drop(pending);
 }

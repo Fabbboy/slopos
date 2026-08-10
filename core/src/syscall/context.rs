@@ -11,9 +11,10 @@
 
 use slopos_abi::Errno;
 use slopos_abi::task::{
-    INVALID_PROCESS_ID, TASK_FLAG_COMPOSITOR, TASK_FLAG_CONSOLE_ADMIN, TASK_FLAG_DISPLAY_EXCLUSIVE,
+    TASK_FLAG_COMPOSITOR, TASK_FLAG_CONSOLE_ADMIN, TASK_FLAG_DISPLAY_EXCLUSIVE,
     TASK_FLAG_NET_ADMIN, TASK_FLAG_SYSTEM,
 };
+use slopos_fs::fileio::FdTable;
 use slopos_ostd::KArc;
 use slopos_ostd::mm::vm_space::VmSpace;
 use slopos_ostd::user::context::UserContext;
@@ -122,8 +123,12 @@ impl<'a> SyscallContext<'a> {
     }
 
     /// The calling task's process id, or `INVALID_PROCESS_ID` for a task bound
-    /// to no process. Use [`require_process_id`](Self::require_process_id) when
-    /// the handler needs a real one.
+    /// to no process.
+    ///
+    /// Display and ABI only — `getpid` returns this. A handler that needs to
+    /// *act* on the caller's process wants
+    /// [`require_process`](Self::require_process), which cannot be confused
+    /// with a recycled number.
     #[inline]
     pub fn process_id(&self) -> u32 {
         self.task.process_id
@@ -134,19 +139,27 @@ impl<'a> SyscallContext<'a> {
         Ok(self.task_id)
     }
 
+    /// The calling process's descriptor table.
+    ///
+    /// Read from the task's own `process_handle`, never resolved from its id:
+    /// the task holds the authoritative generation-checked designator, so
+    /// there is no lookup here to get wrong. `ESRCH` for a kernel task, which
+    /// belongs to no process — and never [`FdTable::Kernel`], which would hand
+    /// a user process the descriptors every kernel task shares.
     #[inline]
-    pub fn require_process_id(&self) -> Result<u32, Errno> {
-        match self.process_id() {
-            pid if pid != INVALID_PROCESS_ID => Ok(pid),
-            _ => Err(Errno::ESRCH),
-        }
+    pub fn require_process(&self) -> Result<FdTable, Errno> {
+        self.task
+            .process()
+            .as_deref()
+            .and_then(FdTable::of)
+            .ok_or(Errno::ESRCH)
     }
 
     /// Resolve the caller's [`VmSpace`]. Returns `EFAULT` if the
     /// caller is bound to no process or the process has no VM space.
     pub fn vm_space(&self) -> Result<KArc<VmSpace>, Errno> {
-        let pid = self.require_process_id()?;
-        slopos_mm::process_vm::process_vm_get_vm_space(pid).ok_or(Errno::EFAULT)
+        let table = self.require_process()?;
+        slopos_mm::process_vm::process_vm_get_vm_space(table.id()).ok_or(Errno::EFAULT)
     }
 
     // ── Permission checks ─────────────────────────────────────────────
