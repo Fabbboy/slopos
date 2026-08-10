@@ -206,6 +206,14 @@ pub fn fileio_destroy_table_for_process(process_id: u32) {
     destroy_table_in_slot(slot);
 }
 
+/// Whether `process` currently owns a descriptor table.
+///
+/// A generation-checked question, so a handle whose slot has been rebound
+/// answers `false` rather than reporting the new occupant's table as its own.
+pub fn fileio_table_exists_for_process(process: Handle<Process>) -> bool {
+    slot_for_process(process).is_some()
+}
+
 /// Release every bound descriptor table. Fixture reset only.
 ///
 /// The counterpart to `slopos_mm::process_vm::init_process_vm`, and the reason

@@ -93,6 +93,83 @@ pub fn test_a_fixture_reset_releases_fd_tables() -> TestResult {
     TestResult::Pass
 }
 
+/// A recycled process id does not resolve to the prior principal.
+///
+/// This is the property the whole re-key exists to deliver, asserted end to
+/// end across all three tables rather than on any one of them. A process is
+/// created with an address space and a descriptor table, torn down, and its id
+/// immediately reissued — which the lowest-free allocator guarantees, and
+/// which used to be exactly what the FIFO ring existed to prevent.
+///
+/// What must hold: the second process is a *different* principal, and every
+/// designator minted against the first says so. A handle that resolved to the
+/// second would be the confused deputy — with the kernel as the deputy,
+/// servicing a fault or an open in a stranger's tables.
+pub fn test_a_recycled_pid_does_not_resolve_to_the_prior_principal() -> TestResult {
+    use slopos_ostd::process::{process_for_handle, process_retire, process_spawn_root};
+
+    let Ok(first) = process_spawn_root() else {
+        klog_info!("PROC_ID_TEST: could not register a process");
+        return TestResult::Fail;
+    };
+    let first_id = first.id();
+    let Some(stale) = first.handle() else {
+        klog_info!("PROC_ID_TEST: a registered process carries no handle");
+        return TestResult::Fail;
+    };
+    if slopos_mm::process_vm::create_process_vm_for(first.clone()).is_none() {
+        klog_info!("PROC_ID_TEST: could not give the first process an address space");
+        return TestResult::Fail;
+    }
+    if slopos_fs::fileio::fileio_create_table_for_process_handle(stale) != 0 {
+        klog_info!("PROC_ID_TEST: could not give the first process a descriptor table");
+        destroy_process_vm(first_id);
+        return TestResult::Fail;
+    }
+
+    // Tear the first process down completely, then drop the last reference so
+    // its id returns to the allocator.
+    slopos_fs::fileio::fileio_destroy_table_for_process_handle(stale);
+    destroy_process_vm(first_id);
+    process_retire(stale);
+    drop(first);
+
+    let Ok(second) = process_spawn_root() else {
+        klog_info!("PROC_ID_TEST: could not register a second process");
+        return TestResult::Fail;
+    };
+    let second_id = second.id();
+    let second_handle = second.handle();
+    let resolved_stale = process_for_handle(stale).map(|p| p.id());
+    let vm_after = slopos_mm::process_vm::process_vm_handle_for(stale).is_some();
+    let table_after = slopos_fs::fileio::fileio_table_exists_for_process(stale);
+
+    if let Some(handle) = second_handle {
+        process_retire(handle);
+    }
+    drop(second);
+
+    assert_test!(
+        second_id == first_id,
+        "the id was not reissued ({second_id} != {first_id}) — this test proves \
+         nothing unless the number actually recycles"
+    );
+    assert_test!(
+        resolved_stale.is_none(),
+        "a handle to the retired process resolved to process {resolved_stale:?}, \
+         which now carries the same id — the confused deputy"
+    );
+    assert_test!(
+        !vm_after,
+        "a stale handle still names an address space after its process was reaped"
+    );
+    assert_test!(
+        !table_after,
+        "a stale handle still names a descriptor table after its process was reaped"
+    );
+    TestResult::Pass
+}
+
 /// Descriptors are never installed into the kernel's table on behalf of a
 /// process that has none of its own.
 ///
@@ -156,5 +233,9 @@ slopos_testing::stest!(
 );
 slopos_testing::stest!(
     name = test_a_fixture_reset_releases_fd_tables,
+    suite = process_identity
+);
+slopos_testing::stest!(
+    name = test_a_recycled_pid_does_not_resolve_to_the_prior_principal,
     suite = process_identity
 );
