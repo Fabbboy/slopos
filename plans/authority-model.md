@@ -17,8 +17,8 @@ Linux-ABI kernel whose syscalls take integers, so authorization is a credential 
 against arguments, which is ambient by the standard definition. What is new is that
 forgetting the check is a compile error rather than a review miss.
 
-**Depends on `plans/process-object.md`** for an owner to hang a credential on, and on its
-phase 4 for a pid that is a sound designator. The kernel-hardening pass landed first and
+The owner to hang a credential on is `slopos_ostd::process::Process`, and the pid is a
+sound designator: ids are generation-stamped and a stale one fails closed. The kernel-hardening pass landed first and
 carries every fix that needs no capability system at all.
 
 ---
@@ -460,7 +460,7 @@ Migrations, in priority order:
    so today it is a pid in a different encoding — routing `kill` through it would launder the
    designation problem into the object layer where it is harder to see. Fix, then add
    `pidfd_send_signal`.
-4. **The pid table** — `plans/process-object.md` phase 4.
+4. **The pid table** — landed.
 5. **`write`/`read` → controlling TTY**, which deletes `ConsoleIo`
    (landed).
 6. **The path namespace** — the initramfs seal (landed).
@@ -596,7 +596,7 @@ additionally defaults `process_list` to session scope.
 
 The `Signalable` family; `kill`'s four arms; `terminate_task`; the `getpgid` relation;
 authorize `pidfd_open` at mint time; add `pidfd_send_signal`; keep the pid forms as a
-resolve-once shim. Requires `plans/process-object.md` phase 4.
+resolve-once shim. The pid table it needs has landed.
 
 ### Phase 6 — `Cred` and `Launch`
 
@@ -646,9 +646,9 @@ mask's republish are **audited, not proved** — Verus has no weak-memory model.
 |---|---|
 | `cred: RcuArcSlot<Cred>` | authority — immutable value, no interior mutability, trivial `Drop` |
 | `account: AccountId`, `account_parent` | accounting — parent immutable after creation |
-| `id` (generation-bearing) | authority — `plans/process-object.md` phase 4; `prlimit64` blocks on it |
+| `id` (generation-bearing) | landed; `prlimit64` no longer blocks on it |
 | address-space handle, descriptor table | accounting owns capacity; authority owns per-entry rights |
-| `parent`, `children`, `task_count` | shared; `plans/process-object.md` defines them |
+| `parent`, `account_parent`, `task_count` | shared; `slopos_ostd::process` defines them |
 | `caps: AtomicU64` (on `Task`) | authority — a cache; the `Cred` is the record |
 
 **Authority is flat. The account tree is the single hierarchy and carries no authority.**
@@ -671,7 +671,7 @@ and has unforgeable identity.
 Three cross-plan constraints:
 
 - **`prlimit64` names a target pid and is therefore a new confused-deputy surface.** It must
-  not be specified before `plans/process-object.md` phase 4, and it lands with
+  could not be specified before the pid table landed, and it lands with
   capability-free relation authorization: same-process free, a foreign target needs the
   relation.
 - **A `Cred` `Drop` must stay trivial**, so it may not own an account reference. The

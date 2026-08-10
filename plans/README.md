@@ -15,17 +15,16 @@ editing.
 | Document | Scope |
 |----------|-------|
 | `KNOWN_ISSUES.md` | Working notes on open issues; verify before using as source of truth |
-| `process-object.md` | The `Process` object and the re-key of the address-space and descriptor tables off the recycled pid. Prerequisite for the two below |
 | `resource-accounting.md` | Per-principal accounting: the `Account` tree, the linear `Charge` token, who pays per resource class |
 | `authority-model.md` | What authority is: a flat per-process capability set, total by compile-time construction, with rights on objects |
 | `driver-framework-base.html` | Driver-framework base: unified Bus model, platform/ACPI registry, deferred-probe/hotplug/unbind |
 | `microtransactions.md` | Kernel microtransaction layer on W/L currency; Phase 1 = pay-to-boot gate |
 | `usb-xhci.md` | USB/xHCI stack: host controller, enumeration, HID input, mass storage |
 
-`process-object.md` → {`resource-accounting.md`,
-`authority-model.md`} is a dependency order, not a suggestion: the latter two both need an
-owner for their state, and the first two carry the fixes that would otherwise be hidden
-rather than fixed by the frameworks above them.
+`resource-accounting.md` and `authority-model.md` both build on the `Process` object, which
+has landed: `slopos_ostd::process` owns the identity, and the address-space and descriptor
+tables are keyed on `Handle<Process>` rather than on a recycled pid. An account has an owner
+to hang off and a credential has a principal to belong to.
 
 ## When To Promote A Plan
 

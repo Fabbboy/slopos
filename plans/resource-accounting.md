@@ -22,8 +22,9 @@ Repeatable form: *one account per process, parent fixed at spawn, hierarchical d
 over-committed ceilings, the charge lives in the object, refund is atomics-only, and the
 id is generation-stamped so a stale refund is a defined no-op.*
 
-**Depends on `plans/process-object.md` phases 1–3** for the account's owner and for a
-process identity that does not recycle. The kernel-hardening pass landed first, because
+The account's owner and a process identity that does not recycle are in place:
+`slopos_ostd::process::Process` carries a generation-stamped handle, and `AccountId` plus
+the arena's placement landed with it. The kernel-hardening pass landed first, because
 two of its items are what stop the tables lying about their capacity.
 
 ---
@@ -565,7 +566,7 @@ What survives, each with its caveat:
 
 ## Phases
 
-Depends on `plans/process-object.md` phases 1–3. `cargo fmt --all`, then
+`cargo fmt --all`, then
 `just build && just _iso-tests && just test` per commit.
 
 ### Phase 1 — the mechanism, with one kind end to end
