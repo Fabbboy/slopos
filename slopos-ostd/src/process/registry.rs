@@ -24,20 +24,33 @@
 //! generation lives in the slot and is bumped on removal, so a handle minted
 //! for a previous occupant resolves to [`HandleError::Stale`].
 //!
-//! # Weak entries, and why a zombie stays resolvable
+//! # The registry owns the process, and a zombie stays resolvable
 //!
-//! The table holds [`KWeak<Process>`], never a strong reference. A strong one
-//! would make the registry the owner and the last task's exit *not* the last
-//! release, which is precisely the decision the object exists to make
-//! answerable. The owning reference lives in the spawn lease and, after that,
-//! in each task's handle.
+//! The table holds a strong [`KArc<Process>`], so registration *is* ownership
+//! — the "linked implies owned" rule the task containers already follow. It
+//! has to be strong: a task names its process by a *packed handle*, which is a
+//! designator and not a reference, so a weak table would leave the object
+//! owned by nobody the moment the spawn lease disarmed.
 //!
-//! A process whose tasks have all exited stays in the table until it is
-//! reaped, because that is the window a `waitpid` arrives in. Its id stays
-//! allocated for the same reason: an id released at last-task-exit could be
-//! handed to a stranger before the parent has read the exit status, and the
-//! parent would then be told about the wrong process. The id comes back in
-//! [`Process::drop`], which runs when the last handle goes — after the reap.
+//! [`process_retire`] is therefore the release, and it is usually the last
+//! one. Usually, not always: [`process_resolve`] hands back a clone, so a
+//! caller holding one mid-operation is not yanked out from under by a
+//! concurrent reap. That is the whole reason the release is a refcount rather
+//! than a table removal.
+//!
+//! A process whose tasks have all exited stays registered until it is reaped,
+//! because that is the window a `waitpid` arrives in. Its id stays allocated
+//! for the same reason: an id released at last-task-exit could be handed to a
+//! stranger before the parent read the exit status, and the parent would then
+//! be told about the wrong process. The id comes back in [`Process::drop`],
+//! which runs when the last reference goes — at or after the reap, never
+//! before.
+//!
+//! # Drop context
+//!
+//! [`Process::drop`] is one `fetch_and` on a `.bss` bitmap: no lock, no
+//! allocation, no wait. That is what makes the final release legal from every
+//! context a reap can run in.
 
 use core::sync::atomic::Ordering;
 
@@ -45,7 +58,7 @@ use slopos_abi::task::{INVALID_PROCESS_ID, MAX_PROCESSES};
 
 use crate::atomic_bitmap::AtomicBitmap;
 use crate::handle::{Handle, HandleError, HandleTable};
-use crate::mm::{AllocError, KArc, KWeak};
+use crate::mm::{AllocError, KArc};
 use crate::sync::{LOCK_LEVEL_REGISTRY, SpinLock};
 use crate::{KVec, lock_class};
 
@@ -106,13 +119,13 @@ pub(super) fn release_process_id(id: u32) {
 
 /// The registry's own handle type.
 ///
-/// [`HandleTable<KWeak<Process>>`] mints `Handle<KWeak<Process>>`, but every
-/// caller outside this module holds a `Handle<Process>` — the weak reference
-/// is storage, not identity, and no consumer should have to name it. The two
+/// [`HandleTable<KArc<Process>>`] mints `Handle<KArc<Process>>`, but every
+/// caller outside this module holds a `Handle<Process>` — the reference is
+/// storage, not identity, and no consumer should have to name it. The two
 /// carry identical bits (`Handle`'s type parameter is `PhantomData`), so the
 /// re-tag below is a rename rather than a conversion. Confined to this module
 /// so no caller can re-tag a handle between two *different* tables.
-type SlotHandle = Handle<KWeak<Process>>;
+type SlotHandle = Handle<KArc<Process>>;
 
 #[inline]
 fn as_slot_handle(handle: Handle<Process>) -> SlotHandle {
@@ -124,14 +137,14 @@ fn as_process_handle(handle: SlotHandle) -> Handle<Process> {
     Handle::from_parts(handle.slot(), handle.generation())
 }
 
-/// A slot table of weak process references.
+/// A slot table of owning process references.
 ///
 /// A distinct type rather than a bare `HandleTable` behind the global lock,
 /// so the binding and resolution logic has a home that takes no lock and can
 /// therefore be exercised by a host test on a private instance. The global
 /// registry is one of these behind a cli-spinlock; nothing else may hold one.
 pub struct ProcessTable {
-    slots: HandleTable<KWeak<Process>>,
+    slots: HandleTable<KArc<Process>>,
 }
 
 impl ProcessTable {
@@ -147,14 +160,14 @@ impl ProcessTable {
 
     /// Bind `process` to a free slot and stamp its self-handle.
     ///
-    /// The stamp happens here, under whatever exclusion the caller holds, so
+    /// Takes a clone rather than the caller's reference: the table's entry is
+    /// an owning one and the caller keeps its own. The stamp happens here, so
     /// no observer can reach a registered `Process` whose `handle()` is
     /// `None`.
     fn bind(&mut self, process: &KArc<Process>) -> Result<Handle<Process>, ProcessAllocError> {
-        let weak = KArc::downgrade(process);
         let handle = self
             .slots
-            .insert(weak)
+            .insert(process.clone())
             .map(as_process_handle)
             .map_err(|_| ProcessAllocError::NoFreeSlot)?;
         // Release, so a reader that resolves the handle out of this table also
@@ -165,14 +178,20 @@ impl ProcessTable {
         Ok(handle)
     }
 
-    /// The weak entry `handle` names, or why it is unreachable.
-    fn entry(&self, handle: Handle<Process>) -> Result<&KWeak<Process>, HandleError> {
+    /// The entry `handle` names, or why it is unreachable.
+    fn entry(&self, handle: Handle<Process>) -> Result<&KArc<Process>, HandleError> {
         self.slots.get(as_slot_handle(handle))
     }
 
-    /// Retire a registration, bumping the slot's generation.
-    fn retire(&mut self, handle: Handle<Process>) -> bool {
-        self.slots.remove(as_slot_handle(handle)).is_ok()
+    /// Retire a registration, bumping the slot's generation and returning the
+    /// reference the table held.
+    ///
+    /// The reference comes back to the caller rather than being dropped here,
+    /// so a caller holding a lock can release it outside one. `Process::drop`
+    /// is lock-free, so that is uniformity with the tree's other containers
+    /// rather than a requirement.
+    fn retire(&mut self, handle: Handle<Process>) -> Option<KArc<Process>> {
+        self.slots.remove(as_slot_handle(handle)).ok()
     }
 
     /// Slots currently bound.
@@ -184,22 +203,23 @@ impl ProcessTable {
     fn find_by_id(&self, id: u32) -> Option<KArc<Process>> {
         self.slots
             .iter()
-            .find_map(|(_, weak)| weak.upgrade().filter(|process| process.id() == id))
+            .find(|(_, process)| process.id() == id)
+            .map(|(_, process)| process.clone())
     }
 
-    /// Drop every registration, returning the displaced weak handles so the
+    /// Drop every registration, returning the displaced references so the
     /// caller can release them off-lock.
-    fn drain(&mut self) -> KVec<KWeak<Process>> {
+    fn drain(&mut self) -> KVec<KArc<Process>> {
         let mut handles: KVec<SlotHandle> = KVec::new();
         for handle in self.slots.handles() {
             if handles.push(handle).is_err() {
                 break;
             }
         }
-        let mut taken: KVec<KWeak<Process>> = KVec::new();
+        let mut taken: KVec<KArc<Process>> = KVec::new();
         for handle in handles.iter() {
-            if let Ok(weak) = self.slots.remove(*handle) {
-                let _ = taken.push(weak);
+            if let Ok(process) = self.slots.remove(*handle) {
+                let _ = taken.push(process);
             }
         }
         taken
@@ -301,15 +321,15 @@ pub fn process_spawn_root() -> Result<KArc<Process>, ProcessAllocError> {
 ///
 /// [`HandleError::Stale`] means the slot was rebound — the handle names a
 /// process that no longer exists, and *not* whichever process holds that slot
-/// now. [`HandleError::NoEntry`] means the slot holds nothing live: either it
-/// was vacated and not yet reused, or its process is mid-teardown. Both are
-/// the point of the exercise.
+/// now. [`HandleError::NoEntry`] means the slot was vacated and not yet
+/// reused. Both are the point of the exercise.
+///
+/// The clone is what makes a resolved reference safe to hold across a
+/// concurrent reap: the reaper's release is then not the last one.
 pub fn process_resolve(handle: Handle<Process>) -> Result<KArc<Process>, HandleError> {
     // No registry at all means nothing has ever been registered, so every
     // handle names a slot outside the table.
-    let weak = with_process_registry(|table| table.entry(handle).cloned())
-        .ok_or(HandleError::OutOfBounds)??;
-    weak.upgrade().ok_or(HandleError::NoEntry)
+    with_process_registry(|table| table.entry(handle).cloned()).ok_or(HandleError::OutOfBounds)?
 }
 
 /// Resolve a handle, discarding the reason it failed.
@@ -339,16 +359,22 @@ pub fn process_count() -> usize {
 /// Retire a process's registry entry: the reap.
 ///
 /// Bumps the slot's generation, so every outstanding handle to it becomes
-/// [`HandleError::Stale`] from this point. The id is *not* released here —
-/// that happens in [`Process::drop`], when the last owning reference goes, so
-/// no window exists in which the id is free while a handle to the process is
-/// still live.
+/// [`HandleError::Stale`] from this point, and releases the reference the
+/// table held. The id is *not* released here — that happens in
+/// [`Process::drop`], when the last reference goes, so no window exists in
+/// which the id is free while a handle to the process is still live.
 ///
 /// Returns `false` if the handle did not resolve, which is the idempotent
 /// case: a double reap is a no-op rather than a second generation bump that
 /// would invalidate the slot's *next* occupant's handles.
 pub fn process_retire(handle: Handle<Process>) -> bool {
-    with_registry_mut(|table| table.retire(handle)).unwrap_or(false)
+    // Released outside the lock. `Process::drop` is lock-free so this is not
+    // load-bearing, but it keeps the retire path identical in shape to every
+    // other container release in the tree.
+    let released = with_registry_mut(|table| table.retire(handle)).flatten();
+    let retired = released.is_some();
+    drop(released);
+    retired
 }
 
 /// Retire every registration and clear the id space. Test-fixture only.
@@ -400,7 +426,7 @@ mod tests {
         table: &ProcessTable,
         handle: Handle<Process>,
     ) -> Result<KArc<Process>, HandleError> {
-        table.entry(handle)?.upgrade().ok_or(HandleError::NoEntry)
+        table.entry(handle).cloned()
     }
 
     #[test]
@@ -420,7 +446,7 @@ mod tests {
     fn a_retired_slot_makes_its_handle_stale() {
         with_table(|t| {
             let (first, stale) = spawn_into(t);
-            assert!(t.retire(stale));
+            assert!(t.retire(stale).is_some());
             drop(first);
 
             // `with_fixed_capacity` recycles the lowest slot first, so the next
@@ -447,7 +473,7 @@ mod tests {
         with_table(|t| {
             let (first, stale) = spawn_into(t);
             let first_id = first.id();
-            t.retire(stale);
+            drop(t.retire(stale));
             // The id comes back here, in `Drop`, not at retire.
             drop(first);
 
@@ -470,7 +496,7 @@ mod tests {
         with_table(|t| {
             let (process, handle) = spawn_into(t);
             let id = process.id();
-            t.retire(handle);
+            drop(t.retire(handle));
 
             // Retired but still referenced: the id is still spoken for, so a
             // `waitpid` arriving now cannot be answered about a stranger.
@@ -549,7 +575,7 @@ mod tests {
             t.bind(&child).expect("bind child");
 
             // The parent exits and is reaped while the child still names it.
-            t.retire(parent_handle);
+            drop(t.retire(parent_handle));
             drop(parent);
 
             // Its slot is taken by an unrelated process.
@@ -569,21 +595,46 @@ mod tests {
     fn retire_is_idempotent() {
         with_table(|t| {
             let (_process, handle) = spawn_into(t);
-            assert!(t.retire(handle));
+            assert!(t.retire(handle).is_some());
             assert!(
-                !t.retire(handle),
+                t.retire(handle).is_none(),
                 "a second reap must not bump the generation again"
             );
         });
     }
 
+    /// Registration keeps the process alive on its own.
+    ///
+    /// The spawner's reference going away is not the last one, so the object
+    /// stays resolvable until it is reaped. That is what lets a task hold only
+    /// a packed handle — a designator, not a reference — without the process
+    /// evaporating under it.
     #[test]
-    fn a_process_with_no_strong_refs_resolves_to_no_entry() {
+    fn registration_owns_the_process() {
         with_table(|t| {
             let (process, handle) = spawn_into(t);
+            let id = process.id();
             drop(process);
-            // Still registered, but nothing owns it: the weak upgrade fails, and
-            // the answer distinguishes that from a rebound slot.
+
+            let still_there = resolve(t, handle).expect("registration keeps it alive");
+            assert_eq!(still_there.id(), id);
+            drop(still_there);
+
+            // And the reap is what ends it: the id comes back only after.
+            let released = t.retire(handle).expect("retire returns the entry");
+            drop(released);
+            let (reuser, _) = spawn_into(t);
+            assert_eq!(reuser.id(), id);
+        });
+    }
+
+    /// A vacated slot answers `NoEntry`, distinct from a rebound one's `Stale`.
+    #[test]
+    fn a_vacated_slot_resolves_to_no_entry() {
+        with_table(|t| {
+            let (process, handle) = spawn_into(t);
+            drop(t.retire(handle));
+            drop(process);
             assert_eq!(resolve(t, handle).err(), Some(HandleError::NoEntry));
         });
     }

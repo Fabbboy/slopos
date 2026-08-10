@@ -3,10 +3,15 @@ use core::ptr::NonNull;
 use core::sync::atomic::Ordering;
 
 use slopos_arch::cpu;
+use slopos_ostd::KArc;
 use slopos_ostd::kdiag_timestamp;
+use slopos_ostd::process::{
+    PROCESS_HANDLE_NONE, Process, process_retire, process_spawn, root_account,
+};
 use slopos_ostd::string::bytes_as_str;
 use slopos_ostd::task::ops::{
-    TASK_EXIT_CLEANUP_ACCOUNTED, TASK_EXIT_CLEANUP_RESOURCES, TASK_EXIT_CLEANUP_VM,
+    TASK_EXIT_CLEANUP_ACCOUNTED, TASK_EXIT_CLEANUP_CHARGES, TASK_EXIT_CLEANUP_RESOURCES,
+    TASK_EXIT_CLEANUP_VM,
 };
 use slopos_ostd::{klog_debug, klog_info};
 
@@ -53,6 +58,11 @@ struct TaskCreateResources {
     process_id: u32,
     /// Packed handle to the task's address space; 0 for a kernel task.
     process_vm_handle: u64,
+    /// The process the new task joins, or `None` for a kernel task.
+    ///
+    /// Owning: the task takes this reference at commit, so the process lives
+    /// exactly as long as a task names it or a lease holds it.
+    process: Option<KArc<Process>>,
     /// User-mode stack base (for user tasks, this lives in process VM;
     /// for kernel tasks, this aliases the kernel stack base).
     stack_base: u64,
@@ -64,12 +74,26 @@ struct TaskCreateResources {
     unsafe_stack: UnsafeStack,
 }
 
+/// Everything a new process owns, held together for the length of a build.
+///
+/// The lease is the RAII half of process creation: it takes the id, the
+/// address space and the descriptor table as one step and releases all three
+/// on any early return. [`disarm`](Self::disarm) hands ownership to the task
+/// that reached commit.
+///
+/// It now also carries the `KArc<Process>`. That reference is what the built
+/// task stores, and holding it here rather than minting it at commit is what
+/// makes an abandoned build release the process object too — the id comes back
+/// in `Process::drop`, so a lease that leaked one would leak the id with it.
 struct ProcessResourceLease {
     process_id: u32,
     /// Packed handle to the address space this lease created, so the task
     /// it is handed to can name that address space without a pid lookup —
     /// and without mistaking a later holder of the same id for it.
     process_vm_handle: u64,
+    /// The process object, or `None` for a lease that owns nothing
+    /// ([`none`](Self::none), the `CLONE_VM` case).
+    process: Option<KArc<Process>>,
     owns_vm: bool,
     owns_file_table: bool,
 }
@@ -79,6 +103,7 @@ impl ProcessResourceLease {
         Self {
             process_id: INVALID_PROCESS_ID,
             process_vm_handle: 0,
+            process: None,
             owns_vm: false,
             owns_file_table: false,
         }
@@ -94,7 +119,35 @@ impl ProcessResourceLease {
         self.process_vm_handle
     }
 
-    fn create_user_process() -> Option<Self> {
+    /// The packed process handle a task built against this lease carries.
+    #[inline]
+    fn process_handle(&self) -> u64 {
+        self.process
+            .as_ref()
+            .map_or(PROCESS_HANDLE_NONE, |process| process.handle_raw())
+    }
+
+    /// Register a process object for `parent`'s child, or log and refuse.
+    ///
+    /// The accounting edge is the *spawner's* account and is fixed here; there
+    /// is no later opportunity to set it, by design.
+    fn mint_process(parent: Option<&Process>) -> Option<KArc<Process>> {
+        let (wait_parent, account_parent) = match parent {
+            Some(parent) => (parent.handle(), parent.account()),
+            None => (None, root_account()),
+        };
+        match process_spawn(wait_parent, account_parent) {
+            Ok(process) => Some(process),
+            Err(error) => {
+                klog_info!("task_create: process registration failed: {:?}", error);
+                None
+            }
+        }
+    }
+
+    fn create_user_process(parent: Option<&Process>) -> Option<Self> {
+        let process = Self::mint_process(parent)?;
+
         let Some(vm) = create_process_vm_ref() else {
             klog_info!("task_create: Failed to create process VM");
             return None;
@@ -108,12 +161,15 @@ impl ProcessResourceLease {
         Some(Self {
             process_id: vm.process_id,
             process_vm_handle: pack_process_vm_handle(vm.handle),
+            process: Some(process),
             owns_vm: true,
             owns_file_table: true,
         })
     }
 
-    fn clone_from_parent(parent_process_id: u32) -> Option<Self> {
+    fn clone_from_parent(parent: &Task) -> Option<Self> {
+        let parent_process_id = parent.process_id;
+        let process = Self::mint_process(parent.process().as_deref())?;
         let child = process_vm_clone_cow_ref(parent_process_id)?;
 
         if fileio_clone_table_for_process(parent_process_id, child.process_id) != 0 {
@@ -124,17 +180,23 @@ impl ProcessResourceLease {
         Some(Self {
             process_id: child.process_id,
             process_vm_handle: pack_process_vm_handle(child.handle),
+            process: Some(process),
             owns_vm: true,
             owns_file_table: true,
         })
     }
 
-    fn disarm(mut self) -> u32 {
+    /// Hand ownership to the task that reached commit.
+    ///
+    /// Returns the id for the caller's bookkeeping and the process reference,
+    /// which the task stores. Both are cleared here, so the `Drop` below
+    /// releases nothing.
+    fn disarm(&mut self) -> (u32, Option<KArc<Process>>) {
         let process_id = self.process_id;
         self.process_id = INVALID_PROCESS_ID;
         self.owns_vm = false;
         self.owns_file_table = false;
-        process_id
+        (process_id, self.process.take())
     }
 
     fn cleanup_owned_process(process_id: u32, owns_vm: bool, owns_file_table: bool) {
@@ -154,6 +216,14 @@ impl ProcessResourceLease {
 impl Drop for ProcessResourceLease {
     fn drop(&mut self) {
         Self::cleanup_owned_process(self.process_id, self.owns_vm, self.owns_file_table);
+        // Retire the registration before the reference goes, so the slot's
+        // generation is bumped while this is still provably the only owner —
+        // a build that never published the process has no other handle to it.
+        if let Some(process) = self.process.take() {
+            if let Some(handle) = process.handle() {
+                process_retire(handle);
+            }
+        }
     }
 }
 
@@ -184,6 +254,7 @@ fn allocate_kernel_task_resources() -> Option<TaskCreateResources> {
     Some(TaskCreateResources {
         process_id: INVALID_PROCESS_ID,
         process_vm_handle: 0,
+        process: None,
         stack_base,
         kernel_stack,
         unsafe_stack,
@@ -191,7 +262,11 @@ fn allocate_kernel_task_resources() -> Option<TaskCreateResources> {
 }
 
 fn allocate_user_task_resources() -> Option<TaskCreateResources> {
-    let process = ProcessResourceLease::create_user_process()?;
+    // No wait parent and the root account as the accounting parent: this is
+    // the entry point for a process the kernel starts, not one a process
+    // spawned. A spawn goes through `clone_from_parent`, which names the real
+    // spawner on both edges.
+    let mut process = ProcessResourceLease::create_user_process(None)?;
     let process_id = process.process_id();
 
     let stack_top = process_vm_get_stack_top(process_id);
@@ -203,10 +278,12 @@ fn allocate_user_task_resources() -> Option<TaskCreateResources> {
     let kernel_stack = allocate_kernel_stack(TASK_KERNEL_STACK_SIZE, "kernel RSP0 stack")?;
     let unsafe_stack = allocate_unsafe_stack(TASK_UNSAFE_STACK_SIZE, "SafeStack data stack")?;
     let process_vm_handle = process.process_vm_handle();
+    let (process_id, process) = process.disarm();
 
     Some(TaskCreateResources {
-        process_id: process.disarm(),
+        process_id,
         process_vm_handle,
+        process,
         stack_base: stack_top - TASK_STACK_SIZE,
         kernel_stack,
         unsafe_stack,
@@ -224,15 +301,25 @@ fn allocate_task_create_resources(flags: u16) -> Option<TaskCreateResources> {
 /// Release resources allocated by `allocate_task_create_resources` when
 /// the surrounding `task_create` bails out mid-flight.
 ///
-/// The caller passes both stacks by value so their `Drop` runs here
-/// (releasing VA slots; the physical frames remain mapped for reuse by
-/// the next slot allocation — see `KernelStack::drop` / `UnsafeStack::drop`).
-fn cleanup_task_create_resources(
-    process_id: u32,
-    kernel_stack: KernelStack,
-    unsafe_stack: UnsafeStack,
-) {
+/// Takes the whole bundle by value so nothing can be forgotten: the stacks'
+/// `Drop` releases their VA slots, and the process reference goes with the
+/// address space and descriptor table it names. Passing the fields
+/// individually is what let the process object be missed while the two older
+/// halves were released.
+fn cleanup_task_create_resources(resources: TaskCreateResources) {
+    let TaskCreateResources {
+        process_id,
+        process,
+        kernel_stack,
+        unsafe_stack,
+        ..
+    } = resources;
     ProcessResourceLease::cleanup_owned_process(process_id, true, true);
+    if let Some(process) = process {
+        if let Some(handle) = process.handle() {
+            process_retire(handle);
+        }
+    }
     drop(kernel_stack);
     drop(unsafe_stack);
 }
@@ -252,34 +339,53 @@ fn cleanup_task_process_resources(task: &Task, resolved_id: u32, mode: TaskProce
         return;
     }
 
-    if !process_has_other_live_tasks(process_id, task.task_id) {
-        fileio_destroy_table_for_process(process_id);
-        if matches!(mode, TaskProcessCleanupMode::DropVm)
-            && task.exit_cleanup_mark(TASK_EXIT_CLEANUP_VM) & TASK_EXIT_CLEANUP_VM != 0
-        {
-            destroy_process_vm(process_id);
-        }
+    if !task_leaves_process(task) {
+        return;
+    }
+
+    fileio_destroy_table_for_process(process_id);
+    if matches!(mode, TaskProcessCleanupMode::DropVm)
+        && task.exit_cleanup_mark(TASK_EXIT_CLEANUP_VM) & TASK_EXIT_CLEANUP_VM != 0
+    {
+        destroy_process_vm(process_id);
     }
 }
 
-fn process_has_other_live_tasks(process_id: u32, excluding_task_id: u32) -> bool {
-    with_task_manager(|mgr| {
-        for task in mgr.iter_tasks() {
-            if task.task_id == excluding_task_id {
-                continue;
-            }
-            if matches!(
-                task.status(),
-                TaskStatus::Invalid | TaskStatus::Terminated | TaskStatus::Zombie
-            ) {
-                continue;
-            }
-            if task.process_id == process_id {
-                return true;
-            }
-        }
-        false
-    })
+/// Give back `task`'s share of its process, answering whether it was the last.
+///
+/// This replaces an O(`MAX_TASKS`) registry walk under the task-manager lock,
+/// run on every exit, with one atomic on an object the task already names. The
+/// walk also could not distinguish two processes that had held the same id;
+/// the handle can.
+///
+/// Latched by `TASK_EXIT_CLEANUP_CHARGES` because exit cleanup runs from both
+/// an external `task_terminate` and the owning CPU's post-switch path, and a
+/// second decrement would report a *live* process as torn down — which is a
+/// second `destroy_process_vm` on an address space another task is running in.
+///
+/// A task whose process handle no longer resolves answers `false`: the process
+/// was reaped, so somebody else already did the teardown, and doing it again
+/// against a recycled id is the exact confusion this plan removes.
+///
+/// The last leaver also retires the registration, which is what returns the id
+/// — via `Process::drop`, once every resolved clone has gone. Retiring here
+/// rather than at some later reap keeps the id allocated for exactly the
+/// interval the address space is being torn down in.
+fn task_leaves_process(task: &Task) -> bool {
+    if task.exit_cleanup_mark(TASK_EXIT_CLEANUP_CHARGES) & TASK_EXIT_CLEANUP_CHARGES == 0 {
+        return false;
+    }
+    let Some(process) = task.process() else {
+        return false;
+    };
+    if !process.task_leave() {
+        return false;
+    }
+    process.mark_exited();
+    if let Some(handle) = process.handle() {
+        process_retire(handle);
+    }
+    true
 }
 
 /// Bytes reserved at the top of every user task's per-task kernel stack
@@ -606,11 +712,7 @@ pub fn task_build(
     // have had to move `pending` out from under it.
     if flags & TASK_FLAG_USER_MODE != 0 && !user_entry_is_allowed(entry_point as u64) {
         klog_info!("task_create: user entry outside user_text window");
-        cleanup_task_create_resources(
-            resources.process_id,
-            resources.kernel_stack,
-            resources.unsafe_stack,
-        );
+        cleanup_task_create_resources(resources);
         drop(pending);
         return None;
     }
@@ -621,11 +723,7 @@ pub fn task_build(
         match new_session_group(task_id) {
             Some(pg) => Some(pg),
             None => {
-                cleanup_task_create_resources(
-                    resources.process_id,
-                    resources.kernel_stack,
-                    resources.unsafe_stack,
-                );
+                cleanup_task_create_resources(resources);
                 drop(pending);
                 return None;
             }
@@ -643,6 +741,13 @@ pub fn task_build(
     task_ref.flags = flags;
     task_ref.process_id = resources.process_id;
     task_ref.set_process_vm_handle_raw(resources.process_vm_handle);
+    // Join before the handle is stored, so the count is never behind the set
+    // of tasks naming the process. The reference the lease minted moves into
+    // the task here; from now on the process lives while any task names it.
+    if let Some(process) = resources.process.as_ref() {
+        process.task_join();
+        task_ref.set_process_handle_raw(process.handle_raw());
+    }
     task_ref.tgid = task_id;
     task_ref.set_pgid(task_id);
     task_ref.set_sid(task_id);
@@ -733,12 +838,22 @@ pub fn task_commit(pending: PendingTask) -> Option<TaskRef> {
 /// no other live task shares the process — the same rule the ordinary exit path
 /// applies, and what makes this correct for a `CLONE_VM` thread whose address
 /// space belongs to the parent it was branching from.
+///
+/// Reaching the count through the task's own process handle rather than a
+/// registry scan is what makes "the parent it was branching from" precise: a
+/// `CLONE_VM` thread and its parent hold the *same* handle, so the parent's
+/// share keeps the address space; a task whose handle is stale names a process
+/// somebody already tore down, and answers `false`.
 pub fn task_abandon(mut pending: PendingTask) {
-    let (task_id, process_id) = {
+    let process_id = {
         let task = pending.as_mut();
-        (task.task_id, task.process_id)
+        if task_leaves_process(task) {
+            task.process_id
+        } else {
+            INVALID_PROCESS_ID
+        }
     };
-    if process_id != INVALID_PROCESS_ID && !process_has_other_live_tasks(process_id, task_id) {
+    if process_id != INVALID_PROCESS_ID {
         ProcessResourceLease::cleanup_owned_process(process_id, true, true);
     }
     drop(pending);
@@ -1295,7 +1410,7 @@ pub fn task_fork(
         return INVALID_TASK_ID;
     }
 
-    let child_process = match ProcessResourceLease::clone_from_parent(parent.process_id) {
+    let mut child_process = match ProcessResourceLease::clone_from_parent(parent) {
         Some(process) => process,
         None => {
             klog_info!("task_fork: process_vm_clone_cow failed");
@@ -1303,6 +1418,7 @@ pub fn task_fork(
         }
     };
     let child_process_id = child_process.process_id();
+    let child_process_handle = child_process.process_handle();
 
     let child_kernel_stack = match KernelStack::allocate(TASK_KERNEL_STACK_SIZE as usize) {
         Ok(stack) => stack,
@@ -1355,6 +1471,10 @@ pub fn task_fork(
     child.task_id = child_task_id;
     child.process_id = child_process_id;
     child.set_process_vm_handle_raw(child_process.process_vm_handle());
+    // A fork gets its own process, so the child joins that one rather than the
+    // parent's. `clone_from_raw` cleared the copied handle, so a miss here is a
+    // child with no process and not a child silently sharing its parent's.
+    child.set_process_handle_raw(child_process_handle);
     // The parent link and children-list membership are published together, after
     // registration, via `link_child` — never a bare field write.
     child.tgid = child_task_id;
@@ -1396,7 +1516,9 @@ pub fn task_fork(
         slopos_mm::process_vm::process_vm_get_ostd_pml4_paddr(child_process_id);
 
     child.reset_runtime_state();
-    let _ = child_process.disarm();
+    if let (_, Some(process)) = child_process.disarm() {
+        process.task_join();
+    }
     // Transfer ownership of the kernel stack into the task; its `Drop`
     // runs when the task is destroyed.
     child.kernel_stack = Some(child_kernel_stack);
@@ -1481,10 +1603,10 @@ pub fn task_clone(
     let share_vm = flags & CLONE_VM != 0;
     let is_thread = flags & CLONE_THREAD != 0;
 
-    let child_process = if share_vm {
+    let mut child_process = if share_vm {
         ProcessResourceLease::none()
     } else {
-        match ProcessResourceLease::clone_from_parent(parent.process_id) {
+        match ProcessResourceLease::clone_from_parent(parent) {
             Some(process) => process,
             None => {
                 klog_info!("task_clone: process_vm_clone_cow failed");
@@ -1496,6 +1618,17 @@ pub fn task_clone(
         parent.process_id
     } else {
         child_process.process_id()
+    };
+    // A `CLONE_VM` thread is a *member* of the parent's process, not a new one:
+    // same address space, same descriptor table, same account, so the same
+    // handle. That is what makes the exit-time count meaningful — the last
+    // member out tears the address space down, and a thread that had its own
+    // process object would tear it down while its siblings were still running
+    // in it.
+    let child_process_handle = if share_vm {
+        parent.process_handle_raw()
+    } else {
+        child_process.process_handle()
     };
 
     let child_kernel_stack = match KernelStack::allocate(TASK_KERNEL_STACK_SIZE as usize) {
@@ -1553,6 +1686,7 @@ pub fn task_clone(
     } else {
         child_process.process_vm_handle()
     });
+    child.set_process_handle_raw(child_process_handle);
     // The parent link and children-list membership are published together, after
     // registration, via `link_child` — never a bare field write.
 
@@ -1629,8 +1763,16 @@ pub fn task_clone(
     }
 
     child.reset_runtime_state();
-    if !share_vm {
-        let _ = child_process.disarm();
+    // Both branches join, and both join exactly once: a new process gets its
+    // first member here, and a shared one gets an additional member. The lease
+    // is disarmed in the same step so the join and the ownership transfer
+    // cannot drift apart.
+    if share_vm {
+        if let Some(process) = parent.process() {
+            process.task_join();
+        }
+    } else if let (_, Some(process)) = child_process.disarm() {
+        process.task_join();
     }
     // Transfer ownership of the kernel stack to the task; its `Drop`
     // runs when the task is destroyed.

@@ -27,6 +27,17 @@ pub const TASK_EXIT_CLEANUP_VM: u8 = 1 << 1;
 /// may run from both an external `task_terminate` and the owning CPU's
 /// post-switch path; this bit keeps the decrement exactly-once.
 pub const TASK_EXIT_CLEANUP_ACCOUNTED: u8 = 1 << 2;
+/// The task has left its [`Process`](crate::process::Process): its share of
+/// the process's `task_count` has been given back, and its owning
+/// `KArc<Process>` reference released.
+///
+/// A fourth bit rather than a reuse of `ACCOUNTED`, because the two decrements
+/// answer different questions and are consumed by different readers — one is
+/// the global live-task census, the other is what decides whether this exit is
+/// the one that tears down the address space. Sharing a bit would make a
+/// future change to either silently skip the other, on the exit path, where
+/// the symptom is a leaked address space rather than a fault.
+pub const TASK_EXIT_CLEANUP_CHARGES: u8 = 1 << 3;
 
 /// The child-exit event for a task id. Parents blocked in `waitpid`-style
 /// waits park on this; the task's exit path publishes it. Public so the

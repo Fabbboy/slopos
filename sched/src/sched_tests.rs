@@ -883,6 +883,159 @@ slopos_testing::stest!(
     suite = sched_core
 );
 
+/// A built user task names a live process, and that process counts it.
+///
+/// The count is what decides teardown, so a task that joined without being
+/// counted would have its address space destroyed while it was still running
+/// in it — and a task counted without joining would pin the address space
+/// forever. Both are silent, so the pairing is asserted rather than assumed.
+pub fn test_a_built_user_task_joins_a_counted_process() -> TestResult {
+    let _fixture = SchedFixture::new();
+
+    let Some(mut pending) = task_build(
+        b"ProcJoin\0".as_ptr() as *const c_char,
+        crate::task::task_entry_from_kernel_va(PROCESS_CODE_START_VA as u64),
+        ptr::null_mut(),
+        TaskPriority::Normal.as_u8(),
+        TASK_FLAG_USER_MODE,
+    ) else {
+        klog_info!("SCHED_TEST: task_build refused a user task");
+        return TestResult::Fail;
+    };
+
+    let Some(process) = pending.as_mut().process() else {
+        klog_info!("SCHED_TEST: a built user task carries no process handle");
+        task_abandon(pending);
+        return TestResult::Fail;
+    };
+    let process_id = process.id();
+    let count = process.task_count();
+    let handle = process.handle();
+    drop(process);
+
+    if count != 1 {
+        klog_info!(
+            "SCHED_TEST: process {} counts {} tasks, expected exactly its one builder",
+            process_id,
+            count
+        );
+        task_abandon(pending);
+        return TestResult::Fail;
+    }
+
+    task_abandon(pending);
+
+    // The last task left, so the registration is retired and the handle is
+    // stale rather than resolving to whoever takes the slot next.
+    let Some(handle) = handle else {
+        klog_info!("SCHED_TEST: a registered process carries no self-handle");
+        return TestResult::Fail;
+    };
+    if slopos_ostd::process::process_for_handle(handle).is_some() {
+        klog_info!(
+            "SCHED_TEST: process {} still resolves after its last task was abandoned",
+            process_id
+        );
+        return TestResult::Fail;
+    }
+
+    TestResult::Pass
+}
+
+slopos_testing::stest!(
+    name = test_a_built_user_task_joins_a_counted_process,
+    suite = sched_core
+);
+
+/// A kernel task has no process, and says so.
+///
+/// `INVALID_PROCESS_ID` and "no process handle" have to agree: a kernel task
+/// that resolved a process would be counted against a principal it does not
+/// belong to, and the exit path would take it as a member whose departure
+/// tears an address space down.
+pub fn test_a_kernel_task_has_no_process() -> TestResult {
+    let _fixture = SchedFixture::new();
+
+    let Some(mut pending) = task_build(
+        b"NoProc\0".as_ptr() as *const c_char,
+        dummy_task_entry,
+        ptr::null_mut(),
+        TaskPriority::Normal.as_u8(),
+        TASK_FLAG_KERNEL_MODE,
+    ) else {
+        klog_info!("SCHED_TEST: task_build refused a kernel task");
+        return TestResult::Fail;
+    };
+
+    let task = pending.as_mut();
+    let has_process = task.process().is_some();
+    let raw = task.process_handle_raw();
+    let pid = task.process_id;
+    task_abandon(pending);
+
+    if has_process || raw != slopos_ostd::process::PROCESS_HANDLE_NONE {
+        klog_info!(
+            "SCHED_TEST: a kernel task carries a process handle (raw {})",
+            raw
+        );
+        return TestResult::Fail;
+    }
+    if pid != INVALID_PROCESS_ID {
+        klog_info!("SCHED_TEST: a kernel task carries process id {}", pid);
+        return TestResult::Fail;
+    }
+    TestResult::Pass
+}
+
+slopos_testing::stest!(name = test_a_kernel_task_has_no_process, suite = sched_core);
+
+/// Process registrations do not accumulate across task churn.
+///
+/// The id space is 256 wide and a registration holds an id until it is
+/// retired, so a build/abandon cycle that leaked one would exhaust the space
+/// after 256 spawns and refuse every process afterwards — a failure that
+/// arrives long after the commit that caused it, on a boot that got far
+/// enough to spawn that many. Cheaper to assert here.
+pub fn test_process_registrations_do_not_leak_across_churn() -> TestResult {
+    let _fixture = SchedFixture::new();
+
+    let before = slopos_ostd::process::process_count();
+
+    for i in 0..32 {
+        let Some(pending) = task_build(
+            b"ProcChurn\0".as_ptr() as *const c_char,
+            crate::task::task_entry_from_kernel_va(PROCESS_CODE_START_VA as u64),
+            ptr::null_mut(),
+            TaskPriority::Normal.as_u8(),
+            TASK_FLAG_USER_MODE,
+        ) else {
+            klog_info!(
+                "SCHED_TEST: task_build refused a user task at cycle {} — \
+                 the id space is likely already exhausted",
+                i
+            );
+            return TestResult::Fail;
+        };
+        task_abandon(pending);
+    }
+
+    let after = slopos_ostd::process::process_count();
+    if after != before {
+        klog_info!(
+            "SCHED_TEST: 32 build/abandon cycles left the registry at {} entries, was {}",
+            after,
+            before
+        );
+        return TestResult::Fail;
+    }
+    TestResult::Pass
+}
+
+slopos_testing::stest!(
+    name = test_process_registrations_do_not_leak_across_churn,
+    suite = sched_core
+);
+
 /// Every user task the kernel can build, it can also run.
 ///
 /// A task is refused dispatch and terminated if its process id is outside

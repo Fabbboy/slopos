@@ -404,6 +404,23 @@ pub struct TaskInner<K, U> {
     ///
     /// [`PROCESS_VM_SLOT_BITS`]: crate::handle::PROCESS_VM_SLOT_BITS
     process_vm_handle: AtomicU64,
+    /// Packed handle to the [`Process`] this task belongs to; 0 means none.
+    ///
+    /// Beside `process_vm_handle` rather than replacing it, because they name
+    /// different objects: several tasks share one `Process`, and a `CLONE_VM`
+    /// thread shares its parent's address space *and* its process, while a
+    /// forked child shares neither. Both are generation-checked designators,
+    /// and both are packed for the same reason — the tables they index live in
+    /// crates this one sits below.
+    ///
+    /// This is what makes `process_id` demotable to display: every question
+    /// that used to be answered by scanning for a matching id (whose address
+    /// space is this, whose descriptor table, is this the last task of its
+    /// process) is answered from here instead, and answers *stale* rather than
+    /// answering about whichever process holds that id now.
+    ///
+    /// [`Process`]: crate::process::Process
+    process_handle: AtomicU64,
     /// Strong membership in this task's process group. The group (and, via
     /// it, the session) lives while any member holds this handle; dropping the
     /// task releases the membership. Empty for kernel-mode tasks.
@@ -1136,6 +1153,33 @@ impl<K, U> TaskInner<K, U> {
         self.process_vm_handle.store(packed, Ordering::Release);
     }
 
+    /// Packed handle to this task's process, or 0 for none.
+    ///
+    /// Acquire/Release for the reason `process_vm_handle` is: published once
+    /// before the task is reachable, read from other CPUs.
+    #[inline]
+    pub fn process_handle_raw(&self) -> u64 {
+        self.process_handle.load(Ordering::Acquire)
+    }
+
+    /// See [`process_handle_raw`](Self::process_handle_raw).
+    #[inline]
+    pub fn set_process_handle_raw(&self, packed: u64) {
+        self.process_handle.store(packed, Ordering::Release);
+    }
+
+    /// The [`Process`](crate::process::Process) this task belongs to.
+    ///
+    /// `None` for a kernel task, and for a user task whose process has been
+    /// reaped out from under a stale handle — which is the failure this
+    /// returns instead of a stranger's process.
+    #[inline]
+    pub fn process(&self) -> Option<crate::KArc<crate::process::Process>> {
+        crate::process::process_for_handle(crate::process::unpack_process_handle(
+            self.process_handle_raw(),
+        )?)
+    }
+
     /// Bitmask of CPUs this task may run on. Relaxed: an affinity change races
     /// dispatch by nature, and the loser of that race is repatriated on the
     /// task's next switch-out.
@@ -1276,6 +1320,7 @@ impl<K, U> TaskInner<K, U> {
             kernel_stack: None,
             unsafe_stack: None,
             process_vm_handle: AtomicU64::new(0),
+            process_handle: AtomicU64::new(crate::process::PROCESS_HANDLE_NONE),
             process_group: RcuArcSlot::empty(),
             test_reports: SpinLock::new(None, TEST_REPORTS_CLASS),
             parent_task_id: AtomicU32::new(INVALID_TASK_ID),
@@ -1619,6 +1664,15 @@ impl<K, U> TaskInner<K, U> {
         // starts parentless; the spawn path publishes the real parent edge (id
         // + children-list membership) via `link_child` after registration.
         self.set_parent_task_id(INVALID_TASK_ID);
+        // Same shape, and the reason it is here rather than left to the call
+        // sites: a `CLONE_VM` thread joins the parent's process and a forked
+        // child gets its own, so the copied value is right in one case and
+        // wrong in the other. Inheriting it by omission is the failure mode
+        // that is invisible in review — the child would join a process that
+        // never counted it, and the count that decides teardown would be one
+        // short of its members. Clearing makes a forgetful call site produce a
+        // task with no process, which fails visibly and immediately.
+        self.process_handle = AtomicU64::new(crate::process::PROCESS_HANDLE_NONE);
         self.sched_placement = AtomicU8::new(SchedPlacement::Nascent.as_u8());
         // The bytewise copy duplicated the parent's park back-pointer. A fresh
         // child is parked on nothing; inheriting it would aim the parent's
