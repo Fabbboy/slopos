@@ -401,6 +401,7 @@ check-framekernel-gates:
     scripts/check_wait_result_handling.sh --self-test
     scripts/check_kernel_pml4_writer.sh --self-test
     scripts/check_task_ownership.sh --self-test
+    scripts/check_process_designator.sh --self-test
     scripts/check_stack_sizes.sh --self-test
     scripts/check_kernel_softfloat.sh --self-test
     scripts/check_registry_sections.sh --self-test
@@ -418,6 +419,7 @@ check-framekernel-gates:
     scripts/check_wait_predicate_purity.sh
     scripts/check_wait_result_handling.sh
     scripts/check_task_ownership.sh
+    scripts/check_process_designator.sh
     scripts/check_safe_contract_surface.sh
     scripts/tcb_ratio.sh --max 1.0
 
