@@ -1,7 +1,7 @@
 use std::any::Any;
 
 use super::constraints::{BoxConstraints, Rect, Size};
-use super::node::Node;
+use super::node::{ContextMenuAt, Node};
 use super::paint::PaintContext;
 use super::style::StyleSheet;
 use super::traits::{MeasureCtx, Widget};
@@ -165,6 +165,7 @@ pub fn build_widget_tree<M: Clone + 'static>(node: &Node<M>) -> Box<dyn Widget> 
             selected,
             on_select,
             on_header_click,
+            on_context_menu,
         } => {
             let row_widgets: Vec<Vec<Box<dyn Widget>>> = rows
                 .iter()
@@ -179,6 +180,11 @@ pub fn build_widget_tree<M: Clone + 'static>(node: &Node<M>) -> Box<dyn Widget> 
                     Box::new(move |i: usize| Box::new(f(i)) as Box<dyn Any>)
                         as Box<dyn Fn(usize) -> Box<dyn Any>>
                 });
+            let erased_context: Option<Box<dyn Fn(ContextMenuAt) -> Box<dyn Any>>> =
+                on_context_menu.map(|f| {
+                    Box::new(move |at: ContextMenuAt| Box::new(f(at)) as Box<dyn Any>)
+                        as Box<dyn Fn(ContextMenuAt) -> Box<dyn Any>>
+                });
             Box::new(widgets::table::TableWidget::new(
                 columns.clone(),
                 row_widgets,
@@ -186,6 +192,7 @@ pub fn build_widget_tree<M: Clone + 'static>(node: &Node<M>) -> Box<dyn Widget> 
                 *selected,
                 erased_select,
                 erased_header,
+                erased_context,
             ))
         }
         Node::Dialog {
@@ -206,6 +213,25 @@ pub fn build_widget_tree<M: Clone + 'static>(node: &Node<M>) -> Box<dyn Widget> 
                 title.clone(),
                 content_widget,
                 action_widgets,
+                erased,
+            ))
+        }
+        Node::Popup {
+            x,
+            y,
+            child,
+            on_dismiss,
+        } => {
+            let child_widget = build_widget_tree(child);
+            let erased: Option<Box<dyn Fn() -> Box<dyn Any>>> = on_dismiss.as_ref().map(|m| {
+                let m = m.clone();
+                Box::new(move || Box::new(m.clone()) as Box<dyn Any>)
+                    as Box<dyn Fn() -> Box<dyn Any>>
+            });
+            Box::new(widgets::popup::PopupWidget::new(
+                *x,
+                *y,
+                child_widget,
                 erased,
             ))
         }

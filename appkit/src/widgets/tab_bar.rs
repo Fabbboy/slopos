@@ -235,7 +235,16 @@ impl Widget for TabBarWidget {
                         EventResponse::Ignored
                     }
                 }
-                _ => EventResponse::Ignored,
+                // Every other key belongs to the panel: the tab strip only
+                // owns Left/Right. Swallowing the rest here left the active
+                // panel's own keyboard handling unreachable.
+                _ => {
+                    if let Some(panel) = self.content.get_mut(self.active) {
+                        panel.event(event, phase, sink)
+                    } else {
+                        EventResponse::Ignored
+                    }
+                }
             },
 
             WidgetEvent::FocusGained => {

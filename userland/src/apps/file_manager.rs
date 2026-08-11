@@ -439,6 +439,7 @@ impl FileManagerApp {
                     selected: self.selected,
                     on_select: Some(FileMsg::FileSelect),
                     on_header_click: None,
+                    on_context_menu: None,
                 }
             }
         };

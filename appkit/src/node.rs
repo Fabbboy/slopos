@@ -50,6 +50,18 @@ pub enum SortIndicator {
     Descending,
 }
 
+/// Where a context-menu request landed.
+///
+/// `x`/`y` are window coordinates. For a keyboard-raised request (Menu key,
+/// Shift+F10) they are the selected row's left edge, so a popup anchored to
+/// them appears in the same place a pointer-raised one would.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub struct ContextMenuAt {
+    pub row: usize,
+    pub x: i32,
+    pub y: i32,
+}
+
 #[derive(Clone, Debug)]
 pub struct ImageData {
     pub width: u32,
@@ -167,11 +179,24 @@ pub enum Node<M> {
         on_select: Option<fn(usize) -> M>,
         /// None = headers not clickable. Some = emits with column index as argument.
         on_header_click: Option<fn(usize) -> M>,
+        /// None = rows have no context menu. Some = emits on secondary click and
+        /// on the Menu / Shift+F10 keys, after moving selection to the row.
+        on_context_menu: Option<fn(ContextMenuAt) -> M>,
     },
     Dialog {
         title: String,
         content: Box<Node<M>>,
         actions: Vec<Node<M>>,
+        on_dismiss: Option<M>,
+    },
+    /// Child floated at an absolute window position, over the rest of the
+    /// parent's area. Clamped to stay on-screen. A click outside the child or
+    /// an Escape press emits `on_dismiss`, so the owning app's state stays the
+    /// single source of truth for whether the popup is open.
+    Popup {
+        x: i32,
+        y: i32,
+        child: Box<Node<M>>,
         on_dismiss: Option<M>,
     },
 

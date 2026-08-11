@@ -173,6 +173,10 @@ name = "keymap_test"
 path = "src/bin/tests/keymap_test.rs"
 
 [[bin]]
+name = "appkit_test"
+path = "src/bin/tests/appkit_test.rs"
+
+[[bin]]
 name = "spawn_privilege_test"
 path = "src/bin/tests/spawn_privilege_test.rs"
 

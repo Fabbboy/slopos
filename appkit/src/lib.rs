@@ -54,8 +54,8 @@ pub mod widgets;
 
 // === Public re-exports: primary app API ===
 pub use node::{
-    Action, App, ButtonStyle, ImageData, MenuItem, MenuItemKind, Node, SortIndicator, TableColumn,
-    TableColumnWidth,
+    Action, App, ButtonStyle, ContextMenuAt, ImageData, MenuItem, MenuItemKind, Node,
+    SortIndicator, TableColumn, TableColumnWidth,
 };
 pub use run::run_app;
 

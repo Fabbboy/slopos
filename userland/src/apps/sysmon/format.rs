@@ -66,6 +66,14 @@ pub(crate) fn is_idle_task(task: &UserTaskEntry) -> bool {
     TaskPriority::from_u8(task.priority) == TaskPriority::Idle
 }
 
+/// Symbolic name for a negative syscall return, e.g. `-1` → `"EPERM"`.
+pub(crate) fn errno_label(rc: i32) -> String {
+    match slopos_abi::errno::Errno::from_raw(rc) {
+        core::option::Option::Some(e) => String::from(e.name()),
+        core::option::Option::None => format!("error {}", rc),
+    }
+}
+
 pub(crate) fn trim_ascii(bytes: &[u8]) -> String {
     let mut end = bytes.len();
     while end > 0 && (bytes[end - 1] == 0 || bytes[end - 1] == b' ') {

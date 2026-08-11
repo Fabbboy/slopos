@@ -1,8 +1,10 @@
 use std::any::Any;
 
 use crate::constraints::{BoxConstraints, Rect, Size};
-use crate::event::{EventPhase, EventResponse, Key, MessageSink, NamedKey, WidgetEvent};
-use crate::node::{SortIndicator, TableColumn, TableColumnWidth};
+use crate::event::{
+    EventPhase, EventResponse, Key, MessageSink, NamedKey, PointerButton, WidgetEvent,
+};
+use crate::node::{ContextMenuAt, SortIndicator, TableColumn, TableColumnWidth};
 use crate::paint::PaintContext;
 use crate::traits::{FocusPolicy, MeasureCtx, Role, Widget, WidgetId, next_widget_id};
 
@@ -19,6 +21,7 @@ pub struct TableWidget {
     hovered_row: Option<usize>,
     on_select: Option<Box<dyn Fn(usize) -> Box<dyn Any>>>,
     on_header_click: Option<Box<dyn Fn(usize) -> Box<dyn Any>>>,
+    on_context_menu: Option<Box<dyn Fn(ContextMenuAt) -> Box<dyn Any>>>,
     scroll_offset: i32,
     header_height: i32,
     col_widths: Vec<i32>,
@@ -33,6 +36,7 @@ impl TableWidget {
         selected: Option<usize>,
         on_select: Option<Box<dyn Fn(usize) -> Box<dyn Any>>>,
         on_header_click: Option<Box<dyn Fn(usize) -> Box<dyn Any>>>,
+        on_context_menu: Option<Box<dyn Fn(ContextMenuAt) -> Box<dyn Any>>>,
     ) -> Self {
         let col_count = columns.len();
         #[cfg(debug_assertions)]
@@ -56,6 +60,7 @@ impl TableWidget {
             hovered_row: None,
             on_select,
             on_header_click,
+            on_context_menu,
             scroll_offset: 0,
             header_height: row_height,
             col_widths: vec![0; col_count],
@@ -162,6 +167,50 @@ impl TableWidget {
             return 1;
         }
         (self.body_height() / self.row_height).max(1) as usize
+    }
+
+    /// Row index at window-space `y`, or `None` outside the body rows.
+    fn row_at_y(&self, y: i32) -> Option<usize> {
+        if self.row_height <= 0 {
+            return None;
+        }
+        let body_top = self.rect.y + self.header_height;
+        if y < body_top {
+            return None;
+        }
+        let index = ((y - body_top + self.scroll_offset) / self.row_height) as usize;
+        (index < self.row_count()).then_some(index)
+    }
+
+    /// Select `row` and emit, skipping the emit when it is already selected so
+    /// a repeated click does not churn the app's state.
+    fn select_row(&mut self, row: usize, sink: &mut MessageSink) {
+        if self.selected == Some(row) {
+            return;
+        }
+        self.selected = Some(row);
+        if let Some(cb) = &self.on_select {
+            sink.emit_raw(cb(row));
+        }
+    }
+
+    /// Bottom-left corner of `row` in window coordinates, clamped into the body
+    /// so a partially-scrolled row still anchors a popup somewhere visible.
+    fn row_anchor(&self, row: usize) -> (i32, i32) {
+        let body_top = self.rect.y + self.header_height;
+        let y = body_top + row as i32 * self.row_height - self.scroll_offset + self.row_height;
+        let bottom = self.rect.y + self.rect.height;
+        (self.rect.x, y.clamp(body_top, bottom))
+    }
+
+    fn emit_context_menu(&self, row: usize, x: i32, y: i32, sink: &mut MessageSink) -> bool {
+        match &self.on_context_menu {
+            Some(cb) => {
+                sink.emit_raw(cb(ContextMenuAt { row, x, y }));
+                true
+            }
+            None => false,
+        }
     }
 }
 
@@ -362,9 +411,13 @@ impl Widget for TableWidget {
         }
 
         match event {
-            WidgetEvent::PointerDown { x, y, .. } => {
-                // Header click?
+            WidgetEvent::PointerDown { x, y, button } => {
+                // Header: sorting is a primary-button action; a secondary
+                // click there addresses no row, so it has nothing to open.
                 if *y >= self.rect.y && *y < self.rect.y + self.header_height {
+                    if *button != PointerButton::Left {
+                        return EventResponse::Ignored;
+                    }
                     if let Some(cb) = &self.on_header_click {
                         if let Some(col) = self.column_at_x(*x) {
                             sink.emit_raw(cb(col));
@@ -373,23 +426,27 @@ impl Widget for TableWidget {
                     return EventResponse::Consumed;
                 }
 
-                // Body click -- select row.
-                if self.row_height <= 0 {
+                let Some(index) = self.row_at_y(*y) else {
                     return EventResponse::Ignored;
-                }
-                let body_top = self.rect.y + self.header_height;
-                if *y >= body_top {
-                    let relative_y = *y - body_top + self.scroll_offset;
-                    let index = (relative_y / self.row_height) as usize;
-                    if index < self.row_count() {
-                        self.selected = Some(index);
-                        if let Some(cb) = &self.on_select {
-                            sink.emit_raw(cb(index));
-                        }
-                        return EventResponse::Consumed;
+                };
+
+                match button {
+                    PointerButton::Left => {
+                        self.select_row(index, sink);
+                        EventResponse::Consumed
                     }
+                    // Secondary click selects first: the menu that opens acts on
+                    // the selection, so the two must never disagree.
+                    PointerButton::Right => {
+                        self.select_row(index, sink);
+                        if self.emit_context_menu(index, *x, *y, sink) {
+                            EventResponse::Consumed
+                        } else {
+                            EventResponse::Ignored
+                        }
+                    }
+                    PointerButton::Middle => EventResponse::Ignored,
                 }
-                EventResponse::Ignored
             }
 
             WidgetEvent::PointerMove { x: _, y } => {
@@ -438,10 +495,26 @@ impl Widget for TableWidget {
                 }
             }
 
-            WidgetEvent::KeyDown { key, .. } => {
+            WidgetEvent::KeyDown { key, modifiers, .. } => {
                 let rc = self.row_count();
                 if rc == 0 {
                     return EventResponse::Ignored;
+                }
+
+                // The keyboard equivalents of a secondary click. Shift+F10 is
+                // the fallback for keyboards with no dedicated Menu key.
+                let context_key = matches!(key, Key::Named(NamedKey::Menu))
+                    || (matches!(key, Key::Named(NamedKey::F10)) && modifiers.shift);
+                if context_key {
+                    let Some(row) = self.selected else {
+                        return EventResponse::Ignored;
+                    };
+                    let (ax, ay) = self.row_anchor(row);
+                    return if self.emit_context_menu(row, ax, ay, sink) {
+                        EventResponse::Consumed
+                    } else {
+                        EventResponse::Ignored
+                    };
                 }
 
                 match key {

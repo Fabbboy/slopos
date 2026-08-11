@@ -7,16 +7,21 @@ use slopos_net_core::{Ipv4, Mac};
 use slopos_slibc::mem::malloc::heap_stats;
 
 use crate::syscall::process as sys_proc;
+use slopos_abi::signal::SIGKILL;
 use slopos_appkit::{
-    Action, App, ButtonStyle, CrossAxisAlignment, EdgeInsets, Length, Node, ScrollDirection,
-    ScrollbarVisibility, SortIndicator, TableColumn, TableColumnWidth, TextAlignment,
+    Action, App, ButtonStyle, ContextMenuAt, CrossAxisAlignment, EdgeInsets, Key, Length, MenuItem,
+    MenuItemKind, Modifiers, NamedKey, Node, ScrollDirection, ScrollbarVisibility, SortIndicator,
+    TableColumn, TableColumnWidth, TextAlignment,
 };
 
 mod format;
 mod state;
 
 pub(crate) use format::*;
-pub(crate) use state::{SortColumn, SysmonApp, Tab};
+pub(crate) use state::{ContextMenu, KillOutcome, SortColumn, SysmonApp, Tab};
+
+/// The only actionable entry in the row context menu.
+const MENU_KILL: usize = 0;
 
 // Colors kept for format.rs (which imports them from super::).
 pub(crate) const COLOR_DIM: Color32 = Color32::rgb(0x60, 0x68, 0x70);
@@ -32,6 +37,9 @@ pub enum SysmonMsg {
     TabChanged(usize),
     SortColumn(usize),
     SelectRow(usize),
+    OpenContextMenu(ContextMenuAt),
+    MenuAction(usize),
+    CloseMenu,
     Kill,
     Cancel,
     HwScroll(i32),
@@ -69,7 +77,7 @@ impl App for SysmonApp {
                     1 => Tab::Processes,
                     _ => Tab::Hardware,
                 };
-                self.confirm_kill = None;
+                self.dismiss_transients();
                 Action::Rebuild
             }
             SysmonMsg::SortColumn(col_idx) => {
@@ -89,12 +97,48 @@ impl App for SysmonApp {
                 self.selected_row = row;
                 Action::Rebuild
             }
-            SysmonMsg::Kill => {
-                if let Some(pid) = self.confirm_kill {
-                    let _ = sys_proc::kill(pid, 9);
-                    self.confirm_kill = None;
-                    self.refresh_data();
+            SysmonMsg::OpenContextMenu(at) => {
+                self.selected_row = at.row;
+                self.last_kill = None;
+                self.context_menu = self.target_for_row(at.row).map(|target| ContextMenu {
+                    target,
+                    x: at.x,
+                    y: at.y,
+                });
+                Action::Rebuild
+            }
+            SysmonMsg::MenuAction(item) => {
+                let menu = self.context_menu.take();
+                if item == MENU_KILL {
+                    self.confirm_kill = menu
+                        .map(|m| m.target)
+                        .filter(|target| self.is_killable(target.pid));
                 }
+                Action::Rebuild
+            }
+            SysmonMsg::CloseMenu => {
+                self.context_menu = None;
+                Action::Rebuild
+            }
+            SysmonMsg::Kill => {
+                // Re-checked here rather than trusted from when the dialog
+                // opened: a refresh in between may have recycled the id.
+                self.last_kill = match self.pending_kill_target() {
+                    Some(target) => {
+                        let name = target.name.clone();
+                        let rc = sys_proc::kill(target.pid, SIGKILL);
+                        Some(if rc < 0 {
+                            KillOutcome::Failed { name, errno: rc }
+                        } else {
+                            KillOutcome::Sent { name }
+                        })
+                    }
+                    None => self.confirm_kill.as_ref().map(|t| KillOutcome::Vanished {
+                        name: t.name.clone(),
+                    }),
+                };
+                self.confirm_kill = None;
+                self.refresh_data();
                 Action::Rebuild
             }
             SysmonMsg::Cancel => {
@@ -105,6 +149,32 @@ impl App for SysmonApp {
                 self.hardware_scroll_y = y;
                 Action::None
             }
+        }
+    }
+
+    fn on_key(&mut self, key: Key, _modifiers: Modifiers) -> Action {
+        // Only reached when no widget consumed the key, so the dialog's own
+        // Escape handling still wins while it is open.
+        match key {
+            Key::Named(NamedKey::Delete) if self.active_tab == Tab::Processes => {
+                if self.confirm_kill.is_some() {
+                    return Action::None;
+                }
+                self.context_menu = None;
+                self.last_kill = None;
+                self.confirm_kill = self
+                    .target_for_row(self.selected_row)
+                    .filter(|target| self.is_killable(target.pid));
+                Action::Rebuild
+            }
+            Key::Named(NamedKey::Escape) => {
+                if self.context_menu.is_none() && self.confirm_kill.is_none() {
+                    return Action::None;
+                }
+                self.dismiss_transients();
+                Action::Rebuild
+            }
+            _ => Action::None,
         }
     }
 
@@ -127,6 +197,11 @@ impl App for SysmonApp {
 }
 
 impl SysmonApp {
+    fn dismiss_transients(&mut self) {
+        self.confirm_kill = None;
+        self.context_menu = None;
+    }
+
     fn view_overview(&self) -> Node<SysmonMsg> {
         let mut children: Vec<Node<SysmonMsg>> = Vec::new();
 
@@ -291,50 +366,106 @@ impl SysmonApp {
             selected,
             on_select: Some(SysmonMsg::SelectRow),
             on_header_click: Some(SysmonMsg::SortColumn),
+            on_context_menu: Some(SysmonMsg::OpenContextMenu),
         };
 
-        let mut children: Vec<Node<SysmonMsg>> = vec![Node::Expand {
-            weight: 1,
-            child: Box::new(table),
-        }];
-
-        // Kill confirmation dialog as overlay.
-        if let Some(pid) = self.confirm_kill {
-            let task_name = if let Some(idx) = self.find_task_index_by_pid(pid) {
-                task_name_string(&self.tasks[idx])
-            } else {
-                String::from("unknown")
-            };
-            children.push(Node::Dialog {
-                title: format!("Kill task '{}' (PID {})?", task_name, pid),
-                content: Box::new(Node::Label {
-                    text: String::from("This action cannot be undone."),
-                    alignment: TextAlignment::Center,
-                    wrap: true,
-                    max_lines: None,
-                }),
-                actions: vec![
-                    Node::Button {
-                        label: String::from("Kill"),
-                        on_press: Some(SysmonMsg::Kill),
-                        style: ButtonStyle::Destructive,
-                        enabled: true,
-                    },
-                    Node::Button {
-                        label: String::from("Cancel"),
-                        on_press: Some(SysmonMsg::Cancel),
-                        style: ButtonStyle::Secondary,
-                        enabled: true,
-                    },
-                ],
-                on_dismiss: Some(SysmonMsg::Cancel),
-            });
-        }
-
-        Node::VStack {
+        let body = Node::VStack {
             spacing: 0,
             align: CrossAxisAlignment::Stretch,
-            children,
+            children: vec![
+                Node::Expand {
+                    weight: 1,
+                    child: Box::new(table),
+                },
+                self.view_status_line(),
+            ],
+        };
+
+        // Menu and dialog are siblings of the table in a ZStack, not of it in a
+        // VStack: both size to the whole area, which in a VStack would consume
+        // the table's space instead of covering it.
+        let mut layers: Vec<Node<SysmonMsg>> = vec![body];
+        if let Some(menu) = &self.context_menu {
+            layers.push(self.view_context_menu(menu));
+        }
+        if let Some(dialog) = self.view_kill_dialog() {
+            layers.push(dialog);
+        }
+
+        Node::ZStack { children: layers }
+    }
+
+    fn view_context_menu(&self, menu: &ContextMenu) -> Node<SysmonMsg> {
+        Node::Popup {
+            x: menu.x,
+            y: menu.y,
+            on_dismiss: Some(SysmonMsg::CloseMenu),
+            child: Box::new(Node::Menu {
+                items: vec![MenuItem {
+                    label: "Kill",
+                    shortcut: Some("Del"),
+                    enabled: self.is_killable(menu.target.pid),
+                    kind: MenuItemKind::Action,
+                }],
+                on_action: Some(SysmonMsg::MenuAction),
+            }),
+        }
+    }
+
+    fn view_kill_dialog(&self) -> Option<Node<SysmonMsg>> {
+        let target = self.confirm_kill.as_ref()?;
+        Some(Node::Dialog {
+            title: format!("Kill task '{}' (PID {})?", target.name, target.pid),
+            content: Box::new(Node::Label {
+                text: String::from("The task is terminated immediately and cannot save state."),
+                alignment: TextAlignment::Center,
+                wrap: true,
+                max_lines: None,
+            }),
+            actions: vec![
+                Node::Button {
+                    label: String::from("Kill"),
+                    on_press: Some(SysmonMsg::Kill),
+                    style: ButtonStyle::Destructive,
+                    enabled: true,
+                },
+                Node::Button {
+                    label: String::from("Cancel"),
+                    on_press: Some(SysmonMsg::Cancel),
+                    style: ButtonStyle::Secondary,
+                    enabled: true,
+                },
+            ],
+            on_dismiss: Some(SysmonMsg::Cancel),
+        })
+    }
+
+    /// Footer: the outcome of the last kill, else the available gestures.
+    /// A silent failure would otherwise read as a task that refuses to die.
+    fn view_status_line(&self) -> Node<SysmonMsg> {
+        let (text, color) = match &self.last_kill {
+            Some(KillOutcome::Sent { name }) => {
+                (format!("Sent SIGKILL to '{}'", name), COLOR_STATE_RUN)
+            }
+            Some(KillOutcome::Failed { name, errno }) => (
+                format!("Could not kill '{}': {}", name, errno_label(*errno)),
+                COLOR_STATE_BLOCK,
+            ),
+            Some(KillOutcome::Vanished { name }) => {
+                (format!("'{}' had already exited", name), COLOR_STATE_BLOCK)
+            }
+            None => (
+                String::from("Right-click or Menu key for actions"),
+                COLOR_DIM,
+            ),
+        };
+        Node::Padding {
+            padding: EdgeInsets::symmetric(6, 4),
+            child: Box::new(Node::StyledLabel {
+                text,
+                color,
+                alignment: TextAlignment::Start,
+            }),
         }
     }
 

@@ -1,5 +1,6 @@
 use core::cmp::Ordering;
 use core::option::Option::{self, None, Some};
+use std::string::String;
 
 /// Sysmon's display-side cap on visible tasks. Independent of the
 /// kernel's `MAX_TASKS`: the TUI can only show a bounded set on screen
@@ -9,7 +10,7 @@ pub(crate) const MAX_TASKS: usize = 256;
 
 use crate::syscall::{UserCpuInfo, UserPerCpuStats, UserSysInfo, UserTaskEntry, core as sys_core};
 
-use super::{MAX_CPUS, REFRESH_INTERVAL_MS, is_idle_task, task_name_bytes};
+use super::{MAX_CPUS, REFRESH_INTERVAL_MS, is_idle_task, task_name_bytes, task_name_string};
 
 /// The network facts the overview shows, read from `net_query` so sysmon and
 /// `ip` cannot disagree about what "online" means.
@@ -63,6 +64,33 @@ pub(crate) enum Tab {
     Hardware,
 }
 
+/// A task named by the row the user acted on.
+///
+/// The name is captured with the pid rather than re-read at confirm time: task
+/// ids recycle, so a refresh between opening the dialog and pressing Kill can
+/// put a different task on that number. Holding both lets
+/// [`SysmonApp::pending_kill_target`] notice the swap and refuse, instead of
+/// killing a stranger the user never saw.
+#[derive(Clone, PartialEq)]
+pub(crate) struct KillTarget {
+    pub(crate) pid: u32,
+    pub(crate) name: String,
+}
+
+/// The row-level context menu, anchored where it was raised.
+pub(crate) struct ContextMenu {
+    pub(crate) target: KillTarget,
+    pub(crate) x: i32,
+    pub(crate) y: i32,
+}
+
+/// Outcome of a kill attempt, surfaced in the process panel's status line.
+pub(crate) enum KillOutcome {
+    Sent { name: String },
+    Failed { name: String, errno: i32 },
+    Vanished { name: String },
+}
+
 #[derive(Clone, Copy, PartialEq)]
 pub(crate) enum SortColumn {
     Pid,
@@ -92,9 +120,13 @@ pub(crate) struct SysmonApp {
     pub(crate) sort_column: SortColumn,
     pub(crate) sort_ascending: bool,
     pub(crate) last_refresh_ms: u64,
-    pub(crate) confirm_kill: Option<u32>,
+    pub(crate) confirm_kill: Option<KillTarget>,
+    pub(crate) context_menu: Option<ContextMenu>,
+    pub(crate) last_kill: Option<KillOutcome>,
     pub(crate) sorted_indices: [usize; MAX_TASKS],
     pub(crate) hardware_scroll_y: i32,
+    /// This process's own id, so sysmon cannot be asked to kill itself.
+    pub(crate) self_pid: u32,
 }
 
 impl SysmonApp {
@@ -118,8 +150,11 @@ impl SysmonApp {
             sort_ascending: false,
             last_refresh_ms: 0,
             confirm_kill: None,
+            context_menu: None,
+            last_kill: None,
             sorted_indices: [0; MAX_TASKS],
             hardware_scroll_y: 0,
+            self_pid: crate::syscall::process::getpid(),
         };
         app.refresh_data();
         app
@@ -181,16 +216,58 @@ impl SysmonApp {
 
         if self.task_count == 0 {
             self.selected_row = 0;
-            self.confirm_kill = None;
         } else if self.selected_row >= self.task_count {
             self.selected_row = self.task_count - 1;
         }
 
-        if let Some(pid) = self.confirm_kill {
-            if self.find_task_index_by_pid(pid).is_none() {
-                self.confirm_kill = None;
-            }
+        // A target that exited while its menu or dialog was open no longer
+        // designates anything; drop the affordance rather than let it act on
+        // whatever inherits the number.
+        if self
+            .confirm_kill
+            .as_ref()
+            .is_some_and(|t| self.live_target(t).is_none())
+        {
+            self.confirm_kill = None;
         }
+        if self
+            .context_menu
+            .as_ref()
+            .is_some_and(|m| self.live_target(&m.target).is_none())
+        {
+            self.context_menu = None;
+        }
+    }
+
+    /// The row for `target`, but only while the pid still carries the name it
+    /// was captured with. `None` once the id has been recycled.
+    fn live_target(&self, target: &KillTarget) -> Option<usize> {
+        let idx = self.find_task_index_by_pid(target.pid)?;
+        (task_name_string(&self.tasks[idx]) == target.name).then_some(idx)
+    }
+
+    /// Whether `pid` may be offered a Kill action.
+    ///
+    /// Refusing our own pid keeps the window from tearing itself down mid-frame;
+    /// the kernel enforces the real privilege rules and answers EPERM.
+    pub(crate) fn is_killable(&self, pid: u32) -> bool {
+        pid != self.self_pid
+    }
+
+    /// Build a kill target from a display row, if the row names a live task.
+    pub(crate) fn target_for_row(&self, row: usize) -> Option<KillTarget> {
+        let idx = self.sorted_task_index(row)?;
+        let task = self.tasks.get(idx)?;
+        Some(KillTarget {
+            pid: task.task_id,
+            name: task_name_string(task),
+        })
+    }
+
+    /// Re-validate the pending target at the moment Kill is pressed.
+    pub(crate) fn pending_kill_target(&self) -> Option<&KillTarget> {
+        let target = self.confirm_kill.as_ref()?;
+        self.live_target(target).map(|_| target)
     }
 
     fn compute_cpu_usage(&mut self) {

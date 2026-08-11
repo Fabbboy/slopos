@@ -5,6 +5,7 @@ pub mod image;
 pub mod label;
 pub mod list_view;
 pub mod menu;
+pub mod popup;
 pub mod progress_bar;
 pub mod scroll_view;
 pub mod separator;

@@ -17,6 +17,9 @@ pub struct MenuWidget {
     on_action: Option<Box<dyn Fn(usize) -> Box<dyn Any>>>,
     hovered_index: Option<usize>,
     focused: bool,
+    /// Item height from the last measure. Hit testing must use the same value
+    /// the paint pass used, or clicks land on the row above or below.
+    item_height: i32,
 }
 
 impl MenuWidget {
@@ -31,7 +34,27 @@ impl MenuWidget {
             on_action,
             hovered_index: None,
             focused: false,
+            item_height: 0,
         }
+    }
+
+    /// Index of the item at window-space `y`, or `None` outside the menu.
+    fn item_at_y(&self, y: i32) -> Option<usize> {
+        if self.item_height <= 0 {
+            return None;
+        }
+        let rel_y = y - self.rect.y;
+        if rel_y < 0 || rel_y >= self.rect.height {
+            return None;
+        }
+        let idx = (rel_y / self.item_height) as usize;
+        (idx < self.items.len()).then_some(idx)
+    }
+
+    fn is_activatable(&self, idx: usize) -> bool {
+        self.items
+            .get(idx)
+            .is_some_and(|i| matches!(i.kind, MenuItemKind::Action) && i.enabled)
     }
 
     /// Find the next actionable (non-separator, enabled) item index, wrapping around.
@@ -63,7 +86,7 @@ impl MenuWidget {
             } else {
                 (start + len - offset) % len
             };
-            if matches!(self.items[idx].kind, MenuItemKind::Action) {
+            if self.is_activatable(idx) {
                 return Some(idx);
             }
         }
@@ -74,6 +97,7 @@ impl MenuWidget {
 impl Widget for MenuWidget {
     fn measure(&mut self, constraints: BoxConstraints, ctx: &mut MeasureCtx) -> Size {
         let item_h = ctx.style.menu_item_height;
+        self.item_height = item_h;
         let padding_h = ctx.style.spacing_md;
 
         // Width = max(label_width + padding + shortcut_width, menu_min_width).
@@ -111,7 +135,7 @@ impl Widget for MenuWidget {
     }
 
     fn paint(&self, ctx: &mut PaintContext) {
-        let item_h = ctx.style.menu_item_height;
+        let item_h = self.item_height;
         let padding_h = ctx.style.spacing_md;
         let radius = ctx.style.corner_radius;
 
@@ -201,46 +225,26 @@ impl Widget for MenuWidget {
             return EventResponse::Ignored;
         }
 
-        let item_h = 28; // Matches style.menu_item_height default.
-
         match event {
             WidgetEvent::PointerMove { y, .. } => {
-                let rel_y = *y - self.rect.y;
-                if rel_y >= 0 && rel_y < self.rect.height {
-                    let idx = (rel_y / item_h) as usize;
-                    if idx < self.items.len() {
-                        // Only hover over non-separator items.
-                        if matches!(self.items[idx].kind, MenuItemKind::Action) {
-                            self.hovered_index = Some(idx);
-                        } else {
-                            self.hovered_index = None;
-                        }
-                    } else {
-                        self.hovered_index = None;
-                    }
+                let hovered = self.item_at_y(*y).filter(|&idx| self.is_activatable(idx));
+                let changed = hovered != self.hovered_index;
+                self.hovered_index = hovered;
+                if changed {
                     EventResponse::Consumed
                 } else {
-                    self.hovered_index = None;
                     EventResponse::Ignored
                 }
             }
 
             WidgetEvent::PointerDown { y, .. } => {
-                let rel_y = *y - self.rect.y;
-                if rel_y >= 0 && rel_y < self.rect.height {
-                    let idx = (rel_y / item_h) as usize;
-                    if idx < self.items.len() {
-                        if matches!(self.items[idx].kind, MenuItemKind::Action)
-                            && self.items[idx].enabled
-                        {
-                            if let Some(cb) = &self.on_action {
-                                sink.emit_raw(cb(idx));
-                            }
-                            return EventResponse::Consumed;
-                        }
-                    }
+                let Some(idx) = self.item_at_y(*y).filter(|&i| self.is_activatable(i)) else {
+                    return EventResponse::Ignored;
+                };
+                if let Some(cb) = &self.on_action {
+                    sink.emit_raw(cb(idx));
                 }
-                EventResponse::Ignored
+                EventResponse::Consumed
             }
 
             WidgetEvent::KeyDown { key, .. } => match key {
@@ -253,20 +257,17 @@ impl Widget for MenuWidget {
                     EventResponse::Consumed
                 }
                 Key::Named(NamedKey::Enter) | Key::Named(NamedKey::Space) => {
-                    if let Some(idx) = self.hovered_index {
-                        if idx < self.items.len()
-                            && matches!(self.items[idx].kind, MenuItemKind::Action)
-                            && self.items[idx].enabled
-                        {
-                            if let Some(cb) = &self.on_action {
-                                sink.emit_raw(cb(idx));
-                            }
-                            return EventResponse::Consumed;
-                        }
+                    let Some(idx) = self.hovered_index.filter(|&i| self.is_activatable(i)) else {
+                        return EventResponse::Ignored;
+                    };
+                    if let Some(cb) = &self.on_action {
+                        sink.emit_raw(cb(idx));
                     }
-                    EventResponse::Ignored
+                    EventResponse::Consumed
                 }
-                Key::Named(NamedKey::Escape) => EventResponse::Consumed,
+                // Left as Ignored so the enclosing Popup sees it and dismisses;
+                // consuming it here would trap the menu open.
+                Key::Named(NamedKey::Escape) => EventResponse::Ignored,
                 _ => EventResponse::Ignored,
             },
 

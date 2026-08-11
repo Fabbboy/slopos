@@ -395,11 +395,251 @@ fn test_deflate_unbounded() {
 }
 
 // ---------------------------------------------------------------------------
+// Table context menu / popup tests
+//
+// These cover the paths that were compiled but unreachable: a secondary click
+// on a table row, its keyboard equivalent, and the popup that renders the menu.
+// ---------------------------------------------------------------------------
+
+use super::node::{ContextMenuAt, TableColumn, TableColumnWidth};
+use super::widgets::popup::PopupWidget;
+use super::widgets::table::TableWidget;
+
+fn table_column(label: &str) -> TableColumn {
+    TableColumn {
+        label: String::from(label),
+        width: TableColumnWidth::Flex(1),
+        sort_indicator: None,
+    }
+}
+
+/// A 3-row, 1-column table laid out at (0,0,200,200) with 20px rows.
+fn context_table(selected: Option<usize>) -> TableWidget {
+    let rows: Vec<Vec<Box<dyn Widget>>> = (0..3)
+        .map(|_| vec![Box::new(FixedSizeWidget::new(50, 20)) as Box<dyn Widget>])
+        .collect();
+    let mut table = TableWidget::new(
+        vec![table_column("Name")],
+        rows,
+        20,
+        selected,
+        Some(Box::new(|i: usize| Box::new(i) as Box<dyn std::any::Any>)),
+        Some(Box::new(|i: usize| {
+            Box::new(format!("header{i}")) as Box<dyn std::any::Any>
+        })),
+        Some(Box::new(|at: ContextMenuAt| {
+            Box::new(at) as Box<dyn std::any::Any>
+        })),
+    );
+    let style = StyleSheet::dark();
+    let mut ctx = MeasureCtx { style: &style };
+    table.measure(BoxConstraints::tight(Size::new(200, 200)), &mut ctx);
+    table.layout(Rect::new(0, 0, 200, 200));
+    table
+}
+
+fn press(x: i32, y: i32, button: super::event::PointerButton) -> WidgetEvent {
+    WidgetEvent::PointerDown { x, y, button }
+}
+
+/// The regression this whole change exists for: a right-click on a row used to
+/// be indistinguishable from a left-click, so no context request was emitted.
+fn test_table_right_click_emits_context_menu() {
+    let mut table = context_table(None);
+    let mut sink = MessageSink::new();
+
+    // Row 1 spans y=[40,60) once the 20px header is skipped.
+    let resp = table.event(
+        &press(10, 45, super::event::PointerButton::Right),
+        EventPhase::Target,
+        &mut sink,
+    );
+    assert!(resp.is_consumed());
+
+    let requests = sink.drain_typed::<ContextMenuAt>();
+    assert_eq!(requests.len(), 1);
+    assert_eq!(requests[0].row, 1);
+    assert_eq!((requests[0].x, requests[0].y), (10, 45));
+}
+
+/// The menu acts on the selection, so opening it must move the selection too.
+fn test_table_right_click_selects_row() {
+    let mut table = context_table(Some(0));
+    let mut sink = MessageSink::new();
+    table.event(
+        &press(10, 85, super::event::PointerButton::Right),
+        EventPhase::Target,
+        &mut sink,
+    );
+    let selections = sink.drain_typed::<usize>();
+    assert_eq!(selections, vec![2]);
+}
+
+fn test_table_left_click_emits_no_context_menu() {
+    let mut table = context_table(None);
+    let mut sink = MessageSink::new();
+    table.event(
+        &press(10, 45, super::event::PointerButton::Left),
+        EventPhase::Target,
+        &mut sink,
+    );
+    assert!(sink.drain_typed::<ContextMenuAt>().is_empty());
+    assert_eq!(sink.drain_typed::<usize>(), vec![1]);
+}
+
+/// Sorting is a primary-button action; a secondary click on the header names
+/// no row and must not open a menu.
+fn test_table_right_click_header_is_inert() {
+    let mut table = context_table(None);
+    let mut sink = MessageSink::new();
+    let resp = table.event(
+        &press(10, 5, super::event::PointerButton::Right),
+        EventPhase::Target,
+        &mut sink,
+    );
+    assert!(!resp.is_consumed());
+    assert!(sink.drain_typed::<ContextMenuAt>().is_empty());
+    assert!(sink.drain_typed::<String>().is_empty());
+}
+
+/// Keyboard parity: the Menu key raises the same request, anchored to the row.
+fn test_table_menu_key_emits_context_menu() {
+    let mut table = context_table(Some(1));
+    let mut sink = MessageSink::new();
+    let resp = table.event(
+        &WidgetEvent::KeyDown {
+            key: super::event::Key::Named(super::event::NamedKey::Menu),
+            modifiers: super::event::Modifiers::default(),
+            repeat: false,
+        },
+        EventPhase::Target,
+        &mut sink,
+    );
+    assert!(resp.is_consumed());
+    let requests = sink.drain_typed::<ContextMenuAt>();
+    assert_eq!(requests.len(), 1);
+    assert_eq!(requests[0].row, 1);
+    // Anchored at the row's bottom-left: header 20 + row 1 ends at y=60.
+    assert_eq!((requests[0].x, requests[0].y), (0, 60));
+}
+
+fn test_table_menu_key_without_selection_is_inert() {
+    let mut table = context_table(None);
+    let mut sink = MessageSink::new();
+    let resp = table.event(
+        &WidgetEvent::KeyDown {
+            key: super::event::Key::Named(super::event::NamedKey::Menu),
+            modifiers: super::event::Modifiers::default(),
+            repeat: false,
+        },
+        EventPhase::Target,
+        &mut sink,
+    );
+    assert!(!resp.is_consumed());
+    assert!(sink.drain_typed::<ContextMenuAt>().is_empty());
+}
+
+fn popup_at(x: i32, y: i32, w: i32, h: i32) -> PopupWidget {
+    let mut popup = PopupWidget::new(
+        x,
+        y,
+        Box::new(FixedSizeWidget::new(w, h)),
+        Some(Box::new(|| {
+            Box::new(String::from("dismiss")) as Box<dyn std::any::Any>
+        })),
+    );
+    let style = StyleSheet::dark();
+    let mut ctx = MeasureCtx { style: &style };
+    popup.measure(BoxConstraints::tight(Size::new(200, 200)), &mut ctx);
+    popup.layout(Rect::new(0, 0, 200, 200));
+    popup
+}
+
+/// A popup with room to open places its child exactly at the anchor.
+fn test_popup_places_child_at_anchor() {
+    let popup = popup_at(30, 40, 60, 50);
+    let child = popup.children()[0].layout_rect();
+    assert_eq!((child.x, child.y), (30, 40));
+}
+
+/// Near the right/bottom edge the child flips back over the anchor rather than
+/// being clipped, so it never covers the pointer that opened it.
+fn test_popup_flips_at_edges() {
+    let popup = popup_at(190, 195, 60, 50);
+    let child = popup.children()[0].layout_rect();
+    assert_eq!((child.x, child.y), (130, 145));
+}
+
+/// A child too large to flip is clamped inside the parent instead.
+fn test_popup_clamps_oversized_child() {
+    let popup = popup_at(190, 190, 300, 300);
+    let child = popup.children()[0].layout_rect();
+    assert_eq!((child.x, child.y), (0, 0));
+}
+
+fn test_popup_click_outside_dismisses() {
+    let mut popup = popup_at(30, 40, 60, 50);
+    let mut sink = MessageSink::new();
+    let resp = popup.event(
+        &press(5, 5, super::event::PointerButton::Left),
+        EventPhase::Target,
+        &mut sink,
+    );
+    assert!(resp.is_consumed());
+    assert_eq!(sink.drain_typed::<String>().len(), 1);
+}
+
+fn test_popup_click_inside_does_not_dismiss() {
+    let mut popup = popup_at(30, 40, 60, 50);
+    let mut sink = MessageSink::new();
+    popup.event(
+        &press(35, 45, super::event::PointerButton::Left),
+        EventPhase::Target,
+        &mut sink,
+    );
+    assert!(sink.drain_typed::<String>().is_empty());
+}
+
+fn test_popup_escape_dismisses() {
+    let mut popup = popup_at(30, 40, 60, 50);
+    let mut sink = MessageSink::new();
+    let resp = popup.event(
+        &WidgetEvent::KeyDown {
+            key: super::event::Key::Named(super::event::NamedKey::Escape),
+            modifiers: super::event::Modifiers::default(),
+            repeat: false,
+        },
+        EventPhase::Target,
+        &mut sink,
+    );
+    assert!(resp.is_consumed());
+    assert_eq!(sink.drain_typed::<String>().len(), 1);
+}
+
+/// A popup is modal over its parent: it must not leak events the child
+/// ignored back down to the tree underneath.
+fn test_popup_swallows_unhandled_events() {
+    let mut popup = popup_at(30, 40, 60, 50);
+    let mut sink = MessageSink::new();
+    let resp = popup.event(
+        &WidgetEvent::Scroll {
+            delta_x: 0,
+            delta_y: 10,
+        },
+        EventPhase::Target,
+        &mut sink,
+    );
+    assert!(resp.is_consumed());
+}
+
+// ---------------------------------------------------------------------------
 // Public test runner (for boot-time invocation)
 // ---------------------------------------------------------------------------
 
-pub fn run_all_tests() -> bool {
-    let tests: &[(&str, fn())] = &[
+/// Every appkit unit test, for a host `cargo test` run and for the
+/// `/bin/appkit_test` userland binary that reports them over KTAP.
+pub fn cases() -> &'static [(&'static str, fn())] {
+    &[
         ("tight_constraints", test_tight_constraints),
         ("loose_constraints", test_loose_constraints),
         ("constrain_clamps", test_constrain_clamps),
@@ -421,7 +661,57 @@ pub fn run_all_tests() -> bool {
         ("edge_insets_symmetric", test_edge_insets_symmetric),
         ("box_constraints_loosen", test_box_constraints_loosen),
         ("deflate_unbounded", test_deflate_unbounded),
-    ];
+        (
+            "table_right_click_emits_context_menu",
+            test_table_right_click_emits_context_menu,
+        ),
+        (
+            "table_right_click_selects_row",
+            test_table_right_click_selects_row,
+        ),
+        (
+            "table_left_click_emits_no_context_menu",
+            test_table_left_click_emits_no_context_menu,
+        ),
+        (
+            "table_right_click_header_is_inert",
+            test_table_right_click_header_is_inert,
+        ),
+        (
+            "table_menu_key_emits_context_menu",
+            test_table_menu_key_emits_context_menu,
+        ),
+        (
+            "table_menu_key_without_selection_is_inert",
+            test_table_menu_key_without_selection_is_inert,
+        ),
+        (
+            "popup_places_child_at_anchor",
+            test_popup_places_child_at_anchor,
+        ),
+        ("popup_flips_at_edges", test_popup_flips_at_edges),
+        (
+            "popup_clamps_oversized_child",
+            test_popup_clamps_oversized_child,
+        ),
+        (
+            "popup_click_outside_dismisses",
+            test_popup_click_outside_dismisses,
+        ),
+        (
+            "popup_click_inside_does_not_dismiss",
+            test_popup_click_inside_does_not_dismiss,
+        ),
+        ("popup_escape_dismisses", test_popup_escape_dismisses),
+        (
+            "popup_swallows_unhandled_events",
+            test_popup_swallows_unhandled_events,
+        ),
+    ]
+}
+
+pub fn run_all_tests() -> bool {
+    let tests = cases();
 
     let mut passed = 0usize;
     let mut failed = 0usize;
@@ -532,5 +822,57 @@ mod cfg_tests {
     #[test]
     fn deflate_unbounded() {
         test_deflate_unbounded();
+    }
+    #[test]
+    fn table_right_click_emits_context_menu() {
+        test_table_right_click_emits_context_menu();
+    }
+    #[test]
+    fn table_right_click_selects_row() {
+        test_table_right_click_selects_row();
+    }
+    #[test]
+    fn table_left_click_emits_no_context_menu() {
+        test_table_left_click_emits_no_context_menu();
+    }
+    #[test]
+    fn table_right_click_header_is_inert() {
+        test_table_right_click_header_is_inert();
+    }
+    #[test]
+    fn table_menu_key_emits_context_menu() {
+        test_table_menu_key_emits_context_menu();
+    }
+    #[test]
+    fn table_menu_key_without_selection_is_inert() {
+        test_table_menu_key_without_selection_is_inert();
+    }
+    #[test]
+    fn popup_places_child_at_anchor() {
+        test_popup_places_child_at_anchor();
+    }
+    #[test]
+    fn popup_flips_at_edges() {
+        test_popup_flips_at_edges();
+    }
+    #[test]
+    fn popup_clamps_oversized_child() {
+        test_popup_clamps_oversized_child();
+    }
+    #[test]
+    fn popup_click_outside_dismisses() {
+        test_popup_click_outside_dismisses();
+    }
+    #[test]
+    fn popup_click_inside_does_not_dismiss() {
+        test_popup_click_inside_does_not_dismiss();
+    }
+    #[test]
+    fn popup_escape_dismisses() {
+        test_popup_escape_dismisses();
+    }
+    #[test]
+    fn popup_swallows_unhandled_events() {
+        test_popup_swallows_unhandled_events();
     }
 }
