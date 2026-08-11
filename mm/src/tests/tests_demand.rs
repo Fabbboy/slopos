@@ -35,7 +35,7 @@ pub fn test_demand_fault_present_page() -> TestResult {
         return fail!("create VM");
     };
 
-    let addr = process_vm_alloc(vm.pid, PAGE_SIZE_4KB, PageFlags::WRITABLE.bits() as u32);
+    let addr = process_vm_alloc(vm.process, PAGE_SIZE_4KB, PageFlags::WRITABLE.bits() as u32);
     assert_test!(addr != 0, "process_vm_alloc failed");
 
     let Some(_phys) = vm.map_test_page(addr, PageFlags::USER_RW.bits()) else {
@@ -44,7 +44,7 @@ pub fn test_demand_fault_present_page() -> TestResult {
 
     let error_code_present: u64 = 0x01;
     assert_test!(
-        !is_demand_fault(error_code_present, vm.pid, addr),
+        !is_demand_fault(error_code_present, vm.process, addr),
         "is_demand_fault returned true for present page"
     );
 
@@ -60,7 +60,7 @@ pub fn test_demand_fault_no_vma() -> TestResult {
     let error_code: u64 = 0x06;
 
     assert_test!(
-        !is_demand_fault(error_code, vm.pid, unmapped_addr),
+        !is_demand_fault(error_code, vm.process, unmapped_addr),
         "is_demand_fault returned true for unmapped address"
     );
 
@@ -72,10 +72,10 @@ pub fn test_demand_fault_lazy_anon_vma() -> TestResult {
         return fail!("create VM");
     };
 
-    let addr = process_vm_alloc(vm.pid, PAGE_SIZE_4KB, PageFlags::WRITABLE.bits() as u32);
+    let addr = process_vm_alloc(vm.process, PAGE_SIZE_4KB, PageFlags::WRITABLE.bits() as u32);
     assert_test!(addr != 0, "process_vm_alloc failed");
 
-    let region = process_vm_get_region(vm.pid, addr);
+    let region = process_vm_get_region(vm.process, addr);
     assert_test!(region.is_some(), "no VMA found for allocated address");
     let region = region.unwrap();
     assert_test!(region.is_demand_paged(), "allocated VMA is not LAZY");
@@ -83,7 +83,7 @@ pub fn test_demand_fault_lazy_anon_vma() -> TestResult {
 
     let error_code: u64 = 0x04;
     assert_test!(
-        is_demand_fault(error_code, vm.pid, addr),
+        is_demand_fault(error_code, vm.process, addr),
         "is_demand_fault returned false for valid LAZY VMA"
     );
 
@@ -150,16 +150,23 @@ pub fn test_demand_permission_allow_write() -> TestResult {
     pass!()
 }
 
-pub fn test_demand_dispatch_absent_for_unknown_pid() -> TestResult {
-    // After the framekernel migration, `demand::handle_demand_fault`
-    // is reached only via `process_vm::process_vm_with_vm_space`,
-    // which filters out slots with no address space. Verify the
-    // dispatcher returns `None` for an unknown PID — the failure path
-    // `try_resolve_user_fault` actually hits.
-    let result =
-        crate::process_vm::process_vm_with_vm_space(slopos_abi::task::INVALID_PROCESS_ID, |_| ());
+pub fn test_demand_dispatch_absent_for_a_reaped_process() -> TestResult {
+    // `demand::handle_demand_fault` is reached only via
+    // `process_vm_with_vm_space`, which must answer `None` for a process that
+    // no longer exists — the failure path `try_resolve_user_fault` hits.
+    //
+    // Driven with a *stale* designator rather than `INVALID_PROCESS_ID`: the
+    // argument is no longer a number a caller can reach by omission, so the
+    // reachable failure is a reference outliving its process.
+    let Some(vm) = crate::tests::test_fixtures::ProcessVmGuard::new() else {
+        return fail!("could not create a process VM");
+    };
+    let stale = vm.process;
+    drop(vm);
+
+    let result = crate::process_vm::process_vm_with_vm_space(stale, |_| ());
     if result.is_some() {
-        return fail!("process_vm_with_vm_space returned Some for INVALID_PROCESS_ID");
+        return fail!("process_vm_with_vm_space resolved a reaped process");
     }
     pass!()
 }
@@ -176,6 +183,6 @@ slopos_testing::stest!(name = test_demand_permission_deny_exec, suite = demand);
 slopos_testing::stest!(name = test_demand_permission_allow_read, suite = demand);
 slopos_testing::stest!(name = test_demand_permission_allow_write, suite = demand);
 slopos_testing::stest!(
-    name = test_demand_dispatch_absent_for_unknown_pid,
+    name = test_demand_dispatch_absent_for_a_reaped_process,
     suite = demand
 );

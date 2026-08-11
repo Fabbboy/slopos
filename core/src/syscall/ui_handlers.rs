@@ -290,10 +290,14 @@ define_syscall!(syscall_roulette_draw
     -> Result<(), Errno>
 {
     use slopos_kernel_services::kernel_vm_space::kernel_vm_space;
-    let caller_pid = ctx.process_id();
+    // Resolved before the switch away, so the restore below names the process
+    // that made the call rather than re-reading an id afterwards.
+    let caller = ctx.require_process()?.process();
     kernel_vm_space().lock().activate_kernel_master();
     let result = video::roulette_draw(fate);
-    let _ = slopos_mm::process_vm::process_vm_activate(caller_pid);
+    if let Some(caller) = caller {
+        let _ = slopos_mm::process_vm::process_vm_activate(caller);
+    }
     result.map_err(|_| Errno::EINVAL)
 });
 

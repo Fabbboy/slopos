@@ -791,7 +791,10 @@ pub fn recvmsg_provided(
     // straight from the socket via a volatile writer — no kernel scratch. The
     // pin is validated *before* any socket consume, so a bad buffer can't lose
     // data (unlike the old consume-then-publish-fault path).
-    let pin = match BufferRegistry::provided_pin(table.id(), buf.addr, buf.len as usize) {
+    let Some(vm_process) = table.process() else {
+        return Outcome::Inline(Errno::EINVAL.raw());
+    };
+    let pin = match BufferRegistry::provided_pin(vm_process, buf.addr, buf.len as usize) {
         Ok(p) => p,
         Err(e) => return Outcome::Inline(e.raw()),
     };

@@ -429,6 +429,19 @@ impl FdTable {
         ProcessId::resolve(id).map(Self::Process)
     }
 
+    /// The owning process, or `None` for the kernel table.
+    ///
+    /// What `mm`'s address-space API takes: a table and an address space are
+    /// two things one process owns, so a caller holding the table already
+    /// holds everything the other lookup needs.
+    #[inline]
+    pub fn process(self) -> Option<ProcessId> {
+        match self {
+            Self::Kernel => None,
+            Self::Process(process) => Some(process),
+        }
+    }
+
     /// The owning process's handle, or `None` for the kernel table.
     ///
     /// The table-creation entry points take this rather than an `FdTable`,

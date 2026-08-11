@@ -166,15 +166,22 @@ fn pts_path_for(number: u32) -> Option<[u8; 11]> {
     Some(path)
 }
 
+/// Resolve a pid this test just created into the designator `mm` now takes.
+fn resolve_pid(pid: u32) -> slopos_ostd::process::ProcessId {
+    slopos_ostd::process::ProcessId::resolve(pid).expect("a pid this test just created")
+}
+
 fn with_user_process_context<R>(table: FdTable, f: impl FnOnce() -> R) -> Option<R> {
-    let pid = table.id();
-    if slopos_mm::process_vm::process_vm_get_ostd_pml4_paddr(pid) == 0 {
+    let process = table.process()?;
+    if slopos_mm::process_vm::process_vm_get_ostd_pml4_paddr(process) == 0 {
         return None;
     }
-    if !slopos_mm::process_vm::process_vm_activate(pid) {
+    if !slopos_mm::process_vm::process_vm_activate(process) {
         return None;
     }
-    set_test_process_id(pid);
+    // The PCR still carries a bare pid across the syscall boundary, so the
+    // designator becomes a number again exactly here.
+    set_test_process_id(table.id());
     let out = f();
     set_test_process_id(slopos_abi::task::INVALID_PROCESS_ID);
     // Reset to kernel master — the test scope runs against the kernel
@@ -204,8 +211,8 @@ fn user_copy_in<T: Copy>(table: FdTable, addr: u64) -> Option<T> {
 }
 
 fn map_user_rw_page(table: FdTable) -> Option<u64> {
-    let pid = table.id();
-    let base = process_vm_alloc(pid, 4096, PageFlags::USER_RW.bits() as u32);
+    let process = table.process()?;
+    let base = process_vm_alloc(process, 4096, PageFlags::USER_RW.bits() as u32);
     if base == 0 {
         return None;
     }
@@ -215,7 +222,7 @@ fn map_user_rw_page(table: FdTable) -> Option<u64> {
         return None;
     }
 
-    let mapped = slopos_mm::process_vm::process_vm_with_vm_space(pid, |vs| {
+    let mapped = slopos_mm::process_vm::process_vm_with_vm_space(process, |vs| {
         slopos_mm::user_mappings::ostd_map_4kb_user(
             vs,
             slopos_abi::addr::VirtAddr::new(base),
@@ -1199,7 +1206,7 @@ pub fn test_vm_mmap_munmap_stress_baseline() -> TestResult {
 
     for _ in 0..128 {
         let addr = slopos_mm::process_vm::process_vm_mmap(
-            pid.id(),
+            pid.process().expect("a live process"),
             0,
             4096,
             slopos_abi::syscall::PROT_READ | slopos_abi::syscall::PROT_WRITE,
@@ -1211,7 +1218,12 @@ pub fn test_vm_mmap_munmap_stress_baseline() -> TestResult {
             task_terminate(task_id);
             return TestResult::Fail;
         }
-        if slopos_mm::process_vm::process_vm_munmap(pid.id(), addr, 4096) != 0 {
+        if slopos_mm::process_vm::process_vm_munmap(
+            pid.process().expect("a live process"),
+            addr,
+            4096,
+        ) != 0
+        {
             task_terminate(task_id);
             return TestResult::Fail;
         }
@@ -1304,20 +1316,20 @@ pub fn test_fork_cleanup_on_failure() -> TestResult {
 
     for _ in 0..5 {
         let _ = slopos_mm::process_vm::process_vm_alloc(
-            parent_pid,
+            resolve_pid(parent_pid),
             4096 * 4,
             slopos_mm::paging_defs::PageFlags::WRITABLE.bits() as u32,
         );
     }
 
     for _ in 0..3 {
-        let child_pid = slopos_mm::process_vm::process_vm_clone_cow(parent_pid);
+        let child_pid = slopos_mm::process_vm::process_vm_clone_cow(resolve_pid(parent_pid));
         if child_pid != slopos_abi::task::INVALID_PROCESS_ID {
-            slopos_mm::process_vm::destroy_process_vm(child_pid);
+            slopos_mm::process_vm::destroy_process_vm(resolve_pid(child_pid));
         }
     }
 
-    slopos_mm::process_vm::destroy_process_vm(parent_pid);
+    slopos_mm::process_vm::destroy_process_vm(resolve_pid(parent_pid));
 
     let free_after = slopos_mm::page_alloc::get_page_allocator_stats().free;
 
@@ -1378,21 +1390,21 @@ pub fn test_brk_extreme_values() -> TestResult {
     let pid = slopos_mm::process_vm::create_process_vm();
     assert_test!(pid != slopos_abi::task::INVALID_PROCESS_ID);
 
-    let current_brk = slopos_mm::process_vm::process_vm_brk(pid, 0);
+    let current_brk = slopos_mm::process_vm::process_vm_brk(resolve_pid(pid), 0);
     if current_brk == 0 {
         klog_info!("SYSCALL_TEST: Initial brk returned 0 (might be a bug)");
     }
 
-    let max_brk = slopos_mm::process_vm::process_vm_brk(pid, u64::MAX);
+    let max_brk = slopos_mm::process_vm::process_vm_brk(resolve_pid(pid), u64::MAX);
     assert_test!(max_brk != u64::MAX, "brk accepted u64::MAX");
 
-    let kernel_brk = slopos_mm::process_vm::process_vm_brk(pid, 0xFFFF_8000_0000_0000);
+    let kernel_brk = slopos_mm::process_vm::process_vm_brk(resolve_pid(pid), 0xFFFF_8000_0000_0000);
     assert_test!(
         kernel_brk != 0xFFFF_8000_0000_0000,
         "brk accepted kernel address"
     );
 
-    slopos_mm::process_vm::destroy_process_vm(pid);
+    slopos_mm::process_vm::destroy_process_vm(resolve_pid(pid));
     TestResult::Pass
 }
 
@@ -1482,7 +1494,7 @@ pub fn test_fork_memory_pressure() -> TestResult {
 
     for _ in 0..10 {
         let addr = slopos_mm::process_vm::process_vm_alloc(
-            parent_pid,
+            resolve_pid(parent_pid),
             4096 * 4,
             slopos_mm::paging_defs::PageFlags::WRITABLE.bits() as u32,
         );
@@ -1507,14 +1519,14 @@ pub fn test_fork_memory_pressure() -> TestResult {
         stress_count += 1;
     }
 
-    let child_pid = slopos_mm::process_vm::process_vm_clone_cow(parent_pid);
+    let child_pid = slopos_mm::process_vm::process_vm_clone_cow(resolve_pid(parent_pid));
 
     let free_before = slopos_mm::page_alloc::get_page_allocator_stats().free;
 
     if child_pid != slopos_abi::task::INVALID_PROCESS_ID {
-        slopos_mm::process_vm::destroy_process_vm(child_pid);
+        slopos_mm::process_vm::destroy_process_vm(resolve_pid(child_pid));
     }
-    slopos_mm::process_vm::destroy_process_vm(parent_pid);
+    slopos_mm::process_vm::destroy_process_vm(resolve_pid(parent_pid));
 
     for i in 0..stress_count {
         free_page_frame(stress_pages[i]);
@@ -1889,7 +1901,7 @@ pub fn test_signal_install_deliver_and_sigreturn() -> TestResult {
         "initial old action should be SIG_DFL"
     );
 
-    let stack_top = process_vm_get_stack_top(pid.id());
+    let stack_top = process_vm_get_stack_top(pid.process().expect("a live process"));
     let original_rsp = stack_top.wrapping_sub(0x200);
     let original_rip = 0x5000_1234;
 
@@ -2156,7 +2168,7 @@ pub fn test_signal_delivery_on_irq_exit_dispatch() -> TestResult {
     // The IRQ-exit path resolves the task via scheduler_get_current_task().
     make_task_current(task_id);
 
-    let stack_top = process_vm_get_stack_top(pid.id());
+    let stack_top = process_vm_get_stack_top(pid.process().expect("a live process"));
     let original_rip = 0x5500_2222;
     let original_rsp = stack_top.wrapping_sub(0x200);
     let mut frame = user_irq_frame(original_rip, original_rsp);
@@ -2419,7 +2431,7 @@ pub fn test_sigprocmask_block_then_unblock_delivery() -> TestResult {
     });
     assert_eq_test!(kill_frame.rax(), 0, "kill(SIGUSR1) failed");
 
-    let stack_top = process_vm_get_stack_top(pid.id());
+    let stack_top = process_vm_get_stack_top(pid.process().expect("a live process"));
     let mut user_frame = zero_frame();
     user_frame.regs_mut().rip = 0x6000_1111;
     user_frame.regs_mut().rsp = stack_top.wrapping_sub(0x200);

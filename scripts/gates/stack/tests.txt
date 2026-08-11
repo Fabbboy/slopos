@@ -41,9 +41,12 @@ expect-test-registry many
 2200	*slopos_acpi3aml6interp*Interp4eval*
 2216	*slopos_core7syscall2fs19poll_ioctl_handlers14syscall_select*
 2072	*slopos_core7syscall16process_handlers18syscall_spawn_path*
-2280	*slopos_core7syscall5tests41test_signal_install_deliver_and_sigreturn*
+2312	*slopos_core7syscall5tests41test_signal_install_deliver_and_sigreturn*
 2248	*slopos_core7syscall5tests33test_unix_socket_poll_syscall_e2e*
 2184	*slopos_core4exec5utest8dispatch*
+2104	*slopos_core4exec16setup_user_stack*
+2072	*slopos_core7syscall5tests44test_sigprocmask_block_then_unblock_delivery*
+2072	*slopos_mm10process_vm24process_vm_clone_cow_for*
 
 # Library smallsort monomorphizations: scratch is the element size, not
 # reducible without changing the sorted element type.

@@ -158,8 +158,8 @@ impl<'a> SyscallContext<'a> {
     /// Resolve the caller's [`VmSpace`]. Returns `EFAULT` if the
     /// caller is bound to no process or the process has no VM space.
     pub fn vm_space(&self) -> Result<KArc<VmSpace>, Errno> {
-        let table = self.require_process()?;
-        slopos_mm::process_vm::process_vm_get_vm_space(table.id()).ok_or(Errno::EFAULT)
+        let vm_process = self.require_process()?.process().ok_or(Errno::ESRCH)?;
+        slopos_mm::process_vm::process_vm_get_vm_space(vm_process).ok_or(Errno::EFAULT)
     }
 
     // ── Permission checks ─────────────────────────────────────────────

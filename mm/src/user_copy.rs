@@ -43,12 +43,12 @@ pub fn set_test_process_id(pid: u32) {
 /// shifted, before we hand any fault-recovering copy a kernel
 /// address. Identical to the legacy probe, retained here because the
 /// shim still wraps the OSTD copy with kernel-side process-VM glue.
-fn check_kernel_guard(pid: u32) -> Result<(), UserPtrError> {
+fn check_kernel_guard(process: slopos_ostd::process::ProcessId) -> Result<(), UserPtrError> {
     if KERNEL_GUARD_CHECKED.is_set() {
         return Ok(());
     }
     let kernel_probe = crate::memory_layout_defs::KERNEL_HALF_PROBE_VA;
-    if crate::process_vm::process_vm_user_va_is_user_accessible(pid, kernel_probe) {
+    if crate::process_vm::process_vm_user_va_is_user_accessible(process, kernel_probe) {
         return Err(UserPtrError::NotMapped);
     }
     KERNEL_GUARD_CHECKED.mark_set();
@@ -58,12 +58,15 @@ fn check_kernel_guard(pid: u32) -> Result<(), UserPtrError> {
 #[inline]
 fn current_vm_space() -> Result<slopos_ostd::KArc<slopos_ostd::mm::vm_space::VmSpace>, UserPtrError>
 {
-    let pid = current_process_id();
-    if pid == slopos_abi::task::INVALID_PROCESS_ID {
+    // The PCR carries a bare pid across the syscall boundary, so this is where
+    // it stops being a number: resolved once, to a generation-checked
+    // designator, and a pid naming no live process fails here rather than
+    // reaching a slot lookup.
+    let Some(process) = slopos_ostd::process::ProcessId::resolve(current_process_id()) else {
         return Err(UserPtrError::NotMapped);
-    }
-    check_kernel_guard(pid)?;
-    crate::process_vm::process_vm_get_vm_space(pid).ok_or(UserPtrError::NotMapped)
+    };
+    check_kernel_guard(process)?;
+    crate::process_vm::process_vm_get_vm_space(process).ok_or(UserPtrError::NotMapped)
 }
 
 /// Copy a `T: Copy` from user space into kernel space.

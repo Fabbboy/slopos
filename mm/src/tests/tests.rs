@@ -26,6 +26,19 @@ use crate::slab::{get_heap_stats_owned, kfree, kmalloc, kzalloc};
 // ============================================================================
 
 /// Test 1: Allocate and free a single 4KB page
+
+/// Resolve a pid these tests just created into the designator `mm` now takes.
+///
+/// A test that holds a raw number from `create_process_vm` is the one caller
+/// that legitimately has to cross back; everywhere else the designator is
+/// carried. Panics on a pid that names no live process, which in a test is the
+/// assertion failing early rather than a lookup silently answering `None`.
+use slopos_ostd::process::ProcessId;
+
+pub(super) fn resolve_pid(pid: u32) -> slopos_ostd::process::ProcessId {
+    slopos_ostd::process::ProcessId::resolve(pid).expect("a pid this test just created")
+}
+
 pub fn test_page_alloc_single() -> TestResult {
     let phys = alloc_kernel_page();
     assert_not_null!(phys.as_u64() as *const u8, "allocate single page");
@@ -493,62 +506,87 @@ pub fn test_process_vm_slot_reuse() -> TestResult {
 
     let initial_active = get_process_vm_stats().active_processes;
 
-    let mut pids = [0u32; 5];
+    // Designators captured at creation and held. Re-resolving a pid after its
+    // process is destroyed is exactly what this test used to do and what the
+    // re-key removes: the number would come back resolving to a *later*
+    // occupant, and the assertion would silently pass against the wrong one.
+    let none = ProcessId::resolve(1).filter(|_| false);
+    let mut procs = [none; 5];
     for i in 0..5 {
-        pids[i] = create_process_vm();
-        if pids[i] == INVALID_PROCESS_ID {
+        let pid = create_process_vm();
+        if pid == INVALID_PROCESS_ID {
             return fail!("create process {}", i);
         }
-        if process_vm_get_ostd_pml4_paddr(pids[i]) == 0 {
+        procs[i] = ProcessId::resolve(pid);
+        let Some(p) = procs[i] else {
+            return fail!("resolve process {}", i);
+        };
+        if process_vm_get_ostd_pml4_paddr(p) == 0 {
             return fail!("address space for process {}", i);
         }
     }
 
     for &idx in &[1usize, 2, 3] {
-        if destroy_process_vm(pids[idx]) != 0 {
+        let Some(p) = procs[idx] else {
+            return fail!("process {} designator", idx);
+        };
+        if destroy_process_vm(p) != 0 {
             return fail!("destroy process at index {}", idx);
         }
     }
 
+    // The held designators now name reaped processes, and answer so rather
+    // than resolving to whichever process took the slot.
     for &idx in &[1usize, 2, 3] {
-        if process_vm_get_ostd_pml4_paddr(pids[idx]) != 0 {
+        let Some(p) = procs[idx] else {
+            return fail!("process {} designator", idx);
+        };
+        if process_vm_get_ostd_pml4_paddr(p) != 0 {
             return fail!("destroyed process {} should have no address space", idx);
         }
     }
 
+    let (Some(p0), Some(p4)) = (procs[0], procs[4]) else {
+        return fail!("surviving designators");
+    };
     assert_test!(
-        process_vm_get_ostd_pml4_paddr(pids[0]) != 0,
+        process_vm_get_ostd_pml4_paddr(p0) != 0,
         "surviving process 0"
     );
     assert_test!(
-        process_vm_get_ostd_pml4_paddr(pids[4]) != 0,
+        process_vm_get_ostd_pml4_paddr(p4) != 0,
         "surviving process 4"
     );
 
-    let mut new_pids = [0u32; 3];
+    let mut reused = [none; 3];
     for i in 0..3 {
-        new_pids[i] = create_process_vm();
-        if new_pids[i] == INVALID_PROCESS_ID {
+        let pid = create_process_vm();
+        if pid == INVALID_PROCESS_ID {
             return fail!("create reuse process {}", i);
         }
-        if process_vm_get_ostd_pml4_paddr(new_pids[i]) == 0 {
+        reused[i] = ProcessId::resolve(pid);
+        let Some(p) = reused[i] else {
+            return fail!("resolve reuse process {}", i);
+        };
+        if process_vm_get_ostd_pml4_paddr(p) == 0 {
             return fail!("reuse address space {}", i);
         }
     }
 
+    // The slots were reused, and the survivors are untouched by that.
     assert_test!(
-        process_vm_get_ostd_pml4_paddr(pids[0]) != 0,
+        process_vm_get_ostd_pml4_paddr(p0) != 0,
         "original process 0 still alive"
     );
     assert_test!(
-        process_vm_get_ostd_pml4_paddr(pids[4]) != 0,
+        process_vm_get_ostd_pml4_paddr(p4) != 0,
         "original process 4 still alive"
     );
 
-    assert_test!(destroy_process_vm(pids[0]) == 0, "destroy original 0");
-    assert_test!(destroy_process_vm(pids[4]) == 0, "destroy original 4");
-    for pid in new_pids {
-        destroy_process_vm(pid);
+    assert_test!(destroy_process_vm(p0) == 0, "destroy original 0");
+    assert_test!(destroy_process_vm(p4) == 0, "destroy original 4");
+    for p in reused.into_iter().flatten() {
+        destroy_process_vm(p);
     }
 
     let final_active = get_process_vm_stats().active_processes;
@@ -572,7 +610,7 @@ pub fn test_process_vm_counter_reset() -> TestResult {
         pids[i] = create_process_vm();
         if pids[i] == INVALID_PROCESS_ID {
             for j in 0..i {
-                destroy_process_vm(pids[j]);
+                destroy_process_vm(resolve_pid(pids[j]));
             }
             return fail!("create process {}", i);
         }
@@ -581,7 +619,7 @@ pub fn test_process_vm_counter_reset() -> TestResult {
     let active_after = get_process_vm_stats().active_processes;
     if active_after != initial_active + 10 {
         for pid in pids {
-            destroy_process_vm(pid);
+            destroy_process_vm(resolve_pid(pid));
         }
         return fail!(
             "active count should be {} + 10, got {}",
@@ -591,7 +629,7 @@ pub fn test_process_vm_counter_reset() -> TestResult {
     }
 
     for pid in pids.iter().rev() {
-        if destroy_process_vm(*pid) != 0 {
+        if destroy_process_vm(resolve_pid(*pid)) != 0 {
             return fail!("destroy process {}", pid);
         }
     }
@@ -628,13 +666,13 @@ pub fn test_a_freed_process_id_is_reissued_promptly() -> TestResult {
     if first == INVALID_PROCESS_ID {
         return fail!("create");
     }
-    destroy_process_vm(first);
+    destroy_process_vm(resolve_pid(first));
 
     let second = create_process_vm();
     if second == INVALID_PROCESS_ID {
         return fail!("create after free");
     }
-    destroy_process_vm(second);
+    destroy_process_vm(resolve_pid(second));
 
     if second != first {
         return fail!(
@@ -661,18 +699,18 @@ pub fn test_process_vm_handle_stale_after_reuse() -> TestResult {
     if p1 == INVALID_PROCESS_ID {
         return fail!("create p1");
     }
-    let Some(h1) = process_vm_handle(p1) else {
-        destroy_process_vm(p1);
+    let Some(h1) = process_vm_handle(resolve_pid(p1)) else {
+        destroy_process_vm(resolve_pid(p1));
         return fail!("handle for live p1");
     };
     // A live handle resolves.
     if process_vm_with_handle(h1, |_| ()).is_err() {
-        destroy_process_vm(p1);
+        destroy_process_vm(resolve_pid(p1));
         return fail!("live handle should resolve");
     }
 
     // Destroy p1: the handle now resolves to NoEntry (slot vacated).
-    destroy_process_vm(p1);
+    destroy_process_vm(resolve_pid(p1));
     if process_vm_with_handle(h1, |_| ()) != Err(HandleError::NoEntry) {
         return fail!("destroyed-slot handle should be NoEntry");
     }
@@ -688,14 +726,14 @@ pub fn test_process_vm_handle_stale_after_reuse() -> TestResult {
         return fail!("id {} was not reissued (got {})", p1, p2);
     }
 
-    let Some(h2) = process_vm_handle(p2) else {
-        destroy_process_vm(p2);
+    let Some(h2) = process_vm_handle(resolve_pid(p2)) else {
+        destroy_process_vm(resolve_pid(p2));
         return fail!("handle for live p2");
     };
 
     let stale = process_vm_with_handle(h1, |_| ());
     let live = process_vm_with_handle(h2, |_| ());
-    destroy_process_vm(p2);
+    destroy_process_vm(resolve_pid(p2));
 
     // Same id, same slot, different generation — the case the handle
     // exists for.
@@ -1480,7 +1518,7 @@ pub fn test_process_vm_alloc_and_access() -> TestResult {
     };
 
     use crate::process_vm::process_vm_alloc;
-    let user_addr = process_vm_alloc(vm.pid, 4096, PageFlags::WRITABLE.bits() as u32);
+    let user_addr = process_vm_alloc(vm.process, 4096, PageFlags::WRITABLE.bits() as u32);
     assert_test!(user_addr != 0, "process_vm_alloc returned 0");
 
     // The allocation is LAZY - pages aren't mapped until accessed
@@ -1504,15 +1542,15 @@ pub fn test_process_vm_brk_expansion() -> TestResult {
 
     use crate::process_vm::process_vm_brk;
 
-    let initial_brk = process_vm_brk(vm.pid, 0);
+    let initial_brk = process_vm_brk(vm.process, 0);
     assert_test!(initial_brk != 0, "initial brk is 0");
 
-    let new_brk = process_vm_brk(vm.pid, initial_brk + 8192);
+    let new_brk = process_vm_brk(vm.process, initial_brk + 8192);
     if new_brk <= initial_brk {
         return fail!("brk expansion failed: {} -> {}", initial_brk, new_brk);
     }
 
-    let shrunk_brk = process_vm_brk(vm.pid, initial_brk + 4096);
+    let shrunk_brk = process_vm_brk(vm.process, initial_brk + 4096);
     if shrunk_brk != initial_brk + 4096 {
         return fail!(
             "brk shrink failed: expected {}, got {}",
@@ -1531,7 +1569,7 @@ pub fn test_process_vm_brk_byte_granular() -> TestResult {
 
     use crate::process_vm::process_vm_brk;
 
-    let base = process_vm_brk(vm.pid, 0);
+    let base = process_vm_brk(vm.process, 0);
     assert_test!(base != 0, "initial brk is 0");
     assert_test!(
         base & (PAGE_SIZE_4KB - 1) == 0,
@@ -1539,7 +1577,10 @@ pub fn test_process_vm_brk_byte_granular() -> TestResult {
     );
 
     let big = base + 64 * PAGE_SIZE_4KB;
-    assert_test!(process_vm_brk(vm.pid, big) == big, "aligned grow not exact");
+    assert_test!(
+        process_vm_brk(vm.process, big) == big,
+        "aligned grow not exact"
+    );
 
     // The allocator top-trim shape: an unaligned break a few bytes shy
     // of a page boundary. The kernel must echo the byte value back
@@ -1547,11 +1588,11 @@ pub fn test_process_vm_brk_byte_granular() -> TestResult {
     // keeping the partial tail page mapped.
     let trimmed = base + 16 * PAGE_SIZE_4KB - 8;
     assert_test!(
-        process_vm_brk(vm.pid, trimmed) == trimmed,
+        process_vm_brk(vm.process, trimmed) == trimmed,
         "unaligned shrink did not return the requested break"
     );
     assert_test!(
-        process_vm_brk(vm.pid, 0) == trimmed,
+        process_vm_brk(vm.process, 0) == trimmed,
         "break not persisted byte-granular"
     );
 
@@ -1569,7 +1610,7 @@ pub fn test_process_vm_brk_byte_granular() -> TestResult {
     // that faulted while grow/shrink handshakes were desynced.
     let regrown = base + 32 * PAGE_SIZE_4KB + 24;
     assert_test!(
-        process_vm_brk(vm.pid, regrown) == regrown,
+        process_vm_brk(vm.process, regrown) == regrown,
         "unaligned regrow did not return the requested break"
     );
     assert_test!(
@@ -1587,14 +1628,18 @@ pub fn test_cow_page_isolation() -> TestResult {
 
     // Use process_vm_alloc to properly create a VMA (COW clone iterates VMAs, not raw mappings)
     use crate::process_vm::process_vm_alloc;
-    let test_addr = process_vm_alloc(parent.pid, PAGE_SIZE_4KB, PageFlags::WRITABLE.bits() as u32);
+    let test_addr = process_vm_alloc(
+        parent.process,
+        PAGE_SIZE_4KB,
+        PageFlags::WRITABLE.bits() as u32,
+    );
     assert_test!(test_addr != 0, "process_vm_alloc failed");
 
     // Allocate physical page and map it within the VMA
     let phys = alloc_kernel_page();
     assert_not_null!(phys.as_u64() as *const u8, "alloc page frame");
 
-    let map_result = process_vm_with_vm_space(parent.pid, |vs| {
+    let map_result = process_vm_with_vm_space(parent.process, |vs| {
         ostd_map_4kb_user(
             vs,
             VirtAddr::new(test_addr),
@@ -1655,7 +1700,7 @@ pub fn test_cow_fault_handling() -> TestResult {
     let phys = alloc_kernel_page();
     assert_not_null!(phys.as_u64() as *const u8, "alloc page frame");
 
-    let map_result = process_vm_with_vm_space(vm.pid, |vs| {
+    let map_result = process_vm_with_vm_space(vm.process, |vs| {
         ostd_map_4kb_user(
             vs,
             VirtAddr::new(test_addr),
@@ -1673,7 +1718,7 @@ pub fn test_cow_fault_handling() -> TestResult {
 
     // Simulate a write fault - error code for write to present page = 0x03
     let error_code = 0x03u64;
-    let is_cow = process_vm_with_vm_space(vm.pid, |vs| is_cow_fault(error_code, vs, test_addr))
+    let is_cow = process_vm_with_vm_space(vm.process, |vs| is_cow_fault(error_code, vs, test_addr))
         .unwrap_or(false);
     assert_test!(is_cow, "is_cow_fault returned false for COW page");
 
@@ -1709,7 +1754,7 @@ pub fn test_multiple_process_vms() -> TestResult {
         pids[i] = create_process_vm();
         if pids[i] == INVALID_PROCESS_ID {
             for j in 0..i {
-                destroy_process_vm(pids[j]);
+                destroy_process_vm(resolve_pid(pids[j]));
             }
             return fail!("create process {}", i);
         }
@@ -1718,10 +1763,10 @@ pub fn test_multiple_process_vms() -> TestResult {
     // Verify each has its own address space
     let mut roots = [0u64; NUM_PROCESSES];
     for i in 0..NUM_PROCESSES {
-        roots[i] = process_vm_get_ostd_pml4_paddr(pids[i]);
+        roots[i] = process_vm_get_ostd_pml4_paddr(resolve_pid(pids[i]));
         if roots[i] == 0 {
             for j in 0..NUM_PROCESSES {
-                destroy_process_vm(pids[j]);
+                destroy_process_vm(resolve_pid(pids[j]));
             }
             return fail!("process {} has no address space", i);
         }
@@ -1732,7 +1777,7 @@ pub fn test_multiple_process_vms() -> TestResult {
         for j in (i + 1)..NUM_PROCESSES {
             if roots[i] == roots[j] {
                 for k in 0..NUM_PROCESSES {
-                    destroy_process_vm(pids[k]);
+                    destroy_process_vm(resolve_pid(pids[k]));
                 }
                 return fail!("processes {} and {} share an address space!", i, j);
             }
@@ -1740,7 +1785,7 @@ pub fn test_multiple_process_vms() -> TestResult {
     }
 
     for i in 0..NUM_PROCESSES {
-        destroy_process_vm(pids[i]);
+        destroy_process_vm(resolve_pid(pids[i]));
     }
     pass!()
 }
@@ -1753,10 +1798,10 @@ pub fn test_vma_region_retrieval() -> TestResult {
     use crate::process_vm::{process_vm_alloc, process_vm_get_region};
     use crate::vma_region::RegionPurpose;
 
-    let user_addr = process_vm_alloc(vm.pid, 8192, PageFlags::WRITABLE.bits() as u32);
+    let user_addr = process_vm_alloc(vm.process, 8192, PageFlags::WRITABLE.bits() as u32);
     assert_test!(user_addr != 0, "process_vm_alloc returned 0");
 
-    let region = process_vm_get_region(vm.pid, user_addr);
+    let region = process_vm_get_region(vm.process, user_addr);
     assert_test!(
         region.is_some(),
         "VMA region not found for allocated address"

@@ -26,9 +26,13 @@ pub fn is_demand_fault_in_region(error_code: u64, region: &VmaRegion) -> bool {
     region.is_demand_paged() && region.is_anonymous()
 }
 
-/// [`is_demand_fault_in_region`] for a caller that has only a process id.
-pub fn is_demand_fault(error_code: u64, process_id: u32, fault_addr: u64) -> bool {
-    let Some(region) = process_vm::process_vm_get_region(process_id, fault_addr) else {
+/// [`is_demand_fault_in_region`] for a caller that has only a process.
+pub fn is_demand_fault(
+    error_code: u64,
+    process: slopos_ostd::process::ProcessId,
+    fault_addr: u64,
+) -> bool {
+    let Some(region) = process_vm::process_vm_get_region(process, fault_addr) else {
         return false;
     };
     is_demand_fault_in_region(error_code, &region)

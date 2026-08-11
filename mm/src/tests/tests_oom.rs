@@ -1,3 +1,4 @@
+use super::tests::resolve_pid;
 use core::ptr;
 
 use slopos_abi::addr::PhysAddr;
@@ -235,7 +236,7 @@ pub fn test_process_vm_creation_pressure() -> TestResult {
             return fail!("process creation failed at cycle {}", i);
         }
         if pid > MAX_PROCESS_ID {
-            destroy_process_vm(pid);
+            destroy_process_vm(resolve_pid(pid));
             return fail!(
                 "cycle {} produced pid {}, past the {} the process tables can index",
                 i,
@@ -243,7 +244,7 @@ pub fn test_process_vm_creation_pressure() -> TestResult {
                 MAX_PROCESS_ID
             );
         }
-        destroy_process_vm(pid);
+        destroy_process_vm(resolve_pid(pid));
     }
 
     pass!()
@@ -416,7 +417,11 @@ pub fn test_process_heap_expansion_oom() -> TestResult {
     let mut total_size = 0u64;
 
     loop {
-        let addr = process_vm_alloc(pid, PAGE_SIZE_4KB * 4, PageFlags::WRITABLE.bits() as u32);
+        let addr = process_vm_alloc(
+            resolve_pid(pid),
+            PAGE_SIZE_4KB * 4,
+            PageFlags::WRITABLE.bits() as u32,
+        );
         if addr == 0 {
             break;
         }
@@ -433,7 +438,7 @@ pub fn test_process_heap_expansion_oom() -> TestResult {
         total_size / 1024
     );
 
-    destroy_process_vm(pid);
+    destroy_process_vm(resolve_pid(pid));
     pass!()
 }
 

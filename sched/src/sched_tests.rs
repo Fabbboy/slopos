@@ -837,11 +837,21 @@ pub fn test_task_abandon_releases_the_address_space() -> TestResult {
         return TestResult::Fail;
     };
     let task_id = pending.id();
-    let process_id = pending.as_mut().process_id;
+    // Captured before the abandon, and held across it: re-resolving the number
+    // afterwards is what this change removes, because by then it names either
+    // nothing or somebody else.
+    let process = pending
+        .as_mut()
+        .process()
+        .as_deref()
+        .and_then(slopos_ostd::process::ProcessId::of);
 
-    if process_id == INVALID_PROCESS_ID
-        || slopos_mm::process_vm::process_vm_get_vm_space(process_id).is_none()
-    {
+    let Some(process) = process else {
+        klog_info!("SCHED_TEST: a built user task has no process");
+        task_abandon(pending);
+        return TestResult::Fail;
+    };
+    if slopos_mm::process_vm::process_vm_get_vm_space(process).is_none() {
         klog_info!("SCHED_TEST: a built user task has no address space");
         task_abandon(pending);
         return TestResult::Fail;
@@ -849,11 +859,11 @@ pub fn test_task_abandon_releases_the_address_space() -> TestResult {
 
     task_abandon(pending);
 
-    if slopos_mm::process_vm::process_vm_get_vm_space(process_id).is_some() {
+    if slopos_mm::process_vm::process_vm_get_vm_space(process).is_some() {
         klog_info!(
             "SCHED_TEST: abandoning task {} left process {} standing",
             task_id,
-            process_id
+            process.id()
         );
         return TestResult::Fail;
     }
@@ -1150,7 +1160,9 @@ pub fn test_a_dead_address_space_is_unreachable_through_its_task_handle() -> Tes
         return TestResult::Fail;
     }
     let resolved = process_vm_get_cr3_phys_by_handle(handle);
-    destroy_process_vm(successor);
+    destroy_process_vm(
+        slopos_ostd::process::ProcessId::resolve(successor).expect("a live process"),
+    );
 
     if let Ok(cr3) = resolved {
         klog_info!(

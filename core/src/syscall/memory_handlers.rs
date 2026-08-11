@@ -8,7 +8,7 @@ define_syscall!(syscall_brk
     requires(let process_id: process_id)
     -> Result<u64, Errno>
 {
-    let result = slopos_mm::process_vm::process_vm_brk(process_id.id(), new_brk);
+    let result = slopos_mm::process_vm::process_vm_brk(process_id.process().ok_or(Errno::ESRCH)?, new_brk);
     if result == 0 && new_brk != 0 {
         Err(Errno::ENOMEM)
     } else {
@@ -29,7 +29,7 @@ define_syscall!(syscall_mmap
             return Err(Errno::EINVAL);
         }
         let result = slopos_mm::process_vm::process_vm_mmap_shared(
-            process_id.id(),
+            process_id.process().ok_or(Errno::ESRCH)?,
             addr,
             length,
             prot,
@@ -44,7 +44,7 @@ define_syscall!(syscall_mmap
     }
 
     let result = slopos_mm::process_vm::process_vm_mmap(
-        process_id.id(),
+        process_id.process().ok_or(Errno::ESRCH)?,
         addr,
         length,
         prot,
@@ -66,7 +66,7 @@ define_syscall!(syscall_munmap
 {
     // Each page was invalidated locally as it went, and the freed frames cannot
     // be reallocated until every CPU has quiesced.
-    let rc = slopos_mm::process_vm::process_vm_munmap(process_id.id(), addr, length);
+    let rc = slopos_mm::process_vm::process_vm_munmap(process_id.process().ok_or(Errno::ESRCH)?, addr, length);
     if rc < 0 {
         Err(Errno::from_raw(rc).unwrap_or(Errno::EINVAL))
     } else {
@@ -79,7 +79,7 @@ define_syscall!(syscall_mprotect
     requires(let process_id: process_id)
     -> Result<(), Errno>
 {
-    let rc = slopos_mm::process_vm::process_vm_mprotect(process_id.id(), addr, length, prot);
+    let rc = slopos_mm::process_vm::process_vm_mprotect(process_id.process().ok_or(Errno::ESRCH)?, addr, length, prot);
     if rc < 0 {
         Err(Errno::from_raw(rc).unwrap_or(Errno::EINVAL))
     } else {

@@ -78,7 +78,11 @@ impl PinnedUserBuffer {
     /// be present, user-accessible, and anonymous; the whole range is pinned
     /// atomically (on any per-page failure, the refs taken so far are released
     /// as the partial `frames` vec drops).
-    pub fn pin(pid: u32, va: u64, len: usize) -> Result<Self, PinError> {
+    pub fn pin(
+        process: slopos_ostd::process::ProcessId,
+        va: u64,
+        len: usize,
+    ) -> Result<Self, PinError> {
         if len == 0 {
             return Err(PinError::InvalidRange);
         }
@@ -88,7 +92,7 @@ impl PinnedUserBuffer {
         va.checked_add(len as u64).ok_or(PinError::InvalidRange)?;
 
         let vm_space =
-            crate::process_vm::process_vm_get_vm_space(pid).ok_or(PinError::NotPresent)?;
+            crate::process_vm::process_vm_get_vm_space(process).ok_or(PinError::NotPresent)?;
 
         let base_off = (va & PAGE_MASK) as usize;
         let first_page = va & !PAGE_MASK;

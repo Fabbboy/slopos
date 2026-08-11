@@ -62,6 +62,12 @@ pub fn ring_setup(
         return eno(Errno::EINVAL);
     }
 
+    // A ring is mapped into a process's address space, so the kernel table —
+    // which owns none — cannot have one.
+    let Some(vm_process) = table.process() else {
+        return eno(Errno::EINVAL);
+    };
+
     let layout = RingLayout::new(entries);
     let n_pages = (layout.region_bytes as u64).div_ceil(PAGE_SIZE) as usize;
 
@@ -89,7 +95,7 @@ pub fn ring_setup(
 
     // Map the region into the caller's address space.
     let paddrs = region.paddrs();
-    let user_addr = slopos_mm::process_vm::process_vm_map_ring(table.id(), paddrs.as_slice());
+    let user_addr = slopos_mm::process_vm::process_vm_map_ring(vm_process, paddrs.as_slice());
     if user_addr == 0 {
         return eno(Errno::ENOMEM);
     }
@@ -108,7 +114,7 @@ pub fn ring_setup(
         Ok(v) => v,
         Err(_) => {
             let _ = slopos_mm::process_vm::process_vm_munmap(
-                table.id(),
+                vm_process,
                 user_addr,
                 layout.region_bytes as u64,
             );
@@ -133,7 +139,7 @@ pub fn ring_setup(
         // Registry full. The mapping + frames are cleaned up when the
         // process exits or unmaps; for a clean failure, unmap now.
         let _ = slopos_mm::process_vm::process_vm_munmap(
-            table.id(),
+            vm_process,
             user_addr,
             layout.region_bytes as u64,
         );
@@ -145,7 +151,7 @@ pub fn ring_setup(
     // ring — only the mapping still needs explicit rollback.
     let Some(backing) = file_ops::ring_backing(raw_handle) else {
         let _ = slopos_mm::process_vm::process_vm_munmap(
-            table.id(),
+            vm_process,
             user_addr,
             layout.region_bytes as u64,
         );
@@ -164,7 +170,7 @@ pub fn ring_setup(
     );
     if fd < 0 {
         let _ = slopos_mm::process_vm::process_vm_munmap(
-            table.id(),
+            vm_process,
             user_addr,
             layout.region_bytes as u64,
         );
@@ -176,7 +182,7 @@ pub fn ring_setup(
         // Roll back: close the fd (which removes the ring) + unmap.
         let _ = slopos_fs::fileio::file_close_fd(table, fd);
         let _ = slopos_mm::process_vm::process_vm_munmap(
-            table.id(),
+            vm_process,
             user_addr,
             layout.region_bytes as u64,
         );

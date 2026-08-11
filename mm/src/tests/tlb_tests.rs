@@ -7,6 +7,7 @@
 //! - handle_shootdown_ipi with invalid cpu_idx
 //! - Race conditions in broadcast_flush_request
 
+use super::tests::resolve_pid;
 use slopos_abi::addr::VirtAddr;
 use slopos_arch::MAX_CPUS;
 use slopos_ostd::klog_info;
@@ -506,9 +507,11 @@ pub fn test_destroy_clears_the_process_shootdown_mask() -> TestResult {
         klog_info!("TLB_TEST: could not create a process VM");
         return TestResult::Fail;
     }
-    let Some(key) = process_vm_handle(pid).and_then(|h| TlbProcessKey::from_slot(h.slot())) else {
+    let Some(key) =
+        process_vm_handle(resolve_pid(pid)).and_then(|h| TlbProcessKey::from_slot(h.slot()))
+    else {
         klog_info!("TLB_TEST: a live process has no shootdown key");
-        destroy_process_vm(pid);
+        destroy_process_vm(resolve_pid(pid));
         return TestResult::Fail;
     };
 
@@ -521,11 +524,11 @@ pub fn test_destroy_clears_the_process_shootdown_mask() -> TestResult {
             masked,
             pid
         );
-        destroy_process_vm(pid);
+        destroy_process_vm(resolve_pid(pid));
         return TestResult::Fail;
     }
 
-    destroy_process_vm(pid);
+    destroy_process_vm(resolve_pid(pid));
 
     let after = process_tlb_cpumask_count(key);
     if after != 0 {
@@ -551,9 +554,11 @@ pub fn test_targeted_flush_covers_every_masked_cpu() -> TestResult {
         klog_info!("TLB_TEST: could not create a process VM");
         return TestResult::Fail;
     }
-    let Some(key) = process_vm_handle(pid).and_then(|h| TlbProcessKey::from_slot(h.slot())) else {
+    let Some(key) =
+        process_vm_handle(resolve_pid(pid)).and_then(|h| TlbProcessKey::from_slot(h.slot()))
+    else {
         klog_info!("TLB_TEST: a live process has no shootdown key");
-        destroy_process_vm(pid);
+        destroy_process_vm(resolve_pid(pid));
         return TestResult::Fail;
     };
 
@@ -569,7 +574,7 @@ pub fn test_targeted_flush_covers_every_masked_cpu() -> TestResult {
             pid,
             masked
         );
-        destroy_process_vm(pid);
+        destroy_process_vm(resolve_pid(pid));
         return TestResult::Fail;
     }
 
@@ -579,7 +584,7 @@ pub fn test_targeted_flush_covers_every_masked_cpu() -> TestResult {
     // Switch this CPU back off the address space, the way a real context
     // switch would, before the process goes away.
     notify_mm_switch(None, INVALID_PROCESS_ID, live_cpu);
-    destroy_process_vm(pid);
+    destroy_process_vm(resolve_pid(pid));
     if after != 3 {
         klog_info!(
             "TLB_TEST: flushing pid {} dropped its mask to {} CPUs",

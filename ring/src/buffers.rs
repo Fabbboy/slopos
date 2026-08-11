@@ -216,7 +216,11 @@ impl BufferRegistry {
 
     /// Pin and register the fixed-buffer set. Rejects a double-register, an
     /// empty / oversized count, or any non-anonymous / unmapped iovec.
-    pub fn register_fixed(&mut self, pid: u32, iovecs: &[(u64, u32)]) -> Result<(), Errno> {
+    pub fn register_fixed(
+        &mut self,
+        process: slopos_ostd::process::ProcessId,
+        iovecs: &[(u64, u32)],
+    ) -> Result<(), Errno> {
         if self.fixed.is_some() {
             return Err(Errno::EEXIST);
         }
@@ -225,7 +229,7 @@ impl BufferRegistry {
         }
         let mut pins = KVec::with_capacity(iovecs.len()).map_err(|_| Errno::ENOMEM)?;
         for &(addr, len) in iovecs {
-            let pin = PinnedUserBuffer::pin(pid, addr, len as usize).map_err(pin_errno)?;
+            let pin = PinnedUserBuffer::pin(process, addr, len as usize).map_err(pin_errno)?;
             pins.push(pin).map_err(|_| Errno::ENOMEM)?;
         }
         // Pre-grow the deferred-notify side table to the buffer count so
@@ -419,7 +423,11 @@ impl BufferRegistry {
     }
 
     /// Pin and register a provided buffer ring for `group`.
-    pub fn register_provided(&mut self, pid: u32, cmd: &RegisterBufRingCmd) -> Result<(), Errno> {
+    pub fn register_provided(
+        &mut self,
+        process: slopos_ostd::process::ProcessId,
+        cmd: &RegisterBufRingCmd,
+    ) -> Result<(), Errno> {
         if cmd.buf_group == 0 || cmd.buf_group > SLOPRING_MAX_BUF_GROUPS {
             return Err(Errno::EINVAL);
         }
@@ -433,7 +441,8 @@ impl BufferRegistry {
             return Err(Errno::EEXIST);
         }
         let ring_bytes = cmd.ring_entries as usize * core::mem::size_of::<IouringBuf>();
-        let ring_pin = PinnedUserBuffer::pin(pid, cmd.ring_addr, ring_bytes).map_err(pin_errno)?;
+        let ring_pin =
+            PinnedUserBuffer::pin(process, cmd.ring_addr, ring_bytes).map_err(pin_errno)?;
         self.provided
             .push(ProvidedBufRing {
                 gid: cmd.buf_group,
@@ -482,8 +491,12 @@ impl BufferRegistry {
     /// on success — the single-direct-copy provided-buffer recv path.
     ///
     /// [`commit_provided`]: Self::commit_provided
-    pub fn provided_pin(pid: u32, addr: u64, len: usize) -> Result<PinnedUserBuffer, Errno> {
-        PinnedUserBuffer::pin(pid, addr, len).map_err(pin_errno)
+    pub fn provided_pin(
+        process: slopos_ostd::process::ProcessId,
+        addr: u64,
+        len: usize,
+    ) -> Result<PinnedUserBuffer, Errno> {
+        PinnedUserBuffer::pin(process, addr, len).map_err(pin_errno)
     }
 
     // ----- test-only injection (no live process VM) ------------------------

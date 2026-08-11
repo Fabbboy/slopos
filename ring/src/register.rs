@@ -24,8 +24,11 @@ pub fn ring_register_buffers(table: FdTable, raw_handle: usize, iovecs: &[(u64, 
     if !registry::owner_is(raw_handle, table) {
         return eno(Errno::EBADF);
     }
+    let Some(vm_process) = table.process() else {
+        return eno(Errno::EINVAL);
+    };
     match registry::with_ring(raw_handle, |ring| {
-        ring.buffers.register_fixed(table.id(), iovecs)
+        ring.buffers.register_fixed(vm_process, iovecs)
     }) {
         Ok(Ok(())) => 0,
         Ok(Err(e)) => eno(e),
@@ -52,8 +55,11 @@ pub fn ring_register_pbuf_ring(table: FdTable, raw_handle: usize, cmd: &Register
     if !registry::owner_is(raw_handle, table) {
         return eno(Errno::EBADF);
     }
+    let Some(vm_process) = table.process() else {
+        return eno(Errno::EINVAL);
+    };
     match registry::with_ring(raw_handle, |ring| {
-        ring.buffers.register_provided(table.id(), cmd)
+        ring.buffers.register_provided(vm_process, cmd)
     }) {
         Ok(Ok(())) => 0,
         Ok(Err(e)) => eno(e),

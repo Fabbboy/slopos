@@ -250,18 +250,32 @@ pub(crate) fn log_user_page_fault_diagnostics(frame_ref: &InterruptFrame, fault_
     // through a raw projection.
     if let Some(task_ref) = task_ref {
         let task_pid = task_ref.process_id;
-        if task_pid != slopos_abi::task::INVALID_TASK_ID {
+        // The faulting task's own process, not a lookup by its id: this is a
+        // diagnostic path, and reporting another process's physical addresses
+        // because the number was reissued would be worse than reporting none.
+        let faulting = task_ref
+            .process()
+            .as_deref()
+            .and_then(slopos_ostd::process::ProcessId::of);
+        if task_pid != slopos_abi::task::INVALID_TASK_ID
+            && let Some(faulting) = faulting
+        {
             pid = task_pid;
             ctx_rip = task_ref.context_rip();
             ctx_rsp = task_ref.context_rsp();
-            cr3 = process_vm::process_vm_get_ostd_pml4_paddr(pid);
+            cr3 = process_vm::process_vm_get_ostd_pml4_paddr(faulting);
             if cr3 != 0 {
-                fault_phys =
-                    PhysAddr::new(process_vm::process_vm_user_va_to_paddr(pid, fault_addr));
-                rsp_phys =
-                    PhysAddr::new(process_vm::process_vm_user_va_to_paddr(pid, frame_ref.rsp));
-                rip_phys =
-                    PhysAddr::new(process_vm::process_vm_user_va_to_paddr(pid, frame_ref.rip));
+                fault_phys = PhysAddr::new(process_vm::process_vm_user_va_to_paddr(
+                    faulting, fault_addr,
+                ));
+                rsp_phys = PhysAddr::new(process_vm::process_vm_user_va_to_paddr(
+                    faulting,
+                    frame_ref.rsp,
+                ));
+                rip_phys = PhysAddr::new(process_vm::process_vm_user_va_to_paddr(
+                    faulting,
+                    frame_ref.rip,
+                ));
             }
         }
     }

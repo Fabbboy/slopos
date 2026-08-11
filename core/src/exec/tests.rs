@@ -14,12 +14,12 @@ use super::{EXEC_MAX_ELF_SIZE, EXEC_MAX_PATH, INIT_PATH};
 const MINIMAL_ELF_SIZE: usize = 64;
 
 fn read_user_u64(process_id: u32, addr: u64) -> Option<u64> {
-    let vm_space = process_vm::process_vm_get_vm_space(process_id)?;
+    let vm_space = process_vm::process_vm_get_vm_space(resolve_pid(process_id))?;
     process_vm::process_vm_read_user_u64(&vm_space, addr)
 }
 
 fn read_user_u8(process_id: u32, addr: u64) -> Option<u8> {
-    let vm_space = process_vm::process_vm_get_vm_space(process_id)?;
+    let vm_space = process_vm::process_vm_get_vm_space(resolve_pid(process_id))?;
     process_vm::process_vm_read_user_u8(&vm_space, addr)
 }
 
@@ -94,6 +94,11 @@ fn create_elf_with_load_segment(vaddr: u64, memsz: u64, filesz: u64, offset: u64
     elf[112..120].copy_from_slice(&0x1000u64.to_le_bytes()); // p_align
 
     elf
+}
+
+/// Resolve a pid this test just created into the designator `mm` now takes.
+fn resolve_pid(pid: u32) -> slopos_ostd::process::ProcessId {
+    slopos_ostd::process::ProcessId::resolve(pid).expect("a pid this test just created")
 }
 
 pub fn test_elf_invalid_magic() -> TestResult {
@@ -329,10 +334,28 @@ pub fn test_translate_address_user_passthrough() -> TestResult {
     TestResult::Pass
 }
 
-pub fn test_process_vm_root_absent_for_unknown_pid() -> TestResult {
-    let pid = 9999; // Invalid process ID
-    if process_vm::process_vm_get_ostd_pml4_paddr(pid) != 0 {
-        klog_info!("EXEC_TEST: BUG - Got an address space for an unknown process");
+/// No address space is handed out for a process that does not exist.
+///
+/// This used to pass the literal 9999 — a number naming nothing. That is no
+/// longer expressible: the argument is a designator only a live process mints,
+/// so `ProcessId::resolve(9999)` answers `None` and the call cannot be made at
+/// all. The reachable form of the same failure is a designator that *outlived*
+/// its process, which is what this drives.
+pub fn test_process_vm_root_absent_for_a_reaped_process() -> TestResult {
+    if slopos_ostd::process::ProcessId::resolve(9999).is_some() {
+        klog_info!("EXEC_TEST: BUG - a pid naming no process resolved");
+        return TestResult::Fail;
+    }
+
+    let pid = process_vm::create_process_vm();
+    if pid == INVALID_PROCESS_ID {
+        return TestResult::Fail;
+    }
+    let stale = resolve_pid(pid);
+    process_vm::destroy_process_vm(stale);
+
+    if process_vm::process_vm_get_ostd_pml4_paddr(stale) != 0 {
+        klog_info!("EXEC_TEST: BUG - Got an address space for a reaped process");
         return TestResult::Fail;
     }
     TestResult::Pass
@@ -431,7 +454,7 @@ pub fn test_setup_user_stack_contract_layout() -> TestResult {
         Ok(v) => v,
         Err(_) => {
             klog_info!("EXEC_TEST: setup_user_stack returned error in contract layout test");
-            process_vm::destroy_process_vm(pid);
+            process_vm::destroy_process_vm(resolve_pid(pid));
             return TestResult::Fail;
         }
     };
@@ -443,7 +466,7 @@ pub fn test_setup_user_stack_contract_layout() -> TestResult {
                 "EXEC_TEST: argc marker not found near stack pointer (sp={})",
                 sp
             );
-            process_vm::destroy_process_vm(pid);
+            process_vm::destroy_process_vm(resolve_pid(pid));
             return TestResult::Fail;
         }
     };
@@ -461,11 +484,11 @@ pub fn test_setup_user_stack_contract_layout() -> TestResult {
             env0,
             env_null
         );
-        process_vm::destroy_process_vm(pid);
+        process_vm::destroy_process_vm(resolve_pid(pid));
         return TestResult::Fail;
     }
 
-    process_vm::destroy_process_vm(pid);
+    process_vm::destroy_process_vm(resolve_pid(pid));
     TestResult::Pass
 }
 
@@ -497,7 +520,7 @@ pub fn test_setup_user_stack_auxv_required_entries() -> TestResult {
         Ok(v) => v,
         Err(_) => {
             klog_info!("EXEC_TEST: setup_user_stack returned error in auxv test");
-            process_vm::destroy_process_vm(pid);
+            process_vm::destroy_process_vm(resolve_pid(pid));
             return TestResult::Fail;
         }
     };
@@ -509,7 +532,7 @@ pub fn test_setup_user_stack_auxv_required_entries() -> TestResult {
                 "EXEC_TEST: auxv test could not locate argc marker near sp={}",
                 sp
             );
-            process_vm::destroy_process_vm(pid);
+            process_vm::destroy_process_vm(resolve_pid(pid));
             return TestResult::Fail;
         }
     };
@@ -543,7 +566,7 @@ pub fn test_setup_user_stack_auxv_required_entries() -> TestResult {
         cursor = cursor.wrapping_add(16);
     }
 
-    process_vm::destroy_process_vm(pid);
+    process_vm::destroy_process_vm(resolve_pid(pid));
     if !(saw_phdr && saw_phent && saw_phnum && saw_pagesz && saw_entry && saw_null) {
         klog_info!(
             "EXEC_TEST: auxv missing entries phdr={} phent={} phnum={} pagesz={} entry={} null={}",
@@ -591,7 +614,7 @@ pub fn test_setup_user_stack_argv_string_content() -> TestResult {
         Ok(v) => v,
         Err(_) => {
             klog_info!("EXEC_TEST: setup_user_stack failed in argv string test");
-            process_vm::destroy_process_vm(pid);
+            process_vm::destroy_process_vm(resolve_pid(pid));
             return TestResult::Fail;
         }
     };
@@ -601,7 +624,7 @@ pub fn test_setup_user_stack_argv_string_content() -> TestResult {
         Some(v) => v,
         None => {
             klog_info!("EXEC_TEST: argc={} not found near sp={}", args.len(), sp);
-            process_vm::destroy_process_vm(pid);
+            process_vm::destroy_process_vm(resolve_pid(pid));
             return TestResult::Fail;
         }
     };
@@ -612,7 +635,7 @@ pub fn test_setup_user_stack_argv_string_content() -> TestResult {
             Some(p) if p != 0 => p,
             _ => {
                 klog_info!("EXEC_TEST: argv[{}] pointer is null or unreadable", i);
-                process_vm::destroy_process_vm(pid);
+                process_vm::destroy_process_vm(resolve_pid(pid));
                 return TestResult::Fail;
             }
         };
@@ -624,7 +647,7 @@ pub fn test_setup_user_stack_argv_string_content() -> TestResult {
                     i,
                     ptr
                 );
-                process_vm::destroy_process_vm(pid);
+                process_vm::destroy_process_vm(resolve_pid(pid));
                 return TestResult::Fail;
             }
         };
@@ -635,7 +658,7 @@ pub fn test_setup_user_stack_argv_string_content() -> TestResult {
                 expected.len(),
                 actual.len()
             );
-            process_vm::destroy_process_vm(pid);
+            process_vm::destroy_process_vm(resolve_pid(pid));
             return TestResult::Fail;
         }
     }
@@ -647,7 +670,7 @@ pub fn test_setup_user_stack_argv_string_content() -> TestResult {
             "EXEC_TEST: argv null terminator missing, got {:#x}",
             argv_null
         );
-        process_vm::destroy_process_vm(pid);
+        process_vm::destroy_process_vm(resolve_pid(pid));
         return TestResult::Fail;
     }
 
@@ -657,7 +680,7 @@ pub fn test_setup_user_stack_argv_string_content() -> TestResult {
         Some(p) if p != 0 => p,
         _ => {
             klog_info!("EXEC_TEST: envp[0] pointer is null or unreadable");
-            process_vm::destroy_process_vm(pid);
+            process_vm::destroy_process_vm(resolve_pid(pid));
             return TestResult::Fail;
         }
     };
@@ -668,7 +691,7 @@ pub fn test_setup_user_stack_argv_string_content() -> TestResult {
                 "EXEC_TEST: cannot read string at envp[0] ptr={:#x}",
                 envp0_ptr
             );
-            process_vm::destroy_process_vm(pid);
+            process_vm::destroy_process_vm(resolve_pid(pid));
             return TestResult::Fail;
         }
     };
@@ -678,18 +701,18 @@ pub fn test_setup_user_stack_argv_string_content() -> TestResult {
             envs[0].len(),
             env_actual.len()
         );
-        process_vm::destroy_process_vm(pid);
+        process_vm::destroy_process_vm(resolve_pid(pid));
         return TestResult::Fail;
     }
 
     // Verify sp is 16-byte aligned (SysV ABI requirement)
     if sp % 16 != 0 {
         klog_info!("EXEC_TEST: sp={:#x} not 16-byte aligned", sp);
-        process_vm::destroy_process_vm(pid);
+        process_vm::destroy_process_vm(resolve_pid(pid));
         return TestResult::Fail;
     }
 
-    process_vm::destroy_process_vm(pid);
+    process_vm::destroy_process_vm(resolve_pid(pid));
     TestResult::Pass
 }
 
@@ -712,7 +735,7 @@ slopos_testing::stest!(name = test_path_empty, suite = exec);
 slopos_testing::stest!(name = test_translate_address_kernel_to_user, suite = exec);
 slopos_testing::stest!(name = test_translate_address_user_passthrough, suite = exec);
 slopos_testing::stest!(
-    name = test_process_vm_root_absent_for_unknown_pid,
+    name = test_process_vm_root_absent_for_a_reaped_process,
     suite = exec
 );
 slopos_testing::stest!(name = test_elf_huge_segment_count, suite = exec);

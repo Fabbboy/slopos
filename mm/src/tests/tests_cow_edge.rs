@@ -1,3 +1,4 @@
+use super::tests::resolve_pid;
 use slopos_ostd::klog_info;
 use slopos_testing::TestResult;
 use slopos_testing::{assert_test, fail, pass};
@@ -28,7 +29,7 @@ pub fn test_cow_read_not_cow_fault() -> TestResult {
 
     let error_code_read: u64 = 0x05;
     let cow_fault =
-        process_vm_with_vm_space(vm.pid, |vs| is_cow_fault(error_code_read, vs, 0x2000))
+        process_vm_with_vm_space(vm.process, |vs| is_cow_fault(error_code_read, vs, 0x2000))
             .unwrap_or(false);
     assert_test!(!cow_fault, "is_cow_fault returned true for read access");
 
@@ -44,7 +45,7 @@ pub fn test_cow_not_present_not_cow() -> TestResult {
     let error_code: u64 = 0x02;
 
     let cow_fault =
-        process_vm_with_vm_space(vm.pid, |vs| is_cow_fault(error_code, vs, unmapped_addr))
+        process_vm_with_vm_space(vm.process, |vs| is_cow_fault(error_code, vs, unmapped_addr))
             .unwrap_or(false);
     assert_test!(
         !cow_fault,
@@ -54,12 +55,22 @@ pub fn test_cow_not_present_not_cow() -> TestResult {
     pass!()
 }
 
-pub fn test_cow_dispatch_absent_for_unknown_pid() -> TestResult {
-    // Public dispatcher returns `None` for an unknown PID — that's the
-    // failure path callers actually hit post-framekernel.
-    let result = crate::process_vm::process_vm_with_vm_space(INVALID_PROCESS_ID, |_| ());
+pub fn test_cow_dispatch_absent_for_a_reaped_process() -> TestResult {
+    // The dispatcher answers `None` for a process that no longer exists.
+    //
+    // This used to pass `INVALID_PROCESS_ID` — a number the caller could
+    // reach by omission. There is no such number now: the argument is a
+    // designator that only a live process mints, so the reachable failure is
+    // a *stale* one, which is what this drives.
+    let Some(vm) = ProcessVmGuard::new() else {
+        return fail!("could not create a process VM");
+    };
+    let stale = vm.process;
+    drop(vm);
+
+    let result = crate::process_vm::process_vm_with_vm_space(stale, |_| ());
     if result.is_some() {
-        return fail!("process_vm_with_vm_space returned Some for INVALID_PROCESS_ID");
+        return fail!("process_vm_with_vm_space resolved a reaped process");
     }
     pass!()
 }
@@ -202,7 +213,11 @@ pub fn test_cow_clone_modify_both() -> TestResult {
         return fail!("create parent VM");
     };
 
-    let test_addr = process_vm_alloc(parent.pid, PAGE_SIZE_4KB, PageFlags::WRITABLE.bits() as u32);
+    let test_addr = process_vm_alloc(
+        parent.process,
+        PAGE_SIZE_4KB,
+        PageFlags::WRITABLE.bits() as u32,
+    );
     assert_test!(test_addr != 0, "process_vm_alloc failed");
 
     let Some(phys) = parent.map_test_page(test_addr, PageFlags::USER_RW.bits()) else {
@@ -264,7 +279,7 @@ pub fn test_cow_multiple_clones() -> TestResult {
     let mut child_count = 0usize;
 
     for i in 0..4 {
-        let child_pid = process_vm_clone_cow(parent.pid);
+        let child_pid = process_vm_clone_cow(parent.process);
         if child_pid == INVALID_PROCESS_ID {
             klog_info!("COW_TEST: Clone {} failed", i);
             break;
@@ -276,7 +291,7 @@ pub fn test_cow_multiple_clones() -> TestResult {
     assert_test!(child_count >= 2, "couldn't create enough clones");
 
     for i in 0..child_count {
-        crate::process_vm::destroy_process_vm(children[i]);
+        crate::process_vm::destroy_process_vm(resolve_pid(children[i]));
     }
 
     pass!()
@@ -310,7 +325,7 @@ pub fn test_cow_no_collateral_damage() -> TestResult {
         page_io::write_bytes(v2.as_mut_ptr::<u8>(), 0x22, PAGE_SIZE_4KB as usize);
     }
 
-    let map_addr1 = process_vm_with_vm_space(vm.pid, |vs| {
+    let map_addr1 = process_vm_with_vm_space(vm.process, |vs| {
         ostd_map_4kb_user(vs, VirtAddr::new(addr1), phys1, PageFlags::USER_RO.bits())
     });
     if !matches!(map_addr1, Some(Ok(()))) {
@@ -318,7 +333,7 @@ pub fn test_cow_no_collateral_damage() -> TestResult {
         free_page_frame(phys2);
         return fail!("map page 1");
     }
-    let map_addr2 = process_vm_with_vm_space(vm.pid, |vs| {
+    let map_addr2 = process_vm_with_vm_space(vm.process, |vs| {
         ostd_map_4kb_user(vs, VirtAddr::new(addr2), phys2, PageFlags::USER_RO.bits())
     });
     if !matches!(map_addr2, Some(Ok(()))) {
@@ -366,7 +381,7 @@ pub fn test_cow_handle_invalid_address() -> TestResult {
 slopos_testing::stest!(name = test_cow_read_not_cow_fault, suite = cow_edge);
 slopos_testing::stest!(name = test_cow_not_present_not_cow, suite = cow_edge);
 slopos_testing::stest!(
-    name = test_cow_dispatch_absent_for_unknown_pid,
+    name = test_cow_dispatch_absent_for_a_reaped_process,
     suite = cow_edge
 );
 slopos_testing::stest!(name = test_cow_handle_not_cow_page, suite = cow_edge);

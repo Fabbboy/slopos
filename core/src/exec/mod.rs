@@ -503,10 +503,11 @@ pub fn do_exec(
         elf_data.truncate(offset as usize);
     }
 
-    let exec_info = process_vm_load_elf_data(table.id(), elf_data.as_slice(), entry_out)
+    let vm_process = table.process().ok_or(ExecError::NoMem)?;
+    let exec_info = process_vm_load_elf_data(vm_process, elf_data.as_slice(), entry_out)
         .map_err(ExecError::from)?;
 
-    if process_vm_reset_stack(table.id()) != 0 {
+    if process_vm_reset_stack(vm_process) != 0 {
         return Err(ExecError::NoMem);
     }
 
@@ -534,7 +535,8 @@ fn setup_user_stack(
     envp: Option<&[&[u8]]>,
     exec_info: &ElfExecInfo,
 ) -> Result<u64, ExecError> {
-    let stack_top_raw = process_vm_get_stack_top(table.id());
+    let vm_process = table.process().ok_or(ExecError::Fault)?;
+    let stack_top_raw = process_vm_get_stack_top(vm_process);
     if stack_top_raw == 0 {
         return Err(ExecError::Fault);
     }
@@ -629,7 +631,8 @@ fn setup_user_stack(
 }
 
 fn write_to_user_stack(table: FdTable, addr: u64, data: &[u8]) -> Result<(), ExecError> {
-    let vm_space = process_vm_get_vm_space(table.id()).ok_or(ExecError::Fault)?;
+    let vm_process = table.process().ok_or(ExecError::Fault)?;
+    let vm_space = process_vm_get_vm_space(vm_process).ok_or(ExecError::Fault)?;
     process_vm_write_user_bytes(&vm_space, addr, data).map_err(|_| ExecError::Fault)
 }
 

@@ -6,7 +6,7 @@ use slopos_arch::cpu;
 use slopos_ostd::KArc;
 use slopos_ostd::kdiag_timestamp;
 use slopos_ostd::process::{
-    PROCESS_HANDLE_NONE, Process, process_retire, process_spawn, root_account,
+    PROCESS_HANDLE_NONE, Process, ProcessId, process_retire, process_spawn, root_account,
 };
 use slopos_ostd::string::bytes_as_str;
 use slopos_ostd::task::ops::{
@@ -155,11 +155,12 @@ impl ProcessResourceLease {
             klog_info!("task_create: Failed to create process VM");
             return None;
         };
+        let vm_id = ProcessId::of(&process)?;
 
         // By handle, into the process's own slot — the same slot its address
         // space occupies. All three tables are now one slot space.
         if process.handle().map(fileio_create_table_for_process) != Some(0) {
-            destroy_process_vm(vm.process_id);
+            destroy_process_vm(vm_id);
             return None;
         }
 
@@ -173,12 +174,13 @@ impl ProcessResourceLease {
     }
 
     fn clone_from_parent(parent: &Task) -> Option<Self> {
-        let parent_process_id = parent.process_id;
         let process = Self::mint_process(parent.process().as_deref())?;
-        let child = process_vm_clone_cow_for(parent_process_id, process.clone())?;
+        let parent_id = parent.process().as_deref().and_then(ProcessId::of)?;
+        let child = process_vm_clone_cow_for(parent_id, process.clone())?;
+        let child_id = ProcessId::of(&process)?;
 
         let Some(parent_table) = parent.process().and_then(|p| FdTable::of(&p)) else {
-            destroy_process_vm(child.process_id);
+            destroy_process_vm(child_id);
             return None;
         };
         if process
@@ -186,7 +188,7 @@ impl ProcessResourceLease {
             .map(|handle| fileio_clone_table_for_process(parent_table, handle))
             != Some(0)
         {
-            destroy_process_vm(child.process_id);
+            destroy_process_vm(child_id);
             return None;
         }
 
@@ -229,8 +231,8 @@ impl ProcessResourceLease {
         if owns_file_table && let Some(handle) = process.handle() {
             fileio_destroy_table_for_process(handle);
         }
-        if owns_vm {
-            destroy_process_vm(process.id());
+        if owns_vm && let Some(id) = ProcessId::of(process) {
+            destroy_process_vm(id);
         }
     }
 }
@@ -292,9 +294,9 @@ fn allocate_user_task_resources() -> Option<TaskCreateResources> {
     // spawned. A spawn goes through `clone_from_parent`, which names the real
     // spawner on both edges.
     let mut process = ProcessResourceLease::create_user_process(None)?;
-    let process_id = process.process_id();
+    let vm_id = process.process.as_deref().and_then(ProcessId::of)?;
 
-    let stack_top = process_vm_get_stack_top(process_id);
+    let stack_top = process_vm_get_stack_top(vm_id);
     if stack_top == 0 {
         klog_info!("task_create: Failed to get process stack");
         return None;
@@ -377,7 +379,9 @@ fn cleanup_task_process_resources(task: &Task, resolved_id: u32, mode: TaskProce
     if matches!(mode, TaskProcessCleanupMode::DropVm)
         && task.exit_cleanup_mark(TASK_EXIT_CLEANUP_VM) & TASK_EXIT_CLEANUP_VM != 0
     {
-        destroy_process_vm(process.id());
+        if let Some(id) = ProcessId::of(&process) {
+            destroy_process_vm(id);
+        }
     }
 }
 
@@ -821,8 +825,11 @@ pub fn task_build(
         // task.context.cr3 holds the OSTD PML4 paddr — that's what
         // VmSpace::activate writes to CR3 during context switch, and
         // the user-fault dispatcher compares it against hardware CR3.
-        task_ref.context.get_mut().cr3 =
-            slopos_mm::process_vm::process_vm_get_ostd_pml4_paddr(resources.process_id);
+        task_ref.context.get_mut().cr3 = resources
+            .process
+            .as_deref()
+            .and_then(ProcessId::of)
+            .map_or(0, slopos_mm::process_vm::process_vm_get_ostd_pml4_paddr);
     }
 
     Some(pending)
@@ -1447,6 +1454,7 @@ pub fn task_fork(
     };
     let child_process_id = child_process.process_id();
     let child_process_handle = child_process.process_handle();
+    let child_vm_id = child_process.process.as_deref().and_then(ProcessId::of);
 
     let child_kernel_stack = match KernelStack::allocate(TASK_KERNEL_STACK_SIZE as usize) {
         Ok(stack) => stack,
@@ -1541,7 +1549,7 @@ pub fn task_fork(
     // address space gets 0, which the dispatcher and `task_find_by_cr3`
     // both read as "no VM".
     child.context.get_mut().cr3 =
-        slopos_mm::process_vm::process_vm_get_ostd_pml4_paddr(child_process_id);
+        child_vm_id.map_or(0, slopos_mm::process_vm::process_vm_get_ostd_pml4_paddr);
 
     child.reset_runtime_state();
     if let (_, Some(process)) = child_process.disarm() {
@@ -1658,6 +1666,7 @@ pub fn task_clone(
     } else {
         child_process.process_handle()
     };
+    let child_vm_id = child_process.process.as_deref().and_then(ProcessId::of);
 
     let child_kernel_stack = match KernelStack::allocate(TASK_KERNEL_STACK_SIZE as usize) {
         Ok(stack) => stack,
@@ -1787,7 +1796,7 @@ pub fn task_clone(
     // repointed at it.
     if !share_vm {
         child.context.get_mut().cr3 =
-            slopos_mm::process_vm::process_vm_get_ostd_pml4_paddr(child_process_id);
+            child_vm_id.map_or(0, slopos_mm::process_vm::process_vm_get_ostd_pml4_paddr);
     }
 
     child.reset_runtime_state();

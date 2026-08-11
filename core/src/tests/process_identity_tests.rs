@@ -131,14 +131,14 @@ pub fn test_a_recycled_pid_does_not_resolve_to_the_prior_principal() -> TestResu
     }
     if slopos_fs::fileio::fileio_create_table_for_process(stale) != 0 {
         klog_info!("PROC_ID_TEST: could not give the first process a descriptor table");
-        destroy_process_vm(first_id);
+        destroy_process_vm(slopos_ostd::process::ProcessId::resolve(first_id).expect("live"));
         return TestResult::Fail;
     }
 
     // Tear the first process down completely, then drop the last reference so
     // its id returns to the allocator.
     slopos_fs::fileio::fileio_destroy_table_for_process(stale);
-    destroy_process_vm(first_id);
+    destroy_process_vm(slopos_ostd::process::ProcessId::resolve(first_id).expect("live"));
     process_retire(stale);
     drop(first);
 
