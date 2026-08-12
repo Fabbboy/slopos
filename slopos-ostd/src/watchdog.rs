@@ -93,10 +93,11 @@ struct CpuSlot {
     /// so a long legitimate section logs a handful of lines rather than
     /// one per tick.
     next_report: AtomicU32,
-    /// Largest `stale` ever observed, for the shutdown summary. Answers
-    /// "what is the real worst-case interrupts-off section" from
-    /// measurement rather than from bug reports.
-    max_stale: AtomicU32,
+    /// Largest `stale` ever observed and the CPU it was observed against,
+    /// packed together. One word because `target` moves when this watcher
+    /// retargets, and a maximum paired with whoever it happens to be
+    /// watching now names the wrong CPU.
+    worst_stall: AtomicU64,
     /// The CPU this one watches, cached across ticks.
     target: AtomicU32,
     /// Disposition of the NMI this CPU is being sent, and the interlock
@@ -136,7 +137,7 @@ impl CpuSlot {
             last_seen: AtomicU64::new(0),
             stale: AtomicU32::new(0),
             next_report: AtomicU32::new(0),
-            max_stale: AtomicU32::new(0),
+            worst_stall: AtomicU64::new(0),
             target: AtomicU32::new(NO_CPU),
             probe: AtomicU32::new(NmiDisposition::Unsolicited as u32),
             wait_seq: AtomicU64::new(0),
@@ -147,6 +148,19 @@ impl CpuSlot {
 }
 
 static SLOTS: [CpuSlot; MAX_CPUS] = [const { CpuSlot::new() }; MAX_CPUS];
+
+static SNAPSHOT: [AtomicU64; MAX_CPUS] = [const { AtomicU64::new(0) }; MAX_CPUS];
+static SNAPSHOT_CLAIMED: AtomicBool = AtomicBool::new(false);
+static SNAPSHOT_READY: AtomicBool = AtomicBool::new(false);
+
+const fn pack_stall(target: u32, samples: u32) -> u64 {
+    ((target as u64) << 32) | samples as u64
+}
+
+fn unpack_stall(packed: u64) -> Option<(usize, u32)> {
+    let samples = packed as u32;
+    (samples != 0).then(|| ((packed >> 32) as usize, samples))
+}
 
 // ---------------------------------------------------------------------------
 // Configuration
@@ -220,6 +234,17 @@ impl Suppress {
     }
 }
 
+/// Take the calling CPU out of the watched set for good.
+///
+/// For a CPU on a path that stops ticking and does not come back — shutdown,
+/// reboot, a permanent park. Unlike [`Suppress`] this has no end, which is
+/// only sound because the caller has none either. Call it *before* the
+/// instruction that stops the ticks, or the gap between the two is a window
+/// in which a watcher reports a CPU that left on purpose.
+pub fn leave_watched_set() {
+    pcr::set_watchdog_suppressed(true);
+}
+
 impl Drop for Suppress {
     fn drop(&mut self) {
         // Bump before unsuppressing: the first sample after the scope would
@@ -281,18 +306,13 @@ fn check_neighbour(me: usize) {
         return;
     };
 
-    let beat = pcr::heartbeat_for_cpu(target);
-    if beat != slot.last_seen.load(Ordering::Relaxed) {
-        reset(slot, beat);
-        return;
-    }
-
-    let stale = slot.stale.load(Ordering::Relaxed).saturating_add(1);
-    slot.stale.store(stale, Ordering::Relaxed);
-    if stale > slot.max_stale.load(Ordering::Relaxed) {
-        slot.max_stale.store(stale, Ordering::Relaxed);
-    }
-    if stale < slot.next_report.load(Ordering::Relaxed) {
+    let stale = accumulate(
+        slot,
+        target,
+        pcr::heartbeat_for_cpu(target),
+        miss_threshold(),
+    );
+    if stale == 0 || stale < slot.next_report.load(Ordering::Relaxed) {
         return;
     }
     slot.next_report
@@ -314,6 +334,25 @@ fn reset(slot: &CpuSlot, beat: u64) {
     slot.last_seen.store(beat, Ordering::Relaxed);
     slot.stale.store(0, Ordering::Relaxed);
     slot.next_report.store(miss_threshold(), Ordering::Relaxed);
+}
+
+/// Fold one sample of `target` into `slot`, returning the consecutive-stale
+/// count. The maximum is recorded against the CPU it was measured on, not
+/// against whoever `slot.target` names by the time it is read.
+fn accumulate(slot: &CpuSlot, target: usize, beat: u64, threshold: u32) -> u32 {
+    if beat != slot.last_seen.load(Ordering::Relaxed) {
+        slot.last_seen.store(beat, Ordering::Relaxed);
+        slot.stale.store(0, Ordering::Relaxed);
+        slot.next_report.store(threshold, Ordering::Relaxed);
+        return 0;
+    }
+    let stale = slot.stale.load(Ordering::Relaxed).saturating_add(1);
+    slot.stale.store(stale, Ordering::Relaxed);
+    if stale > slot.worst_stall.load(Ordering::Relaxed) as u32 {
+        slot.worst_stall
+            .store(pack_stall(target as u32, stale), Ordering::Relaxed);
+    }
+    stale
 }
 
 /// Announce the stall and NMI the target so it dumps its own context —
@@ -513,9 +552,7 @@ pub fn wait_chain_snapshot(start: usize, out: &mut [WaitHop; MAX_WAIT_HOPS]) -> 
 ///
 /// `None` when that watcher has never seen its target stall.
 pub fn max_stall(watcher: usize) -> Option<(usize, u32)> {
-    let slot = SLOTS.get(watcher)?;
-    let max = slot.max_stale.load(Ordering::Relaxed);
-    (max != 0).then(|| (slot.target.load(Ordering::Relaxed) as usize, max))
+    unpack_stall(SLOTS.get(watcher)?.worst_stall.load(Ordering::Relaxed))
 }
 
 pub fn dump_wait_chain(start: usize) {
@@ -664,23 +701,56 @@ pub fn nmi_emit_hex(value: u64) {
     }
 }
 
-/// Print the worst stall each CPU was ever observed in, in samples.
+/// Freeze the per-watcher maxima for a later [`report_max_stalls`].
+///
+/// Shutdown runs a long interrupts-off tail on the CPU it is reporting
+/// about, so a summary read after that tail measures the shutdown path
+/// rather than the steady state it claims to describe. Call this at the
+/// point the request is accepted, while the kernel still looks the way the
+/// number is supposed to characterise. First caller wins.
+pub fn snapshot_max_stalls() {
+    if SNAPSHOT_CLAIMED.swap(true, Ordering::AcqRel) {
+        return;
+    }
+    for cpu in 0..MAX_CPUS {
+        let packed = SLOTS
+            .get(cpu)
+            .map_or(0, |slot| slot.worst_stall.load(Ordering::Relaxed));
+        SNAPSHOT[cpu].store(packed, Ordering::Relaxed);
+    }
+    SNAPSHOT_READY.store(true, Ordering::Release);
+}
+
+/// Print the worst interrupts-off section each CPU was observed in.
 ///
 /// The honest way to size a threshold: measure what the kernel actually
 /// produces rather than infer it from whichever bug report arrived last.
+/// Reads [`snapshot_max_stalls`]'s frozen copy when one was taken.
 pub fn report_max_stalls() {
+    if !is_enabled() {
+        return;
+    }
+    let snapshot = SNAPSHOT_READY.load(Ordering::Acquire);
     let count = pcr::get_cpu_count().min(MAX_CPUS);
+    let threshold = miss_threshold();
     for cpu in 0..count {
-        let Some(slot) = SLOTS.get(cpu) else { continue };
-        let max = slot.max_stale.load(Ordering::Relaxed);
-        if max == 0 {
+        let packed = if snapshot {
+            SNAPSHOT[cpu].load(Ordering::Relaxed)
+        } else {
+            SLOTS
+                .get(cpu)
+                .map_or(0, |slot| slot.worst_stall.load(Ordering::Relaxed))
+        };
+        let Some((target, samples)) = unpack_stall(packed) else {
             continue;
-        }
-        nmi_emit("WATCHDOG: cpu ");
-        nmi_emit_dec(slot.target.load(Ordering::Relaxed) as u64);
-        nmi_emit(" worst observed stall ");
-        nmi_emit_dec(max as u64);
-        nmi_emit(" samples (watcher cpu ");
+        };
+        nmi_emit("WATCHDOG: max interrupts-off cpu ");
+        nmi_emit_dec(target as u64);
+        nmi_emit(": ");
+        nmi_emit_dec(samples as u64);
+        nmi_emit(" of ");
+        nmi_emit_dec(threshold as u64);
+        nmi_emit(" samples before report (watcher cpu ");
         nmi_emit_dec(cpu as u64);
         nmi_emit_line(")");
     }
@@ -696,17 +766,20 @@ pub mod test_support {
     /// The real [`check_neighbour`] reads the heartbeat out of a live PCR,
     /// which a host test has no way to move; the state machine it drives is
     /// the part worth pinning.
+    pub fn sample_of(watcher: usize, target: usize, beat: u64, threshold: u32) -> u32 {
+        accumulate(&SLOTS[watcher], target, beat, threshold)
+    }
+
     pub fn sample(watcher: usize, beat: u64, threshold: u32) -> u32 {
+        sample_of(watcher, watcher, beat, threshold)
+    }
+
+    /// Retarget `watcher` as [`check_neighbour`] does when its target stops
+    /// being eligible, without needing a live PCR to make it happen.
+    pub fn retarget(watcher: usize, target: usize, beat: u64) {
         let slot = &SLOTS[watcher];
-        if beat != slot.last_seen.load(Ordering::Relaxed) {
-            slot.last_seen.store(beat, Ordering::Relaxed);
-            slot.stale.store(0, Ordering::Relaxed);
-            slot.next_report.store(threshold, Ordering::Relaxed);
-            return 0;
-        }
-        let stale = slot.stale.load(Ordering::Relaxed).saturating_add(1);
-        slot.stale.store(stale, Ordering::Relaxed);
-        stale
+        slot.target.store(target as u32, Ordering::Relaxed);
+        reset(slot, beat);
     }
 
     /// Plant a wait-for edge as if `cpu` were spinning on a lock held by
@@ -746,12 +819,19 @@ pub mod test_support {
         }
     }
 
+    /// Discard any frozen summary, so a test that takes one does not decide
+    /// what every later reader sees.
+    pub fn clear_snapshot() {
+        SNAPSHOT_READY.store(false, Ordering::Release);
+        SNAPSHOT_CLAIMED.store(false, Ordering::Release);
+    }
+
     pub fn reset_slot(watcher: usize) {
         let slot = &SLOTS[watcher];
         slot.last_seen.store(0, Ordering::Relaxed);
         slot.stale.store(0, Ordering::Relaxed);
         slot.next_report.store(0, Ordering::Relaxed);
-        slot.max_stale.store(0, Ordering::Relaxed);
+        slot.worst_stall.store(0, Ordering::Relaxed);
         slot.target.store(NO_CPU, Ordering::Relaxed);
         slot.probe
             .store(NmiDisposition::Unsolicited as u32, Ordering::Relaxed);

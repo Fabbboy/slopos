@@ -13,7 +13,7 @@ pub use slopos_ostd::irq::{
     EXCEPTION_INVALID_TSS, EXCEPTION_MACHINE_CHECK, EXCEPTION_NMI, EXCEPTION_OVERFLOW,
     EXCEPTION_PAGE_FAULT, EXCEPTION_SEGMENT_NOT_PRES, EXCEPTION_SIMD_FP_EXCEPTION,
     EXCEPTION_STACK_FAULT, IRQ_BASE_VECTOR, IdtBuilder, IdtEntry, IstPreemptHold,
-    LAPIC_TIMER_VECTOR, RCU_QS_IPI_VECTOR, RESCHEDULE_IPI_VECTOR, SYSCALL_VECTOR,
+    LAPIC_TIMER_VECTOR, RCU_QS_IPI_VECTOR, RESCHEDULE_IPI_VECTOR, SHUTDOWN_VECTOR, SYSCALL_VECTOR,
     TLB_SHOOTDOWN_VECTOR,
 };
 use slopos_ostd::{kdiag_dump_interrupt_frame, klog_debug, klog_info};
@@ -526,8 +526,13 @@ pub fn common_exception_handler_impl(frame: *mut slopos_arch::InterruptFrame) {
         return;
     }
 
-    if vector == 0xFE {
+    if vector == SHUTDOWN_VECTOR {
         send_eoi();
+        // This CPU never runs again, so it must leave the sets that assume a
+        // CPU answers: the TLB ladder would wait on its ack and the lockup
+        // detector would watch a CPU that can never tick.
+        slopos_mm::tlb::notify_cpu_offline();
+        slopos_arch::pcr::mark_cpu_offline(slopos_arch::get_current_cpu());
         cpu::disable_interrupts();
         cpu::halt_loop();
     }

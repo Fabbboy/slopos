@@ -117,6 +117,9 @@ pub const IRQ_BASE_VECTOR: u8 = 32;
 /// Syscall interrupt vector (int 0x80).
 pub const SYSCALL_VECTOR: u8 = 0x80;
 
+/// Shutdown IPI vector (0xFE). Broadcast to park every CPU at power-off.
+pub const SHUTDOWN_VECTOR: u8 = 0xFE;
+
 /// TLB shootdown IPI vector (0xFD). Used for cross-CPU TLB invalidation.
 pub const TLB_SHOOTDOWN_VECTOR: u8 = 0xFD;
 

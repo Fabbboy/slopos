@@ -109,6 +109,7 @@ fn poweroff_hardware() {
 }
 pub fn kernel_quiesce_interrupts() {
     ensure_shutdown_mmio_mapped();
+    slopos_ostd::watchdog::leave_watched_set();
     cpu::disable_interrupts();
     if !INTERRUPTS_QUIESCED.enter() {
         return;
@@ -116,9 +117,6 @@ pub fn kernel_quiesce_interrupts() {
 
     klog_info!("Kernel shutdown: quiescing interrupt controllers");
 
-    // The worst interrupts-off section each CPU was observed in, before the
-    // timers stop. This is the measurement the detector's threshold should
-    // be sized from.
     slopos_ostd::watchdog::report_max_stalls();
 
     if apic::is_available() {
@@ -142,6 +140,10 @@ pub fn kernel_drain_serial_output() {
 }
 pub fn kernel_shutdown(reason: *const c_char) -> ! {
     ensure_shutdown_mmio_mapped();
+    // Before anything below perturbs the machine: the summary characterises
+    // steady-state kernel behaviour, and everything from here on is a path
+    // that runs once and never again.
+    slopos_ostd::watchdog::snapshot_max_stalls();
     // Flush filesystem write-back caches to disk while interrupts are STILL
     // ENABLED — the virtio-blk completion path needs IRQs + the scheduler to
     // post the used-buffer event. Doing this before `disable_interrupts` is
@@ -176,6 +178,11 @@ pub fn kernel_shutdown(reason: *const c_char) -> ! {
         klog_info!("Warning: Failed to terminate one or more tasks");
     }
 
+    // This CPU stops ticking here and never ticks again, and `timer_is_armed`
+    // does not move on a `cli` — so without leaving the set first, the APs go
+    // on watching a CPU that left on purpose, and every instruction below
+    // counts against a threshold it was never meant to be measured by.
+    slopos_ostd::watchdog::leave_watched_set();
     cpu::disable_interrupts();
 
     // After teardown, so the kernel stacks it just freed are drained too.
@@ -238,6 +245,8 @@ const REBOOT_METHODS: &[(&str, fn())] = &[
 
 pub fn kernel_reboot(reason: *const c_char) -> ! {
     ensure_shutdown_mmio_mapped();
+    slopos_ostd::watchdog::snapshot_max_stalls();
+    slopos_ostd::watchdog::leave_watched_set();
     cpu::disable_interrupts();
 
     klog_info!("=== Kernel Reboot Requested ===");

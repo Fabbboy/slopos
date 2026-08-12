@@ -291,8 +291,10 @@ fn fixed_ipi_flags(vector: u32) -> u32 {
 }
 
 pub fn send_ipi_halt_all() {
-    const SHUTDOWN_VECTOR: u32 = 0xFE;
-    send_ipi_raw(LAPIC_ICR_DEST_BROADCAST, fixed_ipi_flags(SHUTDOWN_VECTOR));
+    send_ipi_raw(
+        LAPIC_ICR_DEST_BROADCAST,
+        fixed_ipi_flags(slopos_arch::arch::idt::SHUTDOWN_VECTOR as u32),
+    );
     klog_debug!("APIC: Sent shutdown IPI to all processors");
 }
 

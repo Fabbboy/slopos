@@ -13,13 +13,12 @@
 
 use slopos_abi::addr::PhysAddr;
 use slopos_arch::arch::idt::{
-    LAPIC_TIMER_VECTOR, RCU_QS_IPI_VECTOR, RESCHEDULE_IPI_VECTOR, SYSCALL_VECTOR,
+    LAPIC_TIMER_VECTOR, RCU_QS_IPI_VECTOR, RESCHEDULE_IPI_VECTOR, SHUTDOWN_VECTOR, SYSCALL_VECTOR,
     TLB_SHOOTDOWN_VECTOR,
 };
 use slopos_ostd::io::port::PortRange;
 use slopos_ostd::mm::io_mem::PhysRange;
 
-const SHUTDOWN_VECTOR: u8 = 0xFE;
 const SPURIOUS_VECTOR: u8 = 0xFF;
 
 pub static MMIO_RANGES: &[PhysRange] = &[PhysRange {
