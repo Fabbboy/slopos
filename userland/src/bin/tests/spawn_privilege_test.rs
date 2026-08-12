@@ -23,10 +23,18 @@ use slopos_userland as _;
 use slopos_abi::spawn::{SpawnAttrs, SpawnFdAction};
 use slopos_abi::syscall::SYSCALL_SPAWN_PATH;
 use slopos_abi::task::{
-    TASK_FLAG_COMPOSITOR, TASK_FLAG_CONSOLE_ADMIN, TASK_FLAG_DISPLAY_EXCLUSIVE,
+    SPAWN_RESERVED, TASK_FLAG_COMPOSITOR, TASK_FLAG_CONSOLE_ADMIN, TASK_FLAG_DISPLAY_EXCLUSIVE,
     TASK_FLAG_KERNEL_MODE, TASK_FLAG_NET_ADMIN, TASK_FLAG_NEW_PGRP, TASK_FLAG_NO_PREEMPT,
-    TASK_FLAG_SYSTEM, TASK_FLAG_USER_MODE,
+    TASK_FLAG_PROC_ADMIN, TASK_FLAG_SYSTEM, TASK_FLAG_USER_MODE,
 };
+
+/// The lowest bit the ABI has never defined, derived rather than written down.
+///
+/// A literal here named `0x0800` until `PROC_ADMIN` was assigned that bit, at
+/// which point this file went on asserting that a *defined* flag was refused as
+/// undefined. Deriving it means the next ABI addition moves the probe instead
+/// of invalidating it.
+const UNDEFINED_FLAG: u16 = 1 << SPAWN_RESERVED.trailing_zeros();
 use slopos_userland::syscall::process;
 use slopos_userland::syscall::raw::syscall5;
 
@@ -109,6 +117,10 @@ fn privileged_flags_are_eperm() -> bool {
         "CONSOLE_ADMIN",
         spawn_raw(MISSING, PRIORITY_NORMAL, TASK_FLAG_CONSOLE_ADMIN, &[]),
         EPERM,
+    ) && expect(
+        "PROC_ADMIN",
+        spawn_raw(MISSING, PRIORITY_NORMAL, TASK_FLAG_PROC_ADMIN, &[]),
+        EPERM,
     )
 }
 
@@ -122,8 +134,8 @@ fn privileged_flags_are_eperm() -> bool {
 /// means something.
 fn malformed_flags_are_einval() -> bool {
     expect(
-        "undefined bit 0x0800",
-        spawn_raw(MISSING, PRIORITY_NORMAL, 0x0800, &[]),
+        "lowest undefined bit",
+        spawn_raw(MISSING, PRIORITY_NORMAL, UNDEFINED_FLAG, &[]),
         EINVAL,
     ) && expect(
         "retired FPU_INITIALIZED bit 0x0040",
@@ -135,7 +147,12 @@ fn malformed_flags_are_einval() -> bool {
         EINVAL,
     ) && expect(
         "reserved bit alongside a privileged one",
-        spawn_raw(MISSING, PRIORITY_NORMAL, 0x0800 | TASK_FLAG_COMPOSITOR, &[]),
+        spawn_raw(
+            MISSING,
+            PRIORITY_NORMAL,
+            UNDEFINED_FLAG | TASK_FLAG_COMPOSITOR,
+            &[],
+        ),
         EINVAL,
     )
 }

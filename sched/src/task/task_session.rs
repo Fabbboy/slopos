@@ -95,4 +95,9 @@ pub(super) fn notify_parent_of_child_exit(task: &Task) {
     };
 
     let _ = task_signal_post(&parent, SIGCHLD);
+    // Wakes `waitpid(-1)`. Published unconditionally, not only when a waiter
+    // exists: `wait_event` re-checks its predicate on every wake, and the
+    // waiter registers before it scans, so a publish that races the
+    // registration costs a re-scan rather than a lost wakeup.
+    slopos_ostd::sync::BUS.publish(slopos_ostd::task::ops::any_child_exit_event(parent_task_id));
 }

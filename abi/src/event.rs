@@ -90,6 +90,13 @@ pub enum KernelEvent {
     UnixSocket { sock: UnixSocketSlot },
     /// A task exited; its waiters (e.g. `waitpid`) should re-check.
     ChildExit { task: TaskSlot },
+    /// One of this task's children exited; a `waitpid(-1)` waiter should
+    /// re-scan its children list.
+    ///
+    /// Keyed on the **parent**, unlike [`KernelEvent::ChildExit`], which is
+    /// keyed on the exiting task. A wait-any waiter does not know which child
+    /// it is waiting for, so it cannot name one to park on.
+    AnyChildExit { parent: TaskSlot },
     /// A signal was raised on a task; a `signalfd` poller registered on that
     /// task should re-check its subscribed mask. Published from every
     /// signal-raise site so a signal becomes an in-band ring/poll event

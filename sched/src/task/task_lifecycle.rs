@@ -1143,6 +1143,16 @@ fn mark_task_terminated(task: &Task, resolved_id: u32) {
 
     notify_parent_of_child_exit(task);
 
+    // This task has just become a `Zombie` in its parent's list, so the parent
+    // is the one principal whose budget can have been exceeded, and by exactly
+    // one. Runs before `reparent_and_reap_children` below, which concerns this
+    // task's own children rather than its siblings.
+    if task.status() == TaskStatus::Zombie
+        && let Some(parent) = task_find_by_id(task.parent_task_id())
+    {
+        super::enforce_zombie_budget(&parent);
+    }
+
     // Session-leader hangup. Every field here is either a frozen identity or an
     // atomic, so a shared borrow suffices.
     let should_hangup = if task.task_id != INVALID_TASK_ID
@@ -1182,6 +1192,10 @@ fn mark_task_terminated(task: &Task, resolved_id: u32) {
 /// runnable / blocked (i.e. has not itself exited). Used by
 /// [`mark_task_terminated`] to decide between Zombie (live parent will
 /// reap) and Terminated (no reaper, slot immediately reusable).
+///
+/// A parent that has explicitly set `SIGCHLD` to `SIG_IGN` answers `false`
+/// even while running: it has declared it will never reap, so a Zombie held
+/// for it would be held forever. This is POSIX `SA_NOCLDWAIT` semantics.
 fn parent_alive_for(parent_id: u32) -> bool {
     if parent_id == INVALID_TASK_ID {
         return false;
@@ -1189,10 +1203,27 @@ fn parent_alive_for(parent_id: u32) -> bool {
     let Some(parent) = task_find_by_id(parent_id) else {
         return false;
     };
-    matches!(
+    if !matches!(
         parent.status(),
         TaskStatus::Ready | TaskStatus::Running | TaskStatus::Blocked
-    )
+    ) {
+        return false;
+    }
+    !parent_disclaims_children(&parent)
+}
+
+/// Whether `parent` has explicitly disclaimed reaping by installing `SIG_IGN`
+/// for `SIGCHLD`.
+///
+/// The `SIG_DFL` case is deliberately excluded even though SlopOS maps
+/// `SIGCHLD`'s default action to `Ignore`. Linux draws that same line: the
+/// default disposition discards the *notification*, while an explicit
+/// `SIG_IGN` additionally discards the *status*. Conflating them would make
+/// every child of every default-disposition parent skip `Zombie`, and
+/// `waitpid` would then find nothing to reap for any well-behaved supervisor.
+fn parent_disclaims_children(parent: &Task) -> bool {
+    let idx = (slopos_abi::signal::SIGCHLD - 1) as usize;
+    parent.signal_handler(idx) == Some(slopos_abi::signal::SIG_IGN)
 }
 
 /// Drain the dying task's owned children list — O(children), not a registry

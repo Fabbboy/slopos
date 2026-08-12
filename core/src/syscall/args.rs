@@ -180,6 +180,43 @@ impl SyscallArg for SigPid {
     }
 }
 
+/// `waitpid(2)` target: one named child, or any of them.
+///
+/// An enum rather than a bare `i32` because the two cases resolve through
+/// different paths — one registry lookup versus a scan of the caller's own
+/// children — and a handler that took the integer would have to re-derive
+/// which it holds. `0` and `< -1` (POSIX process-group waits) are refused at
+/// the boundary rather than silently treated as wait-any: SlopOS has no
+/// group-wait implementation, and mapping them onto one would make a future
+/// group-wait a behaviour change instead of a new capability.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum WaitTarget {
+    /// Wait for the child with this id.
+    Child(u32),
+    /// Wait for whichever child exits first (`waitpid(-1)`).
+    Any,
+}
+
+impl SyscallArg for WaitTarget {
+    const ARITY: usize = 1;
+    #[inline]
+    fn from_raw(regs: &[u64], _ctx: &SyscallContext) -> Result<Self, Errno> {
+        // Narrow to 32 bits before taking the sign. The userland wrapper's
+        // parameter is a `u32`, so wait-any arrives as `0xFFFF_FFFF`
+        // zero-extended, while a caller spelling it `-1i64` sign-extends to
+        // all ones. Both narrow to `-1i32`; reading the register as `i64`
+        // would see the first as 4294967295 and reject it.
+        let signed = regs[0] as u32 as i32;
+        if signed == -1 {
+            return Ok(WaitTarget::Any);
+        }
+        if signed <= 0 {
+            return Err(Errno::ESRCH);
+        }
+        Ok(WaitTarget::Child(signed as u32))
+    }
+}
+
 /// Signal number, validated to fall inside `1..=NSIG`.
 ///
 /// The bound is `NSIG` rather than a round number because the only

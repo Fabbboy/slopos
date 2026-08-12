@@ -35,7 +35,7 @@ use slopos_abi::syscall::{
 };
 use slopos_abi::task::{
     INVALID_TASK_ID, TASK_FLAG_COMPOSITOR, TASK_FLAG_CONSOLE_ADMIN, TASK_FLAG_KERNEL_MODE,
-    TASK_FLAG_NET_ADMIN, TASK_FLAG_USER_MODE, TaskStatus,
+    TASK_FLAG_NET_ADMIN, TASK_FLAG_SYSTEM, TASK_FLAG_USER_MODE, TaskStatus,
 };
 use slopos_mm::page_alloc::{alloc_kernel_page, free_page_frame};
 use slopos_mm::paging_defs::PageFlags;
@@ -3576,12 +3576,22 @@ pub fn test_spawn_path_rejects_privileged_flags() -> TestResult {
         eperm,
         "spawning with CONSOLE_ADMIN must be EPERM — it is conferred by program identity"
     );
+    assert_eq_test!(
+        spawn(NORMAL, slopos_abi::task::TASK_FLAG_PROC_ADMIN),
+        eperm,
+        "spawning with PROC_ADMIN must be EPERM — it is conferred by program identity"
+    );
 
     // Undefined bits fail closed so the ABI can grow one without a deployed
-    // caller having already assigned it a different meaning. Any bit in
-    // SPAWN_RESERVED does; 0x0800 is the lowest that has never been defined.
+    // caller having already assigned it a different meaning. Derived from
+    // SPAWN_RESERVED rather than written as a literal: the previous literal
+    // named 0x0800, which a later ABI addition then defined as PROC_ADMIN,
+    // turning this into an assertion about a bit that was no longer undefined.
     assert_eq_test!(
-        spawn(NORMAL, 0x0800),
+        spawn(
+            NORMAL,
+            1 << slopos_abi::task::SPAWN_RESERVED.trailing_zeros()
+        ),
         einval,
         "an undefined flag bit must be EINVAL"
     );
@@ -3606,7 +3616,10 @@ pub fn test_spawn_path_rejects_privileged_flags() -> TestResult {
     // privilege, so probing reserved bits cannot learn from an EPERM that a bit
     // means something.
     assert_eq_test!(
-        spawn(NORMAL, 0x0800 | TASK_FLAG_COMPOSITOR),
+        spawn(
+            NORMAL,
+            (1 << slopos_abi::task::SPAWN_RESERVED.trailing_zeros()) | TASK_FLAG_COMPOSITOR
+        ),
         einval,
         "a reserved bit must be answered before a privileged one"
     );
@@ -7483,5 +7496,383 @@ pub fn test_keymap_load_requires_console_admin() -> TestResult {
 
 slopos_testing::stest!(
     name = test_keymap_load_requires_console_admin,
+    suite = syscall_core
+);
+
+/// `process_list` reports only tasks that can still run code.
+///
+/// A `Zombie` has no address space, no descriptor table and no scheduler
+/// placement — it is an exit-status receipt, not a task. Reporting one invites
+/// a caller to chart its CPU time or offer to kill it, which is how a dead
+/// terminal came to sit in the process table forever. Windows draws the same
+/// line: enumeration returns what can run code, the debugger returns
+/// everything.
+pub fn test_process_list_excludes_exited_tasks() -> TestResult {
+    let _fixture = SyscallFixture::new();
+
+    let caller_id = create_test_user_task_with(TASK_FLAG_USER_MODE | TASK_FLAG_SYSTEM);
+    assert_test!(caller_id != INVALID_TASK_ID, "failed to create caller task");
+    let caller_guard = assert_some!(task_find_by_id(caller_id), "caller lookup failed");
+    let Some(caller_pid) = caller_guard
+        .process()
+        .as_deref()
+        .and_then(slopos_fs::fileio::FdTable::of)
+    else {
+        return fail!("caller has no fd table");
+    };
+
+    let victim_id = create_test_user_task();
+    assert_test!(victim_id != INVALID_TASK_ID, "failed to create victim task");
+    // A live parent is what makes the exit land in `Zombie` rather than going
+    // straight to `Terminated`, which is the state under test.
+    {
+        let victim_guard = assert_some!(task_find_by_id(victim_id), "victim lookup failed");
+        victim_guard.set_parent_task_id(caller_id);
+    }
+
+    let listed = |pid: FdTable, buf_va: u64, max: u64| -> u64 {
+        let mut frame: KBox<UserContext> = KBox::zeroed().expect("alloc");
+        frame.regs_mut().rdi = buf_va;
+        frame.regs_mut().rsi = max;
+        let _ = with_user_process_context(pid, || {
+            crate::syscall::dispatch::dispatch_handler(
+                crate::syscall::core_handlers::syscall_process_list,
+                &caller_guard,
+                &mut *frame,
+            )
+        });
+        frame.rax()
+    };
+
+    let Some(buf) = map_user_rw_page(caller_pid) else {
+        return fail!("could not map a user page");
+    };
+    let capacity = (4096 / core::mem::size_of::<slopos_abi::syscall::UserTaskEntry>()) as u64;
+
+    let contains = |count: u64, want: u32| -> bool {
+        (0..count).any(|i| {
+            let addr = buf + i * core::mem::size_of::<slopos_abi::syscall::UserTaskEntry>() as u64;
+            let Ok(ptr) = UserPtr::<slopos_abi::syscall::UserTaskEntry>::try_new(addr) else {
+                return false;
+            };
+            with_user_process_context(caller_pid, || {
+                copy_from_user(ptr)
+                    .map(|e| e.task_id == want)
+                    .unwrap_or(false)
+            })
+            .unwrap_or(false)
+        })
+    };
+
+    let before = listed(caller_pid, buf, capacity);
+    assert_test!(
+        contains(before, victim_id),
+        "a live task was missing from process_list"
+    );
+
+    task_terminate(victim_id);
+    let status = task_find_by_id(victim_id).map(|t| t.status());
+    assert_eq_test!(
+        status,
+        Some(TaskStatus::Zombie),
+        "the victim did not become a Zombie, so the test proves nothing"
+    );
+
+    let after = listed(caller_pid, buf, capacity);
+    assert_test!(
+        !contains(after, victim_id),
+        "an exited task was reported by process_list"
+    );
+
+    drop(caller_guard);
+    task_terminate(caller_id);
+    pass!()
+}
+
+/// Enumeration answers to the relation `kill` does.
+///
+/// `signal_may_name` refuses to signal a kernel task, and its own comment
+/// recorded why that gate had to exist: `process_list` reported kernel tasks,
+/// "so naming one is not a guess". An unprivileged caller now is not told the
+/// id in the first place, so the two questions cannot disagree.
+pub fn test_process_list_hides_undominated_tasks() -> TestResult {
+    let _fixture = SyscallFixture::new();
+
+    let plain_id = create_test_user_task();
+    assert_test!(plain_id != INVALID_TASK_ID, "failed to create plain task");
+    let plain_guard = assert_some!(task_find_by_id(plain_id), "plain lookup failed");
+    let Some(plain_pid) = plain_guard
+        .process()
+        .as_deref()
+        .and_then(slopos_fs::fileio::FdTable::of)
+    else {
+        return fail!("plain caller has no fd table");
+    };
+
+    let privileged_id = create_test_user_task_with(TASK_FLAG_USER_MODE | TASK_FLAG_COMPOSITOR);
+    assert_test!(
+        privileged_id != INVALID_TASK_ID,
+        "failed to create privileged task"
+    );
+
+    let Some(buf) = map_user_rw_page(plain_pid) else {
+        return fail!("could not map a user page");
+    };
+    let capacity = (4096 / core::mem::size_of::<slopos_abi::syscall::UserTaskEntry>()) as u64;
+
+    let mut frame: KBox<UserContext> = KBox::zeroed().expect("alloc");
+    frame.regs_mut().rdi = buf;
+    frame.regs_mut().rsi = capacity;
+    let _ = with_user_process_context(plain_pid, || {
+        crate::syscall::dispatch::dispatch_handler(
+            crate::syscall::core_handlers::syscall_process_list,
+            &plain_guard,
+            &mut *frame,
+        )
+    });
+    let count = frame.rax();
+
+    let mut saw_privileged = false;
+    let mut saw_kernel_task = false;
+    let mut saw_self = false;
+    for i in 0..count {
+        let addr = buf + i * core::mem::size_of::<slopos_abi::syscall::UserTaskEntry>() as u64;
+        let Ok(ptr) = UserPtr::<slopos_abi::syscall::UserTaskEntry>::try_new(addr) else {
+            continue;
+        };
+        let Some(Ok(entry)) = with_user_process_context(plain_pid, || copy_from_user(ptr)) else {
+            continue;
+        };
+        if entry.task_id == privileged_id {
+            saw_privileged = true;
+        }
+        if entry.task_id == plain_id {
+            saw_self = true;
+        }
+        if let Some(t) = task_find_by_id(entry.task_id)
+            && t.flags & TASK_FLAG_USER_MODE == 0
+        {
+            saw_kernel_task = true;
+        }
+    }
+
+    assert_test!(
+        saw_self,
+        "a task could not see itself, so the filter is too strict"
+    );
+    assert_test!(
+        !saw_privileged,
+        "an unprivileged task enumerated a COMPOSITOR task it may not signal"
+    );
+    assert_test!(
+        !saw_kernel_task,
+        "an unprivileged task enumerated a kernel task"
+    );
+
+    drop(plain_guard);
+    task_terminate(plain_id);
+    task_terminate(privileged_id);
+    pass!()
+}
+
+slopos_testing::stest!(
+    name = test_process_list_excludes_exited_tasks,
+    suite = syscall_core
+);
+slopos_testing::stest!(
+    name = test_process_list_hides_undominated_tasks,
+    suite = syscall_core
+);
+
+/// `waitpid(-1)` reaps whichever child exited, without being told which.
+///
+/// The missing primitive is why every launcher in the tree discarded its
+/// spawn tid: a supervisor that cannot ask "did any child exit" has to track
+/// every id it ever spawned, so in practice it tracked none and leaked them
+/// all.
+pub fn test_waitpid_any_reaps_an_unnamed_child() -> TestResult {
+    let _fixture = SyscallFixture::new();
+
+    let parent_id = create_test_user_task();
+    assert_test!(parent_id != INVALID_TASK_ID, "failed to create parent task");
+    let parent_guard = assert_some!(task_find_by_id(parent_id), "parent lookup failed");
+    let Some(parent_pid) = parent_guard
+        .process()
+        .as_deref()
+        .and_then(slopos_fs::fileio::FdTable::of)
+    else {
+        return fail!("parent has no fd table");
+    };
+
+    // WNOHANG with no children at all is ECHILD, not EAGAIN: the two answer
+    // different questions and a supervisor loop keys on the difference.
+    let wait_any = |wnohang: u64| -> u64 {
+        let mut frame: KBox<UserContext> = KBox::zeroed().expect("alloc");
+        frame.regs_mut().rdi = u32::MAX as u64;
+        frame.regs_mut().rsi = wnohang;
+        let _ = with_user_process_context(parent_pid, || {
+            crate::syscall::dispatch::dispatch_handler(syscall_waitpid, &parent_guard, &mut *frame)
+        });
+        frame.rax()
+    };
+
+    assert_eq_test!(
+        wait_any(1),
+        slopos_abi::Errno::ECHILD.as_u64(),
+        "wait-any with no children must be ECHILD"
+    );
+
+    let child_id = create_test_user_task();
+    assert_test!(child_id != INVALID_TASK_ID, "failed to create child task");
+    assert_eq_test!(
+        slopos_sched::task::task_set_parent(child_id, parent_id),
+        0,
+        "could not parent the child"
+    );
+
+    assert_eq_test!(
+        wait_any(1),
+        slopos_abi::Errno::EAGAIN.as_u64(),
+        "wait-any with a live child must be EAGAIN, not ECHILD"
+    );
+
+    task_terminate(child_id);
+    assert_eq_test!(
+        task_find_by_id(child_id).map(|t| t.status()),
+        Some(TaskStatus::Zombie),
+        "the child did not become a Zombie"
+    );
+
+    // The reap resolves the child without the caller ever naming it.
+    let rc = wait_any(1);
+    assert_test!(
+        rc != slopos_abi::Errno::EAGAIN.as_u64() && rc != slopos_abi::Errno::ECHILD.as_u64(),
+        "wait-any did not reap an exited child"
+    );
+    assert_test!(
+        !matches!(
+            task_find_by_id(child_id).map(|t| t.status()),
+            Some(TaskStatus::Zombie)
+        ),
+        "the child stayed a Zombie after being reaped"
+    );
+
+    drop(parent_guard);
+    task_terminate(parent_id);
+    pass!()
+}
+
+/// An explicit `SIGCHLD = SIG_IGN` parent gets no zombies (POSIX
+/// `SA_NOCLDWAIT`), while a `SIG_DFL` parent still does.
+///
+/// The second half is the load-bearing one. SlopOS maps `SIGCHLD`'s *default*
+/// action to Ignore, so keying the skip on the effective disposition rather
+/// than on an explicit `SIG_IGN` would make every child of every ordinary
+/// parent skip `Zombie` — and `waitpid` would then have nothing to reap for
+/// any well-behaved supervisor.
+pub fn test_sigchld_ignore_skips_the_zombie_state() -> TestResult {
+    let _fixture = SyscallFixture::new();
+
+    let exit_status_of = |handler: u64| -> Option<TaskStatus> {
+        let parent_id = create_test_user_task();
+        if parent_id == INVALID_TASK_ID {
+            return None;
+        }
+        {
+            let parent_guard = task_find_by_id(parent_id)?;
+            parent_guard.set_signal_action(
+                (SIGCHLD - 1) as usize,
+                SignalAction {
+                    handler,
+                    mask: 0,
+                    flags: 0,
+                    restorer: 0,
+                },
+            );
+        }
+        let child_id = create_test_user_task();
+        if child_id == INVALID_TASK_ID {
+            return None;
+        }
+        if slopos_sched::task::task_set_parent(child_id, parent_id) != 0 {
+            return None;
+        }
+        task_terminate(child_id);
+        let status = task_find_by_id(child_id).map(|t| t.status());
+        task_terminate(parent_id);
+        status
+    };
+
+    // SIG_DFL: SIGCHLD's default is Ignore, but the *status* is still kept.
+    assert_eq_test!(
+        exit_status_of(SIG_DFL),
+        Some(TaskStatus::Zombie),
+        "a default-disposition parent lost its child's exit status"
+    );
+
+    // Explicit SIG_IGN: the parent has declared it will never reap, so holding
+    // a receipt for it would hold one forever.
+    assert_test!(
+        !matches!(exit_status_of(SIG_IGN), Some(TaskStatus::Zombie)),
+        "a SIG_IGN parent still accumulated a zombie"
+    );
+
+    pass!()
+}
+
+/// A parent that never reaps cannot grow its zombie set without bound.
+///
+/// `SIG_IGN` and `waitpid(-1)` let a supervisor avoid the leak; the cap is
+/// what makes avoiding it not the supervisor's decision. Each retained
+/// receipt pins a `Task`, a 32 KiB kernel stack, a 16 KiB data stack and a
+/// registry slot, so an unbounded set walks the machine to spawn failure.
+pub fn test_zombie_budget_is_enforced_per_parent() -> TestResult {
+    let _fixture = SyscallFixture::new();
+
+    let parent_id = create_test_user_task();
+    assert_test!(parent_id != INVALID_TASK_ID, "failed to create parent task");
+
+    let budget = slopos_sched::task::MAX_ZOMBIES_PER_PARENT;
+    let mut spawned = 0usize;
+    for _ in 0..(budget + 8) {
+        let child_id = create_test_user_task();
+        if child_id == INVALID_TASK_ID {
+            break;
+        }
+        if slopos_sched::task::task_set_parent(child_id, parent_id) != 0 {
+            task_terminate(child_id);
+            break;
+        }
+        task_terminate(child_id);
+        spawned += 1;
+    }
+    assert_test!(
+        spawned > budget,
+        "could not create enough children to exceed the budget"
+    );
+
+    let held = {
+        let parent_guard = assert_some!(task_find_by_id(parent_id), "parent lookup failed");
+        parent_guard.children_len()
+    };
+    assert_test!(
+        held <= budget,
+        "a parent retained more unreaped children than the budget allows"
+    );
+
+    task_terminate(parent_id);
+    pass!()
+}
+
+slopos_testing::stest!(
+    name = test_waitpid_any_reaps_an_unnamed_child,
+    suite = syscall_core
+);
+slopos_testing::stest!(
+    name = test_sigchld_ignore_skips_the_zombie_state,
+    suite = syscall_core
+);
+slopos_testing::stest!(
+    name = test_zombie_budget_is_enforced_per_parent,
     suite = syscall_core
 );

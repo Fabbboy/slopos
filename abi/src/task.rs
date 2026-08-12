@@ -294,6 +294,20 @@ pub const TASK_FLAG_NET_ADMIN: u16 = 0x200;
 /// applying the persisted layout at boot without holding this bit.
 pub const TASK_FLAG_CONSOLE_ADMIN: u16 = 0x400;
 
+/// May enumerate every task, including kernel threads and more privileged
+/// tasks.
+///
+/// Without it, `process_list` reports only the tasks the caller could already
+/// signal — the relation `slopos_core::syscall::signal::signal_dominates`
+/// applies to `kill`. Visibility and actionability then answer to one
+/// predicate, so an id the kernel refuses to act on is also an id it never
+/// handed out. Linux gates the same question on `hidepid`, FreeBSD on
+/// `security.bsd.see_other_uids`, Fuchsia on `ZX_RIGHT_ENUMERATE`.
+///
+/// Conferred on `/bin/sysmon`. `TASK_FLAG_SYSTEM` implies it, matching how
+/// `CONSOLE_ADMIN` treats init.
+pub const TASK_FLAG_PROC_ADMIN: u16 = 0x800;
+
 // --- Spawn-flag classification ---
 //
 // `task.flags` is the entirety of SlopOS's privilege model — `is_compositor`,
@@ -323,7 +337,8 @@ pub const SPAWN_PRIVILEGED: u16 = TASK_FLAG_NO_PREEMPT
     | TASK_FLAG_COMPOSITOR
     | TASK_FLAG_DISPLAY_EXCLUSIVE
     | TASK_FLAG_NET_ADMIN
-    | TASK_FLAG_CONSOLE_ADMIN;
+    | TASK_FLAG_CONSOLE_ADMIN
+    | TASK_FLAG_PROC_ADMIN;
 
 /// The two ring bits.  They describe where the task executes, not what it may
 /// do, which is why they are classified apart from the privileges.
@@ -341,14 +356,14 @@ pub const SPAWN_MODE_BITS: u16 = TASK_FLAG_USER_MODE | TASK_FLAG_KERNEL_MODE;
 /// unfailable, which is the only reason that assert exists.
 ///
 /// `0x0040` is the retired `TASK_FLAG_FPU_INITIALIZED` and must not be reused —
-/// a binary built against the old header may still set it.  `0x0800..=0x8000`
+/// a binary built against the old header may still set it.  `0x1000..=0x8000`
 /// have never been defined.  All of them fail closed with `EINVAL` so the ABI
 /// can grow a bit without a deployed caller having already assigned it a
 /// different meaning.
 ///
 /// Adding a `TASK_FLAG_*` means clearing its bit here *and* adding it to
 /// exactly one of the three masks above.  The asserts fail until both are done.
-pub const SPAWN_RESERVED: u16 = 0xF840;
+pub const SPAWN_RESERVED: u16 = 0xF040;
 
 // The four classes partition the 16-bit flag word: every bit is in exactly one.
 const _: () = assert!(

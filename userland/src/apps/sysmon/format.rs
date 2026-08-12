@@ -2,7 +2,7 @@ use std::format;
 use std::string::String;
 
 use slopos_abi::draw::Color32;
-use slopos_abi::task::TaskPriority;
+use slopos_abi::task::{TaskPriority, TaskStatus};
 
 use crate::syscall::UserTaskEntry;
 
@@ -37,14 +37,21 @@ fn task_name_from_slice(bytes: &[u8]) -> String {
     out
 }
 
+/// Decodes through [`TaskStatus`] with no wildcard arm on purpose.
+///
+/// The previous version matched the raw `u8` with a `_ =>` fallback. When
+/// `WillBlock` was deleted from the ABI and `Zombie` inherited discriminant 5,
+/// nothing failed to compile and every zombie rendered under the dead
+/// variant's name. An exhaustive match over the enum makes the next such
+/// change a build error here.
 pub(crate) fn task_state(state: u8) -> (&'static str, Color32) {
-    match state {
-        2 => ("Run", COLOR_STATE_RUN),
-        3 => ("Block", COLOR_STATE_BLOCK),
-        1 => ("Ready", COLOR_STATE_READY),
-        5 => ("WillBlk", COLOR_STATE_BLOCK),
-        4 => ("Dead", COLOR_DIM),
-        _ => ("--", COLOR_DIM),
+    match TaskStatus::from_u8(state) {
+        TaskStatus::Running => ("Run", COLOR_STATE_RUN),
+        TaskStatus::Blocked => ("Block", COLOR_STATE_BLOCK),
+        TaskStatus::Ready => ("Ready", COLOR_STATE_READY),
+        TaskStatus::Zombie => ("Zombie", COLOR_DIM),
+        TaskStatus::Terminated => ("Dead", COLOR_DIM),
+        TaskStatus::Invalid => ("--", COLOR_DIM),
     }
 }
 

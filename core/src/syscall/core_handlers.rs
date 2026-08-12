@@ -199,7 +199,22 @@ define_syscall!(syscall_process_list
     use slopos_abi::syscall::UserTaskEntry;
     use slopos_abi::task::{INVALID_TASK_ID, MAX_TASKS};
     use slopos_ostd::KVec;
-    use slopos_sched::task::task_try_for_each_active;
+    use slopos_sched::task::task_try_for_each_enumerable;
+    use crate::syscall::signal::{signal_dominates, signal_is_init, signal_may_name};
+
+    // Enumeration answers to the same relation `kill` does, so an id this
+    // refuses to report is also an id `kill` would refuse to act on. Before
+    // this, `signal_may_name` was the sole guard and its own comment recorded
+    // why: `process_list` reported kernel tasks, "so naming one is not a
+    // guess". `PROC_ADMIN` (held by `/bin/sysmon`) sees everything.
+    let caller_flags = ctx.task().flags;
+    let unrestricted = ctx.is_proc_admin();
+    let visible = |task: &slopos_sched::task_struct::Task| {
+        unrestricted
+            || (signal_may_name(task.flags)
+                && !signal_is_init(task.task_id)
+                && signal_dominates(caller_flags, task.flags))
+    };
 
     let max_entries = (max as usize).min(MAX_TASKS);
     let mut entries = match KVec::<UserTaskEntry>::with_capacity(max_entries) {
@@ -215,11 +230,14 @@ define_syscall!(syscall_process_list
     };
 
     let mut count = 0usize;
-    task_try_for_each_active(|task| {
+    task_try_for_each_enumerable(|task| {
         if count >= max_entries {
             return ControlFlow::Break(());
         }
         if task.task_id == INVALID_TASK_ID {
+            return ControlFlow::Continue(());
+        }
+        if !visible(task) {
             return ControlFlow::Continue(());
         }
         let entry = &mut entries[count];

@@ -40,6 +40,7 @@ pub struct EventBus {
     tty_output: [WaitQueue; MAX_TTYS],
     unix_socket: [WaitQueue; MAX_UNIX_SOCKETS],
     child_exit: [WaitQueue; CHILD_EXIT_BUCKETS],
+    any_child_exit: [WaitQueue; CHILD_EXIT_BUCKETS],
     signal_pending: [WaitQueue; SIGNAL_PENDING_BUCKETS],
     netmon: [WaitQueue; MAX_NETMON],
 }
@@ -67,6 +68,8 @@ pub static BUS: EventBus = EventBus {
     unix_socket: [const { WaitQueue::new(lock_class!("evbus.unix_socket", LOCK_LEVEL_RESOURCE)) };
         MAX_UNIX_SOCKETS],
     child_exit: [const { WaitQueue::new(lock_class!("evbus.child_exit", LOCK_LEVEL_RESOURCE)) };
+        CHILD_EXIT_BUCKETS],
+    any_child_exit: [const { WaitQueue::new(lock_class!("evbus.any_child_exit", LOCK_LEVEL_RESOURCE)) };
         CHILD_EXIT_BUCKETS],
     signal_pending: [const { WaitQueue::new(lock_class!("evbus.signal_pending", LOCK_LEVEL_RESOURCE)) };
         SIGNAL_PENDING_BUCKETS],
@@ -105,6 +108,9 @@ impl EventBus {
             }
             KernelEvent::ChildExit { task } => {
                 &self.child_exit[(task.0 as usize) % CHILD_EXIT_BUCKETS]
+            }
+            KernelEvent::AnyChildExit { parent } => {
+                &self.any_child_exit[(parent.0 as usize) % CHILD_EXIT_BUCKETS]
             }
             KernelEvent::SignalPending { task } => {
                 &self.signal_pending[(task.0 as usize) % SIGNAL_PENDING_BUCKETS]

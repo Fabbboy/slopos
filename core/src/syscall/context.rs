@@ -12,7 +12,7 @@
 use slopos_abi::Errno;
 use slopos_abi::task::{
     TASK_FLAG_COMPOSITOR, TASK_FLAG_CONSOLE_ADMIN, TASK_FLAG_DISPLAY_EXCLUSIVE,
-    TASK_FLAG_NET_ADMIN, TASK_FLAG_SYSTEM,
+    TASK_FLAG_NET_ADMIN, TASK_FLAG_PROC_ADMIN, TASK_FLAG_SYSTEM,
 };
 use slopos_fs::fileio::FdTable;
 use slopos_ostd::KArc;
@@ -195,6 +195,14 @@ impl<'a> SyscallContext<'a> {
     #[inline]
     pub fn is_net_admin(&self) -> bool {
         self.has_flag(TASK_FLAG_NET_ADMIN)
+    }
+
+    /// Whole-machine enumeration privilege — modelled on Linux's `hidepid`
+    /// bypass. Conferred by path identity on `/bin/sysmon`; `TASK_FLAG_SYSTEM`
+    /// implies it, as it does for console administration.
+    #[inline]
+    pub fn is_proc_admin(&self) -> bool {
+        self.has_flag(TASK_FLAG_SYSTEM) || self.has_flag(TASK_FLAG_PROC_ADMIN)
     }
 
     #[inline]

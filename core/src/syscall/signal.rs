@@ -78,10 +78,14 @@ impl TargetSet {
 /// own device state and hardware interrupt lines and have no way to stop
 /// cleanly on demand, one `kill` away from teardown.
 ///
-/// This gates the explicitly-named target as well as the fanouts, because
-/// `process_list` reports every registered task's id and name, kernel tasks
-/// included, so naming one is not a guess.
-fn signal_may_name(flags: u16) -> bool {
+/// This gates the explicitly-named target as well as the fanouts. It used to
+/// carry the whole burden, because `process_list` reported every registered
+/// task's id and name, kernel tasks included, so naming one was not a guess.
+/// Enumeration now applies this same predicate
+/// ([`syscall_process_list`](crate::syscall::core_handlers)), so an
+/// unprivileged caller is not told the id in the first place — this stays as
+/// the enforcing check rather than the only one.
+pub(crate) fn signal_may_name(flags: u16) -> bool {
     (flags & TASK_FLAG_USER_MODE) != 0
 }
 
@@ -93,7 +97,7 @@ fn signal_may_name(flags: u16) -> bool {
 /// already holds, and no other. Peers reach each other exactly as one user's
 /// processes do — a task manager still ends a shell job — while nothing
 /// unprivileged reaches the compositor, `/bin/roulette`, `/bin/ip` or init.
-fn signal_dominates(caller_flags: u16, target_flags: u16) -> bool {
+pub(crate) fn signal_dominates(caller_flags: u16, target_flags: u16) -> bool {
     target_flags & SPAWN_PRIVILEGED & !caller_flags == 0
 }
 
@@ -104,7 +108,7 @@ fn signal_dominates(caller_flags: u16, target_flags: u16) -> bool {
 /// with no way to debug it. Dominance already covers init while it is the only
 /// `TASK_FLAG_SYSTEM` task outside the test runner, but the guarantee should
 /// not rest on that staying true.
-fn signal_is_init(task_id: u32) -> bool {
+pub(crate) fn signal_is_init(task_id: u32) -> bool {
     let init = crate::exec::init_task_id();
     init != INVALID_TASK_ID && task_id == init
 }

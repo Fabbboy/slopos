@@ -145,7 +145,12 @@ pub fn init_user_main() {
         }
     }
 
+    // Init outlives every service it starts, so nothing else will ever reap
+    // them: a supervisor that only yields accumulates one unreaped child per
+    // terminal the user closes. Reaping here is what keeps the registry flat
+    // across an interactive session.
     loop {
+        process::reap_exited_children();
         sys_core::yield_now();
     }
 }

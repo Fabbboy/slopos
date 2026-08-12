@@ -35,7 +35,7 @@
 
 use slopos_abi::task::{
     TASK_FLAG_COMPOSITOR, TASK_FLAG_CONSOLE_ADMIN, TASK_FLAG_DISPLAY_EXCLUSIVE,
-    TASK_FLAG_NET_ADMIN, TaskPriority,
+    TASK_FLAG_NET_ADMIN, TASK_FLAG_PROC_ADMIN, TaskPriority,
 };
 
 /// One program's kernel-conferred attributes.
@@ -85,6 +85,16 @@ const PROGRAM_GRANTS: &[ProgramGrant] = &[
     ProgramGrant {
         path: b"/bin/ip",
         flags: TASK_FLAG_NET_ADMIN,
+        priority: None,
+    },
+    // The system monitor is the one program whose job is to show the whole
+    // machine, so it is the one program that may enumerate past the dominance
+    // relation `process_list` otherwise applies. It confers no power over what
+    // it can see: `kill` re-checks dominance against the caller's own flags, so
+    // an enumerated kernel thread is still refused.
+    ProgramGrant {
+        path: b"/bin/sysmon",
+        flags: TASK_FLAG_PROC_ADMIN,
         priority: None,
     },
 ];

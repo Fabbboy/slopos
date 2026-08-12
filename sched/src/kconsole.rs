@@ -39,6 +39,57 @@ slopos_ostd::kcommand! {
     run = run_sched,
 }
 
+slopos_ostd::kcommand! {
+    name = zombies,
+    key = b'x',
+    help = "exited-but-unreaped tasks, with the reaper that owes each one",
+    flags = KCMD_INFORMATIONAL,
+    run = run_zombies,
+}
+
+/// Exited tasks are absent from `process_list` — they cannot run code, so they
+/// are exit-status receipts rather than tasks. That makes "which corpses are
+/// still held, and who owes the `waitpid`" a question only the console can
+/// answer, which is the split Windows draws between `EnumProcesses` and the
+/// kernel debugger's `!process`.
+fn run_zombies(kc: &mut KConsole<'_>) {
+    let mut zombies = 0u32;
+    let mut terminated = 0u32;
+    task_for_each_active(|task| {
+        match task.status() {
+            TaskStatus::Zombie => zombies += 1,
+            TaskStatus::Terminated => terminated += 1,
+            _ => return,
+        }
+        if kc.budget_left() == 0 {
+            return;
+        }
+        let reaper = task.parent_task_id();
+        let exit = task.exit_info().try_get().cloned();
+        kline!(
+            kc,
+            "  task {:>3} '{}' {:?} reaper={} code={} reason={:?} exited_at={}",
+            task.task_id,
+            bytes_as_str(&task.name),
+            task.status(),
+            if reaper == slopos_abi::task::INVALID_TASK_ID {
+                -1i64
+            } else {
+                reaper as i64
+            },
+            exit.as_ref().map_or(0, |e| e.exit_code),
+            exit.as_ref().map(|e| e.exit_reason),
+            exit.as_ref().map_or(0, |e| e.exit_time_ms),
+        );
+    });
+    kline!(
+        kc,
+        "zombies={} (awaiting waitpid) terminated={} (awaiting reclaim)",
+        zombies,
+        terminated
+    );
+}
+
 fn run_sched(kc: &mut KConsole<'_>) {
     let stats = crate::lifecycle::get_scheduler_stats();
     let tasks = crate::task::get_task_stats();

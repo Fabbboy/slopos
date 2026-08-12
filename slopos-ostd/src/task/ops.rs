@@ -49,6 +49,19 @@ pub fn child_exit_event(task_id: u32) -> KernelEvent {
     }
 }
 
+/// The any-child-exit event for a *parent* task id. A `waitpid(-1)` waiter
+/// parks on this; a child's exit path publishes it against its parent.
+///
+/// Distinct from [`child_exit_event`], which is keyed on the exiting task: a
+/// wait-any caller has no child id to name, and keying both on the same id
+/// space would make "my child exited" indistinguishable from "I exited".
+#[inline]
+pub fn any_child_exit_event(parent_task_id: u32) -> KernelEvent {
+    KernelEvent::AnyChildExit {
+        parent: TaskSlot(parent_task_id),
+    }
+}
+
 /// The signal-pending event for a task id. A `signalfd` poller subscribes
 /// here (via the fd's `poll_wait`); every signal-raise site publishes it so a
 /// raised signal becomes an in-band ring/poll wakeup instead of relying on the

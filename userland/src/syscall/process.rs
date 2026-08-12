@@ -167,6 +167,27 @@ pub fn waitpid_nohang(task_id: u32) -> Option<i32> {
     }
 }
 
+/// Reap one already-exited child, whichever it is, without blocking.
+///
+/// `Some(status)` reaped one; `None` means no child has exited (or the caller
+/// has none). A supervisor that spawns and forgets calls this on a timer to
+/// stay at zero zombies without tracking ids.
+#[inline(always)]
+pub fn wait_any_nohang() -> Option<i32> {
+    let rc = unsafe { syscall2(SYSCALL_WAITPID, u32::MAX as u64, 1) as i64 };
+    if rc < 0 { None } else { Some(rc as i32) }
+}
+
+/// Reap every child that has already exited. Returns how many were reaped.
+#[inline(always)]
+pub fn reap_exited_children() -> usize {
+    let mut reaped = 0usize;
+    while wait_any_nohang().is_some() {
+        reaped += 1;
+    }
+    reaped
+}
+
 #[inline(always)]
 pub fn terminate_task(task_id: u32) -> i32 {
     unsafe { syscall1(SYSCALL_TERMINATE_TASK, task_id as u64) as i32 }

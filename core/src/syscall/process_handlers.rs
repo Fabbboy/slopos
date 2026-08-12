@@ -22,7 +22,7 @@ use slopos_mm::user_copy::{copy_from_user, copy_to_user};
 use slopos_mm::user_ptr::UserPtr as MmUserPtr;
 
 use crate::exec;
-use crate::syscall::args::{Tid, UserBytes, UserCStr, UserPtr};
+use crate::syscall::args::{Tid, UserBytes, UserCStr, UserPtr, WaitTarget};
 use crate::syscall::common::{
     USER_PATH_MAX, syscall_bounded_from_user, syscall_copy_to_user_bounded, syscall_copy_user_str,
 };
@@ -309,19 +309,42 @@ define_syscall!(syscall_sigdefault
 });
 
 define_syscall!(syscall_waitpid
-    (ctx, target: Tid, flags: u32) -> Result<u64, Errno>
+    (ctx, target: WaitTarget, flags: u32) -> Result<u64, Errno>
 {
-    let target_id = target.raw();
     let wnohang = (flags & 0x1) != 0;
-    if target_id == 0 {
-        return Err(Errno::EINVAL);
-    }
+    let caller_id = ctx.task_id();
+
+    // Wait-any resolves to a concrete child before the named path runs, so the
+    // ownership check and the reap below stay one implementation. Without it a
+    // supervisor has to name every child it ever spawned, which is why the
+    // in-tree launchers discarded their tids and leaked the zombies.
+    let target_id = match target {
+        WaitTarget::Child(id) => id,
+        WaitTarget::Any => match slopos_sched::task::task_first_exited_child(caller_id) {
+            Some(id) => id,
+            None => {
+                if !slopos_sched::task::task_has_children(caller_id) {
+                    return Err(Errno::ECHILD);
+                }
+                if wnohang {
+                    return Err(Errno::EAGAIN);
+                }
+                // No child has exited yet. Park until one does, then re-resolve:
+                // the woken waiter learns *which* child exited by scanning, the
+                // same way it would have on entry.
+                slopos_sched::task::task_wait_any_child(caller_id)?;
+                match slopos_sched::task::task_first_exited_child(caller_id) {
+                    Some(id) => id,
+                    None => return Err(Errno::ECHILD),
+                }
+            }
+        },
+    };
 
     // Reaping is the parent's alone. `task_consume_zombie` unlinks the target
     // from whoever its parent is and drops that owning reference, so a
     // stranger's wait would take the exit code *and* leave the real parent
     // with `ECHILD` for a child it is still waiting on.
-    let caller_id = ctx.task_id();
     match task_find_by_id(target_id) {
         Some(t) if t.parent_task_id() == caller_id => {}
         _ => return Err(Errno::ECHILD),

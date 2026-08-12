@@ -879,10 +879,44 @@ pub fn task_get_current_id() -> u32 {
 /// only after that lock is released, so a visitor may take the registry lock
 /// again — resolve a parent, enqueue a task, post a signal — without
 /// deadlocking. Each guard pins its task for the whole visit.
+///
+/// **Includes exited tasks.** This is the teardown/diagnostic walk: the
+/// shutdown sweep, the stranded-task rescue and the console dumps all need to
+/// see corpses. Anything that answers a userland question wants
+/// [`task_for_each_enumerable`] instead.
 pub fn task_for_each_active(mut f: impl FnMut(&TaskRef)) {
     task_try_for_each_active(|task| {
         f(task);
         ControlFlow::Continue(())
+    });
+}
+
+/// Visit every registered task that can still run code.
+///
+/// [`task_for_each_active`] minus the exited ones. A `Zombie` is an exit-status
+/// receipt: its address space and descriptor table are already gone, it holds
+/// no scheduler placement, and it cannot execute an instruction. Reporting one
+/// in a *task* list invites a caller to treat a receipt as a task — to chart
+/// its CPU time, or offer to kill it.
+///
+/// The split follows the rule Windows states outright: process enumeration
+/// returns what can still run code, and the debugger returns everything. Here
+/// the debugger is the diagnostic console, which keeps the `active` walk.
+pub fn task_for_each_enumerable(mut f: impl FnMut(&TaskRef)) {
+    task_try_for_each_enumerable(|task| {
+        f(task);
+        ControlFlow::Continue(())
+    });
+}
+
+/// [`task_for_each_enumerable`] with early exit. See
+/// [`task_try_for_each_active`] for the guard contract.
+pub fn task_try_for_each_enumerable(mut f: impl FnMut(&TaskRef) -> ControlFlow<()>) {
+    task_try_for_each_active(|task| {
+        if task.is_exited() {
+            return ControlFlow::Continue(());
+        }
+        f(task)
     });
 }
 

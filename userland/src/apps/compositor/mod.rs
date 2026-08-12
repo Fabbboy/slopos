@@ -15,7 +15,7 @@ mod surface_cache;
 use crate::gfx::DamageRect;
 use crate::net_query;
 use crate::ring::{Ring, slopfut};
-use crate::syscall::{DisplayInfo, UserWindowInfo, core as sys_core, tty, window};
+use crate::syscall::{DisplayInfo, UserWindowInfo, core as sys_core, process, tty, window};
 use crate::theme::*;
 use region::Region;
 use slopos_abi::net::{
@@ -984,6 +984,12 @@ impl WindowManager {
             proto.cleanup_disconnected();
             proto.flush_all();
         }
+
+        // Dock and shelf launches are fire-and-forget — `spawn_program` keeps
+        // no tid — and the compositor outlives every one of them, so it is
+        // the reaper of record for each. Non-blocking, so a frame with no
+        // exited child costs one syscall that returns immediately.
+        process::reap_exited_children();
     }
 }
 

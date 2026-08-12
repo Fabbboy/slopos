@@ -19,10 +19,27 @@
 
 use core::ptr::NonNull;
 
+use slopos_ostd::klog_info;
 use slopos_ostd::task::{task_placement_retain, with_parked_node};
 
 use super::task_table::{TaskRef, task_find_by_id, with_task_manager};
 use super::{INVALID_TASK_ID, Task, TaskStatus};
+
+/// How many unreaped zombies one parent may hold.
+///
+/// A zombie is retained so a live parent can still read its exit status, which
+/// makes retention a promise the *parent* is supposed to redeem. A parent that
+/// never calls `waitpid` and never exits never redeems it, and each held
+/// receipt pins a `Task` (≤ 8 KiB), a 32 KiB kernel stack, a 16 KiB data stack
+/// and one of `MAX_TASKS` registry slots — so an interactive loop of
+/// spawn-and-close walks the machine to spawn failure. `SIG_IGN` and
+/// `waitpid(-1)` let a supervisor avoid that; this is what makes avoiding it
+/// not the supervisor's decision.
+///
+/// Linux bounds the same quantity with `RLIMIT_NPROC`, per-uid rather than
+/// per-parent. SlopOS has no uid, and the parent is the principal that
+/// actually owes the reap, so the cap lands there.
+pub const MAX_ZOMBIES_PER_PARENT: usize = 64;
 
 /// Whether a task in `status` may still acquire children — i.e. it has not begun
 /// tearing down. Mirrors the "parent alive" predicate teardown keys on.
@@ -72,6 +89,123 @@ pub fn link_child(parent: &Task, child: NonNull<Task>) {
 pub fn take_one_child(parent: &Task) -> Option<TaskRef> {
     let child_nn = with_task_manager(|_mgr| parent.children_pop())?;
     Some(TaskRef::from_placement(child_nn))
+}
+
+/// The oldest zombie in `parent`'s children list once it holds more than
+/// [`MAX_ZOMBIES_PER_PARENT`], or `None` while it is within budget.
+///
+/// Oldest-first because the list is push-back ordered, so the head zombie is
+/// the one whose status has gone unclaimed longest — the one a parent that was
+/// ever going to reap would have reaped already. Dropping the newest instead
+/// would discard the status most likely still to be waited on.
+///
+/// Runs under the registry lock: the walk is allocation-free and touches only
+/// the intrusive links and each child's status word.
+fn overflowing_zombie(parent: &Task) -> Option<NonNull<Task>> {
+    let mut zombies = 0usize;
+    let mut oldest = None;
+    for child in parent.children.iter() {
+        let is_zombie = with_parked_node(child, |c| c.status() == TaskStatus::Zombie);
+        if !is_zombie {
+            continue;
+        }
+        zombies += 1;
+        if oldest.is_none() {
+            oldest = Some(child);
+        }
+    }
+    if zombies > MAX_ZOMBIES_PER_PARENT {
+        oldest
+    } else {
+        None
+    }
+}
+
+/// Enforce [`MAX_ZOMBIES_PER_PARENT`] on `parent`, force-reaping the oldest
+/// zombie when the budget is exceeded.
+///
+/// Called from the exit path after a child has been stamped `Zombie`, so at
+/// most one child is over budget per call and one eviction restores it.
+///
+/// The evicted child's exit status is dropped, which is the whole cost: a
+/// parent that has accumulated this many unreaped children is not reading exit
+/// codes. Losing one status beats losing the ability to spawn.
+pub fn enforce_zombie_budget(parent: &Task) {
+    let Some(victim) = with_task_manager(|_mgr| {
+        let victim = overflowing_zombie(parent)?;
+        // Transition and unlink in the same critical section that chose the
+        // victim: off-lock, `waitpid` could reap it first and this would then
+        // unlink a node the parent's list no longer owns.
+        let demoted = with_parked_node(victim, |c| c.try_transition_to(TaskStatus::Terminated));
+        if !demoted {
+            return None;
+        }
+        parent.children_remove(victim).ok()?;
+        Some(TaskRef::from_placement(victim))
+    }) else {
+        return;
+    };
+
+    let victim_id = victim.task_id;
+    klog_info!(
+        "task {} exceeded {} unreaped children; dropping exit status of task {}",
+        parent.task_id,
+        MAX_ZOMBIES_PER_PARENT,
+        victim_id
+    );
+    victim.set_parent_task_id(INVALID_TASK_ID);
+    // Off-lock, and never the last reference: the child holds its own
+    // existence reference until the reap below retires its registration.
+    super::task_put(victim);
+    let _ = super::task_table::task_reap(victim_id);
+}
+
+/// The id of `parent_id`'s first exited-but-unreaped child, or `None`.
+///
+/// Backs `waitpid(-1)`. Head-first, so the child whose status has gone
+/// unclaimed longest is reaped first and a busy parent cannot starve one.
+pub fn task_first_exited_child(parent_id: u32) -> Option<u32> {
+    let parent = task_find_by_id(parent_id)?;
+    with_task_manager(|_mgr| {
+        for child in parent.children.iter() {
+            let found = with_parked_node(child, |c| {
+                (c.status() == TaskStatus::Zombie).then_some(c.task_id)
+            });
+            if found.is_some() {
+                return found;
+            }
+        }
+        None
+    })
+}
+
+/// Whether `parent_id` owns any child at all.
+///
+/// `waitpid(-1)` needs this to tell "no child has exited yet" (block) from "no
+/// children exist" (`ECHILD`).
+pub fn task_has_children(parent_id: u32) -> bool {
+    let Some(parent) = task_find_by_id(parent_id) else {
+        return false;
+    };
+    with_task_manager(|_mgr| !parent.children_is_empty())
+}
+
+/// Block until one of `parent_id`'s children exits.
+///
+/// Interruptible: a signal aborts with `EINTR`, matching `waitpid`'s
+/// documented behaviour, and a kill aborts the same way so the waiter unwinds
+/// on its own stack rather than being torn down inside the wait.
+///
+/// The predicate re-scans rather than trusting the wake, so a bucket collision
+/// on the event queue costs a re-scan and cannot report a stranger's child.
+pub fn task_wait_any_child(parent_id: u32) -> Result<(), slopos_abi::Errno> {
+    let waited = slopos_ostd::sync::BUS
+        .subscribe(slopos_ostd::task::ops::any_child_exit_event(parent_id))
+        .wait_event_interruptible(|| task_first_exited_child(parent_id).is_some());
+    if waited.is_err() {
+        return Err(slopos_abi::Errno::EINTR);
+    }
+    Ok(())
 }
 
 /// Detach `child` from its parent's children list and hand back the owning

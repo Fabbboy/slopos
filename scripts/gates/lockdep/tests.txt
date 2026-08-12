@@ -39,6 +39,14 @@
 # and reading that table to prove it is the only acquire of that lock anywhere
 # in the tree — measured by disabling the probe, which returns both phases to
 # 176/185. Boot is unchanged; edges and chains stay under their caps.
+#
+# Re-measured over 4 runs for `waitpid(-1)`. Both test phases gain exactly one
+# class, evbus.any_child_exit — the wait-queue array a wait-any caller parks on,
+# one class for the whole array as evbus.netmon is. Boot is unchanged at 70:
+# nothing on the boot path waits for an unnamed child, so the queue is first
+# acquired by the wait-any test. Edges (kernel 145-149, userland 177-184) and
+# chains (kernel 338-341, userland 379-384) still fall under the caps below and
+# keep their earlier values.
 
 # Classes must be well clear of the pool before the validator would disable
 # itself. 70% mirrors MAX_POOL_FILL_PCT in ktesting/src/zz_lockdep_tests.rs;
@@ -63,8 +71,8 @@ require-phase post-userland-tests
 # been reached. One extra class is a new lock, which is exactly what should
 # require a deliberate bump.
 boot	classes	71
-post-kernel-tests	classes	177
-post-userland-tests	classes	186
+post-kernel-tests	classes	178
+post-userland-tests	classes	187
 
 # Edges and chains depend on which *orders* were observed, so they move with
 # scheduling. Each cap is the observed maximum plus that phase's spread, so
