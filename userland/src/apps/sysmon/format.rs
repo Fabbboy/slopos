@@ -66,11 +66,17 @@ pub(crate) fn is_idle_task(task: &UserTaskEntry) -> bool {
     TaskPriority::from_u8(task.priority) == TaskPriority::Idle
 }
 
-/// Symbolic name for a negative syscall return, e.g. `-1` → `"EPERM"`.
+/// Reader-facing text for a negative syscall return, e.g. `-1` →
+/// `"Operation not permitted (EPERM)"`.
+///
+/// Says what the *code* means and nothing about the task it was returned for:
+/// the kernel's privilege rules are the kernel's to state, and a sysmon that
+/// one day runs with more authority gets a different answer without a change
+/// here.
 pub(crate) fn errno_label(rc: i32) -> String {
     match slopos_abi::errno::Errno::from_raw(rc) {
-        core::option::Option::Some(e) => String::from(e.name()),
-        core::option::Option::None => format!("error {}", rc),
+        core::option::Option::Some(e) => format!("{} ({})", e.description(), e.name()),
+        core::option::Option::None => format!("unknown error {}", rc),
     }
 }
 

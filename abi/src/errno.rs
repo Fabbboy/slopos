@@ -76,7 +76,7 @@ impl Errno {
 }
 
 macro_rules! define_errnos {
-    ( $( $(#[$meta:meta])* $name:ident = $val:literal; )* ) => {
+    ( $( $(#[$meta:meta])* $name:ident = $val:literal, $desc:literal; )* ) => {
         impl Errno {
             $( $(#[$meta])* pub const $name: Self = Self::new(-$val); )*
         }
@@ -87,6 +87,19 @@ macro_rules! define_errnos {
                 match self.raw() {
                     $( -$val => stringify!($name), )*
                     _ => "UNKNOWN",
+                }
+            }
+
+            /// Return the sentence-case description of this errno (e.g.
+            /// `"Operation not permitted"`), for text a user reads.
+            ///
+            /// Wording follows the POSIX description of each code, so it
+            /// states what the *code* means and never what a particular
+            /// caller was doing when it got one.
+            pub const fn description(self) -> &'static str {
+                match self.raw() {
+                    $( -$val => $desc, )*
+                    _ => "Unknown error",
                 }
             }
         }
@@ -109,57 +122,57 @@ macro_rules! define_errnos {
 // Values follow the Linux/x86-64 numbering from
 // include/uapi/asm-generic/errno-base.h and errno.h.
 define_errnos! {
-    EPERM           =   1;
-    ENOENT          =   2;
-    ESRCH           =   3;
-    EINTR           =   4;
-    EIO             =   5;
-    ENXIO           =   6;
-    E2BIG           =   7;
-    ENOEXEC         =   8;
-    EBADF           =   9;
-    ECHILD          =  10;
-    EAGAIN          =  11;
-    ENOMEM          =  12;
-    EACCES          =  13;
-    EFAULT          =  14;
-    EBUSY           =  16;
-    EEXIST          =  17;
-    ENODEV          =  19;
-    ENOTDIR         =  20;
-    EISDIR          =  21;
-    EINVAL          =  22;
-    ENFILE          =  23;
-    EMFILE          =  24;
-    ENOSPC          =  28;
-    ESPIPE          =  29;
-    EPIPE           =  32;
-    ERANGE          =  34;
-    ENAMETOOLONG    =  36;
-    ENOSYS          =  38;
-    ENOTEMPTY       =  39;
-    ETIME           =  62;
-    ENOTSOCK        =  88;
-    EDESTADDRREQ    =  89;
-    EPROTONOSUPPORT =  93;
-    EOPNOTSUPP      =  95;
-    EAFNOSUPPORT    =  97;
-    EADDRINUSE      =  98;
-    EADDRNOTAVAIL   =  99;
-    ENETUNREACH     = 101;
-    ECONNABORTED    = 103;
-    ECONNRESET      = 104;
-    ENOBUFS         = 105;
-    EISCONN         = 106;
-    ENOTCONN        = 107;
-    ETIMEDOUT       = 110;
-    ECONNREFUSED    = 111;
-    EHOSTUNREACH    = 113;
-    EALREADY        = 114;
-    EINPROGRESS     = 115;
-    ECANCELED       = 125;
+    EPERM           =   1, "Operation not permitted";
+    ENOENT          =   2, "No such file or directory";
+    ESRCH           =   3, "No such process";
+    EINTR           =   4, "Interrupted system call";
+    EIO             =   5, "Input/output error";
+    ENXIO           =   6, "No such device or address";
+    E2BIG           =   7, "Argument list too long";
+    ENOEXEC         =   8, "Executable format error";
+    EBADF           =   9, "Bad file descriptor";
+    ECHILD          =  10, "No child processes";
+    EAGAIN          =  11, "Resource temporarily unavailable";
+    ENOMEM          =  12, "Cannot allocate memory";
+    EACCES          =  13, "Permission denied";
+    EFAULT          =  14, "Bad address";
+    EBUSY           =  16, "Device or resource busy";
+    EEXIST          =  17, "File exists";
+    ENODEV          =  19, "No such device";
+    ENOTDIR         =  20, "Not a directory";
+    EISDIR          =  21, "Is a directory";
+    EINVAL          =  22, "Invalid argument";
+    ENFILE          =  23, "Too many open files in system";
+    EMFILE          =  24, "Too many open files";
+    ENOSPC          =  28, "No space left on device";
+    ESPIPE          =  29, "Illegal seek";
+    EPIPE           =  32, "Broken pipe";
+    ERANGE          =  34, "Numerical result out of range";
+    ENAMETOOLONG    =  36, "File name too long";
+    ENOSYS          =  38, "Function not implemented";
+    ENOTEMPTY       =  39, "Directory not empty";
+    ETIME           =  62, "Timer expired";
+    ENOTSOCK        =  88, "Not a socket";
+    EDESTADDRREQ    =  89, "Destination address required";
+    EPROTONOSUPPORT =  93, "Protocol not supported";
+    EOPNOTSUPP      =  95, "Operation not supported";
+    EAFNOSUPPORT    =  97, "Address family not supported";
+    EADDRINUSE      =  98, "Address already in use";
+    EADDRNOTAVAIL   =  99, "Cannot assign requested address";
+    ENETUNREACH     = 101, "Network is unreachable";
+    ECONNABORTED    = 103, "Connection aborted";
+    ECONNRESET      = 104, "Connection reset by peer";
+    ENOBUFS         = 105, "No buffer space available";
+    EISCONN         = 106, "Socket is already connected";
+    ENOTCONN        = 107, "Socket is not connected";
+    ETIMEDOUT       = 110, "Connection timed out";
+    ECONNREFUSED    = 111, "Connection refused";
+    EHOSTUNREACH    = 113, "No route to host";
+    EALREADY        = 114, "Operation already in progress";
+    EINPROGRESS     = 115, "Operation now in progress";
+    ECANCELED       = 125, "Operation canceled";
     /// Kernel-internal: restartable syscall.  **Must never reach userland.**
-    ERESTARTSYS     = 512;
+    ERESTARTSYS     = 512, "Restartable system call";
 }
 
 impl fmt::Display for Errno {
