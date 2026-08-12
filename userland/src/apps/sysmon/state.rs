@@ -10,6 +10,7 @@ pub(crate) const MAX_TASKS: usize = 256;
 
 use crate::syscall::{UserCpuInfo, UserPerCpuStats, UserSysInfo, UserTaskEntry, core as sys_core};
 
+use super::selection::{self, TaskKey};
 use super::{MAX_CPUS, REFRESH_INTERVAL_MS, is_idle_task, task_name_bytes, task_name_string};
 
 /// The network facts the overview shows, read from `net_query` so sysmon and
@@ -66,15 +67,21 @@ pub(crate) enum Tab {
 
 /// A task named by the row the user acted on.
 ///
-/// The name is captured with the pid rather than re-read at confirm time: task
-/// ids recycle, so a refresh between opening the dialog and pressing Kill can
-/// put a different task on that number. Holding both lets
-/// [`SysmonApp::pending_kill_target`] notice the swap and refuse, instead of
-/// killing a stranger the user never saw.
+/// Carries the full [`TaskKey`] rather than a pid: ids recycle, so a refresh
+/// between opening the dialog and pressing Kill can put a different task on
+/// that number. The key's creation time distinguishes them, which lets
+/// [`SysmonApp::pending_kill_target`] refuse instead of killing a stranger the
+/// user never saw. `name` is kept for the prompt text only.
 #[derive(Clone, PartialEq)]
 pub(crate) struct KillTarget {
-    pub(crate) pid: u32,
+    pub(crate) key: TaskKey,
     pub(crate) name: String,
+}
+
+impl KillTarget {
+    pub(crate) fn pid(&self) -> u32 {
+        self.key.pid
+    }
 }
 
 /// The row-level context menu, anchored where it was raised.
@@ -116,7 +123,10 @@ pub(crate) struct SysmonApp {
     pub(crate) prev_percpu: [UserPerCpuStats; MAX_CPUS],
     pub(crate) task_cpu_pct: [u32; MAX_TASKS],
     pub(crate) cpu_usage_pct: [u32; MAX_CPUS],
-    pub(crate) selected_row: usize,
+    /// The selected task, not the row it currently occupies. The table
+    /// re-sorts under the user on every refresh, so a row index would slide
+    /// the highlight onto whichever task arrived at that coordinate.
+    pub(crate) selected: Option<TaskKey>,
     pub(crate) sort_column: SortColumn,
     pub(crate) sort_ascending: bool,
     pub(crate) last_refresh_ms: u64,
@@ -145,7 +155,7 @@ impl SysmonApp {
             prev_percpu: [UserPerCpuStats::default(); MAX_CPUS],
             task_cpu_pct: [0; MAX_TASKS],
             cpu_usage_pct: [0; MAX_CPUS],
-            selected_row: 0,
+            selected: None,
             sort_column: SortColumn::CpuPct,
             sort_ascending: false,
             last_refresh_ms: 0,
@@ -214,10 +224,10 @@ impl SysmonApp {
 
         self.sort_tasks();
 
-        if self.task_count == 0 {
-            self.selected_row = 0;
-        } else if self.selected_row >= self.task_count {
-            self.selected_row = self.task_count - 1;
+        // A selected task that exited stops designating anything; clearing is
+        // the honest answer, since any surviving row belongs to someone else.
+        if self.selected.is_some_and(|key| self.row_of(key).is_none()) {
+            self.selected = None;
         }
 
         // A target that exited while its menu or dialog was open no longer
@@ -239,11 +249,31 @@ impl SysmonApp {
         }
     }
 
-    /// The row for `target`, but only while the pid still carries the name it
-    /// was captured with. `None` once the id has been recycled.
+    /// The table index for `target`, or `None` once that task has exited.
     fn live_target(&self, target: &KillTarget) -> Option<usize> {
-        let idx = self.find_task_index_by_pid(target.pid)?;
-        (task_name_string(&self.tasks[idx]) == target.name).then_some(idx)
+        selection::index_of(target.key, self.task_slice())
+    }
+
+    fn task_slice(&self) -> &[UserTaskEntry] {
+        &self.tasks[..self.task_count]
+    }
+
+    fn order_slice(&self) -> &[usize] {
+        &self.sorted_indices[..self.task_count]
+    }
+
+    /// The display row the selected task currently sits on.
+    pub(crate) fn selected_row(&self) -> Option<usize> {
+        self.selected.and_then(|key| self.row_of(key))
+    }
+
+    fn row_of(&self, key: TaskKey) -> Option<usize> {
+        selection::row_of(key, self.task_slice(), self.order_slice())
+    }
+
+    /// Select whatever task is displayed at `row`.
+    pub(crate) fn select_row(&mut self, row: usize) {
+        self.selected = selection::key_at_row(self.task_slice(), self.order_slice(), row);
     }
 
     /// Whether `pid` may be offered a Kill action.
@@ -259,7 +289,17 @@ impl SysmonApp {
         let idx = self.sorted_task_index(row)?;
         let task = self.tasks.get(idx)?;
         Some(KillTarget {
-            pid: task.task_id,
+            key: TaskKey::of(task),
+            name: task_name_string(task),
+        })
+    }
+
+    /// Build a kill target for the selected task.
+    pub(crate) fn target_for_selection(&self) -> Option<KillTarget> {
+        let idx = selection::index_of(self.selected?, self.task_slice())?;
+        let task = self.tasks.get(idx)?;
+        Some(KillTarget {
+            key: TaskKey::of(task),
             name: task_name_string(task),
         })
     }
@@ -386,15 +426,6 @@ impl SysmonApp {
             };
         }
         self.sort_tasks();
-    }
-
-    pub(crate) fn find_task_index_by_pid(&self, pid: u32) -> Option<usize> {
-        for i in 0..self.task_count {
-            if self.tasks[i].task_id == pid {
-                return Some(i);
-            }
-        }
-        None
     }
 
     pub(crate) fn sorted_task_index(&self, row: usize) -> Option<usize> {

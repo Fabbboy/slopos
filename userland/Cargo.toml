@@ -165,6 +165,10 @@ name = "terminal_grid_test"
 path = "src/bin/tests/terminal_grid_test.rs"
 
 [[bin]]
+name = "sysmon_selection_test"
+path = "src/bin/tests/sysmon_selection_test.rs"
+
+[[bin]]
 name = "clipboard_test"
 path = "src/bin/tests/clipboard_test.rs"
 

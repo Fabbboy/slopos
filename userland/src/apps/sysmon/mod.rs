@@ -15,6 +15,7 @@ use slopos_appkit::{
 };
 
 mod format;
+pub mod selection;
 mod state;
 
 pub(crate) use format::*;
@@ -94,11 +95,11 @@ impl App for SysmonApp {
                 Action::Rebuild
             }
             SysmonMsg::SelectRow(row) => {
-                self.selected_row = row;
+                self.select_row(row);
                 Action::Rebuild
             }
             SysmonMsg::OpenContextMenu(at) => {
-                self.selected_row = at.row;
+                self.select_row(at.row);
                 self.last_kill = None;
                 self.context_menu = self.target_for_row(at.row).map(|target| ContextMenu {
                     target,
@@ -112,7 +113,7 @@ impl App for SysmonApp {
                 if item == MENU_KILL {
                     self.confirm_kill = menu
                         .map(|m| m.target)
-                        .filter(|target| self.is_killable(target.pid));
+                        .filter(|target| self.is_killable(target.pid()));
                 }
                 Action::Rebuild
             }
@@ -126,7 +127,7 @@ impl App for SysmonApp {
                 self.last_kill = match self.pending_kill_target() {
                     Some(target) => {
                         let name = target.name.clone();
-                        let rc = sys_proc::kill(target.pid, SIGKILL);
+                        let rc = sys_proc::kill(target.pid(), SIGKILL);
                         Some(if rc < 0 {
                             KillOutcome::Failed { name, errno: rc }
                         } else {
@@ -163,8 +164,8 @@ impl App for SysmonApp {
                 self.context_menu = None;
                 self.last_kill = None;
                 self.confirm_kill = self
-                    .target_for_row(self.selected_row)
-                    .filter(|target| self.is_killable(target.pid));
+                    .target_for_selection()
+                    .filter(|target| self.is_killable(target.pid()));
                 Action::Rebuild
             }
             Key::Named(NamedKey::Escape) => {
@@ -353,17 +354,13 @@ impl SysmonApp {
             ]);
         }
 
-        let selected = if self.task_count > 0 {
-            Some(self.selected_row)
-        } else {
-            None
-        };
-
         let table = Node::Table {
             columns,
             rows,
             row_height: 20,
-            selected,
+            // Resolved from the selected task every frame, so a re-sort moves
+            // the highlight with its task instead of leaving it on the row.
+            selected: self.selected_row(),
             on_select: Some(SysmonMsg::SelectRow),
             on_header_click: Some(SysmonMsg::SortColumn),
             on_context_menu: Some(SysmonMsg::OpenContextMenu),
@@ -404,7 +401,7 @@ impl SysmonApp {
                 items: vec![MenuItem {
                     label: "Kill",
                     shortcut: Some("Del"),
-                    enabled: self.is_killable(menu.target.pid),
+                    enabled: self.is_killable(menu.target.pid()),
                     kind: MenuItemKind::Action,
                 }],
                 on_action: Some(SysmonMsg::MenuAction),
@@ -415,7 +412,7 @@ impl SysmonApp {
     fn view_kill_dialog(&self) -> Option<Node<SysmonMsg>> {
         let target = self.confirm_kill.as_ref()?;
         Some(Node::Dialog {
-            title: format!("Kill task '{}' (PID {})?", target.name, target.pid),
+            title: format!("Kill task '{}' (PID {})?", target.name, target.pid()),
             content: Box::new(Node::Label {
                 text: String::from("The task is terminated immediately and cannot save state."),
                 alignment: TextAlignment::Center,
