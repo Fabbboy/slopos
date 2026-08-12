@@ -5,11 +5,10 @@ use crate::event::{
     EventPhase, EventResponse, Key, MessageSink, NamedKey, PointerButton, WidgetEvent,
 };
 use crate::paint::PaintContext;
-use crate::traits::{FocusPolicy, MeasureCtx, Role, Widget, WidgetId, next_widget_id};
+use crate::traits::{FocusPolicy, MeasureCtx, Role, Widget, WidgetCore};
 
 pub struct CheckboxWidget {
-    id: WidgetId,
-    rect: Rect,
+    core: WidgetCore,
     checked: bool,
     label: String,
     on_toggle: Option<Box<dyn Fn() -> Box<dyn std::any::Any>>>,
@@ -25,8 +24,7 @@ impl CheckboxWidget {
         enabled: bool,
     ) -> Self {
         Self {
-            id: next_widget_id(),
-            rect: Rect::ZERO,
+            core: WidgetCore::new(),
             checked,
             label,
             on_toggle,
@@ -43,31 +41,34 @@ impl CheckboxWidget {
 }
 
 impl Widget for CheckboxWidget {
+    fn core(&self) -> &WidgetCore {
+        &self.core
+    }
+    fn core_mut(&mut self) -> &mut WidgetCore {
+        &mut self.core
+    }
+
     fn measure(&mut self, constraints: BoxConstraints, ctx: &mut MeasureCtx) -> Size {
         let cb_size = ctx.style.checkbox_size;
         let gap = ctx.style.checkbox_gap;
-        // Approximate text width: 8px per char (bitmap font cell width).
-        let text_w = self.label.len() as i32 * 8;
-        let text_h = 16; // bitmap font cell height
+        let text_w = crate::text::string_width(&self.label);
+        let text_h = crate::text::cell_height();
 
         let width = cb_size + gap + text_w;
         let height = cb_size.max(text_h);
         constraints.constrain(Size::new(width, height))
     }
 
-    fn layout(&mut self, rect: Rect) {
-        self.rect = rect;
-    }
-
     fn paint(&self, ctx: &mut PaintContext) {
+        let rect = self.layout_rect();
         let style = ctx.style;
         let cb_size = style.checkbox_size;
         let gap = style.checkbox_gap;
-        let text_h = 16_i32;
+        let text_h = ctx.text_height();
 
         // Vertically center the checkbox box within the rect.
-        let box_y = self.rect.y + (self.rect.height - cb_size) / 2;
-        let box_x = self.rect.x;
+        let box_y = rect.y + (rect.height - cb_size) / 2;
+        let box_x = rect.x;
 
         if self.checked {
             // Filled accent background.
@@ -105,8 +106,8 @@ impl Widget for CheckboxWidget {
         }
 
         // Draw label text to the right.
-        let text_x = self.rect.x + cb_size + gap;
-        let text_y = self.rect.y + (self.rect.height - text_h) / 2;
+        let text_x = rect.x + cb_size + gap;
+        let text_y = rect.y + (rect.height - text_h) / 2;
         let fg = if self.enabled {
             style.text_primary
         } else {
@@ -130,9 +131,13 @@ impl Widget for CheckboxWidget {
         }
         match event {
             WidgetEvent::PointerDown {
+                x,
+                y,
                 button: PointerButton::Left,
-                ..
             } => {
+                if !self.layout_rect().contains(*x, *y) {
+                    return EventResponse::Ignored;
+                }
                 self.toggle();
                 if let Some(f) = &self.on_toggle {
                     sink.emit_raw(f());
@@ -171,14 +176,6 @@ impl Widget for CheckboxWidget {
 
     fn focus_policy(&self) -> FocusPolicy {
         FocusPolicy::StrongFocus
-    }
-
-    fn id(&self) -> WidgetId {
-        self.id
-    }
-
-    fn layout_rect(&self) -> Rect {
-        self.rect
     }
 }
 

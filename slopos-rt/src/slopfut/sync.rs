@@ -4,7 +4,7 @@
 //! All are `Rc<RefCell<…>>`-backed (single-threaded — no atomics) and wake
 //! waiters through the executor's ready-queue via stored [`Waker`]s.
 
-use core::cell::RefCell;
+use core::cell::{Cell, RefCell};
 use core::future::Future;
 use core::pin::Pin;
 use core::task::{Context, Poll, Waker};
@@ -24,7 +24,19 @@ pub struct Notify {
 #[derive(Default)]
 struct NotifyInner {
     permit: bool,
-    wakers: VecDeque<Waker>,
+    waiters: VecDeque<Waiter>,
+}
+
+/// A parked `Notified`, and the flag that tells it — once it is polled again —
+/// that the wake it just received was its own.
+///
+/// The flag is what makes the handoff survive the round trip through the
+/// executor. Waking a waker only schedules a re-poll; without a record that
+/// *this* future was the one chosen, the re-poll finds no permit and parks
+/// again, and the notification is lost for good.
+struct Waiter {
+    notified: Rc<Cell<bool>>,
+    waker: Waker,
 }
 
 impl Notify {
@@ -34,43 +46,81 @@ impl Notify {
 
     pub fn notify_one(&self) {
         let mut i = self.inner.borrow_mut();
-        if let Some(w) = i.wakers.pop_front() {
-            w.wake();
-        } else {
-            i.permit = true;
+        match i.waiters.pop_front() {
+            Some(w) => {
+                w.notified.set(true);
+                w.waker.wake();
+            }
+            None => i.permit = true,
         }
     }
 
-    pub async fn notified(&self) {
+    pub fn notified(&self) -> Notified {
         Notified {
             inner: self.inner.clone(),
+            state: Rc::new(Cell::new(false)),
+            registered: false,
         }
-        .await
     }
 }
 
-struct Notified {
+pub struct Notified {
     inner: Rc<RefCell<NotifyInner>>,
+    /// Set by `notify_one` when this future is the one it woke.
+    state: Rc<Cell<bool>>,
+    registered: bool,
 }
 
 impl Future for Notified {
     type Output = ();
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<()> {
-        let mut i = self.inner.borrow_mut();
+        let this = self.get_mut();
+        if this.state.replace(false) {
+            return Poll::Ready(());
+        }
+        let mut i = this.inner.borrow_mut();
         if i.permit {
             i.permit = false;
-            Poll::Ready(())
-        } else {
-            // Dedup: a `Notified` re-polled before `notify_one` fires (e.g.
-            // a sibling branch in a `select`/`join` woke the task) must not
-            // enqueue a second copy of the same waker, or a later
-            // `notify_one` would spuriously wake an already-resolved task.
-            // The waker's data pointer is the task id, so `will_wake` is a
-            // cheap identity check (the waiter set is tiny).
-            if !i.wakers.iter().any(|w| w.will_wake(cx.waker())) {
-                i.wakers.push_back(cx.waker().clone());
+            return Poll::Ready(());
+        }
+        // Register once per future, not once per poll: a re-poll from a
+        // sibling branch of a `select`/`join` must not enqueue a second
+        // waiter, or one `notify_one` would be consumed without resolving
+        // anything.
+        if this.registered {
+            if let Some(w) = i
+                .waiters
+                .iter_mut()
+                .find(|w| Rc::ptr_eq(&w.notified, &this.state))
+            {
+                w.waker.clone_from(cx.waker());
             }
-            Poll::Pending
+        } else {
+            i.waiters.push_back(Waiter {
+                notified: this.state.clone(),
+                waker: cx.waker().clone(),
+            });
+            this.registered = true;
+        }
+        Poll::Pending
+    }
+}
+
+impl Drop for Notified {
+    fn drop(&mut self) {
+        let mut i = self.inner.borrow_mut();
+        i.waiters.retain(|w| !Rc::ptr_eq(&w.notified, &self.state));
+        // Dropped after being chosen but before observing it: hand the
+        // notification on rather than swallowing it, or a `select` that
+        // cancels this branch silently eats another waiter's wakeup.
+        if self.state.get() {
+            match i.waiters.pop_front() {
+                Some(w) => {
+                    w.notified.set(true);
+                    w.waker.wake();
+                }
+                None => i.permit = true,
+            }
         }
     }
 }

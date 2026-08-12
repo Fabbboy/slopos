@@ -1,18 +1,17 @@
 use std::any::Any;
 
-use crate::constraints::{BoxConstraints, Rect, Size};
+use crate::constraints::{BoxConstraints, Size};
 use crate::event::{EventPhase, EventResponse, Key, MessageSink, NamedKey, WidgetEvent};
 use crate::node::{MenuItem, MenuItemKind};
 use crate::paint::PaintContext;
-use crate::traits::{FocusPolicy, MeasureCtx, Role, Widget, WidgetId, next_widget_id};
+use crate::traits::{FocusPolicy, MeasureCtx, Role, Widget, WidgetCore};
 
 /// Popup menu rendered as a regular widget.
 ///
-/// Overlay positioning is handled externally by the OverlayManager;
-/// this widget just renders the menu items and handles navigation.
+/// Positioning is the enclosing `PopupWidget`'s job; this widget just renders
+/// the items and handles navigation.
 pub struct MenuWidget {
-    id: WidgetId,
-    rect: Rect,
+    core: WidgetCore,
     items: Vec<MenuItem>,
     on_action: Option<Box<dyn Fn(usize) -> Box<dyn Any>>>,
     hovered_index: Option<usize>,
@@ -28,8 +27,7 @@ impl MenuWidget {
         on_action: Option<Box<dyn Fn(usize) -> Box<dyn Any>>>,
     ) -> Self {
         Self {
-            id: next_widget_id(),
-            rect: Rect::ZERO,
+            core: WidgetCore::new(),
             items,
             on_action,
             hovered_index: None,
@@ -43,8 +41,9 @@ impl MenuWidget {
         if self.item_height <= 0 {
             return None;
         }
-        let rel_y = y - self.rect.y;
-        if rel_y < 0 || rel_y >= self.rect.height {
+        let rect = self.layout_rect();
+        let rel_y = y - rect.y;
+        if rel_y < 0 || rel_y >= rect.height {
             return None;
         }
         let idx = (rel_y / self.item_height) as usize;
@@ -95,6 +94,13 @@ impl MenuWidget {
 }
 
 impl Widget for MenuWidget {
+    fn core(&self) -> &WidgetCore {
+        &self.core
+    }
+    fn core_mut(&mut self) -> &mut WidgetCore {
+        &mut self.core
+    }
+
     fn measure(&mut self, constraints: BoxConstraints, ctx: &mut MeasureCtx) -> Size {
         let item_h = ctx.style.menu_item_height;
         self.item_height = item_h;
@@ -130,29 +136,26 @@ impl Widget for MenuWidget {
         constraints.constrain(Size::new(w, h))
     }
 
-    fn layout(&mut self, rect: Rect) {
-        self.rect = rect;
-    }
-
     fn paint(&self, ctx: &mut PaintContext) {
+        let rect = self.layout_rect();
         let item_h = self.item_height;
         let padding_h = ctx.style.spacing_md;
         let radius = ctx.style.corner_radius;
 
         // Background with rounded corners and border.
         ctx.fill_rounded_rect(
-            self.rect.x,
-            self.rect.y,
-            self.rect.width,
-            self.rect.height,
+            rect.x,
+            rect.y,
+            rect.width,
+            rect.height,
             radius,
             ctx.style.bg_primary,
         );
         ctx.draw_rounded_rect(
-            self.rect.x,
-            self.rect.y,
-            self.rect.width,
-            self.rect.height,
+            rect.x,
+            rect.y,
+            rect.width,
+            rect.height,
             radius,
             ctx.style.border_default,
         );
@@ -160,16 +163,16 @@ impl Widget for MenuWidget {
         let text_h = ctx.text_height();
 
         for (i, item) in self.items.iter().enumerate() {
-            let y = self.rect.y + i as i32 * item_h;
+            let y = rect.y + i as i32 * item_h;
 
             match &item.kind {
                 MenuItemKind::Separator => {
                     // 1px horizontal line centered in the item row.
                     let line_y = y + item_h / 2;
                     ctx.fill_rect(
-                        self.rect.x + padding_h,
+                        rect.x + padding_h,
                         line_y,
-                        self.rect.width - padding_h * 2,
+                        rect.width - padding_h * 2,
                         1,
                         ctx.style.border_divider,
                     );
@@ -177,13 +180,7 @@ impl Widget for MenuWidget {
                 MenuItemKind::Action | MenuItemKind::Submenu(_) => {
                     // Hover highlight.
                     if self.hovered_index == Some(i) && item.enabled {
-                        ctx.fill_rect(
-                            self.rect.x + 1,
-                            y,
-                            self.rect.width - 2,
-                            item_h,
-                            ctx.style.bg_accent,
-                        );
+                        ctx.fill_rect(rect.x + 1, y, rect.width - 2, item_h, ctx.style.bg_accent);
                     }
 
                     // Label.
@@ -195,14 +192,14 @@ impl Widget for MenuWidget {
                         ctx.style.text_primary
                     };
 
-                    let label_x = self.rect.x + padding_h;
+                    let label_x = rect.x + padding_h;
                     let label_y = y + (item_h - text_h) / 2;
                     ctx.draw_text_transparent(label_x, label_y, item.label, fg);
 
                     // Shortcut (right-aligned).
                     if let Some(sc) = item.shortcut {
                         let sc_w = ctx.text_width(sc);
-                        let sc_x = self.rect.x + self.rect.width - padding_h - sc_w;
+                        let sc_x = rect.x + rect.width - padding_h - sc_w;
                         let sc_fg = if self.hovered_index == Some(i) && item.enabled {
                             ctx.style.text_on_accent
                         } else {
@@ -237,7 +234,10 @@ impl Widget for MenuWidget {
                 }
             }
 
-            WidgetEvent::PointerDown { y, .. } => {
+            WidgetEvent::PointerDown { x, y, .. } => {
+                if !self.layout_rect().contains(*x, *y) {
+                    return EventResponse::Ignored;
+                }
                 let Some(idx) = self.item_at_y(*y).filter(|&i| self.is_activatable(i)) else {
                     return EventResponse::Ignored;
                 };
@@ -295,13 +295,5 @@ impl Widget for MenuWidget {
 
     fn focus_policy(&self) -> FocusPolicy {
         FocusPolicy::StrongFocus
-    }
-
-    fn id(&self) -> WidgetId {
-        self.id
-    }
-
-    fn layout_rect(&self) -> Rect {
-        self.rect
     }
 }

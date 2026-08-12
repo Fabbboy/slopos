@@ -3,18 +3,18 @@ use std::any::Any;
 use crate::constraints::{BoxConstraints, Rect, Size};
 use crate::event::{EventPhase, EventResponse, Key, MessageSink, NamedKey, WidgetEvent};
 use crate::paint::PaintContext;
-use crate::traits::{FocusPolicy, MeasureCtx, Role, Widget, WidgetId, next_widget_id};
+use crate::traits::{
+    FocusPolicy, MeasureCtx, Role, Widget, WidgetCore, measure_widget, place_widget,
+};
 
 /// A child floated at an absolute position over its parent's area.
 ///
 /// Occupies the parent's whole rect so a click anywhere outside the child is
 /// still seen here and can dismiss; only the child's own rect paints.
 pub struct PopupWidget {
-    id: WidgetId,
-    rect: Rect,
+    core: WidgetCore,
     anchor: (i32, i32),
     child: Box<dyn Widget>,
-    child_size: Size,
     on_dismiss: Option<Box<dyn Fn() -> Box<dyn Any>>>,
 }
 
@@ -26,11 +26,9 @@ impl PopupWidget {
         on_dismiss: Option<Box<dyn Fn() -> Box<dyn Any>>>,
     ) -> Self {
         Self {
-            id: next_widget_id(),
-            rect: Rect::ZERO,
+            core: WidgetCore::new(),
             anchor: (x, y),
             child,
-            child_size: Size::ZERO,
             on_dismiss,
         }
     }
@@ -47,40 +45,44 @@ impl PopupWidget {
     /// Flipping before clamping is what keeps a menu opened near the right or
     /// bottom edge from covering the pointer that opened it.
     fn child_rect(&self) -> Rect {
-        let (w, h) = (self.child_size.width, self.child_size.height);
+        let rect = self.layout_rect();
+        let size = self.child.measured_size();
+        let (w, h) = (size.width, size.height);
         let (ax, ay) = self.anchor;
 
-        let x = if ax + w > self.rect.x + self.rect.width && ax - w >= self.rect.x {
+        let x = if ax + w > rect.x + rect.width && ax - w >= rect.x {
             ax - w
         } else {
             ax
         };
-        let y = if ay + h > self.rect.y + self.rect.height && ay - h >= self.rect.y {
+        let y = if ay + h > rect.y + rect.height && ay - h >= rect.y {
             ay - h
         } else {
             ay
         };
 
-        let max_x = (self.rect.x + self.rect.width - w).max(self.rect.x);
-        let max_y = (self.rect.y + self.rect.height - h).max(self.rect.y);
-        Rect::new(
-            x.clamp(self.rect.x, max_x),
-            y.clamp(self.rect.y, max_y),
-            w,
-            h,
-        )
+        let max_x = (rect.x + rect.width - w).max(rect.x);
+        let max_y = (rect.y + rect.height - h).max(rect.y);
+        Rect::new(x.clamp(rect.x, max_x), y.clamp(rect.y, max_y), w, h)
     }
 }
 
 impl Widget for PopupWidget {
+    fn core(&self) -> &WidgetCore {
+        &self.core
+    }
+    fn core_mut(&mut self) -> &mut WidgetCore {
+        &mut self.core
+    }
+
     fn measure(&mut self, constraints: BoxConstraints, ctx: &mut MeasureCtx) -> Size {
-        self.child_size = self.child.measure(constraints.loosen(), ctx);
+        measure_widget(self.child.as_mut(), constraints.loosen(), ctx);
         constraints.constrain(constraints.max_size())
     }
 
-    fn layout(&mut self, rect: Rect) {
-        self.rect = rect;
-        self.child.layout(self.child_rect());
+    fn layout(&mut self, _rect: Rect) {
+        let child_rect = self.child_rect();
+        place_widget(self.child.as_mut(), child_rect);
     }
 
     fn paint(&self, ctx: &mut PaintContext) {
@@ -129,14 +131,6 @@ impl Widget for PopupWidget {
 
     fn focus_policy(&self) -> FocusPolicy {
         FocusPolicy::StrongFocus
-    }
-
-    fn id(&self) -> WidgetId {
-        self.id
-    }
-
-    fn layout_rect(&self) -> Rect {
-        self.rect
     }
 
     fn children(&self) -> &[Box<dyn Widget>] {

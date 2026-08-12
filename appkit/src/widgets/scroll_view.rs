@@ -1,14 +1,17 @@
 use std::any::Any;
 
-use crate::constraints::{BoxConstraints, Rect, ScrollDirection, ScrollbarVisibility, Size};
+use crate::constraints::{
+    BoxConstraints, MAX_EXTENT, Rect, ScrollDirection, ScrollbarVisibility, Size,
+};
 use crate::event::{EventPhase, EventResponse, Key, MessageSink, NamedKey, WidgetEvent};
 use crate::paint::PaintContext;
-use crate::traits::{FocusPolicy, MeasureCtx, Role, Widget, WidgetId, next_widget_id};
+use crate::traits::{
+    FocusPolicy, MeasureCtx, Role, Widget, WidgetCore, measure_widget, place_widget,
+};
 
 /// Scrollable container with a single child widget.
 pub struct ScrollViewWidget {
-    id: WidgetId,
-    rect: Rect,
+    core: WidgetCore,
     child: Box<dyn Widget>,
     direction: ScrollDirection,
     show_scrollbar: ScrollbarVisibility,
@@ -31,8 +34,7 @@ impl ScrollViewWidget {
         show_scrollbar: ScrollbarVisibility,
     ) -> Self {
         Self {
-            id: next_widget_id(),
-            rect: Rect::ZERO,
+            core: WidgetCore::new(),
             child,
             direction,
             show_scrollbar,
@@ -113,11 +115,12 @@ impl ScrollViewWidget {
 
     /// Returns (track_rect, thumb_rect) for the vertical scrollbar.
     fn vertical_scrollbar_rects(&self, sb_width: i32, thumb_min: i32) -> (Rect, Rect) {
+        let rect = self.layout_rect();
         let track = Rect::new(
-            self.rect.x + self.rect.width - sb_width,
-            self.rect.y,
+            rect.x + rect.width - sb_width,
+            rect.y,
             sb_width,
-            self.rect.height,
+            rect.height,
         );
 
         let track_len = track.height;
@@ -147,9 +150,33 @@ impl ScrollViewWidget {
         let (_, thumb) = self.vertical_scrollbar_rects(sb_width, thumb_min);
         thumb.contains(px, py)
     }
+
+    /// Position the child at the current scroll offset, at its measured size.
+    ///
+    /// Every offset change routes through here so the child's rect and the
+    /// offset can never disagree.
+    fn place_child(&mut self) {
+        let rect = self.layout_rect();
+        place_widget(
+            self.child.as_mut(),
+            Rect::new(
+                rect.x - self.offset_x,
+                rect.y - self.offset_y,
+                self.content_size.width,
+                self.content_size.height,
+            ),
+        );
+    }
 }
 
 impl Widget for ScrollViewWidget {
+    fn core(&self) -> &WidgetCore {
+        &self.core
+    }
+    fn core_mut(&mut self) -> &mut WidgetCore {
+        &mut self.core
+    }
+
     fn measure(&mut self, constraints: BoxConstraints, ctx: &mut MeasureCtx) -> Size {
         // Measure child with unbounded constraints on the scroll axis.
         let child_constraints = match self.direction {
@@ -157,40 +184,31 @@ impl Widget for ScrollViewWidget {
                 min_width: constraints.min_width,
                 max_width: constraints.max_width,
                 min_height: 0,
-                max_height: i32::MAX,
+                max_height: MAX_EXTENT,
             },
             ScrollDirection::Horizontal => BoxConstraints {
                 min_width: 0,
-                max_width: i32::MAX,
+                max_width: MAX_EXTENT,
                 min_height: constraints.min_height,
                 max_height: constraints.max_height,
             },
             ScrollDirection::Both => BoxConstraints::UNBOUNDED,
         };
 
-        self.content_size = self.child.measure(child_constraints, ctx);
+        self.content_size = measure_widget(self.child.as_mut(), child_constraints, ctx);
 
         // Own size fills available space from parent.
-        constraints.constrain(Size::new(constraints.max_width, constraints.max_height))
+        constraints.constrain(constraints.max_size())
     }
 
     fn layout(&mut self, rect: Rect) {
-        self.rect = rect;
         self.viewport_size = Size::new(rect.width, rect.height);
-
-        // Lay out child at offset position with its measured size.
-        self.child.layout(Rect::new(
-            rect.x - self.offset_x,
-            rect.y - self.offset_y,
-            self.content_size.width,
-            self.content_size.height,
-        ));
-
         self.clamp_offsets();
+        self.place_child();
     }
 
     fn paint(&self, ctx: &mut PaintContext) {
-        let viewport = self.rect;
+        let viewport = self.layout_rect();
 
         // Clip child painting to the viewport.
         ctx.with_clip(viewport, |ctx| {
@@ -224,9 +242,9 @@ impl Widget for ScrollViewWidget {
 
         // Paint horizontal scrollbar (similar pattern).
         if self.needs_horizontal_scrollbar() {
-            let track_x = self.rect.x;
-            let track_y = self.rect.y + self.rect.height - sb_width;
-            let track_w = self.rect.width;
+            let track_x = viewport.x;
+            let track_y = viewport.y + viewport.height - sb_width;
+            let track_w = viewport.width;
 
             ctx.fill_rect(track_x, track_y, track_w, sb_width, ctx.style.bg_secondary);
 
@@ -257,7 +275,7 @@ impl Widget for ScrollViewWidget {
 
         // Focus ring.
         if self.focused {
-            ctx.draw_focus_ring(self.rect);
+            ctx.draw_focus_ring(viewport);
         }
     }
 
@@ -296,12 +314,7 @@ impl Widget for ScrollViewWidget {
                 }
 
                 if self.offset_x != old_x || self.offset_y != old_y {
-                    self.child.layout(Rect::new(
-                        self.rect.x - self.offset_x,
-                        self.rect.y - self.offset_y,
-                        self.content_size.width,
-                        self.content_size.height,
-                    ));
+                    self.place_child();
                     if let Some(cb) = &self.on_scroll {
                         sink.emit_raw(cb(self.offset_y));
                     }
@@ -348,13 +361,7 @@ impl Widget for ScrollViewWidget {
                         let new_offset = self.drag_start_offset
                             + ((dy as i64 * self.max_offset_y() as i64) / usable as i64) as i32;
                         self.offset_y = new_offset.clamp(0, self.max_offset_y());
-
-                        self.child.layout(Rect::new(
-                            self.rect.x - self.offset_x,
-                            self.rect.y - self.offset_y,
-                            self.content_size.width,
-                            self.content_size.height,
-                        ));
+                        self.place_child();
                     }
                     return EventResponse::Consumed;
                 }
@@ -420,12 +427,7 @@ impl Widget for ScrollViewWidget {
                 }
 
                 if self.offset_x != old_x || self.offset_y != old_y {
-                    self.child.layout(Rect::new(
-                        self.rect.x - self.offset_x,
-                        self.rect.y - self.offset_y,
-                        self.content_size.width,
-                        self.content_size.height,
-                    ));
+                    self.place_child();
                     EventResponse::Consumed
                 } else {
                     EventResponse::Ignored
@@ -451,14 +453,6 @@ impl Widget for ScrollViewWidget {
 
     fn focus_policy(&self) -> FocusPolicy {
         FocusPolicy::TabFocus
-    }
-
-    fn id(&self) -> WidgetId {
-        self.id
-    }
-
-    fn layout_rect(&self) -> Rect {
-        self.rect
     }
 
     fn children(&self) -> &[Box<dyn Widget>] {

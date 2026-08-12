@@ -214,32 +214,50 @@ fn dispatch(bin: &str, argv: Option<&[&[u8]]>) -> TestResult {
         }
     }
 
-    // Roll-up:
-    //   any Fail subtest reported  → parent Fail
-    //   no reports + non-zero exit → parent Fail (binary crashed before
-    //                                reporting)
-    //   else                       → parent Pass (exit code may still be
-    //                                non-zero from `slibc::test_harness::run`'s
-    //                                failure-count semantics; trust the
-    //                                drained subtest verdicts)
+    roll_up(bin, sub_failed, report_vec.len(), exit_info)
+}
+
+/// Decide the parent verdict from the subtest verdicts and how the binary
+/// exited.
+///
+/// Split out of `dispatch` to keep that function's stack frame under the 2 KiB
+/// gate; the klog calls here each materialise their own argument buffer.
+///
+///   any Fail subtest reported → Fail
+///   anything but a clean exit → Fail, reports or not.
+///
+/// The second rule is the load-bearing one. Userland is built
+/// `panic-strategy = abort`, so a panicking case kills the binary where it
+/// stands and the cases that already reported must not vouch for the ones
+/// that never ran. A signal death arrives as `Normal` with the signal in the
+/// exit code, so the code — not the reason — is what distinguishes it.
+///
+/// This costs `test_harness::run`'s convention of returning the failure count
+/// as the exit code: a binary that reports its own failures now has to exit 0
+/// and let the subtest verdicts speak. That is the safer direction, because
+/// the old rule ignored a non-zero exit whenever any report had arrived.
+#[inline(never)]
+fn roll_up(
+    bin: &str,
+    sub_failed: u32,
+    report_count: usize,
+    exit_info: Option<slopos_sched::exit_info::ExitInfo>,
+) -> TestResult {
     if sub_failed > 0 {
         return TestResult::Fail;
     }
-    let exited_normally = match exit_info.as_ref() {
-        Some(info) => info.exit_reason == TaskExitReason::Normal && info.exit_code == 0,
-        None => false,
+    let Some(info) = exit_info else {
+        klog_info!("UTEST: '{}' exit info unavailable", bin);
+        return TestResult::Fail;
     };
-    if !exited_normally && report_vec.is_empty() {
-        if let Some(info) = exit_info {
-            klog_info!(
-                "UTEST: '{}' exited reason={} code={} with no reports",
-                bin,
-                exit_reason_str(info.exit_reason),
-                info.exit_code
-            );
-        } else {
-            klog_info!("UTEST: '{}' exit info unavailable with no reports", bin);
-        }
+    if info.exit_reason != TaskExitReason::Normal || info.exit_code != 0 {
+        klog_info!(
+            "UTEST: '{}' did not exit cleanly: reason={} code={} after {} report(s)",
+            bin,
+            exit_reason_str(info.exit_reason),
+            info.exit_code,
+            report_count
+        );
         return TestResult::Fail;
     }
     TestResult::Pass

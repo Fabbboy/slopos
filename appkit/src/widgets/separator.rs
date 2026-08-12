@@ -1,19 +1,17 @@
-use crate::constraints::{BoxConstraints, Orientation, Rect, Size};
+use crate::constraints::{BoxConstraints, Orientation, Size};
 use crate::event::{EventPhase, EventResponse, MessageSink, WidgetEvent};
 use crate::paint::PaintContext;
-use crate::traits::{FocusPolicy, MeasureCtx, Role, Widget, WidgetId, next_widget_id};
+use crate::traits::{FocusPolicy, MeasureCtx, Role, Widget, WidgetCore};
 
 pub struct SeparatorWidget {
-    id: WidgetId,
-    rect: Rect,
+    core: WidgetCore,
     orientation: Orientation,
 }
 
 impl SeparatorWidget {
     pub fn new() -> Self {
         Self {
-            id: next_widget_id(),
-            rect: Rect::ZERO,
+            core: WidgetCore::new(),
             orientation: Orientation::Horizontal,
         }
     }
@@ -25,40 +23,34 @@ impl SeparatorWidget {
 }
 
 impl Widget for SeparatorWidget {
-    fn measure(&mut self, constraints: BoxConstraints, _ctx: &mut MeasureCtx) -> Size {
-        // Auto-detect orientation from parent layout context:
-        // - VStack child: max_height is unbounded (i32::MAX), max_width is bounded → HORIZONTAL
-        // - HStack child: max_width is unbounded (i32::MAX), max_height is bounded → VERTICAL
-        let h_unbounded = constraints.max_height >= i32::MAX / 2;
-        let w_unbounded = constraints.max_width >= i32::MAX / 2;
+    fn core(&self) -> &WidgetCore {
+        &self.core
+    }
+    fn core_mut(&mut self) -> &mut WidgetCore {
+        &mut self.core
+    }
 
-        if h_unbounded && !w_unbounded {
-            // In a VStack (height unbounded) → horizontal line (fill width, 1px tall)
+    fn measure(&mut self, constraints: BoxConstraints, _ctx: &mut MeasureCtx) -> Size {
+        // Orientation follows the axis the parent left unbounded: a VStack
+        // frees height, so the divider runs across the width, and vice versa.
+        let h_free = !constraints.is_height_bounded();
+        let w_free = !constraints.is_width_bounded();
+
+        if h_free && !w_free {
             self.orientation = Orientation::Horizontal;
             constraints.constrain(Size::new(constraints.max_width, 1))
-        } else if w_unbounded && !h_unbounded {
-            // In a HStack (width unbounded) → vertical line (1px wide, fill height)
+        } else if w_free && !h_free {
             self.orientation = Orientation::Vertical;
             constraints.constrain(Size::new(1, constraints.max_height))
         } else {
-            // Both bounded or both unbounded → 1x1, parent stretches
             constraints.constrain(Size::new(1, 1))
         }
     }
 
-    fn layout(&mut self, rect: Rect) {
-        self.rect = rect;
-    }
-
     fn paint(&self, ctx: &mut PaintContext) {
+        let rect = self.layout_rect();
         let color = ctx.style.border_divider;
-        ctx.fill_rect(
-            self.rect.x,
-            self.rect.y,
-            self.rect.width,
-            self.rect.height,
-            color,
-        );
+        ctx.fill_rect(rect.x, rect.y, rect.width, rect.height, color);
     }
 
     fn event(
@@ -76,13 +68,5 @@ impl Widget for SeparatorWidget {
 
     fn focus_policy(&self) -> FocusPolicy {
         FocusPolicy::None
-    }
-
-    fn id(&self) -> WidgetId {
-        self.id
-    }
-
-    fn layout_rect(&self) -> Rect {
-        self.rect
     }
 }

@@ -1,11 +1,10 @@
-use crate::constraints::{BoxConstraints, Rect, Size, TextAlignment};
+use crate::constraints::{BoxConstraints, Size, TextAlignment};
 use crate::event::{EventPhase, EventResponse, MessageSink, WidgetEvent};
 use crate::paint::PaintContext;
-use crate::traits::{FocusPolicy, MeasureCtx, Role, Widget, WidgetId, next_widget_id};
+use crate::traits::{FocusPolicy, MeasureCtx, Role, Widget, WidgetCore};
 
 pub struct LabelWidget {
-    id: WidgetId,
-    rect: Rect,
+    core: WidgetCore,
     text: String,
     alignment: TextAlignment,
     wrap: bool,
@@ -15,8 +14,7 @@ pub struct LabelWidget {
 impl LabelWidget {
     pub fn new(text: String, alignment: TextAlignment, wrap: bool, max_lines: Option<u32>) -> Self {
         Self {
-            id: next_widget_id(),
-            rect: Rect::ZERO,
+            core: WidgetCore::new(),
             text,
             alignment,
             wrap,
@@ -65,6 +63,13 @@ impl LabelWidget {
 }
 
 impl Widget for LabelWidget {
+    fn core(&self) -> &WidgetCore {
+        &self.core
+    }
+    fn core_mut(&mut self) -> &mut WidgetCore {
+        &mut self.core
+    }
+
     fn measure(&mut self, constraints: BoxConstraints, ctx: &mut MeasureCtx) -> Size {
         let line_height = ctx.style.line_height;
 
@@ -82,8 +87,16 @@ impl Widget for LabelWidget {
             let size = Size::new(text_w, line_height * lines);
             constraints.constrain(size)
         } else {
-            // Wrapping: use constraint max width for layout.
-            let avail_w = constraints.max_width;
+            // Wrapping needs a real width to wrap against; an unbounded parent
+            // (a scroll view's cross axis) gets the natural single-line width.
+            let avail_w = if constraints.is_width_bounded() {
+                constraints.max_width
+            } else {
+                return constraints.constrain(Size::new(
+                    crate::text::string_width(&self.text),
+                    line_height,
+                ));
+            };
             // Count wrapped lines using a lightweight pass.
             let mut line_count = 0u32;
             for raw_line in self.text.split('\n') {
@@ -123,13 +136,10 @@ impl Widget for LabelWidget {
         }
     }
 
-    fn layout(&mut self, rect: Rect) {
-        self.rect = rect;
-    }
-
     fn paint(&self, ctx: &mut PaintContext) {
         let fg = ctx.style.text_primary;
         let line_height = ctx.style.line_height;
+        let rect = self.layout_rect();
 
         if !self.wrap {
             // Paint each hard-newline-separated line.
@@ -142,23 +152,23 @@ impl Widget for LabelWidget {
             for (i, line) in lines[..max].iter().enumerate() {
                 let tw = ctx.text_width(line);
                 let x = match self.alignment {
-                    TextAlignment::Start => self.rect.x,
-                    TextAlignment::Center => self.rect.x + (self.rect.width - tw) / 2,
-                    TextAlignment::End => self.rect.x + self.rect.width - tw,
+                    TextAlignment::Start => rect.x,
+                    TextAlignment::Center => rect.x + (rect.width - tw) / 2,
+                    TextAlignment::End => rect.x + rect.width - tw,
                 };
-                let y = self.rect.y + i as i32 * line_height;
+                let y = rect.y + i as i32 * line_height;
                 ctx.draw_text_transparent(x, y, line, fg);
             }
         } else {
-            let lines = self.wrap_lines(&self.text, self.rect.width, ctx);
+            let lines = self.wrap_lines(&self.text, rect.width, ctx);
             for (i, line) in lines.iter().enumerate() {
                 let tw = ctx.text_width(line);
                 let x = match self.alignment {
-                    TextAlignment::Start => self.rect.x,
-                    TextAlignment::Center => self.rect.x + (self.rect.width - tw) / 2,
-                    TextAlignment::End => self.rect.x + self.rect.width - tw,
+                    TextAlignment::Start => rect.x,
+                    TextAlignment::Center => rect.x + (rect.width - tw) / 2,
+                    TextAlignment::End => rect.x + rect.width - tw,
                 };
-                let y = self.rect.y + i as i32 * line_height;
+                let y = rect.y + i as i32 * line_height;
                 ctx.draw_text_transparent(x, y, line, fg);
             }
         }
@@ -183,13 +193,5 @@ impl Widget for LabelWidget {
 
     fn focus_policy(&self) -> FocusPolicy {
         FocusPolicy::None
-    }
-
-    fn id(&self) -> WidgetId {
-        self.id
-    }
-
-    fn layout_rect(&self) -> Rect {
-        self.rect
     }
 }

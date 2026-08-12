@@ -4,7 +4,7 @@ use super::constraints::{BoxConstraints, Rect, Size};
 use super::node::{ContextMenuAt, Node};
 use super::paint::PaintContext;
 use super::style::StyleSheet;
-use super::traits::{MeasureCtx, Widget};
+use super::traits::{MeasureCtx, Widget, measure_widget, place_widget};
 
 /// Build a retained widget tree from a declarative `Node<M>` tree.
 ///
@@ -331,8 +331,8 @@ pub fn build_widget_tree<M: Clone + 'static>(node: &Node<M>) -> Box<dyn Widget> 
 pub fn layout_tree(root: &mut dyn Widget, window_size: Size, style: &StyleSheet) {
     let constraints = BoxConstraints::tight(window_size);
     let mut ctx = MeasureCtx { style };
-    let _size = root.measure(constraints, &mut ctx);
-    root.layout(Rect::new(0, 0, window_size.width, window_size.height));
+    measure_widget(root, constraints, &mut ctx);
+    place_widget(root, Rect::new(0, 0, window_size.width, window_size.height));
 }
 
 /// Paint the entire widget tree.

@@ -381,9 +381,9 @@ impl SysmonApp {
             ],
         };
 
-        // Menu and dialog are siblings of the table in a ZStack, not of it in a
-        // VStack: both size to the whole area, which in a VStack would consume
-        // the table's space instead of covering it.
+        // Menu and dialog are layers over the table, not siblings of it: both
+        // cover the whole area, which in a VStack would displace the table
+        // rather than overlay it.
         let mut layers: Vec<Node<SysmonMsg>> = vec![body];
         if let Some(menu) = &self.context_menu {
             layers.push(self.view_context_menu(menu));

@@ -5,11 +5,10 @@ use crate::event::{
     EventPhase, EventResponse, Key, MessageSink, Modifiers, NamedKey, PointerButton, WidgetEvent,
 };
 use crate::paint::PaintContext;
-use crate::traits::{FocusPolicy, MeasureCtx, Role, Widget, WidgetId, next_widget_id};
+use crate::traits::{FocusPolicy, MeasureCtx, Role, Widget, WidgetCore};
 
 pub struct TextFieldWidget {
-    id: WidgetId,
-    rect: Rect,
+    core: WidgetCore,
     text: String,
     placeholder: String,
     on_change: Option<Box<dyn Fn(String) -> Box<dyn Any>>>,
@@ -31,8 +30,7 @@ impl TextFieldWidget {
         read_only: bool,
     ) -> Self {
         Self {
-            id: next_widget_id(),
-            rect: Rect::ZERO,
+            core: WidgetCore::new(),
             text,
             placeholder,
             on_change,
@@ -48,6 +46,10 @@ impl TextFieldWidget {
 
     pub fn text(&self) -> &str {
         &self.text
+    }
+
+    fn rect(&self) -> Rect {
+        self.core.rect()
     }
 
     pub fn set_text(&mut self, text: String) {
@@ -91,7 +93,7 @@ impl TextFieldWidget {
     /// Adjust scroll_offset so the cursor is within the visible content area.
     fn ensure_cursor_visible(&mut self) {
         let padding_h = 8; // field_padding_h from StyleSheet::dark()
-        let content_width = self.rect.width - padding_h * 2;
+        let content_width = self.rect().width - padding_h * 2;
         if content_width <= 0 {
             return;
         }
@@ -109,7 +111,7 @@ impl TextFieldWidget {
     /// Map a pixel x coordinate (window-space) to the nearest char index.
     fn x_to_char_index(&self, x: i32) -> usize {
         let padding_h = 8;
-        let local_x = x - self.rect.x - padding_h + self.scroll_offset;
+        let local_x = x - self.rect().x - padding_h + self.scroll_offset;
         let len = self.char_len();
         if local_x <= 0 {
             return 0;
@@ -203,24 +205,36 @@ impl TextFieldWidget {
         let ph = style.field_padding_h;
         let pv = style.field_padding_v;
         Rect::new(
-            self.rect.x + ph,
-            self.rect.y + pv,
-            (self.rect.width - ph * 2).max(0),
-            (self.rect.height - pv * 2).max(0),
+            self.rect().x + ph,
+            self.rect().y + pv,
+            (self.rect().width - ph * 2).max(0),
+            (self.rect().height - pv * 2).max(0),
         )
     }
 }
 
 impl Widget for TextFieldWidget {
+    fn core(&self) -> &WidgetCore {
+        &self.core
+    }
+    fn core_mut(&mut self) -> &mut WidgetCore {
+        &mut self.core
+    }
+
     fn measure(&mut self, constraints: BoxConstraints, ctx: &mut MeasureCtx) -> Size {
         let text_h = crate::text::cell_height();
-        let width = constraints.max_width.max(ctx.style.field_min_width);
+        let natural = crate::text::string_width(&self.text) + ctx.style.field_padding_h * 2;
+        let width = if constraints.is_width_bounded() {
+            constraints.max_width
+        } else {
+            natural
+        }
+        .max(ctx.style.field_min_width);
         let height = text_h + ctx.style.field_padding_v * 2;
         constraints.constrain(Size::new(width, height))
     }
 
-    fn layout(&mut self, rect: Rect) {
-        self.rect = rect;
+    fn layout(&mut self, _rect: Rect) {
         self.ensure_cursor_visible();
     }
 
@@ -232,10 +246,10 @@ impl Widget for TextFieldWidget {
 
         // 1. Background
         ctx.fill_rounded_rect(
-            self.rect.x,
-            self.rect.y,
-            self.rect.width,
-            self.rect.height,
+            self.rect().x,
+            self.rect().y,
+            self.rect().width,
+            self.rect().height,
             radius,
             style.bg_secondary,
         );
@@ -247,18 +261,18 @@ impl Widget for TextFieldWidget {
             style.border_default
         };
         ctx.draw_rounded_rect(
-            self.rect.x,
-            self.rect.y,
-            self.rect.width,
-            self.rect.height,
+            self.rect().x,
+            self.rect().y,
+            self.rect().width,
+            self.rect().height,
             radius,
             border_color,
         );
 
         // Content area for clipping.
         let content = self.content_rect(style);
-        let text_y = self.rect.y + pv;
-        let text_x = self.rect.x + ph - self.scroll_offset;
+        let text_y = self.rect().y + pv;
+        let text_x = self.rect().x + ph - self.scroll_offset;
 
         ctx.with_clip(content, |ctx| {
             // 3. Selection highlight
@@ -298,7 +312,7 @@ impl Widget for TextFieldWidget {
 
         // 6. Focus ring
         if self.focused {
-            ctx.draw_focus_ring(self.rect);
+            ctx.draw_focus_ring(self.rect());
         }
     }
 
@@ -390,14 +404,6 @@ impl Widget for TextFieldWidget {
 
     fn focus_policy(&self) -> FocusPolicy {
         FocusPolicy::StrongFocus
-    }
-
-    fn id(&self) -> WidgetId {
-        self.id
-    }
-
-    fn layout_rect(&self) -> Rect {
-        self.rect
     }
 }
 

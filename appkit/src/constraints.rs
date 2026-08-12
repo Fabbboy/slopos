@@ -123,10 +123,25 @@ impl EdgeInsets {
     }
 }
 
+/// The extent that stands in for "unbounded" in a constraint or a rect.
+///
+/// Finite on purpose. `i32::MAX` here means any container that adds padding to
+/// a child's reported extent wraps to a negative number, which is how a card
+/// once measured 62px tall and put its buttons at y = -2^31. 16M px is past
+/// any surface this will ever draw to, and small enough that summing a
+/// handful of extents stays inside `i32`.
+pub const MAX_EXTENT: i32 = 1 << 24;
+
+/// Whether an extent denotes "as much as you like" rather than a real bound.
+pub const fn is_unbounded(extent: i32) -> bool {
+    extent >= MAX_EXTENT
+}
+
 /// Constraint box passed top-down during the measure phase.
 ///
 /// Uses `i32` for pixel-perfect layout matching the DrawBuffer coordinate space.
-/// `max_width` / `max_height` of `i32::MAX` represents unbounded (e.g. inside a scroll view).
+/// A `max_width` / `max_height` of [`MAX_EXTENT`] represents unbounded (e.g.
+/// inside a scroll view); see [`is_unbounded`].
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub struct BoxConstraints {
     pub min_width: i32,
@@ -138,9 +153,9 @@ pub struct BoxConstraints {
 impl BoxConstraints {
     pub const UNBOUNDED: Self = Self {
         min_width: 0,
-        max_width: i32::MAX,
+        max_width: MAX_EXTENT,
         min_height: 0,
-        max_height: i32::MAX,
+        max_height: MAX_EXTENT,
     };
 
     pub fn tight(size: Size) -> Self {
@@ -157,7 +172,26 @@ impl BoxConstraints {
             min_width: width,
             max_width: width,
             min_height: 0,
-            max_height: i32::MAX,
+            max_height: MAX_EXTENT,
+        }
+    }
+
+    /// Whether the width axis carries a real upper bound.
+    pub const fn is_width_bounded(&self) -> bool {
+        !is_unbounded(self.max_width)
+    }
+
+    /// Whether the height axis carries a real upper bound.
+    pub const fn is_height_bounded(&self) -> bool {
+        !is_unbounded(self.max_height)
+    }
+
+    /// Whether the axis a stack lays out along carries a real upper bound.
+    pub const fn is_main_axis_bounded(&self, vertical: bool) -> bool {
+        if vertical {
+            self.is_height_bounded()
+        } else {
+            self.is_width_bounded()
         }
     }
 
@@ -189,21 +223,24 @@ impl BoxConstraints {
     }
 
     /// Deflate by edge insets (e.g. for padding).
+    ///
+    /// An unbounded axis stays exactly [`MAX_EXTENT`], so [`is_unbounded`] on
+    /// the result still answers the question the parent asked.
     pub fn deflate(&self, insets: EdgeInsets) -> Self {
         let h = insets.horizontal();
         let v = insets.vertical();
         Self {
             min_width: (self.min_width - h).max(0),
-            max_width: if self.max_width == i32::MAX {
-                i32::MAX
-            } else {
+            max_width: if self.is_width_bounded() {
                 (self.max_width - h).max(0)
+            } else {
+                MAX_EXTENT
             },
             min_height: (self.min_height - v).max(0),
-            max_height: if self.max_height == i32::MAX {
-                i32::MAX
-            } else {
+            max_height: if self.is_height_bounded() {
                 (self.max_height - v).max(0)
+            } else {
+                MAX_EXTENT
             },
         }
     }
@@ -212,7 +249,7 @@ impl BoxConstraints {
         self.min_width == self.max_width && self.min_height == self.max_height
     }
 
-    /// Return maximum available size (capped at a reasonable value for unbounded axes).
+    /// Return maximum available size. Unbounded axes report [`MAX_EXTENT`].
     pub fn max_size(&self) -> Size {
         Size::new(self.max_width, self.max_height)
     }
@@ -238,8 +275,8 @@ impl Default for SizePolicy {
 /// Declarative sizing intent. Replaces raw i32 in user-facing APIs.
 ///
 /// Use `Length::Px(n)` for fixed pixel sizes and `Length::Fill(weight)` for
-/// proportional space distribution. This prevents the class of bugs where
-/// unbounded i32::MAX values leak into widget measurement.
+/// proportional space distribution, so "fill the parent" is stated rather
+/// than encoded as a sentinel extent the caller has to recognise.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum Length {
     /// Fixed pixel size.

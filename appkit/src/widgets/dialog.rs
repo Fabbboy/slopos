@@ -5,21 +5,28 @@ use crate::event::{
     EventPhase, EventResponse, Key, MessageSink, NamedKey, PointerButton, WidgetEvent,
 };
 use crate::paint::PaintContext;
-use crate::traits::{FocusPolicy, MeasureCtx, Role, Widget, WidgetId, next_widget_id};
+use crate::traits::{
+    FocusPolicy, MeasureCtx, Role, Widget, WidgetCore, measure_widget, place_widget,
+};
 
-/// Modal dialog rendered as a centered card with semi-transparent backdrop.
+/// Modal dialog rendered as a centered card over a dimming backdrop.
 ///
-/// The dialog fills its parent (for the backdrop) and centers a card containing
-/// a title, content widget, and a row of action widgets (typically buttons).
+/// The widget itself fills its parent so the backdrop covers everything and no
+/// click reaches the tree underneath; the card is centered within that.
 pub struct DialogWidget {
-    id: WidgetId,
-    rect: Rect,
+    core: WidgetCore,
     title: String,
     content: Box<dyn Widget>,
     actions: Vec<Box<dyn Widget>>,
     on_dismiss: Option<Box<dyn Fn() -> Box<dyn std::any::Any>>>,
-    /// Cached card rect from the last layout pass.
     card_rect: Rect,
+    /// Which action a keyboard activation would fire.
+    ///
+    /// `None` until the user names one with Tab or an arrow key. A confirm
+    /// dialog's first action is typically the destructive one, so defaulting
+    /// to it would let a stray Enter — from the keystroke that opened the
+    /// dialog — carry out the thing the dialog exists to ask about.
+    focused_action: Option<usize>,
 }
 
 impl DialogWidget {
@@ -30,14 +37,76 @@ impl DialogWidget {
         on_dismiss: Option<Box<dyn Fn() -> Box<dyn std::any::Any>>>,
     ) -> Self {
         Self {
-            id: next_widget_id(),
-            rect: Rect::ZERO,
+            core: WidgetCore::new(),
             title,
             content,
             actions,
             on_dismiss,
             card_rect: Rect::ZERO,
+            focused_action: None,
         }
+    }
+
+    /// Move the keyboard selection between actions, wrapping.
+    fn cycle_action(&mut self, forward: bool) {
+        let len = self.actions.len();
+        if len == 0 {
+            return;
+        }
+        self.focused_action = Some(match self.focused_action {
+            Some(i) if forward => (i + 1) % len,
+            Some(i) => (i + len - 1) % len,
+            None if forward => 0,
+            None => len - 1,
+        });
+    }
+
+    /// The centered card, as positioned by the last layout pass.
+    pub fn card_rect(&self) -> Rect {
+        self.card_rect
+    }
+
+    /// Card width for a given available width.
+    fn card_width(&self, available: i32) -> i32 {
+        CARD_MAX_WIDTH.min(available)
+    }
+
+    /// Width available to the content and the title inside the card.
+    fn inner_width(&self, available: i32) -> i32 {
+        (self.card_width(available) - CARD_PADDING * 2).max(0)
+    }
+
+    /// Total width of the action row, including the gaps between buttons.
+    fn actions_width(&self) -> i32 {
+        let mut total = 0;
+        for (i, action) in self.actions.iter().enumerate() {
+            if i > 0 {
+                total += ACTION_SPACING;
+            }
+            total += action.measured_size().width;
+        }
+        total
+    }
+
+    /// Tallest action, which is the height of the action row.
+    fn actions_height(&self) -> i32 {
+        self.actions
+            .iter()
+            .map(|a| a.measured_size().height)
+            .max()
+            .unwrap_or(0)
+    }
+
+    /// Card height for the sizes recorded by the last measure pass.
+    fn card_height(&self) -> i32 {
+        let title_h = crate::text::cell_height() + CARD_PADDING;
+        let content_h = self.content.measured_size().height;
+        let actions_h = self.actions_height();
+        let mut h = title_h + content_h + CARD_PADDING;
+        if actions_h > 0 {
+            h += actions_h + CARD_PADDING;
+        }
+        h
     }
 }
 
@@ -45,114 +114,77 @@ impl DialogWidget {
 const CARD_PADDING: i32 = 16;
 /// Spacing between action buttons.
 const ACTION_SPACING: i32 = 8;
+/// Preferred card width; narrower only when the window is.
+const CARD_MAX_WIDTH: i32 = 300;
 
 impl Widget for DialogWidget {
+    fn core(&self) -> &WidgetCore {
+        &self.core
+    }
+    fn core_mut(&mut self) -> &mut WidgetCore {
+        &mut self.core
+    }
+
     fn measure(&mut self, constraints: BoxConstraints, ctx: &mut MeasureCtx) -> Size {
-        let card_w = 300.min(constraints.max_width);
-        let inner_w = (card_w - CARD_PADDING * 2).max(0);
+        let inner_w = self.inner_width(constraints.max_width);
 
-        // Title row height.
-        let title_h = crate::text::cell_height() + CARD_PADDING;
-
-        // Measure content widget.
+        // Content wraps to the card's inner width and is as tall as it likes:
+        // `card_height` reads that back rather than assuming a line count.
         let content_constraints = BoxConstraints {
-            min_width: 0,
+            min_width: inner_w,
             max_width: inner_w,
             min_height: 0,
-            max_height: i32::MAX,
+            max_height: crate::constraints::MAX_EXTENT,
         };
-        let content_size = self.content.measure(content_constraints, ctx);
+        measure_widget(self.content.as_mut(), content_constraints, ctx);
 
-        // Measure action widgets and sum their widths.
-        let mut actions_w = 0i32;
-        let mut actions_h = 0i32;
-        for (i, action) in self.actions.iter_mut().enumerate() {
-            let action_size = action.measure(BoxConstraints::UNBOUNDED, ctx);
-            actions_w += action_size.width;
-            actions_h = actions_h.max(action_size.height);
-            if i > 0 {
-                actions_w += ACTION_SPACING;
-            }
+        let action_constraints = BoxConstraints::loose(Size::new(inner_w, constraints.max_height));
+        for action in &mut self.actions {
+            measure_widget(action.as_mut(), action_constraints, ctx);
         }
 
-        let _card_h = title_h + content_size.height + CARD_PADDING + actions_h + CARD_PADDING;
-        let _ = actions_w; // used only during layout centering
-
-        // Dialog fills parent for the backdrop overlay.
+        // The dialog itself covers the parent so the backdrop dims everything.
         constraints.constrain(constraints.max_size())
     }
 
     fn layout(&mut self, rect: Rect) {
-        self.rect = rect;
+        let card_w = self.card_width(rect.width);
+        let inner_w = self.inner_width(rect.width);
+        let card_h = self.card_height().min(rect.height);
 
-        let card_w = 300.min(rect.width);
-        let inner_w = (card_w - CARD_PADDING * 2).max(0);
-
-        // Recompute heights for layout (matching measure).
-        let title_h = crate::text::cell_height() + CARD_PADDING;
-
-        let content_rect_y_offset = title_h;
-        let content_layout_rect = Rect::new(0, 0, inner_w, i32::MAX);
-        // We need content height; use the layout_rect from the content after a
-        // pseudo-layout or rely on the measured size. Since measure was already
-        // called, layout_rect won't be set yet. We'll lay out content first
-        // with a temporary rect, read its height, then finalize positions.
-        self.content.layout(content_layout_rect);
-        let content_h = self.content.layout_rect().height.max(0);
-
-        // Lay out each action with unbounded rect to discover natural sizes.
-        let mut actions_total_w = 0i32;
-        let mut actions_h = 0i32;
-        let mut action_widths = Vec::with_capacity(self.actions.len());
-        for action in self.actions.iter_mut() {
-            action.layout(Rect::new(0, 0, i32::MAX, i32::MAX));
-            let ar = action.layout_rect();
-            action_widths.push(ar.width);
-            actions_h = actions_h.max(ar.height);
-        }
-        for (i, w) in action_widths.iter().enumerate() {
-            actions_total_w += *w;
-            if i > 0 {
-                actions_total_w += ACTION_SPACING;
-            }
-        }
-
-        let card_h = title_h + content_h + CARD_PADDING + actions_h + CARD_PADDING;
-
-        // Center card in parent rect.
         let card_x = rect.x + (rect.width - card_w) / 2;
         let card_y = rect.y + (rect.height - card_h) / 2;
         self.card_rect = Rect::new(card_x, card_y, card_w, card_h);
 
-        // Layout content at its final position.
-        let content_x = card_x + CARD_PADDING;
-        let content_y = card_y + content_rect_y_offset;
-        self.content
-            .layout(Rect::new(content_x, content_y, inner_w, content_h));
+        let title_h = crate::text::cell_height() + CARD_PADDING;
+        let content_h = self.content.measured_size().height;
+        place_widget(
+            self.content.as_mut(),
+            Rect::new(card_x + CARD_PADDING, card_y + title_h, inner_w, content_h),
+        );
 
-        // Layout actions: centered horizontally at bottom of card.
+        let actions_h = self.actions_height();
         let actions_row_y = card_y + card_h - CARD_PADDING - actions_h;
-        let mut ax = card_x + (card_w - actions_total_w) / 2;
-        for (i, action) in self.actions.iter_mut().enumerate() {
-            let aw = action_widths[i];
-            action.layout(Rect::new(ax, actions_row_y, aw, actions_h));
+        let mut ax = card_x + (card_w - self.actions_width()) / 2;
+        for action in &mut self.actions {
+            let aw = action.measured_size().width;
+            place_widget(action.as_mut(), Rect::new(ax, actions_row_y, aw, actions_h));
             ax += aw + ACTION_SPACING;
         }
     }
 
     fn paint(&self, ctx: &mut PaintContext) {
         let style = ctx.style;
+        let rect = self.layout_rect();
 
-        // 1. Semi-transparent backdrop.
         ctx.fill_rect_blended(
-            self.rect.x,
-            self.rect.y,
-            self.rect.width,
-            self.rect.height,
+            rect.x,
+            rect.y,
+            rect.width,
+            rect.height,
             Color32::new(0, 0, 0, 128),
         );
 
-        // 2. Card background.
         ctx.fill_rounded_rect(
             self.card_rect.x,
             self.card_rect.y,
@@ -161,8 +193,6 @@ impl Widget for DialogWidget {
             style.corner_radius,
             style.bg_secondary,
         );
-
-        // 3. Card border.
         ctx.draw_rounded_rect(
             self.card_rect.x,
             self.card_rect.y,
@@ -172,19 +202,29 @@ impl Widget for DialogWidget {
             style.border_default,
         );
 
-        // 4. Title text.
         let text_h = ctx.text_height();
         let title_x = self.card_rect.x + CARD_PADDING;
         let title_y = self.card_rect.y + (CARD_PADDING + crate::text::cell_height() - text_h) / 2;
         ctx.draw_text_transparent(title_x, title_y, &self.title, style.text_primary);
 
-        // 5. Content widget.
-        self.content.paint(ctx);
-
-        // 6. Action widgets.
-        for action in &self.actions {
-            action.paint(ctx);
-        }
+        let selected = self.focused_action;
+        ctx.with_clip(self.card_rect, |ctx| {
+            self.content.paint(ctx);
+            for (i, action) in self.actions.iter().enumerate() {
+                action.paint(ctx);
+                if selected == Some(i) {
+                    let r = action.layout_rect();
+                    ctx.draw_rounded_rect(
+                        r.x - 2,
+                        r.y - 2,
+                        r.width + 4,
+                        r.height + 4,
+                        style.corner_radius,
+                        style.focus_ring_color,
+                    );
+                }
+            }
+        });
     }
 
     fn event(
@@ -198,7 +238,6 @@ impl Widget for DialogWidget {
         }
 
         match event {
-            // Escape dismisses the dialog.
             WidgetEvent::KeyDown {
                 key: Key::Named(NamedKey::Escape),
                 ..
@@ -209,30 +248,73 @@ impl Widget for DialogWidget {
                 EventResponse::Consumed
             }
 
-            // Click outside card dismisses the dialog.
-            WidgetEvent::PointerDown {
-                x,
-                y,
-                button: PointerButton::Left,
-            } => {
-                if !self.card_rect.contains(*x, *y) {
+            WidgetEvent::PointerDown { x, y, button } | WidgetEvent::PointerUp { x, y, button } => {
+                if *button == PointerButton::Left
+                    && matches!(event, WidgetEvent::PointerDown { .. })
+                    && !self.card_rect.contains(*x, *y)
+                {
                     if let Some(f) = &self.on_dismiss {
                         sink.emit_raw(f());
                     }
                     return EventResponse::Consumed;
                 }
-                // Forward to action widgets.
+
+                // Only the action under the pointer gets the event. Handing it
+                // to each in turn is how "Cancel" used to fire "Kill".
                 for action in &mut self.actions {
+                    if action.layout_rect().contains(*x, *y) {
+                        let resp = action.event(event, EventPhase::Target, sink);
+                        if resp.is_consumed() {
+                            return resp;
+                        }
+                    }
+                }
+                if self.content.layout_rect().contains(*x, *y) {
+                    let resp = self.content.event(event, EventPhase::Target, sink);
+                    if resp.is_consumed() {
+                        return resp;
+                    }
+                }
+                // Modal: a press inside the card that hit nothing must not fall
+                // through to the tree the backdrop is covering.
+                EventResponse::Consumed
+            }
+
+            WidgetEvent::KeyDown { key, modifiers, .. } => {
+                match key {
+                    Key::Named(NamedKey::Tab) => {
+                        self.cycle_action(!modifiers.shift);
+                        return EventResponse::Consumed;
+                    }
+                    Key::Named(NamedKey::Right) | Key::Named(NamedKey::Down) => {
+                        self.cycle_action(true);
+                        return EventResponse::Consumed;
+                    }
+                    Key::Named(NamedKey::Left) | Key::Named(NamedKey::Up) => {
+                        self.cycle_action(false);
+                        return EventResponse::Consumed;
+                    }
+                    _ => {}
+                }
+
+                // Only the selected action sees the key, so Enter cannot fire
+                // whichever action happens to be listed first.
+                if let Some(action) = self.focused_action.and_then(|i| self.actions.get_mut(i)) {
                     let resp = action.event(event, EventPhase::Target, sink);
                     if resp.is_consumed() {
                         return resp;
                     }
                 }
-                // Forward to content.
-                self.content.event(event, EventPhase::Target, sink)
+                let resp = self.content.event(event, phase, sink);
+                if resp.is_consumed() {
+                    resp
+                } else {
+                    // Modal: swallow, so the app underneath does not act on a
+                    // key aimed at the dialog.
+                    EventResponse::Consumed
+                }
             }
 
-            // Forward other events to children.
             _ => {
                 for action in &mut self.actions {
                     let resp = action.event(event, phase, sink);
@@ -253,17 +335,9 @@ impl Widget for DialogWidget {
         FocusPolicy::StrongFocus
     }
 
-    fn id(&self) -> WidgetId {
-        self.id
-    }
-
-    fn layout_rect(&self) -> Rect {
-        self.rect
-    }
-
     fn children(&self) -> &[Box<dyn Widget>] {
-        // Cannot return a combined slice of content + actions without allocation.
-        // Return actions; content is handled separately in paint/event.
+        // Content is painted and hit-tested directly; only the actions need to
+        // appear in the tab chain.
         &self.actions
     }
 

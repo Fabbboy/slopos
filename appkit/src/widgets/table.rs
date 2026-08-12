@@ -6,14 +6,18 @@ use crate::event::{
 };
 use crate::node::{ContextMenuAt, SortIndicator, TableColumn, TableColumnWidth};
 use crate::paint::PaintContext;
-use crate::traits::{FocusPolicy, MeasureCtx, Role, Widget, WidgetId, next_widget_id};
+use crate::traits::{
+    FocusPolicy, MeasureCtx, Role, Widget, WidgetCore, measure_widget, place_widget,
+};
 
 use slopos_abi::draw::Color32;
 
+/// Horizontal padding inside a table cell.
+const CELL_PADDING: i32 = 4;
+
 /// Multi-column table with fixed row height, virtual scrolling, and keyboard navigation.
 pub struct TableWidget {
-    id: WidgetId,
-    rect: Rect,
+    core: WidgetCore,
     columns: Vec<TableColumn>,
     rows: Vec<Vec<Box<dyn Widget>>>,
     row_height: i32,
@@ -51,8 +55,7 @@ impl TableWidget {
             );
         }
         Self {
-            id: next_widget_id(),
-            rect: Rect::ZERO,
+            core: WidgetCore::new(),
             columns,
             rows,
             row_height,
@@ -73,7 +76,7 @@ impl TableWidget {
     }
 
     fn body_height(&self) -> i32 {
-        (self.rect.height - self.header_height).max(0)
+        (self.layout_rect().height - self.header_height).max(0)
     }
 
     fn total_content_height(&self) -> i32 {
@@ -138,7 +141,7 @@ impl TableWidget {
 
     /// Determine which column index a given x coordinate (window-space) falls in.
     fn column_at_x(&self, x: i32) -> Option<usize> {
-        let rel_x = x - self.rect.x;
+        let rel_x = x - self.layout_rect().x;
         let mut acc = 0;
         for (i, &w) in self.col_widths.iter().enumerate() {
             if rel_x >= acc && rel_x < acc + w {
@@ -174,7 +177,7 @@ impl TableWidget {
         if self.row_height <= 0 {
             return None;
         }
-        let body_top = self.rect.y + self.header_height;
+        let body_top = self.layout_rect().y + self.header_height;
         if y < body_top {
             return None;
         }
@@ -197,10 +200,11 @@ impl TableWidget {
     /// Bottom-left corner of `row` in window coordinates, clamped into the body
     /// so a partially-scrolled row still anchors a popup somewhere visible.
     fn row_anchor(&self, row: usize) -> (i32, i32) {
-        let body_top = self.rect.y + self.header_height;
+        let rect = self.layout_rect();
+        let body_top = rect.y + self.header_height;
         let y = body_top + row as i32 * self.row_height - self.scroll_offset + self.row_height;
-        let bottom = self.rect.y + self.rect.height;
-        (self.rect.x, y.clamp(body_top, bottom))
+        let bottom = rect.y + rect.height;
+        (rect.x, y.clamp(body_top, bottom))
     }
 
     fn emit_context_menu(&self, row: usize, x: i32, y: i32, sink: &mut MessageSink) -> bool {
@@ -215,57 +219,53 @@ impl TableWidget {
 }
 
 impl Widget for TableWidget {
-    fn measure(&mut self, constraints: BoxConstraints, _ctx: &mut MeasureCtx) -> Size {
+    fn core(&self) -> &WidgetCore {
+        &self.core
+    }
+    fn core_mut(&mut self) -> &mut WidgetCore {
+        &mut self.core
+    }
+
+    fn measure(&mut self, constraints: BoxConstraints, ctx: &mut MeasureCtx) -> Size {
         let w = constraints.max_width;
         let h = constraints.max_height;
         self.resolve_col_widths(w);
+
+        // Cells are sized by their column, so measuring them here keeps layout
+        // to pure placement.
+        for row in &mut self.rows {
+            for (col_idx, cell) in row.iter_mut().enumerate() {
+                let cw = self.col_widths.get(col_idx).copied().unwrap_or(0);
+                let cell_w = (cw - CELL_PADDING * 2).max(0);
+                let cell_constraints = BoxConstraints::tight(Size::new(cell_w, self.row_height));
+                measure_widget(cell.as_mut(), cell_constraints, ctx);
+            }
+        }
+
         Size::new(w, h)
     }
 
     fn layout(&mut self, rect: Rect) {
-        self.rect = rect;
         self.resolve_col_widths(rect.width);
         self.scroll_offset = self.scroll_offset.clamp(0, self.max_scroll_offset());
-
-        // Measure then layout each cell widget at its absolute position.
-        let cell_padding = 4;
-        let style = crate::style::StyleSheet::dark();
-        let mut mctx = crate::traits::MeasureCtx { style: &style };
-        for (row_idx, row) in self.rows.iter_mut().enumerate() {
-            let y =
-                rect.y + self.header_height + row_idx as i32 * self.row_height - self.scroll_offset;
-            let mut col_x = rect.x;
-            for (col_idx, cell) in row.iter_mut().enumerate() {
-                let cw = self.col_widths.get(col_idx).copied().unwrap_or(0);
-                let cell_w = (cw - cell_padding * 2).max(0);
-                let cell_constraints = BoxConstraints {
-                    min_width: cell_w,
-                    max_width: cell_w,
-                    min_height: self.row_height,
-                    max_height: self.row_height,
-                };
-                let _ = cell.measure(cell_constraints, &mut mctx);
-                cell.layout(Rect::new(col_x + cell_padding, y, cell_w, self.row_height));
-                col_x += cw;
-            }
-        }
+        self.place_cells();
     }
 
     fn paint(&self, ctx: &mut PaintContext) {
         let style = ctx.style;
-        let cell_padding = 4;
+        let rect = self.layout_rect();
 
         // --- Header row ---
         ctx.fill_rect(
-            self.rect.x,
-            self.rect.y,
-            self.rect.width,
+            rect.x,
+            rect.y,
+            rect.width,
             self.header_height,
             style.bg_secondary,
         );
 
-        let text_y = self.rect.y + (self.header_height - ctx.text_height()) / 2;
-        let mut hx = self.rect.x;
+        let text_y = rect.y + (self.header_height - ctx.text_height()) / 2;
+        let mut hx = rect.x;
         for (i, col) in self.columns.iter().enumerate() {
             let cw = self.col_widths.get(i).copied().unwrap_or(0);
             // Build label with sort indicator.
@@ -282,32 +282,32 @@ impl Widget for TableWidget {
                 }
                 None => col.label.clone(),
             };
-            ctx.draw_text_transparent(hx + cell_padding, text_y, &label, style.text_primary);
+            ctx.draw_text_transparent(hx + CELL_PADDING, text_y, &label, style.text_primary);
             hx += cw;
         }
 
         // Divider line below header.
         ctx.fill_rect(
-            self.rect.x,
-            self.rect.y + self.header_height - 1,
-            self.rect.width,
+            rect.x,
+            rect.y + self.header_height - 1,
+            rect.width,
             1,
             style.border_divider,
         );
 
         // --- Body rows (virtualized) ---
         let body_rect = Rect::new(
-            self.rect.x,
-            self.rect.y + self.header_height,
-            self.rect.width,
+            rect.x,
+            rect.y + self.header_height,
+            rect.width,
             self.body_height(),
         );
         let (vis_start, vis_end) = self.visible_range();
 
         ctx.with_clip(body_rect, |ctx| {
             for i in vis_start..vis_end.min(self.rows.len()) {
-                let y = self.rect.y + self.header_height + i as i32 * self.row_height
-                    - self.scroll_offset;
+                let y =
+                    rect.y + self.header_height + i as i32 * self.row_height - self.scroll_offset;
 
                 // Row background: selected, even, or odd.
                 let bg = if self.selected == Some(i) {
@@ -331,17 +331,17 @@ impl Widget for TableWidget {
                 };
 
                 if self.selected == Some(i) {
-                    ctx.fill_rect_blended(self.rect.x, y, self.rect.width, self.row_height, bg);
+                    ctx.fill_rect_blended(rect.x, y, rect.width, self.row_height, bg);
                 } else {
-                    ctx.fill_rect(self.rect.x, y, self.rect.width, self.row_height, bg);
+                    ctx.fill_rect(rect.x, y, rect.width, self.row_height, bg);
                 }
 
                 // Hover highlight overlay (subtle, on top of bg).
                 if self.hovered_row == Some(i) && self.selected != Some(i) {
                     ctx.fill_rect_blended(
-                        self.rect.x,
+                        rect.x,
                         y,
-                        self.rect.width,
+                        rect.width,
                         self.row_height,
                         Color32::new(255, 255, 255, 15),
                     );
@@ -361,8 +361,8 @@ impl Widget for TableWidget {
             let sb_width = style.scrollbar_width;
             let thumb_min = style.scrollbar_thumb_min;
 
-            let track_x = self.rect.x + self.rect.width - sb_width;
-            let track_y = self.rect.y + self.header_height;
+            let track_x = rect.x + rect.width - sb_width;
+            let track_y = rect.y + self.header_height;
             let track_h = body_h;
 
             // Track background.
@@ -396,7 +396,7 @@ impl Widget for TableWidget {
 
         // Focus ring.
         if self.focused {
-            ctx.draw_focus_ring(self.rect);
+            ctx.draw_focus_ring(rect);
         }
     }
 
@@ -412,9 +412,13 @@ impl Widget for TableWidget {
 
         match event {
             WidgetEvent::PointerDown { x, y, button } => {
+                let rect = self.layout_rect();
+                if !rect.contains(*x, *y) {
+                    return EventResponse::Ignored;
+                }
                 // Header: sorting is a primary-button action; a secondary
                 // click there addresses no row, so it has nothing to open.
-                if *y >= self.rect.y && *y < self.rect.y + self.header_height {
+                if *y < rect.y + self.header_height {
                     if *button != PointerButton::Left {
                         return EventResponse::Ignored;
                     }
@@ -450,7 +454,7 @@ impl Widget for TableWidget {
             }
 
             WidgetEvent::PointerMove { x: _, y } => {
-                let body_top = self.rect.y + self.header_height;
+                let body_top = self.layout_rect().y + self.header_height;
                 let old_hover = self.hovered_row;
                 if *y >= body_top && self.row_height > 0 {
                     let relative_y = *y - body_top + self.scroll_offset;
@@ -488,7 +492,7 @@ impl Widget for TableWidget {
                     (self.scroll_offset + *delta_y).clamp(0, self.max_scroll_offset());
 
                 if self.scroll_offset != old {
-                    self.relayout_rows();
+                    self.place_cells();
                     EventResponse::Consumed
                 } else {
                     EventResponse::Ignored
@@ -620,32 +624,28 @@ impl Widget for TableWidget {
     fn focus_policy(&self) -> FocusPolicy {
         FocusPolicy::StrongFocus
     }
-
-    fn id(&self) -> WidgetId {
-        self.id
-    }
-
-    fn layout_rect(&self) -> Rect {
-        self.rect
-    }
 }
 
 impl TableWidget {
-    /// Re-layout all row cells after a scroll offset change.
-    fn relayout_rows(&mut self) {
-        let cell_padding = 4;
+    /// Position every cell for the current rect, column widths and scroll
+    /// offset. The single place a cell's rect is decided.
+    fn place_cells(&mut self) {
+        let rect = self.layout_rect();
         for (row_idx, row) in self.rows.iter_mut().enumerate() {
-            let y = self.rect.y + self.header_height + row_idx as i32 * self.row_height
-                - self.scroll_offset;
-            let mut col_x = self.rect.x;
+            let y =
+                rect.y + self.header_height + row_idx as i32 * self.row_height - self.scroll_offset;
+            let mut col_x = rect.x;
             for (col_idx, cell) in row.iter_mut().enumerate() {
                 let cw = self.col_widths.get(col_idx).copied().unwrap_or(0);
-                cell.layout(Rect::new(
-                    col_x + cell_padding,
-                    y,
-                    (cw - cell_padding * 2).max(0),
-                    self.row_height,
-                ));
+                place_widget(
+                    cell.as_mut(),
+                    Rect::new(
+                        col_x + CELL_PADDING,
+                        y,
+                        (cw - CELL_PADDING * 2).max(0),
+                        self.row_height,
+                    ),
+                );
                 col_x += cw;
             }
         }

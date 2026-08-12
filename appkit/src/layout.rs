@@ -1,9 +1,11 @@
 use slopos_abi::draw::Color32;
 
-use crate::constraints::{BoxConstraints, CrossAxisAlignment, EdgeInsets, Length, Rect, Size};
+use crate::constraints::{
+    BoxConstraints, CrossAxisAlignment, EdgeInsets, Length, MAX_EXTENT, Rect, Size,
+};
 use crate::event::{EventPhase, EventResponse, MessageSink, WidgetEvent};
 use crate::paint::PaintContext;
-use crate::traits::{MeasureCtx, Widget, WidgetId, next_widget_id};
+use crate::traits::{MeasureCtx, Widget, WidgetCore, measure_widget, place_widget};
 
 // ---------------------------------------------------------------------------
 // Axis helpers
@@ -23,12 +25,12 @@ fn child_constraints(bc: &BoxConstraints, vertical: bool) -> BoxConstraints {
             min_width: bc.min_width,
             max_width: bc.max_width,
             min_height: 0,
-            max_height: i32::MAX,
+            max_height: MAX_EXTENT,
         }
     } else {
         BoxConstraints {
             min_width: 0,
-            max_width: i32::MAX,
+            max_width: MAX_EXTENT,
             min_height: bc.min_height,
             max_height: bc.max_height,
         }
@@ -40,8 +42,7 @@ fn child_constraints(bc: &BoxConstraints, vertical: bool) -> BoxConstraints {
 // ---------------------------------------------------------------------------
 
 struct StackWidget {
-    id: WidgetId,
-    rect: Rect,
+    core: WidgetCore,
     children: Vec<Box<dyn Widget>>,
     spacing: i32,
     cross_align: CrossAxisAlignment,
@@ -57,8 +58,7 @@ impl StackWidget {
         vertical: bool,
     ) -> Self {
         Self {
-            id: next_widget_id(),
-            rect: Rect::ZERO,
+            core: WidgetCore::new(),
             children,
             spacing,
             cross_align: align,
@@ -88,7 +88,7 @@ impl StackWidget {
             if w > 0 {
                 total_flex_weight += w as u32;
             } else {
-                let child_size = child.measure(loose, ctx);
+                let child_size = measure_widget(child.as_mut(), loose, ctx);
                 total_fixed = total_fixed.saturating_add(main_axis(child_size, v));
                 max_cross = max_cross.max(cross_axis(child_size, v));
                 self.child_sizes[i] = child_size;
@@ -104,7 +104,7 @@ impl StackWidget {
 
         // Pass 2: Distribute remaining space to flex children.
         let mut total_main = total_fixed;
-        if total_flex_weight > 0 && max_main < i32::MAX {
+        if total_flex_weight > 0 && constraints.is_main_axis_bounded(v) {
             let remaining = (max_main - total_fixed - spacing_total).max(0);
             for (i, child) in self.children.iter_mut().enumerate() {
                 let w = child.flex_weight();
@@ -125,7 +125,7 @@ impl StackWidget {
                             max_height: loose.max_height,
                         }
                     };
-                    let child_size = child.measure(tight, ctx);
+                    let child_size = measure_widget(child.as_mut(), tight, ctx);
                     max_cross = max_cross.max(cross_axis(child_size, v));
                     self.child_sizes[i] = child_size;
                     total_main = total_main.saturating_add(main_axis(child_size, v));
@@ -135,7 +135,7 @@ impl StackWidget {
             // Unbounded main axis: measure flex children with loose constraints.
             for (i, child) in self.children.iter_mut().enumerate() {
                 if child.flex_weight() > 0 {
-                    let child_size = child.measure(loose, ctx);
+                    let child_size = measure_widget(child.as_mut(), loose, ctx);
                     max_cross = max_cross.max(cross_axis(child_size, v));
                     self.child_sizes[i] = child_size;
                     total_main = total_main.saturating_add(main_axis(child_size, v));
@@ -154,7 +154,6 @@ impl StackWidget {
     }
 
     fn layout_impl(&mut self, rect: Rect) {
-        self.rect = rect;
         let v = self.vertical;
         let avail_main = if v { rect.height } else { rect.width };
         let avail_cross = cross_axis(Size::new(rect.width, rect.height), v);
@@ -217,7 +216,7 @@ impl StackWidget {
                     layout_cross,
                 )
             };
-            self.children[i].layout(Rect::new(abs_x, abs_y, w, h));
+            place_widget(self.children[i].as_mut(), Rect::new(abs_x, abs_y, w, h));
             cursor += child_main + self.spacing;
         }
     }
@@ -289,11 +288,11 @@ impl Widget for VStackWidget {
     fn event(&mut self, e: &WidgetEvent, p: EventPhase, sink: &mut MessageSink) -> EventResponse {
         self.inner.event_impl(e, p, sink)
     }
-    fn id(&self) -> WidgetId {
-        self.inner.id
+    fn core(&self) -> &WidgetCore {
+        &self.inner.core
     }
-    fn layout_rect(&self) -> Rect {
-        self.inner.rect
+    fn core_mut(&mut self) -> &mut WidgetCore {
+        &mut self.inner.core
     }
     fn children(&self) -> &[Box<dyn Widget>] {
         &self.inner.children
@@ -332,11 +331,11 @@ impl Widget for HStackWidget {
     fn event(&mut self, e: &WidgetEvent, p: EventPhase, sink: &mut MessageSink) -> EventResponse {
         self.inner.event_impl(e, p, sink)
     }
-    fn id(&self) -> WidgetId {
-        self.inner.id
+    fn core(&self) -> &WidgetCore {
+        &self.inner.core
     }
-    fn layout_rect(&self) -> Rect {
-        self.inner.rect
+    fn core_mut(&mut self) -> &mut WidgetCore {
+        &mut self.inner.core
     }
     fn children(&self) -> &[Box<dyn Widget>] {
         &self.inner.children
@@ -351,37 +350,43 @@ impl Widget for HStackWidget {
 // ---------------------------------------------------------------------------
 
 pub struct ZStackWidget {
-    id: WidgetId,
-    rect: Rect,
+    core: WidgetCore,
     children: Vec<Box<dyn Widget>>,
 }
 
 impl ZStackWidget {
     pub fn new(children: Vec<Box<dyn Widget>>) -> Self {
         Self {
-            id: next_widget_id(),
-            rect: Rect::ZERO,
+            core: WidgetCore::new(),
             children,
         }
     }
 }
 
 impl Widget for ZStackWidget {
+    fn core(&self) -> &WidgetCore {
+        &self.core
+    }
+    fn core_mut(&mut self) -> &mut WidgetCore {
+        &mut self.core
+    }
+
     fn measure(&mut self, constraints: BoxConstraints, ctx: &mut MeasureCtx) -> Size {
         let loose = constraints.loosen();
         let mut max_w: i32 = 0;
         let mut max_h: i32 = 0;
         for child in &mut self.children {
-            let s = child.measure(loose, ctx);
+            let s = measure_widget(child.as_mut(), loose, ctx);
             max_w = max_w.max(s.width);
             max_h = max_h.max(s.height);
         }
         constraints.constrain(Size::new(max_w, max_h))
     }
     fn layout(&mut self, rect: Rect) {
-        self.rect = rect;
+        // Every layer gets the full area: a ZStack exists so an overlay can
+        // cover its siblings rather than displace them.
         for child in &mut self.children {
-            child.layout(rect);
+            place_widget(child.as_mut(), rect);
         }
     }
     fn paint(&self, ctx: &mut PaintContext) {
@@ -395,6 +400,9 @@ impl Widget for ZStackWidget {
         phase: EventPhase,
         sink: &mut MessageSink,
     ) -> EventResponse {
+        // Topmost layer first, and it may swallow: a ZStack's upper layers are
+        // how modal surfaces are expressed, so a layer that handles nothing
+        // must still not let a click through to the layer it covers.
         for child in self.children.iter_mut().rev() {
             let resp = child.event(event, phase, sink);
             if resp.is_consumed() {
@@ -402,12 +410,6 @@ impl Widget for ZStackWidget {
             }
         }
         EventResponse::Ignored
-    }
-    fn id(&self) -> WidgetId {
-        self.id
-    }
-    fn layout_rect(&self) -> Rect {
-        self.rect
     }
     fn children(&self) -> &[Box<dyn Widget>] {
         &self.children
@@ -422,8 +424,7 @@ impl Widget for ZStackWidget {
 // ---------------------------------------------------------------------------
 
 pub struct PaddingWidget {
-    id: WidgetId,
-    rect: Rect,
+    core: WidgetCore,
     insets: EdgeInsets,
     child: Box<dyn Widget>,
 }
@@ -431,8 +432,7 @@ pub struct PaddingWidget {
 impl PaddingWidget {
     pub fn new(insets: EdgeInsets, child: Box<dyn Widget>) -> Self {
         Self {
-            id: next_widget_id(),
-            rect: Rect::ZERO,
+            core: WidgetCore::new(),
             insets,
             child,
         }
@@ -440,34 +440,36 @@ impl PaddingWidget {
 }
 
 impl Widget for PaddingWidget {
+    fn core(&self) -> &WidgetCore {
+        &self.core
+    }
+    fn core_mut(&mut self) -> &mut WidgetCore {
+        &mut self.core
+    }
     fn measure(&mut self, constraints: BoxConstraints, ctx: &mut MeasureCtx) -> Size {
         let inner = constraints.deflate(self.insets);
-        let child_size = self.child.measure(inner, ctx);
+        let child_size = measure_widget(self.child.as_mut(), inner, ctx);
         constraints.constrain(Size::new(
             child_size.width + self.insets.horizontal(),
             child_size.height + self.insets.vertical(),
         ))
     }
     fn layout(&mut self, rect: Rect) {
-        self.rect = rect;
-        self.child.layout(Rect::new(
-            rect.x + self.insets.left,
-            rect.y + self.insets.top,
-            (rect.width - self.insets.horizontal()).max(0),
-            (rect.height - self.insets.vertical()).max(0),
-        ));
+        place_widget(
+            self.child.as_mut(),
+            Rect::new(
+                rect.x + self.insets.left,
+                rect.y + self.insets.top,
+                (rect.width - self.insets.horizontal()).max(0),
+                (rect.height - self.insets.vertical()).max(0),
+            ),
+        );
     }
     fn paint(&self, ctx: &mut PaintContext) {
         self.child.paint(ctx);
     }
     fn event(&mut self, e: &WidgetEvent, p: EventPhase, sink: &mut MessageSink) -> EventResponse {
         self.child.event(e, p, sink)
-    }
-    fn id(&self) -> WidgetId {
-        self.id
-    }
-    fn layout_rect(&self) -> Rect {
-        self.rect
     }
     fn children(&self) -> &[Box<dyn Widget>] {
         core::slice::from_ref(&self.child)
@@ -482,31 +484,32 @@ impl Widget for PaddingWidget {
 // ---------------------------------------------------------------------------
 
 pub struct SpacerWidget {
-    id: WidgetId,
-    rect: Rect,
+    core: WidgetCore,
     length: Length,
 }
 
 impl SpacerWidget {
     pub fn new(length: Length) -> Self {
         Self {
-            id: next_widget_id(),
-            rect: Rect::ZERO,
+            core: WidgetCore::new(),
             length,
         }
     }
 }
 
 impl Widget for SpacerWidget {
+    fn core(&self) -> &WidgetCore {
+        &self.core
+    }
+    fn core_mut(&mut self) -> &mut WidgetCore {
+        &mut self.core
+    }
     fn measure(&mut self, constraints: BoxConstraints, _ctx: &mut MeasureCtx) -> Size {
         let px = match self.length {
             Length::Px(n) => n,
             Length::Fill(_) => 0, // fill handled by parent flex
         };
         constraints.constrain(Size::new(px, px))
-    }
-    fn layout(&mut self, rect: Rect) {
-        self.rect = rect;
     }
     fn paint(&self, _ctx: &mut PaintContext) {}
     fn event(
@@ -517,12 +520,6 @@ impl Widget for SpacerWidget {
     ) -> EventResponse {
         EventResponse::Ignored
     }
-    fn id(&self) -> WidgetId {
-        self.id
-    }
-    fn layout_rect(&self) -> Rect {
-        self.rect
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -530,8 +527,7 @@ impl Widget for SpacerWidget {
 // ---------------------------------------------------------------------------
 
 pub struct ExpandWidget {
-    id: WidgetId,
-    rect: Rect,
+    core: WidgetCore,
     weight: u16,
     child: Box<dyn Widget>,
 }
@@ -539,8 +535,7 @@ pub struct ExpandWidget {
 impl ExpandWidget {
     pub fn new(weight: u16, child: Box<dyn Widget>) -> Self {
         Self {
-            id: next_widget_id(),
-            rect: Rect::ZERO,
+            core: WidgetCore::new(),
             weight,
             child,
         }
@@ -548,16 +543,21 @@ impl ExpandWidget {
 }
 
 impl Widget for ExpandWidget {
+    fn core(&self) -> &WidgetCore {
+        &self.core
+    }
+    fn core_mut(&mut self) -> &mut WidgetCore {
+        &mut self.core
+    }
     fn measure(&mut self, constraints: BoxConstraints, ctx: &mut MeasureCtx) -> Size {
-        let child_size = self.child.measure(constraints, ctx);
+        let child_size = measure_widget(self.child.as_mut(), constraints, ctx);
         Size::new(
             child_size.width.max(constraints.min_width),
             child_size.height.max(constraints.min_height),
         )
     }
     fn layout(&mut self, rect: Rect) {
-        self.rect = rect;
-        self.child.layout(rect);
+        place_widget(self.child.as_mut(), rect);
     }
     fn paint(&self, ctx: &mut PaintContext) {
         self.child.paint(ctx);
@@ -567,12 +567,6 @@ impl Widget for ExpandWidget {
     }
     fn flex_weight(&self) -> u16 {
         self.weight
-    }
-    fn id(&self) -> WidgetId {
-        self.id
-    }
-    fn layout_rect(&self) -> Rect {
-        self.rect
     }
     fn children(&self) -> &[Box<dyn Widget>] {
         core::slice::from_ref(&self.child)
@@ -587,8 +581,7 @@ impl Widget for ExpandWidget {
 // ---------------------------------------------------------------------------
 
 pub struct BackgroundWidget {
-    id: WidgetId,
-    rect: Rect,
+    core: WidgetCore,
     color: Color32,
     child: Box<dyn Widget>,
 }
@@ -596,8 +589,7 @@ pub struct BackgroundWidget {
 impl BackgroundWidget {
     pub fn new(color: Color32, child: Box<dyn Widget>) -> Self {
         Self {
-            id: next_widget_id(),
-            rect: Rect::ZERO,
+            core: WidgetCore::new(),
             color,
             child,
         }
@@ -605,31 +597,25 @@ impl BackgroundWidget {
 }
 
 impl Widget for BackgroundWidget {
+    fn core(&self) -> &WidgetCore {
+        &self.core
+    }
+    fn core_mut(&mut self) -> &mut WidgetCore {
+        &mut self.core
+    }
     fn measure(&mut self, constraints: BoxConstraints, ctx: &mut MeasureCtx) -> Size {
-        self.child.measure(constraints, ctx)
+        measure_widget(self.child.as_mut(), constraints, ctx)
     }
     fn layout(&mut self, rect: Rect) {
-        self.rect = rect;
-        self.child.layout(rect);
+        place_widget(self.child.as_mut(), rect);
     }
     fn paint(&self, ctx: &mut PaintContext) {
-        ctx.fill_rect(
-            self.rect.x,
-            self.rect.y,
-            self.rect.width,
-            self.rect.height,
-            self.color,
-        );
+        let rect = self.layout_rect();
+        ctx.fill_rect(rect.x, rect.y, rect.width, rect.height, self.color);
         self.child.paint(ctx);
     }
     fn event(&mut self, e: &WidgetEvent, p: EventPhase, sink: &mut MessageSink) -> EventResponse {
         self.child.event(e, p, sink)
-    }
-    fn id(&self) -> WidgetId {
-        self.id
-    }
-    fn layout_rect(&self) -> Rect {
-        self.rect
     }
     fn children(&self) -> &[Box<dyn Widget>] {
         core::slice::from_ref(&self.child)
@@ -644,8 +630,7 @@ impl Widget for BackgroundWidget {
 // ---------------------------------------------------------------------------
 
 pub struct SizedBoxWidget {
-    id: WidgetId,
-    rect: Rect,
+    core: WidgetCore,
     width: Option<Length>,
     height: Option<Length>,
     child: Box<dyn Widget>,
@@ -654,8 +639,7 @@ pub struct SizedBoxWidget {
 impl SizedBoxWidget {
     pub fn new(width: Option<Length>, height: Option<Length>, child: Box<dyn Widget>) -> Self {
         Self {
-            id: next_widget_id(),
-            rect: Rect::ZERO,
+            core: WidgetCore::new(),
             width,
             height,
             child,
@@ -674,6 +658,12 @@ impl SizedBoxWidget {
 }
 
 impl Widget for SizedBoxWidget {
+    fn core(&self) -> &WidgetCore {
+        &self.core
+    }
+    fn core_mut(&mut self) -> &mut WidgetCore {
+        &mut self.core
+    }
     fn measure(&mut self, constraints: BoxConstraints, ctx: &mut MeasureCtx) -> Size {
         let rw = self.resolve_w(&constraints);
         let rh = self.resolve_h(&constraints);
@@ -683,27 +673,20 @@ impl Widget for SizedBoxWidget {
             min_height: rh.unwrap_or(constraints.min_height),
             max_height: rh.unwrap_or(constraints.max_height),
         };
-        let child_size = self.child.measure(inner, ctx);
+        let child_size = measure_widget(self.child.as_mut(), inner, ctx);
         Size::new(
             rw.unwrap_or(child_size.width),
             rh.unwrap_or(child_size.height),
         )
     }
     fn layout(&mut self, rect: Rect) {
-        self.rect = rect;
-        self.child.layout(rect);
+        place_widget(self.child.as_mut(), rect);
     }
     fn paint(&self, ctx: &mut PaintContext) {
         self.child.paint(ctx);
     }
     fn event(&mut self, e: &WidgetEvent, p: EventPhase, sink: &mut MessageSink) -> EventResponse {
         self.child.event(e, p, sink)
-    }
-    fn id(&self) -> WidgetId {
-        self.id
-    }
-    fn layout_rect(&self) -> Rect {
-        self.rect
     }
     fn children(&self) -> &[Box<dyn Widget>] {
         core::slice::from_ref(&self.child)

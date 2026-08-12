@@ -1,14 +1,13 @@
-use crate::constraints::{BoxConstraints, ImageScale, Rect, Size};
+use crate::constraints::{BoxConstraints, ImageScale, Size};
 use crate::event::{EventPhase, EventResponse, MessageSink, WidgetEvent};
 use crate::node::ImageData;
 use crate::paint::PaintContext;
-use crate::traits::{FocusPolicy, MeasureCtx, Role, Widget, WidgetId, next_widget_id};
+use crate::traits::{FocusPolicy, MeasureCtx, Role, Widget, WidgetCore};
 use slopos_abi::damage::DamageRect;
 use slopos_gfx::image::{BitmapRef, ImageFit, ImageSampling};
 
 pub struct ImageWidget {
-    id: WidgetId,
-    rect: Rect,
+    core: WidgetCore,
     image: ImageData,
     scale: ImageScale,
     sampling: ImageSampling,
@@ -17,44 +16,64 @@ pub struct ImageWidget {
 impl ImageWidget {
     pub fn new(image: ImageData, scale: ImageScale, sampling: ImageSampling) -> Self {
         Self {
-            id: next_widget_id(),
-            rect: Rect::ZERO,
+            core: WidgetCore::new(),
             image,
             scale,
             sampling,
         }
     }
+
+    fn natural_size(&self) -> Size {
+        Size::new(self.image.width as i32, self.image.height as i32)
+    }
 }
 
 impl Widget for ImageWidget {
+    fn core(&self) -> &WidgetCore {
+        &self.core
+    }
+    fn core_mut(&mut self) -> &mut WidgetCore {
+        &mut self.core
+    }
+
     fn measure(&mut self, constraints: BoxConstraints, _ctx: &mut MeasureCtx) -> Size {
+        let natural = self.natural_size();
         let size = match self.scale {
-            ImageScale::None => Size::new(self.image.width as i32, self.image.height as i32),
+            ImageScale::None => natural,
             ImageScale::Fit => {
-                let sw = self.image.width as i32;
-                let sh = self.image.height as i32;
-                if sw == 0 || sh == 0 {
+                if natural.width == 0 || natural.height == 0 {
                     return constraints.constrain(Size::ZERO);
                 }
-                let max_w = constraints.max_width.min(i32::MAX / 2);
-                let max_h = constraints.max_height.min(i32::MAX / 2);
-                // Scale to fit preserving aspect ratio.
-                let scale_w = max_w as f64 / sw as f64;
-                let scale_h = max_h as f64 / sh as f64;
+                let max_w = constraints.max_width;
+                let max_h = constraints.max_height;
+                let scale_w = max_w as f64 / natural.width as f64;
+                let scale_h = max_h as f64 / natural.height as f64;
                 let scale = scale_w.min(scale_h).min(1.0);
-                Size::new((sw as f64 * scale) as i32, (sh as f64 * scale) as i32)
+                Size::new(
+                    (natural.width as f64 * scale) as i32,
+                    (natural.height as f64 * scale) as i32,
+                )
             }
-            ImageScale::Cover => constraints.max_size(),
-            ImageScale::Fill => constraints.max_size(),
+            // Filling an unbounded axis means the natural extent: there is no
+            // "available space" to cover when the parent named no limit.
+            ImageScale::Cover | ImageScale::Fill => Size::new(
+                if constraints.is_width_bounded() {
+                    constraints.max_width
+                } else {
+                    natural.width
+                },
+                if constraints.is_height_bounded() {
+                    constraints.max_height
+                } else {
+                    natural.height
+                },
+            ),
         };
         constraints.constrain(size)
     }
 
-    fn layout(&mut self, rect: Rect) {
-        self.rect = rect;
-    }
-
     fn paint(&self, ctx: &mut PaintContext) {
+        let rect = self.layout_rect();
         let Some(bitmap) = BitmapRef::new(
             self.image.width,
             self.image.height,
@@ -77,10 +96,10 @@ impl Widget for ImageWidget {
         slopos_gfx::image::draw_image_clipped(
             ctx.buffer,
             bitmap,
-            self.rect.x,
-            self.rect.y,
-            self.rect.width,
-            self.rect.height,
+            rect.x,
+            rect.y,
+            rect.width,
+            rect.height,
             fit,
             self.sampling,
             &clip,
@@ -102,13 +121,5 @@ impl Widget for ImageWidget {
 
     fn focus_policy(&self) -> FocusPolicy {
         FocusPolicy::None
-    }
-
-    fn id(&self) -> WidgetId {
-        self.id
-    }
-
-    fn layout_rect(&self) -> Rect {
-        self.rect
     }
 }

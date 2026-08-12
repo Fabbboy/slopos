@@ -3,19 +3,23 @@ use std::any::Any;
 use crate::constraints::{BoxConstraints, Rect, Size};
 use crate::event::{EventPhase, EventResponse, Key, MessageSink, NamedKey, WidgetEvent};
 use crate::paint::PaintContext;
-use crate::traits::{FocusPolicy, MeasureCtx, Role, Widget, WidgetId, next_widget_id};
+use crate::traits::{
+    FocusPolicy, MeasureCtx, Role, Widget, WidgetCore, measure_widget, place_widget,
+};
 
 /// Tab header bar with panel switching.
 ///
 /// Displays a row of tab labels at the top and the active panel's content below.
 pub struct TabBarWidget {
-    id: WidgetId,
-    rect: Rect,
+    core: WidgetCore,
     tabs: Vec<String>,
     active: usize,
     on_change: Option<Box<dyn Fn(usize) -> Box<dyn Any>>>,
     content: Vec<Box<dyn Widget>>,
     focused: bool,
+    /// Tab strip height from the last measure. Layout and hit testing must use
+    /// the value the paint pass used, not a second copy of the constant.
+    tab_height: i32,
 }
 
 impl TabBarWidget {
@@ -26,14 +30,25 @@ impl TabBarWidget {
         content: Vec<Box<dyn Widget>>,
     ) -> Self {
         Self {
-            id: next_widget_id(),
-            rect: Rect::ZERO,
+            core: WidgetCore::new(),
             tabs,
             active,
             on_change,
             content,
             focused: false,
+            tab_height: 0,
         }
+    }
+
+    /// The area below the tab strip, where the active panel lives.
+    fn panel_rect(&self) -> Rect {
+        let rect = self.layout_rect();
+        Rect::new(
+            rect.x,
+            rect.y + self.tab_height,
+            rect.width,
+            (rect.height - self.tab_height).max(0),
+        )
     }
 
     /// Compute the X ranges for each tab label in the tab row.
@@ -61,77 +76,78 @@ impl TabBarWidget {
 }
 
 impl Widget for TabBarWidget {
-    fn measure(&mut self, constraints: BoxConstraints, ctx: &mut MeasureCtx) -> Size {
-        let tab_height = ctx.style.tab_height;
-        let w = constraints.max_width;
-
-        // Measure the active panel to determine its height.
-        let panel_height = if let Some(panel) = self.content.get_mut(self.active) {
-            let panel_constraints = BoxConstraints {
-                min_width: w,
-                max_width: w,
-                min_height: 0,
-                max_height: if constraints.max_height == i32::MAX {
-                    i32::MAX
-                } else {
-                    (constraints.max_height - tab_height).max(0)
-                },
-            };
-            panel.measure(panel_constraints, ctx).height
-        } else {
-            0
-        };
-
-        let total_h = tab_height + panel_height;
-        constraints.constrain(Size::new(w, total_h))
+    fn core(&self) -> &WidgetCore {
+        &self.core
+    }
+    fn core_mut(&mut self) -> &mut WidgetCore {
+        &mut self.core
     }
 
-    fn layout(&mut self, rect: Rect) {
-        self.rect = rect;
+    fn measure(&mut self, constraints: BoxConstraints, ctx: &mut MeasureCtx) -> Size {
+        let tab_height = ctx.style.tab_height;
+        self.tab_height = tab_height;
+        let w = constraints.max_width;
 
-        // Layout all content panels (only active is visible, but we lay them all out
-        // so that switching tabs doesn't require a full re-layout).
-        let tab_height = 36; // Matches style.tab_height default.
-        let panel_rect = Rect::new(
-            rect.x,
-            rect.y + tab_height,
-            rect.width,
-            (rect.height - tab_height).max(0),
-        );
+        let panel_constraints = BoxConstraints {
+            min_width: w,
+            max_width: w,
+            min_height: 0,
+            max_height: if constraints.is_height_bounded() {
+                (constraints.max_height - tab_height).max(0)
+            } else {
+                crate::constraints::MAX_EXTENT
+            },
+        };
 
+        // Measure every panel, not just the active one: switching tabs must not
+        // require a fresh measure pass to know how big the new panel is.
+        let mut panel_height = 0;
+        for (i, panel) in self.content.iter_mut().enumerate() {
+            let size = measure_widget(panel.as_mut(), panel_constraints, ctx);
+            if i == self.active {
+                panel_height = size.height;
+            }
+        }
+
+        constraints.constrain(Size::new(w, tab_height + panel_height))
+    }
+
+    fn layout(&mut self, _rect: Rect) {
+        let panel_rect = self.panel_rect();
         for panel in &mut self.content {
-            panel.layout(panel_rect);
+            place_widget(panel.as_mut(), panel_rect);
         }
     }
 
     fn paint(&self, ctx: &mut PaintContext) {
-        let tab_height = ctx.style.tab_height;
+        let rect = self.layout_rect();
+        let tab_height = self.tab_height;
         let underline_height = 3;
 
         // Tab row background.
         ctx.fill_rect(
-            self.rect.x,
-            self.rect.y,
-            self.rect.width,
+            rect.x,
+            rect.y,
+            rect.width,
             tab_height,
             ctx.style.bg_secondary,
         );
 
         // Draw each tab label.
-        let layout = self.tab_layout(self.rect.width);
+        let layout = self.tab_layout(rect.width);
         let text_h = ctx.text_height();
 
         for (i, (tab_x, tab_w)) in layout.iter().enumerate() {
-            let abs_x = self.rect.x + tab_x;
+            let abs_x = rect.x + tab_x;
 
             if i == self.active {
                 // Active tab: opaque background.
-                ctx.fill_rect(abs_x, self.rect.y, *tab_w, tab_height, ctx.style.bg_primary);
+                ctx.fill_rect(abs_x, rect.y, *tab_w, tab_height, ctx.style.bg_primary);
 
                 // Accent underline.
                 ctx.fill_rect(
                     abs_x,
-                    self.rect.y + tab_height - underline_height,
+                    rect.y + tab_height - underline_height,
                     *tab_w,
                     underline_height,
                     ctx.style.bg_accent,
@@ -142,7 +158,7 @@ impl Widget for TabBarWidget {
             let label = &self.tabs[i];
             let text_w = ctx.text_width(label);
             let tx = abs_x + (*tab_w - text_w) / 2;
-            let ty = self.rect.y + (tab_height - text_h) / 2;
+            let ty = rect.y + (tab_height - text_h) / 2;
 
             let fg = if i == self.active {
                 ctx.style.text_primary
@@ -154,21 +170,23 @@ impl Widget for TabBarWidget {
 
         // Separator line below tab row.
         ctx.fill_rect(
-            self.rect.x,
-            self.rect.y + tab_height,
-            self.rect.width,
+            rect.x,
+            rect.y + tab_height,
+            rect.width,
             1,
             ctx.style.border_divider,
         );
 
-        // Paint active panel content.
+        // Paint active panel content, clipped to its own area so a panel that
+        // measured taller than the strip left it cannot draw over the tabs.
         if let Some(panel) = self.content.get(self.active) {
-            panel.paint(ctx);
+            let panel_rect = self.panel_rect();
+            ctx.with_clip(panel_rect, |ctx| panel.paint(ctx));
         }
 
         // Focus ring.
         if self.focused {
-            let tab_row = Rect::new(self.rect.x, self.rect.y, self.rect.width, tab_height);
+            let tab_row = Rect::new(rect.x, rect.y, rect.width, tab_height);
             ctx.draw_focus_ring(tab_row);
         }
     }
@@ -185,9 +203,8 @@ impl Widget for TabBarWidget {
 
         match event {
             WidgetEvent::PointerDown { x, y, .. } => {
-                // Check if click is in the tab row.
-                let tab_height = 36;
-                if *y < self.rect.y || *y >= self.rect.y + tab_height {
+                let rect = self.layout_rect();
+                if *y < rect.y || *y >= rect.y + self.tab_height {
                     // Forward to active panel content.
                     if let Some(panel) = self.content.get_mut(self.active) {
                         return panel.event(event, phase, sink);
@@ -196,8 +213,8 @@ impl Widget for TabBarWidget {
                 }
 
                 // Determine which tab was clicked.
-                let layout = self.tab_layout(self.rect.width);
-                let rel_x = *x - self.rect.x;
+                let layout = self.tab_layout(rect.width);
+                let rel_x = *x - rect.x;
                 for (i, (tab_x, tab_w)) in layout.iter().enumerate() {
                     if rel_x >= *tab_x && rel_x < *tab_x + *tab_w {
                         if i != self.active {
@@ -273,14 +290,6 @@ impl Widget for TabBarWidget {
 
     fn focus_policy(&self) -> FocusPolicy {
         FocusPolicy::StrongFocus
-    }
-
-    fn id(&self) -> WidgetId {
-        self.id
-    }
-
-    fn layout_rect(&self) -> Rect {
-        self.rect
     }
 
     fn children(&self) -> &[Box<dyn Widget>] {

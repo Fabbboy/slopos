@@ -1,18 +1,19 @@
-use super::constraints::{BoxConstraints, CrossAxisAlignment, EdgeInsets, Length, Rect, Size};
+use super::constraints::{
+    BoxConstraints, CrossAxisAlignment, EdgeInsets, Length, MAX_EXTENT, Rect, Size,
+};
 use super::event::{EventPhase, EventResponse, MessageSink, WidgetEvent, hit_test};
 use super::focus::FocusManager;
 use super::layout::{HStackWidget, PaddingWidget, SpacerWidget, VStackWidget};
 use super::paint::PaintContext;
 use super::style::StyleSheet;
-use super::traits::{FocusPolicy, MeasureCtx, Widget, WidgetId, next_widget_id};
+use super::traits::{FocusPolicy, MeasureCtx, Widget, WidgetCore, measure_widget, place_widget};
 
 // ---------------------------------------------------------------------------
 // Test helper: a widget with a fixed measure size (no font dependency).
 // ---------------------------------------------------------------------------
 
 struct FixedSizeWidget {
-    id: WidgetId,
-    rect: Rect,
+    core: WidgetCore,
     size: Size,
     focus: FocusPolicy,
 }
@@ -20,8 +21,7 @@ struct FixedSizeWidget {
 impl FixedSizeWidget {
     fn new(width: i32, height: i32) -> Self {
         Self {
-            id: next_widget_id(),
-            rect: Rect::ZERO,
+            core: WidgetCore::new(),
             size: Size::new(width, height),
             focus: FocusPolicy::None,
         }
@@ -29,8 +29,7 @@ impl FixedSizeWidget {
 
     fn focusable(width: i32, height: i32) -> Self {
         Self {
-            id: next_widget_id(),
-            rect: Rect::ZERO,
+            core: WidgetCore::new(),
             size: Size::new(width, height),
             focus: FocusPolicy::StrongFocus,
         }
@@ -38,11 +37,14 @@ impl FixedSizeWidget {
 }
 
 impl Widget for FixedSizeWidget {
+    fn core(&self) -> &WidgetCore {
+        &self.core
+    }
+    fn core_mut(&mut self) -> &mut WidgetCore {
+        &mut self.core
+    }
     fn measure(&mut self, constraints: BoxConstraints, _ctx: &mut MeasureCtx) -> Size {
         constraints.constrain(self.size)
-    }
-    fn layout(&mut self, rect: Rect) {
-        self.rect = rect;
     }
     fn paint(&self, _ctx: &mut PaintContext) {}
     fn event(
@@ -53,14 +55,63 @@ impl Widget for FixedSizeWidget {
     ) -> EventResponse {
         EventResponse::Ignored
     }
-    fn id(&self) -> WidgetId {
-        self.id
-    }
-    fn layout_rect(&self) -> Rect {
-        self.rect
-    }
     fn focus_policy(&self) -> FocusPolicy {
         self.focus
+    }
+}
+
+/// A button stand-in that records which one was pressed.
+struct ProbeButton {
+    core: WidgetCore,
+    name: &'static str,
+    size: Size,
+}
+
+impl ProbeButton {
+    fn new(name: &'static str, width: i32, height: i32) -> Self {
+        Self {
+            core: WidgetCore::new(),
+            name,
+            size: Size::new(width, height),
+        }
+    }
+}
+
+impl Widget for ProbeButton {
+    fn core(&self) -> &WidgetCore {
+        &self.core
+    }
+    fn core_mut(&mut self) -> &mut WidgetCore {
+        &mut self.core
+    }
+    fn measure(&mut self, constraints: BoxConstraints, _ctx: &mut MeasureCtx) -> Size {
+        constraints.constrain(self.size)
+    }
+    fn paint(&self, _ctx: &mut PaintContext) {}
+    fn event(
+        &mut self,
+        event: &WidgetEvent,
+        _phase: EventPhase,
+        sink: &mut MessageSink,
+    ) -> EventResponse {
+        let activated = match event {
+            WidgetEvent::PointerDown { .. } => true,
+            WidgetEvent::KeyDown { key, .. } => matches!(
+                key,
+                super::event::Key::Named(super::event::NamedKey::Enter)
+                    | super::event::Key::Named(super::event::NamedKey::Space)
+            ),
+            _ => false,
+        };
+        if activated {
+            sink.emit_raw(Box::new(String::from(self.name)) as Box<dyn std::any::Any>);
+            EventResponse::Consumed
+        } else {
+            EventResponse::Ignored
+        }
+    }
+    fn focus_policy(&self) -> FocusPolicy {
+        FocusPolicy::StrongFocus
     }
 }
 
@@ -127,10 +178,12 @@ fn test_deflate() {
 fn test_unbounded() {
     let c = BoxConstraints::UNBOUNDED;
     assert_eq!(c.min_width, 0);
-    assert_eq!(c.max_width, i32::MAX);
+    assert_eq!(c.max_width, MAX_EXTENT);
     assert_eq!(c.min_height, 0);
-    assert_eq!(c.max_height, i32::MAX);
-    // Any size passes through.
+    assert_eq!(c.max_height, MAX_EXTENT);
+    assert!(!c.is_width_bounded());
+    assert!(!c.is_height_bounded());
+    // Any realistic size passes through.
     assert_eq!(c.constrain(Size::new(9999, 9999)), Size::new(9999, 9999));
 }
 
@@ -337,7 +390,7 @@ fn test_focus_scope() {
 
 fn test_hit_test_leaf() {
     let mut w = FixedSizeWidget::new(100, 50);
-    w.layout(Rect::new(10, 20, 100, 50));
+    place_widget(&mut w, Rect::new(10, 20, 100, 50));
     let result = hit_test(&w, 50, 40);
     assert!(result.is_some());
     let ht = result.unwrap();
@@ -347,7 +400,7 @@ fn test_hit_test_leaf() {
 
 fn test_hit_test_miss() {
     let mut w = FixedSizeWidget::new(100, 50);
-    w.layout(Rect::new(10, 20, 100, 50));
+    place_widget(&mut w, Rect::new(10, 20, 100, 50));
     // Point outside widget.
     let result = hit_test(&w, 0, 0);
     assert!(result.is_none());
@@ -387,9 +440,9 @@ fn test_deflate_unbounded() {
     let c = BoxConstraints::UNBOUNDED;
     let insets = EdgeInsets::all(10);
     let d = c.deflate(insets);
-    // Unbounded max stays at i32::MAX.
-    assert_eq!(d.max_width, i32::MAX);
-    assert_eq!(d.max_height, i32::MAX);
+    // Unbounded max stays unbounded rather than shrinking by the insets.
+    assert_eq!(d.max_width, MAX_EXTENT);
+    assert_eq!(d.max_height, MAX_EXTENT);
     assert_eq!(d.min_width, 0);
     assert_eq!(d.min_height, 0);
 }
@@ -433,8 +486,12 @@ fn context_table(selected: Option<usize>) -> TableWidget {
     );
     let style = StyleSheet::dark();
     let mut ctx = MeasureCtx { style: &style };
-    table.measure(BoxConstraints::tight(Size::new(200, 200)), &mut ctx);
-    table.layout(Rect::new(0, 0, 200, 200));
+    measure_widget(
+        &mut table,
+        BoxConstraints::tight(Size::new(200, 200)),
+        &mut ctx,
+    );
+    place_widget(&mut table, Rect::new(0, 0, 200, 200));
     table
 }
 
@@ -466,8 +523,9 @@ fn test_table_right_click_emits_context_menu() {
 fn test_table_right_click_selects_row() {
     let mut table = context_table(Some(0));
     let mut sink = MessageSink::new();
+    // Row 2 is the last of three: y=[60,80) once the 20px header is skipped.
     table.event(
-        &press(10, 85, super::event::PointerButton::Right),
+        &press(10, 70, super::event::PointerButton::Right),
         EventPhase::Target,
         &mut sink,
     );
@@ -550,8 +608,12 @@ fn popup_at(x: i32, y: i32, w: i32, h: i32) -> PopupWidget {
     );
     let style = StyleSheet::dark();
     let mut ctx = MeasureCtx { style: &style };
-    popup.measure(BoxConstraints::tight(Size::new(200, 200)), &mut ctx);
-    popup.layout(Rect::new(0, 0, 200, 200));
+    measure_widget(
+        &mut popup,
+        BoxConstraints::tight(Size::new(200, 200)),
+        &mut ctx,
+    );
+    place_widget(&mut popup, Rect::new(0, 0, 200, 200));
     popup
 }
 
@@ -633,6 +695,251 @@ fn test_popup_swallows_unhandled_events() {
 }
 
 // ---------------------------------------------------------------------------
+// Dialog layout / routing
+//
+// The dialog used to discover its children's sizes by laying them out at
+// `i32::MAX` and reading the rect back. Every sum then wrapped: a card that
+// measured 62px tall, an action row at y = -2^31, and both buttons off-screen.
+// ---------------------------------------------------------------------------
+
+use super::widgets::dialog::DialogWidget;
+
+/// A dialog laid out in `window`, with two 80x30 actions and a 200x40 body.
+fn dialog_in(window: Size) -> DialogWidget {
+    let mut dialog = DialogWidget::new(
+        String::from("Kill task?"),
+        Box::new(FixedSizeWidget::new(200, 40)),
+        vec![
+            Box::new(ProbeButton::new("kill", 80, 30)) as Box<dyn Widget>,
+            Box::new(ProbeButton::new("cancel", 80, 30)) as Box<dyn Widget>,
+        ],
+        Some(Box::new(|| {
+            Box::new(String::from("dismiss")) as Box<dyn std::any::Any>
+        })),
+    );
+    let style = StyleSheet::dark();
+    let mut ctx = MeasureCtx { style: &style };
+    measure_widget(&mut dialog, BoxConstraints::tight(window), &mut ctx);
+    place_widget(&mut dialog, Rect::new(0, 0, window.width, window.height));
+    dialog
+}
+
+/// Every child must land inside the card, which must itself be on-screen.
+/// This is the assertion the shipped bug failed on all three counts.
+fn test_dialog_places_children_inside_card() {
+    let window = Size::new(640, 444);
+    let dialog = dialog_in(window);
+    let card = dialog.card_rect();
+
+    assert!(
+        card.width > 0 && card.height > 0,
+        "card degenerate: {card:?}"
+    );
+    assert!(
+        card.x >= 0 && card.y >= 0,
+        "card starts off-screen: {card:?}"
+    );
+    assert!(
+        card.x + card.width <= window.width && card.y + card.height <= window.height,
+        "card overflows the window: {card:?}"
+    );
+
+    for action in dialog.children() {
+        let r = action.layout_rect();
+        assert!(
+            r.x >= card.x
+                && r.y >= card.y
+                && r.x + r.width <= card.x + card.width
+                && r.y + r.height <= card.y + card.height,
+            "action {r:?} outside card {card:?}"
+        );
+    }
+}
+
+/// The card must be tall enough to hold the title, the body and the buttons.
+/// The wrapped arithmetic produced 62px for content that needs far more.
+fn test_dialog_card_height_covers_content() {
+    let dialog = dialog_in(Size::new(640, 444));
+    let card = dialog.card_rect();
+    // title row + 40px content + 30px actions + padding.
+    assert!(card.height >= 40 + 30, "card too short: {card:?}");
+}
+
+/// A dialog centers itself, so its card must not start at the window origin.
+fn test_dialog_card_is_centered() {
+    let window = Size::new(640, 444);
+    let dialog = dialog_in(window);
+    let card = dialog.card_rect();
+    assert_eq!(card.x, (window.width - card.width) / 2);
+    assert_eq!(card.y, (window.height - card.height) / 2);
+}
+
+/// Clicking one action must not fire the others. The old event path handed the
+/// press to every action in order, so "Cancel" emitted "Kill" first.
+fn test_dialog_click_routes_to_action_under_pointer() {
+    let mut dialog = dialog_in(Size::new(640, 444));
+    let second = dialog.children()[1].layout_rect();
+    let (cx, cy) = (second.x + second.width / 2, second.y + second.height / 2);
+
+    let mut sink = MessageSink::new();
+    dialog.event(
+        &press(cx, cy, super::event::PointerButton::Left),
+        EventPhase::Target,
+        &mut sink,
+    );
+    assert_eq!(sink.drain_typed::<String>(), vec![String::from("cancel")]);
+}
+
+/// A click on the backdrop dismisses; a click on the card does not.
+fn test_dialog_backdrop_click_dismisses() {
+    let mut dialog = dialog_in(Size::new(640, 444));
+    let mut sink = MessageSink::new();
+    let resp = dialog.event(
+        &press(2, 2, super::event::PointerButton::Left),
+        EventPhase::Target,
+        &mut sink,
+    );
+    assert!(resp.is_consumed());
+    assert_eq!(sink.drain_typed::<String>(), vec![String::from("dismiss")]);
+}
+
+/// A dialog is modal: a press inside the card that hits no action must be
+/// swallowed rather than fall through to the tree it covers.
+fn test_dialog_is_modal_over_its_parent() {
+    let mut dialog = dialog_in(Size::new(640, 444));
+    let card = dialog.card_rect();
+    let mut sink = MessageSink::new();
+    let resp = dialog.event(
+        &press(card.x + 2, card.y + 2, super::event::PointerButton::Left),
+        EventPhase::Target,
+        &mut sink,
+    );
+    assert!(resp.is_consumed());
+    assert!(sink.drain_typed::<String>().is_empty());
+}
+
+fn key(named: super::event::NamedKey, shift: bool) -> WidgetEvent {
+    WidgetEvent::KeyDown {
+        key: super::event::Key::Named(named),
+        modifiers: super::event::Modifiers {
+            shift,
+            ..Default::default()
+        },
+        repeat: false,
+    }
+}
+
+/// Enter with nothing selected must not fire an action. The first action in a
+/// confirm dialog is the destructive one, so a stray Enter would carry out the
+/// very thing the dialog exists to ask about.
+fn test_dialog_enter_without_selection_fires_nothing() {
+    let mut dialog = dialog_in(Size::new(640, 444));
+    let mut sink = MessageSink::new();
+    dialog.event(
+        &key(super::event::NamedKey::Enter, false),
+        EventPhase::Target,
+        &mut sink,
+    );
+    assert!(sink.drain_typed::<String>().is_empty());
+}
+
+/// Tab selects an action and Enter then fires that one, not the first.
+fn test_dialog_keyboard_selects_then_activates() {
+    let mut dialog = dialog_in(Size::new(640, 444));
+    let mut sink = MessageSink::new();
+    dialog.event(
+        &key(super::event::NamedKey::Tab, false),
+        EventPhase::Target,
+        &mut sink,
+    );
+    dialog.event(
+        &key(super::event::NamedKey::Tab, false),
+        EventPhase::Target,
+        &mut sink,
+    );
+    dialog.event(
+        &key(super::event::NamedKey::Enter, false),
+        EventPhase::Target,
+        &mut sink,
+    );
+    assert_eq!(sink.drain_typed::<String>(), vec![String::from("cancel")]);
+}
+
+/// Escape dismisses rather than activating whatever is selected.
+fn test_dialog_escape_dismisses() {
+    let mut dialog = dialog_in(Size::new(640, 444));
+    let mut sink = MessageSink::new();
+    let resp = dialog.event(
+        &key(super::event::NamedKey::Escape, false),
+        EventPhase::Target,
+        &mut sink,
+    );
+    assert!(resp.is_consumed());
+    assert_eq!(sink.drain_typed::<String>(), vec![String::from("dismiss")]);
+}
+
+// ---------------------------------------------------------------------------
+// Constraint arithmetic
+// ---------------------------------------------------------------------------
+
+/// The reason `MAX_EXTENT` is finite: a container adds padding to whatever a
+/// child reports, and `i32::MAX + 1` is negative.
+fn test_unbounded_extent_survives_padding_arithmetic() {
+    let c = BoxConstraints::UNBOUNDED;
+    assert!(!c.is_width_bounded());
+    assert!(!c.is_height_bounded());
+    // The sum a card computes: title + content + two paddings.
+    let total = c.max_height + 16 + 16 + 32;
+    assert!(total > 0, "unbounded extent wrapped to {total}");
+}
+
+/// Deflating an unbounded axis must leave it unbounded, or a scroll view's
+/// child suddenly believes it has a finite budget.
+fn test_deflate_preserves_unboundedness() {
+    let d = BoxConstraints::UNBOUNDED.deflate(EdgeInsets::all(10));
+    assert!(!d.is_width_bounded());
+    assert!(!d.is_height_bounded());
+    assert_eq!(d.max_width, MAX_EXTENT);
+}
+
+/// `measure_widget` records the size so a parent never has to invent a rect to
+/// find it out — the habit that produced the dialog bug.
+fn test_measure_widget_records_size() {
+    let style = StyleSheet::dark();
+    let mut ctx = MeasureCtx { style: &style };
+    let mut w = FixedSizeWidget::new(70, 25);
+    assert_eq!(w.measured_size(), Size::ZERO);
+    let size = measure_widget(&mut w, BoxConstraints::UNBOUNDED, &mut ctx);
+    assert_eq!(size, Size::new(70, 25));
+    assert_eq!(w.measured_size(), Size::new(70, 25));
+}
+
+/// `place_widget` is what records the rect, so `layout_rect` reflects the
+/// placement even for a leaf that implements no `layout` at all.
+fn test_place_widget_records_rect() {
+    let mut w = FixedSizeWidget::new(70, 25);
+    place_widget(&mut w, Rect::new(5, 6, 70, 25));
+    assert_eq!(w.layout_rect(), Rect::new(5, 6, 70, 25));
+}
+
+/// A ZStack's layers all get the full area: an overlay covers its siblings
+/// rather than displacing them.
+fn test_zstack_layers_share_the_full_rect() {
+    let style = StyleSheet::dark();
+    let mut ctx = MeasureCtx { style: &style };
+    let children: Vec<Box<dyn Widget>> = vec![
+        Box::new(FixedSizeWidget::new(50, 20)),
+        Box::new(FixedSizeWidget::new(10, 10)),
+    ];
+    let mut z = super::layout::ZStackWidget::new(children);
+    measure_widget(&mut z, BoxConstraints::tight(Size::new(200, 100)), &mut ctx);
+    place_widget(&mut z, Rect::new(0, 0, 200, 100));
+    for child in z.children() {
+        assert_eq!(child.layout_rect(), Rect::new(0, 0, 200, 100));
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Public test runner (for boot-time invocation)
 // ---------------------------------------------------------------------------
 
@@ -707,6 +1014,53 @@ pub fn cases() -> &'static [(&'static str, fn())] {
             "popup_swallows_unhandled_events",
             test_popup_swallows_unhandled_events,
         ),
+        (
+            "dialog_places_children_inside_card",
+            test_dialog_places_children_inside_card,
+        ),
+        (
+            "dialog_card_height_covers_content",
+            test_dialog_card_height_covers_content,
+        ),
+        ("dialog_card_is_centered", test_dialog_card_is_centered),
+        (
+            "dialog_click_routes_to_action_under_pointer",
+            test_dialog_click_routes_to_action_under_pointer,
+        ),
+        (
+            "dialog_backdrop_click_dismisses",
+            test_dialog_backdrop_click_dismisses,
+        ),
+        (
+            "dialog_is_modal_over_its_parent",
+            test_dialog_is_modal_over_its_parent,
+        ),
+        (
+            "unbounded_extent_survives_padding_arithmetic",
+            test_unbounded_extent_survives_padding_arithmetic,
+        ),
+        (
+            "deflate_preserves_unboundedness",
+            test_deflate_preserves_unboundedness,
+        ),
+        (
+            "measure_widget_records_size",
+            test_measure_widget_records_size,
+        ),
+        ("place_widget_records_rect", test_place_widget_records_rect),
+        (
+            "zstack_layers_share_the_full_rect",
+            test_zstack_layers_share_the_full_rect,
+        ),
+        (
+            "dialog_enter_without_selection_fires_nothing",
+            test_dialog_enter_without_selection_fires_nothing,
+        ),
+        (
+            "dialog_keyboard_selects_then_activates",
+            test_dialog_keyboard_selects_then_activates,
+        ),
+        ("dialog_escape_dismisses", test_dialog_escape_dismisses),
     ]
 }
 
@@ -874,5 +1228,61 @@ mod cfg_tests {
     #[test]
     fn popup_swallows_unhandled_events() {
         test_popup_swallows_unhandled_events();
+    }
+    #[test]
+    fn dialog_places_children_inside_card() {
+        test_dialog_places_children_inside_card();
+    }
+    #[test]
+    fn dialog_card_height_covers_content() {
+        test_dialog_card_height_covers_content();
+    }
+    #[test]
+    fn dialog_card_is_centered() {
+        test_dialog_card_is_centered();
+    }
+    #[test]
+    fn dialog_click_routes_to_action_under_pointer() {
+        test_dialog_click_routes_to_action_under_pointer();
+    }
+    #[test]
+    fn dialog_backdrop_click_dismisses() {
+        test_dialog_backdrop_click_dismisses();
+    }
+    #[test]
+    fn dialog_is_modal_over_its_parent() {
+        test_dialog_is_modal_over_its_parent();
+    }
+    #[test]
+    fn unbounded_extent_survives_padding_arithmetic() {
+        test_unbounded_extent_survives_padding_arithmetic();
+    }
+    #[test]
+    fn deflate_preserves_unboundedness() {
+        test_deflate_preserves_unboundedness();
+    }
+    #[test]
+    fn measure_widget_records_size() {
+        test_measure_widget_records_size();
+    }
+    #[test]
+    fn place_widget_records_rect() {
+        test_place_widget_records_rect();
+    }
+    #[test]
+    fn zstack_layers_share_the_full_rect() {
+        test_zstack_layers_share_the_full_rect();
+    }
+    #[test]
+    fn dialog_enter_without_selection_fires_nothing() {
+        test_dialog_enter_without_selection_fires_nothing();
+    }
+    #[test]
+    fn dialog_keyboard_selects_then_activates() {
+        test_dialog_keyboard_selects_then_activates();
+    }
+    #[test]
+    fn dialog_escape_dismisses() {
+        test_dialog_escape_dismisses();
     }
 }

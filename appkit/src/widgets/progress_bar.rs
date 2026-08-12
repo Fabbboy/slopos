@@ -1,13 +1,12 @@
 use slopos_abi::draw::Color32;
 
-use crate::constraints::{BoxConstraints, Rect, Size};
+use crate::constraints::{BoxConstraints, Size};
 use crate::event::{EventPhase, EventResponse, MessageSink, WidgetEvent};
 use crate::paint::PaintContext;
-use crate::traits::{FocusPolicy, MeasureCtx, Role, Widget, WidgetId, next_widget_id};
+use crate::traits::{FocusPolicy, MeasureCtx, Role, Widget, WidgetCore};
 
 pub struct ProgressBarWidget {
-    id: WidgetId,
-    rect: Rect,
+    core: WidgetCore,
     value: u32,
     label: String,
     color: Option<Color32>,
@@ -16,8 +15,7 @@ pub struct ProgressBarWidget {
 impl ProgressBarWidget {
     pub fn new(value: u32, label: String, color: Option<Color32>) -> Self {
         Self {
-            id: next_widget_id(),
-            rect: Rect::ZERO,
+            core: WidgetCore::new(),
             value: value.min(100),
             label,
             color,
@@ -47,52 +45,53 @@ impl ProgressBarWidget {
 }
 
 impl Widget for ProgressBarWidget {
-    fn measure(&mut self, constraints: BoxConstraints, ctx: &mut MeasureCtx) -> Size {
-        let height = ctx.style.line_height + 4;
-        let size = Size::new(constraints.max_width, height);
-        constraints.constrain(size)
+    fn core(&self) -> &WidgetCore {
+        &self.core
+    }
+    fn core_mut(&mut self) -> &mut WidgetCore {
+        &mut self.core
     }
 
-    fn layout(&mut self, rect: Rect) {
-        self.rect = rect;
+    fn measure(&mut self, constraints: BoxConstraints, ctx: &mut MeasureCtx) -> Size {
+        let height = ctx.style.line_height + 4;
+        let width = if constraints.is_width_bounded() {
+            constraints.max_width
+        } else {
+            ctx.style
+                .field_min_width
+                .max(crate::text::string_width(&self.label))
+        };
+        constraints.constrain(Size::new(width, height))
     }
 
     fn paint(&self, ctx: &mut PaintContext) {
-        // 1. Track background
+        let rect = self.layout_rect();
+
         ctx.fill_rect(
-            self.rect.x,
-            self.rect.y,
-            self.rect.width,
-            self.rect.height,
+            rect.x,
+            rect.y,
+            rect.width,
+            rect.height,
             ctx.style.bg_tertiary,
         );
 
-        // 2. Fill portion
-        let fill_w = self.rect.width * self.value as i32 / 100;
+        let fill_w = rect.width * self.value as i32 / 100;
         if fill_w > 0 {
-            ctx.fill_rect(
-                self.rect.x,
-                self.rect.y,
-                fill_w,
-                self.rect.height,
-                self.fill_color(),
-            );
+            ctx.fill_rect(rect.x, rect.y, fill_w, rect.height, self.fill_color());
         }
 
-        // 3. Border outline
         ctx.draw_rect(
-            self.rect.x,
-            self.rect.y,
-            self.rect.width,
-            self.rect.height,
+            rect.x,
+            rect.y,
+            rect.width,
+            rect.height,
             ctx.style.border_default,
         );
 
-        // 4. Centered label text
         let tw = ctx.text_width(&self.label);
         let th = ctx.text_height();
-        let tx = self.rect.x + (self.rect.width - tw) / 2;
-        let ty = self.rect.y + (self.rect.height - th) / 2;
+        let tx = rect.x + (rect.width - tw) / 2;
+        let ty = rect.y + (rect.height - th) / 2;
         ctx.draw_text_transparent(tx, ty, &self.label, ctx.style.text_primary);
     }
 
@@ -111,13 +110,5 @@ impl Widget for ProgressBarWidget {
 
     fn focus_policy(&self) -> FocusPolicy {
         FocusPolicy::None
-    }
-
-    fn id(&self) -> WidgetId {
-        self.id
-    }
-
-    fn layout_rect(&self) -> Rect {
-        self.rect
     }
 }

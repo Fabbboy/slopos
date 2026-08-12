@@ -2,7 +2,7 @@ use std::any::Any;
 
 use slopos_abi::draw::Color32;
 
-use crate::constraints::{BoxConstraints, Rect, Size};
+use crate::constraints::{BoxConstraints, Size};
 use crate::event::{
     EventPhase, EventResponse, Key, MessageSink, NamedKey, PointerButton, WidgetEvent,
 };
@@ -10,7 +10,7 @@ use crate::node::ButtonStyle;
 use crate::paint::PaintContext;
 use crate::style::StyleSheet;
 use crate::text as font;
-use crate::traits::{FocusPolicy, MeasureCtx, Role, Widget, WidgetId, next_widget_id};
+use crate::traits::{FocusPolicy, MeasureCtx, Role, Widget, WidgetCore};
 
 /// Visual interaction state of the button.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
@@ -23,8 +23,7 @@ enum ButtonState {
 
 /// Clickable button with a text label and visual states.
 pub struct ButtonWidget {
-    id: WidgetId,
-    rect: Rect,
+    core: WidgetCore,
     label: String,
     on_press: Option<Box<dyn Fn() -> Box<dyn Any>>>,
     style: ButtonStyle,
@@ -41,8 +40,7 @@ impl ButtonWidget {
         enabled: bool,
     ) -> Self {
         Self {
-            id: next_widget_id(),
-            rect: Rect::ZERO,
+            core: WidgetCore::new(),
             label,
             on_press,
             style,
@@ -109,6 +107,13 @@ fn button_colors(style: &StyleSheet, bs: ButtonStyle, state: ButtonState) -> (Co
 }
 
 impl Widget for ButtonWidget {
+    fn core(&self) -> &WidgetCore {
+        &self.core
+    }
+    fn core_mut(&mut self) -> &mut WidgetCore {
+        &mut self.core
+    }
+
     fn measure(&mut self, constraints: BoxConstraints, ctx: &mut MeasureCtx) -> Size {
         let text_w = font::string_width(&self.label);
         let text_h = font::cell_height();
@@ -117,33 +122,27 @@ impl Widget for ButtonWidget {
         constraints.constrain(Size::new(w, h))
     }
 
-    fn layout(&mut self, rect: Rect) {
-        self.rect = rect;
-    }
-
     fn paint(&self, ctx: &mut PaintContext) {
+        let rect = self.layout_rect();
         let (bg, fg) = button_colors(ctx.style, self.style, self.state);
 
-        // Filled rounded rectangle background.
         ctx.fill_rounded_rect(
-            self.rect.x,
-            self.rect.y,
-            self.rect.width,
-            self.rect.height,
+            rect.x,
+            rect.y,
+            rect.width,
+            rect.height,
             ctx.style.corner_radius,
             bg,
         );
 
-        // Center the label text both horizontally and vertically.
         let text_w = ctx.text_width(&self.label);
         let text_h = ctx.text_height();
-        let tx = self.rect.x + (self.rect.width - text_w) / 2;
-        let ty = self.rect.y + (self.rect.height - text_h) / 2;
+        let tx = rect.x + (rect.width - text_w) / 2;
+        let ty = rect.y + (rect.height - text_h) / 2;
         ctx.draw_text_transparent(tx, ty, &self.label, fg);
 
-        // Focus ring when keyboard-focused.
         if self.focused {
-            ctx.draw_focus_ring(self.rect);
+            ctx.draw_focus_ring(rect);
         }
     }
 
@@ -175,21 +174,30 @@ impl Widget for ButtonWidget {
                 EventResponse::Ignored
             }
             WidgetEvent::PointerDown {
+                x,
+                y,
                 button: PointerButton::Left,
-                ..
             } => {
                 // Transition to Pressed from any interactive state.
                 // Don't require PointerEnter (hover) first — the framework
                 // may not synthesize enter/leave events from pointer motion.
+                if !self.layout_rect().contains(*x, *y) {
+                    return EventResponse::Ignored;
+                }
                 if self.state != ButtonState::Disabled {
                     self.state = ButtonState::Pressed;
                 }
                 EventResponse::Consumed
             }
             WidgetEvent::PointerUp {
+                x,
+                y,
                 button: PointerButton::Left,
-                ..
             } => {
+                if !self.layout_rect().contains(*x, *y) {
+                    self.state = ButtonState::Idle;
+                    return EventResponse::Ignored;
+                }
                 if self.state == ButtonState::Pressed {
                     self.state = ButtonState::Hovered;
                     if let Some(f) = &self.on_press {
@@ -237,13 +245,5 @@ impl Widget for ButtonWidget {
 
     fn focus_policy(&self) -> FocusPolicy {
         FocusPolicy::StrongFocus
-    }
-
-    fn id(&self) -> WidgetId {
-        self.id
-    }
-
-    fn layout_rect(&self) -> Rect {
-        self.rect
     }
 }

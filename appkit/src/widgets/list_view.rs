@@ -3,16 +3,14 @@ use std::any::Any;
 use crate::constraints::{BoxConstraints, Rect, Size};
 use crate::event::{EventPhase, EventResponse, Key, MessageSink, NamedKey, WidgetEvent};
 use crate::paint::PaintContext;
-use crate::traits::{FocusPolicy, MeasureCtx, Role, Widget, WidgetId, next_widget_id};
+use crate::traits::{FocusPolicy, MeasureCtx, Role, Widget, WidgetCore, place_widget};
 
 /// Virtualized list with fixed item height.
 ///
 /// Only items in the visible range are painted, keeping performance
 /// constant regardless of total item count.
 pub struct ListViewWidget {
-    id: WidgetId,
-    rect: Rect,
-
+    core: WidgetCore,
     item_height: i32,
     selected: Option<usize>,
     on_select: Option<Box<dyn Fn(usize) -> Box<dyn Any>>>,
@@ -29,8 +27,7 @@ impl ListViewWidget {
         items: Vec<Box<dyn Widget>>,
     ) -> Self {
         Self {
-            id: next_widget_id(),
-            rect: Rect::ZERO,
+            core: WidgetCore::new(),
             item_height,
             selected,
             on_select,
@@ -45,7 +42,7 @@ impl ListViewWidget {
     }
 
     fn max_scroll_offset(&self) -> i32 {
-        (self.total_content_height() - self.rect.height).max(0)
+        (self.total_content_height() - self.layout_rect().height).max(0)
     }
 
     fn first_visible(&self) -> usize {
@@ -59,8 +56,21 @@ impl ListViewWidget {
         if self.item_height <= 0 {
             return 0;
         }
-        let last = ((self.scroll_offset + self.rect.height) / self.item_height) as usize + 1;
+        let last =
+            ((self.scroll_offset + self.layout_rect().height) / self.item_height) as usize + 1;
         last.min(self.items.len())
+    }
+
+    /// Position every item row at the current scroll offset.
+    fn place_items(&mut self) {
+        let rect = self.layout_rect();
+        for (i, item) in self.items.iter_mut().enumerate() {
+            let y = rect.y + i as i32 * self.item_height - self.scroll_offset;
+            place_widget(
+                item.as_mut(),
+                Rect::new(rect.x, y, rect.width, self.item_height),
+            );
+        }
     }
 
     /// Ensure the selected item is visible by adjusting scroll_offset.
@@ -68,11 +78,12 @@ impl ListViewWidget {
         if let Some(sel) = self.selected {
             let item_top = sel as i32 * self.item_height;
             let item_bottom = item_top + self.item_height;
+            let height = self.layout_rect().height;
 
             if item_top < self.scroll_offset {
                 self.scroll_offset = item_top;
-            } else if item_bottom > self.scroll_offset + self.rect.height {
-                self.scroll_offset = item_bottom - self.rect.height;
+            } else if item_bottom > self.scroll_offset + height {
+                self.scroll_offset = item_bottom - height;
             }
 
             self.scroll_offset = self.scroll_offset.clamp(0, self.max_scroll_offset());
@@ -81,45 +92,44 @@ impl ListViewWidget {
 }
 
 impl Widget for ListViewWidget {
-    fn measure(&mut self, constraints: BoxConstraints, _ctx: &mut MeasureCtx) -> Size {
-        // The list fills the available space. Its natural height is the total
-        // content height, but we constrain to parent.
+    fn core(&self) -> &WidgetCore {
+        &self.core
+    }
+    fn core_mut(&mut self) -> &mut WidgetCore {
+        &mut self.core
+    }
+
+    fn measure(&mut self, constraints: BoxConstraints, ctx: &mut MeasureCtx) -> Size {
         let w = constraints.max_width;
         let h = constraints
             .constrain(Size::new(w, self.total_content_height()))
             .height;
+
+        // Rows are uniform, so measuring them here — rather than during layout
+        // — keeps the measure pass the only place a child is sized.
+        let item_constraints = BoxConstraints::tight(Size::new(w, self.item_height));
+        for item in &mut self.items {
+            crate::traits::measure_widget(item.as_mut(), item_constraints, ctx);
+        }
+
         Size::new(w, h)
     }
 
-    fn layout(&mut self, rect: Rect) {
-        self.rect = rect;
+    fn layout(&mut self, _rect: Rect) {
         self.scroll_offset = self.scroll_offset.clamp(0, self.max_scroll_offset());
-
-        // Measure then layout all item widgets so their internal structure is initialized.
-        let item_constraints = BoxConstraints {
-            min_width: rect.width,
-            max_width: rect.width,
-            min_height: self.item_height,
-            max_height: self.item_height,
-        };
-        let style = crate::style::StyleSheet::dark();
-        let mut mctx = crate::traits::MeasureCtx { style: &style };
-        for (i, item) in self.items.iter_mut().enumerate() {
-            let _ = item.measure(item_constraints, &mut mctx);
-            let y = rect.y + i as i32 * self.item_height - self.scroll_offset;
-            item.layout(Rect::new(rect.x, y, rect.width, self.item_height));
-        }
+        self.place_items();
     }
 
     fn paint(&self, ctx: &mut PaintContext) {
+        let rect = self.layout_rect();
         let first = self.first_visible();
         let last = self.last_visible().min(self.items.len());
 
         // Clip to our viewport.
-        ctx.with_clip(self.rect, |ctx| {
+        ctx.with_clip(rect, |ctx| {
             for i in first..last {
-                let y = self.rect.y + i as i32 * self.item_height - self.scroll_offset;
-                let item_rect = Rect::new(self.rect.x, y, self.rect.width, self.item_height);
+                let y = rect.y + i as i32 * self.item_height - self.scroll_offset;
+                let item_rect = Rect::new(rect.x, y, rect.width, self.item_height);
 
                 // Draw selection highlight.
                 if self.selected == Some(i) {
@@ -139,7 +149,7 @@ impl Widget for ListViewWidget {
 
         // Focus ring.
         if self.focused {
-            ctx.draw_focus_ring(self.rect);
+            ctx.draw_focus_ring(rect);
         }
     }
 
@@ -169,22 +179,18 @@ impl Widget for ListViewWidget {
                     .clamp(0, self.max_scroll_offset());
 
                 if self.scroll_offset != old {
-                    // Re-layout items at new positions.
-                    for (i, item) in self.items.iter_mut().enumerate() {
-                        let y = self.rect.y + i as i32 * self.item_height - self.scroll_offset;
-                        item.layout(Rect::new(self.rect.x, y, self.rect.width, self.item_height));
-                    }
+                    self.place_items();
                     EventResponse::Consumed
                 } else {
                     EventResponse::Ignored
                 }
             }
 
-            WidgetEvent::PointerDown { y, .. } => {
-                if self.item_height <= 0 {
+            WidgetEvent::PointerDown { x, y, .. } => {
+                if self.item_height <= 0 || !self.layout_rect().contains(*x, *y) {
                     return EventResponse::Ignored;
                 }
-                let relative_y = *y - self.rect.y + self.scroll_offset;
+                let relative_y = *y - self.layout_rect().y + self.scroll_offset;
                 let index = (relative_y / self.item_height) as usize;
                 if index < self.items.len() {
                     self.selected = Some(index);
@@ -285,14 +291,6 @@ impl Widget for ListViewWidget {
 
     fn focus_policy(&self) -> FocusPolicy {
         FocusPolicy::StrongFocus
-    }
-
-    fn id(&self) -> WidgetId {
-        self.id
-    }
-
-    fn layout_rect(&self) -> Rect {
-        self.rect
     }
 
     fn children(&self) -> &[Box<dyn Widget>] {
