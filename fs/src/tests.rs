@@ -1364,6 +1364,218 @@ pub fn test_fileio_open_file_limit() -> TestResult {
 
 slopos_testing::stest!(name = test_fileio_open_file_limit);
 
+/// The account row is what refuses, and the errno is the one the call site
+/// already returned for a full table.
+///
+/// Drives a process to its `FdSlot` ceiling with the ceiling set *below* the
+/// table length, so the refusal provably comes from the quota rather than from
+/// running out of array.
+pub fn test_quota_fdslot_drive_to_full() -> TestResult {
+    use crate::fileio::file_open_for_process;
+    use slopos_abi::fs::O_RDONLY;
+    use slopos_abi::quota::{QuotaMode, ResourceKind};
+    use slopos_ostd::process::quota::{quota_mode, set_limit, set_quota_mode, stats};
+
+    const CEILING: u32 = 8;
+
+    let Some(path) = scratch_file(b"/fileio_test/quota_full.txt") else {
+        return TestResult::Fail;
+    };
+    let Some(scratch) = ScratchProcess::new() else {
+        return TestResult::Fail;
+    };
+    let table = scratch.table();
+    let account = table.account();
+
+    let restore = quota_mode();
+    set_quota_mode(QuotaMode::Enforce);
+    set_limit(account, ResourceKind::FdSlot, CEILING);
+
+    let mut opened = 0u32;
+    let mut first_failure = 0i32;
+    for _ in 0..CEILING + 4 {
+        let fd = file_open_for_process(table, path, O_RDONLY as u32);
+        if fd < 0 {
+            first_failure = fd;
+            break;
+        }
+        opened += 1;
+    }
+
+    let s = stats(account, ResourceKind::FdSlot);
+    set_quota_mode(restore);
+
+    if opened != CEILING {
+        return slopos_testing::fail!(
+            "opened {} descriptors against a ceiling of {}; first failure {}",
+            opened,
+            CEILING,
+            first_failure
+        );
+    }
+    if first_failure != slopos_abi::Errno::EMFILE.raw() {
+        return slopos_testing::fail!(
+            "quota refusal returned {}, want EMFILE ({})",
+            first_failure,
+            slopos_abi::Errno::EMFILE.raw()
+        );
+    }
+    let Some(s) = s else {
+        return slopos_testing::fail!("the account row vanished mid-test");
+    };
+    if s.used != CEILING {
+        return slopos_testing::fail!("used={} after filling to {}", s.used, CEILING);
+    }
+    if s.denials == 0 {
+        return slopos_testing::fail!("a refusal nobody counted is a silent denial");
+    }
+    TestResult::Pass
+}
+
+slopos_testing::stest!(name = test_quota_fdslot_drive_to_full);
+
+/// A refused open refunds exactly once, and closing gives every unit back.
+///
+/// The failure this exists to catch is the one the token design is built
+/// around: a mint that fails after the debit, leaving the row permanently
+/// short and the process permanently denied. `used` returning to its exact
+/// pre-test value is the observable form of "refunded exactly once" — an
+/// under-refund leaves it high, a double refund leaves it low.
+pub fn test_quota_fdslot_refusal_refunds_once() -> TestResult {
+    use crate::fileio::{file_close_fd, file_open_for_process};
+    use slopos_abi::fs::O_RDONLY;
+    use slopos_abi::quota::{QuotaMode, ResourceKind};
+    use slopos_ostd::process::quota::{quota_mode, set_limit, set_quota_mode, stats};
+
+    const CEILING: u32 = 4;
+
+    let Some(path) = scratch_file(b"/fileio_test/quota_refund.txt") else {
+        return TestResult::Fail;
+    };
+    let Some(scratch) = ScratchProcess::new() else {
+        return TestResult::Fail;
+    };
+    let table = scratch.table();
+    let account = table.account();
+    let baseline = stats(account, ResourceKind::FdSlot).map_or(0, |s| s.used);
+
+    let restore = quota_mode();
+    set_quota_mode(QuotaMode::Enforce);
+    set_limit(account, ResourceKind::FdSlot, baseline + CEILING);
+
+    let mut fds = slopos_ostd::KVec::new();
+    for _ in 0..CEILING {
+        let fd = file_open_for_process(table, path, O_RDONLY as u32);
+        if fd < 0 {
+            set_quota_mode(restore);
+            return slopos_testing::fail!("open under the ceiling failed with {}", fd);
+        }
+        if fds.push(fd).is_err() {
+            set_quota_mode(restore);
+            return slopos_testing::fail!("push");
+        }
+    }
+
+    // Refuse repeatedly: a refusal that under-refunds shows up as a row that
+    // drifts, which one refusal could hide.
+    for _ in 0..16 {
+        if file_open_for_process(table, path, O_RDONLY as u32) >= 0 {
+            set_quota_mode(restore);
+            return slopos_testing::fail!("an over-ceiling open succeeded");
+        }
+    }
+
+    let at_ceiling = stats(account, ResourceKind::FdSlot).map_or(0, |s| s.used);
+    if at_ceiling != baseline + CEILING {
+        set_quota_mode(restore);
+        return slopos_testing::fail!(
+            "used={} after 16 refusals, want {} — a refused charge is not the identity",
+            at_ceiling,
+            baseline + CEILING
+        );
+    }
+
+    for fd in fds.iter() {
+        file_close_fd(table, *fd);
+    }
+    let after = stats(account, ResourceKind::FdSlot).map_or(0, |s| s.used);
+    set_quota_mode(restore);
+
+    if after != baseline {
+        return slopos_testing::fail!(
+            "used={} after closing every descriptor, want the {} it started at",
+            after,
+            baseline
+        );
+    }
+    TestResult::Pass
+}
+
+slopos_testing::stest!(name = test_quota_fdslot_refusal_refunds_once);
+
+/// One process at its ceiling does not deny another.
+///
+/// The property the whole subsystem exists for, and the one a global table
+/// bound cannot provide: with a shared array, the first process to fill it
+/// denies everyone. Here the exhausted process is refused and its neighbour —
+/// whose account is a sibling row — opens normally.
+pub fn test_quota_fdslot_cross_process_isolation() -> TestResult {
+    use crate::fileio::file_open_for_process;
+    use slopos_abi::fs::O_RDONLY;
+    use slopos_abi::quota::{QuotaMode, ResourceKind};
+    use slopos_ostd::process::quota::{quota_mode, set_limit, set_quota_mode};
+
+    const CEILING: u32 = 4;
+
+    let Some(path) = scratch_file(b"/fileio_test/quota_isolation.txt") else {
+        return TestResult::Fail;
+    };
+    let Some(greedy) = ScratchProcess::new() else {
+        return TestResult::Fail;
+    };
+    let Some(neighbour) = ScratchProcess::new() else {
+        return TestResult::Fail;
+    };
+    let greedy_table = greedy.table();
+    let neighbour_table = neighbour.table();
+
+    let restore = quota_mode();
+    set_quota_mode(QuotaMode::Enforce);
+    set_limit(greedy_table.account(), ResourceKind::FdSlot, CEILING);
+
+    let mut opened = 0u32;
+    while file_open_for_process(greedy_table, path, O_RDONLY as u32) >= 0 {
+        opened += 1;
+        if opened > CEILING {
+            break;
+        }
+    }
+
+    let neighbour_fd = file_open_for_process(neighbour_table, path, O_RDONLY as u32);
+    set_quota_mode(restore);
+
+    if opened != CEILING {
+        return slopos_testing::fail!("the greedy process opened {opened}, want {CEILING}");
+    }
+    if neighbour_fd < 0 {
+        return slopos_testing::fail!(
+            "a neighbour was denied ({}) because another process hit its ceiling",
+            neighbour_fd
+        );
+    }
+    TestResult::Pass
+}
+
+slopos_testing::stest!(name = test_quota_fdslot_cross_process_isolation);
+
+/// A file to open repeatedly, or `None` if the scratch tree is unavailable.
+fn scratch_file(path: &'static [u8]) -> Option<&'static [u8]> {
+    let _ = vfs_mkdir(b"/fileio_test");
+    let handle = vfs_open(path, true).ok()?;
+    handle.write(0, b"x").ok()?;
+    Some(path)
+}
+
 /// A sealed inode refuses every mutation, and an unsealed one in the same
 /// mount refuses none of them.
 ///

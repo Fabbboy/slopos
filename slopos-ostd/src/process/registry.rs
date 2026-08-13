@@ -62,7 +62,8 @@ use crate::mm::{AllocError, KArc};
 use crate::sync::{LOCK_LEVEL_REGISTRY, SpinLock};
 use crate::{KVec, lock_class};
 
-use super::account::{AccountId, alloc_generation, root_account};
+use super::account::{AccountId, alloc_generation};
+use super::quota;
 use super::{Process, pack_process_handle};
 
 /// Slot width of the packed process handle.
@@ -236,12 +237,23 @@ fn new_process(
     account_parent: AccountId,
 ) -> Result<KArc<Process>, ProcessAllocError> {
     let id = alloc_process_id().ok_or(ProcessAllocError::IdExhausted)?;
+    // The account's arena slot is the process id, which is drawn from a
+    // lowest-free bitmap over `1..=MAX_PROCESS_ID` — so it never collides with
+    // the root's slot 0, and the arena needs no allocator of its own.
     let account = AccountId::from_parts(id, alloc_generation());
     let parent_packed = parent.map_or(super::PROCESS_HANDLE_NONE, pack_process_handle);
-    KArc::try_new(Process::new(id, account, account_parent, parent_packed)).map_err(|_| {
-        release_process_id(id);
-        ProcessAllocError::OutOfMemory
-    })
+    let process =
+        KArc::try_new(Process::new(id, account, account_parent, parent_packed)).map_err(|_| {
+            release_process_id(id);
+            ProcessAllocError::OutOfMemory
+        })?;
+    // A creation refused for depth leaves the process with an account that
+    // names no row, which every arena operation treats as a vacuous success.
+    // That is the right failure: an eighth-generation descendant is not worth
+    // refusing a spawn over, and its charges still reach its ancestors through
+    // the accounts that do have rows.
+    let _ = quota::account_create(account, account_parent);
+    Ok(process)
 }
 
 // ---------------------------------------------------------------------------
@@ -314,7 +326,7 @@ pub fn process_spawn(
 /// "billed to whoever spawned me", and a call site that reaches for the root
 /// should have to name it.
 pub fn process_spawn_root() -> Result<KArc<Process>, ProcessAllocError> {
-    process_spawn(None, root_account())
+    process_spawn(None, quota::root())
 }
 
 /// Resolve a handle to an owning reference.
@@ -381,8 +393,7 @@ pub fn process_retire(handle: Handle<Process>) -> bool {
 ///
 /// The generation counter deliberately survives: it is the only thing
 /// separating a handle minted before the reset from the slot's next occupant,
-/// so it stays globally monotonic across one. Same contract `VmSlotAlloc::reset`
-/// keeps for its own.
+/// so it stays globally monotonic across one.
 pub fn process_registry_reset() {
     let removed = with_registry_mut(|table| table.drain()).unwrap_or_default();
     // Off-lock: a released weak handle can be the allocation's last reference.

@@ -407,6 +407,7 @@ check-framekernel-gates:
     scripts/check_registry_sections.sh --self-test
     scripts/check_lockdep_headroom.sh --self-test
     scripts/check_safe_contract_surface.sh --self-test
+    scripts/check_charge_linearity.sh --self-test
     scripts/check_vendor_pin.sh
     scripts/check_unsafe_outside_ostd.sh
     scripts/check_unsafe_expansion.sh
@@ -421,6 +422,7 @@ check-framekernel-gates:
     scripts/check_task_ownership.sh
     scripts/check_process_designator.sh
     scripts/check_safe_contract_surface.sh
+    scripts/check_charge_linearity.sh
     scripts/tcb_ratio.sh --max 1.0
 
 # Run every framekernel-discipline gate in one shot. Requires a prior

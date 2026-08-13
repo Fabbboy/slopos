@@ -16,6 +16,7 @@ use slopos_ostd::sync::{
     InitFlag, LOCK_LEVEL_REGISTRY, LOCK_LEVEL_RESOURCE, LockClassKey, SpinLock, SpinLockGuard,
 };
 
+use slopos_abi::quota::FdSlot;
 use slopos_abi::task::INVALID_PROCESS_ID;
 use slopos_kernel_services::driver_runtime::{
     current_task_controlling_tty, current_task_id, current_task_pgrp_handle, current_task_sid,
@@ -24,7 +25,8 @@ use slopos_kernel_services::driver_runtime::{
 use slopos_kernel_services::syscall_services::tty;
 use slopos_mm::memory_layout_defs::MAX_PROCESSES;
 use slopos_ostd::handle::Handle;
-use slopos_ostd::process::{Process, ProcessId};
+use slopos_ostd::process::quota::{Charge, Reservation, try_charge};
+use slopos_ostd::process::{AccountId, Process, ProcessId, root_account};
 
 /// Descriptors a process may hold at once — the `RLIMIT_NOFILE` of this
 /// kernel, and the length of every per-process descriptor table.
@@ -244,14 +246,78 @@ impl FdFlags {
 
 /// One file-descriptor-number → open-file mapping. `cloexec` and
 /// `close_on_fork` are per-fd (never shared across dup aliases — they
-/// live here, not on the shared [`OpenFile`]). Cloning an `FdEntry`
-/// bumps the `OpenFile` strong count (a dup/fork alias); dropping one is
-/// a close of that alias.
-#[derive(Clone)]
+/// live here, not on the shared [`OpenFile`]). Dropping one is a close of
+/// that alias, and the same drop refunds the slot.
+///
+/// Deliberately **not** `Clone`: the charge is the reason. A dup or fork
+/// alias occupies a second descriptor number, and for fork that number is in
+/// the *child's* table and must be charged to the child's account. A derived
+/// `Clone` would copy the parent's token and refund the parent twice, so the
+/// alias paths call [`try_alias`](Self::try_alias) and name the account the
+/// new number actually belongs to.
 pub(super) struct FdEntry {
     pub(super) open_file: KArc<OpenFile>,
     pub(super) cloexec: bool,
     pub(super) close_on_fork: bool,
+    /// The descriptor number this entry occupies. Refunded by this struct's
+    /// own `Drop`, with the amount it holds rather than one recomputed at the
+    /// refund site.
+    slot_charge: Charge<FdSlot>,
+}
+
+impl FdEntry {
+    /// Build an entry, consuming the reservation that made room for it.
+    pub(super) fn new(
+        open_file: KArc<OpenFile>,
+        flags: FdFlags,
+        reservation: Reservation<FdSlot>,
+    ) -> Self {
+        Self {
+            open_file,
+            cloexec: flags.cloexec,
+            close_on_fork: flags.close_on_fork,
+            slot_charge: Charge::commit(reservation),
+        }
+    }
+
+    /// Another descriptor number naming the same open file, charged to
+    /// `account`. `None` when that account has no room.
+    pub(super) fn try_alias(&self, account: AccountId) -> Option<Self> {
+        let reservation = try_charge::<FdSlot>(account, 1).ok()?;
+        Some(Self::new(
+            self.open_file.clone(),
+            FdFlags {
+                cloexec: self.cloexec,
+                close_on_fork: self.close_on_fork,
+            },
+            reservation,
+        ))
+    }
+
+    /// Point this descriptor number at a different open file, keeping the
+    /// charge it already holds and handing back the description it displaced
+    /// so the caller can drop it off-lock.
+    ///
+    /// The `dup2`-onto-a-live-descriptor path. The number stays occupied
+    /// throughout, so exactly one charge exists for it at every instant —
+    /// charging a fresh one and refunding the old would be two writes where
+    /// the resource never changed hands.
+    pub(super) fn replacing(
+        self,
+        open_file: KArc<OpenFile>,
+        close_on_fork: bool,
+    ) -> (Self, KArc<OpenFile>) {
+        let displaced = self.open_file;
+        (
+            Self {
+                open_file,
+                cloexec: self.cloexec,
+                close_on_fork,
+                slot_charge: self.slot_charge,
+            },
+            displaced,
+        )
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -463,6 +529,25 @@ impl FdTable {
         match self {
             Self::Kernel => INVALID_PROCESS_ID,
             Self::Process(process) => process.id(),
+        }
+    }
+
+    /// The account a descriptor number in this table is charged to.
+    ///
+    /// The kernel's own table names the root account **explicitly**, rather
+    /// than falling back to it when a lookup misses: a lookup-failure default
+    /// would silently bill a user process's descriptors to the kernel the
+    /// moment its process went away, which is the account-scope form of the
+    /// kernel-descriptor-table fallback this enum already exists to prevent.
+    /// A reaped process answers with its own now-dark account, whose charges
+    /// are vacuous — never the root's.
+    #[inline]
+    pub fn account(self) -> AccountId {
+        match self {
+            Self::Kernel => root_account(),
+            Self::Process(process) => process
+                .get()
+                .map_or(AccountId::NONE, |process| process.account()),
         }
     }
 }

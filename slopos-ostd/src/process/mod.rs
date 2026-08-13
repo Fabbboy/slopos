@@ -45,6 +45,7 @@
 //! *decision* — "is this the last task of this process" — not the teardown.
 
 pub mod account;
+pub mod quota;
 mod registry;
 
 use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
@@ -52,6 +53,7 @@ use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use crate::handle::{Handle, HandleError};
 
 pub use account::{ACCOUNT_SLOT_BITS, AccountId, MAX_ACCOUNTS, root_account};
+pub use quota::{Charge, Reservation, TryChargeError, try_charge};
 pub use registry::{
     MAX_PROCESS_ID, PROCESS_SLOT_BITS, ProcessAllocError, ProcessTable, process_count,
     process_find_by_id, process_for_handle, process_registry_reset, process_resolve,
@@ -289,7 +291,13 @@ impl Drop for Process {
     ///
     /// The registry slot is *not* released here: releasing it is what caused
     /// this drop.
+    ///
+    /// The account row goes dark here rather than at the reap, so a charge
+    /// that outlives its process — an in-flight `SCM_RIGHTS` reference, a
+    /// keepalive pin — refunds against a released row and is a defined no-op
+    /// instead of a debit against whoever holds the slot next.
     fn drop(&mut self) {
+        quota::account_release(self.account);
         registry::release_process_id(self.id);
     }
 }

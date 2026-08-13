@@ -10,6 +10,7 @@ pub mod futex;
 pub mod kconsole;
 pub mod lifecycle;
 pub mod per_cpu;
+pub mod quota_console;
 pub mod runtime;
 #[cfg(feature = "test-hooks")]
 pub mod sched_tests;

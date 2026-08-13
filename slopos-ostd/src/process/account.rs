@@ -108,9 +108,8 @@ impl core::fmt::Debug for AccountId {
 /// Monotonic source of account generations.
 ///
 /// Global rather than per-row so an id minted before a test-scope reset can
-/// never match the slot's next occupant — the property
-/// [`VmSlotAlloc::reset`](../../../mm/src/process_vm.rs) preserves for the
-/// same reason. Starts at 1 because 0 is [`AccountId::NONE`].
+/// never match the slot's next occupant. Starts at 1 because 0 is
+/// [`AccountId::NONE`].
 static NEXT_GENERATION: AtomicU64 = AtomicU64::new(1);
 
 /// Draw a fresh, never-reused generation.
@@ -118,7 +117,7 @@ static NEXT_GENERATION: AtomicU64 = AtomicU64::new(1);
 /// Wraps to 1 rather than 0 at [`GENERATION_MAX`]. A wrap needs 2^48
 /// bindings, which at one process per microsecond is nine years of
 /// uninterrupted spawning; it is handled rather than relied upon.
-pub(super) fn alloc_generation() -> u64 {
+pub(crate) fn alloc_generation() -> u64 {
     let mut current = NEXT_GENERATION.load(Ordering::Relaxed);
     loop {
         let next = if current >= GENERATION_MAX {
@@ -156,6 +155,12 @@ pub fn root_account() -> AccountId {
         // Lost the race; the winner's id is the one everyone uses.
         Err(winner) => AccountId::from_raw(winner),
     }
+}
+
+/// Draw a generation for an account built without a process behind it.
+#[cfg(test)]
+pub(crate) fn alloc_generation_for_test() -> u64 {
+    alloc_generation()
 }
 
 #[cfg(test)]

@@ -67,6 +67,13 @@ fn install_fd_entry(
         return Errno::ENFILE.raw();
     };
 
+    // Charged before the table lock is taken, so a refusal never unwinds
+    // under it. The reservation refunds on every early return below.
+    let Ok(reservation) = try_charge::<FdSlot>(table.account(), 1) else {
+        drop(open_file);
+        return Errno::EMFILE.raw();
+    };
+
     let Some(mut inner) = lock_table_slot(table) else {
         // `open_file` drops here → backing released once.
         return Errno::ESRCH.raw();
@@ -75,11 +82,14 @@ fn install_fd_entry(
     let slot_result = {
         match find_free_slot(&inner) {
             Some(slot_idx) => {
-                inner.descriptors[slot_idx] = Some(FdEntry {
+                inner.descriptors[slot_idx] = Some(FdEntry::new(
                     open_file,
-                    cloexec,
-                    close_on_fork,
-                });
+                    FdFlags {
+                        cloexec,
+                        close_on_fork,
+                    },
+                    reservation,
+                ));
                 Ok(slot_idx as c_int)
             }
             None => Err(open_file),
@@ -610,6 +620,7 @@ pub fn file_pipe_create(
         return Errno::ENFILE.raw() as _;
     };
 
+    let account = table.account();
     let Some(mut inner) = lock_table_slot(table) else {
         drop(read_of);
         drop(write_of);
@@ -621,12 +632,17 @@ pub fn file_pipe_create(
     // the pipe slot) are torn down *after* the lock drops
     // (detach-then-drop). On success install both entries.
     let result: Result<(c_int, c_int), Errno> = (|| {
+        let read_res = try_charge::<FdSlot>(account, 1).map_err(|_| Errno::EMFILE)?;
+        let write_res = try_charge::<FdSlot>(account, 1).map_err(|_| Errno::EMFILE)?;
         let read_idx = find_free_slot(&inner).ok_or(Errno::EMFILE)?;
-        inner.descriptors[read_idx] = Some(FdEntry {
-            open_file: read_of.clone(),
-            cloexec,
-            close_on_fork: false,
-        });
+        inner.descriptors[read_idx] = Some(FdEntry::new(
+            read_of.clone(),
+            FdFlags {
+                cloexec,
+                close_on_fork: false,
+            },
+            read_res,
+        ));
         let write_idx = match find_free_slot(&inner) {
             Some(idx) => idx,
             None => {
@@ -634,11 +650,14 @@ pub fn file_pipe_create(
                 return Err(Errno::EMFILE);
             }
         };
-        inner.descriptors[write_idx] = Some(FdEntry {
-            open_file: write_of.clone(),
-            cloexec,
-            close_on_fork: false,
-        });
+        inner.descriptors[write_idx] = Some(FdEntry::new(
+            write_of.clone(),
+            FdFlags {
+                cloexec,
+                close_on_fork: false,
+            },
+            write_res,
+        ));
         Ok((read_idx as c_int, write_idx as c_int))
     })();
 
@@ -668,6 +687,7 @@ pub fn file_dup_fd(table: FdTable, old_fd: c_int) -> c_int {
 }
 
 fn file_dup_fd_min(table: FdTable, old_fd: c_int, min_fd: usize) -> c_int {
+    let account = table.account();
     with_table_slot(table, |inner| {
         let Some(src) = get_fd_entry(inner, old_fd) else {
             return Errno::EBADF.raw() as _;
@@ -679,20 +699,25 @@ fn file_dup_fd_min(table: FdTable, old_fd: c_int, min_fd: usize) -> c_int {
         // `close_on_fork` is not settable at all and names the described
         // object's affinity to the process that opened it, so an alias
         // must not cross a process boundary its source would not.
-        let open_file = src.open_file.clone();
-        let close_on_fork = src.close_on_fork;
+        // The alias is built before the free-slot scan so the immutable
+        // borrow of `src` ends here rather than spanning the mutable install.
+        let Some(mut alias) = src.try_alias(account) else {
+            return Errno::EMFILE.raw() as _;
+        };
+        // A plain dup never copies the source's `cloexec`: it is a
+        // user-settable preference on the fd number, not a property of the
+        // description. `close_on_fork` does carry over — `try_alias` keeps it
+        // — because it is not settable and names the described object's
+        // affinity to the process that opened it.
+        alias.cloexec = false;
 
         let Some(new_idx) = find_free_slot_from(inner, min_fd) else {
-            // `open_file` drops here under the lock — decrement only, no
-            // teardown (the source alias keeps it alive).
+            // `alias` drops here under the lock — a decrement and a refund,
+            // no teardown (the source alias keeps the open file alive).
             return Errno::EMFILE.raw() as _;
         };
 
-        inner.descriptors[new_idx] = Some(FdEntry {
-            open_file,
-            cloexec: false,
-            close_on_fork,
-        });
+        inner.descriptors[new_idx] = Some(alias);
         new_idx as c_int
     })
     .unwrap_or(Errno::ESRCH.raw() as _)
@@ -739,21 +764,42 @@ fn dup_into(table: FdTable, old_fd: c_int, new_fd: c_int, cloexec: bool, is_dup3
         };
     }
 
+    let account = table.account();
     let outcome = with_table_slot(table, |inner| {
         let Some(src) = get_fd_entry(inner, old_fd) else {
             return Err(Errno::EBADF);
         };
+        // dup2 onto a live descriptor frees one number as it takes one, so
+        // the target's own charge is what pays for the new entry when the
+        // slot is occupied. Refusing only when the target is *free* is what
+        // keeps a replace from tripping a ceiling it does not actually cross.
+        let occupied = inner.descriptors[new_fd as usize].is_some();
+        let alias = if occupied {
+            None
+        } else {
+            match src.try_alias(account) {
+                Some(alias) => Some(alias),
+                None => return Err(Errno::EMFILE),
+            }
+        };
         let open_file = src.open_file.clone();
         let close_on_fork = src.close_on_fork;
-        // Detach any occupant of the target slot; it is dropped by the
-        // caller after the lock is released.
+
         let displaced = inner.descriptors[new_fd as usize].take();
-        inner.descriptors[new_fd as usize] = Some(FdEntry {
-            open_file,
-            cloexec,
-            close_on_fork,
-        });
-        Ok(displaced)
+        let (mut entry, released) = match (alias, displaced) {
+            (Some(alias), _) => (alias, None),
+            // Reuse the displaced entry's charge for the replacement: one
+            // number stays occupied throughout, so exactly one charge should
+            // exist for it at every instant.
+            (None, Some(previous)) => {
+                let (entry, released) = previous.replacing(open_file, close_on_fork);
+                (entry, Some(released))
+            }
+            (None, None) => return Err(Errno::EMFILE),
+        };
+        entry.cloexec = cloexec;
+        inner.descriptors[new_fd as usize] = Some(entry);
+        Ok(released)
     });
 
     match outcome {
@@ -944,6 +990,13 @@ pub fn fileio_clone_file_ref(table: FdTable, fd: i32) -> Option<FileRef> {
 /// (cloexec clear, POSIX default for received fds); on failure it drops
 /// here, closing that alias.
 pub fn fileio_install_file_ref(table: FdTable, file: FileRef) -> c_int {
+    // The receiver pays for the number it is about to hold. The sender's
+    // custody charge, which kept the reference alive in flight, is released
+    // by the queue that held it.
+    let Ok(reservation) = try_charge::<FdSlot>(table.account(), 1) else {
+        drop(file);
+        return Errno::EMFILE.raw() as _;
+    };
     let Some(mut inner) = lock_table_slot(table) else {
         return Errno::ESRCH.raw() as _;
     };
@@ -953,11 +1006,7 @@ pub fn fileio_install_file_ref(table: FdTable, file: FileRef) -> c_int {
         drop(file);
         return Errno::EMFILE.raw() as _;
     };
-    inner.descriptors[idx] = Some(FdEntry {
-        open_file: file.open_file,
-        cloexec: false,
-        close_on_fork: false,
-    });
+    inner.descriptors[idx] = Some(FdEntry::new(file.open_file, FdFlags::NONE, reservation));
     idx as c_int
 }
 
@@ -974,18 +1023,30 @@ pub fn fileio_install_file_ref_at(
         drop(file);
         return Errno::EBADF.raw() as _;
     }
+    let account = table.account();
     let displaced = {
         let Some(mut inner) = lock_table_slot(table) else {
             // No table: no lock held here, so close the alias lock-free.
             drop(file);
             return Errno::ESRCH.raw() as _;
         };
+        // Displace first: installing onto a live descriptor frees one number
+        // as it takes one.
         let displaced = inner.descriptors[target_fd as usize].take();
-        inner.descriptors[target_fd as usize] = Some(FdEntry {
-            open_file: file.open_file,
-            cloexec,
-            close_on_fork: false,
-        });
+        let Ok(reservation) = try_charge::<FdSlot>(account, 1) else {
+            inner.descriptors[target_fd as usize] = displaced;
+            drop(inner);
+            drop(file);
+            return Errno::EMFILE.raw() as _;
+        };
+        inner.descriptors[target_fd as usize] = Some(FdEntry::new(
+            file.open_file,
+            FdFlags {
+                cloexec,
+                close_on_fork: false,
+            },
+            reservation,
+        ));
         displaced
     };
     // Slot lock released above; any displaced alias tears down lock-free.

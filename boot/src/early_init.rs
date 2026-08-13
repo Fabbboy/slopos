@@ -593,6 +593,34 @@ fn boot_step_boot_config_fn(_ctx: &mut BootCtx<'_, BspInit>) {
         }
     }
 
+    // Resource-accounting refusal policy. `quota=warn` grants an over-limit
+    // charge and counts it, which is the only tier a peak can be measured on:
+    // a system that dies at its first over-limit cannot report what its real
+    // high-water mark would have been. `quota=off` consults no ceiling at all
+    // while the counters keep moving, so attribution survives with the
+    // enforcement cost removed.
+    for token in cmdline.split_whitespace() {
+        if let Some(value) = token.strip_prefix("quota=") {
+            match value {
+                "off" => {
+                    slopos_ostd::process::quota::set_quota_mode(slopos_abi::quota::QuotaMode::Off);
+                    boot_info(b"Boot option: quota=off (ceilings not consulted)\0");
+                }
+                "warn" => {
+                    slopos_ostd::process::quota::set_quota_mode(slopos_abi::quota::QuotaMode::Warn);
+                    boot_info(b"Boot option: quota=warn (grant and count, do not refuse)\0");
+                }
+                "enforce" | "on" => {
+                    slopos_ostd::process::quota::set_quota_mode(
+                        slopos_abi::quota::QuotaMode::Enforce,
+                    );
+                    boot_info(b"Boot option: quota=enforce\0");
+                }
+                _ => boot_info(b"Boot option: quota= ignored (want off|warn|enforce)\0"),
+            }
+        }
+    }
+
     // Lockup detector. `watchdog=off` disables it outright,
     // `watchdog.miss_threshold=` sets the consecutive unchanged samples a
     // CPU may accumulate before it is reported (100 = 1 s at the 100 Hz

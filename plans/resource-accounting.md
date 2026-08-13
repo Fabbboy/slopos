@@ -168,10 +168,7 @@ desktop OS has a hard 256-process, 16-mount, 64-pipe, 256-open-file ceiling.
 - **Charged** is the per-principal ceiling: an account row, not an array bound. The sum of
   the per-principal limits is what bounds the boot-sized spine.
 - **Declared** is the residue: a fixed array with a measured peak and a written rationale
-  in the gate file. Three land here and are named individually rather than waved at:
-  - `VM_SLOT_ALLOC` (`mm/src/process_vm.rs:141`) — an *allocator*, not a capacity limit,
-    and `.bss` because "nothing here may allocate". Reshaped to the same
-    allocate-spine-off-lock pattern so the `.bss` contract holds at a boot-sized width.
+  in the gate file. Two land here and are named individually rather than waved at:
   - `EventBus`'s static `WaitQueue` arrays — genuinely fixed, and they need restructuring
     regardless (`queue_for` does `% MAX_SOCKETS`, so
     AF_INET sockets 0 and 64 share a wait queue once the slab grows past 64).
@@ -666,6 +663,10 @@ keepalive frames their own second charge with its refund site in the driver's TX
 Then `Pages` per VMA.
 
 ### Phase 5 — `KernelMeta`, then reclaim
+
+`VM_SLOT_ALLOC` was listed here as declared residue and is no longer a thing: the
+address-space table is keyed on the process registry slot (`slot_for_handle`), so the
+separate slot allocator and its generation counter are gone. Nothing to reshape.
 
 Page tables (three mint sites in `slopos-ostd/src/mm/page_table.rs`), task kernel and data
 stacks, slab refill charged to the root, and the `unix_connect` FIFOs. Sequenced last so it

@@ -20,9 +20,23 @@ fn open_console_fd(
     new_open_file(tty_ops, console_tty.0 as usize, flags, 0, Some(backing))
 }
 
-fn bootstrap_console_fds(inner: &mut FileTableSlotInner, external_ops: &ExternalOpsState) {
+fn bootstrap_console_fds(
+    inner: &mut FileTableSlotInner,
+    external_ops: &ExternalOpsState,
+    account: AccountId,
+) {
     let tty_ops = effective_tty_ops(external_ops);
     let console_tty = tty::default_console_tty();
+
+    let Ok(stdin_res) = try_charge::<FdSlot>(account, 1) else {
+        return;
+    };
+    let Ok(stdout_res) = try_charge::<FdSlot>(account, 1) else {
+        return;
+    };
+    let Ok(stderr_res) = try_charge::<FdSlot>(account, 1) else {
+        return;
+    };
 
     // One console open shared by all three standard fds; each `OpenFile`
     // holds a clone. All-or-nothing: on any failure the already-built
@@ -42,21 +56,9 @@ fn bootstrap_console_fds(inner: &mut FileTableSlotInner, external_ops: &External
         return;
     };
 
-    inner.descriptors[0] = Some(FdEntry {
-        open_file: stdin,
-        cloexec: false,
-        close_on_fork: false,
-    });
-    inner.descriptors[1] = Some(FdEntry {
-        open_file: stdout,
-        cloexec: false,
-        close_on_fork: false,
-    });
-    inner.descriptors[2] = Some(FdEntry {
-        open_file: stderr,
-        cloexec: false,
-        close_on_fork: false,
-    });
+    inner.descriptors[0] = Some(FdEntry::new(stdin, FdFlags::NONE, stdin_res));
+    inner.descriptors[1] = Some(FdEntry::new(stdout, FdFlags::NONE, stdout_res));
+    inner.descriptors[2] = Some(FdEntry::new(stderr, FdFlags::NONE, stderr_res));
 }
 
 /// Lift the lowest-numbered descriptor out of `slot`, holding its lock for
@@ -91,11 +93,22 @@ pub fn fileio_create_table_for_process(process: Handle<Process>) -> i32 {
         return -1;
     };
     let external_ops = with_open_files(|state| state.external_ops);
+    let account = account_of(process);
     let mut inner = slot.inner.lock();
     inner.in_use = true;
     inner.descriptors = descriptors;
-    bootstrap_console_fds(&mut inner, &external_ops);
+    bootstrap_console_fds(&mut inner, &external_ops, account);
     0
+}
+
+/// The account a process's descriptor numbers are charged to.
+///
+/// [`AccountId::NONE`] for a handle that no longer resolves, which every arena
+/// operation treats as a vacuous success — never the root's account, which
+/// would bill the kernel for a user process's descriptors.
+fn account_of(process: Handle<Process>) -> AccountId {
+    slopos_ostd::process::process_for_handle(process)
+        .map_or(AccountId::NONE, |process| process.account())
 }
 
 /// Claim `process`'s own table slot; the caller then locks it and sets
@@ -228,6 +241,10 @@ pub fn fileio_clone_table_for_process(src: FdTable, dst: Handle<Process>) -> i32
         Some(slot) => slot,
         None => return -1,
     };
+    // The child pays for its own descriptor numbers. A cloned entry carrying
+    // the parent's token would refund the parent when the *child* closed it,
+    // which is the double-refund the non-`Clone` `FdEntry` exists to prevent.
+    let dst_account = account_of(dst);
     let mut snapshot: KVec<(usize, FdEntry)> = KVec::new();
     {
         let guard = src_slot.inner.lock();
@@ -239,9 +256,16 @@ pub fn fileio_clone_table_for_process(src: FdTable, dst: Handle<Process>) -> i32
             if src_fd.close_on_fork {
                 continue;
             }
-            if snapshot.push((i, src_fd.clone())).is_err() {
+            // A child that cannot afford the parent's descriptor population
+            // fails the fork rather than starting life with a partial table:
+            // an inherited fd that silently went missing is a far worse
+            // failure than an `EAGAIN` the caller can see.
+            let Some(alias) = src_fd.try_alias(dst_account) else {
+                return -1;
+            };
+            if snapshot.push((i, alias)).is_err() {
                 // Allocation failed mid-snapshot: drop the partial clones
-                // (decrement only — src keeps every `OpenFile` alive).
+                // (decrement and refund — src keeps every `OpenFile` alive).
                 return -1;
             }
         }

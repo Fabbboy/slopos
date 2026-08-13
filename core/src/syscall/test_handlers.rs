@@ -108,6 +108,7 @@ define_syscall!(syscall_run_userland_tests (ctx) -> Result<(), Errno> {
     // The userland phase drives connect/recv/exec through locks the kernel
     // phase never reaches, so this is the run's true pool high-water mark.
     slopos_ostd::kdiag::kdiag_dump_lock_graph("post-userland-tests");
+    slopos_sched::quota_console::quota_report("post-userland-tests");
 
     let _ = utest_rc;
     let _ = kernel_rc;
