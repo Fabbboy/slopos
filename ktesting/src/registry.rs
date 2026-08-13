@@ -76,24 +76,67 @@ fn cmp_desc(a: &&TestDesc, b: &&TestDesc) -> Ordering {
     }
 }
 
-/// Collect every registry entry into a heap-backed vector and sort by
-/// `(module, name)` byte order. Insertion sort to keep the implementation
-/// alloc-light and avoid pulling generic slice-sort into the kernel.
-pub fn registry_sorted() -> Result<KVec<&'static TestDesc>, AllocError> {
-    let mut out: KVec<&'static TestDesc> = KVec::new();
-    for desc in registry_iter() {
-        out.push(desc)?;
-    }
-    let slice: &mut [&'static TestDesc] = &mut out;
-    let len = slice.len();
-    let mut i = 1usize;
-    while i < len {
-        let mut j = i;
-        while j > 0 && cmp_desc(&slice[j], &slice[j - 1]) == Ordering::Less {
-            slice.swap(j, j - 1);
-            j -= 1;
+/// One bottom-up merge pass: merge each adjacent pair of `width`-sized sorted
+/// runs from `src` into `dst`. Stable — ties resolve to the left run.
+fn merge_pass(src: &[&'static TestDesc], dst: &mut [&'static TestDesc], width: usize) {
+    let len = src.len();
+    let mut start = 0usize;
+    while start < len {
+        let mid = core::cmp::min(start + width, len);
+        let end = core::cmp::min(start + 2 * width, len);
+        let (mut i, mut j) = (start, mid);
+        let mut k = start;
+        while k < end {
+            let take_left = if i >= mid {
+                false
+            } else if j >= end {
+                true
+            } else {
+                cmp_desc(&src[j], &src[i]) != Ordering::Less
+            };
+            if take_left {
+                dst[k] = src[i];
+                i += 1;
+            } else {
+                dst[k] = src[j];
+                j += 1;
+            }
+            k += 1;
         }
-        i += 1;
+        start = end;
     }
-    Ok(out)
+}
+
+/// Collect every registry entry into a heap-backed vector and sort by
+/// `(module, name)` byte order. Bottom-up merge sort over a second buffer of
+/// pointers: the registry holds thousands of entries and an O(n^2) sort here
+/// costs more wall-clock than the test run it is ordering.
+pub fn registry_sorted() -> Result<KVec<&'static TestDesc>, AllocError> {
+    let mut src: KVec<&'static TestDesc> = KVec::new();
+    for desc in registry_iter() {
+        src.push(desc)?;
+    }
+    let len = src.len();
+    if len < 2 {
+        return Ok(src);
+    }
+
+    let mut dst: KVec<&'static TestDesc> = KVec::with_capacity(len)?;
+    for &desc in src.iter() {
+        dst.push(desc)?;
+    }
+
+    let mut width = 1usize;
+    let mut sorted_in_src = true;
+    while width < len {
+        if sorted_in_src {
+            merge_pass(&src, &mut dst, width);
+        } else {
+            merge_pass(&dst, &mut src, width);
+        }
+        sorted_in_src = !sorted_in_src;
+        width *= 2;
+    }
+
+    Ok(if sorted_in_src { src } else { dst })
 }
