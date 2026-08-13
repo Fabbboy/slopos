@@ -6,7 +6,7 @@ use slopos_arch::cpu;
 use slopos_ostd::KArc;
 use slopos_ostd::kdiag_timestamp;
 use slopos_ostd::process::{
-    AccountId, PROCESS_HANDLE_NONE, Process, ProcessId, process_retire, process_spawn, root_account,
+    AccountId, PROCESS_HANDLE_NONE, Process, ProcessId, process_retire, process_spawn,
 };
 use slopos_ostd::string::bytes_as_str;
 use slopos_ostd::task::ops::{
@@ -134,7 +134,7 @@ impl ProcessResourceLease {
     fn mint_process(parent: Option<&Process>) -> Option<KArc<Process>> {
         let (wait_parent, account_parent) = match parent {
             Some(parent) => (parent.handle(), parent.account()),
-            None => (None, root_account()),
+            None => (None, slopos_ostd::process::quota::root()),
         };
         match process_spawn(wait_parent, account_parent) {
             Ok(process) => Some(process),

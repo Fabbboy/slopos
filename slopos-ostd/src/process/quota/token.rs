@@ -153,11 +153,21 @@ impl<A: Refundable> Charge<A> {
         if reservation.account() != self.account {
             return self;
         }
-        let (_, amount) = reservation.into_parts();
-        let (account, held) = self.into_parts();
+        // Saturating here would be a phantom debit: the row has already been
+        // charged for `amount`, so a token that caps below `held + amount`
+        // refunds less than was taken and the difference is never given back.
+        // Refuse the extension instead — the reservation's `Drop` gives its
+        // debit straight back, which is the identity the whole design turns
+        // on. Reaching this needs a single object holding 4 billion units,
+        // which no ceiling permits; it is handled rather than relied upon.
+        let Some(total) = self.amount.checked_add(reservation.amount()) else {
+            return self;
+        };
+        let _ = reservation.into_parts();
+        let (account, _) = self.into_parts();
         Self {
             account,
-            amount: held.saturating_add(amount),
+            amount: total,
             _axis: PhantomData,
         }
     }
