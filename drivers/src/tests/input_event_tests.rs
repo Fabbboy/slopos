@@ -204,3 +204,78 @@ slopos_testing::stest!(
     name = test_input_slot_release_drops_queued_events,
     suite = input_event
 );
+
+/// The IRQ-driven routing path never claims a queue slot.
+///
+/// `input_route_key_full` runs in the PS/2 IRQ handler, where there is no
+/// principal to charge for a slot and no errno path to refuse on. A claim
+/// there acquires one of `MAX_INPUT_TASKS` slots on behalf of a task that
+/// never asked, at a point that cannot say no — so routing looks up, and only
+/// a syscall claims.
+///
+/// Routes a key at a task holding focus but with no queue, and asserts no slot
+/// was taken. Focus is set through the raw state rather than
+/// `input_set_keyboard_focus`, which legitimately claims: what is under test
+/// is the routing path in isolation.
+pub fn test_input_routing_never_claims_a_slot() -> TestResult {
+    use crate::input_event::{input_route_key_full, input_set_keyboard_focus};
+
+    const ORPHAN: u32 = 1_000_017;
+
+    input_cleanup_task(ORPHAN);
+    let before = input_event_count(ORPHAN);
+    if before != 0 {
+        return fail!("orphan task starts with {before} events");
+    }
+
+    // Give the orphan focus, then take its queue away: focus without a queue
+    // is exactly the state an IRQ can observe after a task exits.
+    input_set_keyboard_focus(ORPHAN);
+    input_cleanup_task(ORPHAN);
+
+    input_route_key_full(0x1E, b'a', 0x04, 'a' as u32, 0, 0, true, 0);
+
+    // A claim would have created a queue and delivered the key into it.
+    if input_poll(ORPHAN).is_some() {
+        input_cleanup_task(ORPHAN);
+        input_set_keyboard_focus(0);
+        return fail!("the routing path claimed a queue slot for a task that never asked");
+    }
+
+    input_set_keyboard_focus(0);
+    input_cleanup_task(ORPHAN);
+    pass!()
+}
+
+/// Setting focus *does* claim, so the queue exists before the first event.
+///
+/// The other half of the rule: if nothing claimed at a syscall, the routing
+/// path's refusal to claim would simply lose every event.
+pub fn test_input_focus_claims_the_slot_up_front() -> TestResult {
+    use crate::input_event::{input_route_key_full, input_set_keyboard_focus};
+
+    const FOCUSED: u32 = 1_000_019;
+
+    input_cleanup_task(FOCUSED);
+    input_set_keyboard_focus(FOCUSED);
+
+    input_route_key_full(0x1E, b'a', 0x04, 'a' as u32, 0, 0, true, 0);
+
+    let delivered = input_poll(FOCUSED).is_some();
+    input_set_keyboard_focus(0);
+    input_cleanup_task(FOCUSED);
+
+    if !delivered {
+        return fail!("focus must reserve the queue, or routing loses every event");
+    }
+    pass!()
+}
+
+slopos_testing::stest!(
+    name = test_input_routing_never_claims_a_slot,
+    suite = input_event
+);
+slopos_testing::stest!(
+    name = test_input_focus_claims_the_slot_up_front,
+    suite = input_event
+);

@@ -158,6 +158,20 @@ fn find_queue(task_id: u32) -> Option<usize> {
 ///
 /// Returns `None` only when the task id is invalid or all
 /// [`MAX_INPUT_TASKS`] slots are already spoken for.
+///
+/// # Never from the routing path
+///
+/// Every caller must be a syscall, a focus change or a registration — a point
+/// where a task is *asking* for a queue. `input_route_*` runs in the PS/2 IRQ
+/// handler, where there is no principal to charge and no errno to return, so
+/// those paths call [`find_queue`] and drop the event when a task has no
+/// queue. A claim there would acquire a slot on behalf of a task that never
+/// asked, at a point that cannot refuse.
+///
+/// The queue itself is a fixed `.bss` array, so a claim costs no memory — what
+/// it takes is one of [`MAX_INPUT_TASKS`] slots, pre-reserved at its full
+/// [`MAX_EVENTS_PER_TASK`] capacity. That is what makes a full queue a bound
+/// the owner already paid for, rather than an accounting event at drop time.
 fn resolve_queue(task_id: u32) -> Option<usize> {
     if task_id == 0 {
         return None;
@@ -230,6 +244,19 @@ pub fn has_keyboard_focus() -> bool {
 }
 
 pub fn input_set_keyboard_focus(task_id: u32) {
+    // Claim the slot here, at the syscall, not on the routing path.
+    //
+    // `input_route_key_full` runs in the PS/2 IRQ handler, where there is no
+    // principal to charge and no errno to return: a slot claimed there is a
+    // resource acquired on behalf of a task that never asked, at a point that
+    // cannot refuse. Giving focus to a task is the moment it asks, so the
+    // queue is reserved with the full capacity it will ever hold and the IRQ
+    // path is left with a pure lookup. A queue that is then full is a bound
+    // the owner already paid for, and dropping an event stops being an
+    // accounting event.
+    if task_id != 0 {
+        let _ = resolve_queue(task_id);
+    }
     KEYBOARD_FOCUS_FAST.store(task_id, Ordering::Release);
     let mut guard = FOCUS.write_lock();
     guard.get_mut().keyboard_focus = task_id;
@@ -374,7 +401,7 @@ pub fn input_route_key_full(
         state.keyboard_focus
     };
 
-    if let Some(slot) = resolve_queue(target) {
+    if let Some(slot) = find_queue(target) {
         let event_type = if pressed {
             InputEventType::KeyPress
         } else {
@@ -405,7 +432,7 @@ pub fn input_route_pointer_motion(x: i32, y: i32, timestamp_ms: u64) {
     let state = FOCUS.read();
     let comp_id = state.compositor_task_id;
     if comp_id != 0 {
-        if let Some(slot) = resolve_queue(comp_id) {
+        if let Some(slot) = find_queue(comp_id) {
             push_event(
                 slot,
                 comp_id,
@@ -422,7 +449,7 @@ pub fn input_route_pointer_motion(x: i32, y: i32, timestamp_ms: u64) {
 
     let local_x = x - state.window_offset_x;
     let local_y = y - state.window_offset_y;
-    if let Some(slot) = resolve_queue(focus) {
+    if let Some(slot) = find_queue(focus) {
         push_event(
             slot,
             focus,
@@ -442,7 +469,7 @@ pub fn input_route_pointer_button(button: u8, pressed: bool, timestamp_ms: u64) 
     let state = FOCUS.read();
     let comp_id = state.compositor_task_id;
     if comp_id != 0 {
-        if let Some(slot) = resolve_queue(comp_id) {
+        if let Some(slot) = find_queue(comp_id) {
             push_event(
                 slot,
                 comp_id,
@@ -456,7 +483,7 @@ pub fn input_route_pointer_button(button: u8, pressed: bool, timestamp_ms: u64) 
     if focus == 0 {
         return;
     }
-    if let Some(slot) = resolve_queue(focus) {
+    if let Some(slot) = find_queue(focus) {
         push_event(
             slot,
             focus,
@@ -469,7 +496,7 @@ pub fn input_route_pointer_axis(axis: u32, value_v120: i32, timestamp_ms: u64) {
     let state = FOCUS.read();
     let comp_id = state.compositor_task_id;
     if comp_id != 0 {
-        if let Some(slot) = resolve_queue(comp_id) {
+        if let Some(slot) = find_queue(comp_id) {
             push_event(
                 slot,
                 comp_id,
@@ -483,7 +510,7 @@ pub fn input_route_pointer_axis(axis: u32, value_v120: i32, timestamp_ms: u64) {
     if focus == 0 {
         return;
     }
-    if let Some(slot) = resolve_queue(focus) {
+    if let Some(slot) = find_queue(focus) {
         push_event(
             slot,
             focus,
@@ -497,7 +524,8 @@ pub fn input_route_pointer_axis(axis: u32, value_v120: i32, timestamp_ms: u64) {
 // =============================================================================
 
 pub fn input_register_compositor(task_id: u32) {
-    // Pre-create queue for compositor.
+    // Pre-create the queue: see `input_set_keyboard_focus` for why every
+    // claim happens at a syscall and never on the routing path.
     let _ = resolve_queue(task_id);
     // Update focus state to route all raw input to compositor.
     let mut guard = FOCUS.write_lock();
