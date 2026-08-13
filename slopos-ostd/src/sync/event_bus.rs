@@ -152,11 +152,15 @@ impl EventBus {
     ///
     /// `None` before the spine is allocated, or if that allocation was
     /// refused, or for a slot outside it — every one of which falls back to
-    /// the folded static array. The fallback is degraded, never wrong: both
-    /// paths are deterministic functions of the slot, so a subscriber and a
-    /// publisher for the same socket always agree on the queue as long as the
-    /// spine does not appear between them. It cannot: the spine is allocated
-    /// during socket-subsystem init, before any socket exists to wait on.
+    /// the folded static array.
+    ///
+    /// The fallback is degraded, never wrong, and the reason is that the
+    /// choice cannot change under a parked task. A subscriber and a publisher
+    /// must agree on the queue or a wake is lost; both are deterministic in
+    /// the slot, so they can only disagree if the spine appeared between them.
+    /// It cannot: [`OnceLock::call_once`] stores its result even when the
+    /// allocation was refused and produced an empty spine, so there is exactly
+    /// one attempt and its outcome is fixed for the life of the boot.
     #[inline]
     fn socket_queues(slot: usize) -> Option<&'static SocketQueues> {
         SOCKET_QUEUES.get()?.get(slot)
