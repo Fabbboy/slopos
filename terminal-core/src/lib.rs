@@ -11,5 +11,6 @@
 
 extern crate alloc;
 
+pub mod damage;
 pub mod grid;
 pub mod input;

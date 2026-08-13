@@ -26,9 +26,13 @@ use crate::syscall::{ShmBuffer, fs, process, tty};
 
 use grid::TerminalGrid;
 use input::{CompositorEvent, KeyAction, PointerState, Selection};
+use slopos_terminal_core::damage::{CellDamage, DamageHistory};
 
 const WINDOW_WIDTH: i32 = 640;
 const WINDOW_HEIGHT: i32 = 480;
+/// Buffers `SoftSurface` cycles. The damage history is sized to match so a
+/// recycled slot's age always resolves against a recorded frame.
+const SURFACE_BUFFERS: usize = 2;
 const BLINK_INTERVAL: Duration = Duration::from_millis(500);
 
 /// Read buffer drained from the PTY master per loop turn.
@@ -210,17 +214,28 @@ async fn event_loop(
     let mut mods: u8 = 0;
     let mut cursor_on = true;
     let mut last_blink = Instant::now();
+    // Every buffer the surface cycles, so an `age` the surface reports can
+    // always be resolved against a recorded frame rather than forcing a full
+    // repaint on every other frame.
+    let mut history = DamageHistory::new(SURFACE_BUFFERS);
+    // Damage the grid has reported but that has not yet been presented. Only a
+    // present clears it, so a frame skipped for any reason carries forward
+    // rather than being lost.
+    let mut pending = CellDamage::new();
+    pending.set_rows(grid.rows as usize);
     let mut pending_writes = MasterWriteQueue::new();
     // Destination memfd handed to the compositor between a PasteReady and its
     // PasteResult (the receiver-provides-the-buffer paste handshake).
     let mut pending_paste: Option<ShmBuffer> = None;
 
-    // Initial paint.
-    render::render(grid, &selection, cursor_on);
+    // The first frame has no buffer contents to build on.
+    let _ = grid.take_damage();
+    render_full(grid, &selection, cursor_on, &mut history, &mut pending);
 
     loop {
         // --- Drain all pending compositor events synchronously. ---
-        let mut want_render = false;
+        // Set by app-owned state the grid cannot report damage for.
+        let mut repaint_all = false;
         loop {
             let polled = handle.borrow_client().poll_event();
             let evt = match polled {
@@ -249,16 +264,13 @@ async fn event_loop(
                             // Any keypress cancels a scrollback view.
                             if grid.viewing_history() {
                                 grid.scroll_view_down(usize::MAX);
-                                want_render = true;
                             }
                         }
                         KeyAction::ScrollUp(n) => {
                             grid.scroll_view_up(n);
-                            want_render = true;
                         }
                         KeyAction::ScrollDown(n) => {
                             grid.scroll_view_down(n);
-                            want_render = true;
                         }
                         KeyAction::CopySelection => {
                             // Keyboard copy keeps the selection highlighted
@@ -302,7 +314,11 @@ async fn event_loop(
                             }
                         }
                         push_winsize(master_fd, rows, cols);
-                        want_render = true;
+                        // New buffers: nothing recorded describes them.
+                        history.clear();
+                        pending.set_rows(grid.rows as usize);
+                        let _ = grid.take_damage();
+                        render_full(grid, &selection, cursor_on, &mut history, &mut pending);
                     }
                 }
                 CompositorEvent::Close => {
@@ -319,7 +335,7 @@ async fn event_loop(
                     ptr.has_focus = true;
                     let (cw, ch) = cell_metrics();
                     if input::update_selection(&mut ptr, &mut selection, grid, cw, ch) {
-                        want_render = true;
+                        repaint_all = true;
                     }
                 }
                 CompositorEvent::PointerLeave => {
@@ -329,10 +345,8 @@ async fn event_loop(
                     let lines = input::wheel_scroll_lines(value_v120);
                     if lines < 0 {
                         grid.scroll_view_up((-lines) as usize);
-                        want_render = true;
                     } else if lines > 0 {
                         grid.scroll_view_down(lines as usize);
-                        want_render = true;
                     }
                 }
                 CompositorEvent::PointerButton { pressed, code } => {
@@ -343,7 +357,7 @@ async fn event_loop(
                     }
                     let (cw, ch) = cell_metrics();
                     if input::update_selection(&mut ptr, &mut selection, grid, cw, ch) {
-                        want_render = true;
+                        repaint_all = true;
                     }
                     // On release with a non-collapsed selection, copy it to
                     // the compositor clipboard (a bare click left it inactive).
@@ -383,15 +397,19 @@ async fn event_loop(
         pending_writes.drain(master_fd, MASTER_WRITE_BUDGET);
 
         // --- Drain the PTY master (read until WouldBlock). ---
+        // Output damages the cells it writes, so nothing extra is needed here.
         match drain_master(master_fd, grid) {
             MasterDrain::Eof => return ExitReason::ShellGone,
-            MasterDrain::Data => want_render = true,
-            MasterDrain::Idle => {}
+            MasterDrain::Data | MasterDrain::Idle => {}
         }
 
-        if grid.take_dirty() || want_render {
-            render::render(grid, &selection, cursor_on);
+        if repaint_all {
+            // Selection shading is the app's state, not the grid's, so the grid
+            // records no damage for it and the whole view has to repaint.
+            pending.add_all(grid.cols);
         }
+        pending.union(&grid.take_damage());
+        present_pending(grid, &selection, cursor_on, &mut history, &mut pending);
 
         // --- Sleep until the next wake: compositor data, master data, or the
         // next cursor-blink flip. ---
@@ -399,7 +417,11 @@ async fn event_loop(
         if elapsed >= BLINK_INTERVAL {
             cursor_on = !cursor_on;
             last_blink = Instant::now();
-            render::render(grid, &selection, cursor_on);
+            // A blink inverts one cell. Damaging it is what keeps this frame
+            // proportional to what changed.
+            grid.damage_cursor();
+            pending.union(&grid.take_damage());
+            present_pending(grid, &selection, cursor_on, &mut history, &mut pending);
             continue;
         }
         let blink_ms = (BLINK_INTERVAL - elapsed).as_millis().max(1) as u64;
@@ -412,6 +434,56 @@ async fn event_loop(
         let mst = slopfut::poll_add(master_fd, master_mask);
         let blink = Box::pin(slopfut::time::sleep_ms(blink_ms));
         let _ = slopfut::select3(comp, mst, blink).await;
+    }
+}
+
+/// Repaint every cell and present the whole surface, resetting the damage
+/// bookkeeping to match. For the first frame and after a resize, where the
+/// buffers hold nothing a partial repaint could build on.
+fn render_full(
+    grid: &TerminalGrid,
+    selection: &Selection,
+    cursor_on: bool,
+    history: &mut DamageHistory,
+    pending: &mut CellDamage,
+) {
+    render::render_full(grid, selection, cursor_on);
+    pending.clear();
+    // A full paint wrote every pixel of one slot; the others still hold
+    // whatever they held, and no recorded frame describes the difference.
+    history.clear();
+    let mut all = CellDamage::new();
+    all.set_rows(grid.rows as usize);
+    all.add_all(grid.cols);
+    history.push(all);
+}
+
+/// Present `pending`, painting whatever the target buffer's age requires.
+///
+/// `pending` is cleared only once the frame is actually committed, so damage
+/// can never be forgotten without having been shown.
+fn present_pending(
+    grid: &TerminalGrid,
+    selection: &Selection,
+    cursor_on: bool,
+    history: &mut DamageHistory,
+    pending: &mut CellDamage,
+) {
+    if pending.is_empty() {
+        return;
+    }
+    // The slot being drawn into holds an older frame, so it needs this frame's
+    // damage plus everything painted since it was last presented.
+    match history.resolve(surface::buffer_age(), pending) {
+        Some(repaint) => {
+            render::render_damage(grid, selection, cursor_on, &repaint);
+            history.push(core::mem::replace(pending, {
+                let mut d = CellDamage::new();
+                d.set_rows(grid.rows as usize);
+                d
+            }));
+        }
+        None => render_full(grid, selection, cursor_on, history, pending),
     }
 }
 

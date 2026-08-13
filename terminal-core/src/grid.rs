@@ -14,6 +14,8 @@ use slopos_abi::unicode::is_double_width;
 
 use slopos_vt::{Direction, EraseMode, SgrAttr, VtAction, VtParser};
 
+use crate::damage::CellDamage;
+
 pub const MAX_COLS: usize = 240;
 pub const MAX_ROWS: usize = 100;
 
@@ -702,8 +704,12 @@ pub struct TerminalGrid {
     /// next printable char arrives. An exactly-full line followed by `\r\n`
     /// therefore advances one row, not two.
     wrap_pending: bool,
-    /// Set whenever the visible grid changes; the event loop renders on it.
-    dirty: bool,
+    /// Cells whose visible content changed since the last [`take_damage`].
+    /// Every grid mutation records the span it wrote here, so a renderer
+    /// repaints what changed rather than the window.
+    ///
+    /// [`take_damage`]: TerminalGrid::take_damage
+    damage: CellDamage,
 }
 
 impl TerminalGrid {
@@ -738,17 +744,75 @@ impl TerminalGrid {
             reflow_scratch: ScrollbackBuf::empty(),
             total_scrolled: 0,
             wrap_pending: false,
-            dirty: true,
+            damage: {
+                let mut d = CellDamage::new();
+                d.set_rows(rows as usize);
+                d.add_all(cols);
+                d
+            },
         }
     }
 
-    /// True when the visible content changed since the last call; clears the
-    /// flag so the next call reports only fresh changes.
+    /// True when any visible cell changed since the last [`take_damage`].
+    ///
+    /// [`take_damage`]: TerminalGrid::take_damage
     #[inline]
-    pub fn take_dirty(&mut self) -> bool {
-        let d = self.dirty;
-        self.dirty = false;
-        d
+    pub fn has_damage(&self) -> bool {
+        !self.damage.is_empty()
+    }
+
+    /// Move the accumulated per-cell damage out, leaving the grid clean. The
+    /// caller owns the returned set and is responsible for painting it: damage
+    /// dropped on the floor is content that never reaches the screen.
+    #[must_use]
+    pub fn take_damage(&mut self) -> CellDamage {
+        let taken = self.damage.clone();
+        self.damage.clear();
+        taken
+    }
+
+    #[inline]
+    fn damage_cells(&mut self, row: usize, first: usize, last: usize) {
+        self.damage.add(row, first as u16, last as u16);
+    }
+
+    #[inline]
+    fn damage_row(&mut self, row: usize) {
+        self.damage.add_row(row, self.cols);
+    }
+
+    #[inline]
+    fn damage_rows(&mut self, first: usize, last: usize) {
+        self.damage.add_rows(first, last, self.cols);
+    }
+
+    #[inline]
+    fn damage_all(&mut self) {
+        self.damage.add_all(self.cols);
+    }
+
+    /// The screen cell the cursor renders on, or `None` while it is not drawn
+    /// (hidden by DECTCEM, or suppressed because the view is in scrollback).
+    #[inline]
+    fn cursor_cell(&self) -> Option<(usize, usize)> {
+        if !self.cursor_visible || self.viewing_history() {
+            return None;
+        }
+        Some((self.cursor_row as usize, self.cursor_col as usize))
+    }
+
+    #[inline]
+    fn damage_cursor_at(&mut self, cell: Option<(usize, usize)>) {
+        if let Some((row, col)) = cell {
+            self.damage_cells(row, col, col);
+        }
+    }
+
+    /// Damage the cell the cursor occupies. The blink timer calls this: the
+    /// cursor is inverse video on one cell, so a phase flip changes one cell.
+    pub fn damage_cursor(&mut self) {
+        let cell = self.cursor_cell();
+        self.damage_cursor_at(cell);
     }
 
     /// Snapshot of a visible cell, accounting for any active scrollback view.
@@ -843,13 +907,19 @@ impl TerminalGrid {
     // -----------------------------------------------------------------------
 
     pub fn scroll_view_up(&mut self, lines: usize) {
+        let before = self.scrollback.view_offset;
         self.scrollback.scroll_up(lines);
-        self.dirty = true;
+        if self.scrollback.view_offset != before {
+            self.damage_all();
+        }
     }
 
     pub fn scroll_view_down(&mut self, lines: usize) {
+        let before = self.scrollback.view_offset;
         self.scrollback.scroll_down(lines);
-        self.dirty = true;
+        if self.scrollback.view_offset != before {
+            self.damage_all();
+        }
     }
 
     // -----------------------------------------------------------------------
@@ -885,12 +955,14 @@ impl TerminalGrid {
 
         if cols == self.cols {
             self.resize_height_only(rows);
-            self.dirty = true;
+            self.damage.set_rows(self.rows as usize);
+            self.damage_all();
             return ResizeOutcome { reflowed: false };
         }
 
         self.reflow_width(rows, cols, past_eol, anchors);
-        self.dirty = true;
+        self.damage.set_rows(self.rows as usize);
+        self.damage_all();
         ResizeOutcome { reflowed: true }
     }
 
@@ -1164,12 +1236,17 @@ impl TerminalGrid {
         // Any live output cancels a scrollback view so new text is visible.
         if self.scrollback.view_offset != 0 {
             self.scrollback.reset_view();
+            self.damage_all();
         }
         let action = self.parser.advance(b);
         self.execute_action(action);
     }
 
     fn execute_action(&mut self, action: VtAction) {
+        // The cursor is painted as inverse video on whatever cell it sits on,
+        // so both the cell it leaves and the one it lands on change even when
+        // no cell content did.
+        let cursor_before = self.cursor_cell();
         match action {
             VtAction::Print(_) | VtAction::SetAttribute(_) | VtAction::Nop => {}
             _ => self.wrap_pending = false,
@@ -1196,7 +1273,10 @@ impl TerminalGrid {
             VtAction::ResetMode(mode) => self.reset_dec_mode(mode),
             VtAction::Nop => {}
         }
-        self.dirty = true;
+        if self.cursor_cell() != cursor_before {
+            self.damage_cursor_at(cursor_before);
+            self.damage_cursor();
+        }
     }
 
     // -----------------------------------------------------------------------
@@ -1214,7 +1294,8 @@ impl TerminalGrid {
         if self.wrap_pending {
             self.wrap_pending = false;
             if self.parser.auto_wrap {
-                self.cells.set_wrapped(self.cursor_row as usize, true);
+                let row = self.cursor_row as usize;
+                self.cells.set_wrapped(row, true);
                 self.cursor_col = 0;
                 self.advance_row();
             }
@@ -1226,7 +1307,8 @@ impl TerminalGrid {
         // (autowrap) — there is no half-cell placement. That early wrap is also
         // a soft continuation of the current row.
         if wide && self.cursor_col + 2 > self.cols && self.parser.auto_wrap {
-            self.cells.set_wrapped(self.cursor_row as usize, true);
+            let row = self.cursor_row as usize;
+            self.cells.set_wrapped(row, true);
             self.cursor_col = 0;
             self.advance_row();
         }
@@ -1284,6 +1366,8 @@ impl TerminalGrid {
             );
             1
         };
+
+        self.damage_cells(row, col, col + width as usize - 1);
 
         let end = self.cursor_col.saturating_add(width);
         if end >= self.cols {
@@ -1376,6 +1460,7 @@ impl TerminalGrid {
                     }
                     // Trailing run cleared: the row no longer soft-wraps.
                     self.cells.set_wrapped(cr, false);
+                    self.damage_cells(cr, cc, cols - 1);
                 }
                 for r in (cr + 1)..rows {
                     self.clear_row_with_attr(r, clear_cell.attrs);
@@ -1390,6 +1475,7 @@ impl TerminalGrid {
                     for c in 0..end {
                         self.cells.set(cr, c, clear_cell);
                     }
+                    self.damage_cells(cr, 0, end - 1);
                 }
             }
             EraseMode::All => {
@@ -1417,12 +1503,14 @@ impl TerminalGrid {
                 }
                 // Trailing run cleared: the row no longer soft-wraps.
                 self.cells.set_wrapped(cr, false);
+                self.damage_cells(cr, cc, cols - 1);
             }
             EraseMode::ToStart => {
                 let end = if cc < cols { cc + 1 } else { cols };
                 for c in 0..end {
                     self.cells.set(cr, c, clear_cell);
                 }
+                self.damage_cells(cr, 0, end - 1);
             }
             EraseMode::All => {
                 self.clear_row_with_attr(cr, clear_cell.attrs);
@@ -1463,6 +1551,7 @@ impl TerminalGrid {
                 self.cells.clear_row(r, Cell::blank());
             }
         }
+        self.damage_rows(sr_top, sr_bottom);
     }
 
     fn apply_sgr(&mut self, attr: SgrAttr) {
@@ -1529,7 +1618,10 @@ impl TerminalGrid {
 
     fn set_dec_mode(&mut self, mode: u16) {
         match mode {
-            25 => self.cursor_visible = true,
+            25 => {
+                self.cursor_visible = true;
+                self.damage_cursor();
+            }
             1049 => self.enter_alt_screen(),
             2004 => self.bracketed_paste = true,
             _ => {}
@@ -1538,7 +1630,10 @@ impl TerminalGrid {
 
     fn reset_dec_mode(&mut self, mode: u16) {
         match mode {
-            25 => self.cursor_visible = false,
+            25 => {
+                self.cursor_visible = false;
+                self.damage_cursor();
+            }
             1049 => self.leave_alt_screen(),
             2004 => self.bracketed_paste = false,
             _ => {}
@@ -1558,6 +1653,7 @@ impl TerminalGrid {
         self.cursor_row = 0;
         self.cursor_col = 0;
         self.in_alt_screen = true;
+        self.damage_all();
     }
 
     fn leave_alt_screen(&mut self) {
@@ -1570,6 +1666,7 @@ impl TerminalGrid {
         self.cursor_row = self.alt_screen_cursor_row;
         self.cursor_col = self.alt_screen_cursor_col;
         self.in_alt_screen = false;
+        self.damage_all();
     }
 
     fn set_scroll_region(&mut self, top: u16, bottom: u16) {
@@ -1609,6 +1706,7 @@ impl TerminalGrid {
                 self.cells.clear_row(r, Cell::blank());
             }
         }
+        self.damage_rows(cur, sr_bottom);
     }
 
     fn delete_lines(&mut self, n: u16) {
@@ -1629,6 +1727,7 @@ impl TerminalGrid {
                 self.cells.clear_row(row, Cell::blank());
             }
         }
+        self.damage_rows(cur, sr_bottom);
     }
 
     fn delete_chars(&mut self, n: u16) {
@@ -1648,6 +1747,7 @@ impl TerminalGrid {
             };
             self.cells.set(row, c, cell);
         }
+        self.damage_cells(row, col, cols - 1);
     }
 
     fn insert_chars(&mut self, n: u16) {
@@ -1668,6 +1768,7 @@ impl TerminalGrid {
                 self.cells.set(row, c, Cell::blank());
             }
         }
+        self.damage_cells(row, col, cols - 1);
     }
 
     fn erase_chars(&mut self, n: u16) {
@@ -1681,6 +1782,9 @@ impl TerminalGrid {
         let clear_cell = self.blank_with_attrs();
         for c in col..end {
             self.cells.set(row, c, clear_cell);
+        }
+        if end > col {
+            self.damage_cells(row, col, end - 1);
         }
     }
 
@@ -1729,6 +1833,7 @@ impl TerminalGrid {
             attrs: attr,
         };
         self.cells.clear_row(row, clear_cell);
+        self.damage_row(row);
     }
 
     fn scroll_up(&mut self) {
@@ -1757,6 +1862,7 @@ impl TerminalGrid {
             self.cells.row_copy(row - 1, row, cols);
         }
         self.cells.clear_row(sr_bottom, Cell::blank());
+        self.damage_rows(sr_top, sr_bottom);
     }
 }
 
@@ -2196,5 +2302,118 @@ mod tests {
         assert!(g.bracketed_paste());
         feed(&mut g, b"\x1b[?2004l");
         assert!(!g.bracketed_paste());
+    }
+
+    /// Total damaged cells across every row.
+    fn damaged_cells(d: &crate::damage::CellDamage) -> usize {
+        (0..d.rows())
+            .filter_map(|r| d.span(r))
+            .map(|s| (s.last - s.first + 1) as usize)
+            .sum()
+    }
+
+    #[test]
+    fn a_cursor_blink_damages_one_cell() {
+        let mut g = TerminalGrid::new(24, 80);
+        let _ = g.take_damage();
+        g.damage_cursor();
+        assert_eq!(damaged_cells(&g.take_damage()), 1);
+    }
+
+    #[test]
+    fn an_idle_grid_reports_no_damage() {
+        let mut g = TerminalGrid::new(24, 80);
+        let _ = g.take_damage();
+        assert!(!g.has_damage());
+        assert!(g.take_damage().is_empty());
+    }
+
+    #[test]
+    fn printing_one_char_damages_its_cell_and_the_cursor_move() {
+        let mut g = TerminalGrid::new(24, 80);
+        let _ = g.take_damage();
+        feed(&mut g, b"x");
+        let d = g.take_damage();
+        // Row 0 only: the printed cell plus the cursor's old and new cells,
+        // which are contiguous, so one span well under a row.
+        assert_eq!(d.span(1), None);
+        assert!(damaged_cells(&d) <= 4, "{} cells", damaged_cells(&d));
+    }
+
+    #[test]
+    fn a_full_screen_scroll_damages_every_row() {
+        let mut g = TerminalGrid::new(4, 10);
+        let _ = g.take_damage();
+        feed(&mut g, b"a\r\nb\r\nc\r\nd\r\ne");
+        let d = g.take_damage();
+        for r in 0..4 {
+            assert!(d.span(r).is_some(), "row {r} undamaged after scroll");
+        }
+    }
+
+    #[test]
+    fn erase_line_to_end_damages_only_the_tail() {
+        let mut g = TerminalGrid::new(4, 20);
+        feed(&mut g, b"hello");
+        let _ = g.take_damage();
+        feed(&mut g, b"\x1b[K");
+        let d = g.take_damage();
+        let span = d.span(0).expect("cursor row damaged");
+        assert_eq!(span.first, 5);
+        assert_eq!(span.last, 19);
+        assert_eq!(d.span(1), None);
+    }
+
+    #[test]
+    fn a_resize_damages_the_whole_reshaped_grid() {
+        let mut g = TerminalGrid::new(4, 20);
+        let _ = g.take_damage();
+        let mut anchors = [None, None];
+        g.resize(6, 20, &mut anchors);
+        let d = g.take_damage();
+        assert_eq!(d.rows(), 6);
+        for r in 0..6 {
+            assert!(d.span(r).is_some(), "row {r} undamaged after resize");
+        }
+    }
+
+    #[test]
+    fn hiding_the_cursor_damages_the_cell_it_vacated() {
+        let mut g = TerminalGrid::new(4, 20);
+        let _ = g.take_damage();
+        feed(&mut g, b"\x1b[?25l");
+        assert!(g.has_damage());
+        let d = g.take_damage();
+        assert!(d.span(0).is_some());
+        assert_eq!(damaged_cells(&d), 1);
+    }
+
+    #[test]
+    fn entering_scrollback_damages_the_whole_view() {
+        let mut g = TerminalGrid::new(3, 10);
+        feed(&mut g, b"a\r\nb\r\nc\r\nd\r\ne");
+        let _ = g.take_damage();
+        g.scroll_view_up(1);
+        let d = g.take_damage();
+        for r in 0..3 {
+            assert!(d.span(r).is_some(), "row {r} undamaged after view scroll");
+        }
+    }
+
+    #[test]
+    fn a_no_op_view_scroll_reports_nothing() {
+        let mut g = TerminalGrid::new(3, 10);
+        let _ = g.take_damage();
+        g.scroll_view_down(5);
+        assert!(!g.has_damage());
+    }
+
+    #[test]
+    fn take_damage_leaves_the_grid_clean() {
+        let mut g = TerminalGrid::new(4, 20);
+        feed(&mut g, b"hi");
+        assert!(g.has_damage());
+        let _ = g.take_damage();
+        assert!(!g.has_damage());
     }
 }

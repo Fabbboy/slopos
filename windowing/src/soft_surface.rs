@@ -35,6 +35,9 @@ use crate::surface::SurfaceError;
 /// Number of buffers cycled by the surface (double buffering).
 const NUM_BUFFERS: usize = 2;
 
+/// Age at or past which a slot's contents are treated as undefined.
+const AGE_UNDEFINED: u32 = u32::MAX;
+
 /// A CPU/SHM rendering backend for compositor-managed surfaces.
 pub struct SoftSurface {
     handle: ProtocolHandle,
@@ -43,6 +46,9 @@ pub struct SoftSurface {
     registered: [bool; NUM_BUFFERS],
     /// Whether this slot is committed and awaiting a `BufferRelease`.
     busy: [bool; NUM_BUFFERS],
+    /// Frames presented since each slot last held a presented frame, saturating
+    /// at `AGE_UNDEFINED`. Backs [`buffer_age`](SoftSurface::buffer_age).
+    age: [u32; NUM_BUFFERS],
     /// The slot `frame()` last handed out / `present()` will commit.
     current: usize,
     surface_id: SurfaceId,
@@ -88,6 +94,7 @@ impl SoftSurface {
             bufs,
             registered: [false; NUM_BUFFERS],
             busy: [false; NUM_BUFFERS],
+            age: [AGE_UNDEFINED; NUM_BUFFERS],
             current: 0,
             surface_id,
             width,
@@ -96,6 +103,20 @@ impl SoftSurface {
             bytes_pp,
             pixel_format,
         })
+    }
+
+    /// Age of the buffer the next [`frame()`](RenderSurface::frame) will hand
+    /// out, following the `EGL_EXT_buffer_age` convention: `n > 0` means it
+    /// still holds the frame presented `n` frames ago, so the caller may
+    /// repaint only the damage accumulated since then; `0` means its contents
+    /// are undefined and the caller must repaint it in full.
+    ///
+    /// Queried before `frame()` rather than after, so a caller can decide how
+    /// much to paint before it holds the buffer borrow. `frame()` picks the
+    /// same slot this reads, by the same rule.
+    pub fn buffer_age(&self) -> u32 {
+        let age = self.age[self.pick_slot()];
+        if age >= AGE_UNDEFINED { 0 } else { age }
     }
 
     /// Mark a buffer slot drawable again after the compositor releases it.
@@ -149,6 +170,16 @@ impl SoftSurface {
         }
         self.registered[slot] = true;
         self.busy[slot] = true;
+
+        // This slot now holds the frame just presented; every other slot is one
+        // frame further from being current.
+        for (i, age) in self.age.iter_mut().enumerate() {
+            if i == slot {
+                *age = 1;
+            } else {
+                *age = age.saturating_add(1);
+            }
+        }
     }
 }
 
@@ -200,6 +231,8 @@ impl RenderSurface for SoftSurface {
         self.bufs = bufs;
         self.registered = [false; NUM_BUFFERS];
         self.busy = [false; NUM_BUFFERS];
+        // Fresh allocations hold nothing a partial repaint could build on.
+        self.age = [AGE_UNDEFINED; NUM_BUFFERS];
         self.current = 0;
         self.width = new_width;
         self.height = new_height;

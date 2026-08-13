@@ -105,6 +105,16 @@ pub fn draw<R, F: FnOnce(&mut DrawBuffer) -> R>(f: F) -> Option<R> {
     })?
 }
 
+/// Age of the buffer the next [`draw`] will paint into, per the
+/// `EGL_EXT_buffer_age` convention (`0` = contents undefined).
+///
+/// `frame()` picks the slot, so this is only accurate once a draw has started;
+/// the renderer's slot choice is deterministic between presents, which is why
+/// reading it before the draw gives the same answer.
+pub fn buffer_age() -> u32 {
+    with_renderer(|renderer| renderer.buffer_age()).unwrap_or(0)
+}
+
 pub fn resize(new_width: u32, new_height: u32) -> bool {
     with_renderer(|renderer| renderer.resize(new_width, new_height).is_ok()).unwrap_or(false)
 }
@@ -119,6 +129,16 @@ pub fn present() {
         let mut r = r.borrow_mut();
         if let Some(renderer) = r.as_mut() {
             renderer.present();
+        }
+    });
+}
+
+/// Commit the frame, reporting only `(x, y, w, h)` as damaged.
+pub fn present_region(x: i32, y: i32, w: i32, h: i32) {
+    RENDERER.with(|r| {
+        let mut r = r.borrow_mut();
+        if let Some(renderer) = r.as_mut() {
+            renderer.present_region(x, y, w, h);
         }
     });
 }
