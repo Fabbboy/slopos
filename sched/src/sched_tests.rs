@@ -7388,3 +7388,212 @@ slopos_testing::stest!(
     name = test_quota_task_ceiling_refuses_and_refunds,
     suite = sched_core
 );
+
+/// A scratch process with its account row, retired on drop.
+///
+/// Every quota test below needs a principal that is not the caller's, and a
+/// row that goes dark when the test ends: a leftover row carrying a
+/// deliberately-tiny ceiling and a deliberate denial is indistinguishable, to
+/// the headroom gate, from a real workload being refused.
+struct QuotaScratch {
+    process: slopos_ostd::KArc<slopos_ostd::process::Process>,
+}
+
+impl QuotaScratch {
+    fn new() -> Option<Self> {
+        Some(Self {
+            process: slopos_ostd::process::process_spawn_root().ok()?,
+        })
+    }
+
+    fn account(&self) -> slopos_ostd::process::AccountId {
+        self.process.account()
+    }
+}
+
+impl Drop for QuotaScratch {
+    fn drop(&mut self) {
+        if let Some(handle) = self.process.handle() {
+            slopos_ostd::process::process_retire(handle);
+        }
+    }
+}
+
+/// One process at its `Task` ceiling does not deny another.
+///
+/// The property a global `MAX_TASKS` cannot provide: with only a global
+/// bound, the first process to fill the table denies everyone, and the denial
+/// is permanent and silent. Two sibling accounts, one driven to its ceiling,
+/// and the other must still be able to charge.
+pub fn test_quota_task_cross_process_isolation() -> TestResult {
+    use crate::task::task_quota::reserve;
+    use slopos_abi::quota::{QuotaMode, ResourceKind};
+    use slopos_ostd::process::quota::{quota_mode, set_limit, set_quota_mode};
+
+    const CEILING: u32 = 2;
+
+    let (Some(greedy), Some(neighbour)) = (QuotaScratch::new(), QuotaScratch::new()) else {
+        klog_info!("QUOTA_TEST: could not register two processes");
+        return TestResult::Fail;
+    };
+
+    let restore = quota_mode();
+    set_quota_mode(QuotaMode::Enforce);
+    set_limit(greedy.account(), ResourceKind::Task, CEILING);
+
+    let mut held = slopos_ostd::KVec::new();
+    let mut granted = 0u32;
+    while let Some(reservation) = reserve(greedy.account()) {
+        granted += 1;
+        if held.push(reservation).is_err() || granted > CEILING {
+            break;
+        }
+    }
+    // The neighbour is a sibling row under the same root, so it shares every
+    // ancestor with the exhausted one — which is exactly the case a
+    // hierarchical debit could get wrong by refusing at a shared level.
+    let neighbour_ok = reserve(neighbour.account()).is_some();
+    drop(held);
+    set_quota_mode(restore);
+
+    if granted != CEILING {
+        klog_info!("QUOTA_TEST: greedy granted {granted}, want {CEILING}");
+        return TestResult::Fail;
+    }
+    if !neighbour_ok {
+        klog_info!("QUOTA_TEST: a neighbour was denied because a sibling hit its ceiling");
+        return TestResult::Fail;
+    }
+    TestResult::Pass
+}
+
+slopos_testing::stest!(
+    name = test_quota_task_cross_process_isolation,
+    suite = sched_core
+);
+
+/// A process at its `Process` ceiling cannot spawn, and the refusal is exact.
+///
+/// `MAX_PROCESSES` is 256 and is reached long before `MAX_TASKS`, so this is
+/// the tighter global table: without a per-principal bound one process spawns
+/// until nothing else on the machine can.
+pub fn test_quota_process_ceiling_refuses_and_refunds() -> TestResult {
+    use slopos_abi::quota::{QuotaMode, ResourceKind};
+    use slopos_ostd::process::process_spawn;
+    use slopos_ostd::process::quota::{quota_mode, set_limit, set_quota_mode, stats};
+
+    const CEILING: u32 = 3;
+
+    let Some(spawner) = QuotaScratch::new() else {
+        klog_info!("QUOTA_TEST: could not register a spawner");
+        return TestResult::Fail;
+    };
+    let account = spawner.account();
+    let baseline = stats(account, ResourceKind::Process).map_or(0, |s| s.used);
+
+    let restore = quota_mode();
+    set_quota_mode(QuotaMode::Enforce);
+    set_limit(account, ResourceKind::Process, baseline + CEILING);
+
+    // Children are spawned against the scratch account as their accounting
+    // parent, which is the edge a real spawn sets and never re-homes.
+    let mut children = slopos_ostd::KVec::new();
+    let mut spawned = 0u32;
+    for _ in 0..CEILING + 3 {
+        match process_spawn(None, account) {
+            Ok(child) => {
+                spawned += 1;
+                if children.push(child).is_err() {
+                    break;
+                }
+            }
+            Err(_) => break,
+        }
+    }
+
+    let at_ceiling = stats(account, ResourceKind::Process).map_or(0, |s| s.used);
+    let denials = stats(account, ResourceKind::Process).map_or(0, |s| s.denials);
+
+    // Retire each child so its own row goes dark, then drop the references:
+    // the spawner's charge is released at the reap, not at the final drop.
+    for child in children.iter() {
+        if let Some(handle) = child.handle() {
+            slopos_ostd::process::process_retire(handle);
+        }
+    }
+    drop(children);
+    let after = stats(account, ResourceKind::Process).map_or(0, |s| s.used);
+    set_quota_mode(restore);
+
+    if spawned != CEILING {
+        klog_info!("QUOTA_TEST: spawned {spawned} against a ceiling of {CEILING}");
+        return TestResult::Fail;
+    }
+    if at_ceiling != baseline + CEILING {
+        klog_info!(
+            "QUOTA_TEST: process used {at_ceiling}, want {}",
+            baseline + CEILING
+        );
+        return TestResult::Fail;
+    }
+    if denials == 0 {
+        klog_info!("QUOTA_TEST: a refused spawn nobody counted is a silent denial");
+        return TestResult::Fail;
+    }
+    if after != baseline {
+        klog_info!("QUOTA_TEST: process used {after} after reap, want {baseline}");
+        return TestResult::Fail;
+    }
+    TestResult::Pass
+}
+
+slopos_testing::stest!(
+    name = test_quota_process_ceiling_refuses_and_refunds,
+    suite = sched_core
+);
+
+/// A task's stack pages are charged, and given back at the exit latch.
+///
+/// `KernelMeta` is the largest single consumer the accounting added: 12 pages
+/// per task, and nothing table-shaped bounded it before. This pins both the
+/// amount and the release point.
+pub fn test_quota_kernelmeta_covers_task_stacks() -> TestResult {
+    use slopos_abi::quota::{QuotaMode, ResourceKind};
+    use slopos_abi::task::{TASK_KERNEL_STACK_SIZE, TASK_UNSAFE_STACK_SIZE};
+    use slopos_mm::paging_defs::PAGE_SIZE_4KB;
+    use slopos_ostd::process::quota::{quota_mode, set_quota_mode, stats};
+
+    let Some(scratch) = QuotaScratch::new() else {
+        klog_info!("QUOTA_TEST: could not register a process");
+        return TestResult::Fail;
+    };
+    let account = scratch.account();
+    let baseline = stats(account, ResourceKind::KernelMeta).map_or(0, |s| s.used);
+
+    let restore = quota_mode();
+    set_quota_mode(QuotaMode::Enforce);
+
+    let expected = ((TASK_KERNEL_STACK_SIZE + TASK_UNSAFE_STACK_SIZE) / PAGE_SIZE_4KB) as u32;
+    let kernel = crate::task_stack::KernelStack::allocate(TASK_KERNEL_STACK_SIZE as usize, account);
+    let data = crate::task_stack::UnsafeStack::allocate(TASK_UNSAFE_STACK_SIZE as usize, account);
+    let charged = stats(account, ResourceKind::KernelMeta).map_or(0, |s| s.used) - baseline;
+    drop(kernel);
+    drop(data);
+    let after = stats(account, ResourceKind::KernelMeta).map_or(0, |s| s.used);
+    set_quota_mode(restore);
+
+    if charged != expected {
+        klog_info!("QUOTA_TEST: stacks charged {charged} pages, want {expected}");
+        return TestResult::Fail;
+    }
+    if after != baseline {
+        klog_info!("QUOTA_TEST: kernelmeta {after} after release, want {baseline}");
+        return TestResult::Fail;
+    }
+    TestResult::Pass
+}
+
+slopos_testing::stest!(
+    name = test_quota_kernelmeta_covers_task_stacks,
+    suite = sched_core
+);

@@ -126,3 +126,59 @@ slopos_testing::stest!(
     name = test_event_subscription_pre_check_paths,
     suite = event
 );
+
+/// AF_INET sockets past `MAX_SOCKETS` get their own queue, not a fold-mate's.
+///
+/// The static array this replaced was 64 wide and indexed `slot % 64`, while
+/// the socket slab grows to `MAX_SOCKET_SLOTS`. Sockets 0 and 64 therefore
+/// shared a wait queue: correctness survived — every waiter re-checks a
+/// predicate over its own socket — but one event woke sixteen unrelated
+/// sockets on a busy system, which is exactly when there is most to lose.
+///
+/// Asserts the routing directly rather than the code shape, so a later change
+/// that reintroduces folding fails here instead of degrading silently.
+pub fn test_event_socket_queues_do_not_alias() -> TestResult {
+    use slopos_abi::net::MAX_SOCKET_SLOTS;
+
+    // The spine is allocated by the socket-create path; do it explicitly so
+    // this test does not depend on a socket having been made first.
+    assert_test!(
+        slopos_ostd::sync::ensure_socket_queues_allocated(),
+        "the per-socket wait-queue spine must allocate"
+    );
+
+    let recv = |slot: u32| KernelEvent::SocketRecv {
+        sock: SocketSlot(slot),
+    };
+
+    // The pair that used to collide.
+    assert_test!(
+        !BUS.shares_queue(recv(0), recv(MAX_SOCKETS as u32)),
+        "socket 0 and socket {} still share a queue",
+        MAX_SOCKETS
+    );
+    // And the far end of the slab.
+    assert_test!(
+        !BUS.shares_queue(recv(1), recv((MAX_SOCKET_SLOTS - 1) as u32)),
+        "socket 1 and the last slab slot still share a queue"
+    );
+    // A socket does share a queue with itself, or the check above proves
+    // nothing about the comparison.
+    assert_test!(
+        BUS.shares_queue(recv(7), recv(7)),
+        "one socket must map to one queue"
+    );
+    // The three axes stay distinct for one socket.
+    assert_test!(
+        !BUS.shares_queue(
+            recv(3),
+            KernelEvent::SocketSend {
+                sock: SocketSlot(3)
+            }
+        ),
+        "recv and send for one socket must not share a queue"
+    );
+    pass!()
+}
+
+slopos_testing::stest!(name = test_event_socket_queues_do_not_alias, suite = event);

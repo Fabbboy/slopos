@@ -39,7 +39,7 @@ pub mod wait_queue;
 pub use atomic_cell::AtomicCell;
 pub use cpu_local::{CacheAligned, CpuLocal, CpuPinned, CpuPinnedMut};
 pub use epoch::{Epoch, EpochGuard};
-pub use event_bus::{BUS, EventBus, Subscription};
+pub use event_bus::{BUS, EventBus, Subscription, ensure_socket_queues_allocated};
 pub use init_flag::{InitFlag, StateFlag};
 pub use init_in_place::InitInPlace;
 pub use intrusive::{IntrusiveLinkedList, Iter as IntrusiveIter, Link, LinkError, Linked};

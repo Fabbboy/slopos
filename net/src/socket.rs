@@ -402,7 +402,11 @@ impl SlabSocketTable {
     /// Default initial slot count.
     pub const INITIAL_CAPACITY: usize = 64;
     /// Hard maximum slot count.
-    pub const MAX_CAPACITY: usize = 1024;
+    ///
+    /// The per-socket wait-queue spine is sized to this, so the two must
+    /// agree or a high slab index would find no queue and fall back to the
+    /// folded array.
+    pub const MAX_CAPACITY: usize = slopos_abi::net::MAX_SOCKET_SLOTS;
 
     /// Create an empty, const-initializable table.
     ///
@@ -1372,6 +1376,11 @@ pub fn socket_create(domain: u16, sock_type: u16, protocol: u16, owner: SocketOw
         _ => return errno_i32(ERRNO_EPROTONOSUPPORT),
     };
 
+    // Off-lock, and before the first socket exists: the per-socket wait-queue
+    // spine allocates, and the table lock is a cli-spinlock. Idempotent, so
+    // every create pays one relaxed load after the first.
+    slopos_ostd::sync::event_bus::ensure_socket_queues_allocated();
+
     let mut table = NEW_SOCKET_TABLE.lock();
     let Some(idx) = table.alloc(inner, owner) else {
         return errno_i32(ERRNO_ENOMEM);
@@ -1683,6 +1692,9 @@ pub fn socket_listen(sock_idx: u32, backlog: u32) -> i32 {
 }
 
 pub fn socket_accept(sock_idx: u32, peer_addr: *mut [u8; 4], peer_port: *mut u16) -> i32 {
+    // The accept path allocates a socket slot too, so the queue spine has to
+    // exist here as well — and off-lock, before the table lock below.
+    slopos_ostd::sync::event_bus::ensure_socket_queues_allocated();
     loop {
         let (nonblocking, timeout_ms) = {
             let table = NEW_SOCKET_TABLE.lock();

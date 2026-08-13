@@ -6267,6 +6267,95 @@ slopos_testing::stest!(
     suite = unix_scm_rights
 );
 
+/// An in-flight `SCM_RIGHTS` descriptor is charged to the **sender**, and the
+/// charge is released when the reference stops being in flight.
+///
+/// This is the hole the `Custody` axis exists for: eight fds x two directions
+/// x sixteen pairs is 256 `FileRef`s held by a `ConnectionPair` rather than by
+/// any descriptor table, so before this they were owned by nobody and counted
+/// against nothing. Linux answered the identical hole with a per-user
+/// in-flight counter, because no process-scoped principal outlived the sender.
+pub fn test_quota_custody_charges_the_sender() -> TestResult {
+    let _fixture = SyscallFixture::new();
+    use slopos_abi::quota::ResourceKind;
+    use slopos_net::unix_socket;
+    use slopos_ostd::process::quota::stats;
+
+    let task_id = create_test_user_task();
+    assert_test!(task_id != INVALID_TASK_ID, "task creation failed");
+    let Some(process) = task_find_by_id(task_id).and_then(|task| task.process()) else {
+        return TestResult::Fail;
+    };
+    let account = process.account();
+    let Some(pid) = FdTable::of(&process) else {
+        return TestResult::Fail;
+    };
+
+    let (srv, _cli) = match unix_create_connected_pair_raw() {
+        Some(pair) => pair,
+        None => return fail!("could not create connected pair"),
+    };
+
+    let (mfd_handle, mfd_ops, mfd_backing) =
+        match slopos_mm::memfd::memfd_create(0, slopos_ostd::process::quota::root()) {
+            Some(triple) => triple,
+            None => return fail!("memfd_create failed"),
+        };
+    let mfd_fd = slopos_fs::fileio::fileio_open_fd_with_ops(
+        pid,
+        mfd_ops,
+        mfd_handle,
+        Some(mfd_backing),
+        slopos_fs::fileio::FdFlags::NONE,
+    );
+    assert_test!(mfd_fd >= 0, "memfd fd install failed");
+
+    let baseline = stats(account, ResourceKind::Custody).map_or(0, |s| s.used);
+
+    // Queue three descriptors without receiving them: they are now held by
+    // the connection pair alone.
+    const SENT: u32 = 3;
+    for _ in 0..SENT {
+        let mut one: slopos_ostd::KVec<slopos_fs::FileRef> =
+            slopos_ostd::KVec::with_capacity(1).expect("vec alloc");
+        let alias = slopos_fs::fileio_clone_file_ref(pid, mfd_fd).expect("clone failed");
+        let _ = one.push(alias);
+        let n = unix_socket::unix_sendmsg(srv, &[], &mut one, account);
+        assert_test!(n >= 0, "send returned {}", n);
+    }
+
+    let in_flight = stats(account, ResourceKind::Custody).map_or(0, |s| s.used);
+    if in_flight != baseline + SENT {
+        return fail!(
+            "custody {} with {} in flight, want {}",
+            in_flight,
+            SENT,
+            baseline + SENT
+        );
+    }
+
+    // Receiving moves each reference into the receiver's table, which is
+    // where the custody ends and a descriptor number takes over.
+    let mut received: slopos_ostd::KVec<slopos_fs::FileRef> = slopos_ostd::KVec::new();
+    let _ = unix_socket::unix_recvmsg(_cli, &mut [0u8; 4], &mut received, SENT as usize);
+    drop(received);
+
+    let after = stats(account, ResourceKind::Custody).map_or(0, |s| s.used);
+    if after != baseline {
+        return fail!(
+            "custody {} after receive, want the {} it started at",
+            after,
+            baseline
+        );
+    }
+    TestResult::Pass
+}
+
+slopos_testing::stest!(
+    name = test_quota_custody_charges_the_sender,
+    suite = unix_scm_rights
+);
+
 // =============================================================================
 // Signal default-disposition and send-time drop tests
 // =============================================================================

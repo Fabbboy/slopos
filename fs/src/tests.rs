@@ -1708,3 +1708,119 @@ pub fn test_set_sealed_defaults_closed() -> TestResult {
 
 slopos_testing::stest!(name = test_sealed_inode_refuses_mutation);
 slopos_testing::stest!(name = test_set_sealed_defaults_closed);
+
+/// A process at its `ObjectRow` ceiling is refused with `ENFILE`, and every
+/// row it held comes back on close.
+///
+/// `ObjectRow` counts registry rows and their backing objects — the vnode, the
+/// socket endpoint, the pipe — which are the system-wide tables an
+/// unprivileged process could previously fill on its own. The errno is
+/// deliberately `ENFILE` ("too many open files in *system*") rather than
+/// `EMFILE`: what has been exhausted is an object table, not this process's
+/// descriptor numbers, and userland backs off differently for each.
+pub fn test_quota_objectrow_drive_to_full() -> TestResult {
+    use crate::fileio::file_open_for_process;
+    use slopos_abi::fs::O_RDONLY;
+    use slopos_abi::quota::{QuotaMode, ResourceKind};
+    use slopos_ostd::process::quota::{quota_mode, set_limit, set_quota_mode, stats};
+
+    const CEILING: u32 = 6;
+
+    let Some(path) = scratch_file(b"/fileio_test/quota_objectrow.txt") else {
+        return TestResult::Fail;
+    };
+    let Some(scratch) = ScratchProcess::new() else {
+        return TestResult::Fail;
+    };
+    let table = scratch.table();
+    let account = table.account();
+    let baseline = stats(account, ResourceKind::ObjectRow).map_or(0, |s| s.used);
+
+    let restore = quota_mode();
+    set_quota_mode(QuotaMode::Enforce);
+    set_limit(account, ResourceKind::ObjectRow, baseline + CEILING);
+    // The descriptor ceiling must stay clear of the object ceiling, or the
+    // refusal under test would come from the wrong axis with the wrong errno.
+    set_limit(account, ResourceKind::FdSlot, baseline + CEILING + 64);
+
+    let mut opened = 0u32;
+    let mut first_failure = 0i32;
+    for _ in 0..CEILING + 4 {
+        let fd = file_open_for_process(table, path, O_RDONLY as u32);
+        if fd < 0 {
+            first_failure = fd;
+            break;
+        }
+        opened += 1;
+    }
+    let denials = stats(account, ResourceKind::ObjectRow).map_or(0, |s| s.denials);
+    set_quota_mode(restore);
+
+    if opened != CEILING {
+        return slopos_testing::fail!(
+            "opened {} objects against a ceiling of {}; first failure {}",
+            opened,
+            CEILING,
+            first_failure
+        );
+    }
+    if first_failure != slopos_abi::Errno::ENFILE.raw() {
+        return slopos_testing::fail!(
+            "object refusal returned {}, want ENFILE ({})",
+            first_failure,
+            slopos_abi::Errno::ENFILE.raw()
+        );
+    }
+    if denials == 0 {
+        return slopos_testing::fail!("a refused object nobody counted is a silent denial");
+    }
+    TestResult::Pass
+}
+
+slopos_testing::stest!(name = test_quota_objectrow_drive_to_full);
+
+/// One process at its `ObjectRow` ceiling does not deny another.
+pub fn test_quota_objectrow_cross_process_isolation() -> TestResult {
+    use crate::fileio::file_open_for_process;
+    use slopos_abi::fs::O_RDONLY;
+    use slopos_abi::quota::{QuotaMode, ResourceKind};
+    use slopos_ostd::process::quota::{quota_mode, set_limit, set_quota_mode};
+
+    const CEILING: u32 = 3;
+
+    let Some(path) = scratch_file(b"/fileio_test/quota_obj_iso.txt") else {
+        return TestResult::Fail;
+    };
+    let (Some(greedy), Some(neighbour)) = (ScratchProcess::new(), ScratchProcess::new()) else {
+        return TestResult::Fail;
+    };
+    let greedy_table = greedy.table();
+    let neighbour_table = neighbour.table();
+
+    let restore = quota_mode();
+    set_quota_mode(QuotaMode::Enforce);
+    set_limit(greedy_table.account(), ResourceKind::ObjectRow, CEILING);
+
+    let mut opened = 0u32;
+    while file_open_for_process(greedy_table, path, O_RDONLY as u32) >= 0 {
+        opened += 1;
+        if opened > CEILING {
+            break;
+        }
+    }
+    let neighbour_fd = file_open_for_process(neighbour_table, path, O_RDONLY as u32);
+    set_quota_mode(restore);
+
+    if opened != CEILING {
+        return slopos_testing::fail!("greedy opened {opened} objects, want {CEILING}");
+    }
+    if neighbour_fd < 0 {
+        return slopos_testing::fail!(
+            "a neighbour was denied ({}) because another process filled its object quota",
+            neighbour_fd
+        );
+    }
+    TestResult::Pass
+}
+
+slopos_testing::stest!(name = test_quota_objectrow_cross_process_isolation);

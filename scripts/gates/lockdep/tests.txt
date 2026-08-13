@@ -33,6 +33,14 @@
 # move: every edge and chain measurement still falls under the caps below, and
 # they keep their earlier values.
 #
+# Re-measured 2026-08-09 for the per-socket wait-queue spine. The three
+# AF_INET socket queue classes (evbus.socket_recv / _send / _accept) now
+# register from the boot-allocated spine rather than the static array, so both
+# test phases gain exactly three classes. The instance count went 64 -> 1024
+# per axis but the CLASS count is what the validator tracks, and a class is
+# per declaration site, not per instance — which is the whole point of
+# declaration-site keying. Edge and chain counts are unchanged.
+#
 # Re-measured 2026-08-09 for the descriptor-table isolation test. Both test
 # phases gain exactly one class, KERNEL_FILE_TABLE. The test asserts that a
 # process owning no table never has descriptors installed into the kernel's,
@@ -71,8 +79,8 @@ require-phase post-userland-tests
 # been reached. One extra class is a new lock, which is exactly what should
 # require a deliberate bump.
 boot	classes	71
-post-kernel-tests	classes	178
-post-userland-tests	classes	187
+post-kernel-tests	classes	181
+post-userland-tests	classes	190
 
 # Edges and chains depend on which *orders* were observed, so they move with
 # scheduling. Each cap is the observed maximum plus that phase's spread, so

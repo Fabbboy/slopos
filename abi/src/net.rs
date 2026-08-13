@@ -35,8 +35,19 @@ const _: () = assert!(
     "SockAddrIn must be exactly 16 bytes"
 );
 
-/// Maximum number of kernel sockets (shared across all processes).
+/// Initial kernel socket slab capacity, and the width of the fallback
+/// wait-queue arrays.
+///
+/// **Not** the maximum: the slab grows to [`MAX_SOCKET_SLOTS`]. The two were
+/// conflated once, which is how AF_INET sockets 0 and 64 ended up sharing a
+/// wait queue.
 pub const MAX_SOCKETS: usize = 64;
+
+/// Hard maximum kernel socket slab capacity.
+///
+/// The width of the pinned per-socket wait-queue spine, so a slab index maps
+/// to its own queue with no folding. Must equal `SlabSocketTable::MAX_CAPACITY`.
+pub const MAX_SOCKET_SLOTS: usize = 1024;
 
 /// Socket descriptor index indicating "no socket".
 pub const INVALID_SOCKET_IDX: u32 = u32::MAX;
