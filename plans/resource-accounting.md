@@ -3,6 +3,9 @@
 **Every kernel allocation is charged to an `Account`, and the charge is a linear token
 that lives inside the thing it accounts for.**
 
+*Shipped. See [Status](#status) for what landed and [What is left](#what-is-left) for the
+four items that did not.*
+
 One node type. An account is a row in a fixed `.bss` arena, named by a
 generation-stamped id, one per `Process` plus one root owned by the kernel, whose parent
 edge is set once at creation to the spawner's account and never re-homed — so the
@@ -22,21 +25,49 @@ Repeatable form: *one account per process, parent fixed at spawn, hierarchical d
 over-committed ceilings, the charge lives in the object, refund is atomics-only, and the
 id is generation-stamped so a stale refund is a defined no-op.*
 
-The account's owner and a process identity that does not recycle are in place:
-`slopos_ostd::process::Process` carries a generation-stamped handle, and `AccountId` plus
-the arena's placement landed with it. The kernel-hardening pass landed first, because
-two of its items are what stop the tables lying about their capacity.
+---
+
+## Status
+
+**The mechanism and seven of eight kinds have shipped.** This document is now two things:
+the design rationale for code that exists — which is why the sections below are written in
+the present tense and should be read as *why it is the way it is* — and, at the end, the
+short list of what is still missing.
+
+Shipped, over commits `f46cada0`..`8da6213a`:
+
+| Piece | Where |
+|---|---|
+| `ResourceKind`, `Unit`, `Refund`, axis markers, enforced defaults | `abi/src/quota.rs` |
+| Arena, `try_charge`, `refund_raw`, `ledger_audit`, `quota=` tier | `slopos-ostd/src/process/quota/arena.rs` |
+| `Reservation`, `Charge`, `ChargeSlot` | `slopos-ostd/src/process/quota/token.rs` |
+| `Charged`, `FileBacking`, `AliasOf`, `SharedCharge`, audit registry | `slopos-ostd/src/process/quota/charged.rs` |
+| `#[derive(Charged)]` | `slopos-ostd-derive/src/lib.rs` |
+| `ledger` kcommand + `QUOTA[...]` report | `sched/src/quota_console.rs` |
+| Linearity gate | `scripts/check_charge_linearity.sh` |
+| Headroom ratchet + measured caps | `scripts/check_quota_headroom.sh`, `scripts/gates/quota/tests.txt` |
+| Machine-checked ledger, 18 obligations | `verification/proofs/resource_ledger.rs` |
+
+Charged and enforced: `FdSlot` (256), `ObjectRow` (512), `Task` (512), `Process` (64),
+`Custody` (64), `PinnedBytes` (4096 pages), `KernelMeta` (2048 pages). Default is
+`quota=enforce`; a full test boot records **zero denials**, so no legitimate workload is
+refused.
+
+**Not done — see [What is left](#what-is-left).** `Pages` has no charge sites and no
+ceiling, and nothing reclaims. Until reclaim lands, the quota bounds *acquisition* and not
+*holding time*, which is residual risk 4 below and the plan's own stated danger.
 
 ---
 
-## Why there is nothing today
+## Why there was nothing
 
-Zero per-process counters exist for any kernel object. A case-insensitive search for the
-whole rlimit/quota/ucount/racct family returns nothing in kernel code. Every object table
-is a fixed global array, and one unprivileged process can exhaust any of them. Exhaustion
-is graceful everywhere — a typed errno or `None`, never a panic — so the failure mode is
-**permanent silent denial**, which is why none of it appears in a 2819-test suite that
-contains exactly one drive-to-full test and no cross-process denial test at all.
+The problem this solved, kept because it is the argument for not regressing. Zero
+per-process counters existed for any kernel object: a case-insensitive search for the whole
+rlimit/quota/ucount/racct family returned nothing in kernel code. Every object table was a
+fixed global array, and one unprivileged process could exhaust any of them. Exhaustion was
+graceful everywhere — a typed errno or `None`, never a panic — so the failure mode was
+**permanent silent denial**, which is why none of it appeared in a 2819-test suite that
+contained exactly one drive-to-full test and no cross-process denial test at all.
 
 A per-process page counter existed and was deleted for having 21 writes and zero readers.
 That is the governing lesson, and it is a rule below, not a footnote.
@@ -417,7 +448,7 @@ process-scoped principal outlived the sender.
 
 | Resource | Rule | Reason |
 |---|---|---|
-| descriptor table | SLOT → holder | capacity already raised, table heap-backed |
+| descriptor table | SLOT → holder | capacity already raised to 256, table heap-backed |
 | process address spaces | `Process` kind → spawner's account | boot-sized spine; the account bounds it |
 | tasks | `Task` kind → the process's account, **adjusted at the exit latch** | the graveyard defers destruction; a Drop-refund gives spurious `EAGAIN` |
 | TCP established PCBs | OBJECT → the **accepting** process, at accept | remote-triggered; inheriting the *listener's* principal is a wart not to copy |
@@ -532,7 +563,10 @@ What survives, each with its caveat:
   frame allocation and never resolve it from `current()`; and one reclaimable class must
   land, scheduled, in the final phase. Revisit if `KernelMeta` lands early — a witness on
   the frame allocator with `current_frame_allocator()` made crate-private is most of a bank
-  already.
+  already. **That trigger has fired:** `KernelMeta` shipped in phase 5 and its charge sites
+  do name the account explicitly as an argument (`TaskStack::allocate(size, account)`,
+  never resolved from `current()`). So the bank question is live again and should be
+  answered deliberately when reclaim lands, not drifted into.
 - **Per-page or per-frame owner metadata.** See question 7.
 - **Kill as a memory-enforcement lever.** It collides with the discipline that a task only
   exits from its own context. For the one unrefusable case — a demand fault, which has no
@@ -561,125 +595,124 @@ What survives, each with its caveat:
 
 ---
 
-## Phases
+## What shipped, and what it cost
 
-`cargo fmt --all`, then
-`just build && just _iso-tests && just test` per commit.
+`cargo fmt --all`, then `just build && just _iso-tests && just test` per commit — held
+throughout. Nine commits, `f46cada0`..`094f5aeb`.
 
-### Phase 1 — the mechanism, with one kind end to end
+**Phase 1** — the mechanism plus `FdSlot`, with all three readers in the same commit (the
+`EMFILE` refusal, three exhaustion tests, the `ledger` kcommand). The context tripwire on
+`try_charge` was **dropped rather than kept**: this kernel enters syscalls through an
+interrupt gate, so `in_interrupt_context` is true on every sanctioned charge site and false
+on none. The rule is kept by where charges are written, not by a check that would have to be
+disabled to boot.
 
-`ResourceAxis`, `Reservation`, `Charge`, `try_charge`, `refund_raw`, the `quota=warn`
-tier, and **`FdSlot` only**. Lands with every reader in the same commit — see the rule
-below.
+**Phase 2** — `FileBacking` moved to ostd behind the sealed `Charged` supertrait. Three
+field shapes were needed, not one: `Charge` for the eight ordinary backings, `AliasOf` for
+the two pipe backings and `TtySlaveOpen`, and `SharedCharge` for the PTY master/slave pair,
+which is one type whose values play both roles. `Option<Charge>` was tried first and the
+linearity gate rejected it — correctly, since `Option::take` is exactly the safe separation
+the rule forbids.
 
-Plus `scripts/check_charge_linearity.sh`, on `scripts/lib/gate_common.sh`: reject
-`mem::forget`, `ManuallyDrop` and `.leak()` on charge-bearing types, `Option<Charge<_>>`
-fields, `.take()` on a charge field, and any non-mint function returning `Charge<_>`.
-`--self-test` plants each of the five and asserts exact hit counts **and** silence on the
-forms it deliberately accepts; the inline allowlist's dead entries fail. Cite
-`drivers/src/irq.rs:57-58` in the gate header as proof the escape is live.
+**Phase 3** — audit, gate, proof, then enforcement. `resource_ledger.rs` verifies 18
+obligations. The session-smoke `utest!` was required before any number could be claimed to
+describe a desktop: under `tests=on`, init exits *above* the compositor spawn, so the gate
+would otherwise have measured a kernel running its own unit tests.
 
-### Phase 2 — move `FileBacking`, close coverage by compile error
+**Phase 4** — `Task` at the exit latch, `Process` at the reap, `Custody`, `PinnedBytes`.
+`ChargeSlot` exists because of this: a kind whose refund point is not its holder's `Drop`
+needs a `.bss` home that owns a real token, since a charge stored as plain data is a charge
+nothing refunds when the row is overwritten.
 
-`trait FileBacking` moves `abi` → `slopos-ostd` with the sealed `Charged` supertrait.
-`#[derive(Charged)]` emits the private field, refuses to expand alongside `Clone`/`Copy`,
-and registers a `.charge_audit_registry` entry — registered from `mm/`, `sched/` and
-`core/`, **never** from ostd, whose `#[used]` static would break every userland link. All
-ten backings gain their object charge, with the per-class placement rules above, especially
-the pipe (registry entry, not either backing) and the PTY (master only).
+**Phase 5** — `KernelMeta` on task stacks, 12 pages each and previously unbounded.
 
-### Phase 3 — the audit, the gate, the proof
+### Four defects the measurement caught, not the code review
 
-An in-kernel `quotacheck` as a `kcommand`: walk the audit registry, sum live amounts per
-account per kind, compare against `used`, print `charged/refunded/live/peak/denials`, and a
-`stest!` that fails on any non-zero delta immediately after an exhaustion test. This is the
-only mechanism that can see a forgotten or unwinder-skipped charge, and it is the runtime
-form of the equality invariant. Plus `Account::drop`'s `debug_assert!(used == 0)` per kind
-— which must be the *account's* Drop, not the charge's, or it trips
-`check_drop_panic_free.sh`.
+1. `account_release` darkened a row without cancelling it upward, so ancestors kept debits
+   whose refunds had just become generation-mismatch no-ops. Root held **574 tasks** with
+   every process row at zero.
+2. The `Process` charge refunded at `Drop` rather than at the reap, so a spawner kept
+   paying for children already gone.
+3. `Charge::try_extend` saturated, capping the token below what the row had been debited —
+   a permanent phantom debit.
+4. Setting `ObjectRow` equal to `FdSlot` made the object ceiling the *de-facto* descriptor
+   limit, so a full table returned `ENFILE` where POSIX requires `EMFILE`. The existing
+   open-file-limit test caught it.
 
-`scripts/check_quota_headroom.sh` + `scripts/gates/quota/<variant>.txt`, mirroring
-`check_lockdep_headroom.sh` mechanically: one line per row at the three phase points
-already wired (`boot`, `post-kernel-tests`, `post-userland-tests`); one full-line regex with
-an explicit unparseable-line branch; a `min-kinds` floor and a peak-of-zero-fails rule as
-the `min-records` analogue; `require-phase` with its unmatched branch, because a phase that
-stopped reporting looks exactly like a phase that passed; dead-entry failure; `--log`,
-`--emit-allowlist`, and `--self-test` over at least eleven crafted logs including a clean
-accept as the positive control and `peak == cap` exactly (must pass).
+None were visible by reading the code. All four are why the audit and the dump exist.
 
-**The gate cannot measure a desktop today.** Under `tests=on`, init calls
-`run_userland_tests()` then `exit_with_code(0)`
-(`userland/src/apps/init_process.rs:79-92`), and the roulette, compositor, shell and
-terminal spawns are all *below* that exit — so no automated boot has a compositor listen
-socket, client AF_UNIX pairs, or a desktop descriptor population, which are precisely the
-tight resources. Add a deterministic session-smoke `utest!` inside the tests ISO that
-spawns the compositor plus N clients and holds the peak population open across the
-`post-userland-tests` dump point. Without it, do not claim to measure a desktop session.
+### Two premises that did not survive contact
 
-`verification/proofs/resource_ledger.rs` — house style: a standalone Verus crate, flat
-scalar state rather than a `Map`, `&&&` conjunct chains with obligation numbers in
-comments, a `Step` enum with one variant per atomic-bounded operation each doc-commented
-with its real `file:line`, then one `proof fn` per obligation, then the paired witnesses.
+**`VM_SLOT_ALLOC` no longer exists.** It was listed as declared residue; the address-space
+table is keyed on the process registry slot now, so there is no separate allocator to
+reshape.
 
-Steps: `TryChargeOk`, `TryChargeDeniedAtLevel(k)`, `RefundLive`, `RefundStale`,
-`SubAccountCreate`, `SubAccountDrop`, `LowerLimit`, `SlotRelease`, `ExtendOk`,
-`ExtendDenied`, `Shrink`.
+**`CLONE_VM && !CLONE_THREAD` cannot mint a fresh `Process` here.** `mm`'s `PROCESS_VMS`,
+`fs`'s `PROCESS_TABLES` and the account arena are all keyed on the process registry slot,
+and `VmReservation::claim` refuses a second bind to one slot — so two `Process` objects
+sharing one address space is structurally unrepresentable, not a policy switch. Doing it
+needs `ProcessVm` re-keyed onto an independent refcounted handle: a process-semantics
+redesign touching CR3 activation and teardown ordering, not an accounting change. `Task` is
+therefore the countable kind for threads, and a `CLONE_VM` sibling shares the parent's
+account. Recorded rather than silently skipped.
 
-Obligations:
+---
 
-- **L1 — equality, not inequality:** `forall i. used[i] == live_sum[i]`. An inequality
-  cannot catch a phantom refund, which is the failure the token exists to eliminate.
-- **L2 as a step property:** no successful `try_charge` leaves `used > limit`. The global
-  form is false the instant `LowerLimit` exists, and upstream exhibits three incompatible
-  behaviours in one kernel on exactly this point.
-- **L3a:** no charge is refunded twice — delivered by the by-value consume, and the half
-  that matters, since double-refund is the under-count. **L3b:** the quiescent equality,
-  which the audit checks. "Refunded exactly once" is **deleted** as an obligation: it
-  assumes `Drop` always runs, which is false for a fault frame the unwinder skips.
-- **L4:** a denied `try_charge` is identity on every row, **including a batch that succeeds
-  for k and fails at k+1**. The partial-batch unwind is the hard part.
-- **L5:** a stale-generation refund is identity.
+## What is left
 
-Five paired broken witnesses, each an `exists` with an explicit trigger plus a `forall`
-showing the real step preserves it: hierarchical debit combined with committed child limits
-(double-counts, violates L1); debiting `0..k` then returning `Err` without unwinding (L4); a
-refund skipping the generation compare (L1); a `Clone`able charge (L3a); a
-check-then-charge split (L2's step form).
+Ordered by what the plan itself says is most dangerous to defer.
 
-Named as out of model, in the file header and by name in `verification/STATUS.md`: the
-row's `fetch_add`/`fetch_sub` ordering and the refund-versus-slot-release ordering, because
-Verus has no weak-memory model. Covered by KernMiri under both Stacked and Tree Borrows,
-plus the in-kernel audit. Classify the module **Unaudited** alongside `handle` and
-`wl_currency`, and update the obligation total in `verification/proofs/README.md` in the
-same commit.
+### 1. Reclaim — the scheduled item, not an optional one
 
-### Phase 4 — the remaining kinds
+Nothing reclaims. Between now and this landing, the quota bounds acquisition and not
+holding time, on a kernel with no shrinker, no eviction, no out-of-memory disposition and
+no swap. The plan's own words: *bounding acquisition without bounding holding time is a
+first-come land grab with better bookkeeping, and Zircon is nine years of evidence that
+"later" means never.*
 
-`ObjectRow` across the ten backings; `Task` and `Process` counts at the exit latch;
-`Custody`; then **`PinnedBytes` early**, because it is the only genuinely unbounded
-resource and it is a tier-2 charge, so it proves the hard tier rather than deferring it —
-give `PinnedUserBuffer::pin` an `AccountId` in place of its bare recycled pid, and give the
-keepalive frames their own second charge with its refund site in the driver's TX reclaim.
-Then `Pages` per VMA.
+Wanted: a `Reclaimable` trait with two implementors chosen because they are provably safe
+to drop — the per-CPU stack-VA cache (already a pool that can shrink to zero) and clean
+page-cache frames (the dirty bit exists). Plus the demand-fault disposition, which must be
+a **signal so the task unwinds itself**, never a cross-CPU teardown: a demand fault has no
+syscall return path, and killing from another CPU collides with I8 (a task only exits from
+its own context). Depth-ordered subtree kill is the bounded last resort.
 
-### Phase 5 — `KernelMeta`, then reclaim
+### 2. `Pages` — the one uncharged kind
 
-`VM_SLOT_ALLOC` was listed here as declared residue and is no longer a thing: the
-address-space table is keyed on the process registry slot (`slot_for_handle`), so the
-separate slot allocator and its generation counter are gone. Nothing to reshape.
+`ResourceKind::Pages` has no charge sites, so it carries `NO_LIMIT_SENTINEL` rather than a
+ceiling: a limit on a counter nothing increments refuses against nothing. Address-space
+growth is still bounded only by the frame allocator.
 
-Page tables (three mint sites in `slopos-ostd/src/mm/page_table.rs`), task kernel and data
-stacks, slab refill charged to the root, and the `unix_connect` FIFOs. Sequenced last so it
-is not what shakes out the mechanism; in scope because it is plausibly the largest
-unaccounted consumer in the tree.
+Wanted: one `Charge<PagesAxis>` per VMA/region, consume-and-reissue on growth via
+`Charge::try_extend`, refunded by the region's own `Drop` with the exact count it holds.
+That shape is what deletes the deleted counter's `total_freed + unmapped_pages` error-path
+arithmetic outright. Still rejected: exact per-page sharing attribution and per-page owner
+metadata — see question 7.
 
-Then **reclaim**, scheduled rather than deferred indefinitely: a `Reclaimable` trait with
-two initial implementors that are provably safe to drop — the per-CPU stack-VA cache
-(already a pool that can shrink to zero) and clean page-cache frames (the dirty bit already
-exists) — plus the demand-fault disposition and the depth-ordered subtree kill as the
-bounded last resort. Bounding acquisition without bounding holding time is a first-come
-land grab with better bookkeeping, and Zircon is nine years of evidence that "later" means
-never.
+### 3. Keepalive DMA frames
+
+`PinnedUserBuffer::keepalive_frames` takes independent owning refs that deliberately
+outlive the ring, and they are **not** covered by the ring's pin charge — sharing one would
+refund at ring teardown while the driver still held the pages, which is a memory-lock bypass
+at the DMA boundary. Their own second charge belongs at the driver's TX-reclaim site, where
+the frames are actually released. Until then they are bounded by
+`SLOPRING_MAX_FIXED_BUFFERS` times the per-ring pin ceiling, and that is written down at the
+call site rather than left implicit.
+
+### 4. Slab refill and the `unix_connect` FIFOs
+
+Slab backing pages should be charged to the root at refill. Do **not** give an account its
+own slab: per-cgroup caches measured 45–65 % utilisation upstream, and shared-slab
+accounting recovered ~40 % of kernel memory. The `unix_connect` FIFOs (16 KiB × 2 per pair)
+are allocated by the connecting client and that donation is now documented at the call site;
+charging them is the remaining half.
+
+### 5. `prlimit64`
+
+The enforced numbers are still not published to userland. A Linux-ABI kernel must publish
+real limits, because a caller that cannot query a bound cannot back off gracefully — but
+never before the enforcement point exists, which it now does. The gate's numbers stay in a
+tracked file, not in a syscall userland can pin.
 
 ---
 
@@ -691,16 +724,22 @@ The deleted per-process page counter had 21 writes and zero readers. So:
 > point that refuses, an exhaustion test proving the refusal refunds exactly once and leaks
 > nothing, and a `kcommand` that prints it.
 
-The exhaustion-test shape already exists —
-`core/src/syscall/tests.rs:3817` fills a process's descriptor table, attempts one more, and
-asserts the failed mint drops exactly once by checking the strong count returns to baseline.
-Generalise it per resource class.
+The rule was held: every kind landed with its enforcement point, its tests and its dump
+line in one commit.
 
-**Test budget.** 18 resource classes × 3 (drive-to-full → exact errno; refusal refunds
-once; cross-process isolation) plus about 6 for the account's own behaviour and the
-`kcommand` ≈ **+55 to +62** KTAP-counted tests. Measure with
-`TEST_COUNT_BASELINE=0 scripts/check_test_count.sh` and bump the baseline in the same
-commit; never guess. Filtered runs that create files must include `'*ext2_aaa*'`.
+**Test budget, as estimated and as measured.** The estimate was +55 to +62 KTAP tests for
+18 resource classes. Actual: **+15** (2912 → 2927), because the estimate assumed 18 classes
+each needing three kernel-level tests, and the real shape is 21 `slopos-ostd` unit tests
+over the arena and the tokens — which cover the algebra once for every axis rather than
+once per axis — plus per-class kernel tests only where the *call site* differs. Charging
+`FdSlot` and `ObjectRow` exercises different code; charging `Task` and `Process` exercises
+different code; the arena underneath is the same code and is tested once.
+
+The remaining kinds should follow that shape rather than the original number: a kernel test
+per class where the enforcement point is distinct, and unit tests for anything that is
+really a property of the arena. Measure with `TEST_COUNT_BASELINE=0
+scripts/check_test_count.sh` and bump the baseline in the same commit; never guess.
+Filtered runs that create files must include `'*ext2_aaa*'`.
 
 ---
 
@@ -721,33 +760,51 @@ commit; never guess. Filtered runs that create files must include `'*ext2_aaa*'`
    tracking amounts is insufficient and the allocations must come from independent backing
    stores. This tree does not do that, so **tier-1 charges bound object count, not bytes,
    and a bytes-denominated limit must never be enforced through the shared slab.**
-4. **Refuse-only until reclaim lands.** Between phase 1 and phase 5 the quota bounds
-   acquisition and not holding time, on a kernel with no shrinker, no eviction, no
-   out-of-memory disposition and no swap. Attribution is still worth having, but the phase
-   must not slip.
+4. **Refuse-only until reclaim lands. ← CURRENTLY LIVE.** The quota bounds acquisition and
+   not holding time, on a kernel with no shrinker, no eviction, no out-of-memory
+   disposition and no swap. Attribution is worth having on its own, which is why the rest
+   shipped first — but this is the open half, and it is item 1 of *What is left*.
 5. **Shared namespaces are covert channels regardless of accounting.** A bounded shared
    table is probeable by any process through its errno. Futex buckets are the in-tree
    instance: fill one bucket and deny every other process whose word hashes there. The fix
    is per-principal *namespace* partitioning, which is strictly stronger than a
    per-principal count, and out of scope.
 6. **Zombie rows.** A charge outliving its process keeps a row's numbers wrong until the
-   slot is reused. Bounded and self-healing, but the `kcommand` must list rows with live
-   charges and no live process, or it is a number with no reader.
+   slot is reused. Bounded and self-healing; the `ledger` command lists rows with live
+   charges and no live process, so it is a number with a reader. `account_release` also
+   cancels a released row's outstanding amount against its ancestors — without that, the
+   ancestors kept debits whose refunds had already become no-ops, which measured at 574
+   tasks held by the root.
 7. **The audit is not free.** Escort measured end-to-end kernel accounting at 8 %
-   throughput, and 15–50 % under load with protection domains. The gate file should carry a
-   throughput floor alongside the peaks, or a regression of that size passes.
+   throughput, and 15–50 % under load with protection domains. **Not yet measured here,
+   and the gate carries no throughput floor** — so a regression of that size would pass.
+   Worth adding alongside the peaks.
 
-## Open, needing measurement rather than decision
+## Answered by measurement
 
-- Whether `check_stack_sizes.sh` passes on all three variants after the constructor
-  changes. The token is 16 bytes and cannot itself move a frame, but the `inline(always)`
-  scar is measured on the debug ELF and each variant has its own allowlist.
-- Whether the lockdep edge and chain caps move. Charging takes no locks by construction, but
-  the arena's creation path and the `unix_connect` donation change lock nesting.
-  Re-measure over several runs.
-- The real peaks. Every number here is a shape, not a value, and they are unknown until the
-  session-smoke `utest!` exists.
-- Whether `CLONE_VM && !CLONE_THREAD` should mint a fresh `process_id` sharing the vm handle
-  — matching Linux, and making a per-`Process` count meaningful — or whether `Task` is the
-  only countable kind at first. Today such a child gets the *parent's* pid and shares its
-  descriptor table whether or not `CLONE_FILES` was requested. Decide deliberately.
+Every one of these was open when the plan was written. Recorded because the *numbers* are
+the useful part, and because a future change that moves them should notice.
+
+- **`check_stack_sizes.sh` on all three variants: passes.** dev 17 frames over 2048 B,
+  tests 20, release 0 — unchanged from before the work, with no new allowlist entries. One
+  regression appeared and was fixed rather than exempted: resolving the stack account inline
+  in `task_clone` put two `KArc<Process>` temporaries and both stack rvalues into that frame
+  and pushed it 2016 → 2264 B. Factored into one `#[inline(never)]` helper returning the
+  pair.
+- **Lockdep caps: edges and chains did not move; classes +3.** Charging takes no locks, as
+  designed. The three classes are the AF_INET socket wait queues re-registering from the
+  boot-allocated spine — unrelated to accounting, and a *class* is per declaration site
+  however many instances exist.
+- **The real peaks.** Root, at `post-userland-tests` with the session-smoke population
+  live: `fdslot` 256, `objectrow` 257, `kernelmeta` 636, `process` 113, `custody` 8,
+  `task` 5–7, `pinnedbytes` 1. Worst *single* user row: 18 fdslot, 10 objectrow, 12
+  kernelmeta, 4 process. The enforced per-process defaults sit an order of magnitude above
+  those, which is the point — they bound an adversary, not the workload.
+- **`CLONE_VM && !CLONE_THREAD`: `Task` only, and not by choice.** See *Two premises that
+  did not survive contact* — a fresh `Process` there is structurally unrepresentable until
+  `ProcessVm` is re-keyed off the process registry slot.
+
+## Still unmeasured
+
+- **Throughput.** Residual risk 7. No before/after number exists and the gate carries no
+  floor, so an 8 % regression of the kind Escort measured would pass silently.

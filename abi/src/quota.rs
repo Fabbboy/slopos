@@ -91,8 +91,14 @@ impl ResourceKind {
             | ResourceKind::Task
             | ResourceKind::Process
             | ResourceKind::Custody => Unit::Count,
-            ResourceKind::Pages | ResourceKind::KernelMeta => Unit::Pages,
-            ResourceKind::PinnedBytes => Unit::Bytes,
+            // `PinnedBytes` is named for the resource, not the unit: the
+            // charge is in **pages**. `MAX_PIN_BYTES` is 1 GiB, which does not
+            // fit the arena's `u32` amount, and pages are what a pin actually
+            // holds against reclaim — a byte count would also let a thousand
+            // sub-page pins look cheap while each holds a whole frame.
+            ResourceKind::Pages | ResourceKind::KernelMeta | ResourceKind::PinnedBytes => {
+                Unit::Pages
+            }
         }
     }
 
