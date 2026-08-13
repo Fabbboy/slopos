@@ -158,7 +158,7 @@ define_syscall!(syscall_openpty
     // what owns the pair (dropping the backing on any error arm below
     // tears the freshly-made pair down). Writes the master FD and the
     // slave pts number to the out params.
-    let (master_idx, backing) = match tty::alloc_pty() {
+    let (master_idx, backing) = match tty::alloc_pty(pid.account()) {
         Ok(v) => v,
         Err(e) => return Err(Errno::from_raw(e.to_errno()).unwrap_or(Errno::EINVAL)),
     };

@@ -149,13 +149,13 @@ pub fn ring_setup(
     // Open a FileKind::Ring fd referring to it. The backing owns the
     // registry entry from here: a failed install drops it, removing the
     // ring — only the mapping still needs explicit rollback.
-    let Some(backing) = file_ops::ring_backing(raw_handle) else {
+    let Some(backing) = file_ops::ring_backing(raw_handle, table.account()) else {
         let _ = slopos_mm::process_vm::process_vm_munmap(
             vm_process,
             user_addr,
             layout.region_bytes as u64,
         );
-        return eno(Errno::ENOMEM);
+        return eno(Errno::ENFILE);
     };
     // The ring fd is process-private (SLOPRING § 14): a ring's SQ/CQ is
     // SPSC and its user mapping is not inherited, so neither `fork` nor

@@ -1,11 +1,14 @@
 use slopos_abi::Errno;
-use slopos_abi::file_ops::{FileBacking, FileKind, FileOps};
+use slopos_abi::file_ops::{FileKind, FileOps};
 use slopos_abi::fs::UserFsStat;
 use slopos_abi::io::{IO_STAGING_SIZE, IoBufRead, IoBufWrite};
+use slopos_abi::quota::ObjectRow;
 use slopos_abi::syscall::{POLLIN, POLLOUT};
 use slopos_ostd::KArc;
 use slopos_ostd::handle::{Handle, HandleTable};
 use slopos_ostd::lock_class;
+use slopos_ostd::process::AccountId;
+use slopos_ostd::process::quota::{Charge, FileBacking, try_charge};
 use slopos_ostd::sync::{LOCK_LEVEL_REGISTRY, SpinLock};
 
 use crate::vfs::{FileSystem, InodeId};
@@ -73,9 +76,13 @@ pub fn vfs_open_handle_flags(
 }
 
 /// Sole owner of one `OpenVnode` table entry; dropping it closes the vnode.
+#[derive(slopos_ostd::Charged)]
 struct VnodeBacking {
     handle: usize,
+    object_charge: Charge<ObjectRow>,
 }
+
+slopos_ostd::charge_audit!(VnodeBacking);
 
 impl FileBacking for VnodeBacking {}
 
@@ -88,16 +95,29 @@ impl Drop for VnodeBacking {
     }
 }
 
-/// Wrap a handle from [`vfs_open_handle_flags`] into its owning backing.
-/// On allocation failure the vnode entry is removed before returning.
-pub(crate) fn vnode_backing(handle: usize) -> Option<KArc<dyn FileBacking>> {
-    match KArc::try_new(VnodeBacking { handle }) {
+/// Wrap a handle from [`vfs_open_handle_flags`] into its owning backing,
+/// charged to `account` — the opener.
+///
+/// On allocation failure or a refused charge the vnode entry is removed before
+/// returning, so the table row never outlives the attempt to own it.
+pub(crate) fn vnode_backing(handle: usize, account: AccountId) -> Option<KArc<dyn FileBacking>> {
+    let release = || {
+        let h = Handle::<OpenVnode>::unpack(handle, SLOT_BITS);
+        with_table(|t| {
+            let _ = t.remove(h);
+        });
+    };
+    let Ok(reservation) = try_charge::<ObjectRow>(account, 1) else {
+        release();
+        return None;
+    };
+    match KArc::try_new(VnodeBacking {
+        handle,
+        object_charge: Charge::commit(reservation),
+    }) {
         Ok(backing) => Some(backing),
         Err(_) => {
-            let h = Handle::<OpenVnode>::unpack(handle, SLOT_BITS);
-            with_table(|t| {
-                let _ = t.remove(h);
-            });
+            release();
             None
         }
     }

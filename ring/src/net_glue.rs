@@ -87,9 +87,14 @@ pub fn accept_nonblock(table: FdTable, file: &FileRef) -> Result<Option<i32>, Er
             Ok(accepted) => {
                 // The backing owns the accepted endpoint from here: a
                 // failed install (or failed backing alloc) closes it.
-                let Some(backing) = slopos_net::unix_socket_file_ops::unix_socket_backing(accepted)
-                else {
-                    return Err(Errno::ENOMEM);
+                // Charged to the *accepting* process, at accept. A connection
+                // is remote-triggered, so billing the listener's principal for
+                // one would let a peer exhaust that principal's whole budget.
+                let Some(backing) = slopos_net::unix_socket_file_ops::unix_socket_backing(
+                    accepted,
+                    table.account(),
+                ) else {
+                    return Err(Errno::ENFILE);
                 };
                 let new_fd = slopos_fs::fileio_open_fd_with_ops(
                     table,
@@ -118,8 +123,10 @@ pub fn accept_nonblock(table: FdTable, file: &FileRef) -> Result<Option<i32>, Er
             let e = Errno::from_raw(accepted).unwrap_or(Errno::EINVAL);
             return if e == Errno::EAGAIN { Ok(None) } else { Err(e) };
         }
-        let Some(backing) = slopos_net::socket_file_ops::socket_backing(accepted as u32) else {
-            return Err(Errno::ENOMEM);
+        let Some(backing) =
+            slopos_net::socket_file_ops::socket_backing(accepted as u32, table.account())
+        else {
+            return Err(Errno::ENFILE);
         };
         let new_fd = slopos_fs::fileio_open_socket_fd(table, accepted as u32, Some(backing));
         if new_fd < 0 {

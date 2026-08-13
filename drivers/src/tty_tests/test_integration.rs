@@ -4,7 +4,7 @@ use slopos_abi::KernelErrno;
 
 pub fn test_pty_data_roundtrip() -> TestResult {
     tty::table::tty_table_init();
-    let (master, _master_backing) = match tty::pty_alloc() {
+    let (master, _master_backing) = match tty::pty_alloc(slopos_ostd::process::quota::root()) {
         Ok(pair) => pair,
         Err(_) => return TestResult::Fail,
     };
@@ -43,7 +43,7 @@ pub fn test_pty_data_roundtrip() -> TestResult {
 
 pub fn test_pty_hangup_propagation() -> TestResult {
     tty::table::tty_table_init();
-    let (master, master_backing) = match tty::pty_alloc() {
+    let (master, master_backing) = match tty::pty_alloc(slopos_ostd::process::quota::root()) {
         Ok(pair) => pair,
         Err(_) => return TestResult::Fail,
     };

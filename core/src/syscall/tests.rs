@@ -998,8 +998,9 @@ pub fn test_pts_open_acquires_controlling_tty_without_o_noctty() -> TestResult {
 
     // The returned backing IS the master open — held for the test so the
     // pair stays alive, dropped at the end to tear it down.
-    let (master_idx, master_open) = match slopos_kernel_services::syscall_services::tty::alloc_pty()
-    {
+    let (master_idx, master_open) = match slopos_kernel_services::syscall_services::tty::alloc_pty(
+        slopos_ostd::process::quota::root(),
+    ) {
         Ok(v) => v,
         Err(_) => return TestResult::Fail,
     };
@@ -1056,8 +1057,9 @@ pub fn test_pts_open_with_o_noctty_skips_controlling_tty_acquire() -> TestResult
     assert_test!(task_id != INVALID_TASK_ID, "failed to create task");
     let task_guard = assert_some!(task_find_by_id(task_id), "task lookup failed");
 
-    let (master_idx, master_open) = match slopos_kernel_services::syscall_services::tty::alloc_pty()
-    {
+    let (master_idx, master_open) = match slopos_kernel_services::syscall_services::tty::alloc_pty(
+        slopos_ostd::process::quota::root(),
+    ) {
         Ok(v) => v,
         Err(_) => return TestResult::Fail,
     };
@@ -1115,8 +1117,9 @@ pub fn test_tty_poll_after_close_reuse_no_crossobject() -> TestResult {
     let task_guard = assert_some!(task_find_by_id(task_id), "task lookup failed");
 
     // The returned backing owns the pair for the test's duration.
-    let (master_idx, master_open) = match slopos_kernel_services::syscall_services::tty::alloc_pty()
-    {
+    let (master_idx, master_open) = match slopos_kernel_services::syscall_services::tty::alloc_pty(
+        slopos_ostd::process::quota::root(),
+    ) {
         Ok(v) => v,
         Err(_) => return TestResult::Fail,
     };
@@ -1410,7 +1413,7 @@ pub fn test_brk_extreme_values() -> TestResult {
 
 pub fn test_memfd_create_boundaries() -> TestResult {
     // Test memfd_create + ftruncate basics
-    let result = slopos_mm::memfd::memfd_create(0);
+    let result = slopos_mm::memfd::memfd_create(0, slopos_ostd::process::quota::root());
     assert_test!(result.is_some(), "memfd_create should succeed");
     if let Some((handle, _ops, backing)) = result {
         // ftruncate with zero size should fail
@@ -4957,7 +4960,10 @@ fn unix_create_connected_pair(table: FdTable) -> Option<(i32, i32)> {
         }
     };
 
-    let srv_backing = slopos_net::unix_socket_file_ops::unix_socket_backing(accepted_handle)?;
+    let srv_backing = slopos_net::unix_socket_file_ops::unix_socket_backing(
+        accepted_handle,
+        slopos_ostd::process::quota::root(),
+    )?;
     let srv_fd = slopos_fs::fileio::fileio_open_fd_with_ops(
         table,
         &UNIX_SOCKET_FILE_OPS,
@@ -4965,7 +4971,10 @@ fn unix_create_connected_pair(table: FdTable) -> Option<(i32, i32)> {
         Some(srv_backing),
         slopos_fs::fileio::FdFlags::NONE,
     );
-    let cli_backing = slopos_net::unix_socket_file_ops::unix_socket_backing(cli_handle)?;
+    let cli_backing = slopos_net::unix_socket_file_ops::unix_socket_backing(
+        cli_handle,
+        slopos_ostd::process::quota::root(),
+    )?;
     let cli_fd = slopos_fs::fileio::fileio_open_fd_with_ops(
         table,
         &UNIX_SOCKET_FILE_OPS,
@@ -5604,8 +5613,11 @@ pub fn test_compositor_handshake_listen_accept_send_poll() -> TestResult {
     assert_eq_test!(rc, 0, "connect");
 
     // Open FD for client side (like kernel does after connect syscall)
-    let cli_backing = slopos_net::unix_socket_file_ops::unix_socket_backing(cli_handle)
-        .expect("cli backing alloc");
+    let cli_backing = slopos_net::unix_socket_file_ops::unix_socket_backing(
+        cli_handle,
+        slopos_ostd::process::quota::root(),
+    )
+    .expect("cli backing alloc");
     let cli_fd = slopos_fs::fileio::fileio_open_fd_with_ops(
         pid,
         &UNIX_SOCKET_FILE_OPS,
@@ -5625,8 +5637,11 @@ pub fn test_compositor_handshake_listen_accept_send_poll() -> TestResult {
     // ── Server: accept (gets side-B) ──
     let accepted_handle = unix_socket::unix_accept(listen_handle).expect("accept");
 
-    let srv_backing = slopos_net::unix_socket_file_ops::unix_socket_backing(accepted_handle)
-        .expect("srv backing alloc");
+    let srv_backing = slopos_net::unix_socket_file_ops::unix_socket_backing(
+        accepted_handle,
+        slopos_ostd::process::quota::root(),
+    )
+    .expect("srv backing alloc");
     let srv_fd = slopos_fs::fileio::fileio_open_fd_with_ops(
         pid,
         &UNIX_SOCKET_FILE_OPS,
@@ -5992,14 +6007,15 @@ pub fn test_unix_scm_rights_atomic_delivery() -> TestResult {
 
     // A memfd fd in the sender's table; the in-flight alias is a FileRef
     // minted from it.
-    let (mfd_handle, mfd_ops, mfd_backing) = match slopos_mm::memfd::memfd_create(0) {
-        Some(h) => h,
-        None => {
-            unix_socket::unix_close(srv);
-            unix_socket::unix_close(cli);
-            return fail!("memfd_create failed");
-        }
-    };
+    let (mfd_handle, mfd_ops, mfd_backing) =
+        match slopos_mm::memfd::memfd_create(0, slopos_ostd::process::quota::root()) {
+            Some(h) => h,
+            None => {
+                unix_socket::unix_close(srv);
+                unix_socket::unix_close(cli);
+                return fail!("memfd_create failed");
+            }
+        };
     let mfd_fd = slopos_fs::fileio::fileio_open_fd_with_ops(
         pid,
         mfd_ops,
@@ -6081,10 +6097,11 @@ pub fn test_unix_scm_rights_anc_queue_full_no_partial() -> TestResult {
     };
 
     // One memfd fd; every queued alias clones from it.
-    let (mfd_handle, mfd_ops, mfd_backing) = match slopos_mm::memfd::memfd_create(0) {
-        Some(p_guard) => p_guard,
-        None => return fail!("memfd_create failed"),
-    };
+    let (mfd_handle, mfd_ops, mfd_backing) =
+        match slopos_mm::memfd::memfd_create(0, slopos_ostd::process::quota::root()) {
+            Some(p_guard) => p_guard,
+            None => return fail!("memfd_create failed"),
+        };
     let mfd_fd = slopos_fs::fileio::fileio_open_fd_with_ops(
         pid,
         mfd_ops,
@@ -6174,10 +6191,11 @@ pub fn test_unix_scm_rights_error_returns_custody() -> TestResult {
     };
     unix_socket::unix_close(cli);
 
-    let (mfd_handle, mfd_ops, mfd_backing) = match slopos_mm::memfd::memfd_create(0) {
-        Some(p_guard) => p_guard,
-        None => return fail!("memfd_create failed"),
-    };
+    let (mfd_handle, mfd_ops, mfd_backing) =
+        match slopos_mm::memfd::memfd_create(0, slopos_ostd::process::quota::root()) {
+            Some(p_guard) => p_guard,
+            None => return fail!("memfd_create failed"),
+        };
     let mfd_fd = slopos_fs::fileio::fileio_open_fd_with_ops(
         pid,
         mfd_ops,

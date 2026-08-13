@@ -276,7 +276,7 @@ pub fn test_pty_output_idle_immediate() -> TestResult {
     tty::table::tty_table_init();
 
     // Allocate a PTY pair.
-    let (master_idx, master_backing) = match tty::pty_alloc() {
+    let (master_idx, master_backing) = match tty::pty_alloc(slopos_ostd::process::quota::root()) {
         Ok(pair) => pair,
         Err(_) => {
             klog_info!("TTY_TEST: SKIP - could not allocate PTY pair");
@@ -610,13 +610,14 @@ pub fn test_pty_master_close_slave_eof_eio() -> TestResult {
     tty::table::tty_table_init();
 
     // Allocate a PTY pair. The returned backing is the sole master open.
-    let (master_idx, master_backing) = match crate::tty::pty::pty_alloc() {
-        Ok(pair) => pair,
-        Err(e) => {
-            klog_info!("TTY_TEST: BUG - pty_alloc failed: {:?}", e);
-            return TestResult::Fail;
-        }
-    };
+    let (master_idx, master_backing) =
+        match crate::tty::pty::pty_alloc(slopos_ostd::process::quota::root()) {
+            Ok(pair) => pair,
+            Err(e) => {
+                klog_info!("TTY_TEST: BUG - pty_alloc failed: {:?}", e);
+                return TestResult::Fail;
+            }
+        };
 
     let slave_idx = TtyIndex(tty::get_pty_number(master_idx).unwrap() as u8);
 
@@ -697,13 +698,14 @@ pub fn test_hangup_permanent_eof() -> TestResult {
 pub fn test_pty_slave_poll_pollhup_after_master_close() -> TestResult {
     tty::table::tty_table_init();
 
-    let (master_idx, master_backing) = match crate::tty::pty::pty_alloc() {
-        Ok(pair) => pair,
-        Err(e) => {
-            klog_info!("TTY_TEST: BUG - pty_alloc failed: {:?}", e);
-            return TestResult::Fail;
-        }
-    };
+    let (master_idx, master_backing) =
+        match crate::tty::pty::pty_alloc(slopos_ostd::process::quota::root()) {
+            Ok(pair) => pair,
+            Err(e) => {
+                klog_info!("TTY_TEST: BUG - pty_alloc failed: {:?}", e);
+                return TestResult::Fail;
+            }
+        };
 
     let slave_idx = TtyIndex(tty::get_pty_number(master_idx).unwrap() as u8);
 
@@ -2326,7 +2328,7 @@ pub fn test_session_fields_pub_crate_smoke() -> TestResult {
 
 pub fn test_slave_starts_locked() -> TestResult {
     tty::table::tty_table_init();
-    let (master, master_backing) = match tty::pty_alloc() {
+    let (master, master_backing) = match tty::pty_alloc(slopos_ostd::process::quota::root()) {
         Ok(pair) => pair,
         Err(e) => {
             klog_info!("TTY_TEST: BUG - pty_alloc failed: {:?}", e);

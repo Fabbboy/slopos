@@ -20,6 +20,7 @@
 
 mod arena;
 mod axis;
+mod charged;
 mod token;
 
 pub use arena::{
@@ -28,6 +29,10 @@ pub use arena::{
     set_quota_mode, stats, try_charge,
 };
 pub use axis::{Refundable, ResourceAxis};
+pub use charged::{
+    AliasOf, ChargeAuditEntry, Charged, FileBacking, SharedCharge, charge_audit_entries,
+    sealed as charged_sealed,
+};
 pub use token::{Charge, Reservation};
 
 #[cfg(test)]

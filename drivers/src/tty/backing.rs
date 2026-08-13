@@ -46,8 +46,12 @@
 //! dropped while its own slot's registry lock is held — open paths
 //! release the guard first or pin an alias past it.
 
-use slopos_abi::file_ops::FileBacking;
+use slopos_abi::quota::ObjectRow;
 use slopos_abi::syscall::ControlFlags;
+use slopos_ostd::process::AccountId;
+use slopos_ostd::process::quota::{
+    AliasOf, Charge, FileBacking, SharedCharge, root as quota_root, try_charge,
+};
 use slopos_ostd::{KArc, KWeak};
 
 use super::driver::TtyDriverKind;
@@ -57,9 +61,17 @@ use super::{MAX_TTYS, TtyError, TtyFlags, TtyIndex};
 
 /// Owning handle for one TTY slot. See the module docs for the lifetime
 /// model.
+///
+/// The charge accounts for the **slot**, and a PTY pair genuinely occupies
+/// two of them — `pty_alloc` draws `find_free_slot` twice — so each backing
+/// carries its own, both billed to the `/dev/ptmx` opener. What must not
+/// happen is a charge per slave *fd*: every slave fd aliases one
+/// [`TtySlaveOpen`], which is why that type carries [`AliasOf`] instead.
+#[derive(slopos_ostd::Charged)]
 pub struct TtyBacking {
     idx: TtyIndex,
     peer: PeerLink,
+    object_charge: SharedCharge,
 }
 
 enum PeerLink {
@@ -70,6 +82,8 @@ enum PeerLink {
     /// This backing is a PTY slave; `upgrade() == None` ⇔ master gone.
     SlaveOf(KWeak<TtyBacking>),
 }
+
+slopos_ostd::charge_audit!(TtyBacking);
 
 impl FileBacking for TtyBacking {}
 
@@ -108,16 +122,33 @@ impl TtyBacking {
     pub(crate) fn new_pair(
         master_idx: TtyIndex,
         slave_idx: TtyIndex,
+        account: AccountId,
     ) -> Option<(KArc<TtyBacking>, KArc<TtyBacking>)> {
+        // Both slots are charged before either object exists, so a refusal
+        // never leaves half a pair built.
+        //
+        // The pair is charged as **one** two-unit token held by the master
+        // rather than one token each. `try_new_cyclic`'s initialiser is
+        // `FnOnce` but not statically known to run once, so moving a distinct
+        // slave token into it would need an `Option` — and an
+        // `Option<Charge<_>>` is exactly the safe separation the linearity
+        // rule forbids. One token on the master is also the truer statement:
+        // the two slots live and die together, and the master's `Drop` is
+        // what frees both.
+        let master_charge = Charge::commit(try_charge::<ObjectRow>(account, 2).ok()?);
         let mut slave_alloc_failed = false;
         let master = KArc::try_new_cyclic(|master_weak| {
             match KArc::try_new(TtyBacking {
                 idx: slave_idx,
                 peer: PeerLink::SlaveOf(master_weak.clone()),
+                object_charge: SharedCharge::Alias(AliasOf {
+                    owner: "the master TtyBacking's two-slot charge",
+                }),
             }) {
                 Ok(slave) => TtyBacking {
                     idx: master_idx,
                     peer: PeerLink::MasterOf(slave),
+                    object_charge: SharedCharge::Owner(master_charge),
                 },
                 Err(_) => {
                     // Degenerate placeholder: dropped by the caller against
@@ -126,6 +157,7 @@ impl TtyBacking {
                     TtyBacking {
                         idx: master_idx,
                         peer: PeerLink::Console,
+                        object_charge: SharedCharge::Owner(master_charge),
                     }
                 }
             }
@@ -164,9 +196,16 @@ impl Drop for TtyBacking {
 /// alias of one `TtySlaveOpen`. Its `Drop` is "the last slave fd closed"
 /// — the master sees EOF — while the pair structure survives (the master
 /// keeps the slave backing alive) and the slave stays reopenable.
+#[derive(slopos_ostd::Charged)]
 pub struct TtySlaveOpen {
     backing: KArc<TtyBacking>,
+    /// Every slave fd holds an alias of one of these, so a charge here would
+    /// be per-fd rather than per-object. The slot it names is charged on the
+    /// [`TtyBacking`] it points at.
+    object_charge: AliasOf,
 }
+
+slopos_ostd::charge_audit!(TtySlaveOpen);
 
 impl FileBacking for TtySlaveOpen {}
 
@@ -286,9 +325,17 @@ pub fn open_tty(idx: TtyIndex) -> Result<KArc<dyn FileBacking>, TtyError> {
 
         // Allocate with no lock held: a failed allocation drops a console
         // backing whose teardown takes the registry lock.
+        //
+        // Charged to the root, explicitly: a console slot is a fixed boot
+        // resource that every process shares and no process created, so
+        // billing whoever happened to open it first would make a shell's
+        // budget depend on boot ordering.
         let backing = KArc::try_new(TtyBacking {
             idx,
             peer: PeerLink::Console,
+            object_charge: SharedCharge::Owner(Charge::commit(
+                try_charge::<ObjectRow>(quota_root(), 1).map_err(|_| TtyError::OutOfMemory)?,
+            )),
         })
         .map_err(|_| TtyError::OutOfMemory)?;
 
@@ -372,7 +419,13 @@ pub(crate) fn open_slave_shared(backing: KArc<TtyBacking>) -> Result<KArc<TtySla
         clear_slave_latches(&existing.backing);
         return Ok(existing);
     }
-    let open = KArc::try_new(TtySlaveOpen { backing }).map_err(|_| TtyError::OutOfMemory)?;
+    let open = KArc::try_new(TtySlaveOpen {
+        backing,
+        object_charge: AliasOf {
+            owner: "the slave TtyBacking's slot charge",
+        },
+    })
+    .map_err(|_| TtyError::OutOfMemory)?;
     *reg = KArc::downgrade(&open);
     clear_slave_latches(&open.backing);
     Ok(open)

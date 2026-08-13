@@ -18,10 +18,12 @@
 //! tests raw `pending`) still reports them.
 
 use slopos_abi::Errno;
-use slopos_abi::file_ops::{FileBacking, FileKind, FileOps};
+use slopos_abi::file_ops::{FileKind, FileOps};
 use slopos_abi::io::{IoBufRead, IoBufWrite};
+use slopos_abi::quota::ObjectRow;
 use slopos_abi::signal::{SignalfdSiginfo, sig_bit};
 use slopos_abi::syscall::{POLLIN, POLLNVAL};
+use slopos_ostd::process::quota::{Charge, FileBacking};
 use slopos_ostd::sync::event_bus::BUS;
 use slopos_ostd::task::ops::signal_pending_event;
 use slopos_sched::task::task_find_by_id;
@@ -34,9 +36,13 @@ pub static SIGNALFD_FILE_OPS: SignalfdFileOps = SignalfdFileOps;
 
 /// Owns one signalfd registry entry. The open-file layer holds it as a
 /// `KArc<dyn FileBacking>`; dropping the last fd alias removes the entry.
+#[derive(slopos_ostd::Charged)]
 pub(crate) struct SignalfdBacking {
     pub(crate) handle: usize,
+    pub(crate) object_charge: Charge<ObjectRow>,
 }
+
+slopos_ostd::charge_audit!(SignalfdBacking);
 
 impl FileBacking for SignalfdBacking {}
 

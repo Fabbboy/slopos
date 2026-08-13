@@ -52,22 +52,21 @@ pub enum FileKind {
     Netmon = 9,
 }
 
-/// Owned per-open backing object of a file description.
-///
-/// The open-file layer holds each open file's backing as a
-/// `KArc<dyn FileBacking>`; dropping the last strong reference **is** the
-/// teardown. Subsystems implement this on the object that owns their
-/// per-open state (or on a thin owner of their internal handle) and put
-/// the release logic in its `Drop` — there is no release callback, so a
-/// double teardown is unrepresentable and a forgotten one is impossible.
-pub trait FileBacking: Send + Sync {}
+// `trait FileBacking` lives in `slopos_ostd::process::quota`, not here.
+//
+// It gained a `Charged` supertrait, so a backing cannot be written without an
+// object charge — which makes coverage a compile error rather than something a
+// scanner has to look for. The charge token is the accounting mechanism and
+// the mechanism lives in OSTD, where the framekernel gates can see it; this
+// crate carries no `#![feature(...)]` and is depended on by userland-side
+// crates, so it may not name one.
 
 /// Per-resource-type operations for open file descriptions.
 ///
 /// Subsystems provide **static** (zero-sized) implementations. Per-open
 /// state is identified by the opaque `handle` passed to every method.
 /// Lifetime is NOT managed here: the open-file layer owns a
-/// [`FileBacking`] whose `Drop` is the teardown.
+/// `FileBacking` whose `Drop` is the teardown.
 pub trait FileOps: Send + Sync {
     fn kind(&self) -> FileKind;
 

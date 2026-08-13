@@ -2297,7 +2297,7 @@ pub fn test_set_ldisc_invalid_id_rejected() -> TestResult {
 pub fn test_pty_alloc_returns_master_and_slave() -> TestResult {
     tty::table::tty_table_init();
 
-    let (master, master_backing) = match tty::pty_alloc() {
+    let (master, master_backing) = match tty::pty_alloc(slopos_ostd::process::quota::root()) {
         Ok(pair) => pair,
         Err(err) => {
             klog_info!("TTY_TEST: BUG - pty_alloc failed: {:?}", err);
@@ -2341,7 +2341,7 @@ pub fn test_pty_alloc_returns_master_and_slave() -> TestResult {
 pub fn test_pty_master_to_slave_flow() -> TestResult {
     tty::table::tty_table_init();
 
-    let (master, _master_backing) = tty::pty_alloc().unwrap();
+    let (master, _master_backing) = tty::pty_alloc(slopos_ostd::process::quota::root()).unwrap();
     let slave = TtyIndex(tty::get_pty_number(master).unwrap() as u8);
     tty::set_pty_lock(master, false).unwrap();
     let _slave_backing = tty::pty_open_slave(slave).unwrap();
@@ -2373,7 +2373,7 @@ pub fn test_pty_master_to_slave_flow() -> TestResult {
 pub fn test_pty_slave_to_master_flow() -> TestResult {
     tty::table::tty_table_init();
 
-    let (master, _master_backing) = tty::pty_alloc().unwrap();
+    let (master, _master_backing) = tty::pty_alloc(slopos_ostd::process::quota::root()).unwrap();
     let slave = TtyIndex(tty::get_pty_number(master).unwrap() as u8);
     tty::set_pty_lock(master, false).unwrap();
     let _slave_backing = tty::pty_open_slave(slave).unwrap();
@@ -2398,7 +2398,7 @@ pub fn test_pty_slave_to_master_flow() -> TestResult {
 pub fn test_master_close_hangs_up_slave() -> TestResult {
     tty::table::tty_table_init();
 
-    let (master, master_backing) = tty::pty_alloc().unwrap();
+    let (master, master_backing) = tty::pty_alloc(slopos_ostd::process::quota::root()).unwrap();
     let slave = TtyIndex(tty::get_pty_number(master).unwrap() as u8);
     tty::set_pty_lock(master, false).unwrap();
     let _slave_backing = tty::pty_open_slave(slave).unwrap();
@@ -2425,7 +2425,7 @@ pub fn test_master_close_hangs_up_slave() -> TestResult {
 pub fn test_slave_close_eofs_master_and_stays_reopenable() -> TestResult {
     tty::table::tty_table_init();
 
-    let (master, _master_backing) = tty::pty_alloc().unwrap();
+    let (master, _master_backing) = tty::pty_alloc(slopos_ostd::process::quota::root()).unwrap();
     let slave = TtyIndex(tty::get_pty_number(master).unwrap() as u8);
     tty::set_pty_lock(master, false).unwrap();
     let slave_open = tty::pty_open_slave(slave).unwrap();
@@ -2477,7 +2477,7 @@ pub fn test_slave_close_eofs_master_and_stays_reopenable() -> TestResult {
 pub fn test_pty_canonical_editing_on_slave() -> TestResult {
     tty::table::tty_table_init();
 
-    let (master, _master_backing) = tty::pty_alloc().unwrap();
+    let (master, _master_backing) = tty::pty_alloc(slopos_ostd::process::quota::root()).unwrap();
     let slave = TtyIndex(tty::get_pty_number(master).unwrap() as u8);
     tty::set_pty_lock(master, false).unwrap();
     let _slave_backing = tty::pty_open_slave(slave).unwrap();

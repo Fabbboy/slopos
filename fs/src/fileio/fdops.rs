@@ -15,8 +15,8 @@ use crate::pipe;
 use crate::pipe_file_ops::{PIPE_READ_OPS, PIPE_WRITE_OPS, pipe_backings};
 use crate::vfs::{vfs_list, vfs_mkdir, vfs_stat, vfs_unlink};
 use crate::vfs_file_ops::{VFS_FILE_OPS, vfs_open_handle_flags, vnode_backing};
-use slopos_abi::file_ops::FileBacking;
 use slopos_abi::tty_error::TtyError;
+use slopos_ostd::process::quota::FileBacking;
 
 #[allow(non_camel_case_types)]
 type ssize_t = isize;
@@ -153,9 +153,11 @@ pub fn file_open_for_process(table: FdTable, path: &[u8], posix_flags: u32) -> c
     }
 
     if path == b"/dev/ptmx" {
-        let (master_idx, backing) = match tty::alloc_pty() {
+        // The `/dev/ptmx` opener is the master, and the master is what pays
+        // for the pair's two slots.
+        let (master_idx, backing) = match tty::alloc_pty(table.account()) {
             Ok(v) => v,
-            Err(_) => return Errno::ENOMEM.raw() as _,
+            Err(_) => return Errno::ENFILE.raw() as _,
         };
         let tty_ops = current_tty_ops();
         return install_fd_entry(
@@ -200,8 +202,8 @@ pub fn file_open_for_process(table: FdTable, path: &[u8], posix_flags: u32) -> c
         Ok(h) => h,
         Err(e) => return e.raw() as _,
     };
-    let Some(backing) = vnode_backing(vfs_handle) else {
-        return Errno::ENOMEM.raw() as _;
+    let Some(backing) = vnode_backing(vfs_handle, table.account()) else {
+        return Errno::ENFILE.raw() as _;
     };
     install_fd_entry(
         table,
@@ -564,7 +566,7 @@ pub fn file_pipe_create(
         return Errno::EINVAL.raw() as _;
     }
 
-    let pipe_handle = match pipe::alloc_slot() {
+    let pipe_handle = match pipe::alloc_slot(table.account()) {
         Some(h) => h,
         None => return Errno::ENOMEM.raw() as _,
     };

@@ -78,8 +78,8 @@ define_syscall!(syscall_socket
         let handle = unix_socket::unix_create().ok_or(Errno::ENOMEM)?;
         // The backing owns the endpoint from here: a failed install (or a
         // failed backing allocation) closes it.
-        let backing =
-            unix_socket_file_ops::unix_socket_backing(handle).ok_or(Errno::ENOMEM)?;
+        let backing = unix_socket_file_ops::unix_socket_backing(handle, process_id.account())
+            .ok_or(Errno::ENFILE)?;
         let fd = slopos_fs::fileio_open_fd_with_ops(
             process_id,
             &unix_socket_file_ops::UNIX_SOCKET_FILE_OPS,
@@ -114,7 +114,8 @@ define_syscall!(syscall_socket
     }
 
     let backing =
-        slopos_net::socket_file_ops::socket_backing(sock_idx as u32).ok_or(Errno::ENOMEM)?;
+        slopos_net::socket_file_ops::socket_backing(sock_idx as u32, process_id.account())
+            .ok_or(Errno::ENFILE)?;
     let fd = slopos_fs::fileio_open_socket_fd(process_id, sock_idx as u32, Some(backing));
     if fd < 0 {
         return Err(Errno::ENOMEM);
@@ -188,8 +189,12 @@ define_syscall!(syscall_accept
         SocketFd::Unix(sh) => {
             let accepted_handle =
                 unix_socket::unix_accept(sh).map_err(errno_from_neg)?;
-            let backing = unix_socket_file_ops::unix_socket_backing(accepted_handle)
-                .ok_or(Errno::ENOMEM)?;
+            // The accepting process pays, at accept: a connection is
+            // remote-triggered, so charging the listener's principal would
+            // let a peer exhaust that principal's entire budget.
+            let backing =
+                unix_socket_file_ops::unix_socket_backing(accepted_handle, process_id.account())
+                    .ok_or(Errno::ENFILE)?;
             let new_fd = slopos_fs::fileio_open_fd_with_ops(
                 process_id,
                 &unix_socket_file_ops::UNIX_SOCKET_FILE_OPS,
@@ -219,8 +224,11 @@ define_syscall!(syscall_accept
                 return Err(errno_from_neg(accepted_idx));
             }
 
-            let backing = slopos_net::socket_file_ops::socket_backing(accepted_idx as u32)
-                .ok_or(Errno::ENOMEM)?;
+            let backing = slopos_net::socket_file_ops::socket_backing(
+                accepted_idx as u32,
+                process_id.account(),
+            )
+            .ok_or(Errno::ENFILE)?;
             let new_fd =
                 slopos_fs::fileio_open_socket_fd(process_id, accepted_idx as u32, Some(backing));
             if new_fd < 0 {

@@ -74,6 +74,7 @@ declare -A ENTRY_SIZE=(
     ['.test_registry']=104
     ['.hermetic_state_registry']=48
     ['.kconsole_registry']=48
+    ['.charge_audit_registry']=40
 )
 
 # Sections that are neither a registry nor emitted by the toolchain.

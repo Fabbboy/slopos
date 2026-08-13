@@ -3,7 +3,7 @@ use core::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use slopos_ostd::lock_class;
 
 use slopos_abi::KernelErrno;
-use slopos_abi::file_ops::{FileBacking, FileKind, FileOps};
+use slopos_abi::file_ops::{FileKind, FileOps};
 use slopos_abi::fs::{
     FS_TYPE_CHARDEV, FS_TYPE_FILE, O_ACCMODE, O_APPEND, O_CREAT, O_RDONLY, O_RDWR, O_WRONLY,
     UserFsStat,
@@ -12,6 +12,7 @@ use slopos_abi::io::{IO_STAGING_SIZE, IoBufRead, IoBufWrite};
 use slopos_abi::syscall::{O_NOCTTY, O_NONBLOCK, POLLIN, POLLNVAL, POLLOUT, TtyIndex};
 use slopos_ostd::KArc;
 use slopos_ostd::KVec;
+use slopos_ostd::process::quota::FileBacking;
 use slopos_ostd::sync::{
     InitFlag, LOCK_LEVEL_REGISTRY, LOCK_LEVEL_RESOURCE, LockClassKey, SpinLock, SpinLockGuard,
 };

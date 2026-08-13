@@ -36,6 +36,126 @@ use syn::{
     spanned::Spanned,
 };
 
+/// Implement `slopos_ostd::process::quota::Charged` for a type carrying an
+/// object charge.
+///
+/// The field must be named `object_charge` and typed `Charge<ObjectRow>`. The
+/// derive is the only implementor of the sealed supertrait, which is what
+/// makes `impl FileBacking for X {}` fail to compile unless `X` is accounted
+/// for.
+///
+/// Refuses to expand alongside `Clone` or `Copy`: a cloned charge refunds
+/// twice, and catching it here is better than catching it in the linearity
+/// gate, because the error names the type.
+#[proc_macro_derive(Charged)]
+pub fn derive_charged(input: TokenStream) -> TokenStream {
+    let input = parse_macro_input!(input as DeriveInput);
+    match expand_charged(&input) {
+        Ok(ts) => ts.into(),
+        Err(err) => err.to_compile_error().into(),
+    }
+}
+
+fn expand_charged(input: &DeriveInput) -> syn::Result<TokenStream2> {
+    for attr in &input.attrs {
+        if !attr.path().is_ident("derive") {
+            continue;
+        }
+        let nested = attr.parse_args_with(Punctuated::<Meta, Token![,]>::parse_terminated)?;
+        for meta in &nested {
+            if meta.path().is_ident("Clone") || meta.path().is_ident("Copy") {
+                return Err(syn::Error::new(
+                    meta.span(),
+                    "a Charged type may not be Clone or Copy: a cloned charge refunds \
+                     twice. Clone the handle the charge accounts for instead, or wrap \
+                     the object in a KArc",
+                ));
+            }
+        }
+    }
+
+    let named = match &input.data {
+        Data::Struct(s) => match &s.fields {
+            Fields::Named(n) => n,
+            other => {
+                return Err(syn::Error::new(
+                    other.span(),
+                    "Charged requires a struct with named fields: the charge is \
+                     addressed by name",
+                ));
+            }
+        },
+        Data::Enum(e) => {
+            return Err(syn::Error::new(
+                e.enum_token.span(),
+                "Charged cannot be derived for enums: a variant without the charge \
+                 would be an unaccounted state",
+            ));
+        }
+        Data::Union(u) => {
+            return Err(syn::Error::new(
+                u.union_token.span(),
+                "Charged cannot be derived for unions",
+            ));
+        }
+    };
+
+    let field = named
+        .named
+        .iter()
+        .find(|f| f.ident.as_ref().is_some_and(|i| i == "object_charge"))
+        .ok_or_else(|| {
+            syn::Error::new(
+                input.ident.span(),
+                "Charged requires a field `object_charge`, typed `Charge<ObjectRow>`, \
+                 `AliasOf` for a backing whose object is charged elsewhere, or \
+                 `SharedCharge` for a type whose values play both roles; without \
+                 one the type claims to be accounted for and is not",
+            )
+        })?;
+
+    let ty = field.ty.to_token_stream().to_string();
+    let name = &input.ident;
+    let (impl_generics, ty_generics, where_clause) = input.generics.split_for_impl();
+
+    // Three field shapes, and the accessor differs for each:
+    //
+    //   Charge<ObjectRow>  the ordinary case — this value is the charge's home
+    //   AliasOf            an alias of an object charged elsewhere; the field
+    //                      is a written claim, so the expansion consumes it
+    //                      once to keep `dead_code` off every definition site
+    //   SharedCharge       one type playing both roles, distinguished at
+    //                      runtime (the PTY master/slave shape)
+    let body = if ty.contains("SharedCharge") {
+        quote! { self.object_charge.get() }
+    } else if ty.contains("AliasOf") {
+        quote! {
+            let _ = &self.object_charge.owner;
+            ::core::option::Option::None
+        }
+    } else {
+        quote! { ::core::option::Option::Some(&self.object_charge) }
+    };
+
+    Ok(quote! {
+        impl #impl_generics ::slopos_ostd::process::quota::charged_sealed::ChargedSealed
+            for #name #ty_generics #where_clause {}
+
+        impl #impl_generics ::slopos_ostd::process::quota::Charged
+            for #name #ty_generics #where_clause
+        {
+            #[inline]
+            fn object_charge(
+                &self,
+            ) -> ::core::option::Option<
+                &::slopos_ostd::process::quota::Charge<::slopos_abi::quota::ObjectRow>,
+            > {
+                #body
+            }
+        }
+    })
+}
+
 #[proc_macro_derive(Pod)]
 pub fn derive_pod(input: TokenStream) -> TokenStream {
     let input = parse_macro_input!(input as DeriveInput);

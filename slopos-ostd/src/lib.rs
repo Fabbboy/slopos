@@ -77,7 +77,7 @@ pub use paste as __paste;
 /// the `#[derive(Pod)]` / `#[derive(Zeroable)]` expansions can
 /// resolve `::slopos_ostd::Pod` / `::slopos_ostd::Zeroable`.
 pub use mm::Pod;
-pub use slopos_ostd_derive::{Pod, SlotFields, Zeroable};
+pub use slopos_ostd_derive::{Charged, Pod, SlotFields, Zeroable};
 
 pub use mm::{
     AllocError, Field, FrameAlloc, FrameAllocOptions, HasFields, Init, InitClosure, Initialised,

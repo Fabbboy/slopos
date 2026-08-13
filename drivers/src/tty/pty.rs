@@ -23,6 +23,7 @@
 //! never take it.
 
 use slopos_ostd::lock_class;
+use slopos_ostd::process::AccountId;
 use slopos_ostd::sync::{LOCK_LEVEL_REGISTRY, SpinLock};
 use slopos_ostd::{KArc, KWeak};
 
@@ -55,7 +56,7 @@ static PTY_ALLOC_LOCK: SpinLock<()> =
 /// backing (the `/dev/ptmx` open). The slave end is created alongside it,
 /// kept alive by the master's strong link, and opened separately via
 /// `pty_open_slave` / `pty_open_peer`.
-pub fn pty_alloc() -> Result<(TtyIndex, KArc<TtyBacking>), TtyError> {
+pub fn pty_alloc(account: AccountId) -> Result<(TtyIndex, KArc<TtyBacking>), TtyError> {
     let _alloc = PTY_ALLOC_LOCK.lock();
 
     let master_slot = find_free_slot().ok_or(TtyError::NotAllocated)?;
@@ -65,7 +66,7 @@ pub fn pty_alloc() -> Result<(TtyIndex, KArc<TtyBacking>), TtyError> {
     let slave_idx = TtyIndex(slave_slot as u8);
 
     let (master_backing, slave_backing) =
-        TtyBacking::new_pair(master_idx, slave_idx).ok_or(TtyError::OutOfMemory)?;
+        TtyBacking::new_pair(master_idx, slave_idx, account).ok_or(TtyError::OutOfMemory)?;
 
     // Build both `Tty` states before installing either, so a mid-way
     // allocation failure leaves the slots untouched (the backings drop

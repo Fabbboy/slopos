@@ -1036,7 +1036,7 @@ pub fn test_irqmutex_try_lock() -> TestResult {
 use crate::memfd;
 
 pub fn test_memfd_create_and_release() -> TestResult {
-    let result = memfd::memfd_create(0);
+    let result = memfd::memfd_create(0, slopos_ostd::process::quota::root());
     assert_test!(result.is_some(), "memfd_create should succeed");
     if let Some((_handle, _ops, backing)) = result {
         drop(backing);
@@ -1045,7 +1045,8 @@ pub fn test_memfd_create_and_release() -> TestResult {
 }
 
 pub fn test_memfd_ftruncate_valid() -> TestResult {
-    let (handle, _ops, backing) = memfd::memfd_create(0).unwrap();
+    let (handle, _ops, backing) =
+        memfd::memfd_create(0, slopos_ostd::process::quota::root()).unwrap();
     let rc = memfd::memfd_ftruncate(handle, 4096);
     assert_test!(rc == 0, "ftruncate(4096) should succeed");
     let (phys, size) = memfd::memfd_get_phys(handle);
@@ -1056,7 +1057,8 @@ pub fn test_memfd_ftruncate_valid() -> TestResult {
 }
 
 pub fn test_memfd_ftruncate_zero() -> TestResult {
-    let (handle, _ops, backing) = memfd::memfd_create(0).unwrap();
+    let (handle, _ops, backing) =
+        memfd::memfd_create(0, slopos_ostd::process::quota::root()).unwrap();
     let rc = memfd::memfd_ftruncate(handle, 0);
     assert_test!(rc < 0, "ftruncate(0) should fail");
     drop(backing);
@@ -1064,7 +1066,8 @@ pub fn test_memfd_ftruncate_zero() -> TestResult {
 }
 
 pub fn test_memfd_ftruncate_excessive() -> TestResult {
-    let (handle, _ops, backing) = memfd::memfd_create(0).unwrap();
+    let (handle, _ops, backing) =
+        memfd::memfd_create(0, slopos_ostd::process::quota::root()).unwrap();
     let rc = memfd::memfd_ftruncate(handle, 128 * 1024 * 1024);
     assert_test!(rc < 0, "ftruncate(128MB) should fail");
     drop(backing);
@@ -1072,7 +1075,8 @@ pub fn test_memfd_ftruncate_excessive() -> TestResult {
 }
 
 pub fn test_memfd_ftruncate_twice() -> TestResult {
-    let (handle, _ops, backing) = memfd::memfd_create(0).unwrap();
+    let (handle, _ops, backing) =
+        memfd::memfd_create(0, slopos_ostd::process::quota::root()).unwrap();
     let rc1 = memfd::memfd_ftruncate(handle, 4096);
     assert_test!(rc1 == 0, "first ftruncate should succeed");
     let rc2 = memfd::memfd_ftruncate(handle, 8192);
@@ -1082,7 +1086,8 @@ pub fn test_memfd_ftruncate_twice() -> TestResult {
 }
 
 pub fn test_memfd_refcount() -> TestResult {
-    let (handle, _ops, backing) = memfd::memfd_create(0).unwrap();
+    let (handle, _ops, backing) =
+        memfd::memfd_create(0, slopos_ostd::process::quota::root()).unwrap();
     // A second alias (fd passing / dup shares the same backing).
     let alias = backing.clone();
     // First drop: the object stays alive through the remaining alias.
@@ -1110,7 +1115,8 @@ pub fn test_memfd_invalid_handle() -> TestResult {
 }
 
 pub fn test_memfd_mapcount() -> TestResult {
-    let (handle, _ops, backing) = memfd::memfd_create(0).unwrap();
+    let (handle, _ops, backing) =
+        memfd::memfd_create(0, slopos_ostd::process::quota::root()).unwrap();
     let h = memfd::handle_from_raw(handle);
     memfd::memfd_ftruncate(handle, 4096);
     memfd::memfd_inc_mapcount_by(h, 1);
@@ -1125,7 +1131,8 @@ pub fn test_memfd_mapcount() -> TestResult {
 }
 
 pub fn test_memfd_get_info() -> TestResult {
-    let (handle, _ops, backing) = memfd::memfd_create(0).unwrap();
+    let (handle, _ops, backing) =
+        memfd::memfd_create(0, slopos_ostd::process::quota::root()).unwrap();
     let h = memfd::handle_from_raw(handle);
     // Before ftruncate, get_info should return None
     assert_test!(
@@ -1145,7 +1152,8 @@ pub fn test_memfd_get_info() -> TestResult {
 }
 
 pub fn test_memfd_size_query() -> TestResult {
-    let (handle, _ops, backing) = memfd::memfd_create(0).unwrap();
+    let (handle, _ops, backing) =
+        memfd::memfd_create(0, slopos_ostd::process::quota::root()).unwrap();
     assert_test!(memfd::memfd_size(handle) == 0, "size before ftruncate");
     memfd::memfd_ftruncate(handle, 16384);
     assert_test!(memfd::memfd_size(handle) >= 16384, "size after ftruncate");

@@ -21,10 +21,13 @@
 //! never let a table guard escape their closure, so a sleeper or waker
 //! never holds the table lock across a wait-queue operation.
 
+use slopos_abi::quota::ObjectRow;
 use slopos_abi::syscall::{POLLERR, POLLHUP, POLLIN, POLLOUT, POLLPRI};
 use slopos_ostd::KVec;
 use slopos_ostd::handle::{Handle, HandleTable};
 use slopos_ostd::lock_class;
+use slopos_ostd::process::AccountId;
+use slopos_ostd::process::quota::{Charge, try_charge};
 use slopos_ostd::sync::{LOCK_LEVEL_RESOURCE, SpinLock};
 
 pub(crate) use slopos_abi::event::MAX_PIPES;
@@ -99,10 +102,20 @@ pub(crate) struct Pipe {
     pub(crate) readers: u16,
     pub(crate) writers: u16,
     buffer: KVec<u8>,
+    /// The registry row and its buffer, charged to the `pipe2` caller.
+    ///
+    /// Here rather than in either backing, because a pipe has **two**
+    /// backings releasing into **one** slot: a charge in each would refund
+    /// twice, and a charge in one would refund while the object was still
+    /// alive behind the other. The row is freed exactly once, when both ends
+    /// are gone, so it is the only place the lifetime of the charge and the
+    /// lifetime of the object coincide.
+    #[expect(dead_code, reason = "held for ownership; dropping it is the refund")]
+    object_charge: Charge<ObjectRow>,
 }
 
 impl Pipe {
-    fn new(buffer: KVec<u8>) -> Self {
+    fn new(buffer: KVec<u8>, object_charge: Charge<ObjectRow>) -> Self {
         Self {
             read_pos: 0,
             write_pos: 0,
@@ -110,6 +123,7 @@ impl Pipe {
             readers: 0,
             writers: 0,
             buffer,
+            object_charge,
         }
     }
 
@@ -185,9 +199,11 @@ static PIPE_TABLE: SpinLock<HandleTable<Pipe>> = SpinLock::new(
 /// The ring buffer is allocated before the table lock is taken so the
 /// locked region stays allocation-light. Returns `None` if the pipe table
 /// is full or the buffer allocation fails.
-pub(crate) fn alloc_slot() -> Option<PipeHandle> {
+pub(crate) fn alloc_slot(account: AccountId) -> Option<PipeHandle> {
     let buffer = KVec::<u8>::zeroed(PIPE_BUFFER_SIZE).ok()?;
-    let pipe = Pipe::new(buffer);
+    // Charged before the table lock: a refusal must not unwind under it.
+    let reservation = try_charge::<ObjectRow>(account, 1).ok()?;
+    let pipe = Pipe::new(buffer, Charge::commit(reservation));
     let mut table = PIPE_TABLE.lock();
     if table.len() >= MAX_PIPES {
         return None;

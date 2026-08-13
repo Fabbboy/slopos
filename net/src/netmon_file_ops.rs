@@ -20,12 +20,14 @@
 
 use slopos_abi::Errno;
 use slopos_abi::event::KernelEvent;
-use slopos_abi::file_ops::{FileBacking, FileKind, FileOps, FusedPollResult};
+use slopos_abi::file_ops::{FileKind, FileOps, FusedPollResult};
 use slopos_abi::io::{IoBufRead, IoBufWrite};
 use slopos_abi::net::NET_EVENT_LEN;
+use slopos_abi::quota::ObjectRow;
 use slopos_abi::syscall::{POLLIN, POLLNVAL};
 use slopos_fs::fileio::FdTable;
 use slopos_ostd::KArc;
+use slopos_ostd::process::quota::{Charge, FileBacking, try_charge};
 use slopos_ostd::sync::event_bus::BUS;
 
 use crate::netmon::NETMON_TABLE;
@@ -36,9 +38,13 @@ pub static NETMON_FILE_OPS: NetmonFileOps = NetmonFileOps;
 
 /// Owns one monitor registry entry. The open-file layer holds it as a
 /// `KArc<dyn FileBacking>`; dropping the last fd alias releases the ring.
+#[derive(slopos_ostd::Charged)]
 pub(crate) struct NetmonBacking {
     pub(crate) handle: usize,
+    pub(crate) object_charge: Charge<ObjectRow>,
 }
+
+slopos_ostd::charge_audit!(NetmonBacking);
 
 impl FileBacking for NetmonBacking {}
 
@@ -140,6 +146,9 @@ impl FileOps for NetmonFileOps {
 /// install it as an fd. Returns the fd (`>= 0`) or a negated errno — see
 /// [`NetMonTable::open`](crate::netmon::NetMonTable::open) for which.
 pub fn netmon_create(table: FdTable, mask: u32) -> i32 {
+    let Ok(reservation) = try_charge::<ObjectRow>(table.account(), 1) else {
+        return Errno::ENFILE.raw();
+    };
     let raw_handle = match NETMON_TABLE.open(table, mask) {
         Ok(handle) => handle,
         Err(e) => return e.raw(),
@@ -147,7 +156,10 @@ pub fn netmon_create(table: FdTable, mask: u32) -> i32 {
     // The backing owns the registry entry: dropping the last fd alias runs its
     // `Drop`, which releases the ring. If the allocation itself fails there is
     // no backing to hand off, so release the orphaned entry here.
-    let backing: KArc<dyn FileBacking> = match KArc::try_new(NetmonBacking { handle: raw_handle }) {
+    let backing: KArc<dyn FileBacking> = match KArc::try_new(NetmonBacking {
+        handle: raw_handle,
+        object_charge: Charge::commit(reservation),
+    }) {
         Ok(backing) => backing,
         Err(_) => {
             NETMON_TABLE.close(raw_handle);

@@ -5,9 +5,12 @@
 //! `SocketHandle::from_usize(handle)` before forwarding to `unix_socket::*`.
 
 use slopos_abi::Errno;
-use slopos_abi::file_ops::{FileBacking, FileKind, FileOps};
+use slopos_abi::file_ops::{FileKind, FileOps};
 use slopos_abi::io::{IO_STAGING_SIZE, IoBufRead, IoBufWrite};
+use slopos_abi::quota::ObjectRow;
 use slopos_ostd::KArc;
+use slopos_ostd::process::AccountId;
+use slopos_ostd::process::quota::{Charge, FileBacking, try_charge};
 
 use crate::unix_socket;
 use crate::unix_socket::SocketHandle;
@@ -17,9 +20,13 @@ pub struct UnixSocketFileOps;
 pub static UNIX_SOCKET_FILE_OPS: UnixSocketFileOps = UnixSocketFileOps;
 
 /// Sole owner of one AF_UNIX socket endpoint; dropping it closes it.
+#[derive(slopos_ostd::Charged)]
 struct UnixSocketBacking {
     handle: SocketHandle,
+    object_charge: Charge<ObjectRow>,
 }
+
+slopos_ostd::charge_audit!(UnixSocketBacking);
 
 impl FileBacking for UnixSocketBacking {}
 
@@ -32,8 +39,18 @@ impl Drop for UnixSocketBacking {
 /// Wrap ownership of a freshly-created (or accepted) AF_UNIX endpoint.
 /// On allocation failure the endpoint is closed before returning, so it
 /// cannot leak.
-pub fn unix_socket_backing(handle: SocketHandle) -> Option<KArc<dyn FileBacking>> {
-    match KArc::try_new(UnixSocketBacking { handle }) {
+pub fn unix_socket_backing(
+    handle: SocketHandle,
+    account: AccountId,
+) -> Option<KArc<dyn FileBacking>> {
+    let Ok(reservation) = try_charge::<ObjectRow>(account, 1) else {
+        let _ = unix_socket::unix_close(handle);
+        return None;
+    };
+    match KArc::try_new(UnixSocketBacking {
+        handle,
+        object_charge: Charge::commit(reservation),
+    }) {
         Ok(backing) => Some(backing),
         Err(_) => {
             let _ = unix_socket::unix_close(handle);

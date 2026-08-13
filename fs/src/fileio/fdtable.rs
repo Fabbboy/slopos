@@ -15,7 +15,7 @@ fn open_console_fd(
     tty_ops: &'static dyn FileOps,
     console_tty: TtyIndex,
     flags: OpenMode,
-    backing: KArc<dyn slopos_abi::file_ops::FileBacking>,
+    backing: KArc<dyn slopos_ostd::process::quota::FileBacking>,
 ) -> Option<KArc<OpenFile>> {
     new_open_file(tty_ops, console_tty.0 as usize, flags, 0, Some(backing))
 }

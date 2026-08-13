@@ -17,9 +17,12 @@ use slopos_abi::file_ops::{FileKind, FileOps};
 use slopos_abi::fs::UserFsStat;
 use slopos_abi::io::{IoBufRead, IoBufWrite};
 use slopos_abi::pixel::PixelFormat;
+use slopos_abi::quota::ObjectRow;
 use slopos_ostd::handle::{Handle, HandleTable};
 use slopos_ostd::klog_debug;
 use slopos_ostd::mm::frame::{claim_owned_anon_page, release_owned_anon_page};
+use slopos_ostd::process::AccountId;
+use slopos_ostd::process::quota::{Charge, try_charge};
 use slopos_ostd::sync::{LOCK_LEVEL_RESOURCE, SpinLock};
 
 use crate::page_alloc::{alloc_kernel_pages, free_page_frame};
@@ -153,11 +156,19 @@ fn try_cleanup(table: &mut HandleTable<MemfdObject>, handle: MemfdHandle) {
 
 /// Sole owner of one registry entry's fd reference; dropping it retires
 /// the reference and frees the pages once no mapping pins them.
+///
+/// The object charge is the creator's, taken once. A per-alias charge would
+/// double-count a shared memfd — the pages exist once however many processes
+/// map them, and each *mapping* is a separate `Pages` charge on the mapper.
+#[derive(slopos_ostd::Charged)]
 struct MemfdBacking {
     handle: usize,
+    object_charge: Charge<ObjectRow>,
 }
 
-impl slopos_abi::file_ops::FileBacking for MemfdBacking {}
+slopos_ostd::charge_audit!(MemfdBacking);
+
+impl slopos_ostd::process::quota::FileBacking for MemfdBacking {}
 
 impl Drop for MemfdBacking {
     fn drop(&mut self) {
@@ -170,11 +181,13 @@ impl Drop for MemfdBacking {
 /// the backing's `Drop` is the close.
 pub fn memfd_create(
     _flags: u32,
+    account: AccountId,
 ) -> Option<(
     usize,
     &'static dyn FileOps,
-    slopos_ostd::KArc<dyn slopos_abi::file_ops::FileBacking>,
+    slopos_ostd::KArc<dyn slopos_ostd::process::quota::FileBacking>,
 )> {
+    let reservation = try_charge::<ObjectRow>(account, 1).ok()?;
     let raw = with_registry(|t| {
         t.insert(MemfdObject {
             phys_addr: PhysAddr::NULL,
@@ -187,8 +200,11 @@ pub fn memfd_create(
         .ok()
         .map(|h| h.pack(SLOT_BITS))
     })?;
-    let backing: slopos_ostd::KArc<dyn slopos_abi::file_ops::FileBacking> =
-        match slopos_ostd::KArc::try_new(MemfdBacking { handle: raw }) {
+    let backing: slopos_ostd::KArc<dyn slopos_ostd::process::quota::FileBacking> =
+        match slopos_ostd::KArc::try_new(MemfdBacking {
+            handle: raw,
+            object_charge: Charge::commit(reservation),
+        }) {
             Ok(b) => b,
             Err(_) => {
                 memfd_release(raw);

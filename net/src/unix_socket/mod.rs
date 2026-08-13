@@ -273,6 +273,13 @@ pub fn unix_connect(handle: SocketHandle, path: &[u8]) -> i32 {
         return Errno::ENFILE.raw();
     }
 
+    // The *connecting client's* syscall allocates side B's slot, the pair
+    // entry and both 16 KiB FIFOs — storage the server will use but the
+    // client pays for. That is deliberate and load-bearing, not incidental:
+    // moving these allocations to `accept` would flip 32 clients' worth of
+    // kernel storage onto the compositor's budget and make a connect flood
+    // exhaust the server rather than the caller. Keep the allocation here.
+    //
     // Allocate a pair entry; this is where the 16 KiB×2 FIFO heap allocations happen.
     let pair_handle = match state.pairs.allocate() {
         Ok(Some(ph)) => ph,

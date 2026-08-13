@@ -1,10 +1,10 @@
 use slopos_abi::KernelErrno;
-use slopos_abi::file_ops::FileBacking;
 use slopos_abi::syscall::TtyIndex;
 use slopos_kernel_services::syscall_services::input::{InputServices, register_input_services};
 use slopos_kernel_services::syscall_services::keymap::{KeymapServices, register_keymap_services};
 use slopos_kernel_services::syscall_services::tty::{TtyServices, register_tty_services};
 use slopos_ostd::KArc;
+use slopos_ostd::process::quota::FileBacking;
 
 use crate::{input_event, ps2, tty};
 
@@ -65,8 +65,10 @@ fn tty_grantpt_adapter(tty_index: TtyIndex) -> Result<(), tty::TtyError> {
 // `KArc<dyn FileBacking>` at this boundary so the file layer can own it
 // without naming the driver type; the other opens are already erased.
 
-fn tty_alloc_pty_adapter() -> Result<(TtyIndex, KArc<dyn FileBacking>), tty::TtyError> {
-    tty::pty_alloc().map(|(idx, b)| -> (TtyIndex, KArc<dyn FileBacking>) { (idx, b) })
+fn tty_alloc_pty_adapter(
+    account: slopos_ostd::process::AccountId,
+) -> Result<(TtyIndex, KArc<dyn FileBacking>), tty::TtyError> {
+    tty::pty_alloc(account).map(|(idx, b)| -> (TtyIndex, KArc<dyn FileBacking>) { (idx, b) })
 }
 
 fn tty_ptsname_adapter(tty_index: TtyIndex, buf: *mut u8, buflen: usize) -> i32 {

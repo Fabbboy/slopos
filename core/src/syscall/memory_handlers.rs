@@ -92,7 +92,8 @@ define_syscall!(syscall_memfd_create
     requires(let process_id: process_id)
     -> Result<u64, Errno>
 {
-    let (handle, ops, backing) = slopos_mm::memfd::memfd_create(flags).ok_or(Errno::ENOMEM)?;
+    let (handle, ops, backing) =
+        slopos_mm::memfd::memfd_create(flags, process_id.account()).ok_or(Errno::ENFILE)?;
     let fd = slopos_fs::fileio::fileio_open_fd_with_ops(
         process_id,
         ops,

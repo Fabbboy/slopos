@@ -669,7 +669,17 @@ fn test_netmon_ring_freed_when_backing_drops() -> TestResult {
     };
     assert_eq_test!(NETMON_TABLE.count(), before + 1, "the monitor is live");
 
-    drop(NetmonBacking { handle });
+    let charge = slopos_ostd::process::quota::Charge::commit(
+        slopos_ostd::process::quota::try_charge::<slopos_abi::quota::ObjectRow>(
+            slopos_ostd::process::quota::root(),
+            1,
+        )
+        .expect("the root account has room"),
+    );
+    drop(NetmonBacking {
+        handle,
+        object_charge: charge,
+    });
 
     assert_eq_test!(
         NETMON_TABLE.count(),

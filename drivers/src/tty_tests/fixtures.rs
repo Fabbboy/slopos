@@ -40,7 +40,7 @@ pub(super) use crate::tty::vconsole::{
 };
 pub(super) use crate::tty::vtparser::{Direction, EraseMode, SgrAttr, VtAction, VtParser};
 pub(super) use crate::tty::{PacketEvents, TtyFlags};
-pub(super) use slopos_abi::file_ops::FileBacking;
+pub(super) use slopos_ostd::process::quota::FileBacking;
 pub(super) use slopos_ostd::task::{ProcessGroup, Session};
 
 pub(super) use slopos_ostd::{KArc, KWeak};
@@ -236,7 +236,8 @@ pub(super) struct PtyPair {
 /// open by the returned backings; dropping the [`PtyPair`] closes both.
 pub(super) fn open_pty_pair() -> PtyPair {
     tty::table::tty_table_init();
-    let (master, master_backing) = tty::pty_alloc().expect("pty_alloc");
+    let (master, master_backing) =
+        tty::pty_alloc(slopos_ostd::process::quota::root()).expect("pty_alloc");
     let slave = TtyIndex(tty::get_pty_number(master).expect("get_pty_number") as u8);
     tty::set_pty_lock(master, false).expect("unlock slave");
     let slave_backing = tty::pty_open_slave(slave).expect("open slave");
@@ -278,7 +279,7 @@ pub(super) fn packet_mode_setup_pty() -> Option<(
     PtyGuard,
 )> {
     tty::table::tty_table_init();
-    let (master, master_backing) = tty::pty_alloc().ok()?;
+    let (master, master_backing) = tty::pty_alloc(slopos_ostd::process::quota::root()).ok()?;
     let slave_num = tty::get_pty_number(master).ok()?;
     let slave = TtyIndex(slave_num as u8);
     tty::set_pty_lock(master, false).ok()?;

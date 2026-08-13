@@ -186,7 +186,7 @@ pub fn test_review_tcflush_unthrottles_pty() -> TestResult {
     use crate::tty::ldisc::THROTTLE_HIGH_WATER;
     tty::table::tty_table_init();
 
-    let (master, _master_backing) = match tty::pty_alloc() {
+    let (master, _master_backing) = match tty::pty_alloc(slopos_ostd::process::quota::root()) {
         Ok(pair) => pair,
         Err(e) => {
             klog_info!("TTY_TEST: BUG - pty_alloc failed: {:?}", e);
@@ -259,7 +259,7 @@ pub fn test_review_tcflush_both_unthrottles_pty() -> TestResult {
     use crate::tty::ldisc::THROTTLE_HIGH_WATER;
     tty::table::tty_table_init();
 
-    let (master, _master_backing) = match tty::pty_alloc() {
+    let (master, _master_backing) = match tty::pty_alloc(slopos_ostd::process::quota::root()) {
         Ok(pair) => pair,
         Err(e) => {
             klog_info!("TTY_TEST: BUG - pty_alloc failed: {:?}", e);
@@ -313,7 +313,7 @@ pub fn test_review_master_write_batch_boundary() -> TestResult {
     use crate::tty::ldisc::THROTTLE_HIGH_WATER;
     tty::table::tty_table_init();
 
-    let (master, _master_backing) = match tty::pty_alloc() {
+    let (master, _master_backing) = match tty::pty_alloc(slopos_ostd::process::quota::root()) {
         Ok(pair) => pair,
         Err(e) => {
             klog_info!("TTY_TEST: BUG - pty_alloc failed: {:?}", e);
@@ -531,7 +531,7 @@ pub fn test_review_pollerr_on_hangup() -> TestResult {
 pub fn test_review_pollerr_on_peer_closed() -> TestResult {
     tty::table::tty_table_init();
 
-    let (master, _master_backing) = match tty::pty_alloc() {
+    let (master, _master_backing) = match tty::pty_alloc(slopos_ostd::process::quota::root()) {
         Ok(pair) => pair,
         Err(e) => {
             klog_info!("TTY_TEST: BUG - pty_alloc failed: {:?}", e);
@@ -658,7 +658,7 @@ pub fn test_bugfix_flush_edit_preserves_remainder() -> TestResult {
 pub fn test_bugfix_nonblock_write_throttled_pty() -> TestResult {
     tty::table::tty_table_init();
 
-    let (master, _master_backing) = match tty::pty_alloc() {
+    let (master, _master_backing) = match tty::pty_alloc(slopos_ostd::process::quota::root()) {
         Ok(pair) => pair,
         Err(e) => {
             klog_info!("TTY_TEST: BUG - pty_alloc failed: {:?}", e);
@@ -706,7 +706,7 @@ pub fn test_bugfix_nonblock_write_throttled_pty() -> TestResult {
 pub fn test_bugfix_nonblock_write_unthrottled_pty() -> TestResult {
     tty::table::tty_table_init();
 
-    let (master, _master_backing) = match tty::pty_alloc() {
+    let (master, _master_backing) = match tty::pty_alloc(slopos_ostd::process::quota::root()) {
         Ok(pair) => pair,
         Err(e) => {
             klog_info!("TTY_TEST: BUG - pty_alloc failed: {:?}", e);
@@ -948,7 +948,7 @@ pub fn test_bugfix_rawdisc_input_full() -> TestResult {
 pub fn test_bugfix_slave_write_stops_on_full() -> TestResult {
     tty::table::tty_table_init();
 
-    let (master, _master_backing) = match tty::pty_alloc() {
+    let (master, _master_backing) = match tty::pty_alloc(slopos_ostd::process::quota::root()) {
         Ok(pair) => pair,
         Err(e) => {
             klog_info!("TTY_TEST: BUG - pty_alloc failed: {:?}", e);
@@ -2154,7 +2154,7 @@ pub fn test_drain_unallocated_slot() -> TestResult {
 pub fn test_pty_tcsbrk_drain_immediate() -> TestResult {
     tty::table::tty_table_init();
 
-    let (master_idx, _master_backing) = match tty::pty_alloc() {
+    let (master_idx, _master_backing) = match tty::pty_alloc(slopos_ostd::process::quota::root()) {
         Ok(pair) => pair,
         Err(_) => {
             klog_info!("TTY_TEST: SKIP - could not allocate PTY pair");
@@ -2502,7 +2502,7 @@ pub fn test_grantpt_unlocks_slave() -> TestResult {
     use slopos_kernel_services::syscall_services::tty::tty_services;
 
     tty::table::tty_table_init();
-    let (master, _master_backing) = match tty::pty_alloc() {
+    let (master, _master_backing) = match tty::pty_alloc(slopos_ostd::process::quota::root()) {
         Ok(pair) => pair,
         Err(_) => return TestResult::Pass,
     };
@@ -2931,10 +2931,11 @@ pub fn test_p21_postlockwork_zero_event_bits_ignored() -> TestResult {
 
 pub fn test_p21_write_path_peer_cache_consolidation() -> TestResult {
     tty::table::tty_table_init();
-    let (master_idx, _master_backing) = match tty::pty::pty_alloc() {
-        Ok(pair) => pair,
-        Err(_) => return TestResult::Pass,
-    };
+    let (master_idx, _master_backing) =
+        match tty::pty::pty_alloc(slopos_ostd::process::quota::root()) {
+            Ok(pair) => pair,
+            Err(_) => return TestResult::Pass,
+        };
     let slave_idx = match tty::get_pty_number(master_idx) {
         Ok(n) => TtyIndex(n as u8),
         Err(_) => return TestResult::Fail,

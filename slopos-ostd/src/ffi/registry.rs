@@ -47,6 +47,8 @@ pub enum RegistryId {
     HermeticStates,
     /// `.kconsole_registry`
     KConsole,
+    /// `.charge_audit_registry`
+    ChargeAudit,
 }
 
 impl RegistryId {
@@ -65,6 +67,7 @@ impl RegistryId {
             RegistryId::Tests => ".test_registry",
             RegistryId::HermeticStates => ".hermetic_state_registry",
             RegistryId::KConsole => ".kconsole_registry",
+            RegistryId::ChargeAudit => ".charge_audit_registry",
         }
     }
 }
@@ -122,6 +125,8 @@ unsafe extern "C" {
     static __stop_hermetic_state_registry: u8;
     static __start_kconsole_registry: u8;
     static __stop_kconsole_registry: u8;
+    static __start_charge_audit_registry: u8;
+    static __stop_charge_audit_registry: u8;
 }
 
 fn bounds(id: RegistryId) -> (*const u8, *const u8) {
@@ -165,6 +170,10 @@ fn bounds(id: RegistryId) -> (*const u8, *const u8) {
         RegistryId::KConsole => (
             &raw const __start_kconsole_registry,
             &raw const __stop_kconsole_registry,
+        ),
+        RegistryId::ChargeAudit => (
+            &raw const __start_charge_audit_registry,
+            &raw const __stop_charge_audit_registry,
         ),
     }
 }
@@ -244,6 +253,9 @@ macro_rules! registry_entry {
     };
     (kconsole, $($item:tt)*) => {
         $crate::__registry_entry!(".kconsole_registry", KConsole, $($item)*);
+    };
+    (charge_audit, $($item:tt)*) => {
+        $crate::__registry_entry!(".charge_audit_registry", ChargeAudit, $($item)*);
     };
 }
 

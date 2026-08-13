@@ -125,6 +125,12 @@ SECTIONS
     __stop_kconsole_registry = .;
   } :rodata
 
+  .charge_audit_registry ALIGN(8) : {
+    __start_charge_audit_registry = .;
+    KEEP(*(.charge_audit_registry))
+    __stop_charge_audit_registry = .;
+  } :rodata
+
   .data ALIGN(4096) : {
     _data_start = .;
     *(.data .data.*)

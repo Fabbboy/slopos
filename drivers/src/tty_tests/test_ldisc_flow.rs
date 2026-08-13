@@ -286,7 +286,7 @@ pub fn test_pollhup_always_reported() -> TestResult {
 pub fn test_poll_events_peer_closed_pollhup() -> TestResult {
     tty::table::tty_table_init();
 
-    let (master, _master_backing) = match tty::pty_alloc() {
+    let (master, _master_backing) = match tty::pty_alloc(slopos_ostd::process::quota::root()) {
         Ok(pair) => pair,
         Err(_) => {
             klog_info!("TTY_TEST: BUG - pty_alloc failed");
@@ -846,7 +846,7 @@ pub fn test_throttle_watermark_constants() -> TestResult {
 pub fn test_pty_initially_unthrottled() -> TestResult {
     tty::table::tty_table_init();
 
-    let (master, _master_backing) = match tty::pty_alloc() {
+    let (master, _master_backing) = match tty::pty_alloc(slopos_ostd::process::quota::root()) {
         Ok(pair) => pair,
         Err(e) => {
             klog_info!("TTY_TEST: BUG - pty_alloc failed: {:?}", e);
@@ -876,7 +876,7 @@ pub fn test_throttle_activates_at_high_water() -> TestResult {
     use crate::tty::ldisc::THROTTLE_HIGH_WATER;
     tty::table::tty_table_init();
 
-    let (master, _master_backing) = match tty::pty_alloc() {
+    let (master, _master_backing) = match tty::pty_alloc(slopos_ostd::process::quota::root()) {
         Ok(pair) => pair,
         Err(e) => {
             klog_info!("TTY_TEST: BUG - pty_alloc failed: {:?}", e);
@@ -921,7 +921,7 @@ pub fn test_master_write_short_write_when_throttled() -> TestResult {
     use crate::tty::ldisc::THROTTLE_HIGH_WATER;
     tty::table::tty_table_init();
 
-    let (master, _master_backing) = match tty::pty_alloc() {
+    let (master, _master_backing) = match tty::pty_alloc(slopos_ostd::process::quota::root()) {
         Ok(pair) => pair,
         Err(e) => {
             klog_info!("TTY_TEST: BUG - pty_alloc failed: {:?}", e);
@@ -1002,7 +1002,7 @@ pub fn test_read_unthrottles_slave() -> TestResult {
     use crate::tty::ldisc::THROTTLE_HIGH_WATER;
     tty::table::tty_table_init();
 
-    let (master, _master_backing) = match tty::pty_alloc() {
+    let (master, _master_backing) = match tty::pty_alloc(slopos_ostd::process::quota::root()) {
         Ok(pair) => pair,
         Err(e) => {
             klog_info!("TTY_TEST: BUG - pty_alloc failed: {:?}", e);
@@ -1087,7 +1087,7 @@ pub fn test_read_unthrottles_slave() -> TestResult {
 pub fn test_throttle_cycle_no_data_loss() -> TestResult {
     tty::table::tty_table_init();
 
-    let (master, _master_backing) = match tty::pty_alloc() {
+    let (master, _master_backing) = match tty::pty_alloc(slopos_ostd::process::quota::root()) {
         Ok(pair) => pair,
         Err(e) => {
             klog_info!("TTY_TEST: BUG - pty_alloc failed: {:?}", e);
@@ -1186,7 +1186,7 @@ pub fn test_console_not_throttled() -> TestResult {
 pub fn test_master_write_full_when_not_throttled() -> TestResult {
     tty::table::tty_table_init();
 
-    let (master, _master_backing) = match tty::pty_alloc() {
+    let (master, _master_backing) = match tty::pty_alloc(slopos_ostd::process::quota::root()) {
         Ok(pair) => pair,
         Err(e) => {
             klog_info!("TTY_TEST: BUG - pty_alloc failed: {:?}", e);

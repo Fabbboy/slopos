@@ -1,8 +1,11 @@
 use slopos_abi::Errno;
-use slopos_abi::file_ops::{FileBacking, FileKind, FileOps};
+use slopos_abi::file_ops::{FileKind, FileOps};
 use slopos_abi::io::{IO_STAGING_SIZE, IoBufRead, IoBufWrite};
+use slopos_abi::quota::ObjectRow;
 use slopos_abi::syscall::{POLLERR, POLLHUP, POLLIN, POLLOUT};
 use slopos_ostd::KArc;
+use slopos_ostd::process::AccountId;
+use slopos_ostd::process::quota::{Charge, FileBacking, try_charge};
 
 use crate::socket;
 
@@ -11,9 +14,13 @@ pub struct SocketFileOps;
 pub static SOCKET_FILE_OPS: SocketFileOps = SocketFileOps;
 
 /// Sole owner of one AF_INET socket; dropping it closes the socket.
+#[derive(slopos_ostd::Charged)]
 struct SocketBacking {
     idx: u32,
+    object_charge: Charge<ObjectRow>,
 }
+
+slopos_ostd::charge_audit!(SocketBacking);
 
 impl FileBacking for SocketBacking {}
 
@@ -25,8 +32,15 @@ impl Drop for SocketBacking {
 
 /// Wrap ownership of a freshly-created AF_INET socket. On allocation
 /// failure the socket is closed before returning, so it cannot leak.
-pub fn socket_backing(idx: u32) -> Option<KArc<dyn FileBacking>> {
-    match KArc::try_new(SocketBacking { idx }) {
+pub fn socket_backing(idx: u32, account: AccountId) -> Option<KArc<dyn FileBacking>> {
+    let Ok(reservation) = try_charge::<ObjectRow>(account, 1) else {
+        let _ = socket::socket_close(idx);
+        return None;
+    };
+    match KArc::try_new(SocketBacking {
+        idx,
+        object_charge: Charge::commit(reservation),
+    }) {
         Ok(backing) => Some(backing),
         Err(_) => {
             let _ = socket::socket_close(idx);
