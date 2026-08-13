@@ -637,7 +637,12 @@ define_syscall!(syscall_sendmsg
         }
     }
 
-    let rc = unix_socket::unix_sendmsg(sh, &scratch[..data_len], &mut files);
+    let rc = unix_socket::unix_sendmsg(
+        sh,
+        &scratch[..data_len],
+        &mut files,
+        process_id.account(),
+    );
     if rc < 0 {
         // Uncommitted aliases drop with `files`.
         return Err(errno_from_neg(rc));

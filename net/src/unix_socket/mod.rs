@@ -45,6 +45,7 @@ use slopos_ostd::{KVec, KVecDeque};
 
 use pair::{PairSide, PairTable};
 use slopos_fs::FileRef;
+use slopos_ostd::process::AccountId;
 use slot::{MAX_BACKLOG, SlotState, UNIX_PATH_MAX, UnixSlot};
 
 pub use buffer::UNIX_BUF_SIZE;
@@ -345,7 +346,8 @@ pub fn unix_connect(handle: SocketHandle, path: &[u8]) -> i32 {
 /// FIFO + ancillary queue + peer-wake ordering invariants live.
 pub fn unix_send(handle: SocketHandle, data: &[u8]) -> i32 {
     let mut no_files: KVec<FileRef> = KVec::new();
-    unix_sendmsg(handle, data, &mut no_files)
+    // No fds, so no custody is ever charged and the account is never read.
+    unix_sendmsg(handle, data, &mut no_files, AccountId::NONE)
 }
 
 /// Receive data from a connected AF_UNIX socket.
@@ -581,7 +583,12 @@ pub fn unix_recv_into(handle: SocketHandle, writer: &mut slopos_ostd::mm::VmWrit
 /// the caller's `KVec` and close when the caller drops it — no net lock
 /// is held at that point, so the (possibly recursive) file teardown is
 /// safe.
-pub fn unix_sendmsg(handle: SocketHandle, data: &[u8], files: &mut KVec<FileRef>) -> i32 {
+pub fn unix_sendmsg(
+    handle: SocketHandle,
+    data: &[u8],
+    files: &mut KVec<FileRef>,
+    sender_account: AccountId,
+) -> i32 {
     let Some(wq_idx) = handle.slot_for_wq() else {
         return Errno::EBADF.raw();
     };
@@ -638,10 +645,13 @@ pub fn unix_sendmsg(handle: SocketHandle, data: &[u8], files: &mut KVec<FileRef>
                 if fd_count > 0 {
                     let anc = pair.send_anc(side);
                     for file in files.drain(..) {
-                        // Capacity was checked above and the queue's
-                        // storage is pre-reserved; pushes must succeed.
-                        let pushed = anc.push(file);
-                        debug_assert!(pushed, "anc.push must succeed after capacity check");
+                        // Capacity was checked above and the queue's storage
+                        // is pre-reserved, so the only refusal left is the
+                        // sender's custody ceiling. A refused file drops here,
+                        // closing that alias, rather than travelling uncharged.
+                        if let Err(refused) = anc.push(file, sender_account) {
+                            drop(refused);
+                        }
                     }
                 }
                 let n = if data.is_empty() {
@@ -778,8 +788,11 @@ fn drain_ancillary(handle: SocketHandle, out_files: &mut KVec<FileRef>, max_fds:
     };
 
     let mut received = 0usize;
-    for file in drained.drain(..) {
-        if received < max_fds && out_files.push(file).is_ok() {
+    for entry in drained.drain(..) {
+        // The custody charge drops with the entry as the file moves out, so
+        // the sender's in-flight count falls exactly when the reference stops
+        // being in flight — whether the receiver takes it or the cap drops it.
+        if received < max_fds && out_files.push(entry.file).is_ok() {
             received += 1;
         }
         // Beyond the cap (or on push failure) the file drops here,

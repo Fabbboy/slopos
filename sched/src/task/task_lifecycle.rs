@@ -780,6 +780,18 @@ pub fn task_build(
     if let Some(process) = resources.process.as_ref() {
         process.task_join();
         task_ref.set_process_handle_raw(process.handle_raw());
+        // Charged here rather than at `allocate_task`, which runs before the
+        // task has a process and therefore before there is a principal to
+        // bill. Recorded in the side table, not in `Task`: the refund belongs
+        // at the exit latch, and a `Task` field would defer it to the
+        // graveyard drain.
+        if let Some(reservation) = super::task_quota::reserve(process.account()) {
+            super::task_quota::commit(task_id, reservation);
+        } else {
+            process.task_leave();
+            drop(pending);
+            return None;
+        }
     }
     task_ref.tgid = task_id;
     task_ref.set_pgid(task_id);
@@ -1024,6 +1036,9 @@ pub fn task_terminate(task_id: u32) -> c_int {
         }
         mgr.tasks_terminated = mgr.tasks_terminated.saturating_add(1);
     });
+    if account_here {
+        super::task_quota::release(resolved_id);
+    }
 
     // Release through the reclaim path, never through `KArc`'s own `Drop`. This
     // can be the final reference — terminating a task that no queue, inbox or
@@ -1297,6 +1312,9 @@ pub fn cleanup_current_task_after_switch(task: &TaskRef) {
                 mgr.num_tasks -= 1;
             }
         });
+        // The same latch, for the same reason: the task's share of the
+        // per-process bound is free now, not when the graveyard drains.
+        super::task_quota::release(resolved_id);
     }
 
     let _ = task_reap(resolved_id);

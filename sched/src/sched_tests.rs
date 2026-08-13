@@ -7226,3 +7226,87 @@ slopos_testing::stest!(
     name = test_wait_node_unlinks_when_its_frame_unwinds,
     suite = sched_core
 );
+
+/// A process at its `Task` ceiling is refused, and the refusal refunds.
+///
+/// `MAX_TASKS` is 8192 global, so without a per-principal bound one process
+/// spends the whole table and every other process is denied — the permanent
+/// silent denial this subsystem exists to delete. Drives one account to its
+/// ceiling, checks the refusal, then checks the row returns to where it
+/// started once the tasks exit.
+pub fn test_quota_task_ceiling_refuses_and_refunds() -> TestResult {
+    use slopos_abi::quota::{QuotaMode, ResourceKind};
+    use slopos_ostd::process::quota::{quota_mode, set_limit, set_quota_mode, stats};
+
+    const CEILING: u32 = 3;
+
+    let Ok(process) = slopos_ostd::process::process_spawn_root() else {
+        klog_info!("QUOTA_TEST: could not register a process");
+        return TestResult::Fail;
+    };
+    let account = process.account();
+    let baseline = stats(account, ResourceKind::Task).map_or(0, |s| s.used);
+
+    let restore = quota_mode();
+    set_quota_mode(QuotaMode::Enforce);
+    set_limit(account, ResourceKind::Task, baseline + CEILING);
+
+    // The account is what the ceiling binds, so the charges are taken the way
+    // `task_build` takes them rather than by spawning real tasks: this test is
+    // about the bound and the refund, and a real spawn drags in the scheduler.
+    let mut held = slopos_ostd::KVec::new();
+    let mut granted = 0u32;
+    for _ in 0..CEILING + 4 {
+        match crate::task::task_quota::reserve(account) {
+            Some(reservation) => {
+                granted += 1;
+                if held.push(reservation).is_err() {
+                    break;
+                }
+            }
+            None => break,
+        }
+    }
+
+    let at_ceiling = stats(account, ResourceKind::Task).map_or(0, |s| s.used);
+    let denials = stats(account, ResourceKind::Task).map_or(0, |s| s.denials);
+    drop(held);
+    let after = stats(account, ResourceKind::Task).map_or(0, |s| s.used);
+    set_quota_mode(restore);
+
+    // Retire the scratch process so its row goes dark. Without this the row
+    // survives the test carrying a deliberately-tiny ceiling and the denial
+    // this test *wants*, and the headroom gate reads both as a finding — which
+    // it should: a denial in the dump means a real workload was refused, and a
+    // test must not make that indistinguishable from one.
+    if let Some(handle) = process.handle() {
+        slopos_ostd::process::process_retire(handle);
+    }
+    drop(process);
+
+    if granted != CEILING {
+        klog_info!("QUOTA_TEST: granted {granted} tasks against a ceiling of {CEILING}");
+        return TestResult::Fail;
+    }
+    if at_ceiling != baseline + CEILING {
+        klog_info!(
+            "QUOTA_TEST: used {at_ceiling} at the ceiling, want {}",
+            baseline + CEILING
+        );
+        return TestResult::Fail;
+    }
+    if denials == 0 {
+        klog_info!("QUOTA_TEST: a refusal nobody counted is a silent denial");
+        return TestResult::Fail;
+    }
+    if after != baseline {
+        klog_info!("QUOTA_TEST: used {after} after release, want the {baseline} it started at");
+        return TestResult::Fail;
+    }
+    TestResult::Pass
+}
+
+slopos_testing::stest!(
+    name = test_quota_task_ceiling_refuses_and_refunds,
+    suite = sched_core
+);

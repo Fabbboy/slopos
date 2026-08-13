@@ -271,9 +271,57 @@ pub fn account_release(id: AccountId) {
     let Some(row) = row_for(id) else {
         return;
     };
+
+    // Give the ancestors back whatever this row still holds, BEFORE going
+    // dark.
+    //
+    // A charge debits every level; its refund credits every level. Once this
+    // row is dark, a late refund fails the generation compare and is a no-op —
+    // which is what makes a stale refund safe, but it also means the ancestors
+    // would keep those debits with nothing left to release them. Left
+    // uncorrected the root accumulates one debit per charge that outlived its
+    // process, which is unbounded across a boot: the measurement that caught
+    // this showed the root holding 574 tasks while every process row read
+    // zero.
+    //
+    // Cancelling here is exact rather than approximate. `used` is the sum of
+    // the charges outstanding against this row, and those are precisely the
+    // charges whose refunds are about to become no-ops, so crediting the
+    // ancestors by that number retires exactly the debits that will never be
+    // retired by a token.
+    let parent_slot = row.parent.load(Ordering::Acquire);
+    if parent_slot != NO_PARENT {
+        let parent = account_id_at(parent_slot);
+        for kind in ResourceKind::ALL {
+            let outstanding = row.used[kind.index()].load(Ordering::Acquire);
+            if outstanding != 0 {
+                refund_raw(parent, kind, outstanding);
+            }
+        }
+    }
+
     row.live.store(false, Ordering::Release);
     row.generation.store(0, Ordering::Release);
     row.reset_counters();
+}
+
+/// Release whichever account currently occupies `slot`, whatever its
+/// generation.
+///
+/// For the fixture reset, which clears the id space wholesale and therefore
+/// has no live [`AccountId`] to name each row with. Ordinary teardown goes
+/// through [`account_release`], which is generation-checked.
+pub fn account_release_by_slot(slot: u32) {
+    let Some(row) = ACCOUNTS.get(slot as usize) else {
+        return;
+    };
+    if !row.live.load(Ordering::Acquire) {
+        return;
+    }
+    account_release(AccountId::from_parts(
+        slot,
+        row.generation.load(Ordering::Acquire),
+    ));
 }
 
 /// Set the ceiling for one kind. Boot and test-fixture use only.

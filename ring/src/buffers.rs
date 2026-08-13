@@ -229,7 +229,8 @@ impl BufferRegistry {
         }
         let mut pins = KVec::with_capacity(iovecs.len()).map_err(|_| Errno::ENOMEM)?;
         for &(addr, len) in iovecs {
-            let pin = PinnedUserBuffer::pin(process, addr, len as usize).map_err(pin_errno)?;
+            let pin = PinnedUserBuffer::pin(process, addr, len as usize, process.account())
+                .map_err(pin_errno)?;
             pins.push(pin).map_err(|_| Errno::ENOMEM)?;
         }
         // Pre-grow the deferred-notify side table to the buffer count so
@@ -441,8 +442,8 @@ impl BufferRegistry {
             return Err(Errno::EEXIST);
         }
         let ring_bytes = cmd.ring_entries as usize * core::mem::size_of::<IouringBuf>();
-        let ring_pin =
-            PinnedUserBuffer::pin(process, cmd.ring_addr, ring_bytes).map_err(pin_errno)?;
+        let ring_pin = PinnedUserBuffer::pin(process, cmd.ring_addr, ring_bytes, process.account())
+            .map_err(pin_errno)?;
         self.provided
             .push(ProvidedBufRing {
                 gid: cmd.buf_group,
@@ -496,7 +497,7 @@ impl BufferRegistry {
         addr: u64,
         len: usize,
     ) -> Result<PinnedUserBuffer, Errno> {
-        PinnedUserBuffer::pin(process, addr, len).map_err(pin_errno)
+        PinnedUserBuffer::pin(process, addr, len, process.account()).map_err(pin_errno)
     }
 
     // ----- test-only injection (no live process VM) ------------------------

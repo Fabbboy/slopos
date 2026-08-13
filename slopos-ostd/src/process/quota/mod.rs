@@ -25,15 +25,15 @@ mod token;
 
 pub use arena::{
     AccountCreateError, KindStats, LedgerFault, MAX_ACCOUNT_DEPTH, NO_LIMIT, TryChargeError,
-    account_count, account_create, account_release, for_each_account, ledger_audit, quota_mode,
-    reset_for_test, root, set_limit, set_quota_mode, stats, try_charge,
+    account_count, account_create, account_release, account_release_by_slot, for_each_account,
+    ledger_audit, quota_mode, reset_for_test, root, set_limit, set_quota_mode, stats, try_charge,
 };
 pub use axis::{Refundable, ResourceAxis};
 pub use charged::{
     AliasOf, ChargeAuditEntry, Charged, FileBacking, SharedCharge, charge_audit_entries,
     sealed as charged_sealed,
 };
-pub use token::{Charge, Reservation};
+pub use token::{Charge, ChargeSlot, Reservation};
 
 #[cfg(test)]
 mod tests {
@@ -143,6 +143,37 @@ mod tests {
         }
         assert_eq!(held.len(), 3);
         assert_eq!(stats(a, ResourceKind::FdSlot).expect("row").denials, 1);
+    }
+
+    /// Releasing an account gives its ancestors back whatever it still holds.
+    ///
+    /// The charges outstanding against a released row are exactly the ones
+    /// whose refunds are about to become generation-mismatch no-ops, so the
+    /// ancestors would otherwise keep those debits with nothing left to
+    /// retire them. That leak is unbounded across a boot — measured at 574
+    /// tasks held by the root while every process row read zero.
+    #[test]
+    fn releasing_an_account_hands_its_outstanding_amount_back_up() {
+        let _f = fixture();
+        let parent = account(1, root());
+        let child = account(2, parent);
+
+        // A charge that outlives its process: an in-flight SCM_RIGHTS
+        // reference, a keepalive pin, a task in the graveyard.
+        let outlives = Charge::commit(try_charge::<FdSlot>(child, 4).expect("charge"));
+        assert_eq!(used(root(), ResourceKind::FdSlot), 4);
+
+        account_release(child);
+        assert_eq!(
+            used(parent, ResourceKind::FdSlot),
+            0,
+            "the parent must not keep a debit nothing can retire"
+        );
+        assert_eq!(used(root(), ResourceKind::FdSlot), 0);
+
+        // And the token's own refund, now stale, changes nothing further.
+        drop(outlives);
+        assert_eq!(used(root(), ResourceKind::FdSlot), 0);
     }
 
     /// L5: a refund against a released row is a defined no-op, not a write
@@ -370,6 +401,65 @@ mod tests {
             }
             self.count += 1;
         }
+    }
+
+    /// A `ChargeSlot` refunds exactly once however the release is reached.
+    ///
+    /// The shape every kind whose refund point is not its holder's `Drop`
+    /// relies on — `Task` at the exit latch, `Process` at the reap. Both
+    /// latches can fire twice (from `task_terminate` and from the owning CPU's
+    /// post-switch path; from a double reap), so "exactly once" has to be a
+    /// property of the slot rather than of the caller.
+    #[test]
+    fn a_charge_slot_releases_exactly_once() {
+        let _f = fixture();
+        let a = account(1, root());
+        let slot: ChargeSlot<FdSlot> = ChargeSlot::empty();
+
+        slot.put(try_charge::<FdSlot>(a, 3).expect("charge"));
+        assert!(slot.is_occupied());
+        assert_eq!(used(a, ResourceKind::FdSlot), 3);
+
+        slot.take();
+        assert!(!slot.is_occupied());
+        assert_eq!(used(a, ResourceKind::FdSlot), 0);
+
+        // The second latch finds an empty slot.
+        slot.take();
+        assert_eq!(used(a, ResourceKind::FdSlot), 0);
+    }
+
+    /// Overwriting an occupied slot refunds the displaced charge rather than
+    /// dropping it on the floor — so a recycled id whose predecessor never
+    /// reached its latch costs nothing rather than one leaked charge.
+    #[test]
+    fn a_charge_slot_refunds_what_it_displaces() {
+        let _f = fixture();
+        let a = account(1, root());
+        let slot: ChargeSlot<FdSlot> = ChargeSlot::empty();
+
+        slot.put(try_charge::<FdSlot>(a, 3).expect("charge"));
+        slot.put(try_charge::<FdSlot>(a, 5).expect("charge"));
+        assert_eq!(
+            used(a, ResourceKind::FdSlot),
+            5,
+            "the displaced charge must be given back, not leaked"
+        );
+        slot.take();
+        assert_eq!(used(a, ResourceKind::FdSlot), 0);
+    }
+
+    /// A slot dropped without an explicit release still refunds.
+    #[test]
+    fn a_dropped_charge_slot_refunds() {
+        let _f = fixture();
+        let a = account(1, root());
+        {
+            let slot: ChargeSlot<FdSlot> = ChargeSlot::empty();
+            slot.put(try_charge::<FdSlot>(a, 6).expect("charge"));
+            assert_eq!(used(a, ResourceKind::FdSlot), 6);
+        }
+        assert_eq!(used(a, ResourceKind::FdSlot), 0);
     }
 
     /// A charge against an account whose row has gone succeeds vacuously.

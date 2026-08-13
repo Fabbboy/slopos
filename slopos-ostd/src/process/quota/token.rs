@@ -33,6 +33,7 @@
 //! `scripts/check_charge_linearity.sh` is what keeps the invariant true.
 
 use core::marker::PhantomData;
+use core::sync::atomic::Ordering;
 
 use slopos_abi::quota::ResourceKind;
 
@@ -205,6 +206,19 @@ impl<A: Refundable> Charge<A> {
         parts
     }
 
+    /// Hand this charge's obligation to a [`ChargeSlot`] that has already
+    /// recorded it.
+    ///
+    /// Private to this module and used only by [`ChargeSlot::put`], which
+    /// stores the account and amount before calling it. Consuming the token
+    /// without refunding is correct exactly there and nowhere else: the slot
+    /// has become the charge's single home, so refunding here would
+    /// double-count against a debit that is still outstanding.
+    #[inline]
+    fn into_slot(self) {
+        let _ = self.into_parts();
+    }
+
     /// Give the whole charge back explicitly, for a kind whose refund point is
     /// not its holder's `Drop`.
     ///
@@ -246,3 +260,81 @@ impl<A: Refundable> core::fmt::Debug for Charge<A> {
 // and several of those objects are counted against a 2 KiB stack-frame gate.
 const _: () = assert!(core::mem::size_of::<Charge<slopos_abi::quota::FdSlot>>() <= 16);
 const _: () = assert!(core::mem::size_of::<Reservation<slopos_abi::quota::FdSlot>>() <= 16);
+
+/// A `.bss` home for one charge, claimed and released atomically.
+///
+/// For a resource whose refund point is **not** its holder's `Drop`. The
+/// motivating case is a task: its destruction is deferred to the graveyard, so
+/// a `Charge` field would keep a thousand exited threads charged until the
+/// drain — spurious refusals under exactly the load the quota bounds. The
+/// charge lives here instead and is released at the exit latch.
+///
+/// The slot owns a real token rather than a decomposed account-and-amount
+/// pair. A charge stored as plain data is a charge nothing refunds if the row
+/// is overwritten, which is the failure the linear token exists to prevent;
+/// [`put`](Self::put) refunds a displaced occupant rather than dropping it on
+/// the floor, and [`take`](Self::take) is a move, so exactly one caller can
+/// win the release.
+///
+/// Every operation is a compare-exchange and a store: no lock, no allocation,
+/// no counted reference, so it is legal from the IRQ-off exit path.
+pub struct ChargeSlot<A: Refundable> {
+    /// The charged account, packed. Zero means empty, which no live account
+    /// id can be.
+    account: core::sync::atomic::AtomicU64,
+    amount: core::sync::atomic::AtomicU32,
+    _axis: PhantomData<A>,
+}
+
+impl<A: Refundable> ChargeSlot<A> {
+    pub const fn empty() -> Self {
+        Self {
+            account: core::sync::atomic::AtomicU64::new(0),
+            amount: core::sync::atomic::AtomicU32::new(0),
+            _axis: PhantomData,
+        }
+    }
+
+    /// Store `reservation` as this slot's charge, refunding any occupant.
+    pub fn put(&self, reservation: Reservation<A>) {
+        let charge = Charge::commit(reservation);
+        let (account, amount) = (charge.account(), charge.amount());
+        // The displaced occupant is refunded through the same path a take
+        // would use, so an overwrite cannot leak.
+        self.take();
+        self.amount.store(amount, Ordering::Release);
+        self.account.store(account.raw(), Ordering::Release);
+        // The slot is now the charge's single home. Handing the token's
+        // amount to the slot and then letting the token refund would
+        // double-count, so the token is consumed without refunding here — the
+        // one sanctioned place that happens, and the reason `ChargeSlot` lives
+        // beside the token rather than in a service crate.
+        charge.into_slot();
+    }
+
+    /// Take the charge out and refund it. Idempotent.
+    pub fn take(&self) {
+        let raw = self.account.swap(0, Ordering::AcqRel);
+        if raw == 0 {
+            return;
+        }
+        let amount = self.amount.swap(0, Ordering::AcqRel);
+        refund_raw(AccountId::from_raw(raw), A::KIND, amount);
+    }
+
+    /// Whether this slot currently holds a charge.
+    pub fn is_occupied(&self) -> bool {
+        self.account.load(Ordering::Acquire) != 0
+    }
+}
+
+impl<A: Refundable> Drop for ChargeSlot<A> {
+    /// The backstop. A slot released explicitly — at an exit latch, at a reap
+    /// — is already empty by the time this runs, so the common path is one
+    /// relaxed load. A slot whose owner was dropped without reaching its
+    /// release point still refunds here rather than leaking.
+    #[inline]
+    fn drop(&mut self) {
+        self.take();
+    }
+}

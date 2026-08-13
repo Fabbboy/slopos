@@ -149,13 +149,35 @@ pub struct Process {
     /// `waitpid` that arrives after the exit still finds something to answer
     /// with — and so the id cannot be handed to a stranger in that window.
     exited: AtomicBool,
+
+    /// This process's own existence, charged to its **spawner**.
+    ///
+    /// Held in a slot rather than as a plain field, and released at the reap
+    /// rather than at the final `Drop`, for the same reason the task charge
+    /// lives in a side table: the object outlives the resource. A `Process`
+    /// stays referenced after `process_retire` — a `waitpid` still has to find
+    /// it, an in-flight designator may still resolve it — so a `Drop`-refund
+    /// keeps the spawner charged for children that are already gone. Measured
+    /// at 113 processes held by the root across one boot with ten live.
+    ///
+    /// The reap is the honest point: it is when the registry slot and the
+    /// process's claim on the table are given up.
+    proc_charge: quota::ChargeSlot<slopos_abi::quota::ProcCount>,
 }
 
 impl Process {
     /// Build an unregistered process. Private: the only way to obtain one is
     /// through [`process_spawn`], which allocates the id, binds the slot and
     /// stamps the self-handle as one step.
-    fn new(id: u32, account: AccountId, account_parent: AccountId, parent: u64) -> Self {
+    fn new(
+        id: u32,
+        account: AccountId,
+        account_parent: AccountId,
+        parent: u64,
+        proc_charge: quota::Reservation<slopos_abi::quota::ProcCount>,
+    ) -> Self {
+        let slot = quota::ChargeSlot::empty();
+        slot.put(proc_charge);
         Self {
             id,
             handle: AtomicU64::new(PROCESS_HANDLE_NONE),
@@ -164,7 +186,17 @@ impl Process {
             account_parent,
             task_count: AtomicU32::new(0),
             exited: AtomicBool::new(false),
+            proc_charge: slot,
         }
+    }
+
+    /// Give the spawner back the charge for this process.
+    ///
+    /// Idempotent, and called from the reap. The slot's own `Drop` is the
+    /// backstop for a process that is dropped without ever being retired.
+    #[inline]
+    pub(super) fn release_proc_charge(&self) {
+        self.proc_charge.take();
     }
 
     /// The numeric process id. Display and ABI only.
@@ -297,6 +329,11 @@ impl Drop for Process {
     /// keepalive pin — refunds against a released row and is a defined no-op
     /// instead of a debit against whoever holds the slot next.
     fn drop(&mut self) {
+        // This releases *this process's* account row. It does not touch
+        // `proc_charge`, which is billed to the **spawner's** row and is
+        // refunded by its own field destructor after this body returns — a
+        // different row, on a chain this process is not on, so the two do not
+        // interact.
         quota::account_release(self.account);
         registry::release_process_id(self.id);
     }
@@ -407,6 +444,18 @@ impl ProcessId {
     pub fn is_live(self) -> bool {
         self.get().is_some()
     }
+
+    /// The account this process's resources are charged to.
+    ///
+    /// [`AccountId::NONE`] once the process has been reaped, which every arena
+    /// operation treats as a vacuous success — never the root's, which would
+    /// bill the kernel for a user process's resources the moment that process
+    /// went away.
+    #[inline]
+    pub fn account(self) -> AccountId {
+        self.get()
+            .map_or(AccountId::NONE, |process| process.account())
+    }
 }
 
 impl core::fmt::Debug for ProcessId {
@@ -433,8 +482,22 @@ impl core::fmt::Display for ProcessId {
 mod tests {
     use super::*;
 
+    /// A charge against no account. Every arena operation on `AccountId::NONE`
+    /// is a vacuous success, so this debits nothing and refunds nothing — the
+    /// right shape for a process that was never registered.
+    fn no_charge() -> quota::Reservation<slopos_abi::quota::ProcCount> {
+        quota::try_charge::<slopos_abi::quota::ProcCount>(AccountId::NONE, 1)
+            .expect("a charge against no account is vacuous")
+    }
+
     fn scratch(id: u32) -> Process {
-        Process::new(id, AccountId::NONE, AccountId::NONE, PROCESS_HANDLE_NONE)
+        Process::new(
+            id,
+            AccountId::NONE,
+            AccountId::NONE,
+            PROCESS_HANDLE_NONE,
+            no_charge(),
+        )
     }
 
     #[test]
@@ -467,6 +530,7 @@ mod tests {
             AccountId::from_parts(4, 9),
             AccountId::from_parts(1, 2),
             PROCESS_HANDLE_NONE,
+            no_charge(),
         );
         assert!(p.parent().is_none());
         let new_parent = Handle::<Process>::from_parts(7, 11);

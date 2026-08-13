@@ -12,20 +12,26 @@
 #
 # Measured 2026-08-09 on the tests ISO under quota=enforce, with the
 # session-smoke utest holding a desktop-shaped population open across the
-# post-userland-tests dump. Two kinds are charged so far (FdSlot,
-# ObjectRow); the remaining six land with their phases.
+# post-userland-tests dump. Six of the eight kinds are charged; Pages and
+# KernelMeta have no charge sites yet and are absent rather than capped at
+# zero, because a cap on a kind nothing charges bounds nothing.
 #
-# The caps are the ROOT account's peaks — the sum over every process plus
-# the kernel's own, not a per-process figure. The worst single user row
-# measured 18 fdslot / 10 objectrow, against enforced per-process defaults
-# of 256 / 512. Both numbers matter and they are deliberately different
-# numbers in different places: this file is the gate ceiling, the enforced
-# runtime defaults live in abi/src/quota.rs. Deriving either from the other
+# The caps are the ROOT account's peaks — the sum over every principal plus
+# the kernel's own, not a per-process figure. Worst single user rows measured
+# 18 fdslot / 10 objectrow / 4 process / 1 task, against enforced per-process
+# defaults of 256 / 512 / 64 / 512. Both numbers matter and they live in
+# different places on purpose: this file is the gate ceiling, the enforced
+# runtime defaults are in abi/src/quota.rs. Deriving either from the other
 # would make the ratchet measure its own configuration.
 #
-# max-denials 0 is the load-bearing line under quota=enforce: a denial here
-# means a legitimate workload was refused, which is a finding rather than a
-# pass.
+# `process` at 113 against ~109 live account rows is not a leak: the userland
+# phase spawns a test binary per utest and most are still referenced at the
+# dump point. The charge is released at the reap (`process_retire`), which is
+# when the registry slot is given up, rather than at the final `Drop`, which
+# lags for as long as any designator still resolves.
+#
+# max-denials 0 is the load-bearing line under quota=enforce: a denial means a
+# legitimate workload was refused, which is a finding rather than a pass.
 
 # The peak of a kind nobody exercised is zero, and a cap derived from
 # it would bound nothing. Every listed kind must have been reached.
@@ -39,7 +45,14 @@ max-denials 0
 require-phase post-kernel-tests
 require-phase post-userland-tests
 
-post-kernel-tests	fdslot	257
+post-kernel-tests	custody	8
+post-kernel-tests	fdslot	256
 post-kernel-tests	objectrow	257
-post-userland-tests	fdslot	257
+post-kernel-tests	process	11
+post-kernel-tests	task	4
+post-userland-tests	custody	8
+post-userland-tests	fdslot	256
 post-userland-tests	objectrow	257
+post-userland-tests	pinnedbytes	1
+post-userland-tests	process	113
+post-userland-tests	task	5

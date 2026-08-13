@@ -62,6 +62,8 @@ use crate::mm::{AllocError, KArc};
 use crate::sync::{LOCK_LEVEL_REGISTRY, SpinLock};
 use crate::{KVec, lock_class};
 
+use slopos_abi::quota::ProcCount;
+
 use super::account::{AccountId, alloc_generation};
 use super::quota;
 use super::{Process, pack_process_handle};
@@ -93,6 +95,10 @@ pub enum ProcessAllocError {
     NoFreeSlot,
     /// The heap refused the `KArc<Process>` or the registry spine.
     OutOfMemory,
+    /// The spawner's account is at its process ceiling. Distinct from
+    /// [`IdExhausted`](Self::IdExhausted): the table has room, this principal
+    /// does not.
+    QuotaExceeded,
 }
 
 /// Live process ids. Bit `n` is set while id `n + 1` is allocated.
@@ -242,11 +248,27 @@ fn new_process(
     // the root's slot 0, and the arena needs no allocator of its own.
     let account = AccountId::from_parts(id, alloc_generation());
     let parent_packed = parent.map_or(super::PROCESS_HANDLE_NONE, pack_process_handle);
-    let process =
-        KArc::try_new(Process::new(id, account, account_parent, parent_packed)).map_err(|_| {
+    // The spawner pays for the process it is creating, before the object
+    // exists. `MAX_PROCESSES` is 256 and is reached long before `MAX_TASKS`,
+    // so without this one principal can spend the whole table.
+    let charge = match quota::try_charge::<ProcCount>(account_parent, 1) {
+        Ok(reservation) => reservation,
+        Err(_) => {
             release_process_id(id);
-            ProcessAllocError::OutOfMemory
-        })?;
+            return Err(ProcessAllocError::QuotaExceeded);
+        }
+    };
+    let process = KArc::try_new(Process::new(
+        id,
+        account,
+        account_parent,
+        parent_packed,
+        charge,
+    ))
+    .map_err(|_| {
+        release_process_id(id);
+        ProcessAllocError::OutOfMemory
+    })?;
     // A creation refused for depth leaves the process with an account that
     // names no row, which every arena operation treats as a vacuous success.
     // That is the right failure: an eighth-generation descendant is not worth
@@ -385,6 +407,13 @@ pub fn process_retire(handle: Handle<Process>) -> bool {
     // other container release in the tree.
     let released = with_registry_mut(|table| table.retire(handle)).flatten();
     let retired = released.is_some();
+    if let Some(process) = released.as_deref() {
+        // The reap is when the process gives up its registry slot, so it is
+        // when the spawner stops paying for it. Waiting for the final `Drop`
+        // would keep the spawner charged for as long as anything still holds a
+        // reference — a `waitpid` that has not run, a designator mid-flight.
+        process.release_proc_charge();
+    }
     drop(released);
     retired
 }
@@ -399,7 +428,20 @@ pub fn process_registry_reset() {
     // Off-lock: a released weak handle can be the allocation's last reference.
     drop(removed);
 
+    // The id bitmap is cleared wholesale below, which is what makes this a
+    // *reset* rather than a mass reap. Every account row goes with it, for the
+    // same reason: a `Process` whose reference outlived the drain still holds
+    // its spawner's `ProcCount` charge, and that charge's refund now names a
+    // row this reset is about to reissue to somebody else. Releasing the rows
+    // here cancels each one against its ancestors and darkens it, so those
+    // late refunds are generation-mismatch no-ops instead of debits against a
+    // stranger — which is what the arena's stale-refund rule is for.
+    //
+    // Without this the root accumulates one process debit per fixture reset,
+    // unbounded across a boot: measured at 113 with every live account
+    // reading a handful.
     for id in 1..=MAX_PROCESS_ID {
+        quota::account_release_by_slot(id);
         release_process_id(id);
     }
 }

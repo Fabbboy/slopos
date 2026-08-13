@@ -201,14 +201,27 @@ pub const fn default_process_limit(kind: ResourceKind) -> u32 {
         //
         // Measured worst single process: 10, against 18 descriptors.
         ResourceKind::ObjectRow => 512,
+        // Threads per process. `MAX_TASKS` is 8192 global, so without a
+        // per-principal bound one process spends the whole table; 512 is well
+        // above anything in this tree (the busiest measured process holds a
+        // handful) and far below the global ceiling.
+        ResourceKind::Task => 512,
+        // `MAX_PROCESSES` is 256 and is reached long before `MAX_TASKS`, so
+        // this is the tighter global resource. A principal may spawn a
+        // quarter of the table before it is refused.
+        ResourceKind::Process => 64,
+        // In-flight `SCM_RIGHTS` references, held by no descriptor table. The
+        // structural bound is 8 fds x 2 directions x 16 pairs = 256 across
+        // the whole system; per principal this is the tighter of the two.
+        ResourceKind::Custody => 64,
+        // Pinned pages, charged in pages rather than bytes. 16 MiB of pinned
+        // memory per principal: enough for the ring buffer sets this tree
+        // registers, bounded against a process pinning until the machine
+        // cannot reclaim.
+        ResourceKind::PinnedBytes => 4096,
         // No charge sites yet. A ceiling here would refuse against a counter
         // nothing increments.
-        ResourceKind::Task
-        | ResourceKind::Process
-        | ResourceKind::Pages
-        | ResourceKind::PinnedBytes
-        | ResourceKind::Custody
-        | ResourceKind::KernelMeta => NO_LIMIT_SENTINEL,
+        ResourceKind::Pages | ResourceKind::KernelMeta => NO_LIMIT_SENTINEL,
     }
 }
 
@@ -325,14 +338,7 @@ mod tests {
     /// no reader.
     #[test]
     fn unwired_kinds_carry_no_ceiling() {
-        for kind in [
-            ResourceKind::Task,
-            ResourceKind::Process,
-            ResourceKind::Pages,
-            ResourceKind::PinnedBytes,
-            ResourceKind::Custody,
-            ResourceKind::KernelMeta,
-        ] {
+        for kind in [ResourceKind::Pages, ResourceKind::KernelMeta] {
             assert_eq!(default_process_limit(kind), NO_LIMIT_SENTINEL, "{kind:?}");
         }
     }

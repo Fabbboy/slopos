@@ -5,6 +5,7 @@ mod task_cleanup_hooks;
 mod task_family;
 mod task_lifecycle;
 mod task_ops;
+pub mod task_quota;
 mod task_reclaim;
 mod task_session;
 mod task_state;

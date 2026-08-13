@@ -4386,7 +4386,7 @@ pub fn test_scm_rights_tty_balanced() -> TestResult {
         slopos_ostd::KVec::with_capacity(1).expect("files vec alloc");
     let alias = slopos_fs::fileio_clone_file_ref(pid, master_fd).expect("clone_file_ref failed");
     let _ = files.push(alias);
-    let n = unix_socket::unix_sendmsg(srv, b"T", &mut files);
+    let n = unix_socket::unix_sendmsg(srv, b"T", &mut files, slopos_ostd::process::quota::root());
     assert_test!(n == 1, "sendmsg returned {}", n);
     assert_eq_test!(
         slopos_ostd::KArc::strong_count(&probe),
@@ -6031,7 +6031,12 @@ pub fn test_unix_scm_rights_atomic_delivery() -> TestResult {
     let _ = files.push(alias);
 
     let payload = b"ATOM";
-    let n = unix_socket::unix_sendmsg(srv, payload, &mut files);
+    let n = unix_socket::unix_sendmsg(
+        srv,
+        payload,
+        &mut files,
+        slopos_ostd::process::quota::root(),
+    );
     assert_test!(
         n == payload.len() as i32,
         "unix_sendmsg returned {} (expected {})",
@@ -6118,7 +6123,7 @@ pub fn test_unix_scm_rights_anc_queue_full_no_partial() -> TestResult {
             slopos_ostd::KVec::with_capacity(1).expect("fill vec alloc");
         let alias = slopos_fs::fileio_clone_file_ref(pid, mfd_fd).expect("fill clone failed");
         let _ = one.push(alias);
-        let n = unix_socket::unix_sendmsg(srv, &[], &mut one);
+        let n = unix_socket::unix_sendmsg(srv, &[], &mut one, slopos_ostd::process::quota::root());
         assert_test!(n >= 0, "fill push returned {}", n);
     }
 
@@ -6127,7 +6132,12 @@ pub fn test_unix_scm_rights_anc_queue_full_no_partial() -> TestResult {
         slopos_ostd::KVec::with_capacity(1).expect("overflow vec alloc");
     let alias = slopos_fs::fileio_clone_file_ref(pid, mfd_fd).expect("overflow clone failed");
     let _ = overflow.push(alias);
-    let rc = unix_socket::unix_sendmsg(srv, b"X", &mut overflow);
+    let rc = unix_socket::unix_sendmsg(
+        srv,
+        b"X",
+        &mut overflow,
+        slopos_ostd::process::quota::root(),
+    );
     assert_test!(rc == -12, "expected ENOMEM (-12), got {}", rc);
     assert_eq_test!(
         overflow.len(),
@@ -6213,7 +6223,12 @@ pub fn test_unix_scm_rights_error_returns_custody() -> TestResult {
         slopos_ostd::KVec::with_capacity(1).expect("files vec alloc");
     let alias = slopos_fs::fileio_clone_file_ref(pid, mfd_fd).expect("clone_file_ref failed");
     let _ = files.push(alias);
-    let rc = unix_socket::unix_sendmsg(srv, b"DEAD", &mut files);
+    let rc = unix_socket::unix_sendmsg(
+        srv,
+        b"DEAD",
+        &mut files,
+        slopos_ostd::process::quota::root(),
+    );
     assert_test!(rc == -32, "expected EPIPE (-32), got {}", rc);
     assert_eq_test!(
         files.len(),

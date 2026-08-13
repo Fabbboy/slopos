@@ -24,10 +24,13 @@
 //! [`PinError::NotAnonymous`], matching `IORING_REGISTER_BUFFERS`.
 
 use slopos_abi::addr::VirtAddr;
+use slopos_abi::quota::PinnedBytesAxis;
 use slopos_ostd::KVec;
 use slopos_ostd::mm::frame::{AnonymousMeta, Paddr};
 use slopos_ostd::mm::uframe::{UFrame, UFrameError};
 use slopos_ostd::mm::vmcursor::{VmReader, VmWriter};
+use slopos_ostd::process::AccountId;
+use slopos_ostd::process::quota::{Charge, try_charge};
 
 const PAGE_SIZE: usize = 4096;
 const PAGE_MASK: u64 = (PAGE_SIZE as u64) - 1;
@@ -71,6 +74,16 @@ pub struct PinnedUserBuffer {
     len: usize,
     /// One owning ref per backing page, in range order. `Drop` releases all.
     frames: KVec<UFrame<AnonymousMeta>>,
+    /// The pinned bytes, charged to the ring owner.
+    ///
+    /// A tier-2 charge: the amount is the byte count, carried rather than
+    /// recomputed at the refund site, and refunded by this struct's own `Drop`
+    /// with exactly the number it holds. Pinned memory is the only genuinely
+    /// unbounded resource here — a pin holds frames against reclaim for as
+    /// long as the handle lives, and nothing else caps how many a process may
+    /// take.
+    #[expect(dead_code, reason = "held for ownership; dropping it is the refund")]
+    pin_charge: Charge<PinnedBytesAxis>,
 }
 
 impl PinnedUserBuffer {
@@ -82,6 +95,7 @@ impl PinnedUserBuffer {
         process: slopos_ostd::process::ProcessId,
         va: u64,
         len: usize,
+        account: AccountId,
     ) -> Result<Self, PinError> {
         if len == 0 {
             return Err(PinError::InvalidRange);
@@ -90,6 +104,18 @@ impl PinnedUserBuffer {
             return Err(PinError::TooLarge);
         }
         va.checked_add(len as u64).ok_or(PinError::InvalidRange)?;
+
+        // Charged in **pages**, not bytes: `MAX_PIN_BYTES` is 1 GiB, which
+        // does not fit the arena's `u32` amount, and pages are what a pin
+        // actually holds against reclaim — a byte count would also let a
+        // thousand sub-page pins look cheap while each holds a whole frame.
+        let pinned_pages = ((va & PAGE_MASK) as usize + len).div_ceil(PAGE_SIZE);
+        // Charged before a single frame is pinned, so a refusal costs nothing
+        // to unwind.
+        let pin_charge = Charge::commit(
+            try_charge::<PinnedBytesAxis>(account, pinned_pages as u32)
+                .map_err(|_| PinError::OutOfMemory)?,
+        );
 
         let vm_space =
             crate::process_vm::process_vm_get_vm_space(process).ok_or(PinError::NotPresent)?;
@@ -122,6 +148,7 @@ impl PinnedUserBuffer {
             base_off,
             len,
             frames,
+            pin_charge,
         })
     }
 
@@ -217,6 +244,9 @@ impl PinnedUserBuffer {
             base_off: 0,
             len,
             frames,
+            // A fabricated pin belongs to no process; a charge against no
+            // account is a vacuous success that debits and refunds nothing.
+            pin_charge: Charge::commit(try_charge::<PinnedBytesAxis>(AccountId::NONE, 0).ok()?),
         })
     }
 
@@ -305,6 +335,20 @@ impl PinnedUserBuffer {
     /// would be recycled mid-DMA. Re-wrapping a live paddr bumps the frame
     /// slot's ref count (`from_in_use`); the last wrapper to drop frees it.
     /// `None` if the per-page list cannot be allocated.
+    ///
+    /// # Accounting
+    ///
+    /// These frames are **not** covered by this pin's `PinnedBytes` charge,
+    /// and deliberately so: the keepalive outlives the ring — that is its
+    /// whole purpose — so a shared charge would be refunded when the ring went
+    /// away while the driver still held the pages, which is a memory-lock
+    /// bypass at exactly the DMA boundary. The independent second charge that
+    /// covers them belongs at the driver's TX-reclaim refund site, which is
+    /// where the frames are actually released; until that lands, keepalive
+    /// pages are the one uncharged pin in the tree and are bounded instead by
+    /// `SLOPRING_MAX_FIXED_BUFFERS` times the per-ring pin ceiling. Recorded
+    /// here rather than left implicit, because an uncounted resource nobody
+    /// wrote down is how the last per-process counter got deleted.
     pub fn keepalive_frames(&self) -> Option<KVec<UFrame<AnonymousMeta>>> {
         let mut frames = KVec::with_capacity(self.frames.len()).ok()?;
         for frame in self.frames.iter() {

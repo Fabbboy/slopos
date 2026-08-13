@@ -7,7 +7,10 @@
 //! `1` when one side closes, and dropped to `0` (freeing the pair) when
 //! the second side closes.
 
+use slopos_abi::quota::CustodyAxis;
 use slopos_fs::FileRef;
+use slopos_ostd::process::AccountId;
+use slopos_ostd::process::quota::{Charge, try_charge};
 use slopos_ostd::{AllocError, KVec};
 
 use super::MAX_UNIX_SOCKETS;
@@ -44,7 +47,26 @@ pub enum PairSide {
 /// `FileRef` while the socket state lock is held (a drop can recurse
 /// into arbitrary file teardown, including `unix_close`).
 pub(super) struct AncillaryQueue {
-    entries: KVec<FileRef>,
+    entries: KVec<InFlightFile>,
+}
+
+/// One in-flight descriptor and the custody charge that accounts for it.
+///
+/// The charge is the **sender's**, and it is mandatory rather than a
+/// refinement: 8 in-flight descriptors x 2 directions x 16 pairs is 256
+/// `FileRef`s held by no descriptor table at all, against a per-process
+/// descriptor limit far below that. Without a custody axis those references
+/// are owned by the `ConnectionPair` and charged to nobody — Linux answered
+/// the identical hole with a per-user in-flight counter, because no
+/// process-scoped principal outlived the sender.
+///
+/// The charge travels with the reference, so whichever way the queue empties
+/// — the receiver installs it, or the pair drops — the refund happens exactly
+/// once, in the same move.
+pub(super) struct InFlightFile {
+    pub(super) file: FileRef,
+    #[expect(dead_code, reason = "held for ownership; dropping it is the refund")]
+    custody: Charge<CustodyAxis>,
 }
 
 impl AncillaryQueue {
@@ -54,14 +76,34 @@ impl AncillaryQueue {
         })
     }
 
-    /// Push a file, capped at [`MAX_INFLIGHT_FDS`].  Returns `false` if
-    /// the cap is reached (callers capacity-check first, so a `false`
-    /// is a logic error, not a runtime condition).
-    pub(super) fn push(&mut self, file: FileRef) -> bool {
+    /// Push a file, capped at [`MAX_INFLIGHT_FDS`] and charged to `sender`.
+    /// Returns the file back on refusal so the caller can drop it off-lock.
+    ///
+    /// The charge is minted **after** the only two things that can refuse —
+    /// the cap and the reservation — because `KVec::push` consumes its
+    /// argument on failure, so a token built before a failing push would be
+    /// lost with it. Storage is pre-reserved to `MAX_INFLIGHT_FDS` at pair
+    /// creation, so the push below cannot allocate and cannot fail.
+    pub(super) fn push(&mut self, file: FileRef, sender: AccountId) -> Result<(), FileRef> {
         if self.entries.len() >= MAX_INFLIGHT_FDS {
-            return false;
+            return Err(file);
         }
-        self.entries.push(file).is_ok()
+        let Ok(reservation) = try_charge::<CustodyAxis>(sender, 1) else {
+            return Err(file);
+        };
+        let alias = file.alias();
+        if self
+            .entries
+            .push(InFlightFile {
+                file,
+                custody: Charge::commit(reservation),
+            })
+            .is_err()
+        {
+            return Err(alias);
+        }
+        drop(alias);
+        Ok(())
     }
 
     /// Number of files currently queued. Used by the atomic-publish path
@@ -76,7 +118,7 @@ impl AncillaryQueue {
     /// Drain all entries.  A pure move: the returned `KVec` owns the
     /// aliases, so the caller can carry them out of the state lock
     /// before forwarding or dropping them.
-    pub(super) fn drain(&mut self) -> KVec<FileRef> {
+    pub(super) fn drain(&mut self) -> KVec<InFlightFile> {
         core::mem::replace(&mut self.entries, KVec::new())
     }
 }

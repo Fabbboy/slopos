@@ -103,6 +103,13 @@ scan_forget() {
     done <<< "$2"
 }
 
+# An `Option<Charge<_>>` **field**, where `Option::take` is a safe separation
+# of the token from its object.
+#
+# A `-> Option<Reservation<_>>` *return* is deliberately accepted: that is the
+# ordinary fallible-mint shape, and the `None` arm means no debit was taken at
+# all rather than a charge that went missing. Matching both would make the gate
+# fire on every correct mint, which is how a gate gets switched off.
 scan_optional() {
     local root="$1" file
     cd "$root"
@@ -110,6 +117,7 @@ scan_optional() {
         [ -f "$file" ] || continue
         awk -v fname="$file" '
             { line = $0; sub(/\/\/.*/, "", line) }
+            line ~ /->/ { next }
             line ~ /Option[[:space:]]*<[[:space:]]*(Charge|Reservation)[[:space:]]*</ {
                 printf "optional\t%s:%d: %s\n", fname, NR, substr($0, 1, 110)
             }
@@ -117,17 +125,41 @@ scan_optional() {
     done <<< "$2"
 }
 
+# `.take()` on a charge-bearing field.
+#
+# The shape being kept out is `Option<Charge<_>>::take`, which separates the
+# token from the object it accounts for and leaves the object uncharged.
+#
+# `ChargeSlot::take` is the opposite and is accepted: the slot IS the charge's
+# single home for a kind whose refund point is not its holder's `Drop` (a task
+# at the exit latch, a process at the reap), and taking from it refunds. It is
+# distinguished by the declared field type rather than by the call, so a field
+# would have to actually be a `ChargeSlot` to be accepted.
 scan_take() {
     local root="$1" file
     cd "$root"
     while IFS= read -r file; do
         [ -f "$file" ] || continue
         awk -v fname="$file" '
-            { line = $0; sub(/\/\/.*/, "", line) }
-            line ~ /(_charge|charge_|Charge|Reservation)[A-Za-z0-9_]*[[:space:]]*\.[[:space:]]*take[[:space:]]*\(/ {
-                printf "take\t%s:%d: %s\n", fname, NR, substr($0, 1, 110)
+            function note_slots(text,   name) {
+                while (match(text, /[A-Za-z_][A-Za-z0-9_]*[[:space:]]*:[[:space:]]*(quota::)?ChargeSlot[[:space:]]*</)) {
+                    name = substr(text, RSTART, RLENGTH)
+                    sub(/[[:space:]]*:.*/, "", name)
+                    slot[name] = 1
+                    text = substr(text, RSTART + RLENGTH)
+                }
             }
-        ' "$file"
+            FNR == NR { note_slots($0); next }
+            {
+                line = $0; sub(/\/\/.*/, "", line)
+                if (line !~ /(_charge|charge_|Charge|Reservation)[A-Za-z0-9_]*[[:space:]]*\.[[:space:]]*take[[:space:]]*\(/) next
+                for (name in slot) {
+                    if (line ~ ("(^|[^A-Za-z0-9_])" name "[[:space:]]*\\.[[:space:]]*take")) next
+                }
+                if (line ~ /ChargeSlot|[[:space:]]slot[[:space:]]*\.[[:space:]]*take/) next
+                printf "take\t%s:%d: %s\n", fname, FNR, substr($0, 1, 110)
+            }
+        ' "$file" "$file"
     done <<< "$2"
 }
 
@@ -278,6 +310,25 @@ fn take_entry(slot: &mut Slot) {
     let _ = slot.descriptors.take();
 }
 
+// `ChargeSlot::take` IS the sanctioned release for a kind whose refund point
+// is not its holder's Drop — the slot is the charge's single home, and taking
+// from it refunds.
+struct Reaped {
+    proc_charge: quota::ChargeSlot<ProcCount>,
+}
+
+impl Reaped {
+    fn release(&self) {
+        self.proc_charge.take();
+    }
+}
+
+// The ordinary fallible mint: `None` means no debit was taken, not a charge
+// that went missing.
+fn reserve(account: AccountId) -> Option<Reservation<TaskCount>> {
+    try_charge::<TaskCount>(account, 1).ok()
+}
+
 // Clone on a struct with no charge field.
 #[derive(Clone, Copy)]
 struct Flags {
@@ -292,7 +343,7 @@ RS
     gate_expect escape 1 "a non-mint fn returning Charge<_> by value"
     gate_expect clone 1 "a derived Clone on a charge-bearing struct"
     gate_expect_silent 'negatives\.rs' \
-        "the live driver mem::forget pair, a by-value charge field, a borrowing accessor, an unrelated Option/take, and Clone on a charge-free struct"
+        "the live driver mem::forget pair, a by-value charge field, a borrowing accessor, an unrelated Option/take, Clone on a charge-free struct, a fallible mint returning Option<Reservation>, and ChargeSlot::take"
     gate_selftest_end
 fi
 
