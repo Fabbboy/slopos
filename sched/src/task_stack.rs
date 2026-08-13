@@ -48,11 +48,14 @@
 //!   cannot be accidentally mapped.
 
 use slopos_abi::addr::{PhysAddr, VirtAddr};
+use slopos_abi::quota::KernelMetaAxis;
 use slopos_mm::kernel_mappings::{kernel_map_4kb, kernel_unmap_4kb};
 use slopos_mm::page_alloc::{alloc_page_frames_pcp_batch, free_page_frame};
 use slopos_mm::paging_defs::PAGE_SIZE_4KB;
 use slopos_mm::stack_region::{KstackRegion, StackRegion, UstackRegion};
 use slopos_mm::stack_va::{self, StackSlot};
+use slopos_ostd::process::AccountId;
+use slopos_ostd::process::quota::{Charge, try_charge};
 
 /// Maximum pages that fit in any region's slot (excluding the guard
 /// page).  Sized to cover the largest stride any current or near-future
@@ -91,6 +94,18 @@ pub struct TaskStack<R: StackRegion> {
     slot: StackSlot<R>,
     /// Number of bytes mapped (excluding the guard page).
     size: u32,
+    /// The mapped pages, charged to the account that asked for the stack.
+    ///
+    /// Plausibly the largest single unaccounted consumer in the tree: 8192
+    /// tasks at 32 KiB of kernel stack plus 16 KiB of data stack is not
+    /// table-shaped, so no array bound capped it and nothing else did.
+    ///
+    /// Refunded by this struct's own `Drop`, which is also where the pages go
+    /// back — including on the pooled return-to-cache path, where the VA slot
+    /// is recycled but the backing pages stay mapped and therefore stay
+    /// charged until the stack itself is dropped.
+    #[expect(dead_code, reason = "held for ownership; dropping it is the refund")]
+    pages_charge: Charge<KernelMetaAxis>,
 }
 
 impl<R: StackRegion> TaskStack<R> {
@@ -110,7 +125,7 @@ impl<R: StackRegion> TaskStack<R> {
     ///
     /// On failure, no resources leak: any partially-mapped pages are
     /// unmapped and their frames freed, and the slot handle is dropped.
-    pub fn allocate(size: usize) -> Result<Self, StackAllocError> {
+    pub fn allocate(size: usize, account: AccountId) -> Result<Self, StackAllocError> {
         // Force the compile-time stride check to instantiate per region.
         let _: () = Self::_FITS;
 
@@ -120,6 +135,13 @@ impl<R: StackRegion> TaskStack<R> {
         if (size as u64) + R::GUARD_SIZE > R::STRIDE {
             return Err(StackAllocError::InvalidSize);
         }
+
+        // Charged before any VA slot or frame is taken, so a refusal unwinds
+        // nothing. The amount is pages, matching every other KernelMeta site.
+        let pages_charge = Charge::commit(
+            try_charge::<KernelMetaAxis>(account, (size / PAGE_SIZE_4KB as usize) as u32)
+                .map_err(|_| StackAllocError::OutOfPhysicalFrames)?,
+        );
 
         let mut slot = stack_va::alloc_slot::<R>().ok_or(StackAllocError::OutOfVirtualSpace)?;
         let base = slot.va_base().as_u64() + R::GUARD_SIZE;
@@ -132,6 +154,7 @@ impl<R: StackRegion> TaskStack<R> {
             return Ok(Self {
                 slot,
                 size: size as u32,
+                pages_charge,
             });
         }
 
@@ -173,6 +196,7 @@ impl<R: StackRegion> TaskStack<R> {
         Ok(Self {
             slot,
             size: size as u32,
+            pages_charge,
         })
     }
 

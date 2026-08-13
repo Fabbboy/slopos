@@ -12,23 +12,32 @@
 #
 # Measured 2026-08-09 on the tests ISO under quota=enforce, with the
 # session-smoke utest holding a desktop-shaped population open across the
-# post-userland-tests dump. Six of the eight kinds are charged; Pages and
-# KernelMeta have no charge sites yet and are absent rather than capped at
-# zero, because a cap on a kind nothing charges bounds nothing.
+# post-userland-tests dump. Seven of the eight kinds are charged; Pages has no
+# charge sites yet and is absent rather than capped at zero, because a cap on
+# a kind nothing charges bounds nothing.
 #
 # The caps are the ROOT account's peaks — the sum over every principal plus
 # the kernel's own, not a per-process figure. Worst single user rows measured
-# 18 fdslot / 10 objectrow / 4 process / 1 task, against enforced per-process
-# defaults of 256 / 512 / 64 / 512. Both numbers matter and they live in
-# different places on purpose: this file is the gate ceiling, the enforced
-# runtime defaults are in abi/src/quota.rs. Deriving either from the other
-# would make the ratchet measure its own configuration.
+# 18 fdslot / 10 objectrow / 4 process / 1 task / 12 kernelmeta, against
+# enforced per-process defaults of 256 / 512 / 64 / 512 / 2048. Both numbers
+# matter and they live in different places on purpose: this file is the gate
+# ceiling, the enforced runtime defaults are in abi/src/quota.rs. Deriving
+# either from the other would make the ratchet measure its own configuration.
+#
+# kernelmeta is exactly 12 pages per task — a 32 KiB kernel stack plus a
+# 16 KiB SafeStack data stack — so the root peak of 636 is ~53 concurrent
+# tasks' worth of stack, or 2.5 MiB. This is the consumer the plan called the
+# largest unaccounted one in the tree, and it was: nothing table-shaped
+# bounded it.
 #
 # `process` at 113 against ~109 live account rows is not a leak: the userland
 # phase spawns a test binary per utest and most are still referenced at the
 # dump point. The charge is released at the reap (`process_retire`), which is
 # when the registry slot is given up, rather than at the final `Drop`, which
 # lags for as long as any designator still resolves.
+#
+# `task` moves with scheduling (measured 5-7 across runs), so its cap carries
+# the observed spread as margin rather than a single observation.
 #
 # max-denials 0 is the load-bearing line under quota=enforce: a denial means a
 # legitimate workload was refused, which is a finding rather than a pass.
@@ -37,22 +46,30 @@
 # it would bound nothing. Every listed kind must have been reached.
 min-kinds 2
 
+# Boot charges only the idle tasks' stacks, so it reports one kind and that
+# is the honest floor for it rather than evidence of a broken report.
+min-kinds-for boot 1
+
 # A denial is an over-limit charge. Under quota=warn it is granted and
 # counted, so a non-zero total means the enforced tier would have
 # refused something — which is a finding, not a pass.
 max-denials 0
 
+require-phase boot
 require-phase post-kernel-tests
 require-phase post-userland-tests
 
+boot	kernelmeta	60
 post-kernel-tests	custody	8
 post-kernel-tests	fdslot	256
+post-kernel-tests	kernelmeta	636
 post-kernel-tests	objectrow	257
 post-kernel-tests	process	11
-post-kernel-tests	task	4
+post-kernel-tests	task	8
 post-userland-tests	custody	8
 post-userland-tests	fdslot	256
+post-userland-tests	kernelmeta	636
 post-userland-tests	objectrow	257
 post-userland-tests	pinnedbytes	1
 post-userland-tests	process	113
-post-userland-tests	task	5
+post-userland-tests	task	10

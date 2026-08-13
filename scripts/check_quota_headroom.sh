@@ -106,6 +106,7 @@ emit_gate_data() {
     echo "# The peak of a kind nobody exercised is zero, and a cap derived from"
     echo "# it would bound nothing. Every listed kind must have been reached."
     echo "min-kinds 2"
+    echo "min-kinds-for boot 1"
     echo
     echo "# A denial is an over-limit charge. Under quota=warn it is granted and"
     echo "# counted, so a non-zero total means the enforced tier would have"
@@ -134,6 +135,7 @@ run_gate() {
     local MIN_KINDS=0 MAX_DENIALS=0
     local -a REQUIRED=()
     declare -A CAPS=()
+    declare -A MIN_KINDS_FOR=()
     local lineno=0 line key
     while IFS= read -r line || [ -n "$line" ]; do
         lineno=$((lineno + 1))
@@ -146,6 +148,8 @@ run_gate() {
         key="${line%% *}"
         case "$key" in
             min-kinds)    MIN_KINDS=$(awk '{print $2}' <<<"$line") ;;
+            min-kinds-for)
+                MIN_KINDS_FOR["$(awk '{print $2}' <<<"$line")"]=$(awk '{print $3}' <<<"$line") ;;
             max-denials)  MAX_DENIALS=$(awk '{print $2}' <<<"$line") ;;
             require-phase) REQUIRED+=("$(awk '{print $2}' <<<"$line")") ;;
             *)
@@ -168,8 +172,12 @@ run_gate() {
         for gkey in "${!PEAK[@]}"; do
             [ "${gkey%%/*}" = "$phase" ] && kinds=$((kinds + 1))
         done
-        if [ "$kinds" -lt "$MIN_KINDS" ]; then
-            echo "FAIL: QUOTA[$phase] reported only $kinds kind(s) (min $MIN_KINDS) — nothing measured." >&2
+        # A per-phase floor overrides the global one. Boot legitimately
+        # reports fewer kinds than the test phases: the only charges taken
+        # before userland exists are the idle tasks' stacks.
+        local floor="${MIN_KINDS_FOR[$phase]:-$MIN_KINDS}"
+        if [ "$kinds" -lt "$floor" ]; then
+            echo "FAIL: QUOTA[$phase] reported only $kinds kind(s) (min $floor) — nothing measured." >&2
             fail=1
         fi
     done

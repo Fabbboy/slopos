@@ -1713,7 +1713,10 @@ pub fn test_kstack_basic_alloc() -> TestResult {
     use super::task_stack::KernelStack;
     use slopos_abi::task::TASK_STACK_SIZE;
 
-    let stack = match KernelStack::allocate(TASK_STACK_SIZE as usize) {
+    let stack = match KernelStack::allocate(
+        TASK_STACK_SIZE as usize,
+        slopos_ostd::process::quota::root(),
+    ) {
         Ok(s) => s,
         Err(e) => {
             klog_info!("SCHED_TEST: KernelStack::allocate failed: {:?}", e);
@@ -1756,7 +1759,10 @@ pub fn test_kstack_slot_reuse() -> TestResult {
     use super::task_stack::KernelStack;
     use slopos_abi::task::TASK_STACK_SIZE;
 
-    let s1 = match KernelStack::allocate(TASK_STACK_SIZE as usize) {
+    let s1 = match KernelStack::allocate(
+        TASK_STACK_SIZE as usize,
+        slopos_ostd::process::quota::root(),
+    ) {
         Ok(s) => s,
         Err(e) => {
             klog_info!("SCHED_TEST: first alloc failed: {:?}", e);
@@ -1766,7 +1772,10 @@ pub fn test_kstack_slot_reuse() -> TestResult {
     let top1 = s1.top();
     drop(s1);
 
-    let s2 = match KernelStack::allocate(TASK_STACK_SIZE as usize) {
+    let s2 = match KernelStack::allocate(
+        TASK_STACK_SIZE as usize,
+        slopos_ostd::process::quota::root(),
+    ) {
         Ok(s) => s,
         Err(e) => {
             klog_info!("SCHED_TEST: second alloc after free failed: {:?}", e);
@@ -1792,17 +1801,17 @@ pub fn test_kstack_rejects_invalid_size() -> TestResult {
     use super::task_stack::KernelStack;
 
     // Zero size.
-    if KernelStack::allocate(0).is_ok() {
+    if KernelStack::allocate(0, slopos_ostd::process::quota::root()).is_ok() {
         klog_info!("SCHED_TEST: zero-size alloc unexpectedly succeeded");
         return TestResult::Fail;
     }
     // Not a multiple of page size.
-    if KernelStack::allocate(4097).is_ok() {
+    if KernelStack::allocate(4097, slopos_ostd::process::quota::root()).is_ok() {
         klog_info!("SCHED_TEST: unaligned alloc unexpectedly succeeded");
         return TestResult::Fail;
     }
     // Bigger than the slot stride (64 KB minus guard).
-    if KernelStack::allocate(64 * 1024).is_ok() {
+    if KernelStack::allocate(64 * 1024, slopos_ostd::process::quota::root()).is_ok() {
         klog_info!("SCHED_TEST: oversized alloc unexpectedly succeeded");
         return TestResult::Fail;
     }
@@ -1832,7 +1841,10 @@ pub fn test_kstack_pcp_refill() -> TestResult {
     let before = pcp_stats::<KstackRegion>(cpu);
 
     // First alloc → empty cache → triggers exactly one refill.
-    let s1 = match KernelStack::allocate(TASK_STACK_SIZE as usize) {
+    let s1 = match KernelStack::allocate(
+        TASK_STACK_SIZE as usize,
+        slopos_ostd::process::quota::root(),
+    ) {
         Ok(s) => s,
         Err(e) => {
             klog_info!("SCHED_TEST[pcp_refill]: first alloc failed: {:?}", e);
@@ -1854,7 +1866,10 @@ pub fn test_kstack_pcp_refill() -> TestResult {
     // Subsequent allocs should be pure cache hits — the refill batch
     // (8 slots) amply covers several rounds.
     for i in 0..4 {
-        let s = match KernelStack::allocate(TASK_STACK_SIZE as usize) {
+        let s = match KernelStack::allocate(
+            TASK_STACK_SIZE as usize,
+            slopos_ostd::process::quota::root(),
+        ) {
             Ok(s) => s,
             Err(e) => {
                 klog_info!("SCHED_TEST[pcp_refill]: iter {} failed: {:?}", i, e);
@@ -1908,7 +1923,10 @@ pub fn test_kstack_pcp_spill_overflow() -> TestResult {
         return TestResult::Fail;
     }
     for i in 0..hold {
-        stacks[i] = match KernelStack::allocate(TASK_STACK_SIZE as usize) {
+        stacks[i] = match KernelStack::allocate(
+            TASK_STACK_SIZE as usize,
+            slopos_ostd::process::quota::root(),
+        ) {
             Ok(s) => Some(s),
             Err(e) => {
                 klog_info!("SCHED_TEST[pcp_spill]: alloc {} failed: {:?}", i, e);
@@ -1960,7 +1978,10 @@ pub fn test_kstack_pcp_was_backed_preserved() -> TestResult {
 
     pcp_flush_current::<KstackRegion>();
 
-    let s1 = match KernelStack::allocate(TASK_STACK_SIZE as usize) {
+    let s1 = match KernelStack::allocate(
+        TASK_STACK_SIZE as usize,
+        slopos_ostd::process::quota::root(),
+    ) {
         Ok(s) => s,
         Err(e) => {
             klog_info!("SCHED_TEST[pcp_backed]: s1 failed: {:?}", e);
@@ -1970,7 +1991,10 @@ pub fn test_kstack_pcp_was_backed_preserved() -> TestResult {
     let top1 = s1.top();
     drop(s1);
 
-    let s2 = match KernelStack::allocate(TASK_STACK_SIZE as usize) {
+    let s2 = match KernelStack::allocate(
+        TASK_STACK_SIZE as usize,
+        slopos_ostd::process::quota::root(),
+    ) {
         Ok(s) => s,
         Err(e) => {
             klog_info!("SCHED_TEST[pcp_backed]: s2 failed: {:?}", e);
@@ -2006,7 +2030,10 @@ pub fn test_kstack_pcp_cross_cpu_safety() -> TestResult {
     // Alloc, drop, and immediately flush — forces the slot back into
     // the global pool instead of the PCP.  The next alloc then has to
     // refill from the global, exercising the cross-CPU handoff path.
-    let s1 = match KernelStack::allocate(TASK_STACK_SIZE as usize) {
+    let s1 = match KernelStack::allocate(
+        TASK_STACK_SIZE as usize,
+        slopos_ostd::process::quota::root(),
+    ) {
         Ok(s) => s,
         Err(e) => {
             klog_info!("SCHED_TEST[pcp_xcpu]: s1 failed: {:?}", e);
@@ -2016,7 +2043,10 @@ pub fn test_kstack_pcp_cross_cpu_safety() -> TestResult {
     drop(s1);
     pcp_flush_current::<KstackRegion>();
 
-    let s2 = match KernelStack::allocate(TASK_STACK_SIZE as usize) {
+    let s2 = match KernelStack::allocate(
+        TASK_STACK_SIZE as usize,
+        slopos_ostd::process::quota::root(),
+    ) {
         Ok(s) => s,
         Err(e) => {
             klog_info!("SCHED_TEST[pcp_xcpu]: s2 failed: {:?}", e);
@@ -2050,7 +2080,10 @@ pub fn test_kstack_pcp_stress_1000() -> TestResult {
     let before = in_use_count::<KstackRegion>();
 
     for i in 0..1000 {
-        let s = match KernelStack::allocate(TASK_STACK_SIZE as usize) {
+        let s = match KernelStack::allocate(
+            TASK_STACK_SIZE as usize,
+            slopos_ostd::process::quota::root(),
+        ) {
             Ok(s) => s,
             Err(e) => {
                 klog_info!("SCHED_TEST[pcp_stress]: iteration {} failed: {:?}", i, e);
@@ -2086,7 +2119,10 @@ pub fn test_kstack_pcp_smp_throughput_bench() -> TestResult {
     pcp_flush_current::<KstackRegion>();
 
     // Warm up the cache so the timed loop is a pure PCP hit.
-    let warmup = match KernelStack::allocate(TASK_STACK_SIZE as usize) {
+    let warmup = match KernelStack::allocate(
+        TASK_STACK_SIZE as usize,
+        slopos_ostd::process::quota::root(),
+    ) {
         Ok(s) => s,
         Err(_) => return TestResult::Pass,
     };
@@ -2095,7 +2131,10 @@ pub fn test_kstack_pcp_smp_throughput_bench() -> TestResult {
     const ITERATIONS: u64 = 512;
     let start = slopos_arch::tsc::rdtsc();
     for _ in 0..ITERATIONS {
-        let s = match KernelStack::allocate(TASK_STACK_SIZE as usize) {
+        let s = match KernelStack::allocate(
+            TASK_STACK_SIZE as usize,
+            slopos_ostd::process::quota::root(),
+        ) {
             Ok(s) => s,
             Err(_) => return TestResult::Pass,
         };
@@ -2125,7 +2164,10 @@ pub fn test_ustack_basic_alloc() -> TestResult {
     use super::task_stack::UnsafeStack;
     use slopos_abi::task::TASK_UNSAFE_STACK_SIZE;
 
-    let stack = match UnsafeStack::allocate(TASK_UNSAFE_STACK_SIZE as usize) {
+    let stack = match UnsafeStack::allocate(
+        TASK_UNSAFE_STACK_SIZE as usize,
+        slopos_ostd::process::quota::root(),
+    ) {
         Ok(s) => s,
         Err(e) => {
             klog_info!("SCHED_TEST: UnsafeStack::allocate failed: {:?}", e);
@@ -2161,7 +2203,10 @@ pub fn test_ustack_slot_reuse() -> TestResult {
     use super::task_stack::UnsafeStack;
     use slopos_abi::task::TASK_UNSAFE_STACK_SIZE;
 
-    let s1 = match UnsafeStack::allocate(TASK_UNSAFE_STACK_SIZE as usize) {
+    let s1 = match UnsafeStack::allocate(
+        TASK_UNSAFE_STACK_SIZE as usize,
+        slopos_ostd::process::quota::root(),
+    ) {
         Ok(s) => s,
         Err(e) => {
             klog_info!("SCHED_TEST: ustack first alloc failed: {:?}", e);
@@ -2171,7 +2216,10 @@ pub fn test_ustack_slot_reuse() -> TestResult {
     let top1 = s1.top();
     drop(s1);
 
-    let s2 = match UnsafeStack::allocate(TASK_UNSAFE_STACK_SIZE as usize) {
+    let s2 = match UnsafeStack::allocate(
+        TASK_UNSAFE_STACK_SIZE as usize,
+        slopos_ostd::process::quota::root(),
+    ) {
         Ok(s) => s,
         Err(e) => {
             klog_info!("SCHED_TEST: ustack second alloc after free failed: {:?}", e);
@@ -2195,16 +2243,16 @@ pub fn test_ustack_slot_reuse() -> TestResult {
 pub fn test_ustack_rejects_invalid_size() -> TestResult {
     use super::task_stack::UnsafeStack;
 
-    if UnsafeStack::allocate(0).is_ok() {
+    if UnsafeStack::allocate(0, slopos_ostd::process::quota::root()).is_ok() {
         klog_info!("SCHED_TEST: ustack zero-size alloc unexpectedly succeeded");
         return TestResult::Fail;
     }
-    if UnsafeStack::allocate(4097).is_ok() {
+    if UnsafeStack::allocate(4097, slopos_ostd::process::quota::root()).is_ok() {
         klog_info!("SCHED_TEST: ustack unaligned alloc unexpectedly succeeded");
         return TestResult::Fail;
     }
     // Bigger than the slot stride (64 KB minus guard).
-    if UnsafeStack::allocate(64 * 1024).is_ok() {
+    if UnsafeStack::allocate(64 * 1024, slopos_ostd::process::quota::root()).is_ok() {
         klog_info!("SCHED_TEST: ustack oversized alloc unexpectedly succeeded");
         return TestResult::Fail;
     }
@@ -2223,7 +2271,10 @@ pub fn test_ustack_pcp_refill() -> TestResult {
 
     let before = pcp_stats::<UstackRegion>(cpu);
 
-    let s1 = match UnsafeStack::allocate(TASK_UNSAFE_STACK_SIZE as usize) {
+    let s1 = match UnsafeStack::allocate(
+        TASK_UNSAFE_STACK_SIZE as usize,
+        slopos_ostd::process::quota::root(),
+    ) {
         Ok(s) => s,
         Err(e) => {
             klog_info!("SCHED_TEST[ustack_refill]: first alloc failed: {:?}", e);
@@ -2243,7 +2294,10 @@ pub fn test_ustack_pcp_refill() -> TestResult {
     }
 
     for i in 0..4 {
-        let s = match UnsafeStack::allocate(TASK_UNSAFE_STACK_SIZE as usize) {
+        let s = match UnsafeStack::allocate(
+            TASK_UNSAFE_STACK_SIZE as usize,
+            slopos_ostd::process::quota::root(),
+        ) {
             Ok(s) => s,
             Err(e) => {
                 klog_info!("SCHED_TEST[ustack_refill]: iter {} failed: {:?}", i, e);
@@ -2293,7 +2347,10 @@ pub fn test_ustack_pcp_spill_overflow() -> TestResult {
         return TestResult::Fail;
     }
     for i in 0..hold {
-        stacks[i] = match UnsafeStack::allocate(TASK_UNSAFE_STACK_SIZE as usize) {
+        stacks[i] = match UnsafeStack::allocate(
+            TASK_UNSAFE_STACK_SIZE as usize,
+            slopos_ostd::process::quota::root(),
+        ) {
             Ok(s) => Some(s),
             Err(e) => {
                 klog_info!("SCHED_TEST[ustack_spill]: alloc {} failed: {:?}", i, e);
@@ -2336,7 +2393,10 @@ pub fn test_ustack_pcp_was_backed_preserved() -> TestResult {
 
     pcp_flush_current::<UstackRegion>();
 
-    let s1 = match UnsafeStack::allocate(TASK_UNSAFE_STACK_SIZE as usize) {
+    let s1 = match UnsafeStack::allocate(
+        TASK_UNSAFE_STACK_SIZE as usize,
+        slopos_ostd::process::quota::root(),
+    ) {
         Ok(s) => s,
         Err(e) => {
             klog_info!("SCHED_TEST[ustack_backed]: s1 failed: {:?}", e);
@@ -2346,7 +2406,10 @@ pub fn test_ustack_pcp_was_backed_preserved() -> TestResult {
     let top1 = s1.top();
     drop(s1);
 
-    let s2 = match UnsafeStack::allocate(TASK_UNSAFE_STACK_SIZE as usize) {
+    let s2 = match UnsafeStack::allocate(
+        TASK_UNSAFE_STACK_SIZE as usize,
+        slopos_ostd::process::quota::root(),
+    ) {
         Ok(s) => s,
         Err(e) => {
             klog_info!("SCHED_TEST[ustack_backed]: s2 failed: {:?}", e);
@@ -2376,7 +2439,10 @@ pub fn test_ustack_pcp_cross_cpu_safety() -> TestResult {
     pcp_flush_current::<UstackRegion>();
     let before = in_use_count::<UstackRegion>();
 
-    let s1 = match UnsafeStack::allocate(TASK_UNSAFE_STACK_SIZE as usize) {
+    let s1 = match UnsafeStack::allocate(
+        TASK_UNSAFE_STACK_SIZE as usize,
+        slopos_ostd::process::quota::root(),
+    ) {
         Ok(s) => s,
         Err(e) => {
             klog_info!("SCHED_TEST[ustack_xcpu]: s1 failed: {:?}", e);
@@ -2386,7 +2452,10 @@ pub fn test_ustack_pcp_cross_cpu_safety() -> TestResult {
     drop(s1);
     pcp_flush_current::<UstackRegion>();
 
-    let s2 = match UnsafeStack::allocate(TASK_UNSAFE_STACK_SIZE as usize) {
+    let s2 = match UnsafeStack::allocate(
+        TASK_UNSAFE_STACK_SIZE as usize,
+        slopos_ostd::process::quota::root(),
+    ) {
         Ok(s) => s,
         Err(e) => {
             klog_info!("SCHED_TEST[ustack_xcpu]: s2 failed: {:?}", e);
@@ -2419,7 +2488,10 @@ pub fn test_ustack_pcp_stress_1000() -> TestResult {
     let before = in_use_count::<UstackRegion>();
 
     for i in 0..1000 {
-        let s = match UnsafeStack::allocate(TASK_UNSAFE_STACK_SIZE as usize) {
+        let s = match UnsafeStack::allocate(
+            TASK_UNSAFE_STACK_SIZE as usize,
+            slopos_ostd::process::quota::root(),
+        ) {
             Ok(s) => s,
             Err(e) => {
                 klog_info!("SCHED_TEST[ustack_stress]: iteration {} failed: {:?}", i, e);
@@ -2474,7 +2546,10 @@ pub fn test_regions_disjoint() -> TestResult {
 
     // Snapshot U's count, do K work, confirm U didn't move.
     let u_before_k_work = slopos_mm::stack_va::in_use_count::<UstackRegion>();
-    let kstack = match KernelStack::allocate(TASK_STACK_SIZE as usize) {
+    let kstack = match KernelStack::allocate(
+        TASK_STACK_SIZE as usize,
+        slopos_ostd::process::quota::root(),
+    ) {
         Ok(s) => s,
         Err(e) => {
             klog_info!("SCHED_TEST[disjoint]: kstack alloc failed: {:?}", e);
@@ -2493,7 +2568,10 @@ pub fn test_regions_disjoint() -> TestResult {
 
     // Snapshot K's count, do U work, confirm K didn't move.
     let k_before_u_work = slopos_mm::stack_va::in_use_count::<KstackRegion>();
-    let ustack = match UnsafeStack::allocate(TASK_UNSAFE_STACK_SIZE as usize) {
+    let ustack = match UnsafeStack::allocate(
+        TASK_UNSAFE_STACK_SIZE as usize,
+        slopos_ostd::process::quota::root(),
+    ) {
         Ok(s) => s,
         Err(e) => {
             klog_info!("SCHED_TEST[disjoint]: ustack alloc failed: {:?}", e);

@@ -219,9 +219,16 @@ pub const fn default_process_limit(kind: ResourceKind) -> u32 {
         // registers, bounded against a process pinning until the machine
         // cannot reclaim.
         ResourceKind::PinnedBytes => 4096,
+        // Kernel memory attributable to a principal: today its task stacks,
+        // at 12 pages each (32 KiB kernel + 16 KiB data). 2048 pages is 8 MiB
+        // per principal, or roughly 170 threads' worth of stack — comfortably
+        // above the `Task` ceiling of 512 threads only because most processes
+        // are single-threaded, which is deliberate: this bounds the *memory*,
+        // not the thread count, and the two ceilings bind independently.
+        ResourceKind::KernelMeta => 2048,
         // No charge sites yet. A ceiling here would refuse against a counter
         // nothing increments.
-        ResourceKind::Pages | ResourceKind::KernelMeta => NO_LIMIT_SENTINEL,
+        ResourceKind::Pages => NO_LIMIT_SENTINEL,
     }
 }
 
@@ -338,7 +345,7 @@ mod tests {
     /// no reader.
     #[test]
     fn unwired_kinds_carry_no_ceiling() {
-        for kind in [ResourceKind::Pages, ResourceKind::KernelMeta] {
+        for kind in [ResourceKind::Pages] {
             assert_eq!(default_process_limit(kind), NO_LIMIT_SENTINEL, "{kind:?}");
         }
     }

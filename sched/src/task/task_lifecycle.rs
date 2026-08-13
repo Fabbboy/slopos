@@ -6,7 +6,7 @@ use slopos_arch::cpu;
 use slopos_ostd::KArc;
 use slopos_ostd::kdiag_timestamp;
 use slopos_ostd::process::{
-    PROCESS_HANDLE_NONE, Process, ProcessId, process_retire, process_spawn, root_account,
+    AccountId, PROCESS_HANDLE_NONE, Process, ProcessId, process_retire, process_spawn, root_account,
 };
 use slopos_ostd::string::bytes_as_str;
 use slopos_ostd::task::ops::{
@@ -254,8 +254,50 @@ impl Drop for ProcessResourceLease {
     }
 }
 
-fn allocate_kernel_stack(size: u64, what: &'static str) -> Option<KernelStack> {
-    match KernelStack::allocate(size as usize) {
+/// Both stacks for a cloned child, charged to the account they will serve.
+///
+/// `#[inline(never)]` and returning the pair rather than the account:
+/// resolving the account in `task_clone` put two `KArc<Process>` temporaries
+/// and both `Result<TaskStack, _>` rvalues into that frame and pushed it from
+/// 2016 B to 2264 B, over the 2 KiB gate. One call per clone, on a path that
+/// already maps twelve pages.
+#[inline(never)]
+fn clone_child_stacks(
+    parent: &Task,
+    child_process: &ProcessResourceLease,
+    share_vm: bool,
+) -> Option<(KernelStack, UnsafeStack)> {
+    // A `CLONE_VM` thread shares the parent's process and therefore its
+    // account, so either branch bills the principal the stacks serve.
+    let account = if share_vm {
+        parent.process().map_or(AccountId::NONE, |p| p.account())
+    } else {
+        child_process
+            .process
+            .as_deref()
+            .map_or(AccountId::NONE, |p| p.account())
+    };
+
+    let kernel = match KernelStack::allocate(TASK_KERNEL_STACK_SIZE as usize, account) {
+        Ok(stack) => stack,
+        Err(e) => {
+            klog_info!("task_clone: kernel stack alloc failed: {:?}", e);
+            return None;
+        }
+    };
+    let data = match UnsafeStack::allocate(TASK_UNSAFE_STACK_SIZE as usize, account) {
+        Ok(stack) => stack,
+        Err(e) => {
+            klog_info!("task_clone: data-stack alloc failed: {:?}", e);
+            drop(kernel);
+            return None;
+        }
+    };
+    Some((kernel, data))
+}
+
+fn allocate_kernel_stack(size: u64, what: &'static str, account: AccountId) -> Option<KernelStack> {
+    match KernelStack::allocate(size as usize, account) {
         Ok(s) => Some(s),
         Err(e) => {
             klog_info!("task_create: {} failed: {:?}", what, e);
@@ -264,8 +306,8 @@ fn allocate_kernel_stack(size: u64, what: &'static str) -> Option<KernelStack> {
     }
 }
 
-fn allocate_unsafe_stack(size: u64, what: &'static str) -> Option<UnsafeStack> {
-    match UnsafeStack::allocate(size as usize) {
+fn allocate_unsafe_stack(size: u64, what: &'static str, account: AccountId) -> Option<UnsafeStack> {
+    match UnsafeStack::allocate(size as usize, account) {
         Ok(s) => Some(s),
         Err(e) => {
             klog_info!("task_create: {} failed: {:?}", what, e);
@@ -275,8 +317,12 @@ fn allocate_unsafe_stack(size: u64, what: &'static str) -> Option<UnsafeStack> {
 }
 
 fn allocate_kernel_task_resources() -> Option<TaskCreateResources> {
-    let kernel_stack = allocate_kernel_stack(TASK_STACK_SIZE, "kernel stack")?;
-    let unsafe_stack = allocate_unsafe_stack(TASK_UNSAFE_STACK_SIZE, "SafeStack data stack")?;
+    // A kernel task has no process, so its stacks are the kernel's own and are
+    // charged to the root **explicitly** rather than by a lookup that failed.
+    let account = slopos_ostd::process::quota::root();
+    let kernel_stack = allocate_kernel_stack(TASK_STACK_SIZE, "kernel stack", account)?;
+    let unsafe_stack =
+        allocate_unsafe_stack(TASK_UNSAFE_STACK_SIZE, "SafeStack data stack", account)?;
     let stack_base = kernel_stack.base().as_u64();
     Some(TaskCreateResources {
         process_id: INVALID_PROCESS_ID,
@@ -302,8 +348,13 @@ fn allocate_user_task_resources() -> Option<TaskCreateResources> {
         return None;
     }
 
-    let kernel_stack = allocate_kernel_stack(TASK_KERNEL_STACK_SIZE, "kernel RSP0 stack")?;
-    let unsafe_stack = allocate_unsafe_stack(TASK_UNSAFE_STACK_SIZE, "SafeStack data stack")?;
+    let account = process
+        .process
+        .as_deref()
+        .map_or(AccountId::NONE, |p| p.account());
+    let kernel_stack = allocate_kernel_stack(TASK_KERNEL_STACK_SIZE, "kernel RSP0 stack", account)?;
+    let unsafe_stack =
+        allocate_unsafe_stack(TASK_UNSAFE_STACK_SIZE, "SafeStack data stack", account)?;
     let process_vm_handle = process.process_vm_handle();
     let (process_id, process) = process.disarm();
 
@@ -1504,24 +1555,32 @@ pub fn task_fork(
     let child_process_id = child_process.process_id();
     let child_process_handle = child_process.process_handle();
     let child_vm_id = child_process.process.as_deref().and_then(ProcessId::of);
+    // The child's own account: a fork mints a fresh process, so the stacks
+    // belong to the principal that will run on them.
+    let stack_account = child_process
+        .process
+        .as_deref()
+        .map_or(AccountId::NONE, |p| p.account());
 
-    let child_kernel_stack = match KernelStack::allocate(TASK_KERNEL_STACK_SIZE as usize) {
-        Ok(stack) => stack,
-        Err(e) => {
-            klog_info!("task_fork: kernel stack alloc failed: {:?}", e);
-            return INVALID_TASK_ID;
-        }
-    };
+    let child_kernel_stack =
+        match KernelStack::allocate(TASK_KERNEL_STACK_SIZE as usize, stack_account) {
+            Ok(stack) => stack,
+            Err(e) => {
+                klog_info!("task_fork: kernel stack alloc failed: {:?}", e);
+                return INVALID_TASK_ID;
+            }
+        };
     let child_kernel_stack_base = child_kernel_stack.base().as_u64();
 
-    let child_unsafe_stack = match UnsafeStack::allocate(TASK_UNSAFE_STACK_SIZE as usize) {
-        Ok(stack) => stack,
-        Err(e) => {
-            klog_info!("task_fork: data-stack alloc failed: {:?}", e);
-            drop(child_kernel_stack);
-            return INVALID_TASK_ID;
-        }
-    };
+    let child_unsafe_stack =
+        match UnsafeStack::allocate(TASK_UNSAFE_STACK_SIZE as usize, stack_account) {
+            Ok(stack) => stack,
+            Err(e) => {
+                klog_info!("task_fork: data-stack alloc failed: {:?}", e);
+                drop(child_kernel_stack);
+                return INVALID_TASK_ID;
+            }
+        };
     let child_unsafe_stack_top = child_unsafe_stack.top().as_u64();
 
     // The token below is the sole reference to a task that already owns its
@@ -1717,23 +1776,12 @@ pub fn task_clone(
     };
     let child_vm_id = child_process.process.as_deref().and_then(ProcessId::of);
 
-    let child_kernel_stack = match KernelStack::allocate(TASK_KERNEL_STACK_SIZE as usize) {
-        Ok(stack) => stack,
-        Err(e) => {
-            klog_info!("task_clone: kernel stack alloc failed: {:?}", e);
-            return Err(ERRNO_ENOMEM);
-        }
+    let Some((child_kernel_stack, child_unsafe_stack)) =
+        clone_child_stacks(parent, &child_process, share_vm)
+    else {
+        return Err(ERRNO_ENOMEM);
     };
     let child_kernel_stack_base = child_kernel_stack.base().as_u64();
-
-    let child_unsafe_stack = match UnsafeStack::allocate(TASK_UNSAFE_STACK_SIZE as usize) {
-        Ok(stack) => stack,
-        Err(e) => {
-            klog_info!("task_clone: data-stack alloc failed: {:?}", e);
-            drop(child_kernel_stack);
-            return Err(ERRNO_ENOMEM);
-        }
-    };
     let child_unsafe_stack_top = child_unsafe_stack.top().as_u64();
 
     // The token below is the sole reference to a task that already owns its
