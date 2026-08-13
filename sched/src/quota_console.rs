@@ -12,7 +12,9 @@ use slopos_abi::quota::{QuotaMode, ResourceKind};
 use slopos_ostd::kconsole::{KCMD_INFORMATIONAL, KConsole};
 use slopos_ostd::kline;
 use slopos_ostd::process::AccountId;
-use slopos_ostd::process::quota::{for_each_account, quota_mode, stats};
+use slopos_ostd::process::quota::{
+    LedgerFault, charge_audit_entries, for_each_account, ledger_audit, quota_mode, stats,
+};
 
 slopos_ostd::kcommand! {
     name = ledger,
@@ -20,6 +22,63 @@ slopos_ostd::kcommand! {
     help = "resource accounts: used/peak/limit/denials per kind, and zombie rows",
     flags = KCMD_INFORMATIONAL,
     run = run_ledger,
+}
+
+/// Render one audit finding.
+fn describe(kc: &mut KConsole<'_>, fault: LedgerFault) {
+    match fault {
+        LedgerFault::AncestorUnderCount {
+            ancestor,
+            kind,
+            ancestor_used,
+            children_used,
+        } => kline!(
+            kc,
+            "  FAULT slot={} {}: holds {} but its children hold {} — a refund \
+             reached a descendant and not this level",
+            ancestor.slot(),
+            kind.name(),
+            ancestor_used,
+            children_used
+        ),
+        LedgerFault::UsedAbovePeak {
+            account,
+            kind,
+            used,
+            peak,
+        } => kline!(
+            kc,
+            "  FAULT slot={} {}: used {} exceeds peak {} — a debit landed \
+             without going through try_charge",
+            account.slot(),
+            kind.name(),
+            used,
+            peak
+        ),
+        LedgerFault::OverLimit {
+            account,
+            kind,
+            used,
+            limit,
+        } => kline!(
+            kc,
+            "  FAULT slot={} {}: used {} is over its ceiling of {}",
+            account.slot(),
+            kind.name(),
+            used,
+            limit
+        ),
+    }
+}
+
+/// The runtime form of the ledger's equality invariant.
+///
+/// Returns the number of faults found; the caller decides whether that is a
+/// test failure or a console line. This is the only mechanism that can see a
+/// forgotten or unwinder-skipped charge, because the type system's guarantee
+/// stops at "the token is unique", never "the number matches reality".
+pub fn quotacheck(mut emit: impl FnMut(LedgerFault)) -> usize {
+    ledger_audit(&mut emit)
 }
 
 fn mode_name(mode: QuotaMode) -> &'static str {
@@ -54,7 +113,31 @@ fn has_live_process(account: AccountId) -> bool {
 }
 
 fn run_ledger(kc: &mut KConsole<'_>) {
-    kline!(kc, "quota mode={}", mode_name(quota_mode()));
+    kline!(
+        kc,
+        "quota mode={} charge-bearing types={}",
+        mode_name(quota_mode()),
+        charge_audit_entries().len()
+    );
+    let faults = {
+        let mut found = 0usize;
+        ledger_audit(|fault| {
+            found += 1;
+            if found <= 8 {
+                describe(kc, fault);
+            }
+        });
+        found
+    };
+    kline!(
+        kc,
+        "quotacheck: {}",
+        if faults == 0 {
+            "consistent"
+        } else {
+            "INCONSISTENT (see FAULT lines above)"
+        }
+    );
     let mut zombies = 0u32;
     for_each_account(|account, parent| {
         if kc.budget_left() == 0 {

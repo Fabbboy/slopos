@@ -196,6 +196,10 @@ path = "src/bin/tests/stdio_stream_test.rs"
 name = "ip_e2e_test"
 path = "src/bin/tests/ip_e2e_test.rs"
 
+[[bin]]
+name = "session_smoke_test"
+path = "src/bin/tests/session_smoke_test.rs"
+
 [features]
 default = []
 testbins = []

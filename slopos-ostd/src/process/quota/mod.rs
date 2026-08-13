@@ -24,9 +24,9 @@ mod charged;
 mod token;
 
 pub use arena::{
-    AccountCreateError, KindStats, MAX_ACCOUNT_DEPTH, NO_LIMIT, TryChargeError, account_count,
-    account_create, account_release, for_each_account, quota_mode, reset_for_test, root, set_limit,
-    set_quota_mode, stats, try_charge,
+    AccountCreateError, KindStats, LedgerFault, MAX_ACCOUNT_DEPTH, NO_LIMIT, TryChargeError,
+    account_count, account_create, account_release, for_each_account, ledger_audit, quota_mode,
+    reset_for_test, root, set_limit, set_quota_mode, stats, try_charge,
 };
 pub use axis::{Refundable, ResourceAxis};
 pub use charged::{
@@ -294,6 +294,82 @@ mod tests {
             Some(AccountCreateError::TooDeep),
             "an unbounded walk must be refused at creation, not discovered at charge time"
         );
+    }
+
+    /// The audit is silent on a ledger that is behaving.
+    #[test]
+    fn the_audit_accepts_a_consistent_ledger() {
+        let _f = fixture();
+        let parent = account(1, root());
+        let child = account(2, parent);
+        let held = Charge::commit(try_charge::<FdSlot>(child, 3).expect("charge"));
+        let other = Charge::commit(try_charge::<ObjectRow>(parent, 2).expect("charge"));
+
+        let mut faults = KVecFaults::default();
+        assert_eq!(ledger_audit(|f| faults.push(f)), 0, "{:?}", faults.first);
+        drop((held, other));
+        assert_eq!(ledger_audit(|f| faults.push(f)), 0);
+    }
+
+    /// And it is not vacuous: a row edited behind the token's back is caught.
+    ///
+    /// The failure being modelled is the one the whole design exists to
+    /// eliminate — a refund that reached a descendant but not its ancestor,
+    /// which leaves the ancestor holding less than the sum of the rows
+    /// debiting through it. An audit that could not see this would be a number
+    /// with no reader.
+    #[test]
+    fn the_audit_catches_an_ancestor_that_lost_a_refund() {
+        let _f = fixture();
+        let parent = account(1, root());
+        let child = account(2, parent);
+        let held = Charge::commit(try_charge::<FdSlot>(child, 4).expect("charge"));
+
+        let mut faults = KVecFaults::default();
+        assert_eq!(ledger_audit(|f| faults.push(f)), 0, "consistent to start");
+
+        // Refund the parent alone, as a hand-written cancel loop that missed a
+        // level would: the child still holds 4, the parent now holds 0.
+        arena::refund_raw_one_level_for_test(parent, ResourceKind::FdSlot, 4);
+
+        let mut faults = KVecFaults::default();
+        let found = ledger_audit(|f| faults.push(f));
+        assert!(found > 0, "the audit must see an under-counted ancestor");
+        assert!(
+            matches!(
+                faults.first,
+                Some(LedgerFault::AncestorUnderCount {
+                    kind: ResourceKind::FdSlot,
+                    ancestor_used: 0,
+                    children_used: 4,
+                    ..
+                })
+            ),
+            "{:?}",
+            faults.first
+        );
+
+        // Undo the planted corruption before the real token drops: its refund
+        // walks the same chain and would underflow the row this test emptied.
+        arena::charge_raw_one_level_for_test(parent, ResourceKind::FdSlot, 4);
+        drop(held);
+    }
+
+    /// Collects audit findings without allocating: the audit runs in contexts
+    /// where a `KVec` push would be the wrong thing to do.
+    #[derive(Default)]
+    struct KVecFaults {
+        first: Option<LedgerFault>,
+        count: usize,
+    }
+
+    impl KVecFaults {
+        fn push(&mut self, fault: LedgerFault) {
+            if self.first.is_none() {
+                self.first = Some(fault);
+            }
+            self.count += 1;
+        }
     }
 
     /// A charge against an account whose row has gone succeeds vacuously.

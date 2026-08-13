@@ -49,7 +49,7 @@ const ROOT_DEPTH_REMAINING: u8 = MAX_ACCOUNT_DEPTH - 1;
 
 /// A limit that has not been configured. Distinct from a limit of zero, which
 /// refuses everything.
-pub const NO_LIMIT: u32 = u32::MAX;
+pub const NO_LIMIT: u32 = slopos_abi::quota::NO_LIMIT_SENTINEL;
 
 /// `parent` value meaning "no parent" — the root's own.
 const NO_PARENT: u32 = u32::MAX;
@@ -106,10 +106,14 @@ impl AccountRow {
 
 static ACCOUNTS: [AccountRow; MAX_ACCOUNTS] = [const { AccountRow::new() }; MAX_ACCOUNTS];
 
-/// Refusal policy. `Warn` is the tier the peaks are measured on: a system that
-/// dies at its first over-limit cannot report what its real peak would have
-/// been.
-static QUOTA_MODE: AtomicU8 = AtomicU8::new(mode_bits(QuotaMode::Warn));
+/// Refusal policy.
+///
+/// `Enforce` by default, now that the peaks have been measured and the
+/// enforced ceilings derived from them. `quota=warn` remains the tier a *new*
+/// kind's peaks are measured on — it grants an over-limit charge and counts
+/// it, because a system that dies at its first over-limit cannot report what
+/// its real high-water mark would have been.
+static QUOTA_MODE: AtomicU8 = AtomicU8::new(mode_bits(QuotaMode::Enforce));
 
 const fn mode_bits(mode: QuotaMode) -> u8 {
     match mode {
@@ -235,6 +239,18 @@ pub fn account_create(id: AccountId, parent: AccountId) -> Result<(), AccountCre
 
     let row = &ACCOUNTS[slot];
     row.reset_counters();
+    // Every process account starts at the enforced per-kind defaults. The root
+    // deliberately does not: it is the sum of every principal, so a
+    // per-principal ceiling applied to it would refuse the machine's own
+    // aggregate. Its limits are set from measured RAM at boot instead.
+    if slot != ROOT_ACCOUNT_SLOT as usize {
+        for kind in ResourceKind::ALL {
+            row.limit[kind.index()].store(
+                slopos_abi::quota::default_process_limit(kind),
+                Ordering::Relaxed,
+            );
+        }
+    }
     row.parent.store(parent_slot, Ordering::Relaxed);
     row.depth_remaining.store(depth, Ordering::Relaxed);
     // Generation before `live`: a reader checks liveness first, so this order
@@ -494,12 +510,142 @@ pub fn for_each_account(mut f: impl FnMut(AccountId, AccountId)) {
     }
 }
 
+/// A violation of the ledger's own consistency, found by the runtime audit.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LedgerFault {
+    /// An ancestor holds less than the descendants debiting through it. The
+    /// hierarchical debit makes this impossible while every charge and refund
+    /// walks the same chain, so it means a refund reached a level a charge did
+    /// not — the phantom-refund shape the token exists to eliminate.
+    AncestorUnderCount {
+        ancestor: AccountId,
+        kind: ResourceKind,
+        ancestor_used: u32,
+        children_used: u32,
+    },
+    /// `used` exceeds the high-water mark, which is impossible if every charge
+    /// updates the peak: it means a debit landed without going through
+    /// `charge_row`.
+    UsedAbovePeak {
+        account: AccountId,
+        kind: ResourceKind,
+        used: u32,
+        peak: u32,
+    },
+    /// A row is above its own ceiling while enforcement is on — L2's step
+    /// property failing.
+    OverLimit {
+        account: AccountId,
+        kind: ResourceKind,
+        used: u32,
+        limit: u32,
+    },
+}
+
+/// Check the ledger against itself, reporting every inconsistency to `report`.
+///
+/// The runtime form of the equality invariant, and the only mechanism that can
+/// see a forgotten or unwinder-skipped charge. Three checks, each naming a
+/// distinct way the numbers could be lying — see [`LedgerFault`].
+///
+/// Returns the number of faults found. Allocation-free: the walk is bounded by
+/// the arena and by [`MAX_ACCOUNT_DEPTH`], so it is legal anywhere a read is.
+pub fn ledger_audit(mut report: impl FnMut(LedgerFault)) -> usize {
+    let enforcing = matches!(quota_mode(), QuotaMode::Enforce);
+    let mut faults = 0usize;
+
+    for (slot, row) in ACCOUNTS.iter().enumerate() {
+        if !row.live.load(Ordering::Acquire) {
+            continue;
+        }
+        let account = AccountId::from_parts(slot as u32, row.generation.load(Ordering::Acquire));
+
+        for kind in ResourceKind::ALL {
+            let idx = kind.index();
+            let used = row.used[idx].load(Ordering::Acquire);
+            let peak = row.peak[idx].load(Ordering::Acquire);
+            let limit = row.limit[idx].load(Ordering::Acquire);
+
+            if used > peak {
+                faults += 1;
+                report(LedgerFault::UsedAbovePeak {
+                    account,
+                    kind,
+                    used,
+                    peak,
+                });
+            }
+            if enforcing && limit != NO_LIMIT && used > limit {
+                faults += 1;
+                report(LedgerFault::OverLimit {
+                    account,
+                    kind,
+                    used,
+                    limit,
+                });
+            }
+
+            // Every direct child debits through this row, so this row's `used`
+            // is at least their sum. Saturating, because a child's own charge
+            // is included in its total and several children can each exceed
+            // what a `u32` sum would hold.
+            let mut children = 0u32;
+            for (child_slot, child) in ACCOUNTS.iter().enumerate() {
+                if child_slot == slot || !child.live.load(Ordering::Acquire) {
+                    continue;
+                }
+                if child.parent.load(Ordering::Acquire) == slot as u32 {
+                    children = children.saturating_add(child.used[idx].load(Ordering::Acquire));
+                }
+            }
+            if used < children {
+                faults += 1;
+                report(LedgerFault::AncestorUnderCount {
+                    ancestor: account,
+                    kind,
+                    ancestor_used: used,
+                    children_used: children,
+                });
+            }
+        }
+    }
+    faults
+}
+
 /// Live rows.
 pub fn account_count() -> usize {
     ACCOUNTS
         .iter()
         .filter(|row| row.live.load(Ordering::Acquire))
         .count()
+}
+
+/// Credit exactly one row, skipping its ancestors. Test-fixture only.
+///
+/// Fabricates the inconsistency a hand-written cancel loop produces when it
+/// misses a level, so the audit's own test can prove the audit rejects rather
+/// than merely accepts.
+#[cfg(test)]
+pub(super) fn refund_raw_one_level_for_test(account: AccountId, kind: ResourceKind, n: u32) {
+    // Writes the row directly rather than through `release_row`, whose
+    // underflow `debug_assert` would fire on the very corruption being
+    // planted.
+    if let Some(row) = row_for(account) {
+        let idx = kind.index();
+        let used = row.used[idx].load(Ordering::Acquire);
+        row.used[idx].store(used.saturating_sub(n), Ordering::Release);
+    }
+}
+
+/// Inverse of [`refund_raw_one_level_for_test`], for restoring a row a test
+/// deliberately corrupted so the real token's refund still balances.
+#[cfg(test)]
+pub(super) fn charge_raw_one_level_for_test(account: AccountId, kind: ResourceKind, n: u32) {
+    if let Some(row) = row_for(account) {
+        let idx = kind.index();
+        let used = row.used[idx].load(Ordering::Acquire);
+        row.used[idx].store(used.saturating_add(n), Ordering::Release);
+    }
 }
 
 /// Release every row and restore the default policy. Test-fixture only.
@@ -512,5 +658,5 @@ pub fn reset_for_test() {
         row.generation.store(0, Ordering::Release);
         row.reset_counters();
     }
-    set_quota_mode(QuotaMode::Warn);
+    set_quota_mode(QuotaMode::Enforce);
 }

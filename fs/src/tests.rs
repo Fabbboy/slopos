@@ -1568,6 +1568,36 @@ pub fn test_quota_fdslot_cross_process_isolation() -> TestResult {
 
 slopos_testing::stest!(name = test_quota_fdslot_cross_process_isolation);
 
+/// The ledger agrees with itself immediately after an exhaustion run.
+///
+/// Named `zzz` so it sorts after the three tests above: the audit is only
+/// interesting on a ledger that has just been driven to its ceilings and
+/// unwound, which is what those leave behind. This is the runtime form of the
+/// equality invariant and the only mechanism that can see a forgotten or
+/// unwinder-skipped charge — the type system guarantees the token is unique,
+/// never that the number matches reality.
+pub fn test_zzz_quota_ledger_is_consistent_after_exhaustion() -> TestResult {
+    use slopos_ostd::process::quota::{LedgerFault, ledger_audit};
+
+    let mut first: Option<LedgerFault> = None;
+    let faults = ledger_audit(|fault| {
+        if first.is_none() {
+            first = Some(fault);
+        }
+    });
+
+    if faults != 0 {
+        return slopos_testing::fail!(
+            "the ledger disagrees with itself in {} place(s); first: {:?}",
+            faults,
+            first
+        );
+    }
+    TestResult::Pass
+}
+
+slopos_testing::stest!(name = test_zzz_quota_ledger_is_consistent_after_exhaustion);
+
 /// A file to open repeatedly, or `None` if the scratch tree is unavailable.
 fn scratch_file(path: &'static [u8]) -> Option<&'static [u8]> {
     let _ = vfs_mkdir(b"/fileio_test");

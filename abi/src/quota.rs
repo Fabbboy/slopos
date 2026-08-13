@@ -163,6 +163,58 @@ pub enum Refund {
     OnExitLatch,
 }
 
+/// The enforced per-process default for this kind, or [`NO_LIMIT_SENTINEL`]
+/// where no ceiling is enforced yet.
+///
+/// **Measured, never chosen** — but deliberately a *different number* from the
+/// gate ceiling in `scripts/gates/quota/<variant>.txt`, and in a different
+/// place. Deriving the enforced default from a boot-time observation is how
+/// Linux shipped limits that could not subsequently be raised; deriving the
+/// gate ceiling from the enforced default would make the ratchet measure its
+/// own configuration. Two numbers, two homes, on purpose.
+///
+/// A kind whose charge sites have not landed yet answers [`NO_LIMIT_SENTINEL`]
+/// rather than a guess. A ceiling on a kind nothing charges bounds nothing and
+/// would be a number with no reader.
+#[inline]
+pub const fn default_process_limit(kind: ResourceKind) -> u32 {
+    match kind {
+        // The per-process descriptor table is 256 entries, so this is the
+        // existing array bound restated as a per-principal ceiling. The worst
+        // single process measured across a full test boot plus the
+        // session-smoke population was 18, so there is an order of magnitude
+        // of headroom before this binds — which is the point: it bounds the
+        // adversary, not the workload.
+        ResourceKind::FdSlot => 256,
+        // Strictly above the descriptor ceiling, and that relation is
+        // load-bearing rather than slack.
+        //
+        // A process legitimately holds objects that no descriptor names — an
+        // in-flight `SCM_RIGHTS` reference, a ring's in-flight file reference
+        // — so the two counts are not the same quantity and the object bound
+        // must not be the tighter one. Set equal, `ObjectRow` becomes the
+        // *de-facto* descriptor limit: an `open` charges the object before the
+        // descriptor number, so a full table would refuse with `ENFILE`
+        // ("system-wide table full") where POSIX requires `EMFILE` ("this
+        // process holds too many descriptors"), and userland reading that
+        // errno would back off against the wrong resource.
+        //
+        // Measured worst single process: 10, against 18 descriptors.
+        ResourceKind::ObjectRow => 512,
+        // No charge sites yet. A ceiling here would refuse against a counter
+        // nothing increments.
+        ResourceKind::Task
+        | ResourceKind::Process
+        | ResourceKind::Pages
+        | ResourceKind::PinnedBytes
+        | ResourceKind::Custody
+        | ResourceKind::KernelMeta => NO_LIMIT_SENTINEL,
+    }
+}
+
+/// "No ceiling." Distinct from a limit of zero, which refuses everything.
+pub const NO_LIMIT_SENTINEL: u32 = u32::MAX;
+
 /// How a refused charge is answered.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum QuotaMode {
@@ -248,6 +300,41 @@ mod tests {
         assert_eq!(ResourceKind::Process.errno(), Errno::EAGAIN);
         assert_eq!(ResourceKind::Pages.errno(), Errno::ENOMEM);
         assert_eq!(ResourceKind::KernelMeta.errno(), Errno::ENOMEM);
+    }
+
+    /// The object ceiling must sit strictly above the descriptor ceiling.
+    ///
+    /// An `open` charges the object row before the descriptor number, so if
+    /// the object bound were the tighter of the two it would refuse first and
+    /// a process at its descriptor limit would see `ENFILE` where POSIX
+    /// requires `EMFILE`. A process also legitimately holds objects no
+    /// descriptor names, which is the substantive reason the two counts differ.
+    #[test]
+    fn the_object_ceiling_clears_the_descriptor_ceiling() {
+        let fds = default_process_limit(ResourceKind::FdSlot);
+        let objects = default_process_limit(ResourceKind::ObjectRow);
+        assert!(
+            objects > fds,
+            "ObjectRow ({objects}) must exceed FdSlot ({fds}), or it silently \
+             becomes the descriptor limit and reports the wrong errno"
+        );
+    }
+
+    /// A kind with no charge sites carries no ceiling: a limit on a counter
+    /// nothing increments refuses against nothing and would be a number with
+    /// no reader.
+    #[test]
+    fn unwired_kinds_carry_no_ceiling() {
+        for kind in [
+            ResourceKind::Task,
+            ResourceKind::Process,
+            ResourceKind::Pages,
+            ResourceKind::PinnedBytes,
+            ResourceKind::Custody,
+            ResourceKind::KernelMeta,
+        ] {
+            assert_eq!(default_process_limit(kind), NO_LIMIT_SENTINEL, "{kind:?}");
+        }
     }
 
     #[test]

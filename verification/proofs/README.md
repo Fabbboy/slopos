@@ -116,6 +116,27 @@ state-machine **logic only**: the flag CAS and `KArc` CAS-loop memory ordering,
 the intrusive links, pointer provenance, and `KArc` saturation stay audited-only
 / KernMiri-covered — see the file header and `../STATUS.md`.
 
-The narrative obligation total is 105 across the nine files, confirmed by
+`resource_ledger.rs` is the tenth: 18 obligations over an abstract three-level
+account chain driven by a 12-variant `Step` — (L1) `used == live_sum` as an
+**equality**, because an inequality cannot catch a phantom refund, which is the
+failure the linear token exists to eliminate; (L2) no successful `try_charge`
+leaves a row over its ceiling, stated as a *step* property because the global
+form is false the instant a limit can be lowered, with a proof exhibiting that
+so nobody reads it as the stronger claim; (L3a) no double refund, delivered in
+the tree by `Charge` being non-`Clone` and `release` taking `self`; (L4) a
+denied charge is the identity on every row **including the partial batch** that
+succeeded at level k and failed at k+1, which is the obligation the two-phase
+`Reservation`/`Charge` split exists to deliver; and (L5) a stale-generation
+refund is the identity, which is what makes a leaked charge self-healing.
+
+Five load-bearing broken witnesses: debiting `0..k` and returning `Err` without
+unwinding (L4), a refund skipping the generation compare (L1/L5), a `Clone`able
+charge (L1 in the under-count direction), a check-then-charge split (L2's step
+form), and hierarchical debit combined with committed child ceilings (L1). The
+state-machine **logic only**: the per-row atomic ordering and the token's
+placement in the tree stay audited-only — see the file header and
+`../STATUS.md`.
+
+The narrative obligation total is 125 across the ten files, confirmed by
 `just verify` on the pinned Verus — `verify.sh` auto-sums the exact `N verified`
 count it reports per file.

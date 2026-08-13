@@ -1,0 +1,45 @@
+# check_quota_headroom gate data — variant: tests
+#
+#     scripts/check_quota_headroom.sh --variant tests --emit-allowlist
+#
+# One line per <phase> <TAB> <kind> <TAB> <cap>, where the cap is the
+# highest peak any single account row reached for that kind. Measured,
+# never chosen: raise a cap only with a fresh --emit-allowlist in the
+# same commit, and say in the message what started consuming more.
+#
+# A cap matching nothing is a dead entry and fails, because a kind that
+# stopped being reported looks exactly like a kind that stayed cheap.
+#
+# Measured 2026-08-09 on the tests ISO under quota=enforce, with the
+# session-smoke utest holding a desktop-shaped population open across the
+# post-userland-tests dump. Two kinds are charged so far (FdSlot,
+# ObjectRow); the remaining six land with their phases.
+#
+# The caps are the ROOT account's peaks — the sum over every process plus
+# the kernel's own, not a per-process figure. The worst single user row
+# measured 18 fdslot / 10 objectrow, against enforced per-process defaults
+# of 256 / 512. Both numbers matter and they are deliberately different
+# numbers in different places: this file is the gate ceiling, the enforced
+# runtime defaults live in abi/src/quota.rs. Deriving either from the other
+# would make the ratchet measure its own configuration.
+#
+# max-denials 0 is the load-bearing line under quota=enforce: a denial here
+# means a legitimate workload was refused, which is a finding rather than a
+# pass.
+
+# The peak of a kind nobody exercised is zero, and a cap derived from
+# it would bound nothing. Every listed kind must have been reached.
+min-kinds 2
+
+# A denial is an over-limit charge. Under quota=warn it is granted and
+# counted, so a non-zero total means the enforced tier would have
+# refused something — which is a finding, not a pass.
+max-denials 0
+
+require-phase post-kernel-tests
+require-phase post-userland-tests
+
+post-kernel-tests	fdslot	257
+post-kernel-tests	objectrow	257
+post-userland-tests	fdslot	257
+post-userland-tests	objectrow	257

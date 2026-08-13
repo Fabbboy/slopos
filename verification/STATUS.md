@@ -133,9 +133,29 @@ verified.
 
 Pure safe Rust within OSTD — no `unsafe`, no Inv. obligation, sound by the
 type system: `handle` (generation-counter `Handle<T>`/`HandleTable<T>`),
+`process::quota` (the account arena and the `Charge`/`Reservation` tokens),
 the POD/zeroable markers, boot-handoff data types, and the safe helper
 modules (`bitmap_slice`, `numfmt`, `wl_currency`, `kdiag`, `klog`,
 `test_support`).
+
+`process::quota` is classified here rather than under *verified* even though
+`proofs/resource_ledger.rs` machine-checks its state machine, for the same
+reason `slopos_ring` carries its caveat: the proof covers the **accounting
+logic only**. What it does not reach, and what is audited instead:
+
+- The `fetch_add`/`fetch_sub` ordering on each account row, and the ordering
+  between a refund and the slot release it may race. Verus has no weak-memory
+  model. Each modelled `Step` is atomic; the real `charge_row` and
+  `release_row` are compare-exchange loops, so the proof is the sequential
+  skeleton of the concurrency claim rather than the whole of it. Covered by
+  KernMiri under both Stacked and Tree Borrows.
+- That a `Charge` lives in exactly one field for exactly its object's
+  lifetime. That is a syntactic property of the tree, enforced by
+  `scripts/check_charge_linearity.sh`, not a property of the state machine.
+- That `used` matches physical reality. A linear token guarantees the *token*
+  is unique, never that the resource it names is; the in-kernel `quotacheck`
+  audit (`ledger_audit`) is the runtime cross-check, and there is no third
+  line of defence.
 
 ## The soundness invariants
 
