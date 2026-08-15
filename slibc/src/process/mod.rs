@@ -1,6 +1,7 @@
 //! Process lifecycle — the Rites of Birth and Death.
 
 pub mod atexit;
+pub mod rlimit;
 pub mod shim;
 pub mod tests;
 pub mod wait;
@@ -12,6 +13,7 @@ use crate::errno::{self, EINVAL, ENOENT};
 use crate::pal::{Pal, Sys};
 use crate::string::u_strlen;
 
+pub use rlimit::{RLIM_INFINITY, RLIMIT_ALL, RLimit, getrlimit, prlimit, setrlimit};
 pub use wait::{WEXITSTATUS, WIFEXITED, WIFSIGNALED, WTERMSIG};
 
 // ---------------------------------------------------------------------------

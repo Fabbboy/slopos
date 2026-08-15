@@ -272,6 +272,78 @@ pub enum QuotaMode {
 }
 
 // ---------------------------------------------------------------------------
+// The `prlimit64` view
+// ---------------------------------------------------------------------------
+
+// Linux's `RLIMIT_*` numbering and `struct rlimit64` layout, from
+// `asm-generic/resource.h`. Interface facts: ABI numbers and struct layouts
+// carry no copyright, which is what makes the compatibility work sound.
+
+/// `struct rlimit64`. Soft limit, then hard limit.
+#[repr(C)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct RLimit64 {
+    pub rlim_cur: u64,
+    pub rlim_max: u64,
+}
+
+/// "No limit", as `prlimit64` spells it.
+pub const RLIM64_INFINITY: u64 = u64::MAX;
+
+pub const RLIMIT_DATA: u32 = 2;
+pub const RLIMIT_NPROC: u32 = 6;
+pub const RLIMIT_NOFILE: u32 = 7;
+pub const RLIMIT_MEMLOCK: u32 = 8;
+pub const RLIMIT_AS: u32 = 9;
+
+/// How a `RLIMIT_*` maps onto a [`ResourceKind`], and what one unit of the
+/// limit is worth in that kind's units.
+///
+/// The scale is what stops the two vocabularies disagreeing: `RLIMIT_AS` and
+/// `RLIMIT_MEMLOCK` are byte-denominated in the ABI while the arena counts
+/// pages, so publishing a page count under a byte-named limit would understate
+/// the bound by a factor of 4096 and a caller sizing an allocation against it
+/// would back off far too early.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct RLimitMapping {
+    pub kind: ResourceKind,
+    /// Bytes (or items) per unit the arena counts.
+    pub scale: u64,
+}
+
+/// The [`ResourceKind`] a `RLIMIT_*` names, or `None` for one this kernel does
+/// not enforce.
+///
+/// Returning `None` rather than a plausible-looking infinity is the whole
+/// point: a kernel that reports `RLIM64_INFINITY` for a limit it does not
+/// enforce actively defeats userland self-limiting, because a caller cannot
+/// distinguish "unbounded" from "unimplemented". An unmapped resource is
+/// `EINVAL`, which a caller can act on.
+#[inline]
+pub const fn rlimit_mapping(resource: u32) -> Option<RLimitMapping> {
+    match resource {
+        RLIMIT_NOFILE => Some(RLimitMapping {
+            kind: ResourceKind::FdSlot,
+            scale: 1,
+        }),
+        RLIMIT_NPROC => Some(RLimitMapping {
+            kind: ResourceKind::Process,
+            scale: 1,
+        }),
+        // Byte-denominated in the ABI; the arena counts pages.
+        RLIMIT_AS | RLIMIT_DATA => Some(RLimitMapping {
+            kind: ResourceKind::Pages,
+            scale: 4096,
+        }),
+        RLIMIT_MEMLOCK => Some(RLimitMapping {
+            kind: ResourceKind::PinnedBytes,
+            scale: 4096,
+        }),
+        _ => None,
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Axis marker types
 // ---------------------------------------------------------------------------
 
@@ -378,6 +450,49 @@ mod tests {
                  or say here why it is unbounded"
             );
         }
+    }
+
+    /// Every published `RLIMIT_*` names a kind that is actually enforced.
+    ///
+    /// The failure this prevents is the one Redox and Asterinas ship: a limit
+    /// reported to userland that nothing consults. A caller that cannot query
+    /// a real bound cannot back off gracefully, and one that queries a fake
+    /// one backs off against nothing.
+    #[test]
+    fn every_published_rlimit_maps_to_an_enforced_kind() {
+        for resource in [
+            RLIMIT_DATA,
+            RLIMIT_NPROC,
+            RLIMIT_NOFILE,
+            RLIMIT_MEMLOCK,
+            RLIMIT_AS,
+        ] {
+            let mapping = rlimit_mapping(resource).expect("published limits must map");
+            assert_ne!(
+                default_process_limit(mapping.kind),
+                NO_LIMIT_SENTINEL,
+                "RLIMIT {resource} maps to {:?}, which enforces nothing",
+                mapping.kind
+            );
+            assert!(mapping.scale > 0);
+        }
+    }
+
+    /// An unknown resource is unmapped rather than silently infinite.
+    #[test]
+    fn unknown_rlimits_are_unmapped() {
+        for resource in [0u32, 1, 3, 4, 5, 10, 42] {
+            assert!(rlimit_mapping(resource).is_none(), "{resource}");
+        }
+    }
+
+    /// A byte-denominated limit scales by the page size the arena counts in.
+    #[test]
+    fn byte_denominated_limits_carry_the_page_scale() {
+        for resource in [RLIMIT_AS, RLIMIT_DATA, RLIMIT_MEMLOCK] {
+            assert_eq!(rlimit_mapping(resource).unwrap().scale, 4096, "{resource}");
+        }
+        assert_eq!(rlimit_mapping(RLIMIT_NOFILE).unwrap().scale, 1);
     }
 
     #[test]

@@ -36,9 +36,9 @@ pub use crate::syscall::process_handlers::{
     syscall_arch_prctl, syscall_chdir, syscall_clone, syscall_exec, syscall_fork, syscall_futex,
     syscall_get_cpu_affinity, syscall_get_cpu_count, syscall_get_current_cpu, syscall_getcwd,
     syscall_getegid, syscall_geteuid, syscall_getgid, syscall_getpgid, syscall_getpid,
-    syscall_getppid, syscall_getuid, syscall_set_cpu_affinity, syscall_setpgid, syscall_setsid,
-    syscall_sigdefault, syscall_spawn_path, syscall_terminate_task, syscall_vhangup,
-    syscall_waitpid,
+    syscall_getppid, syscall_getuid, syscall_prlimit64, syscall_set_cpu_affinity, syscall_setpgid,
+    syscall_setsid, syscall_sigdefault, syscall_spawn_path, syscall_terminate_task,
+    syscall_vhangup, syscall_waitpid,
 };
 pub use crate::syscall::ring_handlers::{
     syscall_ring_enter, syscall_ring_register, syscall_ring_setup,
@@ -187,6 +187,7 @@ static SYSCALL_TABLE: [SyscallEntry; SYSCALL_TABLE_SIZE] = syscall_table! {
     [SYSCALL_GETEGID] => syscall_getegid, "getegid";
     [SYSCALL_CHDIR]   => syscall_chdir,   "chdir";
     [SYSCALL_GETCWD]  => syscall_getcwd,  "getcwd";
+    [SYSCALL_PRLIMIT64] => syscall_prlimit64, "prlimit64";
 
     [SYSCALL_RT_SIGACTION]   => syscall_rt_sigaction,   "rt_sigaction";
     [SYSCALL_RT_SIGPROCMASK] => syscall_rt_sigprocmask, "rt_sigprocmask";

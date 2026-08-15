@@ -778,12 +778,36 @@ The charge is a `.bss` `ChargeSlot`, not a field on the slab page header: a head
 `#[repr(C)]`, is written through raw pointers and is read back at a fixed offset by the free
 path — exactly the placement the design prohibits for a token.
 
-### 5. `prlimit64`
+### 5. `prlimit64` — **shipped**
 
-The enforced numbers are still not published to userland. A Linux-ABI kernel must publish
-real limits, because a caller that cannot query a bound cannot back off gracefully — but
-never before the enforcement point exists, which it now does. The gate's numbers stay in a
-tracked file, not in a syscall userland can pin.
+Syscall 174, with `getrlimit`/`setrlimit`/`prlimit` in `slibc`. Five resources are mapped
+onto the kinds that enforce them: `RLIMIT_NOFILE`→`FdSlot`, `RLIMIT_NPROC`→`Process`,
+`RLIMIT_AS`/`RLIMIT_DATA`→`Pages`, `RLIMIT_MEMLOCK`→`PinnedBytes`.
+
+**Every published number is the one enforcement consults.** An unmapped resource is
+`EINVAL`, deliberately: a kernel that answers `RLIM64_INFINITY` for a limit it does not
+enforce actively defeats userland self-limiting, because a caller cannot distinguish
+"unbounded" from "unimplemented". `EINVAL` is something a caller can act on.
+
+The mapping carries a **scale**, and that is load-bearing rather than tidiness:
+`RLIMIT_AS` and `RLIMIT_MEMLOCK` are byte-denominated in the ABI while the arena counts
+pages, so publishing a page count under a byte-named limit would understate the bound by
+4096 and a caller sizing an allocation against it would back off far too early. A unit test
+asserts the scale, and the userland test asserts `RLIMIT_AS` reads as bytes.
+
+Writes are **lower-only, self-only**. Raising the hard limit is `EPERM` — granting it would
+make every ceiling advisory, since a process refused for want of headroom could simply ask
+for more. A foreign pid is `EPERM` because there is no privilege principal here (`getuid`
+returns a literal 0), so permitting it would be permitting it unconditionally; that belongs
+to `plans/authority-model.md`. Lowering is the useful half regardless: it is how a process
+sandboxes itself before running work it does not trust.
+
+Soft and hard report the same number, because there is no privileged path that could raise
+one above the other — reporting them apart would imply headroom that cannot be claimed.
+
+The gate's numbers stay in `scripts/gates/quota/tests.txt`, not in a syscall userland can
+pin. The userland test asserts *relationships* — finite, non-zero, byte-scaled, lowerable —
+and never a specific value, so it does not become a third place the numbers live.
 
 ---
 

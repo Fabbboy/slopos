@@ -102,6 +102,7 @@ if [ "$TEST_MODE" = "--test" ]; then
         --bin shell_script_test \
         --bin stdio_stream_test \
         --bin ip_e2e_test \
+        --bin rlimit_test \
         --bin session_smoke_test \
         --features testbins \
         --no-default-features \
@@ -196,6 +197,9 @@ if [ "$TEST_MODE" = "--test" ]; then
     fi
     if [ -f "$RELEASE_DIR/ip_e2e_test" ]; then
         cp "$RELEASE_DIR/ip_e2e_test" "$BUILD_DIR/ip_e2e_test.elf"
+    fi
+    if [ -f "$RELEASE_DIR/rlimit_test" ]; then
+        cp "$RELEASE_DIR/rlimit_test" "$BUILD_DIR/rlimit_test.elf"
     fi
     if [ -f "$RELEASE_DIR/session_smoke_test" ]; then
         cp "$RELEASE_DIR/session_smoke_test" "$BUILD_DIR/session_smoke_test.elf"

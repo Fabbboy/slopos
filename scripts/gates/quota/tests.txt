@@ -85,5 +85,5 @@ post-userland-tests	kernelmeta	6500
 post-userland-tests	objectrow	257
 post-userland-tests	pages	655360
 post-userland-tests	pinnedbytes	8
-post-userland-tests	process	113
+post-userland-tests	process	120
 post-userland-tests	task	10

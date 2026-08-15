@@ -197,6 +197,10 @@ name = "ip_e2e_test"
 path = "src/bin/tests/ip_e2e_test.rs"
 
 [[bin]]
+name = "rlimit_test"
+path = "src/bin/tests/rlimit_test.rs"
+
+[[bin]]
 name = "session_smoke_test"
 path = "src/bin/tests/session_smoke_test.rs"
 

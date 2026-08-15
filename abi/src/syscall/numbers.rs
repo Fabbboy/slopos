@@ -954,7 +954,28 @@ pub const SYSCALL_NET_RESOLVER_SET: u64 = 172;
 /// Unprivileged.
 pub const SYSCALL_NET_MONITOR: u64 = 173;
 
-pub const SYSCALL_TABLE_SIZE: usize = 174;
+/// Query, and optionally set, a resource limit of the calling process.
+///
+/// # Arguments (via registers)
+/// * rdi (arg0): target pid; 0 or the caller's own id
+/// * rsi (arg1): `RLIMIT_*` resource number
+/// * rdx (arg2): pointer to a new [`RLimit64`](crate::quota::RLimit64), or 0
+/// * r10 (arg3): pointer to receive the old value, or 0
+///
+/// The limits reported are the ones the kernel actually enforces, not
+/// `RLIM64_INFINITY` placeholders: a caller that cannot query a real bound
+/// cannot back off gracefully, and one told a resource is unlimited when it is
+/// not will find out by failing.
+///
+/// # Returns
+/// * 0 on success
+/// * -EINVAL: unknown resource, or a soft limit above the hard limit
+/// * -EPERM: another process's limits, or raising the hard limit
+/// * -EFAULT: an unreadable/unwritable pointer
+/// * -ESRCH: the caller is bound to no process
+pub const SYSCALL_PRLIMIT64: u64 = 174;
+
+pub const SYSCALL_TABLE_SIZE: usize = 175;
 
 const _: () = assert!((SYSCALL_PIDFD_OPEN as usize) < SYSCALL_TABLE_SIZE);
 const _: () = assert!((SYSCALL_SIGNALFD as usize) < SYSCALL_TABLE_SIZE);
@@ -969,6 +990,7 @@ const _: () = assert!((SYSCALL_NET_ADDR_CTL as usize) < SYSCALL_TABLE_SIZE);
 const _: () = assert!((SYSCALL_NET_ROUTE_CTL as usize) < SYSCALL_TABLE_SIZE);
 const _: () = assert!((SYSCALL_NET_RESOLVER_SET as usize) < SYSCALL_TABLE_SIZE);
 const _: () = assert!((SYSCALL_NET_MONITOR as usize) < SYSCALL_TABLE_SIZE);
+const _: () = assert!((SYSCALL_PRLIMIT64 as usize) < SYSCALL_TABLE_SIZE);
 
 /// Standard return value for unimplemented syscalls: -ENOSYS (negated errno 38).
 pub const ENOSYS_RETURN: u64 = (-38i64) as u64;

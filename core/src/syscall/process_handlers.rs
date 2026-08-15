@@ -856,3 +856,74 @@ define_syscall!(syscall_vhangup (ctx)
 
 #[allow(dead_code)]
 type _Unused<T> = UserPtr<T>;
+
+define_syscall!(syscall_prlimit64
+    (ctx, pid: u32, resource: u32, new_ptr: u64, old_ptr: u64)
+    requires(let process_id: process_id)
+    -> Result<(), Errno>
+{
+    use slopos_abi::quota::{RLIM64_INFINITY, RLimit64, rlimit_mapping};
+    use slopos_ostd::process::quota::{KindStats, NO_LIMIT, set_limit, stats};
+
+    let process = process_id.process().ok_or(Errno::ESRCH)?;
+    // Self only. There is no privilege principal in this kernel — getuid and
+    // friends return a literal 0 — so "may I change that process's limits"
+    // has no answer that is not "everyone may", which is not a policy worth
+    // shipping. Belongs to plans/authority-model.md.
+    if pid != 0 && pid != process.id() {
+        return Err(Errno::EPERM);
+    }
+
+    let mapping = rlimit_mapping(resource).ok_or(Errno::EINVAL)?;
+    let account = process.account();
+    // A process whose account row has gone — reaped mid-call — reports the
+    // enforced default rather than failing: the number is still true of every
+    // process, and `ESRCH` here would be a syscall that fails depending on how
+    // recently the caller was reaped.
+    let current = stats(account, mapping.kind).unwrap_or(KindStats {
+        used: 0,
+        limit: slopos_abi::quota::default_process_limit(mapping.kind),
+        peak: 0,
+        denials: 0,
+    });
+    let publish = |limit: u32| -> u64 {
+        if limit == NO_LIMIT {
+            RLIM64_INFINITY
+        } else {
+            (limit as u64).saturating_mul(mapping.scale)
+        }
+    };
+
+    // Read before write, so a call that both queries and sets reports what was
+    // in force when it was made rather than what it just installed.
+    if old_ptr != 0 {
+        let out = MmUserPtr::<RLimit64>::try_new(old_ptr).map_err(|_| Errno::EFAULT)?;
+        // Soft and hard are the same number here: the hard limit is the
+        // enforced ceiling, and there is no privileged path that could raise
+        // one above the other, so reporting them apart would imply headroom
+        // that cannot be claimed.
+        let value = publish(current.limit);
+        copy_to_user(out, &RLimit64 { rlim_cur: value, rlim_max: value })
+            .map_err(|_| Errno::EFAULT)?;
+    }
+
+    if new_ptr != 0 {
+        let src = MmUserPtr::<RLimit64>::try_new(new_ptr).map_err(|_| Errno::EFAULT)?;
+        let want = copy_from_user(src).map_err(|_| Errno::EFAULT)?;
+        if want.rlim_cur > want.rlim_max {
+            return Err(Errno::EINVAL);
+        }
+        // Lowering only. Raising the ceiling is the privileged operation, and
+        // granting it unconditionally would make every limit advisory — a
+        // process refused for want of headroom could simply ask for more.
+        // Lowering is always safe and is the useful half: it is how a process
+        // sandboxes itself before running untrusted work.
+        if current.limit != NO_LIMIT && want.rlim_max > publish(current.limit) {
+            return Err(Errno::EPERM);
+        }
+        let scaled = want.rlim_cur / mapping.scale.max(1);
+        set_limit(account, mapping.kind, u32::try_from(scaled).unwrap_or(NO_LIMIT));
+    }
+
+    Ok(())
+});

@@ -61,6 +61,7 @@ crate::utest!(
 );
 crate::utest!(name = utest_stdio_stream, bin = "/bin/stdio_stream_test");
 crate::utest!(name = utest_ip_e2e, bin = "/bin/ip_e2e_test");
+crate::utest!(name = utest_rlimit, bin = "/bin/rlimit_test");
 
 // Last deliberately. Tests run in link order, and this one exists to leave a
 // desktop-shaped resource population behind for the `post-userland-tests`
