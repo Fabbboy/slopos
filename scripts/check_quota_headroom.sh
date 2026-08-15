@@ -47,6 +47,7 @@ done
 # `sed` would echo its input unchanged when the pattern missed, so a renamed
 # field would yield a whole log line where an integer was expected.
 QUOTA_RE='^QUOTA\[([a-z-]+)\]: mode=([a-z]+) slot=([0-9]+) kind=([a-z]+) used=([0-9]+) peak=([0-9]+) limit=(-?[0-9]+) denials=([0-9]+)'
+COST_RE='^QUOTACOST: depth=([0-9]+) cycles_per_charge=([0-9]+)'
 
 # phase/kind -> "maxpeak totaldenials mode". Rows are per-process; the cap is
 # on the worst single row of a kind, because that is what a per-principal
@@ -55,6 +56,8 @@ declare -A PEAK=()
 declare -A DENIALS=()
 declare -A MODE=()
 declare -A SEEN_PHASE=()
+# depth -> worst observed cycles per charge+refund round trip.
+declare -A COST=()
 
 parse_log() {
     local log="$1" raw key phase kind peak denials
@@ -87,6 +90,24 @@ parse_log() {
         fi
         DENIALS["$key"]=$(( ${DENIALS[$key]:-0} + denials ))
     done < <(grep -oE 'QUOTA\[[a-z-]+\]:.*' "$log")
+
+    # The charge path's own cost. Escort measured end-to-end kernel accounting
+    # at 8 % throughput and 15-50 % under load; without a floor here a
+    # regression of that size passes every other check in this file.
+    local cost_line depth cycles
+    while IFS= read -r cost_line; do
+        cost_line="${cost_line%$'\r'}"
+        if [[ ! "$cost_line" =~ $COST_RE ]]; then
+            echo "FAIL: could not parse a QUOTACOST line \u2014 the report format moved." >&2
+            echo "      line: $cost_line" >&2
+            return 1
+        fi
+        depth="${BASH_REMATCH[1]}"
+        cycles="${BASH_REMATCH[2]}"
+        if [ -z "${COST[$depth]+x}" ] || [ "$cycles" -gt "${COST[$depth]}" ]; then
+            COST["$depth"]=$cycles
+        fi
+    done < <(grep -oE 'QUOTACOST: depth=[0-9]+ cycles_per_charge=[0-9]+' "$log" || true)
 }
 
 emit_gate_data() {
@@ -120,6 +141,13 @@ emit_gate_data() {
     for key in $(printf '%s\n' "${!PEAK[@]}" | sort); do
         printf '%s\t%s\t%s\n' "${key%%/*}" "${key##*/}" "${PEAK[$key]}"
     done
+    echo
+    echo "# Cycles per charge+refund round trip, by account-chain depth. The"
+    echo "# spread across runs is wide under TCG, so these carry it as margin"
+    echo "# rather than sitting one observation above the measurement."
+    for depth in $(printf '%s\n' "${!COST[@]}" | sort -n); do
+        printf 'max-cycles-per-charge %s %s\n' "$depth" "${COST[$depth]}"
+    done
 }
 
 run_gate() {
@@ -135,6 +163,7 @@ run_gate() {
     local MIN_KINDS=0 MAX_DENIALS=0
     local -a REQUIRED=()
     declare -A CAPS=()
+    declare -A COST_CAP=()
     declare -A MIN_KINDS_FOR=()
     local lineno=0 line key
     while IFS= read -r line || [ -n "$line" ]; do
@@ -151,6 +180,8 @@ run_gate() {
             min-kinds-for)
                 MIN_KINDS_FOR["$(awk '{print $2}' <<<"$line")"]=$(awk '{print $3}' <<<"$line") ;;
             max-denials)  MAX_DENIALS=$(awk '{print $2}' <<<"$line") ;;
+            max-cycles-per-charge)
+                COST_CAP["$(awk '{print $2}' <<<"$line")"]=$(awk '{print $3}' <<<"$line") ;;
             require-phase) REQUIRED+=("$(awk '{print $2}' <<<"$line")") ;;
             *)
                 echo "check_quota_headroom: $gate:$lineno: unknown directive '$key'" >&2
@@ -207,6 +238,20 @@ run_gate() {
         fi
     done
 
+    for depth in "${!COST_CAP[@]}"; do
+        if [ -z "${COST[$depth]+x}" ]; then
+            echo "FAIL: gate expects a QUOTACOST line for depth $depth and the boot printed none." >&2
+            echo "      A cost nobody measures is how an 8 % throughput regression passes." >&2
+            fail=1
+            continue
+        fi
+        if [ "${COST[$depth]}" -gt "${COST_CAP[$depth]}" ]; then
+            echo "FAIL: a charge at depth $depth cost ${COST[$depth]} cycles, over the recorded cap ${COST_CAP[$depth]}." >&2
+            echo "      Re-measure over several runs with --emit-allowlist; the charge path is on every syscall that allocates." >&2
+            fail=1
+        fi
+    done
+
     # A cap matching nothing is a dead entry: it stops describing the kernel and
     # would silently keep passing after the kind it names stopped being charged.
     for gkey in "${!CAPS[@]}"; do
@@ -221,6 +266,9 @@ run_gate() {
             [ "${gkey%%/*}" = "$phase" ] || continue
             echo "OK: $gkey peak=${PEAK[$gkey]} denials=${DENIALS[$gkey]:-0} (mode=${MODE[$phase]})"
         done
+    done
+    for depth in $(printf '%s\n' "${!COST_CAP[@]}" | sort -n); do
+        echo "OK: charge cost at depth $depth = ${COST[$depth]} cycles (cap ${COST_CAP[$depth]})"
     done
 }
 
@@ -335,7 +383,30 @@ post-userland-tests	objectrow	257
     printf 'min-kinds 2\nmax-denialz 0\nrequire-phase post-userland-tests\npost-userland-tests\tfdslot\t257\n' > "$tmp/gates/$VARIANT.txt"
     _expect 2 "unknown directive" "$clean" "unknown directive rejected"
 
-    # 12. No gate data at all for the variant.
+    # 12. A charge cost over its cap. The floor that makes an 8 % throughput
+    #     regression a failure rather than a silent pass.
+    {
+        cat "$clean"
+        printf 'QUOTACOST: depth=1 cycles_per_charge=9999\r\n'
+    } > "$tmp/slow.log"
+    printf '%smax-cycles-per-charge 1 3000\n' "$good_gate" > "$tmp/gates/$VARIANT.txt"
+    _expect 1 "over the recorded cap 3000" "$tmp/slow.log" "slow charge rejected"
+
+    # 13. A gate that asks about a depth the boot never measured. A cost
+    #     nobody measures is exactly how the regression above gets through.
+    printf '%smax-cycles-per-charge 4 3000\n' "$good_gate" > "$tmp/gates/$VARIANT.txt"
+    _expect 1 "printed none" "$clean" "missing charge cost rejected"
+
+    # 14. A charge cost within its cap passes, so 12 is not a gate that
+    #     rejects unconditionally.
+    {
+        cat "$clean"
+        printf 'QUOTACOST: depth=1 cycles_per_charge=1200\r\n'
+    } > "$tmp/fast.log"
+    printf '%smax-cycles-per-charge 1 3000\n' "$good_gate" > "$tmp/gates/$VARIANT.txt"
+    _expect 0 "charge cost at depth 1" "$tmp/fast.log" "in-budget charge accepted"
+
+    # 15. No gate data at all for the variant.
     rm -f "$tmp/gates/$VARIANT.txt"
     _expect 2 "no gate data" "$clean" "missing gate data rejected"
 

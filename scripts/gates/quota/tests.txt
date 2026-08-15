@@ -77,7 +77,7 @@ post-kernel-tests	fdslot	256
 post-kernel-tests	kernelmeta	2200
 post-kernel-tests	objectrow	257
 post-kernel-tests	pages	65536
-post-kernel-tests	process	11
+post-kernel-tests	process	20
 post-kernel-tests	task	8
 post-userland-tests	custody	8
 post-userland-tests	fdslot	256
@@ -87,3 +87,17 @@ post-userland-tests	pages	655360
 post-userland-tests	pinnedbytes	8
 post-userland-tests	process	120
 post-userland-tests	task	10
+
+# Cycles per charge+refund round trip, by account-chain depth. The charge path
+# runs on every syscall that allocates, so a regression here is a whole-kernel
+# throughput regression -- Escort measured end-to-end accounting at 8 %, and
+# 15-50 % under load with protection domains. Without this floor a change of
+# that size passes every other check in this file.
+#
+# Measured under TCG across several runs: depth 1 at 1440-1572, depth 7 at
+# 3787-6121. The caps carry that spread as margin rather than sitting one
+# observation above a single measurement, because TCG's timing is not stable
+# enough for a tight bound to mean anything. The *ratio* is the durable part:
+# ~770 cycles per additional level, which is what MAX_ACCOUNT_DEPTH bounds.
+max-cycles-per-charge 1 3000
+max-cycles-per-charge 7 9000

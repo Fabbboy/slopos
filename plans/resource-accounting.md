@@ -872,10 +872,19 @@ Filtered runs that create files must include `'*ext2_aaa*'`.
    cancels a released row's outstanding amount against its ancestors — without that, the
    ancestors kept debits whose refunds had already become no-ops, which measured at 574
    tasks held by the root.
-7. **The audit is not free.** Escort measured end-to-end kernel accounting at 8 %
-   throughput, and 15–50 % under load with protection domains. **Not yet measured here,
-   and the gate carries no throughput floor** — so a regression of that size would pass.
-   Worth adding alongside the peaks.
+7. **The audit is not free — and is now measured.** Escort measured end-to-end kernel
+   accounting at 8 % throughput, and 15–50 % under load with protection domains. This tree
+   had no number at all, so a regression of that size would have passed every gate.
+   `QUOTACOST` reports cycles per charge+refund round trip at depth 1 and at the deepest
+   chain the arena permits, and `check_quota_headroom.sh` enforces a cap on both.
+   Measured under TCG: ~1450 cycles at depth 1, ~4600 at depth 7 — about 770 cycles per
+   additional level, which is the quantity `MAX_ACCOUNT_DEPTH` bounds.
+
+   Reported in **cycles, not nanoseconds**: converting needs a frequency, and under TCG the
+   TSC does not track one. The first attempt divided by the harness's `cycles_per_ms` and
+   reported a depth-7 walk as five times *cheaper* than a depth-1 walk. The caps carry the
+   cross-run spread as margin rather than sitting one observation above a single
+   measurement, because TCG timing is not stable enough for a tight bound to mean anything.
 
 ## Answered by measurement
 
@@ -903,5 +912,8 @@ the useful part, and because a future change that moves them should notice.
 
 ## Still unmeasured
 
-- **Throughput.** Residual risk 7. No before/after number exists and the gate carries no
-  floor, so an 8 % regression of the kind Escort measured would pass silently.
+- **Throughput under load.** The `QUOTACOST` figure is an uncontended micro-benchmark on an
+  idle machine. Escort's 15–50 % figure was measured *under load with protection domains*,
+  and nothing here reproduces that: the arena takes no locks, so the interesting number is
+  cache-line contention on a hot row across CPUs, which needs a multi-CPU charge storm this
+  suite does not run.

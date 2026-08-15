@@ -7597,3 +7597,128 @@ slopos_testing::stest!(
     name = test_quota_kernelmeta_covers_task_stacks,
     suite = sched_core
 );
+
+/// The charge path's cost, in nanoseconds per charge+refund round trip.
+///
+/// Residual risk 7 made measurable. Escort measured end-to-end kernel
+/// accounting at 8 % throughput and 15-50 % under load with protection
+/// domains; this tree had no number at all, so a regression of that size would
+/// have passed every gate silently.
+///
+/// Measured at two depths because the debit walks *up* the account chain: a
+/// leaf under the root pays for two rows, one at `MAX_ACCOUNT_DEPTH` pays for
+/// eight. The difference between them is the per-level cost, which is the part
+/// that grows if the hierarchy ever deepens.
+///
+/// Emits `QUOTACOST:` lines rather than asserting a bound here — the ceiling
+/// lives in `scripts/gates/quota/<variant>.txt`, so raising it is a diff on a
+/// tracked file rather than an edit to a test.
+pub fn test_quota_charge_cost() -> TestResult {
+    use slopos_abi::quota::{FdSlot, QuotaMode, ResourceKind};
+    use slopos_ostd::process::quota::{Charge, quota_mode, set_quota_mode, try_charge};
+
+    const ITERATIONS: u32 = 10_000;
+
+    let Some(shallow) = QuotaScratch::new() else {
+        klog_info!("QUOTACOST: could not register a process");
+        return TestResult::Fail;
+    };
+
+    // A chain as deep as the arena permits, so the reported per-level cost is
+    // measured over the real maximum rather than extrapolated from two points.
+    // Grown until the arena refuses, not to a computed bound: `account_create`
+    // is what enforces `MAX_ACCOUNT_DEPTH`, and a spawn past it still succeeds
+    // -- it just leaves the process with an account that names no row. Keeping
+    // only children that actually got one is what makes `deepest` the deepest
+    // *charged* account rather than the deepest process.
+    let mut chain = slopos_ostd::KVec::new();
+    let mut deepest = shallow.account();
+    loop {
+        let Ok(child) = slopos_ostd::process::process_spawn(None, deepest) else {
+            break;
+        };
+        let candidate = child.account();
+        if slopos_ostd::process::quota::stats(candidate, ResourceKind::FdSlot).is_none() {
+            if let Some(handle) = child.handle() {
+                slopos_ostd::process::process_retire(handle);
+            }
+            break;
+        }
+        deepest = candidate;
+        if chain.push(child).is_err() {
+            break;
+        }
+    }
+    let depth = chain.len() as u32 + 1;
+
+    // A row that does not exist makes `try_charge` return immediately, so a
+    // chain built past `MAX_ACCOUNT_DEPTH` would measure the *absence* of a
+    // walk and report it as a fast one. Checking that the deepest account has
+    // a row is what stops this test reporting a number for work it never did.
+    if slopos_ostd::process::quota::stats(deepest, ResourceKind::FdSlot).is_none() {
+        klog_info!("QUOTACOST: the deepest account has no row; nothing to measure");
+        return TestResult::Fail;
+    }
+
+    let restore = quota_mode();
+    set_quota_mode(QuotaMode::Enforce);
+
+    let measure = |account| -> u64 {
+        // Warm first, unmeasured. Without it the first loop absorbs the
+        // arena's cold cache lines and the branch predictor's first pass, and
+        // reports them as the cost of whichever depth happened to run first --
+        // which measured a deeper chain as *cheaper* than a shallow one.
+        for _ in 0..ITERATIONS / 10 {
+            if let Ok(reservation) = try_charge::<FdSlot>(account, 1) {
+                drop(Charge::commit(reservation));
+            }
+        }
+        let start = slopos_arch::tsc::rdtsc();
+        for _ in 0..ITERATIONS {
+            // Commit and drop, so the measurement covers the whole round trip
+            // a real charge site pays: the walk up, the token, and the walk
+            // back down on refund.
+            if let Ok(reservation) = try_charge::<FdSlot>(account, 1) {
+                drop(Charge::commit(reservation));
+            }
+        }
+        slopos_arch::tsc::rdtsc().wrapping_sub(start)
+    };
+
+    // Both accounts resolved before either is timed, and the deep one measured
+    // first: the loop that runs first pays for the arena's cold cache lines
+    // however much warming precedes it, and attributing that to whichever
+    // depth happened to go first is what made a depth-8 walk look cheaper than
+    // a depth-1 walk.
+    let shallow_account = shallow.account();
+    let deep_cycles = measure(deepest);
+    let shallow_cycles = measure(shallow_account);
+    set_quota_mode(restore);
+
+    for child in chain.iter() {
+        if let Some(handle) = child.handle() {
+            slopos_ostd::process::process_retire(handle);
+        }
+    }
+    drop(chain);
+
+    // Reported in **cycles**, not nanoseconds. Converting needs a frequency,
+    // and under TCG the TSC does not track one -- the first attempt divided by
+    // `estimate_cycles_per_ms` and reported a depth-8 walk as five times
+    // cheaper than a depth-1 walk, which is impossible and was the conversion
+    // rather than the measurement. Cycles per charge is the quantity a
+    // regression would move anyway.
+    let per_charge = |cycles: u64| -> u64 { cycles / ITERATIONS as u64 };
+
+    // Published through the quota report rather than logged here: per-test
+    // klog is captured per test and shown only on failure, and this line has
+    // to reach the raw stream for the gate to parse it.
+    crate::quota_console::record_charge_cost(
+        per_charge(shallow_cycles),
+        depth,
+        per_charge(deep_cycles),
+    );
+    TestResult::Pass
+}
+
+slopos_testing::stest!(name = test_quota_charge_cost, suite = sched_core);
