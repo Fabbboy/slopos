@@ -47,6 +47,7 @@ Shipped, over commits `f46cada0`..`8da6213a`:
 | Linearity gate | `scripts/check_charge_linearity.sh` |
 | Headroom ratchet + measured caps | `scripts/check_quota_headroom.sh`, `scripts/gates/quota/tests.txt` |
 | Machine-checked ledger, 18 obligations | `verification/proofs/resource_ledger.rs` |
+| `Pages` on `VmaMap`, `ChargeSlot::grow`/`shrink`, the `PagesMismatch` audit | `mm/src/vma_region.rs`, `slopos-ostd/src/process/quota/token.rs` |
 
 Charged and enforced: `FdSlot` (256), `ObjectRow` (512), `Task` (512), `Process` (64),
 `Custody` (64), `PinnedBytes` (4096 pages), `KernelMeta` (2048 pages). Default is
@@ -677,17 +678,39 @@ a **signal so the task unwinds itself**, never a cross-CPU teardown: a demand fa
 syscall return path, and killing from another CPU collides with I8 (a task only exits from
 its own context). Depth-ordered subtree kill is the bounded last resort.
 
-### 2. `Pages` — the one uncharged kind
+### 2. `Pages` — **shipped**, and not in the shape this plan asked for
 
-`ResourceKind::Pages` has no charge sites, so it carries `NO_LIMIT_SENTINEL` rather than a
-ceiling: a limit on a counter nothing increments refuses against nothing. Address-space
-growth is still bounded only by the frame allocator.
+Charged, enforced at 65 536 pages (256 MiB of VA) per address space, with a full test boot
+recording **zero denials**. The charge lives in `VmaMap` — one `ChargeSlot<PagesAxis>` per
+address space — and every tree mutation goes through `link`/`unlink`/`settle`, which are
+its only writers.
 
-Wanted: one `Charge<PagesAxis>` per VMA/region, consume-and-reissue on growth via
-`Charge::try_extend`, refunded by the region's own `Drop` with the exact count it holds.
-That shape is what deletes the deleted counter's `total_freed + unmapped_pages` error-path
-arithmetic outright. Still rejected: exact per-page sharing attribution and per-page owner
-metadata — see question 7.
+**The per-VMA shape this plan specified is wrong, and was abandoned by the two production
+kernels that shipped it.** FreeBSD carried a per-object `charge` scalar for sixteen years
+and removed it in January 2026 (`d160447129fe`): *the split operations effectively carve
+holes in the charged regions, and a single counter cannot properly express it* — their fix
+was to give up exactness and over-account, because tracking the carved set per object *has
+significant overhead and complications*. Zircon reached the same conclusion from the other
+direction and rewrote attribution to be computed by enumeration rather than carried per
+mapping. Here the region map **is** the carved set already, so the exactness FreeBSD priced
+and declined is free: a hole punched mid-region refunds exactly the hole, and a merge
+charges exactly once.
+
+It is also the only shape that compiles. `VmaRegion` is `Clone` and is cloned for every
+split remnant, and a linear token may never be — `check_charge_linearity.sh`'s `clone` scan
+rejects it, correctly.
+
+`Charge::try_extend` was not the growth primitive in the end. It returns a new token by
+value, which cannot be stored back into a `.bss` slot without a `&mut`; `ChargeSlot::grow`
+and `ChargeSlot::shrink` are the in-place forms, and they keep the rule that no
+`&mut Charge` exists anywhere.
+
+Still rejected, unchanged: exact per-page sharing attribution and per-page owner metadata —
+see question 7. The kind is deliberately `RLIMIT_AS`-shaped (mapped VA) rather than
+RSS-shaped, because a resident bound needs a disposition for a process *already over* it,
+which is a kill daemon and an exception taxonomy in XNU and which illumos declined to build
+at all. A VA bound is refusable at the syscall that asks for it, which is the only place a
+refusal has an errno to travel back on.
 
 ### 3. Keepalive DMA frames
 

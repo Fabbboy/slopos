@@ -24,9 +24,10 @@ mod charged;
 mod token;
 
 pub use arena::{
-    AccountCreateError, KindStats, LedgerFault, MAX_ACCOUNT_DEPTH, NO_LIMIT, TryChargeError,
-    account_count, account_create, account_release, account_release_by_slot, for_each_account,
-    ledger_audit, quota_mode, reset_for_test, root, set_limit, set_quota_mode, stats, try_charge,
+    AccountCreateError, KindStats, LedgerFault, MAX_ACCOUNT_DEPTH, NO_LIMIT, PagesReconciler,
+    TryChargeError, account_count, account_create, account_release, account_release_by_slot,
+    for_each_account, ledger_audit, quota_mode, register_pages_reconciler, reset_for_test, root,
+    set_limit, set_quota_mode, stats, try_charge,
 };
 pub use axis::{Refundable, ResourceAxis};
 pub use charged::{

@@ -88,6 +88,13 @@ impl<A: Refundable> Reservation<A> {
         core::mem::forget(self);
         parts
     }
+
+    /// Hand this reservation's debit to a [`ChargeSlot`] that has already
+    /// recorded it. Private, for the same reason [`Charge::into_slot`] is.
+    #[inline]
+    fn into_slot(self) {
+        let _ = self.into_parts();
+    }
 }
 
 impl<A: Refundable> Drop for Reservation<A> {
@@ -335,6 +342,97 @@ impl<A: Refundable> ChargeSlot<A> {
     /// Whether this slot currently holds a charge.
     pub fn is_occupied(&self) -> bool {
         self.account.load(Ordering::Acquire) != 0
+    }
+
+    /// The amount currently held, or zero for an empty slot.
+    pub fn amount(&self) -> u32 {
+        if self.account.load(Ordering::Acquire) == 0 {
+            return 0;
+        }
+        self.amount.load(Ordering::Acquire)
+    }
+
+    /// The account being charged, or [`AccountId::NONE`] for an empty slot.
+    pub fn account(&self) -> AccountId {
+        AccountId::from_raw(self.account.load(Ordering::Acquire))
+    }
+
+    /// Add `reservation`'s debit to what this slot already holds.
+    ///
+    /// The growth path for a charge whose amount tracks a quantity that
+    /// changes over the holder's life — an address space gaining a mapping —
+    /// so one token names the whole amount rather than a token accumulating
+    /// per growth.
+    ///
+    /// A reservation against a *different* account is refunded and the slot
+    /// left alone, because a charge that changed accounts would be charge
+    /// migration. Refusing rather than asserting keeps that true in a release
+    /// build, where an assertion would be compiled out and the charge would
+    /// silently move.
+    pub fn grow(&self, reservation: Reservation<A>) {
+        if reservation.amount() == 0 {
+            return;
+        }
+        let raw = self.account.load(Ordering::Acquire);
+        if raw == 0 {
+            self.put(reservation);
+            return;
+        }
+        if AccountId::from_raw(raw) != reservation.account() {
+            return;
+        }
+        let mut held = self.amount.load(Ordering::Relaxed);
+        loop {
+            // Saturating here would be a phantom debit: the row has already
+            // been charged, so a slot capping below `held + amount` refunds
+            // less than was taken. Refuse instead and let the reservation's
+            // `Drop` give its debit straight back.
+            let Some(total) = held.checked_add(reservation.amount()) else {
+                return;
+            };
+            match self.amount.compare_exchange_weak(
+                held,
+                total,
+                Ordering::AcqRel,
+                Ordering::Relaxed,
+            ) {
+                Ok(_) => break,
+                Err(observed) => held = observed,
+            }
+        }
+        // The slot now accounts for this debit, so refunding here would
+        // double-count against one that is still outstanding.
+        reservation.into_slot();
+    }
+
+    /// Give back `n` units, keeping the rest. Clamped at what is held.
+    pub fn shrink(&self, n: u32) {
+        if n == 0 {
+            return;
+        }
+        let raw = self.account.load(Ordering::Acquire);
+        if raw == 0 {
+            return;
+        }
+        let mut held = self.amount.load(Ordering::Relaxed);
+        loop {
+            let give_back = n.min(held);
+            if give_back == 0 {
+                return;
+            }
+            match self.amount.compare_exchange_weak(
+                held,
+                held - give_back,
+                Ordering::AcqRel,
+                Ordering::Relaxed,
+            ) {
+                Ok(_) => {
+                    refund_raw(AccountId::from_raw(raw), A::KIND, give_back);
+                    return;
+                }
+                Err(observed) => held = observed,
+            }
+        }
     }
 }
 

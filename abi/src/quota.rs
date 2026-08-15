@@ -232,9 +232,25 @@ pub const fn default_process_limit(kind: ResourceKind) -> u32 {
         // are single-threaded, which is deliberate: this bounds the *memory*,
         // not the thread count, and the two ceilings bind independently.
         ResourceKind::KernelMeta => 2048,
-        // No charge sites yet. A ceiling here would refuse against a counter
-        // nothing increments.
-        ResourceKind::Pages => NO_LIMIT_SENTINEL,
+        // Mapped **virtual** pages per address space -- `RLIMIT_AS`, not RSS.
+        // 256 MiB of address space per principal.
+        //
+        // Deliberately a VA bound and not a resident one. An RSS-shaped
+        // resource needs a reclaim disposition for the case where a process is
+        // already over it, which is a kill daemon and an exception taxonomy in
+        // XNU and which illumos declined to put in its synchronous framework
+        // at all; a VA bound is refusable at the syscall that asks for it,
+        // which is the only place a refusal has an errno to travel back on.
+        //
+        // Measured worst single address space across a full test boot plus the
+        // session-smoke population: 30 998 pages (121 MiB), which is a test
+        // binary's own mappings rather than anything adversarial. 65 536 is a
+        // shade over twice that -- deliberately tighter in *multiples* than
+        // the other kinds, because the demand-paging split means a process can
+        // map far more than it will ever populate, so the headroom this needs
+        // is bounded by what a real workload maps rather than by what it
+        // touches.
+        ResourceKind::Pages => 65536,
     }
 }
 
@@ -346,13 +362,21 @@ mod tests {
         );
     }
 
-    /// A kind with no charge sites carries no ceiling: a limit on a counter
-    /// nothing increments refuses against nothing and would be a number with
-    /// no reader.
+    /// Every kind is charged somewhere and therefore carries a ceiling.
+    ///
+    /// Stated over the whole set rather than over a list of the wired ones, so
+    /// a kind added later without charge sites fails here instead of shipping
+    /// a limit that refuses against a counter nothing increments -- or, worse,
+    /// a `NO_LIMIT_SENTINEL` nobody notices is unbounded.
     #[test]
-    fn unwired_kinds_carry_no_ceiling() {
-        for kind in [ResourceKind::Pages] {
-            assert_eq!(default_process_limit(kind), NO_LIMIT_SENTINEL, "{kind:?}");
+    fn every_kind_carries_a_ceiling() {
+        for kind in ResourceKind::ALL {
+            assert_ne!(
+                default_process_limit(kind),
+                NO_LIMIT_SENTINEL,
+                "{kind:?} has no enforced ceiling: either wire its charge sites \
+                 or say here why it is unbounded"
+            );
         }
     }
 

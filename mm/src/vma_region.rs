@@ -8,10 +8,13 @@
 //! gaps between existing entries, and `insert` merges compatible adjacent
 //! regions automatically.
 
+use slopos_abi::quota::PagesAxis;
+use slopos_ostd::process::AccountId;
+use slopos_ostd::process::quota::{ChargeSlot, Reservation, TryChargeError, try_charge};
 use slopos_ostd::{KBTreeMap, KVec};
 
 use crate::memfd::MemfdHandle;
-use crate::paging_defs::PageFlags;
+use crate::paging_defs::{PAGE_SIZE_4KB, PageFlags};
 
 // ---------------------------------------------------------------------------
 // RegionBacking — what provides pages for this region
@@ -174,20 +177,132 @@ impl VmaRegion {
 // VmaMap — sorted, non-overlapping map of virtual memory regions
 // ---------------------------------------------------------------------------
 
+/// Pages spanned by the half-open range `[start, end)`.
+#[inline]
+fn range_pages(start: u64, end: u64) -> u32 {
+    let bytes = end.saturating_sub(start);
+    u32::try_from(bytes.div_ceil(PAGE_SIZE_4KB)).unwrap_or(u32::MAX)
+}
+
 /// A sorted map of non-overlapping virtual memory regions.
 ///
 /// Key = start address, value = (end address, region).
 /// All intervals are half-open: [start, end).
 /// Invariant: no two entries overlap; maintained by construction.
+///
+/// # The address space's page charge lives here
+///
+/// One [`ChargeSlot<PagesAxis>`] for the whole map, not a `Charge` field per
+/// [`VmaRegion`]. The per-region shape is the one FreeBSD carried for sixteen
+/// years and removed in 2026: a scalar charge on a region cannot survive being
+/// split, because "the split operations effectively carve holes in the charged
+/// regions, and a single counter cannot express it", and their fix was to give
+/// up exactness rather than track the carved set. Here the map *is* the carved
+/// set, so the same exactness is free — and a `VmaRegion` is `Clone`, cloned on
+/// every split remnant, which a linear token may never be.
+///
+/// Every mutation goes through [`link`](Self::link) / [`unlink`](Self::unlink),
+/// which are the only writers of both the tree and `mapped_pages`, so the
+/// charge cannot drift from the thing it accounts for by any path that
+/// compiles. [`audit`](Self::audit) checks that at runtime anyway.
 pub struct VmaMap {
     map: KBTreeMap<u64, (u64, VmaRegion)>,
+    /// Pages the tree currently spans. Maintained incrementally by
+    /// `link`/`unlink` rather than recomputed, so a mutation stays O(log n).
+    mapped_pages: u32,
+    /// The account [`mapped_pages`](Self::mapped_pages) is charged to, kept
+    /// separately because an empty slot names no account and a refusal has to
+    /// know who it is refusing.
+    account: AccountId,
+    charge: ChargeSlot<PagesAxis>,
 }
 
 impl VmaMap {
     pub const fn new() -> Self {
         Self {
             map: KBTreeMap::new(),
+            mapped_pages: 0,
+            account: AccountId::NONE,
+            charge: ChargeSlot::empty(),
         }
+    }
+
+    /// Name the principal this address space's pages are charged to.
+    ///
+    /// Called once when the slot binds. Anything already mapped is re-charged
+    /// against the new account, which keeps the invariant that the charge
+    /// equals the map rather than making the binding order load-bearing.
+    pub fn bind_account(&mut self, account: AccountId) {
+        if self.account == account {
+            return;
+        }
+        self.charge.take();
+        self.account = account;
+        if self.mapped_pages != 0
+            && let Ok(reservation) = try_charge::<PagesAxis>(account, self.mapped_pages)
+        {
+            self.charge.put(reservation);
+        }
+    }
+
+    /// The account this map's pages are charged to.
+    #[inline]
+    pub fn account(&self) -> AccountId {
+        self.account
+    }
+
+    /// Pages the tree spans.
+    #[inline]
+    pub fn mapped_pages(&self) -> u32 {
+        self.mapped_pages
+    }
+
+    /// Pages the charge token currently holds.
+    #[inline]
+    pub fn charged_pages(&self) -> u32 {
+        self.charge.amount()
+    }
+
+    /// Recompute the tree's span and report it beside what is charged.
+    ///
+    /// The runtime form of "the charge equals the map". `mapped_pages` is
+    /// maintained incrementally, so this is the only thing that can see it
+    /// having drifted from the tree it summarises; the ledger audit reads it.
+    pub fn audit(&self) -> (u32, u32, u32) {
+        let walked = self.map.iter().fold(0u32, |acc, entry| {
+            acc.saturating_add(range_pages(*entry.0, entry.1.0))
+        });
+        (walked, self.mapped_pages, self.charge.amount())
+    }
+
+    /// Add one entry to the tree. Tracks the span; never touches the charge.
+    ///
+    /// The charge is adjusted only by [`settle`](Self::settle) and by the
+    /// reservation an `insert` arrives with, so no tree operation has to
+    /// remember whether its pages were already paid for — which is exactly the
+    /// bookkeeping a merge and a split get wrong in opposite directions.
+    fn link(&mut self, start: u64, end: u64, region: VmaRegion) {
+        self.mapped_pages = self.mapped_pages.saturating_add(range_pages(start, end));
+        self.map.insert(start, (end, region));
+    }
+
+    /// Remove one entry from the tree. Tracks the span; never touches the charge.
+    fn unlink(&mut self, start: u64) -> Option<(u64, VmaRegion)> {
+        let (end, region) = self.map.remove(&start)?;
+        self.mapped_pages = self.mapped_pages.saturating_sub(range_pages(start, end));
+        Some((end, region))
+    }
+
+    /// Give back whatever the charge holds above what the tree spans.
+    ///
+    /// Only ever a shrink, and that is what makes it infallible and therefore
+    /// safe to run at the end of every removal path: growth is always
+    /// pre-reserved by the caller that wanted it, so the only way the charge
+    /// can exceed the map is that pages were unmapped. A `munmap` must not be
+    /// refusable against a ceiling it is *reducing* the use of.
+    fn settle(&mut self) {
+        self.charge
+            .shrink(self.charge.amount().saturating_sub(self.mapped_pages));
     }
 
     pub fn len(&self) -> usize {
@@ -200,10 +315,48 @@ impl VmaMap {
 
     /// Insert a region, merging with compatible adjacent regions.
     ///
+    /// Charges `[start, end)` against this map's account before touching the
+    /// tree, so a refusal leaves the address space exactly as it found it. A
+    /// merge absorbs entries whose pages are already charged and widens the
+    /// new entry by exactly as much, so the reservation taken here is the net
+    /// growth however many neighbours merge.
+    ///
     /// In debug builds, asserts that no incompatible overlap exists (gap
     /// finder guarantees non-overlap by construction).
+    pub fn insert(
+        &mut self,
+        start: u64,
+        end: u64,
+        region: VmaRegion,
+    ) -> Result<(), TryChargeError> {
+        let reserved = self.reserve_pages(start, end)?;
+        self.insert_reserved(start, end, region, reserved);
+        Ok(())
+    }
+
+    /// Take the page charge for `[start, end)` without touching the tree.
+    ///
+    /// For a caller that must map before it can link — charging first means a
+    /// refusal happens before any page-table write, so there is no partial
+    /// mapping to unwind. The reservation refunds itself if dropped, so an
+    /// abandoned mapping attempt needs no cleanup either.
+    pub fn reserve_pages(
+        &self,
+        start: u64,
+        end: u64,
+    ) -> Result<Reservation<PagesAxis>, TryChargeError> {
+        try_charge::<PagesAxis>(self.account, range_pages(start, end))
+    }
+
+    /// [`insert`](Self::insert) with the charge already taken.
     #[allow(unused_mut)]
-    pub fn insert(&mut self, mut start: u64, mut end: u64, region: VmaRegion) {
+    pub fn insert_reserved(
+        &mut self,
+        mut start: u64,
+        mut end: u64,
+        region: VmaRegion,
+        reservation: Reservation<PagesAxis>,
+    ) {
         // Try merge with predecessor (entry whose end == start).
         let merge_pred = self
             .map
@@ -211,9 +364,12 @@ impl VmaMap {
             .next_back()
             .filter(|entry| entry.1.0 == start && entry.1.1.can_merge_with(&region))
             .map(|entry| *entry.0);
+        // The absorbed neighbour's pages stay charged: they are re-linked
+        // below as part of the widened entry, so this is a move within the
+        // tree rather than a removal.
         if let Some(pred_start) = merge_pred {
             start = pred_start;
-            self.map.remove(&pred_start);
+            self.unlink(pred_start);
         }
 
         // Try merge with successor (entry whose start == end).
@@ -225,7 +381,7 @@ impl VmaMap {
             .map(|entry| (*entry.0, entry.1.0));
         if let Some((succ_start, succ_end)) = merge_succ {
             end = succ_end;
-            self.map.remove(&succ_start);
+            self.unlink(succ_start);
         }
 
         // Debug: assert no actual overlap.
@@ -245,12 +401,13 @@ impl VmaMap {
             }
         }
 
-        self.map.insert(start, (end, region));
-    }
-
-    /// Remove the exact region starting at `start`. Returns the removed region.
-    pub fn remove_exact(&mut self, start: u64) -> Option<(u64, VmaRegion)> {
-        self.map.remove(&start)
+        self.charge.grow(reservation);
+        self.link(start, end, region);
+        debug_assert_eq!(
+            self.charge.amount(),
+            self.mapped_pages,
+            "VmaMap::insert left the page charge disagreeing with the tree"
+        );
     }
 
     /// Find the region containing address `addr` (point query).
@@ -368,23 +525,23 @@ impl VmaMap {
         if let Some((pred_start, pred_end)) = pred {
             if pred_end > start && !affected.iter().any(|k| *k == pred_start) {
                 // This predecessor overlaps but wasn't caught by the range query.
-                let (pred_end_val, region) = self.map.remove(&pred_start).unwrap();
+                let (pred_end_val, region) = self.unlink(pred_start).unwrap();
                 let overlap_start = start;
                 let overlap_end = pred_end_val.min(end);
                 on_removed(overlap_start, overlap_end, &region);
                 // Re-insert left remnant.
                 if pred_start < start {
-                    self.map.insert(pred_start, (start, region.clone()));
+                    self.link(pred_start, start, region.clone());
                 }
                 // Re-insert right remnant.
                 if pred_end_val > end {
-                    self.map.insert(end, (pred_end_val, region));
+                    self.link(end, pred_end_val, region);
                 }
             }
         }
 
         for key in affected {
-            if let Some((vma_end, region)) = self.map.remove(&key) {
+            if let Some((vma_end, region)) = self.unlink(key) {
                 let vma_start = key;
                 let overlap_start = vma_start.max(start);
                 let overlap_end = vma_end.min(end);
@@ -392,28 +549,18 @@ impl VmaMap {
 
                 // Re-insert left remnant [vma_start, start).
                 if vma_start < start {
-                    self.map.insert(vma_start, (start, region.clone()));
+                    self.link(vma_start, start, region.clone());
                 }
                 // Re-insert right remnant [end, vma_end).
                 if vma_end > end {
-                    self.map.insert(end, (vma_end, region));
+                    self.link(end, vma_end, region);
                 }
             }
         }
-    }
-
-    /// Shrink a region's start (for partial munmap from the left).
-    pub fn set_start(&mut self, old_start: u64, new_start: u64) {
-        if let Some((end, region)) = self.map.remove(&old_start) {
-            self.map.insert(new_start, (end, region));
-        }
-    }
-
-    /// Change a region's end (for brk, partial munmap from the right).
-    pub fn set_end(&mut self, start: u64, new_end: u64) {
-        if let Some(val) = self.map.get_mut(&start) {
-            val.0 = new_end;
-        }
+        // One settle for the whole range: a split refunds exactly the carved
+        // hole, because the remnants were re-linked before the charge was
+        // reconciled against the span.
+        self.settle();
     }
 
     /// Drain all regions, calling `on_each(start, end, &region)` before removal.
@@ -422,14 +569,17 @@ impl VmaMap {
         let keys: KVec<u64> =
             KVec::from_iter_fallible(self.map.keys().copied()).expect("vma drain: alloc");
         for key in keys {
-            if let Some((end, region)) = self.map.remove(&key) {
+            if let Some((end, region)) = self.unlink(key) {
                 on_each(key, end, &region);
             }
         }
+        self.settle();
     }
 
-    /// Clear all regions without callbacks.
+    /// Clear all regions without callbacks, refunding every page.
     pub fn clear(&mut self) {
         self.map.clear();
+        self.mapped_pages = 0;
+        self.charge.take();
     }
 }

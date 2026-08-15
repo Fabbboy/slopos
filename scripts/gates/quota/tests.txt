@@ -10,11 +10,17 @@
 # A cap matching nothing is a dead entry and fails, because a kind that
 # stopped being reported looks exactly like a kind that stayed cheap.
 #
-# Measured 2026-08-09 on the tests ISO under quota=enforce, with the
-# session-smoke utest holding a desktop-shaped population open across the
-# post-userland-tests dump. Seven of the eight kinds are charged; Pages has no
-# charge sites yet and is absent rather than capped at zero, because a cap on
-# a kind nothing charges bounds nothing.
+# Measured on the tests ISO under quota=enforce, with the session-smoke utest
+# holding a desktop-shaped population open across the post-userland-tests
+# dump. All eight kinds are charged.
+#
+# `pages` is mapped **virtual** address space, not resident memory -- the
+# RLIMIT_AS quantity. The root's 612 416 pages is 2.3 GiB of VA across ~108
+# live address spaces against 86 899 physical pages of RAM, and those two
+# numbers are not comparable *by design*: demand paging means a process may
+# map far more than it ever populates. The reconciling number is the per-row
+# one -- worst single address space 30 998 pages (121 MiB) -- which is what
+# the enforced per-process ceiling of 65 536 is derived from.
 #
 # The caps are the ROOT account's peaks — the sum over every principal plus
 # the kernel's own, not a per-process figure. Worst single user rows measured
@@ -64,12 +70,14 @@ post-kernel-tests	custody	8
 post-kernel-tests	fdslot	256
 post-kernel-tests	kernelmeta	636
 post-kernel-tests	objectrow	257
+post-kernel-tests	pages	65536
 post-kernel-tests	process	11
 post-kernel-tests	task	8
 post-userland-tests	custody	8
 post-userland-tests	fdslot	256
 post-userland-tests	kernelmeta	636
 post-userland-tests	objectrow	257
+post-userland-tests	pages	655360
 post-userland-tests	pinnedbytes	1
 post-userland-tests	process	113
 post-userland-tests	task	10

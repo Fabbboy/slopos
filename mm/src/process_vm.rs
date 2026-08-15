@@ -762,7 +762,12 @@ fn add_vma_to_inner(inner: &mut ProcessVm, start: u64, end: u64, region: VmaRegi
     if !vma_range_valid(start, end) {
         return -1;
     }
-    inner.vma_map.insert(start, end, region);
+    // A refused page charge is an address space at its ceiling, which reaches
+    // userland as `ENOMEM` — the errno `ResourceKind::Pages` already names, and
+    // the one every caller of this function already maps a failure to.
+    if inner.vma_map.insert(start, end, region).is_err() {
+        return -1;
+    }
     0
 }
 
@@ -1789,6 +1794,9 @@ pub fn create_process_vm_for(process: KArc<Process>) -> Option<ProcessVmRef> {
         proc.generation = generation;
         proc.vm_space = Some(vm_space_arc);
         proc.vma_map.clear();
+        // Before the first mapping, so every page this address space maps is
+        // charged to the process that owns it rather than to nobody.
+        proc.vma_map.bind_account(reservation.process.account());
         proc.code_start = layout.code_start;
         proc.data_start = layout.data_start;
         proc.heap_start = layout.heap_start;
@@ -2091,6 +2099,7 @@ pub fn process_vm_free(process: ProcessId, vaddr: u64, size: u64) -> c_int {
 /// descriptor table is keyed on the process too, and retiring the process is
 /// what releases both. mm does not have to reach fs to say so.
 pub fn init_process_vm() -> c_int {
+    slopos_ostd::process::quota::register_pages_reconciler(reconcile_page_charges);
     for i in 0..MAX_PROCESSES {
         // The slot's own process, so the teardown names the object rather
         // than re-resolving a number that may already have been reissued.
@@ -2108,6 +2117,35 @@ pub fn init_process_vm() -> c_int {
     klog_info!("Process VM manager initialized");
 
     0
+}
+
+/// Report every bound address space's mapped-versus-charged page counts.
+///
+/// The audit's `Pages` check. `try_lock` rather than `lock`: the audit runs
+/// from the diagnostic console and from a test, and a slot held by a CPU
+/// mid-mmap is a *transient* disagreement rather than a fault — blocking for
+/// it would order the console behind every address-space operation, and
+/// reporting it would be a false positive.
+fn reconcile_page_charges(report: &mut dyn FnMut(slopos_ostd::process::AccountId, u32, u32)) {
+    for slot in PROCESS_VMS.iter() {
+        let Some(guard) = slot.try_lock() else {
+            continue;
+        };
+        // Occupancy asked of the slot's owning process rather than of its id:
+        // an unbound slot has no process, and no number can say that.
+        if guard.process.is_none() {
+            continue;
+        }
+        let (walked, tracked, charged) = guard.vma_map.audit();
+        // `walked` is the tree recomputed from scratch and `tracked` the
+        // incrementally-maintained span, so reporting the recomputed one makes
+        // a drift between them visible too rather than trusting the summary.
+        debug_assert_eq!(
+            walked, tracked,
+            "VmaMap span drifted from the tree it summarises"
+        );
+        report(guard.vma_map.account(), walked, charged);
+    }
 }
 
 /// Process-address-space slot occupancy.
@@ -2445,6 +2483,16 @@ pub fn process_vm_map_ring(process: ProcessId, paddrs: &[PhysAddr]) -> u64 {
     };
 
     let inner = &mut *proc;
+    // Charged before a single PTE is written, so a refusal costs no rollback:
+    // the reservation this takes is released by the `Drop` below if the
+    // mapping loop fails, and committed into the map's charge on success.
+    let ring_pages = match inner.vma_map.reserve_pages(start_addr, end_addr) {
+        Ok(r) => r,
+        Err(_) => {
+            klog_info!("process_vm_map_ring: address space is at its page ceiling");
+            return 0;
+        }
+    };
     let vm_space = inner
         .vm_space
         .as_mut()
@@ -2471,7 +2519,9 @@ pub fn process_vm_map_ring(process: ProcessId, paddrs: &[PhysAddr]) -> u64 {
         }
     }
 
-    inner.vma_map.insert(start_addr, end_addr, region);
+    inner
+        .vma_map
+        .insert_reserved(start_addr, end_addr, region, ring_pages);
 
     start_addr
 }
@@ -2662,6 +2712,14 @@ fn process_vm_mmap_inner(
         };
 
         let inner = &mut *proc;
+        // Charged before the first PTE, so a refusal unwinds nothing.
+        let shared_pages = match inner.vma_map.reserve_pages(start_addr, end_addr) {
+            Ok(r) => r,
+            Err(_) => {
+                klog_info!("process_vm_mmap shared: address space is at its page ceiling");
+                return 0;
+            }
+        };
         let vm_space_for_shared = inner
             .vm_space
             .as_mut()
@@ -2699,7 +2757,9 @@ fn process_vm_mmap_inner(
         }
 
         // Insert the shared VMA
-        inner.vma_map.insert(start_addr, end_addr, shared_region);
+        inner
+            .vma_map
+            .insert_reserved(start_addr, end_addr, shared_region, shared_pages);
 
         // Tell the memfd about this mapping
         crate::memfd::memfd_inc_mapcount_by(memfd_handle, page_count);
@@ -3067,6 +3127,91 @@ pub fn process_vm_clone_cow_ref(parent: ProcessId) -> Option<ProcessVmRef> {
     vm
 }
 
+/// A fork refused by the child's page ceiling.
+///
+/// Out of line and `#[cold]`: `format_args!` builds its argument array in the
+/// caller's frame, and this one's caller is measured against the 2 KiB gate.
+#[cold]
+#[inline(never)]
+fn report_clone_page_ceiling(start: u64, end: u64) {
+    klog_info!(
+        "process_vm_clone_cow: child at its page ceiling mapping [{:#x},{:#x})",
+        start,
+        end
+    );
+}
+
+/// Copy every inheritable VMA of `parent_vmas` into `child`, COW-marking the
+/// anonymous ones. Returns the COW pages walked, `Err` carrying the same count
+/// if the clone must be abandoned.
+///
+/// Split out of `process_vm_clone_cow_for` for the stack gate: the per-VMA
+/// locals, the cloned `VmaRegion` and the two walk calls are a frame of their
+/// own, and folding them into the caller put it 88 bytes over the 2 KiB cap.
+#[inline(never)]
+fn clone_cow_populate_child(
+    child: &mut ProcessVm,
+    parent_vmas: &[(u64, u64, VmaRegion, KVec<(u64, PhysAddr, u64)>)],
+) -> Result<u32, u32> {
+    let mut cow_pages = 0u32;
+    for (vma_start, vma_end, parent_region, snapshot) in parent_vmas.iter() {
+        let vma_start = *vma_start;
+        let vma_end = *vma_end;
+        // SlopRing regions are NOT inherited (SLOPRING § 14): the SQ/CQ is
+        // SPSC, so a second producer in the child is forbidden by
+        // construction. Skip the VMA entirely — the child gets no ring
+        // mapping, matching the ring fd, which is close-on-fork and so absent
+        // from the child's fd table.
+        if parent_region.is_ring() {
+            continue;
+        }
+        let is_shared_vma = parent_region.is_shared();
+
+        let child_region = if is_shared_vma {
+            // Shared memfd: inherit directly, no COW
+            parent_region.clone()
+        } else {
+            // Anonymous: mark as COW
+            let mut r = parent_region.clone();
+            r.cow = true;
+            r
+        };
+
+        if child
+            .vma_map
+            .insert(vma_start, vma_end, child_region)
+            .is_err()
+        {
+            report_clone_page_ceiling(vma_start, vma_end);
+            return Err(cow_pages);
+        }
+        if let Some(memfd_handle) = parent_region.memfd_handle() {
+            crate::memfd::memfd_inc_mapcount_by(memfd_handle, vma_page_count(vma_start, vma_end));
+        }
+
+        // Pull a mutable handle to the child's OSTD VmSpace once per VMA. The
+        // child slot lock held by the caller is the sole owner of the KArc, so
+        // `as_mut` succeeds. Parent-side OSTD mark_cow ran inline under the
+        // parent lock in the snapshot phase.
+        let child_vm_space_for_vma = child
+            .vm_space
+            .as_mut()
+            .expect("clone_cow: child vm_space populated above");
+
+        let walked = if is_shared_vma {
+            clone_cow_walk_shared_vma(child_vm_space_for_vma, snapshot.as_slice())
+        } else {
+            clone_cow_walk_anon_vma(child_vm_space_for_vma, snapshot.as_slice())
+        };
+
+        match walked {
+            Ok(n) => cow_pages += n,
+            Err(()) => return Err(cow_pages),
+        }
+    }
+    Ok(cow_pages)
+}
+
 /// Clone `parent_id`'s address space with COW into `child`'s slot.
 pub fn process_vm_clone_cow_for(parent: ProcessId, child: KArc<Process>) -> Option<ProcessVmRef> {
     let parent_slot = match find_slot_for_pid(parent) {
@@ -3144,7 +3289,7 @@ pub fn process_vm_clone_cow_for(parent: ProcessId, child: KArc<Process>) -> Opti
     // We hold the child slot lock while building VMA map + page tables.
     // The parent's address space is stable (read from snapshot; the parent
     // cannot be destroyed while fork is in progress -- scheduler guarantees).
-    let mut cow_pages: u32 = 0;
+    let cow_pages: u32;
     let mut clone_failed = false;
 
     {
@@ -3154,6 +3299,7 @@ pub fn process_vm_clone_cow_for(parent: ProcessId, child: KArc<Process>) -> Opti
         child.generation = child_generation;
         child.vm_space = Some(child_vm_space_arc);
         child.vma_map.clear();
+        child.vma_map.bind_account(reservation.process.account());
         child.code_start = parent_code_start;
         child.data_start = parent_data_start;
         child.heap_start = parent_heap_start;
@@ -3163,63 +3309,11 @@ pub fn process_vm_clone_cow_for(parent: ProcessId, child: KArc<Process>) -> Opti
         child.stack_end = parent_stack_end;
         child.flags = parent_flags;
 
-        // Walk parent's VMA list (from snapshot Vec).
-        for (vma_start, vma_end, parent_region, snapshot) in parent_vmas.iter() {
-            let vma_start = *vma_start;
-            let vma_end = *vma_end;
-            // SlopRing regions are NOT inherited (SLOPRING § 14): the
-            // SQ/CQ is SPSC, so a second producer in the child is
-            // forbidden by construction. Skip the VMA entirely — the
-            // child gets no ring mapping, matching the ring fd, which is
-            // close-on-fork and so absent from the child's fd table.
-            if parent_region.is_ring() {
-                continue;
-            }
-            let is_shared_vma = parent_region.is_shared();
-
-            let child_region = if is_shared_vma {
-                // Shared memfd: inherit directly, no COW
-                parent_region.clone()
-            } else {
-                // Anonymous: mark as COW
-                let mut r = parent_region.clone();
-                r.cow = true;
-                r
-            };
-
-            child.vma_map.insert(vma_start, vma_end, child_region);
-            if let Some(memfd_handle) = parent_region.memfd_handle() {
-                crate::memfd::memfd_inc_mapcount_by(
-                    memfd_handle,
-                    vma_page_count(vma_start, vma_end),
-                );
-            }
-
-            // Pull a mutable handle to the child's OSTD VmSpace once
-            // per VMA. The child slot lock above is the sole owner of
-            // the KArc, so KArc::get_mut succeeds. Parent-side OSTD
-            // mark_cow ran inline under the parent lock in the
-            // snapshot phase above.
-            let child_vm_space_for_vma = child
-                .vm_space
-                .as_mut()
-                .expect("clone_cow: child vm_space populated above");
-
-            let walked = if is_shared_vma {
-                clone_cow_walk_shared_vma(child_vm_space_for_vma, snapshot.as_slice())
-            } else {
-                clone_cow_walk_anon_vma(child_vm_space_for_vma, snapshot.as_slice())
-            };
-
-            match walked {
-                Ok(n) => cow_pages += n,
-                Err(()) => {
-                    clone_failed = true;
-                }
-            }
-
-            if clone_failed {
-                break;
+        match clone_cow_populate_child(&mut child, parent_vmas.as_slice()) {
+            Ok(n) => cow_pages = n,
+            Err(n) => {
+                cow_pages = n;
+                clone_failed = true;
             }
         }
     }

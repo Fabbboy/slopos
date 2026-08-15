@@ -25,7 +25,7 @@
 //! split is a race by construction, and the reservation is the only
 //! observation of headroom this module offers.
 
-use core::sync::atomic::{AtomicBool, AtomicU8, AtomicU32, AtomicU64, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU8, AtomicU32, AtomicU64, AtomicUsize, Ordering};
 
 use slopos_abi::quota::{KIND_COUNT, QuotaMode, ResourceKind};
 
@@ -588,6 +588,51 @@ pub enum LedgerFault {
         used: u32,
         limit: u32,
     },
+    /// A `Pages` row disagrees with the address spaces it accounts for.
+    ///
+    /// The only kind whose charge tracks a quantity that *changes* over the
+    /// holder's life rather than a countable object, so it is the only one
+    /// where "the token is unique" does not already imply "the number is
+    /// right": a mapping can grow, split or merge under a token that was
+    /// minted once.
+    ///
+    /// Two comparisons, because they fail in different ways. `mapped` against
+    /// `charged` catches a token that stopped tracking its own tree — a
+    /// mutation that forgot to adjust it. `charged` against the row's `used`
+    /// catches a debit that reached the account without a token behind it, or
+    /// a token whose refund never reached the row; that is the phantom-debit
+    /// shape, and the other three checks are blind to it because they compare
+    /// rows only against each other.
+    PagesMismatch {
+        account: AccountId,
+        /// Pages the address spaces on this account actually span.
+        mapped: u32,
+        /// Pages their tokens claim.
+        charged: u32,
+        /// What the row says, including every descendant's debit.
+        used: u32,
+    },
+}
+
+/// Reports each address space's `(account, mapped, charged)` page counts.
+///
+/// One call per bound address space, not per account: several address spaces
+/// can name one account (every kernel-side `process_spawn_root` shares the
+/// root's), so the audit sums the reports per account before comparing. A
+/// reconciler that pre-aggregated would hide exactly the case where two maps
+/// disagree in opposite directions.
+pub type PagesReconciler = fn(&mut dyn FnMut(AccountId, u32, u32));
+
+static PAGES_RECONCILER: AtomicUsize = AtomicUsize::new(0);
+
+/// Teach the audit how to check `Pages` against the maps it accounts for.
+///
+/// Registered by `mm`, which owns the region trees; OSTD defines the axis but
+/// cannot name a `VmaMap`. Without this the audit's other three checks pass
+/// vacuously on `Pages`: they compare rows against each other, and a charge
+/// that drifted from its *map* is consistent with every ancestor.
+pub fn register_pages_reconciler(reconciler: PagesReconciler) {
+    PAGES_RECONCILER.store(reconciler as usize, Ordering::Release);
 }
 
 /// Check the ledger against itself, reporting every inconsistency to `report`.
@@ -653,6 +698,68 @@ pub fn ledger_audit(mut report: impl FnMut(LedgerFault)) -> usize {
                     kind,
                     ancestor_used: used,
                     children_used: children,
+                });
+            }
+        }
+    }
+
+    let raw = PAGES_RECONCILER.load(Ordering::Acquire);
+    if let Some(reconcile) =
+        crate::util::fn_ptr::fn_ptr_decode_opt::<PagesReconciler>(raw as *mut ())
+    {
+        // One account at a time, because the mapping from address space to
+        // account is many-to-one — every kernel-side `process_spawn_root`
+        // shares the root's — and a per-map comparison would report each
+        // sibling as a mismatch against the shared row. Re-driving the walk
+        // per account is O(accounts x maps), which is bounded by two fixed
+        // arena-sized constants and pays no stack: the alternative is a
+        // 257-entry accumulator, and this runs inside the 2 KiB frame cap.
+        for (slot, row) in ACCOUNTS.iter().enumerate() {
+            if !row.live.load(Ordering::Acquire) {
+                continue;
+            }
+            let account = account_id_at(slot as u32);
+            if account.is_none() {
+                continue;
+            }
+            let mut mapped = 0u32;
+            let mut charged = 0u32;
+            let mut seen = false;
+            reconcile(&mut |reported, m, c| {
+                if reported != account {
+                    return;
+                }
+                seen = true;
+                mapped = mapped.saturating_add(m);
+                charged = charged.saturating_add(c);
+            });
+            if !seen {
+                continue;
+            }
+            // Descendants debit through this row too, so `used` is the maps'
+            // own total only after their contribution is taken out. Comparing
+            // the residue against zero is what makes a phantom debit visible
+            // without the walk needing a second pass over the tree.
+            let idx = ResourceKind::Pages.index();
+            let used = row.used[idx].load(Ordering::Acquire);
+            let mut descendants = 0u32;
+            for (child_slot, child) in ACCOUNTS.iter().enumerate() {
+                if child_slot == slot || !child.live.load(Ordering::Acquire) {
+                    continue;
+                }
+                if child.parent.load(Ordering::Acquire) == slot as u32 {
+                    descendants =
+                        descendants.saturating_add(child.used[idx].load(Ordering::Acquire));
+                }
+            }
+            let own = used.saturating_sub(descendants);
+            if mapped != charged || own != charged {
+                faults += 1;
+                report(LedgerFault::PagesMismatch {
+                    account,
+                    mapped,
+                    charged,
+                    used: own,
                 });
             }
         }

@@ -68,6 +68,20 @@ fn describe(kc: &mut KConsole<'_>, fault: LedgerFault) {
             used,
             limit
         ),
+        LedgerFault::PagesMismatch {
+            account,
+            mapped,
+            charged,
+            used,
+        } => kline!(
+            kc,
+            "  FAULT slot={} pages: maps {}, tokens claim {}, row holds {} — a \
+             region changed without its charge, or a debit landed without a token",
+            account.slot(),
+            mapped,
+            charged,
+            used
+        ),
     }
 }
 

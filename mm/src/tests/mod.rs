@@ -9,4 +9,5 @@ pub mod tests;
 pub mod tests_cow_edge;
 pub mod tests_demand;
 pub mod tests_oom;
+pub mod tests_quota_pages;
 pub mod tlb_tests;
