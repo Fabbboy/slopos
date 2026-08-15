@@ -52,6 +52,13 @@ fn run_memory(kc: &mut KConsole<'_>) {
         pages.allocated
     );
 
+    // What could be given back under pressure, per registrant. A reclaimer
+    // that has quietly stopped finding anything reads as zero here rather
+    // than as an allocation failure nobody can explain.
+    slopos_ostd::mm::reclaim::for_each_reclaimer(|name, pages| {
+        kline!(kc, "reclaim: {:<18} {} pages", name, pages);
+    });
+
     let (epoch, advance_requested, last_deferred) = crate::mmu::quiesce::stats();
     kline!(
         kc,

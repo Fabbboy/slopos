@@ -170,12 +170,23 @@ impl<K, U> TaskInner<K, U> {
     /// holding this borrow across the diverging switch tail.
     ///
     /// Release on each store, in the order a fault reader walks them.
+    ///
+    /// The exit code carries the signal a POSIX kernel would have killed the
+    /// task with, so `waitpid` can distinguish the causes. `SIGBUS` for an
+    /// out-of-memory demand fault specifically: the mapping exists and the
+    /// access is legal, but the kernel cannot produce a page for it, which is
+    /// the bus-error case rather than the segmentation one.
     #[inline]
     pub fn record_user_fault_exit(&self, reason: TaskFaultReason) -> u32 {
         self.exit_reason
             .store(TaskExitReason::UserFault.as_u16(), Ordering::Release);
         self.fault_reason.store(reason.as_u16(), Ordering::Release);
-        self.exit_code.store(1, Ordering::Release);
+        let signal = match reason {
+            TaskFaultReason::UserOom => slopos_abi::signal::SIGBUS,
+            TaskFaultReason::UserUd => slopos_abi::signal::SIGILL,
+            _ => slopos_abi::signal::SIGSEGV,
+        };
+        self.exit_code.store(128 + signal as u32, Ordering::Release);
         self.task_id
     }
 

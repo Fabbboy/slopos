@@ -479,3 +479,50 @@ fn ext2_file_type_to_vfs(file_type: u8) -> FileType {
         _ => FileType::Regular,
     }
 }
+
+// ============================================================================
+// Reclaim
+// ============================================================================
+
+/// The block cache as a reclaim source.
+///
+/// Clean cached blocks are the cheapest pages in the kernel to give back: the
+/// bytes are already on disk, so dropping one costs a re-read and can lose
+/// nothing. Dirty ones are deliberately out of scope — writing them back is
+/// I/O, on a path that runs precisely because memory is short.
+struct Ext2CacheReclaim;
+
+impl slopos_ostd::mm::reclaim::Reclaimable for Ext2CacheReclaim {
+    fn name(&self) -> &'static str {
+        "ext2-page-cache"
+    }
+
+    fn reclaimable_pages(&self) -> u32 {
+        // `try_lock`, and zero when it fails: reclaim runs on an allocation
+        // failure path that may already hold an allocator lock, and the FS
+        // lock is a sleeping mutex held across block I/O. Waiting here would
+        // block on the very I/O that needs memory to proceed.
+        let Some(guard) = CACHED_EXT2.try_lock() else {
+            return 0;
+        };
+        guard
+            .as_ref()
+            .map_or(0, |cached| cached.cache.reclaimable())
+    }
+
+    fn reclaim(&self, want: u32) -> u32 {
+        let Some(mut guard) = CACHED_EXT2.try_lock() else {
+            return 0;
+        };
+        guard
+            .as_mut()
+            .map_or(0, |cached| cached.cache.shrink_clean(want))
+    }
+}
+
+static EXT2_CACHE_RECLAIM: Ext2CacheReclaim = Ext2CacheReclaim;
+
+/// Register the block cache with the reclaim tier. Boot only.
+pub fn register_reclaim(token: &slopos_ostd::sync::BspToken<'_>) {
+    slopos_ostd::mm::reclaim::register(token, &EXT2_CACHE_RECLAIM);
+}

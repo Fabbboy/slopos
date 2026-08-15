@@ -53,3 +53,13 @@ use slopos_ostd::sync::BspToken;
 pub fn global_allocator_use_kernel_slab<'brand>(token: &BspToken<'brand>) {
     register_kernel_slab_handle(token, crate::slab::slab_handle());
 }
+
+/// Ask every registered reclaimer for up to `want` pages, returning how many
+/// came back.
+///
+/// The kernel-facing entry point for the reclaim tier: `mm` owns the
+/// registrations, so callers reach it here rather than naming
+/// `slopos_ostd::mm::reclaim` and having to know which crates registered.
+pub fn reclaim_pages(want: u32) -> u32 {
+    slopos_ostd::mm::reclaim::run(want)
+}

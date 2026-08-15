@@ -160,6 +160,22 @@ fn boot_step_register_luf_hook_fn(ctx: &mut BootCtx<'_, BspInit>) {
     klog_info!("OSTD: cursor_unmap_hook registered (LufHook)");
 }
 
+/// Wire the reclaim tier.
+///
+/// Registration order is policy: the quarantine goes first because its frames
+/// are already free — nothing references them and releasing one is a splice
+/// into the free lists — so a small shortfall is met without dropping a cache
+/// that costs disk I/O to refill.
+fn boot_step_register_reclaimers_fn(ctx: &mut BootCtx<'_, BspInit>) {
+    let token = ctx.bsp_token();
+    slopos_mm::page_alloc::register_reclaim(&token);
+    slopos_fs::ext2_vfs::register_reclaim(&token);
+    klog_info!(
+        "OSTD: reclaim tier armed ({} pages currently reclaimable)",
+        slopos_ostd::mm::reclaim::reclaimable_pages()
+    );
+}
+
 fn boot_step_memory_pre_typestate(_ctx: &mut BootCtx<'_, BspInit>) -> i32 {
     let memmap = boot_get_memmap();
     if memmap.is_null() {
@@ -282,4 +298,11 @@ crate::boot_init!(
     b"ostd cursor_unmap_hook\0",
     boot_step_register_luf_hook_fn,
     flags = boot_init_priority(56)
+);
+crate::boot_init!(
+    BOOT_STEP_REGISTER_RECLAIMERS,
+    memory,
+    b"ostd reclaim tier\0",
+    boot_step_register_reclaimers_fn,
+    flags = boot_init_priority(57)
 );

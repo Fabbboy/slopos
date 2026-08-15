@@ -10,6 +10,42 @@ use slopos_ostd::{kdiag_dump_interrupt_frame, kdiag_stack_word_at, klog_info};
 use crate::ist_stacks;
 use crate::user_fault::*;
 
+/// Per-CPU slot for why the last unresolvable user page fault could not be
+/// serviced.
+///
+/// Written by the resolver and consumed by the handler two frames above it, on
+/// the same CPU, with interrupts off and no blocking call between — an
+/// exception handler cannot be re-entered by another fault on this CPU before
+/// it reads the value back. Indexed by CPU anyway rather than shared, so a
+/// concurrent fault on a *peer* cannot claim this one's reason.
+///
+/// Exists because the distinction is otherwise invisible: a task killed by a
+/// wild pointer and one killed because the machine ran out of memory produce
+/// the same `waitpid` status without it, and only one of them is the program's
+/// fault.
+static PENDING_FAULT_REASON: [core::sync::atomic::AtomicU16; slopos_arch::pcr::MAX_CPUS] =
+    [const { core::sync::atomic::AtomicU16::new(0) }; slopos_arch::pcr::MAX_CPUS];
+
+/// Record why a fault could not be serviced. Called from the resolver.
+pub(crate) fn record_fault_reason(reason: TaskFaultReason) {
+    let cpu = slopos_arch::pcr::get_current_cpu();
+    if let Some(slot) = PENDING_FAULT_REASON.get(cpu) {
+        slot.store(reason.as_u16(), core::sync::atomic::Ordering::Relaxed);
+    }
+}
+
+/// Take this CPU's recorded reason, leaving `None` behind.
+///
+/// Consuming rather than peeking: a stale reason would attribute the *next*
+/// wild pointer on this CPU to an out-of-memory condition.
+fn take_fault_reason() -> TaskFaultReason {
+    let cpu = slopos_arch::pcr::get_current_cpu();
+    let raw = PENDING_FAULT_REASON.get(cpu).map_or(0, |slot| {
+        slot.swap(0, core::sync::atomic::Ordering::Relaxed)
+    });
+    TaskFaultReason::from_u16(raw)
+}
+
 pub(crate) fn exception_default_panic(frame: *mut InterruptFrame) {
     klog_info!("FATAL: Unhandled exception");
     kdiag_dump_interrupt_frame(frame);
@@ -161,11 +197,17 @@ pub(crate) fn exception_page_fault(frame: *mut InterruptFrame) {
 
     if from_user {
         log_user_page_fault_diagnostics(frame_ref, fault_addr);
-        terminate_user_task(
-            TaskFaultReason::UserPage,
-            frame_ref,
-            cstr_from_bytes(b"user page fault\0"),
-        );
+        let (reason, detail) = match take_fault_reason() {
+            TaskFaultReason::UserOom => (
+                TaskFaultReason::UserOom,
+                cstr_from_bytes(b"out of memory servicing a user page fault\0"),
+            ),
+            _ => (
+                TaskFaultReason::UserPage,
+                cstr_from_bytes(b"user page fault\0"),
+            ),
+        };
+        terminate_user_task(reason, frame_ref, detail);
         return;
     }
 

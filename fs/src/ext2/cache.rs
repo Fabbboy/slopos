@@ -310,12 +310,76 @@ impl BlockCache {
         }
     }
 
+    /// Frames holding a clean, unpinned block — what [`shrink_clean`] could
+    /// give back right now.
+    ///
+    /// [`shrink_clean`]: Self::shrink_clean
+    pub fn reclaimable(&self) -> u32 {
+        self.entries
+            .iter()
+            .filter(|e| e.pinned == 0 && !e.frame.dirty())
+            .count() as u32
+    }
+
+    /// Drop up to `want` clean, unpinned cache entries, returning their frames
+    /// to the buddy. Returns how many were released.
+    ///
+    /// **Clean only, and that is the whole safety argument.** A clean block's
+    /// bytes are already on disk, so dropping it costs a re-read and cannot
+    /// lose data; a dirty one would need a device write, which is I/O on a
+    /// path that runs *because* memory is short. A pinned entry has a live
+    /// `CachedBlock` guard borrowing it and is not ours to drop.
+    ///
+    /// The cache re-grows on demand: `get_kind` allocates a fresh entry when
+    /// none is free, so shrinking costs re-reads rather than correctness.
+    pub fn shrink_clean(&mut self, want: u32) -> u32 {
+        if want == 0 {
+            return 0;
+        }
+        let mut released = 0u32;
+        // Back to front, so each `swap_remove`-free truncation only ever moves
+        // entries that have already been considered.
+        let mut i = self.entries.len();
+        while i > 0 && released < want {
+            i -= 1;
+            if self.entries[i].pinned != 0 || self.entries[i].frame.dirty() {
+                continue;
+            }
+            // Dropping the entry drops its `Frame<PageCacheMeta>`, which is
+            // what actually returns the page.
+            self.entries.swap_remove(i);
+            released += 1;
+        }
+        if released != 0 {
+            // Slot indices moved, so the block index is rebuilt rather than
+            // patched: a stale index entry would hand a reader another
+            // block's bytes under the number it asked for.
+            self.index.clear();
+            for (slot, entry) in self.entries.iter().enumerate() {
+                if entry.valid {
+                    self.index.insert(entry.block, slot);
+                }
+            }
+        }
+        released
+    }
+
     fn find_or_evict(&mut self, device: &dyn BlockDevice) -> Result<usize, Ext2Error> {
         // First pass: find an empty slot.
         for (i, entry) in self.entries.iter().enumerate() {
             if !entry.valid {
                 return Ok(i);
             }
+        }
+
+        // Re-grow after a reclaim took entries away. Without this the cache
+        // would stay permanently shrunk and every later miss would evict a
+        // live block instead of using the capacity it is entitled to.
+        if self.entries.len() < CACHE_ENTRIES
+            && let Ok(entry) = CacheEntry::new()
+            && self.entries.push(entry).is_ok()
+        {
+            return Ok(self.entries.len() - 1);
         }
 
         // Second pass: find LRU unpinned entry.

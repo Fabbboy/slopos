@@ -11,4 +11,5 @@ pub mod tests_demand;
 pub mod tests_oom;
 pub mod tests_quota_heap;
 pub mod tests_quota_pages;
+pub mod tests_reclaim;
 pub mod tlb_tests;

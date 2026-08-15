@@ -79,9 +79,21 @@ pub fn handle_demand_fault(
         return Ok(());
     }
 
-    let phys = alloc_kernel_page();
+    let mut phys = alloc_kernel_page();
     if phys.is_null() {
-        return Err(MmError::NoMemory);
+        // One bounded reclaim-and-retry. A demand fault has no syscall return
+        // path to back off on, so this is the last point at which the fault
+        // can still be serviced rather than turned into a signal.
+        //
+        // Here and not inside `try_charge`: the account arena takes no locks
+        // by construction, and a reclaim hook there would give it an inbound
+        // edge from every charge site at once.
+        if slopos_ostd::mm::reclaim::run(1) != 0 {
+            phys = alloc_kernel_page();
+        }
+        if phys.is_null() {
+            return Err(MmError::NoMemory);
+        }
     }
 
     let pte_flags = region.to_page_flags().bits();

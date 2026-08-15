@@ -663,20 +663,43 @@ account. Recorded rather than silently skipped.
 
 Ordered by what the plan itself says is most dangerous to defer.
 
-### 1. Reclaim — the scheduled item, not an optional one
+### 1. Reclaim — **shipped**
 
-Nothing reclaims. Between now and this landing, the quota bounds acquisition and not
-holding time, on a kernel with no shrinker, no eviction, no out-of-memory disposition and
-no swap. The plan's own words: *bounding acquisition without bounding holding time is a
-first-come land grab with better bookkeeping, and Zircon is nine years of evidence that
-"later" means never.*
+`slopos_ostd::mm::reclaim` is a `Reclaimable` trait in the count/scan shape Linux settled
+on after its single-callback shrinker proved unworkable: `reclaimable_pages` answers
+without freeing, `reclaim(want)` frees. Registrants live in a `.bss` table, because a
+registry that allocated would be unusable from the path that runs when allocation has
+already failed.
 
-Wanted: a `Reclaimable` trait with two implementors chosen because they are provably safe
-to drop — the per-CPU stack-VA cache (already a pool that can shrink to zero) and clean
-page-cache frames (the dirty bit exists). Plus the demand-fault disposition, which must be
-a **signal so the task unwinds itself**, never a cross-CPU teardown: a demand fault has no
-syscall return path, and killing from another CPU collides with I8 (a task only exits from
-its own context). Depth-ordered subtree kill is the bounded last resort.
+**Two implementors, and not the two this plan named.** The TLB quarantine goes first — its
+frames are already free, and releasing one is a splice into the free lists. Clean ext2
+page-cache frames go second: a clean block's bytes are already on disk, so dropping one
+costs a re-read and can lose nothing.
+
+The per-CPU stack-VA cache was rejected on inspection. `pcp_drain_all` is documented
+shutdown-only and takes every CPU's cache without pinning, and a stack VA slot keeps its
+frames *mapped* by design — returning the slot frees no page. It would have been a
+reclaimer that reclaims nothing.
+
+**Driven from the caller of a refused allocation, never from `try_charge`.** The arena
+takes no locks by construction; a reclaim hook there would give it an inbound edge from
+every charge site at once. `mmap` retries once at the syscall boundary, and the demand-fault
+path retries once before giving up.
+
+**The demand-fault disposition.** `TaskFaultReason::UserOom` is distinct from `UserPage`,
+and `record_user_fault_exit` maps it to `128 + SIGBUS` (`SIGSEGV` for a wild pointer,
+`SIGILL` for a bad opcode) — so `waitpid` can tell "the machine ran out of memory" from
+"the program dereferenced a wild pointer", which were the same status before.
+
+Termination already satisfies I8 and did not have to change: `retire_faulted_cpu` runs on
+the faulting task's *own* CPU and lets it exit from its own context. What was missing was
+only the reason, which is why this is a fault-reason change rather than a teardown one.
+
+*Not* delivered: running a userland `SIGBUS` **handler** from the fault. A page-fault frame
+arrives on an IST stack, and `deliver_pending_signal_on_irq_exit` deliberately refuses
+there (`trap_running_on_exception_stack`). Lifting that is a change to the IST discipline,
+not to accounting, and is left un-attempted rather than half-done.
+
 
 ### 2. `Pages` — **shipped**, and not in the shape this plan asked for
 
@@ -808,10 +831,12 @@ Filtered runs that create files must include `'*ext2_aaa*'`.
    tracking amounts is insufficient and the allocations must come from independent backing
    stores. This tree does not do that, so **tier-1 charges bound object count, not bytes,
    and a bytes-denominated limit must never be enforced through the shared slab.**
-4. **Refuse-only until reclaim lands. ← CURRENTLY LIVE.** The quota bounds acquisition and
-   not holding time, on a kernel with no shrinker, no eviction, no out-of-memory
-   disposition and no swap. Attribution is worth having on its own, which is why the rest
-   shipped first — but this is the open half, and it is item 1 of *What is left*.
+4. **Reclaim is shallow.** Two sources — the TLB quarantine and clean ext2 page-cache
+   frames — and an out-of-memory demand fault that reports `SIGBUS` rather than being
+   serviced. There is still no swap, no anonymous-page eviction and no shrinker over the
+   slab, so a workload whose memory is all anonymous and dirty reclaims nothing. What
+   changed is that holding time is now bounded for the classes that *can* be given back,
+   and that an out-of-memory kill is distinguishable from a wild pointer.
 5. **Shared namespaces are covert channels regardless of accounting.** A bounded shared
    table is probeable by any process through its errno. Futex buckets are the in-tree
    instance: fill one bucket and deny every other process whose word hashes there. The fix

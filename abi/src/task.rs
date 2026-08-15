@@ -426,6 +426,15 @@ pub enum TaskFaultReason {
     UserGp = 2,
     UserUd = 3,
     UserDeviceNa = 4,
+    /// A demand fault that could not be serviced because memory ran out,
+    /// after reclaim was asked and could not free enough.
+    ///
+    /// Distinct from [`UserPage`](Self::UserPage), which is a wild pointer.
+    /// Both kill the task, but only this one means the machine was short of
+    /// memory rather than the program being wrong — and `waitpid` cannot tell
+    /// them apart if they share a reason. Reported as `SIGBUS`, matching the
+    /// signal a mapping that cannot be backed raises elsewhere.
+    UserOom = 5,
 }
 
 impl TaskFaultReason {
@@ -443,6 +452,7 @@ impl TaskFaultReason {
             2 => Self::UserGp,
             3 => Self::UserUd,
             4 => Self::UserDeviceNa,
+            5 => Self::UserOom,
             _ => Self::None,
         }
     }

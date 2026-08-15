@@ -260,3 +260,41 @@ pub fn page_allocator_paint_all(value: u8) {
 pub type OwnedPageFrame = slopos_ostd::mm::frame::Frame<crate::kernel_meta::KernelMeta>;
 
 pub use OwnedPageFrame as KernelFrame;
+
+// ---------------------------------------------------------------------------
+// Reclaim
+// ---------------------------------------------------------------------------
+
+/// The TLB quarantine as a reclaim source.
+///
+/// Frames sit here after being unmapped, waiting for every CPU to prove it has
+/// invalidated its translation. Once the epoch closes they are *already free*
+/// — nothing references them and no work is needed to release them beyond
+/// splicing them back into the free lists. That makes this the cheapest and
+/// most certainly-recoverable pool in the kernel, so it is asked first.
+struct QuarantineReclaim;
+
+impl slopos_ostd::mm::reclaim::Reclaimable for QuarantineReclaim {
+    fn name(&self) -> &'static str {
+        "tlb-quarantine"
+    }
+
+    fn reclaimable_pages(&self) -> u32 {
+        if BUDDY_ALLOCATOR.quarantine_has_releasable() {
+            BUDDY_ALLOCATOR.quarantine_frames()
+        } else {
+            0
+        }
+    }
+
+    fn reclaim(&self, want: u32) -> u32 {
+        BUDDY_ALLOCATOR.quarantine_release_some(want)
+    }
+}
+
+static QUARANTINE_RECLAIM: QuarantineReclaim = QuarantineReclaim;
+
+/// Register the quarantine with the reclaim tier. Boot only.
+pub fn register_reclaim(token: &slopos_ostd::sync::BspToken<'_>) {
+    slopos_ostd::mm::reclaim::register(token, &QUARANTINE_RECLAIM);
+}

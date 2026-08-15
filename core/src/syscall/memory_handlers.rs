@@ -43,15 +43,23 @@ define_syscall!(syscall_mmap
         return Ok(result);
     }
 
-    let result = slopos_mm::process_vm::process_vm_mmap(
-        process_id.process().ok_or(Errno::ESRCH)?,
-        addr,
-        length,
-        prot,
-        flags,
-        fd.raw() as i64,
-        offset,
+    let process = process_id.process().ok_or(Errno::ESRCH)?;
+    let mut result = slopos_mm::process_vm::process_vm_mmap(
+        process, addr, length, prot, flags, fd.raw() as i64, offset,
     );
+    if result == 0 {
+        // One bounded reclaim-and-retry, here rather than inside `try_charge`:
+        // the account arena takes no locks by construction, so a reclaim hook
+        // there would give it an inbound edge from every charge site at once.
+        // A syscall boundary is where blocking is legal and where a refusal
+        // has an errno to travel back on.
+        let want = length.div_ceil(4096).try_into().unwrap_or(u32::MAX);
+        if slopos_mm::reclaim_pages(want) != 0 {
+            result = slopos_mm::process_vm::process_vm_mmap(
+                process, addr, length, prot, flags, fd.raw() as i64, offset,
+            );
+        }
+    }
     if result == 0 {
         Err(Errno::ENOMEM)
     } else {

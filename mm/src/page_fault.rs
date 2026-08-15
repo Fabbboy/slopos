@@ -1,7 +1,21 @@
+use slopos_abi::task::TaskFaultReason;
 use slopos_ostd::handle::HandleError;
 use slopos_ostd::klog_info;
 
+use crate::error::MmError;
 use crate::{cow, demand, process_vm};
+
+/// What became of a user page fault.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FaultOutcome {
+    /// Serviced; the faulting instruction can be retried.
+    Resolved,
+    /// Not serviceable. The task dies, and this is the reason it died — which
+    /// `waitpid` needs, because "the machine is out of memory" and "the
+    /// program dereferenced a wild pointer" are the same observation without
+    /// it.
+    Fatal(TaskFaultReason),
+}
 
 /// Try to service a user page fault in the address space named by
 /// `process_vm_handle`, returning whether it was resolved.
@@ -17,9 +31,9 @@ pub fn try_resolve_user_fault(
     error_code: u64,
     process_vm_handle: u64,
     task_id: u32,
-) -> bool {
+) -> FaultOutcome {
     let Some(handle) = process_vm::unpack_process_vm_handle(process_vm_handle) else {
-        return false;
+        return FaultOutcome::Fatal(TaskFaultReason::UserPage);
     };
 
     // Quick path: probe COW status WITHOUT taking the per-process lock
@@ -36,7 +50,15 @@ pub fn try_resolve_user_fault(
                 cow::handle_cow_fault(vs, fault_addr)
             });
             match result {
-                Ok(Ok(())) => return true,
+                Ok(Ok(())) => return FaultOutcome::Resolved,
+                Ok(Err(MmError::NoMemory)) => {
+                    klog_info!(
+                        "PF: COW copy for task {} at cr2=0x{:x} found no memory",
+                        task_id,
+                        fault_addr
+                    );
+                    return FaultOutcome::Fatal(TaskFaultReason::UserOom);
+                }
                 Ok(Err(_)) | Err(_) => {
                     klog_info!(
                         "PF: COW resolution FAILED for task {} at cr2=0x{:x}",
@@ -49,7 +71,7 @@ pub fn try_resolve_user_fault(
         Ok(false) => {}
         Err(err) => {
             report_unresolvable_address_space(err, task_id, fault_addr);
-            return false;
+            return FaultOutcome::Fatal(TaskFaultReason::UserPage);
         }
     }
 
@@ -70,11 +92,19 @@ pub fn try_resolve_user_fault(
     );
 
     match demanded {
-        Ok(Some(Ok(()))) => true,
-        Ok(_) => false,
+        Ok(Some(Ok(()))) => FaultOutcome::Resolved,
+        Ok(Some(Err(MmError::NoMemory))) => {
+            klog_info!(
+                "PF: demand fault for task {} at cr2=0x{:x} found no memory after reclaim",
+                task_id,
+                fault_addr
+            );
+            FaultOutcome::Fatal(TaskFaultReason::UserOom)
+        }
+        Ok(_) => FaultOutcome::Fatal(TaskFaultReason::UserPage),
         Err(err) => {
             report_unresolvable_address_space(err, task_id, fault_addr);
-            false
+            FaultOutcome::Fatal(TaskFaultReason::UserPage)
         }
     }
 }

@@ -10,6 +10,7 @@ pub mod page_size;
 pub mod page_table;
 pub mod phys;
 pub mod pod;
+pub mod reclaim;
 pub mod slab;
 pub mod tlb;
 pub mod uframe;

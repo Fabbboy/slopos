@@ -806,5 +806,22 @@ fn try_handle_page_fault(frame: *mut slopos_arch::InterruptFrame) -> bool {
     let vm_handle = task_ref.process_vm_handle_raw();
     let tid = task_ref.task_id;
 
-    slopos_mm::page_fault::try_resolve_user_fault(fault_addr, frame_ref.error_code, vm_handle, tid)
+    match slopos_mm::page_fault::try_resolve_user_fault(
+        fault_addr,
+        frame_ref.error_code,
+        vm_handle,
+        tid,
+    ) {
+        slopos_mm::page_fault::FaultOutcome::Resolved => true,
+        // Recorded rather than returned: the fatal path runs in
+        // `exception_page_fault`, several frames above, and threading a reason
+        // back through a `bool`-shaped IST dispatcher would change the
+        // signature of every handler. Read and cleared by
+        // `take_pending_fault_reason` on the very next statement of the only
+        // caller, on this CPU, with interrupts off.
+        slopos_mm::page_fault::FaultOutcome::Fatal(reason) => {
+            crate::exception::record_fault_reason(reason);
+            false
+        }
+    }
 }

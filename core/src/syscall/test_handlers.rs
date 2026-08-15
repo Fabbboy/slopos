@@ -109,9 +109,32 @@ define_syscall!(syscall_run_userland_tests (ctx) -> Result<(), Errno> {
     // phase never reaches, so this is the run's true pool high-water mark.
     slopos_ostd::kdiag::kdiag_dump_lock_graph("post-userland-tests");
     slopos_sched::quota_console::quota_report("post-userland-tests");
+    report_reclaim();
 
     let _ = utest_rc;
     let _ = kernel_rc;
+
+    fn report_reclaim() {
+        // Measured here and not in a kernel `stest!`: the kernel phase runs at
+        // drivers/90, before the services phase mounts ext2, so the block
+        // cache does not exist yet and a reclaim test there would measure an
+        // empty tier and pass vacuously. By this point a full userland run has
+        // warmed it.
+        let available = slopos_ostd::mm::reclaim::reclaimable_pages();
+        let freed = slopos_ostd::mm::reclaim::run(available.min(32));
+        // Not compared against the buddy's free count: a reclaimed page goes
+        // to the TLB quarantine first and only reaches a free list once every
+        // CPU has proven it invalidated its translation, so the two numbers
+        // move at different times by design.
+        let quarantined = slopos_mm::page_alloc::quarantine_frames();
+        slopos_ostd::mm::reclaim::for_each_reclaimer(|name, pages| {
+            klog_info!("RECLAIM[post-userland-tests]: source={name} holds={pages}");
+        });
+        klog_info!(
+            "RECLAIM[post-userland-tests]: available={available} freed={freed} \
+             quarantined={quarantined}"
+        );
+    }
 
     if kernel_phase_summary::shutdown_requested() {
         klog_info!("TESTS: Auto shutdown enabled after harness");
