@@ -499,9 +499,7 @@ pub fn udp_sendto_zerocopy(
     dst_port: u16,
     runs: &[(u64, u32)],
     total_len: usize,
-    keepalive: slopos_ostd::KVec<
-        slopos_ostd::mm::uframe::UFrame<slopos_ostd::mm::frame::AnonymousMeta>,
-    >,
+    keepalive: slopos_ostd::mm::uframe::KeepaliveFrames,
     token: slopos_ostd::TxReclaimToken,
 ) -> crate::socket::ZcSendOutcome {
     use super::netdev::{CsumOffload, DEVICE_REGISTRY, NetDeviceFeatures};

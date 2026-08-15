@@ -25,6 +25,9 @@ use crate::mm::frame::{
 };
 use crate::mm::phys;
 use crate::mm::pod::Pod;
+use crate::process::AccountId;
+use crate::process::quota::{Charge, try_charge};
+use slopos_abi::quota::PinnedBytesAxis;
 
 const PAGE_SIZE: usize = 4096;
 
@@ -676,6 +679,81 @@ pub fn redup_frames(frames: &[UFrame<AnonymousMeta>]) -> Option<KVec<UFrame<Anon
             .ok()?;
     }
     Some(out)
+}
+
+/// Pinned pages held across a DMA that outlives whatever registered them, with
+/// the pin charge that accounts for them.
+///
+/// # Why this is charged separately from the buffer it was taken from
+///
+/// A keepalive exists precisely *because* it outlives its `PinnedUserBuffer`:
+/// a NIC TX DMA driven from a registered buffer survives a ring-fd close or a
+/// process exit, and these refs are what stop the pages being recycled
+/// mid-DMA. Sharing the buffer's `PinnedBytes` charge would therefore refund
+/// at ring teardown while the driver still held the pages — a memory-lock
+/// bypass at exactly the DMA boundary, and the reason the pin ceiling exists
+/// at all.
+///
+/// So the charge is independent and travels with the frames, refunded by this
+/// struct's own `Drop` wherever that lands — the driver's TX reclaim, a
+/// rejected submit, a torn-down send queue. Every one of those already drops
+/// the frames, so no new release point was invented for the charge.
+///
+/// A retransmit takes a *second* keepalive via [`redup`](Self::redup) and pays
+/// for it: two in-flight DMAs of the same pages are two pins, and counting
+/// them once would let a retransmit storm hold arbitrarily many pages against
+/// one charge.
+pub struct KeepaliveFrames {
+    frames: KVec<UFrame<AnonymousMeta>>,
+    charge: Charge<PinnedBytesAxis>,
+}
+
+impl KeepaliveFrames {
+    /// Take an independent owning ref on every page of `frames`, charged to
+    /// `account`.
+    ///
+    /// `None` on allocation failure or a refused charge — both of which mean
+    /// no keepalive was taken, so the caller falls back to the copy path
+    /// rather than proceeding with pages nothing is holding.
+    pub fn take(frames: &[UFrame<AnonymousMeta>], account: AccountId) -> Option<Self> {
+        let pages = u32::try_from(frames.len()).ok()?;
+        let charge = Charge::commit(try_charge::<PinnedBytesAxis>(account, pages).ok()?);
+        Some(Self {
+            frames: redup_frames(frames)?,
+            charge,
+        })
+    }
+
+    /// A second, independently charged keepalive over the same pages.
+    ///
+    /// One per in-flight DMA: a retransmit hands the driver its own refs while
+    /// the send-queue chunk keeps this one, and each is a distinct pin that
+    /// must be paid for and released on its own reclaim.
+    ///
+    /// Charged to the same account as this one, read back off the charge
+    /// rather than passed in. That is what stops a retransmit re-homing a pin
+    /// onto whichever principal happens to be running the send path — the
+    /// pages belong to the process that registered them, and a retransmit
+    /// changes nothing about who is holding them down.
+    pub fn redup(&self) -> Option<Self> {
+        Self::take(self.frames.as_slice(), self.charge.account())
+    }
+
+    /// The pinned pages, for DMA-run coalescing and the copy fallback.
+    #[inline]
+    pub fn as_slice(&self) -> &[UFrame<AnonymousMeta>] {
+        self.frames.as_slice()
+    }
+
+    #[inline]
+    pub fn is_empty(&self) -> bool {
+        self.frames.is_empty()
+    }
+
+    #[inline]
+    pub fn len(&self) -> usize {
+        self.frames.len()
+    }
 }
 
 /// Volatile byte-copy of `[byte_start, byte_start + dst.len())` out of a page

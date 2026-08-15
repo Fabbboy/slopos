@@ -27,8 +27,7 @@ use slopos_ostd::lock_class;
 use slopos_ostd::sync::lock_tracking::LockClassKey;
 
 use bitflags::bitflags;
-use slopos_ostd::mm::frame::AnonymousMeta;
-use slopos_ostd::mm::uframe::UFrame;
+use slopos_ostd::mm::uframe::KeepaliveFrames;
 use slopos_ostd::sync::{LOCK_LEVEL_REGISTRY, LOCK_LEVEL_RESOURCE, SpinLock};
 use slopos_ostd::{KArc, KVec};
 use slopos_ostd::{TxReclaimToken, ZcNotifToken};
@@ -92,7 +91,7 @@ pub trait NetDevice: Send + Sync {
         net_hdr: &[u8],
         runs: &[(u64, u32)],
         csum: Option<CsumOffload>,
-        keepalive: KVec<UFrame<AnonymousMeta>>,
+        keepalive: KeepaliveFrames,
         token: TxReclaimToken,
     ) -> Result<(), NetError> {
         let _ = (net_hdr, runs, csum, keepalive, token);
@@ -112,7 +111,7 @@ pub trait NetDevice: Send + Sync {
         net_hdr: &[u8],
         runs: &[(u64, u32)],
         csum: Option<CsumOffload>,
-        keepalive: KVec<UFrame<AnonymousMeta>>,
+        keepalive: KeepaliveFrames,
         token: ZcNotifToken,
     ) -> Result<(), NetError> {
         let _ = (net_hdr, runs, csum, keepalive, token);
@@ -637,7 +636,7 @@ impl NetDeviceRegistry {
         net_hdr: &[u8],
         runs: &[(u64, u32)],
         csum: Option<CsumOffload>,
-        keepalive: KVec<UFrame<AnonymousMeta>>,
+        keepalive: KeepaliveFrames,
         token: TxReclaimToken,
     ) -> Result<(), NetError> {
         match self.device_at(index) {
@@ -655,7 +654,7 @@ impl NetDeviceRegistry {
         net_hdr: &[u8],
         runs: &[(u64, u32)],
         csum: Option<CsumOffload>,
-        keepalive: KVec<UFrame<AnonymousMeta>>,
+        keepalive: KeepaliveFrames,
         token: ZcNotifToken,
     ) -> Result<(), NetError> {
         match self.device_at(index) {

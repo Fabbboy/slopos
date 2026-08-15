@@ -712,15 +712,27 @@ which is a kill daemon and an exception taxonomy in XNU and which illumos declin
 at all. A VA bound is refusable at the syscall that asks for it, which is the only place a
 refusal has an errno to travel back on.
 
-### 3. Keepalive DMA frames
+### 3. Keepalive DMA frames — **shipped**
 
-`PinnedUserBuffer::keepalive_frames` takes independent owning refs that deliberately
-outlive the ring, and they are **not** covered by the ring's pin charge — sharing one would
-refund at ring teardown while the driver still held the pages, which is a memory-lock bypass
-at the DMA boundary. Their own second charge belongs at the driver's TX-reclaim site, where
-the frames are actually released. Until then they are bounded by
-`SLOPRING_MAX_FIXED_BUFFERS` times the per-ring pin ceiling, and that is written down at the
-call site rather than left implicit.
+`slopos_ostd::mm::uframe::KeepaliveFrames` is the frames plus their own
+`Charge<PinnedBytesAxis>`, so the charge travels with the pages and is refunded wherever
+they are released — the driver's TX reclaim, a rejected submit, a torn-down send queue.
+Every one of those already dropped the frames, so no release point had to be invented.
+
+A newtype rather than a second charge threaded alongside `KVec<UFrame<AnonymousMeta>>`,
+because the frames cross mm → ring → net → drivers through nine signatures: a parallel
+argument is nine chances to drop it, and the type is zero.
+
+**A retransmit pays for its own pin.** `KeepaliveFrames::redup` takes a second independent
+ref *and* a second charge, because two in-flight DMAs of the same pages hold them down
+twice; counting once would let a retransmit storm pin arbitrarily many pages against one
+charge. `redup` reads the account off the existing charge rather than taking one, so a
+retransmit cannot re-home a pin onto whichever principal happens to be running the send
+path.
+
+The ring's account is captured at `register_fixed` rather than re-resolved per send: a
+keepalive is taken on a path a process exit races, and re-resolving would charge it to
+`AccountId::NONE` exactly when the pages are least likely to be released promptly.
 
 ### 4. Slab refill and the `unix_connect` FIFOs — **shipped**
 

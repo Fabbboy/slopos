@@ -338,9 +338,7 @@ pub fn send_echo_request_zerocopy(
     runs: &[(u64, u32)],
     reader: &mut slopos_ostd::mm::VmReader<'_>,
     total_len: usize,
-    keepalive: slopos_ostd::KVec<
-        slopos_ostd::mm::uframe::UFrame<slopos_ostd::mm::frame::AnonymousMeta>,
-    >,
+    keepalive: slopos_ostd::mm::uframe::KeepaliveFrames,
     token: slopos_ostd::TxReclaimToken,
 ) -> crate::socket::ZcSendOutcome {
     use super::netdev::DEVICE_REGISTRY;

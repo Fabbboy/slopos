@@ -27,8 +27,7 @@ use slopos_abi::ring::{
 };
 use slopos_mm::pinned_user_buffer::{PinError, PinnedUserBuffer};
 use slopos_ostd::KVec;
-use slopos_ostd::mm::frame::AnonymousMeta;
-use slopos_ostd::mm::uframe::UFrame;
+use slopos_ostd::mm::uframe::KeepaliveFrames;
 use slopos_ostd::mm::{VmReader, VmWriter};
 use slopos_ostd::{TxReclaimToken, ZcNotifToken};
 
@@ -92,6 +91,15 @@ impl BufBitset {
 struct FixedBufferSet {
     pins: KVec<PinnedUserBuffer>,
     checked_out: BufBitset,
+    /// The ring owner's account, captured at registration.
+    ///
+    /// Held rather than re-resolved at keepalive time: a keepalive is taken on
+    /// the send path, which a process exit races, and re-resolving would
+    /// charge it to `AccountId::NONE` exactly when the pages are least likely
+    /// to be released promptly. The row is generation-stamped, so a charge
+    /// against an account whose process has gone is a defined no-op rather
+    /// than a debit against a stranger.
+    account: slopos_ostd::process::AccountId,
 }
 
 /// One registered provided buffer ring (the pinned userland `io_uring_buf_ring`
@@ -240,6 +248,7 @@ impl BufferRegistry {
         self.fixed = Some(FixedBufferSet {
             pins,
             checked_out: BufBitset::new(),
+            account: process.account(),
         });
         self.deferred = deferred;
         Ok(())
@@ -340,10 +349,13 @@ impl BufferRegistry {
     /// teardown that drops this registry while the NIC is still DMAing them
     /// (the use-after-free guard; the registry's own pin + `checked_out` guard
     /// only the explicit unregister syscall). `None` if out of range / alloc.
-    pub fn fixed_keepalive(&self, index: u16) -> Option<KVec<UFrame<AnonymousMeta>>> {
+    /// The keepalive carries its own `PinnedBytes` charge, independent of the
+    /// registered buffer's: it outlives the ring by design, so sharing one
+    /// would refund at teardown while the NIC still held the pages.
+    pub fn fixed_keepalive(&self, index: u16) -> Option<KeepaliveFrames> {
         let set = self.fixed.as_ref()?;
         let pin = set.pins.get(index as usize)?;
-        pin.keepalive_frames()
+        pin.keepalive_frames(set.account)
     }
 
     /// In-page byte offset of fixed buffer `index`'s data within its first
@@ -508,6 +520,9 @@ impl BufferRegistry {
         self.fixed = Some(FixedBufferSet {
             pins,
             checked_out: BufBitset::new(),
+            // A fabricated set belongs to no process; a charge against no
+            // account debits and refunds nothing.
+            account: slopos_ostd::process::AccountId::NONE,
         });
     }
 

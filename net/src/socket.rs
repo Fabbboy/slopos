@@ -3,10 +3,9 @@ use slopos_fs::fileio::FdTable;
 
 use slopos_ostd::AllocError;
 use slopos_ostd::KVec;
-use slopos_ostd::mm::frame::AnonymousMeta;
 use slopos_ostd::mm::init::{Init, Initialised, SlotPtr, init_struct_with};
-use slopos_ostd::mm::uframe::UFrame;
-use slopos_ostd::mm::uframe::{coalesce_io_runs, copy_out_frames, redup_frames};
+use slopos_ostd::mm::uframe::KeepaliveFrames;
+use slopos_ostd::mm::uframe::{coalesce_io_runs, copy_out_frames};
 use slopos_ostd::mm::{VmReader, VmWriter};
 use slopos_ostd::write_field;
 use slopos_ostd::{Bitmap, words_for};
@@ -999,8 +998,11 @@ fn socket_send_tcp_segment_zerocopy(
                 csum_offset: 16,
             };
             // Independent keepalive clone for the driver TX slot (survives a
-            // teardown mid-DMA); `z.keepalive` stays owned for the copy fallback.
-            if let Some(driver_ka) = redup_frames(z.keepalive.as_slice()) {
+            // teardown mid-DMA); `z.keepalive` stays owned for the copy
+            // fallback. Independently charged too: this is a distinct
+            // in-flight DMA holding the pages down, released by the driver's
+            // own reclaim rather than by the send queue's.
+            if let Some(driver_ka) = z.keepalive.redup() {
                 match net::DEVICE_REGISTRY.tx_zerocopy_notif_by_index(
                     dev,
                     &hdr[..hlen],
@@ -2517,7 +2519,7 @@ pub fn socket_send_zerocopy(
     runs: &[(u64, u32)],
     reader: &mut VmReader<'_>,
     total_len: usize,
-    keepalive: KVec<UFrame<AnonymousMeta>>,
+    keepalive: KeepaliveFrames,
     token: TxReclaimToken,
 ) -> ZcSendOutcome {
     let target = match socket_send_resolve(sock_idx, total_len) {
@@ -2557,7 +2559,7 @@ pub fn socket_send_zerocopy(
 /// caller uses the single-direct-copy leaf.
 pub fn socket_send_zerocopy_tcp(
     sock_idx: u32,
-    keepalive: KVec<UFrame<AnonymousMeta>>,
+    keepalive: KeepaliveFrames,
     base_off: usize,
     len: usize,
     token: ZcNotifToken,

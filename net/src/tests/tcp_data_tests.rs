@@ -5,7 +5,7 @@
 //! zero-window probing.
 
 use slopos_ostd::mm::frame::AnonymousMeta;
-use slopos_ostd::mm::uframe::UFrame;
+use slopos_ostd::mm::uframe::{KeepaliveFrames, UFrame};
 use slopos_ostd::{KBox, KVec, ZcNotifToken};
 use slopos_testing::TestResult;
 use slopos_testing::{assert_eq_test, assert_ok, assert_test, fail, pass};
@@ -850,6 +850,43 @@ pub fn test_poll_transmit_respects_cwnd() -> TestResult {
     pass!()
 }
 
+/// Inject one dup ACK carrying SACK blocks for `segs[1..4]`.
+///
+/// `#[inline(never)]`: the 28-byte option buffer and the `Actions` slot are a
+/// frame of their own, and folding them into the caller puts it over the 2 KiB
+/// stack gate.
+#[inline(never)]
+fn inject_sack_dup_ack(c: &tcp_common::EstablishedConn, snd_una: u32, segs: &[(u32, u32); 4]) {
+    let peer_seq = c.peer_iss.wrapping_add(1);
+    let mut opts = [0u8; 28]; // NOP NOP SACK(kind=5, len=26, 3 blocks)
+    opts[0] = 1; // NOP
+    opts[1] = 1; // NOP
+    opts[2] = 5; // SACK kind
+    opts[3] = 26; // len = 2 + 3*8
+    opts[4..8].copy_from_slice(&segs[1].0.to_be_bytes());
+    opts[8..12].copy_from_slice(&segs[1].1.to_be_bytes());
+    opts[12..16].copy_from_slice(&segs[2].0.to_be_bytes());
+    opts[16..20].copy_from_slice(&segs[2].1.to_be_bytes());
+    opts[20..24].copy_from_slice(&segs[3].0.to_be_bytes());
+    opts[24..28].copy_from_slice(&segs[3].1.to_be_bytes());
+    // Heap-allocated reusable Actions slot — keeps the ~400 B return
+    // value off the stack frame so the 2 KiB gate holds.
+    let mut actions: KBox<tcp::Actions> =
+        KBox::try_init(tcp::Actions::init_default()).expect("alloc");
+    tcp_common::inject_with_options_into(
+        &mut *actions,
+        tcp_common::REMOTE_IP,
+        tcp_common::LOCAL_IP,
+        tcp_common::REMOTE_PORT,
+        c.local_port,
+        peer_seq,
+        snd_una,
+        TCP_FLAG_ACK,
+        &opts,
+        &[],
+    );
+}
+
 pub fn test_fast_retransmit_triggers_on_3_dup_acks() -> TestResult {
     reset();
     let c = tcp_common::establish_connection();
@@ -880,34 +917,7 @@ pub fn test_fast_retransmit_triggers_on_3_dup_acks() -> TestResult {
     // Inject dup ACK with SACK blocks covering segments 2, 3, 4
     // (skipping segment 1). This creates 3 SACKed entries past seg 1
     // → seg 1 is declared Lost.
-    let peer_seq = c.peer_iss.wrapping_add(1);
-    let mut opts = [0u8; 28]; // NOP NOP SACK(kind=5, len=26, 3 blocks)
-    opts[0] = 1; // NOP
-    opts[1] = 1; // NOP
-    opts[2] = 5; // SACK kind
-    opts[3] = 26; // len = 2 + 3*8
-    opts[4..8].copy_from_slice(&segs[1].0.to_be_bytes());
-    opts[8..12].copy_from_slice(&segs[1].1.to_be_bytes());
-    opts[12..16].copy_from_slice(&segs[2].0.to_be_bytes());
-    opts[16..20].copy_from_slice(&segs[2].1.to_be_bytes());
-    opts[20..24].copy_from_slice(&segs[3].0.to_be_bytes());
-    opts[24..28].copy_from_slice(&segs[3].1.to_be_bytes());
-    // Heap-allocated reusable Actions slot — keeps the ~400 B return
-    // value off this test's stack frame so the 2 KiB gate holds.
-    let mut actions: KBox<tcp::Actions> =
-        KBox::try_init(tcp::Actions::init_default()).expect("alloc");
-    tcp_common::inject_with_options_into(
-        &mut *actions,
-        tcp_common::REMOTE_IP,
-        tcp_common::LOCAL_IP,
-        tcp_common::REMOTE_PORT,
-        c.local_port,
-        peer_seq,
-        snd_una,
-        TCP_FLAG_ACK,
-        &opts,
-        &[],
-    );
+    inject_sack_dup_ack(&c, snd_una, &segs);
 
     let (snd_nxt_after, in_recovery, has_lost) = with_data_state!(id, |d| (
         d.snd_nxt.raw(),
@@ -1612,9 +1622,13 @@ pub fn test_tcp_immediate_ack_for_fin() -> TestResult {
     pass!()
 }
 
-/// Allocate `n` zeroed kernel frames wrapped as `UFrame`s — a headless
-/// stand-in for a pinned user buffer's keepalive page list (no process VM).
-fn alloc_test_frames(n: usize) -> Option<KVec<UFrame<AnonymousMeta>>> {
+/// Allocate `n` zeroed kernel frames as a keepalive page list — a headless
+/// stand-in for a pinned user buffer's (no process VM).
+///
+/// Charged to the root, which is the account a kernel-side pin belongs to;
+/// the arena treats it like any other, so the charge and refund are real
+/// rather than elided for the test.
+fn alloc_test_frames(n: usize) -> Option<KeepaliveFrames> {
     let alloc = slopos_ostd::mm::frame_alloc::current_frame_allocator()?;
     let mut frames = KVec::with_capacity(n).ok()?;
     for _ in 0..n {
@@ -1624,7 +1638,7 @@ fn alloc_test_frames(n: usize) -> Option<KVec<UFrame<AnonymousMeta>>> {
             .push(UFrame::<AnonymousMeta>::from_unused(pa, AnonymousMeta::default()).ok()?)
             .ok()?;
     }
-    Some(frames)
+    KeepaliveFrames::take(frames.as_slice(), slopos_ostd::process::quota::root())
 }
 
 /// TCP `MSG_ZEROCOPY` send-queue chunk lifecycle: a zero-copy chunk accounts for

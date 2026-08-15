@@ -125,7 +125,7 @@ pub fn test_pinned_io_slices_len_and_keepalive() -> TestResult {
     assert_test!(cross == 5000, "io_slices_len(5000) summed {}", cross);
     let capped: u32 = pin.io_slices_len(99999).iter().map(|s| s.len).sum();
     assert_test!(capped as usize == 8192, "io_slices_len caps at pin length");
-    let Some(keepalive) = pin.keepalive_frames() else {
+    let Some(keepalive) = pin.keepalive_frames(slopos_ostd::process::quota::root()) else {
         return fail!("keepalive_frames returned None");
     };
     assert_test!(

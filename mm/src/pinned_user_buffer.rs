@@ -27,7 +27,7 @@ use slopos_abi::addr::VirtAddr;
 use slopos_abi::quota::PinnedBytesAxis;
 use slopos_ostd::KVec;
 use slopos_ostd::mm::frame::{AnonymousMeta, Paddr};
-use slopos_ostd::mm::uframe::{UFrame, UFrameError};
+use slopos_ostd::mm::uframe::{KeepaliveFrames, UFrame, UFrameError};
 use slopos_ostd::mm::vmcursor::{VmReader, VmWriter};
 use slopos_ostd::process::AccountId;
 use slopos_ostd::process::quota::{Charge, try_charge};
@@ -342,19 +342,11 @@ impl PinnedUserBuffer {
     /// and deliberately so: the keepalive outlives the ring — that is its
     /// whole purpose — so a shared charge would be refunded when the ring went
     /// away while the driver still held the pages, which is a memory-lock
-    /// bypass at exactly the DMA boundary. The independent second charge that
-    /// covers them belongs at the driver's TX-reclaim refund site, which is
-    /// where the frames are actually released; until that lands, keepalive
-    /// pages are the one uncharged pin in the tree and are bounded instead by
-    /// `SLOPRING_MAX_FIXED_BUFFERS` times the per-ring pin ceiling. Recorded
-    /// here rather than left implicit, because an uncounted resource nobody
-    /// wrote down is how the last per-process counter got deleted.
-    pub fn keepalive_frames(&self) -> Option<KVec<UFrame<AnonymousMeta>>> {
-        let mut frames = KVec::with_capacity(self.frames.len()).ok()?;
-        for frame in self.frames.iter() {
-            let dup = UFrame::<AnonymousMeta>::wrap_user_paddr(frame.paddr()).ok()?;
-            frames.push(dup).ok()?;
-        }
-        Some(frames)
+    /// bypass at exactly the DMA boundary. [`KeepaliveFrames`] carries its own
+    /// independent charge instead, refunded wherever the frames are actually
+    /// released — the driver's TX reclaim, a rejected submit, a torn-down send
+    /// queue.
+    pub fn keepalive_frames(&self, account: AccountId) -> Option<KeepaliveFrames> {
+        KeepaliveFrames::take(self.frames.as_slice(), account)
     }
 }

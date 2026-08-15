@@ -55,8 +55,7 @@ use crate::timer::{NET_TIMER_WHEEL, TimerKind, TimerToken};
 use crate::types::{Ipv4Addr, Port, SockAddr};
 
 use slopos_ostd::klog_debug;
-use slopos_ostd::mm::frame::AnonymousMeta;
-use slopos_ostd::mm::uframe::UFrame;
+use slopos_ostd::mm::uframe::KeepaliveFrames;
 use slopos_ostd::{KVec, ZcNotifToken};
 
 // =============================================================================
@@ -1059,7 +1058,7 @@ pub fn recv_into(
 /// single-direct-copy leaf. On `None` the `keepalive`/`token` are dropped here.
 pub fn enqueue_zerocopy(
     id: ConnId,
-    keepalive: KVec<UFrame<AnonymousMeta>>,
+    keepalive: KeepaliveFrames,
     base_off: usize,
     len: usize,
     token: ZcNotifToken,

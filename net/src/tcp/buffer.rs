@@ -25,9 +25,8 @@
 //! shipped by `slopos-utils`.
 
 use slopos_ostd::RingBuffer;
-use slopos_ostd::mm::frame::AnonymousMeta;
-use slopos_ostd::mm::uframe::{UFrame, copy_out_frames, redup_frames};
-use slopos_ostd::{AllocError, KBox, KVec, KVecDeque, ZcNotifToken};
+use slopos_ostd::mm::uframe::{KeepaliveFrames, copy_out_frames};
+use slopos_ostd::{AllocError, KBox, KVecDeque, ZcNotifToken};
 
 /// Size of per-connection send/receive ring buffers.
 pub const TCP_BUFFER_SIZE: usize = 32768;
@@ -63,7 +62,7 @@ enum SendChunk {
     },
     Zerocopy {
         /// Owning refs on the pinned pages — held until this chunk is acked.
-        keepalive: KVec<UFrame<AnonymousMeta>>,
+        keepalive: KeepaliveFrames,
         /// In-page byte offset of the chunk's data within `keepalive[0]`
         /// (the pin's `base_off`); advances as the chunk is partially acked.
         base_off: usize,
@@ -87,7 +86,7 @@ impl SendChunk {
 /// notification token. Not `Copy` — it owns page refs — so it rides beside the
 /// `Copy` [`TcpOutSegment`] in the `poll_transmit` result rather than inside it.
 pub struct ZcSource {
-    pub keepalive: KVec<UFrame<AnonymousMeta>>,
+    pub keepalive: KeepaliveFrames,
     /// Absolute byte offset of this segment within `keepalive`.
     pub byte_start: usize,
     pub len: usize,
@@ -105,7 +104,7 @@ pub(crate) enum SegmentSource {
     /// **independent** keepalive clone (the driver TX slot holds it until the
     /// descriptor is reclaimed) and the refcounted notification token.
     Zerocopy {
-        keepalive: KVec<UFrame<AnonymousMeta>>,
+        keepalive: KeepaliveFrames,
         /// Absolute byte offset of this segment within `keepalive` (the chunk's
         /// `base_off + intra-offset`), for SG-run / copy-fallback derivation.
         byte_start: usize,
@@ -200,7 +199,7 @@ impl TcpSendState {
     /// `free_space`; the caller (`socket_send_zerocopy`) gates against SO_SNDBUF.
     pub(crate) fn enqueue_zerocopy(
         &mut self,
-        keepalive: KVec<UFrame<AnonymousMeta>>,
+        keepalive: KeepaliveFrames,
         base_off: usize,
         len: u32,
         token: ZcNotifToken,
@@ -311,9 +310,14 @@ impl TcpSendState {
                         base_off,
                         token,
                         ..
-                    } => match redup_frames(keepalive.as_slice()) {
-                        // Cloning the owning page refs failed (OOM): fall back to
-                        // a copy of these bytes from the pin via `peek_at_stream`.
+                        // A retransmit is a second in-flight DMA of the same
+                        // pages, so it takes and pays for its own keepalive:
+                        // counting them once would let a retransmit storm hold
+                        // arbitrarily many pages against a single charge.
+                    } => match keepalive.redup() {
+                        // Cloning the owning page refs failed (OOM or the pin
+                        // ceiling): fall back to a copy of these bytes from
+                        // the pin via `peek_at_stream`.
                         None => SegmentSource::Inline { len: n },
                         Some(ka) => SegmentSource::Zerocopy {
                             keepalive: ka,

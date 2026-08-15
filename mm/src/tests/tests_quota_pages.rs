@@ -381,3 +381,109 @@ slopos_testing::stest!(
     name = test_quota_pages_audit_catches_a_drifted_charge,
     suite = quota_pages
 );
+
+// ---------------------------------------------------------------------------
+// Keepalive DMA frames: the second, independent pin charge
+// ---------------------------------------------------------------------------
+
+/// A keepalive's pin charge is independent of the buffer it was taken from.
+///
+/// The property that makes it safe for a keepalive to outlive its
+/// `PinnedUserBuffer`, which is its entire purpose: a NIC TX DMA survives a
+/// ring-fd close or a process exit, and these refs are what stop the pages
+/// being recycled mid-DMA. A shared charge would be refunded at ring teardown
+/// while the driver still held them -- a memory-lock bypass at exactly the DMA
+/// boundary, and the reason the pin ceiling exists at all.
+#[cfg(feature = "test-hooks")]
+pub fn test_quota_keepalive_charge_outlives_its_pin() -> TestResult {
+    use crate::pinned_user_buffer::PinnedUserBuffer;
+
+    let account = slopos_ostd::process::quota::root();
+    let pinned = || stats(account, ResourceKind::PinnedBytes).map_or(0, |s| s.used);
+
+    let before = pinned();
+    let Some(pin) = PinnedUserBuffer::alloc_for_test(8192) else {
+        return fail!("pin alloc_for_test failed");
+    };
+    let Some(keepalive) = pin.keepalive_frames(account) else {
+        return fail!("keepalive_frames returned None");
+    };
+    let with_both = pinned();
+    assert_test!(
+        with_both >= before + 2,
+        "a 2-page keepalive charged {} pages",
+        with_both - before
+    );
+
+    // The buffer goes away; the keepalive and its charge must not.
+    drop(pin);
+    let after_pin = pinned();
+    assert_test!(
+        after_pin >= before + 2,
+        "dropping the pin refunded the keepalive's charge ({} -> {}) -- the \
+         driver may still be DMAing those pages",
+        with_both,
+        after_pin
+    );
+
+    drop(keepalive);
+    assert_test!(
+        pinned() == before,
+        "dropping the keepalive left {} pages charged, want {}",
+        pinned(),
+        before
+    );
+    pass!()
+}
+
+/// A retransmit's keepalive is a second pin and is charged as one.
+///
+/// Two in-flight DMAs of the same pages hold them down twice over, so counting
+/// them once would let a retransmit storm pin arbitrarily many pages against a
+/// single charge. `redup` also re-uses the original's account rather than the
+/// caller's, so a retransmit cannot re-home a pin onto whoever happens to be
+/// running the send path.
+#[cfg(feature = "test-hooks")]
+pub fn test_quota_keepalive_redup_charges_each_dma() -> TestResult {
+    use crate::pinned_user_buffer::PinnedUserBuffer;
+
+    let account = slopos_ostd::process::quota::root();
+    let pinned = || stats(account, ResourceKind::PinnedBytes).map_or(0, |s| s.used);
+
+    let Some(pin) = PinnedUserBuffer::alloc_for_test(8192) else {
+        return fail!("pin alloc_for_test failed");
+    };
+    let Some(first) = pin.keepalive_frames(account) else {
+        return fail!("keepalive_frames returned None");
+    };
+    let one = pinned();
+    let Some(second) = first.redup() else {
+        return fail!("redup returned None");
+    };
+    let two = pinned();
+
+    assert_test!(
+        two == one + 2,
+        "a retransmit's keepalive charged {} pages, want 2",
+        two - one
+    );
+    drop(second);
+    assert_test!(
+        pinned() == one,
+        "releasing one in-flight DMA did not refund exactly its own pin"
+    );
+    drop(first);
+    drop(pin);
+    pass!()
+}
+
+#[cfg(feature = "test-hooks")]
+slopos_testing::stest!(
+    name = test_quota_keepalive_charge_outlives_its_pin,
+    suite = quota_pages
+);
+#[cfg(feature = "test-hooks")]
+slopos_testing::stest!(
+    name = test_quota_keepalive_redup_charges_each_dma,
+    suite = quota_pages
+);

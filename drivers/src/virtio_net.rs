@@ -2,8 +2,7 @@ use core::mem::size_of;
 use core::sync::atomic::{AtomicBool, AtomicPtr, AtomicU32, Ordering};
 use slopos_ostd::dev::FromRawPtr;
 use slopos_ostd::lock_class;
-use slopos_ostd::mm::frame::AnonymousMeta;
-use slopos_ostd::mm::uframe::UFrame;
+use slopos_ostd::mm::uframe::KeepaliveFrames;
 use slopos_ostd::{KArc, KBox, KVec};
 use slopos_ostd::{TxReclaimToken, ZcNotifToken};
 
@@ -130,7 +129,7 @@ enum TxReclaim {
 struct TxChain {
     hdr_page: OwnedPageFrame,
     reclaim: Option<TxReclaim>,
-    keepalive: Option<KVec<UFrame<AnonymousMeta>>>,
+    keepalive: Option<KeepaliveFrames>,
     descs: [u16; MAX_TX_SG_DESCS],
     desc_count: u8,
 }
@@ -306,7 +305,7 @@ impl NetDevice for VirtioNetDev {
         net_hdr: &[u8],
         runs: &[(u64, u32)],
         csum: Option<CsumOffload>,
-        keepalive: KVec<UFrame<AnonymousMeta>>,
+        keepalive: KeepaliveFrames,
         token: TxReclaimToken,
     ) -> Result<(), NetError> {
         submit_tx_zerocopy(net_hdr, runs, csum, keepalive, TxReclaim::Tx(token))
@@ -317,7 +316,7 @@ impl NetDevice for VirtioNetDev {
         net_hdr: &[u8],
         runs: &[(u64, u32)],
         csum: Option<CsumOffload>,
-        keepalive: KVec<UFrame<AnonymousMeta>>,
+        keepalive: KeepaliveFrames,
         token: ZcNotifToken,
     ) -> Result<(), NetError> {
         submit_tx_zerocopy(net_hdr, runs, csum, keepalive, TxReclaim::Notif(token))
@@ -585,7 +584,7 @@ fn submit_tx_zerocopy(
     net_hdr: &[u8],
     runs: &[(u64, u32)],
     csum: Option<CsumOffload>,
-    keepalive: KVec<UFrame<AnonymousMeta>>,
+    keepalive: KeepaliveFrames,
     reclaim: TxReclaim,
 ) -> Result<(), NetError> {
     let mut state = VIRTIO_NET_STATE.lock();
