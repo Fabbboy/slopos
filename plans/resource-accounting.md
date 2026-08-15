@@ -722,13 +722,26 @@ the frames are actually released. Until then they are bounded by
 `SLOPRING_MAX_FIXED_BUFFERS` times the per-ring pin ceiling, and that is written down at the
 call site rather than left implicit.
 
-### 4. Slab refill and the `unix_connect` FIFOs
+### 4. Slab refill and the `unix_connect` FIFOs — **shipped**
 
-Slab backing pages should be charged to the root at refill. Do **not** give an account its
-own slab: per-cgroup caches measured 45–65 % utilisation upstream, and shared-slab
-accounting recovered ~40 % of kernel memory. The `unix_connect` FIFOs (16 KiB × 2 per pair)
-are allocated by the connecting client and that donation is now documented at the call site;
-charging them is the remaining half.
+Every page the kernel heap takes from the buddy is charged to the root as `KernelMeta`, at
+the two functions that take them: `alloc_slab_page` and `alloc_large_pages`. No account gets
+its own slab, for the reason this plan already gave.
+
+**The FIFOs are not charged a second time, and charging them would have been a bug.** At
+16 KiB each they are well past `MAX_SLAB_CLASS_BYTES`, so they come from the large-alloc
+tier and are already covered by the allocator-level charge above. A second charge at
+`unix_connect` would count the same pages twice and destroy the property the root account
+exists for — that its row can be reconciled against the buddy's own allocated count. The
+call site says so rather than leaving the absence to be noticed.
+
+Attributing those pages to the connecting *client* instead of to the root is a different
+question, and it is the bank question: it needs the frame allocator to take an account
+witness. See the answer below.
+
+The charge is a `.bss` `ChargeSlot`, not a field on the slab page header: a header is
+`#[repr(C)]`, is written through raw pointers and is read back at a fixed offset by the free
+path — exactly the placement the design prohibits for a token.
 
 ### 5. `prlimit64`
 

@@ -281,6 +281,16 @@ pub fn unix_connect(handle: SocketHandle, path: &[u8]) -> i32 {
     // kernel storage onto the compositor's budget and make a connect flood
     // exhaust the server rather than the caller. Keep the allocation here.
     //
+    // The FIFOs' *pages* are charged elsewhere and deliberately not here. At
+    // 16 KiB each they are well past `MAX_SLAB_CLASS_BYTES`, so they come from
+    // the large-alloc tier, which charges its backing to the root as
+    // `KernelMeta` in `mm::slab::page::alloc_large_pages`. Charging them again
+    // here would count the same pages twice and stop the root's row
+    // reconciling against the buddy. Attributing them to the connecting client
+    // *instead* of to the root would need the frame allocator to take an
+    // account witness — the bank question — which is to be answered
+    // deliberately rather than drifted into.
+    //
     // Allocate a pair entry; this is where the 16 KiB×2 FIFO heap allocations happen.
     let pair_handle = match state.pairs.allocate() {
         Ok(Some(ph)) => ph,

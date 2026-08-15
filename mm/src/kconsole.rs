@@ -38,6 +38,20 @@ fn run_memory(kc: &mut KConsole<'_>) {
         heap.free_count
     );
 
+    // The heap's own backing, charged to the root as `KernelMeta`. Printed
+    // beside the buddy's `allocated` because the pair is what makes the root's
+    // row reconcilable: heap pages are a subset of allocated ones, so a
+    // charged count above `allocated` is a leak in the accounting rather than
+    // in the allocator.
+    let heap_pages = crate::slab::page::charged_heap_pages();
+    kline!(
+        kc,
+        "heap backing: {} pages charged to the root ({} KiB of the {} allocated)",
+        heap_pages,
+        (heap_pages as u64) * 4,
+        pages.allocated
+    );
+
     let (epoch, advance_requested, last_deferred) = crate::mmu::quiesce::stats();
     kline!(
         kc,

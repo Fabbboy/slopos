@@ -21,6 +21,9 @@ use slopos_ostd::align_down_u64;
 use slopos_ostd::sync::{ByteChain, RawLink};
 use slopos_ostd::util::ptr_buf;
 
+use slopos_abi::quota::KernelMetaAxis;
+use slopos_ostd::process::quota::{ChargeSlot, root, try_charge};
+
 use crate::hhdm::PhysAddrHhdm;
 use crate::page_alloc::{alloc_kernel_page, free_page_frame};
 use crate::paging_defs::PAGE_SIZE_4KB;
@@ -204,6 +207,43 @@ fn read_u32_at(base: NonNull<u8>, off: usize) -> u32 {
     ptr_buf::with_at_mut::<u32, _>(base, off, 1, |slice| slice[0])
 }
 
+/// The kernel heap's own page charge, held against the root account.
+///
+/// # Why the root, and why one slot
+///
+/// These are the pages the size-class slabs and the large-alloc tier take from
+/// the buddy to back *every* kernel allocation. They are charged so the root's
+/// `KernelMeta` row can be reconciled against the buddy's own allocated count
+/// — without them the tree is not total at the top, and a discrepancy between
+/// the ledger and reality reads as a known gap rather than as a bug.
+///
+/// Charged to the root and **not** to whoever happened to allocate. Giving an
+/// account its own slab is the thing to avoid: per-cgroup caches measured
+/// 45-65 % utilisation upstream, and moving to shared-slab accounting
+/// recovered ~40 % of kernel memory. The slab is shared, so its backing is the
+/// root's; per-object attribution is what the tier-1 object charges are for.
+///
+/// A `.bss` slot rather than a `Charge` field on the page header: a slab
+/// header is `#[repr(C)]`, is written through raw pointers, and sits at a
+/// fixed offset the free path reads back — exactly the placement the design
+/// prohibits for a token.
+static HEAP_PAGES: ChargeSlot<KernelMetaAxis> = ChargeSlot::empty();
+
+/// Charge `pages` of kernel-heap backing to the root, or refuse.
+///
+/// Refusing here is what makes the ceiling real rather than advisory: the
+/// caller propagates `None` as an allocation failure, which every slab and
+/// large-alloc path already handles.
+fn charge_heap_pages(pages: u32) -> bool {
+    match try_charge::<KernelMetaAxis>(root(), pages) {
+        Ok(reservation) => {
+            HEAP_PAGES.grow(reservation);
+            true
+        }
+        Err(_) => false,
+    }
+}
+
 /// Allocate a fresh, zero-initialised 4 KiB kernel page and return
 /// its HHDM-addressed base pointer + paddr. Returns `None` on
 /// allocation failure.
@@ -214,12 +254,25 @@ pub(crate) fn alloc_slab_page() -> Option<(NonNull<u8>, PhysAddr)> {
         return None;
     }
     let virt = paddr.to_virt();
-    let base = NonNull::new(virt.as_u64() as *mut u8)?;
+    let Some(base) = NonNull::new(virt.as_u64() as *mut u8) else {
+        free_page_frame(paddr);
+        return None;
+    };
+    if !charge_heap_pages(1) {
+        free_page_frame(paddr);
+        return None;
+    }
     Some((base, paddr))
 }
 
 /// Allocate `pages` contiguous zeroed kernel pages and return the
 /// HHDM-addressed base pointer + paddr. Returns `None` on failure.
+///
+/// This is where the AF_UNIX connection FIFOs land: 16 KiB each, well past
+/// `MAX_SLAB_CLASS_BYTES`, so a connecting client's two FIFOs are two
+/// large-tier allocations and are charged here rather than at the call site.
+/// Charging them twice is the thing to avoid — it would make the root's row
+/// mean two different quantities and stop it reconciling against the buddy.
 #[inline]
 pub(crate) fn alloc_large_pages(pages: u32) -> Option<(NonNull<u8>, PhysAddr)> {
     if pages == 0 {
@@ -230,8 +283,20 @@ pub(crate) fn alloc_large_pages(pages: u32) -> Option<(NonNull<u8>, PhysAddr)> {
         return None;
     }
     let virt = paddr.to_virt();
-    let base = NonNull::new(virt.as_u64() as *mut u8)?;
+    let Some(base) = NonNull::new(virt.as_u64() as *mut u8) else {
+        free_page_frame(paddr);
+        return None;
+    };
+    if !charge_heap_pages(pages) {
+        free_page_frame(paddr);
+        return None;
+    }
     Some((base, paddr))
+}
+
+/// Pages of kernel-heap backing currently charged to the root.
+pub fn charged_heap_pages() -> u32 {
+    HEAP_PAGES.amount()
 }
 
 /// Recover the paddr backing an HHDM-addressed page.
@@ -244,11 +309,12 @@ pub(crate) fn paddr_for_page(base: NonNull<u8>) -> PhysAddr {
 }
 
 /// Free a slab page by HHDM-addressed base. Returns the underlying
-/// paddr to the buddy.
+/// paddr to the buddy and its charge to the root.
 #[inline]
 pub(crate) fn free_kernel_page(base: NonNull<u8>) {
     let paddr = paddr_for_page(base);
     free_page_frame(paddr);
+    HEAP_PAGES.shrink(1);
 }
 
 // ---------------------------------------------------------------------------

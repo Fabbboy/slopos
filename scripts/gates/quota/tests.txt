@@ -30,11 +30,17 @@
 # ceiling, the enforced runtime defaults are in abi/src/quota.rs. Deriving
 # either from the other would make the ratchet measure its own configuration.
 #
-# kernelmeta is exactly 12 pages per task — a 32 KiB kernel stack plus a
-# 16 KiB SafeStack data stack — so the root peak of 636 is ~53 concurrent
-# tasks' worth of stack, or 2.5 MiB. This is the consumer the plan called the
-# largest unaccounted one in the tree, and it was: nothing table-shaped
-# bounded it.
+# kernelmeta is two things summed on the root. Task stacks are 12 pages each
+# — a 32 KiB kernel stack plus a 16 KiB SafeStack data stack — and are the
+# deterministic half; the kernel heap's own backing is the other, every page
+# the size-class slabs and the large-alloc tier take from the buddy, charged
+# once at the allocator so the root's row stays reconcilable against the
+# buddy's allocated count. The `memory` kconsole command prints both numbers
+# side by side for exactly that comparison.
+#
+# The heap half is why these caps carry visible slack rather than sitting one
+# observation above the measurement: a slab refill happens on whichever
+# allocation first empties a class, so the peak moves with test order.
 #
 # `process` at 113 against ~109 live account rows is not a leak: the userland
 # phase spawns a test binary per utest and most are still referenced at the
@@ -65,17 +71,17 @@ require-phase boot
 require-phase post-kernel-tests
 require-phase post-userland-tests
 
-boot	kernelmeta	60
+boot	kernelmeta	900
 post-kernel-tests	custody	8
 post-kernel-tests	fdslot	256
-post-kernel-tests	kernelmeta	636
+post-kernel-tests	kernelmeta	2200
 post-kernel-tests	objectrow	257
 post-kernel-tests	pages	65536
 post-kernel-tests	process	11
 post-kernel-tests	task	8
 post-userland-tests	custody	8
 post-userland-tests	fdslot	256
-post-userland-tests	kernelmeta	636
+post-userland-tests	kernelmeta	6500
 post-userland-tests	objectrow	257
 post-userland-tests	pages	655360
 post-userland-tests	pinnedbytes	1
