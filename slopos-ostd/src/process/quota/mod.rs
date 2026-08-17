@@ -14,9 +14,28 @@
 //! Because `slopos-ostd` is the only crate permitted `unsafe` and the token's
 //! fields are private, no service crate can forge, clone or bypass a `Charge`.
 //!
-//! See `plans/resource-accounting.md` for the design argument, and the module
-//! docs of [`arena`] for why the arena takes no locks and has no release
-//! point.
+//! `Charge::drop` touches nothing but atomics on `.bss` and holds no counted
+//! reference, so it is legal from a hard IRQ, from under a cli-spinlock, from
+//! the IRQ-off switch tail, and from a dying task's own unwind. See the module
+//! docs of `arena` for why it takes no locks and has no release point, and of
+//! `token` for the narrow linearity claim that actually holds — Rust is
+//! affine, not linear, so "a missing refund is unrepresentable" would be
+//! false.
+//!
+//! # The rule that keeps a counter honest
+//!
+//! A per-process page counter existed here once and was deleted for having 21
+//! writes and zero readers. So: **a counter lands with all three of its
+//! readers** — the enforcement point that refuses, an exhaustion test proving
+//! the refusal refunds exactly once, and a line in the `ledger` kcommand.
+//! [`ledger_audit`] is the fourth: the type system guarantees the *token* is
+//! unique, never that the number matches reality, and the audit is the only
+//! mechanism that can see a forgotten or unwinder-skipped charge.
+//!
+//! Every ceiling is **measured, never chosen**, and deliberately lives in two
+//! places: the enforced runtime default in [`slopos_abi::quota`], and the gate
+//! ceiling in `scripts/gates/quota/<variant>.txt`. Deriving either from the
+//! other would make the ratchet measure its own configuration.
 
 mod arena;
 mod axis;

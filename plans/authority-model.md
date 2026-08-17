@@ -640,13 +640,16 @@ mask's republish are **audited, not proved** — Verus has no weak-memory model.
 
 ---
 
-## Interface with the accounting plan
+## Interface with accounting
+
+Accounting has landed in full (`slopos_ostd::process::quota`), so this is a boundary with
+existing code rather than with a sibling proposal.
 
 | Field of `Process` | Owner |
 |---|---|
 | `cred: RcuArcSlot<Cred>` | authority — immutable value, no interior mutability, trivial `Drop` |
 | `account: AccountId`, `account_parent` | accounting — parent immutable after creation |
-| `id` (generation-bearing) | landed; `prlimit64` no longer blocks on it |
+| `id` (generation-bearing) | landed; `prlimit64` has since shipped on top of it |
 | address-space handle, descriptor table | accounting owns capacity; authority owns per-entry rights |
 | `parent`, `account_parent`, `task_count` | shared; `slopos_ostd::process` defines them |
 | `caps: AtomicU64` (on `Task`) | authority — a cache; the `Cred` is the record |

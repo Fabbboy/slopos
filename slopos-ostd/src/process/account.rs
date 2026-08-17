@@ -2,11 +2,11 @@
 //!
 //! An `AccountId` names a row in the resource-accounting arena. This module
 //! places the id and its generation stamp; the arena's semantics — the debit
-//! walk, the linear `Charge` token, the per-kind ceilings — belong to
-//! `plans/resource-accounting.md` and land on top of this.
+//! walk, the linear `Charge` token, the per-kind ceilings — live in
+//! [`super::quota`].
 //!
 //! It is a generation-stamped slot index rather than a counted reference for
-//! the reason the whole plan turns on: a refund has to be legal from a hard
+//! the reason the whole design turns on: a refund has to be legal from a hard
 //! IRQ, from under a cli-spinlock and from a dying task's own unwind, and a
 //! counted reference makes the last release a heap free. A `.bss` row named by
 //! a stamped id has no release point at all, so the context question does not
