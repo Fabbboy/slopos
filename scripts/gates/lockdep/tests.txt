@@ -73,13 +73,26 @@ require-phase post-userland-tests
 
 # <phase> <TAB> <pool> <TAB> <cap>
 #
+# Re-measured 2026-08-10 for the reclaim tier. The kernel phase gains exactly
+# one class and the userland phase gains none, which is the signature of a
+# class registering EARLIER rather than of a new lock: CACHED_EXT2 has always
+# existed and has always been taken, but before the reclaim tier nothing in the
+# kernel test phase reached it — `fs/src/tests.rs` builds its own
+# MemoryBlockDevice and never touches the mounted filesystem. The reclaim tests
+# call `reclaimable_pages`, which `try_lock`s CACHED_EXT2, so the class is now
+# first registered one phase sooner. Confirmed by the pair: post-kernel 181 ->
+# 182 while post-userland stays at 190, so the total set of classes is
+# unchanged. Edge and chain caps still bound the new measurement over 3 runs
+# (kernel edges 148-149 under 161, chains 343-345 under 351) and keep their
+# earlier values.
+#
 # Class counts were identical in all 8 runs, so their caps are the measured
 # value with no margin: a class is registered on the first acquire of a
 # declaration site, and by the end of a phase every site the phase reaches has
 # been reached. One extra class is a new lock, which is exactly what should
 # require a deliberate bump.
 boot	classes	71
-post-kernel-tests	classes	181
+post-kernel-tests	classes	182
 post-userland-tests	classes	190
 
 # Edges and chains depend on which *orders* were observed, so they move with
