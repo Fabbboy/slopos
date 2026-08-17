@@ -110,6 +110,40 @@ fn raising_the_hard_limit_is_refused() -> bool {
     setrlimit(RLIMIT_NOFILE, &raised) != 0
 }
 
+/// No `setrlimit` input, however large, raises the ceiling.
+///
+/// Belt-and-braces over the `EPERM` check above rather than a second route to
+/// the same refusal. The arena counts in `u32` and the ABI in `u64`, so a
+/// request too large to convert has to land somewhere; mapping it to the
+/// no-limit sentinel would turn the widest possible `setrlimit` into an
+/// unprivileged way to switch enforcement off. Unreachable today — the hard
+/// limit is checked first, and it bounds the value below `u32::MAX` for every
+/// published resource — which is exactly why it is worth pinning: the day a
+/// resource is published with a larger ceiling, this is the check that still
+/// holds.
+fn an_oversized_request_cannot_lift_the_ceiling() -> bool {
+    let mut original = zeroed();
+    if getrlimit(RLIMIT_NOFILE, &mut original) != 0 {
+        return false;
+    }
+    // Both halves large: `rlim_cur > rlim_max` is rejected before the
+    // conversion, so a value that only overflows the soft limit never reaches
+    // the arithmetic this is about.
+    let huge = RLimit {
+        rlim_cur: u64::MAX - 1,
+        rlim_max: u64::MAX - 1,
+    };
+    setrlimit(RLIMIT_NOFILE, &huge);
+
+    let mut after = zeroed();
+    if getrlimit(RLIMIT_NOFILE, &mut after) != 0 {
+        return false;
+    }
+    let ok = after.rlim_cur <= original.rlim_cur && after.rlim_cur != RLIM_INFINITY;
+    setrlimit(RLIMIT_NOFILE, &original);
+    ok
+}
+
 /// A soft limit above the hard limit is `EINVAL`.
 fn soft_above_hard_is_rejected() -> bool {
     let mut original = zeroed();
@@ -156,6 +190,10 @@ fn main() {
             raising_the_hard_limit_is_refused,
         ),
         ("soft_above_hard_is_rejected", soft_above_hard_is_rejected),
+        (
+            "an_oversized_request_cannot_lift_the_ceiling",
+            an_oversized_request_cannot_lift_the_ceiling,
+        ),
         ("foreign_pids_are_refused", foreign_pids_are_refused),
     ]);
 }

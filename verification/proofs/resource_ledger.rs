@@ -8,7 +8,7 @@
 // succeeded at level k and failed at k+1, which is the case a hand-written
 // cancel loop gets wrong.
 //
-// Five obligations:
+// Six obligations:
 //
 //   (L1) EQUALITY, not inequality. `used[i] == live_sum[i]` at every level:
 //        the row holds exactly the sum of the charges outstanding against it.
@@ -34,6 +34,16 @@
 //   (L4) A DENIED CHARGE IS IDENTITY ON EVERY ROW, including the partial
 //        batch. This is the hard one and the reason `Reservation` exists as a
 //        separate type from `Charge`.
+//
+//   (L6) `settle` IS IDEMPOTENT AND ONLY SHRINKS, and reclaim gives back only
+//        what was charged. The address-space page charge is the one that
+//        tracks a quantity changing over its holder's life, so it is the one
+//        where "the token is unique" does not already imply "the number is
+//        right". Idempotence is what makes a split exact: a region carved in
+//        two settles against the tree's new span, and settling again must
+//        change nothing or a second call on an unchanged map would refund
+//        pages the map still holds. Shrink-only is what makes a `munmap`
+//        unrefusable against a ceiling it is reducing the use of.
 //
 //   (L5) A STALE REFUND IS IDENTITY. A refund whose generation does not match
 //        the row's touches nothing. This is what makes a leaked charge
@@ -235,6 +245,23 @@ pub enum Step {
     /// `Charge::shrink`: part of the amount is given back.
     /// slopos-ostd/src/process/quota/token.rs — `Charge::shrink`.
     Shrink { n: nat },
+
+    /// A reclaimer released `n` pages that were charged.
+    ///
+    /// Modelled as an ordinary refund and not as a special case, which is the
+    /// claim being made: reclaim gives pages back through the same token path
+    /// as a `munmap`, so it cannot produce a refund the ledger has no charge
+    /// behind. slopos-ostd/src/mm/reclaim.rs — `run`.
+    Reclaim { n: nat },
+
+    /// `VmaMap::settle`: give back whatever the charge holds above what the
+    /// map spans.
+    ///
+    /// The whole address-space page charge in one step. `want` is the tree's
+    /// span after the mutation; the charge falls to meet it and never rises,
+    /// which is what makes a `munmap` unrefusable.
+    /// mm/src/vma_region.rs — `settle`.
+    SettleTo { want: nat },
 }
 
 /// Whether a debit of `n` fits under `limit`.
@@ -333,6 +360,43 @@ pub open spec fn step(s: Ledger, t: Step) -> Ledger {
             }
         },
         Step::ExtendDenied => s,
+        // Reclaim is a refund and nothing more. Bounded by what is held, so
+        // it can never manufacture headroom that was not charged.
+        Step::Reclaim { n } => {
+            if s.charge_held && n <= s.charge_amount && s.leaf_live && s.gen_charge == s.gen_row {
+                Ledger {
+                    used_leaf: (s.used_leaf - n) as nat,
+                    used_mid: (s.used_mid - n) as nat,
+                    used_root: (s.used_root - n) as nat,
+                    live_leaf: (s.live_leaf - n) as nat,
+                    live_mid: (s.live_mid - n) as nat,
+                    live_root: (s.live_root - n) as nat,
+                    charge_amount: (s.charge_amount - n) as nat,
+                    ..s
+                }
+            } else {
+                s
+            }
+        },
+        // Shrink-only: `want` above what is held is a no-op, because growth is
+        // always pre-reserved by the caller that wanted it.
+        Step::SettleTo { want } => {
+            if s.charge_held && want < s.charge_amount && s.leaf_live && s.gen_charge == s.gen_row {
+                let give_back = (s.charge_amount - want) as nat;
+                Ledger {
+                    used_leaf: (s.used_leaf - give_back) as nat,
+                    used_mid: (s.used_mid - give_back) as nat,
+                    used_root: (s.used_root - give_back) as nat,
+                    live_leaf: (s.live_leaf - give_back) as nat,
+                    live_mid: (s.live_mid - give_back) as nat,
+                    live_root: (s.live_root - give_back) as nat,
+                    charge_amount: want,
+                    ..s
+                }
+            } else {
+                s
+            }
+        },
         Step::Shrink { n } => {
             if s.charge_held && n <= s.charge_amount {
                 Ledger {
@@ -550,6 +614,53 @@ pub proof fn l1_holds_on_every_trace(s0: Ledger, trace: Seq<Step>)
         step_preserves(ledger_run(s0, trace.drop_last()), trace.last());
         step_preserves_bounded(ledger_run(s0, trace.drop_last()), trace.last());
     }
+}
+
+// ===========================================================================
+// (L6) `settle` is idempotent, and only ever shrinks.
+//
+// The property that makes a split exact where FreeBSD's per-object counter
+// could not be. A region carved in two settles once against the tree's new
+// span; settling again must be the identity, or a second call on an unchanged
+// map would refund pages the map still holds. And it must never raise the
+// charge, because growth is pre-reserved by the caller and a `munmap` that
+// could be refused against a ceiling it is *reducing* the use of would be a
+// process unable to give memory back.
+// ===========================================================================
+
+/// Settling twice to the same target is settling once.
+pub proof fn settle_is_idempotent(s: Ledger, want: nat)
+    requires
+        ledger_inv(s),
+        charge_bounded(s),
+    ensures
+        step(step(s, Step::SettleTo { want }), Step::SettleTo { want })
+            == step(s, Step::SettleTo { want }),
+{
+}
+
+/// Settling never raises the charge, and never raises a row.
+pub proof fn settle_only_shrinks(s: Ledger, want: nat)
+    requires
+        ledger_inv(s),
+        charge_bounded(s),
+    ensures
+        step(s, Step::SettleTo { want }).charge_amount <= s.charge_amount,
+        step(s, Step::SettleTo { want }).used_leaf <= s.used_leaf,
+        step(s, Step::SettleTo { want }).used_root <= s.used_root,
+{
+}
+
+/// Reclaim gives back only what was charged, so it cannot manufacture
+/// headroom — the property that makes a reclaimer safe to register.
+pub proof fn reclaim_never_exceeds_the_charge(s: Ledger, n: nat)
+    requires
+        ledger_inv(s),
+        charge_bounded(s),
+    ensures
+        step(s, Step::Reclaim { n }).used_leaf <= s.used_leaf,
+        step(s, Step::Reclaim { n }).charge_amount <= s.charge_amount,
+{
 }
 
 // ===========================================================================

@@ -3,8 +3,9 @@
 **Every kernel allocation is charged to an `Account`, and the charge is a linear token
 that lives inside the thing it accounts for.**
 
-*Shipped. See [Status](#status) for what landed and [What is left](#what-is-left) for the
-four items that did not.*
+*Complete. See [Status](#status) for what landed, and
+[The second round](#the-second-round-and-what-it-cost) for the four premises of this plan
+that did not survive contact with the tree.*
 
 One node type. An account is a row in a fixed `.bss` arena, named by a
 generation-stamped id, one per `Process` plus one root owned by the kernel, whose parent
@@ -29,36 +30,35 @@ id is generation-stamped so a stale refund is a defined no-op.*
 
 ## Status
 
-**The mechanism and seven of eight kinds have shipped.** This document is now two things:
-the design rationale for code that exists — which is why the sections below are written in
-the present tense and should be read as *why it is the way it is* — and, at the end, the
-short list of what is still missing.
+**Complete.** Every kind is charged and enforced, reclaim exists, and the numbers are
+published to userland. This document is now two things: the design rationale for code that
+exists — which is why the sections below are written in the present tense and should be
+read as *why it is the way it is* — and, at the end, the record of what each phase cost and
+what did not survive contact.
 
-Shipped, over commits `f46cada0`..`8da6213a`:
+Shipped, over commits `f46cada0`..`4d947a93`:
 
 | Piece | Where |
 |---|---|
 | `ResourceKind`, `Unit`, `Refund`, axis markers, enforced defaults | `abi/src/quota.rs` |
 | Arena, `try_charge`, `refund_raw`, `ledger_audit`, `quota=` tier | `slopos-ostd/src/process/quota/arena.rs` |
-| `Reservation`, `Charge`, `ChargeSlot` | `slopos-ostd/src/process/quota/token.rs` |
+| `Reservation`, `Charge`, `ChargeSlot` (+ `grow`/`shrink`) | `slopos-ostd/src/process/quota/token.rs` |
 | `Charged`, `FileBacking`, `AliasOf`, `SharedCharge`, audit registry | `slopos-ostd/src/process/quota/charged.rs` |
 | `#[derive(Charged)]` | `slopos-ostd-derive/src/lib.rs` |
-| `ledger` kcommand + `QUOTA[...]` report | `sched/src/quota_console.rs` |
+| `ledger` kcommand + `QUOTA[...]` / `QUOTACOST` reports | `sched/src/quota_console.rs` |
+| `Pages` on the address space + the `PagesMismatch` audit | `mm/src/vma_region.rs` |
+| Kernel-heap backing charged at the allocator | `mm/src/slab/page.rs` |
+| `KeepaliveFrames` — the DMA pin that outlives its ring | `slopos-ostd/src/mm/uframe.rs` |
+| `Reclaimable`, the registry, two sources | `slopos-ostd/src/mm/reclaim.rs`, `mm/src/page_alloc/mod.rs`, `fs/src/ext2_vfs.rs` |
+| `prlimit64` + `getrlimit`/`setrlimit` | `core/src/syscall/process_handlers.rs`, `slibc/src/process/rlimit.rs` |
 | Linearity gate | `scripts/check_charge_linearity.sh` |
-| Headroom ratchet + measured caps | `scripts/check_quota_headroom.sh`, `scripts/gates/quota/tests.txt` |
-| Machine-checked ledger, 18 obligations | `verification/proofs/resource_ledger.rs` |
-| `Pages` on `VmaMap`, `ChargeSlot::grow`/`shrink`, the `PagesMismatch` audit | `mm/src/vma_region.rs`, `slopos-ostd/src/process/quota/token.rs` |
+| Headroom + throughput ratchet, measured caps | `scripts/check_quota_headroom.sh`, `scripts/gates/quota/tests.txt` |
+| Machine-checked ledger, 21 obligations | `verification/proofs/resource_ledger.rs` |
 
 Charged and enforced: `FdSlot` (256), `ObjectRow` (512), `Task` (512), `Process` (64),
-`Custody` (64), `PinnedBytes` (4096 pages), `KernelMeta` (2048 pages). Default is
-`quota=enforce`; a full test boot records **zero denials**, so no legitimate workload is
-refused.
-
-**Not done — see [What is left](#what-is-left).** `Pages` has no charge sites and no
-ceiling, and nothing reclaims. Until reclaim lands, the quota bounds *acquisition* and not
-*holding time*, which is residual risk 4 below and the plan's own stated danger.
-
----
+`Custody` (64), `PinnedBytes` (4096 pages), `KernelMeta` (2048 pages), `Pages` (65536
+pages). Default is `quota=enforce`; a full test boot records **zero denials**, so no
+legitimate workload is refused.
 
 ## Why there was nothing
 
@@ -564,15 +564,30 @@ What survives, each with its caveat:
   frame allocation and never resolve it from `current()`; and one reclaimable class must
   land, scheduled, in the final phase. Revisit if `KernelMeta` lands early — a witness on
   the frame allocator with `current_frame_allocator()` made crate-private is most of a bank
-  already. **That trigger has fired:** `KernelMeta` shipped in phase 5 and its charge sites
-  do name the account explicitly as an argument (`TaskStack::allocate(size, account)`,
-  never resolved from `current()`). So the bank question is live again and should be
-  answered deliberately when reclaim lands, not drifted into.
+  already. **That trigger fired, and the question is now answered: still a counter, and
+  the reason has changed.** Reclaim has landed, so the original argument — that title buys
+  revocation and revocation needs reclaimable implementors that do not exist — no longer
+  applies. What replaces it is narrower and stronger. Both page-denominated kinds are
+  charged at sites that already name the account explicitly (`TaskStack::allocate(size,
+  account)`, `VmaMap::bind_account`, `PinnedUserBuffer::pin(.., account)`), so the *stated
+  benefit* of a bank — that the payer is named at the allocation rather than inferred — is
+  already had, without rewriting the frame allocator's signature. And the one place a bank
+  would still differ is the shared slab, where it must not be applied: per-cgroup caches
+  measured 45–65 % utilisation upstream and shared-slab accounting recovered ~40 % of
+  kernel memory, so the kernel heap's backing is charged to the root as an unattributed
+  remainder on purpose. A bank over a shared slab is the design that measurement rejects.
+  Revisit only if a *per-principal* backing store ever exists to hold title against.
 - **Per-page or per-frame owner metadata.** See question 7.
 - **Kill as a memory-enforcement lever.** It collides with the discipline that a task only
   exits from its own context. For the one unrefusable case — a demand fault, which has no
   syscall return path — the disposition is a **signal, so the task unwinds itself**, with a
   depth-ordered subtree kill as the bounded last resort. Never a cross-CPU teardown.
+  *Shipped, with one honest gap:* `TaskFaultReason::UserOom` exits with `128 + SIGBUS` and
+  `retire_faulted_cpu` already ran on the faulting task's own CPU, so I8 holds. What does
+  not happen is a userland `SIGBUS` **handler** running — the fault frame is on an IST
+  stack, where signal delivery is deliberately refused. Lifting that is an IST-discipline
+  change, and it is left un-attempted rather than half-done. The depth-ordered subtree kill
+  was never needed and is not built.
 - **Exception- or unwind-based quota failure.** Windows raised on quota exhaustion by
   default, then made not-raising the preferred flag, then deprecated the family entirely in
   favour of returning null. Matters concretely for a `panic=unwind` kernel.
@@ -659,9 +674,14 @@ account. Recorded rather than silently skipped.
 
 ---
 
-## What is left
+## The second round, and what it cost
 
-Ordered by what the plan itself says is most dangerous to defer.
+The five items this plan listed as outstanding, plus the one measurement it listed as
+missing. Ordered as the plan ordered them — by what it judged most dangerous to defer.
+
+Held throughout, as in the first round: `cargo fmt --all`, then
+`just build && just _iso-tests && just test` per commit. Six commits,
+`477bcf63`..`4d947a93`. Test count 2927 → 2944.
 
 ### 1. Reclaim — **shipped**
 
@@ -811,6 +831,55 @@ and never a specific value, so it does not become a third place the numbers live
 
 ---
 
+### Four premises of this plan that did not survive contact
+
+Recorded in the same spirit as the first round's two, because the *reasons* are the useful
+part and a future change that re-proposes any of them should have to answer these.
+
+**1. "One `Charge<PagesAxis>` per VMA/region."** Wrong twice over. FreeBSD carried exactly
+that for sixteen years and removed it in January 2026 — a split carves holes a single
+counter cannot express — and Zircon rewrote attribution to enumerate rather than carry per
+mapping. It is also unrepresentable here: `VmaRegion` is `Clone` and is cloned for every
+split remnant, which a linear token may never be. The map itself is the carved set, so one
+charge per address space is both exact and writable.
+
+**2. "The per-CPU stack-VA cache is a pool that can shrink to zero."** It is not a reclaim
+source. `pcp_drain_all` is documented shutdown-only and takes every CPU's cache without
+pinning, and a stack VA slot keeps its frames *mapped* by design — returning the slot frees
+no page. Registering it would have been a reclaimer that reclaims nothing, which is worse
+than none: it would have made `reclaimable_pages` report headroom that does not exist.
+
+**3. "Charge the slab refill *and* the `unix_connect` FIFOs."** Double-counting. At 16 KiB
+the FIFOs exceed `MAX_SLAB_CLASS_BYTES`, so they come from the large-alloc tier and are
+already covered by the allocator-level charge. Charging them again would destroy the one
+property the root account exists for — that its row reconciles against the buddy.
+
+**4. "`Charge::try_extend` is the growth primitive."** It returns a new token by value,
+which cannot be stored back into a `.bss` slot without a `&mut Charge` — and no `&mut
+Charge` exists anywhere, deliberately. `ChargeSlot::grow`/`shrink` are the in-place forms.
+
+### Three defects the measurement caught, again
+
+The first round found four defects by measuring rather than reading. This round found three
+more, all by writing the test before believing the code:
+
+1. **The `Pages` audit was vacuous as first written.** It compared each map's charge against
+   its own span — two numbers maintained by the same code, which agree even when both are
+   wrong. The check that has teeth compares the *row* against the summed maps, because that
+   is the pair a phantom debit separates. Caught by a test that planted a drift and watched
+   the audit stay silent.
+2. **`test_quota_charge_cost` measured nothing at depth 8.** `account_create` refuses past
+   `MAX_ACCOUNT_DEPTH` while `process_spawn` still succeeds, so the chain ended on an
+   account naming no row — and `try_charge` returns immediately on one. It reported a
+   depth-8 walk as five times *cheaper* than depth-1, which is impossible, which is how it
+   was noticed. The test now asserts the deepest account has a row before timing it.
+3. **`shrink_clean` rebuilt its index with an allocating insert.** On the path that runs
+   *because* allocation failed, and a failed re-insert would have left a live cached block
+   unreachable under its own number. Replaced with an in-place repair of the one entry
+   `swap_remove` moves. The regression test for it needed two attempts to become real: the
+   first released only empty trailing slots, where nothing moves and the repair is dead
+   code.
+
 ## The rule that killed the last counter
 
 The deleted per-process page counter had 21 writes and zero readers. So:
@@ -823,7 +892,8 @@ The rule was held: every kind landed with its enforcement point, its tests and i
 line in one commit.
 
 **Test budget, as estimated and as measured.** The estimate was +55 to +62 KTAP tests for
-18 resource classes. Actual: **+15** (2912 → 2927), because the estimate assumed 18 classes
+18 resource classes. Actual across both rounds: **+32** (2912 → 2944), of which the first
+round was +15, because the estimate assumed 18 classes
 each needing three kernel-level tests, and the real shape is 21 `slopos-ostd` unit tests
 over the arena and the tokens — which cover the algebra once for every axis rather than
 once per axis — plus per-class kernel tests only where the *call site* differs. Charging
@@ -897,14 +967,32 @@ the useful part, and because a future change that moves them should notice.
   in `task_clone` put two `KArc<Process>` temporaries and both stack rvalues into that frame
   and pushed it 2016 → 2264 B. Factored into one `#[inline(never)]` helper returning the
   pair.
+
+  The second round *removed* two allowlist entries rather than adding any. Making
+  `VmaMap::insert` fallible pushed `process_vm_clone_cow_for` over the cap; splitting the
+  per-VMA walk into `clone_cow_populate_child` took it back under 2048 B in both dev and
+  tests, at which point its pre-existing exemptions became dead entries and the gate
+  demanded they be handed back — which is the ratchet working in the direction it is meant
+  to. One new frame appeared and was also fixed rather than exempted: `KeepaliveFrames`
+  widened `SegmentSource`, which pushed a TCP retransmit test over, and the SACK setup was
+  factored into `inject_sack_dup_ack`.
 - **Lockdep caps: edges and chains did not move; classes +3.** Charging takes no locks, as
   designed. The three classes are the AF_INET socket wait queues re-registering from the
   boot-allocated spine — unrelated to accounting, and a *class* is per declaration site
   however many instances exist.
 - **The real peaks.** Root, at `post-userland-tests` with the session-smoke population
-  live: `fdslot` 256, `objectrow` 257, `kernelmeta` 636, `process` 113, `custody` 8,
-  `task` 5–7, `pinnedbytes` 1. Worst *single* user row: 18 fdslot, 10 objectrow, 12
-  kernelmeta, 4 process. The enforced per-process defaults sit an order of magnitude above
+  live: `fdslot` 256, `objectrow` 257, `kernelmeta` 6000, `pages` 612416, `process` 114,
+  `custody` 8, `task` 5–7, `pinnedbytes` 4. Worst *single* user row: 18 fdslot, 10
+  objectrow, 12 kernelmeta, 30998 pages, 4 process.
+
+  Two of those moved in the second round and the reason matters. `kernelmeta` went 636 →
+  6000 because the kernel heap's own backing joined it — the same row now means task
+  stacks *plus* every page the slab and large tiers hold, which is what makes it
+  reconcilable against the buddy. `pinnedbytes` went 1 → 4 because the keepalive DMA pages
+  were previously uncharged. `pages` is mapped **virtual** address space, so its 2.3 GiB
+  across ~108 live address spaces is not comparable to the machine's 340 MiB of RAM;
+  demand paging means a process maps far more than it populates, and the per-row figure is
+  what the ceiling is derived from. The enforced per-process defaults sit an order of magnitude above
   those, which is the point — they bound an adversary, not the workload.
 - **`CLONE_VM && !CLONE_THREAD`: `Task` only, and not by choice.** See *Two premises that
   did not survive contact* — a fresh `Process` there is structurally unrepresentable until

@@ -1,13 +1,21 @@
 # SlopOS Vulnerability Audit and CVSS Scoring
 
-Date: 2026-03-17 (original); last reviewed 2026-08-09.
+Date: 2026-03-17 (original); last reviewed 2026-08-10.
 Method: repository-wide static review (`grep`, `ast-grep`, targeted source inspection), plus NVD CVE lookups via `curl` + `jq`. The 2026-07-30 pass added a structured sweep: six reference briefs on proven kernel designs, fifteen per-subsystem auditors, then one adversarial verifier per candidate finding (two independent lenses for the most severe), each instructed to default to REFUTED and to locate the guard that would disprove the claim. Only findings that survived verification with a concrete attacker trigger are recorded here. The 2026-08-08 pass swept the authorization and resource-accounting surfaces specifically, over twelve prior-art clusters and seven adversarial lenses, and added 0044–0052; its remediation lives in `plans/process-object.md`, `plans/resource-accounting.md` and `plans/authority-model.md`; the nine findings that had no framework dependency have since been fixed and removed under the policy below.
 
 The 2026-08-09 pass swept the resource-accounting implementation as it landed (`plans/resource-accounting.md`, phases 1-5). Per-principal ceilings are now enforced on seven kinds — descriptor slots, object rows, tasks, processes, in-flight `SCM_RIGHTS` custody, pinned pages, and kernel metadata (task stacks) — which closes the class of "one unprivileged process exhausts a fixed global table and every other process is permanently denied" for those resources. The sweep found one defect in the new code, in `Charge::try_extend`: a saturating add capped the token's amount below what the account row had already been debited, so the difference would never be refunded. Not recorded as a finding — it required a single object holding 4 billion units, which no ceiling permits, so there was no attacker-reachable trigger; fixed by refusing the extension instead, which makes the reservation's own `Drop` return the debit.
 
 The same pass swept the two structural changes that landed alongside it. AF_INET sockets now hold their own wait queues on a pinned, boot-allocated spine rather than sharing one of 64 folded buckets, which removes a cross-socket wake amplification (one event woke up to sixteen unrelated sockets) without changing the correctness argument — the fallback path is chosen once by `OnceLock::call_once` and cannot flip under a parked task, so no wake can be lost. Input event-queue slots are now claimed only at a syscall or focus change, never from the PS/2 IRQ handler: a claim there acquired one of 32 slots on behalf of a task that never asked, at a point with no principal and no errno path, which is the confused-deputy shape at queue-registration scope.
 
-Two residual exposures are recorded here rather than scored, because both are bounded and neither has a reachable trigger. Keepalive DMA frames (`PinnedUserBuffer::keepalive_frames`) are deliberately not covered by the ring's pin charge — sharing one would refund at ring teardown while the driver still held the pages — and are bounded instead by `SLOPRING_MAX_FIXED_BUFFERS` times the per-ring pin ceiling until the charge lands at the driver's TX-reclaim site. `Pages` (per-VMA address-space accounting) has no charge sites yet and carries no ceiling, so address-space growth is still bounded only by the frame allocator.
+**Both residual exposures the previous pass recorded are now closed.** Keepalive DMA frames carry their own independent `PinnedBytes` charge (`KeepaliveFrames`), refunded where the frames are actually released rather than at ring teardown, and a retransmit's second in-flight DMA is charged as the second pin it is. `Pages` is charged per address space and enforced at 65 536 pages, so address-space growth is no longer bounded only by the frame allocator.
+
+The 2026-08-10 pass swept the second implementation round — `Pages`, kernel-heap backing, keepalive charges, the reclaim tier, and `prlimit64`. Three defects were found and fixed; none is recorded as a finding, because none had an attacker-reachable trigger, and the policy below forbids scoring speculative issues:
+
+1. **`shrink_clean` rebuilt the block-cache index with an allocating `KBTreeMap::insert`**, on the path that runs *because* allocation failed. A failed re-insert would have left a live cached block unreachable under its own number — a correctness fault, not a safety one, and unreachable in practice because the reclaimer is only driven after an allocation has already failed and before any caller depends on the index. Replaced with an in-place repair of the single entry `swap_remove` moves, which allocates nothing.
+2. **`prlimit64` mapped an unconvertible `rlim_cur` to the no-limit sentinel.** Had it been reachable this would have been an unprivileged escape from every ceiling: the widest possible `setrlimit` would have switched enforcement off for the caller's own account. It is not reachable — the `EPERM` check against the published hard limit runs first and bounds the value below `u32::MAX` for every published resource — so it is fixed as defence in depth (clamp to the current limit, never raise) and pinned by a userland test rather than scored.
+3. **The `Pages` audit was vacuous as first written**, comparing two numbers maintained by the same code. Rewritten to compare the account row against the summed maps, which is the pair a phantom debit separates.
+
+The reclaim tier was reviewed specifically for the deadlock class it could introduce, since it runs on allocation-failure paths reachable from under other subsystems' locks. Both reclaimers are non-blocking by construction: the quarantine reclaimer takes the buddy lock it already owns, and the ext2 reclaimer `try_lock`s a sleeping mutex held across block I/O and returns zero rather than waiting. Reclaim is never driven from `try_charge` — the arena takes no locks by construction, and a hook there would give it an inbound edge from every charge site at once — but from the caller of a refused allocation, at a syscall boundary or the demand-fault path, each with a single bounded retry.
 
 > **Pre-alpha ledger policy.** SlopOS is pre-alpha with no backwards-compatibility or audit-trail obligations, so this ledger tracks **open findings only**. When a finding is resolved it is **removed** from this file (not retained as a `fixed` historical record). Internal IDs stay stable for findings that remain open, so gaps in the numbering are expected.
 
@@ -60,7 +68,6 @@ python3 scripts/cvss_calc.py "CVSS:3.1/AV:L/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H"
 | [SLOPOS-2026-0027](#slopos-2026-0027) | 3.3 | LOW | O_APPEND is evaluated once at open and the file position has no lock |
 | [SLOPOS-2026-0028](#slopos-2026-0028) | 3.3 | LOW | `stat`, `fstat` and `sys_info` copy uninitialized struct padding to userland |
 | [SLOPOS-2026-0032](#slopos-2026-0032) | 3.3 | LOW | `FUTEX_WAIT` accepts a timeout and silently ignores it |
-| [SLOPOS-2026-0035](#slopos-2026-0035) | 3.3 | LOW | The SlopRing registry is global with no per-process quota |
 | [SLOPOS-2026-0036](#slopos-2026-0036) | 3.3 | LOW | A malformed compositor frame wedges that client's connection permanently |
 ## Open SlopOS Findings (for remediation)
 
@@ -407,22 +414,6 @@ These are **candidate CVE-style records** for internal tracking. They are not of
   Drive the kernel heap to exhaustion (anonymous faulting or task spawning until a slab refill fails), then have any task call `synchronize_rcu` or trigger a `call_rcu` whose node allocation fails.
 - Remediation: Make the snapshot allocation-free by using a fixed per-CPU array sized by MAX_CPUS, so the OOM fallback path cannot itself allocate. This is the general rule for a reclaim path: it must not require the resource it exists to reclaim.
 
-### SLOPOS-2026-0035
-- Title: The SlopRing registry is global with no per-process quota
-- Status: open
-- Confidence: 88 — evidence 38 (the registry bound and the absence of any per-process accounting read directly), exploitability 24 (needs ~9 cooperating processes because the per-process fd table caps one process at ~29 rings), reproducibility 26 (deterministic)
-- CVSS vector/score: `CVSS:3.1/AV:L/AC:L/PR:L/UI:N/S:U/C:N/I:N/A:L` — **3.3 LOW**
-- Impact: `MAX_RINGS = 256` is a system-wide registry with no per-process quota. In a kernel with no credential model, spawning nine processes is unprivileged, so a single user can exhaust the registry and deny SlopRing to everything else until those processes exit.
-- Evidence:
-  - ring/src/registry.rs:19-22 — `const MAX_RINGS: usize = 256;` with the comment "Maximum concurrent rings system-wide"
-  - ring/src/registry.rs:55 — `static REGISTRY: SpinLock<Option<HandleTable<RingSlot>>>` — one global table, no per-pid partitioning
-  - ring/src/registry.rs:76-79 — `insert` returns `None` when `HandleTable::insert` yields `HandleError::Full`
-  - ring/src/enter.rs:130-136 — `let Some(raw_handle) = registry::insert(ring) else { … return eno(Errno::ENOMEM) }`
-  - ring/src/file_ops.rs:33-38 — the registry entry is released only when the last fd on the open-file description closes
-- Repro:
-  Spawn 9+ processes, each calling `ring_setup` ~29 times and then blocking to hold the fds. Subsequent `ring_setup` calls anywhere on the system fail.
-- Remediation: Add a per-process ring quota at the registration point. This is one instance of the general resource-accounting gap; see the resource-accounting plan.
-
 ### SLOPOS-2026-0036
 - Title: A malformed compositor frame wedges that client's connection permanently
 - Status: open
@@ -568,5 +559,5 @@ Ordered by what removes the most exposure per unit of work, not by score.
 2. **Reseed the DNS resolver and validate response provenance** (0012), then replace the ISN generator with a keyed PRF (0014) and add the RFC 793 §3.9 acceptability gate (0013). These three are the network-facing set and share a test harness.
 3. **The TLB correctness set** (0017, 0018, 0019). Stale writable translations across address spaces are the only findings here that could become memory corruption rather than denial of service.
 4. **The filesystem integrity set** (0021–0027, 0042, 0043). Individually low-scoring, collectively the reason the filesystem cannot yet be trusted with data that matters.
-5. **Resource accounting** (0016, 0035, 0030, 0031). These are instances of one absent mechanism; see `plans/resource-accounting.md` rather than patching them individually. 0016's fix is a type restriction on what may be passed over a socket, not a smarter collector — the same place io_uring landed after five years.
+5. **The residue of resource accounting** (0016, 0030, 0031). `plans/resource-accounting.md` has landed and 0035 went with it — a ring is a `FileBacking`, so it now carries a per-process `ObjectRow` charge. These three do **not** fall out of it, and grouping them under it was the error: a per-principal count bounds how many of a thing one process holds, and none of these is that shape. 0016 is a reference *cycle*, which no count collects; its fix is a type restriction on what may be passed over a socket, the same place io_uring landed after five years. 0030 is a scheduling-fairness gap, not a capacity one. 0031 is a shared *namespace* — fill one futex bucket and every other process whose word hashes there is denied — which per-principal partitioning would fix and per-principal counting would not; the plan names this as residual risk 5 and explicitly puts it out of scope.
 6. **Authorization** (0049, and the structural halves of the fixed authorization findings). The relation checks have landed; the capability set, the witness that makes a missing check a compile error, and the display and input seats are `plans/authority-model.md`, which depends on `plans/process-object.md`.

@@ -337,29 +337,40 @@ impl BlockCache {
             return 0;
         }
         let mut released = 0u32;
-        // Back to front, so each `swap_remove`-free truncation only ever moves
-        // entries that have already been considered.
+        // From the end, so a `swap_remove` only ever moves an entry that has
+        // already been considered.
         let mut i = self.entries.len();
         while i > 0 && released < want {
             i -= 1;
             if self.entries[i].pinned != 0 || self.entries[i].frame.dirty() {
                 continue;
             }
+            // Drop this entry's index key *before* the removal, and repair the
+            // key of whatever `swap_remove` moves into its place. Rebuilding
+            // the whole index afterwards would be simpler and is wrong: it
+            // needs `KBTreeMap::insert`, which allocates, on the path that
+            // runs *because* allocation failed — and a failed re-insert would
+            // leave a live cached block unreachable under its own number.
+            //
+            // `remove` and the in-place `get_mut` below allocate nothing.
+            self.index.remove(&self.entries[i].block);
+            let moved_from = self.entries.len() - 1;
+            let moved = if moved_from != i {
+                Some(self.entries[moved_from].block)
+            } else {
+                None
+            };
+            let removed_valid = self.entries[moved_from].valid;
             // Dropping the entry drops its `Frame<PageCacheMeta>`, which is
             // what actually returns the page.
             self.entries.swap_remove(i);
-            released += 1;
-        }
-        if released != 0 {
-            // Slot indices moved, so the block index is rebuilt rather than
-            // patched: a stale index entry would hand a reader another
-            // block's bytes under the number it asked for.
-            self.index.clear();
-            for (slot, entry) in self.entries.iter().enumerate() {
-                if entry.valid {
-                    self.index.insert(entry.block, slot);
-                }
+            if let Some(block) = moved
+                && removed_valid
+                && let Some(slot) = self.index.get_mut(&block)
+            {
+                *slot = i;
             }
+            released += 1;
         }
         released
     }

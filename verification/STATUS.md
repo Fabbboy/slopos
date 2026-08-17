@@ -156,6 +156,17 @@ logic only**. What it does not reach, and what is audited instead:
   is unique, never that the resource it names is; the in-kernel `quotacheck`
   audit (`ledger_audit`) is the runtime cross-check, and there is no third
   line of defence.
+- That `VmaMap`'s incrementally-maintained span still describes its tree. L6
+  proves `settle` is idempotent and shrink-only over an *abstract* target;
+  that the target equals what the region map actually holds is checked at
+  runtime by the `PagesMismatch` arm of the audit, and in debug builds by the
+  assertion `insert` carries.
+- Reclaim's *timing*. L6 covers reclaim as a refund bounded by the charge, so
+  it cannot manufacture headroom. What it does not model is the `try_lock`
+  the ext2 reclaimer takes: whether declining to block is enough to keep the
+  reclaim path free of the deadlock its own allocation failure could cause is
+  a lock-order argument, checked by lockdep and by
+  `scripts/check_lockdep_headroom.sh`, not by Verus.
 
 ## The soundness invariants
 

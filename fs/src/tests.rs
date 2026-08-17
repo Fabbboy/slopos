@@ -1824,3 +1824,85 @@ pub fn test_quota_objectrow_cross_process_isolation() -> TestResult {
 }
 
 slopos_testing::stest!(name = test_quota_objectrow_cross_process_isolation);
+
+/// Reclaiming from the block cache leaves every surviving block findable.
+///
+/// The index maps block number to slot, and reclaim moves slots — so a repair
+/// that missed an entry would leave a live cached block unreachable under its
+/// own number, and the next read of it would fault in a second copy while the
+/// first sat pinned and invisible. Worse, a *stale* entry would hand back
+/// another block's bytes under the number that was asked for.
+///
+/// Written against the cache directly rather than through the VFS: the failure
+/// is in the index, and a read through the VFS would silently re-fault the
+/// block and report success.
+pub fn test_block_cache_reclaim_keeps_the_index_coherent() -> TestResult {
+    use crate::blockdev::MemoryBlockDevice;
+    use crate::ext2::cache::BlockCache;
+    use crate::ext2::types::BlockNum;
+
+    const BLOCK_SIZE: u32 = 1024;
+    const BLOCKS: u32 = 24;
+
+    let Some(device) = MemoryBlockDevice::allocate((BLOCKS as usize + 8) * BLOCK_SIZE as usize)
+    else {
+        return TestResult::Skipped;
+    };
+    let Ok(mut cache) = BlockCache::new(BLOCK_SIZE) else {
+        return TestResult::Fail;
+    };
+
+    // Stamp each block with its own number so a mixed-up index is visible as
+    // wrong *contents* rather than merely a miss.
+    for b in 1..=BLOCKS {
+        let Ok(mut guard) = cache.get_zero(BlockNum(b), &device) else {
+            return TestResult::Fail;
+        };
+        guard.data_mut()[0] = b as u8;
+    }
+    // Clean, so they are reclaimable.
+    if cache.flush_all(&device).is_err() {
+        return TestResult::Fail;
+    }
+
+    // Re-dirty the *last* block, so the scan (which walks from the end) has to
+    // skip it and the entries it does release come from the middle. That is
+    // what makes `swap_remove` actually move a surviving entry into a lower
+    // slot -- without it every removal is a pop, nothing moves, and the index
+    // repair this test exists for is never exercised.
+    {
+        let Ok(mut tail) = cache.get(BlockNum(BLOCKS), &device) else {
+            return TestResult::Fail;
+        };
+        tail.data_mut()[0] = BLOCKS as u8;
+    }
+
+    // Reclaim nearly everything. The cache pre-allocates `CACHE_ENTRIES`
+    // slots, so a small request is satisfied entirely from the empty trailing
+    // ones and never disturbs a live block -- the case that must work is the
+    // one where the scan reaches the populated slots and has to move them.
+    let before = cache.reclaimable();
+    slopos_testing::assert_test!(before > 0, "a flushed cache reported nothing reclaimable");
+    let released = cache.shrink_clean(before);
+    slopos_testing::assert_test!(released > 0, "shrink_clean released nothing");
+
+    // Every block must still read back its own stamp: a survivor through the
+    // index, an evicted one through a re-read from the device.
+    for b in 1..=BLOCKS {
+        let Ok(guard) = cache.get(BlockNum(b), &device) else {
+            return TestResult::Fail;
+        };
+        slopos_testing::assert_test!(
+            guard.data()[0] == b as u8,
+            "block {} read back as {} after reclaim -- the index points at the wrong slot",
+            b,
+            guard.data()[0]
+        );
+    }
+    TestResult::Pass
+}
+
+slopos_testing::stest!(
+    name = test_block_cache_reclaim_keeps_the_index_coherent,
+    suite = fs
+);

@@ -918,11 +918,19 @@ define_syscall!(syscall_prlimit64
         // process refused for want of headroom could simply ask for more.
         // Lowering is always safe and is the useful half: it is how a process
         // sandboxes itself before running untrusted work.
-        if current.limit != NO_LIMIT && want.rlim_max > publish(current.limit) {
+        if want.rlim_max > publish(current.limit) {
             return Err(Errno::EPERM);
         }
+        // Saturating, never `NO_LIMIT`. A `rlim_cur` too large for the arena's
+        // `u32` is a request to raise the ceiling past anything this kernel
+        // enforces, and mapping it to the no-limit sentinel would turn the
+        // widest possible *set* into a way to switch enforcement off for the
+        // caller's own account — an unprivileged escape from every ceiling.
+        // Clamping to the current one keeps `setrlimit` lower-only for every
+        // input, including the ones that do not fit.
         let scaled = want.rlim_cur / mapping.scale.max(1);
-        set_limit(account, mapping.kind, u32::try_from(scaled).unwrap_or(NO_LIMIT));
+        let requested = u32::try_from(scaled).unwrap_or(u32::MAX).min(current.limit);
+        set_limit(account, mapping.kind, requested);
     }
 
     Ok(())
