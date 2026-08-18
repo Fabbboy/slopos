@@ -1,35 +1,12 @@
 #![feature(restricted_std)]
 
-//! End-to-end TCP recv proof.
+//! End-to-end TCP recv proof: sends a TCP-DNS query to a public resolver and
+//! asserts a response byte arrives inside the 5-second budget curl uses.
 //!
-//! Sends a minimal TCP-DNS query to a public resolver and asserts
-//! that at least one response byte is read inside the 5-second
-//! budget curl itself uses. If this passes, `curl http://google.com`
-//! works from the shell.
-//!
-//! The in-kernel `test_source_ip_for_*` checks prove the SYN goes
-//! out with a route-aware src_ip, but no kernel-side unit test can
-//! prove that SLIRP NATs the packet, the SYN-ACK reaches us, the
-//! data path enqueues a response into `bufs.recv`, and userland
-//! `read()` returns it — only an actual end-to-end transmission
-//! does. That gap is what this binary closes.
-//!
-//! Target choice: **TCP port 53 on any of several public
-//! resolvers**. TCP-DNS is mandatory by RFC 7766, every public
-//! resolver listens on 53/tcp, the addresses below have been stable
-//! for over a decade, and SLIRP's NAT forwards them normally (no
-//! special-case rewriting like SLIRP does for its own gateway and
-//! DNS-alias IPs). That isolates the kernel TCP send/recv path from
-//! DNS resolution and from SLIRP IP rewriting.
-//!
-//! It does **not** isolate it from host-side filtering, which is why
-//! more than one address is tried. Reachability is per address and
-//! per protocol: a host can refuse `8.8.8.8:53` while answering
-//! `1.1.1.1:53` and passing ICMP to both, so "anything that lets
-//! `ping` work lets this work" is false and a single hardcoded target
-//! turns one operator's filtering policy into a kernel test failure.
-//! What this test exists to prove is that external TCP works at all,
-//! so it fails — never skips — when every address refuses.
+//! Target is 53/tcp on public resolvers: TCP-DNS is mandatory by RFC 7766 and
+//! SLIRP NATs those addresses normally, unlike its own gateway and DNS-alias
+//! IPs. Reachability is per address, so several are tried; every address
+//! refusing is a failure, never a skip.
 
 use slopos_userland as _;
 
@@ -46,8 +23,7 @@ const TEST_DST_IPS: [Ipv4Addr; 3] = [
 const TEST_DST_PORT: u16 = 53;
 const IO_TIMEOUT: Duration = Duration::from_secs(5);
 /// 2-byte TCP-DNS length prefix + a minimal valid DNS query for `.`
-/// (root, type=NS). Any well-behaved resolver answers; we discard
-/// the answer and just check that bytes came back.
+/// (root, type=NS). The response is never parsed; resolver answers vary.
 const TCP_DNS_QUERY: &[u8] = &[
     0x00, 0x11, // 17-byte DNS message
     0xab, 0xcd, // ID
@@ -61,19 +37,15 @@ const TCP_DNS_QUERY: &[u8] = &[
     0x00, 0x01, // QCLASS=IN
 ];
 
-/// Connect to the first reachable target, reporting which one answered.
-///
-/// Every refusal is named in the failure string rather than only the last,
-/// because "this one address is filtered" and "there is no route off the
-/// machine" are different faults and the list is what tells them apart.
+/// Connects to the first reachable target and names every refusal: one
+/// filtered address and no route off the machine are different faults.
 fn connect_any() -> Result<(SocketAddrV4, TcpStream, u128), String> {
     let mut refusals = String::new();
     for ip in TEST_DST_IPS {
         let addr = SocketAddrV4::new(ip, TEST_DST_PORT);
-        // The plain blocking `TcpStream::connect` — that is the exact
-        // path `curl` takes. `connect_timeout` would also work but
-        // exercises std's nonblocking-poll plumbing on top, which can
-        // mask a TCP-state regression behind a poll bug.
+        // Blocking `connect` is the path curl takes; `connect_timeout` layers
+        // std's nonblocking-poll plumbing on top and can mask a TCP-state
+        // regression behind a poll bug.
         let connect_start = Instant::now();
         match TcpStream::connect(&addr) {
             Ok(stream) => return Ok((addr, stream, connect_start.elapsed().as_millis())),
@@ -153,10 +125,6 @@ fn run_tcp_recv() -> (bool, String) {
         );
     }
 
-    // For TCP-DNS, the first 2 bytes are the length prefix followed
-    // by a DNS response. Any non-zero read proves the recv path
-    // delivered bytes; we don't validate the DNS contents because
-    // host resolver behavior varies.
     (
         true,
         format!(
@@ -169,8 +137,6 @@ fn run_tcp_recv() -> (bool, String) {
 fn run_tcp_recv_diag() -> (bool, String) {
     let (ok, diag) = run_tcp_recv();
     if !ok {
-        // Hint at the categories so the post-mortem reader knows where
-        // to look first.
         let hint = if diag.contains("connect to") {
             " — SYN/SYN-ACK path broken (src_ip routing, ARP, or RX demux)"
         } else if diag.contains("write_all failed") {
@@ -188,14 +154,9 @@ fn run_tcp_recv_diag() -> (bool, String) {
     }
 }
 
-/// Sanity check: every test run actually went through the
-/// route-aware source-ip selection, by inspecting the socket's
-/// `local_addr` once `connect` returns. A loopback address there
-/// means `first_ipv4()` has leaked into `socket_connect`.
+/// A loopback `local_addr` on an outbound socket means `first_ipv4()` has
+/// leaked into `socket_connect` in place of route-aware source selection.
 fn run_local_addr_is_not_loopback() -> (bool, String) {
-    // If no target completes a handshake we cannot make a useful
-    // assertion; the message names every refusal so this is not
-    // mistaken for the recv-path test failing.
     let (_addr, stream, _connect_ms) = match connect_any() {
         Ok(v) => v,
         Err(diag) => return (false, format!("{diag} — cannot probe local_addr")),

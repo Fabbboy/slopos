@@ -1,16 +1,8 @@
 //! `Zeroable` impls for `slopos-abi` types.
 //!
-//! `Zeroable` is OSTD's trait and `slopos-abi` is the upstream ABI
-//! crate; the orphan rule permits these impls to live here even though
-//! the types themselves are defined in `slopos-abi`. Centralising the
-//! impls in OSTD keeps the unsafe surface inside the trusted core and
-//! lets downstream kernel crates derive `Zeroable` on aggregates that
-//! embed these ABI types without needing their own unsafe blocks.
-//!
-//! Every impl below carries a SAFETY comment naming the bit-pattern
-//! justification: the all-zero byte pattern must be a well-formed
-//! value of the type. See `slopos_ostd::Zeroable` for the trait
-//! contract.
+//! `Zeroable` is OSTD's trait, so the orphan rule permits these impls here even
+//! though the types are defined in `slopos-abi`; centralising them keeps the
+//! unsafe surface inside the trusted core.
 
 use slopos_abi::addr::{PhysAddr, VirtAddr};
 use slopos_abi::input::layout::{Cell, ComposeEntry, LayoutTable};

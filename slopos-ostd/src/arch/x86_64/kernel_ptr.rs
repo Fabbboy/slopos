@@ -188,9 +188,8 @@ pub mod fn_ptr {
         }
         match f {
             Some(func) => {
-                // SAFETY: const assert guarantees layout-equal pointer
-                // size. fn-pointers are non-null and ABI-equivalent to
-                // `*mut ()`.
+                // SAFETY: the const assert guarantees pointer-sized `F`;
+                // fn-pointers are non-null and ABI-equivalent to `*mut ()`.
                 unsafe { core::mem::transmute_copy::<F, *mut ()>(&func) }
             }
             None => core::ptr::null_mut(),
@@ -214,12 +213,7 @@ pub mod fn_ptr {
 }
 
 /// Sanity-check probe: read one byte from a linker-published kernel
-/// symbol pointer. Returns the byte value. Used by boot's
-/// `verify_memory_layout` to confirm the kernel image is mapped where
-/// the linker said it would be — a fault here triple-faults during
-/// boot, which is the intended outcome.
-///
-/// The unsafe `read_volatile` lives once, here.
+/// symbol pointer.
 ///
 /// # Safety
 /// `addr` must point to a readable byte inside the kernel image (or
@@ -233,9 +227,8 @@ pub unsafe fn probe_kernel_byte(addr: *const u8) -> u8 {
     unsafe { core::ptr::read_volatile(addr) }
 }
 
-/// Internal extern block holding the kernel entry symbol `_start`.
-/// Consumed by [`verify_kernel_entry_alive`] below; kept private so
-/// only the bundled probe can dereference it.
+/// Kernel entry symbol `_start`; kept private so only
+/// [`verify_kernel_entry_alive`] can dereference it.
 mod kernel_entry_sym {
     crate::extern_block! {
         pub(super) mod externs {
@@ -245,17 +238,12 @@ mod kernel_entry_sym {
 }
 
 /// Best-effort sanity check that the linker placed the kernel image
-/// where the bootloader handoff promised. Reads one byte from the
-/// linker-published `_start` symbol via `read_volatile` — a fault
-/// here triple-faults during boot, which is the desired diagnostic.
-/// The unsafe `read_volatile` stays inside OSTD; consumers stay safe.
+/// where the bootloader handoff promised: a fault on the one-byte
+/// `_start` probe triple-faults during boot, which is the diagnostic.
 #[inline]
 pub fn verify_kernel_entry_alive() {
     let addr = kernel_entry_sym::externs::_start_addr();
     // SAFETY: `_start` is a linker-published byte inside the kernel
-    // image; if the image is mapped where the linker said, this
-    // single-byte probe is sound. If the image is *not* mapped, the
-    // probe page-faults, which is exactly the diagnostic outcome
-    // this sanity check exists for.
+    // image; an unmapped image faults, which is the intended outcome.
     let _ = unsafe { core::ptr::read_volatile(addr) };
 }

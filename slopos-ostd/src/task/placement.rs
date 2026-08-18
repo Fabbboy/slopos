@@ -35,20 +35,13 @@ use crate::task::kernel_task::TaskInner;
 /// Number of tasks currently holding their own existence reference.
 ///
 /// Equal, at every quiescent point, to the number of tasks the registry has
-/// published and not yet reaped — which is what makes it a leak tripwire: the
-/// two diverging means a reap released the reference without unhashing, or an
-/// unhash dropped an entry without reaping.
+/// published and not yet reaped — a leak tripwire: divergence means a reap
+/// released the reference without unhashing, or an unhash dropped an entry
+/// without reaping.
 static EXISTENCE_REFS_PARKED: AtomicUsize = AtomicUsize::new(0);
 
 /// Hand a task one strong reference to *itself*, to be taken back exactly once
 /// when it is reaped. Returns `false` if it already holds one.
-///
-/// This is the reference that keeps a task alive in the states where no
-/// container holds it — blocked with its waiter node holding only an opaque
-/// handle, holding a placement reservation that has not reached a queue,
-/// registered but not yet published, or mid-fork before joining its parent's
-/// list. Linux gives `task_struct` the same self-reference and takes it back in
-/// `release_task`.
 ///
 /// # Correctness
 /// Same liveness contract as [`task_placement_clone`]: `task`'s strong count
@@ -60,17 +53,13 @@ pub fn task_existence_park<K, U>(task: NonNull<TaskInner<K, U>>) -> bool {
     // SAFETY: per the contract the caller holds an owning reference, so the
     // referent is live for the duration of this call.
     let flag = unsafe { &task.as_ref().existence_ref_parked };
-    // Retain before claiming the flag, never after: a releaser that observes
-    // the flag must be guaranteed the count it is about to take back already
-    // exists. The cost is that a loser has to undo its retain.
     task_placement_retain(task);
     if flag
         .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
         .is_err()
     {
-        // Another caller parked first. Give back the reference we minted; the
-        // caller's own owning reference means this cannot be the final one, so
-        // it is a bare atomic decrement.
+        // The caller's own owning reference means giving back the one we minted
+        // cannot be the final release, so this is a bare atomic decrement.
         drop(task_placement_reclaim(task));
         return false;
     }
@@ -163,10 +152,6 @@ pub fn task_placement_reclaim<K, U>(ptr: NonNull<TaskInner<K, U>>) -> KArc<TaskI
 /// reference the caller disposes normally.
 #[inline]
 pub fn task_placement_clone<K, U>(ptr: NonNull<TaskInner<K, U>>) -> KArc<TaskInner<K, U>> {
-    // Reconstruct a handle onto the shared allocation without taking ownership,
-    // clone it to mint one fresh strong reference, then hand the borrowed
-    // reference back untouched via `into_raw`. Net effect: exactly one new
-    // strong reference; the caller's borrowed pointer is unchanged.
     // SAFETY: per the contract `ptr`'s strong count is non-zero, so
     // reconstructing and re-parking the borrowed reference is a balanced no-op
     // and the clone observes strong > 0.
@@ -187,14 +172,10 @@ pub fn task_placement_retain<K, U>(ptr: NonNull<TaskInner<K, U>>) {
 
 /// Borrow a task through a reference some container has parked on it.
 ///
-/// The counterpart to [`with_parked`] for the *other* kind of unowned node: not
-/// a task nobody can reach any more, but one whose owning reference lives in a
-/// container rather than in the caller's frame. A ready queue peeking at its
-/// tail, or a wait map's predicate, holds only the node — reclaiming to read it
-/// would take a membership the container still owns.
-///
-/// Scoped rather than returning a reference, so the borrow's lifetime is the
-/// call and the caller cannot choose it.
+/// A ready queue peeking at its tail, or a wait map's predicate, holds only the
+/// node — reclaiming to read it would take a membership the container still
+/// owns. Scoped rather than returning a reference, so the borrow's lifetime is
+/// the call and the caller cannot choose it.
 ///
 /// # Correctness
 /// Same liveness contract as [`task_placement_clone`]: the caller must hold, or
@@ -211,19 +192,15 @@ pub fn with_parked_node<K, U, R>(
 
 /// Whether a task a caller has parked a reference on has finished exiting.
 ///
-/// The one read the `waitpid` predicate needs, and the reason it has to live
-/// here. That predicate outlives the registry guard that found the target: a
+/// The `waitpid` predicate outlives the registry guard that found the target: a
 /// waiter killed mid-wait never unwinds its own stack, so the owning reference
-/// is parked in the wait map instead and the stack keeps only the node. A
-/// borrow tied to the guard therefore cannot be what the predicate holds, and
-/// this is the sanctioned surface for turning the parked node back into one —
-/// the same "reference in, answer out" shape as [`task_placement_clone`].
+/// is parked in the wait map instead and the stack keeps only the node. A borrow
+/// tied to the guard therefore cannot be what the predicate holds.
 ///
-/// Two reads, because they answer slightly different questions and either is
-/// sufficient: `exit_info` is the value the exit path publishes, and the
-/// exited-status check covers a path that flipped state without publishing
-/// one. Both are atomic loads and nothing else, which is what a wait predicate
-/// is allowed to be.
+/// Two reads, because either is sufficient and they differ: `exit_info` is the
+/// value the exit path publishes, and the exited-status check covers a path that
+/// flipped state without publishing one. Both are atomic loads and nothing else,
+/// which is what a wait predicate is allowed to be.
 ///
 /// # Correctness
 /// Same liveness contract as [`task_placement_clone`]: the caller must hold, or
@@ -241,9 +218,8 @@ pub fn parked_task_has_exited<K, U>(node: NonNull<TaskInner<K, U>>) -> bool {
 /// what turns LIFO push order into FIFO drain order.
 ///
 /// The walk is expressed on pointers rather than borrows because the link field
-/// *is* the placement slot: it is the same "reference in, pointer out" surface
-/// as [`task_placement_leak`], and a `&T` held across the rewrite would name a
-/// node the chain no longer links.
+/// *is* the placement slot, and a `&T` held across the rewrite would name a node
+/// the chain no longer links.
 ///
 /// # Correctness
 /// `head` must be a chain this caller detached and not yet published anywhere
@@ -275,30 +251,21 @@ where
 /// The field is private and there is no public constructor, so the token cannot
 /// be fabricated from an arbitrary address. It is obtained by winning the
 /// one-to-zero transition ([`task_release_strong`]) or by reclaiming one this
-/// module itself parked ([`task_parked_reclaim`]).
+/// module itself parked ([`task_parked_reclaim`]). [`task_destroy_parked`]
+/// consumes it by value, which makes a double-destroy *unrepresentable* rather
+/// than merely forbidden.
 ///
-/// # What the token buys
+/// The token's existence is the safety argument, so [`with_parked`] forms a
+/// `&TaskInner` with **no caller obligation at all** — which matters because
+/// every kernel crate outside OSTD compiles under `#![forbid(unsafe_code)]`, and
+/// a safe function that dereferences a caller-supplied address lets such a crate
+/// reach undefined behaviour without ever writing the keyword.
 ///
-/// [`with_parked`] takes `&ParkedTask` and forms a `&TaskInner` with **no
-/// caller obligation at all** — the token's existence is the safety argument,
-/// so the borrow is sound by construction rather than by contract. That matters
-/// beyond tidiness: every kernel crate outside OSTD compiles under
-/// `#![forbid(unsafe_code)]`, and a safe function that dereferences a
-/// caller-supplied address lets such a crate reach undefined behaviour without
-/// ever writing the keyword the discipline is built to require.
-///
-/// [`task_destroy_parked`] consumes the token by value, which makes a
-/// double-destroy *unrepresentable* rather than merely forbidden.
-///
-/// # Why there is no `Drop`
-///
-/// Destroying a task is allocator-heavy work whose whole reason for being
-/// deferred is that it must not run in an arbitrary context. A `Drop` impl
-/// would run it at whatever moment the token happened to go out of scope —
-/// under a lock, with interrupts off, on the dying task's own stack. So a
-/// dropped token leaks the allocation instead. Leaking is memory-safe;
-/// destroying in the wrong context is not, and `#[must_use]` catches the
-/// accident at compile time.
+/// No `Drop`: destroying a task is allocator-heavy work that must not run under
+/// a lock, with interrupts off, or on the dying task's own stack, and a `Drop`
+/// impl would run it at whatever moment the token went out of scope. A dropped
+/// token leaks the allocation instead, which is memory-safe, and `#[must_use]`
+/// catches the accident at compile time.
 ///
 /// Neither `Clone` nor `Copy`: two tokens for one allocation would be two
 /// claims of unique ownership.
@@ -311,9 +278,9 @@ impl<K, U> ParkedTask<K, U> {
     /// The allocation's node pointer, for identity comparisons and for the
     /// predicates the reclaim path consults before choosing a destroy context.
     ///
-    /// Borrows rather than consumes: the token still owns the allocation. This
-    /// hands a pointer *out*, which is not the direction that was unsound —
-    /// what the private field prevents is an arbitrary address coming *in*.
+    /// Borrows rather than consumes: the token still owns the allocation.
+    /// Handing a pointer *out* is not the direction that was unsound — what the
+    /// private field prevents is an arbitrary address coming *in*.
     #[inline]
     pub fn node(&self) -> NonNull<TaskInner<K, U>> {
         self.node

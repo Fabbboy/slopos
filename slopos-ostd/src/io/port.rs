@@ -1,24 +1,9 @@
 //! `IoPort<T>`: typed safe wrapper for x86 port I/O.
 //!
-//! Lifts the type-safe port abstraction from `slopos-utils::io::Port`
-//! into OSTD and gates construction behind [`IoPortRegistry`] so only
-//! ports the platform has marked insensitive (Inv. 7) are reachable.
-//!
-//! # `unsafe fn read` / `write`
-//!
-//! Port I/O has arbitrary side effects on hardware: a write can
-//! advance a CMOS index latch, EOI a PIC, drive a debug-exit register,
-//! or wedge the machine if sequenced wrong against another port. The
-//! registry gates *which* ports can be reached; the per-call `unsafe`
-//! block continues to certify *what* sequence is being issued. That
-//! split matches the existing `slopos-utils::io::Port` contract.
-//!
-//! # Coexistence with `slopos-utils::io::Port`
-//!
-//! `slopos-utils::io::Port` is intentionally kept alive in parallel:
-//! the early-boot panic logger needs port I/O before any registry
-//! exists, so the registry-gated `IoPort` cannot serve it. Non-boot
-//! consumers should migrate to `IoPort`.
+//! Construction is gated behind [`IoPortRegistry`] so only ports the platform
+//! has marked insensitive (Inv. 7) are reachable. `slopos-utils::io::Port`
+//! stays alive in parallel: the early-boot panic logger needs port I/O before
+//! any registry exists.
 
 use core::arch::asm;
 use core::marker::PhantomData;
@@ -34,10 +19,6 @@ mod private {
     impl Sealed for u16 {}
     impl Sealed for u32 {}
 }
-
-// ---------------------------------------------------------------------------
-// PortAccessible.
-// ---------------------------------------------------------------------------
 
 /// Sealed trait identifying types that fit a single x86 `in` / `out`
 /// instruction. Implemented for `u8`, `u16`, `u32` only.
@@ -154,10 +135,6 @@ unsafe impl PortAccessible for u32 {
     }
 }
 
-// ---------------------------------------------------------------------------
-// PortRange.
-// ---------------------------------------------------------------------------
-
 /// Half-open port range `[start, end)`.
 #[derive(Clone, Copy, Debug)]
 pub struct PortRange {
@@ -183,10 +160,6 @@ impl PortRange {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Errors.
-// ---------------------------------------------------------------------------
-
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum IoPortError {
     /// `IoPortRegistry::reserve` could not find a containing range.
@@ -195,17 +168,12 @@ pub enum IoPortError {
     Uninitialised,
 }
 
-// ---------------------------------------------------------------------------
-// IoPort<T>.
-// ---------------------------------------------------------------------------
-
 /// Typed handle to a single x86 I/O port.
 ///
-/// Construction is gated by [`IoPortRegistry::reserve`] so only ports
-/// the platform has certified insensitive (Inv. 7) can be reached.
-/// `read` / `write` remain `unsafe` — the registry doesn't certify
-/// that arbitrary sequencing is sound, only that the *port itself* is
-/// approved.
+/// Construction is gated by [`IoPortRegistry::reserve`] so only ports the
+/// platform has certified insensitive (Inv. 7) can be reached; `read` /
+/// `write` stay `unsafe` because the registry approves the port, not the
+/// sequencing.
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
 pub struct IoPort<T: PortAccessible> {
     port: u16,
@@ -213,16 +181,14 @@ pub struct IoPort<T: PortAccessible> {
 }
 
 impl<T: PortAccessible> IoPort<T> {
-    /// Underlying port address.
     #[inline]
     pub const fn address(&self) -> u16 {
         self.port
     }
 
-    /// Wrapping advance of the port number. Returns the same handle
-    /// type even if the new address sits outside any registered
-    /// range; pair with [`IoPortRegistry::reserve`] when offset-then-
-    /// reserve semantics are needed.
+    /// Wrapping advance of the port number; the result is not re-checked
+    /// against the registry, so pair with [`IoPortRegistry::reserve`] when it
+    /// must be.
     #[inline]
     pub const fn offset(self, off: u16) -> Self {
         Self {
@@ -262,10 +228,6 @@ impl<T: PortAccessible> core::fmt::Debug for IoPort<T> {
     }
 }
 
-// ---------------------------------------------------------------------------
-// IoPortRegistry: insensitive-port list + registration.
-// ---------------------------------------------------------------------------
-
 struct PortRegistrySlot {
     base: AtomicPtr<PortRange>,
     len: AtomicUsize,
@@ -276,12 +238,9 @@ static IO_PORT_REGISTRY: PortRegistrySlot = PortRegistrySlot {
     len: AtomicUsize::new(0),
 };
 
-/// One-shot wiring point for the insensitive-port list. Boot installs
-/// the slice (e.g. COM1 0x3F8..0x400, PS/2 0x60..0x65, RTC 0x70..0x72,
-/// QEMU debug-exit 0xF4..0xF5). The `&BspToken<'brand>` witnesses
-/// BSP-only init; every entry must describe a port range the platform
-/// has marked as insensitive (Inv. 7) — a caller invariant cross-
-/// checked at the gated `IoPort::reserve` path.
+/// One-shot wiring point for the insensitive-port list; the `&BspToken<'brand>`
+/// witnesses BSP-only init. Every entry must describe a port range the platform
+/// has marked as insensitive (Inv. 7).
 pub fn register_io_port_registry<'brand>(_token: &BspToken<'brand>, ranges: &'static [PortRange]) {
     let raw = ranges.as_ptr() as *mut PortRange;
     let prev = IO_PORT_REGISTRY.base.swap(raw, Ordering::AcqRel);
@@ -303,7 +262,6 @@ fn current_io_port_registry() -> Option<&'static [PortRange]> {
     Some(unsafe { core::slice::from_raw_parts(base, len) })
 }
 
-/// Test-only reset hook.
 #[cfg(any(test, feature = "test-helpers"))]
 pub fn reset_for_test() {
     IO_PORT_REGISTRY
@@ -317,10 +275,6 @@ pub struct IoPortRegistry;
 
 impl IoPortRegistry {
     /// Reserve `[port, port + size_of::<T>())` as an `IoPort<T>`.
-    ///
-    /// Returns `Err(Uninitialised)` until [`register_io_port_registry`]
-    /// is called, `Err(NotReserved)` if no registered range contains
-    /// the request.
     pub fn reserve<T: PortAccessible>(port: u16) -> Result<IoPort<T>, IoPortError> {
         let ranges = current_io_port_registry().ok_or(IoPortError::Uninitialised)?;
         let access_size = size_of::<T>();
@@ -333,10 +287,6 @@ impl IoPortRegistry {
         })
     }
 }
-
-// ---------------------------------------------------------------------------
-// io_wait.
-// ---------------------------------------------------------------------------
 
 /// Diagnostic-port (`0x80`) write used as an I/O delay between
 /// back-to-back port writes to slow legacy hardware.
@@ -351,10 +301,6 @@ pub unsafe fn io_wait() {
     // SAFETY: caller-certified; port 0x80 is the POST diagnostic port.
     unsafe { u8::write_to_port(0x80, 0) }
 }
-
-// ---------------------------------------------------------------------------
-// Tests (host-side, pure logic).
-// ---------------------------------------------------------------------------
 
 #[cfg(test)]
 mod tests {

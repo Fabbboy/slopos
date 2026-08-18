@@ -299,10 +299,6 @@ impl<A: Refundable> ChargeSlot<A> {
         }
         let mut held = self.amount.load(Ordering::Relaxed);
         loop {
-            // Saturating here would be a phantom debit: the row has already
-            // been charged, so a slot capping below `held + amount` refunds
-            // less than was taken. Refuse instead and let the reservation's
-            // `Drop` give its debit straight back.
             let Some(total) = held.checked_add(reservation.amount()) else {
                 return;
             };
@@ -316,8 +312,6 @@ impl<A: Refundable> ChargeSlot<A> {
                 Err(observed) => held = observed,
             }
         }
-        // The slot now accounts for this debit, so refunding here would
-        // double-count against one that is still outstanding.
         reservation.into_slot();
     }
 
@@ -353,10 +347,8 @@ impl<A: Refundable> ChargeSlot<A> {
 }
 
 impl<A: Refundable> Drop for ChargeSlot<A> {
-    /// The backstop. A slot released explicitly — at an exit latch, at a reap
-    /// — is already empty by the time this runs, so the common path is one
-    /// relaxed load. A slot whose owner was dropped without reaching its
-    /// release point still refunds here rather than leaking.
+    /// Backstop: a slot whose owner was dropped without reaching its release
+    /// point still refunds here rather than leaking.
     #[inline]
     fn drop(&mut self) {
         self.take();

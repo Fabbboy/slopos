@@ -1,15 +1,13 @@
-//! Framebuffer handoff.
-//!
-//! Wraps a bootloader-published framebuffer base pointer + dimensions
-//! in a typed view that exposes a byte-slice accessor.
+//! Framebuffer handoff: a typed view over the bootloader-published base
+//! pointer and dimensions, plus the pixel-store helpers that fold the raw
+//! stores inside OSTD.
 
 use core::ptr::NonNull;
 
 /// View over a bootloader-pre-mapped framebuffer region.
 ///
 /// The base address is virtual — the bootloader has already mapped the
-/// framebuffer into the kernel's address space, so no HHDM translation
-/// is performed here.
+/// framebuffer, so no HHDM translation is performed here.
 #[derive(Debug)]
 pub struct Framebuffer {
     base: NonNull<u8>,
@@ -53,13 +51,8 @@ impl Framebuffer {
     /// Mutable byte slice covering the framebuffer's `pitch * height`
     /// bytes.
     ///
-    /// # Why this is safe to call
-    ///
-    /// The bootloader pre-maps the framebuffer with read/write
-    /// permission for the kernel's lifetime. The returned slice is
-    /// `&'static mut` — callers must not retain two overlapping
-    /// mutable borrows. Production callers route every framebuffer
-    /// write through the video subsystem's serialised state.
+    /// The slice is `&'static mut`; callers must not retain two overlapping
+    /// mutable borrows.
     pub fn as_bytes_mut(&self) -> &'static mut [u8] {
         // SAFETY: kernel-lifetime, pre-mapped, RW. Aliasing discipline
         // is the caller's contract.
@@ -67,24 +60,8 @@ impl Framebuffer {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Bootloader-published framebuffer base + volatile-write helpers.
-// ---------------------------------------------------------------------------
-//
-// The video / vconsole drivers cache a framebuffer base pointer (as a
-// `u64` so the cache type stays `Send + Sync`) and write pixels via
-// `core::ptr::write_volatile` so the compiler cannot reorder, cache, or
-// elide stores against the MMIO-backed framebuffer. The drivers do not
-// observe other side effects from the framebuffer mapping — every
-// callable below is safe to invoke once the caller has obtained the
-// base pointer from a bootloader-pre-mapped framebuffer and certifies
-// that the byte offset lies inside the published `pitch * height`
-// region. Each helper folds one `unsafe { write_volatile(...) }` call
-// site behind a safe API for `video/src/graphics.rs` and
-// `drivers/src/tty/vconsole.rs`.
-
-/// Write `value` at `base + byte_offset` as a `u8` using a single
-/// volatile store. Use for per-channel writes on 24-bpp framebuffers.
+/// Volatile `u8` store at `base + byte_offset`; per-channel writes on 24-bpp
+/// framebuffers.
 #[inline]
 pub fn fb_write_u8(base: u64, byte_offset: usize, value: u8) {
     // SAFETY: caller certifies `base` came from a bootloader-pre-mapped
@@ -95,8 +72,7 @@ pub fn fb_write_u8(base: u64, byte_offset: usize, value: u8) {
     }
 }
 
-/// Write `value` at `base + byte_offset` as a `u16` using a single
-/// volatile, possibly-unaligned store.
+/// Volatile, possibly-unaligned `u16` store at `base + byte_offset`.
 #[inline]
 pub fn fb_write_u16(base: u64, byte_offset: usize, value: u16) {
     // SAFETY: same as `fb_write_u8`; `write_unaligned` tolerates
@@ -107,8 +83,7 @@ pub fn fb_write_u16(base: u64, byte_offset: usize, value: u16) {
     }
 }
 
-/// Write `value` at `base + byte_offset` as a `u32` using a single
-/// volatile store.
+/// Volatile `u32` store at `base + byte_offset`.
 #[inline]
 pub fn fb_write_u32(base: u64, byte_offset: usize, value: u32) {
     // SAFETY: as `fb_write_u8`; framebuffers from Limine on x86_64
@@ -119,9 +94,8 @@ pub fn fb_write_u32(base: u64, byte_offset: usize, value: u32) {
     }
 }
 
-/// Write `value` at `ptr` as a `u32` using `write_unaligned` so the
-/// store works on a framebuffer that is not 4-byte aligned at the
-/// row offset (very rare, but observed on some firmware).
+/// Unaligned `u32` store at `ptr`: some firmware lands a row offset that is
+/// not 4-byte aligned.
 #[inline]
 pub fn fb_write_u32_unaligned(ptr: *mut u8, value: u32) {
     // SAFETY: caller certifies `ptr` is within a pre-mapped
@@ -131,8 +105,7 @@ pub fn fb_write_u32_unaligned(ptr: *mut u8, value: u32) {
     }
 }
 
-/// Copy `len` bytes from `src` to `base + byte_offset` using
-/// `copy_nonoverlapping`. Used by the vconsole shadow-buffer blit.
+/// Copy `src` to `base + byte_offset`; the vconsole shadow-buffer blit.
 #[inline]
 pub fn fb_blit_bytes(base: u64, byte_offset: usize, src: &[u8]) {
     // SAFETY: caller certifies the destination range
@@ -144,9 +117,8 @@ pub fn fb_blit_bytes(base: u64, byte_offset: usize, src: &[u8]) {
     }
 }
 
-/// Solid-color fast path for the `bytes_per_pixel == 4`, all-bytes-
-/// identical case. Writes `count * 4` bytes at `base_ptr` to the byte
-/// `byte_value` via `write_bytes`.
+/// Solid-color fast path for the `bytes_per_pixel == 4`, all-bytes-identical
+/// case.
 #[inline]
 pub fn fb_fill_u8_bulk(base_ptr: *mut u8, byte_value: u8, byte_count: usize) {
     // SAFETY: caller certifies `[base_ptr, base_ptr + byte_count)`
@@ -157,9 +129,7 @@ pub fn fb_fill_u8_bulk(base_ptr: *mut u8, byte_value: u8, byte_count: usize) {
     }
 }
 
-/// Volatile write of `value: u32` at `ptr: *mut u8`. Used inside
-/// the row-fill hot path where `ptr` has been advanced by byte offset
-/// already.
+/// Volatile `u32` store at an already-advanced `ptr`.
 #[inline]
 pub fn fb_write_u32_at(ptr: *mut u8, value: u32) {
     // SAFETY: caller certifies `ptr..ptr+4` is within a pre-mapped FB.
@@ -168,9 +138,7 @@ pub fn fb_write_u32_at(ptr: *mut u8, value: u32) {
     }
 }
 
-/// Volatile write of `value: u64` at `ptr: *mut u64`. Hot-path 64-bit
-/// store used by the solid-color row filler when the destination is
-/// 8-byte aligned.
+/// Volatile `u64` store, for an 8-byte-aligned destination.
 #[inline]
 pub fn fb_write_u64_at(ptr: *mut u64, value: u64) {
     // SAFETY: caller certifies `ptr..ptr+8` is within a pre-mapped FB.
@@ -179,8 +147,7 @@ pub fn fb_write_u64_at(ptr: *mut u64, value: u64) {
     }
 }
 
-/// Volatile write of `value: u16` at `ptr: *mut u8` reinterpreted as
-/// `*mut u16`.
+/// Volatile `u16` store at `ptr`.
 #[inline]
 pub fn fb_write_u16_at(ptr: *mut u8, value: u16) {
     // SAFETY: caller certifies `ptr..ptr+2` is within a pre-mapped FB.
@@ -189,7 +156,7 @@ pub fn fb_write_u16_at(ptr: *mut u8, value: u16) {
     }
 }
 
-/// Volatile write of `value: u8` at `ptr: *mut u8`.
+/// Volatile `u8` store at `ptr`.
 #[inline]
 pub fn fb_write_u8_at(ptr: *mut u8, value: u8) {
     // SAFETY: caller certifies `ptr..ptr+1` is within a pre-mapped FB.
@@ -198,8 +165,7 @@ pub fn fb_write_u8_at(ptr: *mut u8, value: u8) {
     }
 }
 
-/// Advance `base_ptr` by `byte_offset` bytes, returning a fresh raw
-/// pointer. Folds `(*mut u8).add(...)` interior to OSTD.
+/// Advance `base_ptr` by `byte_offset`, folding `(*mut u8).add` inside OSTD.
 #[inline]
 pub fn fb_ptr_add(base_ptr: *mut u8, byte_offset: usize) -> *mut u8 {
     // SAFETY: caller certifies the resulting address remains within
@@ -208,9 +174,8 @@ pub fn fb_ptr_add(base_ptr: *mut u8, byte_offset: usize) -> *mut u8 {
     unsafe { base_ptr.add(byte_offset) }
 }
 
-/// Construct a [`Framebuffer`] view over a bootloader-published base
-/// address + dimensions. The `base` pointer is the pre-mapped virtual
-/// address Limine publishes — no HHDM translation is performed.
+/// Construct a [`Framebuffer`] view over a bootloader-published base address
+/// and dimensions.
 pub fn framebuffer_handoff(base: NonNull<u8>, pitch: usize, height: u32) -> Framebuffer {
     Framebuffer {
         base,
