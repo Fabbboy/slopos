@@ -1,9 +1,8 @@
 #![forbid(unsafe_code)]
 //! slopos-windowing — compositor connection, surface management, and event loop.
 //!
-//! Provides everything needed to create a window, get a pixel buffer,
-//! receive input events, and run an event loop — without pulling in
-//! the widget toolkit.
+//! Create a window, get a pixel buffer, receive input events, and run an event
+//! loop, without pulling in the widget toolkit.
 //!
 //! # Quick start (raw drawing)
 //!
@@ -31,7 +30,6 @@ pub mod surface;
 pub(crate) mod sys;
 pub mod window;
 
-// Flat re-exports for ergonomic use.
 pub use app::{ControlFlow, WindowedApp, run};
 pub use connection::{Protocol, ProtocolHandle, UiSender, connect};
 pub use event::Event;

@@ -409,8 +409,8 @@ fn render_full(
 ) {
     render::render_full(grid, selection, cursor_on);
     pending.clear();
-    // A full paint wrote every pixel of one slot; the others still hold
-    // whatever they held, and no recorded frame describes the difference.
+    // Only one slot was fully painted; no recorded frame describes what the
+    // others still hold.
     history.clear();
     let mut all = CellDamage::new();
     all.set_rows(grid.rows as usize);
@@ -418,8 +418,6 @@ fn render_full(
     history.push(all);
 }
 
-/// Present `pending`, painting whatever the target buffer's age requires.
-///
 /// `pending` is cleared only once the frame is actually committed, so damage
 /// can never be forgotten without having been shown.
 fn present_pending(
@@ -432,8 +430,8 @@ fn present_pending(
     if pending.is_empty() {
         return;
     }
-    // The slot being drawn into holds an older frame, so it needs this frame's
-    // damage plus everything painted since it was last presented.
+    // The target slot holds an older frame, so it needs this frame's damage
+    // plus everything painted since it was last presented.
     match history.resolve(surface::buffer_age(), pending) {
         Some(repaint) => {
             render::render_damage(grid, selection, cursor_on, &repaint);
@@ -571,9 +569,8 @@ enum MasterDrain {
     Eof,
 }
 
-/// Read from the master until `WouldBlock`, feeding bytes to the interpreter.
-/// Every byte read is mirrored via `tty::write` (SYSCALL_WRITE -> kernel
-/// console) so `just boot-log` keeps showing shell output.
+/// Reads until `WouldBlock`. Every byte is mirrored to the kernel console so
+/// `just boot-log` keeps showing shell output.
 fn drain_master(master_fd: i32, grid: &mut TerminalGrid) -> MasterDrain {
     let mut buf = [0u8; MASTER_READ_CHUNK];
     let mut got_any = false;
@@ -581,13 +578,11 @@ fn drain_master(master_fd: i32, grid: &mut TerminalGrid) -> MasterDrain {
     loop {
         match fs::read_slice(master_fd, &mut buf) {
             Ok(0) => {
-                // EOF / hangup: shell session gone.
                 return MasterDrain::Eof;
             }
             Ok(n) => {
                 got_any = true;
                 total += n;
-                // Serial-debug mirror (single call site).
                 let _ = tty::write(&buf[..n]);
                 for &b in &buf[..n] {
                     grid.process_byte(b);
@@ -596,8 +591,8 @@ fn drain_master(master_fd: i32, grid: &mut TerminalGrid) -> MasterDrain {
                     return MasterDrain::Data;
                 }
                 if n < buf.len() {
-                    // Short read: likely drained. Loop once more to confirm
-                    // WouldBlock so we never leave bytes buffered.
+                    // A short read still needs one more turn to confirm
+                    // WouldBlock, so no bytes are left buffered.
                     continue;
                 }
             }
@@ -609,7 +604,7 @@ fn drain_master(master_fd: i32, grid: &mut TerminalGrid) -> MasterDrain {
                 };
             }
             Err(e) => {
-                // Any other error (EBADF after close, EIO) ends the session.
+                // EBADF after close, EIO: either way the session is over.
                 let msg = std::format!("terminal: master read error {e:?}\n");
                 let _ = tty::write(msg.as_bytes());
                 return MasterDrain::Eof;
@@ -621,9 +616,8 @@ fn drain_master(master_fd: i32, grid: &mut TerminalGrid) -> MasterDrain {
 /// Hard ceiling on a single clipboard copy (16 MiB), matching the compositor.
 const MAX_CLIPBOARD_BYTES: usize = 16 * 1024 * 1024;
 
-/// Copy the current selection to the compositor clipboard via a memfd. The
-/// full selection is captured (no truncation): a buffer sized to the selection
-/// is filled by `collect_selection`, then its fd is handed to the compositor.
+/// Copies the full selection with no truncation: the memfd is sized to it
+/// before `collect_selection` fills it.
 fn copy_selection(
     handle: &slopos_windowing::ProtocolHandle,
     grid: &TerminalGrid,
@@ -638,17 +632,16 @@ fn copy_selection(
     };
     let n = input::collect_selection(grid, selection, shm.as_mut_slice());
     if n > 0 {
-        // The compositor dups the fd via SCM_RIGHTS, so dropping `shm` after
-        // the send leaves the clipboard backing alive on the compositor side.
+        // The compositor dups the fd via SCM_RIGHTS, so dropping `shm` here
+        // leaves the clipboard backing alive on its side.
         let _ = handle.borrow_client().clipboard_copy(shm.fd(), n as u32);
     }
 }
 
-/// Write pasted content to the master, wrapped in bracketed-paste markers
-/// only when the slave-side application enabled DECSET 2004 (the shell's
-/// line editor does; a raw `cat` must not see the markers). The payload is
-/// sanitized first — no control byte survives, so the bracket cannot be
-/// escaped and a clipboard can never type Ctrl+C (see `sanitize_paste`).
+/// Bracketed-paste markers are added only when the slave-side application
+/// enabled DECSET 2004; a raw `cat` must not see them. `sanitize_paste` strips
+/// every control byte first, so the bracket cannot be escaped and a clipboard
+/// can never type Ctrl+C.
 fn write_paste(
     master_fd: i32,
     pending_writes: &mut MasterWriteQueue,
