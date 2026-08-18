@@ -12,12 +12,8 @@ use slopos_abi::net::{
 use slopos_abi::syscall::{F_GETFL, F_SETFL, O_NONBLOCK};
 use slopos_slibc::pal::{Pal, Sys};
 
-// ---------------------------------------------------------------------------
-// Network management
-// ---------------------------------------------------------------------------
-
-/// Turn a raw syscall return into a result. Every syscall below reports failure
-/// as a negated errno, so the sign test is the whole protocol.
+/// Turn a raw syscall return into a result; every syscall below reports failure
+/// as a negated errno.
 #[inline]
 fn checked(raw: i64) -> SyscallResult<u64> {
     if raw < 0 {
@@ -29,10 +25,9 @@ fn checked(raw: i64) -> SyscallResult<u64> {
 
 /// Enumerate one class of network state into `buf`.
 ///
-/// Returns the bytes written. `buf` receives a `UserNetQueryHdr` followed by
-/// `record_count` records of `record_size` bytes; whether the answer was
-/// complete is read from the header's `total_count`, not from this return
-/// value, so a header-sized buffer is the sizing query.
+/// `buf` receives a `UserNetQueryHdr` followed by `record_count` records of
+/// `record_size` bytes; completeness is read from the header's `total_count`,
+/// not from the return value, so a header-sized buffer is the sizing query.
 pub fn net_query(what: u32, ifindex: u32, buf: &mut [u8]) -> SyscallResult<usize> {
     let raw = unsafe {
         syscall4(
@@ -125,7 +120,6 @@ pub fn listen(fd: RawFd, backlog: u32) -> SyscallResult<()> {
 }
 
 /// Bind an AF_UNIX socket to `path` (a `SockAddrUn`, `addrlen = 2 + path.len()`).
-/// The AF_INET counterpart of [`bind`].
 pub fn bind_unix(fd: RawFd, path: &[u8]) -> SyscallResult<()> {
     let mut addr = slopos_abi::unix::SockAddrUn::default();
     addr.family = slopos_abi::net::AF_UNIX;

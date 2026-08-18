@@ -2,15 +2,9 @@
 
 //! pidfd end-to-end test (process-exit fd).
 //!
-//! Forks children that exit, and verifies a `pidfd` for a child:
-//!   * `pidfd_open` succeeds for a child of the caller;
-//!   * the fd signals `POLLIN` once the child exits, via `poll(2)`;
-//!   * the fd signals `POLLIN` via SlopRing `OP_POLL_ADD` (the async edge).
-//! A standalone fork/exit/waitpid case isolates the exit-code path so a
-//! pidfd failure is never confused with a `waitpid` quirk.
-//!
-//! This closes the one userland polling loop the ring alone could not:
-//! process reaping has no fd to submit against — `pidfd_open` provides it.
+//! Verifies a child's `pidfd` signals `POLLIN` on exit through both `poll(2)`
+//! and SlopRing `OP_POLL_ADD`, with a standalone fork/exit/waitpid case to
+//! isolate the exit-code path.
 
 use slopos_abi::syscall::POLLIN;
 use slopos_userland as _;
@@ -19,8 +13,7 @@ use slopos_userland::syscall::{UserPollFd, core as sys_core, fs, pidfd, process}
 
 const CHILD_EXIT_CODE: i32 = 42;
 
-/// Fork a child that immediately exits with [`CHILD_EXIT_CODE`]. Returns the
-/// child task id in the parent; never returns in the child.
+/// Returns the child task id in the parent; never returns in the child.
 fn fork_exiting_child() -> i32 {
     let pid = process::fork();
     if pid == 0 {
@@ -30,8 +23,7 @@ fn fork_exiting_child() -> i32 {
     pid
 }
 
-/// Sanity: fork → exit → waitpid reaps with the expected code. Isolates the
-/// fork/exit/reap path from the pidfd behaviour proper.
+/// Isolates the fork/exit/reap path from the pidfd behaviour proper.
 fn test_fork_exit_waitpid() -> bool {
     let pid = fork_exiting_child();
     if pid <= 0 {
@@ -68,10 +60,9 @@ fn test_pidfd_poll() -> bool {
         return false;
     }
 
-    // The child sends SIGCHLD when it exits, which interrupts poll(2) with
-    // EINTR. Retry on EINTR — the retry's readiness check runs before poll's
-    // own signal check, so it observes the now-exited child as POLLIN. This
-    // is the standard pattern a waiter (e.g. the shell) uses with pidfd.
+    // The child's exit SIGCHLD interrupts poll(2) with EINTR; the retry's
+    // readiness check runs before poll's own signal check, so it observes the
+    // now-exited child as POLLIN.
     let mut pfds = [UserPollFd {
         fd,
         events: POLLIN,
@@ -96,7 +87,7 @@ fn test_pidfd_poll() -> bool {
 }
 
 /// pidfd + SlopRing `OP_POLL_ADD`: the ring completes with `POLLIN` when the
-/// child exits (exercises the pidfd through the async edge too).
+/// child exits.
 fn test_pidfd_ring_poll_add() -> bool {
     let pid = fork_exiting_child();
     if pid <= 0 {

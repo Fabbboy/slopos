@@ -125,78 +125,52 @@ pub struct TaskOwn {
 /// `Step` preserves it, and — unlike `flag_agrees` — so does every intermediate
 /// state of a decomposed `Step`.
 pub open spec fn own_inv(s: TaskOwn) -> bool {
-    // (T2) LEDGER CONSERVATION. The strong count is exactly the sum of its
-    //      owner classes. This is "linked implies owned" stated as arithmetic:
-    //      a container membership *is* a strong reference, so a container can
-    //      never name a task it does not own. `task_placement_retain` /
-    //      `task_placement_reclaim` move a reference between `containers` and
-    //      `transient` and leave this sum alone.
+    // (T2) Linked implies owned, stated as arithmetic: a container membership
+    //      *is* a strong reference, so a container can never name a task it does
+    //      not own. Retain/reclaim move a reference and leave this sum alone.
     &&& s.strong == s.containers + s.transient + s.exist_refs
-    // (T1) The existence reference is a single reference, and the flag never
-    //      advertises one that has not been minted yet. This is the
-    //      retain-before-claim ordering in `task_existence_park`, and it is
-    //      the conjunct the broken CAS-first ordering violates.
+    // (T1) The retain-before-claim ordering in `task_existence_park`: the flag
+    //      never advertises a reference that has not been minted yet.
     &&& s.exist_refs <= 1
     &&& (s.exist_flag ==> s.exist_refs == 1)
-    // (T3) A task holding its existence reference is in the registry. Losing
-    //      this direction strands a live task nothing can look up and nothing
-    //      will ever reap, and makes `EXISTENCE_REFS_PARKED` diverge from
-    //      registry occupancy — which is exactly what that counter is a
-    //      tripwire for. It is why `reap_task_registration` unhashes only
-    //      *after* winning the release, never before; see
-    //      `broken_reap_unhash_before_release_violates_invariant`. The
-    //      converse holds at every atomic-`Step` boundary but not inside
+    // (T3) A task holding its existence reference is in the registry; losing
+    //      this direction strands a task nothing can look up and nothing will
+    //      ever reap, and diverges `EXISTENCE_REFS_PARKED` from registry
+    //      occupancy. The converse holds only at `Step` boundaries, not inside
     //      `register_task`'s insert-then-park window, so it lives in
     //      `flag_agrees`.
     &&& (s.exist_flag ==> s.registered)
-    // (T6) A dispatch-pinned task still holds its existence reference, and is
-    //      therefore still registered. This is the fact `drain_previous_task`
-    //      relies on when it calls the switch-tail release "a bare atomic
-    //      decrement", and the fact that keeps a running task alive at all:
-    //      the dispatching CPU's own dispatch reference is a caller handle it
-    //      will hand on, whereas the existence reference is pinned down by the
-    //      reap gate for as long as the task is on a CPU. Unhashing a
-    //      still-pinned task takes that reference back, and the last release
-    //      which follows runs the allocator-heavy destructor — freeing the
-    //      kernel stack the CPU is executing on.
-    //      `broken_reap_ignoring_pin_violates_invariant` breaks exactly this.
-    //      `pinned` is set and cleared by two writes rather than one; see the
-    //      disjunction note in the header for why modelling that pair as a
-    //      single atomic step is sound, why the idle disjunct's one-way shape
-    //      is an over-approximation in the safe direction, and what would
-    //      silently invalidate either.
+    // (T6) A dispatch-pinned task still holds its existence reference and is
+    //      therefore still registered: the dispatching CPU's own reference is a
+    //      caller handle it will hand on, so unhashing a pinned task takes back
+    //      the reference whose last release runs the destructor — freeing the
+    //      kernel stack the CPU is executing on. See the header for why the two
+    //      writes behind `pinned` may be modelled as one step.
     &&& (s.pinned ==> s.exist_refs == 1)
     &&& (s.pinned ==> s.registered)
-    // (T4) A referenced task's body is live. This is the no-use-after-free
-    //      conjunct: any holder of a strong reference may dereference.
+    // (T4) No use-after-free: any holder of a strong reference may dereference.
     &&& (s.strong > 0 ==> s.body_live)
     // (T5) Destruction runs at most once, and exactly once past teardown.
     &&& (s.body_live ==> s.destroys == 0)
     &&& (!s.body_live ==> s.destroys == 1)
     &&& (s.destroys <= 1)
     // (T5) The winner of the one-to-zero transition owns the allocation
-    //      outright: nothing else holds a reference, and the body is still
-    //      intact for the deferred destructor to run against. This pair is
-    //      `with_parked`'s soundness argument — the borrow is exclusive not
-    //      because someone else keeps the task alive but because nobody else
-    //      can reach it. Conversely a dead-but-undestroyed task is ALWAYS
-    //      parked for destruction: the graveyard never strands a corpse.
+    //      outright — `with_parked`'s exclusivity argument — and conversely a
+    //      dead-but-undestroyed task is always parked, so the graveyard never
+    //      strands a corpse.
     &&& (s.parked_node ==> s.strong == 0 && s.body_live)
     &&& (s.strong == 0 && s.body_live ==> s.parked_node)
 }
 
 /// The two agreements that hold at every atomic-`Step` boundary but not inside
-/// a decomposed step. Carried separately (see the header) and proved inductive
-/// over `Step` in `flag_agreement_preserved`.
+/// a decomposed step, which is why they are carried outside `own_inv`.
 pub open spec fn flag_agrees(s: TaskOwn) -> bool {
     &&& (s.exist_refs == 1 <==> s.exist_flag)
     &&& (s.registered <==> s.exist_flag)
 }
 
-/// A freshly allocated task, before registration: one strong reference held by
-/// its constructor (`allocate_task`'s `KArc::try_init`, whose `KArc::get_mut`
-/// proves uniqueness and hands the handle to a `PendingTask`), no containers,
-/// no existence reference, not registered, not pinned, body intact.
+/// A freshly allocated task, before registration: one strong reference, held by
+/// the `PendingTask` `allocate_task` hands back.
 pub open spec fn own_init(s: TaskOwn) -> bool {
     &&& s.strong == 1
     &&& s.containers == 0
@@ -210,67 +184,39 @@ pub open spec fn own_init(s: TaskOwn) -> bool {
     &&& s.destroys == 0
 }
 
-// ---------------------------------------------------------------------------
-// Steps: one per atomic-bounded operation.
-// ---------------------------------------------------------------------------
-
 pub enum Step {
-    /// `register_task` (`task_table.rs`): insert the weak registry entry, then
-    /// `task_existence_park` mints and parks the task's own reference. The two
-    /// are fused into one step because `register_task` is the ONLY production
-    /// caller of `task_existence_park` — which is what makes T3's biconditional
-    /// true. The guard mirrors the CAS: it fires only when the flag is
-    /// currently down, and only for a caller holding an owning reference of its
-    /// own (the `PendingTask`'s), which is `task_existence_park`'s liveness
-    /// contract.
+    /// `register_task`: insert the weak registry entry, then
+    /// `task_existence_park` mints and parks the task's own reference. Fused
+    /// into one step because `register_task` is the ONLY production caller of
+    /// `task_existence_park`, which is what makes T3's biconditional true.
     RegisterAndPark,
     /// `task_existence_park` losing the flag compare-exchange: it minted a
-    /// reference, lost `false -> true`, and gave the reference back
-    /// (`drop(task_placement_reclaim(task))`). Net identity — which is the
-    /// whole point of retaining first and undoing on loss.
+    /// reference and gave it back. Net identity — the point of retaining first
+    /// and undoing on loss.
     ParkLoses,
-    /// `reap_task_registration` (`task_table.rs`): the winner of
-    /// `task_existence_release`'s `true -> false` CAS takes the reference back
-    /// as an ordinary handle (`task_placement_reclaim`) and the registry entry
-    /// is dropped under the same lock. The reference MOVES from the existence
-    /// ledger to the caller ledger; `strong` does not change. The reaper's own
-    /// upgrade (`transient > 0`) is what makes the returned handle provably
-    /// non-final at the moment of return.
+    /// `reap_task_registration`: the winner of `task_existence_release`'s
+    /// `true -> false` CAS takes the reference back as an ordinary handle and
+    /// the registry entry is dropped under the same lock. The reference MOVES
+    /// between ledgers; `strong` does not change. The reaper's own upgrade
+    /// (`transient > 0`) makes the returned handle provably non-final.
     ReapAndRelease,
-    /// `task_existence_release` losing the CAS: `None` for every caller after
-    /// the first, and for a task that never held one. Identity — which is what
-    /// makes a reap idempotent and stops two racing reapers both releasing.
+    /// `task_existence_release` losing the CAS. Identity — which is what makes
+    /// a reap idempotent and stops two racing reapers both releasing.
     ReleaseLoses,
-    /// `reap_task_registration`'s dispatch-pin gate declining
-    /// (`task_is_dispatch_pinned` holds; `REAP_BLOCKED_BY_DISPATCH` is armed
-    /// and the idle dispatcher retries). Identity.
+    /// `reap_task_registration`'s dispatch-pin gate declining. Identity.
     ReapDeclinedPinned,
     /// `task_placement_clone`: one atomic strong-count increment yielding a
     /// fresh caller handle. The wake/enqueue fast path; allocates nothing.
     PlacementClone,
     /// `task_placement_retain`: clone one reference straight into a container
-    /// without materialising a handle (`task_placement_clone` then forget).
+    /// without materialising a handle.
     ContainerRetain,
     /// `task_placement_leak`: move a caller's owning handle into a container.
     /// `strong` is untouched — the reference changes ledger, not existence.
-    /// The switch tail parking the outgoing dispatch reference in the CPU's
-    /// deferred previous-task slot is this step.
     ContainerLeak,
     /// `task_placement_reclaim`: take a parked reference back out as a handle.
-    /// `strong` untouched — the reference changes ledger, not existence.
-    ///
-    /// The transition's own guard is `containers > 0`, and that is the whole
-    /// of what this step claims. Individual call sites may add their own gate
-    /// and some do: `task_family.rs`'s remove-child path reclaims only when
-    /// `task_children_remove` reports the child was actually unlinked, which
-    /// is correct — an ungated reclaim there would take a reference the list
-    /// no longer holds. A gated site is still an instance of this step; it
-    /// simply does not take it on every path.
-    ///
-    /// Deliberately not enumerated here. There are nine call sites across
-    /// `per_cpu.rs`, `task_family.rs` and `scheduler.rs`, the set grows
-    /// whenever a container is added — C4's remote-inbox drain added two —
-    /// and a list in a comment rots silently while the guard above does not.
+    /// `strong` untouched. The step's guard is `containers > 0` and that is all
+    /// it claims; a call site may add its own gate and still be an instance.
     ///
     /// The load-bearing instance is `ReadyQueue::dequeue`: the reference
     /// *moves* to the dispatcher rather than being released, so the task is
@@ -282,41 +228,28 @@ pub enum Step {
     /// existence reference can be claimed, and the dispatching CPU holds the
     /// dequeued reference as a caller handle for the whole window.
     ///
-    /// Two writes, not one, and not in the same function: `task_set_on_cpu(_,
-    /// true)` at `scheduler.rs:1221` and `:1355`, then the `PCR.current_task`
-    /// publication inside `dispatch()`. `dispatch()` itself does *not* set
-    /// `on_cpu` — it did once, and this comment said so for longer than it was
-    /// true.
-    ///
-    /// `install_idle_task` is the third writer, and it fits this step's guard
-    /// (`!pinned && exist_flag && transient > 0`) exactly: `create_idle_task_
-    /// for_cpu` holds the idle task's registry guard across the call, and the
-    /// task is registered by then. Unlike the other two it is a one-way write —
-    /// see the header note on why that is an over-approximation in the safe
-    /// direction rather than a hole.
+    /// Two writes, in two functions: `task_set_on_cpu(_, true)` in the
+    /// scheduler, then the `PCR.current_task` publication inside `dispatch()`.
+    /// `install_idle_task` is a third, one-way writer that fits the same guard;
+    /// see the header for why that is an over-approximation rather than a hole.
     DispatchPin,
-    /// The switch tail retiring the task. Also two writes in that order
-    /// reversed: the successor takes `PCR.current_task` (`dispatch()` on the
-    /// incoming task) and only then is `task_set_on_cpu(_, false)` cleared, at
-    /// `scheduler.rs:1471`, once every still-Ready task has been published.
+    /// The switch tail retiring the task, the same two writes in the opposite
+    /// order: the successor takes `PCR.current_task`, and only then is
+    /// `task_set_on_cpu(_, false)` cleared.
     DispatchUnpin,
     /// `task_release_strong` -> `KArc::release_deferrable`, non-final: the CAS
     /// loop observed a previous value above one. A bare atomic decrement, safe
     /// under a lock and with interrupts disabled.
     ReleaseStrongNonFinal,
     /// `task_release_strong`, final: the decrement took the count one-to-zero.
-    /// This step's guard is `strong == 1`, but that is the OUTCOME of the
-    /// decrement, not a pre-check by the caller — `release_deferrable` reads
-    /// nothing before it CASes. The winner uniquely owns the allocation, so
-    /// the node is parked for `task_destroy_parked`. By the ledger conjunct,
-    /// `strong == 1` with a caller handle outstanding forces
+    /// The guard `strong == 1` is the OUTCOME of the decrement, not a caller
+    /// pre-check — `release_deferrable` reads nothing before it CASes. By the
+    /// ledger conjunct, `strong == 1` with a caller handle outstanding forces
     /// `containers == 0 && exist_refs == 0`: nothing else can reach the task.
     ReleaseStrongFinal,
-    /// `task_destroy_parked` -> `KArc::destroy_deferred`, run either inline
-    /// when `destroy_context_is_safe` (four facts about the calling CPU:
-    /// interrupts on, no lock held, no preempt guard, not dispatch-pinned —
-    /// never a count) or from `task_graveyard_drain` with interrupts on and no
-    /// lock held. Consumes the parked node exactly once.
+    /// `task_destroy_parked` -> `KArc::destroy_deferred`, run inline when
+    /// `destroy_context_is_safe` or else from `task_graveyard_drain`. Consumes
+    /// the parked node exactly once.
     DestroyParked,
 }
 

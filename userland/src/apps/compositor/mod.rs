@@ -298,9 +298,7 @@ impl WindowManager {
             return;
         }
 
-        // Register signal button group hover for each visible window.
-        // We track the group bounding box for the focused window so the
-        // renderer can show/hide button glyphs on hover.
+        // The renderer shows/hides the button glyphs from this hover state.
         for i in (0..self.window_count as usize).rev() {
             let w = self.windows[i];
             if w.state == WINDOW_STATE_MINIMIZED {
@@ -329,7 +327,6 @@ impl WindowManager {
             );
         }
 
-        // Status items, from the same layout the bar draws from.
         let mut status_regions = [(0u32, DamageRect::invalid(), false); MAX_STATUS_ITEMS];
         let status_count = self.system_bar.hover_regions(
             self.renderer.output_width,
@@ -353,9 +350,9 @@ impl WindowManager {
         }
     }
 
-    /// The index this `task_id` held in the previous frame's z-ordered window
-    /// list, or `None` if it was not present. The index doubles as the window's
-    /// previous stacking rank (bottom = 0), so the caller can detect restacks.
+    /// The index this `task_id` held in the previous frame's window list. The
+    /// index doubles as its stacking rank (bottom = 0), so callers detect
+    /// restacks by comparing it against the current index.
     fn find_prev_index(&self, task_id: u32) -> Option<usize> {
         (0..self.prev_window_count as usize).find(|&i| self.prev_windows[i].task_id == task_id)
     }
@@ -372,21 +369,15 @@ impl WindowManager {
         }
     }
 
-    /// Dispatch the frame's raw input events IN STREAM ORDER.
-    ///
-    /// This is the wlroots/Wayland event model: each event is processed at
-    /// the input state accumulated up to that event. Folding the batch into
-    /// final state first (the old model) hit-tested button presses at the
-    /// end-of-batch pointer position — when the press and its subsequent
-    /// drag motion arrived within one 16 ms frame batch, the press was
-    /// tested at post-drag coordinates and landed on the wrong target
-    /// (observed live: a resize-corner grab becoming a content/desktop
-    /// click, the latter leaving keyboard focus pointing at nothing).
+    /// Dispatch the frame's raw input events in stream order: each event is
+    /// processed against the input state accumulated up to that event, so a
+    /// press is hit-tested at its own pointer position rather than at the
+    /// end-of-batch one.
     fn process_input_events(&mut self, fb_width: i32, fb_height: i32, shelf_height: i32) {
         use slopos_abi::InputEventType;
 
-        // Take the protocol bridge out so it can be passed mutably into
-        // InputHandler methods without borrowing all of `self`.
+        // Taken out so it can be passed mutably into `InputHandler` methods
+        // without borrowing all of `self`.
         let mut proto_box = self.protocol.take();
 
         for i in 0..self.input.raw_event_count {
@@ -470,11 +461,8 @@ impl WindowManager {
                 }
                 InputEventType::KeyPress | InputEventType::KeyRelease => {
                     let pressed = event.event_type == InputEventType::KeyPress;
-                    // Adopt the kernel's authoritative per-event modifier snapshot.
                     let mods = event.key_modifiers();
                     self.input.set_modifier_state(mods);
-                    // Route to the keyboard focus AS OF THIS EVENT: a click
-                    // earlier in the batch already retargeted focused_task.
                     let kbd_focus = self.input.focused_task();
                     if let Some(p) = proto_box.as_deref_mut() {
                         p.forward_key_event(
@@ -490,17 +478,15 @@ impl WindowManager {
             }
         }
 
-        // Final per-frame sync: pointer focus can also change without any
-        // motion event (a window moved/appeared/vanished under a static
-        // cursor), so recompute once per frame after window-state changes.
+        // Pointer focus can change without a motion event — a window moved,
+        // appeared or vanished under a static cursor.
         self.sync_pointer_focus(proto_box.as_deref_mut());
 
         self.protocol = proto_box;
     }
 
     /// Recompute pointer focus and emit protocol enter/leave events on
-    /// transitions. A client holds the pointer only while the cursor is over
-    /// its content; decorations and the desktop belong to the compositor, so a
+    /// transitions. Decorations and the desktop belong to the compositor, so a
     /// non-`Content` hit drops focus to none.
     fn sync_pointer_focus(&mut self, proto: Option<&mut ProtocolBridge>) {
         let hit = self.input.resolve_cursor_hit(
@@ -524,8 +510,7 @@ impl WindowManager {
                 p.send_pointer_leave_for_task(self.protocol_pointer_focus, self.protocol_serial);
             }
             if new_ptr_focus != 0 {
-                // Serial 0 is the "never entered" sentinel the cursor gate
-                // rejects, so an enter must never carry it.
+                // Serial 0 is the "never entered" sentinel the cursor gate rejects.
                 self.protocol_serial = self.protocol_serial.wrapping_add(1).max(1);
                 p.send_pointer_enter_for_task(
                     new_ptr_focus,
@@ -561,7 +546,6 @@ impl WindowManager {
         for i in 0..self.window_count as usize {
             let curr_bounds = WindowBounds::from_window(&self.windows[i]);
             let task_id = self.windows[i].task_id;
-            // Find this window's pre-input z-rank (array index = stacking rank).
             let prev_idx = pre_windows[..pre_count]
                 .iter()
                 .position(|w| w.task_id == task_id);
@@ -572,11 +556,8 @@ impl WindowManager {
                     || p.width != curr_bounds.width
                     || p.height != curr_bounds.height
                     || p.visible != curr_bounds.visible;
-                // A raise/lower happens during input processing, so a restack is
-                // only visible here, in the post-input re-fetch: a window's
-                // pre-input rank `j` differs from its post-input rank `i`. Every
-                // window whose rank shifted (the raised one and any it passed)
-                // gets its bounds damaged, repainting the full overlap region.
+                // A raise/lower happens during input processing, so a restack
+                // is only visible here, in the post-input re-fetch.
                 let restacked = j != i;
                 if geometry_changed || restacked {
                     self.add_bounds_damage(&p);
@@ -613,8 +594,7 @@ impl WindowManager {
         self.output_damage.add_rect(x - 9, y - 9, x + 12, y + 17);
     }
 
-    /// Add damage for a window's title bar + shadow area by task_id.
-    /// Used for targeted focus-change damage instead of full-screen redraw.
+    /// Targeted focus-change damage, in place of a full-screen redraw.
     fn add_title_bar_damage_for_task(&mut self, task_id: u32) {
         if task_id == 0 {
             return;
@@ -623,7 +603,6 @@ impl WindowManager {
             if self.windows[i].task_id == task_id {
                 let w = &self.windows[i];
                 let frame_y = w.y - TITLE_BAR_HEIGHT;
-                // Damage the title bar area including shadow overlap.
                 self.output_damage.add_rect(
                     w.x - SHADOW_SPREAD,
                     frame_y - SHADOW_SPREAD,
@@ -642,11 +621,9 @@ impl WindowManager {
             || !self.output_damage.is_empty()
     }
 
-    /// Run one frame: gather input, refresh window state, render+present if
-    /// dirty, emit frame_done events, then reap disconnected clients and
-    /// flush per-client write buffers. The accept path and frame pacing live
-    /// in the async driver; this is the synchronous per-frame work the timer
-    /// arm invokes. Logic is identical to the legacy per-frame body.
+    /// The synchronous per-frame work the timer arm invokes: gather input,
+    /// refresh window state, render+present if dirty, emit frame_done, reap
+    /// disconnected clients and flush. Accept and pacing live in the driver.
     fn render_frame(
         &mut self,
         output: &mut CompositorOutput,
@@ -661,11 +638,8 @@ impl WindowManager {
         let wm = self;
         wm.input.drain_events();
         wm.refresh_windows();
-        // Snapshot focus *before* any input processing so we can detect
-        // changes from any source (sync, mouse click, shelf, spawn) in a
-        // single comparison afterwards.  This is order-independent and
-        // mirrors the Mutter/KWin pattern where focus transitions always
-        // trigger targeted title-bar redraws.
+        // Snapshot before any input processing so a change from any source —
+        // sync, click, shelf, spawn — is one comparison afterwards.
         let focus_before = wm.input.focused_task();
 
         wm.input.sync_keyboard_focus(
@@ -676,28 +650,18 @@ impl WindowManager {
         );
         wm.input
             .process_pending_close_requests(&wm.windows, wm.window_count);
-        // Shelf height for maximize: pill + bottom margin + running dots
         let shelf_h = SHELF_ICON_SIZE
             + 2 * SHELF_PILL_PADDING_Y
             + SHELF_BOTTOM_MARGIN
             + SHELF_DOT_DIAMETER
             + SHELF_DOT_MARGIN_Y;
 
-        // Dispatch the frame's input events in stream order: every button
-        // press is hit-tested at the pointer position accumulated up to
-        // that event, and every key is routed to the keyboard focus as of
-        // that moment (a click earlier in the same batch retargets the
-        // keys that follow it). Also forwards each event to the protocol
-        // clients with in-order coordinates.
         wm.process_input_events(fb_info.width as i32, fb_info.height as i32, shelf_h);
 
-        // Cursor trail + shelf + hover damage — needs the trail the input
-        // dispatch just accumulated.
         wm.add_pointer_damage();
 
-        // Resolve what the pointer is over once; the cursor shape and the
-        // signal-button hover both read this single hit, against this window
-        // snapshot, before the post-input resync can reorder the array.
+        // Resolved once, against this window snapshot, before the post-input
+        // resync can reorder the array.
         let cursor_hit = wm.input.resolve_cursor_hit(
             &wm.windows,
             wm.window_count,
@@ -711,17 +675,11 @@ impl WindowManager {
             wm.input
                 .signal_hovered_task(&cursor_hit, &wm.windows, wm.input.focused_task());
 
-        // When cursor shape changes, damage the cursor position so the old
-        // shape gets erased and the new one gets drawn.
         if cursor_shape != wm.prev_cursor_shape {
             wm.add_cursor_damage_at(wm.input.mouse_x, wm.input.mouse_y);
             wm.prev_cursor_shape = cursor_shape;
         }
 
-        // Hardware cursor (virtio-gpu overlay): upload the image on shape
-        // change and reposition it when the pointer moves. When active, the
-        // renderer omits the software cursor; without a virtio-gpu device the
-        // overlay calls are no-ops and the software cursor is composited.
         let hw_cursor = wm.update_hw_cursor(cursor_shape);
         if hw_cursor
             && (wm.input.mouse_x != wm.hw_cursor_last_x || wm.input.mouse_y != wm.hw_cursor_last_y)

@@ -212,9 +212,8 @@ fn snapshot_last_dealloc() -> Option<DeallocCall> {
     CALL_LOG.deallocs.lock().unwrap().last().copied()
 }
 
-/// Run `f` with the mapper temporarily swapped for `mapper`, restoring the
-/// recording mapper afterwards. The `setup()` guard serialises tests, so the
-/// swap is never observed by another test.
+/// Run `f` with the mapper temporarily swapped for `mapper`. The `setup()`
+/// guard serialises tests, so the swap is never observed by another test.
 fn with_mapper<R>(mapper: &'static &'static dyn IommuMapper, f: impl FnOnce() -> R) -> R {
     dma::reset_for_test();
     slopos_ostd::sync::run_bsp_init_for_test(|t| register_iommu_mapper(t, mapper));
@@ -347,17 +346,10 @@ fn coherent_alloc_zero_pages_returns_exhausted() {
     assert_eq!(snapshot_dealloc_count(), before);
 }
 
-// ---------------------------------------------------------------------------
-// Page release: the success path and all three post-allocation error paths.
-//
-// `DmaCoherentMeta` / `DmaStreamMeta` declare
-// `returns_frame_on_last_drop() == false`, so nothing in the per-frame
-// lifecycle returns these pages — the run's own release does. Each test
-// below pins one path from "the allocator handed over a run" to "the run
-// came back", and checks the head slot read `Unused` at the moment of
-// release, which is the ordering the next claimant's `from_unused` depends
-// on.
-// ---------------------------------------------------------------------------
+// `DmaCoherentMeta` / `DmaStreamMeta` declare `returns_frame_on_last_drop() ==
+// false`, so nothing in the per-frame lifecycle returns these pages — the run's
+// own release does, and the head slot must read `Unused` at that moment for the
+// next claimant's `from_unused`.
 
 /// The paddr `BumpAlloc` will hand out next, so a test can name the run an
 /// about-to-fail `alloc` is going to take and give back.
@@ -463,8 +455,6 @@ fn stream_alloc_returns_pages_when_segment_build_fails() {
 #[test]
 fn repeated_alloc_and_drop_returns_every_run() {
     let _g = setup();
-    // Each round takes a fresh run from the bump cursor and must give it
-    // back: one release per round, naming exactly the paddr the round took.
     for _ in 0..8 {
         let before = snapshot_dealloc_count();
         let head = next_bump_paddr();

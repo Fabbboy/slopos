@@ -1,16 +1,13 @@
 //! Userland glue over the host-testable `slopos-terminal-core` input model.
 //!
-//! The pure logic (key encoding, selection, paste sanitizing, the
-//! `CompositorEvent` taxonomy) lives in the core crate. The only piece that
-//! cannot move there is `classify`, which translates the compositor's wire
-//! `Event` into a `CompositorEvent` — it is the sole protocol-coupled function.
+//! `classify` is the sole protocol-coupled function; everything else lives in
+//! the core crate.
 
 pub use slopos_terminal_core::input::*;
 
 use slopos_abi::input::POINTER_AXIS_VERTICAL;
 use slopos_protocol::types::Event as ProtocolEvent;
 
-/// Translate a raw protocol event into a terminal-facing `CompositorEvent`.
 pub fn classify(evt: &ProtocolEvent) -> CompositorEvent {
     match evt {
         ProtocolEvent::Key {
@@ -40,8 +37,7 @@ pub fn classify(evt: &ProtocolEvent) -> CompositorEvent {
             CompositorEvent::Resize(*width as i32, *height as i32)
         }
         ProtocolEvent::PointerAxis { axis, value, .. } => {
-            // Only the vertical wheel/touchpad axis pages the scrollback;
-            // horizontal scroll has no meaning for the terminal grid.
+            // Horizontal scroll has no meaning for the terminal grid.
             if *axis == POINTER_AXIS_VERTICAL {
                 CompositorEvent::Scroll(*value)
             } else {

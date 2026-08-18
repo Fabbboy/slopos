@@ -1,10 +1,8 @@
 // `VmSpace::cursor` page-table proof.
 //
-// This is a Verus-annotated mirror of the page-table mutation path in
-// `slopos_ostd::mm::vm_space::{VmSpace, CursorMut}` — the `map` / `unmap` /
-// `protect` operations that walk a 4-level x86_64 page table and the
-// `Frame<M>` ref-count leak/reclaim discipline that backs a leaf mapping. It
-// machine-checks three obligations:
+// A Verus-annotated mirror of the page-table mutation path in
+// `slopos_ostd::mm::vm_space::{VmSpace, CursorMut}`, machine-checking three
+// obligations:
 //
 //   (WF)   Cursor operations preserve page-table well-formedness: no
 //          dangling intermediate frames; every present entry points at a

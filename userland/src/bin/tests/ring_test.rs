@@ -769,9 +769,7 @@ fn test_pbuf_ring_select_enobufs() -> bool {
     recv_ok && ring.unregister_buf_ring(1) == 0
 }
 
-/// `OP_CONNECT` validates the user `SockAddrIn` pointer: a null `addr`
-/// completes inline with `-EFAULT` (before any handshake), a single CQE with no
-/// `F_MORE`/`F_NOTIF`. Proves the opcode is wired and validates its input.
+/// `OP_CONNECT` validates the user `SockAddrIn` pointer before any handshake.
 fn test_connect_efault() -> bool {
     let Ok(sock) = net::socket(AF_INET, SOCK_STREAM, 0) else {
         return false;
@@ -799,10 +797,8 @@ fn test_connect_efault() -> bool {
     }
 }
 
-/// `OP_CONNECT` on a UDP socket completes **inline** with `res == 0`: a UDP
-/// "connect" just records the default peer + `Connected` state (no handshake),
-/// so the async opcode resolves immediately with a single, notification-free
-/// CQE — exercising OP_CONNECT's success path deterministically (no network).
+/// A UDP "connect" only records the default peer, so the async opcode resolves
+/// inline with a single notification-free CQE.
 fn test_connect_udp_inline_success() -> bool {
     let Ok(sock) = net::socket(AF_INET, SOCK_DGRAM, 0) else {
         return false;
@@ -836,12 +832,10 @@ fn test_connect_udp_inline_success() -> bool {
     }
 }
 
-/// `OP_SEND_ZC` with a fixed buffer on an **unconnected** TCP socket yields a
-/// single error CQE (the send fails before the buffer is used: not connected),
-/// with no `F_MORE`/`F_NOTIF`. The TCP `MSG_ZEROCOPY` two-CQE / pin-lifetime
-/// correctness over a real handshake is covered by the kernel stests + the
-/// `tcp_zc_pin` proof — SLIRP has no deterministic outbound TCP peer, so the
-/// userland test asserts only the deterministic shape.
+/// An unconnected TCP socket fails the send before the buffer is used, so it
+/// yields one error CQE and no notification. SLIRP has no deterministic
+/// outbound TCP peer; the two-CQE pin lifetime is covered by the kernel stests
+/// and the `tcp_zc_pin` proof.
 fn test_tcp_send_zc_shape() -> bool {
     let Ok(sock) = net::socket(AF_INET, SOCK_STREAM, 0) else {
         return false;
@@ -869,9 +863,6 @@ fn test_tcp_send_zc_shape() -> bool {
         return false;
     }
     match ring.poll_completion() {
-        // Unconnected TCP: the send fails before the buffer is used → one error
-        // CQE, never a two-CQE notification. (A blocked second CQE would hang;
-        // this asserts the single-CQE error shape.)
         Some(cqe) => {
             cqe.user_data == 0x7C90 && cqe.res < 0 && (cqe.flags & SLOPRING_CQE_F_NOTIF) == 0
         }
@@ -879,11 +870,8 @@ fn test_tcp_send_zc_shape() -> bool {
     }
 }
 
-/// `OP_CONNECT` on an **AF_UNIX** socket, end-to-end: bind + listen a unix
-/// listener, then async-connect a client to its path through the ring. Unix
-/// connect allocates the pair immediately when the backlog has room, so the op
-/// completes inline with `res == 0` and a single notification-free CQE — a fully
-/// deterministic (in-process, no network) exercise of the AF_UNIX OP_CONNECT path.
+/// AF_UNIX connect allocates the pair immediately when the listener's backlog
+/// has room, so the op completes inline with a single notification-free CQE.
 fn test_connect_unix_inline_success() -> bool {
     let path = b"/ring-op-connect-unix";
     let Ok(listener) = net::socket(AF_UNIX, SOCK_STREAM, 0) else {
@@ -924,9 +912,7 @@ fn test_connect_unix_inline_success() -> bool {
     }
 }
 
-/// `OP_CONNECT` on an AF_UNIX socket to a path with **no listener** completes
-/// inline with `-ECONNREFUSED`, a single notification-free CQE — proving the
-/// unix connect routing + errno mapping through the ring.
+/// An AF_UNIX path with no listener maps to `-ECONNREFUSED` (-111) inline.
 fn test_connect_unix_refused() -> bool {
     let Ok(sock) = net::socket(AF_UNIX, SOCK_STREAM, 0) else {
         return false;

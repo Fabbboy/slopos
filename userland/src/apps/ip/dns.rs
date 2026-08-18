@@ -1,9 +1,7 @@
 //! `ip dns` — resolver configuration.
 //!
-//! Neither verb is short-circuited: `show` issues `NET_Q_RESOLVER` and `set`
-//! issues `net_resolver_set`, and both surface whatever error comes back rather
-//! than printing an empty resolver list, which would read as "no nameservers
-//! configured".
+//! Errors surface rather than degrading to an empty resolver list, which would
+//! read as "no nameservers configured".
 
 use slopos_abi::net::{NET_IFINDEX_NONE, NET_Q_RESOLVER, UserResolver, UserResolverReq};
 use slopos_net_core::Ipv4;
@@ -33,8 +31,7 @@ pub fn set(servers: &[Ipv4]) -> Outcome {
         *slot = server.octets();
     }
     req.n_servers = count as u8;
-    // A caller naming servers explicitly means them to outrank whatever a lease
-    // later offers, which is what the STATIC source records.
+    // STATIC outranks whatever a later lease offers.
     req.source = slopos_abi::net::NET_RESOLVER_SRC_STATIC;
 
     net_resolver_set(&req).map_err(|err| Failure::from_errno("dns", err))

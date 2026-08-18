@@ -69,11 +69,8 @@ fn spawns_concurrent_clients() -> bool {
     reaped == CLIENTS
 }
 
-/// The session's own descriptors survive the concurrent spawns.
-///
-/// Catches the failure the quota could plausibly introduce: a child's charges
-/// billed to the parent's account would make the parent's own opens start
-/// failing once enough children existed.
+/// Catches a child's charges being billed to the parent's account, which would
+/// make the parent's own opens start failing once enough children existed.
 fn population_survives_concurrent_children() -> bool {
     let Some(held) = open_population() else {
         return false;

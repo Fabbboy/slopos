@@ -18,7 +18,6 @@ fn with_renderer<R, F: FnOnce(&mut SoftSurface) -> R>(f: F) -> Option<R> {
     RENDERER.with(|r| r.borrow_mut().as_mut().map(f))
 }
 
-/// Store the protocol handle for later use by surface operations.
 pub fn init_handle(handle: ProtocolHandle) {
     HANDLE.with(|h| *h.borrow_mut() = Some(handle));
 }
@@ -106,11 +105,9 @@ pub fn draw<R, F: FnOnce(&mut DrawBuffer) -> R>(f: F) -> Option<R> {
 }
 
 /// Age of the buffer the next [`draw`] will paint into, per the
-/// `EGL_EXT_buffer_age` convention (`0` = contents undefined).
-///
-/// `frame()` picks the slot, so this is only accurate once a draw has started;
-/// the renderer's slot choice is deterministic between presents, which is why
-/// reading it before the draw gives the same answer.
+/// `EGL_EXT_buffer_age` convention (`0` = contents undefined). The renderer's
+/// slot choice is deterministic between presents, so reading this before the
+/// draw gives the same answer as reading it after.
 pub fn buffer_age() -> u32 {
     with_renderer(|renderer| renderer.buffer_age()).unwrap_or(0)
 }
@@ -119,7 +116,6 @@ pub fn resize(new_width: u32, new_height: u32) -> bool {
     with_renderer(|renderer| renderer.resize(new_width, new_height).is_ok()).unwrap_or(false)
 }
 
-/// Mark a double-buffer slot reusable after the compositor releases it.
 pub fn release_buffer(buffer_id: u32) {
     with_renderer(|renderer| renderer.release_buffer(buffer_id));
 }

@@ -1,12 +1,8 @@
 //! `ip route` — the routing table.
 //!
-//! `0.0.0.0/0` prints as `default`, which is both what iproute2 does and what
-//! the grammar accepts back, so a line of output can be retyped as a command.
-//! A metric of zero is omitted rather than printed, again following iproute2: a
-//! metric only means something when there is another route to compare it with.
-//!
-//! `scope` and `src` are absent because `UserRoute` has no such fields. A
-//! `scope link` printed from nothing would be a guess.
+//! Follows iproute2: `0.0.0.0/0` prints as `default`, which the grammar also
+//! accepts back, and a zero metric is omitted. `scope` and `src` are absent
+//! because `UserRoute` carries no such fields.
 
 use slopos_abi::net::{NET_IFINDEX_NONE, NET_Q_ROUTES, UserRoute, UserRouteReq};
 use slopos_net_core::Ipv4;

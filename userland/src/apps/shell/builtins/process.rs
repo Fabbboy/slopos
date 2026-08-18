@@ -145,11 +145,10 @@ pub fn cmd_wait(argc: i32, argv: &[&[u8]]) -> i32 {
 /// `exit [n]` — end the shell with status `n`, or with the status of the last
 /// command when no operand is given.
 ///
-/// In a forked pipeline stage the returned status *is* the exit: `run_in_child`
-/// passes whatever a builtin returns straight to `exit_with_code`, so `exit | true`
-/// correctly ends only the subshell.  In the shell's own process the request is
-/// recorded and the command loop acts on it, so the redirect restore and the
-/// terminal handback that loop still owes both happen.
+/// In a forked pipeline stage the returned status *is* the exit, so `exit | true`
+/// ends only the subshell. In the shell's own process the request is merely
+/// recorded, leaving the command loop to restore redirects and hand back the
+/// terminal.
 pub fn cmd_exit(argc: i32, argv: &[&[u8]]) -> i32 {
     let status = if argc >= 2 {
         match jobs::parse_u32_arg(argv[1]) {
@@ -181,7 +180,7 @@ pub fn cmd_exec(argc: i32, argv: &[&[u8]]) -> i32 {
         return 1;
     }
 
-    // exec_ptr expects a null-terminated raw pointer; build one on the stack.
+    // `exec_ptr` takes a NUL-terminated pointer.
     let mut buf = [0u8; 256];
     let len = path.len().min(buf.len() - 1);
     buf[..len].copy_from_slice(&path[..len]);

@@ -84,13 +84,12 @@ pub fn fetch<T: Copy + Default>(what: u32, ifindex: u32) -> SyscallResult<Query<
     Ok(Query { hdr, records })
 }
 
-/// The whole interface table, which nearly every renderer needs: routes and
-/// addresses name an interface by index, and a person reads names.
+/// The whole interface table: routes and addresses name an interface by index,
+/// and a person reads names.
 ///
-/// Deliberately unfiltered even when a `dev` operand is present. Resolving a
-/// name to an index needs every row, and the per-object query that follows does
-/// the filtering kernel-side, where every `NET_Q_*` honours the ifindex it
-/// takes.
+/// Deliberately unfiltered even when a `dev` operand is present — resolving a
+/// name to an index needs every row, and the per-object query that follows
+/// filters kernel-side.
 pub struct Ifaces {
     pub rows: Vec<UserIface>,
     /// How many interfaces the kernel had, which may exceed what fit.
@@ -106,12 +105,10 @@ impl Ifaces {
         })
     }
 
-    /// Whether the kernel had more interfaces than fit in one read.
     pub fn truncated(&self) -> bool {
         self.total as usize > self.rows.len()
     }
 
-    /// The name of `ifindex`, or `None` if this snapshot does not have it.
     pub fn name_of(&self, ifindex: u32) -> Option<&str> {
         self.rows
             .iter()
@@ -119,20 +116,16 @@ impl Ifaces {
             .map(name_of)
     }
 
-    /// The interface called `name`.
-    ///
-    /// Exact match, never a prefix: device names come from outside the program,
-    /// so abbreviating one would mean a command's meaning changes when a new
-    /// interface appears.
+    /// The interface called `name`. Exact match, never a prefix: abbreviating a
+    /// device name would change a command's meaning when a new interface
+    /// appears.
     pub fn find(&self, name: &[u8]) -> Option<&UserIface> {
         self.rows.iter().find(|row| name_of(row).as_bytes() == name)
     }
 }
 
-/// An interface's name as text.
-///
-/// The ABI field is NUL-*padded* and not NUL-terminated when the name fills it
-/// exactly, so the length is "up to the first NUL, else the whole field".
+/// An interface's name as text. The ABI field is NUL-*padded* and not
+/// NUL-terminated when the name fills it exactly.
 pub fn name_of(iface: &UserIface) -> &str {
     let end = iface
         .name
@@ -142,11 +135,9 @@ pub fn name_of(iface: &UserIface) -> &str {
     core::str::from_utf8(&iface.name[..end]).unwrap_or("?")
 }
 
-/// How a record's interface is named.
-///
-/// Falls back to `if#N` when the table does not have the index: a route can
-/// name an interface that went away between two queries, which is racy rather
-/// than broken, and printing the index says more than printing nothing.
+/// How a record's interface is named, falling back to `if#N` when the table
+/// lacks the index: a route can name an interface that went away between two
+/// queries.
 pub fn name_or_index(ifaces: &Ifaces, ifindex: u32) -> std::string::String {
     match ifaces.name_of(ifindex) {
         Some(name) => std::string::String::from(name),

@@ -64,8 +64,7 @@ pub fn try_complete(input: &[u8], len: usize, cursor_pos: usize, cwd: &[u8]) -> 
     result
 }
 
-/// Tab-complete the argument of `keymap` against the installed layouts in
-/// `/usr/share/keymaps/*.layout` (by their short name), rather than the cwd.
+/// Completes against the installed layouts, not against the cwd.
 fn complete_keymap(prefix: &[u8], prefix_len: usize, result: &mut CompletionResult) {
     let prefix_str = match core::str::from_utf8(prefix) {
         Ok(s) => s,
@@ -98,7 +97,6 @@ fn complete_keymap(prefix: &[u8], prefix_len: usize, result: &mut CompletionResu
         return;
     }
 
-    // Multiple: insert the longest common prefix, then list the matches.
     let first = names[0].as_bytes();
     let mut common_len = first.len();
     for name in &names[1..] {
@@ -223,8 +221,6 @@ fn push_command_match(name: &'static [u8], matches: &mut [&'static [u8]; 64], co
     *count += 1;
 }
 
-/// The command word (first token) of `input`, given the start of the word being
-/// completed.
 fn command_word(input: &[u8], word_start: usize) -> &[u8] {
     let mut cmd_start = 0;
     while cmd_start < word_start && is_space(input[cmd_start]) {
@@ -345,9 +341,7 @@ fn complete_path(
         }
 
         if common_len > file_prefix_len {
-            // `remaining` is derived from a filename, which the filesystem lets
-            // run far past this buffer.  Bounded like every sibling branch, or
-            // two long names sharing a prefix panic the shell on Tab.
+            // Filenames can run past this buffer; unbounded, Tab panics the shell.
             let remaining = (common_len - file_prefix_len).min(result.insertion.len());
             let end = file_prefix_len + remaining;
             result.insertion[..remaining].copy_from_slice(&first.name[file_prefix_len..end]);

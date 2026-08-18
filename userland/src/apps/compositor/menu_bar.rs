@@ -4,16 +4,8 @@
 //! and the active application's name on the left, status items packed against
 //! the right edge.
 //!
-//! Placement, hit-testing and damage all go through
-//! [`slopos_chrome_core::status::layout_status_items`], never through a
-//! rectangle cached from the last draw: a press and the motion that brought the
-//! pointer there can arrive in the same frame batch, so a hit test against the
-//! previous frame's geometry answers for where the cursor *was*.
-//!
-//! Damage comes in three tiers: a layout change repaints from the leftmost item
-//! to the screen edge, a content change repaints that slot alone, and hover
-//! repaints nothing here — [`super::hover::HoverRegistry`] already emits both
-//! the old and the new rect when a hover flips.
+//! Hover repaints nothing here — [`super::hover::HoverRegistry`] already emits
+//! both the old and the new rect when a hover flips.
 
 use slopos_abi::draw::Color32;
 use slopos_chrome_core::status::{StatusKind, StatusLayout, hit_status_item, layout_status_items};
@@ -24,17 +16,11 @@ use super::status_item::{STATUS_ITEM_COUNT, StatusItems, hover_rect};
 use crate::gfx::{self, DamageRect, DrawBuffer};
 use crate::theme::*;
 
-// ---------------------------------------------------------------------------
-// Constants derived from theme.rs (kept as local aliases for readability)
-// ---------------------------------------------------------------------------
-
 /// Font size used when rendering with the TrueType font renderer.
 const BAR_FONT_SIZE: u16 = 13;
 
-/// Radius of the system icon circle (half of SYSTEM_BAR_ICON_SIZE).
 const ICON_RADIUS: i32 = SYSTEM_BAR_ICON_SIZE / 2;
 
-/// Semi-transparent panel background colour (PANEL_BG + PANEL_BG_ALPHA).
 const BAR_BG: Color32 = Color32::new(
     PANEL_BG.red(),
     PANEL_BG.green(),
@@ -42,22 +28,15 @@ const BAR_BG: Color32 = Color32::new(
     PANEL_BG_ALPHA,
 );
 
-/// Ellipsis string for truncation.
 const ELLIPSIS: &str = "...";
 
 /// Damage rects [`SystemBar::take_damage`] can emit in one frame: one per
 /// item, or the single spanning rect a layout change produces.
 pub const MAX_BAR_DAMAGE: usize = STATUS_ITEM_COUNT;
 
-/// A cursor position no bar pixel can hold, for layouts taken purely for their
-/// geometry.
+/// A cursor position no bar pixel can hold, for geometry-only layouts.
 const NO_CURSOR: i32 = i32::MIN;
 
-// ---------------------------------------------------------------------------
-// SystemBar
-// ---------------------------------------------------------------------------
-
-/// System bar state (lives in the compositor's main struct).
 pub struct SystemBar {
     items: StatusItems,
     /// Layout digest as of the last damage pass. A change means items moved.
@@ -65,8 +44,7 @@ pub struct SystemBar {
     /// Per-item content revisions as of the last damage pass.
     last_revision: [u32; STATUS_ITEM_COUNT],
     /// Left edge of the leftmost item as of the last damage pass, so a layout
-    /// change repaints the strip the items *used* to occupy as well as the one
-    /// they occupy now.
+    /// change also repaints the strip the items *used* to occupy.
     last_leftmost: i32,
     /// Screen width the last damage pass laid out against. Every slot moves
     /// with it, so a change is a layout change even at an equal signature.
@@ -84,15 +62,14 @@ impl SystemBar {
         }
     }
 
-    /// Publish the network indicator's state. A poll that finds the rendered
-    /// state unchanged bumps no revision and therefore produces no damage.
+    /// Publish the network indicator's state; an unchanged rendered state bumps
+    /// no revision and therefore produces no damage.
     pub fn set_network(&mut self, present: bool, state: slopos_chrome_core::NetIndicatorState) {
         self.items.set_network(present, state);
     }
 
-    /// Where the status items sit for this screen width and cursor position.
-    /// The single geometry source: draw, hit-test, hover and damage all come
-    /// from here.
+    /// Where the status items sit — the single geometry source, for draw,
+    /// hit-test, hover and damage alike.
     fn layout(&self, screen_width: u32, cursor_x: i32, cursor_y: i32) -> StatusLayout {
         layout_status_items(self.items.specs(), screen_width as i32, cursor_x, cursor_y)
     }
@@ -122,24 +99,18 @@ impl SystemBar {
         };
         let clip = clip.unwrap_or(full_clip);
 
-        // -- Background (semi-transparent) ------------------------------------
         gfx::fill_rect_blended_clipped(buf, 0, 0, sw, bar_h, BAR_BG, &clip);
-
-        // -- Bottom border (1 px, opaque) -------------------------------------
         gfx::fill_rect_clipped(buf, 0, bar_h, sw, 1, PANEL_BORDER, &clip);
 
         let layout = self.layout(screen_width, cursor_x, cursor_y);
 
-        // -- Left section -----------------------------------------------------
         let mut cursor = SYSTEM_BAR_PADDING_X;
 
-        // System icon: filled green circle, 8 px diameter, centred vertically.
         let icon_cx = cursor + ICON_RADIUS;
         let icon_cy = bar_h / 2;
         gfx::draw_circle_filled(buf, icon_cx, icon_cy, ICON_RADIUS, SIGNAL_EXPAND);
         cursor += SYSTEM_BAR_ICON_SIZE + SYSTEM_BAR_ICON_GAP;
 
-        // Active app name (or "SlopOS"), never crossing the leftmost item.
         let name = if active_app_name.is_empty() {
             "SlopOS"
         } else {
@@ -156,26 +127,21 @@ impl SystemBar {
             }
         }
 
-        // -- Right section (status items, rightmost first) --------------------
         for (index, slot) in layout.slots().iter().enumerate() {
             self.items
                 .draw(buf, slot, layout.hovered == Some(index), &clip);
         }
     }
 
-    /// Whether `py` falls inside the bar strip.
-    ///
-    /// The bar spans the full width, so x says nothing about whether the
-    /// pointer is on it; which *item* it is over is [`Self::hit_test`].
+    /// Whether `py` falls inside the bar strip.  The bar spans the full width,
+    /// so x says nothing; which *item* it is over is [`Self::hit_test`].
     pub fn covers(py: i32) -> bool {
         py >= 0 && py < SYSTEM_BAR_HEIGHT
     }
 
-    /// Which status item `(px, py)` lands on.
-    ///
-    /// Lays out at the passed position rather than reusing the last draw
-    /// pass's geometry, so a click batched with the motion that brought the
-    /// cursor here is tested against where the cursor now is.
+    /// Which status item `(px, py)` lands on.  Laid out at the passed position,
+    /// so a click batched with the motion that brought the cursor here is
+    /// tested against where the cursor now is.
     pub fn hit_test(&self, screen_width: u32, px: i32, py: i32) -> Option<StatusKind> {
         let layout = self.layout(screen_width, px, py);
         hit_status_item(&layout, px, py)
