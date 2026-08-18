@@ -1,15 +1,5 @@
 //! MSI-X regression tests.
 //!
-//! These tests verify:
-//! - MSI-X capability parsing from QEMU VirtIO devices
-//! - Capability field consistency (table_size, BIR, offsets)
-//! - Table mapping and accessor correctness
-//! - Configuration of individual table entries
-//! - Mask/unmask entry operations
-//! - Enable/disable toggling via config space reads
-//! - Error path validation (invalid vector, out-of-range entry, unmapped table)
-//! - Integration with the MSI vector allocator
-//!
 //! All tests run on the QEMU q35 platform, targeting VirtIO block (1af4:1042)
 //! and VirtIO net (1af4:1041), both of which expose MSI-X at a known capability
 //! offset.
@@ -25,10 +15,6 @@ use crate::msix::{
 use crate::pci::{pci_config_read16, pci_config_write16, pci_get_device, pci_get_device_count};
 use crate::pci_defs::*;
 
-// =============================================================================
-// Helpers
-// =============================================================================
-
 fn find_device_by_vendor_device(vendor: u16, device: u16) -> Option<PciDeviceInfo> {
     for i in 0..pci_get_device_count() {
         if let Some(dev) = pci_get_device(i) {
@@ -40,9 +26,8 @@ fn find_device_by_vendor_device(vendor: u16, device: u16) -> Option<PciDeviceInf
     None
 }
 
-/// Restore a previously saved MSI-X table entry by re-programming it via
-/// `msix_configure`.  Extracts the vector (msg_data bits 7:0) and APIC ID
-/// (msg_addr_lo bits 19:12) from the saved raw register values.
+/// Re-program a saved table entry: the vector is `msg_data` bits 7:0 and the
+/// APIC ID is `msg_addr_lo` bits 19:12.
 fn restore_table_entry(
     table: &crate::msix::MsixTable,
     entry: u16,
@@ -52,17 +37,14 @@ fn restore_table_entry(
 ) {
     let vector = (orig_data & 0xFF) as u8;
     let apic_id = ((orig_addr_lo >> 12) & 0xFF) as u8;
-    // msix_configure masks, writes addr/data, then unmasks — fully restoring
-    // the entry to its pre-test state.
     let _ = msix_configure(table, entry, vector, apic_id);
 }
 
-/// Restore MSI-X Message Control register to a previously saved value.
+/// Restore the MSI-X Message Control register from a saved value.
 ///
-/// Writes the saved control register directly via PCI config space,
-/// bypassing `msix_enable`/`msix_disable` to avoid tearing down QEMU's
-/// internal KVM irqfd routing state.  The single atomic config write
-/// restores enable, function mask, and table-size bits in one go.
+/// Written directly through config space rather than via
+/// `msix_enable`/`msix_disable`: QEMU's KVM irqfd routing does not survive a
+/// disable/re-enable cycle.
 fn restore_msix_control(dev: &PciDeviceInfo, cap: &MsixCapability, saved_ctrl: u16) {
     pci_config_write16(
         dev.bus,
@@ -73,7 +55,6 @@ fn restore_msix_control(dev: &PciDeviceInfo, cap: &MsixCapability, saved_ctrl: u
     );
 }
 
-/// Find first device with MSI-X capability and return (device, cap_offset).
 fn find_msix_device() -> Option<(PciDeviceInfo, u16)> {
     for i in 0..pci_get_device_count() {
         if let Some(dev) = pci_get_device(i) {
@@ -85,16 +66,10 @@ fn find_msix_device() -> Option<(PciDeviceInfo, u16)> {
     None
 }
 
-/// Read the MSI-X Message Control register for a given capability.
 fn read_msix_control(dev: &PciDeviceInfo, cap: &MsixCapability) -> u16 {
     pci_config_read16(dev.bus, dev.device, dev.function, cap.cap_offset + 0x02)
 }
 
-// =============================================================================
-// 1. Capability parsing — VirtIO block device
-// =============================================================================
-
-/// VirtIO block device (1af4:1042) must have MSI-X capability discoverable.
 pub fn test_virtio_blk_msix_cap_present() -> TestResult {
     let dev = match find_device_by_vendor_device(PCI_VENDOR_ID_VIRTIO, 0x1042) {
         Some(d) => d,
@@ -108,7 +83,6 @@ pub fn test_virtio_blk_msix_cap_present() -> TestResult {
     pass!()
 }
 
-/// Parsed capability must have a nonzero table_size (at least 1 entry).
 pub fn test_virtio_blk_msix_table_size_nonzero() -> TestResult {
     let dev = match find_device_by_vendor_device(PCI_VENDOR_ID_VIRTIO, 0x1042) {
         Some(d) => d,
@@ -132,7 +106,6 @@ pub fn test_virtio_blk_msix_table_size_nonzero() -> TestResult {
     pass!()
 }
 
-/// Table BIR and PBA BIR must be within valid BAR range (0–5).
 pub fn test_virtio_blk_msix_bir_valid() -> TestResult {
     let dev = match find_device_by_vendor_device(PCI_VENDOR_ID_VIRTIO, 0x1042) {
         Some(d) => d,
@@ -156,7 +129,6 @@ pub fn test_virtio_blk_msix_bir_valid() -> TestResult {
     pass!()
 }
 
-/// Capability cap_offset must match the stored msix_cap_offset.
 pub fn test_virtio_blk_msix_cap_offset_matches() -> TestResult {
     let dev = match find_device_by_vendor_device(PCI_VENDOR_ID_VIRTIO, 0x1042) {
         Some(d) => d,
@@ -187,11 +159,6 @@ pub fn test_virtio_blk_msix_table_offset_aligned() -> TestResult {
     pass!()
 }
 
-// =============================================================================
-// 2. Capability parsing — VirtIO network device
-// =============================================================================
-
-/// VirtIO net device (1af4:1041) must also have MSI-X.
 pub fn test_virtio_net_msix_cap_present() -> TestResult {
     let dev = match find_device_by_vendor_device(PCI_VENDOR_ID_VIRTIO, 0x1041) {
         Some(d) => d,
@@ -211,11 +178,6 @@ pub fn test_virtio_net_msix_cap_present() -> TestResult {
     pass!()
 }
 
-// =============================================================================
-// 3. Parsing consistency — multiple reads must agree
-// =============================================================================
-
-/// Two consecutive capability reads on the same device must yield identical results.
 pub fn test_msix_capability_parse_deterministic() -> TestResult {
     let (dev, off) = match find_msix_device() {
         Some(pair) => pair,
@@ -252,11 +214,6 @@ pub fn test_msix_capability_parse_deterministic() -> TestResult {
     pass!()
 }
 
-// =============================================================================
-// 4. Table mapping
-// =============================================================================
-
-/// Mapping the MSI-X table on a VirtIO device must succeed.
 pub fn test_msix_map_table_success() -> TestResult {
     let (dev, off) = match find_msix_device() {
         Some(pair) => pair,
@@ -277,7 +234,6 @@ pub fn test_msix_map_table_success() -> TestResult {
     pass!()
 }
 
-/// read_vector_control must return Some for valid entries.
 pub fn test_msix_read_vector_control_valid() -> TestResult {
     let (dev, off) = match find_msix_device() {
         Some(pair) => pair,
@@ -289,13 +245,11 @@ pub fn test_msix_read_vector_control_valid() -> TestResult {
         Err(e) => return fail!("msix_map_table failed: {:?}", e),
     };
 
-    // Entry 0 must always be readable.
     let ctrl = table.read_vector_control(0);
     assert_test!(ctrl.is_some(), "read_vector_control(0) returned None");
     pass!()
 }
 
-/// read_vector_control for out-of-range entry must return None.
 pub fn test_msix_read_vector_control_out_of_range() -> TestResult {
     let (dev, off) = match find_msix_device() {
         Some(pair) => pair,
@@ -321,7 +275,6 @@ pub fn test_msix_read_vector_control_out_of_range() -> TestResult {
     pass!()
 }
 
-/// is_pending must return Some(bool) for valid entries and None for out-of-range.
 pub fn test_msix_is_pending_bounds() -> TestResult {
     let (dev, off) = match find_msix_device() {
         Some(pair) => pair,
@@ -345,14 +298,7 @@ pub fn test_msix_is_pending_bounds() -> TestResult {
     pass!()
 }
 
-// =============================================================================
-// 5. Entry configuration
-// =============================================================================
-
-/// Configuring entry 0 with a valid vector must succeed.
-///
-/// Saves and restores the original entry 0 configuration to avoid corrupting
-/// live device state.
+/// Entry 0 belongs to a live device, so its configuration is saved and restored.
 pub fn test_msix_configure_entry_success() -> TestResult {
     let (dev, off) = match find_msix_device() {
         Some(pair) => pair,
@@ -364,12 +310,11 @@ pub fn test_msix_configure_entry_success() -> TestResult {
         Err(e) => return fail!("msix_map_table failed: {:?}", e),
     };
 
-    // Save original entry 0 state before overwriting.
     let orig_data = table.read_msg_data(0).unwrap_or(0);
     let orig_addr = table.read_msg_addr_lo(0).unwrap_or(0);
     let orig_ctrl = table.read_vector_control(0).unwrap_or(0);
 
-    // Use vector 48 (MSI_VECTOR_BASE), APIC ID 0.
+    // Vector 48 is MSI_VECTOR_BASE.
     let result = msix_configure(&table, 0, 48, 0);
     assert_test!(
         result.is_ok(),
@@ -377,15 +322,12 @@ pub fn test_msix_configure_entry_success() -> TestResult {
         result
     );
 
-    // Restore original entry 0 state.
     restore_table_entry(&table, 0, orig_addr, orig_data, orig_ctrl);
     pass!()
 }
 
-/// Configuring with vector < 32 must return InvalidVector error.
-///
-/// The vector-32 boundary test succeeds and writes to entry 0, so we
-/// save/restore the original entry state.
+/// The vector-32 case succeeds and writes entry 0, so the original entry state
+/// is saved and restored.
 pub fn test_msix_configure_invalid_vector() -> TestResult {
     let (dev, off) = match find_msix_device() {
         Some(pair) => pair,
@@ -397,35 +339,30 @@ pub fn test_msix_configure_invalid_vector() -> TestResult {
         Err(e) => return fail!("msix_map_table failed: {:?}", e),
     };
 
-    // Save original entry 0 state before overwriting.
     let orig_data = table.read_msg_data(0).unwrap_or(0);
     let orig_addr = table.read_msg_addr_lo(0).unwrap_or(0);
     let orig_ctrl = table.read_vector_control(0).unwrap_or(0);
 
-    // Vector 0 is a CPU exception — must fail.
+    // Vectors 0–31 are CPU exceptions; 32 is the first usable one.
     let result = msix_configure(&table, 0, 0, 0);
     assert_eq_test!(
         result,
         Err(MsixError::InvalidVector),
         "vector 0 should return InvalidVector"
     );
-    // Vector 31 is the last exception vector.
     let result31 = msix_configure(&table, 0, 31, 0);
     assert_eq_test!(
         result31,
         Err(MsixError::InvalidVector),
         "vector 31 should return InvalidVector"
     );
-    // Vector 32 is the first valid vector.
     let result32 = msix_configure(&table, 0, 32, 0);
     assert_test!(result32.is_ok(), "vector 32 should succeed");
 
-    // Restore original entry 0 state (vector 32 write was destructive).
     restore_table_entry(&table, 0, orig_addr, orig_data, orig_ctrl);
     pass!()
 }
 
-/// Configuring an out-of-range entry must return InvalidEntry error.
 pub fn test_msix_configure_invalid_entry() -> TestResult {
     let (dev, off) = match find_msix_device() {
         Some(pair) => pair,
@@ -452,11 +389,6 @@ pub fn test_msix_configure_invalid_entry() -> TestResult {
     pass!()
 }
 
-// =============================================================================
-// 6. Mask / Unmask operations
-// =============================================================================
-
-/// Masking a valid entry must return true.
 pub fn test_msix_mask_entry_valid() -> TestResult {
     let (dev, off) = match find_msix_device() {
         Some(pair) => pair,
@@ -472,16 +404,14 @@ pub fn test_msix_mask_entry_valid() -> TestResult {
         msix_mask_entry(&table, 0),
         "msix_mask_entry(0) should return true"
     );
-    // After masking, vector control bit 0 should be set.
     let ctrl = table.read_vector_control(0).unwrap_or(0);
     assert_test!((ctrl & 1) != 0, "entry 0 mask bit not set after masking");
 
-    // Clean up: unmask entry 0 so subsequent tests see the original state.
+    // Later tests expect entry 0 unmasked.
     msix_unmask_entry(&table, 0);
     pass!()
 }
 
-/// Unmasking a valid entry must return true and clear the mask bit.
 pub fn test_msix_unmask_entry_valid() -> TestResult {
     let (dev, off) = match find_msix_device() {
         Some(pair) => pair,
@@ -493,7 +423,6 @@ pub fn test_msix_unmask_entry_valid() -> TestResult {
         Err(e) => return fail!("msix_map_table failed: {:?}", e),
     };
 
-    // Mask first, then unmask.
     msix_mask_entry(&table, 0);
     assert_test!(
         msix_unmask_entry(&table, 0),
@@ -507,7 +436,6 @@ pub fn test_msix_unmask_entry_valid() -> TestResult {
     pass!()
 }
 
-/// Mask/unmask on out-of-range entries must return false.
 pub fn test_msix_mask_unmask_out_of_range() -> TestResult {
     let (dev, off) = match find_msix_device() {
         Some(pair) => pair,
@@ -540,15 +468,8 @@ pub fn test_msix_mask_unmask_out_of_range() -> TestResult {
     pass!()
 }
 
-// =============================================================================
-// 7. Enable / Disable toggling
-// =============================================================================
-
-/// Verify the MSI-X enable bit is set on a device that was enabled at probe time.
-///
-/// This is a read-only check: MSI-X was enabled by the driver probe, so the
-/// enable bit (bit 15) must already be set.  We do NOT toggle the enable bit
-/// because QEMU's KVM irqfd routing cannot survive disable/re-enable cycles.
+/// Read-only: MSI-X is enabled by the driver probe, so bit 15 must already be
+/// set.
 pub fn test_msix_enable_sets_enable_bit() -> TestResult {
     let (dev, off) = match find_msix_device() {
         Some(pair) => pair,
@@ -565,9 +486,8 @@ pub fn test_msix_enable_sets_enable_bit() -> TestResult {
     pass!()
 }
 
-/// Verify that clearing the enable bit via config space actually clears it,
-/// then restore.  We keep the function mask set throughout so QEMU never
-/// attempts to fire vectors through a stale KVM notifier.
+/// The function mask stays set throughout, so QEMU never fires a vector through
+/// a stale KVM notifier.
 pub fn test_msix_disable_clears_enable_bit() -> TestResult {
     let (dev, off) = match find_msix_device() {
         Some(pair) => pair,
@@ -576,10 +496,8 @@ pub fn test_msix_disable_clears_enable_bit() -> TestResult {
     let cap = msix_read_capability(dev.bus, dev.device, dev.function, off);
     let saved_ctrl = read_msix_control(&dev, &cap);
 
-    // Set function mask first to suppress vector delivery.
     msix_set_function_mask(dev.bus, dev.device, dev.function, &cap);
 
-    // Clear the enable bit while function mask is active.
     let fmasked_ctrl = read_msix_control(&dev, &cap);
     pci_config_write16(
         dev.bus,
@@ -595,7 +513,6 @@ pub fn test_msix_disable_clears_enable_bit() -> TestResult {
         "enable bit still set after clearing"
     );
 
-    // Re-enable: set the enable bit again (still function-masked).
     pci_config_write16(
         dev.bus,
         dev.device,
@@ -604,12 +521,11 @@ pub fn test_msix_disable_clears_enable_bit() -> TestResult {
         ctrl | (1 << 15),
     );
 
-    // Now restore original control register (clears function mask).
     restore_msix_control(&dev, &cap, saved_ctrl);
     pass!()
 }
 
-/// Function mask set/clear must toggle bit 14 in Message Control.
+/// The function mask is bit 14 of Message Control.
 pub fn test_msix_function_mask_toggling() -> TestResult {
     let (dev, off) = match find_msix_device() {
         Some(pair) => pair,
@@ -633,7 +549,6 @@ pub fn test_msix_function_mask_toggling() -> TestResult {
     pass!()
 }
 
-/// msix_refresh_control must update the capability's control field.
 pub fn test_msix_refresh_control_updates_cap() -> TestResult {
     let (dev, off) = match find_msix_device() {
         Some(pair) => pair,
@@ -641,7 +556,6 @@ pub fn test_msix_refresh_control_updates_cap() -> TestResult {
     };
     let mut cap = msix_read_capability(dev.bus, dev.device, dev.function, off);
 
-    // Toggle function mask, then refresh — the in-memory cap should match hardware.
     msix_set_function_mask(dev.bus, dev.device, dev.function, &cap);
     msix_refresh_control(dev.bus, dev.device, dev.function, &mut cap);
     let live_ctrl = read_msix_control(&dev, &cap);
@@ -651,16 +565,10 @@ pub fn test_msix_refresh_control_updates_cap() -> TestResult {
         "refresh_control did not update cap.control"
     );
 
-    // Restore: clear function mask.
     msix_clear_function_mask(dev.bus, dev.device, dev.function, &cap);
     pass!()
 }
 
-// =============================================================================
-// 8. MsixCapability helper methods
-// =============================================================================
-
-/// is_enabled() must agree with the enable bit in control.
 pub fn test_msix_cap_is_enabled_method() -> TestResult {
     let (dev, off) = match find_msix_device() {
         Some(pair) => pair,
@@ -668,14 +576,12 @@ pub fn test_msix_cap_is_enabled_method() -> TestResult {
     };
     let mut cap = msix_read_capability(dev.bus, dev.device, dev.function, off);
 
-    // MSI-X is enabled at probe time.  Verify is_enabled() reflects that.
     msix_refresh_control(dev.bus, dev.device, dev.function, &mut cap);
     assert_test!(
         cap.is_enabled(),
         "is_enabled() should be true (enabled at probe)"
     );
 
-    // Set function mask, clear enable bit, verify is_enabled() returns false.
     msix_set_function_mask(dev.bus, dev.device, dev.function, &cap);
     let fmasked_ctrl = read_msix_control(&dev, &cap);
     pci_config_write16(
@@ -691,7 +597,6 @@ pub fn test_msix_cap_is_enabled_method() -> TestResult {
         "is_enabled() should be false after clearing enable bit"
     );
 
-    // Restore: set enable bit back (still function-masked).
     let disabled_ctrl = read_msix_control(&dev, &cap);
     pci_config_write16(
         dev.bus,
@@ -706,12 +611,10 @@ pub fn test_msix_cap_is_enabled_method() -> TestResult {
         "is_enabled() should be true after restoring enable bit"
     );
 
-    // Clear function mask to restore fully.
     msix_clear_function_mask(dev.bus, dev.device, dev.function, &cap);
     pass!()
 }
 
-/// is_function_masked() must agree with the function mask bit.
 pub fn test_msix_cap_is_function_masked_method() -> TestResult {
     let (dev, off) = match find_msix_device() {
         Some(pair) => pair,
@@ -733,17 +636,10 @@ pub fn test_msix_cap_is_function_masked_method() -> TestResult {
         "is_function_masked() should be true after set"
     );
 
-    // Clean up.
     msix_clear_function_mask(dev.bus, dev.device, dev.function, &cap);
     pass!()
 }
 
-// =============================================================================
-// 9. All MSI-X devices — consistency sweep
-// =============================================================================
-
-/// For every device with MSI-X, the parsed table_size must be 1–2048
-/// and BIR values must be in range 0–5.
 pub fn test_all_msix_devices_fields_valid() -> TestResult {
     let mut found = false;
     for i in 0..pci_get_device_count() {
@@ -789,10 +685,6 @@ pub fn test_all_msix_devices_fields_valid() -> TestResult {
     pass!()
 }
 
-// =============================================================================
-// 10. SATA controller — must NOT have MSI-X
-// =============================================================================
-
 /// ICH9 SATA (8086:2922) has MSI but not MSI-X.
 pub fn test_sata_no_msix() -> TestResult {
     let dev = match find_device_by_vendor_device(0x8086, 0x2922) {
@@ -803,11 +695,6 @@ pub fn test_sata_no_msix() -> TestResult {
     pass!()
 }
 
-// =============================================================================
-// Suite registration
-// =============================================================================
-
-// Capability parsing — VirtIO block
 slopos_testing::stest!(name = test_virtio_blk_msix_cap_present, suite = msix);
 slopos_testing::stest!(name = test_virtio_blk_msix_table_size_nonzero, suite = msix);
 slopos_testing::stest!(name = test_virtio_blk_msix_bir_valid, suite = msix);
@@ -816,14 +703,11 @@ slopos_testing::stest!(
     name = test_virtio_blk_msix_table_offset_aligned,
     suite = msix
 );
-// Capability parsing — VirtIO net
 slopos_testing::stest!(name = test_virtio_net_msix_cap_present, suite = msix);
-// Parsing consistency
 slopos_testing::stest!(
     name = test_msix_capability_parse_deterministic,
     suite = msix
 );
-// Table mapping
 slopos_testing::stest!(name = test_msix_map_table_success, suite = msix);
 slopos_testing::stest!(name = test_msix_read_vector_control_valid, suite = msix);
 slopos_testing::stest!(
@@ -831,23 +715,17 @@ slopos_testing::stest!(
     suite = msix
 );
 slopos_testing::stest!(name = test_msix_is_pending_bounds, suite = msix);
-// Entry configuration
 slopos_testing::stest!(name = test_msix_configure_entry_success, suite = msix);
 slopos_testing::stest!(name = test_msix_configure_invalid_vector, suite = msix);
 slopos_testing::stest!(name = test_msix_configure_invalid_entry, suite = msix);
-// Mask / Unmask
 slopos_testing::stest!(name = test_msix_mask_entry_valid, suite = msix);
 slopos_testing::stest!(name = test_msix_unmask_entry_valid, suite = msix);
 slopos_testing::stest!(name = test_msix_mask_unmask_out_of_range, suite = msix);
-// Enable / Disable
 slopos_testing::stest!(name = test_msix_enable_sets_enable_bit, suite = msix);
 slopos_testing::stest!(name = test_msix_disable_clears_enable_bit, suite = msix);
 slopos_testing::stest!(name = test_msix_function_mask_toggling, suite = msix);
 slopos_testing::stest!(name = test_msix_refresh_control_updates_cap, suite = msix);
-// Capability helper methods
 slopos_testing::stest!(name = test_msix_cap_is_enabled_method, suite = msix);
 slopos_testing::stest!(name = test_msix_cap_is_function_masked_method, suite = msix);
-// Sweep all MSI-X devices
 slopos_testing::stest!(name = test_all_msix_devices_fields_valid, suite = msix);
-// Negative — device without MSI-X
 slopos_testing::stest!(name = test_sata_no_msix, suite = msix);

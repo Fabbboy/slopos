@@ -1,10 +1,7 @@
 //! VirtIO GPU 2D driver regression tests.
 //!
-//! Pure-logic tests (format mapping, damage coalescing) run everywhere.
-//! Integration tests round-trip real control-queue commands and are gated on a
-//! live device: on a QEMU without `-device virtio-gpu-pci` they no-op (the
-//! kernel stays on the passive framebuffer), so they pass trivially rather than
-//! fail the suite.
+//! The integration tests are gated on a live device: on a QEMU without
+//! `-device virtio-gpu-pci` they no-op and pass rather than fail the suite.
 
 use slopos_abi::PixelFormat;
 use slopos_abi::damage::DamageRect;
@@ -14,11 +11,6 @@ use slopos_testing::{TestResult, assert_eq_test, assert_test, pass};
 use crate::virtio_gpu;
 use crate::virtio_gpu::test_support;
 
-// =============================================================================
-// Pure-logic tests (no device)
-// =============================================================================
-
-/// SlopOS pixel formats map to the matching virtio-gpu 2D format codes.
 pub fn test_virtio_gpu_format_mapping() -> TestResult {
     // Argb8888 memory order [B,G,R,A] == VIRTIO_GPU_FORMAT_B8G8R8A8_UNORM (1).
     assert_eq_test!(test_support::format_code(PixelFormat::Argb8888), 1u32);
@@ -29,7 +21,6 @@ pub fn test_virtio_gpu_format_mapping() -> TestResult {
     pass!()
 }
 
-/// Scattered damage rects coalesce to their bounding box.
 pub fn test_virtio_gpu_coalesce_bbox() -> TestResult {
     let rects = [
         DamageRect {
@@ -50,7 +41,6 @@ pub fn test_virtio_gpu_coalesce_bbox() -> TestResult {
     pass!()
 }
 
-/// A rect overhanging the screen is clamped to the framebuffer bounds.
 pub fn test_virtio_gpu_coalesce_clamps_to_screen() -> TestResult {
     let rects = [DamageRect {
         x0: -5,
@@ -63,7 +53,6 @@ pub fn test_virtio_gpu_coalesce_clamps_to_screen() -> TestResult {
     pass!()
 }
 
-/// No valid rect (empty list or inverted rect) yields no transfer.
 pub fn test_virtio_gpu_coalesce_invalid_is_none() -> TestResult {
     assert_test!(test_support::coalesce(&[], 100, 100).is_none());
     let invalid = [DamageRect {
@@ -76,7 +65,7 @@ pub fn test_virtio_gpu_coalesce_invalid_is_none() -> TestResult {
     pass!()
 }
 
-/// Mode validation rejects out-of-range sizes and rounds to even dimensions.
+/// Rejects out-of-range sizes and rounds to even dimensions.
 pub fn test_virtio_gpu_sanitize_mode() -> TestResult {
     assert_test!(
         test_support::sanitize(100, 100).is_none(),
@@ -90,10 +79,6 @@ pub fn test_virtio_gpu_sanitize_mode() -> TestResult {
     assert_eq_test!(test_support::sanitize(1921, 1081), Some((1920u32, 1080u32)));
     pass!()
 }
-
-// =============================================================================
-// Integration tests (live device, gated on is_present)
-// =============================================================================
 
 /// `GET_DISPLAY_INFO` returns a non-zero scanout-0 resolution.
 pub fn test_virtio_gpu_display_info_roundtrip() -> TestResult {
@@ -110,8 +95,8 @@ pub fn test_virtio_gpu_display_info_roundtrip() -> TestResult {
     }
 }
 
-/// Full control-queue resource lifecycle (create → attach → transfer → flush →
-/// unref) acks OK against the live device.
+/// Control-queue resource lifecycle: create → attach → transfer → flush →
+/// unref.
 pub fn test_virtio_gpu_resource_roundtrip() -> TestResult {
     if !virtio_gpu::is_present() {
         klog_info!("virtio-gpu: no device — skipping resource round-trip");

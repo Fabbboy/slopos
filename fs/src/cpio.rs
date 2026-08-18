@@ -1,20 +1,8 @@
 //! Minimal `newc` cpio archive reader for the initramfs.
 //!
-//! Limine loads the initramfs as a module: a single uncompressed `newc`
-//! (SVR4) cpio archive packed at build time by `scripts/gen_initramfs.py`.
-//! At boot the kernel unpacks it into the RAM-backed root filesystem so the
-//! whole userland (`/sbin/init`, `/bin/*`, fonts, …) is available with **no
-//! storage drivers** — the boot path is identical in QEMU and on real
-//! hardware.
-//!
 //! The archive is bootloader-supplied data, so every offset is computed with
 //! `checked_add` and bounds-checked against the slice: a malformed archive
 //! yields a [`CpioError`], never a panic or an out-of-bounds read.
-//!
-//! Parsing ([`for_each_cpio_entry`]) is kept free of side effects so it is
-//! unit-testable in isolation; [`unpack_cpio_into_root`] is the thin wrapper
-//! that materializes each entry into the VFS via [`vfs_mkdir`] /
-//! [`vfs_open_flags`] / [`vfs_set_mode`].
 
 use slopos_ostd::klog_info;
 
@@ -24,17 +12,15 @@ use crate::{MAX_NAME_LEN, MAX_PATH_LEN};
 /// Fixed `newc` header size: 6-byte magic + 13 fields × 8 ASCII-hex chars.
 const HEADER_LEN: usize = 110;
 const MAGIC: &[u8] = b"070701";
-/// Sentinel entry name that terminates the archive.
 const TRAILER: &[u8] = b"TRAILER!!!";
 
-/// `st_mode` type mask and the two types we materialize.
 const S_IFMT: u32 = 0o170000;
 const S_IFDIR: u32 = 0o040000;
 const S_IFREG: u32 = 0o100000;
 
 /// Field byte offsets within the header (each field is 8 ASCII-hex chars).
-const OFF_MODE: usize = 6 + 8; // after magic + c_ino
-const OFF_FILESIZE: usize = 6 + 8 * 6; // after c_nlink + c_mtime
+const OFF_MODE: usize = 6 + 8;
+const OFF_FILESIZE: usize = 6 + 8 * 6;
 const OFF_NAMESIZE: usize = 6 + 8 * 11;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -81,8 +67,7 @@ fn parse_hex8(field: &[u8]) -> Result<u32, CpioError> {
     Ok(val)
 }
 
-/// The stored name is NUL-terminated within its `namesize` field; return the
-/// bytes up to the first NUL.
+/// The stored name is NUL-terminated within its `namesize` field.
 fn nul_terminated(bytes: &[u8]) -> &[u8] {
     match bytes.iter().position(|&b| b == 0) {
         Some(i) => &bytes[..i],
@@ -92,8 +77,7 @@ fn nul_terminated(bytes: &[u8]) -> &[u8] {
 
 /// Walk every record of a `newc` cpio archive, invoking `f` for each entry up
 /// to (but not including) the `TRAILER!!!` sentinel. Returns the number of
-/// entries visited. Pure with respect to the VFS — used both by
-/// [`unpack_cpio_into_root`] and by the unit tests.
+/// entries visited.
 pub fn for_each_cpio_entry<F>(archive: &[u8], mut f: F) -> Result<usize, CpioError>
 where
     F: FnMut(&CpioEntry) -> Result<(), CpioError>,
@@ -120,9 +104,9 @@ struct CpioRecord<'a> {
 
 /// Decode one `newc` record, or `None` at the `TRAILER!!!` sentinel.
 ///
-/// Out of line: the dozen `checked_*(…)?` chains are a stack slot each at
-/// opt-level 0, and inlined they were charged to every instantiation of the
-/// generic, putting all of them over the frame ceiling.
+/// Out of line: at opt-level 0 the `checked_*(…)?` chains are a stack slot
+/// each, and inlining charges them to every instantiation of the generic,
+/// putting all of them over the frame ceiling.
 #[inline(never)]
 fn parse_record(archive: &[u8], pos: usize) -> Result<Option<CpioRecord<'_>>, CpioError> {
     let header_end = pos.checked_add(HEADER_LEN).ok_or(CpioError::Truncated)?;
@@ -153,8 +137,8 @@ fn parse_record(archive: &[u8], pos: usize) -> Result<Option<CpioRecord<'_>>, Cp
         return Ok(None);
     }
 
-    // File data starts after the header+name, padded (from the record
-    // start) to a 4-byte boundary; the data itself is padded likewise.
+    // newc pads header+name, and the data itself, to 4-byte boundaries
+    // measured from the record start.
     let after_name = HEADER_LEN
         .checked_add(namesize)
         .ok_or(CpioError::Truncated)?;
@@ -191,7 +175,7 @@ pub fn unpack_cpio_into_root(archive: &[u8]) -> Result<usize, CpioError> {
         let mut buf = [0u8; MAX_PATH_LEN];
         let path = match normalize_path(entry.path, &mut buf)? {
             Some(len) => &buf[..len],
-            None => return Ok(()), // root / "." — nothing to materialize
+            None => return Ok(()),
         };
         validate_components(path)?;
 
@@ -220,14 +204,12 @@ pub fn unpack_cpio_into_root(archive: &[u8]) -> Result<usize, CpioError> {
 /// the byte length written, `None` for the root / `.`, or [`CpioError::NameTooLong`].
 fn normalize_path(name: &[u8], out: &mut [u8; MAX_PATH_LEN]) -> Result<Option<usize>, CpioError> {
     let mut n = name;
-    // Strip a leading "." or "./" (gen_init_cpio convention).
     if n == b"." {
         return Ok(None);
     }
     if n.len() >= 2 && n[0] == b'.' && n[1] == b'/' {
         n = &n[2..];
     }
-    // Collapse leading slashes; we re-add exactly one.
     while n.first() == Some(&b'/') {
         n = &n[1..];
     }
@@ -306,13 +288,11 @@ fn write_file(path: &[u8], data: &[u8], mode: u32) -> Result<(), CpioError> {
         off += n;
     }
 
-    // Restore the permission bits (notably the exec bit on binaries; the VFS
-    // create path defaults regular files to 0o644).
+    // The VFS create path defaults regular files to 0o644, losing the exec bit.
     vfs_set_mode(path, (mode & 0o7777) as u16).map_err(CpioError::Vfs)?;
-    // Sealed last, after the contents and the mode are final. Program-identity
-    // privilege is keyed on a path, so an unpacked `/bin` that stayed writable
-    // would hand every grant to whoever overwrote the binary. A root that
-    // cannot store the bit fails the unpack rather than booting unprotected.
+    // Seal last: contents and mode must be final first. Program-identity
+    // privilege is keyed on a path, so a writable unpacked binary hands every
+    // grant to whoever overwrites it.
     vfs_set_sealed(path).map_err(CpioError::Vfs)?;
     Ok(())
 }

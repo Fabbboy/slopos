@@ -169,7 +169,6 @@ pub const CLONE_SETTLS: u64 = 0x0008_0000;
 /// New thread shares the parent's thread group (POSIX thread semantics).
 pub const CLONE_THREAD: u64 = 0x0001_0000;
 
-/// Mask of all clone flags that SlopOS currently recognises.
 pub const CLONE_SUPPORTED_MASK: u64 = CLONE_VM
     | CLONE_FS
     | CLONE_FILES

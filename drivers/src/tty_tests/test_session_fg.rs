@@ -105,7 +105,7 @@ pub fn test_check_read_kernel_task_allowed() -> TestResult {
 }
 
 /// The harness runs as task_id 0, which skips the foreground check, so the
-/// write succeeds under TOSTOP; `check_write` is tested directly above.
+/// write succeeds under TOSTOP.
 pub fn test_tty_write_foreground_with_tostop() -> TestResult {
     tty::table::tty_table_init();
     let saved = tty::get_termios(TtyIndex(0)).unwrap();
@@ -145,7 +145,6 @@ pub fn test_bootstrap_allowed_no_session_read() -> TestResult {
 pub fn test_bootstrap_allowed_no_fg_pgrp() -> TestResult {
     let scope = SessionScope::new(10, 10);
     let mut s = TtySession::new();
-    // Live session, empty foreground group.
     s.attach(scope.session_weak(), KWeak::new());
     match s.check_read(42, 10) {
         ForegroundCheck::BootstrapAllowed => TestResult::Pass,

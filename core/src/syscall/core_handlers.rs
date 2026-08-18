@@ -24,10 +24,9 @@ use slopos_mm::page_alloc::get_page_allocator_stats;
 use slopos_mm::user_copy::copy_to_user;
 
 define_syscall!(syscall_yield (ctx) -> SyscallResult {
-    // Bump the WL balance before yielding so the post-yield path
-    // doesn't double-account. yield_() suspends; when control
-    // resumes here the dispatcher's normal `write_ok` will adjust
-    // again, so we return NoReturn and write rax manually.
+    // rax is written before yielding and the handler returns `NoReturn`:
+    // `yield_()` suspends, and the dispatcher's own `write_ok` on resume would
+    // double-account the WL balance.
     ctx.write_ok(0);
     yield_();
     SyscallResult::NoReturn
@@ -74,11 +73,9 @@ define_syscall!(syscall_sleep_ms (ctx, ms: u64) -> Result<(), Errno> {
         return Ok(());
     }
 
-    // An absolute deadline, re-derived each pass. Anything that wakes the task
-    // early — a signal's unblock, a kill's — used to end the sleep reporting
-    // success, so a signalled `sleep(10)` returned immediately and claimed to
-    // have slept. EINTR rather than ERESTARTSYS: a restart re-arms the whole
-    // original duration.
+    // An absolute deadline, re-derived each pass: an early wake (a signal's
+    // unblock, a kill's) must not end the sleep reporting success. EINTR rather
+    // than ERESTARTSYS, because a restart re-arms the whole original duration.
     let deadline_ms = slopos_kernel_services::platform::get_time_ms().saturating_add(ms);
     loop {
         let now_ms = slopos_kernel_services::platform::get_time_ms();
@@ -101,8 +98,7 @@ define_syscall!(syscall_exit (ctx, code: u32) -> SyscallResult {
     klog_debug!("SYSCALL_EXIT: task {} entering exit", task_id);
     {
         let t = ctx.task();
-        // Atomics now, so a shared borrow is enough — these are written by any
-        // CPU terminating any task, never only by the owner.
+        // Atomic: written by any CPU terminating any task, never only by the owner.
         t.exit_reason
             .store(TaskExitReason::Normal.as_u16(), AtomicOrdering::Release);
         t.fault_reason
@@ -119,17 +115,11 @@ define_syscall!(syscall_exit (ctx, code: u32) -> SyscallResult {
     SyscallResult::NoReturn
 });
 
-// Write a diagnostic line to the kernel console. Takes no descriptor.
-//
-// This is not the `write(2)` a C program reaches through libc — that is
-// `SYSCALL_FS_WRITE`, which goes through the caller's fd table. This one exists
-// for output that must survive a broken or absent fd 1: boot tracing from a
-// compositor that never came up, a panic hook with nowhere else to go, and the
-// terminal's mirror of shell output into the serial transcript.
-//
-// Deliberately unprivileged, like Linux's `/dev/kmsg`. It reaches the same
-// serialised writer klog uses, so a caller cannot interleave into a klog line
-// or into the test harness's KTAP framing.
+// Not the `write(2)` a C program reaches through libc — that is
+// `SYSCALL_FS_WRITE`, via the caller's fd table. This one exists for output
+// that must survive a broken or absent fd 1. Deliberately unprivileged, like
+// Linux's `/dev/kmsg`, and it reaches the same serialised writer klog uses, so
+// a caller cannot interleave into a klog line or the harness's KTAP framing.
 define_syscall!(syscall_user_write (ctx, buf: UserBytes) -> Result<u64, Errno> {
     if buf.base_u64() == 0 {
         return Err(Errno::EFAULT);
@@ -146,12 +136,9 @@ define_syscall!(syscall_user_write (ctx, buf: UserBytes) -> Result<u64, Errno> {
     Ok(write_len as u64)
 });
 
-// Read cooked input from the caller's controlling terminal.
-//
 // `/dev/tty` semantics: the terminal resolves per process, so a task in a PTY
-// session reads its own PTY, and one with no controlling terminal reads
-// nothing rather than the operator's console. `ENXIO` is what opening
-// `/dev/tty` answers with no controlling terminal.
+// session reads its own PTY and one with no controlling terminal reads nothing
+// rather than the operator's console — `ENXIO`, as opening `/dev/tty` answers.
 define_syscall!(syscall_user_read (ctx, buf: UserBytes) -> Result<u64, Errno> {
     if buf.base_u64() == 0 || buf.len() == 0 {
         return Err(Errno::EFAULT);
@@ -203,10 +190,8 @@ define_syscall!(syscall_process_list
     use crate::syscall::signal::{signal_dominates, signal_is_init, signal_may_name};
 
     // Enumeration answers to the same relation `kill` does, so an id this
-    // refuses to report is also an id `kill` would refuse to act on. Before
-    // this, `signal_may_name` was the sole guard and its own comment recorded
-    // why: `process_list` reported kernel tasks, "so naming one is not a
-    // guess". `PROC_ADMIN` (held by `/bin/sysmon`) sees everything.
+    // refuses to report is also one `kill` would refuse to act on. `PROC_ADMIN`
+    // (held by `/bin/sysmon`) sees everything.
     let caller_flags = ctx.task().flags;
     let unrestricted = ctx.is_proc_admin();
     let visible = |task: &slopos_sched::task_struct::Task| {

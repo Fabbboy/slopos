@@ -871,9 +871,8 @@ fn pci_scan_bus_inner(state: &mut PciEnumState, bus: u8) {
     }
 }
 
-/// Discover and cache MCFG (PCIe ECAM) entries from ACPI tables, then map each
-/// entry's configuration space. ECAM is mandatory, so this panics if MCFG is
-/// absent, empty, or the primary segment cannot be mapped.
+/// ECAM is mandatory, so this panics if MCFG is absent, empty, or the primary
+/// segment cannot be mapped.
 fn pci_discover_mcfg() {
     if !hhdm::is_available() {
         panic!("PCI: ECAM requires HHDM — cannot initialize PCI subsystem");
@@ -1257,9 +1256,8 @@ pub(crate) fn matchmake(
             if !e.entry_matches(&dev) {
                 continue;
             }
-            // On `Bound` the bag moves into the claim slot; on any other outcome
-            // it drops here, releasing every resource the probe acquired in
-            // reverse order.
+            // On `Bound` the bag moves into the claim slot; otherwise it drops
+            // here, releasing every acquired resource in reverse order.
             let mut devres = Devres::new();
             let mut bound = BoundDevice::new(&dev, &mut devres);
             match (e.probe)(&mut bound) {
@@ -1281,7 +1279,6 @@ pub(crate) fn matchmake(
         }
     }
 
-    // One bounded retry pass; deferral is never retried to a fixpoint.
     for n in 0..deferred.len() {
         let (li, dev_idx) = deferred[n];
         if claims.is_claimed(dev_idx) {

@@ -88,9 +88,6 @@ pub fn syscall_msr_init<W: slopos_ostd::sync::CpuInitWitness>(witness: &W) {
     let lstar_value = slopos_ostd::user::mode::user_return_trampoline_addr();
     let sfmask_value: u64 = 0x0000_0000_0004_7700;
 
-    // Inv. 2: the LSTAR trampoline requires `pcr.user_ctx_ptr` and
-    // `pcr.kernel_return_ctx` to be populated before any user-mode SYSCALL
-    // fires, and the STAR selectors must match the GDT already loaded.
     install_syscall_msrs(witness, star_value, lstar_value, sfmask_value);
 
     klog_debug!(

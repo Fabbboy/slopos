@@ -458,9 +458,8 @@ impl VirtioGpuInner {
         )
     }
 
-    /// IRQ-side completion path. The shared MSI/MSI-X fallback delivers a
-    /// single `q`, so harvest BOTH queues unconditionally and wake both wait
-    /// sets — cheap, and correct regardless of which interrupt fired.
+    /// The shared MSI/MSI-X fallback delivers a single `q`, so both queues are
+    /// harvested regardless of which interrupt fired.
     fn handle_queue_irq(&self, _q: u8) {
         {
             let mut st = self.state.lock();
@@ -470,8 +469,6 @@ impl VirtioGpuInner {
         let _ = self.ctrl_waiters.wake_all();
         let _ = self.cursor_waiters.wake_all();
     }
-
-    // --- transport ---------------------------------------------------------
 
     fn submit_and_notify(
         &self,
@@ -496,9 +493,8 @@ impl VirtioGpuInner {
         Some(slot_idx)
     }
 
-    /// Park until the chain in `slot_idx` completes; return its DMA page.
-    /// Scheduler-backed; the state lock is never held across the wait (the
-    /// predicate re-acquires it briefly), so the GPU IRQ can be serviced.
+    /// The state lock is never held across the wait, so the GPU IRQ can be
+    /// serviced.
     fn wait_completion(&self, which: QSel, slot_idx: usize) -> Option<OwnedPageFrame> {
         let collect = || {
             let mut st = self.state.lock();
@@ -534,8 +530,6 @@ impl VirtioGpuInner {
                 );
                 self.finish_or_orphan(which, slot_idx)
             }
-            // Same as the block path: quarantine rather than free a chain the
-            // device may still be writing into.
             Err(WaitAbort::Timeout | WaitAbort::Killed | WaitAbort::Interrupted) => {
                 self.finish_or_orphan(which, slot_idx)
             }
@@ -559,8 +553,8 @@ impl VirtioGpuInner {
         None
     }
 
-    /// Submit a pre-filled control page (command at offset 0, response written
-    /// by the device at `RESP_OFFSET`) and block until completion.
+    /// `page` must already hold the command at offset 0; blocks until the
+    /// device completes it.
     fn ctrl_submit_page(
         &self,
         page: OwnedPageFrame,
@@ -579,8 +573,8 @@ impl VirtioGpuInner {
         self.wait_completion(QSel::Control, slot_idx)
     }
 
-    /// Submit a single-descriptor cursor command (no response) and block until
-    /// the device reclaims the descriptor.
+    /// Single-descriptor cursor command (no response); blocks until the device
+    /// reclaims the descriptor.
     fn cursor_submit_page(&self, page: OwnedPageFrame, cmd_len: u32) -> bool {
         let Ok(_g) = self.cursor_lock.lock() else {
             return false;
@@ -593,9 +587,6 @@ impl VirtioGpuInner {
         }
     }
 
-    // --- typed control commands -------------------------------------------
-
-    /// Issue a command whose response is a bare `OK_NODATA` header.
     fn ctrl_cmd_nodata<C: slopos_ostd::Pod>(&self, cmd: &C) -> bool {
         let Some(page) = OwnedPageFrame::alloc_zeroed() else {
             return false;
@@ -666,7 +657,6 @@ impl VirtioGpuInner {
         })
     }
 
-    /// `RESOURCE_ATTACH_BACKING` with a single contiguous mem-entry.
     fn attach_backing(&self, resource_id: u32, phys: u64, len: u32) -> bool {
         let Some(page) = OwnedPageFrame::alloc_zeroed() else {
             return false;
@@ -698,7 +688,7 @@ impl VirtioGpuInner {
             .unwrap_or(false)
     }
 
-    /// `GET_DISPLAY_INFO` — host's configured size for scanout 0, if enabled.
+    /// Host's configured size for scanout 0, if enabled.
     fn get_display_info(&self) -> Option<(u32, u32)> {
         let page = OwnedPageFrame::alloc_zeroed()?;
         if !page.write_at(0, &VirtioGpuCtrlHdr::cmd(VIRTIO_GPU_CMD_GET_DISPLAY_INFO)) {
@@ -721,8 +711,8 @@ impl VirtioGpuInner {
         Some((rect.width, rect.height))
     }
 
-    /// `GET_EDID` — parse the first detailed-timing descriptor for the
-    /// preferred resolution (EDID base block, descriptor at byte 54).
+    /// Preferred resolution from the first detailed-timing descriptor, at byte
+    /// 54 of the EDID base block.
     fn get_edid_mode(&self) -> Option<(u32, u32)> {
         let page = OwnedPageFrame::alloc_zeroed()?;
         let cmd = VirtioGpuGetEdid {
@@ -755,10 +745,6 @@ impl VirtioGpuInner {
         Some((hactive, vactive))
     }
 
-    // --- scanout / present -------------------------------------------------
-
-    /// Pick the scanout resolution: host display-info → EDID preferred →
-    /// firmware framebuffer → 1280×800 fallback.
     fn choose_mode(&self, boot_fb: Option<FramebufferData>) -> (u32, u32) {
         if let Some(mode) = self
             .get_display_info()
@@ -780,10 +766,8 @@ impl VirtioGpuInner {
         (1280, 800)
     }
 
-    /// Allocate a contiguous backing, create+attach a 2D resource, bind it to
-    /// scanout 0, and (optionally) copy the firmware framebuffer's current
-    /// pixels in so the boot splash survives the takeover. Returns the new
-    /// CPU-visible framebuffer.
+    /// Brings up scanout 0 on a fresh backing, seeded from the firmware
+    /// framebuffer so the boot splash survives the takeover.
     fn setup_scanout(&self, boot_fb: Option<FramebufferData>) -> Option<FramebufferData> {
         if self.state.lock().num_scanouts == 0 {
             klog_warn!("virtio-gpu: device reports zero scanouts");
@@ -805,9 +789,8 @@ impl VirtioGpuInner {
             free_page_frame(phys);
             return None;
         }
-        // Past resource creation, unref before freeing: the device may now hold
-        // a backing reference to `phys`, so the page must be detached on the
-        // device side before it returns to the allocator.
+        // Past resource creation the device may hold a backing reference to
+        // `phys`, so unref before the page returns to the allocator.
         if !self.attach_backing(RES_FB_PRIMARY, phys.as_u64(), size as u32)
             || !self.set_scanout(0, RES_FB_PRIMARY, w, h)
         {
@@ -816,7 +799,6 @@ impl VirtioGpuInner {
             return None;
         }
 
-        // Preserve the firmware framebuffer content across the switch.
         if let Some(bf) = boot_fb
             && !bf.address.is_null()
         {
@@ -835,9 +817,8 @@ impl VirtioGpuInner {
         let _ = self.transfer_to_host(RES_FB_PRIMARY, full, 0);
         let _ = self.resource_flush(RES_FB_PRIMARY, full);
 
-        // Pre-allocate the fire-and-forget present command page now (task
-        // context), so the per-frame present never allocates — it may run from
-        // the `fblog` timer-tick interrupt where allocation is unsafe.
+        // Allocated in task context so the per-frame present, which may run
+        // from the `fblog` timer-tick interrupt, never allocates.
         let present_page = OwnedPageFrame::alloc_zeroed();
 
         {
@@ -869,8 +850,8 @@ impl VirtioGpuInner {
         })
     }
 
-    /// Allocate a contiguous 32bpp backing for `w`×`h`. Returns
-    /// (virt ptr, phys, pitch, size bytes).
+    /// Returns (virt ptr, phys, pitch, size bytes) for a contiguous 32bpp
+    /// `w`×`h` backing.
     fn alloc_backing(&self, w: u32, h: u32) -> Option<(*mut u8, PhysAddr, u32, usize)> {
         let pitch = w.checked_mul(4)?;
         let size = (pitch as usize).checked_mul(h as usize)?;
@@ -886,26 +867,20 @@ impl VirtioGpuInner {
         Some((virt.as_u64() as *mut u8, phys, pitch, size))
     }
 
-    /// Present: transfer the damaged region (coalesced to a bounding box) from
-    /// the backing to the host resource and flush it to the display.
-    /// Present the (optionally damage-scoped) frame. Fire-and-forget and
-    /// IRQ-safe: it never blocks or allocates, so it is callable from the
-    /// `fblog` timer-tick (interrupt, preemption disabled) as well as the
-    /// compositor. The transfer + flush commands go out on a pre-allocated
-    /// page; a present still in flight from a prior call drops this frame
-    /// rather than waiting.
+    /// Fire-and-forget present of the damage bounding box. Never blocks or
+    /// allocates, so it is callable from the `fblog` timer tick as well as the
+    /// compositor; a present still in flight drops this frame rather than
+    /// waiting.
     fn present(&self, damage: *const DamageRect, count: u32) -> c_int {
         let mut st = self.state.lock();
         let geom = st.geom;
         if !geom.ready || geom.resource_id == 0 {
             return -1;
         }
-        // Reclaim a previous present's chains (also marks blocking slots).
         st.control.harvest();
         if st.control.present_busy {
-            // A prior present is still in flight: this frame's transfer/flush was
-            // not submitted. Report suppression (1) so the compositor keeps the
-            // damage pending and retries next frame.
+            // 1 = suppressed: the compositor keeps the damage pending and
+            // retries next frame.
             return 1;
         }
         if st.control.present_page.is_none() {
@@ -963,14 +938,11 @@ impl VirtioGpuInner {
             );
             0
         } else {
-            // Descriptors exhausted / queue not ready: the frame was not
-            // submitted. Report failure so the compositor keeps damage pending.
+            // -1 = not submitted; the compositor keeps the damage pending.
             -1
         }
     }
 
-    /// Runtime mode-set: bring up a new scanout at `w`×`h` before unref'ing the
-    /// old one. Returns the new CPU-visible framebuffer.
     fn set_mode(&self, w: u32, h: u32) -> Option<FramebufferData> {
         let (w, h) = sanitize_mode(w, h)?;
         let old = self.state.lock().geom;
@@ -988,7 +960,6 @@ impl VirtioGpuInner {
             || !self.attach_backing(new_rid, phys.as_u64(), size as u32)
             || !self.set_scanout(0, new_rid, w, h)
         {
-            // Detach on the device before returning the page to the allocator.
             let _ = self.resource_unref(new_rid);
             free_page_frame(phys);
             return None;
@@ -1028,10 +999,8 @@ impl VirtioGpuInner {
         })
     }
 
-    // --- hardware cursor ---------------------------------------------------
-
-    /// Upload a 64×64 BGRA cursor image and show it. Lazily creates the cursor
-    /// resource + backing on first use.
+    /// Uploads a 64×64 BGRA cursor image and shows it; lazily creates the
+    /// cursor resource and backing on first use.
     fn cursor_set_image(&self, image: &[u8], hot_x: u32, hot_y: u32) -> bool {
         let size = (CURSOR_W * CURSOR_H * 4) as usize;
         let cur = self.state.lock().cursor_state;
@@ -1059,7 +1028,6 @@ impl VirtioGpuInner {
                 CURSOR_H,
             ) || !self.attach_backing(RES_CURSOR, phys.as_u64(), size as u32)
             {
-                // Detach on the device before returning the page to the allocator.
                 let _ = self.resource_unref(RES_CURSOR);
                 free_page_frame(phys);
                 return false;
@@ -1081,8 +1049,6 @@ impl VirtioGpuInner {
             return false;
         }
 
-        // Keep the last commanded position across the re-upload so the cursor
-        // does not jump to the origin when the shape changes mid-move.
         let (px, py) = {
             let mut st = self.state.lock();
             let (px, py) = (st.cursor_state.x, st.cursor_state.y);
@@ -1098,7 +1064,6 @@ impl VirtioGpuInner {
             (px, py)
         };
 
-        // UPDATE_CURSOR binds the resource + hotspot and (re)asserts position.
         let cmd = VirtioGpuUpdateCursor {
             hdr: VirtioGpuCtrlHdr::cmd(VIRTIO_GPU_CMD_UPDATE_CURSOR),
             pos: VirtioGpuCursorPos {
@@ -1115,7 +1080,6 @@ impl VirtioGpuInner {
         self.cursor_cmd(&cmd)
     }
 
-    /// Move the hardware cursor to `(x, y)`.
     fn cursor_move(&self, x: u32, y: u32) -> bool {
         let cur = {
             let mut st = self.state.lock();
@@ -1153,7 +1117,6 @@ impl VirtioGpuInner {
     }
 }
 
-/// Clamp a candidate mode to the framebuffer subsystem's accepted range.
 fn sanitize_mode(w: u32, h: u32) -> Option<(u32, u32)> {
     if w < 320 || h < 240 || w > DisplayInfo::MAX_DIMENSION || h > DisplayInfo::MAX_DIMENSION {
         return None;
@@ -1161,10 +1124,8 @@ fn sanitize_mode(w: u32, h: u32) -> Option<(u32, u32)> {
     Some((w & !1, h & !1))
 }
 
-/// Coalesce the valid damage rects into one bounding box clamped to the `w`×`h`
-/// screen. The compositor has already written every damaged pixel into the
-/// backing, so transferring the (possibly larger) box is always correct.
-/// Returns `None` when no rect is valid or the box falls outside the screen.
+/// The compositor has already written every damaged pixel into the backing, so
+/// transferring the (possibly larger) bounding box is always correct.
 fn coalesce_damage(regions: &[DamageRect], w: u32, h: u32) -> Option<VirtioGpuRect> {
     if w == 0 || h == 0 {
         return None;
@@ -1201,33 +1162,24 @@ fn coalesce_damage(regions: &[DamageRect], w: u32, h: u32) -> Option<VirtioGpuRe
     })
 }
 
-// ============================================================================
-// Test hooks (in-harness integration coverage against a live device)
-// ============================================================================
-
 #[cfg(feature = "test-hooks")]
 pub mod test_support {
     use super::*;
 
-    /// Expose the bounding-box coalescer for unit tests.
     pub fn coalesce(regions: &[DamageRect], w: u32, h: u32) -> Option<(u32, u32, u32, u32)> {
         super::coalesce_damage(regions, w, h).map(|r| (r.x, r.y, r.width, r.height))
     }
 
-    /// Map a SlopOS pixel format to its virtio-gpu 2D format code.
     pub fn format_code(format: PixelFormat) -> u32 {
         format_from_pixel(format)
     }
 
-    /// `GET_DISPLAY_INFO` round-trip against the live device. `None` if no
-    /// device or the command failed.
     pub fn display_info() -> Option<(u32, u32)> {
         current_device()?.get_display_info()
     }
 
-    /// Create → attach → transfer → flush → unref a throwaway 64×64 resource
-    /// (id far from the live scanout/cursor ids) entirely on the control
-    /// queue. Returns `true` if every command was acked OK.
+    /// Control-queue round-trip on a throwaway resource whose id sits far from
+    /// the live scanout/cursor ids.
     pub fn resource_roundtrip() -> bool {
         let Some(dev) = current_device() else {
             return false;
@@ -1254,8 +1206,8 @@ pub mod test_support {
         ok
     }
 
-    /// Upload a (zeroed) 64×64 cursor image and move it. The image buffer is
-    /// page-backed rather than stacked (16 KiB exceeds the kernel frame limit).
+    /// The image buffer is page-backed rather than stacked: 16 KiB exceeds the
+    /// kernel frame limit.
     pub fn cursor_roundtrip() -> bool {
         let Some(dev) = current_device() else {
             return false;
@@ -1277,15 +1229,10 @@ pub mod test_support {
         ok
     }
 
-    /// Expose the mode-validation clamp for unit tests.
     pub fn sanitize(w: u32, h: u32) -> Option<(u32, u32)> {
         super::sanitize_mode(w, h)
     }
 }
-
-// ============================================================================
-// Module-global device + public API
-// ============================================================================
 
 static VIRTIO_GPU: SpinLock<Option<KArc<VirtioGpuInner>>> =
     SpinLock::new(None, lock_class!("VIRTIO_GPU", LOCK_LEVEL_REGISTRY));
@@ -1294,7 +1241,6 @@ fn current_device() -> Option<KArc<VirtioGpuInner>> {
     VIRTIO_GPU.lock().clone()
 }
 
-/// Whether a virtio-gpu device was probed and is ready for scanout.
 pub fn is_present() -> bool {
     VIRTIO_GPU.lock().is_some()
 }
@@ -1307,12 +1253,10 @@ pub fn virtio_gpu_flush(damage: *const DamageRect, count: u32) -> c_int {
     }
 }
 
-/// Runtime resolution change. Returns the new framebuffer on success.
 pub fn set_mode(width: u32, height: u32) -> Option<FramebufferData> {
     current_device()?.set_mode(width, height)
 }
 
-/// Whether a hardware cursor overlay is available.
 pub fn hw_cursor_available() -> bool {
     is_present()
 }
@@ -1324,9 +1268,9 @@ pub fn cursor_set_image(image: &[u8], hot_x: u32, hot_y: u32) -> bool {
         .unwrap_or(false)
 }
 
-/// `*const u8` + len entry point for the video GPU-control backend (whose
-/// fn-pointer table cannot carry a slice lifetime). The pointer/len pair is the
-/// kernel-side copy the syscall handler validated.
+/// Raw-pointer entry point for the video GPU-control backend, whose fn-pointer
+/// table cannot carry a slice lifetime. The pointer/len pair is the kernel-side
+/// copy the syscall handler validated.
 pub fn cursor_set_image_raw(image: *const u8, len: usize, hot_x: u32, hot_y: u32) -> bool {
     if image.is_null() || len == 0 {
         return false;
@@ -1349,13 +1293,12 @@ fn read_num_scanouts(caps: &VirtioMmioCaps) -> u32 {
     }
 }
 
-/// Eviction hook: GPU→GPU re-claim (uninstall + reinstall) is deferred, so a
-/// displaced virtio-gpu has nothing to do here yet.
+/// GPU→GPU re-claim is deferred, so a displaced virtio-gpu has nothing to do.
 fn virtio_gpu_evict() {}
 
 fn virtio_gpu_probe(bound: &mut BoundDevice<'_>) -> Result<ProbeOutcome, PciProbeError> {
-    // Reserve the scanout before the destructive device reset. If a
-    // higher-priority provider already owns it, stay passive and touch nothing.
+    // Reserve the scanout before the destructive device reset; a higher-priority
+    // owner means staying passive and touching nothing.
     match scanout::SCANOUT.claim(scanout::PRIO_VIRTIO_GPU) {
         ClaimOutcome::Won => {}
         ClaimOutcome::Lost | ClaimOutcome::LostTie => {
@@ -1369,9 +1312,8 @@ fn virtio_gpu_probe(bound: &mut BoundDevice<'_>) -> Result<ProbeOutcome, PciProb
         return Err(err);
     }
 
-    // Create the scanout resource (blocking GPU commands — safe because the PCI
-    // probe loop runs lock-free with IRQs enabled), seeded from the current
-    // firmware framebuffer.
+    // The blocking GPU commands are safe here: the PCI probe loop runs
+    // lock-free with IRQs enabled.
     let Some(gpu_fb) =
         current_device().and_then(|d| d.setup_scanout(scanout::current_framebuffer()))
     else {
@@ -1379,8 +1321,6 @@ fn virtio_gpu_probe(bound: &mut BoundDevice<'_>) -> Result<ProbeOutcome, PciProb
         return Err(PciProbeError::DeviceFault);
     };
 
-    // Commit ownership (evicting any displaced provider via its own hook), then
-    // install the scanout front-end through the video-registered installer.
     scanout::SCANOUT.commit_install(
         ScanoutProvider {
             id: ScanoutId::VirtioGpu,
@@ -1412,8 +1352,7 @@ fn virtio_gpu_probe(bound: &mut BoundDevice<'_>) -> Result<ProbeOutcome, PciProb
     Ok(ProbeOutcome::Bound)
 }
 
-/// Reset and initialise the device (bus-master, capabilities, feature
-/// negotiation, interrupts, virtqueues) and publish it as the live device.
+/// Initialises the device and publishes it as the live device.
 fn virtio_gpu_bring_up(bound: &mut BoundDevice<'_>) -> Result<(), PciProbeError> {
     let info = *bound.info();
     klog_info!(
@@ -1445,7 +1384,6 @@ fn virtio_gpu_bring_up(bound: &mut BoundDevice<'_>) -> Result<(), PciProbeError>
         Err(_) => return Err(PciProbeError::OutOfMemory),
     };
 
-    // Control queue = 0, cursor queue = 1.
     let inner_for_irq = inner.clone();
     let (irq_mode, msix_state) = match setup_interrupts(bound, &caps, 2, move |q: u8| {
         inner_for_irq.handle_queue_irq(q)

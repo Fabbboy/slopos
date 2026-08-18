@@ -166,13 +166,11 @@ func TestRendererStreamingFailureWarning(t *testing.T) {
 	r.Finalize(rec.Summary)
 
 	out := buf.String()
-	// New format: "  F FAIL 2 mod::bad  11ms"
 	if !strings.Contains(out, "FAIL 2 mod::bad") {
 		t.Errorf("missing streaming FAIL warning: %q", out)
 	}
 }
 
-// JSONL sink end-to-end smoke.
 func TestJsonlSinkOneEventPerLine(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "events.jsonl")

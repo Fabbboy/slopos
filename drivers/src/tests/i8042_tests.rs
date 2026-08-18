@@ -1,14 +1,11 @@
-//! Regression guard for the i8042 platform-bus driver registration.
-//!
-//! Asserts on the *live* `.platform_driver_registry`, unlike `platform_binding.rs`
-//! which drives the matchmaker over synthetic drivers. The probe itself does live
-//! controller I/O and is exercised at boot, so it is not unit-tested here.
+//! Regression guard for the i8042 platform-bus driver registration: asserts on
+//! the *live* `.platform_driver_registry`. The probe does live controller I/O and
+//! is exercised at boot, so it is not unit-tested here.
 
 use slopos_testing::{TestResult, fail, pass};
 
 use crate::platform_bus::{PlatformDriverEntry, driver_registry_iter};
 
-/// The live registry entry for the i8042 keyboard driver, if registered.
 fn i8042_entry() -> Option<&'static PlatformDriverEntry> {
     driver_registry_iter().find(|e| e.name == "i8042-kbd")
 }

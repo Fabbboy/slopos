@@ -1,5 +1,4 @@
-//! Managed-resource (`Devres`) and identity-DMA-mapper regression tests; the
-//! binding-path integration lives in `pci_binding.rs`.
+//! Managed-resource (`Devres`) and identity-DMA-mapper regression tests.
 //!
 //! The DMA release test asserts on slot state and frame accounting: the buddy
 //! absorbs a double free without faulting, so "it did not crash" is no evidence.
@@ -147,8 +146,7 @@ pub fn test_devres_releases_dma() -> TestResult {
         }
     }
 
-    // One round trip proves nothing while the allocator still has free memory;
-    // churn until a leak would dwarf the noise a concurrent CPU contributes.
+    // One round trip proves nothing while the allocator still has free memory.
     let free_before = free_frames();
     for round in 0..DMA_CHURN_ROUNDS {
         match DmaCoherent::alloc(DMA_RUN_PAGES) {

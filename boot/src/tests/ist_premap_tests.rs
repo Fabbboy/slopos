@@ -1,6 +1,5 @@
-//! Per-CPU IST, exception and emergency stack mappings. A hole in one is not a
-//! fault the machine can report: the CPU faults onto an unmapped IST stack and
-//! triple-faults, so the mappings are checked here rather than at fault time.
+//! Per-CPU IST, exception and emergency stack mappings. A hole in one triple-faults
+//! rather than reporting anything, so the mappings are checked here.
 
 use slopos_abi::addr::VirtAddr;
 use slopos_arch::get_cpu_count;

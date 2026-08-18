@@ -8,15 +8,13 @@
 /// heap-backed and grows lazily.
 pub const MAX_TASKS: usize = 8192;
 /// Task kernel-mode stack: 32 KiB usable in a 64 KiB slot (4 KiB guard + 32 KiB
-/// usable + 28 KiB reserve). The guard page turns kernel-stack overflow into a
-/// deterministic page fault instead of silent corruption of adjacent memory.
+/// usable + 28 KiB reserve).
 pub const TASK_STACK_SIZE: u64 = 0x8000;
 pub const TASK_KERNEL_STACK_SIZE: u64 = 0x8000;
 
 /// SafeStack-sanitizer data stack. LLVM's SafeStack pass moves every
 /// address-taken local onto it, and the `&mut`-passing safe-helper style here
-/// produces many, so deep syscall paths approached the prior 8 KiB ceiling on
-/// slow TCG hosts. 16 KiB matches Linux's x86_64 `THREAD_SIZE`; at the
+/// produces many. 16 KiB matches Linux's x86_64 `THREAD_SIZE`; at the
 /// 8192-task ceiling it costs 128 MiB at peak.
 pub const TASK_UNSAFE_STACK_SIZE: u64 = 0x4000;
 
@@ -24,10 +22,9 @@ pub const TASK_NAME_MAX_LEN: usize = 32;
 pub const INVALID_TASK_ID: u32 = 0xFFFF_FFFF;
 pub const INVALID_PROCESS_ID: u32 = 0xFFFF_FFFF;
 
-/// Maximum number of concurrently live processes. Three fixed tables are sized
-/// by this — the process registry, the address-space table and the descriptor
-/// tables — and they key on each other's slot indices, so the bound has to be
-/// one number rather than three that happen to agree.
+/// Maximum number of concurrently live processes. The process registry, the
+/// address-space table and the descriptor tables are all sized by this and key
+/// on each other's slot indices, so the bound has to be one number.
 pub const MAX_PROCESSES: usize = 256;
 
 #[repr(u8)]
@@ -82,8 +79,7 @@ impl TaskStatus {
     }
 }
 
-/// Reason why a task is in the Blocked state. Discriminant `1` is retired and
-/// reserved.
+/// Discriminant `1` is retired and reserved.
 #[repr(u8)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub enum BlockReason {
@@ -128,9 +124,9 @@ impl BlockReason {
 pub enum TaskPriority {
     /// Latency-critical work: compositor, RT kernel paths.
     High = 0,
-    /// Kernel I/O kthreads (NAPI, net-timer, …). Above any user task, for paths
-    /// whose progress is required for correctness. Never selectable from user
-    /// space; `slopos_ostd::task::spawn_kernel_io` is the only spawn surface.
+    /// Kernel I/O kthreads (NAPI, net-timer, …), above any user task. Never
+    /// selectable from user space; `slopos_ostd::task::spawn_kernel_io` is the
+    /// only spawn surface.
     KernelIo = 1,
     /// Default class for ordinary user tasks and kernel threads.
     #[default]
@@ -192,25 +188,24 @@ pub const TASK_FLAG_DISPLAY_EXCLUSIVE: u16 = 0x20;
 /// parent's `setpgid` + `tcsetpgrp` calls.
 pub const TASK_FLAG_NEW_PGRP: u16 = 0x80;
 /// Make the spawned task's process group the foreground group of its inherited
-/// controlling terminal *before* the task becomes schedulable; otherwise the
-/// child's first terminal read can lose the race against the parent's
-/// `tcsetpgrp` and fail the foreground check. Only honoured when the child's
-/// session matches the terminal's controlling session.
+/// controlling terminal *before* the task becomes schedulable, closing the race
+/// against the parent's `tcsetpgrp`. Only honoured when the child's session
+/// matches the terminal's controlling session.
 pub const TASK_FLAG_FOREGROUND: u16 = 0x100;
 
 /// May mutate network configuration: interface admin state, addresses, routes,
 /// the resolver, the DHCP client, and the master networking switch. Reading
 /// that state needs nothing — `net_query` and `net_monitor` are unprivileged.
 ///
-/// Conferred on exactly one program, `/bin/ip`. That does not restrict *who*
-/// may reconfigure the network, since any task can spawn any path; it restricts
-/// *how*, to one argument grammar with one set of validation.
+/// Conferred on exactly one program, `/bin/ip`. That restricts not *who* may
+/// reconfigure the network — any task can spawn any path — but *how*, to one
+/// argument grammar with one set of validation.
 pub const TASK_FLAG_NET_ADMIN: u16 = 0x200;
 
 /// May reconfigure the console: the keyboard layout and the console font. The
 /// layout is one global table feeding every TTY and the compositor's input path
-/// — Linux's `KDSKBENT`, gated there on `CAP_SYS_TTY_CONFIG`. Reading it needs
-/// nothing.
+/// — Linux gates the equivalent `KDSKBENT` on `CAP_SYS_TTY_CONFIG`. Reading it
+/// needs nothing.
 ///
 /// Conferred on `/bin/keymap`; `TASK_FLAG_SYSTEM` implies it.
 pub const TASK_FLAG_CONSOLE_ADMIN: u16 = 0x400;
@@ -219,16 +214,14 @@ pub const TASK_FLAG_CONSOLE_ADMIN: u16 = 0x400;
 /// tasks.
 ///
 /// Without it, `process_list` reports only the tasks the caller could already
-/// signal (`slopos_core::syscall::signal::signal_dominates`), so visibility and
-/// actionability answer to one predicate and an id the kernel refuses to act on
-/// is one it never handed out.
+/// signal (`slopos_core::syscall::signal::signal_dominates`), so an id the
+/// kernel refuses to act on is one it never handed out.
 ///
 /// Conferred on `/bin/sysmon`; `TASK_FLAG_SYSTEM` implies it.
 pub const TASK_FLAG_PROC_ADMIN: u16 = 0x800;
 
-// `task.flags` is the entirety of SlopOS's privilege model. The four masks below
-// partition it, so "may a caller set this bit?" is answered once, here, for
-// every bit, rather than at each spawn site.
+// `task.flags` is the entirety of SlopOS's privilege model; the four masks
+// below partition it, so "may a caller set this bit?" is answered once, here.
 
 /// Flag bits a `spawn_path` caller may set for its own child. `NEW_PGRP` only
 /// mints a group inside the parent's own session and `FOREGROUND` is
@@ -238,8 +231,7 @@ pub const SPAWN_USER_SETTABLE: u16 = TASK_FLAG_NEW_PGRP | TASK_FLAG_FOREGROUND;
 
 /// Flag bits that name a privilege. A spawn request carrying any of these is
 /// refused with `EPERM`: the kernel confers them from the program-identity table
-/// in `slopos_core::exec::grants`, keyed on the binary being loaded, and never
-/// accepts them from user space.
+/// in `slopos_core::exec::grants`, keyed on the binary being loaded.
 ///
 /// `NO_PREEMPT` is here despite having no path that grants it — the timer tick
 /// and the deferred post-IRQ reschedule both return early for a task carrying
@@ -253,9 +245,9 @@ pub const SPAWN_PRIVILEGED: u16 = TASK_FLAG_NO_PREEMPT
     | TASK_FLAG_PROC_ADMIN;
 
 /// The two ring bits. They describe where the task executes, not what it may do,
-/// which is why they are classified apart from the privileges. `USER_MODE` is
-/// forced on regardless, so a caller that sets it is redundant rather than
-/// wrong; `KERNEL_MODE` is refused with `EINVAL` here because `task_build`'s own
+/// hence classified apart from the privileges. `USER_MODE` is forced on
+/// regardless, so a caller that sets it is redundant rather than wrong;
+/// `KERNEL_MODE` is refused with `EINVAL` here because `task_build`'s own
 /// refusal reaches the exec layer only as `NoMem`.
 pub const SPAWN_MODE_BITS: u16 = TASK_FLAG_USER_MODE | TASK_FLAG_KERNEL_MODE;
 
@@ -269,7 +261,6 @@ pub const SPAWN_MODE_BITS: u16 = TASK_FLAG_USER_MODE | TASK_FLAG_KERNEL_MODE;
 /// one of the three masks above; the asserts fail until both are done.
 pub const SPAWN_RESERVED: u16 = 0xF040;
 
-// The four classes partition the 16-bit flag word: every bit is in exactly one.
 const _: () = assert!(
     (SPAWN_USER_SETTABLE | SPAWN_PRIVILEGED | SPAWN_MODE_BITS | SPAWN_RESERVED) == u16::MAX,
     "spawn flag classes must cover all 16 bits",

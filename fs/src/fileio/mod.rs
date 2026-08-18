@@ -122,17 +122,14 @@ pub(crate) fn openmode_to_posix_bits(mode: OpenMode) -> u32 {
 
 #[derive(Clone)]
 pub struct PollRegInfo {
-    /// A weak reference to the open file the caller registered a wait on.
-    /// Weak by design: the registration must never keep the file alive,
-    /// and an upgrade that fails (the file closed) means a stale wakeup is
-    /// silently dropped — it can never touch a reused slot.
+    /// Weak by design: a registration must never keep the file alive, and a
+    /// failed upgrade drops a stale wakeup rather than reaching a reused slot.
     pub(super) open_file: slopos_ostd::KWeak<OpenFile>,
     pub registered: bool,
 }
 
 impl PollRegInfo {
-    /// A registration that resolves to nothing. The empty weak never
-    /// upgrades, so unregister is a no-op.
+    /// The empty weak never upgrades, so unregister is a no-op.
     pub fn none() -> Self {
         Self {
             open_file: slopos_ostd::KWeak::new(),
@@ -140,21 +137,17 @@ impl PollRegInfo {
         }
     }
 
-    /// True once the registered open file has been closed: the weak no
-    /// longer upgrades, so this registration can never reach the object
-    /// that reuses its fd number.
+    /// True once the open file has closed: the weak no longer upgrades, so the
+    /// registration can never reach whatever reuses its fd number.
     pub fn is_stale(&self) -> bool {
         self.open_file.upgrade().is_none()
     }
 }
 
-/// One open file description — POSIX's "open file description". The
-/// fd-table entry holds a [`KArc<OpenFile>`]; its strong count is the
-/// dup/fork alias count, and its `Drop` is the file close: dropping the
-/// owned `backing` reference is the teardown (the backing object's own
-/// `Drop` runs when the last reference to it goes away). Position and
-/// status flags live in atomics so dup/dup2/fork aliases share them per
-/// POSIX without taking a second lock.
+/// POSIX's open file description. The [`KArc`]'s strong count is the dup/fork
+/// alias count, and its `Drop` is the close: dropping the owned `backing` is
+/// the teardown. Position and status flags live in atomics so aliases share
+/// them per POSIX without taking a second lock.
 pub(super) struct OpenFile {
     pub(super) ops: &'static dyn FileOps,
     pub(super) handle: usize,
@@ -180,12 +173,10 @@ impl OpenFile {
     }
 }
 
-/// A strong, opaque reference to an open file description, for holding a
-/// file alive outside any fd table (SCM_RIGHTS in-flight custody, ring
-/// in-flight ops). Dropping it is a close of that alias; installing it
-/// into an fd table transfers the alias. The referenced description —
-/// offset, status flags, backing — is shared, per POSIX fd-passing
-/// semantics.
+/// A strong reference holding an open file description alive outside any fd
+/// table (SCM_RIGHTS in-flight custody, ring in-flight ops). Dropping it closes
+/// that alias; installing it into an fd table transfers the alias. The
+/// description — offset, status flags, backing — is shared, per POSIX.
 pub struct FileRef {
     pub(super) open_file: KArc<OpenFile>,
 }
@@ -195,32 +186,28 @@ impl FileRef {
         self.open_file.ops.kind()
     }
 
-    /// Mint another strong alias of this open file description (a
-    /// deliberate incref). `FileRef` is intentionally not `Clone` so that
-    /// creating an alias is always an explicit act at the call site.
+    /// Another strong alias of this description. `FileRef` is deliberately not
+    /// `Clone`, so aliasing stays an explicit act at the call site.
     pub fn alias(&self) -> FileRef {
         FileRef {
             open_file: self.open_file.clone(),
         }
     }
 
-    /// True iff both references name the same open file description
-    /// (identity, not equality of contents).
+    /// True iff both name the same description — identity, not contents.
     pub fn ptr_eq(&self, other: &FileRef) -> bool {
         KArc::ptr_eq(&self.open_file, &other.open_file)
     }
 
-    /// Strong-reference count of the underlying description — its live
-    /// aliases plus fd-table entries. For lifetime assertions in tests.
+    /// Live aliases plus fd-table entries. For lifetime assertions in tests.
     pub fn description_strong_count(&self) -> usize {
         KArc::strong_count(&self.open_file)
     }
 }
 
-/// Per-descriptor inheritance policy, chosen by whoever installs the fd.
-/// `cloexec` drops the descriptor across `exec`; `close_on_fork` drops it
-/// across `fork`. Both live on the fd number rather than the shared
-/// description, so two aliases of one description can differ.
+/// Per-descriptor inheritance policy, chosen by whoever installs the fd. Both
+/// flags live on the fd number rather than the shared description, so two
+/// aliases of one description can differ.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct FdFlags {
     pub cloexec: bool,
@@ -235,38 +222,31 @@ impl FdFlags {
         close_on_fork: false,
     };
 
-    /// Bound to the process that opened it: neither `fork` nor `exec`
-    /// carries it forward. For descriptors naming an object whose kernel
-    /// state is only meaningful to its creator.
+    /// Neither `fork` nor `exec` carries it forward — for a descriptor whose
+    /// kernel state is only meaningful to its creator.
     pub const PROCESS_PRIVATE: Self = Self {
         cloexec: true,
         close_on_fork: true,
     };
 }
 
-/// One file-descriptor-number → open-file mapping. `cloexec` and
-/// `close_on_fork` are per-fd (never shared across dup aliases — they
-/// live here, not on the shared [`OpenFile`]). Dropping one is a close of
-/// that alias, and the same drop refunds the slot.
+/// One file-descriptor-number → open-file mapping. Dropping one closes that
+/// alias and refunds the slot.
 ///
-/// Deliberately **not** `Clone`: the charge is the reason. A dup or fork
-/// alias occupies a second descriptor number, and for fork that number is in
-/// the *child's* table and must be charged to the child's account. A derived
-/// `Clone` would copy the parent's token and refund the parent twice, so the
-/// alias paths call [`try_alias`](Self::try_alias) and name the account the
-/// new number actually belongs to.
+/// Deliberately **not** `Clone`: a fork alias occupies a number in the
+/// *child's* table and must be charged to the child's account, whereas a
+/// derived `Clone` would copy the parent's token and refund the parent twice.
+/// The alias paths call [`try_alias`](Self::try_alias) instead.
 pub(super) struct FdEntry {
     pub(super) open_file: KArc<OpenFile>,
     pub(super) cloexec: bool,
     pub(super) close_on_fork: bool,
-    /// The descriptor number this entry occupies. Refunded by this struct's
-    /// own `Drop`, with the amount it holds rather than one recomputed at the
-    /// refund site.
+    /// Refunded by this struct's own `Drop`, with the amount it holds rather
+    /// than one recomputed at the refund site.
     slot_charge: Charge<FdSlot>,
 }
 
 impl FdEntry {
-    /// Build an entry, consuming the reservation that made room for it.
     pub(super) fn new(
         open_file: KArc<OpenFile>,
         flags: FdFlags,
@@ -296,12 +276,8 @@ impl FdEntry {
 
     /// Point this descriptor number at a different open file, keeping the
     /// charge it already holds and handing back the description it displaced
-    /// so the caller can drop it off-lock.
-    ///
-    /// The `dup2`-onto-a-live-descriptor path. The number stays occupied
-    /// throughout, so exactly one charge exists for it at every instant —
-    /// charging a fresh one and refunding the old would be two writes where
-    /// the resource never changed hands.
+    /// so the caller can drop it off-lock. The number stays occupied
+    /// throughout, so exactly one charge exists for it at every instant.
     pub(super) fn replacing(
         self,
         open_file: KArc<OpenFile>,
@@ -320,33 +296,18 @@ impl FdEntry {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Per-process slot layout.
+// A slot's index *is* the owning process's registry slot — the slot space the
+// process registry and `slopos_mm`'s address-space table share — so a table is
+// found by indexing rather than scanning. `generation` is what makes that
+// sound: ids recycle, and `process_id` is only a display value and the
+// occupancy sentinel for the lock-free peek.
 //
-// Each `FileTableSlot` lives in a top-level static array, and its index *is*
-// the owning process's registry slot — the same slot space `slopos_ostd`'s
-// process registry and `slopos_mm`'s address-space table use. A table is
-// therefore found by indexing the process rather than by scanning for a
-// matching id, and `generation` is what makes that sound: a slot rebound
-// since a handle was minted fails the check instead of handing the holder a
-// stranger's open files.
-//
-// `process_id` survives as a display value and as the occupancy sentinel for
-// the lock-free peek. It is not an identity: ids recycle, so two processes can
-// carry the same number and only the generation separates them.
-//
-// The mutable per-slot state — `in_use` plus the `descriptors` array — is
-// wrapped in a `SpinLock<FileTableSlotInner>` at `LOCK_LEVEL_REGISTRY`.
-//
-// Lock order: per-process `slot.inner` (REGISTRY=2) is acquired first;
-// the shared `OPEN_FILES_STATE` (RESOURCE=1) is acquired second. Holders
-// of two different per-process locks must snapshot one and release before
-// taking the other (used by fork in fdtable.rs).
-// ---------------------------------------------------------------------------
+// Lock order: per-process `slot.inner` (REGISTRY) first, `OPEN_FILES_STATE`
+// (RESOURCE) second. A holder of two different per-process locks must snapshot
+// one and release before taking the other (fork, in fdtable.rs).
 
 pub(super) struct FileTableSlot {
     pub(super) process_id: AtomicU32,
-    /// Generation of the process bound to this slot, mirroring its handle's.
     /// Written before `process_id` is published and cleared after it, so a
     /// reader that sees an occupied slot sees the matching generation.
     pub(super) generation: AtomicU64,
@@ -356,17 +317,14 @@ pub(super) struct FileTableSlot {
 pub(super) struct FileTableSlotInner {
     pub(super) in_use: bool,
     /// Empty until the slot is claimed. Heap-backed rather than inline so the
-    /// spine of `PROCESS_TABLES` stays a few KiB of `.data` instead of scaling
-    /// the whole descriptor capacity by `MAX_PROCESSES`, and so the array is
-    /// built and freed away from the slot lock.
+    /// `PROCESS_TABLES` spine does not scale descriptor capacity by
+    /// `MAX_PROCESSES`, and so the array is built and freed off the slot lock.
     pub(super) descriptors: KVec<Option<FdEntry>>,
 }
 
-/// A zero-filled descriptor array, built before any slot lock is taken.
-///
-/// The one allocation a table costs. Every caller is a process-creation path
-/// that already fails creation when it cannot get a slot, so there is nowhere
-/// this has to succeed.
+/// A zero-filled descriptor array, built before any slot lock is taken. Every
+/// caller is a process-creation path that already fails creation when it cannot
+/// get a slot, so there is nowhere this has to succeed.
 pub(super) fn new_descriptor_table() -> Option<KVec<Option<FdEntry>>> {
     let mut table = KVec::with_capacity(FILEIO_MAX_OPEN_FILES).ok()?;
     for _ in 0..FILEIO_MAX_OPEN_FILES {
@@ -376,11 +334,10 @@ pub(super) fn new_descriptor_table() -> Option<KVec<Option<FdEntry>>> {
 }
 
 impl FileTableSlot {
-    /// The lock class comes from the caller. Minted here it would be one
-    /// class for both statics below, and the kernel table is not one of the
-    /// process tables: an inversion between it and a process's own could not
-    /// be seen. The process tables do share a class — one declaration, many
-    /// like instances — which is what declaration-site keying is for.
+    /// The lock class comes from the caller: minted here, the kernel table and
+    /// the process tables would share one class and an inversion between them
+    /// could not be seen. The process tables do share a class — one
+    /// declaration, many like instances.
     pub(super) const fn new(in_use: bool, class: &'static LockClassKey) -> Self {
         Self {
             process_id: AtomicU32::new(INVALID_PROCESS_ID),
@@ -411,10 +368,9 @@ impl ExternalOpsState {
     }
 }
 
-/// Shared fileio registry state. Now that liveness lives in each
-/// [`KArc<OpenFile>`]'s strong count, this only carries the registered
-/// external `FileOps` singletons (set once at subsystem init) and the
-/// init latch — there is no longer an open-file table here.
+/// Shared fileio registry state: the external `FileOps` singletons, set once at
+/// subsystem init, plus the init latch. Liveness lives in each
+/// [`KArc<OpenFile>`]'s strong count, not in a table here.
 pub(super) struct OpenFilesState {
     pub(super) initialized: bool,
     pub(super) external_ops: ExternalOpsState,
@@ -443,10 +399,8 @@ pub(super) static OPEN_FILES_STATE: SpinLock<OpenFilesState> = SpinLock::new(
 );
 pub(super) static FILEIO_INIT: InitFlag = InitFlag::new();
 
-/// The descriptor table `process` owns — one index, no scan.
-///
-/// The generation check is what this buys: a slot rebound since the handle was
-/// minted answers `None` rather than handing back the new occupant's table.
+/// The descriptor table `process` owns — one index, no scan. A slot rebound
+/// since the handle was minted answers `None`, not the new occupant's table.
 pub(super) fn slot_for_process(process: Handle<Process>) -> Option<&'static FileTableSlot> {
     let slot = PROCESS_TABLES.get(process.slot() as usize)?;
     if slot.process_id.load(Ordering::Acquire) == INVALID_PROCESS_ID
@@ -459,21 +413,14 @@ pub(super) fn slot_for_process(process: Handle<Process>) -> Option<&'static File
 
 /// Which descriptor table an operation acts on.
 ///
-/// Replaces `process_id: u32` at every fileio entry point. The two cases used
-/// to be one `u32` with `INVALID_PROCESS_ID` meaning "the kernel's table",
-/// which is a sentinel a caller reaches by *omission* — a pid that failed to
-/// resolve, a zeroed field, a forgotten argument — and the consequence was
-/// installing a user process's descriptors into the domain every kernel task
-/// shares. As a variant it has to be named, and nothing produces it by
-/// accident.
-///
-/// The process case carries a [`ProcessId`], so the lookup is a
-/// generation-checked index rather than a scan for a matching number.
+/// The kernel's table is a variant a caller has to name, so no failed pid
+/// lookup, zeroed field or forgotten argument reaches it by omission. The
+/// process case carries a [`ProcessId`], so the lookup is a generation-checked
+/// index rather than a scan for a matching number.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum FdTable {
     /// The kernel's own descriptors, shared by every kernel task.
     Kernel,
-    /// One user process's descriptors.
     Process(ProcessId),
 }
 
@@ -484,22 +431,15 @@ impl FdTable {
         ProcessId::of(process).map(Self::Process)
     }
 
-    /// Resolve a numeric id to the table its process owns.
-    ///
-    /// The ABI-boundary constructor: userland hands over a number, and this is
-    /// where it stops being one. `None` for an id naming no live process —
-    /// never [`FdTable::Kernel`], which is the redirect that would hand a user
-    /// process the kernel's descriptors.
+    /// Resolve a numeric id to the table its process owns. `None` for an id
+    /// naming no live process — never [`FdTable::Kernel`], which would hand a
+    /// user process the kernel's descriptors.
     #[inline]
     pub fn resolve(id: u32) -> Option<Self> {
         ProcessId::resolve(id).map(Self::Process)
     }
 
     /// The owning process, or `None` for the kernel table.
-    ///
-    /// What `mm`'s address-space API takes: a table and an address space are
-    /// two things one process owns, so a caller holding the table already
-    /// holds everything the other lookup needs.
     #[inline]
     pub fn process(self) -> Option<ProcessId> {
         match self {
@@ -509,11 +449,6 @@ impl FdTable {
     }
 
     /// The owning process's handle, or `None` for the kernel table.
-    ///
-    /// The table-creation entry points take this rather than an `FdTable`,
-    /// because there is no such thing as creating the kernel's table: it is a
-    /// static, and a caller reaching those functions is always naming a
-    /// process.
     #[inline]
     pub fn handle(self) -> Option<Handle<Process>> {
         match self {
@@ -534,13 +469,9 @@ impl FdTable {
 
     /// The account a descriptor number in this table is charged to.
     ///
-    /// The kernel's own table names the root account **explicitly**, rather
-    /// than falling back to it when a lookup misses: a lookup-failure default
-    /// would silently bill a user process's descriptors to the kernel the
-    /// moment its process went away, which is the account-scope form of the
-    /// kernel-descriptor-table fallback this enum already exists to prevent.
-    /// A reaped process answers with its own now-dark account, whose charges
-    /// are vacuous — never the root's.
+    /// The kernel's own table names the root account **explicitly**, never as a
+    /// lookup-failure fallback: a reaped process answers with its own now-dark
+    /// account, whose charges are vacuous, rather than billing the root.
     #[inline]
     pub fn account(self) -> AccountId {
         match self {
@@ -552,11 +483,8 @@ impl FdTable {
     }
 }
 
-/// The slot backing `table`.
-///
-/// One index for a process, one static for the kernel — no scan either way.
-/// A process whose slot has been rebound since its [`ProcessId`] was minted
-/// answers `None` rather than the new occupant's table.
+/// The slot backing `table` — one index for a process, one static for the
+/// kernel, no scan either way.
 pub(super) fn slot_for_table(table: FdTable) -> Option<&'static FileTableSlot> {
     match table {
         FdTable::Kernel => Some(&KERNEL_TABLE),
@@ -589,14 +517,8 @@ pub(super) fn with_table_slot<R>(
 }
 
 /// Acquire the slot lock and return the guard, or `None` when the table does
-/// not exist.
-///
-/// A lookup, never an allocation: every table is minted by an explicit
-/// create/clone that fails process creation when no slot is free, so a process
-/// reaching here without one does not exist. Answering with the kernel's own
-/// table instead would install a user process's descriptors into the domain
-/// shared by every kernel task — which is now unrepresentable, because
-/// [`FdTable::Kernel`] is a variant a caller has to name.
+/// not exist. A lookup, never an allocation: a table is minted only by an
+/// explicit create/clone, which fails process creation when no slot is free.
 pub(super) fn lock_table_slot(
     table: FdTable,
 ) -> Option<SpinLockGuard<'static, FileTableSlotInner>> {
@@ -608,13 +530,10 @@ pub(super) fn lock_table_slot(
     Some(guard)
 }
 
-/// Snapshot of a file descriptor's open-file state. Holds a strong
-/// [`KArc<OpenFile>`] clone captured under the per-process slot lock, so
-/// I/O proceeds after the lock is released — and the open file cannot be
-/// torn down mid-operation even if a concurrent `close` drops the
-/// fd-table alias. Position / status-flags are read from the held
-/// `KArc`'s atomics (they may have advanced since capture, which is the
-/// intended shared-offset POSIX behaviour).
+/// A strong [`KArc<OpenFile>`] captured under the per-process slot lock, so I/O
+/// proceeds off-lock and a concurrent `close` dropping the fd-table alias
+/// cannot tear the file down mid-operation. Position and status flags are read
+/// live from its atomics — the intended shared-offset POSIX behaviour.
 pub(super) struct FdSnapshot {
     pub(super) open_file: KArc<OpenFile>,
 }
@@ -671,11 +590,8 @@ pub(super) fn find_free_slot_from(inner: &FileTableSlotInner, min_fd: usize) -> 
     None
 }
 
-/// Build a `KArc<OpenFile>` owning `backing`, materialising the
-/// `OpenFile` directly into the heap allocation (no stack rvalue — the
-/// atomics are tiny but this keeps the construction uniform and honours
-/// the stack-frame gate). On allocation failure the caller's `backing`
-/// was consumed and dropped — its teardown has already run.
+/// Build a `KArc<OpenFile>` owning `backing`. On allocation failure `backing`
+/// has already been consumed and dropped — its teardown has run.
 pub(super) fn new_open_file(
     ops: &'static dyn FileOps,
     handle: usize,

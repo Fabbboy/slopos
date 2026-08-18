@@ -1,12 +1,6 @@
 use super::*;
 
-// ===========================================================================
-// TTY Table tests
-// ===========================================================================
-
-/// After tty_table_init, TTY 0 and TTY 1 are allocated.
 pub fn test_table_init_allocates_tty0_and_tty1() -> TestResult {
-    // Ensure init has been called (it's idempotent — re-calling overwrites).
     tty::table::tty_table_init();
 
     let slot0 = TTY_SLOTS[0].lock();
@@ -21,7 +15,6 @@ pub fn test_table_init_allocates_tty0_and_tty1() -> TestResult {
         return TestResult::Fail;
     }
     drop(slot1);
-    // Slots 2..MAX_TTYS should be None.
     for i in 2..tty::MAX_TTYS {
         let slot = TTY_SLOTS[i].lock();
         if slot.is_some() {
@@ -32,7 +25,6 @@ pub fn test_table_init_allocates_tty0_and_tty1() -> TestResult {
     TestResult::Pass
 }
 
-/// TTY 0 has the correct index.
 pub fn test_table_tty0_has_index_zero() -> TestResult {
     tty::table::tty_table_init();
 
@@ -49,7 +41,6 @@ pub fn test_table_tty0_has_index_zero() -> TestResult {
     TestResult::Pass
 }
 
-/// TTY 0 is allocated by default (slot being Some is the active state).
 pub fn test_table_tty0_active() -> TestResult {
     tty::table::tty_table_init();
 
@@ -63,7 +54,6 @@ pub fn test_table_tty0_active() -> TestResult {
     TestResult::Pass
 }
 
-/// with_tty helper works for existing TTY.
 pub fn test_table_with_tty_exists() -> TestResult {
     tty::table::tty_table_init();
 
@@ -83,7 +73,6 @@ pub fn test_table_with_tty_exists() -> TestResult {
     TestResult::Pass
 }
 
-/// with_tty helper returns None for empty slot.
 pub fn test_table_with_tty_empty() -> TestResult {
     tty::table::tty_table_init();
 

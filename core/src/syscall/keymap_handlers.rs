@@ -3,9 +3,8 @@
 //! Thin forwarders to the keymap service the keyboard driver registers; the
 //! active layout lives in the driver, which `core` cannot depend on directly.
 //!
-//! Loading is console administration: the single layout table feeds every TTY
-//! and the compositor's input path, so this is `loadkeys` writing the kernel
-//! console keymap, not `setxkbmap` rearranging one client's view of a seat.
+//! Loading is console administration: the one layout table feeds every TTY and
+//! the compositor's input path, not a single client's view of a seat.
 
 use slopos_abi::Errno;
 use slopos_abi::input::layout::LAYOUT_NAME_LEN;

@@ -1,29 +1,21 @@
 //! Kernel-side tests for the RCU quiescent-state report guard.
 //!
 //! `rcu_note_qs` is only sound from a site that is a quiescent state *by
-//! construction* — a context switch or the idle loop, where the outgoing task
-//! provably holds no read-side section. The two interrupt-context sites (the
-//! LAPIC timer tick and the RCU QS IPI) are not such sites: a read-side section
+//! construction* — a context switch or the idle loop. The two interrupt-context
+//! sites (the LAPIC timer tick and the RCU QS IPI) are not: a read-side section
 //! holds a `PreemptGuard`, which disables preemption but **not** interrupts, so
-//! either can land in the middle of one.
-//!
-//! Reporting from inside a reader tells `synchronize_rcu` that reader has
-//! finished, and the object it is still dereferencing is then freed underneath
-//! it. `rcu_note_qs_from_interrupt` is the guarded variant those two sites use;
-//! these tests are what say it is actually guarding.
+//! either can land in the middle of one, and a report from inside a reader frees
+//! the object that reader is still dereferencing.
+//! `rcu_note_qs_from_interrupt` is the guarded variant those two sites use.
 
 use slopos_ostd::sync::{rcu_note_qs_from_interrupt, rcu_qs_counter, rcu_read_lock};
 use slopos_testing::TestResult;
 use slopos_testing::assert_test;
 
-/// A report from inside a read-side critical section is declined, and — the
-/// half that matters — leaves the counter alone.
-///
-/// Both assertions are load-bearing. Checking only the `false` return would
-/// pass identically against a variant that always declined and never reported
-/// anything, which would stall every grace period rather than corrupt memory,
-/// but is still a bug this test should be able to see. The positive control
-/// below is the other side of that.
+/// A report from inside a read-side critical section is declined and leaves the
+/// counter alone. Checking only the `false` return would pass identically
+/// against a variant that always declined; the positive control below is the
+/// other side of that.
 pub fn test_rcu_interrupt_qs_declines_inside_a_reader() -> TestResult {
     let cpu = slopos_arch::pcr::get_current_cpu();
 
@@ -46,12 +38,9 @@ pub fn test_rcu_interrupt_qs_declines_inside_a_reader() -> TestResult {
     TestResult::Pass
 }
 
-/// Positive control: with no reader held, the same call reports and the counter
-/// advances.
-///
-/// This is what stops the guard from being satisfiable by never reporting.
-/// Liveness depends on it: if the tick could never report, a grace period would
-/// have to wait for a context switch on every CPU.
+/// Positive control: what stops the guard from being satisfiable by never
+/// reporting. If the tick could never report, a grace period would have to wait
+/// for a context switch on every CPU.
 pub fn test_rcu_interrupt_qs_reports_outside_a_reader() -> TestResult {
     let cpu = slopos_arch::pcr::get_current_cpu();
 
@@ -72,11 +61,9 @@ pub fn test_rcu_interrupt_qs_reports_outside_a_reader() -> TestResult {
     TestResult::Pass
 }
 
-/// The guard tracks the section rather than latching: a CPU that declines while
-/// a reader is held reports again once it is dropped.
-///
-/// Without this, a single unbalanced decline could wedge a CPU's reporting for
-/// good and the first test would not notice.
+/// The guard tracks the section rather than latching. Without this, a single
+/// unbalanced decline could wedge a CPU's reporting for good and the first test
+/// would not notice.
 pub fn test_rcu_interrupt_qs_recovers_after_the_reader_ends() -> TestResult {
     let cpu = slopos_arch::pcr::get_current_cpu();
 

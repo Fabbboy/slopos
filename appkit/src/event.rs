@@ -37,8 +37,6 @@ impl Modifiers {
     }
 }
 
-/// Re-exported from the ABI keycode vocabulary the kernel shares via
-/// `keymap-core`, so the named-key set is defined in one place.
 pub use slopos_keymap_core::keycode::NamedKey;
 
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
@@ -155,8 +153,7 @@ fn hit_test_recursive(
         return false;
     }
 
-    // Layout leaves every rect in absolute coordinates, so the point needs no
-    // per-level conversion.
+    // Layout leaves every rect in absolute coordinates; no per-level conversion.
     let children = widget.children();
     for child in children.iter().rev() {
         if hit_test_recursive(child.as_ref(), px, py, chain) {

@@ -91,7 +91,6 @@ pub fn set_periodic_ms(vector: u8, ms: u32) -> bool {
         return false;
     }
 
-    // count = freq_hz × ms / 1000, using u128 to avoid intermediate overflow.
     let count = (freq as u128 * ms as u128 / 1000) as u64;
     if count == 0 || count > u32::MAX as u64 {
         klog_info!(
@@ -118,17 +117,10 @@ pub fn set_periodic_ms(vector: u8, ms: u32) -> bool {
     true
 }
 
-/// Configure the LAPIC timer in **one-shot** mode firing the IDT
-/// `vector` after `ms` milliseconds, then naturally going idle.
-/// Used by the tickless-idle path: before the per-CPU idle loop
-/// HLTs, it consults the next sleep-queue deadline and arms a
-/// one-shot for that deadline so a sleeping kernel task wakes on
-/// time instead of waiting for the next periodic tick.
-///
-/// On every periodic-or-oneshot timer ISR, the scheduler restores
-/// periodic mode via [`set_periodic_ms`] (see
-/// `sched/src/scheduler.rs::scheduler_timer_tick`) so the system
-/// converges back to the 100 Hz baseline whenever a tick fires.
+/// Fire an interrupt on IDT `vector` once after `ms` milliseconds, then go
+/// idle. The tickless-idle path arms this for the next sleep-queue deadline
+/// before HLTing; every timer ISR restores periodic mode via
+/// [`set_periodic_ms`], so the system converges back to the 100 Hz baseline.
 ///
 /// Returns `false` if not calibrated, the count is out of u32
 /// range, or the LAPIC is not enabled.
@@ -152,30 +144,23 @@ pub fn set_oneshot_ms(vector: u8, ms: u32) -> bool {
     true
 }
 
-/// Return the calibrated LAPIC timer frequency in Hz.
-///
-/// Returns `0` if calibration has not been performed yet.
+/// Calibrated LAPIC timer frequency in Hz, or `0` if not yet calibrated.
 #[inline]
 pub fn frequency_hz() -> u64 {
     LAPIC_TIMER_FREQ_HZ.load(Ordering::Acquire)
 }
 
-/// Whether calibration has been performed successfully.
 #[inline]
 pub fn is_calibrated() -> bool {
     LAPIC_TIMER_FREQ_HZ.load(Ordering::Acquire) != 0
 }
 
-/// Write the timer LVT and republish whether this CPU still receives
-/// periodic ticks.
+/// Write the timer LVT and republish whether this CPU still receives periodic
+/// ticks.
 ///
-/// The lockup detector watches for a CPU whose progress counter has
-/// stopped moving, and the counter moves on the timer interrupt. A CPU
-/// whose timer is masked, one-shot or mid-calibration is not wedged — it
-/// simply has no timer — so it must not be watched. Keeping the flag on
-/// the register write means no caller has to remember, including the
-/// LAPIC-timer tests, which stop the timer on purpose and leave it stopped
-/// across the tests that follow.
+/// The lockup detector's progress counter moves on the timer interrupt, so a
+/// CPU whose timer is masked, one-shot or mid-calibration must not be watched.
+/// Deriving the flag from the register write means no caller has to remember.
 fn write_timer_lvt(lvt: u32) {
     write_register(LAPIC_LVT_TIMER, lvt);
     let ticking = (lvt & LAPIC_TIMER_PERIODIC) != 0 && (lvt & LAPIC_LVT_MASKED) == 0;
@@ -192,7 +177,7 @@ pub fn mask() {
     write_timer_lvt(lvt | LAPIC_LVT_MASKED);
 }
 
-/// Unmask the LAPIC timer LVT entry (resume delivering interrupts).
+/// Unmask the LAPIC timer LVT entry.
 #[inline]
 pub fn unmask() {
     if !is_enabled() {
@@ -201,10 +186,6 @@ pub fn unmask() {
     let lvt = read_register(LAPIC_LVT_TIMER);
     write_timer_lvt(lvt & !LAPIC_LVT_MASKED);
 }
-
-// ---------------------------------------------------------------------------
-// Reference clock abstraction
-// ---------------------------------------------------------------------------
 
 /// Selects which reference timer to use for the measurement window.
 enum ReferenceTimer {
@@ -220,18 +201,16 @@ impl ReferenceTimer {
         match self {
             Self::Hpet => crate::hpet::delay_ns(CALIBRATION_WINDOW_NS),
             Self::Pit => {
-                // `pit_poll_delay_ms` reads the hardware counter directly via
-                // PIT_BASE_FREQUENCY_HZ, so it works even before `pit_init`.
+                // `pit_poll_delay_ms` reads the hardware counter directly, so
+                // it works even before `pit_init`.
                 let ms = (CALIBRATION_WINDOW_NS / 1_000_000) as u32;
                 crate::pit::pit_poll_delay_ms(ms.max(1));
             }
         }
     }
 
-    /// The effective window duration in nanoseconds.
-    ///
-    /// PIT operates in whole-millisecond steps, so round to what we
-    /// actually waited.
+    /// Effective window duration; PIT steps in whole milliseconds, so this
+    /// rounds to what was actually waited.
     fn window_ns(&self) -> u64 {
         match self {
             Self::Hpet => CALIBRATION_WINDOW_NS,
@@ -243,35 +222,25 @@ impl ReferenceTimer {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Internal calibration logic
-// ---------------------------------------------------------------------------
-
-/// Perform a multi-sample calibration against the given reference clock.
-///
-/// Returns the measured frequency in Hz, or `0` if the counter did not
-/// advance (hardware problem).
+/// Multi-sample calibration against `reference`, in Hz, or `0` if the counter
+/// did not advance.
 fn calibrate_against(reference: ReferenceTimer) -> u64 {
     let mut total_elapsed: u64 = 0;
 
     for _ in 0..CALIBRATION_SAMPLES {
-        // Configure one-shot mode, masked (no interrupt fires during
-        // calibration).  One-shot is the default when PERIODIC/TSC-deadline
-        // bits are clear.
+        // Masked, so no interrupt fires during calibration.
         write_timer_lvt(LAPIC_TIMER_ONESHOT | LAPIC_LVT_MASKED);
         timer_set_divisor(LAPIC_TIMER_DIV_16);
 
-        // Load maximum initial count so we never underflow to zero.
+        // Maximum initial count, so the counter cannot underflow to zero.
         write_register(LAPIC_TIMER_ICR, 0xFFFF_FFFF);
 
-        // Wait the reference window.
         reference.delay();
 
-        // Elapsed = initial − remaining.
         let remaining = timer_get_current_count();
         let elapsed = 0xFFFF_FFFFu32.wrapping_sub(remaining);
 
-        // Stop the timer to leave a clean state.
+        // Writing 0 to the initial count register stops the timer.
         write_register(LAPIC_TIMER_ICR, 0);
 
         total_elapsed += elapsed as u64;
@@ -283,6 +252,5 @@ fn calibrate_against(reference: ReferenceTimer) -> u64 {
         return 0;
     }
 
-    // freq = avg_elapsed / (window_ns / 1e9) = avg_elapsed × 1e9 / window_ns
     (avg_elapsed as u128 * 1_000_000_000 / window_ns as u128) as u64
 }

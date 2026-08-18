@@ -65,12 +65,12 @@ use slopos_sched::task::{
     task_set_state_from_with_reason, task_terminate, task_try_transition_from,
 };
 
-/// Hermetic scope: its registry walk restores every piece of cross-test state a
-/// syscall test can disturb, so a test cannot leak by forgetting a teardown.
+/// Hermetic scope: restores every piece of cross-test state a syscall test can
+/// disturb, so a test cannot leak by forgetting a teardown.
 type SyscallFixture = slopos_sched::test_fixture::KernelTestScope;
 
-/// Park PCR's `current_task` on the BSP bootstrap stub, for tests that mutate
-/// the running-task pointer. `BspCurrentTask` restores it on scope drop.
+/// For tests that mutate the running-task pointer; `BspCurrentTask` restores
+/// the parked pointer on scope drop.
 fn park_bootstrap_on_current_cpu() {
     slopos_arch::pcr::park_bootstrap_task(
         slopos_ostd::task::bootstrap::BSP_BOOTSTRAP_TASK.get() as *mut ()
@@ -90,9 +90,9 @@ fn make_task_current(task_id: u32) {
     );
 }
 
-/// Deliver a pending signal the way production does: on the task's own CPU with
-/// the `Current` witness. Restores the bootstrap current-task afterwards so a
-/// later `task_terminate` does not take the is-current Zombie path.
+/// Delivers on the task's own CPU with the `Current` witness, as production
+/// does, then restores the bootstrap current-task so a later `task_terminate`
+/// does not take the is-current Zombie path.
 fn deliver_pending_signal_as_current(task_id: u32, table: FdTable, ctx: &UserContext) {
     make_task_current(task_id);
     {
@@ -129,14 +129,12 @@ fn create_test_user_task_with(flags: u16) -> u32 {
     )
 }
 
-/// Zero-initialised `UserContext`; tests load syscall arg registers through
-/// `regs_mut()` before dispatching.
 fn zero_frame() -> UserContext {
     UserContext::const_zeroed()
 }
 
-/// A zeroed syscall frame on the heap. `UserContext` is 192 bytes with its own
-/// unmerged slot per local, so tests holding several take them off the stack.
+/// Heap-backed: `UserContext` is 192 bytes with its own unmerged slot per
+/// local, so tests holding several keep them off the stack.
 fn zero_frame_boxed() -> KBox<UserContext> {
     KBox::zeroed().expect("frame alloc")
 }
@@ -150,7 +148,6 @@ fn pts_path_for(number: u32) -> Option<[u8; 11]> {
     Some(path)
 }
 
-/// Resolve a pid this test just created into the designator `mm` takes.
 fn resolve_pid(pid: u32) -> slopos_ostd::process::ProcessId {
     slopos_ostd::process::ProcessId::resolve(pid).expect("a pid this test just created")
 }
@@ -163,8 +160,8 @@ fn with_user_process_context<R>(table: FdTable, f: impl FnOnce() -> R) -> Option
     if !slopos_mm::process_vm::process_vm_activate(process) {
         return None;
     }
-    // The PCR still carries a bare pid across the syscall boundary, so the
-    // designator becomes a number again exactly here.
+    // The PCR carries a bare pid across the syscall boundary, so the designator
+    // becomes a number again here.
     set_test_process_id(table.id());
     let out = f();
     set_test_process_id(slopos_abi::task::INVALID_PROCESS_ID);
@@ -241,8 +238,7 @@ pub fn test_syscall_lookup_empty_slot() -> TestResult {
 }
 
 pub fn test_index_tty_io_syscalls_retired() -> TestResult {
-    // Retired index-addressed TTY calls; TTY access is fd-only. Guards the
-    // numbers against re-registration.
+    // TTY access is fd-only.
     assert_test!(
         syscall_lookup(146).is_none(),
         "146 (tty_read) must be retired"
@@ -259,7 +255,6 @@ pub fn test_index_tty_io_syscalls_retired() -> TestResult {
 }
 
 pub fn test_syscall_lookup_valid() -> TestResult {
-    // SYSCALL_EXIT = 1
     let entry = syscall_lookup(1);
     let Some(entry_ref) = entry else {
         klog_info!("SYSCALL_EXIT lookup returned None");
@@ -540,8 +535,6 @@ pub fn test_kill_process_group_semantics() -> TestResult {
     TestResult::Pass
 }
 
-/// A user task is born its own process-group leader with a live group object;
-/// fork shares that object by identity; setsid installs a fresh one.
 pub fn test_process_group_object_fork_and_setsid_identity() -> TestResult {
     let _fixture = SyscallFixture::new();
 
@@ -597,13 +590,9 @@ pub fn test_process_group_object_fork_and_setsid_identity() -> TestResult {
     TestResult::Pass
 }
 
-/// A membership handle read out of a task's group slot stays valid after a
-/// *different* task republishes that slot.
-///
-/// `setpgid` writes the target's group field and `task_process_group` clones it
-/// from any CPU, both holding nothing. The slot is what keeps them apart: a read
-/// mints inside an RCU read-side section, and the displaced reference is
-/// released only after a grace period.
+/// `setpgid` and `task_process_group` race holding nothing: a slot read mints
+/// inside an RCU read-side section, and the displaced reference is released
+/// only after a grace period.
 pub fn test_process_group_slot_survives_republication() -> TestResult {
     let _fixture = SyscallFixture::new();
 
@@ -617,7 +606,7 @@ pub fn test_process_group_slot_survives_republication() -> TestResult {
     let child_guard = assert_some!(task_find_by_id(child_id));
 
     // Counted relative to whatever else holds the group, so the assertions
-    // below stay exact without assuming this test is the only holder.
+    // below need not assume this test is the only holder.
     let held = child_guard
         .process_group
         .load()
@@ -651,7 +640,6 @@ pub fn test_process_group_slot_survives_republication() -> TestResult {
         "the displaced group is still readable through the handle"
     );
 
-    // Retire whatever the store deferred, on whichever CPU runs the callback.
     crate::tests::rcu_cb_tests::drain_until(|| KArc::strong_count(&held) == count_before - 1);
     assert_eq_test!(
         KArc::strong_count(&held),
@@ -668,8 +656,6 @@ pub fn test_process_group_slot_survives_republication() -> TestResult {
     TestResult::Pass
 }
 
-/// `ProcessGroup -> Session` is a strong DAG: a session outlives every group in
-/// it and is freed only when the last group drops.
 pub fn test_process_group_session_dag_lifetime() -> TestResult {
     let _fixture = SyscallFixture::new();
 
@@ -726,9 +712,8 @@ pub fn test_tiocsctty_session_leader_acquires_ctty() -> TestResult {
     TestResult::Pass
 }
 
-/// The console read resolves the caller's controlling terminal rather than
-/// `TtyIndex(0)`, so no task reads the operator's keystrokes off a terminal it
-/// does not own.
+/// The read resolves the caller's controlling terminal, not `TtyIndex(0)`, so
+/// no task reads the operator's keystrokes off a terminal it does not own.
 pub fn test_console_read_without_a_controlling_tty_is_refused() -> TestResult {
     let _fixture = SyscallFixture::new();
 
@@ -955,7 +940,6 @@ pub fn test_pts_open_acquires_controlling_tty_without_o_noctty() -> TestResult {
     assert_test!(task_id != INVALID_TASK_ID, "failed to create task");
     let task_guard = assert_some!(task_find_by_id(task_id), "task lookup failed");
 
-    // The master open holds the pair alive; dropped at the end to tear it down.
     let (master_idx, master_open) = match slopos_kernel_services::syscall_services::tty::alloc_pty(
         slopos_ostd::process::quota::root(),
     ) {
@@ -1074,7 +1058,6 @@ pub fn test_tty_poll_after_close_reuse_no_crossobject() -> TestResult {
     assert_test!(task_id != INVALID_TASK_ID, "failed to create task");
     let task_guard = assert_some!(task_find_by_id(task_id), "task lookup failed");
 
-    // The returned backing owns the pair for the test's duration.
     let (master_idx, master_open) = match slopos_kernel_services::syscall_services::tty::alloc_pty(
         slopos_ostd::process::quota::root(),
     ) {

@@ -1,15 +1,13 @@
-//! Legacy PIT (Intel 8254) — calibration-only polled delay, the reference for
-//! LAPIC timer calibration should the HPET codepath fall through (dead, since
-//! HPET is mandatory at boot).
-//!
-//! Nothing here routes IRQs or configures a frequency: the counter free-runs at
-//! its base oscillator frequency (~1.193 182 MHz) from power-on reset.
+//! Legacy PIT (Intel 8254): polled delay only, the fallback reference for LAPIC
+//! timer calibration (dead — HPET is mandatory at boot). Nothing here routes IRQs
+//! or configures a frequency; the counter free-runs at its base oscillator
+//! frequency from power-on reset.
 
 use slopos_ostd::io::Pit;
 use slopos_ostd::io::port::IoPortRegistry;
 use slopos_ostd::io::port_consts::PIT_BASE_FREQUENCY_HZ;
 
-/// Hardware default reload value (counter wraps at 0x10000 = 65 536).
+/// Hardware default reload value; the counter wraps at 0x10000.
 const DEFAULT_RELOAD: u32 = 0x10000;
 
 /// Latch and read the PIT channel 0 down-counter. Interrupts are briefly

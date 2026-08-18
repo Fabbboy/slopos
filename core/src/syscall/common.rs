@@ -17,7 +17,7 @@ pub const USER_IO_MAX_BYTES: usize = 512;
 pub use slopos_abi::fs::USER_PATH_MAX;
 
 /// Convert a C-style negative return code into an [`Errno`], clamping
-/// values outside the valid errno range to `EINVAL`.
+/// out-of-range values to `EINVAL`.
 pub fn errno_from_neg(rc: i32) -> Errno {
     Errno::from_raw(rc).unwrap_or(Errno::EINVAL)
 }
@@ -33,16 +33,14 @@ pub type SyscallHandler = fn(&SyscallContext) -> SyscallResult;
 pub struct SyscallEntry {
     pub handler: Option<SyscallHandler>,
     /// Diagnostic label (NUL-terminated static string). `KernelSync` because
-    /// raw pointers are `!Send + !Sync`; the target is a `'static` text-segment
-    /// pointer, never mutated after table construction.
+    /// raw pointers are `!Send + !Sync`; the target is `'static` text.
     pub name: KernelSync<*const c_char>,
 }
 
 /// Copy a NUL-terminated string out of user memory, bounded by `dst`.
 ///
-/// Copies a page at a time and stops at the first NUL: reading the full
-/// capacity in one go would reject a short string sitting near the end of its
-/// mapping.
+/// Copies a page at a time: reading the full capacity in one go would reject a
+/// short string sitting near the end of its mapping.
 pub fn syscall_copy_user_str(dst: &mut [u8], user_src: u64) -> Result<(), UserPtrError> {
     if dst.is_empty() {
         return Err(UserPtrError::Null);

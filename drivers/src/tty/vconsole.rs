@@ -262,8 +262,7 @@ pub(crate) struct VConsoleFbInfo {
     pub(crate) bytes_per_pixel: u8,
 }
 
-/// Flat ring buffer of `SCROLLBACK_LINES` rows, heap-allocated once so
-/// `VConsoleState` stores only a pointer.
+/// Flat ring buffer of `SCROLLBACK_LINES` rows in one allocation.
 struct ScrollbackBuf {
     buf: KVec<Cell>,
     cols: usize,

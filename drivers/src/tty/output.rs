@@ -253,11 +253,10 @@ impl EchoDrain {
     }
 
     /// Hand the claim back inside the critical section that decided this
-    /// drainer is done with the queue — which is what makes a flush request
-    /// unloseable. Staging, `acquire` and this release are all
-    /// `TTY_SLOTS[slot]` sections and so totally ordered: either a stage lands
-    /// first and this drainer's next `echo_take` returns it, or this release
-    /// lands first and the producer's `acquire` drains it itself.
+    /// drainer is done, which is what makes a flush request unloseable: staging,
+    /// `acquire` and this release are all `TTY_SLOTS[slot]` sections, so either a
+    /// stage lands first and the next `echo_take` returns it, or this release
+    /// lands first and the producer's `acquire` drains it.
     fn release_under(&mut self, ldisc: &mut LdiscKind) {
         ldisc.echo_release_drain();
         self.released = true;

@@ -1,7 +1,5 @@
-// KtapParser tests — table-driven port of the Phase 4 Python tests in
-// `scripts/run_tests_test.py`, plus the leading-garbage rescue regression
-// tests added at Phase 4's tail end. Every Python test maps to one or more
-// `t.Run(...)` cases here.
+// Tests for KtapParser, the leading-garbage rescue, and RunRecorder
+// aggregation.
 
 package main
 
@@ -68,10 +66,6 @@ func filterBails(events []Event) []*EvBail {
 	return out
 }
 
-// -----------------------------------------------------------------------
-//  Green run (Python: TestKtapParserGreenRun)
-// -----------------------------------------------------------------------
-
 func TestKtapMinimalGreenRun(t *testing.T) {
 	p := NewKtapParser()
 	events := feedAll(p, []string{
@@ -109,10 +103,6 @@ func TestKtapMinimalGreenRun(t *testing.T) {
 		t.Fatalf("phase end: got %+v, want pass=3 fail=0", ends[0])
 	}
 }
-
-// -----------------------------------------------------------------------
-//  Single fail with diag block (Python: TestKtapParserFailure.test_single_fail)
-// -----------------------------------------------------------------------
 
 func TestKtapSingleFailWithDiagAndLog(t *testing.T) {
 	p := NewKtapParser()
@@ -183,10 +173,6 @@ func TestKtapFailWithTruncationMarkers(t *testing.T) {
 	}
 }
 
-// -----------------------------------------------------------------------
-//  Subtests (Python: TestKtapParserSubtests)
-// -----------------------------------------------------------------------
-
 func TestKtapSubtestsPrecedeParent(t *testing.T) {
 	p := NewKtapParser()
 	events := feedAll(p, []string{
@@ -226,13 +212,7 @@ func TestKtapSubtestsPrecedeParent(t *testing.T) {
 	}
 }
 
-// -----------------------------------------------------------------------
-//  Verbose-pass log block (Python: TestKtapParserVerboseLogOnPass)
-// -----------------------------------------------------------------------
-
 func TestKtapPassWithVerboseLogBlockNoOutcomeField(t *testing.T) {
-	// Mirrors harness.rs:380-408: verbose mode emits ---/log:|/...
-	// for *passing* tests. No outcome:/file: fields present.
 	p := NewKtapParser()
 	events := feedAll(p, []string{
 		"KTAP\tTAP version 14",
@@ -263,10 +243,6 @@ func TestKtapPassWithVerboseLogBlockNoOutcomeField(t *testing.T) {
 		t.Errorf("fail_file should be nil, got %v", rec.FailFile)
 	}
 }
-
-// -----------------------------------------------------------------------
-//  Suffixes (Python: TestKtapParserSuffixes)
-// -----------------------------------------------------------------------
 
 func TestKtapOverTimeSuffix(t *testing.T) {
 	p := NewKtapParser()
@@ -318,10 +294,6 @@ func TestKtapSkipWithReason(t *testing.T) {
 	}
 }
 
-// -----------------------------------------------------------------------
-//  Multi-phase (Python: TestKtapParserMultiPhase)
-// -----------------------------------------------------------------------
-
 func TestKtapKernelThenUserland(t *testing.T) {
 	p := NewKtapParser()
 	events := feedAll(p, []string{
@@ -329,7 +301,6 @@ func TestKtapKernelThenUserland(t *testing.T) {
 		"KTAP\t1..1",
 		"KTAP\tok 1 - mod::a # time_ms=1",
 		"KTAP\t# elapsed_ms=1 pass=1 fail=0 skip=0 over_time=0",
-		// Userland phase
 		"KTAP\tTAP version 14",
 		"KTAP\t1..1",
 		"KTAP\t  ok 1 - inner",
@@ -356,10 +327,6 @@ func TestKtapKernelThenUserland(t *testing.T) {
 	}
 }
 
-// -----------------------------------------------------------------------
-//  Bail (Python: TestKtapParserBail)
-// -----------------------------------------------------------------------
-
 func TestKtapBailMidStream(t *testing.T) {
 	p := NewKtapParser()
 	events := feedAll(p, []string{
@@ -380,10 +347,6 @@ func TestKtapBailMidStream(t *testing.T) {
 	}
 }
 
-// -----------------------------------------------------------------------
-//  Truncated stream (Python: TestKtapParserTruncatedStream)
-// -----------------------------------------------------------------------
-
 func TestKtapTruncatedStream(t *testing.T) {
 	p := NewKtapParser()
 	events := feedAll(p, []string{
@@ -400,16 +363,12 @@ func TestKtapTruncatedStream(t *testing.T) {
 	if !rec.Summary.Truncated {
 		t.Errorf("expected Truncated=true, got false")
 	}
-	// mod::b is in current_record-pending state — emits no EvTest yet,
-	// so only mod::a is observable. The footer would have flushed it.
+	// mod::b is still pending — a footer would have flushed it — so only
+	// mod::a is observable.
 	if len(rec.Summary.Phases[0].Tests) != 1 {
 		t.Errorf("expected 1 emitted test, got %d", len(rec.Summary.Phases[0].Tests))
 	}
 }
-
-// -----------------------------------------------------------------------
-//  Klog tail attached to fail with empty log (Python: TestKtapParserNonKtapKlog)
-// -----------------------------------------------------------------------
 
 func TestKtapKlogTailAttachedToPanicFailureWithEmptyLog(t *testing.T) {
 	p := NewKtapParser()
@@ -446,10 +405,6 @@ func TestKtapKlogTailAttachedToPanicFailureWithEmptyLog(t *testing.T) {
 	}
 }
 
-// -----------------------------------------------------------------------
-//  ANSI strip (Python: TestKtapParserAnsiStrip)
-// -----------------------------------------------------------------------
-
 func TestKtapStripAnsiPassesThroughToParser(t *testing.T) {
 	p := NewKtapParser()
 	events := feedAll(p, []string{
@@ -475,16 +430,7 @@ func TestStripANSIIdempotent(t *testing.T) {
 	}
 }
 
-// -----------------------------------------------------------------------
-//  Leading-garbage rescue (Python: TestKtapParserLeadingGarbageRescue)
-// -----------------------------------------------------------------------
-
 func TestKtapLeadingGarbageBeforeKtapPrefixIsRecognized(t *testing.T) {
-	// Regression: TTY-layer tests write fixture strings ('"hello"', XON/XOFF)
-	// directly to COM1, so the next emit_ok arrives prefixed:
-	//   `helloKTAP\tok 994 - test_tcoon_resumes_write…`
-	// The parser must rescue these by finding `KTAP\t` after leading bytes,
-	// otherwise the truncation guard mis-reports the kernel as dropping output.
 	p := NewKtapParser()
 	events := feedAll(p, []string{
 		"KTAP\tTAP version 14",
@@ -510,8 +456,6 @@ func TestKtapLeadingGarbageBeforeKtapPrefixIsRecognized(t *testing.T) {
 }
 
 func TestKtapKtapSubstringInsideLogLiteralIsNotRescued(t *testing.T) {
-	// If captured log itself contains `KTAP\t` literal bytes, IN_LOG_LITERAL
-	// state must keep treating it as content, not as a top-level result line.
 	p := NewKtapParser()
 	events := feedAll(p, []string{
 		"KTAP\tTAP version 14",
@@ -537,10 +481,6 @@ func TestKtapKtapSubstringInsideLogLiteralIsNotRescued(t *testing.T) {
 		t.Errorf("log content not preserved: %v", rec.Log)
 	}
 }
-
-// -----------------------------------------------------------------------
-//  Recorder (Python: TestRunRecorder)
-// -----------------------------------------------------------------------
 
 func TestRecorderAggregatesTwoPhases(t *testing.T) {
 	p := NewKtapParser()

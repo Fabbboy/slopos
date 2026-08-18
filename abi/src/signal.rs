@@ -155,9 +155,8 @@ pub const fn sig_default_action(signum: u8) -> SigDefault {
 }
 
 /// True when `signum`'s default disposition is `Ignore`. The send-time drop
-/// check uses this so an unblocked, unhandled, default-ignored signal is dropped
-/// at the raise site instead of spuriously waking a blocked task. `Stop` and
-/// `Continue` are excluded deliberately: those are still delivered.
+/// check uses this so a default-ignored signal never spuriously wakes a blocked
+/// task. `Stop` and `Continue` are excluded deliberately: those are delivered.
 pub const fn sig_default_ignores(signum: u8) -> bool {
     matches!(sig_default_action(signum), SigDefault::Ignore)
 }
@@ -170,7 +169,6 @@ pub const fn sig_default_ignores(signum: u8) -> bool {
 #[derive(Copy, Clone)]
 pub struct SignalFrame {
     pub signum: u64,
-    /// Saved general-purpose registers.
     pub rax: u64,
     pub rbx: u64,
     pub rcx: u64,

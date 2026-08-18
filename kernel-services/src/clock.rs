@@ -1,11 +1,7 @@
-//! High-resolution monotonic clock.
+//! Nanosecond-precision monotonic clock backed by the HPET main counter.
 //!
-//! Provides nanosecond-precision system time via the HPET main counter,
-//! replacing the coarse tick-counting approach from the PIT era.
-//!
-//! All functions are safe to call from any context (interrupt, kernel thread,
-//! syscall handler). Before the platform services are wired during early boot,
-//! every accessor returns `0`.
+//! Callable from any context; every accessor returns `0` before the platform
+//! services are wired during early boot.
 
 use core::sync::atomic::{AtomicU64, Ordering};
 
@@ -33,30 +29,18 @@ fn tsc_frequency_hz() -> u64 {
     freq_hz
 }
 
-/// Returns the monotonic clock value in nanoseconds since boot.
-///
-/// Reads the HPET main counter and converts to nanoseconds.
-/// Falls back to tick-based approximation when HPET is unavailable.
-/// Returns `0` if platform services are not yet initialized.
 #[inline]
 pub fn monotonic_ns() -> u64 {
     platform::clock_monotonic_ns()
 }
 
-/// Returns system uptime in milliseconds.
-///
-/// Convenience wrapper around [`monotonic_ns`] with millisecond granularity.
-/// Replaces `irq_get_timer_ticks()` tick-counting for time queries.
 #[inline]
 pub fn uptime_ms() -> u64 {
     monotonic_ns() / 1_000_000
 }
 
-/// Convert raw timestamp ticks to microseconds.
-///
-/// `Task.total_runtime` stores deltas from `kdiag_timestamp()`, which currently
-/// uses TSC cycle deltas. Convert cycles to microseconds from a CPUID-reported
-/// base frequency when available.
+/// `ticks` are TSC cycle deltas, as `kdiag_timestamp()` produces; the
+/// conversion uses the CPUID-reported base frequency when available.
 #[inline]
 pub fn ticks_to_microseconds(ticks: u64) -> u64 {
     let freq_hz = tsc_frequency_hz();
@@ -66,16 +50,9 @@ pub fn ticks_to_microseconds(ticks: u64) -> u64 {
     ((ticks as u128 * 1_000_000u128) / (freq_hz as u128)) as u64
 }
 
-// =============================================================================
-// Coarse timer tick counter
-// =============================================================================
-//
-// Incremented from the LAPIC timer arm in `boot/src/idt.rs`. Used by the
-// scheduler watchdog and by tests to confirm timer delivery. Lives here so
-// both `slopos-core` (legacy re-exports in `core::irq`) and the out-of-OSTD
-// scheduler in `slopos-sched` can read/write it without depending on each
-// other.
-
+// Coarse tick counter, incremented from the LAPIC timer arm in `boot/src/idt.rs`.
+// Lives here so `slopos-core` and `slopos-sched` can both touch it without
+// depending on each other.
 static TIMER_TICK_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 #[inline]

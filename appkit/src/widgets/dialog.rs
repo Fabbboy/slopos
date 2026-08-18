@@ -18,9 +18,8 @@ pub struct DialogWidget {
     actions: Vec<Box<dyn Widget>>,
     on_dismiss: Option<Box<dyn Fn() -> Box<dyn std::any::Any>>>,
     card_rect: Rect,
-    /// `None` until Tab or an arrow key names one: a confirm dialog's first
-    /// action is typically the destructive one, and a stray Enter must not fire
-    /// the thing the dialog exists to ask about.
+    /// `None` until Tab or an arrow key names one, so a stray Enter cannot fire
+    /// a confirm dialog's typically-destructive first action.
     focused_action: Option<usize>,
 }
 
@@ -42,7 +41,6 @@ impl DialogWidget {
         }
     }
 
-    /// Move the keyboard selection between actions, wrapping.
     fn cycle_action(&mut self, forward: bool) {
         let len = self.actions.len();
         if len == 0 {
@@ -56,7 +54,6 @@ impl DialogWidget {
         });
     }
 
-    /// The centered card, as positioned by the last layout pass.
     pub fn card_rect(&self) -> Rect {
         self.card_rect
     }
@@ -65,12 +62,10 @@ impl DialogWidget {
         CARD_MAX_WIDTH.min(available)
     }
 
-    /// Width available to the content and the title inside the card.
     fn inner_width(&self, available: i32) -> i32 {
         (self.card_width(available) - CARD_PADDING * 2).max(0)
     }
 
-    /// Action row width, gaps included.
     fn actions_width(&self) -> i32 {
         let mut total = 0;
         for (i, action) in self.actions.iter().enumerate() {
@@ -82,7 +77,6 @@ impl DialogWidget {
         total
     }
 
-    /// Tallest action, which is the height of the action row.
     fn actions_height(&self) -> i32 {
         self.actions
             .iter()
@@ -91,7 +85,6 @@ impl DialogWidget {
             .unwrap_or(0)
     }
 
-    /// Card height for the sizes recorded by the last measure pass.
     fn card_height(&self) -> i32 {
         let title_h = crate::text::cell_height() + CARD_PADDING;
         let content_h = self.content.measured_size().height;
@@ -106,7 +99,6 @@ impl DialogWidget {
 
 const CARD_PADDING: i32 = 16;
 const ACTION_SPACING: i32 = 8;
-/// Preferred card width; narrower only when the window is.
 const CARD_MAX_WIDTH: i32 = 300;
 
 impl Widget for DialogWidget {
@@ -120,8 +112,8 @@ impl Widget for DialogWidget {
     fn measure(&mut self, constraints: BoxConstraints, ctx: &mut MeasureCtx) -> Size {
         let inner_w = self.inner_width(constraints.max_width);
 
-        // Content wraps to the card's inner width and is as tall as it likes:
-        // `card_height` reads that back rather than assuming a line count.
+        // Content height is unbounded: `card_height` reads the measured value
+        // back rather than assuming a line count.
         let content_constraints = BoxConstraints {
             min_width: inner_w,
             max_width: inner_w,
@@ -267,8 +259,6 @@ impl Widget for DialogWidget {
                         return resp;
                     }
                 }
-                // Modal: a press inside the card that hit nothing must not fall
-                // through to the tree the backdrop is covering.
                 EventResponse::Consumed
             }
 
@@ -289,8 +279,6 @@ impl Widget for DialogWidget {
                     _ => {}
                 }
 
-                // Only the selected action sees the key, so Enter cannot fire
-                // whichever action happens to be listed first.
                 if let Some(action) = self.focused_action.and_then(|i| self.actions.get_mut(i)) {
                     let resp = action.event(event, EventPhase::Target, sink);
                     if resp.is_consumed() {
@@ -301,8 +289,7 @@ impl Widget for DialogWidget {
                 if resp.is_consumed() {
                     resp
                 } else {
-                    // Modal: swallow, so the app underneath does not act on a
-                    // key aimed at the dialog.
+                    // Modal: the app underneath must not act on a key aimed at the dialog.
                     EventResponse::Consumed
                 }
             }
@@ -328,8 +315,7 @@ impl Widget for DialogWidget {
     }
 
     fn children(&self) -> &[Box<dyn Widget>] {
-        // Content is painted and hit-tested directly; only the actions need to
-        // appear in the tab chain.
+        // Content is painted and hit-tested directly; only actions join the tab chain.
         &self.actions
     }
 

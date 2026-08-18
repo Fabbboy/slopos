@@ -1,16 +1,13 @@
 //! Scan-line coverage rasterizer for glyph outlines.
 //!
-//! Computes per-pixel coverage using the non-zero winding rule with
-//! analytical horizontal coverage (fractional x-intercepts) and 8×
-//! vertical supersampling.  This matches the approach used by FreeType,
-//! stb_truetype, and ab-glyph — boundary pixels get smooth sub-pixel
-//! coverage instead of binary in/out.
+//! Non-zero winding rule with analytical horizontal coverage (fractional
+//! x-intercepts) and 8× vertical supersampling, so boundary pixels get
+//! sub-pixel coverage instead of binary in/out.
 
 use slopos_ostd::KVec;
 
 use crate::outline::Edge;
 
-/// A rasterized glyph's coverage bitmap and positioning metrics.
 #[derive(Clone, Debug)]
 pub struct RasterizedGlyph {
     /// Width of the coverage bitmap in pixels.
@@ -32,10 +29,6 @@ pub struct RasterizedGlyph {
 const SUPERSAMPLE: usize = 8;
 
 /// Rasterize a list of edges into a coverage bitmap.
-///
-/// Uses analytical horizontal coverage (the fractional x-intercept
-/// determines how much of the boundary pixel is covered) combined with
-/// vertical supersampling for diagonal edges.
 pub fn rasterize(edges: &[Edge], width: usize, height: usize) -> KVec<u8> {
     if width == 0 || height == 0 || edges.is_empty() {
         return KVec::<u8>::zeroed(width * height).expect("rasterize: alloc");
@@ -47,7 +40,7 @@ pub fn rasterize(edges: &[Edge], width: usize, height: usize) -> KVec<u8> {
     // Per-pixel area accumulator (0.0 = uncovered, ±1.0 = fully covered).
     let mut area = KVec::<f32>::zeroed(width * height).expect("rasterize: alloc");
 
-    // Per-scanline winding delta buffer (reused each sub-scanline).
+    // Winding-delta buffer, reused each sub-scanline.
     let mut scanline_fill = KVec::<f32>::zeroed(width + 1).expect("rasterize: alloc");
 
     for sub_y in 0..sub_height {

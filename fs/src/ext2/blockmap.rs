@@ -98,8 +98,6 @@ pub fn map_block(
     Ok(current)
 }
 
-/// Ensure a data block exists at the given file block offset.
-/// Allocates blocks internally via the alloc module — no closure needed.
 pub fn ensure_data_block(
     inode: &mut Inode,
     file_block: FileBlock,

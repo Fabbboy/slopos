@@ -2,7 +2,7 @@
 //!
 //! `call_rcu` only queues, so these tests never call the drain by hand: a queue
 //! whose consumer is unreachable looks exactly like a working one from the
-//! producer's side, and leaks every deferred object for the life of the boot.
+//! producer's side.
 
 use core::sync::atomic::{AtomicU32, Ordering};
 
@@ -12,19 +12,18 @@ use slopos_ostd::sync::RcuArcSlot;
 use slopos_testing::TestResult;
 use slopos_testing::fail;
 
-/// How long to give the drain before calling it unreachable. The drain runs
-/// when a CPU finds nothing to dispatch, so the bound is a scheduling property
-/// rather than a timer one.
+/// How long to give the drain before calling it unreachable: it runs when a CPU
+/// finds nothing to dispatch, so the bound is a scheduling property.
 const RECLAIM_DEADLINE_MS: u32 = 400;
 
-/// Poll interval. Polled rather than slept: the kernel test phase runs on the
-/// BSP before it enters the scheduler, so this task cannot block.
+/// Polled rather than slept: the kernel test phase runs on the BSP before it
+/// enters the scheduler, so this task cannot block.
 const POLL_INTERVAL_MS: u32 = 10;
 
-/// Drive the RCU drain until `done` holds, or the deadline expires. Returns
-/// whether it held. Polls for the effect rather than claiming the manual call
-/// did the invoking: a CPU that already detached the chain leaves nothing for
-/// that call to find while the callback is still in flight.
+/// Drive the RCU drain until `done` holds, or the deadline expires. Polls for
+/// the effect rather than trusting the manual call: a CPU that already detached
+/// the chain leaves nothing for that call to find while the callback is in
+/// flight.
 pub fn drain_until(done: impl Fn() -> bool) -> bool {
     let mut waited = 0;
     loop {
@@ -51,7 +50,6 @@ impl Drop for DropCounted {
     }
 }
 
-/// A callback queued by `call_rcu` is invoked without anyone driving the drain.
 /// `RcuArcSlot::store` defers the displaced reference through `call_rcu`, so
 /// the payload's `Drop` runs only if the callback does.
 pub fn test_rcu_callbacks_are_invoked_without_a_manual_drain() -> TestResult {
@@ -80,9 +78,9 @@ pub fn test_rcu_callbacks_are_invoked_without_a_manual_drain() -> TestResult {
     )
 }
 
-/// `synchronize_rcu` reaches no allocator: it is called from the reclaim path,
-/// including `call_rcu`'s own out-of-memory fallback, so an allocation here
-/// fails exactly when there is nothing to allocate from.
+/// Called from the reclaim path, including `call_rcu`'s own out-of-memory
+/// fallback, so an allocation here fails exactly when there is nothing to
+/// allocate from.
 pub fn test_synchronize_rcu_allocates_nothing() -> TestResult {
     let before = slopos_mm::slab::get_heap_stats_owned();
     slopos_ostd::sync::synchronize_rcu();
@@ -97,8 +95,6 @@ pub fn test_synchronize_rcu_allocates_nothing() -> TestResult {
     TestResult::Pass
 }
 
-/// A grace period elapses, and the caller observes it having elapsed — the
-/// runtime counterpart to the arithmetic tests in `slopos_ostd::sync::rcu`.
 pub fn test_synchronize_rcu_completes_a_grace_period() -> TestResult {
     let before = slopos_ostd::sync::rcu_gp_seq();
     slopos_ostd::sync::synchronize_rcu();
@@ -113,9 +109,9 @@ pub fn test_synchronize_rcu_completes_a_grace_period() -> TestResult {
     TestResult::Pass
 }
 
-/// A drain pass invokes what is ready and returns; it never takes a grace
-/// period inline. Putting the wait back would still pass every correctness
-/// test and show up only as latency, so the passes are timed.
+/// A drain pass never takes a grace period inline. Putting the wait back would
+/// still pass every correctness test and show up only as latency, so the passes
+/// are timed.
 pub fn test_rcu_drain_never_waits_for_a_grace_period() -> TestResult {
     const PASSES: u32 = 32;
     // 32 passes each taking a grace period would be seconds, not milliseconds.

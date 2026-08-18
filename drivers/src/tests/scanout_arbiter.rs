@@ -1,11 +1,5 @@
 //! Singleton-resource arbiter regression tests.
 //!
-//! Exercises the generic [`SingletonResource`] claim/commit protocol with a
-//! dummy provider type (no hardware): priority decides the winner, equal
-//! priority loses the tie, a live reservation blocks later claims before any
-//! commit, `abort_claim` restores the prior owner, and committing a higher
-//! provider evicts the displaced one exactly once.
-//!
 //! Each test owns a distinct function-local `static` arbiter (the methods take
 //! `&'static self`); the harness runs each test once per boot, so the statics
 //! start in their default (unowned) state.
@@ -31,8 +25,6 @@ fn counting_evict() {
 
 fn noop_evict() {}
 
-/// A higher-priority claimant wins and takes ownership over a lower-priority
-/// committed owner.
 pub fn test_higher_priority_wins() -> TestResult {
     static A: SingletonResource<DummyProvider> = SingletonResource::new(
         "test-prio",
@@ -69,8 +61,6 @@ pub fn test_higher_priority_wins() -> TestResult {
     }
 }
 
-/// A lower-priority claim loses; an equal-priority claim loses the tie. Neither
-/// disturbs the committed owner.
 pub fn test_lower_and_equal_priority_lose() -> TestResult {
     static A: SingletonResource<DummyProvider> = SingletonResource::new(
         "test-tie",

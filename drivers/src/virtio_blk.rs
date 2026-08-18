@@ -29,8 +29,8 @@ pub const VIRTIO_BLK_DEVICE_ID_MODERN: u16 = 0x1042;
 
 const VIRTIO_BLK_T_IN: u32 = 0;
 const VIRTIO_BLK_T_OUT: u32 = 1;
-/// Flush the device's volatile write-back cache to non-volatile media. Only
-/// valid once `VIRTIO_BLK_F_FLUSH` has been negotiated.
+/// Flush the device's volatile write-back cache; valid only once
+/// `VIRTIO_BLK_F_FLUSH` has been negotiated.
 const VIRTIO_BLK_T_FLUSH: u32 = 4;
 const VIRTIO_BLK_S_OK: u8 = 0;
 

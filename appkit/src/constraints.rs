@@ -176,7 +176,6 @@ impl BoxConstraints {
         !is_unbounded(self.max_height)
     }
 
-    /// Whether the axis a stack lays out along carries a real upper bound.
     pub const fn is_main_axis_bounded(&self, vertical: bool) -> bool {
         if vertical {
             self.is_height_bounded()
@@ -201,7 +200,6 @@ impl BoxConstraints {
         }
     }
 
-    /// Loosen: keep max, set min to 0.
     pub fn loosen(&self) -> Self {
         Self {
             min_width: 0,

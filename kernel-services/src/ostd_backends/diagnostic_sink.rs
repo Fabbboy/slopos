@@ -1,8 +1,6 @@
-//! `DiagnosticSink` impl that writes raw lines to the platform console.
-//!
-//! Routes through the `platform::console_puts` facade rather than
-//! `slopos-utils::klog` because `slopos-utils` depends on
-//! `slopos-kernel-services`; pulling it in here would form a cycle.
+//! `DiagnosticSink` writing raw lines to the platform console. Routed through
+//! `platform::console_puts` rather than `slopos-utils::klog` because
+//! `slopos-utils` depends on this crate, so klog here would form a cycle.
 
 use slopos_ostd::irq::idt::DiagnosticSink;
 

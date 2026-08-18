@@ -1,10 +1,9 @@
 //! Syscall number definitions (kernel-userland ABI).
 //!
-//! Single source of truth for all syscall numbers; gaps are retired calls, and
-//! a new syscall takes the next highest number so existing userland binaries
-//! keep working. Arguments arrive in `rdi`, `rsi`, `rdx`, `r10`, `r8`, `r9`
-//! (`arg0`..`arg5`); unless noted, the return is a non-negative result or a
-//! negated errno.
+//! Gaps are retired calls, and a new syscall takes the next highest number so
+//! existing userland binaries keep working. Arguments arrive in `rdi`, `rsi`,
+//! `rdx`, `r10`, `r8`, `r9` (`arg0`..`arg5`); unless noted, the return is a
+//! non-negative result or a negated errno.
 
 pub const SYSCALL_YIELD: u64 = 0;
 pub const SYSCALL_EXIT: u64 = 1;
@@ -245,7 +244,7 @@ pub const SYSCALL_TEST_REPORT: u64 = 155;
 
 /// Drive the kernel-side userland-test phase: spawn each `TestKind::Userland`
 /// entry of the `.test_registry`, drain its `SYSCALL_TEST_REPORT` ring, emit
-/// KTAP, and merge with the kernel-phase summary stashed at boot.
+/// KTAP, and merge with the kernel-phase summary.
 ///
 /// Caller must be a real kernel-scheduled task (`/sbin/init` is the canonical
 /// one) — `task_wait_for` requires a non-null `current_task`.
@@ -264,9 +263,8 @@ pub const SYSCALL_RING_SETUP: u64 = 157;
 pub const SYSCALL_RING_ENTER: u64 = 158;
 
 /// `pidfd_open(pid: u32) -> fd` that becomes `POLLIN`-ready once the target
-/// task exits, so a waiter need not busy-poll `waitpid`. Not readable (`read`
-/// → `-EINVAL`); reap the status with `waitpid`. The target must be a child of
-/// the caller.
+/// task exits. Not readable (`read` → `-EINVAL`); reap the status with
+/// `waitpid`. The target must be a child of the caller.
 pub const SYSCALL_PIDFD_OPEN: u64 = 159;
 
 /// `signalfd(mask: u64, flags: u32) -> fd` that becomes `POLLIN`-ready while a
@@ -298,9 +296,9 @@ pub const SYSCALL_CURSOR_MOVE: u64 = 163;
 pub const SYSCALL_SET_DISPLAY_MODE: u64 = 164;
 
 /// `keymap_load(data: *const u8, len)` — a serialised `LayoutTable` blob (see
-/// `slopos_abi::input::layout`), `EINVAL` if malformed. Unprivileged: a layout
-/// is a per-session user preference and the kernel-side binary validator is the
-/// safety boundary. The kernel never parses layout text.
+/// `slopos_abi::input::layout`), `EINVAL` if malformed. Unprivileged: the
+/// kernel-side binary validator is the safety boundary, and the kernel never
+/// parses layout text.
 pub const SYSCALL_KEYMAP_LOAD: u64 = 165;
 
 /// `keymap_get_name(buf: *mut u8, buf_len) -> bytes written` of the active
@@ -324,10 +322,9 @@ pub const SYSCALL_NET_QUERY: u64 = 168;
 
 /// `net_iface_ctl(ifindex, op, arg)` — admin up/down, MTU, DHCP lifecycle,
 /// neighbour and address flushes, plus the global operations addressed to
-/// `NET_IFINDEX_GLOBAL`. Multiplexed where the three calls below are not
-/// because every operand fits in a scalar, so there is no user memory to
-/// reinterpret and no per-op length table to get wrong. Requires
-/// `TASK_FLAG_NET_ADMIN`.
+/// `NET_IFINDEX_GLOBAL`. Multiplexed where the three calls below are not,
+/// because every operand fits in a scalar and there is no user memory to
+/// reinterpret. Requires `TASK_FLAG_NET_ADMIN`.
 pub const SYSCALL_NET_IFACE_CTL: u64 = 169;
 
 /// `net_addr_ctl(op, ptr, len)`, where `op` is `NET_ADDROP_ADD`/`_DEL` and

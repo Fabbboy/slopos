@@ -6,8 +6,8 @@ use slopos_mm::mmio::MmioRegion;
 
 use crate::xe_logic::regs::Pipe;
 
-/// Poll `PIPEDSL` for up to `wdog_ms` milliseconds in 1 ms steps, holding no
-/// lock, and report whether the scanline is still advancing.
+/// Poll `PIPEDSL` for up to `wdog_ms` milliseconds in 1 ms steps and report
+/// whether the scanline is still advancing.
 ///
 /// `true` means the pipe is scanning out and the caller may commit the repoint;
 /// `false` means it stalled or underran and the caller must roll back to the

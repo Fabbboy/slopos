@@ -1,8 +1,8 @@
 //! Input translation: windowing events → widget events.
 //!
 //! The kernel is the single keyboard-layout authority, so text comes from the
-//! codepoint the event already carries and appkit runs no layout engine of its
-//! own; only layout-independent action keys go through `keymap-core`.
+//! codepoint the event already carries; only layout-independent action keys go
+//! through `keymap-core`.
 
 use super::event::{Key, Modifiers, WidgetEvent};
 use slopos_keymap_core::{UiKey, mods_locks_from_raw, ui_classify};
@@ -13,8 +13,7 @@ use slopos_windowing::Event;
 /// A freshly-pressed dead key carries `codepoint == 0` and yields
 /// [`Key::Unknown`]. Ctrl+letter control codes (0x01..=0x1A) are inverted back
 /// to the letter so shortcuts follow the active layout — on QWERTZ, Ctrl on the
-/// key labelled Z is Ctrl+Z. Named keys are matched first, so Enter/Tab/Esc
-/// control codes never reach that inversion.
+/// key labelled Z is Ctrl+Z.
 fn classify_key(keycode: u16, codepoint: u32, modifiers: u8) -> Key {
     let (mods, locks) = mods_locks_from_raw(modifiers);
 
@@ -42,7 +41,6 @@ fn classify_key(keycode: u16, codepoint: u32, modifiers: u8) -> Key {
     Key::Unknown
 }
 
-/// Convert a windowing [`Event`] into a [`WidgetEvent`].
 pub fn translate_event(event: &Event) -> Option<WidgetEvent> {
     match event {
         Event::PointerMotion { x, y } => Some(WidgetEvent::PointerMove { x: *x, y: *y }),
@@ -80,8 +78,7 @@ pub fn translate_event(event: &Event) -> Option<WidgetEvent> {
             let mods = Modifiers::from_raw(*modifiers);
             let key = classify_key(*keycode, *codepoint, *modifiers);
             match key {
-                // AltGr-composed characters are text; Ctrl and plain Alt make
-                // the press a shortcut instead.
+                // AltGr-composed characters are text; Ctrl and plain Alt are shortcuts.
                 Key::Char(c) if !mods.ctrl && !mods.plain_alt() => {
                     Some(WidgetEvent::TextInput { character: c })
                 }

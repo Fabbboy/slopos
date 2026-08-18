@@ -1,13 +1,9 @@
 //! Keyboard-layout wire types — the binary `LayoutTable` POD.
 //!
-//! A [`LayoutTable`] is a fixed-capacity `#[repr(C)]` POD: the in-memory form the
-//! resolver reads *and* the blob userland uploads via `SYSCALL_KEYMAP_LOAD`. Every
-//! field is a plain integer, so any byte pattern is structurally valid and the
-//! kernel rejects only semantically-bad data (`slopos_keymap_core::validate`),
-//! where the keymap logic also lives.
-//!
-//! Layout-*dependent* data only: per-key, per-level text (base / shift / AltGr /
-//! shift+AltGr), a per-key caps-affected bit, and a dead-key compose table.
+//! A [`LayoutTable`] is a fixed-capacity `#[repr(C)]` POD: both the in-memory form
+//! the resolver reads and the blob userland uploads via `SYSCALL_KEYMAP_LOAD`.
+//! Every field is a plain integer, so any byte pattern is structurally valid and
+//! only semantic validation applies (`slopos_keymap_core::validate`).
 
 /// HID usages the table indexes directly (`0x00..0x80`) — every layout-dependent
 /// key. Modifier usages (`0xE0..`) never reach the table.
@@ -104,13 +100,10 @@ impl Default for ComposeEntry {
     }
 }
 
-/// A complete keyboard layout: `#[repr(C)]`, fixed-size, no heap.
 #[repr(C)]
 #[derive(Clone, Copy)]
 pub struct LayoutTable {
-    /// [`LAYOUT_MAGIC`].
     pub magic: u32,
-    /// [`LAYOUT_VERSION`].
     pub version: u16,
     /// Number of valid entries in `compose` (`0..=MAX_COMPOSE`).
     pub num_compose: u16,
@@ -177,7 +170,6 @@ impl LayoutTable {
         None
     }
 
-    /// The bare spacing accent for a declared dead key (`0` if undeclared).
     #[inline]
     pub fn dead_accent_of(&self, dead: u8) -> u32 {
         let d = dead as usize;

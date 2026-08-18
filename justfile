@@ -1,14 +1,10 @@
 set shell := ["bash", "-euo", "pipefail", "-c"]
 
-# ── Toolchain ────────────────────────────────────────────────────────────────
-
 cargo             := env("CARGO", "cargo")
 rust_channel      := `sed -n 's/^channel[[:space:]]*=[[:space:]]*"\(.*\)"/\1/p' rust-toolchain.toml`
 rust_target       := "targets/x86_64-slos.json"
 userland_target   := "targets/x86_64-slos-userland.json"
 kernel_rustflags  := env("KERNEL_RUSTFLAGS", "-C force-frame-pointers=yes")
-
-# ── Paths ────────────────────────────────────────────────────────────────────
 
 build_dir        := env("BUILD_DIR", "builddir")
 cargo_target_dir := build_dir / "target"
@@ -21,15 +17,12 @@ fs_image_size    := env("FS_IMAGE_SIZE", "16M")
 initramfs        := build_dir / "initramfs.cpio"
 initramfs_tests  := build_dir / "initramfs-tests.cpio"
 
-# ── Kernel ELFs ──────────────────────────────────────────────────────────────
-# One artifact per build variant: a shared path would mean whichever build ran
-# last silently answers for all three — to the gates, to gdb, to the ISO.
+# One artifact per variant: a shared path lets whichever build ran last answer
+# for all three — to the gates, to gdb, to the ISO.
 kernel_release   := env("KERNEL_RELEASE", "0")
 kernel_variant   := if kernel_release == "1" { "release" } else { "dev" }
 kernel_elf       := build_dir / ("kernel-" + kernel_variant + ".elf")
 kernel_elf_tests := build_dir / "kernel-tests.elf"
-
-# ── ISO outputs ──────────────────────────────────────────────────────────────
 
 iso          := build_dir / "slop.iso"
 iso_notests  := build_dir / "slop-notests.iso"
@@ -37,8 +30,6 @@ iso_tests    := build_dir / "slop-tests.iso"
 log_file     := env("LOG_FILE", "test_output.log")
 
 ports        := ""
-
-# ── QEMU ─────────────────────────────────────────────────────────────────────
 
 qemu_bin     := env("QEMU_BIN", "qemu-system-x86_64")
 qemu_smp     := env("QEMU_SMP", "4")
@@ -56,28 +47,19 @@ qemu_gtk_zoom       := env("QEMU_GTK_ZOOM_TO_FIT", "off")
 # Emulated display adapter: virtio-vga (default), virtio-gpu-pci, or vga.
 gpu                 := env("GPU", "virtio-vga")
 
-# ── Boot / Test cmdlines ────────────────────────────────────────────────────
-
 boot_log_timeout := env("BOOT_LOG_TIMEOUT", "15")
 boot_cmdline     := env("BOOT_CMDLINE", "tests=off")
 test_cmdline     := "tests=on tests.shutdown=on tests.verbosity=summary boot.debug=on roulette=skip root=auto"
-# `TEST_CMDLINE=…` env override lets `builddir/run_tests` thread filter
-# / verbosity flags into the ISO at build time. Mirrors `BOOT_CMDLINE` for
-# the non-test path.
+# `TEST_CMDLINE=…` is how `builddir/run_tests` threads filter / verbosity flags
+# into the ISO at build time.
 test_cmdline_effective := env("TEST_CMDLINE", test_cmdline)
 
 debug         := env("DEBUG", "0")
 debug_flag    := if debug =~ '^(1|true|on|yes)$' { "boot.debug=on" } else { "" }
 boot_cmdline_effective := trim(boot_cmdline + " " + debug_flag)
 
-# ── Userland binaries ───────────────────────────────────────────────────────
-
 userland_bins      := "init shell terminal compositor roulette file_manager image_viewer sysmon nmap ip keymap ss nc curl ping oops_smoke"
 test_userland_bins := userland_bins + " fork_test io_capture_test heap_allocator_test image_test curl_recv_repro_test curl_e2e_test cd_test ring_test pidfd_e2e_test signalfd_test slopfut_test multishot_test tls_independence_test percore_reactor_test signal_handler_test sigwinch_default_test ctrlc_flood_test pty_flow_test mm_stress_test spin_signal_test terminal_grid_test sysmon_selection_test clipboard_test keymap_test appkit_test spawn_privilege_test stdio_stream_test shell_script_test ip_e2e_test rlimit_test session_smoke_test"
-
-# ═════════════════════════════════════════════════════════════════════════════
-#  Recipes
-# ═════════════════════════════════════════════════════════════════════════════
 
 [doc("Install Rust + Go toolchains and verify workspace")]
 setup:
@@ -85,8 +67,6 @@ setup:
     scripts/ensure_go.sh
     mkdir -p {{build_dir}}
     CARGO_TARGET_DIR={{cargo_target_dir}} {{cargo}} +{{rust_channel}} metadata --format-version 1 >/dev/null
-
-# ── Userland ─────────────────────────────────────────────────────────────────
 
 _build-userland:
     CARGO={{cargo}} RUST_CHANNEL={{rust_channel}} USERLAND_TARGET={{userland_target}} \
@@ -96,8 +76,6 @@ _build-userland-tests: _build-userland
     CARGO={{cargo}} RUST_CHANNEL={{rust_channel}} USERLAND_TARGET={{userland_target}} \
         scripts/build_userland.sh "{{build_dir}}" "{{cargo_target_dir}}" --test
 
-# ── Filesystem images ───────────────────────────────────────────────────────
-
 _fs-image: _build-userland
     FS_IMAGE_SIZE={{fs_image_size}} \
         scripts/build_fs_image.sh "{{fs_image}}" "{{build_dir}}" {{userland_bins}}
@@ -106,15 +84,11 @@ _fs-image-tests: _build-userland-tests
     FS_IMAGE_SIZE={{fs_image_size}} \
         scripts/build_fs_image.sh "{{fs_image_tests}}" "{{build_dir}}" {{test_userland_bins}}
 
-# ── Initramfs (RAM-resident root) ────────────────────────────────────────────
-
 _initramfs: _build-userland
     scripts/build_initramfs.sh "{{initramfs}}" "{{build_dir}}" {{userland_bins}}
 
 _initramfs-tests: _build-userland-tests
     scripts/build_initramfs.sh "{{initramfs_tests}}" "{{build_dir}}" {{test_userland_bins}}
-
-# ── Kernel ───────────────────────────────────────────────────────────────────
 
 [doc("Build the kernel (implies fs-image)")]
 build: _fs-image
@@ -122,15 +96,13 @@ build: _fs-image
     KERNEL_RUSTFLAGS="{{kernel_rustflags}}" \
         scripts/build_kernel.sh "{{build_dir}}" "{{cargo_target_dir}}"
 
-# No `_fs-image` dependency: a gate-only job has no use for userland binaries,
-# and building them is most of the wall clock.
+# No `_fs-image` dependency: building the userland binaries is most of the wall
+# clock, and a gate-only job has no use for them.
 [doc("Build the kernel ELF alone, skipping the fs image — for gate-only jobs")]
 build-kernel-only:
     CARGO={{cargo}} RUST_CHANNEL={{rust_channel}} RUST_TARGET={{rust_target}} \
     KERNEL_RUSTFLAGS="{{kernel_rustflags}}" \
         scripts/build_kernel.sh "{{build_dir}}" "{{cargo_target_dir}}"
-
-# ── ISO images ───────────────────────────────────────────────────────────────
 
 [doc("Build default ISO (honors BOOT_CMDLINE, e.g. BOOT_CMDLINE='tests=off tp.debug=on')")]
 iso: build _initramfs
@@ -158,11 +130,8 @@ _iso-tests: _fs-image-tests _initramfs-tests
     QEMU_FB_AUTO_OUTPUT="{{qemu_fb_auto_output}}" \
         scripts/build_iso.sh "{{iso_tests}}" "{{build_dir}}" "{{test_cmdline_effective}}"
 
-# Same as `_iso-tests` but adds a `tests.run` glob that matches no kernel
-# test, so the kernel-side harness emits a `1..0` plan and the userland
-# phase (driven by /sbin/init's `SYSCALL_RUN_USERLAND_TESTS`) is the
-# only thing exercised. Useful for isolating userland-test regressions
-# from kernel-test interactions.
+# `tests.run=__userland_only__` is a glob that deliberately matches no kernel
+# test, leaving the userland phase as the only thing exercised.
 _iso-tests-userland-only: _fs-image-tests _initramfs-tests
     CARGO={{cargo}} RUST_CHANNEL={{rust_channel}} RUST_TARGET={{rust_target}} \
     KERNEL_RUSTFLAGS="{{kernel_rustflags}}" \
@@ -174,8 +143,6 @@ _iso-tests-userland-only: _fs-image-tests _initramfs-tests
     QEMU_FB_AUTO_OUTPUT="{{qemu_fb_auto_output}}" \
         scripts/build_iso.sh "{{iso_tests}}" "{{build_dir}}" \
             "{{test_cmdline_effective}} tests.run=__userland_only__"
-
-# ── QEMU boot ───────────────────────────────────────────────────────────────
 
 _qemu-boot mode video iso fs_image *extra_env:
     QEMU_BIN={{qemu_bin}} QEMU_SMP={{qemu_smp}} QEMU_MEM={{qemu_mem}} \
@@ -229,11 +196,8 @@ boot-ramonly:
         exit 1
     fi
 
-# ── Live-debug attach to a running kernel ────────────────────────────────────
-# `boot-debug` enables QEMU's GDB stub on TCP :1234 and a monitor socket at
-# /tmp/slopos-monitor.sock. While that QEMU is running, the `debug-*` recipes
-# attach without rebuilding. Typical session: `just boot-debug` in one
-# terminal, reproduce the freeze, then `just debug-bt` in another.
+# The `debug-*` recipes attach to a QEMU already running under `boot-debug`;
+# they never rebuild.
 
 [doc("Boot with QEMU GDB stub (:1234) + monitor socket (/tmp/slopos-monitor.sock)")]
 boot-debug:
@@ -265,16 +229,11 @@ debug-monitor:
     @echo "Connecting to QEMU monitor — type 'quit' or Ctrl-D to detach…"
     socat - UNIX-CONNECT:/tmp/slopos-monitor.sock
 
-# ── Deterministic record/replay debugging (TCG, single-CPU, reverse-debuggable) ──
-# Record a failing test run once, then replay it under GDB with reverse-continue
-# and reverse watchpoints — the practical way to find "who corrupted this byte?"
-# for load-dependent kernel bugs. Requires TCG + smp=1 (icount constraints), so
-# this cannot capture SMP-only races. See the public debugging docs.
+# Record/replay needs TCG + smp=1 for icount, so it cannot capture SMP-only races.
 
-# Kernel tests incompatible with the deterministic icount environment (they
-# assert wall-clock timer calibration, which instruction-counted time breaks)
-# or flaky under slow single-CPU TCG. Skipped so the "tests" boot step passes
-# and recording reaches the userland phase where the corruption manifests.
+# These assert wall-clock timer calibration, which instruction-counted time
+# breaks, or are flaky under single-CPU TCG; skipping them lets the "tests" boot
+# step pass so recording reaches the userland phase.
 rr_skip := "slopos_core::syscall::tests::test_kill_process_group_semantics,slopos_drivers::tests::apic_timer_tests::test_lapic_timer_tick_rate_reasonable,slopos_drivers::tests::hpet_tests::test_hpet_delay_accuracy"
 
 [doc("Record a deterministic test run to builddir/replay.bin (TCG, smp=1)")]
@@ -298,9 +257,8 @@ rr-gdb WATCH='0':
     -gdb -q -batch -ex 'set $watch_va = {{WATCH}}' -x scripts/gdb/find_corruptor.gdb 2>&1 | tee {{build_dir}}/rr-session.log
     -pkill -f 'rr=replay'
 
-# Build the Go-based host-side test wrapper. Idempotent: Go's build cache
-# makes warm rebuilds ~50ms. Output is a single static binary that all
-# `test*` recipes below invoke.
+# Idempotent — Go's build cache makes warm rebuilds ~50ms — so every `test*`
+# recipe below can depend on it unconditionally.
 _build-run-tests:
     mkdir -p {{build_dir}}
     cd tools/run_tests && go build -o ../../{{build_dir}}/run_tests .
@@ -353,12 +311,10 @@ check-lockdep-headroom: _build-run-tests
 check-quota-headroom: _build-run-tests
     scripts/check_quota_headroom.sh
 
-# Two passes, because the two aliasing models disagree about exactly the
-# thing the task cells rely on. `TaskOwnCell::get_ptr` hands out `*mut T`
-# rather than `&mut T` so that two witnesses for one task may hold live
-# pointers into the same field at once; whether that is legal is a
-# question about raw-pointer retagging, which is where Stacked and Tree
-# Borrows differ. Passing under one proves nothing about the other.
+# Two passes: `TaskOwnCell::get_ptr` hands out `*mut T` rather than `&mut T` so
+# two witnesses for one task may hold live pointers into the same field, and
+# whether that is legal is a raw-pointer retagging question — exactly where
+# Stacked and Tree Borrows differ.
 [doc("Run slopos-ostd unit + integration tests under Miri to detect UB in the OSTD critical path, under both Stacked and Tree Borrows. See tools/kernmiri/README.md.")]
 check-miri:
     @rustup component list --installed --toolchain {{rust_channel}} 2>/dev/null | grep -q '^miri' || rustup component add miri --toolchain {{rust_channel}}
@@ -386,17 +342,13 @@ verify FILTER='':
 check-no-kernel-async:
     scripts/check_no_kernel_async.sh
 
-# The gate scripts alone, with no toolchain-heavy steps. This is the
-# single source of truth for the gate list: CI calls this recipe directly
-# rather than duplicating the list inline, because `check-framekernel`
-# below also runs KernMiri and Verus, which are separate CI jobs.
-# Requires a prior `just build` so the ELF gates have a kernel-dev.elf to
-# inspect.
-#
+# Single source of truth for the gate list: CI calls this recipe rather than
+# duplicating it inline, because `check-framekernel` below also runs KernMiri
+# and Verus, which are separate CI jobs.
 [doc("Run the framekernel gate scripts only — no fmt, KernMiri, or Verus (requires a prior `just build`)")]
 check-framekernel-gates:
-    # Self-tests first: a gate whose patterns have rotted produces output
-    # nobody can trust, and each costs ~50 ms against a ~40 s recipe.
+    # Self-tests first: a gate whose patterns have rotted produces output nobody
+    # can trust.
     scripts/check_unsafe_outside_ostd.sh --self-test
     scripts/check_alloc_dep.sh --self-test
     scripts/check_no_kernel_async.sh --self-test
@@ -430,18 +382,13 @@ check-framekernel-gates:
     scripts/check_charge_linearity.sh
     scripts/tcb_ratio.sh --max 1.0
 
-# Run every framekernel-discipline gate in one shot. Requires a prior
-# `just build` so the ELF gates have a kernel-dev.elf to inspect.
-# A kernel-aware `cargo clippy -- -D warnings` gate is not included
-# here yet — SlopOS has no clippy config in tree and the custom
-# `no_std` target needs plumbing; track as a Phase 2 chore.
+# TODO(tech-debt): no `cargo clippy -- -D warnings` gate here — there is no
+# clippy config in tree and the custom `no_std` target needs plumbing first.
 [doc("Run every framekernel-discipline gate: vendor pin / unsafe source + expansion / async / alloc / Drop / stack / registry sections / task ownership / TCB ratio / fmt / KernMiri / Verus (requires a prior `just build`)")]
 check-framekernel: check-framekernel-gates
     {{cargo}} +{{rust_channel}} fmt --all -- --check
     just check-miri
     just verify
-
-# ── Utilities ────────────────────────────────────────────────────────────────
 
 [doc("Show detected QEMU framebuffer resolution")]
 show-qemu-resolution:
@@ -479,8 +426,7 @@ stack-audit:
         echo "{{kernel_elf}} missing — run \`just build\` first" >&2
         exit 1
     fi
-    # Anything above 8 KiB eats into the call-depth budget on a 32 KiB
-    # task stack.  See `clippy.toml` for the matching compile-time rail.
+    # Anything above 8 KiB eats into the call-depth budget on a 32 KiB task stack.
     THRESHOLD="${THRESHOLD:-8192}"
     echo "Kernel functions with frame > ${THRESHOLD} bytes:"
     OBJDUMP="$(scripts/llvm_tool.sh llvm-objdump)"

@@ -32,7 +32,6 @@ impl<'a> PaintContext<'a> {
         }
     }
 
-    /// Fill a rectangle, clipped to the current clip rect.
     pub fn fill_rect(&mut self, x: i32, y: i32, w: i32, h: i32, color: Color32) {
         let rect = Rect::new(x, y, w, h);
         if let Some(clipped) = rect.intersect(&self.clip) {
@@ -41,7 +40,6 @@ impl<'a> PaintContext<'a> {
         }
     }
 
-    /// Fill a rectangle with alpha blending, clipped.
     pub fn fill_rect_blended(&mut self, x: i32, y: i32, w: i32, h: i32, color: Color32) {
         let rect = Rect::new(x, y, w, h);
         if let Some(clipped) = rect.intersect(&self.clip) {
@@ -50,7 +48,7 @@ impl<'a> PaintContext<'a> {
         }
     }
 
-    /// Draw a 1px outline rectangle, clipped.
+    /// Draw a 1px outline rectangle.
     pub fn draw_rect(&mut self, x: i32, y: i32, w: i32, h: i32, color: Color32) {
         self.fill_rect(x, y, w, 1, color);
         self.fill_rect(x, y + h - 1, w, 1, color);
@@ -58,7 +56,6 @@ impl<'a> PaintContext<'a> {
         self.fill_rect(x + w - 1, y + 1, 1, h - 2, color);
     }
 
-    /// Draw a rounded filled rectangle, clipped.
     pub fn fill_rounded_rect(
         &mut self,
         x: i32,
@@ -84,7 +81,6 @@ impl<'a> PaintContext<'a> {
         slopos_gfx::canvas_ops::rounded_rect(self.buffer, x, y, w, h, radius, color);
     }
 
-    /// Draw text at position, clipped to the current clip rect.
     pub fn draw_text(&mut self, x: i32, y: i32, text: &str, fg: Color32, bg: Color32) {
         let dr = slopos_abi::damage::DamageRect {
             x0: self.clip.x,
@@ -95,7 +91,6 @@ impl<'a> PaintContext<'a> {
         crate::text::draw_str_clipped(self.buffer, x, y, text, fg, bg, &dr);
     }
 
-    /// Draw text with a transparent background (alpha-blended onto existing content).
     pub fn draw_text_transparent(&mut self, x: i32, y: i32, text: &str, fg: Color32) {
         let dr = self.clip.to_damage_rect();
         crate::text::draw_str_clipped(self.buffer, x, y, text, fg, Color32::TRANSPARENT, &dr);

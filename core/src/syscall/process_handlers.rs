@@ -172,7 +172,7 @@ fn read_user_spawn_actions(attrs: &SpawnAttrs) -> Result<KVec<exec::FdAction>, E
 /// Order is load-bearing: an undefined bit is answered as malformed before
 /// anything is said about privilege, so probing reserved bits never learns from
 /// an `EPERM` that a bit *means* something. The privileged bits a child ends up
-/// with come from [`crate::exec::grants`], keyed on the program being loaded.
+/// with come from [`crate::exec::grants`].
 fn validate_spawn_flags(flags: u16) -> Result<u16, Errno> {
     if flags & SPAWN_RESERVED != 0 {
         return Err(Errno::EINVAL);
@@ -184,8 +184,7 @@ fn validate_spawn_flags(flags: u16) -> Result<u16, Errno> {
         return Err(Errno::EPERM);
     }
     // `USER_MODE` is dropped rather than refused: `spawn_program_with_attrs`
-    // ORs it back in unconditionally, so refusing would fail a request asking
-    // for precisely what it is about to be given.
+    // ORs it back in unconditionally.
     Ok(flags & SPAWN_USER_SETTABLE)
 }
 
@@ -205,9 +204,8 @@ define_syscall!(syscall_spawn_path
 
     let priority = TaskPriority::try_from_u8(attrs.priority).ok_or(Errno::EINVAL)?;
     // Userland picks between the two ordinary tiers and nothing else. `High` is
-    // the compositor's, handed out by program identity (`exec::grants`) — a
-    // `loop {}` binary at that tier starves the machine. `KernelIo` and `Idle`
-    // have no syscall spawn surface at all.
+    // handed out by program identity (`exec::grants`) — a `loop {}` binary at
+    // that tier starves the machine.
     if !matches!(priority, TaskPriority::Normal | TaskPriority::Low) {
         return Err(Errno::EINVAL);
     }
@@ -263,8 +261,8 @@ define_syscall!(syscall_spawn_path
 
     let actions = read_user_spawn_actions(&attrs)?;
 
-    // The spawner's own table, so the child's fd actions clone from the
-    // process that asked — not from whoever holds its number by then.
+    // The spawner's own table, so the child's fd actions clone from the process
+    // that asked rather than from whoever holds its number by then.
     let parent_table = ctx.require_process().ok();
     let parent_tid = ctx.task_id();
     match exec::spawn_program_with_attrs(
@@ -311,7 +309,6 @@ define_syscall!(syscall_waitpid
                 if wnohang {
                     return Err(Errno::EAGAIN);
                 }
-                // The woken waiter learns *which* child exited by re-scanning.
                 slopos_sched::task::task_wait_any_child(caller_id)?;
                 match slopos_sched::task::task_first_exited_child(caller_id) {
                     Some(id) => id,
@@ -321,9 +318,9 @@ define_syscall!(syscall_waitpid
         },
     };
 
-    // Reaping is the parent's alone: `task_consume_zombie` unlinks from whoever
-    // the parent is and drops that owning reference, so a stranger's wait would
-    // leave the real parent with `ECHILD`.
+    // Reaping is the parent's alone: `task_consume_zombie` drops the parent's
+    // owning reference, so a stranger's wait would leave the real parent with
+    // `ECHILD`.
     match task_find_by_id(target_id) {
         Some(t) if t.parent_task_id() == caller_id => {}
         _ => return Err(Errno::ECHILD),
@@ -366,7 +363,7 @@ define_syscall!(syscall_terminate_task
         return Err(Errno::EINVAL);
     }
     // The compositor bit admits the caller to this syscall; it does not make
-    // every task reachable through it. Same rule as `kill`.
+    // every task reachable through it.
     if !crate::syscall::signal::may_signal(ctx.task().flags, target_id) {
         return Err(Errno::EPERM);
     }
@@ -489,7 +486,6 @@ define_syscall!(syscall_exec
                 }
                 slopos_arch::cpu::msr::write_msr(slopos_arch::cpu::msr::Msr::FS_BASE, tls_tp);
             }
-            // `set_regs` reapplies the CS/SS/RFLAGS sandbox bits.
             let uc = ctx.user_ctx();
             let mut regs = uc.regs();
             regs.rip = entry_point;
@@ -510,8 +506,6 @@ define_syscall!(syscall_exec
             // switch cannot re-save the old live registers over the reset.
             let xcr0 = slopos_ostd::cpu::x86_64::xsave::active_xcr0();
             slopos_ostd::cpu::x86_64::interrupts::IrqDisabled::with(|_irq| {
-                // One witness authorises both writes, so they cannot be split
-                // by a second derivation, and both keep the FPU owner tag.
                 if let Some(current) = slopos_sched::task_struct::Current::get() {
                     current.task().fpu_reset(&current);
                     let restored = current.task().fpu_restore_to_cpu(&current, xcr0);
@@ -541,10 +535,9 @@ define_syscall!(syscall_set_cpu_affinity
     let Some(task_ref) = task_find_by_id(resolved) else {
         return Err(Errno::ESRCH);
     };
-    // Pinning is a scheduling decision about someone else's task: unchecked,
-    // any task could pin a `NO_PREEMPT` spinner per CPU and wedge every core.
-    // Sharing an address space is the honest boundary. Compared as tables, not
-    // numbers — a recycled id would let a *later* process pass a sibling check.
+    // Unchecked, any task could pin a `NO_PREEMPT` spinner per CPU and wedge
+    // every core, so pinning is confined to a shared address space. Compared as
+    // tables, not numbers — a recycled id would let a *later* process pass.
     if task_ref.process().as_deref().and_then(FdTable::of) != Some(process_id) {
         return Err(Errno::EPERM);
     }
@@ -564,8 +557,6 @@ define_syscall!(syscall_get_cpu_affinity
     let Some(task_ref) = task_find_by_id(resolved) else {
         return Err(Errno::ESRCH);
     };
-    // Same boundary as the setter, compared as tables rather than numbers: a
-    // recycled id would let a task in a *later* process pass a sibling check.
     if task_ref.process().as_deref().and_then(FdTable::of) != Some(process_id) {
         return Err(Errno::EPERM);
     }
@@ -643,10 +634,10 @@ define_syscall!(syscall_setpgid
         Some(leader_ref.process_group.load().ok_or(Errno::EINVAL)?)
     };
 
-    // `target` is generally *not* the calling task, so a reader on another CPU
-    // may be looking at these fields. Integer first, membership second: the
-    // slot's Release store orders the pair and defers the displaced handle's
-    // release past any concurrent reader's clone.
+    // `target` is generally *not* the calling task, so another CPU may be
+    // reading these fields. Integer first, membership second: the slot's
+    // Release store orders the pair and defers the displaced handle's release
+    // past any concurrent reader's clone.
     target.set_pgid(resolved_pgid);
     target.process_group.store(new_group);
     Ok(())
@@ -660,8 +651,8 @@ define_syscall!(syscall_setsid (ctx)
     if task.pgid() == task.task_id || task.sid() == task.task_id {
         return Err(Errno::EPERM);
     }
-    // A fresh session + its initial group; installing them drops the old group
-    // membership (so the old session and any terminal weak links to it die).
+    // Installing the fresh group drops the old membership, so the old session
+    // and any terminal weak links to it die with it.
     let pg = new_session_group(task.task_id).ok_or(Errno::ENOMEM)?;
     if task.controlling_tty().is_some() {
         task.set_controlling_tty(None);
@@ -695,8 +686,6 @@ define_syscall!(syscall_chdir
         Err(_) => return Err(Errno::ENOENT),
     }
 
-    // Only the running task touches its own cwd, which is exactly what the
-    // `Current` witness proves.
     let current = Current::get().ok_or(Errno::EINVAL)?;
     if !current.task().set_cwd(&current, path.as_bytes()) {
         return Err(Errno::ENAMETOOLONG);
@@ -827,7 +816,7 @@ define_syscall!(syscall_prlimit64
     let process = process_id.process().ok_or(Errno::ESRCH)?;
     // Self only: there is no privilege principal in this kernel (getuid returns
     // a literal 0), so a cross-process limit change has no answer but
-    // "everyone may". Belongs to plans/authority-model.md.
+    // "everyone may".
     if pid != 0 && pid != process.id() {
         return Err(Errno::EPERM);
     }
@@ -875,8 +864,7 @@ define_syscall!(syscall_prlimit64
         }
         // Saturating, never `NO_LIMIT`: mapping an over-wide `rlim_cur` to the
         // no-limit sentinel would turn the widest possible *set* into a way to
-        // switch enforcement off. Clamping keeps `setrlimit` lower-only for
-        // every input, including the ones that do not fit.
+        // switch enforcement off.
         let scaled = want.rlim_cur / mapping.scale.max(1);
         let requested = u32::try_from(scaled).unwrap_or(u32::MAX).min(current.limit);
         set_limit(account, mapping.kind, requested);

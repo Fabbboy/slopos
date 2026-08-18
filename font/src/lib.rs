@@ -1,8 +1,7 @@
 //! TrueType font rasterizer for SlopOS.
 //!
-//! Provides anti-aliased text rendering from `.ttf` font files. Parses
-//! TrueType outline data, rasterizes glyphs with coverage-based anti-aliasing,
-//! and caches rendered glyphs for performance.
+//! Parses `.ttf` outline data, rasterizes glyphs with coverage-based
+//! anti-aliasing, and caches the results.
 //!
 //! # Usage
 //!
@@ -26,7 +25,6 @@ pub mod ttf_parser;
 use slopos_abi::damage::DamageRect;
 use slopos_abi::draw::{Canvas, Color32};
 
-// ── Shared glyph-set constants ─────────────────────────────────────────
 /// First printable ASCII codepoint (space).
 pub const ASCII_FIRST: u32 = 0x20;
 /// Last printable ASCII codepoint (tilde).
@@ -45,9 +43,8 @@ pub const LATIN1_COUNT: usize = (LATIN1_LAST - LATIN1_FIRST + 1) as usize;
 /// keyboard layout's `ring`/`caron` dead keys can flush.
 pub const EXTRA_GLYPHS: [u32; 3] = [0x20AC, 0x02DA, 0x02C7];
 
-/// Total glyph slots in an atlas (ASCII + Latin-1 supplement + extras). This
-/// is also the `glyph_count` of the `SYSCALL_FONT_SET` coverage wire format —
-/// both sides compile against this constant.
+/// Total glyph slots in an atlas; also the `glyph_count` of the
+/// `SYSCALL_FONT_SET` coverage wire format — both sides compile against it.
 pub const GLYPH_COUNT: usize = ASCII_COUNT + LATIN1_COUNT + EXTRA_GLYPHS.len();
 
 /// Atlas slot for a codepoint, or `None` for codepoints outside the glyph set
@@ -86,7 +83,6 @@ use ttf_parser::TtfFont;
 pub enum FontSource {
     /// Compiled into the binary via `include_bytes!`.
     Embedded,
-    /// Loaded from the filesystem at runtime.
     Filesystem,
     /// Loaded via `SYS_FONT_SET` from userland-provided bitmap or coverage data.
     Syscall,
@@ -94,7 +90,6 @@ pub enum FontSource {
     BitmapFallback,
 }
 
-/// High-level font renderer that combines parsing, rasterization, and caching.
 pub struct FontRenderer<'a> {
     pub(crate) font: TtfFont<'a>,
     cache: GlyphCache,
@@ -104,13 +99,12 @@ pub struct FontRenderer<'a> {
 impl<'a> FontRenderer<'a> {
     /// Create a new font renderer from raw TrueType font data.
     ///
-    /// Returns `None` if the font data cannot be parsed.
-    /// Source defaults to [`FontSource::Embedded`].
+    /// Returns `None` if the font data cannot be parsed. Source defaults to
+    /// [`FontSource::Embedded`].
     pub fn new(ttf_data: &'a [u8]) -> Option<Self> {
         Self::new_with_source(ttf_data, FontSource::Embedded)
     }
 
-    /// Create a new font renderer with an explicit source tag.
     pub fn new_with_source(ttf_data: &'a [u8], source: FontSource) -> Option<Self> {
         let font = TtfFont::parse(ttf_data)?;
         Some(Self {
@@ -120,19 +114,17 @@ impl<'a> FontRenderer<'a> {
         })
     }
 
-    /// Returns the source from which this font was loaded.
     pub fn source(&self) -> FontSource {
         self.source
     }
 
     /// Draw a text string onto a canvas at the given position.
     ///
-    /// `(x, y)` is the top-left corner of the text. `size_px` is the font
-    /// size in pixels. `bg` is the background colour for anti-alias blending;
-    /// pass an opaque colour for MMIO/write-only surfaces, or
-    /// `Color32::TRANSPARENT` to composite over existing content (requires a
-    /// readable surface).  Returns the damage rectangle covering all rendered
-    /// glyphs.
+    /// `(x, y)` is the top-left corner of the text. `bg` is the background
+    /// colour for anti-alias blending; pass an opaque colour for MMIO/write-only
+    /// surfaces, or `Color32::TRANSPARENT` to composite over existing content
+    /// (requires a readable surface). Returns the damage rectangle covering all
+    /// rendered glyphs.
     pub fn draw_text<T: Canvas>(
         &mut self,
         target: &mut T,
@@ -158,15 +150,13 @@ impl<'a> FontRenderer<'a> {
         for ch in text.chars() {
             let codepoint = ch as u32;
 
-            // Try cache first
             if self.cache.get(codepoint, size_px).is_none() {
-                // Rasterize and cache
                 if let Some(glyph) = self.rasterize_glyph(codepoint, size_px, scale, ascender) {
                     self.cache.insert(codepoint, size_px, glyph);
                 }
             }
 
-            // Get the true advance from font metrics (full float precision).
+            // Full float precision; the cached glyph's advance is pixel-rounded.
             let true_advance = self
                 .font
                 .glyph_index(codepoint)
@@ -174,7 +164,7 @@ impl<'a> FontRenderer<'a> {
                 .map(|hm| hm.advance_width as f32 * scale)
                 .unwrap_or(size_px as f32 * 0.5);
 
-            // Extract glyph info from cache to avoid overlapping borrows
+            // Copied out of the cache to avoid overlapping borrows.
             let glyph_info = self.cache.get(codepoint, size_px).map(|g| {
                 (
                     g.bearing_x,
@@ -261,7 +251,6 @@ impl<'a> FontRenderer<'a> {
 
                 let edges = outline_to_edges(out, scale, y_offset);
 
-                // Shift edges by x_offset
                 let shifted_edges: slopos_ostd::KVec<outline::Edge> =
                     slopos_ostd::KVec::from_iter_fallible(edges.iter().map(|e| outline::Edge {
                         x0: e.x0 + x_offset,
@@ -284,7 +273,7 @@ impl<'a> FontRenderer<'a> {
                 })
             }
             _ => {
-                // Space or empty glyph — no coverage data, just advance
+                // Space or empty glyph: advance only.
                 Some(RasterizedGlyph {
                     width: 0,
                     height: 0,
@@ -299,9 +288,9 @@ impl<'a> FontRenderer<'a> {
 
     /// Draw a coverage bitmap onto a canvas.
     ///
-    /// When `bg` is opaque, blends fg/bg directly (no framebuffer read-back,
-    /// safe for MMIO).  When `bg` is transparent, composites onto the
-    /// existing pixel (requires a readable surface like `DrawBuffer`).
+    /// An opaque `bg` blends fg/bg directly, with no framebuffer read-back, so
+    /// it is safe over MMIO; a transparent `bg` composites onto the existing
+    /// pixel and requires a readable surface like `DrawBuffer`.
     fn draw_glyph_coverage_static<T: Canvas>(
         target: &mut T,
         x: i32,

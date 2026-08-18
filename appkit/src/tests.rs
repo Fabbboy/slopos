@@ -322,7 +322,6 @@ fn test_focus_scope() {
     assert_eq!(fm.focused(), Some(id_a));
 
     fm.push_scope(vec![id_b, id_c]);
-    // A pushed scope focuses its first widget.
     assert_eq!(fm.focused(), Some(id_b));
 
     fm.move_focus_next();
@@ -383,7 +382,6 @@ fn test_deflate_unbounded() {
     let c = BoxConstraints::UNBOUNDED;
     let insets = EdgeInsets::all(10);
     let d = c.deflate(insets);
-    // Unbounded max stays unbounded rather than shrinking by the insets.
     assert_eq!(d.max_width, MAX_EXTENT);
     assert_eq!(d.max_height, MAX_EXTENT);
     assert_eq!(d.min_width, 0);
@@ -479,7 +477,6 @@ fn test_table_left_click_emits_no_context_menu() {
     assert_eq!(sink.drain_typed::<usize>(), vec![1]);
 }
 
-/// A secondary click on the header names no row, so it has nothing to open.
 fn test_table_right_click_header_is_inert() {
     let mut table = context_table(None);
     let mut sink = MessageSink::new();
@@ -647,7 +644,6 @@ fn dialog_in(window: Size) -> DialogWidget {
     dialog
 }
 
-/// Every child must land inside the card, which must itself be on-screen.
 fn test_dialog_places_children_inside_card() {
     let window = Size::new(640, 444);
     let dialog = dialog_in(window);
@@ -678,7 +674,6 @@ fn test_dialog_places_children_inside_card() {
     }
 }
 
-/// The card must be tall enough to hold the title, the body and the buttons.
 fn test_dialog_card_height_covers_content() {
     let dialog = dialog_in(Size::new(640, 444));
     let card = dialog.card_rect();
@@ -694,7 +689,6 @@ fn test_dialog_card_is_centered() {
     assert_eq!(card.y, (window.height - card.height) / 2);
 }
 
-/// Clicking one action must not fire the others.
 fn test_dialog_click_routes_to_action_under_pointer() {
     let mut dialog = dialog_in(Size::new(640, 444));
     let second = dialog.children()[1].layout_rect();
@@ -746,8 +740,6 @@ fn key(named: super::event::NamedKey, shift: bool) -> WidgetEvent {
     }
 }
 
-/// The first action of a confirm dialog is the destructive one, so a stray
-/// Enter must not reach it.
 fn test_dialog_enter_without_selection_fires_nothing() {
     let mut dialog = dialog_in(Size::new(640, 444));
     let mut sink = MessageSink::new();
@@ -759,7 +751,6 @@ fn test_dialog_enter_without_selection_fires_nothing() {
     assert!(sink.drain_typed::<String>().is_empty());
 }
 
-/// Tab selects an action and Enter then fires that one, not the first.
 fn test_dialog_keyboard_selects_then_activates() {
     let mut dialog = dialog_in(Size::new(640, 444));
     let mut sink = MessageSink::new();
@@ -794,8 +785,6 @@ fn test_dialog_escape_dismisses() {
     assert_eq!(sink.drain_typed::<String>(), vec![String::from("dismiss")]);
 }
 
-/// The reason `MAX_EXTENT` is finite: a container adds padding to whatever a
-/// child reports, and `i32::MAX + 1` is negative.
 fn test_unbounded_extent_survives_padding_arithmetic() {
     let c = BoxConstraints::UNBOUNDED;
     assert!(!c.is_width_bounded());
@@ -814,8 +803,6 @@ fn test_deflate_preserves_unboundedness() {
     assert_eq!(d.max_width, MAX_EXTENT);
 }
 
-/// `measure_widget` records the size, so a parent never has to invent a rect to
-/// find it out.
 fn test_measure_widget_records_size() {
     let style = StyleSheet::dark();
     let mut ctx = MeasureCtx { style: &style };

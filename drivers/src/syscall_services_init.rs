@@ -61,9 +61,8 @@ fn tty_grantpt_adapter(tty_index: TtyIndex) -> Result<(), tty::TtyError> {
     tty::set_pty_lock(tty_index, false)
 }
 
-// The pty_alloc adapter erases the concrete master `KArc<TtyBacking>` to
-// `KArc<dyn FileBacking>` at this boundary so the file layer can own it
-// without naming the driver type; the other opens are already erased.
+// Erases the concrete master `KArc<TtyBacking>` to `KArc<dyn FileBacking>` so the
+// file layer can own it without naming the driver type.
 
 fn tty_alloc_pty_adapter(
     account: slopos_ostd::process::AccountId,

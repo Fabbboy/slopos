@@ -8,7 +8,6 @@ pub const MAX_INPUT_TASKS: usize = 32;
 pub const MAX_EVENTS_PER_TASK: usize = 64;
 pub const CLIPBOARD_MAX_SIZE: usize = 4096;
 
-/// Focus type for input_set_focus syscall
 pub const INPUT_FOCUS_KEYBOARD: u32 = 0;
 pub const INPUT_FOCUS_POINTER: u32 = 1;
 
@@ -22,7 +21,6 @@ pub const MODIFIER_CAPS_LOCK: u8 = 1 << 4;
 /// Num Lock active. Carried in the key-event modifier snapshot so a consumer can
 /// resolve keypad keys (digit vs navigation) without tracking lock state itself.
 pub const MODIFIER_NUM_LOCK: u8 = 1 << 5;
-/// Scroll Lock active.
 pub const MODIFIER_SCROLL_LOCK: u8 = 1 << 6;
 /// AltGr (right Alt) held; `MODIFIER_ALT` is set too. Distinguishes
 /// AltGr-as-text (`AltGr+2 = @`) from a left-Alt shortcut chord.
@@ -33,7 +31,6 @@ pub const MODIFIER_ALTGR: u8 = 1 << 7;
 pub const KEY_FLAG_HAS_CANONICAL: u8 = 1 << 0;
 /// This press is an auto-repeat, not a fresh physical key-down.
 pub const KEY_FLAG_IS_REPEAT: u8 = 1 << 1;
-/// The key came from the numeric keypad block.
 pub const KEY_FLAG_FROM_KEYPAD: u8 = 1 << 2;
 
 /// Axis identifiers for PointerAxis events (Wayland wl_pointer.axis convention)
@@ -224,7 +221,6 @@ impl InputEvent {
         }
     }
 
-    /// Configure event — a window-resize notification.
     pub fn configure(width: u32, height: u32, timestamp_ms: u64) -> Self {
         Self {
             event_type: InputEventType::Configure,
@@ -251,13 +247,11 @@ impl InputEvent {
         }
     }
 
-    /// Axis identifier of a PointerAxis event (0 = vertical, 1 = horizontal).
     #[inline]
     pub fn axis_id(&self) -> u32 {
         self.data.data0
     }
 
-    /// Scroll value in value120 units; ±120 = one physical wheel click.
     #[inline]
     pub fn axis_value_v120(&self) -> i32 {
         self.data.data1 as i32
@@ -273,19 +267,18 @@ impl InputEvent {
         ((self.data.data0 >> 16) & 0xFF) as u8
     }
 
-    /// Extract the `KEY_FLAG_*` bitset from a key event.
     #[inline]
     pub fn key_flags(&self) -> u8 {
         ((self.data.data0 >> 8) & 0xFF) as u8
     }
 
-    /// Extract the `MODIFIER_*` snapshot captured when the key event was produced.
+    /// The `MODIFIER_*` snapshot captured when the key event was produced.
     #[inline]
     pub fn key_modifiers(&self) -> u8 {
         ((self.data.data0 >> 24) & 0xFF) as u8
     }
 
-    /// Extract the canonical HID usage keycode (0 = none / legacy event).
+    /// Canonical HID usage keycode (0 = none / legacy event).
     #[inline]
     pub fn key_keycode(&self) -> u16 {
         (self.data.data1 & 0xFFFF) as u16

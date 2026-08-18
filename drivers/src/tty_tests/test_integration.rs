@@ -58,7 +58,6 @@ pub fn test_pty_hangup_propagation() -> TestResult {
         Err(_) => return TestResult::Fail,
     };
 
-    // Closing the last master open hangs up the still-open slave.
     drop(master_backing);
     let events = tty::poll_events(
         slave,
@@ -136,10 +135,6 @@ pub fn test_echo_batching_correctness() -> TestResult {
     TestResult::Pass
 }
 
-// ===========================================================================
-// Per-TTY API tests (replaced compat shim tests)
-// ===========================================================================
-/// active_tty defaults to 0.
 pub fn test_active_tty_default() -> TestResult {
     let idx = tty::active_tty();
     if idx != TtyIndex(0) {
@@ -152,11 +147,9 @@ pub fn test_active_tty_default() -> TestResult {
     TestResult::Pass
 }
 
-/// set_active_tty + active_tty round-trip.
 pub fn test_set_active_tty() -> TestResult {
     tty::set_active_tty(TtyIndex(1));
     let idx = tty::active_tty();
-    // Reset to default.
     tty::set_active_tty(TtyIndex(0));
 
     if idx != TtyIndex(1) {
@@ -166,13 +159,12 @@ pub fn test_set_active_tty() -> TestResult {
     TestResult::Pass
 }
 
-/// set_foreground_pgrp / get_foreground_pgrp round-trip via per-TTY API.
 pub fn test_foreground_pgrp() -> TestResult {
     tty::table::tty_table_init();
     let scope = SessionScope::new(42, 42);
     tty::session::test_install_session(TtyIndex(0), scope.session_weak(), scope.pgrp_weak());
     let pgid = tty::get_foreground_pgrp(TtyIndex(0)).unwrap_or(0);
-    tty::detach_session(TtyIndex(0)); // Reset.
+    tty::detach_session(TtyIndex(0));
 
     if pgid != 42 {
         klog_info!(
@@ -184,14 +176,12 @@ pub fn test_foreground_pgrp() -> TestResult {
     TestResult::Pass
 }
 
-/// set_compositor_focus / get_compositor_focus round-trip.
-///
 /// Verifies that compositor focus only sets `focused_task_id`, NOT `fg_pgrp`.
 pub fn test_compositor_focus() -> TestResult {
     tty::table::tty_table_init();
     let _ = tty::set_compositor_focus(99);
     let focus = tty::get_compositor_focus().unwrap_or(0);
-    let _ = tty::set_compositor_focus(0); // Reset.
+    let _ = tty::set_compositor_focus(0);
 
     if focus != 99 {
         klog_info!(
@@ -201,12 +191,11 @@ pub fn test_compositor_focus() -> TestResult {
         return TestResult::Fail;
     }
 
-    // Verify that fg_pgrp was NOT modified by set_compositor_focus.
     tty::table::tty_table_init();
     let fg_before = tty::get_foreground_pgrp(TtyIndex(0)).unwrap_or(0);
     let _ = tty::set_compositor_focus(42);
     let fg_after = tty::get_foreground_pgrp(TtyIndex(0)).unwrap_or(0);
-    let _ = tty::set_compositor_focus(0); // Reset.
+    let _ = tty::set_compositor_focus(0);
 
     if fg_before != fg_after {
         klog_info!(

@@ -2,9 +2,7 @@
 //!
 //! Exercises [`crate::platform_bus::matchmake`] over synthetic devices +
 //! drivers with a heap-backed claim sink — no ACPI namespace, no real hardware,
-//! no live claim table. Mirrors `pci_binding.rs`: one-driver-per-device binding,
-//! priority ordering (specific before generic), dup-claim prevention, and
-//! probe-failure leaving the device unbound.
+//! no live claim table.
 
 use core::cell::RefCell;
 use core::sync::atomic::{AtomicU32, Ordering};
@@ -19,7 +17,6 @@ use crate::platform_bus::{
     PlatformMatch, PlatformProbeError, ProbeOutcome, matchmake,
 };
 
-/// A synthetic device that matched a `'static` id.
 fn device(id: &'static [u8]) -> PlatformDeviceInfo {
     PlatformDeviceInfo {
         matched_id: id,
@@ -75,8 +72,6 @@ fn fail_probe(_b: &mut BoundPlatformDevice<'_>) -> Result<ProbeOutcome, Platform
     Err(PlatformProbeError::DeviceFault)
 }
 
-// --- Test 1: a matching driver binds the device. --------------------------
-
 static T1_DRV: PlatformDriverEntry = PlatformDriverEntry {
     name: "t1-kbd",
     match_table: &[PlatformMatch::HidCid(b"PNP0303")],
@@ -100,8 +95,6 @@ pub fn test_platform_binding_records_claim() -> TestResult {
         other => fail!("expected t1-kbd to bind, got {:?}", other),
     }
 }
-
-// --- Test 2: specific (lower priority) offered before generic. -------------
 
 static T2_SEQ: AtomicU32 = AtomicU32::new(0);
 static T2_SPECIFIC_SEQ: AtomicU32 = AtomicU32::new(u32::MAX);
@@ -166,8 +159,6 @@ pub fn test_platform_specific_beats_generic() -> TestResult {
     }
 }
 
-// --- Test 3: a claimed device is not offered to another matching driver. ---
-
 static T3_B_PROBES: AtomicU32 = AtomicU32::new(0);
 
 fn t3_b_probe(_b: &mut BoundPlatformDevice<'_>) -> Result<ProbeOutcome, PlatformProbeError> {
@@ -212,8 +203,6 @@ pub fn test_platform_dup_claim_prevention() -> TestResult {
         ),
     }
 }
-
-// --- Test 4: probe Err leaves the device unbound. --------------------------
 
 static T4_DRV: PlatformDriverEntry = PlatformDriverEntry {
     name: "t4-fail",

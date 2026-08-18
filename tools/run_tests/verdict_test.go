@@ -5,11 +5,9 @@ import (
 	"testing"
 )
 
-// intp is a small helper for the *int QemuStatus field.
 func intp(v int) *int { return &v }
 
-// phase builds a PhaseRecord with a plan and a given number of passing
-// tests, which is all ClassifyRun looks at.
+// phase builds a PhaseRecord with the plan and pass count ClassifyRun reads.
 func phase(idx int, name string, planN int, passing int) *PhaseRecord {
 	p := &PhaseRecord{Idx: idx, Name: name}
 	n := planN
@@ -32,12 +30,8 @@ func summaryOf(phases ...*PhaseRecord) *RunSummary {
 	return s
 }
 
-// The regression this file exists for. A stale QEMU holding the write lock
-// on the fs image makes QEMU exit 1 without producing a single byte of
-// KTAP; qemu_run.sh reads status 1 as "tests passed" and exits 0. The
-// wrapper used to agree and exit 0 having run nothing.
 func TestQemuNeverLaunchedIsHardError(t *testing.T) {
-	s := summaryOf() // no phases at all — nothing was ever announced
+	s := summaryOf()
 	v := ClassifyRun(s, DriverResult{QemuStatus: intp(0)}, false)
 	if v.Code == 0 {
 		t.Fatalf("a run that produced no phases must not exit 0")
@@ -50,8 +44,6 @@ func TestQemuNeverLaunchedIsHardError(t *testing.T) {
 	}
 }
 
-// The same thing with a filter set. A filter explains zero *tests*; it
-// never explains zero *phases*, so this must still fail.
 func TestQemuNeverLaunchedIsHardErrorEvenWithFilter(t *testing.T) {
 	v := ClassifyRun(summaryOf(), DriverResult{QemuStatus: intp(0)}, true)
 	if v.Code != 2 {
@@ -59,10 +51,6 @@ func TestQemuNeverLaunchedIsHardErrorEvenWithFilter(t *testing.T) {
 	}
 }
 
-// The case that must stay green, and the reason the predicate keys on
-// phase count rather than test count. Measured against the real harness:
-// `just test 'zzz_no_such_test::*'` prints "0 tests across 2 phases",
-// because both phases announce themselves and then plan 1..0.
 func TestZeroMatchFilterStaysGreen(t *testing.T) {
 	s := summaryOf(
 		phase(0, "kernel", 0, 0),
@@ -75,8 +63,6 @@ func TestZeroMatchFilterStaysGreen(t *testing.T) {
 	}
 }
 
-// Phases ran, planned nothing, and the caller asked for everything. That
-// is a broken build rather than an empty request.
 func TestZeroPlanWithoutFilterFails(t *testing.T) {
 	s := summaryOf(
 		phase(0, "kernel", 0, 0),
@@ -91,8 +77,6 @@ func TestZeroPlanWithoutFilterFails(t *testing.T) {
 	}
 }
 
-// Truncation: the kernel planned more than it delivered and did not bail.
-// "0 failed" is true and misleading, so the exit code must not be 0.
 func TestTruncatedRunFails(t *testing.T) {
 	s := summaryOf(phase(0, "kernel", 2666, 2562))
 	s.Truncated = true
@@ -105,8 +89,6 @@ func TestTruncatedRunFails(t *testing.T) {
 	}
 }
 
-// A truncated run is still a failure when the caller filtered, and the
-// filter must not launder it into the legitimate-empty path.
 func TestTruncatedRunFailsUnderFilter(t *testing.T) {
 	s := summaryOf(phase(0, "kernel", 10, 4))
 	s.Truncated = true
@@ -149,8 +131,6 @@ func TestTimeoutExitsOne(t *testing.T) {
 	}
 }
 
-// Ctrl-C outranks the no-phases check: a run killed before the first phase
-// is the user's doing, not a broken harness.
 func TestUserAbortWinsOverNoPhases(t *testing.T) {
 	v := ClassifyRun(summaryOf(), DriverResult{UserAborted: true}, false)
 	if v.Code != 130 {
@@ -161,9 +141,6 @@ func TestUserAbortWinsOverNoPhases(t *testing.T) {
 	}
 }
 
-// Pre-existing behaviour that must not drift: a green run whose child
-// reported a non-zero status is a wrapper failure, and a failing run whose
-// child reported something other than 0 or 1 escalates from 1 to 2.
 func TestGreenRunWithDirtyQemuStatusEscalates(t *testing.T) {
 	s := summaryOf(phase(0, "kernel", 1, 1))
 	v := ClassifyRun(s, DriverResult{QemuStatus: intp(3)}, false)
@@ -189,8 +166,6 @@ func TestFailingRunWithUnexpectedQemuStatusEscalates(t *testing.T) {
 	}
 }
 
-// A failing run whose child exited 1 is the normal shape (isa-debug-exit
-// encodes the kernel verdict), so it must stay at 1 rather than escalating.
 func TestFailingRunWithQemuStatusOneStaysAtOne(t *testing.T) {
 	p := phase(0, "kernel", 2, 1)
 	p.Tests = append(p.Tests, &TestRecord{
@@ -201,7 +176,6 @@ func TestFailingRunWithQemuStatusOneStaysAtOne(t *testing.T) {
 	}
 }
 
-// A nil status (child never finished cleanly) must not be dereferenced.
 func TestNilQemuStatusIsSafe(t *testing.T) {
 	s := summaryOf(phase(0, "kernel", 1, 1))
 	if v := ClassifyRun(s, DriverResult{QemuStatus: nil}, false); v.Code != 0 {

@@ -1,6 +1,5 @@
 //! The unwinder resolves return addresses through a binary-search index. Two
-//! checks: the index's shape, which is exact and deterministic, and the
-//! per-frame cost of a real caught panic, which the NMI watchdog must cover.
+//! checks: the index's shape, and the per-frame cost of a real caught panic.
 
 use slopos_kernel_services::clock;
 use slopos_ostd::panic_recovery;

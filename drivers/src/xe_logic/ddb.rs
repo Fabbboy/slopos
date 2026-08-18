@@ -2,9 +2,8 @@
 //! sequencing half (`crate::xe::ddb`) turns these values into register writes.
 //!
 //! The cursor is a real plane in the display engine's DBUF/watermark model, so
-//! arming it with a zero DDB allocation is an invalid pipe state that starves the
-//! primary's fetch (which then decodes its linear surface at X-tile stride and
-//! replicates 8x vertically). Cursor blocks come off the TAIL of the pipe's
+//! arming it with a zero DDB allocation is an invalid pipe state that starves
+//! the primary's fetch. Cursor blocks come off the TAIL of the pipe's
 //! allocation, written before the cursor is armed.
 
 use super::regs;
@@ -17,7 +16,7 @@ pub const CURSOR_DDB_BLOCKS: u32 = 32;
 /// [`CURSOR_DDB_BLOCKS`]: a watermark >= the plane's DDB allocation is invalid.
 pub const CURSOR_WM0_BLOCKS: u32 = 8;
 
-/// A DDB allocation as a half-open block range `[start, end)` (end exclusive).
+/// A DDB allocation as a half-open block range `[start, end)`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct DdbEntry {
     pub start: u32,
@@ -35,7 +34,6 @@ impl DdbEntry {
     }
 }
 
-/// The result of carving cursor DDB off the primary's allocation.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct CursorDdbSplit {
     pub primary: DdbEntry,

@@ -1,9 +1,4 @@
 //! Kernel-side IRQ surface tests.
-//!
-//! Exercises:
-//!   - the residual core::irq book-keeping (route, mask, init, counters)
-//!   - the OSTD IrqAllocator surface that drivers now consume
-//!   - the closure-callback dispatch path
 
 use core::sync::atomic::{AtomicUsize, Ordering};
 
@@ -16,10 +11,6 @@ use crate::irq::{
     get_timer_ticks, increment_keyboard_events, increment_timer_ticks, is_initialized, is_masked,
     mask_irq_line, set_irq_route, unmask_irq_line,
 };
-
-// ---------------------------------------------------------------------------
-// Route + mask book-keeping
-// ---------------------------------------------------------------------------
 
 pub fn test_irq_route_set_get_round_trip() -> TestResult {
     set_irq_route(5, 42);
@@ -52,8 +43,7 @@ pub fn test_irq_is_masked_boundary() -> TestResult {
 }
 
 pub fn test_irq_mask_unmask_no_route() -> TestResult {
-    // Pick an IRQ line that the kernel boot path doesn't program.
-    // (PS/2 init programs lines 1, 4, 12; we pick 7 which is unused.)
+    // Line 7 is one the boot path never programs; PS/2 init takes 1, 4 and 12.
     unmask_irq_line(7);
     assert_test!(!is_masked(7), "Line should be unmasked");
     mask_irq_line(7);
@@ -71,10 +61,6 @@ pub fn test_irq_initialized_flag_true() -> TestResult {
     assert_test!(is_initialized(), "is_initialized should always return true");
     TestResult::Pass
 }
-
-// ---------------------------------------------------------------------------
-// Counters
-// ---------------------------------------------------------------------------
 
 pub fn test_irq_timer_ticks_increment() -> TestResult {
     let before = get_timer_ticks();
@@ -125,10 +111,6 @@ pub fn test_irq_vector_calculation() -> TestResult {
     TestResult::Pass
 }
 
-// ---------------------------------------------------------------------------
-// OSTD IrqAllocator + reserve_specific (the new driver-facing surface)
-// ---------------------------------------------------------------------------
-
 pub fn test_ostd_alloc_returns_in_range() -> TestResult {
     let line = IrqAllocator::alloc().expect("alloc");
     let v = line.vector();
@@ -149,9 +131,7 @@ pub fn test_ostd_alloc_drop_releases() -> TestResult {
         let line = IrqAllocator::alloc().expect("alloc");
         line.vector()
     };
-    // After drop the bit is freed; we don't assert exact reuse (other
-    // tests run in parallel suite ordering) but the basic Drop path must
-    // not panic.
+    // Exact reuse is not asserted, only that the Drop path does not panic.
     assert_test!(v >= 32, "vector still in range");
     TestResult::Pass
 }
@@ -186,10 +166,6 @@ pub fn test_ostd_reserve_specific_out_of_range() -> TestResult {
     );
     TestResult::Pass
 }
-
-// ---------------------------------------------------------------------------
-// OSTD register_callback + dispatch
-// ---------------------------------------------------------------------------
 
 static DISPATCH_COUNTER: AtomicUsize = AtomicUsize::new(0);
 
@@ -235,7 +211,7 @@ pub fn test_ostd_handle_drop_clears_dispatch() -> TestResult {
                 DISPATCH_COUNTER.fetch_add(1, Ordering::SeqCst);
             })
             .expect("register");
-    } // _h drops here -> clears dispatch slot
+    }
     dispatch(v, 0);
     assert_test!(
         DISPATCH_COUNTER.load(Ordering::SeqCst) == 0,
@@ -245,8 +221,7 @@ pub fn test_ostd_handle_drop_clears_dispatch() -> TestResult {
 }
 
 pub fn test_ostd_dispatch_to_unregistered_vector_is_noop() -> TestResult {
-    // Pick a vector with no registered callback. Dispatch must be a no-op
-    // (no panic, no UB).
+    // 123 has no registered callback.
     dispatch(123, 0);
     TestResult::Pass
 }

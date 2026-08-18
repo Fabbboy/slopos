@@ -1,19 +1,13 @@
-//! Touchpad gesture engine — turns multitouch contact frames into the
-//! pointer events the compositor understands (relative motion, buttons,
-//! scroll axis): pointer acceleration, tap-to-click, two-finger scroll, and
-//! basic multi-finger arbitration.
-//!
-//! It feeds the relative-pointer ABI rather than pushing raw
-//! absolute/multitouch coordinates at apps.
+//! Touchpad gesture engine: multitouch contact frames in, relative-pointer
+//! events out — motion, buttons, scroll axis, tap-to-click. Apps never see the
+//! raw absolute/multitouch coordinates.
 
 use crate::input_event;
 
-/// Maximum simultaneous contacts we track.
 pub const MAX_CONTACTS: usize = 5;
 
 const BUTTON_LEFT: u8 = 0x01;
 
-/// One reported contact.
 #[derive(Clone, Copy, Default)]
 pub struct Contact {
     pub id: u8,
@@ -22,7 +16,6 @@ pub struct Contact {
     pub tip: bool,
 }
 
-/// One input report's worth of touch state.
 pub struct Frame {
     pub contacts: [Contact; MAX_CONTACTS],
     pub count: usize,
@@ -40,10 +33,9 @@ impl Frame {
     }
 }
 
-// Tuning.
-const TAP_MAX_FRAMES: u32 = 12; // ~ up to this many poll intervals = a tap
-const TAP_MAX_MOVE: i32 = 60; // pad units of slop allowed during a tap
-const SCROLL_STEP: i32 = 80; // pad units per scroll notch
+const TAP_MAX_FRAMES: u32 = 12; // poll intervals
+const TAP_MAX_MOVE: i32 = 60; // pad units
+const SCROLL_STEP: i32 = 80; // pad units per notch
 const SCROLL_NOTCH_V120: i32 = 120;
 
 pub struct GestureEngine {
@@ -54,19 +46,16 @@ pub struct GestureEngine {
     pad_max_x: i32,
     pad_max_y: i32,
 
-    // Single-finger pointer tracking.
     active_id: Option<u8>,
     last_x: i32,
     last_y: i32,
 
-    // Two-finger scroll.
     scroll_id_a: Option<u8>,
     scroll_last_y: i32,
     scroll_last_x: i32,
     scroll_accum_y: i32,
     scroll_accum_x: i32,
 
-    // Tap-to-click.
     finger_was_down: bool,
     max_fingers_in_gesture: usize,
     gesture_frames: u32,
@@ -113,9 +102,7 @@ impl GestureEngine {
         self.cy = self.cy.clamp(0, self.h - 1);
     }
 
-    /// Process one frame, emitting pointer events.
     pub fn process(&mut self, frame: &Frame, ts: u64) {
-        // Physical button edge.
         if frame.button != self.btn_down {
             self.btn_down = frame.button;
             input_event::input_route_pointer_button(BUTTON_LEFT, frame.button, ts);
@@ -147,7 +134,7 @@ impl GestureEngine {
             return;
         };
         if self.active_id != Some(c.id) {
-            // New finger took over — establish baseline, no motion.
+            // New finger: baseline only, no motion emitted.
             self.active_id = Some(c.id);
             self.last_x = c.x;
             self.last_y = c.y;
@@ -178,7 +165,6 @@ impl GestureEngine {
 
     fn handle_two_finger(&mut self, frame: &Frame, ts: u64) {
         self.active_id = None; // not driving the cursor with 2 fingers
-        // Use the first two tipped contacts; scroll on their average motion.
         let mut it = frame.contacts[..frame.count].iter().filter(|c| c.tip);
         let (Some(a), Some(b)) = (it.next(), it.next()) else {
             return;
@@ -211,8 +197,6 @@ impl GestureEngine {
     }
 
     fn on_lift(&mut self, ts: u64) {
-        // Tap-to-click: a single finger, brief, with little movement, and
-        // no physical button press.
         let tapped = self.max_fingers_in_gesture == 1
             && self.gesture_frames <= TAP_MAX_FRAMES
             && !self.gesture_moved
@@ -234,7 +218,6 @@ impl GestureEngine {
         self.scroll_accum_y = 0;
     }
 
-    /// Map a pad-X delta to a screen-X delta with light acceleration.
     fn scale_x(&self, dpad: i32) -> i32 {
         accelerate(dpad, self.w, self.pad_max_x)
     }
@@ -243,14 +226,12 @@ impl GestureEngine {
     }
 }
 
-/// Base 1:1 pad→screen mapping with a gentle speed-up for fast motion.
 fn accelerate(dpad: i32, screen: i32, pad_max: i32) -> i32 {
     if dpad == 0 || pad_max <= 0 {
         return 0;
     }
-    // Base mapping: full-pad swipe ≈ full screen, times a sensitivity of 1.4.
+    // Full-pad swipe ≈ full screen, times a sensitivity of 1.4.
     let base = dpad * screen * 14 / (pad_max * 10);
-    // Acceleration: add a fraction of base again for fast flicks.
     let extra = if dpad.abs() > pad_max / 16 {
         base / 2
     } else {

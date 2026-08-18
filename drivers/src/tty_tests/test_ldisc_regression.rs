@@ -2,7 +2,6 @@
 
 use super::fixtures::*;
 
-/// PENDIN constant value is 0x4000.
 pub fn test_pendin_flag_value() -> TestResult {
     if LocalFlags::PENDIN.bits() != 0x4000 {
         klog_info!("TTY_TEST: BUG - PENDIN should be 0x4000");
@@ -11,8 +10,6 @@ pub fn test_pendin_flag_value() -> TestResult {
     TestResult::Pass
 }
 
-/// Changing an echo-affecting lflag sets PENDIN; the next input_char()
-/// returns ReprintLine instead of processing the byte.
 pub fn test_pendin_auto_set_on_echo_change() -> TestResult {
     let mut ld = LineDisc::new();
     ld.input_char(b'h');
@@ -30,7 +27,6 @@ pub fn test_pendin_auto_set_on_echo_change() -> TestResult {
     TestResult::Pass
 }
 
-/// PENDIN triggers ReprintLine once, then the next input is processed normally.
 pub fn test_pendin_one_shot() -> TestResult {
     let mut ld = LineDisc::new();
     ld.input_char(b'a');
@@ -53,7 +49,6 @@ pub fn test_pendin_one_shot() -> TestResult {
     TestResult::Pass
 }
 
-/// Explicit VREPRINT (Ctrl+R) clears PENDIN so we don't double-reprint.
 pub fn test_vreprint_clears_pendin() -> TestResult {
     let mut ld = LineDisc::new();
     ld.input_char(b'z');
@@ -77,7 +72,6 @@ pub fn test_vreprint_clears_pendin() -> TestResult {
     TestResult::Pass
 }
 
-/// Changing non-echo-affecting flags (e.g., ISIG, NOFLSH) does NOT set PENDIN.
 pub fn test_pendin_not_set_for_non_echo_flags() -> TestResult {
     let mut ld = LineDisc::new();
     ld.input_char(b'q');
@@ -94,7 +88,6 @@ pub fn test_pendin_not_set_for_non_echo_flags() -> TestResult {
     TestResult::Pass
 }
 
-/// PENDIN is not set when the edit buffer is empty (nothing to reprint).
 pub fn test_pendin_empty_edit_buffer() -> TestResult {
     let mut ld = LineDisc::new();
 
@@ -110,7 +103,6 @@ pub fn test_pendin_empty_edit_buffer() -> TestResult {
     TestResult::Pass
 }
 
-/// flush_all() clears PENDIN state.
 pub fn test_flush_clears_pendin() -> TestResult {
     let mut ld = LineDisc::new();
     ld.input_char(b'a');
@@ -129,7 +121,6 @@ pub fn test_flush_clears_pendin() -> TestResult {
     TestResult::Pass
 }
 
-/// flush_input() clears PENDIN state.
 pub fn test_flush_input_clears_pendin() -> TestResult {
     let mut ld = LineDisc::new();
     ld.input_char(b'a');
@@ -148,8 +139,7 @@ pub fn test_flush_input_clears_pendin() -> TestResult {
     TestResult::Pass
 }
 
-/// tcflush(TCIFLUSH) clears throttle on a PTY slave, or the master-side
-/// writer stays blocked forever.
+/// Without the unthrottle, the master-side writer stays blocked forever.
 pub fn test_review_tcflush_unthrottles_pty() -> TestResult {
     use crate::tty::ldisc::THROTTLE_HIGH_WATER;
     tty::table::tty_table_init();
@@ -214,7 +204,6 @@ pub fn test_review_tcflush_unthrottles_pty() -> TestResult {
     TestResult::Pass
 }
 
-/// TCIOFLUSH clears throttle too, via its input-flush branch.
 pub fn test_review_tcflush_both_unthrottles_pty() -> TestResult {
     use crate::tty::ldisc::THROTTLE_HIGH_WATER;
     tty::table::tty_table_init();
@@ -315,8 +304,6 @@ pub fn test_review_master_write_batch_boundary() -> TestResult {
     let burst = [b'Q'; 256];
     let accepted = crate::tty::pty::master_write(&peer, &burst);
 
-    // Throttle is checked only after each 64-byte batch, so the first batch
-    // goes in whole and the count is batch-aligned.
     if accepted != 64 {
         klog_info!(
             "TTY_TEST: BUG - master_write returned {} (expected 64 for batch boundary)",
@@ -330,8 +317,8 @@ pub fn test_review_master_write_batch_boundary() -> TestResult {
     TestResult::Pass
 }
 
-/// c_ospeed does not override the CBAUD bits. POSIX puts the baud rate in
-/// c_cflag; c_ispeed/c_ospeed are informational fields get_termios fills in.
+/// POSIX puts the baud rate in c_cflag; c_ispeed/c_ospeed are informational
+/// fields get_termios fills in.
 pub fn test_review_speed_fields_merge_into_cflag() -> TestResult {
     use slopos_abi::syscall::*;
     tty::table::tty_table_init();
@@ -399,7 +386,6 @@ pub fn test_review_speed_ispeed_fallback() -> TestResult {
     TestResult::Pass
 }
 
-/// An unrecognised c_ospeed leaves the CBAUD bits as they were.
 pub fn test_review_speed_unrecognised_noop() -> TestResult {
     use slopos_abi::syscall::*;
     tty::table::tty_table_init();
@@ -428,8 +414,7 @@ pub fn test_review_speed_unrecognised_noop() -> TestResult {
     TestResult::Pass
 }
 
-/// poll_events reports POLLERR on a hung-up TTY, so a program watching only
-/// POLLERR for write errors still sees the hang-up.
+/// A program watching only POLLERR for write errors still sees the hang-up.
 pub fn test_review_pollerr_on_hangup() -> TestResult {
     tty::table::tty_table_init();
     let idx = TtyIndex(0);
@@ -457,7 +442,6 @@ pub fn test_review_pollerr_on_hangup() -> TestResult {
     TestResult::Pass
 }
 
-/// A closed and drained PTY slave shows the master POLLERR beside POLLHUP.
 pub fn test_review_pollerr_on_peer_closed() -> TestResult {
     tty::table::tty_table_init();
 
@@ -494,8 +478,7 @@ pub fn test_review_pollerr_on_peer_closed() -> TestResult {
     TestResult::Pass
 }
 
-/// flush_edit_to_cooked preserves bytes that did not fit in the cooked ring
-/// rather than resetting `edit_len` and discarding them.
+/// flush_edit_to_cooked preserves bytes that did not fit in the cooked ring.
 pub fn test_bugfix_flush_edit_preserves_remainder() -> TestResult {
     use crate::tty::ldisc::LineDisc;
 
@@ -564,8 +547,6 @@ pub fn test_bugfix_flush_edit_preserves_remainder() -> TestResult {
     TestResult::Pass
 }
 
-/// A non-blocking write to a PTY master whose slave is throttled returns
-/// WouldBlock rather than blocking.
 pub fn test_bugfix_nonblock_write_throttled_pty() -> TestResult {
     tty::table::tty_table_init();
 
@@ -606,7 +587,6 @@ pub fn test_bugfix_nonblock_write_throttled_pty() -> TestResult {
     }
 }
 
-/// A non-blocking write to an unthrottled PTY succeeds normally.
 pub fn test_bugfix_nonblock_write_unthrottled_pty() -> TestResult {
     tty::table::tty_table_init();
 
@@ -799,8 +779,6 @@ pub fn test_literal_next_vintr_does_not_bypass_throttle() -> TestResult {
     TestResult::Pass
 }
 
-/// With the master's raw buffer full, slave_write stops accepting bytes
-/// instead of dropping them silently.
 pub fn test_bugfix_rawdisc_input_full() -> TestResult {
     use crate::tty::ldisc::RawDisc;
 
@@ -838,7 +816,6 @@ pub fn test_bugfix_rawdisc_input_full() -> TestResult {
     TestResult::Pass
 }
 
-/// slave_write returns a short write count when the master's buffer is full.
 pub fn test_bugfix_slave_write_stops_on_full() -> TestResult {
     tty::table::tty_table_init();
 
@@ -902,7 +879,7 @@ pub fn test_bugfix_slave_write_stops_on_full() -> TestResult {
     TestResult::Pass
 }
 
-/// LineDisc input_full needs both buffers full, not just the cooked one.
+/// input_full needs both buffers full, not just the cooked one.
 pub fn test_bugfix_linedisc_input_full() -> TestResult {
     use crate::tty::ldisc::LineDisc;
 
@@ -928,8 +905,8 @@ pub fn test_bugfix_linedisc_input_full() -> TestResult {
     TestResult::Pass
 }
 
-/// PARMRK atomic insertion: with 3+ bytes free in the cooked buffer, the
-/// full \xff \x00 \x00 triplet is inserted.
+/// With 3+ bytes free in the cooked buffer, the full \xff \x00 \x00 triplet
+/// is inserted.
 pub fn test_bugfix_parmrk_atomic_full_insert() -> TestResult {
     use crate::tty::ldisc::LineDisc;
     let mut ld = LineDisc::new();
@@ -985,8 +962,8 @@ pub fn test_bugfix_parmrk_atomic_full_insert() -> TestResult {
     TestResult::Pass
 }
 
-/// PARMRK atomic insertion: with only 2 bytes free, the entire triplet is
-/// dropped (no partial sequence).  Without IMAXBEL, returns None.
+/// With only 2 bytes free the entire triplet is dropped, and without IMAXBEL
+/// that is reported as None.
 pub fn test_bugfix_parmrk_drop_when_insufficient_space() -> TestResult {
     use crate::tty::ldisc::LineDisc;
     let mut ld = LineDisc::new();
@@ -1039,8 +1016,8 @@ pub fn test_bugfix_parmrk_drop_when_insufficient_space() -> TestResult {
     TestResult::Pass
 }
 
-/// PARMRK atomic insertion: with only 1 byte free and IMAXBEL set, a bell
-/// is returned instead of a partial sequence.
+/// With only 1 byte free and IMAXBEL set, a bell is returned instead of a
+/// partial sequence.
 pub fn test_bugfix_parmrk_imaxbel_bell_on_insufficient_space() -> TestResult {
     use crate::tty::ldisc::LineDisc;
     let mut ld = LineDisc::new();
@@ -1092,8 +1069,7 @@ pub fn test_bugfix_parmrk_imaxbel_bell_on_insufficient_space() -> TestResult {
     TestResult::Pass
 }
 
-/// PARMRK atomic insertion: with 0 bytes free (completely full buffer),
-/// the triplet is dropped.  Verifies the boundary condition.
+/// With 0 bytes free the triplet is dropped.
 pub fn test_bugfix_parmrk_drop_when_buffer_completely_full() -> TestResult {
     use crate::tty::ldisc::LineDisc;
     let mut ld = LineDisc::new();
@@ -1120,7 +1096,6 @@ pub fn test_bugfix_parmrk_drop_when_buffer_completely_full() -> TestResult {
     TestResult::Pass
 }
 
-/// TCXONC argument validation: invalid action codes return InvalidArg.
 pub fn test_bugfix_tcxonc_invalid_action_returns_error() -> TestResult {
     tty::table::tty_table_init();
     let idx = TtyIndex(0);
@@ -1155,7 +1130,6 @@ pub fn test_bugfix_tcxonc_invalid_action_returns_error() -> TestResult {
     TestResult::Pass
 }
 
-/// TCXONC argument validation: boundary values (0 and 3) are accepted.
 pub fn test_bugfix_tcxonc_boundary_values() -> TestResult {
     tty::table::tty_table_init();
     let idx = TtyIndex(0);
@@ -1198,7 +1172,6 @@ pub fn test_bugfix_tcxonc_boundary_values() -> TestResult {
     TestResult::Pass
 }
 
-/// WAKEUP_CHARS constant has expected value.
 pub fn test_wakeup_chars_constant() -> TestResult {
     use crate::tty::ldisc::WAKEUP_CHARS;
     if WAKEUP_CHARS != 256 {
@@ -1211,7 +1184,6 @@ pub fn test_wakeup_chars_constant() -> TestResult {
     TestResult::Pass
 }
 
-/// Canonical mode wakes immediately on line boundary.
 pub fn test_canonical_wake_on_newline() -> TestResult {
     let mut ld = LineDisc::new();
 
@@ -1232,7 +1204,7 @@ pub fn test_canonical_wake_on_newline() -> TestResult {
     TestResult::Pass
 }
 
-/// Non-canonical VMIN=1: wake as soon as any data is available.
+/// Non-canonical VMIN=1 wakes as soon as any data is available.
 pub fn test_noncanonical_no_wake_per_byte() -> TestResult {
     use slopos_abi::syscall::LocalFlags;
     let mut ld = LineDisc::new();
@@ -1251,7 +1223,6 @@ pub fn test_noncanonical_no_wake_per_byte() -> TestResult {
     TestResult::Pass
 }
 
-/// Non-canonical mode wakes at WAKEUP_CHARS threshold.
 pub fn test_noncanonical_wake_at_threshold() -> TestResult {
     use crate::tty::ldisc::WAKEUP_CHARS;
     use slopos_abi::syscall::LocalFlags;
@@ -1274,7 +1245,6 @@ pub fn test_noncanonical_wake_at_threshold() -> TestResult {
     TestResult::Pass
 }
 
-/// Non-canonical mode wakes when buffer is nearly full.
 pub fn test_noncanonical_wake_near_full() -> TestResult {
     use slopos_abi::syscall::LocalFlags;
     let mut ld = LineDisc::new();
@@ -1300,7 +1270,6 @@ pub fn test_noncanonical_wake_near_full() -> TestResult {
     TestResult::Pass
 }
 
-/// flush_input clears the buffer; refilled data should be readable.
 pub fn test_flush_input_resets_wake_counter() -> TestResult {
     use slopos_abi::syscall::LocalFlags;
     let mut ld = LineDisc::new();
@@ -1329,7 +1298,6 @@ pub fn test_flush_input_resets_wake_counter() -> TestResult {
     TestResult::Pass
 }
 
-/// flush_all clears the buffer; refilled data should be readable.
 pub fn test_flush_all_resets_wake_counter() -> TestResult {
     use slopos_abi::syscall::LocalFlags;
     let mut ld = LineDisc::new();
@@ -1358,7 +1326,6 @@ pub fn test_flush_all_resets_wake_counter() -> TestResult {
     TestResult::Pass
 }
 
-/// RawDisc also batches wakeups.
 pub fn test_rawdisc_wake_batching() -> TestResult {
     use crate::tty::ldisc::WAKEUP_CHARS;
     let mut rd = RawDisc::new();
@@ -1385,7 +1352,6 @@ pub fn test_rawdisc_wake_batching() -> TestResult {
     TestResult::Pass
 }
 
-/// should_wake_reader returns false on empty buffer, true when data exists.
 pub fn test_wake_resets_counter() -> TestResult {
     use slopos_abi::syscall::LocalFlags;
     let mut ld = LineDisc::new();
@@ -1413,14 +1379,13 @@ pub fn test_wake_resets_counter() -> TestResult {
     TestResult::Pass
 }
 
-/// Canonical mode EOF (Ctrl+D) still wakes immediately.
 pub fn test_canonical_eof_wakes() -> TestResult {
     let mut ld = LineDisc::new();
 
     for &c in b"data" {
         ld.input_char(c);
     }
-    ld.input_char(0x04); // EOF
+    ld.input_char(0x04);
 
     if !ld.should_wake_reader() {
         klog_info!("TTY_TEST: BUG - canonical EOF did not wake");
@@ -1430,7 +1395,6 @@ pub fn test_canonical_eof_wakes() -> TestResult {
     TestResult::Pass
 }
 
-/// A fresh LineDisc has no_room = false.
 pub fn test_no_room_initially_false() -> TestResult {
     let ld = LineDisc::new();
     if ld.no_room() {
@@ -1444,7 +1408,6 @@ pub fn test_no_room_initially_false() -> TestResult {
     TestResult::Pass
 }
 
-/// Filling cooked buffer then pushing sets no_room.
 pub fn test_no_room_set_on_cooked_full() -> TestResult {
     let mut ld = LineDisc::new();
     for _ in 0..8192 {
@@ -1468,7 +1431,6 @@ pub fn test_no_room_set_on_cooked_full() -> TestResult {
     TestResult::Pass
 }
 
-/// no_room not set when buffer is not full.
 pub fn test_no_room_not_set_before_full() -> TestResult {
     let mut ld = LineDisc::new();
     for _ in 0..100 {
@@ -1481,7 +1443,6 @@ pub fn test_no_room_not_set_before_full() -> TestResult {
     TestResult::Pass
 }
 
-/// overflow_count increments on each dropped byte.
 pub fn test_overflow_count_increments() -> TestResult {
     let mut ld = LineDisc::new();
     for _ in 0..8192 {
@@ -1500,7 +1461,6 @@ pub fn test_overflow_count_increments() -> TestResult {
     TestResult::Pass
 }
 
-/// overflow_count saturates instead of wrapping.
 pub fn test_overflow_count_saturates() -> TestResult {
     let mut ld = LineDisc::new();
     for _ in 0..8192 {
@@ -1526,7 +1486,6 @@ pub fn test_overflow_count_saturates() -> TestResult {
     TestResult::Pass
 }
 
-/// Draining below low-water clears no_room.
 pub fn test_no_room_clears_on_drain_below_threshold() -> TestResult {
     use crate::tty::ldisc::THROTTLE_LOW_WATER;
     let mut ld = LineDisc::new();
@@ -1581,7 +1540,6 @@ pub fn test_no_room_clears_on_drain_below_threshold() -> TestResult {
     TestResult::Pass
 }
 
-/// no_room stays set when still above threshold.
 pub fn test_no_room_stays_above_threshold() -> TestResult {
     let mut ld = LineDisc::new();
     for _ in 0..8192 {
@@ -1601,7 +1559,6 @@ pub fn test_no_room_stays_above_threshold() -> TestResult {
     TestResult::Pass
 }
 
-/// flush_input clears no_room and overflow_count.
 pub fn test_flush_input_clears_no_room() -> TestResult {
     let mut ld = LineDisc::new();
     for _ in 0..8192 {
@@ -1624,7 +1581,6 @@ pub fn test_flush_input_clears_no_room() -> TestResult {
     TestResult::Pass
 }
 
-/// flush_all clears no_room and overflow_count.
 pub fn test_flush_all_clears_no_room() -> TestResult {
     let mut ld = LineDisc::new();
     for _ in 0..8192 {
@@ -1643,7 +1599,6 @@ pub fn test_flush_all_clears_no_room() -> TestResult {
     TestResult::Pass
 }
 
-/// Fill/drain cycle with no_room preserves throttle.
 pub fn test_fill_drain_cycle_preserves_throttle() -> TestResult {
     use crate::tty::ldisc::THROTTLE_LOW_WATER;
     let mut ld = LineDisc::new();
@@ -1695,7 +1650,6 @@ pub fn test_fill_drain_cycle_preserves_throttle() -> TestResult {
     TestResult::Pass
 }
 
-/// RawDisc also tracks no_room on overflow.
 pub fn test_rawdisc_no_room() -> TestResult {
     let mut rd = RawDisc::new();
     for _ in 0..4096 {
@@ -1722,7 +1676,6 @@ pub fn test_rawdisc_no_room() -> TestResult {
     TestResult::Pass
 }
 
-/// IMAXBEL bell still works when no_room is set.
 pub fn test_imaxbel_preserved_with_no_room() -> TestResult {
     let mut ld = LineDisc::new();
     let mut t = *ld.termios();
@@ -1745,7 +1698,6 @@ pub fn test_imaxbel_preserved_with_no_room() -> TestResult {
     TestResult::Pass
 }
 
-/// RawDisc check_no_room_recovery works.
 pub fn test_rawdisc_recovery() -> TestResult {
     use crate::tty::ldisc::THROTTLE_LOW_WATER;
     let mut rd = RawDisc::new();
@@ -1775,7 +1727,6 @@ pub fn test_rawdisc_recovery() -> TestResult {
     TestResult::Pass
 }
 
-/// LdiscKind dispatch forwards no_room/overflow_count.
 pub fn test_ldisc_kind_dispatch() -> TestResult {
     use crate::tty::ldisc::LdiscKind;
     let mut lk = LdiscKind::NTty(LineDisc::new());
@@ -1805,8 +1756,7 @@ pub fn test_ldisc_kind_dispatch() -> TestResult {
     TestResult::Pass
 }
 
-/// wait_output_idle (via is_output_idle) returns true
-/// when no output is in-flight and driver has no pending output (fast path).
+/// wait_output_idle's fast path, reached here via is_output_idle.
 pub fn test_drain_idle_fast_path() -> TestResult {
     tty::table::tty_table_init();
     drain_tty_nonblock(TtyIndex(0));
@@ -1826,7 +1776,6 @@ pub fn test_drain_idle_fast_path() -> TestResult {
     }
 }
 
-/// Drain on a hung-up TTY is vacuously complete.
 pub fn test_drain_hangup_vacuously_complete() -> TestResult {
     tty::table::tty_table_init();
     drain_tty_nonblock(TtyIndex(0));
@@ -1845,7 +1794,6 @@ pub fn test_drain_hangup_vacuously_complete() -> TestResult {
     }
 }
 
-/// tcsbrk(arg>0) on a hung-up TTY returns HungUp error.
 pub fn test_tcsbrk_hangup_returns_error() -> TestResult {
     tty::table::tty_table_init();
     let idx = TtyIndex(0);
@@ -1864,7 +1812,6 @@ pub fn test_tcsbrk_hangup_returns_error() -> TestResult {
     }
 }
 
-/// tcsbrk(0) on a hung-up TTY also returns HungUp (break is an ioctl).
 pub fn test_tcsbrk_zero_hangup_returns_error() -> TestResult {
     tty::table::tty_table_init();
     let idx = TtyIndex(0);
@@ -1882,7 +1829,6 @@ pub fn test_tcsbrk_zero_hangup_returns_error() -> TestResult {
     }
 }
 
-/// tcsbrk(0) on a healthy TTY returns success (no-op break).
 pub fn test_tcsbrk_zero_healthy_succeeds() -> TestResult {
     tty::table::tty_table_init();
     let idx = TtyIndex(0);
@@ -1896,8 +1842,6 @@ pub fn test_tcsbrk_zero_healthy_succeeds() -> TestResult {
     }
 }
 
-/// tcsbrk(arg>0) and TCSETSW share a drain path, so both succeed immediately
-/// on a synchronous backend.
 pub fn test_tcsbrk_and_tcsetsw_share_drain() -> TestResult {
     tty::table::tty_table_init();
     let idx = TtyIndex(0);
@@ -1919,7 +1863,6 @@ pub fn test_tcsbrk_and_tcsetsw_share_drain() -> TestResult {
     TestResult::Pass
 }
 
-/// drain on an invalid TTY index returns InvalidIndex.
 pub fn test_drain_invalid_index() -> TestResult {
     tty::table::tty_table_init();
     match tty::tcsbrk(TtyIndex(255), 1) {
@@ -1934,7 +1877,6 @@ pub fn test_drain_invalid_index() -> TestResult {
     }
 }
 
-/// drain on an unallocated TTY slot returns NotAllocated.
 pub fn test_drain_unallocated_slot() -> TestResult {
     tty::table::tty_table_init();
     match tty::tcsbrk(TtyIndex(7), 1) {
@@ -1949,7 +1891,6 @@ pub fn test_drain_unallocated_slot() -> TestResult {
     }
 }
 
-/// PTY drain is always immediate (no hardware latency).
 pub fn test_pty_tcsbrk_drain_immediate() -> TestResult {
     tty::table::tty_table_init();
 
@@ -1991,7 +1932,6 @@ pub fn test_pty_tcsbrk_drain_immediate() -> TestResult {
     }
 }
 
-/// Console drain is immediate (synchronous serial driver).
 pub fn test_console_drain_synchronous() -> TestResult {
     tty::table::tty_table_init();
     drain_tty_nonblock(TtyIndex(0));
@@ -2018,8 +1958,7 @@ pub fn test_console_drain_synchronous() -> TestResult {
     }
 }
 
-/// output_pending_bytes returns 0 for all current driver kinds
-/// (all backends are synchronous).
+/// Every driver kind is synchronous, so none reports pending output.
 pub fn test_output_pending_bytes_all_drivers() -> TestResult {
     use crate::tty::driver::SerialConsoleDriver;
 
@@ -2056,8 +1995,6 @@ pub fn test_output_pending_bytes_all_drivers() -> TestResult {
     TestResult::Pass
 }
 
-/// output_queued_bytes uses output_pending_bytes.
-/// After a completed write, queued bytes should be 0 for synchronous drivers.
 pub fn test_output_queued_uses_pending_bytes() -> TestResult {
     tty::table::tty_table_init();
     drain_tty_nonblock(TtyIndex(0));
@@ -2080,8 +2017,7 @@ pub fn test_output_queued_uses_pending_bytes() -> TestResult {
     }
 }
 
-/// TCSETSW on a hung-up TTY returns HungUp (the
-/// set_termios_mode hangup guard fires before the drain path).
+/// The set_termios_mode hangup guard fires before the drain path.
 pub fn test_tcsetsw_hangup_returns_error() -> TestResult {
     tty::table::tty_table_init();
     let idx = TtyIndex(0);
@@ -2102,7 +2038,6 @@ pub fn test_tcsetsw_hangup_returns_error() -> TestResult {
     }
 }
 
-/// TCSETSF on a hung-up TTY returns HungUp.
 pub fn test_tcsetsf_hangup_returns_error() -> TestResult {
     tty::table::tty_table_init();
     let idx = TtyIndex(0);
@@ -2123,8 +2058,6 @@ pub fn test_tcsetsf_hangup_returns_error() -> TestResult {
     }
 }
 
-/// The inflight counter starts at 0, bumps during a write and returns to 0
-/// once it completes.
 pub fn test_inflight_accounting_round_trip() -> TestResult {
     use core::sync::atomic::Ordering;
     tty::table::tty_table_init();
@@ -2688,7 +2621,7 @@ pub fn test_p21_postlockwork_wake_helpers() -> TestResult {
 
 pub fn test_p21_postlockwork_zero_pgid_signal_ignored() -> TestResult {
     // "No target, no signal" is enforced at resolution time, not inside
-    // `add_signal`, so a call site with no live group queues nothing.
+    // `add_signal`.
     let s = TtySession::new();
     let mut plw = PostLockWork::new();
     if let Some(pg) = s.fg_pgrp_handle() {

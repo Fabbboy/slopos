@@ -1,18 +1,11 @@
-//! Singleton-resource arbiter for the display scanout.
+//! Singleton-resource arbiter for the display scanout: providers claim it by
+//! priority, the highest-priority claimant wins, and the displaced owner is
+//! evicted through its own `evict` callback.
 //!
-//! A single piece of hardware (the scanout / display plane) can be driven by at
-//! most one provider at a time, yet several drivers may be willing and able to
-//! drive it (the firmware framebuffer, virtio-gpu, Intel xe). This module owns
-//! the arbitration: providers register as ordinary `pci_driver!`s and **claim**
-//! the scanout by priority. The highest-priority claimant wins; the displaced
-//! owner is evicted through its own `evict` callback.
-//!
-//! The arbiter lives here (not in `video` or `drivers`) because it must be
-//! reachable from both — `drivers` depends on this crate, and `video` does too,
-//! but `drivers` must never name a `video` symbol. The arbiter therefore stores
-//! only plain data and function pointers; the actual install work lives in
-//! `video` and is reached through [`register_scanout_installer`] /
-//! [`run_scanout_install`].
+//! Lives here rather than in `video` or `drivers` because both depend on this
+//! crate and `drivers` must never name a `video` symbol, so the arbiter stores
+//! only plain data and reaches the `video`-side install work through
+//! [`register_scanout_installer`] / [`run_scanout_install`].
 
 use core::ffi::c_int;
 use slopos_ostd::lock_class;
@@ -20,19 +13,18 @@ use slopos_ostd::lock_class;
 use slopos_abi::damage::DamageRect;
 use slopos_abi::{DisplayInfo, FramebufferData};
 use slopos_ostd::klog_info;
-use slopos_ostd::sync::{LockClassKey, SpinLock, LOCK_LEVEL_RESOURCE};
+use slopos_ostd::sync::{LOCK_LEVEL_RESOURCE, LockClassKey, SpinLock};
 
 /// Outcome of a [`SingletonResource::claim`] reservation attempt.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ClaimOutcome {
-    /// The caller out-ranked the current owner and any in-flight reservation; it
-    /// may now perform its (destructive) device bring-up and then commit.
+    /// Out-ranked the owner and any in-flight reservation; the caller may now
+    /// perform its destructive device bring-up and then commit.
     Won,
-    /// A higher-priority provider already owns or has reserved the resource. The
-    /// caller must stay passive and touch no hardware.
+    /// A higher-priority provider owns or has reserved it; the caller must stay
+    /// passive and touch no hardware.
     Lost,
-    /// A provider at the same priority already owns or reserved the resource.
-    /// First-come keeps it; the caller stays passive.
+    /// A same-priority provider owns or reserved it; first-come keeps it.
     LostTie,
 }
 
@@ -44,23 +36,17 @@ struct ArbiterState<P: Copy + 'static> {
 }
 
 /// Generic two-phase claim/commit arbiter for a resource only one provider may
-/// own at a time.
-///
-/// Phase A ([`claim`](Self::claim)) is a pure-priority reservation that touches
-/// no hardware and releases the lock before returning. Phase B
-/// ([`commit_install`](Self::commit_install)) records the new owner and hands
-/// the displaced provider back so the caller can evict it — the evict callback
-/// runs **after** the lock is dropped, so the arbiter never re-enters itself.
+/// own at a time: [`claim`](Self::claim) reserves by priority, then
+/// [`commit_install`](Self::commit_install) records the winner.
 pub struct SingletonResource<P: Copy + 'static> {
     state: SpinLock<ArbiterState<P>>,
     name: &'static str,
 }
 
 impl<P: Copy + 'static> SingletonResource<P> {
-    /// The lock class comes from the caller for the same reason `name` does.
-    /// Minted here it would merge every arbiter — including the scratch ones
-    /// the tests declare — into one class, and a test's nesting would then be
-    /// indistinguishable from the production resource's.
+    /// The lock class comes from the caller: minted here it would merge every
+    /// arbiter into one class, making a test's nesting indistinguishable from
+    /// the production resource's.
     pub const fn new(name: &'static str, class: &'static LockClassKey) -> Self {
         Self {
             state: SpinLock::new(
@@ -74,9 +60,9 @@ impl<P: Copy + 'static> SingletonResource<P> {
         }
     }
 
-    /// Phase A: reserve the resource by priority. Touches no hardware; the lock
-    /// is released before returning. A claimant must strictly out-rank the
-    /// higher of the current owner's priority and any in-flight reservation.
+    /// Reserve the resource by priority; touches no hardware and releases the
+    /// lock before returning. A claimant must strictly out-rank the higher of
+    /// the current owner's priority and any in-flight reservation.
     pub fn claim(&'static self, priority: i32) -> ClaimOutcome {
         let mut st = self.state.lock();
         let owner_prio = st.owner.map(|(_, p)| p);
@@ -100,9 +86,9 @@ impl<P: Copy + 'static> SingletonResource<P> {
         }
     }
 
-    /// Phase B: record `new` as the owner and clear the reservation. The
-    /// displaced owner (if any) is passed to `evict_with`, which runs after the
-    /// arbiter lock is dropped.
+    /// Record `new` as the owner and clear the reservation. The displaced owner
+    /// is passed to `evict_with`, which runs after the arbiter lock is dropped
+    /// so the arbiter never re-enters itself.
     pub fn commit_install(
         &'static self,
         new: P,
@@ -126,25 +112,21 @@ impl<P: Copy + 'static> SingletonResource<P> {
         self.state.lock().reserved = None;
     }
 
-    /// The current committed owner, if any.
     pub fn current(&'static self) -> Option<P> {
         self.state.lock().owner.map(|(p, _)| p)
     }
 }
 
-/// Identifies the scanout providers participating in arbitration.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ScanoutId {
-    /// The passive firmware framebuffer (direct CPU writes, no flush callback).
+    /// Passive firmware framebuffer: direct CPU writes, no flush callback.
     FirmwareFb,
-    /// virtio-gpu 2D scanout.
     VirtioGpu,
-    /// Intel xe display plane.
     IntelXe,
 }
 
-/// Hardware-cursor + runtime mode-set entry points a GPU provider exposes to the
-/// compositor (mirrors the legacy `register_gpu_control` four-tuple).
+/// Hardware-cursor + runtime mode-set entry points a GPU provider exposes to
+/// the compositor.
 #[derive(Clone, Copy)]
 pub struct GpuControlFns {
     pub available: fn() -> bool,
@@ -153,8 +135,8 @@ pub struct GpuControlFns {
     pub set_mode: fn(u32, u32) -> Option<FramebufferData>,
 }
 
-/// Everything the `video`-side installer needs to adopt a scanout. Passed **by
-/// reference** so the (small) value never bloats a probe stack frame.
+/// Everything the `video`-side installer needs to adopt a scanout. Passed by
+/// reference so it never bloats a probe stack frame.
 pub struct InstallCtx {
     pub fb: FramebufferData,
     /// Present hook, or `None` for a direct-write (firmware) backing.
@@ -162,8 +144,6 @@ pub struct InstallCtx {
     pub gpu_control: Option<GpuControlFns>,
 }
 
-/// A registered scanout provider. Copy-cheap: an id, the priority it won at, and
-/// its eviction hook.
 #[derive(Clone, Copy)]
 pub struct ScanoutProvider {
     pub id: ScanoutId,
@@ -172,12 +152,9 @@ pub struct ScanoutProvider {
     pub evict: fn(),
 }
 
-/// The one display-scanout arbiter.
 pub static SCANOUT: SingletonResource<ScanoutProvider> =
     SingletonResource::new("scanout", lock_class!("SCANOUT.state", LOCK_LEVEL_RESOURCE));
 
-// Single source of truth for the claim priority ladder. Lower providers are
-// always losable; a cmdline hint folds into priority rather than gating a probe.
 pub const PRIO_FIRMWARE_FB: i32 = 0;
 pub const PRIO_VIRTIO_GPU: i32 = 30;
 pub const PRIO_INTEL_XE: i32 = 50;
@@ -185,18 +162,16 @@ pub const PRIO_INTEL_XE: i32 = 50;
 /// lifting it above every GPU so their claims lose without a gate in `matches`.
 pub const PRIO_CMDLINE_HINT_BUMP: i32 = 100;
 
-// The `video`-side install logic, reached by `drivers` through a fn-pointer so
-// no `drivers -> video` dependency edge is needed.
 static SCANOUT_INSTALLER: SpinLock<Option<fn(&InstallCtx) -> bool>> =
     SpinLock::new(None, lock_class!("SCANOUT_INSTALLER", LOCK_LEVEL_RESOURCE));
 
-/// Register the install callback. Called once by `video::init`.
+/// Register the install callback; called once by `video::init`.
 pub fn register_scanout_installer(installer: fn(&InstallCtx) -> bool) {
     *SCANOUT_INSTALLER.lock() = Some(installer);
 }
 
-/// Invoke the registered installer. The fn-pointer is copied out and the lock
-/// dropped before the (potentially blocking) installer runs.
+/// The fn-pointer is copied out and the lock dropped before the (potentially
+/// blocking) installer runs.
 pub fn run_scanout_install(ctx: &InstallCtx) -> bool {
     let installer = *SCANOUT_INSTALLER.lock();
     match installer {
@@ -205,10 +180,8 @@ pub fn run_scanout_install(ctx: &InstallCtx) -> bool {
     }
 }
 
-// The framebuffer the next provider seeds from (dimensions for mode choice, plus
-// the backing address it copies the existing image across from). Stored as an
-// integer address + `DisplayInfo` so the static stays `Send`/`Sync` without
-// holding a raw pointer.
+// Stored as an integer address + `DisplayInfo` so the static stays `Send`/`Sync`
+// without holding a raw pointer.
 static CURRENT_FB: SpinLock<Option<(u64, DisplayInfo)>> =
     SpinLock::new(None, lock_class!("CURRENT_FB", LOCK_LEVEL_RESOURCE));
 

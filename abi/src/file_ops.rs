@@ -3,8 +3,8 @@
 use crate::fs::UserFsStat;
 use crate::io::{IoBufRead, IoBufWrite};
 
-/// Result of [`FileOps::poll_fused`]: readiness bits plus registration status.
-/// Doing both in one call closes the race between separate register and check.
+/// Readiness bits plus registration status. Doing both in one call closes the
+/// race between a separate register and check.
 #[derive(Debug, Clone, Copy)]
 pub struct FusedPollResult {
     /// POLL* bitmask of currently ready events.
