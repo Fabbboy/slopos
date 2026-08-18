@@ -1,10 +1,8 @@
 //! Userland-side bridge to the kernel test harness.
 //!
-//! Test binaries call [`run`] with a slice of `(name, fn() -> bool)` pairs.
-//! Each test reports its result via `SYSCALL_TEST_REPORT`, then the binary
-//! exits with the failure count (capped at 255). The kernel-side runner
-//! drains the structured reports and emits one indented KTAP subtest line
-//! per case under the parent utest line.
+//! Test binaries call [`run`] with `(name, fn() -> bool)` pairs; each result
+//! goes to the kernel via `SYSCALL_TEST_REPORT` and becomes a KTAP subtest
+//! line.
 
 use crate::pal::{Pal, Sys};
 use crate::process;
@@ -19,9 +17,8 @@ pub enum TestStatus {
     Skip = 2,
 }
 
-/// Submit a single test result to the kernel. Best-effort: kernel-side
-/// failure to record (no harness running, ring exhausted, bad pointer)
-/// is swallowed — callers continue regardless.
+/// Best-effort: a kernel-side failure to record is swallowed and the caller
+/// continues.
 pub fn report(status: TestStatus, name: &str, msg: &str) {
     let _ = Sys::test_report(status as u32, name.as_bytes(), msg.as_bytes());
 }
@@ -40,20 +37,15 @@ fn progress(prefix: &str, name: &str, phase: &str) {
     progress_write(b"\n");
 }
 
-/// Iterate `cases`, run each, and report its result. Exits the process
-/// after the final case with `failed.min(255)` as the exit code.
-///
-/// The kernel utest runner uses the structured reports for fine-grained
-/// roll-up; the exit code is a coarse signal that only matters when the
-/// binary crashes before reporting any cases.
+/// Runs every case, reports each result, then exits with `failed.min(255)`.
+/// The exit code is a coarse fallback for a binary that crashes before
+/// reporting; the structured reports are what the kernel runner rolls up.
 pub fn run(cases: &[(&'static str, fn() -> bool)]) -> ! {
     run_impl(None, cases)
 }
 
-/// Like [`run`], but also prints a best-effort start/end line to stderr for
-/// each case. This is intentionally separate from the structured report stream:
-/// reports remain final verdicts only, while progress lines identify the active
-/// case if a userland binary hangs or panics before it can report.
+/// Like [`run`], but also prints a best-effort start/end line to stderr so the
+/// active case is identifiable if the binary hangs or panics before reporting.
 pub fn run_with_progress(prefix: &'static str, cases: &[(&'static str, fn() -> bool)]) -> ! {
     run_impl(Some(prefix), cases)
 }

@@ -1,37 +1,12 @@
 //! IRQ vector allocation and callback registration.
 //!
-//! [`IrqAllocator::alloc`] hands out a typed [`IrqLine`] over the
-//! 32..224 vector range; [`IrqLine::register_callback`] installs a
-//! `Fn(&IrqContext<'_>) + Send + Sync + 'static` closure for that
-//! vector. [`dispatch`] is the public entrypoint the production IDT
-//! stub jumps into — it loads the registered closure (if any) and
-//! invokes it.
+//! [`IrqAllocator::alloc`] hands out a typed [`IrqLine`] over the 32..224
+//! vector range; [`IrqLine::register_callback`] installs the closure that
+//! [`dispatch`] invokes from the production IDT stub.
 //!
-//! # `IrqContext` keeps sensitive frame state private
-//!
-//! The context exposes only `vector` and `error_code`. RIP / RSP /
-//! CS / RFLAGS are deliberately *not* reachable: those are sensitive
-//! kernel-mode CPU state (Inv. 2) and must not flow to driver-supplied
-//! callbacks.
-//!
-//! # Lifetime gating between [`IrqLine`] and [`CallbackHandle`]
-//!
-//! [`CallbackHandle`] borrows the [`IrqLine`] it was issued from
-//! (`CallbackHandle<'a>` carries `PhantomData<&'a IrqLine>`). The
-//! borrow checker therefore guarantees the line outlives the handle:
-//! the line's `Drop` cannot run while a handle still holds a
-//! pointer-to-vector mapping for the same vector. Forgotten handles
-//! (`mem::forget`) leak the slot — by design; the leaked closure
-//! lives forever and the vector remains un-re-registerable, which is
-//! a soundness-preserving leak rather than a use-after-free.
-//!
-//! # Soundness
-//!
-//! Inv. 2 (kernel state untamperable by OSTD clients): `IrqContext`
-//! shape; `register_callback` `Send + Sync + 'static` bound. Inv. 3
-//! (peripheral untamperability): vectors only allocate from the
-//! IOMMU-remap-friendly 32..224 range; reserved-vector list is
-//! configured at boot.
+//! [`CallbackHandle`] borrows its [`IrqLine`], so the line cannot drop while a
+//! registration is live; `mem::forget`ing a handle leaks the slot by design
+//! rather than risking a use-after-free.
 
 use core::marker::PhantomData;
 use core::ptr;
@@ -39,10 +14,6 @@ use core::sync::atomic::{AtomicBool, AtomicPtr, AtomicU64, Ordering};
 
 use crate::KBox;
 use crate::sync::BspToken;
-
-// ---------------------------------------------------------------------------
-// Vector range and allocator state.
-// ---------------------------------------------------------------------------
 
 /// First allocatable vector. Vectors 0..=31 are CPU exceptions.
 pub const ALLOC_VECTOR_BASE: u8 = 32;
@@ -54,9 +25,7 @@ pub const ALLOC_VECTOR_END: u8 = 224;
 const ALLOC_RANGE: usize = (ALLOC_VECTOR_END - ALLOC_VECTOR_BASE) as usize;
 const BITMAP_WORDS: usize = ALLOC_RANGE.div_ceil(64);
 
-/// Simple lock-free bitmap: each bit guarded by its own CAS loop on
-/// the containing 64-bit word. `set` / `clear` / `test` / `alloc` /
-/// `free` are the only operations the allocator needs.
+/// Lock-free bitmap; each bit is guarded by a CAS loop on its 64-bit word.
 struct AtomicBitmap {
     words: [AtomicU64; BITMAP_WORDS],
 }
@@ -98,8 +67,7 @@ impl AtomicBitmap {
         self.words[w].fetch_and(!mask, Ordering::AcqRel);
     }
 
-    /// Atomically claim a specific bit. Returns `true` if the bit was
-    /// clear and is now set; `false` if the bit was already set.
+    /// Atomically claim a bit; `false` if it was already set.
     fn try_set(&self, bit: usize) -> bool {
         if bit >= ALLOC_RANGE {
             return false;
@@ -120,19 +88,13 @@ impl AtomicBitmap {
         }
     }
 
-    /// Atomically claim the first clear bit in `start_bit..ALLOC_RANGE`.
-    /// Uses a CAS retry loop per word; returns the bit index or `None`
-    /// if no clear bits exist in the requested range.
+    /// Atomically claim the first clear bit at or after `start_bit`.
     ///
-    /// `start_bit` lets `IrqAllocator::alloc()` skip the legacy
-    /// IOAPIC-pinned vectors (32..48) so dynamic allocations only
-    /// land in the MSI range (48..224). Vectors below `start_bit`
-    /// remain claimable through `IrqAllocator::reserve_specific`.
+    /// `start_bit` lets `IrqAllocator::alloc()` skip the legacy IOAPIC-pinned
+    /// vectors (32..48) so dynamic allocations only land in the MSI range;
+    /// lower vectors stay claimable through `IrqAllocator::reserve_specific`.
     fn alloc_from(&self, start_bit: usize) -> Option<usize> {
         for (w_idx, word) in self.words.iter().enumerate() {
-            // Mask out bits below `start_bit` so trailing_zeros never
-            // picks one. For words entirely below start_bit, this
-            // makes the inverted value zero so the loop falls through.
             let word_start = w_idx * 64;
             let local_skip = if start_bit > word_start {
                 start_bit - word_start
@@ -151,7 +113,7 @@ impl AtomicBitmap {
                 let cur = word.load(Ordering::Acquire);
                 let inv = !(cur | skip_mask);
                 if inv == 0 {
-                    break; // no clear bits in this word at or after start_bit
+                    break;
                 }
                 let bit_in_word = inv.trailing_zeros() as usize;
                 let bit = word_start + bit_in_word;
@@ -165,26 +127,22 @@ impl AtomicBitmap {
                 {
                     return Some(bit);
                 }
-                // Lost race; retry this word.
             }
         }
         None
     }
 }
 
-/// Bit index corresponding to vector 48 (MSI_VECTOR_BASE) — the lowest
-/// vector `IrqAllocator::alloc()` is allowed to hand out. Vectors below
-/// this (32..48) are reserved for IOAPIC-pinned legacy IRQs and must be
-/// claimed through `reserve_specific`.
+/// Bit index of vector 48 (MSI_VECTOR_BASE) — the lowest vector
+/// `IrqAllocator::alloc()` may hand out; 32..48 are IOAPIC-pinned legacy IRQs,
+/// claimable only through `reserve_specific`.
 const MSI_RANGE_FIRST_BIT: usize = 16;
 
 struct AllocState {
-    /// Bit set = vector currently held by some `IrqLine` *or* marked
-    /// platform-reserved. The allocator scans for the first clear bit.
+    /// Bit set = vector held by some `IrqLine` *or* marked platform-reserved.
     allocated: AtomicBitmap,
-    /// Bit set = platform-reserved (see [`register_irq_reserved`]).
-    /// `free` consults this bitmap to avoid clearing a reserved bit
-    /// when an `IrqLine` for an allocated vector drops.
+    /// Bit set = platform-reserved; consulted on `IrqLine` drop so a reserved
+    /// bit is never cleared.
     reserved: AtomicBitmap,
 }
 
@@ -201,19 +159,12 @@ fn vector_to_idx(vector: u8) -> Option<usize> {
     Some((vector - ALLOC_VECTOR_BASE) as usize)
 }
 
-/// Mark a set of vectors as platform-reserved. Subsequent
-/// [`IrqAllocator::alloc`] calls will not return them; calling code
-/// drops on a reserved vector are no-ops in the bitmap (so a
-/// boot-time `IrqLine` constructed via internal API for a reserved
-/// vector — should one ever exist — does not free it back to the
-/// pool by mistake).
+/// Mark vectors as platform-reserved: [`IrqAllocator::alloc`] will not hand
+/// them out, and an `IrqLine` drop will not release them back to the pool.
 ///
-/// Additive: multiple calls accumulate. Vectors outside the
-/// 32..224 range are silently ignored. Idempotent. The
-/// `&BspToken<'brand>` witnesses BSP-only init; every vector in
-/// `reserved` must be reserved by the platform's vector layout
-/// (LAPIC timer, SYSCALL_VECTOR, IPIs, spurious vector, etc.) —
-/// Inv. 3, a caller invariant.
+/// Additive and idempotent; vectors outside 32..224 are ignored. The
+/// `BspToken` witnesses BSP-only init. Caller invariant (Inv. 3): every listed
+/// vector is reserved by the platform's vector layout.
 pub fn register_irq_reserved<'brand>(_token: &BspToken<'brand>, reserved: &[u8]) {
     for &v in reserved {
         if let Some(idx) = vector_to_idx(v) {
@@ -244,33 +195,24 @@ pub fn reset_for_test() {
     SHUTDOWN.store(false, Ordering::Release);
 }
 
-// ---------------------------------------------------------------------------
-// Errors.
-// ---------------------------------------------------------------------------
-
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum IrqError {
     /// Allocator pool exhausted (or fully reserved).
     Exhausted,
     /// `register_callback` called twice on the same vector.
     AlreadyRegistered,
-    /// Allocator gave out a vector that the dispatch table cannot
-    /// hold a closure for — only ever returned for a runtime test of
-    /// the allocator failing-`KBox::try_new` invariant.
+    /// Allocator gave out a vector that the dispatch table cannot hold a
+    /// closure for.
     AllocFailed,
     /// `dispatch` is suppressed because [`shutdown`] has been called.
     ShuttingDown,
 }
 
-// ---------------------------------------------------------------------------
-// IrqContext.
-// ---------------------------------------------------------------------------
-
 /// Read-only context handed to a dispatched callback.
 ///
-/// Lifetime parameter ties the borrow to the dispatch invocation:
-/// the closure may not retain the context. Sensitive frame state
-/// (RIP / RSP / CS / RFLAGS / FS_BASE / GS_BASE) is *not* reachable.
+/// The lifetime stops the closure retaining it. Sensitive frame state
+/// (RIP / RSP / CS / RFLAGS / FS_BASE / GS_BASE) is deliberately unreachable
+/// (Inv. 2).
 pub struct IrqContext<'a> {
     vector: u8,
     error_code: u64,
@@ -278,7 +220,6 @@ pub struct IrqContext<'a> {
 }
 
 impl<'a> IrqContext<'a> {
-    /// Vector that fired.
     #[inline]
     pub fn vector(&self) -> u8 {
         self.vector
@@ -292,10 +233,6 @@ impl<'a> IrqContext<'a> {
         self.error_code
     }
 }
-
-// ---------------------------------------------------------------------------
-// Dispatch table.
-// ---------------------------------------------------------------------------
 
 struct HandlerCell {
     callback: KBox<dyn Fn(&IrqContext<'_>) + Send + Sync + 'static>,
@@ -316,25 +253,19 @@ impl DispatchSlot {
 
 static DISPATCH: [DispatchSlot; 256] = [const { DispatchSlot::new() }; 256];
 
-/// Set after [`shutdown`] is called. Subsequent `dispatch` calls are
-/// no-ops; this lets an orderly shutdown drain in-flight handlers
-/// without racing teardown.
 static SHUTDOWN: AtomicBool = AtomicBool::new(false);
 
-/// Mark the dispatch surface as shutting down — subsequent calls to
-/// [`dispatch`] return immediately. Useful when the kernel is about
-/// to tear down all `IrqLine` instances.
+/// Mark the dispatch surface as shutting down: [`dispatch`] returns
+/// immediately, so teardown does not race in-flight handlers.
 pub fn shutdown() {
     SHUTDOWN.store(true, Ordering::Release);
 }
 
-/// Dispatch entrypoint. Called by the production IDT stub. Loads the
-/// registered closure for `vector` (if any) and invokes it.
+/// Dispatch entrypoint for the production IDT stub: invokes the closure
+/// registered for `vector`, if any.
 ///
-/// **Restriction:** registered closures must outlive any potential
-/// dispatch. Production wiring registers at boot and only deregisters
-/// at panic/shutdown; integration tests deregister handlers before
-/// tearing down the test harness.
+/// **Restriction:** registered closures must outlive any potential dispatch,
+/// and no dispatch may be in flight during deregistration.
 pub fn dispatch(vector: u8, error_code: u64) {
     if SHUTDOWN.load(Ordering::Acquire) {
         return;
@@ -343,13 +274,11 @@ pub fn dispatch(vector: u8, error_code: u64) {
     if raw.is_null() {
         return;
     }
-    // SAFETY: `register_callback` published `raw` with Release; we
-    // observed it Acquire. The handler cell is alive until either
-    // (a) the issuing `CallbackHandle` drops, which swaps the slot
-    // back to null *before* dropping the `KBox<HandlerCell>`, or
-    // (b) the issuing `IrqLine` drops, which the borrow checker
-    // forbids while a handle exists. The module contract requires
-    // that no dispatch is in flight during deregistration.
+    // SAFETY: `register_callback` published `raw` with Release; we observed
+    // it Acquire. The cell lives until either the issuing `CallbackHandle`
+    // drops, which nulls the slot before freeing the `KBox`, or the issuing
+    // `IrqLine` drops, which the borrow checker forbids while a handle
+    // exists. No dispatch may be in flight during deregistration.
     let cell = unsafe { &*raw };
     let ctx = IrqContext {
         vector,
@@ -367,33 +296,21 @@ fn clear_dispatch(vector: u8) {
     if raw.is_null() {
         return;
     }
-    // SAFETY: we extracted `raw` by atomic swap; the dispatch path
-    // either observed null already (no-op) or observed `raw` and is
-    // required by the module contract to have completed before this
-    // point.
+    // SAFETY: `raw` was extracted by atomic swap; the dispatch path either
+    // observed null or, per the module contract, completed before this point.
     unsafe {
         drop(KBox::from_raw(raw));
     }
 }
 
-// ---------------------------------------------------------------------------
-// IrqAllocator + IrqLine + CallbackHandle.
-// ---------------------------------------------------------------------------
-
-/// ZST gateway over the allocator pool. Only callable surface is
-/// [`IrqAllocator::alloc`].
+/// ZST gateway over the allocator pool.
 pub struct IrqAllocator;
 
 impl IrqAllocator {
-    /// Allocate a free vector from the MSI pool (48..224, excluding
-    /// platform-reserved vectors). Vectors 32..48 are reserved for
-    /// legacy IOAPIC-pinned IRQs and only claimable via
-    /// [`IrqAllocator::reserve_specific`] — virtio MSI/MSI-X programming
-    /// requires vectors in 48+ because the lower range is bound to
-    /// fixed hardware lines (PIT timer, PS/2 keyboard/mouse, COM1, …).
-    ///
-    /// Returns [`IrqError::Exhausted`] if no clear bits remain in the
-    /// MSI range.
+    /// Allocate a free vector from the MSI pool (48..224, minus
+    /// platform-reserved vectors). Vectors 32..48 stay bound to fixed hardware
+    /// lines (PIT timer, PS/2 keyboard/mouse, COM1, …) and are claimable only
+    /// via [`IrqAllocator::reserve_specific`].
     pub fn alloc() -> Result<IrqLine, IrqError> {
         let idx = ALLOC_STATE
             .allocated
@@ -404,21 +321,15 @@ impl IrqAllocator {
         })
     }
 
-    /// Claim a specific vector. Used for hardware-pinned IRQs whose
-    /// IDT slot is fixed by the platform — typically legacy IOAPIC
-    /// IRQs (PS/2 keyboard at 33, mouse at 44, COM1 at 36, …) where
-    /// the IOAPIC redirection-table entry already points at this
-    /// vector, so the dispatch slot must match.
+    /// Claim a specific vector, for hardware-pinned IRQs whose IOAPIC
+    /// redirection entry already names it (PS/2 keyboard 33, mouse 44,
+    /// COM1 36, …), so the dispatch slot must match.
     ///
-    /// Returns:
-    /// - [`IrqError::Exhausted`] if `vector` is outside the
-    ///   `ALLOC_VECTOR_BASE..ALLOC_VECTOR_END` range.
-    /// - [`IrqError::AlreadyRegistered`] if the bit is already claimed
-    ///   (by a prior `alloc`, a prior `reserve_specific`, *or* by a
-    ///   platform-reserved vector via [`register_irq_reserved`]).
-    /// - `Ok(IrqLine)` on success. The line's `Drop` releases the
-    ///   bitmap bit unless the vector was platform-reserved (in which
-    ///   case the reservation persists, matching `alloc`'s drop path).
+    /// [`IrqError::Exhausted`] if `vector` is outside
+    /// `ALLOC_VECTOR_BASE..ALLOC_VECTOR_END`;
+    /// [`IrqError::AlreadyRegistered`] if the bit is already claimed, including
+    /// by [`register_irq_reserved`]. The line's `Drop` releases the bit unless
+    /// the vector was platform-reserved.
     pub fn reserve_specific(vector: u8) -> Result<IrqLine, IrqError> {
         let idx = vector_to_idx(vector).ok_or(IrqError::Exhausted)?;
         if ALLOC_STATE.allocated.try_set(idx) {

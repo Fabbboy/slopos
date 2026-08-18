@@ -1,10 +1,7 @@
 //! `getrlimit` / `setrlimit` / `prlimit` — the enforced resource ceilings.
 //!
-//! The numbers these report are the ones the kernel actually consults, not
-//! `RLIM_INFINITY` placeholders. That distinction is the whole reason the
-//! syscall exists here: a caller that cannot query a real bound cannot back
-//! off gracefully, and one told a resource is unlimited when it is not finds
-//! out by failing.
+//! The numbers reported are the ones the kernel actually consults, not
+//! `RLIM_INFINITY` placeholders.
 
 use core::ffi::c_int;
 
@@ -24,12 +21,11 @@ pub use slopos_abi::quota::{
 /// `struct rlimit`, which is `struct rlimit64` on a 64-bit target.
 pub type RLimit = RLimit64;
 
-/// `RLIM_INFINITY`.
 pub const RLIM_INFINITY: u64 = RLIM64_INFINITY;
 
-/// Every resource this kernel publishes, for a caller that wants to enumerate
-/// rather than guess. A resource outside this set is `EINVAL`, deliberately:
-/// an unimplemented limit must not be indistinguishable from an unlimited one.
+/// Every resource this kernel publishes. A resource outside this set is
+/// `EINVAL`, deliberately: an unimplemented limit must not be
+/// indistinguishable from an unlimited one.
 pub const RLIMIT_ALL: [u32; 5] = [
     RLIMIT_DATA,
     RLIMIT_NPROC,
@@ -38,8 +34,6 @@ pub const RLIMIT_ALL: [u32; 5] = [
     RLIMIT_AS,
 ];
 
-/// `prlimit(pid, resource, new_limit, old_limit)`.
-///
 /// `pid` must be 0 or the caller's own: there is no privilege principal in
 /// this kernel, so acting on another process would be unconditional.
 pub fn prlimit(
@@ -64,16 +58,11 @@ pub fn prlimit(
     finish(ret)
 }
 
-/// `getrlimit(resource, rlim)`.
 pub fn getrlimit(resource: u32, rlim: &mut RLimit) -> c_int {
     prlimit(0, resource, None, Some(rlim))
 }
 
-/// `setrlimit(resource, rlim)`.
-///
-/// Lowering succeeds; raising the hard limit is `EPERM`. Lowering is the
-/// useful half anyway — it is how a process sandboxes itself before running
-/// work it does not trust.
+/// Lowering succeeds; raising the hard limit is `EPERM`.
 pub fn setrlimit(resource: u32, rlim: &RLimit) -> c_int {
     prlimit(0, resource, Some(rlim), None)
 }

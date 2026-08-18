@@ -1,8 +1,5 @@
-//! High-level client-side protocol API.
-//!
-//! `Client::connect()` opens a Unix domain socket to the compositor,
-//! performs the version handshake, and provides typed methods for every
-//! protocol request plus event polling.
+//! High-level client-side protocol API: `Client::connect()` opens a Unix
+//! domain socket to the compositor and performs the version handshake.
 
 use crate::connection::Connection;
 use crate::types::{
@@ -19,20 +16,14 @@ pub struct Client {
     pub output: OutputInfo,
     /// Compositor capability flags from the Hello handshake.
     pub capabilities: u64,
-    /// Monotonically increasing ID counter for client-assigned object IDs.
     next_id: u32,
-    /// Serial of the most recent `Event::PointerEnter`, tracked by
-    /// `poll_event` and echoed in `SetCursorShape` to prove the cursor request
-    /// belongs to the current pointer focus.
+    /// Serial of the most recent `Event::PointerEnter`, echoed in
+    /// `SetCursorShape` to prove the request belongs to the current focus.
     last_pointer_enter_serial: u32,
 }
 
 impl Client {
     /// Connect to the compositor and perform the version handshake.
-    ///
-    /// 1. Opens the AF_UNIX socket at `path`.
-    /// 2. Receives `Event::Hello { version, capabilities }`.
-    /// 3. Sends `Request::Hello { version }` back.
     ///
     /// Display geometry (`OutputInfo`) is received lazily via
     /// [`ensure_output_info()`] before the first surface operation.
@@ -54,7 +45,6 @@ impl Client {
 
         let mut conn = Connection::new(fd);
 
-        // Receive server Hello (blocking, 5 second timeout).
         let hello: Event = conn.wait_recv(5000)?;
         let capabilities = match hello {
             Event::Hello {
@@ -69,7 +59,6 @@ impl Client {
             _ => return Err(ProtocolError::MalformedMessage),
         };
 
-        // Send client Hello response.
         conn.send(&Request::Hello {
             version: PROTOCOL_VERSION,
         })?;
@@ -92,8 +81,6 @@ impl Client {
         id
     }
 
-    // -- Surface operations -----------------------------------------------
-
     pub fn create_surface(&mut self) -> Result<SurfaceId, ProtocolError> {
         let id = self.allocate_id();
         self.conn.send(&Request::CreateSurface {
@@ -103,9 +90,8 @@ impl Client {
     }
 
     /// Register a memfd-backed buffer in slot `buffer_id`, passing the fd via
-    /// SCM_RIGHTS. Sent the first time each double-buffer slot is used; the
-    /// compositor maps and remembers it. Re-selecting an already-registered
-    /// slot uses [`surface_select_buffer`](Self::surface_select_buffer) (no fd).
+    /// SCM_RIGHTS. Re-selecting an already-registered slot uses
+    /// [`surface_select_buffer`](Self::surface_select_buffer) (no fd).
     pub fn surface_attach_buffer(
         &mut self,
         surface: SurfaceId,
@@ -121,15 +107,14 @@ impl Client {
                 width,
                 height,
                 has_fd: true,
-                buffer_fd: None, // fd travels via SCM_RIGHTS ancillary data, not in struct
+                buffer_fd: None,
             },
             memfd_fd,
         )
     }
 
     /// Re-select an already-registered buffer slot for the next commit, without
-    /// re-sending the fd. The compositor reuses the mapping it kept when the
-    /// slot was first registered via [`surface_attach_buffer`].
+    /// re-sending the fd.
     pub fn surface_select_buffer(
         &mut self,
         surface: SurfaceId,
@@ -176,8 +161,6 @@ impl Client {
     pub fn surface_destroy(&mut self, surface: SurfaceId) -> Result<(), ProtocolError> {
         self.conn.send(&Request::SurfaceDestroy { surface })
     }
-
-    // -- Toplevel operations ----------------------------------------------
 
     pub fn get_toplevel(&mut self, surface: SurfaceId) -> Result<ToplevelId, ProtocolError> {
         let id = self.allocate_id();
@@ -227,8 +210,6 @@ impl Client {
         self.conn.send(&Request::AckConfigure { serial })
     }
 
-    // -- Cursor -----------------------------------------------------------
-
     /// Request a cursor shape for `surface`. The last pointer-enter serial is
     /// attached automatically so the compositor honors the request only while
     /// this client holds the pointer.
@@ -240,12 +221,9 @@ impl Client {
         })
     }
 
-    // -- Clipboard --------------------------------------------------------
-
     /// Publish a clipboard selection backed by `fd` (a memfd holding `len`
-    /// valid bytes). The fd is passed via SCM_RIGHTS; the compositor keeps its
-    /// own reference, so the caller may close its copy after this returns.
-    /// Unbounded — no 4 KiB cap.
+    /// valid bytes). The compositor keeps its own reference, so the caller may
+    /// close its copy after this returns.
     pub fn clipboard_copy(&mut self, fd: i32, len: u32) -> Result<(), ProtocolError> {
         self.conn.send_with_fd(
             &Request::ClipboardCopy {
@@ -274,8 +252,6 @@ impl Client {
         )
     }
 
-    // -- Interactive (compositor-driven) -----------------------------------
-
     /// Start an interactive move. Serial must come from a recent pointer event.
     pub fn interactive_move(
         &mut self,
@@ -300,8 +276,6 @@ impl Client {
         })
     }
 
-    // -- Event polling ----------------------------------------------------
-
     /// Poll for one event (non-blocking). Returns `Ok(None)` if nothing pending.
     ///
     /// The first `OutputInfo` event is consumed silently to populate the
@@ -314,8 +288,6 @@ impl Client {
                 x,
                 y,
             }) => {
-                // Remember the focus serial so a later `set_cursor_shape` can
-                // prove it responds to this enter.
                 self.last_pointer_enter_serial = serial;
                 Ok(Some(Event::PointerEnter {
                     surface,
@@ -396,8 +368,6 @@ impl Client {
             }
         }
     }
-
-    // -- Convenience accessors --------------------------------------------
 
     pub fn fd(&self) -> i32 {
         self.conn.fd()

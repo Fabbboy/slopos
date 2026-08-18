@@ -1,24 +1,9 @@
-//! IDT (Interrupt Descriptor Table) construction surface and the
-//! IRET-frame corruption recovery path.
+//! IDT (Interrupt Descriptor Table) construction surface, the IRET-frame
+//! corruption recovery path, and the IST-vector entry guard.
 //!
-//! [`IdtBuilder`] formats hardware IDT gates from typed inputs.
-//! [`handle_corrupt_iret_frame`] is the irreducible IRET-frame
-//! recovery path lifted out of the boot crate — it stays here in
-//! OSTD because the diagnostic dump is the last line of defence
-//! against silent CPU-state corruption (Inv. 2).
-//!
-//! This module also hosts the IST-vector entry guard ([`IrqEntryGuard`]
-//! / [`IstPreemptHold`]) which keeps the per-CPU preempt count elevated
-//! for the duration of an IST-using exception handler. Yielding from an
-//! IST handler corrupts the per-vector IST stack, so this guard's
-//! `Drop` decrements the count *without* invoking any deferred
-//! reschedule callback.
-//!
-//! # Soundness
-//!
-//! Inv. 2: kernel-mode CPU state cannot be tampered with by OSTD
-//! clients. The diagnostic dump never returns; corrupt IRET frames
-//! are unrecoverable.
+//! Inv. 2: kernel-mode CPU state cannot be tampered with by OSTD clients.
+//! Corrupt IRET frames are unrecoverable — [`handle_corrupt_iret_frame`]
+//! dumps and panics.
 
 use core::arch::asm;
 use core::cell::UnsafeCell;
@@ -29,123 +14,94 @@ use core::sync::atomic::{AtomicBool, Ordering};
 use crate::cpu::preempt;
 use crate::sync::BspToken;
 
-// Inline the OSTD-side IDT entry-point asm stubs. Gated on the *kernel
-// target* (`target_os = "none"`), NOT `not(test)`: the stubs reference Rust
-// symbols `common_exception_handler` / `isr_iret_frame_corrupt` that only
-// exist in the final kernel link (boot crate). `not(test)` would still
-// compile this asm into host *integration*-test binaries (which link the
-// non-`test` lib), where those externs are undefined — it only linked there
-// by `--gc-sections` luck, which varies by linker version. `target_os =
-// "none"` is true only in the kernel build, excluding every host build
-// deterministically. Includes the `msi_vector_table` rodata array consumed
-// by `install_default_handlers`.
+// Gated on the kernel target rather than `not(test)`: the stubs reference
+// `common_exception_handler` / `isr_iret_frame_corrupt`, which exist only in
+// the final kernel link, and `not(test)` still covers host integration tests.
 #[cfg(all(target_arch = "x86_64", target_os = "none"))]
 core::arch::global_asm!(include_str!("asm/handlers.s"), options(att_syntax));
 
-// ---------------------------------------------------------------------------
-// Architectural constants and gate descriptor.
-// ---------------------------------------------------------------------------
-
-/// Number of entries in the IDT (256 vectors).
 pub const IDT_ENTRIES: usize = 256;
 
-/// Interrupt-gate type/attr byte (DPL=0, present, interrupt gate).
-/// Clears IF on entry.
+/// Interrupt-gate type/attr byte (DPL=0, present). Clears IF on entry.
 pub const IDT_GATE_INTERRUPT: u8 = 0x8E;
 
-/// Trap-gate type/attr byte (DPL=0, present, trap gate). Does *not*
-/// clear IF on entry.
+/// Trap-gate type/attr byte (DPL=0, present). Does *not* clear IF on entry.
 pub const IDT_GATE_TRAP: u8 = 0x8F;
 
-// ---------------------------------------------------------------------------
-// CPU exception vectors (0-31) — Intel SDM Vol. 3A, Table 6-1.
-// ---------------------------------------------------------------------------
+// CPU exception vectors — Intel SDM Vol. 3A, Table 6-1.
 
-/// Divide Error (#DE) - vector 0.
+/// Divide Error (#DE).
 pub const EXCEPTION_DIVIDE_ERROR: u8 = 0;
-/// Debug (#DB) - vector 1.
+/// Debug (#DB).
 pub const EXCEPTION_DEBUG: u8 = 1;
-/// Non-Maskable Interrupt (NMI) - vector 2.
+/// Non-Maskable Interrupt (NMI).
 pub const EXCEPTION_NMI: u8 = 2;
-/// Breakpoint (#BP) - vector 3.
+/// Breakpoint (#BP).
 pub const EXCEPTION_BREAKPOINT: u8 = 3;
-/// Overflow (#OF) - vector 4.
+/// Overflow (#OF).
 pub const EXCEPTION_OVERFLOW: u8 = 4;
-/// Bound Range Exceeded (#BR) - vector 5.
+/// Bound Range Exceeded (#BR).
 pub const EXCEPTION_BOUND_RANGE: u8 = 5;
-/// Invalid Opcode (#UD) - vector 6.
+/// Invalid Opcode (#UD).
 pub const EXCEPTION_INVALID_OPCODE: u8 = 6;
-/// Device Not Available (#NM) - vector 7.
+/// Device Not Available (#NM).
 pub const EXCEPTION_DEVICE_NOT_AVAIL: u8 = 7;
-/// Double Fault (#DF) - vector 8.
+/// Double Fault (#DF).
 pub const EXCEPTION_DOUBLE_FAULT: u8 = 8;
-/// Coprocessor Segment Overrun - vector 9 (reserved).
+/// Coprocessor Segment Overrun (reserved).
 pub const EXCEPTION_COPROCESSOR_OVERRUN: u8 = 9;
-/// Invalid TSS (#TS) - vector 10.
+/// Invalid TSS (#TS).
 pub const EXCEPTION_INVALID_TSS: u8 = 10;
-/// Segment Not Present (#NP) - vector 11.
+/// Segment Not Present (#NP).
 pub const EXCEPTION_SEGMENT_NOT_PRES: u8 = 11;
-/// Stack-Segment Fault (#SS) - vector 12.
+/// Stack-Segment Fault (#SS).
 pub const EXCEPTION_STACK_FAULT: u8 = 12;
-/// General Protection (#GP) - vector 13.
+/// General Protection (#GP).
 pub const EXCEPTION_GENERAL_PROTECTION: u8 = 13;
-/// Page Fault (#PF) - vector 14.
+/// Page Fault (#PF).
 pub const EXCEPTION_PAGE_FAULT: u8 = 14;
-/// Reserved - vector 15.
+/// Reserved.
 pub const EXCEPTION_RESERVED_15: u8 = 15;
-/// x87 FPU Floating-Point Error (#MF) - vector 16.
+/// x87 FPU Floating-Point Error (#MF).
 pub const EXCEPTION_FPU_ERROR: u8 = 16;
-/// Alignment Check (#AC) - vector 17.
+/// Alignment Check (#AC).
 pub const EXCEPTION_ALIGNMENT_CHECK: u8 = 17;
-/// Machine Check (#MC) - vector 18.
+/// Machine Check (#MC).
 pub const EXCEPTION_MACHINE_CHECK: u8 = 18;
-/// SIMD Floating-Point Exception (#XM/#XF) - vector 19.
+/// SIMD Floating-Point Exception (#XM/#XF).
 pub const EXCEPTION_SIMD_FP_EXCEPTION: u8 = 19;
-/// Virtualization Exception (#VE) - vector 20.
+/// Virtualization Exception (#VE).
 pub const EXCEPTION_VIRTUALIZATION: u8 = 20;
-/// Control Protection Exception (#CP) - vector 21.
+/// Control Protection Exception (#CP).
 pub const EXCEPTION_CONTROL_PROTECTION: u8 = 21;
 // Vectors 22-31 are reserved.
 
-// ---------------------------------------------------------------------------
-// Hardware IRQ, syscall, and IPI vector constants.
-// ---------------------------------------------------------------------------
-
-/// Base vector for hardware IRQs (IRQ0 maps to this vector).
+/// Base vector for hardware IRQs; IRQ0 maps here.
 pub const IRQ_BASE_VECTOR: u8 = 32;
 
-/// Syscall interrupt vector (int 0x80).
 pub const SYSCALL_VECTOR: u8 = 0x80;
 
-/// Shutdown IPI vector (0xFE). Broadcast to park every CPU at power-off.
+/// Shutdown IPI: broadcast to park every CPU at power-off.
 pub const SHUTDOWN_VECTOR: u8 = 0xFE;
 
-/// TLB shootdown IPI vector (0xFD). Used for cross-CPU TLB invalidation.
 pub const TLB_SHOOTDOWN_VECTOR: u8 = 0xFD;
 
-/// Reschedule IPI vector (0xFC). Wakes a CPU from idle to run newly-queued tasks.
+/// Reschedule IPI: wakes a CPU from idle to run newly-queued tasks.
 pub const RESCHEDULE_IPI_VECTOR: u8 = 0xFC;
 
-/// RCU quiescent-state IPI vector (0xFB). Bumps the per-CPU RCU QS counter.
+/// RCU quiescent-state IPI: bumps the per-CPU RCU QS counter.
 pub const RCU_QS_IPI_VECTOR: u8 = 0xFB;
 
-/// LAPIC timer vector (0xEC). Each CPU's local APIC timer fires here for
-/// scheduler preemption.
+/// Each CPU's local APIC timer fires here for scheduler preemption.
 pub const LAPIC_TIMER_VECTOR: u8 = 0xEC;
 
-// ---------------------------------------------------------------------------
-// MSI vector range.
-// ---------------------------------------------------------------------------
-
-/// First vector available for MSI allocation. Vectors 32-47 are reserved
-/// for legacy IOAPIC IRQs (IRQ0-IRQ15).
+/// First MSI vector; 32-47 are reserved for legacy IOAPIC IRQs.
 pub const MSI_VECTOR_BASE: u8 = 48;
 
-/// One-past-the-last MSI vector. Vectors 224-255 are reserved for
-/// system IPIs, LAPIC timer, and spurious.
+/// One-past-the-last MSI vector; 224-255 are reserved for system IPIs,
+/// LAPIC timer, and spurious.
 pub const MSI_VECTOR_END: u8 = 224;
 
-/// Total number of vectors available for MSI allocation.
 pub const MSI_VECTOR_COUNT: usize = (MSI_VECTOR_END - MSI_VECTOR_BASE) as usize;
 
 /// x86-64 IDT entry. Layout matches Intel SDM Vol. 3A §6.14.1.
@@ -174,9 +130,6 @@ impl IdtEntry {
         }
     }
 
-    /// Format gate fields from a handler entrypoint, segment selector,
-    /// gate type byte, and DPL. Pure-logic helper used by
-    /// [`IdtBuilder::set_gate_priv`] and the unit tests.
     pub const fn format(handler: u64, selector: u16, typ: u8, dpl: u8) -> Self {
         Self {
             offset_low: (handler & 0xFFFF) as u16,
@@ -203,20 +156,14 @@ struct IdtPtr {
     base: u64,
 }
 
-// ---------------------------------------------------------------------------
-// IdtBuilder.
-// ---------------------------------------------------------------------------
-
-/// Owns the 256-entry IDT array and exposes typed gate-formatting
-/// helpers. The hardware `lidt` instruction is gated behind an
+/// Owns the 256-entry IDT array; the hardware `lidt` is gated behind
 /// `unsafe fn load`.
 pub struct IdtBuilder {
     entries: UnsafeCell<[IdtEntry; IDT_ENTRIES]>,
 }
 
 // SAFETY: every mutator goes through `&self` + interior mutability;
-// callers serialise the IDT-build sequence at boot. The hardware load
-// is `unsafe fn`. Inv. 2.
+// callers serialise the IDT-build sequence at boot. Inv. 2.
 unsafe impl Sync for IdtBuilder {}
 
 impl IdtBuilder {
@@ -231,9 +178,8 @@ impl IdtBuilder {
         self.set_gate_priv(vector, handler, selector, typ, 0);
     }
 
-    /// Install a gate with an explicit Descriptor Privilege Level
-    /// (DPL=3 is required for software-int gates reachable from user
-    /// mode, e.g. the `int 0x80` syscall trampoline).
+    /// Install a gate with an explicit Descriptor Privilege Level; DPL=3 is
+    /// required for software-int gates reachable from user mode (`int 0x80`).
     pub fn set_gate_priv(&self, vector: u8, handler: u64, selector: u16, typ: u8, dpl: u8) {
         let formatted = IdtEntry::format(handler, selector, typ, dpl);
         // SAFETY: `entries` is owned by this builder; aliasing is the
@@ -251,7 +197,6 @@ impl IdtBuilder {
         }
     }
 
-    /// Read back a gate (used for diagnostics + tests).
     pub fn get_gate(&self, vector: u8) -> IdtEntry {
         // SAFETY: see `set_gate_priv`.
         unsafe { (*self.entries.get())[vector as usize] }
@@ -259,19 +204,15 @@ impl IdtBuilder {
 
     /// Copy a gate read-back into a caller-supplied `*mut IdtEntry`.
     ///
-    /// Returns `0` on success, `-1` if `out_entry` is null. This is the
-    /// FFI-boundary writer used by the `idt_get_gate(...)` C-ABI shim
-    /// that kernel test fixtures consume — wrapping the unsafe write
-    /// here keeps callers in safe Rust.
+    /// Returns `0` on success, `-1` if `out_entry` is null. Exists for the
+    /// `idt_get_gate` C-ABI shim, so its callers stay in safe Rust.
     pub fn write_gate_to_caller(&self, vector: u8, out_entry: *mut IdtEntry) -> i32 {
         if out_entry.is_null() {
             return -1;
         }
         let entry = self.get_gate(vector);
-        // SAFETY: out_entry is non-null per the guard; the FFI caller's
-        // C-ABI contract states the pointer references a writable
-        // `IdtEntry`. The unsafe `ptr::write` is centralised here so
-        // kernel-side shim layers (boot/) stay in safe Rust.
+        // SAFETY: out_entry is non-null per the guard; the FFI caller's C-ABI
+        // contract states the pointer references a writable `IdtEntry`.
         unsafe {
             core::ptr::write(out_entry, entry);
         }

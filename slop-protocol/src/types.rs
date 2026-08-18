@@ -1,20 +1,15 @@
 //! Core protocol types: Request, Event, ProtocolError, OutputInfo.
 
-/// Current wire protocol version.
 pub const PROTOCOL_VERSION: u32 = 3;
 
-/// Compile-time-safe surface identifier.
-///
-/// `repr(transparent)` over `u32` -- zero runtime cost.
-/// Prevents accidental interchange with toplevel IDs or raw integers.
+/// Compile-time-safe surface identifier: prevents accidental interchange with
+/// toplevel IDs or raw integers.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Default)]
 #[repr(transparent)]
 pub struct SurfaceId(u32);
 
-/// Compile-time-safe toplevel identifier.
-///
-/// `repr(transparent)` over `u32` -- zero runtime cost.
-/// Prevents accidental interchange with surface IDs or raw integers.
+/// Compile-time-safe toplevel identifier: prevents accidental interchange with
+/// surface IDs or raw integers.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Default)]
 #[repr(transparent)]
 pub struct ToplevelId(u32);
@@ -41,11 +36,8 @@ impl ToplevelId {
 
 /// Capability flags advertised by the compositor in [`Event::Hello`].
 pub mod caps {
-    /// Compositor supports toplevel windows.
     pub const TOPLEVEL: u64 = 1 << 0;
-    /// Compositor supports clipboard copy/paste.
     pub const CLIPBOARD: u64 = 1 << 1;
-    /// Compositor supports interactive move/resize.
     pub const INTERACTIVE_MOVE_RESIZE: u64 = 1 << 2;
 }
 
@@ -66,11 +58,8 @@ pub mod resize_edge {
     pub const RIGHT: u32 = 8;
 }
 
-/// Move-only file descriptor wrapper. Closes on drop.
-///
-/// Provides RAII lifecycle for file descriptors received via SCM_RIGHTS.
-/// The fd is closed automatically when the `OwnedFd` is dropped, unless
-/// consumed via [`into_raw`](OwnedFd::into_raw).
+/// Move-only file descriptor wrapper. Closes on drop unless consumed via
+/// [`into_raw`](OwnedFd::into_raw).
 pub struct OwnedFd(i32);
 
 impl OwnedFd {
@@ -96,22 +85,14 @@ impl Drop for OwnedFd {
     }
 }
 
-/// Error type for all protocol operations.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ProtocolError {
-    /// Socket send/recv failed.
     Io,
-    /// Message too large for buffer.
     MessageTooLarge,
-    /// Received malformed message (bad tag, truncated, etc.).
     MalformedMessage,
-    /// Timeout waiting for response.
     Timeout,
-    /// Connection was closed by peer.
     Disconnected,
-    /// Buffer full, message couldn't be queued.
     BufferFull,
-    /// Incompatible protocol version.
     VersionMismatch,
 }
 
@@ -135,25 +116,21 @@ pub enum Request {
         version: u32,
     },
 
-    // -- Surface lifecycle ------------------------------------------------
     CreateSurface {
         new_id: SurfaceId,
     },
     SurfaceAttach {
         surface: SurfaceId,
-        /// Client-assigned buffer slot (0 or 1 for double-buffering). The fd is
-        /// sent via SCM_RIGHTS only the first time a slot is used; subsequent
-        /// attaches re-select an already-registered buffer by id, with no fd.
+        /// Client-assigned buffer slot. The fd is sent via SCM_RIGHTS only the
+        /// first time a slot is used; later attaches re-select by id, no fd.
         buffer_id: u32,
         width: u32,
         height: u32,
-        /// Whether this attach carries an SCM_RIGHTS fd. Encoded explicitly so the
-        /// decoder pops the ancillary fd FIFO only for fd-bearing attaches; a
-        /// no-fd re-select must never pop a later message's fd.
+        /// Whether this attach carries an SCM_RIGHTS fd; a no-fd re-select must
+        /// never pop a later message's fd from the decoder's FIFO.
         has_fd: bool,
-        /// File descriptor received via SCM_RIGHTS (memfd-backed buffer).
-        /// `None` when re-selecting an already-registered buffer slot, or on the
-        /// send side before transmission.
+        /// Memfd-backed buffer fd received via SCM_RIGHTS. `None` when
+        /// re-selecting a registered slot, or on the send side before transmission.
         buffer_fd: Option<OwnedFd>,
     },
     SurfaceDamage {
@@ -174,7 +151,6 @@ pub enum Request {
         surface: SurfaceId,
     },
 
-    // -- Toplevel lifecycle ------------------------------------------------
     GetToplevel {
         surface: SurfaceId,
         new_id: ToplevelId,
@@ -197,21 +173,17 @@ pub enum Request {
         serial: u32,
     },
 
-    // -- Cursor -----------------------------------------------------------
     /// Request a cursor shape for `surface`. `serial` must match the surface's
-    /// most recent [`Event::PointerEnter`]; the compositor ignores the request
-    /// unless the surface holds the pointer with that serial, so only the
-    /// surface under the pointer can change the cursor.
+    /// most recent [`Event::PointerEnter`], so only the surface under the
+    /// pointer can change the cursor.
     SetCursorShape {
         surface: SurfaceId,
         serial: u32,
         shape: u8,
     },
 
-    // -- Clipboard --------------------------------------------------------
     /// Publish a clipboard selection: the bytes live in a memfd passed via
     /// SCM_RIGHTS, `len` is the valid byte count (the memfd is page-rounded).
-    /// Unbounded — large selections are no longer truncated.
     ClipboardCopy {
         len: u32,
         buffer_fd: Option<OwnedFd>,
@@ -220,15 +192,14 @@ pub enum Request {
     /// `Event::PasteReady { len }`; the client then sends `ClipboardRead`.
     ClipboardPaste,
     /// Provide a destination memfd (via SCM_RIGHTS) for the compositor to copy
-    /// `len` clipboard bytes into; it replies with `Event::PasteResult`. This
-    /// receiver-provides-the-buffer handshake exists because the server→client
-    /// event path cannot carry an fd.
+    /// `len` clipboard bytes into; it replies with `Event::PasteResult`. The
+    /// receiver provides the buffer because the server→client event path
+    /// cannot carry an fd.
     ClipboardRead {
         len: u32,
         buffer_fd: Option<OwnedFd>,
     },
 
-    // -- Interactive (compositor-driven) -----------------------------------
     /// Start an interactive window move. Serial must match a recent pointer event.
     InteractiveMove {
         toplevel: ToplevelId,
@@ -256,7 +227,6 @@ pub enum Event {
         id: u32,
     },
 
-    // -- Display ----------------------------------------------------------
     OutputInfo {
         width: u32,
         height: u32,
@@ -265,7 +235,6 @@ pub enum Event {
         scale: u32,
     },
 
-    // -- Frame synchronization --------------------------------------------
     /// Sent only to surfaces that requested it via [`Request::SurfaceFrame`].
     FrameDone {
         surface: SurfaceId,
@@ -273,14 +242,12 @@ pub enum Event {
     },
 
     /// A buffer slot the compositor has finished compositing from and the client
-    /// may draw into again. Sent when a newer buffer for the surface is
-    /// committed, so the client never overwrites a buffer still being read.
+    /// may draw into again. Sent when a newer buffer for the surface is committed.
     BufferRelease {
         surface: SurfaceId,
         buffer_id: u32,
     },
 
-    // -- Toplevel ---------------------------------------------------------
     /// Window state/size change. Client must [`Request::AckConfigure`] the
     /// serial before committing a buffer at the new size.
     Configure {
@@ -294,7 +261,6 @@ pub enum Event {
         toplevel: ToplevelId,
     },
 
-    // -- Pointer ----------------------------------------------------------
     /// Pointer entered `surface`. `serial` identifies this focus grant; the
     /// client echoes it in [`Request::SetCursorShape`] to set the cursor.
     PointerEnter {
@@ -323,7 +289,6 @@ pub enum Event {
         value: i32,
     },
 
-    // -- Keyboard ---------------------------------------------------------
     KeyboardEnter {
         surface: SurfaceId,
     },
@@ -334,7 +299,7 @@ pub enum Event {
         serial: u32,
         time: u32,
         /// Legacy PS/2 set-1 make code (low 7 bits). Preserved for consumers
-        /// that decode it directly (terminal, image viewer).
+        /// that decode it directly.
         scancode: u32,
         /// Legacy single-byte text/pseudo-code (nav keys use 0x80..=0x88).
         ascii: u32,
@@ -351,7 +316,6 @@ pub enum Event {
         mods: u32,
     },
 
-    // -- Clipboard --------------------------------------------------------
     /// The clipboard holds `len` bytes; the client should send a destination
     /// memfd of that size via `Request::ClipboardRead`. `len == 0` means empty.
     PasteReady {
@@ -362,7 +326,6 @@ pub enum Event {
         len: u32,
     },
 
-    // -- Error ------------------------------------------------------------
     Error {
         object_id: u32,
         code: u32,

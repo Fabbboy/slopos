@@ -2452,12 +2452,6 @@ pub fn test_regions_disjoint() -> TestResult {
     TestResult::Pass
 }
 
-// =============================================================================
-// SCHEDULER QUEUE TESTS
-// Test priority queue behavior including edge cases
-// =============================================================================
-
-/// Test: Schedule task to empty queue
 pub fn test_schedule_to_empty_queue() -> TestResult {
     let _fixture = SchedFixture::new();
     let cpu_id = slopos_arch::pcr::get_current_cpu();
@@ -2492,13 +2486,11 @@ pub fn test_schedule_to_empty_queue() -> TestResult {
         return TestResult::Fail;
     }
 
-    // Schedule to empty queue
     if schedule_task(&task_guard) != 0 {
         klog_info!("SCHED_TEST: Failed to schedule task to empty queue");
         return TestResult::Fail;
     }
 
-    // Verify task is in queue by checking stats
     let ready_count = get_scheduler_stats().ready_tasks;
 
     if ready_count == 0 {
@@ -2509,7 +2501,7 @@ pub fn test_schedule_to_empty_queue() -> TestResult {
     TestResult::Pass
 }
 
-/// Test: Schedule same task twice - should not duplicate
+/// Scheduling the same task twice must not duplicate it.
 pub fn test_schedule_duplicate_task() -> TestResult {
     let _fixture = SchedFixture::new();
 
@@ -2534,12 +2526,10 @@ pub fn test_schedule_duplicate_task() -> TestResult {
         return TestResult::Fail;
     }
 
-    // Schedule once
     schedule_task(&task_guard);
 
     let ready_before = get_scheduler_stats().ready_tasks;
 
-    // Schedule again - should be idempotent
     schedule_task(&task_guard);
 
     let ready_after = get_scheduler_stats().ready_tasks;
@@ -2550,20 +2540,13 @@ pub fn test_schedule_duplicate_task() -> TestResult {
             ready_before,
             ready_after
         );
-        // This is actually handled correctly (returns 0 if already in queue)
-        // but let's verify the count didn't change
     }
 
     TestResult::Pass
 }
 
-/// Test: the publication entry point refuses input it cannot schedule.
-///
-/// This used to pass a null pointer. `schedule_task` now takes an owning
-/// handle, so a null is unrepresentable and the branch that rejected one is
-/// gone with it — the type is the guard. What still needs a runtime check is
-/// the other unschedulable input: a task that is not Ready. The reservation it
-/// takes must be rolled back, leaving a never-published task spelled `Nascent`.
+/// The publication entry point refuses a task that is not Ready, and rolls its
+/// reservation back to `Nascent`.
 pub fn test_schedule_refuses_non_ready_task() -> TestResult {
     let _fixture = SchedFixture::new();
 
@@ -2600,7 +2583,6 @@ pub fn test_schedule_refuses_non_ready_task() -> TestResult {
     TestResult::Pass
 }
 
-/// Test: Unschedule task not in queue
 pub fn test_unschedule_not_in_queue() -> TestResult {
     let _fixture = SchedFixture::new();
 
@@ -2625,22 +2607,14 @@ pub fn test_unschedule_not_in_queue() -> TestResult {
     TestResult::Pass
 }
 
-// =============================================================================
-// PRIORITY TESTS
-// Verify priority-based scheduling works correctly
-// =============================================================================
-
-/// Test: Higher priority task should be selected first
 pub fn test_priority_ordering() -> TestResult {
     let _fixture = SchedFixture::new();
 
-    // Create tasks with different priorities
-    // Priority 0 = highest, Priority 3 = lowest (IDLE)
     let low_id = task_create(
         b"LowPri\0".as_ptr() as *const c_char,
         dummy_task_entry,
         ptr::null_mut(),
-        TaskPriority::Low.as_u8(), // 2
+        TaskPriority::Low.as_u8(),
         TASK_FLAG_KERNEL_MODE,
     );
 
@@ -2648,7 +2622,7 @@ pub fn test_priority_ordering() -> TestResult {
         b"NormalPri\0".as_ptr() as *const c_char,
         dummy_task_entry,
         ptr::null_mut(),
-        TaskPriority::Normal.as_u8(), // 1
+        TaskPriority::Normal.as_u8(),
         TASK_FLAG_KERNEL_MODE,
     );
 
@@ -2656,7 +2630,7 @@ pub fn test_priority_ordering() -> TestResult {
         b"HighPri\0".as_ptr() as *const c_char,
         dummy_task_entry,
         ptr::null_mut(),
-        TaskPriority::High.as_u8(), // 0
+        TaskPriority::High.as_u8(),
         TASK_FLAG_KERNEL_MODE,
     );
 
@@ -2664,7 +2638,6 @@ pub fn test_priority_ordering() -> TestResult {
         return TestResult::Fail;
     }
 
-    // Schedule in reverse priority order (low first)
     let (Some(low_guard), Some(normal_guard), Some(high_guard)) = (
         task_find_by_id(low_id),
         task_find_by_id(normal_id),
@@ -2684,7 +2657,6 @@ pub fn test_priority_ordering() -> TestResult {
     TestResult::Pass
 }
 
-/// Test: IDLE priority task should be selected last
 pub fn test_idle_priority_last() -> TestResult {
     let _fixture = SchedFixture::new();
 
@@ -2692,7 +2664,7 @@ pub fn test_idle_priority_last() -> TestResult {
         b"IdlePri\0".as_ptr() as *const c_char,
         dummy_task_entry,
         ptr::null_mut(),
-        TaskPriority::Idle.as_u8(), // 3
+        TaskPriority::Idle.as_u8(),
         TASK_FLAG_KERNEL_MODE,
     );
 
@@ -2718,25 +2690,17 @@ pub fn test_idle_priority_last() -> TestResult {
         return TestResult::Fail;
     }
 
-    // Schedule idle first, then normal
     schedule_task(&idle_guard);
     schedule_task(&normal_guard);
 
-    // The scheduler should pick normal before idle due to priority
-    // We can't directly verify this without running, but we verify no crash
-
+    // Priority order is not verifiable without running the scheduler; this only
+    // checks the two publications do not crash.
     TestResult::Pass
 }
 
-// =============================================================================
-// TIMER TICK / PREEMPTION TESTS
-// =============================================================================
-
-/// Test: Timer tick should decrement time slice
 pub fn test_timer_tick_decrements_slice() -> TestResult {
     let _fixture = SchedFixture::new();
 
-    // Create idle task so scheduler can start
     if scheduler::create_idle_task() != 0 {
         return TestResult::Fail;
     }
@@ -2765,11 +2729,6 @@ pub fn test_timer_tick_decrements_slice() -> TestResult {
     TestResult::Pass
 }
 
-// =============================================================================
-// TERMINATION EDGE CASES
-// =============================================================================
-
-/// Test: Terminate task with invalid ID
 pub fn test_terminate_invalid_id() -> TestResult {
     let _fixture = SchedFixture::new();
 
@@ -2783,11 +2742,9 @@ pub fn test_terminate_invalid_id() -> TestResult {
     TestResult::Pass
 }
 
-/// Test: Terminate non-existent task ID
 pub fn test_terminate_nonexistent_id() -> TestResult {
     let _fixture = SchedFixture::new();
 
-    // Use a very high ID that definitely doesn't exist
     let result = task_terminate(0xDEADBEEF);
 
     if result == 0 {
@@ -2798,7 +2755,6 @@ pub fn test_terminate_nonexistent_id() -> TestResult {
     TestResult::Pass
 }
 
-/// Test: Double terminate same task
 pub fn test_double_terminate() -> TestResult {
     let _fixture = SchedFixture::new();
 
@@ -2814,7 +2770,6 @@ pub fn test_double_terminate() -> TestResult {
         return TestResult::Fail;
     }
 
-    // First terminate
     let first_result = task_terminate(task_id);
     if first_result != 0 {
         klog_info!("SCHED_TEST: First terminate failed");
@@ -2826,11 +2781,6 @@ pub fn test_double_terminate() -> TestResult {
     TestResult::Pass
 }
 
-// =============================================================================
-// TASK FIND/GET EDGE CASES
-// =============================================================================
-
-/// Test: Find task by invalid ID
 pub fn test_find_invalid_id() -> TestResult {
     let _fixture = SchedFixture::new();
 
@@ -2842,11 +2792,8 @@ pub fn test_find_invalid_id() -> TestResult {
     TestResult::Pass
 }
 
-// =============================================================================
-// TASK CREATION EDGE CASES
-// =============================================================================
-
-/// Test: Create task with null entry point
+// TODO(tech-debt): asserts nothing — a null entry point is unrepresentable, so
+// either drive a real refusal through `task_create` or delete the test.
 #[allow(unused_variables)]
 pub fn test_create_null_entry() -> TestResult {
     let _fixture = SchedFixture::new();
@@ -2856,11 +2803,9 @@ pub fn test_create_null_entry() -> TestResult {
     TestResult::Pass
 }
 
-/// Test: Create task with conflicting mode flags
 pub fn test_create_conflicting_flags() -> TestResult {
     let _fixture = SchedFixture::new();
 
-    // Both kernel and user mode flags
     let bad_flags = TASK_FLAG_KERNEL_MODE | super::task::TASK_FLAG_USER_MODE;
 
     let task_id = task_create(
@@ -2880,7 +2825,6 @@ pub fn test_create_conflicting_flags() -> TestResult {
     TestResult::Pass
 }
 
-/// Test: Create task with null name (should still work)
 pub fn test_create_null_name() -> TestResult {
     let _fixture = SchedFixture::new();
 
@@ -2892,20 +2836,13 @@ pub fn test_create_null_name() -> TestResult {
         TASK_FLAG_KERNEL_MODE,
     );
 
-    // Null name should be allowed (empty name)
     if task_id == INVALID_TASK_ID {
         klog_info!("SCHED_TEST: Task creation with null name failed (may be OK)");
-        // This is actually acceptable behavior
     }
 
     TestResult::Pass
 }
 
-// =============================================================================
-// SCHEDULER ENABLE/DISABLE TESTS
-// =============================================================================
-
-/// Test: Scheduler starts disabled
 pub fn test_scheduler_starts_disabled() -> TestResult {
     let _fixture = SchedFixture::new();
 
@@ -2919,21 +2856,17 @@ pub fn test_scheduler_starts_disabled() -> TestResult {
     TestResult::Pass
 }
 
-/// Test: Schedule call when scheduler disabled
 pub fn test_schedule_while_disabled() -> TestResult {
     let _fixture = SchedFixture::new();
 
-    // Scheduler is disabled by default after init
-    // Calling schedule() should be a no-op
+    // Must be a no-op rather than a crash.
     schedule();
 
-    // Should not crash, no-op when disabled
     TestResult::Pass
 }
 
-/// Regression: boot userland pre-init enqueues tasks before enter_scheduler().
-/// This must work on the current CPU even when its scheduler is initialized
-/// but not yet enabled.
+/// Boot userland pre-init enqueues tasks before `enter_scheduler()`, so this
+/// must work on a CPU whose scheduler is initialised but not yet enabled.
 pub fn test_schedule_task_before_scheduler_enable_on_current_cpu() -> TestResult {
     let _fixture = SchedFixture::new();
     let cpu_id = slopos_arch::pcr::get_current_cpu();
@@ -2991,7 +2924,6 @@ pub fn test_schedule_task_before_scheduler_enable_on_current_cpu() -> TestResult
     TestResult::Pass
 }
 
-/// Regression: BSP idle-stack handoff must use idle task kernel stack.
 pub fn test_resolve_idle_stack_for_bsp_uses_idle_task_kernel_stack() -> TestResult {
     let _fixture = SchedFixture::new();
 
@@ -3008,7 +2940,6 @@ pub fn test_resolve_idle_stack_for_bsp_uses_idle_task_kernel_stack() -> TestResu
         }
     };
 
-    // `Ok` already means the slot named a task — the guard cannot be null.
     let expected_top = idle_task.task().kernel_stack_top;
     if expected_top == 0 || stack_top != expected_top {
         klog_info!(
@@ -3030,7 +2961,6 @@ pub fn test_resolve_idle_stack_for_bsp_uses_idle_task_kernel_stack() -> TestResu
     TestResult::Pass
 }
 
-/// Regression: idle-stack resolution must fail cleanly when no idle task exists.
 pub fn test_resolve_idle_stack_reports_missing_idle_task() -> TestResult {
     let _fixture = SchedFixture::new();
 
@@ -3061,13 +2991,11 @@ pub fn test_resolve_idle_stack_reports_missing_idle_task() -> TestResult {
     result
 }
 
-/// Regression: idle-stack resolution must fail cleanly for zero kernel stack top.
 pub fn test_resolve_idle_stack_reports_missing_kernel_stack() -> TestResult {
     let _fixture = SchedFixture::new();
 
     // Built here rather than mutated in place on the installed idle task: a
-    // running CPU is standing on that stack, and zeroing its top to see the
-    // error would be a live edit to the thing under it.
+    // running CPU is standing on that stack.
     let mut arc = match KArc::try_init(Task::init_invalid()) {
         Ok(task) => task,
         Err(_) => return TestResult::Fail,
@@ -3105,11 +3033,6 @@ pub fn test_resolve_idle_stack_reports_missing_kernel_stack() -> TestResult {
     TestResult::Pass
 }
 
-// =============================================================================
-// STRESS TESTS
-// =============================================================================
-
-/// Test: Create many tasks with same priority
 pub fn test_many_same_priority_tasks() -> TestResult {
     let _fixture = SchedFixture::new();
 
@@ -3131,7 +3054,6 @@ pub fn test_many_same_priority_tasks() -> TestResult {
         }
     }
 
-    // Schedule all of them
     for id in ids.iter() {
         if *id != INVALID_TASK_ID {
             if let Some(task) = task_find_by_id(*id) {
@@ -3152,12 +3074,10 @@ pub fn test_many_same_priority_tasks() -> TestResult {
     TestResult::Pass
 }
 
-/// Test: Interleaved create/schedule/terminate
 pub fn test_interleaved_operations() -> TestResult {
     let _fixture = SchedFixture::new();
 
     for i in 0..50 {
-        // Create
         let id1 = task_create(
             b"Inter1\0".as_ptr() as *const c_char,
             dummy_task_entry,
@@ -3179,7 +3099,6 @@ pub fn test_interleaved_operations() -> TestResult {
             return TestResult::Fail;
         }
 
-        // Schedule first
         if let Some(task1) = task_find_by_id(id1) {
             assert!(
                 make_task_ready(id1),
@@ -3189,10 +3108,8 @@ pub fn test_interleaved_operations() -> TestResult {
             schedule_task(&task1);
         }
 
-        // Terminate first before scheduling second
         task_terminate(id1);
 
-        // Schedule second
         if let Some(task2) = task_find_by_id(id2) {
             assert!(
                 make_task_ready(id2),
@@ -3202,21 +3119,14 @@ pub fn test_interleaved_operations() -> TestResult {
             schedule_task(&task2);
         }
 
-        // Terminate second
         task_terminate(id2);
     }
 
     TestResult::Pass
 }
 
-// =============================================================================
-// CROSS-CPU SCHEDULING TESTS (SMP)
-// Tests for the unified per-CPU scheduler architecture
-// =============================================================================
-
-/// Test: Remote inbox push and drain mechanism
-/// Verifies that push_remote_wake() correctly adds tasks to the inbox
-/// and drain_remote_inbox() moves them to the ready queue.
+/// `push_remote_wake` adds to the inbox; `drain_remote_inbox` moves the entries
+/// to the ready queue.
 pub fn test_remote_inbox_push_drain() -> TestResult {
     let _fixture = SchedFixture::new();
 
@@ -3235,8 +3145,6 @@ pub fn test_remote_inbox_push_drain() -> TestResult {
     let Some(task_guard) = task_find_by_id(task_id) else {
         return TestResult::Fail;
     };
-    // Stand in for a published-then-blocked task: inbox and wake paths refuse
-    // a task that is still nascent.
     assert!(
         scheduler::clear_nascent_for_test(task_id),
         "fixture task was not nascent"
@@ -3249,27 +3157,22 @@ pub fn test_remote_inbox_push_drain() -> TestResult {
 
     let cpu_id = slopos_arch::pcr::get_current_cpu();
 
-    // Get ready count before
     let ready_before =
         super::per_cpu::with_cpu_scheduler(cpu_id, |sched| sched.total_ready_count()).unwrap_or(0);
 
-    // Push to remote inbox (simulating cross-CPU wake)
     super::per_cpu::with_cpu_scheduler(cpu_id, |sched| {
         sched.push_remote_wake(&task_guard);
     });
 
-    // Verify inbox has pending task.
-    // On SMP, a timer tick may concurrently drain the inbox before this read.
-    // We treat that as acceptable and validate via ready-queue delta below.
+    // On SMP a timer tick may drain the inbox before this read; the ready-queue
+    // delta below is the real assertion.
     let has_pending = super::per_cpu::with_cpu_scheduler(cpu_id, |sched| sched.has_pending_inbox())
         .unwrap_or(false);
 
-    // Drain inbox
     super::per_cpu::with_cpu_scheduler(cpu_id, |sched| {
         sched.drain_remote_inbox();
     });
 
-    // Verify inbox is now empty
     let still_pending =
         super::per_cpu::with_cpu_scheduler(cpu_id, |sched| sched.has_pending_inbox())
             .unwrap_or(true);
@@ -3279,7 +3182,6 @@ pub fn test_remote_inbox_push_drain() -> TestResult {
         return TestResult::Fail;
     }
 
-    // Verify task is now in ready queue
     let ready_after =
         super::per_cpu::with_cpu_scheduler(cpu_id, |sched| sched.total_ready_count()).unwrap_or(0);
 
@@ -3295,10 +3197,8 @@ pub fn test_remote_inbox_push_drain() -> TestResult {
     TestResult::Pass
 }
 
-/// Regression: pushing the same task into a remote inbox twice must be a
-/// no-op, not a duplicate Treiber node. A duplicate node can self-cycle the
-/// inbox and make the stranded-READY rescue mistake a legitimate pending
-/// remote wake for a lost enqueue.
+/// Pushing the same task into a remote inbox twice is a no-op, not a duplicate
+/// Treiber node: a duplicate can self-cycle the inbox.
 pub fn test_remote_inbox_duplicate_push_is_single_membership() -> TestResult {
     let _fixture = SchedFixture::new();
 
@@ -3317,8 +3217,6 @@ pub fn test_remote_inbox_duplicate_push_is_single_membership() -> TestResult {
         return TestResult::Fail;
     };
     let task_ptr: &Task = &task_guard;
-    // Stand in for a published-then-blocked task: inbox and wake paths refuse
-    // a task that is still nascent.
     assert!(
         scheduler::clear_nascent_for_test(task_id),
         "fixture task was not nascent"
@@ -3335,8 +3233,8 @@ pub fn test_remote_inbox_duplicate_push_is_single_membership() -> TestResult {
     let Some(node) = Some(task_guard.node()) else {
         return TestResult::Fail;
     };
-    // Baseline strong count with the task merely registered (its registry
-    // owner). One placement reference should survive the duplicate push + drain.
+    // Baseline: the registry owner alone. One placement reference must survive
+    // the duplicate push and drain.
     let strong_base = task_placement_strong_count(node);
 
     super::per_cpu::with_cpu_scheduler(cpu_id, |sched| {
@@ -3383,8 +3281,7 @@ pub fn test_remote_inbox_duplicate_push_is_single_membership() -> TestResult {
     TestResult::Pass
 }
 
-/// Test: Multiple tasks in remote inbox
-/// Verifies FIFO ordering is preserved through inbox drain
+/// FIFO ordering is preserved through an inbox drain.
 pub fn test_remote_inbox_multiple_tasks() -> TestResult {
     let _fixture = SchedFixture::new();
 
@@ -3392,7 +3289,6 @@ pub fn test_remote_inbox_multiple_tasks() -> TestResult {
     let mut task_ids = [INVALID_TASK_ID; NUM_TASKS];
     let mut task_guards: [Option<TaskRef>; NUM_TASKS] = [const { None }; NUM_TASKS];
 
-    // Create tasks
     for i in 0..NUM_TASKS {
         task_ids[i] = task_create(
             b"MultiInbox\0".as_ptr() as *const c_char,
@@ -3411,8 +3307,6 @@ pub fn test_remote_inbox_multiple_tasks() -> TestResult {
             return TestResult::Fail;
         };
         task_guards[i] = Some(guard);
-        // Stand in for a published-then-blocked task; the inbox refuses a
-        // task that is still nascent.
         assert!(
             scheduler::clear_nascent_for_test(task_ids[i]),
             "fixture task was not nascent"
@@ -3425,19 +3319,16 @@ pub fn test_remote_inbox_multiple_tasks() -> TestResult {
 
     let cpu_id = slopos_arch::pcr::get_current_cpu();
 
-    // Push all to inbox
     for guard in task_guards.iter().flatten() {
         super::per_cpu::with_cpu_scheduler(cpu_id, |sched| {
             sched.push_remote_wake(&guard);
         });
     }
 
-    // Drain all
     super::per_cpu::with_cpu_scheduler(cpu_id, |sched| {
         sched.drain_remote_inbox();
     });
 
-    // Verify all are in ready queue
     let ready_count =
         super::per_cpu::with_cpu_scheduler(cpu_id, |sched| sched.total_ready_count()).unwrap_or(0);
 
@@ -3453,12 +3344,10 @@ pub fn test_remote_inbox_multiple_tasks() -> TestResult {
     TestResult::Pass
 }
 
-/// Test: Timer tick drains inbox on all CPUs
-/// This is the key test for the unified scheduler inbox-drain path.
+/// A timer tick drains the remote inbox.
 pub fn test_timer_tick_drains_inbox() -> TestResult {
     let _fixture = SchedFixture::new();
 
-    // Create idle task so scheduler can work
     if scheduler::create_idle_task() != 0 {
         klog_info!("SCHED_TEST: Failed to create idle task");
         return TestResult::Fail;
@@ -3479,8 +3368,6 @@ pub fn test_timer_tick_drains_inbox() -> TestResult {
     let Some(task_guard) = task_find_by_id(task_id) else {
         return TestResult::Fail;
     };
-    // Stand in for a published-then-blocked task: inbox and wake paths refuse
-    // a task that is still nascent.
     assert!(
         scheduler::clear_nascent_for_test(task_id),
         "fixture task was not nascent"
@@ -3493,12 +3380,11 @@ pub fn test_timer_tick_drains_inbox() -> TestResult {
 
     let cpu_id = slopos_arch::pcr::get_current_cpu();
 
-    // Push to inbox (bypassing normal schedule_task)
+    // Push to the inbox, bypassing `schedule_task`.
     super::per_cpu::with_cpu_scheduler(cpu_id, |sched| {
         sched.push_remote_wake(&task_guard);
     });
 
-    // Verify inbox has pending
     let has_pending_before =
         super::per_cpu::with_cpu_scheduler(cpu_id, |sched| sched.has_pending_inbox())
             .unwrap_or(false);
@@ -3508,10 +3394,8 @@ pub fn test_timer_tick_drains_inbox() -> TestResult {
         return TestResult::Fail;
     }
 
-    // Simulate timer tick - this should drain the inbox
     scheduler_timer_tick();
 
-    // Verify inbox is now empty (drained by timer tick)
     let has_pending_after =
         super::per_cpu::with_cpu_scheduler(cpu_id, |sched| sched.has_pending_inbox())
             .unwrap_or(true);
@@ -3524,7 +3408,7 @@ pub fn test_timer_tick_drains_inbox() -> TestResult {
     TestResult::Pass
 }
 
-/// Test: Draining remote inbox must not enqueue non-ready tasks.
+/// Draining the remote inbox must not enqueue non-ready tasks.
 pub fn test_remote_inbox_drops_non_ready_tasks() -> TestResult {
     let _fixture = SchedFixture::new();
     let cpu_id = slopos_arch::pcr::get_current_cpu();
@@ -3593,15 +3477,14 @@ pub fn test_remote_inbox_drops_non_ready_tasks() -> TestResult {
     TestResult::Pass
 }
 
-/// Test: Cross-CPU schedule_task uses lock-free path
-/// Verifies that schedule_task to another CPU uses push_remote_wake
+/// A cross-CPU `schedule_task` goes through `push_remote_wake`.
 pub fn test_cross_cpu_schedule_lockfree() -> TestResult {
     let _fixture = SchedFixture::new();
 
     let cpu_count = slopos_arch::pcr::get_cpu_count();
     if cpu_count < 2 {
         klog_info!("SCHED_TEST: Skipping cross-CPU test (only 1 CPU)");
-        return TestResult::Pass; // Skip on single-CPU systems
+        return TestResult::Pass;
     }
 
     let current_cpu = slopos_arch::pcr::get_current_cpu() as usize;
@@ -3656,7 +3539,6 @@ pub fn test_cross_cpu_schedule_lockfree() -> TestResult {
         return TestResult::Fail;
     }
 
-    // After drain, it should be in ready queue
     super::per_cpu::with_cpu_scheduler(target_cpu, |sched| {
         sched.drain_remote_inbox();
     });
@@ -3685,13 +3567,8 @@ pub fn test_cross_cpu_schedule_lockfree() -> TestResult {
     TestResult::Pass
 }
 
-// =============================================================================
-// PRIVILEGE SEPARATION TESTS
-// Verify that user-mode tasks get correct segment selectors, process VM,
-// kernel RSP0 stack, and that the syscall gate has DPL=3.
-// =============================================================================
-
-/// Test: User-mode tasks are created with correct privilege separation invariants.
+/// A user-mode task carries user segment selectors, a process VM and a kernel
+/// RSP0 stack, and the syscall gate is reachable at DPL 3.
 pub fn test_privilege_separation_invariants() -> TestResult {
     let _fixture = SchedFixture::new();
 
@@ -3830,17 +3707,13 @@ pub fn test_sleep_wake_race_regression() -> TestResult {
         return TestResult::Fail;
     };
     let task_ptr: &Task = &task_guard;
-    // Stand in for a published-then-blocked task; wakes refuse a nascent one.
     assert!(
         scheduler::clear_nascent_for_test(task_id),
         "fixture task was not nascent"
     );
 
-    // Use a wake_tick far in the future so that real timer interrupts
-    // (which call wake_due_sleepers with the current tick) never collect
-    // our entry before the test explicitly wakes it.  With wake_tick=100
-    // the entry was already "due" by the time the test ran, creating a
-    // race between the timer handler and the test's block/wake sequence.
+    // Far enough out that a real timer tick cannot collect the entry before the
+    // test explicitly wakes it.
     const FAR_FUTURE: u64 = u64::MAX / 2;
 
     for round in 0..64 {
@@ -3882,39 +3755,29 @@ pub fn test_sleep_wake_race_regression() -> TestResult {
     TestResult::Pass
 }
 
-/// Regression: the tickless-idle path must not panic when the soonest
-/// sleep deadline is already in the past. Between a sleeper's deadline
-/// passing and the next periodic tick removing it, the idle loop can
-/// observe `deadline <= now`, whose `wrapping_sub(now)` lands near
-/// `u64::MAX`. Feeding that delta to the tick→ms conversion previously
-/// overflowed (`saturating_mul(1000)` pinned to `u64::MAX`, then a
-/// non-saturating `+ (freq - 1)`). The idle path must treat a past
-/// deadline as already-due and skip arming a one-shot.
+/// The tickless-idle path must not panic when the soonest sleep deadline is
+/// already past: `deadline.wrapping_sub(now)` then lands near `u64::MAX`, and
+/// the idle path must treat it as already-due rather than arm a one-shot.
 pub fn test_tickless_idle_past_deadline_no_overflow() -> TestResult {
     let _fixture = SchedFixture::new();
     super::sleep::reset_sleep_queue();
 
-    // `wake_tick = 1` is in the past once the timer has advanced beyond
-    // boot, so the idle path's `wrapping_sub` produces a ~`u64::MAX`
-    // delta — the exact input that used to overflow `ticks_to_ms_ceil`.
+    // `wake_tick = 1` is already past, so the idle path's `wrapping_sub`
+    // produces a ~`u64::MAX` delta.
     if !super::sleep::test_insert_sleep_entry(424_242, 1) {
         super::sleep::reset_sleep_queue();
         return TestResult::Fail;
     }
 
-    // Must return without panicking (no add-with-overflow).
+    // Must return without panicking.
     scheduler::arm_tickless_idle_if_due();
 
     super::sleep::reset_sleep_queue();
     TestResult::Pass
 }
 
-/// Regression: a due sleep entry whose task is NOT (yet) sleep-parked must
-/// survive the tick untouched. The old pop-then-wake design destroyed the
-/// entry and then dropped the wake when it hit the sleeper's commit window
-/// — leaving the task Blocked(Sleep) with no armed entry and placement
-/// `None`, permanently (the bare-metal `touchpad-poll` strand). Entries may
-/// only disappear once a wake conclusively publishes `Ready`.
+/// A due sleep entry whose task is not yet sleep-parked survives the tick:
+/// entries may only disappear once a wake conclusively publishes `Ready`.
 pub fn test_sleep_entry_survives_unparked_wake() -> TestResult {
     let _fixture = SchedFixture::new();
     super::sleep::reset_sleep_queue();
@@ -3939,15 +3802,14 @@ pub fn test_sleep_entry_survives_unparked_wake() -> TestResult {
         return TestResult::Fail;
     };
     let task_ptr: &Task = &task_guard;
-    // Stand in for a published-then-blocked task; wakes refuse a nascent one.
     assert!(
         scheduler::clear_nascent_for_test(task_id),
         "fixture task was not nascent"
     );
 
-    // Park the task outside the ready queue so the scheduler cannot dispatch
-    // (and exit) it mid-test. It ends up Blocked with a non-Sleep reason —
-    // exactly the "not sleep-parked" shape phase 1 needs.
+    // Park the task off the ready queue so the scheduler cannot dispatch (and
+    // exit) it mid-test; it lands Blocked with a non-Sleep reason, which is the
+    // "not sleep-parked" shape under test.
     let _ = unschedule_task(&task_guard);
     if !task_ptr.is_blocked() {
         klog_info!("SCHED_TEST: unschedule did not park the task");
@@ -3955,8 +3817,8 @@ pub fn test_sleep_entry_survives_unparked_wake() -> TestResult {
         return TestResult::Fail;
     }
 
-    // Phase 1 — the mid-commit snapshot: entry armed and already due, task
-    // not Blocked(Sleep). A tick must leave the entry armed for retry.
+    // Entry armed and already due, task not Blocked(Sleep): the tick must leave
+    // it armed for retry.
     if !super::sleep::test_insert_sleep_entry(task_id, 1) {
         klog_info!("SCHED_TEST: sleep entry insert failed");
         task_terminate(task_id);
@@ -3970,9 +3832,8 @@ pub fn test_sleep_entry_survives_unparked_wake() -> TestResult {
         return TestResult::Fail;
     }
 
-    // Phase 2 — once the task is genuinely sleep-parked (reason stamped,
-    // deadline armed), the next tick must deliver the wake and only then
-    // clear the entry.
+    // Genuinely sleep-parked: the next tick delivers the wake and only then
+    // clears the entry.
     if !super::sleep::arm_blocked_timeout(task_id, 0) {
         klog_info!("SCHED_TEST: could not arm a deadline for the parked task");
         super::sleep::cancel_sleep(task_id);
@@ -3997,13 +3858,8 @@ pub fn test_sleep_entry_survives_unparked_wake() -> TestResult {
     TestResult::Pass
 }
 
-/// Ensuring the sleep queue has a backing store must never disturb the entries
-/// it already holds.
-///
-/// `ensure_sleep_queue_allocated` runs from `allocate_task`, so it fires on
-/// every task creation, long after the first sleeper has armed: an
-/// implementation that reset the queue would unarm every live sleeper each
-/// time a task spawned.
+/// Ensuring the sleep queue has a backing store must not disturb the entries it
+/// already holds — it runs from `allocate_task`, long after sleepers have armed.
 pub fn test_ensure_sleep_queue_allocated_preserves_entries() -> TestResult {
     let _fixture = SchedFixture::new();
     super::sleep::reset_sleep_queue();
@@ -4019,7 +3875,6 @@ pub fn test_ensure_sleep_queue_allocated_preserves_entries() -> TestResult {
         return TestResult::Fail;
     }
 
-    // Far enough out that a real timer tick cannot collect it mid-test.
     const FAR_FUTURE: u64 = u64::MAX / 2;
     if !super::sleep::test_insert_sleep_entry(task_id, FAR_FUTURE) {
         klog_info!("SCHED_TEST: could not arm the entry to protect");
@@ -4049,44 +3904,11 @@ pub fn test_ensure_sleep_queue_allocated_preserves_entries() -> TestResult {
     TestResult::Pass
 }
 
-// =============================================================================
-// REGRESSION: task_wait_for race-window robustness (harmonic-cascade Phase 1H)
-//
-// These tests verify that the new wait/wake protocol — durable per-task
-// `exit_info` cell published before the `waiters` queue's `wake_all`
-// fanout — closes the lost-wakeup race that the legacy two-atomic
-// `(status, waiting_on)` pair admitted. The buggy version deadlocked on
-// child-exit at ~5% on KVM and much higher on TCG.
-//
-// In the test fixture APs are paused, so the runner cannot reproduce
-// the multi-CPU race window directly. What it *can* exercise is the
-// fast-path that Phase 1's design relies on for late waiters: any
-// `task_wait_for` call that arrives after `mark_task_terminated`'s
-// publish must observe the durable `exit_info` (or the Terminated
-// status) on its first condition check and return immediately, no
-// matter how many such calls land on the same target. A regression
-// that re-introduces the lost-wake bug would either deadlock here (the
-// runner's test thread blocks forever) or fail the post-conditions on
-// `exit_info` / `task_is_terminated`.
-// =============================================================================
-
-/// 1000-iteration stress: child kthread is created and immediately
-/// terminated; parent (this runner) calls `task_wait_for(child_id)`
-/// against the freshly-terminated slot. Each iteration must return
-/// promptly via the fast path — no blocking, no deadlock.
+/// 1000 rounds of create → terminate → `task_wait_for`: every wait must return
+/// promptly via the durable `exit_info` fast path rather than block.
 ///
-/// What this catches if regressed:
-/// - `mark_task_terminated` failing to publish `exit_info` before
-///   `release_task_dependents` (Phase 1G regression) → late waiter
-///   would not see `is_set()` true and could fall through to the
-///   blocking path, deadlocking the runner.
-/// - `task_wait_for`'s condition closure forgetting the
-///   `target.is_terminated()` fallback (Phase 1E regression) →
-///   same outcome if the publish path ever skipped `try_set`.
-/// - `release_task_dependents` no longer doing `waiters.wake_all()`
-///   (Phase 1F regression) → caught only on the multi-waiter
-///   variant below; the 1000-iter case is dominated by the durable
-///   exit_info fast path.
+/// The fixture pauses the APs, so the multi-CPU race window is not reproducible
+/// here; what is under test is that a waiter arriving after the publish sees it.
 pub fn test_task_wait_exit_race_1000() -> TestResult {
     let _fixture = SchedFixture::new();
 
@@ -4109,9 +3931,6 @@ pub fn test_task_wait_exit_race_1000() -> TestResult {
         };
         let child_ptr: &Task = &child;
 
-        // Terminate the child synchronously. mark_task_terminated runs
-        // inline: publishes exit_info via try_set, then wake_all on
-        // the (still-empty) waiters queue.
         let rc = task_terminate(child_id);
         if rc != 0 {
             klog_info!(
@@ -4122,7 +3941,6 @@ pub fn test_task_wait_exit_race_1000() -> TestResult {
             return TestResult::Fail;
         }
 
-        // Post-conditions for the publish step.
         if !child_ptr.is_terminated() {
             klog_info!(
                 "SCHED_TEST: child not Terminated after task_terminate at iter {}",
@@ -4138,9 +3956,7 @@ pub fn test_task_wait_exit_race_1000() -> TestResult {
             return TestResult::Fail;
         }
 
-        // The wait must complete via the fast path — if it returns at
-        // all the runner is not deadlocked, which is the property we
-        // care about.
+        // Returning at all is the property: the runner is not deadlocked.
         let wait_rc = task_wait_for(child_id);
         if wait_rc != 0 {
             klog_info!(
@@ -4155,13 +3971,9 @@ pub fn test_task_wait_exit_race_1000() -> TestResult {
     TestResult::Pass
 }
 
-/// Same shape as `test_task_wait_exit_race_1000` but the child slot is
-/// driven through Ready→Running→Ready transitions before terminate, so
-/// the "did some work" code path of `mark_task_terminated` (which
-/// updates `total_runtime` based on `last_run_timestamp`) is exercised
-/// alongside the publish/fanout sequence. This shifts the publish
-/// timing relative to the runner's wait, so a regression that only
-/// reliably misses the wake when the child has run is still caught.
+/// `test_task_wait_exit_race_1000` with the child driven Ready→Running→Ready
+/// first, so `mark_task_terminated`'s runtime-accounting path runs alongside
+/// the publish.
 pub fn test_task_wait_exit_race_with_work() -> TestResult {
     let _fixture = SchedFixture::new();
 
@@ -4184,11 +3996,7 @@ pub fn test_task_wait_exit_race_with_work() -> TestResult {
         };
         let child_ptr: &Task = &child;
 
-        // Simulate "child did some work": Ready -> Running, advance a
-        // synthetic last_run_timestamp, then back to Ready so terminate
-        // observes a non-zero runtime delta in mark_task_terminated.
-        // The state set must respect the FSM (Ready -> Running is
-        // valid).
+        // A non-zero runtime delta for `mark_task_terminated` to observe.
         if !make_task_ready(child_id) {
             klog_info!("SCHED_TEST: failed Ready transition at iter {}", i);
             return TestResult::Fail;
@@ -4198,8 +4006,7 @@ pub fn test_task_wait_exit_race_with_work() -> TestResult {
             return TestResult::Fail;
         }
         child_ptr.set_last_run_timestamp(1);
-        // Spin a few iterations to advance any kdiag timestamp source
-        // and shift the relative ordering of publish vs. observe.
+        // Shift the relative ordering of publish versus observe.
         for _ in 0..16 {
             core::hint::spin_loop();
         }
@@ -4243,23 +4050,9 @@ pub fn test_task_wait_exit_race_with_work() -> TestResult {
     TestResult::Pass
 }
 
-/// Multi-waiter fanout: durable `exit_info` must satisfy any number of
-/// late waiters that arrive after the wake fanout has already fired
-/// against an (possibly empty) `waiters` queue. Each subsequent
-/// `task_wait_for` for the same terminated child must hit the
-/// fast-path return without blocking, no matter how many siblings
-/// have already done the same.
-///
-/// What this catches if regressed:
-/// - `release_task_dependents` failing to invoke
-///   `child.waiters.wake_all()` (Phase 1F regression) is partially
-///   caught here: while the test cannot enqueue real foreign waiters
-///   under the paused-AP fixture, it does verify the symmetric
-///   guarantee — that durable exit_info plus the Terminated status
-///   make repeated independent waits all return 0.
-/// - `exit_info` not surviving the wake fanout (e.g. a future
-///   refactor that `take`s instead of `try_get`s) — the 4th waiter
-///   would observe `is_set()` false.
+/// Durable `exit_info` satisfies any number of late waiters that arrive after
+/// the wake fanout has already fired: each `task_wait_for` for the same
+/// terminated child returns via the fast path without blocking.
 pub fn test_task_wait_multi_waiter() -> TestResult {
     let _fixture = SchedFixture::new();
 
@@ -4279,7 +4072,6 @@ pub fn test_task_wait_multi_waiter() -> TestResult {
     };
     let child_ptr: &Task = &child_ref;
 
-    // Pre-condition: waiters queue is empty before terminate.
     if task_waiter_count(child_ptr) > 0 {
         klog_info!("SCHED_TEST: child waiters queue non-empty before terminate");
         return TestResult::Fail;
@@ -4290,7 +4082,6 @@ pub fn test_task_wait_multi_waiter() -> TestResult {
         return TestResult::Fail;
     }
 
-    // After terminate: status Terminated and exit_info published.
     if !child_ptr.is_terminated() {
         klog_info!("SCHED_TEST: child not Terminated after terminate");
         return TestResult::Fail;
@@ -4300,8 +4091,6 @@ pub fn test_task_wait_multi_waiter() -> TestResult {
         return TestResult::Fail;
     }
 
-    // 4 simulated sibling parents each independently observe the
-    // durable exit_info via the fast-path return.
     for waiter in 0..4 {
         let rc = task_wait_for(child_id);
         if rc != 0 {
@@ -4312,9 +4101,8 @@ pub fn test_task_wait_multi_waiter() -> TestResult {
             );
             return TestResult::Fail;
         }
-        // exit_info must remain set across multiple observations
-        // (try_get is non-consuming; only `take` consumes — and the
-        // wait path never takes).
+        // The wait path never takes the cell, so it survives repeated
+        // observation.
         if !child_ptr.exit_info_is_set() {
             klog_info!(
                 "SCHED_TEST: exit_info became unset after waiter {} returned",
@@ -4327,14 +4115,8 @@ pub fn test_task_wait_multi_waiter() -> TestResult {
     TestResult::Pass
 }
 
-// =============================================================================
-// REGRESSION: Tick accounting & load-aware CPU selection
-// =============================================================================
-
-/// Regression: scheduler_timer_tick() must always increment total_ticks.
-/// Previously the early-return path skipped increment_ticks(), under-counting
-/// ticks on busy CPUs.  This test exercises the unguarded (no PreemptGuard)
-/// path only; the guarded path is covered by the live scheduler under SMP.
+/// `scheduler_timer_tick()` always increments `total_ticks`, including on its
+/// early-return path. Exercises the unguarded path only.
 pub fn test_timer_tick_always_increments_ticks() -> TestResult {
     let _fixture = SchedFixture::new();
 
@@ -4351,7 +4133,6 @@ pub fn test_timer_tick_always_increments_ticks() -> TestResult {
     })
     .unwrap_or(0);
 
-    // Fire several timer ticks
     for _ in 0..5 {
         scheduler_timer_tick();
     }
@@ -4375,9 +4156,8 @@ pub fn test_timer_tick_always_increments_ticks() -> TestResult {
     TestResult::Pass
 }
 
-/// Regression: idle_time must track ticks, not loop iterations.
-/// When the idle task is current, each timer tick should increment both
-/// total_ticks and idle_time by the same amount.
+/// With the idle task current, each timer tick increments `total_ticks` and
+/// `idle_time` by the same amount.
 pub fn test_idle_time_tracks_ticks_not_iterations() -> TestResult {
     let _fixture = SchedFixture::new();
 
@@ -4388,8 +4168,6 @@ pub fn test_idle_time_tracks_ticks_not_iterations() -> TestResult {
     let cpu_id = slopos_arch::pcr::get_current_cpu();
 
     // Set current task to the idle task so timer_tick recognises us as idle.
-    // `dispatch()` writes PCR.current_task + scheduler-copy + syscall_pid
-    // + state=Running in lockstep — single-writer invariant.
     let Some(idle) = crate::task_struct::Idle::current() else {
         return TestResult::Fail;
     };
@@ -4422,7 +4200,6 @@ pub fn test_idle_time_tracks_ticks_not_iterations() -> TestResult {
     let delta_ticks = ticks_after.saturating_sub(ticks_before);
     let delta_idle = idle_after.saturating_sub(idle_before);
 
-    // Both should have incremented by 10 (one per tick).
     if delta_ticks < 10 {
         klog_info!("SCHED_TEST: total_ticks delta {} < 10", delta_ticks);
         return TestResult::Fail;
@@ -4433,7 +4210,7 @@ pub fn test_idle_time_tracks_ticks_not_iterations() -> TestResult {
     } else {
         delta_ticks - delta_idle
     };
-    // Allow a small tolerance (up to 2 ticks) for SMP timing jitter.
+    // Tolerance for SMP timing jitter.
     if drift > 2 {
         klog_info!(
             "SCHED_TEST: idle_time ({}) vs total_ticks ({}) — drift {} exceeds tolerance",
@@ -4447,8 +4224,7 @@ pub fn test_idle_time_tracks_ticks_not_iterations() -> TestResult {
     TestResult::Pass
 }
 
-/// Regression: select_target_cpu should prefer idle CPUs over busy ones.
-/// Previously it always returned last_cpu regardless of load.
+/// `select_target_cpu` prefers an idle CPU over a busy `last_cpu`.
 pub fn test_select_target_cpu_prefers_idle_cpu() -> TestResult {
     let _fixture = SchedFixture::new();
     let cpu_count = slopos_arch::pcr::get_cpu_count();
@@ -4464,8 +4240,7 @@ pub fn test_select_target_cpu_prefers_idle_cpu() -> TestResult {
 
     let cpu_id = slopos_arch::pcr::get_current_cpu();
 
-    // Ensure both the local CPU and at least one other CPU are online
-    // and schedulable so select_target_cpu sees both as candidates.
+    // Both CPUs online and schedulable, so both are candidates.
     slopos_arch::pcr::mark_cpu_online(cpu_id);
     if super::per_cpu::with_cpu_scheduler(cpu_id, |sched| sched.enable()).is_none() {
         klog_info!(
@@ -4484,7 +4259,6 @@ pub fn test_select_target_cpu_prefers_idle_cpu() -> TestResult {
         return TestResult::Fail;
     }
 
-    // Load up last_cpu (cpu_id) with several queued tasks.
     let mut filler_ids = [INVALID_TASK_ID; 3];
     for i in 0..3 {
         let tid = task_create(
@@ -4513,7 +4287,7 @@ pub fn test_select_target_cpu_prefers_idle_cpu() -> TestResult {
         }
     }
 
-    // Create a test task whose last_cpu is cpu_id (busy), with affinity=0 (any CPU).
+    // affinity 0 = any CPU; `last_cpu` is the busy one.
     let task_id = task_create(
         b"Migratee\0".as_ptr() as *const c_char,
         dummy_task_entry,
@@ -4544,7 +4318,6 @@ pub fn test_select_target_cpu_prefers_idle_cpu() -> TestResult {
             return TestResult::Fail;
         }
         Some(t) => {
-            // Some other idle CPU is also acceptable.
             klog_info!(
                 "SCHED_TEST: select_target_cpu chose CPU {} (not the expected {} but still OK)",
                 t,
@@ -4560,10 +4333,8 @@ pub fn test_select_target_cpu_prefers_idle_cpu() -> TestResult {
     TestResult::Pass
 }
 
-/// Regression: CPU running a real task with empty queue must NOT be
-/// considered idle.  This is the key scenario that caused all tasks to
-/// stick to CPU0 — bursty workloads left the queue empty between bursts,
-/// so the old code always returned last_cpu.
+/// A CPU running a real task with an empty queue is not idle — bursty workloads
+/// leave the queue empty between bursts.
 pub fn test_select_target_cpu_running_task_not_idle() -> TestResult {
     let _fixture = SchedFixture::new();
     let cpu_count = slopos_arch::pcr::get_cpu_count();
@@ -4584,9 +4355,8 @@ pub fn test_select_target_cpu_running_task_not_idle() -> TestResult {
         return TestResult::Fail;
     }
 
-    // Simulate a real task running on cpu_id: create a task and set it as
-    // the current task.  The queue stays empty, but effective_load should
-    // be 1 because a non-idle task is running.
+    // The queue stays empty, but `effective_load` must be 1 because a non-idle
+    // task is running.
     let runner_id = task_create(
         b"Runner\0".as_ptr() as *const c_char,
         dummy_task_entry,
@@ -4615,8 +4385,6 @@ pub fn test_select_target_cpu_running_task_not_idle() -> TestResult {
         return TestResult::Fail;
     }
 
-    // Create a task with last_cpu = cpu_id.  Even though cpu_id's QUEUE
-    // is empty, the scheduler should NOT consider it idle.
     let task_id = task_create(
         b"WakeTest\0".as_ptr() as *const c_char,
         dummy_task_entry,
@@ -4652,9 +4420,8 @@ pub fn test_select_target_cpu_running_task_not_idle() -> TestResult {
     TestResult::Pass
 }
 
-/// Regression: schedule_new_task() must spread sequential forks across
-/// CPUs via round-robin, not pile them all onto CPU0.  Mirrors Linux's
-/// WF_FORK / SD_BALANCE_FORK slow path.
+/// `schedule_new_task()` spreads sequential forks across CPUs round-robin
+/// rather than piling them onto CPU0.
 pub fn test_schedule_new_task_spreads_across_cpus() -> TestResult {
     let _fixture = SchedFixture::new();
     let cpu_count = slopos_arch::pcr::get_cpu_count();
@@ -4669,13 +4436,12 @@ pub fn test_schedule_new_task_spreads_across_cpus() -> TestResult {
 
     let cpu_id = slopos_arch::pcr::get_current_cpu();
 
-    // Enable all CPUs for scheduling.
     for c in 0..cpu_count {
         slopos_arch::pcr::mark_cpu_online(c);
         super::per_cpu::with_cpu_scheduler(c, |sched| sched.enable());
     }
 
-    // Simulate the parent (shell) running on cpu_id by setting current_task.
+    // The forking parent runs on cpu_id.
     let parent_id = task_create(
         b"Parent\0".as_ptr() as *const c_char,
         dummy_task_entry,
@@ -4694,7 +4460,6 @@ pub fn test_schedule_new_task_spreads_across_cpus() -> TestResult {
     }
     super::scheduler::dispatch(cpu_id, &parent_guard);
 
-    // Spawn N children using schedule_new_task (the fork path).
     let n = cpu_count.min(4);
     let mut placed_on = [0usize; 4];
     for i in 0..n {
@@ -4719,7 +4484,6 @@ pub fn test_schedule_new_task_spreads_across_cpus() -> TestResult {
         placed_on[i] = tp.last_cpu() as usize;
     }
 
-    // Verify that at least 2 distinct CPUs were used (not all on CPU0).
     let mut distinct = [false; MAX_CPUS];
     let mut count = 0usize;
     for i in 0..n {
@@ -4741,13 +4505,12 @@ pub fn test_schedule_new_task_spreads_across_cpus() -> TestResult {
     TestResult::Pass
 }
 
-/// Regression: effective_load must reflect queued tasks correctly.
+/// `effective_load` reflects queued tasks.
 pub fn test_effective_load_accuracy() -> TestResult {
     let _fixture = SchedFixture::new();
     let cpu_id = slopos_arch::pcr::get_current_cpu();
 
-    // After fixture reset, effective_load should be 0 or 1 (just the
-    // running task on this CPU, if any).
+    // After a fixture reset only the running task can count, so 0 or 1.
     let load_before = super::per_cpu::with_cpu_scheduler(cpu_id, |sched| sched.effective_load())
         .unwrap_or(u32::MAX);
     if load_before > 1 {
@@ -4758,7 +4521,6 @@ pub fn test_effective_load_accuracy() -> TestResult {
         return TestResult::Fail;
     }
 
-    // Enqueue a task — effective_load should increase.
     let task_id = task_create(
         b"LoadCheck\0".as_ptr() as *const c_char,
         dummy_task_entry,
@@ -4772,8 +4534,6 @@ pub fn test_effective_load_accuracy() -> TestResult {
     let Some(task_guard) = task_find_by_id(task_id) else {
         return TestResult::Fail;
     };
-    // Stand in for a published-then-blocked task; the enqueue path refuses a
-    // task that is still nascent.
     assert!(
         scheduler::clear_nascent_for_test(task_id),
         "fixture task was not nascent"
@@ -4796,54 +4556,17 @@ pub fn test_effective_load_accuracy() -> TestResult {
     TestResult::Pass
 }
 
-// =============================================================================
-// REGRESSION: Phase 7A race-exerciser stress suite
-//
-// These three tests stress the wait/wake protocol from angles the
-// existing Phase 1 sequential stress tests do not cover:
-//
-//   1. Overlapping parent/child lifetimes within each "fork group" so
-//      multiple terminate publishes interleave with multiple wait
-//      observations against distinct waiters queues.
-//   2. Deep allocation churn: 1000 children, each destroyed before
-//      the next is spawned, exercising fresh per-task `waiters` and
-//      `exit_info` initialization.
-//   3. Cross-priority terminate/wait pair so the runqueue's
-//      priority-aware enqueue logic is exercised on the wake path
-//      even though the child publishes from a Low-priority slot.
-//
-// Under `KernelTestScope` APs are paused, so these are not true SMP
-// races — they widen coverage of the durable-exit-info fast path,
-// fresh-allocation initialization, and the cross-priority wake
-// fanout. A regression that re-introduces lost wakeups would either
-// deadlock (test runner hangs) or fail one of the post-conditions.
-// =============================================================================
-
-/// 10 fork-groups × 100 iterations: each iteration spawns 10 children
-/// concurrently, then terminates
-/// and waits for each in turn. Total fork/exit/wait cycles = 1000.
-///
-/// What this catches if regressed:
-/// - `mark_task_terminated` skipping the `waiters.wake_all()` fanout
-///   (Phase 1F) — under overlapping lifetimes the ring buffer of the
-///   first child has had ample opportunity to observe non-empty
-///   waiter slots from sibling churn, so a missed fanout would
-///   diverge from the durable exit_info path.
-/// - A fresh allocation carrying non-empty waiter state.
 const FORK_GROUP_WIDTH: usize = 10;
 const FORK_GROUP_ITERATIONS: usize = 100;
 
+/// Each round spawns `FORK_GROUP_WIDTH` children before terminating any, so the
+/// wait/wake protocol runs with live siblings rather than the singleton case.
 pub fn test_fork_exit_wait_stress_10x100() -> TestResult {
     let _fixture = SchedFixture::new();
 
     let mut child_ids = [INVALID_TASK_ID; FORK_GROUP_WIDTH];
 
     for outer in 0..FORK_GROUP_ITERATIONS {
-        // Phase 1: spawn FORK_GROUP_WIDTH children. Their lifetimes
-        // overlap — every child is allocated before any is terminated
-        // — so the wait/wake protocol is exercised with WIDTH live
-        // siblings rather than the always-singleton case of the
-        // existing 1000-iter test.
         for slot in 0..FORK_GROUP_WIDTH {
             let id = task_create(
                 b"ForkStress\0".as_ptr() as *const c_char,
@@ -4862,10 +4585,8 @@ pub fn test_fork_exit_wait_stress_10x100() -> TestResult {
             }
             child_ids[slot] = id;
 
-            // Pre-condition: a freshly-allocated slot must come back
-            // with an empty waiters ring and an unset exit_info, no
-            // matter how many prior reuses it has been through. Stale
-            // Any state here means fresh initialization regressed.
+            // A freshly-allocated slot must come back with an empty waiters
+            // ring and an unset exit_info however many reuses it has seen.
             let Some(child) = task_find_by_id(id) else {
                 klog_info!(
                     "SCHED_TEST: task_find_by_id null at outer={} slot={}",
@@ -4893,10 +4614,6 @@ pub fn test_fork_exit_wait_stress_10x100() -> TestResult {
             }
         }
 
-        // Phase 2: terminate all WIDTH children. Each terminate
-        // publishes exit_info and fans out wake_all on a still-empty
-        // waiters queue. The ordering of these publishes interleaves
-        // across siblings — different from the singleton case.
         for slot in 0..FORK_GROUP_WIDTH {
             let id = child_ids[slot];
             let rc = task_terminate(id);
@@ -4912,10 +4629,6 @@ pub fn test_fork_exit_wait_stress_10x100() -> TestResult {
             }
         }
 
-        // Phase 3: wait_for each terminated child. Every call must
-        // hit the fast path (durable exit_info) and return 0 without
-        // blocking. If the runner deadlocks here Phase 1's lost-wake
-        // fix has regressed.
         for slot in 0..FORK_GROUP_WIDTH {
             let id = child_ids[slot];
             let wait_rc = task_wait_for(id);
@@ -5003,23 +4716,15 @@ pub fn test_serial_reap_stampede() -> TestResult {
     TestResult::Pass
 }
 
-/// Regression: a parent's `waitpid_nohang`-equivalent reaper must still
-/// observe a child's exit info after dozens of unrelated task
-/// allocations fire between the child's termination and the parent's
-/// reaping call. The child's `exit_info` stays stable in the Zombie task
-/// until `task_consume_zombie` transitions it.
-///
-/// What this catches if regressed:
-/// - Anyone re-adding a recyclable parallel exit-record cache causes the
-///   post-churn consume to return `None`.
+/// A child's exit info survives unrelated task churn between its termination
+/// and the parent's reap: `exit_info` stays in the Zombie task until
+/// `task_consume_zombie` transitions it.
 pub fn test_waitpid_survives_task_churn() -> TestResult {
     use super::task::{task_consume_zombie, task_set_parent};
 
     let _fixture = SchedFixture::new();
 
-    // "Parent" runs the test (`task_set_parent` makes the child's
-    // parent_task_id resolve to a Ready slot, so the child takes the
-    // Zombie path on termination).
+    // A live parent is what makes the child take the Zombie path on exit.
     let parent_id = task_create(
         b"ZombieParent\0".as_ptr() as *const c_char,
         dummy_task_entry,
@@ -5059,9 +4764,8 @@ pub fn test_waitpid_survives_task_churn() -> TestResult {
         return TestResult::Fail;
     }
 
-    // Churn: spawn + immediately terminate a long chain of
-    // kernel-mode tasks. These have no parent so they go straight to
-    // Terminated and destroyed. None may disturb the Zombie child.
+    // Parentless tasks go straight to Terminated and are destroyed; none may
+    // disturb the Zombie child.
     for _ in 0..256 {
         let id = task_create(
             b"ChurnTask\0".as_ptr() as *const c_char,
@@ -5076,7 +4780,6 @@ pub fn test_waitpid_survives_task_churn() -> TestResult {
         let _ = task_terminate(id);
     }
 
-    // Re-find the child by ID and confirm it is still the same task.
     let Some(child_ref_after) = task_find_by_id(child_id) else {
         klog_info!("SCHED_TEST: child vanished during churn");
         return TestResult::Fail;
@@ -5090,7 +4793,6 @@ pub fn test_waitpid_survives_task_churn() -> TestResult {
         return TestResult::Fail;
     }
 
-    // Parent's reaper would call this. Must succeed.
     let info = match task_consume_zombie(child_id) {
         Some(i) => i,
         None => {
@@ -5108,21 +4810,12 @@ pub fn test_waitpid_survives_task_churn() -> TestResult {
         return TestResult::Fail;
     }
 
-    // Cleanup: terminate the parent so the next test starts clean.
     let _ = task_terminate(parent_id);
     TestResult::Pass
 }
 
-/// Regression: when a parent terminates without reaping its Zombie
-/// children, those children must be auto-reaped (Zombie → Terminated)
-/// so they can be destroyed. Without this, a parent that crashes
-/// leaves zombies pinned forever and the live-task cap eventually
-/// exhausts.
-///
-/// What this catches if regressed:
-/// - `mark_task_terminated` no longer calling `reparent_and_reap_children`
-///   → the zombie stays pinned, this test sees status == Zombie after
-///   the parent's exit and fails.
+/// A parent that terminates without reaping auto-reaps its Zombie children, so
+/// a crashed parent does not pin zombies until the live-task cap exhausts.
 pub fn test_orphan_child_auto_reaped_on_parent_exit() -> TestResult {
     use super::task::task_set_parent;
 
@@ -5162,8 +4855,7 @@ pub fn test_orphan_child_auto_reaped_on_parent_exit() -> TestResult {
     }
     drop(child);
 
-    // Parent dies without ever calling waitpid: the dying parent must
-    // sweep its child list and demote the Zombie to Terminated.
+    // The dying parent must sweep its child list and demote the Zombie.
     if task_terminate(parent_id) != 0 {
         return TestResult::Fail;
     }
@@ -5213,8 +4905,6 @@ pub fn test_child_owned_by_parent_children_list() -> TestResult {
         return TestResult::Fail;
     };
 
-    // Before linking: the parent owns no children; the child is pinned only by
-    // its registry owner.
     if !parent_ptr.children_is_empty() {
         klog_info!("SCHED_TEST: parent children list non-empty before link");
         return TestResult::Fail;
@@ -5223,8 +4913,6 @@ pub fn test_child_owned_by_parent_children_list() -> TestResult {
 
     task_set_parent(child_id, parent_id);
 
-    // After linking: the child is on the parent's list and carries exactly one
-    // extra owning reference.
     if parent_ptr.children_is_empty() {
         klog_info!("SCHED_TEST: child not on parent children list after link");
         return TestResult::Fail;
@@ -5234,7 +4922,6 @@ pub fn test_child_owned_by_parent_children_list() -> TestResult {
         return TestResult::Fail;
     }
 
-    // Terminating the child makes it a Zombie still owned by the (alive) parent.
     if task_terminate(child_id) != 0 {
         return TestResult::Fail;
     }
@@ -5247,8 +4934,6 @@ pub fn test_child_owned_by_parent_children_list() -> TestResult {
         return TestResult::Fail;
     }
 
-    // Reaping via the waitpid path unlinks the child, drops the parent's parked
-    // reference, and reclaims the task.
     if task_consume_zombie(child_id).is_none() {
         klog_info!("SCHED_TEST: task_consume_zombie returned None");
         return TestResult::Fail;
@@ -5311,18 +4996,16 @@ pub fn test_parent_death_drains_multiple_children() -> TestResult {
     }
     drop(parent);
 
-    // Two children become Zombies owned by the parent; two stay live.
     if task_terminate(child_ids[0]) != 0 || task_terminate(child_ids[1]) != 0 {
         return TestResult::Fail;
     }
 
-    // Parent dies: drains its list. (Its own children list must be empty by the
-    // time it is reclaimed, which the `Drop` tripwire also asserts.)
+    // The parent's own children list must be empty by the time it is reclaimed;
+    // the `Drop` tripwire also asserts that.
     if task_terminate(parent_id) != 0 {
         return TestResult::Fail;
     }
 
-    // The two zombies were reaped; the two live children survive as orphans.
     if task_find_by_id(child_ids[0]).is_some() || task_find_by_id(child_ids[1]).is_some() {
         klog_info!("SCHED_TEST: zombie children not reaped on parent death");
         return TestResult::Fail;
@@ -5341,25 +5024,9 @@ pub fn test_parent_death_drains_multiple_children() -> TestResult {
     TestResult::Pass
 }
 
-/// Cross-priority wait: a high-priority caller waits on a
-/// low-priority child that has already published its exit. Under the
-/// paused-AP fixture this is not a true SMP priority-inversion
-/// scenario, but it does exercise the symmetric guarantee — that
-/// the durable exit_info publish from a Low-priority slot is fully
-/// visible to a High-priority observer's wait_event condition check
-/// regardless of the producer's runqueue placement.
-///
-/// What this catches if regressed:
-/// - `mark_task_terminated` publishing exit_info via a path that
-///   somehow varies with `task->priority` (it shouldn't) would
-///   surface as a different ordering on Low than on Normal — the
-///   existing Phase 1 tests use Normal exclusively, so this fills
-///   that gap.
-/// - A future change that makes the WaitQueue's wake fanout
-///   priority-aware (e.g. reordering wake_all by waiter priority)
-///   could lose the wake on a High waiter waiting on a Low
-///   producer; this test pins that wake to fire and observes the
-///   fast-path return.
+/// A High-priority caller waits on a Low-priority child that has already
+/// published its exit: the durable `exit_info` publish must be visible
+/// regardless of the producer's priority or runqueue placement.
 pub fn test_cross_priority_wait() -> TestResult {
     let _fixture = SchedFixture::new();
 
@@ -5388,10 +5055,8 @@ pub fn test_cross_priority_wait() -> TestResult {
         return TestResult::Fail;
     }
 
-    // Producer: low priority. The exit publish runs synchronously
-    // inside `task_terminate` from the runner CPU, but the slot's
-    // `priority` field stays Low — so any priority-conditional
-    // logic on the producer side is exercised at the Low setting.
+    // The publish runs on the runner CPU, but the producer slot's `priority`
+    // stays Low.
     let child_id = task_create(
         b"LowChild\0".as_ptr() as *const c_char,
         dummy_task_entry,
@@ -5417,17 +5082,13 @@ pub fn test_cross_priority_wait() -> TestResult {
         return TestResult::Fail;
     }
 
-    // Sanity: the two slots really are distinct, so the wait below
-    // is genuinely cross-slot rather than a self-wait that the early
-    // task_id-equality check in `task_wait_for` would short-circuit.
+    // Distinct slots, or `task_wait_for`'s self-wait short-circuit makes the
+    // wait below vacuous.
     if core::ptr::eq(child_ptr, high_ptr) {
         klog_info!("SCHED_TEST: Low and High mapped to the same slot");
         return TestResult::Fail;
     }
 
-    // Terminate Low producer. Publishes exit_info and fans out on
-    // the (still-empty) waiters queue, all from a Low-priority
-    // slot's perspective.
     if task_terminate(child_id) != 0 {
         klog_info!("SCHED_TEST: task_terminate(Low) failed");
         return TestResult::Fail;
@@ -5441,9 +5102,6 @@ pub fn test_cross_priority_wait() -> TestResult {
         return TestResult::Fail;
     }
 
-    // The wait must complete via the durable exit_info fast path.
-    // A regression that gates wake fanout on producer priority
-    // would either deadlock the runner here or corrupt exit_info.
     // `child_ref` keeps the Low task alive across the wait.
     let wait_rc = task_wait_for(child_id);
     if wait_rc != 0 {
@@ -5454,16 +5112,13 @@ pub fn test_cross_priority_wait() -> TestResult {
         return TestResult::Fail;
     }
 
-    // Post-condition: the durable exit_info is still observable on
-    // the strongly held Low task. The wait path uses `try_get`/`is_set`
-    // (non-consuming), never `take`; a regression that consumed
-    // the cell would leave subsequent waiters stranded.
+    // The wait path never takes the cell, so it stays observable for later
+    // waiters.
     if !child_ptr.exit_info_is_set() {
         klog_info!("SCHED_TEST: exit_info became unset after High-priority wait returned");
         return TestResult::Fail;
     }
 
-    // Clean up the High waiter task.
     if task_terminate(high_id) != 0 {
         klog_info!("SCHED_TEST: task_terminate(High) failed");
         return TestResult::Fail;
@@ -5654,29 +5309,6 @@ slopos_testing::stest!(
     suite = sched_core
 );
 
-// =============================================================================
-// WAIT_QUEUE TESTS
-//
-// These tests cover the wait/wake primitive's APIs and defense-in-depth
-// invariants:
-//
-// - `WaitOutcome<R>` enum return type.
-// - `wait_event_until` / `wait_event_timeout_until` generic-return APIs.
-// - Lock-free `has_waiters()` (callers that want to skip a `wake_*`
-//   when no one is queued do this at the call site rather than baked
-//   into `wake_*` itself — the in-place fast path is unsound on
-//   weakly-ordered architectures).
-// - `WaitNode::has_woken` auxiliary atomic, exercised indirectly via
-//   the wake-empty-queue tests and via the wider scheduler integration.
-// - `WaitNode` Drop with null queue back-pointer is a no-op (the
-//   common case — back-pointer is cleared inside the WQ critical
-//   section by every pop path, so by the time stack-pinned `WaitNode`s
-//   go out of scope they hold null).
-//
-// `test_wait_node_unlinks_when_its_frame_unwinds` covers the panic path:
-// `catch_panic!` unwinds, so destructors do run during recovery.
-// =============================================================================
-
 use slopos_ostd::sync::wait_queue::{ParkedTestNode, WaitAbort, WaitQueue};
 
 /// `wait_event_until` returns the closure's `Some(R)` immediately via
@@ -5755,10 +5387,8 @@ pub fn test_wait_event_timeout_bool_wrapper_times_out() -> TestResult {
     }
 }
 
-/// `has_waiters()` on a fresh queue returns `false` via the lock-free
-/// read path (it must NOT take the queue's `SpinLock` — if it did,
-/// it would still work in kernel mode, but the soundness invariant
-/// from the plan would be violated).
+/// `has_waiters()` on a fresh queue returns `false` via the lock-free read
+/// path; it must not take the queue's `SpinLock`.
 pub fn test_has_waiters_fresh_queue_is_false() -> TestResult {
     let _fixture = SchedFixture::new();
     let wq = WaitQueue::new(lock_class!("test.wq6", LOCK_LEVEL_RESOURCE));
@@ -5769,7 +5399,7 @@ pub fn test_has_waiters_fresh_queue_is_false() -> TestResult {
     }
 }
 
-/// `WaitQueue::new(lock_class!("test.wq7", LOCK_LEVEL_RESOURCE))` produces a queue with `generation == 0`.
+/// A fresh `WaitQueue` has `generation == 0`.
 pub fn test_wait_queue_initial_generation() -> TestResult {
     let _fixture = SchedFixture::new();
     let wq = WaitQueue::new(lock_class!("test.wq8", LOCK_LEVEL_RESOURCE));
@@ -5780,9 +5410,7 @@ pub fn test_wait_queue_initial_generation() -> TestResult {
     }
 }
 
-/// `wake_one` on an empty queue returns `false` without panicking —
-/// confirms the has_woken / queue-back-pointer bookkeeping handles
-/// the empty-pop branch cleanly.
+/// `wake_one` on an empty queue returns `false` without panicking.
 pub fn test_wake_one_on_empty_queue() -> TestResult {
     let _fixture = SchedFixture::new();
     let wq = WaitQueue::new(lock_class!("test.wq9", LOCK_LEVEL_RESOURCE));
@@ -5804,9 +5432,7 @@ pub fn test_wake_all_on_empty_queue() -> TestResult {
     }
 }
 
-/// Verify that wake_one / wake_all on an empty queue do NOT bump the
-/// generation counter — the generation is only incremented when at
-/// least one waiter was actually woken.
+/// The generation only advances when at least one waiter was actually woken.
 pub fn test_generation_unchanged_when_no_waiters() -> TestResult {
     let _fixture = SchedFixture::new();
     let wq = WaitQueue::new(lock_class!("test.wq11", LOCK_LEVEL_RESOURCE));
@@ -5855,13 +5481,8 @@ slopos_testing::stest!(
     suite = sched_core
 );
 
-// =============================================================================
-// Phase-1 scheduler-refactor regression tests
-// =============================================================================
-
-/// `TaskPriority::KernelIo` is numerically 1 (between `High`=0 and
-/// `Normal`=2) and the renumber landed cleanly across the enum's
-/// total decoder, strict decoder, and dispatch index.
+/// `TaskPriority::KernelIo` is numerically 1, between `High`=0 and `Normal`=2,
+/// in the total decoder, the strict decoder and the dispatch index alike.
 fn test_kernel_io_priority_renumber() -> TestResult {
     if TaskPriority::High.as_u8() != 0 {
         return TestResult::Fail;
@@ -5878,17 +5499,14 @@ fn test_kernel_io_priority_renumber() -> TestResult {
     if TaskPriority::Idle.as_u8() != 4 {
         return TestResult::Fail;
     }
-    // Total decoder round-trips every variant.
     for v in 0..=4u8 {
         if TaskPriority::from_u8(v).as_u8() != v {
             return TestResult::Fail;
         }
     }
-    // Out-of-range coerces to Normal in the total decoder.
     if TaskPriority::from_u8(255) != TaskPriority::Normal {
         return TestResult::Fail;
     }
-    // Strict decoder rejects out-of-range.
     if TaskPriority::try_from_u8(5).is_some() {
         return TestResult::Fail;
     }
@@ -5898,10 +5516,8 @@ fn test_kernel_io_priority_renumber() -> TestResult {
     TestResult::Pass
 }
 
-/// `SleepQueue::earliest_deadline` returns `None` on the lock-free
-/// fast path when no tasks are sleeping. Drives the
-/// tickless-idle path: when there are no deadlines, the idle loop
-/// must skip arming a one-shot LAPIC.
+/// With no sleepers the lock-free fast path returns `None`, so the tickless
+/// idle loop skips arming a one-shot LAPIC.
 fn test_sleep_queue_next_deadline_none_when_empty() -> TestResult {
     let _fix = SchedFixture::new();
     let now = slopos_kernel_services::platform::timer_ticks();
@@ -5911,10 +5527,8 @@ fn test_sleep_queue_next_deadline_none_when_empty() -> TestResult {
     }
 }
 
-/// `KernelIoToken::__new_for_trampoline_only` is documented as the
-/// only way to construct a witness. The constructor compiles and
-/// returns. (The macro path is exercised in production by every
-/// `spawn_kernel_io!` invocation; this test pins the inner ABI.)
+/// Pins the inner ABI of `KernelIoToken::__new_for_trampoline_only`, the only
+/// witness constructor.
 fn test_kernel_io_token_constructs() -> TestResult {
     let _t =
         slopos_ostd::sync::kernel_io_task::KernelIoToken::<'static>::__new_for_trampoline_only();
@@ -5927,18 +5541,6 @@ slopos_testing::stest!(
     suite = sched_core
 );
 slopos_testing::stest!(name = test_kernel_io_token_constructs, suite = sched_core);
-
-// =============================================================================
-// Per-CPU preempt accounting (single-instruction gs-relative ops)
-// =============================================================================
-//
-// Regression coverage for the migration TOCTOU class: the old
-// pointer-then-RMW preempt accounting let an IRQ-driven migration land
-// an increment on the previous CPU's count (leaked +1 there, underflow
-// panic here). The accounting is now single-instruction gs-relative;
-// these tests pin the guard semantics and soak the exact acquisition
-// shape that used to corrupt — guard churn at the preemptible baseline
-// with the timer free to preempt and migrate the task mid-loop.
 
 fn test_preempt_guard_nesting_balances() -> TestResult {
     let baseline = slopos_ostd::sync::preempt_count();
@@ -5966,10 +5568,8 @@ fn test_preempt_guard_nesting_balances() -> TestResult {
 }
 
 fn test_preempt_reschedule_pending_deferred_not_lost() -> TestResult {
-    // With IRQs disabled nothing else can mutate this CPU's pending
-    // flag, and the guard-drop deferred callback is gated off (it
-    // requires the IRQs-enabled baseline) — so a guard dropped with
-    // the flag set must LEAVE it set for the trap-exit handoff.
+    // IRQs off gates the guard-drop deferred callback off, so a guard dropped
+    // with the flag set must leave it set for the trap-exit handoff.
     let ok = slopos_ostd::cpu::x86_64::interrupts::IrqDisabled::with(|_irq| -> bool {
         PreemptGuard::clear_reschedule_pending();
         let guard = PreemptGuard::new();
@@ -6003,20 +5603,16 @@ fn test_preempt_count_balanced_under_guard_churn() -> TestResult {
 
     let baseline = slopos_ostd::sync::preempt_count();
     for i in 0..20_000u32 {
-        // Bare guard churn: the acquisition shape that used to race
-        // IRQ-driven migration.
         let guard = slopos_ostd::sync::PreemptGuard::new();
         core::hint::black_box(&guard);
         drop(guard);
 
-        // SpinLock churn: guard + cli + critical section, the exact
-        // panicking path (poll_reg_take's lock/unlock).
+        // SpinLock churn: guard + cli + critical section.
         let mut slot = CHURN_LOCK.lock();
         *slot = slot.wrapping_add(1);
         drop(slot);
 
-        // Invite the timer to preempt (and the stealer to migrate)
-        // the task between iterations.
+        // Invite the timer to preempt (and the stealer to migrate) the task.
         if i % 1024 == 0 {
             scheduler::yield_();
         }
@@ -6041,10 +5637,6 @@ slopos_testing::stest!(
     suite = sched_core
 );
 
-// =============================================================================
-// D3 coverage backlog
-// =============================================================================
-
 fn park_bootstrap_on_current_cpu() {
     slopos_arch::pcr::park_bootstrap_task(
         slopos_ostd::task::bootstrap::BSP_BOOTSTRAP_TASK.get() as *mut ()
@@ -6053,10 +5645,9 @@ fn park_bootstrap_on_current_cpu() {
 
 /// Make `task_id` this CPU's current task.
 ///
-/// `dispatch` asserts its incoming task is runnable, so publishing Ready first
-/// is not optional: a task straight out of `task_create` is Blocked, and
-/// dispatching one trips the dispatcher's own invariant rather than returning
-/// an error.
+/// `dispatch` asserts its incoming task is runnable, so the Ready publish is
+/// not optional — a task straight out of `task_create` is Blocked, and
+/// dispatching one trips that invariant rather than returning an error.
 fn dispatch_as_current(task_id: u32) -> bool {
     let cpu = slopos_arch::pcr::get_current_cpu();
     make_task_ready(task_id) && scheduler::dispatch_task_for_test(cpu, task_id)
@@ -6065,15 +5656,10 @@ fn dispatch_as_current(task_id: u32) -> bool {
 /// Park `task_id` on `wq`.
 ///
 /// [`WaitQueue::enqueue_current`] reads the waiter's identity from the PCR, so
-/// making the task this CPU's current for exactly the duration of the enqueue
-/// is the only way to put a *chosen* task on a queue from a test. The
-/// bootstrap stub is restored before returning: a task that is still some
-/// CPU's current is dispatch-pinned, and the reap would refuse it.
+/// the task must be this CPU's current for the duration of the enqueue. The
+/// bootstrap stub is restored before returning: a task that is still some CPU's
+/// current is dispatch-pinned, and the reap would refuse it.
 fn park_task_on_queue(wq: &WaitQueue, task_id: u32) -> bool {
-    // Stand in for a published-then-blocked waiter. A task straight out of
-    // `task_create` is `Nascent`, and every wake path deliberately refuses one
-    // — so a nascent control would report "not woken" for a reason that has
-    // nothing to do with what is under test.
     if !scheduler::clear_nascent_for_test(task_id) {
         return false;
     }
@@ -6085,8 +5671,7 @@ fn park_task_on_queue(wq: &WaitQueue, task_id: u32) -> bool {
     parked
 }
 
-/// `(id, status)` for every registered task, so a wake that touches something
-/// it should not is visible as a diff rather than as a later mystery.
+/// `(id, status)` for every registered task, so a stray wake shows up as a diff.
 fn snapshot_live_task_states() -> slopos_ostd::KVec<(u32, TaskStatus)> {
     let mut out = match slopos_ostd::KVec::with_capacity(super::task::MAX_TASKS) {
         Ok(v) => v,
@@ -6101,16 +5686,11 @@ fn snapshot_live_task_states() -> slopos_ostd::KVec<(u32, TaskStatus)> {
 /// A wake delivered to a wait-queue node whose task has been reaped resolves to
 /// nothing, and disturbs no other task.
 ///
-/// Teardown scrubs sleep entries and futex buckets but never unlinks
-/// wait-queue nodes, so a node outliving its task is structurally reachable —
-/// a waiter SIGKILL'd while parked never unwinds its own stack. The node holds
-/// an id, and the wake resolves it through the registry, which is what makes
-/// the dangling node inert. Were the node to hold a pointer instead, this wake
-/// would read freed memory.
-///
-/// The `weak.upgrade()` check is load-bearing: it asserts the allocation is
-/// *freed*, not merely unhashed, so "the id resolves to nothing" is not
-/// masking a task that is still sitting at that address.
+/// Teardown never unlinks wait-queue nodes, so a node outliving its task is
+/// structurally reachable. The node holds an id resolved through the registry,
+/// which is what makes it inert; a pointer would read freed memory. The
+/// `weak.upgrade()` check asserts the allocation is *freed*, not merely
+/// unhashed.
 pub fn test_wake_against_reaped_waiter_is_inert() -> TestResult {
     let _fixture = SchedFixture::new();
 
@@ -6148,7 +5728,6 @@ pub fn test_wake_against_reaped_waiter_is_inert() -> TestResult {
     }
     crate::task::task_graveyard_drain();
 
-    // Gone in both senses: unhashed from the registry, and actually freed.
     if task_find_by_id(victim_id).is_some() {
         klog_info!("SCHED_TEST: reaped waiter {} still resolves", victim_id);
         return TestResult::Fail;
@@ -6163,8 +5742,6 @@ pub fn test_wake_against_reaped_waiter_is_inert() -> TestResult {
 
     let before = snapshot_live_task_states();
 
-    // The node is still linked. The wake must pop it and resolve its id to
-    // nothing, rather than to whatever now occupies the address.
     if !wq.wake_one() {
         klog_info!("SCHED_TEST: the reaped waiter's node was not on the queue");
         return TestResult::Fail;
@@ -6196,9 +5773,8 @@ pub fn test_wake_against_reaped_waiter_is_inert() -> TestResult {
         }
     }
 
-    // Positive control. Without it, "a node was popped" is satisfiable by a
-    // `wake_one` that reaches no task at all, and the no-disturbance assertion
-    // above would hold vacuously.
+    // Positive control: without it the no-disturbance assertion above holds
+    // vacuously.
     let live_id = task_create(
         b"LiveWaiter\0".as_ptr() as *const c_char,
         dummy_task_entry,
@@ -6245,10 +5821,9 @@ pub fn test_wake_against_reaped_waiter_is_inert() -> TestResult {
 /// The preemption gate: strictly-higher priority preempts, equal does not, and
 /// a CPU parked on a bootstrap stub loses to every real priority.
 ///
-/// Covers the predicate and the effect it drives. Equal priority is the case
-/// that matters: an inverted or non-strict comparison still passes a
-/// high-versus-low check, and turns every same-priority wake into a
-/// reschedule — a preemption storm rather than a visible fault.
+/// Equal priority is the case that matters: a non-strict comparison still
+/// passes a high-versus-low check and turns every same-priority wake into a
+/// reschedule.
 pub fn test_newcomer_outranks_current_preemption_gate() -> TestResult {
     let _fixture = SchedFixture::new();
     let cpu = slopos_arch::pcr::get_current_cpu();
@@ -6277,7 +5852,6 @@ pub fn test_newcomer_outranks_current_preemption_gate() -> TestResult {
         return TestResult::Fail;
     };
 
-    // --- predicate, against a Normal current task --------------------------
     if !dispatch_as_current(normal_a.task_id) {
         klog_info!("SCHED_TEST: could not dispatch the current-task fixture");
         return TestResult::Fail;
@@ -6295,14 +5869,12 @@ pub fn test_newcomer_outranks_current_preemption_gate() -> TestResult {
         return TestResult::Fail;
     }
 
-    // --- predicate, against a CPU running nothing schedulable --------------
     park_bootstrap_on_current_cpu();
     if !scheduler::newcomer_outranks_current(cpu, &idle) {
         klog_info!("SCHED_TEST: Idle did not outrank PRIORITY_NONE");
         return TestResult::Fail;
     }
 
-    // --- the effect the predicate drives -----------------------------------
     slopos_arch::pcr::mark_cpu_online(cpu);
     if super::per_cpu::with_cpu_scheduler(cpu, |sched| sched.enable()).is_none() {
         return TestResult::Fail;
@@ -6312,8 +5884,7 @@ pub fn test_newcomer_outranks_current_preemption_gate() -> TestResult {
     crate::task::task_install_idle_affinity(&normal_b, affinity, cpu as u8);
 
     // The reschedule request is gated on scheduling being active; enable it
-    // only across the two publications so the fixture's quiescence is
-    // disturbed as little as possible.
+    // only across the two publications.
     scheduler::set_scheduler_enabled(true);
     let effect = (|| {
         if !scheduler::is_scheduling_active() {
@@ -6366,10 +5937,8 @@ pub fn test_newcomer_outranks_current_preemption_gate() -> TestResult {
 
 /// `is_bootstrap_task_ptr` accepts stub base addresses and nothing else.
 ///
-/// A false accept would hand a raw PCR reader an address that is not a task at
-/// all, to be read as one. The interior
-/// sweep is exhaustive only because the stub is exactly its 8-byte ABI header,
-/// which is asserted here so a growth of the struct fails by name rather than
+/// The interior sweep is exhaustive only because the stub is exactly its 8-byte
+/// ABI header, which is asserted here so a growth fails by name rather than
 /// silently reducing this test's coverage to the first byte.
 pub fn test_bootstrap_task_ptr_rejects_interior_addresses() -> TestResult {
     use slopos_ostd::task::bootstrap::{
@@ -6423,9 +5992,8 @@ pub fn test_bootstrap_task_ptr_rejects_interior_addresses() -> TestResult {
         }
     }
 
-    // One past the end and one before the base. Both are asserted only when
-    // they are not the BSP stub itself: the two statics are independent, so
-    // the linker may place the BSP stub immediately either side of the array.
+    // The two statics are independent, so the linker may place the BSP stub
+    // immediately either side of the array; skip those cases.
     if end != bsp && is_bootstrap_task_ptr(end as *const ()) {
         klog_info!("SCHED_TEST: one-past-the-end of the AP array accepted");
         return TestResult::Fail;
@@ -6438,13 +6006,11 @@ pub fn test_bootstrap_task_ptr_rejects_interior_addresses() -> TestResult {
     TestResult::Pass
 }
 
-/// Task ids are handed out strictly increasing, are never recycled once
-/// retired, and the allocator does not rewind across a fixture reset.
+/// Task ids are strictly increasing, never recycled once retired, and the
+/// allocator does not rewind across a fixture reset.
 ///
-/// Every id-keyed subsystem — the wait queues, the sleep queue, the futex
-/// buckets, `waitpid` — is only safe because a stale id resolves to nothing
-/// rather than to a different task. `init_task_manager` promises the monotonic
-/// source survives reinitialisation, and nothing else checks it.
+/// Every id-keyed subsystem is safe only because a stale id resolves to
+/// nothing; nothing else checks `init_task_manager`'s monotonicity promise.
 pub fn test_task_ids_are_never_reused() -> TestResult {
     let _fixture = SchedFixture::new();
 
@@ -6477,8 +6043,6 @@ pub fn test_task_ids_are_never_reused() -> TestResult {
         if task_terminate(id) != 0 {
             return TestResult::Fail;
         }
-        // Retired, not recycled: the id stays spent even though nothing holds
-        // it any more.
         if task_find_by_id(id).is_some() {
             klog_info!("SCHED_TEST: terminated task {} still resolves", id);
             return TestResult::Fail;
@@ -6501,7 +6065,7 @@ pub fn test_task_ids_are_never_reused() -> TestResult {
         }
     }
 
-    // A fixture reset retires every non-idle registration. The monotonic id
+    // A fixture reset retires every non-idle registration; the monotonic id
     // source must survive it.
     if crate::task::init_task_manager() != 0 {
         klog_info!("SCHED_TEST: init_task_manager failed");

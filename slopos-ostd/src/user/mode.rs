@@ -1,27 +1,15 @@
 //! User-mode entry / exit primitive.
 //!
-//! [`UserMode<'a>`] is the only OSTD-sanctioned way to enter user
-//! mode. [`UserMode::execute`] consumes the wrapper, performs the
-//! kernel→user transition (IRETQ to the user RIP/RSP encoded in the
-//! `UserContext`), and returns once user mode hands control back
-//! through a syscall, exception, or interrupt. The
-//! [`ReturnReason`] enumerates what brought us back.
+//! [`UserMode::execute`] is the only OSTD-sanctioned way to enter user mode:
+//! it IRETQs to the RIP/RSP encoded in the `UserContext` and returns once user
+//! mode hands control back, with [`ReturnReason`] naming what brought it back.
+//! `__ostd_user_return`, defined here via `global_asm!`, is the trampoline the
+//! IDT routes user→kernel transitions through; it captures the user register
+//! file back into the `UserContext` named by the per-CPU stash.
 //!
-//! The mechanism is split into two halves:
-//!
-//! - [`UserMode::execute`] runs the entry asm: STAC handling lives
-//!   inside `slopos-ostd::user::copy`, swapgs/IRETQ live here.
-//! - `__ostd_user_return` (defined in this module via `global_asm!`)
-//!   is the trampoline the IDT routes user→kernel transitions
-//!   through. It captures the user register file back into the
-//!   `UserContext` pointed at by the per-CPU stash and returns
-//!   control to `execute()`'s caller.
-//!
-//! The per-CPU UserContext-pointer stash is supplied by the trusted
-//! side via [`register_user_mode_backend`]. Until a backend is
-//! registered, [`UserMode::execute`] panics; production wiring
-//! installs a backend that proxies to a per-CPU PCR slot and
-//! reroutes IDT vectors through `__ostd_user_return`.
+//! That stash is supplied by the trusted side via
+//! [`register_user_mode_backend`]; until a backend is registered,
+//! [`UserMode::execute`] panics.
 
 use core::cell::UnsafeCell;
 use core::mem::MaybeUninit;
@@ -36,15 +24,11 @@ use crate::user::context::UserRegs;
 /// Why the kernel re-took control from a user-mode thread.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ReturnReason {
-    /// User executed the SYSCALL instruction. Argument is the syscall
-    /// number that was loaded into `rax`.
+    /// SYSCALL; the argument is the syscall number loaded into `rax`.
     Syscall(u64),
-    /// User trapped on a CPU exception. The vector / error code /
-    /// faulting address (CR2 for `#PF`, else 0) come back via
-    /// [`ExceptionInfo`].
+    /// A CPU exception; `fault_addr` is CR2 for `#PF` and 0 otherwise.
     Exception(ExceptionInfo),
-    /// External interrupt vector took control while the user thread
-    /// was executing.
+    /// An external interrupt took control while the user thread was running.
     Interrupt(u8),
 }
 
@@ -57,12 +41,9 @@ pub struct ExceptionInfo {
 
 /// Borrowed handle paired against a `UserContext` and a `VmSpace`.
 ///
-/// `execute` consumes the wrapper, so one `UserMode` value round-trips
-/// at most once. That is all it buys: `&'a UserContext` is `Copy`, so a
-/// caller holding the borrow can build as many wrappers as it likes —
-/// [`crate::user::mode::UserMode::execute`] confers no once-only
-/// property on the context itself. Entry is serialised by the
-/// `__ostd_user_return` protocol (publish `pcr.user_ctx_ptr` → iretq →
+/// `execute` consumes the wrapper, but `&'a UserContext` is `Copy`, so that
+/// confers no once-only property on the context itself: entry is serialised by
+/// the `__ostd_user_return` protocol (publish `pcr.user_ctx_ptr` → iretq →
 /// trampoline → return), not by this type.
 pub struct UserMode<'a> {
     ctx: &'a UserContext,
@@ -78,14 +59,11 @@ impl<'a> UserMode<'a> {
     /// `ctx.rip()` with `ctx.rsp()`. Returns once a syscall,
     /// exception, or external interrupt rejoins the kernel.
     ///
-    /// SAFETY: The asm sequence below switches GS via `swapgs`,
-    /// reloads every GPR (including the user-mode frame on the
-    /// trusted side of the per-CPU stash), and IRETs into the user
-    /// half. Inv. 2 (kernel-mode CPU state) is preserved because
-    /// `set_rflags` masked every dangerous flag before the frame
-    /// was built. Inv. 5 (user pointers cannot reach kernel memory)
-    /// is preserved because the context's `rip` / `rsp` are loaded via
-    /// IRETQ which itself enforces canonicality on 64-bit.
+    /// SAFETY: Inv. 2 (kernel-mode CPU state) is preserved because
+    /// `set_rflags` masked every dangerous flag before the frame was built.
+    /// Inv. 5 (user pointers cannot reach kernel memory) is preserved because
+    /// the context's `rip` / `rsp` are loaded via IRETQ, which itself enforces
+    /// canonicality on 64-bit.
     pub fn execute(self) -> ReturnReason {
         let backend = current_user_mode_backend();
         // SAFETY: `self` borrows `ctx` for `'a`, which outlives the
@@ -101,20 +79,12 @@ impl<'a> UserMode<'a> {
 
 /// Trusted-side hook that drives a single user-mode round trip.
 ///
-/// Implementations must:
-/// 1. Stash `ctx` in the current CPU's PCR slot so the
-///    `__ostd_user_return` trampoline can write user state back
-///    into it.
-/// 2. Activate `space` if not already active.
-/// 3. Save the kernel callee-saved registers onto the kernel stack.
-/// 4. Restore user GPRs from `ctx.regs_ptr()`.
-/// 5. Build the IRETQ frame and `swapgs; iretq`.
-/// 6. On the next user→kernel transition, the trampoline restores
-///    callee-saves and returns control to step 6.
-/// 7. Derive the [`ReturnReason`] from the per-task `UserContext` the
-///    trampoline just wrote (the syscall number is `ctx.rax()`) and
-///    return it — never from a per-CPU slot, which a preemption in the
-///    trampoline-return tail could misdirect to another CPU.
+/// An implementation stashes `ctx` in the current CPU's PCR slot for the
+/// `__ostd_user_return` trampoline, activates `space`, saves the kernel
+/// callee-saves, restores the user GPRs from `ctx.regs_ptr()`, and
+/// `swapgs; iretq`s. It must derive the [`ReturnReason`] from the per-task
+/// `UserContext` the trampoline wrote, never from a per-CPU slot, which a
+/// preemption in the trampoline-return tail could misdirect to another CPU.
 ///
 /// # Safety
 ///
@@ -151,9 +121,8 @@ static BACKEND_SLOT: BackendSlot = BackendSlot(UnsafeCell::new(MaybeUninit::unin
 static BACKEND_INSTALLED: AtomicBool = AtomicBool::new(false);
 
 /// One-shot wiring point for the production user-mode backend. The
-/// `&BspToken<'brand>` witnesses BSP-only init; `backend` must live
-/// for the static lifetime of the kernel and drive the user-mode
-/// round trip in the manner documented on [`UserModeBackend`] (Inv. 2).
+/// `&BspToken<'brand>` witnesses BSP-only init; `backend` must drive the round
+/// trip in the manner documented on [`UserModeBackend`] (Inv. 2).
 pub fn register_user_mode_backend<'brand>(
     _token: &BspToken<'brand>,
     backend: &'static dyn UserModeBackend,
@@ -178,30 +147,20 @@ pub fn reset_user_mode_backend_for_test() {
 /// Production [`UserModeBackend`] that drives the kernel→user→kernel
 /// round trip via the per-CPU PCR slots.
 ///
-/// `execute_round_trip` stashes the active [`UserContext`] pointer in
-/// `pcr.user_ctx_ptr`, invokes [`user_mode_round_trip_asm`] (which builds
-/// the IRETQ frame and transitions to user mode), and on user→kernel
-/// re-entry derives the [`ReturnReason`] from the per-task `UserContext`
-/// the trampoline wrote (always a syscall on this path).
-///
 /// `_space` is intentionally ignored at this layer: CR3 is owned by
 /// the kernel paging code outside OSTD, so address-space activation
 /// happens before the round trip is dispatched.
 pub struct PcrUserModeBackend;
 
-/// Production backend installed by boot via
-/// [`register_user_mode_backend`]. Use as
-/// `register_user_mode_backend(&DEFAULT_USER_MODE_BACKEND)`.
+/// Production backend installed by boot via [`register_user_mode_backend`].
 pub static DEFAULT_USER_MODE_BACKEND: PcrUserModeBackend = PcrUserModeBackend;
 
-// SAFETY: `PcrUserModeBackend` carries no per-instance state. The
-// outbound leg reads per-CPU PCR slots through `current_pcr()` (which
-// resolves to the running CPU's PCR via `gs:[0]`) while IRQs are off and
-// the kernel-side window between the `user_ctx_ptr.store` and the iretq
-// is serialised on the running CPU. The return reason is read from the
-// per-task `UserContext`, so it is correct even though the trampoline
-// `sti`s before returning and the task may be preempted/migrated in the
-// return tail — the `UserContext` travels with the task.
+// SAFETY: `PcrUserModeBackend` carries no per-instance state. The outbound leg
+// reads the running CPU's PCR through `current_pcr()` with IRQs off, and the
+// window between the `user_ctx_ptr.store` and the iretq is serialised on that
+// CPU. The return reason is read from the per-task `UserContext`, which travels
+// with the task, so a preempt-and-migrate in the trampoline's post-`sti` tail
+// cannot misattribute it.
 #[cfg(all(target_arch = "x86_64", not(test)))]
 unsafe impl UserModeBackend for PcrUserModeBackend {
     unsafe fn execute_round_trip(&self, ctx: &UserContext, _space: &VmSpace) -> ReturnReason {

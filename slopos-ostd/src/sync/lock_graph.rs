@@ -1578,17 +1578,14 @@ pub fn class_info(idx: usize) -> Option<ClassInfo> {
 /// Latch [`GRAPH_OVERFLOW`] and, once per boot, say so.
 ///
 /// Reached from inside a held-stack update, so the [`ReportLatch`] is what
-/// makes the logging safe: `klog_warn!` reaches `klog::ring_capture`, which
-/// takes `KLOG_RING` — a `SpinLock`, whose `try_lock` calls back into
-/// [`push_lock`] and would otherwise take a second borrow of the stack the
-/// caller is holding. The `try_lock` also cannot deadlock against a
-/// `KLOG_RING` this CPU already holds: it fails the ticket CAS and drops the
-/// line. The serial backend below `ring_capture` is a bespoke ticket lock,
-/// not a `SpinLock`, so it never re-enters at all.
+/// makes the logging safe: `klog_warn!` takes `KLOG_RING` — a `SpinLock`,
+/// whose `try_lock` calls back into [`push_lock`]. That `try_lock` cannot
+/// deadlock against a `KLOG_RING` this CPU already holds: it fails the ticket
+/// CAS and drops the line.
 ///
-/// Kept `#[cold] #[inline(never)]` because [`push_lock`] is `#[inline]` and
-/// expands at every tracked lock-acquire site; an inline `klog_warn!` would
-/// push a `format_args!` frame into all of them.
+/// Kept `#[cold] #[inline(never)]` because [`push_lock`] is `#[inline]`: an
+/// inline `klog_warn!` would push a `format_args!` frame into every tracked
+/// lock-acquire site.
 #[cold]
 #[inline(never)]
 fn latch_overflow(reason: &str, addr: *const (), level: u8) {
@@ -1613,19 +1610,11 @@ fn latch_overflow(reason: &str, addr: *const (), level: u8) {
     );
 }
 
-// ===========================================================================
-// Helpers
-// ===========================================================================
-
 /// What the held-stack updates this boot were observed to run under.
 ///
-/// Three states, not a bool: the entry write and the depth publish are
-/// separate stores, so an interrupt between them lets a handler's own acquire
-/// take the slot the interrupted push had filled but not yet counted, leaving
-/// an entry inside `depth` that nothing can pop. [`IrqOff`] is what makes that
-/// impossible — but a two-state "saw interrupts enabled" flag cannot tell
-/// "every update ran masked" from "no update ever ran", so an assertion built
-/// on one passes on a validator that never started.
+/// Three states, not a bool: a two-state "saw interrupts enabled" flag cannot
+/// tell "every update ran masked" from "no update ever ran", so an assertion
+/// built on one passes on a validator that never started.
 #[cfg(any(test, feature = "test-helpers"))]
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 #[repr(u8)]
@@ -1663,7 +1652,7 @@ fn record_push_irq_state() {
     let _ = PUSH_IRQ_STATE.fetch_max(observed, Ordering::Relaxed);
 }
 
-/// Production builds const-fold this away; the probe costs a `pushfq` the
+/// Production builds const-fold this away: the probe costs a `pushfq` the
 /// acquire path does not otherwise need.
 #[cfg(not(any(test, feature = "test-helpers")))]
 #[inline(always)]
@@ -1710,14 +1699,12 @@ fn register_class(key: &'static LockClassKey, subclass: u8) -> Option<u16> {
     let id = subclass_id(key.id(), subclass);
     let bucket = class_bucket(id);
 
-    // Fast path: probe the hash bucket.
     let mut idx = CLASS_HASH.0[bucket].load(Ordering::Acquire);
     while idx != NONE_IDX {
         let cls = &CLASSES.0[idx as usize];
         if cls.id.load(Ordering::Acquire) == id {
-            // One predictable compare guards the collision detector. The
-            // string compare runs only when the pointers differ, which is
-            // either duplicated rodata or a genuine 64-bit collision.
+            // The string compare runs only when the pointers differ — either
+            // duplicated rodata or a genuine 64-bit collision.
             if cls.key.load(Ordering::Relaxed) != key as *const LockClassKey as *mut LockClassKey {
                 check_class_collision(idx, key);
             }
@@ -1726,7 +1713,6 @@ fn register_class(key: &'static LockClassKey, subclass: u8) -> Option<u16> {
         idx = cls.next_in_bucket.load(Ordering::Acquire);
     }
 
-    // Slow path: allocate a new slot. Bump CLASS_COUNT atomically.
     let new_idx = CLASS_COUNT.fetch_add(1, Ordering::Relaxed);
     if (new_idx as usize) >= REGISTRABLE_CLASSES {
         return None;
@@ -1742,20 +1728,17 @@ fn register_class(key: &'static LockClassKey, subclass: u8) -> Option<u16> {
     // Release: publishes every field above to the bucket walker's Acquire.
     cls.id.store(id, Ordering::Release);
 
-    // Link into the hash bucket, re-scanning from the observed head each
-    // round. Linking unconditionally would split one declaration site
-    // across two classes whenever two CPUs first-acquire two different
-    // instances of it concurrently — a silently halved graph. Re-scanning
-    // means we link only when our id is absent as of `head`, and the CAS
-    // fails if `head` moved.
+    // Re-scan from the observed head each round: linking unconditionally would
+    // split one declaration site across two classes whenever two CPUs
+    // first-acquire two different instances of it concurrently.
     loop {
         let head = CLASS_HASH.0[bucket].load(Ordering::Acquire);
         let mut probe = head;
         while probe != NONE_IDX {
             let other = &CLASSES.0[probe as usize];
             if other.id.load(Ordering::Acquire) == id {
-                // Lost the race. Our slot leaks; the leak is bounded by the
-                // number of CPUs first-acquiring this class in one window.
+                // Lost the race; our slot leaks, bounded by the CPUs
+                // first-acquiring this class in one window.
                 CLASS_SLOTS_LEAKED.fetch_add(1, Ordering::Relaxed);
                 return Some(probe);
             }
@@ -1771,11 +1754,10 @@ fn register_class(key: &'static LockClassKey, subclass: u8) -> Option<u16> {
     }
 }
 
-/// Two declaration sites whose ids collide are validated as one class.
-/// That can only add false positives, never false negatives, so the class
-/// is merged and the collision reported rather than rehashed — rehashing
-/// would need an unbounded probe on the hot lookup path and would make the
-/// table's contents depend on registration order.
+/// Two declaration sites whose ids collide are validated as one class. That
+/// can only add false positives, never false negatives, so the class is merged
+/// and the collision reported rather than rehashed — rehashing would need an
+/// unbounded probe on the hot lookup path.
 #[cold]
 #[inline(never)]
 fn check_class_collision(idx: u16, incoming: &'static LockClassKey) {
@@ -1784,7 +1766,7 @@ fn check_class_collision(idx: u16, incoming: &'static LockClassKey) {
         return;
     };
     // Two addresses for one key is release-build rodata duplication, not a
-    // collision. Compare by content, which is what survives duplication.
+    // collision; content is what survives duplication.
     if existing.site() == incoming.site() && existing.name() == incoming.name() {
         return;
     }
@@ -1808,18 +1790,16 @@ fn check_class_collision(idx: u16, incoming: &'static LockClassKey) {
 
 /// Add an edge `from -> to` to the dependency graph if not already present.
 fn add_edge(from: u16, to: u16) -> Result<(), ()> {
-    // Walk existing edges from `from` looking for `to`.
     let cls_from = &CLASSES.0[from as usize];
     let mut idx = cls_from.edges_after_head.load(Ordering::Acquire);
     while idx != NONE_IDX {
         let e = &EDGES.0[idx as usize];
         if e.target.load(Ordering::Acquire) == to {
-            return Ok(()); // already present
+            return Ok(());
         }
         idx = e.next.load(Ordering::Acquire);
     }
 
-    // Allocate a new edge slot.
     let new_idx = EDGE_COUNT.fetch_add(1, Ordering::Relaxed);
     if (new_idx as usize) >= MAX_EDGES {
         return Err(());
@@ -1827,7 +1807,6 @@ fn add_edge(from: u16, to: u16) -> Result<(), ()> {
     let e = &EDGES.0[new_idx as usize];
     e.target.store(to, Ordering::Relaxed);
 
-    // Link into source class's `edges_after` list via CAS.
     loop {
         let head = cls_from.edges_after_head.load(Ordering::Relaxed);
         e.next.store(head, Ordering::Relaxed);
@@ -1843,9 +1822,8 @@ fn add_edge(from: u16, to: u16) -> Result<(), ()> {
 
 /// BFS from `src`: is `target` reachable via `edges_after` edges?
 ///
-/// Out of line and `#[cold]`: reached only on a chain-cache miss, and its
-/// ~600 bytes of scratch must not be hoisted into `LockCore::acquire`'s
-/// frame, which `check_stack_sizes.sh` holds to 2 KiB.
+/// Out of line and `#[cold]` so its ~600 bytes of scratch are not hoisted into
+/// `LockCore::acquire`'s frame, which `check_stack_sizes.sh` holds to 2 KiB.
 #[cold]
 #[inline(never)]
 fn path_exists(src: u16, target: u16) -> bool {
@@ -1887,10 +1865,9 @@ fn path_exists(src: u16, target: u16) -> bool {
             }
             if !is_marked(&visited, nxt) && (nxt as usize) < MAX_CLASSES {
                 mark(&mut visited, nxt);
-                // `visited` admits each class at most once and the frontier
-                // holds MAX_CLASSES, so the bound is unreachable; the check
-                // is what makes that a compile-time-obvious fact rather
-                // than a reasoned one.
+                // Unreachable: `visited` admits each class at most once and
+                // the frontier holds MAX_CLASSES. The check is what makes that
+                // obvious rather than reasoned.
                 if tail < MAX_BFS_FRONTIER {
                     queue[tail] = nxt;
                     tail += 1;
@@ -1942,8 +1919,7 @@ fn chain_bucket(chain_key: u64) -> usize {
     ((chain_key.wrapping_mul(0x9E3779B97F4A7C15)) as usize) & (CHAIN_HASH_BUCKETS - 1)
 }
 
-/// Iteratively mix a class index into the running chain key. Modelled
-/// on lockdep's `iterate_chain_key`.
+/// Iteratively mix a class index into the running chain key.
 #[inline]
 fn iterate_chain_key(key: u64, idx: u16) -> u64 {
     let mut k = key;
@@ -1956,10 +1932,6 @@ fn iterate_chain_key(key: u64, idx: u16) -> u64 {
 
 /// No-op poison function used as the sentinel for empty held-stack entries.
 unsafe fn noop_poison(_addr: *const ()) {}
-
-// ===========================================================================
-// Violation reporting
-// ===========================================================================
 
 /// What a report should do about a finding.
 enum Action {
@@ -1989,7 +1961,6 @@ fn violation_action(class_idx: u16) -> Action {
     }
 }
 
-// Finding kinds, for the dedup key.
 const VK_CYCLE: u8 = 1;
 const VK_NESTING: u8 = 2;
 const VK_RECURSION: u8 = 3;
@@ -1997,12 +1968,12 @@ const VK_EPOCH: u8 = 4;
 
 const VK_OCCUPIED: u64 = 1 << 63;
 
-/// `true` the first time this `(kind, held class, new class)` triple is
-/// seen. Deduping on the *class* pair rather than the address pair is the
-/// payoff of declaration-site keying: 256 `PROCESS_VMS` instances inverting
-/// against one registry lock is one finding, and it prints once. Without
-/// this, an inversion on a hot path floods the serial line and truncates
-/// the boot before the enumeration finishes.
+/// `true` the first time this `(kind, held class, new class)` triple is seen.
+///
+/// Deduping on the *class* pair rather than the address pair is the payoff of
+/// declaration-site keying: 256 `PROCESS_VMS` instances inverting against one
+/// registry lock is one finding. Without it, an inversion on a hot path floods
+/// the serial line and truncates the boot before the enumeration finishes.
 fn violation_is_new(kind: u8, held_class: u16, new_class: u16) -> bool {
     if VIOLATION_DEDUP_FULL.load(Ordering::Relaxed) {
         return false;
@@ -2049,8 +2020,7 @@ fn begin_report(kind: u8, class_idx: u16, cpu: usize, upto: usize) -> (Action, b
         VIOLATION_COUNT.fetch_add(1, Ordering::Relaxed);
     }
     // Raised before `violation_is_new`, which warns when the dedup table
-    // fills — a klog line like any other, and this one would otherwise land
-    // outside the latch.
+    // fills; that klog line would otherwise land outside the latch.
     IN_REPORT[cpu].store(true, Ordering::Relaxed);
     let held_class = if upto == 0 {
         NONE_IDX
@@ -2063,11 +2033,10 @@ fn begin_report(kind: u8, class_idx: u16, cpu: usize, upto: usize) -> (Action, b
 
 /// Clear the per-CPU report latch.
 ///
-/// Only for a report that *returns*. A panicking report deliberately leaves
-/// it set: the unwind logs, that logging takes `KLOG_RING`, and its acquire
-/// re-enters `push_lock` — straight back into the reporter that is already
-/// panicking. [`poison_unlock_held_above`] clears it once the panic has been
-/// caught or the machine is going down.
+/// Only for a report that *returns*. A panicking report deliberately leaves it
+/// set: the unwind logs, that logging takes `KLOG_RING`, and its acquire
+/// re-enters `push_lock` straight back into the already-panicking reporter.
+/// [`poison_unlock_held_above`] clears it once the panic has been caught.
 #[inline]
 fn end_report(cpu: usize) {
     IN_REPORT[cpu].store(false, Ordering::Relaxed);
@@ -2092,9 +2061,8 @@ fn print_held(cpu: usize, upto: usize) {
     }
 }
 
-/// Print the learned route from `src` to `target`, if one reporter can get
-/// the path lock. Endpoints alone say a path exists without saying through
-/// what, which is not actionable.
+/// Print the learned route from `src` to `target`, if one reporter can get the
+/// path lock. Endpoints alone say a path exists without saying through what.
 fn print_path(src: u16, target: u16) {
     if REPORT_PATH_LOCK.swap(true, Ordering::Acquire) {
         return;
@@ -2138,8 +2106,6 @@ fn print_path(src: u16, target: u16) {
         }
     }
     if found {
-        // Walk parents back from `target`, printing innermost-first into a
-        // bounded reversal buffer.
         let mut route = [NONE_IDX; MAX_HELD_LOCKS];
         let mut n = 0usize;
         let mut cur = target;
@@ -2287,17 +2253,13 @@ fn report_same_class_nesting(
     true
 }
 
-// ===========================================================================
-// Test helpers
-// ===========================================================================
-
 /// Install `addr` into reserved class slot `slot` and link it into the class
 /// hash, so a later [`push_lock`] finds it on the fast path.
 ///
 /// Idempotent: re-registering the same address returns the same index. Slots
 /// live above [`REGISTRABLE_CLASSES`], so [`register_class`] can never hand one
-/// out and memory init can never consume them — which is what lets the in-kernel
-/// self-test run against a class table that has otherwise overflowed.
+/// out — which is what lets the in-kernel self-test run against a class table
+/// that has otherwise overflowed.
 ///
 /// Returns `None` if `slot` is out of range or already claimed by a different
 /// address.
@@ -2341,26 +2303,22 @@ pub fn reserve_self_test_class(
     }
 }
 
-/// Register a class from a raw id, bypassing [`LockClassKey`]'s
-/// site-derived hashing so a test can force two distinct sites to collide.
+/// Register a class from a test-supplied key, so a test can force two
+/// distinct sites to collide.
 #[cfg(any(test, feature = "test-helpers"))]
 pub fn register_class_for_test(key: &'static LockClassKey) -> Option<u16> {
     register_class(key, 0)
 }
 
 /// Hands the validator to the lockdep self-test for the guard's lifetime.
-///
-/// See [`SELF_TEST_ACTIVE`] for why this overrides the two kill switches rather
-/// than clearing them.
+/// See [`SELF_TEST_ACTIVE`].
 #[cfg(any(test, feature = "test-helpers"))]
 pub struct SelfTestGuard(());
 
-/// Poison callback for reserved self-test classes.
-///
-/// Reached only by `poison_unlock_all_held` during a fatal abort, where
-/// there is no lock at a synthetic address to unlock. OSTD supplies it so
-/// the "nothing ever dereferences a self-test address" half of
-/// [`push_lock`]'s contract is not something a caller can get wrong.
+/// Poison callback for reserved self-test classes. Reached only by
+/// `poison_unlock_all_held`, where there is no lock at a synthetic address to
+/// unlock; OSTD supplies it so the "nothing ever dereferences a self-test
+/// address" half of [`push_lock`]'s contract is not a caller's to get wrong.
 #[cfg(any(test, feature = "test-helpers"))]
 unsafe fn self_test_noop_poison(_addr: *const ()) {}
 
@@ -2374,9 +2332,8 @@ impl SelfTestGuard {
     /// Push a reserved self-test class onto the held stack.
     ///
     /// Safe because the address came from [`reserve_self_test_class`], which
-    /// only hands out slots above [`REGISTRABLE_CLASSES`] that no real lock
-    /// can occupy, and because the poison callback is OSTD's own no-op — so
-    /// the address is never dereferenced.
+    /// only hands out slots above [`REGISTRABLE_CLASSES`], and because the
+    /// poison callback is OSTD's own no-op — so it is never dereferenced.
     pub fn push(&self, class: SelfTestClass) {
         // SAFETY: synthetic reserved-class address, never dereferenced; the
         // caller pairs push/pop LIFO within this guard's scope.
@@ -2467,7 +2424,6 @@ pub fn reset_for_test() {
         ch.chain_key.store(0, Relaxed);
         ch.next_in_bucket.store(NONE_IDX, Relaxed);
     }
-    // Reset all per-CPU held stacks.
     for cell in HELD.iter() {
         // SAFETY: test-only; serialised by harness.
         unsafe {

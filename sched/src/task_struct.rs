@@ -66,53 +66,36 @@ const _: () = {
 // budget a single-page allocation.
 const _: () = assert!(core::mem::size_of::<Task>() <= 8192);
 
-// Razor: the per-signal disposition table has exactly one slot per signal.
-//
-// `Signum` (core/src/syscall/args.rs) and `parse_signum`
-// (core/src/syscall/signal.rs) both bound signal numbers at `NSIG` and hand
-// `signum - 1` to the table. This measures the field's real extent rather
-// than restating its declared length, so resizing the table without moving
-// `NSIG` with it is a build failure instead of an out-of-range index.
-//
-// `signal_actions` and `switch_ctx` are adjacent and both 8-aligned, so the
-// delta is exact. If this fires after a field was inserted between them, the
-// span is no longer the table and the razor needs a new neighbour — not a new
-// tolerance.
+// The per-signal disposition table must have exactly one slot per signal:
+// callers bound at `NSIG` and index with `signum - 1`. Measuring the field's
+// real extent makes a resize without `NSIG` a build failure rather than an
+// out-of-range index. `signal_actions` and `switch_ctx` are adjacent and both
+// 8-aligned, so the delta is exact; if this fires after a field was inserted
+// between them, the razor needs a new neighbour, not a new tolerance.
 const _: () = {
     let span = offset_of!(Task, switch_ctx) - offset_of!(Task, signal_actions);
     assert!(span == NSIG * core::mem::size_of::<SignalActionCell>());
 };
 
-// ABI razor: `abi: TaskAbi` must be field #0 of Task so the
-// OSTD-side `TASK_UNSAFE_STACK_SP_OFFSET` const (computed as
-// `offset_of!(TaskAbi, unsafe_stack_sp)` inside OSTD, naturally 0)
-// matches the asm-readable offset of the `unsafe_stack_sp` field
-// inside Task.
+// `abi: TaskAbi` must be field #0 so OSTD's `TASK_UNSAFE_STACK_SP_OFFSET`,
+// computed inside `TaskAbi`, matches the asm-readable offset of
+// `unsafe_stack_sp` within `Task`.
 const _: () = assert!(offset_of!(Task, abi) == 0);
 
-// SwitchContext layout (size and every field offset) is pinned by
-// `const _` asserts beside the canonical definition in
-// `slopos-ostd/src/task/task.rs`; the switch asm derives its offsets
-// via `offset_of!` at the use site. No duplicate razors here — the
-// alias cannot drift from the type it names.
-
-// =============================================================================
-// FpuState compile-time checks
-// =============================================================================
+// No `SwitchContext` razor here: its layout is pinned beside the canonical
+// definition in OSTD, and the alias cannot drift from the type it names.
 
 const _: () = {
     // XSAVE requires 64-byte alignment.
     assert!(core::mem::align_of::<FpuState>() >= 64);
-    // Buffer must be large enough for the FXSAVE legacy area.
     assert!(FPU_STATE_SIZE >= FXSAVE_AREA_SIZE);
-    // Buffer size should be a multiple of the alignment for clean packing.
     assert!(FPU_STATE_SIZE % core::mem::align_of::<FpuState>() == 0);
 };
 
 /// Panics at boot if the CPU's XSAVE area exceeds our compile-time maximum.
 ///
-/// Call once from a boot step (after `xsave::init()`) to fail early rather
-/// than silently corrupting adjacent task memory.
+/// Call once from a boot step after `xsave::init()`, to fail early rather than
+/// silently corrupting adjacent task memory.
 pub fn validate_fpu_state_size() {
     let hw_size = slopos_arch::cpu::xsave::area_size();
     assert!(

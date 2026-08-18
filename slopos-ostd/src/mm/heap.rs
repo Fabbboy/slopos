@@ -1,15 +1,12 @@
-//! Kernel-wide allocation surface.
+//! Kernel-wide allocation surface: the blessed wrappers (`KBox`, `KVec`,
+//! `KArc`, `KVecDeque`, `KBTreeMap`, `PinBox`) plus the global allocator shim
+//! (`KernelHeap`).
 //!
-//! Hosts the kernel-blessed wrappers (`KBox`, `KVec`, `KArc`, `KVecDeque`,
-//! `KBTreeMap`, `PinBox`) plus the global allocator shim (`KernelHeap`). The
-//! in-place [`Init<T, E>`] and `T: Zeroable` constructors exist so a large `T`
+//! The in-place [`Init<T, E>`] / [`Zeroable`] constructors exist so a large `T`
 //! never materialises on a caller's stack; the by-value ones are for small `T`,
-//! with `scripts/check_stack_sizes.sh` enforcing the bound.
-//!
-//! The [`Init<T, E>`] / [`Zeroable`] surface is in-house (see [`super::init`]):
-//! SlopOS has no self-referential kernel types and no in-kernel async, so the
-//! `Pin` machinery motivating `pinned-init` / `pin-init` would be unneeded
-//! complexity.
+//! with `scripts/check_stack_sizes.sh` enforcing the bound. That surface is
+//! in-house (see [`super::init`]) because SlopOS has no self-referential kernel
+//! types and no in-kernel async.
 
 use core::cell::SyncUnsafeCell;
 use core::hint;
@@ -42,11 +39,8 @@ static BUMP_NEXT: AtomicUsize = AtomicUsize::new(0);
 /// `KernelHeap::alloc/dealloc` dispatch.
 static BACKEND_LIVE: AtomicBool = AtomicBool::new(false);
 
-/// Registered backend handle. Stored as `AtomicPtr<&dyn …>` (the
-/// "double-indirect static" idiom: `slot` is itself a `'static`
-/// reference whose address we publish). Mirrors
-/// `slopos_ostd::mm::frame_alloc::register_frame_allocator`. Null until
-/// `register_kernel_slab_handle` runs.
+/// Registered backend handle: the address of a `'static` reference. Null until
+/// [`register_kernel_slab_handle`] publishes it.
 static BACKEND_SLOT: AtomicPtr<&'static dyn KernelHeapBackend> =
     AtomicPtr::new(core::ptr::null_mut());
 

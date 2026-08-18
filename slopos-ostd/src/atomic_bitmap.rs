@@ -1,25 +1,14 @@
 //! Atomic, fixed-size bitmap over `[AtomicUsize; W]` words.
 //!
-//! All mutation methods take `&self` and use atomic RMW operations.
-//! Safe for concurrent access from multiple CPUs without external locking.
-//!
 //! Query methods (`find_*`, `count_ones`) return **point-in-time snapshots**
-//! that may be stale under contention.  The [`alloc`](AtomicBitmap::alloc) /
-//! [`free`](AtomicBitmap::free) pair provides a linearizable allocate-or-fail
-//! primitive via CAS.
+//! that may be stale under contention; [`alloc`](AtomicBitmap::alloc) /
+//! [`free`](AtomicBitmap::free) is the linearizable allocate-or-fail pair.
 
 use core::sync::atomic::{AtomicUsize, Ordering};
 
 const WORD_BITS: usize = usize::BITS as usize;
 
 /// Fixed-size atomic bitmap.  Bit 0 is the LSB of `words[0]`.
-///
-/// Ordering profile:
-/// - `set` / `clear` / `free`: `Release` (publish allocation state)
-/// - `test`: `Acquire` (observe published state)
-/// - `test_and_set` / `test_and_clear`: `AcqRel`
-/// - `alloc` CAS loop: `AcqRel` / `Relaxed`
-/// - snapshot queries (`find_*`, `count_ones`): `Relaxed`
 pub struct AtomicBitmap<const W: usize> {
     words: [AtomicUsize; W],
 }
@@ -81,10 +70,7 @@ impl<const W: usize> AtomicBitmap<W> {
         self.clear(bit);
     }
 
-    /// Lock-free find-first-zero-and-set.
-    ///
-    /// Scans `[0 .. nbits)` for the first clear bit, atomically sets it via
-    /// CAS, and returns its index.  Returns `None` if all bits are set.
+    /// Lock-free find-first-zero-and-set over `[0 .. nbits)`; `None` if all set.
     pub fn alloc(&self, nbits: usize) -> Option<usize> {
         self.alloc_from(0, nbits)
     }
@@ -198,10 +184,7 @@ impl<const W: usize> AtomicBitmap<W> {
         self.words[idx].load(Ordering::Acquire)
     }
 
-    /// Snapshot iterator over set-bit indices.
-    ///
-    /// Loads all words upfront with `Acquire` ordering, then iterates the
-    /// snapshot.  Mutations after the snapshot is taken are not visible.
+    /// Snapshot iterator over set-bit indices; later mutations are not visible.
     pub fn iter_ones_snapshot(&self, nbits: usize) -> IterOnesSnapshot<W> {
         debug_assert!(nbits <= Self::CAPACITY);
         let mut words = [0usize; W];
