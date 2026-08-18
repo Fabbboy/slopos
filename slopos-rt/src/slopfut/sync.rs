@@ -182,8 +182,6 @@ impl<T> Future for OneshotReceiver<T> {
     }
 }
 
-// ── unbounded mpsc ───────────────────────────────────────────────────────────
-
 struct ChanInner<T> {
     queue: VecDeque<T>,
     waker: Option<Waker>,

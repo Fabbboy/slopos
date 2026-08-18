@@ -31,7 +31,6 @@ fn from_ptr_works_for_heap_box() {
     let raw = Box::into_raw(boxed);
     let r = u64::from_ptr(raw).expect("box pointer is non-null");
     assert_eq!(*r, 0xDEAD_BEEF_DEAD_BEEF);
-    // Reclaim ownership so we don't leak.
     // SAFETY: `raw` came from `Box::into_raw` and no other live
     // borrow of *r remains (the &u64 above is dropped).
     let _ = unsafe { Box::from_raw(raw) };

@@ -37,8 +37,6 @@ fn derive_emits_zeroable_for_unit_struct() {
 
 #[test]
 fn init_zeroed_works_with_derived_zeroable() {
-    // `init_zeroed::<T>()` requires `T: Zeroable`; if the derive is
-    // sound the bound resolves and the recipe constructor compiles.
     let _ = init_zeroed::<Plain>();
     let _ = init_zeroed::<Wrapped>();
     let _ = init_zeroed::<UnitFields>();

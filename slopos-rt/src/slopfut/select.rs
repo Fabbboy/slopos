@@ -1,18 +1,11 @@
 //! Minimal `select` combinators — race N futures, resolve to the first
 //! that completes.
 //!
-//! There is no `tokio::select!` here; nc needs to await "stdin-readable OR
-//! socket-readable OR timer" and act on whichever fires first. These poll
-//! each child once per wakeup (via `Pin::new(&mut child)`, hence the
+//! Each child is polled once per wakeup via `Pin::new(&mut child)`, hence the
 //! `Unpin` bound — satisfied by the [`BufOp`](super::BufOp) /
-//! [`IntOp`](super::IntOp) leaf futures) and return the first `Ready`.
-//!
-//! The losing children are dropped when the returned `Either` is consumed,
-//! which fires their `OP_CANCEL` via [`OpFuture`](super::op)'s `Drop` — so
-//! a fresh `select` next loop turn re-arms cleanly. (For a hot data path
-//! this re-arm/cancel churn could be avoided by keeping the loser futures
-//! alive across turns; nc's interactive cadence does not need that, and
-//! the simpler by-value form is the clearer template.)
+//! [`IntOp`](super::IntOp) leaf futures. The losing children are dropped when
+//! the returned `Either` is consumed, which fires their `OP_CANCEL` via
+//! [`OpFuture`](super::op)'s `Drop`.
 
 use core::future::Future;
 use core::pin::Pin;
@@ -42,9 +35,8 @@ impl<A: Future + Unpin, B: Future + Unpin> Future for Select2<A, B> {
         let this = self.get_mut();
         if let Some(a) = this.a.as_mut() {
             if let Poll::Ready(v) = Pin::new(a).poll(cx) {
-                // Winner resolved — drop the loser NOW so its in-flight op is
-                // cancelled immediately, not deferred to when this Select is
-                // dropped (which, as a match scrutinee, can outlive the win).
+                // Drop the loser now: as a match scrutinee this Select can
+                // outlive the win, deferring the loser's cancel until then.
                 this.b = None;
                 return Poll::Ready(Either2::A(v));
             }
@@ -80,7 +72,6 @@ impl<A: Future + Unpin, B: Future + Unpin, C: Future + Unpin> Future for Select3
         let this = self.get_mut();
         if let Some(a) = this.a.as_mut() {
             if let Poll::Ready(v) = Pin::new(a).poll(cx) {
-                // Drop both losers now → cancel their in-flight ops immediately.
                 this.b = None;
                 this.c = None;
                 return Poll::Ready(Either3::A(v));

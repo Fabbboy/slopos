@@ -16,22 +16,21 @@ use slopos_protocol::types::{
 use crate::syscall::CachedShmMapping;
 use crate::syscall::tty;
 
-/// Hard ceiling on a single clipboard payload (16 MiB). Caps a hostile or
-/// runaway selection size so a copy cannot exhaust memory.
+/// Hard ceiling on a single clipboard payload: a hostile or runaway selection
+/// cannot exhaust memory.
 const MAX_CLIPBOARD_BYTES: u32 = 16 * 1024 * 1024;
 
 const MAX_SURFACES: usize = 32;
 const MAX_PENDING_DAMAGE: usize = 8;
 const MAX_CHILDREN: usize = 8;
 
-/// Client double-buffer slots per surface.
 const MAX_SURFACE_BUFFERS: usize = 2;
 /// `current_buffer` sentinel: no buffer has been committed yet.
 const NO_BUFFER: u8 = u8::MAX;
 
 /// One client-registered buffer slot. The bridge owns `fd` for the slot's
 /// lifetime and closes it on teardown and re-registration; the renderer's
-/// surface cache only borrows a read-only mapping of it.
+/// surface cache only borrows a read-only mapping.
 #[derive(Copy, Clone)]
 struct SurfaceBuffer {
     fd: i32,
@@ -49,7 +48,6 @@ impl SurfaceBuffer {
     };
 }
 
-/// Surface role assigned via get_toplevel.
 #[derive(Copy, Clone, PartialEq, Eq)]
 #[repr(u8)]
 #[allow(dead_code)]
@@ -60,7 +58,6 @@ enum SurfaceRole {
     Subsurface = 3,
 }
 
-/// Per-surface state managed by the protocol bridge.
 #[allow(dead_code)]
 struct ProtocolSurface {
     active: bool,
@@ -68,53 +65,41 @@ struct ProtocolSurface {
     surface_id: SurfaceId,
     toplevel_id: ToplevelId,
     /// Current buffer's fd (= `buffers[current_buffer].fd`), threaded to the
-    /// renderer via `WindowInfo.shm_token`. 0 when nothing is committed.
+    /// renderer via `WindowInfo.shm_token`; 0 when nothing is committed.
     shm_token: u32,
     width: u32,
     height: u32,
     frame_width: u32,
     frame_height: u32,
-    // Double-buffering: registered buffer slots, the slot the next commit will
-    // apply, and the slot currently being composited.
     buffers: [SurfaceBuffer; MAX_SURFACE_BUFFERS],
     pending_buffer: u8,
     current_buffer: u8,
-    // Damage tracking
     pending_damage: [DamageRect; MAX_PENDING_DAMAGE],
     pending_damage_count: u8,
     committed_damage: [DamageRect; MAX_PENDING_DAMAGE],
     committed_damage_count: u8,
     dirty: bool,
-    // Window state
     window_x: i32,
     window_y: i32,
     z_order: u32,
     visible: bool,
     window_state: u8,
-    /// Monotonic incarnation id assigned at creation. Distinguishes a recycled
-    /// surface slot (same `task_id`) from an earlier surface in that slot, so the
-    /// renderer's buffer cache can never alias a stale mapping.
+    /// Monotonic incarnation id: distinguishes a recycled surface slot (same
+    /// `task_id`) from an earlier surface in it, so the renderer's buffer cache
+    /// cannot alias a stale mapping.
     generation: u32,
-    // Frame callback
     frame_callback_pending: bool,
     last_present_time_ms: u64,
-    // Role & hierarchy
     role: SurfaceRole,
     parent_surface_idx: Option<usize>,
     children: [Option<usize>; MAX_CHILDREN],
     child_count: u8,
     relative_x: i32,
     relative_y: i32,
-    // Configure ack tracking
     acked_serial: u32,
-    // Metadata
     title: [u8; MAX_STRING_LEN],
     app_id: [u8; MAX_STRING_LEN],
     cursor_shape: u8,
-    /// Serial of the last pointer-enter sent to this surface, and whether the
-    /// pointer is currently inside it. Together they gate `SetCursorShape`: a
-    /// request is honored only when it carries this serial and the surface
-    /// still holds the pointer.
     last_enter_serial: u32,
     has_pointer: bool,
 }
@@ -163,15 +148,14 @@ impl ProtocolSurface {
     }
 }
 
-/// Clipboard state shared across all clients: a read-only mapping of the
-/// source memfd received on copy (owns the fd; dropped when replaced) plus the
-/// valid byte count. `None` source means the clipboard is empty.
+/// Clipboard shared across all clients: a read-only mapping of the source memfd
+/// (owns the fd; dropped when replaced) and its valid byte count. `None` source
+/// means the clipboard is empty.
 struct Clipboard {
     source: Option<CachedShmMapping>,
     len: u32,
 }
 
-/// Protocol bridge: translates wire protocol messages into local surface state.
 pub struct ProtocolBridge {
     server: Server,
     surfaces: [ProtocolSurface; MAX_SURFACES],
@@ -179,30 +163,20 @@ pub struct ProtocolBridge {
     /// Monotonic source for `ProtocolSurface.generation` (never reused).
     next_surface_gen: u32,
     clipboard: Clipboard,
-    /// Display dimensions passed to new clients on accept.
     display_width: u32,
     display_height: u32,
     display_format: u32,
     display_pitch: u32,
-    /// Monotonic serial counter for configure events.
     configure_serial: u32,
-    /// Per-slot connection generation. Bumped each time a slot is (re)used by
-    /// `accept_and_collect`. Disambiguates a slot+fd that the kernel/Server
-    /// recycle for a successor client from the original owner, so a stale
-    /// per-client task cannot drive or tear down the wrong connection.
+    /// Per-slot connection generation. Slot indices and fd numbers are recycled
+    /// across disconnect→reconnect, so without this a stale per-client task
+    /// could drive or tear down a successor's connection.
     client_gen: [u64; MAX_CLIENTS],
     /// Monotonic source for `client_gen` values (never reused).
     next_gen: u64,
 }
 
 impl ProtocolBridge {
-    /// Create a new bridge.
-    ///
-    /// The compositor creates its OWN listen socket via `Server::bind()`.
-    /// After binding, it signals readiness to init by writing to fd 3
-    /// (the readiness pipe inherited from init, xinit/weston/s6 pattern).
-    /// Init blocks on the read end until this signal arrives, then spawns
-    /// client apps whose connect() succeeds immediately via kernel backlog.
     pub fn new() -> Option<Self> {
         let server = Server::bind(b"/run/compositor").ok()?;
         tty::write(b"COMPOSITOR: protocol bridge listening on /run/compositor\n");
@@ -226,7 +200,6 @@ impl ProtocolBridge {
         })
     }
 
-    /// Set display dimensions (called by compositor after framebuffer init).
     pub fn set_display_info(&mut self, width: u32, height: u32, format: u32, pitch: u32) {
         self.display_width = width;
         self.display_height = height;
@@ -234,8 +207,6 @@ impl ProtocolBridge {
         self.display_pitch = pitch;
     }
 
-    /// Queue the per-accept greeting (Hello + OutputInfo) to a freshly
-    /// accepted client. Shared by the synchronous and async accept paths.
     fn greet_client(&mut self, idx: usize) {
         let _ = self.server.queue_event(
             idx,
@@ -256,9 +227,8 @@ impl ProtocolBridge {
         );
     }
 
-    /// Non-blocking accept loop for new clients.
     pub fn accept_clients(&mut self) {
-        // Accept up to 4 connections per frame to avoid stalling the loop
+        // Bounded per frame so a connect burst cannot stall the compositor loop.
         for _ in 0..4 {
             match self.server.accept() {
                 Ok(Some(idx)) => self.greet_client(idx),
@@ -268,15 +238,10 @@ impl ProtocolBridge {
         }
     }
 
-    /// The listening socket's FD — used to arm an async accept-readiness
-    /// stream (`poll_add_multishot(listen_fd, POLLIN)`).
     pub fn listen_fd(&self) -> i32 {
         self.server.listen_fd()
     }
 
-    /// A connected client's socket FD, or `None` if the slot is empty —
-    /// used to arm a per-client readiness stream
-    /// (`poll_add_multishot(client_fd, POLLIN)`).
     pub fn client_fd(&self, idx: usize) -> Option<i32> {
         self.server
             .clients

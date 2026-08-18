@@ -1,16 +1,12 @@
 //! Typed readiness signaling between parent and child processes.
 //!
-//! The parent creates a [`ReadinessGate`] before spawning the child.
-//! The child inherits a [`ReadinessNotifier`] on a well-known FD and
-//! calls [`signal_ready()`](ReadinessNotifier::signal_ready) when
-//! initialization is complete. The parent's [`wait()`](ReadinessGate::wait)
-//! blocks until the signal arrives.
+//! The parent creates a [`ReadinessGate`] before spawning; the child inherits a
+//! [`ReadinessNotifier`] on a well-known FD and signals once initialized.
 
 use crate::syscall::fs;
 
-/// The well-known fd the notifier write-end lives on. A parent that wants a
-/// spawned child to signal readiness must clone this fd into the child (a
-/// `CloneFd` spawn action) so the child inherits the notifier.
+/// The well-known fd the notifier write-end lives on. The parent must clone it
+/// into the child (a `CloneFd` spawn action) for the child to inherit it.
 pub const NOTIFIER_FD: i32 = 3;
 
 /// Parent side: blocks until the child signals readiness.
@@ -26,8 +22,6 @@ impl ReadinessGate {
         let read_fd = read_end.into_raw();
         let write_fd = write_end.into_raw();
 
-        // Move the write end to the well-known FD. If the read end
-        // happens to be on that slot, move it out of the way first.
         if read_fd == NOTIFIER_FD {
             let new_read = fs::dup(read_fd).ok()?.into_raw();
             let _ = slopos_slibc::ffi::close(read_fd);
@@ -56,13 +50,9 @@ impl ReadinessGate {
         let _ = slopos_slibc::ffi::close(self.read_fd);
     }
 
-    /// Async analogue of [`wait`](Self::wait): close the parent's copy of
-    /// the notifier write end (so a dead child's EOF surfaces), then await
-    /// the single readiness byte as an `OP_READ` on the slopfut runtime.
-    ///
-    /// Folds the gate's blocking read into init's `block_on` root future —
-    /// the byte arrives as a ring completion rather than a synchronous
-    /// `read(2)`.
+    /// Async analogue of [`wait`](Self::wait): closes the parent's copy of the
+    /// notifier write end (so a dead child's EOF surfaces), then awaits the
+    /// readiness byte as an `OP_READ` on the slopfut runtime.
     pub async fn wait_async(self) {
         let _ = slopos_slibc::ffi::close(NOTIFIER_FD);
         let _ = crate::ring::slopfut::read(self.read_fd, vec![0u8; 1], 1).await;
@@ -83,7 +73,6 @@ impl ReadinessNotifier {
         Some(Self)
     }
 
-    /// Signal readiness and consume the notifier.
     pub fn signal_ready(self) {
         let _ = slopos_slibc::ffi::write(NOTIFIER_FD, b"R".as_ptr() as *const core::ffi::c_void, 1);
         let _ = slopos_slibc::ffi::close(NOTIFIER_FD);

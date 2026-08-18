@@ -1,10 +1,7 @@
 //! How the shell was invoked.
 //!
-//! `sh`, `sh -c STRING`, `sh FILE [args…]` and `sh -s [args…]` are four
-//! different programs wearing one name, and which one is running decides where
-//! commands come from and what `$0`/`$1` mean.  Parsed once at startup and
-//! recorded here, because expansion needs the operands and the entry point
-//! needs the source.
+//! `sh`, `sh -c STRING`, `sh FILE [args…]` and `sh -s [args…]` each decide
+//! where commands come from and what `$0`/`$1` mean.  Parsed once at startup.
 
 use std::sync::Mutex;
 
@@ -24,7 +21,6 @@ pub struct Invocation {
     pub force_interactive: bool,
 }
 
-/// What the user typed to run this: something wrong with the command line.
 pub struct UsageError(pub &'static str);
 
 /// `$0` followed by `$1`..`$9`.

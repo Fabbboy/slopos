@@ -3,8 +3,7 @@
 //! slibc stdio conformance: the open-stream registry, per-stream locking, and
 //! read/write direction state on an update stream.
 //!
-//! Every case drives the code under test through `slopos_slibc::stdio::shim`
-//! and verifies the result with `std::fs`, which reaches the file through the
+//! Results are verified with `std::fs`, which reaches the file through the
 //! kernel rather than through the buffering being tested.
 
 use std::sync::OnceLock;
@@ -34,16 +33,11 @@ fn cstr(path: &str, out: &mut [u8; 128]) -> usize {
     bytes.len() + 1
 }
 
-/// Open `path` and hand back the stream, or report the failure and give up.
 fn open(path: &str, mode: &[u8]) -> Option<Stream> {
     let mut buf = [0u8; 128];
     let len = cstr(path, &mut buf);
     shim::fopen(&buf[..len], mode)
 }
-
-// ---------------------------------------------------------------------------
-// Regression guards — these hold before and after the registry exists
-// ---------------------------------------------------------------------------
 
 /// A `fopen`'d write stream delivers its buffer at `fclose`.
 fn test_fopen_roundtrip() -> bool {
@@ -66,7 +60,6 @@ fn test_fopen_roundtrip() -> bool {
     contents(PATH) == b"roundtrip"
 }
 
-/// `_IONBF` reaches the descriptor without any flush.
 fn test_unbuffered_writes_immediately() -> bool {
     const PATH: &str = "/tmp/stdio_unbuffered.txt";
     let _ = std::fs::remove_file(PATH);
@@ -85,7 +78,6 @@ fn test_unbuffered_writes_immediately() -> bool {
     seen == b"now"
 }
 
-/// `fgets` stops at the newline and NUL-terminates.
 fn test_fgets_reads_line() -> bool {
     const PATH: &str = "/tmp/stdio_fgets.txt";
     if !seed(PATH, b"alpha\nbeta\n") {
@@ -107,10 +99,6 @@ fn test_fgets_reads_line() -> bool {
         }
     }
 }
-
-// ---------------------------------------------------------------------------
-// The registry
-// ---------------------------------------------------------------------------
 
 /// `fflush(NULL)` must reach every open output stream, not just the standard
 /// ones (C11 §7.21.5.2). Both an `fopen`'d and an `fdopen`'d stream count.
@@ -213,10 +201,6 @@ fn test_exit_flushes_after_atexit() -> bool {
     true
 }
 
-// ---------------------------------------------------------------------------
-// Per-stream locking
-// ---------------------------------------------------------------------------
-
 const RECORD_LEN: usize = 64;
 const RECORDS_PER_THREAD: usize = 1000;
 const WRITERS: usize = 4;
@@ -275,13 +259,8 @@ fn test_threads_share_one_stream() -> bool {
     true
 }
 
-// ---------------------------------------------------------------------------
-// Direction state
-// ---------------------------------------------------------------------------
-
 /// C11 §7.21.5.3: on an update stream, input after output flushes the pending
-/// output. The buffered byte must reach the file, and the read must see the
-/// file past it.
+/// output.
 fn test_rplus_read_after_write() -> bool {
     const PATH: &str = "/tmp/stdio_rplus_rw.txt";
     if !seed(PATH, DIGITS) {

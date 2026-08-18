@@ -229,8 +229,8 @@ pub fn copy_value_from_user<T: Copy>(space: &VmSpace, src: UserPtr<T>) -> Result
 
 /// Copy a single `T: Copy` from kernel space into user space.
 ///
-/// Sibling of [`copy_value_from_user`] — see its doc for the
-/// `T: Copy` carve-out rationale.
+/// Sibling of [`copy_value_from_user`]; see its doc for the `T: Copy`
+/// carve-out.
 pub fn copy_value_to_user<T: Copy>(
     space: &VmSpace,
     dst: UserPtr<T>,
@@ -314,12 +314,9 @@ mod tests {
         assert!(!is_ostd_usercopy_ip(fault));
     }
 
-    // The next two cases depend on the real binary layout of the
-    // `global_asm!` block (`__ostd_usercopy_start` immediately precedes
-    // the `rep movsb` byte, `__ostd_usercopy_end` follows it). Miri's
-    // interpreter assigns external-fn pointer values that do not
-    // preserve that layout, so the start..end range collapses and the
-    // checks become meaningless. Skip under Miri.
+    // The next two cases depend on the real binary layout of the `global_asm!`
+    // block; Miri assigns external-fn pointer values that do not preserve it,
+    // collapsing the start..end range.
     #[cfg_attr(miri, ignore)]
     #[test]
     fn fault_range_contains_movsb() {

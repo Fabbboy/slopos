@@ -7,8 +7,7 @@ use slopos_ostd::{KArc, KWeak};
 fn upgrade_racing_last_drop_never_resurrects_dead_data() {
     #[cfg(not(miri))]
     const ITERATIONS: usize = 10_000;
-    // Miri explores each atomic interleaving and is intentionally much slower
-    // than native execution; this still exercises the real two-thread race.
+    // Miri is far slower per atomic interleaving; 32 still exercises the race.
     #[cfg(miri)]
     const ITERATIONS: usize = 32;
 

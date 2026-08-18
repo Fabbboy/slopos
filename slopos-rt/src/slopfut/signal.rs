@@ -1,5 +1,5 @@
 //! Async signal handling via signalfd — signals delivered as in-band ring
-//! events, never as an out-of-band `EINTR` (Phase 1).
+//! events, never as an out-of-band `EINTR`.
 
 use core::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 
@@ -13,11 +13,8 @@ static ORIGINAL_UNBLOCK_ON_DROP: AtomicU64 = AtomicU64::new(0);
 /// Awaits delivery of signals in a mask via a signalfd. The signals are
 /// blocked on construction so they queue (drainable) instead of interrupting
 /// the reactor's waits. Dropping the listener closes the fd and unblocks the
-/// bits it newly blocked, restoring the caller's signal mask — so a listener
-/// scoped to one operation (a prompt, a download) does not leave its signals
-/// masked for the rest of the process, or for children forked afterwards. If
-/// multiple listeners share a signal bit, the final dropped reference performs
-/// that restoration.
+/// bits it newly blocked, restoring the caller's signal mask; when several
+/// listeners share a bit, the last one dropped performs that restoration.
 pub struct SignalListener {
     fd: i32,
     /// Bits whose listener reference this instance owns.
@@ -26,10 +23,9 @@ pub struct SignalListener {
 
 impl SignalListener {
     /// Listen for the signals in `mask`. Returns `None` if the signalfd could
-    /// not be created — in which case only the bits this call newly blocked
-    /// are unblocked again (a signal the caller had already blocked stays
-    /// blocked), so the signals keep their normal delivery instead of
-    /// queueing forever with no fd to drain them.
+    /// not be created — only the bits this call newly blocked are unblocked
+    /// again (one the caller had already blocked stays blocked), so the signals
+    /// keep their normal delivery instead of queueing with no fd to drain them.
     pub fn new(mask: u64) -> Option<Self> {
         let mut owned_mask = 0u64;
         let mut to_block = 0u64;
@@ -65,8 +61,6 @@ impl SignalListener {
     }
 
     /// Await the next signal; resolves to its number (1-based), or 0 on error.
-    /// An `OP_READ` on the signalfd blocks via the deferred path until a
-    /// masked signal is pending, then drains one `SignalfdSiginfo`.
     pub async fn recv(&self) -> u32 {
         let br = super::read(self.fd, vec![0u8; 16], 16).await;
         if br.res < 4 {
@@ -79,8 +73,8 @@ impl SignalListener {
 impl Drop for SignalListener {
     fn drop(&mut self) {
         // Close before unblocking: an undrained pending signal then takes its
-        // normal delivery path (handler or default) instead of being stranded
-        // behind a mask with no fd left to drain it.
+        // normal delivery path instead of being stranded behind a mask with no
+        // fd left to drain it.
         let _ = slopos_slibc::ffi::close(self.fd);
         release_signal_refs(self.owned_mask);
     }

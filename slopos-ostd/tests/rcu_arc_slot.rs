@@ -1,25 +1,17 @@
 //! Coverage for [`RcuArcSlot`] — the RCU-published `KArc` slot.
 //!
-//! The slot owns exactly one strong reference and hands each reader an
-//! independent one. Every property worth testing is a *refcount* property, so
-//! every test asserts strong counts explicitly rather than trusting a clean
-//! run: `just check-miri` runs with `-Zmiri-ignore-leaks`, which would hide a
-//! reference the slot forgot to release. A double release, by contrast, is a
-//! double free and Miri does catch it.
+//! Every test asserts strong counts explicitly: `just check-miri` runs with
+//! `-Zmiri-ignore-leaks`, so a reference the slot forgot to release is
+//! otherwise invisible.
 //!
-//! `load` and `store` are **not** reachable here: both open an RCU read-side
-//! section, and `rcu_read_lock` takes a `PreemptGuard`, whose increment is a
-//! gs-relative RMW that faults without a PCR. They are covered in-kernel by
-//! `slopos_core::tests::ostd_arc_tests` instead. What a host test can pin down
-//! is the ownership algebra around them — that an exclusive replace returns
-//! exactly the displaced reference and mints none, and that dropping the slot
-//! releases what it held rather than leaking it.
+//! `load` and `store` are unreachable here — both open an RCU read-side
+//! section, and `rcu_read_lock` takes a `PreemptGuard` whose gs-relative RMW
+//! faults without a PCR. They are covered in-kernel by
+//! `slopos_core::tests::ostd_arc_tests`.
 
 use slopos_ostd::mm::KArc;
 use slopos_ostd::sync::RcuArcSlot;
 
-/// A payload with the bounds the slot requires. `KArc<T>` is `Send + Sync`
-/// only when `T` is, and the slot's whole point is cross-CPU publication.
 #[derive(Debug, PartialEq, Eq)]
 struct Payload(u32);
 
@@ -39,8 +31,6 @@ fn exclusive_replace_moves_the_reference_without_minting_one() {
     let first = arc(1);
     assert_eq!(KArc::strong_count(&first), 1);
 
-    // Publishing moves the caller's reference into the slot: the count is
-    // unchanged, because a reference changed owner rather than being cloned.
     assert!(slot.replace_exclusive(Some(first)).is_none());
     assert!(!slot.is_empty_racy());
 
@@ -49,7 +39,6 @@ fn exclusive_replace_moves_the_reference_without_minting_one() {
         .replace_exclusive(Some(second))
         .expect("the first reference comes back out");
     assert_eq!(*displaced, Payload(1));
-    // Exactly the reference we put in, and nothing else holds it.
     assert_eq!(KArc::strong_count(&displaced), 1);
     drop(displaced);
 
@@ -59,11 +48,8 @@ fn exclusive_replace_moves_the_reference_without_minting_one() {
     assert!(slot.is_empty_racy());
 }
 
-/// A reader's handle outliving the slot's contents is the whole reason this
-/// type exists rather than a borrow-lending [`slopos_ostd::sync::RcuCell`].
-/// The in-kernel test mints the reader handle with `load`; here the same
-/// property is checked against a handle taken before publication, which is the
-/// half that needs no RCU section.
+/// A reader's handle outliving the slot's contents is why this type exists
+/// rather than a borrow-lending [`slopos_ostd::sync::RcuCell`].
 #[test]
 fn a_reference_taken_before_publication_outlives_the_slot() {
     let mut slot = RcuArcSlot::empty();
@@ -100,8 +86,6 @@ fn dropping_the_slot_releases_what_it_held() {
             "the slot keeps the payload alive"
         );
     }
-    // Without `Drop` on the slot, this reference would leak — invisibly, since
-    // KernMiri runs with `-Zmiri-ignore-leaks`. Hence the explicit assertion.
     assert!(
         observer.upgrade().is_none(),
         "dropping the slot released its reference"

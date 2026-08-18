@@ -372,10 +372,6 @@ fn expand_marker(input: &DeriveInput, kind: MarkerKind) -> syn::Result<TokenStre
     let fields = match &input.data {
         Data::Struct(s) => collect_field_types(&s.fields),
         Data::Enum(e) => match kind {
-            // A fieldless enum with a primitive repr whose first variant sits
-            // at discriminant 0 has a valid all-zero representation, and both
-            // halves of that are checked below. `Pod` needs the stronger
-            // property that *every* bit pattern is valid, which no enum has.
             MarkerKind::Zeroable => {
                 check_zeroable_enum(input, e)?;
                 Vec::new()
@@ -430,7 +426,6 @@ fn collect_field_types(fields: &Fields) -> Vec<syn::Type> {
     }
 }
 
-/// Scan `#[repr(...)]` for the two properties the derives care about.
 fn scan_repr(input: &DeriveInput) -> syn::Result<ReprFacts> {
     const PRIMITIVE: &[&str] = &[
         "u8", "u16", "u32", "u64", "u128", "usize", "i8", "i16", "i32", "i64", "i128", "isize",
@@ -489,10 +484,8 @@ fn check_repr(input: &DeriveInput, kind: MarkerKind) -> syn::Result<()> {
             ),
         ));
     }
-    // `Pod` reinterprets bytes, so the layout has to be the declared one.
-    // `Zeroable` only claims the all-zero value is valid, which is the
-    // conjunction of the fields' own claims at whatever offsets the compiler
-    // picks — a property `#[repr(Rust)]` preserves.
+    // `Pod` reinterprets bytes, so the layout has to be the declared one;
+    // `Zeroable` only claims all-zero validity, which `#[repr(Rust)]` preserves.
     if matches!(kind, MarkerKind::Pod) && !facts.c_or_transparent {
         return Err(syn::Error::new(
             input.ident.span(),
@@ -503,7 +496,7 @@ fn check_repr(input: &DeriveInput, kind: MarkerKind) -> syn::Result<()> {
 }
 
 /// A fieldless enum is `Zeroable` exactly when a zero discriminant names a
-/// real variant. Both halves of that are syntactically checkable.
+/// real variant.
 fn check_zeroable_enum(input: &DeriveInput, data: &syn::DataEnum) -> syn::Result<()> {
     if !scan_repr(input)?.primitive {
         return Err(syn::Error::new(
@@ -530,8 +523,7 @@ fn check_zeroable_enum(input: &DeriveInput, data: &syn::DataEnum) -> syn::Result
         ));
     };
 
-    // The first variant is discriminant 0 unless it says otherwise; a later
-    // variant cannot occupy 0 without the first one having a negative
+    // A later variant cannot occupy 0 without the first one having a negative
     // discriminant, which a `#[repr(uN)]` enum cannot have.
     match &first.discriminant {
         None => Ok(()),

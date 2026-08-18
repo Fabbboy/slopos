@@ -89,9 +89,8 @@ impl<T: Pod> VirtqueueRegion<T> {
         self.frame.write_at::<T>(off, value)
     }
 
-    /// Volatile sibling of [`Self::write_desc`] — required for
-    /// publishing entries the hardware may observe before the
-    /// next memory barrier.
+    /// Volatile sibling of [`Self::write_desc`], for entries the hardware may
+    /// observe before the next memory barrier.
     pub fn write_desc_volatile(&mut self, idx: usize, value: T) -> bool {
         if idx >= self.desc_count {
             return false;
@@ -102,9 +101,8 @@ impl<T: Pod> VirtqueueRegion<T> {
         self.frame.write_volatile_at::<T>(off, value)
     }
 
-    /// Borrow `len` bytes from the payload region starting at
-    /// `payload_offset() + offset`. Returns `None` on overflow or
-    /// if the slice would extend past the frame.
+    /// Borrow `len` bytes at `payload_offset() + offset`; `None` on overflow
+    /// or past the end of the frame.
     pub fn slice_payload(&self, offset: usize, len: usize) -> Option<&[u8]> {
         let abs = self.payload_offset.checked_add(offset)?;
         self.frame.slice_at(abs, len)
@@ -116,8 +114,7 @@ impl<T: Pod> VirtqueueRegion<T> {
         self.frame.slice_at_mut(abs, len)
     }
 
-    /// Bytes from the payload region copied into `dst`.
-    /// Convenience for callers that don't want the borrow form.
+    /// Copy payload bytes at `payload_offset() + offset` into `dst`.
     pub fn read_payload(&self, offset: usize, dst: &mut [u8]) -> bool {
         let Some(abs) = self.payload_offset.checked_add(offset) else {
             return false;
@@ -125,8 +122,7 @@ impl<T: Pod> VirtqueueRegion<T> {
         self.frame.read_slice(abs, dst)
     }
 
-    /// Copy `src` into the payload region starting at
-    /// `payload_offset() + offset`.
+    /// Copy `src` into the payload region at `payload_offset() + offset`.
     pub fn write_payload(&mut self, offset: usize, src: &[u8]) -> bool {
         let Some(abs) = self.payload_offset.checked_add(offset) else {
             return false;
@@ -134,7 +130,6 @@ impl<T: Pod> VirtqueueRegion<T> {
         self.frame.write_slice(abs, src)
     }
 
-    /// Consume the region and return the underlying frame.
     pub fn into_frame(self) -> Frame<KernelMeta> {
         self.frame
     }

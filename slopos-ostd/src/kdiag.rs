@@ -6,10 +6,6 @@ use crate::arch::x86_64::tsc;
 use crate::cpu::x86_64 as cpu;
 use crate::stacktrace::{self, StacktraceEntry};
 
-// ---------------------------------------------------------------------------
-// Register snapshot — only used by kdiag_dump_cpu_state() below.
-// ---------------------------------------------------------------------------
-
 #[repr(C)]
 #[derive(Debug, Clone, Copy)]
 struct RegSnapshot {
@@ -286,13 +282,8 @@ pub fn kdiag_dump_stack_trace_from_frame(frame: *const InterruptFrame) {
         crate::klog_info!("=== END STACK TRACE ===");
     }
 }
-/// Read a single stack word at `rsp + idx * 8`, validating that the
-/// address falls within `[stack_lo, stack_hi)` first. Returns `None`
-/// if the address would be out of bounds.
-///
-/// Used by the supervisor-fault stack-dump path in `boot/`. Centralises
-/// the unaligned-read unsafe in this diagnostic crate so callers stay
-/// in safe Rust.
+/// Read a stack word at `rsp + idx * 8`, or `None` if that address falls
+/// outside `[stack_lo, stack_hi)`.
 pub fn kdiag_stack_word_at(rsp: u64, idx: isize, stack_lo: usize, stack_hi: usize) -> Option<u64> {
     let base = rsp as *const u64;
     // SAFETY: pointer arithmetic only — no deref yet.
@@ -351,15 +342,10 @@ pub fn kdiag_hexdump(data: *const u8, length: usize, base_address: u64) {
     });
 }
 
-/// One-line health report for the lock-order validator, plus pool headroom.
-///
-/// Answers "is lockdep actually running, and how close is it to turning itself
-/// off?" — a question the boot log could not previously answer, because the
-/// validator disables itself silently and stays that way for the rest of the
-/// boot.
-/// `phase` names the boot point so a log with several of these lines can be
-/// read without counting: positional parsing is wrong in whichever mode
-/// emits a different number of them, and rots silently when one is added.
+/// One-line health report for the lock-order validator, plus pool headroom:
+/// the validator disables itself silently, so nothing else reports whether it
+/// is still running. `phase` names the boot point so a log carrying several of
+/// these lines needs no positional parsing.
 pub fn kdiag_dump_lock_graph(phase: &str) {
     use crate::sync::lock_graph as lg;
 
@@ -405,12 +391,10 @@ pub fn kdiag_dump_lock_graph(phase: &str) {
     );
 }
 
-/// Dump up to `limit` registered lock classes.
-///
-/// Bounded so a full table cannot monopolise the serial line. The *run of
-/// contiguous addresses* is what identifies an array-of-locks static that ate
-/// the table (256 `PROCESS_VMS` slots, 544 event-bus wait queues, …); a single
-/// address, which is all the overflow warning can name, cannot show that.
+/// Dump up to `limit` registered lock classes, bounded so a full table cannot
+/// monopolise the serial line. A *run of contiguous addresses* is what
+/// identifies an array-of-locks static that ate the table; the single address
+/// the overflow warning names cannot show that.
 pub fn kdiag_dump_lock_classes(limit: usize) {
     use crate::sync::lock_graph as lg;
 

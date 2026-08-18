@@ -1,8 +1,7 @@
 //! Host-side integration tests for `IoPort` / `IoPortRegistry`.
 //!
-//! Port-I/O asm cannot run host-side (would fault outside ring 0), so
-//! these tests cover only the registry gate and `IoPort`'s
-//! address/offset arithmetic.
+//! Port-I/O asm faults outside ring 0, so only the registry gate and the
+//! address arithmetic are covered here.
 
 use std::sync::{Mutex, MutexGuard, OnceLock};
 
