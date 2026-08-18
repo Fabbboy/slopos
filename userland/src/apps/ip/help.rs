@@ -1,18 +1,12 @@
 //! `ip help` and `ip OBJECT help`.
 //!
-//! The text names the same objects, commands and options
-//! [`slopos_net_core::ip_plan`] parses, and every word it prints is in that
-//! module's `ALL_GRAMMAR_WORDS`, which the crate's own glyph-coverage test
-//! holds to what the console font can draw.
-//!
-//! Where an object is defined in the ABI and not served by this kernel, the
-//! help says so. A person reading a usage line should not have to run a command
-//! to find out it cannot work.
+//! Every word printed here must be in [`slopos_net_core::ip_plan`]'s
+//! `ALL_GRAMMAR_WORDS`, which a glyph-coverage test holds to what the console
+//! font can draw.
 
 use slopos_net_core::ip_plan::Object;
 
-/// The one-line summary, printed on stdout for `ip help` and alongside the
-/// error for a command line with no object.
+/// The summary, printed for `ip help` and beside the no-object error.
 pub fn usage() {
     println!("usage: ip [-br|-brief] [-s|-stats] [-n|-numeric] OBJECT [COMMAND] [ARGS...]");
     println!("       options must precede OBJECT; OBJECT and COMMAND may be abbreviated");
