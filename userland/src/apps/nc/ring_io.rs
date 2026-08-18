@@ -1,22 +1,18 @@
 //! Ring-driven, `async`/`await` I/O session for nc's TCP recv/send loop.
 //!
-//! This is the reference port of the SlopRing async edge onto the
-//! `slopfut` runtime: nc's established-connection loop — historically a
-//! `poll(2)` over stdin + socket with blocking `recv`/`send` — is written
-//! here as an `async fn` that races three leaf futures with
-//! [`slopfut::select3`]: an `OP_READ` on stdin, an `OP_READ` on the socket,
-//! and a periodic `OP_TIMEOUT` tick that bounds the wait so the inactivity
-//! timeout is enforced. `block_on` drives them on one [`Ring`]; the
-//! multiplexing `poll` used to do is now the kernel's caller-as-waiter
-//! harvest (SLOPRING § 7.1/§ 8.3).
+//! The established-connection loop races three leaf futures with
+//! [`slopfut::select3`]: an `OP_READ` on stdin, an `OP_READ` on the socket, and
+//! a periodic `OP_TIMEOUT` tick that bounds the wait so the inactivity timeout
+//! is enforced. Multiplexing is the kernel's caller-as-waiter harvest
+//! (SLOPRING § 7.1/§ 8.3).
 //!
-//! `connect`/`listen`/`accept`/`shutdown` stay regular syscalls (outside
-//! the nine-opcode data plane, SLOPRING § 12).
+//! `connect`/`listen`/`accept`/`shutdown` stay regular syscalls, outside the
+//! nine-opcode data plane (SLOPRING § 12).
 //!
 //! Buffer lifetime (no UAF): each `OP_READ`/`OP_WRITE` buffer is a `Vec`
-//! *owned by the reactor* while in flight ([`slopfut`]'s ownership-passing
-//! API), so a buffer the kernel might still write is never freed — even
-//! when `select3` drops the losing read and fires its `OP_CANCEL`.
+//! *owned by the reactor* while in flight, so a buffer the kernel might still
+//! write is never freed — even when `select3` drops the losing read and fires
+//! its `OP_CANCEL`.
 
 use std::io::Write;
 use std::time::Instant;
@@ -28,24 +24,22 @@ use crate::ring::{Ring, slopfut};
 const STDIN_FD: i32 = 0;
 /// stdin read buffer capacity (one keystroke burst at a time).
 const STDIN_CAP: usize = 64;
-/// socket read buffer capacity.
 const SOCK_CAP: usize = 2048;
 /// Periodic timer tick (ns). Bounds an otherwise I/O-only `select` so the
-/// inactivity timeout is checked even while no data flows. Mirrors the old
-/// `poll(.., 100)` cadence (SLOPRING § 12 OP_TIMEOUT note).
+/// inactivity timeout is checked even while no data flows
+/// (SLOPRING § 12 OP_TIMEOUT note).
 const TIMER_TICK_NS: u64 = 200_000_000;
 
 /// One ring-driven established-connection session.
 ///
-/// `listen_mode` selects nc's accept-loop semantics: a normal remote close
-/// / timeout returns `None` (let the listener accept again) rather than the
+/// `listen_mode` selects nc's accept-loop semantics: a normal remote close or
+/// timeout returns `None` so the listener accepts again, rather than the
 /// client's terminal exit code.
 pub(super) struct Session<'a> {
     config: &'a NcConfig,
     conn: &'a TcpConn,
     listen_mode: bool,
 
-    // Line assembly for raw-mode stdin → socket sends.
     line_buf: [u8; 1024],
     line_pos: usize,
 
@@ -72,9 +66,8 @@ impl<'a> Session<'a> {
     /// Drive the session to completion. Returns `Some(code)` to exit the
     /// program, or `None` (listen mode only) to resume accepting.
     pub(super) fn run(mut self) -> Option<u8> {
-        // 16 SQ slots is comfortably more than the loop's peak in-flight
-        // count (stdin + socket + one write + one timer). The ring is this
-        // session's async substrate; setup failure means no loop at all.
+        // 16 SQ slots is comfortably more than the loop's peak in-flight count
+        // (stdin + socket + one write + one timer).
         let ring = match Ring::setup(16) {
             Ok(r) => r,
             Err(_) => {
@@ -87,23 +80,20 @@ impl<'a> Session<'a> {
         slopfut::block_on(ring, self.run_async())
     }
 
-    /// The async event loop: race stdin-read / socket-read / timer, act on
-    /// whichever fires, re-arm, repeat.
     async fn run_async(mut self) -> Option<u8> {
         type DynBuf = core::pin::Pin<Box<dyn core::future::Future<Output = slopfut::BufResult>>>;
         type DynInt = core::pin::Pin<Box<dyn core::future::Future<Output = i32>>>;
 
-        // Buffers ping-pong between this loop and the in-flight reads. The
-        // winning read returns its buffer; a cancelled (losing) read keeps
-        // its buffer in the reactor until the cancellation lands, so we hand
-        // the loser a fresh buffer next turn.
+        // The winning read returns its buffer; a cancelled read keeps its buffer
+        // in the reactor until the cancellation lands, so the loser is handed a
+        // fresh one next turn.
         let mut stdin_buf = vec![0u8; STDIN_CAP];
         let mut sock_buf = vec![0u8; SOCK_CAP];
 
         loop {
             let fd_sock = self.conn.raw();
-            // A closed stdin (or disabled timer) is a never-resolving
-            // `pending()` placeholder so the `select3` shape stays fixed.
+            // A closed stdin or disabled timer becomes a never-resolving
+            // `pending()` so the `select3` shape stays fixed.
             let f_stdin: DynBuf = if self.stdin_closed {
                 Box::pin(core::future::pending())
             } else {
@@ -126,7 +116,6 @@ impl<'a> Session<'a> {
 
             match slopfut::select3(f_stdin, f_sock, f_timer).await {
                 slopfut::Either3::A(br) => {
-                    // stdin readable; the socket read (loser) was cancelled.
                     sock_buf = vec![0u8; SOCK_CAP];
                     let outcome = self.on_stdin(br.res, &br.buf).await;
                     stdin_buf = br.buf;
@@ -145,7 +134,6 @@ impl<'a> Session<'a> {
                     }
                 }
                 slopfut::Either3::C(_) => {
-                    // Timer tick: both reads were cancelled; refresh buffers.
                     if !self.stdin_closed {
                         stdin_buf = vec![0u8; STDIN_CAP];
                     }
@@ -158,13 +146,10 @@ impl<'a> Session<'a> {
         }
     }
 
-    // -- stdin → socket -----------------------------------------------------
-
     async fn on_stdin(&mut self, res: i32, buf: &[u8]) -> Option<Option<u8>> {
         if res <= 0 {
-            // EOF (0) or a genuine read error (<0; would-block never reaches
-            // here — the kernel keeps those in-flight). Half-close the write
-            // side and keep receiving; re-arming on an error would busy-spin.
+            // EOF or a genuine error; would-block never reaches here, the kernel
+            // keeps those in-flight. Re-arming on an error would busy-spin.
             self.stdin_closed = true;
             if res == 0 {
                 verbose_msg(self.config, "stdin EOF");
@@ -214,8 +199,6 @@ impl<'a> Session<'a> {
         true
     }
 
-    // -- socket → stdout ----------------------------------------------------
-
     fn on_sock(&mut self, res: i32, buf: &[u8]) -> Option<Option<u8>> {
         if res == 0 {
             verbose_msg(self.config, "connection closed by remote");
@@ -223,9 +206,8 @@ impl<'a> Session<'a> {
             return Some(self.on_closed());
         }
         if res < 0 {
-            // A negative socket-read completion is a genuine error
-            // (would-block stays in-flight). A reset peer surfaces here on
-            // every probe; treating it as transient would busy-spin.
+            // A reset peer surfaces here on every probe; treating it as
+            // transient would busy-spin.
             verbose_msg(self.config, "connection error");
             self.conn.shutdown_both();
             return Some(self.on_closed());
@@ -243,8 +225,6 @@ impl<'a> Session<'a> {
         self.touch();
         None
     }
-
-    // -- bookkeeping --------------------------------------------------------
 
     fn touch(&mut self) {
         self.last_activity_ms = self.clock_start.elapsed().as_millis() as u64;

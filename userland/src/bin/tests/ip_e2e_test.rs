@@ -642,23 +642,18 @@ fn socket_query_resolves_a_live_tcp_state() -> bool {
     true
 }
 
-/// A socket is attributed to the process that opened it, and to nobody else.
+/// The redaction contract: holding `SYSTEM` and not `NET_ADMIN`, this binary's
+/// own socket must name its own pid and no other row may name any pid at all.
+/// Disclosing indiscriminately fails the second; redacting indiscriminately, or
+/// filtering rows by owner, fails the first.
 ///
-/// The redaction contract, from the side that can be wrong dangerously. This
-/// binary holds `SYSTEM` and not `NET_ADMIN`, so exactly two things must hold
-/// of what it is shown: its own socket names its own pid, and no other row
-/// names any pid at all. A kernel that disclosed indiscriminately fails the
-/// second; one that redacted indiscriminately, or that filtered rows by owner,
-/// fails the first.
-///
-/// Deliberately a **bound UDP socket and no traffic**, so this runs to the same
-/// conclusion on a host with no route off the machine. The property is about
-/// who owns a socket, and nothing has to be sent to own one.
+/// Deliberately a bound UDP socket and no traffic, so it reaches the same
+/// conclusion on a host with no route off the machine.
 fn socket_query_attributes_a_socket_to_its_owner() -> bool {
     use slopos_userland::syscall::net::{bind_any, socket};
 
-    // Distinctive enough that a row carrying it is unambiguously the one this
-    // test opened, and outside the ephemeral range the stack allocates from.
+    // Distinctive enough to identify this test's row, and outside the ephemeral
+    // range the stack allocates from.
     const PORT: u16 = 47251;
 
     let Ok(fd) = socket(AF_INET as u16, SOCK_DGRAM as u16, 0) else {
@@ -725,30 +720,17 @@ fn socket_query_attributes_a_socket_to_its_owner() -> bool {
     true
 }
 
-/// `/bin/ss` lists a socket it does not own, and does not name its owner.
+/// The same rule from a second process, which is the only way to check it.
 ///
-/// The rule the socket query exists to implement, checked the only way it can
-/// be: from a **second process**. This test binds a socket and then runs
-/// `/bin/ss` — a different task, a different address space, holding no
-/// `NET_ADMIN` — and reads what it printed.
-///
-/// Both halves matter and they pull in opposite directions.
-///
-/// *The row must be there.* A diagnostic tool is never the process that opened
+/// *The row must be there*: a diagnostic tool is never the process that opened
 /// the socket it was asked about, so a query keyed on the caller's identity
-/// would print an empty table to every tool that ever ran it — an answer that
-/// is wrong rather than absent. That failure is invisible from inside a single
-/// process, which is why this case spends a spawn.
+/// would print an empty table to every tool that ran it — invisible from inside
+/// a single process, which is why this case spends a spawn.
 ///
-/// *The owner must not be.* `-p` on a socket belonging to another address space
-/// prints nothing, because the pid is what a caller is not entitled to and the
-/// four-tuple is what it is.
-///
-/// There is deliberately no positive `-p` case here. `ss` opens no sockets of
-/// its own, so no unprivileged run of it can ever be entitled to a pid; the
-/// disclosing direction is checked in
-/// [`socket_query_attributes_a_socket_to_its_owner`], where the process asking
-/// is the process that owns.
+/// *The owner must not be*: `-p` on a socket in another address space prints
+/// nothing. There is deliberately no positive `-p` case, because `ss` opens no
+/// sockets of its own; that direction is
+/// [`socket_query_attributes_a_socket_to_its_owner`].
 fn ss_lists_another_processes_socket_without_naming_it() -> bool {
     use slopos_userland::syscall::net::{bind_any, socket};
 
@@ -798,7 +780,6 @@ fn ss_lists_another_processes_socket_without_naming_it() -> bool {
     true
 }
 
-/// Read every socket row, which is every socket there is.
 fn fetch_sockets() -> Result<Vec<UserSockInfo>, SyscallError> {
     const SOCK_SIZE: usize = core::mem::size_of::<UserSockInfo>();
     let mut probe = [0u8; HDR];
@@ -839,29 +820,17 @@ fn decode_sock(bytes: &[u8]) -> UserSockInfo {
 
 /// The monitor fd wakes a reader parked in `poll`.
 ///
-/// This is the one property nothing else in the tree covers: every other
-/// netmon test drives the ring directly, which exercises the data structure and
-/// not the descriptor. Here the fd is opened, proven quiet, and then polled
-/// with a real deadline while `/bin/ip link set lo down` changes the stack from
-/// another process.
+/// The one property nothing else covers: every other netmon test drives the
+/// ring directly, exercising the data structure and not the descriptor.
 ///
-/// **What this does and does not prove.** It proves the event reaches a
-/// `poll`-armed descriptor and that a whole `NetEvent` is then readable from
-/// it. It does not prove a hard interleaving — that the poll had already
-/// blocked when the event was posted — because nothing here can hold the child
-/// until the parent is inside the syscall. Spawning, loading and executing
-/// `/bin/ip` takes far longer than entering `poll`, so in practice the wake is
-/// what happens; but the assertion below is the weaker, true one, and the empty
-/// pre-check is what keeps it from passing on a stale event.
+/// It proves the event reaches a `poll`-armed descriptor and that a whole
+/// `NetEvent` is then readable. It does not prove a hard interleaving — nothing
+/// here can hold the child until the parent is inside the syscall — so the
+/// assertion is the weaker one, and the quiet pre-check is what keeps it from
+/// passing on a stale event.
 ///
-/// **Every failure here names which half is at fault**, because three distinct
-/// causes produce the same timeout and separating them after the fact costs a
-/// person a whole investigation each time. `lo.admin_up` is read immediately
-/// before the change and quoted on failure: a request that changes nothing
-/// posts nothing, so an interface that was already down makes a correct kernel
-/// look like a broken one. The drained count is quoted for the same reason —
-/// it is the difference between "nothing arrived" and "the stack is chatty and
-/// something raced the drain".
+/// Failures quote `lo.admin_up` and the drained count because three distinct
+/// causes produce the same timeout.
 fn monitor_fd_wakes_a_blocked_poll() -> bool {
     let fd = match net_monitor(NET_MON_DEFAULT, 0) {
         Ok(fd) => fd,
@@ -872,9 +841,7 @@ fn monitor_fd_wakes_a_blocked_poll() -> bool {
     };
 
     // Drain anything already queued, so what arrives below is caused by the
-    // change below and not by whatever the stack did during boot. The count is
-    // printed because a stack that keeps posting is the one failure mode the
-    // quiet check below reports without explaining.
+    // change below and not by whatever the stack did during boot.
     let mut scratch = [0u8; NET_EVENT_LEN * 8];
     let mut drained = 0usize;
     loop {
@@ -899,11 +866,9 @@ fn monitor_fd_wakes_a_blocked_poll() -> bool {
         }
     }
 
-    // Quiet: a zero-timeout poll reports nothing ready. Not fatal on its own —
-    // the stack posts on its own schedule (DHCP timers, carrier polls), so an
-    // event landing between the loop above and this check says the machine is
-    // busy, not that anything is broken. It is drained and re-checked; only a
-    // monitor that never settles is a finding, and then the count says so.
+    // The stack posts on its own schedule (DHCP timers, carrier polls), so an
+    // event landing between the drain above and this check means the machine is
+    // busy. Only a monitor that never settles is a finding.
     let mut settled = false;
     for _ in 0..8 {
         let mut quiet = [UserPollFd {
@@ -934,14 +899,9 @@ fn monitor_fd_wakes_a_blocked_poll() -> bool {
         return false;
     }
 
-    // The precondition, read immediately before the change and reported on
-    // every failure below.
-    //
-    // **A request that changes nothing is not an event.** If `lo` is already
-    // down, `set lo down` correctly posts nothing, the wait correctly expires,
-    // and the failure looks identical to a producer that never fired or a wake
-    // that never arrived. That ambiguity has to be resolved by a person once
-    // per occurrence unless the value is on the wire, so it is on the wire.
+    // A request that changes nothing is not an event: with `lo` already down,
+    // `set lo down` correctly posts nothing and the wait correctly expires,
+    // which is indistinguishable from a producer or a wake that never fired.
     let (lo_ifindex, admin_up_before) = match read_ifaces() {
         Ok((_, rows)) => match find(&rows, "lo") {
             Some(lo) => (lo.ifindex, lo.admin_up),
@@ -959,8 +919,8 @@ fn monitor_fd_wakes_a_blocked_poll() -> bool {
         }
     };
     if admin_up_before == 0 {
-        // Not repaired here on purpose: something left the interface down, and
-        // bringing it back would hide that while making this case pass.
+        // Not repaired on purpose: bringing it back would hide whatever left
+        // the interface down while making this case pass.
         eprintln!(
             "ip_e2e_test: lo is already down before `ip link set lo down` — the change \
              would post nothing. The fault is upstream of this case: an earlier test or \
@@ -969,21 +929,16 @@ fn monitor_fd_wakes_a_blocked_poll() -> bool {
         return false;
     }
 
-    // Change the stack from another process. `/bin/ip` holds NET_ADMIN by path;
-    // this binary does not, which is why the mutation is spawned rather than
-    // issued.
     let down = spawn_prog(b"/bin/ip", &["ip", "link", "set", "lo", "down"], 1);
     if down <= 0 {
         eprintln!("ip_e2e_test: spawn of `ip link set lo down` returned {down}");
         return false;
     }
 
-    // Wait for an event **naming `lo`**, not for the descriptor to become
-    // readable. Any interface's event would satisfy the weaker condition, and
-    // an unrelated one arriving first would otherwise be read as the answer —
-    // a pass proving nothing. Events for other interfaces are consumed and
-    // counted; the deadline is on the whole wait, not on each poll, so a busy
-    // stack cannot extend it.
+    // Waits for an event naming `lo`, not merely for the descriptor to become
+    // readable: an unrelated interface's event arriving first would otherwise
+    // read as the answer. The deadline is on the whole wait, not on each poll,
+    // so a busy stack cannot extend it.
     let deadline = std::time::Instant::now() + std::time::Duration::from_millis(2000);
     let mut unrelated = 0usize;
     let mut ok = false;
@@ -1039,8 +994,8 @@ fn monitor_fd_wakes_a_blocked_poll() -> bool {
         );
     }
 
-    // Restore loopback whatever happened above, and say so if it did not come
-    // back — a test that leaves the stack broken makes every later one lie.
+    // Restore loopback whatever happened above; a test that leaves the stack
+    // broken makes every later one lie.
     let up = run_ip(&["ip", "link", "set", "lo", "up"]);
     if up != 0 {
         eprintln!("ip_e2e_test: restoring lo returned {up}");
@@ -1062,9 +1017,8 @@ fn monitor_fd_wakes_a_blocked_poll() -> bool {
 
 /// Read one whole `NetEvent` off a readable monitor fd and sanity-check it.
 ///
-/// `None` distinguishes "the descriptor misbehaved" from "the event was not the
-/// one wanted" — the caller decides which events it is waiting for, and only
-/// the first of those is a failure.
+/// `None` means the descriptor misbehaved, never "not the event wanted" — the
+/// caller decides which events it is waiting for.
 fn read_one_event(fd: i32) -> Option<NetEvent> {
     let mut buf = [0u8; NET_EVENT_LEN];
     let n = match fs::read_slice(fd, &mut buf) {
@@ -1105,9 +1059,8 @@ fn read_one_event(fd: i32) -> Option<NetEvent> {
 /// What `/bin/ip` actually renders, captured through a pipe and printed.
 ///
 /// The structural assertion is deliberately narrow — the `lo` line exists and
-/// says `UNKNOWN` — because pinning the whole layout here would make every
-/// cosmetic change a test failure. The captured text is emitted in full so a
-/// reader can see the rest.
+/// says `UNKNOWN` — because pinning the whole layout would make every cosmetic
+/// change a test failure. The captured text is emitted in full instead.
 fn ip_renders_the_stack() -> bool {
     let commands: [&[&str]; 7] = [
         &["ip", "link"],
@@ -1115,10 +1068,9 @@ fn ip_renders_the_stack() -> bool {
         &["ip", "route"],
         &["ip", "status"],
         // The read half of the master switch. The write half is deliberately
-        // absent: turning it off downs every device by construction, which
-        // takes unrelated socket and NAPI tests with it.
+        // absent: turning it off downs every device, taking unrelated socket
+        // and NAPI tests with it.
         &["ip", "net"],
-        // Scoped views: each must name one interface, not the whole table.
         &["ip", "link", "show", "dev", "lo"],
         &["ip", "-s", "link", "show", "dev", "lo"],
     ];
@@ -1138,8 +1090,8 @@ fn ip_renders_the_stack() -> bool {
         if words == ["ip", "link"] {
             link_output = text.clone();
         }
-        // A `dev`-scoped render names exactly one interface. The numbered
-        // header lines are one per interface, so counting them is enough.
+        // The numbered header lines are one per interface, so counting them is
+        // enough to tell a scoped render from the whole table.
         if words.contains(&"dev") {
             let headers = text
                 .lines()
@@ -1156,8 +1108,7 @@ fn ip_renders_the_stack() -> bool {
         }
     }
 
-    // `ip link` must name loopback and say UNKNOWN on that same line — the
-    // renderer's half of `loopback_operstate_is_unknown`.
+    // The renderer's half of `loopback_operstate_is_unknown`.
     let lo_line = link_output
         .lines()
         .find(|line| line.contains("lo:") && line.contains("LOOPBACK"));
@@ -1172,12 +1123,10 @@ fn ip_renders_the_stack() -> bool {
     true
 }
 
-/// `neigh`, `dns` and `route` are served by the kernel, not stubbed.
-///
-/// Each must answer for real rather than the "not supported" the CLI renders an
-/// `ENOSYS` as. The route case is a write round-trip on `203.0.113.0/24`
-/// (TEST-NET-3, which nothing routes to), so it proves `net_route_ctl` both
-/// directions without disturbing the live stack.
+/// `neigh`, `dns` and `route` must answer for real rather than the "not
+/// supported" the CLI renders an `ENOSYS` as. The route case is a write
+/// round-trip on `203.0.113.0/24` (TEST-NET-3, which nothing routes to), so it
+/// proves `net_route_ctl` both directions without disturbing the live stack.
 fn late_verbs_are_served() -> bool {
     let Some(neigh) = capture_ip(&["ip", "neigh"]) else {
         eprintln!("ip_e2e_test: `ip neigh` produced no output");

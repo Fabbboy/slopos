@@ -84,27 +84,17 @@ pub struct Ledger {
     pub charge_held: bool,
 }
 
-// ===========================================================================
-// The invariant.
-// ===========================================================================
-
-/// (L1) Every row holds exactly the sum of the charges outstanding against it.
-///
-/// Equality in both directions: `>=` alone would admit a phantom refund
-/// (a credit with no charge behind it), which is precisely the failure the
-/// linear token is there to make unrepresentable.
+/// (L1) Every row holds exactly the sum of the charges outstanding against it;
+/// `>=` alone would admit a phantom refund, a credit with no charge behind it.
 pub open spec fn l1_equality(s: Ledger) -> bool {
     &&& s.used_leaf == s.live_leaf
     &&& s.used_mid == s.live_mid
     &&& s.used_root == s.live_root
 }
 
-/// The hierarchical shape: an ancestor holds at least what its descendants do,
-/// because every debit against a descendant walked through it.
-///
-/// This is what the in-kernel `quotacheck` audit checks at runtime
-/// (`LedgerFault::AncestorUnderCount`), stated here as an invariant the step
-/// relation preserves.
+/// An ancestor holds at least what its descendants do, because every debit
+/// against a descendant walked through it. Checked at runtime too, by the
+/// in-kernel `quotacheck` audit (`LedgerFault::AncestorUnderCount`).
 pub open spec fn hierarchy_monotone(s: Ledger) -> bool {
     &&& s.live_mid >= s.live_leaf
     &&& s.live_root >= s.live_mid
@@ -115,7 +105,6 @@ pub open spec fn ledger_inv(s: Ledger) -> bool {
     &&& hierarchy_monotone(s)
 }
 
-/// Initial state: nothing charged, the leaf bound, generations agreeing.
 pub open spec fn ledger_init(s: Ledger) -> bool {
     &&& s.used_leaf == 0
     &&& s.used_mid == 0
@@ -135,92 +124,73 @@ pub proof fn ledger_init_inv(s: Ledger)
 {
 }
 
-// ===========================================================================
-// Steps.
-//
-// One variant per atomic-bounded operation, each doc-commented with the real
-// call site it mirrors.
-// ===========================================================================
-
+// One variant per atomic-bounded operation, named with the call site it
+// mirrors.
 pub enum Step {
     /// `try_charge` succeeds at every level: all three rows are debited and a
-    /// `Reservation` is handed back.
-    /// slopos-ostd/src/process/quota/arena.rs — `try_charge`, the loop's
-    /// successful exit.
+    /// `Reservation` is handed back. arena.rs — `try_charge`.
     TryChargeOk { n: nat },
 
-    /// `try_charge` debits the leaf, then the mid level refuses. The leaf's
-    /// debit MUST be given back before the error returns.
-    /// slopos-ostd/src/process/quota/arena.rs — `try_charge`'s `unwind` call
-    /// on the `charge_row` error arm.
+    /// `try_charge` debits the leaf, then the mid level refuses; the leaf's
+    /// debit MUST be given back before the error returns. arena.rs —
+    /// `try_charge`'s `unwind` call on the `charge_row` error arm.
     TryChargeDeniedAtLevel1 { n: nat },
 
-    /// `try_charge` debits the leaf and the mid, then the root refuses. Both
-    /// must be unwound. This is the partial batch that makes L4 hard.
-    /// slopos-ostd/src/process/quota/arena.rs — same `unwind`, two levels deep.
+    /// Leaf and mid debited, then the root refuses: the partial batch that
+    /// makes L4 hard. arena.rs — the same `unwind`, two levels deep.
     TryChargeDeniedAtLevel2 { n: nat },
 
     /// A refund whose generation matches the row's: every level is credited.
-    /// slopos-ostd/src/process/quota/arena.rs — `refund_raw`.
+    /// arena.rs — `refund_raw`.
     RefundLive,
 
     /// A refund whose generation does not match — the row was released and
-    /// its slot rebound. A defined no-op.
-    /// slopos-ostd/src/process/quota/arena.rs — `refund_raw`'s `row_for`
+    /// its slot rebound. A defined no-op. arena.rs — `refund_raw`'s `row_for`
     /// returning `None` on the generation compare.
     RefundStale,
 
-    /// A child account is bound beneath the leaf.
-    /// slopos-ostd/src/process/quota/arena.rs — `account_create`.
+    /// A child account is bound beneath the leaf. arena.rs — `account_create`.
     SubAccountCreate,
 
     /// The leaf's row goes dark; outstanding amounts are already reflected in
-    /// its ancestors, so nothing moves.
-    /// slopos-ostd/src/process/quota/arena.rs — `account_release`.
+    /// its ancestors, so nothing moves. arena.rs — `account_release`.
     SubAccountDrop,
 
     /// An operator lowers a ceiling, possibly below what is already held.
-    /// slopos-ostd/src/process/quota/arena.rs — `set_limit`.
+    /// arena.rs — `set_limit`.
     LowerLimit { to: nat },
 
     /// The slot's generation is bumped, invalidating every outstanding
-    /// designator for it.
-    /// slopos-ostd/src/process/quota/arena.rs — `account_release`'s
-    /// generation store, and `account_create`'s on the next occupant.
+    /// designator for it. arena.rs — `account_release`'s generation store, and
+    /// `account_create`'s on the next occupant.
     SlotRelease,
 
     /// `Charge::try_extend` with headroom: the token grows in place.
-    /// slopos-ostd/src/process/quota/token.rs — `Charge::try_extend`.
+    /// token.rs — `Charge::try_extend`.
     ExtendOk { n: nat },
 
     /// `try_extend`'s reservation was refused, so the charge is unchanged.
-    /// slopos-ostd/src/process/quota/token.rs — the caller's `try_charge`
-    /// having returned `Err` before `try_extend` is reached.
+    /// token.rs — the caller's `try_charge` having returned `Err` before
+    /// `try_extend` is reached.
     ExtendDenied,
 
-    /// `Charge::shrink`: part of the amount is given back.
-    /// slopos-ostd/src/process/quota/token.rs — `Charge::shrink`.
+    /// `Charge::shrink`: part of the amount is given back. token.rs —
+    /// `Charge::shrink`.
     Shrink { n: nat },
 
-    /// A reclaimer released `n` pages that were charged.
-    ///
-    /// Modelled as an ordinary refund and not as a special case, which is the
-    /// claim being made: reclaim gives pages back through the same token path
-    /// as a `munmap`, so it cannot produce a refund the ledger has no charge
-    /// behind. slopos-ostd/src/mm/reclaim.rs — `run`.
+    /// A reclaimer released `n` pages that were charged. Modelled as an
+    /// ordinary refund rather than a special case, which is the claim being
+    /// made: reclaim gives pages back through the same token path as a
+    /// `munmap`. slopos-ostd/src/mm/reclaim.rs — `run`.
     Reclaim { n: nat },
 
     /// `VmaMap::settle`: give back whatever the charge holds above what the
-    /// map spans.
-    ///
-    /// The whole address-space page charge in one step. `want` is the tree's
-    /// span after the mutation; the charge falls to meet it and never rises,
-    /// which is what makes a `munmap` unrefusable.
-    /// mm/src/vma_region.rs — `settle`.
+    /// map spans. `want` is the tree's span after the mutation; the charge
+    /// falls to meet it and never rises, which is what makes a `munmap`
+    /// unrefusable. mm/src/vma_region.rs — `settle`.
     SettleTo { want: nat },
 }
 
-/// Whether a debit of `n` fits under `limit`.
 pub open spec fn fits(used: nat, n: nat, limit: nat) -> bool {
     used + n <= limit
 }
@@ -228,8 +198,6 @@ pub open spec fn fits(used: nat, n: nat, limit: nat) -> bool {
 pub open spec fn step(s: Ledger, t: Step) -> Ledger {
     match t {
         Step::TryChargeOk { n } => {
-            // Only modelled as taken when every level has room and no charge
-            // is already outstanding (the model tracks one token).
             if !s.charge_held && fits(s.used_leaf, n, s.limit_leaf) && fits(
                 s.used_mid,
                 n,
@@ -251,14 +219,12 @@ pub open spec fn step(s: Ledger, t: Step) -> Ledger {
                 s
             }
         },
-        // The leaf was debited and then given back: identity. Written as the
-        // *composition* rather than as `s` so the proof has to show the
-        // round-trip cancels, which is the thing under test.
+        // Written as the composition rather than as `s` so the proof has to
+        // show the round-trip cancels, which is the thing under test.
         Step::TryChargeDeniedAtLevel1 { n } => {
             let debited = Ledger { used_leaf: (s.used_leaf + n) as nat, ..s };
             Ledger { used_leaf: (debited.used_leaf - n) as nat, ..debited }
         },
-        // Leaf and mid debited, then both given back.
         Step::TryChargeDeniedAtLevel2 { n } => {
             let debited = Ledger {
                 used_leaf: (s.used_leaf + n) as nat,
@@ -272,7 +238,6 @@ pub open spec fn step(s: Ledger, t: Step) -> Ledger {
             }
         },
         Step::RefundLive => {
-            // The generation compare is what makes this the live path.
             if s.charge_held && s.leaf_live && s.gen_charge == s.gen_row {
                 Ledger {
                     used_leaf: (s.used_leaf - s.charge_amount) as nat,
@@ -288,8 +253,6 @@ pub open spec fn step(s: Ledger, t: Step) -> Ledger {
                 s
             }
         },
-        // A stale refund touches nothing at all — not the row it names, and
-        // not the principal that holds that slot now.
         Step::RefundStale => s,
         Step::SubAccountCreate => s,
         Step::SubAccountDrop => Ledger { leaf_live: false, ..s },
@@ -316,8 +279,6 @@ pub open spec fn step(s: Ledger, t: Step) -> Ledger {
             }
         },
         Step::ExtendDenied => s,
-        // Reclaim is a refund and nothing more. Bounded by what is held, so
-        // it can never manufacture headroom that was not charged.
         Step::Reclaim { n } => {
             if s.charge_held && n <= s.charge_amount && s.leaf_live && s.gen_charge == s.gen_row {
                 Ledger {
@@ -334,8 +295,8 @@ pub open spec fn step(s: Ledger, t: Step) -> Ledger {
                 s
             }
         },
-        // Shrink-only: `want` above what is held is a no-op, because growth is
-        // always pre-reserved by the caller that wanted it.
+        // Growth is pre-reserved by the caller, so a `want` above what is held
+        // is a no-op.
         Step::SettleTo { want } => {
             if s.charge_held && want < s.charge_amount && s.leaf_live && s.gen_charge == s.gen_row {
                 let give_back = (s.charge_amount - want) as nat;

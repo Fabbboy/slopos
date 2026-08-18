@@ -332,12 +332,8 @@ impl Popover {
         self.pending.unwrap_or(model.enabled)
     }
 
-    /// Settle or abandon an outstanding request.
-    ///
-    /// Called every frame. The kernel agreeing is the normal exit; the
-    /// deadline is the one that matters, because without it a request whose
-    /// completion never arrives leaves the control permanently busy and
-    /// permanently lying about the state.
+    /// Settle or abandon an outstanding request. Called every frame; the kernel
+    /// agreeing is the normal exit, the deadline the one that matters.
     pub fn settle(&mut self, model: &NetPanelModel) {
         let Some(wanted) = self.pending else {
             return;
@@ -350,16 +346,10 @@ impl Popover {
             .pending_since
             .is_none_or(|since| since.elapsed().as_millis() >= SWITCH_SETTLE_MS)
         {
-            // Given up on. The control reverts to whatever the kernel actually
-            // says, which may be the old value — a wrong switch position is
-            // worse than a refused one.
+            // Given up on: a wrong switch position is worse than a refused one.
             self.clear_pending();
             return;
         }
-        // Not agreed yet and not yet abandoned: ask again. Without this the
-        // control has no way to recover from a command that was lost or that
-        // landed before an earlier one, and simply displays the target in a
-        // busy state until the deadline expires.
         if self
             .issued_at
             .is_none_or(|at| at.elapsed().as_millis() >= SWITCH_RETRY_MS)
@@ -368,7 +358,6 @@ impl Popover {
         }
     }
 
-    /// Spawn the command for `wanted` and note when.
     fn issue(&mut self, wanted: bool) {
         if spawn_ip_net(wanted) {
             self.issued_at = Some(Instant::now());
@@ -382,17 +371,11 @@ impl Popover {
         self.switch_dirty = true;
     }
 
-    /// Route a press inside the panel. Returns whether anything took it.
-    ///
-    /// The mutation is not issued here and cannot be: the compositor holds
-    /// `TASK_FLAG_COMPOSITOR` and not `NET_ADMIN`, so it spawns the one
-    /// program that does. Exactly one process in the system can change network
-    /// state, and the compositor's trusted surface does not grow to include
-    /// it.
+    /// Route a press inside the panel. Returns whether anything took it; the
+    /// mutation itself is spawned, see [`spawn_ip_net`].
     pub fn press(&mut self, x: i32, y: i32, model: &NetPanelModel) -> bool {
-        // Only the network panel has controls. Without this a click on another
-        // kind's popover — which draws nothing — reports "taken" and eats the
-        // press.
+        // Only the network panel has controls; without this a click on another
+        // kind's popover — which draws nothing — reports "taken" and eats it.
         if self.open != Some(StatusKind::Network) {
             return false;
         }
@@ -402,19 +385,15 @@ impl Popover {
         if !Self::switch_hit(rect, &layout(model)).contains(x, y) {
             return false;
         }
-        // Toggle from what the switch is SHOWING, not from what the kernel
-        // last said. While a request is outstanding those differ, and reading
-        // the kernel value makes a press during the busy window re-request the
-        // state already being asked for, so the switch cannot be turned back
-        // until it settles.
+        // Toggle from what the switch is showing, not from what the kernel last
+        // said: during the busy window those differ, and reading the kernel value
+        // would re-request the state already being asked for.
         let wanted = !self.switch_on(model);
         if self.pending == Some(wanted) {
             return true;
         }
         // A press during an outstanding request retargets it rather than being
-        // dropped. Dropping it loses the person's intent silently: the switch
-        // under their finger does not move, and the machine settles into the
-        // state they just asked it to leave.
+        // dropped, which would silently lose the intent.
         self.pending = Some(wanted);
         self.pending_since = Some(Instant::now());
         self.switch_dirty = true;
@@ -422,9 +401,8 @@ impl Popover {
         true
     }
 
-    /// Rects to repaint: whatever the popover covered last frame and whatever
-    /// it covers now. Emitted only when the two differ, so an open popover
-    /// over an idle network costs nothing per frame.
+    /// Rects to repaint: whatever the popover covered last frame and whatever it
+    /// covers now, emitted only when the two differ.
     pub fn take_damage(&mut self, out: &mut [DamageRect]) -> usize {
         let current = self.rect().unwrap_or(Rect::EMPTY);
         if current == self.prev_rect && !self.switch_dirty {
@@ -447,7 +425,6 @@ impl Popover {
         count
     }
 
-    /// Draw the open popover.
     pub fn draw(&mut self, buf: &mut DrawBuffer, model: &NetPanelModel, clip: &DamageRect) {
         let Some(rect) = self.rect() else {
             return;
@@ -463,8 +440,7 @@ impl Popover {
         // `fitted`, so it cannot hold `&self`.
         let Self { line, fitted, .. } = self;
 
-        // Two rails, and one rule for them: rail1 is where the panel speaks
-        // about itself, rail2 where it speaks about an interface.
+        // rail1 is where the panel speaks about itself, rail2 about an interface.
         let rail1 = rect.x + PANEL_PAD;
         let rail2 = rail1 + DOT_GUTTER;
         let content_w = rect.w - 2 * PANEL_PAD;
@@ -476,9 +452,7 @@ impl Popover {
         buf.with_scissor(*clip, |buf| {
             // Two concentric opaque fills, not fill-then-outline: a stroked
             // rounded rect blends its corner arcs against the fill's own
-            // antialiased boundary and fades out across each corner, leaving a
-            // border with four holes in it. Giving the hairline its own pixels
-            // keeps the edge solid the whole way round.
+            // antialiased boundary and fades out across each corner.
             rounded_rect_filled(
                 buf,
                 rect.x,
@@ -500,12 +474,9 @@ impl Popover {
 
             // The colour rule, panel-wide: TEXT_PRIMARY names the thing,
             // TEXT_SECONDARY describes it. With one font size and no weight
-            // axis, colour is the only channel that can say "this matters
-            // more", so it is not asked to say anything else.
-            //
-            // The title is the dimmer of the two. Someone who clicked the
-            // network indicator does not need to be told the panel is about
-            // the network; the sentence underneath is what they came for.
+            // axis, colour is the only channel that can say "this matters more".
+            // The title is the dimmer of the two; the sentence underneath is
+            // what someone who clicked the network indicator came for.
             let text = fit(fitted, PANEL_TITLE, header_text_w);
             gfx::draw_str_clipped(
                 buf,
@@ -531,14 +502,13 @@ impl Popover {
                 clip,
             );
 
-            // The switch. Busy while a request is outstanding, so the control
-            // says "asked, not yet confirmed" rather than showing a position
-            // the kernel has not agreed to. Presence increases with state —
-            // off, busy, on.
+            // Busy while a request is outstanding, so the control says "asked,
+            // not yet confirmed" rather than showing a position the kernel has
+            // not agreed to.
             let track = Self::switch_track(rect, &l);
-            // Busy keeps the TARGET's own colour and dims only the knob: a
-            // grey track under a knob in the on position reads as a disabled
-            // control rather than a moving one.
+            // Busy keeps the target's own track colour and dims only the knob: a
+            // grey track under an on-position knob reads as a disabled control
+            // rather than a moving one.
             let track_colour = if on { SIGNAL_EXPAND } else { SIGNAL_INACTIVE };
             rounded_rect_filled(
                 buf,
@@ -562,9 +532,9 @@ impl Popover {
                 );
             }
 
-            // Inset to the text rail rather than full-bleed: a rule that
-            // reaches the panel's edges runs into the corner arcs and reads as
-            // a window seam instead of a group division.
+            // Inset to the text rail rather than full-bleed: a rule that reaches
+            // the panel's edges runs into the corner arcs and reads as a window
+            // seam instead of a group division.
             if l.has_rule {
                 rounded_rect_filled(
                     buf,
@@ -577,16 +547,15 @@ impl Popover {
                 );
             }
 
-            // One row per interface. The state is a coloured dot and a plain
-            // word, never an RFC 2863 spelling: `UNKNOWN` and `LOWERLAYERDOWN`
-            // belong in `ip link`, and in a status menu they ask a question
-            // instead of answering one.
+            // State is a coloured dot and a plain word, never an RFC 2863
+            // spelling: `UNKNOWN` and `LOWERLAYERDOWN` belong in `ip link`, and
+            // in a status menu they ask a question instead of answering one.
             for (i, iface) in model.listed_ifaces().enumerate() {
                 let row_top = rect.y + l.rows_y + i as i32 * l.row_pitch;
                 let state = iface_state(iface);
 
-                // Centred on the name's line, which puts the disc's centre on
-                // the cap band's optical centre for this font.
+                // Centred on the name's line, which puts the disc's centre on the
+                // cap band's optical centre for this font.
                 rounded_rect_filled(
                     buf,
                     rail1,
@@ -618,10 +587,9 @@ impl Popover {
                         let _ = write!(line, "{}/{}", Ipv4(iface.ipv4), iface.prefix_len);
                     }
                 }
-                // Never dimmed by state. The fault is carried by the dot's hue
-                // and by the status word — both additions of contrast. A
-                // disabled grey measures 2.5:1 on exactly the line someone
-                // opens this panel to read when something is wrong.
+                // Never dimmed by state: a disabled grey measures 2.5:1 on
+                // exactly the line someone opens this panel to read when
+                // something is wrong. The dot's hue carries the fault instead.
                 let text = fit(fitted, line, row_text_w);
                 gfx::draw_str_clipped(
                     buf,
@@ -634,10 +602,8 @@ impl Popover {
                 );
             }
 
-            // The gateway, once. At rail1, not rail2: it is not an interface
-            // and must not sit in the dot column with a permanently empty
-            // gutter, which reads as an orphaned row. Absent rather than shown
-            // as 0.0.0.0 when there is no default route.
+            // At rail1, not rail2: the gateway is not an interface, and a
+            // permanently empty dot gutter reads as an orphaned row.
             if l.has_gateway {
                 let y = rect.y + l.gateway_y;
                 gfx::draw_str_clipped(
@@ -651,9 +617,8 @@ impl Popover {
                 );
                 line.clear();
                 let _ = write!(line, "{}", Ipv4(model.gateway));
-                // A fixed key column, not a right rail: nothing else in the
-                // panel ends at the right edge, and right-aligning would open a
-                // trough that changes width with the address.
+                // A fixed key column, not a right rail: right-aligning would open
+                // a trough that changes width with the address.
                 let text = fit(fitted, line, gw_value_w);
                 gfx::draw_str_clipped(
                     buf,
@@ -669,11 +634,9 @@ impl Popover {
     }
 }
 
-/// The region a popover may occupy: the screen below the bar, inset on the
-/// other three sides.
-///
-/// No inset on top — the gap below the bar is the positioner's offset, and
-/// insetting here as well would count it twice.
+/// The region a popover may occupy: the screen below the bar, inset on the other
+/// three sides. No inset on top — the gap below the bar is the positioner's
+/// offset, and insetting here as well would count it twice.
 fn work_area(screen_w: u32, screen_h: u32) -> Rect {
     let top = SYSTEM_BAR_HEIGHT + 1;
     Rect::new(
@@ -692,8 +655,8 @@ fn work_area(screen_w: u32, screen_h: u32) -> Rect {
 /// for the capability here would widen the trusted surface of the process that
 /// already owns the framebuffer and every input event.
 ///
-/// Returns whether the child started. The result of the operation itself
-/// arrives later, as a `net_monitor` event.
+/// Returns whether the child started; the operation's own result arrives later
+/// as a `net_monitor` event.
 fn spawn_ip_net(enable: bool) -> bool {
     let verb: &[u8] = if enable { b"on\0" } else { b"off\0" };
     let argv: [*const u8; 3] = [b"ip\0".as_ptr(), b"net\0".as_ptr(), verb.as_ptr()];
