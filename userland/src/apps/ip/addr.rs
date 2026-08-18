@@ -1,9 +1,7 @@
 //! `ip addr` — the addresses assigned to each interface.
 //!
-//! One query for interfaces and one for addresses, joined on `ifindex` rather
-//! than on the name: indices are never reused, but names are, so a re-probed
-//! NIC becomes `eth0` again and a join keyed on the string would attach the old
-//! interface's addresses to the new one.
+//! Interfaces and addresses are joined on `ifindex`, never on the name: names
+//! are reused across re-probes, indices are not.
 
 use core::fmt::Write;
 use std::string::String;
@@ -128,8 +126,7 @@ fn print_brief(iface: &UserIface, addrs: &[&UserAddr]) {
     println!("{}", line.trim_end());
 }
 
-/// A lifetime, as iproute2 spells it: `forever`, or a count of seconds with the
-/// unit attached so a bare number is never mistaken for something else.
+/// Spelled as iproute2 does: `forever`, or seconds with the unit attached.
 fn lifetime(seconds: u32) -> String {
     if seconds == NET_LFT_FOREVER {
         String::from("forever")

@@ -1,25 +1,17 @@
 //! Global registration hook for the kernel's [`KernelThreadSpawner`].
 //!
-//! `slopos-ostd` ships the trait + a free [`spawn`] helper. The
-//! concrete implementation lives outside the trusted core (`sched/`
-//! crate). Boot wires the production spawner through this hook before
-//! any driver init step runs.
-//!
-//! One-shot init pattern matches
-//! [`crate::mm::frame_alloc::register_frame_allocator`]: an `AtomicPtr`
-//! AcqRel-swapped against null, with a panic on double-init.
+//! `slopos-ostd` ships the trait + a free [`spawn`] helper; the concrete
+//! implementation lives outside the trusted core (`sched/`). Boot wires the
+//! production spawner through this hook before any driver init step runs.
 
 use core::sync::atomic::{AtomicPtr, Ordering};
 
 use crate::sync::BspToken;
 
-/// Bare kernel-thread entry point. The spawn API accepts a plain `fn`
-/// because every current call site uses a `'static fn` directly; a
-/// closure-based variant (`spawn_boxed<F: FnOnce() + Send + 'static>`)
-/// can be layered on top later if a caller actually needs captures.
+/// Bare kernel-thread entry point: a plain `fn`, because every call site uses
+/// a `'static fn` directly and none needs captures.
 pub type KernelThreadEntry = fn();
 
-/// Reason a spawn request failed.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum SpawnError {
     /// No spawner has been registered (boot wiring missing or test
@@ -33,16 +25,10 @@ pub enum SpawnError {
     ScheduleFailed,
 }
 
-/// Out-of-OSTD spawner trait. The concrete impl lives in `sched/`.
-///
-/// Implementors are required to be `Sync` so the static handle slot
-/// can be read from any CPU.
+/// Implementors are required to be `Sync` so the static handle slot can be
+/// read from any CPU.
 pub trait KernelThreadSpawner: Sync {
     /// Create a new kernel-mode task and place it on the run queue.
-    ///
-    /// On success returns an opaque [`SpawnedTaskId`]; on failure
-    /// returns a typed [`SpawnError`] (so callers can log a useful
-    /// reason rather than discriminating on a sentinel integer).
     fn spawn(
         &self,
         name: &'static str,
@@ -51,13 +37,8 @@ pub trait KernelThreadSpawner: Sync {
     ) -> Result<SpawnedTaskId, SpawnError>;
 }
 
-/// Opaque task identifier returned by [`spawn`].
-///
-/// Carries the underlying `u32` from the scheduler's task table so the
-/// callers that already need a numeric ID for logging or wait/exit
-/// tracking can extract it via [`Self::as_u32`]. The newtype wrapper
-/// exists so future shape changes (e.g. a 64-bit ID with embedded
-/// generation counter) don't ripple through every `spawn` caller.
+/// Opaque task identifier returned by [`spawn`], wrapping the scheduler task
+/// table's `u32` so a later shape change does not ripple through callers.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct SpawnedTaskId(u32);
 
@@ -72,8 +53,7 @@ impl SpawnedTaskId {
 }
 
 struct SpawnerSlot {
-    /// `*const &'static dyn KernelThreadSpawner` reinterpreted as
-    /// `*mut ()`.
+    /// A `*const &'static dyn KernelThreadSpawner` reinterpreted as `*mut ()`.
     inner: AtomicPtr<()>,
 }
 
@@ -81,13 +61,11 @@ static SPAWNER: SpawnerSlot = SpawnerSlot {
     inner: AtomicPtr::new(core::ptr::null_mut()),
 };
 
-/// One-shot wiring point. Pass a reference to a `&'static dyn
-/// KernelThreadSpawner` — typically a `static` consumer-side wrapping
-/// the production spawner singleton, then a reference to *that*. The
-/// `&BspToken<'brand>` witnesses BSP-only init via the HRTB closure
-/// minted by [`crate::sync::run_bsp_init`]; the underlying `dyn` impl
-/// is `Sync` by trait bound so concurrent reads from any CPU after
-/// publication are sound.
+/// One-shot wiring point. `slot` is a reference to a `&'static dyn
+/// KernelThreadSpawner` — typically a consumer-side `static` wrapping the
+/// production spawner singleton. The `&BspToken<'brand>` witnesses BSP-only
+/// init; the `Sync` trait bound makes concurrent reads from any CPU after
+/// publication sound.
 pub fn register_kernel_thread_spawner<'brand>(
     _token: &BspToken<'brand>,
     slot: &'static &'static dyn KernelThreadSpawner,
@@ -100,8 +78,7 @@ pub fn register_kernel_thread_spawner<'brand>(
     );
 }
 
-/// Look up the registered spawner. Returns `None` until
-/// [`register_kernel_thread_spawner`] has been called.
+/// `None` until [`register_kernel_thread_spawner`] has been called.
 pub fn current_kernel_thread_spawner() -> Option<&'static dyn KernelThreadSpawner> {
     let raw = SPAWNER.inner.load(Ordering::Acquire);
     if raw.is_null() {

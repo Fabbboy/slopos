@@ -15,13 +15,8 @@ static PATH_BUF: Mutex<[u8; SHELL_PATH_BUF]> = Mutex::new([0; SHELL_PATH_BUF]);
 
 static LIST_ENTRIES: Mutex<[UserFsEntry; 32]> = Mutex::new([UserFsEntry::new(); 32]);
 
-/// Parsed token storage.
-///
-/// One byte arena plus a span per token, so neither the number of words on a
-/// line nor the length of any one of them is capped.  Both used to be, and both
-/// truncated silently: a path longer than the slot was cut short and then acted
-/// on, which with `rm` or `>` means operating on a different file than the one
-/// that was typed.
+/// Parsed token storage: one byte arena plus a span per token, so neither the
+/// number of words on a line nor the length of any one of them is capped.
 pub struct ParsedTokens {
     bytes: Vec<u8>,
     spans: Vec<(usize, usize)>,

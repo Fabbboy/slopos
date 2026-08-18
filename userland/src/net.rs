@@ -1,11 +1,6 @@
-//! Shared userland DNS resolver.  Every tool that turns a host
-//! string into an IPv4 address routes through [`resolve_host`];
-//! [`syscall::net::resolve`](crate::syscall::net) is `pub(crate)` so
-//! there is no bypass path.
-//!
-//! The address types themselves live in `slopos-net-core`, which is host
-//! testable, and are re-exported here so a tool needs one import for "the
-//! userland network types".
+//! Shared userland DNS resolver, plus re-exports of the `slopos-net-core`
+//! address types. [`syscall::net::resolve`](crate::syscall::net) is
+//! `pub(crate)`, so [`resolve_host`] has no bypass path.
 
 use core::fmt;
 

@@ -1,10 +1,8 @@
 //! Slim ANSI output emitter for the PTY-slave shell.
 //!
 //! The shell owns no surface or scrollback: fd 0/1/2 are the PTY slave the
-//! parent terminal emulator provides.  Output goes to fd 1 as raw bytes
-//! (when redirected to a pipe/file) or as truecolor-SGR-wrapped bytes (when
-//! interactive).  The terminal interprets the SGR sequences and renders the
-//! grid; this module never touches pixels.
+//! parent terminal emulator provides, and it is the terminal that interprets
+//! the SGR runs this module wraps interactive output in.
 
 use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
 
@@ -26,8 +24,7 @@ pub const COLOR_SELECTION_BG: u8 = 8;
 
 pub const PALETTE_SIZE: usize = 16;
 
-/// Indexed foreground-color palette mapped to truecolor SGR runs.  The index
-/// values double as the `COLOR_*` constants the rest of the shell emits.
+/// Indexed foreground-color palette; the indices are the `COLOR_*` constants.
 pub static PALETTE: [Color32; PALETTE_SIZE] = [
     SHELL_FG_COLOR,                 // 0: default
     Color32::rgb(0x5C, 0x9E, 0xD6), // 1: directory blue
@@ -53,9 +50,8 @@ static OUTPUT_FD: AtomicI32 = AtomicI32::new(-1);
 
 /// When set, no SGR escape is ever emitted.
 ///
-/// A separate flag rather than a reuse of [`OUTPUT_FD`], which the redirect
-/// machinery owns and clears after every builtin `>`: a shell running a script
-/// must stay plain for its whole life, not until the first redirect.
+/// Separate from [`OUTPUT_FD`], which the redirect machinery clears after every
+/// builtin `>`: a shell running a script must stay plain for its whole life.
 static PLAIN: AtomicBool = AtomicBool::new(false);
 
 /// Standard-output file descriptor (the PTY slave when interactive).
@@ -84,16 +80,10 @@ fn palette_index_for(color: Color32) -> u8 {
     COLOR_DEFAULT
 }
 
-// =============================================================================
-// fd 1 emit path
-// =============================================================================
-
 /// Write every byte of `bytes` to `fd`, or report failure.
 ///
-/// A single `write(2)` is allowed to transfer less than it was given, and a
-/// pipe write genuinely does so whenever the ring fills or the reader goes
-/// away mid-transfer.  Treating that partial count as success silently drops
-/// the tail of the payload, so every write in the shell loops here.
+/// A single `write(2)` may transfer less than it was given — a pipe write does
+/// whenever the ring fills — and treating that count as success drops the tail.
 fn write_all(fd: i32, bytes: &[u8]) -> bool {
     let mut written = 0usize;
     while written < bytes.len() {
@@ -107,9 +97,9 @@ fn write_all(fd: i32, bytes: &[u8]) -> bool {
     true
 }
 
-/// Write raw bytes to fd 1.  Returns `true` on success.  If the kernel write
-/// fails (e.g. EBADF in a test binary with no wired stdout), fall back to the
-/// serial console exactly once so diagnostic output still reaches a transcript.
+/// Write raw bytes to fd 1. On failure (EBADF in a test binary with no wired
+/// stdout) fall back to the serial console once, so the output still reaches a
+/// transcript.
 fn emit_stdout(bytes: &[u8]) -> bool {
     if bytes.is_empty() {
         return true;
@@ -124,8 +114,7 @@ fn emit_stdout(bytes: &[u8]) -> bool {
 /// Write a diagnostic to fd 2.
 ///
 /// Deliberately blind to [`OUTPUT_FD`]: a builtin's `>` redirects its *output*,
-/// not its complaints, so `ls nosuch > out` must leave the error on the
-/// terminal rather than in `out`.
+/// not its complaints, so `ls nosuch > out` leaves the error on the terminal.
 pub fn shell_error(bytes: &[u8]) -> bool {
     if bytes.is_empty() {
         return true;
@@ -149,9 +138,8 @@ pub fn shell_error_named(name: &[u8], msg: &[u8]) {
     shell_error(&buf[..len]);
 }
 
-/// Format an SGR truecolor foreground-set sequence for `color` into `buf`.
-/// Returns the number of bytes written (`buf` must hold at least 19 bytes:
-/// `\x1b[38;2;255;255;255m`).
+/// Format an SGR truecolor foreground-set sequence for `color` into `buf`,
+/// which must hold at least 19 bytes (`\x1b[38;2;255;255;255m`).
 fn write_sgr_set(buf: &mut [u8], color: Color32) -> usize {
     let mut pos = 0usize;
     let prefix = b"\x1b[38;2;";

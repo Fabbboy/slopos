@@ -1,10 +1,8 @@
 //! Raw fd0 line editor for the PTY-slave shell.
 //!
-//! The shell reads bytes from fd 0 (the PTY slave) on the slopfut ring,
-//! parses VT100/xterm escape sequences incrementally (with partial state
-//! carried across reads), and decodes them into internal key codes so the
-//! editor's `match` dispatch is the same regardless of whether a key arrived
-//! as a literal byte or a CSI sequence.  All redraw output is ANSI to fd 1.
+//! Bytes come off fd 0 (the PTY slave) on the slopfut ring and are decoded into
+//! internal key codes, so the editor's `match` dispatch is the same whether a
+//! key arrived as a literal byte or a CSI sequence. Redraws are ANSI to fd 1.
 
 use core::cmp;
 

@@ -24,8 +24,8 @@ fn fork_spinning_child() -> i32 {
     pid
 }
 
-/// A pure-spin child must be killable via SIGINT delivered on IRQ exit,
-/// and `waitpid` must reap it with the default-terminate exit code.
+/// SIGINT delivered on IRQ exit kills a pure-spin child; `waitpid` reaps it
+/// with the default-terminate exit code.
 fn test_spin_child_killed_by_sigint() -> bool {
     let pid = fork_spinning_child();
     if pid <= 0 {
@@ -33,9 +33,8 @@ fn test_spin_child_killed_by_sigint() -> bool {
         return false;
     }
 
-    // Give the child a chance to start spinning in user mode before we
-    // signal it (the kill is still correct if the child is mid-spawn —
-    // the pending bit just gets acted on at the first IRQ exit).
+    // Let the child reach its spin loop first; a kill landing mid-spawn is
+    // still correct, the pending bit is acted on at the first IRQ exit.
     sys_core::yield_now();
 
     let rc = process::kill_pid(pid, SIGINT);
