@@ -2125,9 +2125,6 @@ mod tests {
 
     #[test]
     fn resize_drag_does_not_reallocate_cell_grids() {
-        // The screen and alt grids are re-shaped by reusing pooled backings, so
-        // a drag never reallocates them either (the residual churn class). Once
-        // every backing has reached the ceiling capacity it must stay put.
         let mut g = TerminalGrid::new(100, 240);
         feed(&mut g, b"anchor");
         // Warm every pooled backing to its ceiling capacity.
@@ -2152,7 +2149,6 @@ mod tests {
                 );
             }
         }
-        // Content within the overlap survives the churn.
         g.resize(100, 240, &mut []);
         assert_eq!(glyph_at(&g, 0, 0), 'a');
         assert_eq!(glyph_at(&g, 0, 5), 'r');
@@ -2168,7 +2164,6 @@ mod tests {
         assert!(!g.bracketed_paste());
     }
 
-    /// Total damaged cells across every row.
     fn damaged_cells(d: &crate::damage::CellDamage) -> usize {
         (0..d.rows())
             .filter_map(|r| d.span(r))
@@ -2199,7 +2194,7 @@ mod tests {
         feed(&mut g, b"x");
         let d = g.take_damage();
         // Row 0 only: the printed cell plus the cursor's old and new cells,
-        // which are contiguous, so one span well under a row.
+        // which are contiguous.
         assert_eq!(d.span(1), None);
         assert!(damaged_cells(&d) <= 4, "{} cells", damaged_cells(&d));
     }

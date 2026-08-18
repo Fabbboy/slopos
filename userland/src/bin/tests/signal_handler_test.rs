@@ -2,17 +2,10 @@
 
 //! libc signal()/sigaction() handler-install end-to-end test.
 //!
-//! Regression guard for the EINVAL-on-install footgun: slibc's `signal()`
-//! and `sigaction()` used to leave `sa_restorer` at 0, which the kernel
-//! rejects for any catchable handler (it requires a nonzero restorer and
-//! bails out of delivery when it is 0). libc must inject its own restorer
-//! trampoline — exactly what glibc does. These cases install a real handler
-//! through libc, `raise()` the signal, and prove the handler actually ran
-//! by observing a volatile flag it sets.
+//! The kernel rejects a catchable handler whose `sa_restorer` is 0, so libc
+//! must inject its own restorer trampoline. These cases install a handler
+//! through libc, `raise()` the signal, and observe a flag the handler sets.
 
-// Pull in the `slopos-userland` lib crate so its `_start` ELF entry point
-// is linked into the binary (same requirement as the sibling test bins;
-// without it the linker emits entry 0x0 and `do_exec` rejects the ELF).
 use slopos_userland as _;
 
 use core::sync::atomic::{AtomicU32, Ordering};
@@ -26,8 +19,7 @@ static CLOBBER_RAN: AtomicU32 = AtomicU32::new(0);
 static MXCSR_CLOBBER_RAN: AtomicU32 = AtomicU32::new(0);
 
 /// Backing store for a hand-built signal frame. Static rather than a local so
-/// pointing RSP at it cannot put the kernel's view of the stack inside this
-/// function's own frame.
+/// pointing RSP at it cannot land the kernel's stack view inside a live frame.
 #[repr(C, align(16))]
 struct SigreturnScratch([u8; 4096]);
 
@@ -41,10 +33,8 @@ extern "C" fn on_sigusr2(_sig: i32) {
     SIGUSR2_COUNT.fetch_add(1, Ordering::SeqCst);
 }
 
-/// Signal handler that deliberately poisons the vector register file. If
-/// the kernel preserves the interrupted task's FPU/vector state across
-/// signal delivery, sigreturn undoes this clobber and the interrupted
-/// code never sees it.
+/// Poisons the vector register file: if the kernel preserves the interrupted
+/// task's FPU/vector state, sigreturn undoes it and the caller never sees it.
 extern "C" fn on_clobber_vectors(_sig: i32) {
     CLOBBER_RAN.fetch_add(1, Ordering::SeqCst);
     let poison: [u32; 4] = [0xDEAD_BEEF; 4];
@@ -67,8 +57,7 @@ extern "C" fn on_clobber_vectors(_sig: i32) {
     }
 }
 
-/// `signal()` must install a real handler (not fail with SIG_ERR) and the
-/// handler must run when the signal is raised.
+/// `signal()` must install a real handler rather than fail with SIG_ERR.
 fn test_signal_installs_and_delivers() -> bool {
     SIGUSR1_COUNT.store(0, Ordering::SeqCst);
 
@@ -95,8 +84,7 @@ fn test_signal_installs_and_delivers() -> bool {
 }
 
 /// `sigaction()` with `sa_restorer == 0` on a real handler must have libc
-/// substitute its own restorer (glibc behavior), so the install succeeds and
-/// the handler runs.
+/// substitute its own restorer (glibc behavior) so the install succeeds.
 fn test_sigaction_injects_restorer() -> bool {
     SIGUSR2_COUNT.store(0, Ordering::SeqCst);
 
@@ -128,12 +116,9 @@ fn test_sigaction_injects_restorer() -> bool {
     true
 }
 
-/// The kernel must preserve a task's vector (XMM/YMM) registers across
-/// signal delivery: a handler that uses SSE/AVX must not corrupt the
-/// interrupted code's state. Loads a known pattern into xmm0..xmm3,
-/// raises SIGUSR1 (handler poisons the vector file) via an INLINE kill
-/// syscall so the registers stay live across delivery, then reads them
-/// back — they must still hold the pattern.
+/// The kernel must preserve a task's vector (XMM/YMM) registers across signal
+/// delivery. The kill is issued inline in the asm block so the loaded pattern
+/// stays live in xmm0..xmm3 across delivery.
 fn test_signal_preserves_vector_regs() -> bool {
     CLOBBER_RAN.store(0, Ordering::SeqCst);
     let prev = unsafe { signal::signal(SIGUSR1, on_clobber_vectors as *const () as usize) };
@@ -235,14 +220,13 @@ fn mxcsr_mask() -> u32 {
 /// feeding the bytes that follow it to `XRSTOR64` in ring 0.
 ///
 /// Every byte of the frame is `0xFF`, so the XSTATE header names components
-/// XCR0 does not enable and the MXCSR word is nothing but reserved bits — the
-/// shortest path to a fault the kernel has no way to unwind out of. Issued as a
-/// raw syscall with RSP pointed at the frame, because that is the only way to
-/// reach `rt_sigreturn` without a signal having been delivered.
+/// XCR0 does not enable and the MXCSR word is nothing but reserved bits. Issued
+/// as a raw syscall with RSP pointed at the frame, the only way to reach
+/// `rt_sigreturn` without a signal having been delivered.
 ///
-/// The process surviving is half the assertion: the syscall must return EFAULT
-/// *without* having committed the frame's registers, or execution would resume
-/// at an all-ones RIP instead of the instruction after `syscall`.
+/// The process surviving is half the assertion: EFAULT must be returned
+/// *without* committing the frame's registers, or execution would resume at an
+/// all-ones RIP instead of the instruction after `syscall`.
 fn test_sigreturn_rejects_poisoned_frame() -> bool {
     let frame = &raw mut SIGRETURN_SCRATCH as *mut u8;
     // SAFETY: `frame` names a live static of exactly this size, and nothing
@@ -279,10 +263,9 @@ fn test_sigreturn_rejects_poisoned_frame() -> bool {
 /// A *valid* sigreturn must round-trip MXCSR, including the bits this CPU
 /// implements beyond the classic mask.
 ///
-/// The kernel validates the MXCSR word in the signal frame against the CPU's
-/// own `MXCSR_MASK`. Assuming a fixed mask instead would clear DAZ, and this
-/// case is what notices: the handler resets MXCSR to the plain default, so the
-/// value only comes back if sigreturn accepted the frame and restored it.
+/// The kernel validates the frame's MXCSR word against the CPU's own
+/// `MXCSR_MASK`; a fixed mask would clear DAZ. The handler resets MXCSR to the
+/// plain default, so the value only comes back if sigreturn restored it.
 fn test_signal_preserves_mxcsr() -> bool {
     MXCSR_CLOBBER_RAN.store(0, Ordering::SeqCst);
     let prev = unsafe { signal::signal(SIGUSR1, on_clobber_mxcsr as *const () as usize) };
@@ -334,10 +317,9 @@ fn test_signal_preserves_mxcsr() -> bool {
 /// `rt_sigaction` must reject a signal number past `NSIG` with `EINVAL` rather
 /// than indexing off the end of the 32-entry action table.
 ///
-/// Issued as a raw syscall because libc's `sigaction()` never produces one. The
+/// Issued as a raw syscall because libc's `sigaction()` never produces one; the
 /// query-only form (`new == 0`, `old != 0`) reaches the table read before any
-/// other validation, which is what made it the shortest repro. Running it from
-/// userland also proves the *process* survives holding `-EINVAL`.
+/// other validation.
 fn test_sigaction_rejects_signum_past_nsig() -> bool {
     let mut old = UserSigaction {
         sa_handler: 0,

@@ -1,33 +1,26 @@
 // Task ownership proof.
 //
 // A Verus-annotated mirror of the ownership core of SlopOS's task lifetime:
-// `slopos_ostd::task::placement` (the existence reference and the four
-// placement primitives), the deferred strong-release split in
-// `slopos_ostd::mm::heap::KArc` (`release_deferrable` / `destroy_deferred`),
-// `slopos_sched::task::task_reclaim` (`task_put` and the graveyard), and
-// `slopos_sched::task::task_table::{register_task, reap_task_registration}`
-// (the publication and reap gates). It machine-checks seven ownership
-// obligations:
+// `slopos_ostd::task::placement`, `KArc`'s deferred strong-release split
+// (`release_deferrable` / `destroy_deferred`), `task_reclaim`'s `task_put` and
+// graveyard, and `task_table::{register_task, reap_task_registration}`. It
+// machine-checks seven ownership obligations:
 //
 //   (T1) The existence reference is handed out at most once and taken back at
-//        most once, and the election is made by the FLAG CAS, never by a
-//        count. The retain happens *before* the flag is claimed, so a releaser
-//        that observes the flag is guaranteed the count it is about to take
-//        back already exists.
-//   (T2) Container transitions conserve the strong count: a retain/leak and
-//        its matching reclaim MOVE one reference between the container ledger
-//        and the caller ledger without minting or destroying one; a clone
-//        mints exactly one. Linked implies owned.
-//   (T3) A task is registered if and only if it holds its existence
-//        reference. That is what lets the registry hold only `KWeak` and own
-//        nothing, and what makes a lookup a liveness-checked upgrade rather
-//        than a fabricated strong reference.
+//        most once, elected by the FLAG CAS and never by a count. The retain
+//        precedes the claim, so a releaser observing the flag is guaranteed the
+//        count it is about to take back already exists.
+//   (T2) Container transitions conserve the strong count: retain/leak and their
+//        matching reclaim MOVE one reference between ledgers, a clone mints
+//        exactly one. Linked implies owned.
+//   (T3) A task is registered if and only if it holds its existence reference,
+//        which is what lets the registry hold only `KWeak` and makes a lookup a
+//        liveness-checked upgrade rather than a fabricated strong reference.
 //   (T4) A referenced task's body is live: `strong > 0` implies the
 //        destructor has not run.
-//   (T5) Exactly one caller wins the one-to-zero strong transition; that
-//        caller uniquely owns the allocation (no other reference can reach
-//        it), and destruction runs exactly once. Finality is decided BY THE
-//        DECREMENT, never by reading the count first.
+//   (T5) Exactly one caller wins the one-to-zero strong transition and uniquely
+//        owns the allocation, and destruction runs exactly once. Finality is
+//        decided BY THE DECREMENT, never by reading the count first.
 //   (T6) A reap never fires on a dispatch-pinned task: a task some CPU is
 //        executing, names as its `PCR.current_task`, or holds in its idle slot
 //        stays in the registry and keeps its existence reference.
@@ -35,76 +28,34 @@
 //        unregistered, unpinned, in no container, and holds no existence
 //        reference.
 //
-// Background. Linux's `task_struct` carries a self-reference taken back in
-// `release_task`, and PREEMPT_RT forbids the final `put_task_struct` in atomic
-// context. SlopOS copies both, plus the property that matters most here:
-// finality is decided by the decrement. A `strong_count == 1` pre-check cannot
-// be made race-free — two holders can both observe two and both then drop —
-// and a count-elected release is exactly the shape that put four
-// use-after-free defects in this tree. `broken_count_elected_release_violates_
-// ledger` below encodes that mistake and shows it reaches a state the
-// invariant forbids, so this proof is load-bearing rather than vacuous.
+// Concept borrowed from documented Linux behaviour: `task_struct` carries a
+// self-reference taken back at release, and PREEMPT_RT forbids the final
+// `put_task_struct` in atomic context.
 //
-// Modelling strategy. Every operation on the ownership core touches shared
-// state only through atomics: the `existence_ref_parked` compare-exchange
-// (`placement.rs`), the `KArc` strong-count CAS loop (`heap.rs::
-// refcount_release` — a CAS loop rather than a `fetch_sub`, so a racing
-// saturation is never undone), the `into_raw`/`from_raw` placement pair, and
-// the registry spine under its cli-spinlock. Each method body is therefore one
-// atomic-bounded `Step` against the shared task. An inductive invariant that
-// survives every `Step` holds in every reachable state of every interleaving —
-// which is the concurrency claim.
+// Every operation on the ownership core touches shared state only through
+// atomics, so each method body is one atomic-bounded `Step` against the shared
+// task and an invariant inductive over `Step` holds in every reachable state of
+// every interleaving — which is the concurrency claim.
 //
-// ONE exception to "each method body is one atomic-bounded Step", and the
-// reason it is sound. `DispatchPin` and `DispatchUnpin` are single atomic
-// steps here, but each is TWO separate writes in the tree, in two different
-// functions, with a real window between them:
+// ONE exception. `DispatchPin` and `DispatchUnpin` are single steps here but
+// TWO writes in the tree, in different functions, with a real window between
+// them (`task_set_on_cpu` and the `PCR.current_task` publication, in opposite
+// orders for pin and unpin). Modelling the pair as atomic is sound only because
+// `pinned` mirrors `task_is_dispatch_pinned`, which is a DISJUNCTION —
+// `task_on_cpu_load || task_is_current_on_any_cpu || is_idle_task` — so
+// whichever write lands first another disjunct still holds and the intermediate
+// state collapses onto the pre-state. It does not depend on the write order.
+// Narrowing that predicate to a conjunction, or deleting a disjunct, makes T6
+// stop describing the tree while THIS PROOF KEEPS VERIFYING, since the model
+// never sees the intermediate state it just started admitting. `CurrentTask`
+// (`slopos-ostd/src/task/cell.rs`) takes no reference count and rests on the
+// `task_is_current_on_any_cpu` disjunct for the same reason.
 //
-//   pin    `task_set_on_cpu(_, true)`  (scheduler.rs:1221, :1355)
-//          then `PCR.current_task` <- task     (inside `dispatch()`)
-//   unpin  `PCR.current_task` <- successor     (`dispatch()` on the incoming)
-//          then `task_set_on_cpu(_, false)`    (scheduler.rs:1471)
-//
-// So a state exists in which exactly one of the two writes has landed, and
-// this model has no image for it. It does not need one, because `pinned`
-// mirrors `task_is_dispatch_pinned`, which is a DISJUNCTION —
-// `task_on_cpu_load || task_is_current_on_any_cpu || is_idle_task`. Whichever
-// write lands first, another disjunct is still true, so `pinned` is true
-// throughout the window and the intermediate state collapses onto the
-// pre-state of the step. Modelling the pair as atomic is therefore sound, and
-// the disjunction is the entire reason. Note what this does NOT depend on: the
-// order of the two writes. Either order is safe, which is why the pin and
-// unpin sequences above use opposite orders without consequence.
-//
-// The edit that breaks it is not a reordering. It is narrowing
-// `task_is_dispatch_pinned` to a conjunction, or deleting a disjunct.
-// Then one write landing would take `pinned` false while the task is still on
-// a CPU, T6 would no longer describe the tree, and — the part that makes this
-// worth writing down — THIS PROOF WOULD KEEP VERIFYING, because the model
-// never sees the intermediate state it just started admitting.
-//
-// The third disjunct is a different shape from the first two, and the
-// difference is worth stating because it looks like a modelling error and is
-// not. `is_idle_task` is set once per CPU by `install_idle_task` and is never
-// cleared, so a CPU's idle task is `pinned` for the machine's whole life —
-// whereas `Step::DispatchUnpin` sets `pinned: false` unconditionally. The model
-// is therefore an OVER-approximation for idle tasks: it admits states in which
-// `pinned` is false while the tree would still say true. That direction is the
-// safe one. Every obligation that mentions `pinned` is an implication with
-// `pinned` in the ANTECEDENT ((T6): `pinned ==> exist_refs == 1`,
-// `pinned ==> registered`), so a model that takes `pinned` false more often
-// proves a WEAKER statement about a tree that is pinned more often, and the
-// real behaviours remain a subset of the proved ones. Do not "fix"
-// `DispatchUnpin` to preserve the idle disjunct — an unconditional
-// `pinned: false` is what keeps the step total, and narrowing it is how the
-// induction breaks.
-//
-// The same disjunction underwrites `CurrentTask`'s soundness in
-// `slopos-ostd/src/task/cell.rs`: that guard takes no reference count and
-// relies on the `task_is_current_on_any_cpu` disjunct keeping a running task
-// unreapable, and its doc says in terms that deleting that disjunct deletes
-// the guard's soundness proof. Both facts rest on the same predicate; until
-// now only the `cell.rs` half was written down.
+// `is_idle_task` is set once by `install_idle_task` and never cleared, whereas
+// `DispatchUnpin` sets `pinned: false` unconditionally — an OVER-approximation
+// for idle tasks, and in the safe direction because every obligation mentioning
+// `pinned` carries it in the ANTECEDENT. Do not "fix" `DispatchUnpin`: the
+// unconditional `pinned: false` is what keeps the step total.
 //
 // TWO invariants, deliberately:
 //

@@ -21,10 +21,8 @@ mod state;
 pub(crate) use format::*;
 pub(crate) use state::{ContextMenu, KillOutcome, SortColumn, SysmonApp, Tab};
 
-/// The only actionable entry in the row context menu.
 const MENU_KILL: usize = 0;
 
-// Colors kept for format.rs (which imports them from super::).
 pub(crate) const COLOR_DIM: Color32 = Color32::rgb(0x60, 0x68, 0x70);
 pub(crate) const COLOR_STATE_RUN: Color32 = Color32::rgb(0x44, 0xCC, 0x44);
 pub(crate) const COLOR_STATE_BLOCK: Color32 = Color32::rgb(0xCC, 0xAA, 0x44);
@@ -154,8 +152,8 @@ impl App for SysmonApp {
     }
 
     fn on_key(&mut self, key: Key, _modifiers: Modifiers) -> Action {
-        // Only reached when no widget consumed the key, so the dialog's own
-        // Escape handling still wins while it is open.
+        // Only reached when no widget consumed the key, so an open dialog's own
+        // Escape handling still wins.
         match key {
             Key::Named(NamedKey::Delete) if self.active_tab == Tab::Processes => {
                 if self.confirm_kill.is_some() {
@@ -206,7 +204,6 @@ impl SysmonApp {
     fn view_overview(&self) -> Node<SysmonMsg> {
         let mut children: Vec<Node<SysmonMsg>> = Vec::new();
 
-        // SYSTEM
         children.push(label("SYSTEM"));
         children.push(label(&format!(
             "Uptime: {}",
@@ -216,7 +213,6 @@ impl SysmonApp {
             size: Length::Px(8),
         });
 
-        // CPU
         children.push(label("CPU"));
         for i in 0..self.cpu_count {
             let pct = self.cpu_usage_pct[i];
@@ -230,7 +226,6 @@ impl SysmonApp {
             size: Length::Px(8),
         });
 
-        // MEMORY
         children.push(label("MEMORY"));
         let total_bytes = (self.sys_info.total_pages as u64).saturating_mul(PAGE_SIZE);
         let used_bytes = (self.sys_info.allocated_pages.min(self.sys_info.total_pages) as u64)
@@ -254,7 +249,6 @@ impl SysmonApp {
             size: Length::Px(8),
         });
 
-        // TASKS
         children.push(label("TASKS"));
         let mut blocked = 0usize;
         for i in 0..self.task_count {
@@ -272,7 +266,6 @@ impl SysmonApp {
             size: Length::Px(8),
         });
 
-        // NETWORK
         children.push(label("NETWORK"));
         children.push(label("RX: 0.0 MiB (0 pkts)  TX: 0.0 MiB (0 pkts)"));
         Node::Padding {
@@ -358,8 +351,8 @@ impl SysmonApp {
             columns,
             rows,
             row_height: 20,
-            // Resolved from the selected task every frame, so a re-sort moves
-            // the highlight with its task instead of leaving it on the row.
+            // Resolved from the selected task each frame, so a re-sort carries
+            // the highlight with its task rather than leaving it on the row.
             selected: self.selected_row(),
             on_select: Some(SysmonMsg::SelectRow),
             on_header_click: Some(SysmonMsg::SortColumn),
@@ -378,9 +371,8 @@ impl SysmonApp {
             ],
         };
 
-        // Menu and dialog are layers over the table, not siblings of it: both
-        // cover the whole area, which in a VStack would displace the table
-        // rather than overlay it.
+        // Layers, not siblings: both cover the whole area, which in a VStack
+        // would displace the table rather than overlay it.
         let mut layers: Vec<Node<SysmonMsg>> = vec![body];
         if let Some(menu) = &self.context_menu {
             layers.push(self.view_context_menu(menu));
@@ -438,7 +430,6 @@ impl SysmonApp {
     }
 
     /// Footer: the outcome of the last kill, else the available gestures.
-    /// A silent failure would otherwise read as a task that refuses to die.
     fn view_status_line(&self) -> Node<SysmonMsg> {
         let (text, color) = match &self.last_kill {
             Some(KillOutcome::Sent { name }) => {
@@ -469,7 +460,6 @@ impl SysmonApp {
     fn view_hardware(&self) -> Node<SysmonMsg> {
         let mut children: Vec<Node<SysmonMsg>> = Vec::new();
 
-        // PROCESSOR
         children.push(label("PROCESSOR"));
         children.push(kv_row("Model", &trim_ascii(&self.cpu_info.brand_string)));
         children.push(kv_row("Vendor", &trim_ascii(&self.cpu_info.vendor)));
@@ -487,7 +477,6 @@ impl SysmonApp {
         ));
         children.push(Node::Divider);
 
-        // MEMORY
         children.push(label("MEMORY"));
         let total_bytes = (self.sys_info.total_pages as u64).saturating_mul(PAGE_SIZE);
         let used_bytes = (self.sys_info.allocated_pages.min(self.sys_info.total_pages) as u64)
@@ -520,7 +509,6 @@ impl SysmonApp {
         children.push(kv_row("Allocated", &format_bytes_mib(used_bytes)));
         children.push(Node::Divider);
 
-        // SCHEDULER
         children.push(label("SCHEDULER"));
         children.push(kv_row(
             "Ctx switches",
@@ -540,7 +528,6 @@ impl SysmonApp {
         ));
         children.push(Node::Divider);
 
-        // HEAP
         children.push(label("HEAP"));
         let stats = heap_stats();
         children.push(kv_row(
@@ -557,7 +544,6 @@ impl SysmonApp {
         ));
         children.push(Node::Divider);
 
-        // NETWORK
         children.push(label("NETWORK"));
         match &self.net {
             Some(net) => {
@@ -571,13 +557,12 @@ impl SysmonApp {
                 ));
                 children.push(kv_row("MAC", &format!("{}", Mac(net.mac))));
             }
-            // No interface at all is a different fact from one that is down,
-            // and saying "Offline" for both would hide a missing driver.
+            // Distinct from a down interface: "Offline" for both would hide a
+            // missing driver.
             None => children.push(kv_row("Status", "unavailable")),
         }
         children.push(Node::Divider);
 
-        // BOOT
         children.push(label("BOOT"));
         children.push(kv_row("Uptime", &format_uptime(self.last_refresh_ms)));
         children.push(kv_row(

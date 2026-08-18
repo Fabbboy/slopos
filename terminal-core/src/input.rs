@@ -2,19 +2,17 @@
 //! selection, paste sanitizing, and the compositor-event taxonomy.
 //!
 //! Keys become PTY-master byte sequences (printable / control passthrough plus
-//! the kernel's baked 0x80-0x88 navigation codes mapped to CSI). Pointer drags
-//! select a cell rectangle; release copies to the clipboard; paste arrives as
-//! bracketed-paste bytes. This module is host-testable: it touches no syscalls,
-//! no protocol wire types, and no font globals — cell metrics arrive as plain
-//! `i32` arguments. The userland app owns the `classify(ProtocolEvent)` bridge
-//! and the actual IO.
+//! the kernel's baked 0x80-0x88 navigation codes mapped to CSI). Touches no
+//! syscalls, no protocol wire types and no font globals — cell metrics arrive
+//! as plain `i32` arguments, and the userland app owns the actual IO and the
+//! `classify(ProtocolEvent)` bridge.
 
 use slopos_abi::input::{MODIFIER_CTRL, MODIFIER_SHIFT};
 
 use super::grid::TerminalGrid;
 
-// Kernel-baked navigation key codes (the compositor reports these as the
-// "ascii" byte for non-text keys; mirror the shell exec.rs encoder table).
+// Kernel-baked navigation key codes: the compositor reports these as the
+// "ascii" byte for non-text keys.
 const KEY_PAGE_UP: u8 = 0x80;
 const KEY_PAGE_DOWN: u8 = 0x81;
 const KEY_UP: u8 = 0x82;
@@ -31,7 +29,7 @@ const MOUSE_LEFT: u8 = 0x01;
 const SCROLLBACK_PAGE_LINES: usize = 10;
 
 /// Scrollback lines moved per mouse-wheel / touchpad notch (a value120 axis
-/// delta of ±120). Three lines per notch is the common terminal default.
+/// delta of ±120); three per notch is the common terminal default.
 const SCROLLBACK_WHEEL_LINES: i32 = 3;
 
 /// What the event loop should do after a compositor key event.
@@ -46,7 +44,6 @@ pub enum KeyAction {
     /// Ctrl+Shift+V: ask the compositor for the clipboard contents (the
     /// `PasteResult` reply feeds the paste writer).
     RequestPaste,
-    /// Nothing to do.
     None,
 }
 
@@ -83,9 +80,7 @@ impl KeyBytes {
 
 /// A selection endpoint anchored to a stable content coordinate: an absolute
 /// line number (see [`TerminalGrid::screen_to_abs`]) plus a column. Anchoring
-/// to content rather than a screen cell is what makes a copy survive scrolling
-/// — the anchor keeps naming the same text after output pushes it up or the
-/// user pages through history.
+/// to content rather than a screen cell is what makes a copy survive scrolling.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub struct Anchor {
     pub line: u64,
@@ -195,8 +190,7 @@ impl PointerState {
 }
 
 /// Convert a pixel coordinate to a clamped `(screen_row, col)` cell. `cell_w`/
-/// `cell_h` are the font metrics supplied by the caller (the app reads them
-/// from its glyph atlas; the core stays font-agnostic).
+/// `cell_h` are the caller's font metrics; the core stays font-agnostic.
 fn pixel_to_cell(
     px: i32,
     py: i32,
@@ -223,18 +217,16 @@ fn pixel_to_anchor(px: i32, py: i32, cell_w: i32, cell_h: i32, grid: &TerminalGr
 
 /// Encode a compositor key event into a master action.
 ///
-/// PageUp/PageDown drive the terminal's own scrollback view (the kernel
-/// keyboard driver already intercepts Shift+PageUp/Down for the in-kernel
-/// vconsole, so only the plain codes ever reach a compositor client).
+/// PageUp/PageDown drive the terminal's own scrollback view; the kernel
+/// keyboard driver intercepts the Shift+ variants for the in-kernel vconsole,
+/// so only the plain codes ever reach a compositor client.
 ///
-/// `mods` is the latest compositor-reported modifier state. Ctrl+Shift chords
-/// are terminal commands (the xterm/GNOME clipboard convention), never PTY
-/// input: the kernel bakes the same control byte for Ctrl+C and Ctrl+Shift+C,
-/// so the modifier state is the only way to tell them apart.
+/// Ctrl+Shift chords are terminal commands (the xterm/GNOME clipboard
+/// convention), never PTY input: the kernel bakes the same control byte for
+/// Ctrl+C and Ctrl+Shift+C, so `mods` is the only way to tell them apart.
 ///
-/// `codepoint` is the kernel-resolved character for the active layout. ASCII
-/// text rides the legacy `ascii` byte; non-ASCII text (umlauts, accents, €)
-/// has no legacy byte and is written to the PTY as UTF-8 from the codepoint.
+/// ASCII text rides the legacy `ascii` byte; non-ASCII text has no legacy byte
+/// and is written to the PTY as UTF-8 from the layout-resolved `codepoint`.
 pub fn encode_key(ascii: u8, scancode: u8, codepoint: u32, mods: u8) -> KeyAction {
     const CHORD: u8 = MODIFIER_CTRL | MODIFIER_SHIFT;
     if mods & CHORD == CHORD {
@@ -256,22 +248,17 @@ pub fn encode_key(ascii: u8, scancode: u8, codepoint: u32, mods: u8) -> KeyActio
             KEY_HOME => return KeyAction::ToMaster(KeyBytes::seq(b"\x1b[H")),
             KEY_END => return KeyAction::ToMaster(KeyBytes::seq(b"\x1b[F")),
             KEY_DELETE => return KeyAction::ToMaster(KeyBytes::seq(b"\x1b[3~")),
-            // Everything else (printable text, control bytes like 0x03 Ctrl+C,
-            // 0x04 Ctrl+D, CR/LF, BS/DEL, tab) passes straight through to the
-            // PTY master where the kernel line discipline handles it.
             _ => return KeyAction::ToMaster(KeyBytes::one(ascii)),
         }
     }
 
-    // Non-ASCII text: UTF-8-encode the layout-resolved codepoint.
     if codepoint > 0x7F {
         if let Some(c) = char::from_u32(codepoint) {
             return KeyAction::ToMaster(KeyBytes::utf8(c));
         }
     }
 
-    // Non-ASCII keys arriving without a baked code: translate scancodes the
-    // same way the shell's legacy encoder did.
+    // Keys arriving without a baked ascii code: translate the raw scancode.
     let seq: &[u8] = match scancode {
         0x82 => b"\x1b[A",
         0x83 => b"\x1b[B",
@@ -319,19 +306,15 @@ pub enum CompositorEvent {
     Ignored,
 }
 
-/// Resolve a pointer-axis (mouse-wheel / touchpad) value120 delta into a signed
-/// number of scrollback lines: negative scrolls up into history, positive
-/// scrolls back down toward live output. The sign matches the rest of the
-/// system's axis convention (see appkit's scroll view), so the terminal scrolls
-/// the same direction as every other app. value120 units are ±120 per notch;
-/// sub-notch deltas round toward zero (the drivers only ever emit whole notches).
+/// Resolve a pointer-axis value120 delta (±120 per notch) into a signed number
+/// of scrollback lines: negative scrolls up into history, matching the rest of
+/// the system's axis convention. Sub-notch deltas round toward zero.
 pub fn wheel_scroll_lines(value_v120: i32) -> i32 {
     (value_v120 / 120) * SCROLLBACK_WHEEL_LINES
 }
 
 /// Update pointer-driven selection from a button/motion change. Returns true
-/// when the selection changed (so the caller re-renders). `cell_w`/`cell_h`
-/// are the font metrics the caller reads from its glyph atlas.
+/// when the selection changed, so the caller re-renders.
 pub fn update_selection(
     ptr: &mut PointerState,
     selection: &mut Selection,
@@ -371,17 +354,15 @@ pub fn update_selection(
     changed
 }
 
-/// Sanitize a clipboard payload so it can only ever act as typed text
-/// (the VTE/kitty paste rule, applied to bracketed and plain pastes alike):
-/// `\r\n` and `\n` normalize to `\r` (a typed Enter), `\t` passes, every
-/// other C0 control and DEL is dropped, bytes above 0x7F pass through for
-/// future UTF-8 text. Returns the sanitized length in `out`.
+/// Sanitize a clipboard payload so it can only ever act as typed text, for
+/// bracketed and plain pastes alike: `\r\n` and `\n` normalize to `\r`, `\t`
+/// passes, every other C0 control and DEL is dropped, bytes above 0x7F pass
+/// through. Returns the sanitized length in `out`.
 ///
-/// Dropping ESC outright is what makes bracketed paste injection-proof
-/// (the xterm CVE-2022-45063 class): with no ESC byte in the payload, the
-/// `\x1b[201~` end marker cannot appear — not literally, and not spliced
-/// together from fragments around a stripped inner marker, the bypass that
-/// defeats remove-the-marker filtering.
+/// Dropping ESC outright is what makes bracketed paste injection-proof (the
+/// xterm CVE-2022-45063 class): with no ESC byte in the payload the `\x1b[201~`
+/// end marker cannot appear — not literally, and not spliced together from
+/// fragments around a stripped inner marker.
 pub fn sanitize_paste(data: &[u8], out: &mut [u8]) -> usize {
     let mut n = 0usize;
     let mut i = 0usize;
@@ -426,13 +407,12 @@ pub fn selection_byte_bound(grid: &TerminalGrid, selection: &Selection) -> usize
     }
 }
 
-/// Extract the selected text into `out`, returning the number of bytes
-/// captured (bounded only by `out.len()` — the caller sizes the buffer to the
-/// selection). Reads by absolute content line via [`TerminalGrid::abs_cell`],
-/// so the text is the originally-selected content regardless of the current
-/// scroll position. Trailing blanks on each row are trimmed; multi-row
-/// selections join with `\n`; lines evicted from scrollback yield blanks
-/// rather than panicking.
+/// Extract the selected text into `out`, returning the bytes captured (bounded
+/// by `out.len()`). Reads by absolute content line via
+/// [`TerminalGrid::abs_cell`], so the text is the originally-selected content
+/// regardless of the current scroll position. Trailing blanks on each row are
+/// trimmed, multi-row selections join with `\n`, and lines evicted from
+/// scrollback yield blanks rather than panicking.
 pub fn collect_selection(grid: &TerminalGrid, selection: &Selection, out: &mut [u8]) -> usize {
     let cols = grid.cols as usize;
     let Some((lo, hi)) = selection.ordered() else {
@@ -490,9 +470,7 @@ pub fn collect_selection(grid: &TerminalGrid, selection: &Selection, out: &mut [
 }
 
 /// Whether absolute cell `(abs_line, col)` lies within the ordered selection
-/// range `[lo, hi)` (lexicographic on `(line, col)`, `hi` exclusive). The
-/// renderer converts each visible row to its absolute line and calls this to
-/// shade selected cells.
+/// range `[lo, hi)` (lexicographic on `(line, col)`, `hi` exclusive).
 pub fn cell_in_selection(abs_line: u64, col: usize, lo: Anchor, hi: Anchor) -> bool {
     let pos = (abs_line, col);
     pos >= lo.key() && pos < hi.key()
@@ -521,11 +499,7 @@ mod tests {
     }
 
     /// Plain Ctrl+C (no Shift) must reach the PTY master so the ldisc can
-    /// raise SIGINT. Regression lock for the stuck-SHIFT modifier bug: the
-    /// kernel routed modifier *releases* with the raw break code (make |
-    /// 0x80), no tracker cleared the bit, and after the first shifted
-    /// keystroke (e.g. the ':' in a curl URL) every Ctrl+C was
-    /// misclassified as the Ctrl+Shift+C copy chord and silently swallowed.
+    /// raise SIGINT.
     #[test]
     fn ctrl_only_c_reaches_master_as_sigint_byte() {
         assert_eq!(
@@ -592,12 +566,8 @@ mod tests {
 
     #[test]
     fn wheel_axis_resolves_to_signed_scrollback_lines() {
-        // Negative value120 (one notch up) scrolls up into history; positive
-        // scrolls back down toward live output. Matches appkit's axis sign so
-        // the terminal scrolls the same direction as every other app.
         assert_eq!(wheel_scroll_lines(-120), -SCROLLBACK_WHEEL_LINES);
         assert_eq!(wheel_scroll_lines(120), SCROLLBACK_WHEEL_LINES);
-        // Multiple notches accumulate; sub-notch deltas round toward zero.
         assert_eq!(wheel_scroll_lines(-240), -2 * SCROLLBACK_WHEEL_LINES);
         assert_eq!(wheel_scroll_lines(0), 0);
         assert_eq!(wheel_scroll_lines(60), 0);
@@ -610,16 +580,13 @@ mod tests {
         assert!(matches!(encode_key(0, 0x42, 0, 0), KeyAction::None));
     }
 
-    /// Non-ASCII text (umlauts, accents, €) has no legacy byte: the kernel
-    /// codepoint is written to the PTY as UTF-8.
     #[test]
     fn non_ascii_codepoint_encodes_as_utf8() {
         assert_eq!(master_bytes(encode_key(0, 0x1A, 0x00E4, 0)), "ä".as_bytes());
         assert_eq!(master_bytes(encode_key(0, 0x12, 0x20AC, 0)), "€".as_bytes());
         // The dead-key accent flush (keycode 0, bare codepoint) too.
         assert_eq!(master_bytes(encode_key(0, 0, 0x00B4, 0)), "´".as_bytes());
-        // ASCII still rides the legacy byte; codepoint matches and is not
-        // double-encoded.
+        // ASCII still rides the legacy byte, not double-encoded.
         assert_eq!(master_bytes(encode_key(b'a', 0x1E, b'a' as u32, 0)), [b'a']);
     }
 
@@ -629,8 +596,7 @@ mod tests {
         // Literal end marker: the ESC is dropped, leaving inert text.
         let n = sanitize_paste(b"safe\x1b[201~rm -rf /\r", &mut out);
         assert_eq!(&out[..n], b"safe[201~rm -rf /\r");
-        // Splice attack: ESC + (marker) + "[201~" must NOT reassemble a
-        // marker after filtering — no ESC survives, so it cannot.
+        // Splice attack: no ESC survives, so no marker can reassemble.
         let n = sanitize_paste(b"\x1b\x1b[201~[201~x", &mut out);
         assert_eq!(&out[..n], b"[201~[201~x");
         assert!(!out[..n].windows(6).any(|w| w == b"\x1b[201~"));
@@ -697,7 +663,6 @@ mod selection_tests {
         for r in 0..5 {
             assert_eq!(g.abs_to_screen(g.screen_to_abs(r)), Some(r));
         }
-        // Row 0 is the absolute origin when not scrolled.
         assert_eq!(g.screen_to_abs(0), 0);
     }
 
@@ -718,15 +683,11 @@ mod selection_tests {
     #[test]
     fn total_scrolled_tracks_evictions() {
         let mut g = TerminalGrid::new(3, 8);
-        // 3 rows; each newline past the bottom evicts one line. Seven
-        // CRLF-terminated lines push the cursor past the bottom five times
-        // (the trailing CRLF of the last line scrolls once more), so five
-        // lines reach history.
+        // Seven CRLF-terminated lines push the cursor past the bottom of a
+        // 3-row grid five times, so five lines reach history.
         for i in 0..7 {
             feed(&mut g, alloc::format!("L{i}\r\n").as_bytes());
         }
-        // Origin advanced by exactly the number of lines pushed to history,
-        // and the absolute numbering stays consistent (abs of row 0 == L5).
         assert_eq!(g.screen_to_abs(0), 5);
         let mut buf = [0u8; 16];
         let n = {
@@ -749,7 +710,6 @@ mod selection_tests {
         let mut g = TerminalGrid::new(5, 10);
         feed(&mut g, b"AAAA\r\nBBBB\r\nCCCC");
         let mut sel = Selection::NONE;
-        // Select the "AAAA" on screen row 0.
         drag_select(&g, &mut sel, 0, 0, 0, 4);
         assert_eq!(copied(&g, &sel), b"AAAA");
 
@@ -757,8 +717,6 @@ mod selection_tests {
         for i in 0..8 {
             feed(&mut g, alloc::format!("X{i}\r\n").as_bytes());
         }
-        // The anchored selection still yields the originally-selected text —
-        // NOT whatever now occupies screen row 0.
         assert_eq!(copied(&g, &sel), b"AAAA");
     }
 
@@ -783,7 +741,7 @@ mod selection_tests {
         let mut g = TerminalGrid::new(5, 10);
         feed(&mut g, b"hello\r\nworld");
         let mut sel = Selection::NONE;
-        // Select from row 0 col 0 through row 1 col 5 (end of "world").
+        // Col 5 on row 1 is the end of "world".
         drag_select(&g, &mut sel, 0, 0, 1, 5);
         assert_eq!(copied(&g, &sel), b"hello\nworld");
     }
@@ -797,7 +755,6 @@ mod selection_tests {
         let origin = g.screen_to_abs(0);
         let mut sel = Selection::NONE;
         drag_select(&g, &mut sel, 1, 0, 1, 2);
-        // The anchor names the absolute line of screen row 1, not row 1 itself.
         let (lo, _hi) = sel.ordered().unwrap();
         assert_eq!(lo.line, origin + 1);
     }
@@ -813,7 +770,6 @@ mod selection_tests {
         for _ in 0..1100 {
             feed(&mut g, b"\r\n");
         }
-        // No panic; the lost line yields blanks (trimmed to nothing).
         assert!(copied(&g, &sel).is_empty());
     }
 

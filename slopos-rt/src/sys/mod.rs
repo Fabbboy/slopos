@@ -1,5 +1,4 @@
-//! Thin syscall shims `slopfut` + the `Ring` wrapper need. Copied verbatim
-//! from `userland/src/syscall/`, retargeted onto `slopos_slibc::pal::raw`.
+//! Thin syscall shims `slopfut` and the `Ring` wrapper need.
 
 pub mod memory;
 pub mod pidfd;

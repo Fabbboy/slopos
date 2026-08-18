@@ -1,5 +1,4 @@
-//! Memory management syscalls the `Ring` wrapper's `Drop` needs: `munmap`
-//! (release the mapped SQ/CQ region) + `close` (drop the ring fd).
+//! Memory syscalls the `Ring` wrapper's `Drop` needs: `munmap` and `close`.
 
 use slopos_abi::syscall::{SYSCALL_FS_CLOSE, SYSCALL_MUNMAP};
 use slopos_slibc::pal::raw::{syscall1, syscall2};

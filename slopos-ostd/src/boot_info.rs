@@ -14,30 +14,21 @@ pub struct LimineMemmapEntry {
 pub struct LimineMemmapResponse {
     pub revision: u64,
     pub entry_count: u64,
-    /// Bootloader-published `[*const LimineMemmapEntry; entry_count]`.
-    /// `KernelSync` wraps the raw pointer-to-pointer so the surrounding
-    /// struct auto-derives `Send + Sync`; the bootloader publishes
-    /// every entry at a lifetime-stable address before the kernel
-    /// reads them.
+    /// Bootloader-published `[*const LimineMemmapEntry; entry_count]`, every
+    /// entry at a lifetime-stable address. `KernelSync` is what makes the
+    /// surrounding struct auto-derive `Send + Sync`.
     pub entries: KernelSync<*const *const LimineMemmapEntry>,
 }
 
-/// Iterate the entries of a Limine memmap response. The single `unsafe`
-/// reborrow of the response pointer + the per-entry deref live here, so
-/// kernel-side callers stay fully safe.
-///
-/// Returns an empty iterator if `memmap` is null or its entries array
-/// is empty. The bootloader publishes the response at a stable virtual
-/// address valid for the lifetime of the kernel.
+/// Iterate the entries of a Limine memmap response; empty if `memmap` is null
+/// or its entries array is empty.
 #[inline]
 pub fn limine_memmap_iter(
     memmap: *const LimineMemmapResponse,
 ) -> impl Iterator<Item = LimineMemmapEntry> {
-    // SAFETY: `memmap` either is null (handled below) or points at the
-    // bootloader-published, lifetime-stable response struct. The inner
-    // `entries` array is `[*const LimineMemmapEntry; entry_count]` of
-    // similarly stable lifetime; each entry pointer is either null or
-    // points at a `LimineMemmapEntry` we own a Copy of.
+    // SAFETY: `memmap` is null (handled below) or points at the
+    // bootloader-published, lifetime-stable response; its `entries` array is
+    // `[*const LimineMemmapEntry; entry_count]` of the same lifetime.
     let parts: Option<(usize, *const *const LimineMemmapEntry)> = unsafe {
         if memmap.is_null() {
             None
@@ -53,9 +44,8 @@ pub fn limine_memmap_iter(
     };
     let (count, entries_ptr) = parts.unwrap_or((0, core::ptr::null()));
     (0..count).filter_map(move |i| {
-        // SAFETY: `i < count` and `entries_ptr` is non-null per the
-        // Some() branch above; bootloader guarantees the slot's
-        // lifetime.
+        // SAFETY: `i < count` and `entries_ptr` is non-null per the Some()
+        // branch above; the bootloader guarantees the slot's lifetime.
         unsafe {
             let entry_ptr = *entries_ptr.add(i);
             if entry_ptr.is_null() {
@@ -143,11 +133,9 @@ impl MemoryRegion {
 #[derive(Clone, Copy, Debug)]
 #[repr(C)]
 pub struct BootFramebuffer {
-    /// Bootloader-published framebuffer base virtual address.
-    /// `KernelSync` wraps the raw pointer so the surrounding struct
-    /// auto-derives `Send + Sync`; the underlying physical memory is
-    /// device-side MMIO that the bootloader maps for the kernel's
-    /// lifetime.
+    /// Bootloader-published framebuffer base virtual address; the backing
+    /// MMIO stays mapped for the kernel's lifetime. `KernelSync` is what makes
+    /// the surrounding struct auto-derive `Send + Sync`.
     pub address: KernelSync<*mut u8>,
     pub info: DisplayInfo,
 }

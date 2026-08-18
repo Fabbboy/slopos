@@ -31,10 +31,7 @@ pub fn ring_enter(ring_fd: i32, to_submit: u32, min_complete: u32, flags: u32) -
 
 /// `ring_register(ring_fd, op, arg, nr_args)` — register provided/fixed
 /// buffers with a ring (SLOPRING § 13, ABI v2). Returns 0 on success or a
-/// negated errno. Phase 3 ships the ABI only: every `op` returns
-/// `-ENOSYS` (Phase 4 implements the provided/fixed buffer paths). The
-/// shared `syscall4` wrapper already clobbers XMM/YMM, so user FP/SIMD
-/// state cannot be corrupted across the boundary.
+/// negated errno. Only the ABI is wired: every `op` returns `-ENOSYS`.
 #[inline(always)]
 pub fn ring_register(ring_fd: i32, op: u32, arg: u64, nr_args: u32) -> i32 {
     unsafe {

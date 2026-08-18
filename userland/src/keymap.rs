@@ -1,10 +1,7 @@
 //! Keyboard-layout helpers: the file → parse → serialise → upload pipeline.
 //!
-//! One home for the `keymap <name>` plumbing, shared by the shell builtin, the
-//! boot-time applier in init, and the keymap test binary. Layout files are
-//! parsed **in userland** (`slopos_keymap_core::parse`) into the binary
-//! `LayoutTable`, serialised, and uploaded via `SYSCALL_KEYMAP_LOAD` — the
-//! kernel never parses layout text.
+//! Layout files are parsed in userland into a binary `LayoutTable` and uploaded
+//! via `SYSCALL_KEYMAP_LOAD`; the kernel never parses layout text.
 
 use std::fs;
 
@@ -18,7 +15,6 @@ pub const KEYMAP_DIR: &str = "/usr/share/keymaps";
 /// The persisted layout choice (the short name, e.g. `de_CH`), applied at boot.
 pub const PERSIST_PATH: &str = "/etc/keymap";
 
-/// The active layout name, queried from the kernel.
 pub fn current_name() -> Option<String> {
     let mut buf = [0u8; 16];
     let n = keymap_get_name(&mut buf);
@@ -46,9 +42,8 @@ pub fn load_layout_by_name(name: &str) -> Result<(), &'static str> {
     Ok(())
 }
 
-/// Apply the layout name persisted in [`PERSIST_PATH`], if any. Best-effort
-/// and silent: a missing file, a bogus name, or a parse failure just leaves
-/// the built-in default active.
+/// Apply the layout name persisted in [`PERSIST_PATH`], if any. Best-effort and
+/// silent: any failure leaves the built-in default active.
 pub fn apply_persisted_layout() {
     let Ok(bytes) = fs::read(PERSIST_PATH) else {
         return;

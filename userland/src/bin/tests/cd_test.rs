@@ -1,19 +1,12 @@
 #![feature(restricted_std)]
 
-// Pull in the userland lib so its `_start` ELF entry point is linked.
 use slopos_userland as _;
 
 use std::env;
 use std::fs;
 
-/// Regression for the "`cd` always says not found" bug.
-///
-/// `cd` is `std::env::set_current_dir`, and it used to *always* fail because
-/// std's `sys::paths` module had no SlopOS arm and fell back to the
-/// `Unsupported` stub — even though the kernel chdir/getcwd syscalls work and
-/// `ls` (which uses `std::fs`) succeeds. This walks every directory `ls /`
-/// reports and `cd`s into each via plain `std::env`, proving third-party
-/// userland apps can rely on `std` for cwd ops.
+/// Walks every directory `/` reports and `cd`s into each through plain
+/// `std::env`, proving third-party userland apps can rely on `std` for cwd ops.
 fn std_cd_into_every_listed_dir() -> bool {
     if env::set_current_dir("/").is_err() {
         return false;
@@ -31,11 +24,9 @@ fn std_cd_into_every_listed_dir() -> bool {
         }
         let path = entry.path();
 
-        // `cmd_cd` stats the target first…
         if !fs::metadata(&path).map(|m| m.is_dir()).unwrap_or(false) {
             return false;
         }
-        // …then `set_current_dir` into it (this is what used to always fail).
         if env::set_current_dir(&path).is_err() {
             return false;
         }
@@ -48,10 +39,8 @@ fn std_cd_into_every_listed_dir() -> bool {
     dirs > 0
 }
 
-/// `set_current_dir` then `current_dir` round-trips through getcwd/chdir.
 fn std_set_then_current_dir_roundtrip() -> bool {
     if !fs::metadata("/bin").map(|m| m.is_dir()).unwrap_or(false) {
-        // No /bin (e.g. ramfs root): assert root round-trip instead.
         if env::set_current_dir("/").is_err() {
             return false;
         }
@@ -72,7 +61,6 @@ fn std_set_then_current_dir_roundtrip() -> bool {
     ok
 }
 
-/// `std::env::temp_dir()` resolves (wired to `/tmp`).
 fn std_temp_dir_is_tmp() -> bool {
     env::temp_dir().to_str() == Some("/tmp")
 }

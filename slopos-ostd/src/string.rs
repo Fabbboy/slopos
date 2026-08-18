@@ -24,8 +24,8 @@ pub unsafe fn cstr_to_str(ptr: *const c_char) -> &'static str {
 /// glue / Limine; the pointer contract is still the caller's.
 #[inline]
 pub fn cstr_to_str_lossy(ptr: *const c_char) -> &'static str {
-    // SAFETY: see doc-comment — production callers are kdiag/IST
-    // diagnostics reading from static-lifetime NUL-terminated strings.
+    // SAFETY: see doc-comment — every caller reads a static NUL-terminated
+    // string.
     unsafe { cstr_to_str(ptr) }
 }
 

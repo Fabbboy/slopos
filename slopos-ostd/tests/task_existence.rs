@@ -1,32 +1,13 @@
 //! Coverage for the task existence reference — the one strong reference a task
 //! holds to itself between registration and reap.
 //!
-//! It exists because containers do not cover every live state: a blocked kernel
-//! thread sits in no queue and has no parent, a placement reservation has not
-//! reached its queue, and a freshly created or forked task is registered before
-//! it is published. In each of those the existence reference is the only thing
-//! keeping the allocation alive, so the two properties tested here are what the
-//! whole weak-only registry rests on:
+//! In the states no container covers — a blocked kernel thread, an unqueued
+//! placement reservation, a task registered before it is published — it is the
+//! only thing keeping the allocation alive.
 //!
-//! - the reference is handed out once and taken back once, even under repeated
-//!   or racing attempts, so a reap is idempotent and cannot double-release;
-//! - a task that never held one yields nothing, which is what makes the reap
-//!   safe to attempt on any task.
-//!
-//! Note `just check-miri` runs with `-Zmiri-ignore-leaks`, so a *leaked*
-//! reference is invisible to Miri here — every test asserts strong counts and
-//! the parked tally explicitly. A double release is a double free, which Miri
-//! does catch.
-//!
-//! # Why every test takes the serial gate
-//!
-//! The parked tally is one process-global counter, while `cargo test` runs these
-//! `#[test]` items on parallel threads of a single process. A sibling's park
-//! landing between the tally test's baseline read and its next read is an
-//! observation the tally test cannot distinguish from the leak it exists to
-//! catch. So each test opens with [`serial`], and [`fresh_task`] refuses to hand
-//! out a task to a thread that does not hold it — a test that forgets the gate
-//! fails under its own name instead of flaking the tally test.
+//! `just check-miri` runs with `-Zmiri-ignore-leaks`, so a *leaked* reference is
+//! invisible to Miri here — every test asserts strong counts and the parked
+//! tally explicitly. A double release is a double free, which Miri does catch.
 
 use core::ptr::NonNull;
 use std::cell::Cell;
@@ -50,7 +31,6 @@ thread_local! {
     static HOLDS_SERIAL: Cell<bool> = const { Cell::new(false) };
 }
 
-/// The exclusive gate, held for the remainder of the test.
 struct SerialGate {
     _guard: MutexGuard<'static, ()>,
 }
@@ -61,12 +41,9 @@ impl Drop for SerialGate {
     }
 }
 
-/// Take the serial gate.
-///
-/// Poison is taken over rather than propagated: a failing assertion in one test
-/// poisons the mutex, and propagating that would replace every later test's real
-/// result with a panic naming the wrong test. The state behind the gate is the
-/// tally, and a poisoning test leaves it balanced or has already reported the
+/// Poison is taken over rather than propagated: propagating it would replace
+/// every later test's real result with a panic naming the wrong test, and a
+/// poisoning test either leaves the tally balanced or has already reported the
 /// imbalance itself.
 fn serial() -> SerialGate {
     let guard = SERIAL
@@ -87,9 +64,6 @@ fn fresh_task() -> (KArc<HostTask>, NonNull<HostTask>) {
     (arc, node)
 }
 
-/// The reference is minted once, reported as held, and taken back once. The
-/// second attempt is the idempotent reap: it must not fabricate a reference the
-/// task no longer owns.
 #[test]
 fn park_then_release_round_trips_exactly_once() {
     let _gate = serial();
@@ -120,8 +94,6 @@ fn park_then_release_round_trips_exactly_once() {
     drop(arc);
 }
 
-/// Parking twice must not inflate the count. The flag is claimed with a
-/// compare-exchange after the retain, so the loser undoes its own mint.
 #[test]
 fn parking_twice_mints_one_reference() {
     let _gate = serial();
@@ -145,9 +117,7 @@ fn parking_twice_mints_one_reference() {
     drop(arc);
 }
 
-/// A task that was never registered holds nothing, so a reap attempt on it is a
-/// no-op rather than a fabricated reference. This is what lets the reap path run
-/// without first proving the task was ever published.
+/// What lets the reap path run without first proving the task was published.
 #[test]
 fn release_without_park_yields_nothing() {
     let _gate = serial();
@@ -164,8 +134,8 @@ fn release_without_park_yields_nothing() {
     drop(arc);
 }
 
-/// The parked tally is the leak tripwire the kernel asserts against its registry
-/// occupancy, so it has to return to its baseline across a park/release pair.
+/// The parked tally is the leak tripwire the kernel asserts against its
+/// registry occupancy.
 #[test]
 fn parked_count_tracks_park_and_release() {
     let _gate = serial();
@@ -179,7 +149,6 @@ fn parked_count_tracks_park_and_release() {
         "a park that mints a reference counts once"
     );
 
-    // A refused park must not be counted.
     assert!(!task_existence_park(node));
     assert_eq!(
         task_existence_parked_count(),
@@ -194,7 +163,6 @@ fn parked_count_tracks_park_and_release() {
         "the release that took the reference back returns the tally"
     );
 
-    // Nor must a refused release.
     assert!(task_existence_release(node).is_none());
     assert_eq!(
         task_existence_parked_count(),
@@ -206,8 +174,8 @@ fn parked_count_tracks_park_and_release() {
     drop(arc);
 }
 
-/// The reference round-trips through the task's own base address, which is the
-/// same pointer the placement links are keyed on.
+/// The base address it round-trips through is the pointer the placement links
+/// are keyed on.
 #[test]
 fn release_returns_a_handle_to_the_same_allocation() {
     let _gate = serial();
@@ -223,13 +191,9 @@ fn release_returns_a_handle_to_the_same_allocation() {
     drop(arc);
 }
 
-/// A forked child must not inherit its parent's parked flag.
-///
-/// `clone_from_raw` copies the parent bytewise, flag included. If the child kept
-/// that `true` it would be reaped by taking back a reference it was never given,
-/// dropping the count one below what its real owners hold — a use-after-free
-/// with no bad pointer anywhere in sight. This is the single most dangerous way
-/// the existence reference can be got wrong.
+/// `clone_from_raw` copies the parent bytewise, flag included. A child that
+/// kept that `true` would be reaped by taking back a reference it was never
+/// given, dropping the count below what its real owners hold.
 #[test]
 fn a_cloned_task_does_not_inherit_the_parked_flag() {
     let _gate = serial();

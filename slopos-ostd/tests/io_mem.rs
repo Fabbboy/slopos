@@ -1,14 +1,9 @@
 //! Host-side integration tests for `IoMem` / `IoMemRegistry`.
 //!
-//! Setup pattern matches `tests/uframe_round_trip.rs` and
-//! `tests/vm_space.rs`: a leaked page-aligned `Backing` array stands
-//! in for "MMIO" storage, a fake [`IoMemMapper`] implementation maps
-//! every requested phys address to the same offset within the
-//! backing buffer, and a leaked `&'static [PhysRange]` covers the
-//! address space we test against.
-//!
-//! Tests share a `OnceLock<Mutex<()>>` setup gate so the OSTD
-//! globals are wired exactly once and tests serialise.
+//! A leaked page-aligned buffer stands in for MMIO storage and a fake
+//! [`IoMemMapper`] maps every phys address to the same offset within it.
+//! Tests share a `OnceLock<Mutex<()>>` gate so the OSTD globals are wired
+//! exactly once and the tests serialise.
 
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, MutexGuard, OnceLock};
@@ -60,12 +55,10 @@ fn setup() -> MutexGuard<'static, ()> {
         let layout =
             std::alloc::Layout::from_size_align(REGION_SIZE, PAGE_SIZE).expect("backing layout");
         // SAFETY: layout has nonzero size; standard allocator contract.
-        // SAFETY: layout has nonzero size; standard allocator contract.
         let backing_ptr_real: *mut u8 = unsafe { std::alloc::alloc_zeroed(layout) };
         assert!(!backing_ptr_real.is_null(), "backing alloc failed");
-        // Expose provenance once; FakeMapper later hands out addresses
-        // derived from this base, and IoMem's read/write_volatile
-        // reconstructs pointers via `with_exposed_provenance[_mut]`.
+        // Provenance must be exposed here: IoMem reconstructs pointers from
+        // the mapper's addresses via `with_exposed_provenance[_mut]`.
         let backing_ptr = backing_ptr_real.expose_provenance() as u64;
         BACKING_BASE.store(backing_ptr, Ordering::Release);
         slopos_ostd::sync::run_bsp_init_for_test(|t| {
@@ -236,18 +229,13 @@ fn sub_region_rejects_overrun() {
 #[test]
 fn dynamic_range_register_then_reserve() {
     let _g = setup();
-    // Pick a phys range outside the static slice (the static covers
-    // REGION_BASE..REGION_BASE + REGION_SIZE, i.e. 0xfee0_0000..
-    // 0xfee1_0000). 0xfee2_0000 is comfortably outside.
+    // Outside the static slice (0xfee0_0000..0xfee1_0000).
     let dyn_base = PhysAddr::new(REGION_BASE + (REGION_SIZE as u64) * 2);
     register_io_mem_range(PhysRange {
         base: dyn_base,
         len: PAGE_SIZE,
     })
     .expect("register_io_mem_range");
-    // Reserve a sub-range — fake mapper happily produces a virt
-    // address (we don't dereference; just check reserve succeeds and
-    // returns the right metadata).
     let m = IoMemRegistry::reserve(dyn_base, PAGE_SIZE, IoMemCachePolicy::Uncacheable)
         .expect("reserve");
     assert_eq!(m.size(), PAGE_SIZE);
@@ -257,9 +245,8 @@ fn dynamic_range_register_then_reserve() {
 #[test]
 fn dynamic_range_outside_static_and_dynamic_rejected() {
     let _g = setup();
-    // 0xff00_0000 is outside both the static slice and any range the
-    // companion `dynamic_range_register_then_reserve` test registers,
-    // so the order in which the two tests run doesn't matter.
+    // Outside both the static slice and the range the companion
+    // `dynamic_range_register_then_reserve` test adds, so run order is free.
     let r = IoMemRegistry::reserve(
         PhysAddr::new(0xff00_0000),
         PAGE_SIZE,
