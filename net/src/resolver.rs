@@ -4,16 +4,6 @@
 //! bootstrap: any interface's lease may contribute one, an operator may
 //! override one, and [`ResolverConfig::source`] reports where the current one
 //! came from.
-//!
-//! # Static outranks learned
-//!
-//! An address somebody typed in is a decision; an address a lease carried is a
-//! default. So a static configuration wins and a later DHCP lease does not
-//! quietly replace it. Clearing the static configuration lets the next lease
-//! apply again.
-//!
-//! Atomics and a small fixed array, no allocation, so the read on the DNS path
-//! costs a load and the write from a lease can happen from anywhere.
 
 use core::sync::atomic::{AtomicBool, AtomicU8, AtomicU32, Ordering};
 
@@ -21,21 +11,15 @@ use slopos_abi::net::{NET_MAX_RESOLVERS, NET_RESOLVER_SRC_DHCP, NET_RESOLVER_SRC
 
 use crate::types::Ipv4Addr;
 
-/// Default query timeout, in milliseconds.
 pub const DEFAULT_TIMEOUT_MS: u32 = 5_000;
-/// Default number of attempts per query.
 pub const DEFAULT_ATTEMPTS: u32 = 2;
 
-/// One resolver configuration.
-///
 /// The servers are `AtomicU32` rather than a locked array so the DNS path can
-/// read one without a lock: a resolver address changing under a query is
-/// harmless — the worst case is a query sent to the previous server, which is
-/// the same thing that happens when a server goes away mid-query.
+/// read one without a lock: a query racing a change goes to the previous
+/// server, the same as when a server goes away mid-query.
 pub struct ResolverConfig {
     servers: [AtomicU32; NET_MAX_RESOLVERS],
     n_servers: AtomicU8,
-    /// `NET_RESOLVER_SRC_*`.
     source: AtomicU8,
     /// The interface a learned configuration came from.
     source_ifindex: AtomicU32,
@@ -46,7 +30,6 @@ pub struct ResolverConfig {
     pinned: AtomicBool,
 }
 
-/// The system resolver configuration.
 pub static RESOLVER: ResolverConfig = ResolverConfig::new();
 
 impl ResolverConfig {
@@ -62,7 +45,6 @@ impl ResolverConfig {
         }
     }
 
-    /// The primary server, or `None` when nothing is configured.
     pub fn primary(&self) -> Option<Ipv4Addr> {
         if self.n_servers.load(Ordering::Acquire) == 0 {
             return None;
@@ -186,7 +168,6 @@ impl ResolverConfig {
             .store(NET_RESOLVER_SRC_STATIC, Ordering::Release);
     }
 
-    /// Test-only: back to the boot state.
     #[cfg(feature = "test-hooks")]
     pub fn reset(&self) {
         self.pinned.store(false, Ordering::Release);
@@ -206,18 +187,14 @@ impl Default for ResolverConfig {
     }
 }
 
-/// The system's primary DNS server.
 #[inline]
 pub fn primary() -> Option<Ipv4Addr> {
     RESOLVER.primary()
 }
 
-/// The primary server as raw octets.
-///
 /// Deliberately **not** inlined: its caller `dns_resolve` sits 16 bytes under
 /// the build's measured frame cap, and folding this lookup's temporaries into
-/// that frame exceeds it. The extra call lands on a path that is about to wait
-/// milliseconds for a network round trip.
+/// that frame exceeds it.
 #[inline(never)]
 pub fn primary_octets() -> Option<[u8; 4]> {
     RESOLVER.primary().map(|ip| ip.0)

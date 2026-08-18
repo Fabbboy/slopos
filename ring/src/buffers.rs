@@ -319,12 +319,11 @@ impl BufferRegistry {
 
     /// An **independent** owning ref on every backing page of fixed buffer
     /// `index`, handed to the driver so the pinned pages survive a ring/process
-    /// teardown that drops this registry while the NIC is still DMAing them
-    /// (the use-after-free guard; the registry's own pin + `checked_out` guard
-    /// only the explicit unregister syscall). `None` if out of range / alloc.
-    /// The keepalive carries its own `PinnedBytes` charge, independent of the
-    /// registered buffer's: it outlives the ring by design, so sharing one
-    /// would refund at teardown while the NIC still held the pages.
+    /// teardown while the NIC is still DMAing them (the registry's own pin and
+    /// `checked_out` bit guard only the explicit unregister syscall). It
+    /// carries its own `PinnedBytes` charge, because sharing the registered
+    /// buffer's would refund at teardown while the NIC still held the pages.
+    /// `None` if out of range / alloc.
     pub fn fixed_keepalive(&self, index: u16) -> Option<KeepaliveFrames> {
         let set = self.fixed.as_ref()?;
         let pin = set.pins.get(index as usize)?;
@@ -333,20 +332,17 @@ impl BufferRegistry {
 
     /// In-page byte offset of fixed buffer `index`'s data within its first
     /// backing page — paired with [`fixed_keepalive`](Self::fixed_keepalive) so
-    /// the TCP `MSG_ZEROCOPY` send queue can re-derive a segment's DMA runs at an
-    /// arbitrary offset on every (re)transmit. `None` if out of range.
+    /// the TCP `MSG_ZEROCOPY` send queue can re-derive a segment's DMA runs at
+    /// an arbitrary offset on every (re)transmit. `None` if out of range.
     pub fn fixed_base_off(&self, index: u16) -> Option<usize> {
         let set = self.fixed.as_ref()?;
         Some(set.pins.get(index as usize)?.base_off())
     }
 
     /// Record an in-flight zero-copy send awaiting its deferred `F_NOTIF`. The
-    /// fixed buffer stays checked out (held by this entry) until the driver
-    /// reclaims the NIC descriptor and [`take_reclaimed`] retires it. Infallible
-    /// — the table was pre-grown at `register_fixed` (see [`deferred`]).
-    ///
-    /// [`take_reclaimed`]: Self::take_reclaimed
-    /// [`deferred`]: Self::deferred
+    /// fixed buffer stays checked out until the driver reclaims the NIC
+    /// descriptor and `take_reclaimed` retires it. Infallible — the table was
+    /// pre-grown at `register_fixed`.
     pub fn push_deferred(
         &mut self,
         user_data: u64,
@@ -363,10 +359,8 @@ impl BufferRegistry {
 
     /// Record an in-flight TCP `MSG_ZEROCOPY` send awaiting its deferred
     /// `F_NOTIF`. Like [`push_deferred`](Self::push_deferred) but keyed on the
-    /// refcounted [`ZcNotifToken`] — the buffer stays checked out until the bytes
-    /// are cumulatively ACKed and every retransmit DMA is reclaimed (the count
-    /// reaches zero). Infallible (the table was pre-grown; one in-flight ZC send
-    /// per buffer index, since the index stays checked out until `F_NOTIF`).
+    /// refcounted [`ZcNotifToken`] — the buffer stays checked out until the
+    /// bytes are cumulatively ACKed and every retransmit DMA is reclaimed.
     pub fn push_deferred_notif(&mut self, user_data: u64, token: ZcNotifToken, buf_index: u16) {
         let _ = self.deferred.push(DeferredNotif {
             user_data,
@@ -375,18 +369,15 @@ impl BufferRegistry {
         });
     }
 
-    /// `true` iff any zero-copy send is in flight awaiting its deferred
-    /// `F_NOTIF` — the harvest uses this to decide whether to drive a device TX
-    /// reclaim before checking the tokens.
+    /// `true` iff any zero-copy send awaits its deferred `F_NOTIF` — the
+    /// harvest drives a device TX reclaim before checking the tokens.
     pub fn has_deferred(&self) -> bool {
         !self.deferred.is_empty()
     }
 
-    /// Drain every deferred zero-copy send whose driver has reclaimed the NIC TX
-    /// descriptor since submit (`token.is_reclaimed(snapshot)`), returning the
-    /// `(user_data, buf_index)` of each so the caller can post `F_NOTIF` and
-    /// `check_in_fixed` **after** this `&mut self` borrow ends (the harvest
-    /// double-borrow fix).
+    /// Drain every deferred zero-copy send whose token has flipped, returning
+    /// the `(user_data, buf_index)` of each so the caller can post `F_NOTIF`
+    /// and `check_in_fixed` **after** this `&mut self` borrow ends.
     pub fn take_reclaimed(&mut self) -> KVec<(u64, u16)> {
         let mut out: KVec<(u64, u16)> = KVec::new();
         let mut i = 0;
@@ -401,8 +392,6 @@ impl BufferRegistry {
         }
         out
     }
-
-    // ----- provided buffer rings (RING_REGISTER_PBUF_RING) -----------------
 
     fn provided_idx(&self, group: u16) -> Option<usize> {
         self.provided.iter().position(|r| r.gid == group)
@@ -445,7 +434,7 @@ impl BufferRegistry {
     /// no in-flight op references `group` (`-EBUSY` otherwise).
     pub fn unregister_provided(&mut self, group: u16) -> Result<(), Errno> {
         let idx = self.provided_idx(group).ok_or(Errno::EINVAL)?;
-        let _ = self.provided.swap_remove(idx); // drops the ring pin
+        let _ = self.provided.swap_remove(idx);
         Ok(())
     }
 
@@ -472,11 +461,9 @@ impl BufferRegistry {
 
     /// Transiently pin a kernel-picked provided buffer at user `addr` for the
     /// duration of one recv op (no per-op reservation: a provided buffer is
-    /// touched only within the op). The caller builds a [`VmWriter`] over the
-    /// returned pin, fills it directly from the socket, then [`commit_provided`]
-    /// on success — the single-direct-copy provided-buffer recv path.
-    ///
-    /// [`commit_provided`]: Self::commit_provided
+    /// touched only within the op). The caller fills a [`VmWriter`] over the
+    /// returned pin directly from the socket, then
+    /// [`commit_provided`](Self::commit_provided) on success.
     pub fn provided_pin(
         process: slopos_ostd::process::ProcessId,
         addr: u64,
@@ -485,16 +472,14 @@ impl BufferRegistry {
         PinnedUserBuffer::pin(process, addr, len, process.account()).map_err(pin_errno)
     }
 
-    // ----- test-only injection (no live process VM) ------------------------
-
     /// Test hook: install a fixed-buffer set from pre-built (fabricated) pins.
     #[cfg(feature = "test-hooks")]
     pub fn register_fixed_for_test(&mut self, pins: KVec<PinnedUserBuffer>) {
         self.fixed = Some(FixedBufferSet {
             pins,
             checked_out: BufBitset::new(),
-            // A fabricated set belongs to no process; a charge against no
-            // account debits and refunds nothing.
+            // A fabricated set belongs to no process; charges against NONE
+            // debit and refund nothing.
             account: slopos_ostd::process::AccountId::NONE,
         });
     }

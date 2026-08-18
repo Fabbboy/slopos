@@ -1,18 +1,11 @@
 //! Untyped frames and segments — byte-copy-only physical memory.
 //!
-//! `UFrame<M>` and `USegment<M>` expose physical memory through a
-//! deliberately-restricted byte-copy interface so user, peripheral,
-//! and DMA-tampered memory can never be observed as a Rust
-//! reference (`&T` / `&[u8]`).
-//!
-//! # No-reference discipline
-//!
-//! `UFrame` and `USegment` deliberately do **not** implement
-//! `Deref`, `DerefMut`, `AsRef`, `AsMut`, `Index`, `IndexMut`, nor
-//! expose `as_slice` / `as_mut_slice`. The `compile_fail` doctests
-//! on [`UFrame`] lock this in. Any future addition that returns
-//! `&T` or `&[u8]` from these types is a soundness regression and
-//! must be rejected at review.
+//! `UFrame<M>` and `USegment<M>` expose physical memory through a byte-copy
+//! interface so user, peripheral and DMA-tampered memory can never be observed
+//! as a Rust reference. They deliberately implement neither `Deref` / `AsRef` /
+//! `Index` nor expose `as_slice`; the `compile_fail` doctests on [`UFrame`]
+//! lock that in, and any addition returning `&T` / `&[u8]` from these types is
+//! a soundness regression.
 
 use core::marker::PhantomData;
 use core::mem::{align_of, size_of};
@@ -31,7 +24,6 @@ use slopos_abi::quota::PinnedBytesAxis;
 
 const PAGE_SIZE: usize = 4096;
 
-/// Byte-copy error type.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum UFrameError {
     /// `offset + len` exceeds the region's byte length.
@@ -39,12 +31,10 @@ pub enum UFrameError {
     /// `(paddr + offset) % align_of::<T>() != 0` for a `read_pod` /
     /// `write_pod` call.
     Misaligned,
-    /// A vectored byte-copy completed only part of the requested
-    /// transfer. Reserved for future vectored-I/O / partial-segment
-    /// paths; unused by the current byte-copy methods.
+    /// A vectored byte-copy completed only part of the requested transfer.
+    /// Reserved for future vectored-I/O paths; unused today.
     Truncated,
-    /// `USegment` construction tried to allocate per-segment
-    /// bookkeeping and the kernel heap refused.
+    /// The kernel heap refused `USegment`'s per-segment bookkeeping.
     OutOfMemory,
 }
 
@@ -53,10 +43,6 @@ impl From<AllocError> for UFrameError {
         Self::OutOfMemory
     }
 }
-
-// ---------------------------------------------------------------------------
-// AnyUFrameMeta marker.
-// ---------------------------------------------------------------------------
 
 /// Marker trait identifying frame-metadata types whose pages are
 /// untyped — i.e. their contents may be tampered with by user code,
@@ -74,26 +60,18 @@ impl From<AllocError> for UFrameError {
 pub unsafe trait AnyUFrameMeta: AnyFrameMeta + Default {}
 
 // SAFETY: `AnonymousMeta` is a ZST representing user/anon untyped
-// pages — exactly the case `AnyUFrameMeta` describes. `KernelMeta`
-// and `PageTableMeta` deliberately do **not** implement this trait
-// because their pages are sensitive kernel-owned memory.
+// pages — exactly the case `AnyUFrameMeta` describes.
 unsafe impl AnyUFrameMeta for AnonymousMeta {}
 
-// SAFETY: `RingMeta` backs a SlopRing SQ/CQ region that is mapped
-// read+write into userspace and mutated concurrently by a user thread
-// — exactly the untyped case `AnyUFrameMeta` describes. The kernel ring
-// code reaches the bytes only through this module's byte-copy /
-// volatile interface, never forming a `&Sqe` / `&mut Cqe` over the
-// frame (SLOPRING § 5.2 / § 5.3, AD-3 / Inv. 4/5).
+// SAFETY: `RingMeta` backs a SlopRing SQ/CQ region mapped read+write into
+// userspace and mutated concurrently by a user thread. The kernel reaches the
+// bytes only through this module's volatile byte-copy interface, never forming
+// a `&Sqe` / `&mut Cqe` over the frame (SLOPRING § 5.2 / § 5.3).
 unsafe impl AnyUFrameMeta for RingMeta {}
 
-// Reference the import so the unused-import lint doesn't fire on
-// `_PageTableMeta`; documenting why it is *not* `AnyUFrameMeta`.
+// Keeps the unused-import lint quiet on `_PageTableMeta`, which is
+// deliberately *not* `AnyUFrameMeta`.
 const _SENSITIVE: PhantomData<_PageTableMeta> = PhantomData;
-
-// ---------------------------------------------------------------------------
-// Bounds + alignment helpers.
-// ---------------------------------------------------------------------------
 
 #[inline]
 pub(crate) fn check_range(offset: usize, len: usize, region: usize) -> Result<(), UFrameError> {
@@ -114,21 +92,13 @@ fn check_alignment<T: Pod>(paddr: Paddr, offset: usize) -> Result<(), UFrameErro
     Ok(())
 }
 
-// ---------------------------------------------------------------------------
-// UFrame: single untyped frame.
-// ---------------------------------------------------------------------------
-
 /// A single physical 4 KiB frame whose contents are untyped — i.e.
 /// reachable only through the byte-copy interface defined on this
 /// type. Holds one ref to the underlying [`Frame<M>`] for as long as
 /// it lives. See module docs for the no-reference discipline.
 ///
-/// ## No-reference discipline (compile-fail tests)
-///
-/// `UFrame` deliberately does **not** implement `Deref`,
-/// `Index<Range<usize>>`, or expose `as_slice`. Each of the
-/// following must fail to compile; if any of them ever start
-/// passing, a soundness invariant has been broken.
+/// Each of the following must fail to compile; if one ever starts passing, a
+/// soundness invariant has been broken.
 ///
 /// `Deref`:
 /// ```compile_fail

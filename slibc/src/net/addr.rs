@@ -1,41 +1,20 @@
 //! Socket address types, constants, and network byte-order helpers.
-//! Every address is a gamble — will the packet find its way through the Slopsea?
-
-// =============================================================================
-// Address families
-// =============================================================================
 
 pub const AF_UNIX: i32 = 1;
 pub const AF_INET: i32 = 2;
 pub const AF_INET6: i32 = 10;
-
-// =============================================================================
-// Socket types
-// =============================================================================
 
 pub const SOCK_STREAM: i32 = 1;
 pub const SOCK_DGRAM: i32 = 2;
 pub const SOCK_NONBLOCK: i32 = 2048;
 pub const SOCK_CLOEXEC: i32 = 524288;
 
-// =============================================================================
-// Protocols
-// =============================================================================
-
 pub const IPPROTO_TCP: i32 = 6;
 pub const IPPROTO_UDP: i32 = 17;
-
-// =============================================================================
-// Shutdown constants
-// =============================================================================
 
 pub const SHUT_RD: i32 = 0;
 pub const SHUT_WR: i32 = 1;
 pub const SHUT_RDWR: i32 = 2;
-
-// =============================================================================
-// Socket option constants
-// =============================================================================
 
 pub const SOL_SOCKET: i32 = 1;
 pub const SO_REUSEADDR: i32 = 2;
@@ -49,10 +28,6 @@ pub const TCP_NODELAY: i32 = 1;
 
 pub const INADDR_ANY: u32 = 0;
 pub const INADDR_NONE: u32 = u32::MAX;
-
-// =============================================================================
-// Socket address structures
-// =============================================================================
 
 /// Generic socket address — compatible with POSIX `struct sockaddr`.
 #[repr(C)]
@@ -72,44 +47,31 @@ pub struct SockAddrIn {
     pub sin_zero: [u8; 8],
 }
 
-// Compile-time layout assertions
 const _: () = assert!(core::mem::size_of::<SockAddr>() == 16);
 const _: () = assert!(core::mem::size_of::<SockAddrIn>() == 16);
 
-// =============================================================================
-// Byte-order conversion
-// =============================================================================
-
-/// Convert host 16-bit to network byte order (big-endian).
 #[unsafe(no_mangle)]
 pub extern "C" fn htons(x: u16) -> u16 {
     x.to_be()
 }
 
-/// Convert network 16-bit to host byte order.
 #[unsafe(no_mangle)]
 pub extern "C" fn ntohs(x: u16) -> u16 {
     u16::from_be(x)
 }
 
-/// Convert host 32-bit to network byte order (big-endian).
 #[unsafe(no_mangle)]
 pub extern "C" fn htonl(x: u32) -> u32 {
     x.to_be()
 }
 
-/// Convert network 32-bit to host byte order.
 #[unsafe(no_mangle)]
 pub extern "C" fn ntohl(x: u32) -> u32 {
     u32::from_be(x)
 }
 
-// =============================================================================
-// Address parsing / formatting
-// =============================================================================
-
-/// Parse dotted-decimal IPv4 address string into network-byte-order u32.
-/// Returns `INADDR_NONE` on parse failure.
+/// Parse dotted-decimal IPv4 into a network-byte-order `u32`, or
+/// `INADDR_NONE` if the string does not parse.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn inet_addr(cp: *const u8) -> u32 {
     if cp.is_null() {
@@ -148,14 +110,14 @@ pub unsafe extern "C" fn inet_addr(cp: *const u8) -> u32 {
         return INADDR_NONE;
     }
 
-    // Return in network byte order (octets already in correct order)
+    // The octets are already in network order, so no swap.
     u32::from_ne_bytes(octets)
 }
 
-/// Format IPv4 address (network byte order u32) as dotted-decimal string.
-/// Returns pointer to a static buffer — NOT thread-safe.
 static mut INET_NTOA_BUF: [u8; 16] = [0u8; 16];
 
+/// Format a network-byte-order IPv4 `u32` as dotted decimal. The result points
+/// into a shared static buffer — NOT thread-safe.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn inet_ntoa(addr: u32) -> *const u8 {
     let bytes = addr.to_ne_bytes();

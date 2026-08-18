@@ -53,8 +53,7 @@ impl ReadyQueue {
         }
     }
 
-    /// Drop every linked task, releasing each one's parked owning reference as
-    /// we pop. Used during scheduler shutdown / per-CPU reinitialisation.
+    /// Drop every linked task, releasing each one's parked owning reference.
     fn clear_with_ref_release(&self) {
         while let Some(node) = self.list.pop() {
             let task = TaskRef::from_placement(node);
@@ -74,11 +73,8 @@ impl ReadyQueue {
     }
 
     /// Link a task whose placement has already been transitioned to
-    /// `SchedPlacement::ReadyQueue`.
-    ///
-    /// Takes the caller's handle rather than a pointer because membership
-    /// *mints* a reference: `task_placement_retain` is sound exactly because
-    /// the caller already holds a live one, which is what `&TaskRef` says.
+    /// `SchedPlacement::ReadyQueue`. Membership mints an owning reference,
+    /// which is sound because `&TaskRef` proves the caller holds a live one.
     ///
     /// Returns:
     /// - `0` when the task was newly linked and its owning reference parked;
@@ -88,7 +84,6 @@ impl ReadyQueue {
         let node = task.node();
         match self.list.push(node) {
             Ok(()) => {
-                // Membership now holds one owning reference to the task.
                 task_placement_retain(node);
                 0
             }
@@ -101,9 +96,8 @@ impl ReadyQueue {
     /// queue held.
     ///
     /// The membership reference is *moved* out rather than released: the
-    /// dispatcher needs a reference for the whole window between dequeue and
-    /// the switch, and releasing here would leave the task pinned by nothing
-    /// across that window — including an unbounded `on_cpu` spin.
+    /// dispatcher needs the task pinned across the whole window between
+    /// dequeue and the switch.
     fn dequeue(&self) -> Option<TaskRef> {
         let node = self.list.pop()?;
         let task = TaskRef::from_placement(node);
@@ -113,17 +107,10 @@ impl ReadyQueue {
     }
 
     /// Unlink a task and release the owning reference membership held.
-    ///
-    /// Borrows the task rather than taking a handle: removal *releases* the
-    /// queue's own reference and mints nothing, so the caller only has to
-    /// prove the task is there to be unlinked.
     fn remove(&self, task: &Task) -> i32 {
-        // Search with the borrow, reclaim with what the list hands back. The
-        // two addresses are equal but not interchangeable:
-        // `task_placement_reclaim` walks backwards out of the task body into
-        // the `KArc` header, which a pointer derived from a `&Task` has no
-        // provenance over. The list's own link pointer came from
-        // `KArc::node`, which does.
+        // Reclaim from the list's own link pointer, not from `task`: the
+        // reclaim walks backwards into the `KArc` header, which a pointer
+        // derived from a `&Task` has no provenance over.
         let Ok(node) = self.list.remove(NonNull::from(task)) else {
             return -1;
         };
@@ -135,20 +122,13 @@ impl ReadyQueue {
 
     /// Detach the tail task for migration, handing the thief the owning
     /// reference this queue held.
-    ///
-    /// As with [`ReadyQueue::dequeue`] the reference moves rather than being
-    /// released: a stolen task travels through the work-stealer, possibly
-    /// bouncing back to the victim, before any queue re-parks a reference for
-    /// it. Carrying the handle makes the `Migrating` window owned like every
-    /// other placement instead of relying on an anchor elsewhere.
     fn steal_from_tail(&self) -> Option<TaskRef> {
         if self.list.len() <= 1 {
             return None;
         }
         let last = self.list.iter().last()?;
-        // Borrowed through the membership this queue still holds rather than
-        // reclaimed: both CASes below can fail, and taking the reference first
-        // would release a membership the queue keeps.
+        // Borrowed, not reclaimed: both CASes below can fail, and taking the
+        // reference would release a membership the queue keeps.
         let claimed = with_parked_node(last, |task| {
             task.sched_placement_compare_exchange(
                 SchedPlacement::ReadyQueue,
@@ -175,15 +155,12 @@ const EMPTY_QUEUE: ReadyQueue = ReadyQueue::new();
 
 #[repr(C, align(64))]
 pub struct PriorityRunQueue {
-    /// Owning CPU id. Written once during `init`, read everywhere via
-    /// the `cpu_id` accessor; backed by `AtomicUsize` so the read path
-    /// stays in safe Rust without an `UnsafeCell` carve-out.
+    /// Owning CPU id, written once during `init`.
     cpu_id_atom: AtomicUsize,
     ready_queues: [ReadyQueue; NUM_PRIORITY_LEVELS],
     queue_lock: SpinLock<()>,
     pub enabled: AtomicBool,
-    /// Default time slice in ticks. Same `init`-once / read-everywhere
-    /// pattern as `cpu_id_atom`.
+    /// Default time slice in ticks, written once during `init`.
     time_slice_atom: AtomicU32,
     pub total_switches: AtomicU64,
     pub total_preemptions: AtomicU64,
@@ -221,7 +198,6 @@ impl PriorityRunQueue {
         }
     }
 
-    /// Owning CPU id, set once during `init`.
     #[inline]
     pub fn cpu_id(&self) -> usize {
         self.cpu_id_atom.load(Ordering::Relaxed)
@@ -235,10 +211,9 @@ impl PriorityRunQueue {
         self.executing_task.load(Ordering::SeqCst)
     }
 
-    /// Initialise this CPU's scheduler. Idempotent re-init across
-    /// test fixtures uses the same path; the only ordering contract
-    /// is that callers run this on the owning CPU during scheduler
-    /// bring-up before any task is enqueued onto it.
+    /// Initialise this CPU's scheduler. Must run on the owning CPU before any
+    /// task is enqueued onto it; idempotent, so test-fixture re-init shares
+    /// this path.
     pub fn init(&self, cpu_id: usize) {
         self.cpu_id_atom.store(cpu_id, Ordering::Relaxed);
         self.time_slice_atom.store(10, Ordering::Relaxed);
@@ -289,9 +264,8 @@ impl PriorityRunQueue {
         }
     }
 
-    /// Park a migrating task on this CPU while the caller keeps the handle it
-    /// carried across the `Migrating` window — the give-it-back paths, where
-    /// the carried reference is released separately.
+    /// Park a migrating task on this CPU; the caller keeps and separately
+    /// releases the handle it carried across the `Migrating` window.
     pub fn enqueue_migrated_borrowed(&self, task: &TaskRef) -> i32 {
         match self.enqueue_local_from_placement(task, SchedPlacement::Migrating) {
             0 | 1 => 0,
@@ -325,10 +299,9 @@ impl PriorityRunQueue {
         let body: &Task = task;
 
         let current = body.sched_placement();
-        // A never-published task is not enqueueable by anyone but its creator,
-        // and its creator goes through `publish_new_task`. `-1`, not `1`: `1`
-        // means "some queue already owns it", which would make the publish
-        // fallback believe the task landed somewhere.
+        // `-1`, not `1`: `1` means "some queue already owns it", which would
+        // make the publish fallback believe this never-published task landed
+        // somewhere.
         if current == SchedPlacement::Nascent {
             return -1;
         }
@@ -411,11 +384,10 @@ impl PriorityRunQueue {
         self.ready_queues.iter().map(|q| q.len()).sum()
     }
 
-    /// Pending cross-core wakes parked in this CPU's remote inbox. Like
-    /// [`Self::effective_load`], treat a non-null head as at least one entry:
-    /// `push_remote_wake` links the head before bumping `inbox_count`, so a
-    /// bare count can momentarily undercount. Used by `resume_all_aps` to wake a
-    /// paused AP that has an inbox wake but no ready-queue entry.
+    /// Pending cross-core wakes parked in this CPU's remote inbox. A non-null
+    /// head counts as at least one entry: `push_remote_wake` links the head
+    /// before bumping `inbox_count`, so a bare count can momentarily
+    /// undercount.
     pub fn inbox_count(&self) -> u32 {
         let inbox = self.inbox_count.load(Ordering::Relaxed);
         if inbox == 0 && !self.remote_inbox_head.load(Ordering::Acquire).is_null() {
@@ -425,25 +397,19 @@ impl PriorityRunQueue {
         }
     }
 
-    /// Returns the effective load on this CPU: queued tasks plus one if a
-    /// non-idle task is currently running.  Lock-free and approximate.
-    /// Mirrors Linux's `rq->nr_running` which includes the running task.
+    /// Effective load on this CPU: queued tasks plus one if a non-idle task is
+    /// currently running. Lock-free and approximate.
     pub fn effective_load(&self) -> u32 {
         let queued: u32 = self.ready_queues.iter().map(|q| q.len()).sum();
         let inbox = self.inbox_count.load(Ordering::Relaxed);
-        // push_remote_wake() links into remote_inbox_head BEFORE
-        // incrementing inbox_count, so treat a non-null head as at
-        // least one pending task to avoid undercounting.
         let inbox = if inbox == 0 && !self.remote_inbox_head.load(Ordering::Acquire).is_null() {
             1
         } else {
             inbox
         };
         let cpu_id = self.cpu_id();
-        // The bootstrap check still reads the slot raw: a stub is eight bytes
-        // and has no task identity to compare, so it is recognised by address
-        // range. Whether the CPU is on its *idle* task is pure identity, and
-        // that is what `TaskAddr` exists for.
+        // The bootstrap stub is eight bytes with no task identity to compare,
+        // so that check reads the slot raw and recognises it by address range.
         let raw_current = slopos_arch::pcr::get_current_task_for(cpu_id);
         let current = TaskAddr::current_of(cpu_id);
         let running_real = current.is_some()
@@ -457,8 +423,7 @@ impl PriorityRunQueue {
         }
     }
 
-    /// Reset inbox_count to zero.  For test fixtures only — clears stale
-    /// counts that leak between test runs due to SMP timing.
+    /// Clear the remote inbox and its count. Test fixtures only.
     #[cfg(feature = "test-hooks")]
     pub fn force_clear_inbox_count(&self) {
         self.clear_remote_inbox_with_ref_release();
@@ -511,10 +476,8 @@ impl PriorityRunQueue {
         self.schedule_calls.fetch_add(1, Ordering::Relaxed);
     }
 
-    /// Push a task to this CPU's remote wake inbox.
-    ///
-    /// This is a lock-free MPSC (multi-producer single-consumer) push.
-    /// Can be called from ANY CPU safely.
+    /// Push a task to this CPU's remote wake inbox. Lock-free MPSC push,
+    /// callable from any CPU.
     pub fn push_remote_wake(&self, task: &TaskRef) {
         let from = if task.sched_placement() == SchedPlacement::Waking {
             SchedPlacement::Waking
@@ -534,11 +497,9 @@ impl PriorityRunQueue {
         let node = task.node();
         let body: &Task = task;
 
-        // Cross-role runnable ownership comes before the intrusive link. A
-        // task already in a local ready queue, a remote inbox, an on-CPU
-        // switch window, or a migration handoff is already scheduler-owned;
-        // duplicate wakes are no-ops. This is the single gate that prevents
-        // the historical ready-queue + remote-inbox double-placement race.
+        // The single gate against ready-queue + remote-inbox double placement:
+        // a task already scheduler-owned in any placement makes a duplicate
+        // wake a no-op.
         let current = body.sched_placement();
         if current == SchedPlacement::ReadyQueue
             || current == SchedPlacement::RemoteWake
@@ -559,31 +520,25 @@ impl PriorityRunQueue {
             return -1;
         }
 
-        // Acquire single-membership before publishing task into the lock-free
-        // stack. The inbox uses the task's role-typed RemoteWakeRole Link: a
-        // tail node has a null successor while still queued, so membership must
-        // be tracked by the link's `linked` bit just like the ready queue.
+        // A tail node has a null successor while still queued, so membership is
+        // tracked by the link's `linked` bit rather than inferred from it.
         if !body.inbox_link().try_mark_linked() {
             let _ = body.sched_placement_compare_exchange(SchedPlacement::RemoteWake, from);
             return -1;
         }
 
-        // Park the inbox's owning reference before publishing the node so a
-        // drain that immediately swaps the head cannot drop the last reference
-        // before the producer has finished linking it.
+        // Park the inbox's reference before publishing the node: a drain that
+        // immediately swaps the head must not drop the last reference before
+        // the producer has finished linking it.
         body.set_last_cpu(self.cpu_id() as u8);
         task_placement_retain(node);
 
-        // Lock-free push using CAS loop (Treiber stack pattern)
         loop {
-            // Load current head
             let old_head = self.remote_inbox_head.load(Ordering::Acquire);
 
-            // Point our RemoteWakeRole link to the current head. The inbox
-            // reference parked above is what keeps this borrow live.
+            // The inbox reference parked above is what keeps this borrow live.
             body.inbox_link().store_relaxed(old_head);
 
-            // Try to become new head
             match self.remote_inbox_head.compare_exchange_weak(
                 old_head,
                 node.as_ptr(),
@@ -591,12 +546,10 @@ impl PriorityRunQueue {
                 Ordering::Acquire,
             ) {
                 Ok(_) => {
-                    // Success! Update count and return
                     self.inbox_count.fetch_add(1, Ordering::Relaxed);
                     return 0;
                 }
                 Err(_) => {
-                    // Lost race - retry
                     core::hint::spin_loop();
                 }
             }
@@ -606,11 +559,9 @@ impl PriorityRunQueue {
     /// Drain all tasks from remote inbox into local ready queues.
     /// MUST only be called by the owning CPU.
     ///
-    /// Each node's parked reference is *reclaimed first*, so every status read,
-    /// placement CAS and enqueue below is made through a handle this CPU owns.
-    /// The reclaim is refcount-neutral — it is the inverse of the producer's
-    /// park, not a second reference — so the drain still allocates nothing and
-    /// spends no extra atomic per task.
+    /// Each node's parked reference is reclaimed first — refcount-neutral, the
+    /// inverse of the producer's park — so every status read, placement CAS and
+    /// enqueue below is made through a handle this CPU owns.
     pub fn drain_remote_inbox(&self) {
         let head = self
             .remote_inbox_head
@@ -620,16 +571,13 @@ impl PriorityRunQueue {
             return;
         }
 
-        // The swap above detached the whole chain, so this CPU owns every node
-        // on it; reversing turns the producers' LIFO push order into FIFO drain
-        // order.
+        // Reversing turns the producers' LIFO push order into FIFO drain order.
         let (mut cursor, count) = slopos_ostd::task::reverse_detached_chain::<
             Task,
             slopos_ostd::task::RemoteWakeRole,
         >(head);
 
         while let Some(node) = NonNull::new(cursor) {
-            // Take the reference back before reading anything through it.
             let task = TaskRef::from_placement(node);
             let body: &Task = &task;
             let next = body.inbox_link().load();
@@ -641,10 +589,9 @@ impl PriorityRunQueue {
                     SchedPlacement::ReadyQueue,
                 )
             {
-                // The inbox owner transfers placement directly to its local
-                // ready queue. During this short handoff the task is
-                // scheduler-owned as ReadyQueue even before `ready_link` is
-                // linked, so a duplicate wake cannot publish a second entry.
+                // The task is scheduler-owned as ReadyQueue for this handoff
+                // even before `ready_link` is linked, so a duplicate wake
+                // cannot publish a second entry.
                 body.inbox_link().mark_unlinked();
                 if self.enqueue_local_preclaimed(&task) < 0 {
                     let _ = body.sched_placement_compare_exchange(
@@ -653,12 +600,10 @@ impl PriorityRunQueue {
                     );
                 }
             } else {
-                // The task is no longer Ready, or another owner repaired an
-                // inconsistent placement. Drop the remote-inbox claim, then
-                // re-check state. If a wake raced while producers observed
-                // `RemoteWake` and therefore no-op'd, this CPU performs the
-                // enqueue now; if the producer already enqueued after the
-                // release, `enqueue_local` sees non-None placement and no-ops.
+                // A wake that raced while producers saw `RemoteWake` was a
+                // no-op, so this CPU re-checks after dropping the claim; a
+                // producer that enqueued after the release leaves a non-None
+                // placement and `enqueue_local` no-ops.
                 body.inbox_link().mark_unlinked();
                 let _ = body.sched_placement_compare_exchange(
                     SchedPlacement::RemoteWake,
@@ -678,8 +623,7 @@ impl PriorityRunQueue {
         self.saturating_sub_inbox_count(count);
     }
 
-    /// Discard the whole inbox, releasing each parked reference. Same
-    /// reclaim-then-read shape as [`Self::drain_remote_inbox`].
+    /// Discard the whole inbox, releasing each parked reference.
     fn clear_remote_inbox_with_ref_release(&self) {
         let mut cursor = self
             .remote_inbox_head
@@ -720,7 +664,6 @@ impl PriorityRunQueue {
         }
     }
 
-    /// Check if inbox has pending tasks
     #[inline]
     pub fn has_pending_inbox(&self) -> bool {
         !self.remote_inbox_head.load(Ordering::Acquire).is_null()
@@ -730,12 +673,9 @@ impl PriorityRunQueue {
 use slopos_ostd::sync::CacheAligned;
 use slopos_ostd::sync::cpu_local::CpuLocal;
 
-/// The global preemptive priority scheduler. Owns one
-/// [`PriorityRunQueue`] per CPU through [`CpuLocal`], which guarantees
-/// per-slot pinning and cache-line alignment. The preemptive surface
-/// (block, unblock, sleep, `schedule_task`, …) lives as free functions
-/// in [`crate::scheduler`] and operates on raw `*mut Task` with manual
-/// refcount accounting.
+/// The global preemptive priority scheduler: one [`PriorityRunQueue`] per CPU
+/// through [`CpuLocal`], which pins and cache-line-aligns each slot. The
+/// preemptive surface lives as free functions in [`crate::scheduler`].
 pub struct PriorityScheduler {
     runqueues: CpuLocal<PriorityRunQueue>,
     pub enabled: AtomicBool,
@@ -751,28 +691,23 @@ impl PriorityScheduler {
         }
     }
 
-    /// Borrow the per-CPU [`PriorityRunQueue`] for `cpu_id`. Returns
-    /// `None` if `cpu_id` is out of range. Cross-CPU reads are valid
-    /// because every interior field is atomic / `SpinLock`-protected.
+    /// Borrow the per-CPU [`PriorityRunQueue`] for `cpu_id`. Cross-CPU reads
+    /// are valid because every interior field is atomic or `SpinLock`-guarded.
     #[inline]
     pub fn runqueue_for(&'static self, cpu_id: usize) -> Option<&'static PriorityRunQueue> {
         self.runqueues.snapshot_for_cpu(cpu_id)
     }
 }
 
-/// The global preemptive scheduler instance.
 pub static PRIORITY_SCHEDULER: PriorityScheduler = PriorityScheduler::new();
 
-/// Bounds-checked accessor over the per-CPU run queues. Thin
-/// delegate to [`PriorityScheduler::runqueue_for`].
 #[inline]
 fn cpu_scheduler(cpu_id: usize) -> Option<&'static PriorityRunQueue> {
     PRIORITY_SCHEDULER.runqueue_for(cpu_id)
 }
 
-/// `init_all_percpu_schedulers` init-once gate. `pub(crate)` so the
-/// `test_hermetic::SchedulersInitFlag` HermeticState impl can
-/// snapshot/restore it.
+/// `init_all_percpu_schedulers` init-once gate. `pub(crate)` for the
+/// `test_hermetic::SchedulersInitFlag` snapshot/restore.
 pub(crate) static SCHEDULERS_INIT: InitFlag = InitFlag::new();
 
 pub fn init_percpu_scheduler(cpu_id: usize) {
@@ -826,9 +761,6 @@ pub fn enqueue_task_on_cpu(cpu_id: usize, task: &TaskRef) -> i32 {
     }
 
     with_cpu_scheduler(cpu_id, |sched| match body.sched_placement() {
-        // A borrowed re-enqueue of a migrating task (the give-it-back path)
-        // parks a fresh membership reference; the caller still owns the handle
-        // it carried and releases it separately.
         SchedPlacement::Migrating => sched.enqueue_migrated_borrowed(task),
         SchedPlacement::Waking => sched.enqueue_waking(task),
         _ => sched.enqueue_local(task),
@@ -900,35 +832,23 @@ pub fn get_total_schedule_calls() -> u32 {
     total
 }
 
-/// Check whether a CPU is genuinely idle: no queued tasks AND no real
-/// (non-idle) task currently running.  Mirrors Linux's `idle_cpu()` which
-/// checks `rq->nr_running == 0` (their nr_running includes the running task).
+/// Genuinely idle: no queued tasks and no real (non-idle) task running.
 fn cpu_is_idle(cpu_id: usize) -> bool {
     with_cpu_scheduler(cpu_id, |sched| sched.effective_load() == 0).unwrap_or(false)
 }
 
 /// Select the best CPU for a waking task.
-///
-/// Inspired by Linux `select_task_rq_fair()` / `wake_affine_idle()`:
-///   1. Prefer `last_cpu` if it has no queued work (cache locality + idle).
-///   2. Prefer the waker's CPU if idle and affinity-compatible.
-///   3. Fall through to the globally least-loaded CPU.
-///   4. Last resort: `last_cpu` even if busy (keeps the task runnable).
 pub fn select_target_cpu(task: &Task) -> Option<usize> {
     let current_cpu = slopos_arch::pcr::get_current_cpu();
     let affinity = task.cpu_affinity();
     let last_cpu = task.last_cpu() as usize;
 
-    // 1. Prefer last_cpu when idle — cache-warm data is still there and
-    //    no contention.  Mirrors Linux wake_affine_idle(): "If prev_cpu is
-    //    idle and cache affine then avoid a migration."
+    // Prefer `last_cpu` when idle: its cache-warm data is still there.
     if is_schedulable_cpu(last_cpu, affinity) && cpu_is_idle(last_cpu) {
         return Some(last_cpu);
     }
 
-    // 2. If the waker's CPU is idle and compatible, use it.  The waker is
-    //    about to return to userspace or sleep, freeing the CPU shortly.
-    //    Mirrors Linux WF_SYNC / wake_affine_idle() this_cpu path.
+    // The waker is about to return to userspace or sleep, freeing its CPU.
     if current_cpu != last_cpu
         && is_schedulable_cpu(current_cpu, affinity)
         && cpu_is_idle(current_cpu)
@@ -936,31 +856,24 @@ pub fn select_target_cpu(task: &Task) -> Option<usize> {
         return Some(current_cpu);
     }
 
-    // 3. Neither last_cpu nor waker CPU is idle — find globally least loaded.
-    //    This spreads work across genuinely idle CPUs.
     if let Some(best_cpu) = find_least_loaded_cpu(affinity) {
         return Some(best_cpu);
     }
 
-    // 4. Fallback: last_cpu even if busy — keeps the task runnable.
     if is_schedulable_cpu(last_cpu, affinity) {
         return Some(last_cpu);
     }
 
-    // Boot-time fallback: allow queueing onto the current CPU before it is
-    // marked online/enabled, so pre-init tasks can be staged before enter_scheduler().
+    // Boot-time: stage pre-init tasks on the current CPU before it is marked
+    // online/enabled.
     if is_local_enqueue_fallback_cpu(current_cpu, affinity) {
         return Some(current_cpu);
     }
 
-    // Last resort, mirroring Linux `select_fallback_rq`: no *schedulable* CPU in
-    // the mask right now, but a permitted CPU may be merely transiently
-    // non-schedulable (an AP paused for a teardown, or mid-enable). Target it
-    // anyway rather than dropping to `None` and stranding the wake — the remote
-    // push parks it in that CPU's inbox and its next drain (idle-loop, tick, or
-    // reschedule IPI) runs it. Prefer `last_cpu` (cache-warm), else the
-    // lowest-index permitted online CPU. Only a mask with no online CPU at all
-    // yields `None`.
+    // Last resort: a permitted CPU may be merely transiently non-schedulable
+    // (an AP paused for a teardown, or mid-enable). Target it anyway rather
+    // than stranding the wake — the remote push parks it in that CPU's inbox
+    // and its next drain runs it. Only a mask with no online CPU yields `None`.
     if slopos_arch::pcr::is_cpu_online(last_cpu) && affinity_allows_cpu(affinity, last_cpu) {
         return Some(last_cpu);
     }
@@ -976,20 +889,16 @@ pub fn select_target_cpu(task: &Task) -> Option<usize> {
 
 /// Select the best CPU for a **newly created** task (fork, spawn, exec).
 ///
-/// Mirrors Linux's `WF_FORK` / `SD_BALANCE_FORK` slow path: bypasses
-/// `last_cpu` entirely (cache is cold for a new address space) and finds
-/// the globally idlest CPU.  A round-robin counter rotates the scan start
-/// so sequential forks spread evenly when all CPUs have equal load.
+/// Bypasses `last_cpu` entirely — cache is cold for a new address space — and
+/// goes straight to the globally idlest CPU.
 pub fn select_target_cpu_for_new(task: &Task) -> Option<usize> {
     let current_cpu = slopos_arch::pcr::get_current_cpu();
     let affinity = task.cpu_affinity();
 
-    // Go straight to the global idlest-CPU search — no last_cpu preference.
     if let Some(best_cpu) = find_idlest_cpu(affinity) {
         return Some(best_cpu);
     }
 
-    // Fallback: current CPU if schedulable.
     if is_schedulable_cpu(current_cpu, affinity) {
         return Some(current_cpu);
     }
@@ -1002,20 +911,16 @@ pub fn select_target_cpu_for_new(task: &Task) -> Option<usize> {
 }
 
 /// Find the CPU with the lowest effective load, using a round-robin starting
-/// position to break ties.  This mirrors Linux's `for_each_cpu_wrap()` in
-/// `sched_balance_find_dst_group_cpu()`.
-///
-/// The RR counter advances over the eligible set (not raw cpu_count) so
-/// that tie-breaking is fair when some CPUs are ineligible.
+/// position to break ties. The counter advances over the eligible set, not raw
+/// `cpu_count`, so tie-breaking stays fair when some CPUs are ineligible.
 fn find_idlest_cpu(affinity: u32) -> Option<usize> {
     let cpu_count = slopos_arch::pcr::get_cpu_count();
     if cpu_count == 0 {
         return None;
     }
 
-    // Heap-allocate the eligible-CPU list: a stack [usize; MAX_CPUS]
-    // is 2 KiB on its own and pushes this hot path over the
-    // stack-sizes gate.
+    // Heap, not stack: a `[usize; MAX_CPUS]` is 2 KiB on its own and pushes
+    // this frame over the stack-sizes gate.
     let mut eligible = match slopos_ostd::KVec::<usize>::zeroed(slopos_arch::MAX_CPUS) {
         Ok(v) => v,
         Err(_) => return None,
@@ -1031,7 +936,6 @@ fn find_idlest_cpu(affinity: u32) -> Option<usize> {
         return None;
     }
 
-    // Rotate start position so sequential calls spread across eligible CPUs.
     let start = FORK_RR_COUNTER.fetch_add(1, Ordering::Relaxed) % n_eligible;
 
     let mut best_cpu: Option<usize> = None;
@@ -1119,8 +1023,6 @@ fn find_least_loaded_cpu(affinity: u32) -> Option<usize> {
             continue;
         }
 
-        // Use effective_load (queued + running) so that a CPU running a
-        // real task is not considered equally idle to a truly idle CPU.
         if let Some(load) = with_cpu_scheduler(cpu_id, |sched| sched.effective_load()) {
             if load < min_load {
                 min_load = load;
@@ -1133,49 +1035,32 @@ fn find_least_loaded_cpu(affinity: u32) -> Option<usize> {
 }
 
 /// Whether `task` is the idle task of any CPU.
-///
-/// Pure identity: takes the compare-only [`TaskAddr`] rather than a pointer,
-/// so the answer cannot be used as a licence to read the task.
-///
-/// PCR.idle_task is the source of truth post-consolidation; the
-/// scheduler-copy field is kept in lockstep by `install_idle_task`
-/// until its deletion in a follow-up commit.
 pub fn is_idle_task(task: TaskAddr) -> bool {
     let cpu_count = slopos_arch::pcr::get_cpu_count();
     (0..cpu_count).any(|cpu_id| TaskAddr::idle_of(cpu_id) == Some(task))
 }
 
-// =============================================================================
-// AP Pause Mechanism
-// =============================================================================
-//
-// Parks every AP at its scheduler-loop poll point so the BSP can mutate
-// kernel-wide scheduler state with nothing racing it — kernel shutdown's task
-// sweep, and the hermetic test scope's snapshot/reset window.
+// The AP pause parks every AP at its scheduler-loop poll point so the BSP can
+// mutate kernel-wide scheduler state unraced — the shutdown task sweep and the
+// hermetic test scope's snapshot/reset window.
 
-/// Nesting depth of the AP pause. Non-zero parks every AP's scheduler loop at
-/// its poll point. A count rather than a flag because the holders are
-/// independent: two overlapping pauses that did not nest lexically would, under
-/// a flag, have the first release lift the second holder's pause out from under
-/// it.
+/// Nesting depth of the AP pause; non-zero parks every AP at its poll point. A
+/// count rather than a flag: under a flag, the first of two overlapping pauses
+/// to release would lift the second holder's pause out from under it.
 static AP_PAUSE_DEPTH: AtomicU32 = AtomicU32::new(0);
 
-/// Spin budget the pause wait spends polling the APs before it gives up. Each
-/// iteration is one scan of the online APs plus a `spin_loop` hint, so this
-/// bounds work rather than wall-clock time.
+/// Spin budget for the pause wait. Each iteration is one scan of the online APs
+/// plus a `spin_loop` hint, so this bounds work, not wall-clock time.
 const AP_PAUSE_SPIN_BUDGET: u32 = 100_000;
 
-/// Spin iterations between reschedule-IPI re-sends while waiting. An IPI that
-/// is lost or coalesced against a pending one would otherwise leave the wait
-/// back where it started — spinning for an AP that has not been provoked.
+/// Spin iterations between reschedule-IPI re-sends: an IPI that is lost or
+/// coalesced against a pending one would leave the wait spinning for an AP that
+/// was never provoked.
 const AP_PAUSE_NUDGE_INTERVAL: u32 = 16_384;
 
-/// Proof that one AP pause is held.
-///
-/// Minted only by a successful [`pause_all_aps`] and released by
-/// [`resume_all_aps_if_not_nested`], so the two cannot be written apart. Its
-/// `Drop` performs the same release as the explicit call, which is what keeps a
-/// panic between acquire and release from parking every AP permanently.
+/// Proof that one AP pause is held. `Drop` performs the same release as
+/// [`resume_all_aps_if_not_nested`], so a panic between acquire and release
+/// cannot park every AP permanently.
 #[must_use = "the pause is held until the token is released"]
 pub struct ApPauseToken {
     _private: (),
@@ -1191,8 +1076,7 @@ impl Drop for ApPauseToken {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ApPauseError {
     /// `cpu_id` was still executing a task after the whole spin budget. The
-    /// depth increment is rolled back before this is returned, so no AP is
-    /// parked on the failed caller's behalf and there is nothing to release.
+    /// depth increment is rolled back first, so there is nothing to release.
     Timeout { cpu_id: usize },
 }
 
@@ -1202,9 +1086,8 @@ pub enum ApPauseError {
 /// waiting, and the APs stay parked until the last token is released.
 ///
 /// Returns `Err` if an AP is still executing after the spin budget. A caller
-/// whose correctness rests on the APs being quiescent — a hermetic test scope,
-/// say — must treat that as a hard failure, because the alternative is to
-/// proceed against APs that are still free to race it.
+/// whose correctness rests on the APs being quiescent must treat that as a hard
+/// failure rather than proceed against APs still free to race it.
 pub fn pause_all_aps() -> Result<ApPauseToken, ApPauseError> {
     let outermost = AP_PAUSE_DEPTH.fetch_add(1, Ordering::SeqCst) == 0;
     if !outermost {
@@ -1212,8 +1095,8 @@ pub fn pause_all_aps() -> Result<ApPauseToken, ApPauseError> {
     }
 
     // The depth increment must be visible to an AP before this CPU reads that
-    // AP's executing flag; otherwise a CPU that dispatched just ahead of the
-    // increment reads back as parked and the wait ends early.
+    // AP's executing flag, or a CPU that dispatched just ahead of the increment
+    // reads back as parked and the wait ends early.
     core::sync::atomic::fence(Ordering::SeqCst);
 
     match wait_for_aps_to_park(slopos_arch::pcr::get_cpu_count()) {
@@ -1225,7 +1108,6 @@ pub fn pause_all_aps() -> Result<ApPauseToken, ApPauseError> {
     }
 }
 
-/// The lowest-numbered AP currently executing a task, if any.
 fn executing_ap(cpu_count: usize) -> Option<usize> {
     (1..cpu_count)
         .find(|&cpu_id| with_cpu_scheduler(cpu_id, |sched| sched.is_executing_task()) == Some(true))
@@ -1236,9 +1118,9 @@ fn wait_for_aps_to_park(cpu_count: usize) -> Result<(), ApPauseError> {
         return Ok(());
     }
 
-    // An AP holds `executing_task` for as long as its task runs, so waiting for
-    // it to reach its poll point unprovoked is a wait on that task yielding.
-    // The reschedule IPI turns it into a wait on interrupt latency.
+    // An AP holds `executing_task` for as long as its task runs, so waiting
+    // unprovoked is a wait on that task yielding; the reschedule IPI turns it
+    // into a wait on interrupt latency.
     nudge_aps_to_poll_point(cpu_count);
 
     for iteration in 0..AP_PAUSE_SPIN_BUDGET {
@@ -1271,10 +1153,8 @@ fn release_ap_pause_depth() {
 
     let cpu_count = slopos_arch::pcr::get_cpu_count();
     for cpu_id in 1..cpu_count {
-        // Wake an AP that has ready work OR a cross-core wake parked in its
-        // inbox. Gating only on the ready count would leave an inbox-parked
-        // wake (pushed while this AP was paused during a task teardown) waiting
-        // for the next timer tick instead of resuming promptly on the IPI.
+        // Gating only on the ready count would leave an inbox-parked wake
+        // waiting for the next timer tick instead of resuming on the IPI.
         if let Some((ready, inbox)) = with_cpu_scheduler(cpu_id, |sched| {
             (sched.total_ready_count(), sched.inbox_count())
         }) {
@@ -1291,13 +1171,11 @@ pub fn resume_all_aps_if_not_nested(token: ApPauseToken) {
     drop(token);
 }
 
-/// Check if APs should be paused.
 #[inline]
 pub fn are_aps_paused() -> bool {
     AP_PAUSE_DEPTH.load(Ordering::Acquire) != 0
 }
 
-/// How many AP pauses are outstanding. Zero means the APs are running.
 #[inline]
 pub fn ap_pause_depth() -> u32 {
     AP_PAUSE_DEPTH.load(Ordering::Acquire)
@@ -1308,7 +1186,7 @@ pub fn should_pause_scheduler_loop(cpu_id: usize) -> bool {
     cpu_id != 0 && are_aps_paused()
 }
 
-/// Clear all ready queues for a specific CPU. Used during test reinitialization.
+/// Clear one CPU's ready queues and its remote inbox.
 pub fn clear_cpu_queues(cpu_id: usize) {
     if cpu_id >= MAX_CPUS {
         return;
@@ -1324,7 +1202,6 @@ pub fn clear_cpu_queues(cpu_id: usize) {
     sched.clear_remote_inbox_with_ref_release();
 }
 
-/// Clear all per-CPU ready queues across all CPUs. Used during scheduler shutdown.
 pub fn clear_all_cpu_queues() {
     let cpu_count = slopos_arch::pcr::get_cpu_count();
     for cpu_id in 0..cpu_count {

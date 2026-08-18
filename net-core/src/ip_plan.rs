@@ -4,39 +4,28 @@
 //! ip [-br|-brief] [-s|-stats] [-n|-numeric] OBJECT [COMMAND] [ARGS...]
 //! ```
 //!
-//! Every user-visible decision `ip` makes is here and none of it needs a
-//! kernel, which is what makes the grammar testable on the host: [`parse`]
-//! turns bytes into a [`Plan`], and only the caller turns a [`Plan`] into
-//! syscalls.
+//! [`parse`] turns bytes into a [`Plan`] and only the caller turns a [`Plan`]
+//! into syscalls, which is what makes the grammar testable on the host.
 //!
-//! Three rules shape the grammar.
-//!
-//! **Options precede the object.** `ip -br link show` is accepted and
-//! `ip link show -br` is [`IpError::OptionAfterObject`]. iproute2 is lenient
-//! here, but leniency makes "is this token an option or an operand?" depend on
-//! everything parsed so far; the strict rule is stateless, so every token after
-//! the object is an operand and there is nothing to get subtly wrong. Options
-//! are multi-character words rather than single letters, so they do not bundle:
-//! `-brs` is not `-br -s`.
+//! **Options precede the object.** `ip link show -br` is
+//! [`IpError::OptionAfterObject`]: the strict rule is stateless, so every token
+//! after the object is an operand. Options are multi-character words rather
+//! than single letters, so they do not bundle: `-brs` is not `-br -s`.
 //!
 //! **Abbreviation applies to the object and the command, never to an operand.**
-//! `ip a` is `ip addr` and `ip li sh` is `ip link show`, because those tokens
-//! are drawn from a closed table this crate owns. A device name, an address or
-//! a keyword operand is never abbreviated: those come from the outside world,
-//! so a prefix match against them would mean the meaning of a command changes
-//! when a new interface appears. The real collisions are kept rather than
-//! broken by renaming: `d` is ambiguous between `dhcp` and `dns`, `n` and `ne`
-//! between `neigh` and `net`, `s` between `show` and `set`, and each reports
-//! the candidates. Renaming `net` to dodge the `neigh` collision would trade a
-//! reported ambiguity for a name nobody would guess.
+//! Objects and commands are drawn from closed tables this crate owns; a device
+//! name, an address or a keyword operand comes from the outside world, where a
+//! prefix match would mean a new interface changes what a command means. The
+//! real collisions are reported with their candidates rather than broken by
+//! renaming: `d` between `dhcp` and `dns`, `n` and `ne` between `neigh` and
+//! `net`, `s` between `show` and `set`.
 //!
 //! **An omitted command means `show`**, except `ip dhcp`, which means
-//! `ip dhcp status` — there is nothing to "show" about a client, and `status`
-//! is what a person typing `ip dhcp` wants. A bare `ip` is [`IpError::Usage`].
+//! `ip dhcp status`. A bare `ip` is [`IpError::Usage`].
 //!
 //! Tokens are `&[u8]` throughout: interface names are bytes in the ABI, so
 //! keeping them bytes avoids a UTF-8 check that could reject a name the kernel
-//! accepts, and it is what lets the parser live in a `no_std` crate.
+//! accepts.
 
 use slopos_abi::net::{NET_IFNAMSIZ, NET_MAX_RESOLVERS};
 
@@ -56,16 +45,13 @@ const NEIGH_COMMANDS: [&str; 3] = ["del", "flush", "show"];
 const DHCP_COMMANDS: [&str; 5] = ["release", "renew", "start", "status", "stop"];
 const DNS_COMMANDS: [&str; 2] = ["set", "show"];
 const STATUS_COMMANDS: [&str; 1] = ["show"];
-/// `on`/`off` are the words a person reaches for and `enable`/`disable` are
-/// the words a script written against another tool already has, so both are
-/// accepted rather than one being canonical. They collide on `o`, which is
-/// reported like any other ambiguity.
+/// `on`/`off` and `enable`/`disable` are both accepted rather than one being
+/// canonical; they collide on `o`, reported like any other ambiguity.
 const NET_COMMANDS: [&str; 5] = ["disable", "enable", "off", "on", "show"];
 
-/// Every word the grammar can print back at a person: object names, command
-/// names, keyword operands, option spellings. A help renderer draws from this,
-/// and the crate's glyph-coverage test holds all of it to what the console
-/// font can draw.
+/// Every word the grammar can print back at a person. A help renderer draws
+/// from this, and the crate's glyph-coverage test holds all of it to what the
+/// console font can draw.
 pub const ALL_GRAMMAR_WORDS: &[&str] = &[
     "addr", "dhcp", "dns", "help", "link", "monitor", "neigh", "route", "status", "set", "show",
     "add", "del", "flush", "release", "renew", "start", "stop", "dev", "via", "default", "up",
@@ -160,8 +146,7 @@ pub enum RouteDest {
     Prefix(Cidr),
 }
 
-/// A parsed command. Holding no file descriptors and performing no syscalls is
-/// the point: the grammar is decided here and executed elsewhere.
+/// A parsed command; the grammar is decided here and executed elsewhere.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Plan<'a> {
     LinkShow {
@@ -253,9 +238,9 @@ pub struct Invocation<'a> {
 
 /// Why a command line is not a command.
 ///
-/// The offending token travels with the error so a caller can name it, and the
-/// ambiguous variants carry the table they were resolved against so the
-/// message can list the candidates ([`crate::argv::matches`] produces them).
+/// The offending token travels with the error, and the ambiguous variants carry
+/// the table they were resolved against so a message can list the candidates
+/// ([`crate::argv::matches`] produces them).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum IpError<'a> {
     /// Nothing was asked for.
@@ -481,15 +466,13 @@ fn dispatch<'a>(
             Ok(Plan::Status)
         }
 
-        // Unreachable: `command` came from the table `object` names, and every
-        // pair in those tables is handled above.
+        // Unreachable: every (object, command) pair in the tables is handled above.
         _ => Err(IpError::Usage),
     }
 }
 
 /// `ip link set DEV up|down`. The device comes first: `ip link set up eth0`
-/// reads `up` as the device and then finds no verb, which is the error the
-/// wrong order deserves.
+/// reads `up` as the device and then finds no verb.
 fn parse_link_set<'a>(operands: &[&'a [u8]]) -> Result<Plan<'a>, IpError<'a>> {
     let mut rest = Tokens::new(operands);
     let dev_token = rest.next().ok_or(IpError::MissingOperand)?;
@@ -514,9 +497,8 @@ fn parse_cidr_dev<'a>(operands: &[&'a [u8]]) -> Result<(Cidr, &'a [u8]), IpError
     Ok((cidr, dev))
 }
 
-/// `default|CIDR via IP dev DEV`. `via` and `dev` are both required: a route
-/// with neither is not a route, and guessing either from the address would be
-/// a guess the routing table then acts on.
+/// `default|CIDR via IP dev DEV`. Both `via` and `dev` are required; guessing
+/// either from the address would be a guess the routing table then acts on.
 fn parse_route_add<'a>(operands: &[&'a [u8]]) -> Result<Plan<'a>, IpError<'a>> {
     let mut rest = Tokens::new(operands);
     let dest_token = rest.next().ok_or(IpError::MissingOperand)?;
@@ -556,9 +538,7 @@ fn parse_dest(token: &[u8]) -> Result<RouteDest, IpError<'_>> {
 }
 
 /// A trailing `[dev DEV]` or bare `[DEV]`, as every `show` and `flush` takes.
-/// Both spellings are accepted because `ip addr show dev eth0` is the form
-/// muscle memory produces and `ip addr show eth0` is the form that is shorter;
-/// an interface actually named `dev` is reachable as the one-token form.
+/// An interface actually named `dev` is reachable as the one-token form.
 fn optional_dev<'a>(operands: &[&'a [u8]]) -> Result<Option<&'a [u8]>, IpError<'a>> {
     match operands {
         [] => Ok(None),
@@ -581,15 +561,12 @@ fn exactly_one_dev<'a>(operands: &[&'a [u8]]) -> Result<&'a [u8], IpError<'a>> {
 /// A cursor over one command's operand tokens.
 ///
 /// A named type rather than an `impl Iterator<Item = &'a [u8]>` bound: check 8
-/// of `scripts/check_task_ownership.sh` parses the generic list, the argument
-/// list and the return type but deliberately not the `where` clause, so an
-/// associated-type equality bound reads to it as a lifetime the caller may pick
-/// freely. That over-report has no exemption mechanism, so `'a` has to be
-/// visible in the argument list itself.
+/// of `scripts/check_task_ownership.sh` deliberately does not parse the `where`
+/// clause, so an associated-type equality bound reads to it as a lifetime the
+/// caller may pick freely, and that over-report has no exemption mechanism.
 ///
-/// Two lifetimes rather than one: `'t` is the operand slice, which lives on
-/// `parse`'s stack, and `'a` is the token bytes, which outlive the parse and
-/// travel out in the [`Plan`].
+/// `'t` is the operand slice, which lives on `parse`'s stack; `'a` is the token
+/// bytes, which outlive the parse and travel out in the [`Plan`].
 struct Tokens<'t, 'a> {
     rest: &'t [&'a [u8]],
 }
@@ -599,7 +576,6 @@ impl<'t, 'a> Tokens<'t, 'a> {
         Tokens { rest: operands }
     }
 
-    /// Take the next token, or `None` at the end.
     fn next(&mut self) -> Option<&'a [u8]> {
         let (first, rest) = self.rest.split_first()?;
         self.rest = rest;
@@ -618,7 +594,6 @@ fn expect_keyword_value<'a>(
     }
 }
 
-/// Everything the grammar wanted was found; anything left over is an error.
 fn require_end<'a>(rest: &mut Tokens<'_, 'a>) -> Result<(), IpError<'a>> {
     if rest.next().is_some() {
         Err(IpError::TrailingOperand)
@@ -666,8 +641,6 @@ mod tests {
         run(line).expect_err("expected an error")
     }
 
-    // -- objects, commands, abbreviation ------------------------------------
-
     #[test]
     fn bare_ip_is_usage() {
         assert_eq!(err(&[]), IpError::Usage);
@@ -706,18 +679,12 @@ mod tests {
         );
     }
 
-    /// `ip net` reaches the master switch, in both vocabularies.
-    ///
-    /// `on`/`off` and `enable`/`disable` are the same plan rather than two,
-    /// because a switch has two positions and a caller should not have to know
-    /// which word this tool prefers.
     #[test]
     fn net_switch_accepts_both_vocabularies() {
         assert_eq!(plan(&[b"net", b"on"]), Plan::NetSet { enabled: true });
         assert_eq!(plan(&[b"net", b"enable"]), Plan::NetSet { enabled: true });
         assert_eq!(plan(&[b"net", b"off"]), Plan::NetSet { enabled: false });
         assert_eq!(plan(&[b"net", b"disable"]), Plan::NetSet { enabled: false });
-        // Command abbreviation still applies; only `o` is ambiguous.
         assert_eq!(plan(&[b"net", b"en"]), Plan::NetSet { enabled: true });
         assert_eq!(plan(&[b"net", b"dis"]), Plan::NetSet { enabled: false });
     }
@@ -729,9 +696,6 @@ mod tests {
         assert_eq!(plan(&[b"net", b"s"]), Plan::NetShow);
     }
 
-    /// The switch takes no operand at all: it addresses the stack, not an
-    /// interface, so `ip net on eth0` is a request the ABI cannot express and
-    /// must be refused rather than quietly ignoring the device.
     #[test]
     fn net_takes_no_operand() {
         assert_eq!(err(&[b"net", b"on", b"eth0"]), IpError::TrailingOperand);
@@ -755,8 +719,6 @@ mod tests {
         }
     }
 
-    /// One more character each way disambiguates, and `net` resolves by exact
-    /// match despite `neigh` sharing its first two letters.
     #[test]
     fn one_more_character_resolves_the_collision() {
         assert_eq!(plan(&[b"nei"]), Plan::NeighShow { dev: None });
@@ -764,8 +726,6 @@ mod tests {
         assert_eq!(plan(&[b"net"]), Plan::NetShow);
     }
 
-    /// Every object's shortest abbreviation resolves to the object it names,
-    /// and a collision is reported rather than silently bound to one candidate.
     #[test]
     fn existing_abbreviations_are_unmoved() {
         assert_eq!(plan(&[b"a"]), Plan::AddrShow { dev: None });
@@ -782,7 +742,7 @@ mod tests {
             }
         );
         // `s` prefixes only `status` among the objects; the `show`/`set`
-        // collision the module doc names lives in the command tables.
+        // collision lives in the command tables.
         assert_eq!(plan(&[b"s"]), Plan::Status);
     }
 
@@ -814,12 +774,10 @@ mod tests {
         };
         assert_eq!(token, b"s");
         assert_eq!(crate::argv::matches(token, table).count(), 2);
-        // `link` has the same collision.
         assert!(matches!(
             err(&[b"link", b"s"]),
             IpError::AmbiguousCommand { .. }
         ));
-        // And `dhcp` collides on `st` across start/status/stop.
         assert!(matches!(
             err(&[b"dhcp", b"st", b"eth0"]),
             IpError::AmbiguousCommand { .. }
@@ -851,15 +809,12 @@ mod tests {
                 object: Object::Link
             }
         );
-        // An operand where a command belongs is an unknown command, not a
-        // device: `ip link eth0` never meant `ip link show eth0`.
+        // An operand where a command belongs is an unknown command, not a device.
         assert!(matches!(
             err(&[b"link", b"eth0"]),
             IpError::UnknownCommand { .. }
         ));
     }
-
-    // -- options -------------------------------------------------------------
 
     #[test]
     fn options_precede_the_object() {
@@ -916,14 +871,11 @@ mod tests {
             err(&[b"-z", b"link"]),
             IpError::UnknownOption { token: b"-z" }
         );
-        // Options do not bundle: `-brs` is not `-br -s`.
         assert_eq!(
             err(&[b"-brs", b"link"]),
             IpError::UnknownOption { token: b"-brs" }
         );
     }
-
-    // -- link ----------------------------------------------------------------
 
     #[test]
     fn link_set_up_and_down() {
@@ -976,8 +928,6 @@ mod tests {
         assert_eq!(plan(&[b"help"]), Plan::Help { object: None });
         assert_eq!(err(&[b"help", b"link"]), IpError::TrailingOperand);
     }
-
-    // -- addr ----------------------------------------------------------------
 
     #[test]
     fn addr_add_and_del() {
@@ -1044,8 +994,6 @@ mod tests {
             Plan::AddrFlush { dev: Some(b"eth0") }
         );
     }
-
-    // -- route ---------------------------------------------------------------
 
     #[test]
     fn route_add_default() {
@@ -1150,8 +1098,6 @@ mod tests {
         assert_eq!(err(&[b"route", b"del"]), IpError::MissingOperand);
     }
 
-    // -- neigh ---------------------------------------------------------------
-
     #[test]
     fn neigh_show_del_and_flush() {
         assert_eq!(plan(&[b"neigh"]), Plan::NeighShow { dev: None });
@@ -1182,8 +1128,6 @@ mod tests {
         );
     }
 
-    // -- dhcp ----------------------------------------------------------------
-
     #[test]
     fn dhcp_verbs_take_a_bare_device() {
         assert_eq!(
@@ -1200,8 +1144,6 @@ mod tests {
             IpError::TrailingOperand
         );
     }
-
-    // -- dns -----------------------------------------------------------------
 
     #[test]
     fn dns_show_and_set() {
@@ -1239,8 +1181,6 @@ mod tests {
         assert_eq!(err(&[b"dns", b"show", b"extra"]), IpError::TrailingOperand);
     }
 
-    // -- monitor and status --------------------------------------------------
-
     #[test]
     fn monitor_takes_an_optional_filter() {
         assert_eq!(plan(&[b"monitor"]), Plan::Monitor { filter: None });
@@ -1270,8 +1210,6 @@ mod tests {
         );
     }
 
-    // -- device-name validation ----------------------------------------------
-
     #[test]
     fn device_names_are_validated() {
         assert_eq!(
@@ -1286,7 +1224,6 @@ mod tests {
             err(&[b"link", b"set", b"../etc", b"up"]),
             IpError::BadDevice { token: b"../etc" }
         );
-        // NET_IFNAMSIZ bytes fit; one more does not.
         let exact: &[u8] = b"0123456789abcdef";
         assert_eq!(exact.len(), NET_IFNAMSIZ);
         assert_eq!(
@@ -1302,17 +1239,14 @@ mod tests {
 
     #[test]
     fn objects_and_commands_are_never_abbreviated_in_operand_position() {
-        // `up` is a keyword, not a prefix-matched token: `u` is not `up`.
         assert_eq!(
             err(&[b"link", b"set", b"eth0", b"u"]),
             IpError::MissingKeyword("up|down")
         );
-        // `dev` likewise.
         assert_eq!(
             err(&[b"addr", b"add", b"10.0.0.1/24", b"d", b"eth0"]),
             IpError::MissingKeyword("dev")
         );
-        // And `default` is spelled out.
         assert_eq!(
             err(&[b"route", b"del", b"def"]),
             IpError::BadCidr { token: b"def" }

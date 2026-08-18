@@ -7,10 +7,6 @@ use slopos_testing::{assert_eq_test, assert_test, pass};
 
 use crate::types::*;
 
-// =============================================================================
-// 1.T6 — Ipv4Addr methods
-// =============================================================================
-
 pub fn test_ipv4_addr_constants() -> TestResult {
     assert_test!(
         Ipv4Addr::UNSPECIFIED.is_unspecified(),
@@ -110,7 +106,6 @@ pub fn test_ipv4_addr_in_subnet() -> TestResult {
         "10.0.0.1 not in /24"
     );
 
-    // /16 subnet
     let net16 = Ipv4Addr([10, 0, 0, 0]);
     let mask16 = Ipv4Addr([255, 255, 0, 0]);
     assert_test!(
@@ -130,7 +125,6 @@ pub fn test_ipv4_addr_byte_conversions() -> TestResult {
     let roundtrip = Ipv4Addr::from_u32_be(as_u32);
     assert_eq_test!(addr, roundtrip, "u32_be round-trip");
 
-    // Known value: 192.168.1.1 = 0xC0A80101
     assert_eq_test!(as_u32, 0xC0A8_0101u32, "192.168.1.1 = 0xC0A80101");
 
     let from_bytes = Ipv4Addr::from_bytes([10, 0, 2, 15]);
@@ -151,31 +145,23 @@ pub fn test_ipv4_addr_unspecified() -> TestResult {
     pass!()
 }
 
-// =============================================================================
-// 1.T7 — Port byte-order conversions
-// =============================================================================
-
 pub fn test_port_network_bytes_roundtrip() -> TestResult {
     let port = Port::new(8080);
     let net_bytes = port.to_network_bytes();
     let roundtrip = Port::from_network_bytes(net_bytes);
     assert_eq_test!(port, roundtrip, "network bytes round-trip");
 
-    // 8080 in big-endian = [0x1F, 0x90]
     assert_eq_test!(net_bytes, [0x1F, 0x90], "8080 network bytes");
     pass!()
 }
 
 pub fn test_port_well_known_values() -> TestResult {
-    // Port 80 in big-endian = [0x00, 0x50]
     let http = Port::new(80);
     assert_eq_test!(http.to_network_bytes(), [0x00, 0x50], "port 80 bytes");
 
-    // Port 443 in big-endian = [0x01, 0xBB]
     let https = Port::new(443);
     assert_eq_test!(https.to_network_bytes(), [0x01, 0xBB], "port 443 bytes");
 
-    // Port 53 (DNS) in big-endian = [0x00, 0x35]
     let dns = Port::new(53);
     assert_eq_test!(dns.to_network_bytes(), [0x00, 0x35], "port 53 bytes");
     pass!()
@@ -213,10 +199,6 @@ pub fn test_port_as_u16() -> TestResult {
     pass!()
 }
 
-// =============================================================================
-// MacAddr tests
-// =============================================================================
-
 pub fn test_mac_addr_constants() -> TestResult {
     assert_test!(MacAddr::BROADCAST.is_broadcast(), "BROADCAST is broadcast");
     assert_test!(MacAddr::ZERO.is_zero(), "ZERO is zero");
@@ -229,13 +211,11 @@ pub fn test_mac_addr_multicast() -> TestResult {
     // Broadcast is also multicast (bit 0 of first octet is set)
     assert_test!(MacAddr::BROADCAST.is_multicast(), "broadcast is multicast");
 
-    // Multicast: first octet has LSB set
     assert_test!(
         MacAddr([0x01, 0x00, 0x5e, 0x00, 0x00, 0x01]).is_multicast(),
         "01:00:5e:00:00:01 is multicast"
     );
 
-    // Unicast: first octet has LSB clear
     assert_test!(
         !MacAddr([0x00, 0x1a, 0x2b, 0x3c, 0x4d, 0x5e]).is_multicast(),
         "unicast MAC is not multicast"
@@ -257,19 +237,11 @@ pub fn test_mac_addr_as_bytes() -> TestResult {
     pass!()
 }
 
-// =============================================================================
-// DevIndex tests
-// =============================================================================
-
 pub fn test_dev_index_equality() -> TestResult {
     assert_eq_test!(DevIndex(0), DevIndex(0), "same index equal");
     assert_test!(DevIndex(0) != DevIndex(1), "different indices not equal");
     pass!()
 }
-
-// =============================================================================
-// NetError tests
-// =============================================================================
 
 pub fn test_net_error_errno_mapping() -> TestResult {
     // Spot-check critical errno values against Linux constants
@@ -317,7 +289,6 @@ pub fn test_net_error_errno_mapping() -> TestResult {
 }
 
 pub fn test_net_error_all_negative() -> TestResult {
-    // Every errno must be negative
     let all = [
         NetError::WouldBlock,
         NetError::ConnectionRefused,
@@ -346,14 +317,10 @@ pub fn test_net_error_all_negative() -> TestResult {
     pass!()
 }
 
-// =============================================================================
-// SockAddr tests
-// =============================================================================
-
 pub fn test_sock_addr_from_user_valid() -> TestResult {
     let raw = SockAddrIn {
         family: AF_INET,
-        port: 8080u16.to_be(), // network byte order
+        port: 8080u16.to_be(),
         addr: [10, 0, 2, 15],
         _pad: [0; 8],
     };
@@ -389,10 +356,8 @@ pub fn test_sock_addr_to_user_roundtrip() -> TestResult {
     let raw = addr.to_user();
     assert_eq_test!(raw.family, AF_INET, "family is AF_INET");
     assert_eq_test!(raw.addr, [192, 168, 1, 1], "addr preserved");
-    // Port should be in network byte order in the SockAddrIn
     assert_eq_test!(raw.port, 443u16.to_be(), "port in network byte order");
 
-    // Full round-trip: to_user -> from_user should give back the original
     let roundtrip = match SockAddr::from_user(&raw) {
         Ok(a) => a,
         Err(_) => return slopos_testing::fail!("round-trip from_user failed"),
@@ -408,10 +373,6 @@ pub fn test_sock_addr_unspecified() -> TestResult {
     assert_eq_test!(raw.port, 0u16, "port 0");
     pass!()
 }
-
-// =============================================================================
-// EtherType tests
-// =============================================================================
 
 pub fn test_ether_type_from_u16() -> TestResult {
     assert_eq_test!(
@@ -435,10 +396,6 @@ pub fn test_ether_type_as_u16() -> TestResult {
     pass!()
 }
 
-// =============================================================================
-// IpProtocol tests
-// =============================================================================
-
 pub fn test_ip_protocol_from_u8() -> TestResult {
     assert_eq_test!(IpProtocol::from_u8(1), Some(IpProtocol::Icmp), "1 = ICMP");
     assert_eq_test!(IpProtocol::from_u8(6), Some(IpProtocol::Tcp), "6 = TCP");
@@ -456,11 +413,6 @@ pub fn test_ip_protocol_as_u8() -> TestResult {
     pass!()
 }
 
-// =============================================================================
-// Test suite registration
-// =============================================================================
-
-// Ipv4Addr (1.T6)
 slopos_testing::stest!(name = test_ipv4_addr_constants, suite = net_types);
 slopos_testing::stest!(name = test_ipv4_addr_loopback, suite = net_types);
 slopos_testing::stest!(name = test_ipv4_addr_broadcast, suite = net_types);
@@ -468,21 +420,16 @@ slopos_testing::stest!(name = test_ipv4_addr_multicast, suite = net_types);
 slopos_testing::stest!(name = test_ipv4_addr_in_subnet, suite = net_types);
 slopos_testing::stest!(name = test_ipv4_addr_byte_conversions, suite = net_types);
 slopos_testing::stest!(name = test_ipv4_addr_unspecified, suite = net_types);
-// Port (1.T7)
 slopos_testing::stest!(name = test_port_network_bytes_roundtrip, suite = net_types);
 slopos_testing::stest!(name = test_port_well_known_values, suite = net_types);
 slopos_testing::stest!(name = test_port_ranges, suite = net_types);
 slopos_testing::stest!(name = test_port_as_u16, suite = net_types);
-// MacAddr
 slopos_testing::stest!(name = test_mac_addr_constants, suite = net_types);
 slopos_testing::stest!(name = test_mac_addr_multicast, suite = net_types);
 slopos_testing::stest!(name = test_mac_addr_as_bytes, suite = net_types);
-// DevIndex
 slopos_testing::stest!(name = test_dev_index_equality, suite = net_types);
-// NetError
 slopos_testing::stest!(name = test_net_error_errno_mapping, suite = net_types);
 slopos_testing::stest!(name = test_net_error_all_negative, suite = net_types);
-// SockAddr
 slopos_testing::stest!(name = test_sock_addr_from_user_valid, suite = net_types);
 slopos_testing::stest!(
     name = test_sock_addr_from_user_invalid_family,
@@ -490,9 +437,7 @@ slopos_testing::stest!(
 );
 slopos_testing::stest!(name = test_sock_addr_to_user_roundtrip, suite = net_types);
 slopos_testing::stest!(name = test_sock_addr_unspecified, suite = net_types);
-// EtherType
 slopos_testing::stest!(name = test_ether_type_from_u16, suite = net_types);
 slopos_testing::stest!(name = test_ether_type_as_u16, suite = net_types);
-// IpProtocol
 slopos_testing::stest!(name = test_ip_protocol_from_u8, suite = net_types);
 slopos_testing::stest!(name = test_ip_protocol_as_u8, suite = net_types);

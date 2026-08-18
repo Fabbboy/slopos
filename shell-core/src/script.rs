@@ -1,9 +1,4 @@
 //! Line framing for shell script input.
-//!
-//! See the crate docs for why this reads one byte at a time. The short version:
-//! the descriptor a script arrives on is the same descriptor its commands
-//! inherit, so anything the framer buffers is either lost or stolen from a
-//! child. Consuming exactly the line being returned is the whole contract.
 
 /// Why a [`ByteSource`] read did not produce a byte.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -17,7 +12,7 @@ pub enum SourceError {
 /// A byte-granular input the framer pulls from.
 ///
 /// `Ok(0)` means end of input. Implementations are only ever asked for one
-/// byte, so a short read is not a case callers have to think about.
+/// byte.
 pub trait ByteSource {
     fn read(&mut self, buf: &mut [u8]) -> Result<usize, SourceError>;
 }
@@ -28,13 +23,13 @@ pub enum Line<'a> {
     /// A complete command line, terminator stripped. May be empty (blank line).
     Line(&'a [u8]),
     /// Input is exhausted. Sticky: every subsequent call returns this without
-    /// touching the source, so a caller looping on it cannot spin.
+    /// touching the source.
     Eof,
     /// The line did not fit the caller's buffer. It was consumed through its
-    /// terminator and **not** returned: a truncated command line means
-    /// something different from what was written (`rm -rf /home/x/tmpdir`
-    /// truncating to `rm -rf /home`), so the caller must diagnose rather than
-    /// execute. The next call returns a whole line, never this line's tail.
+    /// terminator and **not** returned: a truncated command line is a
+    /// different command (`rm -rf /home/x/tmpdir` truncating to
+    /// `rm -rf /home`). The next call returns a whole line, never this line's
+    /// tail.
     TooLong,
     /// The source failed. Also sticky.
     Err,
@@ -72,7 +67,7 @@ impl ScriptReader {
     /// more. `\n` and `\r\n` both terminate; a bare `\r` is kept literally,
     /// because this frames bytes rather than keystrokes. Interior NUL bytes are
     /// dropped as they are read: NUL terminates the shell's line and token
-    /// buffers, so passing one through would silently truncate the command.
+    /// buffers.
     pub fn next_line<'a, S: ByteSource>(&mut self, src: &mut S, out: &'a mut [u8]) -> Line<'a> {
         match self.frame(src, out) {
             Framed::Line(len) => Line::Line(&out[..len]),
@@ -94,8 +89,7 @@ impl ScriptReader {
             let mut byte = [0u8; 1];
             let got = match src.read(&mut byte) {
                 Ok(0) => {
-                    // End of input mid-line: a final line without a terminator
-                    // is still a command. Report it now and EOF next call.
+                    // A final line without a terminator is still a command.
                     self.done = true;
                     return if overflowed {
                         Framed::TooLong
@@ -118,8 +112,6 @@ impl ScriptReader {
                     if overflowed {
                         return Framed::TooLong;
                     }
-                    // A `\r` immediately before the `\n` is the other half of a
-                    // CRLF terminator, not content.
                     if len > 0 && out[len - 1] == b'\r' {
                         len -= 1;
                     }
@@ -129,8 +121,6 @@ impl ScriptReader {
                 _ if overflowed => continue,
                 _ => {
                     if len == out.len() {
-                        // Keep consuming to the terminator so the *next* call
-                        // starts at a line boundary rather than mid-command.
                         overflowed = true;
                         continue;
                     }
@@ -146,8 +136,7 @@ impl ScriptReader {
 mod tests {
     use super::*;
 
-    /// Counts every byte handed out, so a test can assert that framing a line
-    /// consumed exactly that line — the property a block read would break.
+    /// Counts every byte handed out so a test can assert exact consumption.
     struct SliceSource<'a> {
         data: &'a [u8],
         pos: usize,
@@ -155,8 +144,8 @@ mod tests {
         /// Fail the read issued once this many bytes have been consumed.
         fail_after: Option<usize>,
         fail_kind: SourceError,
-        /// Number of `Interrupted` results still to be injected before each
-        /// successful read.
+        /// `Interrupted` results still to be injected before each successful
+        /// read.
         interrupts: usize,
     }
 
@@ -222,8 +211,6 @@ mod tests {
 
     #[test]
     fn consumes_nothing_beyond_the_terminator() {
-        // The reported bug in one assertion: after framing line 1, everything
-        // else must still be in the source for the next reader (or a child).
         let script = b"curl http://google.com\ncurl http://google.com\n";
         let mut src = SliceSource::new(script);
         let mut r = ScriptReader::new();
@@ -238,8 +225,7 @@ mod tests {
 
     #[test]
     fn concatenation_of_all_lines_equals_input() {
-        // A script far larger than any plausible read chunk: every line must
-        // come back exactly once, in order, with nothing dropped or repeated.
+        // Larger than any plausible read chunk.
         let mut script = [0u8; 4096];
         let mut written = 0usize;
         let mut expected_lines = 0usize;
@@ -298,7 +284,6 @@ mod tests {
 
     #[test]
     fn bare_cr_is_literal() {
-        // This frames bytes, not keystrokes: only `\n` ends a line.
         let mut src = SliceSource::new(b"a\rb\n");
         let mut r = ScriptReader::new();
         let mut buf = [0u8; 64];
@@ -368,8 +353,6 @@ mod tests {
         let mut r = ScriptReader::new();
         let mut buf = [0u8; 16];
         assert_eq!(r.next_line(&mut src, &mut buf), Line::TooLong);
-        // The whole over-long line, terminator included, was consumed — so the
-        // next call starts at a line boundary, never mid-command.
         assert_eq!(src.consumed, 65);
         assert_eq!(line_of(&r.next_line(&mut src, &mut buf)), b"echo after");
     }

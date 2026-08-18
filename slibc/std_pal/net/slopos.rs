@@ -2,12 +2,8 @@
 
 //! SlopOS platform implementation for `std::net`.
 //!
-//! Provides the `Socket` wrapper, `LookupHost` iterator, and the `netc` module
-//! of C-compatible types, constants, and extern declarations that the shared
-//! `mod.rs` in `sys/net/connection/socket/` consumes.
-//!
-//! All unsafe is confined to the extern "C" calls and raw-pointer plumbing
-//! inside Socket methods.
+//! Supplies the `Socket` wrapper, the `LookupHost` iterator and the `netc`
+//! module that the shared `sys/net/connection/socket/mod.rs` consumes.
 
 use crate::ffi::c_int;
 use crate::io::{self, BorrowedBuf, BorrowedCursor, ErrorKind, IoSlice, IoSliceMut};
@@ -23,21 +19,12 @@ use crate::{cmp, mem, ptr};
 
 use super::{socket_addr_from_c, socket_addr_to_c};
 
-// ---------------------------------------------------------------------------
-// netc — C types, constants, and extern function declarations
-// ---------------------------------------------------------------------------
-
-/// C-compatible networking primitives for the SlopOS platform.
-///
-/// This module serves the same role as `libc` on Unix targets: it provides the
-/// raw types and extern declarations that the shared socket code in
-/// `sys/net/connection/socket/mod.rs` calls through.
+/// C-compatible networking primitives — the role `libc` plays on Unix targets.
 pub mod netc {
     #![allow(non_camel_case_types, dead_code)]
 
     use core::ffi::c_void;
 
-    // -- scalar aliases --
     pub type c_int = i32;
     pub type c_uint = u32;
     pub type c_ushort = u16;
@@ -50,8 +37,6 @@ pub mod netc {
     pub type size_t = usize;
     pub type time_t = i64;
     pub type suseconds_t = i64;
-
-    // -- address structures --
 
     #[repr(C)]
     #[derive(Clone, Copy)]
@@ -146,8 +131,6 @@ pub mod netc {
         pub revents: i16,
     }
 
-    // -- constants --
-
     pub const AF_INET: c_int = 2;
     pub const AF_INET6: c_int = 10;
 
@@ -196,12 +179,8 @@ pub mod netc {
 
     pub const EAI_SYSTEM: c_int = -11;
 
-    // SlopOS uses Linux errno values (slopos-abi::syscall::errno_defs).
-    // The BSD-style values that the template-copied PAL had (EISCONN=56,
-    // EINPROGRESS=36) caused `Socket::connect`'s EISCONN fast-path and
-    // `Socket::connect_timeout`'s EINPROGRESS poll arm to mis-fire,
-    // surfacing as connect-fails with a raw errno that std could not
-    // interpret. Keep these in lock-step with `errno_defs.rs`.
+    // Values follow the Linux numbering; keep them in lock-step with
+    // `slopos-abi::syscall::errno_defs`.
     pub const EINTR: c_int = 4;
     pub const EISCONN: c_int = 106;
     pub const EINPROGRESS: c_int = 115;
@@ -210,8 +189,7 @@ pub mod netc {
     pub const F_SETFL: c_int = 4;
     pub const O_NONBLOCK: c_int = 0x800;
 
-    // -- extern C functions (link to slibc #[no_mangle] exports) --
-
+    // Resolved at link time against slibc's `#[no_mangle]` exports.
     unsafe extern "C" {
         pub fn socket(domain: c_int, ty: c_int, protocol: c_int) -> c_int;
         pub fn bind(fd: c_int, addr: *const sockaddr, addrlen: socklen_t) -> c_int;
@@ -219,18 +197,8 @@ pub mod netc {
         pub fn accept(fd: c_int, addr: *mut sockaddr, addrlen: *mut socklen_t) -> c_int;
         pub fn connect(fd: c_int, addr: *const sockaddr, addrlen: socklen_t) -> c_int;
 
-        pub fn send(
-            fd: c_int,
-            buf: *const c_void,
-            len: size_t,
-            flags: c_int,
-        ) -> ssize_t;
-        pub fn recv(
-            fd: c_int,
-            buf: *mut c_void,
-            len: size_t,
-            flags: c_int,
-        ) -> ssize_t;
+        pub fn send(fd: c_int, buf: *const c_void, len: size_t, flags: c_int) -> ssize_t;
+        pub fn recv(fd: c_int, buf: *mut c_void, len: size_t, flags: c_int) -> ssize_t;
         pub fn sendto(
             fd: c_int,
             buf: *const c_void,
@@ -264,16 +232,8 @@ pub mod netc {
         ) -> c_int;
         pub fn shutdown(fd: c_int, how: c_int) -> c_int;
 
-        pub fn getpeername(
-            fd: c_int,
-            addr: *mut sockaddr,
-            addrlen: *mut socklen_t,
-        ) -> c_int;
-        pub fn getsockname(
-            fd: c_int,
-            addr: *mut sockaddr,
-            addrlen: *mut socklen_t,
-        ) -> c_int;
+        pub fn getpeername(fd: c_int, addr: *mut sockaddr, addrlen: *mut socklen_t) -> c_int;
+        pub fn getsockname(fd: c_int, addr: *mut sockaddr, addrlen: *mut socklen_t) -> c_int;
 
         pub fn getaddrinfo(
             node: *const c_char,
@@ -291,15 +251,10 @@ pub mod netc {
 
 use netc as c;
 
-// Re-export for mod.rs
 pub use crate::sys::{cvt, cvt_r};
 
 #[expect(non_camel_case_types)]
 pub type wrlen_t = c::size_t;
-
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
 
 pub fn init() {}
 
@@ -334,10 +289,6 @@ fn errno() -> c_int {
     crate::sys::pal::errno()
 }
 
-// ---------------------------------------------------------------------------
-// LookupHost
-// ---------------------------------------------------------------------------
-
 pub struct LookupHost {
     original: *mut c::addrinfo,
     cur: *mut c::addrinfo,
@@ -351,10 +302,7 @@ impl Iterator for LookupHost {
             unsafe {
                 let cur = self.cur.as_ref()?;
                 self.cur = cur.ai_next;
-                match socket_addr_from_c(
-                    cur.ai_addr.cast(),
-                    cur.ai_addrlen as usize,
-                ) {
+                match socket_addr_from_c(cur.ai_addr.cast(), cur.ai_addrlen as usize) {
                     Ok(mut addr) => {
                         addr.set_port(self.port);
                         return Some(addr);
@@ -397,10 +345,6 @@ pub fn lookup_host(host: &str, port: u16) -> io::Result<LookupHost> {
     })
 }
 
-// ---------------------------------------------------------------------------
-// Socket
-// ---------------------------------------------------------------------------
-
 pub struct Socket(FileDesc);
 
 impl Socket {
@@ -421,8 +365,7 @@ impl Socket {
     pub fn connect(&self, addr: &SocketAddr) -> io::Result<()> {
         let (addr, len) = socket_addr_to_c(addr);
         loop {
-            let result =
-                unsafe { c::connect(self.as_raw_fd(), addr.as_ptr(), len) };
+            let result = unsafe { c::connect(self.as_raw_fd(), addr.as_ptr(), len) };
             if result == -1 {
                 let err = errno();
                 match err {
@@ -435,11 +378,7 @@ impl Socket {
         }
     }
 
-    pub fn connect_timeout(
-        &self,
-        addr: &SocketAddr,
-        timeout: Duration,
-    ) -> io::Result<()> {
+    pub fn connect_timeout(&self, addr: &SocketAddr, timeout: Duration) -> io::Result<()> {
         self.set_nonblocking(true)?;
         let r = unsafe {
             let (addr, len) = socket_addr_to_c(addr);
@@ -493,7 +432,6 @@ impl Socket {
                 }
                 0 => {}
                 _ => {
-                    // Check for POLLHUP/POLLERR
                     if pollfd.revents & (c::POLLHUP | c::POLLERR) != 0 {
                         let e = self.take_error()?.unwrap_or_else(|| {
                             io::const_error!(
@@ -509,13 +447,8 @@ impl Socket {
         }
     }
 
-    pub fn accept(
-        &self,
-        storage: *mut c::sockaddr,
-        len: *mut c::socklen_t,
-    ) -> io::Result<Socket> {
-        let fd =
-            cvt_r(|| unsafe { c::accept(self.as_raw_fd(), storage, len) })?;
+    pub fn accept(&self, storage: *mut c::sockaddr, len: *mut c::socklen_t) -> io::Result<Socket> {
+        let fd = cvt_r(|| unsafe { c::accept(self.as_raw_fd(), storage, len) })?;
         let fd = unsafe { FileDesc::from_raw_fd(fd) };
         fd.set_cloexec()?;
         Ok(Socket(fd))
@@ -525,28 +458,13 @@ impl Socket {
         self.0.duplicate().map(Socket)
     }
 
-    pub fn send_with_flags(
-        &self,
-        buf: &[u8],
-        flags: c_int,
-    ) -> io::Result<usize> {
+    pub fn send_with_flags(&self, buf: &[u8], flags: c_int) -> io::Result<usize> {
         let len = cmp::min(buf.len(), <wrlen_t>::MAX as usize) as wrlen_t;
-        let ret = cvt(unsafe {
-            c::send(
-                self.as_raw_fd(),
-                buf.as_ptr() as *const _,
-                len,
-                flags,
-            )
-        })?;
+        let ret = cvt(unsafe { c::send(self.as_raw_fd(), buf.as_ptr() as *const _, len, flags) })?;
         Ok(ret as usize)
     }
 
-    fn recv_with_flags(
-        &self,
-        mut buf: BorrowedCursor<'_, u8>,
-        flags: c_int,
-    ) -> io::Result<()> {
+    fn recv_with_flags(&self, mut buf: BorrowedCursor<'_, u8>, flags: c_int) -> io::Result<()> {
         let ret = cvt(unsafe {
             c::recv(
                 self.as_raw_fd(),
@@ -577,10 +495,7 @@ impl Socket {
         self.recv_with_flags(buf, 0)
     }
 
-    pub fn read_vectored(
-        &self,
-        bufs: &mut [IoSliceMut<'_>],
-    ) -> io::Result<usize> {
+    pub fn read_vectored(&self, bufs: &mut [IoSliceMut<'_>]) -> io::Result<usize> {
         self.0.read_vectored(bufs)
     }
 
@@ -594,10 +509,8 @@ impl Socket {
         buf: &mut [u8],
         flags: c_int,
     ) -> io::Result<(usize, SocketAddr)> {
-        let mut storage: MaybeUninit<c::sockaddr_storage> =
-            MaybeUninit::uninit();
-        let mut addrlen =
-            size_of_val(&storage) as c::socklen_t;
+        let mut storage: MaybeUninit<c::sockaddr_storage> = MaybeUninit::uninit();
+        let mut addrlen = size_of_val(&storage) as c::socklen_t;
 
         let n = cvt(unsafe {
             c::recvfrom(
@@ -609,25 +522,16 @@ impl Socket {
                 &mut addrlen,
             )
         })?;
-        Ok((
-            n as usize,
-            unsafe {
-                socket_addr_from_c(storage.as_ptr(), addrlen as usize)?
-            },
-        ))
+        Ok((n as usize, unsafe {
+            socket_addr_from_c(storage.as_ptr(), addrlen as usize)?
+        }))
     }
 
-    pub fn recv_from(
-        &self,
-        buf: &mut [u8],
-    ) -> io::Result<(usize, SocketAddr)> {
+    pub fn recv_from(&self, buf: &mut [u8]) -> io::Result<(usize, SocketAddr)> {
         self.recv_from_with_flags(buf, 0)
     }
 
-    pub fn peek_from(
-        &self,
-        buf: &mut [u8],
-    ) -> io::Result<(usize, SocketAddr)> {
+    pub fn peek_from(&self, buf: &mut [u8]) -> io::Result<(usize, SocketAddr)> {
         self.recv_from_with_flags(buf, c::MSG_PEEK)
     }
 
@@ -635,10 +539,7 @@ impl Socket {
         self.0.write(buf)
     }
 
-    pub fn write_vectored(
-        &self,
-        bufs: &[IoSlice<'_>],
-    ) -> io::Result<usize> {
+    pub fn write_vectored(&self, bufs: &[IoSlice<'_>]) -> io::Result<usize> {
         self.0.write_vectored(bufs)
     }
 
@@ -647,11 +548,7 @@ impl Socket {
         self.0.is_write_vectored()
     }
 
-    pub fn set_timeout(
-        &self,
-        dur: Option<Duration>,
-        kind: c::c_int,
-    ) -> io::Result<()> {
+    pub fn set_timeout(&self, dur: Option<Duration>, kind: c::c_int) -> io::Result<()> {
         let timeout = match dur {
             Some(dur) => {
                 if dur.as_secs() == 0 && dur.subsec_nanos() == 0 {
@@ -679,12 +576,8 @@ impl Socket {
         unsafe { setsockopt(self, c::SOL_SOCKET, kind, timeout) }
     }
 
-    pub fn timeout(
-        &self,
-        kind: c::c_int,
-    ) -> io::Result<Option<Duration>> {
-        let raw: c::timeval =
-            unsafe { getsockopt(self, c::SOL_SOCKET, kind)? };
+    pub fn timeout(&self, kind: c::c_int) -> io::Result<Option<Duration>> {
+        let raw: c::timeval = unsafe { getsockopt(self, c::SOL_SOCKET, kind)? };
         if raw.tv_sec == 0 && raw.tv_usec == 0 {
             Ok(None)
         } else {
@@ -704,10 +597,7 @@ impl Socket {
         Ok(())
     }
 
-    pub fn set_linger(
-        &self,
-        linger: Option<Duration>,
-    ) -> io::Result<()> {
+    pub fn set_linger(&self, linger: Option<Duration>) -> io::Result<()> {
         let linger = c::linger {
             l_onoff: linger.is_some() as c::c_int,
             l_linger: linger.unwrap_or_default().as_secs() as c::c_int,
@@ -716,69 +606,41 @@ impl Socket {
     }
 
     pub fn linger(&self) -> io::Result<Option<Duration>> {
-        let val: c::linger =
-            unsafe { getsockopt(self, c::SOL_SOCKET, c::SO_LINGER)? };
-        Ok(
-            (val.l_onoff != 0)
-                .then(|| Duration::from_secs(val.l_linger as u64)),
-        )
+        let val: c::linger = unsafe { getsockopt(self, c::SOL_SOCKET, c::SO_LINGER)? };
+        Ok((val.l_onoff != 0).then(|| Duration::from_secs(val.l_linger as u64)))
     }
 
     pub fn set_nodelay(&self, nodelay: bool) -> io::Result<()> {
-        unsafe {
-            setsockopt(
-                self,
-                c::IPPROTO_TCP,
-                c::TCP_NODELAY,
-                nodelay as c_int,
-            )
-        }
+        unsafe { setsockopt(self, c::IPPROTO_TCP, c::TCP_NODELAY, nodelay as c_int) }
     }
 
     pub fn nodelay(&self) -> io::Result<bool> {
-        let raw: c_int = unsafe {
-            getsockopt(self, c::IPPROTO_TCP, c::TCP_NODELAY)?
-        };
+        let raw: c_int = unsafe { getsockopt(self, c::IPPROTO_TCP, c::TCP_NODELAY)? };
         Ok(raw != 0)
     }
 
     pub fn set_keepalive(&self, keepalive: bool) -> io::Result<()> {
-        unsafe {
-            setsockopt(
-                self,
-                c::SOL_SOCKET,
-                c::SO_KEEPALIVE,
-                keepalive as c_int,
-            )
-        }
+        unsafe { setsockopt(self, c::SOL_SOCKET, c::SO_KEEPALIVE, keepalive as c_int) }
     }
 
     pub fn keepalive(&self) -> io::Result<bool> {
-        let raw: c_int = unsafe {
-            getsockopt(self, c::SOL_SOCKET, c::SO_KEEPALIVE)?
-        };
+        let raw: c_int = unsafe { getsockopt(self, c::SOL_SOCKET, c::SO_KEEPALIVE)? };
         Ok(raw != 0)
     }
 
     pub fn set_nonblocking(&self, nonblocking: bool) -> io::Result<()> {
-        let flags = cvt(unsafe {
-            c::fcntl(self.as_raw_fd(), c::F_GETFL, 0)
-        })?;
+        let flags = cvt(unsafe { c::fcntl(self.as_raw_fd(), c::F_GETFL, 0) })?;
         let flags = if nonblocking {
             flags | c::O_NONBLOCK
         } else {
             flags & !c::O_NONBLOCK
         };
-        cvt(unsafe {
-            c::fcntl(self.as_raw_fd(), c::F_SETFL, flags as i64)
-        })?;
+        cvt(unsafe { c::fcntl(self.as_raw_fd(), c::F_SETFL, flags as i64) })?;
         Ok(())
     }
 
     pub fn take_error(&self) -> io::Result<Option<io::Error>> {
-        let raw: c_int = unsafe {
-            getsockopt(self, c::SOL_SOCKET, c::SO_ERROR)?
-        };
+        let raw: c_int = unsafe { getsockopt(self, c::SOL_SOCKET, c::SO_ERROR)? };
         if raw == 0 {
             Ok(None)
         } else {
@@ -790,10 +652,6 @@ impl Socket {
         self.as_raw_fd()
     }
 }
-
-// ---------------------------------------------------------------------------
-// Trait implementations
-// ---------------------------------------------------------------------------
 
 impl AsInner<FileDesc> for Socket {
     #[inline]

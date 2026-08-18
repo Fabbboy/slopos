@@ -579,26 +579,19 @@ fn harvest_step(table: FdTable, ring: &mut Ring, min_complete: u32) -> bool {
                 retire_row(ring, row.user_data, res, cqe_flags, false, true)
             }
             Outcome::InlineNotif(res) => {
-                // A deferred OP_SEND_ZC that became sendable on the copy backend:
-                // post the two-CQE result (F_MORE) + notification (F_NOTIF).
                 retire_row(ring, row.user_data, res, SLOPRING_CQE_F_MORE, true, true)
             }
             Outcome::DeferredNotif(res) => {
-                // A would-blocked OP_SEND_ZC that got queued to the NIC on
-                // re-probe: post the result (F_MORE) and retire the row, but keep
-                // the buffer checked out — the registry's deferred table holds it
-                // until the reclaim posts F_NOTIF.
+                // The buffer stays checked out until the reclaim posts F_NOTIF.
                 retire_row(ring, row.user_data, res, SLOPRING_CQE_F_MORE, false, false)
             }
             Outcome::WouldBlock => {}
         }
     }
 
-    // Drive a device TX reclaim for any in-flight zero-copy send, then post the
-    // deferred F_NOTIF for each the driver has now reclaimed and check its fixed
-    // buffer back in. The waiter polls its own TX completion (caller-as-waiter),
-    // so a deferred F_NOTIF makes progress without a TX-completion interrupt.
-    // Collected first (so the `&mut buffers` borrow ends) then posted.
+    // The waiter polls its own TX completion (caller-as-waiter), so a deferred
+    // F_NOTIF makes progress without a TX-completion interrupt. Reclaims are
+    // collected first so the `&mut buffers` borrow ends before the posts.
     if ring.buffers.has_deferred() {
         slopos_net::netdev::DEVICE_REGISTRY.poll_tx_all();
     }
@@ -612,38 +605,30 @@ fn harvest_step(table: FdTable, ring: &mut Ring, min_complete: u32) -> bool {
     ring.available_cqes(cq_head) >= min_complete
 }
 
-/// Drain an armed consuming-multishot row (OP_ACCEPT / OP_RECVMSG) within
-/// one harvest pass (SLOPRING §1.2). Each successful reprobe consumes one
-/// connection / datagram and posts an interim CQE carrying `F_MORE`,
-/// keeping the row armed; the loop terminates when the resource drains
-/// (`WouldBlock`) — the self-limit that prevents a CQ flood — or on a real
-/// error / EOF, which posts a terminal CQE (F_MORE clear) and removes the
-/// row. The ownership-op CQE-slot reserve (SLOPRING § 11) is re-checked
-/// before *each* post, so a full CQ leaves the row armed for the next
-/// harvest rather than consuming-without-a-slot.
+/// Drain an armed consuming-multishot row (OP_ACCEPT / OP_RECVMSG) in one
+/// harvest pass (SLOPRING §1.2): each reprobe posts an interim `F_MORE` CQE
+/// and keeps the row armed, `WouldBlock` self-limits the drain against a CQ
+/// flood, and a real error or EOF posts a terminal CQE. The ownership-op
+/// CQE-slot reserve (SLOPRING § 11) is re-checked before *each* post, so a
+/// full CQ leaves the row armed rather than consuming-without-a-slot.
 fn harvest_consuming_multishot(table: FdTable, ring: &mut Ring, row: &InFlight) {
     let ownership = opcode::is_ownership_op(row.opcode);
     loop {
-        // Re-check the live row still exists (a concurrent cancel could
-        // have removed it) and reserve a CQE slot before the side effect.
+        // A concurrent cancel could have removed the row.
         if ring.inflight.find_user_data(row.user_data).is_none() {
             return;
         }
         if ownership {
             let cq_head = ring.read_cq_head().unwrap_or(0);
             if ring.cq_full(cq_head) {
-                // No slot: leave armed, retry next harvest (no data lost —
-                // the reprobe has not yet consumed anything this iteration).
+                // No slot: leave armed — the reprobe has not consumed anything
+                // this iteration, so nothing is lost.
                 return;
             }
         }
-        // A multishot row never carries a registered/provided buffer
-        // (rejected at submit), so reprobe's InlineBuf and Inline collapse to
-        // one signed result; WouldBlock means drained.
+        // A multishot row carries no registered/provided buffer and is never
+        // OP_SEND_ZC, so every inline outcome collapses to one signed result.
         let res = match opcode::reprobe(table, row, &mut *ring.buffers) {
-            // A multishot row never carries OP_SEND_ZC (not multishot-supported),
-            // so InlineNotif/DeferredNotif are unreachable here; collapse them
-            // for exhaustiveness.
             Outcome::Inline(res)
             | Outcome::InlineBuf(res, _)
             | Outcome::InlineNotif(res)
@@ -654,38 +639,30 @@ fn harvest_consuming_multishot(table: FdTable, ring: &mut Ring, row: &InFlight) 
             }
         };
         if res >= 0 {
-            // A connection / datagram was consumed.
-            //   res == 0 on a stream recvmsg is orderly EOF — terminal, never
-            //   silently re-arm (the CVE-2026-23473 lesson).
+            // res == 0 on a stream recvmsg is orderly EOF: terminal, never
+            // silently re-armed.
             if res == 0 && row.opcode == slopos_abi::ring::OP_RECVMSG {
                 remove_and_post(ring, row.user_data, 0, 0);
                 return;
             }
             let _ = ring.post_cqe(row.user_data, res, SLOPRING_CQE_F_MORE);
-            // Keep armed; loop to drain the next pending item.
         } else {
-            // res < 0: a real error → terminal CQE, F_MORE clear.
             remove_and_post(ring, row.user_data, res, 0);
             return;
         }
     }
 }
 
-/// Re-arm an armed OP_POLL_ADD multishot row via the readiness-transition
-/// edge (SLOPRING §1.2). A CQE fires only when the masked-ready bitset
-/// *changes* (not-ready→ready, or the ready bits differ from the last
-/// post), which suppresses the level flood the caller-as-waiter model
-/// would otherwise produce. `POLLERR`/`POLLHUP` post one terminal CQE
-/// (F_MORE clear) and retire the row.
+/// Re-arm an armed OP_POLL_ADD multishot row on the readiness-transition edge
+/// (SLOPRING §1.2): a CQE fires only when the masked-ready bitset *changes*,
+/// which suppresses the level flood caller-as-waiter would otherwise produce.
+/// `POLLERR`/`POLLHUP` post one terminal CQE and retire the row.
 fn harvest_poll_multishot(ring: &mut Ring, row: &InFlight) {
     let revents = opcode::probe_poll_revents(row);
     if revents & POLLNVAL != 0 {
-        // Bad fd — terminate the armed row.
         remove_and_post(ring, row.user_data, eno(Errno::EBADF), 0);
         return;
     }
-    // Error / hangup is terminal: one final CQE, then retire (mirrors
-    // Linux multishot poll termination on error).
     if revents & (POLLERR | POLLHUP) != 0 {
         let ready = revents & (opcode::poll_want(row.op_flags) | POLLERR | POLLHUP);
         remove_and_post(ring, row.user_data, ready as i32, 0);
@@ -694,28 +671,26 @@ fn harvest_poll_multishot(ring: &mut Ring, row: &InFlight) {
     let want = opcode::poll_want(row.op_flags);
     let ready = revents & want;
     if ready != 0 && ready != row.last_revents {
-        // EDGE: the ready bitset transitioned — post one interim CQE and
-        // stay armed, recording the new ready set on the *live* row.
+        // Recorded on the *live* row: `row` is a snapshot copy.
         ring.inflight.set_last_revents(row.user_data, ready);
         let _ = ring.post_cqe(row.user_data, ready as i32, SLOPRING_CQE_F_MORE);
     } else if ready == 0 {
-        // Went not-ready: clear the cache so the next ready transition
-        // re-fires (this is the synthesized edge).
+        // Clear the cache so the next ready transition re-fires.
         ring.inflight.set_last_revents(row.user_data, 0);
     }
 }
 
 /// Remove the live row matching `user_data` and post its terminal CQE
-/// (multishot terminals carry no fixed buffer and a single CQE).
+/// (multishot terminals carry no fixed buffer and no notification).
 fn remove_and_post(ring: &mut Ring, user_data: u64, res: i32, cqe_flags: u32) {
     retire_row(ring, user_data, res, cqe_flags, false, false);
 }
 
-/// Retire the live in-flight row `user_data`: remove it, post its terminal
-/// CQE (`res`/`cqe_flags`, plus a zero-copy `F_NOTIF` when `notif`), release
-/// any fixed buffer it held when `release_fixed`, and move it into the reap
-/// buffer to drop off-lock. `#[inline(never)]` keeps the by-value `InFlight`
-/// out of `harvest_step`'s frame, holding it under the 2 KiB ceiling (Inv. 5').
+/// Retire the live in-flight row `user_data`: remove it, post its terminal CQE
+/// (plus a zero-copy `F_NOTIF` when `notif`), release any fixed buffer it held
+/// when `release_fixed`, and move it into the reap buffer to drop off-lock.
+/// `#[inline(never)]` keeps the by-value `InFlight` out of `harvest_step`'s
+/// frame, holding it under the 2 KiB ceiling (Inv. 5').
 #[inline(never)]
 fn retire_row(
     ring: &mut Ring,
@@ -739,16 +714,14 @@ fn retire_row(
     }
 }
 
-/// Detach a retired in-flight row into the ring's reap buffer. Its file
-/// reference is dropped by the `ring_enter`/`harvest` caller once the ring
-/// lock is released — never here, since a completing op's file may be its
-/// backing's last alias and the teardown must not run under the ring lock.
+/// Detach a retired in-flight row into the ring's reap buffer, for the caller
+/// to drop once the ring lock is released.
 fn reap_row(ring: &mut Ring, row: InFlight) {
     let _ = ring.pending_reap.push(row);
 }
 
-/// Register the calling task on each in-flight file's resource queue via
-/// the fused-poll path; return the open-file tokens for cleanup.
+/// Register the calling task on each file's resource queue via the fused-poll
+/// path; returns the open-file tokens for cleanup.
 fn register_files(files: &KVec<FileRef>) -> KVec<u64> {
     use slopos_abi::syscall::{POLLIN, POLLOUT};
     let mut tokens: KVec<u64> = KVec::new();

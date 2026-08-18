@@ -26,10 +26,8 @@ impl Cidr {
 
     /// Parses `10.0.2.15/24`.
     ///
-    /// **A bare address parses as `/32`, with no classful inference.** Reading
-    /// `10.0.2.15` as `/8` because it starts with a 10 is the classic silent
-    /// wrong answer here: classful ranges stopped describing real networks in
-    /// 1993, and the guess fails invisibly — the command succeeds and the
+    /// A bare address parses as `/32`, with no classful inference: reading
+    /// `10.0.2.15` as `/8` fails invisibly, the command succeeding while the
     /// routing table is subtly not what was asked for.
     ///
     /// Rejected: an empty address, an empty prefix (`10.0.2.15/`), a prefix
@@ -77,8 +75,7 @@ impl Cidr {
     }
 
     /// The address with every host bit set. For a `/32` that is the address
-    /// itself, and for a `/31` it is the peer — both correct, both what the
-    /// arithmetic says.
+    /// itself, and for a `/31` it is the peer.
     pub const fn broadcast(self) -> Ipv4 {
         let a = self.addr.0;
         let m = self.mask();
@@ -108,11 +105,9 @@ pub const fn prefix_len_to_mask(prefix_len: u8) -> [u8; 4] {
 /// Prefix length for a netmask, or `None` if the mask has a zero bit above a
 /// one bit.
 ///
-/// A non-contiguous mask is the case implementations get wrong: `255.255.0.255`
-/// counts 24 set bits, so a popcount-based conversion reports `/24` and every
-/// later comparison against that prefix silently disagrees with the mask the
-/// operator wrote. There are exactly 33 valid masks and this accepts only
-/// those.
+/// There are exactly 33 valid masks. `255.255.0.255` counts 24 set bits, so a
+/// popcount-based conversion reports `/24` and every later comparison against
+/// that prefix silently disagrees with the mask the operator wrote.
 pub const fn mask_to_prefix_len(mask: [u8; 4]) -> Option<u8> {
     let value = u32::from_be_bytes(mask);
     let ones = value.leading_ones();
@@ -154,7 +149,6 @@ mod tests {
         );
     }
 
-    /// The deliberate decision, pinned: no classful inference.
     #[test]
     fn bare_address_is_a_host_route() {
         assert_eq!(
@@ -182,7 +176,6 @@ mod tests {
         assert_eq!(Cidr::from_str_bytes(b"10.0.2.15/999"), None);
     }
 
-    /// Same leniency as the address parser, recorded rather than incidental.
     #[test]
     fn parse_reads_leading_zeros_as_decimal() {
         assert_eq!(
@@ -263,15 +256,14 @@ mod tests {
         assert_eq!(mask_to_prefix_len([255, 0, 255, 0]), None);
         assert_eq!(mask_to_prefix_len([0, 255, 255, 255]), None);
         assert_eq!(mask_to_prefix_len([255, 255, 255, 1]), None);
-        // Same popcount as /24, which is what a popcount implementation gets
-        // wrong.
+        // Same popcount as /24, which a popcount implementation gets wrong.
         assert_eq!(mask_to_prefix_len([255, 255, 0, 255]), None);
         assert_eq!(mask_to_prefix_len([255, 255, 255, 0]), Some(24));
     }
 
     /// Exhaustive over the whole 32-bit mask space would be four billion
-    /// checks; the octet-granular sweep is enough to catch a popcount-based
-    /// implementation, which is the failure this guards.
+    /// checks; the octet-granular sweep still catches a popcount-based
+    /// implementation.
     #[test]
     fn mask_to_prefix_len_accepts_only_the_33() {
         let mut accepted = 0usize;

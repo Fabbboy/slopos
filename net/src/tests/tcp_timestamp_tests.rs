@@ -6,7 +6,6 @@ use slopos_testing::{assert_eq_test, assert_test, pass};
 use super::tcp_common::*;
 use crate::tcp::{self, TCP_FLAG_ACK, TCP_FLAG_PSH, TCP_FLAG_RST};
 
-/// Read (ts_enabled, ts_recent) from a Data-state PCB.
 fn ts_state(id: tcp::ConnId) -> (bool, u32) {
     tcp::with_pcb(id, |pcb| {
         let tcp::PcbState::Data(d) = &pcb.state else {
@@ -17,7 +16,6 @@ fn ts_state(id: tcp::ConnId) -> (bool, u32) {
     .expect("PCB should exist")
 }
 
-/// Read whether the RTT estimator has a sample.
 fn has_rtt_sample(id: tcp::ConnId) -> bool {
     tcp::with_pcb(id, |pcb| {
         let tcp::PcbState::Data(d) = &pcb.state else {
@@ -28,7 +26,6 @@ fn has_rtt_sample(id: tcp::ConnId) -> bool {
     .expect("PCB should exist")
 }
 
-/// Read rcv_nxt.
 fn rcv_nxt_raw(id: tcp::ConnId) -> u32 {
     tcp::with_pcb(id, |pcb| {
         let tcp::PcbState::Data(d) = &pcb.state else {
@@ -39,7 +36,6 @@ fn rcv_nxt_raw(id: tcp::ConnId) -> u32 {
     .expect("PCB should exist")
 }
 
-/// Read reset_received.
 fn is_reset(id: tcp::ConnId) -> bool {
     tcp::with_pcb(id, |pcb| {
         let tcp::PcbState::Data(d) = &pcb.state else {
@@ -49,10 +45,6 @@ fn is_reset(id: tcp::ConnId) -> bool {
     })
     .unwrap_or(false)
 }
-
-// ---------------------------------------------------------------------------
-// Negotiation
-// ---------------------------------------------------------------------------
 
 pub fn test_active_open_ts_negotiation() -> TestResult {
     reset_all();
@@ -85,10 +77,6 @@ pub fn test_ts_declined_by_peer() -> TestResult {
     pass!()
 }
 
-// ---------------------------------------------------------------------------
-// Data segments carry TSopt
-// ---------------------------------------------------------------------------
-
 pub fn test_data_segments_carry_tsopt() -> TestResult {
     reset_all();
     #[cfg(feature = "test-hooks")]
@@ -105,10 +93,6 @@ pub fn test_data_segments_carry_tsopt() -> TestResult {
     pass!()
 }
 
-// ---------------------------------------------------------------------------
-// PAWS
-// ---------------------------------------------------------------------------
-
 pub fn test_paws_rejects_old_duplicate() -> TestResult {
     reset_all();
     #[cfg(feature = "test-hooks")]
@@ -117,7 +101,6 @@ pub fn test_paws_rejects_old_duplicate() -> TestResult {
     let conn = establish_connection_with_ts();
     let peer_seq = conn.peer_iss + 1;
 
-    // Fresh timestamp → accepted.
     let tsopt_fresh = build_tsopt(2000, 0);
     let actions = inject_with_options(
         REMOTE_IP,
@@ -132,7 +115,6 @@ pub fn test_paws_rejects_old_duplicate() -> TestResult {
     );
     assert_test!(!actions.notify.is_empty(), "fresh-TS segment accepted");
 
-    // Old timestamp → PAWS drop + dup-ACK.
     let tsopt_old = build_tsopt(500, 0);
     let actions2 = inject_with_options(
         REMOTE_IP,
@@ -173,7 +155,6 @@ pub fn test_paws_allows_rst() -> TestResult {
         b"data",
     );
 
-    // RST with old timestamp — should bypass PAWS.
     let tsopt_old = build_tsopt(100, 0);
     let _ = inject_with_options(
         REMOTE_IP,
@@ -190,10 +171,6 @@ pub fn test_paws_allows_rst() -> TestResult {
     assert_test!(is_reset(conn.id), "RST bypasses PAWS");
     pass!()
 }
-
-// ---------------------------------------------------------------------------
-// RTTM
-// ---------------------------------------------------------------------------
 
 pub fn test_rttm_samples_every_ack() -> TestResult {
     reset_all();
@@ -225,10 +202,6 @@ pub fn test_rttm_samples_every_ack() -> TestResult {
     assert_test!(has_rtt_sample(conn.id), "RTTM produced a sample");
     pass!()
 }
-
-// ---------------------------------------------------------------------------
-// Non-timestamp fallback
-// ---------------------------------------------------------------------------
 
 pub fn test_non_ts_fallback_karn_sampling() -> TestResult {
     reset_all();

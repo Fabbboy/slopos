@@ -1,12 +1,7 @@
-//! SlopRing kernel-side tests.
-//!
-//! These exercise the pieces that do not require a live userspace
-//! process: the shared-region volatile accessor round-trips, the ring
-//! object's CQE post / overflow / reserve logic, the in-flight table,
-//! and `OP_CANCEL` semantics. End-to-end opcode *parity* (driving the
-//! same input through an opcode and its sync syscall and diffing the
-//! result) is a userland test because it needs a mapped ring and a
-//! process fd table — see `userland/` for those.
+//! SlopRing kernel-side tests: the shared-region volatile accessors, the ring
+//! object's CQE post / overflow / reserve logic, the in-flight table, and
+//! `OP_CANCEL` semantics. End-to-end opcode *parity* needs a mapped ring and a
+//! process fd table, so it lives in `userland/`.
 
 use slopos_abi::Errno;
 use slopos_abi::ring::{
@@ -86,10 +81,6 @@ fn inflight(user_data: u64, opcode: u8) -> InFlight {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Region volatile accessor round-trips.
-// ---------------------------------------------------------------------------
-
 fn region_u32_round_trip() -> TestResult {
     let r = match RingRegion::alloc(1) {
         Ok(r) => r,
@@ -148,9 +139,8 @@ fn region_rejects_straddle() -> TestResult {
         Ok(r) => r,
         Err(_) => return slopos_testing::fail!("region alloc failed"),
     };
-    // A 64-byte copy starting 32 bytes before a page boundary straddles
-    // two frames — must be rejected (the ABI layout never places one
-    // there, but the guard is structural).
+    // 4096-32 puts a 64-byte copy across two frames. The ABI layout never
+    // places one there; the guard is structural.
     let mut out = [0u8; 64];
     if r.copy_out(4096 - 32, &mut out).is_ok() {
         return slopos_testing::fail!("straddling copy_out should fail");

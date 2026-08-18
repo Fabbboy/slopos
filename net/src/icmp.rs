@@ -143,16 +143,10 @@ pub fn handle_rx(src_ip: [u8; 4], dst_ip: [u8; 4], pkt: &PacketBuf) {
                 klog_debug!("icmp: drop echo reply with code {}", code);
                 return;
             }
-            // Passive connectivity evidence, recorded before the demux: a reply
-            // from the gateway confirms the first hop whether it was answering
-            // this stack's own probe or somebody's `ping`, and a reply that
-            // belongs to no socket is dropped a few lines below. Two atomic
-            // loads and a store — nothing here takes a lock, which is what
-            // makes it legal on the receive path.
+            // Recorded before the demux: a reply that belongs to no socket is
+            // still first-hop evidence. Takes no lock, so it is legal here.
             crate::connectivity::note_gateway_answer(crate::types::Ipv4Addr(src_ip));
-            // An echo reply from off-link is direct proof the path beyond the
-            // gateway works — the same class of evidence as a TCP connection
-            // reaching ESTABLISHED.
+            // An off-link echo reply is proof the path beyond the gateway works.
             crate::connectivity::note_wan_peer(crate::types::Ipv4Addr(src_ip));
             klog_debug!(
                 "icmp: echo reply from {}.{}.{}.{} id={} seq={}",
@@ -271,10 +265,9 @@ fn send_echo(
     Ok(payload.len())
 }
 
-/// Single-direct-copy [`send_echo_request`]: the echo payload is volatile-copied
-/// **once**, straight from the pinned user pages (via `reader`) into the packet
-/// buffer — no kernel staging scratch. The checksum is computed over the
-/// in-packet bytes. Payload length is `reader.remain()`.
+/// Single-copy [`send_echo_request`]: the payload goes straight from the pinned
+/// user pages into the packet buffer, with no kernel staging scratch. Length is
+/// `reader.remain()`.
 pub fn send_echo_request_from(
     dst_ip: [u8; 4],
     identifier: u16,
@@ -320,17 +313,16 @@ pub fn send_echo_request_from(
     Ok(copied)
 }
 
-/// True NIC-DMA zero-copy echo request (SlopRing `OP_SEND_ZC`): the
-/// echo payload is **never** copied into a packet buffer — the NIC DMAs it
-/// straight from the pinned user pages (`runs`). Only the 42-byte header is
-/// built. ICMP has no pseudo-header and QEMU virtio-net does not offload ICMP
-/// checksums, so the checksum is computed over the 8-byte ICMP header + the
-/// payload read **once** via `reader` (a single volatile pass, no staging copy)
-/// and written into the header; the device does no checksum work (`csum=None`).
+/// Zero-copy echo request: the NIC DMAs the payload straight from the pinned
+/// user pages (`runs`), so only the 42-byte header is built.
 ///
-/// Eligibility mirrors [`crate::udp::udp_sendto_zerocopy`] (unicast, route,
-/// resolved neighbor, size); a miss returns [`ZcSendOutcome::NotEligible`] so
-/// the caller falls back to the single-copy leaf.
+/// ICMP has no pseudo-header and QEMU virtio-net does not offload ICMP
+/// checksums, so the checksum is computed here over the ICMP header plus one
+/// volatile pass of `reader`, and the device does none (`csum=None`).
+///
+/// A miss on unicast, route, resolved neighbor or size returns
+/// [`ZcSendOutcome::NotEligible`] and the caller falls back to the single-copy
+/// leaf.
 pub fn send_echo_request_zerocopy(
     dst_ip: [u8; 4],
     identifier: u16,
@@ -370,11 +362,9 @@ pub fn send_echo_request_zerocopy(
     let icmp_len = ICMP_HEADER_LEN + total_len;
     let ip_total = super::IPV4_HEADER_LEN + icmp_len;
     let mut hdr = [0u8; super::ETH_HEADER_LEN + super::IPV4_HEADER_LEN + ICMP_HEADER_LEN];
-    // Ethernet (0..14).
     hdr[0..6].copy_from_slice(&dst_mac.0);
     hdr[6..12].copy_from_slice(&src_mac.0);
     hdr[12..14].copy_from_slice(&super::EtherType::Ipv4.to_be_bytes());
-    // IPv4 (14..34).
     {
         let ip = &mut hdr[super::ETH_HEADER_LEN..super::ETH_HEADER_LEN + super::IPV4_HEADER_LEN];
         ip[0] = 0x45;
@@ -389,7 +379,7 @@ pub fn send_echo_request_zerocopy(
         let ip_csum = super::checksum::internet_checksum(ip);
         ip[10..12].copy_from_slice(&ip_csum.to_be_bytes());
     }
-    // ICMP (34..42): header with checksum=0, then compute over header + payload.
+    // The checksum field stays zero while the sum over header + payload is taken.
     let l4 = super::ETH_HEADER_LEN + super::IPV4_HEADER_LEN;
     {
         let icmp = &mut hdr[l4..l4 + ICMP_HEADER_LEN];

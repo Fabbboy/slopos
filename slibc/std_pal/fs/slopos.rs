@@ -9,7 +9,7 @@ use crate::os::fd::{AsFd, AsRawFd, BorrowedFd, FromRawFd, IntoRawFd, OwnedFd, Ra
 use crate::path::{Path, PathBuf};
 pub use crate::sys::fs::common::Dir;
 use crate::sys::time::SystemTime;
-use crate::sys::{unsupported, unsupported_err, AsInner, FromInner, IntoInner};
+use crate::sys::{AsInner, FromInner, IntoInner, unsupported, unsupported_err};
 use crate::vec::Vec;
 
 const O_RDONLY: i32 = 0;
@@ -554,8 +554,6 @@ impl File {
         unsupported()
     }
 }
-
-// FileDesc (via OwnedFd) handles close on drop — no explicit Drop needed.
 
 impl DirBuilder {
     pub fn new() -> DirBuilder {

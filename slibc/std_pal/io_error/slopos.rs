@@ -1,11 +1,5 @@
-//! `std::io::Error` ↔ errno decoder for SlopOS.
-//!
-//! This file replaces the upstream `generic.rs` errno decoder for
-//! `target_os = "slopos"`. The fallback decoder maps every errno to
-//! `ErrorKind::Uncategorized`, which broke every `e.kind()` check in
-//! userland (`curl`, `nc`, the std test suite, …) — a recv timeout
-//! came back as a generic recv failure, file-not-found came back as
-//! Uncategorized, etc.
+//! `std::io::Error` ↔ errno decoder for `target_os = "slopos"`, replacing the
+//! upstream `generic.rs` decoder that maps every errno to `Uncategorized`.
 //!
 //! Errno numbering matches `slopos-abi::syscall::errno_defs` (the
 //! negative-i64 values there are stored positive in
@@ -24,46 +18,45 @@ pub fn is_interrupted(code: i32) -> bool {
 pub fn decode_error_kind(code: i32) -> ErrorKind {
     use ErrorKind::*;
     match code {
-        1 => PermissionDenied,           // EPERM
-        2 => NotFound,                   // ENOENT
-        3 => Uncategorized,              // ESRCH
-        4 => Interrupted,                // EINTR
-        5 => Uncategorized,              // EIO
-        6 => Uncategorized,              // ENXIO
-        10 => Uncategorized,             // ECHILD
-        11 => WouldBlock,                // EAGAIN / EWOULDBLOCK
-        12 => OutOfMemory,               // ENOMEM
-        13 => PermissionDenied,          // EACCES (POSIX value; tracked here even though
-                                          //   slopos does not currently emit it)
-        14 => Uncategorized,              // EFAULT
-        16 => ResourceBusy,               // EBUSY
-        17 => AlreadyExists,              // EEXIST
-        20 => NotADirectory,              // ENOTDIR
-        21 => IsADirectory,               // EISDIR
-        22 => InvalidInput,               // EINVAL
-        24 => Uncategorized,              // EMFILE
-        28 => StorageFull,                // ENOSPC
-        32 => BrokenPipe,                 // EPIPE
-        34 => Uncategorized,              // ERANGE
-        38 => Unsupported,                // ENOSYS
-        39 => DirectoryNotEmpty,          // ENOTEMPTY
-        88 => Uncategorized,              // ENOTSOCK
-        89 => Uncategorized,              // EDESTADDRREQ
-        93 => Unsupported,                // EPROTONOSUPPORT
-        95 => Unsupported,                // EOPNOTSUPP
-        97 => Unsupported,                // EAFNOSUPPORT
-        98 => AddrInUse,                  // EADDRINUSE
-        99 => AddrNotAvailable,           // EADDRNOTAVAIL
-        101 => NetworkUnreachable,        // ENETUNREACH
-        103 => ConnectionAborted,         // ECONNABORTED
-        104 => ConnectionReset,           // ECONNRESET
-        105 => Uncategorized,             // ENOBUFS
-        106 => Uncategorized,             // EISCONN
-        107 => NotConnected,              // ENOTCONN
-        110 => TimedOut,                  // ETIMEDOUT
-        111 => ConnectionRefused,         // ECONNREFUSED
-        113 => HostUnreachable,           // EHOSTUNREACH
-        115 => InProgress,                // EINPROGRESS
+        1 => PermissionDenied,     // EPERM
+        2 => NotFound,             // ENOENT
+        3 => Uncategorized,        // ESRCH
+        4 => Interrupted,          // EINTR
+        5 => Uncategorized,        // EIO
+        6 => Uncategorized,        // ENXIO
+        10 => Uncategorized,       // ECHILD
+        11 => WouldBlock,          // EAGAIN / EWOULDBLOCK
+        12 => OutOfMemory,         // ENOMEM
+        13 => PermissionDenied,    // EACCES (POSIX value; slopos never emits it)
+        14 => Uncategorized,       // EFAULT
+        16 => ResourceBusy,        // EBUSY
+        17 => AlreadyExists,       // EEXIST
+        20 => NotADirectory,       // ENOTDIR
+        21 => IsADirectory,        // EISDIR
+        22 => InvalidInput,        // EINVAL
+        24 => Uncategorized,       // EMFILE
+        28 => StorageFull,         // ENOSPC
+        32 => BrokenPipe,          // EPIPE
+        34 => Uncategorized,       // ERANGE
+        38 => Unsupported,         // ENOSYS
+        39 => DirectoryNotEmpty,   // ENOTEMPTY
+        88 => Uncategorized,       // ENOTSOCK
+        89 => Uncategorized,       // EDESTADDRREQ
+        93 => Unsupported,         // EPROTONOSUPPORT
+        95 => Unsupported,         // EOPNOTSUPP
+        97 => Unsupported,         // EAFNOSUPPORT
+        98 => AddrInUse,           // EADDRINUSE
+        99 => AddrNotAvailable,    // EADDRNOTAVAIL
+        101 => NetworkUnreachable, // ENETUNREACH
+        103 => ConnectionAborted,  // ECONNABORTED
+        104 => ConnectionReset,    // ECONNRESET
+        105 => Uncategorized,      // ENOBUFS
+        106 => Uncategorized,      // EISCONN
+        107 => NotConnected,       // ENOTCONN
+        110 => TimedOut,           // ETIMEDOUT
+        111 => ConnectionRefused,  // ECONNREFUSED
+        113 => HostUnreachable,    // EHOSTUNREACH
+        115 => InProgress,         // EINPROGRESS
         _ => Uncategorized,
     }
 }

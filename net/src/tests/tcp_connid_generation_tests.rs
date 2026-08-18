@@ -1,14 +1,9 @@
 //! Slot-reuse regression tests for [`ConnId`]'s generation.
 //!
-//! The established table is 16 shards × 4 slots and the listener table is 16
-//! entries, so a busy stack recycles slots constantly. Without a generation an
-//! id names a *slot*, and a holder that outlived its connection — a queued
-//! timer, a socket that has not noticed the close, a local across a dropped
-//! lock — silently addresses whichever connection moved in.
-//!
-//! Each test drives that reuse deterministically on the single-CPU `stest!`
-//! harness: install, release, install into the same slot, then act with the
-//! first id.
+//! Without a generation an id names a *slot*, so a holder that outlived its
+//! connection silently addresses whichever connection moved in. Each test
+//! drives that reuse deterministically: install, release, install into the same
+//! slot, then act with the first id.
 
 use slopos_testing::TestResult;
 use slopos_testing::{assert_eq_test, assert_test, pass};
@@ -26,9 +21,8 @@ fn syn_sent_state() -> PcbState {
     PcbState::SynSent(SynSentState::new(SeqNum::new(0x1000)))
 }
 
-/// The one tuple every test here installs. Reusing it is the point: the same
-/// 4-tuple hashes to the same shard and takes the same slot, which is exactly
-/// the recycling a stale id has to survive.
+/// The one tuple every test installs: the same 4-tuple hashes to the same shard
+/// and takes the same slot, which is the recycling under test.
 fn tuple() -> TcpTuple {
     TcpTuple {
         local_ip: [10, 0, 0, 1],
@@ -56,7 +50,6 @@ fn install_listener() -> ConnId {
     .expect("install listener")
 }
 
-/// Two connections through the same slot must not share an id.
 pub fn test_generation_advances_on_release() -> TestResult {
     reset();
     let first = install();
@@ -77,8 +70,6 @@ pub fn test_generation_advances_on_release() -> TestResult {
     pass!()
 }
 
-/// Every accessor consults the generation. One that did not would hand the
-/// previous occupant's caller a reference to the current connection.
 pub fn test_stale_id_rejected_by_every_accessor() -> TestResult {
     reset();
     let stale = install();
@@ -112,8 +103,7 @@ pub fn test_stale_id_rejected_by_every_accessor() -> TestResult {
 }
 
 /// A socket that has not noticed its connection close still holds the old id,
-/// and `close`/`abort` reach `release` with it. Acting on it would tear down
-/// the unrelated connection that took the slot.
+/// and `close`/`abort` reach `release` with it.
 pub fn test_stale_release_does_not_evict_live_connection() -> TestResult {
     reset();
     let stale = install();
@@ -150,9 +140,6 @@ pub fn test_find_returns_current_generation() -> TestResult {
     pass!()
 }
 
-/// The rejection is counted, so slot reuse racing a stale holder is visible
-/// rather than silently absorbed. A malformed id is a different condition and
-/// must not inflate it.
 pub fn test_stale_lookup_counter_increments() -> TestResult {
     reset();
     let stale = install();
@@ -174,9 +161,8 @@ pub fn test_stale_lookup_counter_increments() -> TestResult {
     pass!()
 }
 
-/// `clear_all` republishes the indices; advancing rather than resetting the
-/// generations is what stops it revalidating ids the cleared connections had
-/// already issued.
+/// `clear_all` advances rather than resets the generations, so ids the cleared
+/// connections had already issued do not revalidate.
 pub fn test_clear_all_advances_generations() -> TestResult {
     reset();
     let stale = install();
@@ -191,7 +177,6 @@ pub fn test_clear_all_advances_generations() -> TestResult {
     pass!()
 }
 
-/// Listener slots recycle on the same terms as established ones.
 pub fn test_listener_generation() -> TestResult {
     reset();
     let first = install_listener();

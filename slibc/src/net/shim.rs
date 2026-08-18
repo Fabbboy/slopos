@@ -10,14 +10,13 @@ pub fn inet_addr_cstr(s: &[u8]) -> u32 {
     unsafe { addr::inet_addr(s.as_ptr()) }
 }
 
-/// Calls `inet_addr` with a null pointer; expected to return `INADDR_NONE`.
 pub fn inet_addr_null() -> u32 {
     // SAFETY: `inet_addr` documents a null `cp` as a defined input.
     unsafe { addr::inet_addr(core::ptr::null()) }
 }
 
-/// Return the length of `inet_ntoa(addr)`'s output up to (excluding) the
-/// terminating NUL. `None` if the pointer is null.
+/// Length of `inet_ntoa(addr)`'s output excluding the NUL; `None` if the
+/// returned pointer is null.
 pub fn inet_ntoa_len(addr: u32) -> Option<usize> {
     // SAFETY: `inet_ntoa` returns a NUL-terminated static buffer valid until
     // the next call.
@@ -36,8 +35,7 @@ pub fn inet_ntoa_len(addr: u32) -> Option<usize> {
     }
 }
 
-/// Wrap `getaddrinfo(null, null, null, &mut res)` — the all-null
-/// invocation. Returns the error code; `res` is dropped if it was set.
+/// Returns `getaddrinfo`'s error code; any chain written to `res` is freed.
 pub fn getaddrinfo_all_null() -> i32 {
     // SAFETY: all-null is a documented input; anything written to `res` is
     // freed before returning.
@@ -56,9 +54,8 @@ pub fn getaddrinfo_all_null() -> i32 {
     }
 }
 
-/// Resolve a numeric IP literal. Returns `(retcode, first_family)`
-/// where `first_family` is `Some(af)` on success or `None` on error
-/// (in which case `retcode != 0`).
+/// Resolve a numeric IP literal into `(retcode, family of the first result)`;
+/// the family is `None` exactly when `retcode != 0`.
 pub fn getaddrinfo_numeric(node: &[u8]) -> (i32, Option<i32>) {
     // SAFETY: `node` is NUL-terminated; the result chain is freed before return.
     unsafe {
@@ -81,7 +78,6 @@ pub fn getaddrinfo_numeric(node: &[u8]) -> (i32, Option<i32>) {
     }
 }
 
-/// Exercise the null-pointer accept path of `freeaddrinfo`.
 pub fn freeaddrinfo_null_safe() {
     // SAFETY: `freeaddrinfo(null)` is documented as a no-op.
     unsafe { dns::freeaddrinfo(core::ptr::null_mut()) }

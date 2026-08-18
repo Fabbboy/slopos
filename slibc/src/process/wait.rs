@@ -11,8 +11,7 @@ pub const WAIT_STATUS_SIG_MASK: i32 = 0x7F;
 pub const WNOHANG: i32 = 1;
 pub const WUNTRACED: i32 = 2;
 
-/// True if the child terminated normally (via `exit()` or returning from
-/// `main`).
+/// True if the child terminated normally.
 #[inline]
 pub const fn WIFEXITED(status: i32) -> bool {
     (status & WAIT_STATUS_SIG_MASK) == 0
@@ -31,8 +30,7 @@ pub const fn WIFSIGNALED(status: i32) -> bool {
     sig != 0 && sig != 0x7F
 }
 
-/// If `WIFSIGNALED` is true, returns the signal number that caused
-/// termination.
+/// If `WIFSIGNALED` is true, returns the terminating signal number.
 #[inline]
 pub const fn WTERMSIG(status: i32) -> i32 {
     status & WAIT_STATUS_SIG_MASK

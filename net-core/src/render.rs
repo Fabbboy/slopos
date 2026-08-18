@@ -201,11 +201,9 @@ pub const IF_FLAG_NAMES: [(u32, &str); 9] = [
 
 /// Writes the `<NO-CARRIER,BROADCAST,MULTICAST,UP>` bracketed flag list.
 ///
-/// `NO-CARRIER` sorts first, as iproute2 puts it, because it is the one flag
-/// that explains why the rest of the line looks wrong; burying it between
-/// `MULTICAST` and `UP` is how a down cable gets missed. An interface with no
-/// flags set renders `<>` rather than nothing, so the field is always present
-/// and a column never collapses.
+/// `NO-CARRIER` sorts first, as iproute2 puts it: it is the one flag that
+/// explains why the rest of the line looks wrong. An interface with no flags
+/// set renders `<>` rather than nothing, so a column never collapses.
 pub fn write_if_flags<W: Write + ?Sized>(out: &mut W, flags: u32) -> core::fmt::Result {
     out.write_char('<')?;
     let mut first = true;
@@ -224,12 +222,9 @@ pub fn write_if_flags<W: Write + ?Sized>(out: &mut W, flags: u32) -> core::fmt::
 
 /// Whether the console font has a glyph for `cp`.
 ///
-/// Mirrors the coverage in `font/src/lib.rs`: ASCII `0x20..=0x7E`, the Latin-1
-/// supplement `0xA0..=0xFF`, and exactly `€ ˚ ˇ`. A codepoint outside those
-/// draws as the replacement glyph, so a string containing one is a rendering
-/// bug wherever it is produced. Encoded here rather than taken as a dependency
-/// on `slopos-font`, which is a kernel-side crate this one has no other reason
-/// to link.
+/// Mirrors the coverage in `font/src/lib.rs`; a codepoint outside it draws as
+/// the replacement glyph. Encoded here rather than taken as a dependency on
+/// `slopos-font`, a kernel-side crate this one has no other reason to link.
 pub const fn is_renderable(cp: u32) -> bool {
     matches!(cp, 0x20..=0x7E | 0xA0..=0xFF | 0x20AC | 0x02DA | 0x02C7)
 }
@@ -301,8 +296,6 @@ mod tests {
         assert_eq!(iface_kind(77), "none");
     }
 
-    /// `ss`'s spellings, not RFC 793's. A person reading this beside `ss`
-    /// output from another system should recognise every word.
     #[test]
     fn socket_state_names_match_ss() {
         assert_eq!(sock_state(NET_SOCK_LISTEN), "LISTEN");
@@ -313,8 +306,6 @@ mod tests {
         assert_eq!(sock_state(200), "UNKNOWN");
     }
 
-    /// Every state name has to fit the column it is printed in, or the row
-    /// after it shifts.
     #[test]
     fn every_socket_state_fits_its_column() {
         for value in 0u8..=255 {
@@ -393,9 +384,6 @@ mod tests {
         assert_eq!(flags_string(IFF_UP | (1 << 20)).as_str(), "<UP>");
     }
 
-    /// Every string this crate can hand to a renderer must be drawable by the
-    /// console font. An em dash in a status line is a bug that only shows up
-    /// on screen, so it is caught here instead.
     #[test]
     fn every_produced_string_is_renderable() {
         let mut checked = 0usize;
@@ -436,8 +424,6 @@ mod tests {
         assert!(checked > 2000);
     }
 
-    /// The glyph range this crate encodes is the range `font/src/lib.rs`
-    /// covers, including the exclusions that matter for human-facing strings.
     #[test]
     fn renderable_range_matches_the_font() {
         assert!(is_renderable(0x20));

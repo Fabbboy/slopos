@@ -1,13 +1,8 @@
 //! TCP connection identity and error type.
 //!
-//! [`TcpTuple`] is the four-tuple that uniquely identifies a connection on
-//! the wire (and together with the TCB state decides how an incoming segment
-//! is routed).  [`TcpError`] is the error type every TCP lifecycle operation
-//! returns.  Both types live in their own module so the state machine in
-//! `tcp/pcb/` can depend on them without pulling in anything from the main
-//! `tcp/mod.rs` file.
+//! Both live outside `tcp/mod.rs` so the state machine in `tcp/pcb/` can depend
+//! on them without pulling the rest of that module in.
 
-/// Four-tuple identifying a TCP connection.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct TcpTuple {
     pub local_ip: [u8; 4],
@@ -24,8 +19,7 @@ impl TcpTuple {
         remote_port: 0,
     };
 
-    /// Check if this tuple matches a specific remote endpoint (for listen
-    /// sockets, `remote_ip`/`remote_port` may be zero = wildcard).
+    /// A zero `remote_ip`/`remote_port` is a wildcard, as on a listen socket.
     pub fn matches(&self, other: &TcpTuple) -> bool {
         self.local_ip == other.local_ip
             && self.local_port == other.local_port
@@ -34,26 +28,17 @@ impl TcpTuple {
     }
 }
 
-/// Error type for TCP operations.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum TcpError {
-    /// Connection table is full.
     TableFull,
-    /// No connection found for the given tuple.
     NotFound,
-    /// Connection is in wrong state for the requested operation.
     InvalidState,
-    /// Port already in use.
     AddrInUse,
-    /// Connection was reset by peer.
     ConnectionReset,
-    /// Connection timed out.
     TimedOut,
-    /// Connection refused by peer (RST received in SYN_SENT).
+    /// RST received in SYN_SENT.
     ConnectionRefused,
-    /// Invalid segment or parameter.
     InvalidSegment,
-    /// Heap allocation failure during a state transition.
     OutOfMemory,
 }
 

@@ -17,22 +17,16 @@ use crate::scheduler;
 
 /// The kernel's owning task handle — outside OSTD, the only one.
 ///
-/// Every way to obtain a strong task reference lands here: the registry's
-/// liveness-checked weak upgrade, a placement container giving its reference
-/// back, a clone minted from a live one, a task surrendering its existence
-/// reference. Each is a constructor below, and none of them hands out the
-/// `KArc<Task>` underneath.
+/// Every way to obtain a strong task reference lands in a constructor below —
+/// the registry's liveness-checked weak upgrade, a placement container giving
+/// its reference back, a clone, a surrendered existence reference — and none of
+/// them hands out the `KArc<Task>` underneath.
 ///
-/// That is deliberate, and it is the whole safety argument. `Task`'s destructor
-/// frees to the buddy allocator, whose reuse path waits on synchronous
-/// cross-CPU TLB drains, so whether it may run *here* is a question about the
-/// calling context — asked by [`super::task_put`], which `Drop` below routes
-/// every release through. `KArc`'s own `Drop` does not ask it. So a bare
-/// `KArc<Task>` in a binding is a hazard rather than a handle: every scope exit
-/// is a release site, including the ones `?` and `return` create, and a struct
-/// field holding one has a derived `Drop` that is silently the wrong one. Since
-/// no expression outside this module produces a `KArc<Task>`, that mistake is
-/// not merely discouraged — it cannot be written.
+/// That is the whole safety argument. `Task`'s destructor frees to the buddy
+/// allocator, whose reuse path waits on synchronous cross-CPU TLB drains, so
+/// whether it may run *here* is a question about the calling context — asked by
+/// [`super::task_put`], which `Drop` below routes every release through, and
+/// not asked by `KArc`'s own `Drop`.
 ///
 /// The raw pointer escape ([`Self::as_ptr`]) is transitional scheduler plumbing
 /// and remains valid for exactly the lifetime of this guard (or of another
@@ -81,23 +75,19 @@ impl TaskRef {
         KArc::as_ptr(self.arc.as_ref().expect("live TaskRef")) as *mut Task
     }
 
-    /// This task's allocation node, for the placement primitives.
+    /// This task's allocation node, for the callers that park a reference on it
+    /// (a ready-queue publication, a wait map, a futex bucket).
     ///
-    /// [`Deref`] already answers "read this task's state"; this answers the
-    /// other question a live guard gets asked — "park a reference to it" — for
-    /// the callers that mint one (a ready-queue publication, a wait map, a
-    /// futex bucket). Handing out the node rather than the handle is what keeps
-    /// `task.arc().clone()` from being a way back to a bare `KArc<Task>`, while
-    /// still carrying the mint's precondition — *the caller holds a live strong
-    /// reference* — as a fact in the signature rather than a comment.
+    /// Handing out the node rather than the handle keeps `KArc<Task>` from
+    /// escaping the guard, while `&self` still carries the mint's precondition:
+    /// the caller holds a live strong reference.
     #[inline]
     pub fn node(&self) -> NonNull<Task> {
         KArc::node(self.arc.as_ref().expect("live TaskRef"))
     }
 
     /// Park this guard's reference in a raw slot, yielding the node pointer to
-    /// store. The inverse of [`Self::from_placement`], and the only way a guard
-    /// leaves the type system — into a slot that hands it straight back.
+    /// store. The inverse of [`Self::from_placement`].
     #[inline]
     pub(crate) fn into_placement(self) -> NonNull<Task> {
         slopos_ostd::task::task_placement_leak(self.into_arc())
@@ -105,24 +95,17 @@ impl TaskRef {
 
     /// Surrender the handle this guard wraps.
     ///
-    /// `pub(super)` on purpose: this is the one place a bare `KArc<Task>`
-    /// escapes the guard, and its only caller is the release path in
-    /// [`super::task_reclaim`], which consumes it immediately. Widening this is
-    /// what would put an un-guarded handle back into a binding.
-    ///
-    /// Costs no refcount traffic — the guard is only ever a wrapper around this
-    /// one reference.
+    /// `pub(super)` on purpose: the one place a bare `KArc<Task>` escapes the
+    /// guard, and its only caller is the release path in
+    /// [`super::task_reclaim`], which consumes it immediately.
     #[inline]
     pub(super) fn into_arc(mut self) -> KArc<Task> {
         self.arc.take().expect("live TaskRef")
     }
 
     /// Wrap a freshly built, never-registered task so the reclaim tests can
-    /// exercise a release that really is final.
-    ///
-    /// The one constructor that takes a handle rather than a node, and gated to
-    /// `test-hooks` for exactly that reason: a production caller reaching for it
-    /// would be a production caller holding a bare `KArc<Task>`.
+    /// exercise a release that really is final. Gated to `test-hooks` because
+    /// it is the one constructor that takes a handle rather than a node.
     #[cfg(feature = "test-hooks")]
     pub fn from_arc_for_test(arc: KArc<Task>) -> Self {
         Self::new(arc)
@@ -166,25 +149,20 @@ impl Drop for TaskRef {
         let Some(arc) = self.arc.take() else {
             return;
         };
-        // Routed through the universal release rather than dropped: a guard on a
-        // reaped task can hold the final reference, and guards are constructed
-        // and dropped *under* the registry cli-spinlock (the cr3 scan, every
-        // registry walk, the fixture reset). The release decrements here and
+        // A guard on a reaped task can hold the final reference, and guards are
+        // constructed and dropped *under* the registry cli-spinlock (the cr3
+        // scan, every registry walk, the fixture reset), so the release
         // defers the allocator-heavy destructor to a context that can run it.
-        //
-        // This is why the guard exists at all, and why nothing hands out the
-        // handle it wraps: `KArc<Task>`'s own `Drop` skips that decision.
         super::task_reclaim::release_arc(arc);
     }
 }
 
 /// One registered task.
 ///
-/// The registry never owns a task. `weak` is the only handle it keeps, so a
-/// lookup is a liveness-checked upgrade and there is no way to fabricate a
-/// strong reference from an entry. What keeps a registered task alive instead is
-/// its own existence reference: a task is registered exactly while it holds one,
-/// and the reap gives it back and unhashes the entry as a single step.
+/// The registry never owns a task: `weak` is its only handle, so a lookup is a
+/// liveness-checked upgrade and no entry can fabricate a strong reference. A
+/// registered task is kept alive by its own existence reference, which the reap
+/// gives back as it unhashes the entry, in one step.
 struct RegistryEntry {
     id: u32,
     weak: KWeak<Task>,
@@ -192,14 +170,11 @@ struct RegistryEntry {
 
 /// Weak-upgrade liveness index over a pre-reserved slot spine.
 ///
-/// IDs are never recycled, so `RegistryEntry::id` is the stable identity and
-/// no parallel slot-generation scheme exists — array slots are reused, IDs
-/// are not. The spine is allocated once outside the manager lock
-/// ([`ensure_registry_allocated`]) and never grows: every mutation under the
-/// cli-spinlock is a plain slot write, so registration and retirement never
-/// touch the heap while the lock is held. Allocating under a cli-lock is a
-/// standing hazard: the allocator is the one place every subsystem meets, so
-/// anything it can block on becomes something every lock holder can block on.
+/// IDs are never recycled, so `RegistryEntry::id` is the stable identity and no
+/// slot-generation scheme exists — array slots are reused, IDs are not. The
+/// spine is allocated once outside the manager lock
+/// ([`ensure_registry_allocated`]) and never grows, so no mutation under the
+/// cli-spinlock can reach the allocator.
 struct TaskRegistry {
     slots: KVec<Option<KernelSync<RegistryEntry>>>,
     /// Occupied-slot count.
@@ -390,11 +365,10 @@ fn ensure_registry_allocated() -> bool {
 /// Reap a task: unhash its registration and give back the existence reference
 /// it has held since registration, as one step.
 ///
-/// This is SlopOS's `release_task`. It declines while the task is still
-/// dispatch-pinned, because unhashing a task takes its existence reference
-/// back, and the last release that follows runs the allocator-heavy destructor
-/// — which frees the kernel stack a CPU is still executing on. The deferred
-/// drain retries once the pin clears.
+/// Declines while the task is still dispatch-pinned: unhashing takes the
+/// existence reference back, and the last release that follows runs the
+/// allocator-heavy destructor — which frees the kernel stack a CPU is still
+/// executing on. The deferred drain retries once the pin clears.
 ///
 /// The gate is a statement about task *state*, never about a reference count: a
 /// count pre-check cannot be made race-free, and the final release is decided by
@@ -406,13 +380,6 @@ fn reap_task_registration(id: u32) -> bool {
     let taken = with_task_manager(|mgr| {
         // A registered task holds its existence reference, so this upgrade
         // cannot fail for an entry that is present.
-        //
-        // Held as a guard rather than as the bare handle: every exit below
-        // releases it while the registry cli-spinlock is held, and one of them
-        // is reached exactly when a racing reaper already took the existence
-        // reference — which makes this upgrade the last one. `TaskRef::drop`
-        // routes that through `task_put`, so the allocator-heavy destructor
-        // never runs under the lock.
         let task = TaskRef::new(mgr.registry.find(id)?.weak.upgrade()?);
         let node = NonNull::new(task.as_ptr())?;
         if task.status() != TaskStatus::Terminated {
@@ -424,9 +391,8 @@ fn reap_task_registration(id: u32) -> bool {
         }
         let existence = TaskRef::take_existence(node)?;
         // Unhash while the existence reference is still held: the weak count is
-        // then at least two (the implicit one the strongs own, plus this entry's),
-        // so dropping the entry is a bare decrement that provably cannot reach
-        // the allocator from under this cli-spinlock.
+        // then at least two, so dropping the entry is a bare decrement that
+        // cannot reach the allocator from under this cli-spinlock.
         let entry = mgr.registry.remove(id).expect("found under the same lock");
         drop(entry.weak);
         // The temporary upgrade above. Non-final while `existence` is held.
@@ -470,10 +436,9 @@ fn force_reap_registration(id: u32) {
 }
 
 /// One-shot retry latch for reaps refused because the task was still
-/// dispatch-pinned. The idle dispatcher drains it via
-/// [`task_reap_dispatch_pinned`]; ids are never recorded, because id-keyed
-/// re-lookup is race-free and allocation-free — recording them would mean
-/// allocating under the registry lock, which the spine design forbids.
+/// dispatch-pinned, drained by [`task_reap_dispatch_pinned`]. Ids are never
+/// recorded: that would mean allocating under the registry lock, which the
+/// spine design forbids.
 static REAP_BLOCKED_BY_DISPATCH: AtomicBool = AtomicBool::new(false);
 
 /// Whether a reap has been refused for a still-pinned task since the last drain.
@@ -487,8 +452,8 @@ pub fn task_reap_pending() -> bool {
 #[inline]
 pub fn arm_deferred_reap() {
     REAP_BLOCKED_BY_DISPATCH.store(true, Ordering::Release);
-    // The latch says there is work; this says where to notice it. The switch
-    // tail arms this with interrupts off, so a byte store is the whole budget.
+    // The latch says there is work; this says where to notice it. Armed from
+    // the switch tail with interrupts off, so a byte store is the whole budget.
     slopos_ostd::sync::bh::raise();
 }
 
@@ -525,11 +490,8 @@ pub fn task_reap_dispatch_pinned() {
     }
 }
 
-/// Reap the task `id` names, if it is ready to be reaped.
-///
-/// The sole entry point for teardown paths: `task_terminate`'s cleanup, the
-/// post-switch cleanup of a task that has just left its CPU, `waitpid`'s reap,
-/// and a dying parent's auto-reap of its zombie children.
+/// Reap the task `id` names, if it is ready to be reaped. The sole entry point
+/// for teardown paths.
 #[inline]
 pub(crate) fn task_reap(id: u32) -> bool {
     reap_task_registration(id)
@@ -546,11 +508,9 @@ pub fn init_task_manager() -> c_int {
     if !was_initialized {
         with_task_manager(|mgr| mgr.initialized = true);
         TASK_MANAGER.clear_poison();
-        // Ensure, not reset. Boot brings the scheduler up in the `drivers`
-        // phase and reaches this step in `services`, so kernel-I/O kthreads are
-        // already parked on deadlines by the time it runs; wiping the queue
-        // here would unarm them. The reset below is the reinit path, which
-        // retires those tasks anyway.
+        // Ensure, not reset: kernel-I/O kthreads are already parked on
+        // deadlines by the time this runs, and wiping the queue would unarm
+        // them.
         if !crate::sleep::ensure_sleep_queue_allocated() {
             return -1;
         }
@@ -588,18 +548,16 @@ pub fn init_task_manager() -> c_int {
     });
     TASK_MANAGER.clear_poison();
     crate::sleep::init_sleep_queue();
-    // Retiring the previous generation's tasks above may have parked their
-    // final references; destroy them here so a test fixture never starts with
-    // the previous run's corpses outstanding.
+    // Retiring the previous generation may have parked their final references;
+    // drain so a fixture never starts with the previous run's corpses.
     super::task_graveyard_drain();
     0
 }
 
-/// Whether `task_id` was ever handed out by the allocator. Because ids are
-/// monotonic and never reused, any id below the watermark named a real task
-/// at some point — it is now either live or fully retired — whereas an id at
-/// or above the watermark never existed. Lets callers treat an operation on
-/// an already-retired task as idempotent rather than "no such task".
+/// Whether `task_id` was ever handed out by the allocator. Ids are monotonic
+/// and never reused, so any id below the watermark named a real task at some
+/// point. Lets callers treat an operation on an already-retired task as
+/// idempotent rather than "no such task".
 pub fn task_id_was_allocated(task_id: u32) -> bool {
     if task_id == INVALID_TASK_ID || task_id == 0 {
         return false;
@@ -647,8 +605,6 @@ pub fn task_find_by_cr3(cr3: u64) -> Option<TaskRef> {
             if matches!(status, TaskStatus::Invalid | TaskStatus::Terminated) {
                 continue;
             }
-            // `task` is the registry guard the walk yields; it derefs to
-            // `&Task`, so the racy context read comes off it directly.
             let task_cr3 = task.context_cr3() & !0xFFF;
             if task_cr3 != target {
                 continue;
@@ -674,14 +630,12 @@ pub(super) enum TaskAllocError {
 ///
 /// The token *is* the pre-publication window: while it exists the task has no
 /// registry entry, so no lookup, no active-task walk and no diagnostic scan can
-/// observe it half-constructed, and the only way to reach it is [`Self::as_mut`]
-/// — an exclusive borrow the compiler can see. Construction therefore finishes
-/// before the task becomes reachable, which is what makes the field writes need
-/// no witness: there is nobody to be a witness against.
+/// observe it half-constructed, and the only way to reach it is
+/// [`Self::as_mut`].
 ///
-/// Every exit is accounted for. [`register_task`] consumes the token and hands
-/// back the strong reference that pins the now-registered task; dropping it
-/// instead gives the reservation back and releases the allocation.
+/// [`register_task`] consumes the token and hands back the strong reference
+/// that pins the now-registered task; dropping it instead gives the reservation
+/// back and releases the allocation.
 pub struct PendingTask {
     task: Option<KArc<Task>>,
     id: u32,
@@ -698,9 +652,7 @@ impl PendingTask {
     /// The exclusivity is *checked*, not asserted: the token holds the only
     /// strong reference and the registry has not published a weak one yet, so
     /// `KArc::get_mut` succeeds precisely when nobody else can reach the
-    /// allocation. The `&mut self` receiver is
-    /// what carries that fact out to the caller — a second builder cannot
-    /// exist, and the borrow ends before `register_task` consumes the token.
+    /// allocation.
     #[inline]
     pub fn as_mut(&mut self) -> &mut Task {
         KArc::get_mut(self.task.as_mut().expect("pending task owns allocation"))
@@ -714,11 +666,9 @@ impl Drop for PendingTask {
             return;
         };
         with_task_manager(|mgr| mgr.num_tasks = mgr.num_tasks.saturating_sub(1));
-        // Always the final release — the token holds the only reference a
-        // never-registered task ever had — so it goes through the universal
-        // release like every other one. `drop_off_lock` checks interrupts and
-        // the lock count but not the preempt guard, and an abandon under one
-        // would run the destructor in the very context `task_put` defers.
+        // `drop_off_lock` checks interrupts and the lock count but not the
+        // preempt guard, and an abandon under one would run the destructor in
+        // the very context `task_put` defers.
         task_put(TaskRef::new(task));
     }
 }
@@ -728,10 +678,8 @@ pub(super) fn allocate_task() -> Result<PendingTask, TaskAllocError> {
     if !ensure_registry_allocated() {
         return Err(TaskAllocError::NoFreeSlot);
     }
-    // Every task comes into existence through here, so this is the one point
-    // that necessarily precedes any park: a task cannot block on a deadline
-    // before it exists. Arming a timeout against a queue with no backing store
-    // silently arms nothing.
+    // The one point that necessarily precedes any park: arming a timeout
+    // against a sleep queue with no backing store silently arms nothing.
     if !crate::sleep::ensure_sleep_queue_allocated() {
         return Err(TaskAllocError::NoFreeSlot);
     }
@@ -739,9 +687,8 @@ pub(super) fn allocate_task() -> Result<PendingTask, TaskAllocError> {
         if mgr.num_tasks as usize >= MAX_TASKS {
             return Err(TaskAllocError::MaxTasks);
         }
-        // Registered-but-unreclaimed tasks (zombies awaiting waitpid) occupy
-        // spine slots without counting toward `num_tasks`; refuse early so
-        // registration after full initialization almost never fails.
+        // Zombies awaiting waitpid occupy spine slots without counting toward
+        // `num_tasks`, so refuse early rather than fail at registration.
         if mgr.registry.len() >= MAX_TASKS {
             return Err(TaskAllocError::NoFreeSlot);
         }
@@ -780,12 +727,8 @@ pub(super) fn allocate_task() -> Result<PendingTask, TaskAllocError> {
 /// discards the pending task.
 ///
 /// The returned guard pins the task across the rest of the caller's own
-/// construction, which still works through a raw pointer. It is a [`TaskRef`]
-/// rather than the bare handle so that the construction path releases through
-/// [`super::task_put`] like every other holder: the callers that take it run a
-/// fallible tail (`CLONE_*_SETTID` writes, `publish_new_task`) whose error exits
-/// terminate the child first, and that makes the scope-end drop the child's
-/// final release.
+/// construction, whose fallible tail terminates the child on error and so makes
+/// the scope-end drop the child's final release.
 pub(super) fn register_task(mut pending: PendingTask) -> Result<TaskRef, PendingTask> {
     let id = pending.id;
     let task = pending.task.take().expect("pending task owns allocation");
@@ -843,15 +786,11 @@ pub fn task_consume_zombie(task_id: u32) -> Option<ExitInfo> {
     if !task.try_transition_to(TaskStatus::Terminated) {
         return None;
     }
-    // waitpid drops the parent's owning reference off-lock: unlink the child
-    // from its parent's children list and release the reference the list held.
-    // A Zombie is pinned by that reference, so without this the reaped child
-    // would stay Terminated-pinned until the parent itself exits.
-    //
-    // The lookup guard stays live across the unlink. The transition above made
-    // the child reapable, so from that instant a peer CPU's deferred-reap drain
-    // may retire the registration and hand back the existence reference; this
-    // guard is then the only thing keeping `child_ptr` addressable.
+    // A Zombie is pinned by the reference its parent's children list holds, so
+    // without this unlink the reaped child stays Terminated-pinned until the
+    // parent exits. The lookup guard stays live across it: from the transition
+    // above, a peer CPU's deferred-reap drain may retire the registration and
+    // hand back the existence reference.
     if let Some(child_ref) = super::unlink_child(&task) {
         task_put(child_ref);
     }
@@ -877,13 +816,10 @@ pub fn task_get_current_id() -> u32 {
 ///
 /// The guards are upgraded into a snapshot under the registry lock and `f` runs
 /// only after that lock is released, so a visitor may take the registry lock
-/// again — resolve a parent, enqueue a task, post a signal — without
-/// deadlocking. Each guard pins its task for the whole visit.
+/// again without deadlocking. Each guard pins its task for the whole visit.
 ///
-/// **Includes exited tasks.** This is the teardown/diagnostic walk: the
-/// shutdown sweep, the stranded-task rescue and the console dumps all need to
-/// see corpses. Anything that answers a userland question wants
-/// [`task_for_each_enumerable`] instead.
+/// **Includes exited tasks** — this is the teardown/diagnostic walk. Anything
+/// that answers a userland question wants [`task_for_each_enumerable`] instead.
 pub fn task_for_each_active(mut f: impl FnMut(&TaskRef)) {
     task_try_for_each_active(|task| {
         f(task);
@@ -894,14 +830,8 @@ pub fn task_for_each_active(mut f: impl FnMut(&TaskRef)) {
 /// Visit every registered task that can still run code.
 ///
 /// [`task_for_each_active`] minus the exited ones. A `Zombie` is an exit-status
-/// receipt: its address space and descriptor table are already gone, it holds
-/// no scheduler placement, and it cannot execute an instruction. Reporting one
-/// in a *task* list invites a caller to treat a receipt as a task — to chart
-/// its CPU time, or offer to kill it.
-///
-/// The split follows the rule Windows states outright: process enumeration
-/// returns what can still run code, and the debugger returns everything. Here
-/// the debugger is the diagnostic console, which keeps the `active` walk.
+/// receipt — no address space, no descriptor table, no scheduler placement — so
+/// reporting one in a *task* list invites a caller to treat a receipt as a task.
 pub fn task_for_each_enumerable(mut f: impl FnMut(&TaskRef)) {
     task_try_for_each_enumerable(|task| {
         f(task);
@@ -923,22 +853,16 @@ pub fn task_try_for_each_enumerable(mut f: impl FnMut(&TaskRef) -> ControlFlow<(
 /// [`task_for_each_active`] with early exit: visiting stops as soon as `f`
 /// returns [`ControlFlow::Break`].
 ///
-/// Visitors are lent the [`TaskRef`] guard rather than a bare `&Task`. Most
-/// only read, and [`Deref`] makes that spelling identical — but the walk also
-/// feeds the stranded-task rescue, which has to *park* a reference on a ready
-/// queue, and a shared borrow is not proof of a non-zero strong count. Lending
-/// the guard is what lets that one caller mint a reference without the walk
-/// handing every other caller a raw pointer to do it with.
+/// Visitors are lent the [`TaskRef`] guard rather than a bare `&Task` because
+/// the walk feeds the stranded-task rescue, which has to *park* a reference on
+/// a ready queue, and a shared borrow is not proof of a non-zero strong count.
 pub fn task_try_for_each_active(mut f: impl FnMut(&TaskRef) -> ControlFlow<()>) {
-    // The buffer is sized in one lock section and filled in another, so the
-    // registry can gain an entry in between. `KVec::with_capacity` reserves
-    // exactly, so an overflowing `push` would reallocate *under* the registry
-    // cli-spinlock, and allocating under a cli-lock is a standing hazard. So
-    // the fill
-    // never grows the buffer: it reports how many entries it saw and the retry
-    // re-reserves off-lock. Truncating instead would silently drop tasks from a
-    // walk that feeds the stranded-task rescue and the shutdown sweep. The spine
-    // holds at most `MAX_TASKS`, so this converges.
+    // Sized in one lock section and filled in another, so the registry can gain
+    // an entry in between. The fill never grows the buffer — that would
+    // reallocate under the registry cli-spinlock — and instead reports how many
+    // entries it saw so the retry can re-reserve off-lock; truncating would
+    // silently drop tasks. The spine holds at most `MAX_TASKS`, so this
+    // converges.
     let mut capacity = with_task_manager(|mgr| mgr.registry.len()).max(1);
     let tasks = loop {
         let mut tasks = match KVec::<TaskRef>::with_capacity(capacity) {

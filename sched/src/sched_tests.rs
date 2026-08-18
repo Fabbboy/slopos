@@ -1,11 +1,4 @@
-//! Comprehensive scheduler and task management tests.
-//!
-//! These tests are designed to find REAL bugs, not just pass. They test:
-//! - State machine transitions (valid AND invalid)
-//! - Edge cases (null, max capacity, overflow)
-//! - Race-prone scenarios
-//! - Resource exhaustion
-//! - Error recovery paths
+//! Scheduler and task-management tests.
 
 use core::ffi::{c_char, c_void};
 use core::ptr;
@@ -37,13 +30,8 @@ use slopos_mm::memory_layout_defs::PROCESS_CODE_START_VA;
 use slopos_ostd::sync::{LOCK_LEVEL_RESOURCE, PreemptGuard, SpinLock};
 use slopos_ostd::task::SchedPlacement;
 
-// =============================================================================
-// RAII Fixture for Scheduler Tests
-// =============================================================================
-
-/// RAII fixture for scheduler tests. All setup/teardown logic lives in
-/// [`KernelTestScope`]; this wrapper exists for the historical name and
-/// to keep the change to call sites mechanical.
+/// RAII fixture for scheduler tests; all setup/teardown lives in
+/// [`KernelTestScope`].
 pub struct SchedFixture {
     _scope: KernelTestScope,
 }
@@ -55,10 +43,6 @@ impl SchedFixture {
         }
     }
 }
-
-// =============================================================================
-// Test Helper Functions
-// =============================================================================
 
 use crate::test_fixture::dummy_task_entry;
 
@@ -81,14 +65,9 @@ pub fn test_previous_task_reference_drains_exactly_once() -> TestResult {
         Ok(arc) => arc,
         Err(_) => return TestResult::Fail,
     };
-    // A witness clone observes the strong count while one reference travels
-    // through the deferred slot.
     let witness = arc.clone();
     let strong_before = KArc::strong_count(&witness);
 
-    // Park one owning reference into the deferred slot exactly as the
-    // dispatcher's switch tail does. `leak` consumes `arc` without changing the
-    // strong count (the reference moves into the raw slot pointer).
     let parked = task_placement_leak(arc);
     if slopos_arch::pcr::defer_previous_task(parked.as_ptr().cast()).is_err() {
         klog_info!("SCHED_TEST: previous-task slot was already occupied");
@@ -103,8 +82,6 @@ pub fn test_previous_task_reference_drains_exactly_once() -> TestResult {
         );
     }
 
-    // The first drain reclaims and drops the parked reference exactly once; the
-    // second finds an empty slot.
     let drained = scheduler::drain_previous_task();
     let restored_after_drain = KArc::strong_count(&witness) == strong_before - 1;
     if !drained || !restored_after_drain {
@@ -130,14 +107,12 @@ slopos_testing::stest!(
     suite = sched_core
 );
 
-/// A final release in a context that cannot run the allocator-heavy `Task`
-/// destructor must park the task rather than destroy it inline, and the drain
-/// must then destroy it exactly once.
+/// A final release in a context that cannot run the `Task` destructor parks the
+/// task rather than destroying it inline; the drain then destroys it once.
 ///
-/// Uses an unregistered task so this release really is final — a registered one
-/// is pinned by the registry, and no placement release can reach zero.
+/// The task is unregistered so the release really is final — the registry pins
+/// a registered one.
 pub fn test_task_put_defers_unsafe_context_then_drains() -> TestResult {
-    // Start from a clean slate so the assertions below observe only this task.
     crate::task::task_graveyard_drain();
     if crate::task::task_graveyard_pending() {
         klog_info!("SCHED_TEST: graveyard non-empty after a drain");
@@ -160,8 +135,6 @@ pub fn test_task_put_defers_unsafe_context_then_drains() -> TestResult {
         klog_info!("SCHED_TEST: final release with interrupts off was not deferred");
         return TestResult::Fail;
     }
-    // The strong side is gone the moment the release lands, whether or not the
-    // destructor has run.
     if witness.upgrade().is_some() {
         klog_info!("SCHED_TEST: task still upgradable after its final release");
         return TestResult::Fail;
@@ -183,12 +156,8 @@ slopos_testing::stest!(
 );
 
 /// A parked corpse is collected at the next bottom-half point, with no idle CPU
-/// and nobody calling the drain.
-///
-/// This is what stops dead tasks accumulating under sustained fork/exit load: a
-/// machine whose CPUs never run out of work never reaches the idle dispatcher,
-/// and before the push armed the bottom half that was the only collector. The
-/// outermost preemption release used here is the same edge every unlock takes.
+/// and nobody calling the drain — the outermost preemption release used here is
+/// the same edge every unlock takes.
 pub fn test_graveyard_drains_at_a_bottom_half_point() -> TestResult {
     crate::task::task_graveyard_drain();
     if crate::task::task_graveyard_pending() {
@@ -212,8 +181,8 @@ pub fn test_graveyard_drains_at_a_bottom_half_point() -> TestResult {
         return TestResult::Fail;
     }
 
-    // The bottom-half point, reached the way ordinary code reaches it. No
-    // `task_graveyard_drain()` here — that is the whole assertion.
+    // The bottom-half point, reached the way ordinary code reaches it — the
+    // absent `task_graveyard_drain()` is the assertion.
     {
         let _guard = slopos_ostd::sync::PreemptGuard::new();
     }
@@ -231,9 +200,8 @@ slopos_testing::stest!(
     suite = sched_core
 );
 
-/// The mirror image: a final release in a context that *does* allow the
-/// destructor must destroy inline and leave nothing parked, so a task freed on
-/// a safe path never waits on an idle pass.
+/// A final release in a context that *does* allow the destructor destroys
+/// inline and parks nothing.
 pub fn test_task_put_destroys_inline_when_context_allows() -> TestResult {
     crate::task::task_graveyard_drain();
 
@@ -261,8 +229,7 @@ slopos_testing::stest!(
     suite = sched_core
 );
 
-/// A non-final release must be a plain decrement: no destruction, nothing
-/// parked. This is the common case on every dequeue and inbox drain.
+/// A non-final release is a plain decrement: no destruction, nothing parked.
 pub fn test_task_put_non_final_release_parks_nothing() -> TestResult {
     crate::task::task_graveyard_drain();
 
@@ -302,15 +269,12 @@ pub fn test_task_placement_leak_reclaim_round_trip() -> TestResult {
     let strong_before = KArc::strong_count(&arc);
     let base = KArc::as_ptr(&arc);
 
-    // Leak parks one strong reference as a raw pointer without dropping it, so
-    // the visible strong count is unchanged and the base pointer is stable.
     let parked = task_placement_leak(arc);
     if parked.as_ptr().cast_const() != base {
         klog_info!("SCHED_TEST: placement leak moved the base pointer");
         return TestResult::Fail;
     }
 
-    // Reclaim reconstitutes exactly that reference.
     let arc = task_placement_reclaim(parked);
     if KArc::strong_count(&arc) != strong_before {
         klog_info!(
@@ -336,11 +300,8 @@ slopos_testing::stest!(
 /// A CPU publishes the priority of the task it dispatches, and returns to the
 /// "nothing schedulable" sentinel when it parks on a bootstrap stub.
 ///
-/// This is what lets a wake publisher decide whether to preempt a *remote* CPU
-/// without dereferencing that CPU's current task — a read that raced its switch
-/// tail, where the outgoing dispatch reference is released and the task's
-/// destructor can run. A stale published priority is the failure with no crash:
-/// the CPU looks permanently high-priority and silently stops being preempted.
+/// Lets a wake publisher judge a remote CPU without dereferencing its current
+/// task, a read that races the switch tail.
 pub fn test_dispatch_publishes_current_priority() -> TestResult {
     let _fixture = SchedFixture::new();
 
@@ -383,7 +344,6 @@ pub fn test_dispatch_publishes_current_priority() -> TestResult {
         return TestResult::Fail;
     }
 
-    // Parking on the bootstrap stub is "this CPU runs nothing schedulable".
     slopos_arch::pcr::park_bootstrap_task(
         slopos_ostd::task::bootstrap::BSP_BOOTSTRAP_TASK.get() as *mut ()
     );
@@ -397,8 +357,6 @@ pub fn test_dispatch_publishes_current_priority() -> TestResult {
         return TestResult::Fail;
     }
 
-    // Every real priority outranks the sentinel, so a newcomer always wins
-    // against a CPU running nothing — the branch the old null-pointer test took.
     if TaskPriority::Idle.as_u8() >= slopos_arch::pcr::PRIORITY_NONE {
         klog_info!("SCHED_TEST: PRIORITY_NONE does not lose to every real priority");
         let _ = task_terminate(task_id);
@@ -416,11 +374,8 @@ slopos_testing::stest!(
 
 /// Every scalar task field reads back the value written to the field it names.
 ///
-/// `TaskInner` carries a dozen same-typed scalars side by side, so the
-/// realistic failure mode is a getter, a bulk copy or a rename wiring one to
-/// another's storage — which compiles cleanly whenever the types match, and
-/// then silently reports one task property as another. Distinct sentinels make
-/// that a test failure instead of a mystery.
+/// A dozen same-typed scalars sit side by side, so a getter wired to another's
+/// storage compiles cleanly; the distinct sentinels are what catch it.
 pub fn test_scalar_field_identity() -> TestResult {
     let mut arc = match KArc::try_init(Task::init_invalid()) {
         Ok(arc) => arc,
@@ -428,8 +383,7 @@ pub fn test_scalar_field_identity() -> TestResult {
     };
 
     {
-        // The sole strong reference to a never-registered task, so `get_mut`
-        // succeeds and the exclusivity is checked rather than asserted.
+        // Sole strong reference to a never-registered task, so `get_mut` succeeds.
         let Some(task) = KArc::get_mut(&mut arc) else {
             return TestResult::Fail;
         };
@@ -466,7 +420,7 @@ pub fn test_scalar_field_identity() -> TestResult {
         ("parent_task_id", arc.parent_task_id() as u64, 0xDDDD),
     ];
     // By reference: `for … in checks` moves the table into `array::IntoIter`,
-    // whose own frame then carried several unmerged copies of it.
+    // whose frame then carries several unmerged copies of it.
     for &(name, got, want) in checks.iter() {
         if got != want {
             klog_info!(
@@ -489,13 +443,8 @@ pub fn test_scalar_field_identity() -> TestResult {
 
 slopos_testing::stest!(name = test_scalar_field_identity, suite = sched_core);
 
-// =============================================================================
-// Kill-safe parking of a half-built task
-// =============================================================================
-
-/// Build a child exactly as `task_build` does, so the tests below park a real
-/// token rather than a stand-in: a task that already owns its kernel stack, its
-/// data stack and its process VM is what makes the leak expensive.
+/// Build a real child token: one that already owns its kernel stack, its data
+/// stack and its process VM.
 fn build_parkable_child() -> Option<crate::task::PendingTask> {
     crate::task::task_build(
         b"ParkedChild\0".as_ptr() as *const core::ffi::c_char,
@@ -508,13 +457,10 @@ fn build_parkable_child() -> Option<crate::task::PendingTask> {
 
 /// A publication that fails leaves the task nascent, not reserved.
 ///
-/// `schedule_task`/`schedule_new_task` reserve scheduler ownership by CASing
-/// `Nascent -> Waking` *before* the publish path checks the task is Ready. A
-/// fresh task is Blocked, so that check fails — and without a rollback the task
-/// would sit in `Waking` forever. That is worse than a leak: `Waking` is a state
-/// `wake_blocked_task` publishes from, so the next signal would hand a runqueue
-/// exactly the half-built task `Nascent` exists to protect. Teardown would not
-/// recover it either, since the retire CAS only matches `Nascent`.
+/// The publish path CASes `Nascent -> Waking` *before* checking the task is
+/// Ready, so without a rollback a fresh (Blocked) task sits in `Waking` — a
+/// state `wake_blocked_task` publishes from, and one the retire CAS, which only
+/// matches `Nascent`, cannot recover.
 pub fn test_failed_publication_restores_nascent() -> TestResult {
     let _fixture = SchedFixture::new();
 
@@ -548,8 +494,6 @@ pub fn test_failed_publication_restores_nascent() -> TestResult {
         return TestResult::Fail;
     }
 
-    // And the wake gate must still hold, which is the property the missing
-    // rollback actually destroyed.
     if scheduler::unblock_task(&guard) != 0 {
         klog_info!("SCHED_TEST: wake after a failed publication did not no-op");
         let _ = task_terminate(task_id);
@@ -561,7 +505,6 @@ pub fn test_failed_publication_restores_nascent() -> TestResult {
         return TestResult::Fail;
     }
 
-    // A real publication still works afterwards.
     if publish_new_task(&guard) != 0 {
         klog_info!("SCHED_TEST: publish_new_task failed after a rolled-back reservation");
         let _ = task_terminate(task_id);
@@ -584,10 +527,8 @@ slopos_testing::stest!(
 
 /// Terminating a never-published task retires its placement to `None`.
 ///
-/// A corpse left in `Nascent` would be permanently unreapable — the reap gate
-/// and the destructor gate both key on task state, and nothing retires the
-/// placement afterwards — so the registry slot would leak until spawns started
-/// failing with `NoFreeSlot` thousands of tasks later.
+/// A corpse left in `Nascent` is permanently unreapable: both gates key on task
+/// state and nothing retires the placement afterwards.
 pub fn test_nascent_task_is_terminable_and_retires_to_none() -> TestResult {
     let _fixture = SchedFixture::new();
 
@@ -636,11 +577,9 @@ slopos_testing::stest!(
 /// A registered-but-unpublished task refuses every wake, and a process-group
 /// signal cannot drive it onto a runqueue.
 ///
-/// `task_create` publishes `pgid = task_id` *before* it registers, so a
-/// process-group signal arriving between registration and `publish_new_task`
-/// finds a task whose status is `Blocked` and whose placement used to be
-/// `None` — indistinguishable from a legitimate wake target. It was then
-/// published half-built. `Nascent` is what makes the two distinguishable.
+/// `task_create` publishes `pgid = task_id` *before* it registers, so a signal
+/// landing before `publish_new_task` finds a Blocked task; `Nascent` is what
+/// distinguishes it from a legitimate wake target.
 pub fn test_nascent_task_refuses_wake() -> TestResult {
     let _fixture = SchedFixture::new();
 
@@ -702,7 +641,6 @@ pub fn test_nascent_task_refuses_wake() -> TestResult {
         return TestResult::Fail;
     }
 
-    // Publication is the one sanctioned way out, and it still works.
     if publish_new_task(&guard) != 0 {
         klog_info!("SCHED_TEST: publish_new_task failed after a refused wake");
         let _ = task_terminate(task_id);
@@ -727,14 +665,9 @@ slopos_testing::stest!(name = test_nascent_task_refuses_wake, suite = sched_core
 /// A task under construction is reachable through nothing but the token that
 /// owns it, so `kill(-pgid)` cannot catch it half-built.
 ///
-/// The spawn path writes a child's job-control identity — pgid, sid, group
-/// object — only once its ELF is loaded, a disk read's worth of time after the
-/// task exists. [`PendingTask`](crate::task::PendingTask) is what keeps that
-/// whole span private: with no registry entry there is nothing for
-/// `task_find_by_id` or the active-task walk to yield, and that walk matching
-/// `task.pgid` is exactly how a process-group signal picks its targets. The
-/// task appears at `task_commit` with its identity already written, so no
-/// observer can find it carrying a stale one.
+/// The spawn path writes a child's job-control identity only once its ELF is
+/// loaded. With no registry entry there is nothing for `task_find_by_id` or the
+/// active-task walk — which matches on `pgid` — to yield until `task_commit`.
 pub fn test_pending_task_is_unreachable_until_commit() -> TestResult {
     let _fixture = SchedFixture::new();
 
@@ -750,8 +683,7 @@ pub fn test_pending_task_is_unreachable_until_commit() -> TestResult {
     };
     let task_id = pending.id();
 
-    // The spawn path's job-control inherit, performed here for the same reason
-    // it is performed there: while the task is still private.
+    // The spawn path's job-control inherit, done while the task is still private.
     let group_pgid = task_id + 0x4000;
     pending.as_mut().set_pgid(group_pgid);
 
@@ -760,8 +692,7 @@ pub fn test_pending_task_is_unreachable_until_commit() -> TestResult {
         return TestResult::Fail;
     }
 
-    // The `kill(-pgid)` target scan, verbatim: walk the active tasks and match
-    // on pgid.
+    // The `kill(-pgid)` target scan, verbatim.
     let mut seen_by_id = false;
     let mut seen_by_pgid = false;
     task_for_each_active(|task| {
@@ -813,14 +744,11 @@ slopos_testing::stest!(
     suite = sched_core
 );
 
-/// Abandoning a built task gives back everything it reserved.
+/// Abandoning a built task gives back everything it reserved — the live-task
+/// reservation, the allocation and the address space.
 ///
-/// This is every spawn failure before publication — a missing binary, a
-/// rejected fd action — so what it has to release is the full cost of a task:
-/// the live-task reservation, the allocation, and the address space the task
-/// was going to run in. Only the id is spent, because ids are monotonic and
-/// never recycled, which is what lets a caller tell "already retired" from
-/// "never existed".
+/// Only the id is spent: ids are monotonic, which is what distinguishes
+/// "already retired" from "never existed".
 pub fn test_task_abandon_releases_the_address_space() -> TestResult {
     let _fixture = SchedFixture::new();
 
@@ -837,9 +765,8 @@ pub fn test_task_abandon_releases_the_address_space() -> TestResult {
         return TestResult::Fail;
     };
     let task_id = pending.id();
-    // Captured before the abandon, and held across it: re-resolving the number
-    // afterwards is what this change removes, because by then it names either
-    // nothing or somebody else.
+    // Captured before the abandon: afterwards the number names either nothing
+    // or somebody else.
     let process = pending
         .as_mut()
         .process()
@@ -895,10 +822,8 @@ slopos_testing::stest!(
 
 /// A built user task names a live process, and that process counts it.
 ///
-/// The count is what decides teardown, so a task that joined without being
-/// counted would have its address space destroyed while it was still running
-/// in it — and a task counted without joining would pin the address space
-/// forever. Both are silent, so the pairing is asserted rather than assumed.
+/// The count decides teardown: uncounted, the address space is destroyed under
+/// a running task; counted without joining, it is pinned forever.
 pub fn test_a_built_user_task_joins_a_counted_process() -> TestResult {
     let _fixture = SchedFixture::new();
 
@@ -957,12 +882,9 @@ slopos_testing::stest!(
     suite = sched_core
 );
 
-/// A kernel task has no process, and says so.
-///
-/// `INVALID_PROCESS_ID` and "no process handle" have to agree: a kernel task
-/// that resolved a process would be counted against a principal it does not
-/// belong to, and the exit path would take it as a member whose departure
-/// tears an address space down.
+/// A kernel task has no process, and says so: `INVALID_PROCESS_ID` and "no
+/// process handle" must agree, or the exit path tears down an address space the
+/// task never belonged to.
 pub fn test_a_kernel_task_has_no_process() -> TestResult {
     let _fixture = SchedFixture::new();
 
@@ -1001,11 +923,8 @@ slopos_testing::stest!(name = test_a_kernel_task_has_no_process, suite = sched_c
 
 /// Process registrations do not accumulate across task churn.
 ///
-/// The id space is 256 wide and a registration holds an id until it is
-/// retired, so a build/abandon cycle that leaked one would exhaust the space
-/// after 256 spawns and refuse every process afterwards — a failure that
-/// arrives long after the commit that caused it, on a boot that got far
-/// enough to spawn that many. Cheaper to assert here.
+/// The id space is 256 wide and a registration holds an id until it is retired,
+/// so a build/abandon cycle that leaked one exhausts it after 256 spawns.
 pub fn test_process_registrations_do_not_leak_across_churn() -> TestResult {
     let _fixture = SchedFixture::new();
 
@@ -1048,17 +967,13 @@ slopos_testing::stest!(
 
 /// Every user task the kernel can build, it can also run.
 ///
-/// A task is refused dispatch and terminated if its process id is outside
-/// the range the process tables are indexed by, so an id allocator that
-/// can hand out an id past that range makes `task_build` succeed and the
-/// task die at its first dispatch — for that task and every one after it,
-/// until reboot.
+/// A task is refused dispatch and terminated if its process id is outside the
+/// range the process tables are indexed by, so an allocator that can hand out
+/// an id past that range makes `task_build` succeed and every task from then on
+/// die at its first dispatch.
 ///
-/// This test does **not** call `init_process_vm`. Every other process test
-/// in the tree does, which resets the id allocator and is exactly why the
-/// suite cannot see a bounded id space. What is under test here is the
-/// allocator's state as the kernel actually accumulates it, so the churn
-/// has to run against whatever that state already is.
+/// Deliberately does **not** call `init_process_vm`: that resets the id
+/// allocator, and what is under test is the state the kernel accumulates.
 pub fn test_every_user_task_built_since_boot_is_dispatchable() -> TestResult {
     let _fixture = SchedFixture::new();
 
@@ -1104,14 +1019,12 @@ slopos_testing::stest!(
     suite = sched_core
 );
 
-/// A task's address-space handle stops resolving once that address space
-/// is gone, and never resolves to whichever process takes its place.
+/// A task's address-space handle stops resolving once that address space is
+/// gone, and never resolves to whichever process takes its place.
 ///
-/// This is the whole reason a task carries a handle and not just a
-/// process id. The id it held will be issued again, and the slot it used
-/// will be bound again; anything keyed on either alone would follow the
-/// task's page-fault and dispatch paths straight into a stranger's
-/// address space.
+/// The id it held is issued again and the slot rebound, so anything keyed on
+/// either alone follows the task's page-fault and dispatch paths straight into
+/// a stranger's address space.
 pub fn test_a_dead_address_space_is_unreachable_through_its_task_handle() -> TestResult {
     use slopos_mm::process_vm::{
         create_process_vm, destroy_process_vm, process_vm_get_cr3_phys_by_handle,
@@ -1143,7 +1056,6 @@ pub fn test_a_dead_address_space_is_unreachable_through_its_task_handle() -> Tes
         return TestResult::Fail;
     }
 
-    // Abandoning the task tears its address space down.
     task_abandon(pending);
 
     if process_vm_get_cr3_phys_by_handle(handle).is_ok() {
@@ -1151,9 +1063,8 @@ pub fn test_a_dead_address_space_is_unreachable_through_its_task_handle() -> Tes
         return TestResult::Fail;
     }
 
-    // Bind a fresh process to the slot the dead task used and re-check.
-    // The handle must still refuse — this is the case that would hand a
-    // dead task's fault path a live stranger's page tables.
+    // Bind a fresh process to the slot the dead task used: the handle must
+    // still refuse, or a dead task's fault path gets a live stranger's tables.
     let successor = create_process_vm();
     if successor == INVALID_PROCESS_ID {
         klog_info!("SCHED_TEST: could not create a successor process");
@@ -1296,9 +1207,8 @@ pub fn test_wake_blocked_task_publishes_from_none() -> TestResult {
         return TestResult::Fail;
     };
     let task: &Task = &guard;
-    // Stand in for a task that was published, ran, and blocked: wakes are
-    // refused while a task is still nascent, which is what this test is *not*
-    // about (see `test_nascent_task_refuses_wake`).
+    // Stand in for a published-then-blocked task: every wake path deliberately
+    // refuses a nascent one.
     if !scheduler::clear_nascent_for_test(task_id) {
         klog_info!("SCHED_TEST: wake fixture was not nascent");
         return TestResult::Fail;
@@ -1326,13 +1236,6 @@ pub fn test_wake_blocked_task_publishes_from_none() -> TestResult {
     TestResult::Pass
 }
 
-// =============================================================================
-// STATE MACHINE TESTS
-// These tests verify state transitions work correctly AND that invalid
-// transitions are properly rejected (or at least logged).
-// =============================================================================
-
-/// Test: Valid state transition READY -> RUNNING
 pub fn test_state_transition_ready_to_running() -> TestResult {
     let _fixture = SchedFixture::new();
 
@@ -1384,7 +1287,6 @@ pub fn test_state_transition_ready_to_running() -> TestResult {
     TestResult::Pass
 }
 
-/// Test: Valid state transition RUNNING -> BLOCKED
 pub fn test_state_transition_running_to_blocked() -> TestResult {
     let _fixture = SchedFixture::new();
 
@@ -1400,7 +1302,6 @@ pub fn test_state_transition_running_to_blocked() -> TestResult {
         return TestResult::Fail;
     }
 
-    // Publish to READY, then claim RUNNING before blocking.
     if task_set_state(task_id, TaskStatus::Ready) != 0 {
         klog_info!("SCHED_TEST: Failed to set READY state");
         return TestResult::Fail;
@@ -1410,7 +1311,6 @@ pub fn test_state_transition_running_to_blocked() -> TestResult {
         return TestResult::Fail;
     }
 
-    // Then transition to BLOCKED
     if task_set_state(task_id, TaskStatus::Blocked) != 0 {
         klog_info!("SCHED_TEST: Failed to set BLOCKED state");
         return TestResult::Fail;
@@ -1442,10 +1342,8 @@ pub fn test_state_transition_invalid_terminated_to_running() -> TestResult {
         return TestResult::Fail;
     }
 
-    // Terminate the task
     task_terminate(task_id);
 
-    // Try to find it again - should fail or be in TERMINATED/INVALID state
     if let Some(task) = task_find_by_id(task_id) {
         let _result = task_set_state(task_id, TaskStatus::Running);
         let new_state = Some(task.status()).unwrap_or(TaskStatus::Terminated);
@@ -1459,7 +1357,7 @@ pub fn test_state_transition_invalid_terminated_to_running() -> TestResult {
     TestResult::Pass
 }
 
-/// Test: INVALID state transition BLOCKED -> RUNNING (should go through READY first)
+/// A blocked task must reach `Running` through `Ready`, never directly.
 pub fn test_state_transition_invalid_blocked_to_running() -> TestResult {
     let _fixture = SchedFixture::new();
 
@@ -1488,11 +1386,6 @@ pub fn test_state_transition_invalid_blocked_to_running() -> TestResult {
 
     TestResult::Pass
 }
-
-// =============================================================================
-// TASK CAPACITY TESTS
-// Test behavior at and beyond MAX_TASKS limit
-// =============================================================================
 
 /// Individually allocated tasks coexist and the concurrent-task cap rejects
 /// without consuming an ID or inserting a registry entry.
@@ -1530,13 +1423,8 @@ pub fn test_task_registry_live_cap() -> TestResult {
 }
 
 /// A held registry guard pins the *allocation* of a reaped task, not its
-/// *registration*.
-///
-/// The reap unhashes the entry as soon as the task is terminated and off-CPU, so
-/// lookups stop resolving immediately and do not wait on outstanding guards —
-/// this is `release_task`'s unhash. What the guard still guarantees is that the
-/// memory stays valid while it is held, which is the property the registry can no
-/// longer provide now that it only observes tasks.
+/// *registration*: the reap unhashes immediately without waiting on outstanding
+/// guards, and the guard only keeps the memory valid.
 pub fn test_task_guard_pins_terminated_task() -> TestResult {
     let _fixture = SchedFixture::new();
 

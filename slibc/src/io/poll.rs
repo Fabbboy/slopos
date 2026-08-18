@@ -1,11 +1,7 @@
-//! poll() and select() — multiplexed I/O, the many-eyed watcher of the Slopsea.
+//! poll() and select() — multiplexed I/O.
 
 use crate::errno::errno_set;
 use crate::pal::{Pal, Sys};
-
-// =============================================================================
-// poll constants
-// =============================================================================
 
 pub const POLLIN: i16 = 0x0001;
 pub const POLLPRI: i16 = 0x0002;
@@ -13,10 +9,6 @@ pub const POLLOUT: i16 = 0x0004;
 pub const POLLERR: i16 = 0x0008;
 pub const POLLHUP: i16 = 0x0010;
 pub const POLLNVAL: i16 = 0x0020;
-
-// =============================================================================
-// Structures
-// =============================================================================
 
 /// POSIX `struct pollfd`.
 #[repr(C)]
@@ -43,11 +35,6 @@ impl Default for FdSet {
 const FD_SETSIZE: usize = 1024;
 const BITS_PER_WORD: usize = 64;
 
-// =============================================================================
-// FdSet manipulation
-// =============================================================================
-
-/// Zero out an FdSet.
 #[inline]
 pub unsafe fn fd_zero(set: *mut FdSet) {
     if !set.is_null() {
@@ -55,7 +42,6 @@ pub unsafe fn fd_zero(set: *mut FdSet) {
     }
 }
 
-/// Add a file descriptor to an FdSet.
 #[inline]
 pub unsafe fn fd_set(fd: i32, set: *mut FdSet) {
     let fd = fd as usize;
@@ -64,7 +50,6 @@ pub unsafe fn fd_set(fd: i32, set: *mut FdSet) {
     }
 }
 
-/// Remove a file descriptor from an FdSet.
 #[inline]
 pub unsafe fn fd_clr(fd: i32, set: *mut FdSet) {
     let fd = fd as usize;
@@ -73,7 +58,6 @@ pub unsafe fn fd_clr(fd: i32, set: *mut FdSet) {
     }
 }
 
-/// Check whether a file descriptor is in an FdSet.
 #[inline]
 pub unsafe fn fd_isset(fd: i32, set: *const FdSet) -> bool {
     let fd = fd as usize;
@@ -83,11 +67,6 @@ pub unsafe fn fd_isset(fd: i32, set: *const FdSet) -> bool {
     ((*set).fds_bits[fd / BITS_PER_WORD] & (1u64 << (fd % BITS_PER_WORD))) != 0
 }
 
-// =============================================================================
-// Exported C functions
-// =============================================================================
-
-/// Wait for events on a set of file descriptors.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn poll(fds: *mut Pollfd, nfds: u32, timeout: i32) -> i32 {
     match Sys::poll(fds as *mut u8, nfds, timeout) {
@@ -99,7 +78,6 @@ pub unsafe extern "C" fn poll(fds: *mut Pollfd, nfds: u32, timeout: i32) -> i32 
     }
 }
 
-/// Synchronous I/O multiplexing.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn select(
     nfds: i32,

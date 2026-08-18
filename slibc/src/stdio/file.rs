@@ -52,8 +52,8 @@ unsafe fn new_stream(fd: i32, fflags: u32) -> *mut FILE {
         return ptr::null_mut();
     }
 
-    // C11 §7.21.3: a stream refers to an interactive device or it does not,
-    // and only the former is line-buffered by default.
+    // C11 §7.21.3: only a stream on an interactive device is line-buffered by
+    // default.
     let buf_mode = if crate::io::shim::isatty(fd) != 0 {
         BufferMode::Line
     } else {
@@ -84,10 +84,8 @@ pub unsafe extern "C" fn fopen(path: *const u8, mode: *const u8) -> *mut FILE {
     stream
 }
 
-/// Associate a stream with an already-open descriptor.
-///
-/// POSIX: `fclose` on the result closes `fd`, and an append mode positions the
-/// descriptor at end-of-file.
+/// Associate a stream with an already-open descriptor. POSIX: `fclose` on the
+/// result closes `fd`, and an append mode seeks it to end-of-file first.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn fdopen(fd: i32, mode: *const u8) -> *mut FILE {
     if fd < 0 {
@@ -151,7 +149,6 @@ unsafe fn fread_core(ptr: *mut u8, size: usize, nmemb: usize, stream: *mut FILE)
     let mut done = 0usize;
 
     while done < total {
-        // Check ungetc push-back first
         if f.ungot >= 0 {
             *ptr.add(done) = f.ungot as u8;
             f.ungot = -1;
@@ -222,7 +219,6 @@ unsafe fn fwrite_core(ptr: *const u8, size: usize, nmemb: usize, stream: *mut FI
 
     match f.mode {
         BufferMode::None => {
-            // Unbuffered: write directly
             let mut done = 0usize;
             while done < total {
                 match Sys::write(f.fd, ptr.add(done), total - done) {
@@ -341,8 +337,8 @@ pub unsafe extern "C" fn fseek(stream: *mut FILE, offset: i64, whence: i32) -> i
     f.buf_pos = 0;
     f.buf_len = 0;
     f.ungot = -1;
-    // C11 §7.21.9.2: a successful `fseek` clears the end-of-file indicator and
-    // undoes `ungetc`. It says nothing about the error indicator.
+    // C11 §7.21.9.2: a successful `fseek` clears end-of-file and undoes
+    // `ungetc`, and says nothing about the error indicator.
     f.flags &= !(FILE_FLAG_EOF | FILE_FLAG_READING | FILE_FLAG_WRITING);
 
     let ret = match Sys::lseek(f.fd, effective, whence) {
@@ -401,8 +397,7 @@ pub unsafe extern "C" fn fflush(stream: *mut FILE) -> i32 {
     let ret = if f.flags & FILE_FLAG_WRITING != 0 {
         f.flush_write_buf()
     } else if f.flags & FILE_FLAG_READING != 0 {
-        // POSIX: on an input stream, `fflush` gives back the read-ahead by
-        // repositioning the descriptor to the stream position and dropping it.
+        // POSIX: on an input stream, `fflush` gives back the read-ahead.
         f.discard_read_ahead();
         0
     } else {
@@ -412,9 +407,8 @@ pub unsafe extern "C" fn fflush(stream: *mut FILE) -> i32 {
     ret
 }
 
-/// `feof` deliberately does not take the stream lock: the answer is a single
-/// aligned load, and POSIX §2.5.1's locking would only make a stale answer
-/// arrive later, not make it fresh.
+/// Deliberately unlocked: the answer is a single aligned load, and POSIX
+/// §2.5.1's locking would only make a stale answer arrive later.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn feof(stream: *mut FILE) -> i32 {
     if stream.is_null() {
@@ -475,10 +469,6 @@ pub unsafe extern "C" fn fileno(stream: *mut FILE) -> i32 {
     }
     (*stream).fd
 }
-
-// ---------------------------------------------------------------------------
-// Explicit stream locking (POSIX §2.5.2)
-// ---------------------------------------------------------------------------
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn flockfile(stream: *mut FILE) {

@@ -27,8 +27,8 @@ impl Mac {
     ///
     /// Exactly six groups of one or two hex digits, separated by `:` or `-`;
     /// case is ignored and the two separators may be mixed. A separator is
-    /// required: a bare twelve-hex run is not accepted, so a mistyped address
-    /// cannot silently reinterpret its digits.
+    /// required, so a mistyped bare twelve-hex run cannot silently reinterpret
+    /// its digits.
     pub fn from_str_bytes(text: &[u8]) -> Option<Mac> {
         let mut out = [0u8; 6];
         let mut iter = text.split(|&b| b == b':' || b == b'-');
@@ -126,7 +126,6 @@ mod tests {
         assert_eq!(Mac::from_str_bytes(b"52:54:00:12:34:ab:cd"), None);
         assert_eq!(Mac::from_str_bytes(b"525:54:00:12:34:ab"), None);
         assert_eq!(Mac::from_str_bytes(b"52::00:12:34:ab"), None);
-        // A separator is mandatory; a bare hex run is not an address here.
         assert_eq!(Mac::from_str_bytes(b"5254001234ab"), None);
     }
 

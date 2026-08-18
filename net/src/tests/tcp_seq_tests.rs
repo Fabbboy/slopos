@@ -116,9 +116,8 @@ fn splitmix32(state: &mut u64) -> u32 {
     (z ^ (z >> 31)) as u32
 }
 
-/// Round-trip invariant: for any base sequence number and positive delta,
-/// `(base + delta).distance_to(base) == (2^32 - delta) mod 2^32` AND
-/// `base.distance_to(base + delta) == delta`.
+/// Round-trip invariant: `base.distance_to(base + delta) == delta`, for any
+/// base and delta.
 pub fn test_seqnum_round_trip_fuzz() -> TestResult {
     let mut rng_state = 0xDEAD_BEEF_CAFE_BABEu64;
     for _ in 0..4_096 {

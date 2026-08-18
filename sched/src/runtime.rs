@@ -203,11 +203,10 @@ pub fn arm_bottom_half(token: &slopos_ostd::sync::BspToken<'_>) {
     slopos_ostd::sync::bh::arm(token, relaxed_bottom_half);
 }
 
-/// Poll every registered idle callback, reporting whether any found work.
-///
-/// Copied out rather than invoked under the lock: the callbacks reach TTY and
-/// driver locks, and holding a registry-level lock across them would order the
-/// whole driver tree under this one.
+/// Poll every registered idle callback, reporting whether any found work. They
+/// are copied out rather than invoked under the lock: they reach TTY and driver
+/// locks, and holding a registry-level lock across them would order the whole
+/// driver tree under this one.
 fn run_idle_callbacks() -> bool {
     let mut callbacks = [None; MAX_IDLE_CALLBACKS];
     if let Some(mutex) = IDLE_CBS.get() {
@@ -224,6 +223,10 @@ fn run_idle_callbacks() -> bool {
     any_work
 }
 
+/// Deferred work an idle CPU is the cheapest place to run. Every callee takes a
+/// lock, frees to the allocator, or both, so the interrupt window is not
+/// optional: the idle loop's tail runs with interrupts disabled because
+/// `sti_hlt_cli_atomic` ends in `cli`.
 fn scheduler_loop_bottom_half() -> bool {
     let _window = crate::scheduler::RestoreInterruptState::open_window();
 
@@ -247,10 +250,6 @@ pub fn create_idle_task() -> c_int {
     create_idle_task_for_cpu(0)
 }
 
-/// Build an `idle/<cpu>` NUL-terminated name in a stack buffer sized to
-/// `TASK_NAME_MAX_LEN`.  Stays no_std and alloc-free; the decimal
-/// converter handles up to 10 digits which is far beyond any plausible
-/// CPU index.
 fn idle_task_name(cpu: usize) -> [u8; super::task::TASK_NAME_MAX_LEN] {
     let mut buf = [0u8; super::task::TASK_NAME_MAX_LEN];
     const PREFIX: &[u8] = b"idle/";
@@ -303,8 +302,6 @@ pub fn create_idle_task_for_cpu(cpu_id: usize) -> c_int {
         cpu_id as u8,
     );
 
-    // `idle_guard` is the registry guard taken three lines above; both of
-    // these are its own state.
     let _ = idle_guard.set_status(TaskStatus::Running);
     idle_guard.set_sched_placement(SchedPlacement::OnCpu);
 
@@ -319,12 +316,9 @@ pub(crate) enum IdleStackResolveError {
     MissingKernelStack,
 }
 
-/// This CPU's idle task and the top of its kernel stack.
-///
-/// Returns the borrow guard rather than a pointer: the caller is about to
-/// switch onto that stack, so it needs the task to still be there when it does,
-/// and the guard is what says so. `Idle` carries no lifetime, so the pair can
-/// be returned by value.
+/// This CPU's idle task and the top of its kernel stack. Returns the borrow
+/// guard rather than a pointer: the caller is about to switch onto that stack
+/// and needs the task to still be there when it does.
 pub(crate) fn resolve_idle_stack_for_cpu(
     cpu_id: usize,
 ) -> Result<(Idle, u64), IdleStackResolveError> {
@@ -337,7 +331,6 @@ pub(crate) fn resolve_idle_stack_for_cpu(
 }
 
 /// The top of an idle task's kernel stack, or why it cannot be switched onto.
-///
 /// Split out from [`resolve_idle_stack_for_cpu`] so the "installed but
 /// unusable" case is reachable from a test without mutating the live idle task
 /// a running CPU is standing on.
@@ -353,14 +346,9 @@ extern "C" fn scheduler_loop_entry(cpu_id: usize, _idle_task: *mut ()) -> ! {
 }
 
 pub fn enter_scheduler(cpu_id: usize) -> ! {
-    // Called exactly once per CPU at boot (BSP from `kernel_main_impl`,
-    // APs from `ap_entry_rust`). No re-entry guard — by the "trust internal
-    // contracts" convention, re-entry is a caller bug to fix at the call site,
-    // not a runtime condition to defend against.
-    // (Historical note: a prior `is_enabled()`-keyed guard caused a
-    // halt-forever bug because the kernel-test fixture's preconditions
-    // tripped the guard; the fixture is now hermetic so the guard's
-    // raison d'être disappeared with it.)
+    // Called exactly once per CPU at boot (BSP from `kernel_main_impl`, APs
+    // from `ap_entry_rust`). No re-entry guard: re-entry is a caller bug to fix
+    // at the call site, not a runtime condition to defend against.
     per_cpu::with_cpu_scheduler(cpu_id, |sched| {
         sched.enable();
     });
@@ -375,8 +363,8 @@ pub fn enter_scheduler(cpu_id: usize) -> ! {
         Err(IdleStackResolveError::MissingIdleTask) => {
             klog_info!("SCHED: CPU {} has no idle task, halting", cpu_id);
             slopos_mm::tlb::notify_cpu_offline();
-            // Leaving `online` latched on a CPU that parks forever would
-            // have the lockup detector watch a CPU that can never tick.
+            // Leaving `online` latched on a CPU that parks forever would have
+            // the lockup detector watch a CPU that can never tick.
             slopos_arch::pcr::mark_cpu_offline(cpu_id);
             slopos_arch::cpu::disable_interrupts();
             slopos_ostd::cpu::x86_64::core::halt_loop();
@@ -387,28 +375,19 @@ pub fn enter_scheduler(cpu_id: usize) -> ! {
                 cpu_id
             );
             slopos_mm::tlb::notify_cpu_offline();
-            // Leaving `online` latched on a CPU that parks forever would
-            // have the lockup detector watch a CPU that can never tick.
             slopos_arch::pcr::mark_cpu_offline(cpu_id);
             slopos_arch::cpu::disable_interrupts();
             slopos_ostd::cpu::x86_64::core::halt_loop();
         }
     };
 
-    // Hand SafeStack off from the bootstrap stub to the real idle
-    // task here — once `dispatch()` stores `PCR.current_task`,
-    // every subsequent instrumented prologue on this CPU reads
-    // `idle_task.unsafe_stack_sp` via `gs:[CURRENT_TASK]` instead of
-    // the per-CPU bootstrap stub's.
+    // Hands SafeStack off from the bootstrap stub to the real idle task: once
+    // `dispatch` stores `PCR.current_task`, every instrumented prologue on this
+    // CPU reads `idle_task.unsafe_stack_sp` via `gs:[CURRENT_TASK]`.
     super::scheduler::dispatch(cpu_id, idle_task.task());
 
-    // OSTD's `enter_scheduler_loop_noreturn` folds the one `unsafe`
-    // stack-switch primitive behind the documented scheduler-bringup
-    // discharge.
-    //
-    // The payload is null: `scheduler_loop_entry` ignores it and
-    // `scheduler_loop` re-reads the idle slot per iteration, so passing the
-    // task here would launder a type-erased task handle across a stack switch
+    // Null payload: `scheduler_loop` re-reads the idle slot per iteration, so
+    // passing the task would launder a type-erased handle across a stack switch
     // for a value nothing reads.
     slopos_ostd::cpu::x86_64::stack::enter_scheduler_loop_noreturn(
         idle_stack_top,
@@ -418,23 +397,18 @@ pub fn enter_scheduler(cpu_id: usize) -> ! {
     )
 }
 
-/// Callback registered by the boot layer to start the per-CPU LAPIC timer.
-/// Returns `true` when the timer was successfully started (or already running).
-/// Called from the scheduler loop on each AP until it returns `true`.
+/// Boot-registered callback that starts the per-CPU LAPIC timer, returning
+/// `true` once it is running. Each AP retries it until then.
 static AP_TIMER_START_CB: core::sync::atomic::AtomicPtr<()> =
     core::sync::atomic::AtomicPtr::new(core::ptr::null_mut());
 
-/// Register a callback that APs invoke from their scheduler loop to start
-/// their LAPIC timer.  The boot layer calls this after calibration so that
-/// APs (which may already be running) can pick up the calibrated frequency.
-///
-/// The callback signature is `fn() -> bool` (returns true once started).
+/// Called by the boot layer after calibration, so APs that are already running
+/// pick up the calibrated frequency.
 pub fn register_ap_timer_start(cb: fn() -> bool) {
     AP_TIMER_START_CB.store(cb as *mut (), core::sync::atomic::Ordering::Release);
 }
 
-/// Try to start the per-CPU LAPIC timer via the registered callback.
-/// Called once per scheduler-loop iteration until the timer is running.
+/// Retried once per scheduler-loop iteration until the timer is running.
 fn deferred_start_ap_timer(cpu_id: usize) {
     use core::sync::atomic::{AtomicBool, Ordering};
 
@@ -462,8 +436,6 @@ fn deferred_start_ap_timer(cpu_id: usize) {
 
 fn scheduler_loop(cpu_id: usize) -> ! {
     loop {
-        // Start the LAPIC timer on this AP once the boot layer registers
-        // the callback (after calibration).  No-op after the first success.
         deferred_start_ap_timer(cpu_id);
 
         per_cpu::with_cpu_scheduler(cpu_id, |sched| {
@@ -471,10 +443,9 @@ fn scheduler_loop(cpu_id: usize) -> ! {
         });
 
         if per_cpu::should_pause_scheduler_loop(cpu_id) {
-            // Deliberately no reclaim and no bottom half: the pause exists so
-            // its holder can act against quiescent APs, and both would take
-            // allocator and registry locks on this CPU's behalf. Whatever this
-            // CPU is holding drains on the iteration after the pause lifts.
+            // No reclaim and no bottom half: the pause exists so its holder can
+            // act against quiescent APs, and both take allocator and registry
+            // locks on this CPU's behalf.
             slopos_ostd::sync::rcu_note_qs();
             crate::scheduler::arm_tickless_idle_if_due();
             slopos_ostd::sync::rcu_note_cpu_idle_enter();
@@ -483,24 +454,15 @@ fn scheduler_loop(cpu_id: usize) -> ! {
             continue;
         }
 
-        // IRQs must be OFF across the dispatch: `execute_task` →
-        // `switch_context` swaps the per-task preempt_count with the PCR
-        // and switches registers — an IRQ landing inside that window (and
-        // its trap-exit handoff re-entering `schedule()`) interleaves a
-        // second switch with the half-completed swap, corrupting the
-        // count for the incoming task. `schedule_internal` already
-        // brackets its switches with `save_flags_cli`; this idle-loop
-        // dispatch was the one unbracketed path (and the one every fresh
-        // task's first run goes through). When the switch happens, idle's
-        // context saves IF=0 and the flags restore below runs at idle
-        // resumption.
+        // IRQs must be OFF across the dispatch: `switch_context` swaps the
+        // per-task preempt_count with the PCR, and an IRQ landing in that
+        // window — its trap-exit handoff re-entering `schedule()` — interleaves
+        // a second switch with the half-completed swap. Idle's context saves
+        // IF=0, so the restore below runs at idle resumption.
         let irq_flags = slopos_arch::cpu::save_flags_cli();
-        // Minted per iteration rather than once outside the loop: the slot is
-        // the authority for which task this loop dispatches from, and the
-        // payload that crossed `enter_scheduler_loop_noreturn`'s stack switch
-        // is type-erased and deliberately ignored. Re-reading it here is two
-        // atomic loads and removes the question of whether a cached pointer is
-        // still the CPU's idle task.
+        // Minted per iteration rather than cached: the slot is the authority for
+        // which task this loop dispatches from, and re-reading it is two atomic
+        // loads.
         let Some(idle) = Idle::current() else {
             slopos_arch::cpu::restore_flags(irq_flags);
             slopos_ostd::sync::rcu_note_qs();
@@ -511,11 +473,9 @@ fn scheduler_loop(cpu_id: usize) -> ! {
             continue;
         };
         let dispatched = run_ready_task_from_idle(cpu_id, idle.task());
-        // Drain before re-enabling interrupts: the drain clears the CPU-local
-        // previous-task slot while interrupts are disabled, closing the window
-        // in which a re-entrant dispatch would park a second reference into the
-        // still-occupied slot. The reference is then dropped in the drain's own
-        // interrupt window.
+        // Drain before re-enabling interrupts: clearing the CPU-local
+        // previous-task slot with interrupts off closes the window in which a
+        // re-entrant dispatch would park a second reference into it.
         let _ = crate::scheduler::drain_previous_task();
         slopos_arch::cpu::restore_flags(irq_flags);
         crate::scheduler::drain_deferred_task_reclaim();
@@ -527,30 +487,23 @@ fn scheduler_loop(cpu_id: usize) -> ! {
             continue;
         }
 
-        // Belt-and-braces: re-enqueue any task stranded READY with no
-        // runqueue entry (a lost-enqueue race would otherwise freeze it
-        // forever — see `rescue_stranded_ready_tasks`). Runs only when this
-        // CPU is fully idle (nothing to run, nothing to steal), so the
-        // registry walk costs idle time only.
+        // Sited where this CPU is fully idle, so the registry walk costs idle
+        // time only.
         crate::scheduler::rescue_stranded_ready_tasks();
 
         // Before the bottom half, and unconditionally: reaching here proves
         // this CPU holds no read-side section, and the bottom half can loop for
-        // as long as it keeps finding work. A report placed after it would be
-        // skipped exactly while this CPU is busiest reclaiming — stalling the
-        // grace period that the reclamation is itself waiting on.
+        // as long as it keeps finding work. Reporting after it would skip
+        // exactly while this CPU is busiest reclaiming, stalling the grace
+        // period that reclamation is itself waiting on.
         slopos_ostd::sync::rcu_note_qs();
 
-        // Nothing to run, nothing to steal: the deferred work runs here rather
-        // than at the top of the loop, where it would cost a lock acquisition
-        // and a TTY slot walk on every dispatch.
+        // Sited here rather than at the top of the loop, where it would cost a
+        // lock acquisition and a TTY slot walk on every dispatch.
         if scheduler_loop_bottom_half() {
             continue;
         }
 
-        // Tickless-idle: arm one-shot LAPIC for the soonest pending
-        // sleep-queue deadline if it falls inside the next periodic
-        // tick. See `sched::scheduler::arm_tickless_idle_if_due`.
         crate::scheduler::arm_tickless_idle_if_due();
 
         slopos_ostd::sync::rcu_note_cpu_idle_enter();

@@ -1,5 +1,4 @@
-//! Time functions — the ticking clock of Sloptopia.
-//! Time is a flat circle; the Wheel spins regardless.
+//! Clock and sleep functions.
 
 #[allow(dead_code)]
 pub(crate) mod shim;
@@ -8,18 +7,10 @@ pub mod tests;
 use crate::errno::errno_set;
 use crate::pal::{Pal, Sys};
 
-// =============================================================================
-// Clock constants
-// =============================================================================
-
 pub const CLOCK_REALTIME: i32 = 1;
 pub const CLOCK_MONOTONIC: i32 = 0;
 
-// =============================================================================
-// Time structures
-// =============================================================================
-
-/// POSIX timespec — seconds and nanoseconds.
+/// POSIX timespec.
 #[repr(C)]
 #[derive(Clone, Copy, Default)]
 pub struct Timespec {
@@ -27,7 +18,7 @@ pub struct Timespec {
     pub tv_nsec: i64,
 }
 
-/// POSIX timeval — seconds and microseconds.
+/// POSIX timeval.
 #[repr(C)]
 #[derive(Clone, Copy, Default)]
 pub struct Timeval {
@@ -35,11 +26,6 @@ pub struct Timeval {
     pub tv_usec: i64,
 }
 
-// =============================================================================
-// Time functions
-// =============================================================================
-
-/// Get time from a specific clock.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn clock_gettime(clk_id: i32, tp: *mut Timespec) -> i32 {
     if tp.is_null() {
@@ -65,7 +51,6 @@ pub unsafe extern "C" fn clock_gettime(clk_id: i32, tp: *mut Timespec) -> i32 {
     }
 }
 
-/// Get time of day — calls clock_gettime and converts to microseconds.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gettimeofday(tv: *mut Timeval, _tz: *mut u8) -> i32 {
     if tv.is_null() {
@@ -86,7 +71,6 @@ pub unsafe extern "C" fn gettimeofday(tv: *mut Timeval, _tz: *mut u8) -> i32 {
     0
 }
 
-/// Return seconds since the epoch.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn time(tloc: *mut i64) -> i64 {
     let mut ts = Timespec {
@@ -104,8 +88,6 @@ pub unsafe extern "C" fn time(tloc: *mut i64) -> i64 {
     ts.tv_sec
 }
 
-/// Sleep for the specified duration. Converts to milliseconds and calls
-/// the kernel's `sleep_ms` syscall.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn nanosleep(req: *const Timespec, _rem: *mut Timespec) -> i32 {
     if req.is_null() {
@@ -116,7 +98,7 @@ pub unsafe extern "C" fn nanosleep(req: *const Timespec, _rem: *mut Timespec) ->
     let ms = ((*req).tv_sec as u64) * 1000 + ((*req).tv_nsec as u64) / 1_000_000;
     Sys::sleep_ms(ms);
 
-    // Zero out remainder (we don't support interrupting sleep)
+    // Sleep is not interruptible here, so the remainder is always zero.
     if !_rem.is_null() {
         (*_rem).tv_sec = 0;
         (*_rem).tv_nsec = 0;
@@ -124,7 +106,6 @@ pub unsafe extern "C" fn nanosleep(req: *const Timespec, _rem: *mut Timespec) ->
     0
 }
 
-/// Sleep for `usec` microseconds.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn usleep(usec: u32) -> i32 {
     let ts = Timespec {
@@ -134,7 +115,6 @@ pub unsafe extern "C" fn usleep(usec: u32) -> i32 {
     nanosleep(&ts, core::ptr::null_mut())
 }
 
-/// Sleep for `seconds` seconds. Returns 0.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn sleep(seconds: u32) -> u32 {
     let ts = Timespec {

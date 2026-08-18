@@ -1,51 +1,12 @@
-//! Lock-ordering verification via runtime dependency graph + cycle detection.
+//! Lock-ordering verification: a per-class dependency DAG with cycle
+//! detection over the per-CPU held-lock stack.
 //!
-//! Replaces the strict-level rule (`acquire.level <= top.level` panics) with
-//! a per-class dependency DAG. Same-level nesting becomes legal as long as
-//! it does not form a cycle. Inspired by Linux's lockdep and FreeBSD's
-//! WITNESS, but rewritten for SlopOS's constraints:
-//!
-//! - The **declaration site** is the class identity, via a
-//!   [`LockClassKey`] minted by [`lock_class!`](crate::lock_class). An
-//!   array of N like locks is one class, not N: the 256 `PROCESS_VMS`
-//!   slots and the 544 event-bus wait queues each cost a single slot.
-//!   The instance address is still recorded per held entry, because the
-//!   poison-unlock walk and the watchdog both name a lock by address.
-//! - All bookkeeping is lock-free via atomic CAS into fixed pools (no global
-//!   walker lock à la WITNESS's `w_mtx` to serialise edge learning across
-//!   CPUs).
-//! - Chain-hash cache short-circuits already-validated chain prefixes —
-//!   steady-state acquire is O(1) (single hash lookup + push), matching
-//!   lockdep's fast path.
-//! - BFS over `locks_after` edges detects cycles; bounded queue means no
-//!   stack growth (lockdep historically had to migrate from DFS to BFS for
-//!   exactly this reason — LWN 335329).
-//! - Panic-mode bypass: during a fatal abort the held-stack walk for
-//!   poison-unlock is still active, but ordering checks are suppressed
-//!   (Inv. 9 relaxation).
-//! - Escape hatches modelled on WITNESS: [`LO_DUPOK`] for legitimate
-//!   same-class nesting, [`LO_BLESSED`] to suppress a known-safe inverse
-//!   acquisition. Both are spelled in the key, at the declaration.
-//! - [`LockdepMode`] selects what a finding does: `Panic` (default),
-//!   `Warn` (report each distinct finding once and keep booting), or
-//!   `Off` (track for the poison walk only).
-//!
-//! The `lock_tracking` module is a thin compat shim over this one.
-//!
-//! # Lock ordering levels (advisory rank hints)
-//!
-//! ```text
-//! Level 0: Per-CPU data (preempt guard only, no lock)
-//! Level 1: Per-resource locks (FD table, VM, pipe, socket, SHM)
-//! Level 2: Registries (PIPE_ALLOC, SOCKET_ALLOC, ...)
-//! Level 3: Global allocators (PAGE_ALLOCATOR, KERNEL_HEAP)
-//! Level 4: Scheduler locks (per-CPU queue_lock)
-//! ```
-//!
-//! Under the new model, level is an **advisory rank hint** stored on the
-//! class for diagnostics; the *enforcement* is the cycle check, which is
-//! strictly more general (catches AB-BA between same-level locks while
-//! also catching the cross-level cases the old strict-rule caught).
+//! Class identity is the **declaration site**, via a [`LockClassKey`] minted
+//! by [`lock_class!`](crate::lock_class), so an array of N like locks is one
+//! class; the instance address is still recorded per held entry, because the
+//! poison-unlock walk and the watchdog both name a lock by address.
+//! `LOCK_LEVEL_*` is an advisory rank hint for diagnostics — the cycle check
+//! is the enforcement.
 
 use core::cell::UnsafeCell;
 use core::sync::atomic::{
@@ -57,33 +18,22 @@ use crate::cpu::x86_64::pcr::{MAX_CPUS, get_current_cpu};
 
 use super::cpu_local::CacheAligned;
 
-// ===========================================================================
-// Sizing
-// ===========================================================================
-
 /// Maximum distinct lock classes (one per [`LockClassKey`] declaration
 /// site, plus one per distinct subclass of a site).
 ///
-/// Sized against the number of `lock_class!` sites in the tree rather than
-/// the number of lock instances, which is an order of magnitude larger.
-///
-/// Measured 2026-08-02 over 8 runs of the tests ISO: 65 classes at the end of
-/// boot, 165 after the kernel phase, 176 after the userland phase — identical
-/// in every run, because a class is registered on the first acquire of a
-/// declaration site and by the end of a phase every site it reaches has been
-/// reached. 176/508 is 35%. Deliberately not more generous:
-/// `lockdep_pool_headroom` fails the suite above 70% fill, so slack past that
-/// buys no safety — it only lets a new array-of-locks static that forgot its
-/// class key land without anyone noticing.
+/// Sized against the number of `lock_class!` sites, not the number of lock
+/// instances. Measured high-water is 176; `lockdep_pool_headroom` fails the
+/// suite above 70% fill, so slack past that only lets an array-of-locks
+/// static that forgot its class key land unnoticed.
 pub const MAX_CLASSES: usize = 512;
 
 /// Class slots held back from [`register_class`] so the in-kernel lockdep
 /// self-test always has headroom, even after the table has otherwise
 /// overflowed.
 ///
-/// Deliberately **not** `cfg`-gated: a test-build-only reservation would make
-/// the class index at which the table fills differ between `just test` and
-/// `just boot-log`, so the two boot logs could not be compared.
+/// Deliberately **not** `cfg`-gated: the class index at which the table fills
+/// must be the same under `just test` and `just boot-log`, or the two boot
+/// logs cannot be compared.
 pub const RESERVED_TEST_CLASSES: usize = 4;
 
 /// Slots [`register_class`] may allocate from. This, not [`MAX_CLASSES`], is
@@ -92,24 +42,16 @@ pub const REGISTRABLE_CLASSES: usize = MAX_CLASSES - RESERVED_TEST_CLASSES;
 
 /// Maximum dependency edges in the class graph.
 ///
-/// Measured 2026-08-02 over 8 runs: 48 edges at the end of boot, 157-159 after
-/// the kernel phase, 189-197 after the userland phase — they move with
-/// scheduling because they record which *orders* were observed, not which
-/// locks exist. 197/1024 is 19%, which leaves the 70% ceiling more than three
-/// times the highest count ever seen. The previous 4096 was an estimate of
-/// "~16 edges per class" scaled off lockdep's own defaults; the kernel
-/// actually learns closer to one edge per class, so that was 20x the measured
-/// need in .bss for nothing.
+/// Measured high-water is 197. Edge count moves with scheduling because an
+/// edge records which *orders* were observed, not which locks exist.
 pub const MAX_EDGES: usize = 1024;
 
 /// Chain-hash cache slots. Each entry caches an already-validated chain
 /// prefix so repeated acquisitions skip the BFS.
 ///
-/// Measured 2026-08-02 over 8 runs: 112 at the end of boot, 339-341 after the
-/// kernel phase, 383-391 after the userland phase. 391/2048 is 19%. The cache
-/// is what makes a steady-state acquire O(1) — 5.2M hits against 455 misses
-/// across a full run — so this is sized to keep the miss rate at noise rather
-/// than to the smallest table that fits.
+/// Measured high-water is 391. The cache is what makes a steady-state acquire
+/// O(1), so this is sized to keep the miss rate at noise rather than to the
+/// smallest table that fits.
 pub const MAX_CHAINS: usize = 2048;
 
 /// Number of buckets in the chain-key hash table. Must be a power of two.
@@ -121,13 +63,9 @@ pub const CLASS_HASH_BUCKETS: usize = 512;
 
 /// Maximum concurrently held locks per CPU.
 ///
-/// Measured 2026-08-02: deepest nesting is 3 during boot and 4 across both
-/// test phases, with zero dropped pushes. Kept at 4x the observed high-water
-/// rather than trimmed to it, because the failure mode is asymmetric: a push
-/// past this cap is dropped, and a dropped entry is invisible to the poison
-/// walk and unfindable by `pop_lock`. `held_depth_overflows` counts them and
-/// `lockdep_pool_headroom` asserts the count is zero, so growth is visible
-/// rather than silent.
+/// Kept at 4x the observed high-water of 4 because the failure mode is
+/// asymmetric: a push past this cap is dropped, and a dropped entry is
+/// invisible to the poison walk and unfindable by `pop_lock`.
 pub const MAX_HELD_LOCKS: usize = 16;
 
 /// Maximum BFS frontier size during cycle check. Bounded so the search
@@ -139,17 +77,10 @@ const MAX_BFS_FRONTIER: usize = MAX_CLASSES;
 /// Sentinel value for "no class / null edge / empty bucket".
 const NONE_IDX: u16 = u16::MAX;
 
-/// Initial chain key (all-ones; lockdep's `INITIAL_CHAIN_KEY`).
 const INITIAL_CHAIN_KEY: u64 = !0;
 
-// ===========================================================================
-// Lock levels (advisory rank hints; backwards-compatible names)
-// ===========================================================================
-
-/// Lock level 0 — historically meant "skip the ordering check entirely"
-/// for leaf diagnostic locks (SERIAL, INPUT_BUFFER). Under the
-/// cycle-detection model this is just an advisory rank: leaf locks are
-/// detected by *having no outgoing edges*, not by their level number.
+/// Advisory rank only: leaf locks are detected by *having no outgoing edges*,
+/// not by their level number.
 pub const LOCK_LEVEL_UNORDERED: u8 = 0;
 pub const LOCK_LEVEL_RESOURCE: u8 = 1;
 pub const LOCK_LEVEL_REGISTRY: u8 = 2;
@@ -157,73 +88,52 @@ pub const LOCK_LEVEL_ALLOCATOR: u8 = 3;
 pub const LOCK_LEVEL_SCHEDULER: u8 = 4;
 
 /// Sentinel level for synthetic Epoch classes pushed by
-/// `crate::sync::epoch::Epoch::enter`. Held-stack entries with this
-/// level are not real locks — they exist solely so that `push_lock`
-/// can detect an attempt to acquire a `SpinLock` (or any other tracked
-/// lock) while an epoch read-side critical section is live. Such an
-/// acquisition would risk holding the lock across a wake site and
-/// regress the atomic-publish invariant.
+/// `crate::sync::epoch::Epoch::enter`. Not a real lock: the entry exists so
+/// `push_lock` can detect a tracked lock being acquired while an epoch
+/// read-side critical section is live, which would risk holding it across a
+/// wake site and regress the atomic-publish invariant.
 pub const LOCK_LEVEL_EPOCH: u8 = 0xFE;
 
-// ===========================================================================
-// Per-class flags
-// ===========================================================================
-
-/// Permit legitimate same-class nesting (mirrors WITNESS's `LO_DUPOK`).
+/// Permit legitimate same-class nesting.
 ///
-/// Under declaration-site class identity, two *different* instances of one
-/// site share a class, so holding two at once is same-class nesting. That
-/// is a real AB-BA risk unless the site guarantees a total order over its
-/// instances, so it is reported by default; a site that does guarantee one
-/// says so with this flag. Re-acquiring the *same* instance is recursion
-/// and is reported separately — `LO_DUPOK` does not cover it.
+/// Two *different* instances of one declaration site share a class, so
+/// holding two at once is a real AB-BA risk unless the site guarantees a
+/// total order over its instances; this flag is how it says so. Re-acquiring
+/// the *same* instance is recursion and is reported separately.
 pub const LO_DUPOK: u32 = 1 << 0;
 
-/// Suppress every ordering finding for this class (mirrors WITNESS's
-/// `blessed_list[]`). A blunt instrument: it discards the check rather than
-/// expressing an ordering, so prefer [`LO_DUPOK`] or a distinct class.
+/// Suppress every ordering finding for this class. A blunt instrument: it
+/// discards the check rather than expressing an ordering, so prefer
+/// [`LO_DUPOK`] or a distinct class.
 pub const LO_BLESSED: u32 = 1 << 2;
 
-/// Internal: this class has already reported an id collision. Latched in
-/// the class record's flags so the warning fires once, not per acquire.
+/// Latched in the class record's flags so an id-collision warning fires once,
+/// not per acquire.
 const LC_COLLISION_REPORTED: u32 = 1 << 16;
 
-// ===========================================================================
-// Acquisition flags
-// ===========================================================================
-
-/// Ordinary blocking acquisition.
 pub const ACQ_NONE: u8 = 0;
 
-/// The primitive permits re-acquiring the *same instance* while it is held
-/// — a recursive reader. Suppresses the recursion report only; the ordering
-/// check against every other held class still runs.
+/// The primitive permits re-acquiring the *same instance* while it is held.
+/// Suppresses the recursion report only; the ordering check against every
+/// other held class still runs.
 pub const ACQ_RECURSIVE: u8 = 1 << 0;
-
-// ===========================================================================
-// Class keys
-// ===========================================================================
 
 /// The compile-time identity of a lock **declaration site**.
 ///
 /// Minted only by [`lock_class!`](crate::lock_class). One key exists per
 /// source site, so every lock built from one expansion shares one class.
 ///
-/// # Identity is [`id`](Self::id), never this struct's address
+/// A release build may duplicate `.rodata` across crates, so [`id`](Self::id)
+/// is the identity and this struct's address never is; duplicate copies are
+/// recognised as one class by comparing [`name`](Self::name) and
+/// [`site`](Self::site) by content.
 ///
-/// A release build may duplicate `.rodata` across crates, so two copies of
-/// one key can exist at two addresses. [`register_class`] therefore reads
-/// `id` and nothing else; the pointer is kept only so a report can print
-/// [`name`](Self::name) and [`site`](Self::site), and duplicate copies are
-/// recognised as one class by comparing those strings by content.
-///
-/// Contains no interior mutability and must never grow any: the macro
-/// interns it through `const K: &'static LockClassKey = &…`, which rustc
-/// rejects (E0492) the moment an `UnsafeCell` appears anywhere inside.
+/// Must never grow interior mutability: the macro interns it through
+/// `const K: &'static LockClassKey = &…`, which rustc rejects (E0492) the
+/// moment an `UnsafeCell` appears anywhere inside.
 pub struct LockClassKey {
-    /// Site-derived identity. Never zero — 0 is the free-slot sentinel.
+    /// Never zero — 0 is the free-slot sentinel.
     id: u64,
-    /// Short human name for reports, e.g. `"PROCESS_VMS"`.
     name: &'static str,
     /// `file:line:column` of the `lock_class!` invocation.
     site: &'static str,
@@ -234,9 +144,8 @@ pub struct LockClassKey {
 }
 
 impl LockClassKey {
-    /// Mint a key. Hand-writing one is possible but never right: the id is
-    /// derived from the site string here, in one place, so no caller can
-    /// hand in an id that aliases another site's.
+    /// Mint a key. The id is derived from the site string here, in one place,
+    /// so no caller can hand in an id that aliases another site's.
     #[doc(hidden)]
     pub const fn __from_site(
         name: &'static str,
@@ -277,11 +186,10 @@ impl LockClassKey {
 
 /// FNV-1a over `site` then `name`, finished with splitmix64's avalanche.
 ///
-/// FNV-1a alone is a poor fit: [`class_bucket`] folds the *high* bits, and
-/// FNV-1a's high bits barely move between inputs differing only in their
-/// last few characters — which is exactly what consecutive `line!()` values
-/// look like. `name` is folded in as well as `site` so two invocations that
-/// somehow share a `file:line:column` still separate when the names differ.
+/// FNV-1a alone is a poor fit: [`class_bucket`] folds the *high* bits, which
+/// FNV-1a barely moves between inputs differing only in their last few
+/// characters — exactly what consecutive `line!()` values look like. `name`
+/// is folded in too, so two sites sharing a `file:line:column` still separate.
 const fn class_id(name: &str, site: &str) -> u64 {
     const FNV_OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
     const FNV_PRIME: u64 = 0x0000_0100_0000_01B3;
@@ -328,17 +236,13 @@ fn subclass_id(base: u64, subclass: u8) -> u64 {
 /// `[const { SpinLock::new(x, lock_class!("FOO", L)) }; 256]` is 256 lock
 /// instances and one class.
 ///
-/// Legal in a `static` initializer, inside `[const { … }; N]`, inside
-/// `{ const INIT: T = …; [INIT; N] }`, inside a `const fn` body, and in an
-/// ordinary runtime expression. Expands to safe code, so `forbid(unsafe_code)`
-/// crates may invoke it.
+/// Expands to safe code, so `forbid(unsafe_code)` crates may invoke it, and
+/// to a `const` item rather than a `static`, because a const context may name
+/// a const but not a static (E0013).
 ///
-/// A `const` item, not a `static`: const contexts may name a const but not a
-/// static (E0013), and most call sites are `static`/`const` initializers.
-///
-/// Note a site key inside a **generic** function is one static shared by every
-/// monomorphisation. Where the instantiations must not merge, the caller passes
-/// the key in instead.
+/// A site key inside a **generic** function is one static shared by every
+/// monomorphisation. Where the instantiations must not merge, the caller
+/// passes the key in instead.
 #[macro_export]
 macro_rules! lock_class {
     ($name:expr, $level:expr) => {
@@ -372,10 +276,6 @@ macro_rules! epoch_class {
     };
 }
 
-// ===========================================================================
-// Public type aliases
-// ===========================================================================
-
 /// Poison-unlock callback for the panic-recovery held-stack walk.
 ///
 /// # Safety
@@ -383,40 +283,33 @@ macro_rules! epoch_class {
 /// closure.
 pub type PoisonUnlockFn = unsafe fn(*const ());
 
-// ===========================================================================
-// Lock class
-// ===========================================================================
-
 /// One class record per `(declaration site, subclass)` pair.
 ///
 /// All fields are interior-mutable so the class table can be initialised
-/// lazily under the lock-free CAS protocol. Class metadata is set once
-/// (on first acquire of a lock built from the site); subsequent acquires
-/// only update `usage_mask` and the edge lists.
+/// lazily under the lock-free CAS protocol; the metadata is written once, on
+/// first acquire of a lock built from the site.
 struct LockClass {
     /// `subclass_id(key.id(), subclass)` — the class identity. 0 = free.
     id: AtomicU64,
-    /// The key this class first registered from. Diagnostics only; see
-    /// [`LockClassKey`] for why the pointer is not the identity.
+    /// Diagnostics only; see [`LockClassKey`] for why the pointer is not the
+    /// identity.
     key: AtomicPtr<LockClassKey>,
-    /// The first instance address seen, so a report can name a concrete
-    /// lock for a gdb or watchdog cross-reference. CAS-once.
+    /// First instance address seen, so a report can name a concrete lock.
+    /// CAS-once.
     first_addr: AtomicU64,
     /// Advisory rank hint, copied from the key.
     level: AtomicU8,
-    /// Subclass ordinal this record stands for.
     subclass: AtomicU8,
     /// `LO_*` copied from the key, plus [`LC_COLLISION_REPORTED`].
     flags: AtomicU32,
-    /// Head of the singly-linked list of edges from this class (edges
-    /// recording "lock A was acquired while this class was held"). Index
-    /// into the global EDGES pool; NONE_IDX = empty.
+    /// Head of the singly-linked list of edges recording "lock A was acquired
+    /// while this class was held". Index into EDGES; NONE_IDX = empty.
     edges_after_head: AtomicU16,
     /// Hash-bucket linkage (next class index in the same bucket).
     next_in_bucket: AtomicU16,
-    /// BFS parent, written only by the cold report path under
-    /// [`REPORT_PATH_LOCK`]. Keeps the path reconstruction's parent array
-    /// out of a `#[cold]` frame that also carries `format_args!`.
+    /// Written only by the cold report path under [`REPORT_PATH_LOCK`], which
+    /// keeps the path reconstruction's parent array out of a `#[cold]` frame
+    /// that also carries `format_args!`.
     bfs_parent: AtomicU16,
     /// IRQ-context usage bits (reserved for future hardirq tracking).
     #[allow(dead_code)]
@@ -439,7 +332,6 @@ impl LockClass {
         }
     }
 
-    /// The key this class registered from, if any.
     fn key_ref(&self) -> Option<&'static LockClassKey> {
         let p = self.key.load(Ordering::Acquire);
         if p.is_null() {
@@ -451,8 +343,6 @@ impl LockClass {
         Some(unsafe { &*(p as *const LockClassKey) })
     }
 
-    /// Name for reports; falls back to the class id when a class was
-    /// registered without a key (the self-test's reserved slots).
     fn name(&self) -> &'static str {
         self.key_ref().map(|k| k.name()).unwrap_or("<anon>")
     }
@@ -462,14 +352,10 @@ impl LockClass {
     }
 }
 
-// ===========================================================================
-// Dependency edge
-// ===========================================================================
-
 /// One edge in the dependency graph: "the source class was held when the
 /// target class was acquired".
 struct Edge {
-    /// Target class index (which class was acquired). NONE_IDX if free.
+    /// Class that was acquired. NONE_IDX if free.
     target: AtomicU16,
     /// Next edge in the source class's `edges_after` linked list.
     next: AtomicU16,
@@ -484,12 +370,8 @@ impl Edge {
     }
 }
 
-// ===========================================================================
-// Chain-hash cache
-// ===========================================================================
-
-/// One entry in the chain-hash cache. Records "this chain prefix has
-/// already been validated; skip the BFS check on a hit."
+/// One entry in the chain-hash cache: "this chain prefix has already been
+/// validated; skip the BFS check on a hit."
 struct Chain {
     /// Rolling 64-bit hash of the class indices in this chain.
     chain_key: AtomicU64,
@@ -509,17 +391,13 @@ impl Chain {
     }
 }
 
-// ===========================================================================
-// Per-CPU held-lock stack
-// ===========================================================================
-
 #[derive(Clone, Copy)]
 struct HeldLock {
-    /// Class index in the global table.
     class_idx: u16,
-    /// Lock instance address (for poison-walk dispatch + duplicate-acquire detection).
+    /// Instance address, for poison-walk dispatch and duplicate-acquire
+    /// detection.
     lock_addr: *const (),
-    /// Poison callback to invoke during fatal-abort cleanup.
+    /// Invoked during fatal-abort cleanup.
     poison_fn: PoisonUnlockFn,
     /// Chain key as it stood before this lock was pushed (for fast pop).
     prev_chain_key: u64,
@@ -542,23 +420,20 @@ struct HeldStack {
     /// Number of entries published in `entries`. Atomic because the watchdog
     /// wait-chain dump and the TLB ack-wait diagnostic read a *foreign* CPU's
     /// stack while its owner is writing it — a mask on this CPU says nothing
-    /// about that one. Relaxed is a plain `mov` on x86-64.
+    /// about that one.
     depth: AtomicU32,
     /// Running chain key for the currently-held chain. Single-CPU.
     curr_chain_key: u64,
-    /// Chain-hash outcomes on this CPU. Per-CPU rather than global: two global
-    /// RMWs per acquire would distort the very cost these measure.
+    /// Per-CPU rather than global: two global RMWs per acquire would distort
+    /// the very cost these measure.
     chain_hits: AtomicU64,
     chain_misses: AtomicU64,
-    /// High-water depth, and how many pushes [`push_held`] had to drop for
-    /// exceeding [`MAX_HELD_LOCKS`]. A dropped entry is invisible to the
-    /// poison walk and cannot be found by `pop_lock`, so it must be counted.
+    /// High-water depth, and pushes [`push_held`] dropped for exceeding
+    /// [`MAX_HELD_LOCKS`]. A dropped entry is invisible to the poison walk and
+    /// cannot be found by `pop_lock`, so it must be counted.
     depth_max: AtomicU32,
     depth_overflows: AtomicU64,
-    /// Releases whose address was not on the stack. Never zero in a kernel
-    /// that recovers from a panic — the poison walk drains the stack and every
-    /// live guard's `Drop` then pops an address that is gone — so the ratchet
-    /// is against the drained count, not against zero.
+    /// Releases whose address was not on the stack.
     pop_misses: AtomicU64,
     /// Entries removed by the poison walk, the legitimate source of a pop miss.
     poison_drained: AtomicU64,
@@ -580,37 +455,18 @@ impl HeldStack {
     }
 }
 
-// ===========================================================================
-// Interrupt masking
-// ===========================================================================
-
 /// Masks interrupts across a held-stack update.
 ///
-/// Every update is a multi-word entry write followed by a separate depth
-/// publish, so an interrupt handler that acquires a tracked lock re-enters the
-/// update and takes the slot the interrupted push had filled but not yet
-/// counted — leaving an empty entry inside `depth` that no `pop_lock` can
-/// find. Preemption being disabled does not exclude that: `PreemptMutex` and
-/// `Epoch::enter` both acquire with interrupts on.
+/// An update is a multi-word entry write followed by a separate depth publish,
+/// so an interrupt handler acquiring a tracked lock between the two takes the
+/// slot the interrupted push had filled but not yet counted — leaving an entry
+/// inside `depth` that no `pop_lock` can find. Preemption being disabled does
+/// not exclude that: `PreemptMutex` and `Epoch::enter` both acquire with
+/// interrupts on.
 ///
-/// The mask spans the whole acquire, not each store: reading the depth,
-/// deriving the chain key, publishing the entry and walking what was already
-/// held is one sequence, and a handler that mutates the stack partway through
-/// it leaves the validator reasoning about a state that never existed —
-/// observed as an intermittent wedge during AP bring-up when the mask covered
-/// only the individual stores, and again when the report alone was let out.
-///
-/// A report therefore prints under the mask. That is what every `SpinLock`
-/// acquire has always done, since those run `cli` before reaching here; the
-/// two sites that acquire with interrupts on — `PreemptMutex` and
-/// `Epoch::enter` — inherit it, and for them a report's serial write is a
-/// window in which this CPU cannot ack a TLB-shootdown IPI. Steady state is
-/// zero reports, so the exposure is a finding that is about to panic anyway
-/// or a `lockdep=warn` boot taken deliberately.
-///
-/// [`restore_flags`] re-enables only when the caller had them enabled, so an
-/// acquire already running under `cli` — every `SpinLock` and `IrqRwLock` —
-/// pays a `pushfq`/`cli` pair and one not-taken branch.
+/// The mask spans the whole acquire — depth read, chain key, entry publish,
+/// held-stack walk — reports included, so those two sites cannot ack a
+/// TLB-shootdown IPI while one prints. Steady state is zero reports.
 struct IrqOff(u64);
 
 impl IrqOff {
@@ -627,20 +483,11 @@ impl Drop for IrqOff {
     }
 }
 
-// ===========================================================================
-// Held-stack storage
-// ===========================================================================
-//
 // Every access goes through a raw place expression rather than a `&mut`. The
 // klog ring is itself a tracked lock, so a report — or the overflow warning —
 // re-enters `push_lock` from inside a held-stack update; a reference minted
 // here would still be live at that point, and two `&mut` to one object is
-// undefined however the accesses interleave. A raw pointer cannot be aliased
-// because no reference exists.
-//
-// Interrupts are masked only across the mutations, never across the
-// validation walk or a report: `mm::mmu::luf`'s drain protocol requires its
-// holder to service TLB-ack IPIs, and a report's serial write is unbounded.
+// undefined however the accesses interleave.
 
 #[inline]
 fn held(cpu: usize) -> *mut HeldStack {
@@ -651,7 +498,7 @@ fn held(cpu: usize) -> *mut HeldStack {
 ///
 /// The entry is written before the depth that publishes it, so a reader this
 /// cannot mask — an NMI, or another CPU — sees a prefix of the truth rather
-/// than a slot that is counted but not yet filled.
+/// than a counted-but-unfilled slot.
 #[inline]
 fn push_held(cpu: usize, entry: HeldLock, new_chain_key: u64) {
     let _irq = IrqOff::enter();
@@ -662,9 +509,6 @@ fn push_held(cpu: usize, entry: HeldLock, new_chain_key: u64) {
     unsafe {
         let depth = (*stack).depth.load(Ordering::Relaxed);
         if (depth as usize) >= MAX_HELD_LOCKS {
-            // Dropped: the lock still works, but it is invisible to the poison
-            // walk and to `pop_lock`. Counted so the depth cap can be sized
-            // against reality rather than assumed adequate.
             (*stack).depth_overflows.fetch_add(1, Ordering::Relaxed);
             return;
         }
@@ -700,12 +544,12 @@ fn held_entry(
 }
 
 /// Record an acquisition the validator is not checking — off, overflowed, or
-/// a class that could not be registered. An untracked entry leaves the chain
-/// key alone, so its pop restores the key unchanged.
+/// a class that could not be registered. Leaves the chain key alone, so its
+/// pop restores the key unchanged.
 ///
-/// Recording rather than dropping is the whole point: the poison walk and
-/// every held-lock consumer must still see that this CPU holds a lock, and a
-/// push with no matching pop strands the depth for the rest of the boot.
+/// Recorded rather than dropped: the poison walk and every held-lock consumer
+/// must still see that this CPU holds a lock, and a push with no matching pop
+/// strands the depth for the rest of the boot.
 #[inline]
 fn push_untracked(cpu: usize, lock_addr: *const (), poison_fn: PoisonUnlockFn) {
     let entry = held_entry(cpu, NONE_IDX, lock_addr, poison_fn, 0);
@@ -723,21 +567,15 @@ fn held_depth(cpu: usize) -> u32 {
 
 /// One entry from this CPU's held stack.
 ///
-/// Read element by element rather than through a slice: a handler pushes at
-/// or above the published depth, so a slice covering the entries below it is
-/// never concurrently written *element-wise* — but it is still one allocation
-/// to the compiler, and handing out a reference into it while the handler
-/// writes the array is the aliasing this module exists without.
+/// Read element by element rather than through a slice: a slice is still one
+/// allocation to the compiler, and handing out a reference into it while an
+/// interrupt handler writes the array is the aliasing this module avoids.
 #[inline]
 fn held_entry_at(cpu: usize, index: usize) -> HeldLock {
     // SAFETY: per-CPU slot, `index < MAX_HELD_LOCKS`, and `HeldLock: Copy`
     // so the read borrows nothing.
     unsafe { (*held(cpu)).entries[index] }
 }
-
-// ===========================================================================
-// Sync wrapper for per-CPU UnsafeCell holding the stack
-// ===========================================================================
 
 struct PerCpuHeldStack(UnsafeCell<HeldStack>);
 
@@ -747,11 +585,6 @@ struct PerCpuHeldStack(UnsafeCell<HeldStack>);
 // `poison_unlock_all_held` walks only the panicking CPU's slot.
 unsafe impl Sync for PerCpuHeldStack {}
 
-// ===========================================================================
-// Statics
-// ===========================================================================
-
-/// Per-class records. Indexed by class index assigned at registration.
 struct ClassArray([LockClass; MAX_CLASSES]);
 unsafe impl Sync for ClassArray {}
 
@@ -760,20 +593,17 @@ static CLASSES: ClassArray = ClassArray([const { LockClass::empty() }; MAX_CLASS
 /// Next class slot to allocate (monotonic; overflow disables the validator).
 static CLASS_COUNT: AtomicU16 = AtomicU16::new(0);
 
-/// Hash table head (class index) per bucket.
 struct ClassHash([AtomicU16; CLASS_HASH_BUCKETS]);
 unsafe impl Sync for ClassHash {}
 
 static CLASS_HASH: ClassHash = ClassHash([const { AtomicU16::new(NONE_IDX) }; CLASS_HASH_BUCKETS]);
 
-/// Edge pool.
 struct EdgeArray([Edge; MAX_EDGES]);
 unsafe impl Sync for EdgeArray {}
 
 static EDGES: EdgeArray = EdgeArray([const { Edge::empty() }; MAX_EDGES]);
 static EDGE_COUNT: AtomicU32 = AtomicU32::new(0);
 
-/// Chain pool + hash buckets.
 struct ChainArray([Chain; MAX_CHAINS]);
 unsafe impl Sync for ChainArray {}
 
@@ -785,20 +615,18 @@ unsafe impl Sync for ChainHash {}
 
 static CHAIN_HASH: ChainHash = ChainHash([const { AtomicU16::new(NONE_IDX) }; CHAIN_HASH_BUCKETS]);
 
-/// Per-CPU held-lock stacks.
 static HELD: [CacheAligned<PerCpuHeldStack>; MAX_CPUS] = {
     const INIT: CacheAligned<PerCpuHeldStack> =
         CacheAligned(PerCpuHeldStack(UnsafeCell::new(HeldStack::new())));
     [INIT; MAX_CPUS]
 };
 
-/// Master enable. When `false`, all hooks short-circuit. Production
-/// boot flips this on after PCR init via [`enable_lock_tracking`].
+/// Master enable. When `false`, all hooks short-circuit. Production boot
+/// flips this on after PCR init via [`enable_lock_tracking`].
 static TRACKING_ENABLED: AtomicBool = AtomicBool::new(false);
 
-/// Panic-mode bypass. When `true`, ordering checks are suppressed (the
-/// kernel is already aborting; Inv. 9 relaxes lock discipline). The
-/// held-stack walk for poison-unlock remains active.
+/// Panic-mode bypass: ordering checks suppressed, held-stack walk for
+/// poison-unlock still active.
 static FATAL_BYPASS: AtomicBool = AtomicBool::new(false);
 
 /// Overflow latch. Set if any pool fills; further events become no-ops
@@ -836,13 +664,8 @@ static DECLARED: [DeclaredOrder; MAX_DECLARED_ORDERS] =
 static DECLARED_COUNT: AtomicU16 = AtomicU16::new(0);
 
 /// Ordering violations reported since boot (cycle + nesting + recursion +
-/// epoch). Bumped in the `#[cold]` report paths, so it costs nothing on
-/// acquire.
-///
-/// A non-zero value in a kernel that is still running means a report fired
-/// while something suppressed the panic — a real finding that nobody saw.
-/// Self-test reports are counted separately in [`REPORT_ONLY_VIOLATIONS`]
-/// so this one stays gateable.
+/// epoch). Self-test and warn-mode reports are counted separately in
+/// [`REPORT_ONLY_VIOLATIONS`] so this one stays gateable.
 static VIOLATION_COUNT: AtomicU32 = AtomicU32::new(0);
 
 /// Violations reported while the reporter was in report-only mode (the
@@ -856,8 +679,8 @@ pub enum LockdepMode {
     /// Track for the poison walk only: no class registration, no edges, no
     /// checks. Lets one binary measure its own validation cost.
     Off = 0,
-    /// Report each distinct finding once and keep booting. Enumerates every
-    /// inversion in the tree in a single boot.
+    /// Report each distinct finding once and keep booting, so one boot
+    /// enumerates every inversion in the tree.
     Warn = 1,
     /// Report and panic on the first finding.
     Panic = 2,
@@ -871,7 +694,7 @@ static LOCKDEP_MODE: AtomicU8 = AtomicU8::new(LockdepMode::Panic as u8);
 /// Per-CPU report-in-progress latch.
 ///
 /// Every diagnostic this module emits logs with `klog_warn!`, which takes
-/// `KLOG_RING` — a `SpinLock`, whose acquire re-enters [`push_lock`]. Warn
+/// `KLOG_RING` — a `SpinLock`, whose acquire re-enters [`push_lock`]; warn
 /// mode would recurse without bound. Raised, that re-entry still *records*
 /// the acquisition — dropping it would strand the depth once the release
 /// arrives — but runs no checks.
@@ -903,9 +726,9 @@ impl Drop for ReportLatch {
 }
 
 /// Serialises the cold path that reconstructs a cycle's route through
-/// [`LockClass::bfs_parent`]. A raced route is a diagnostic imprecision,
-/// not a correctness problem, so this is a plain test-and-set with no
-/// waiting: a second reporter prints endpoints without a route.
+/// [`LockClass::bfs_parent`]. A plain test-and-set with no waiting, because a
+/// raced route is a diagnostic imprecision: a second reporter prints
+/// endpoints without a route.
 static REPORT_PATH_LOCK: AtomicBool = AtomicBool::new(false);
 
 /// Distinct `(kind, held class, new class)` triples reported. Far more than
@@ -935,11 +758,9 @@ static CLASS_SLOTS_LEAKED: AtomicU32 = AtomicU32::new(0);
 /// [`SelfTestGuard`], so the self-test can *provoke* a cycle and assert the
 /// detector saw it without taking the machine down.
 ///
-/// It grants nothing else. The self-test asserts [`validator_alive`] up
-/// front instead of overriding [`GRAPH_OVERFLOW`] or [`FATAL_BYPASS`],
-/// because a guard that reached past a latched kill switch would let the
-/// test pass on a validator that never ran — hiding exactly the regression
-/// it exists to catch.
+/// It grants nothing else: the self-test asserts [`validator_alive`] up front
+/// rather than reaching past [`GRAPH_OVERFLOW`] or [`FATAL_BYPASS`], which
+/// would let it pass on a validator that never ran.
 #[cfg(any(test, feature = "test-helpers"))]
 static SELF_TEST_ACTIVE: AtomicBool = AtomicBool::new(false);
 
@@ -950,16 +771,12 @@ fn self_test_active() -> bool {
 }
 
 /// Production builds const-fold this to `false`, so the gates that consult it
-/// compile to exactly the code they compiled to before it existed.
+/// cost nothing.
 #[cfg(not(any(test, feature = "test-helpers")))]
 #[inline(always)]
 fn self_test_active() -> bool {
     false
 }
-
-// ===========================================================================
-// Public API — backwards-compatible with the old lock_tracking module
-// ===========================================================================
 
 /// Enable lock tracking. Call once after PCR init, before the first
 /// SpinLock acquisition we want tracked. Idempotent.
@@ -977,7 +794,6 @@ fn lockdep_mode_raw() -> u8 {
     LOCKDEP_MODE.load(Ordering::Relaxed)
 }
 
-/// The active violation policy.
 pub fn lockdep_mode() -> LockdepMode {
     match lockdep_mode_raw() {
         0 => LockdepMode::Off,
@@ -993,8 +809,8 @@ pub fn enter_fatal_bypass() {
     FATAL_BYPASS.store(true, Ordering::Release);
 }
 
-/// Returns the number of locks currently held on the calling CPU.
-/// Advisory; read with preemption potentially enabled.
+/// Locks currently held on the calling CPU. Advisory — read with preemption
+/// potentially enabled.
 #[inline]
 pub fn held_lock_count() -> u32 {
     if !TRACKING_ENABLED.load(Ordering::Relaxed) {
@@ -1006,10 +822,9 @@ pub fn held_lock_count() -> u32 {
     unsafe { (*HELD[cpu].0.0.get()).depth.load(Ordering::Relaxed) }
 }
 
-/// Copy the addresses of the locks currently held on the calling CPU
-/// into `out`, innermost-last. Returns how many entries were written.
-/// Advisory (same benign-race caveat as [`held_lock_count`]); intended
-/// for diagnostics such as the TLB ack-wait lock-discipline check.
+/// Copy the addresses of the locks currently held on the calling CPU into
+/// `out`, innermost-last. Returns how many entries were written. Advisory,
+/// same benign-race caveat as [`held_lock_count`].
 pub fn held_lock_addrs(out: &mut [u64]) -> usize {
     if !TRACKING_ENABLED.load(Ordering::Relaxed) {
         return 0;
@@ -1025,10 +840,8 @@ pub fn held_lock_addrs(out: &mut [u64]) -> usize {
     n
 }
 
-/// Cross-CPU variant of [`held_lock_addrs`] for watchdog/panic
-/// diagnostics: snapshot the locks held by an arbitrary CPU. Torn
-/// snapshots are acceptable (the target CPU may be mid push/pop);
-/// intended only for post-mortem dumps.
+/// Cross-CPU variant of [`held_lock_addrs`] for post-mortem dumps. The target
+/// CPU may be mid push/pop, so the snapshot can tear.
 pub fn held_lock_addrs_for_cpu(cpu: usize, out: &mut [u64]) -> usize {
     if !TRACKING_ENABLED.load(Ordering::Relaxed) || cpu >= MAX_CPUS {
         return 0;
@@ -1083,8 +896,6 @@ pub unsafe fn push_lock_ex(
     let _irq = IrqOff::enter();
     let cpu = get_current_cpu();
 
-    // Off or overflowed: keep the held stack complete for the poison walk,
-    // run no checks.
     if lockdep_mode_raw() == LockdepMode::Off as u8 || GRAPH_OVERFLOW.load(Ordering::Relaxed) {
         push_untracked(cpu, lock_addr, poison_fn);
         return;
@@ -1093,9 +904,9 @@ pub unsafe fn push_lock_ex(
     let class_idx = match register_class(class, subclass) {
         Some(idx) => idx,
         None => {
-            // Record before warning: `latch_overflow` klogs, the klog ring is
-            // itself a tracked lock, and its acquire re-enters here — onto a
-            // stack that must already be whole.
+            // Record before warning: `latch_overflow` klogs, and the klog
+            // ring's own acquire re-enters here onto a stack that must
+            // already be whole.
             push_untracked(cpu, lock_addr, poison_fn);
             latch_overflow("class table full", lock_addr, class.level());
             return;
@@ -1105,8 +916,6 @@ pub unsafe fn push_lock_ex(
     let entry = held_entry(cpu, class_idx, lock_addr, poison_fn, acq_flags);
     let new_chain_key = iterate_chain_key(entry.prev_chain_key, class_idx);
 
-    // Fatal abort: track for the poison walk, skip all ordering checks.
-    //
     // This gate, not just the reporting ones, is what a latched bypass costs:
     // no edge is learned and no cycle is looked for, so the graph stops
     // growing as well as stops complaining.
@@ -1115,8 +924,6 @@ pub unsafe fn push_lock_ex(
         return;
     }
 
-    // Fast path: chain-hash hit means this chain prefix has already
-    // been validated end-to-end. O(1).
     if chain_lookup(new_chain_key) {
         bump_chain_hit(cpu);
         push_held(cpu, entry, new_chain_key);
@@ -1126,38 +933,25 @@ pub unsafe fn push_lock_ex(
 
     record_first_addr(class_idx, lock_addr);
 
-    // Record the acquisition *before* running the checks. A report may
-    // panic, and a panic that unwinds through a recovery boundary runs the
-    // poison walk — which can only release locks the held stack knows
-    // about. Reporting first would leave the just-acquired lock held by a
-    // frame that no longer exists, wedging every later acquirer.
+    // Record the acquisition *before* running the checks: a report may panic,
+    // and the poison walk on that unwind can only release locks the held
+    // stack knows about.
     let depth_before = held_depth(cpu);
     push_held(cpu, entry, new_chain_key);
 
-    // Inside a report on this CPU: this acquire is the reporter's own klog
-    // ring, reached from the middle of printing. Record it — the poison walk
-    // and every held-lock consumer must still see it, and a push with no
-    // matching pop strands the depth for the rest of the boot — but check
-    // nothing, or warn mode recurses without bound.
     if IN_REPORT[cpu].load(Ordering::Relaxed) {
         return;
     }
 
     let mut violated = false;
 
-    // Epoch-scope check: any held entry with level `LOCK_LEVEL_EPOCH`
-    // means an `Epoch::enter` is live on this CPU. Acquiring a real
-    // lock inside the scope would risk holding it across a wake site
-    // (the atomic-publish hazard from the SCM_RIGHTS regression).
-    // Fire before the regular scan so the diagnostic points at the Epoch
-    // rather than at a downstream cycle edge.
+    // Any held entry at `LOCK_LEVEL_EPOCH` means an `Epoch::enter` is live on
+    // this CPU. Checked before the regular scan so the diagnostic points at
+    // the Epoch rather than at a downstream cycle edge.
     //
-    // Skipped in interrupt context. The held stack is per-CPU, so an
-    // interrupt that lands inside an epoch scope inherits the interrupted
-    // context's entries — but the handler is not "inside" that epoch in any
-    // sense the invariant cares about, and it will return before the scope
-    // ends. Attributing its locks to the epoch reports the interrupted
-    // code for something the handler did.
+    // Skipped in interrupt context: the handler inherits the interrupted
+    // context's entries but is not inside that epoch, so reporting it would
+    // blame the interrupted code for what the handler did.
     if !crate::cpu::x86_64::pcr::in_interrupt_context() {
         for i in 0..depth_before as usize {
             let h = held_entry_at(cpu, i);
@@ -1173,7 +967,6 @@ pub unsafe fn push_lock_ex(
         }
     }
 
-    // Slow path: validate the new acquisition against every held lock.
     let class_flags = CLASSES.0[class_idx as usize].flags.load(Ordering::Relaxed);
     let mut top_class = NONE_IDX;
     for i in 0..depth_before as usize {
@@ -1184,30 +977,22 @@ pub unsafe fn push_lock_ex(
         }
         if h.class_idx == class_idx {
             if h.lock_addr == lock_addr {
-                // Same class and same instance: true recursion. A ticket
-                // lock cannot reach here on its own (the second `lock()`
-                // spins on its own ticket), so this means either a
-                // recursive primitive or a lost pop.
-                //
-                // Both sides must declare themselves recursive. Checking
-                // only the incoming one would wave through a write nested
-                // inside a read of the same `IrqRwLock`, which deadlocks.
+                // A ticket lock cannot reach here on its own (the second
+                // `lock()` spins on its own ticket), so this is a recursive
+                // primitive or a lost pop. Both sides must declare themselves
+                // recursive — checking only the incoming one would wave
+                // through a write nested inside a read of the same
+                // `IrqRwLock`, which deadlocks.
                 let recursive_pair = h.flags & ACQ_RECURSIVE != 0 && acq_flags & ACQ_RECURSIVE != 0;
                 if !recursive_pair {
                     violated |= report_recursion(class_idx, lock_addr, cpu, i + 1);
                 }
             } else if class_flags & LO_DUPOK == 0 {
-                // Same class, different instance: nesting on an array of
-                // like objects. A real AB-BA risk unless the site orders
-                // its instances, which `LO_DUPOK` is how it says so.
                 violated |=
                     report_same_class_nesting(class_idx, lock_addr, h.lock_addr, cpu, i + 1);
             }
             continue;
         }
-        // Cycle check: is the new class already a known ancestor of a
-        // currently held class? I.e., is there a path from `class_idx`
-        // to `held.class_idx` in the dependency graph?
         if path_exists(class_idx, h.class_idx) {
             violated |= report_cycle(class_idx, lock_addr, cpu, i + 1);
         }

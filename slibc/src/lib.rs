@@ -1,5 +1,4 @@
 //! slibc — SlopOS Rust-native C standard library.
-//! Every call through slibc is a gamble with the Wheel of Fate.
 
 #![no_std]
 #![allow(unsafe_op_in_unsafe_fn)]

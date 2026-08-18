@@ -11,7 +11,6 @@ use super::Task;
 use super::task_lifecycle::task_abandon;
 use super::task_table::{PendingTask, TaskRef};
 
-/// Owns a half-built task for the whole construction window.
 pub struct SpawnGuard {
     child_id: u32,
     child_process_id: u32,

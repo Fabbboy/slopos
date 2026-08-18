@@ -8,7 +8,6 @@ pub const PTHREAD_KEYS_MAX: usize = 64;
 /// TLS ABI (`mov rax, fs:[0]` must yield the TCB address).
 #[repr(C)]
 pub struct Tcb {
-    /// Must be first field: `fs:[0]` reads this to get the TCB pointer.
     pub self_ptr: *mut Tcb,
     pub errno_val: i32,
     pub tid: i32,

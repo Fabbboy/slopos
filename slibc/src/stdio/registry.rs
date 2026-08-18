@@ -1,20 +1,14 @@
 //! The open-stream list.
 //!
-//! C11 §7.21.5.2 requires `fflush(NULL)` to flush every stream whose most
-//! recent operation was output, and C11 §7.22.4.4 requires `exit` to do the
-//! same before the process terminates. Both need to name every open stream, so
-//! every `FILE` is on this list — the three standard streams included, which
-//! makes "flushed exactly once" a consequence of list membership rather than
-//! an invariant maintained by hand at each call site.
-//!
-//! Singly linked, push-front, O(n) unlink; n is bounded by the fd table.
+//! C11 §7.21.5.2 (`fflush(NULL)`) and §7.22.4.4 (`exit`) both have to name
+//! every open stream, so every `FILE` is on this list, the three standard
+//! streams included.
 //!
 //! **Two lock levels, and the list outranks the stream.** The walk takes the
 //! list lock and then each stream's lock in turn; nothing takes the list lock
-//! while holding a stream lock, so no cycle is expressible. The walk holds the
-//! list lock across blocking `write()` syscalls on purpose: snapshotting the
-//! pointers and releasing would let a concurrent `fclose` free a `FILE`
-//! mid-flush. For the same reason `fclose` unlinks *before* it flushes.
+//! while holding a stream lock, so no cycle is expressible. The walk keeps the
+//! list lock across blocking `write()` syscalls, and `fclose` unlinks *before*
+//! it flushes, so no `FILE` can be freed mid-flush.
 
 use core::ptr;
 
@@ -50,7 +44,6 @@ fn list_lock() {
 }
 
 fn list_unlock() {
-    // SAFETY: as in `list_lock`; the caller holds it.
     unsafe {
         pthread_mutex_unlock(&raw mut LIST_LOCK);
     }
@@ -75,8 +68,6 @@ pub unsafe fn link(stream: *mut FILE) {
     list_unlock();
 }
 
-/// Remove `stream` from the open-stream list.
-///
 /// # Safety
 /// `stream` must point at a live `FILE`.
 pub unsafe fn unlink(stream: *mut FILE) {
@@ -118,13 +109,10 @@ fn acquire(stream: &FILE, mode: WalkMode) -> bool {
     }
 }
 
-/// Flush every stream whose most recent operation was output.
-///
-/// Read-direction streams are left alone: C11 §7.21.5.2 defines `fflush(NULL)`
-/// only over streams where the last operation was not input, and discarding a
-/// pipe's read-ahead here would destroy data the program has not consumed.
-///
-/// Returns 0, or [`EOF`] if any stream reported a write error.
+/// Flush every stream whose most recent operation was output. Read-direction
+/// streams are left alone: C11 §7.21.5.2 scopes `fflush(NULL)` to output, and
+/// dropping a pipe's read-ahead would destroy unconsumed data. Returns 0, or
+/// [`EOF`] if any stream reported a write error.
 pub fn flush_all(mode: WalkMode) -> i32 {
     let mut ret = 0i32;
     list_lock();

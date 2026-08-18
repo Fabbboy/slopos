@@ -1,7 +1,4 @@
 //! Environment variables — the compass of the lost wizards.
-//!
-//! Provides `getenv`, `setenv`, `unsetenv`, `putenv`, `getcwd`, `chdir`,
-//! and the `environ` pointer that C code relies on.
 
 use core::ptr;
 
@@ -10,29 +7,18 @@ use crate::mem::malloc;
 use crate::pal::{Pal, Sys};
 use crate::string::{u_memcpy, u_strlen};
 
-// ---------------------------------------------------------------------------
-// environ global
-// ---------------------------------------------------------------------------
-
-/// The environment pointer — a null-terminated array of `"KEY=VALUE\0"` C
-/// strings.  Set during `__libc_start_main` from the kernel-prepared stack.
-///
-/// C programs access this as `extern char **environ;`.
+/// A null-terminated array of `"KEY=VALUE\0"` C strings, set during
+/// `__libc_start_main` from the kernel-prepared stack. C sees it as
+/// `extern char **environ;`.
 #[unsafe(no_mangle)]
 pub static mut environ: *mut *mut u8 = ptr::null_mut();
 
-/// Internal copy of the environment array (heap-allocated) used when
-/// `setenv` / `unsetenv` / `putenv` need to grow or shrink the array.
-/// When null, `environ` still points at the original stack-provided array.
+/// Heap copy of the environment array, made when the array has to grow.
+/// While null, `environ` still points at the original stack-provided array.
 static mut ENVIRON_ALLOC: *mut *mut u8 = ptr::null_mut();
 static mut ENVIRON_CAP: usize = 0;
 
-// ---------------------------------------------------------------------------
-// getenv
-// ---------------------------------------------------------------------------
-
-/// Search the environment for `name` and return a pointer to the value
-/// (the part after `=`), or null if not found.
+/// Pointer to `name`'s value (the part after `=`), or null if not set.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn getenv(name: *const u8) -> *mut u8 {
     if name.is_null() || *name == 0 {
@@ -68,14 +54,8 @@ pub unsafe extern "C" fn getenv(name: *const u8) -> *mut u8 {
     ptr::null_mut()
 }
 
-// ---------------------------------------------------------------------------
-// setenv
-// ---------------------------------------------------------------------------
-
-/// Set the environment variable `name` to `value`.  If `overwrite` is zero
-/// and the variable already exists, the call is a no-op.
-///
-/// Returns 0 on success, -1 on error (sets errno).
+/// Set `name` to `value`; a zero `overwrite` leaves an existing variable
+/// alone. Returns 0, or -1 with errno set.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn setenv(name: *const u8, value: *const u8, overwrite: i32) -> i32 {
     if name.is_null() || *name == 0 {
@@ -122,13 +102,7 @@ pub unsafe extern "C" fn setenv(name: *const u8, value: *const u8, overwrite: i3
     0
 }
 
-// ---------------------------------------------------------------------------
-// unsetenv
-// ---------------------------------------------------------------------------
-
-/// Remove the variable `name` from the environment.
-///
-/// Returns 0 on success, -1 on error (sets errno).
+/// Remove `name`. Returns 0, or -1 with errno set.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn unsetenv(name: *const u8) -> i32 {
     if name.is_null() || *name == 0 {
@@ -168,14 +142,8 @@ pub unsafe extern "C" fn unsetenv(name: *const u8) -> i32 {
     0
 }
 
-// ---------------------------------------------------------------------------
-// putenv
-// ---------------------------------------------------------------------------
-
-/// Add or replace the `"NAME=VALUE"` string directly in the environment.
-/// The string is NOT copied — the caller must ensure it remains valid.
-///
-/// Returns 0 on success, -1 on error.
+/// Add or replace the `"NAME=VALUE"` string directly in the environment. The
+/// string is NOT copied; the caller keeps it alive. Returns 0, or -1.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn putenv(string: *mut u8) -> i32 {
     if string.is_null() {
@@ -211,14 +179,8 @@ pub unsafe extern "C" fn putenv(string: *mut u8) -> i32 {
     0
 }
 
-// ---------------------------------------------------------------------------
-// getcwd / chdir
-// ---------------------------------------------------------------------------
-
-/// Get the current working directory.
-///
-/// Writes the absolute path into `buf` (up to `size` bytes including NUL).
-/// Returns `buf` on success, null on error (sets errno).
+/// Write the absolute working directory into `buf` (`size` bytes including
+/// the NUL). Returns `buf`, or null with errno set.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn getcwd(buf: *mut u8, size: usize) -> *mut u8 {
     if buf.is_null() || size == 0 {
@@ -232,9 +194,7 @@ pub unsafe extern "C" fn getcwd(buf: *mut u8, size: usize) -> *mut u8 {
     }
 }
 
-/// Change the current working directory.
-///
-/// Returns 0 on success, -1 on error (sets errno).
+/// Change the working directory. Returns 0, or -1 with errno set.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn chdir(path: *const u8) -> i32 {
     if path.is_null() {
@@ -248,10 +208,6 @@ pub unsafe extern "C" fn chdir(path: *const u8) -> i32 {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Internal helpers
-// ---------------------------------------------------------------------------
-
 /// Check if an environment entry starts with `name=`.
 unsafe fn matches_name(entry: *const u8, name: *const u8, name_len: usize) -> bool {
     for i in 0..name_len {
@@ -262,7 +218,6 @@ unsafe fn matches_name(entry: *const u8, name: *const u8, name_len: usize) -> bo
     *entry.add(name_len) == b'='
 }
 
-/// Find the index of `name` in the current environ array.
 unsafe fn find_env_index(name: *const u8, name_len: usize) -> Option<usize> {
     let ep = environ;
     if ep.is_null() {
@@ -282,7 +237,7 @@ unsafe fn find_env_index(name: *const u8, name_len: usize) -> Option<usize> {
     }
 }
 
-/// Count the number of entries in environ (not including the null terminator).
+/// Entries in environ, excluding the null terminator.
 unsafe fn environ_count() -> usize {
     let ep = environ;
     if ep.is_null() {
@@ -324,8 +279,7 @@ unsafe fn alloc_entry(
     ptr
 }
 
-/// Append an entry to the environ array, growing it if needed.
-/// Returns 0 on success, -1 on failure.
+/// Append an entry, growing the array if needed. Returns 0, or -1.
 unsafe fn append_env_entry(entry: *mut u8) -> i32 {
     let count = environ_count();
     let needed = count + 2;
