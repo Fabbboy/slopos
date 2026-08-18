@@ -402,32 +402,23 @@ pub unsafe extern "sysv64" fn task_entry_trampoline() {
     naked_asm!(
         // r12 = entry point function pointer
         // r13 = argument
-
-        // Move argument to first parameter register.
         "mov rdi, r13",
 
-        // Enter the task body with interrupts enabled. The context switch
-        // restores RFLAGS with IF cleared (the dispatch runs IRQs-off to
-        // protect the register/preempt-count swap), so a fresh kernel
-        // thread must re-enable them here — a non-blocking poll loop would
-        // otherwise run IRQs-off forever, deaf to timer ticks and
-        // TLB-shootdown IPIs.
+        // The switch restored RFLAGS with IF cleared, so a fresh kernel thread
+        // re-enables here — a non-blocking poll loop would otherwise run
+        // IRQs-off forever, deaf to timer ticks and TLB-shootdown IPIs.
         "sti",
 
-        // Call the task entry function.
         "call r12",
 
-        // If entry returns, dispatch to the exit hook.
         "call {task_exit}",
 
-        // Should never reach here.
         "ud2",
 
         task_exit = sym dispatch_task_exit,
     );
 }
 
-/// Test-only reset hook.
 #[cfg(any(test, feature = "test-helpers"))]
 pub fn reset_exit_hook_for_test() {
     EXIT_HOOK_INSTALLED.store(false, Ordering::Release);

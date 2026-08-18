@@ -670,7 +670,6 @@ pub struct SlotSnapshot {
     pub raw_ref_count: u32,
     /// The stored vtable pointer as an integer (`0` == null).
     pub vtable_addr: usize,
-    /// The decoded metadata kind.
     pub kind: SlotMetaKind,
 }
 
@@ -1211,13 +1210,11 @@ impl<S: init_state::InitState> Frame<PageCacheMeta, S> {
         unsafe { core::slice::from_raw_parts_mut(p, crate::mm::page_table::PAGE_SIZE_4KB as usize) }
     }
 
-    /// `true` iff the page is currently marked dirty.
     #[inline]
     pub fn dirty(&self) -> bool {
         self.borrow().dirty.load(Ordering::Acquire) != 0
     }
 
-    /// Set / clear the dirty bit.
     #[inline]
     pub fn set_dirty(&self, dirty: bool) {
         self.borrow()
@@ -1225,13 +1222,11 @@ impl<S: init_state::InitState> Frame<PageCacheMeta, S> {
             .store(u8::from(dirty), Ordering::Release);
     }
 
-    /// Read the opaque owner-backref key.
     #[inline]
     pub fn owner_key(&self) -> u64 {
         self.borrow().owner_key.load(Ordering::Acquire)
     }
 
-    /// Publish a new owner-backref key.
     #[inline]
     pub fn set_owner_key(&self, key: u64) {
         self.borrow().owner_key.store(key, Ordering::Release);
@@ -1367,17 +1362,9 @@ pub trait FrameAlloc: Send + Sync + 'static {
     fn dealloc(&self, paddr: Paddr, size_pages: usize);
 }
 
-// ---------------------------------------------------------------------------
-// Tests
-// ---------------------------------------------------------------------------
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    // MetaSlot layout (ref_count @ 0, alignment >= MAX_META_ALIGN) is
-    // pinned by the `const _` asserts beside the struct definition; no
-    // runtime duplicate here.
 
     #[test]
     fn meta_size_fits() {
@@ -1403,11 +1390,8 @@ mod tests {
 
     #[test]
     fn vtables_carry_distinct_canonical_type_ids() {
-        // The type-identity gate in `from_in_use` compares the `TypeId` value
-        // each builtin's vtable carries. `TypeId::of::<M>()` is unique per
-        // type by language guarantee, so two metas can never collide — this
-        // test documents that and checks the vtable plumbing returns the
-        // canonical value (not, say, the same fn for every M).
+        // Checks the vtable plumbing returns each `M`'s canonical `TypeId`,
+        // not the same fn for every `M`.
         let ids = [
             (vtable_for::<KernelMeta>().type_id)(),
             (vtable_for::<PageTableMeta>().type_id)(),

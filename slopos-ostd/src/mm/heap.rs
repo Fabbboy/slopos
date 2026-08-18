@@ -48,43 +48,30 @@ static BACKEND_SLOT: AtomicPtr<&'static dyn KernelHeapBackend> =
 /// allocator. Exactly one impl is registered per kernel via
 /// [`register_kernel_slab_handle`].
 ///
-/// Intentionally distinct from [`super::slab::Slab`]: `Slab` is a
-/// typed, fixed-size per-class surface (each impl knows its own
-/// element size at compile time), whereas `KernelHeap` needs a
-/// variable-size entry point. Pushing variable size onto `Slab` would
-/// either require an extra `size` parameter on every `Slab` impl or
-/// degrade the per-class type-state guarantee that each fixed-size
-/// slab provides.
+/// Deliberately distinct from [`super::slab::Slab`], whose impls each know
+/// their element size at compile time: a `size` parameter there would degrade
+/// that per-class type-state guarantee.
 pub trait KernelHeapBackend: Send + Sync {
-    /// Allocate `size` bytes of kernel heap memory aligned to at least
-    /// 16. Returns `None` when the backing pool is exhausted or `size`
-    /// exceeds the implementation's upper bound. The returned pointer
-    /// is non-null and aligned to 16 bytes; the bytes are
-    /// implementation-defined (the SlopOS in-tree impl zeroes them).
+    /// Allocate `size` bytes aligned to at least 16, or `None` when the pool is
+    /// exhausted or `size` exceeds the implementation's upper bound. Contents
+    /// are implementation-defined (the SlopOS in-tree impl zeroes them).
     fn alloc(&self, size: usize) -> Option<NonNull<u8>>;
 
-    /// Return a previously [`KernelHeapBackend::alloc`]-ed pointer to
-    /// the backend. `ptr` must be the exact value returned by a prior
-    /// `alloc`; size is recovered from the backend's own bookkeeping.
+    /// Return a pointer to the backend. `ptr` must be the exact value a prior
+    /// [`KernelHeapBackend::alloc`] returned; the size is recovered from the
+    /// backend's own bookkeeping.
     fn dealloc(&self, ptr: NonNull<u8>);
 }
 
-/// Register the kernel slab allocator as the [`KernelHeap`] backend.
-/// The `&BspToken<'brand>` witnesses BSP-only init; the doubly-indirect
-/// `&'static &'static dyn KernelHeapBackend` argument matches the shape
-/// of [`crate::mm::frame_alloc::register_frame_allocator`] — `slot`
-/// points at a `'static` reference held in the registering crate's BSS,
-/// so registration is a lock-free, one-shot publish of a stable
-/// pointer.
+/// Register the kernel slab allocator as the [`KernelHeap`] backend. The
+/// `&BspToken<'brand>` witnesses BSP-only init; `slot` points at a `'static`
+/// reference held in the registering crate's BSS, so registration is a
+/// lock-free, one-shot publish of a stable pointer.
 ///
 /// Must be called exactly once after `slopos-mm`'s slab tier finishes
-/// self-initialisation; subsequent calls panic. After registration,
-/// every `KernelHeap` request routes through `slot`. Layouts with
-/// `align > 16` get a one-`usize` cookie written ahead of the user-
-/// visible pointer so `dealloc` can recover the underlying allocation;
-/// the cookie write/read happens inside this module's SAFETY-noted
-/// block, so the backend itself stays layout-naive and requires no
-/// `unsafe`.
+/// self-initialisation; subsequent calls panic. Layouts with `align > 16` get a
+/// one-`usize` cookie written ahead of the user-visible pointer by this module,
+/// so the backend itself stays layout-naive.
 pub fn register_kernel_slab_handle<'brand>(
     _token: &BspToken<'brand>,
     slot: &'static &'static dyn KernelHeapBackend,
@@ -114,12 +101,10 @@ fn current_backend() -> Option<&'static dyn KernelHeapBackend> {
     if ptr.is_null() {
         return None;
     }
-    // SAFETY: `ptr` was published by `register_kernel_slab_handle` as
-    // the address of a `&'static &'static dyn KernelHeapBackend`; the
-    // `BACKEND_LIVE` flag was published with Release ordering after the
-    // pointer store, and the matching Acquire load above guarantees we
-    // observe a non-null, valid slot. The pointee outlives the kernel,
-    // so dereferencing is sound.
+    // SAFETY: `register_kernel_slab_handle` published `ptr` as the address of a
+    // `&'static &'static dyn KernelHeapBackend` before the Release store to
+    // `BACKEND_LIVE`, which the Acquire load above orders against; the pointee
+    // outlives the kernel.
     Some(*unsafe { &*ptr })
 }
 
@@ -164,10 +149,9 @@ unsafe impl core::alloc::GlobalAlloc for KernelHeap {
                 .map_or(core::ptr::null_mut(), |p| p.as_ptr());
         }
 
-        // Over-allocate so we can stash a back-pointer cookie ahead of the
-        // user-visible aligned pointer. `extra` is the cookie's footprint
-        // rounded up to the slab-class minimum alignment so we never lose
-        // the alignment guarantee on the user pointer.
+        // `extra` is the back-pointer cookie's footprint rounded up to the
+        // slab-class minimum alignment, so stashing it ahead of the user-visible
+        // pointer cannot cost that pointer its alignment guarantee.
         let extra = align_up_usize(core::mem::size_of::<usize>(), 16);
         let total = size.saturating_add(align).saturating_add(extra);
         let raw = match backend.alloc(total) {
@@ -181,11 +165,8 @@ unsafe impl core::alloc::GlobalAlloc for KernelHeap {
         // SAFETY: `aligned >= base + extra`, so `cookie` lives strictly
         // inside the just-allocated `[base, base + total)` region.
         //
-        // This branch is OSTD's enforcement of **Inv. 10**: the user-
-        // visible pointer returned below is aligned to `align` and
-        // backed by `size` bytes of usable storage, so any object the
-        // caller subsequently constructs from this slot has its size +
-        // alignment requirements satisfied by construction.
+        // This branch is OSTD's enforcement of **Inv. 10**: the pointer returned
+        // below is aligned to `align` and backed by `size` usable bytes.
         unsafe {
             *cookie = base;
         }
@@ -220,40 +201,29 @@ unsafe impl core::alloc::GlobalAlloc for KernelHeap {
     }
 }
 
-// ---------------------------------------------------------------------------
-// PinBox
-// ---------------------------------------------------------------------------
-
-/// Kernel-wide pinned heap cell. The sole public constructor that runs
-/// initialisation in-place takes an [`Init<T, E>`] recipe, so a `T`
-/// value never materialises on a caller's stack for the heap-direct
-/// path.
+/// Kernel-wide pinned heap cell. The in-place constructor takes an
+/// [`Init<T, E>`] recipe, so a `T` value never materialises on a caller's
+/// stack.
 pub struct PinBox<T: ?Sized> {
     inner: Pin<Box<T>>,
 }
 
 impl<T> PinBox<T> {
-    /// Heap-allocate and initialise a `T` in place from an
-    /// [`Init<T, E>`] recipe. The `T` rvalue never materialises on
-    /// the caller's stack — the recipe writes the fields directly
-    /// into the freshly allocated heap slot, then we pin it.
+    /// Heap-allocate and initialise a `T` in place from an [`Init<T, E>`]
+    /// recipe, then pin it.
     pub fn try_init<E>(init: impl Init<T, E>) -> Result<Self, E>
     where
         E: From<AllocError>,
     {
         let boxed: Box<core::mem::MaybeUninit<T>> = Box::try_new_uninit().map_err(E::from)?;
-        // SAFETY: `boxed` is a freshly-allocated, properly aligned,
-        // writable slot for a `T`. `init.__init` writes a valid `T`
-        // into the slot on `Ok(())`, satisfying `assume_init`.
-        // On `Err(e)`, we drop `boxed` (a `MaybeUninit<T>`) which
-        // does not run `T`'s drop glue — the allocation is freed
-        // without touching uninitialised memory.
+        // SAFETY: `boxed` is a freshly-allocated, properly aligned, writable slot
+        // for a `T`. `init.__init` writes a valid `T` into it on `Ok(())`,
+        // satisfying `assume_init`. On `Err(e)` the slot is freed as a
+        // `Box<MaybeUninit<T>>`, running no drop glue over uninitialised memory.
         unsafe {
             let raw = Box::into_raw(boxed);
             let slot: *mut T = (*raw).as_mut_ptr();
             if let Err(e) = init.__init(slot) {
-                // Rebuild `Box<MaybeUninit<T>>` so Drop frees the
-                // allocation without running `T`'s glue.
                 let _ = Box::from_raw(raw);
                 return Err(e);
             }
@@ -266,8 +236,6 @@ impl<T> PinBox<T> {
 }
 
 impl<T: Zeroable> PinBox<T> {
-    /// Heap-allocate a zero-initialised `T`. Safe because `T: Zeroable`
-    /// certifies an all-zero bit pattern is a valid `T`.
     pub fn zeroed() -> Result<Self, AllocError> {
         boxed_zeroed()
     }

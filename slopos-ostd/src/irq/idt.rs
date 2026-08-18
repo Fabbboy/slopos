@@ -247,23 +247,14 @@ impl IdtBuilder {
         }
     }
 
-    /// Safe `'static` wrapper around [`Self::load`].
-    ///
-    /// A `&'static self` borrow + a [`CpuInitWitness`](crate::sync::CpuInitWitness)
-    /// discharges the three contract clauses of `unsafe fn load`:
-    ///
-    /// - **`'static` storage** — guaranteed by the `&'static self`
-    ///   receiver.
-    /// - **Gate population** — discharged by build-step ordering; the
-    ///   BSP `idt_init` path runs `install_default_handlers` before
-    ///   any caller observes a witness, and `register_*` is monotonic
-    ///   across that scope.
-    /// - **GDT/TSS already loaded** — `CpuInitWitness` is minted only
-    ///   inside `run_bsp_init` / `run_ap_init`, both of which run
-    ///   `init_gdt_and_install` first.
+    /// Safe `'static` wrapper around [`Self::load`], discharging its three
+    /// contract clauses: the `&'static self` receiver gives `'static` storage;
+    /// `idt_init` runs `install_default_handlers` before any caller observes a
+    /// witness; [`CpuInitWitness`](crate::sync::CpuInitWitness) is minted only
+    /// inside `run_bsp_init` / `run_ap_init`, which load the GDT/TSS first.
     pub fn load_static<W: crate::sync::CpuInitWitness>(&'static self, _witness: &W) {
-        // SAFETY: see fn-level docs — all three clauses of `unsafe fn
-        // load` are discharged structurally.
+        // SAFETY: see fn-level docs; all three clauses are discharged
+        // structurally.
         unsafe { self.load() };
     }
 }
@@ -274,29 +265,19 @@ impl Default for IdtBuilder {
     }
 }
 
-// ---------------------------------------------------------------------------
-// install_default_handlers — wire OSTD's asm stubs into the IDT.
-// ---------------------------------------------------------------------------
-
-// Gated on the kernel target (matching the `handlers.s` global_asm above):
-// this references the asm's `isr*` / `msi_vector_table` symbols, so it must
-// compile only where that asm does — never in a host build.
+// Same gate as the `handlers.s` global_asm above: this references its `isr*` /
+// `msi_vector_table` symbols.
 #[cfg(all(target_arch = "x86_64", target_os = "none"))]
 impl IdtBuilder {
     /// Install the OSTD-supplied default exception, syscall-trap, IPI,
-    /// LAPIC-timer, IRQ, and MSI gates. The asm stubs live in
-    /// `slopos-ostd/src/irq/asm/handlers.s`. Boot configures IST slots
-    /// (via [`set_ist`]) and loads the IDT (via [`load`]) separately.
+    /// LAPIC-timer, IRQ, and MSI gates; boot configures IST slots and loads
+    /// the IDT separately.
     ///
-    /// All gates use `KERNEL_CODE` (selector 0x08). The syscall trap
-    /// gate is DPL=3 (user-reachable); every other gate is DPL=0.
-    /// Vectors 9 and 15 are reserved (Intel SDM); they remain zeroed.
-    ///
-    /// [`set_ist`]: IdtBuilder::set_ist
-    /// [`load`]: IdtBuilder::load
+    /// All gates use `KERNEL_CODE`. The syscall trap gate is DPL=3
+    /// (user-reachable); every other gate is DPL=0. Vectors 9 and 15 are
+    /// reserved (Intel SDM); they remain zeroed.
     pub fn install_default_handlers(&self) {
         unsafe extern "C" {
-            // Exception entries (vectors 0..=19, except reserved 9 and 15).
             fn isr0();
             fn isr1();
             fn isr2();
@@ -315,16 +296,13 @@ impl IdtBuilder {
             fn isr17();
             fn isr18();
             fn isr19();
-            // Syscall trap-gate (vector 0x80).
             fn isr128();
-            // IPI / spurious / timer custom stubs.
             fn isr_reschedule_ipi();
             fn isr_rcu_qs_ipi();
             fn isr_tlb_shootdown();
             fn isr_shutdown_ipi();
             fn isr_spurious();
             fn isr_lapic_timer();
-            // Legacy IRQ stubs (vectors 32..=47).
             fn irq0();
             fn irq1();
             fn irq2();
@@ -341,7 +319,6 @@ impl IdtBuilder {
             fn irq13();
             fn irq14();
             fn irq15();
-            // MSI stub address table.
             static msi_vector_table: [u64; MSI_VECTOR_COUNT];
         }
 
@@ -352,8 +329,6 @@ impl IdtBuilder {
             p as *const () as u64
         }
 
-        // Architectural exception vectors (0..=19, minus reserved 9 and 15).
-        // BP (3) and OF (4) are trap gates; the rest are interrupt gates.
         self.set_gate(EXCEPTION_DIVIDE_ERROR, fp(isr0), cs, IDT_GATE_INTERRUPT);
         self.set_gate(EXCEPTION_DEBUG, fp(isr1), cs, IDT_GATE_INTERRUPT);
         self.set_gate(EXCEPTION_NMI, fp(isr2), cs, IDT_GATE_INTERRUPT);
@@ -388,7 +363,6 @@ impl IdtBuilder {
             IDT_GATE_INTERRUPT,
         );
 
-        // Legacy IOAPIC IRQ gates (vectors 32..=47).
         self.set_gate(32, fp(irq0), cs, IDT_GATE_INTERRUPT);
         self.set_gate(33, fp(irq1), cs, IDT_GATE_INTERRUPT);
         self.set_gate(34, fp(irq2), cs, IDT_GATE_INTERRUPT);
@@ -406,10 +380,8 @@ impl IdtBuilder {
         self.set_gate(46, fp(irq14), cs, IDT_GATE_INTERRUPT);
         self.set_gate(47, fp(irq15), cs, IDT_GATE_INTERRUPT);
 
-        // Syscall trap gate (vector 0x80, DPL=3).
         self.set_gate_priv(SYSCALL_VECTOR, fp(isr128), cs, IDT_GATE_TRAP, 3);
 
-        // IPIs, LAPIC timer, shutdown, spurious.
         self.set_gate(
             RESCHEDULE_IPI_VECTOR,
             fp(isr_reschedule_ipi),
@@ -437,8 +409,8 @@ impl IdtBuilder {
             IDT_GATE_INTERRUPT,
         );
 
-        // MSI vectors (48..224). Skip SYSCALL_VECTOR which sits inside
-        // this range and gets its own DPL=3 trap gate above.
+        // SYSCALL_VECTOR sits inside the MSI range and keeps its DPL=3 trap
+        // gate from above.
         // SAFETY: msi_vector_table is a 176-entry rodata array emitted
         // by handlers.s; the asm guarantees i < MSI_VECTOR_COUNT.
         unsafe {
@@ -453,15 +425,8 @@ impl IdtBuilder {
     }
 }
 
-// ---------------------------------------------------------------------------
-// ExceptionMode.
-// ---------------------------------------------------------------------------
-
-/// Whether the kernel is running production exception handlers
-/// ([`Normal`]) or test-mode override handlers ([`Test`]).
-///
-/// [`Normal`]: ExceptionMode::Normal
-/// [`Test`]: ExceptionMode::Test
+/// Whether the kernel runs production exception handlers or test-mode
+/// overrides.
 #[repr(u8)]
 #[derive(Copy, Clone, PartialEq, Eq, Debug)]
 pub enum ExceptionMode {
@@ -469,16 +434,10 @@ pub enum ExceptionMode {
     Test = 1,
 }
 
-// ---------------------------------------------------------------------------
-// DiagnosticSink: callback for the IRET-corruption dump.
-// ---------------------------------------------------------------------------
-
 /// Sink for the IRET-frame-corruption diagnostic. Production wires a
 /// klog-backed implementation; the OSTD-internal default is silent.
 pub trait DiagnosticSink: Send + Sync + 'static {
-    /// Emit one diagnostic line. Called from the corrupt-IRET path.
-    /// The body is interpolated by the caller; the sink is a raw
-    /// stream — no formatting allocation.
+    /// Emit one diagnostic line; a raw stream, no formatting allocation.
     fn emit(&self, line: &str);
 }
 

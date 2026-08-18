@@ -1222,27 +1222,22 @@ pub extern "sysv64" fn reset_ist_unsafe_sp(top: u64) {
     )
 }
 
-/// Get the number of initialized PCRs (i.e. CPU count).
 #[inline]
 pub fn get_pcr_count() -> usize {
     PCR_COUNT.load(Ordering::Acquire) as usize
 }
 
-/// Check if PCR subsystem is initialized.
 #[inline]
 pub fn is_pcr_initialized() -> bool {
     PCR_INIT.is_set()
 }
 
-// ==================== CPU COUNT & STATE ====================
-
-/// Get the number of initialized CPUs (alias for `get_pcr_count`).
 #[inline]
 pub fn get_cpu_count() -> usize {
     get_pcr_count()
 }
 
-/// Get the number of online (scheduler-running) CPUs.
+/// Counts CPUs that are online, i.e. running the scheduler.
 #[inline]
 pub fn get_online_cpu_count() -> usize {
     let count = get_cpu_count().min(MAX_CPUS);
@@ -1257,27 +1252,24 @@ pub fn get_online_cpu_count() -> usize {
     online
 }
 
-/// Check if the current CPU is the BSP.
 #[inline]
 pub fn is_bsp() -> bool {
     get_current_cpu() == 0
 }
 
-/// Mark a CPU as online (ready to run tasks).
+/// Online means ready to run tasks.
 pub fn mark_cpu_online(cpu_id: usize) {
     if let Some(pcr) = get_pcr(cpu_id) {
         pcr.online.store(true, Ordering::Release);
     }
 }
 
-/// Mark a CPU as offline.
 pub fn mark_cpu_offline(cpu_id: usize) {
     if let Some(pcr) = get_pcr(cpu_id) {
         pcr.online.store(false, Ordering::Release);
     }
 }
 
-/// Check if a CPU is online.
 #[inline]
 pub fn is_cpu_online(cpu_id: usize) -> bool {
     get_pcr(cpu_id)
@@ -1301,8 +1293,7 @@ pub fn heartbeat_for_cpu(cpu_id: usize) -> u64 {
         .unwrap_or(0)
 }
 
-/// Publish whether this CPU's LAPIC timer is delivering periodic ticks,
-/// which is what makes it eligible to be watched.
+/// Delivering periodic ticks is what makes a CPU eligible to be watched.
 #[inline]
 pub fn set_timer_armed(armed: bool) {
     if let Some(pcr) = current_pcr_local() {
@@ -1310,7 +1301,6 @@ pub fn set_timer_armed(armed: bool) {
     }
 }
 
-/// Whether `cpu_id` has a running periodic timer.
 #[inline]
 pub fn timer_is_armed(cpu_id: usize) -> bool {
     get_pcr(cpu_id)
@@ -1318,7 +1308,7 @@ pub fn timer_is_armed(cpu_id: usize) -> bool {
         .unwrap_or(false)
 }
 
-/// Set or clear this CPU's watchdog suppression, returning the old value.
+/// Returns the old value.
 #[inline]
 pub fn set_watchdog_suppressed(suppressed: bool) -> bool {
     current_pcr_local()
@@ -1326,7 +1316,6 @@ pub fn set_watchdog_suppressed(suppressed: bool) -> bool {
         .unwrap_or(false)
 }
 
-/// Whether `cpu_id` has asked not to be watched.
 #[inline]
 pub fn watchdog_is_suppressed(cpu_id: usize) -> bool {
     get_pcr(cpu_id)
@@ -1334,14 +1323,10 @@ pub fn watchdog_is_suppressed(cpu_id: usize) -> bool {
         .unwrap_or(false)
 }
 
-// ==================== PER-CPU DATA ACCESSORS ====================
-// These operate on the *current* CPU's PCR via GS_BASE.
-
-/// Set the current task pointer and its id for this CPU.
+/// Set the current task pointer, id and priority for this CPU.
 ///
-/// Two gs-relative stores, each migration-atomic (see the
-/// single-instruction per-CPU ops block above) — neither value can land in a
-/// PCR the writing task has been migrated away from.
+/// Each store is migration-atomic, so no value can land in a PCR the writing
+/// task has been migrated away from.
 ///
 /// The id and the priority travel with the pointer rather than in their own
 /// setters so the three cannot be written independently: [`current_task_id`]
@@ -1354,12 +1339,9 @@ pub(crate) fn set_current_task(task: *mut (), task_id: u32, priority: u8) {
     if !GS_BASE_SET.is_set() {
         return;
     }
-    // Retire the old id before the pointer moves. Readers discriminate on the
-    // id — `CurrentTask::get` treats `INVALID_TASK_ID` as "no task, and
-    // therefore possibly a bootstrap stub" — so publishing the pointer first
-    // would briefly pair a new pointer with the *previous* id. When the new
-    // pointer is a stub and the previous id was a real task, that window reads
-    // as "a live task lives at this stub address".
+    // Retire the old id before the pointer moves: readers discriminate on the
+    // id, so publishing the pointer first would briefly pair a new (possibly
+    // stub) pointer with the previous task's id.
     set_current_task_id(slopos_abi::task::INVALID_TASK_ID);
     // SAFETY: GS_BASE is installed (checked above); single gs-relative
     // store to this CPU's PCR field.
@@ -1377,11 +1359,10 @@ pub(crate) fn set_current_task(task: *mut (), task_id: u32, priority: u8) {
 
 /// Publish `task` as the task running on this CPU.
 ///
-/// The typed counterpart of the reader in [`crate::task::cell`]: this is where
-/// the monomorphisation the PCR slot holds is *decided*, and the
-/// `PcrTaskType` bound is what makes reader and writer name the same one. The
-/// erased [`set_current_task`] is `pub(crate)`, so this and
-/// [`park_bootstrap_task`] are the only ways in from outside OSTD.
+/// Decides the monomorphisation the PCR slot holds; the `PcrTaskType` bound is
+/// what makes the reader in [`crate::task::cell`] name the same one. The erased
+/// [`set_current_task`] is `pub(crate)`, so this and [`park_bootstrap_task`]
+/// are the only ways in from outside OSTD.
 #[inline]
 pub fn set_current_task_typed<K, U>(
     task: *mut crate::task::kernel_task::TaskInner<K, U>,
@@ -1396,21 +1377,17 @@ pub fn set_current_task_typed<K, U>(
 /// Park this CPU on a pre-heap bootstrap stub.
 ///
 /// A stub is deliberately *not* a `TaskInner`: it holds only the eight-byte
-/// `unsafe_stack_sp` prefix an instrumented prologue reads. Publishing
-/// `INVALID_TASK_ID` and [`PRIORITY_NONE`] alongside it is what every reader's
-/// stub filter keys on, so the two travel together here rather than being
-/// spelled out at each call site.
+/// `unsafe_stack_sp` prefix an instrumented prologue reads. Every reader's stub
+/// filter keys on the `INVALID_TASK_ID` + [`PRIORITY_NONE`] pair published
+/// alongside it.
 #[inline]
 pub fn park_bootstrap_task(stub: *mut ()) {
     set_current_task(stub, slopos_abi::task::INVALID_TASK_ID, PRIORITY_NONE);
 }
 
-/// Get the current task pointer for this CPU.
-///
-/// Single gs-relative load: a preemptible caller that is migrated
-/// mid-call still reads the PCR of the CPU executing the instruction
-/// — which, post-migration, holds *this* task again — never a stale
-/// pointer into the previous CPU's PCR.
+/// Single gs-relative load, so a preemptible caller migrated mid-call still
+/// reads the PCR of the CPU executing the instruction — which post-migration
+/// holds *this* task again — never a stale pointer into the previous CPU's PCR.
 #[inline]
 pub fn get_current_task() -> *mut () {
     if !GS_BASE_SET.is_set() {

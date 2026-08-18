@@ -464,10 +464,9 @@ impl<T> SpinLock<T> {
             )
             .is_ok()
         {
-            // `current` was `now_serving`, so the wait inside `acquire`
-            // completes immediately. The `try_lock`-only locks are the ones
-            // the reporter itself takes; skipping the holder here would
-            // leave a hole in the graph exactly where the diagnostics run.
+            // `current` was `now_serving`, so `acquire`'s wait completes at
+            // once; skipping it would leave the reporter's own `try_lock`-only
+            // locks out of the wait-for graph, where the diagnostics run.
             self.core.acquire(current);
             Some(SpinLockGuard {
                 mutex: self,
@@ -482,12 +481,10 @@ impl<T> SpinLock<T> {
     }
 }
 
-/// Report a spin whose queue has stopped moving.
-///
-/// `#[cold]` and never inlined, with no `format_args!` at the call site:
-/// `SpinLock::lock` is the most-monomorphised function in the kernel and
-/// its frame is held to 2048 bytes by `check_stack_sizes.sh`. Non-generic
-/// for the same reason.
+/// Report a spin whose queue has stopped moving. Cold, never inlined,
+/// non-generic, and with no `format_args!` at the call site: `SpinLock::lock`
+/// is the most-monomorphised function in the kernel and its frame is held to
+/// 2048 bytes by `check_stack_sizes.sh`.
 #[cold]
 #[inline(never)]
 fn report_spin_stall(core: &LockCore, my_ticket: u16) {
@@ -536,10 +533,6 @@ impl<'a, T> Drop for SpinLockGuard<'a, T> {
         unsafe {
             lock_tracking::pop_lock(&self.mutex.core as *const _ as *const ());
         }
-        // `holder` is deliberately left naming this CPU. A reader believes
-        // it only while `holder`'s ticket equals `now_serving`, which this
-        // bump makes false — so there is no window in which a stale holder
-        // is trusted, and no clear to order against the release.
         self.mutex.core.now_serving.fetch_add(1, Ordering::Release);
         cpu::restore_flags(self.saved_flags);
     }
@@ -668,9 +661,6 @@ impl<'a, T> Drop for PreemptMutexGuard<'a, T> {
 unsafe fn preempt_mutex_poison_fn<T>(addr: *const ()) {
     // SAFETY: caller certifies addr is a valid PreemptMutex<T>.
     let mutex = unsafe { &*(addr as *const PreemptMutex<T>) };
-    // One holder, as a guard's `Drop` releases. Storing `next_ticket`
-    // would strand every already-queued waiter on a ticket that is never
-    // served.
     let mut serving = mutex.now_serving.load(Ordering::Relaxed);
     loop {
         if mutex.next_ticket.load(Ordering::Relaxed) == serving {
@@ -688,18 +678,12 @@ unsafe fn preempt_mutex_poison_fn<T>(addr: *const ()) {
     }
 }
 
-// =============================================================================
-// IrqRwLock - Reader-Writer Lock with IRQ disable
-// =============================================================================
-
-/// A **writer-preferring** reader-writer lock that disables interrupts while held.
-/// Multiple readers can hold the lock simultaneously, but writers get exclusive access.
-/// When a writer is waiting, new readers yield to prevent writer starvation.
+/// A **writer-preferring** reader-writer lock that disables interrupts while
+/// held. Readers share; while a writer is waiting new readers yield, which
+/// prevents writer starvation under continuous read traffic.
 pub struct IrqRwLock<T> {
     /// State: 0 = unlocked, -1 = write-locked, >0 = number of readers
     state: core::sync::atomic::AtomicI32,
-    /// Number of writers waiting for access. When > 0, new readers yield
-    /// to prevent writer starvation under continuous read traffic.
     writer_waiting: AtomicU32,
     class: &'static LockClassKey,
     data: UnsafeCell<T>,
@@ -710,14 +694,12 @@ pub struct IrqRwLock<T> {
 unsafe impl<T: Send> Send for IrqRwLock<T> {}
 unsafe impl<T: Send + Sync> Sync for IrqRwLock<T> {}
 
-/// Guard for read access to IrqRwLock data.
 pub struct IrqRwLockReadGuard<'a, T> {
     lock: &'a IrqRwLock<T>,
     saved_flags: u64,
     _preempt: PreemptGuard,
 }
 
-/// Guard for write access to IrqRwLock data.
 pub struct IrqRwLockWriteGuard<'a, T> {
     lock: &'a IrqRwLock<T>,
     saved_flags: u64,
@@ -725,7 +707,6 @@ pub struct IrqRwLockWriteGuard<'a, T> {
 }
 
 impl<T> IrqRwLock<T> {
-    /// Create a new IrqRwLock protecting the given data.
     #[inline]
     pub const fn new(data: T, class: &'static LockClassKey) -> Self {
         Self {
@@ -736,8 +717,8 @@ impl<T> IrqRwLock<T> {
         }
     }
 
-    /// Acquire read access. Multiple readers can hold the lock simultaneously.
-    /// Blocks if a writer holds the lock or if writers are waiting (writer preference).
+    /// Acquire shared read access; blocks while a writer holds the lock or one
+    /// is waiting.
     #[inline]
     pub fn read(&self) -> IrqRwLockReadGuard<'_, T> {
         let preempt = PreemptGuard::new();
@@ -770,13 +751,11 @@ impl<T> IrqRwLock<T> {
                     };
                 }
             }
-            // IRQs-off spin: keep servicing pending TLB shootdowns.
             spin_relax_fire();
             spin_loop();
         }
     }
 
-    /// Try to acquire read access without blocking.
     #[inline]
     pub fn try_read(&self) -> Option<IrqRwLockReadGuard<'_, T>> {
         let preempt = PreemptGuard::new();
@@ -812,8 +791,7 @@ impl<T> IrqRwLock<T> {
         None
     }
 
-    /// Acquire write access. Only one writer, no readers. Signals intent so
-    /// new readers yield (writer preference).
+    /// Acquire exclusive write access, signalling intent so new readers yield.
     #[inline]
     pub fn write(&self) -> IrqRwLockWriteGuard<'_, T> {
         let preempt = PreemptGuard::new();
@@ -842,13 +820,11 @@ impl<T> IrqRwLock<T> {
                     _preempt: preempt,
                 };
             }
-            // IRQs-off spin: keep servicing pending TLB shootdowns.
             spin_relax_fire();
             spin_loop();
         }
     }
 
-    /// Try to acquire write access without blocking.
     #[inline]
     pub fn try_write(&self) -> Option<IrqRwLockWriteGuard<'_, T>> {
         let preempt = PreemptGuard::new();

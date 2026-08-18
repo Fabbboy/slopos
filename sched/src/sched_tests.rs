@@ -6095,16 +6095,12 @@ pub fn test_task_ids_are_never_reused() -> TestResult {
     TestResult::Pass
 }
 
-/// The AP pause nests on a depth, so a release only resumes the APs when it is
-/// the last one outstanding — and the holders are independent, so releasing in
-/// acquire order has to work as well as releasing in reverse.
+/// The AP pause nests on a depth: a release resumes the APs only when it is the
+/// last outstanding, and releasing in acquire order must work as well as in
+/// reverse.
 ///
-/// A flag gets the second half wrong: the earlier release lifts the pause while
-/// a holder is still standing, and that holder then runs its critical section
-/// against live APs believing they are parked.
-///
-/// Deliberately runs without a fixture. `KernelTestScope` holds a pause for the
-/// whole of any test that uses one, and the transition being pinned here is the
+/// Deliberately runs without a fixture — `KernelTestScope` holds a pause for
+/// the whole of any test that uses one, and the transition pinned here is the
 /// one at depth zero.
 pub fn test_ap_pause_nests_on_a_depth_count() -> TestResult {
     if crate::per_cpu::ap_pause_depth() != 0 {
@@ -6128,8 +6124,8 @@ pub fn test_ap_pause_nests_on_a_depth_count() -> TestResult {
         }
     };
 
-    // Every observation is recorded before it is judged, so no failure path can
-    // return while a token is still outstanding and leave the APs parked.
+    // Every observation is recorded before it is judged, so no failure path
+    // returns with a token still outstanding and leaves the APs parked.
     let depth_nested = crate::per_cpu::ap_pause_depth();
     let paused_nested = crate::per_cpu::are_aps_paused();
 
@@ -6169,17 +6165,14 @@ pub fn test_ap_pause_nests_on_a_depth_count() -> TestResult {
     TestResult::Pass
 }
 
-/// A pause that cannot be established is an error the caller has to handle, and
-/// the failed attempt leaves no depth behind. Both halves are load-bearing: a
-/// silent success would let `KernelTestScope` run a test body against APs that
-/// are still free to race it, and a leaked depth would park every AP for the
-/// rest of the boot.
+/// A pause that cannot be established is a reported error, and the failed
+/// attempt leaves no depth behind — a leaked depth parks every AP for the rest
+/// of the boot.
 ///
-/// Provokes the timeout through the executing flag itself, which is the only
-/// state `pause_all_aps` waits on and which nothing else reads. An AP may clear
-/// the forced flag by passing through its dispatch path underneath the attempt,
-/// so the provocation gets a bounded number of tries before the test reports it
-/// unreproducible rather than silently passing.
+/// The timeout is provoked through the executing flag, the only state
+/// `pause_all_aps` waits on. An AP may clear it by passing through its dispatch
+/// path underneath the attempt, so the provocation gets a bounded number of
+/// tries rather than silently passing.
 pub fn test_ap_pause_timeout_is_reported_and_rolled_back() -> TestResult {
     if slopos_arch::pcr::get_cpu_count() < 2 {
         klog_info!("SCHED_TEST: uniprocessor boot has no AP to hold a pause off");
@@ -6258,18 +6251,9 @@ slopos_testing::stest!(
 );
 slopos_testing::stest!(name = test_task_ids_are_never_reused, suite = sched_core);
 
-// =============================================================================
-// Teardown of a task parked in a stack-pinned wait
-// =============================================================================
-
 /// Create a kernel task and park a wait node for it on `wq`, leaving the park
-/// back-pointer published.
-///
-/// `park_unowned_node_for_test` reads the waiter's identity from the PCR, so
-/// making the task this CPU's current for exactly the duration of the link is
-/// the only way to park a *chosen* task from a test. The bootstrap stub is
-/// restored before returning: a task that is still some CPU's current is
-/// dispatch-pinned, and teardown would refuse it.
+/// back-pointer published. Dispatched and restored for the same reasons as
+/// [`park_task_on_queue`].
 fn park_stack_waiter(wq: &WaitQueue, name: &'static [u8]) -> Option<(u32, ParkedTestNode)> {
     let task_id = task_create(
         name.as_ptr() as *const c_char,
@@ -6298,11 +6282,10 @@ fn park_stack_waiter(wq: &WaitQueue, name: &'static [u8]) -> Option<(u32, Parked
 
 /// A task torn down while parked in `wait_event` leaves no node behind.
 ///
-/// The node lives on the victim's kernel stack, and `TaskStack` recycles a slot
-/// rather than quarantining it — so a node still linked after teardown is
-/// dereferenced and written through by the next wake, at an address that by
-/// then belongs to a different task. The keeper is what makes that wake
-/// happen: a queue with no other waiter is never woken again.
+/// The node lives on the victim's kernel stack and the slot is recycled rather
+/// than quarantined, so a node still linked after teardown is written through
+/// by the next wake, at an address that by then belongs to a different task.
+/// The keeper is what makes that wake happen.
 pub fn test_terminated_waiter_leaves_no_wait_node() -> TestResult {
     let _fixture = SchedFixture::new();
 
@@ -6329,8 +6312,8 @@ pub fn test_terminated_waiter_leaves_no_wait_node() -> TestResult {
         outcome = TestResult::Fail;
     }
 
-    // `remove_task` declines an unowned node by contract, so this is the
-    // control: teardown must not be relying on it.
+    // Control: `remove_task` declines an unowned node, so teardown must not be
+    // relying on it.
     wq.remove_task(victim);
     if wq.waiter_count() != 2 {
         klog_info!("SCHED_TEST: remove_task unlinked an unowned node");
@@ -6349,7 +6332,6 @@ pub fn test_terminated_waiter_leaves_no_wait_node() -> TestResult {
         outcome = TestResult::Fail;
     }
 
-    // The surviving node must still be the keeper's, reachable by a wake.
     if !wq.wake_one() {
         klog_info!("SCHED_TEST: the keeper's node did not survive the purge");
         outcome = TestResult::Fail;
@@ -6366,12 +6348,10 @@ slopos_testing::stest!(
 
 /// A terminal task running on a CPU is descheduled at the next tick.
 ///
-/// Every arm of the tick handler that declines to preempt — the no-preempt
-/// flag, an unspent time slice, an empty ready queue — returns without
-/// requesting a reschedule. A task killed from a peer CPU is left `Zombie`
-/// while still executing, so without a terminal-status escape above those arms
-/// it keeps running as a Zombie for as long as it likes, and the deferred
-/// cleanup that runs in the switch tail never happens.
+/// Every arm of the tick handler that declines to preempt returns without
+/// requesting a reschedule, so without a terminal-status escape above them a
+/// task killed from a peer CPU keeps running as a `Zombie` and its switch-tail
+/// cleanup never happens.
 pub fn test_terminal_task_is_descheduled_at_the_tick() -> TestResult {
     let _fixture = SchedFixture::new();
 
@@ -6394,15 +6374,13 @@ pub fn test_terminal_task_is_descheduled_at_the_tick() -> TestResult {
 
     let mut outcome = TestResult::Pass;
 
-    // IRQs off for the whole window. `dispatch_task_for_test` publishes a
-    // different Task as this CPU's current while the test's own stack keeps
-    // running, so a real tick landing here would reschedule off that stack and
-    // never come back — the fixture Task is not schedulable. Every other
-    // fixture is safe from this only because the scheduler is disabled, and
-    // enabling it is exactly what this test must do.
+    // IRQs off for the whole window: `dispatch_task_for_test` publishes a Task
+    // that is not schedulable as this CPU's current while the test's own stack
+    // keeps running, so a real tick would reschedule off that stack and never
+    // come back.
     slopos_ostd::cpu::x86_64::interrupts::IrqDisabled::with(|_irq| {
-        // The fixture leaves the scheduler disabled, and the tick's first arm
-        // returns on that — without this every check below would pass
+        // The tick's first arm returns on a disabled scheduler, which the
+        // fixture leaves it as — without this every check below passes
         // vacuously.
         scheduler::set_scheduler_enabled_for_test(true);
 
@@ -6443,13 +6421,10 @@ slopos_testing::stest!(
 
 /// A task that goes terminal while parked is not restored to Running.
 ///
-/// The wait protocol cancels its own `Running -> Blocked` commit whenever a
-/// wake, a satisfied condition or a runtime teardown beats it to the yield,
-/// and that cancellation is a force-store. A task stamped `Zombie` by a peer
-/// CPU while parked would be force-restored to `Running` by it — after which
-/// the status gate in `cleanup_current_task_after_switch` makes deferred
-/// cleanup a permanent no-op, so the fd table, the process VM and the reap
-/// never run while the task lives on with a published exit value.
+/// The wait protocol's cancel of its own `Running -> Blocked` commit is a
+/// force-store; restoring a `Zombie` that way makes the status gate in
+/// `cleanup_current_task_after_switch` a permanent no-op, so the fd table, the
+/// process VM and the reap never run.
 pub fn test_terminal_task_is_not_restored_to_running() -> TestResult {
     let _fixture = SchedFixture::new();
 
@@ -6471,7 +6446,7 @@ pub fn test_terminal_task_is_not_restored_to_running() -> TestResult {
 
     let mut outcome = TestResult::Pass;
 
-    // Control: a live task is restored, which is the whole point of the call.
+    // Control: a live task is restored, which is what the call is for.
     if let Some(current) = slopos_sched_current_for_test() {
         if !scheduler::consume_ready_wake_for_current_for_test(&current) {
             klog_info!("SCHED_TEST: a live task was refused a Running publish");
@@ -6518,19 +6493,13 @@ slopos_testing::stest!(
     suite = sched_core
 );
 
-// =============================================================================
-// Futex dequeue contract
-// =============================================================================
-
 /// A futex waiter always leaves its bucket, and the dequeue reports *who*
 /// dequeued it.
 ///
-/// The bucket slot holds a strong reference to the waiter. `futex_wake` takes
-/// the slot when it is the one that wakes a task, so a slot still present
-/// after a wait ends means something else ended it — a signal, a kill, or the
-/// deadline. Without an unconditional self-dequeue that reference is stranded
-/// until teardown or an unrelated wake on the same address, and the return
-/// value is also what distinguishes a real wake from every other way out.
+/// The bucket slot holds a strong reference; without an unconditional
+/// self-dequeue it is stranded until teardown or an unrelated wake on the same
+/// address, and the return value is what tells a real wake from every other way
+/// out.
 pub fn test_futex_waiter_always_leaves_its_bucket() -> TestResult {
     let _fixture = SchedFixture::new();
 
@@ -6563,13 +6532,11 @@ pub fn test_futex_waiter_always_leaves_its_bucket() -> TestResult {
         outcome = TestResult::Fail;
     }
 
-    // A dequeue keyed on a different address must not claim this entry.
     if crate::futex::futex_remove_self_for_test(other, task_id) {
         klog_info!("SCHED_TEST: dequeue matched an unrelated futex address");
         outcome = TestResult::Fail;
     }
 
-    // The waiter's own dequeue finds it: nothing else woke it.
     if !crate::futex::futex_remove_self_for_test(uaddr, task_id) {
         klog_info!("SCHED_TEST: self-dequeue did not find its own entry");
         outcome = TestResult::Fail;
@@ -6578,7 +6545,6 @@ pub fn test_futex_waiter_always_leaves_its_bucket() -> TestResult {
         klog_info!("SCHED_TEST: bucket still holds the entry after dequeue");
         outcome = TestResult::Fail;
     }
-    // Idempotent, and reports that someone else got there first.
     if crate::futex::futex_remove_self_for_test(uaddr, task_id) {
         klog_info!("SCHED_TEST: a second dequeue claimed to find an entry");
         outcome = TestResult::Fail;

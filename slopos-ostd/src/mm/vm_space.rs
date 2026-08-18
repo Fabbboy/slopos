@@ -542,7 +542,6 @@ impl Cursor<'_> {
                 property: PageProperty::default(),
                 // The level whose entry was missing — caller advances
                 // by `level.entry_size()` to skip the empty subtree.
-                // E.g. PML4 entry missing ⇒ skip 512 GiB.
                 level: stopped_at,
             }),
         }
@@ -588,10 +587,6 @@ impl Cursor<'_> {
     }
 }
 
-// ---------------------------------------------------------------------------
-// CursorMut
-// ---------------------------------------------------------------------------
-
 impl<'a> CursorMut<'a> {
     pub fn vaddr(&self) -> VirtAddr {
         self.cur
@@ -635,8 +630,6 @@ impl<'a> CursorMut<'a> {
     /// Snapshot of the current entry — same data as the read-only
     /// cursor's [`Cursor::query`].
     pub fn query(&self) -> Result<CursorEntry, MapError> {
-        // Reuse the read-only path by constructing a temporary
-        // `Cursor` over the same range.
         let probe = Cursor {
             space: self.space,
             range: self.range.clone(),
@@ -646,10 +639,9 @@ impl<'a> CursorMut<'a> {
     }
 
     /// Map `frame` at the cursor's current vaddr with `prop`, at leaf
-    /// size `S`. Consumes `frame`; on success the returned `Ok(())`
-    /// means the underlying `Frame<M>` has been leaked into the leaf
-    /// PTE (its single ref is now held by the page table). Reverse
-    /// via [`Self::unmap::<S>`].
+    /// size `S`. Consumes `frame`; on success its single reference is
+    /// leaked into the leaf PTE and held by the page table. Reverse via
+    /// [`Self::unmap::<S>`].
     ///
     /// Errors:
     /// * [`MapError::OutOfBounds`] — cursor past `range.end`.
@@ -668,9 +660,8 @@ impl<'a> CursorMut<'a> {
         if self.cur.as_u64() & (S::BYTES - 1) != 0 {
             return Err(MapError::UnalignedCursor);
         }
-        // The mapped region must fit inside `range`. Otherwise a
-        // 2 MiB map at the last 4 KiB of `range` would silently extend
-        // past `range.end`.
+        // Without this, a 2 MiB map at the last 4 KiB of `range` would
+        // silently extend past `range.end`.
         let map_end = self
             .cur
             .as_u64()
@@ -686,21 +677,20 @@ impl<'a> CursorMut<'a> {
         let (leaf_table_phys, leaf_index) = self.walk_to_leaf_for_map::<S>(prop.user)?;
         let pte = entry_in_table(leaf_table_phys, leaf_index);
         if pte.is_present() {
-            // VERIFIED: `verification/proofs/vm_space_cursor.rs` proves
-            // this Overlap guard is load-bearing for (REF) —
-            // `broken_double_leak_violates_refcount` shows that leaking a
-            // second ref over a present leaf drives `pte_refs` past 1,
-            // stranding a ref. Do not remove without re-proving.
+            // VERIFIED: `verification/proofs/vm_space_cursor.rs`
+            // (`broken_double_leak_violates_refcount`) proves this
+            // Overlap guard load-bearing for (REF) — a second leak over
+            // a present leaf strands a ref. This guard is shared by
+            // `map_kernel` and `map_io`; do not remove without
+            // re-proving.
             return Err(MapError::Overlap);
         }
 
-        // Leak the UFrame's ref into the PTE: the frame's ref count
-        // stays at 1, conceptually owned by the leaf entry.
-        // VERIFIED: the `frame: UFrame<M>` argument type is the Inv. 4 +
-        // Inv. 5 carrier — `vm_space_cursor.rs::broken_map_sensitive_
+        // Leak the UFrame's ref into the PTE: the count stays at 1,
+        // owned by the leaf entry. VERIFIED: the `UFrame<M>` argument
+        // type is the Inv. 4 + Inv. 5 carrier — `broken_map_sensitive_
         // violates_inv45` proves accepting a raw `Frame` here would let a
-        // sensitive frame land in a user PTE. (REF) `map` leaks exactly
-        // one ref; `unmap` reclaims exactly one.
+        // sensitive frame land in a user PTE.
         let inner = frame.into_frame();
         let paddr = inner.paddr();
         let _slot = inner.into_raw();
@@ -718,19 +708,16 @@ impl<'a> CursorMut<'a> {
     }
 
     /// Map a kernel-owned `frame` at the cursor's current vaddr with
-    /// `prop`, at leaf size `S`. The kernel-half sibling of
-    /// [`Self::map`]: same walk, same `Overlap` guard, same
-    /// leak-exactly-one-ref accounting, but the frame is a sensitive
-    /// `Frame<M>` rather than an untyped `UFrame<M>`. Reverse via
+    /// `prop`, at leaf size `S` — the kernel-half sibling of
+    /// [`Self::map`], taking a sensitive `Frame<M>` rather than an
+    /// untyped `UFrame<M>`. Reverse via
     /// [`Self::unmap_kernel::<S, M>`].
     ///
-    /// Why `M` needs only [`AnyFrameMeta`]: Inv. 4 and Inv. 5 are
-    /// hypothetically scoped to *user-visible* leaves — sensitive memory
-    /// must never be reachable from ring 3. The two guards below make
-    /// that hypothesis vacuous for every leaf this installs, discharging
-    /// the obligation at run time instead of through the `UFrame`
-    /// type carrier that [`Self::map`] uses. Both guards are therefore
-    /// load-bearing, not defensive:
+    /// `M` needs only [`AnyFrameMeta`] because Inv. 4 and Inv. 5 are
+    /// scoped to *user-visible* leaves: the `!prop.user` and higher-half
+    /// guards below discharge the obligation at run time instead of
+    /// through the `UFrame` type carrier that [`Self::map`] uses. Both
+    /// are load-bearing, not defensive —
     /// `verification/proofs/vm_space_cursor.rs`'s
     /// `broken_map_kernel_user_violates_inv45` is the machine-checked
     /// statement that dropping the `!prop.user` half violates the
@@ -773,16 +760,9 @@ impl<'a> CursorMut<'a> {
         let (leaf_table_phys, leaf_index) = self.walk_to_leaf_for_map::<S>(false)?;
         let pte = entry_in_table(leaf_table_phys, leaf_index);
         if pte.is_present() {
-            // VERIFIED: `verification/proofs/vm_space_cursor.rs` proves
-            // this Overlap guard is load-bearing for (REF) —
-            // `broken_double_leak_violates_refcount` shows that leaking a
-            // second ref over a present leaf drives `pte_refs` past 1,
-            // stranding a ref. Do not remove without re-proving.
             return Err(MapError::Overlap);
         }
 
-        // Leak the Frame's ref into the PTE: the frame's ref count
-        // stays at 1, conceptually owned by the leaf entry.
         let paddr = frame.paddr();
         let _slot = frame.into_raw();
 
@@ -851,11 +831,6 @@ impl<'a> CursorMut<'a> {
         let (leaf_table_phys, leaf_index) = self.walk_to_leaf_for_map::<S>(false)?;
         let pte = entry_in_table(leaf_table_phys, leaf_index);
         if pte.is_present() {
-            // VERIFIED: `verification/proofs/vm_space_cursor.rs` proves
-            // this Overlap guard is load-bearing for (REF) —
-            // `broken_double_leak_violates_refcount` shows that leaking a
-            // second ref over a present leaf drives `pte_refs` past 1,
-            // stranding a ref. Do not remove without re-proving.
             return Err(MapError::Overlap);
         }
 

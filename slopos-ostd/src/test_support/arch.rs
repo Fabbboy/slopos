@@ -1,24 +1,7 @@
 //! Safe wrappers around x86_64 segment / GDTR / TR register reads.
 //!
-//! `boot/src/tests/gdt_tests.rs` reads CS / DS / ES / FS / GS / SS / TR
-//! and the GDTR descriptor to verify boot-stage segment configuration.
-//! Every read is an `unsafe { asm!(...) }` block today. These wrappers
-//! fold each unsafe inline-asm site into a one-line `pub fn` here.
-//!
-//! All wrappers are read-only and side-effect-free:
-//! - `nomem` — no memory operands (except GDTR which writes a 10-byte
-//!   buffer; `read_gdtr` returns the parsed limit+base instead),
-//! - `nostack` — does not touch the stack,
-//! - `preserves_flags` — does not clobber `EFLAGS`.
-//!
-//! The CPU is assumed to be in long mode (true by the time any kernel
-//! test runs).
-
-//!
-//! Miri behaviour: every `asm!` site is gated `#[cfg(not(miri))]`; the
-//! `#[cfg(miri)]` stub returns zero so tests calling these compile but
-//! observe deterministic placeholder values. Tests that depend on real
-//! segment / GDTR state must additionally `#[cfg_attr(miri, ignore)]`.
+//! Under Miri every `asm!` site is replaced by a stub returning zero, so tests
+//! depending on real segment / GDTR state need `#[cfg_attr(miri, ignore)]`.
 
 #[cfg(not(miri))]
 use core::arch::asm;

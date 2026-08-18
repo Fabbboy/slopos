@@ -1,41 +1,30 @@
 //! Resource accounting: every kernel allocation is charged to an account, and
 //! the charge is a linear token that lives inside the thing it accounts for.
 //!
-//! One node type. An account is a row in a fixed `.bss` arena, named by a
-//! generation-stamped [`AccountId`](crate::process::AccountId), one per
-//! [`Process`](crate::process::Process) plus one root owned by the kernel,
-//! whose parent edge is set once at creation and never re-homed — so the
-//! accounting tree *is* the spawn tree and charge migration is
+//! An account is a row in a fixed `.bss` arena named by a generation-stamped
+//! [`AccountId`](crate::process::AccountId), one per
+//! [`Process`](crate::process::Process) plus one kernel-owned root. Its parent
+//! edge is set once at creation and never re-homed, so charge migration is
 //! unrepresentable.
 //!
 //! [`try_charge`] debits the leaf and every ancestor and hands back a linear
 //! [`Reservation`]; the charged object's constructor consumes that reservation
 //! and stores a [`Charge`]; the same `Drop` that releases the object refunds.
-//! Because `slopos-ostd` is the only crate permitted `unsafe` and the token's
-//! fields are private, no service crate can forge, clone or bypass a `Charge`.
+//! The token's fields are private, so no service crate can forge, clone or
+//! bypass a `Charge`.
 //!
 //! `Charge::drop` touches nothing but atomics on `.bss` and holds no counted
 //! reference, so it is legal from a hard IRQ, from under a cli-spinlock, from
-//! the IRQ-off switch tail, and from a dying task's own unwind. See the module
-//! docs of `arena` for why it takes no locks and has no release point, and of
-//! `token` for the narrow linearity claim that actually holds — Rust is
-//! affine, not linear, so "a missing refund is unrepresentable" would be
-//! false.
+//! the IRQ-off switch tail, and from a dying task's own unwind.
 //!
-//! # The rule that keeps a counter honest
+//! The type system guarantees the *token* is unique, never that the number
+//! matches reality; [`ledger_audit`] is the only mechanism that can see a
+//! forgotten or unwinder-skipped charge.
 //!
-//! A per-process page counter existed here once and was deleted for having 21
-//! writes and zero readers. So: **a counter lands with all three of its
-//! readers** — the enforcement point that refuses, an exhaustion test proving
-//! the refusal refunds exactly once, and a line in the `ledger` kcommand.
-//! [`ledger_audit`] is the fourth: the type system guarantees the *token* is
-//! unique, never that the number matches reality, and the audit is the only
-//! mechanism that can see a forgotten or unwinder-skipped charge.
-//!
-//! Every ceiling is **measured, never chosen**, and deliberately lives in two
-//! places: the enforced runtime default in [`slopos_abi::quota`], and the gate
-//! ceiling in `scripts/gates/quota/<variant>.txt`. Deriving either from the
-//! other would make the ratchet measure its own configuration.
+//! Ceilings are measured, and deliberately live in two places: the enforced
+//! runtime default in [`slopos_abi::quota`], and the gate ceiling in
+//! `scripts/gates/quota/<variant>.txt`. Deriving either from the other would
+//! make the ratchet measure its own configuration.
 
 mod arena;
 mod axis;
@@ -63,20 +52,17 @@ mod tests {
     use crate::test_support::global_lock::{GlobalTestStateGuard, lock_global_test_state};
     use slopos_abi::quota::{FdSlot, ObjectRow, QuotaMode, ResourceKind};
 
-    /// A fresh account on `slot`, debiting through `parent`.
-    ///
-    /// Slots are picked by the caller so a test can build an exact shape; the
-    /// generation comes from the global counter, so no two accounts in a run
-    /// share one even on the same slot.
+    /// A fresh account on `slot`, debiting through `parent`. The generation
+    /// comes from the global counter, so no two accounts in a run share one
+    /// even on the same slot.
     fn account(slot: u32, parent: AccountId) -> AccountId {
         let id = AccountId::from_parts(slot, alloc_generation_for_test());
         account_create(id, parent).expect("create");
         id
     }
 
-    /// Serialised against every other global-state test in this binary, and
-    /// self-cleaning: the arena is process-global, so a test that left rows
-    /// behind would be a sibling's phantom ancestor.
+    /// The arena is process-global, so this serialises against every other
+    /// global-state test and clears rows a sibling would inherit as ancestors.
     fn fixture() -> impl Drop {
         struct Guard(GlobalTestStateGuard);
         impl Drop for Guard {
@@ -119,8 +105,8 @@ mod tests {
         assert_eq!(used(root(), ResourceKind::FdSlot), 0);
     }
 
-    /// L4, the hard half: a batch that succeeds at level *k* and fails at
-    /// *k+1* must leave every row exactly as it found it.
+    /// L4: a batch that succeeds at level *k* and fails at *k+1* leaves every
+    /// row exactly as it found it.
     #[test]
     fn a_refusal_partway_up_is_the_identity_on_every_row() {
         let _f = fixture();
