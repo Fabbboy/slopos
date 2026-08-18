@@ -175,8 +175,7 @@ impl EchoQueue {
         self.len == 0
     }
 
-    /// Staged bytes; they count as pending output, being queued for a driver
-    /// they have not reached.
+    /// Staged bytes; they count as pending output, not yet having reached a driver.
     #[inline]
     fn staged(&self) -> usize {
         self.len
@@ -450,9 +449,8 @@ impl LineDisc {
         }
     }
 
-    /// Allocate a default `LineDisc` straight onto the heap. The ≈12 KiB
-    /// struct must never materialise on the caller's stack: doing so costs
-    /// ~20 KiB and overflows the 32 KiB kernel stack during PTY pair setup.
+    /// Allocate a default `LineDisc` straight onto the heap: the ≈12 KiB struct
+    /// on the caller's stack overflows the 32 KiB kernel stack in PTY setup.
     pub fn new_pinned() -> Result<PinBox<Self>, AllocError> {
         let mut pb = PinBox::<Self>::zeroed()?;
         pb.termios = Self::default_termios();
@@ -509,7 +507,6 @@ impl LineDisc {
     /// Whether the cooked ring has readable data. In canonical mode that means
     /// a committed line — a newline or an EOF flush — never a partial one.
     pub fn has_data(&self) -> bool {
-        // EXTPROC bypasses canonical line buffering.
         let canonical =
             self.is_canonical() && !self.termios.local_flags().contains(LocalFlags::EXTPROC);
         if canonical {
@@ -519,9 +516,7 @@ impl LineDisc {
         }
     }
 
-    /// Read cooked bytes into `out`, returning the number of bytes copied.
     pub fn read(&mut self, out: &mut [u8]) -> usize {
-        // EXTPROC bypasses canonical line buffering.
         let canonical =
             self.is_canonical() && !self.termios.local_flags().contains(LocalFlags::EXTPROC);
 
@@ -546,9 +541,8 @@ impl LineDisc {
                 return copied;
             }
         }
-        // Draining the last cooked byte without hitting a newline means an
-        // EOF-flushed chunk; a merely-full caller buffer is mid-line and must
-        // not decrement.
+        // Draining the last cooked byte without a newline means an EOF-flushed
+        // chunk; a merely-full caller buffer is mid-line and must not decrement.
         if canonical && copied > 0 && self.cooked.count() == 0 && self.line_count > 0 {
             self.line_count -= 1;
         }

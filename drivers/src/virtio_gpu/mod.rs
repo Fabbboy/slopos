@@ -44,41 +44,31 @@ use crate::virtio::{
 
 use protocol::*;
 
-/// Command timeout — generous; QEMU acks GPU commands in microseconds.
+/// Generous; QEMU acks GPU commands in microseconds.
 const CMD_TIMEOUT_MS: u32 = 2000;
-/// Response buffer offset within the single 4 KiB command DMA page. The
-/// command occupies `[0, RESP_OFFSET)`, the device-written response
-/// `[RESP_OFFSET, 4096)`.
+/// The command occupies `[0, RESP_OFFSET)` of the 4 KiB DMA page, the
+/// device-written response `[RESP_OFFSET, 4096)`.
 const RESP_OFFSET: usize = 2048;
-/// Concurrent request-slot depth per queue. Commands are serialized per queue
-/// (`ctrl_lock`/`cursor_lock`), so at most one is in flight; the extra slot
-/// absorbs a chain quarantined by a (near-impossible in QEMU) timeout.
+/// One command is in flight per queue; the extra slot absorbs a chain
+/// quarantined by a timeout.
 const NUM_GPU_SLOTS: usize = 2;
 /// Hardware cursor dimensions mandated by virtio-gpu.
 const CURSOR_W: u32 = 64;
 const CURSOR_H: u32 = 64;
 
-/// Stable resource ids. The scanout ping-pongs between PRIMARY and ALT on
-/// mode-set so the new scanout is live before the old resource is unref'd;
-/// the cursor resource keeps its own id.
+/// The scanout ping-pongs between PRIMARY and ALT on mode-set so the new
+/// scanout is live before the old resource is unref'd.
 const RES_FB_PRIMARY: u32 = 1;
 const RES_CURSOR: u32 = 2;
 const RES_FB_ALT: u32 = 3;
 
 const PAGE_SIZE: usize = PAGE_SIZE_4KB as usize;
 
-// Layout of the pre-allocated present command page (one 4 KiB page holding both
-// the transfer and flush commands plus their response areas, non-overlapping).
 const PRESENT_XFER_CMD: usize = 0;
 const PRESENT_XFER_RESP: usize = 1024;
 const PRESENT_FLUSH_CMD: usize = 2048;
 const PRESENT_FLUSH_RESP: usize = 3072;
-/// Sentinel for an empty present-chain head slot.
 const PRESENT_NONE: u16 = u16::MAX;
-
-// ============================================================================
-// Per-queue request tracking
-// ============================================================================
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum SlotState {
@@ -89,9 +79,9 @@ enum SlotState {
     OrphanDone,
 }
 
-/// One submitted (or quarantined) command chain, keyed by its head descriptor
-/// — the id the device echoes on the used ring. Owns the DMA page so a
-/// timed-out command never frees memory the device may still read/write.
+/// Keyed by head descriptor — the id the device echoes on the used ring. Owns
+/// the DMA page so a timed-out command never frees memory the device may still
+/// read/write.
 struct GpuSlot {
     state: SlotState,
     head: u16,
@@ -110,15 +100,13 @@ impl GpuSlot {
     };
 }
 
-/// A virtqueue plus its in-flight/quarantined request slots.
 struct GpuQueue {
     q: Virtqueue,
     index: u16,
     slots: [GpuSlot; NUM_GPU_SLOTS],
-    /// Fire-and-forget present engine (control queue only). A pre-allocated
-    /// command page + two in-flight chain heads (transfer, flush) submitted
-    /// without waiting, so `present` is IRQ-safe (no alloc, no block). Cleared
-    /// by `harvest` when the device completes them.
+    /// Fire-and-forget present engine (control queue only): a pre-allocated
+    /// command page and two chain heads submitted without waiting, so `present`
+    /// neither allocates nor blocks.
     present_page: Option<OwnedPageFrame>,
     present_busy: bool,
     present_heads: [u16; 2],
@@ -140,8 +128,6 @@ impl GpuQueue {
         }
     }
 
-    /// Match a used-ring head against an in-flight present chain; free its
-    /// descriptors and clear `present_busy` once both chains complete.
     fn complete_present_head(&mut self, head: u16) -> bool {
         for i in 0..2 {
             if self.present_heads[i] != PRESENT_NONE && self.present_heads[i] == head {
@@ -159,10 +145,8 @@ impl GpuQueue {
         false
     }
 
-    /// Submit the transfer + flush commands already written into `present_page`
-    /// as two fire-and-forget chains. Returns `false` (drop the frame) if a
-    /// present is still in flight, the page is unset, or descriptors are
-    /// exhausted. IRQ-safe: only descriptor-index and MMIO operations, no alloc.
+    /// `false` means the frame was dropped: a present is still in flight, the
+    /// page is unset, or descriptors are exhausted. IRQ-safe: no alloc.
     fn submit_present(&mut self, xfer_len: u32, flush_len: u32) -> bool {
         if !self.q.is_ready() || self.present_busy {
             return false;
@@ -228,8 +212,6 @@ impl GpuQueue {
         true
     }
 
-    /// Consume every pending used-ring entry, transitioning the matching slot
-    /// by chain-head id. Spurious/duplicate completions are dropped.
     fn harvest(&mut self) {
         while let Some(elem) = self.q.try_pop_used() {
             let head = elem.id as u16;
@@ -251,8 +233,6 @@ impl GpuQueue {
         }
     }
 
-    /// Release descriptors + DMA page of every orphaned chain whose completion
-    /// has since been harvested.
     fn reap_orphans(&mut self) {
         for i in 0..NUM_GPU_SLOTS {
             if self.slots[i].state != SlotState::OrphanDone {
@@ -267,8 +247,6 @@ impl GpuQueue {
         }
     }
 
-    /// Collect a `Complete` slot: free its descriptors, return its DMA page
-    /// (carrying the device-written response).
     fn try_collect(&mut self, slot_idx: usize) -> Option<OwnedPageFrame> {
         if self.slots[slot_idx].state != SlotState::Complete {
             return None;
@@ -283,9 +261,8 @@ impl GpuQueue {
         page
     }
 
-    /// Build, record and submit a descriptor chain from `segs`
-    /// (`(phys, len, extra_flags)`, last segment terminates the chain). The
-    /// `page` moves into the slot so its lifetime is tied to device ownership.
+    /// `segs` is `(phys, len, extra_flags)`; the last segment terminates the
+    /// chain. `page` moves into the slot, tying its lifetime to device ownership.
     fn submit_descs(&mut self, page: OwnedPageFrame, segs: &[(u64, u32, u16)]) -> Option<usize> {
         if !self.q.is_ready() {
             return None;
@@ -343,10 +320,6 @@ enum QSel {
     Cursor,
 }
 
-// ============================================================================
-// Scanout + cursor geometry
-// ============================================================================
-
 #[derive(Clone, Copy)]
 struct ScanoutGeom {
     ready: bool,
@@ -379,8 +352,8 @@ struct CursorState {
     backing_phys: PhysAddr,
     hot_x: u32,
     hot_y: u32,
-    /// Last commanded position. `UPDATE_CURSOR` reuses it so a shape-change
-    /// re-upload does not yank the cursor to the origin between frames.
+    /// Last commanded position; `UPDATE_CURSOR` reuses it so a shape-change
+    /// re-upload does not yank the cursor to the origin.
     x: u32,
     y: u32,
 }
@@ -398,10 +371,6 @@ impl CursorState {
         }
     }
 }
-
-// ============================================================================
-// Device state
-// ============================================================================
 
 #[derive(slopos_ostd::SlotFields)]
 struct VirtioGpuState {
@@ -437,17 +406,15 @@ impl VirtioGpuState {
 
 #[derive(slopos_ostd::SlotFields)]
 struct VirtioGpuInner {
-    /// Queues + caps + geometry. `LOCK_LEVEL_RESOURCE` `SpinLock` (IRQs off
-    /// while held) so the IRQ-side harvest and task-side submit/collect never
-    /// interleave mid-update. Never held across a blocking wait.
+    /// IRQs are off while held, so the IRQ-side harvest and task-side
+    /// submit/collect never interleave mid-update. Never held across a
+    /// blocking wait.
     state: SpinLock<VirtioGpuState>,
-    /// Serializes control-queue commands (one in flight at a time).
+    /// Serializes control-queue commands.
     ctrl_lock: Mutex<()>,
     /// Serializes cursor-queue commands.
     cursor_lock: Mutex<()>,
-    /// Parked control-command waiters; woken by the IRQ handler.
     ctrl_waiters: WaitQueue,
-    /// Parked cursor-command waiters; woken by the IRQ handler.
     cursor_waiters: WaitQueue,
 }
 

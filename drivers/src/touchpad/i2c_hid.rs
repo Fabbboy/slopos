@@ -1,9 +1,5 @@
-//! HID-over-I²C transport.
-//!
-//! Sits on top of an [`I2cBus`] and speaks the register protocol an I²C-HID
-//! touchpad uses: fetch the 30-byte HID descriptor, fetch the report
-//! descriptor, RESET, SET_POWER, and read length-prefixed input reports.
-//! Polled (no GPIO interrupt).
+//! HID-over-I²C transport: the register protocol an I²C-HID touchpad speaks,
+//! over an [`I2cBus`]. Polled — no GPIO interrupt.
 
 use slopos_ostd::KArc;
 use slopos_ostd::{KVec, klog_info, klog_warn};
@@ -50,7 +46,6 @@ impl HidDescriptor {
     }
 }
 
-/// HID-over-I²C opcodes / power states (the subset we use).
 const OPCODE_RESET: u8 = 0x01;
 const OPCODE_SET_REPORT: u8 = 0x03;
 const OPCODE_SET_POWER: u8 = 0x08;
@@ -75,7 +70,6 @@ impl From<I2cError> for HidError {
     }
 }
 
-/// A bound-up I²C-HID device.
 pub struct I2cHid {
     bus: KArc<I2cBus>,
     addr: u8,
@@ -91,8 +85,8 @@ impl I2cHid {
         self.desc.max_input_length as usize
     }
 
-    /// Power on, reset, and validate the device. `desc_reg` is the HID
-    /// descriptor register address obtained from ACPI `_DSM`.
+    /// `desc_reg` is the HID descriptor register address obtained from ACPI
+    /// `_DSM`.
     pub fn bring_up(bus: KArc<I2cBus>, addr: u8, desc_reg: u16) -> Result<Self, HidError> {
         let mut raw = [0u8; 30];
         bus.write_read(addr, &[desc_reg as u8, (desc_reg >> 8) as u8], &mut raw)?;
@@ -115,19 +109,18 @@ impl I2cHid {
 
         let dev = Self { bus, addr, desc };
 
-        // Spec power-up: SET_POWER(ON), settle, RESET, wait, SET_POWER(ON).
+        // Power-up ordering and delays are spec-mandated.
         dev.set_power(POWER_ON)?;
         hpet::delay_ms(60);
         dev.reset()?;
-        // We don't rely on the reset-complete interrupt during polled
-        // bring-up; the spec allows a fixed wait.
+        // Polled bring-up: the spec allows a fixed wait in place of the
+        // reset-complete interrupt.
         hpet::delay_ms(100);
         dev.set_power(POWER_ON)?;
 
         Ok(dev)
     }
 
-    /// Read the report descriptor into a freshly allocated buffer.
     pub fn fetch_report_descriptor(&self) -> Result<KVec<u8>, HidError> {
         let len = self.desc.report_desc_length as usize;
         if len == 0 {
@@ -144,16 +137,15 @@ impl I2cHid {
         Ok(buf)
     }
 
-    /// Read one input report. Returns the number of payload bytes written
-    /// to `out` (the report ID + data, i.e. the length-prefixed body
-    /// minus the 2-byte length), or 0 if nothing was pending.
+    /// Returns payload bytes written to `out` — the report ID + data, with the
+    /// 2-byte length prefix stripped — or 0 if nothing was pending.
     pub fn read_input_report(&self, out: &mut [u8]) -> Result<usize, HidError> {
         let max = self.desc.max_input_length as usize;
         if max < 2 {
             return Ok(0);
         }
-        // Stack-local read buffer bounded by a sane cap; the touchpad's
-        // max_input_length is well under this.
+        // 256 bounds the stack frame; the touchpad's max_input_length is well
+        // under it.
         let mut buf = [0u8; 256];
         let n = max.min(buf.len());
         self.bus.read(self.addr, &mut buf[..n])?;
@@ -167,10 +159,8 @@ impl I2cHid {
         Ok(copy)
     }
 
-    /// Write a Feature report. The command goes to the command register,
-    /// the report ID + payload to the data register, in one transaction.
-    /// Only report IDs below `0x0f` are supported (the device's mode
-    /// selector uses a low ID).
+    /// The command goes to the command register, the report ID + payload to
+    /// the data register, in one transaction. Report IDs must be below `0x0f`.
     pub fn set_feature_report(&self, report_id: u8, data: &[u8]) -> Result<(), HidError> {
         let cmd = self.desc.command_register;
         let dreg = self.desc.data_register;
@@ -199,8 +189,8 @@ impl I2cHid {
     }
 
     fn set_power(&self, state: u8) -> Result<(), HidError> {
-        // SET_POWER uses a zero command byte and carries the power state in
-        // command byte 3 after the opcode.
+        // SET_POWER takes a zero command byte and the power state after the
+        // opcode.
         let cmd = self.desc.command_register;
         let buf = [
             cmd as u8,

@@ -52,10 +52,6 @@ func TestAssembleExtraAppended(t *testing.T) {
 	}
 }
 
-// -----------------------------------------------------------------------
-//  Argv preprocessing — POSIX `--flag value` → `--flag=value`
-// -----------------------------------------------------------------------
-
 func TestPreprocessFlagValueFusion(t *testing.T) {
 	in := []string{"--filter", "mm::*", "--skip", "tcp_live::*", "--verbose"}
 	out := preprocessArgv(in)
@@ -81,10 +77,6 @@ func TestPreprocessLeavesBooleansAlone(t *testing.T) {
 	}
 }
 
-// -----------------------------------------------------------------------
-//  Parsing into Args
-// -----------------------------------------------------------------------
-
 func TestParseArgsNoColorAlias(t *testing.T) {
 	args, err := parseArgs(preprocessArgv([]string{"--no-color"}))
 	if err != nil {
@@ -96,8 +88,7 @@ func TestParseArgsNoColorAlias(t *testing.T) {
 }
 
 func TestParseArgsEmptyFilterDropped(t *testing.T) {
-	// Justfile invokes `--filter ""`; preprocess fuses to `--filter=`,
-	// parseArgs filters out empty entries.
+	// The justfile invokes `--filter ""`, which preprocess fuses to `--filter=`.
 	args, err := parseArgs(preprocessArgv([]string{"--filter="}))
 	if err != nil {
 		t.Fatal(err)

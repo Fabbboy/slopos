@@ -283,8 +283,7 @@ fn nmi_handler(frame: &slopos_arch::InterruptFrame) {
         watchdog::nmi_emit_line(" recorded, resuming");
     }
 
-    // Must be last: the detector will not re-send until this runs, which is
-    // what lets a stalled CPU finish its dump instead of restarting it.
+    // Must be last: the detector will not re-send until this runs.
     watchdog::release_probe(cpu_id);
 }
 
@@ -334,10 +333,9 @@ fn nmi_emit_context(
 fn nmi_die(cpu_id: usize, frame: &slopos_arch::InterruptFrame) -> ! {
     use slopos_ostd::watchdog::{nmi_emit, nmi_emit_dec, nmi_emit_hex, nmi_emit_line};
 
-    // Each frame is [saved_rbp][return_addr]. The per-read validation is not a
-    // tight bounds check — rbp cannot cheaply be proved inside the interrupted
-    // task's stack — so a fault can still slip through, which is why the walk
-    // runs only here, where we are already dying.
+    // Each frame is [saved_rbp][return_addr]. The per-read validation cannot
+    // prove rbp lies inside the interrupted task's stack, so a fault can still
+    // slip through — the walk runs only here, where we are already dying.
     {
         use slopos_ostd::arch::x86_64::kernel_ptr::read_volatile_canonical_kernel_u64;
         let mut rbp = frame.rbp;
@@ -366,7 +364,6 @@ fn nmi_die(cpu_id: usize, frame: &slopos_arch::InterruptFrame) -> ! {
 
     // Puts the wedge site on the panic screen, not just the serial log.
     crate::panic::set_panic_cpu_state(frame.rip, frame.rsp, frame.rbp);
-    // Force-release all tracked locks so other CPUs can make progress.
     slopos_ostd::sync::panic_recovery::poison_all_held_locks_no_halt();
 
     // Not `panic!`: the panic strategy is `unwind`, and the interrupt-entry
@@ -420,9 +417,6 @@ pub fn common_exception_handler_impl(frame: *mut slopos_arch::InterruptFrame) {
     }
 
     if vector == RCU_QS_IPI_VECTOR {
-        // Must stay conditional: `synchronize_rcu` sends this IPI to break a
-        // stall, so an unconditional report would declare a reader done on the
-        // very CPU still inside one.
         slopos_ostd::sync::rcu_note_qs_from_interrupt();
         send_eoi();
         return;
@@ -578,7 +572,6 @@ pub(crate) fn handle_corrupt_iret_frame(iret_frame: *const u64) -> ! {
         iret_frame
     );
 
-    // One racy snapshot, reused for the probe bounds and the task line below.
     // A fault path may take no lock and upgrade no `KArc`, so the fields come
     // from a volatile read behind the PCR's id filter rather than a lookup.
     let diag = slopos_sched::task_struct::current_task_diag();

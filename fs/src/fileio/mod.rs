@@ -29,11 +29,10 @@ use slopos_ostd::handle::Handle;
 use slopos_ostd::process::quota::{Charge, Reservation, try_charge};
 use slopos_ostd::process::{AccountId, Process, ProcessId, root_account};
 
-/// Descriptors a process may hold at once — the `RLIMIT_NOFILE` of this
-/// kernel, and the length of every per-process descriptor table.
+/// Descriptors a process may hold at once — this kernel's `RLIMIT_NOFILE`, and
+/// the length of every per-process descriptor table.
 pub(super) const FILEIO_MAX_OPEN_FILES: usize = 256;
 
-/// Internal open-mode flags for `OpenFileEntry`.
 #[derive(Clone, Copy, PartialEq, Eq)]
 #[repr(transparent)]
 pub(crate) struct OpenMode(u32);

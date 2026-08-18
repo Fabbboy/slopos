@@ -1,5 +1,4 @@
-//! Active-pipe discovery and scanline sampling. Read-only helpers over the pipe
-//! registers; neither function writes.
+//! Active-pipe discovery and scanline sampling.
 
 use slopos_mm::mmio::MmioRegion;
 
@@ -15,15 +14,13 @@ pub fn find_active(mmio: &MmioRegion) -> Option<Pipe> {
     None
 }
 
-/// Current scanline counter (`PIPEDSL`) for `pipe`.
 pub fn scanline(mmio: &MmioRegion, pipe: Pipe) -> u32 {
     mmio.read::<u32>(regs::pipe_dsl(pipe))
 }
 
 /// Block until the pipe completes a vertical blank — the point at which an armed
-/// `PLANE_SURF` update latches — by polling `PIPEDSL` for a high→low wrap in 1 ms
-/// steps, holding no lock. Bounded by `VBLANK_TIMEOUT_MS` so a stalled pipe
-/// returns rather than hanging the probe.
+/// `PLANE_SURF` update latches — holding no lock. Bounded by `VBLANK_TIMEOUT_MS`
+/// so a stalled pipe returns rather than hanging the probe.
 ///
 /// Two plane-group flips inside one frame race the vblank: on Gen12 the plane
 /// then reads a linear surface with the X-tile (512-byte) `PLANE_STRIDE` unit

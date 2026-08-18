@@ -51,7 +51,7 @@ pub fn map_pages(bank: &MmioRegion, ggtt_addr: u64, phys: PhysAddr, pages: u32) 
     }
 
     // Posting read: drains the MMIO store queue into the GGTT before the display
-    // engine is told to re-read it.
+    // engine re-reads it.
     let last_entry = base_entry + (pages - 1);
     let last_offset = (last_entry as usize) * regs::GGTT_PTE_BYTES;
     if bank.is_valid_offset(last_offset, regs::GGTT_PTE_BYTES) {
@@ -62,10 +62,9 @@ pub fn map_pages(bank: &MmioRegion, ggtt_addr: u64, phys: PhysAddr, pages: u32) 
 }
 
 /// Invalidate the display engine's GGTT TLB: PTEs written via MMIO stay invisible
-/// to the engine until it is flushed, so without this the plane scans stale
-/// translations. `mmio` is the full BAR0 window — the flush register lives in its
-/// low half, not in the GGTT bank. The posting read makes the flush land before
-/// scanout is re-pointed.
+/// to the engine until it is flushed. `mmio` is the full BAR0 window — the flush
+/// register lives in its low half, not in the GGTT bank. The posting read makes
+/// the flush land before scanout is re-pointed.
 pub fn invalidate_tlb(mmio: &MmioRegion) {
     mmio.write::<u32>(regs::GFX_FLSH_CNTL_GEN6, regs::GFX_FLSH_CNTL_EN);
     let _ = mmio.read::<u32>(regs::GFX_FLSH_CNTL_GEN6);

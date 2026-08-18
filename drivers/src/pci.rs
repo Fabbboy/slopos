@@ -80,19 +80,18 @@ impl PciMatch {
     }
 }
 
-/// What a probe did with a device it matched.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ProbeOutcome {
-    /// The registry records the claim by device index, so no other driver is
-    /// offered this device.
+    /// The claim is recorded by device index; no other driver is offered this
+    /// device.
     Bound,
     /// Matched but deliberately did not bind; lower-priority candidates are
     /// still offered the device.
     Declined,
 }
 
-/// Registry record of a driver's successful claim on a device, stored in the
-/// per-device claim slot once its probe returns [`ProbeOutcome::Bound`].
+/// A driver's claim on a device, stored in the per-device claim slot once its
+/// probe returns [`ProbeOutcome::Bound`].
 pub struct Binding {
     name: &'static str,
 }
@@ -107,25 +106,24 @@ impl Binding {
     }
 }
 
-/// Static PCI driver descriptor. Every field is `'static`-constructible so the
-/// struct fits into a `static` placed in the `.driver_registry` link section by
-/// the [`crate::pci_driver!`] macro.
+/// Every field is `'static`-constructible so the struct fits into a `static`
+/// placed in the `.driver_registry` link section by [`crate::pci_driver!`].
 #[repr(C)]
 pub struct PciDriverEntry {
     pub name: &'static str,
-    /// Declarative match rules: the driver matches when any rule matches.
-    /// Indexed at boot for O(1) candidate lookup.
+    /// The driver matches when **any** rule matches. Indexed at boot for O(1)
+    /// candidate lookup.
     pub match_table: &'static [PciMatch],
-    /// Imperative escape hatch for predicates a `match_table` cannot express
-    /// (a cmdline gate, a device-slot constraint). A driver matches when the
-    /// table matches **or** the fallback returns `true`.
+    /// Imperative escape hatch for predicates a `match_table` cannot express:
+    /// a driver matches when the table matches **or** the fallback returns
+    /// `true`.
     pub fallback: Option<fn(&PciDeviceInfo) -> bool>,
     /// Bind order, ascending: a lower value binds first, so a specific driver
-    /// can beat a generic one for the same device. Defaults to 128.
+    /// can beat a generic one for the same device.
     pub priority: u8,
-    /// Probe the matched device. The driver acquires every resource through the
-    /// [`BoundDevice`] capability, so a failed probe releases them
-    /// automatically. `Deferred` is retried once.
+    /// The driver acquires every resource through the [`BoundDevice`]
+    /// capability, so a failed probe releases them automatically. `Deferred` is
+    /// retried once.
     pub probe: fn(&mut BoundDevice<'_>) -> Result<ProbeOutcome, PciProbeError>,
 }
 
@@ -158,9 +156,8 @@ static ENUM_STATE: SpinLock<PciEnumState> = SpinLock::new(
 );
 static DEVICE_COUNT_CACHE: AtomicUsize = AtomicUsize::new(0);
 
-/// Bump-allocator cursor for assigning MMIO regions to PCI BARs the firmware
-/// left unassigned. Anchored at enumeration to the top of the highest
-/// firmware-assigned MMIO BAR; `0` = no anchor available.
+/// Anchored at enumeration to the top of the highest firmware-assigned MMIO
+/// BAR; `0` = no anchor available.
 static MMIO_ALLOC_CURSOR: AtomicU64 = AtomicU64::new(0);
 
 /// Allocate a free physical MMIO region of `size` bytes (size-aligned) for
@@ -190,10 +187,6 @@ pub fn pci_alloc_mmio(size: u64) -> Option<u64> {
     }
 }
 
-// The linker gathers every `PciDriverEntry` placed in `.driver_registry` into a
-// contiguous array bracketed by `__start_driver_registry` /
-// `__stop_driver_registry` (see `link.ld`).
-
 impl slopos_ostd::ffi::registry::RegistryEntry for PciDriverEntry {
     const REGISTRIES: &'static [slopos_ostd::ffi::registry::RegistryId] =
         &[slopos_ostd::ffi::registry::RegistryId::PciDrivers];
@@ -207,7 +200,6 @@ pub fn driver_registry_iter() -> impl Iterator<Item = &'static PciDriverEntry> {
     .iter()
 }
 
-/// Pick a supplied optional macro field or fall back to its default.
 #[macro_export]
 #[doc(hidden)]
 macro_rules! __pci_driver_opt {
@@ -300,7 +292,6 @@ impl EcamRegistry {
 
 static ECAM: OnceLock<EcamRegistry> = OnceLock::new();
 
-/// PCIe extended configuration space size per function (4 KiB).
 const ECAM_FUNCTION_SIZE: u16 = 4096;
 
 fn ecam_for(bus: u8, device: u8, function: u8) -> Option<(&'static EcamConfigSpace, Bdf)> {
@@ -417,7 +408,7 @@ pub struct PciCapabilityIter {
 
 impl PciCapabilityIter {
     /// The 256-byte config space fits at most ~60 entries; 48 is a generous
-    /// bound matching Linux's `PCI_FIND_CAP_TTL`.
+    /// bound.
     const MAX_CAPS: u8 = 48;
 
     /// Empty if the device's Status register does not advertise a capabilities
@@ -485,8 +476,7 @@ pub struct PciExtCapabilityIter {
 }
 
 impl PciExtCapabilityIter {
-    /// 48 matches the standard-capability guard in [`PciCapabilityIter`] and
-    /// Linux's `PCI_FIND_CAP_TTL`.
+    /// Matches the standard-capability guard in [`PciCapabilityIter`].
     const MAX_EXT_CAPS: u8 = 48;
 
     /// Empty if ECAM MMIO is inactive or the first extended header is absent.
@@ -526,7 +516,6 @@ impl Iterator for PciExtCapabilityIter {
         let offset = self.next_offset;
         let header = pci_ecam_read32(self.bus, self.device, self.function, offset)?;
 
-        // Zero or all-ones header terminates the list (malformed-hardware guard).
         if header == 0 || header == 0xFFFF_FFFF {
             self.next_offset = 0;
             return None;
@@ -734,7 +723,6 @@ fn pci_enumerate_bars(
     (bars, bar_count)
 }
 
-/// Walk the capability list once, extracting MSI and MSI-X offsets.
 #[inline(never)]
 fn pci_find_msi_caps(bus: u8, device: u8, function: u8) -> (Option<u16>, Option<u16>) {
     let mut msi_cap_offset: Option<u16> = None;
@@ -1046,8 +1034,6 @@ pub fn pci_init() {
         }
     }
 
-    // Anchor the unassigned-BAR allocator above the highest firmware-assigned
-    // MMIO BAR, so a later allocation lands in the same host-bridge aperture.
     let mut mmio_top = 0u64;
     for dev in &state.devices[..state.device_count] {
         for bar in &dev.bars {
@@ -1084,7 +1070,6 @@ pub fn pci_device_owner(dev_idx: usize) -> Option<&'static str> {
     }
 }
 
-/// `(vendor << 16) | device` key for the exact-pair index.
 const fn vd_key_of(dev: &PciDeviceInfo) -> u32 {
     ((dev.vendor_id as u32) << 16) | dev.device_id as u32
 }
@@ -1128,8 +1113,8 @@ impl MatchIndex {
                     idx.by_cs.entry(k).or_default().push(li)?;
                 }
             }
-            // A fallback is an arbitrary predicate, so its driver must be
-            // offered every device and verified per-device.
+            // A fallback is an arbitrary predicate: its driver must be offered
+            // every device.
             if e.fallback.is_some() {
                 idx.catch_all.push(li)?;
             }
@@ -1187,8 +1172,7 @@ enum ClaimSlot {
     Unclaimed,
     Claimed {
         binding: Binding,
-        // Held live purely for its `Drop`, which releases the device's acquired
-        // resources when the slot is torn down.
+        // Held for its `Drop`, which releases the device's acquired resources.
         #[allow(dead_code)]
         devres: Devres,
     },
@@ -1233,7 +1217,6 @@ pub(crate) trait ClaimSink {
     fn record(&self, dev_idx: usize, name: &'static str, devres: Devres);
 }
 
-/// The live per-device claim table.
 struct GlobalClaims;
 
 impl ClaimSink for GlobalClaims {
@@ -1249,10 +1232,8 @@ impl ClaimSink for GlobalClaims {
 /// Offer each device to its candidate drivers in priority order, recording the
 /// first that binds, then run one bounded deferred-retry pass.
 ///
-/// The device set comes from `get_device` and claims go through `claims`, so
-/// the boot path passes [`pci_get_device`]/[`GlobalClaims`] while unit tests
-/// pass synthetic devices and a local sink. `probe` runs with neither the
-/// `ENUM_STATE` nor the `CLAIMED_BY` lock held, so it may block and allocate.
+/// `probe` runs with neither the `ENUM_STATE` nor the `CLAIMED_BY` lock held,
+/// so it may block and allocate.
 pub(crate) fn matchmake(
     idx: &MatchIndex,
     device_count: usize,

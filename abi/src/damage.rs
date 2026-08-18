@@ -67,7 +67,6 @@ impl DamageRect {
         self.x0 <= other.x1 && self.x1 >= other.x0 && self.y0 <= other.y1 && self.y1 >= other.y0
     }
 
-    /// Check whether the point `(x, y)` lies inside this rect (inclusive).
     #[inline]
     pub fn contains(&self, x: i32, y: i32) -> bool {
         x >= self.x0 && x <= self.x1 && y >= self.y0 && y <= self.y1

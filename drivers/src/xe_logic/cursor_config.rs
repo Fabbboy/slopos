@@ -1,6 +1,5 @@
 //! Pure cursor-plane encoding for the hardware cursor: bit math over plain data,
-//! no MMIO. Field values come from the register constants in [`super::regs`], so
-//! the register map stays the single source of truth.
+//! no MMIO.
 
 use super::regs::{
     self, MCURSOR_MODE_64_ARGB_AX, MCURSOR_MODE_128_ARGB_AX, MCURSOR_MODE_256_ARGB_AX,
@@ -61,7 +60,6 @@ pub const fn cur_pos_pack(x: i32, y: i32) -> u32 {
         | y_sign
 }
 
-/// Split a signed coordinate into its field magnitude and the sign bit to OR in.
 /// `unsigned_abs` so `i32::MIN` cannot overflow the negation.
 const fn split_sign(value: i32, sign_bit: u32) -> (u32, u32) {
     if value < 0 {

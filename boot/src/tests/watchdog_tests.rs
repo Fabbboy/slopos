@@ -65,7 +65,7 @@ pub fn test_suppress_scopes_eligibility() -> TestResult {
 }
 
 /// A CPU whose LAPIC timer is masked cannot tick, so it must not be watched for
-/// not ticking — the LAPIC timer suite masks it on purpose and leaves it masked.
+/// not ticking.
 pub fn test_masked_timer_is_not_watchable() -> TestResult {
     if !apic::timer::is_calibrated() {
         return TestResult::Skipped;
@@ -200,20 +200,18 @@ pub fn test_force_unlock_releases_exactly_one() -> TestResult {
     lock.release_leaked_guard_for_test();
     assert_test!(!lock.is_locked(), "the queue did not drain");
 
-    // A release on a free lock must not run `now_serving` past `next_ticket`.
     lock.release_leaked_guard_for_test();
     assert_test!(!lock.is_locked(), "a free lock was over-released");
 
-    // The proof it is still usable: a fresh acquisition must be served.
+    // A fresh acquisition must still be served.
     drop(lock.lock());
     TestResult::Pass
 }
 
 /// This CPU stops taking timer interrupts long enough that its watcher must
-/// report it; reaching the end of the function is the assertion that matters.
+/// report it, and must survive being reported.
 pub fn test_a_wedged_cpu_is_reported_and_survives() -> TestResult {
     if slopos_arch::pcr::get_online_cpu_count() < 2 {
-        // Nobody is watching, so there is nothing to observe.
         return TestResult::Skipped;
     }
 

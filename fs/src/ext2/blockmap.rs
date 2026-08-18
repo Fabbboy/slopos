@@ -17,7 +17,6 @@ pub struct BlockPath {
     pub offsets: [u32; 4],
 }
 
-/// Convert a logical file block to a chain of offsets into the indirect tree.
 pub fn block_to_path(file_block: FileBlock, ptrs_per_block: u32) -> Result<BlockPath, Ext2Error> {
     let fb = file_block.raw();
     let n = ptrs_per_block;
@@ -73,7 +72,6 @@ fn write_ptr(data: &mut [u8], idx: u32, block: BlockNum) {
     data[off..off + 4].copy_from_slice(&block.raw().to_le_bytes());
 }
 
-/// Map a logical file block to its physical block number.
 /// Returns `BlockNum::ZERO` for holes (sparse file).
 pub fn map_block(
     inode: &Inode,

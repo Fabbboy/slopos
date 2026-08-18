@@ -1,15 +1,8 @@
 //! LAPIC Timer calibration and configuration.
 //!
-//! Calibrates the LAPIC timer frequency using HPET (preferred) or PIT
-//! (fallback) as a reference clock.  The calibrated frequency enables
-//! precise periodic timer setup for scheduler preemption.
-//!
-//! The LAPIC timer counts down from an initial value at a rate determined
-//! by the CPU bus clock divided by a configurable divisor (currently 16).
-//! Because this frequency varies per machine, a reference timer must
-//! measure the actual tick rate once at boot.  After calibration,
-//! [`set_periodic_ms`] converts a desired millisecond interval to the
-//! correct initial count.
+//! The LAPIC timer counts down at the CPU bus clock divided by a divisor
+//! (16 here), a rate that varies per machine, so HPET — or PIT as a fallback —
+//! measures the actual tick rate once at boot.
 
 use core::sync::atomic::{AtomicU64, Ordering};
 
@@ -20,36 +13,21 @@ use super::{
     is_enabled, read_register, timer_get_current_count, timer_set_divisor, write_register,
 };
 
-// ---------------------------------------------------------------------------
-// Static state
-// ---------------------------------------------------------------------------
-
-/// Calibrated LAPIC timer frequency in Hz (ticks per second at divisor 16).
+/// Calibrated LAPIC timer frequency in Hz, at divisor 16.
 static LAPIC_TIMER_FREQ_HZ: AtomicU64 = AtomicU64::new(0);
 
-// ---------------------------------------------------------------------------
-// Calibration tunables
-// ---------------------------------------------------------------------------
-
-/// Number of measurement samples to average (reduces noise from QEMU jitter).
+/// Measurement samples averaged, to damp QEMU jitter.
 const CALIBRATION_SAMPLES: u32 = 3;
 
 /// Duration of each measurement window in nanoseconds (10 ms).
 const CALIBRATION_WINDOW_NS: u64 = 10_000_000;
 
-/// Sanity bounds — warn (but accept) if outside this range.
+/// Sanity bounds — warn, but accept, outside this range.
 const MIN_REASONABLE_FREQ_HZ: u64 = 1_000_000; // 1 MHz
 const MAX_REASONABLE_FREQ_HZ: u64 = 10_000_000_000; // 10 GHz
 
-// ---------------------------------------------------------------------------
-// Public API
-// ---------------------------------------------------------------------------
-
-/// Calibrate the LAPIC timer against a reference clock.
-///
-/// Uses HPET if available, otherwise falls back to PIT polled delay.
-/// Stores the result in [`LAPIC_TIMER_FREQ_HZ`] and returns the
-/// frequency in Hz, or `0` on failure.
+/// Calibrate the LAPIC timer against HPET, or PIT polled delay if HPET is
+/// unavailable, and return the frequency in Hz, or `0` on failure.
 pub fn calibrate() -> u64 {
     if !is_enabled() {
         klog_info!("APIC TIMER: Cannot calibrate — LAPIC not enabled");
@@ -92,13 +70,10 @@ pub fn calibrate() -> u64 {
     freq
 }
 
-/// Configure the LAPIC timer in periodic mode at a given interval.
+/// Fire an interrupt on IDT `vector` every `ms` milliseconds.
 ///
-/// The timer will fire an interrupt on the specified IDT `vector` every
-/// `ms` milliseconds.  Requires prior calibration via [`calibrate`].
-///
-/// Returns `true` on success, `false` if not calibrated or the computed
-/// initial count is out of range.
+/// Returns `false` if [`calibrate`] has not run or the computed initial count
+/// does not fit a `u32`.
 pub fn set_periodic_ms(vector: u8, ms: u32) -> bool {
     if !is_enabled() {
         klog_info!("APIC TIMER: Cannot set periodic — LAPIC not enabled");

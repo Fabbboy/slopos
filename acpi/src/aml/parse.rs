@@ -86,7 +86,6 @@ pub fn pkg_length(aml: &[u8], p: usize) -> Option<(usize, usize)> {
 
 /// Yields the final 4-byte NameSeg, or `None` for a NullName.
 pub fn name_string(aml: &[u8], mut p: usize) -> Option<(Option<[u8; 4]>, usize)> {
-    // Prefixes: one RootChar or any number of ParentPrefixChars.
     if aml.get(p).copied() == Some(OP_ROOT_CHAR) {
         p += 1;
     } else {

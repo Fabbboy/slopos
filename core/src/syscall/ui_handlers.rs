@@ -282,8 +282,8 @@ define_syscall!(syscall_roulette_draw
     -> Result<(), Errno>
 {
     use slopos_kernel_services::kernel_vm_space::kernel_vm_space;
-    // Resolved before the switch away, so the restore below names the process
-    // that made the call rather than re-reading an id afterwards.
+    // Resolved before the switch away so the restore below names the caller
+    // rather than re-reading an id afterwards.
     let caller = ctx.require_process()?.process();
     kernel_vm_space().lock().activate_kernel_master();
     let result = video::roulette_draw(fate);
@@ -340,6 +340,5 @@ define_syscall!(syscall_fb_info
     Ok(())
 });
 
-// Silence unused warning for the legacy alias.
 #[allow(dead_code)]
 type _Unused = MmUserPtr<u8>;

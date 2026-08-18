@@ -38,7 +38,6 @@ impl UserFsEntry {
         }
     }
 
-    /// Get the name as a string slice (up to null terminator)
     pub fn name_str(&self) -> &str {
         let len = self
             .name
@@ -85,7 +84,6 @@ impl UserFsStat {
 #[repr(C)]
 #[derive(Copy, Clone)]
 pub struct UserFsList {
-    /// Pointer to entry buffer (provided by caller)
     pub entries: *mut UserFsEntry,
     pub max_entries: u32,
     /// Actual number of entries returned

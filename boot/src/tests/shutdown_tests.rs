@@ -227,7 +227,7 @@ pub fn test_shutdown_from_clean_state() -> TestResult {
 pub fn test_shutdown_partial_init() -> TestResult {
     task_shutdown_all();
     let _ = init_task_manager();
-    // Deliberately skip init_scheduler - partial init
+    // Deliberately skips init_scheduler.
     scheduler_shutdown();
     task_shutdown_all();
     TestResult::Pass
@@ -333,8 +333,8 @@ pub fn test_kernel_pml4_root_matches_ostd_master() -> TestResult {
     let recorded = kernel_pml4_phys();
     assert_test!(!recorded.is_null(), "init_paging recorded no kernel PML4");
 
-    // `slopos_mm::paging` and the OSTD cursor must root on the same frame, or a
-    // mapping written through one is invisible to the other.
+    // A mapping written through one is invisible to the other unless both root
+    // on the same frame.
     let installed = slopos_kernel_services::kernel_vm_space::try_kernel_vm_space();
     assert_test!(installed.is_some(), "kernel_vm_space not installed");
     let ostd_master = installed.unwrap().lock().pml4_paddr();
@@ -473,7 +473,7 @@ pub fn test_task_terminate_idempotent() -> TestResult {
 pub fn test_shutdown_scheduler_alive_during_task_teardown() -> TestResult {
     let _fixture = ShutdownFixture::new();
 
-    // The fixture leaves the scheduler disabled; enable it to observe preservation.
+    // The fixture leaves the scheduler disabled.
     scheduler_enable();
 
     let created = create_n_tasks(5);

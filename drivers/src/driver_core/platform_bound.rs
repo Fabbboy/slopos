@@ -24,15 +24,14 @@ impl<'d> BoundPlatformDevice<'d> {
         Self { info, res }
     }
 
-    /// The device's ACPI enumeration record. `PlatformDeviceInfo` is `Copy`, so
-    /// a probe can snapshot it before vending and free the borrow.
+    /// `PlatformDeviceInfo` is `Copy`, so a probe can snapshot it before
+    /// vending and free the borrow.
     #[inline]
     pub fn info(&self) -> &PlatformDeviceInfo {
         self.info
     }
 
-    /// Reserve a single I/O port and hand the handle to the bag, so it releases
-    /// on probe failure / unbind. The returned handle is a `Copy`; the bag cell
+    /// Reserve a single I/O port. The returned handle is a `Copy`; the bag cell
     /// is the ownership anchor.
     pub fn reserve_io_port(&mut self, port: u16) -> Result<IoPort<u8>, BoundError> {
         let handle = IoPortRegistry::reserve::<u8>(port).map_err(BoundError::IoPort)?;

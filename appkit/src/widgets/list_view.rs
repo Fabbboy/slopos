@@ -101,8 +101,8 @@ impl Widget for ListViewWidget {
             .constrain(Size::new(w, self.total_content_height()))
             .height;
 
-        // Rows are uniform, so measuring them here — rather than during layout
-        // — keeps the measure pass the only place a child is sized.
+        // Rows are uniform, so measuring here keeps the measure pass the only
+        // place a child is sized.
         let item_constraints = BoxConstraints::tight(Size::new(w, self.item_height));
         for item in &mut self.items {
             crate::traits::measure_widget(item.as_mut(), item_constraints, ctx);

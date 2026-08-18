@@ -166,7 +166,6 @@ impl CellGrid {
     }
 }
 
-/// Grid dimensions for a `width` x `height` framebuffer at the given cell size.
 /// Depends on nothing behind the console lock, so a caller can size and
 /// allocate the grids before taking it.
 fn grid_dims(width: u32, height: u32, cell_w: i32, cell_h: i32) -> (u16, u16) {
@@ -255,8 +254,7 @@ fn color256_to_rgb(idx: u8) -> u32 {
 #[derive(Clone, Copy)]
 pub(crate) struct VConsoleFbInfo {
     /// Kernel virtual address of the framebuffer's first byte. An integer
-    /// rather than `*mut u8` so the type is `Send`/`Sync` without a marker;
-    /// access goes through the `fb_blit` / `fb_put_pixel` helpers.
+    /// rather than `*mut u8` so the type is `Send`/`Sync` without a marker.
     pub(crate) base: u64,
     pub(crate) pitch: u32,
     pub(crate) width: u32,
@@ -377,7 +375,7 @@ pub(crate) struct VConsoleState {
     /// All glyph rendering targets this buffer; `flush_dirty()` blits to HW.
     shadow: Option<KVec<u8>>,
     shadow_pitch: usize,
-    /// Bitmask of rows modified since last flush. Bit N = row N is dirty.
+    /// Bitmask of rows modified since the last flush.
     dirty_rows: u128,
     /// A full-screen repaint is owed; run by [`run_pending_repaint`].
     repaint_pending: bool,
@@ -386,10 +384,9 @@ pub(crate) struct VConsoleState {
     layout_epoch: u32,
 }
 
-/// Framebuffer ownership flag (Linux DRM/KMS master model).
-///
-/// While set, the vconsole keeps rendering to its shadow buffer but
-/// `flush_dirty()` is a no-op, so no pixels reach the display.
+/// Framebuffer ownership flag (Linux DRM/KMS master model). While set,
+/// rendering continues into the shadow buffer but `flush_dirty()` is a no-op,
+/// so no pixels reach the display.
 static COMPOSITOR_OWNS_FB: AtomicBool = AtomicBool::new(false);
 
 static SERIAL_MIRROR_ENABLED: AtomicBool = AtomicBool::new(true);
@@ -1158,10 +1155,8 @@ impl VConsoleState {
     }
 
     /// Paint one text row's pixel band in `color`, returning whether it
-    /// happened.
-    ///
-    /// The space glyph has no coverage, so writing the colour straight in is
-    /// the same image without the per-pixel atlas lookup and blend.
+    /// happened. The space glyph has no coverage, so writing the colour
+    /// straight in is the same image without the atlas lookup and blend.
     fn fill_shadow_row(&mut self, row: usize, color: u32) -> bool {
         let pitch = self.shadow_pitch;
         let width = (self.cols as usize).saturating_mul(self.cell_w as usize);
@@ -1392,8 +1387,6 @@ impl VConsoleState {
         }
     }
 
-    /// Whether `atlas`'s cell geometry is the one the grid was laid out for.
-    ///
     /// `atlas::replace_global` swaps the atlas without holding the console
     /// lock, so a glyph's coverage buffer can be sized for a cell this state
     /// has not adopted yet, and the row slices below would read past its end.
@@ -1517,8 +1510,7 @@ impl VConsoleState {
         if self.dirty_rows == 0 {
             return;
         }
-        // Compositor owns the framebuffer: keep the dirty bits for
-        // `compositor_release_fb()` rather than clearing them.
+        // Keep the dirty bits for `compositor_release_fb()`, do not clear them.
         if COMPOSITOR_OWNS_FB.load(Ordering::Acquire) || slopos_ostd::fblog::is_active() {
             return;
         }
@@ -1568,8 +1560,6 @@ impl VConsoleState {
         slopos_ostd::arch::x86_64::mem_fence::sfence();
     }
 
-    /// Common tail of every geometry change: invalidate in-flight repaints,
-    /// reset the scroll region and clamp the cursor into the new grid.
     fn settle_geometry(&mut self) {
         self.bump_layout_epoch();
         self.mark_all_dirty();
@@ -1603,14 +1593,12 @@ impl VConsoleState {
     }
 }
 
-/// Copy `src.len()` bytes into the framebuffer mapping at `base + byte_offset`.
 /// Caller must ensure `byte_offset + src.len()` is inside the framebuffer.
 #[inline]
 fn fb_blit(base: u64, byte_offset: usize, src: &[u8]) {
     slopos_ostd::boot::handoff::framebuffer::fb_blit_bytes(base, byte_offset, src);
 }
 
-/// Write a single pixel at `base + offset` using the given pixel format.
 /// `offset` is bounds-checked by the caller (`put_pixel`'s width/height gate).
 #[inline]
 fn fb_put_pixel(base: u64, offset: usize, bytes_per_pixel: u8, color: u32) {
@@ -1650,14 +1638,12 @@ static SCROLLBACK: SpinLock<Option<KBox<ScrollbackBuf>>> =
 const REPAINT_BAND_ROWS: u16 = 4;
 
 /// Run an owed full-screen repaint, releasing the console lock between row
-/// bands.
+/// bands: `VCONSOLE_STATE` is IRQ-disabling, so banding bounds one hold to a
+/// few rows' worth of work.
 ///
 /// Callers reaching the console through the TTY layer must invoke this with
-/// `TTY_WRITE_LOCKS` released: a repaint emits no bytes, and holding it here
-/// would mask interrupts for the whole screen however finely the console lock
-/// is banded. `VCONSOLE_STATE` is IRQ-disabling and a full-screen glyph
-/// rasterisation is 8.3 M pixels at 4K, so banding bounds one hold to a few
-/// rows' worth of work.
+/// `TTY_WRITE_LOCKS` released: holding it would mask interrupts for the whole
+/// screen however finely the console lock is banded.
 ///
 /// Concurrent output is not lost: a row written before the band reaches it is
 /// rendered with its new content, one written after paints and marks itself
@@ -1753,10 +1739,9 @@ pub fn write(data: &[u8]) {
 
     let mut state = VCONSOLE_STATE.lock();
     if state.fb.is_none() {
-        // No framebuffer (headless boot or -nographic), and deliberately no
-        // serial fallback: `tty::driver::write_driver_unlocked` already mirrors
-        // to COM1 under the klog ticket lock, so emitting here would duplicate
-        // every TTY write and do it lock-free, corrupting concurrent klog.
+        // Deliberately no serial fallback: `tty::driver::write_driver_unlocked`
+        // already mirrors to COM1 under the klog ticket lock, so emitting here
+        // would duplicate every TTY write lock-free and corrupt concurrent klog.
         return;
     }
 
@@ -1898,15 +1883,14 @@ pub fn scroll_view_down(lines: usize) {
     run_pending_repaint();
 }
 
-/// Transfer framebuffer ownership to the compositor (Linux `DRM_IOCTL_SET_MASTER`
-/// equivalent). The vconsole keeps rendering to its shadow buffer, preserving
-/// terminal state, but stops copying to the hardware framebuffer.
+/// Transfer framebuffer ownership to the compositor (Linux
+/// `DRM_IOCTL_SET_MASTER` equivalent).
 pub fn compositor_acquire_fb() {
     COMPOSITOR_OWNS_FB.store(true, Ordering::Release);
 }
 
-/// Return framebuffer ownership to the vconsole (compositor crash recovery):
-/// re-enables `flush_dirty()` and blits the shadow buffer back to the display.
+/// Return framebuffer ownership to the vconsole (compositor crash recovery)
+/// and blit the shadow buffer back to the display.
 pub fn compositor_release_fb() {
     COMPOSITOR_OWNS_FB.store(false, Ordering::Release);
     let mut state = VCONSOLE_STATE.lock();

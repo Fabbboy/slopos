@@ -1,7 +1,6 @@
 //! POSIX signal ABI definitions shared between kernel and userland.
 
-/// Maximum number of signals. Signals are numbered 1..NSIG (signal 0 is reserved
-/// for error checking in kill()).
+/// Signals are numbered 1..NSIG; signal 0 is reserved for error checking in kill().
 pub const NSIG: usize = 32;
 
 // Numbering follows the POSIX / Linux-compatible subset.
@@ -30,8 +29,7 @@ pub const SIGTTIN: u8 = 21;
 pub const SIGTTOU: u8 = 22;
 pub const SIGWINCH: u8 = 28;
 
-/// Bitmask representing a set of signals. Bit N corresponds to signal N+1.
-/// (Signal 0 does not exist; bit 0 = signal 1 = SIGHUP.)
+/// Bit N is signal N+1: bit 0 = SIGHUP. Signal 0 does not exist.
 pub type SigSet = u64;
 
 pub const SIG_EMPTY: SigSet = 0;
@@ -41,7 +39,7 @@ pub const SIG_EMPTY: SigSet = 0;
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct SignalfdSiginfo {
-    /// The signal number (1-based) that was drained.
+    /// Signal number (1-based).
     pub ssi_signo: u32,
     /// Signal-specific code (0 — SlopOS does not track si_code yet).
     pub ssi_code: i32,
@@ -79,8 +77,8 @@ pub const fn sig_bit(signum: u8) -> SigSet {
 ///
 /// Bits at and above `NSIG` are kernel-private and must be masked off before a
 /// signal number is derived from a pending set: an unmasked one yields
-/// `signum = NSIG + 1`, for which [`sig_bit`] returns 0 — so clearing is a no-op
-/// and the bit re-delivers forever — and it indexes past a `[_; NSIG]` table.
+/// `signum = NSIG + 1`, for which [`sig_bit`] returns 0 — so the bit never
+/// clears — and it indexes past a `[_; NSIG]` table.
 pub const SIGNAL_MASK: SigSet = (1u64 << NSIG) - 1;
 
 /// Kernel-private: the task is marked for death and every blocking primitive
@@ -95,7 +93,6 @@ const _: () = assert!(sig_bit(NSIG as u8) & SIGNAL_MASK != 0);
 /// Signals that cannot be caught, blocked, or ignored.
 pub const SIG_UNCATCHABLE: SigSet = sig_bit(SIGKILL) | sig_bit(SIGSTOP);
 
-/// Special handler values for sigaction.
 pub const SIG_DFL: u64 = 0;
 pub const SIG_IGN: u64 = 1;
 
@@ -135,7 +132,6 @@ pub const SIG_BLOCK: u32 = 0;
 pub const SIG_UNBLOCK: u32 = 1;
 pub const SIG_SETMASK: u32 = 2;
 
-/// Default action for each signal.
 #[repr(u8)]
 #[derive(Copy, Clone, PartialEq, Eq)]
 pub enum SigDefault {
