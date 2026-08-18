@@ -470,125 +470,90 @@ pub struct TaskInner<K, U> {
     /// The CPU whose register file last held this task's FPU/vector state, or
     /// [`FPU_CPU_NONE`] for none — the per-task half of the FPU owner tag.
     ///
-    /// Not to be confused with [`last_cpu`](Self::last_cpu) directly above,
-    /// which is the *scheduler's* placement hint. This one is about the vector
-    /// register file and nothing else: it is stamped by an `XSAVE`/`XRSTOR`
-    /// pairing, not by an enqueue, and it is meaningful only in agreement with
-    /// the per-CPU owner slot. See [`crate::task::fpu_owner`] for why the tag
-    /// has two halves and what each one catches.
+    /// Not [`last_cpu`](Self::last_cpu) directly above, which is the
+    /// *scheduler's* placement hint: this one is stamped by an `XSAVE`/`XRSTOR`
+    /// pairing and is meaningful only in agreement with the per-CPU owner slot.
+    /// See [`crate::task::fpu_owner`] for what each half of the tag catches.
     ///
     /// Signed rather than a `usize` with a max sentinel because
-    /// [`FPU_CPU_NONE`] must not be a representable CPU index, and because it
-    /// mirrors Linux's `fpu->last_cpu`.
+    /// [`FPU_CPU_NONE`] must not be a representable CPU index.
     fpu_last_cpu: AtomicI32,
-    /// How many times this task has been migrated between CPUs.
+    /// How many times this task has been migrated between CPUs. Atomic because
+    /// the **thief** CPU increments it in `work_steal` while the task may be
+    /// running on its victim.
     ///
-    /// Atomic because the **thief** CPU increments it in `work_steal`, while
-    /// the task may be running on its victim — a plain `u32` made that a
-    /// cross-CPU non-atomic read-modify-write, i.e. a data race, not merely a
-    /// soundness wart. It was also unconvertible: no shared borrow can express
-    /// a write to a plain field, so this had to become an atomic before the
-    /// accessor could take `&self` at all.
-    ///
-    /// Relaxed: a counter nobody orders anything against. Reaching for
-    /// Acquire/Release here would imply a publication relationship that does
-    /// not exist.
+    /// Relaxed: a counter nobody orders anything against.
     pub migration_count: AtomicU32,
-    // --- Signal state ---
-    /// Bitmask of pending signals (written atomically by kill()).
+    /// Bitmask of pending signals, written by `kill()`.
     pub signal_pending: AtomicU64,
-    /// Bitmask of blocked signals (modified by rt_sigprocmask).
-    /// Bitmask of blocked signals.
-    ///
-    /// Atomic because `task_signal_post` reads it from whichever CPU is
-    /// sending — every `kill`, every process-group and session fanout — while
-    /// the owner writes it in `rt_sigprocmask`, `rt_sigreturn`, and on exec.
-    /// A plain field made that a data race the pointer accessors happened to
-    /// hide behind a `*mut` reborrow.
+    /// Bitmask of blocked signals. Atomic because `task_signal_post` reads it
+    /// from whichever CPU is sending while the owner writes it in
+    /// `rt_sigprocmask`, `rt_sigreturn`, and on exec.
     pub signal_blocked: AtomicU64,
-    /// Per-signal action table.
     pub signal_actions: [SignalActionCell; NSIG],
     pub switch_ctx: TaskOwnCell<SwitchContext>,
     /// Set while a CPU is physically executing this task.
     pub on_cpu: AtomicBool,
-    /// Intrusive link slot for the per-CPU `ReadyQueue`.
     pub ready_link: Link<TaskInner<K, U>, ReadyQueueRole>,
     /// Intrusive link slot for per-CPU remote wake inboxes.
     ///
-    /// Although the inbox itself is a lock-free Treiber stack, not an
-    /// `IntrusiveLinkedList`, it has the same single-membership rule as a
-    /// runqueue: a one-element stack has a null successor while still being a
-    /// member. Using a role-typed `Link` folds the successor and membership bit
-    /// into one OSTD primitive, so duplicate remote wakes cannot self-cycle the
-    /// inbox and diagnostics can distinguish pending wake delivery from a
-    /// genuinely stranded Ready task.
+    /// The inbox is a lock-free Treiber stack whose one-element case has a null
+    /// successor while still being a member, so membership needs its own bit. A
+    /// role-typed `Link` carries both, which is what stops a duplicate remote
+    /// wake self-cycling the inbox and lets diagnostics tell pending wake
+    /// delivery from a genuinely stranded Ready task.
     pub remote_inbox_link: Link<TaskInner<K, U>, RemoteWakeRole>,
-    /// Owning list of this task's live and zombie children.
-    ///
-    /// Each entry is one child task whose membership is backed by a strong
-    /// reference parked exactly like ready-queue placement: linking a child
-    /// pairs with `task_placement_retain`, unlinking with
-    /// `task_placement_reclaim`. A zombie child stays here — pinned by that
-    /// parked reference — until `waitpid` reaps it or this task's own teardown
-    /// drains the list. There is no separate zombie list; a zombie is just a
-    /// child whose status is `Zombie`.
+    /// Owning list of this task's live and zombie children. Linking a child
+    /// pairs with `task_placement_retain` and unlinking with
+    /// `task_placement_reclaim`, so membership parks a strong reference — which
+    /// is what pins a zombie child until `waitpid` reaps it or this task's own
+    /// teardown drains the list. There is no separate zombie list.
     pub children: IntrusiveDList<TaskInner<K, U>, SiblingRole>,
-    /// Intrusive link slot naming this task's membership in the one owner list
-    /// holding it. A task is linked into at most one such list; the
-    /// single-membership invariant of the role-typed slot rejects a
-    /// double-link, and the slot's owner back-pointer lets the task be
+    /// This task's membership in the one owner list holding it. The role-typed
+    /// slot rejects a double-link, and its owner back-pointer lets the task be
     /// unlinked without naming which list that is.
     pub sibling_link: DLink<TaskInner<K, U>, SiblingRole>,
-    /// Intrusive link slot for the task graveyard — the lock-free stack of
-    /// tasks awaiting destruction in a context where the allocator may run.
+    /// Intrusive link slot for the task graveyard — tasks awaiting destruction
+    /// in a context where the allocator may run.
     ///
-    /// Unlike every other link slot, membership here does *not* imply a parked
-    /// strong reference: the pusher won the final release, so the strong count
-    /// is already zero and the pusher owns the allocation outright. That is why
-    /// it gets its own role.
+    /// Unlike every other link slot, membership here parks no strong reference:
+    /// the pusher won the final release, so the count is already zero and the
+    /// pusher owns the allocation outright. That is why it gets its own role.
     pub reclaim_link: Link<TaskInner<K, U>, ReclaimRole>,
-    /// Explicit scheduler placement owner for runnable tasks. This is the
-    /// cross-role gate that prevents a task from being in a ready queue and a
-    /// remote wake inbox at the same time.
+    /// Explicit scheduler placement owner. The cross-role gate that keeps a task
+    /// out of a ready queue and a remote wake inbox at the same time.
     pub sched_placement: AtomicU8,
-    /// The `WaitQueue` this task is currently parked on, or null.
+    /// The `WaitQueue` this task is currently parked on, or null. Erased to
+    /// `*mut c_void` because `WaitQueue` cannot name a `TaskInner`
+    /// monomorphisation and this module cannot name `WaitQueue`.
     ///
-    /// Erased to `*mut c_void` because `WaitQueue` cannot name a `TaskInner`
-    /// monomorphisation and this module cannot name `WaitQueue`. Written by
-    /// the wait protocol on the task's own CPU, read by teardown from any CPU,
-    /// so a task torn down while parked can have its stack-pinned wait node
-    /// unlinked before the stack slot is recycled.
+    /// Read by teardown from any CPU, so a task torn down while parked has its
+    /// stack-pinned wait node unlinked before that stack slot is recycled.
     pub(crate) parked_wait_queue: AtomicPtr<c_void>,
-    /// Panic-recovery nesting depth saved while this task is not running; the
-    /// live value lives in `PCR.recovery_depth` (read directly by the panic
-    /// handler), and context-switch code saves/restores it here so recovery
-    /// scopes survive migration.
+    /// Panic-recovery nesting depth while this task is not running; the live
+    /// value is `PCR.recovery_depth`. Saved and restored across a switch so
+    /// recovery scopes survive migration.
     pub recovery_depth: AtomicU32,
-    /// Panic in-flight depth saved while this task is not running; the live
-    /// value lives in `PCR.panic_in_flight`. An unwinding task runs
-    /// interrupts-on and can be preempted or migrate mid-unwind, so the
-    /// depth must travel with the task like `recovery_depth`.
+    /// Panic in-flight depth while this task is not running; the live value is
+    /// `PCR.panic_in_flight`. An unwinding task runs interrupts-on and can be
+    /// preempted or migrate mid-unwind, so the depth travels with the task like
+    /// `recovery_depth`.
     pub panic_in_flight: AtomicU32,
     /// Idempotence bits for task/process teardown that may be split between
     /// `task_terminate` and post-switch cleanup of the current task.
     pub exit_cleanup_flags: AtomicU8,
-    /// Whether this task currently holds one strong reference to *itself* —
-    /// the reference it is handed at registration and that is taken back
-    /// exactly once when it is reaped.
+    /// Whether this task currently holds one strong reference to *itself* — the
+    /// reference it is handed at registration and that is taken back exactly
+    /// once when it is reaped.
     ///
-    /// Every other owner of a task is a container: a ready queue, a remote
-    /// inbox, a CPU's dispatch slot, a parent's children list, a wait map. This
-    /// one is the task itself, and it is what keeps a task alive in the states
-    /// where no container holds it at all — a blocked kernel thread (whose wait
-    /// node stores only an opaque handle, and which has no parent), a placement
-    /// reservation that has not reached its queue yet, a freshly created task
-    /// before publication, and a child mid-fork before it joins its parent's
-    /// list.
+    /// Every other owner of a task is a container, so this is what keeps a task
+    /// alive in the states where none holds it: a blocked kernel thread, a
+    /// placement reservation short of its queue, a freshly created task before
+    /// publication, a child mid-fork.
     ///
     /// The flag, not the count, is the witness that authorises taking the
     /// reference back, so the reclaim is exactly-once even under a race.
     pub existence_ref_parked: AtomicBool,
-    /// Per-task user-mode register snapshot.
     pub user_ctx: TaskOwnCell<UserContext>,
     /// Saved per-task value of `pcr.user_ctx_ptr`.
     pub saved_user_ctx_ptr: AtomicPtr<UserContext>,

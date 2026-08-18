@@ -1,34 +1,13 @@
 //! Per-CPU GDT/TSS/syscall-data storage.
 //!
-//! Boot's pre-PCR GDT path used to keep three independent
-//! `SyncUnsafeCell<[T; MAX_CPUS]>` arrays in `boot/src/gdt.rs`. Each
-//! mutator hand-rolled an `unsafe { (*CELL.get())[cpu_id] = … }` block.
-//! This module relocates the cells into OSTD so the unsafe is paid
-//! once, and exposes scoped per-CPU writers gated by `cpu_id`.
-//!
-//! All public surfaces are safe `fn`s. They no-op when `cpu_id >=
-//! MAX_CPUS`. The actual mutation site is a single
-//! `pub(in crate::arch)` `&mut self` accessor — the public surfaces
-//! call it via `with_cpu_mut(cpu_id, |slot| …)`, which obtains the
-//! `&mut` reborrow through the cell's `get()` exactly once per
-//! invocation.
-//!
 //! # Soundness
 //!
-//! `MAX_CPUS` slots × three cells. Each slot is touched by exactly
-//! one CPU during BSP-init (CPU 0) and the matching AP's per-CPU
-//! bringup (`cpu_id`). The `cpu_id` argument is the per-CPU
-//! invariant: each CPU mutates only its own slot, so the
-//! per-slot writes are race-free (Inv. 8). Cross-slot reads
-//! (e.g. `gdt_set_kernel_rsp0_for_cpu` only writes `cpu_id`'s
-//! TSS) are bounded by the same invariant.
+//! Each slot is touched by exactly one CPU — CPU 0 during BSP-init, `cpu_id`
+//! during that AP's bringup — so the per-slot writes are race-free (Inv. 8).
 //!
-//! The legacy boot path is only exercised before PCR is live; after
-//! that, `slopos_arch::pcr::is_pcr_initialized()` is true and callers
-//! skip into the PCR path. We retain the cell-backed cells anyway so
-//! that early-boot diagnostics + hermetic test fixtures can reach
-//! into a stable per-CPU GDT footprint without depending on PCR
-//! bringup ordering.
+//! Only reached before PCR is live. The cells are retained anyway so
+//! early-boot diagnostics and hermetic fixtures can read a per-CPU GDT
+//! footprint without depending on PCR bringup ordering.
 
 use core::cell::SyncUnsafeCell;
 
@@ -36,16 +15,13 @@ use crate::arch::x86_64::gdt::{GDT_STANDARD_ENTRIES, GdtLayout, SegmentSelector,
 
 /// Maximum CPU count tracked by the per-CPU GDT slots.
 ///
-/// Mirrors `slopos_arch::pcr::MAX_CPUS`. Kept independent here so
-/// downstream callers don't pull in `slopos_arch` just to reach the
-/// constant.
+/// Mirrors `slopos_arch::pcr::MAX_CPUS`, kept independent so callers need not
+/// pull in `slopos_arch` for the constant.
 pub const MAX_CPUS: usize = 256;
 
-/// Per-CPU syscall scratch layout: low quad = user RSP scratch slot
-/// the syscall trampoline uses for SWAPGS; high quad = kernel-side
-/// RSP loaded on syscall entry. The asm trampoline reads this via
-/// `gs:[0]` / `gs:[8]`; the layout must therefore stay `#[repr(C)]`
-/// + 16-byte total.
+/// Per-CPU syscall scratch: low quad is the SWAPGS user-RSP scratch, high quad
+/// the kernel RSP loaded on syscall entry. The asm trampoline reads them as
+/// `gs:[0]` / `gs:[8]`, so the layout must stay `#[repr(C)]` and 16 bytes.
 #[repr(C)]
 pub struct PerCpuSyscallData {
     pub user_rsp_scratch: u64,
@@ -72,8 +48,6 @@ static PER_CPU_SYSCALL_DATA: SyncUnsafeCell<[PerCpuSyscallData; MAX_CPUS]> = Syn
     [EMPTY; MAX_CPUS]
 });
 
-/// Reborrow the GDT array as `&mut [GdtLayout; MAX_CPUS]`.
-///
 /// # Safety
 /// Per-slot writes are race-free under Inv. 8 (single-CPU task
 /// ownership / each CPU owns its `cpu_id` slot). Callers should
@@ -94,13 +68,8 @@ unsafe fn syscall_data_array_mut() -> &'static mut [PerCpuSyscallData; MAX_CPUS]
     unsafe { &mut *PER_CPU_SYSCALL_DATA.get() }
 }
 
-/// Initialise the per-CPU GDT/TSS pair for `cpu_id` and load it on
-/// the current CPU. No-op when `cpu_id >= MAX_CPUS`. Caller must
-/// have populated the TSS (e.g. `rsp0`) before this call.
-///
-/// `cpu_id` is the per-CPU invariant; each CPU calls this once for
-/// its own slot and never touches any other slot, so the
-/// per-slot writes are race-free.
+/// Initialise the per-CPU GDT/TSS pair for `cpu_id` and load it on the current
+/// CPU. Caller must have populated the TSS (e.g. `rsp0`) before this call.
 pub fn init_and_install(cpu_id: usize) {
     if cpu_id >= MAX_CPUS {
         return;

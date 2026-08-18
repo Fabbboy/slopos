@@ -340,8 +340,7 @@ impl IrqAllocator {
     }
 }
 
-/// Owned IRQ vector handle. Frees the vector back to the allocator
-/// on drop. Construction is gated by [`IrqAllocator::alloc`].
+/// Owned IRQ vector handle; frees the vector back to the allocator on drop.
 pub struct IrqLine {
     vector: u8,
 }
@@ -353,12 +352,9 @@ impl IrqLine {
         self.vector
     }
 
-    /// Publish `handler` into this line's dispatch slot. Shared body of
-    /// [`register_callback`](Self::register_callback) and
-    /// [`register_callback_owned`](Self::register_callback_owned); the
-    /// only difference between those two is the receipt they return
-    /// (borrowed handle vs. owned line), so the slot-population CAS lives
-    /// here once.
+    /// Publish `handler` into this line's dispatch slot; shared body of the
+    /// two `register_callback*` entry points, which differ only in the receipt
+    /// they return.
     fn install<F>(&self, handler: F) -> Result<(), IrqError>
     where
         F: Fn(&IrqContext<'_>) + Send + Sync + 'static,
@@ -384,9 +380,8 @@ impl IrqLine {
         }
     }
 
-    /// Install a callback for this line's vector. Returns a handle
-    /// that, on drop, deregisters the callback. The handle borrows
-    /// `self` so it cannot outlive the line.
+    /// Install a callback for this line's vector. The returned handle borrows
+    /// `self` and deregisters the callback on drop.
     pub fn register_callback<'a, F>(&'a self, handler: F) -> Result<CallbackHandle<'a>, IrqError>
     where
         F: Fn(&IrqContext<'_>) + Send + Sync + 'static,
@@ -398,13 +393,10 @@ impl IrqLine {
         })
     }
 
-    /// Install a callback and fold the line + its registration into a
-    /// single owned [`OwnedIrq`]. Consumes `self`, so there is no
-    /// outstanding borrow to juggle: the resource can be stored, moved,
-    /// or attached to a [`crate::dev::Devres`] bag, and releases both the
-    /// dispatch slot and the vector when dropped (in that order). This
-    /// is the leak-free replacement for the `register_callback` +
-    /// `mem::forget(handle); mem::forget(line)` pattern.
+    /// Install a callback and fold the line plus its registration into one
+    /// owned [`OwnedIrq`], with no outstanding borrow to juggle: it can be
+    /// stored, moved, or attached to a [`crate::dev::Devres`] bag, and on drop
+    /// releases the dispatch slot and then the vector.
     pub fn register_callback_owned<F>(self, handler: F) -> Result<OwnedIrq, IrqError>
     where
         F: Fn(&IrqContext<'_>) + Send + Sync + 'static,
@@ -414,13 +406,8 @@ impl IrqLine {
     }
 }
 
-/// A vector with an installed callback, owned as one RAII unit.
-///
-/// Holds the [`IrqLine`] by value; the dispatch slot is populated for
-/// the lifetime of this value. Dropping it runs [`IrqLine`]'s `Drop`,
-/// which clears the dispatch slot (releasing the boxed closure) *before*
-/// freeing the vector bit — the correct handle-before-line teardown
-/// order, with no `mem::forget` and no self-referential borrow.
+/// A vector with an installed callback, owned as one RAII unit. Dropping it
+/// clears the dispatch slot before freeing the vector bit.
 pub struct OwnedIrq {
     line: IrqLine,
 }
@@ -444,9 +431,8 @@ impl Drop for IrqLine {
     }
 }
 
-/// Receipt for a registered callback. Borrows the [`IrqLine`] it was
-/// issued from so the line cannot drop first. Dropping the handle
-/// deregisters the callback.
+/// Receipt for a registered callback. Borrows the issuing [`IrqLine`] so the
+/// line cannot drop first; dropping the handle deregisters the callback.
 #[must_use = "dropping the handle deregisters the callback"]
 pub struct CallbackHandle<'a> {
     vector: u8,
@@ -454,7 +440,6 @@ pub struct CallbackHandle<'a> {
 }
 
 impl CallbackHandle<'_> {
-    /// Vector number whose dispatch slot this handle controls.
     #[inline]
     pub fn vector(&self) -> u8 {
         self.vector
@@ -467,10 +452,6 @@ impl Drop for CallbackHandle<'_> {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Lib unit tests (host-side).
-// ---------------------------------------------------------------------------
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -479,9 +460,8 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering as StdOrd};
 
     fn isolate<R>(f: impl FnOnce() -> R) -> R {
-        // The allocator bitmap and the BSP mint guard (via
-        // `run_bsp_init_for_test` in some bodies) are process-global;
-        // serialise against the other global-state test modules.
+        // Allocator bitmap and BSP mint guard are process-global; serialise
+        // against the other global-state test modules.
         let _g = crate::test_support::global_lock::lock_global_test_state();
         reset_for_test();
         let r = f();
@@ -514,7 +494,6 @@ mod tests {
                 let l = IrqAllocator::alloc().expect("alloc");
                 l.vector()
             };
-            // Drain everything else and check `v` is reachable.
             let mut others = std::vec::Vec::new();
             loop {
                 match IrqAllocator::alloc() {
@@ -587,7 +566,7 @@ mod tests {
                         c2.fetch_add(1, StdOrd::Relaxed);
                     })
                     .expect("register");
-            } // handle drops here
+            }
             dispatch(v, 0);
             assert_eq!(counter.load(StdOrd::Relaxed), 0);
         });
@@ -613,10 +592,8 @@ mod tests {
 
     #[test]
     fn irq_context_does_not_expose_frame_fields() {
-        // Compile-time check via field count: `IrqContext` has only
-        // vector + error_code + lifetime. Anyone adding RIP / RSP /
-        // CS would have to bump this assertion, which serves as a
-        // tripwire for Inv. 2 leakage.
+        // The exhaustive struct literal is the tripwire: adding RIP / RSP / CS
+        // to `IrqContext` breaks it (Inv. 2 leakage).
         let ctx = IrqContext {
             vector: 13,
             error_code: 0,
@@ -687,7 +664,6 @@ mod tests {
             {
                 let _line = IrqAllocator::reserve_specific(36).expect("first");
             }
-            // Should be claimable again after drop.
             let line = IrqAllocator::reserve_specific(36).expect("after drop");
             assert_eq!(line.vector(), 36);
         });
@@ -696,11 +672,9 @@ mod tests {
     #[test]
     fn reserve_specific_refuses_platform_reserved_vector() {
         isolate(|| {
-            // Mark vector 0x80 (SYSCALL_VECTOR) as platform-reserved.
-            // It's the one reserved vector that lives inside the
-            // allocator's 32..224 pool — the IPI/timer/spurious vectors
-            // sit at 0xEC..0xFF, outside the pool entirely, so reserving
-            // them is a no-op in the bitmap.
+            // 0x80 (SYSCALL_VECTOR) is the only platform-reserved vector inside
+            // the 32..224 pool; the IPI/timer/spurious vectors at 0xEC..0xFF
+            // sit outside it, so reserving those is a no-op in the bitmap.
             crate::sync::run_bsp_init_for_test(|t| {
                 register_irq_reserved(t, &[0x80]);
             });
