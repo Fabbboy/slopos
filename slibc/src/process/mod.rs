@@ -16,12 +16,6 @@ use crate::string::u_strlen;
 pub use rlimit::{RLIM_INFINITY, RLIMIT_ALL, RLimit, getrlimit, prlimit, setrlimit};
 pub use wait::{WEXITSTATUS, WIFEXITED, WIFSIGNALED, WTERMSIG};
 
-// ---------------------------------------------------------------------------
-// Process creation and lifecycle
-// ---------------------------------------------------------------------------
-
-/// Create a child process.
-///
 /// Returns the child PID to the parent, 0 to the child, -1 on error.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn fork() -> i32 {
@@ -31,8 +25,6 @@ pub unsafe extern "C" fn fork() -> i32 {
     }
 }
 
-/// Replace the current process image with a new program.
-///
 /// Only returns on error (-1, sets errno).
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn execve(
@@ -50,16 +42,13 @@ pub unsafe extern "C" fn execve(
     }
 }
 
-/// `execv` — exec with the current environment.
+/// Exec with the current environment.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn execv(path: *const u8, argv: *const *const u8) -> i32 {
     execve(path, argv, environ as *const *const u8)
 }
 
-/// `execvp` — search PATH for `file`, then exec.
-///
-/// If `file` contains a `/`, it is used as-is. Otherwise each directory in
-/// the `PATH` environment variable is tried in order.
+/// Search `PATH` for `file`, then exec; a `file` containing `/` is used as-is.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn execvp(file: *const u8, argv: *const *const u8) -> i32 {
     if file.is_null() {
@@ -120,8 +109,6 @@ pub unsafe extern "C" fn execvp(file: *const u8, argv: *const *const u8) -> i32 
     -1
 }
 
-/// Wait for a specific child process.
-///
 /// Returns the child PID on success, -1 on error.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn waitpid(pid: i32, status: *mut i32, options: i32) -> i32 {
@@ -145,11 +132,9 @@ pub unsafe extern "C" fn _exit(status: i32) -> ! {
 
 /// Clean exit — flushes stdio, runs atexit handlers, then terminates.
 ///
-/// The flush after the handlers is what C11 §7.22.4.4 requires: a handler that
-/// writes must have its bytes reach the descriptor. The flush before them is a
-/// deliberate superset, so a handler that faults or calls `_exit` cannot
-/// discard everything `main` buffered. Flushing is idempotent and
-/// order-preserving, so no conforming program can tell the two apart.
+/// The flush after the handlers is what C11 §7.22.4.4 requires; the one before
+/// them keeps a handler that faults or calls `_exit` from discarding what
+/// `main` buffered. Flushing is idempotent, so no conforming program can tell.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn exit(status: i32) -> ! {
     crate::stdio::__stdio_exit();

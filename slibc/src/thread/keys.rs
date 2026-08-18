@@ -70,9 +70,6 @@ pub unsafe extern "C" fn pthread_setspecific(key: pthread_key_t, value: *mut u8)
     0
 }
 
-/// Run destructors for all non-null key values. Called from `pthread_exit`
-/// and `thread_trampoline` before thread termination.
-///
 /// # Safety
 /// `tcb` must be valid and belong to the exiting thread.
 pub unsafe fn run_key_destructors(tcb: *mut Tcb) {

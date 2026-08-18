@@ -1446,12 +1446,10 @@ pub fn test_task_guard_pins_terminated_task() -> TestResult {
         return TestResult::Fail;
     }
 
-    // Unhashed by the reap, independently of the outstanding guard.
     if task_find_by_id(id).is_some() {
         klog_info!("SCHED_TEST: reaped task {} still resolves", id);
         return TestResult::Fail;
     }
-    // ...but the guard still keeps the allocation alive.
     if weak.upgrade().is_none() {
         klog_info!("SCHED_TEST: guarded task {} freed while pinned", id);
         return TestResult::Fail;
@@ -1467,11 +1465,9 @@ pub fn test_task_guard_pins_terminated_task() -> TestResult {
 
 /// A registered-but-unpublished task is terminable and reclaimable.
 ///
-/// Reproduces the shape a fork/clone child has between `register_task` and
-/// `publish_new_task`: fully constructed, registered, `Invalid`, and hidden from
-/// every active-task scan. `task_terminate` used to report such a task as "not
-/// found" and walk away, abandoning it along with its kernel stack, unsafe
-/// stack and address space on every pre-publication failure path.
+/// The shape a fork/clone child has between `register_task` and
+/// `publish_new_task`: constructed, registered, `Invalid`, and hidden from
+/// every active-task scan.
 pub fn test_unpublished_task_is_terminable() -> TestResult {
     let _fixture = SchedFixture::new();
 
@@ -1503,7 +1499,6 @@ pub fn test_unpublished_task_is_terminable() -> TestResult {
     TestResult::Pass
 }
 
-/// Test: rapid individually allocated task create/destroy cycle.
 pub fn test_rapid_create_destroy_cycle() -> TestResult {
     let _fixture = SchedFixture::new();
 
@@ -1524,7 +1519,6 @@ pub fn test_rapid_create_destroy_cycle() -> TestResult {
             return TestResult::Fail;
         }
 
-        // Immediately terminate
         if task_terminate(task_id) != 0 {
             klog_info!("SCHED_TEST: Cycle {} failed to terminate task", i);
             return TestResult::Fail;
@@ -1560,13 +1554,11 @@ pub fn test_task_handle_stale_after_reuse() -> TestResult {
         let _ = task_terminate(id1);
         return TestResult::Fail;
     };
-    // The live handle resolves to the same allocation as the ID lookup.
     if task_resolve_handle(h1).is_none() || task_resolve_handle(h1) != task_find_by_id(id1) {
         let _ = task_terminate(id1);
         return TestResult::Fail;
     }
 
-    // Destruction makes both lookup forms fail.
     let _ = task_terminate(id1);
     if task_resolve_handle(h1).is_some() || task_find_by_id(id1).is_some() {
         return TestResult::Fail;
@@ -1594,9 +1586,7 @@ pub fn test_task_handle_stale_after_reuse() -> TestResult {
     result
 }
 
-/// Test: `KernelStack::allocate` returns a handle whose `top > base`
-/// and is page-aligned.  Verifies the VA region carving + guard-page
-/// layout are correct.
+/// `KernelStack::allocate` returns a page-aligned handle whose `top > base`.
 pub fn test_kstack_basic_alloc() -> TestResult {
     use super::task_stack::KernelStack;
     use slopos_abi::task::TASK_STACK_SIZE;
@@ -1636,13 +1626,10 @@ pub fn test_kstack_basic_alloc() -> TestResult {
     TestResult::Pass
 }
 
-/// Test: after dropping a `KernelStack`, the slot is returned to the
-/// allocator and can be reused for a subsequent allocation.
+/// A dropped `KernelStack` returns its slot to the allocator for reuse.
 ///
-/// Confirms that task stack capacity is **independent of kernel binary
-/// size**, because the slot allocator tracks availability in its own
-/// bitmap rather than reading from (kernel-image-reserved) physical
-/// pages.
+/// Stack capacity is therefore independent of kernel binary size: the slot
+/// allocator tracks availability in its own bitmap.
 pub fn test_kstack_slot_reuse() -> TestResult {
     use super::task_stack::KernelStack;
     use slopos_abi::task::TASK_STACK_SIZE;
@@ -1684,16 +1671,14 @@ pub fn test_kstack_slot_reuse() -> TestResult {
     TestResult::Pass
 }
 
-/// Test: invalid sizes are rejected without touching global state.
+/// Invalid sizes are rejected without touching global state.
 pub fn test_kstack_rejects_invalid_size() -> TestResult {
     use super::task_stack::KernelStack;
 
-    // Zero size.
     if KernelStack::allocate(0, slopos_ostd::process::quota::root()).is_ok() {
         klog_info!("SCHED_TEST: zero-size alloc unexpectedly succeeded");
         return TestResult::Fail;
     }
-    // Not a multiple of page size.
     if KernelStack::allocate(4097, slopos_ostd::process::quota::root()).is_ok() {
         klog_info!("SCHED_TEST: unaligned alloc unexpectedly succeeded");
         return TestResult::Fail;
@@ -1707,13 +1692,8 @@ pub fn test_kstack_rejects_invalid_size() -> TestResult {
     TestResult::Pass
 }
 
-// =============================================================================
-// Per-CPU kstack slot cache tests.
-// =============================================================================
-
-/// Test: repeated alloc/free on the same CPU stays in the per-CPU cache.
-/// After the first refill, subsequent iterations must not increment
-/// `refill_count`.
+/// Repeated alloc/free on the same CPU stays in the per-CPU cache: only the
+/// first allocation may increment `refill_count`.
 pub fn test_kstack_pcp_refill() -> TestResult {
     use super::task_stack::KernelStack;
     use slopos_abi::task::TASK_STACK_SIZE;
@@ -1722,13 +1702,11 @@ pub fn test_kstack_pcp_refill() -> TestResult {
 
     let cpu = slopos_arch::pcr::get_current_cpu();
 
-    // Start from a known-clean cache: flush any stale entries back to the
-    // global allocator so refill_count readings are meaningful.
+    // Flush stale entries so the refill_count readings are meaningful.
     pcp_flush_current::<KstackRegion>();
 
     let before = pcp_stats::<KstackRegion>(cpu);
 
-    // First alloc → empty cache → triggers exactly one refill.
     let s1 = match KernelStack::allocate(
         TASK_STACK_SIZE as usize,
         slopos_ostd::process::quota::root(),
@@ -1751,8 +1729,7 @@ pub fn test_kstack_pcp_refill() -> TestResult {
         return TestResult::Fail;
     }
 
-    // Subsequent allocs should be pure cache hits — the refill batch
-    // (8 slots) amply covers several rounds.
+    // The refill batch is 8 slots, so four more allocations stay cache hits.
     for i in 0..4 {
         let s = match KernelStack::allocate(
             TASK_STACK_SIZE as usize,
@@ -1777,7 +1754,7 @@ pub fn test_kstack_pcp_refill() -> TestResult {
         return TestResult::Fail;
     }
 
-    // alloc_count advanced by at least 4 warm-path pops (plus the first).
+    // Four warm-path pops plus the first allocation.
     if after_warm.alloc_count < before.alloc_count.saturating_add(5) {
         klog_info!(
             "SCHED_TEST[pcp_refill]: alloc_count under-advanced: {} -> {}",
@@ -1790,7 +1767,7 @@ pub fn test_kstack_pcp_refill() -> TestResult {
     TestResult::Pass
 }
 
-/// Test: driving the cache past `pcp_capacity()` forces a spill.
+/// Driving the cache past `pcp_capacity()` forces a spill.
 pub fn test_kstack_pcp_spill_overflow() -> TestResult {
     use super::task_stack::KernelStack;
     use slopos_abi::task::TASK_STACK_SIZE;
@@ -1802,8 +1779,7 @@ pub fn test_kstack_pcp_spill_overflow() -> TestResult {
     let baseline_in_use = in_use_count::<KstackRegion>();
     let before = pcp_stats::<KstackRegion>(cpu);
 
-    // Hold N + 1 stacks simultaneously so each drop enters a full cache
-    // and triggers a spill.  N = capacity.
+    // Hold capacity + 1 stacks so a drop enters a full cache.
     let hold = pcp_capacity::<KstackRegion>() + 1;
     let mut stacks: [Option<KernelStack>; 32] = [const { None }; 32];
     if hold > stacks.len() {
@@ -1822,8 +1798,6 @@ pub fn test_kstack_pcp_spill_overflow() -> TestResult {
             }
         };
     }
-    // Drop all — the first `capacity` fit in the cache, the rest force
-    // at least one spill.
     for i in 0..hold {
         stacks[i] = None;
     }
@@ -1838,10 +1812,8 @@ pub fn test_kstack_pcp_spill_overflow() -> TestResult {
         return TestResult::Fail;
     }
 
-    // No leaks: the global in-use counter returns to baseline + (what's
-    // still sitting in the cache).  Since we flushed at the start and
-    // every stack has been dropped, any residual in_use must equal the
-    // current cache `count` exactly.
+    // Everything was flushed then dropped, so residual in_use must equal the
+    // cache count exactly.
     let residual_in_use = in_use_count::<KstackRegion>().saturating_sub(baseline_in_use);
     if residual_in_use != after.count {
         klog_info!(
@@ -1855,9 +1827,8 @@ pub fn test_kstack_pcp_spill_overflow() -> TestResult {
     TestResult::Pass
 }
 
-/// Test: a slot's `was_backed` bit survives a PCP round-trip.  After
-/// alloc/drop/alloc on the same CPU we should see the same VA reused
-/// AND the second alloc must NOT hit the mapping path.
+/// A slot's `was_backed` bit survives a PCP round-trip: the same VA comes back
+/// and the second allocation skips the mapping path.
 pub fn test_kstack_pcp_was_backed_preserved() -> TestResult {
     use super::task_stack::KernelStack;
     use slopos_abi::task::TASK_STACK_SIZE;
@@ -1903,9 +1874,8 @@ pub fn test_kstack_pcp_was_backed_preserved() -> TestResult {
     TestResult::Pass
 }
 
-/// Test: allocate on one CPU, free on another (simulated by explicit
-/// flush-between), then reallocate.  The global state must stay
-/// consistent — freed slots must be visible to any CPU's refill path.
+/// Freed slots are visible to any CPU's refill path; a cross-CPU free is
+/// simulated by an explicit flush in between.
 pub fn test_kstack_pcp_cross_cpu_safety() -> TestResult {
     use super::task_stack::KernelStack;
     use slopos_abi::task::TASK_STACK_SIZE;
@@ -1915,9 +1885,8 @@ pub fn test_kstack_pcp_cross_cpu_safety() -> TestResult {
     pcp_flush_current::<KstackRegion>();
     let before = in_use_count::<KstackRegion>();
 
-    // Alloc, drop, and immediately flush — forces the slot back into
-    // the global pool instead of the PCP.  The next alloc then has to
-    // refill from the global, exercising the cross-CPU handoff path.
+    // The flush forces the slot into the global pool, so the next allocation
+    // must refill from it.
     let s1 = match KernelStack::allocate(
         TASK_STACK_SIZE as usize,
         slopos_ostd::process::quota::root(),
@@ -1957,7 +1926,7 @@ pub fn test_kstack_pcp_cross_cpu_safety() -> TestResult {
     TestResult::Pass
 }
 
-/// Test: 1000-iteration stress loop with no leaks.
+/// 1000-iteration stress loop with no leaks.
 pub fn test_kstack_pcp_stress_1000() -> TestResult {
     use super::task_stack::KernelStack;
     use slopos_abi::task::TASK_STACK_SIZE;
@@ -1995,9 +1964,8 @@ pub fn test_kstack_pcp_stress_1000() -> TestResult {
     TestResult::Pass
 }
 
-/// Advisory benchmark: logs cycles-per-alloc for a tight warm-cache
-/// loop.  Always passes — the numbers show up in `test_output.log` for
-/// regression tracking.
+/// Advisory benchmark: logs cycles-per-alloc for a warm-cache loop, and always
+/// passes.
 pub fn test_kstack_pcp_smp_throughput_bench() -> TestResult {
     use super::task_stack::KernelStack;
     use slopos_abi::task::TASK_STACK_SIZE;
@@ -2039,14 +2007,6 @@ pub fn test_kstack_pcp_smp_throughput_bench() -> TestResult {
 
     TestResult::Pass
 }
-
-// =============================================================================
-// UnsafeStack (SafeStack data-stack) parity tests.
-//
-// These mirror the kstack tests above against the U-region allocator.  They
-// guard the unification refactor: any change that diverges the two regions'
-// behavior must show up here.
-// =============================================================================
 
 pub fn test_ustack_basic_alloc() -> TestResult {
     use super::task_stack::UnsafeStack;
@@ -2139,7 +2099,6 @@ pub fn test_ustack_rejects_invalid_size() -> TestResult {
         klog_info!("SCHED_TEST: ustack unaligned alloc unexpectedly succeeded");
         return TestResult::Fail;
     }
-    // Bigger than the slot stride (64 KB minus guard).
     if UnsafeStack::allocate(64 * 1024, slopos_ostd::process::quota::root()).is_ok() {
         klog_info!("SCHED_TEST: ustack oversized alloc unexpectedly succeeded");
         return TestResult::Fail;
@@ -2403,15 +2362,9 @@ pub fn test_ustack_pcp_stress_1000() -> TestResult {
     TestResult::Pass
 }
 
-/// Test: kstack and ustack live in disjoint VA regions and have
-/// independent global state.  Three load-bearing invariants the
-/// unification refactor must preserve:
-///
-///   1. The K and U VA windows do not overlap.
-///   2. A K allocation lands inside the K window; same for U.
-///   3. Allocating from one region must NOT change the other region's
-///      `in_use_count`.  (The two regions must be backed by truly
-///      independent allocators.)
+/// kstack and ustack live in disjoint VA regions backed by independent
+/// allocators: the windows do not overlap, each allocation lands in its own
+/// window, and allocating from one leaves the other's `in_use_count` alone.
 pub fn test_regions_disjoint() -> TestResult {
     use super::task_stack::{KernelStack, UnsafeStack};
     use slopos_abi::task::{TASK_STACK_SIZE, TASK_UNSAFE_STACK_SIZE};
@@ -2420,7 +2373,6 @@ pub fn test_regions_disjoint() -> TestResult {
     };
     use slopos_mm::stack_region::{KstackRegion, UstackRegion};
 
-    // (1) Region windows must not overlap.
     if KSTACK_VA_END > USTACK_VA_BASE && USTACK_VA_END > KSTACK_VA_BASE {
         klog_info!(
             "SCHED_TEST[disjoint]: VA regions overlap: K=[{:#x},{:#x}) U=[{:#x},{:#x})",
@@ -2432,7 +2384,6 @@ pub fn test_regions_disjoint() -> TestResult {
         return TestResult::Fail;
     }
 
-    // Snapshot U's count, do K work, confirm U didn't move.
     let u_before_k_work = slopos_mm::stack_va::in_use_count::<UstackRegion>();
     let kstack = match KernelStack::allocate(
         TASK_STACK_SIZE as usize,
@@ -2454,7 +2405,6 @@ pub fn test_regions_disjoint() -> TestResult {
         return TestResult::Fail;
     }
 
-    // Snapshot K's count, do U work, confirm K didn't move.
     let k_before_u_work = slopos_mm::stack_va::in_use_count::<KstackRegion>();
     let ustack = match UnsafeStack::allocate(
         TASK_UNSAFE_STACK_SIZE as usize,
@@ -2476,7 +2426,6 @@ pub fn test_regions_disjoint() -> TestResult {
         return TestResult::Fail;
     }
 
-    // (2) Each handle's VA must land in its own region.
     let k_base = kstack.base().as_u64();
     let u_base = ustack.base().as_u64();
     if !(KSTACK_VA_BASE..KSTACK_VA_END).contains(&k_base) {

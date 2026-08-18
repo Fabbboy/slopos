@@ -1,8 +1,4 @@
 //! Safe wrappers over `io::poll` and `io::misc` for use from tests.
-//!
-//! Each wrapper validates inputs (or accepts `&mut`/`&` instead of raw
-//! pointers) and contains the sole `unsafe { ... }` call to the
-//! underlying extern.
 
 use super::misc;
 use super::poll::{self, FdSet};
@@ -27,11 +23,11 @@ pub fn fd_isset(fd: i32, set: &FdSet) -> bool {
     unsafe { poll::fd_isset(fd, set as *const FdSet) }
 }
 
-/// Exercise the null-pointer paths of every fd_* helper. Returns true
-/// iff each null call returned its documented sentinel.
+/// Returns true iff every `fd_*` helper's null-pointer path returned its
+/// documented sentinel.
 pub fn fd_macros_null_safe() -> bool {
-    // SAFETY: each fd_* helper documents that a null pointer is a no-op
-    // / returns false; this test verifies that contract.
+    // SAFETY: each fd_* helper documents a null pointer as a no-op / false
+    // return.
     unsafe {
         poll::fd_set(5, core::ptr::null_mut());
         poll::fd_clr(5, core::ptr::null_mut());
@@ -41,8 +37,8 @@ pub fn fd_macros_null_safe() -> bool {
 }
 
 pub fn pipe(pipefd: &mut [i32; 2]) -> i32 {
-    // SAFETY: `pipefd` is a live `&mut [i32; 2]`; pointer is non-null,
-    // aligned, and valid for 2 i32 writes.
+    // SAFETY: `pipefd` is a live `&mut [i32; 2]`; pointer is non-null, aligned
+    // and valid for 2 i32 writes.
     unsafe { misc::pipe(pipefd.as_mut_ptr()) }
 }
 

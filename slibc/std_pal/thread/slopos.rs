@@ -15,9 +15,7 @@ unsafe extern "C" {
     fn pthread_join(thread: u64, retval: *mut *mut u8) -> i32;
     fn slopos_sleep_ms(ms: u64);
     fn slopos_yield();
-    // SlopOS cpu-count syscall wrapper from slibc:
-    //   slopos_get_cpu_count() -> i32
-    //     returns the online CPU count, or -errno on error
+    // Returns the online CPU count, or -errno.
     fn slopos_get_cpu_count() -> i32;
 }
 
@@ -61,8 +59,6 @@ impl Thread {
 }
 
 pub fn available_parallelism() -> io::Result<NonZero<usize>> {
-    // SlopOS is SMP-capable; ask the kernel for the online CPU count and
-    // clamp to >= 1 (a non-positive/error result falls back to a single CPU).
     let n = unsafe { slopos_get_cpu_count() };
     let count = if n >= 1 { n as usize } else { 1 };
     Ok(unsafe { NonZero::new_unchecked(count) })

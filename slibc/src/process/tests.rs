@@ -45,7 +45,6 @@ pub fn run_process_tests() -> (u32, u32) {
     check!("WIFSTOPPED stopped", WIFSTOPPED(stopped_sigstop));
     check!("WSTOPSIG SIGSTOP", WSTOPSIG(stopped_sigstop) == 19);
 
-    // WNOHANG constant
     check!("WNOHANG value", WNOHANG == 1);
 
     (pass, fail)

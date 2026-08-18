@@ -142,8 +142,8 @@ static GP_SNAP: [QsSlot; MAX_CPUS] = [const { QsSlot(AtomicU64::new(0)) }; MAX_C
 ///
 /// The claim and the snapshot cannot be one atomic step, so this is what says
 /// the snapshot is ready. Without it a peer polling between the two would read
-/// the *previous* period's snapshot, find every counter long since advanced, and
-/// declare a period complete that never ran — freeing under live readers.
+/// the *previous* period's snapshot and declare a period complete that never
+/// ran — freeing under live readers.
 static GP_SNAP_SEQ: AtomicU64 = AtomicU64::new(0);
 
 const GP_IN_FLIGHT: u64 = 1;
@@ -192,9 +192,8 @@ fn gp_start_if_idle() {
 /// Advance the grace-period state machine if every online CPU has reported.
 ///
 /// Loads plus at most one compare-exchange: no lock, no allocation, no wait, so
-/// it is legal from a hard IRQ handler by the same argument
-/// [`crate::sync`]'s other tick-driven pollers make. Driven from every CPU's
-/// timer tick, so a period completes on whichever CPU notices first.
+/// it is legal from a hard IRQ handler. Driven from every CPU's timer tick, so
+/// a period completes on whichever CPU notices first.
 pub fn rcu_gp_poll() {
     let seq = GP_SEQ.load(Ordering::Acquire);
     if seq & GP_IN_FLIGHT == 0 {
@@ -211,7 +210,7 @@ pub fn rcu_gp_poll() {
     let _ = GP_SEQ.compare_exchange(seq, seq + 1, Ordering::AcqRel, Ordering::Relaxed);
 }
 
-/// The grace-period sequence: completions in the high bits, in-flight in bit 0.
+/// Completions in the high bits, in-flight in bit 0.
 #[inline]
 pub fn rcu_gp_seq() -> u64 {
     GP_SEQ.load(Ordering::Acquire)
@@ -219,9 +218,7 @@ pub fn rcu_gp_seq() -> u64 {
 
 /// Nudge CPUs that have not yet reported for the in-flight period.
 ///
-/// The IPI handler reports a quiescent state if it did not land inside a
-/// reader, which is what breaks a CPU that is busy in a long kernel path with
-/// no context switch of its own.
+/// Breaks a CPU busy in a long kernel path with no context switch of its own.
 fn kick_holdouts() {
     let this_cpu = get_current_cpu();
     for cpu in 0..get_cpu_count().min(MAX_CPUS) {
@@ -242,10 +239,6 @@ fn holdout_cpu() -> Option<usize> {
     (0..get_cpu_count().min(MAX_CPUS)).find(|&cpu| is_cpu_online(cpu) && !cpu_is_quiescent(cpu))
 }
 
-// ---------------------------------------------------------------------------
-// RcuBackend trait + one-shot registration.
-// ---------------------------------------------------------------------------
-
 /// Hooks the RCU machinery uses to talk to platform services it cannot
 /// reach from within OSTD: monotonic clock and warning log.
 ///
@@ -261,7 +254,6 @@ pub unsafe trait RcuBackend: Send + Sync + 'static {
     /// Current monotonic nanoseconds, or 0 before the platform clock is wired.
     fn clock_monotonic_ns(&self) -> u64;
 
-    /// Emit a warning-level log line. Used for stall reports.
     fn log_warn(&self, args: core::fmt::Arguments<'_>);
 }
 
@@ -276,10 +268,6 @@ unsafe impl RcuBackend for UnregisteredBackend {
 }
 
 static DEFAULT_BACKEND: UnregisteredBackend = UnregisteredBackend;
-
-// ---------------------------------------------------------------------------
-// Function-pointer ops table — production-backend registration shape.
-// ---------------------------------------------------------------------------
 
 /// Function-pointer table that consumers use to wire up the production
 /// RCU backend without taking a dependency on the OSTD-internal
@@ -338,8 +326,6 @@ fn backend() -> &'static dyn RcuBackend {
     unsafe { (*BACKEND_SLOT.0.get()).assume_init_ref() }
 }
 
-/// Read the current monotonic time in nanoseconds.
-///
 /// Uses the registered RCU backend's platform clock when available; falls
 /// back to raw TSC if no backend is registered yet (early boot).
 #[inline]
@@ -356,11 +342,9 @@ fn monotonic_ns() -> u64 {
 /// Snap the target first, then poll: concurrent callers land on the same target
 /// and share one period rather than each forcing their own. Allocates nothing.
 ///
-/// A stall is reported and waited through rather than declared complete. The
-/// alternative — giving up and letting the caller free — hands memory back while
-/// a reader may still be dereferencing it, and says so only through a logger
-/// that is a no-op in production. A CPU that never reports is a bug the watchdog
-/// can name; a use-after-free is not.
+/// A stall is reported and waited through rather than declared complete: giving
+/// up and letting the caller free hands memory back while a reader may still be
+/// dereferencing it.
 pub fn synchronize_rcu() {
     let target = gp_snap(GP_SEQ.load(Ordering::Acquire));
     gp_start_if_idle();
@@ -370,13 +354,9 @@ pub fn synchronize_rcu() {
     let mut next_warn = monotonic_ns().wrapping_add(RCU_STALL_TIMEOUT_NS);
 
     while !gp_done(GP_SEQ.load(Ordering::Acquire), target) {
-        // Report unconditionally. A CPU spinning here reaches no switch of its
-        // own, so a declined report makes the caller its own permanent holdout;
-        // and the guarded variant declines for any preemption guard, not just a
-        // read-side section, so an ordinary spinlock held across this call would
-        // wedge the machine. Waiting for a grace period from inside a read-side
-        // section is a self-deadlock the caller must not write, which is the
-        // same assumption that lets the poll below treat this CPU as quiescent.
+        // Unconditional: a CPU spinning here reaches no switch of its own, so a
+        // declined report would make the caller its own permanent holdout.
+        // Waiting from inside a read-side section is a caller-side deadlock.
         rcu_note_qs();
 
         // The period this caller is waiting for may not have started yet: its
@@ -413,16 +393,11 @@ pub fn synchronize_rcu() {
         }
 
         // A CPU spinning on a peer must keep acknowledging that peer's
-        // shootdowns; `spin_relax` is the service call and carries no
-        // `pause` of its own.
+        // shootdowns; `spin_relax` carries no `pause` of its own.
         crate::sync::spin_relax();
         core::hint::spin_loop();
     }
 }
-
-// ---------------------------------------------------------------------------
-// Deferred RCU callbacks (call_rcu)
-// ---------------------------------------------------------------------------
 
 type RcuCallback = unsafe fn(*mut u8);
 
@@ -442,9 +417,7 @@ static PENDING_HEAD: AtomicPtr<RcuCallbackNode> = AtomicPtr::new(core::ptr::null
 /// Flag set by the timer tick when pending callbacks exist.
 static RCU_CB_PENDING: AtomicBool = AtomicBool::new(false);
 
-/// Attempt to allocate an `RcuCallbackNode` via the global allocator.
-///
-/// Returns a raw pointer (null on OOM).
+/// Allocate an `RcuCallbackNode`; null on OOM.
 fn try_alloc_callback_node(ptr: *mut u8, callback: RcuCallback) -> *mut RcuCallbackNode {
     let layout = Layout::new::<RcuCallbackNode>();
     // SAFETY: layout is non-zero-sized.
@@ -480,9 +453,9 @@ unsafe fn dealloc_callback_node(node: *mut RcuCallbackNode) {
 
 /// Schedule a deferred free after the next RCU grace period.
 ///
-/// On successful allocation the function is O(1) and never blocks.
-/// If the callback-node allocation fails (OOM), falls back to a synchronous
-/// grace period and invokes the callback immediately.
+/// O(1) and never blocks on success; if the callback-node allocation fails,
+/// falls back to a synchronous grace period and invokes the callback
+/// immediately.
 ///
 /// # Safety
 ///
@@ -522,29 +495,20 @@ pub unsafe fn call_rcu(ptr: *mut u8, callback: RcuCallback) {
 }
 
 /// Type-safe wrapper for [`call_rcu`] that takes ownership of a
-/// `KBox<T>` and a typed `fn(KBox<T>)` drop callback.
+/// `KBox<T>` and a typed `fn(KBox<T>)` drop callback; the unsafe
+/// `*mut u8` round-trip lives once, here, in OSTD.
 ///
-/// The unsafe `*mut u8` round-trip lives once, here, in OSTD; consumer
-/// code stays fully safe. After the next grace period the callback is
-/// invoked with the rebuilt `KBox<T>`, which then drops normally.
-///
-/// On OOM this takes a synchronous grace period *before* releasing `arg`,
-/// mirroring [`call_rcu`]. The ordering is the whole point: a reader that
-/// entered its read-side section before the publication must be allowed to
-/// leave it before the old value dies, and an allocation failure is not a
-/// licence to skip that.
+/// On OOM this takes a synchronous grace period *before* releasing `arg`: a
+/// reader that entered its read-side section before the publication must be
+/// allowed to leave it before the old value dies.
 pub fn rcu_call_typed<T: Send + 'static>(arg: crate::mm::KBox<T>, drop_fn: fn(crate::mm::KBox<T>)) {
-    // The trampoline forms a closure-free function pointer compatible
-    // with `RcuCallback = unsafe fn(*mut u8)`. Each `T` / `drop_fn`
-    // pair monomorphises a distinct trampoline.
+    // A closure-free function pointer compatible with `RcuCallback`; each
+    // `T` / `drop_fn` pair monomorphises a distinct trampoline.
     struct Trampoline<T: Send + 'static> {
         _phantom: core::marker::PhantomData<T>,
     }
     impl<T: Send + 'static> Trampoline<T> {
         unsafe fn run(ptr: *mut u8) {
-            // The pushed pointer is the (arg, drop_fn) pack the reservation
-            // below allocated. Recover both halves, release the pack's own
-            // storage symmetrically with `raw_alloc`, then run the callback.
             let pack = ptr as *mut TypedRcuPack<T>;
             // SAFETY: `pack` was allocated by the matching path in
             // `rcu_call_typed`; ownership transferred at that point, and this
@@ -561,11 +525,9 @@ pub fn rcu_call_typed<T: Send + 'static>(arg: crate::mm::KBox<T>, drop_fn: fn(cr
         drop_fn: fn(crate::mm::KBox<T>),
     }
 
-    // Reserve the pack's storage *before* taking ownership of `arg`. Moving
-    // `arg` into a fallible constructor instead would hand it to a callee that
-    // drops it on failure — freeing the payload with no grace period at all,
-    // which is exactly the use-after-free the deferral exists to prevent, and
-    // is invisible because the failure path still logs that it waited.
+    // Reserve the pack's storage *before* taking ownership of `arg`: moving
+    // `arg` into a fallible constructor would hand it to a callee that drops it
+    // on failure, freeing the payload with no grace period at all.
     let layout = Layout::new::<TypedRcuPack<T>>();
     // SAFETY: `TypedRcuPack<T>` holds a `KBox` and a fn pointer, so its layout
     // is non-zero-sized.
@@ -595,8 +557,7 @@ pub fn rcu_call_typed<T: Send + 'static>(arg: crate::mm::KBox<T>, drop_fn: fn(cr
 /// Callbacks are parked in [`CB_BATCHES`] that a drain has not finished with.
 ///
 /// The tick cannot take the batch lock to find that out, so the drain publishes
-/// it here. Without it a backlog left by a limited pass would rest entirely on
-/// that pass having re-armed, and one dropped arm would strand it until the next
+/// it here; without it one dropped re-arm strands a backlog until the next
 /// `call_rcu`.
 static CB_BACKLOG: AtomicBool = AtomicBool::new(false);
 

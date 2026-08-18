@@ -127,17 +127,12 @@ fn check_alignment<T: Pod>(paddr: Paddr, offset: usize) -> Result<(), UFrameErro
 pub struct UFrame<M: AnyUFrameMeta = AnonymousMeta>(Frame<M>);
 
 impl UFrame<AnonymousMeta> {
-    /// Wrap a freshly-allocated 4 KiB user paddr that this `UFrame`
-    /// will own through META_SLOTS. The first call for a paddr does
-    /// `from_unused` (slot UNUSED → TYPED, ref count = 1). Subsequent
-    /// calls for the same paddr (e.g. fork(2)'s child mapping the
-    /// parent's pages) fall through to `from_in_use`, bumping the
-    /// existing slot's ref count.
-    ///
-    /// `Drop` of the LAST wrapper for a paddr returns the page to the
-    /// registered [`FrameAlloc`] — exactly the legacy
-    /// `free_page_frame` semantics, but driven by META_SLOTS rather
-    /// than the legacy refcount table.
+    /// Wrap a freshly-allocated 4 KiB user paddr that this `UFrame` will own
+    /// through META_SLOTS. The first call for a paddr does `from_unused` (slot
+    /// UNUSED → TYPED, ref count = 1); a later call for the same paddr (e.g.
+    /// fork(2)'s child mapping the parent's pages) falls through to
+    /// `from_in_use`, bumping the existing slot's ref count. `Drop` of the LAST
+    /// wrapper returns the page to the registered frame allocator.
     pub fn wrap_user_paddr(paddr: Paddr) -> Result<Self, FrameError> {
         match Frame::<AnonymousMeta>::from_unused(paddr, AnonymousMeta::default()) {
             Ok(frame) => Ok(Self(frame)),
@@ -148,14 +143,10 @@ impl UFrame<AnonymousMeta> {
 }
 
 impl UFrame<RingMeta> {
-    /// Allocate a single zeroed physical frame from the registered
-    /// frame allocator and wrap it as an untyped `UFrame<RingMeta>`.
-    ///
-    /// This is the SlopRing allocation entry point (SLOPRING § 5.1): the
-    /// ring crate owns the returned `UFrame` for the ring's lifetime,
-    /// reads SQEs / writes CQEs through the volatile byte-copy interface,
-    /// and maps the same physical frame into the owning process. Returns
-    /// `None` if no allocator is registered or the buddy is exhausted.
+    /// Allocate a single zeroed physical frame from the registered frame
+    /// allocator and wrap it as an untyped `UFrame<RingMeta>` — the SlopRing
+    /// allocation entry point (SLOPRING § 5.1). `None` if no allocator is
+    /// registered or the buddy is exhausted.
     pub fn alloc() -> Option<Self> {
         let alloc = crate::mm::frame_alloc::current_frame_allocator()?;
         let opts = crate::mm::frame::FrameAllocOptions::single().zeroed();
@@ -185,29 +176,22 @@ impl<M: AnyUFrameMeta> UFrame<M> {
         Ok(Self(Frame::<M>::from_in_use(paddr)?))
     }
 
-    /// Physical address of the underlying frame.
     pub fn paddr(&self) -> Paddr {
         self.0.paddr()
     }
 
-    /// Current ref count of the underlying frame slot.
     pub fn reference_count(&self) -> u32 {
         self.0.reference_count()
     }
 
-    /// Internal: drop the untyped wrapper and yield the inner
-    /// [`Frame<M>`]. Crate-private to keep the no-reference
-    /// discipline — exposing this publicly would let callers go
-    /// `uframe.into_frame().borrow()` and read the metadata, which
-    /// is fine, but would also let them call any future helper on
-    /// `Frame<M>` that returns `&[u8]` over frame contents. Keep
-    /// the exit door inside the crate.
+    /// Drop the untyped wrapper and yield the inner [`Frame<M>`]. Crate-private
+    /// to keep the exit door inside the crate: a public one would expose any
+    /// future `Frame<M>` helper returning `&[u8]` over frame contents.
     #[allow(dead_code)]
     pub(crate) fn into_frame(self) -> Frame<M> {
         self.0
     }
 
-    /// Internal: wrap an existing `Frame<M>` as untyped. Crate-private.
     #[allow(dead_code)]
     pub(crate) fn from_frame(frame: Frame<M>) -> Self {
         Self(frame)
@@ -220,14 +204,10 @@ impl<M: AnyUFrameMeta> UFrame<M> {
         if dst.is_empty() {
             return Ok(());
         }
-        // SAFETY: `phys_to_virt(self.paddr())` returns a kernel-virt
-        // pointer into a frame this `UFrame` owns (ref-count > 0
-        // guarantees the slot is live for the duration of `&self`);
-        // `offset + dst.len() <= PAGE_SIZE` was just checked, so
-        // `[src, src + dst.len())` stays within the frame; `dst` is
-        // a Rust `&mut [u8]` so it cannot alias the kernel-virt
-        // mapping for a `UFrame` (those mappings only address the
-        // physical frame, not arbitrary kernel buffers).
+        // SAFETY: `phys_to_virt(self.paddr())` points into a frame this
+        // `UFrame` owns (ref-count > 0 for the life of `&self`); the range
+        // check above keeps `[src, src + dst.len())` inside the frame; `dst`
+        // is a `&mut [u8]`, which cannot alias the frame's kernel-virt mapping.
         unsafe {
             let src = phys::phys_to_virt(self.paddr()).add(offset);
             core::ptr::copy_nonoverlapping(src, dst.as_mut_ptr(), dst.len());
@@ -278,45 +258,21 @@ impl<M: AnyUFrameMeta> UFrame<M> {
         Ok(())
     }
 
-    // -----------------------------------------------------------------
-    // Volatile / atomic accessors (SlopRing — SLOPRING § 3, § 5.3).
-    //
-    // The plain byte-copy methods above (`read_bytes`/`read_pod` …)
-    // assume the frame's bytes do not change underneath the kernel for
-    // the duration of the access. That assumption is *false* for memory
-    // shared read+write with a concurrently-running userspace thread —
-    // an io_uring-style ring is exactly that. A non-atomic, non-volatile
-    // read racing a userspace write is a data race (UB) in the
-    // Rust/LLVM abstract machine *regardless* of the value-level
-    // snapshot argument, and `core::ptr::read` emits no fence so LLVM
-    // may reorder reads of the SQE body relative to the `sq_tail` index
-    // read even on x86.
-    //
-    // These four accessors are the fix: they perform `read_volatile` /
-    // `write_volatile` (so the access is never elided or duplicated and
-    // races are well-defined per the "atomic-or-volatile" relaxation
-    // LLVM gives volatile) plus an explicit acquire/release fence on the
-    // index ops, mirroring Linux's `READ_ONCE`/`smp_load_acquire` on the
-    // ring head/tail. They are the single new piece of OSTD `unsafe`
-    // SlopRing requires, and are in the KernMiri scope (SLOPRING § 15).
-    // -----------------------------------------------------------------
-
-    /// Volatile + acquire load of a `u32` at `offset`. Used by the
-    /// kernel ring code to read a user-written index (`sq_tail` /
-    /// `cq_head`) without a data race or reordering against the
-    /// subsequent body reads. Requires 4-byte alignment.
+    /// Volatile + acquire load of a `u32` at `offset`. Reads a user-written
+    /// index (`sq_tail` / `cq_head`) from a page shared read+write with a
+    /// running userspace thread, where the plain byte-copy methods above would
+    /// be a data race and `core::ptr::read` would let the body reads be
+    /// reordered ahead of the index read. Requires 4-byte alignment.
     pub fn load_u32_acquire(&self, offset: usize) -> Result<u32, UFrameError> {
         check_range(offset, size_of::<u32>(), PAGE_SIZE)?;
         check_alignment::<u32>(self.paddr(), offset)?;
-        // SAFETY (Inv. 4/5): `phys_to_virt(self.paddr())` points into a
-        // frame this `UFrame` owns (ref-count > 0 for the life of
-        // `&self`); `offset + 4 <= PAGE_SIZE` and 4-byte alignment were
-        // just checked, so the read stays in-bounds and is naturally
-        // aligned. `read_volatile` makes a concurrent user write
-        // well-defined (no data-race UB, never elided/duplicated); the
-        // following `Acquire` fence orders this load before any later
-        // body read, matching the ring's release-store-before-publish
-        // ABI. No `&T` is ever formed over the untyped ring frame.
+        // SAFETY (Inv. 4/5): the pointer is into a frame this `UFrame` owns
+        // (ref-count > 0 for the life of `&self`); the checks above make the
+        // read in-bounds and naturally aligned. `read_volatile` makes a
+        // concurrent user write well-defined and un-elidable; the following
+        // `Acquire` fence orders this load before any later body read, matching
+        // the ring's release-store-before-publish ABI. No `&T` is ever formed
+        // over the untyped ring frame.
         let val = unsafe {
             let src = phys::phys_to_virt(self.paddr()).add(offset) as *const u32;
             core::ptr::read_volatile(src)
@@ -325,20 +281,18 @@ impl<M: AnyUFrameMeta> UFrame<M> {
         Ok(val)
     }
 
-    /// Release + volatile store of a `u32` at `offset`. Used to publish
-    /// a kernel-owned index (`sq_head` / `cq_tail`) into the shared
-    /// page after the corresponding body writes. Requires 4-byte
-    /// alignment.
+    /// Release + volatile store of a `u32` at `offset`. Publishes a
+    /// kernel-owned index (`sq_head` / `cq_tail`) into the shared page after
+    /// the corresponding body writes. Requires 4-byte alignment.
     pub fn store_u32_release(&self, offset: usize, value: u32) -> Result<(), UFrameError> {
         check_range(offset, size_of::<u32>(), PAGE_SIZE)?;
         check_alignment::<u32>(self.paddr(), offset)?;
-        // SAFETY (Inv. 4/5): same ownership + bounds + alignment
-        // argument as `load_u32_acquire`. The `Release` fence orders
-        // every preceding body write (e.g. the CQE just copied in)
-        // before this index publication, matching the ABI userspace
-        // reads with an acquire load. `write_volatile` makes the store
-        // well-defined against a concurrent user reader. No `&mut T` is
-        // ever formed over the untyped ring frame.
+        // SAFETY (Inv. 4/5): same ownership + bounds + alignment argument as
+        // `load_u32_acquire`. The `Release` fence orders every preceding body
+        // write before this index publication, matching the acquire load
+        // userspace reads it with; `write_volatile` makes the store
+        // well-defined against a concurrent user reader. No `&mut T` is ever
+        // formed over the untyped ring frame.
         core::sync::atomic::fence(core::sync::atomic::Ordering::Release);
         unsafe {
             let dst = phys::phys_to_virt(self.paddr()).add(offset) as *mut u32;
@@ -356,12 +310,11 @@ impl<M: AnyUFrameMeta> UFrame<M> {
         if dst.is_empty() {
             return Ok(());
         }
-        // SAFETY (Inv. 4/5): `src` points into a frame this `UFrame`
-        // owns; `offset + dst.len() <= PAGE_SIZE` checked. Each byte is
-        // copied with `read_volatile`, so a concurrent user write is a
-        // well-defined volatile race rather than UB and the compiler
-        // cannot elide/duplicate the reads. `dst` is a Rust `&mut [u8]`
-        // that cannot alias the frame mapping. No `&T` over the frame.
+        // SAFETY (Inv. 4/5): `src` points into a frame this `UFrame` owns and
+        // the range check above bounds the copy. Each byte is read with
+        // `read_volatile`, so a concurrent user write is a well-defined
+        // volatile race rather than UB. `dst` is a `&mut [u8]` that cannot
+        // alias the frame mapping. No `&T` over the frame.
         unsafe {
             let base = phys::phys_to_virt(self.paddr()).add(offset);
             for (i, b) in dst.iter_mut().enumerate() {
@@ -381,9 +334,8 @@ impl<M: AnyUFrameMeta> UFrame<M> {
         }
         // SAFETY (Inv. 4/5): same ownership + bounds argument as
         // `copy_out_volatile`, roles swapped. Each byte is written with
-        // `write_volatile`, so a concurrent user read is well-defined.
-        // `src` is a Rust `&[u8]` that cannot alias the frame mapping.
-        // No `&mut T` over the frame.
+        // `write_volatile`, so a concurrent user read is well-defined. `src`
+        // cannot alias the frame mapping. No `&mut T` over the frame.
         unsafe {
             let base = phys::phys_to_virt(self.paddr()).add(offset);
             for (i, b) in src.iter().enumerate() {
@@ -394,25 +346,18 @@ impl<M: AnyUFrameMeta> UFrame<M> {
     }
 }
 
-// ---------------------------------------------------------------------------
-// USegment: contiguous run of UFrames.
-// ---------------------------------------------------------------------------
-
 /// A contiguous run of [`UFrame<M>`]s totalling `len_pages * 4096`
 /// bytes. Internally holds one ref per frame in a `KVec`; on Drop,
 /// each frame's ref is released, returning the run to the
 /// allocator.
 ///
-/// The byte-copy methods address the run as a single byte buffer
-/// from offset `0` to `len_bytes() = len_pages * PAGE_SIZE`.
-/// Crossing a 4 KiB boundary inside a single `read_bytes` is fine
-/// because the run is physically contiguous (the kernel-virt window
-/// established by [`crate::mm::phys::phys_to_virt`] is HHDM-style
-/// linear).
+/// The byte-copy methods address the run as a single byte buffer from offset
+/// `0` to `len_bytes()`. Crossing a 4 KiB boundary inside a single `read_bytes`
+/// is fine because the run is physically contiguous and the kernel-virt window
+/// [`crate::mm::phys::phys_to_virt`] establishes is HHDM-style linear.
 pub struct USegment<M: AnyUFrameMeta = AnonymousMeta> {
-    /// One [`Frame<M>`] ref per page. Held by the segment so that
-    /// dropping the segment releases each frame's slot in turn.
-    /// Only read via its `Drop` glue, so tagged `#[allow(dead_code)]`.
+    /// One [`Frame<M>`] ref per page, reached only through `Drop` — hence
+    /// `#[allow(dead_code)]`.
     #[allow(dead_code)]
     frames: KVec<Frame<M>>,
     head_paddr: Paddr,
@@ -421,17 +366,10 @@ pub struct USegment<M: AnyUFrameMeta = AnonymousMeta> {
 }
 
 impl<M: AnyUFrameMeta> USegment<M> {
-    /// Build a segment from a freshly-allocated run of `len_pages`
-    /// consecutive unused frames starting at `head`, installing
-    /// `M::default()` as metadata for each. On any per-frame
-    /// allocation failure, frames already installed are dropped
-    /// (releasing their slots) and an `Err` is returned.
-    ///
-    /// Test-only for now; the production allocator will route
-    /// through a registered [`FrameAlloc`] with a multi-page
-    /// `FrameAllocOptions` request.
-    ///
-    /// [`FrameAlloc`]: crate::mm::frame::FrameAlloc
+    /// Build a segment from a run of `len_pages` consecutive unused frames
+    /// starting at `head`, installing `M::default()` as metadata for each. On
+    /// any per-frame failure the frames already installed are dropped,
+    /// releasing their slots.
     #[cfg(any(test, feature = "test-helpers"))]
     pub fn from_unused_run(head: Paddr, len_pages: usize) -> Result<Self, UFrameError> {
         Self::from_unused_run_inner(head, len_pages)
@@ -452,8 +390,7 @@ impl<M: AnyUFrameMeta> USegment<M> {
                     }
                 }
                 Err(_) => {
-                    // Dropping `frames` releases every successfully
-                    // installed slot; no leak.
+                    // Dropping `frames` releases every slot installed so far.
                     return Err(UFrameError::OutOfMemory);
                 }
             }

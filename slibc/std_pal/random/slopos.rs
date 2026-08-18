@@ -1,8 +1,4 @@
 /// Fill `bytes` with cryptographically secure random data from the kernel.
-///
-/// Issues the `SYSCALL_GETRANDOM` syscall (number 12) directly via inline
-/// assembly. This replaces the old userland xorshift64 PRNG with a proper
-/// kernel-backed CSPRNG (ChaCha20).
 pub fn fill_bytes(bytes: &mut [u8]) {
     const SYS_GETRANDOM: u64 = 12;
 

@@ -1,48 +1,20 @@
 //! The `Process` object: the identity a task's address space, descriptor
 //! table and resource account all hang off.
 //!
-//! # Why the object cannot contain what it names
+//! This crate sits below `mm` and `fs`, so the object carries identity only
+//! and those subsystems keep their own storage, re-keyed from a recycled `u32`
+//! onto [`Handle<Process>`]: a recycled id designates whichever process holds
+//! it *now*, while a generation-checked handle fails closed with
+//! [`HandleError`].
 //!
-//! `KArc` and `Task` are this crate's, so `Process` must be this crate's too —
-//! and this crate sits below `mm` and `fs`, so it cannot name `ProcessVm` or
-//! `FdEntry`. The object therefore supplies *identity* and the subsystems keep
-//! their storage: `mm` keeps its address-space table, `fs` keeps its
-//! descriptor tables, and both re-key from a recycled `u32` onto
-//! [`Handle<Process>`].
-//!
-//! That is not a workaround. A recycled id is the confused-deputy designator:
-//! a task holding only an id can be handed the address space of whichever
-//! process holds that id *now*, which on a page fault means servicing the
-//! fault in a stranger's page tables. A generation-checked handle fails closed
-//! instead, and the failure is a typed [`HandleError`] rather than a silent
-//! aliasing read.
-//!
-//! # What is deliberately absent
-//!
-//! **A children list.** The wait/orphan tree is task-keyed
-//! (`Task::children` + `parent_task_id`) and works; a second, unread parent
-//! edge made of intrusive links would need its own role marker, its own
-//! placement primitives and its own drop-ordering argument, for no reader.
-//! [`Process::parent`] is a packed handle instead — see below.
-//!
-//! **An owning parent reference.** A `KArc<Process>` parent edge would make
-//! the child's release a potential release of the parent, so a 256-deep
-//! ancestor chain would unwind on one stack against a 2 KiB frame budget, and
-//! the cross-CPU store would need an RCU slot to keep a destructor off the
-//! writer's stack. A packed [`Handle<Process>`] has neither problem: the store
-//! is one atomic word, there is no displaced reference to release, and a
-//! parent that has been reaped resolves to [`HandleError::Stale`] — which is
-//! exactly what "orphaned" means. This is the same reasoning the tree already
-//! wrote down for `Task::process_vm_handle`, applied one level up.
-//!
-//! **Teardown.** [`Process::drop`] returns the id to the allocator and
-//! nothing else. Address-space and descriptor-table teardown stay behind the
-//! exit latch and the `on_cpu` bail, because that ordering is load-bearing in
-//! two ways a refcount cannot express: CR3 must move off an address space
-//! before it is destroyed, and the destroy path holds a cli-lock across a
-//! cross-CPU shootdown wait. A `Drop` invoked from an arbitrary last-reference
-//! release has no way to refuse that context. The refcount replaces the
-//! *decision* — "is this the last task of this process" — not the teardown.
+//! The parent edge is a packed handle, not a `KArc` — an owning edge would
+//! unwind a deep ancestor chain on one stack against a 2 KiB frame budget, and
+//! a reaped parent resolving to [`HandleError::Stale`] is exactly what
+//! "orphaned" means. Address-space and descriptor-table teardown stay behind
+//! the exit latch rather than in [`Process::drop`]: CR3 must move off an
+//! address space before it is destroyed, and the destroy path holds a cli-lock
+//! across a cross-CPU shootdown wait, neither of which a `Drop` from an
+//! arbitrary last release can refuse.
 
 pub mod account;
 pub mod quota;
@@ -60,22 +32,15 @@ pub use registry::{
     process_retire, process_spawn, process_spawn_root, with_process_registry,
 };
 
-/// Packed [`Handle<Process>`] meaning "no process".
-///
-/// Zero, so a zeroed `Task` field reads as "no process" rather than as slot 0's
-/// — the same convention `Task::process_vm_handle` carries.
+/// Packed [`Handle<Process>`] meaning "no process". Zero, so a zeroed `Task`
+/// field reads as "no process" rather than as slot 0's.
 pub const PROCESS_HANDLE_NONE: u64 = 0;
 
 /// Pack a process handle into the single word a task carries.
 ///
-/// The slot is stored **biased by one**. Without the bias, slot 0 at
-/// generation 0 packs to zero and is indistinguishable from
-/// [`PROCESS_HANDLE_NONE`] — and slot 0 generation 0 is exactly what the first
-/// `bind` into a fresh table produces, so the collision is on the very first
-/// process rather than in some corner. `mm`'s handle avoids this by starting
-/// its generations at 1, but that makes the encoding depend on an allocator
-/// policy two crates away; biasing the slot makes it a property of the packing
-/// itself, which is where a total encoding belongs.
+/// The slot is stored **biased by one**: unbiased, slot 0 at generation 0 —
+/// exactly what the first `bind` into a fresh table produces — packs to zero
+/// and is indistinguishable from [`PROCESS_HANDLE_NONE`].
 #[inline]
 pub fn pack_process_handle(handle: Handle<Process>) -> u64 {
     Handle::<Process>::from_parts(handle.slot() + 1, handle.generation()).pack(PROCESS_SLOT_BITS)
@@ -89,9 +54,8 @@ pub fn unpack_process_handle(packed: u64) -> Option<Handle<Process>> {
         return None;
     }
     let biased = Handle::<Process>::unpack(packed as usize, PROCESS_SLOT_BITS);
-    // A packed word whose slot field is 0 was not produced by
-    // `pack_process_handle` — every real slot is stored biased. Refuse it
-    // rather than unbiasing to `u32::MAX`.
+    // Slot field 0 did not come from the packer; refuse it rather than
+    // unbiasing to `u32::MAX`.
     let slot = biased.slot().checked_sub(1)?;
     Some(Handle::from_parts(slot, biased.generation()))
 }
@@ -99,29 +63,23 @@ pub fn unpack_process_handle(packed: u64) -> Option<Handle<Process>> {
 /// A process: one address space, one descriptor table, one resource account,
 /// and the tasks that share them.
 ///
-/// Held by `KArc`. The registry owns one reference for as long as the process
-/// is reachable by handle or by id; every other holder is a borrow or a clone
-/// of that. See the module docs for what this object deliberately does not
-/// own.
+/// Held by `KArc`; the registry owns one reference for as long as the process
+/// is reachable by handle or by id.
 pub struct Process {
-    /// Display and ABI only. Never an authority key, never a lookup key for
-    /// anything that matters. `getpid` returns it; nothing resolves an object
+    /// Display and ABI only, never a lookup key: nothing resolves an object
     /// through it without a generation check.
     id: u32,
 
-    /// This process's own identity: the registry slot plus the generation
-    /// stamped when that slot was bound. Self-referential — written once at
-    /// registration, before the object is published, and never again.
+    /// Self-handle: registry slot plus the generation stamped at bind. Written
+    /// once at registration, before the object is published.
     handle: AtomicU64,
 
     /// Parent, as a generation-checked designator.
     ///
-    /// Mutable: reparent-to-init is required by the wait protocol. Atomic
-    /// because the writer is not the owner — a dying parent re-homes children
-    /// it does not own, from a CPU that is not theirs. Relaxed is not enough
-    /// and SeqCst is not needed: an Acquire load pairs with the Release store
-    /// so a reader that sees the new parent also sees everything the reparent
-    /// published before it.
+    /// Atomic because the writer is not the owner: a dying parent re-homes
+    /// children from a CPU that is not theirs. Acquire/Release, so a reader
+    /// that sees the new parent also sees what the reparent published before
+    /// it.
     parent: AtomicU64,
 
     /// This process's resource account row, minted with it.
@@ -130,18 +88,13 @@ pub struct Process {
     /// The accounting tree's upward edge: the spawner's account, set once and
     /// never re-homed.
     ///
-    /// Deliberately a different field from [`parent`](Self::parent). Reparent-
-    /// to-init must move the *wait* edge and must not move a budget; an
-    /// immutable accounting edge is what makes charge migration
-    /// unrepresentable rather than merely discouraged. Zircon reached the same
-    /// conclusion by making the upward edge `const` at all three levels of its
-    /// hierarchy.
+    /// Deliberately a different field from [`parent`](Self::parent):
+    /// reparent-to-init must move the *wait* edge and must not move a budget,
+    /// and an immutable accounting edge makes charge migration
+    /// unrepresentable rather than merely discouraged.
     account_parent: AccountId,
 
     /// Live tasks sharing this process.
-    ///
-    /// The reader that matters: "is this the last task of this process" was an
-    /// O(MAX_TASKS) registry walk under the task-manager lock, on every exit.
     task_count: AtomicU32,
 
     /// Set once the last task has exited. The id stays allocated and the
@@ -152,23 +105,17 @@ pub struct Process {
 
     /// This process's own existence, charged to its **spawner**.
     ///
-    /// Held in a slot rather than as a plain field, and released at the reap
-    /// rather than at the final `Drop`, for the same reason the task charge
-    /// lives in a side table: the object outlives the resource. A `Process`
-    /// stays referenced after `process_retire` — a `waitpid` still has to find
-    /// it, an in-flight designator may still resolve it — so a `Drop`-refund
-    /// keeps the spawner charged for children that are already gone. Measured
-    /// at 113 processes held by the root across one boot with ten live.
-    ///
-    /// The reap is the honest point: it is when the registry slot and the
-    /// process's claim on the table are given up.
+    /// Released at the reap rather than at the final `Drop`, because the
+    /// object outlives the resource: a `Process` stays referenced after
+    /// `process_retire`, so a `Drop`-refund would keep the spawner charged for
+    /// children that are already gone.
     proc_charge: quota::ChargeSlot<slopos_abi::quota::ProcCount>,
 }
 
 impl Process {
-    /// Build an unregistered process. Private: the only way to obtain one is
-    /// through [`process_spawn`], which allocates the id, binds the slot and
-    /// stamps the self-handle as one step.
+    /// Build an unregistered process. [`process_spawn`] is the only way to
+    /// obtain one: it allocates the id, binds the slot and stamps the
+    /// self-handle as one step.
     fn new(
         id: u32,
         account: AccountId,
@@ -192,7 +139,7 @@ impl Process {
 
     /// Give the spawner back the charge for this process.
     ///
-    /// Idempotent, and called from the reap. The slot's own `Drop` is the
+    /// Idempotent, and called from the reap; the slot's own `Drop` is the
     /// backstop for a process that is dropped without ever being retired.
     #[inline]
     pub(super) fn release_proc_charge(&self) {
@@ -205,10 +152,8 @@ impl Process {
         self.id
     }
 
-    /// This process's own handle.
-    ///
-    /// Stamped at registration, so it is `None` only inside the registry's own
-    /// bind step — never on a process any caller can reach.
+    /// This process's own handle. `None` only inside the registry's own bind
+    /// step — never on a process any caller can reach.
     #[inline]
     pub fn handle(&self) -> Option<Handle<Process>> {
         unpack_process_handle(self.handle.load(Ordering::Acquire))

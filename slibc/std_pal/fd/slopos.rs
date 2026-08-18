@@ -1,6 +1,4 @@
-//! SlopOS file descriptor abstraction.
-//!
-//! Mirrors `sys/fd/unix.rs` but calls slibc C functions instead of libc.
+//! SlopOS file descriptor abstraction, over slibc C functions.
 
 #![unstable(reason = "not public", issue = "none", feature = "fd")]
 #![deny(unsafe_op_in_unsafe_fn)]
@@ -77,7 +75,7 @@ impl FileDesc {
     }
 
     pub fn read_at(&self, buf: &mut [u8], offset: u64) -> io::Result<usize> {
-        // No pread — emulate with lseek + read (not atomic, but sufficient)
+        // No pread — emulated with lseek + read, so not atomic.
         let saved = cvt(unsafe { slopos_lseek(self.as_raw_fd(), 0, SEEK_CUR) })?;
         cvt(unsafe { slopos_lseek(self.as_raw_fd(), offset as i64, SEEK_SET) })?;
         let result = self.read(buf);
