@@ -20,9 +20,6 @@ use super::traits::{FocusPolicy, Widget};
 use super::tree;
 
 /// Run a widget-framework-driven application.
-///
-/// Sets up one ring and drives the event loop as an async root via
-/// [`slopfut::block_on`].
 pub fn run_app<A: App>(app: A, width: u32, height: u32) -> ! {
     let ring = Ring::setup(16).expect("appkit: ring setup failed");
     slopfut::block_on(ring, run_app_async(app, width, height))
@@ -189,8 +186,6 @@ async fn run_app_async<A: App>(mut app: A, width: u32, height: u32) -> ! {
             needs_repaint = false;
         }
 
-        // Sleep until the compositor sends an event, a UiSender posts work, or
-        // the next tick is due.
         let timeout_ms: i64 = if needs_repaint || needs_rebuild {
             0
         } else if let Some(interval) = app.tick_interval_ms() {
@@ -204,8 +199,7 @@ async fn run_app_async<A: App>(mut app: A, width: u32, height: u32) -> ! {
         } else {
             -1
         };
-        // A zero timeout deliberately awaits nothing; otherwise race the
-        // compositor socket, the wakeup pipe, and — when bounded — a timer.
+        // A zero timeout deliberately awaits nothing.
         if timeout_ms < 0 {
             match slopfut::select2(
                 slopfut::poll_add(handle.compositor_fd(), POLLIN),

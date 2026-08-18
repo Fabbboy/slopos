@@ -222,8 +222,8 @@ impl StackWidget {
         phase: EventPhase,
         sink: &mut MessageSink,
     ) -> EventResponse {
-        // A pointer event reaches only the child whose rect contains it, so a
-        // Table cannot steal a click meant for a sibling in the same HStack.
+        // Pointer events reach only the child whose rect contains them, so a
+        // sibling cannot steal a click.
         let pointer_pos = match event {
             WidgetEvent::PointerDown { x, y, .. }
             | WidgetEvent::PointerUp { x, y, .. }
@@ -359,8 +359,8 @@ impl Widget for ZStackWidget {
         constraints.constrain(Size::new(max_w, max_h))
     }
     fn layout(&mut self, rect: Rect) {
-        // Every layer gets the full area: a ZStack exists so an overlay can
-        // cover its siblings rather than displace them.
+        // Every layer gets the full area: overlays cover siblings, never
+        // displace them.
         for child in &mut self.children {
             place_widget(child.as_mut(), rect);
         }
@@ -376,8 +376,8 @@ impl Widget for ZStackWidget {
         phase: EventPhase,
         sink: &mut MessageSink,
     ) -> EventResponse {
-        // Topmost layer first, and it may swallow: upper layers are how modal
-        // surfaces are expressed.
+        // Topmost layer first, and it may swallow: that is how a modal surface
+        // is expressed.
         for child in self.children.iter_mut().rev() {
             let resp = child.event(event, phase, sink);
             if resp.is_consumed() {

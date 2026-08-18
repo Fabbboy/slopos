@@ -9,8 +9,8 @@ use crate::traits::{
 
 /// A child floated at an absolute position over its parent's area.
 ///
-/// Occupies the parent's whole rect so a click anywhere outside the child is
-/// still seen here and can dismiss; only the child's own rect paints.
+/// Occupies the parent's whole rect so a click outside the child still lands
+/// here and can dismiss it.
 pub struct PopupWidget {
     core: WidgetCore,
     anchor: (i32, i32),
@@ -41,9 +41,7 @@ impl PopupWidget {
     }
 
     /// Position the child at the anchor, flipped/clamped to stay inside `rect`.
-    ///
-    /// Flipping before clamping is what keeps a menu opened near the right or
-    /// bottom edge from covering the pointer that opened it.
+    /// Flip before clamp, so an edge-anchored menu does not cover the pointer.
     fn child_rect(&self) -> Rect {
         let rect = self.layout_rect();
         let size = self.child.measured_size();
@@ -112,8 +110,8 @@ impl Widget for PopupWidget {
                 self.child.event(event, EventPhase::Target, sink)
             }
 
-            // A popup is modal over its parent: swallow whatever the child
-            // ignores so the tree underneath cannot act while it is open.
+            // Modal: swallow what the child ignores so the tree underneath
+            // cannot act while the popup is open.
             _ => {
                 let resp = self.child.event(event, phase, sink);
                 if resp.is_consumed() {

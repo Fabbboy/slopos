@@ -1,5 +1,4 @@
-//! HID report-descriptor parser, enough for a Precision-Touchpad digitizer
-//! collection: produces the flat input-field list the gesture engine reads.
+//! HID report-descriptor parser for a Precision-Touchpad digitizer collection.
 //! Multitouch fingers appear as repeated X/Y/Tip occurrences in descriptor
 //! order, so the engine indexes them by occurrence.
 
@@ -79,7 +78,6 @@ pub fn parse_report_descriptor(desc: &[u8]) -> ReportFormat {
     let mut usage_max: Option<u16> = None;
     let mut uses_report_ids = false;
     let mut input_mode_report_id: Option<u8> = None;
-    // Per-report-id running input bit offset.
     let mut bit_off = [0u32; 256];
 
     let mut p = 0usize;
@@ -138,7 +136,7 @@ pub fn parse_report_descriptor(desc: &[u8]) -> ReportFormat {
                         usage_max = None;
                     }
                     0xa => {
-                        // Collection — locals reset.
+                        // Collection.
                         usages.clear();
                         usage_min = None;
                         usage_max = None;

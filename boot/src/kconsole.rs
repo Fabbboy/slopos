@@ -1,8 +1,5 @@
-//! Diagnostic-console commands that take the machine down.
-//!
-//! Both are `KCMD_DESTRUCTIVE`, so both are refused unless the policy mask names
-//! that bit, which the default does not. They live in `boot` because
-//! registration must happen in a crate userland does not link.
+//! Diagnostic-console commands that take the machine down. They live in `boot`
+//! because registration must happen in a crate userland does not link.
 
 use slopos_ostd::kconsole::{KCMD_DESTRUCTIVE, KConsole};
 use slopos_ostd::kline;

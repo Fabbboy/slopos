@@ -15,8 +15,8 @@ pub struct TabBarWidget {
     on_change: Option<Box<dyn Fn(usize) -> Box<dyn Any>>>,
     content: Vec<Box<dyn Widget>>,
     focused: bool,
-    /// Tab strip height from the last measure. Layout and hit testing must use
-    /// the value the paint pass used, not a second copy of the constant.
+    /// Tab strip height from the last measure; layout and hit testing must read
+    /// it rather than re-derive the constant.
     tab_height: i32,
 }
 
@@ -38,7 +38,6 @@ impl TabBarWidget {
         }
     }
 
-    /// The area below the tab strip, where the active panel lives.
     fn panel_rect(&self) -> Rect {
         let rect = self.layout_rect();
         Rect::new(
@@ -95,8 +94,7 @@ impl Widget for TabBarWidget {
             },
         };
 
-        // Measure every panel, not just the active one: switching tabs must not
-        // require a fresh measure pass to know how big the new panel is.
+        // Measure every panel so a tab switch needs no fresh measure pass.
         let mut panel_height = 0;
         for (i, panel) in self.content.iter_mut().enumerate() {
             let size = measure_widget(panel.as_mut(), panel_constraints, ctx);
@@ -167,8 +165,7 @@ impl Widget for TabBarWidget {
             ctx.style.border_divider,
         );
 
-        // Clipped to the panel area: a panel that measured taller than the strip
-        // left it must not draw over the tabs.
+        // A panel taller than the area left for it must not draw over the tabs.
         if let Some(panel) = self.content.get(self.active) {
             let panel_rect = self.panel_rect();
             ctx.with_clip(panel_rect, |ctx| panel.paint(ctx));
@@ -239,8 +236,6 @@ impl Widget for TabBarWidget {
                         EventResponse::Ignored
                     }
                 }
-                // The tab strip owns only Left/Right; every other key belongs to
-                // the panel.
                 _ => {
                     if let Some(panel) = self.content.get_mut(self.active) {
                         panel.event(event, phase, sink)

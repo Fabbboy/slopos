@@ -1,11 +1,9 @@
-//! SlopRing — io_uring-style submission/completion ring ABI.
-//!
-//! Single source of truth for the wire format shared between the kernel `ring`
-//! crate and the userland SlopRing runtime: the `#[repr(C)]` layouts, the
-//! opcodes and the flag constants.
+//! SlopRing — io_uring-style submission/completion ring ABI: the `#[repr(C)]`
+//! wire layouts, opcodes and flag constants shared by the kernel `ring` crate
+//! and the userland SlopRing runtime.
 
-/// Maximum SQ entries a single `ring_setup` may request (SLOPRING § 6.1).
-/// Power of two; the CQ is twice this.
+/// Maximum SQ entries a single `ring_setup` may request (SLOPRING § 6.1);
+/// power of two.
 pub const SLOPRING_MAX_ENTRIES: u32 = 4096;
 
 /// CQ headroom multiplier over the SQ (`cq_entries = SQ_TO_CQ * sq_entries`),
@@ -14,15 +12,11 @@ pub const SLOPRING_SQ_TO_CQ: u32 = 2;
 
 /// No-op; completes immediately with `res = 0`.
 pub const OP_NOP: u8 = 0;
-/// `read(fd, buf, len)`.
 pub const OP_READ: u8 = 1;
-/// `write(fd, buf, len)`.
 pub const OP_WRITE: u8 = 2;
-/// `recvmsg(fd, msghdr)`.
+/// `recvmsg(fd, msghdr)` — `addr` is the msghdr.
 pub const OP_RECVMSG: u8 = 3;
-/// `send(fd, buf, len)`.
 pub const OP_SEND: u8 = 4;
-/// `accept(fd)`.
 pub const OP_ACCEPT: u8 = 5;
 /// `poll(fd, mask)`.
 pub const OP_POLL_ADD: u8 = 6;
@@ -40,27 +34,24 @@ pub const OP_OPENAT: u8 = 10;
 pub const OP_CLOSE: u8 = 11;
 
 /// Zero-copy send from a registered fixed buffer (`SLOPRING_SQE_FIXED_BUFFER`
-/// + `Sqe.buf_index`). The NIC DMAs from the pinned user pages, so the result
-/// CQE carries [`SLOPRING_CQE_F_MORE`] and a later terminal
-/// [`SLOPRING_CQE_F_NOTIF`] one signals the pin is dropped and the buffer
-/// reusable. Sound only for single-transmit datagrams (UDP/raw); other
-/// families fall back to the single-copy `OP_SEND` path (SLOPRING § 13).
+/// + `Sqe.buf_index`): the result CQE carries [`SLOPRING_CQE_F_MORE`] and a
+/// later terminal [`SLOPRING_CQE_F_NOTIF`] one signals the pin is dropped.
+/// Sound only for single-transmit datagrams (UDP/raw); other families fall
+/// back to the single-copy `OP_SEND` path (SLOPRING § 13).
 pub const OP_SEND_ZC: u8 = 12;
 
 /// `connect(fd, sockaddr)` — `addr` is the user VA of a
-/// [`crate::net::SockAddrIn`] (`len` = 16) or a `SockAddrUn`. Single-CQE (no
-/// `F_MORE` / `F_NOTIF`): `res = 0` or a negated errno. Re-entrant — it
-/// initiates the handshake once and then defers (`WouldBlock`) on each harvest
-/// re-probe while the connection is in progress. Installs no fd and consumes
-/// no bytes, and carries no buffer selection.
+/// [`crate::net::SockAddrIn`] (`len` = 16) or a `SockAddrUn`. Single-CQE:
+/// `res = 0` or a negated errno. Re-entrant — it initiates the handshake once
+/// and then defers (`WouldBlock`) on each harvest re-probe while the
+/// connection is in progress.
 pub const OP_CONNECT: u8 = 13;
 
 /// Largest opcode value (inclusive); anything above is `-EINVAL`.
 pub const OP_MAX: u8 = OP_CONNECT;
 
-/// Interim completion of an armed multishot row — more CQEs for the same
-/// `user_data` are expected. Cleared on the terminal CQE (error / EOF /
-/// cancel), which retires the row.
+/// Interim completion of an armed multishot row; cleared on the terminal CQE
+/// (error / EOF / cancel), which retires the row.
 pub const SLOPRING_CQE_F_MORE: u32 = 1 << 0;
 
 /// A kernel-picked provided-buffer id is valid in the high 16 bits of `flags`
@@ -75,25 +66,23 @@ pub const SLOPRING_CQE_F_BUF_MORE: u32 = 1 << 2;
 /// last reference to the pinned send buffer: userland may reuse it.
 pub const SLOPRING_CQE_F_NOTIF: u32 = 1 << 3;
 
-/// Bit shift of the provided-buffer id within `Cqe.flags` (the high 16 bits,
-/// mirroring Linux io_uring's `IORING_CQE_BUFFER_SHIFT`).
+/// Bit shift of the provided-buffer id within `Cqe.flags`; matches Linux
+/// io_uring's `IORING_CQE_BUFFER_SHIFT`.
 pub const SLOPRING_CQE_BUFFER_SHIFT: u32 = 16;
 
 pub const SLOPRING_CQE_BUFFER_MASK: u32 = 0xFFFF_0000;
 
 /// Set in the shared CQ-flags word when at least one CQE was dropped because
-/// the CQ was full (`cq_off_overflow` counts them). A sticky one-way latch:
-/// the dropped completions are unrecoverable, so the kernel never clears it
-/// and only the next `ring_setup` does.
+/// the CQ was full (`cq_off_overflow` counts them). Sticky: the kernel never
+/// clears it, only the next `ring_setup` does.
 pub const SLOPRING_CQ_OVERFLOW: u32 = 1 << 1;
 
 /// `OP_CANCEL`: cancel *every* in-flight op matching the target fd, not
 /// just the one whose `user_data` is named.
 pub const SLOPRING_ASYNC_CANCEL_ALL: u32 = 1 << 0;
 
-/// `Sqe.sqe_flags2`: arm this op as multishot — the kernel keeps the row in
-/// flight and posts a CQE (each carrying [`SLOPRING_CQE_F_MORE`]) every time
-/// the resource yields, until a terminal event. Honoured for OP_ACCEPT /
+/// `Sqe.sqe_flags2`: arm this op as multishot — the row stays in flight and
+/// posts a CQE per event until a terminal one. Honoured for OP_ACCEPT /
 /// OP_RECVMSG / OP_POLL_ADD.
 pub const SLOPRING_SQE_MULTISHOT: u16 = 1 << 0;
 
@@ -103,9 +92,7 @@ pub const SLOPRING_SQE_MULTISHOT: u16 = 1 << 0;
 pub const SLOPRING_SQE_BUFFER_SELECT: u8 = 1 << 0;
 
 /// `Sqe.flags`: the op's data buffer is the registered fixed buffer named by
-/// `Sqe.buf_index`, not the user VA in `Sqe.addr` — pre-pinned at
-/// `ring_register(RING_REGISTER_BUFFERS)`, so the op skips the per-op
-/// page-table walk and staging copy. Mutually exclusive with
+/// `Sqe.buf_index`, not the user VA in `Sqe.addr`. Mutually exclusive with
 /// [`SLOPRING_SQE_BUFFER_SELECT`].
 pub const SLOPRING_SQE_FIXED_BUFFER: u8 = 1 << 1;
 
@@ -136,12 +123,11 @@ pub const SLOPRING_PBUF_RING_TAIL_OFFSET: usize = 14;
 /// The whole ring region is a single mapping (the only mode today).
 pub const SLOPRING_FEAT_SINGLE_MMAP: u32 = 1 << 0;
 
-/// The kernel honours [`SLOPRING_SQE_MULTISHOT`]. Userland gates multishot
-/// submission on this bit so it degrades gracefully on an older kernel.
+/// The kernel honours [`SLOPRING_SQE_MULTISHOT`]; userland gates on this bit.
 pub const SLOPRING_FEAT_MULTISHOT: u32 = 1 << 1;
 
-/// The kernel implements `ring_register` provided/fixed buffers. Userland
-/// gates registered-buffer use on this bit.
+/// The kernel implements `ring_register` provided/fixed buffers; userland
+/// gates on this bit.
 pub const SLOPRING_FEAT_REG_BUFFERS: u32 = 1 << 2;
 
 /// Reserved: wait for events even when nothing was submitted.
@@ -185,8 +171,8 @@ pub struct Sqe {
 
 const _: () = assert!(core::mem::size_of::<Sqe>() == 64);
 const _: () = assert!(core::mem::align_of::<Sqe>() == 8);
-// The serializer below hand-writes these fields at literal offsets, so pin
-// them here: a reorder that shifts one must fail the build.
+// The serializer hand-writes these fields at literal offsets; a reorder that
+// shifts one must fail the build.
 const _: () = assert!(core::mem::offset_of!(Sqe, sqe_flags2) == 48);
 const _: () = assert!(core::mem::offset_of!(Sqe, buf_group) == 50);
 const _: () = assert!(core::mem::offset_of!(Sqe, buf_index) == 52);
@@ -312,9 +298,9 @@ impl Cqe {
 // wire image equals the `#[repr(C)]` layout and the kernel marshals a private
 // snapshot rather than a `&T` over user memory.
 
-/// One registered fixed buffer (a user iovec). A `RING_REGISTER_BUFFERS` call
-/// passes `nr_args` of these at the `arg` user pointer; each is pinned and
-/// referenced thereafter by its array index via `Sqe.buf_index`.
+/// One registered fixed buffer (a user iovec). `RING_REGISTER_BUFFERS` passes
+/// `nr_args` of these at the `arg` user pointer; each is pinned and referenced
+/// thereafter by its array index via `Sqe.buf_index`.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct BufIovec {
@@ -411,7 +397,6 @@ const _: () = assert!(core::mem::offset_of!(IouringBuf, addr) == 0);
 const _: () = assert!(core::mem::offset_of!(IouringBuf, len) == 8);
 const _: () = assert!(core::mem::offset_of!(IouringBuf, bid) == 12);
 const _: () = assert!(core::mem::offset_of!(IouringBuf, resv) == 14);
-// The ring `tail` overlaps `bufs[0].resv` (Linux io_uring_buf_ring union).
 const _: () = assert!(core::mem::offset_of!(IouringBuf, resv) == SLOPRING_PBUF_RING_TAIL_OFFSET);
 
 impl IouringBuf {

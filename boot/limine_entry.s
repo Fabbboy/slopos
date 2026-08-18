@@ -1,6 +1,4 @@
-# SlopOS Limine Entry Point
 # Limine bootloader jumps directly to 64-bit mode with paging enabled
-# No 32-bit entry code needed - Limine handles the transition
 
 .code64
 .intel_syntax noprefix
@@ -26,31 +24,25 @@
 # instrumented Rust runs.
 .equ PCR_OFFSET_CURRENT_TASK, 40
 
-# MSR number for IA32_GS_BASE.  Used to install GS_BASE via wrmsr.
 .equ MSR_IA32_GS_BASE, 0xC0000101
 
 .section .text
 .global _start
 
 _start:
-    # Limine provides 64-bit long mode with paging enabled
-    # Set up our own kernel stack for safety
     cli
 
-    # Load kernel stack pointer (use absolute address in higher half)
     lea rax, [rip + kernel_stack_top]
     mov rsp, rax
 
     # Ensure 16-byte stack alignment (required by System V ABI)
     and rsp, -16
 
-    # Clear direction flag for string operations
     cld
 
     # Zero out base pointer for clean stack traces
     xor rbp, rbp
 
-    # Initialize COM1 properly and then emit markers
     call early_serial_init
     mov dx, COM1_BASE
     mov al, SERIAL_MARKER_L
@@ -70,47 +62,17 @@ _start:
     mov cr4, rax
     fninit
 
-    # --- SafeStack-sanitizer bootstrap ---------------------------------
-    # Before any instrumented Rust code runs, the BSP must:
-    #   1. Set `BSP_PCR.self_ref = &BSP_PCR` so any `gs:[0]` read
-    #      returns the PCR pointer.
-    #   2. Set `BSP_PCR.current_task = &BSP_BOOTSTRAP_TASK`.
-    #      Rust has already initialised `BSP_BOOTSTRAP_TASK.unsafe_stack_sp`
-    #      to `&BOOTSTRAP_UNSAFE_STACK_TOP` — see
-    #      `slopos_core::scheduler::safestack_rt::init_bootstrap_tasks`,
-    #      which the kernel_main path calls on entry.
-    #      Wait: that's not yet done here — we do it in asm by directly
-    #      stamping `unsafe_stack_sp` at its well-known Task offset.
-    #   3. Install `IA32_GS_BASE = &BSP_PCR` via wrmsr.
-    #
-    # Every function compiled with -Zsanitizer=safestack calls
-    # __safestack_pointer_address on entry, which reads
-    # `gs:[PCR_OFFSET_CURRENT_TASK]` then returns that pointer plus
-    # `TASK_UNSAFE_STACK_SP_OFFSET`.  Getting all three steps wrong in
-    # any direction would instantly corrupt RIP.
-    #
-    # The actual offset of `Task.unsafe_stack_sp` is a Rust-side
-    # compile-time computation.  We do *not* reference it from this
-    # .s file — instead, Rust's `init_bootstrap_tasks()` fn (called
-    # from kernel_main before anything else interesting happens)
-    # stamps the field using `TASK_UNSAFE_STACK_SP_OFFSET`.  This
-    # trampoline only has to make sure GS_BASE is valid so when
-    # kernel_main's own prologue fires __safestack_pointer_address,
-    # the bootstrap stub's (zeroed) unsafe_stack_sp is read.
-    #
-    # Subtle: the very first instrumented call (kernel_main's
-    # prologue) would read `unsafe_stack_sp = 0` and try to use it.
-    # To avoid that, we ALSO stamp unsafe_stack_sp directly in asm
-    # using a separately-exported symbol `BOOTSTRAP_UNSAFE_STACK_TOP`
-    # and hard-code the offset from the Rust side's constant.
+    # SafeStack bootstrap.  Every function compiled with -Zsanitizer=safestack
+    # calls __safestack_pointer_address on entry, which reads
+    # `gs:[PCR_OFFSET_CURRENT_TASK]` and adds `TASK_UNSAFE_STACK_SP_OFFSET`.
+    # GS_BASE, BSP_PCR.current_task and the task's unsafe_stack_sp must
+    # therefore all be valid before kernel_main's own prologue runs.
     lea rax, [rip + BSP_PCR]
     mov [rax], rax                                   # BSP_PCR.self_ref = &BSP_PCR
 
-    # Install BSP_PCR.current_task = &BSP_BOOTSTRAP_TASK
     lea rdx, [rip + BSP_BOOTSTRAP_TASK]
     mov [rax + PCR_OFFSET_CURRENT_TASK], rdx
 
-    # Stamp BSP_BOOTSTRAP_TASK.unsafe_stack_sp = top of bootstrap unsafe stack.
     # Offset derived from Rust's TASK_UNSAFE_STACK_SP_OFFSET constant,
     # exported to the linker as the symbol `BOOTSTRAP_TASK_UNSAFE_SP_OFFSET`
     # by `slopos_core::scheduler::safestack_rt`.
@@ -128,7 +90,6 @@ _start:
     mov ecx, MSR_IA32_GS_BASE
     wrmsr
 
-    # Zero out registers for clean state
     xor rax, rax
     xor rbx, rbx
     xor rcx, rcx
@@ -144,7 +105,6 @@ _start:
     xor r14, r14
     xor r15, r15
 
-    # Call kernel_main with no parameters
     call kernel_main
 
     # If kernel_main returns (it shouldn't), halt
@@ -153,7 +113,6 @@ _start:
     hlt
     jmp .halt_loop
 
-# Minimal serial port initialization
 # Initializes COM1 for 115200 baud, 8N1
 early_serial_init:
     push rax
@@ -199,7 +158,6 @@ early_serial_init:
 
 .size _start, . - _start
 
-# Kernel stack in BSS section
 # 512KB stack — test harness needs extra headroom in debug mode
 .section .bss
 .align 16

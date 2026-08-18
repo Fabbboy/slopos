@@ -35,7 +35,7 @@ fn parse_signum(raw: u64) -> Option<u8> {
     }
 }
 
-/// Heap-backed list of unique task IDs collected during signal delivery.
+/// Heap-backed list of unique task IDs.
 struct TargetSet {
     ids: slopos_ostd::KVec<u32>,
 }
@@ -70,28 +70,24 @@ impl TargetSet {
 
 /// Whether `kill` may name this task at all.
 ///
-/// Kernel tasks are structurally excluded from signal *delivery*, so naming one
-/// could only reach the SIGKILL arm — which is not signal-gated — and tear down
-/// a driver thread that owns device state and an interrupt line. Enumeration
-/// applies the same predicate; this stays as the enforcing check.
+/// Kernel tasks are excluded from signal *delivery*, so naming one could only
+/// reach the SIGKILL arm — not signal-gated — and tear down a driver thread
+/// owning device state and an interrupt line.
 pub(crate) fn signal_may_name(flags: u16) -> bool {
     (flags & TASK_FLAG_USER_MODE) != 0
 }
 
 /// Whether a task holding `caller_flags` may signal one holding `target_flags`.
 ///
-/// `task.flags` is the whole of SlopOS's privilege model, standing in for the
-/// user ids POSIX asks about: a sender may name a task whose privileges it
-/// already holds, and no other.
+/// `task.flags` stands in for the user ids POSIX asks about: a sender may name
+/// a task whose privileges it already holds, and no other.
 pub(crate) fn signal_dominates(caller_flags: u16, target_flags: u16) -> bool {
     target_flags & SPAWN_PRIVILEGED & !caller_flags == 0
 }
 
-/// Init is never a signal target.
-///
-/// Matches the `SIGNAL_UNKILLABLE` behaviour Linux gives global init: a
-/// terminating signal there takes the system down undebuggably. Dominance
-/// already covers init today; the guarantee should not rest on that.
+/// Init is never a signal target: a terminating signal there takes the system
+/// down undebuggably. Dominance already covers init today; the guarantee should
+/// not rest on that.
 pub(crate) fn signal_is_init(task_id: u32) -> bool {
     let init = crate::exec::init_task_id();
     init != INVALID_TASK_ID && task_id == init
@@ -114,7 +110,6 @@ pub(crate) fn may_signal(caller_flags: u16, target_id: u32) -> bool {
     }
 }
 
-/// Outcome of a fanout collection, so an empty result can say *why*.
 struct Fanout {
     /// A task matched the selector but the caller may not signal it.
     denied: bool,
@@ -261,8 +256,7 @@ define_syscall!(syscall_kill
     let mut fanout = Fanout { denied: false };
     if pid > 0 {
         let target_id = pid as u32;
-        // A kernel task is not a process: ESRCH rather than EPERM, a category
-        // error rather than a permission question.
+        // A kernel task is not a process: ESRCH rather than EPERM.
         let target_flags = match task_find_by_id(target_id) {
             Some(target) if signal_may_name(target.flags) => target.flags,
             _ => return SyscallResult::Err(Errno::ESRCH),
@@ -300,8 +294,8 @@ define_syscall!(syscall_kill
     }
 
     if targets.len() == 0 {
-        // A selector that matched tasks the caller may not signal is a
-        // permission answer; one that matched nothing at all is not.
+        // A selector that matched only unsignalable tasks is a permission
+        // answer; one that matched nothing at all is not.
         return SyscallResult::Err(if fanout.denied {
             Errno::EPERM
         } else {
@@ -312,6 +306,7 @@ define_syscall!(syscall_kill
     // Deliberately after the permission check: `kill(pid, 0)` is the
     // existence-and-permission probe, so it must be able to answer EPERM.
     if sig == 0 {
+
         return SyscallResult::Ok(0);
     }
 

@@ -1,9 +1,8 @@
 //! Canonical keyboard keycodes — USB HID Keyboard/Keypad usage IDs (page 0x07).
 //!
-//! SlopOS's single, layout-independent keycode space: every keyboard backend
-//! decodes its raw protocol into these usages. Values are the USB HID Usage
-//! Table v1.12 "Keyboard/Keypad Page (0x07)" ids, carried on the wire as the low
-//! 16 bits of an [`super::InputEvent`]'s `data1`.
+//! Every keyboard backend decodes its raw protocol into these layout-independent
+//! usages. Values are USB HID Usage Table v1.12 ids, carried on the wire as the
+//! low 16 bits of an [`super::InputEvent`]'s `data1`.
 //!
 //! Intentionally **not** glob-re-exported at the crate root — reach them as
 //! `slopos_abi::input::keycode::KEY_A` so the short names cannot collide.

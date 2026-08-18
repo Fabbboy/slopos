@@ -115,7 +115,6 @@ impl WindowInfo {
         self.app_id.as_str()
     }
 
-    /// Effective frame width (for decorations/damage). Falls back to buffer width.
     #[inline]
     pub fn effective_width(&self) -> u32 {
         if self.frame_width > 0 {
@@ -125,7 +124,6 @@ impl WindowInfo {
         }
     }
 
-    /// Effective frame height (for decorations/damage). Falls back to buffer height.
     #[inline]
     pub fn effective_height(&self) -> u32 {
         if self.frame_height > 0 {

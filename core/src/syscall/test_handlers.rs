@@ -42,8 +42,6 @@ define_syscall!(syscall_test_report
 
     let task = ctx.task();
 
-    // Build the report before touching the lock: it is a stack value with no
-    // allocation, and the critical section should cover nothing but the push.
     let mut report: TestReport = empty_report();
     report.status = status;
     report.name_len = name_len as u8;
@@ -53,12 +51,9 @@ define_syscall!(syscall_test_report
         report.msg[..msg_len].copy_from_slice(&msg_buf[..msg_len]);
     }
 
-    // Allocate outside the lock, then install under it. The drain side is a
-    // foreign task (`take_test_reports` on a corpse), so the two need
-    // mutual exclusion — but an allocator call inside the critical section is
-    // the shape that deadlocks against the buddy's cross-CPU reuse path, so the
-    // ring is built first and only the install is guarded. The re-check under
-    // the guard makes a lost race drop the spare rather than the winner.
+    // Allocating under `test_reports` deadlocks against the buddy's cross-CPU
+    // reuse path, so the ring is built outside the lock and only the install is
+    // guarded; the re-check drops the loser's spare.
     if task.test_reports.lock().is_none() {
         let Ok(fresh) = alloc_ring() else {
             return Err(Errno::ENOMEM);
@@ -105,8 +100,8 @@ define_syscall!(syscall_run_userland_tests (ctx) -> Result<(), Errno> {
         total_panics,
     );
 
-    // The userland phase drives connect/recv/exec through locks the kernel
-    // phase never reaches, so this is the run's true pool high-water mark.
+    // The userland phase reaches locks the kernel phase never does, so this is
+    // the run's true pool high-water mark.
     slopos_ostd::kdiag::kdiag_dump_lock_graph("post-userland-tests");
     slopos_sched::quota_console::quota_report("post-userland-tests");
     report_reclaim();
@@ -115,17 +110,13 @@ define_syscall!(syscall_run_userland_tests (ctx) -> Result<(), Errno> {
     let _ = kernel_rc;
 
     fn report_reclaim() {
-        // Measured here and not in a kernel `stest!`: the kernel phase runs at
-        // drivers/90, before the services phase mounts ext2, so the block
-        // cache does not exist yet and a reclaim test there would measure an
-        // empty tier and pass vacuously. By this point a full userland run has
-        // warmed it.
+        // Not a kernel `stest!`: the kernel phase runs at drivers/90, before
+        // ext2 is mounted, so the block cache does not exist yet and the
+        // measurement would pass vacuously against an empty tier.
         let available = slopos_ostd::mm::reclaim::reclaimable_pages();
         let freed = slopos_ostd::mm::reclaim::run(available.min(32));
-        // Not compared against the buddy's free count: a reclaimed page goes
-        // to the TLB quarantine first and only reaches a free list once every
-        // CPU has proven it invalidated its translation, so the two numbers
-        // move at different times by design.
+        // Not comparable against the buddy's free count: a reclaimed page sits
+        // in TLB quarantine until every CPU acknowledges the invalidation.
         let quarantined = slopos_mm::page_alloc::quarantine_frames();
         slopos_ostd::mm::reclaim::for_each_reclaimer(|name, pages| {
             klog_info!("RECLAIM[post-userland-tests]: source={name} holds={pages}");
@@ -145,9 +136,8 @@ define_syscall!(syscall_run_userland_tests (ctx) -> Result<(), Errno> {
 });
 
 define_syscall!(syscall_test_panic (ctx) -> Result<(), Errno> {
-    // Runtime-armed fault injection: without the `panic.recover_smoke`
-    // boot flag this is indistinguishable from an unimplemented syscall,
-    // so production images expose no user-reachable panic trigger.
+    // Boot-flag armed so production images expose no user-reachable panic
+    // trigger.
     if !slopos_ostd::boot_flags::has_flag(slopos_ostd::boot_flags::BOOT_FLAG_PANIC_RECOVER_SMOKE) {
         return Err(Errno::ENOSYS);
     }

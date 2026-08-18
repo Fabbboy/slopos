@@ -54,8 +54,6 @@ impl Widget for ImageWidget {
                     (natural.height as f64 * scale) as i32,
                 )
             }
-            // Filling an unbounded axis means the natural extent: there is no
-            // "available space" to cover when the parent named no limit.
             ImageScale::Cover | ImageScale::Fill => Size::new(
                 if constraints.is_width_bounded() {
                     constraints.max_width

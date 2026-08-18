@@ -1,26 +1,14 @@
 //! PTY pair allocation and data routing.
 //!
-//! # Lifetime
+//! Pair lifetime lives in [`super::backing::TtyBacking`]: the master backing
+//! owns the slave strongly, the slave holds the master weakly, and each end's
+//! `Drop` frees its own slot. Cross-end references are `KWeak<TtyBacking>`
+//! links; a data path upgrades one first, which pins the peer's slot for the
+//! operation, so slot reuse can never misroute.
 //!
-//! Pair lifetime lives in [`super::backing::TtyBacking`]: the master
-//! backing owns the slave strongly, the slave holds the master weakly, and
-//! each end's `Drop` frees its own slot. This module only allocates pairs
-//! and routes data between live ends.
-//!
-//! # Peer identity
-//!
-//! Cross-end references are `KWeak<TtyBacking>` links carried in
-//! [`TtyDriverKind`]. A data path upgrades the link first: success pins
-//! the peer's slot for the duration of the operation (a slot is freed only
-//! by its backing's `Drop`, which cannot run while a strong reference
-//! exists); failure means the peer is gone and the write is discarded.
-//! Slot reuse can never misroute — there is no index to go stale.
-//!
-//! # Lock Ordering
-//!
-//! `PTY_ALLOC_LOCK` → `TTY_SLOTS[i]` (never the reverse). `PTY_ALLOC_LOCK`
-//! is **not** held during data-path operations, and backing `Drop` bodies
-//! never take it.
+//! Lock ordering: `PTY_ALLOC_LOCK` → `TTY_SLOTS[i]`, never the reverse.
+//! `PTY_ALLOC_LOCK` is not held on data paths, and backing `Drop` bodies never
+//! take it.
 
 use slopos_ostd::lock_class;
 use slopos_ostd::process::AccountId;
@@ -37,20 +25,11 @@ use super::table::{
 use super::{MAX_TTYS, PacketEvents, Tty, TtyError, TtyFlags, TtyIndex};
 use slopos_ostd::sync::BUS;
 
-// ---------------------------------------------------------------------------
-// Pair-level allocation lock
-// ---------------------------------------------------------------------------
-
-/// Serialises concurrent [`pty_alloc`] calls (find-two-free-slots +
-/// initialise must be atomic against other allocators). Frees don't need
-/// it: a slot's backing `Drop` is its sole freer, and the allocation
-/// bitmap bit is cleared only after the slot is fully empty.
+/// Serialises [`pty_alloc`]: find-two-free-slots + initialise must be atomic
+/// against other allocators. Frees need no lock — a slot's backing `Drop` is
+/// its sole freer and clears the bitmap bit only once the slot is empty.
 static PTY_ALLOC_LOCK: SpinLock<()> =
     SpinLock::new((), lock_class!("PTY_ALLOC_LOCK", LOCK_LEVEL_REGISTRY));
-
-// ---------------------------------------------------------------------------
-// Pair allocation
-// ---------------------------------------------------------------------------
 
 /// Allocate a PTY master/slave pair and return the master's owning
 /// backing (the `/dev/ptmx` open). The slave end is created alongside it,
@@ -68,9 +47,8 @@ pub fn pty_alloc(account: AccountId) -> Result<(TtyIndex, KArc<TtyBacking>), Tty
     let (master_backing, slave_backing) =
         TtyBacking::new_pair(master_idx, slave_idx, account).ok_or(TtyError::OutOfMemory)?;
 
-    // Build both `Tty` states before installing either, so a mid-way
-    // allocation failure leaves the slots untouched (the backings drop
-    // harmlessly against empty slots).
+    // Both states are built before either is installed, so a mid-way
+    // allocation failure leaves the slots untouched.
     let master = Tty::new_pty_master(master_idx, KArc::downgrade(&slave_backing))
         .map_err(|_| TtyError::OutOfMemory)?;
     let slave = Tty::new_pty_slave(slave_idx, KArc::downgrade(&master_backing))
@@ -92,40 +70,16 @@ pub fn pty_alloc(account: AccountId) -> Result<(TtyIndex, KArc<TtyBacking>), Tty
     Ok((master_idx, master_backing))
 }
 
-// ---------------------------------------------------------------------------
-// Data routing
-// ---------------------------------------------------------------------------
-
 /// Master write → push bytes into the slave's line discipline input.
 ///
-/// Upgrading `peer` pins the slave's slot for the whole write; a failed
-/// upgrade means the pair is gone and the write is discarded.
+/// Returns the number of bytes pushed, stopping short once the slave's cooked
+/// buffer reaches the throttle high-water mark; the caller retries the
+/// remainder. A failed peer upgrade means the pair is gone.
 ///
-/// Returns the number of bytes successfully pushed. Stops early when the
-/// slave's cooked buffer hits the throttle high-water mark
-/// (`throttled == true`), enabling short writes and back-pressure. The
-/// caller is responsible for retrying the remainder.
-///
-/// # Throttle granularity (design decision)
-///
-/// Throttle is checked once per `BATCH_SIZE` (64 bytes) rather than
-/// per byte. This is an intentional trade-off:
-///
-/// - **Per-byte checking** requires acquiring the per-slot `SpinLock`
-///   on every byte, turning an O(1) cost into O(n) lock/unlock cycles.
-///   Linux avoids this in `n_tty_receive_buf_common` only because its
-///   `TTY_THROTTLED` flag lives outside the line discipline lock.
-///
-/// - **Batch checking** allows up to `BATCH_SIZE - 1` bytes (63) to be
-///   pushed past `THROTTLE_HIGH_WATER` before the flag is noticed.  With
-///   `COOKED_BUF_SIZE = 8192` and `HIGH_WATER = 6144`, the worst-case
-///   occupancy is ~6207 — well within the remaining 2048-byte headroom.
-///   `push_cooked()` independently guards against actual overflow, so no
-///   data loss occurs.
-///
-/// This is safe because `push_input()` sets `throttled = true` inside
-/// the slot lock when the buffer reaches high-water, and the flag is
-/// visible on the next batch boundary check.
+/// Throttle is sampled once per 64-byte batch, not per byte, which would cost
+/// a slot-lock cycle per byte. The batch may therefore overshoot
+/// `THROTTLE_HIGH_WATER` by up to 63 bytes, inside the 2048 bytes of headroom
+/// `COOKED_BUF_SIZE` leaves; `push_cooked()` guards actual overflow.
 pub fn master_write(peer: &KWeak<TtyBacking>, data: &[u8]) -> usize {
     let Some(slave_pin) = peer.upgrade() else {
         return 0;
@@ -136,10 +90,9 @@ pub fn master_write(peer: &KWeak<TtyBacking>, data: &[u8]) -> usize {
     let slave_idx = slave_pin.index();
     let slave_slot = slave_idx.0 as usize;
 
-    // Check throttle once before starting.  When the slave is throttled,
-    // ordinary input remains back-pressured, but one ldisc-priority control
-    // byte (VINTR/VQUIT/VSUSP under ISIG, VSTART/VSTOP under IXON) may still
-    // enter so job-control signals cannot be stuck behind user input.
+    // While throttled, one ldisc-priority control byte (VINTR/VQUIT/VSUSP under
+    // ISIG, VSTART/VSTOP under IXON) still enters, so job-control signals are
+    // not stuck behind back-pressured input.
     let allow_single_priority = {
         let guard = TTY_SLOTS[slave_slot].lock();
         let Some(tty) = guard.as_ref() else {
@@ -169,10 +122,6 @@ pub fn master_write(peer: &KWeak<TtyBacking>, data: &[u8]) -> usize {
         return 1;
     }
 
-    // Process bytes in batches.  After each batch, re-check the throttle
-    // flag.  `push_input()` sets `throttled = true` inside the slot lock
-    // when the cooked buffer reaches high-water, so the flag is visible
-    // on the next batch boundary check.
     const BATCH_SIZE: usize = 64;
     let mut written = 0usize;
 
@@ -188,9 +137,6 @@ pub fn master_write(peer: &KWeak<TtyBacking>, data: &[u8]) -> usize {
         );
         written += chunk.len();
 
-        // Re-check throttle after processing the batch.  If the slave
-        // just became throttled, return a short write so the caller
-        // blocks in the write() loop until the slave reader drains.
         {
             let guard = TTY_SLOTS[slave_slot].lock();
             if let Some(tty) = guard.as_ref() {
@@ -206,12 +152,8 @@ pub fn master_write(peer: &KWeak<TtyBacking>, data: &[u8]) -> usize {
 
 /// Slave write → push bytes into the master's raw read buffer.
 ///
-/// Upgrading `peer` pins the master's slot; a failed upgrade means the
-/// master is gone and the write is discarded.
-///
-/// Returns the number of bytes successfully pushed into the master's
-/// buffer.  Stops early when the master's input buffer is full,
-/// preventing silent data loss from overflow.
+/// Returns the number of bytes pushed, stopping short when the master's input
+/// buffer is full. A failed peer upgrade means the master is gone.
 pub fn slave_write(peer: &KWeak<TtyBacking>, data: &[u8]) -> usize {
     let Some(master_pin) = peer.upgrade() else {
         return 0;
@@ -229,18 +171,16 @@ pub fn slave_write(peer: &KWeak<TtyBacking>, data: &[u8]) -> usize {
             return 0;
         }
 
-        // A reader parks only while `has_data()` is false — that is the
-        // predicate its wait re-runs — so the false→true edge is the one wake
-        // that cannot be skipped. `should_wake_reader`'s byte batching sits on
-        // top of it and may only suppress redundant wakes: alone it needs
-        // `WAKEUP_CHARS` bytes, and a lone flow-control byte never reaches
-        // that, so a blocked reader would sleep through it.
+        // A reader parks only while `has_data()` is false, so the false→true
+        // edge is the one wake that cannot be skipped: `should_wake_reader`
+        // alone needs `WAKEUP_CHARS` bytes and would sleep through a lone
+        // flow-control byte.
         let was_idle = !master.ldisc.has_data();
 
         let mut count = 0usize;
         for &byte in data {
             if master.ldisc.input_full() {
-                break; // master buffer full — return short write
+                break;
             }
             master.ldisc.input_char(InputEvent::normal(byte));
             count += 1;
@@ -255,10 +195,6 @@ pub fn slave_write(peer: &KWeak<TtyBacking>, data: &[u8]) -> usize {
     }
     written
 }
-
-// ---------------------------------------------------------------------------
-// Queries
-// ---------------------------------------------------------------------------
 
 pub fn is_pty_slave(idx: TtyIndex) -> bool {
     let slot = idx.0 as usize;
@@ -290,10 +226,6 @@ pub fn get_pty_number(idx: TtyIndex) -> Result<u32, TtyError> {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Peer latches (driven by backing Drop and the open paths)
-// ---------------------------------------------------------------------------
-
 /// Latch `PEER_CLOSED` on `idx` and wake its readers/poll waiters so they
 /// observe EOF. Fired from the slave backing's `Drop` against the master.
 pub(crate) fn peer_closed(idx: TtyIndex) {
@@ -322,15 +254,9 @@ pub(crate) fn clear_peer_closed(idx: TtyIndex) {
     }
 }
 
-// ---------------------------------------------------------------------------
-// PTY slave lock management
-// ---------------------------------------------------------------------------
-
-/// Set the PTY slave lock state.
-///
-/// `idx` must refer to a **master** FD — the function resolves the
-/// paired slave and sets its `slave_locked` flag.  Returns
-/// `TtyError::NotAllocated` if `idx` is not a PTY master.
+/// Set the PTY slave lock state. `idx` must refer to a **master** FD; the
+/// paired slave's flag is what changes. `TtyError::NotAllocated` if `idx` is
+/// not a PTY master.
 pub fn set_pty_lock(idx: TtyIndex, locked: bool) -> Result<(), TtyError> {
     let slave = resolve_slave_of_master(idx)?;
     let mut guard = TTY_SLOTS[slave.index().0 as usize].lock();
@@ -339,11 +265,9 @@ pub fn set_pty_lock(idx: TtyIndex, locked: bool) -> Result<(), TtyError> {
     Ok(())
 }
 
-/// Get the PTY slave lock state.
-///
-/// `idx` must refer to a **master** FD — the function resolves the
-/// paired slave and reads its `slave_locked` flag.  Returns
-/// `TtyError::NotAllocated` if `idx` is not a PTY master.
+/// Get the PTY slave lock state. `idx` must refer to a **master** FD; the
+/// paired slave's flag is what is read. `TtyError::NotAllocated` if `idx` is
+/// not a PTY master.
 pub fn get_pty_lock(idx: TtyIndex) -> Result<bool, TtyError> {
     let slave = resolve_slave_of_master(idx)?;
     let guard = TTY_SLOTS[slave.index().0 as usize].lock();

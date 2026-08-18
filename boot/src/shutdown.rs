@@ -35,8 +35,8 @@ fn flush_filesystems_for_shutdown() {
     klog_info!("Kernel shutdown: flushing filesystem caches");
     slopos_fs::ext2_vfs_shutdown_sync();
 }
-/// Map LAPIC/IOAPIC MMIO before a shutdown path touches it — the
-/// caller may arrive from user context, where it is not mapped.
+/// Map LAPIC/IOAPIC MMIO: a shutdown path may arrive from user context, where it
+/// is not mapped.
 fn ensure_shutdown_mmio_mapped() {
     activate_post_user_fault();
 }
@@ -96,8 +96,6 @@ fn poweroff_hardware() {
         None => klog_info!("ACPI poweroff: FADT unavailable; using fallback ports"),
     }
 
-    // Hypervisor-specific PM1A_CNT ports (QEMU 0x604, Bochs 0xB004, VirtualBox
-    // 0x4004); harmless no-ops on bare metal.
     ostd_power::acpi_poweroff_broadcast();
 }
 pub fn kernel_quiesce_interrupts() {
@@ -132,8 +130,8 @@ pub fn kernel_drain_serial_output() {
 }
 pub fn kernel_shutdown(reason: *const c_char) -> ! {
     ensure_shutdown_mmio_mapped();
-    // Before anything below perturbs the machine: the summary characterises
-    // steady-state kernel behaviour.
+    // Must precede anything below that perturbs the machine: the summary
+    // characterises steady-state kernel behaviour.
     slopos_ostd::watchdog::snapshot_max_stalls();
     // Must precede `disable_interrupts`: the virtio-blk completion path needs
     // IRQs and the scheduler to post the used-buffer event.
@@ -150,10 +148,10 @@ pub fn kernel_shutdown(reason: *const c_char) -> ! {
         klog_info!("Reason: {}", cstr_to_str_lossy(reason));
     }
 
-    // Tasks are torn down with the scheduler and interrupts still enabled: a
-    // destructor frees to the buddy allocator, whose reuse path waits on
-    // synchronous cross-CPU TLB drains. The I/O threads stop first — a thread
-    // parked on a paused CPU never reaches its own exit point.
+    // Teardown runs with the scheduler and interrupts still enabled: a destructor
+    // frees to the buddy allocator, whose reuse path waits on synchronous
+    // cross-CPU TLB drains. I/O threads stop first — one parked on a paused CPU
+    // never reaches its own exit point.
     stop_kernel_io_tasks();
 
     if task_shutdown_all() != 0 {
@@ -179,8 +177,8 @@ pub fn kernel_shutdown(reason: *const c_char) -> ! {
     halt();
 }
 
-/// Terminal halt: attempt ACPI power-off, then spin forever. All quiescing
-/// (IPI broadcast, APIC teardown, serial drain) must already have happened.
+/// Terminal halt. All quiescing (IPI broadcast, APIC teardown, serial drain)
+/// must already have happened.
 fn halt() -> ! {
     poweroff_hardware();
 

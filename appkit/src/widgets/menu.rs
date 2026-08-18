@@ -14,8 +14,8 @@ pub struct MenuWidget {
     on_action: Option<Box<dyn Fn(usize) -> Box<dyn Any>>>,
     hovered_index: Option<usize>,
     focused: bool,
-    /// Item height from the last measure. Hit testing must use the same value
-    /// the paint pass used, or clicks land on the row above or below.
+    /// Item height from the last measure; hit testing must use the same value
+    /// paint did, or clicks land on the neighbouring row.
     item_height: i32,
 }
 
@@ -257,8 +257,7 @@ impl Widget for MenuWidget {
                     }
                     EventResponse::Consumed
                 }
-                // Left as Ignored so the enclosing Popup sees it and dismisses;
-                // consuming it here would trap the menu open.
+                // Ignored so the enclosing Popup sees Escape and dismisses.
                 Key::Named(NamedKey::Escape) => EventResponse::Ignored,
                 _ => EventResponse::Ignored,
             },

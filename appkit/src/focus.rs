@@ -42,7 +42,6 @@ impl FocusManager {
         self.focused == Some(id)
     }
 
-    /// Whether focus rings should be rendered.
     pub fn is_focus_visible(&self) -> bool {
         self.keyboard_active
     }
@@ -60,7 +59,6 @@ impl FocusManager {
         self.keyboard_active = false;
     }
 
-    /// Rebuild the tab chain by walking the tree depth-first.
     pub fn rebuild_tab_chain(&mut self, root: &dyn Widget) {
         self.tab_chain.clear();
         Self::collect_focusable(root, &mut self.tab_chain);
@@ -75,7 +73,6 @@ impl FocusManager {
         }
     }
 
-    /// The topmost scope's chain, or the global one.
     fn active_chain(&self) -> &[WidgetId] {
         if let Some(scope) = self.scope_stack.last() {
             &scope.chain

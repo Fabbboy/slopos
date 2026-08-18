@@ -1,11 +1,6 @@
 //! Keyboard adapter integration tests: synthetic scancodes → focused task's
 //! input queue, asserting the canonical `(keycode, codepoint, modifiers)`
 //! payload alongside the legacy `(scancode, ascii)` bytes.
-//!
-//! The pure decode/keymap logic is covered exhaustively by the host-testable
-//! `keymap-core` crate; these tests verify the kernel glue end-to-end through
-//! `handle_scancode` → `input_route_key_full` → the per-task queue, including
-//! the **numeric-keypad fix** (KP digits now decode and produce text).
 
 use slopos_abi::input::{InputEventType, KEY_FLAG_FROM_KEYPAD, MODIFIER_SHIFT};
 use slopos_keymap_core::keycode;
@@ -16,8 +11,6 @@ use crate::ps2::keyboard::{handle_scancode, reset_state_for_test};
 
 const DUMMY_TASK: u32 = 9001;
 
-/// Reset keyboard state, claim keyboard focus for the dummy task, and drain any
-/// stale events.
 fn setup() {
     reset_state_for_test();
     input_cleanup_task(DUMMY_TASK);
@@ -25,16 +18,13 @@ fn setup() {
     while input_poll(DUMMY_TASK).is_some() {}
 }
 
-/// Release focus, free the queue slot, and reset keyboard state so nothing
-/// leaks into other tests or the live keyboard handler.
 fn teardown() {
     input_set_keyboard_focus(0);
     input_cleanup_task(DUMMY_TASK);
     reset_state_for_test();
 }
 
-/// KP7 (set-1 0x47) decodes, and with Num Lock on (the default) produces the
-/// digit '7'.
+/// KP7 with Num Lock on (the default) produces the digit '7'.
 pub fn test_keypad_numlock_digit() -> TestResult {
     setup();
     handle_scancode(0x47); // KP7 make code
@@ -60,8 +50,6 @@ pub fn test_keypad_numlock_digit() -> TestResult {
     pass!()
 }
 
-/// A plain letter carries the canonical keycode + codepoint and the legacy
-/// ascii byte.
 pub fn test_letter_canonical_payload() -> TestResult {
     setup();
     handle_scancode(0x1E); // 'a' make code
@@ -81,14 +69,12 @@ pub fn test_letter_canonical_payload() -> TestResult {
     pass!()
 }
 
-/// Shift makes the letter uppercase and the event carries the Shift modifier
-/// snapshot.
 pub fn test_shift_letter_uppercase_and_modifier() -> TestResult {
     setup();
     handle_scancode(0x2A); // Left Shift press
     handle_scancode(0x1E); // 'a' -> 'A'
-    let _shift_ev = input_poll(DUMMY_TASK); // shift press event
-    let ev = input_poll(DUMMY_TASK); // the 'A' event
+    let _shift_ev = input_poll(DUMMY_TASK);
+    let ev = input_poll(DUMMY_TASK);
     teardown();
 
     let ev = match ev {
@@ -107,8 +93,8 @@ pub fn test_shift_letter_uppercase_and_modifier() -> TestResult {
     pass!()
 }
 
-/// An extended arrow key decodes to the canonical KEY_UP and still carries the
-/// legacy 0x82 pseudo-code the terminal/shell expect.
+/// Extended arrows still carry the legacy 0x82 pseudo-code the terminal/shell
+/// expect.
 pub fn test_extended_arrow_legacy_and_canonical() -> TestResult {
     setup();
     handle_scancode(0xE0); // extended prefix
@@ -129,8 +115,6 @@ pub fn test_extended_arrow_legacy_and_canonical() -> TestResult {
     pass!()
 }
 
-/// Releases now produce a KeyRelease event that carries the canonical keycode
-/// but no text (legacy ascii 0) — consumers that ignore releases are unaffected.
 pub fn test_press_then_release_events() -> TestResult {
     setup();
     handle_scancode(0x1E); // 'a' press
@@ -162,10 +146,8 @@ pub fn test_press_then_release_events() -> TestResult {
     pass!()
 }
 
-/// After swapping in the Swiss German layout at runtime, the IRQ handler
-/// resolves against it: the physical-Y key produces `z` (QWERTZ) and AltGr+2
-/// produces `@` — proving `handle_scancode` reads the loaded layout, not the
-/// hardcoded default. (Restored to the default in `teardown`.)
+/// `handle_scancode` resolves against the layout loaded at runtime, not the
+/// hardcoded default.
 pub fn test_runtime_layout_swap() -> TestResult {
     use crate::ps2::keyboard::set_layout;
     use slopos_keymap_core::{LayoutTable, parse};

@@ -24,20 +24,16 @@ pub enum PciProbeError {
     /// Initial vendor/device match passed but post-inspection rules
     /// rejected the candidate (e.g., feature negotiation failed).
     Mismatch,
-    /// Resource allocation failed during probe (heap, frames, DMA pools).
     OutOfMemory,
-    /// The device was reachable but reported a fault or bad state.
     DeviceFault,
     /// A required capability (e.g., MSI-X) is unavailable on the device.
     Unsupported,
-    /// The driver matched and would bind, but a dependency is not ready yet;
-    /// the registry retries it in a later bounded pass.
+    /// Matched and would bind, but a dependency is not ready; the registry
+    /// retries it in a later bounded pass.
     Deferred,
 }
 
-/// One declarative match rule in a driver's `match_table`. A driver matches a
-/// device when **any** rule in its table matches (or its imperative `fallback`
-/// returns `true`).
+/// One declarative match rule in a driver's `match_table`.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum PciMatch {
@@ -63,7 +59,6 @@ impl PciMatch {
         }
     }
 
-    /// The `(vendor << 16) | device` index key for the exact-pair case.
     const fn vd_key(&self) -> Option<u32> {
         match *self {
             PciMatch::VendorDevice { vendor, device } => {
@@ -73,8 +68,8 @@ impl PciMatch {
         }
     }
 
-    /// The class index key for every class-shaped rule. The index only narrows
-    /// candidates; [`PciMatch::matches`] still verifies the full predicate.
+    /// The index only narrows candidates; [`PciMatch::matches`] still verifies
+    /// the full predicate.
     const fn cs_key(&self) -> Option<u16> {
         match *self {
             PciMatch::VendorClass { class, .. }

@@ -4,8 +4,6 @@
 //! fixed-size record. `copy_to_user` can fault and the allocator must not be
 //! reached under a cli-disabling lock, so each query allocates its staging
 //! vector first, fills it under the lock, then copies out after dropping it.
-//! Truncation is read from the header (`total_count > record_count`), so a
-//! buffer too small to hold the header is `EINVAL`.
 
 use slopos_abi::Errno;
 use slopos_abi::net::{
@@ -127,8 +125,7 @@ fn render_route(src: &slopos_net::RouteEntry) -> UserRoute {
     out
 }
 
-/// Collect every interface, reserving up front so the fill under the table
-/// lock never reaches the allocator.
+/// Collect every interface, reserving up front so the fill under the table lock never allocates.
 fn collect_ifaces() -> Result<KVec<Iface>, Errno> {
     let mut staging: KVec<Iface> =
         KVec::with_capacity(slopos_abi::net::NET_MAX_IFACES).map_err(|_| Errno::ENOMEM)?;
@@ -209,8 +206,7 @@ fn query_sockets(
     caller_table: FdTable,
     net_admin: bool,
 ) -> Result<u64, Errno> {
-    // Allocated before the collector takes the socket table lock, and sized
-    // from the table's live capacity: the slab grows past `MAX_SOCKETS`.
+    // Sized from the table's live capacity: the slab grows past `MAX_SOCKETS`.
     let capacity = slopos_net::socket::socket_table_capacity();
     let mut staging: KVec<slopos_net::socket::SocketRow> =
         KVec::with_capacity(capacity).map_err(|_| Errno::ENOMEM)?;
@@ -231,8 +227,6 @@ fn render_sock(
     caller_table: FdTable,
     net_admin: bool,
 ) -> UserSockInfo {
-    // Field by field from a zeroed value: the ABI has no implicit padding, so
-    // no uninitialised byte can reach user space.
     let mut out = UserSockInfo::default();
     out.local_addr = src.local_ip;
     out.remote_addr = src.remote_ip;
@@ -332,7 +326,7 @@ fn query_dhcp(buf: u64, len: usize, ifindex: u32) -> Result<u64, Errno> {
     Ok(core::mem::size_of::<UserNetQueryHdr>() as u64 + (written * size) as u64)
 }
 
-/// The neighbour cache, filtered to one interface when asked. An unknown
+/// The neighbour cache, filtered to one interface when asked; an unknown
 /// interface yields nothing rather than everything.
 fn query_neigh(buf: u64, len: usize, ifindex: u32) -> Result<u64, Errno> {
     let dev = if ifindex == NET_IFINDEX_NONE {
@@ -348,7 +342,6 @@ fn query_neigh(buf: u64, len: usize, ifindex: u32) -> Result<u64, Errno> {
         }
     };
 
-    // Allocates and returns with the cache lock already released.
     let (staging, total) = NEIGHBOR_CACHE.snapshot_owned(dev);
 
     let size = core::mem::size_of::<UserNeigh>();

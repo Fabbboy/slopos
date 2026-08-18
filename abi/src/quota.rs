@@ -1,8 +1,6 @@
 //! Resource-accounting vocabulary: the kinds, their units, and the errno each
 //! refusal is reported as. The mechanism lives in `slopos-ostd`; the vocabulary
-//! is here because this crate carries no `#![feature(...)]` and userland links
-//! it — which is also why the axis marker types below duplicate
-//! [`ResourceKind`] rather than using an enum const-generic parameter.
+//! is here because this crate carries no `#![feature(...)]` and userland links it.
 
 use crate::errno::Errno;
 
@@ -35,8 +33,7 @@ pub enum ResourceKind {
 pub const KIND_COUNT: usize = 8;
 
 impl ResourceKind {
-    /// Every kind, in discriminant order — the iteration order of every dump
-    /// and every audit.
+    /// Discriminant order — the iteration order of every dump and every audit.
     pub const ALL: [ResourceKind; KIND_COUNT] = [
         ResourceKind::FdSlot,
         ResourceKind::ObjectRow,
@@ -70,7 +67,6 @@ impl ResourceKind {
         }
     }
 
-    /// What one unit of this kind measures.
     #[inline]
     pub const fn unit(self) -> Unit {
         match self {
@@ -79,31 +75,26 @@ impl ResourceKind {
             | ResourceKind::Task
             | ResourceKind::Process
             | ResourceKind::Custody => Unit::Count,
-            // `PinnedBytes` is named for the resource, not the unit: the charge
-            // is in pages, because 1 GiB of bytes overflows the arena's `u32`
-            // and a sub-page pin still holds a whole frame against reclaim.
+            // `PinnedBytes` charges in pages: a byte count overflows the arena's
+            // `u32`, and a sub-page pin still holds a whole frame against reclaim.
             ResourceKind::Pages | ResourceKind::KernelMeta | ResourceKind::PinnedBytes => {
                 Unit::Pages
             }
         }
     }
 
-    /// When the charge is given back.
     #[inline]
     pub const fn refund(self) -> Refund {
         match self {
             // A `Task`'s destruction is deferred to the graveyard, so a
-            // `Drop`-refund would keep exited tasks charged until the drain —
-            // spurious `EAGAIN` on fork under exactly the load the quota exists
-            // to bound.
+            // `Drop`-refund would keep exited tasks charged until the drain.
             ResourceKind::Task => Refund::OnExitLatch,
             _ => Refund::OnDrop,
         }
     }
 
-    /// The errno a refused charge of this kind is reported as — always the code
-    /// the corresponding call site already returns on its own capacity failure,
-    /// so enforcement mints no new code at the ABI boundary.
+    /// Always the code the corresponding call site already returns on its own
+    /// capacity failure, so enforcement mints no new code at the ABI boundary.
     #[inline]
     pub const fn errno(self) -> Errno {
         match self {
@@ -138,53 +129,46 @@ impl Unit {
 }
 
 /// When a charge of a given kind is given back. A property of the kind, never
-/// of the call site: two sites refunding one kind differently is how a ledger
-/// starts disagreeing with itself.
+/// of the call site.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Refund {
-    /// The token's `Drop` refunds.
     OnDrop,
-    /// The refund is applied at the task exit latch, because the object's own
-    /// destruction is deferred past the point the resource is actually free.
+    /// Applied at the task exit latch: the object's own destruction is deferred
+    /// past the point the resource is actually free.
     OnExitLatch,
 }
 
 /// The enforced per-process default for this kind, or [`NO_LIMIT_SENTINEL`]
 /// where no ceiling is enforced yet.
 ///
-/// Measured, never chosen — but deliberately a different number, in a different
+/// Measured, never chosen — and deliberately a different number, in a different
 /// file, from the gate ceiling in `scripts/gates/quota/<variant>.txt`, so the
-/// ratchet never ends up measuring its own configuration.
+/// ratchet never measures its own configuration.
 #[inline]
 pub const fn default_process_limit(kind: ResourceKind) -> u32 {
     match kind {
-        // The per-process descriptor table is 256 entries; measured worst
-        // single process was 18.
+        // The per-process descriptor table is 256 entries; measured worst 18.
         ResourceKind::FdSlot => 256,
-        // Strictly above the descriptor ceiling, and that relation is
-        // load-bearing: an `open` charges the object row before the descriptor
-        // number, so an equal bound would refuse with `ENFILE` where POSIX
-        // requires `EMFILE`. Measured worst case 10, against 18 descriptors.
+        // Must stay strictly above the descriptor ceiling: an `open` charges the
+        // object row before the descriptor number, so an equal bound would refuse
+        // with `ENFILE` where POSIX requires `EMFILE`. Measured worst 10.
         ResourceKind::ObjectRow => 512,
         // Threads per process, against a global `MAX_TASKS` of 8192.
         ResourceKind::Task => 512,
-        // `MAX_PROCESSES` is 256, so a principal may spawn a quarter of the
-        // table before it is refused.
+        // `MAX_PROCESSES` is 256: a quarter of the table per principal.
         ResourceKind::Process => 64,
         // In-flight `SCM_RIGHTS` references, held by no descriptor table; the
         // structural system-wide bound is 8 fds x 2 directions x 16 pairs.
         ResourceKind::Custody => 64,
         // 16 MiB of pinned memory per principal, charged in pages.
         ResourceKind::PinnedBytes => 4096,
-        // 8 MiB per principal — today its task stacks, at 12 pages each. This
-        // bounds the memory, not the thread count, so it binds independently of
-        // the `Task` ceiling.
+        // 8 MiB per principal — today its task stacks, at 12 pages each. Bounds
+        // the memory, not the thread count, so it binds independently of `Task`.
         ResourceKind::KernelMeta => 2048,
-        // Mapped *virtual* pages -- `RLIMIT_AS`, not RSS: a VA bound is
-        // refusable at the syscall that asks for it, which is the only place a
-        // refusal has an errno to travel back on, whereas an RSS bound needs a
-        // reclaim disposition for a process already over it. 256 MiB per
-        // principal, against a measured worst case of 30 998 pages.
+        // Mapped *virtual* pages -- `RLIMIT_AS`, not RSS: a VA bound is refusable
+        // at the syscall that asks for it, the only place a refusal has an errno
+        // to travel back on, whereas an RSS bound needs a reclaim disposition for
+        // a process already over it. 256 MiB, against a measured worst of 30 998.
         ResourceKind::Pages => 65536,
     }
 }
@@ -199,15 +183,13 @@ pub enum QuotaMode {
     /// measures.
     Off,
     /// An over-limit charge is counted as a denial and *granted*. The tier the
-    /// peaks are measured on: a system that dies at the first over-limit
-    /// cannot report what its real peak would have been.
+    /// peaks are measured on: dying at the first over-limit hides the real peak.
     Warn,
     /// An over-limit charge is refused with the kind's errno.
     Enforce,
 }
 
-// `RLIMIT_*` numbering and `struct rlimit64` layout follow Linux's
-// `asm-generic/resource.h`.
+// `RLIMIT_*` numbering and `struct rlimit64` layout follow Linux's `asm-generic/resource.h`.
 
 /// `struct rlimit64`. Soft limit, then hard limit.
 #[repr(C)]
@@ -226,10 +208,9 @@ pub const RLIMIT_NOFILE: u32 = 7;
 pub const RLIMIT_MEMLOCK: u32 = 8;
 pub const RLIMIT_AS: u32 = 9;
 
-/// How a `RLIMIT_*` maps onto a [`ResourceKind`], and what one unit of the
-/// limit is worth in that kind's units. The scale is what stops the two
-/// vocabularies disagreeing: `RLIMIT_AS` and `RLIMIT_MEMLOCK` are
-/// byte-denominated in the ABI while the arena counts pages.
+/// How a `RLIMIT_*` maps onto a [`ResourceKind`]. The scale reconciles the two
+/// vocabularies: `RLIMIT_AS` and `RLIMIT_MEMLOCK` are byte-denominated in the
+/// ABI while the arena counts pages.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct RLimitMapping {
     pub kind: ResourceKind,
@@ -237,9 +218,6 @@ pub struct RLimitMapping {
     pub scale: u64,
 }
 
-/// The [`ResourceKind`] a `RLIMIT_*` names, or `None` for one this kernel does
-/// not enforce.
-///
 /// `None` rather than a plausible-looking infinity: a caller cannot distinguish
 /// "unbounded" from "unimplemented", so an unmapped resource is `EINVAL`, which
 /// it can act on.
@@ -254,7 +232,6 @@ pub const fn rlimit_mapping(resource: u32) -> Option<RLimitMapping> {
             kind: ResourceKind::Process,
             scale: 1,
         }),
-        // Byte-denominated in the ABI; the arena counts pages.
         RLIMIT_AS | RLIMIT_DATA => Some(RLimitMapping {
             kind: ResourceKind::Pages,
             scale: 4096,
@@ -267,9 +244,9 @@ pub const fn rlimit_mapping(resource: u32) -> Option<RLimitMapping> {
     }
 }
 
-// One zero-sized type per kind. `slopos-ostd` seals them and hangs the axis
-// trait off each, buying associated cost and amount types that an enum
-// const-generic parameter could not — for no feature gate.
+// One zero-sized type per kind. `slopos-ostd` seals them and hangs the axis trait
+// off each, buying associated cost and amount types an enum const-generic
+// parameter could not — with no feature gate.
 
 macro_rules! axes {
     ($($(#[$doc:meta])* $name:ident),* $(,)?) => {
@@ -282,21 +259,13 @@ macro_rules! axes {
 }
 
 axes! {
-    /// [`ResourceKind::FdSlot`].
     FdSlot,
-    /// [`ResourceKind::ObjectRow`].
     ObjectRow,
-    /// [`ResourceKind::Task`].
     TaskCount,
-    /// [`ResourceKind::Process`].
     ProcCount,
-    /// [`ResourceKind::Pages`].
     PagesAxis,
-    /// [`ResourceKind::PinnedBytes`].
     PinnedBytesAxis,
-    /// [`ResourceKind::Custody`].
     CustodyAxis,
-    /// [`ResourceKind::KernelMeta`].
     KernelMetaAxis,
 }
 

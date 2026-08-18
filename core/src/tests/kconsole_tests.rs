@@ -1,8 +1,7 @@
 //! Kernel-side tests for the diagnostic console.
 //!
 //! These assert on state a probe command recorded rather than on log text,
-//! because swapping the klog backend is process-global. The one exception
-//! searches the log ring directly, which tolerates other CPUs interleaving.
+//! because swapping the klog backend is process-global.
 
 use core::sync::atomic::{AtomicU32, Ordering};
 
@@ -52,8 +51,8 @@ fn run_probe_destructive(_kc: &mut KConsole<'_>) {
     DESTRUCTIVE_RUNS.fetch_add(1, Ordering::Relaxed);
 }
 
-/// Run whatever is queued through the real bottom-half point — the same pair
-/// production uses. Nothing here forges a `BhContext`.
+/// Run whatever is queued through the real bottom-half point; nothing here
+/// forges a `BhContext`.
 fn pump() {
     bh::raise();
     bh::run_pending_if_due();
@@ -68,7 +67,6 @@ fn with_policy<R>(cfg: KConfig, f: impl FnOnce() -> R) -> R {
     out
 }
 
-/// Every registered command is reachable and described.
 pub fn test_kcon_registry_is_populated() -> TestResult {
     let cmds = kconsole::commands();
     if cmds.is_empty() {
