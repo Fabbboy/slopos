@@ -67,19 +67,16 @@ impl Surface {
         })
     }
 
-    /// Compositor-assigned surface identifier.
     #[inline]
     pub fn surface_id(&self) -> SurfaceId {
         self.protocol_surface_id
     }
 
-    /// Compositor-assigned toplevel identifier.
     #[inline]
     pub fn toplevel_id(&self) -> ToplevelId {
         self.protocol_toplevel_id
     }
 
-    /// Update the stored dimensions (called by Window after a renderer resize).
     #[inline]
     pub fn set_size(&mut self, width: u32, height: u32) {
         self.width = width;
@@ -106,7 +103,6 @@ impl Surface {
         self.bytes_pp
     }
 
-    /// Protocol handle (for callers that need direct client access).
     #[inline]
     pub fn protocol_handle(&self) -> &ProtocolHandle {
         &self.handle

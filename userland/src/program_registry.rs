@@ -6,14 +6,11 @@ pub struct ProgramSpec {
     pub path: &'static str,
     /// The tier this program is *requested* at. User space may name only
     /// `Normal` and `Low`; anything else is `EINVAL` at the spawn boundary. A
-    /// program that needs a higher tier is given it kernel-side by program
-    /// identity — the compositor runs at `High` despite this field saying
-    /// `Normal`.
+    /// program needing a higher tier is given it kernel-side by program identity.
     pub priority: TaskPriority,
     /// The *unprivileged* flags this program is spawned with. Privileged bits
     /// (`SYSTEM`, `COMPOSITOR`, `DISPLAY_EXCLUSIVE`, `NO_PREEMPT`) are refused
-    /// with `EPERM` if named here; the kernel confers them by program identity
-    /// instead.
+    /// with `EPERM` if named here; the kernel confers them by program identity.
     pub flags: u16,
     pub desc: &'static str,
 }
@@ -107,9 +104,6 @@ const PROGRAM_REGISTRY: &[ProgramSpec] = &[
     // one binary renders whichever name was asked for. A canonical entry must
     // precede its aliases — `resolve_program_path` returns the first match, so
     // a lookup by path never reports an alias.
-    //
-    // `netstat` also carries `-r` (routing table) and `-i` (interface
-    // counters), which are different questions rather than different spellings.
     ProgramSpec {
         name: "netstat",
         path: "/bin/ss",
