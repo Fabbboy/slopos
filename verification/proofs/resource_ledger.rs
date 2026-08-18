@@ -2,84 +2,52 @@
 //
 // Machine-checks the accounting core of `slopos_ostd::process::quota` — the
 // `.bss` account arena (`arena.rs`), the linear `Reservation`/`Charge` tokens
-// (`token.rs`), and the hierarchical debit walk `try_charge` performs. The
-// property that matters is not "the counter is roughly right": it is that a
-// *refused* charge is the identity on every row, including the batch that
-// succeeded at level k and failed at k+1, which is the case a hand-written
-// cancel loop gets wrong.
+// (`token.rs`), and the hierarchical debit walk `try_charge` performs. Six
+// obligations:
 //
-// Six obligations:
+//   (L1) EQUALITY, not inequality: `used[i] == live_sum[i]` at every level.
+//        `used >= live` could not catch a phantom refund — a refund with no
+//        charge behind it — which is what the linear token exists to prevent.
 //
-//   (L1) EQUALITY, not inequality. `used[i] == live_sum[i]` at every level:
-//        the row holds exactly the sum of the charges outstanding against it.
-//        An inequality (`used >= live`) cannot catch a *phantom refund* — a
-//        refund with no charge behind it — which is the failure the linear
-//        token exists to eliminate, so the obligation is stated as equality
-//        and nothing weaker.
+//   (L2) AS A STEP PROPERTY: no successful `try_charge` leaves `used > limit`.
+//        The global form is false the instant `LowerLimit` exists — lowering a
+//        ceiling cannot retroactively refuse the outstanding charges.
 //
-//   (L2) AS A STEP PROPERTY. No successful `try_charge` leaves `used > limit`.
-//        Deliberately not the global form `forall states. used <= limit`,
-//        which is false the instant `LowerLimit` exists — an operator lowering
-//        a ceiling below what is already held does not retroactively refuse
-//        the outstanding charges, and cannot. The honest claim is about the
-//        step, and it is the claim the ceiling actually makes.
+//   (L3a) NO DOUBLE REFUND: a charge is refunded at most once. A double refund
+//        under-counts, handing out headroom that does not exist.
 //
-//   (L3a) NO DOUBLE REFUND. A charge is refunded at most once. Delivered in
-//        the tree by the by-value consume (`Charge` is not `Clone`, and
-//        `release` takes `self`); modelled here as a per-charge `live` flag
-//        that only a transition can clear. This is the half that matters,
-//        because a double refund is the *under*-count: it makes a principal
-//        look emptier than it is and hands out headroom that does not exist.
-//
-//   (L4) A DENIED CHARGE IS IDENTITY ON EVERY ROW, including the partial
-//        batch. This is the hard one and the reason `Reservation` exists as a
+//   (L4) A DENIED CHARGE IS IDENTITY ON EVERY ROW, including the batch that
+//        succeeded at level k and failed at k+1. The reason `Reservation` is a
 //        separate type from `Charge`.
 //
 //   (L6) `settle` IS IDEMPOTENT AND ONLY SHRINKS, and reclaim gives back only
-//        what was charged. The address-space page charge is the one that
-//        tracks a quantity changing over its holder's life, so it is the one
-//        where "the token is unique" does not already imply "the number is
-//        right". Idempotence is what makes a split exact: a region carved in
-//        two settles against the tree's new span, and settling again must
-//        change nothing or a second call on an unchanged map would refund
-//        pages the map still holds. Shrink-only is what makes a `munmap`
-//        unrefusable against a ceiling it is reducing the use of.
+//        what was charged: a second settle on an unchanged map must not refund
+//        pages the map still holds, and a `munmap` must not be refusable
+//        against a ceiling it is reducing the use of.
 //
-//   (L5) A STALE REFUND IS IDENTITY. A refund whose generation does not match
-//        the row's touches nothing. This is what makes a leaked charge
-//        self-healing rather than a permanent lie, and what lets a charge
-//        outlive its process (an in-flight SCM_RIGHTS FileRef, a keepalive pin
-//        the NIC has not reclaimed) without corrupting the slot's next
-//        occupant.
+//   (L5) A STALE REFUND IS IDENTITY: a refund whose generation does not match
+//        the row's touches nothing, which is what lets a charge outlive its
+//        process without corrupting the slot's next occupant.
 //
-// DELETED as an obligation, deliberately: "refunded exactly once". It assumes
-// `Drop` always runs, which is false for a fault frame the unwinder skips and
-// false for `mem::forget` — which is *already called four times* inside a
-// `#![forbid(unsafe_code)]` crate in this tree (drivers/src/irq.rs:57-58,
-// drivers/src/touchpad/mod.rs:283-284). What holds is L3a (at most once) plus
-// the runtime audit for the other direction; claiming linearity here would be
-// claiming something Rust does not give.
+// Not claimed: "refunded exactly once". It assumes `Drop` always runs, which
+// is false for a fault frame the unwinder skips and for `mem::forget`. What
+// holds is L3a plus the runtime audit for the other direction.
 //
-// NOT IN MODEL, and audited instead — named here and in verification/STATUS.md:
+// Not in model, audited instead — see verification/STATUS.md:
 //
 //   * The `fetch_add`/`fetch_sub` memory ordering on each row, and the
-//     ordering between a refund and the slot release it may race. Verus has
-//     no weak-memory model. Each method body is one atomic-bounded `Step`
-//     here; the real `charge_row` is a compare-exchange loop and
-//     `release_row` another, so an inductive invariant that survives every
-//     `Step` is the sequential skeleton of the concurrency claim, not the
-//     whole of it. Covered by KernMiri under both Stacked and Tree Borrows,
-//     plus the in-kernel `quotacheck` audit.
+//     ordering between a refund and the slot release it may race. Verus has no
+//     weak-memory model, so each method body is one atomic-bounded `Step` here
+//     and the induction is the sequential skeleton of the concurrency claim,
+//     not the whole of it.
 //
 //   * The `Charge` token's *placement* — that it lives in exactly one field
-//     for exactly the object's lifetime. That is a syntactic property of the
-//     tree, enforced by `scripts/check_charge_linearity.sh`, not a property
-//     of this state machine.
+//     for exactly the object's lifetime, which is syntactic and enforced by
+//     `scripts/check_charge_linearity.sh`.
 //
-// Modelling strategy. Flat scalars rather than a `Map`, in the house style: a
-// three-level chain (root, parent, leaf) instantiated concretely, which is
-// enough to exhibit every partial-batch shape because the debit walk is
-// uniform in depth and bounded by MAX_ACCOUNT_DEPTH.
+// Flat scalars rather than a `Map`: a three-level chain (root, parent, leaf)
+// instantiated concretely, enough to exhibit every partial-batch shape because
+// the debit walk is uniform in depth and bounded by MAX_ACCOUNT_DEPTH.
 
 use vstd::prelude::*;
 

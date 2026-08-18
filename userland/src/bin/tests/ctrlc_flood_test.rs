@@ -54,7 +54,7 @@ fn open_pair() -> Option<(i32, i32)> {
 }
 
 /// The session/foreground dance every job-control shell performs on its
-/// controlling TTY (mirrors the shell's initialize_job_control()).
+/// controlling TTY.
 fn child_become_fg(slave_fd: i32) {
     let _ = process::ignore_signal(SIGTTOU);
     let _ = process::ignore_signal(SIGTTIN);
@@ -97,7 +97,7 @@ fn drain_master(master_fd: i32) -> usize {
         }
         total += n;
         if total > 64 * 1024 {
-            break; // defensive bound; the assert below fails anyway
+            break;
         }
     }
     total
@@ -111,18 +111,17 @@ fn run_flood_case(install_handler: bool, noflsh: bool) -> Option<(i32, usize)> {
             return None;
         }
     };
-    // The parent NEVER drains during the flood — that is the point: the
-    // master read buffer must fill so the child blocks inside write().
+    // The parent never drains during the flood: the master read buffer must
+    // fill so the child blocks inside write().
     let _ = fs::set_fd_nonblocking(master_fd);
 
     let pid = process::fork();
     if pid == 0 {
-        // CHILD: become the foreground job on the slave, then flood.
         child_become_fg(slave_fd);
         if noflsh {
-            // NOFLSH: ISIG must still fire but must NOT flush the queues —
-            // the blocked writer can then only unwind via the pending-signal
-            // check in its wait predicate.
+            // NOFLSH: ISIG must still fire but must not flush the queues, so the
+            // blocked writer can only unwind via the pending-signal check in its
+            // wait predicate.
             if let Ok(mut t) = fs::tcgetattr(slave_fd) {
                 t.c_lflag |= LocalFlags::NOFLSH;
                 let _ = fs::tcsetattr(slave_fd, &t);
@@ -152,8 +151,8 @@ fn run_flood_case(install_handler: bool, noflsh: bool) -> Option<(i32, usize)> {
         sys_core::yield_now();
     }
 
-    // The interrupt: one 0x03 into the master. Travels master->slave, so a
-    // full master READ buffer must not impede it.
+    // 0x03 travels master->slave, so a full master READ buffer must not impede
+    // it.
     if fs::write_slice(master_fd, b"\x03").is_err() {
         eprintln!("ctrlc_flood_test: writing VINTR to master failed");
         let _ = kill_and_reap(pid);
@@ -191,8 +190,8 @@ fn test_ctrlc_kills_flooding_fg_child() -> bool {
         );
         return false;
     }
-    // ISIG output flush: the flood must have been discarded. Only bytes
-    // written after the flush (the ^C caret echo) may remain.
+    // ISIG output flush: only bytes written after the flush (the ^C caret echo)
+    // may remain.
     if drained >= 256 {
         eprintln!(
             "ctrlc_flood_test: master still held {drained} bytes — ISIG did not flush output"
@@ -202,7 +201,7 @@ fn test_ctrlc_kills_flooding_fg_child() -> bool {
     true
 }
 
-/// Installed handler: SIGINT is DELIVERED (not just terminates) while the
+/// Installed handler: SIGINT is delivered, not merely terminating, while the
 /// child is blocked in write() — the EINTR/restart path a shell's
 /// record-the-interrupt handler depends on.
 fn test_ctrlc_handler_delivered_under_flood() -> bool {
@@ -218,10 +217,8 @@ fn test_ctrlc_handler_delivered_under_flood() -> bool {
 }
 
 /// NOFLSH set: ISIG fires but nothing is flushed, so the full-master wait
-/// predicate stays false forever — the blocked writer can ONLY unwind by
-/// observing its pending signal inside the wait. Goes RED if the
-/// pending-signal check in `wait_for_write_ready`'s master arm regresses,
-/// independent of the ISIG output flush.
+/// predicate stays false forever and the blocked writer can only unwind by
+/// observing its pending signal inside the wait.
 fn test_ctrlc_kills_flooding_fg_child_noflsh() -> bool {
     let Some((code, _drained)) = run_flood_case(false, true) else {
         return false;
@@ -238,10 +235,9 @@ fn test_ctrlc_kills_flooding_fg_child_noflsh() -> bool {
 
 /// Input-throttle regression: a full slave input queue must not block VINTR.
 ///
-/// The child owns the slave foreground process group but deliberately does not
-/// read. The parent fills the slave input path through the master until
-/// ordinary writes hit EAGAIN, then writes one Ctrl-C. The kernel must admit
-/// that priority byte through the throttled PTY and deliver SIGINT to the child.
+/// The child owns the slave foreground process group but never reads. The
+/// parent fills the slave input path until ordinary writes hit EAGAIN, then
+/// writes one Ctrl-C, which the kernel must admit through the throttled PTY.
 fn test_ctrlc_kills_input_throttled_fg_child() -> bool {
     let (master_fd, slave_fd) = match open_pair() {
         Some(pair) => pair,

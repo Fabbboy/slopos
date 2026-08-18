@@ -676,8 +676,7 @@ impl Renderer {
         let sy = window.y - TITLE_BAR_HEIGHT + SHADOW_OFFSET_Y;
         let spread = SHADOW_SPREAD;
 
-        // Pre-compute alpha profile: alpha[d-1] = shadow alpha at distance d.
-        // Using quadratic falloff matching the original concentric-rect approach.
+        // Quadratic falloff; alpha[d-1] is the shadow alpha at distance d.
         let spread_sq = (spread * spread) as u32;
         let mut inv_alpha = [0u32; 12]; // 255 - alpha, for fast black-shadow blend
         for d in 1..=spread {
@@ -691,7 +690,6 @@ impl Renderer {
         let bpp = buf.bytes_per_pixel() as usize;
         let pitch = buf.pitch_bytes();
 
-        // Blend a single pixel at (px, py) with black at the given inv_alpha.
         // For black shadow: out = dst * inv_alpha / 255, using the RB/AG trick.
         #[inline(always)]
         fn shadow_blend_pixel(buf: &mut DrawBuffer, off: usize, inv_a: u32) {
@@ -702,10 +700,7 @@ impl Renderer {
             buf.write_encoded_at(off, EncodedPixel(result));
         }
 
-        // Process shadow in 4 regions: top strip, bottom strip, left strip, right strip.
-        // Each strip is `spread` pixels wide/tall. Corners are handled by overlap.
-
-        // Top strip: rows from (sy - spread) to (sy - 1)
+        // Four strips of `spread` pixels; the corners fall out of their overlap.
         for d in 1..=spread {
             let row = sy - d;
             if row < clip.y0 || row > clip.y1 {
@@ -726,7 +721,6 @@ impl Renderer {
             }
         }
 
-        // Bottom strip: rows from (sy + wh) to (sy + wh + spread - 1)
         for d in 1..=spread {
             let row = sy + wh + d - 1;
             if row < clip.y0 || row > clip.y1 {
@@ -747,7 +741,6 @@ impl Renderer {
             }
         }
 
-        // Left strip: rows from sy to (sy + wh - 1), columns (sx - spread) to (sx - 1)
         for row in sy.max(clip.y0)..=(sy + wh - 1).min(clip.y1).min(buf_h - 1) {
             let base = (row as usize) * pitch;
             for d in 1..=spread {
@@ -763,7 +756,6 @@ impl Renderer {
             }
         }
 
-        // Right strip: rows from sy to (sy + wh - 1), columns (sx + ww) to (sx + ww + spread - 1)
         for row in sy.max(clip.y0)..=(sy + wh - 1).min(clip.y1).min(buf_h - 1) {
             let base = (row as usize) * pitch;
             for d in 1..=spread {
@@ -789,15 +781,13 @@ impl Renderer {
     ) {
         let bytes_pp = self.output_bytes_pp as usize;
 
-        // Use BUFFER dimensions (not frame dimensions) for content blit.
-        // During resize, frame_width/frame_height may be larger than the
-        // actual SHM buffer; using them for pitch would cause corruption.
+        // Buffer, not frame, dimensions: during a resize the frame may be larger
+        // than the SHM buffer, and using it as the pitch would corrupt the blit.
         let buf_w = window.width;
         let buf_h = window.height;
         let src_pitch = (buf_w as usize) * bytes_pp;
         let buffer_size = src_pitch * (buf_h as usize);
 
-        // Frame dimensions for the content area rect (may be larger during resize)
         let frame_w = window.effective_width() as i32;
         let frame_h = window.effective_height() as i32;
 
@@ -827,7 +817,6 @@ impl Renderer {
         let out_w = buf.width() as i32;
         let out_h = buf.height() as i32;
 
-        // Frame rect (the full content area the compositor allocated)
         let frame_rect = DamageRect {
             x0: window.x,
             y0: window.y,
@@ -835,10 +824,9 @@ impl Renderer {
             y1: window.y + frame_h - 1,
         };
 
-        // Wayland model: always show the last committed buffer, clipped to
-        // the frame boundary.  During shrink the content is cropped; during
-        // grow a placeholder fills the gap.  No timing-dependent "resizing"
-        // flag — the compositor never shows an inconsistent state.
+        // Always show the last committed buffer, clipped to the frame: a shrink
+        // crops, a grow leaves a placeholder gap, and no timing-dependent
+        // "resizing" flag can expose an inconsistent state.
         let visible_w = (buf_w as i32).min(frame_w);
         let visible_h = (buf_h as i32).min(frame_h);
 
@@ -878,7 +866,6 @@ impl Renderer {
             }
         }
 
-        // Fill gap between committed content and frame (grow case).
         if frame_w > buf_w as i32 {
             let strip = DamageRect {
                 x0: window.x + buf_w as i32,

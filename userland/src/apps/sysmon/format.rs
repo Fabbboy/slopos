@@ -37,13 +37,8 @@ fn task_name_from_slice(bytes: &[u8]) -> String {
     out
 }
 
-/// Decodes through [`TaskStatus`] with no wildcard arm on purpose.
-///
-/// The previous version matched the raw `u8` with a `_ =>` fallback. When
-/// `WillBlock` was deleted from the ABI and `Zombie` inherited discriminant 5,
-/// nothing failed to compile and every zombie rendered under the dead
-/// variant's name. An exhaustive match over the enum makes the next such
-/// change a build error here.
+/// No wildcard arm on purpose: a change to the ABI's [`TaskStatus`]
+/// discriminants must be a build error here.
 pub(crate) fn task_state(state: u8) -> (&'static str, Color32) {
     match TaskStatus::from_u8(state) {
         TaskStatus::Running => ("Run", COLOR_STATE_RUN),
@@ -65,21 +60,14 @@ pub(crate) fn priority_label(priority: u8) -> &'static str {
     }
 }
 
-/// True for the per-CPU kernel idle tasks. Sysmon dims these rows so they
-/// don't dominate the visible process list. The syscall boundary now
-/// rejects userland spawn calls with `Idle` priority, so this check is
-/// sufficient — only the kernel idle loop can carry that priority.
+/// Only the kernel idle loop can carry `Idle`: the syscall boundary rejects
+/// userland spawn calls with that priority.
 pub(crate) fn is_idle_task(task: &UserTaskEntry) -> bool {
     TaskPriority::from_u8(task.priority) == TaskPriority::Idle
 }
 
 /// Reader-facing text for a negative syscall return, e.g. `-1` →
 /// `"Operation not permitted (EPERM)"`.
-///
-/// Says what the *code* means and nothing about the task it was returned for:
-/// the kernel's privilege rules are the kernel's to state, and a sysmon that
-/// one day runs with more authority gets a different answer without a change
-/// here.
 pub(crate) fn errno_label(rc: i32) -> String {
     match slopos_abi::errno::Errno::from_raw(rc) {
         core::option::Option::Some(e) => format!("{} ({})", e.description(), e.name()),

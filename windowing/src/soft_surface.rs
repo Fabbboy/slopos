@@ -45,9 +45,8 @@ pub struct SoftSurface {
 impl SoftSurface {
     /// Create a new software rendering surface for a compositor `surface_id`.
     ///
-    /// Allocates the double-buffer pair. Nothing is attached or committed yet —
-    /// the first [`present`](RenderSurface::present) registers buffer 0 and makes
-    /// the surface visible.
+    /// Nothing is attached or committed until the first
+    /// [`present`](RenderSurface::present).
     pub fn new(
         handle: ProtocolHandle,
         surface_id: SurfaceId,
@@ -88,31 +87,24 @@ impl SoftSurface {
         })
     }
 
-    /// Age of the buffer the next [`frame()`](RenderSurface::frame) will hand
-    /// out, following the `EGL_EXT_buffer_age` convention: `n > 0` means it
-    /// still holds the frame presented `n` frames ago, so the caller may
-    /// repaint only the damage accumulated since then; `0` means its contents
-    /// are undefined and the caller must repaint it in full.
+    /// Age of the buffer the next [`frame()`](RenderSurface::frame) will hand out,
+    /// per the `EGL_EXT_buffer_age` convention: `n > 0` means it still holds the
+    /// frame presented `n` frames ago; `0` means undefined contents, repaint in full.
     ///
-    /// Queried before `frame()` rather than after, so a caller can decide how
-    /// much to paint before it holds the buffer borrow. `frame()` picks the
-    /// same slot this reads, by the same rule.
+    /// `frame()` picks the same slot this reads, by the same rule.
     pub fn buffer_age(&self) -> u32 {
         let age = self.age[self.pick_slot()];
         if age >= AGE_UNDEFINED { 0 } else { age }
     }
 
     /// Mark a buffer slot drawable again after the compositor releases it.
-    /// Called by [`Window`](crate::window::Window) on a `BufferRelease` event.
     pub fn release_buffer(&mut self, buffer_id: u32) {
         if let Some(b) = self.busy.get_mut(buffer_id as usize) {
             *b = false;
         }
     }
 
-    /// Choose the slot to draw the next frame into: a free buffer if one exists,
-    /// otherwise the current slot (only when both are still in flight — a rare
-    /// case that degrades to a single-buffer in-place update for that frame).
+    /// Choose the slot to draw the next frame into: a free buffer, else the current one.
     fn pick_slot(&self) -> usize {
         let other = 1 - self.current;
         if !self.busy[other] {
@@ -124,9 +116,8 @@ impl SoftSurface {
         }
     }
 
-    /// Attach the current buffer (register its fd the first time, else re-select
-    /// the slot), then damage `(x, y, w, h)` and commit. Marks the slot in
-    /// flight until the compositor releases it.
+    /// A buffer's fd is sent only on first use; later frames re-select the slot by
+    /// id, so the compositor keeps a stable mapping per slot.
     fn attach_and_commit(&mut self, x: i32, y: i32, w: i32, h: i32) {
         let slot = self.current;
         let first_use = !self.registered[slot];
@@ -154,8 +145,6 @@ impl SoftSurface {
         self.registered[slot] = true;
         self.busy[slot] = true;
 
-        // This slot now holds the frame just presented; every other slot is one
-        // frame further from being current.
         for (i, age) in self.age.iter_mut().enumerate() {
             if i == slot {
                 *age = 1;
@@ -208,13 +197,11 @@ impl RenderSurface for SoftSurface {
             MemfdBuffer::create(buffer_size).map_err(|_| RenderError::BufferUnavailable)?,
         ];
 
-        // New fds must be re-registered; no commit has used them, so neither is
-        // in flight. The compositor evicts the old slot mappings when the new
-        // fds become current.
+        // New fds must be re-registered; the compositor evicts the old slot
+        // mappings when the new fds become current.
         self.bufs = bufs;
         self.registered = [false; NUM_BUFFERS];
         self.busy = [false; NUM_BUFFERS];
-        // Fresh allocations hold nothing a partial repaint could build on.
         self.age = [AGE_UNDEFINED; NUM_BUFFERS];
         self.current = 0;
         self.width = new_width;

@@ -91,9 +91,6 @@ pub fn mkdir_path(path: *const c_char) -> SyscallResult<()> {
 
 /// Remove a file or empty directory.
 ///
-/// # Arguments
-/// * `path` - Null-terminated path string
-///
 /// # Errors
 /// * `ENOENT` - File not found
 /// * `EISDIR` - Is a non-empty directory
@@ -104,10 +101,6 @@ pub fn unlink_path(path: *const c_char) -> SyscallResult<()> {
 }
 
 /// Atomically rename/move a file or directory.
-///
-/// # Arguments
-/// * `old_path` - Null-terminated old path string
-/// * `new_path` - Null-terminated new path string
 ///
 /// # Errors
 /// * `ENOENT` - Source not found
@@ -120,10 +113,6 @@ pub fn rename(old_path: *const c_char, new_path: *const c_char) -> SyscallResult
 
 /// List directory contents.
 ///
-/// # Arguments
-/// * `path` - Null-terminated path string
-/// * `list` - Output buffer for directory entries
-///
 /// # Errors
 /// * `ENOENT` - Directory not found
 /// * `ENOTDIR` - Path is not a directory
@@ -133,7 +122,6 @@ pub fn list_dir(path: *const c_char, list: &mut UserFsList) -> SyscallResult<()>
     demux(result).map(|_| ())
 }
 
-/// Duplicate a file descriptor, returning a new `OwnedFd`.
 #[inline(always)]
 pub fn dup(fd: RawFd) -> SyscallResult<super::OwnedFd> {
     Sys::dup(fd)
@@ -142,9 +130,8 @@ pub fn dup(fd: RawFd) -> SyscallResult<super::OwnedFd> {
         .map_err(Into::into)
 }
 
-/// Duplicate `old_fd` onto `new_fd` (closing whatever was at `new_fd`).
-/// Returns the new fd number.  The `new_fd` slot is now a raw alias —
-/// its lifetime is NOT tracked by OwnedFd.
+/// Closes whatever was at `new_fd`. The `new_fd` slot is a raw alias
+/// afterwards: no `OwnedFd` tracks its lifetime.
 #[inline(always)]
 pub fn dup2(old_fd: RawFd, new_fd: RawFd) -> SyscallResult<RawFd> {
     Sys::dup2(old_fd, new_fd)
@@ -157,7 +144,7 @@ pub fn lseek(fd: RawFd, offset: i64, whence: u32) -> SyscallResult<i64> {
     Sys::lseek(fd, offset, whence as i32).map_err(Into::into)
 }
 
-/// Create a pipe pair.  Returns `(read_end, write_end)` as `OwnedFd`.
+/// Returns `(read_end, write_end)`.
 #[inline(always)]
 pub fn pipe() -> SyscallResult<(super::OwnedFd, super::OwnedFd)> {
     let mut raw = [0i32; 2];
@@ -171,7 +158,7 @@ pub fn pipe() -> SyscallResult<(super::OwnedFd, super::OwnedFd)> {
     })
 }
 
-/// Create a pipe pair with flags.  Returns `(read_end, write_end)` as `OwnedFd`.
+/// Returns `(read_end, write_end)`.
 #[inline(always)]
 pub fn pipe2(flags: u32) -> SyscallResult<(super::OwnedFd, super::OwnedFd)> {
     let mut raw = [0i32; 2];
@@ -256,9 +243,8 @@ pub fn tiocsctty(fd: RawFd) -> SyscallResult<()> {
 
 /// Session id owning the terminal on `fd` (TIOCGSID ioctl).
 ///
-/// Fails when `fd` is not a terminal or the terminal has no session — which is
-/// how a shell tells "nobody owns this yet, claiming it is mine to do" from
-/// "someone is already using it, taking it would strand them".
+/// Fails when `fd` is not a terminal or the terminal has no session, which is
+/// how a shell tells an unclaimed terminal from one already in use.
 #[inline(always)]
 pub fn tcgetsid(fd: RawFd) -> SyscallResult<u32> {
     let mut sid = 0u32;
@@ -296,12 +282,9 @@ pub fn tcgetattr(fd: RawFd) -> SyscallResult<UserTermios> {
     demux(result).map(|_| t)
 }
 
-/// POSIX `isatty(3)`: true when `fd` refers to a terminal.
-///
-/// A TCGETS probe is the whole implementation, and it is exact here rather than
-/// approximate: `syscall_ioctl` resolves the descriptor through
-/// `file_get_tty_index`, which yields nothing unless the file's kind is `Tty`,
-/// so a pipe or a regular file takes the `EINVAL` path.
+/// POSIX `isatty(3)`. The TCGETS probe is exact, not approximate:
+/// `syscall_ioctl` resolves the descriptor through `file_get_tty_index`, which
+/// yields nothing unless the file's kind is `Tty`.
 #[inline]
 pub fn isatty(fd: RawFd) -> bool {
     tcgetattr(fd).is_ok()
@@ -320,7 +303,6 @@ pub fn tcsetattr(fd: RawFd, t: &UserTermios) -> SyscallResult<()> {
     demux(result).map(|_| ())
 }
 
-/// Query the terminal window size (TIOCGWINSZ ioctl).
 #[inline(always)]
 pub fn tiocgwinsz(fd: RawFd) -> SyscallResult<UserWinsize> {
     let mut ws = UserWinsize::default();
