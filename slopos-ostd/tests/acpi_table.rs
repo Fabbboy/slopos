@@ -2,8 +2,7 @@
 
 use slopos_ostd::acpi::{AcpiTable, RSDP_SIGNATURE, RSDP_V1_SIZE, Rsdp, SdtHeader};
 
-/// Set the byte at `idx` to whatever value makes the running
-/// 8-bit additive sum zero.
+/// Set byte `idx` so the 8-bit additive sum over `bytes` is zero.
 fn fix_checksum(bytes: &mut [u8], idx: usize) {
     let sum: u8 = bytes
         .iter()
@@ -31,9 +30,9 @@ fn synth_rsdp_v2() -> [u8; 36] {
     b[16..20].copy_from_slice(&0xCAFE_BABEu32.to_le_bytes());
     b[20..24].copy_from_slice(&36u32.to_le_bytes());
     b[24..32].copy_from_slice(&0x1122_3344_5566_7788u64.to_le_bytes());
-    // V1 checksum first (over bytes 0..20, byte 8 holds it).
+    // V1 checksum
     fix_checksum(&mut b[..20], 8);
-    // Now extended checksum (over 0..36, byte 32 holds it).
+    // extended checksum
     let sum: u8 = b
         .iter()
         .enumerate()
@@ -124,7 +123,6 @@ fn acpi_table_accepts_synthetic_table() {
 #[test]
 fn acpi_table_rejects_length_mismatch() {
     let mut bytes = synth_sdt(b"APIC", b"data");
-    // Overwrite length with a wrong value.
     let bogus_len = (bytes.len() + 1) as u32;
     bytes[4..8].copy_from_slice(&bogus_len.to_le_bytes());
     fix_checksum(&mut bytes, 9);

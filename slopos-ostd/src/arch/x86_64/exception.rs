@@ -1,7 +1,5 @@
-//! Exception metadata for x86_64.
-//!
-//! Provides exception names and classification functions that can be used
-//! by both kernel and test code without depending on the boot crate.
+//! Exception metadata for x86_64, usable by kernel and test code without
+//! depending on the boot crate.
 
 use crate::irq::idt::{EXCEPTION_DOUBLE_FAULT, EXCEPTION_MACHINE_CHECK, EXCEPTION_NMI};
 

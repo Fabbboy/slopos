@@ -1,14 +1,9 @@
 //! Synchronisation primitives.
 //!
-//! All synchronisation primitives the kernel needs live here: spinning
-//! ticket locks, sleeping mutexes, RCU, wait queues, sequence locks,
-//! per-CPU storage, init/state flags, lazy `OnceLock`, and the per-CPU
-//! lock-tracking + ordering enforcement.
-//!
-//! `WaitQueue` and `RCU` reach the kernel scheduler / platform clock
-//! through one-shot-registered backends ([`wait_queue::WaitQueueBackend`],
-//! [`rcu::RcuBackend`]) — OSTD does not depend on `slopos-kernel-services`
-//! or `slopos-utils`. The kernel installs production backends at boot.
+//! `WaitQueue` and `RCU` reach the scheduler and platform clock through
+//! one-shot-registered backends ([`wait_queue::WaitQueueBackend`],
+//! [`rcu::RcuBackend`]) that the kernel installs at boot, so OSTD does not
+//! depend on `slopos-kernel-services`.
 
 pub mod append_log;
 pub mod atomic_cell;
@@ -83,8 +78,6 @@ pub use wait_queue::{
     WaitAbort, WaitQueue, WaitQueueBackend, WaitResult, WaitTaskHandle, register_wait_queue_backend,
 };
 
-// PCR-backed preempt guards re-exported here so the sync surface
-// stays self-contained.
 pub use crate::cpu::preempt::{
     IrqPreemptGuard, PreemptGuard, is_preemption_disabled, preempt_count_pcr as preempt_count,
     register_reschedule_callback,

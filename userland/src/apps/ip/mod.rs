@@ -1,31 +1,14 @@
 //! `ip` — the network configuration command.
 //!
 //! The grammar lives in [`slopos_net_core::ip_plan`] and is decided before any
-//! syscall runs; this crate's job is to execute a [`Plan`] and render what came
-//! back. Keeping the two apart is what makes the grammar host-testable: a
-//! `Plan` holds no descriptors and performs no I/O, so `cargo test -p
-//! slopos-net-core` covers every parsing decision without a kernel.
+//! syscall runs, so it is host-testable; every state→string mapping comes from
+//! [`slopos_net_core::render`], which the compositor's status indicator reads
+//! too.
 //!
-//! Every state→string mapping comes from [`slopos_net_core::render`], which the
-//! compositor's status indicator also reads. `ip link` and the bar name the
-//! same states, so if either spelled them itself a person reading a terminal
-//! and a panel at once would get two answers to one question.
-//!
-//! # What is not here
-//!
-//! Several objects the grammar accepts are not served by this kernel:
-//! `NET_Q_NEIGH`, `NET_Q_SOCKETS`, `NET_Q_RESOLVER` and `NET_Q_DHCP` answer
-//! `ENOSYS`, as do the DHCP operations and the three mutation syscalls that
-//! have no dispatch entry yet. Each of those prints
-//! `ip: OBJECT: not supported by this kernel yet` and exits 1 — never an empty
-//! table. "You have no neighbours" and "this kernel cannot tell you" are
-//! different answers, and a person must be able to tell which one they got.
-//!
-//! Nothing here pre-checks whether the caller holds `NET_ADMIN`. There is no
-//! syscall to read a task's own flags, so any such check would be a guess that
-//! can disagree with the kernel — which is how a tool comes to print an error
-//! for something it went on to do anyway. The syscall is issued and its errno
-//! is rendered.
+//! Objects the grammar accepts but this kernel does not serve print
+//! `ip: OBJECT: not supported by this kernel yet` and exit 1, never an empty
+//! table. Nothing pre-checks `NET_ADMIN` — there is no syscall to read a task's
+//! own flags, so the syscall is issued and its errno is rendered.
 
 mod addr;
 mod dhcp;
@@ -46,8 +29,7 @@ use slopos_net_core::ip_plan::{IpError, Options, Plan, parse};
 use crate::net_query as query;
 use crate::syscall::SyscallError;
 
-/// What a command that did not run has to say, as the two halves of the
-/// `ip: CONTEXT: MESSAGE` line plus the status it earns.
+/// The two halves of the `ip: CONTEXT: MESSAGE` line plus the status it earns.
 pub struct Failure {
     context: String,
     message: String,
@@ -59,8 +41,7 @@ const EXIT_RUNTIME: i32 = 1;
 /// Exit status for a command line that is not a command.
 const EXIT_USAGE: i32 = 2;
 
-/// What the kernel says when an object is defined in the ABI and not yet
-/// served. Spelled once so every object reports it identically.
+/// What the kernel says when an object is defined in the ABI and not yet served.
 const NOT_SUPPORTED: &str = "not supported by this kernel yet";
 
 impl Failure {
@@ -82,10 +63,8 @@ impl Failure {
 
     /// Render a syscall's errno for a person.
     ///
-    /// `EPERM` gets the extra clause because a system with no uids has no
-    /// `sudo`: a bare "operation not permitted" sends the reader hunting for a
-    /// command that does not exist, when the actual answer is that the
-    /// privilege comes from the binary's path.
+    /// `EPERM` names the binary because a system with no uids has no `sudo`:
+    /// the privilege comes from the path the program was run from.
     pub fn from_errno(context: impl Into<String>, err: SyscallError) -> Failure {
         let message = match err {
             SyscallError::EPERM => "operation not permitted (need NET_ADMIN; run /bin/ip)",
@@ -100,7 +79,6 @@ impl Failure {
         Failure::runtime(context, message)
     }
 
-    /// The kernel does not serve this object yet.
     pub fn unsupported(object: &str) -> Failure {
         Failure::runtime(object, NOT_SUPPORTED)
     }
@@ -110,13 +88,10 @@ pub type Outcome = Result<(), Failure>;
 
 /// How long `ip monitor` runs when neither bound is given.
 ///
-/// Bounded by default on purpose: a monitor that blocks forever is
-/// indistinguishable from a hang in a serial transcript, and this is the only
-/// user-runnable demonstration of a pollable fd in the tree. `-t 0` asks for no
-/// deadline, for someone who wants to watch.
+/// Bounded by default: a monitor that blocks forever is indistinguishable from
+/// a hang in a serial transcript. `-t 0` asks for no deadline.
 const DEFAULT_MONITOR_MS: i64 = 10_000;
 
-/// The bounds `ip monitor` runs under.
 #[derive(Clone, Copy)]
 pub struct MonitorBounds {
     /// Stop after this many events, or `None` for no count limit.
@@ -148,14 +123,8 @@ fn basename(path: &str) -> &str {
     path.rsplit('/').next().unwrap_or(path)
 }
 
-/// `ifconfig` is this binary under another name, sharing this renderer rather
-/// than being a second implementation.
-///
-/// The shell passes the typed name as `argv[0]` and resolves the path through
-/// the program registry, so one extra registry entry pointing at `/bin/ip` is
-/// the whole of the alias. It renders `ip addr show` — the addresses, hardware
-/// address and MTU `ifconfig` is expected to print — over the interfaces that
-/// exist rather than a hardcoded name.
+/// `ifconfig` is this binary under another name — one program-registry entry
+/// pointing at `/bin/ip` — rendering `ip addr show`.
 fn run_ifconfig(args: &[String]) -> i32 {
     let plan = match args {
         [] => Plan::AddrShow { dev: None },
@@ -195,8 +164,8 @@ fn run_ip(args: &[String]) -> i32 {
         }
     };
 
-    // The two monitor bounds are handled here rather than in the grammar, so
-    // accepting them for an object that cannot use them would be silent.
+    // Rejected here because the grammar never sees these bounds; without this
+    // they would be accepted silently for an object that cannot use them.
     if bounds_given && !matches!(invocation.plan, Plan::Monitor { .. }) {
         report(&Failure::usage(
             "-c/-t",
@@ -224,11 +193,8 @@ fn report(failure: &Failure) {
 
 /// Consume `-c COUNT` and `-t MILLISECONDS` from the front of the line.
 ///
-/// They are stripped before [`parse`] rather than added to the grammar: the
-/// grammar is a closed table `net-core` owns and host-tests, and a bound on how
-/// long a process runs is a property of this binary, not of the language. The
-/// leading-option run is the only place they are looked for, which is where the
-/// grammar puts every other option.
+/// Stripped before [`parse`] rather than added to the grammar: a bound on how
+/// long a process runs is a property of this binary, not of the language.
 ///
 /// Returns the bounds, whether either was given, and the remaining arguments.
 fn take_monitor_bounds(args: &[String]) -> Result<(MonitorBounds, bool, &[String]), Failure> {
@@ -251,8 +217,7 @@ fn take_monitor_bounds(args: &[String]) -> Result<(MonitorBounds, bool, &[String
                     .parse()
                     .map_err(|_| Failure::usage(key, "expects a count"))?;
                 bounds.count = Some(count);
-                // A count with no explicit deadline still needs one: the events
-                // may simply never arrive.
+                // The default deadline stays: the events may never arrive.
             }
             _ => {
                 let ms: i64 = value
@@ -353,8 +318,7 @@ fn candidates(lead: &str, token: &[u8], table: &'static [&'static str]) -> Strin
     out
 }
 
-/// An argument as text for an error message. Arguments arrive as `String`s, so
-/// this only has to survive the byte slices the grammar hands back.
+/// An argument as text for an error message.
 fn text(token: &[u8]) -> String {
     match core::str::from_utf8(token) {
         Ok(s) => s.to_string(),
@@ -362,7 +326,6 @@ fn text(token: &[u8]) -> String {
     }
 }
 
-/// Resolve a device name to its index, or say which name was wrong.
 pub fn device_index(ifaces: &query::Ifaces, dev: &[u8]) -> Result<u32, Failure> {
     match ifaces.find(dev) {
         Some(iface) => Ok(iface.ifindex),

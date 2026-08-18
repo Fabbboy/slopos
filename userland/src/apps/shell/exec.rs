@@ -676,8 +676,6 @@ fn execute_registry_spawn(
     Some(status)
 }
 
-/// What a redirection resolves to: the descriptor it replaces, and either a
-/// freshly opened file, an existing descriptor to duplicate, or a close.
 enum RedirectSource {
     Opened(i32),
     Dup(i32),
@@ -702,9 +700,8 @@ fn open_redirect_target(
 
     let flags = match redir.kind {
         RedirectKind::Input => O_RDONLY,
-        // Truncate the existing inode rather than unlinking and recreating it.
-        // Unlinking first destroys the file even when the open then fails, and
-        // it silently breaks every hard link and device node it is pointed at.
+        // O_TRUNC rather than unlink-and-recreate: unlinking destroys the file
+        // even when the open then fails, and breaks hard links and device nodes.
         RedirectKind::OutputTruncate => O_WRONLY | O_CREAT | O_TRUNC,
         RedirectKind::OutputAppend => O_WRONLY | O_CREAT | O_APPEND,
     };
@@ -727,9 +724,9 @@ fn apply_redirects_for_builtin(
             return false;
         };
 
-        // A builtin runs in the shell's own process and writes through
-        // `shell_write`, so its stdout is redirected by pointing that at the
-        // opened file rather than by moving fd 1 out from under the shell.
+        // A builtin runs in the shell's own process, so redirecting its stdout
+        // points `shell_write` at the file rather than moving fd 1 out from
+        // under the shell.
         if let (1, RedirectSource::Opened(opened_fd)) = (target_fd, &source) {
             if *output_fd >= 0 {
                 let _ = fs::close_fd_raw(*output_fd);
@@ -828,9 +825,6 @@ fn run_in_child(
     pgid: u32,
     foreground: bool,
 ) -> ! {
-    // A script shell performs no job control: its children stay in the process
-    // group it was placed in, which is the terminal's foreground group, so a
-    // Ctrl+C aimed at the pipeline reaches them too.
     let job_control = super::is_interactive();
 
     if job_control {
@@ -841,13 +835,10 @@ fn run_in_child(
         }
     }
 
-    // Both-sides foreground handoff (foreground jobs only — a `&` pipeline
-    // must never claim the terminal): the child claims the terminal for its
-    // own pgrp itself, racing the parent's `enter_foreground` so whichever
-    // lands first wins (both set the same value).  Must happen *before*
-    // the sigdefault reset below — at this point SIGTTOU is still
-    // inherited-ignored from the shell, so the not-yet-foreground child's
-    // tcsetpgrp proceeds instead of being denied.
+    // The child claims the terminal for its own pgrp, racing the parent's
+    // `enter_foreground`; both set the same value.  Must precede the sigdefault
+    // reset below: SIGTTOU is still inherited-ignored there, so this tcsetpgrp
+    // is not denied to a not-yet-foreground child.
     if foreground && job_control {
         let fg_pgid = if pgid == 0 {
             process::getpid() as u32
@@ -857,17 +848,12 @@ fn run_in_child(
         let _ = fs::tcsetpgrp(0, fg_pgid);
     }
 
-    // Forked children take the default job-control signal dispositions before
-    // running the command, so a terminal-generated SIGINT/SIGTSTP acts on the
-    // job instead of inheriting the shell's caught SIGINT or its ignored
-    // SIGTTOU/SIGTTIN/SIGTSTP. One declarative reset forces all four to
-    // SIG_DFL — execve would preserve the ignores, and an in-child builtin
-    // never execs at all.
+    // The reset must be explicit: execve preserves ignored dispositions, and an
+    // in-child builtin never execs at all.
     let _ = process::sigdefault(JOB_CONTROL_DEFAULT_SIGNALS);
     super::interrupt::mark_forked_child();
 
-    // This process runs exactly one command, so a `NAME=VALUE` prefix needs no
-    // undoing — the environment dies with the stage.
+    // The stage runs one command and exits, so the prefix needs no undoing.
     apply_assignments(cmd, tokens, false);
 
     if stdin_fd >= 0 {
@@ -960,9 +946,7 @@ fn run_in_child(
     let (argv_owned, argv_ptrs) = build_c_argv(cmd, tokens);
     let (envp_owned, envp_ptrs) = build_c_envp();
 
-    // The path resolved but the image would not run — a different failure from
-    // "no such command", and POSIX gives it its own status so a caller can tell
-    // a typo from an unexecutable file.
+    // POSIX gives an unexecutable image its own status, distinct from a typo.
     let rc = process::execve(path_buf.as_ptr(), argv_ptrs.as_ptr(), envp_ptrs.as_ptr());
     drop(argv_owned);
     drop(envp_owned);
@@ -1005,9 +989,8 @@ fn execute_single_builtin(cmd: &ParsedCommand, tokens: &ParsedTokens) -> i32 {
 }
 
 fn execute_pipeline(pipeline: &ParsedPipeline, tokens: &ParsedTokens) -> i32 {
-    // One pipe between each adjacent pair of stages, and nothing else: the last
-    // stage inherits the shell's own stdout, so its output reaches the terminal
-    // directly rather than through the shell.
+    // The last stage inherits the shell's own stdout, so no pipe is made for it
+    // and its output reaches the terminal directly.
     let inter_pipes = pipeline.command_count.saturating_sub(1);
     let total_pipes = inter_pipes;
     let mut pipes = [[-1; 2]; MAX_PIPE_CMDS];
@@ -1097,8 +1080,7 @@ fn execute_pipeline(pipeline: &ParsedPipeline, tokens: &ParsedTokens) -> i32 {
 
     enter_foreground(pgid);
 
-    // Every stage is waited for, so none is left a zombie, but the pipeline's
-    // status is the last stage's — that is the one whose output the caller saw.
+    // Every stage is reaped, but the pipeline's status is the last stage's.
     let mut status = 0;
     for (idx, pid) in pids.iter().take(pipeline.command_count).enumerate() {
         let st = wait_for(*pid);
@@ -1112,10 +1094,9 @@ fn execute_pipeline(pipeline: &ParsedPipeline, tokens: &ParsedTokens) -> i32 {
 
 /// Run one line: an and-or list of pipelines joined by `;`, `&&` and `||`.
 ///
-/// The list is walked one pipeline at a time rather than parsed whole, so a
-/// long line costs no more memory than its longest single pipeline.  Joining is
-/// left-associative, as POSIX specifies: `a && b || c` is `(a && b) || c`, and
-/// a skipped pipeline leaves the status alone for the next connector to judge.
+/// Joining is left-associative, as POSIX specifies: `a && b || c` is
+/// `(a && b) || c`, and a skipped pipeline leaves the status alone for the next
+/// connector to judge.
 pub fn execute_tokens(tokens: &ParsedTokens) -> i32 {
     super::interrupt::clear();
 
@@ -1154,8 +1135,6 @@ pub fn execute_tokens(tokens: &ParsedTokens) -> i32 {
     status
 }
 
-/// Find where the pipeline starting at `start` ends.
-///
 /// Returns the exclusive end of the pipeline's tokens, the connector that
 /// follows it, and the index the next pipeline starts at.
 fn split_at_connector(tokens: &ParsedTokens, start: usize) -> (usize, Connector, usize) {
@@ -1186,8 +1165,8 @@ fn execute_and_or_term(tokens: &ParsedTokens, start: usize, end: usize) -> i32 {
 
     simplify_pipeline(&mut pipeline, tokens);
 
-    // `NAME=VALUE` with no command sets a shell variable outright, rather than
-    // for the duration of something.
+    // `NAME=VALUE` with no command sets the variable outright, not for the
+    // duration of something.
     if pipeline.command_count == 1 && pipeline.commands[0].argc == 0 {
         apply_assignments(&pipeline.commands[0], tokens, false);
         return 0;
@@ -1195,8 +1174,7 @@ fn execute_and_or_term(tokens: &ParsedTokens, start: usize, end: usize) -> i32 {
 
     if pipeline.command_count == 1 && !pipeline.background {
         let cmd = &pipeline.commands[0];
-        // A prefix on a command is that command's environment only, so it is
-        // put back once the command has run.
+        // A prefix belongs to that command alone, so it is put back after.
         let saved = apply_assignments(cmd, tokens, true);
         if is_builtin_command(cmd, tokens) {
             let status = execute_single_builtin(cmd, tokens);

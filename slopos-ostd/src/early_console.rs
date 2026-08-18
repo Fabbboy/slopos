@@ -50,8 +50,9 @@ mod imp {
     use core::sync::atomic::{AtomicU8, AtomicUsize, Ordering};
 
     pub(super) const MOCK_CAP: usize = 4096;
-    pub(super) static MOCK_BUFFER: [AtomicU8; MOCK_CAP] =
-        { [const { AtomicU8::new(0) }; MOCK_CAP] };
+    pub(super) static MOCK_BUFFER: [AtomicU8; MOCK_CAP] = {
+        [const { AtomicU8::new(0) }; MOCK_CAP]
+    };
     pub(super) static MOCK_LEN: AtomicUsize = AtomicUsize::new(0);
 
     pub fn write_byte(b: u8) {
@@ -66,26 +67,18 @@ mod imp {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Public API.
-// ---------------------------------------------------------------------------
-
-/// Write one byte to COM1. Polls the UART LSR until the transmit
-/// holding register is empty, then writes the byte.
+/// Write one byte to COM1, blocking until the transmitter is free.
 #[inline]
 pub fn write_byte(b: u8) {
     imp::write_byte(b);
 }
 
-/// Write a byte slice to COM1, converting lone `\n` into `\r\n`.
-///
-/// An existing `\r\n` pair passes through unchanged (the `\n` after a
-/// `\r` is preceded by the existing `\r`, not by a duplicate).
+/// Write a byte slice to COM1, converting a lone `\n` into `\r\n`; an existing
+/// `\r\n` pair passes through unchanged.
 #[inline]
 pub fn write_bytes(slice: &[u8]) {
-    // Mirror the full serial stream into the framebuffer-log capture ring.
-    // This is the single sink all serial output funnels through (kernel klog
-    // and userland TTY alike), so the on-screen log matches the wire.
+    // Every serial writer — kernel klog and userland TTY alike — funnels
+    // through here, so the framebuffer log mirrors the wire.
     crate::fblog::capture(slice);
 
     let mut last_was_cr = false;
@@ -98,24 +91,14 @@ pub fn write_bytes(slice: &[u8]) {
     }
 }
 
-/// Wait for the UART transmit FIFO to drain. Returns when the
-/// transmit holding register is empty.
+/// Block until the UART transmit holding register is empty.
 #[inline]
 pub fn flush() {
     imp::flush();
 }
 
-// ---------------------------------------------------------------------------
-// Host-side test helpers.
-// ---------------------------------------------------------------------------
-
-/// Drain the recorded mock buffer and return its contents.
-///
-/// Used by host-side tests to observe the bytes that `write_byte` /
-/// `write_bytes` would have transmitted on a real UART. Gated behind
-/// `feature = "test-helpers"` (auto-enabled by the dev-dependency
-/// shim in slopos-ostd's Cargo.toml) or `cfg(test)` for internal
-/// crate tests. Not exposed in production builds.
+/// Drain the recorded mock buffer, so host-side tests can observe the bytes
+/// that would have been transmitted on a real UART.
 #[cfg(all(not(target_os = "none"), any(test, feature = "test-helpers")))]
 pub fn take_recorded_bytes_for_tests() -> alloc::vec::Vec<u8> {
     use core::sync::atomic::Ordering;

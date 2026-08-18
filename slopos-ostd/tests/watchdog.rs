@@ -1,8 +1,6 @@
-//! The lockup detector's sample state machine.
-//!
-//! Each test owns a distinct watcher index: `SLOTS` is process-global and
-//! `cargo test` runs integration tests on parallel threads, so sharing one
-//! index would make the assertions race each other rather than the code.
+//! The lockup detector's sample state machine. Each test must own a distinct
+//! watcher index: `SLOTS` is process-global and `cargo test` runs these on
+//! parallel threads.
 
 use slopos_ostd::watchdog::max_stall;
 use slopos_ostd::watchdog::test_support::{
@@ -59,18 +57,15 @@ fn a_heartbeat_that_wrapped_backwards_still_counts_as_progress() {
     const WATCHER: usize = 13;
     reset_slot(WATCHER);
 
-    // The predicate is inequality, not ordering: nothing about the detector
-    // depends on the counter being monotonic, which is what keeps it free
-    // of clock arithmetic.
+    // The predicate is inequality, not ordering: the counter need not be
+    // monotonic.
     assert_eq!(sample(WATCHER, u64::MAX, THRESHOLD), 0);
     assert_eq!(sample(WATCHER, u64::MAX, THRESHOLD), 1);
     assert_eq!(sample(WATCHER, 0, THRESHOLD), 0);
 }
 
-/// The worst stall names the CPU it was measured against, not whichever
-/// one the watcher moved on to. Retargeting is routine — a CPU going
-/// offline or stopping its timer causes it — and shutdown is when it churns
-/// most, which is exactly when the summary gets read.
+/// The worst stall names the CPU it was measured against, not whichever one the
+/// watcher later moved on to. Retargeting is routine.
 #[test]
 fn a_recorded_maximum_survives_retargeting_without_changing_cpu() {
     const WATCHER: usize = 14;

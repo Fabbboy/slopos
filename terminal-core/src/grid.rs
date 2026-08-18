@@ -1750,8 +1750,8 @@ impl TerminalGrid {
             return;
         }
 
-        // Only a full-screen scroll (not a constrained scroll region, not the
-        // alt screen) feeds the scrollback history — matches the kernel.
+        // Only a full-screen scroll — not a constrained scroll region, not the
+        // alt screen — feeds the scrollback history.
         let full_screen = sr_top == 0 && sr_bottom == (self.rows as usize).saturating_sub(1);
         if full_screen && !self.in_alt_screen {
             // Carry the evicted row's soft-wrap bit so a line that straddles the
@@ -1759,8 +1759,6 @@ impl TerminalGrid {
             let wrapped = self.cells.wrapped(sr_top);
             self.scrollback.push_row(&self.cells, sr_top, wrapped);
             self.scrollback.reset_view();
-            // A line just became history: advance the absolute line origin so
-            // selection anchors keep naming the same content.
             self.total_scrolled = self.total_scrolled.wrapping_add(1);
         }
 
@@ -1800,7 +1798,6 @@ mod tests {
     fn cr_and_lf_independent() {
         let mut g = TerminalGrid::new(5, 10);
         feed(&mut g, b"ab\r\nc");
-        // \r returns to col 0, \n moves down one row.
         assert_eq!(glyph_at(&g, 0, 0), 'a');
         assert_eq!(glyph_at(&g, 1, 0), 'c');
         assert_eq!(g.cursor_row, 1);
@@ -1811,7 +1808,6 @@ mod tests {
     fn backspace_moves_left_without_erasing() {
         let mut g = TerminalGrid::new(5, 10);
         feed(&mut g, b"ab\x08");
-        // BS only moves the cursor; ldisc does BS-space-BS to erase.
         assert_eq!(g.cursor_col, 1);
         assert_eq!(glyph_at(&g, 0, 1), 'b');
     }
@@ -1836,12 +1832,10 @@ mod tests {
     #[test]
     fn exactly_full_line_defers_wrap() {
         let mut g = TerminalGrid::new(5, 3);
-        // Fill row 0 exactly: the cursor stays on row 0 (wrap pending).
         feed(&mut g, b"abc");
         assert_eq!(g.cursor_row, 0);
         assert_eq!(g.cursor_col, 2);
-        // An explicit CRLF after the full row advances exactly ONE row —
-        // the pending wrap must not stack with the newline.
+        // The pending wrap must not stack with the newline.
         feed(&mut g, b"\r\nx");
         assert_eq!(glyph_at(&g, 1, 0), 'x');
         assert_eq!(g.cursor_row, 1);
@@ -1860,7 +1854,6 @@ mod tests {
     #[test]
     fn carriage_return_cancels_pending_wrap() {
         let mut g = TerminalGrid::new(5, 3);
-        // Full row, then \r: overwriting from column 0 stays on row 0.
         feed(&mut g, b"abc\rX");
         assert_eq!(glyph_at(&g, 0, 0), 'X');
         assert_eq!(g.cursor_row, 0);
@@ -1869,7 +1862,6 @@ mod tests {
     #[test]
     fn sgr_preserves_pending_wrap() {
         let mut g = TerminalGrid::new(5, 3);
-        // SGR between the edge char and the next print must not eat the wrap.
         feed(&mut g, b"abc\x1b[31md");
         assert_eq!(glyph_at(&g, 1, 0), 'd');
         assert_eq!(g.cursor_row, 1);
@@ -1878,13 +1870,11 @@ mod tests {
     #[test]
     fn scroll_pushes_to_scrollback() {
         let mut g = TerminalGrid::new(2, 4);
-        // Three lines into a 2-row grid forces one scroll.
         feed(&mut g, b"L1\r\nL2\r\nL3");
         assert_eq!(glyph_at(&g, 0, 0), 'L');
         assert_eq!(glyph_at(&g, 0, 1), '2');
         assert_eq!(glyph_at(&g, 1, 0), 'L');
         assert_eq!(glyph_at(&g, 1, 1), '3');
-        // Scrolling the view up should reveal L1.
         g.scroll_view_up(1);
         assert_eq!(g.viewing_history(), true);
         assert_eq!(char::from_u32(g.visible_cell(0, 0).glyph()).unwrap(), 'L');
@@ -1937,12 +1927,9 @@ mod tests {
     #[test]
     fn resize_height_shrink_anchors_cursor_not_top() {
         let mut g = TerminalGrid::new(5, 10);
-        // Five rows of content, cursor resting on the bottom row.
         feed(&mut g, b"a\r\nb\r\nc\r\nd\r\ne");
         assert_eq!(g.cursor_row, 4);
         g.resize(3, 10, &mut []);
-        // The cursor's line stays on screen at the new bottom; the two
-        // displaced top rows scrolled into history instead of being clipped.
         assert_eq!(g.cursor_row, 2);
         assert_eq!(glyph_at(&g, 0, 0), 'c');
         assert_eq!(glyph_at(&g, 1, 0), 'd');
@@ -1956,7 +1943,6 @@ mod tests {
         feed(&mut g, b"a\r\nb");
         assert_eq!(g.cursor_row, 1);
         g.resize(3, 10, &mut []);
-        // Cursor already fits: plain top-aligned clip, nothing scrolled.
         assert_eq!(g.cursor_row, 1);
         assert_eq!(glyph_at(&g, 0, 0), 'a');
         assert_eq!(glyph_at(&g, 1, 0), 'b');
@@ -1966,15 +1952,11 @@ mod tests {
     #[test]
     fn resize_in_alt_screen_anchors_saved_main_cursor() {
         let mut g = TerminalGrid::new(5, 10);
-        // Main cursor parked on the bottom row, then enter the alt screen
-        // and move its cursor to the bottom too.
         feed(&mut g, b"a\r\nb\r\nc\r\nd\r\ne");
         feed(&mut g, b"\x1b[?1049h\x1b[5;1HALT");
         g.resize(3, 10, &mut []);
         // Alt screen has no history: its cursor clamps.
         assert_eq!(g.cursor_row, 2);
-        // Leaving alt restores a bottom-anchored main screen whose saved
-        // cursor moved with its content.
         feed(&mut g, b"\x1b[?1049l");
         assert_eq!(g.cursor_row, 2);
         assert_eq!(glyph_at(&g, 2, 0), 'e');
@@ -1985,13 +1967,11 @@ mod tests {
     fn alt_screen_saves_and_restores_main() {
         let mut g = TerminalGrid::new(3, 10);
         feed(&mut g, b"main\x1b[2;3H");
-        // Enter: alt screen starts blank with the cursor homed.
         feed(&mut g, b"\x1b[?1049h");
         assert_eq!(glyph_at(&g, 0, 0), ' ');
         assert_eq!((g.cursor_row, g.cursor_col), (0, 0));
         feed(&mut g, b"ALT");
         assert_eq!(glyph_at(&g, 0, 0), 'A');
-        // Leave: main content AND cursor come back exactly.
         feed(&mut g, b"\x1b[?1049l");
         assert_eq!(glyph_at(&g, 0, 0), 'm');
         assert_eq!(glyph_at(&g, 0, 3), 'n');
@@ -2002,8 +1982,6 @@ mod tests {
     fn alt_screen_enter_twice_keeps_saved_main() {
         let mut g = TerminalGrid::new(3, 10);
         feed(&mut g, b"keep\x1b[?1049h\x1b[?1049hALT\x1b[?1049l");
-        // The second 1049h must not overwrite the saved main screen with
-        // the (blank) alt contents.
         assert_eq!(glyph_at(&g, 0, 0), 'k');
     }
 
@@ -2011,26 +1989,20 @@ mod tests {
     fn alt_screen_does_not_feed_scrollback() {
         let mut g = TerminalGrid::new(2, 4);
         feed(&mut g, b"\x1b[?1049h");
-        // Scroll three lines through the 2-row alt screen.
         feed(&mut g, b"A1\r\nA2\r\nA3");
         feed(&mut g, b"\x1b[?1049l");
-        // Nothing from the alt screen may appear in history.
         g.scroll_view_up(1);
         assert!(!g.viewing_history());
     }
 
     #[test]
     fn width_resize_never_reallocates_scrollback_ring() {
-        // A width drag reflows into a pooled second ring and pointer-swaps, so
-        // the two ceiling-sized backings ping-pong. Once both have reached the
-        // ceiling capacity, no further width step may reallocate either — the
-        // multi-megabyte ring is allocated at most twice over the grid's life.
+        // The two ceiling-sized backings ping-pong through the pointer swap, so
+        // the multi-megabyte ring is allocated at most twice over a grid's life.
         let mut g = TerminalGrid::new(24, 80);
         let ceiling = SCROLLBACK_LINES * MAX_COLS;
-        // Warm BOTH pooled backings to the ceiling: each reaches it the first
-        // time it is reflowed into at a width wide enough to need more than its
-        // initial backing (the second backing starts at the new(80) size, so it
-        // only grows when reflowed at cols > 80).
+        // Warm BOTH backings to the ceiling: the second starts at the new(80)
+        // size, so it only grows when reflowed at cols > 80.
         g.resize(24, MAX_COLS as u16, &mut []);
         let ptr_a = g.scrollback.buf.as_ptr();
         g.resize(24, 120, &mut []);
@@ -2054,10 +2026,7 @@ mod tests {
 
     #[test]
     fn width_reflow_preserves_history() {
-        // The anti-`reset_for_width` test: scrollback content must survive a
-        // width change (re-wrapped), not be discarded.
         let mut g = TerminalGrid::new(24, 80);
-        // Push a marked line into history, then change width.
         feed(&mut g, b"\x1b[H top");
         feed(&mut g, &[b'\r', b'\n'].repeat(24));
         g.resize(24, 100, &mut []);
@@ -2076,12 +2045,10 @@ mod tests {
         assert_eq!(glyph_at(&g, 0, 0), 'a');
         assert_eq!(glyph_at(&g, 1, 0), 'f');
         assert_eq!(glyph_at(&g, 2, 0), 'k');
-        // Grow to width 20: the wrapped run rejoins into a single row.
         g.resize(4, 20, &mut []);
         assert_eq!(glyph_at(&g, 0, 0), 'a');
         assert_eq!(glyph_at(&g, 0, 11), 'l');
         assert_eq!(glyph_at(&g, 0, 12), ' ');
-        // Shrink back to width 5: re-split into the same 3 rows.
         g.resize(4, 5, &mut []);
         assert_eq!(glyph_at(&g, 0, 0), 'a');
         assert_eq!(glyph_at(&g, 1, 0), 'f');
@@ -2104,8 +2071,6 @@ mod tests {
 
     #[test]
     fn cursor_stays_on_char_after_reflow() {
-        // The alacritty PR#7873 regression guard: shrink-then-grow must restore
-        // the cursor to its character, not saturate to (0, 0).
         let mut g = TerminalGrid::new(4, 20);
         feed(&mut g, b"hello world");
         assert_eq!((g.cursor_row, g.cursor_col), (0, 11));
@@ -2119,8 +2084,8 @@ mod tests {
         let mut g = TerminalGrid::new(3, 4);
         // 'a' + wide 'あ' (U+3042, 2 cells) + 'b'.
         feed(&mut g, "aあb".as_bytes());
-        // Shrink so the wide glyph cannot fit after 'a' in the 1 remaining col:
-        // it early-wraps to the next row as an intact lead+continuation pair.
+        // Width 2 leaves one column after 'a', so the wide glyph early-wraps as
+        // an intact lead+continuation pair.
         g.resize(3, 2, &mut []);
         assert_eq!(glyph_at(&g, 0, 0), 'a');
         assert_eq!(g.cells.get(1, 0).codepoint, 0x3042);
@@ -2130,10 +2095,8 @@ mod tests {
     #[test]
     fn empty_logical_line_survives_reflow() {
         let mut g = TerminalGrid::new(5, 10);
-        // Two non-blank lines separated by an intentional blank line.
         feed(&mut g, b"alpha\r\n\r\nbeta");
         g.resize(5, 6, &mut []);
-        // The blank middle line is preserved, not collapsed.
         assert_eq!(glyph_at(&g, 0, 0), 'a');
         assert_eq!(glyph_at(&g, 1, 0), ' ');
         assert_eq!(glyph_at(&g, 2, 0), 'b');
@@ -2141,17 +2104,12 @@ mod tests {
 
     #[test]
     fn straddling_wrap_rejoins_after_eviction() {
-        // A line longer than the screen, printed at the bottom row, has its head
-        // evicted into history mid-wrap. The carried wrap bit must let a later
-        // width change rejoin it across the history/live boundary.
         let mut g = TerminalGrid::new(2, 5);
-        // Fill row 0, then a 12-char line whose wrapped head scrolls into
-        // history while its tail stays live.
+        // At width 5 the 12-char line's wrapped head scrolls into history while
+        // its tail stays live.
         feed(&mut g, b"top\r\nabcdefghijkl");
-        // Grow wide enough to rejoin the whole logical line onto one row.
         g.resize(2, 20, &mut []);
         g.scroll_view_up(5);
-        // Somewhere in the visible history+live the rejoined line reads in order.
         let mut found = false;
         for row in 0..2 {
             if char::from_u32(g.visible_cell(row, 0).glyph()).unwrap_or('?') == 'a' {

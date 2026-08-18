@@ -1,6 +1,5 @@
 //! CPU HAL surface: preemption control, instruction wrappers, MSR /
-//! CPUID access, per-CPU storage. Subsystem-prefixed re-exports kept
-//! at the [`crate::cpu`] level for ergonomic access.
+//! CPUID access, per-CPU storage.
 
 pub mod preempt;
 pub mod x86_64;

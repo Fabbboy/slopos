@@ -3,10 +3,8 @@ use core::arch::asm;
 
 /// Read the Time Stamp Counter via `RDTSC`.
 ///
-/// On non-`target_os = "none"` builds (host integration tests, including
-/// `cargo miri test`) the asm cannot execute; the host stub returns a
-/// monotonically-increasing counter sufficient for any code that uses
-/// `rdtsc` as a coarse clock (e.g. RCU stall detection).
+/// On non-`target_os = "none"` builds the asm cannot execute; the host stub
+/// returns a monotonically-increasing counter instead.
 #[inline(always)]
 pub fn rdtsc() -> u64 {
     #[cfg(target_os = "none")]

@@ -1,25 +1,18 @@
 //! Scoped RCU epochs.
 //!
-//! Layered on the kernel's existing RCU machinery (`crate::sync::rcu`),
 //! [`Epoch`] gives a subsystem a typed entry point distinct from raw
 //! [`rcu_read_lock`]. An [`EpochGuard`] holds an [`RcuReadGuard`] for its
 //! lifetime — preemption stays disabled, so no quiescent state can be
 //! reported on this CPU while a guard is live, which keeps published
 //! pointers valid for the entire scope.
 //!
-//! When lock tracking is enabled, `Epoch::enter` also records a synthetic
-//! lock class on the per-CPU held-lock stack. Acquiring any tracked
-//! `SpinLock` while the synthetic class is held panics with a lockdep
-//! violation: "SpinLock acquired inside Epoch scope". The motivation is
-//! to keep epoch read-side regions structurally short and free of
-//! multi-step publish hazards (the same shape that broke SCM_RIGHTS in
-//! `unix_sendmsg`).
+//! Under lock tracking, `Epoch::enter` records a synthetic lock class, so
+//! acquiring any tracked `SpinLock` inside the scope panics with "SpinLock
+//! acquired inside Epoch scope" — epoch read-side regions stay short and free
+//! of multi-step publish hazards.
 //!
-//! Each subsystem instantiates its own `Epoch` — e.g. `net/`'s
-//! `NET_EPOCH` lives next to the TCP demux table. OSTD only ships the
-//! type definition; no kernel-wide singleton is implied.
-//!
-//! # Atomic-publish discipline
+//! Each subsystem instantiates its own `Epoch`; OSTD ships only the type
+//! definition, and no kernel-wide singleton is implied.
 //!
 //! Writers update RCU-published state via
 //! [`crate::sync::RcuCell::replace`]; the displaced box is deferred via
@@ -48,7 +41,6 @@ pub struct Epoch {
 }
 
 impl Epoch {
-    /// Construct an empty epoch. Suitable for `pub static` declarations.
     #[inline]
     pub const fn new(class: &'static LockClassKey) -> Self {
         Self { class }

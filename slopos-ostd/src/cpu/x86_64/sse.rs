@@ -2,7 +2,6 @@
 
 use super::control_regs::{Cr0Flags, Cr4Flags, read_cr0, read_cr4, write_cr0, write_cr4};
 
-/// Enable SSE instructions by configuring CR0 and CR4.
 pub fn enable_sse() {
     let mut cr0 = read_cr0();
     cr0 &= !Cr0Flags::EM.bits();

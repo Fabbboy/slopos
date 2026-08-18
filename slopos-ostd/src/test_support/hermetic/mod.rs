@@ -1,16 +1,10 @@
 //! Hermetic-state framework — snapshot / restore primitives for
 //! kernel-singleton state that tests may transiently mutate.
 //!
-//! The trait and registry vtable live here so the
-//! [`crate::hermetic_state`] declarative macro can emit both the
-//! `unsafe impl HermeticState` body and the `.hermetic_state_registry`
-//! linker-section entry in a single crate without circular deps.
-//!
-//! The kernel-side walker (`registry_iter`, `topo_order`) and the
-//! `KernelTestScope` RAII enter/exit machinery stay in `slopos-hermetic`
-//! because they need `KVec` (a kernel-allocator wrapper) and the
-//! `pause_all_aps` / `synchronize_rcu` quiescence dance that lives
-//! in `slopos-core`.
+//! The trait and registry vtable live here so [`crate::hermetic_state`] can emit
+//! both the `unsafe impl` and the `.hermetic_state_registry` entry without a
+//! circular dep. The registry walker and `KernelTestScope` stay in
+//! `slopos-hermetic`, which has `KVec` and the `slopos-core` quiescence dance.
 
 pub mod macros;
 pub mod scope;

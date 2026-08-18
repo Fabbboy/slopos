@@ -2,7 +2,6 @@
 
 use core::arch::asm;
 
-/// Execute the HLT instruction, halting the CPU until the next interrupt.
 #[inline(always)]
 pub fn hlt() {
     unsafe {
@@ -10,7 +9,6 @@ pub fn hlt() {
     }
 }
 
-/// Execute the PAUSE instruction (spin-loop hint).
 #[inline(always)]
 pub fn pause() {
     unsafe {
@@ -18,7 +16,6 @@ pub fn pause() {
     }
 }
 
-/// Halt forever in a loop. Does not return.
 #[inline(always)]
 pub fn halt_loop() -> ! {
     loop {
@@ -26,11 +23,9 @@ pub fn halt_loop() -> ! {
     }
 }
 
-/// Atomic `sti; hlt` pair. The IF-shadow rule guarantees no IRQ window
-/// between the `sti` and the `hlt`, so a pending interrupt that
-/// arrived during a `cli` region is delivered exactly when the CPU is
-/// already in HLT state. Used by HPET-driven busy-wait loops in
-/// drivers (`drivers/src/virtio/mod.rs::pause_for_irq`).
+/// Atomic `sti; hlt`: the IF shadow leaves no IRQ window between the two, so
+/// an interrupt pending from a `cli` region is delivered with the CPU already
+/// in HLT state.
 #[inline(always)]
 pub fn sti_hlt_atomic() {
     // SAFETY: `sti; hlt` is a single architectural sequence; the IF
@@ -41,12 +36,9 @@ pub fn sti_hlt_atomic() {
     }
 }
 
-/// Atomic `sti; hlt; cli` triple — idle-loop park-until-interrupt with
-/// IRQs returned to the disabled state on resume. The IF-shadow
-/// (same as [`sti_hlt_atomic`]) keeps interrupts inhibited between the
-/// `sti` and the `hlt`; the trailing `cli` re-disables IRQs after the
-/// woken ISR's IRET restores IF=1, so the caller's surrounding
-/// IRQ-disabled discipline is preserved across the wake.
+/// Atomic `sti; hlt; cli`: park until interrupt as [`sti_hlt_atomic`], then
+/// re-disable IRQs after the woken ISR's IRET restores IF=1, preserving the
+/// caller's IRQ-disabled discipline across the wake.
 #[inline(always)]
 pub fn sti_hlt_cli_atomic() {
     unsafe {
@@ -54,12 +46,9 @@ pub fn sti_hlt_cli_atomic() {
     }
 }
 
-/// Last-resort platform reset: load a zero-limit IDT, then issue
-/// `int3`. The breakpoint cannot be vectored through an empty IDT,
-/// the resulting double-fault cannot be vectored either, and the CPU
-/// triple-faults — most platforms (and QEMU) interpret the triple
-/// fault as a reset. Used by the kernel reboot path after the PS/2
-/// keyboard-controller reset fails.
+/// Last-resort platform reset: a zero-limit IDT can vector neither the `int3`
+/// nor the resulting double fault, so the CPU triple-faults, which QEMU and
+/// most platforms treat as a reset.
 #[inline(always)]
 pub fn trigger_triple_fault() -> ! {
     #[repr(C, packed)]
@@ -76,8 +65,6 @@ pub fn trigger_triple_fault() -> ! {
             options(nostack, preserves_flags),
         );
     }
-    // Defensive: if the platform somehow swallows the triple fault,
-    // park the BSP rather than letting control escape into surprising
-    // territory.
+    // Unreachable unless the platform swallows the triple fault.
     halt_loop()
 }

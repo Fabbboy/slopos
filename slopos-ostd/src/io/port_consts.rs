@@ -1,11 +1,7 @@
-//! Well-known x86 I/O port constants.
-//!
-//! These describe stable hardware port addresses (UART, PIT, PS/2, QEMU,
-//! ACPI PM1A) and the bit layouts of their associated registers. The
-//! [`Port<T>`](super::raw_port::Port) handles are non-registry-gated so
-//! they remain reachable in early-boot contexts before
-//! [`register_io_port_registry`](super::port::register_io_port_registry)
-//! has run.
+//! Well-known x86 I/O port constants and register bit layouts. The
+//! [`Port<T>`](super::raw_port::Port) handles are deliberately not
+//! registry-gated, so they stay reachable in early boot before
+//! [`register_io_port_registry`](super::port::register_io_port_registry) runs.
 
 use super::raw_port::Port;
 
@@ -47,9 +43,9 @@ pub const UART_FCR_14_BYTE_THRESHOLD: u8 = 0xC0;
 pub const UART_LSR_DATA_READY: u8 = 0x01;
 /// Break interrupt: the line was held at spacing for longer than a full frame.
 ///
-/// Out of band by construction — no byte pattern can produce it — which is why
-/// the diagnostic console uses it as its serial trigger. The UART also pushes a
-/// framing-error `0x00` into the FIFO alongside it, which the reader discards.
+/// No byte pattern can forge it, which is why the diagnostic console uses it as
+/// its serial trigger. The UART also pushes a framing-error `0x00` into the FIFO
+/// alongside it, which the reader discards.
 pub const UART_LSR_BREAK: u8 = 0x10;
 pub const UART_LSR_TX_EMPTY: u8 = 0x20;
 pub const UART_MCR_DTR: u8 = 0x01;
