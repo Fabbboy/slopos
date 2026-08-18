@@ -1,44 +1,28 @@
-// SlopRing registered / provided buffer-selection bounds proof.
+// Verus mirror of the two in-bounds properties the kernel's SlopRing buffer
+// selection (`ring/src/buffers.rs`) relies on:
 //
-// Machine-checks the two in-bounds properties the kernel's buffer selection
-// (`ring/src/buffers.rs`) relies on — the obligation the buffer-rings task
-// names ("a buf_group-selected buffer index stays in bounds"):
+//   (INV-FIXED-INDEX-BOUND) `BufferRegistry::resolve_fixed` /
+//        `check_out_fixed` accept an `Sqe.buf_index` iff it is a valid slot of
+//        the pin list, and the staged length is `len.min(pin.len())`, so the
+//        volatile `copy_out`/`copy_in` window never exceeds the selected pin.
 //
-//   (INV-FIXED-INDEX-BOUND) A registered fixed buffer is selected by
-//        `Sqe.buf_index`. `BufferRegistry::resolve_fixed` /
-//        `check_out_fixed` accept the index iff `buf_index < buf_count`
-//        (`pins.get(index)` / the explicit `i >= set.pins.len()` guard), and
-//        the staged length is `len.min(pin.len())`, so the volatile
-//        `copy_out`/`copy_in` window never exceeds the selected pin. Modelled
-//        as pure facts: an accepted index is a valid `KVec` slot, and the
-//        staged length is within the pin.
-//
-//   (INV-PBUF-SLOT-BOUND) A provided buffer ring is consumed by
-//        `ProvidedBufRing::{peek, commit}`. The consumer cursor `head` never
-//        passes the user-published producer `tail`, and the masked slot byte
-//        window `(head % entries) * stride .. + stride` always lies inside the
-//        `entries * stride`-byte pinned ring — so `peek`'s
-//        `copy_out((head & mask) * 16, [u8; 16])` is always in range. Mirrors
-//        ring_cursor.rs's adversarial-monotone user-cursor model and
-//        ring_layout.rs's masked-index lemma.
+//   (INV-PBUF-SLOT-BOUND) For a provided buffer ring, the consumer cursor
+//        `head` never passes the user-published producer `tail`, and the
+//        masked slot byte window `(head % entries) * stride .. + stride`
+//        always lies inside the `entries * stride`-byte pinned ring.
 
 use vstd::prelude::*;
 
 verus! {
 
-// ===========================================================================
-// (INV-FIXED-INDEX-BOUND) — registered fixed buffers (separate pins).
-// ===========================================================================
-
 /// `resolve_fixed(index)` / `check_out_fixed(index)` accept the index iff it
-/// is a valid slot of the `count`-long pin list (`pins.get(index)` is `Some`,
-/// or `i < pins.len()`).
+/// is a valid slot of the `count`-long pin list.
 pub open spec fn fixed_resolve_ok(index: nat, count: nat) -> bool {
     index < count
 }
 
-/// An accepted fixed-buffer index is a valid `KVec<PinnedUserBuffer>` slot.
-/// (Trivial, but it pins the contract the kernel's bounds check enforces.)
+/// An accepted fixed-buffer index is a valid `KVec<PinnedUserBuffer>` slot —
+/// trivial, but it pins the contract the kernel's bounds check enforces.
 pub proof fn fixed_index_valid_slot(index: nat, count: nat)
     requires
         fixed_resolve_ok(index, count),
@@ -47,9 +31,8 @@ pub proof fn fixed_index_valid_slot(index: nat, count: nat)
 {
 }
 
-/// The staged transfer length is `len.min(pin_len)` (see
-/// `stage_fixed_out`/`publish_fixed_in`), which is always within the selected
-/// pin — so the volatile copy window never runs off the buffer.
+/// The staged transfer length `len.min(pin_len)` of
+/// `stage_fixed_out`/`publish_fixed_in`.
 pub open spec fn staged_len(len: nat, pin_len: nat) -> nat {
     if len <= pin_len {
         len
@@ -64,14 +47,9 @@ pub proof fn staged_len_within_pin(len: nat, pin_len: nat)
 {
 }
 
-// ===========================================================================
-// (INV-PBUF-SLOT-BOUND, part a) — masked slot index + slot byte offset.
-// ===========================================================================
-
-/// The masked slot index `head & (entries - 1)` for a power-of-two `entries`
-/// equals `head % entries` (the bit-twiddle identity ring_layout.rs proves),
-/// always strictly less than `entries`. Pure modular arithmetic — holds for
-/// every positive `entries`.
+/// The masked slot index: for power-of-two `entries` the kernel's
+/// `head & (entries - 1)` is `head % entries`, always below `entries`. Pure
+/// modular arithmetic, so it holds for every positive `entries`.
 pub proof fn pbuf_slot_index_in_range(head: nat, entries: nat)
     requires
         entries > 0,
@@ -80,10 +58,9 @@ pub proof fn pbuf_slot_index_in_range(head: nat, entries: nat)
 {
 }
 
-/// The slot byte window `idx * stride .. idx * stride + stride` lies inside the
-/// `entries * stride`-byte ring region whenever `idx < entries`. This is the
-/// `copy_out((head & mask) * size_of::<IouringBuf>(), [u8; 16])` in-region
-/// guarantee — the nonlinear step the bound rests on.
+/// The slot byte window `idx * stride .. idx * stride + stride` lies inside
+/// the `entries * stride`-byte ring region whenever `idx < entries` — the
+/// in-region guarantee behind `peek`'s `copy_out`, and its nonlinear step.
 pub proof fn pbuf_slot_offset_in_region(idx: nat, entries: nat, stride: nat)
     requires
         idx < entries,
@@ -98,21 +75,11 @@ pub proof fn pbuf_slot_offset_in_region(idx: nat, entries: nat, stride: nat)
     ;
 }
 
-// ===========================================================================
-// (INV-PBUF-SLOT-BOUND, part b) — head/tail cursor state machine.
-//
-// `ProvidedBufRing` keeps a kernel-owned consumer `head`; the user publishes
-// buffers by advancing the producer `tail`. The kernel only ever advances
-// `head` (on commit) when `head != tail`, and never past `tail` — so a peeked
-// slot is one the user actually published. The user-published `tail` is an
-// adversarial-monotone input clamped to the ring size (it cannot overwrite
-// un-consumed slots), exactly as ring_cursor.rs models `cq_head`/`sq_tail`.
-// ===========================================================================
-
 pub struct PbufState {
     /// Kernel-owned consumer cursor (`ProvidedBufRing::head`).
     pub head: nat,
-    /// User-owned producer cursor (read via `read_tail`).
+    /// User-owned producer cursor (read via `read_tail`); an
+    /// adversarial-monotone input to the model.
     pub tail: nat,
     /// Ring slot count (power of two at runtime; here only `entries > 0`).
     pub entries: nat,
@@ -184,8 +151,7 @@ pub open spec fn pbuf_run(s: PbufState, trace: Seq<PbufStep>) -> PbufState
     }
 }
 
-/// Every reachable provided-ring state satisfies the invariant — the inductive
-/// whole-execution guarantee (mirrors ring_cursor.rs's main theorem).
+/// Every reachable provided-ring state satisfies the invariant.
 pub proof fn pbuf_inv_on_every_trace(s0: PbufState, trace: Seq<PbufStep>)
     requires
         pbuf_init(s0),
@@ -201,10 +167,9 @@ pub proof fn pbuf_inv_on_every_trace(s0: PbufState, trace: Seq<PbufStep>)
     }
 }
 
-/// (INV-PBUF-SLOT-BOUND) The headline corollary: in every reachable state the
-/// consumer never passes the producer, and the masked slot byte window lies
-/// inside the pinned ring — so a `buf_group`-selected (peeked) provided buffer
-/// index is always valid.
+/// (INV-PBUF-SLOT-BOUND) In every reachable state the consumer never passes
+/// the producer and the masked slot byte window lies inside the pinned ring,
+/// so a `buf_group`-selected provided buffer index is always valid.
 pub proof fn pbuf_selected_slot_in_bounds(s0: PbufState, trace: Seq<PbufStep>, stride: nat)
     requires
         pbuf_init(s0),

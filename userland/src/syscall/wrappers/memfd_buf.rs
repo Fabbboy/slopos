@@ -1,7 +1,4 @@
 //! Shared memory RAII wrappers (memfd-backed, fd-only).
-//!
-//! All buffer sharing uses memfd_create + ftruncate + mmap(MAP_SHARED).
-//! No legacy token-based code paths.
 
 use core::ptr::NonNull;
 
@@ -84,11 +81,9 @@ impl Drop for ShmBuffer {
 
 /// Read-only mapping of a memfd received via SCM_RIGHTS (compositor side).
 ///
-/// When `owns_fd` is true the mapping closes the fd on drop (sole-owner case,
-/// e.g. the clipboard). When false it only `munmap`s and leaves the fd to its
-/// owner (borrow case, e.g. a surface buffer the protocol bridge owns). A
-/// `MAP_SHARED` mapping stays valid after its fd is closed, so a borrowed mapping
-/// outliving the fd is safe.
+/// `owns_fd` decides whether drop closes the fd as well as unmapping. A
+/// `MAP_SHARED` mapping stays valid after its fd is closed, so a borrowed
+/// mapping outliving the fd is safe.
 pub struct CachedShmMapping {
     fd: i32,
     vaddr: u64,
@@ -97,14 +92,12 @@ pub struct CachedShmMapping {
 }
 
 impl CachedShmMapping {
-    /// Map a memfd fd read-only via mmap(MAP_SHARED), taking ownership of the
-    /// fd (closed on drop). Use when the mapping is the sole fd owner.
+    /// Takes ownership of `fd`; drop closes it.
     pub fn map_readonly_fd(fd: i32, size: usize) -> Option<Self> {
         Self::map_readonly_inner(fd, size, true)
     }
 
-    /// Map a memfd fd read-only WITHOUT taking ownership of the fd — only the
-    /// mapping is released on drop; the fd stays open for its owner to close.
+    /// Borrows `fd`; drop releases only the mapping.
     pub fn map_readonly_fd_borrowed(fd: i32, size: usize) -> Option<Self> {
         Self::map_readonly_inner(fd, size, false)
     }
@@ -127,8 +120,7 @@ impl CachedShmMapping {
         })
     }
 
-    /// Map a received memfd fd read/write via mmap(MAP_SHARED), e.g. a paste
-    /// destination buffer the compositor copies the clipboard into. Owns the fd.
+    /// Read/write mapping; takes ownership of `fd`.
     pub fn map_writable_fd(fd: i32, size: usize) -> Option<Self> {
         if fd < 0 || size == 0 {
             return None;

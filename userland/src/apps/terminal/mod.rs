@@ -2,12 +2,6 @@
 //! spawns `/bin/shell` on the slave, and bridges keystrokes <-> shell output
 //! through the kernel line discipline.
 //!
-//! ```text
-//! compositor <-> [terminal] <-> PTY master
-//!                               | kernel ldisc (ISIG -> SIGINT -> fg pgrp)
-//!                               <-> PTY slave <-> [shell] <-> forked jobs
-//! ```
-//!
 //! Single-threaded `slopfut` `block_on` root: `ProtocolHandle` is `Rc`/`!Send`,
 //! so the protocol client and the master fd are never touched off-thread.
 
@@ -35,20 +29,18 @@ const WINDOW_HEIGHT: i32 = 480;
 const SURFACE_BUFFERS: usize = 2;
 const BLINK_INTERVAL: Duration = Duration::from_millis(500);
 
-/// Read buffer drained from the PTY master per loop turn.
 const MASTER_READ_CHUNK: usize = 1024;
-/// Output bytes to consume per loop turn before returning to compositor input.
+/// Output bytes per loop turn before returning to compositor input.
 const MASTER_READ_BUDGET: usize = 4 * 1024;
-/// Bounded terminal-local input backlog for nonblocking PTY-master writes.
 const MASTER_WRITE_QUEUE_CAP: usize = 64 * 1024;
-/// Queued input bytes to write per loop turn before returning to events/output.
+/// Queued input bytes per loop turn before returning to events/output.
 const MASTER_WRITE_BUDGET: usize = 4 * 1024;
 
 pub fn terminal_user_main() {
     use slopos_windowing::connection;
 
-    // The terminal's stderr is not wired to anything a developer can see;
-    // route panic payloads to the kernel serial console instead.
+    // The terminal's stderr goes nowhere visible, so panics route to the
+    // kernel serial console instead.
     std::panic::set_hook(Box::new(|info| {
         let _ = tty::write(b"terminal: PANIC: ");
         let msg = std::format!("{info}\n");
@@ -63,10 +55,7 @@ pub fn terminal_user_main() {
     }
     surface::set_title("Terminal");
     surface::set_app_id("org.slopos.terminal");
-    // The I-beam cursor is set on each pointer-enter (see the event loop),
-    // where a live focus serial is available to authorize the request.
 
-    // Open the PTY pair; the master arrives as a real owned fd.
     let (master_owned, _slave_num) = match process::openpty() {
         Ok(pair) => pair,
         Err(_) => {
@@ -76,7 +65,6 @@ pub fn terminal_user_main() {
     };
     let master_fd = master_owned.into_raw();
 
-    // Resolve the slave peer fd from the master (TIOCGPTPEER).
     let slave_fd = match fs::ioctl_tiocgptpeer(master_fd) {
         Ok(fd) => fd.into_raw(),
         Err(_) => {
@@ -86,23 +74,17 @@ pub fn terminal_user_main() {
         }
     };
 
-    // Set the initial winsize from the default geometry so the shell sees a
-    // sane TERM size immediately (a Configure later re-pushes the real one).
+    // The shell needs a sane TERM size before the first Configure arrives.
     let cw = crate::gfx::font::cell_width().max(1);
     let ch = crate::gfx::font::cell_height().max(1);
     let cols = (WINDOW_WIDTH / cw).clamp(1, grid::MAX_COLS as i32) as u16;
     let rows = (WINDOW_HEIGHT / ch).clamp(1, grid::MAX_ROWS as i32) as u16;
     push_winsize(master_fd, rows, cols);
 
-    // Spawn the shell with the slave cloned onto its stdin/stdout/stderr. The
-    // child's empty table inherits only those clones — the terminal's own
-    // master/slave descriptors are never in the child, so no cloexec juggling
-    // is needed. No TASK_FLAG_NEW_PGRP: the shell runs its own setsid()/TIOCSCTTY.
     spawn_shell_on_slave(slave_fd);
 
-    // The terminal no longer needs the slave fd; the shell holds its own
-    // clone. Closing this ref keeps the master's EOF / SIGHUP semantics
-    // correct when the shell finally exits.
+    // The shell holds its own clone; dropping this last terminal-side ref is
+    // what makes the master's EOF/SIGHUP fire when the shell exits.
     let _ = fs::close_fd_raw(slave_fd);
 
     // Master must be non-blocking so the drain loop can read-until-WouldBlock.
@@ -139,11 +121,9 @@ pub fn terminal_user_main() {
 }
 
 enum ExitReason {
-    /// Master hit EOF / hangup — the shell session ended.
+    /// Master hit EOF / hangup.
     ShellGone,
-    /// Compositor asked the window to close.
     Closed,
-    /// A fatal setup error inside the loop.
     Error,
 }
 

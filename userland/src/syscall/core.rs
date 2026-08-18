@@ -78,7 +78,6 @@ pub fn getrandom(buf: &mut [u8]) -> isize {
     }
 }
 
-/// Convenience: get a random u32 value.
 #[inline(always)]
 pub fn random_next() -> u32 {
     let mut buf = [0u8; 4];
@@ -91,9 +90,8 @@ pub fn sys_info(info: &mut UserSysInfo) -> i64 {
     unsafe { syscall1(SYSCALL_SYS_INFO, info as *mut _ as u64) as i64 }
 }
 
-/// Drive the kernel-side userland-test phase from this task. Used by
-/// `/sbin/init` when the kernel was booted with `tests=on`. Returns the
-/// raw syscall result (0 on success, negative errno otherwise).
+/// Drives the kernel-side userland-test phase from this task; `/sbin/init`
+/// calls it when the kernel was booted with `tests=on`.
 #[inline(always)]
 pub fn run_userland_tests() -> i64 {
     unsafe { syscall0(SYSCALL_RUN_USERLAND_TESTS) as i64 }
