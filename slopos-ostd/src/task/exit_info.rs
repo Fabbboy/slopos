@@ -1,12 +1,8 @@
-//! Durable per-task exit value.
+//! Durable per-task exit value, and the source of truth for child-wait.
 //!
-//! Stored on each `Task` in an `AtomicCell<ExitInfo>`. `mark_task_terminated`
-//! publishes via `try_set` *before* the wake fanout in
-//! `release_task_dependents`; late waiters that race past the wake see the
-//! published value on their next condition re-check and exit cleanly without
-//! ever blocking. This is the durable source of truth for child-wait;
-//! `TaskExitRecord` (in `mgr.exit_records`) remains a non-durable diagnostics
-//! cache.
+//! `mark_task_terminated` publishes here *before* the wake fanout, so a waiter
+//! that races past the wake still sees it on its next condition re-check.
+//! `TaskExitRecord` is a non-durable diagnostics cache, not this.
 
 use slopos_abi::task::{TaskExitReason, TaskFaultReason};
 

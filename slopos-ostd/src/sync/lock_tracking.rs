@@ -1,14 +1,4 @@
-//! Backwards-compatibility shim over [`super::lock_graph`].
-//!
-//! Pre-existing call sites (`SpinLock::lock`, `PreemptMutex::lock`,
-//! `IrqRwLock::*`, `utils/src/panic_recovery.rs`, `boot/src/idt.rs`) call
-//! into the `lock_tracking` namespace with `push_lock` / `pop_lock` /
-//! `poison_unlock_all_held` / `enable_lock_tracking` / `LOCK_LEVEL_*` /
-//! `held_lock_count`. The actual validator now lives in
-//! [`super::lock_graph`] (dependency-graph + cycle detection); this shim
-//! preserves the public surface so no call site needs to change.
-//!
-//! Everything here is a `pub use`; no logic lives in this file.
+//! Backwards-compatibility shim over [`super::lock_graph`]; `pub use` only.
 
 pub use super::lock_graph::{
     ACQ_NONE, ACQ_RECURSIVE, ClassInfo, DeclareOrderError, LO_BLESSED, LO_DUPOK,

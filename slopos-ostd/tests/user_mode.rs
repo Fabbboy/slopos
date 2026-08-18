@@ -1,13 +1,10 @@
 //! Host-side integration tests for `slopos_ostd::user`.
 //!
-//! Exercises the `UserContext` argument-validation path and the
-//! `copy_*_user` page-table reachability check against a fixture
-//! `VmSpace`. The actual `__ostd_raw_usercopy` asm is **not**
-//! invoked from these tests — `STAC` is privileged and would fault
-//! when run from a host process. We force every assertion path to
-//! return *before* the asm runs by either using zero-length
-//! buffers or by mapping pages with permissions that fail
-//! validation.
+//! Exercises the `UserContext` argument-validation path and the `copy_*_user`
+//! page-table reachability check against a fixture `VmSpace`.
+//! `__ostd_raw_usercopy` is never reached — `STAC` is privileged and would
+//! fault in a host process — so every case returns before the asm, using
+//! zero-length buffers or permissions that fail validation.
 
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, MutexGuard, OnceLock};
@@ -154,7 +151,6 @@ fn copy_from_user_reports_not_user_accessible() {
     let v_end = VirtAddr::new(user_va + PAGE_SIZE as u64);
     {
         let mut cur = space.cursor_mut(v_start..v_end).unwrap();
-        // map kernel-only — user bit clear.
         cur.map::<Size4Kb, _>(fresh_user_frame(), PageProperty::KERNEL_RW)
             .unwrap();
     }
@@ -213,14 +209,12 @@ fn copy_validation_spans_two_pages() {
     let v_start = VirtAddr::new(user_va);
     let v_mid = VirtAddr::new(user_va + PAGE_SIZE as u64);
     {
-        // Map only the first page; the second page in the cross-page
-        // copy below is unmapped, so validation must report it.
+        // Only the first page is mapped.
         let mut cur = space.cursor_mut(v_start..v_mid).unwrap();
         cur.map::<Size4Kb, _>(fresh_user_frame(), PageProperty::USER_RW)
             .unwrap();
     }
-    // Place the slice base 8 bytes before the page boundary; a 16-byte
-    // copy then spans both pages.
+    // Base 8 bytes before the boundary, so the 16-byte copy spans both pages.
     let near_end = user_va + (PAGE_SIZE as u64 - 8);
     let mut regs = UserRegs::default();
     regs.rdi = near_end;
@@ -234,10 +228,8 @@ fn copy_validation_spans_two_pages() {
 
 #[test]
 fn user_ptr_construction_is_private() {
-    // Confirm at run time that `UserVirtAddr::try_new` is not public.
-    // This is a weaker check than the compile-fail test on the
-    // `&T` escape: here we just assert that the only public entry
-    // point (`UserContext::user_ptr_arg`) yields the same wrapper.
+    // `UserVirtAddr::try_new` is private, so all this can check is that the
+    // one public entry point yields the same wrapper.
     let _g = setup();
     let user_va = 0x0000_4000_8000_0000;
     let ctx = ctx_with_arg0(user_va);

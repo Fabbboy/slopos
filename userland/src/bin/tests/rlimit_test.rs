@@ -2,13 +2,7 @@
 
 //! `prlimit64` reports the ceilings the kernel actually enforces.
 //!
-//! The failure this exists to prevent is the one Redox and Asterinas ship: a
-//! limit reported to userland that nothing consults. A caller that cannot
-//! query a real bound cannot back off gracefully, and one told a resource is
-//! unlimited when it is not finds out by failing an allocation it had every
-//! reason to believe would succeed.
-//!
-//! So these assert the *relationship* between what is reported and what is
+//! These assert the *relationship* between what is reported and what is
 //! enforced, never a specific number — the numbers live in `abi/src/quota.rs`
 //! and in the gate file, and a test that pinned them here would be a third
 //! place to update and the first one to drift.
@@ -26,16 +20,14 @@ fn zeroed() -> RLimit {
     }
 }
 
-/// Every published resource answers with a finite, enforced bound.
 fn every_published_limit_is_finite() -> bool {
     for resource in RLIMIT_ALL {
         let mut lim = zeroed();
         if getrlimit(resource, &mut lim) != 0 {
             return false;
         }
-        // A published limit that reads as infinity is the failure mode: it
-        // tells a caller to stop worrying about a resource the kernel is
-        // still counting and still refusing on.
+        // Infinity tells a caller to stop worrying about a resource the kernel
+        // is still counting and still refusing on.
         if lim.rlim_cur == RLIM_INFINITY || lim.rlim_max == RLIM_INFINITY {
             return false;
         }
@@ -46,18 +38,14 @@ fn every_published_limit_is_finite() -> bool {
     true
 }
 
-/// An unknown resource is refused rather than answered with a fiction.
 fn unknown_resources_are_refused() -> bool {
     let mut lim = zeroed();
     // 4 and 42 are outside the set this kernel maps.
     getrlimit(4, &mut lim) != 0 && getrlimit(42, &mut lim) != 0
 }
 
-/// `RLIMIT_AS` is byte-denominated, so it must be far larger than a page.
-///
-/// Catches the scale bug directly: the arena counts pages, and publishing a
-/// page count under a byte-named limit would understate the bound by 4096 and
-/// make a caller sizing an allocation against it back off far too early.
+/// `RLIMIT_AS` is byte-denominated: the arena counts pages, and publishing a
+/// page count under a byte-named limit would understate the bound by 4096.
 fn byte_limits_are_reported_in_bytes() -> bool {
     let mut lim = zeroed();
     if getrlimit(RLIMIT_AS, &mut lim) != 0 {
@@ -66,7 +54,6 @@ fn byte_limits_are_reported_in_bytes() -> bool {
     lim.rlim_cur >= 4096 * 1024
 }
 
-/// Lowering the soft limit succeeds and is visible on read-back.
 fn lowering_a_limit_takes_effect() -> bool {
     let mut original = zeroed();
     if getrlimit(RLIMIT_NOFILE, &mut original) != 0 {
@@ -87,17 +74,14 @@ fn lowering_a_limit_takes_effect() -> bool {
     }
     let ok = read_back.rlim_cur == lowered.rlim_cur;
 
-    // Put it back: a lowered descriptor ceiling would follow this process into
-    // whatever the harness runs next.
+    // A lowered descriptor ceiling would follow this process into whatever the
+    // harness runs next.
     setrlimit(RLIMIT_NOFILE, &original);
     ok
 }
 
-/// Raising the hard limit is refused.
-///
-/// Raising is the privileged operation, and granting it unconditionally would
-/// make every ceiling advisory — a process refused for want of headroom could
-/// simply ask for more.
+/// Raising is the privileged operation; granting it unconditionally would make
+/// every ceiling advisory.
 fn raising_the_hard_limit_is_refused() -> bool {
     let mut original = zeroed();
     if getrlimit(RLIMIT_NOFILE, &mut original) != 0 {
@@ -110,25 +94,18 @@ fn raising_the_hard_limit_is_refused() -> bool {
     setrlimit(RLIMIT_NOFILE, &raised) != 0
 }
 
-/// No `setrlimit` input, however large, raises the ceiling.
-///
-/// Belt-and-braces over the `EPERM` check above rather than a second route to
-/// the same refusal. The arena counts in `u32` and the ABI in `u64`, so a
-/// request too large to convert has to land somewhere; mapping it to the
-/// no-limit sentinel would turn the widest possible `setrlimit` into an
-/// unprivileged way to switch enforcement off. Unreachable today — the hard
-/// limit is checked first, and it bounds the value below `u32::MAX` for every
-/// published resource — which is exactly why it is worth pinning: the day a
-/// resource is published with a larger ceiling, this is the check that still
-/// holds.
+/// The arena counts in `u32` and the ABI in `u64`, so a request too large to
+/// convert has to land somewhere; mapping it to the no-limit sentinel would turn
+/// the widest possible `setrlimit` into an unprivileged way to switch
+/// enforcement off. Unreachable while the hard-limit check bounds every
+/// published resource below `u32::MAX`, and pinned for the day one is not.
 fn an_oversized_request_cannot_lift_the_ceiling() -> bool {
     let mut original = zeroed();
     if getrlimit(RLIMIT_NOFILE, &mut original) != 0 {
         return false;
     }
     // Both halves large: `rlim_cur > rlim_max` is rejected before the
-    // conversion, so a value that only overflows the soft limit never reaches
-    // the arithmetic this is about.
+    // conversion this is about.
     let huge = RLimit {
         rlim_cur: u64::MAX - 1,
         rlim_max: u64::MAX - 1,
@@ -144,7 +121,6 @@ fn an_oversized_request_cannot_lift_the_ceiling() -> bool {
     ok
 }
 
-/// A soft limit above the hard limit is `EINVAL`.
 fn soft_above_hard_is_rejected() -> bool {
     let mut original = zeroed();
     if getrlimit(RLIMIT_NOFILE, &mut original) != 0 {
@@ -157,10 +133,8 @@ fn soft_above_hard_is_rejected() -> bool {
     setrlimit(RLIMIT_NOFILE, &inverted) != 0
 }
 
-/// Another process's limits are not ours to read or write.
-///
-/// There is no privilege principal in this kernel, so permitting it would be
-/// permitting it unconditionally.
+/// There is no privilege principal in this kernel, so permitting a foreign pid
+/// would be permitting it unconditionally.
 fn foreign_pids_are_refused() -> bool {
     let mut lim = zeroed();
     // A pid this process is very unlikely to own.

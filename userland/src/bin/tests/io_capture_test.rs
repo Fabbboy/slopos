@@ -15,8 +15,7 @@ fn test_ifconfig() -> bool {
     tokens.push_token(b"ifconfig");
     let rc = shell::exec::execute_tokens(&tokens);
     eprintln!("io_capture_test: ifconfig exit={}", rc);
-    // ifconfig is allowed to return any code; we just want to confirm it
-    // can be spawned through the registry path without crashing.
+    // Any exit code passes; this only checks ifconfig spawns via the registry.
     true
 }
 

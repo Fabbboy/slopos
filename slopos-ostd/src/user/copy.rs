@@ -1,25 +1,20 @@
 //! Fault-recoverable user-space byte copy.
 //!
 //! [`copy_from_user`] / [`copy_to_user`] / [`copy_bytes_from_user`] /
-//! [`copy_bytes_to_user`] are the only OSTD-sanctioned paths to move
-//! bytes across the kernel/user boundary. They:
+//! [`copy_bytes_to_user`] are the only OSTD-sanctioned paths to move bytes
+//! across the kernel/user boundary: they confirm every covering page is present
+//! and user-accessible through the supplied [`VmSpace`], then `rep movsb`
+//! between `__ostd_usercopy_start..__ostd_usercopy_end` with `STAC` / `CLAC`
+//! around the loop. The page-fault handler recognises that range via
+//! [`is_ostd_usercopy_ip`] and redirects RIP to [`ostd_usercopy_fault_ip`],
+//! which clears AC and returns the un-copied byte count via `rax`.
 //!
-//! 1. Walk the supplied [`VmSpace`] cursor to confirm every covering
-//!    4 KiB page is present and user-accessible.
-//! 2. Run a `rep movsb` between the asm labels
-//!    `__ostd_usercopy_start..__ostd_usercopy_end`, with `STAC` /
-//!    `CLAC` immediately around the loop. The page-fault handler
-//!    recognises the fault range via [`is_ostd_usercopy_ip`] and
-//!    redirects RIP to [`ostd_usercopy_fault_ip`], which clears AC
-//!    and returns the un-copied byte count via `rax`.
+//! No public API exposes a raw `STAC`/`CLAC`. The only AC=1 window in the
+//! kernel — outside `IRETQ` to user mode — lives inside these symbols (Inv. 4).
 //!
-//! No public API exposes a raw `STAC`/`CLAC`. The only AC=1 window
-//! in the kernel — outside `IRETQ` to user mode — lives inside
-//! these symbols (Inv. 4).
-//!
-//! `copy_from_user::<T>` returns `T` by value via `MaybeUninit`. The
-//! signature deliberately rules out returning `&T`, so a user
-//! pointer can never escape into a kernel reference.
+//! `copy_from_user::<T>` returns `T` by value; the signature deliberately rules
+//! out returning `&T`, so a user pointer can never escape into a kernel
+//! reference.
 
 use core::mem::MaybeUninit;
 
@@ -41,24 +36,19 @@ pub enum UserCopyError {
     NotUserWritable = 3,
     /// `addr + len` left the user range or overflowed.
     OutOfUserRange = 4,
-    /// Page-fault during the copy: the user pages were unmapped or the
-    /// permissions changed concurrently. The byte at offset
-    /// `bytes_copied` did not transfer.
+    /// Page-fault during the copy — the user pages were unmapped or their
+    /// permissions changed concurrently. The byte at offset `bytes_copied` did
+    /// not transfer.
     Fault { bytes_copied: usize },
     /// VmSpace cursor construction returned an unexpected error
     /// (alignment / range). Programmer error in the caller.
     InvalidSpace,
 }
 
-// SMAP: `STAC` opens a window through which `rep movsb` can read or
-// write user pages. `CLAC` closes it on every exit edge — both
-// success and the fault-recovery branch. Hardware automatically
-// clears AC on exception entry, so any nested kernel code that runs
-// during the fault sees SMAP enforced normally; IRETQ then restores
-// AC from the saved RFLAGS at `__ostd_usercopy_*`. The labels are
-// distinct from the legacy `mm/src/user_copy.rs` symbols so both
-// implementations can coexist in the binary while consumer
-// migration is in flight.
+// SMAP: `STAC` opens the window `rep movsb` needs; `CLAC` closes it on every
+// exit edge, the fault-recovery branch included. Hardware clears AC on
+// exception entry, so nested kernel code running during the fault sees SMAP
+// enforced normally; IRETQ then restores AC from the saved RFLAGS.
 core::arch::global_asm!(
     ".global __ostd_raw_usercopy",
     ".global __ostd_usercopy_start",
@@ -86,9 +76,7 @@ unsafe extern "C" {
     fn __ostd_usercopy_fault();
 }
 
-/// Returns `true` if `rip` falls within the OSTD usercopy fault
-/// region. The page-fault handler queries this and redirects RIP
-/// to [`ostd_usercopy_fault_ip`] when it matches.
+/// Whether `rip` falls within the OSTD usercopy fault region.
 #[inline]
 pub fn is_ostd_usercopy_ip(rip: u64) -> bool {
     let start = __ostd_usercopy_start as *const () as u64;
@@ -97,8 +85,7 @@ pub fn is_ostd_usercopy_ip(rip: u64) -> bool {
 }
 
 /// RIP value the page-fault handler should rewrite to when
-/// [`is_ostd_usercopy_ip`] matches. Resumes at the CLAC + return
-/// branch which surfaces the un-copied byte count via `rax`.
+/// [`is_ostd_usercopy_ip`] matches.
 #[inline]
 pub fn ostd_usercopy_fault_ip() -> u64 {
     __ostd_usercopy_fault as *const () as u64
@@ -165,8 +152,7 @@ fn map_walk_err(e: MapError) -> UserCopyError {
 
 /// Copy a single `T: Pod` from user space.
 ///
-/// Returns `T` by value — never a reference, never a borrow into a
-/// user page. The compile-fail tests below verify this.
+/// Returns `T` by value — never a reference, never a borrow into a user page.
 ///
 /// ```compile_fail
 /// # use slopos_ostd::user::copy::copy_from_user;
@@ -217,13 +203,9 @@ pub fn copy_to_user<T: Pod>(
 
 /// Copy a single `T: Copy` from user space.
 ///
-/// Wider trait bound than [`copy_from_user`] (which requires `T: Pod`)
-/// — accepts any `Copy` type. The caller carries responsibility that
-/// the type's representation tolerates arbitrary byte patterns
-/// (no `bool`, no enum with niches, etc.); the surrounding kernel
-/// validates the value as appropriate. Provided for caller-API parity
-/// with the 84 kernel callsites that pre-date the `Pod` trait — see
-/// `mm/src/user_copy.rs` for the historical rationale.
+/// Wider than [`copy_from_user`]'s `T: Pod` bound: the caller carries
+/// responsibility that the type's representation tolerates arbitrary byte
+/// patterns (no `bool`, no enum with niches, etc.).
 pub fn copy_value_from_user<T: Copy>(space: &VmSpace, src: UserPtr<T>) -> Result<T, UserCopyError> {
     let len = core::mem::size_of::<T>();
     validate_pages(space, src.as_u64(), len, AccessKind::Read)?;

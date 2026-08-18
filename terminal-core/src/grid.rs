@@ -109,20 +109,17 @@ impl Cell {
         }
     }
 
-    /// A default-styled space — what a hard-break row's trailing run trims to
-    /// during reflow. SGR-colored blanks (non-default bg) are *not* blank, so a
-    /// painted trailing region survives a width change.
+    /// A default-styled space. SGR-colored blanks (non-default bg) are *not*
+    /// blank, so a painted trailing region survives reflow's trailing trim.
     #[inline]
     pub fn is_blank(&self) -> bool {
         self.glyph() == b' ' as u32 && self.attrs == CellAttributes::default_colors()
     }
 }
 
-/// Reserve `buf`'s capacity straight to `max` the first time it would grow past
-/// what it already holds, so a run of incremental `resize`s (a terminal resize
-/// drag) reallocates at most once over the buffer's life instead of every step.
-/// The backing is lazy — reserving address space faults in no pages — so only
-/// the live (`len`-sized) region costs physical memory.
+/// Reserve straight to `max` the first time `buf` would grow, so a resize drag
+/// reallocates at most once over the buffer's life. Reserved address space
+/// faults in no pages, so only the live (`len`-sized) region costs memory.
 fn reserve_to_max<T>(buf: &mut Vec<T>, max: usize) {
     if buf.capacity() < max {
         buf.reserve_exact(max.saturating_sub(buf.len()));
@@ -133,10 +130,7 @@ fn reserve_to_max<T>(buf: &mut Vec<T>, max: usize) {
 ///
 /// `wrapped[r] == true` means physical row `r` was filled by autowrap and
 /// continues into row `r + 1` (a soft wrap); `false` is a hard line break.
-/// The bit lives here, parallel to the cells, so every row-moving primitive
-/// (`row_copy`, `copy_from`, `clear_all`, `clear_row`) carries or clears it in
-/// lockstep with the content — the alt-screen save/restore and the height
-/// resize path then maintain wrap state for free through the same machinery.
+/// Every row-moving primitive carries or clears it in lockstep with content.
 pub struct CellGrid {
     cells: Vec<Cell>,
     wrapped: Vec<bool>,
@@ -152,11 +146,9 @@ impl CellGrid {
         }
     }
 
-    /// Re-shape to `rows`×`cols`, blanking the whole grid (and clearing every
-    /// wrap bit). Both backings grow at most once (to the maximum grid), so
-    /// reusing one `CellGrid` across a resize drag never reallocates after
-    /// that — `len` still tracks the live area, so every other method stays
-    /// bound to the logical grid.
+    /// Re-shape to `rows`×`cols`, blanking the whole grid and every wrap bit.
+    /// Both backings grow at most once (to the maximum grid), so reusing one
+    /// `CellGrid` across a resize drag never reallocates after that.
     pub fn allocate(&mut self, rows: usize, cols: usize) {
         let total = rows.saturating_mul(cols);
         if total == 0 {
@@ -189,7 +181,7 @@ impl CellGrid {
     }
 
     /// The `cols`-wide cell slice backing `row`, or an empty slice when out of
-    /// range. The reflow pass reads source rows through this.
+    /// range.
     #[inline]
     pub fn row(&self, row: usize) -> &[Cell] {
         let start = row * self.cols;
@@ -235,7 +227,7 @@ impl CellGrid {
     }
 
     /// Blank every cell of `row` to `fill` and clear its wrap bit (a blanked
-    /// row is a hard break). The single sink for "this row is now empty".
+    /// row is a hard break).
     fn clear_row(&mut self, row: usize, fill: Cell) {
         let start = row * self.cols;
         let end = start + self.cols;
@@ -320,10 +312,9 @@ impl CursorAttributes {
 
 struct ScrollbackBuf {
     buf: Vec<Cell>,
-    /// Per-ring-slot soft-wrap bit, aligned to `head`/`count` exactly like
-    /// `buf`. A history row whose bit is set continues into the row below it
-    /// (or into live row 0 for the newest entry); reflow walks these to rejoin
-    /// logical lines across a width change.
+    /// Per-ring-slot soft-wrap bit, aligned to `head`/`count` like `buf`. A set
+    /// bit means the row continues into the one below it (into live row 0 for
+    /// the newest entry).
     wrap: Vec<bool>,
     cols: usize,
     head: usize,
@@ -363,9 +354,8 @@ impl ScrollbackBuf {
     }
 
     /// Reset to an empty ring strided for `cols`, growing the backing straight
-    /// to its `MAX_COLS` ceiling the first time it must. Unlike the old
-    /// `reset_for_width`, this is only ever called on the *scratch* ring the
-    /// reflow pass builds into — the live ring's history is never discarded.
+    /// to its `MAX_COLS` ceiling the first time it must. Only ever called on
+    /// the *scratch* ring; the live ring's history is never discarded.
     fn clear_to_width(&mut self, cols: usize) {
         let cols = cols.min(MAX_COLS);
         let needed = SCROLLBACK_LINES.saturating_mul(cols);
@@ -419,8 +409,7 @@ impl ScrollbackBuf {
         Some((&self.buf[start..end], self.wrap[idx]))
     }
 
-    /// True when the newest row is an all-blank hard break — the trailing-trim
-    /// predicate the reflow partition uses to keep the prompt at the bottom.
+    /// The reflow trailing-trim predicate — what keeps the prompt at the bottom.
     fn newest_is_blank_hard_break(&self) -> bool {
         match self.get_row(1) {
             Some((cells, wrapped)) => !wrapped && cells.iter().all(|c| c.is_blank()),
@@ -428,7 +417,6 @@ impl ScrollbackBuf {
         }
     }
 
-    /// Drop the newest row (used by reflow trailing-blank trimming).
     fn pop_newest(&mut self) {
         if self.count == 0 {
             return;
@@ -437,8 +425,8 @@ impl ScrollbackBuf {
         self.count -= 1;
     }
 
-    /// Drop the newest `n` rows without reading them (the reflow partition
-    /// peels these into the live screen, so they leave the history).
+    /// Drop the newest `n` rows: the reflow partition peels these into the live
+    /// screen, so they leave the history.
     fn drop_newest(&mut self, n: usize) {
         let n = n.min(self.count);
         self.head = (self.head + SCROLLBACK_LINES - n) % SCROLLBACK_LINES;
@@ -465,9 +453,8 @@ pub struct ResizeOutcome {
     pub reflowed: bool,
 }
 
-/// Number of cells up to and including the last non-blank cell of a row — the
-/// logical length of a hard-break row (trailing default-blank cells trimmed;
-/// SGR-colored blanks are non-blank and so survive).
+/// Logical length of a hard-break row: cells up to and including the last
+/// non-blank one (SGR-colored blanks count as non-blank and so survive).
 fn trimmed_len(row: &[Cell]) -> usize {
     let mut n = row.len();
     while n > 0 && row[n - 1].is_blank() {
@@ -500,10 +487,9 @@ impl TrackPt {
 
 /// The streaming join-then-re-split engine. Source rows are fed oldest→newest;
 /// each soft-wrapped run is concatenated into a logical line and re-emitted at
-/// `new_cols`, with rows pushed into the destination ring as they fill. Tracked
-/// points (cursor + selection) record their new (emitted_row, col) the instant
-/// the matching source cell is written, so the cursor stays on its character
-/// and selections survive the reflow without arithmetic that wide chars break.
+/// `new_cols`. Tracked points (cursor + selection) record their new
+/// (emitted_row, col) the instant the matching source cell is written, so the
+/// remap needs no arithmetic that wide chars would break.
 struct Reflow<'a> {
     dst: &'a mut ScrollbackBuf,
     new_cols: usize,
@@ -644,9 +630,8 @@ pub struct TerminalGrid {
     pub rows: u16,
     pub cols: u16,
     cells: CellGrid,
-    /// Pooled grid swapped in on resize so the live screen and alt buffers are
-    /// re-shaped by reusing one extra allocation instead of allocating a fresh
-    /// grid per resize step (a drag fires one resize per cell-width crossed).
+    /// Pooled grid swapped in on resize, so re-shaping the live and alt buffers
+    /// costs one extra allocation rather than a fresh grid per resize step.
     resize_scratch: CellGrid,
     parser: VtParser,
     cursor_attrs: CursorAttributes,
@@ -664,25 +649,20 @@ pub struct TerminalGrid {
     scroll_bottom: u16,
     scrollback: ScrollbackBuf,
     /// Pooled second scrollback ring the width-reflow pass builds into, then
-    /// swaps with `scrollback` (a pointer move, no multi-MB copy). Reading the
-    /// old ring while writing a distinct one is what makes a width *shrink*
-    /// safe (more output rows than input rows would otherwise overrun unread
-    /// history). Ceiling-sized once via `reserve_to_max`, so a resize drag
-    /// never reallocates it.
+    /// swaps with `scrollback`. Reading the old ring while writing a distinct
+    /// one is what makes a width *shrink* safe: more output rows than input
+    /// rows would otherwise overrun unread history. Ceiling-sized once, so a
+    /// resize drag never reallocates it.
     reflow_scratch: ScrollbackBuf,
-    /// Count of lines ever evicted into scrollback. This is the absolute line
-    /// number of live screen row 0, giving every line (history + live) a
-    /// stable identity that survives scrolling — selections anchor to it so a
-    /// copy grabs the originally-selected text even after output scrolls.
+    /// Count of lines ever evicted into scrollback, i.e. the absolute line
+    /// number of live screen row 0. Selections anchor to it, so a copy grabs
+    /// the originally-selected text even after output scrolls.
     total_scrolled: u64,
     /// VT100 deferred autowrap: a char printed in the last column leaves the
     /// cursor there with the wrap pending; the wrap commits only when the
-    /// next printable char arrives. An exactly-full line followed by `\r\n`
-    /// therefore advances one row, not two.
+    /// next printable char arrives.
     wrap_pending: bool,
     /// Cells whose visible content changed since the last [`take_damage`].
-    /// Every grid mutation records the span it wrote here, so a renderer
-    /// repaints what changed rather than the window.
     ///
     /// [`take_damage`]: TerminalGrid::take_damage
     damage: CellDamage,
@@ -738,8 +718,7 @@ impl TerminalGrid {
     }
 
     /// Move the accumulated per-cell damage out, leaving the grid clean. The
-    /// caller owns the returned set and is responsible for painting it: damage
-    /// dropped on the floor is content that never reaches the screen.
+    /// caller must paint it: dropped damage never reaches the screen.
     #[must_use]
     pub fn take_damage(&mut self) -> CellDamage {
         let taken = self.damage.clone();
@@ -784,8 +763,8 @@ impl TerminalGrid {
         }
     }
 
-    /// Damage the cell the cursor occupies. The blink timer calls this: the
-    /// cursor is inverse video on one cell, so a phase flip changes one cell.
+    /// Damage the cell the cursor occupies. The cursor is inverse video on one
+    /// cell, so a blink phase flip changes exactly that cell.
     pub fn damage_cursor(&mut self) {
         let cell = self.cursor_cell();
         self.damage_cursor_at(cell);
@@ -796,7 +775,6 @@ impl TerminalGrid {
     pub fn visible_cell(&self, row: usize, col: usize) -> Cell {
         let sb_lines = self.scrollback.view_offset.min(self.rows as usize);
         if row < sb_lines {
-            // Rows above the live region show scrollback history.
             let sb_offset = self.scrollback.view_offset - row;
             if let Some((sb_row, _)) = self.scrollback.get_row(sb_offset) {
                 return sb_row.get(col).copied().unwrap_or_else(Cell::blank);
@@ -809,13 +787,12 @@ impl TerminalGrid {
 
     /// Absolute line number shown at visible screen `row`, given the current
     /// scrollback view. Exact inverse of [`visible_cell`](Self::visible_cell)'s
-    /// `sb_lines` / `view_offset` split — the single authority both render
-    /// (highlight) and copy (collect) convert through, so they never disagree.
+    /// `sb_lines` / `view_offset` split — the single authority both render and
+    /// copy convert through, so they never disagree.
     #[inline]
     pub fn screen_to_abs(&self, row: usize) -> u64 {
         let sb_lines = self.scrollback.view_offset.min(self.rows as usize);
         if row < sb_lines {
-            // Scrollback line: `view_offset - row` is its offset-from-bottom.
             let sb_offset = (self.scrollback.view_offset - row) as u64;
             self.total_scrolled.wrapping_sub(sb_offset)
         } else {
@@ -831,12 +808,10 @@ impl TerminalGrid {
         let view_offset = self.scrollback.view_offset;
         let sb_lines = view_offset.min(rows);
         if abs >= self.total_scrolled {
-            // Live line; pushed down by `sb_lines` when scrolled into history.
             let live_row = (abs - self.total_scrolled) as usize;
             let screen = live_row + sb_lines;
             (screen < rows).then_some(screen)
         } else {
-            // Scrollback line: `k` = offset-from-bottom (>= 1).
             let k = (self.total_scrolled - abs) as usize;
             if k > self.scrollback.count || k > view_offset {
                 return None;
@@ -847,8 +822,8 @@ impl TerminalGrid {
     }
 
     /// Cell at an absolute `(line, col)`, resolving to the live buffer or the
-    /// scrollback ring independent of the current view. Blank for an evicted
-    /// or out-of-range line — copy degrades gracefully, never panics.
+    /// scrollback ring independent of the current view. An evicted or
+    /// out-of-range line yields a blank rather than panicking.
     pub fn abs_cell(&self, abs_line: u64, col: usize) -> Cell {
         if abs_line >= self.total_scrolled {
             let live_row = (abs_line - self.total_scrolled) as usize;
@@ -899,12 +874,11 @@ impl TerminalGrid {
     /// `anchors` are width-invariant content points (the app's selection
     /// endpoints) remapped in place so a copy survives the reflow; an endpoint
     /// whose content was evicted from history becomes `None`. Pass an empty
-    /// slice when there is no selection. The returned [`ResizeOutcome`] tells
-    /// the caller whether a width reflow happened (so it can apply the remap).
+    /// slice when there is no selection.
     ///
     /// A width change rejoins soft-wrapped rows into logical lines and re-wraps
-    /// them at the new width (`reflow_width`); a height-only change keeps the
-    /// cheaper shift/clip path, since no wrap point moves.
+    /// them at the new width; a height-only change keeps the cheaper shift/clip
+    /// path, since no wrap point moves.
     pub fn resize(
         &mut self,
         rows: u16,
@@ -934,13 +908,10 @@ impl TerminalGrid {
         ResizeOutcome { reflowed: true }
     }
 
-    /// Width-unchanged resize. No wrap point moves, so the live grid and alt
-    /// buffer are re-shaped by the pooled scratch (which carries each row's
-    /// wrap bit through `copy_from`) and the scrollback ring — history and the
-    /// absolute line numbering — stays valid. Height shrink anchors the
-    /// cursor's line on screen by scrolling displaced top rows into history,
-    /// rather than top-aligned clipping that would teleport the cursor away
-    /// from the line a shell line editor is tracking.
+    /// Width-unchanged resize: no wrap point moves, so history and the absolute
+    /// line numbering stay valid. A height shrink scrolls displaced top rows
+    /// into history rather than clipping top-aligned, which would teleport the
+    /// cursor away from the line a shell line editor is tracking.
     fn resize_height_only(&mut self, rows: u16) {
         let old_rows = self.rows as usize;
         let cols = self.cols as usize;
@@ -1013,9 +984,8 @@ impl TerminalGrid {
         let old_rows = self.rows as usize;
         let old_total = self.total_scrolled;
 
-        // The history-bearing primary buffer is `cells` normally, `alt_cells`
-        // while in the alt screen (where `cells` is the active alt content,
-        // which never reflows). The reflowed cursor is that buffer's cursor.
+        // The history-bearing buffer is `cells` normally, `alt_cells` while in
+        // the alt screen (where `cells` holds alt content, which never reflows).
         let in_alt = self.in_alt_screen;
         let cur_row = if in_alt {
             self.alt_screen_cursor_row as usize
@@ -1028,14 +998,11 @@ impl TerminalGrid {
             self.cursor_col as usize
         };
         let cursor_abs = old_total.wrapping_add(cur_row as u64);
-        // A deferred-wrap cursor sits visually on the filled last column, but
-        // its logical position is one past it (the next write would wrap). Track
-        // that one-past column so a wider reflow advances the cursor off the old
-        // margin instead of pinning it to the last glyph (or, for a wide char,
-        // its continuation cell).
+        // A deferred-wrap cursor sits on the filled last column but is logically
+        // one past it, so track the one-past column: a wider reflow must advance
+        // it off the old margin, not pin it to the last glyph.
         let cursor_track_col = if past_eol { cur_col + 1 } else { cur_col };
 
-        // ---- streaming join-then-re-split into the pooled scratch ring ----
         self.reflow_scratch.clear_to_width(new_cols);
         let (recorded, emitted) = {
             let mut rf = Reflow::new(&mut self.reflow_scratch, new_cols);
@@ -1046,8 +1013,6 @@ impl TerminalGrid {
                 }
             }
 
-            // Source rows oldest -> newest: scrollback offsets [count..=1],
-            // then the live primary rows.
             let count = self.scrollback.count;
             for k in (1..=count).rev() {
                 if let Some((slice, wrapped)) = self.scrollback.get_row(k) {
@@ -1066,9 +1031,8 @@ impl TerminalGrid {
             (rf.points_recorded(), rf.emitted)
         };
 
-        // Trailing-blank trim (bottom gravity): drop empty hard-break rows from
-        // the newest end so the prompt sits at the bottom, but never above the
-        // cursor's emitted row.
+        // Bottom gravity: drop trailing blank hard-break rows so the prompt sits
+        // at the bottom, but never above the cursor's emitted row.
         let cursor_emit_row = recorded[0].map(|(r, _)| r).unwrap_or(0);
         let mut emitted_eff = emitted;
         while emitted_eff > cursor_emit_row + 1 && self.reflow_scratch.newest_is_blank_hard_break()
@@ -1077,7 +1041,6 @@ impl TerminalGrid {
             emitted_eff -= 1;
         }
 
-        // Install the reflowed ring; the old one parks in the pool for reuse.
         core::mem::swap(&mut self.scrollback, &mut self.reflow_scratch);
         self.scrollback.view_offset = 0;
 
@@ -1087,7 +1050,6 @@ impl TerminalGrid {
         // new absolute line of an emitted row `er`: er + (c_count - emitted_eff).
         let renumber = c_count as i128 - emitted_eff as i128;
 
-        // Reshape the non-history (alt) buffer by clip/clamp via the scratch.
         let copy_rows = old_rows.min(new_rows);
         let copy_cols = (self.cols as usize).min(new_cols);
         if in_alt {
@@ -1102,8 +1064,6 @@ impl TerminalGrid {
             core::mem::swap(&mut self.alt_cells, &mut self.resize_scratch);
         }
 
-        // Reshape + fill the history-bearing buffer from the reflowed ring's
-        // newest `live_n` rows (oldest live at top), blanking the remainder.
         if in_alt {
             self.alt_cells.allocate(new_rows, new_cols);
         } else {
@@ -1127,9 +1087,8 @@ impl TerminalGrid {
         self.scrollback.drop_newest(live_n);
         self.total_scrolled = self.scrollback.count as u64;
 
-        // Resolve the cursor from its tracked emission position. Re-derive the
-        // deferred wrap only when the cursor landed exactly at the new right
-        // margin at the end of its line (its content wrapped to a fresh row).
+        // Re-derive the deferred wrap only when the cursor landed at column 0 of
+        // a fresh row, i.e. its content filled the new right margin exactly.
         let (mut cer, mut ccol) = recorded[0].unwrap_or((first_live, 0));
         let mut cursor_wrap = false;
         if past_eol && ccol == 0 && cer > 0 {
@@ -1148,8 +1107,6 @@ impl TerminalGrid {
         }
         self.wrap_pending = cursor_wrap;
 
-        // Remap the caller's selection anchors. An endpoint whose content was
-        // evicted (or already off-history before the reflow) becomes `None`.
         for (i, a) in anchors.iter_mut().enumerate() {
             if a.is_none() {
                 continue;
@@ -1187,7 +1144,6 @@ impl TerminalGrid {
         if self.alt_screen_cursor_row >= self.rows {
             self.alt_screen_cursor_row = self.rows.saturating_sub(1);
         }
-        // The DECSC-saved cursor obeys the new bounds too.
         if self.saved_cursor_col >= self.cols {
             self.saved_cursor_col = self.cols.saturating_sub(1);
         }
@@ -1207,9 +1163,8 @@ impl TerminalGrid {
     }
 
     fn execute_action(&mut self, action: VtAction) {
-        // The cursor is painted as inverse video on whatever cell it sits on,
-        // so both the cell it leaves and the one it lands on change even when
-        // no cell content did.
+        // The cursor is inverse video on its cell, so both the cell it leaves
+        // and the one it lands on change even when no content did.
         let cursor_before = self.cursor_cell();
         match action {
             VtAction::Print(_) | VtAction::SetAttribute(_) | VtAction::Nop => {}
@@ -1243,18 +1198,13 @@ impl TerminalGrid {
         }
     }
 
-    // -----------------------------------------------------------------------
-    // Action handlers
-    // -----------------------------------------------------------------------
-
     fn print_codepoint(&mut self, cp: u32) {
         if self.rows == 0 || self.cols == 0 {
             return;
         }
 
-        // Commit a pending wrap before placing the next char. The row the
-        // cursor is leaving was filled to the margin and continues here, so
-        // mark it soft-wrapped (carried down by any scroll the advance causes).
+        // Commit a pending wrap before placing the next char: the row being left
+        // was filled to the margin and continues here, so it is soft-wrapped.
         if self.wrap_pending {
             self.wrap_pending = false;
             if self.parser.auto_wrap {
@@ -1267,9 +1217,8 @@ impl TerminalGrid {
 
         let wide = is_double_width(cp);
 
-        // A wide char that cannot fit in the remaining columns wraps early
-        // (autowrap) — there is no half-cell placement. That early wrap is also
-        // a soft continuation of the current row.
+        // A wide char that cannot fit the remaining columns wraps early — there
+        // is no half-cell placement — and that wrap is a soft continuation.
         if wide && self.cursor_col + 2 > self.cols && self.parser.auto_wrap {
             let row = self.cursor_row as usize;
             self.cells.set_wrapped(row, true);
@@ -1336,8 +1285,7 @@ impl TerminalGrid {
         let end = self.cursor_col.saturating_add(width);
         if end >= self.cols {
             // Last column filled: stay put with the wrap pending. Without
-            // autowrap the pending commit is a no-op and the last column
-            // keeps being overwritten, matching xterm.
+            // autowrap the last column keeps being overwritten, as in xterm.
             self.cursor_col = self.cols - 1;
             self.wrap_pending = true;
         } else {
@@ -1465,7 +1413,6 @@ impl TerminalGrid {
                 for c in cc..cols {
                     self.cells.set(cr, c, clear_cell);
                 }
-                // Trailing run cleared: the row no longer soft-wraps.
                 self.cells.set_wrapped(cr, false);
                 self.damage_cells(cr, cc, cols - 1);
             }
@@ -1752,10 +1699,6 @@ impl TerminalGrid {
         }
     }
 
-    // -----------------------------------------------------------------------
-    // Helpers
-    // -----------------------------------------------------------------------
-
     fn blank_with_attrs(&self) -> Cell {
         Cell {
             codepoint: b' ' as u32,
@@ -1774,8 +1717,7 @@ impl TerminalGrid {
         }
     }
 
-    /// Move the cursor one row down, scrolling the region when it passes
-    /// the bottom margin.
+    /// Move the cursor one row down, scrolling the region at the bottom margin.
     fn advance_row(&mut self) {
         self.cursor_row = self.cursor_row.saturating_add(1);
         let sr_bottom = self.effective_scroll_bottom();

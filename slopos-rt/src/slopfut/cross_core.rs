@@ -125,16 +125,13 @@ impl<T> Future for Recv<'_, T> {
 
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<T> {
         let this = self.get_mut();
-        // Fast path: an item is already queued.
         if let Some(item) = this.rx.try_recv() {
             return Poll::Ready(item);
         }
-        // Empty: register this task's local waker with the reactor's wakeup
-        // waiter set, then re-check the queue. The reactor (this thread) only
-        // services the wakeup-fd inside `park`, which happens strictly after
-        // this poll returns Pending — and a sender's byte (written after its
-        // push) is durable in the pipe — so the re-check + registration cannot
-        // race a concurrent push into a lost wakeup.
+        // Register before the re-check: this thread's reactor services the
+        // wakeup-fd only inside `park`, which runs strictly after this poll
+        // returns Pending, and the sender's byte (written after its push) is
+        // durable in the pipe — so a concurrent push cannot be missed.
         reactor::with_reactor(|r| r.register_wakeup_waiter(cx.waker().clone()));
         if let Some(item) = this.rx.try_recv() {
             return Poll::Ready(item);

@@ -14,9 +14,6 @@ pub use slopos_gfx::canvas_ops::{
 };
 
 /// Height of one line of text in the chrome font.
-///
-/// Layout must ask for this rather than hardcode a line height, which drifts
-/// the moment the font changes.
 pub fn cell_height() -> i32 {
     font::cell_height()
 }

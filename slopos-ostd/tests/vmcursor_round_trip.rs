@@ -1,10 +1,6 @@
-//! Round-trip tests for the `VmReader` / `VmWriter` volatile cursors.
-//!
-//! Run host-side under `cargo test` and under KernMiri (`just check-miri`).
-//! Mirror `uframe_round_trip.rs`'s arena setup: install a scratch `META_SLOTS`
-//! array + a phys-virt offset mapping paddr `0` to a leaked page-aligned heap
-//! buffer, then build real `UFrame<AnonymousMeta>`s over that arena and drive
-//! the cursors across page boundaries.
+//! Round-trip tests for the `VmReader` / `VmWriter` volatile cursors, driven
+//! over a scratch `META_SLOTS` arena whose phys-virt offset maps paddr `0` to a
+//! leaked page-aligned heap buffer.
 
 use std::sync::{Mutex, MutexGuard, OnceLock};
 
@@ -39,9 +35,8 @@ fn setup() -> MutexGuard<'static, ()> {
     m.lock().unwrap()
 }
 
-/// Build `n` consecutive owning `UFrame`s starting at physical page `base_page`
-/// within the arena. Each page is used by exactly one test (no cross-test
-/// paddr reuse) so the `UNUSED → TYPED` slot transition always succeeds.
+/// Build `n` consecutive owning `UFrame`s from arena page `base_page`. Each page
+/// belongs to exactly one test, so the `UNUSED → TYPED` transition succeeds.
 fn frames(base_page: usize, n: usize) -> Vec<UFrame<AnonymousMeta>> {
     (0..n)
         .map(|i| {
@@ -68,7 +63,6 @@ fn reader_crosses_page_boundary() {
     fr[0].copy_in_volatile(0, &s0).unwrap();
     fr[1].copy_in_volatile(0, &s1).unwrap();
 
-    // Span the last 100 bytes of page 0 + the first 200 bytes of page 1.
     let mut r = VmReader::new(&fr, PAGE_SIZE - 100, 300).unwrap();
     assert_eq!(r.remain(), 300);
     assert!(r.has_remain());
@@ -81,7 +75,6 @@ fn reader_crosses_page_boundary() {
     assert_eq!(&out[..100], &s0[PAGE_SIZE - 100..]);
     assert_eq!(&out[100..], &s1[..200]);
 
-    // A dry cursor yields nothing more.
     let mut tail = [0u8; 8];
     assert_eq!(r.read(&mut tail), 0);
 }
@@ -115,8 +108,7 @@ fn reader_spans_three_pages_in_small_chunks() {
         f.copy_in_volatile(0, &ramp((i * 13) as u8)).unwrap();
     }
 
-    // Whole three-page range, drained 37 bytes at a time (resumable, advancing
-    // across both page boundaries).
+    // Drained 37 bytes at a time so chunks straddle both page boundaries.
     let total = 3 * PAGE_SIZE;
     let mut r = VmReader::new(&fr, 0, total).unwrap();
     let mut collected = Vec::with_capacity(total);
@@ -143,23 +135,20 @@ fn read_is_capped_by_remaining_then_dst() {
     let fr = frames(7, 1);
     fr[0].copy_in_volatile(0, &ramp(3)).unwrap();
 
-    // Only 10 bytes in the logical range, but a larger dst.
     let mut r = VmReader::new(&fr, 5, 10).unwrap();
     let mut out = [0xFFu8; 64];
     assert_eq!(r.read(&mut out), 10);
     assert_eq!(r.remain(), 0);
     let s = ramp(3);
     assert_eq!(&out[..10], &s[5..15]);
-    assert_eq!(out[10], 0xFF); // untouched past the copied region
+    assert_eq!(out[10], 0xFF);
 }
 
 #[test]
 fn new_rejects_out_of_range() {
     let _g = setup();
     let fr = frames(0, 1); // re-uses page 0; serialized by the setup mutex
-    // abs_start + len > n_frames * PAGE_SIZE.
     assert!(VmReader::new(&fr, 0, PAGE_SIZE + 1).is_none());
     assert!(VmWriter::new(&fr, PAGE_SIZE, 1).is_none());
-    // Exactly the chain length is fine.
     assert!(VmReader::new(&fr, 0, PAGE_SIZE).is_some());
 }

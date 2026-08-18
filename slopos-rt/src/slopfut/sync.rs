@@ -11,11 +11,8 @@ use core::task::{Context, Poll, Waker};
 use std::collections::VecDeque;
 use std::rc::Rc;
 
-// ── Notify ─────────────────────────────────────────────────────────────────
-
-/// A multi-waiter notification with a single stored permit (the shape of
-/// `tokio::sync::Notify`). `notify_one` wakes one waiter, or leaves a permit
-/// for the next `notified().await`.
+/// A multi-waiter notification with a single stored permit. `notify_one` wakes
+/// one waiter, or leaves a permit for the next `notified().await`.
 #[derive(Clone, Default)]
 pub struct Notify {
     inner: Rc<RefCell<NotifyInner>>,
@@ -27,13 +24,9 @@ struct NotifyInner {
     waiters: VecDeque<Waiter>,
 }
 
-/// A parked `Notified`, and the flag that tells it — once it is polled again —
-/// that the wake it just received was its own.
-///
-/// The flag is what makes the handoff survive the round trip through the
-/// executor. Waking a waker only schedules a re-poll; without a record that
-/// *this* future was the one chosen, the re-poll finds no permit and parks
-/// again, and the notification is lost for good.
+/// A parked `Notified` plus the flag telling it that the wake it received was
+/// its own. Waking only schedules a re-poll, so without that record the re-poll
+/// finds no permit, parks again, and the notification is lost for good.
 struct Waiter {
     notified: Rc<Cell<bool>>,
     waker: Waker,
@@ -83,10 +76,9 @@ impl Future for Notified {
             i.permit = false;
             return Poll::Ready(());
         }
-        // Register once per future, not once per poll: a re-poll from a
-        // sibling branch of a `select`/`join` must not enqueue a second
-        // waiter, or one `notify_one` would be consumed without resolving
-        // anything.
+        // Register once per future, not once per poll: a re-poll from a sibling
+        // branch of a `select`/`join` must not enqueue a second waiter, or one
+        // `notify_one` would be consumed without resolving anything.
         if this.registered {
             if let Some(w) = i
                 .waiters
@@ -111,8 +103,8 @@ impl Drop for Notified {
         let mut i = self.inner.borrow_mut();
         i.waiters.retain(|w| !Rc::ptr_eq(&w.notified, &self.state));
         // Dropped after being chosen but before observing it: hand the
-        // notification on rather than swallowing it, or a `select` that
-        // cancels this branch silently eats another waiter's wakeup.
+        // notification on, or a `select` cancelling this branch silently eats
+        // another waiter's wakeup.
         if self.state.get() {
             match i.waiters.pop_front() {
                 Some(w) => {
@@ -124,8 +116,6 @@ impl Drop for Notified {
         }
     }
 }
-
-// ── oneshot ────────────────────────────────────────────────────────────────
 
 struct OneshotInner<T> {
     value: Option<T>,

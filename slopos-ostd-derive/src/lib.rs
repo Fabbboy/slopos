@@ -1,32 +1,9 @@
 //! Derive macros for `slopos-ostd`.
 //!
 //! Exports `#[derive(Pod)]`, `#[derive(Zeroable)]` and
-//! `#[derive(SlotFields)]`.
-//!
-//! `#[derive(SlotFields)]` builds the compile-time field table that
-//! `write_field!` / `zero_field!` / `write_init_field!` /
-//! `write_array_field!` address a heap slot through. Every token it emits
-//! is safe: the offsets come from `core::mem::offset_of!` and each field's
-//! type is pinned by a never-called projection closure, so a consumer crate
-//! writes fields into uninitialised memory without an `unsafe` block
+//! `#[derive(SlotFields)]`. `SlotFields` emits only safe tokens, so a consumer
+//! crate writes fields into uninitialised memory without an `unsafe` block
 //! appearing anywhere in its expansion.
-//!
-//! `#[derive(Pod)]` / `#[derive(Zeroable)]` implement the
-//! `slopos_ostd::Pod` and `slopos_ostd::Zeroable` traits. Both reject
-//! `#[repr(packed)]` and unions, and give every field type a
-//! `T: ::slopos_ostd::Pod` (or `Zeroable`) `where`-bound so the
-//! type-checker enforces field-level conformance. They differ where the
-//! two properties genuinely differ:
-//!
-//!  - `Pod` claims *every* bit pattern is a valid value, so it requires
-//!    `#[repr(C)]` or `#[repr(transparent)]` — the layout it reinterprets
-//!    has to be the declared one — and it rejects enums outright.
-//!  - `Zeroable` claims only that the all-zero value is valid. For a
-//!    struct that is the conjunction of the fields' own claims at whatever
-//!    offsets the compiler picks, which `#[repr(Rust)]` preserves, so no
-//!    `repr` is required. A fieldless enum with a primitive `repr` whose
-//!    first variant sits at discriminant 0 qualifies too, and both halves
-//!    of that are checked.
 
 use proc_macro::TokenStream;
 use proc_macro2::TokenStream as TokenStream2;
@@ -40,13 +17,10 @@ use syn::{
 /// object charge.
 ///
 /// The field must be named `object_charge` and typed `Charge<ObjectRow>`. The
-/// derive is the only implementor of the sealed supertrait, which is what
-/// makes `impl FileBacking for X {}` fail to compile unless `X` is accounted
-/// for.
+/// derive is the only implementor of the sealed supertrait, so `impl
+/// FileBacking for X {}` fails to compile unless `X` is accounted for.
 ///
-/// Refuses to expand alongside `Clone` or `Copy`: a cloned charge refunds
-/// twice, and catching it here is better than catching it in the linearity
-/// gate, because the error names the type.
+/// Refuses to expand alongside `Clone` or `Copy`: a cloned charge refunds twice.
 #[proc_macro_derive(Charged)]
 pub fn derive_charged(input: TokenStream) -> TokenStream {
     let input = parse_macro_input!(input as DeriveInput);
@@ -118,14 +92,9 @@ fn expand_charged(input: &DeriveInput) -> syn::Result<TokenStream2> {
     let name = &input.ident;
     let (impl_generics, ty_generics, where_clause) = input.generics.split_for_impl();
 
-    // Three field shapes, and the accessor differs for each:
-    //
-    //   Charge<ObjectRow>  the ordinary case — this value is the charge's home
-    //   AliasOf            an alias of an object charged elsewhere; the field
-    //                      is a written claim, so the expansion consumes it
-    //                      once to keep `dead_code` off every definition site
-    //   SharedCharge       one type playing both roles, distinguished at
-    //                      runtime (the PTY master/slave shape)
+    // `AliasOf` names an object charged elsewhere; the field is a written
+    // claim, so the expansion consumes it once to keep `dead_code` off every
+    // definition site.
     let body = if ty.contains("SharedCharge") {
         quote! { self.object_charge.get() }
     } else if ty.contains("AliasOf") {
@@ -180,21 +149,11 @@ pub fn derive_zeroable(input: TokenStream) -> TokenStream {
 /// For `struct DataState { iss: u32, sendmap: SendMap }` the expansion is a
 /// zero-sized `DataStateSlotFields` holding one
 /// `Field<DataState, T, { offset_of!(DataState, f) }>` per field, plus the
-/// `HasFields` impl carrying it as an associated `const`. `write_field!`
-/// resolves `slot.fields().iss`, so the field path is name-checked, the value
-/// type is inferred from the field, and the byte offset is a compile-time
-/// constant — with no `unsafe` token in the invoking crate.
+/// `HasFields` impl carrying it as an associated `const`, so `write_field!`
+/// name-checks the field path and resolves its byte offset at compile time
+/// with no `unsafe` token in the invoking crate.
 ///
-/// Restrictions, each of which would otherwise make the emitted table wrong
-/// rather than merely unbuildable:
-///  1. Named-field structs only. Tuple and unit structs have no field
-///     identifiers to hang the table's members on.
-///  2. `#[repr(packed)]` is rejected: the projection closure `|t| &t.f` is
-///     E0793 on a packed field, and a `Field`-addressed write assumes the
-///     field is aligned for its type.
-///  3. Generic types are rejected: `offset_of!` in const-generic argument
-///     position needs `generic_const_exprs` once a type parameter is
-///     involved.
+/// Named-field, non-generic, non-`#[repr(packed)]` structs only.
 #[proc_macro_derive(SlotFields)]
 pub fn derive_slot_fields(input: TokenStream) -> TokenStream {
     let input = parse_macro_input!(input as DeriveInput);
@@ -249,9 +208,6 @@ fn expand_slot_fields(input: &DeriveInput) -> syn::Result<TokenStream2> {
 
     for field in &named.named {
         let ident = field.ident.as_ref().expect("named fields checked above");
-        // A field type may spell `Self` (e.g. `Bitmap<{ words_for(Self::N) }>`).
-        // Inside the generated table that would resolve to the table type, so
-        // substitute the concrete name.
         let ty = substitute_self(field.ty.to_token_stream(), name);
         members.push(quote! {
             #vis #ident: ::slopos_ostd::mm::init::Field<
@@ -273,10 +229,8 @@ fn expand_slot_fields(input: &DeriveInput) -> syn::Result<TokenStream2> {
             #(#members),*
         }
 
-        // Hand-written rather than derived: `#[derive(Clone, Copy)]` emits an
-        // `unsafe impl ::core::clone::TrivialClone`, which would put an
-        // `unsafe` token into the expansion of every crate that uses the
-        // table — the exact thing this derive exists to avoid.
+        // Hand-written: `#[derive(Clone, Copy)]` emits an `unsafe impl
+        // ::core::clone::TrivialClone`, which this derive exists to avoid.
         impl ::core::clone::Clone for #table {
             #[inline]
             fn clone(&self) -> Self {
@@ -303,11 +257,10 @@ fn expand_slot_fields(input: &DeriveInput) -> syn::Result<TokenStream2> {
 
 /// Rewrite every `Self` ident in a field type to the concrete type name.
 ///
-/// In a struct field position `Self` can only mean the struct itself, so the
-/// substitution is unconditional. It is needed because the generated field
-/// table is a *different* type, and a field spelled
+/// The generated field table is a *different* type, so a field spelled
 /// `Bitmap<{ words_for(Self::COUNT) }>` would otherwise resolve `Self` to the
-/// table.
+/// table. In field position `Self` can only mean the struct itself, so the
+/// substitution is unconditional.
 fn substitute_self(tokens: TokenStream2, name: &syn::Ident) -> TokenStream2 {
     use proc_macro2::{Group, TokenTree};
     tokens
@@ -329,17 +282,17 @@ fn substitute_self(tokens: TokenStream2, name: &syn::Ident) -> TokenStream2 {
 ///
 /// `#[xdp_filter] fn drop_ssh(pkt: &mut PacketView<'_>) -> XdpAction { … }`
 /// expands to the original function plus a zero-sized type implementing
-/// `slopos_net::xdp::XdpFilter` (delegating to the function) and a `'static`
-/// instance named after the function in upper-case. Register it explicitly:
+/// `slopos_net::xdp::XdpFilter` and a `'static` instance named after the
+/// function in upper-case. Register it explicitly:
 ///
 /// ```ignore
 /// XDP.register(&DROP_SSH);
 /// ```
 ///
-/// The expansion emits no `unsafe` and no link-section magic — filter chain
-/// membership and order stay an explicit, auditable sequence of `register`
-/// calls. Paths resolve through `slopos_net` (the `net` crate aliases itself
-/// via `extern crate self as slopos_net;`).
+/// No `unsafe` and no link-section magic: filter chain membership and order
+/// stay an explicit sequence of `register` calls. Paths resolve through
+/// `slopos_net` (the `net` crate aliases itself via
+/// `extern crate self as slopos_net;`).
 #[proc_macro_attribute]
 pub fn xdp_filter(_attr: TokenStream, item: TokenStream) -> TokenStream {
     let func = parse_macro_input!(item as ItemFn);

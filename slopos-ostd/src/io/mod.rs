@@ -18,10 +18,8 @@ pub use uart::UartRegs;
 
 /// Terminate the VM through QEMU's `isa-debug-exit` device.
 ///
-/// Safe: the port has exactly one effect, and it is to end the machine.
-/// There is no memory it can corrupt and no state left to observe, so the
-/// write carries no obligation for a caller to discharge. Does nothing on
-/// hardware, where the port is unclaimed.
+/// The port's only effect is ending the machine, so the write carries no
+/// caller obligation. Does nothing on hardware, where the port is unclaimed.
 ///
 /// QEMU reports `(value << 1) | 1`, so 0 surfaces as exit code 1 and 1 as 3.
 pub fn qemu_debug_exit(value: u8) {

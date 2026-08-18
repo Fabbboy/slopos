@@ -1,18 +1,10 @@
-//! `ss` — socket statistics, and `netstat` under the same roof.
-//!
-//! One binary and two names, the same arrangement `/bin/ip` uses for
-//! `ifconfig`: the shell passes the typed name as `argv[0]`, so the two share a
-//! renderer rather than drifting into two implementations of one table.
+//! `ss` — socket statistics, and `netstat` under the same roof: the shell
+//! passes the typed name as `argv[0]` and both names share one renderer.
 //!
 //! **Every row is visible to everyone; the owner is not.** `NET_Q_SOCKETS`
-//! returns every socket to any caller, and reports `owner_pid` only for rows the
-//! caller owns or to a caller holding `NET_ADMIN`. That is the kernel's decision,
-//! not this file's — `-p` prints what it was given and never guesses, because a
-//! redacted owner and an unowned socket arrive as the same value by design.
-//!
-//! Flag bundling is [`slopos_net_core::argv::scan_bundled`], so `-tuln` and
-//! `-t -u -l -n` are the same command and neither this file nor its reader has
-//! to care which was typed.
+//! reports `owner_pid` only for rows the caller owns or to a caller holding
+//! `NET_ADMIN`, so `-p` prints what it was given and never guesses: a redacted
+//! owner and an unowned socket arrive as the same value by design.
 
 use core::fmt::Write;
 use std::string::String;
@@ -30,10 +22,6 @@ use slopos_net_core::render::{route_origin, sock_state, sock_transport};
 use slopos_net_core::ss_filter::{is_connected, ss_row_selected};
 
 use crate::net_query::{self, name_of};
-
-// ---------------------------------------------------------------------------
-// Options
-// ---------------------------------------------------------------------------
 
 // The four that decide which rows are shown are `net-core`'s, so the flag
 // algebra is host-tested rather than only reachable through a boot.
@@ -59,10 +47,9 @@ const SS_FLAGS: &[(u8, u32)] = &[
     (b's', OPT_SUMMARY),
 ];
 
-/// `netstat` accepts everything `ss` does plus the two views that are genuinely
-/// a different question — the routing table and the interface counters — which
-/// is the whole reason the alias carries its own flag table rather than being a
-/// pure rename.
+/// `netstat` adds the two views that are a different question — the routing
+/// table and the interface counters — which is why the alias carries its own
+/// flag table rather than being a pure rename.
 const NETSTAT_FLAGS: &[(u8, u32)] = &[
     (b't', OPT_TCP),
     (b'u', OPT_UDP),
@@ -112,8 +99,6 @@ fn basename(path: &str) -> &str {
 }
 
 fn run(opts: u32, netstat: bool) -> i32 {
-    // The two `netstat` views answer a different question entirely, so they
-    // short-circuit before any socket is read.
     if opts & OPT_ROUTE != 0 {
         return show_routes();
     }
@@ -147,11 +132,8 @@ fn run(opts: u32, netstat: bool) -> i32 {
     0
 }
 
-/// Whether a row survives the flag filter.
-///
-/// The decision itself is [`slopos_net_core::ss_filter::ss_row_selected`],
-/// where it is host-tested. This is the part of `ss` that can be wrong
-/// silently: a dropped row looks exactly like having no sockets.
+/// A wrongly dropped row looks exactly like having no sockets, so the decision
+/// itself lives in host-tested [`slopos_net_core::ss_filter::ss_row_selected`].
 fn selected(row: &UserSockInfo, opts: u32) -> bool {
     ss_row_selected(opts, row.sock_type, row.state)
 }
@@ -193,21 +175,17 @@ fn print_row(row: &UserSockInfo, opts: u32) {
     let _ = write!(addr, "{}", Endpoint(row.remote_addr, row.remote_port));
     let _ = field(&mut line, &addr, COL_ADDR);
 
-    // Linux's shape is `users:(("comm",pid=N,fd=N))`; the outer parens are the
-    // list and the inner one entry. Neither the command name nor the descriptor
-    // is in this ABI, so one entry carrying only a pid is written in the same
-    // brackets rather than in a shape of its own.
+    // Linux's shape is `users:(("comm",pid=N,fd=N))`; this ABI carries neither
+    // the command name nor the descriptor, so the single entry keeps the
+    // brackets and drops the rest.
     if opts & OPT_PROCESS != 0 && row.owner_pid != INVALID_PROCESS_ID {
         let _ = write!(line, "users:((pid={}))", row.owner_pid);
     }
     println!("{}", line.trim_end());
 }
 
-/// An address and port, as `ss` writes them.
-///
-/// The wildcard address prints as `*` rather than `0.0.0.0`, which is what
-/// makes a listening row read as "any interface" at a glance; a zero port is
-/// `*` for the same reason.
+/// The wildcard address and a zero port print as `*`, so a listening row reads
+/// as "any interface" at a glance.
 struct Endpoint([u8; 4], u16);
 
 impl core::fmt::Display for Endpoint {
@@ -227,11 +205,8 @@ impl core::fmt::Display for Endpoint {
     }
 }
 
-/// `-s`: how many sockets there are, by transport and by state.
-///
-/// Counted over every row the kernel returned, not over the filtered set: a
-/// summary that respected `-l` would be a summary of one flag rather than of
-/// the machine.
+/// `-s`: counted over every row the kernel returned, not over the filtered set —
+/// a summary that respected `-l` would summarise one flag, not the machine.
 fn summary(rows: &[UserSockInfo]) -> i32 {
     let total = rows.len();
     let tcp = rows

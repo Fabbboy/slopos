@@ -1,37 +1,16 @@
 //! Pre-OSTD-init serial output primitive.
 //!
-//! Three safe `pub fn`s that write bytes to COM1 (`0x3F8`) without
-//! requiring any prior OSTD initialization — in particular without
-//! [`IoPortRegistry`](crate::io::port::IoPortRegistry) being installed.
-//! The early-boot panic logger calls this *before* the kernel has set
-//! up its full OSTD surface; the registry-gated `IoPort<T>` cannot
-//! serve that pathway because the registry does not yet exist.
+//! Three safe `pub fn`s that write bytes to COM1 (`0x3F8`) without any prior
+//! OSTD initialization — in particular without
+//! [`IoPortRegistry`](crate::io::port::IoPortRegistry) being installed, which
+//! is why the registry-gated `IoPort<T>` cannot serve the early-boot panic
+//! logger.
 //!
-//! # Why a parallel primitive to `IoPort<T>`?
+//! No internal locking; callers serialise externally.
 //!
-//! The registry-gated `IoPort<T>` cannot serve the early-boot panic
-//! logger because the registry does not yet exist when the panic
-//! handler runs. The non-registry-gated
-//! [`raw_port::Port<T>`](crate::io::raw_port::Port) sits at the same
-//! pre-registry level as this module; this module further specialises
-//! that primitive for the COM1-only fast path used by `klog`'s default
-//! backend.
-//!
-//! # Lock-free
-//!
-//! No internal locking. Callers serialise externally (cli/sti,
-//! `SpinLock`, etc.).
-//!
-//! # Host-side behaviour
-//!
-//! On non-`target_os = "none"` builds the port I/O is replaced with a
-//! `static` byte ring + index counter so host tests can observe the
-//! emitted bytes. Drain via [`take_recorded_bytes_for_tests`] (gated
-//! behind `feature = "test-helpers"` or `cfg(test)`).
-
-// ---------------------------------------------------------------------------
-// Kernel-target implementation.
-// ---------------------------------------------------------------------------
+//! On non-`target_os = "none"` builds the port I/O is replaced with a `static`
+//! byte ring so host tests can observe the emitted bytes. Drain via
+//! [`take_recorded_bytes_for_tests`].
 
 #[cfg(target_os = "none")]
 mod imp {
@@ -47,8 +26,6 @@ mod imp {
         // SAFETY: COM1 (`0x3F8`) is a well-known 8250/16550-compatible
         // UART base address on every supported platform. Reading the
         // LSR is side-effect-free; writing the THR transmits one byte.
-        // The poll loop on `UART_LSR_TX_EMPTY` ensures we don't
-        // overrun the transmitter.
         unsafe {
             while (u8::read_from_port(COM1_BASE + UART_REG_LSR) & UART_LSR_TX_EMPTY) == 0 {
                 core::hint::spin_loop();
@@ -68,19 +45,13 @@ mod imp {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Host-side stub: records bytes into a static mock buffer.
-// ---------------------------------------------------------------------------
-
 #[cfg(not(target_os = "none"))]
 mod imp {
     use core::sync::atomic::{AtomicU8, AtomicUsize, Ordering};
 
     pub(super) const MOCK_CAP: usize = 4096;
-    pub(super) static MOCK_BUFFER: [AtomicU8; MOCK_CAP] = {
-        // Inline constant initializer for an array of `AtomicU8`.
-        [const { AtomicU8::new(0) }; MOCK_CAP]
-    };
+    pub(super) static MOCK_BUFFER: [AtomicU8; MOCK_CAP] =
+        { [const { AtomicU8::new(0) }; MOCK_CAP] };
     pub(super) static MOCK_LEN: AtomicUsize = AtomicUsize::new(0);
 
     pub fn write_byte(b: u8) {

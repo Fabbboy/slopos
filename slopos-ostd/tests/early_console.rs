@@ -1,18 +1,11 @@
 //! Host-side tests for `slopos_ostd::early_console`.
-//!
-//! The kernel-target build polls COM1 (`0x3F8`) directly; the host
-//! stub records bytes into a static mock buffer that we drain via
-//! `take_recorded_bytes_for_tests()`. The mock buffer is process-
-//! global, so tests serialise on a `Mutex` to avoid cargo-test
-//! parallelism interleaving recorded bytes.
 
 use std::sync::{Mutex, MutexGuard};
 
 use slopos_ostd::early_console;
 
-/// Global lock — cargo runs tests in parallel; the mock buffer is a
-/// single static, so concurrent writers would interleave bytes and
-/// poison assertions. Each test takes this lock for its full body.
+/// The host stub records into one process-global buffer, so parallel tests
+/// would interleave bytes; each test holds this for its full body.
 static MOCK_GUARD: Mutex<()> = Mutex::new(());
 
 fn lock_and_drain() -> MutexGuard<'static, ()> {
@@ -20,8 +13,7 @@ fn lock_and_drain() -> MutexGuard<'static, ()> {
         Ok(g) => g,
         Err(poisoned) => poisoned.into_inner(),
     };
-    // Drain any residue from a previously-poisoned test so this test
-    // starts from a clean buffer.
+    // Residue from a poisoned test would otherwise leak into this one.
     let _ = early_console::take_recorded_bytes_for_tests();
     guard
 }
@@ -45,7 +37,6 @@ fn write_bytes_converts_lone_newline_to_crlf() {
 #[test]
 fn write_bytes_preserves_existing_crlf() {
     let _g = lock_and_drain();
-    // An existing `\r\n` pair must not be expanded to `\r\r\n`.
     early_console::write_bytes(b"\r\n");
     let buf = early_console::take_recorded_bytes_for_tests();
     assert_eq!(buf, vec![b'\r', b'\n']);

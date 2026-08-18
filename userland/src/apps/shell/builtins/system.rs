@@ -238,7 +238,6 @@ pub fn cmd_time(argc: i32, argv: &[&[u8]]) -> i32 {
 
     let start_ns = sys_core::clock_gettime_ns();
 
-    // Build a sub-ParsedTokens from argv[1..] and execute it.
     let mut sub = super::super::buffers::ParsedTokens::new();
     for arg in &argv[1..argc as usize] {
         sub.push_token(arg);

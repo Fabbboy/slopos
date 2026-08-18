@@ -1,16 +1,10 @@
 //! Read-back of the unwinder's `.eh_frame_hdr` FDE index.
 //!
-//! The index is what makes a return-address lookup a binary search instead
-//! of a full parse of every FDE in `.eh_frame`. Nothing at runtime notices
-//! when it is missing — `EhFrameHdr::parse`'s error is swallowed and the
-//! finder falls through to a linear scan — so the in-kernel tests read the
-//! header directly and assert its shape.
-//!
-//! The raw reads live here because `slopos-ostd` is the only kernel crate
-//! that may hold `unsafe`.
+//! A missing index costs a binary search and goes unnoticed at runtime — the
+//! parse error is swallowed and the finder falls back to a linear scan — so
+//! the in-kernel tests read the header directly and assert its shape.
 
-/// The `.eh_frame_hdr` prologue: version, three encoding bytes, the
-/// `.eh_frame` pointer, and the entry count.
+/// The `.eh_frame_hdr` prologue.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct UnwindIndexHeader {
     pub version: u8,
@@ -52,10 +46,8 @@ mod imp {
     /// Decode the 12-byte prologue.
     pub fn header() -> UnwindIndexHeader {
         let base = hdr_base();
-        // SAFETY: `link.ld` brackets `.eh_frame_hdr` with this symbol and the
-        // gate in `scripts/check_registry_sections.sh` fails the build unless
-        // the section holds at least a prologue plus one entry, so the first
-        // 12 bytes are inside it.
+        // SAFETY: `check_registry_sections.sh` fails the build unless the
+        // bracketed section holds a prologue plus one entry.
         let raw = unsafe { core::slice::from_raw_parts(base, 12) };
         let ptr_rel = i32::from_le_bytes([raw[4], raw[5], raw[6], raw[7]]);
         UnwindIndexHeader {
@@ -73,9 +65,8 @@ mod imp {
 
     /// Start address of the highest-addressed function the index covers.
     ///
-    /// The search table is sorted by initial location, so the last entry is
-    /// the one whose FDE no linear scan would reach early — the worst case
-    /// for the unwinder and therefore the probe the timing test uses.
+    /// The table is sorted by initial location, so the last entry is the
+    /// worst case for a linear scan and the probe the timing test uses.
     pub fn highest_indexed_function() -> Option<u64> {
         let hdr = header();
         if hdr.version != 1 || hdr.table_enc != ENC_DATAREL_SDATA4 || hdr.fde_count == 0 {
@@ -90,8 +81,8 @@ mod imp {
         Some((base as u64).wrapping_add(rel as i64 as u64))
     }
 
-    /// Resolve `pc` to the start of its enclosing function through the
-    /// unwinder's own finder, or `None` when no FDE covers it.
+    /// Resolve `pc` through the unwinder's own finder; `None` when no FDE
+    /// covers it.
     pub fn enclosing_function(pc: u64) -> Option<u64> {
         let found = unwinding::abi::_Unwind_FindEnclosingFunction(pc as *mut core::ffi::c_void);
         if found.is_null() {

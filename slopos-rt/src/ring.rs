@@ -1,11 +1,6 @@
-//! `slibc-ring` — the userland SlopRing runtime.
-//!
-//! Mirrors `liburing`'s shape: [`Ring::setup`] creates a ring and maps
-//! its SQ/CQ, [`Ring::get_sqe`] / [`Ring::submit`] fill and publish
-//! submissions, and [`Ring::wait_completion`] / [`Ring::poll_completion`]
-//! harvest. This is **userland** — async lives here, never in the kernel
-//! (AD-8/AD-9). The kernel side is the strictly-synchronous `ring/`
-//! crate driven by the two `ring_*` syscalls.
+//! `slibc-ring` — the userland SlopRing runtime. This is **userland**: async
+//! lives here, never in the kernel (AD-8/AD-9); the kernel side is the
+//! strictly-synchronous `ring/` crate driven by the two `ring_*` syscalls.
 //!
 //! The runtime reads/writes the shared region directly through its own
 //! mapping. Because the *kernel* reads this same memory volatilely
@@ -56,15 +51,13 @@ impl Ring {
         })
     }
 
-    /// The ring fd.
     pub fn fd(&self) -> i32 {
         self.fd
     }
 
     /// Register fixed buffers (`RING_REGISTER_BUFFERS`). Each [`BufIovec`] is
     /// pinned by the kernel and thereafter referenced by its array index via
-    /// `Sqe.buf_index` + `SLOPRING_SQE_FIXED_BUFFER`. The `iovecs` slice is the
-    /// wire image (a `#[repr(C)]` `BufIovec` array). Returns 0 or a negated
+    /// `Sqe.buf_index` + `SLOPRING_SQE_FIXED_BUFFER`. Returns 0 or a negated
     /// errno. The caller must keep the underlying buffers alive + unmodified
     /// while any op references them.
     pub fn register_buffers(&self, iovecs: &[BufIovec]) -> i32 {
@@ -98,22 +91,15 @@ impl Ring {
         ring_register(self.fd, RING_UNREGISTER_PBUF_RING, group as u64, 0)
     }
 
-    /// Number of SQ slots.
     pub fn sq_entries(&self) -> u32 {
         self.params.sq_entries
     }
 
-    /// `true` if the kernel has dropped at least one completion because
-    /// the CQ was full (the shared `SLOPRING_CQ_OVERFLOW` flag). Userland
-    /// should harvest aggressively and treat in-flight ops as possibly
-    /// lost when this is set. The companion count is
+    /// `true` if the kernel has dropped at least one completion because the CQ
+    /// was full. A **sticky one-way latch**: the dropped completions are
+    /// unrecoverable, so once set it stays set for the ring's lifetime and is
+    /// cleared only by a fresh `ring_setup`. Running count:
     /// [`Ring::cq_overflow_count`].
-    ///
-    /// This is a **sticky one-way latch**: once set it stays set for the
-    /// ring's lifetime and is cleared only by creating a fresh ring
-    /// (`ring_setup`). The dropped completions are unrecoverable, so the
-    /// flag is a permanent "this ring lost data" signal, not a transient
-    /// edge. Use [`Ring::cq_overflow_count`] for the running drop count.
     pub fn cq_overflow(&self) -> bool {
         (self.load_acq(self.params.cq_off_flags) & SLOPRING_CQ_OVERFLOW) != 0
     }
@@ -123,8 +109,6 @@ impl Ring {
     pub fn cq_overflow_count(&self) -> u32 {
         self.load_acq(self.params.cq_off_overflow)
     }
-
-    // -- raw index access (volatile, ordered) --
 
     #[inline]
     fn idx_ptr(&self, off: u32) -> *mut u32 {
@@ -224,8 +208,7 @@ impl Ring {
             let src = (self.base + off as u64) as *const u8;
             core::ptr::copy_nonoverlapping(src, bytes.as_mut_ptr(), bytes.len());
         }
-        // Consume: advance cq_head (release) so the kernel can reuse the
-        // slot.
+        // Advance cq_head (release) so the kernel can reuse the slot.
         self.store_rel(self.params.cq_off_head, head.wrapping_add(1));
         Some(Cqe::from_bytes(&bytes))
     }
@@ -237,17 +220,14 @@ impl Ring {
             if let Some(cqe) = self.poll_completion() {
                 return Ok(cqe);
             }
-            // Nothing ready — block once to drive deferred completions.
             self.enter(0, 1)?;
         }
     }
 }
 
 impl Drop for Ring {
-    /// Release the ring: unmap the shared region, then close the ring fd
-    /// (which drops the kernel-side `Ring` and its `Frame<RingMeta>`
-    /// refs). Without this, every `Ring::setup` would leak a mapping +
-    /// an fd for the process's lifetime.
+    /// Release the ring: unmap the shared region, then close the ring fd, which
+    /// drops the kernel-side `Ring` and its `Frame<RingMeta>` refs.
     fn drop(&mut self) {
         let bytes = self.params.region_bytes;
         if self.base != 0 && bytes != 0 {

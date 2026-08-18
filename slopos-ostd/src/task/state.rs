@@ -104,16 +104,11 @@ impl TaskState {
         self.snapshot().reason
     }
 
-    /// Try to transition the state from `expected` to `target` while
-    /// stamping the block reason. The caller's `expected` is matched
-    /// against the current status; the current reason and epoch are
-    /// preserved on the comparator (they don't gate the CAS) but
-    /// the epoch is bumped on success.
+    /// Try to transition from `expected` to `target` while stamping the block
+    /// reason. Only the status gates the CAS; the epoch is bumped on success.
     ///
-    /// Returns `Ok(view_after)` on success, `Err(view_now)` on failure.
-    /// The error path's view is the freshly-loaded state — callers
-    /// that loop must use it as their next comparator's starting
-    /// point.
+    /// `Err` carries the freshly-loaded state — a looping caller must use it as
+    /// its next comparator's starting point.
     #[inline]
     pub fn try_transition(
         &self,
@@ -144,18 +139,12 @@ impl TaskState {
         }
     }
 
-    /// Force the state to (status, reason) and bump the epoch. The
-    /// "force" is relative to the current value's status and reason —
-    /// it ignores them — but the operation is implemented as a
-    /// Release CAS-loop because the epoch has to be derived from the
-    /// current word and incremented atomically, so a stale comparator
-    /// from any pre-call observer fails its next CAS.
+    /// Force the state to (status, reason) and bump the epoch, ignoring the
+    /// current status and reason.
     ///
-    /// Intended for single-owner contexts (slot init, slot reset,
-    /// kernel-only state forcings). The CAS-loop tolerates concurrent
-    /// epoch bumps from `bump_epoch` or successful `try_transition`
-    /// callers but is not designed to interleave correctly with other
-    /// `force_set` callers.
+    /// For single-owner contexts (slot init, slot reset, kernel-only state
+    /// forcings). The CAS-loop tolerates concurrent epoch bumps but is not
+    /// designed to interleave correctly with another `force_set`.
     #[inline]
     pub fn force_set(&self, status: TaskStatus, reason: BlockReason) {
         loop {
@@ -182,17 +171,14 @@ impl TaskState {
     /// into a live one. Returns `false`, having written nothing, when it
     /// refuses.
     ///
-    /// Deliberately narrower than [`TaskStatus::can_transition_to`], which has
-    /// no self-edges and no `Invalid -> Blocked`, and so would reject the
-    /// `Running -> Running` re-publish in dispatch, the `Ready -> Ready`
-    /// publication rollback, and slot init. This closes the one hole that
-    /// matters: a task stamped `Zombie` by a peer and then force-restored to
-    /// `Running` never reaches deferred cleanup, so its fd table, its process
-    /// VM and its reap never run while it lives on with a published exit value
-    /// and reparented children.
+    /// The hole it closes: a task stamped `Zombie` by a peer and then
+    /// force-restored to `Running` never reaches deferred cleanup, so its fd
+    /// table, its process VM and its reap never run.
     ///
-    /// The status is re-read inside the CAS loop, so the check is not a
-    /// time-of-check gap the way reading it once outside would be.
+    /// Narrower than [`TaskStatus::can_transition_to`], which has no self-edges
+    /// and would reject the `Running -> Running` re-publish in dispatch, the
+    /// `Ready -> Ready` publication rollback, and slot init. The status is
+    /// re-read inside the CAS loop, so the check has no time-of-check gap.
     #[inline]
     #[must_use = "a refused publish means the task is already dead; take the terminal path"]
     pub fn set_status_checked(&self, status: TaskStatus, reason: BlockReason) -> bool {
@@ -219,10 +205,9 @@ impl TaskState {
         }
     }
 
-    /// Bump only the epoch field, preserving status and reason.
-    /// Used when a slot is recycled but its terminal state is also
-    /// the next initial state (e.g. Terminated → Terminated on
-    /// observed-but-not-yet-reaped transitions).
+    /// Bump only the epoch field, preserving status and reason — for a slot
+    /// recycled whose terminal state is also its next initial state (e.g.
+    /// Terminated → Terminated on observed-but-not-yet-reaped transitions).
     #[inline]
     pub fn bump_epoch(&self) {
         loop {
@@ -245,11 +230,8 @@ impl TaskState {
         }
     }
 
-    /// Try to transition from `expected` to `target` without changing
-    /// the block reason. The reason is preserved verbatim (even if
-    /// stale relative to the new status — this matches the existing
-    /// `try_transition_from` semantics where reason was only meaningful
-    /// for transitions ending in `Blocked`).
+    /// Try to transition from `expected` to `target`, preserving the block
+    /// reason verbatim even when it is stale relative to the new status.
     #[inline]
     pub fn try_transition_keep_reason(
         &self,
@@ -279,10 +261,10 @@ impl TaskState {
         }
     }
 
-    /// Stamp the block reason without touching status. Used by paths
-    /// that hand-off a reason just before a CAS that ends in `Blocked`
-    /// (futex, sleep timeout). Relaxed because the publishing fence is
-    /// the subsequent Release-CAS on status.
+    /// Stamp the block reason without touching status, for paths that hand off
+    /// a reason just before a CAS that ends in `Blocked` (futex, sleep
+    /// timeout). Relaxed: the publishing fence is the subsequent Release-CAS
+    /// on status.
     #[inline]
     pub fn store_reason(&self, reason: BlockReason) {
         loop {
@@ -327,10 +309,6 @@ impl Default for TaskState {
     }
 }
 
-// Per-API runtime coverage of pack/unpack roundtrip, transition
-// success/failure, epoch advance, bump_epoch preservation, and the
-// (status, reason) bit-field maxima lives in
-// `core/src/syscall/tests.rs::test_task_state_fused_cas`. That test
-// runs in the kernel-under-QEMU harness — the only environment with
-// the required atomic backing — so a `cfg(test)` host module here
-// would be dead weight.
+// Runtime coverage lives in `core/src/syscall/tests.rs::test_task_state_fused_cas`:
+// the kernel-under-QEMU harness is the only environment with the required
+// atomic backing.

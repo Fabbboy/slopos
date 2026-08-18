@@ -1,14 +1,12 @@
 //! Non-atomic, fixed-size bitmap over `[usize; W]` words.
 //!
-//! `W` is the number of machine words.  Use [`words_for`] to compute it:
-//! `Bitmap<{ words_for(16_384) }>` for a 16 384-bit bitmap.
-//!
-//! Query methods accept `nbits` — the count of *valid* bits (≤ [`Bitmap::CAPACITY`]).
-//! Bits beyond `nbits` in the last word are masked out automatically.
+//! `W` is the number of machine words; use [`words_for`] to compute it:
+//! `Bitmap<{ words_for(16_384) }>` for a 16 384-bit bitmap. Query methods take
+//! `nbits`, the count of *valid* bits (≤ [`Bitmap::CAPACITY`]); bits beyond it
+//! in the last word are masked out automatically.
 
 const WORD_BITS: usize = usize::BITS as usize;
 
-/// Number of `usize` words needed to store `bits` bits.
 #[inline]
 pub const fn words_for(bits: usize) -> usize {
     (bits + WORD_BITS - 1) / WORD_BITS
@@ -24,10 +22,8 @@ const fn last_word_mask(nbits: usize) -> usize {
     }
 }
 
-/// Fixed-size, non-atomic bitmap.  Bit 0 is the LSB of `words[0]`.
-///
-/// Mutation requires `&mut self`; external synchronisation is the caller's
-/// responsibility.
+/// Bit 0 is the LSB of `words[0]`. Non-atomic: synchronisation is the
+/// caller's responsibility.
 #[derive(Clone)]
 pub struct Bitmap<const W: usize> {
     words: [usize; W],
@@ -36,9 +32,8 @@ pub struct Bitmap<const W: usize> {
 // SAFETY: `Bitmap<W>` is a single `[usize; W]` field. `usize` is
 // `Zeroable` and arrays of `Zeroable` are `Zeroable`; the all-zero
 // pattern is the empty bitmap, the same value `Bitmap::new` returns.
-// This unlocks `KBox::<Bitmap<W>>::zeroed()` so callers wrapping a
-// large bitmap can heap-allocate it without the W-word stack temp
-// that `let b = Bitmap::new()` materialises.
+// Lets `KBox::<Bitmap<W>>::zeroed()` skip the W-word stack temp that
+// `let b = Bitmap::new()` materialises.
 unsafe impl<const W: usize> crate::mm::init::Zeroable for Bitmap<W> {}
 
 impl<const W: usize> Bitmap<W> {
@@ -77,7 +72,6 @@ impl<const W: usize> Bitmap<W> {
         self.words[word] &= !mask;
     }
 
-    /// Set contiguous range `[start .. start+len)`.
     pub fn set_range(&mut self, start: usize, len: usize) {
         if len == 0 {
             return;
