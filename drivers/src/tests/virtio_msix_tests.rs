@@ -15,7 +15,6 @@ use crate::virtio_net;
 const MSI_VECTOR_BASE: u8 = 48;
 const MSI_VECTOR_MAX: u8 = 223;
 
-/// Handle to the root-fs virtio-blk device.
 fn disk0() -> Option<virtio_blk::DevHandle> {
     virtio_blk::blk_device_by_index(BlockDeviceIndex(0))
 }
@@ -31,7 +30,7 @@ fn find_device(vendor: u16, device: u16) -> Option<crate::pci::PciDeviceInfo> {
     None
 }
 
-/// Read the MSI-X Message Control register and return `(enabled, function_masked)`.
+/// The MSI-X Message Control register sits at `cap_offset + 0x02`.
 fn msix_control_bits(dev: &crate::pci::PciDeviceInfo, cap_offset: u16) -> (bool, bool) {
     let ctrl = pci_config_read16(dev.bus, dev.device, dev.function, cap_offset + 0x02);
     let enabled = (ctrl & (1 << 15)) != 0;

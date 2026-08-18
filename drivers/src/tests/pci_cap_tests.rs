@@ -1,7 +1,7 @@
 //! PCI capability list parsing regression tests.
 //!
-//! Run after PCI enumeration; the assertions rely on QEMU q35 exposing a
-//! deterministic set of devices and capability chains.
+//! Run after PCI enumeration; assertions rely on QEMU q35's deterministic
+//! device and capability topology.
 
 use slopos_testing::TestResult;
 use slopos_testing::{fail, pass};
@@ -85,7 +85,6 @@ pub fn test_cap_iter_deterministic() -> TestResult {
     pass!()
 }
 
-/// Every capability offset must be DWORD-aligned and at or above 0x40.
 pub fn test_cap_offsets_valid() -> TestResult {
     for i in 0..pci_get_device_count() {
         let dev = match pci_get_device(i) {

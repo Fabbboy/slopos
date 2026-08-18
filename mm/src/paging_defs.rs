@@ -3,14 +3,12 @@
 use bitflags::bitflags;
 
 bitflags! {
-    /// x86_64 page table entry flags.
     #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
     pub struct PageFlags: u64 {
         const PRESENT       = 1 << 0;
         const WRITABLE      = 1 << 1;
         /// Accessible from ring 3.
         const USER          = 1 << 2;
-        /// Write-through caching rather than write-back.
         const WRITE_THROUGH = 1 << 3;
         const CACHE_DISABLE = 1 << 4;
         /// Set by hardware on access.
@@ -55,10 +53,9 @@ pub const PAGE_SIZE_2MB: u64 = 0x20_0000;
 
 pub const PAGE_SIZE_1GB: u64 = 0x4000_0000;
 
-// Every `PageFlags::*` value must match `slopos_ostd::mm::page_table::PteFlags`
-// exactly: the kernel-half mapping helpers convert one to the other on every
-// call, so a drifted bit would round-trip a mapping into a different set of
-// permissions with nothing to notice.
+// The kernel-half mapping helpers convert `PageFlags` into
+// `slopos_ostd::mm::page_table::PteFlags` on every call, so a drifted bit
+// silently changes a mapping's permissions.
 const _: () = {
     use slopos_ostd::mm::page_table::PteFlags;
     assert!(PageFlags::PRESENT.bits() == PteFlags::PRESENT.bits());
@@ -72,8 +69,6 @@ const _: () = {
     assert!(PageFlags::GLOBAL.bits() == PteFlags::GLOBAL.bits());
     assert!(PageFlags::NO_EXECUTE.bits() == PteFlags::NO_EXECUTE.bits());
     assert!(PageFlags::ADDRESS_MASK == PteFlags::ADDRESS_MASK);
-    // Pins the contract that slopos-mm's COW marker is bit 9 of OSTD's
-    // software bits (9..=11); see `mm::cow::SOFTWARE_COW_BIT`.
     assert!(PageFlags::COW.bits() == 1 << 9);
     assert!(PageFlags::COW.bits() & PteFlags::SOFTWARE_BITS_MASK == PageFlags::COW.bits());
 };

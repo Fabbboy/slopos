@@ -56,7 +56,7 @@ pub fn test_iutf8_backspace_ascii() -> TestResult {
     TestResult::Pass
 }
 
-/// é = U+00E9 = 0xC3 0xA9: erasing it removes both bytes and one column.
+/// é = U+00E9 = 0xC3 0xA9.
 pub fn test_iutf8_backspace_2byte() -> TestResult {
     let mut ld = LineDisc::new();
     let mut t = *ld.termios();
@@ -87,7 +87,7 @@ pub fn test_iutf8_backspace_2byte() -> TestResult {
     TestResult::Pass
 }
 
-/// 中 = U+4E2D = 0xE4 0xB8 0xAD: erasing it removes three bytes and two columns.
+/// 中 = U+4E2D = 0xE4 0xB8 0xAD.
 pub fn test_iutf8_backspace_3byte_cjk() -> TestResult {
     let mut ld = LineDisc::new();
     let mut t = *ld.termios();
@@ -121,7 +121,7 @@ pub fn test_iutf8_backspace_3byte_cjk() -> TestResult {
     TestResult::Pass
 }
 
-/// 😀 = U+1F600 = 0xF0 0x9F 0x98 0x80: erasing it removes four bytes and two columns.
+/// 😀 = U+1F600 = 0xF0 0x9F 0x98 0x80.
 pub fn test_iutf8_backspace_4byte_emoji() -> TestResult {
     let mut ld = LineDisc::new();
     let mut t = *ld.termios();
@@ -210,7 +210,7 @@ pub fn test_iutf8_word_erase_mixed() -> TestResult {
     t.c_iflag |= InputFlags::IUTF8;
     ld.set_termios(&t);
 
-    // "hello" then 中 (0xE4 0xB8 0xAD), which counts as a non-word char.
+    // 中 = 0xE4 0xB8 0xAD, which counts as a non-word char.
     for &b in b"hello" {
         ld.input_char(b);
     }
@@ -251,8 +251,7 @@ pub fn test_iutf8_word_erase_preserves_prefix() -> TestResult {
         ld.input_char(b);
     }
 
-    // POSIX word erase skips trailing non-word chars, then erases one word,
-    // so "cd" goes and the separating space stays.
+    // POSIX word erase skips trailing non-word chars, then erases one word.
     ld.input_char(0x17);
 
     let content = ld.edit_content();

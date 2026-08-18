@@ -1,9 +1,8 @@
 //! The kernel heap's own backing pages, charged to the root.
 //!
-//! Slab and large-tier pages are the unattributed remainder: tier-1 object
-//! charges bound how many objects a principal may hold, never how many pages
-//! the shared slab needed. The slab is shared, so its backing is charged to
-//! the root rather than to the allocating principal.
+//! Tier-1 object charges bound how many objects a principal may hold, never
+//! how many pages the shared slab needed, so slab backing is charged to the
+//! root rather than to the allocating principal.
 
 use slopos_abi::quota::ResourceKind;
 use slopos_ostd::KVec;
@@ -20,9 +19,6 @@ fn root_kernelmeta() -> u32 {
 }
 
 /// The heap's charged page count never exceeds what the buddy handed out.
-///
-/// Heap pages are a subset of allocated ones, so a higher charge is an
-/// accounting leak that shrinks every principal's headroom.
 pub fn test_quota_heap_backing_reconciles_with_the_buddy() -> TestResult {
     let charged = charged_heap_pages();
     let allocated = crate::page_alloc::get_page_allocator_stats().allocated;
@@ -45,7 +41,6 @@ pub fn test_quota_heap_backing_reconciles_with_the_buddy() -> TestResult {
     pass!()
 }
 
-/// A large allocation charges its pages and gives them back.
 pub fn test_quota_heap_large_alloc_is_charged() -> TestResult {
     const BYTES: usize = 4 * (MAX_SLAB_CLASS_BYTES + 1);
 
@@ -71,9 +66,6 @@ pub fn test_quota_heap_large_alloc_is_charged() -> TestResult {
 }
 
 /// Slab refills move the root's row, and the ledger stays consistent.
-///
-/// The charge is taken inside the allocator, so a mistake here corrupts the
-/// row every other principal debits through.
 pub fn test_quota_heap_slab_refill_moves_the_root_row() -> TestResult {
     let before = charged_heap_pages();
 

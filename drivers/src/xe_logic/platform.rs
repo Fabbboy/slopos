@@ -89,7 +89,6 @@ pub const fn is_intel_vendor(vendor: u16) -> bool {
     vendor == PCI_VENDOR_INTEL
 }
 
-/// Resolves by Device ID only — never by an MMIO version register.
 pub fn identify(vendor: u16, device: u16) -> Option<XePlatform> {
     if !is_intel_vendor(vendor) {
         return None;

@@ -1,20 +1,13 @@
 //! Gen12 hardware-cursor DBUF/DDB + watermark programming.
 //!
-//! Enabling the Gen12 cursor plane with a zero DBUF allocation (`CUR_BUF_CFG = 0`,
-//! `CUR_WM = 0`) is an invalid pipe state: the cursor is a real plane in the
-//! display engine's DBUF/watermark model, and a zero allocation starves the
-//! pipe's fetch so the PRIMARY plane decodes its linear surface at the X-tile
-//! (512-byte) stride unit and replicates 8x vertically.
+//! A zero cursor DBUF allocation (`CUR_BUF_CFG = 0`, `CUR_WM = 0`) is an invalid
+//! pipe state: it starves the pipe's fetch, and the primary plane then decodes
+//! its linear surface at the X-tile (512-byte) stride unit, replicated 8x
+//! vertically.
 //!
 //! `PLANE_BUF_CFG` is a no-arm register — it latches on the plane's `PLANE_SURF`
 //! flip — so the primary's shrink must latch before the cursor claims the
-//! reclaimed tail, leaving no overlap window the hardware could hang on. The
-//! cursor's own DDB and watermarks latch when it arms `CUR_BASE` in
-//! [`super::cursor::set_image`].
-//!
-//! The only primary-plane register this writes is `PLANE_BUF_CFG` (plus the
-//! re-arm via the existing geometry flip); it never touches the pipe, transcoder,
-//! PLL, or eDP link.
+//! reclaimed tail.
 
 use slopos_mm::mmio::MmioRegion;
 use slopos_ostd::klog_info;

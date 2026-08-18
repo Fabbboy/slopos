@@ -197,10 +197,10 @@ const _: () = assert!(
     "a page-table frame is one 4 KiB page of entries"
 );
 
-// Read side of the page-table descent; every kernel-half write goes through
-// `slopos_ostd::mm::vm_space::CursorMut` under the `KERNEL_VM_SPACE` lock.
-// Access is per-entry and atomic, never a reference over the frame: the
-// hardware walker stamps Accessed and Dirty into entries concurrently.
+// Every kernel-half write goes through `slopos_ostd::mm::vm_space::CursorMut`
+// under the `KERNEL_VM_SPACE` lock. Access is per-entry and atomic, never a
+// reference over the frame: the hardware walker stamps Accessed and Dirty
+// concurrently.
 
 /// The HHDM view of the page-table frame at `phys`, as an entry array.
 #[inline]
