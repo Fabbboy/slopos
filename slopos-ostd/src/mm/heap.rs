@@ -244,17 +244,10 @@ impl<T: Zeroable> PinBox<T> {
 impl<T> PinBox<T> {
     /// Wrap an existing rvalue `T` in a fresh heap allocation.
     ///
-    /// Intended for **small** types where the brief stack
-    /// materialisation of `value` is not a stack-safety concern.
-    /// Large types (anything close to or above 1 KiB) should use
-    /// [`PinBox::try_init`] or [`PinBox::zeroed`] instead so the `T`
-    /// never touches a caller's stack — this is the whole reason
-    /// `PinBox` exists.
-    ///
-    /// The ELF post-link stack-sizes gate (`scripts/check_stack_sizes.sh`)
-    /// enforces that rule from the other direction: a frame growing
-    /// beyond the threshold will fail the build regardless of which
-    /// constructor produced it.
+    /// For **small** `T` only: `value` briefly materialises on the caller's
+    /// stack. Anything near or above 1 KiB should use [`PinBox::try_init`] or
+    /// [`PinBox::zeroed`]; `scripts/check_stack_sizes.sh` fails the build for an
+    /// over-threshold frame whichever constructor produced it.
     pub fn try_new(value: T) -> Result<Self, AllocError> {
         let boxed = Box::try_new(value)?;
         Ok(Self {
@@ -278,16 +271,14 @@ impl<T: ?Sized + Unpin> DerefMut for PinBox<T> {
 }
 
 impl<T: ?Sized> PinBox<T> {
-    /// Borrow the wrapped `Pin<&mut T>` without unpinning.
     pub fn as_pin_mut(&mut self) -> Pin<&mut T> {
         self.inner.as_mut()
     }
 }
 
-/// Raw byte allocation through the global kernel allocator. Mirrors
-/// [`alloc::alloc::alloc`]; intended for low-level pools (RCU node
-/// freelist, slab pre-allocation) that manage their own typed
-/// constructors. Returns null on failure — callers must check.
+/// Raw byte allocation through the global kernel allocator, for low-level pools
+/// that manage their own typed constructors. Returns null on failure — callers
+/// must check.
 ///
 /// # Safety
 /// `layout.size()` must be non-zero. The returned pointer is
@@ -308,12 +299,10 @@ pub unsafe fn raw_dealloc(ptr: *mut u8, layout: core::alloc::Layout) {
     unsafe { alloc::alloc::dealloc(ptr, layout) }
 }
 
-/// Heap-direct zeroed allocation of any `T: Zeroable`.
 pub fn boxed_zeroed<T: Zeroable>() -> Result<PinBox<T>, AllocError> {
     let boxed: Box<core::mem::MaybeUninit<T>> = Box::try_new_uninit()?;
-    // SAFETY: `T: Zeroable` ⇒ an all-zero bit pattern is a valid `T`.
-    // `write_bytes` zeroes the whole allocation; `assume_init` is then
-    // sound. `Box::into_pin` pins the result.
+    // SAFETY: `T: Zeroable` ⇒ an all-zero bit pattern is a valid `T`, and
+    // `write_bytes` zeroes the whole allocation before `assume_init`.
     let init = unsafe {
         let mut boxed = boxed;
         core::ptr::write_bytes(boxed.as_mut_ptr(), 0, 1);
@@ -324,22 +313,19 @@ pub fn boxed_zeroed<T: Zeroable>() -> Result<PinBox<T>, AllocError> {
     })
 }
 
-/// Kernel-blessed boxed slot. Fallible. The `zeroed` constructor allocates
-/// in place (no stack temp) and requires `T: Zeroable`; `try_new` is the
-/// small-`T` escape hatch and shares its caveat with [`PinBox::try_new`].
+/// Kernel-blessed boxed slot. Fallible. `zeroed` allocates in place (no stack
+/// temp) and requires `T: Zeroable`; `try_new` is the small-`T` escape hatch and
+/// shares its caveat with [`PinBox::try_new`].
 ///
-/// `#[repr(transparent)]` over the single `Box<T>` field makes the
-/// niche-optimisation layout spec-guaranteed: `Option<KBox<T>>` is
-/// exactly one pointer wide, with `None` encoded as null. Lock-free
-/// readers rely on this so a word-sized atomic load observes either
-/// null or a valid box without tearing.
+/// `#[repr(transparent)]` makes the niche layout spec-guaranteed: `Option<KBox<T>>`
+/// is one pointer wide with `None` encoded as null, so a lock-free reader's
+/// word-sized load observes either null or a valid box without tearing.
 #[repr(transparent)]
 pub struct KBox<T: ?Sized> {
     inner: Box<T>,
 }
 
 impl<T: Zeroable> KBox<T> {
-    /// Heap-allocate and zero-initialise. `T: Zeroable` required.
     pub fn zeroed() -> Result<Self, AllocError> {
         let boxed: Box<core::mem::MaybeUninit<T>> = Box::try_new_uninit()?;
         // SAFETY: see `boxed_zeroed` above; same invariant.
@@ -359,20 +345,16 @@ impl<T> KBox<T> {
         Box::try_new(value).map(|inner| Self { inner })
     }
 
-    /// Heap-allocate and initialise a `T` in place from an
-    /// [`Init<T, E>`] recipe. The `T` rvalue never materialises on
-    /// the caller's stack — the recipe writes fields directly into
-    /// the freshly-allocated heap slot.
+    /// Heap-allocate and initialise a `T` in place from an [`Init<T, E>`]
+    /// recipe.
     pub fn try_init<E>(init: impl Init<T, E>) -> Result<Self, E>
     where
         E: From<AllocError>,
     {
         let boxed: Box<core::mem::MaybeUninit<T>> = Box::try_new_uninit().map_err(E::from)?;
         // SAFETY: see `PinBox::try_init` — identical invariants. The
-        // `Box::try_new_uninit::<T>()` slot is sized and aligned to
-        // `T`'s `Layout` by construction, upholding **Inv. 10**: the
-        // `T` value the `init` recipe writes into `slot` lands in
-        // storage that meets `T`'s size and alignment requirements.
+        // `Box::try_new_uninit::<T>()` slot is sized and aligned to `T`'s
+        // `Layout` by construction, upholding **Inv. 10**.
         unsafe {
             let raw = Box::into_raw(boxed);
             let slot: *mut T = (*raw).as_mut_ptr();
@@ -386,15 +368,12 @@ impl<T> KBox<T> {
         }
     }
 
-    /// Convert to a raw pointer; caller becomes responsible for freeing
-    /// via [`KBox::from_raw`] (or otherwise managing the allocation).
+    /// Convert to a raw pointer; the caller becomes responsible for freeing it
+    /// via [`KBox::from_raw`].
     pub fn into_raw(b: Self) -> *mut T {
         Box::into_raw(b.inner)
     }
 
-    /// Reconstruct a `KBox` from a raw pointer previously obtained via
-    /// [`KBox::into_raw`].
-    ///
     /// # Safety
     /// `ptr` must originate from a matching `into_raw` call (or another
     /// allocation that `Box::from_raw` would accept) and must not be
@@ -406,10 +385,7 @@ impl<T> KBox<T> {
         }
     }
 
-    /// Reclaim and drop a raw pointer that was previously produced by
-    /// [`KBox::into_raw`]. Convenience wrapper for the common
-    /// "atomically swap an `AtomicPtr<T>`, then free the previous
-    /// pointer" pattern.
+    /// Reclaim and drop a raw pointer produced by [`KBox::into_raw`].
     ///
     /// # Safety
     /// `ptr` must originate from a matching `into_raw` call and must
@@ -428,11 +404,8 @@ impl<T> KBox<T> {
     /// Leak the boxed value into a static-lifetime reference.
     ///
     /// `&'static mut T` rather than a caller-chosen `&'a mut T`: the allocation
-    /// is deliberately never freed, so `'static` is what it actually is, and a
-    /// lifetime the caller picks would be one it could pick twice. The box is
-    /// consumed, so a second call against the same allocation cannot be
-    /// written either — but saying `'static` means the signature no longer
-    /// relies on that to be sound.
+    /// is deliberately never freed, and a lifetime the caller picks would be one
+    /// it could pick twice.
     ///
     /// See [`KBox::leak_unsized`] for the `?Sized` case.
     pub fn leak(b: Self) -> &'static mut T
@@ -442,19 +415,15 @@ impl<T> KBox<T> {
         Box::leak(b.inner)
     }
 
-    /// Move the boxed value out, freeing the allocation. Equivalent to
-    /// `Box::into_inner`. Used by the hermetic-state framework to take
-    /// ownership of a type-erased snapshot before invoking `restore`.
+    /// Move the boxed value out, freeing the allocation.
     pub fn into_inner(b: Self) -> T {
-        // `Box<T>` supports move-out via `*` in stable Rust.
         *b.inner
     }
 }
 
 impl<T: ?Sized> KBox<T> {
-    /// Leak the boxed value into a static-lifetime reference. Works
-    /// for both sized and unsized `T` (e.g. `dyn Trait` for trait
-    /// objects whose registry holds them for the kernel's lifetime).
+    /// Leak the boxed value into a static-lifetime reference. Works for both
+    /// sized and unsized `T`.
     pub fn leak_unsized(b: Self) -> &'static mut T {
         Box::leak(b.inner)
     }
@@ -507,11 +476,9 @@ impl<T: ?Sized + core::fmt::Debug> core::fmt::Debug for PinBox<T> {
 
 /// Kernel-blessed fallible `Vec<T>`.
 ///
-/// `KVec::zeroed(len)` is the heap-direct, in-place initialised path
-/// (requires `T: Zeroable`). `KVec::with_capacity` / `KVec::push` cover
-/// the dynamic-growth case for any `T`; for large `T` callers should
-/// rely on the `.stack_sizes` gate to enforce the upper bound on
-/// individual `push` rvalues.
+/// `KVec::zeroed(len)` is the heap-direct, in-place initialised path (requires
+/// `T: Zeroable`); `with_capacity` / `push` cover dynamic growth for any `T`,
+/// with the `.stack_sizes` gate bounding the individual `push` rvalue.
 pub struct KVec<T> {
     inner: alloc::vec::Vec<T>,
 }
@@ -524,7 +491,6 @@ impl<T> KVec<T> {
         }
     }
 
-    /// Reserve `cap` slots up-front. Fails on allocation error.
     pub fn with_capacity(cap: usize) -> Result<Self, AllocError> {
         let mut v = alloc::vec::Vec::new();
         if cap > 0 {
@@ -533,7 +499,6 @@ impl<T> KVec<T> {
         Ok(Self { inner: v })
     }
 
-    /// Push a value, growing the backing buffer if needed.
     pub fn push(&mut self, value: T) -> Result<(), AllocError> {
         self.inner.try_reserve(1).map_err(|_| AllocError)?;
         self.inner.push(value);
@@ -557,7 +522,6 @@ impl<T> KVec<T> {
         self.inner.shrink_to_fit();
     }
 
-    /// Move every element from `other` into `self`, leaving `other` empty.
     pub fn append(&mut self, other: &mut Self) {
         self.inner
             .try_reserve(other.inner.len())
@@ -565,19 +529,16 @@ impl<T> KVec<T> {
         self.inner.append(&mut other.inner);
     }
 
-    /// Reserve capacity for `additional` more elements. Fallible.
     pub fn try_reserve(&mut self, additional: usize) -> Result<(), AllocError> {
         self.inner.try_reserve(additional).map_err(|_| AllocError)
     }
 
-    /// Reserve capacity for exactly `additional` more elements. Fallible.
     pub fn try_reserve_exact(&mut self, additional: usize) -> Result<(), AllocError> {
         self.inner
             .try_reserve_exact(additional)
             .map_err(|_| AllocError)
     }
 
-    /// Append every element of `slice` by `Copy`. Reserves up-front.
     pub fn extend_from_slice(&mut self, slice: &[T]) -> Result<(), AllocError>
     where
         T: Copy,
@@ -589,7 +550,6 @@ impl<T> KVec<T> {
         Ok(())
     }
 
-    /// Resize to `new_len`, padding with clones of `value`.
     pub fn resize(&mut self, new_len: usize, value: T) -> Result<(), AllocError>
     where
         T: Clone,
@@ -659,8 +619,6 @@ impl<T> KVec<T> {
         self.inner.iter_mut()
     }
 
-    /// Build a `KVec` from an iterator, surfacing allocation failure.
-    /// Honours `size_hint`'s lower bound to amortise reservations.
     pub fn from_iter_fallible<I>(iter: I) -> Result<Self, AllocError>
     where
         I: IntoIterator<Item = T>,
@@ -674,8 +632,6 @@ impl<T> KVec<T> {
         Ok(out)
     }
 
-    /// Forwards [`alloc::vec::Vec::set_len`].
-    ///
     /// # Safety
     /// `new_len` must be `<= self.capacity()`, and the elements at
     /// `[old_len, new_len)` must already be initialised (i.e., the
@@ -685,8 +641,6 @@ impl<T> KVec<T> {
         unsafe { self.inner.set_len(new_len) }
     }
 
-    /// Splits the vector at `at`, keeping `[0, at)` and returning a new
-    /// `KVec` holding `[at, len)`.
     pub fn split_off(&mut self, at: usize) -> Self {
         Self {
             inner: self.inner.split_off(at),
@@ -695,14 +649,11 @@ impl<T> KVec<T> {
 }
 
 impl<T: Zeroable> KVec<T> {
-    /// Allocate `len` zeroed elements. Fails with `AllocError` if the
-    /// allocation cannot be satisfied.
     pub fn zeroed(len: usize) -> Result<Self, AllocError> {
         let mut v: alloc::vec::Vec<T> = alloc::vec::Vec::new();
         v.try_reserve_exact(len).map_err(|_| AllocError)?;
-        // SAFETY: capacity ≥ len (just reserved). `T: Zeroable` ⇒ the
-        // zeroed backing memory is a valid sequence of `T`s; we commit
-        // that fact via `set_len` after zeroing.
+        // SAFETY: capacity ≥ len (just reserved), and `T: Zeroable` ⇒ the zeroed
+        // backing memory is a valid sequence of `T`s.
         unsafe {
             core::ptr::write_bytes(v.as_mut_ptr(), 0, len);
             v.set_len(len);
@@ -712,8 +663,7 @@ impl<T: Zeroable> KVec<T> {
 }
 
 impl<T: Clone> KVec<T> {
-    /// Allocate `len` copies of `value`. Fallible counterpart to the
-    /// `vec![value; len]` literal.
+    /// Fallible counterpart to the `vec![value; len]` literal.
     pub fn filled(value: T, len: usize) -> Result<Self, AllocError> {
         let mut out = Self::with_capacity(len)?;
         for _ in 0..len {
@@ -730,8 +680,7 @@ impl<T> Default for KVec<T> {
 }
 
 impl<T: Clone> Clone for KVec<T> {
-    /// Panics on allocation failure. Kernel call sites that need
-    /// fallible clone should iterate manually with `KVec::push`.
+    /// Panics on allocation failure.
     fn clone(&self) -> Self {
         let mut out = Self::with_capacity(self.inner.len()).expect("KVec::clone: alloc");
         for v in self.inner.iter() {
@@ -748,8 +697,8 @@ impl<T: core::fmt::Debug> core::fmt::Debug for KVec<T> {
 }
 
 impl<T> FromIterator<T> for KVec<T> {
-    /// Panics on allocation failure. Use `KVec::from_iter_fallible` for
-    /// `Result`-returning variants.
+    /// Panics on allocation failure; [`KVec::from_iter_fallible`] returns
+    /// `Result` instead.
     fn from_iter<I: IntoIterator<Item = T>>(iter: I) -> Self {
         Self::from_iter_fallible(iter).expect("KVec::from_iter: alloc")
     }
@@ -825,10 +774,10 @@ impl<'a, T> IntoIterator for &'a mut KVec<T> {
     }
 }
 
-/// Largest live reference count. Reaching this value makes that counter
-/// permanently saturated: subsequent clones and drops leave it unchanged.
-/// Leaking an allocation is the only sound response to a count that can no
-/// longer represent all live handles; wrapping would permit use-after-free.
+/// Largest live reference count; reaching it saturates that counter
+/// permanently, so later clones and drops leave it unchanged. Leaking is the
+/// only sound response to a count that can no longer represent all live
+/// handles — wrapping would permit use-after-free.
 const KARC_MAX_REFCOUNT: usize = isize::MAX as usize;
 
 /// Sentinel used to exclude concurrent downgrades while `get_mut` verifies
@@ -852,7 +801,6 @@ enum RefcountRelease {
 }
 
 /// Increment a live reference count without allowing integer wraparound.
-/// Once saturated, the counter stays saturated for the allocation's lifetime.
 #[inline]
 fn refcount_increment_saturating(counter: &AtomicUsize) {
     let mut current = counter.load(Ordering::Relaxed);
@@ -899,10 +847,8 @@ fn refcount_release(counter: &AtomicUsize) -> RefcountRelease {
 /// Kernel-owned atomically reference-counted pointer. Allocation is fallible;
 /// cloning is allocation-free and saturates rather than wrapping its count.
 ///
-/// As with [`KBox::try_new`] the rvalue passed to [`KArc::try_new`] does
-/// briefly land on the caller's stack; large `T` should be constructed
-/// via [`KArc::try_init`], which writes the `T` directly into the Arc's
-/// heap allocation without a stack materialisation step.
+/// As with [`KBox::try_new`], the rvalue passed to [`KArc::try_new`] briefly
+/// lands on the caller's stack; large `T` should use [`KArc::try_init`].
 pub struct KArc<T: ?Sized> {
     ptr: NonNull<KArcInner<T>>,
 }
@@ -919,11 +865,8 @@ impl<T> KArc<T> {
         Ok(Self { ptr })
     }
 
-    /// Heap-allocate and initialise a `T` in place from an
-    /// [`Init<T, E>`] recipe. The `T` rvalue never materialises on the
-    /// caller's stack — the recipe writes fields directly into the
-    /// freshly-allocated `Arc` slot. Mirrors [`KBox::try_init`]; use it
-    /// for large `T` that would otherwise blow the stack-frame gate.
+    /// Heap-allocate and initialise a `T` in place from an [`Init<T, E>`]
+    /// recipe, writing it straight into the freshly-allocated `Arc` slot.
     pub fn try_init<E>(init: impl Init<T, E>) -> Result<Self, E>
     where
         E: From<AllocError>,
@@ -931,10 +874,10 @@ impl<T> KArc<T> {
         let uninit: Box<MaybeUninit<KArcInner<T>>> = Box::try_new_uninit().map_err(E::from)?;
         let allocation = Box::into_raw(uninit);
         let inner = allocation.cast::<KArcInner<T>>();
-        // SAFETY: `allocation` is a fresh, correctly sized and aligned slot.
-        // The two header fields are initialized before the recipe receives
-        // the data slot. On recipe failure the original `MaybeUninit` box is
-        // reconstructed, so no partially initialized field is dropped.
+        // SAFETY: `allocation` is a fresh, correctly sized and aligned slot; both
+        // header fields are initialized before the recipe receives the data slot,
+        // and on recipe failure the `MaybeUninit` box is reconstructed, so no
+        // partially initialized field is dropped.
         unsafe {
             core::ptr::addr_of_mut!((*inner).strong).write(AtomicUsize::new(1));
             core::ptr::addr_of_mut!((*inner).weak).write(AtomicUsize::new(1));
@@ -949,10 +892,9 @@ impl<T> KArc<T> {
         }
     }
 
-    /// Heap-allocate a `T` whose initialiser receives a [`KWeak<T>`]
-    /// pointing back at the allocation being constructed, enabling a
-    /// self-referential weak link (e.g. a parent/child pair where the
-    /// child holds a weak back-pointer to the parent).
+    /// Heap-allocate a `T` whose initialiser receives a [`KWeak<T>`] pointing
+    /// back at the allocation being constructed, for a self-referential weak
+    /// link.
     ///
     /// `data_fn` can clone the supplied weak handle, but upgrading it returns
     /// `None` until the returned value has been written completely. Allocation
@@ -964,9 +906,9 @@ impl<T> KArc<T> {
         let uninit: Box<MaybeUninit<KArcInner<T>>> = Box::try_new_uninit()?;
         let inner = Box::into_raw(uninit).cast::<KArcInner<T>>();
         // SAFETY: `inner` points to a fresh `KArcInner<T>` allocation. The
-        // temporary `KWeak` owns the implicit weak count. Forgetting it after
-        // publication transfers that count to the strong-reference set. If
-        // `data_fn` unwinds in a host test, its Drop instead deallocates the
+        // temporary `KWeak` owns the implicit weak count; forgetting it after
+        // publication transfers that count to the strong-reference set, and
+        // dropping it on a host-test unwind instead deallocates the
         // still-uninitialized allocation without reading `data`.
         unsafe {
             core::ptr::addr_of_mut!((*inner).strong).write(AtomicUsize::new(0));
@@ -995,10 +937,6 @@ impl<T: ?Sized> KArc<T> {
 
     /// Returns a mutable reference to the inner value iff no other strong or
     /// weak handle can access this allocation.
-    ///
-    /// Returns `None` when the strong or weak ref-count exceeds one,
-    /// because handing out `&mut T` while another clone exists would
-    /// alias the inner value.
     #[inline]
     pub fn get_mut(this: &mut Self) -> Option<&mut T> {
         let inner = this.inner();
@@ -1020,17 +958,13 @@ impl<T: ?Sized> KArc<T> {
         Some(unsafe { &mut (*this.ptr.as_ptr()).data })
     }
 
-    /// Strong reference count. Useful for invariant assertions in
-    /// callers that rely on sole ownership for `get_mut` to succeed.
     #[inline]
     pub fn strong_count(this: &Self) -> usize {
         this.inner().strong.load(Ordering::Relaxed)
     }
 
-    /// Weak reference count. The count is 0 when no [`KWeak`] points at
-    /// the allocation (a lone strong `KArc` reports 0, not 1 — the
-    /// implicit weak that backs the strong count is not exposed). Useful
-    /// for invariant assertions about outstanding weak handles.
+    /// Weak reference count. A lone strong `KArc` reports 0, not 1 — the
+    /// implicit weak that backs the strong count is not exposed.
     #[inline]
     pub fn weak_count(this: &Self) -> usize {
         let inner = this.inner();
@@ -1045,11 +979,8 @@ impl<T: ?Sized> KArc<T> {
         }
     }
 
-    /// Create a [`KWeak`] handle that does *not* keep the allocation
-    /// alive. The weak handle [`upgrade`](KWeak::upgrade)s back to a
-    /// strong [`KArc`] only while at least one strong reference survives;
-    /// once the last strong `KArc` drops, every `KWeak` upgrade yields
-    /// `None`. Mirrors [`alloc::sync::Arc::downgrade`].
+    /// Create a [`KWeak`] handle that does *not* keep the allocation alive: it
+    /// [`upgrade`](KWeak::upgrade)s only while a strong reference survives.
     #[inline]
     pub fn downgrade(this: &Self) -> KWeak<T> {
         let weak = &this.inner().weak;
@@ -1076,25 +1007,21 @@ impl<T: ?Sized> KArc<T> {
         KWeak { ptr: this.ptr }
     }
 
-    /// Returns `true` if both handles point at the same allocation.
-    /// Mirrors [`alloc::sync::Arc::ptr_eq`]. This compares allocation
-    /// identity, never the pointee — safe for zero-sized and unsized `T`.
+    /// Returns `true` if both handles point at the same allocation. Compares
+    /// allocation identity, never the pointee — safe for zero-sized and
+    /// unsized `T`.
     #[inline]
     pub fn ptr_eq(this: &Self, other: &Self) -> bool {
         core::ptr::addr_eq(this.ptr.as_ptr(), other.ptr.as_ptr())
     }
 
     /// Return a stable raw pointer to the shared value without transferring
-    /// ownership. The pointer remains valid only while at least one strong
-    /// [`KArc`] is alive; callers that retain it must retain a strong handle
-    /// for the same duration.
+    /// ownership. Valid only while at least one strong [`KArc`] is alive.
     ///
     /// Derived from the handle's raw pointer rather than through a
     /// `&KArcInner`, so it carries provenance over the whole allocation and not
-    /// just the `data` field. That is what makes it interchangeable with
-    /// [`KArc::into_raw`] — the placement primitives hand these pointers to
-    /// [`KArc::from_raw`], which walks *backwards* out of `data` to reach the
-    /// reference counts in the header.
+    /// just the `data` field — which is what lets [`KArc::from_raw`] walk
+    /// *backwards* out of `data` to reach the header's reference counts.
     #[inline]
     pub fn as_ptr(this: &Self) -> *const T {
         // SAFETY: `this` owns a live strong reference, so the allocation and its
@@ -1102,14 +1029,10 @@ impl<T: ?Sized> KArc<T> {
         unsafe { core::ptr::addr_of!((*this.ptr.as_ptr()).data) }
     }
 
-    /// The allocation's stable node pointer, as a [`NonNull`].
-    ///
-    /// The same address [`KArc::as_ptr`] and [`KArc::into_raw`] yield, which is
-    /// also the node pointer the placement primitives and the intrusive links
-    /// are keyed on — so a container can derive its key from a handle without a
-    /// null check, and without the pointer ever being the *source* of a
-    /// reference. Borrowing, not owning: parking the result requires a matching
-    /// retain or leak.
+    /// The allocation's stable node pointer, as a [`NonNull`] — the same address
+    /// [`KArc::as_ptr`] and [`KArc::into_raw`] yield, and the key the placement
+    /// primitives and intrusive links use. Borrowing, not owning: parking the
+    /// result requires a matching retain or leak.
     #[inline]
     pub fn node(this: &Self) -> NonNull<T> {
         // SAFETY: `as_ptr` derives from a live allocation's initialized `data`
@@ -1152,29 +1075,25 @@ impl<T: ?Sized> KArc<T> {
     /// Returns `Some(data)` exactly when this call took the strong count from
     /// one to zero. In that case the caller **uniquely** owns the allocation:
     /// `T` is still initialized, the implicit weak reference is still held, and
-    /// no other thread can reach the value. That uniqueness is what makes it
-    /// sound to park the allocation in an intrusive list — the link slot has no
-    /// contention — and destroy it later from a context where the destructor
-    /// may safely run. The returned pointer must reach
-    /// [`KArc::destroy_deferred`] exactly once.
+    /// no other thread can reach the value — which is what makes it sound to
+    /// park the allocation in an intrusive list and destroy it later from a
+    /// context where the destructor may safely run. The returned pointer must
+    /// reach [`KArc::destroy_deferred`] exactly once.
     ///
     /// Deciding finality here rather than by reading the count beforehand is
     /// load-bearing: a `strong_count == 1` pre-check is racy, because two
     /// holders can both observe two and both then drop.
     ///
-    /// A saturated count never destroys, matching [`Drop`].
-    ///
-    /// The returned address is the same one [`KArc::as_ptr`] and
-    /// [`KArc::into_raw`] yield, so it interchanges with the placement
-    /// primitives' node pointers.
+    /// A saturated count never destroys, matching [`Drop`]. The returned address
+    /// is the one [`KArc::as_ptr`] and [`KArc::into_raw`] yield, so it
+    /// interchanges with the placement primitives' node pointers.
     pub(crate) fn release_deferrable(this: Self) -> Option<NonNull<T>>
     where
         T: Sized,
     {
         let ptr = this.ptr;
         let release = refcount_release(&this.inner().strong);
-        // This handle's release is already accounted for above; `Drop` must
-        // not repeat it.
+        // The release above is this handle's; `Drop` must not repeat it.
         core::mem::forget(this);
         match release {
             RefcountRelease::Remaining | RefcountRelease::Saturated => None,
@@ -1210,11 +1129,8 @@ impl<T: ?Sized> KArc<T> {
         unsafe { Self::finish_last_strong(NonNull::new_unchecked(inner)) };
     }
 
-    /// Test-only view of [`KArc::release_deferrable`]. The production surface
-    /// stays `pub(crate)` (raw strong ownership belongs inside OSTD), but the
-    /// racing-releaser property is a property of the generic refcount, not of
-    /// any one payload — and `TaskInner` is `!Send`, so it cannot be raced in a
-    /// host test.
+    /// Test-only view of [`KArc::release_deferrable`]; the production surface
+    /// stays `pub(crate)` because raw strong ownership belongs inside OSTD.
     #[cfg(any(test, feature = "test-helpers"))]
     pub fn release_deferrable_for_test(this: Self) -> Option<NonNull<T>>
     where
@@ -1258,25 +1174,20 @@ where
 {
 }
 
-/// Kernel-blessed `Weak<T>`. A non-owning handle to a [`KArc`]
-/// allocation: it never keeps the inner value alive, and
-/// [`upgrade`](KWeak::upgrade) returns `None` once the last strong
-/// [`KArc`] has dropped. Used to break ownership cycles and to hold a
-/// reference that must not extend the referent's lifetime (e.g. a poll
-/// registration that observes — but never resurrects — a closed file).
+/// Kernel-blessed `Weak<T>`: a non-owning handle to a [`KArc`] allocation. It
+/// never keeps the inner value alive, and [`upgrade`](KWeak::upgrade) returns
+/// `None` once the last strong [`KArc`] has dropped.
 pub struct KWeak<T: ?Sized> {
     ptr: NonNull<KArcInner<T>>,
 }
 
 impl<T> KWeak<T> {
-    /// An empty weak handle that never upgrades to a value. Mirrors
-    /// [`alloc::sync::Weak::new`]; useful as a sentinel / default, and
-    /// `const` so empty handles can seed static registries.
+    /// An empty weak handle that never upgrades to a value. `const`, so empty
+    /// handles can seed static registries.
     #[inline]
     pub const fn new() -> Self {
-        // Matches the standard library's empty-weak representation. A real
-        // `KArcInner` has alignment >= 2, so this address cannot identify an
-        // allocation. It is never dereferenced.
+        // A real `KArcInner` has alignment >= 2, so this address cannot identify
+        // an allocation. It is never dereferenced.
         Self {
             ptr: NonNull::without_provenance(NonZeroUsize::MAX),
         }
@@ -1285,12 +1196,10 @@ impl<T> KWeak<T> {
     /// Identity address of the referent, without upgrading and without
     /// touching any reference count. Null for an empty [`KWeak::new`] handle.
     ///
-    /// The result is a **comparison token only and must never be
-    /// dereferenced**: the strong count may already be zero, in which case `T`
-    /// has been dropped. Computing it is nonetheless always well-defined — a
-    /// live weak count keeps the allocation itself mapped, and this reads no
-    /// field — and it equals [`KArc::as_ptr`] for any strong handle onto the
-    /// same allocation.
+    /// A **comparison token only; never dereference it** — the strong count may
+    /// already be zero. Computing it is always well-defined (a live weak count
+    /// keeps the allocation mapped, and this reads no field), and it equals
+    /// [`KArc::as_ptr`] for any strong handle onto the same allocation.
     ///
     /// Exists so a registry can answer "is this pointer one of mine?" without
     /// upgrading, because an upgraded handle dropped under a lock could be the
@@ -1329,11 +1238,8 @@ impl<T: ?Sized> KWeak<T> {
         Some(unsafe { (&(*ptr).strong, &(*ptr).weak) })
     }
 
-    /// Attempt to promote this weak handle to a strong [`KArc`],
-    /// bumping the strong count. Returns `None` if the inner value has
-    /// already been dropped (the last strong `KArc` is gone) or if this
-    /// is an empty [`KWeak::new`] handle. Mirrors
-    /// [`alloc::sync::Weak::upgrade`].
+    /// Promote this weak handle to a strong [`KArc`]. `None` if the inner value
+    /// has already been dropped, or if this is an empty [`KWeak::new`] handle.
     #[inline]
     pub fn upgrade(&self) -> Option<KArc<T>> {
         let (strong, _) = self.counters()?;
@@ -1357,9 +1263,8 @@ impl<T: ?Sized> KWeak<T> {
         }
     }
 
-    /// Strong reference count of the referent, or 0 if it has been
-    /// dropped / this is an empty handle. Mirrors
-    /// [`alloc::sync::Weak::strong_count`].
+    /// Strong reference count of the referent, or 0 if it has been dropped or
+    /// this is an empty handle.
     #[inline]
     pub fn strong_count(&self) -> usize {
         self.counters()
@@ -1403,10 +1308,8 @@ impl<T: ?Sized> KArc<T> {
         // Every prior reference release publishes accesses through Release;
         // this Acquire fence makes them visible before `T`'s destructor runs.
         fence(Ordering::Acquire);
-        // Materialize the implicit weak as an RAII guard before calling user
-        // drop glue. It releases the allocation on both normal return and a
-        // host-test unwind; kernel panics abort, but the stronger invariant
-        // keeps this primitive correct in every build mode.
+        // The implicit weak becomes an RAII guard before user drop glue runs, so
+        // the allocation is released on a host-test unwind as well as on return.
         let implicit = KWeak { ptr };
         // SAFETY: the caller changed the strong count from one to zero, so no
         // strong handle can access data and weak upgrades can no longer win.
@@ -1636,12 +1539,10 @@ impl<T> Default for KVecDeque<T> {
     }
 }
 
-/// Kernel-blessed `BTreeMap<K, V>`. `BTreeMap::new` itself does not
-/// allocate; insertions reach a node-allocation path that, in the
-/// stable allocator API, panics on OOM. The fallible `try_insert`
-/// surface is intentionally not exposed because the upstream type
-/// does not provide one. Consumers that absolutely need fallible
-/// insert should switch to a `KVec`-of-pairs.
+/// Kernel-blessed `BTreeMap<K, V>`. `new` does not allocate, but insertion
+/// reaches a node allocation that panics on OOM; no fallible insert is exposed
+/// because the upstream type has none. Consumers needing one should switch to a
+/// `KVec`-of-pairs.
 pub struct KBTreeMap<K, V> {
     inner: BTreeMap<K, V>,
 }

@@ -82,18 +82,16 @@ pub fn init_and_install(cpu_id: usize) {
         gdts[cpu_id].load_tss(&tsses[cpu_id]);
         tsses[cpu_id].iomap_base = core::mem::size_of::<Tss64>() as u16;
     }
-    // SAFETY: `install` reads the layout we just populated; the
-    // GdtLayout / TSS pair both live in `'static` per-CPU cells so
-    // the post-`install` borrow remains valid as long as the CPU is
-    // running. Inv. 2.
+    // SAFETY: `install` reads the layout just populated; both live in
+    // `'static` per-CPU cells, so the borrow stays valid while the CPU runs.
+    // Inv. 2.
     unsafe {
         super::gdt::install(&(*PER_CPU_GDT.get())[cpu_id], SegmentSelector::TSS);
     }
 }
 
-/// Bind a TSS IST slot on `cpu_id` to a kernel-stack-top address.
-/// `offset` is the index into `Tss64.ist[]` (0-based, 0..=6 valid).
-/// No-op when `cpu_id >= MAX_CPUS` or `offset >= 7`.
+/// Bind a TSS IST slot on `cpu_id` to a kernel-stack-top address. `offset` is
+/// the index into `Tss64.ist[]` (0-based, 0..=6 valid).
 pub fn set_ist(cpu_id: usize, offset: usize, stack_top: u64) {
     if cpu_id >= MAX_CPUS || offset >= 7 {
         return;
@@ -104,8 +102,7 @@ pub fn set_ist(cpu_id: usize, offset: usize, stack_top: u64) {
     }
 }
 
-/// Set `rsp0` on `cpu_id`'s TSS *and* the matching syscall-data
-/// `kernel_rsp`. No-op when `cpu_id >= MAX_CPUS`.
+/// Set `rsp0` on `cpu_id`'s TSS *and* the matching syscall-data `kernel_rsp`.
 pub fn set_kernel_rsp0(cpu_id: usize, rsp0: u64) {
     if cpu_id >= MAX_CPUS {
         return;
@@ -117,8 +114,8 @@ pub fn set_kernel_rsp0(cpu_id: usize, rsp0: u64) {
     }
 }
 
-/// Read back `rsp0` from `cpu_id`'s TSS, used during the pre-PCR
-/// GS_BASE seeding path.
+/// Read back `rsp0` from `cpu_id`'s TSS; used by the pre-PCR GS_BASE seeding
+/// path.
 pub fn rsp0(cpu_id: usize) -> u64 {
     if cpu_id >= MAX_CPUS {
         return 0;
@@ -127,9 +124,8 @@ pub fn rsp0(cpu_id: usize) -> u64 {
     unsafe { (*PER_CPU_TSS.get())[cpu_id].rsp0 }
 }
 
-/// Update only the syscall-data `kernel_rsp` half (used by per-task
-/// kernel-stack swap on `task_first_run`). No-op when `cpu_id >=
-/// MAX_CPUS`.
+/// Update only the syscall-data `kernel_rsp` half, for the per-task
+/// kernel-stack swap on `task_first_run`.
 pub fn set_syscall_kernel_rsp(cpu_id: usize, rsp: u64) {
     if cpu_id >= MAX_CPUS {
         return;
@@ -140,15 +136,13 @@ pub fn set_syscall_kernel_rsp(cpu_id: usize, rsp: u64) {
     }
 }
 
-/// Return a raw pointer to `cpu_id`'s syscall-data slot. Boot's
-/// pre-PCR GS_BASE wiring writes the slot pointer into the legacy
-/// `SYSCALL_CPU_DATA_PTR` cell + `KERNEL_GS_BASE` MSR. Returns 0 on
-/// out-of-range `cpu_id`.
+/// Return a raw pointer to `cpu_id`'s syscall-data slot. Boot's pre-PCR
+/// GS_BASE wiring writes it into the legacy `SYSCALL_CPU_DATA_PTR` cell and
+/// the `KERNEL_GS_BASE` MSR.
 pub fn syscall_data_ptr(cpu_id: usize) -> u64 {
     if cpu_id >= MAX_CPUS {
         return 0;
     }
-    // SAFETY: pointer derivation from a `'static` cell — no
-    // dereference here, only address computation.
+    // SAFETY: address computation from a `'static` cell, no dereference.
     unsafe { &(*PER_CPU_SYSCALL_DATA.get())[cpu_id] as *const PerCpuSyscallData as u64 }
 }

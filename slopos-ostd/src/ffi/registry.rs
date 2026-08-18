@@ -4,12 +4,11 @@
 //! and that the kernel later walks as a contiguous array. `link.ld` brackets
 //! each one with `__start_<section>` / `__stop_<section>` symbols.
 //!
-//! OSTD owns the whole mechanism: the section names, the bracket symbol
-//! declarations, and the walk. A consumer crate names a registry by
-//! [`RegistryId`] and never spells a section string, so it cannot place a
-//! static into an arbitrary section — including one the linker script's
-//! `*(.text .text.*)`-style wildcards would silently merge into an existing
-//! output section, where no post-link check could see it.
+//! A consumer crate names a registry by [`RegistryId`] and never spells a
+//! section string, so it cannot place a static into an arbitrary section —
+//! including one the linker script's `*(.text .text.*)`-style wildcards would
+//! silently merge into an existing output section, where no post-link check
+//! could see it.
 //!
 //! Writer and reader are tied together by [`RegistryEntry`]: the entry type
 //! declares which registries it belongs to, [`registry_entry!`] refuses to
@@ -52,9 +51,9 @@ pub enum RegistryId {
 }
 
 impl RegistryId {
-    /// The section label, for diagnostics. The label the macro actually
-    /// emits is a literal in [`registry_entry!`](crate::registry_entry)'s
-    /// body, because an attribute needs one.
+    /// The section label, for diagnostics. What the macro actually emits is a
+    /// literal in [`registry_entry!`](crate::registry_entry)'s body, because an
+    /// attribute needs one.
     pub const fn section(self) -> &'static str {
         match self {
             RegistryId::BootInitEarlyHw => ".boot_init_early_hw",
@@ -75,14 +74,12 @@ impl RegistryId {
 /// A type that may be emitted into a linker registry.
 ///
 /// Implemented by the crate that owns the entry type — OSTD cannot name
-/// `PciDriverEntry` or `TestDesc`. Declaring the membership here is what
-/// lets the writer macro and [`registry_slice`] agree on the element type
-/// without either side restating it.
+/// `PciDriverEntry` or `TestDesc` — and it is what lets the writer macro and
+/// [`registry_slice`] agree on the element type.
 ///
 /// `BootInitStep` lists five registries because the boot phases are five
 /// separate sections holding one entry type.
 pub trait RegistryEntry: Sized + 'static {
-    /// Registries this type may be placed in.
     const REGISTRIES: &'static [RegistryId];
 }
 
@@ -100,9 +97,8 @@ pub const fn __declares(registries: &[RegistryId], id: RegistryId) -> bool {
     false
 }
 
-// The bracket symbols the linker synthesises around each section. Declared
-// as `u8` rather than the entry type: the symbols are addresses, not values,
-// and giving them a type here would be a second, unchecked claim about what
+// Declared as `u8` rather than the entry type: the symbols are addresses, not
+// values, and typing them here would be a second, unchecked claim about what
 // the section holds.
 unsafe extern "C" {
     static __start_boot_init_early_hw: u8;
@@ -180,10 +176,9 @@ fn bounds(id: RegistryId) -> (*const u8, *const u8) {
 
 /// Borrow the contiguous `[T]` the linker built for `id`.
 ///
-/// Panics if `T` does not declare `id`, or if the section's byte span is not
-/// a whole number of `T`s — the latter is what a wrong-typed entry looks
-/// like from here, and computing a count from it would be unsound rather
-/// than merely wrong.
+/// Panics if `T` does not declare `id`, or if the section's byte span is not a
+/// whole number of `T`s — the shape a wrong-typed entry takes from here, and
+/// computing a count from it would be unsound rather than merely wrong.
 pub fn registry_slice<T: RegistryEntry>(id: RegistryId) -> &'static [T] {
     assert!(
         __declares(T::REGISTRIES, id),
@@ -199,20 +194,18 @@ pub fn registry_slice<T: RegistryEntry>(id: RegistryId) -> &'static [T] {
     );
     // SAFETY: `link.ld` brackets the section with these two symbols and the
     // only way to place a static between them is `registry_entry!`, which
-    // refuses any type that does not declare this registry. The span is a
-    // whole number of `T`s per the assertion above, and the section is part
-    // of the image, so the entries live for `'static` and are never written
-    // after load.
+    // refuses any type that does not declare this registry. The span is a whole
+    // number of `T`s per the assertion above, and the section is part of the
+    // image, so the entries live for `'static` and are never written after load.
     unsafe { core::slice::from_raw_parts(start.cast::<T>(), bytes / stride) }
 }
 
 /// Emit a `#[used]` static into a linker registry.
 ///
 /// The section label lives in this macro's body, so a consumer crate picks
-/// from the closed set `link.ld` defines rather than supplying a string.
-/// The expansion also asserts that the static's type declares the registry
-/// it is being placed into, which is what stops a reader walking the section
-/// as the wrong type.
+/// from the closed set `link.ld` defines rather than supplying a string. The
+/// expansion also asserts that the static's type declares the registry it is
+/// placed into, which stops a reader walking the section as the wrong type.
 ///
 /// ```ignore
 /// slopos_ostd::registry_entry! {

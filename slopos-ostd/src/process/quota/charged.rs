@@ -67,8 +67,8 @@ impl SharedCharge {
 /// same `Drop` that releases the registry row refunds the charge.
 pub trait FileBacking: Send + Sync + Charged {}
 
-/// One entry in `.charge_audit_registry`: a charge-bearing type, and how to
-/// ask a value of it what it is holding.
+/// One entry in `.charge_audit_registry`: a charge-bearing type, and where it
+/// is defined.
 ///
 /// `#[repr(C)]` and a fixed size: the linker concatenates these into an array
 /// that `registry_slice` divides by this stride.

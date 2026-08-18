@@ -1,35 +1,23 @@
 //! Doubly-linked, head/tail intrusive list with self-identifying membership.
 //!
-//! The singly-linked [`IntrusiveLinkedList`](super::intrusive::IntrusiveLinkedList)
-//! removes by scanning from the head, and its nodes do not record *which* list
-//! they belong to. Both properties are wrong for ownership lists:
-//!
-//! - **Removal must be O(1).** A parent's children list and the parentless-task
-//!   root list are ownership edges walked on every reap and every task exit; a
-//!   linear scan makes a mass reap quadratic.
-//! - **A node must know its own list.** Retiring a task has to drop the one
-//!   owning reference its list membership holds, without first working out
-//!   whether that list is a parent's `children` or the global root list.
-//!   Deriving the list from a parallel field (a parent id, say) would make
-//!   membership have two sources of truth — and disagreement between them is
-//!   exactly the double-free/leak class this type exists to prevent.
-//!
-//! So each [`DLink`] carries an `owner` back-pointer to its list, non-null
-//! exactly while linked. That is the same shape the wait-queue nodes already
-//! use for `queue_ptr`. Membership is read off the link slot alone, and
-//! [`dlist_unlink`] needs no head pointer.
+//! Each [`DLink`] carries an `owner` back-pointer to its list, non-null exactly
+//! while linked, so membership is read off the link slot alone and
+//! [`dlist_unlink`] needs no head pointer. Ownership lists need both properties
+//! the singly-linked
+//! [`IntrusiveLinkedList`](super::intrusive::IntrusiveLinkedList) lacks: O(1)
+//! removal, since a mass reap walks these edges and a head scan would make it
+//! quadratic; and a node that knows its own list, since deriving that from a
+//! parallel field (a parent id, say) gives membership two sources of truth
+//! whose disagreement is the double-free/leak class this type prevents.
 //!
 //! `Role` is a zero-sized tag, as in the singly-linked list: an element type
 //! participating in several lists embeds one link per role, so a list of one
 //! role cannot splice a link slot belonging to another.
 //!
-//! # Serialisation
-//!
 //! Operations are `&self` but **not** lock-free against each other. Every list
 //! sharing a `Role` for a given element type must be serialised by one outer
 //! lock, because [`dlist_unlink`] mutates whichever list owns the node — a
-//! caller holding only "its own" list's lock would still race. In the kernel
-//! every owner-list mutation runs under the task-registry lock.
+//! caller holding only "its own" list's lock would still race.
 
 use core::marker::PhantomData;
 use core::ptr::NonNull;
@@ -45,9 +33,8 @@ use super::intrusive::LinkError;
 pub struct DLink<T, Role> {
     next: AtomicPtr<T>,
     prev: AtomicPtr<T>,
-    /// The list currently holding this node, type-erased. Non-null exactly
-    /// while linked; it is only ever compared and cast back to the list type
-    /// this `Role` pins, never dereferenced as anything else.
+    /// The list currently holding this node, type-erased: only ever compared,
+    /// or cast back to the list type this `Role` pins.
     owner: AtomicPtr<()>,
     // `fn() -> Role` lets `Role` be uninhabited (the typical case).
     _role: PhantomData<fn() -> Role>,
@@ -63,15 +50,13 @@ impl<T, Role> DLink<T, Role> {
         }
     }
 
-    /// Whether this node is currently a member of some list.
     #[inline]
     pub fn is_linked(&self) -> bool {
         !self.owner.load(Ordering::Acquire).is_null()
     }
 
-    /// Clear the slot without touching any list. For reinitialising a slot
-    /// whose bytes were copied from another task (fork) or whose list was
-    /// abandoned wholesale.
+    /// Clear the slot without touching any list, for one whose bytes were
+    /// copied from another task (fork) or whose list was abandoned wholesale.
     #[inline]
     pub fn reset(&self) {
         self.next.store(core::ptr::null_mut(), Ordering::Relaxed);
@@ -97,10 +82,8 @@ pub unsafe trait DLinked<Role>: Sized {
     fn dlink(&self) -> &DLink<Self, Role>;
 }
 
-/// Doubly-linked, head/tail intrusive list.
-///
-/// Push transfers no ownership by itself; consumers pair membership with a
-/// parked reference. Removal is O(1) from any position.
+/// Doubly-linked, head/tail intrusive list. Push transfers no ownership by
+/// itself; consumers pair membership with a parked reference.
 pub struct IntrusiveDList<T, Role>
 where
     T: DLinked<Role>,
@@ -146,13 +129,11 @@ where
     }
 
     /// Append `node` at the tail. `Err(AlreadyLinked)` when the node is already
-    /// a member of this or any other list of the same role — the
-    /// single-membership tripwire.
+    /// a member of this or any other list of the same role.
     pub fn push_back(&self, node: NonNull<T>) -> Result<(), LinkError> {
         // SAFETY: the `DLinked` contract makes the link a stable, addressable
-        // member of the element; membership keeps the element alive (the
-        // consumer's reference discipline), so pointers loaded from link slots
-        // stay valid until we mutate them.
+        // member of the element, and membership keeps the element alive, so
+        // pointers loaded from link slots stay valid until we mutate them.
         let link = unsafe { node.as_ref().dlink() };
         if link.is_linked() {
             return Err(LinkError::AlreadyLinked);
@@ -178,14 +159,12 @@ where
         Ok(())
     }
 
-    /// Detach and return the head element.
     pub fn pop_front(&self) -> Option<NonNull<T>> {
         let head = NonNull::new(self.head.load(Ordering::Acquire))?;
         self.unlink_member(head);
         Some(head)
     }
 
-    /// The head element without detaching it.
     #[inline]
     pub fn peek_front(&self) -> Option<NonNull<T>> {
         NonNull::new(self.head.load(Ordering::Acquire))
@@ -227,8 +206,8 @@ where
         self.count.fetch_sub(1, Ordering::AcqRel);
     }
 
-    /// Snapshot iterator from the head. Concurrent mutation may yield a stale
-    /// view but cannot trigger UB (each step null-checks).
+    /// Snapshot iterator from the head. A concurrent mutation may make the view
+    /// stale but cannot cause UB.
     pub fn iter(&self) -> DIter<'_, T, Role> {
         DIter {
             cursor: self.head.load(Ordering::Acquire),
@@ -248,10 +227,6 @@ where
 
 /// Remove `node` from whichever list currently owns it. Returns whether it was
 /// linked.
-///
-/// This is the operation the singly-linked list cannot offer: retirement drops
-/// the owning reference a task's list membership holds without having to know
-/// whether that list is a parent's children list or the root list.
 ///
 /// The caller must hold the lock serialising every list of this role, not just
 /// the one it believes owns the node.

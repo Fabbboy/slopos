@@ -1,20 +1,16 @@
 //! User-mode CPU register context.
 //!
-//! [`UserContext`] is the OSTD-canonical snapshot of the user-mode
-//! register file. It is the only public way to express "the state a
-//! user-mode thread should resume with"; in particular,
-//! [`UserContext::set_rflags`] is the only path that writes RFLAGS,
-//! and it forcibly masks every flag that, if forged by user code,
-//! would let userland step outside its sandbox (Inv. 2).
+//! [`UserContext`] is the OSTD-canonical snapshot of the user-mode register
+//! file. [`UserContext::set_rflags`] is the only path that writes RFLAGS, and
+//! it masks every flag that, if forged by user code, would let userland step
+//! outside its sandbox (Inv. 2). `cs` / `ss` are populated by
+//! [`UserContext::new`] from the OSTD GDT selectors and are not publicly
+//! settable.
 //!
-//! `cs` / `ss` are populated by [`UserContext::new`] from the OSTD
-//! GDT selectors and are not publicly settable.
-//!
-//! Argument-register validation happens through
-//! [`UserContext::user_ptr_arg`] and friends — these are the only
-//! public constructors of [`crate::user::ptr::UserPtr`] /
-//! [`crate::user::ptr::UserSlice`], enforcing Inv. 5 (no
-//! kernel-half address ever enters the kernel as a user pointer).
+//! [`UserContext::user_ptr_arg`] and friends are the only public constructors
+//! of [`crate::user::ptr::UserPtr`] / [`crate::user::ptr::UserSlice`],
+//! enforcing Inv. 5 (no kernel-half address ever enters the kernel as a user
+//! pointer).
 
 use core::cell::SyncUnsafeCell;
 
@@ -52,9 +48,8 @@ pub const USER_RFLAGS_PERMITTED: u64 = (1 << 0)
 /// - bit 9  IF       — user must run with interrupts enabled
 pub const USER_RFLAGS_FORCED: u64 = (1 << 1) | (1 << 9);
 
-/// Drop every RFLAGS bit userland must not influence and force the
-/// ones it must not clear. Every write of `rflags_user_subset` goes
-/// through this.
+/// Drop every RFLAGS bit userland must not influence and force the ones it
+/// must not clear; every write of `rflags_user_subset` goes through this.
 #[inline]
 const fn sanitize_user_rflags(value: u64) -> u64 {
     (value & USER_RFLAGS_PERMITTED) | USER_RFLAGS_FORCED
@@ -88,13 +83,10 @@ pub struct UserRegs {
     pub _pad: [u16; 3],
 }
 
-// This layout is the user-mode register ABI. Both asm halves of the
-// round trip derive their displacements from it with `offset_of!`, so a
-// field reorder would move them in lockstep rather than scramble user
-// state — but the numbers are the contract, and anything reading a
-// `UserRegs` without going through `offset_of!` (a debugger, a core
-// dump, a future consumer) reads them. These asserts are what makes a
-// reorder a build failure instead of a silent ABI break.
+// This layout is the user-mode register ABI: the numbers are the contract for
+// anything reading a `UserRegs` without going through `offset_of!` (a
+// debugger, a core dump), so these asserts make a field reorder a build
+// failure instead of a silent ABI break.
 const _: () = {
     use core::mem::offset_of;
     assert!(offset_of!(UserRegs, rax) == 0);
@@ -128,8 +120,8 @@ const _: () = {
 unsafe impl crate::mm::init::Zeroable for UserRegs {}
 
 impl UserRegs {
-    /// `const fn` zero/default constructor — usable in `const`
-    /// contexts where `Default::default()` cannot be called.
+    /// Zero constructor for `const` contexts, where `Default::default()`
+    /// cannot be called.
     pub const fn const_zeroed() -> Self {
         Self {
             rax: 0,
@@ -161,34 +153,28 @@ impl UserRegs {
 
 /// Borrowed handle to a task's XSAVE/FXSAVE buffer.
 ///
-/// Opaque to consumers — the only way to produce one is through
-/// the trusted side via [`FpuStateRef::from_raw`].
-/// [`crate::user::mode::UserMode::execute`] is the only consumer;
-/// it loads the buffer with `XRSTOR` on entry and persists it with
-/// `XSAVE` on user-to-kernel transitions.
+/// The only producer is the trusted-side [`FpuStateRef::from_raw`]; the only
+/// consumer is [`crate::user::mode::UserMode::execute`], which `XRSTOR`s the
+/// buffer on entry and `XSAVE`s it on user-to-kernel transitions.
 #[derive(Clone, Copy)]
 pub struct FpuStateRef {
     ptr: *mut u8,
     len: usize,
 }
 
-// SAFETY: `FpuStateRef` is a raw pointer + length pair naming a task's
-// own XSAVE area, and `Send`/`Sync` claim only that the pair is
-// meaningful on any CPU — the buffer is task memory, not CPU-local.
-// Neither carries an aliasing promise; exclusivity over an FPU area is
-// arranged by the `TaskExclusive` witness every `Task::fpu_*` accessor
-// demands, so an `FpuStateRef` riding inside a `UserContext` grants no
-// access its holder did not already have. The pair's only producer is
-// the `unsafe` `from_raw`, whose contract names the buffer and requires
-// it to outlive every `UserContext` built for that task. `from_raw` has
-// no caller today, so every `FpuStateRef` in the kernel is `empty()`.
+// SAFETY: `FpuStateRef` is a raw pointer + length pair naming a task's own
+// XSAVE area — task memory, not CPU-local, so the pair is meaningful on any
+// CPU. Neither impl carries an aliasing promise: exclusivity over an FPU area
+// comes from the `TaskExclusive` witness every `Task::fpu_*` accessor demands,
+// so an `FpuStateRef` riding inside a `UserContext` grants no access its
+// holder did not already have. Its only producer is the `unsafe` `from_raw`,
+// whose contract requires the buffer to outlive every `UserContext` built for
+// that task.
 unsafe impl Send for FpuStateRef {}
 unsafe impl Sync for FpuStateRef {}
 
-// SAFETY: `FpuStateRef` is `(*mut u8, usize)`. Both `*mut u8`
-// (Zeroable yields null) and `usize` (Zeroable yields 0) are valid
-// when zero — the resulting `FpuStateRef` is the same as
-// `FpuStateRef::empty()`.
+// SAFETY: `FpuStateRef` is `(*mut u8, usize)`; both are valid when zero, and
+// the resulting value is the same as `FpuStateRef::empty()`.
 unsafe impl crate::mm::init::Zeroable for FpuStateRef {}
 
 impl FpuStateRef {
@@ -238,22 +224,16 @@ impl core::fmt::Debug for FpuStateRef {
 ///
 /// # Who may write it
 ///
-/// The register file sits in a cell, so writes go through `&self` and
-/// the type arranges no exclusivity — the round-trip protocol does.
-/// `UserContext` is `Send + Sync` (a task's context travels with the
-/// task across CPUs), so this is a contract rather than a bound.
+/// The register file sits in a cell, so writes go through `&self` and the type
+/// arranges no exclusivity — the round-trip protocol does. `UserContext` is
+/// `Send + Sync` (a context travels with its task across CPUs), so this is a
+/// contract rather than a bound. There are exactly two writers, and they
+/// cannot overlap:
 ///
-/// There are exactly two writers, and they cannot overlap:
-///
-/// 1. `__ostd_user_return`, on the task's own CPU, between the SYSCALL
-///    that left user mode and the jump back into the round trip. IRQs
-///    are off for that whole window — `SFMASK` clears IF on entry and
-///    the `sti` is the last instruction before the jump — and the task
-///    cannot be running anywhere else, because it is running here.
-/// 2. Kernel code acting for that task — the syscall dispatcher, signal
-///    delivery, `exec`, the fork and clone builders reading a parent —
-///    after the trampoline returned and before the next
-///    [`crate::user::mode::UserMode::execute`] republishes
+/// 1. `__ostd_user_return`, on the task's own CPU with IRQs off, between the
+///    SYSCALL that left user mode and the jump back into the round trip.
+/// 2. Kernel code acting for that task, after the trampoline returned and
+///    before the next [`crate::user::mode::UserMode::execute`] republishes
 ///    `pcr.user_ctx_ptr`.
 ///
 /// There is no third: the only route to another task's context is
@@ -274,27 +254,21 @@ impl core::fmt::Debug for UserContext {
     }
 }
 
-// `__ostd_user_return` loads a `*mut UserContext` out of the PCR and
-// indexes it with the `UR_*` displacements above — it treats the whole
-// context as its register file, so `regs` must sit at offset zero.
+// `__ostd_user_return` indexes a `*mut UserContext` loaded from the PCR with
+// the `UR_*` displacements above, so `regs` must sit at offset zero.
 const _: () = assert!(core::mem::offset_of!(UserContext, regs) == 0);
 
-// SAFETY: every field of `UserContext` is `Zeroable`
-// (`UserRegs` and `FpuStateRef` impls above). `SyncUnsafeCell<T>` is
-// `#[repr(transparent)]` over `UnsafeCell<T>` over `T`, so wrapping
-// `UserRegs` in one leaves its bit patterns untouched and the all-zero
-// one is still what `UserContext::const_zeroed()` produces.
-// `#[repr(C)]` pins the layout so the impl stays well-formed under
-// field reorder.
+// SAFETY: every field of `UserContext` is `Zeroable`, and `SyncUnsafeCell<T>`
+// is `#[repr(transparent)]` over `T`, so the all-zero bit pattern is still
+// what `UserContext::const_zeroed()` produces. `#[repr(C)]` pins the layout so
+// the impl stays well-formed under field reorder.
 unsafe impl crate::mm::init::Zeroable for UserContext {}
 
 impl UserContext {
-    /// `const fn` zero/uninitialised constructor.  All-zero regs +
-    /// empty FPU state.  Suitable for slots inside larger structs
-    /// (e.g. `Task::invalid()`) that need to be const-constructible
-    /// before being filled in by an init path.  Production code
-    /// should reach for [`Self::new`] / [`Self::set_regs`] before
-    /// the context is consumed by [`crate::user::mode::UserMode`].
+    /// All-zero regs plus empty FPU state, for const-constructible slots inside
+    /// larger structs (e.g. `Task::invalid()`). Production code fills the
+    /// context via [`Self::new`] / [`Self::set_regs`] before
+    /// [`crate::user::mode::UserMode`] consumes it.
     pub const fn const_zeroed() -> Self {
         Self {
             regs: SyncUnsafeCell::new(UserRegs::const_zeroed()),
@@ -316,24 +290,20 @@ impl UserContext {
         }
     }
 
-    /// Snapshot the register file.
-    ///
-    /// By value, not by reference: the file is written through `&self`,
-    /// so a `&UserRegs` handed out here would be a shared borrow of
-    /// memory the next setter mutates.
+    /// Snapshot the register file. By value, not by reference: the file is
+    /// written through `&self`, so a `&UserRegs` handed out here would be a
+    /// shared borrow of memory the next setter mutates.
     #[inline]
     pub fn regs(&self) -> UserRegs {
         // SAFETY: the cell's contents are a plain `UserRegs`, always
-        // initialised, and the write contract on this type keeps the
-        // two writers from overlapping this read.
+        // initialised, and the write contract on this type keeps the two
+        // writers from overlapping this read.
         unsafe { *self.regs.get() }
     }
 
-    /// Raw pointer to the embedded `UserRegs`.  Used by the kernel→user
-    /// round-trip asm helper (see
-    /// [`crate::user::mode::user_mode_round_trip_asm`]); ordinary
-    /// callers should reach for [`Self::regs`] / [`Self::set_regs`]
-    /// instead.
+    /// Raw pointer to the embedded `UserRegs`, for the kernel→user round-trip
+    /// asm helper ([`crate::user::mode::user_mode_round_trip_asm`]); ordinary
+    /// callers want [`Self::regs`] / [`Self::set_regs`].
     #[inline]
     pub fn regs_ptr(&self) -> *const UserRegs {
         self.regs.get().cast_const()
@@ -342,27 +312,20 @@ impl UserContext {
     /// Direct mutable view of the embedded GPR snapshot, proven by
     /// `&mut self` rather than by the write contract.
     ///
-    /// **Mask discipline is on the caller**: writes to
-    /// `rflags_user_subset` through this reference bypass
-    /// [`Self::set_rflags`]'s sensitive-bit filter, and writes to
-    /// `cs` / `ss` bypass the user-selector reapplication that
-    /// [`Self::new`] / [`Self::set_regs`] guarantee.  Prefer
-    /// [`Self::set_regs`] for any path that is (or could be) driven by
-    /// user-supplied register values; reach for this only when the
-    /// caller is OSTD-internal kernel state-management (e.g. seeding a
-    /// fresh context from a known-good kernel-supplied snapshot, or
-    /// kernel-mode test scaffolding constructing inputs to a syscall
-    /// handler).
+    /// **Mask discipline is on the caller**: writes to `rflags_user_subset`
+    /// through this reference bypass [`Self::set_rflags`]'s sensitive-bit
+    /// filter, and writes to `cs` / `ss` bypass the user-selector
+    /// reapplication. Any path that is (or could be) driven by user-supplied
+    /// register values must use [`Self::set_regs`] instead.
     #[inline]
     pub fn regs_mut(&mut self) -> &mut UserRegs {
         self.regs.get_mut()
     }
 
-    /// Replace the entire register snapshot. `cs` / `ss` from `regs`
-    /// are ignored — the OSTD selectors are re-applied. `rflags` is
-    /// masked so a caller cannot bypass the sensitive-bits filter by
-    /// writing the snapshot directly. Sanitised before the store, so an
-    /// unmasked value is never briefly live in the cell.
+    /// Replace the entire register snapshot. `cs` / `ss` from `regs` are
+    /// ignored — the OSTD selectors are re-applied — and `rflags` is masked,
+    /// sanitised before the store so an unmasked value is never briefly live
+    /// in the cell.
     pub fn set_regs(&self, mut regs: UserRegs) {
         regs.cs = USER_CODE_SELECTOR;
         regs.ss = USER_DATA_SELECTOR;
@@ -390,9 +353,8 @@ impl UserContext {
         unsafe { (*self.regs.get()).rax = rax };
     }
 
-    /// Individual argument-register reads. `regs()` returns `UserRegs` by
-    /// value — 176 bytes of caller frame per read at opt-level 0, unmerged —
-    /// so prefer these unless the whole register file is wanted.
+    /// Individual argument-register reads: `regs()` returns 176 bytes by
+    /// value, which at opt-level 0 is that much caller frame per read.
     #[inline]
     pub fn rdi(&self) -> u64 {
         // SAFETY: see the write contract on `UserContext`.
@@ -477,14 +439,10 @@ impl UserContext {
         unsafe { (*self.regs.get()).gs_base = gs_base };
     }
 
-    /// Write user-mode RFLAGS, masking every sensitive bit.
-    ///
-    /// SAFETY note (Inv. 2): the kernel never copies user-supplied
-    /// RFLAGS into hardware verbatim. IOPL=0 forbids user port I/O,
-    /// IF=1 keeps the user preemptible, AC=0 keeps SMAP enforcement
-    /// active for kernel-mode code that runs after the next IRETQ,
-    /// VM/NT/RF/VIF/VIP cleared closes the corresponding x86 escape
-    /// hatches.
+    /// Write user-mode RFLAGS, masking every sensitive bit (Inv. 2): IOPL=0
+    /// forbids user port I/O, IF=1 keeps the user preemptible, AC=0 keeps SMAP
+    /// enforcement active for kernel-mode code after the next IRETQ, and
+    /// VM/NT/RF/VIF/VIP cleared closes the corresponding x86 escape hatches.
     pub fn set_rflags(&self, value: u64) {
         // SAFETY: see the write contract on `UserContext`.
         unsafe { (*self.regs.get()).rflags_user_subset = sanitize_user_rflags(value) };
@@ -507,18 +465,15 @@ impl UserContext {
         }
     }
 
-    /// Build a validated typed [`UserPtr<T>`] from syscall argument
-    /// register `reg_index`. This is the only public construction
-    /// path for `UserPtr`, which is what enforces Inv. 5 — every
-    /// user pointer that crosses into the kernel must come from a
-    /// register that was loaded by a user-mode IRETQ exit or
-    /// SYSCALL entry.
+    /// Build a validated typed [`UserPtr<T>`] from syscall argument register
+    /// `reg_index`. The only public construction path for `UserPtr`, which is
+    /// what enforces Inv. 5.
     pub fn user_ptr_arg<T: Pod>(&self, reg_index: usize) -> Result<UserPtr<T>, UserPtrError> {
         UserPtr::<T>::try_new(self.syscall_arg(reg_index))
     }
 
-    /// Build a validated [`UserSlice<T>`] from a (base, count) pair
-    /// of syscall argument registers.
+    /// Build a validated [`UserSlice<T>`] from a (base, count) pair of syscall
+    /// argument registers.
     pub fn user_slice_arg<T: Pod>(
         &self,
         base_idx: usize,
@@ -611,9 +566,7 @@ mod tests {
         let ctx = ctx_with_rflags(0);
         ctx.set_rflags(u64::MAX);
         let f = ctx.rflags();
-        // No bits beyond 21 may be set.
         assert_eq!(f & !((1u64 << 22) - 1), 0, "high bits leaked: {f:#x}");
-        // IOPL must be zero.
         assert_eq!(f & 0x3000, 0);
     }
 

@@ -1441,13 +1441,10 @@ pub fn take_previous_task() -> *mut () {
     }
 }
 
-/// Read the current CPU's `syscall_pid` atomically. Returns
-/// `u32::MAX` (`INVALID_PROCESS_ID` sentinel) if GS_BASE has not yet
-/// been installed on this CPU. Folds the single `unsafe` deref of the
-/// PCR pointer interior to OSTD so kernel-half copy / mm helpers stay
-/// in safe Rust. Single gs-relative load (migration-atomic): user
-/// pointer validation must see the pid the *executing* CPU's
-/// dispatcher installed, never a stale neighbour-CPU value.
+/// Returns `u32::MAX` (`INVALID_PROCESS_ID`) if GS_BASE has not yet been
+/// installed on this CPU. Migration-atomic: user pointer validation must see
+/// the pid the *executing* CPU's dispatcher installed, never a stale
+/// neighbour-CPU value.
 #[inline]
 pub fn current_syscall_pid() -> u32 {
     if !GS_BASE_SET.is_set() {
@@ -1467,9 +1464,7 @@ pub fn current_syscall_pid() -> u32 {
     pid
 }
 
-/// Store `pid` into the current CPU's `syscall_pid`. No-op until the
-/// PCR is installed. Counterpart of [`current_syscall_pid`].
-/// Single gs-relative store (migration-atomic).
+/// No-op until the PCR is installed. Counterpart of [`current_syscall_pid`].
 #[inline]
 pub fn set_current_syscall_pid(pid: u32) {
     if !GS_BASE_SET.is_set() {
@@ -1487,15 +1482,11 @@ pub fn set_current_syscall_pid(pid: u32) {
     }
 }
 
-/// Read the id of the task running on this CPU, or `u32::MAX`
-/// (`INVALID_TASK_ID`) before this CPU's first dispatch or until GS_BASE is
-/// installed.
+/// Returns `u32::MAX` (`INVALID_TASK_ID`) before this CPU's first dispatch or
+/// until GS_BASE is installed. Migration-atomic, like [`current_syscall_pid`].
 ///
-/// Single gs-relative load, so it is migration-atomic on the same argument as
-/// [`current_syscall_pid`]: a caller preempted mid-call still reads the PCR of
-/// the CPU executing the instruction, which post-migration holds this task
-/// again. Answers "which task am I" without dereferencing the task, which is
-/// what makes it safe while `current_task` names a pre-heap bootstrap stub.
+/// Answers "which task am I" without dereferencing the task, which is what
+/// makes it safe while `current_task` names a pre-heap bootstrap stub.
 #[inline]
 pub fn current_task_id() -> u32 {
     if !GS_BASE_SET.is_set() {
@@ -1515,11 +1506,8 @@ pub fn current_task_id() -> u32 {
     id
 }
 
-/// Publish the id of the task this CPU is switching to.
-///
 /// Private on purpose: [`set_current_task`] is the only caller, which is what
 /// keeps the id and the pointer from ever naming different tasks.
-/// Single gs-relative store (migration-atomic).
 #[inline]
 fn set_current_task_id(task_id: u32) {
     if !GS_BASE_SET.is_set() {
@@ -1537,15 +1525,13 @@ fn set_current_task_id(task_id: u32) {
     }
 }
 
-/// Read the id of the task running on `cpu_id`, or `u32::MAX` when that CPU has
-/// no PCR or has not dispatched yet. Cross-CPU sibling of [`current_task_id`].
+/// Cross-CPU sibling of [`current_task_id`]; `u32::MAX` when that CPU has no
+/// PCR or has not dispatched yet.
 #[inline]
 pub fn current_task_id_for(cpu_id: usize) -> u32 {
     get_pcr(cpu_id).map_or(u32::MAX, |pcr| pcr.current_task_id.load(Ordering::Acquire))
 }
 
-/// Publish the priority of the task this CPU is switching to.
-///
 /// Private for the same reason as [`set_current_task_id`]: keeping
 /// [`set_current_task`] the only writer is what stops the priority from ever
 /// describing a task other than the one the pointer names.
@@ -1566,13 +1552,11 @@ fn set_current_task_priority(priority: u8) {
     }
 }
 
-/// Read the scheduling priority of the task running on `cpu_id`, or
 /// [`PRIORITY_NONE`] when that CPU has no PCR or is running nothing.
 ///
-/// The whole point is that this answers the preemption question **without
-/// dereferencing a foreign CPU's task**: that CPU's switch tail may be
-/// releasing the outgoing dispatch reference and running the task's
-/// allocator-heavy destructor concurrently.
+/// Answers the preemption question **without dereferencing a foreign CPU's
+/// task**: that CPU's switch tail may concurrently be releasing the outgoing
+/// dispatch reference and running the task's destructor.
 #[inline]
 pub fn current_task_priority_for(cpu_id: usize) -> u8 {
     get_pcr(cpu_id).map_or(PRIORITY_NONE, |pcr| {
@@ -1580,12 +1564,9 @@ pub fn current_task_priority_for(cpu_id: usize) -> u8 {
     })
 }
 
-/// Set the idle-task pointer for `cpu_id`.
-///
-/// Cross-CPU-safe (takes explicit `cpu_id`) so the BSP can seed every
-/// AP's idle slot during bring-up before that AP's GS_BASE is
-/// installed.  Single-writer discipline: each idle task is installed
-/// exactly once per CPU, at `create_idle_task_for_cpu()` time.
+/// Takes an explicit `cpu_id` so the BSP can seed every AP's idle slot during
+/// bring-up, before that AP's GS_BASE is installed. Single-writer: each idle
+/// task is installed exactly once per CPU, at `create_idle_task_for_cpu()`.
 #[inline]
 pub fn set_idle_task(cpu_id: usize, task: *mut ()) {
     if let Some(pcr) = get_pcr(cpu_id) {
@@ -1593,8 +1574,7 @@ pub fn set_idle_task(cpu_id: usize, task: *mut ()) {
     }
 }
 
-/// Get the idle-task pointer for `cpu_id`.  Returns null for
-/// uninitialised / out-of-range CPUs.
+/// Returns null for uninitialised / out-of-range CPUs.
 #[inline]
 pub fn get_idle_task(cpu_id: usize) -> *mut () {
     get_pcr(cpu_id)
@@ -1602,9 +1582,8 @@ pub fn get_idle_task(cpu_id: usize) -> *mut () {
         .unwrap_or(ptr::null_mut())
 }
 
-/// Get the current-task pointer for `cpu_id`.  Cross-CPU variant of
-/// [`get_current_task`]; used by the scheduler when it needs to read
-/// another CPU's running task (e.g. remote-wakeup fast paths).
+/// Cross-CPU variant of [`get_current_task`]; returns null for uninitialised
+/// CPUs.
 #[inline]
 pub fn get_current_task_for(cpu_id: usize) -> *mut () {
     get_pcr(cpu_id)
@@ -1612,7 +1591,6 @@ pub fn get_current_task_for(cpu_id: usize) -> *mut () {
         .unwrap_or(ptr::null_mut())
 }
 
-/// Increment the context switch counter for this CPU.
 #[inline]
 pub fn increment_context_switches() {
     if !GS_BASE_SET.is_set() {
@@ -1625,7 +1603,6 @@ pub fn increment_context_switches() {
     }
 }
 
-/// Increment the interrupt counter for this CPU.
 #[inline]
 pub fn increment_interrupt_count() {
     if !GS_BASE_SET.is_set() {
@@ -1638,20 +1615,17 @@ pub fn increment_interrupt_count() {
     }
 }
 
-// ==================== IPI INFRASTRUCTURE ====================
-
 pub type SendIpiToCpuFn = fn(u32, u8);
 
 static SEND_IPI_TO_CPU_FN: AtomicPtr<()> = AtomicPtr::new(ptr::null_mut());
 static LAPIC_ID_FN: AtomicPtr<()> = AtomicPtr::new(ptr::null_mut());
 
-/// Register the IPI send function from the APIC driver. The
-/// `&BspToken<'brand>` witnesses BSP-only init.
+/// The `&BspToken<'brand>` witnesses BSP-only init.
 pub fn register_send_ipi_to_cpu_fn<'brand>(_token: &BspToken<'brand>, f: SendIpiToCpuFn) {
     SEND_IPI_TO_CPU_FN.store(f as *mut (), Ordering::Release);
 }
 
-/// Send an IPI to the specified CPU.
+/// No-op if the send function has not been registered yet.
 pub fn send_ipi_to_cpu(target_apic_id: u32, vector: u8) {
     let fn_ptr = SEND_IPI_TO_CPU_FN.load(Ordering::Acquire);
     if !fn_ptr.is_null() {
@@ -1660,29 +1634,22 @@ pub fn send_ipi_to_cpu(target_apic_id: u32, vector: u8) {
     }
 }
 
-/// Register the LAPIC ID reader function from the APIC driver. The
-/// `&BspToken<'brand>` witnesses BSP-only init.
+/// The `&BspToken<'brand>` witnesses BSP-only init.
 pub fn register_lapic_id_fn<'brand>(_token: &BspToken<'brand>, f: fn() -> u32) {
     LAPIC_ID_FN.store(f as *mut (), Ordering::Release);
 }
-
-// ==================== NMI IPI ====================
 
 pub type SendNmiToCpuFn = fn(u32);
 
 static SEND_NMI_TO_CPU_FN: AtomicPtr<()> = AtomicPtr::new(ptr::null_mut());
 
-/// Register the NMI send function from the APIC driver. The
-/// `&BspToken<'brand>` witnesses BSP-only init.
+/// The `&BspToken<'brand>` witnesses BSP-only init.
 pub fn register_send_nmi_fn<'brand>(_token: &BspToken<'brand>, f: SendNmiToCpuFn) {
     SEND_NMI_TO_CPU_FN.store(f as *mut (), Ordering::Release);
 }
 
-/// Send an NMI to the specified CPU (by APIC ID).
-///
-/// Used by the NMI watchdog to interrupt a CPU that appears stuck with
-/// interrupts disabled.  No-op if the NMI send function has not been
-/// registered yet.
+/// Target named by APIC ID. No-op if the send function has not been registered
+/// yet.
 pub fn send_nmi_to_cpu(target_apic_id: u32) {
     let fn_ptr = SEND_NMI_TO_CPU_FN.load(Ordering::Acquire);
     if !fn_ptr.is_null() {
@@ -1695,15 +1662,15 @@ pub type SendNmiBroadcastFn = fn();
 
 static SEND_NMI_BROADCAST_FN: AtomicPtr<()> = AtomicPtr::new(ptr::null_mut());
 
-/// Register the broadcast-NMI send function from the APIC driver (BSP-only).
+/// The `&BspToken<'brand>` witnesses BSP-only init.
 pub fn register_send_nmi_broadcast_fn<'brand>(_token: &BspToken<'brand>, f: SendNmiBroadcastFn) {
     SEND_NMI_BROADCAST_FN.store(f as *mut (), Ordering::Release);
 }
 
 /// Broadcast an NMI to all OTHER CPUs (Reliable Abort Core stop-the-world).
 ///
-/// No-op if the send function has not been registered yet (e.g. a panic before
-/// APIC init — the single-CPU early-boot case where there are no peers to stop).
+/// No-op if the send function has not been registered yet — a panic before APIC
+/// init is the single-CPU early-boot case with no peers to stop.
 pub fn send_nmi_broadcast() {
     let fn_ptr = SEND_NMI_BROADCAST_FN.load(Ordering::Acquire);
     if !fn_ptr.is_null() {

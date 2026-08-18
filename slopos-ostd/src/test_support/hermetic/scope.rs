@@ -1,13 +1,6 @@
 //! Safe-fn wrappers around the `HermeticVTable::{snapshot,restore}`
-//! function pointers, used by `core/src/scheduler/test_fixture.rs`
-//! (`KernelTestScope`).
-//!
-//! The vtable thunks are typed `unsafe fn(...)` because the trait
-//! contract is enforced by the framework's "snapshot/restore pair
-//! only ever called from `KernelTestScope`" invariant. These wrappers
-//! absorb the `unsafe` call: the kernel-side scope code calls
-//! `run_snapshot_phase` / `run_restore_phase_drain` and the unsafe
-//! token never appears in `test_fixture.rs`.
+//! function pointers, so the kernel-side `KernelTestScope` never spells
+//! `unsafe`.
 
 use core::ptr::NonNull;
 
@@ -15,21 +8,16 @@ use crate::KVec;
 
 use super::vtable::HermeticVTable;
 
-/// Outcome of [`run_snapshot_phase`].
 pub enum SnapshotError {
-    /// `KVec::push` returned `Err(AllocError)`. The framework rewinds
-    /// already-captured snapshots; this variant carries no payload
-    /// because there is none to surface.
+    /// `KVec::push` returned `Err(AllocError)`.
     Oom,
     /// A specific state's `snapshot()` returned `Err(AllocError)`.
-    /// The framework rewinds and reports the name to the caller.
     StateAllocFailed(&'static str),
 }
 
-/// Capture every state in `order` into a KVec of `(vtable, payload)`
-/// pairs. On failure, the caller is responsible for rewinding any
-/// already-captured pairs through [`run_restore_phase_drain`] and
-/// reporting via the returned `SnapshotError`.
+/// Capture every state in `order` into `(vtable, payload)` pairs. On failure
+/// the caller must rewind the returned already-captured pairs through
+/// [`run_restore_phase_drain`].
 pub fn run_snapshot_phase(
     order: &[&'static HermeticVTable],
 ) -> Result<
@@ -58,10 +46,6 @@ pub fn run_snapshot_phase(
 }
 
 /// Drain `captured` from the back, invoking each state's `restore`.
-/// Used both by `KernelTestScope::Drop` (normal restore) and the
-/// unwind paths in `enter()` (snapshot-OOM, init-failure).
-///
-/// After this returns, `captured` is empty.
 pub fn run_restore_phase_drain(captured: &mut KVec<(&'static HermeticVTable, NonNull<()>)>) {
     while let Some((vt, payload)) = captured.pop() {
         // SAFETY: payload was produced by `vt.snapshot()` (registry

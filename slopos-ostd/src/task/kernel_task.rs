@@ -583,23 +583,17 @@ const TEST_REPORTS_CLASS: &crate::sync::lock_tracking::LockClassKey =
 
 impl<K, U> TaskInner<K, U> {
     /// This task's FS segment base (TLS pointer).
-    ///
-    /// Acquire, pairing with [`set_fs_base`](Self::set_fs_base)'s Release: the
-    /// value must be visible to the next `prepare_switch_to` on any CPU, which
-    /// reads the *incoming* task's copy.
     #[inline]
     pub fn fs_base(&self) -> u64 {
         self.fs_base.load(Ordering::Acquire)
     }
 
-    /// Stamp this task's FS segment base. See [`fs_base`](Self::fs_base).
     #[inline]
     pub fn set_fs_base(&self, value: u64) {
         self.fs_base.store(value, Ordering::Release);
     }
 
-    /// The CPU whose register file last held this task's FPU state, or
-    /// [`FPU_CPU_NONE`]. The per-task half of the FPU owner tag; meaningful
+    /// The per-task half of the FPU owner tag, or [`FPU_CPU_NONE`]; meaningful
     /// only in agreement with the per-CPU half, via
     /// [`fpu_state_valid`](crate::task::fpu_owner::fpu_state_valid).
     #[inline]
@@ -609,26 +603,21 @@ impl<K, U> TaskInner<K, U> {
 
     /// Stamp the per-task half of the FPU owner tag.
     ///
-    /// `pub(crate)` on purpose: outside OSTD the only sanctioned way to move
-    /// this field is [`fpu_save_current`](Self::fpu_save_current) /
-    /// [`fpu_restore_to_cpu`](Self::fpu_restore_to_cpu), which move both halves
-    /// together. A caller able to stamp one half alone could manufacture the
-    /// agreement the tag exists to check.
+    /// `pub(crate)`: a caller able to stamp one half alone could manufacture the
+    /// agreement the tag exists to check. Outside OSTD the sanctioned moves are
+    /// [`fpu_save_current`](Self::fpu_save_current) and
+    /// [`fpu_restore_to_cpu`](Self::fpu_restore_to_cpu), which move both halves.
     #[inline]
     pub(crate) fn set_fpu_last_cpu(&self, cpu: i32) {
         self.fpu_last_cpu.store(cpu, Ordering::Release);
     }
 
     /// Capture this task's live FPU/vector registers into its save area and
-    /// hand the register file back.
+    /// hand the register file back, stamping both halves of the owner tag so a
+    /// call site cannot do one without the other.
     ///
-    /// Pairs the `XSAVE64` with both halves of the owner tag so a call site
-    /// cannot do one without the other. The witness proves this CPU has
-    /// exclusive access to the task's register state — the same fact that makes
-    /// the save sound, now checkable rather than commented.
-    ///
-    /// Eager by construction: no "save only if dirty" branch. Lazy FPU
-    /// switching is CVE-2018-3665 and this is not it.
+    /// Eager by construction: no "save only if dirty" branch — lazy FPU
+    /// switching is CVE-2018-3665.
     #[inline]
     pub fn fpu_save_current(&self, witness: &impl TaskExclusive<K, U>, xcr0_mask: u64) {
         debug_assert!(
@@ -638,10 +627,10 @@ impl<K, U> TaskInner<K, U> {
         let cpu = crate::task::fpu_owner::fpu_current_cpu();
         fpu_owner_assert_may_take(self, cpu);
         // SAFETY: the witness proves exclusive access to this task's register
-        // state, and `get_ptr` yields a `SharedReadWrite` derivation of the
-        // cell — never a `&mut` — so a nested witness on the same task (an
-        // interrupt above a syscall) cannot invalidate this pointer. XSAVE64's
-        // 64-byte alignment is pinned by the razors beside `TaskOwnCell`.
+        // state, and `get_ptr` yields a `SharedReadWrite` derivation of the cell
+        // — never a `&mut` — so a nested witness on the same task cannot
+        // invalidate this pointer. XSAVE64's 64-byte alignment is pinned by the
+        // razors beside `TaskOwnCell`.
         unsafe { crate::task::fpu::fpu_xsave(self.fpu_state.get_ptr(witness), xcr0_mask) };
         fpu_owner_yield_after_save(self, cpu);
     }
@@ -649,22 +638,17 @@ impl<K, U> TaskInner<K, U> {
     /// Load this task's saved FPU/vector state into the register file and take
     /// ownership of it. Mirror of [`fpu_save_current`](Self::fpu_save_current).
     ///
-    /// Unconditional, and it must stay that way at this entry point. The owner
+    /// Unconditional, and it must stay that way at this entry point: the owner
     /// tag records *which task* the register file belongs to, not whether the
-    /// file still agrees with the save area — signal delivery saves via
-    /// [`fpu_save_in_place`](Self::fpu_save_in_place) and keeps
-    /// ownership, so a handler clobbers the live registers without disturbing
-    /// either half of the tag. Skipping the reload on a tag hit would then
-    /// discard the saved state that `sigreturn` exists to reinstate.
+    /// file still agrees with the save area. Signal delivery saves via
+    /// [`fpu_save_in_place`](Self::fpu_save_in_place) and keeps ownership, so
+    /// skipping the reload on a tag hit would discard the state `sigreturn`
+    /// exists to reinstate.
+    /// [`fpu_state_valid`](crate::task::fpu_owner::fpu_state_valid) is therefore
+    /// an opt-in predicate, not a precondition of this function.
     ///
-    /// [`fpu_state_valid`](crate::task::fpu_owner::fpu_state_valid) is
-    /// therefore an opt-in predicate for callers that can rule out an
-    /// intervening write, not a precondition of this function.
-    ///
-    /// Returns `false` if the hardware rejected the save area. The save area is
-    /// reset to the init image in that case and that image is reloaded, so the
-    /// caller only has to decide what to tell *its* caller — a later restore of
-    /// this task cannot fault for the same reason.
+    /// Returns `false` if the hardware rejected the save area; it is reset to
+    /// the init image and reloaded, so a later restore cannot fault the same way.
     #[must_use]
     #[inline]
     pub fn fpu_restore_to_cpu(&self, witness: &impl TaskExclusive<K, U>, xcr0_mask: u64) -> bool {
@@ -675,8 +659,7 @@ impl<K, U> TaskInner<K, U> {
         let cpu = crate::task::fpu_owner::fpu_current_cpu();
         let slot = self.fpu_state.get_ptr(witness);
         // No precondition: a restore defines the register file's new contents,
-        // and is not always preceded by a save on this CPU — see
-        // `fpu_owner_assert_may_take`.
+        // and is not always preceded by a save on this CPU.
         // SAFETY: as `fpu_save_current`; XRSTOR64 only reads the buffer.
         let accepted = unsafe { crate::task::fpu::fpu_xrstor(slot.cast_const(), xcr0_mask) };
         if !accepted {
@@ -686,9 +669,9 @@ impl<K, U> TaskInner<K, U> {
                 fpu_reset_in_place(slot);
                 crate::task::fpu::fpu_xrstor(slot.cast_const(), xcr0_mask)
             };
-            // The init image satisfies every rule XRSTOR64 checks. A rejection
-            // here would mean the register file is still the undefined state
-            // the first fault left, which nothing downstream can repair.
+            // The init image satisfies every rule XRSTOR64 checks; a rejection
+            // here leaves the register file in the undefined state the first
+            // fault produced, which nothing downstream can repair.
             debug_assert!(repaired, "XRSTOR64 rejected the FPU init image");
         }
         fpu_owner_take(self, cpu);
@@ -696,26 +679,16 @@ impl<K, U> TaskInner<K, U> {
     }
 
     /// Capture the live registers into the save area **without** handing the
-    /// register file back.
+    /// register file back — the signal-frame save and the fork flush, both of
+    /// which keep executing afterwards, so the owner tag must keep naming this
+    /// task.
     ///
-    /// For the two saves that are not switch-outs — the signal-frame save and
-    /// the fork flush. Both run while the task keeps executing, so its state is
-    /// still live in the registers afterwards and the owner tag must keep
-    /// saying so.
-    ///
-    /// # Why this one disables interrupts and the switch-out saves do not
-    ///
-    /// Both callers reach here from a syscall with interrupts *enabled*, and
-    /// the sequence — read this CPU's index, `XSAVE` 2.6 KiB, stamp both halves
-    /// of the owner tag against that index — is not migration-atomic. A
-    /// reschedule in the middle moves the task to another CPU, and the stamp
-    /// then names the CPU it left: the per-CPU slot claims a register file that
-    /// now belongs to whatever task was dispatched there, and the task's own
-    /// half points at the wrong CPU. The next save on the abandoned CPU trips
-    /// [`fpu_owner_assert_may_take`] and panics a task that did nothing wrong.
-    /// The switch-out saves need no guard because the scheduler already holds
-    /// interrupts off across the whole switch, which `run_switch` and
-    /// `switch_context` both assert.
+    /// Disables interrupts because the sequence — read this CPU's index,
+    /// `XSAVE`, stamp both halves of the owner tag against that index — is not
+    /// migration-atomic: a reschedule in the middle stamps the CPU the task
+    /// left, and the next save on that CPU trips
+    /// [`fpu_owner_assert_may_take`]. The switch-out saves need no guard,
+    /// because the scheduler already holds interrupts off across the switch.
     #[inline]
     pub fn fpu_save_in_place(&self, witness: &impl TaskExclusive<K, U>, xcr0_mask: u64) {
         debug_assert!(
@@ -731,14 +704,10 @@ impl<K, U> TaskInner<K, U> {
         });
     }
 
-    /// `&mut self`-authorised counterparts to the two ops above.
-    ///
-    /// Exclusive access proven by the borrow rather than by a witness, for the
-    /// paths that already hold `&mut TaskInner` — the signal-frame save and
-    /// restore reach the task through `SyscallContext::task_mut`. Minting a
-    /// `CurrentTask` witness alongside that `&mut` would alias it, so these
-    /// exist rather than forcing a caller to hold two exclusive proofs of the
-    /// same fact at once. Both maintain the owner tag.
+    /// `&mut self`-authorised counterpart to
+    /// [`fpu_save_in_place`](Self::fpu_save_in_place), for the paths that
+    /// already hold `&mut TaskInner`: minting a `CurrentTask` witness alongside
+    /// that borrow would alias it. Maintains the owner tag.
     #[inline]
     pub fn fpu_save_in_place_mut(&mut self, xcr0_mask: u64) {
         // Migration-atomic for the reason spelled out on `fpu_save_in_place`.
@@ -752,8 +721,7 @@ impl<K, U> TaskInner<K, U> {
     }
 
     /// See [`fpu_save_in_place_mut`](Self::fpu_save_in_place_mut). Repairs a
-    /// rejected save area exactly as [`fpu_restore_to_cpu`](Self::fpu_restore_to_cpu)
-    /// does.
+    /// rejected save area as [`fpu_restore_to_cpu`](Self::fpu_restore_to_cpu) does.
     #[must_use]
     #[inline]
     pub fn fpu_restore_to_cpu_mut(&mut self, xcr0_mask: u64) -> bool {
@@ -775,13 +743,12 @@ impl<K, U> TaskInner<K, U> {
         accepted
     }
 
-    /// Borrow this task's FPU save area as bytes, authorised by `witness`.
+    /// Borrow this task's FPU save area as bytes. The signal-frame paths copy it
+    /// to and from user memory and cannot stage 2.6 KiB through a stack buffer
+    /// the 2 KiB frame gate would reject.
     ///
-    /// The signal-frame paths copy the area to and from user memory and cannot
-    /// stage it through a 2.6 KiB stack buffer (the frame gate is 2 KiB), so
-    /// they borrow it in place. Same re-entrancy contract as
-    /// [`with_cwd`](Self::with_cwd): `f` must not itself take a witness on this
-    /// task and call back in, or the `&mut` handed out here would alias.
+    /// `f` must not itself take a witness on this task and call back in, or the
+    /// `&mut` handed out here would alias.
     #[inline]
     pub fn with_fpu_bytes_mut<R>(
         &self,
@@ -798,16 +765,13 @@ impl<K, U> TaskInner<K, U> {
     }
 
     /// Reset the FPU save area to the kernel default (x87/SSE exceptions
-    /// masked, XSTATE header zeroed), authorised by `witness`.
+    /// masked, XSTATE header zeroed). The *save area* only.
     ///
-    /// This redefines the *save area* only. A caller that also means to
-    /// redefine the live registers — execve, where the old image's vector state
-    /// must not survive into the new one — must pair it with
-    /// [`fpu_restore_to_cpu`](Self::fpu_restore_to_cpu) under one IRQ-off
-    /// window, so a context switch cannot re-save the old image's live
-    /// registers over the reset before the new image runs. A caller discarding
-    /// a save area whose live registers are already the ones it wants — a
-    /// signal return the kernel refused — pairs it with nothing.
+    /// A caller that also means to redefine the live registers — execve, where
+    /// the old image's vector state must not survive into the new one — must
+    /// pair it with [`fpu_restore_to_cpu`](Self::fpu_restore_to_cpu) under one
+    /// IRQ-off window, or a context switch can re-save the old image's live
+    /// registers over the reset before the new image runs.
     #[inline]
     pub fn fpu_reset(&self, witness: &impl TaskExclusive<K, U>) {
         debug_assert!(
@@ -819,31 +783,27 @@ impl<K, U> TaskInner<K, U> {
         unsafe { fpu_reset_in_place(self.fpu_state.get_ptr(witness)) };
     }
 
-    /// This task's user-mode register snapshot, authorised by `witness`.
+    /// This task's user-mode register snapshot.
     ///
-    /// Shared rather than exclusive: the register file lives in a cell, so a
-    /// shared borrow is all any writer needs, and two witnesses on one task —
-    /// an interrupt handler above a syscall — may legitimately coexist. The
-    /// borrow is the task's own, because the context lives inside it.
+    /// Shared rather than exclusive: the state lives in a cell, so a shared
+    /// borrow is all any writer needs, and two witnesses on one task — an
+    /// interrupt handler above a syscall — may legitimately coexist.
     #[inline]
     pub fn user_ctx(&self, witness: &impl TaskExclusive<K, U>) -> &UserContext {
         debug_assert!(
             core::ptr::eq(witness.witnessed(), self),
             "witness names a different task"
         );
-        // SAFETY: the cell lives inside `self`, so `&self` is exactly the bound
-        // the borrow needs — it cannot outlive the storage. The witness proves
-        // this CPU owns the task's register state, and the pointer comes from
-        // an `UnsafeCell`, so it is non-null, aligned and initialised, and the
-        // shared derivation composes with the other witnesses that may hold one.
+        // SAFETY: the cell lives inside `self`, so `&self` bounds the borrow to
+        // the storage. The witness proves this CPU owns the task's register
+        // state, and the pointer comes from an `UnsafeCell`, so it is non-null,
+        // aligned and initialised, and shared derivations compose.
         unsafe { &*self.user_ctx.get_ptr(witness) }
     }
 
-    /// Save `frame`'s register state into this task's context, authorised by
-    /// `witness`, and stamp the user-mode entry flags.
-    ///
-    /// The preempt path takes the trap frame of the task it is already running,
-    /// so the `CurrentTask` guard it holds is the exclusivity proof.
+    /// Save `frame`'s register state into this task's context and stamp the
+    /// user-mode entry flags. The preempt path takes the trap frame of the task
+    /// it is already running, so its `CurrentTask` guard is the proof.
     pub fn save_from_interrupt_frame(
         &self,
         witness: &impl TaskExclusive<K, U>,
@@ -879,9 +839,9 @@ impl<K, U> TaskInner<K, U> {
         }
     }
 
-    /// This task's saved callee-saved register frame, authorised by `witness`.
-    /// Feeds [`switch_registers`](crate::task::switch_registers), whose asm
-    /// takes both endpoints as raw pointers.
+    /// This task's saved callee-saved register frame. Raw because it feeds
+    /// [`switch_registers`](crate::task::switch_registers), whose asm takes
+    /// both endpoints as pointers.
     #[inline]
     pub fn switch_ctx_ptr(&self, witness: &impl TaskExclusive<K, U>) -> *mut SwitchContext {
         debug_assert!(
@@ -891,10 +851,7 @@ impl<K, U> TaskInner<K, U> {
         self.switch_ctx.get_ptr(witness)
     }
 
-    /// Replace the working directory. The witness is what proves no other CPU
-    /// is reading the bytes while they are half-written; the length is
-    /// published after them.
-    ///
+    /// Replace the working directory; the length is published after the bytes.
     /// Returns false if `path` does not fit with its NUL terminator.
     #[inline]
     pub fn set_cwd(&self, witness: &impl TaskExclusive<K, U>, path: &[u8]) -> bool {
@@ -930,15 +887,11 @@ impl<K, U> TaskInner<K, U> {
         f(bytes)
     }
 
-    /// Read the blocked-signal mask. `&self` because every signal sender reads
-    /// it from its own CPU.
     #[inline]
     pub fn signal_blocked(&self) -> SigSet {
         self.signal_blocked.load(Ordering::Acquire)
     }
 
-    /// Replace the blocked-signal mask. `&self` for the same reason; only the
-    /// owning task writes it.
     #[inline]
     pub fn set_signal_blocked(&self, mask: SigSet) {
         self.signal_blocked.store(mask, Ordering::Release);
@@ -953,8 +906,6 @@ impl<K, U> TaskInner<K, U> {
         }
     }
 
-    /// Set or clear the controlling terminal. `&self` because the
-    /// session-hangup path reaches tasks through a shared snapshot.
     #[inline]
     pub fn set_controlling_tty(&self, tty: Option<TtyIndex>) {
         let raw = tty.map_or(TTY_INDEX_NONE, |t| u16::from(t.0));
@@ -962,11 +913,9 @@ impl<K, U> TaskInner<K, U> {
     }
 
     /// Clear the controlling terminal only if it currently names `tty`,
-    /// reporting whether this call did the clearing.
-    ///
-    /// Compare-and-clear rather than load-then-store so a session teardown
-    /// racing a task that has already moved to a different terminal cannot
-    /// clear the new one.
+    /// reporting whether this call did the clearing. Compare-and-clear rather
+    /// than load-then-store so a session teardown racing a task that has already
+    /// moved to a different terminal cannot clear the new one.
     #[inline]
     pub fn clear_controlling_tty_if(&self, tty: TtyIndex) -> bool {
         self.controlling_tty
@@ -994,9 +943,8 @@ impl<K, U> TaskInner<K, U> {
     }
 
     /// Packed handle to this task's address space, or 0 for none.
-    ///
-    /// Acquire/Release: the handle is published once, before the task is
-    /// reachable, and read on another CPU's dispatch and fault paths.
+    /// Acquire/Release: published once, before the task is reachable, and read
+    /// on another CPU's dispatch and fault paths.
     #[inline]
     pub fn process_vm_handle_raw(&self) -> u64 {
         self.process_vm_handle.load(Ordering::Acquire)
@@ -1008,10 +956,8 @@ impl<K, U> TaskInner<K, U> {
         self.process_vm_handle.store(packed, Ordering::Release);
     }
 
-    /// Packed handle to this task's process, or 0 for none.
-    ///
-    /// Acquire/Release for the reason `process_vm_handle` is: published once
-    /// before the task is reachable, read from other CPUs.
+    /// Packed handle to this task's process, or 0 for none. Acquire/Release for
+    /// the reason `process_vm_handle` is.
     #[inline]
     pub fn process_handle_raw(&self) -> u64 {
         self.process_handle.load(Ordering::Acquire)
@@ -1023,11 +969,9 @@ impl<K, U> TaskInner<K, U> {
         self.process_handle.store(packed, Ordering::Release);
     }
 
-    /// The [`Process`](crate::process::Process) this task belongs to.
-    ///
-    /// `None` for a kernel task, and for a user task whose process has been
-    /// reaped out from under a stale handle — which is the failure this
-    /// returns instead of a stranger's process.
+    /// The [`Process`](crate::process::Process) this task belongs to. `None` for
+    /// a kernel task, and for a user task whose process has been reaped out from
+    /// under a stale handle — returned instead of a stranger's process.
     #[inline]
     pub fn process(&self) -> Option<crate::KArc<crate::process::Process>> {
         crate::process::process_for_handle(crate::process::unpack_process_handle(
@@ -1049,11 +993,9 @@ impl<K, U> TaskInner<K, U> {
         self.cpu_affinity.store(mask, Ordering::Relaxed);
     }
 
-    /// This task's full scheduling quantum, in timer ticks.
-    ///
-    /// Relaxed throughout: the quantum orders nothing else, and a tick lost or
-    /// duplicated across the reset/decrement race costs one tick of scheduling
-    /// fairness rather than correctness.
+    /// This task's full scheduling quantum, in timer ticks. Relaxed throughout:
+    /// a tick lost or duplicated across the reset/decrement race costs one tick
+    /// of scheduling fairness rather than correctness.
     #[inline]
     pub fn time_slice(&self) -> u64 {
         self.time_slice.load(Ordering::Relaxed)
@@ -1071,20 +1013,16 @@ impl<K, U> TaskInner<K, U> {
         self.time_slice_remaining.load(Ordering::Relaxed)
     }
 
-    /// See [`time_slice_remaining`](Self::time_slice_remaining).
     #[inline]
     pub fn set_time_slice_remaining(&self, ticks: u64) {
         self.time_slice_remaining.store(ticks, Ordering::Relaxed);
     }
 
-    /// Timestamp of this task's last dispatch.
     #[inline]
     pub fn last_run_timestamp(&self) -> u64 {
         self.last_run_timestamp.load(Ordering::Acquire)
     }
 
-    /// Stamp the last-dispatch timestamp. `&self`: written by the owning CPU's
-    /// switch path while other CPUs read it.
     #[inline]
     pub fn set_last_run_timestamp(&self, timestamp: u64) {
         self.last_run_timestamp.store(timestamp, Ordering::Release);
@@ -1096,7 +1034,6 @@ impl<K, U> TaskInner<K, U> {
         self.last_cpu.load(Ordering::Acquire)
     }
 
-    /// Stamp the last-CPU placement hint.
     #[inline]
     pub fn set_last_cpu(&self, cpu: u8) {
         self.last_cpu.store(cpu, Ordering::Release);
@@ -1104,21 +1041,17 @@ impl<K, U> TaskInner<K, U> {
 
     /// Debug tripwire that nothing still claims to own this task at reclaim.
     ///
-    /// `IntrusiveLinkedList` has no `Drop`, so a non-empty `children` list at
-    /// reclaim would silently leak every parked child reference; a still-linked
-    /// `sibling_link` would mean a parent's list still names this task. Teardown
-    /// drains the children list and reap/reparent unlinks the sibling slot before
-    /// a task can reach a reclaimable state, so both hold here. Factored out of
-    /// `Drop` (as [`assert_task_drop_context`] is) so the destructor body carries
-    /// no literal panic op; `debug_assert!` compiles out of release, so the
-    /// destructor is panic-free there.
+    /// The intrusive lists have no `Drop`, so a non-empty `children` list would
+    /// silently leak every parked child reference and a still-linked
+    /// `sibling_link` would leave a parent's list naming this task.
     ///
-    /// [`assert_task_drop_context`]: crate::task::drop_context::assert_task_drop_context
+    /// Factored out of `Drop` so the destructor body carries no literal panic
+    /// op; `debug_assert!` compiles out of release, so it is panic-free there.
     #[inline]
     fn assert_no_owner_holds_this_task(&self) {
-        // The count could not have reached zero while the task still held a
-        // reference to itself, so observing this here means a reap released the
-        // reference without clearing the flag, or a copy inherited it.
+        // The count cannot reach zero while the task still holds its own
+        // reference: seeing this means a reap released it without clearing the
+        // flag, or a copy inherited it.
         debug_assert!(
             !self.existence_ref_parked.load(Ordering::Relaxed),
             "task dropped while still holding its own existence reference"
@@ -1131,10 +1064,8 @@ impl<K, U> TaskInner<K, U> {
             !self.sibling_link.is_linked(),
             "task dropped while still linked into an owner list"
         );
-        // A still-linked scheduler slot means the container's parked reference
-        // leaked: the count could not have reached zero while that reference
-        // existed, so reaching the destructor here means a retain/reclaim pair
-        // went unbalanced.
+        // A still-linked scheduler slot means an unbalanced retain/reclaim: the
+        // container's parked reference leaked.
         debug_assert!(
             !self.ready_link.is_linked(),
             "task dropped while still linked into a ready queue"
@@ -1241,10 +1172,9 @@ impl<K, U> TaskInner<K, U> {
         }
     }
 
-    /// In-place Init recipe for a fresh `Invalid` Task, equivalent in
-    /// observable state to [`TaskInner::invalid`] but constructed
-    /// field-by-field at the destination slot — no 3.8 KiB rvalue on
-    /// the caller's stack.
+    /// In-place `Init` recipe equivalent to [`TaskInner::invalid`], built
+    /// field-by-field at the destination slot so no 3.8 KiB rvalue lands on the
+    /// caller's stack.
     pub fn init_invalid() -> impl Init<Self, AllocError> {
         // SAFETY: the closure writes every byte of `slot` — first via
         // `write_bytes` to zero the struct, then targeted writes for the
@@ -1262,13 +1192,12 @@ impl<K, U> TaskInner<K, U> {
                 addr_of_mut!((*slot).pgid).write(AtomicU32::new(INVALID_TASK_ID));
                 addr_of_mut!((*slot).sid).write(AtomicU32::new(INVALID_TASK_ID));
 
-                // Not all-zero: zero would name TTY 0, not "no controlling
-                // terminal".
+                // Not all-zero: zero would name TTY 0, not "no controlling terminal".
                 addr_of_mut!((*slot).controlling_tty).write(AtomicU16::new(TTY_INDEX_NONE));
 
                 // Also not all-zero: zero would name CPU 0 as holding this
-                // task's vector state, which would let a never-run task pass
-                // the FPU owner agreement check on the boot CPU.
+                // task's vector state, letting a never-run task pass the FPU
+                // owner agreement check on the boot CPU.
                 addr_of_mut!((*slot).fpu_last_cpu).write(AtomicI32::new(FPU_CPU_NONE));
 
                 addr_of_mut!((*slot).cwd_len).write(AtomicU16::new(1));
@@ -1276,8 +1205,6 @@ impl<K, U> TaskInner<K, U> {
                 // is the array's.
                 (addr_of_mut!((*slot).cwd) as *mut u8).write(b'/');
 
-                // `TaskOwnCell` is `repr(transparent)`, so the cell's
-                // address is the buffer's.
                 fpu_reset_in_place(addr_of_mut!((*slot).fpu_state).cast::<FpuState>());
 
                 addr_of_mut!((*slot).kernel_stack).write(None);
@@ -1306,11 +1233,9 @@ impl<K, U> TaskInner<K, U> {
         self.state.status()
     }
 
-    /// Publish a new status, keeping the current block reason.
-    ///
-    /// Refuses to bring a terminal task back to life; see
-    /// [`TaskState::set_status_checked`]. Returns `false` when it refuses, and
-    /// the caller must then take its own terminal path.
+    /// Publish a new status, keeping the current block reason. Returns `false`
+    /// if the task is already terminal, and the caller must then take its own
+    /// terminal path.
     #[inline]
     #[must_use = "a refused publish means the task is already dead; take the terminal path"]
     pub fn set_status(&self, status: TaskStatus) -> bool {
@@ -1329,7 +1254,6 @@ impl<K, U> TaskInner<K, U> {
             .is_ok()
     }
 
-    /// Atomically transition from `expected` to `target`.
     #[inline]
     pub fn try_transition_from(&self, expected: TaskStatus, target: TaskStatus) -> bool {
         if !expected.can_transition_to(target) {
@@ -1340,17 +1264,15 @@ impl<K, U> TaskInner<K, U> {
             .is_ok()
     }
 
-    /// The fused state word's ABA epoch (bumped on every state transition).
-    /// Diagnostics: a task whose epoch is frozen across observation windows
-    /// has genuinely stopped transitioning, distinguishing a stranded task
-    /// from one merely caught mid-park by a racing scan.
+    /// The fused state word's ABA epoch, bumped on every state transition. A
+    /// frozen epoch across observation windows distinguishes a genuinely
+    /// stranded task from one merely caught mid-park by a racing scan.
     #[inline]
     pub fn state_epoch(&self) -> u32 {
         self.state.snapshot().epoch
     }
 
-    /// Block from a specific expected state, stamping the block reason
-    /// in the same CAS.
+    /// Block from a specific expected state, stamping the reason in the same CAS.
     #[inline]
     pub fn block_from(&self, expected: TaskStatus, reason: BlockReason) -> bool {
         if !expected.can_transition_to(TaskStatus::Blocked) {
@@ -1388,7 +1310,6 @@ impl<K, U> TaskInner<K, U> {
         self.state.reason()
     }
 
-    /// Store the block reason directly.
     #[inline]
     pub fn store_block_reason(&self, reason: BlockReason) {
         self.state.store_reason(reason);
@@ -1399,7 +1320,6 @@ impl<K, U> TaskInner<K, U> {
         self.try_transition_to(TaskStatus::Terminated)
     }
 
-    /// Transition to `Zombie`.
     #[inline]
     pub fn mark_zombie(&self) -> bool {
         self.try_transition_to(TaskStatus::Zombie)
@@ -1430,20 +1350,17 @@ impl<K, U> TaskInner<K, U> {
         self.status() == TaskStatus::Zombie
     }
 
-    /// True if the task has exited (Zombie or Terminated).
     #[inline]
     pub fn is_exited(&self) -> bool {
         matches!(self.status(), TaskStatus::Zombie | TaskStatus::Terminated)
     }
 
-    /// Reset the per-run runtime bookkeeping on a newly allocated task:
-    /// clears timing, exit/fault disposition, fate tokens, scheduler
-    /// placement, the intrusive scheduler links, and the refcount, and stamps
-    /// a fresh creation timestamp.
+    /// Reset the per-run runtime bookkeeping on a newly allocated task: timing,
+    /// exit/fault disposition, fate tokens, scheduler placement, the intrusive
+    /// scheduler links, and a fresh creation timestamp.
     ///
     /// Drives both the task-create path and the fork path (after the child is
-    /// bulk-copied from its parent), so every task starts neutral. The
-    /// owning crate holds exclusive `&mut self` access at every call site.
+    /// bulk-copied from its parent), so every task starts neutral.
     pub fn reset_runtime_state(&mut self) {
         *self.time_slice_remaining.get_mut() = *self.time_slice.get_mut();
         self.total_runtime.store(0, Ordering::Relaxed);
@@ -1500,60 +1417,47 @@ impl<K, U> TaskInner<K, U> {
             self.abi.unsafe_stack_sp = 0;
             core::ptr::write(&mut self.exit_info as *mut _, AtomicCell::empty());
             core::ptr::write(&mut self.state as *mut _, TaskState::invalid());
-            // The bytewise copy duplicated the parent's `children` head/tail
-            // and its owner-list membership state. Overwrite the list head with
-            // an empty one (no `Drop` on `IntrusiveDList`, so `ptr::write` over
-            // the raw copy is correct — it must not run a destructor on the
-            // copied bits) and detach the owner slot: a fresh child owns no
-            // children and is linked into no owner list until registration
-            // publishes it. Leaving the copied `owner` back-pointer in place
-            // would make the child claim membership in its parent's list, and
-            // an unlink would then corrupt that list.
+            // The bytewise copy duplicated the parent's `children` head/tail.
+            // `IntrusiveDList` has no `Drop`, so `ptr::write` over the copied
+            // bits is correct — a destructor must not run on them. Leaving the
+            // copied `owner` back-pointer would make the child claim membership
+            // in its parent's list, and an unlink would then corrupt that list.
             core::ptr::write(&mut self.children as *mut _, IntrusiveDList::new());
         }
         self.ready_link.reset();
         self.remote_inbox_link.reset();
         self.sibling_link.reset();
         self.reclaim_link.reset();
-        // The bytewise copy carried the parent's own parent id. A fresh child
-        // starts parentless; the spawn path publishes the real parent edge (id
-        // + children-list membership) via `link_child` after registration.
+        // A fresh child starts parentless; the spawn path publishes the real
+        // parent edge via `link_child` after registration.
         self.set_parent_task_id(INVALID_TASK_ID);
-        // Same shape, and the reason it is here rather than left to the call
-        // sites: a `CLONE_VM` thread joins the parent's process and a forked
-        // child gets its own, so the copied value is right in one case and
-        // wrong in the other. Inheriting it by omission is the failure mode
-        // that is invisible in review — the child would join a process that
-        // never counted it, and the count that decides teardown would be one
-        // short of its members. Clearing makes a forgetful call site produce a
-        // task with no process, which fails visibly and immediately.
+        // A `CLONE_VM` thread joins the parent's process and a forked child gets
+        // its own, so the copied value is right in one case and wrong in the
+        // other. Clearing makes a forgetful call site produce a task with no
+        // process, which fails visibly, rather than one silently uncounted by
+        // the process whose teardown count it belongs to.
         self.process_handle = AtomicU64::new(crate::process::PROCESS_HANDLE_NONE);
         self.sched_placement = AtomicU8::new(SchedPlacement::Nascent.as_u8());
-        // The bytewise copy duplicated the parent's park back-pointer. A fresh
-        // child is parked on nothing; inheriting it would aim the parent's
-        // teardown purge at a queue the child never joined.
+        // A fresh child is parked on nothing; inheriting the copied back-pointer
+        // would aim the parent's teardown purge at a queue it never joined.
         self.parked_wait_queue = AtomicPtr::new(ptr::null_mut());
         self.recovery_depth = AtomicU32::new(0);
         self.exit_cleanup_flags = AtomicU8::new(0);
         self.signal_pending = AtomicU64::new(0);
-        // The bytewise copy duplicated the live parent's parked flag. A child
-        // is handed its own existence reference at registration; inheriting the
-        // parent's `true` would let the child's reap take back a reference that
-        // was never given, dropping the count one below what any owner holds.
+        // A child is handed its own existence reference at registration;
+        // inheriting the parent's `true` would let its reap take back a
+        // reference never given, dropping the count below what owners hold.
         self.existence_ref_parked = AtomicBool::new(false);
-        // The bytewise copy also duplicated the parent's FPU owner tag. The
-        // child's vector state has never been live in any register file, so
+        // The child's vector state has never been live in any register file, so
         // inheriting a CPU index would let it agree with a slot that names the
-        // *parent* — and skip a restore it genuinely needs. Poisoned so the
-        // agreement check fails and the child takes the slow path.
+        // *parent* and skip a restore it genuinely needs.
         self.fpu_last_cpu = AtomicI32::new(FPU_CPU_NONE);
     }
 }
 
-// Per-role `Linked<Role> for TaskInner` impls are absorbed via OSTD's
-// blanket `unsafe impl<T: LinkProvider<R>, R> Linked<R> for T` — only
-// the two safe `LinkProvider` impls live here, returning distinct
-// fields per role.
+// `Linked<Role>` comes from OSTD's blanket
+// `unsafe impl<T: LinkProvider<R>, R> Linked<R> for T`; only the safe
+// `LinkProvider` impls live here, returning a distinct field per role.
 
 impl<K, U> crate::task::LinkProvider<ReadyQueueRole> for TaskInner<K, U> {
     fn link(&self) -> &Link<Self, ReadyQueueRole> {

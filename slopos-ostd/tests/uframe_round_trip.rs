@@ -1,16 +1,7 @@
 //! Round-trip integration tests for `UFrame` / `USegment`.
 //!
-//! These run host-side under `cargo test`. They install a scratch
-//! `META_SLOTS` array and a phys-virt offset that maps physical
-//! address `0` (within the test arena) to the start of a leaked
-//! page-aligned heap buffer, then exercise the byte-copy interface.
-//!
-//! Test isolation: `cargo test` runs tests in this binary on
-//! multiple threads in one process. We share the static OSTD state
-//! across tests via a `OnceLock<Mutex<()>>` setup gate, so
-//! `init_meta_slots` and `init_phys_virt_offset` fire exactly once
-//! and each test serialises against the others while it owns the
-//! arena.
+//! These run host-side under `cargo test` against a scratch `META_SLOTS` array
+//! and a phys-virt offset over a leaked, page-aligned heap buffer.
 
 use std::sync::{Mutex, MutexGuard, OnceLock};
 
@@ -32,19 +23,14 @@ fn setup() -> MutexGuard<'static, ()> {
             Box::leak(Box::new(Backing([0u8; PAGE_SIZE * N_PAGES])));
         let mut slots: Vec<MetaSlot> = (0..N_PAGES).map(|_| MetaSlot::new_unused()).collect();
         let slots_ptr: *mut MetaSlot = slots.as_mut_ptr();
-        // Leak the slot array so the `'static` view OSTD takes
-        // remains valid for the lifetime of the test binary.
+        // OSTD keeps a `'static` view of the slots.
         Box::leak(slots.into_boxed_slice());
         let backing_ptr = backing.0.as_mut_ptr();
-        // Expose provenance once on the leaked backing pointer so
-        // `phys_to_virt` (which internally calls
-        // `with_exposed_provenance_mut`) can soundly reconstruct
-        // pointers into this arena under strict provenance.
+        // Expose provenance so `phys_to_virt`'s `with_exposed_provenance_mut`
+        // can soundly reconstruct pointers into this arena.
         let backing_addr = backing_ptr.expose_provenance() as u64;
-        // slots_ptr / backing live for `'static` (both leaked above);
-        // the offset places paddr `0` at the start of the backing
-        // buffer, so paddrs in `[0, N_PAGES * 4096)` map into the
-        // buffer.
+        // The offset places paddr `0` at the start of the backing buffer, so
+        // paddrs in `[0, N_PAGES * 4096)` map into it.
         slopos_ostd::sync::run_bsp_init_for_test(|t| {
             init_meta_slots(t, slots_ptr, N_PAGES);
             init_phys_virt_offset(t, backing_addr);
@@ -62,8 +48,8 @@ fn round_trip_u64_pod() {
     let v = f.read_pod::<u64>(8).unwrap();
     assert_eq!(v, 0xdead_beef_cafe_babe);
     drop(f);
-    // Reset the slot for re-use by other tests addressing the same
-    // paddr (each from_unused requires UNUSED → TYPED transition).
+    // Re-arm the slot for tests reusing this paddr: `from_unused` requires the
+    // UNUSED → TYPED transition.
     let _ = UFrame::<AnonymousMeta>::from_unused(Paddr::new(0), AnonymousMeta::default()).unwrap();
 }
 
@@ -141,8 +127,6 @@ fn volatile_u32_index_round_trip() {
     let _g = setup();
     let f =
         UFrame::<AnonymousMeta>::from_unused(Paddr::new(0x5000), AnonymousMeta::default()).unwrap();
-    // Aligned u32 store/load round-trips through the volatile/acquire
-    // accessors used for the SQ/CQ head/tail indices.
     f.store_u32_release(0, 0xabad_1dea).unwrap();
     assert_eq!(f.load_u32_acquire(0).unwrap(), 0xabad_1dea);
     f.store_u32_release(64, 7).unwrap();
@@ -170,14 +154,11 @@ fn volatile_byte_copy_round_trip() {
     let _g = setup();
     let f =
         UFrame::<AnonymousMeta>::from_unused(Paddr::new(0x3000), AnonymousMeta::default()).unwrap();
-    // Mirror an SQE snapshot in / CQE post out: a 64-byte body copied
-    // through the volatile accessors must round-trip byte-identically.
     let src: [u8; 64] = core::array::from_fn(|i| (i as u8).wrapping_mul(3));
     f.copy_in_volatile(128, &src).unwrap();
     let mut dst = [0u8; 64];
     f.copy_out_volatile(128, &mut dst).unwrap();
     assert_eq!(src, dst);
-    // Bounds are enforced exactly like the non-volatile path.
     let mut overflow = [0u8; 8];
     assert_eq!(
         f.copy_out_volatile(4090, &mut overflow),
@@ -196,21 +177,18 @@ fn usegment_round_trip_crosses_page_boundary() {
     assert_eq!(seg.len_pages(), 2);
     assert_eq!(seg.len_bytes(), 8192);
 
-    // Write a buffer that straddles the two physical pages.
     let src: Vec<u8> = (0..256u32).map(|i| i as u8).collect();
     seg.write_bytes(4000, &src).unwrap();
     let mut dst = vec![0u8; 256];
     seg.read_bytes(4000, &mut dst).unwrap();
     assert_eq!(src, dst);
 
-    // Bounds check at the end of the run.
     let mut overflow = [0u8; 8];
     assert_eq!(
         seg.read_bytes(8189, &mut overflow),
         Err(UFrameError::OutOfBounds)
     );
 
-    // Vectored-I/O descriptor is single-element + correct.
     let slices = seg.io_slices();
     assert_eq!(slices.len(), 1);
     assert_eq!(slices[0].paddr.as_u64(), 0x6000);

@@ -1,46 +1,24 @@
 //! Exclusive access to a task's register state, witnessed by a type.
 //!
-//! A published task is reachable through `KArc<Task>`, which yields only
-//! `&TaskInner`. So the fields the kernel *must* still write after publication —
+//! A published task is reachable only through `KArc<Task>`, which yields
+//! `&TaskInner`, so the fields the kernel must still write after publication —
 //! the saved register context, the FPU area, the user-mode round-trip slots —
-//! cannot be reached through a Rust `&mut`. They live in [`TaskOwnCell`], and
-//! writing one requires a value that proves the writer has exclusive access.
+//! live in [`TaskOwnCell`] and need a value proving exclusive access to write.
 //!
-//! # Why a witness rather than a lock
-//!
-//! These fields are written on the context-switch path, which runs with
-//! interrupts off and must not acquire anything: a lock taken in the switch
-//! window is held by a CPU that cannot answer an interrupt, which is the shape
-//! every cross-CPU stall in this kernel has taken. Exclusivity here is not
-//! *arranged* by taking a lock, it is a fact about the CPU that already holds:
-//! only the CPU running a task touches that task's registers, and only the CPU
-//! performing a switch touches either endpoint's. The witness makes that fact
-//! checkable instead of commented.
-//!
-//! # The two witnesses
-//!
-//! - [`CurrentTask`] — this CPU is running the task. Minted from the PCR.
-//! - [`SwitchWindow`] — this CPU is switching between two tasks and owns both
-//!   endpoints' dispatch references for the duration.
-//!
-//! Both are `!Send` and `!Sync`, so a witness cannot be observed from a CPU
-//! other than the one that minted it, and the trait is sealed, so no crate
-//! outside OSTD can forge a third.
+//! A witness rather than a lock because the context-switch path runs with
+//! interrupts off and must not acquire anything; exclusivity there is already a
+//! fact about the CPU, and the witness makes it checkable. [`CurrentTask`] (this
+//! CPU runs the task) and [`SwitchWindow`] (this CPU owns both switch endpoints'
+//! dispatch references) are the only implementors — sealed, `!Send`, `!Sync`.
 //!
 //! [`IdleTask`] also lives here and is deliberately *not* one of them: it
 //! borrows this CPU's idle task, which is usually not the task this CPU is
 //! running, so it proves liveness and identity but authorises no write.
 //!
-//! # What a witness does *not* authorise
-//!
-//! Not the atomic fields — they need no witness — and not the states that
-//! merely *look* exclusive. In particular a registered-but-unpublished task is
-//! **not** exclusive: `SchedPlacement::Nascent` proves it is unschedulable, not
-//! that it is unobservable, and a nascent task is still reachable through every
-//! registry lookup, the active-task walk, the cr3 scan, the job-control
-//! handles, and the diagnostic dump. Exclusive access before publication comes
-//! from `KArc::get_mut` on the sole strong reference instead, which proves
-//! uniqueness rather than asserting it.
+//! A registered-but-unpublished task is not exclusive either — it is still
+//! reachable through every registry lookup, the active-task walk, the cr3 scan,
+//! the job-control handles and the diagnostic dump — so exclusive access before
+//! publication comes from `KArc::get_mut` on the sole strong reference.
 
 use core::cell::UnsafeCell;
 use core::marker::PhantomData;
@@ -82,10 +60,9 @@ pub struct TaskOwnCell<T> {
     value: UnsafeCell<T>,
 }
 
-// No `unsafe impl Sync`: `TaskInner` is already neither `Send` nor `Sync` (it
-// carries raw pointers), and every cross-CPU hand-off of a task launders
-// through `KernelSync` or a raw placement pointer. Adding an `UnsafeCell` field
-// therefore costs nothing and adds no unsafe trait impl.
+// No `unsafe impl Sync`: `TaskInner` is already neither `Send` nor `Sync`, and
+// every cross-CPU hand-off of a task launders through `KernelSync` or a raw
+// placement pointer.
 
 impl<T> TaskOwnCell<T> {
     #[inline]
@@ -104,27 +81,13 @@ impl<T> TaskOwnCell<T> {
     /// - not `&mut T`, because two witnesses for the same task can legitimately
     ///   coexist in nested frames (an interrupt handler above a syscall on the
     ///   same task), and two `&mut` to one field would be aliasing UB even when
-    ///   the accesses are disjoint.
+    ///   the accesses are disjoint. `UnsafeCell` memory carries
+    ///   `SharedReadWrite` provenance, which composes with itself, whereas
+    ///   forming a `&mut` pushes a `Unique` that pops its sibling.
     ///
-    /// The second reason is the load-bearing one, and it is not a local
-    /// judgement call: memory inside an `UnsafeCell` carries `SharedReadWrite`
-    /// provenance, which composes with itself, whereas forming a `&mut` pushes
-    /// a `Unique` that pops its sibling. Rust-for-Linux reached the identical
-    /// fork with `Opaque<T>` and chose the same signature, `get(&self) ->
-    /// *mut T`, listing "no uniqueness for mutable references: it is fine to
-    /// have multiple `&mut Opaque<T>` point to the same value" as a design
-    /// property rather than a caveat. The `task::cell` unit tests hold both
-    /// aliasing models — Stacked and Tree Borrows — to that claim.
-    ///
-    /// # No precondition
-    ///
-    /// Forming a raw pointer is total: there is no way to call this that
-    /// causes UB, so it carries no caller obligation. Every obligation belongs
-    /// to the *dereference*, which is an `unsafe` block carrying its own
-    /// `SAFETY:` note — that the pointer is not retained past the witness, and
-    /// that the witness names the task this cell belongs to (debug-asserted at
-    /// every call site inside OSTD). The returned pointer is valid for as long
-    /// as `self` is.
+    /// Forming the raw pointer carries no caller obligation; every obligation
+    /// belongs to the *dereference*, which carries its own `SAFETY:` note. The
+    /// returned pointer is valid for as long as `self` is.
     #[inline]
     pub(crate) fn get_ptr<K, U>(&self, _witness: &impl TaskExclusive<K, U>) -> *mut T {
         self.value.get()
@@ -145,8 +108,7 @@ impl<T> TaskOwnCell<T> {
     /// The contents may be written concurrently by the owning CPU, so the
     /// caller must read through `read_unaligned`/`read_volatile` and must never
     /// form a `&T`. Torn values are expected and acceptable: every consumer is
-    /// a log line or a stack-walk seed. This is the pointer accessors' existing
-    /// behaviour, named rather than implied.
+    /// a log line or a stack-walk seed.
     #[inline]
     pub fn as_ptr_racy(&self) -> *const T {
         self.value.get().cast_const()
@@ -160,17 +122,11 @@ impl<T: Default> Default for TaskOwnCell<T> {
     }
 }
 
-// Layout razors for the register-state payloads.
-//
-// `#[repr(transparent)]` over `UnsafeCell<T>` (itself `repr(transparent)`) is
-// what makes wrapping a `Task` field free, and `sched/src/task_struct.rs`'s
-// `offset_of!(Task, fpu_state) - offset_of!(Task, context)` razor silently
-// depends on it. That razor does NOT catch a regression here: if someone wrote
-// `#[repr(C)]` on the cell, both offsets would move together and the delta
-// would still land in range, while `FpuState` quietly lost its 64-byte
-// alignment and `XSAVE64` started faulting with a #GP at the first context
-// switch. So assert the properties the hardware actually needs, here, beside
-// the definition that could break them.
+// `#[repr(transparent)]` is what makes wrapping a `Task` field free, and
+// `sched/src/task_struct.rs`'s offset-delta razor silently depends on it — but
+// that razor does not catch a `#[repr(C)]` regression here, since both offsets
+// would move together. So assert the properties the hardware needs beside the
+// definition that could break them.
 const _: () = {
     use crate::task::fpu::FpuState;
     use crate::task::task::TaskContext;
@@ -185,8 +141,7 @@ const _: () = {
 
     assert!(core::mem::size_of::<TaskOwnCell<FpuState>>() == core::mem::size_of::<FpuState>());
     assert!(core::mem::align_of::<TaskOwnCell<FpuState>>() == core::mem::align_of::<FpuState>());
-    // The one the hardware enforces: XSAVE64/XRSTOR64 require a 64-byte-aligned
-    // save area, and the cell must not erode it.
+    // XSAVE64/XRSTOR64 require a 64-byte-aligned save area.
     assert!(core::mem::align_of::<TaskOwnCell<FpuState>>() >= 64);
 
     assert!(
@@ -197,30 +152,24 @@ const _: () = {
     );
 };
 
-// ---------------------------------------------------------------------------
-// CurrentTask — invariant I5: `current` is a borrow, never an owned handle
-// ---------------------------------------------------------------------------
-
-/// Borrow of the task running on this CPU.
+/// Borrow of the task running on this CPU. Invariant I5: `current` is a borrow,
+/// never an owned handle.
 ///
-/// Takes no reference count. The task cannot be freed underneath it because a
-/// task's own execution pins its allocation: the reap gate declines while
-/// `task_is_dispatch_pinned` holds, and that predicate's *current-task*
-/// disjunct tests whether the task is any CPU's `PCR.current_task` — which is
-/// exactly the condition under which this guard exists. **Deleting that
-/// disjunct deletes this guard's soundness proof**, so it is spelled out at the
-/// gate too. [`IdleTask`] rests on the gate's idle disjunct the same way.
+/// Takes no reference count: the reap gate declines while
+/// `task_is_dispatch_pinned` holds, and that predicate's *current-task* disjunct
+/// tests whether the task is any CPU's `PCR.current_task` — exactly the
+/// condition under which this guard exists. **Deleting that disjunct deletes
+/// this guard's soundness proof.** [`IdleTask`] rests on the gate's idle
+/// disjunct the same way.
 ///
-/// `!Send` and `!Sync`, which is the whole enforcement: a guard cannot travel
-/// to a CPU whose PCR names a different task. It deliberately does *not* hold a
-/// preemption guard — several paths that read the current task go on to block,
-/// and a held preempt guard across a deschedule trips the switch assertion.
-/// Migration is safe without one: the guard travels with the task's own frames,
-/// and those only execute while that task is scheduled.
+/// `!Send` and `!Sync` is the whole enforcement: a guard cannot travel to a CPU
+/// whose PCR names a different task. It deliberately holds no preemption guard —
+/// several paths that read the current task go on to block, and a held preempt
+/// guard across a deschedule trips the switch assertion — and needs none, since
+/// the guard travels with frames that only execute while the task is scheduled.
 pub struct CurrentTask<K, U> {
     ptr: NonNull<TaskInner<K, U>>,
     id: u32,
-    /// Opts out of `Send`/`Sync`.
     _not_send: PhantomData<*mut ()>,
 }
 
@@ -234,14 +183,10 @@ impl<K, U> CurrentTask<K, U> {
     /// publisher of the pair and writes both in the same call — so an id that
     /// is not `INVALID_TASK_ID` guarantees the pointer names a real task.
     ///
-    /// # Type parameters
-    ///
     /// `K` and `U` must be the stack-handle types the running kernel
     /// instantiated `TaskInner` with — the PCR slot is type-erased, so naming
-    /// different ones would reinterpret the task body. That is the
-    /// `PcrTaskType` bound rather than a caveat: it holds exactly when both
-    /// parameters are declared `PcrStackTy`, which the kernel does once, beside
-    /// its `Current` alias.
+    /// different ones would reinterpret the task body. That is what the
+    /// `PcrTaskType` bound holds.
     #[inline]
     pub fn get() -> Option<Self>
     where
@@ -251,10 +196,6 @@ impl<K, U> CurrentTask<K, U> {
         if id == INVALID_TASK_ID {
             return None;
         }
-        // A valid id and a bootstrap-stub pointer are contradictory: every site
-        // that parks a CPU on a stub publishes `INVALID_TASK_ID` with it, and
-        // `set_current_task` is the only publisher of the pair. So the id check
-        // above is also the stub filter.
         let ptr = NonNull::new(pcr::get_current_task().cast::<TaskInner<K, U>>())?;
         Some(Self {
             ptr,
@@ -286,20 +227,15 @@ impl<K, U> CurrentTask<K, U> {
         unsafe { self.ptr.as_ref() }
     }
 
-    /// Mint an owning handle for a caller that must outlive the borrow.
-    ///
-    /// Storing the current task anywhere requires this explicit clone: the
-    /// guard itself is never an owned handle.
+    /// Mint an owning handle: the guard itself is never one, so storing the
+    /// current task anywhere requires this explicit clone.
     #[inline]
     pub fn to_owned(&self) -> KArc<TaskInner<K, U>> {
         task_placement_clone(self.ptr)
     }
 
-    /// The underlying pointer.
-    ///
-    /// Transitional: it exists so call sites can migrate to the guard before
-    /// the surfaces they feed have been retyped, and goes away with the last of
-    /// them.
+    /// The underlying pointer. Transitional: it exists so call sites can adopt
+    /// the guard before the surfaces they feed have been retyped.
     #[inline]
     pub fn as_ptr(&self) -> *mut TaskInner<K, U> {
         self.ptr.as_ptr()
@@ -318,47 +254,31 @@ unsafe impl<K, U> TaskExclusive<K, U> for CurrentTask<K, U> {
     }
 }
 
-// ---------------------------------------------------------------------------
-// IdleTask — borrow of this CPU's idle task
-// ---------------------------------------------------------------------------
-
 /// Borrow of this CPU's idle task.
 ///
 /// Takes no reference count, for the same reason [`CurrentTask`] does not: the
 /// reap gate declines while `task_is_dispatch_pinned` holds, and that
 /// predicate's *idle* disjunct tests whether the task is any CPU's PCR idle
-/// task — which is exactly the condition under which this guard exists.
-/// **Deleting that disjunct deletes this guard's soundness proof**, so it is
-/// spelled out at the gate too.
+/// task — exactly the condition under which this guard exists. **Deleting that
+/// disjunct deletes this guard's soundness proof.**
 ///
-/// # Local CPU only, by construction
-///
-/// [`current`](Self::current) takes no CPU index, so there is no way to name a
-/// foreign CPU's idle task and get something dereferenceable back. That is
-/// deliberate: reading another CPU's task races its switch tail, and a
+/// Local-CPU only by construction: [`current`](Self::current) takes no CPU
+/// index, because reading another CPU's task races its switch tail and a
 /// `debug_assert!` on an index would evaporate in release exactly where the
-/// hazard is real. `TaskAddr::idle_of` stays the compare-only answer for
-/// foreign CPUs — it can be compared and never dereferenced.
+/// hazard is real. `TaskAddr::idle_of` stays the compare-only answer for foreign
+/// CPUs.
 ///
-/// `None` covers the two states in which the slot names nothing: a CPU whose
-/// idle task has not been installed yet, and the two test fixtures that null
-/// the slot and restore it. `install_idle_task` is the only other writer, so a
-/// non-null slot names a real task and no id sidecar is needed — unlike
-/// [`CurrentTask`], whose slot is also parked on pre-heap bootstrap stubs and
-/// therefore needs the id as its discriminator.
+/// `None` covers the two states in which the slot names nothing: an idle task
+/// not yet installed, and the test fixtures that null the slot and restore it.
+/// `install_idle_task` is the only other writer, so a non-null slot names a real
+/// task and no id sidecar is needed.
 ///
-/// # Not a [`TaskExclusive`]
-///
-/// Deliberately no `TaskExclusive` impl. A CPU's idle task is frequently *not*
-/// the task that CPU is running — this guard is mintable at any moment,
-/// including while a ready task is on-CPU — so it proves identity and liveness,
-/// never exclusivity. The idle task's register state is written only inside
-/// `run_switch`, where the [`SwitchWindow`] over that endpoint is the witness,
-/// and that window's dispatch-reference precondition is discharged by the same
-/// idle disjunct rather than by this guard.
+/// Deliberately not a [`TaskExclusive`]: a CPU's idle task is frequently *not*
+/// the task that CPU is running, so this proves identity and liveness, never
+/// exclusivity. Its register state is written only inside `run_switch`, under
+/// the [`SwitchWindow`] over that endpoint.
 pub struct IdleTask<K, U> {
     ptr: NonNull<TaskInner<K, U>>,
-    /// Opts out of `Send`/`Sync`.
     _not_send: PhantomData<*mut ()>,
 }
 
@@ -378,9 +298,8 @@ impl<K, U> IdleTask<K, U> {
     }
 
     /// [`current`](Self::current) for a caller that already carries its own CPU
-    /// index. Prefer `current`; this exists so an index computed one frame
-    /// earlier does not have to be threaded away, and it debug-asserts that the
-    /// index is this CPU's rather than trusting it.
+    /// index. Prefer `current`; this debug-asserts the index is this CPU's
+    /// rather than trusting it.
     #[inline]
     pub fn get(cpu_id: usize) -> Option<Self>
     where
@@ -404,17 +323,12 @@ impl<K, U> IdleTask<K, U> {
         unsafe { self.ptr.as_ref() }
     }
 
-    /// This task's compare-only address, for identity tests that must not
-    /// dereference either side.
+    /// This task's compare-only address.
     #[inline]
     pub fn addr(&self) -> crate::task::TaskAddr {
         crate::task::TaskAddr::of(self.task())
     }
 }
-
-// ---------------------------------------------------------------------------
-// SwitchWindow — exclusivity over both endpoints of a context switch
-// ---------------------------------------------------------------------------
 
 /// Exclusive access to the task being switched *away from*, held by the CPU
 /// performing the switch.
@@ -424,8 +338,7 @@ impl<K, U> IdleTask<K, U> {
 /// the time the FPU area and the round-trip slots are written, the outgoing
 /// task is no longer this CPU's current. It is still exclusively this CPU's —
 /// the dispatch reference is held across the whole window and no other CPU may
-/// dispatch a task while its `on_cpu` is set — which is what this witness
-/// names.
+/// dispatch a task while its `on_cpu` is set.
 pub struct SwitchWindow<'a, K, U> {
     task: &'a TaskInner<K, U>,
     _not_send: PhantomData<*mut ()>,
@@ -447,7 +360,6 @@ impl<'a, K, U> SwitchWindow<'a, K, U> {
         }
     }
 
-    /// The task this window covers.
     #[inline]
     pub fn task(&self) -> &'a TaskInner<K, U> {
         self.task
@@ -465,21 +377,10 @@ unsafe impl<K, U> TaskExclusive<K, U> for SwitchWindow<'_, K, U> {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Tests
-// ---------------------------------------------------------------------------
-//
-// These live inside the module rather than in `tests/task_cells.rs` because
-// [`TaskOwnCell::get_ptr`] is `pub(crate)` and must stay that way: handing a
-// `*mut T` to a `#![forbid(unsafe_code)]` crate is exactly the surface the
-// witness exists to remove. Testing through a `test-helpers` shim would test a
-// *different function* — the regression guarded against here is a future edit
-// changing `get_ptr`'s return type, and a shim can keep its own signature while
-// the production one changes. So the test calls the production signature.
-//
-// `just check-miri` runs with `-Zmiri-ignore-leaks`, which suppresses leak
-// reports only. Every property below is a borrow-model or value property, so
-// the flag hides nothing here.
+// These live inside the module because [`TaskOwnCell::get_ptr`] is `pub(crate)`
+// and must stay that way: the regression guarded against here is a future edit
+// changing its return type, and a `test-helpers` shim could keep its own
+// signature while the production one changed.
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -491,8 +392,6 @@ mod tests {
         KArc::try_new(HostTask::invalid()).expect("task allocation")
     }
 
-    /// Open a switch window over `task`.
-    ///
     /// # Safety
     /// Single-threaded host test: this "CPU" owns the switch, holds the only
     /// reference to `task`, and the window cannot be re-entered.
@@ -500,32 +399,19 @@ mod tests {
         unsafe { SwitchWindow::new(task) }
     }
 
-    /// Off-PCR there is no current task, which is *why* [`SwitchWindow`] is the
-    /// only witness a host test can mint — `pcr::current_task_id` short-circuits
-    /// on `GS_BASE_SET` and reports `INVALID_TASK_ID`.
+    /// `pcr::current_task_id` short-circuits on `GS_BASE_SET` and reports
+    /// `INVALID_TASK_ID`, which is *why* [`SwitchWindow`] is the only witness a
+    /// host test can mint.
     #[test]
     fn current_task_is_none_without_a_pcr() {
         assert!(CurrentTask::<crate::task::HostStack, crate::task::HostStack>::get().is_none());
     }
 
-    /// THE test this module exists for.
-    ///
-    /// Two witnesses for one task may legitimately coexist — an interrupt
-    /// handler above a syscall, both on the same task — and both may hold a
-    /// live pointer into the same cell at once.
-    ///
     /// The write ordering is load-bearing: derive `a`, derive `b`, then write
     /// through `a` *again*. `UnsafeCell::get()` yields a `SharedReadWrite`
     /// derivation, so interleaving is defined. If `get_ptr` ever returns
     /// `&mut T`, deriving `b` pops `a` off the borrow stack and that third
-    /// write becomes instant Miri UB — which is the whole point: the hazard
-    /// turns into a hard test failure instead of sitting latent.
-    ///
-    /// That claim was checked, not assumed. Temporarily giving the accessor the
-    /// `&mut T` shape and re-running this body under Miri fails with
-    /// "<tag> was created by a Unique retag … later invalidated … by a Unique
-    /// retag", pointing at exactly the third write. Re-do that probe if you
-    /// ever doubt this test still bites.
+    /// write becomes instant Miri UB.
     ///
     /// Run under **both** aliasing models — plain `cargo miri test` and
     /// `MIRIFLAGS=-Zmiri-tree-borrows` — because the two differ precisely on
@@ -547,8 +433,6 @@ mod tests {
         unsafe {
             a.write(b'/');
             b.add(1).write(b'a');
-            // Written after `b` was derived: the access that would be UB if
-            // `get_ptr` handed out `&mut T`.
             a.add(2).write(b'b');
             assert_eq!(a.read(), b'/');
             assert_eq!(b.add(1).read(), b'a');
@@ -556,8 +440,8 @@ mod tests {
         }
     }
 
-    /// A witness authorises exactly one task. Writing another's state through
-    /// it is what the owner check in `set_cwd`/`with_cwd` refuses.
+    /// The owner check in `set_cwd`/`with_cwd` refuses a witness that names
+    /// another task.
     #[test]
     fn a_witness_names_exactly_one_task() {
         let first = fresh();
@@ -572,9 +456,8 @@ mod tests {
         );
     }
 
-    /// The witnessed path and the `&mut self` path address the same storage —
-    /// so pre-publication construction through `get_mut` and post-publication
-    /// writes through a witness cannot disagree about where a field lives.
+    /// Pre-publication construction through `get_mut` and post-publication
+    /// writes through a witness must not disagree about where a field lives.
     #[test]
     fn get_mut_and_get_ptr_address_the_same_storage() {
         let mut task = fresh();
@@ -588,9 +471,6 @@ mod tests {
         assert_eq!(unsafe { via_witness.read() }, b'/');
     }
 
-    /// `as_ptr_racy` is the diagnostics read: same address, no witness, and
-    /// deliberately no `&T` — a torn read is acceptable, an aliasing violation
-    /// is not.
     #[test]
     fn racy_read_addresses_the_same_storage() {
         let task = fresh();

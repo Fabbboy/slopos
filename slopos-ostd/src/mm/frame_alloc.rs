@@ -1,23 +1,17 @@
 //! Global registration hook for the kernel's [`FrameAlloc`].
 //!
-//! `slopos-ostd` ships only the trait (in [`super::frame`]); the
-//! concrete buddy/per-CPU-cache implementation lives outside the
-//! trusted core. Boot wires the production allocator through this
-//! hook; tests install a scratch impl on the same hook.
-//!
-//! One-shot init pattern matches [`crate::mm::frame::init_meta_slots`]
-//! and [`crate::mm::phys::init_phys_virt_offset`]: an `AtomicPtr`
-//! AcqRel-swapped against null, with a panic on double-init.
+//! `slopos-ostd` ships only the trait (in [`super::frame`]); the concrete
+//! buddy/per-CPU-cache implementation lives outside the trusted core. Boot
+//! wires the production allocator through this hook; tests install a scratch
+//! impl on the same hook.
 
 use core::sync::atomic::{AtomicPtr, Ordering};
 
 use crate::mm::frame::FrameAlloc;
 use crate::sync::BspToken;
 
-// We store a pointer to a `&'static dyn FrameAlloc`. `dyn` trait
-// objects are wide pointers (data + vtable), so we double-box: the
-// caller hands us a `&'static dyn FrameAlloc`, we store its address
-// (a thin `*const ()`) and reconstruct on read.
+// `dyn` trait objects are wide pointers, so the slot stores the address of a
+// `&'static dyn FrameAlloc` — thin — and reconstructs the wide one on read.
 
 struct AllocSlot {
     /// `*const &'static dyn FrameAlloc` reinterpreted as `*mut ()`.
@@ -28,14 +22,9 @@ static FRAME_ALLOCATOR: AllocSlot = AllocSlot {
     inner: AtomicPtr::new(core::ptr::null_mut()),
 };
 
-/// One-shot wiring point. Pass a reference to a `&'static dyn FrameAlloc`
-/// — typically `&LEGACY_FRAME_ALLOC_SHIM as &'static dyn FrameAlloc`
-/// stored in a `static` consumer-side, then a reference to *that*. The
-/// `&BspToken<'brand>` witnesses BSP-only init via the HRTB closure
-/// minted by [`crate::sync::run_bsp_init`]; the underlying `dyn
-/// FrameAlloc` is required to be sound for concurrent `alloc`/`dealloc`
-/// from any CPU (the static double-reference guarantees `'static`
-/// storage).
+/// One-shot wiring point. Takes a reference to a consumer-side `static`
+/// holding a `&'static dyn FrameAlloc`; that allocator must be sound for
+/// concurrent `alloc`/`dealloc` from any CPU.
 pub fn register_frame_allocator<'brand>(
     _token: &BspToken<'brand>,
     slot: &'static &'static dyn FrameAlloc,
@@ -62,8 +51,7 @@ pub fn current_frame_allocator() -> Option<&'static dyn FrameAlloc> {
     Some(*slot)
 }
 
-/// Test-only reset hook. Allows host integration-test binaries to
-/// re-install a fresh allocator between test binary invocations.
+/// Test-only: clear the slot so a fresh allocator can be installed.
 #[cfg(any(test, feature = "test-helpers"))]
 pub fn reset_for_test() {
     FRAME_ALLOCATOR

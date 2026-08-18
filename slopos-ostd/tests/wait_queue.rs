@@ -1,29 +1,9 @@
 //! Host-side tests for `slopos_ostd::sync::wait_queue`.
 //!
-//! # Scope (and why most tests are kernel-side)
-//!
-//! `WaitQueue::wait_event*` and `wake_*` paths take the queue's
-//! internal `SpinLock`, which executes the `cli` instruction
-//! (privileged in user mode). Under `cargo test` running as a normal
-//! Linux process, `cli` raises SIGSEGV. The deep integration tests
-//! (mock scheduler backend, concurrent wake/Drop races, panic-mid-wait
-//! recovery, full three-way recheck logic) therefore live kernel-side
-//! in `core/src/scheduler/sched_tests.rs`, where the per-CPU PCR is
-//! initialized and `cli` is permitted.
-//!
-//! The host-side suite here verifies the parts that touch no
-//! privileged state:
-//!
-//! - `WaitResult<R>` / `WaitAbort` API surface — the payload is carried out
-//!   of `Ok`, and every abort is distinguishable.
-//! - `WaitQueue::has_waiters()` is **lock-free**; it must read the
-//!   queue's intrusive-list head atom without entering the
-//!   `SpinLock`. Verifying a fresh queue reports `false` proves the
-//!   lock-free read path doesn't crash.
-//! - `WaitQueue::generation()` is a plain atomic load.
-//! - `WaitAbort` exhibits `Debug + Clone + Copy + PartialEq + Eq`
-//!   as declared (regression guard against accidental derive drift
-//!   in future refactors).
+//! The `wait_event*` / `wake_*` paths take the queue's `SpinLock`, whose `cli`
+//! is privileged and faults under `cargo test`; those tests live kernel-side in
+//! `core/src/scheduler/sched_tests.rs`. Only the lock-free surface is covered
+//! here.
 
 use slopos_ostd::lock_class;
 use slopos_ostd::sync::lock_tracking::LOCK_LEVEL_RESOURCE;
@@ -31,15 +11,8 @@ use std::sync::Mutex;
 
 use slopos_ostd::sync::wait_queue::{WaitAbort, WaitQueue, WaitResult};
 
-/// Serializes every test that touches a `WaitQueue`. `cargo test`
-/// parallelizes `#[test]` items by default, and even though our
-/// host-side suite doesn't toggle the backend `BACKEND_INSTALLED`
-/// flag, future tests might. The lock is cheap insurance.
+/// Serializes every test that touches a `WaitQueue`.
 static TEST_LOCK: Mutex<()> = Mutex::new(());
-
-// ----------------------------------------------------------------------------
-// WaitResult / WaitAbort API
-// ----------------------------------------------------------------------------
 
 #[test]
 fn waitresult_is_ok_only_when_the_condition_held() {
@@ -77,8 +50,6 @@ fn waitresult_carries_non_copy_payload() {
 #[test]
 fn waitabort_variants_are_all_distinct() {
     let _g = TEST_LOCK.lock().unwrap();
-    // Collapsing any two of these is what the type exists to prevent: a
-    // caller must be able to tell "you are dying" from "the deadline passed".
     let all = [
         WaitAbort::Killed,
         WaitAbort::Interrupted,
@@ -95,8 +66,6 @@ fn waitabort_variants_are_all_distinct() {
 #[test]
 fn waitabort_derives_are_present() {
     let _g = TEST_LOCK.lock().unwrap();
-    // Force-compile-check that Debug, Clone, Copy, PartialEq, Eq are all
-    // derived. If any drops in a future refactor this breaks at compile time.
     fn assert_debug<T: core::fmt::Debug>() {}
     fn assert_clone<T: Clone>() {}
     fn assert_copy<T: Copy>() {}
@@ -109,18 +78,11 @@ fn waitabort_derives_are_present() {
     assert_eq_::<WaitAbort>();
 }
 
-// ----------------------------------------------------------------------------
-// WaitQueue lock-free observability
-// ----------------------------------------------------------------------------
-
 #[test]
 fn fresh_queue_has_waiters_is_false_without_taking_the_spinlock() {
     let _g = TEST_LOCK.lock().unwrap();
-    // `has_waiters` MUST read the intrusive-list's head atom
-    // directly via `SpinLock::as_ptr()` without acquiring the
-    // SpinLock — otherwise it would execute `cli` and crash this
-    // user-space test. A successful return is therefore proof that
-    // the lock-free path is correctly wired.
+    // Acquiring the SpinLock would execute `cli` and fault in user space, so
+    // returning at all proves `has_waiters` reads the list head lock-free.
     let wq = WaitQueue::new(lock_class!("test.hostwq1", LOCK_LEVEL_RESOURCE));
     assert!(!wq.has_waiters());
 }
@@ -148,7 +110,6 @@ fn multiple_fresh_queues_are_independent() {
     let wq2 = WaitQueue::new(lock_class!("test.hostwq5", LOCK_LEVEL_RESOURCE));
     assert!(!wq1.has_waiters());
     assert!(!wq2.has_waiters());
-    // generations are independent atomics — both at 0.
     assert_eq!(wq1.generation(), 0);
     assert_eq!(wq2.generation(), 0);
 }

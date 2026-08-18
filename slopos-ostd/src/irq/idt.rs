@@ -456,9 +456,8 @@ unsafe impl Sync for SinkSlot {}
 static SINK_SLOT: SinkSlot = SinkSlot(UnsafeCell::new(MaybeUninit::uninit()));
 static SINK_INSTALLED: AtomicBool = AtomicBool::new(false);
 
-/// One-shot wiring point for the production diagnostic sink. The
-/// `&BspToken<'brand>` witnesses BSP-only init; `sink` must live for
-/// `'static`.
+/// One-shot wiring point for the production diagnostic sink; the `BspToken`
+/// witnesses BSP-only init.
 pub fn register_diagnostic_sink<'brand>(
     _token: &BspToken<'brand>,
     sink: &'static dyn DiagnosticSink,
@@ -474,7 +473,6 @@ pub fn register_diagnostic_sink<'brand>(
     }
 }
 
-/// Test-only reset hook.
 #[cfg(any(test, feature = "test-helpers"))]
 pub fn reset_for_test() {
     SINK_INSTALLED.store(false, Ordering::Release);
@@ -489,16 +487,11 @@ fn current_sink() -> &'static dyn DiagnosticSink {
     unsafe { *(*SINK_SLOT.0.get()).as_ptr() }
 }
 
-// ---------------------------------------------------------------------------
-// IRET-frame corruption recovery.
-// ---------------------------------------------------------------------------
-
 /// Emit the standard IRET-frame corruption banner and panic.
 ///
 /// `iret_frame` must point to 5 readable u64s laid out as
 /// `[RIP, CS, RFLAGS, RSP, SS]` (the CPU-pushed portion of an
-/// interrupt frame). The pointer need not be aligned (values are read
-/// with `read_unaligned`).
+/// interrupt frame). The pointer need not be aligned.
 ///
 /// # Safety
 ///
@@ -519,28 +512,19 @@ pub unsafe fn handle_corrupt_iret_frame(iret_frame: *const u64) -> ! {
     let sink = current_sink();
     sink.emit("ISR IRET FRAME CORRUPT (CS expected 0x08 or 0x23)");
     let _ = (rip, cs, rflags, rsp, ss);
-    // Field values are emitted by the production sink via its own
-    // formatting buffer; OSTD itself does not pull a heap formatter.
+    // TODO(tech-debt): the frame fields are read and then discarded — the sink
+    // only ever receives the banner, so no field value reaches the log.
 
     panic!("Unrecoverable IRET frame corruption");
 }
 
-// ---------------------------------------------------------------------------
-// IST-handler entry guard.
-// ---------------------------------------------------------------------------
-
 /// Predicate: must the given vector hold off deferred rescheduling?
 ///
-/// Every architectural exception vector (0..=31) does, whether or not it
-/// is one of the few that actually carries an IST assignment: a guard drop
-/// inside any of them could otherwise context-switch out of an exception
-/// handler. Hardware IRQs (32..) do not — they are the paths a reschedule
-/// is *supposed* to leave from.
-///
-/// Named for the IST because that is the case that made it necessary. The
-/// predicate is deliberately wider than the IST table; narrowing it to the
-/// vectors that really use one would let a `SpinLockGuard` drop inside a
-/// page-fault handler run the deferred reschedule from exception context.
+/// Deliberately wider than the IST table — every architectural exception
+/// vector (0..=31) qualifies, so a guard drop inside e.g. a page-fault
+/// handler cannot run the deferred reschedule from exception context.
+/// Hardware IRQs (32..) are the paths a reschedule is *supposed* to leave
+/// from.
 #[inline]
 pub const fn vector_uses_ist(vector: u8) -> bool {
     vector < 32
@@ -548,19 +532,15 @@ pub const fn vector_uses_ist(vector: u8) -> bool {
 
 /// Const-generic RAII guard for IST-using exception entry points.
 ///
-/// `enter()` bumps the per-CPU preempt count; `Drop` decrements it
-/// with the *quiet* path so no deferred reschedule callback fires
-/// (which would corrupt the IST stack).
-///
-/// Non-IST vectors construct as a no-op — the guard is still typed so
-/// the entrypoint code is uniform.
+/// `Drop` decrements the per-CPU preempt count on the *quiet* path so no
+/// deferred reschedule callback fires — that would corrupt the IST stack.
+/// Non-IST vectors construct as a no-op.
 #[must_use = "if unused, the IST preempt hold is immediately released"]
 pub struct IrqEntryGuard<const V: u8> {
     _not_send: PhantomData<*const ()>,
 }
 
 impl<const V: u8> IrqEntryGuard<V> {
-    /// Construct the guard.
     #[inline]
     pub fn enter() -> Self {
         if vector_uses_ist(V) {
@@ -581,16 +561,14 @@ impl<const V: u8> Drop for IrqEntryGuard<V> {
     }
 }
 
-/// Runtime-toggleable variant of [`IrqEntryGuard`]. Equivalent body,
-/// gated by an `active` boolean rather than a const generic. Used by
-/// dispatch entry points where the vector is only known dynamically.
+/// Runtime-toggleable [`IrqEntryGuard`], for dispatch entry points where the
+/// vector is only known dynamically.
 #[must_use]
 pub struct IstPreemptHold {
     active: bool,
 }
 
 impl IstPreemptHold {
-    /// Bump the preempt count if `active`, otherwise no-op.
     #[inline]
     pub fn new(active: bool) -> Self {
         if active {
@@ -609,18 +587,14 @@ impl Drop for IstPreemptHold {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Lib unit tests (host-side, pure logic).
-// ---------------------------------------------------------------------------
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::cpu::preempt as p;
 
     fn isolate<R>(f: impl FnOnce() -> R) -> R {
-        // Counts against the same process-global preempt backend as
-        // `cpu::preempt`'s tests; serialise, then reset the baseline.
+        // Shares the process-global preempt backend with `cpu::preempt`'s
+        // tests; serialise, then reset the baseline.
         let _g = crate::test_support::global_lock::lock_global_test_state();
         p::reset_for_test();
         let r = f();
@@ -676,7 +650,7 @@ mod tests {
     fn builder_set_ist_masks_to_three_bits() {
         let b = IdtBuilder::new();
         b.set_gate(8, 0x100, 0x08, IDT_GATE_INTERRUPT);
-        b.set_ist(8, 0xFF); // garbage bits should be masked
+        b.set_ist(8, 0xFF);
         let e = b.get_gate(8);
         assert_eq!(e.ist, 7);
     }

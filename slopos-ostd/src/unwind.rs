@@ -1,29 +1,18 @@
 //! Kernel-facing Rust unwind facade.
 //!
-//! This is the only public kernel surface over the `unwinding` crate. It keeps
-//! panic payload allocation, catch boundaries, and fixed-buffer DWARF backtrace
-//! capture inside OSTD.
+//! The only public kernel surface over the `unwinding` crate.
 //!
-//! Unwinding is kernel-internal only. It must not cross user/kernel entry,
+//! Unwinding is kernel-internal only: it must not cross user/kernel entry,
 //! interrupt/trap stubs, scheduler context switches, or other non-Rust ABI
 //! boundaries; those paths must catch before the boundary or abort.
 //!
-//! The `unwinding` crate is only linked for the bare-metal kernel target
-//! (`target_os = "none"`); it provides the `eh_personality` lang item and the
-//! `_Unwind_*` symbols a `no_std` build needs. On the host/Miri targets
-//! (`cargo test` / `cargo miri test`) `std` already owns those, so pulling in
-//! `unwinding` there collides on the `eh_personality` lang item (E0152). The
-//! host shim below keeps this module's surface present off-target — where the
-//! std test harness owns panic handling — so `catch_panic!` and any host test
-//! that names this facade still compile.
+//! `unwinding` is linked only for `target_os = "none"` — on host/Miri targets
+//! `std` already owns the `eh_personality` lang item and linking it there
+//! collides (E0152), so the host shim below keeps this surface compiling.
 //!
-//! `unwinding` is built without its `dwarf-expr` feature: a call-frame
-//! instruction that requires DWARF expression evaluation
-//! (`DW_CFA_def_cfa_expression` and friends) fails the unwind,
-//! `begin_panic` returns `Err`, and the panic falls through to the fatal
-//! abort path. Fail-safe: an unsupported CFI rule can never resume with
-//! wrong register state. Both `unwinding` and its DWARF reader `gimli`
-//! are vendored TCB annexes pinned by `scripts/check_vendor_pin.sh`.
+//! Built without `unwinding`'s `dwarf-expr` feature: a call-frame instruction
+//! requiring DWARF expression evaluation fails the unwind and falls through to
+//! the fatal abort path rather than resuming with wrong register state.
 
 use core::fmt::{self, Write};
 use core::panic::PanicInfo;
@@ -67,11 +56,9 @@ impl<const N: usize> Write for FixedOopsStr<N> {
     }
 }
 
-/// Panic metadata carried through the catch boundary to the recovery
-/// consumer. Deliberately holds no backtrace: the panic handler prints the
-/// symbolized trace exactly once on serial with interrupts disabled, and
-/// this struct is `Copy` — a frames array would grow every copy to
-/// duplicate what serial already carries.
+/// Panic metadata carried through the catch boundary to the recovery consumer.
+/// Deliberately holds no backtrace: it is `Copy`, and the panic handler already
+/// prints the symbolized trace once on serial.
 #[derive(Clone, Copy, Debug)]
 pub struct OopsInfo {
     /// Best-effort task id supplied by the scheduler registration hook.
@@ -143,7 +130,6 @@ impl UnwindBacktrace {
 #[cfg(target_os = "none")]
 pub use bare_metal::{begin_panic, capture_backtrace, catch_unwind};
 
-/// Bare-metal implementation: real DWARF unwinding via the `unwinding` crate.
 #[cfg(target_os = "none")]
 mod bare_metal {
     use super::{KernelPanic, UNWIND_BACKTRACE_MAX, UnwindBacktrace};
@@ -274,10 +260,8 @@ mod bare_metal {
 #[cfg(not(target_os = "none"))]
 pub use host::{capture_backtrace, catch_unwind};
 
-/// Host/Miri shim (see module docs for why `unwinding` isn't linked here):
-/// the std test harness already catches panics at the `#[test]` boundary, so
-/// `catch_unwind` just runs the closure and `capture_backtrace` returns an
-/// empty trace.
+/// Host/Miri shim: the std test harness already catches panics at the `#[test]`
+/// boundary.
 #[cfg(not(target_os = "none"))]
 mod host {
     use super::{KernelPanic, UnwindBacktrace};

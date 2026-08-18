@@ -1,24 +1,16 @@
 //! Context-switch register snapshot.
 //!
-//! [`TaskContext`] is the callee-saved register block that the software
-//! context switch in [`super::switch`] saves and restores. The switch
-//! assembly reads the register offsets directly via `offset_of!`, so the
-//! field order is an ABI contract pinned by the `const _` layout asserts
-//! below — it must not change without updating the asm in lockstep.
+//! The switch assembly in [`super::switch`] reads [`TaskContext`]'s register
+//! offsets via `offset_of!`, so the field order is an ABI contract pinned by
+//! the `const _` asserts below and must not change without the asm.
 
 use core::mem::offset_of;
 
 /// Callee-saved register snapshot for software context switch.
 ///
-/// # Preempt-count ownership
-///
-/// `preempt_count` is logically a property of the *task*, not the CPU,
-/// but is cached in the per-CPU PCR for cheap guard inc/dec. This field
-/// is the task's saved copy: at every context switch the live per-CPU
-/// count is saved here for the outgoing task and the incoming task's
-/// saved count is loaded into the PCR. That keeps a preempt/lock guard's
-/// increment and its matching decrement balanced against the same
-/// logical counter even when the task migrates across CPUs between them.
+/// `preempt_count` is a property of the *task*, cached in the per-CPU PCR for
+/// cheap guard inc/dec; every switch swaps it with the PCR so a guard's
+/// increment and decrement stay balanced across a migration.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default)]
 pub struct TaskContext {
@@ -31,8 +23,8 @@ pub struct TaskContext {
     pub rsp: u64,
     pub rflags: u64,
     pub rip: u64,
-    /// Saved per-task preemption-disable count (see type docs). Not read
-    /// by the switch asm — swapped with the PCR by `switch_context`.
+    /// Saved per-task preemption-disable count, swapped with the PCR by
+    /// `switch_context`.
     pub preempt_count: u64,
 }
 
@@ -54,11 +46,9 @@ impl TaskContext {
         }
     }
 
-    /// Build a context that, when first dispatched via
-    /// [`super::switch::switch_registers`], resumes at `trampoline`
-    /// with `entry_point` in `r12` and `arg` in `r13`. The trampoline
-    /// is expected to call `entry_point(arg)` and then invoke the
-    /// task-exit hook.
+    /// Build a context that first resumes at `trampoline` with `entry_point` in
+    /// `r12` and `arg` in `r13`; the trampoline calls `entry_point(arg)` and
+    /// then the task-exit hook.
     pub const fn new_for_task(entry_point: u64, arg: u64, stack_top: u64, trampoline: u64) -> Self {
         Self {
             rbx: 0,

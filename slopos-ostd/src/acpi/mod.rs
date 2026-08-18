@@ -1,22 +1,17 @@
 //! ACPI table primitives.
 //!
-//! Houses the Pod definitions of the on-wire ACPI structures
-//! (RSDP, SDT header) plus a checksum-validated borrow over a
-//! pre-mapped byte slice.
+//! Pod definitions of the on-wire structures (RSDP, SDT header) plus a
+//! checksum-validated borrow over a pre-mapped byte slice.
 //!
-//! `slopos-ostd` exposes the spec-fixed structures so the kernel's
-//! `acpi/` crate can stop hand-rolling pointer-arithmetic over
-//! `*const SdtHeader` / `*const Rsdp`. The structures here are
-//! `#[repr(C, packed)]` and carry a manual `unsafe impl Pod` —
-//! the slopos-ostd-derive macro rejects packed layouts, but the
-//! hand-written impl is sound: every byte sequence of the right
-//! length is a valid ACPI structure (validation is over the
-//! checksum and signature, not the type).
+//! The structures carry a hand-written `unsafe impl Pod` because the derive
+//! macro rejects packed layouts; every byte sequence of the right length is a
+//! valid ACPI structure, since validation is over the checksum and signature
+//! rather than the type.
 
 use crate::mm::Pod;
 
-/// Root System Description Pointer (`#[repr(C, packed)]`, 36
-/// bytes for revision 2+, 20 bytes for revision 0/1).
+/// Root System Description Pointer: 36 bytes for revision 2+, 20 bytes for
+/// revision 0/1.
 #[repr(C, packed)]
 #[derive(Clone, Copy)]
 pub struct Rsdp {
@@ -31,13 +26,12 @@ pub struct Rsdp {
     pub reserved: [u8; 3],
 }
 
-// SAFETY: `Rsdp` is `#[repr(C, packed)]` over `Copy` primitives /
-// fixed-size byte arrays; no padding, no invalid bit patterns.
+// SAFETY: packed over `Copy` primitives and fixed-size byte arrays; no
+// padding, no invalid bit patterns.
 unsafe impl Pod for Rsdp {}
 
-/// System Description Table header (`#[repr(C, packed)]`, 36
-/// bytes). Every ACPI table (RSDT, XSDT, MADT, MCFG, HPET, FADT, ...)
-/// begins with one of these.
+/// System Description Table header, 36 bytes. Every ACPI table (RSDT, XSDT,
+/// MADT, MCFG, HPET, FADT, ...) begins with one of these.
 #[repr(C, packed)]
 #[derive(Clone, Copy)]
 pub struct SdtHeader {
@@ -52,25 +46,21 @@ pub struct SdtHeader {
     pub creator_revision: u32,
 }
 
-// SAFETY: `SdtHeader` is `#[repr(C, packed)]` over `Copy`
-// primitives / fixed-size byte arrays; no padding, no invalid
-// bit patterns.
+// SAFETY: packed over `Copy` primitives and fixed-size byte arrays; no
+// padding, no invalid bit patterns.
 unsafe impl Pod for SdtHeader {}
 
-/// Canonical RSDP signature, "RSD PTR " (the trailing byte is a
-/// space, not NUL).
+/// Canonical RSDP signature; the trailing byte is a space, not NUL.
 pub const RSDP_SIGNATURE: [u8; 8] = *b"RSD PTR ";
 
-/// Spec-fixed length of the RSDP v1 structure (signature through
-/// the v1 RSDT address; the v2 fields follow immediately and are
-/// covered by the extended checksum).
+/// Spec-fixed length of the RSDP v1 structure: signature through the v1 RSDT
+/// address. The v2 fields follow and are covered by the extended checksum.
 pub const RSDP_V1_SIZE: usize = 20;
 
 impl Rsdp {
-    /// Validate `bytes` as a complete RSDP and copy out the
-    /// structure. Checks: signature matches, length sufficient for
-    /// the indicated revision, and the v1 / v2 checksums (whichever
-    /// applies) sum to zero.
+    /// Validate `bytes` as a complete RSDP and copy out the structure:
+    /// signature, length for the indicated revision, and the applicable
+    /// checksums summing to zero.
     pub fn validate(bytes: &[u8]) -> Option<Self> {
         if bytes.len() < RSDP_V1_SIZE {
             return None;
@@ -78,7 +68,6 @@ impl Rsdp {
         if bytes[0..8] != RSDP_SIGNATURE {
             return None;
         }
-        // V1 checksum covers the first 20 bytes.
         if checksum(&bytes[..RSDP_V1_SIZE]) != 0 {
             return None;
         }
@@ -96,8 +85,8 @@ impl Rsdp {
                 return None;
             }
         }
-        // Size-checked above; copy field-by-field so we can build
-        // the packed struct without going through `read_unaligned`.
+        // Field-by-field copy builds the packed struct without a
+        // `read_unaligned`.
         let mut sig = [0u8; 8];
         sig.copy_from_slice(&bytes[0..8]);
         let mut oem_id = [0u8; 6];
@@ -129,24 +118,16 @@ impl Rsdp {
     }
 }
 
-/// Checksum-validated borrow over a complete ACPI table (header
-/// plus payload).
-///
-/// The wrapped byte slice must include both the
-/// [`size_of::<SdtHeader>()`]-byte header and the full payload as
-/// declared by `header.length`. The lifetime of the borrow is the
-/// caller's; no allocation happens here.
+/// Checksum-validated borrow over a complete ACPI table: the slice must span
+/// the [`size_of::<SdtHeader>()`]-byte header and the full payload declared by
+/// `header.length`.
 pub struct AcpiTable<'a> {
     bytes: &'a [u8],
 }
 
 impl<'a> AcpiTable<'a> {
-    /// Build a checksum-validated table view from a byte slice.
-    ///
-    /// Returns `None` if any of the following fail:
-    /// - `bytes.len() < size_of::<SdtHeader>()`
-    /// - `header.length` does not equal `bytes.len()`
-    /// - the byte sum of `bytes` is not zero (bad checksum).
+    /// Returns `None` unless `bytes` covers a full header, `header.length`
+    /// equals `bytes.len()`, and the byte sum of `bytes` is zero.
     pub fn from_bytes(bytes: &'a [u8]) -> Option<Self> {
         let hdr_size = core::mem::size_of::<SdtHeader>();
         if bytes.len() < hdr_size {
@@ -163,10 +144,8 @@ impl<'a> AcpiTable<'a> {
         Some(Self { bytes })
     }
 
-    /// Copy out the SDT header. Returns by value because the
-    /// underlying struct is `#[repr(C, packed)]`; the wrapper
-    /// performs aligned reads internally so callers see plain
-    /// values.
+    /// Copy out the SDT header. By value because the struct is packed: the
+    /// reads happen here, aligned, so callers never reference into it.
     pub fn header(&self) -> SdtHeader {
         let b = self.bytes;
         let mut signature = [0u8; 4];
@@ -194,35 +173,30 @@ impl<'a> AcpiTable<'a> {
         }
     }
 
-    /// 4-byte ACPI signature ("APIC", "MCFG", "HPET", ...).
     #[inline]
     pub fn signature(&self) -> [u8; 4] {
         let b = self.bytes;
         [b[0], b[1], b[2], b[3]]
     }
 
-    /// Total declared length of the table (header + payload).
     #[inline]
     pub fn length(&self) -> u32 {
         let b = self.bytes;
         u32::from_le_bytes([b[4], b[5], b[6], b[7]])
     }
 
-    /// Borrow the post-header payload bytes.
     #[inline]
     pub fn payload(&self) -> &'a [u8] {
         &self.bytes[core::mem::size_of::<SdtHeader>()..]
     }
 
-    /// Borrow the full table bytes (header + payload).
     #[inline]
     pub fn raw(&self) -> &'a [u8] {
         self.bytes
     }
 }
 
-/// 8-bit additive ACPI checksum: the byte sum of a valid table is
-/// zero.
+/// 8-bit additive ACPI checksum: the byte sum of a valid table is zero.
 #[inline]
 fn checksum(bytes: &[u8]) -> u8 {
     bytes.iter().fold(0u8, |acc, &b| acc.wrapping_add(b))

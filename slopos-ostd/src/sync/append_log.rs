@@ -1,21 +1,15 @@
 //! Fixed-capacity append-only byte log.
 //!
 //! A `.bss`-resident buffer that many CPUs append to and one reads back,
-//! used for the per-CPU klog capture rings the test harness installs. The
-//! buffer, the length and the overflow counters move together under one
-//! lock, so both ends are safe to call: readers cannot observe a length
-//! that runs past the bytes actually written, and a writer cannot extend
-//! the log while a reader holds a view of it.
+//! backing the per-CPU klog capture rings. Buffer, length and overflow
+//! counters move together under one lock.
 //!
-//! Reads take a closure rather than returning a slice. A returned
-//! `&'static [u8]` would outlive the lock and re-open the race the lock
-//! exists to close — the same reason [`crate::util::ptr_buf`]'s `with_*`
-//! forms are the shape to reach for there.
+//! Reads take a closure: a returned `&'static [u8]` would outlive the lock
+//! and re-open the race the lock exists to close.
 
 use core::cell::UnsafeCell;
 use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
-/// Append-only byte log of `N` bytes.
 pub struct AppendLog<const N: usize> {
     /// Bytes plus the count of live ones. Both under `lock`.
     inner: UnsafeCell<Inner<N>>,
@@ -89,19 +83,16 @@ impl<const N: usize> AppendLog<N> {
 
     /// Read the live bytes under the lock.
     ///
-    /// `f` runs with appends from every CPU blocked, so it should not do
-    /// unbounded work — and must not append to this same log, which would
-    /// deadlock.
+    /// `f` runs with appends from every CPU blocked, and must not append to
+    /// this same log, which would deadlock.
     pub fn with_bytes<R>(&self, f: impl FnOnce(&[u8]) -> R) -> R {
         self.with_locked(|inner| f(&inner.buf[..inner.len]))
     }
 
-    /// Number of live bytes.
     pub fn len(&self) -> usize {
         self.with_locked(|inner| inner.len)
     }
 
-    /// Whether the log holds no bytes.
     pub fn is_empty(&self) -> bool {
         self.len() == 0
     }

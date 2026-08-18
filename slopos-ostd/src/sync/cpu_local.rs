@@ -1,17 +1,9 @@
 //! Compile-time safe per-CPU data access.
 //!
-//! This module provides `CpuLocal<T>` for declaring per-CPU variables and
-//! `CpuPinned<'a, T>` as an RAII guard that prevents CPU migration while
-//! accessing per-CPU data.
-//!
-//! Per-CPU data must only be accessed while "pinned" to the current CPU.
-//! Migration during access would cause data corruption. This module enforces
-//! this at compile-time by:
-//!
-//! 1. `CpuLocal<T>` stores one `T` per CPU but provides no direct access
-//! 2. Access requires calling `.get()` which returns `CpuPinned<T>`
-//! 3. `CpuPinned<T>` disables preemption (preventing migration) while held
-//! 4. When `CpuPinned<T>` drops, preemption is re-enabled
+//! Per-CPU data must only be accessed while pinned to the current CPU;
+//! migration mid-access would corrupt it. `CpuLocal<T>` therefore offers no
+//! direct access — `get()` hands back a `CpuPinned<T>` holding a
+//! `PreemptGuard` for its lifetime.
 //!
 //! # Example
 //!
@@ -47,8 +39,8 @@ pub struct CpuLocal<T> {
     data: UnsafeCell<[CacheAligned<T>; MAX_CPUS]>,
 }
 
-// SAFETY: Each CPU accesses only its own slot while pinned.
-// The CpuPinned guard ensures no migration occurs during access.
+// SAFETY: each CPU accesses only its own slot, and the CpuPinned guard keeps
+// it from migrating while it does.
 unsafe impl<T: Send> Sync for CpuLocal<T> {}
 
 impl<T> CpuLocal<T> {
@@ -62,8 +54,7 @@ impl<T> CpuLocal<T> {
     pub fn get(&self) -> CpuPinned<'_, T> {
         let guard = PreemptGuard::new();
         let cpu_id = get_current_cpu();
-        // SAFETY: We hold PreemptGuard so we can't migrate.
-        // cpu_id is always < MAX_CPUS.
+        // SAFETY: the PreemptGuard prevents migration, and cpu_id < MAX_CPUS.
         let ptr = unsafe { (*self.data.get()).get_unchecked(cpu_id) };
         CpuPinned {
             data: &ptr.0,
@@ -76,9 +67,8 @@ impl<T> CpuLocal<T> {
     pub fn get_mut(&self) -> CpuPinnedMut<'_, T> {
         let guard = PreemptGuard::new();
         let cpu_id = get_current_cpu();
-        // SAFETY: We hold PreemptGuard so we can't migrate.
-        // cpu_id is always < MAX_CPUS. Mutable access is safe because
-        // each CPU can only access its own slot while pinned.
+        // SAFETY: the PreemptGuard prevents migration, cpu_id < MAX_CPUS, and
+        // each CPU reaches only its own slot while pinned.
         let ptr = unsafe { (*self.data.get()).get_unchecked_mut(cpu_id) };
         CpuPinnedMut {
             data: &mut ptr.0,
@@ -125,28 +115,21 @@ impl<T> CpuLocal<T> {
         }
     }
 
-    /// Safe wrapper around [`Self::for_each_mut`] for **single-threaded
-    /// drain windows**: pre-SMP boot init and post-shutdown drain. The
-    /// caller's contract is identical to `for_each_mut`'s — SMP must be
-    /// either not yet active (early boot) or cooperatively quiesced
-    /// (shutdown drain). The single internal `unsafe` reborrow is the
-    /// only one in this code path.
-    ///
-    /// Use from per-CPU drain helpers (kernel heap, page allocator,
-    /// stack-VA allocator) so the consumer side can stay safe.
+    /// Safe wrapper around [`Self::for_each_mut`] for **single-threaded drain
+    /// windows**: pre-SMP boot init and post-shutdown drain. The caller's
+    /// contract is identical to `for_each_mut`'s — SMP must be either not yet
+    /// active (early boot) or cooperatively quiesced (shutdown drain).
     pub fn for_each_mut_at_shutdown(&self, f: impl FnMut(usize, &mut T)) {
-        // SAFETY: caller guarantees the call site is single-threaded
-        // (early boot or quiesced shutdown); the contract of
-        // `for_each_mut` is satisfied.
+        // SAFETY: caller guarantees the call site is single-threaded, which is
+        // `for_each_mut`'s contract.
         unsafe { self.for_each_mut(f) };
     }
 
     /// Mutable slot access for a caller that already holds a `PreemptGuard`.
     /// `cpu` must equal the current CPU — debug-asserted at entry.
     ///
-    /// Use this from amortised hot paths that pin once via `PreemptGuard::new()`
-    /// and then dispatch through the same cache multiple times. Cheaper than
-    /// `get_mut()` because no per-call guard is created.
+    /// Cheaper than `get_mut()` for a hot path that pins once and then
+    /// dispatches through the same cache repeatedly: no per-call guard.
     #[inline]
     pub fn get_pinned_mut(&self, cpu: usize) -> &mut T {
         debug_assert!(
@@ -159,22 +142,20 @@ impl<T> CpuLocal<T> {
             get_current_cpu(),
             "CpuLocal::get_pinned_mut: cpu argument must match current CPU"
         );
-        // SAFETY: PreemptGuard pins this thread to `cpu`; no other thread
-        // can hold a borrow of the same slot at the same time.
+        // SAFETY: the PreemptGuard pins this thread to `cpu`, so no other
+        // thread can hold a borrow of the same slot.
         unsafe { &mut (*self.data.get()).get_unchecked_mut(cpu).0 }
     }
 
-    /// Read-only slot access for any CPU. Suitable for cross-CPU diagnostic
-    /// snapshots — `T` is responsible for its own atomicity (e.g. atomic
-    /// counters on the cache stats; benign races on plain integer fields).
+    /// Read-only slot access for any CPU, for cross-CPU diagnostic snapshots.
+    /// `T` is responsible for its own atomicity.
     #[inline]
     pub fn snapshot_for_cpu(&self, cpu: usize) -> Option<&T> {
         if cpu >= MAX_CPUS {
             return None;
         }
-        // SAFETY: read-only borrow; the caller is responsible for tolerating
-        // benign races on non-atomic fields. No mutation is possible through
-        // this reference.
+        // SAFETY: read-only borrow, so no mutation is possible through it; the
+        // caller tolerates benign races on non-atomic fields.
         Some(unsafe { &(*self.data.get()).get_unchecked(cpu).0 })
     }
 }

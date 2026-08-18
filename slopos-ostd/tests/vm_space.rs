@@ -1,16 +1,8 @@
 //! Host-side integration tests for `VmSpace` / `Cursor` / `CursorMut`.
 //!
-//! Setup pattern mirrors `tests/uframe_round_trip.rs`: a leaked
-//! page-aligned `Backing` array gives us "physical" memory, a leaked
-//! `Vec<MetaSlot>` gives us per-frame ref-count slots, and OSTD's
-//! one-shot init hooks (`init_meta_slots`, `init_phys_virt_offset`,
-//! `register_frame_allocator`, `register_kernel_master_pml4`) get
-//! wired exactly once via a shared `OnceLock<Mutex<()>>` setup gate.
-//!
-//! Each test acquires the gate so global OSTD state is serialised.
-//! Tests use disjoint `vaddr` ranges so they never see each other's
-//! mappings; the test allocator hands out fresh paddrs so every test
-//! gets its own page-table tree (a fresh PML4 per `VmSpace::new()`).
+//! OSTD's one-shot init hooks are wired exactly once behind a shared setup
+//! gate, which every test acquires so global OSTD state is serialised. Tests
+//! use disjoint `vaddr` ranges so they never see each other's mappings.
 
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, MutexGuard, OnceLock};
@@ -35,8 +27,8 @@ use slopos_ostd::mm::vm_space::{
 const N_PAGES: usize = 8192; // 32 MiB scratch arena (room for huge-page tests under parallel runs)
 const PAGE_SIZE: usize = 4096;
 
-/// Bump allocator over the scratch arena. Hands out pages 1.. (page 0
-/// is reserved as the kernel-master PML4 — see `setup`).
+/// Bump allocator over the scratch arena; page 0 is reserved as the
+/// kernel-master PML4.
 struct BumpAlloc {
     next_page: AtomicU64,
 }
@@ -63,14 +55,11 @@ impl FrameAlloc for BumpAlloc {
     }
 
     fn dealloc(&self, _paddr: Paddr, _size_pages: usize) {
-        // Bump allocator: leak. The Frame::Drop dealloc-back-to-allocator
-        // path lands here too; we accept any size_pages.
+        // Bump allocator: leak.
     }
 }
 
-/// Reserve a 2 MiB-aligned page-index region from the bump allocator
-/// and return its head paddr (suitable for installing as a 2 MiB
-/// huge-page leaf). Stride is 512 pages = 2 MiB.
+/// Reserve a 2 MiB-aligned page-index region and return its head paddr.
 fn alloc_2mb_aligned_paddr() -> Paddr {
     let cur = BUMP_ALLOC.next_page.load(Ordering::Relaxed);
     let aligned = (cur + 511) & !511_u64;
@@ -91,19 +80,16 @@ static SETUP: OnceLock<Mutex<()>> = OnceLock::new();
 
 fn setup() -> MutexGuard<'static, ()> {
     let m = SETUP.get_or_init(|| {
-        // Heap-allocate the scratch arena directly (1 MiB) so we never
-        // construct it on the stack — a `Box::new(Backing([0; ...]))`
-        // would copy through the test thread's stack and overflow.
-        // 4 KiB-aligned via `Layout`.
+        // Heap-allocate the arena directly: `Box::new(Backing([0; ...]))` would
+        // copy through the test thread's stack and overflow it.
         let layout = std::alloc::Layout::from_size_align(N_PAGES * PAGE_SIZE, PAGE_SIZE)
             .expect("backing layout");
         // SAFETY: `layout.size() > 0`; standard allocator contract.
         let backing_ptr_real: *mut u8 = unsafe { std::alloc::alloc_zeroed(layout) };
         assert!(!backing_ptr_real.is_null(), "backing alloc failed");
-        // Expose the allocation's provenance once so that every later
-        // `with_exposed_provenance_mut(addr)` against an address inside
-        // `[backing_ptr_real, backing_ptr_real + N_PAGES * PAGE_SIZE)`
-        // is sound under `-Zmiri-strict-provenance`.
+        // Expose the allocation's provenance once so every later
+        // `with_exposed_provenance_mut` into the arena is sound under
+        // `-Zmiri-strict-provenance`.
         let backing_ptr = backing_ptr_real.expose_provenance() as u64;
         BACKING_BASE.store(backing_ptr, Ordering::Release);
 
@@ -115,18 +101,14 @@ fn setup() -> MutexGuard<'static, ()> {
             init_meta_slots(t, slots_ptr, N_PAGES);
             init_phys_virt_offset(t, backing_ptr);
             register_frame_allocator(t, &BUMP_REF);
-            // Page 0 is the kernel master — already zero-initialised.
             register_kernel_master_pml4(t, PhysAddr::new(0));
         });
         Mutex::new(())
     });
-    // Recover from poison so a panic in one test doesn't cascade
-    // into PoisonError on every subsequent test.
+    // Recover from poison so one test's panic doesn't cascade.
     m.lock().unwrap_or_else(|p| p.into_inner())
 }
 
-// Allocate a fresh "user frame" paddr disjoint from the page-table
-// tree. We just call the same bump allocator.
 fn fresh_user_frame() -> UFrame<AnonymousMeta> {
     let paddr = BUMP_ALLOC
         .alloc(FrameAllocOptions::single().zeroed())
@@ -192,8 +174,7 @@ fn map_then_unmap_returns_uframe() {
 
     drop(frame);
 
-    // After drop, the slot transitions to UNUSED — proven by being
-    // able to re-install at the same paddr.
+    // Re-installing at the same paddr succeeds only if the slot went UNUSED.
     let _ = UFrame::<AnonymousMeta>::from_unused(frame_paddr, AnonymousMeta::default()).unwrap();
 }
 
@@ -280,17 +261,14 @@ fn protect_changes_writable_bit() {
 fn cursor_oob_after_step_past_range() {
     let _g = setup();
     let mut space = VmSpace::new().unwrap();
-    // Two-page range so we can step `next()` once (to end), then a
-    // second call must return OutOfBounds.
     let vaddr_start = VirtAddr::new(0x0000_0001_6000_0000);
     let vaddr_end = VirtAddr::new(0x0000_0001_6000_2000);
 
     let f = fresh_user_frame();
     let mut cur = space.cursor_mut(vaddr_start..vaddr_end).unwrap();
     cur.map::<Size4Kb, _>(f, PageProperty::USER_RW).unwrap();
-    cur.next().unwrap(); // moves to vaddr_start + 0x1000
-    cur.next().unwrap(); // moves to range.end (allowed past-the-end position)
-    // A third step (or any map at past-the-end) is OOB.
+    cur.next().unwrap();
+    cur.next().unwrap(); // range.end is an allowed past-the-end position
     assert_eq!(cur.next(), Err(MapError::OutOfBounds));
     let f2 = fresh_user_frame();
     assert_eq!(
@@ -371,16 +349,10 @@ fn map_seek_returns_to_same_entry() {
     assert_eq!(cur.query().unwrap().paddr, Some(f_paddr));
 }
 
-// ---------------------------------------------------------------------------
-// Huge-page cursor ops, wrap_existing, the drop walker, and the
-// cursor-unmap hook.
-// ---------------------------------------------------------------------------
-
 #[test]
 fn map_2mb_round_trip_via_cursor() {
     let _g = setup();
     let mut space = VmSpace::new().unwrap();
-    // 2 MiB-aligned virtual base: the cursor enforces alignment.
     let vaddr_start = VirtAddr::new(0x0000_0002_0020_0000);
     let vaddr_end = VirtAddr::new(0x0000_0002_0040_0000);
 
@@ -406,8 +378,7 @@ fn map_2mb_round_trip_via_cursor() {
 fn map_2mb_unaligned_cursor_rejected() {
     let _g = setup();
     let mut space = VmSpace::new().unwrap();
-    // Range is 2 MiB-spanning, but cursor starts at a 4 KiB boundary
-    // that's not 2 MiB-aligned (start | 0x1000).
+    // 2 MiB-spanning range starting at a 4 KiB boundary that is not 2 MiB-aligned.
     let vaddr_start = VirtAddr::new(0x0000_0002_0040_1000);
     let vaddr_end = VirtAddr::new(0x0000_0002_0060_1000);
 
@@ -427,7 +398,6 @@ fn unmap_size_mismatch_returns_err() {
     let vaddr_start = VirtAddr::new(0x0000_0002_0080_0000);
     let vaddr_end = VirtAddr::new(0x0000_0002_00A0_0000);
 
-    // Install a 2 MiB leaf, then try to 4 KiB unmap it — must error.
     let huge_paddr = alloc_2mb_aligned_paddr();
     let huge_uframe =
         UFrame::<AnonymousMeta>::from_unused(huge_paddr, AnonymousMeta::default()).unwrap();
@@ -504,8 +474,7 @@ fn map_range_installs_consecutive_pages() {
 #[test]
 fn wrap_existing_round_trip() {
     let _g = setup();
-    // Allocate a fresh page; treat it as an "already-installed" PML4
-    // (kernel master simulation). Use Pcid 0 to mirror production.
+    // Treat a fresh page as an already-installed PML4; Pcid 0 mirrors production.
     let pml4_phys = BUMP_ALLOC
         .alloc(FrameAllocOptions::single().zeroed())
         .expect("arena");
@@ -516,9 +485,8 @@ fn wrap_existing_round_trip() {
 
     drop(space);
 
-    // Frame::Drop with `static_borrowed: true` does NOT call dealloc
-    // for the page itself; the slot transitions to UNUSED. Re-wrap to
-    // verify the slot is back to UNUSED and the contents are intact.
+    // Re-wrapping succeeds only if Drop returned the slot to UNUSED without
+    // deallocating the borrowed page.
     let space2 = unsafe { VmSpace::wrap_existing(pml4_phys, Pcid::new(0)).unwrap() };
     assert_eq!(space2.pml4_paddr(), pml4_phys);
 }
@@ -527,13 +495,11 @@ fn wrap_existing_round_trip() {
 fn drop_user_half_returns_intermediate_tables_to_allocator() {
     let _g = setup();
 
-    // Snapshot the bump allocator's next page so we can prove the
-    // user-half teardown didn't leak any frames.
     let mut space = VmSpace::new().unwrap();
     let pages_before = BUMP_ALLOC.next_page.load(Ordering::Relaxed);
 
-    // Map four 4 KiB pages spread across distinct PT/PD subtrees so
-    // Drop has multiple intermediates to reclaim.
+    // Spread across distinct PT/PD subtrees so Drop has several
+    // intermediates to reclaim.
     let leaves = [
         VirtAddr::new(0x0000_0003_0000_0000), // PD #0, PT #0
         VirtAddr::new(0x0000_0003_0020_0000), // PD #1, PT #0  (different PT)
@@ -550,13 +516,8 @@ fn drop_user_half_returns_intermediate_tables_to_allocator() {
     }
 
     let pages_after_map = BUMP_ALLOC.next_page.load(Ordering::Relaxed);
-    // Expected allocations: at minimum 4 user frames + 4 PT frames
-    // (one PT per distinct leaf vaddr — distinct PD entries always
-    // require a fresh PT). Plus some PD/PDPT allocations depending
-    // on the layout sharing pattern. We don't pin the exact count
-    // because the test's real correctness check is "Drop runs to
-    // completion without a panic"; this assertion just confirms the
-    // map calls actually allocated something.
+    // Not an exact count: the PD/PDPT sharing pattern varies. This only
+    // confirms the map calls allocated at all.
     let allocated = pages_after_map - pages_before;
     assert!(
         allocated >= 4 + 4,
@@ -565,30 +526,12 @@ fn drop_user_half_returns_intermediate_tables_to_allocator() {
 
     drop(space);
 
-    // After Drop: every intermediate page-table frame's META_SLOT
-    // transitions to UNUSED. We verify by re-installing one of the
-    // intermediate paddrs as a fresh `from_unused` — succeeds only
-    // when the slot is UNUSED.
-    //
-    // We don't know the exact paddrs of intermediates without an
-    // observation hook; instead, check that the bump allocator's
-    // dealloc was called the right number of times. The bump alloc
-    // in this test leaks (dealloc is a no-op), so we instead verify
-    // the META_SLOTS entries by re-using the user-leaf paddrs.
-    //
-    // Simplest indirect check: re-create the same VmSpace and re-map
-    // at the same vaddrs with fresh frames. If the tree teardown
-    // worked, this succeeds. If it leaked, the META_SLOTS for the
-    // page-table frames are still TYPED and the next user-VmSpace's
-    // internal `from_unused` would StateMismatch — but the bump
-    // allocator hands out fresh paddrs, so we never re-encounter
-    // the leaked paddrs. The real proof is that the test runs to
-    // completion without a panic in the recursive walker.
+    // The bump allocator hands out fresh paddrs, so a leaked intermediate is
+    // never re-encountered; the real check is that the recursive teardown
+    // walker completes without panicking.
     let _space2 = VmSpace::new().unwrap();
 }
 
-// Counting hook for the cursor-unmap hook tests. Records (vaddr,
-// paddr, mm_ctx_handle) for each invocation.
 struct CountingUnmapHook {
     after_unmap_calls: AtomicU64,
     on_activate_calls: AtomicU64,
@@ -625,9 +568,8 @@ impl CursorUnmapHook for CountingUnmapHook {
     }
 }
 
-// One-shot hook installation. The test that triggers it runs in
-// isolation (sequential setup mutex) so a second test running after
-// it observes the same hook — that's fine for assertions.
+// Installed once and never removed; the setup mutex serialises tests, so a
+// later test observes the same hook.
 static HOOK_INSTALLED: OnceLock<()> = OnceLock::new();
 
 fn install_hook_once() {
@@ -743,7 +685,6 @@ fn pte_software_bits_round_trip_through_cursor() {
         .unwrap();
     let entry = cur.query().unwrap();
     assert_eq!(entry.property.software, 0b101);
-    // Sanity: PTE bits 9/11 are AVL_9 and AVL_11.
     let prop_back = entry.property;
     let bits = prop_back.to_leaf_flags().bits();
     assert_eq!(bits & PteFlags::AVL_9.bits(), PteFlags::AVL_9.bits());
@@ -751,23 +692,9 @@ fn pte_software_bits_round_trip_through_cursor() {
     assert_eq!(bits & PteFlags::AVL_11.bits(), PteFlags::AVL_11.bits());
 }
 
-// ---------------------------------------------------------------------------
-// Huge-leaf demotion, and the kernel-half entry points.
-//
-// A create-mode walk that meets a huge leaf on its way to a smaller
-// target splits it. That has to preserve every translation the huge leaf
-// carried: the demoted children cover the same physical range, so a
-// neighbour inside it must resolve exactly where it did before, and only
-// the requested address may change. The two failure modes — a child
-// stride that is off, and a lost neighbour — are silent, so both are
-// asserted explicitly.
-// ---------------------------------------------------------------------------
-
-/// Raw pointer to entry `index` of the page-table frame at
-/// `table_phys`, through the test arena's "HHDM". Used to install a
-/// 1 GiB leaf by hand: the arena is 32 MiB, so no 1 GiB-aligned page can
-/// be allocated from it, and the leaf's physical range is never
-/// dereferenced.
+/// Raw pointer to entry `index` of the page-table frame at `table_phys`,
+/// through the test arena's HHDM. Used to install a 1 GiB leaf by hand, since
+/// no 1 GiB-aligned page fits the arena; that leaf's range is never dereferenced.
 fn arena_entry_ptr(table_phys: PhysAddr, index: usize) -> *mut u64 {
     let base = BACKING_BASE.load(Ordering::Acquire) as usize;
     // SAFETY: `table_phys` is a page inside the arena, whose provenance
@@ -822,16 +749,11 @@ fn map_4kb_inside_2mb_leaf_demotes_and_keeps_translations() {
         PageTableLevel::Two,
     );
 
-    // A 4 KiB target two pages into the huge leaf, and a neighbour that
-    // must keep the translation the huge leaf gave it.
     let target = VirtAddr::new(huge_va.as_u64() + 0x2000);
     let neighbour = VirtAddr::new(huge_va.as_u64() + 0x9000);
 
-    // The create-mode walk demotes the 2 MiB leaf into a page table of
-    // 4 KiB children covering the same range, and then refuses: the
-    // address is still mapped, and overwriting a present leaf would
-    // strand the reference it holds. Demotion is a structural change,
-    // not a licence to remap.
+    // The create-mode walk demotes the leaf on the way down and then still
+    // refuses: overwriting a present leaf would strand the reference it holds.
     {
         let mut cur = space
             .cursor_mut(target..VirtAddr::new(target.as_u64() + 0x1000))
@@ -869,8 +791,7 @@ fn map_4kb_inside_1gb_leaf_demotes_and_keeps_translations() {
     let _g = setup();
     let mut space = VmSpace::new().unwrap();
 
-    // Force the PDPT into existence, then replace the PDPT entry that
-    // covers this 1 GiB region with a huge leaf.
+    // Force the PDPT into existence, then overwrite its entry with a huge leaf.
     let region = VirtAddr::new(0x0000_0006_0000_0000);
     {
         let mut cur = space
@@ -888,8 +809,7 @@ fn map_4kb_inside_1gb_leaf_demotes_and_keeps_translations() {
             arena_entry_ptr(space.pml4_paddr(), pml4_idx).read_volatile() & PteFlags::ADDRESS_MASK,
         )
     };
-    // A 1 GiB-aligned physical base outside the arena. Only PTE values
-    // name it; nothing dereferences the range.
+    // 1 GiB-aligned base outside the arena; only PTE values name it.
     let huge_base = PhysAddr::new(0x4000_0000);
     let huge_entry = huge_base.as_u64()
         | (PteFlags::PRESENT | PteFlags::WRITABLE | PteFlags::USER | PteFlags::HUGE).bits();
@@ -899,9 +819,8 @@ fn map_4kb_inside_1gb_leaf_demotes_and_keeps_translations() {
     let target = VirtAddr::new(region.as_u64() + 0x20_3000);
     let neighbour = VirtAddr::new(region.as_u64() + 0x40_5000);
 
-    // Two demotions in one descent: PDPT huge leaf -> page directory of
-    // 2 MiB children, then the covering 2 MiB child -> a page table of
-    // 4 KiB children. Refused at the leaf for the same reason as above.
+    // Two demotions in one descent: 1 GiB leaf -> 2 MiB children -> 4 KiB
+    // children, then the same refusal at the leaf.
     {
         let mut cur = space
             .cursor_mut(target..VirtAddr::new(target.as_u64() + 0x1000))
@@ -1019,8 +938,8 @@ fn map_io_owns_no_reference() {
     let mut space = VmSpace::new().unwrap();
     let vaddr = VirtAddr::new(0xFFFF_9000_0002_0000);
     let end = VirtAddr::new(vaddr.as_u64() + 0x1000);
-    // Well past the arena — there is no MetaSlot for this address, which
-    // is exactly the case `map_io` exists for.
+    // Well past the arena: no MetaSlot exists for it, which is the case
+    // `map_io` is for.
     let device_pa = PhysAddr::new(0xFEE0_0000);
 
     {
