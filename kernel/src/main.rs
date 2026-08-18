@@ -17,7 +17,6 @@ mod ffi;
 #[global_allocator]
 static GLOBAL_ALLOCATOR: KernelHeap = KernelHeap;
 
-// Include the Limine assembly trampoline that sets up stack + serial and jumps into kernel_main.
 global_asm!(include_str!("../../boot/limine_entry.s"));
 
 // Ensure the boot crate is linked so kernel_main is available for the assembly entry.

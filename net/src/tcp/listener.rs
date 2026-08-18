@@ -210,7 +210,6 @@ impl SynQueue {
         };
 
         let syn_ack = build_syn_ack_from(&entry, &four_tuple);
-        // Reserved at construction; a failure here means that was skipped.
         if self.entries.push((four_tuple, entry)).is_err() {
             NET_TIMER_WHEEL.cancel(timer_token);
             return None;
@@ -355,7 +354,6 @@ impl core::fmt::Debug for SynQueue {
 pub struct TcpListenState {
     accept_queue: KVecDeque<AcceptedConn>,
 
-    /// From `listen(fd, backlog)`.
     backlog: usize,
 
     local: SockAddr,

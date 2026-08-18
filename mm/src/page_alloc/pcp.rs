@@ -18,8 +18,6 @@ pub(super) const PCP_LOW_WATERMARK: u32 = 8;
 pub(super) const PCP_HIGH_WATERMARK: u32 = PCP_CAPACITY as u32;
 pub(super) const PCP_BATCH_SIZE: u32 = 16;
 
-/// Per-CPU page cache with an array-based stack.
-///
 /// `count`/`stack` are non-atomic: only the owning CPU touches them, under a
 /// [`PreemptGuard`]. The counters are atomic for cross-CPU stat reads.
 #[repr(C, align(64))]
