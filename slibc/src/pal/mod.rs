@@ -155,12 +155,8 @@ pub trait Pal {
     /// runner waiting for this task and the report was discarded.
     fn test_report(status: u32, name: &[u8], msg: &[u8]) -> Result<(), Errno>;
 
-    /// Drive the kernel-side userland-test phase from this task's context.
-    ///
-    /// Intended to be called once from `/sbin/init` when the kernel was
-    /// booted with `tests=on`. Blocks until every registered utest has
-    /// completed; returns `Ok(())` once the harness signalled shutdown
-    /// (or completed without it). Returning `Err` means the syscall is
-    /// not registered or the kernel was not built with `tests=on`.
+    /// Drive the kernel-side userland-test phase from this task's context;
+    /// called once from `/sbin/init`. Blocks until every registered utest has
+    /// completed. `Err` means the kernel was not booted with `tests=on`.
     fn run_userland_tests() -> Result<(), Errno>;
 }

@@ -17,8 +17,7 @@ fn connect_and_establish() -> Result<(u32, tcp::ConnId), &'static str> {
     }
     let sock = sock as u32;
 
-    // Use non-blocking connect so the test doesn't block waiting for a
-    // SYN-ACK that can only arrive from manual injection below.
+    // Non-blocking: the SYN-ACK can only arrive from the manual injection below.
     socket_set_nonblocking(sock, true);
 
     let rc = socket_connect(sock, [10, 0, 0, 2], 80);
@@ -87,14 +86,12 @@ pub fn test_socket_create_invalid_type() -> TestResult {
 
 pub fn test_socket_table_full() -> TestResult {
     reset();
-    // SlabSocketTable grows on demand up to MAX_CAPACITY (1024).
-    // Verify we can allocate beyond the initial 64-slot capacity.
+    // SlabSocketTable grows on demand from 64 slots up to MAX_CAPACITY (1024).
     for i in 0..128 {
         if socket_create(AF_INET, SOCK_STREAM, 0, SocketOwner::UNOWNED) < 0 {
             return fail!("socket allocation failed at index {}", i);
         }
     }
-    // 129th socket should still succeed (table grows to 256).
     assert_test!(
         socket_create(AF_INET, SOCK_STREAM, 0, SocketOwner::UNOWNED) >= 0,
         "129th socket succeeds (growable table)"
@@ -679,14 +676,6 @@ pub fn test_tcp_send_after_shutdown_wr_fails() -> TestResult {
     pass!()
 }
 
-/// Regression test: reproduces the "nc: send failed (broken pipe)" scenario.
-///
-/// The old `socket_connect()` returned immediately without waiting for the
-/// TCP 3WHS. A subsequent `socket_send()` found the socket still in
-/// `Connecting` state and returned `ENOTCONN` — reported as "broken pipe".
-///
-/// This test uses non-blocking connect + manual 3WHS injection to verify
-/// that after establishment, send works correctly.
 pub fn test_tcp_send_after_blocking_connect() -> TestResult {
     reset();
 
@@ -734,8 +723,6 @@ pub fn test_tcp_send_after_blocking_connect() -> TestResult {
         "TCP should be Established after SYN-ACK"
     );
 
-    // Socket state should now be Connected (via sync_socket_state or
-    // notify path) — this is the state nc expects before send.
     let payload = b"Hello World\n";
     let n = socket_send(sock, &payload[..]);
     assert_test!(
@@ -747,8 +734,6 @@ pub fn test_tcp_send_after_blocking_connect() -> TestResult {
     pass!()
 }
 
-/// Regression test: verify that send on a TCP socket that has not completed
-/// the 3WHS returns an error (ENOTCONN), not EPIPE.
 pub fn test_tcp_send_before_handshake_complete() -> TestResult {
     reset();
 
@@ -756,15 +741,11 @@ pub fn test_tcp_send_before_handshake_complete() -> TestResult {
     assert_test!(sock >= 0, "socket_create succeeds");
     let sock = sock as u32;
 
-    // Force non-blocking so connect returns immediately.
     socket_set_nonblocking(sock, true);
 
-    // Connect sends SYN but returns immediately (non-blocking).
     let rc = socket_connect(sock, [10, 0, 0, 2], 80);
-    // Non-blocking connect should return 0 (SYN sent) or EINPROGRESS.
     assert_test!(rc == 0 || rc == -115, "non-blocking connect");
 
-    // Verify TCP is in SynSent (handshake NOT complete).
     let Some(tcp_id) = socket_lookup_tcp_idx(sock) else {
         return fail!("no tcp idx after connect");
     };
@@ -774,12 +755,10 @@ pub fn test_tcp_send_before_handshake_complete() -> TestResult {
         "TCP should be SynSent"
     );
 
-    // Try to send data BEFORE the 3WHS completes.
     let payload = b"Hello World\n";
     let n = socket_send(sock, &payload[..]);
     assert_test!(n < 0, "send before 3WHS completion must fail (ENOTCONN)");
 
-    // Now complete the handshake.
     let Some((tuple, iss)) = tcp::with_pcb(tcp_id, |pcb| match &pcb.state {
         tcp::PcbState::SynSent(s) => Some((pcb.tuple, s.iss.raw())),
         _ => None,
@@ -801,7 +780,6 @@ pub fn test_tcp_send_before_handshake_complete() -> TestResult {
     let result = tcp::input(tuple.remote_ip, tuple.local_ip, &syn_ack, &[], &[], 0);
     socket_notify_tcp_activity(&result);
 
-    // After 3WHS, send should now succeed.
     let n2 = socket_send(sock, &payload[..]);
     assert_test!(n2 > 0, "send after 3WHS completion must succeed");
 
@@ -829,7 +807,6 @@ pub fn test_tcp_listen_accept_incoming_syn() -> TestResult {
     };
     let syn_result = tcp::input([10, 0, 0, 2], [10, 0, 0, 1], &syn_hdr, &[], &[], 0);
 
-    // The SYN-ACK was sent; get the ISS from the outbound segment.
     let syn_ack_seg = match syn_result.segments().next() {
         Some(seg) => seg.clone(),
         None => return fail!("no SYN-ACK segment after SYN"),

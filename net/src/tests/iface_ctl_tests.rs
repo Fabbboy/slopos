@@ -1,12 +1,10 @@
 //! Tests for the interface control plane: what an administrative up or down
 //! actually does to the rest of the stack.
 //!
-//! These need a *real* device registered in the global registry, because the
-//! whole point of the sequence under test is that it calls into a driver and
-//! edits three other tables. So each test registers its own mock, exercises it,
-//! and then unregisters and detaches — the tree is left exactly as it was
-//! found. Nothing here clears a global table: the kernel these run inside has a
-//! live NIC whose configuration later tests depend on.
+//! Each test registers its own mock device in the global registry — the
+//! sequence under test calls into a driver and edits three other tables — and
+//! unregisters it again. Nothing here clears a global table: the kernel these
+//! run inside has a live NIC whose configuration later tests depend on.
 
 use slopos_testing::TestResult;
 use slopos_testing::{assert_eq_test, assert_test, fail, pass};
@@ -26,10 +24,9 @@ use crate::pool::{PACKET_POOL, PacketPool};
 use crate::route::{ROUTE_TABLE, RouteEntry};
 use crate::types::{DevIndex, Ipv4Addr, MacAddr, NetError};
 
-/// A device that records what the control plane did to it.
-///
-/// The counters are the point: "did the transition reach the driver, exactly
-/// once" is not observable from the interface table alone.
+/// A device that records what the control plane did to it: whether a transition
+/// reached the driver, and how often, is not observable from the interface
+/// table alone.
 struct AdminMock {
     mac: MacAddr,
     up_calls: AtomicU32,
@@ -95,8 +92,7 @@ struct Fixture {
 }
 
 impl Fixture {
-    /// Register a mock device and attach an interface for it, exactly as the
-    /// real probe path does: register first, attach after it returns.
+    /// Register first, attach after it returns, as the real probe path does.
     fn new(kind: IfaceKind, mac: MacAddr) -> Option<Self> {
         let mock = KArc::try_new(AdminMock::new(mac)).ok()?;
         let dyn_dev: KArc<dyn NetDevice + Send + Sync> = mock.clone();
@@ -132,8 +128,6 @@ fn routes_for(dev: crate::types::DevIndex) -> usize {
         .count()
 }
 
-/// Bringing an interface down must reach the driver exactly once, withdraw its
-/// routes, and leave every other device's routes alone.
 fn test_admin_down_reaches_the_driver_and_withdraws_routes() -> TestResult {
     let Some(f) = Fixture::new(IfaceKind::Ethernet, MacAddr([2, 0, 0, 0, 9, 1])) else {
         return fail!("could not register a mock device");
@@ -143,7 +137,6 @@ fn test_admin_down_reaches_the_driver_and_withdraws_routes() -> TestResult {
         return fail!("could not register a second mock device");
     };
 
-    // Give both a connected route, and the first a default route too.
     if iface_ctl::configure_ipv4(
         f.dev,
         Ipv4Addr([10, 9, 1, 5]),
@@ -201,8 +194,6 @@ fn test_admin_down_reaches_the_driver_and_withdraws_routes() -> TestResult {
     pass!()
 }
 
-/// The operator's own configuration survives a down; the lease does not.
-///
 /// A static address is not the lease's to discard, and an interface being
 /// administratively down is exactly what invalidates a lease.
 fn test_admin_down_keeps_static_drops_dhcp() -> TestResult {
@@ -253,8 +244,6 @@ fn test_admin_down_keeps_static_drops_dhcp() -> TestResult {
     pass!()
 }
 
-/// Bringing it back up must re-install the connected route for whatever
-/// survived, and reach the driver.
 fn test_admin_up_restores_connected_routes() -> TestResult {
     let Some(f) = Fixture::new(IfaceKind::Ethernet, MacAddr([2, 0, 0, 0, 9, 4])) else {
         return fail!("could not register a mock device");
@@ -284,8 +273,6 @@ fn test_admin_up_restores_connected_routes() -> TestResult {
         1,
         "the connected route for the surviving address is back"
     );
-    // The default route is deliberately *not* restored: it belongs to whoever
-    // learned it, and DHCP re-installs it when it re-binds.
     let has_default = ROUTE_TABLE
         .all_routes()
         .iter()
@@ -299,22 +286,16 @@ fn test_admin_up_restores_connected_routes() -> TestResult {
     pass!()
 }
 
-/// A learned default route does not survive a down/up cycle.
-///
 /// `realise` derives the connected route back from an address that survived;
 /// the default route was *learned* rather than derived, so only a DHCP re-bind
 /// installs it again.
-///
-/// The `assert_test!` below is non-vacuous by construction: a default route is
-/// really installed first, so the assertion is about a route that existed and
-/// is gone, not about one that was never there.
 fn test_admin_up_does_not_restore_the_default_route() -> TestResult {
     let Some(f) = Fixture::new(IfaceKind::Ethernet, MacAddr([2, 0, 0, 0, 9, 12])) else {
         return fail!("could not register a mock device");
     };
 
-    // A static address, so the address itself survives the down and the test is
-    // isolated to what happens to the two routes derived from it.
+    // A static address survives the down, isolating the test to the two routes
+    // derived from it.
     if iface_ctl::configure_ipv4(
         f.dev,
         Ipv4Addr([10, 9, 12, 5]),
@@ -364,7 +345,6 @@ fn test_admin_up_does_not_restore_the_default_route() -> TestResult {
     pass!()
 }
 
-/// Whether a default route is installed for `dev`.
 fn has_default_route(dev: DevIndex) -> bool {
     ROUTE_TABLE
         .all_routes()
@@ -372,8 +352,6 @@ fn has_default_route(dev: DevIndex) -> bool {
         .any(|r| r.dev == dev && r.prefix_len == 0)
 }
 
-/// A concurrent transition is refused rather than interleaved with a
-/// half-applied one.
 fn test_admin_guard_refuses_a_second_entrant() -> TestResult {
     let Some(f) = Fixture::new(IfaceKind::Ethernet, MacAddr([2, 0, 0, 0, 9, 5])) else {
         return fail!("could not register a mock device");
@@ -405,13 +383,9 @@ fn test_admin_guard_refuses_a_second_entrant() -> TestResult {
     pass!()
 }
 
-/// A down flushes the interface's neighbours, and the packets those entries had
-/// queued go back to the pool rather than leaking.
-///
-/// The free happens in `iface_ctl`, outside the cache lock, because
-/// `PacketBuf::drop` takes the packet pool's lock — which is exactly why
-/// `flush_device` hands the packets back instead of dropping them itself. The
-/// pool's free count is how that shows up from outside.
+/// `flush_device` hands the packets back rather than dropping them under the
+/// cache lock, because `PacketBuf::drop` takes the pool's lock; the pool's free
+/// count is how that shows up from outside.
 fn test_admin_down_flushes_neighbours_and_frees_packets() -> TestResult {
     PACKET_POOL.init();
 
@@ -424,9 +398,8 @@ fn test_admin_down_flushes_neighbours_and_frees_packets() -> TestResult {
         f.teardown();
         return fail!("packet pool has no capacity");
     };
-    // An absent neighbour creates an `Incomplete` entry and queues the packet in
-    // it. The ARP request the outcome asks for is never sent, which is fine —
-    // the entry and its queued packet are the state under test.
+    // The ARP request this outcome asks for is never sent: the `Incomplete`
+    // entry and its queued packet are the state under test.
     drop(NEIGHBOR_CACHE.resolve(f.dev, Ipv4Addr([10, 9, 6, 9]), pkt));
 
     let pool_queued = PACKET_POOL.available();
@@ -440,7 +413,6 @@ fn test_admin_down_flushes_neighbours_and_frees_packets() -> TestResult {
     f.teardown();
 
     assert_test!(result.is_ok(), "admin down must succeed");
-    // Deterministic half: this device's cache entries are nobody else's.
     assert_eq_test!(
         queued,
         Some(1),
@@ -451,9 +423,8 @@ fn test_admin_down_flushes_neighbours_and_frees_packets() -> TestResult {
         pool_queued < pool_before,
         "the queued packet is held out of the pool"
     );
-    // The pool is shared with live NIC receive, so an exact count here would be
-    // a flake waiting for a SLIRP frame to land mid-test. `>=` is the assertion
-    // that actually catches the defect: a leaked vector returns nothing, giving
+    // The pool is shared with live NIC receive, so an exact count would flake on
+    // a frame landing mid-test; `>=` still catches a leak, which would leave
     // `pool_after == pool_queued`.
     assert_test!(
         pool_after >= pool_queued + 1,
@@ -462,9 +433,9 @@ fn test_admin_down_flushes_neighbours_and_frees_packets() -> TestResult {
     pass!()
 }
 
-/// Carrier is the physical link; `admin_up` is what the operator asked for.
-/// Losing the first must not rewrite the second, or replugging a cable would
-/// bring an interface back administratively down.
+/// Carrier is the physical link, `admin_up` what the operator asked for: losing
+/// the first must not rewrite the second, or replugging a cable would bring an
+/// interface back administratively down.
 fn test_admin_intent_survives_carrier_loss() -> TestResult {
     let Some(f) = Fixture::new(IfaceKind::Ethernet, MacAddr([2, 0, 0, 0, 9, 7])) else {
         return fail!("could not register a mock device");
@@ -482,8 +453,7 @@ fn test_admin_intent_survives_carrier_loss() -> TestResult {
     assert_test!(lost.is_some(), "carrier loss is a transition");
     assert_test!(regained.is_some(), "carrier return is a transition");
     // `LowerLayerDown`, not `Down`: RFC 2863 keeps "the operator took it down"
-    // and "the cable is out" as distinct states, and collapsing them is what
-    // makes a UI tell someone to check a setting when they should check a plug.
+    // and "the cable is out" as distinct states.
     assert_eq_test!(
         while_lost,
         Some((true, OperState::LowerLayerDown)),
@@ -502,27 +472,16 @@ fn test_admin_intent_survives_carrier_loss() -> TestResult {
     pass!()
 }
 
-// =============================================================================
-// The master switch
-// =============================================================================
+// The master switch acts on every admin-up non-loopback interface, so a naive
+// test downs the real virtio NIC the rest of the suite uses: its DHCP-learned
+// default route is withdrawn and not restored on the way back up, breaking the
+// socket and DNS tests downstream.
 //
-// The switch acts on every admin-up non-loopback interface, so a naive test
-// downs the real virtio NIC the rest of the suite is using. `LeasePolicy::Keep`
-// keeps its address, but `realise` re-installs only *connected* routes on the
-// way back up — a DHCP-learned default route is withdrawn and not restored,
-// because re-learning it is the client's job. Off-link traffic would stay
-// broken for the rest of the boot, failing the socket and DNS tests downstream.
-//
-// Parking is what makes the switch testable anyway. `iface::set_admin_intent`
-// writes the intent flag and *only* the flag — no driver call, no route
-// withdrawal, no address touched — so a parked interface drops out of the
-// switch's target set ("non-loopback and admin-up") while nothing about it has
-// actually changed. Unparking writes the flag back, leaving the switch acting
-// on exactly the interfaces the test owns.
-//
-// Each test below gathers its observations *before* restoring global state and
-// asserts *after*, so a failing assertion cannot leave networking switched off
-// for every test that runs later.
+// `iface::set_admin_intent` writes the intent flag and *only* the flag, so a
+// parked interface drops out of the switch's target set while nothing about it
+// has actually changed. Each test below gathers its observations *before*
+// restoring global state and asserts *after*, so a failing assertion cannot
+// leave networking switched off for every later test.
 
 /// Park every live non-loopback interface's admin intent, recording them in
 /// `out` and returning how many.
@@ -551,7 +510,6 @@ fn unpark_live_ifaces(parked: &[u32]) {
     }
 }
 
-/// The kernel's loopback interface index, if one is attached.
 fn find_loopback() -> Option<u32> {
     let mut found = None;
     iface::for_each(|i| {
@@ -562,8 +520,8 @@ fn find_loopback() -> Option<u32> {
     found
 }
 
-/// An empty snapshot buffer. Eight entries is well past what any test here
-/// creates, and small enough to stay clear of the 2 KiB stack-frame gate.
+/// Eight entries: well past what any test here creates, and small enough to
+/// stay clear of the 2 KiB stack-frame gate.
 fn empty_neigh_snapshot() -> [NeighborSnapshot; 8] {
     [NeighborSnapshot {
         dev: DevIndex(0),
@@ -575,7 +533,6 @@ fn empty_neigh_snapshot() -> [NeighborSnapshot; 8] {
     }; 8]
 }
 
-/// Neighbour-cache entries belonging to one device.
 fn neighbours_for(dev: DevIndex) -> usize {
     let mut out = empty_neigh_snapshot();
     NEIGHBOR_CACHE.snapshot(Some(dev), &mut out).1
@@ -589,9 +546,8 @@ fn queued_pkts_for(dev: DevIndex) -> Option<u32> {
     (written == 1 && total == 1).then(|| out[0].queued_pkts)
 }
 
-/// Disabling networking unrealises interfaces without rewriting what the
-/// operator asked for. `admin_up` is the memory the next enable reads, so a
-/// disable that wrote it would destroy the very thing it needs.
+/// `admin_up` is the memory the next enable reads, so a disable that wrote it
+/// would destroy the very thing it needs.
 fn test_disable_preserves_admin_intent() -> TestResult {
     let Some(f) = Fixture::new(IfaceKind::Ethernet, MacAddr([2, 0, 0, 0, 9, 8])) else {
         return fail!("could not register a mock device");
@@ -622,9 +578,8 @@ fn test_disable_preserves_admin_intent() -> TestResult {
     pass!()
 }
 
-/// Loopback ignores the master switch entirely. Taking `127.0.0.1` away would
-/// break AF_INET localhost IPC, which has nothing to do with networking being
-/// switched off.
+/// Taking `127.0.0.1` away would break AF_INET localhost IPC, which has nothing
+/// to do with networking being switched off.
 fn test_loopback_is_exempt_from_master_switch() -> TestResult {
     let Some(lo) = find_loopback() else {
         return fail!("no loopback interface is attached");
@@ -649,12 +604,9 @@ fn test_loopback_is_exempt_from_master_switch() -> TestResult {
     pass!()
 }
 
-/// A device attached while networking is disabled comes up admin-up but
-/// unrealised, and the next enable realises it.
-///
-/// This is the case a remembered-set implementation gets wrong: the interface
-/// was in nobody's snapshot when the switch moved, so an enable that only
-/// re-realises what the disable recorded leaves it dark forever.
+/// The case a remembered-set implementation gets wrong: the interface was in
+/// nobody's snapshot when the switch moved, so an enable that only re-realises
+/// what the disable recorded leaves it dark forever.
 fn test_attach_while_disabled_realises_on_enable() -> TestResult {
     let mut parked = [0u32; NET_MAX_IFACES];
     let n_parked = park_live_ifaces(&[], &mut parked);
@@ -697,9 +649,7 @@ fn test_attach_while_disabled_realises_on_enable() -> TestResult {
     pass!()
 }
 
-/// `disable` then `enable` leaves the administrative flags exactly as they
-/// were, and puts back the addresses and connected routes it unrealised. The
-/// switch is a gate in front of intent, not an edit of it.
+/// The switch is a gate in front of intent, not an edit of it.
 fn test_disable_then_enable_is_identity() -> TestResult {
     let Some(down) = Fixture::new(IfaceKind::Ethernet, MacAddr([2, 0, 0, 0, 9, 10])) else {
         return fail!("could not register a mock device");
@@ -709,8 +659,8 @@ fn test_disable_then_enable_is_identity() -> TestResult {
         return fail!("could not register a second mock device");
     };
 
-    // A DHCP-origin address on the interface that stays up: the switch must keep
-    // it, which is what distinguishes `LeasePolicy::Keep` from an admin down.
+    // A DHCP-origin address on the interface that stays up: keeping it is what
+    // distinguishes `LeasePolicy::Keep` from an admin down.
     let _ = iface::add_addr(
         up.ifindex,
         IfaceAddr::permanent(
@@ -720,8 +670,8 @@ fn test_disable_then_enable_is_identity() -> TestResult {
             AddrOrigin::Dhcp,
         ),
     );
-    // One of the pair is administratively down before the cycle, so the test
-    // distinguishes "flags preserved" from "everything ended up up".
+    // One of the pair goes down before the cycle, so the test distinguishes
+    // "flags preserved" from "everything ended up up".
     let pre_down = iface_ctl::set_admin_up(down.ifindex, false);
 
     let mut parked = [0u32; NET_MAX_IFACES];

@@ -41,10 +41,6 @@ fn create_test_task(name: &[u8], flags: u16) -> u32 {
     )
 }
 
-// =============================================================================
-// Task Lifecycle Tests
-// =============================================================================
-
 pub fn test_task_context_initial_state() -> TestResult {
     let _fixture = ContextFixture::new();
 
@@ -53,8 +49,8 @@ pub fn test_task_context_initial_state() -> TestResult {
 
     let task = assert_some!(task_find_by_id(task_id));
 
-    // Shared guard, not a `&mut`: these are diagnostic reads of a live task,
-    // so they go through the racy accessors rather than a witness.
+    // Diagnostic reads of a live task, so the racy accessors off a shared guard
+    // rather than a witness.
     let ctx_rsp = task.context_rsp();
     let ctx_rip = task.context_rip();
     if ctx_rsp == 0 && ctx_rip == 0 {
@@ -110,10 +106,6 @@ pub fn test_task_invalid_state_transition() -> TestResult {
 
     TestResult::Pass
 }
-
-// =============================================================================
-// Termination Edge Cases
-// =============================================================================
 
 pub fn test_task_double_terminate() -> TestResult {
     let _fixture = ContextFixture::new();
@@ -208,15 +200,10 @@ pub fn test_task_flags_preserved() -> TestResult {
     TestResult::Pass
 }
 
-// =============================================================================
-// SwitchContext Behavior Tests
-// =============================================================================
-// No layout (size/offset) stests here on purpose: SwitchContext is an
-// alias of slopos_ostd::task::TaskContext, whose size and every field
-// offset are pinned by `const _` asserts beside the struct definition
-// (slopos-ostd/src/task/task.rs) in all build configurations. Runtime
-// duplicates of compile-time-enforced facts can only agree or drift
-// stale.
+// No layout (size/offset) stests here on purpose: `SwitchContext` aliases
+// `slopos_ostd::task::TaskContext`, whose size and every field offset are
+// pinned by `const _` asserts beside the struct definition in all build
+// configurations. A runtime duplicate can only agree or drift stale.
 
 pub fn test_switch_context_zero_init() -> TestResult {
     use super::task_struct::SwitchContext;
@@ -266,11 +253,9 @@ pub fn test_task_has_switch_ctx() -> TestResult {
     TestResult::Pass
 }
 
-/// Compare two arrays of u64 fields by index, with labels supplied as a
-/// separate parallel array. Folds dozens of inline `assert_eq_test!`
-/// call sites — each of which materialises its own `format_args!` slot
-/// in the caller's stack frame — into one materialisation site here,
-/// keeping the test fn's frame under the 2 KiB stack-size gate.
+/// Compare u64 fields by index against a parallel label array. Dozens of inline
+/// `assert_eq_test!` sites would each materialise a `format_args!` slot in the
+/// caller's frame; folding them here keeps the test fn under the 2 KiB gate.
 #[inline(never)]
 fn check_u64_fields(labels: &[&'static str], expected: &[u64], actual: &[u64]) -> Result<(), ()> {
     for ((label, &exp), &act) in labels.iter().zip(expected.iter()).zip(actual.iter()) {
@@ -317,7 +302,6 @@ pub fn test_save_task_context_from_interrupt_frame_marks_started() -> TestResult
 
     let user_data = SegmentSelector::USER_DATA.bits() as u64;
     let user_code = SegmentSelector::USER_CODE.bits() as u64;
-    // Labels are static — no per-call materialisation cost.
     static LABELS: [&'static str; 25] = [
         "rax",
         "rbx",
@@ -345,8 +329,7 @@ pub fn test_save_task_context_from_interrupt_frame_marks_started() -> TestResult
         "context_from_user",
         "user_started",
     ];
-    // Heap-allocate expected/actual u64 arrays so 25 * 8 byte arrays
-    // never sit on the test fn's stack frame.
+    // Heap-allocated so two 25 * 8 byte arrays never sit on this frame.
     let mut expected: KBox<[u64; 25]> = KBox::zeroed().expect("alloc");
     let mut actual: KBox<[u64; 25]> = KBox::zeroed().expect("alloc");
     expected[0] = 0xA1;
@@ -457,39 +440,24 @@ slopos_testing::stest!(name = test_task_find_after_terminate, suite = context);
 slopos_testing::stest!(name = test_task_rapid_create_terminate, suite = context);
 slopos_testing::stest!(name = test_task_process_id_consistency, suite = context);
 
-// =============================================================================
-// Per-task FPU slot: the vector state the context switch routes through
-// =============================================================================
+// The FPU tests below drive the buffer the context switch routes through — each
+// task's own `fpu_state` cell — rather than the XSAVE/XRSTOR instructions,
+// which `xsave_tests.rs` covers.
 //
-// `xsave_tests.rs` proves the XSAVE/XRSTOR *instructions* round-trip a register
-// file through a buffer. Nothing covered the buffer the switch actually uses —
-// each task's own `fpu_state` cell — so a save that wrote into the wrong task's
-// slot, or a restore that read from it, was silent user-visible corruption
-// rather than a fault. These three tests drive the kernel's own
-// `TaskInner::fpu_*` operations and check the vector registers on the way out.
+// Each begins by restoring a scratch task, which is not redundant:
+// `fpu_owner_assert_may_take` exempts a task whose `fpu_last_cpu` is still
+// `FPU_CPU_NONE`, which is exactly the state of a fresh `KBox<Task>`, so a test
+// that saved straight into one would exercise the exempt path. The restore is
+// what gives the task an ownership claim so the saves below run checked.
 //
-// # Why each test hands a task the register file first
-//
-// Every one of these begins by restoring a scratch task, which looks redundant
-// and is not. `fpu_owner_assert_may_take` deliberately exempts a task whose
-// `fpu_last_cpu` is still `FPU_CPU_NONE` — a task that has never had its vector
-// state loaded owns no register file, so "these registers are not yours" is not
-// a bug for it. A freshly allocated `KBox<Task>` is in exactly that state, so a
-// test that saved straight into it would exercise the *exempt* path and prove
-// nothing about the checked one. Restoring the task first is what gives it an
-// ownership claim, through public API, so the saves below run checked.
-//
-// # Why interrupts stay off
-//
-// The sequences below leave a pattern in the live register file across several
-// calls. A context switch in that window would legitimately save and restore
-// the whole file underneath them and the readback would be meaningless. Each
-// test also snapshots the live state on entry and restores it on exit, so a
-// test that clobbers XMM does not corrupt the task it is running on.
+// Interrupts stay off because the sequences leave a pattern in the live register
+// file across several calls, and a context switch in that window would save and
+// restore the whole file underneath them. Each test also snapshots the live
+// state on entry and puts it back on exit.
 
-/// Scratch XSAVE image used to park the running task's live vector state for
-/// the duration of a test. Heap-allocated: `FpuState` is 2.6 KiB and the
-/// stack-frame gate is 2 KiB.
+/// Scratch XSAVE image parking the running task's live vector state for the
+/// duration of a test. Heap-allocated: `FpuState` is 2.6 KiB against a 2 KiB
+/// stack-frame gate.
 fn snapshot_live_fpu(xcr0: u64) -> KBox<slopos_ostd::task::FpuState> {
     let mut area: KBox<slopos_ostd::task::FpuState> =
         KBox::try_init(slopos_ostd::task::FpuState::init_zero()).expect("alloc");
@@ -519,10 +487,7 @@ fn patterns_b() -> [slopos_ostd::test_support::cpu_state::Xmm128; 4] {
 }
 
 /// Two tasks' save areas are independent: writing B's does not disturb A's.
-///
-/// This is the test that fails if a save or restore is ever routed through the
-/// wrong task's cell — the shape the `TaskOwnCell` migration exists to make
-/// unrepresentable, and the one a mis-sequenced save reintroduces.
+/// Fails if a save or restore is ever routed through the wrong task's cell.
 pub fn test_fpu_per_task_slot_isolation() -> TestResult {
     use slopos_ostd::test_support::cpu_state as cpu;
 
@@ -536,17 +501,14 @@ pub fn test_fpu_per_task_slot_isolation() -> TestResult {
         let saved = snapshot_live_fpu(xcr0);
 
         // Every image restored below is one this test authored, so a rejection
-        // is a defect in the save path rather than a hostile image — worth
-        // failing on rather than absorbing.
+        // is a defect in the save path rather than a hostile image.
         let mut accepted = true;
 
-        // Give A the register file, then park pattern A in its slot.
         accepted &= a.fpu_restore_to_cpu_mut(xcr0);
         cpu::xmm_load_4(&pat_a);
         a.fpu_save_in_place_mut(xcr0);
 
-        // Same for B, with a disjoint pattern. If the two slots aliased, this
-        // is the write that would destroy A's.
+        // If the two slots aliased, this is the write that would destroy A's.
         accepted &= b.fpu_restore_to_cpu_mut(xcr0);
         cpu::xmm_load_4(&pat_b);
         b.fpu_save_in_place_mut(xcr0);
@@ -557,8 +519,7 @@ pub fn test_fpu_per_task_slot_isolation() -> TestResult {
         accepted &= a.fpu_restore_to_cpu_mut(xcr0);
         let readback = cpu::xmm_read_4();
 
-        // Leave no CPU naming a task that is about to be freed, and put the
-        // running task's own vector state back exactly as found.
+        // Leave no CPU naming a task that is about to be freed.
         slopos_ostd::task::fpu_owner_forget(&*a);
         slopos_ostd::task::fpu_owner_forget(&*b);
         accepted &= saved.restore_to_cpu(xcr0);
@@ -589,15 +550,11 @@ pub fn test_fpu_per_task_slot_isolation() -> TestResult {
 /// The dispatcher's save-prev / restore-next pair, run through `run_switch`
 /// with the incoming task published inside the window.
 ///
-/// That ordering is the whole reason `SwitchWindow` exists: the dispatcher
-/// publishes the incoming task into the PCR *before* the outgoing task's
-/// registers are saved, so `CurrentTask` no longer names the task whose vector
-/// state is about to be written. Publication happens in `run_switch`'s
-/// `publish` step, which is where production puts it — the window has to be
-/// open first, because publishing also swaps the SafeStack data stack. This
-/// drives the real `fpu_save_current` / `fpu_restore_to_cpu` pair through the
-/// real witnesses and checks both halves: the outgoing task's live registers
-/// land in its own slot, and the incoming task's slot lands in the registers.
+/// That ordering is the whole reason `SwitchWindow` exists: the incoming task
+/// reaches the PCR *before* the outgoing task's registers are saved, so
+/// `CurrentTask` no longer names the task whose vector state is about to be
+/// written. Publication sits in `run_switch`'s `publish` step, as in production,
+/// because it also swaps the SafeStack data stack and so needs the window open.
 pub fn test_fpu_switch_saves_prev_and_restores_next() -> TestResult {
     use slopos_ostd::task::SchedPlacement;
     use slopos_ostd::task::fpu_current_cpu;
@@ -605,14 +562,12 @@ pub fn test_fpu_switch_saves_prev_and_restores_next() -> TestResult {
 
     let _fixture = ContextFixture::new();
 
-    // The switch's incoming end has to be a task the PCR genuinely names, and
-    // in the kernel test phase the BSP is parked on a bootstrap stub where
-    // `Current::get()` is `None`. So dispatch a real registered task as this
-    // CPU's current through the sanctioned test hook — the same thing the
-    // syscall suite's `make_task_current` does. Forging `PCR.current_task`
-    // directly would be worse than useless here: it would leave the genuinely
-    // running task looking un-pinned to `task_is_dispatch_pinned`, and a
-    // concurrent reap could free it underneath this test.
+    // The incoming end has to be a task the PCR genuinely names, and in the
+    // kernel test phase the BSP is parked on a bootstrap stub where
+    // `Current::get()` is `None`, so a real registered task is dispatched
+    // through the sanctioned test hook. Forging `PCR.current_task` would leave
+    // the genuinely running task looking un-pinned to `task_is_dispatch_pinned`,
+    // and a concurrent reap could free it underneath this test.
     let next_id = create_test_task(b"FpuSwitch\0", TASK_FLAG_KERNEL_MODE);
     assert_test!(next_id != INVALID_TASK_ID, "failed to create incoming task");
     let next_guard = assert_some!(task_find_by_id(next_id));
@@ -638,39 +593,24 @@ pub fn test_fpu_switch_saves_prev_and_restores_next() -> TestResult {
             let mut published = false;
             let mut accepted = true;
 
-            // `run_switch` is the only way to obtain a `SwitchWindow`. The
-            // publication it takes as an argument is the condition this test
-            // exists to exercise: everything in `prepare` runs with the PCR
-            // naming `next`, so the outgoing task's registers are saved through
-            // a witness `CurrentTask` could no longer supply.
             slopos_ostd::task::run_switch(
                 Some(prev_ref),
                 &next_guard,
                 || {
                     published = crate::scheduler::dispatch_task_for_test(cpu_id, next_id);
 
-                    // Park pattern "next" in the incoming task's own slot,
-                    // using the witness for the task the PCR now names.
                     if let Some(current) = crate::task_struct::Current::get() {
                         cpu::xmm_load_4(&pat_next);
                         current.task().fpu_save_in_place(&current, xcr0);
                     }
 
-                    // Hand the outgoing task the register file (see the module
-                    // note on why), then make pattern "prev" the live state it
-                    // is switched out with.
-                    //
                     // The owner tag is taken directly rather than as a
-                    // side-effect of a restore, and that is the stronger
-                    // version, not a workaround for the shared borrow this
-                    // closure holds. An `XRSTOR` here would load a slot that
-                    // the `xmm_load_4` on the next line immediately overwrites,
-                    // so only the tag survives it — and the tag is what the
-                    // test needs: without it `prev.fpu_last_cpu()` stays
-                    // `FPU_CPU_NONE`, `fpu_owner_assert_may_take` inside the
-                    // `fpu_save_current` below takes its never-restored
-                    // exemption, and the assertion this test exists for is
-                    // skipped rather than exercised.
+                    // side-effect of a restore: an `XRSTOR` here would load a
+                    // slot the next line immediately overwrites, so only the tag
+                    // would survive it anyway. Without the tag `prev` stays
+                    // `FPU_CPU_NONE` and the `fpu_save_current` below takes
+                    // `fpu_owner_assert_may_take`'s never-restored exemption,
+                    // skipping the assertion this test exists for.
                     slopos_ostd::task::fpu_owner_take(prev_ref, fpu_current_cpu());
                     cpu::xmm_load_4(&pat_prev);
                 },
@@ -682,9 +622,7 @@ pub fn test_fpu_switch_saves_prev_and_restores_next() -> TestResult {
                 },
             );
 
-            // The incoming task's saved state must now be live...
             let live_after_switch = cpu::xmm_read_4();
-            // ...and the outgoing task's live state must have landed in its slot.
             cpu::xmm_zero_4();
             accepted &= prev.fpu_restore_to_cpu_mut(xcr0);
             let prev_slot = cpu::xmm_read_4();
@@ -728,11 +666,9 @@ pub fn test_fpu_switch_saves_prev_and_restores_next() -> TestResult {
     TestResult::Pass
 }
 
-/// The AVX upper halves survive a round trip through a task's slot.
-///
-/// `fxsave` cannot represent the upper 128 bits of YMM. A save path that
-/// regressed to it would return correct lower halves and zeroed upper ones, so
-/// this is the half of the register file worth checking explicitly.
+/// The AVX upper halves survive a round trip through a task's slot. `fxsave`
+/// cannot represent the upper 128 bits of YMM, so a save path that regressed to
+/// it would return correct lower halves and zeroed upper ones.
 pub fn test_fpu_avx_upper_halves_survive_task_slot() -> TestResult {
     use slopos_arch::cpu::control_regs::Xcr0Flags;
     use slopos_ostd::test_support::cpu_state as cpu;
@@ -743,7 +679,6 @@ pub fn test_fpu_avx_upper_halves_survive_task_slot() -> TestResult {
     }
 
     let mut task: KBox<Task> = KBox::try_init(Task::init_invalid()).expect("alloc");
-    // YMM0 lower, YMM0 UPPER, YMM1 lower, YMM1 UPPER.
     let patterns: [cpu::Xmm128; 4] = [
         [0xDEAD_BEEF_CAFE_BABE, 0x1111_2222_3333_4444],
         [0xAAAA_BBBB_CCCC_DDDD, 0x5555_6666_7777_8888],
@@ -790,12 +725,10 @@ pub fn test_fpu_avx_upper_halves_survive_task_slot() -> TestResult {
 }
 
 /// A save area the hardware refuses is repaired underneath the restore.
-///
 /// `prepare_switch_to` XRSTORs the incoming task's slot with interrupts off,
-/// mid-switch, with nowhere to report a failure — so the repair has to happen
-/// below it or the switch is the thing that stops the CPU. This drives the
-/// exact call that path makes, on a slot poisoned the way a signal frame from
-/// user memory could poison one.
+/// mid-switch, with nowhere to report a failure, so the repair has to happen
+/// below it or the switch is what stops the CPU. The slot here is poisoned the
+/// way a signal frame from user memory could poison one.
 pub fn test_fpu_poisoned_slot_is_repaired() -> TestResult {
     use slopos_ostd::task::XSTATE_RESERVED_OFFSET;
 
@@ -804,7 +737,7 @@ pub fn test_fpu_poisoned_slot_is_repaired() -> TestResult {
 
     // A non-zero byte in the XSTATE header's reserved tail faults in both the
     // standard and the compacted form, so the fault does not depend on which
-    // XSAVE features the CPU implements.
+    // XSAVE features this CPU implements.
     task.fpu_state.get_mut().data[XSTATE_RESERVED_OFFSET] = 1;
 
     let (accepted, poison_after, accepted_again, restored) =
@@ -813,8 +746,6 @@ pub fn test_fpu_poisoned_slot_is_repaired() -> TestResult {
 
             let accepted = task.fpu_restore_to_cpu_mut(xcr0);
             let poison_after = task.fpu_state.get_mut().data[XSTATE_RESERVED_OFFSET];
-            // The repair has to hold: a second switch to this task must not
-            // walk into the same fault.
             let accepted_again = task.fpu_restore_to_cpu_mut(xcr0);
 
             slopos_ostd::task::fpu_owner_forget(&*task);

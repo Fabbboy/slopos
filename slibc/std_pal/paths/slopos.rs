@@ -1,12 +1,8 @@
-//! SlopOS path/cwd operations for `std::env`.
+//! SlopOS path/cwd operations for `std::env`, living at `std::sys::paths`.
 //!
-//! Lives at `std::sys::paths` (the module `std::env::{current_dir,
-//! set_current_dir, temp_dir}` route through). Upstream std moved `chdir` /
-//! `getcwd` here out of `sys::pal::<os>::os`, so a target without a `paths`
-//! arm silently falls back to `unsupported` — which is exactly why
-//! `set_current_dir` used to always fail on SlopOS. We wire `getcwd`/`chdir`
-//! to the slibc C ABI (`SYSCALL_GETCWD` / `SYSCALL_CHDIR`); the remaining
-//! path helpers stay on the `unsupported` stub.
+//! A target without a `paths` arm silently falls back to the `unsupported`
+//! stub, so `set_current_dir` fails rather than failing to build. The
+//! remaining path helpers here are still that stub.
 
 #![forbid(unsafe_op_in_unsafe_fn)]
 
@@ -55,6 +51,6 @@ pub fn chdir(p: &path::Path) -> io::Result<()> {
 }
 
 pub fn temp_dir() -> PathBuf {
-    // `/tmp` is a ramfs mount in the SlopOS VFS (see fs/src/vfs/init.rs).
+    // `/tmp` is a ramfs mount in the SlopOS VFS.
     PathBuf::from("/tmp")
 }

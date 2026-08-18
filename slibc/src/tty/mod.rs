@@ -40,10 +40,9 @@ pub unsafe extern "C" fn tcgetattr(fd: i32, termios: *mut UserTermios) -> i32 {
     }
 }
 
-/// `optional_actions` determines when the change takes effect:
-/// - `TCSANOW`   (0): immediately
-/// - `TCSADRAIN` (1): after all output written
-/// - `TCSAFLUSH` (2): after output written, discard pending input
+/// `optional_actions` selects when the change takes effect: `TCSANOW`
+/// immediately, `TCSADRAIN` after pending output drains, `TCSAFLUSH` after
+/// output drains and pending input is discarded.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn tcsetattr(
     fd: i32,

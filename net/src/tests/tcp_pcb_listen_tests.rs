@@ -1,12 +1,7 @@
 //! Unit tests for `tcp::pcb::listen::ListenState::on_segment`.
 //!
-//! Drives the handler directly: a `Pcb` in `Listen` state, a synthetic
-//! `TcpHeader`, and assertions on the returned `Actions` plus the SYN queue's
-//! own state. No table lookup, no socket layer, no timer dispatch.
-//!
-//! The property these exist for is that a SYN costs a SYN-queue entry and
-//! nothing else — no connection-table slot is spent until a handshake
-//! completes, and the queue is bounded per listener.
+//! Drives the handler directly: no table lookup, no socket layer, no timer
+//! dispatch.
 
 use slopos_testing::TestResult;
 use slopos_testing::{assert_eq_test, assert_test, fail, pass};
@@ -36,7 +31,6 @@ fn make_pcb() -> Pcb {
     Pcb::new(tuple, PcbState::Listen(ListenState::with_syn_queue(syn)))
 }
 
-/// The four-tuple a segment from `remote_port` arrives on.
 fn incoming(remote_port: u16) -> TcpTuple {
     TcpTuple {
         local_ip: LOCAL_IP,
@@ -71,7 +65,6 @@ fn syn_queue_len(pcb: &Pcb) -> usize {
     }
 }
 
-/// RST in → no action, and the half-open entry it names is retired.
 pub fn test_listen_rst_is_ignored() -> TestResult {
     let mut pcb = make_pcb();
     let actions =
@@ -83,7 +76,6 @@ pub fn test_listen_rst_is_ignored() -> TestResult {
     pass!()
 }
 
-/// A RST for a queued half-open connection retires it, freeing the slot.
 pub fn test_listen_rst_retires_the_half_open_entry() -> TestResult {
     let mut pcb = make_pcb();
     let _ = ListenState::on_segment(
@@ -100,7 +92,6 @@ pub fn test_listen_rst_retires_the_half_open_entry() -> TestResult {
     pass!()
 }
 
-/// An ACK naming no half-open connection → RST out, nothing accepted.
 pub fn test_listen_ack_triggers_rst() -> TestResult {
     let mut pcb = make_pcb();
     let actions = ListenState::on_segment(
@@ -117,8 +108,6 @@ pub fn test_listen_ack_triggers_rst() -> TestResult {
     pass!()
 }
 
-/// SYN → SYN+ACK out and a SYN-queue entry, but **nothing accepted**: a
-/// half-open connection must not reach the connection table.
 pub fn test_listen_syn_queues_without_accepting() -> TestResult {
     let mut pcb = make_pcb();
     let actions = ListenState::on_segment(
@@ -147,8 +136,6 @@ pub fn test_listen_syn_queues_without_accepting() -> TestResult {
     pass!()
 }
 
-/// The final ACK completes the handshake: the entry leaves the SYN queue and
-/// becomes an `AcceptedConn` carrying both sides' sequence numbers.
 pub fn test_listen_final_ack_completes_the_handshake() -> TestResult {
     let mut pcb = make_pcb();
     let syn = ListenState::on_segment(
@@ -192,7 +179,6 @@ pub fn test_listen_final_ack_completes_the_handshake() -> TestResult {
     pass!()
 }
 
-/// An ACK whose number does not acknowledge our SYN-ACK is not a handshake.
 pub fn test_listen_wrong_ack_number_does_not_complete() -> TestResult {
     let mut pcb = make_pcb();
     let _ = ListenState::on_segment(
@@ -222,7 +208,6 @@ pub fn test_listen_wrong_ack_number_does_not_complete() -> TestResult {
     pass!()
 }
 
-/// SYN with an MSS option carries it through to the accepted connection.
 pub fn test_listen_syn_parses_mss_option() -> TestResult {
     let mut pcb = make_pcb();
     // MSS option: kind 2, length 4, value 1200
@@ -247,7 +232,6 @@ pub fn test_listen_syn_parses_mss_option() -> TestResult {
     pass!()
 }
 
-/// A SYN with no MSS option falls back to the default.
 pub fn test_listen_syn_without_mss_uses_default() -> TestResult {
     let mut pcb = make_pcb();
     let syn = ListenState::on_segment(&mut pcb, &incoming(40000), &hdr(TCP_FLAG_SYN, 0, 0), &[], 0);
@@ -267,7 +251,6 @@ pub fn test_listen_syn_without_mss_uses_default() -> TestResult {
     pass!()
 }
 
-/// FIN alone at a LISTEN socket is a malformed stranger; dropped.
 pub fn test_listen_stray_fin_dropped() -> TestResult {
     let mut pcb = make_pcb();
     let actions =
@@ -278,8 +261,6 @@ pub fn test_listen_stray_fin_dropped() -> TestResult {
     pass!()
 }
 
-/// A duplicate SYN retransmits the original SYN-ACK rather than taking a
-/// second queue slot.
 pub fn test_listen_duplicate_syn_reuses_its_slot() -> TestResult {
     let mut pcb = make_pcb();
     let first = ListenState::on_segment(
@@ -305,9 +286,8 @@ pub fn test_listen_duplicate_syn_reuses_its_slot() -> TestResult {
     pass!()
 }
 
-/// The queue is bounded: SYN number `SYN_QUEUE_MAX + 1` is dropped, and
-/// dropped *silently* — a RST would confirm to the sender that its flood is
-/// working.
+/// The overflowing SYN is dropped *silently*: a RST would confirm to the sender
+/// that its flood is working.
 pub fn test_listen_syn_queue_is_bounded() -> TestResult {
     let mut pcb = make_pcb();
     for i in 0..SYN_QUEUE_MAX {
@@ -350,10 +330,6 @@ pub fn test_listen_syn_queue_is_bounded() -> TestResult {
     );
     pass!()
 }
-
-// =============================================================================
-// Register the test suite
-// =============================================================================
 
 slopos_testing::stest!(name = test_listen_rst_is_ignored, suite = tcp_pcb_listen);
 slopos_testing::stest!(

@@ -72,7 +72,6 @@ pub fn init_scheduler_for_ap(cpu_id: usize) {
     }
 }
 
-/// One CPU's scheduler counters.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct PerCpuSchedulerStats {
     pub switches: u64,

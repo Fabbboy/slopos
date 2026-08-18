@@ -10,10 +10,8 @@
 //! kernel's first-fit gap finder places two segments back to back.
 //!
 //! Allocations at or above `mmap_threshold` (and all over-aligned
-//! `memalign` requests) get a dedicated mapping, tracked in a registry
-//! of nodes that live in arena chunks — never inside the registered
-//! mapping itself — so neither a buffer overrun nor a forged header
-//! can aim `munmap` at an unrelated mapping.
+//! `memalign` requests) get a dedicated mapping, tracked in the
+//! `DirectRegion` registry.
 
 use core::cell::SyncUnsafeCell;
 use core::cmp;
@@ -141,8 +139,8 @@ impl Segment {
         self.len - SEGMENT_OVERHEAD
     }
 
-    /// Whether `chunk_ptr` is a plausible chunk position: inside
-    /// `[first_chunk, fence)` and on the 16-byte chunk grid.
+    /// A plausible chunk position: inside `[first_chunk, fence)` and on the
+    /// 16-byte chunk grid.
     #[inline]
     fn contains_chunk(&self, chunk_ptr: ChunkPtr) -> bool {
         let addr = chunk_ptr as usize;
@@ -211,9 +209,8 @@ impl DlMalloc {
         }
 
         let chunk_ptr = unsafe { chunk::from_data_ptr(ptr.cast::<u8>()) };
-        // Validate before any header read: segment membership bounds
-        // arena reads, and the direct registry compares pointer values
-        // only. An unrecognized pointer is ignored outright.
+        // Validate before any header read: segment membership bounds the arena
+        // reads, and the direct registry compares pointer values only.
         if unsafe { self.is_allocated_heap_chunk(chunk_ptr) } {
             unsafe {
                 self.release_chunk(chunk_ptr);
@@ -316,8 +313,6 @@ impl DlMalloc {
         }
     }
 
-    // ── Arena (segment) allocation ───────────────────────────────────────
-
     fn arena_alloc(&mut self, request_size: usize) -> *mut c_void {
         if let Some(bin_idx) = bins::size_to_small_bin(request_size)
             && !self.bins.is_empty(bin_idx)
@@ -355,12 +350,10 @@ impl DlMalloc {
         unsafe { self.allocate_from_chunk(fresh, request_size) }
     }
 
-    /// Map a fresh arena segment sized to serve `request_size`, format
-    /// it as one spanning free chunk guarded by the end fence, and
-    /// record it. Returns the spanning chunk (not yet binned) or null.
-    ///
-    /// Segments grow geometrically (at least half the existing arena),
-    /// so the fixed table cannot fill before the address space does.
+    /// Map a fresh arena segment sized to serve `request_size`, format it as
+    /// one spanning free chunk guarded by the end fence, and record it.
+    /// Returns that chunk (not yet binned) or null. Segments grow
+    /// geometrically, so the fixed table cannot fill before the address space.
     fn allocate_segment(&mut self, request_size: usize) -> ChunkPtr {
         if self.segment_count >= MAX_SEGMENTS {
             return ptr::null_mut();
@@ -417,10 +410,9 @@ impl DlMalloc {
         (0..self.segment_count).find(|&i| self.segments[i].contains_chunk(chunk_ptr))
     }
 
-    /// A spanning free chunk releases its whole segment back to the
-    /// kernel, except the last default-sized segment, which stays
-    /// resident as the warm arena so a free/alloc cycle does not
-    /// thrash mmap/munmap.
+    /// A spanning free chunk releases its whole segment back to the kernel,
+    /// except the last default-sized one: that stays resident as the warm
+    /// arena so a free/alloc cycle does not thrash mmap/munmap.
     fn should_release_segment(&self, idx: usize) -> bool {
         self.segment_count > 1 || self.segments[idx].len > SEGMENT_MIN_LEN
     }
@@ -430,8 +422,6 @@ impl DlMalloc {
         self.segments[idx] = self.segments[self.segment_count];
         self.segments[self.segment_count] = Segment::EMPTY;
     }
-
-    // ── Direct (whole-mapping) allocation ────────────────────────────────
 
     fn alloc_direct(&mut self, request_size: usize, alignment: usize) -> *mut u8 {
         let Some(len_request) = request_size
@@ -511,9 +501,8 @@ impl DlMalloc {
     }
 
     /// Unmap the direct mapping registered for `chunk_ptr` and free its
-    /// registry node. The registry is the source of truth: a pointer
-    /// without a node is ignored, so a forged or corrupted header can
-    /// never aim `munmap` at an unrelated mapping.
+    /// registry node. The registry is the source of truth: a pointer with no
+    /// node is ignored.
     unsafe fn release_direct(&mut self, chunk_ptr: ChunkPtr) -> bool {
         let mut link: *mut *mut DirectRegion = &mut self.direct_head;
         loop {
@@ -535,8 +524,6 @@ impl DlMalloc {
             link = unsafe { &mut (*cur).next };
         }
     }
-
-    // ── Chunk carving and recycling ──────────────────────────────────────
 
     unsafe fn allocate_from_chunk(
         &mut self,
@@ -646,8 +633,7 @@ impl DlMalloc {
         if !unsafe { chunk::is_prev_in_use(merged) } {
             let prev = unsafe { chunk::prev_physical(merged) };
             // Merge backward only if prev's own size agrees with the
-            // prev_size that led here — a corrupted neighbor header is
-            // leaked, never merged.
+            // prev_size that led here; a corrupted neighbour is leaked.
             if self.containing_segment(prev).is_some()
                 && unsafe { chunk::next_physical(prev) } == merged
             {
@@ -724,9 +710,8 @@ impl DlMalloc {
         unsafe { chunk::data_ptr(chunk_ptr).cast::<c_void>() }
     }
 
-    /// Record `chunk_ptr`'s size and in-use state in its physical
-    /// successor's header. The successor is always writable: it is
-    /// either a real chunk header or the segment fence.
+    /// Record `chunk_ptr`'s size and in-use state in its physical successor's
+    /// header. That successor is always writable: a real chunk, or the fence.
     unsafe fn set_successor_state(&self, chunk_ptr: ChunkPtr, prev_in_use: bool) {
         let next = unsafe { chunk::next_physical(chunk_ptr) };
         let size = unsafe { chunk::size(chunk_ptr) };
@@ -736,9 +721,9 @@ impl DlMalloc {
         }
     }
 
-    /// A chunk is free iff its successor's PREV_IN_USE bit is clear.
-    /// Fences (size 0) and out-of-grid pointers fail the segment and
-    /// size checks, so merging never crosses a segment boundary.
+    /// A chunk is free iff its successor's PREV_IN_USE bit is clear. Fences
+    /// (size 0) and out-of-grid pointers fail the segment and size checks, so
+    /// merging never crosses a segment boundary.
     unsafe fn is_free_chunk(&self, chunk_ptr: ChunkPtr) -> bool {
         let Some(idx) = self.containing_segment(chunk_ptr) else {
             return false;
@@ -772,8 +757,6 @@ impl DlMalloc {
         }
         unsafe { chunk::is_prev_in_use(next) }
     }
-
-    // ── Plumbing ─────────────────────────────────────────────────────────
 
     fn mmap_anon(len: usize) -> *mut u8 {
         let ret = unsafe {
@@ -816,8 +799,6 @@ impl DlMalloc {
     fn is_valid_chunk_size(size: usize) -> bool {
         size >= chunk::MIN_CHUNK_SIZE && size & (chunk::ALIGNMENT - 1) == 0
     }
-
-    // ── Diagnostics ──────────────────────────────────────────────────────
 
     /// Total address space held by arena segments.
     pub fn arena_size(&self) -> usize {

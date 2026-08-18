@@ -64,7 +64,7 @@ unsafe fn format_to_cb<F: FnMut(u8)>(out: &mut F, fmt: *const u8, ap: &mut VaLis
             p = p.add(1);
             continue;
         }
-        p = p.add(1); // skip '%'
+        p = p.add(1);
 
         if *p == 0 {
             break;
@@ -75,7 +75,6 @@ unsafe fn format_to_cb<F: FnMut(u8)>(out: &mut F, fmt: *const u8, ap: &mut VaLis
             continue;
         }
 
-        // --- Parse flags ---
         let mut flags: u32 = 0;
         loop {
             match *p {
@@ -89,14 +88,12 @@ unsafe fn format_to_cb<F: FnMut(u8)>(out: &mut F, fmt: *const u8, ap: &mut VaLis
             p = p.add(1);
         }
 
-        // --- Parse width ---
         let mut width: i32 = 0;
         while (*p).is_ascii_digit() {
             width = width * 10 + (*p - b'0') as i32;
             p = p.add(1);
         }
 
-        // --- Parse precision ---
         let mut precision: i32 = -1;
         if *p == b'.' {
             p = p.add(1);
@@ -107,7 +104,6 @@ unsafe fn format_to_cb<F: FnMut(u8)>(out: &mut F, fmt: *const u8, ap: &mut VaLis
             }
         }
 
-        // --- Parse length modifier ---
         let mut length = Length::Default;
         match *p {
             b'l' => {
@@ -132,12 +128,11 @@ unsafe fn format_to_cb<F: FnMut(u8)>(out: &mut F, fmt: *const u8, ap: &mut VaLis
                 if *p == b'h' {
                     p = p.add(1);
                 }
-                // treat h and hh as default (promoted to int in varargs)
+                // h and hh are promoted to int in varargs, so default applies.
             }
             _ => {}
         }
 
-        // --- Handle specifier ---
         let spec = *p;
         if spec == 0 {
             break;
@@ -350,17 +345,12 @@ unsafe fn format_to_cb<F: FnMut(u8)>(out: &mut F, fmt: *const u8, ap: &mut VaLis
     count
 }
 
-// ---------------------------------------------------------------------------
-// Public printf family
-// ---------------------------------------------------------------------------
-
 unsafe fn vfprintf_impl(stream: *mut FILE, fmt: *const u8, ap: &mut VaList<'_>) -> i32 {
     if stream.is_null() {
         return -1;
     }
-    // One acquisition for the whole conversion: POSIX §2.5.1 requires the call
-    // to be atomic against other stdio on the stream, and taking the lock here
-    // rather than inside the emit callback keeps it off the per-byte path.
+    // POSIX §2.5.1 requires the whole conversion to be atomic against other
+    // stdio on the stream; locking here keeps it off the per-byte emit path.
     (*stream).lock.lock();
     let count = format_to_cb(
         &mut |b: u8| {

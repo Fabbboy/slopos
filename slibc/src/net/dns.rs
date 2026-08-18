@@ -29,9 +29,6 @@ pub struct AddrInfo {
 }
 
 /// Simplified getaddrinfo — resolves a hostname or dotted-decimal IP.
-///
-/// If `node` is a dotted-decimal IP, parses directly without DNS.
-/// Otherwise calls `SYSCALL_RESOLVE`(135) to get the IPv4 address.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn getaddrinfo(
     node: *const u8,

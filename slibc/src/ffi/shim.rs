@@ -31,8 +31,7 @@ pub fn slopos_pipe(fds: &mut [i32; 2]) -> i32 {
     unsafe { syscalls::slopos_pipe(fds.as_mut_ptr()) }
 }
 
-/// Safe wrapper for `crate::ffi::close` (already a safe extern; this
-/// just keeps test imports tidy).
+/// `crate::ffi::close` is already a safe extern; this only keeps test imports tidy.
 pub fn close(fd: i32) -> i32 {
     crate::ffi::close(fd)
 }

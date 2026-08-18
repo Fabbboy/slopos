@@ -117,9 +117,8 @@ pub unsafe extern "C" fn pthread_create(
         }
     };
 
-    // Build a full per-thread TLS block (TLS image + TCB) so the new thread's
-    // `.tbss` thread-locals are zero-initialized. `tcb_ptr` is the thread
-    // pointer; `tls_base` is the raw allocation to free on failure.
+    // A full block (TLS image + TCB) is what leaves the new thread's `.tbss`
+    // thread-locals zero-initialized.
     let (tls_base, tcb_ptr) = super::tls::alloc_thread_tls();
     if tcb_ptr.is_null() {
         let _ = Sys::munmap(stack_base, stack_size);

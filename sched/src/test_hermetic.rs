@@ -1,16 +1,9 @@
-//! `HermeticState` impls for the kernel-singleton state that
-//! `KernelTestScope` previously snapshotted by hand.
+//! `HermeticState` impls for the scheduler/PCR singletons a test may
+//! transiently mutate.
 //!
-//! Each impl declares one piece of mutable scheduler/PCR state that
-//! tests may transiently mutate. The framework auto-walks the registry
-//! at scope enter/Drop, so adding a new singleton means writing one
-//! `hermetic_state! { ... }` block — never editing the scope itself.
-//!
-//! Each entry uses the `hermetic_state! { ... }` block form: one
-//! macro invocation emits the marker struct, the trait impl, and the
-//! `.hermetic_state_registry` linker-section entry. The custom
-//! per-impl snapshot/restore logic stays — the boilerplate is what
-//! the macro absorbs.
+//! One `hermetic_state! { ... }` block per singleton emits the marker struct,
+//! the trait impl, and the `.hermetic_state_registry` entry the framework
+//! auto-walks at scope enter/Drop, so adding one never means editing the scope.
 
 #![cfg(feature = "test-hooks")]
 
@@ -24,10 +17,6 @@ use slopos_ostd::test_support;
 use super::per_cpu::{SCHEDULERS_INIT, with_cpu_scheduler};
 
 const SCOPE_BITMAP_MAX_CPUS: usize = 32;
-
-// =============================================================================
-// PerCpuOnlineBits — `pcr::is_cpu_online(cpu)` / `mark_cpu_online/offline`
-// =============================================================================
 
 hermetic_state! {
     pub PerCpuOnlineBits {
@@ -55,13 +44,8 @@ hermetic_state! {
     }
 }
 
-// =============================================================================
-// PerCpuSchedulerEnableBits — per-CPU `sched.is_enabled()` bitmap
-// =============================================================================
-//
-// Depends on PerCpuOnlineBits because some tests bring CPUs offline,
-// and restoring `enabled=true` for an offline CPU would be confusing.
-
+// Ordered after PerCpuOnlineBits: some tests bring CPUs offline, and restoring
+// `enabled = true` for an offline CPU would be confusing.
 hermetic_state! {
     pub PerCpuSchedulerEnableBits {
         type Snapshot = u32;
@@ -92,18 +76,8 @@ hermetic_state! {
     }
 }
 
-// =============================================================================
-// SchedulersInitFlag — `SCHEDULERS_INIT` init-once gate
-// =============================================================================
-//
-// Resetting this on Drop lets the next `KernelTestScope::enter()`
-// re-enter `init_all_percpu_schedulers` cleanly (otherwise init_once
-// would short-circuit on the second scope, leaving per-CPU schedulers
-// in whatever state the prior scope left them).
-//
-// Snapshotting is trivial: an `InitFlag` is an atomic bool. We capture
-// its current value and re-arm/clear on restore.
-
+// Without the Drop reset, `init_once` short-circuits on the second scope and
+// leaves the per-CPU schedulers in whatever state the prior scope left them.
 hermetic_state! {
     pub SchedulersInitFlag {
         type Snapshot = bool;
@@ -112,10 +86,8 @@ hermetic_state! {
         }
         fn restore(was_set: Self::Snapshot) {
             if was_set {
-                // Already-set semantics: ensure the flag is set so subsequent
-                // init_once() returns false. InitFlag::reset() puts it back
-                // to "uninitialised", then init_once() takes it. There's no
-                // atomic "set" so we use the init_once side-effect.
+                // There is no atomic "set": reset then init_once is how the
+                // flag is re-armed.
                 SCHEDULERS_INIT.reset();
                 let _ = SCHEDULERS_INIT.init_once();
             } else {
@@ -125,15 +97,11 @@ hermetic_state! {
     }
 }
 
-// =============================================================================
-// BspCurrentTask — `PCR.current_task[BSP]`
-// =============================================================================
-
 hermetic_state! {
     pub BspCurrentTask {
-        // Raw pointer as u64 to satisfy Send, paired with the id and priority
-        // the PCR published for it: restoring the pointer alone would leave
-        // the other two describing a different task.
+        // Pointer as u64 to satisfy Send, paired with the id and priority the
+        // PCR published for it: restoring the pointer alone would leave the
+        // other two describing a different task.
         type Snapshot = (u64, u32, u8);
         fn snapshot() -> Result<Self::Snapshot, AllocError> {
             Ok((
@@ -144,11 +112,8 @@ hermetic_state! {
         }
         fn restore(saved: Self::Snapshot) {
             let (addr, task_id, priority) = saved;
-            // Same discriminator every reader uses: `set_current_task` is the
-            // sole publisher of the (pointer, id) pair and stamps
-            // `INVALID_TASK_ID` whenever the slot does not name a heap task, so
-            // the id decides which shape the saved pointer had and the restore
-            // goes back through the matching publisher.
+            // `INVALID_TASK_ID` is stamped whenever the slot does not name a
+            // heap task, so the id decides which publisher to restore through.
             if task_id == slopos_abi::task::INVALID_TASK_ID {
                 pcr::park_bootstrap_task(addr as *mut ());
             } else {
@@ -157,10 +122,6 @@ hermetic_state! {
         }
     }
 }
-
-// =============================================================================
-// BspIdleTask — `PCR.idle_task[BSP]`
-// =============================================================================
 
 hermetic_state! {
     pub BspIdleTask {
@@ -173,10 +134,6 @@ hermetic_state! {
         }
     }
 }
-
-// =============================================================================
-// SchedulerEnabledFlag — global `SCHEDULER_ENABLED` AtomicU8
-// =============================================================================
 
 hermetic_state! {
     pub SchedulerEnabledFlag {
@@ -191,17 +148,9 @@ hermetic_state! {
     }
 }
 
-// =============================================================================
-// TssIstShadow — BSP TSS.ist[0..7] (gdt_tests overwrite these directly)
-// =============================================================================
-//
-// This is the wedge-critical impl. `gdt_set_ist` writes through to
-// `pcr.tss.ist[slot - 1]`. `prepare_switch_to` resets RSP0 on every
-// dispatch but never touches IST. Without this snapshot/restore, the
-// gdt-test functions leave bogus addresses in BSP's IST entries; the
-// next `#PF` from a user-mode COW write loads RSP from the bogus
-// address and either triple-faults or smashes hot-path code.
-
+// `prepare_switch_to` resets RSP0 on every dispatch but never touches IST, so
+// a bogus IST entry left by a gdt test survives until the next `#PF` loads RSP
+// from it and either triple-faults or smashes hot-path code.
 hermetic_state! {
     pub TssIstShadow {
         type Snapshot = [u64; 7];
@@ -214,15 +163,8 @@ hermetic_state! {
     }
 }
 
-// =============================================================================
-// TssRsp0Shadow — BSP TSS.rsp0 + PCR.kernel_rsp
-// =============================================================================
-//
-// `prepare_switch_to` resets RSP0 on every dispatch, so the corruption
-// is transient — but during the test phase BSP isn't dispatching so
-// RSP0 stays bogus until the first post-test dispatch. Snapshot keeps
-// us honest.
-
+// RSP0 corruption self-heals on the next dispatch, but BSP does not dispatch
+// during the test phase.
 hermetic_state! {
     pub TssRsp0Shadow {
         type Snapshot = u64;
@@ -235,15 +177,7 @@ hermetic_state! {
     }
 }
 
-// =============================================================================
-// MsrShadow — STAR/LSTAR/SFMASK/EFER on BSP
-// =============================================================================
-//
-// `syscall_msr_init` writes idempotent values, but other tests could
-// rebind LSTAR / SFMASK. Snapshot+restore makes the discipline uniform.
-// KERNEL_GS_BASE is per-CPU and points into the PCR; we don't snapshot
-// that — touching it would conflict with the live PCR setup.
-
+// KERNEL_GS_BASE is deliberately excluded: it points into the live PCR.
 #[derive(Clone, Copy)]
 pub struct MsrSnapshot {
     efer: u64,
@@ -274,20 +208,9 @@ hermetic_state! {
     }
 }
 
-// =============================================================================
-// PanicCleanupHandlers — append-only list with no native reset
-// =============================================================================
-//
-// `register_panic_cleanup` increments PANIC_CLEANUP_COUNT monotonically;
-// without restore, the count caps at 8 across many test runs and silently
-// drops new registrations. We snapshot the count at scope-enter and
-// truncate-to-count on Drop.
-//
-// Note: we cannot snapshot the slot pointers themselves because they're
-// `AtomicPtr<()>` and don't implement Copy. We assume the count alone
-// is sufficient — slots above the snapshot count are zeroed on restore
-// so the next registration starts fresh.
-
+// Registration is monotonic and caps at 8, so without a truncate-to-count
+// restore a long run silently drops new registrations. The slot pointers are
+// `AtomicPtr<()>` and not Copy; slots above the count are zeroed on restore.
 hermetic_state! {
     pub PanicCleanupHandlers {
         type Snapshot = usize;
@@ -299,10 +222,6 @@ hermetic_state! {
         }
     }
 }
-
-// =============================================================================
-// OopsLedger — recovered-panic count and limit (tests may record/reconfigure)
-// =============================================================================
 
 hermetic_state! {
     pub OopsLedgerShadow {
@@ -319,10 +238,6 @@ hermetic_state! {
     }
 }
 
-// =============================================================================
-// KlogLevel — global klog verbosity (tests may set Debug or Trace)
-// =============================================================================
-
 hermetic_state! {
     pub KlogLevelShadow {
         type Snapshot = slopos_ostd::klog::KlogLevel;
@@ -335,14 +250,6 @@ hermetic_state! {
     }
 }
 
-// =============================================================================
-// WatchdogHeartbeatShadow — per-CPU lockup-detector progress counter
-// =============================================================================
-//
-// The detector compares a heartbeat against a watcher's own previous
-// reading, so drift between tests changes nothing. Captured anyway so the
-// audit gate sees the state covered.
-
 hermetic_state! {
     pub WatchdogHeartbeatShadow {
         type Snapshot = u64;
@@ -350,16 +257,11 @@ hermetic_state! {
             Ok(slopos_arch::pcr::heartbeat_for_cpu(0))
         }
         fn restore(_snap: Self::Snapshot) {
-            // The counter is monotonic by construction and only ever read
-            // as a difference against the reader's own last sample, so
-            // there is nothing a restore could make more correct.
+            // Monotonic, and only ever read as a difference against the
+            // reader's own last sample; captured so the audit gate sees it.
         }
     }
 }
-
-// =============================================================================
-// ForkRrCounterShadow — per-CPU fork round-robin counter
-// =============================================================================
 
 hermetic_state! {
     pub ForkRrCounterShadow {

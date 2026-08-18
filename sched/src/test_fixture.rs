@@ -1,48 +1,17 @@
-//! Hermetic kernel-test scope guard, v2.
+//! Hermetic kernel-test scope guard.
 //!
-//! `KernelTestScope` is the single source of truth for "set up a clean
-//! scheduler state for a kernel test, then restore the kernel-wide
-//! singleton state on Drop." Every kernel-test fixture in the workspace
-//! delegates to this scope.
+//! `KernelTestScope` sets up a clean scheduler state for a kernel test and
+//! restores the kernel-wide singleton state on Drop; every kernel-test fixture
+//! in the workspace delegates to it. The singletons come from the
+//! `slopos_hermetic` linker-section registry, so a subsystem declares one
+//! `hermetic_state! { ... }` block (see `crate::test_hermetic`) rather than
+//! editing this scope.
 //!
-//! ## v2 redesign (Phase 3)
-//!
-//! v1 hard-coded snapshot fields for `cpu_online`, `cpu_enabled`,
-//! `PCR.current_task[BSP]`, and `PCR.idle_task[BSP]`. v2 walks the
-//! `slopos_hermetic` linker-section registry: each subsystem with
-//! mutable singleton state declares a `hermetic_state! { ... }` block
-//! and the framework handles snapshot, topo-sort, and restore. Adding
-//! a new mutable singleton is a one-liner per subsystem, not a central
-//! edit to this scope.
-//!
-//! ## What v2 still owns directly
-//!
-//! - **Pause/resume APs**: not snapshotable per se; serializes the
-//!   capture window. Done before snapshot, undone after restore.
-//! - **`drain_remote_inbox` quiescence barrier**: drops in-flight
-//!   wake-IPIs that were issued before the AP-pause flag was visible.
-//! - **`synchronize_rcu` quiescence barrier**: waits for any
-//!   read-side critical sections that started before pause to retire.
-//! - **Reset-to-fresh-state setup**: after snapshot but before the
-//!   test body runs, the scope calls `init_task_manager` +
-//!   `init_scheduler` so the test body sees a clean kernel. This is
-//!   *not* part of the snapshot/restore round-trip — the snapshots
-//!   capture the pre-reset values, and Drop's `restore()` walk puts
-//!   them back.
-//!
-//! ## What v2 delegates to `HermeticState` impls
-//!
-//! - Per-CPU `cpu_online` bitmap → `PerCpuOnlineBits`
-//! - Per-CPU scheduler `enabled` bitmap → `PerCpuSchedulerEnableBits`
-//! - `SCHEDULERS_INIT` init-once flag → `SchedulersInitFlag`
-//! - PCR.current_task[BSP] → `BspCurrentTask`
-//! - PCR.idle_task[BSP] → `BspIdleTask`
-//!
-//! See `crate::test_hermetic` for the impls.
+//! The AP pause, the inbox drain and the RCU barrier are owned here instead:
+//! they serialise the capture window rather than being snapshotable state.
 
-/// No-op task entry point usable as a placeholder for tests that
-/// only care about the task struct, not the body. `extern "C"` to
-/// match the `TaskEntry` alias the scheduler exports.
+/// No-op placeholder for tests that only care about the task struct, not the
+/// body. `extern "C"` to match the `TaskEntry` alias the scheduler exports.
 pub extern "C" fn dummy_task_entry(_arg: *mut core::ffi::c_void) {}
 
 use core::marker::PhantomData;
@@ -55,10 +24,9 @@ use slopos_ostd::test_support::hermetic::{
     SnapshotError, run_restore_phase_drain, run_snapshot_phase,
 };
 
-/// Idempotent registration of the panic-cleanup that clears the
-/// `TEST_SCOPE_ACTIVE` flag if a test body panics inside its
-/// `KernelTestScope`. Without this, a panicking test leaves the flag
-/// set forever and every subsequent `enter()` would panic.
+/// Guards registration of the panic-cleanup that clears `TEST_SCOPE_ACTIVE`:
+/// without it a panicking test leaves the flag set and every later `enter()`
+/// panics.
 static PANIC_CLEANUP_REGISTERED: StateFlag = StateFlag::new();
 
 fn ensure_panic_cleanup_registered() {
@@ -70,9 +38,6 @@ fn ensure_panic_cleanup_registered() {
 }
 
 fn panic_clear_test_scope() {
-    // Single-CPU atomic flag clear; registered with panic_recovery
-    // and invoked from the recovery cleanup chain after
-    // `catch_panic!`'s longjmp on the test-running CPU.
     slopos_hermetic::clear_test_scope_after_panic();
 }
 
@@ -83,9 +48,9 @@ use super::per_cpu::{
 use super::scheduler::{init_scheduler, scheduler_shutdown};
 use super::task::{init_task_manager, task_shutdown_all};
 
-/// RAII scope guard for kernel tests that mutate scheduler / task
-/// state. Embed this as a field in a fixture; do not implement Drop on
-/// the wrapper — the scope's Drop handles teardown.
+/// RAII scope guard for kernel tests that mutate scheduler / task state. Embed
+/// it as a fixture field; do not implement Drop on the wrapper — the scope's
+/// Drop handles teardown.
 pub struct KernelTestScope {
     aps_paused: Option<ApPauseToken>,
     captured: KVec<(&'static HermeticVTable, core::ptr::NonNull<()>)>,
@@ -109,14 +74,12 @@ impl KernelTestScope {
     pub fn enter() -> Self {
         ensure_panic_cleanup_registered();
 
-        // Take BootCtx FIRST so concurrent scope is rejected before we
-        // start mutating any state. `take_for_test` panics if a prior
-        // scope is still alive (panicked test that didn't drop).
+        // First, so a concurrent scope is rejected before any state is mutated.
         let boot_ctx = slopos_hermetic::take_for_test();
 
-        // Hermeticity is not a best effort here: every snapshot below reads
-        // kernel-wide state that an AP is free to mutate, so a scope entered
-        // over running APs would report results from a run it did not control.
+        // Every snapshot below reads kernel-wide state an AP is free to mutate,
+        // so a scope entered over running APs would report results from a run
+        // it did not control.
         let aps_paused = match pause_all_aps() {
             Ok(token) => token,
             Err(err) => {
@@ -125,8 +88,7 @@ impl KernelTestScope {
             }
         };
 
-        // Drain in-flight wake-IPIs that were issued before the pause
-        // flag became visible to APs.
+        // Drop wake-IPIs issued before the pause flag became visible to APs.
         let cpu_count = slopos_arch::pcr::get_cpu_count();
         for cpu in 0..cpu_count {
             #[cfg(feature = "test-hooks")]
@@ -134,12 +96,8 @@ impl KernelTestScope {
             #[cfg(not(feature = "test-hooks"))]
             let _ = cpu;
         }
-        // Quiescence: wait for any RCU read-side critical sections that
-        // started before pause to retire.
         slopos_ostd::sync::synchronize_rcu();
 
-        // Topo-sort the registry by `DEPENDS_ON` and capture each state
-        // in dependency order.
         let order = match topo_order() {
             Ok(o) => o,
             Err(e) => {

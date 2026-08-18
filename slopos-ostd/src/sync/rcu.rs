@@ -1,55 +1,9 @@
 //! Classic RCU (Read-Copy-Update) for SlopOS.
 //!
-//! Read-side critical sections use [`PreemptGuard`] to prevent context
-//! switches, guaranteeing the CPU cannot pass through a quiescent state
-//! while an [`RcuReadGuard`] is held. Writers call [`synchronize_rcu`]
-//! after publishing new data to wait until every online CPU has passed
-//! through at least one quiescent state, making it safe to free the old
-//! version.
-//!
-//! Quiescent states are recorded from four sites, and the two that run in
-//! interrupt context report *conditionally*:
-//! - The scheduler after each context switch — [`rcu_note_qs`], unconditional:
-//!   a read-side section holds a [`PreemptGuard`], so reaching a switch proves
-//!   the section has ended.
-//! - Each iteration of the idle loop — [`rcu_note_qs`], same reasoning.
-//! - The LAPIC timer tick handler (100 Hz on every CPU) —
-//!   [`rcu_note_qs_from_interrupt`]. A section disables preemption but not
-//!   interrupts, so the tick can land inside one.
-//! - The dedicated RCU QS IPI handler (vector 0xFB) — likewise, and more
-//!   sharply: [`synchronize_rcu`] sends that IPI to break a stall, so an
-//!   unconditional report there would fake a quiescent state on the very CPU
-//!   the grace period is waiting for.
-//!
-//! The two unconditional sites are what carry liveness: a tick that declines
-//! only delays a grace period, because the next switch reports regardless.
-//!
-//! ## The grace period is a number
-//!
-//! `GP_SEQ` counts completed periods, with bit 0 set while one is in flight.
-//! Starting a period snapshots every CPU's quiescent-state counter;
-//! [`rcu_gp_poll`], driven from every CPU's timer tick, completes it once each
-//! online CPU has advanced past its snapshot. That check is a handful of loads,
-//! so no site has to wait to learn whether a period has elapsed —
-//! [`synchronize_rcu`] is the only thing that waits, and only because its
-//! callers ask it to.
-//!
-//! ## Stall reporting
-//!
-//! A CPU that has not reported after 500 ms is named in a warning and the wait
-//! continues. Declaring the period complete instead would free memory a reader
-//! may still be dereferencing, and would say so only through a logger that is a
-//! no-op in production.
-//!
-//! ## Deferred callbacks (`call_rcu`)
-//!
-//! Modelled after Linux's `call_rcu()` / `rcu_do_batch()`:
-//!
-//! - `call_rcu()` pushes a callback node onto a lock-free Treiber stack.
-//! - `rcu_process_callbacks()` runs from non-IRQ context (idle/scheduler).
-//! - The timer-tick path only sets a flag via [`rcu_raise_softirq`].
-//!
-//! ## Backend inversion
+//! Read-side critical sections hold a [`PreemptGuard`], so a CPU cannot pass
+//! through a quiescent state while an [`RcuReadGuard`] is live. Writers call
+//! [`synchronize_rcu`] to wait for a grace period, or [`call_rcu`] to defer the
+//! free until after one.
 //!
 //! Logging and the platform monotonic clock are reached via the
 //! one-shot-registered [`RcuBackend`] trait — OSTD does not depend on
@@ -75,13 +29,11 @@ struct QsSlot(AtomicU64);
 
 static RCU_QS_CTR: [QsSlot; MAX_CPUS] = [const { QsSlot(AtomicU64::new(0)) }; MAX_CPUS];
 
-/// Read-side critical section guard.
 #[must_use = "dropping the guard immediately ends the RCU read-side critical section"]
 pub struct RcuReadGuard {
     _preempt: PreemptGuard,
 }
 
-/// Enter an RCU read-side critical section.
 #[inline]
 pub fn rcu_read_lock() -> RcuReadGuard {
     RcuReadGuard {
@@ -91,16 +43,13 @@ pub fn rcu_read_lock() -> RcuReadGuard {
 
 /// Record a quiescent state on the current CPU.
 ///
-/// Call this only from a site that is a quiescent state *by construction* — a
-/// context switch or the idle loop. A switch qualifies because a read-side
-/// section holds a [`PreemptGuard`], so a CPU cannot switch away from inside
-/// one; reaching a switch therefore proves the section has ended.
+/// Only from a site that is a quiescent state *by construction* — a context
+/// switch or the idle loop, where a read-side section's [`PreemptGuard`] proves
+/// the section has ended.
 ///
 /// **Not safe from an interrupt handler.** A section disables preemption but
-/// **not** interrupts, so an ISR can land in the middle of one; reporting a
-/// quiescent state from there tells [`synchronize_rcu`] a reader has finished
-/// when it has not, and the object it is reading can then be freed underneath
-/// it. Interrupt context wants [`rcu_note_qs_from_interrupt`].
+/// **not** interrupts, so an ISR can land in the middle of one; interrupt
+/// context wants [`rcu_note_qs_from_interrupt`].
 #[inline]
 pub fn rcu_note_qs() {
     let cpu = get_current_cpu();
@@ -117,12 +66,7 @@ pub fn rcu_note_qs() {
 ///
 /// Declining is always safe: it delays a grace period, never shortens one. The
 /// switch and idle sites remain unconditional quiescent states, so liveness
-/// does not depend on the tick — and a CPU that is preempt-disabled for some
-/// unrelated reason (a spinlock, say) simply reports at its next switch.
-///
-/// This is the distinction Linux draws between a context switch, which is a
-/// quiescent state outright, and a clock interrupt, which is one only if it did
-/// not interrupt a reader.
+/// does not depend on the tick.
 #[inline]
 pub fn rcu_note_qs_from_interrupt() -> bool {
     if PreemptGuard::is_active() {
@@ -134,12 +78,9 @@ pub fn rcu_note_qs_from_interrupt() -> bool {
 
 /// Whether each CPU is parked in its idle loop with interrupts enabled.
 ///
-/// A halted CPU stops reporting, so a grace period that starts after one goes
-/// to sleep would wait on it until something unrelated woke it. It is also
-/// provably not inside a read-side critical section — reaching the halt means
-/// passing through the idle loop, which is a quiescent state by construction —
-/// so the wait would be for nothing. Marking the state lets a period complete
-/// across a sleeping CPU instead of stalling on it.
+/// A halted CPU stops reporting, and reaching the halt means passing through
+/// the idle loop, so it is provably not inside a read-side critical section.
+/// Marking the state lets a period complete across it instead of stalling.
 static RCU_CPU_IDLE: [QsSlot; MAX_CPUS] = [const { QsSlot(AtomicU64::new(0)) }; MAX_CPUS];
 
 /// Enter the extended quiescent state: this CPU is about to halt.
@@ -185,20 +126,15 @@ fn qs_counter_advanced(current: u64, snapshot: u64) -> bool {
     (current.wrapping_sub(snapshot)) as i64 > 0
 }
 
-// ---------------------------------------------------------------------------
-// Grace-period sequence
-// ---------------------------------------------------------------------------
-
 /// Grace-period sequence. Bit 0 set means a period is in flight; the rest
-/// counts completions. One word, so a reader learns which period and whether it
-/// is running from a single load.
+/// counts completions.
 static GP_SEQ: AtomicU64 = AtomicU64::new(0);
 
 /// Per-CPU quiescent-state counters as of the in-flight period's start.
 ///
 /// A static rather than a stack array or a `KVec`: `[u64; MAX_CPUS]` is exactly
-/// the stack gate's 2 KiB threshold, and reclamation must not be able to fail an
-/// allocation. Exactly one CPU ever writes it — whichever wins the claim in
+/// the stack gate's 2 KiB threshold, and reclamation must not be able to fail
+/// an allocation. Written only by whichever CPU wins the claim in
 /// [`gp_start_if_idle`].
 static GP_SNAP: [QsSlot; MAX_CPUS] = [const { QsSlot(AtomicU64::new(0)) }; MAX_CPUS];
 

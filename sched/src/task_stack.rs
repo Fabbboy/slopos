@@ -1,8 +1,5 @@
-//! Generic RAII handle owning one task stack: VA slot + physical frames.
-//!
-//! One implementation parameterised over [`StackRegion`].  Replaces the
-//! historical `stack.rs` (kernel stacks) and `unsafe_stack.rs`
-//! (SafeStack data stacks) mirror modules.
+//! Generic RAII handle owning one task stack: VA slot + physical frames, in one
+//! implementation parameterised over [`StackRegion`].
 //!
 //! # Layout (stack of `size` bytes, stride `R::STRIDE`)
 //!
@@ -17,21 +14,6 @@
 //!
 //! Stack pointers start at `top()` and grow downward.  An overflow past
 //! `base()` hits the unmapped guard page, producing a clean page fault.
-//!
-//! # Drop semantics — intentionally do NOT unmap
-//!
-//! Dropping a `TaskStack<R>` returns the VA slot to the per-CPU cache
-//! with the physical-frame mapping still installed.  Unmapping a
-//! kernel-VA page would broadcast a TLB shootdown IPI per page; under
-//! task churn (tests that create and destroy thousands of tasks) the
-//! shootdown path becomes the bottleneck and can hang CPUs.
-//!
-//! When the slot is later reused, [`StackSlot::was_backed`] is `true`
-//! and the allocate path skips frame allocation + page mapping
-//! entirely — it just re-zeros the stack contents.
-//!
-//! Peak physical memory = peak concurrent tasks × stack size, summed
-//! across regions.
 //!
 //! # Safety
 //!
@@ -57,18 +39,11 @@ use slopos_mm::stack_va::{self, StackSlot};
 use slopos_ostd::process::AccountId;
 use slopos_ostd::process::quota::{Charge, try_charge};
 
-/// Maximum pages that fit in any region's slot (excluding the guard
-/// page).  Sized to cover the largest stride any current or near-future
-/// region uses; both kstack and ustack today use a 64 KB stride →
-/// 16 pages.  Bump this if a new region needs more.  The compile-time
-/// assertion in `TaskStack::<R>::allocate` rejects regions whose stride
-/// would overflow this buffer.
+/// Maximum pages in any region's slot, excluding the guard page: both kstack
+/// and ustack use a 64 KB stride. `TaskStack::<R>::allocate`'s compile-time
+/// assertion rejects a region whose stride would overflow this buffer.
 const MAX_STACK_PAGES_PER_SLOT: usize = 16;
 
-/// Reasons `TaskStack::<R>::allocate` (and its `KernelStack` /
-/// `UnsafeStack` aliases) can fail.  Each variant maps to a recoverable
-/// resource exhaustion or a caller error; the kernel returns it to the
-/// task creator.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StackAllocError {
     /// `size` was zero, not a multiple of 4 KB, or larger than
@@ -78,9 +53,8 @@ pub enum StackAllocError {
     OutOfVirtualSpace,
     /// The page allocator could not satisfy a frame request.
     OutOfPhysicalFrames,
-    /// `kernel_map_4kb` returned an error (typically out of memory for
-    /// intermediate page tables).  The frame handed to the failing call
-    /// is consumed by it, so the rollback below skips it.
+    /// `kernel_map_4kb` returned an error, typically out of memory for
+    /// intermediate page tables.
     MappingFailed,
 }
 
@@ -88,29 +62,22 @@ pub enum StackAllocError {
 ///
 /// Not `Copy`/`Clone` — double-free is impossible by construction.
 pub struct TaskStack<R: StackRegion> {
-    /// RAII handle to the VA slot.  Dropped after the empty `Drop`
-    /// body of `TaskStack` so its return-to-cache logic runs at the
-    /// right point in the destruction order.
+    /// Dropped after `TaskStack`'s own empty `Drop` body, so its
+    /// return-to-cache logic runs at the right point in the destruction order.
     slot: StackSlot<R>,
     /// Number of bytes mapped (excluding the guard page).
     size: u32,
-    /// The mapped pages, charged to the account that asked for the stack.
-    ///
-    /// Plausibly the largest single unaccounted consumer in the tree: 8192
-    /// tasks at 32 KiB of kernel stack plus 16 KiB of data stack is not
-    /// table-shaped, so no array bound capped it and nothing else did.
-    ///
-    /// Refunded by this struct's own `Drop`, which is also where the pages go
-    /// back — including on the pooled return-to-cache path, where the VA slot
-    /// is recycled but the backing pages stay mapped and therefore stay
-    /// charged until the stack itself is dropped.
+    /// The mapped pages, charged to the account that asked for the stack and
+    /// refunded by this struct's `Drop`. On the pooled return-to-cache path the
+    /// VA slot is recycled but the pages stay mapped, so they stay charged
+    /// until the stack itself drops.
     #[expect(dead_code, reason = "held for ownership; dropping it is the refund")]
     pages_charge: Charge<KernelMetaAxis>,
 }
 
 impl<R: StackRegion> TaskStack<R> {
-    /// Compile-time check: `R`'s stride must fit in our worst-case
-    /// frames buffer.  Triggered by referencing `_FITS` from `allocate`.
+    /// `R`'s stride must fit the worst-case frames buffer; instantiated by
+    /// referencing `_FITS` from `allocate`.
     const _FITS: () = assert!(
         (R::STRIDE / PAGE_SIZE_4KB) as usize <= MAX_STACK_PAGES_PER_SLOT,
         "TaskStack: region stride exceeds MAX_STACK_PAGES_PER_SLOT — bump the constant",
@@ -123,10 +90,10 @@ impl<R: StackRegion> TaskStack<R> {
     /// - a multiple of `PAGE_SIZE_4KB` (4 KB),
     /// - small enough that `size + R::GUARD_SIZE <= R::STRIDE`.
     ///
-    /// On failure, no resources leak: any partially-mapped pages are
-    /// unmapped and their frames freed, and the slot handle is dropped.
+    /// On failure nothing leaks: partially-mapped pages are unmapped, their
+    /// frames freed, and the slot handle dropped.
     pub fn allocate(size: usize, account: AccountId) -> Result<Self, StackAllocError> {
-        // Force the compile-time stride check to instantiate per region.
+        // Forces the compile-time stride check to instantiate per region.
         let _: () = Self::_FITS;
 
         if size == 0 || size % PAGE_SIZE_4KB as usize != 0 {
@@ -137,7 +104,7 @@ impl<R: StackRegion> TaskStack<R> {
         }
 
         // Charged before any VA slot or frame is taken, so a refusal unwinds
-        // nothing. The amount is pages, matching every other KernelMeta site.
+        // nothing.
         let pages_charge = Charge::commit(
             try_charge::<KernelMetaAxis>(account, (size / PAGE_SIZE_4KB as usize) as u32)
                 .map_err(|_| StackAllocError::OutOfPhysicalFrames)?,
@@ -148,8 +115,7 @@ impl<R: StackRegion> TaskStack<R> {
         let page_count = size / PAGE_SIZE_4KB as usize;
 
         if slot.was_backed() {
-            // Slot was previously allocated and is still mapped.  Just
-            // zero the stack contents for hygiene — no TLB traffic.
+            // Still mapped from its last use: re-zero only, no TLB traffic.
             Self::zero_stack_pages(base, page_count);
             return Ok(Self {
                 slot,
@@ -158,7 +124,6 @@ impl<R: StackRegion> TaskStack<R> {
             });
         }
 
-        // First time this slot is used: allocate frames and map.
         debug_assert!(page_count <= MAX_STACK_PAGES_PER_SLOT);
         let mut frames = [PhysAddr::NULL; MAX_STACK_PAGES_PER_SLOT];
         let got = alloc_page_frames_pcp_batch(&mut frames[..page_count]);
@@ -173,24 +138,17 @@ impl<R: StackRegion> TaskStack<R> {
             let va = VirtAddr::new(base + (i as u64) * PAGE_SIZE_4KB);
             let map_rc = kernel_map_4kb(va, frames[i], R::PAGE_FLAGS);
             if map_rc != 0 {
-                // Free the frames we have not handed over yet.
-                // `frames[i]` is not among them: `kernel_map_4kb` took
-                // ownership of it and returned it to the allocator when
-                // the mapping failed.
+                // The loop starts at `i + 1`: `kernel_map_4kb` took ownership
+                // of `frames[i]` and returned it on failure.
                 for j in (i + 1)..page_count {
                     free_page_frame(frames[j]);
                 }
-                // Unmap + free anything already installed.
                 Self::cleanup_partial(&slot, i);
                 return Err(StackAllocError::MappingFailed);
             }
         }
 
-        // Zero the fresh mapping.
         Self::zero_stack_pages(base, page_count);
-
-        // Record that the slot is now backed so future allocs of it
-        // reuse the mapping.
         slot.mark_backed();
 
         Ok(Self {
@@ -200,14 +158,13 @@ impl<R: StackRegion> TaskStack<R> {
         })
     }
 
-    /// Lowest usable address (inclusive).  Guard page sits below this.
+    /// Lowest usable address (inclusive); the guard page sits below it.
     #[inline]
     pub fn base(&self) -> VirtAddr {
         VirtAddr::new(self.slot.va_base().as_u64() + R::GUARD_SIZE)
     }
 
-    /// One-past-the-top address (exclusive).  Stacks grow downward
-    /// from here toward `base()`.
+    /// One-past-the-top address (exclusive); stacks grow down toward `base()`.
     #[inline]
     pub fn top(&self) -> VirtAddr {
         VirtAddr::new(self.base().as_u64() + self.size as u64)
@@ -219,21 +176,14 @@ impl<R: StackRegion> TaskStack<R> {
         self.size as usize
     }
 
-    /// Zero `page_count` pages starting at `base`.  Safe because `base`
-    /// points into the caller's exclusively-owned stack slot. OSTD's
-    /// `zero_bytes_at_kernel_va` folds the one `unsafe` write_bytes.
     fn zero_stack_pages(base: u64, page_count: usize) {
         let bytes = page_count * PAGE_SIZE_4KB as usize;
         slopos_ostd::util::ptr_buf::zero_bytes_at_kernel_va(base, bytes);
     }
 
-    /// Unmap & free the first `mapped` pages of `slot`.  Used by
-    /// `allocate` on the error path (the slot's own Drop handles VA
-    /// release).
-    ///
-    /// `kernel_unmap_4kb` frees the page it reclaims — the leaf owned
-    /// the frame, and taking the leaf away drops that ownership — so
-    /// there is nothing left here to hand back.
+    /// Unmap the first `mapped` pages of `slot` on `allocate`'s error path; the
+    /// slot's own `Drop` releases the VA. `kernel_unmap_4kb` frees the frame it
+    /// reclaims, so there is nothing left here to hand back.
     fn cleanup_partial(slot: &StackSlot<R>, mapped: usize) {
         let base = slot.va_base().as_u64() + R::GUARD_SIZE;
         for i in 0..mapped {
@@ -245,31 +195,18 @@ impl<R: StackRegion> TaskStack<R> {
 
 impl<R: StackRegion> Drop for TaskStack<R> {
     fn drop(&mut self) {
-        // Intentionally do NOT unmap or free frames here.  Unmapping a
-        // kernel-VA page triggers a broadcast TLB shootdown; under task
-        // churn that floods the IPI path.  We keep the mapping alive
-        // and let the next allocation reuse this slot — see
-        // `TaskStack::allocate` and `stack_va::StackSlot`.  The slot
-        // handle drops next, returning to the per-CPU cache (or
-        // spilling to the global if the cache is full).
+        // Deliberately empty: unmapping a kernel-VA page broadcasts a TLB
+        // shootdown IPI per page, which floods under task churn. The mapping
+        // stays installed and the slot handle, dropping next, returns it to the
+        // cache for the next allocation to reuse.
     }
 }
-
-// ---------------------------------------------------------------------------
-// Per-region type aliases.
-//
-// Distinct nominal types — `KernelStack` and `UnsafeStack` carry
-// different `R` parameters, so passing one where the other is expected
-// is a compile error.  Zero runtime cost (the region tag is a ZST).
-// ---------------------------------------------------------------------------
 
 /// Owning handle to a kernel-mode task stack.
 pub type KernelStack = TaskStack<KstackRegion>;
 
-/// Owning handle to a SafeStack-sanitiser data stack.
-///
-/// Lives alongside the task's [`KernelStack`].  The SafeStack
-/// sanitiser pass moves address-taken locals onto this stack so a
-/// write through a corrupted data pointer cannot reach the
-/// return-address region of the kernel (safe) stack.
+/// Owning handle to a SafeStack-sanitiser data stack, living alongside the
+/// task's [`KernelStack`]. The sanitiser pass moves address-taken locals here
+/// so a write through a corrupted data pointer cannot reach the return-address
+/// region of the kernel stack.
 pub type UnsafeStack = TaskStack<UstackRegion>;

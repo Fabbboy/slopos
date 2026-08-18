@@ -3,19 +3,16 @@
 
 use core::fmt;
 
-/// POSIX errno value — a newtype over the raw error number.
 #[derive(Clone, Copy, Eq, PartialEq, Hash)]
 #[repr(transparent)]
 pub struct Errno(pub i32);
 
 impl Errno {
-    /// Extract the raw errno integer.
     #[inline]
     pub const fn raw(self) -> i32 {
         self.0
     }
 
-    /// Returns `true` when the value represents success (zero).
     #[inline]
     pub const fn is_ok(self) -> bool {
         self.0 == 0

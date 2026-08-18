@@ -31,9 +31,7 @@ unsafe fn reset(stream: *mut FILE, flags: u32) {
 
 /// Reset the standard streams and put them on the open-stream list.
 ///
-/// Called from the CRT before `main`. Buffering follows C11 §7.21.3: stdout is
-/// line-buffered when it refers to an interactive device and fully buffered
-/// otherwise; stderr is never fully buffered.
+/// Called from the CRT before `main`. Buffering follows C11 §7.21.3.
 pub fn stdio_init() {
     unsafe {
         reset(&raw mut STDIN_FILE, FILE_FLAG_READABLE);

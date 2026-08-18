@@ -302,10 +302,8 @@ fn allocate_kernel_task_resources() -> Option<TaskCreateResources> {
 }
 
 fn allocate_user_task_resources() -> Option<TaskCreateResources> {
-    // No wait parent and the root account as the accounting parent: this is
-    // the entry point for a process the kernel starts, not one a process
-    // spawned. A spawn goes through `clone_from_parent`, which names the real
-    // spawner on both edges.
+    // No parent: this is a process the kernel starts, not one a process
+    // spawned — a spawn goes through `clone_from_parent`.
     let mut process = ProcessResourceLease::create_user_process(None)?;
     let vm_id = process.process.as_deref().and_then(ProcessId::of)?;
 
@@ -343,14 +341,9 @@ fn allocate_task_create_resources(flags: u16) -> Option<TaskCreateResources> {
     }
 }
 
-/// Release resources allocated by `allocate_task_create_resources` when
-/// the surrounding `task_create` bails out mid-flight.
-///
-/// Takes the whole bundle by value so nothing can be forgotten: the stacks'
-/// `Drop` releases their VA slots, and the process reference goes with the
-/// address space and descriptor table it names. Passing the fields
-/// individually is what let the process object be missed while the two older
-/// halves were released.
+/// Release resources allocated by `allocate_task_create_resources` when the
+/// surrounding `task_create` bails out mid-flight. Takes the whole bundle by
+/// value so nothing can be forgotten.
 fn cleanup_task_create_resources(resources: TaskCreateResources) {
     let TaskCreateResources {
         process,
@@ -358,9 +351,6 @@ fn cleanup_task_create_resources(resources: TaskCreateResources) {
         unsafe_stack,
         ..
     } = resources;
-    // Teardown first, retire second — the two tables share a slot space, so a
-    // registry slot freed ahead of the unbind would be handed out while the
-    // old address space still occupied it.
     ProcessResourceLease::cleanup_owned_process(process.as_ref(), true, true);
     if let Some(process) = process.as_ref()
         && let Some(handle) = process.handle()
@@ -405,26 +395,16 @@ fn cleanup_task_process_resources(task: &Task, resolved_id: u32, mode: TaskProce
 
 /// Give back `task`'s share of its process, answering whether it was the last.
 ///
-/// This replaces an O(`MAX_TASKS`) registry walk under the task-manager lock,
-/// run on every exit, with one atomic on an object the task already names. The
-/// walk also could not distinguish two processes that had held the same id;
-/// the handle can.
+/// Latched by `TASK_EXIT_CLEANUP_CHARGES`: exit cleanup runs from both an
+/// external `task_terminate` and the owning CPU's post-switch path, and a
+/// second decrement would report a live process as torn down — a second
+/// `destroy_process_vm` on an address space another task is running in.
 ///
-/// Latched by `TASK_EXIT_CLEANUP_CHARGES` because exit cleanup runs from both
-/// an external `task_terminate` and the owning CPU's post-switch path, and a
-/// second decrement would report a *live* process as torn down — which is a
-/// second `destroy_process_vm` on an address space another task is running in.
+/// A task whose process handle no longer resolves answers `false`; the process
+/// was already reaped.
 ///
-/// A task whose process handle no longer resolves answers `false`: the process
-/// was reaped, so somebody else already did the teardown, and doing it again
-/// against a recycled id is the exact confusion this plan removes.
-///
-/// The registration is **not** retired here. Retiring frees the registry slot,
-/// and the address-space table is keyed on that same slot — so retiring before
-/// the caller has torn the address space down would hand the slot to the next
-/// process while the old occupant's page tables were still bound to it, and
-/// that spawn would be refused for a slot nothing owns. `destroy_process_vm`
-/// retires as its own last step, after the unbind.
+/// The registration is **not** retired here: `destroy_process_vm` retires as
+/// its own last step, after the unbind.
 fn task_leaves_process(task: &Task) -> bool {
     if task.exit_cleanup_mark(TASK_EXIT_CLEANUP_CHARGES) & TASK_EXIT_CLEANUP_CHARGES == 0 {
         return false;
@@ -439,80 +419,32 @@ fn task_leaves_process(task: &Task) -> bool {
     true
 }
 
-/// Bytes reserved at the top of every user task's per-task kernel stack
-/// for handling interrupts/exceptions that arrive from user mode.
+/// Bytes reserved at the top of every user task's per-task kernel stack for
+/// the interrupt/exception chain that arrives from user mode.
 ///
-/// `TSS.RSP0` and `pcr.kernel_rsp` point to `kernel_stack_top`; on a
-/// user→kernel transition the CPU pushes the IRET frame there and the
-/// ISR/handler chain grows downward.  Concurrently, `user_task_loop`
-/// (the OSTD round-trip supervisor) holds a multi-hundred-byte safe-stack
-/// frame *on the same stack*, including a SafeStack-saved unsafe-SP slot
-/// at `[rbp-0xb8]`.
-///
-/// If the supervisor's frame sat at the top of the stack (the historical
-/// `kernel_stack_top - 16` arrangement), every IRQ from user mode would
-/// step onto that frame:
-/// `common_exception_handler_impl` alone allocates 264 bytes of safe
-/// stack, which pulls RSP into the supervisor's [rbp-0xb8] slot.  The
-/// resulting clobber surfaces later as a kernel page fault when the
-/// supervisor reads its now-corrupt unsafe-SP back.
-///
-/// The fix: place the supervisor's RSP at `kernel_stack_top -
-/// SUPERVISOR_RESERVE`.  That gives the CPU `SUPERVISOR_RESERVE` bytes
-/// at the top of the stack to land IRETs, ISR pushes, and the deepest
-/// IRQ-handler call chain (timer → scheduler → context-switch); the
-/// supervisor's own frame plus the syscall-dispatch chain live below
-/// that line and cannot be reached by IRQ-from-user-mode pushes.
-///
-/// 0x2000 (8 KiB) covers the worst observed IRQ chain (CPU IRET + ISR
-/// pushes + `common_exception_handler` + `common_exception_handler_impl`
-/// + scheduler timer-tick / context-switch through `switch_registers`,
-/// totalling ~2 KiB safe-stack frames) with comfortable margin.  The
-/// remaining 24 KiB of the 32 KiB per-task kernel stack covers the
-/// supervisor + every syscall handler's call chain.
-///
-/// The per-task-stack model splits each task's kernel stack into
-/// supervisor + IRQ regions and places the supervisor at the bottom.
-/// No scheduler / TSS / per-task-RSP plumbing required.
+/// `TSS.RSP0` and `pcr.kernel_rsp` point at `kernel_stack_top`, so IRQ pushes
+/// land there and grow downward while `user_task_loop` holds a frame on the
+/// same stack; the supervisor's RSP sits at `kernel_stack_top -
+/// SUPERVISOR_RESERVE` so those pushes cannot reach it. 8 KiB covers the worst
+/// observed IRQ chain (~2 KiB of safe-stack frames) with margin.
 const SUPERVISOR_RESERVE: u64 = 0x2000;
 
 const _: () = {
-    // 16-byte alignment: required for SystemV ABI.  After `ret` pops
-    // the synthetic RA from `kernel_stack_top - SUPERVISOR_RESERVE`,
-    // RSP = `kernel_stack_top - SUPERVISOR_RESERVE + 8`; with
-    // `SUPERVISOR_RESERVE` a multiple of 16 this is `mod 16 == 8`,
-    // satisfying "RSP mod 16 == 8 at function entry".
+    // SystemV ABI: after `ret` pops the synthetic return address, RSP is
+    // `mod 16 == 8` only if this is a multiple of 16.
     assert!(SUPERVISOR_RESERVE % 16 == 0);
-    // Bound: must fit comfortably inside the per-task kernel stack so
-    // both halves remain usable.  Cap at half the stack — a
-    // SUPERVISOR_RESERVE that ate more than half would leave the
-    // supervisor + every syscall-dispatch chain crammed into <16 KiB.
+    // Cap at half the stack, so the supervisor plus every syscall-dispatch
+    // chain keeps the rest.
     assert!(SUPERVISOR_RESERVE < TASK_KERNEL_STACK_SIZE / 2);
-    // Floor: must hold the worst-case IRQ chain (CPU IRET + ISR pushes
-    // + Rust handler frames through the scheduler's context-switch).
-    // 4 KiB is the smallest value that still has comfortable margin.
+    // Floor: the worst-case IRQ chain through the scheduler's context switch.
     assert!(SUPERVISOR_RESERVE >= 0x1000);
 };
 
-/// Build a user-task entry frame on a task's kernel stack.  The frame
-/// is empty save for a single return-address slot containing
-/// `user_task_first_run`'s address.  When `switch_registers` executes
-/// `ret`, control jumps into `user_task_first_run`, which seeds
-/// `pcr.user_ctx_ptr` and enters the OSTD `UserMode::execute()` round
-/// trip.  The user-mode register state must already have been written
-/// to `task.user_ctx` by the caller (typically via
-/// `crate::syscall::user_loop::init_user_ctx_*`).
-///
-/// The slot lives at `kernel_stack_top - SUPERVISOR_RESERVE` (rather
-/// than at the very top of the stack) so the IRQ-handler chain that
-/// fires on user→kernel transitions, which lands at `TSS.RSP0 =
-/// kernel_stack_top`, has `SUPERVISOR_RESERVE` bytes of headroom before
-/// it could overlap with the supervisor's own frame.  See the
-/// `SUPERVISOR_RESERVE` comment for the full rationale.  Alignment:
-/// after `ret` pops the synthetic address, `RSP = kernel_stack_top -
-/// SUPERVISOR_RESERVE + 8`; with `SUPERVISOR_RESERVE` a multiple of 16
-/// and `kernel_stack_top` page-aligned, that satisfies the SystemV ABI's
-/// "`RSP mod 16 == 8` at function entry" invariant.
+/// Build a user-task entry frame: a single return-address slot at
+/// `kernel_stack_top - SUPERVISOR_RESERVE` holding the OSTD user-task entry,
+/// so `switch_registers`' `ret` enters the `UserMode::execute()` round trip.
+/// The caller must already have written the user-mode register state to
+/// `task.user_ctx`.
 ///
 /// # Safety
 /// Caller must ensure that the slot at `kernel_stack_top -
@@ -523,9 +455,6 @@ const _: () = {
 pub(crate) fn build_user_task_entry_frame(kernel_stack_top: u64) -> SwitchContext {
     let entry = slopos_ostd::task::user_task_entry_addr();
     let ret_addr_slot = kernel_stack_top - SUPERVISOR_RESERVE;
-    // OSTD's `write_kernel_va` carries the one `unsafe`; the caller-
-    // facing contract says the kernel stack was just allocated and no
-    // observer is yet attached.
     slopos_ostd::util::ptr_buf::write_kernel_va::<u64>(ret_addr_slot, entry);
     SwitchContext {
         rbx: 0,
@@ -537,7 +466,6 @@ pub(crate) fn build_user_task_entry_frame(kernel_stack_top: u64) -> SwitchContex
         rsp: ret_addr_slot,
         rflags: 0x02,
         rip: entry,
-        // Fresh task starts at the running baseline (preemption enabled).
         preempt_count: 0,
     }
 }
@@ -546,26 +474,12 @@ pub(crate) fn build_user_task_entry_frame(kernel_stack_top: u64) -> SwitchContex
 /// [`task_entry_trampoline`] with this task's **id** in `rdi`.
 ///
 /// An **id**, not an address: a task handle parked in a saved register file
-/// across every context switch until first dispatch, then cast back, is a
-/// handle with no owner reconstituted on faith — which is exactly what checks
-/// 3a and 3b of `check_task_ownership.sh` name.
-///
-/// An id is a scalar. It cannot be dereferenced, so it carries no claim about
-/// the task still existing, and the task is re-derived from the PCR instead —
-/// which is authoritative, because by the time this runs the task *is* this
-/// CPU's current. `execute_task` calls `dispatch` (which publishes the PCR)
-/// before `switch_context`, and the trampoline `sti`s before calling here, so
-/// `Current::get()` is two gs-relative loads that cannot fail. Deliberately
-/// **not** a registry lookup: that would take the global registry cli-spinlock
-/// and scan it on every kernel thread's first dispatch to learn what the PCR
-/// already publishes.
-///
-/// The id survives only as a cross-check — a `debug_assert` that the task the
-/// PCR names is the one this shim was seeded for.
-///
-/// `extern "sysv64" fn(u64)` rather than `extern "C" fn(*mut c_void)` so
-/// "this argument is not a caller payload" is checked by the compiler. The
-/// trampoline ABI is one integer in `rdi` either way, so no asm moves.
+/// until first dispatch would be a handle with no owner — what checks 3a and 3b
+/// of `check_task_ownership.sh` name. The task is re-derived from the PCR,
+/// authoritative because by the time this runs the task *is* this CPU's
+/// current; a registry lookup would take the global cli-spinlock to learn what
+/// the PCR already publishes. The id survives only as a `debug_assert`
+/// cross-check.
 extern "sysv64" fn kernel_task_entry_shim(task_id: u64) {
     let seeded = {
         let Some(current) = crate::task_struct::Current::get() else {
@@ -590,14 +504,14 @@ extern "sysv64" fn kernel_task_entry_shim(task_id: u64) {
         let fatal_if_panics = crate::per_cpu::is_idle_task(slopos_ostd::task::TaskAddr::of(task))
             || (task.flags & TASK_FLAG_SYSTEM) != 0
             || !slopos_ostd::panic_recovery::production_recovery_enabled();
-        // `kernel_thread_trampoline` (the spawn() facade's entry point) already
-        // wraps the real entry in its own run_recoverable — skip the shim's
-        // boundary for it so a panic is caught exactly once.
+        // `kernel_thread_trampoline` already wraps the real entry in its own
+        // `run_recoverable`; skipping the shim's boundary keeps a panic caught
+        // exactly once.
         let already_recoverable =
             task.entry_point == crate::runtime::kernel_thread_trampoline as *const () as u64;
-        // The guard is dropped here, before `entry` runs: the task body may
-        // block, migrate or exit, and none of that is a borrow this frame
-        // should still be holding.
+        // The guard is dropped before `entry` runs: the task body may block,
+        // migrate or exit, none of which this frame should still be borrowing
+        // across.
         (entry, task.entry_arg, fatal_if_panics, already_recoverable)
     };
     let (entry, arg, fatal_if_panics, already_recoverable) = seeded;
@@ -625,16 +539,11 @@ extern "sysv64" fn kernel_task_entry_shim(task_id: u64) {
 
 fn init_task_context(task: &mut Task) {
     *task.context.get_mut() = TaskContext::default();
-    // `task.fpu_state` is a valid in-place FpuState owned by the
-    // caller-provided `&mut Task`. Writing into it does not alias
-    // with any other reference because we hold the unique `&mut`.
     super::task_ops::task_reset_fpu_state(task);
 
     if task.flags & TASK_FLAG_KERNEL_MODE != 0 {
         let trampoline = task_entry_trampoline as *const () as u64;
         let shim = kernel_task_entry_shim as *const () as u64;
-        // The task's id, not its address: a scalar the trampoline can carry in
-        // a saved register file without it being an unowned task handle.
         let shim_arg = task.task_id as u64;
         super::task_ops::task_kernel_stack_seed_ret(task.kernel_stack_top, trampoline);
         *task.switch_ctx.get_mut() =
@@ -649,11 +558,6 @@ fn init_task_context(task: &mut Task) {
         task.context.get_mut().es = 0x10;
         task.context.get_mut().ss = 0x10;
     } else {
-        // OSTD user-mode entry: populate `task.user_ctx` with the
-        // initial register snapshot and set up the kernel stack so
-        // `switch_registers` rets into `user_task_first_run`.  The
-        // first iteration of `user_task_loop` will iretq into user
-        // mode at (entry_point, stack_pointer) with rdi=entry_arg.
         crate::task::init_user_ctx_for_new_task(
             task.user_ctx.get_mut(),
             task.entry_point,
@@ -677,15 +581,9 @@ fn init_task_context(task: &mut Task) {
     task.context.get_mut().cr3 = 0;
 }
 
-/// Walk a caller-owned C string up to `TASK_NAME_MAX_LEN-1` bytes,
-/// copying into `dest` and NUL-padding the remainder.
-///
-/// Copy `src` (NUL-terminated kernel pointer) into the fixed-length
-/// `dest` buffer, padding the tail with zero. Null `src` clears `dest`.
-///
-/// The interior `unsafe` (NUL-bounded walk through the C string) lives
-/// inside OSTD's `cstr_from_kernel_ptr`; this consumer sees only the
-/// resulting byte slice.
+/// Copy the NUL-terminated `src` into `dest`, truncating to
+/// `TASK_NAME_MAX_LEN-1` bytes and zero-padding the tail. A null `src` clears
+/// `dest`.
 fn copy_name(dest: &mut [u8; TASK_NAME_MAX_LEN], src: *const c_char) {
     *dest = [0u8; TASK_NAME_MAX_LEN];
     let Some(bytes) = slopos_ostd::util::cstr::cstr_from_kernel_ptr(src) else {
@@ -693,21 +591,15 @@ fn copy_name(dest: &mut [u8; TASK_NAME_MAX_LEN], src: *const c_char) {
     };
     let take = core::cmp::min(bytes.len(), TASK_NAME_MAX_LEN - 1);
     dest[..take].copy_from_slice(&bytes[..take]);
-    // `dest[take]` is already 0 from the wipe above; tail stays zero.
 }
 
 /// Build a task and hand back the token that solely owns it.
 ///
-/// The task is fully formed — address space, both stacks, entry frame, job
-/// control identity — and reachable through nothing but the returned token, so
-/// a caller with more to write finishes construction through
-/// [`PendingTask::as_mut`] and only then makes the task reachable with
-/// [`task_commit`]. That ordering is what removes the pre-publication window
-/// entirely rather than papering over it: there is no interval in which a
-/// half-built task is visible to a registry lookup or an active-task walk.
-///
-/// A caller with nothing to add wants [`task_create`], which is this and
-/// [`task_commit`] with no gap between them.
+/// The task is fully formed but reachable through nothing but the token: a
+/// caller with more to write finishes construction through
+/// [`PendingTask::as_mut`] and only then publishes with [`task_commit`], so no
+/// half-built task is ever visible to a registry lookup or an active-task walk.
+/// [`task_create`] is the two with no gap between them.
 pub fn task_build(
     name: *const c_char,
     entry_point: TaskEntry,
@@ -729,11 +621,9 @@ pub fn task_build(
         return None;
     }
 
-    // The token below is the sole reference to a task that already owns its
-    // process lease; from here to the commit it must not be lost. The guard
-    // keeps the region non-blocking: `assert_switch_preempt_safe` turns a
-    // blocking call added here into a panic naming this frame. Allocation
-    // under it is fine — interrupts stay on, so cross-CPU TLB acks still land.
+    // Non-blocking from here to the commit, where the token is the sole
+    // reference to a task that already owns its process lease. Allocation under
+    // the guard is fine — interrupts stay on, so cross-CPU TLB acks still land.
     let _preempt = slopos_ostd::cpu::preempt::PreemptGuard::new();
     let mut pending = match allocate_task() {
         Ok(pending) => pending,
@@ -756,11 +646,8 @@ pub fn task_build(
         }
     };
 
-    // Both ways this can still fail are decided by the arguments alone, so
-    // they are settled before the first field write rather than midway
-    // through it. That is also what lets the initialisation below hold one
-    // uninterrupted exclusive borrow: an early return in the middle would
-    // have had to move `pending` out from under it.
+    // Argument-only failures are settled before the first field write, so the
+    // initialisation below holds one uninterrupted exclusive borrow.
     if flags & TASK_FLAG_USER_MODE != 0 && !user_entry_is_allowed(entry_point as u64) {
         klog_info!("task_create: user entry outside user_text window");
         cleanup_task_create_resources(resources);
@@ -783,7 +670,6 @@ pub fn task_build(
         None
     };
 
-    // Exclusive because the token holds the only reference to this task.
     let task_ref = pending.as_mut();
     task_ref.task_id = task_id;
     copy_name(&mut task_ref.name, name);
@@ -793,16 +679,13 @@ pub fn task_build(
     task_ref.process_id = resources.process_id;
     task_ref.set_process_vm_handle_raw(resources.process_vm_handle);
     // Join before the handle is stored, so the count is never behind the set
-    // of tasks naming the process. The reference the lease minted moves into
-    // the task here; from now on the process lives while any task names it.
+    // of tasks naming the process.
     if let Some(process) = resources.process.as_ref() {
         process.task_join();
         task_ref.set_process_handle_raw(process.handle_raw());
-        // Charged here rather than at `allocate_task`, which runs before the
-        // task has a process and therefore before there is a principal to
-        // bill. Recorded in the side table, not in `Task`: the refund belongs
-        // at the exit latch, and a `Task` field would defer it to the
-        // graveyard drain.
+        // Charged here, not at `allocate_task`: there is no principal to bill
+        // before the task has a process. Kept in the side table so the refund
+        // lands at the exit latch rather than at the graveyard drain.
         if let Some(reservation) = super::task_quota::reserve(process.account()) {
             super::task_quota::commit(task_id, reservation);
         } else {
@@ -815,9 +698,8 @@ pub fn task_build(
     task_ref.set_pgid(task_id);
     task_ref.set_sid(task_id);
     task_ref.set_controlling_tty(None);
-    // The token proves this task is unpublished, so there is no reader to defer
-    // a release past and no displaced handle to release — exclusivity carries
-    // the write, not a grace period.
+    // The token proves this task is unpublished: no reader to defer a release
+    // past, and no displaced handle to release.
     let _ = task_ref.process_group.replace_exclusive(process_group);
     task_ref.set_clear_child_tid(0);
     task_ref.set_parent_task_id(INVALID_TASK_ID);
@@ -825,9 +707,6 @@ pub fn task_build(
     task_ref.stack_size = TASK_STACK_SIZE;
     task_ref.stack_pointer = resources.stack_base + TASK_STACK_SIZE - 8;
 
-    // Populate the plain-u64 fields from the `KernelStack` handle, then
-    // move ownership of the handle into the task slot.  Dropping the
-    // task's `kernel_stack = None` later releases all backing memory.
     let kstack_base = resources.kernel_stack.base().as_u64();
     let kstack_top = resources.kernel_stack.top().as_u64();
     let kstack_size = resources.kernel_stack.size() as u64;
@@ -835,9 +714,7 @@ pub fn task_build(
     task_ref.kernel_stack_top = kstack_top;
     task_ref.kernel_stack_size = kstack_size;
     task_ref.kernel_stack = Some(resources.kernel_stack);
-    // Install the unsafe stack and prime its RSP at the top.  Every
-    // instrumented function prologue walks this pointer downward; at
-    // context-switch time it is saved/restored exactly like RSP.
+    // Primed at the top: every instrumented prologue walks it downward.
     task_ref.abi.unsafe_stack_sp = resources.unsafe_stack.top().as_u64();
     task_ref.unsafe_stack = Some(resources.unsafe_stack);
     task_ref.entry_point = entry_point as usize as u64;
@@ -852,9 +729,9 @@ pub fn task_build(
     if flags & TASK_FLAG_KERNEL_MODE != 0 {
         task_ref.context.get_mut().cr3 = cpu::read_cr3() & !0xFFF;
     } else {
-        // task.context.cr3 holds the OSTD PML4 paddr — that's what
-        // VmSpace::activate writes to CR3 during context switch, and
-        // the user-fault dispatcher compares it against hardware CR3.
+        // `context.cr3` holds the OSTD PML4 paddr: what `VmSpace::activate`
+        // writes at switch time and what the user-fault dispatcher compares
+        // against hardware CR3.
         task_ref.context.get_mut().cr3 = resources
             .process
             .as_deref()
@@ -867,14 +744,12 @@ pub fn task_build(
 
 /// Make a built task reachable, returning the strong reference that pins it.
 ///
-/// The task becomes findable here, not runnable: `scheduler::publish_new_task`
-/// is the sole new-task runnable edge, and it reserves scheduler placement and
-/// publishes `Ready` as one protocol. Between the two the task is registered
-/// but nascent, which is why every field a caller owns is written *before* this
-/// call, through the token's exclusive borrow.
+/// Findable, not runnable: `scheduler::publish_new_task` is the sole new-task
+/// runnable edge, reserving scheduler placement and publishing `Ready` as one
+/// protocol, so every field a caller owns is written *before* this call.
 ///
 /// A registry that cannot take the task abandons it, so the token is consumed
-/// either way and no caller can be left holding one it must remember to release.
+/// either way.
 pub fn task_commit(pending: PendingTask) -> Option<TaskRef> {
     let task_id = pending.id();
     let registered = match register_task(pending) {
@@ -898,18 +773,9 @@ pub fn task_commit(pending: PendingTask) -> Option<TaskRef> {
 
 /// Release a task whose construction failed before it was ever made reachable.
 ///
-/// The token owns the task, so dropping it releases both stacks and everything
-/// else the task itself holds. The address space and its file table are
-/// process-scoped and outlive any single task, so they are torn down only when
-/// no other live task shares the process — the same rule the ordinary exit path
-/// applies, and what makes this correct for a `CLONE_VM` thread whose address
-/// space belongs to the parent it was branching from.
-///
-/// Reaching the count through the task's own process handle rather than a
-/// registry scan is what makes "the parent it was branching from" precise: a
-/// `CLONE_VM` thread and its parent hold the *same* handle, so the parent's
-/// share keeps the address space; a task whose handle is stale names a process
-/// somebody already tore down, and answers `false`.
+/// The address space and its file table are process-scoped, so they are torn
+/// down only when no other live task shares the process — which is what makes
+/// this correct for a `CLONE_VM` thread whose address space is the parent's.
 pub fn task_abandon(mut pending: PendingTask) {
     let process = {
         let task = pending.as_mut();
@@ -944,14 +810,9 @@ pub fn task_create(
 }
 
 pub fn task_terminate(task_id: u32) -> c_int {
-    // One owning handle covers both entry shapes. A named id resolves through
-    // the registry, which hands back a guard. `u32::MAX` means "me", and there
-    // the handle is minted from this CPU's current-task pointer — sound because
-    // the dispatch reference the scheduler parked on the idle stack keeps this
-    // task alive for exactly as long as it is the current one.
-    //
-    // Holding it for the whole function is what lets the teardown below work
-    // from a borrow: nothing it calls can be the last release.
+    // `u32::MAX` means "me": the handle is minted from this CPU's current-task
+    // pointer, sound because the dispatch reference the scheduler parked on the
+    // idle stack keeps the current task alive.
     let target: Option<TaskRef> = if task_id == u32::MAX {
         crate::task_struct::Current::get()
             .and_then(|current| NonNull::new(current.as_ptr()).map(TaskRef::clone_of))
@@ -964,9 +825,9 @@ pub fn task_terminate(task_id: u32) -> c_int {
             klog_info!("task_terminate: No current task to terminate");
             return -1;
         }
-        // A specific id that no longer resolves either named a task that has
-        // been fully terminated and reclaimed (idempotent success) or one
-        // that never existed. Monotonic non-reused ids tell the two apart.
+        // An unresolvable id either named a task already terminated and
+        // reclaimed (idempotent success) or one that never existed; monotonic
+        // non-reused ids tell the two apart.
         if super::task_table::task_id_was_allocated(task_id) {
             return 0;
         }
@@ -981,16 +842,10 @@ pub fn task_terminate(task_id: u32) -> c_int {
         task_id
     };
 
-    // A resolvable `Invalid` task is not a missing one — it is a fork/clone
-    // child between `register_task` and `publish_new_task`. Its construction is
-    // complete (stacks, address space and user context are all installed before
-    // registration); only scheduler publication is outstanding, which is why it
-    // is still hidden from every active-task scan. Refusing to terminate it is
-    // what abandoned it on the pre-publication failure paths — a failed
-    // `publish_new_task`, or a faulting `CLONE_*_SETTID` write — leaking the
-    // task together with its kernel stack, unsafe stack and address space.
-    // `mark_task_terminated` force-publishes the terminal status, so the
-    // `Invalid -> Ready`-only transition rule does not stand in the way.
+    // A resolvable `Invalid` task is a fork/clone child between `register_task`
+    // and `publish_new_task` — fully constructed, so it is terminable here;
+    // `mark_task_terminated` force-publishes the terminal status past the
+    // `Invalid -> Ready`-only transition rule.
 
     if matches!(task.status(), TaskStatus::Terminated | TaskStatus::Zombie) {
         return 0;
@@ -1004,37 +859,19 @@ pub fn task_terminate(task_id: u32) -> c_int {
 
     let is_current = TaskAddr::current() == Some(TaskAddr::of(task));
 
-    // Hold preemption disabled across the `mark_task_terminated` →
-    // cleanup → defer/free sequence below. Without this guard, a
-    // spinlock-drop deep inside `mark_task_terminated` (e.g. inside
-    // `release_task_dependents` → `task_wake_all_waiters` → `wake_all`
-    // → `unblock_task` → `schedule_task`'s runqueue lock) can release
-    // the only outstanding `PreemptGuard` while a `reschedule_pending`
-    // flag is set. That flag was set by a previous timer-tick ISR that
-    // saw `is_scheduling_active()` true but couldn't reschedule because
-    // some inner critical section still held preemption.
-    //
-    // When the spinlock guard finally drops with preempt_count → 0 and
-    // reschedule_pending set, OSTD invokes
-    // `deferred_reschedule_callback`, which calls `schedule()`. We are
-    // already in `Zombie` state (mark_task_terminated transitioned us
-    // there before its first lock-drop), so the scheduler picks any
-    // other task — and the current task's task_terminate continuation
-    // (the call to `cleanup_task_process_resources` two lines below)
-    // never runs. Zombie tasks are not schedulable, so the dropped
-    // continuation stays dropped: the fd table is never destroyed, FD
-    // refcounts on inherited file objects never reach zero, and any
-    // waiter on a pipe whose only writer was this task hangs forever.
+    // Preemption stays off across the `mark_task_terminated` → cleanup →
+    // defer/free sequence: a spinlock drop inside `mark_task_terminated` would
+    // otherwise release the last guard with `reschedule_pending` set, and this
+    // task — already `Zombie`, so never scheduled again — would never run the
+    // cleanup below.
     let _preempt = slopos_ostd::cpu::preempt::PreemptGuard::new();
     mark_task_terminated(task, resolved_id);
 
     let defer_cleanup_to_running_cpu = !is_current && task.on_cpu();
     if defer_cleanup_to_running_cpu {
-        // The victim is executing on a peer CPU and its status is now terminal.
-        // Without a nudge it keeps running until that CPU's next timer tick,
-        // which on an otherwise-idle CPU it may reach only after a full
-        // quantum. The tick handler's terminal-status escape is what turns the
-        // interrupt into a deschedule.
+        // Without the IPI the victim runs on its peer CPU until that CPU's next
+        // timer tick; the tick handler's terminal-status escape is what turns
+        // the interrupt into a deschedule.
         if let Some(cpu) = scheduler::cpu_running_task(TaskAddr::of(task)) {
             crate::lifecycle::send_reschedule_ipi(cpu);
         }
@@ -1058,19 +895,15 @@ pub fn task_terminate(task_id: u32) -> c_int {
         super::task_quota::release(resolved_id);
     }
 
-    // Release through the reclaim path, never through `KArc`'s own `Drop`. This
-    // can be the final reference — terminating a task that no queue, inbox or
-    // parent list still holds leaves this handle as the last one — and the
-    // preempt guard above is still live, so the destructor must not run here.
+    // Never `KArc`'s own `Drop`: this can be the final reference and the preempt
+    // guard above is still live, so the destructor must not run here.
     // `task_put` parks it for the graveyard instead.
     super::task_put(target);
     0
 }
 
-/// What [`stamp_exit_state`] hands to the teardown tail.
-///
-/// Carries the decisions the stamping phase made, so the tail does not have to
-/// re-derive them from fields it has already retired.
+/// What [`stamp_exit_state`] hands to the teardown tail: decisions the tail
+/// cannot re-derive from fields already retired.
 struct ExitPlan {
     /// `clear_child_tid`, if this task is the one running and the address is
     /// non-zero — i.e. if the futex clear is ours to perform.
@@ -1079,12 +912,9 @@ struct ExitPlan {
 
 /// Write every field the exit path owns.
 ///
-/// Shared, not exclusive. The dying task is still reachable: a peer CPU may be
-/// in `wake_blocked_task` reading its status and placement, and its parent may
-/// be in `waitpid` reading `exit_info`. An `&mut` here would have claimed those
-/// readers do not exist. Every field this writes is therefore atomic or behind
-/// a lock, which is also what lets the teardown tail below keep using this one
-/// borrow rather than re-deriving one per call.
+/// Shared, not exclusive: the dying task is still reachable — a peer CPU may be
+/// reading its status and placement, its parent its `exit_info` — so every
+/// field written here is atomic or behind a lock.
 fn stamp_exit_state(task: &Task, now: u64) -> ExitPlan {
     let last_run = task.last_run_timestamp();
     if last_run != 0 && now >= last_run {
@@ -1096,21 +926,11 @@ fn stamp_exit_state(task: &Task, now: u64) -> ExitPlan {
             .store(TaskExitReason::Kernel.as_u16(), Ordering::Release);
     }
 
-    // Publish exit_info BEFORE the status transition so any racing
-    // observer that sees status==Zombie is guaranteed to see a fully
-    // populated `exit_info` cell on its next read. Order is load-bearing:
-    // `task_consume_zombie` keys on `status == Zombie` and then reads
-    // `exit_info.try_get()`; with this ordering, the consumer never
-    // sees Zombie+empty (which would force it to either return None
-    // and spin, or transition to Terminated and silently drop the
-    // exit code).
-    //
-    // `try_set` returns Err on a re-entry (e.g. fault path also calling
-    // task_terminate(self)); discard via `_` — the operation is
-    // idempotent.
-    // Acquire loads pairing with the Release stores above and in
-    // `task_record_user_fault_exit`: whoever publishes the status below must
-    // publish a fully-populated `ExitInfo`, and these three are its inputs.
+    // Published before the status transition: `task_consume_zombie` keys on
+    // `status == Zombie` and then reads `exit_info`, so Zombie+empty would make
+    // it spin or drop the exit code. The Acquire loads pair with the Release
+    // stores above and in `task_record_user_fault_exit`; a failing `try_set` is
+    // a re-entry, and the operation is idempotent.
     let info = ExitInfo {
         exit_code: task.exit_code.load(Ordering::Acquire) as i32,
         exit_reason: TaskExitReason::from_u16(task.exit_reason.load(Ordering::Acquire)),
@@ -1120,10 +940,6 @@ fn stamp_exit_state(task: &Task, now: u64) -> ExitPlan {
     };
     let _ = task.exit_info.try_set(info);
 
-    // Pick Zombie or Terminated based on whether a live parent might
-    // call `waitpid` on us. Kernel-mode tasks and orphans skip Zombie
-    // and go straight to Terminated — their exit code has no consumer,
-    // so the slot is immediately reapable.
     let parent_alive = parent_alive_for(task.parent_task_id());
     let final_status = if parent_alive {
         TaskStatus::Zombie
@@ -1133,9 +949,8 @@ fn stamp_exit_state(task: &Task, now: u64) -> ExitPlan {
     let _ = task.set_status(final_status);
     task.clear_fate();
 
-    // The futex clear is ours only when we are the running task. The swap is
-    // what elects a single performer: whoever takes a non-zero address does
-    // the wake, and there is no window in which two teardowns both see one.
+    // The swap elects a single performer: whoever takes a non-zero address does
+    // the wake, and no window lets two teardowns both see one.
     let clear_tid = if TaskAddr::current() == Some(TaskAddr::of(task)) {
         Some(task.take_clear_child_tid()).filter(|addr| *addr != 0)
     } else {
@@ -1148,11 +963,9 @@ fn stamp_exit_state(task: &Task, now: u64) -> ExitPlan {
 /// Drive one task to its terminal status and unhook it from everything that
 /// still names it.
 ///
-/// The caller holds an owning reference for the whole call — either the
-/// registry guard it resolved the id through, or, for self-termination, a
-/// handle minted from this CPU's dispatch reference. That is what makes a
-/// single borrow good across the whole sequence: nothing below can be the last
-/// release, because the caller's handle outlives all of them.
+/// The caller holds an owning reference for the whole call, which is what makes
+/// a single borrow good across the sequence: nothing below can be the last
+/// release.
 fn mark_task_terminated(task: &Task, resolved_id: u32) {
     let now = kdiag_timestamp();
 
@@ -1160,11 +973,9 @@ fn mark_task_terminated(task: &Task, resolved_id: u32) {
 
     scheduler::cancel_sleep(resolved_id);
 
-    // Unlink the wait node of a task parked in `wait_event*`. The node lives on
-    // the dying task's kernel stack, and that stack slot is recycled rather
-    // than quarantined, so a node left linked here is written through by the
-    // next wake on that queue — after the memory has been handed to another
-    // task.
+    // A `wait_event*` node lives on the dying task's kernel stack, which is
+    // recycled rather than quarantined: a node left linked is written through
+    // by the next wake on that queue, after another task owns the memory.
     slopos_ostd::sync::wait_queue::purge_parked_wait_node(task.parked_wait_queue(), resolved_id);
 
     if let Some(clear_tid) = plan.clear_tid {
@@ -1176,18 +987,14 @@ fn mark_task_terminated(task: &Task, resolved_id: u32) {
 
     notify_parent_of_child_exit(task);
 
-    // This task has just become a `Zombie` in its parent's list, so the parent
-    // is the one principal whose budget can have been exceeded, and by exactly
-    // one. Runs before `reparent_and_reap_children` below, which concerns this
-    // task's own children rather than its siblings.
+    // The parent is the one principal whose zombie budget can have been
+    // exceeded, and by exactly one.
     if task.status() == TaskStatus::Zombie
         && let Some(parent) = task_find_by_id(task.parent_task_id())
     {
         super::enforce_zombie_budget(&parent);
     }
 
-    // Session-leader hangup. Every field here is either a frozen identity or an
-    // atomic, so a shared borrow suffices.
     let should_hangup = if task.task_id != INVALID_TASK_ID
         && task.is_session_leader()
         && let Some(tty_idx) = task.controlling_tty()
@@ -1200,9 +1007,9 @@ fn mark_task_terminated(task: &Task, resolved_id: u32) {
 
     scheduler::unschedule_task(task);
 
-    // A task that dies before it was ever published leaves `Nascent` behind.
-    // Retire it to `None` so placement keeps meaning "no scheduler owner" for
-    // every dead task, whatever stage it died at.
+    // A task that dies before it was ever published leaves `Nascent` behind;
+    // retiring it keeps placement meaning "no scheduler owner" for every dead
+    // task, whatever stage it died at.
     let _ = task.sched_placement_compare_exchange(
         slopos_ostd::task::SchedPlacement::Nascent,
         slopos_ostd::task::SchedPlacement::None,
@@ -1210,10 +1017,7 @@ fn mark_task_terminated(task: &Task, resolved_id: u32) {
 
     release_task_dependents(resolved_id);
 
-    // Adopt children: live ones become orphans (parent id cleared, so their
-    // later termination skips Zombie); zombie ones are auto-reaped (Zombie →
-    // Terminated). There is no userland-PID-1 reaper, so orphan adoption happens
-    // entirely in the kernel.
+    // There is no userland PID-1, so orphan adoption happens in the kernel.
     reparent_and_reap_children(task);
 
     if let Some(tty_idx) = should_hangup {
@@ -1221,14 +1025,13 @@ fn mark_task_terminated(task: &Task, resolved_id: u32) {
     }
 }
 
-/// True if `parent_id` refers to a task slot that is currently
-/// runnable / blocked (i.e. has not itself exited). Used by
-/// [`mark_task_terminated`] to decide between Zombie (live parent will
-/// reap) and Terminated (no reaper, slot immediately reusable).
+/// True if `parent_id` names a task that has not itself exited, deciding
+/// between Zombie (a live parent will reap) and Terminated (no reaper, slot
+/// immediately reusable).
 ///
-/// A parent that has explicitly set `SIGCHLD` to `SIG_IGN` answers `false`
-/// even while running: it has declared it will never reap, so a Zombie held
-/// for it would be held forever. This is POSIX `SA_NOCLDWAIT` semantics.
+/// A parent that has explicitly set `SIGCHLD` to `SIG_IGN` answers `false` even
+/// while running: it will never reap, so the Zombie would be held forever.
+/// POSIX `SA_NOCLDWAIT` semantics.
 fn parent_alive_for(parent_id: u32) -> bool {
     if parent_id == INVALID_TASK_ID {
         return false;
@@ -1248,32 +1051,22 @@ fn parent_alive_for(parent_id: u32) -> bool {
 /// Whether `parent` has explicitly disclaimed reaping by installing `SIG_IGN`
 /// for `SIGCHLD`.
 ///
-/// The `SIG_DFL` case is deliberately excluded even though SlopOS maps
-/// `SIGCHLD`'s default action to `Ignore`. Linux draws that same line: the
-/// default disposition discards the *notification*, while an explicit
-/// `SIG_IGN` additionally discards the *status*. Conflating them would make
-/// every child of every default-disposition parent skip `Zombie`, and
-/// `waitpid` would then find nothing to reap for any well-behaved supervisor.
+/// `SIG_DFL` is deliberately excluded even though SlopOS maps `SIGCHLD`'s
+/// default action to `Ignore`: the default disposition discards the
+/// *notification*, an explicit `SIG_IGN` also discards the *status*.
+/// Conflating them would leave `waitpid` nothing to reap.
 fn parent_disclaims_children(parent: &Task) -> bool {
     let idx = (slopos_abi::signal::SIGCHLD - 1) as usize;
     parent.signal_handler(idx) == Some(slopos_abi::signal::SIG_IGN)
 }
 
-/// Drain the dying task's owned children list — O(children), not a registry
-/// scan. For each child:
-///   * clear its parent id so a live child's later exit skips the Zombie state
-///     and a reaped zombie leaves no dangling parent id;
-///   * if it is already a Zombie, demote it to Terminated (the would-be reaper
-///     just died, so its exit code has no consumer and it can be destroyed);
-///   * drop the owning reference the list held.
+/// Drain the dying task's owned children list: a live child's parent id is
+/// cleared so its later exit skips Zombie, and a child already Zombie is
+/// demoted and reaped here, having just lost its only reaper.
 ///
 /// Each `take_one_child` pop runs under the registry lock; the returned
 /// reference is dropped off-lock and is never the last one, because the child
-/// still holds its own existence reference until it is reaped.
-///
-/// A child demoted to `Terminated` here has just lost its only reaper, so this
-/// is the one place that must reap it. A live child keeps its existence
-/// reference and reaps itself when it exits.
+/// holds its own existence reference until it is reaped.
 fn reparent_and_reap_children(dying: &Task) {
     while let Some(child) = super::take_one_child(dying) {
         let child_id = child.task_id;
@@ -1287,19 +1080,13 @@ fn reparent_and_reap_children(dying: &Task) {
     }
 }
 
-/// Takes the guard rather than a borrow: the `task_reap` below releases the
-/// task's existence reference off-lock and may run the destructor inline, so the
-/// caller's handle is what keeps the body addressable across this call.
+/// Takes the guard rather than a borrow: the `task_reap` below may run the
+/// destructor inline, so the caller's handle is what keeps the body addressable
+/// across this call.
 fn cleanup_terminated_task_resources(task: &TaskRef, resolved_id: u32) {
     if task.on_cpu() {
         return;
     }
-
-    // Past the `on_cpu` bail, so this task is established not to be executing:
-    // it cannot be inside the ELF read or the fd actions of a spawn whose child
-    // this abandons. That is the whole reason the release hooks here and in
-    // `cleanup_current_task_after_switch` rather than in
-    // `mark_task_terminated`, which runs *before* `task_terminate` has even
 
     cleanup_task_process_resources(task, resolved_id, TaskProcessCleanupMode::DropVm);
     task.set_recovery_depth(0);
@@ -1318,7 +1105,6 @@ pub fn cleanup_current_task_after_switch(task: &TaskRef) {
     }
 
     let resolved_id = task.task_id;
-    // The victim's own CPU, after the register swap: its frames are dead, so a
 
     cleanup_task_process_resources(task, resolved_id, TaskProcessCleanupMode::DropVm);
     task.set_recovery_depth(0);
@@ -1330,8 +1116,8 @@ pub fn cleanup_current_task_after_switch(task: &TaskRef) {
                 mgr.num_tasks -= 1;
             }
         });
-        // The same latch, for the same reason: the task's share of the
-        // per-process bound is free now, not when the graveyard drains.
+        // The task's share of the per-process bound is free now, not when the
+        // graveyard drains.
         super::task_quota::release(resolved_id);
     }
 
@@ -1391,20 +1177,17 @@ fn refresh_num_tasks_after_shutdown() {
     });
 }
 
-/// How long shutdown gives the kernel-I/O threads to finish, and how long it
-/// yields between checks. A thread that has not stopped by then is torn down
-/// with everything else and named in the log.
+/// How long shutdown gives the kernel-I/O threads to finish. A thread that has
+/// not stopped by then is torn down with everything else and named in the log.
 const KERNEL_IO_JOIN_MS: u64 = 250;
 
 /// Ask every kernel-I/O thread to stop and wait, bounded, for it to say it
 /// finished.
 ///
-/// A step of kernel shutdown rather than of the task sweep: it must run while
-/// every CPU is still scheduling, because a thread parked on a paused CPU
-/// cannot reach its own exit point — and its last act is the one that matters,
-/// the ext2 flusher's final sync being what puts dirty blocks on the device.
-/// The task sweep also runs per test scope, where stopping the machine's
-/// service threads would be both wrong and slow.
+/// Must run while every CPU is still scheduling: a thread parked on a paused
+/// CPU cannot reach its own exit point, and its last act is the one that
+/// matters (the ext2 flusher's final sync). Not part of the task sweep, which
+/// also runs per test scope.
 pub fn stop_kernel_io_tasks() {
     use slopos_ostd::sync::kernel_io_task::{
         for_each_unstopped_kernel_io, kernel_io_stops_pending, request_kernel_io_stop_all,
@@ -1423,18 +1206,16 @@ pub fn stop_kernel_io_tasks() {
         crate::scheduler::yield_();
     }
 
-    // Naming the stragglers is the point: this log line is the list of threads
-    // whose park is not stop-aware, which is otherwise invisible.
+    // This log line is the list of threads whose park is not stop-aware.
     for_each_unstopped_kernel_io(|name| {
         klog_info!("SCHED: kernel-io task '{}' did not stop in time", name);
     });
 }
 
 pub fn task_shutdown_all() -> c_int {
-    // A pause that cannot be taken is reported and stepped over rather than
-    // propagated: the two callers are kernel shutdown, where refusing to tear
-    // tasks down leaves the machine up with no way forward, and the test scope,
-    // which already holds a pause of its own and so takes the nesting path.
+    // A pause that cannot be taken is stepped over rather than propagated:
+    // refusing to tear tasks down would leave the machine up with no way
+    // forward.
     let ap_pause = match crate::per_cpu::pause_all_aps() {
         Ok(token) => Some(token),
         Err(crate::per_cpu::ApPauseError::Timeout { cpu_id }) => {
@@ -1449,40 +1230,30 @@ pub fn task_shutdown_all() -> c_int {
     let result = terminate_task_ids(&tasks_to_terminate);
 
     crate::per_cpu::clear_all_cpu_queues();
-    // Before the recount, not after: `refresh_num_tasks_after_shutdown`
-    // recomputes `num_tasks` from the registry, which cannot see a parked
-    // token — so draining afterwards would paper over the accounting without
-    // returning the memory. The shutdown sweep cannot reach these either, for
-    // the same reason, so this is an explicit call rather than a byproduct.
+    // Queue teardown runs before the recount: `refresh_num_tasks_after_shutdown`
+    // recomputes `num_tasks` from the registry, which cannot see a parked token.
     refresh_num_tasks_after_shutdown();
 
     if let Some(token) = ap_pause {
         crate::per_cpu::resume_all_aps_if_not_nested(token);
     }
-    // Queue teardown releases every parked reference, so this is where the last
-    // one usually lands. Drain now — with the APs resumed and no lock held —
-    // rather than leaving corpses for an idle pass that may never come.
+    // Drained with the APs resumed and no lock held: queue teardown released
+    // the last parked references, and no idle pass is guaranteed to come.
     super::task_graveyard_drain();
     result
 }
 
-/// Flush the parent's live FPU/vector registers into its `fpu_state`
-/// slot before a fork/clone copies that slot into the child. Without
-/// this the child inherits the parent's last context-switch snapshot
-/// rather than its register state at the `fork()`/`clone()` call site.
+/// Flush the parent's live FPU/vector registers into its `fpu_state` before a
+/// fork/clone copies that slot: otherwise the child inherits the parent's last
+/// context-switch snapshot rather than its state at the call site.
 ///
-/// `save_current` captures the *current CPU's* vector file, so this is
-/// gated on the parent being the running task — the fork/clone
-/// self-syscall contract. If it ever isn't current, the scheduler's own
-/// switch-out already holds a correct snapshot and we skip the flush.
+/// Gated on the parent being the running task, since the save captures this
+/// CPU's vector file; otherwise its switch-out snapshot is already correct.
 fn flush_live_fpu_for_clone(parent: &Task) {
     let parent_addr = TaskAddr::of(parent);
     if TaskAddr::current() != Some(parent_addr) {
         return;
     }
-    // The check above established the parent is this CPU's current task, so the
-    // guard names it — and that is exactly the fact that makes capturing *this
-    // CPU's* vector file the right thing to do.
     let Some(current) = crate::task_struct::Current::get() else {
         return;
     };
@@ -1522,8 +1293,6 @@ pub fn task_fork(
     let child_process_id = child_process.process_id();
     let child_process_handle = child_process.process_handle();
     let child_vm_id = child_process.process.as_deref().and_then(ProcessId::of);
-    // The child's own account: a fork mints a fresh process, so the stacks
-    // belong to the principal that will run on them.
     let stack_account = child_process
         .process
         .as_deref()
@@ -1550,11 +1319,6 @@ pub fn task_fork(
         };
     let child_unsafe_stack_top = child_unsafe_stack.top().as_u64();
 
-    // The token below is the sole reference to a task that already owns its
-    // process lease; from here to the commit it must not be lost. The guard
-    // keeps the region non-blocking: `assert_switch_preempt_safe` turns a
-    // blocking call added here into a panic naming this frame. Allocation
-    // under it is fine — interrupts stay on, so cross-CPU TLB acks still land.
     let _preempt = slopos_ostd::cpu::preempt::PreemptGuard::new();
     let mut pending = match allocate_task() {
         Ok(pending) => pending,
@@ -1572,28 +1336,25 @@ pub fn task_fork(
 
     super::task_ops::task_clone_from(child, parent);
 
-    // The bulk copy above may carry the parent's saved recovery/in-flight
-    // depths, which were written at its last switch-out and can be stale
-    // (e.g. saved mid-unwind, then the parent caught the panic without
-    // another switch-out). The child starts outside any recovery scope.
+    // The bulk copy above can carry the parent's recovery depths, saved at its
+    // last switch-out and possibly stale; the child starts outside any
+    // recovery scope.
     child.set_recovery_depth(0);
     child.set_panic_in_flight(0);
 
     child.task_id = child_task_id;
     child.process_id = child_process_id;
     child.set_process_vm_handle_raw(child_process.process_vm_handle());
-    // A fork gets its own process, so the child joins that one rather than the
-    // parent's. `clone_from_raw` cleared the copied handle, so a miss here is a
-    // child with no process and not a child silently sharing its parent's.
+    // `clone_from_raw` cleared the copied handle, so a miss here leaves a child
+    // with no process rather than one silently sharing its parent's.
     child.set_process_handle_raw(child_process_handle);
     // The parent link and children-list membership are published together, after
     // registration, via `link_child` — never a bare field write.
     child.tgid = child_task_id;
     child.set_pgid(parent.pgid());
     child.set_sid(parent.sid());
-    // Share the parent's group object (clone_from_raw emptied the copied
-    // slot); the shared identity is what a stale pid check keys on. Exclusive
-    // because the child is not published yet.
+    // The parent's group object, shared: `clone_from_raw` emptied the copied
+    // slot, and the shared identity is what a stale pid check keys on.
     let _ = child
         .process_group
         .replace_exclusive(parent.process_group.load());
@@ -1603,10 +1364,7 @@ pub fn task_fork(
     child.kernel_stack_top = child_kernel_stack.top().as_u64();
     child.kernel_stack_size = TASK_KERNEL_STACK_SIZE;
 
-    // OSTD user-mode entry: seed `child.user_ctx` from the parent's
-    // syscall-time UserContext when one is supplied, and otherwise from
-    // the copy `clone_from_raw` already made. Either way rax is forced
-    // to 0 for fork's child return, and through `set_regs` so the
+    // `rax = 0` is fork's child return, written through `set_regs` so the
     // CS/SS/RFLAGS-mask invariants hold.
     let mut regs = match parent_user_ctx {
         Some(parent_ctx) => parent_ctx.regs(),
@@ -1619,10 +1377,9 @@ pub fn task_fork(
     child.context_from_user.store(0, Ordering::Relaxed);
     child.context.get_mut().rax = 0;
 
-    // `clone_from_raw` copied the parent's whole `TaskInner`, so `cr3`
-    // still names the parent's root until this write. A child with no
-    // address space gets 0, which the dispatcher and `task_find_by_cr3`
-    // both read as "no VM".
+    // `clone_from_raw` copied the parent's whole `TaskInner`, so `cr3` still
+    // names the parent's root until this write; 0 is what the dispatcher and
+    // `task_find_by_cr3` read as "no VM".
     child.context.get_mut().cr3 =
         child_vm_id.map_or(0, slopos_mm::process_vm::process_vm_get_ostd_pml4_paddr);
 
@@ -1630,15 +1387,12 @@ pub fn task_fork(
     if let (_, Some(process)) = child_process.disarm() {
         process.task_join();
     }
-    // Transfer ownership of the kernel stack into the task; its `Drop`
-    // runs when the task is destroyed.
     child.kernel_stack = Some(child_kernel_stack);
     child.abi.unsafe_stack_sp = child_unsafe_stack_top;
     child.unsafe_stack = Some(child_unsafe_stack);
 
-    // Held across link_child and publication below: registration alone would
-    // let a concurrent shutdown sweep reclaim the child under them, and this
-    // handle is also where those two get the child's address from.
+    // Held across `link_child` and publication below: registration alone would
+    // let a concurrent shutdown sweep reclaim the child under them.
     let Some(registered) = task_commit(pending) else {
         return INVALID_TASK_ID;
     };
@@ -1651,18 +1405,12 @@ pub fn task_fork(
         parent.process_id
     );
 
-    // Publish the parent→child ownership edge: sets the child's parent id and
-    // parks one owning reference in the parent's children list. Done after
-    // registration (so the child is a live registry entry) and after the
-    // `child` borrow above has ended. The parent is the borrow this function
-    // was handed, which outlives every child-side write.
+    // After registration and after the `child` borrow above has ended:
+    // `link_child` parks one owning reference in the parent's children list.
     if let Some(child_nn) = core::ptr::NonNull::new(registered.as_ptr()) {
         super::link_child(parent, child_nn);
     }
 
-    // Publish Ready only after all child-specific fields are fully initialized.
-    // `publish_new_task` reserves scheduler placement before setting Ready, so
-    // the child is never visible as Ready with no runqueue/inbox owner.
     if scheduler::publish_new_task(&registered) != 0 {
         klog_info!("fork: initial runnable publish failed for task {child_task_id}");
         let _ = task_terminate(child_task_id);
@@ -1730,12 +1478,9 @@ pub fn task_clone(
     } else {
         child_process.process_id()
     };
-    // A `CLONE_VM` thread is a *member* of the parent's process, not a new one:
-    // same address space, same descriptor table, same account, so the same
-    // handle. That is what makes the exit-time count meaningful — the last
-    // member out tears the address space down, and a thread that had its own
-    // process object would tear it down while its siblings were still running
-    // in it.
+    // A `CLONE_VM` thread is a member of the parent's process, not a new one,
+    // so it carries the same handle: the exit-time count is what makes the last
+    // member out — and only it — tear the address space down.
     let child_process_handle = if share_vm {
         parent.process_handle_raw()
     } else {
@@ -1751,11 +1496,6 @@ pub fn task_clone(
     let child_kernel_stack_base = child_kernel_stack.base().as_u64();
     let child_unsafe_stack_top = child_unsafe_stack.top().as_u64();
 
-    // The token below is the sole reference to a task that already owns its
-    // process lease; from here to the commit it must not be lost. The guard
-    // keeps the region non-blocking: `assert_switch_preempt_safe` turns a
-    // blocking call added here into a panic naming this frame. Allocation
-    // under it is fine — interrupts stay on, so cross-CPU TLB acks still land.
     let _preempt = slopos_ostd::cpu::preempt::PreemptGuard::new();
     let mut pending = match allocate_task() {
         Ok(pending) => pending,
@@ -1763,33 +1503,21 @@ pub fn task_clone(
     };
     let child_task_id = pending.id();
 
-    // Exclusive because the token holds the only reference to the child; the
-    // parent is a separate allocation reached through a shared borrow, so one
-    // `&mut` and one `&` coexist without aliasing.
     let child = pending.as_mut();
 
     super::task_ops::task_clone_from(child, parent);
 
-    // The bulk copy above may carry the parent's saved recovery/in-flight
-    // depths, which were written at its last switch-out and can be stale
-    // (e.g. saved mid-unwind, then the parent caught the panic without
-    // another switch-out). The child starts outside any recovery scope.
     child.set_recovery_depth(0);
     child.set_panic_in_flight(0);
 
     child.task_id = child_task_id;
     child.process_id = child_process_id;
-    // A `CLONE_VM` thread runs in the parent's address space, so it carries
-    // the parent's handle: same slot, same generation, same object. Anything
-    // else got its own address space from the lease.
     child.set_process_vm_handle_raw(if share_vm {
         parent.process_vm_handle_raw()
     } else {
         child_process.process_vm_handle()
     });
     child.set_process_handle_raw(child_process_handle);
-    // The parent link and children-list membership are published together, after
-    // registration, via `link_child` — never a bare field write.
 
     if is_thread {
         child.tgid = if parent.tgid != INVALID_TASK_ID {
@@ -1802,9 +1530,6 @@ pub fn task_clone(
     }
     child.set_pgid(parent.pgid());
     child.set_sid(parent.sid());
-    // Share the parent's group object (clone_from_raw emptied the copied
-    // slot); the shared identity is what a stale pid check keys on. Exclusive
-    // because the child is not published yet.
     let _ = child
         .process_group
         .replace_exclusive(parent.process_group.load());
@@ -1813,16 +1538,9 @@ pub fn task_clone(
     child.kernel_stack_top = child_kernel_stack.top().as_u64();
     child.kernel_stack_size = TASK_KERNEL_STACK_SIZE;
 
-    // OSTD user-mode entry: seed `child.user_ctx` from the parent's
-    // live syscall-time `UserContext` — the registers captured at the
-    // `clone` trap, whose `rip` is the instruction after the syscall.
-    // The child resumes there with `rax = 0` so the libc clone shim
-    // takes its child branch and runs the new thread's start routine.
-    // Seeding from the legacy `context` instead would resume the child
-    // at a stale rip (e.g. the ELF entry), re-running `main`. This
-    // mirrors `task_fork`; `task_clone_from` already copied the
-    // parent's `user_ctx` as the fallback when no live snapshot is
-    // supplied.
+    // Seeded from the parent's live syscall-time `UserContext`, whose `rip` is
+    // the instruction after the `clone` trap; the legacy `context` would resume
+    // the child at a stale rip (the ELF entry) and re-run `main`.
     {
         let mut regs = match parent_user_ctx {
             Some(parent_ctx) => parent_ctx.regs(),
@@ -1855,19 +1573,16 @@ pub fn task_clone(
         child.fs_base.store(tls, Ordering::Release);
     }
 
-    // A VM-sharing child keeps the parent's root, which `clone_from_raw`
-    // already copied; only a child with its own address space is
-    // repointed at it.
+    // A VM-sharing child keeps the parent's root, already copied by
+    // `clone_from_raw`.
     if !share_vm {
         child.context.get_mut().cr3 =
             child_vm_id.map_or(0, slopos_mm::process_vm::process_vm_get_ostd_pml4_paddr);
     }
 
     child.reset_runtime_state();
-    // Both branches join, and both join exactly once: a new process gets its
-    // first member here, and a shared one gets an additional member. The lease
-    // is disarmed in the same step so the join and the ownership transfer
-    // cannot drift apart.
+    // Both branches join exactly once; the lease is disarmed in the same step
+    // so the join and the ownership transfer cannot drift apart.
     if share_vm {
         if let Some(process) = parent.process() {
             process.task_join();
@@ -1875,17 +1590,12 @@ pub fn task_clone(
     } else if let (_, Some(process)) = child_process.disarm() {
         process.task_join();
     }
-    // Transfer ownership of the kernel stack to the task; its `Drop`
-    // runs when the task is destroyed.
     child.kernel_stack = Some(child_kernel_stack);
     child.abi.unsafe_stack_sp = child_unsafe_stack_top;
     child.unsafe_stack = Some(child_unsafe_stack);
     let child_tgid = child.tgid;
-    // Held across the settid writes, link_child and publication below.
-    // Registration alone would let a concurrent shutdown sweep reclaim the
-    // child under them; the scope-held guard also covers every faulting early
-    // return between here and the end, and is where link_child reads the
-    // child's address from.
+    // Held across the settid writes, `link_child` and publication below,
+    // including every faulting early return between here and the end.
     let Some(registered) = task_commit(pending) else {
         return Err(ERRNO_EAGAIN);
     };
@@ -1930,17 +1640,10 @@ pub fn task_clone(
         parent.process_id
     );
 
-    // Publish the parent→child ownership edge (parent id + children-list
-    // membership) after registration and after the `child` borrow above has
-    // ended. The parent is the borrow this function was handed, which outlives
-    // every child-side write.
     if let Some(child_nn) = core::ptr::NonNull::new(registered.as_ptr()) {
         super::link_child(parent, child_nn);
     }
 
-    // Publish Ready only after all child-specific fields are fully initialized.
-    // `publish_new_task` reserves scheduler placement before setting Ready, so
-    // the child is never visible as Ready with no runqueue/inbox owner.
     if scheduler::publish_new_task(&registered) != 0 {
         klog_info!("clone: initial runnable publish failed for task {child_task_id}");
         let _ = task_terminate(child_task_id);

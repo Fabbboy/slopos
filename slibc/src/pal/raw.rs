@@ -1,8 +1,5 @@
 //! Raw syscall primitives for x86_64 SlopOS userland.
 //!
-//! This module provides the low-level inline assembly wrappers for issuing
-//! syscalls. All higher-level syscall wrappers should use these primitives.
-//!
 //! # ABI Convention
 //!
 //! SlopOS uses the standard x86_64 syscall convention:

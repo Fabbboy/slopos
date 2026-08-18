@@ -129,8 +129,6 @@ impl Pipe {
     }
 }
 
-// OwnedFd handles close on drop — no explicit Drop needed.
-
 impl fmt::Debug for Pipe {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Pipe")

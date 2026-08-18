@@ -605,12 +605,10 @@ fn test_netmon_stale_handle_is_ebadf() -> TestResult {
     pass!()
 }
 
-/// The ring is released when its last fd closes: the backing owns the registry
-/// entry, so the drop **is** the teardown.
+/// The backing owns the registry entry, so its drop **is** the teardown.
 ///
-/// This one runs against the kernel registry, because the backing names it.
-/// It opens one monitor under a synthetic process id and gives it straight
-/// back, so the registry ends exactly as it started.
+/// Runs against the kernel registry, because the backing names it; it gives the
+/// monitor straight back, so the registry ends exactly as it started.
 fn test_netmon_ring_freed_when_backing_drops() -> TestResult {
     let before = NETMON_TABLE.count();
 
@@ -645,19 +643,13 @@ fn test_netmon_ring_freed_when_backing_drops() -> TestResult {
     pass!()
 }
 
-// =============================================================================
-// The fd
-// =============================================================================
-
-/// `read` delivers whole records and nothing else: a short buffer is `EINVAL`,
-/// a quiet ring is `EAGAIN`, and a long buffer takes as many whole records as
-/// fit. There is no partial record, so a reader needs no framing.
+/// `read` delivers whole records and nothing else, so a reader needs no
+/// framing.
 fn test_netmon_read_is_a_record_stride() -> TestResult {
     // Subscribed to neighbour churn, which nothing in the stack posts: this is
     // the kernel registry, so a real interface, address or route change landing
-    // mid-test would be an extra record in this ring and these assertions count
-    // exactly. The fd contract under test is indifferent to which kind carries
-    // it.
+    // mid-test would be an extra record in a ring these assertions count
+    // exactly.
     let handle = match NETMON_TABLE.open(TEST_OWNER, NET_MON_NEIGH) {
         Ok(h) => h,
         Err(_) => return fail!("the kernel registry must have a free slot"),
@@ -690,7 +682,6 @@ fn test_netmon_read_is_a_record_stride() -> TestResult {
         NetEvent::neigh_payload([10, 0, 2, 3], NET_NEIGH_REACHABLE),
     );
 
-    // Three records of room, two records queued.
     let mut wide = [0u8; NET_EVENT_LEN * 3];
     let mut wide_buf = KernelIoBuf::new(&mut wide);
     let n = NETMON_FILE_OPS.read(handle, &mut wide_buf, 0, 0);
@@ -716,7 +707,6 @@ fn test_netmon_read_is_a_record_stride() -> TestResult {
     assert_eq_test!(decoded.seq, second, "the second record follows");
     assert_eq_test!(decoded.ifindex, 102, "and carries its interface");
 
-    // A one-record buffer takes exactly one, leaving the rest queued.
     NETMON_TABLE.post(
         NET_EV_NEIGH_CHANGED,
         103,
@@ -741,7 +731,6 @@ fn test_netmon_read_is_a_record_stride() -> TestResult {
         "and the next read takes the one left behind"
     );
 
-    // `write` is meaningless: the stream runs one way.
     let empty: [u8; 0] = [];
     let write_buf = slopos_abi::io::KernelIoBufRef::new(&empty);
     assert_eq_test!(
@@ -760,8 +749,6 @@ fn test_netmon_read_is_a_record_stride() -> TestResult {
     pass!()
 }
 
-/// Readiness follows the ring: `POLLIN` exactly while a record is queued, and
-/// `POLLNVAL` once the monitor is gone.
 fn test_netmon_poll_tracks_readiness() -> TestResult {
     // A kind no production path emits — see `test_netmon_read_is_a_record_stride`.
     let handle = match NETMON_TABLE.open(TEST_OWNER, NET_MON_NEIGH) {
@@ -775,13 +762,8 @@ fn test_netmon_poll_tracks_readiness() -> TestResult {
         "an empty ring is not ready"
     );
 
-    // The fused hook registers before it tests, which is what closes the
-    // window a post between the test and the block would fall into.
-    //
-    // Only `revents` is asserted here: `registered` depends on the caller being
-    // the PCR's current task, which a `net`-crate test cannot arrange — the
-    // helper that installs one (`make_task_current`) lives in `core`'s test
-    // support. The registration path here is the one `signalfd` uses.
+    // Only `revents` is asserted: `registered` depends on the caller being the
+    // PCR's current task, which a `net`-crate test cannot arrange.
     let fused = NETMON_FILE_OPS.poll_fused(handle, POLLIN);
     assert_eq_test!(fused.revents, 0, "an empty ring reports not-ready");
     NETMON_FILE_OPS.poll_unwait(handle);

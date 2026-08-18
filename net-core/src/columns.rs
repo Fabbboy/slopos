@@ -13,8 +13,7 @@ pub const BRIEF_MAC: usize = 18;
 ///
 /// The `max(1, ...)` is what keeps a row parseable: a plain `width - len` pad
 /// emits nothing for a field that exactly fills its column, and the next field
-/// runs straight into it (`eth0LOWERLAYERDOWN`). The guaranteed separator costs
-/// a column of alignment on the rare over-long row.
+/// runs straight into it (`eth0LOWERLAYERDOWN`).
 pub fn field<W: Write + ?Sized>(out: &mut W, text: &str, width: usize) -> core::fmt::Result {
     out.write_str(text)?;
     let pad = width.saturating_sub(text.chars().count()).max(1);
@@ -83,8 +82,6 @@ mod tests {
     #[test]
     fn field_exactly_at_width_still_emits_one_separator() {
         assert_eq!(rendered("abcdefgh", 8).as_str(), "abcdefgh ");
-        // Fourteen characters in a fifteen-wide column pads to width as usual;
-        // fifteen would fill it exactly.
         assert_eq!(
             rendered("LOWERLAYERDOWN", BRIEF_STATE).as_str(),
             "LOWERLAYERDOWN "
@@ -107,8 +104,7 @@ mod tests {
 
     #[test]
     fn padding_counts_characters_not_bytes() {
-        // A Latin-1 character is two UTF-8 bytes; the column is measured in
-        // characters, which is what the console draws.
+        // A Latin-1 character is two UTF-8 bytes; the column counts characters.
         assert_eq!(rendered("é", 4).as_str(), "é   ");
     }
 

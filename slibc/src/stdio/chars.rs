@@ -1,19 +1,14 @@
 //! Character and line primitives.
 //!
-//! Each one is an unlocked core plus a wrapper that takes the stream lock, so
-//! callers that already hold the stream (POSIX §2.5.2 `flockfile`, and the
-//! `printf`/`scanf` families internally) pay for one acquisition per call
-//! rather than one per byte.
+//! Each is an unlocked core plus a locking wrapper, so a caller that already
+//! holds the stream (POSIX §2.5.2 `flockfile`, the `printf`/`scanf` families)
+//! pays one acquisition per call rather than one per byte.
 
 use crate::pal::Pal;
 
 use super::{
     BufferMode, EOF, FILE, FILE_FLAG_EOF, FILE_FLAG_ERR, FILE_FLAG_READABLE, FILE_FLAG_WRITABLE,
 };
-
-// ---------------------------------------------------------------------------
-// Unlocked cores
-// ---------------------------------------------------------------------------
 
 /// # Safety
 /// The caller holds the stream lock, or the stream is thread-private.
@@ -29,7 +24,6 @@ pub unsafe extern "C" fn fgetc_unlocked(stream: *mut FILE) -> i32 {
         return EOF;
     }
 
-    // Check ungetc push-back first
     if f.ungot >= 0 {
         let c = f.ungot;
         f.ungot = -1;
@@ -161,7 +155,7 @@ pub unsafe extern "C" fn ungetc_unlocked(c: i32, stream: *mut FILE) -> i32 {
 
     let f = &mut *stream;
     if f.ungot >= 0 {
-        // Only one byte of push-back is supported
+        // C guarantees only one byte of push-back.
         return EOF;
     }
 
@@ -169,10 +163,6 @@ pub unsafe extern "C" fn ungetc_unlocked(c: i32, stream: *mut FILE) -> i32 {
     f.flags &= !FILE_FLAG_EOF;
     f.ungot
 }
-
-// ---------------------------------------------------------------------------
-// Locking wrappers
-// ---------------------------------------------------------------------------
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn fgetc(stream: *mut FILE) -> i32 {
@@ -228,10 +218,6 @@ pub unsafe extern "C" fn ungetc(c: i32, stream: *mut FILE) -> i32 {
     (*stream).lock.unlock();
     r
 }
-
-// ---------------------------------------------------------------------------
-// getc / putc and the standard-stream shorthands
-// ---------------------------------------------------------------------------
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn getc(stream: *mut FILE) -> i32 {

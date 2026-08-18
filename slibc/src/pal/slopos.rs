@@ -6,17 +6,13 @@ use slopos_abi::syscall::*;
 pub struct Sys;
 
 /// Signal restorer trampoline — the address userland installs as
-/// `sa_restorer` so the kernel can deliver a catchable handler.
+/// `sa_restorer`. The kernel refuses to deliver a handler whose
+/// `sa_restorer` is 0, so libc must always inject one.
 ///
-/// The kernel rejects any real handler whose `sa_restorer` is 0 and bails
-/// out of delivery when it is 0, so libc must always inject one (matching
-/// glibc, which never trusts the caller to supply a restorer). When a
-/// handler returns, control lands here; we invoke `rt_sigreturn`
-/// (syscall [`SYSCALL_RT_SIGRETURN`]) to restore the interrupted context.
-/// The kernel pushes the restorer address as a separate stack word ahead
-/// of the `SignalFrame`, so after the handler's `ret` pops it, RSP points
-/// directly at the frame and no stack adjustment is needed before the
-/// syscall. `ud2` traps if `rt_sigreturn` ever returns (it must not).
+/// The kernel pushes the restorer address as a separate stack word ahead of
+/// the `SignalFrame`, so once the handler's `ret` pops it RSP points directly
+/// at the frame and `rt_sigreturn` needs no stack adjustment. `ud2` traps if
+/// `rt_sigreturn` ever returns.
 #[unsafe(naked)]
 extern "C" fn signal_restorer() {
     core::arch::naked_asm!(

@@ -151,7 +151,7 @@ pub fn test_ingress_drops_unknown_ethertype() -> TestResult {
     let frame = build_frame(
         device_mac.0,
         [0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff],
-        0x9999, // unknown ethertype
+        0x9999,
         &payload,
     );
 

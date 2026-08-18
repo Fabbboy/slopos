@@ -1,20 +1,6 @@
 //! `SynSent` state: active-open client, waiting for SYN+ACK.
 //!
-//! RFC 793 §3.4 segment arrival at `SYN_SENT` has four cases:
-//!
-//! 1. **ACK with bad value** → `RST(seq = ack_num)` unless the
-//!    incoming segment is already a RST (in which case silently
-//!    drop).  "Bad value" means `ack_num <= iss` or
-//!    `ack_num > snd_nxt`; a valid SYN must ack our SYN.
-//! 2. **RST + valid ACK** → connection refused; release the PCB and
-//!    surface `RESET_RECEIVED` to the socket layer.
-//! 3. **RST without ACK** → silently drop (unacknowledged RSTs at
-//!    `SYN_SENT` are invalid).
-//! 4. **SYN** → parse options, update `rcv_nxt`/`irs`/`peer_mss`/
-//!    `wscale`.  If the SYN carried a valid ACK, transition to
-//!    `Data`/`ClosePhase::Established` and emit a plain ACK;
-//!    otherwise (simultaneous open) transition to `SynRecv` and
-//!    emit a SYN+ACK.
+//! Segment arrival at `SYN_SENT` follows RFC 793 §3.4.
 
 use core::mem;
 
@@ -29,7 +15,6 @@ use super::syn_recv::SynRecvState;
 use super::{Pcb, PcbState};
 use crate::timer::TimerToken;
 
-/// State-specific payload for `SYN_SENT`.
 #[derive(Debug)]
 pub struct SynSentState {
     pub iss: SeqNum,
@@ -44,9 +29,8 @@ pub struct SynSentState {
 }
 
 impl SynSentState {
-    /// Create a fresh SYN_SENT payload.  The caller is responsible
-    /// for actually emitting the SYN segment; this constructor only
-    /// populates the state that tracks the half-open handshake.
+    /// The caller must emit the SYN segment; this only populates the state
+    /// tracking the half-open handshake.
     pub const fn new(iss: SeqNum) -> Self {
         Self {
             iss,
@@ -61,16 +45,13 @@ impl SynSentState {
         }
     }
 
-    /// Apply an incoming segment to a SYN_SENT PCB.
-    ///
-    /// Returns `Actions` by value; see `SynRecvState::on_segment` for
-    /// why `Result<Actions, _>` is not used (frame size).
+    /// Returns `Actions` by value, not `Result<Actions, _>` — see
+    /// `SynRecvState::on_segment` (frame size).
     pub fn on_segment(pcb: &mut Pcb, hdr: &TcpHeader, options: &[u8], now_ms: u64) -> Actions {
         let mut actions = Actions::new();
 
-        // Snapshot the bits we need — destructuring &mut pcb.state and
-        // also borrowing pcb.tuple would be a double borrow, so grab
-        // the tuple first and the state borrows second.
+        // Take `tuple` before borrowing `pcb.state` mutably; both at once is a
+        // double borrow.
         let tuple = pcb.tuple;
         let PcbState::SynSent(s) = &mut pcb.state else {
             unreachable!("SynSentState::on_segment called with non-SynSent state");
@@ -78,10 +59,6 @@ impl SynSentState {
         let iss = s.iss;
         let snd_nxt = s.snd_nxt;
 
-        // Step 1: if the segment has an ACK flag, verify the ack_num
-        // is within the valid range (iss, snd_nxt].  A bad ACK gets a
-        // RST reply (unless the stranger already sent RST, in which
-        // case we drop silently).
         if hdr.is_ack() {
             let ack = SeqNum::new(hdr.ack_num);
             if seq_le(hdr.ack_num, iss.raw()) || seq_gt(hdr.ack_num, snd_nxt.raw()) {
@@ -94,9 +71,6 @@ impl SynSentState {
             let _ = ack;
         }
 
-        // Step 2: RST handling.  A RST with a valid ACK (verified in
-        // step 1) means the peer refused the connection.  Mark the
-        // PCB for release and surface the reset to the socket layer.
         if hdr.is_rst() {
             if hdr.is_ack() {
                 actions.release = true;
@@ -105,20 +79,15 @@ impl SynSentState {
             return actions;
         }
 
-        // Step 3: we only care about SYNs from here on.
         if !hdr.is_syn() {
             return actions;
         }
 
-        // Step 4: parse options and pull everything we need out of the
-        // incoming header before we swap out pcb.state.
         let opts = parse_tcp_options(options);
         let peer_mss = opts.mss.unwrap_or(DEFAULT_MSS);
         let irs = SeqNum::new(hdr.seq_num);
         let rcv_nxt = irs.wrapping_add(1);
 
-        // Work out the final snd_una / snd_wnd based on whether this
-        // segment also acknowledges our SYN.
         let ack_valid_for_our_syn = hdr.is_ack() && seq_gt(hdr.ack_num, iss.raw());
         let snd_una = if ack_valid_for_our_syn {
             SeqNum::new(hdr.ack_num)
@@ -136,12 +105,9 @@ impl SynSentState {
         let _ = s;
 
         if ack_valid_for_our_syn {
-            // SYN+ACK acknowledging our SYN → ESTABLISHED.
-            // Build the new DataState and replace pcb.state.
             let ts_enabled = opts.timestamp.is_some();
-            // Heap-direct DataState construction; matches the SynRecv
-            // path. Allocation failure surfaces as `TcpError::OutOfMemory`
-            // up through `Pcb::on_segment` -> `tcp::input`.
+            // TODO(tech-debt): allocation failure panics here — it should
+            // surface as `TcpError::OutOfMemory` through `tcp::input`.
             let mut data = slopos_ostd::KBox::try_init(DataState::init_new(
                 iss,
                 irs,
@@ -164,7 +130,6 @@ impl SynSentState {
             }
             let _old = mem::replace(&mut pcb.state, PcbState::Data(data));
 
-            // Emit plain ACK that closes out the 3WHS from our side.
             let mut ack_seg =
                 SegmentBuilder::ack(tuple, snd_nxt.raw(), rcv_nxt.raw(), DEFAULT_WINDOW_SIZE);
             if ts_enabled {
@@ -189,8 +154,6 @@ impl SynSentState {
             }
             let _old = mem::replace(&mut pcb.state, PcbState::SynRecv(syn_recv));
 
-            // Emit SYN+ACK that reflects the simultaneous-open
-            // crossover.
             let mut syn_ack_seg = SegmentBuilder::syn_ack(
                 tuple,
                 iss.raw(),
@@ -204,8 +167,8 @@ impl SynSentState {
             }
             actions.push_segment(syn_ack_seg);
         }
-        // Silence an unused TCP_FLAG_ACK warning if the compiler can't
-        // see it used via the builder.
+        // Silences an unused warning for `TCP_FLAG_ACK`, used only via the
+        // builder.
         let _ = TCP_FLAG_ACK;
 
         actions

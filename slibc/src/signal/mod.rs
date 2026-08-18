@@ -9,17 +9,12 @@ use crate::pal::{Pal, Sys};
 use slopos_abi::signal::UserSigaction;
 
 /// True when `handler` is a real function pointer (not `SIG_DFL`/`SIG_IGN`).
-///
-/// The kernel rejects (`EINVAL`) a real handler whose `sa_restorer` is 0,
-/// so libc must inject its own restorer for exactly these handlers.
+/// The kernel rejects (`EINVAL`) such a handler with a zero `sa_restorer`, so
+/// libc injects its own restorer for exactly these.
 #[inline]
 fn is_catchable_handler(handler: u64) -> bool {
     handler != slopos_abi::signal::SIG_DFL && handler != slopos_abi::signal::SIG_IGN
 }
-
-// ---------------------------------------------------------------------------
-// Signal number constants (re-exported from abi for C consumers)
-// ---------------------------------------------------------------------------
 
 pub const SIGHUP: i32 = slopos_abi::signal::SIGHUP as i32;
 pub const SIGINT: i32 = slopos_abi::signal::SIGINT as i32;
@@ -51,21 +46,14 @@ pub type SigHandler = unsafe extern "C" fn(i32);
 
 const SIGSET_SIZE: usize = mem::size_of::<u64>();
 
-// ---------------------------------------------------------------------------
-// signal()
-// ---------------------------------------------------------------------------
-
-/// Install a signal handler (simplified BSD-style interface).
-///
-/// Returns the previous handler, or `SIG_ERR` (usize::MAX cast) on error.
+/// Install a handler, BSD-style. Returns the previous handler, or `SIG_ERR`
+/// (`usize::MAX` cast) on error.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn signal(signum: i32, handler: usize) -> usize {
     let mut act: UserSigaction = mem::zeroed();
     act.sa_handler = handler as u64;
     act.sa_flags = slopos_abi::signal::SA_RESTART;
     act.sa_mask = 0;
-    // The kernel requires a nonzero restorer for catchable handlers; inject
-    // ours. SIG_DFL/SIG_IGN need no restorer, so leave it 0 for those.
     act.sa_restorer = if is_catchable_handler(act.sa_handler) {
         signal_restorer_addr()
     } else {
@@ -85,23 +73,13 @@ pub unsafe extern "C" fn signal(signum: i32, handler: usize) -> usize {
     }
 }
 
-// ---------------------------------------------------------------------------
-// sigaction()
-// ---------------------------------------------------------------------------
-
-/// Examine or change a signal action (POSIX interface).
-///
-/// Returns 0 on success, -1 on error (sets errno).
+/// Examine or change a signal action. Returns 0, or -1 with errno set.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn sigaction(
     signum: i32,
     act: *const UserSigaction,
     oldact: *mut UserSigaction,
 ) -> i32 {
-    // When installing a catchable handler with no caller-supplied restorer,
-    // substitute libc's trampoline (glibc behavior). A nonzero restorer or a
-    // SIG_DFL/SIG_IGN install passes through untouched. A NULL `act` is a
-    // query-only call and is forwarded as-is.
     let mut patched: UserSigaction;
     let act_ptr: *const u8 = if !act.is_null() {
         let a = &*act;
@@ -122,14 +100,8 @@ pub unsafe extern "C" fn sigaction(
     }
 }
 
-// ---------------------------------------------------------------------------
-// sigprocmask()
-// ---------------------------------------------------------------------------
-
-/// Examine or change the blocked signal mask.
-///
-/// `how`: `SIG_BLOCK`, `SIG_UNBLOCK`, or `SIG_SETMASK`.
-/// Returns 0 on success, -1 on error.
+/// Examine or change the blocked signal mask. `how` is `SIG_BLOCK`,
+/// `SIG_UNBLOCK` or `SIG_SETMASK`. Returns 0, or -1.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn sigprocmask(how: i32, set: *const u64, oldset: *mut u64) -> i32 {
     match Sys::rt_sigprocmask(how, set, oldset, SIGSET_SIZE) {
@@ -138,13 +110,7 @@ pub unsafe extern "C" fn sigprocmask(how: i32, set: *const u64, oldset: *mut u64
     }
 }
 
-// ---------------------------------------------------------------------------
-// kill()
-// ---------------------------------------------------------------------------
-
-/// Send a signal to a process.
-///
-/// Returns 0 on success, -1 on error (sets errno).
+/// Send a signal to a process. Returns 0, or -1 with errno set.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kill(pid: i32, sig: i32) -> i32 {
     match Sys::kill(pid, sig) {
@@ -153,19 +119,10 @@ pub unsafe extern "C" fn kill(pid: i32, sig: i32) -> i32 {
     }
 }
 
-// ---------------------------------------------------------------------------
-// raise()
-// ---------------------------------------------------------------------------
-
-/// Send a signal to the calling process.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn raise(sig: i32) -> i32 {
     kill(Sys::getpid(), sig)
 }
-
-// ---------------------------------------------------------------------------
-// abort()
-// ---------------------------------------------------------------------------
 
 /// Abort the process — sends SIGABRT, then force-exits if the handler returns.
 #[unsafe(no_mangle)]

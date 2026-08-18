@@ -1,11 +1,6 @@
-//! Futex (fast userspace mutex) wait queue implementation.
-//!
-//! Provides FUTEX_WAIT and FUTEX_WAKE operations for userspace synchronization
-//! primitives (mutexes, condition variables, thread join via CLONE_CHILD_CLEARTID).
-//!
-//! The implementation uses a fixed-size hash table of wait queue buckets,
-//! keyed by the physical address of the futex word. Each bucket holds a
-//! small fixed-capacity list of waiting tasks.
+//! Futex (fast userspace mutex) wait queues: FUTEX_WAIT and FUTEX_WAKE over a
+//! fixed-size hash table of buckets keyed by the futex word's address, each
+//! holding a small fixed-capacity list of waiting tasks.
 
 use core::ptr::NonNull;
 use slopos_ostd::lock_class;
@@ -20,25 +15,20 @@ use super::scheduler::{
 };
 use super::task::{INVALID_TASK_ID, TaskRef, task_put};
 
-/// Number of hash buckets. Must be a power of two.
+/// Must be a power of two.
 const FUTEX_HASH_BUCKETS: usize = 64;
 
-/// Maximum number of waiters per bucket.
 const FUTEX_MAX_WAITERS_PER_BUCKET: usize = 16;
 
-/// A single waiter entry in a futex bucket.
-///
-/// The bucket owns one strong reference to each blocked waiter (`task`), so a
-/// waiter cannot be freed out from under the queue. `task_id` identifies the
-/// waiter for teardown removal without dereferencing the handle.
+/// The bucket owns one strong reference to each blocked waiter, so a waiter
+/// cannot be freed out from under the queue. `task_id` identifies it for
+/// teardown removal without dereferencing the handle.
 struct FutexWaiter {
-    /// Physical address of the futex word (used as the key).
     futex_addr: u64,
-    /// Owning reference to the blocked task, or `None` for a free slot. The
-    /// `KernelSync` wrapper asserts the cross-CPU access to the raw pointers
+    /// The `KernelSync` asserts that cross-CPU access to the raw pointers
     /// inside `Task` is serialised by the bucket lock.
     task: KernelSync<Option<TaskRef>>,
-    /// The waiter's task id, or `INVALID_TASK_ID` for a free slot.
+    /// `INVALID_TASK_ID` for a free slot.
     task_id: u32,
 }
 
@@ -70,9 +60,7 @@ impl FutexBucket {
     }
 }
 
-// Wrap each bucket in an SpinLock for interrupt-safe locking.
 static FUTEX_TABLE: [SpinLock<FutexBucket>; FUTEX_HASH_BUCKETS] = {
-    // const-init all buckets
     const BUCKET: SpinLock<FutexBucket> = SpinLock::new(
         FutexBucket::new(),
         lock_class!("FUTEX_TABLE", LOCK_LEVEL_RESOURCE),
@@ -80,23 +68,14 @@ static FUTEX_TABLE: [SpinLock<FutexBucket>; FUTEX_HASH_BUCKETS] = {
     [BUCKET; FUTEX_HASH_BUCKETS]
 };
 
-/// Hash a futex address to a bucket index.
 #[inline]
 fn futex_hash(addr: u64) -> usize {
-    // Mix with a prime to spread sequential addresses across buckets.
-    // Shift right by 2 since futex words are 4-byte aligned.
+    // Shifted by 2 because futex words are 4-byte aligned; the prime multiply
+    // spreads sequential addresses across buckets.
     let h = (addr >> 2).wrapping_mul(0x9E3779B97F4A7C15);
     (h as usize) & (FUTEX_HASH_BUCKETS - 1)
 }
 
-// AUDIT 2B: futex wait/wake protocol — bucket SpinLock IS the barrier.
-//
-// The per-bucket `SpinLock<FutexBucket>` (FUTEX_TABLE: 64 buckets) covers
-// the entire publish-and-condition-check window: under the same lock we
-// (a) read `*uaddr`, (b) compare against `expected`, and (c) enqueue the
-// waiter. FUTEX_WAKE takes the same bucket lock to dequeue. The lock-pair
-// gives a bidirectional full barrier identical to Linux's `wq_head->lock`
-// pattern in `wake_q_add` / `prepare_to_wait_event`.
 /// FUTEX_WAIT: atomically check that `*uaddr == expected` and block the
 /// calling task on the futex queue keyed by `uaddr`.
 ///
@@ -118,8 +97,6 @@ pub fn futex_wait(uaddr: u64, expected: u32, timeout_ms: Option<u64>) -> i64 {
     let deadline_ms =
         timeout_ms.map(|ms| slopos_kernel_services::platform::get_time_ms().saturating_add(ms));
 
-    // The running task, as a borrow: the bucket needs its identity and its
-    // block reason, and both come off the guard the syscall path already has.
     let Some(current_guard) = crate::task_struct::Current::get() else {
         return slopos_abi::syscall::ERRNO_EAGAIN as i64;
     };
@@ -127,22 +104,17 @@ pub fn futex_wait(uaddr: u64, expected: u32, timeout_ms: Option<u64>) -> i64 {
     let my_id = current_guard.id();
 
     loop {
-        // The bucket SpinLock plays the same role as a WaitQueue's internal
-        // SpinLock in the harmonic-cascade wait protocol: under the lock we
-        // (a) read+compare *uaddr, (b) enqueue the waiter, AND
-        // (c) CAS Running→Blocked. FUTEX_WAKE takes the same lock to dequeue
-        // and CAS Blocked→Ready. Doing the consumer's state CAS *under* the
-        // lock is what closes the lost-wakeup window: a producer that
-        // observes our waiter on the bucket also necessarily observes
-        // status=Blocked, and its `unblock_task` Blocked→Ready CAS succeeds.
+        // The bucket lock covers the read+compare of `*uaddr`, the enqueue and
+        // the Running→Blocked CAS; FUTEX_WAKE takes the same lock to dequeue.
+        // Doing the CAS under the lock is what closes the lost-wakeup window: a
+        // waker that observes our waiter necessarily observes Blocked too.
         let blocked = {
             let mut bucket = FUTEX_TABLE[bucket_idx].lock();
 
-            // Read the futex word through the SMAP-safe, fault-recoverable
-            // user-copy path. A raw kernel load of the user page faults under
-            // CR4.SMAP (no STAC window); `copy_from_user` opens the kernel's sole
-            // AC window around the read. Under the bucket lock + IRQs-off a single
-            // aligned 4-byte copy is equivalent to an atomic load for the compare.
+            // `copy_from_user`, not a raw load: it opens the kernel's sole AC
+            // window, without which the access faults under CR4.SMAP. Under the
+            // bucket lock with IRQs off one aligned 4-byte copy is equivalent
+            // to an atomic load for the compare.
             let current_val = match UserPtr::<u32>::try_new(uaddr)
                 .ok()
                 .and_then(|p| slopos_mm::user_copy::copy_from_user::<u32>(p).ok())
@@ -155,7 +127,6 @@ pub fn futex_wait(uaddr: u64, expected: u32, timeout_ms: Option<u64>) -> i64 {
                 return slopos_abi::syscall::ERRNO_EAGAIN as i64;
             }
 
-            // Find a free slot in the bucket.
             let mut slot_idx = None;
             for i in 0..FUTEX_MAX_WAITERS_PER_BUCKET {
                 if bucket.waiters[i].is_empty() {
@@ -168,9 +139,8 @@ pub fn futex_wait(uaddr: u64, expected: u32, timeout_ms: Option<u64>) -> i64 {
                 return slopos_abi::syscall::ERRNO_ENOMEM as i64;
             };
 
-            // The bucket owns a strong reference to the blocked waiter. `current`
-            // is the running task, kept alive by its dispatch reference, so cloning
-            // its handle here is sound.
+            // `current` is the running task, kept alive by its dispatch
+            // reference, so cloning its handle here is sound.
             let Some(node) = NonNull::new(current) else {
                 return slopos_abi::syscall::ERRNO_EAGAIN as i64;
             };
@@ -181,21 +151,17 @@ pub fn futex_wait(uaddr: u64, expected: u32, timeout_ms: Option<u64>) -> i64 {
             };
             bucket.count += 1;
 
-            // Stamp the block reason before flipping status so any tracer
-            // (or future signal-aware unblock path) sees the committed
-            // reason at the same moment the status flips.
+            // Stamped before the status flip, so a reader never observes
+            // Blocked without the reason that goes with it.
             current_guard
                 .task()
                 .store_block_reason(BlockReason::FutexWait);
 
             mark_current_blocked()
         };
-        // Bucket lock is dropped here.
 
-        // Yield only if we successfully transitioned Running→Blocked. If the
-        // CAS failed (e.g. a wake-side path got there first via some other
-        // route), don't yield — the wakeup is already preserved as the
-        // current Running/Ready status.
+        // A failed Running→Blocked CAS means a wake got there first, and that
+        // wakeup is already preserved in the current Running/Ready status.
         if blocked {
             match deadline_ms {
                 None => yield_blocked_task(),
@@ -211,11 +177,9 @@ pub fn futex_wait(uaddr: u64, expected: u32, timeout_ms: Option<u64>) -> i64 {
             }
         }
 
-        // Always dequeue. FUTEX_WAKE takes the slot when it is the one that
-        // wakes us, so a slot still present means something else did — a
-        // signal, a kill, or the deadline — and leaving it there would strand
-        // the bucket's strong reference until teardown or an unrelated wake on
-        // the same address.
+        // FUTEX_WAKE takes the slot when it is the one that woke us, so a slot
+        // still present means a signal, a kill or the deadline did — and
+        // leaving it would strand the bucket's strong reference.
         if !futex_remove_self(bucket_idx, uaddr, my_id) {
             return 0;
         }
@@ -228,7 +192,6 @@ pub fn futex_wait(uaddr: u64, expected: u32, timeout_ms: Option<u64>) -> i64 {
         if deadline_ms.is_some_and(|d| slopos_kernel_services::platform::get_time_ms() >= d) {
             return slopos_abi::syscall::ERRNO_ETIMEDOUT as i64;
         }
-        // Spurious wake: re-read `*uaddr` and decide again.
     }
 }
 
@@ -275,14 +238,10 @@ pub fn futex_wake(uaddr: u64, max_wake: u32) -> i64 {
         if bucket.waiters[i].is_empty() || bucket.waiters[i].futex_addr != uaddr {
             continue;
         }
-        // Take the waiter's owning reference out of the slot. The bucket lock
-        // is held across the unblock so a concurrent FUTEX_WAIT reusing this
-        // freed slot races only against a different task; the woken task stays
-        // alive because we still hold `arc`. `unblock_task`'s enqueue path
-        // clones its own membership reference (bucket lock RESOURCE → run-queue
-        // lock, no cycle), then we drop the waiter's guard — never the last
-        // reference, since the task holds its own existence reference until it
-        // is reaped.
+        // The bucket lock is held across the unblock, so a concurrent
+        // FUTEX_WAIT reusing this freed slot races only a different task. Lock
+        // order is bucket (RESOURCE) → run queue, no cycle. The `task_put`
+        // below is never the last reference: the task holds its own until reap.
         let taken = core::mem::replace(&mut bucket.waiters[i], FutexWaiter::empty());
         bucket.count = bucket.count.saturating_sub(1);
         if let Some(waiter) = taken.task.into_inner() {
@@ -298,14 +257,12 @@ pub fn futex_wake(uaddr: u64, max_wake: u32) -> i64 {
 
 /// Wake one waiter on the given futex address.
 ///
-/// Convenience function used by the thread-exit path for
-/// CLONE_CHILD_CLEARTID: the kernel writes 0 to the TID address
-/// and then wakes one waiter so pthread_join can complete.
+/// Used by the CLONE_CHILD_CLEARTID thread-exit path after the kernel writes 0
+/// to the TID address, so `pthread_join` can complete.
 pub fn futex_wake_one(uaddr: u64) -> i64 {
     futex_wake(uaddr, 1)
 }
 
-/// Number of waiters queued for `uaddr`.
 #[cfg(feature = "test-hooks")]
 pub fn futex_waiters_for_test(uaddr: u64) -> usize {
     let bucket = FUTEX_TABLE[futex_hash(uaddr)].lock();

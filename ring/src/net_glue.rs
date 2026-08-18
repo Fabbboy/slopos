@@ -1,14 +1,11 @@
 //! Socket-opcode glue (SLOPRING § 12, cross-cutting reality 2).
 //!
-//! `OP_ACCEPT`, `OP_SEND`, and `OP_RECVMSG` are socket-typed opcodes that
-//! must route through the socket send/recv/accept paths (not the generic
-//! `file_read_fd`/`file_write_fd` write/read). AF_INET and AF_UNIX have
-//! different ABIs, so each routes per family via `FileOps::is_unix_socket()`,
-//! forcing the socket's stored nonblocking flag across the probe (and
-//! restoring it). AF_INET entry points take raw user pointers and copy
-//! against the current address space; AF_UNIX entry points take kernel
-//! slices, so AF_UNIX marshals user↔kernel through a validated `UserBytes`
-//! staging copy (SLOPRING § 12 reality 2).
+//! Socket-typed opcodes route through the socket send/recv/accept paths, not
+//! the generic `file_read_fd`/`file_write_fd`, per family via
+//! `FileOps::is_unix_socket()` and with the socket's stored nonblocking flag
+//! forced across the probe. AF_INET entry points take raw user pointers;
+//! AF_UNIX ones take kernel slices, so AF_UNIX marshals user↔kernel through a
+//! validated `UserBytes` staging copy.
 
 use slopos_abi::Errno;
 use slopos_abi::file_ops::{FileKind, FileOps};
@@ -41,13 +38,10 @@ const STAGING_CAP: usize = 4096;
 /// The would-block sentinel (`Errno::EAGAIN.raw()` is already negative).
 const EAGAIN: i32 = Errno::EAGAIN.raw();
 
-/// Run `f` with the AF_UNIX socket forced nonblocking, restoring the
-/// listener/socket's original stored flag afterward (SLOPRING § 12
-/// reality 1: there is no per-call nonblock argument).
-///
-/// A concurrent close of the same socket between the set and the restore
-/// is the established forced-nonblock pattern's narrow race, bounded by
-/// the socket-handle/idx validation each primitive does internally.
+/// Run `f` with the AF_UNIX socket forced nonblocking, restoring its original
+/// stored flag afterward (SLOPRING § 12 reality 1: there is no per-call
+/// nonblock argument). A concurrent close between the set and the restore is
+/// bounded by the socket-handle validation each primitive does internally.
 fn with_unix_forced_nonblock<T>(h: SocketHandle, f: impl FnOnce() -> T) -> T {
     let was = unix_socket::unix_is_nonblocking(h).unwrap_or(false);
     let _ = unix_socket::unix_set_nonblocking(h, true);
@@ -56,8 +50,8 @@ fn with_unix_forced_nonblock<T>(h: SocketHandle, f: impl FnOnce() -> T) -> T {
     out
 }
 
-/// Run `f` with the AF_INET socket forced nonblocking, restoring the
-/// socket's original stored flag afterward.
+/// Run `f` with the AF_INET socket forced nonblocking, restoring its original
+/// stored flag afterward.
 fn with_inet_forced_nonblock<T>(idx: u32, f: impl FnOnce() -> T) -> T {
     let was = socket::socket_is_nonblocking(idx).unwrap_or(false);
     let _ = socket::socket_set_nonblocking(idx, true);
@@ -66,10 +60,8 @@ fn with_inet_forced_nonblock<T>(idx: u32, f: impl FnOnce() -> T) -> T {
     out
 }
 
-/// Non-blocking accept on `fd` for process `table`. Returns:
-///   * `Ok(Some(new_fd))` — a connection was accepted and installed;
-///   * `Ok(None)`         — would block (no pending connection);
-///   * `Err(errno)`       — a real error (`ENOTSOCK`, `ENOMEM`, …).
+/// Non-blocking accept for process `table`. `Ok(None)` means would block;
+/// `Err(errno)` is a real error.
 ///
 /// Reserve-before-side-effect (SLOPRING § 11) is the *caller's*
 /// responsibility — by the time we install the fd here the CQE slot is
@@ -79,17 +71,13 @@ pub fn accept_nonblock(table: FdTable, file: &FileRef) -> Result<Option<i32>, Er
 
     if ops.is_unix_socket() {
         let listener = SocketHandle::from_usize(handle);
-        // Force nonblocking across the accept, then restore the listener's
-        // *original* stored flag (not hard-coded blocking — that would
-        // clobber a listener the caller deliberately set nonblocking).
         let result = with_unix_forced_nonblock(listener, || unix_socket::unix_accept(listener));
         match result {
             Ok(accepted) => {
-                // The backing owns the accepted endpoint from here: a
-                // failed install (or failed backing alloc) closes it.
-                // Charged to the *accepting* process, at accept. A connection
-                // is remote-triggered, so billing the listener's principal for
-                // one would let a peer exhaust that principal's whole budget.
+                // The backing owns the accepted endpoint: a failed install
+                // closes it. Charged to the *accepting* process — a connection
+                // is remote-triggered, so billing the listener's principal
+                // would let a peer exhaust that principal's whole budget.
                 let Some(backing) = slopos_net::unix_socket_file_ops::unix_socket_backing(
                     accepted,
                     table.account(),
@@ -115,7 +103,6 @@ pub fn accept_nonblock(table: FdTable, file: &FileRef) -> Result<Option<i32>, Er
         }
     } else {
         let sock_idx = handle as u32;
-        // Restore the listener's *original* stored flag after the probe.
         let accepted = with_inet_forced_nonblock(sock_idx, || {
             socket::socket_accept(sock_idx, core::ptr::null_mut(), core::ptr::null_mut())
         });
@@ -136,25 +123,18 @@ pub fn accept_nonblock(table: FdTable, file: &FileRef) -> Result<Option<i32>, Er
     }
 }
 
-/// Non-blocking connect on `fd` to the `SockAddrIn` at user VA `addr_va`.
-///
-/// Mirrors [`accept_nonblock`]'s shape but returns the socket-op result code:
-/// `Ok(0)` (connected), `Ok(-EAGAIN)` (in progress — the ring defers), or
-/// `Ok(other_negated_errno)` / `Err(errno)` (a real failure). Idempotent across
+/// Non-blocking connect to the socket address at user VA `addr_va` — AF_INET
+/// (`SockAddrIn`) and AF_UNIX (`SockAddrUn`). Returns the socket-op result
+/// code; `Ok(-EAGAIN)` is in progress and the ring defers. Idempotent across
 /// re-probes: [`socket::socket_connect_nonblock`] emits the SYN once and then
-/// polls. The user `SockAddrIn` is validated and snapshotted **before** any side
-/// effect so a faulting address fails cleanly and a re-probe re-reads the same
-/// (caller-stable) pointer. Both AF_INET (`SockAddrIn`) and AF_UNIX
-/// (`SockAddrUn`) are supported.
+/// polls. The user address is validated and snapshotted **before** any side
+/// effect, so a faulting address fails cleanly and a re-probe re-reads the same
+/// (caller-stable) pointer.
 pub fn connect_nonblock(file: &FileRef, addr_va: u64, addr_len: u32) -> Result<i32, Errno> {
     let (handle, ops) = socket_handle_from_ref(file)?;
     if ops.is_unix_socket() {
-        // AF_UNIX: copy the SockAddrUn path and run the (already nonblock-aware)
-        // unix_connect under the forced-nonblock guard. Its `-EAGAIN` means the
-        // listener backlog is momentarily full — returned before any side effect,
-        // so it is legitimately deferrable; the ring re-probes until the pair
-        // allocates (or the connect refuses / faults). Mirrors `syscall_connect`'s
-        // AF_UNIX path so observable results match (R12 parity).
+        // The AF_UNIX `-EAGAIN` means the listener backlog is momentarily full,
+        // returned before any side effect, so it is legitimately deferrable.
         if (addr_len as usize) < 4 {
             return Err(Errno::EINVAL);
         }
@@ -186,17 +166,16 @@ pub fn connect_nonblock(file: &FileRef, addr_va: u64, addr_len: u32) -> Result<i
     }
     let port = u16::from_be(sa.port);
     let idx = handle as u32;
-    // socket_connect_nonblock keys off the socket's own state, not the forced
-    // nonblock flag, so the wrapper is a no-op here — kept for symmetry with the
-    // other socket-op glue and so a future blocking-aware path stays correct.
+    // `socket_connect_nonblock` keys off the socket's own state, so the wrapper
+    // is a no-op here; kept so a future blocking-aware path stays correct.
     Ok(with_inet_forced_nonblock(idx, || {
         socket::socket_connect_nonblock(idx, sa.addr, port)
     }))
 }
 
-/// Resolve a held [`FileRef`] to its socket handle + ops, returning
-/// `ENOTSOCK` for any non-socket reference. The reference pins one socket
-/// identity for the op's duration — no fd number is re-interpreted.
+/// Resolve a held [`FileRef`] to its socket handle + ops (`ENOTSOCK` for a
+/// non-socket). The reference pins one socket identity for the op's duration —
+/// no fd number is re-interpreted.
 fn socket_handle_from_ref(file: &FileRef) -> Result<(usize, &'static dyn FileOps), Errno> {
     let (handle, ops) = slopos_fs::fileio::fileio_handle_and_ops_from_ref(file);
     if ops.kind() != FileKind::Socket {
@@ -206,8 +185,7 @@ fn socket_handle_from_ref(file: &FileRef) -> Result<(usize, &'static dyn FileOps
 }
 
 /// Map a non-blocking socket-op return code into an [`Outcome`]: the
-/// would-block sentinel (`-EAGAIN`) defers, everything else (success or a
-/// real negative errno) completes inline.
+/// would-block sentinel (`-EAGAIN`) defers, everything else completes inline.
 pub(crate) fn outcome_from_rc(rc: i32) -> Outcome {
     if rc == EAGAIN {
         Outcome::WouldBlock
@@ -216,16 +194,12 @@ pub(crate) fn outcome_from_rc(rc: i32) -> Outcome {
     }
 }
 
-/// `OP_SEND`: socket-only send (SLOPRING § 12). Routes per family —
-/// Both families stage the user bytes into a kernel scratch buffer first
-/// (via `copy_bytes_from_user`) and pass the *scratch* pointer/slice to
-/// the send primitive — never a raw user VA. Forwarding the user VA to
-/// `socket_send` (which reads it without fault recovery) would be a
-/// TOCTOU: a concurrent munmap between validation and the read faults
-/// the kernel. Neither primitive takes per-call send flags, so
-/// `sqe.op_flags` is accepted and ignored, matching the `send(2)` syscall
-/// path (`_flags`). The socket's stored nonblock flag is forced across
-/// the probe; `-EAGAIN` defers, every other result completes inline.
+/// `OP_SEND`: socket-only send (SLOPRING § 12). Both families stage the user
+/// bytes into a kernel scratch and pass the *scratch* to the send primitive,
+/// never a raw user VA: `socket_send` reads without fault recovery, so a
+/// concurrent munmap between validation and the read would fault the kernel.
+/// Neither primitive takes per-call send flags, so `sqe.op_flags` is accepted
+/// and ignored, matching the `send(2)` syscall path.
 pub fn send_nonblock(file: &FileRef, addr: u64, len: u32, _op_flags: u32) -> Outcome {
     let (handle, ops) = match socket_handle_from_ref(file) {
         Ok(v) => v,
@@ -237,7 +211,6 @@ pub fn send_nonblock(file: &FileRef, addr: u64, len: u32, _op_flags: u32) -> Out
         return Outcome::Inline(Errno::EFAULT.raw());
     }
 
-    // Stage the user bytes into a kernel buffer once, for both families.
     let mut scratch = match slopos_ostd::KVec::<u8>::zeroed(STAGING_CAP) {
         Ok(v) => v,
         Err(_) => return Outcome::Inline(Errno::ENOMEM.raw()),
@@ -261,8 +234,6 @@ pub fn send_nonblock(file: &FileRef, addr: u64, len: u32, _op_flags: u32) -> Out
         outcome_from_rc(rc)
     } else {
         let idx = handle as u32;
-        // Pass the *scratch* slice — kernel memory the netstack can read
-        // safely — never the user VA.
         let rc = with_inet_forced_nonblock(idx, || socket::socket_send(idx, &scratch[..copied]));
         // socket_send returns i64; collapse to the CQE's i32 res.
         if rc == EAGAIN as i64 {
@@ -273,23 +244,19 @@ pub fn send_nonblock(file: &FileRef, addr: u64, len: u32, _op_flags: u32) -> Out
     }
 }
 
-/// `OP_RECVMSG`: socket-only recvmsg (SLOPRING § 12). Parses the user
-/// `MsgHdr` at `sqe.addr`, recvs into a staging buffer, copies the data
-/// out to `iov_base`/`iov_len`, and — for AF_UNIX with SCM_RIGHTS fds —
-/// installs the received fds into the caller's fd table and writes the
-/// `CmsgHdr` back into `control`/`control_len`. Mirrors the kernel
-/// recvmsg syscall's marshalling (the same `unix_recvmsg` primitive and
-/// the same fd-install + cmsg-writeback shape) so observable results
-/// match (R12). AF_INET fills data only (no SCM_RIGHTS), which is
-/// correct, not an error. This is an ownership op (it installs fds), so
-/// the caller reserves a CQE slot before dispatch (SLOPRING § 11).
+/// `OP_RECVMSG`: socket-only recvmsg (SLOPRING § 12). Parses the user `MsgHdr`
+/// at `sqe.addr`, recvs into a staging buffer, copies the data out to
+/// `iov_base`/`iov_len`, and — for AF_UNIX with SCM_RIGHTS fds — installs the
+/// received fds into the caller's fd table and writes the `CmsgHdr` back into
+/// `control`/`control_len`. AF_INET fills data only (no SCM_RIGHTS), which is
+/// correct, not an error. An ownership op (it installs fds), so the caller
+/// reserves a CQE slot before dispatch (SLOPRING § 11).
 pub fn recvmsg_nonblock(table: FdTable, file: &FileRef, addr: u64, _op_flags: u32) -> Outcome {
     let (handle, ops) = match socket_handle_from_ref(file) {
         Ok(v) => v,
         Err(e) => return Outcome::Inline(e.raw()),
     };
 
-    // Validate + snapshot the user MsgHdr (a null/invalid addr → EFAULT).
     let msg_ptr = match UserPtr::<MsgHdr>::try_new(addr) {
         Ok(p) => p,
         Err(_) => return Outcome::Inline(Errno::EFAULT.raw()),
@@ -316,8 +283,7 @@ pub fn recvmsg_nonblock(table: FdTable, file: &FileRef, addr: u64, _op_flags: u3
             unix_socket::unix_recvmsg(sh, &mut scratch[..data_len], &mut received, SCM_MAX_FDS)
         });
         if bytes_read == EAGAIN && n_fds == 0 {
-            // No data and no fds drained — defer (the fds drain atomically
-            // with the data on the real completion).
+            // The fds drain atomically with the data on the real completion.
             return Outcome::WouldBlock;
         }
         if bytes_read < 0 && !(bytes_read == EAGAIN && n_fds > 0) {
@@ -345,7 +311,6 @@ pub fn recvmsg_nonblock(table: FdTable, file: &FileRef, addr: u64, _op_flags: u3
         }
         Outcome::Inline(copied as i32)
     } else {
-        // AF_INET stream recv: fill data only, no control fds.
         let idx = handle as u32;
         let rc =
             with_inet_forced_nonblock(idx, || socket::socket_recv(idx, &mut scratch[..data_len]));
@@ -357,10 +322,8 @@ pub fn recvmsg_nonblock(table: FdTable, file: &FileRef, addr: u64, _op_flags: u3
         }
         let copied = rc as usize;
         if copied > 0 && msg.iov_base != 0 {
-            // The bytes are already consumed from the socket by this
-            // point; if the copy to iov_base faults they are lost (TCP
-            // has no un-consume). This matches the recv/recvmsg syscall
-            // path, which also reports EFAULT after consuming.
+            // The bytes are already consumed; if the copy to iov_base faults
+            // they are lost (TCP has no un-consume), as in the recv syscall.
             let user_out = match UserBytes::try_new(msg.iov_base, copied) {
                 Ok(u) => u,
                 Err(_) => return Outcome::Inline(Errno::EFAULT.raw()),
@@ -373,21 +336,16 @@ pub fn recvmsg_nonblock(table: FdTable, file: &FileRef, addr: u64, _op_flags: u3
     }
 }
 
-/// `OP_RECVFROM`: AF_INET datagram recv that returns the source address
-/// (SLOPRING § 12, the nc UDP-listen gap). Mirrors the blocking
-/// `recvfrom` syscall (`syscall_recvfrom` / `socket_recvfrom`): recv into
-/// a kernel scratch (forced nonblocking), copy the data out to the user
-/// buffer at `addr`, and write the source `SockAddrIn` to the validated
-/// user out-pointer at `addr2`. `-EAGAIN` defers; every other result
-/// (success bytes or a negative errno) completes inline. This is a
-/// *consuming* op — the caller reserves a CQE slot before dispatch
-/// (SLOPRING § 11), so a successful recv never drops its CQE and loses
-/// the datagram. Null `addr` (with non-zero `len`) or null `addr2` →
-/// `-EFAULT` before any recv (the source addr is mandatory, like
-/// `recvfrom(2)`'s `src_addr` when requested).
+/// `OP_RECVFROM`: AF_INET datagram recv that also returns the source address
+/// (SLOPRING § 12). Recvs into a kernel scratch, copies the data out to the
+/// user buffer at `addr`, and writes the source `SockAddrIn` to the validated
+/// user out-pointer at `addr2`. `-EAGAIN` defers; every other result completes
+/// inline. A *consuming* op — the caller reserves a CQE slot before dispatch
+/// (SLOPRING § 11), so a successful recv never drops its CQE and loses the
+/// datagram. Null `addr` (with non-zero `len`) or null `addr2` is `-EFAULT`
+/// before any recv: the source addr is mandatory, like `recvfrom(2)`'s
+/// `src_addr` when requested.
 pub fn recvfrom_nonblock(file: &FileRef, addr: u64, len: u32, addr2: u64) -> Outcome {
-    // The source-addr out-pointer is mandatory for OP_RECVFROM (it is the
-    // entire point of the op); a null one is a caller error → EFAULT.
     if addr2 == 0 {
         return Outcome::Inline(Errno::EFAULT.raw());
     }
@@ -395,8 +353,7 @@ pub fn recvfrom_nonblock(file: &FileRef, addr: u64, len: u32, addr2: u64) -> Out
         Ok(v) => v,
         Err(e) => return Outcome::Inline(e.raw()),
     };
-    // socket_recvfrom is AF_INET (UDP/ICMP) only — an AF_UNIX fd has no
-    // datagram source address, matching `syscall_recvfrom`'s ENOTSOCK.
+    // An AF_UNIX fd has no datagram source address.
     if ops.is_unix_socket() {
         return Outcome::Inline(Errno::ENOTSOCK.raw());
     }
@@ -423,10 +380,8 @@ pub fn recvfrom_nonblock(file: &FileRef, addr: u64, len: u32, addr2: u64) -> Out
         return Outcome::Inline(rc as i32);
     }
 
-    // The datagram is consumed from the socket by this point. If a copy to
-    // the user buffer or out-addr faults the bytes are lost (UDP has no
-    // un-consume) — this matches `syscall_recvfrom`, which also reports
-    // EFAULT after consuming.
+    // The datagram is consumed by this point; if a copy to the user buffer or
+    // out-addr faults the bytes are lost (UDP has no un-consume).
     let copied = rc as usize;
     if copied > 0 && addr != 0 {
         let user_out = match UserBytes::try_new(addr, copied) {
@@ -438,7 +393,6 @@ pub fn recvfrom_nonblock(file: &FileRef, addr: u64, len: u32, addr2: u64) -> Out
         }
     }
 
-    // Write the source SockAddrIn to the validated user out-pointer.
     let src = SockAddrIn {
         family: AF_INET,
         port: peer.port.0.to_be(),
@@ -456,14 +410,12 @@ pub fn recvfrom_nonblock(file: &FileRef, addr: u64, len: u32, addr2: u64) -> Out
     Outcome::Inline(copied as i32)
 }
 
-/// Install the received SCM_RIGHTS files into the caller's fd table and
-/// write the `CmsgHdr` + fd array back into the user `control` buffer,
-/// updating `control_len`. Mirrors the kernel recvmsg syscall's
-/// cmsg-writeback exactly. Consumes `received`: aliases that cannot be
-/// delivered drop (close) here; if a copy back to user memory fails
-/// *after* fds were installed, every installed fd is closed so the
-/// caller (which never learns the fd numbers) cannot orphan them — an
-/// fd-table-exhaustion DoS over repeated calls.
+/// Install the received SCM_RIGHTS files into the caller's fd table and write
+/// the `CmsgHdr` + fd array back into the user `control` buffer, updating
+/// `control_len`. Consumes `received`: undeliverable aliases drop (close) here,
+/// and a copy back to user memory failing *after* fds were installed closes
+/// every installed fd — the caller never learns the numbers, so they would
+/// otherwise be orphaned into an fd-table-exhaustion DoS.
 fn recvmsg_writeback_cmsg(
     table: FdTable,
     msg: &MsgHdr,
@@ -496,9 +448,8 @@ fn recvmsg_writeback_cmsg(
     for (j, file) in received.drain(..).enumerate() {
         let new_fd = slopos_fs::fileio::fileio_install_file_ref(table, file);
         if new_fd < 0 {
-            // The failed install dropped its alias; the drain drops the
-            // rest. Roll back the fds installed so far (a partial install
-            // with no surviving cmsg writeback would orphan them).
+            // The failed install dropped its alias and the drain drops the
+            // rest; roll back the installed fds so none are orphaned.
             for &fd in fd_nums.iter().take(j) {
                 let _ = slopos_fs::fileio::file_close_fd(table, fd);
             }
@@ -507,10 +458,6 @@ fn recvmsg_writeback_cmsg(
         fd_nums[j] = new_fd;
     }
 
-    // From here the fds are installed in the caller's table. If any copy
-    // back to user memory faults, close every installed fd before
-    // returning the error — otherwise the caller never learns the fd
-    // numbers and the fds are orphaned (fd-table-exhaustion DoS).
     let writeback = || -> Result<(), Errno> {
         let cmsg = CmsgHdr {
             cmsg_len: needed as u32,
@@ -544,14 +491,8 @@ fn recvmsg_writeback_cmsg(
     Ok(())
 }
 
-// ---------------------------------------------------------------------------
-// Registered / provided buffer fast paths (ABI v2). These never allocate a
-// per-op staging `KVec`, never run `copy_*_user` (SMAP), and never re-validate
-// a user pointer — the buffer was pinned + validated once at registration. The
-// payload is staged through the ring's reusable scratch via one volatile copy
-// against the pinned pages. `buf_group == 0` and no fixed-buffer flag keep the
-// inline `*_nonblock` paths above byte-for-byte unchanged.
-// ---------------------------------------------------------------------------
+// The registered / provided buffer fast paths below never re-validate a user
+// pointer: the buffer was pinned and validated once at registration.
 
 /// `OP_SEND` from registered fixed buffer `index` (`SLOPRING_SQE_FIXED_BUFFER`).
 pub fn send_fixed(
@@ -565,9 +506,7 @@ pub fn send_fixed(
         Ok(v) => v,
         Err(e) => return Outcome::Inline(e.raw()),
     };
-    // Single-direct-copy: build a volatile reader over the pinned buffer and
-    // have the net leaf pull straight from the pinned pages into the socket
-    // buffer — no kernel scratch hop.
+    // The net leaf pulls straight from the pinned pages — no kernel scratch hop.
     let mut reader = match reg.fixed_reader(index, len as usize) {
         Ok(r) => r,
         Err(e) => return Outcome::Inline(e.raw()),
@@ -587,21 +526,16 @@ pub fn send_fixed(
     }
 }
 
-/// `OP_SEND_ZC` from registered fixed buffer `index`: the io_uring zero-copy
-/// send (true NIC-DMA).
+/// `OP_SEND_ZC` from registered fixed buffer `index`: the zero-copy send.
 ///
-/// For a connected **AF_INET UDP/ICMP** socket it first attempts the true
-/// NIC-DMA path ([`try_send_zc_inet`]): the NIC DMAs the payload straight from
-/// the pinned pages (0 CPU copies) and the buffer is **not** reusable until the
-/// device reclaims the descriptor, so it returns [`Outcome::DeferredNotif`] —
-/// the result CQE (`F_MORE`) posts now and the terminal `F_NOTIF` is deferred
-/// until the harvest observes the reclaim token flip. When the destination
-/// isn't a zero-copy candidate (cold ARP, no checksum offload, TCP, …) it falls
-/// back to the **single-direct-copy** leaf (one volatile copy pinned-pages →
-/// socket buffer), whose buffer is reusable the instant the copy returns, so it
-/// posts the two CQEs immediately ([`Outcome::InlineNotif`], io_uring's `COPIED`
-/// fallback). AF_UNIX always uses the copy leaf. A real error (`rc < 0`) posts a
-/// single CQE; a would-block defers.
+/// AF_INET first attempts the true NIC-DMA path: the NIC DMAs straight from the
+/// pinned pages, and the buffer is **not** reusable until the device reclaims
+/// the descriptor, so it returns [`Outcome::DeferredNotif`] — the `F_MORE`
+/// result posts now and the terminal `F_NOTIF` waits for the harvest to observe
+/// the reclaim. A non-candidate (cold ARP, no checksum offload, …) and AF_UNIX
+/// fall back to the single-direct-copy leaf, whose buffer is reusable the
+/// instant the copy returns, so both CQEs post immediately
+/// ([`Outcome::InlineNotif`]). A real error posts a single CQE.
 pub fn send_zc_fixed(
     file: &FileRef,
     index: u16,
@@ -615,10 +549,7 @@ pub fn send_zc_fixed(
         Err(e) => return Outcome::Inline(e.raw()),
     };
 
-    // AF_INET: try true NIC-DMA zero-copy first; `None` means not a candidate,
-    // fall through to the single-direct-copy leaf below. TCP holds the pinned
-    // pages across retransmits (send-queue chunk + refcounted token); UDP/ICMP
-    // are one-shot (generation token).
+    // `None` means not a zero-copy candidate: fall through to the copy leaf.
     if !ops.is_unix_socket() {
         let idx = handle as u32;
         if socket::socket_is_tcp(idx) {
@@ -651,17 +582,11 @@ pub fn send_zc_fixed(
 }
 
 /// Attempt a true NIC-DMA zero-copy send of fixed buffer `index` on AF_INET
-/// socket `idx`. Returns:
-///   * `Some(Outcome::DeferredNotif(n))` — queued to the NIC; the deferred-notif
-///     row is recorded in `reg` (buffer stays checked out until the token flips);
-///   * `Some(Outcome::WouldBlock)`      — device TX ring full, defer + re-probe;
-///   * `None`                            — not a zero-copy candidate (or the
-///     token / keepalive / slices could not be built); caller uses the copy leaf.
-///
-/// Nothing is submitted on the `None` path, so the copy fallback is sound. The
-/// reclaim snapshot is taken **before** the submit (so a fast reclaim is never
-/// missed) and `push_deferred` runs **after** a successful submit (and is
-/// infallible — the table was pre-grown).
+/// socket `idx`. `Some(DeferredNotif)` was queued to the NIC and the buffer
+/// stays checked out until the token flips; `Some(WouldBlock)` is a full device
+/// TX ring; `None` is not a candidate and submits nothing, so the caller's copy
+/// fallback is sound. The reclaim snapshot is taken **before** the submit, so a
+/// fast reclaim is never missed.
 fn try_send_zc_inet(
     idx: u32,
     index: u16,
@@ -676,9 +601,8 @@ fn try_send_zc_inet(
         return None; // empty datagram → copy leaf
     }
     let keepalive = reg.fixed_keepalive(index)?;
-    // Scope the reader (it borrows `reg`) so the `&mut reg` for `push_deferred`
-    // is free afterward. ICMP uses the reader for its CPU-side checksum; UDP
-    // ignores it (hardware checksum offload).
+    // The reader borrows `reg`, so scope it to free the `&mut reg` for
+    // `push_deferred`. ICMP uses it for its CPU-side checksum; UDP ignores it.
     let outcome = {
         let mut reader = reg.fixed_reader(index, len as usize).ok()?;
         socket::socket_send_zerocopy(
@@ -701,14 +625,12 @@ fn try_send_zc_inet(
 }
 
 /// Attempt a TCP `MSG_ZEROCOPY` send of fixed buffer `index` on connected TCP
-/// socket `idx`. Unlike [`try_send_zc_inet`] (UDP/ICMP, one-shot generation
-/// token) this enqueues a send-queue chunk holding the pinned pages across
-/// retransmits, keyed on a refcounted [`ZcNotifToken`]; the deferred `F_NOTIF`
-/// fires once the bytes are cumulatively ACKed and every in-flight DMA is
-/// reclaimed (the count reaches zero). Returns `Some(DeferredNotif)` on success
-/// (buffer stays checked out, deferred-notif row recorded), `Some(WouldBlock)`,
-/// or `None` (not eligible — caller uses the copy leaf). Nothing is left dangling
-/// on `None`: the keepalive / token are dropped inside `socket_send_zerocopy_tcp`.
+/// socket `idx`. Unlike [`try_send_zc_inet`]'s one-shot generation token, this
+/// enqueues a send-queue chunk holding the pinned pages across retransmits,
+/// keyed on a refcounted [`ZcNotifToken`]; the deferred `F_NOTIF` fires once the
+/// bytes are cumulatively ACKed and every in-flight DMA is reclaimed. Nothing is
+/// left dangling on `None`: the keepalive and token are dropped inside
+/// `socket_send_zerocopy_tcp`.
 fn try_send_zc_tcp(
     idx: u32,
     index: u16,
@@ -745,16 +667,13 @@ pub fn recvmsg_fixed(
         Ok(v) => v,
         Err(e) => return Outcome::Inline(e.raw()),
     };
-    // Single-direct-copy: fill the pinned buffer straight from the socket via a
-    // volatile writer — no kernel scratch, no separate publish copy.
     let mut writer = match reg.fixed_writer(index) {
         Ok(w) => w,
         Err(e) => return Outcome::Inline(e.raw()),
     };
     let rc: i32 = if ops.is_unix_socket() {
         let sh = SocketHandle::from_usize(handle);
-        // Data-plane only: cap 0 makes the drain drop (close) any
-        // arriving SCM_RIGHTS aliases.
+        // Cap 0 makes the drain drop (close) any arriving SCM_RIGHTS aliases.
         let mut no_files: slopos_ostd::KVec<slopos_fs::FileRef> = slopos_ostd::KVec::new();
         let (read, _n_fds) = with_unix_forced_nonblock(sh, || {
             unix_socket::unix_recvmsg_into(sh, &mut writer, &mut no_files, 0)
@@ -774,10 +693,9 @@ pub fn recvmsg_fixed(
 }
 
 /// `OP_RECVMSG` into a kernel-picked provided buffer from `group`
-/// (`SLOPRING_SQE_BUFFER_SELECT`). Peeks the next published buffer, recvs into
-/// it, reports the chosen `bid` in the CQE (`SLOPRING_CQE_F_BUFFER`). The buffer
-/// is consumed off the ring only once data actually lands (a would-block leaves
-/// the ring untouched), and the ring head advances atomically with the fill.
+/// (`SLOPRING_SQE_BUFFER_SELECT`), reporting the chosen `bid` in the CQE
+/// (`SLOPRING_CQE_F_BUFFER`). The buffer is consumed off the ring only once data
+/// actually lands, and the ring head advances atomically with the fill.
 pub fn recvmsg_provided(
     table: FdTable,
     file: &FileRef,
@@ -794,10 +712,8 @@ pub fn recvmsg_provided(
         Ok(None) => return Outcome::Inline(Errno::ENOBUFS.raw()),
         Err(e) => return Outcome::Inline(e.raw()),
     };
-    // Single-direct-copy: transiently pin the kernel-picked buffer and fill it
-    // straight from the socket via a volatile writer — no kernel scratch. The
-    // pin is validated *before* any socket consume, so a bad buffer can't lose
-    // data (unlike the old consume-then-publish-fault path).
+    // The pin is validated *before* any socket consume, so a bad buffer cannot
+    // lose data.
     let Some(vm_process) = table.process() else {
         return Outcome::Inline(Errno::EINVAL.raw());
     };
@@ -811,8 +727,7 @@ pub fn recvmsg_provided(
     };
     let rc: i32 = if ops.is_unix_socket() {
         let sh = SocketHandle::from_usize(handle);
-        // Data-plane only: cap 0 makes the drain drop (close) any
-        // arriving SCM_RIGHTS aliases.
+        // Cap 0 makes the drain drop (close) any arriving SCM_RIGHTS aliases.
         let mut no_files: slopos_ostd::KVec<slopos_fs::FileRef> = slopos_ostd::KVec::new();
         let (read, _n_fds) = with_unix_forced_nonblock(sh, || {
             unix_socket::unix_recvmsg_into(sh, &mut writer, &mut no_files, 0)
@@ -828,7 +743,6 @@ pub fn recvmsg_provided(
     if rc < 0 {
         return Outcome::Inline(rc); // ring untouched — no data landed
     }
-    // Data landed directly in the pinned buffer; consume it off the ring.
     reg.commit_provided(group);
     let flags = SLOPRING_CQE_F_BUFFER | ((buf.bid as u32) << SLOPRING_CQE_BUFFER_SHIFT);
     Outcome::InlineBuf(rc, flags)
