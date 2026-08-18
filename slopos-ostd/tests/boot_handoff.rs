@@ -1,11 +1,5 @@
-//! Host-side tests for `slopos_ostd::boot::handoff`.
-//!
-//! Each handoff fn (`acpi_handoff`, `framebuffer_handoff`,
-//! `memmap_handoff`, `elf_image_handoff`) is exercised with a
-//! synthetic byte slice or in-memory entry array. Tests that touch
-//! the BSP-gated HHDM-offset registry serialise on a `Mutex` because
-//! the registry is process-global and `cargo test` parallelises
-//! `#[test]` items by default.
+//! Host-side tests for `slopos_ostd::boot::handoff`, driving each handoff fn
+//! from a synthetic byte slice or in-memory entry array.
 
 use core::ptr::NonNull;
 use std::sync::Mutex;
@@ -18,17 +12,12 @@ use slopos_ostd::boot::handoff::{
 use slopos_ostd::boot::hhdm::{register_hhdm_offset, reset_hhdm_offset_for_tests};
 use slopos_ostd::sync::{reset_bsp_token_for_tests, run_bsp_init};
 
-/// Serialises every test that touches the BSP-gated HHDM-offset
-/// registry. `cargo test` parallelises tests by default.
+/// Serialises every test touching the BSP-gated HHDM-offset registry: it is
+/// process-global on host, and `cargo test` runs tests in parallel.
 static BSP_LOCK: Mutex<()> = Mutex::new(());
 
-// ----------------------------------------------------------------------------
-// acpi_handoff
-// ----------------------------------------------------------------------------
-
-/// Build a synthetic ACPI table: 4-byte sig + 4-byte length + revision
-/// + checksum byte + padding to `length`. The 8-bit additive checksum
-/// of the full table is forced to zero.
+/// Synthetic ACPI table, padded to `total_len`, whose 8-bit additive
+/// checksum is forced to zero.
 fn build_synthetic_acpi_table(sig: [u8; 4], total_len: usize) -> Vec<u8> {
     assert!(total_len >= 36, "ACPI SDT header is 36 bytes");
     let mut table = vec![0u8; total_len];
@@ -37,10 +26,6 @@ fn build_synthetic_acpi_table(sig: [u8; 4], total_len: usize) -> Vec<u8> {
     table[4..8].copy_from_slice(&length.to_le_bytes());
     table[8] = 1; // revision
     table[9] = 0; // checksum placeholder
-    // OEM fields, etc. — leave zero.
-
-    // Compute 8-bit additive checksum and patch byte 9 so the sum
-    // is zero modulo 256.
     let sum: u8 = table.iter().fold(0u8, |a, b| a.wrapping_add(*b));
     table[9] = (0u8).wrapping_sub(sum);
     table
@@ -52,7 +37,6 @@ fn acpi_handoff_requires_hhdm_registration() {
     reset_hhdm_offset_for_tests();
     reset_bsp_token_for_tests();
 
-    // No HHDM offset registered yet → handoff returns None.
     let result = acpi_handoff(PhysAddr::new(0x1000), 36);
     assert!(result.is_none(), "must reject when HHDM unregistered");
 }
@@ -65,10 +49,8 @@ fn acpi_handoff_round_trips_checksum_validated_table() {
 
     let table = build_synthetic_acpi_table(*b"APIC", 36);
     let table_ptr = table.as_ptr().expose_provenance() as u64;
-    // Choose offset so phys + offset = table_ptr. The kernel's HHDM
-    // is `virt = phys + offset`, so we just register `table_ptr`
-    // itself as the offset (phys 0 is then mapped at table_ptr).
-    // Use phys = 0x1000 → virt = offset + 0x1000.
+    // HHDM is `virt = phys + offset`, so pick the offset that lands
+    // `phys_base` on the synthetic table.
     let phys_base = 0x1000_u64;
     let offset = table_ptr.wrapping_sub(phys_base);
 
@@ -126,10 +108,6 @@ fn acpi_region_bytes_rejects_null_phys_or_zero_len() {
     assert!(acpi_region_bytes(PhysAddr::new(0x1000), 0).is_none());
 }
 
-// ----------------------------------------------------------------------------
-// framebuffer_handoff
-// ----------------------------------------------------------------------------
-
 #[test]
 fn framebuffer_handoff_exposes_dimensions_and_byte_slice() {
     let mut backing: Vec<u8> = vec![0xAB; 64 * 16]; // 64 px × 16 rows
@@ -141,21 +119,14 @@ fn framebuffer_handoff_exposes_dimensions_and_byte_slice() {
     let bytes = fb.as_bytes_mut();
     assert_eq!(bytes.len(), 64 * 16);
     assert!(bytes.iter().all(|b| *b == 0xAB));
-    // Write back, observe through the view's slice.
     bytes[0] = 0xCD;
     let bytes2 = fb.as_bytes_mut();
     assert_eq!(bytes2[0], 0xCD);
 }
 
-// ----------------------------------------------------------------------------
-// memmap_handoff
-// ----------------------------------------------------------------------------
-
 #[test]
 fn memmap_handoff_borrows_entry_array() {
-    // Use a Box::leak so the entries live for 'static — `memmap_handoff`
-    // returns `&'static [MemmapEntry]` and dropping `entries` here
-    // would dangle.
+    // Leaked: `memmap_handoff` hands back a `&'static [MemmapEntry]`.
     let entries: &'static mut [MemmapEntry] = Box::leak(Box::new([
         MemmapEntry {
             base: 0x1000,
@@ -181,10 +152,6 @@ fn memmap_handoff_borrows_entry_array() {
     assert_eq!(slice[1].length, 0x2000);
     assert_eq!(slice[2].typ, 3);
 }
-
-// ----------------------------------------------------------------------------
-// elf_image_handoff
-// ----------------------------------------------------------------------------
 
 #[test]
 fn elf_image_handoff_accepts_valid_magic() {

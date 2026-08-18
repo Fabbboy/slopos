@@ -1,23 +1,12 @@
 //! Page-table walk primitives. **All `unsafe` for PTE writes lives
-//! in this module.**
-//!
-//! The on-disk PTE bit layout, the four-level walker, and the
-//! intermediate-frame allocator glue all sit here so [`super::vm_space`]
-//! can stay free of raw pointers — `VmSpace`, `Cursor`, and `CursorMut`
-//! talk to PTEs only through the safe helpers below.
-//!
-//! # Soundness
+//! in this module**, so [`super::vm_space`]'s `VmSpace`, `Cursor` and
+//! `CursorMut` stay free of raw pointers.
 //!
 //! Page-table frames are sensitive: they are always typed
-//! `Frame<PageTableMeta>` and never reachable as `UFrame`. Every PTE
-//! access goes through the `Pte` wrapper as a single relaxed atomic,
-//! which is what a page-table entry actually is — eight bytes the
-//! hardware walker on another core may read, and stamp Accessed and
-//! Dirty into, at any instant. The
+//! `Frame<PageTableMeta>` and never reachable as `UFrame`. The
 //! intermediate-allocator hand-off via [`Frame::into_raw`] /
-//! [`Frame::from_raw`] keeps the slot's ref count exact (one ref
-//! "owned by" the parent PTE), so no double-free or leak is possible
-//! across map / unmap.
+//! [`Frame::from_raw`] keeps the slot's ref count exact — one ref owned by
+//! the parent PTE — so map / unmap can neither double-free nor leak.
 
 use core::sync::atomic::{AtomicU64, Ordering};
 
@@ -33,10 +22,6 @@ pub const PAGE_SIZE_4KB: u64 = 0x1000;
 pub const PAGE_SIZE_2MB: u64 = 0x20_0000;
 pub const PAGE_SIZE_1GB: u64 = 0x4000_0000;
 pub const PAGE_TABLE_ENTRIES: usize = 512;
-
-// ---------------------------------------------------------------------------
-// PageTableLevel
-// ---------------------------------------------------------------------------
 
 /// Level of an x86_64 page-table entry. `Four` = top (PML4),
 /// `One` = leaf 4 KiB PT.
@@ -97,18 +82,11 @@ impl PageTableLevel {
     }
 }
 
-// ---------------------------------------------------------------------------
-// PteFlags — leaf + intermediate PTE bit layout.
-// ---------------------------------------------------------------------------
-
 bitflags! {
     /// On-disk x86_64 PTE bit pattern.
     ///
-    /// `AVL_*` cover bits 9..=11 — the architectural "available to OS"
-    /// field. OSTD declares them so [`Pte::flags`]'s `from_bits_truncate`
-    /// preserves them on round-trip, but assigns no semantics; consumers
-    /// (slopos-mm, etc.) attach meaning via
-    /// [`super::page_property::PageProperty::software`].
+    /// `AVL_*` are declared only so [`Pte::flags`]'s `from_bits_truncate`
+    /// preserves bits 9..=11 on round-trip; OSTD assigns them no meaning.
     #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
     pub struct PteFlags: u64 {
         const PRESENT       = 1 << 0;
@@ -128,59 +106,46 @@ bitflags! {
 }
 
 impl PteFlags {
-    /// Address mask. Bits 12..=51 hold the 4 KiB-aligned physical
-    /// frame address; the rest are flag bits.
+    /// Bits 12..=51 hold the 4 KiB-aligned physical frame address; the rest
+    /// are flag bits.
     pub const ADDRESS_MASK: u64 = 0x000F_FFFF_FFFF_F000;
 
-    /// Mask for PTE bits 9..=11 — the AVL ("available to OS") field
-    /// that x86_64 reserves for software use. OSTD does not assign
-    /// semantics to these bits; consumers (slopos-mm) define their
-    /// own meanings (e.g. a copy-on-write marker) and route them
+    /// Mask for the AVL ("available to OS") bits 9..=11; consumers
+    /// (slopos-mm) attach their own meaning — e.g. a copy-on-write marker —
     /// through [`super::page_property::PageProperty::software`].
     pub const SOFTWARE_BITS_MASK: u64 = 0x0E00;
-    /// Right-shift amount that moves the AVL bits down to the low
-    /// three bits of a `u8`.
+    /// Right-shift that moves the AVL bits down to the low three bits.
     pub const SOFTWARE_BITS_SHIFT: u32 = 9;
 }
 
-// ---------------------------------------------------------------------------
-// Pte — a single 8-byte entry, accessed as one relaxed atomic.
-//
-// A page-table entry is shared with the hardware page walker on every
-// other core, which reads it and stamps Accessed and Dirty into it
-// without asking. Kernel-half entries are additionally read by
-// `slopos_mm::paging`'s lock-free walker while a cursor writes them.
-// A non-atomic access to a location another agent touches concurrently
-// is a data race under the Rust memory model even when it lowers to the
-// same single `mov`, so every read and write below is an atomic op.
-// Relaxed is the right strength: the ordering that matters — a table's
-// contents being visible before the link that publishes it — is carried
-// by the invalidation the caller issues, not by the entry store.
-// ---------------------------------------------------------------------------
-
-/// Wrapper over a single PTE slot. Holds a raw `*mut u64` and goes
-/// through relaxed atomic reads/writes. Crate-private to keep pointers
-/// out of the safe API.
+/// Wrapper over a single PTE slot: a raw `*mut u64` accessed only through
+/// relaxed atomics, crate-private to keep pointers out of the safe API.
+///
+/// The atomic is not optional — the hardware walker on other cores reads the
+/// entry and stamps Accessed and Dirty into it, and `slopos_mm::paging`'s
+/// lock-free walker reads kernel-half entries while a cursor writes them, so
+/// a plain access races even though it lowers to the same `mov`. Relaxed
+/// suffices because the ordering that matters, a table's contents being
+/// visible before the link that publishes it, comes from the caller's
+/// invalidation.
 #[derive(Clone, Copy)]
 pub(crate) struct Pte {
     raw: *mut u64,
 }
 
-// SAFETY: a `Pte` is a thin pointer to a single 8-byte slot inside a
-// page-table frame this OSTD invocation owns. Sharing/sending across
-// threads is sound because every access is a relaxed atomic op; the
-// surrounding `CursorMut` discipline (one `&mut VmSpace` at a time)
-// serialises mutation.
+// SAFETY: a `Pte` is a thin pointer to one 8-byte slot inside a page-table
+// frame this OSTD invocation owns; every access is a relaxed atomic op, and
+// the `CursorMut` discipline (one `&mut VmSpace` at a time) serialises
+// mutation.
 unsafe impl Send for Pte {}
 unsafe impl Sync for Pte {}
 
 impl Pte {
     #[inline]
     pub(crate) fn read(self) -> u64 {
-        // SAFETY: `self.raw` was constructed from a live page-table
-        // frame's HHDM mapping (see `entry_in_table`); the slot is
-        // inside the page and 8-byte aligned, so it is a valid
-        // `AtomicU64` for the duration of this call.
+        // SAFETY: `self.raw` comes from a live page-table frame's HHDM
+        // mapping (see `entry_in_table`) — inside the page and 8-byte
+        // aligned, so a valid `AtomicU64` for the duration of this call.
         unsafe {
             let slot = AtomicU64::from_ptr(self.raw);
             slot.load(Ordering::Relaxed)
@@ -234,16 +199,14 @@ impl Pte {
 }
 
 /// Yield the PTE at `index` inside the page-table frame at `table_phys`.
-/// Internal: callers must guarantee that `table_phys` is a live
-/// `Frame<PageTableMeta>` for the duration of the returned `Pte`.
+/// Callers must guarantee `table_phys` is a live `Frame<PageTableMeta>` for
+/// the lifetime of the returned `Pte`.
 #[inline]
 pub(crate) fn entry_in_table(table_phys: Paddr, index: usize) -> Pte {
     debug_assert!(index < PAGE_TABLE_ENTRIES);
-    // SAFETY: `phys::phys_to_virt` returns the kernel HHDM mapping of
-    // `table_phys`; that mapping is read+write for any frame the
-    // kernel owns. The byte offset stays inside the 4 KiB frame
-    // (`index < 512` ⇒ offset ≤ 4088). The pointer's alignment is
-    // 8-byte because it's `8 * index` from a 4 KiB-aligned base.
+    // SAFETY: `phys::phys_to_virt` returns the kernel HHDM mapping, which is
+    // read+write for any frame the kernel owns; `index < 512` keeps the byte
+    // offset inside the 4 KiB frame, 8-byte aligned from a 4 KiB-aligned base.
     unsafe {
         let base = phys::phys_to_virt(table_phys) as *mut u64;
         Pte {
@@ -252,33 +215,27 @@ pub(crate) fn entry_in_table(table_phys: Paddr, index: usize) -> Pte {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Walk + huge-page split.
-// ---------------------------------------------------------------------------
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WalkError {
     /// `current_frame_allocator()` is `None` (FrameAlloc not registered).
     AllocUninitialised,
     /// FrameAlloc returned `None` for an intermediate page-table frame.
     AllocFailed,
-    /// A PML4 entry on the path is marked HUGE — architecturally
-    /// invalid (top-level entries are never leaves on x86_64).
+    /// A PML4 entry on the path is marked HUGE; top-level entries are never
+    /// leaves on x86_64.
     PathCorrupt,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum WalkMode {
-    /// Read-only walk. Stop on the first missing intermediate and
-    /// return [`WalkOutcome::NotPresent`]. Never allocates, never
-    /// splits huge pages.
+    /// Read-only: stops at the first missing intermediate, never allocates
+    /// and never splits huge pages.
     Query,
     /// Mutating walk that creates missing intermediates and splits
     /// huge pages so the leaf is a real 4 KiB PT entry.
     Create,
-    /// Mutating walk that does **not** create intermediates. Used by
-    /// `unmap` / `protect`: if the path is incomplete there's nothing
-    /// to do, so return [`WalkOutcome::NotPresent`].
+    /// Mutating walk that does **not** create intermediates: for
+    /// `unmap` / `protect`, an incomplete path means there is nothing to do.
     Mutate,
 }
 
@@ -289,27 +246,20 @@ pub(crate) enum WalkOutcome {
         leaf_index: usize,
         leaf_level: PageTableLevel,
     },
-    /// Walk halted because an intermediate entry was not present.
-    /// `stopped_at` is the level whose entry was missing — e.g.
-    /// `Four` ⇒ the PML4 entry covering this vaddr is empty (the
-    /// next 512 GiB of address space is unmapped). Consumers (in
-    /// particular [`super::vm_space::Cursor::query`]) use this to
-    /// skip empty subtrees in O(1) instead of advancing one 4 KiB
-    /// page at a time.
+    /// Walk halted at a missing intermediate: `stopped_at` is the level whose
+    /// entry was empty, so a consumer can skip that whole subtree (`Four` ⇒
+    /// the next 512 GiB) in O(1) rather than one 4 KiB page at a time.
     NotPresent { stopped_at: PageTableLevel },
 }
 
-/// Walk down from `pml4_phys` toward the entry containing `vaddr`,
-/// honouring `mode`. The walk stops at the table whose entries cover
-/// `target_level`-sized regions (`Three` for 1 GiB, `Two` for 2 MiB,
-/// `One` for 4 KiB). In `Create` mode, intermediates are allocated
-/// down to the table holding `target_level` entries; existing huge
-/// entries that block reaching a deeper target are split. In `Query`
-/// / `Mutate` mode the walk returns whichever leaf is found first
-/// (huge or 4 KiB) without splitting — callers compare
-/// `outcome.leaf_level` against their `S::LEVEL` razor.
+/// Walk down from `pml4_phys` toward the entry containing `vaddr`, stopping
+/// at the table whose entries cover `target_level`-sized regions (`Three` for
+/// 1 GiB, `Two` for 2 MiB, `One` for 4 KiB).
 ///
-/// See [`WalkMode`] / [`WalkOutcome`].
+/// `Create` allocates intermediates down to that table and splits huge
+/// entries blocking a deeper target; `Query` / `Mutate` return whichever leaf
+/// is found first, huge or 4 KiB, without splitting — callers compare
+/// `outcome.leaf_level` against their `S::LEVEL` razor.
 pub(crate) fn walk_to_leaf(
     pml4_phys: Paddr,
     vaddr: VirtAddr,
@@ -336,8 +286,6 @@ pub(crate) fn walk_to_leaf(
         }
     };
 
-    // Target is 1 GiB (Level::Three): caller wants the PDPT entry as
-    // the leaf. Stop here — no descent into PD.
     if target_level == PageTableLevel::Three {
         return Ok(WalkOutcome::LeafTable {
             leaf_table_phys: pdpt_phys,
@@ -370,8 +318,6 @@ pub(crate) fn walk_to_leaf(
         }
     };
 
-    // Target is 2 MiB (Level::Two): caller wants the PD entry as the
-    // leaf. Stop here — no descent into PT.
     if target_level == PageTableLevel::Two {
         return Ok(WalkOutcome::LeafTable {
             leaf_table_phys: pd_phys,
@@ -404,7 +350,6 @@ pub(crate) fn walk_to_leaf(
         }
     };
 
-    // Target is 4 KiB (Level::One): default deepest path.
     Ok(WalkOutcome::LeafTable {
         leaf_table_phys: pt_phys,
         leaf_index: PageTableLevel::One.index_of(vaddr),
@@ -434,9 +379,8 @@ fn step_down(
             return Err(WalkError::PathCorrupt);
         }
         if mode == WalkMode::Create && user_mapping && !parent.flags().contains(PteFlags::USER) {
-            // Promote the intermediate to USER so the leaf is
-            // reachable from ring 3. Mirrors
-            // `mm/src/paging/tables.rs`'s `add_flags(USER)` discipline.
+            // Promote the intermediate to USER so the leaf is reachable from
+            // ring 3.
             let bits = parent.read() | PteFlags::USER.bits();
             parent.write(bits);
         }
@@ -448,7 +392,6 @@ fn step_down(
         WalkMode::Create => {}
     }
 
-    // Create: allocate a fresh, zeroed intermediate.
     let alloc = current_frame_allocator().ok_or(WalkError::AllocUninitialised)?;
     let new_phys = match alloc.alloc(FrameAllocOptions::single().zeroed()) {
         Some(p) => p,
@@ -473,9 +416,6 @@ fn step_down(
     ) {
         Ok(f) => f,
         Err(e) => {
-            // from_unused fails when `new_phys`'s MetaSlot is not claimable —
-            // a page on the buddy free list whose slot is still typed.
-            // `slot_kind` names the subsystem that still owns it.
             let snap = crate::mm::frame::slot_snapshot(new_phys);
             crate::klog_warn!(
                 "page_table: intermediate from_unused FAILED phys=0x{:x} parent_level={:?} \
@@ -488,15 +428,13 @@ fn step_down(
                 snap.raw_ref_count,
                 snap.vtable_addr,
             );
-            // Leak `new_phys` rather than return it: if its slot is still
-            // owned, that owner's Drop frees the page, so deallocating here
-            // would double-free.
+            // Leak `new_phys`: if its slot is still owned, that owner's Drop
+            // frees the page and deallocating here would double-free.
             return Err(WalkError::PathCorrupt);
         }
     };
-    // Leak the typed handle into the parent PTE — the page-table
-    // frame is now "owned by" the parent slot. Reclaimed on unmap
-    // via `reclaim_table_frame`.
+    // The typed handle is leaked into the parent PTE, which now owns the
+    // page-table frame; `reclaim_leaked_frame` takes it back on unmap.
     let _slot_ptr = frame.into_raw();
 
     let mut intermediate = PteFlags::PRESENT | PteFlags::WRITABLE;
@@ -601,21 +539,10 @@ fn table_flags_from_leaf(leaf_flags: PteFlags) -> PteFlags {
     flags
 }
 
-// ---------------------------------------------------------------------------
-// Reclaim + leaf-property helpers.
-// ---------------------------------------------------------------------------
-
-/// Reclaim a leaked `Frame<_>` referenced by `phys`, regardless of
-/// the meta type that was originally installed. The slot's stored
-/// vtable carries the type-correct Drop dispatch — the `M` parameter
-/// of `Frame::from_raw` is just `PhantomData` and is never read at
-/// Drop time. Used both:
-///
-/// 1. During [`VmSpace::Drop`]'s user-half tree walk, where every
-///    intermediate page-table frame and every leaf user frame must
-///    be returned to the allocator.
-/// 2. By a future garbage-collect-empty-intermediate-tables pass on
-///    a live cursor.
+/// Reclaim a leaked `Frame<_>` referenced by `phys`, regardless of the meta
+/// type originally installed: the slot's stored vtable carries the
+/// type-correct Drop dispatch, and `Frame::from_raw`'s `M` parameter is
+/// `PhantomData` that is never read at Drop time.
 ///
 /// # Safety
 ///
@@ -627,12 +554,10 @@ pub(crate) unsafe fn reclaim_leaked_frame(phys: Paddr) {
     let Some(slot_ptr) = meta_slot_for_paddr_ptr(phys) else {
         return;
     };
-    // SAFETY: caller's contract — the slot has one outstanding ref
-    // owned by the (now-cleared) parent PTE. The `PageTableMeta`
-    // type parameter on `from_raw` is `PhantomData` only — at Drop
-    // time the slot's stored vtable performs the correct
-    // `drop_in_place` and `returns_frame` dispatch for whatever `M`
-    // was originally installed.
+    // SAFETY: caller's contract — the slot has one outstanding ref owned by
+    // the now-cleared parent PTE. The `PageTableMeta` parameter is
+    // `PhantomData`; the slot's stored vtable drives `drop_in_place` and
+    // `returns_frame` for whatever `M` was originally installed.
     let frame: Frame<PageTableMeta> = unsafe { Frame::from_raw(slot_ptr) };
     drop(frame);
 }
@@ -656,13 +581,6 @@ pub(crate) fn read_leaf(outcome: &WalkOutcome) -> Option<(Paddr, PageProperty, P
     Some((pte.address(), prop, leaf_level))
 }
 
-// ---------------------------------------------------------------------------
-// META_SLOTS lookup helper. We need the raw `*const MetaSlot` so we
-// can call `Frame::from_raw` (which takes a slot pointer, not a
-// paddr). The crate-private `meta_slot_for` returns `&'static MetaSlot`;
-// we cast to a `*const MetaSlot` here.
-// ---------------------------------------------------------------------------
-
 #[inline]
 fn meta_slot_for_paddr_ptr(paddr: Paddr) -> Option<*const MetaSlot> {
     meta_slot_for(paddr).map(|s| s as *const MetaSlot)
@@ -683,8 +601,8 @@ mod tests {
 
     #[test]
     fn page_table_level_index_aligned() {
-        // 0x4000_0000 — single bit at level-3 boundary. Tests shift
-        // arithmetic without cross-digit interactions.
+        // Single bit at the level-3 boundary: shift arithmetic with no
+        // cross-digit interaction.
         let v = VirtAddr::new(0x4000_0000);
         assert_eq!(PageTableLevel::One.index_of(v), 0);
         assert_eq!(PageTableLevel::Two.index_of(v), 0);
@@ -720,12 +638,6 @@ mod tests {
         assert_eq!(raw & PteFlags::ADDRESS_MASK, 0x0000_1234_5678_9000);
     }
 
-    /// Compile-time pin of every architectural PTE bit value. This
-    /// catches accidental drift in OSTD's bitflags definition — for
-    /// example, a refactor that swaps the `WRITABLE` and `USER` bits
-    /// would break boot but the kernel would already be running on
-    /// the wrong values by then. Pinning to hex literals here makes
-    /// the bit-layout commitment explicit at the OSTD level.
     #[test]
     fn pte_flags_pinned_to_x86_64_arch() {
         assert_eq!(PteFlags::PRESENT.bits(), 1u64 << 0);
@@ -747,8 +659,7 @@ mod tests {
     }
 }
 
-// Compile-time razors. These survive even if every external consumer
-// is deleted — they protect OSTD's PTE-bit invariants forever.
+// Compile-time razors: these hold even if every external consumer is deleted.
 const _: () = {
     assert!(PteFlags::PRESENT.bits() == 1 << 0);
     assert!(PteFlags::WRITABLE.bits() == 1 << 1);

@@ -1,27 +1,9 @@
 //! Validated user-space pointer types.
 //!
-//! [`UserPtr<T>`], [`UserSlice<T>`], and the underlying
-//! [`UserVirtAddr`] are the only typed handles that may carry a
-//! user-supplied address into kernel code. The validating constructor
-//! [`UserVirtAddr::try_new`] checks: non-null, canonical x86_64,
-//! within `[USER_SPACE_START_VA, USER_SPACE_END_VA)`, and
-//! `addr + len` does not overflow — a kernel-half address is rejected
-//! at construction so a `UserPtr<T>` value can never point into the
-//! higher half (Inv. 5).
-//!
-//! Two public construction paths exist:
-//!
-//!   1. [`crate::user::context::UserContext::user_ptr_arg`] /
-//!      [`crate::user::context::UserContext::user_slice_arg`] /
-//!      [`crate::user::context::UserContext::user_bytes_arg`] —
-//!      the canonical syscall-entry surface that takes a register
-//!      index and validates the value the user loaded.
-//!   2. [`UserPtr::try_new`] / [`UserSlice::try_new`] /
-//!      [`UserVirtAddr::try_new`] — the same validating logic, used
-//!      by kernel callers that derive a secondary user pointer from
-//!      an already-validated one (e.g. advancing through an array,
-//!      or stepping from `rsp` into a signal frame). The
-//!      kernel-half-rejection guarantee is identical.
+//! [`UserPtr<T>`], [`UserSlice<T>`] and the underlying [`UserVirtAddr`] are the
+//! only typed handles that may carry a user-supplied address into kernel code.
+//! Every construction path runs [`UserVirtAddr::try_new`], so a kernel-half
+//! address is rejected before such a value exists (Inv. 5).
 
 use core::marker::PhantomData;
 
@@ -30,10 +12,8 @@ use slopos_abi::addr::VirtAddr;
 /// Lower bound (inclusive) of the user virtual-address range.
 pub const USER_SPACE_START_VA: u64 = 0x0000_0000_0000_0000;
 
-/// Upper bound (exclusive) of the user virtual-address range. On
-/// x86_64 with 48-bit canonical addresses, the user half occupies
-/// `[0x0, 0x0000_8000_0000_0000)` and the kernel half occupies
-/// `[0xffff_8000_0000_0000, 0xffff_ffff_ffff_ffff]`.
+/// Upper bound (exclusive) of the user virtual-address range: under 48-bit
+/// canonical addressing the user half is `[0x0, 0x0000_8000_0000_0000)`.
 pub const USER_SPACE_END_VA: u64 = 0x0000_8000_0000_0000;
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
@@ -200,14 +180,11 @@ mod tests {
 
     #[test]
     fn at_user_end_rejected() {
-        // USER_SPACE_END_VA has bit 47 set and bits 48-63 zero — the
-        // first check that fires is the canonicality test.
+        // Bit 47 set with bits 48-63 zero, so canonicality fires first.
         assert_eq!(
             UserVirtAddr::try_new(USER_SPACE_END_VA, 1),
             Err(UserPtrError::NonCanonical)
         );
-        // Just below the canonical boundary is in-range and canonical:
-        // confirm the boundary is exclusive.
         let inside = USER_SPACE_END_VA - 0x1000;
         assert!(UserVirtAddr::try_new(inside, 1).is_ok());
     }

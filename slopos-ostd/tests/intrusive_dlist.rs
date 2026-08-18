@@ -1,11 +1,7 @@
-//! Coverage for the doubly-linked intrusive list backing task ownership.
-//!
-//! The two properties that distinguish it from the singly-linked list are the
-//! ones worth testing hardest: removal is O(1) from any position, and a node
-//! knows which list owns it, so `dlist_unlink` works without naming a head.
-//! Task retirement depends on the latter — it must drop the reference a task's
-//! list membership holds without first deciding whether that list is a parent's
-//! children list or the global root list.
+//! Coverage for the doubly-linked intrusive list backing task ownership: O(1)
+//! removal from any position, and a node that knows which list owns it, so
+//! `dlist_unlink` works without naming a head — the property task retirement
+//! depends on.
 
 use std::pin::Pin;
 
@@ -155,7 +151,6 @@ fn peek_front_does_not_detach() {
     assert_eq!(list.len(), 1, "peek leaves membership intact");
 }
 
-/// The property retirement depends on: unlink without naming the list.
 #[test]
 fn dlist_unlink_finds_the_owning_list() {
     let parent = IntrusiveDList::<Node, RoleA>::new();
@@ -181,9 +176,7 @@ fn dlist_unlink_of_an_unlinked_node_is_a_no_op() {
     assert!(!node.a.is_linked());
 }
 
-/// Moving a node between owner lists must be count-neutral for its membership:
-/// exactly one list holds it at every instant. This is the shape adoption and
-/// orphaning use.
+/// The shape adoption and orphaning use.
 #[test]
 fn a_node_moves_between_lists_without_double_membership() {
     let root = IntrusiveDList::<Node, RoleA>::new();
@@ -202,7 +195,6 @@ fn a_node_moves_between_lists_without_double_membership() {
     assert!(node.a.is_linked());
 }
 
-/// Distinct roles are distinct memberships on the same element.
 #[test]
 fn roles_are_independent() {
     let a = IntrusiveDList::<Node, RoleA>::new();
@@ -230,8 +222,7 @@ fn reset_clears_a_copied_slot() {
     list.push_back(ptr(&node)).expect("push");
     assert!(node.a.is_linked());
 
-    // Models fork: the child's bytes were copied from a linked parent, so the
-    // slot claims a membership the child does not have.
+    // Models fork: the child's copied bytes claim a membership it does not have.
     node.a.reset();
     assert!(!node.a.is_linked());
     assert!(!dlist_unlink::<Node, RoleA>(ptr(&node)));

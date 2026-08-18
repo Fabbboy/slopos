@@ -2,7 +2,6 @@
 
 use core::arch::asm;
 
-/// Read the current RBP (frame pointer).
 #[inline(always)]
 pub fn read_rbp() -> u64 {
     let rbp: u64;
@@ -12,7 +11,6 @@ pub fn read_rbp() -> u64 {
     rbp
 }
 
-/// Read the current RSP (stack pointer).
 #[inline(always)]
 pub fn read_rsp() -> u64 {
     let rsp: u64;
@@ -22,7 +20,6 @@ pub fn read_rsp() -> u64 {
     rsp
 }
 
-/// Read the current R15 register.
 #[inline(always)]
 pub fn read_r15() -> u64 {
     let r15: u64;
@@ -33,9 +30,7 @@ pub fn read_r15() -> u64 {
 }
 
 /// One-shot stack switch: set `rsp` to `stack_top`, sync `rbp`, then
-/// `call target(arg0, arg1)`. `target` must never return — the `call`
-/// is trapped by `ud2` so any spurious return is fatal at the
-/// instruction boundary.
+/// `call target(arg0, arg1)`.
 ///
 /// `arg0` lands in `rdi` and `arg1` lands in `rsi` per the SysV-AMD64
 /// ABI, matching `target`'s `extern "C"` signature.
@@ -73,26 +68,11 @@ pub unsafe fn switch_stack_and_call_noreturn(
     }
 }
 
-/// Scheduler-bootstrap safe wrapper around
-/// [`switch_stack_and_call_noreturn`].
-///
-/// The contract that [`switch_stack_and_call_noreturn`] documents is
-/// discharged by the call-site invariants of the scheduler bringup
-/// path:
-///
-/// - The stack top is the top of a freshly-allocated kernel stack
-///   (returned by the kstack allocator) — 16-byte aligned by
-///   construction.
-/// - The `target` is `scheduler_loop_entry`, an `extern "C" fn(_, _) -> !`
-///   that diverges (`fn() -> !`) — it cannot return.
-/// - The CPU is in scheduler-bringup mode (BSP after `boot_init_run_all`
-///   or AP after `init_scheduler_for_ap`), so no live references into
-///   the previous stack are held: every consumer above this frame has
-///   already returned, and the freshly-dispatched idle task owns the
-///   destination stack.
-///
-/// Centralising the discharge here lets the consumer crate stay
-/// `unsafe`-free.
+/// Safe wrapper: the scheduler-bringup path discharges
+/// [`switch_stack_and_call_noreturn`]'s contract — the stack top comes from the
+/// kstack allocator and is 16-byte aligned by construction, `target` diverges,
+/// and every consumer above this frame has already returned, so no reference
+/// into the previous stack is live.
 #[inline]
 pub fn enter_scheduler_loop_noreturn(
     stack_top: u64,

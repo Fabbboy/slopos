@@ -1,10 +1,8 @@
 //! Pure terminal-emulator core: the VT grid model and the input/selection
 //! logic, with zero dependency on syscalls, the compositor protocol, or font
-//! globals. The userland terminal app (`slopos-userland`) depends on this and
+//! globals — which is what makes it host-testable. The userland terminal app
 //! supplies the IO, rendering, and protocol bridge; the kernel does not link
-//! it. Being free of those couplings makes the whole core host-testable —
-//! `cargo test -p slopos-terminal-core` actually runs (unlike the userland
-//! crate, whose slibc C-runtime interposition segfaults host test binaries).
+//! it.
 
 #![no_std]
 #![forbid(unsafe_code)]

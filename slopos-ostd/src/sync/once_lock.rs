@@ -1,12 +1,4 @@
 //! Thread-safe lazy initialization container.
-//!
-//! [`OnceLock<T>`] provides one-time initialization with [`call_once()`] and
-//! subsequent access via [`get()`].  The first caller to `call_once()` runs
-//! the initializer; concurrent callers spin until complete; later callers
-//! are no-ops.
-//!
-//! [`call_once()`]: OnceLock::call_once
-//! [`get()`]: OnceLock::get
 
 use core::cell::UnsafeCell;
 use core::mem::MaybeUninit;
@@ -17,15 +9,7 @@ const STATE_RUNNING: u8 = 1;
 const STATE_COMPLETE: u8 = 2;
 
 /// A thread-safe container for one-time initialization.
-///
-/// The value is lazily initialized on the first call to [`call_once()`].
-/// Subsequent calls are no-ops.  [`get()`] returns `Some(&T)` once
-/// initialization is complete.
-///
-/// [`call_once()`]: OnceLock::call_once
-/// [`get()`]: OnceLock::get
 pub struct OnceLock<T> {
-    /// 0 = uninit, 1 = initializer running, 2 = complete.
     state: AtomicU8,
     data: UnsafeCell<MaybeUninit<T>>,
 }
@@ -37,7 +21,6 @@ unsafe impl<T: Send + Sync> Send for OnceLock<T> {}
 unsafe impl<T: Send + Sync> Sync for OnceLock<T> {}
 
 impl<T> OnceLock<T> {
-    /// Create a new uninitialized `OnceLock`.
     #[inline]
     pub const fn new() -> Self {
         Self {
@@ -46,11 +29,8 @@ impl<T> OnceLock<T> {
         }
     }
 
-    /// Initialize the value if not yet initialized.
-    ///
-    /// The first caller's closure runs to completion and stores the result.
-    /// Concurrent callers spin (with `PAUSE`) until initialization completes.
-    /// Subsequent callers are no-ops — the closure is never invoked.
+    /// Concurrent callers spin (with `PAUSE`) until the first caller's closure
+    /// completes; later callers are no-ops and never invoke the closure.
     #[inline]
     pub fn call_once(&self, f: impl FnOnce() -> T) {
         if self.state.load(Ordering::Acquire) == STATE_COMPLETE {
@@ -78,7 +58,6 @@ impl<T> OnceLock<T> {
         }
     }
 
-    /// Returns a reference to the value if initialized, or `None`.
     #[inline]
     pub fn get(&self) -> Option<&T> {
         if self.state.load(Ordering::Acquire) == STATE_COMPLETE {
@@ -90,19 +69,13 @@ impl<T> OnceLock<T> {
         }
     }
 
-    /// Returns `true` if the value has been initialized.
     #[inline]
     pub fn is_completed(&self) -> bool {
         self.state.load(Ordering::Acquire) == STATE_COMPLETE
     }
 
-    /// Spin-wait until the value is initialized, then return a reference.
-    ///
-    /// Used at boot rendezvous points where one CPU produces a value
-    /// (via [`call_once`](Self::call_once)) and another spin-waits for
-    /// it before proceeding. The wait is an unbounded spin with
-    /// `PAUSE` hints — it must only be used in pre-scheduler contexts
-    /// where parking the task is impossible.
+    /// An unbounded spin with `PAUSE` hints: only for pre-scheduler rendezvous
+    /// points where parking the task is impossible.
     #[inline]
     pub fn wait(&self) -> &T {
         while self.state.load(Ordering::Acquire) != STATE_COMPLETE {

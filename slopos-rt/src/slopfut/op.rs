@@ -1,17 +1,13 @@
 //! Leaf futures over single ring ops.
 //!
-//! [`OpFuture`] is the one real `Future` in userland: on first poll it
-//! submits its SQE and returns `Pending`; on a later poll it returns
-//! `Ready` once the reactor has harvested its completion. Its `Drop` fires
-//! `OP_CANCEL` for an op still in flight (the kernel cancel is a safe
-//! table-row removal), and the data buffer stays owned by the reactor
-//! until the completion lands — so a dropped future can never leave the
-//! kernel writing freed memory.
+//! [`OpFuture`] is the one real `Future` in userland: on first poll it submits
+//! its SQE and returns `Pending`, and its `Drop` fires `OP_CANCEL` for an op
+//! still in flight.
 //!
-//! The public constructors return small concrete `Unpin` wrapper futures
-//! ([`BufOp`] / [`IntOp`]) rather than `async fn`s, because the `select`
-//! combinators poll their children through `Pin::new(&mut _)` and so
-//! require `Unpin` children — which an `async fn` state machine is not.
+//! The public constructors return concrete `Unpin` wrapper futures ([`BufOp`] /
+//! [`IntOp`]) rather than `async fn`s, because the `select` combinators poll
+//! their children through `Pin::new(&mut _)` and so require `Unpin` children —
+//! which an `async fn` state machine is not.
 
 use core::future::Future;
 use core::pin::Pin;
@@ -29,20 +25,16 @@ use super::reactor::with_reactor;
 const RES_IO_ERR: i32 = -5;
 
 /// A completed data-plane op: the kernel's `res` (>= 0 byte count, or a
-/// negated errno) plus the buffer handed back for reuse. For `res > 0` the
-/// first `res` bytes of `buf` are the transferred data; `buf` keeps its
-/// original length (slice it as `&buf[..res as usize]`).
+/// negated errno) plus the buffer handed back for reuse. `buf` keeps its
+/// original length — slice it as `&buf[..res as usize]`.
 pub struct BufResult {
     pub res: i32,
     pub buf: Vec<u8>,
 }
 
 /// A completed `OP_RECVFROM`: the kernel's `res` (>= 0 datagram byte
-/// count, or a negated errno), the data buffer handed back (its first
-/// `res` bytes are the datagram), and the datagram's *source* address
-/// (`SockAddrIn`, valid only when `res >= 0`). The source addr rides back
-/// in the result struct — the ownership-passing analogue of `recvfrom(2)`
-/// filling `src_addr`.
+/// count, or a negated errno), the data buffer handed back, and the
+/// datagram's *source* address (valid only when `res >= 0`).
 pub struct RecvFromResult {
     pub res: i32,
     pub buf: Vec<u8>,
@@ -50,20 +42,17 @@ pub struct RecvFromResult {
 }
 
 enum State {
-    /// Not yet submitted. `sqe` has opcode/fd/len/off/op_flags filled;
-    /// `addr` is stamped from `buf` at submit time. If `addr2_off` is
-    /// `Some(o)`, `addr2` is stamped to `buf_ptr + o` too — used by
-    /// OP_RECVFROM, whose source-address out-struct rides in the same
-    /// owned buffer (the last 16 bytes), so a single owned `Vec` keeps
-    /// both the data region and the addr-out region alive in-flight.
+    /// Not yet submitted. `addr` is stamped from `buf` at submit time, and
+    /// `addr2_off` — OP_RECVFROM's source-address out-struct — is stamped to
+    /// `buf_ptr + off`, so one owned `Vec` keeps both regions alive in flight.
     Start {
         sqe: Sqe,
         buf: Option<Vec<u8>>,
         addr2_off: Option<u32>,
     },
-    /// Submitted; awaiting completion under this cookie.
-    InFlight { cookie: u64 },
-    /// Completion observed (terminal).
+    InFlight {
+        cookie: u64,
+    },
     Done,
 }
 
@@ -101,8 +90,7 @@ impl Future for OpFuture {
     type Output = (i32, Option<Vec<u8>>);
 
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        // OpFuture holds no self-references, so it is Unpin and we can take
-        // a plain &mut.
+        // OpFuture holds no self-references, so it is Unpin.
         let this = self.get_mut();
         match &mut this.state {
             State::Start {
@@ -112,21 +100,17 @@ impl Future for OpFuture {
             } => {
                 let mut s = *sqe;
                 if let Some(b) = buf.as_mut() {
-                    // Stamp the buffer's (heap-stable) address now, at the
-                    // last moment before ownership moves into the reactor.
+                    // Stamp the buffer's (heap-stable) address at the last
+                    // moment before ownership moves into the reactor.
                     let base = b.as_mut_ptr() as u64;
                     s.addr = base;
                     if let Some(off) = *addr2_off {
-                        // The source-addr out-struct lives in the same owned
-                        // buffer at `base + off`, kept alive by the same Vec.
                         s.addr2 = base + off as u64;
                     }
                 }
                 let taken = buf.take();
                 match with_reactor(|r| r.submit(s, taken)) {
                     Ok(cookie) => {
-                        // Register this task's waker so the reactor wakes us
-                        // when the completion lands.
                         with_reactor(|r| r.register_waker(cookie, cx.waker().clone()));
                         this.state = State::InFlight { cookie };
                         Poll::Pending
@@ -145,7 +129,7 @@ impl Future for OpFuture {
                         Poll::Ready((res, buf))
                     }
                     None => {
-                        // Refresh the waker (the awaiting task may have moved).
+                        // Refresh the waker: the awaiting task may have moved.
                         with_reactor(|r| r.register_waker(cookie, cx.waker().clone()));
                         Poll::Pending
                     }
@@ -159,8 +143,6 @@ impl Future for OpFuture {
 impl Drop for OpFuture {
     fn drop(&mut self) {
         if let State::InFlight { cookie } = self.state {
-            // Future dropped mid-flight: cancel and let the reactor keep
-            // the buffer alive until the cancellation is harvested.
             with_reactor(|r| r.cancel(cookie));
         }
     }
@@ -175,8 +157,6 @@ fn op_sqe(opcode: u8, fd: i32, off: u64, len: u32, op_flags: u32) -> Sqe {
     sqe.op_flags = op_flags;
     sqe
 }
-
-// --- typed wrapper futures (Unpin, usable in `select`) ---------------------
 
 /// A data-plane op future resolving to [`BufResult`] (read/write/send).
 pub struct BufOp(OpFuture);
@@ -211,11 +191,10 @@ impl Future for IntOp {
 /// buffer (the kernel writes the source address here on success).
 const SOCKADDR_IN_LEN: usize = core::mem::size_of::<SockAddrIn>();
 
-/// A datagram-recv future resolving to [`RecvFromResult`]. The owned
-/// buffer carries the data region followed by a [`SockAddrIn`] out-slot
-/// (the last [`SOCKADDR_IN_LEN`] bytes); on completion the source address
-/// is decoded from that slot and the data region is handed back trimmed
-/// to its original capacity.
+/// A datagram-recv future resolving to [`RecvFromResult`]. The owned buffer
+/// carries the data region followed by a [`SockAddrIn`] out-slot (the last
+/// [`SOCKADDR_IN_LEN`] bytes); on completion the source address is decoded from
+/// that slot and the data region is handed back trimmed.
 pub struct RecvFromOp {
     inner: OpFuture,
     /// Length of the data region (the buffer is `data_len + SOCKADDR_IN_LEN`).
@@ -230,9 +209,6 @@ impl Future for RecvFromOp {
         match Pin::new(&mut this.inner).poll(cx) {
             Poll::Ready((res, buf)) => {
                 let mut buf = buf.unwrap_or_default();
-                // Decode the source SockAddrIn from the appended out-slot,
-                // then truncate the buffer back to the data region so the
-                // caller sees only its data (the addr rides in `src`).
                 let src = decode_sockaddr_in(&buf, data_len);
                 if buf.len() >= data_len {
                     buf.truncate(data_len);
@@ -245,8 +221,8 @@ impl Future for RecvFromOp {
 }
 
 /// Decode the `SockAddrIn` the kernel wrote into the out-slot at
-/// `buf[data_len .. data_len + SOCKADDR_IN_LEN]`. Falls back to a zeroed
-/// addr if the buffer is short (a failed/`-EAGAIN` op never wrote it).
+/// `buf[data_len .. data_len + SOCKADDR_IN_LEN]`. Falls back to a zeroed addr
+/// if the buffer is short — a failed op never wrote one.
 fn decode_sockaddr_in(buf: &[u8], data_len: usize) -> SockAddrIn {
     let mut src = SockAddrIn::default();
     let end = data_len + SOCKADDR_IN_LEN;
@@ -258,8 +234,6 @@ fn decode_sockaddr_in(buf: &[u8], data_len: usize) -> SockAddrIn {
     }
     src
 }
-
-// --- public constructors ---------------------------------------------------
 
 /// `OP_NOP` — completes with `res == 0`. Useful as a fence / smoke test.
 pub fn nop() -> IntOp {
@@ -300,10 +274,10 @@ pub fn accept(fd: i32) -> IntOp {
     IntOp(OpFuture::new(op_sqe(OP_ACCEPT, fd, 0, 0, 0), None))
 }
 
-/// Encode a [`SockAddrIn`] into its 16-byte `#[repr(C)]` memory image (the
-/// inverse of [`decode_sockaddr_in`]) so the kernel's `connect` probe reads it
-/// back as a raw struct via `copy_from_user`. `family`/`port` keep their stored
-/// values (the kernel applies `from_be` to the network-order port itself).
+/// Encode a [`SockAddrIn`] into its 16-byte `#[repr(C)]` memory image, which
+/// the kernel reads back as a raw struct via `copy_from_user`. `family`/`port`
+/// keep their stored values — the kernel applies `from_be` to the
+/// network-order port itself.
 fn encode_sockaddr_in(a: &SockAddrIn) -> Vec<u8> {
     let mut v = vec![0u8; SOCKADDR_IN_LEN];
     v[0..2].copy_from_slice(&a.family.to_le_bytes());
@@ -316,9 +290,7 @@ fn encode_sockaddr_in(a: &SockAddrIn) -> Vec<u8> {
 /// `OP_CONNECT` — connect socket `fd` to `addr` (AF_INET). Resolves to `0` on
 /// success or a negated errno (`-ECONNREFUSED`, `-ETIMEDOUT`, …). The
 /// `SockAddrIn` is copied into an owned buffer carried by the future, so the
-/// kernel-read address stays alive in-flight and the caller's `&SockAddrIn` need
-/// not outlive the await. Single-CQE (no `F_MORE`/`F_NOTIF`); composable in
-/// `select` like the other [`IntOp`] futures.
+/// caller's `&SockAddrIn` need not outlive the await.
 pub fn connect(fd: i32, addr: &SockAddrIn) -> IntOp {
     let buf = encode_sockaddr_in(addr);
     let sqe = op_sqe(OP_CONNECT, fd, 0, SOCKADDR_IN_LEN as u32, 0);
@@ -328,17 +300,11 @@ pub fn connect(fd: i32, addr: &SockAddrIn) -> IntOp {
 /// `OP_RECVFROM` — receive a datagram from `fd` (an AF_INET UDP socket),
 /// returning the source address. Reads up to `len` bytes; `buf` capacity
 /// must be at least `len`. Resolves to [`RecvFromResult`]: `res` is the
-/// datagram byte count (or a negated errno), `buf` is handed back owned
-/// (first `res` bytes are the data), and `src` is the sender's address.
-///
-/// Ownership model: `buf` is consumed and a [`SOCKADDR_IN_LEN`]-byte
-/// out-slot is appended, so a single owned `Vec` keeps both the data
-/// region and the addr-out region alive in-flight (the same UAF guard the
-/// other ops use). The buffer is trimmed back to `len` before it returns.
+/// datagram byte count (or a negated errno), `buf` is handed back owned and
+/// trimmed to `len`, and `src` is the sender's address.
 pub fn recvfrom(fd: i32, mut buf: Vec<u8>, len: u32) -> RecvFromOp {
     let data_len = len as usize;
-    // Grow the owned buffer so it has room for the appended out-slot. The
-    // kernel writes the source SockAddrIn at `addr + len`.
+    // The kernel writes the source SockAddrIn at `addr + len`.
     if buf.len() < data_len + SOCKADDR_IN_LEN {
         buf.resize(data_len + SOCKADDR_IN_LEN, 0);
     }
@@ -351,8 +317,7 @@ pub fn recvfrom(fd: i32, mut buf: Vec<u8>, len: u32) -> RecvFromOp {
 
 /// `OP_OPENAT` — open the file at `path` with POSIX open `flags`. Opens
 /// are immediate (no disk blocking), so this resolves inline to the new
-/// fd (`>= 0`) or a negated errno. The path bytes are owned by the future
-/// while in flight (the ownership-passing buffer model).
+/// fd (`>= 0`) or a negated errno.
 pub fn openat(path: &[u8], flags: u32) -> IntOp {
     let buf = path.to_vec();
     let len = buf.len() as u32;
@@ -366,28 +331,18 @@ pub fn close(fd: i32) -> IntOp {
     IntOp(OpFuture::new(op_sqe(OP_CLOSE, fd, 0, 0, 0), None))
 }
 
-// --- multishot stream -------------------------------------------------------
-
-/// A multishot op modelled as an async stream of `i32` results. The
-/// kernel keeps one armed row in flight and posts a CQE on every yield
-/// (each carrying `F_MORE`) until a terminal event; this surface yields
-/// one `Some(res)` per interim CQE and finally `None` once the terminal
-/// CQE (F_MORE clear) is observed.
-///
-/// One SQE replaces an N-resubmit loop: a server accept-loop becomes
-/// `while let Some(fd) = accept_multishot(l).next().await { … }`. Dropping
-/// the stream mid-flight fires `OP_CANCEL` (the kernel terminal CQE retires
-/// the armed row), exactly like [`OpFuture`].
+/// A multishot op modelled as an async stream of `i32` results. The kernel
+/// keeps one armed row in flight and posts a CQE on every yield (each carrying
+/// `F_MORE`) until a terminal event; this surface yields one `Some(res)` per
+/// interim CQE and finally `None` once the terminal CQE (F_MORE clear) is
+/// observed. Dropping the stream mid-flight fires `OP_CANCEL`.
 pub struct MultishotStream {
     state: MultishotState,
 }
 
 enum MultishotState {
-    /// Not yet submitted; `sqe` carries opcode/fd/op_flags.
     Start { sqe: Sqe },
-    /// Armed under this cookie; yielding interim results.
     Armed { cookie: u64 },
-    /// Terminal CQE observed — the stream has ended.
     Done,
 }
 
@@ -422,14 +377,11 @@ impl MultishotStream {
                 match with_reactor(|r| r.take_next(cookie)) {
                     Some((res, _flags, terminal)) => {
                         if terminal {
-                            // The terminal CQE itself is the stream-end
-                            // marker (error / EOF / cancel), not a data
-                            // item — so it ends the stream rather than
-                            // yielding `res`.
+                            // The terminal CQE is the stream-end marker, not a
+                            // data item, so its `res` is not yielded.
                             this.state = MultishotState::Done;
                             Poll::Ready(None)
                         } else {
-                            // Refresh the waker for the next yield.
                             with_reactor(|r| r.register_waker(cookie, cx.waker().clone()));
                             Poll::Ready(Some(res))
                         }
@@ -444,8 +396,7 @@ impl MultishotStream {
         }
     }
 
-    /// Await the next item (`None` at stream end). Convenience over
-    /// [`MultishotStream::poll_next`] for `while let Some(x) = s.next().await`.
+    /// Await the next item (`None` at stream end).
     pub fn next(&mut self) -> Next<'_> {
         Next { stream: self }
     }
@@ -454,8 +405,8 @@ impl MultishotStream {
 impl Drop for MultishotStream {
     fn drop(&mut self) {
         if let MultishotState::Armed { cookie } = self.state {
-            // Stream dropped while armed: cancel the kernel row. The
-            // terminal -ECANCELED CQE retires it (SLOPRING §1.3 trigger 4).
+            // The terminal -ECANCELED CQE retires the armed kernel row
+            // (SLOPRING §1.3 trigger 4).
             with_reactor(|r| r.cancel(cookie));
         }
     }
@@ -476,7 +427,6 @@ impl Future for Next<'_> {
 
 /// `OP_ACCEPT` armed as multishot — yields each accepted connection fd as
 /// a stream item, then `None` when the listener errors / is cancelled.
-/// The server-loop primitive: one SQE, a stream of inbound connections.
 pub fn accept_multishot(fd: i32) -> MultishotStream {
     MultishotStream::new(op_sqe(OP_ACCEPT, fd, 0, 0, 0))
 }

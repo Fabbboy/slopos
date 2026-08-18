@@ -37,7 +37,6 @@ fn mmap_failed(v: u64) -> bool {
     v == 0 || (v as i64) < 0
 }
 
-/// Per-(iter, page) 64-bit magic written to the head of each memfd page.
 #[inline]
 fn magic(iter: usize, page: usize) -> u64 {
     0x5105_0000_0000_0000 ^ ((iter as u64) << 20) ^ ((page as u64) << 4) ^ 0xABCD
@@ -78,9 +77,8 @@ fn reap_bounded(pid: u32) -> Option<i32> {
     None
 }
 
-/// One map→write→unmap→reuse→remap→verify cycle on a fresh memfd. Returns
-/// an exit code (EXIT_OK on success) so it can drive both the in-process
-/// loop and the child workers.
+/// One map→write→unmap→reuse→remap→verify cycle on a fresh memfd, reported as
+/// an exit code so it drives both the in-process loop and the child workers.
 fn memfd_cycle(iter: usize) -> i32 {
     let len = MEMFD_PAGES as u64 * PAGE;
     let reuse_len = REUSE_PAGES as u64 * PAGE;
@@ -94,7 +92,6 @@ fn memfd_cycle(iter: usize) -> i32 {
         return EXIT_MEMFD_FAIL;
     }
 
-    // Map shared, stamp the pattern.
     let a = memory::mmap(0, len, PROT_READ | PROT_WRITE, MAP_SHARED, fd as i64, 0);
     if mmap_failed(a) {
         let _ = fs::close_fd_raw(fd);
@@ -102,12 +99,9 @@ fn memfd_cycle(iter: usize) -> i32 {
     }
     write_pattern(a, iter, MEMFD_PAGES);
 
-    // Unmap while the fd stays open. Under the bug this freed the backing
-    // pages to the buddy even though the memfd is still alive.
+    // Unmap while the fd stays open: the pages must not return to the buddy.
     let _ = memory::munmap(a, len);
 
-    // Reuse: churn a big anonymous region to recycle any freed frames and
-    // clobber their contents.
     let b = memory::mmap(
         0,
         reuse_len,
@@ -123,8 +117,6 @@ fn memfd_cycle(iter: usize) -> i32 {
     touch(b, REUSE_PAGES);
     let _ = memory::munmap(b, reuse_len);
 
-    // Re-map the SAME memfd and verify the pattern survived. A mismatch
-    // means the pages were freed-and-reused under the open fd.
     let c = memory::mmap(0, len, PROT_READ | PROT_WRITE, MAP_SHARED, fd as i64, 0);
     if mmap_failed(c) {
         let _ = fs::close_fd_raw(fd);
@@ -188,7 +180,6 @@ fn test_concurrent_memfd_churn() -> bool {
         spawned += 1;
     }
 
-    // Drive a cycle stream in the parent too, concurrently with the workers.
     let mut ok = true;
     for iter in 0..WORKER_ITERS {
         if memfd_cycle(iter) != EXIT_OK {

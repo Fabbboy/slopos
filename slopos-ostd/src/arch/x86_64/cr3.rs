@@ -1,14 +1,7 @@
 //! CR3 write helper + [`Pcid`] newtype.
 //!
-//! A thin `Pcid(u16)` (only 12 bits architecturally) and a
-//! `write_cr3_pcid` that writes the (PCID-encoded) physical address
-//! of the PML4 plus the no-flush bit.
-//!
-//! # Soundness
-//!
-//! The single `unsafe` block wraps a `mov %rax, %cr3`. The PML4 phys
-//! + PCID encoding are typed via [`PhysAddr`] / [`Pcid`], so callers
-//! cannot smuggle arbitrary u64s into CR3.
+//! The written value is built entirely from [`PhysAddr`] / [`Pcid`], so a
+//! caller cannot smuggle an arbitrary `u64` into CR3.
 
 use slopos_abi::addr::PhysAddr;
 
@@ -40,9 +33,8 @@ impl Default for Pcid {
     }
 }
 
-/// Write CR3 to `(pml4_phys, pcid)`. When `no_flush == true`,
-/// architecturally bit 63 is set and the CPU skips flushing the
-/// previous PCID's TLB entries. Set to `false` if you need a flush.
+/// Write CR3 to `(pml4_phys, pcid)`. `no_flush` sets bit 63, which makes the
+/// CPU skip flushing the previous PCID's TLB entries.
 ///
 /// # Safety
 ///
@@ -63,10 +55,8 @@ pub unsafe fn write_cr3_pcid(pml4_phys: PhysAddr, pcid: Pcid, no_flush: bool) {
     }
     #[cfg(target_os = "none")]
     {
-        // SAFETY: caller's contract above. The value is built entirely
-        // from typed inputs (`PhysAddr`, `Pcid`), so no arbitrary u64
-        // can sneak in. The single assembly statement clobbers no
-        // general-purpose register.
+        // SAFETY: caller's contract above; the value is built entirely from
+        // typed inputs, so no arbitrary u64 can sneak in.
         unsafe {
             core::arch::asm!(
                 "mov {value}, %cr3",
@@ -77,9 +67,8 @@ pub unsafe fn write_cr3_pcid(pml4_phys: PhysAddr, pcid: Pcid, no_flush: bool) {
     }
     #[cfg(not(target_os = "none"))]
     {
-        // Host / cargo-miri-test: no real CR3 to write to. Stash the
-        // would-be value in an atomic so any caller that immediately
-        // re-reads observes the write.
+        // Host builds have no CR3; stash the would-be value so a re-read
+        // observes it.
         use core::sync::atomic::{AtomicU64, Ordering};
         static MOCK_CR3: AtomicU64 = AtomicU64::new(0);
         MOCK_CR3.store(value, Ordering::Relaxed);

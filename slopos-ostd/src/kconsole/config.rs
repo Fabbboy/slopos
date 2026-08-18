@@ -1,11 +1,8 @@
 //! Diagnostic-console policy, parsed from the Limine cmdline.
 //!
-//! Pure parse, atomic install, atomic read. The parse is a free function over
-//! a `&str` so it is testable on the host without a kernel; the installed
-//! state is one packed `AtomicU64` rather than a lock, because the read side
-//! runs from the keyboard ISR and from the serial drain under the per-TTY
-//! lock, and because the lockdep class table is a budgeted resource that a
-//! diagnostic has no business spending.
+//! The installed state is one packed `AtomicU64` rather than a lock: the read
+//! side runs from the keyboard ISR and from the serial drain under the per-TTY
+//! lock, and lockdep classes are a budgeted resource.
 
 use core::sync::atomic::{AtomicU64, Ordering};
 
@@ -20,11 +17,10 @@ const DEFAULT_ARM_MS: u16 = 3000;
 const DEFAULT_MAX_LINES: u16 = 512;
 const DEFAULT_PROBE_MS: u16 = 250;
 
-/// Parsed console policy.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct KConfig {
-    /// Which command classes may run. A command whose `flags` share no bit
-    /// with this mask is refused. `0` disables the console outright.
+    /// Command classes that may run; a command sharing no bit is refused, and
+    /// `0` disables the console outright.
     pub mask: u8,
     /// Whether the serial BREAK trigger is armed.
     pub serial: bool,
@@ -69,26 +65,24 @@ impl KConfig {
 /// The live policy. Written once at boot, read from every trigger path.
 static PACKED: AtomicU64 = AtomicU64::new(KConfig::defaults().pack());
 
-/// Publish a parsed policy.
 pub fn install(cfg: KConfig) {
     PACKED.store(cfg.pack(), Ordering::Release);
 }
 
-/// Read the live policy.
 #[inline]
 pub fn current() -> KConfig {
     KConfig::unpack(PACKED.load(Ordering::Acquire))
 }
 
-/// Whether any command may run at all. One relaxed load: this is on the
-/// keyboard ISR's path for every keystroke.
+/// Whether any command may run at all. Relaxed: this is on the keyboard ISR's
+/// path for every keystroke.
 #[inline]
 pub fn enabled() -> bool {
     (PACKED.load(Ordering::Relaxed) as u8) != 0
 }
 
-/// `on`/`true`/`yes`/`enabled`/`1` and their negatives. Matches the spelling
-/// the test harness already accepts, so one boot line reads consistently.
+/// Accepts the spellings the test harness already does, so one boot line reads
+/// consistently.
 fn parse_bool(value: &str) -> Option<bool> {
     match value {
         "on" | "true" | "yes" | "enabled" | "1" => Some(true),
@@ -193,8 +187,6 @@ mod tests {
 
     #[test]
     fn malformed_values_keep_the_default() {
-        // A typo must not silently disable the console — it is the surface an
-        // operator reaches for when nothing else works.
         assert_eq!(parse("kconsole=maybe").mask, MASK_DEFAULT);
         assert_eq!(parse("kconsole.arm_ms=99999999").arm_ms, DEFAULT_ARM_MS);
         assert_eq!(parse("kconsole.arm_ms=").arm_ms, DEFAULT_ARM_MS);

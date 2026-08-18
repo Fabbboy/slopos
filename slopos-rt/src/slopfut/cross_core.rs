@@ -1,49 +1,14 @@
-//! `Send` cross-core channel (Phase-6 Tier B, additive).
+//! `Send` cross-core channel. The [`Sender`] is `Send + Sync + Clone` and lives
+//! on **any** thread; the [`Receiver`] is `!Send` and belongs to one reactor.
+//! The shared state is an `Arc<Shared<T>>` — a `Mutex`-guarded `VecDeque<T>`
+//! plus the write end of that receiver-reactor's wakeup self-pipe.
 //!
-//! The single-threaded [`sync`](super::sync) channels are `Rc`-backed: their
-//! `Sender` and `Receiver` both live on one reactor thread and wake each other
-//! through that reactor's ready-queue. They cannot cross threads — an `Rc`
-//! waker fired from another core would scribble a foreign reactor's task ids.
-//!
-//! This channel bridges that gap. The [`Sender`] is `Send + Sync + Clone` and
-//! lives on **any** thread; the [`Receiver`] is `!Send` and integrates with one
-//! specific reactor. The shared state is an `Arc<Shared<T>>` — a `Mutex`-guarded
-//! `VecDeque<T>` plus the write end of that receiver-reactor's wakeup self-pipe
-//! ([`reactor::Reactor`]'s lazily-armed `OP_POLL_ADD`).
-//!
-//! ## Wake path (the load-bearing invariant)
-//!
-//! A reactor parked in `ring_enter` can only be roused through an fd its ring
-//! polls; a `Send` sender on core B cannot touch the `!Send` `Rc` waker of a
-//! receiver task on core A. So the cross-thread wake is a self-pipe write, never
-//! a direct waker call:
-//!
-//!   `Sender::send` → lock+push the queue → write one byte to the wakeup-fd
-//!     → core A's reactor poll completes in `park` → `service_wakeup` fires the
-//!     receiver's **local** waker → the receiver re-polls and drains the queue.
-//!
-//! The sender only ever touches `Send` state (the mutex + the fd). The `!Send`
-//! waker is fired exclusively on the receiver's own thread by its own reactor.
-//! This mirrors the windowing `UiSender` self-pipe rationale: a `!Send` runtime
-//! is woken cross-thread only via a kernel fd it polls.
-//!
-//! ## Lost-wakeup safety
-//!
-//! `send` writes the byte *after* the push, and a receiver that finds the queue
-//! empty registers its local waker with the reactor *before* returning Pending
-//! — and the reactor's next `park` is what reads the byte and fires that waker.
-//! Both the registration and the park run on the receiver's single thread in
-//! that order, and the byte (written after the push) is durable in the pipe, so
-//! the item is always observed: either the receiver's poll pops it directly, or
-//! the byte rouses a re-poll that pops it. A byte left in the pipe after the
-//! item was already taken is a harmless spurious wake.
-//!
-//! ## Deferred (future scope, intentionally not built here)
-//!
-//! Work-stealing between reactors, per-thread signalfd mask reconciliation, and
-//! `futex_wait` timeout enforcement are out of scope: this channel's wake path
-//! is the wakeup-fd, so it never needs a timed wait, and the queue mutex (which
-//! routes through the kernel futex under contention) needs no condvar.
+//! The cross-thread wake is a self-pipe write, never a direct waker call: a
+//! reactor parked in `ring_enter` is rousable only through an fd its ring polls,
+//! and a sender on another core cannot touch the receiver's `!Send` `Rc` waker.
+//! `send` pushes and writes one byte; the receiver's own reactor reads it in
+//! `park` and fires the local waker, so the sender only ever touches `Send`
+//! state.
 
 use core::future::Future;
 use core::pin::Pin;
@@ -56,14 +21,12 @@ use slopos_slibc::pal::raw::syscall3;
 
 use super::reactor;
 
-/// Cross-thread shared channel state. `Send + Sync` (the `Mutex` makes the
-/// queue safe to touch from any thread; the fd is a plain integer).
+/// Cross-thread shared channel state.
 struct Shared<T> {
     queue: Mutex<VecDeque<T>>,
-    /// Write end of the receiver-reactor's wakeup self-pipe. `-1` if the
-    /// receiver's reactor could not arm a wakeup pipe (the channel still works
-    /// when sender and receiver happen to share a thread; it just cannot rouse
-    /// a parked reactor cross-core).
+    /// Write end of the receiver-reactor's wakeup self-pipe; `-1` if no pipe
+    /// could be armed, in which case a parked reactor cannot be roused
+    /// cross-core (the channel still works same-thread).
     wakeup_fd: i32,
 }
 
@@ -73,9 +36,8 @@ pub struct Sender<T> {
     shared: Arc<Shared<T>>,
 }
 
-/// The `!Send` consumer. Bound to the reactor of the thread that created it
-/// (the wakeup-fd write end addresses that reactor's self-pipe). Polled as a
-/// future via [`Receiver::recv`].
+/// The `!Send` consumer, bound to the reactor of the thread that created it —
+/// the wakeup-fd write end addresses that reactor's self-pipe.
 pub struct Receiver<T> {
     shared: Arc<Shared<T>>,
 }
@@ -87,9 +49,6 @@ pub struct Receiver<T> {
 /// it. The returned [`Sender`] is `Send` and can be moved to other threads; the
 /// [`Receiver`] stays on this thread.
 pub fn channel<T: Send>() -> (Sender<T>, Receiver<T>) {
-    // Arm this reactor's wakeup pipe and capture its write end. `-1` if the
-    // pipe could not be created — the receiver then cannot be roused while
-    // parked, but the channel is still sound (and works same-thread).
     let wakeup_fd = reactor::with_reactor(|r| r.ensure_wakeup()).unwrap_or(-1);
     let shared = Arc::new(Shared {
         queue: Mutex::new(VecDeque::new()),
@@ -104,15 +63,15 @@ pub fn channel<T: Send>() -> (Sender<T>, Receiver<T>) {
 }
 
 impl<T> Sender<T> {
-    /// Enqueue `item` and rouse the receiver's reactor. Lock-and-push, then
-    /// write one wakeup byte — in that order, so the item is visible before the
-    /// byte that triggers the receiver's re-poll (no lost wakeup).
+    /// Enqueue `item` and rouse the receiver's reactor. Push, then write one
+    /// wakeup byte — in that order, so the item is visible before the byte that
+    /// triggers the receiver's re-poll.
     pub fn send(&self, item: T) {
         if let Ok(mut q) = self.shared.queue.lock() {
             q.push_back(item);
         }
-        // Rouse the parked reactor. A full pipe (EAGAIN) means a wakeup is
-        // already pending — harmless. Any other error is best-effort.
+        // The write result is ignored: a full pipe (EAGAIN) means a wakeup is
+        // already pending.
         if self.shared.wakeup_fd >= 0 {
             let byte = [1u8];
             unsafe {
@@ -127,8 +86,7 @@ impl<T> Sender<T> {
     }
 }
 
-// The `Arc<Shared<T>>` is `Send + Sync` whenever `T: Send`, so the sender is
-// freely movable across threads — the whole point of the cross-core channel.
+// `Arc<Shared<T>>` is `Send + Sync` whenever `T: Send`.
 unsafe impl<T: Send> Send for Sender<T> {}
 unsafe impl<T: Send> Sync for Sender<T> {}
 
@@ -141,9 +99,8 @@ impl<T> Clone for Sender<T> {
 }
 
 impl<T> Receiver<T> {
-    /// Await the next item. Resolves once an item is available; never resolves
-    /// to a "closed" state — senders may keep arriving (the consumer decides
-    /// when it has received enough). Drains one item per call.
+    /// Await the next item. There is no "closed" state — senders may keep
+    /// arriving, so the consumer decides when it has received enough.
     pub fn recv(&mut self) -> Recv<'_, T> {
         Recv { rx: self }
     }

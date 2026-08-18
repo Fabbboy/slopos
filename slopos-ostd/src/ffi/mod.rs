@@ -1,10 +1,9 @@
 //! FFI primitives: the surfaces a `#![forbid(unsafe_code)]` crate cannot
 //! spell for itself.
 //!
-//! Linker registries live in [`registry`]; this module hosts the
-//! `extern_block!` declarative macro that wraps `unsafe extern "C" { … }`
-//! declarations, the Edition-2024 `no_mangle` wrappers, and the Limine
-//! request placement macro.
+//! Linker registries live in [`registry`]; this module hosts `extern_block!`,
+//! the Edition-2024 `no_mangle` wrappers, and the Limine request placement
+//! macro.
 //!
 //! # `extern_block!` shape
 //!
@@ -39,11 +38,8 @@
 //! }
 //! ```
 //!
-//! `fn` items are consolidated inside the extern block but get **no**
-//! safe accessor — callers retain `unsafe { mod_name::fn_name(...) }`
-//! at the call site, because whether an external `fn` is safe to call
-//! depends on the callee, not on its mere existence as a symbol. The
-//! macro's contract is solely to absorb the `unsafe extern` *syntax*.
+//! `fn` items get **no** safe accessor: whether an external `fn` is safe to
+//! call depends on the callee, not on its existence as a symbol.
 
 pub mod registry;
 
@@ -53,12 +49,9 @@ pub use core::ptr;
 /// Place a static in one of the three sections the Limine boot protocol
 /// reads.
 ///
-/// Distinct from [`registry_entry!`](crate::registry_entry): the Limine
-/// sections are an interop contract with the bootloader rather than a
-/// kernel-internal registry, they hold heterogeneous request types, and
-/// nothing walks them from inside the kernel — so there are no bracket
-/// symbols and no entry type to agree on. What they share is that the
-/// section label is OSTD's, not the caller's.
+/// Distinct from [`registry_entry!`](crate::registry_entry): these sections are
+/// a bootloader interop contract, hold heterogeneous request types, and nothing
+/// walks them from inside the kernel — so no bracket symbols, no entry type.
 ///
 /// ```ignore
 /// slopos_ostd::limine_request! {
@@ -98,11 +91,8 @@ macro_rules! __limine_request {
 
 /// Declarative wrapper around `#[unsafe(no_mangle)] pub extern "C" fn …`.
 ///
-/// Edition 2024 marks the `no_mangle` attribute as `unsafe(no_mangle)`
-/// at the attribute grammar level. The `unsafe` token is syntactic —
-/// the body is plain `pub extern "C" fn`. This macro absorbs the
-/// `unsafe` keyword so consumers declare entry points without spelling
-/// it.
+/// Edition 2024 spells `no_mangle` as `unsafe(no_mangle)`; the `unsafe` token
+/// is syntactic, and this macro absorbs it so consumers never spell it.
 ///
 /// Two forms — with and without a return type:
 /// ```ignore
@@ -138,8 +128,7 @@ macro_rules! extern_c_entry {
 
 /// Declarative wrapper around `#[unsafe(no_mangle)] $vis static FOO: T = …`.
 ///
-/// Same syntactic-`unsafe`-absorbing role as [`extern_c_entry`], for
-/// `static` symbols that need the unmangled C-linkage name (e.g. the
+/// For `static` symbols that need the unmangled C-linkage name (e.g. the
 /// `SYSCALL_CPU_DATA_PTR` slot consumed by the asm syscall trampoline).
 #[macro_export]
 #[allow_internal_unsafe]
@@ -156,19 +145,12 @@ macro_rules! no_mangle_static {
 
 /// Wrap an `unsafe extern "C" { … }` declaration.
 ///
-/// See the module-level docs for the expansion shape. The macro
-/// accepts a mod-wrapped form so multiple invocations in the same
-/// scope cannot collide on symbol names — each invocation names its
-/// own private module.
+/// See the module-level docs for the expansion shape. The mod-wrapped form
+/// keeps multiple invocations in one scope from colliding on symbol names.
 ///
-/// Item kinds supported:
-/// - `static NAME: TY;` — emits a safe `pub fn NAME_addr() -> *const TY`
-///   accessor at the mod's outer level.
-/// - `fn NAME(args) -> RET;` — consolidated inside the extern block;
-///   no safe wrapper (callers retain call-site `unsafe { … }`).
-///
-/// Item-level attributes (`#[link_name = "…"]` on a static, etc.) are
-/// preserved verbatim. Outer attributes on the `mod` likewise survive.
+/// A `static NAME: TY;` gains a safe `pub fn NAME_addr() -> *const TY`; a `fn`
+/// gains nothing. Item-level attributes (`#[link_name = "…"]`) survive
+/// verbatim.
 #[macro_export]
 #[allow_internal_unsafe]
 macro_rules! extern_block {
@@ -188,15 +170,12 @@ macro_rules! extern_block {
     };
 }
 
-/// Internal: emit each item inside the `unsafe extern "C" { … }` block.
-///
-/// Per-item visibility is forced to `pub(super)` so the safe accessor
-/// fns emitted at the outer mod level can reference the extern items.
+/// Per-item visibility is forced to `pub(super)` so the safe accessor fns
+/// emitted at the outer mod level can reference the extern items.
 #[doc(hidden)]
 #[macro_export]
 macro_rules! __extern_block_items {
     () => {};
-    // static form
     (
         $(#[$attr:meta])*
         static $name:ident : $ty:ty ;
@@ -206,7 +185,6 @@ macro_rules! __extern_block_items {
         pub(super) static $name : $ty;
         $crate::__extern_block_items! { $($rest)* }
     };
-    // fn form with return type
     (
         $(#[$attr:meta])*
         fn $name:ident ( $($args:tt)* ) -> $ret:ty ;
@@ -216,7 +194,6 @@ macro_rules! __extern_block_items {
         pub(super) fn $name ( $($args)* ) -> $ret;
         $crate::__extern_block_items! { $($rest)* }
     };
-    // fn form without return type
     (
         $(#[$attr:meta])*
         fn $name:ident ( $($args:tt)* ) ;
@@ -228,9 +205,6 @@ macro_rules! __extern_block_items {
     };
 }
 
-/// Internal: emit safe accessor fns for each `static` item.
-///
-/// `fn` items get no accessor — the macro skips them.
 #[doc(hidden)]
 #[macro_export]
 macro_rules! __extern_block_accessors {
@@ -249,7 +223,6 @@ macro_rules! __extern_block_accessors {
         }
         $crate::__extern_block_accessors! { $($rest)* }
     };
-    // skip fn-with-ret-type
     (
         $(#[$attr:meta])*
         fn $name:ident ( $($args:tt)* ) -> $ret:ty ;
@@ -257,7 +230,6 @@ macro_rules! __extern_block_accessors {
     ) => {
         $crate::__extern_block_accessors! { $($rest)* }
     };
-    // skip fn-without-ret-type
     (
         $(#[$attr:meta])*
         fn $name:ident ( $($args:tt)* ) ;
