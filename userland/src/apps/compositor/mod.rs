@@ -56,60 +56,47 @@ struct WindowManager {
 
     system_bar: menu_bar::SystemBar,
     shelf: dock::LauncherShelf,
-    /// The bar's popover: compositor-owned chrome holding a pointer grab while
-    /// it is open.
+    /// Compositor-owned chrome; holds a pointer grab while open.
     popover: popover::Popover,
 
-    /// Protocol bridge for AF_UNIX socket-based clients (None if bind failed).
+    /// `None` if the AF_UNIX bind failed.
     protocol: Option<Box<ProtocolBridge>>,
 
-    /// Monotonic serial counter for protocol input events (Wayland convention).
     protocol_serial: u32,
-    /// Task ID of the protocol surface that last had pointer focus (for enter/leave).
     protocol_pointer_focus: u32,
 
     first_frame: bool,
     /// This frame's accumulated, disjoint damage region.
     output_damage: Region,
-    /// Force a full-output redraw this frame (first frame, new window, mode
-    /// change). Tracked separately from `output_damage` so the region itself
-    /// stays a precise rect set.
+    /// Tracked separately from `output_damage` so that region stays a precise
+    /// rect set.
     force_full_redraw: bool,
-    /// Damage from a present that did NOT reach the screen (failed flip, or the
-    /// kernel suppressed it) — carried forward until actually shown.
+    /// Damage from a present that did not reach the screen, carried forward
+    /// until actually shown.
     pending_damage: Region,
     /// A suppressed/failed *full* present to retry next frame.
     pending_full: bool,
-    /// Surfaces whose committed content damage was folded into this frame's
-    /// `output_damage` (by `task_id`). Only these are cleared after a present
-    /// that actually reached the screen — a commit that landed after the
-    /// snapshot keeps its dirty flag and is exported next frame.
+    /// Surfaces (by `task_id`) whose committed damage was folded into this
+    /// frame. Only these are cleared after a present that reached the screen —
+    /// a commit landing after the snapshot stays dirty and exports next frame.
     frame_dirty_surfaces: Vec<u32>,
     prev_window_bounds: [WindowBounds; MAX_WINDOWS],
     prev_cursor_shape: u8,
-    /// Everything the network panel would show, as of the last poll.
     net_cache: NetPanelModel,
-    /// The one state the bar's indicator draws, derived from `net_cache`.
     net_indicator: NetIndicatorState,
-    /// When the network was last queried; `None` until the first poll. Only
-    /// consulted on the fallback path — see [`WindowManager::net_event_driven`].
+    /// Only consulted on the fallback path — see [`WindowManager::net_event_driven`].
     net_last_poll: Option<Instant>,
-    /// Whether a `net_monitor` fd is driving refreshes.
-    ///
-    /// When it is, the timer below is switched off entirely rather than kept
-    /// as a backstop. A backstop would mask a monitor that had stopped firing:
-    /// the bar would still update, a little late, and the broken fd would go
-    /// unnoticed. Every event triggers a full re-query, including the in-band
-    /// overflow record, so a dropped event cannot desync the model.
+    /// Whether a `net_monitor` fd is driving refreshes. When it is, the poll
+    /// timer is switched off entirely rather than kept as a backstop, so a
+    /// monitor that stopped firing is noticed instead of masked.
     net_event_driven: bool,
-    /// Hardware-cursor state: `None` = not yet probed, `Some(true)` = the
-    /// virtio-gpu overlay owns the pointer (software cursor suppressed),
-    /// `Some(false)` = unavailable (software cursor in use).
+    /// `None` = not yet probed, `Some(true)` = the virtio-gpu overlay owns the
+    /// pointer (software cursor suppressed), `Some(false)` = unavailable.
     hw_cursor: Option<bool>,
     /// Cursor shape last uploaded to the hardware overlay (`-1` = none).
     hw_cursor_shape: i32,
-    /// Last position sent to the hardware cursor (`i32::MIN` = never), so we
-    /// only issue a (blocking) move when the pointer actually moved.
+    /// Last position sent to the hardware cursor (`i32::MIN` = never), so the
+    /// blocking move is only issued when the pointer actually moved.
     hw_cursor_last_x: i32,
     hw_cursor_last_y: i32,
 }
@@ -153,11 +140,9 @@ impl WindowManager {
         }
     }
 
-    /// Drive the virtio-gpu hardware cursor. Probes it lazily, (re)uploads the
-    /// cursor image when the shape changes, and reports whether the hardware
-    /// overlay owns the pointer (so the renderer skips compositing it into the
-    /// frame). Without a virtio-gpu device the first upload fails and the
-    /// software cursor is used for the rest of the session.
+    /// Drive the virtio-gpu hardware cursor: probe lazily, re-upload on shape
+    /// change, and report whether the overlay owns the pointer (so the renderer
+    /// skips compositing a software cursor into the frame).
     fn update_hw_cursor(&mut self, shape: u8) -> bool {
         match self.hw_cursor {
             Some(false) => return false,
@@ -177,9 +162,8 @@ impl WindowManager {
             self.hw_cursor_shape = shape as i32;
             return true;
         }
-        // First probe failure means no hardware cursor: use software. A failed
-        // re-upload after activation keeps the last good overlay shape (stay on
-        // hardware) so the overlay and a software cursor never show together.
+        // A failed re-upload after activation stays on hardware, keeping the
+        // last good overlay shape, so overlay and software cursor never coexist.
         if self.hw_cursor.is_none() {
             self.hw_cursor = Some(false);
             false
@@ -190,15 +174,8 @@ impl WindowManager {
 
     /// Rebuild the network model from the kernel and republish the indicator.
     ///
-    /// The single seam between the compositor and how the kernel reports the
-    /// network. Everything downstream reads `net_cache` and `net_indicator`,
-    /// and the bar republishes only when the *drawn* state changes, so what
-    /// this body queries is invisible to the rest of the compositor.
-    ///
     /// A failed query leaves the previous model in place rather than falling
-    /// back to `EMPTY`. A transient `ENOMEM` mid-frame is not evidence that
-    /// the network went away, and flashing the indicator to Disconnected and
-    /// back is worse than showing state one poll old.
+    /// back to `EMPTY`: a transient error is not evidence the network went away.
     fn refresh_from_kernel(&mut self) {
         let Some(model) = read_net_model() else {
             return;
@@ -213,7 +190,6 @@ impl WindowManager {
         self.prev_window_count = self.window_count;
         let saved_bounds = self.prev_window_bounds;
 
-        // Populate window list from ProtocolBridge local state.
         let raw_count = if let Some(ref proto) = self.protocol {
             proto.get_windows(&mut self.windows) as i64
         } else {
@@ -228,15 +204,12 @@ impl WindowManager {
         self.surface_cache
             .cleanup_stale(&self.windows, self.window_count);
 
-        // Sync running apps into the launcher shelf.
         self.shelf
             .sync_running_apps(&self.windows, self.window_count);
 
         self.output_damage.clear();
         self.frame_dirty_surfaces.clear();
 
-        // Carry forward damage from a present that never reached the screen
-        // (failed flip, or the kernel suppressed it).
         if self.pending_full {
             self.force_full_redraw = true;
             self.pending_full = false;
@@ -250,9 +223,6 @@ impl WindowManager {
             let window = self.windows[i];
             let curr_bounds = WindowBounds::from_window(&window);
 
-            // Look up where this window was last frame: its geometry AND its
-            // z-rank (array index = stacking position, since `get_windows`
-            // returns the windows bottom-to-top).
             let prev = self.find_prev_index(window.task_id);
 
             if let Some(prev_idx) = prev {
@@ -262,8 +232,8 @@ impl WindowManager {
                     || old.width != curr_bounds.width
                     || old.height != curr_bounds.height
                     || old.visible != curr_bounds.visible;
-                // A pure restack (raise/lower) changes no geometry but changes
-                // occlusion, so the covered/revealed area must be repainted.
+                // A pure restack changes no geometry but changes occlusion, so
+                // the covered/revealed area must be repainted.
                 let restacked = prev_idx != i;
                 if geometry_changed || restacked {
                     self.add_bounds_damage(&old);
@@ -293,15 +263,9 @@ impl WindowManager {
         }
     }
 
-    /// Cursor-trail / shelf / hover damage. Runs AFTER the frame's input
-    /// events have been dispatched (the cursor trail is populated by
-    /// `process_input_events`), unlike the window damage in
-    /// `refresh_windows` which only needs the protocol surface state.
+    /// Cursor-trail / shelf / hover damage. Must run after the frame's input
+    /// events are dispatched: `process_input_events` populates the cursor trail.
     fn add_pointer_damage(&mut self) {
-        // Add shelf bounds to damage only when its visual output changes:
-        // cursor moved (magnification/hover may change) or content changed
-        // (app opened/closed). Following the Mutter/wlroots pattern where
-        // panels produce zero damage when idle.
         let cursor_moved = self.input.cursor_trail_count > 0;
         let shelf_content_changed = self.shelf.take_content_dirty();
         if cursor_moved || shelf_content_changed {

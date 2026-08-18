@@ -1,10 +1,7 @@
 //! `ip neigh` — the neighbour cache.
 //!
 //! Output follows iproute2: `<addr> dev <name> lladdr <mac> <STATE>`, with the
-//! `lladdr` clause omitted entirely when there is no MAC rather than printed as
-//! all-zeroes. An `INCOMPLETE` entry additionally reports how many packets are
-//! queued behind it, which is the one thing that distinguishes "ARP is in
-//! flight" from "ARP is in flight and traffic is piling up".
+//! `lladdr` clause omitted rather than zero-filled when there is no MAC.
 
 use slopos_abi::net::{NET_IFINDEX_NONE, NET_IFOP_DEL_NEIGH, NET_IFOP_FLUSH_NEIGH, NET_Q_NEIGH};
 use slopos_abi::net::{NET_NEIGH_FAILED, NET_NEIGH_INCOMPLETE, UserNeigh};
@@ -33,8 +30,8 @@ pub fn show(dev: Option<&[u8]>) -> Outcome {
             Ipv4(entry.addr),
             query::name_or_index(&ifaces, entry.ifindex)
         );
-        // No MAC is the truth for INCOMPLETE and FAILED; `lladdr 00:00:00:00:00:00`
-        // would read as a resolved neighbour with a broken address.
+        // INCOMPLETE and FAILED have no MAC; `lladdr 00:00:00:00:00:00` would
+        // read as a resolved neighbour with a broken address.
         if entry.state != NET_NEIGH_INCOMPLETE && entry.state != NET_NEIGH_FAILED {
             line.push_str(&std::format!(" lladdr {}", Mac(entry.mac)));
         }
@@ -53,8 +50,6 @@ pub fn del(addr: Ipv4, dev: &[u8]) -> Outcome {
     let ifindex = device_index(&ifaces, dev)?;
     let context = query::name_or_index(&ifaces, ifindex);
 
-    // The address is the operation's scalar operand: `net_iface_ctl` takes no
-    // user memory at all.
     let key = u64::from(u32::from_be_bytes(addr.octets()));
     net_iface_ctl(ifindex, NET_IFOP_DEL_NEIGH, key).map_err(|err| Failure::from_errno(context, err))
 }

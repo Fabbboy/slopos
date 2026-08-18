@@ -1,23 +1,14 @@
-//! Reading `net_query`'s fixed-stride buffers.
-//!
-//! Shared rather than owned by one program: `/bin/ip` renders this state as
-//! text and the compositor's status indicator renders it as a glyph, and both
-//! have to walk the same buffers. Keeping the walker here rather than inside
-//! either one stops the second consumer from depending on the first's
-//! internals.
-//!
-//! Every query answers in the same shape — a [`UserNetQueryHdr`] followed by an
-//! array of one record type — so there is one walker rather than one per
-//! object.
+//! Reading `net_query`'s fixed-stride buffers, shared by `/bin/ip` and the
+//! compositor's status indicator. Every query answers in the same shape: a
+//! [`UserNetQueryHdr`] followed by an array of one record type.
 //!
 //! **The header's `record_size` is the stride, not this build's `size_of`.**
 //! That is the ABI's forward-compatibility lever: a newer kernel may grow a
 //! record, and a client that strides by the kernel's number keeps reading the
-//! prefix it understands instead of walking off into the middle of a struct.
+//! prefix it understands.
 //!
 //! Sizing is a two-call protocol: a header-sized buffer returns
-//! `record_count == 0` and `total_count == N`, so the caller learns the size
-//! without guessing a capacity and without a fixed cap that silently truncates.
+//! `record_count == 0` and `total_count == N`.
 
 use std::vec::Vec;
 
@@ -26,7 +17,6 @@ use slopos_abi::net::{NET_IFINDEX_NONE, NET_IFNAMSIZ, NET_Q_IFACES, UserIface, U
 use crate::syscall::SyscallResult;
 use crate::syscall::net::net_query;
 
-/// One query's answer.
 pub struct Query<T> {
     pub hdr: UserNetQueryHdr,
     pub records: Vec<T>,
@@ -34,8 +24,7 @@ pub struct Query<T> {
 
 impl<T> Query<T> {
     /// Whether the kernel had more to say than fit. Not an error: the state can
-    /// grow between the sizing call and the reading call, and showing what
-    /// arrived beats failing.
+    /// grow between the sizing call and the reading call.
     pub fn truncated(&self) -> bool {
         self.hdr.total_count as usize > self.records.len()
     }
@@ -43,10 +32,9 @@ impl<T> Query<T> {
 
 /// Copy one record out of a byte buffer.
 ///
-/// Byte-wise rather than a typed load because the record starts at
-/// `header + i * record_size`, and neither the kernel's stride nor this build's
-/// alignment for `T` is something the other side promised. A stride longer than
-/// `T` keeps the prefix; a shorter one leaves the tail at its `Default` value.
+/// Byte-wise because neither the kernel's stride nor this build's alignment for
+/// `T` is something the other side promised. A stride longer than `T` keeps the
+/// prefix; a shorter one leaves the tail at its `Default` value.
 fn decode<T: Copy + Default>(bytes: &[u8]) -> T {
     let mut out = T::default();
     let n = bytes.len().min(core::mem::size_of::<T>());
@@ -66,8 +54,6 @@ fn decode<T: Copy + Default>(bytes: &[u8]) -> T {
 pub fn fetch<T: Copy + Default>(what: u32, ifindex: u32) -> SyscallResult<Query<T>> {
     const HDR: usize = core::mem::size_of::<UserNetQueryHdr>();
 
-    // Sizing call: the smallest buffer the kernel accepts holds the header and
-    // no records, so it reports `total_count` without transferring anything.
     let mut probe = [0u8; HDR];
     net_query(what, ifindex, &mut probe)?;
     let sizing = decode::<UserNetQueryHdr>(&probe);
@@ -84,8 +70,8 @@ pub fn fetch<T: Copy + Default>(what: u32, ifindex: u32) -> SyscallResult<Query<
     let mut buf = std::vec![0u8; HDR + want * stride];
     net_query(what, ifindex, &mut buf)?;
 
-    // Re-read the header: this is a second snapshot, and its counts and stride
-    // are the ones that describe the bytes actually in `buf`.
+    // A second snapshot: these counts and stride, not the sizing call's,
+    // describe the bytes actually in `buf`.
     let hdr = decode::<UserNetQueryHdr>(&buf);
     let stride = (hdr.record_size as usize).max(1);
     let count = (hdr.record_count as usize).min(buf.len().saturating_sub(HDR) / stride);

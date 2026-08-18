@@ -1,17 +1,15 @@
 //! Host-side integration tests for `DmaCoherent` / `DmaStream`.
 //!
-//! Setup mirrors `tests/vm_space.rs`: a leaked page-aligned scratch
-//! arena stands in for "physical memory", a leaked `Vec<MetaSlot>`
-//! gives per-frame ref-count slots, a multi-page `BumpAlloc`
-//! implements `FrameAlloc`, and a `RecordingMapper` impls
+//! A leaked page-aligned scratch arena stands in for "physical memory", a
+//! leaked `Vec<MetaSlot>` gives per-frame ref-count slots, a multi-page
+//! `BumpAlloc` implements `FrameAlloc`, and a `RecordingMapper` impls
 //! `IommuMapper` while recording every map/unmap call.
 //!
 //! `BumpAlloc` never re-hands a page, so each `dealloc` it records names a
 //! paddr no other test can also have produced — which is what lets a test
 //! assert on the *last* recorded release. It snapshots the head page's
-//! `MetaSlot` at the instant of release, so a run that hands its pages back
-//! before the per-frame lifecycle has reset the slots is caught by the
-//! recorded kind rather than by a downstream mystery.
+//! `MetaSlot` at the instant of release, so a run handed back before the
+//! per-frame lifecycle has reset the slots is caught by the recorded kind.
 
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Mutex, MutexGuard, OnceLock};
@@ -29,10 +27,9 @@ use slopos_ostd::mm::phys::init_phys_virt_offset;
 const N_PAGES: usize = 64;
 const PAGE_SIZE: usize = 4096;
 
-/// A page-aligned address one page past the end of the `MetaSlot` array.
-/// [`BumpAlloc`] hands this out in poison mode so the caller's
-/// `Frame::from_unused` fails `OutOfRange`, which is the reachable shape of
-/// a segment-build failure.
+/// A page-aligned address one page past the end of the `MetaSlot` array, so a
+/// caller's `Frame::from_unused` fails `OutOfRange` — the reachable shape of a
+/// segment-build failure.
 const OUT_OF_SLOT_RANGE_PADDR: u64 = (N_PAGES * PAGE_SIZE) as u64;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -44,8 +41,7 @@ struct DeallocCall {
     head_slot_kind: SlotMetaKind,
 }
 
-/// Bump allocator over the scratch arena. Supports multi-page
-/// requests so `DmaCoherent::alloc(npages > 1)` works in tests.
+/// Bump allocator over the scratch arena, supporting multi-page requests.
 struct BumpAlloc {
     next_page: AtomicU64,
     /// While set, `alloc` hands out [`OUT_OF_SLOT_RANGE_PADDR`] instead of a
@@ -81,8 +77,6 @@ impl FrameAlloc for BumpAlloc {
     }
 
     fn dealloc(&self, paddr: Paddr, size_pages: usize) {
-        // Bump allocator: the pages are not recycled, only recorded — the
-        // record is what the release tests assert on.
         CALL_LOG.deallocs.lock().unwrap().push(DeallocCall {
             paddr: paddr.as_u64(),
             size_pages,
@@ -91,10 +85,9 @@ impl FrameAlloc for BumpAlloc {
     }
 }
 
-// BACKING_BASE holds the *exposed* address of the leaked scratch arena.
-// `expose_provenance()` is called once during `setup()`; every later
-// `with_exposed_provenance_mut(addr)` against an address inside the
-// arena round-trips back to that provenance under strict provenance.
+// BACKING_BASE holds the *exposed* address of the leaked scratch arena, so
+// every later `with_exposed_provenance_mut` against an address inside the arena
+// round-trips back to that provenance under strict provenance.
 static BACKING_BASE: AtomicU64 = AtomicU64::new(0);
 static BUMP_ALLOC: BumpAlloc = BumpAlloc {
     next_page: AtomicU64::new(0),
@@ -154,9 +147,8 @@ impl IommuMapper for RecordingMapper {
 static RECORDING_MAPPER: RecordingMapper = RecordingMapper;
 static RECORDING_MAPPER_REF: &'static dyn IommuMapper = &RECORDING_MAPPER;
 
-/// Refuses every mapping. Stands in for an IOMMU policy that rejects a
-/// physical range, the error path between "pages allocated" and "handle
-/// constructed".
+/// Stands in for an IOMMU policy that rejects a physical range: the error path
+/// between "pages allocated" and "handle constructed".
 struct RefusingMapper;
 
 impl IommuMapper for RefusingMapper {
@@ -183,13 +175,9 @@ fn setup() -> MutexGuard<'static, ()> {
     let m = SETUP.get_or_init(|| {
         let layout = std::alloc::Layout::from_size_align(N_PAGES * PAGE_SIZE, PAGE_SIZE)
             .expect("backing layout");
-        // SAFETY: nonzero size; standard allocator contract.
         // SAFETY: `layout.size() > 0`; standard allocator contract.
         let backing_ptr_real: *mut u8 = unsafe { std::alloc::alloc_zeroed(layout) };
         assert!(!backing_ptr_real.is_null(), "backing alloc failed");
-        // Expose provenance once so every later
-        // `with_exposed_provenance_mut(backing + offset)` round-trips
-        // back to the original allocation under strict provenance.
         let backing_ptr = backing_ptr_real.expose_provenance() as u64;
         BACKING_BASE.store(backing_ptr, Ordering::Release);
 

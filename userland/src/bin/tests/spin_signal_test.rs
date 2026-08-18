@@ -2,15 +2,9 @@
 
 //! Signal-on-IRQ-exit end-to-end test.
 //!
-//! A child enters a pure userspace spin loop that issues NO syscalls,
-//! so the only way it can ever leave userspace is a timer/IRQ. The
-//! parent kills it with SIGINT (default disposition: terminate) and
-//! waits. Before signals were delivered on IRQ return-to-user, such a
-//! child was unkillable — it would spin forever because the kernel only
-//! checked pending signals on syscall exit, which the child never
-//! reached. With IRQ-exit delivery, the next timer tick redirects the
-//! child into the default-terminate path and the parent's `waitpid`
-//! reaps it with exit code `128 + SIGINT`.
+//! The child spins in userspace issuing no syscalls, so only a timer IRQ
+//! can pull it out of user mode; the parent's SIGINT must still terminate
+//! it and `waitpid` reap `128 + SIGINT`.
 
 use slopos_abi::signal::SIGINT;
 use slopos_userland as _;
@@ -19,13 +13,10 @@ use slopos_userland::syscall::{core as sys_core, process};
 /// Default-terminate encodes the exit code as `128 + signum`.
 const EXPECTED_EXIT_CODE: i32 = 128 + SIGINT as i32;
 
-/// Fork a child that spins purely in userspace forever (no syscalls).
 /// Returns the child task id in the parent; never returns in the child.
 fn fork_spinning_child() -> i32 {
     let pid = process::fork();
     if pid == 0 {
-        // Child: tight userspace loop with no syscalls. Only a timer
-        // IRQ can ever pull this task out of user mode.
         loop {
             core::hint::spin_loop();
         }

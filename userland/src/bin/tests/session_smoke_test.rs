@@ -3,19 +3,10 @@
 //! A deterministic desktop-shaped resource population, so the quota gate has
 //! something real to measure.
 //!
-//! Under `tests=on`, `/sbin/init` calls `run_userland_tests()` and then
-//! `exit_with_code(0)`; the compositor, shell and terminal spawns are all
-//! *below* that exit. So no automated boot has a compositor listen socket,
-//! client AF_UNIX pairs, or a desktop descriptor population — which are
-//! precisely the tight resources the ceilings have to be derived from. Without
-//! this binary the gate's numbers describe a kernel running its own unit
-//! tests, and claiming they describe a desktop session would be false.
-//!
-//! What it does *not* do is assert a number. Peaks are a measurement, and this
-//! is the thing being measured; the gate file holds the values and
-//! `check_quota_headroom.sh` compares against them. What this asserts is that
-//! the population was actually built — a smoke test that silently created
-//! nothing would let the gate record a peak of zero and call it a pass.
+//! Under `tests=on`, `/sbin/init` exits above the compositor, shell and
+//! terminal spawns, so no automated boot otherwise holds a desktop descriptor
+//! population. Asserts only that the population was built, never a number:
+//! the gate file holds the peaks and `check_quota_headroom.sh` compares them.
 
 use slopos_userland as _;
 
@@ -24,20 +15,14 @@ use std::io::Write;
 
 use slopos_userland::syscall::process;
 
-/// Descriptors one client of a desktop session plausibly holds open at once:
-/// a few files, a socket, a pipe pair. Small enough that N of them fit under
-/// the tightest per-process ceiling, large enough that the peak is not noise.
+/// Small enough that N of them fit under the tightest per-process ceiling,
+/// large enough that the peak is not noise.
 const FILES_PER_CLIENT: usize = 6;
 
-/// Concurrent clients. The compositor's real peak is what the gate wants, and
-/// it scales with this.
 const CLIENTS: usize = 8;
 
-/// Hold a descriptor population open, all at once rather than serially.
-///
-/// Serial opens would leave a peak of one however many times the loop ran:
-/// the peak is a high-water mark, so the descriptors have to be live
-/// simultaneously to move it.
+/// Descriptors must be live simultaneously to move a high-water mark; serial
+/// opens would leave a peak of one however many times the loop ran.
 fn open_population() -> Option<Vec<File>> {
     let mut held = Vec::new();
     for i in 0..FILES_PER_CLIENT {
@@ -49,7 +34,6 @@ fn open_population() -> Option<Vec<File>> {
     Some(held)
 }
 
-/// A descriptor population is built and held simultaneously.
 fn holds_a_descriptor_population() -> bool {
     let Some(held) = open_population() else {
         return false;
@@ -59,18 +43,15 @@ fn holds_a_descriptor_population() -> bool {
     ok
 }
 
-/// Several processes hold their own populations at once.
-///
-/// This is the cross-process shape the per-principal ceilings exist for: N
-/// accounts each at their own peak, summing into the root's. A single process
-/// opening N times measures one row and says nothing about the tree.
+/// The cross-process shape the per-principal ceilings exist for: N accounts
+/// each at their own peak, summing into the root's.
 fn spawns_concurrent_clients() -> bool {
     let mut children = Vec::new();
     for _ in 0..CLIENTS {
         let tid = process::spawn_path("/bin/cd_test");
         if tid <= 0 {
-            // A refused spawn is a real failure here: the population this
-            // exists to create would be smaller than the gate recorded.
+            // A refused spawn would leave the population smaller than the peak
+            // the gate records.
             for tid in children {
                 process::waitpid(tid as u32);
             }

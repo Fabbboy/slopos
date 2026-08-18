@@ -557,24 +557,20 @@ fn test_udp_send_zc_two_cqe() -> bool {
     sqe.buf_index = 0;
     sqe.len = payload.len() as u32;
     sqe.user_data = 0x5C1;
-    // Block for both CQEs: on the deferred NIC-DMA path the F_NOTIF arrives only
-    // after the device reclaims the TX descriptor (a harvest re-poll), so a
-    // bare `submit()` + `poll_completion()` would miss it. `submit_and_wait(2)`
-    // is correct for both the deferred and the copy-fallback paths.
+    // On the deferred NIC-DMA path F_NOTIF arrives only after the device
+    // reclaims the TX descriptor, which a bare submit + poll would miss.
     if ring.push_sqe(&sqe).is_err() || ring.submit_and_wait(2).is_err() {
         return false;
     }
-    // First CQE: the send result, carrying F_MORE and not yet F_NOTIF.
     let Some(cqe1) = ring.poll_completion() else {
         return false;
     };
     if cqe1.user_data != 0x5C1 || cqe1.res < 0 {
-        return false; // a failed send would be a single error CQE — regression
+        return false;
     }
     if (cqe1.flags & SLOPRING_CQE_F_MORE) == 0 || (cqe1.flags & SLOPRING_CQE_F_NOTIF) != 0 {
         return false;
     }
-    // Terminal CQE: F_NOTIF set, F_MORE clear (buffer reusable).
     let Some(cqe2) = ring.poll_completion() else {
         return false;
     };
@@ -583,13 +579,10 @@ fn test_udp_send_zc_two_cqe() -> bool {
         && (cqe2.flags & SLOPRING_CQE_F_MORE) == 0
 }
 
-/// `OP_SEND_ZC` over a **warmed** connection takes the true NIC-DMA zero-copy
-/// path: the payload is DMA'd straight from the pinned buffer and the
-/// terminal `SLOPRING_CQE_F_NOTIF` is **deferred** until the device reclaims the
-/// TX descriptor (QEMU SLIRP returns it), observed by a harvest re-poll. Warms
-/// the gateway neighbor first so the send resolves a MAC (else it falls back to
-/// the copy path, which still yields the two-CQE protocol). Either way the
-/// blocking `submit_and_wait(2)` collects both CQEs.
+/// Over a warmed connection the payload is DMA'd from the pinned buffer and the
+/// terminal `SLOPRING_CQE_F_NOTIF` is deferred until the device reclaims the TX
+/// descriptor. An unresolved MAC falls back to the copy path, which yields the
+/// same two-CQE protocol.
 fn test_udp_send_zc_two_cqe_deferred() -> bool {
     let Ok(sock) = net::socket(AF_INET, SOCK_DGRAM, 0) else {
         return false;
@@ -603,8 +596,7 @@ fn test_udp_send_zc_two_cqe_deferred() -> bool {
     if net::connect(sock.raw(), &dst).is_err() {
         return false;
     }
-    // Warm the neighbor cache: a normal datagram drives the ARP request; the
-    // reply lands via NAPI so the zero-copy send can resolve the gateway MAC.
+    // Warm the neighbor cache so the zero-copy send can resolve the gateway MAC.
     let _ = net::send(sock.raw(), b"warm", 0);
 
     let Ok(mut ring) = Ring::setup(8) else {
@@ -648,10 +640,8 @@ fn test_udp_send_zc_two_cqe_deferred() -> bool {
         && (cqe2.flags & SLOPRING_CQE_F_MORE) == 0
 }
 
-/// `OP_SEND_ZC` on a connected ICMP socket exercises the ICMP zero-copy leaf:
-/// the echo payload is DMA'd from the pinned buffer while the kernel
-/// computes only the ICMP checksum (no hardware offload for ICMP). The two-CQE
-/// protocol (result `F_MORE` then deferred `F_NOTIF`) must hold.
+/// The ICMP zero-copy leaf DMAs the echo payload from the pinned buffer while
+/// the kernel computes the checksum itself (no hardware offload for ICMP).
 fn test_icmp_send_zc_two_cqe() -> bool {
     let Ok(sock) = net::socket(AF_INET, SOCK_DGRAM, IPPROTO_ICMP) else {
         return false;
@@ -708,9 +698,8 @@ fn test_icmp_send_zc_two_cqe() -> bool {
         && (cqe2.flags & SLOPRING_CQE_F_MORE) == 0
 }
 
-/// A fixed-buffer op naming an out-of-range `buf_index` is rejected inline with
-/// -EINVAL (the kernel's `check_out_fixed` bounds check — the property the
-/// Verus `ring_bufpool` obligation pins) before any socket side effect.
+/// An out-of-range `buf_index` is rejected before any socket side effect — the
+/// property the Verus `ring_bufpool` obligation pins.
 fn test_fixed_buffer_oob() -> bool {
     let Ok(sock) = net::socket(AF_INET, SOCK_STREAM, 0) else {
         return false;
@@ -744,10 +733,8 @@ fn test_fixed_buffer_oob() -> bool {
     }
 }
 
-/// Registering a provided buffer ring succeeds; a recv with `BUFFER_SELECT`
-/// over an *empty* ring completes inline with -ENOBUFS (the kernel peeked the
-/// group, found no published buffer), and the ring then unregisters. Proves the
-/// `RING_REGISTER_PBUF_RING` plumbing + the provided-ring selection path.
+/// A `BUFFER_SELECT` recv over a provided ring with no published buffer must
+/// complete inline with -ENOBUFS rather than deferring.
 fn test_pbuf_ring_select_enobufs() -> bool {
     let Ok(sock) = net::socket(AF_INET, SOCK_STREAM, 0) else {
         return false;
@@ -755,7 +742,7 @@ fn test_pbuf_ring_select_enobufs() -> bool {
     let Ok(mut ring) = Ring::setup(8) else {
         return false;
     };
-    // A 4-slot provided ring (4 × 16 bytes), empty (producer tail == 0).
+    // 4 slots × 16 bytes, empty (producer tail == 0).
     let ringbuf = [0u8; 4 * 16];
     let cmd = RegisterBufRingCmd {
         ring_addr: ringbuf.as_ptr() as u64,
@@ -776,7 +763,7 @@ fn test_pbuf_ring_select_enobufs() -> bool {
         return false;
     }
     let recv_ok = match ring.poll_completion() {
-        Some(cqe) => cqe.user_data == 0xB0 && cqe.res == -105, // -ENOBUFS (empty ring)
+        Some(cqe) => cqe.user_data == 0xB0 && cqe.res == -105, // -ENOBUFS
         None => false,
     };
     recv_ok && ring.unregister_buf_ring(1) == 0

@@ -59,89 +59,34 @@
 //
 // TWO invariants, deliberately:
 //
-//   `own_inv`     — the sub-step-robust core. It survives not only every
-//                   atomic-bounded `Step` but also the intermediate states
-//                   exposed when a `Step` is decomposed into its constituent
-//                   writes. It is what the broken park ordering and the broken
-//                   reap ordering violate.
+//   `own_inv`     — the sub-step-robust core: it survives every `Step` and also
+//                   the intermediate states of a decomposed `Step`.
 //   `flag_agrees` — the two biconditionals (`exist_refs == 1 <==> exist_flag`,
 //                   `registered <==> exist_flag`). Inductive over `Step` given
-//                   `own_inv`, but deliberately NOT a sub-step invariant:
-//                   `register_task` inserts the registry entry *before*
-//                   parking the reference, and `reap_task_registration`
-//                   releases the reference *before* removing the entry
-//                   (opposite orders, both under the same lock), so neither
-//                   biconditional is momentarily true during either. Splitting
-//                   them is what keeps the model honest.
+//                   `own_inv`, but deliberately NOT sub-step robust:
+//                   `register_task` inserts the registry entry before parking
+//                   the reference and `reap_task_registration` releases before
+//                   removing the entry, so neither biconditional holds
+//                   throughout either.
 //
-// NOT covered, and deliberately excluded rather than assumed:
-//
-//   - The weak-memory ordering of the flag compare-exchange and of `KArc`'s
-//     `refcount_release` CAS loop. Verus has no weak-memory model.
-//   - The intrusive placement links and the provenance of the raw pointers
-//     `task_placement_leak` / `_reclaim` hand around.
-//   - `KArc`'s saturation arm. `refcount_release` returns `Saturated` at
-//     `isize::MAX` and never destroys, so a saturated allocation leaks
-//     forever. `strong` is modelled as an unbounded `nat`, which excludes that
-//     arm; leaking is not a memory-safety violation, so the exclusion is in
-//     the sound direction.
-//   - The weak count and `KWeak::upgrade`. The registry entry is modelled as
-//     the bare boolean `registered`.
-//   - `force_reap_registration` (`task_table.rs`), the registry-reset fixture
-//     path, which deliberately bypasses the status and dispatch-pin gates.
-//     Production reaps all go through `reap_task_registration`.
-//
-// Those stay KernMiri-covered — `slopos-ostd/tests/task_existence.rs`,
-// `tests/karc_deferred.rs`, `tests/task_cells.rs`, `tests/intrusive_list.rs`.
-// See `../STATUS.md`.
+// NOT covered, and deliberately excluded rather than assumed: the weak-memory
+// ordering of the flag compare-exchange and of `refcount_release`'s CAS loop
+// (Verus has no weak-memory model); the intrusive placement links and the
+// provenance of the raw pointers `task_placement_leak` / `_reclaim` hand
+// around; `KArc`'s saturation arm (`strong` is an unbounded `nat`, so the
+// saturated-leak arm is excluded — leaking is not a memory-safety violation, so
+// the exclusion is in the sound direction); the weak count and `KWeak::upgrade`;
+// and `force_reap_registration`, the fixture path that bypasses the status and
+// dispatch-pin gates. Those stay KernMiri-covered; see `../STATUS.md`.
 //
 // Where the model is *more permissive* than the tree it is deliberately so:
-// `reap_task_registration` additionally requires `TaskStatus::Terminated` and
-// a present registry entry whose `KWeak` upgrades, and `ReapAndRelease` drops
-// both. A step machine that admits reaps the real gate refuses proves a
-// superset of the real behaviours, so every theorem below holds a fortiori.
-//
-// Field correspondence to the real tree:
-//   `strong`      <-> `KArcInner::strong` (mm/heap.rs)
-//   `containers`  <-> references parked in a placement container: ready
-//                     queue, remote inbox, deferred previous-task slot,
-//                     parent's children list, wait maps, futex buckets — one
-//                     per `task_placement_retain` / `task_placement_leak`
-//   `transient`   <-> caller-held handles: `TaskRef` lookup guards, the
-//                     dispatching CPU's live dispatch reference, the reap's
-//                     temporary upgrade, a `PendingTask`'s allocation handle
-//   `exist_refs`  <-> how much of `strong` is the existence reference (0 or 1)
-//   `exist_flag`  <-> `TaskInner::existence_ref_parked` (AtomicBool)
-//   `registered`  <-> a `RegistryEntry` for this id is in the registry spine
-//   `pinned`      <-> `task_is_dispatch_pinned` = `task_on_cpu_load ||
-//                     task_is_current_on_any_cpu || per_cpu::is_idle_task`
-//                     (sched/src/scheduler.rs)
-//   `body_live`   <-> the `TaskInner` body is still initialised, i.e.
-//                     `drop_in_place` has not run
-//   `parked_node` <-> `task_release_strong` returned `Some(ParkedTask)` — the
-//                     reclaim token minted only for the winner of the
-//                     one-to-zero release — and the matching
-//                     `task_destroy_parked` has not consumed it. Since the
-//                     token landed, that second clause is enforced by the
-//                     compiler rather than only by this model:
-//                     `task_destroy_parked` takes the token BY VALUE and
-//                     `ParkedTask` is neither `Copy` nor `Clone`, so a second
-//                     destroy would need a second token and the type has no
-//                     public constructor. `t5_destruction_runs_at_most_once`
-//                     below therefore now proves something the type system
-//                     also rejects — belt and braces, not the sole guard.
-//                     The one place a token is built from a bare pointer is
-//                     `task_parked_reclaim`, whose single caller is the
-//                     graveyard drain.
-//   `destroys`    <-> ghost: destructor run count (must be at most one)
+// `ReapAndRelease` drops `reap_task_registration`'s `TaskStatus::Terminated`
+// and present-entry gates, so the step machine proves a superset of the real
+// behaviours and every theorem below holds a fortiori.
 
 use vstd::prelude::*;
 
 verus! {
-
-// ---------------------------------------------------------------------------
-// Abstract task ownership state.
-// ---------------------------------------------------------------------------
 
 /// Abstract image of one task's ownership state: the strong-count ledger split
 /// by owner class, the existence-reference flag, the registry and dispatch
@@ -149,27 +94,28 @@ verus! {
 pub struct TaskOwn {
     /// `KArcInner::strong` — the total live strong reference count.
     pub strong: nat,
-    /// How many of `strong` are parked in placement containers.
+    /// How many of `strong` are parked in placement containers: ready queue,
+    /// remote inbox, deferred previous-task slot, children list, wait maps,
+    /// futex buckets.
     pub containers: nat,
-    /// How many of `strong` are caller-held handles (lookup guards, the live
-    /// dispatch reference, the reap's temporary upgrade).
+    /// How many of `strong` are caller-held handles: `TaskRef` lookup guards,
+    /// the live dispatch reference, the reap's temporary upgrade, `PendingTask`.
     pub transient: nat,
-    /// How many of `strong` are the task's own existence reference. At most
-    /// one; a separate field rather than a function of `exist_flag` precisely
-    /// so "the flag agrees with the ledger" is a breakable fact rather than a
-    /// definition — see `broken_park_ordering_violates_invariant`.
+    /// How many of `strong` are the task's own existence reference. A separate
+    /// field rather than a function of `exist_flag` so that their agreement is a
+    /// breakable fact rather than a definition.
     pub exist_refs: nat,
     /// `TaskInner::existence_ref_parked`.
     pub exist_flag: bool,
     /// The registry holds a (weak) entry for this task.
     pub registered: bool,
-    /// `task_is_dispatch_pinned`: some CPU is executing this task or names it
-    /// as its `PCR.current_task`.
+    /// `task_is_dispatch_pinned` = `task_on_cpu_load ||
+    /// task_is_current_on_any_cpu || per_cpu::is_idle_task`.
     pub pinned: bool,
     /// The `TaskInner` body is still initialised — the destructor has not run.
     pub body_live: bool,
-    /// A `task_release_strong` returned `Some(node)` for this task and the
-    /// matching `task_destroy_parked` has not run. The node is uniquely owned.
+    /// `task_release_strong` returned `Some(ParkedTask)` and the matching
+    /// `task_destroy_parked` has not consumed it. The node is uniquely owned.
     pub parked_node: bool,
     /// Ghost: how many times the destructor ran. Must never exceed one.
     pub destroys: nat,
