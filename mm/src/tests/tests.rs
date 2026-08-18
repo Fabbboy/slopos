@@ -1481,7 +1481,7 @@ pub fn test_cow_page_isolation() -> TestResult {
         return fail!("create parent VM");
     };
 
-    // Use process_vm_alloc to properly create a VMA (COW clone iterates VMAs, not raw mappings)
+    // COW clone iterates VMAs, not raw mappings, so the page needs a real VMA.
     use crate::process_vm::process_vm_alloc;
     let test_addr = process_vm_alloc(
         parent.process,
@@ -1490,7 +1490,6 @@ pub fn test_cow_page_isolation() -> TestResult {
     );
     assert_test!(test_addr != 0, "process_vm_alloc failed");
 
-    // Allocate physical page and map it within the VMA
     let phys = alloc_kernel_page();
     assert_not_null!(phys.as_u64() as *const u8, "alloc page frame");
 
@@ -1507,18 +1506,15 @@ pub fn test_cow_page_isolation() -> TestResult {
         return fail!("map page in parent");
     }
 
-    // Write pattern via HHDM
     if let Some(virt) = phys.to_virt_checked() {
         let ptr = virt.as_mut_ptr::<u8>();
         page_io::fill_volatile(ptr, 0xAA, 4096);
     }
 
-    // Clone with COW
     let Some(child) = parent.clone_cow() else {
         return fail!("COW clone");
     };
 
-    // Both should point to the same physical page initially (COW sharing)
     let parent_phys = parent.virt_to_phys(test_addr);
     let child_phys = child.virt_to_phys(test_addr);
 
@@ -1534,7 +1530,6 @@ pub fn test_cow_page_isolation() -> TestResult {
         klog_info!("PROCESS_TEST: COW pages should share same physical page initially");
     }
 
-    // Verify child can read the same data
     if let Some(virt) = child_phys.to_virt_checked() {
         let ptr = virt.as_mut_ptr::<u8>();
         let val = page_io::read_volatile_byte(ptr, 0);
@@ -1568,16 +1563,14 @@ pub fn test_cow_fault_handling() -> TestResult {
         return fail!("map page as RO");
     }
 
-    // Mark as COW
     vm.mark_cow(test_addr);
 
-    // Simulate a write fault - error code for write to present page = 0x03
+    // 0x03: write to a present page.
     let error_code = 0x03u64;
     let is_cow = process_vm_with_vm_space(vm.process, |vs| is_cow_fault(error_code, vs, test_addr))
         .unwrap_or(false);
     assert_test!(is_cow, "is_cow_fault returned false for COW page");
 
-    // Handle the COW fault
     match vm.handle_cow_fault(test_addr) {
         Ok(()) => {}
         Err(e) => {
@@ -1585,7 +1578,6 @@ pub fn test_cow_fault_handling() -> TestResult {
         }
     }
 
-    // After COW resolution, page should be writable
     let new_phys = vm.virt_to_phys(test_addr);
     assert_test!(!new_phys.is_null(), "page unmapped after COW resolution");
 
@@ -1615,7 +1607,6 @@ pub fn test_multiple_process_vms() -> TestResult {
         }
     }
 
-    // Verify each has its own address space
     let mut roots = [0u64; NUM_PROCESSES];
     for i in 0..NUM_PROCESSES {
         roots[i] = process_vm_get_ostd_pml4_paddr(resolve_pid(pids[i]));
@@ -1627,7 +1618,6 @@ pub fn test_multiple_process_vms() -> TestResult {
         }
     }
 
-    // Check uniqueness
     for i in 0..NUM_PROCESSES {
         for j in (i + 1)..NUM_PROCESSES {
             if roots[i] == roots[j] {
@@ -1675,10 +1665,6 @@ pub fn test_vma_region_retrieval() -> TestResult {
     pass!()
 }
 
-// ============================================================================
-// PAT (PAGE ATTRIBUTE TABLE) TESTS
-// ============================================================================
-
 pub fn test_pat_wc_enabled() -> TestResult {
     const MEM_TYPE_WC: u8 = 0x01;
 
@@ -1697,10 +1683,6 @@ pub fn test_pat_wc_enabled() -> TestResult {
 
     pass!()
 }
-
-// ============================================================================
-// SUITE REGISTRATION — tests are auto-collected via linker section
-// ============================================================================
 
 use slopos_testing::stest;
 

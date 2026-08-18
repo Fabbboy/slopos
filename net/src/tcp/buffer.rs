@@ -86,30 +86,27 @@ pub(crate) enum SegmentSource {
 }
 
 pub struct TcpSendState {
-    /// Inline (copied) bytes, FIFO in stream order — the concatenation of every
-    /// `Inline` chunk. Zero-copy chunks reference pinned pages, not this ring.
+    /// Inline (copied) bytes, FIFO in stream order; zero-copy chunks reference
+    /// pinned pages, not this ring.
     pub(crate) ring: KBox<TcpBuffer>,
-    /// Stream layout: `Inline | Zerocopy` chunks in send order, boxed so
-    /// `TcpSendState` stays within its size tripwire.
+    /// Chunks in send order, boxed so `TcpSendState` stays within its size
+    /// tripwire.
     chunks: KBox<KVecDeque<SendChunk>>,
     /// Bytes sent but not yet acked — a stream offset measured from the queue
-    /// head (`snd_una`). `[0, inflight)` is sent-unacked, `[inflight, buffered)`
-    /// is unsent.
+    /// head (`snd_una`).
     pub(crate) inflight: usize,
     /// Total stream bytes buffered (sum of all chunk lengths).
     buffered: usize,
     pub(crate) rto_deadline_ms: u64,
-    /// Soft cap on usable buffer capacity (SO_SNDBUF).
-    /// Defaults to `TCP_BUFFER_SIZE`; values above that are silently capped
-    /// by the caller.
+    /// Soft cap on usable buffer capacity (SO_SNDBUF); values above
+    /// `TCP_BUFFER_SIZE` are silently capped by the caller.
     pub(crate) effective_capacity: usize,
 }
 
 impl TcpSendState {
-    /// Allocate a zero-filled send state.  `cap` becomes the initial
-    /// `effective_capacity`; all current callers pass `TCP_BUFFER_SIZE`,
-    /// the parameter exists so future per-connection send-buffer sizing
-    /// (SO_SNDBUF) has a hook.
+    /// `cap` becomes the initial `effective_capacity`; every caller passes
+    /// `TCP_BUFFER_SIZE` today, the parameter being the hook for future
+    /// per-connection SO_SNDBUF sizing.
     pub(crate) fn new(cap: usize) -> Result<Self, AllocError> {
         Ok(Self {
             ring: KBox::<TcpBuffer>::zeroed()?,
@@ -121,8 +118,8 @@ impl TcpSendState {
         })
     }
 
-    /// Ensure the tail chunk is `Inline` so inline bytes can extend it; returns
-    /// `false` if a new chunk is needed but cannot be allocated.
+    /// Ensure the tail chunk is `Inline`; `false` if a new one is needed but
+    /// cannot be allocated.
     fn ensure_inline_tail(&mut self) -> bool {
         if matches!(self.chunks.back(), Some(SendChunk::Inline { .. })) {
             return true;
@@ -148,11 +145,10 @@ impl TcpSendState {
         wrote
     }
 
-    /// Single-direct-copy [`enqueue`](Self::enqueue): pull up to
+    /// Single-direct-copy [`enqueue`](Self::enqueue): up to
     /// `min(free_space, reader.remain())` bytes straight from the pinned user
-    /// pages into the send ring with one volatile copy (no kernel scratch). The
-    /// `free_space` cap honours `SO_SNDBUF` exactly like `enqueue`. Returns the
-    /// number of bytes buffered.
+    /// pages into the send ring, with no kernel scratch. Returns the number of
+    /// bytes buffered.
     pub fn enqueue_from(&mut self, reader: &mut slopos_ostd::mm::VmReader<'_>) -> usize {
         let avail = self.free_space();
         if avail == 0 || !self.ensure_inline_tail() {
@@ -164,11 +160,10 @@ impl TcpSendState {
     }
 
     /// Append a zero-copy chunk: the NIC will DMA `len` bytes straight from the
-    /// pinned pages `keepalive` (whose data begins at `base_off`), held until the
-    /// bytes are cumulatively ACKed. `token` is the refcounted notification token
-    /// (starts owning the chunk's reference). Returns `false` if the chunk store
-    /// cannot grow (caller falls back to the copy leaf). Does **not** check
-    /// `free_space`; the caller (`socket_send_zerocopy`) gates against SO_SNDBUF.
+    /// pinned pages `keepalive` (whose data begins at `base_off`), held until
+    /// the bytes are cumulatively ACKed. Returns `false` if the chunk store
+    /// cannot grow. Does **not** check `free_space`; the caller
+    /// (`socket_send_zerocopy`) gates against SO_SNDBUF.
     pub(crate) fn enqueue_zerocopy(
         &mut self,
         keepalive: KeepaliveFrames,
@@ -201,8 +196,7 @@ impl TcpSendState {
     }
 
     pub fn free_space(&self) -> usize {
-        // Inline writes are bounded by both the ring's free space and the
-        // SO_SNDBUF headroom (which counts in-flight zero-copy bytes too).
+        // The SO_SNDBUF headroom counts in-flight zero-copy bytes too.
         let raw = self.ring.free_space();
         let cap_limit = self.effective_capacity.saturating_sub(self.buffered);
         core::cmp::min(raw, cap_limit)
@@ -213,10 +207,9 @@ impl TcpSendState {
         self.effective_capacity.saturating_sub(self.buffered)
     }
 
-    /// Copy up to `out.len()` bytes of the send stream starting at stream offset
-    /// `off` into `out`, clamped to the covering chunk's boundary. Inline chunks
-    /// read from the ring; zero-copy chunks read volatilely from the pinned
-    /// pages (the zero-window 1-byte probe / copy fallback). Returns the count.
+    /// Copy up to `out.len()` bytes of the send stream from stream offset `off`
+    /// into `out`, clamped to the covering chunk's boundary. Zero-copy chunks
+    /// are read volatilely from the pinned pages. Returns the count.
     fn peek_at_stream(&self, off: usize, out: &mut [u8]) -> usize {
         let mut acc = 0usize;
         let mut ring_acc = 0usize;
@@ -256,15 +249,12 @@ impl TcpSendState {
     }
 
     /// Read data at an arbitrary offset within the buffered (unacked) range.
-    /// Used by the selective retransmit path to re-read lost segment data.
     pub fn peek_retransmit(&self, offset: usize, out: &mut [u8]) -> usize {
         self.peek_at_stream(offset, out)
     }
 
     /// Resolve the source of one outgoing segment at stream offset `off`, taking
-    /// at most `max_len` bytes and never crossing a chunk boundary. For a
-    /// zero-copy chunk this clones an independent keepalive + the notification
-    /// token so the caller can DMA (or copy-fall-back) from the pinned pages.
+    /// at most `max_len` bytes and never crossing a chunk boundary.
     pub(crate) fn segment_source(&self, off: usize, max_len: usize) -> SegmentSource {
         let mut acc = 0usize;
         for chunk in self.chunks.iter() {
@@ -283,13 +273,10 @@ impl TcpSendState {
                         token,
                         ..
                         // A retransmit is a second in-flight DMA of the same
-                        // pages, so it takes and pays for its own keepalive:
-                        // counting them once would let a retransmit storm hold
-                        // arbitrarily many pages against a single charge.
+                        // pages, so it takes and pays for its own keepalive.
                     } => match keepalive.redup() {
-                        // Cloning the owning page refs failed (OOM or the pin
-                        // ceiling): fall back to a copy of these bytes from
-                        // the pin via `peek_at_stream`.
+                        // Cloning the page refs failed (OOM or the pin ceiling):
+                        // fall back to a copy via `peek_at_stream`.
                         None => SegmentSource::Inline { len: n },
                         Some(ka) => SegmentSource::Zerocopy {
                             keepalive: ka,
@@ -326,9 +313,8 @@ impl TcpSendState {
                 left -= clen;
                 match self.chunks.pop_front() {
                     Some(SendChunk::Inline { len }) => self.ring.consume(len as usize),
-                    // Whole zero-copy chunk acked: retire the chunk's token
-                    // reference and drop its keepalive refs (the buffer becomes
-                    // reusable once every in-flight DMA is also reclaimed).
+                    // Whole chunk acked: retire its token reference; the buffer
+                    // becomes reusable once every in-flight DMA is reclaimed.
                     Some(SendChunk::Zerocopy { token, .. }) => token.mark_acked_and_release(),
                     None => break,
                 }
@@ -354,9 +340,9 @@ impl TcpSendState {
     }
 
     pub fn clear(&mut self) {
-        // Retire any in-flight zero-copy chunks so their notification tokens
-        // (and the ring's deferred F_NOTIF) make progress on teardown; the
-        // driver's independent keepalive keeps any in-flight DMA's pages alive.
+        // Retire in-flight zero-copy chunks so their notification tokens make
+        // progress on teardown; the driver's independent keepalive keeps any
+        // in-flight DMA's pages alive.
         while let Some(chunk) = self.chunks.pop_front() {
             if let SendChunk::Zerocopy { token, .. } = chunk {
                 token.mark_acked_and_release();
@@ -384,10 +370,6 @@ impl TcpSendState {
         self.effective_capacity
     }
 }
-
-// -----------------------------------------------------------------------------
-// Receive state
-// -----------------------------------------------------------------------------
 
 pub struct TcpRecvState {
     pub(crate) buf: KBox<TcpBuffer>,
@@ -429,10 +411,10 @@ impl TcpRecvState {
         self.buf.read(out)
     }
 
-    /// Single-direct-copy [`dequeue`](Self::dequeue): drain up to
+    /// Single-direct-copy [`dequeue`](Self::dequeue): up to
     /// `min(available, writer.remain())` bytes straight from the recv ring into
-    /// the pinned user pages with one volatile copy (no kernel scratch). Returns
-    /// the number of bytes drained.
+    /// the pinned user pages, with no kernel scratch. Returns the number of
+    /// bytes drained.
     pub fn dequeue_into(&mut self, writer: &mut slopos_ostd::mm::VmWriter<'_>) -> usize {
         self.buf.read_into(writer)
     }
@@ -483,10 +465,6 @@ impl TcpRecvState {
     }
 }
 
-// -----------------------------------------------------------------------------
-// Bundled send+recv+OOO
-// -----------------------------------------------------------------------------
-
 pub struct TcpBufferPair {
     pub(crate) send: TcpSendState,
     pub(crate) recv: TcpRecvState,
@@ -500,9 +478,8 @@ static INJECTED_ALLOC_FAILURES: core::sync::atomic::AtomicU32 =
 
 /// Fail the next `count` connection-buffer allocations.
 ///
-/// The path a remote peer drives into this allocation runs under a
-/// cli-spinlock, so the behaviour on failure is worth a test — and exhausting
-/// the real heap to reach it is neither hermetic nor repeatable.
+/// The failure path runs under a cli-spinlock, and exhausting the real heap to
+/// reach it is neither hermetic nor repeatable.
 #[cfg(feature = "test-hooks")]
 pub fn inject_buffer_alloc_failures(count: u32) {
     INJECTED_ALLOC_FAILURES.store(count, core::sync::atomic::Ordering::Relaxed);
@@ -517,8 +494,6 @@ fn take_injected_alloc_failure() -> bool {
 }
 
 impl TcpBufferPair {
-    /// Allocate a fresh buffer pair.  Both ring buffers are zero-filled
-    /// via `slopos-ostd::KBox::zeroed`; the whole chain is heap-direct.
     pub(crate) fn new(cap: usize) -> Result<Self, AllocError> {
         #[cfg(feature = "test-hooks")]
         if take_injected_alloc_failure() {
@@ -562,10 +537,8 @@ impl TcpBufferPair {
     }
 }
 
-// Size tripwires: the point of routing buffer allocation through
-// `KBox` is to keep these state types small so every function along
-// the buffer-allocation chain has a tiny frame.  If these grow,
-// bring out a bigger rewrite — don't paper it over.
+// Size tripwires: these state types stay small so every function along the
+// buffer-allocation chain keeps a tiny frame.
 const _: () = assert!(core::mem::size_of::<TcpSendState>() <= 64);
 const _: () = assert!(core::mem::size_of::<TcpRecvState>() <= 64);
 const _: () = assert!(core::mem::size_of::<TcpBufferPair>() <= 256);

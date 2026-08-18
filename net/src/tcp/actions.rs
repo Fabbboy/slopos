@@ -1,9 +1,5 @@
-//! Side effects the state machine returns to its caller.
-//!
-//! Every external effect of a state transition lands in an `Actions` struct
-//! that the glue layer applies after the table lock is dropped.  The struct is
-//! fixed-size inline arrays sized for the worst-case single-segment output —
-//! no allocation, and overflow is a programmer error.
+//! Side effects the state machine returns to its caller: fixed-size inline
+//! arrays, no allocation, and overflow is a programmer error.
 
 use bitflags::bitflags;
 use slopos_ostd::mm::AllocError;
@@ -30,7 +26,6 @@ pub struct Actions {
     pub segments: [Option<TcpOutSegment>; MAX_SEGMENTS],
     pub segments_len: u8,
 
-    /// Timer operations — schedule or cancel entries in the net timer wheel.
     pub timer_ops: [Option<TimerOp>; MAX_TIMER_OPS],
     pub timer_ops_len: u8,
 
@@ -40,9 +35,8 @@ pub struct Actions {
     /// `None`; the `tcp_input` glue layer fills it in.
     pub conn_id: Option<ConnId>,
 
-    /// When a LISTEN PCB accepts a new child via a completed 3-way
-    /// handshake, the child's tuple + seq numbers land here so the socket
-    /// layer can wire it into the accept queue.
+    /// Child tuple + seq numbers from a completed 3-way handshake, for the
+    /// socket layer to wire into the listener's accept queue.
     pub accepted: Option<AcceptedConn>,
 
     /// After applying every other action, free this PCB slot.
@@ -50,7 +44,6 @@ pub struct Actions {
 }
 
 impl Actions {
-    /// Empty action set, callable from `const` context.
     pub const fn new() -> Self {
         Self {
             segments: [None, None, None],
@@ -64,12 +57,10 @@ impl Actions {
         }
     }
 
-    /// In-place [`Init`] recipe equivalent to [`Self::new`]: the ~400 B rvalue
-    /// never materialises on the caller's stack, and the field-by-field writes
-    /// keep the closure's own frame inside the 2 KiB stack-size gate.
-    ///
-    /// `AllocError` is the carrier required by `KBox::try_init`'s
-    /// `E: From<AllocError>` bound — the closure itself never errors.
+    /// In-place [`Init`] equivalent of [`Self::new`]: the ~400 B rvalue never
+    /// materialises on the caller's stack, and the field-by-field writes keep
+    /// the closure's own frame inside the 2 KiB stack-size gate.  `AllocError`
+    /// is only `KBox::try_init`'s required carrier; the closure never errors.
     pub fn init_default() -> impl Init<Self, AllocError> {
         init_struct_with(
             |slot: SlotPtr<Self>| -> Result<Initialised<Self>, AllocError> {
@@ -115,8 +106,7 @@ impl Actions {
         other.segments_len = 0;
     }
 
-    /// Append an outbound segment.  Panics in debug builds if the inline
-    /// capacity is exceeded.
+    /// Append an outbound segment.  Panics in debug builds on overflow.
     pub fn push_segment(&mut self, seg: TcpOutSegment) {
         debug_assert!(
             (self.segments_len as usize) < MAX_SEGMENTS,

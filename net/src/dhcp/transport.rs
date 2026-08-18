@@ -1,27 +1,13 @@
-//! Binding the DHCP state machine to a real interface.
+//! Binding the DHCP state machine to a real interface: transmit, arm timers,
+//! install or withdraw a lease, announce the transition to the monitors.
 //!
-//! This is the only part of the client that knows a packet, a timer or an
-//! interface exists. [`client`](super::client) decides *what* to do;
-//! everything here does it: transmit, arm timers, install or withdraw a lease,
-//! and announce the transition to the monitors.
+//! Runs on the network timer thread, never inline in PCI probe: probe holds
+//! `VIRTIO_NET_STATE` cli- and preempt-disabled, and taking a lease there would
+//! span a heap allocation and multi-second descheduling waits.
 //!
-//! # Where the client runs
-//!
-//! On the network timer thread, never inline in PCI probe. Probe holds
-//! `VIRTIO_NET_STATE` — a cli- and preempt-disabling lock — so acquiring a
-//! lease there would span a heap allocation and multi-second waits that
-//! deschedule the calling task, with every other CPU touching that lock
-//! spinning interrupts-off for the duration. From the timer thread every step
-//! is short, takes one lock at a time, and never blocks.
-//!
-//! # Locking
-//!
-//! The client itself lives under a leaf `SpinLock`, and *no action is performed
-//! while it is held*. `step` is called under the lock, the action comes back
-//! out, the lock is dropped, and only then does anything transmit, take a
-//! network table, or post an event. That is the same rule the interface
-//! producers follow, and it is what lets a lease install — which touches the
-//! interface table, the route table and the resolver in turn — happen at all.
+//! The client lives under a leaf `SpinLock` and *no action is performed while it
+//! is held*: `step` runs under the lock, the action is carried out after it
+//! drops.
 
 use slopos_ostd::klog_info;
 use slopos_ostd::lock_class;
@@ -41,24 +27,17 @@ use crate::timer::{NET_TIMER_WHEEL, TimerKind};
 use crate::types::{DevIndex, Ipv4Addr};
 
 /// Clients the kernel runs, one per interface.
-///
-/// Sized to the interface table. A fixed array rather than a map because the
-/// bound is eight and the timer path resolves one of these from a `u32` key on
-/// every tick.
 const MAX_CLIENTS: usize = slopos_abi::net::NET_MAX_IFACES;
 
 struct Slot {
-    /// The device this client runs on. `None` means the slot is free.
+    /// `None` means the slot is free.
     dev: Option<DevIndex>,
     ifindex: u32,
-    /// Bumped whenever the timers this client armed stop being meaningful — a
-    /// new lease, a teardown, a restart. Every armed timer carries the epoch it
-    /// was armed in, and a handler drops one that no longer matches.
+    /// Bumped whenever the timers this client armed stop being meaningful; every
+    /// armed timer carries its epoch and a handler drops one that mismatches.
     ///
-    /// The wheel has no cancel-by-key, so without this the expiry timer of a
-    /// *refused* lease stays in flight and tears the next lease down at the old
-    /// one's deadline. Checking the client's state is not enough: by then the
-    /// state is legitimately `Bound` again.
+    /// The wheel has no cancel-by-key, and checking the client's state is not
+    /// enough: after a refused lease the state is legitimately `Bound` again.
     epoch: u16,
     client: DhcpClient,
 }
@@ -74,12 +53,9 @@ const FREE_SLOT: Slot = Slot {
     client: DhcpClient::new([0; 6], 0),
 };
 
-/// Timer keys carry both the interface and the epoch, because the wheel's key
-/// is one `u32` and a stale timer must be identifiable as stale.
-///
-/// Interface indices are monotonic from 1 and bounded by the eight-slot table,
-/// so sixteen bits is ample; the epoch wraps, which is harmless — it only has
-/// to differ from the epoch in flight.
+/// Packs the interface and the epoch into the wheel's single `u32` key, so a
+/// stale timer is identifiable as stale. The epoch wraps; it only has to differ
+/// from the epoch in flight.
 const fn timer_key(ifindex: u32, epoch: u16) -> u32 {
     ((epoch as u32) << 16) | (ifindex & 0xFFFF)
 }
@@ -115,7 +91,7 @@ static CLIENTS: SpinLock<ClientTable> = SpinLock::new(
 );
 
 /// Everything the actions need, read out under the client lock so the work
-/// itself can happen with nothing held.
+/// itself happens with nothing held.
 #[derive(Clone, Copy)]
 struct SlotContext {
     dev: DevIndex,
@@ -125,7 +101,6 @@ struct SlotContext {
     state: DhcpState,
 }
 
-/// Whether a DHCP client is running on `dev`.
 pub fn is_running(dev: DevIndex) -> bool {
     let table = CLIENTS.lock();
     table.slots.iter().any(|s| s.dev == Some(dev))
@@ -162,13 +137,10 @@ pub fn start(dev: DevIndex) -> bool {
     let Some(row) = iface::get_by_dev(dev) else {
         return false;
     };
-    // Idempotent, and done here rather than from a boot step so the listener is
-    // guaranteed to exist before the DISCOVER this call is about to send. A
-    // reply arriving at a port nobody is listening on is simply dropped, and
-    // the only symptom would be a client that retries forever.
+    // Here rather than from a boot step so the listener exists before the
+    // DISCOVER this call is about to send.
     LISTENER.init_once_then(init);
-    // Seeded from the kernel RNG: a predictable transaction id is answerable by
-    // anyone who can guess it.
+    // A predictable transaction id is answerable by anyone who can guess it.
     let seed = slopos_kernel_services::platform::rng_next() as u32;
 
     {
@@ -197,9 +169,9 @@ pub fn stop(dev: DevIndex) {
 
 /// [`stop`], optionally leaving the interface marked DHCP-managed.
 ///
-/// An administrative down passes `true`. The flag is the only memory that this
-/// interface gets its address from a lease, and clearing it would make
-/// `ip link set eth0 down; ip link set eth0 up` a one-way door out of DHCP.
+/// The flag is the only memory that this interface gets its address from a
+/// lease; clearing it would make `ip link set eth0 down; ip link set eth0 up` a
+/// one-way door out of DHCP.
 pub fn stop_with(dev: DevIndex, keep_managed: bool) {
     let ifindex = {
         let table = CLIENTS.lock();
@@ -221,8 +193,8 @@ pub fn stop_with(dev: DevIndex, keep_managed: bool) {
 
 /// Step the client on `dev` and carry out what it asked for.
 ///
-/// The single place a transmit frame is declared: at 320 bytes each, two of
-/// them on one call path put the frame over the build's 2 KiB stack gate.
+/// The single place a transmit frame is declared: at 320 bytes each, two on one
+/// call path put the frame over the build's 2 KiB stack gate.
 fn drive(dev: DevIndex, event: DhcpEvent<'_>) {
     let mut frame = [0u8; super::codec::DHCP_FRAME_LEN];
     let Some((action, frame_len, ctx)) = with_client(dev, event, &mut frame) else {
@@ -243,7 +215,6 @@ fn with_client(
     let action = slot.client.step(event, crate::clock::now_ms());
     let frame_len = slot.client.frame().len();
     frame[..frame_len].copy_from_slice(slot.client.frame());
-    // Any action that changes what the armed timers mean invalidates them.
     if !matches!(action, DhcpAction::Idle | DhcpAction::Send { .. }) {
         slot.epoch = slot.epoch.wrapping_add(1);
     }
@@ -270,7 +241,6 @@ fn with_client_for_key(
             .slots
             .iter()
             .find(|s| s.dev.is_some() && (s.ifindex & 0xFFFF) == ifindex)?;
-        // A timer armed before the last lease change is not about this lease.
         if slot.epoch != key_epoch(key) {
             return None;
         }
@@ -278,10 +248,6 @@ fn with_client_for_key(
     };
     with_client(dev, event, frame)
 }
-
-// =============================================================================
-// Performing an action
-// =============================================================================
 
 /// Carry out one action. **Nothing here runs under the client lock.**
 fn perform(action: DhcpAction, frame: &[u8], ctx: SlotContext) {
@@ -307,9 +273,8 @@ fn perform(action: DhcpAction, frame: &[u8], ctx: SlotContext) {
             arm_retransmit(ctx, retry_ms);
         }
         DhcpAction::SendThenUnbind { dest, reason } => {
-            // The release has to reach the wire while the address is still
-            // configured — the source address is what identifies the client to
-            // the server.
+            // The release must reach the wire while the address is still
+            // configured: the source address identifies the client to the server.
             transmit(ctx, dest, frame);
             unbind(ctx, reason);
         }
@@ -326,9 +291,9 @@ fn transmit(ctx: SlotContext, dest: DhcpDest, frame: &[u8]) {
             frame,
         ),
         DhcpDest::Server(server) => {
-            // Unicast needs the server's MAC. If it is not resolved yet,
-            // broadcasting reaches it anyway and costs one frame — far better
-            // than dropping a renewal because ARP had aged out.
+            // Falling back to broadcast when the server's MAC is unresolved
+            // costs one frame; dropping the renewal because ARP aged out costs
+            // the lease.
             match crate::neighbor::NEIGHBOR_CACHE.lookup(ctx.dev, Ipv4Addr(server)) {
                 Some(mac) => crate::udp::udp_unicast_on_dev(
                     ctx.dev,
@@ -394,8 +359,8 @@ fn bind(ctx: SlotContext, binding: &DhcpBinding) {
 
 /// Withdraw everything the lease installed.
 fn unbind(ctx: SlotContext, reason: UnbindReason) {
-    // Addresses first, then the routes derived from them: a connected route
-    // outliving its address would forward onto a prefix the interface no longer
+    // Addresses before the routes derived from them: a connected route
+    // outliving its address forwards onto a prefix the interface no longer
     // answers for.
     let _ = iface::retain_addrs(ctx.ifindex, |a| a.origin != AddrOrigin::Dhcp);
     crate::route::remove_device_routes(ctx.dev);
@@ -418,10 +383,6 @@ fn post_dhcp_event(ifindex: u32, state: DhcpState, reason: u8, lease_secs: u32) 
     );
 }
 
-// =============================================================================
-// Timers
-// =============================================================================
-
 fn arm_retransmit(ctx: SlotContext, retry_ms: u32) {
     NET_TIMER_WHEEL.schedule(
         u64::from(retry_ms),
@@ -432,8 +393,8 @@ fn arm_retransmit(ctx: SlotContext, retry_ms: u32) {
 
 fn arm_lease_timers(ctx: SlotContext, binding: &DhcpBinding) {
     let ifindex = timer_key(ctx.ifindex, ctx.epoch);
-    // A lease with no times is a lease that never renews and never expires,
-    // which is what a server that omitted option 51 is asking for.
+    // A server that omitted option 51 is asking for a lease that never renews
+    // and never expires.
     if binding.lease_secs == 0 {
         return;
     }
@@ -454,19 +415,13 @@ fn arm_lease_timers(ctx: SlotContext, binding: &DhcpBinding) {
     );
 }
 
-// =============================================================================
-// Entry points
-// =============================================================================
-
 /// A datagram arrived on port 68.
 ///
-/// Registered as a kernel port listener, so it runs on the receive path with
-/// the packet in hand: it copies nothing, takes the client lock briefly, and
-/// performs the resulting action after releasing it.
+/// Registered as a kernel port listener, so it runs on the receive path with the
+/// packet in hand.
 pub fn on_udp_receive(_src_ip: [u8; 4], _src_port: u16, payload: &[u8]) {
-    // Which client this belongs to is decided by the transaction id inside the
-    // payload, which only the client can check — so offer it to each running
-    // client and let the one whose transaction it is act.
+    // Only the client can check the transaction id inside the payload, so offer
+    // it to each running client and let the one whose transaction it is act.
     let devs = running_devices();
     let mut frame = [0u8; super::codec::DHCP_FRAME_LEN];
     for dev in devs.iter().flatten() {
@@ -518,10 +473,8 @@ fn dispatch_timer(key: u32, event: DhcpEvent<'_>) {
     perform(action, &frame[..frame_len], ctx);
 }
 
-/// Renew now, on request.
-///
-/// Drives the same T1 transition the timer would, so there is no second,
-/// subtly different renewal path to keep in step.
+/// Renew now, on request. Drives the same T1 transition the timer would, so
+/// there is no second renewal path to keep in step.
 pub fn renew_now(dev: DevIndex) {
     drive(dev, DhcpEvent::T1);
 }
@@ -537,11 +490,8 @@ pub fn on_carrier(dev: DevIndex, up: bool) {
     drive(dev, event);
 }
 
-/// The transaction id the client on `dev` currently has in flight.
-///
-/// Test-only. Production has no reason to look inside a transaction: the client
-/// matches replies itself, and exposing the id would invite a caller to match
-/// them somewhere else and disagree.
+/// The transaction id the client on `dev` currently has in flight. Test-only:
+/// the client matches replies itself, and a second matcher would disagree.
 #[cfg(feature = "test-hooks")]
 pub fn xid_of(dev: DevIndex) -> Option<u32> {
     let table = CLIENTS.lock();
@@ -552,11 +502,8 @@ pub fn xid_of(dev: DevIndex) -> Option<u32> {
         .map(|s| s.client.xid())
 }
 
-/// The timer key the client's current lease armed its expiry with.
-///
-/// Test-only, and it exists so a test can hold on to a key across a lease
-/// change and prove the epoch refuses it. Nothing in production needs to name
-/// a timer it did not just arm.
+/// The timer key the client's current lease armed its expiry with. Test-only:
+/// lets a test hold a key across a lease change and prove the epoch refuses it.
 #[cfg(feature = "test-hooks")]
 pub fn expire_key(dev: DevIndex) -> Option<u32> {
     let table = CLIENTS.lock();

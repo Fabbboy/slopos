@@ -1,15 +1,11 @@
 //! Read-time block-integrity verification for the ext2 root filesystem.
 //!
-//! `scripts/gen_verity.py` appends a trailer to the disk image: a per-block
-//! CRC-32 array followed by a 32-byte header at the very END, so the kernel
-//! locates it from `device.capacity()` alone. [`build_verified`] wraps the
-//! backing device so a read mismatch surfaces as
-//! [`BlockDeviceError::IntegrityFailure`] rather than corrupt bytes.
+//! `scripts/gen_verity.py` appends the trailer at the very END of the image, so
+//! the kernel locates it from `device.capacity()` alone.
 //!
-//! Scope: only blocks **not written since mount** are verified — the
-//! filesystem re-blesses its own writes. CRC-32 is an integrity check, not an
-//! authenticity one: an adversary who rewrites a block, the hash array and the
-//! root is not defeated.
+//! Scope: only blocks **not written since mount** are verified. CRC-32 is an
+//! integrity check, not an authenticity one: an adversary who rewrites a block,
+//! the hash array and the root is not defeated.
 
 use slopos_ostd::lock_class;
 use slopos_ostd::sync::{LOCK_LEVEL_RESOURCE, SpinLock};
@@ -69,8 +65,8 @@ fn bit_set(words: &mut [u64], idx: usize) {
     words[idx / 64] |= 1u64 << (idx % 64);
 }
 
-/// A [`BlockDevice`] decorator that verifies each fully-read, not-yet-written
-/// block against a trusted per-block CRC array (see module docs).
+/// Verifies each fully-read, not-yet-written block against a trusted per-block
+/// CRC array.
 pub struct VerifiedBlockDevice {
     inner: KBox<dyn BlockDevice + Send + Sync>,
     block_size: u32,
@@ -93,9 +89,8 @@ impl BlockDevice for VerifiedBlockDevice {
         let bs = self.block_size as u64;
         let n = self.hashes.len() as u64;
         let end = offset + buffer.len() as u64;
-        // Only blocks fully contained in the read are verified. The ext2 cache
-        // always reads whole blocks; sub-block direct reads (the superblock at
-        // byte 1024) fall through to their own magic/sanity checks.
+        // Only blocks fully contained in the read are verified: sub-block direct
+        // reads (the superblock at byte 1024) keep their own sanity checks.
         let mut b = offset.div_ceil(bs);
         let written = self.written.lock();
         while b < n && (b + 1) * bs <= end {
@@ -121,10 +116,10 @@ impl BlockDevice for VerifiedBlockDevice {
     }
 
     fn write_at(&self, offset: u64, buffer: &[u8]) -> Result<(), BlockDeviceError> {
-        // The device write blocks on a scheduler-backed completion, so it must
-        // run outside the spinning `written` lock. Marking happens after
-        // regardless of the result: a failed write leaves the block content
-        // unknown, so its build-time CRC must no longer be enforced.
+        // The device write blocks on a scheduler-backed completion, so it runs
+        // outside the spinning `written` lock. Marked regardless of the result:
+        // a failed write leaves the block content unknown, so its build-time
+        // CRC must no longer be enforced.
         let result = self.inner.write_at(offset, buffer);
         if !buffer.is_empty() && !self.hashes.is_empty() {
             let bs = self.block_size as u64;
@@ -153,11 +148,9 @@ impl BlockDevice for VerifiedBlockDevice {
     }
 }
 
-/// Wrap `device` in a [`VerifiedBlockDevice`] if it carries a valid verity
-/// trailer; otherwise return it unchanged — images without a trailer mount
-/// unverified. The trailer is self-anchored: its stored root CRC must match a
-/// recomputation over the hash array, so a corrupt trailer disables verity
-/// rather than blocking the mount.
+/// Wrap `device` if it carries a valid verity trailer; otherwise return it
+/// unchanged — images without a trailer mount unverified, and a corrupt trailer
+/// disables verity rather than blocking the mount.
 pub fn build_verified(
     device: KBox<dyn BlockDevice + Send + Sync>,
 ) -> KBox<dyn BlockDevice + Send + Sync> {
@@ -220,8 +213,8 @@ fn parse_trailer(device: &dyn BlockDevice) -> Option<(u32, KVec<u32>, KVec<u64>)
         .checked_sub(HEADER_SIZE)?
         .checked_sub(arr_bytes as u64)?;
 
-    // The hash array is the allocation that fails under memory pressure; that
-    // disables verity rather than aborting the mount.
+    // A failed hash-array allocation disables verity rather than aborting the
+    // mount.
     let mut bytes = KVec::<u8>::zeroed(arr_bytes).ok()?;
     device.read_at(arr_off, bytes.as_mut_slice()).ok()?;
     if crc32(bytes.as_slice()) != root {

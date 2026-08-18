@@ -82,16 +82,11 @@ fn xe_probe(bound: &mut BoundDevice<'_>) -> Result<ProbeOutcome, PciProbeError> 
         diag::dump(&mmio, &info, platform);
     }
 
-    // `nomodeset` escape: diagnostics were emitted (if asked), but we write no
-    // display register and leave the firmware scanout driving the panel.
     if !cfg.modeset {
         klog_info!("XE: xe.modeset=off; diagnostics only, firmware framebuffer retained");
         return Ok(ProbeOutcome::Declined);
     }
 
-    // Drive the display: inherit the firmware modeset and take over scanout. The
-    // claim/commit, snapshot/rollback, cursor, and present logic all live in
-    // `repoint::run`, which restores the firmware framebuffer on any failure.
     repoint::run(&mmio, cfg, platform)
 }
 

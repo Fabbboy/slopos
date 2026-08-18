@@ -1,11 +1,5 @@
 //! Tests for NetDevice trait, NetDeviceStats, NetDeviceFeatures, DeviceHandle,
 //! and NetDeviceRegistry.
-//!
-//! Covers:
-//! - 1.T8:  NetDeviceStats accumulation (increment fields, verify reads)
-//! - 1.T11: DeviceHandle::tx() does not acquire the registry lock (structural)
-//! - Additional coverage: features bitflags, registry register/unregister/enumerate,
-//!   handle data-plane ops, registry capacity exhaustion.
 
 use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
@@ -21,13 +15,7 @@ use crate::packetbuf::PacketBuf;
 use crate::pool::{PACKET_POOL, PacketPool};
 use crate::types::*;
 
-// =============================================================================
-// Mock NetDevice for testing
-// =============================================================================
-
 /// A minimal in-memory network device for testing the registry and handle.
-///
-/// Uses `SpinLock` for interior mutability, matching the real-driver pattern.
 struct MockNetDevice {
     mac_addr: MacAddr,
     dev_mtu: u16,
@@ -115,14 +103,9 @@ impl NetDevice for MockNetDevice {
     }
 }
 
-/// Ensure the global pool is initialized before tests that allocate PacketBuf.
 fn ensure_pool_init() {
     PACKET_POOL.init();
 }
-
-// =============================================================================
-// 1.T8 — NetDeviceStats accumulation
-// =============================================================================
 
 pub fn test_netdev_stats_default_zeroed() -> TestResult {
     let stats = NetDeviceStats::default();
@@ -165,7 +148,6 @@ pub fn test_netdev_stats_accumulation() -> TestResult {
     assert_eq_test!(stats.rx_dropped, 7, "rx_dropped after increment");
     assert_eq_test!(stats.tx_dropped, 2, "tx_dropped after increment");
 
-    // Verify convenience totals.
     assert_eq_test!(stats.total_packets(), 150, "total_packets = rx + tx");
     assert_eq_test!(stats.total_bytes(), 153600, "total_bytes = rx + tx");
     assert_eq_test!(stats.total_errors(), 4, "total_errors = rx + tx");
@@ -181,14 +163,9 @@ pub fn test_netdev_stats_copy() -> TestResult {
     let copy = original;
     assert_eq_test!(copy.rx_packets, 42, "copy preserves rx_packets");
     assert_eq_test!(copy.tx_bytes, 1024, "copy preserves tx_bytes");
-    // Modifying original doesn't affect copy (it's Copy).
     assert_eq_test!(original, copy, "original == copy");
     pass!()
 }
-
-// =============================================================================
-// NetDeviceFeatures tests
-// =============================================================================
 
 pub fn test_features_empty() -> TestResult {
     let feats = NetDeviceFeatures::empty();
@@ -258,10 +235,6 @@ pub fn test_features_default_is_empty() -> TestResult {
     assert_eq_test!(feats, NetDeviceFeatures::empty(), "default == empty");
     pass!()
 }
-
-// =============================================================================
-// Registry tests
-// =============================================================================
 
 pub fn test_registry_register_and_enumerate() -> TestResult {
     let registry = NetDeviceRegistry::new(lock_class!("test.netdev_registry", LOCK_LEVEL_REGISTRY));
@@ -338,15 +311,13 @@ pub fn test_registry_unregister() -> TestResult {
         "enumerate is empty after unregister"
     );
 
-    // Unregistering again returns false.
     let removed_again = registry.unregister(DevIndex(0));
     assert_test!(!removed_again, "double unregister returns false");
     pass!()
 }
 
 /// A retained handle outlives unregistration, so it is the one path that can
-/// still reach a retired device. Its send failing is what proves `set_down`
-/// actually ran, which the previous "no panic" assertion could not.
+/// still reach a retired device; its send failing proves `set_down` ran.
 pub fn test_registry_unregister_calls_set_down() -> TestResult {
     ensure_pool_init();
     let registry = NetDeviceRegistry::new(lock_class!("test.netdev_registry", LOCK_LEVEL_REGISTRY));
@@ -395,9 +366,8 @@ pub fn test_registry_unregister_rejects_tx_by_index() -> TestResult {
     pass!()
 }
 
-/// At capacity every device must be polled. The previous snapshot pushed into
-/// a `KVec` and dropped a device on allocation failure, which stalls that
-/// device's TX reclaim with nothing to report.
+/// At capacity every device must be polled: one silently skipped by
+/// `poll_tx_all` stalls its TX reclaim with nothing to report.
 pub fn test_registry_poll_tx_all_visits_every_device() -> TestResult {
     let registry = NetDeviceRegistry::new(lock_class!("test.netdev_registry", LOCK_LEVEL_REGISTRY));
     let mut devices = KVec::new();
@@ -424,7 +394,6 @@ pub fn test_registry_slot_reuse() -> TestResult {
     let mac1 = MacAddr([0x02, 0x00, 0x00, 0x00, 0x00, 0x01]);
     let mac2 = MacAddr([0x02, 0x00, 0x00, 0x00, 0x00, 0x02]);
 
-    // Register, unregister, register again — should reuse slot 0.
     let h1 = registry.register(KArc::try_new(MockNetDevice::new(mac1, 1500)).expect("test alloc"));
     assert_test!(h1.is_some(), "first register succeeds");
     let h1 = h1.unwrap();
@@ -440,13 +409,11 @@ pub fn test_registry_slot_reuse() -> TestResult {
     pass!()
 }
 
-/// The window `unregister` opens: the slot must stay occupied until `set_down`
-/// returns. Free it first and `register` hands the same index to a different
-/// device while the old one is still shutting down, after which an
-/// index-addressed send reaches the wrong NIC.
-///
-/// `set_down` re-enters the registry from inside that window, which is the
-/// only vantage point the invariant is observable from.
+/// The slot must stay occupied until `set_down` returns; free it first and
+/// `register` hands the same index to a new device while the old one is still
+/// shutting down, after which an index-addressed send reaches the wrong NIC.
+/// `set_down` re-enters the registry, the only vantage point that is visible
+/// from.
 static RETIRE_PROBE_REGISTRY: NetDeviceRegistry =
     NetDeviceRegistry::new(lock_class!("test.netdev_retire_probe", LOCK_LEVEL_REGISTRY));
 
@@ -525,10 +492,6 @@ pub fn test_registry_unregister_out_of_range() -> TestResult {
     pass!()
 }
 
-// =============================================================================
-// DeviceHandle data-plane tests
-// =============================================================================
-
 pub fn test_handle_tx() -> TestResult {
     ensure_pool_init();
 
@@ -540,7 +503,6 @@ pub fn test_handle_tx() -> TestResult {
         None => return slopos_testing::fail!("register failed"),
     };
 
-    // Allocate a packet and TX through the handle.
     let pkt = match PacketBuf::alloc() {
         Some(p) => p,
         None => return slopos_testing::fail!("PacketBuf::alloc failed"),
@@ -549,7 +511,6 @@ pub fn test_handle_tx() -> TestResult {
     let result = handle.tx(pkt);
     assert_test!(result.is_ok(), "tx should succeed");
 
-    // Verify the device recorded the TX (stats updated).
     let stats = handle.stats();
     assert_eq_test!(stats.tx_packets, 1, "stats.tx_packets == 1 after TX");
     pass!()
@@ -611,12 +572,8 @@ pub fn test_handle_features() -> TestResult {
     pass!()
 }
 
-/// 1.T11 — Verify `DeviceHandle::tx()` does not acquire the registry lock.
-///
-/// This is a structural test: we hold the registry lock and then call
-/// `handle.tx()`.  If `tx()` tried to acquire the registry lock, it would
-/// deadlock (since `SpinLock` is non-reentrant).  The test passing proves
-/// that `tx()` bypasses the registry lock entirely.
+/// Structural: `tx()` is called with the registry lock already held, so it
+/// would deadlock if it took that lock — `SpinLock` is non-reentrant.
 pub fn test_handle_tx_does_not_acquire_registry_lock() -> TestResult {
     ensure_pool_init();
 
@@ -628,12 +585,8 @@ pub fn test_handle_tx_does_not_acquire_registry_lock() -> TestResult {
         None => return slopos_testing::fail!("register failed"),
     };
 
-    // Hold the registry lock.
     let _guard = registry.inner.lock();
 
-    // Now TX through the handle.  If DeviceHandle::tx() tried to lock
-    // the registry, this would deadlock because SpinLock is non-reentrant
-    // and we already hold the lock above.
     let pkt = match PacketBuf::alloc() {
         Some(p) => p,
         None => {
@@ -645,28 +598,19 @@ pub fn test_handle_tx_does_not_acquire_registry_lock() -> TestResult {
     let result = handle.tx(pkt);
     assert_test!(result.is_ok(), "tx succeeds while registry lock is held");
 
-    // If we reach here, tx() did NOT try to acquire the registry lock.
-    // Q.E.D.
     drop(_guard);
     pass!()
 }
 
-// =============================================================================
-// Test suite registration
-// =============================================================================
-
-// 1.T8 — NetDeviceStats accumulation
 slopos_testing::stest!(name = test_netdev_stats_default_zeroed, suite = netdev);
 slopos_testing::stest!(name = test_netdev_stats_new_equals_default, suite = netdev);
 slopos_testing::stest!(name = test_netdev_stats_accumulation, suite = netdev);
 slopos_testing::stest!(name = test_netdev_stats_copy, suite = netdev);
-// NetDeviceFeatures
 slopos_testing::stest!(name = test_features_empty, suite = netdev);
 slopos_testing::stest!(name = test_features_individual, suite = netdev);
 slopos_testing::stest!(name = test_features_combination, suite = netdev);
 slopos_testing::stest!(name = test_features_all, suite = netdev);
 slopos_testing::stest!(name = test_features_default_is_empty, suite = netdev);
-// Registry
 slopos_testing::stest!(name = test_registry_register_and_enumerate, suite = netdev);
 slopos_testing::stest!(name = test_registry_register_multiple, suite = netdev);
 slopos_testing::stest!(name = test_registry_unregister, suite = netdev);
@@ -688,12 +632,10 @@ slopos_testing::stest!(
     suite = netdev
 );
 slopos_testing::stest!(name = test_registry_unregister_out_of_range, suite = netdev);
-// DeviceHandle data-plane
 slopos_testing::stest!(name = test_handle_tx, suite = netdev);
 slopos_testing::stest!(name = test_handle_poll_rx_empty, suite = netdev);
 slopos_testing::stest!(name = test_handle_stats, suite = netdev);
 slopos_testing::stest!(name = test_handle_features, suite = netdev);
-// 1.T11 — Handle TX doesn't acquire registry lock
 slopos_testing::stest!(
     name = test_handle_tx_does_not_acquire_registry_lock,
     suite = netdev

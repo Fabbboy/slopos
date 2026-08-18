@@ -1,8 +1,7 @@
 //! Round-trip-time estimator (RFC 6298 §2).
 //!
 //! Sans-IO: no clock, no globals, no dependency on the rest of the TCP state
-//! machine.  Callers feed samples to [`RttEstimator::sample`] and read the
-//! current RTO from [`RttEstimator::rto_ms`].
+//! machine.
 
 use super::{INITIAL_RTO_MS, MAX_RTO_MS};
 
@@ -26,7 +25,6 @@ const G_MS: u32 = 1;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct RttEstimator {
-    /// `0` means "no sample yet".
     srtt_ms: u32,
     rttvar_ms: u32,
     rto_ms: u32,
@@ -76,8 +74,6 @@ impl RttEstimator {
         self.has_sample
     }
 
-    /// Incorporate a fresh RTT measurement `r_ms` (in milliseconds).
-    ///
     /// Must **not** be invoked for retransmitted segments (Karn's algorithm) —
     /// use [`back_off`] for those.  A zero sample is treated as `G_MS`.
     pub fn sample(&mut self, r_ms: u32) {

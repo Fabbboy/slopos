@@ -1,40 +1,23 @@
 //! Parser for the `xe.*` kernel command-line knobs into an [`XeConfig`]. Pure
 //! string parsing over `core` only — no allocation, no I/O.
 //!
-//! The defaults make the driver *work*: when it binds to a matching Intel
-//! display device it inherits the firmware modeset and drives scanout, exactly
-//! like any other kernel display driver. None of these knobs is required for
-//! normal operation — they are expert overrides and recovery escapes:
-//!
-//! - `xe.diag=on` emits verbose register logging (like `drm.debug`).
-//! - `xe.modeset=off` keeps the firmware framebuffer and writes no display
-//!   register — the `nomodeset` recovery escape. Pair with `xe.diag=on` for a
-//!   read-only boot that only reports what the silicon programmed.
-//! - `xe.nocursor=on` forces the software cursor (skips the hardware cursor
-//!   plane) — an escape if the hardware cursor ever misbehaves.
-//! - `xe.pipe` / `xe.wdog_ms` / `xe.force_did` are expert overrides with sane
-//!   defaults (auto-detect / 100 ms / real PCI ID).
-//!
-//! There is deliberately no knob for tear-free / double-buffering: like every
-//! real KMS driver, the scanout is always vblank-synced double-buffered, with an
-//! automatic single-buffer fallback only when the second scan buffer cannot be
-//! allocated. `xe.modeset=off` is the recovery escape if the display misbehaves.
+//! Every knob is an expert override or a recovery escape; the defaults drive
+//! scanout on bind. There is deliberately no tear-free / double-buffering knob:
+//! scanout is always vblank-synced double-buffered, falling back to a single
+//! buffer only when the second scan buffer cannot be allocated.
 
 use super::regs::Pipe;
 
 /// Parsed `xe.*` command-line configuration. Plain `Copy` data, no heap.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct XeConfig {
-    /// Emit verbose `XE-DIAG:` register-decode logging while probing. Default
-    /// off — purely a debug aid.
+    /// Verbose `XE-DIAG:` register-decode logging while probing. Default off.
     pub diag: bool,
-    /// Kernel modeset master switch. `true` (default) drives scanout on bind;
-    /// `xe.modeset=off` keeps the firmware framebuffer and touches no display
-    /// register — the `nomodeset` recovery escape.
+    /// Modeset master switch. `true` (default) drives scanout on bind; `off`
+    /// keeps the firmware framebuffer and touches no display register.
     pub modeset: bool,
-    /// Force the software cursor: skip binding the hardware cursor plane and let
-    /// the compositor composite its own cursor. Default off (the hardware cursor
-    /// is used). A recovery escape if the hardware cursor ever misbehaves.
+    /// Skip the hardware cursor plane and let the compositor composite its own.
+    /// Default off.
     pub nocursor: bool,
     /// Active-pipe override; `None` (default) auto-detects the scanning pipe.
     pub pipe: Option<Pipe>,
@@ -105,7 +88,6 @@ pub fn parse(cmdline: &str) -> XeConfig {
     config
 }
 
-/// `on` → `true`, `off` → `false`, anything else → keep default.
 fn parse_on_off(value: &str) -> Option<bool> {
     match value {
         "on" => Some(true),
@@ -114,7 +96,6 @@ fn parse_on_off(value: &str) -> Option<bool> {
     }
 }
 
-/// Case-insensitive single-letter pipe selector (`A`/`B`/`C`).
 fn parse_pipe(value: &str) -> Option<Pipe> {
     match value.as_bytes() {
         [b'A' | b'a'] => Some(Pipe::A),
@@ -124,7 +105,6 @@ fn parse_pipe(value: &str) -> Option<Pipe> {
     }
 }
 
-/// Parse a `0x`-prefixed (case-insensitive) hexadecimal `u16`.
 fn parse_hex_u16(value: &str) -> Option<u16> {
     let digits = value
         .strip_prefix("0x")

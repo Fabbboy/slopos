@@ -2616,9 +2616,9 @@ fn clone_cow_snapshot_parent(
     for (vma_start, vma_end, region) in vmas_iter.iter() {
         let vma_start = *vma_start;
         let vma_end = *vma_end;
-        // SlopRing regions are not inherited (SLOPRING § 14): capture an
-        // empty snapshot and never mark them COW. The child-side walk
-        // skips `is_ring()` VMAs entirely.
+        // SlopRing regions are not inherited (SLOPRING § 14): the SQ/CQ is
+        // SPSC, so a second producer in the child is forbidden. Neither the
+        // snapshot here nor the child-side walk touches one.
         if region.is_ring() {
             vmas.push((vma_start, vma_end, region.clone(), KVec::new()))
                 .expect("clone_cow: vmas alloc");
@@ -2671,15 +2671,8 @@ fn clone_cow_snapshot_parent(
     ))
 }
 
-/// Per-VMA inner walk for shared (memfd) regions in `process_vm_clone_cow`.
-/// Maps the parent's existing physical pages (captured in `snapshot`)
-/// directly into the child's OSTD VmSpace, inheriting the parent's
-/// permissions verbatim. No COW marker — the child shares the same
-/// memfd pages. Each child mapping DOES take a MetaSlot ref (the
-/// `from_in_use` inside `ostd_map_4kb_user`), layered on top of the
-/// memfd object's own owning ref; the page frees only when the memfd
-/// and every mapping have dropped their ref. Returns the number of
-/// pages mapped, or `Err(())` on the first failure.
+/// Maps the parent's pages into the child verbatim: no COW marker, the child
+/// shares the same memfd pages. `Err(())` on the first failure.
 #[inline(never)]
 fn clone_cow_walk_shared_vma(
     child_vm_space: &mut KArc<VmSpace>,
@@ -2697,14 +2690,9 @@ fn clone_cow_walk_shared_vma(
     Ok(cow_pages)
 }
 
-/// Per-VMA inner walk for anonymous regions in `process_vm_clone_cow`.
-/// Maps the captured parent pages into the child's OSTD VmSpace with
-/// `WRITABLE` cleared and the COW marker set. The parent's COW mark
-/// already landed via `ostd_mark_cow_4kb` during the phase-1 snapshot;
-/// META_SLOTS bookkeeping for the additional child reference is handled
-/// inside `ostd_map_4kb_user` (the second `wrap_user_paddr` for a paddr
-/// does `from_in_use`, bumping the META_SLOTS ref count). Returns the
-/// number of pages walked, or `Err(())` on first failure.
+/// Maps the captured parent pages into the child with `WRITABLE` cleared and
+/// the COW marker set; the parent side was marked during the snapshot phase.
+/// `Err(())` on the first failure.
 #[inline(never)]
 fn clone_cow_walk_anon_vma(
     child_vm_space: &mut KArc<VmSpace>,
@@ -2733,15 +2721,14 @@ fn clone_cow_walk_anon_vma(
     Ok(cow_pages)
 }
 
-/// Clone address space with COW for fork(). Returns child PID or INVALID_PROCESS_ID.
+/// Returns the child pid, or `INVALID_PROCESS_ID`.
 pub fn process_vm_clone_cow(parent: ProcessId) -> u32 {
     process_vm_clone_cow_ref(parent).map_or(INVALID_PROCESS_ID, |p| p.process_id)
 }
 
-/// Clone address space with COW for fork(), registering a fresh process for
-/// the child. For callers that have no process object; a real fork goes
-/// through [`process_vm_clone_cow_for`] so the child's accounting edge names
-/// its actual spawner.
+/// Registers a fresh process for the child. For callers with no process
+/// object; a real fork goes through [`process_vm_clone_cow_for`] so the
+/// child's accounting edge names its actual spawner.
 pub fn process_vm_clone_cow_ref(parent: ProcessId) -> Option<ProcessVmRef> {
     let child = slopos_ostd::process::process_spawn_root().ok()?;
     let vm = process_vm_clone_cow_for(parent, child.clone());
@@ -2753,10 +2740,8 @@ pub fn process_vm_clone_cow_ref(parent: ProcessId) -> Option<ProcessVmRef> {
     vm
 }
 
-/// A fork refused by the child's page ceiling.
-///
 /// Out of line and `#[cold]`: `format_args!` builds its argument array in the
-/// caller's frame, and this one's caller is measured against the 2 KiB gate.
+/// caller's frame, which is measured against the 2 KiB stack gate.
 #[cold]
 #[inline(never)]
 fn report_clone_page_ceiling(start: u64, end: u64) {
@@ -2768,12 +2753,8 @@ fn report_clone_page_ceiling(start: u64, end: u64) {
 }
 
 /// Copy every inheritable VMA of `parent_vmas` into `child`, COW-marking the
-/// anonymous ones. Returns the COW pages walked, `Err` carrying the same count
-/// if the clone must be abandoned.
-///
-/// Split out of `process_vm_clone_cow_for` for the stack gate: the per-VMA
-/// locals, the cloned `VmaRegion` and the two walk calls are a frame of their
-/// own, and folding them into the caller put it 88 bytes over the 2 KiB cap.
+/// anonymous ones. `Err` carries the count walked before the clone was
+/// abandoned. Split out of `process_vm_clone_cow_for` for the 2 KiB stack gate.
 #[inline(never)]
 fn clone_cow_populate_child(
     child: &mut ProcessVm,
@@ -2783,21 +2764,14 @@ fn clone_cow_populate_child(
     for (vma_start, vma_end, parent_region, snapshot) in parent_vmas.iter() {
         let vma_start = *vma_start;
         let vma_end = *vma_end;
-        // SlopRing regions are NOT inherited (SLOPRING § 14): the SQ/CQ is
-        // SPSC, so a second producer in the child is forbidden by
-        // construction. Skip the VMA entirely — the child gets no ring
-        // mapping, matching the ring fd, which is close-on-fork and so absent
-        // from the child's fd table.
         if parent_region.is_ring() {
             continue;
         }
         let is_shared_vma = parent_region.is_shared();
 
         let child_region = if is_shared_vma {
-            // Shared memfd: inherit directly, no COW
             parent_region.clone()
         } else {
-            // Anonymous: mark as COW
             let mut r = parent_region.clone();
             r.cow = true;
             r
@@ -2815,10 +2789,8 @@ fn clone_cow_populate_child(
             crate::memfd::memfd_inc_mapcount_by(memfd_handle, vma_page_count(vma_start, vma_end));
         }
 
-        // Pull a mutable handle to the child's OSTD VmSpace once per VMA. The
-        // child slot lock held by the caller is the sole owner of the KArc, so
-        // `as_mut` succeeds. Parent-side OSTD mark_cow ran inline under the
-        // parent lock in the snapshot phase.
+        // The child slot lock held by the caller is the sole owner of the
+        // `KArc`, so `as_mut` succeeds.
         let child_vm_space_for_vma = child
             .vm_space
             .as_mut()
@@ -2851,12 +2823,6 @@ pub fn process_vm_clone_cow_for(parent: ProcessId, child: KArc<Process>) -> Opti
         }
     };
 
-    // Phase 1 — under the parent's per-process lock — snapshot parent
-    // scalar fields, the VMA list, and a per-VMA (vaddr, paddr, flags)
-    // snapshot via OSTD cursor reads. Anonymous VMAs also get their
-    // writable+user pages marked COW in the parent's OSTD half before
-    // we drop the lock. Extracted into a helper so its stack frame
-    // does not fold into this function's frame.
     let (
         parent_code_start,
         parent_data_start,
@@ -2872,9 +2838,6 @@ pub fn process_vm_clone_cow_for(parent: ProcessId, child: KArc<Process>) -> Opti
         None => return None,
     };
 
-    // Phase 1: claim the child's own registry slot. Not an allocation — the
-    // child already exists as a process; this binds an address space into the
-    // slot it occupies.
     let Some(reservation) = VmReservation::claim(child) else {
         klog_info!("process_vm_clone_cow: could not claim the child's VM slot");
         return None;
@@ -2883,9 +2846,6 @@ pub fn process_vm_clone_cow_for(parent: ProcessId, child: KArc<Process>) -> Opti
     let child_id = reservation.process_id;
     let child_generation = reservation.generation;
 
-    // Phase 2: allocate physical resources (no locks held). OSTD
-    // `VmSpace::new` roots the child on its own PML4 and populates its
-    // kernel half via `KERNEL_MASTER_PML4`.
     let child_mm_ctx_id = crate::mmu::alloc_mm_context_id();
     let child_vm_space = match VmSpace::new() {
         Ok(s) => s,
@@ -2911,10 +2871,8 @@ pub fn process_vm_clone_cow_for(parent: ProcessId, child: KArc<Process>) -> Opti
         }
     };
 
-    // Phase 3: initialize child slot and perform COW page walk.
-    // We hold the child slot lock while building VMA map + page tables.
-    // The parent's address space is stable (read from snapshot; the parent
-    // cannot be destroyed while fork is in progress -- scheduler guarantees).
+    // The parent cannot be destroyed while a fork is in progress — a
+    // scheduler guarantee.
     let cow_pages: u32;
     let mut clone_failed = false;
 
@@ -2952,14 +2910,11 @@ pub fn process_vm_clone_cow_for(parent: ProcessId, child: KArc<Process>) -> Opti
     if clone_failed {
         klog_info!("process_vm_clone_cow: Clone failed, cleaning up");
         {
-            // One acquisition: a slot still bound to `child_id` must never
-            // be observable with its address space already released.
-            // `teardown_inner_mappings` reads `process` to target its
-            // TLB flush, so `reset` — which clears it — comes last.
+            // One acquisition: a slot still bound to `child_id` must never be
+            // observable with its address space released. `reset` clears
+            // `process`, which `teardown_inner_mappings` needs, so it is last.
             let mut child = PROCESS_VMS[child_slot].lock();
-            // Dropping the child's VmSpace walks the partial COW tree and
-            // reclaims every leaf frame, the intermediate tables and the
-            // PML4.
+            // Dropping the child's VmSpace reclaims the partial COW tree.
             let _ = child.vm_space.take();
             teardown_inner_mappings(&mut child, slot_tlb_key(child_slot));
             tlb::unregister_process_tlb(slot_tlb_key(child_slot));

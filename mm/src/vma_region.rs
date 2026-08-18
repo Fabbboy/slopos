@@ -1,8 +1,7 @@
 //! Type-safe Virtual Memory Area subsystem.
 //!
-//! Replaces the hand-rolled RB tree (`vma_tree.rs`) with a `BTreeMap`-backed
-//! design inspired by Redox OS. Each region's backing is an enum variant
-//! (not a flags bitfield), so the compiler enforces exhaustive handling.
+//! Each region's backing is an enum variant (not a flags bitfield), so the
+//! compiler enforces exhaustive handling.
 //!
 //! Overlaps are prevented structurally: the gap finder returns addresses from
 //! gaps between existing entries, and `insert` merges compatible adjacent
@@ -16,10 +15,6 @@ use slopos_ostd::{KBTreeMap, KVec};
 use crate::memfd::MemfdHandle;
 use crate::paging_defs::{PAGE_SIZE_4KB, PageFlags};
 
-// ---------------------------------------------------------------------------
-// RegionBacking — what provides pages for this region
-// ---------------------------------------------------------------------------
-
 /// What backs a memory region's physical pages.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum RegionBacking {
@@ -28,20 +23,13 @@ pub enum RegionBacking {
     /// Shared memfd — pages belong to the MemfdObject, not the process.
     /// Must not be freed on munmap; only mapcount decrement.
     SharedMemfd { handle: MemfdHandle },
-    /// SlopRing shared region (SLOPRING § 5.1). Pages are owned by the
-    /// kernel-side ring object as `Frame<RingMeta>`s; the user PTE holds
-    /// an independent `from_in_use` ref. Frames are freed only when both
-    /// the ring object *and* every user PTE have dropped their ref
-    /// (refcount → 0), so the mapping outliving the fd cannot UAF. This
-    /// VMA exists only to *reserve* the virtual range; lifetime is the
-    /// frame refcount. Not inherited across fork (the ring fd is
-    /// close-on-fork — SLOPRING § 14).
+    /// SlopRing shared region (SLOPRING § 5.1). The kernel-side ring object
+    /// owns the frames as `Frame<RingMeta>`s and the user PTE holds an
+    /// independent `from_in_use` ref, so a mapping outliving the fd cannot
+    /// UAF; this VMA only reserves the virtual range. Not inherited across
+    /// fork (the ring fd is close-on-fork — SLOPRING § 14).
     Ring,
 }
-
-// ---------------------------------------------------------------------------
-// Protection — hardware page protection (orthogonal to backing type)
-// ---------------------------------------------------------------------------
 
 /// Page protection bits. Separate from backing/state to prevent conflation.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -74,11 +62,6 @@ impl Protection {
     };
 }
 
-// ---------------------------------------------------------------------------
-// RegionPurpose — semantic tag for special regions (brk, stack)
-// ---------------------------------------------------------------------------
-
-/// Semantic purpose of a memory region. Used by brk/stack special handling.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RegionPurpose {
     /// Generic mmap'd region.
@@ -93,15 +76,7 @@ pub enum RegionPurpose {
     Data,
 }
 
-// ---------------------------------------------------------------------------
-// VmaRegion — typed metadata for a virtual memory region
-// ---------------------------------------------------------------------------
-
 /// A virtual memory region with typed backing, protection, and purpose.
-///
-/// Replaces the old `VmaNode` + `VmaFlags` bitfield. The `RegionBacking`
-/// enum makes it impossible to accidentally conflate anonymous and shared
-/// mappings — the compiler forces exhaustive match.
 #[derive(Clone, Debug)]
 pub struct VmaRegion {
     pub protection: Protection,
@@ -110,14 +85,12 @@ pub struct VmaRegion {
     pub lazy: bool,
     /// Copy-on-write: shared read-only until written (fork).
     pub cow: bool,
-    /// User-mode accessible (Ring 3). Kernel-only mappings set this false.
+    /// User-mode accessible (Ring 3).
     pub user: bool,
     pub purpose: RegionPurpose,
 }
 
 impl VmaRegion {
-    /// Can two adjacent regions be merged into one?
-    /// Requires identical protection, backing variant, and state.
     pub fn can_merge_with(&self, other: &VmaRegion) -> bool {
         self.protection == other.protection
             && self.backing == other.backing
@@ -139,11 +112,8 @@ impl VmaRegion {
         matches!(self.backing, RegionBacking::SharedMemfd { .. })
     }
 
-    /// `true` iff this region is a SlopRing shared mapping. Like
-    /// `is_shared()`, its PTEs must be unmapped *without* the
-    /// anonymous-frame free path on teardown — the ring object owns the
-    /// frame lifecycle through `RingMeta` refcounts (the `from_in_use`
-    /// PTE ref is reclaimed, not double-freed).
+    /// `true` iff this region is a SlopRing shared mapping; like `is_shared()`,
+    /// its PTEs must be unmapped *without* the anonymous-frame free path.
     pub fn is_ring(&self) -> bool {
         matches!(self.backing, RegionBacking::Ring)
     }
@@ -155,7 +125,6 @@ impl VmaRegion {
         }
     }
 
-    /// Convert to x86-64 page table entry flags.
     pub fn to_page_flags(&self) -> PageFlags {
         let mut pf = PageFlags::PRESENT;
         if self.user {
