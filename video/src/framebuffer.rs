@@ -315,7 +315,6 @@ pub fn fb_flip_from_shm_damage(
         let Some(dst_ptr) = fb.checked_ptr(0, copy_size) else {
             return -1;
         };
-        // copy_bytes needs non-overlap: the FB and SHM mappings are distinct.
         slopos_ostd::util::ptr_buf::copy_bytes(dst_ptr, shm_ptr, copy_size);
         return framebuffer_flush(core::ptr::null(), 0);
     }
