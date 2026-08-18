@@ -247,9 +247,8 @@ unsafe fn vfscanf_impl(stream: *mut FILE, fmt: *const u8, ap: &mut VaList<'_>) -
     if stream.is_null() {
         return EOF;
     }
-    // One acquisition for the whole conversion, as in `vfprintf_impl`: the
-    // scan reads and pushes back bytes many times per directive, and every one
-    // of those would otherwise take the lock on its own.
+    // One acquisition for the whole conversion: the scan reads and pushes back
+    // bytes many times per directive.
     (*stream).lock.lock();
     let matched = vfscanf_core(stream, fmt, ap);
     (*stream).lock.unlock();

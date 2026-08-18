@@ -998,15 +998,12 @@ pub unsafe fn push_lock_ex(
         }
     }
 
-    // Learn only from acquisitions that passed. Recording an edge that
-    // closed a cycle would make the graph cyclic, after which `path_exists`
-    // reports unrelated pairs and the findings drown in derived noise;
-    // caching the chain is worse still, because `chain_lookup` is a
-    // short-circuit and every later occurrence would vanish.
+    // Learn only from acquisitions that passed: an edge that closed a cycle
+    // makes the graph cyclic and drowns later findings in derived noise, and a
+    // cached chain short-circuits every later occurrence away entirely.
     if !violated {
         if depth_before > 0 {
-            // A self-edge is meaningless (`path_exists` short-circuits on
-            // `src == target`) and would burn an edge slot per nesting site.
+            // A self-edge is meaningless and would burn a slot per nesting site.
             if top_class != NONE_IDX && top_class != class_idx {
                 if let Err(()) = add_edge(top_class, class_idx) {
                     latch_overflow("edge pool full", lock_addr, class.level());
@@ -1044,10 +1041,9 @@ pub unsafe fn pop_lock(lock_addr: *const ()) {
             return;
         }
 
-        // LIFO fast path: top entry matches. Retiring the depth before
-        // clearing the slot keeps a reader this cannot mask — an NMI, or
-        // another CPU — from ever seeing a counted-but-empty entry, which is
-        // what a corrupt stack looks like.
+        // Retire the depth before clearing the slot, so a reader this cannot
+        // mask — an NMI, or another CPU — never sees a counted-but-empty
+        // entry, which is what a corrupt stack looks like.
         let top = (depth - 1) as usize;
         if (*stack).entries[top].lock_addr == lock_addr {
             (*stack).curr_chain_key = (*stack).entries[top].prev_chain_key;
@@ -1057,9 +1053,8 @@ pub unsafe fn pop_lock(lock_addr: *const ()) {
             return;
         }
 
-        // Out-of-order release: find and remove. Rare; legitimate for code
-        // that drops guards in a non-LIFO order. We don't re-validate the
-        // remaining stack — the chain-hash already attests to it.
+        // Out-of-order release: find and remove. The remaining stack is not
+        // re-validated — the chain hash already attests to it.
         //
         // The shift moves `lock_addr` and `poison_fn` as separate words, so a
         // foreign CPU reading mid-shift can see a mismatched pair. Only the
@@ -1075,9 +1070,8 @@ pub unsafe fn pop_lock(lock_addr: *const ()) {
                 (*stack).entries[j] = (*stack).entries[j + 1];
             }
             (*stack).entries[top] = HeldLock::EMPTY;
-            // Conservatively reset chain key — non-LIFO release breaks
-            // the invariant that prev_chain_key fields chain back to the
-            // initial key. Rebuild from scratch.
+            // Non-LIFO release breaks the invariant that `prev_chain_key`
+            // fields chain back to the initial key; rebuild from scratch.
             let mut key = INITIAL_CHAIN_KEY;
             for j in 0..(depth as usize - 1) {
                 key = iterate_chain_key(key, (*stack).entries[j].class_idx);
@@ -1086,20 +1080,18 @@ pub unsafe fn pop_lock(lock_addr: *const ()) {
             return;
         }
 
-        // Not found. The release is real but the entry is gone — the poison
-        // walk drained it, or the push was dropped past `MAX_HELD_LOCKS`.
-        // Counted so a leak is a number rather than a silence.
+        // The release is real but the entry is gone — the poison walk drained
+        // it, or the push was dropped past `MAX_HELD_LOCKS`. Counted so a leak
+        // is a number rather than a silence.
         (*stack).pop_misses.fetch_add(1, Ordering::Relaxed);
     }
 }
 
-/// Record that an Epoch read-side critical section opened on the
-/// current CPU.
+/// Record that an Epoch read-side critical section opened on the current CPU.
 ///
-/// Pushes a synthetic class entry tagged [`LOCK_LEVEL_EPOCH`] onto the
-/// per-CPU held-lock stack. `push_lock` consults this entry on every
-/// subsequent acquisition and panics if any tracked lock would be
-/// taken while the synthetic class is live.
+/// Pushes a synthetic class entry tagged [`LOCK_LEVEL_EPOCH`]. `push_lock`
+/// consults it on every subsequent acquisition and panics if any tracked lock
+/// would be taken while the synthetic class is live.
 ///
 /// # Safety
 /// Caller must hold a `PreemptGuard` for the lifetime of the synthetic
@@ -1152,24 +1144,20 @@ pub unsafe fn push_epoch(epoch_addr: *const (), class: &'static LockClassKey) {
 /// construction in `EpochGuard::drop`).
 #[inline]
 pub unsafe fn pop_epoch(epoch_addr: *const ()) {
-    // Pop uses the same address-keyed walk as `pop_lock`; the
-    // synthetic entry was pushed with `lock_addr = epoch_addr`.
     // SAFETY: caller honours the LIFO + preempt-disabled contract.
     unsafe { pop_lock(epoch_addr) }
 }
 
-/// Walk the panicking CPU's held-lock stack, calling each entry's
-/// poison callback in reverse order (innermost first).
+/// Walk the panicking CPU's held-lock stack, calling each entry's poison
+/// callback in reverse order (innermost first).
 ///
 /// **Draining is all this does.** Deciding that the kernel is dying is
-/// [`enter_fatal_bypass`]'s job, which the fatal wrappers in
-/// `sync::panic_recovery` and `boot::panic` call. `call_panic_cleanup` —
-/// the *recovered* path — reaches here and must not latch, because the
-/// kernel resumes and every later acquisition on every CPU would go
-/// unvalidated for the rest of the boot.
+/// [`enter_fatal_bypass`]'s job; `call_panic_cleanup` — the *recovered* path —
+/// reaches here and must not latch, or the kernel resumes with every later
+/// acquisition on every CPU unvalidated.
 ///
-/// The walk cannot re-enter [`push_lock`]: every registered poison
-/// callback is pure atomic stores — no lock, no klog, no allocation.
+/// Cannot re-enter [`push_lock`]: every registered poison callback is pure
+/// atomic stores — no lock, no klog, no allocation.
 ///
 /// # Safety
 /// Must only be called from panic recovery on the panicking CPU. All
@@ -1193,11 +1181,9 @@ pub fn held_depth_mark() -> u32 {
 
 /// Poison-unlock only the entries pushed above `mark`.
 ///
-/// A recovery boundary nested inside another must not release the locks
-/// the *outer* frame still holds: those guards are alive and their `Drop`
-/// will release them again, and a ticket lock double-released admits two
-/// holders. Draining to the boundary's own watermark keeps the unwind
-/// scoped to the frames that actually went away.
+/// A recovery boundary nested inside another must not release the locks the
+/// *outer* frame still holds: those guards are alive and their `Drop` will
+/// release them again, and a ticket lock double-released admits two holders.
 ///
 /// # Safety
 /// As [`poison_unlock_all_held`]; `mark` must come from
@@ -1208,9 +1194,8 @@ pub unsafe fn poison_unlock_held_above(mark: u32) {
     }
     let _irq = IrqOff::enter();
     let cpu = get_current_cpu();
-    // A report that panicked left this set so its own unwind logging could
-    // not re-enter the reporter. The panic has now been caught (or the
-    // machine is going down), so the window is over.
+    // A report that panicked left this set so its own unwind logging could not
+    // re-enter the reporter; that window is over.
     IN_REPORT[cpu].store(false, Ordering::Relaxed);
     let stack = held(cpu);
 
@@ -1229,8 +1214,6 @@ pub unsafe fn poison_unlock_held_above(mark: u32) {
         let mut depth = depth;
         while depth > mark {
             depth -= 1;
-            // Retire before releasing, as `pop_lock` does: a reader that
-            // cannot be masked must never see a counted-but-empty entry.
             (*stack).depth.store(depth, Ordering::Relaxed);
             core::sync::atomic::compiler_fence(Ordering::Release);
             let entry = (*stack).entries[depth as usize];
@@ -1246,16 +1229,11 @@ pub unsafe fn poison_unlock_held_above(mark: u32) {
     }
 }
 
-// ===========================================================================
-// Introspection
-// ===========================================================================
-
 /// Registrable class slots consumed, out of [`REGISTRABLE_CLASSES`].
 ///
 /// **Clamped**: [`register_class`] bumps `CLASS_COUNT` before its bound check,
-/// so the raw counter overshoots by at least one the moment the table fills,
-/// and keeps climbing while allocation is still being attempted. Reporting the
-/// raw value would say 253 classes exist when 252 do.
+/// so the raw counter overshoots the moment the table fills and keeps climbing
+/// while allocation is still being attempted.
 #[inline]
 pub fn class_count() -> usize {
     (CLASS_COUNT.load(Ordering::Relaxed) as usize).min(REGISTRABLE_CLASSES)
@@ -1294,10 +1272,9 @@ pub enum DeclareOrderError {
 /// Assert that `outer` is always acquired before `inner`.
 ///
 /// Without a declaration, the polarity of a class pair is whatever ran first
-/// this boot: a subsystem exercised in only one direction on a headless boot
-/// teaches the graph that direction, and the opposite one is not reported
-/// until something happens to execute it. Declaring the intended order at
-/// init makes the first wrong-way acquisition a finding on **every** boot.
+/// this boot, so a direction nothing happened to execute is never reported.
+/// Declaring the intended order at init makes the first wrong-way acquisition
+/// a finding on **every** boot.
 ///
 /// Both classes are registered eagerly at subclass 0, so the declaration is
 /// live before either lock is first taken.
@@ -1323,9 +1300,8 @@ pub fn declare_order(
         return Err(DeclareOrderError::Contradicted);
     }
 
-    // Idempotent: a re-initialised subsystem declares the same pair again,
-    // and burning a slot per call would fill the table and turn a correct
-    // declaration into a failure.
+    // Idempotent: a re-initialised subsystem declares the same pair again, and
+    // burning a slot per call would fill the table.
     let already = DECLARED_COUNT.load(Ordering::Relaxed) as usize;
     for entry in &DECLARED[..already.min(MAX_DECLARED_ORDERS)] {
         if entry.outer.load(Ordering::Relaxed) == outer_idx
@@ -1393,10 +1369,8 @@ pub fn declared_observed() -> usize {
         .count()
 }
 
-/// `true` once the overflow warning has been emitted.
-///
-/// Lets a kernel test assert that a validator which disabled itself said so,
-/// without scraping the serial log.
+/// `true` once the overflow warning has been emitted, so a kernel test can
+/// assert a validator that disabled itself said so without scraping serial.
 #[inline]
 pub fn overflow_reported() -> bool {
     OVERFLOW_REPORTED.load(Ordering::Relaxed)
@@ -1483,11 +1457,8 @@ pub fn held_lock_snapshot() -> (u32, Option<(&'static str, &'static str, u64)>) 
     // only other party able to write it, and no reference is minted.
     unsafe {
         let depth = (*stack).depth.load(Ordering::Relaxed);
-        // Walk down past any null-address slot rather than describing one.
-        // The published depth never counts an unfilled entry, so this can
-        // only skip a dropped push — and a diagnostic that formats a null
-        // address reads as corruption and sends the reader after the wrong
-        // bug.
+        // Skip a null-address slot rather than describe one: it can only be a
+        // dropped push, and a formatted null address reads as corruption.
         for i in (0..depth as usize).rev() {
             let e = (*stack).entries[i];
             if e.lock_addr.is_null() {
@@ -1581,11 +1552,9 @@ pub struct ClassInfo {
     pub flags: u32,
 }
 
-/// Read class `idx` if a class has been registered there.
-///
-/// Bounded on [`MAX_CLASSES`] rather than [`class_count`] so the reserved
-/// self-test slots above the registrable range are dumpable too; the
-/// zero-id check filters slots nothing has claimed.
+/// Read class `idx` if a class has been registered there. Bounded on
+/// [`MAX_CLASSES`] rather than [`class_count`] so the reserved self-test slots
+/// above the registrable range are dumpable too.
 pub fn class_info(idx: usize) -> Option<ClassInfo> {
     if idx >= MAX_CLASSES {
         return None;

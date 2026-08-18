@@ -1,15 +1,7 @@
 //! Per-stream recursive lock.
 //!
-//! POSIX §2.5.1 requires every stdio function to behave as if it acquired the
-//! stream's lock for the duration of the call, and requires `flockfile` to be
-//! recursive so a thread that already owns a stream may lock it again. That
-//! recursion is not a convenience: `printf` takes the stream once per call and
-//! then emits through the same primitives a caller could have taken it with.
-//!
-//! `pthread_mutex_t` is a bare futex word, so the owner identity and the
-//! recursion count live here. Identity is the thread's TCB address — one
-//! `mov rax, fs:[0]`, no syscall. Before TLS is installed exactly one thread
-//! exists, so a constant stands in for it.
+//! POSIX §2.5.1 requires `flockfile` to be recursive, and `pthread_mutex_t` is
+//! a bare futex word, so the owner identity and recursion count live here.
 
 use core::cell::UnsafeCell;
 use core::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
@@ -25,7 +17,6 @@ use crate::thread::tls::tls_is_initialized;
 /// Never collides with a TCB address.
 const PRE_TLS_THREAD: usize = 1;
 
-/// Identity of the calling thread, for the recursive-ownership test.
 fn thread_identity() -> usize {
     if tls_is_initialized() {
         // SAFETY: `tls_is_initialized` reports that `fs_base` holds a live TCB.
@@ -52,8 +43,8 @@ impl StreamLock {
         }
     }
 
-    /// Take one more level if `me` already owns the lock. Only the owner ever
-    /// writes `depth`, so the read-modify-write needs no atomicity.
+    /// Only the owner ever writes `depth`, so the read-modify-write needs no
+    /// atomicity.
     fn reenter(&self, me: usize) -> bool {
         if self.owner.load(Ordering::Acquire) != me {
             return false;

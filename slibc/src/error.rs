@@ -109,8 +109,7 @@ impl From<crate::errno::Errno> for SyscallError {
 
 pub type SyscallResult<T> = Result<T, SyscallError>;
 
-/// Convert raw syscall return value to Result.
-/// Negative values in [-4095, -1] indicate errors (negated errno).
+/// Raw syscall returns in [-4095, -1] are errors carrying a negated errno.
 #[inline]
 pub fn demux(value: u64) -> SyscallResult<u64> {
     let signed = value as i64;

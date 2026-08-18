@@ -149,10 +149,6 @@ fn region_rejects_straddle() -> TestResult {
 }
 stest!(name = region_rejects_straddle, suite = slopring);
 
-// ---------------------------------------------------------------------------
-// CQE post / overflow / reserve.
-// ---------------------------------------------------------------------------
-
 fn cqe_post_advances_tail() -> TestResult {
     let mut ring = make_ring(4);
     let posted = ring.post_cqe(0x1234, 42, 0).unwrap_or(false);
@@ -162,7 +158,6 @@ fn cqe_post_advances_tail() -> TestResult {
     if ring.cq_tail != 1 {
         return slopos_testing::fail!("cq_tail not advanced");
     }
-    // Read the CQE back out of the region.
     let off = ring.layout.cqe_off(0) as usize;
     let mut bytes = [0u8; 16];
     ring.region.copy_out(off, &mut bytes).unwrap();
@@ -176,11 +171,10 @@ fn cqe_post_advances_tail() -> TestResult {
 stest!(name = cqe_post_advances_tail, suite = slopring);
 
 fn cqe_overflow_counts_when_full() -> TestResult {
-    // entries=1 → cq_entries=2. Fill it, then overflow.
+    // entries=1 → cq_entries=2.
     let mut ring = make_ring(1);
     assert_post(&mut ring, 1, true);
     assert_post(&mut ring, 2, true);
-    // Flag is clear while the CQ is not yet overflowing.
     let flags_before = ring
         .region
         .load_u32_acquire(ring.layout.cq_off_flags as usize)
@@ -188,7 +182,6 @@ fn cqe_overflow_counts_when_full() -> TestResult {
     if (flags_before & SLOPRING_CQ_OVERFLOW) != 0 {
         return slopos_testing::fail!("CQ-overflow flag set before any drop");
     }
-    // CQ is now full (2/2); next post overflows.
     let posted = ring.post_cqe(3, 0, 0).unwrap_or(true);
     if posted {
         return slopos_testing::fail!("expected CQ-full drop");
@@ -196,7 +189,6 @@ fn cqe_overflow_counts_when_full() -> TestResult {
     if ring.cq_overflow != 1 {
         return slopos_testing::fail!("cq_overflow not incremented");
     }
-    // The drop must raise the shared CQ-overflow flag so userland sees it.
     let flags_after = ring
         .region
         .load_u32_acquire(ring.layout.cq_off_flags as usize)
@@ -218,7 +210,6 @@ fn cq_full_predicate() -> TestResult {
     if ring.cq_full(0) {
         return slopos_testing::fail!("empty CQ reported full");
     }
-    // Simulate tail at capacity vs head 0.
     let mut ring2 = make_ring(1);
     ring2.cq_tail = 2;
     if !ring2.cq_full(0) {
@@ -227,10 +218,6 @@ fn cq_full_predicate() -> TestResult {
     TestResult::Pass
 }
 stest!(name = cq_full_predicate, suite = slopring);
-
-// ---------------------------------------------------------------------------
-// In-flight table.
-// ---------------------------------------------------------------------------
 
 fn inflight_push_until_full() -> TestResult {
     let mut t = InFlightVec::with_capacity(2);
@@ -265,17 +252,12 @@ fn inflight_find_and_remove() -> TestResult {
     if t.find_user_data(20).is_some() {
         return slopos_testing::fail!("removed row still found");
     }
-    // The other rows survive.
     if t.find_user_data(10).is_none() || t.find_user_data(30).is_none() {
         return slopos_testing::fail!("swap-remove lost a surviving row");
     }
     TestResult::Pass
 }
 stest!(name = inflight_find_and_remove, suite = slopring);
-
-// ---------------------------------------------------------------------------
-// OP_CANCEL semantics (SLOPRING § 10).
-// ---------------------------------------------------------------------------
 
 fn cancel_pending_posts_ecanceled() -> TestResult {
     let mut ring = make_ring(4);
@@ -299,12 +281,10 @@ fn cancel_pending_posts_ecanceled() -> TestResult {
         _resv1: 0,
     };
     crate::enter::process_sqe_for_test(FdTable::Kernel, &mut ring, &cancel);
-    // The cancelled op's row is gone.
     if ring.inflight.find_user_data(0xaaaa).is_some() {
         return slopos_testing::fail!("cancelled row not removed");
     }
-    // Two CQEs posted: the cancelled op (-ECANCELED) and the cancel
-    // result (0 found). cq_tail advanced by 2.
+    // Two CQEs: the cancelled op (-ECANCELED) and the cancel result (0 found).
     if ring.cq_tail != 2 {
         return slopos_testing::fail!("expected 2 CQEs, cq_tail={}", ring.cq_tail);
     }
@@ -332,7 +312,7 @@ fn cancel_missing_returns_enoent() -> TestResult {
         _resv1: 0,
     };
     crate::enter::process_sqe_for_test(FdTable::Kernel, &mut ring, &cancel);
-    // One CQE posted: the cancel result (-ENOENT).
+    // One CQE: the cancel result (-ENOENT).
     if ring.cq_tail != 1 {
         return slopos_testing::fail!("expected 1 CQE, cq_tail={}", ring.cq_tail);
     }
@@ -341,8 +321,7 @@ fn cancel_missing_returns_enoent() -> TestResult {
         .copy_out(ring.layout.cqe_off(0) as usize, &mut bytes)
         .unwrap();
     let cqe = Cqe::from_bytes(&bytes);
-    // `Errno::raw()` is already negative; the CQE carries the negated
-    // errno (`-ENOENT`) verbatim, matching the userland `res < 0` check.
+    // `Errno::raw()` is already negative; the CQE carries it verbatim.
     let enoent = slopos_abi::Errno::ENOENT.raw();
     if cqe.user_data == 0xc1 && cqe.res == enoent {
         TestResult::Pass
@@ -354,7 +333,7 @@ stest!(name = cancel_missing_returns_enoent, suite = slopring);
 
 fn cancel_all_removes_every_match() -> TestResult {
     let mut ring = make_ring(8);
-    // Three rows with the same user_data (cancel_all targets user_data).
+    // Three rows share a user_data: cancel_all targets user_data.
     ring.inflight.push(inflight(0x77, OP_READ));
     ring.inflight.push(inflight(0x77, OP_READ));
     ring.inflight.push(inflight(0x77, OP_READ));
@@ -386,10 +365,6 @@ fn cancel_all_removes_every_match() -> TestResult {
     TestResult::Pass
 }
 stest!(name = cancel_all_removes_every_match, suite = slopring);
-
-// ---------------------------------------------------------------------------
-// NOP inline completion.
-// ---------------------------------------------------------------------------
 
 fn nop_completes_inline() -> TestResult {
     let mut ring = make_ring(4);
@@ -427,10 +402,6 @@ fn nop_completes_inline() -> TestResult {
 }
 stest!(name = nop_completes_inline, suite = slopring);
 
-// ---------------------------------------------------------------------------
-// Layout invariants (mirror the abi-side host tests, run in-kernel).
-// ---------------------------------------------------------------------------
-
 fn layout_arrays_page_aligned() -> TestResult {
     for &e in &[1u32, 2, 16, 256, 4096] {
         let l = RingLayout::new(e);
@@ -445,13 +416,8 @@ fn layout_arrays_page_aligned() -> TestResult {
 }
 stest!(name = layout_arrays_page_aligned, suite = slopring);
 
-// ---------------------------------------------------------------------------
-// Multishot (ABI v2) — F_MORE / edge-cache / cancel / buffer bits.
-// ---------------------------------------------------------------------------
-
-/// A CQE posted with `SLOPRING_CQE_F_MORE` carries that bit verbatim into
-/// the shared CQ — the interim-completion marker the userland reactor uses
-/// to keep an armed multishot slot alive.
+/// `SLOPRING_CQE_F_MORE` reaches the shared CQ verbatim — the
+/// interim-completion marker that keeps an armed multishot slot alive.
 fn post_cqe_carries_f_more() -> TestResult {
     let mut ring = make_ring(4);
     if !ring.post_cqe(0x55, 7, SLOPRING_CQE_F_MORE).unwrap_or(false) {
@@ -470,9 +436,8 @@ fn post_cqe_carries_f_more() -> TestResult {
 }
 stest!(name = post_cqe_carries_f_more, suite = slopring);
 
-/// `set_last_revents` mutates the *live* in-flight row (the OP_POLL_ADD
-/// edge cache), so the harvest's snapshot-walk decision is reflected back
-/// onto the persistent row.
+/// `set_last_revents` mutates the *live* in-flight row, so the harvest's
+/// snapshot-walk decision is reflected back onto the OP_POLL_ADD edge cache.
 fn set_last_revents_updates_live_row() -> TestResult {
     let mut t = InFlightVec::with_capacity(4);
     let mut row = inflight(0x1234, OP_POLL_ADD);
@@ -494,9 +459,8 @@ fn set_last_revents_updates_live_row() -> TestResult {
 }
 stest!(name = set_last_revents_updates_live_row, suite = slopring);
 
-/// Cancelling an armed multishot row posts exactly one terminal CQE with
-/// `-ECANCELED` and **F_MORE clear** (SLOPRING §1.3 trigger 4), and
-/// removes the row.
+/// Cancelling an armed multishot row removes it and posts exactly one terminal
+/// CQE with `-ECANCELED` and **F_MORE clear** (SLOPRING §1.3 trigger 4).
 fn multishot_cancel_clears_more() -> TestResult {
     let mut ring = make_ring(8);
     let mut row = inflight(0xabcd, OP_ACCEPT);
@@ -523,7 +487,6 @@ fn multishot_cancel_clears_more() -> TestResult {
     if ring.inflight.find_user_data(0xabcd).is_some() {
         return slopos_testing::fail!("cancelled multishot row not removed");
     }
-    // CQE 0 = the cancelled op (-ECANCELED, F_MORE clear).
     let mut bytes = [0u8; 16];
     ring.region
         .copy_out(ring.layout.cqe_off(0) as usize, &mut bytes)
@@ -559,9 +522,8 @@ fn sqe_multishot_flag_round_trips() -> TestResult {
 }
 stest!(name = sqe_multishot_flag_round_trips, suite = slopring);
 
-/// CQE provided-buffer bits pack a buffer id into the high 16 bits
-/// alongside `F_BUFFER`; the shift/mask recover it. Freezes the Phase-4
-/// ABI in-kernel.
+/// CQE provided-buffer bits pack a buffer id into the high 16 bits alongside
+/// `F_BUFFER`; the shift/mask recover it.
 fn cqe_buffer_bits_pack() -> TestResult {
     let bid: u32 = 0x1357;
     let flags = SLOPRING_CQE_F_BUFFER | (bid << SLOPRING_CQE_BUFFER_SHIFT);
@@ -582,10 +544,9 @@ stest!(name = cqe_buffer_bits_pack, suite = slopring);
 
 /// The zero-copy-send notification flag (`SLOPRING_CQE_F_NOTIF`) is bit 3,
 /// distinct from `F_MORE` (bit 0) and `F_BUFFER` (bit 1), and round-trips
-/// through the wire `Cqe` encoding — the terminal CQE of an `OP_SEND_ZC` two-CQE
-/// completion (first carries `F_MORE`, then this carries `F_NOTIF`).
+/// through the wire `Cqe` encoding — the terminal CQE of an `OP_SEND_ZC`
+/// two-CQE completion.
 fn cqe_notif_bit_pack() -> TestResult {
-    // Distinct, non-overlapping flag bits.
     if SLOPRING_CQE_F_NOTIF == SLOPRING_CQE_F_MORE
         || SLOPRING_CQE_F_NOTIF == SLOPRING_CQE_F_BUFFER
         || SLOPRING_CQE_F_NOTIF != (1 << 3)

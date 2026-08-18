@@ -124,11 +124,8 @@ impl KernelTestScope {
         };
         let mut captured = captured;
 
-        // Reset-to-fresh-state: park PCR on the bootstrap stub, shut
-        // down the existing task manager + scheduler, then re-init.
-        // This is what test bodies see at the start of their critical
-        // section. Drop's restore() walk puts back the pre-reset
-        // values from the snapshots above.
+        // The reset runs after the snapshot, so the captured values are the
+        // pre-reset ones and Drop's restore walk puts those back.
         slopos_arch::pcr::park_bootstrap_task(
             slopos_ostd::task::bootstrap::BSP_BOOTSTRAP_TASK.get() as *mut (),
         );
@@ -151,8 +148,7 @@ impl KernelTestScope {
             panic!("KernelTestScope: {} failed", stage);
         }
 
-        // Force-clear inbox counts that may have appeared between the
-        // initial drain and init_scheduler's reset.
+        // Inbox counts can reappear between the initial drain and the re-init.
         #[cfg(feature = "test-hooks")]
         {
             let mut missing_cpu: Option<usize> = None;
@@ -181,15 +177,14 @@ impl KernelTestScope {
         }
     }
 
-    /// Convenience alias for `enter()`. Lets pre-existing call sites
-    /// like `let _f = MyFixture::new();` keep working when
+    /// Alias for `enter()`, so `MyFixture::new()` keeps working where
     /// `MyFixture` is a type alias for `KernelTestScope`.
     pub fn new() -> Self {
         Self::enter()
     }
 
-    /// Borrow the BootCtx for the duration of `f`. Used by tests to
-    /// call boot-only mutators (gdt_set_ist, init_scheduler, ...).
+    /// Borrow the `BootCtx` so a test can call boot-only mutators
+    /// (`gdt_set_ist`, `init_scheduler`, ...).
     pub fn with_boot<R>(&mut self, f: impl FnOnce(&mut BootCtx<'static, TestInit>) -> R) -> R {
         let ctx = self
             .boot_ctx
@@ -205,8 +200,6 @@ impl Drop for KernelTestScope {
         scheduler_shutdown();
         clear_all_cpu_queues();
 
-        // Restore in reverse topo order: dependents undone first, then
-        // dependencies.
         run_restore_phase_drain(&mut self.captured);
 
         if let Some(ctx) = self.boot_ctx.take() {

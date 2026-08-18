@@ -242,10 +242,6 @@ pub unsafe extern "C" fn slopos_munmap(addr: *mut u8, len: usize) -> i32 {
     }
 }
 
-// =============================================================================
-// Networking FFI exports for std::net platform layer
-// =============================================================================
-
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn slopos_socket(domain: i32, sock_type: i32, protocol: i32) -> i32 {
     match Sys::socket(domain, sock_type, protocol) {

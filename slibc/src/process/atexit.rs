@@ -1,12 +1,9 @@
-//! atexit — the last rites before the Wheel stops spinning.
-
 const ATEXIT_MAX: usize = 32;
 
 static mut HANDLERS: [Option<unsafe extern "C" fn()>; ATEXIT_MAX] = [None; ATEXIT_MAX];
 static mut COUNT: usize = 0;
 
 /// Register a function to be called at normal process termination.
-///
 /// Returns 0 on success, -1 if the table is full.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn atexit(func: unsafe extern "C" fn()) -> i32 {

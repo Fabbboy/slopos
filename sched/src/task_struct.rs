@@ -1,9 +1,5 @@
-//! Kernel-side alias for the OSTD-owned generic `TaskInner<K, U>`.
-//!
-//! The struct body relocated to `slopos_ostd::task::kernel_task`; this
-//! module keeps the type alias + razor assertions so the existing
-//! `Task` spelling continues to resolve at every existing call site and
-//! the field-offset contract stays pinned at the kernel boundary.
+//! Kernel-side aliases for the OSTD-owned generic `TaskInner<K, U>`, plus the
+//! razor assertions that pin the field-offset contract at the kernel boundary.
 
 use core::mem::offset_of;
 
@@ -25,25 +21,19 @@ pub use slopos_ostd::task::kernel_task::{
     SignalAction, SwitchContext, TaskContext, TaskInner, fpu_reset_in_place,
 };
 
-// The two stack-handle types this kernel builds every task from, declared so
-// `CurrentTask` and the PCR publisher agree on the monomorphisation the
-// current-task slot holds. `KernelStack` and `UnsafeStack` are aliases, so the
-// impl heads are the local `TaskStack<_>` — which is what makes them legal to
-// write here at all.
+// Declared so `CurrentTask` and the PCR publisher agree on the monomorphisation
+// the current-task slot holds. Both names are aliases, so the impl heads are the
+// local `TaskStack<_>` — which is what makes them legal to write here at all.
 slopos_ostd::declare_pcr_stack_type!(KernelStack);
 slopos_ostd::declare_pcr_stack_type!(UnsafeStack);
 
-/// Concrete kernel `Task` type alias. Every existing call site continues
-/// to spell the type as `Task`; the struct body lives in OSTD.
 pub type Task = TaskInner<KernelStack, UnsafeStack>;
 
 /// Borrow of the task running on this CPU, at the concrete kernel
-/// monomorphisation. Spelled `Current::get()` rather than
-/// `CurrentTask::<KernelStack, UnsafeStack>::get()` at every call site.
+/// monomorphisation.
 pub type Current = slopos_ostd::task::CurrentTask<KernelStack, UnsafeStack>;
 
 /// Borrow of this CPU's idle task, at the concrete kernel monomorphisation.
-/// Spelled `Idle::current()` at every call site.
 pub type Idle = slopos_ostd::task::IdleTask<KernelStack, UnsafeStack>;
 
 /// Exclusive access to one endpoint of a context switch, at the concrete
@@ -53,36 +43,27 @@ pub type Switching<'a> = slopos_ostd::task::SwitchWindow<'a, KernelStack, Unsafe
 /// Racy, lock-free, allocation-free snapshot of the running task, at the
 /// concrete kernel monomorphisation.
 ///
-/// The fault handlers in `boot/` are the callers, and they must not name the
-/// stack-handle types to get one. Takes no lock, mints no handle, forms no
-/// reference — see `slopos_ostd::task::diag` for what it does and does not
-/// promise.
+/// Exists so the fault handlers in `boot/` can get one without naming the
+/// stack-handle types. See `slopos_ostd::task::diag` for what it promises.
 #[inline]
 pub fn current_task_diag() -> Option<slopos_ostd::task::TaskDiag> {
     slopos_ostd::task::current_task_diag::<KernelStack, UnsafeStack>()
 }
 
-// =============================================================================
-// Razor blocks against the concrete monomorphisation
-// =============================================================================
-
 /// Offset of `fpu_state - context` within `Task`.
 pub const FPU_STATE_OFFSET: usize = 0xC8;
 
-// The actual `fpu_state - context` delta is `size_of::<TaskContext>()`
-// (200 bytes / 0xC8) plus whatever padding the compiler inserts ahead
-// of `fpu_state` to satisfy its 64-byte alignment. Allow up to one
-// 64-byte alignment cycle so the tripwire still fires if someone
-// inserts a real field between `context` and `fpu_state`.
+// The real delta is `size_of::<TaskContext>()` (0xC8) plus whatever padding
+// `fpu_state`'s 64-byte alignment needs, so one alignment cycle of slack still
+// fires on a real field inserted between `context` and `fpu_state`.
 const _: () = {
     let diff = offset_of!(Task, fpu_state) - offset_of!(Task, context);
     assert!(diff >= FPU_STATE_OFFSET);
     assert!(diff < FPU_STATE_OFFSET + 64);
 };
 
-// Tripwire: the Task struct is inherently large (dominated by FpuState).
-// Keep it bounded to a single page so its static array fits comfortably
-// in `.bss` and heap callers budget a single-page allocation.
+// Bounded so the static array fits comfortably in `.bss` and heap callers
+// budget a single-page allocation.
 const _: () = assert!(core::mem::size_of::<Task>() <= 8192);
 
 // Razor: the per-signal disposition table has exactly one slot per signal.
