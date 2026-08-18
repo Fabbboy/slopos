@@ -1,35 +1,24 @@
 //! Linker-section registry of `HermeticState` impls.
 //!
-//! Mirrors the `boot_init!` (`boot/src/early_init.rs:67-125`) and
-//! `stest!` (`ktesting/src/lib.rs:72-125`) idioms: each impl emits a
-//! `#[link_section = ".hermetic_state_registry"] static` of type
-//! `HermeticVTable`. The kernel ELF's linker concatenates these into a
-//! contiguous slice bracketed by `__start_hermetic_state_registry` and
-//! `__stop_hermetic_state_registry`.
+//! Each impl emits a `#[link_section = ".hermetic_state_registry"] static` of
+//! type `HermeticVTable`; the linker concatenates them into a contiguous
+//! slice bracketed by `__start_hermetic_state_registry` and
+//! `__stop_hermetic_state_registry`. The scope walks it at enter, topo-sorts
+//! by `DEPENDS_ON`, snapshots in that order, and replays restores in reverse
+//! on drop.
 //!
-//! The scope walks the registry at enter, topo-sorts by `DEPENDS_ON`,
-//! captures each state's snapshot in dependency order, stores the
-//! type-erased payload, and replays restores in reverse on drop.
-//!
-//! Type erasure: each state's `Snapshot` is `KBox`-allocated, then its
-//! `into_raw` pointer is cast to `NonNull<()>`. The vtable's `restore`
-//! thunk casts back to `*mut S::Snapshot`, calls `KBox::from_raw`, and
-//! moves the value into `S::restore`. No inline-buffer optimisation —
-//! `KBox::try_new` of small types is ~50ns, not worth the API surface.
+//! Snapshots are type-erased: `KBox::into_raw` cast to `NonNull<()>`, cast
+//! back by the vtable's `restore` thunk.
 
 use slopos_ostd::{AllocError, KVec};
 
-// The vtable type itself lives in OSTD so the new `hermetic_state!`
-// declarative macro and the legacy `register_hermetic_state!` macro
-// both write into the same `.hermetic_state_registry` linker section
-// with a single canonical vtable definition. Re-exported here so
-// consumers that still spell `slopos_hermetic::HermeticVTable`
-// compile unchanged.
+// The vtable lives in OSTD so `hermetic_state!` and the legacy
+// `register_hermetic_state!` write one canonical type into the section.
 pub use slopos_ostd::test_support::hermetic::HermeticVTable;
 
-/// Iterate every registered `HermeticVTable` in linker order. Order is
-/// fragile (depends on translation-unit link order); `topo_order` is
-/// the scope's actual capture-order source of truth.
+/// Iterate every registered `HermeticVTable` in linker order. That order
+/// depends on translation-unit link order; `topo_order` is the scope's
+/// capture-order source of truth.
 pub fn registry_iter() -> impl Iterator<Item = &'static HermeticVTable> {
     slopos_ostd::ffi::registry::registry_slice::<HermeticVTable>(
         slopos_ostd::ffi::registry::RegistryId::HermeticStates,
@@ -37,7 +26,6 @@ pub fn registry_iter() -> impl Iterator<Item = &'static HermeticVTable> {
     .iter()
 }
 
-/// Errors from registry analysis.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RegistryError {
     /// `DEPENDS_ON` graph contains a cycle.
@@ -54,12 +42,9 @@ impl From<AllocError> for RegistryError {
     }
 }
 
-/// Topo-sort the registry by `DEPENDS_ON`. Returns vtables in
-/// dependency order: predecessors first, then dependents. The scope
-/// captures snapshots in this order; restores walk the reverse.
-///
-/// Kahn's algorithm; O(N²) lookup of names but N ≤ ~20 in practice so
-/// fine. Returns `RegistryError::CycleDetected` if cyclic.
+/// Topo-sort the registry by `DEPENDS_ON`: predecessors first, then
+/// dependents. The scope captures snapshots in this order and restores in
+/// reverse. `O(N²)` name lookup, bounded by N ≤ ~20 registered states.
 pub fn topo_order() -> Result<KVec<&'static HermeticVTable>, RegistryError> {
     let entries: KVec<&'static HermeticVTable> = registry_iter().collect();
     let n = entries.len();

@@ -1,11 +1,5 @@
-//! Classic VGA 8×16 bitmap font (public domain).
-//!
-//! This is the minimal emergency/fallback font used when TrueType
-//! fonts cannot be loaded from the filesystem. It provides readable
-//! text at any point in the boot process, including panic screens.
-//!
-//! Format: 256 glyphs × 16 rows × 1 byte/row = 4096 bytes.
-//! Each byte represents 8 pixels (MSB = leftmost).
+//! Classic VGA 8×16 bitmap font (public domain), the fallback used whenever
+//! TrueType fonts cannot be loaded — including on panic screens.
 
 use slopos_ostd::KVec;
 
@@ -16,8 +10,7 @@ pub const BITMAP_FONT_BYTES_PER_GLYPH: usize = 16;
 
 use crate::{ASCII_FIRST, ASCII_LAST, GLYPH_COUNT};
 
-/// Get the bitmap data for a single glyph.
-/// Returns 16 bytes representing the glyph rows (MSB = leftmost pixel).
+/// One glyph's 16 rows, one byte per row (MSB = leftmost pixel).
 pub fn glyph_bitmap(codepoint: u8) -> &'static [u8] {
     let offset = codepoint as usize * BITMAP_FONT_BYTES_PER_GLYPH;
     &VGA_FONT_8X16[offset..offset + BITMAP_FONT_BYTES_PER_GLYPH]
@@ -58,9 +51,8 @@ pub fn bitmap_to_coverage(
         return None;
     }
 
-    // Sized to the full glyph set; the bitmap source only fills the ASCII
-    // slots, so the extended (Latin-1/extras) slots stay blank — the bitmap
-    // fallback is an ASCII-only emergency font.
+    // Sized to the full glyph set but only the ASCII slots are filled: the
+    // bitmap fallback is ASCII-only, so the extended slots stay blank.
     let stride = cell_w.checked_mul(cell_h)?;
     let coverage_len = GLYPH_COUNT.checked_mul(stride)?;
     let mut coverage = KVec::<u8>::zeroed(coverage_len).ok()?;
@@ -152,9 +144,7 @@ mod tests {
 }
 
 /// Classic VGA 8x16 ROM font — public domain IBM PC font data.
-/// 256 glyphs × 16 bytes/glyph = 4096 bytes total.
-/// Printable ASCII (0x20-0x7E) has recognizable glyphs;
-/// non-printable characters (0x00-0x1F, 0x80-0xFF) are zero-filled.
+/// Only printable ASCII (0x20-0x7E) carries glyphs; the rest is zero-filled.
 #[rustfmt::skip]
 pub static VGA_FONT_8X16: [u8; 4096] = [
     0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // 0x00,

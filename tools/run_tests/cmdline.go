@@ -8,9 +8,7 @@ import (
 	"strings"
 )
 
-// DefaultBaseCmdline is the standard kernel cmdline plumbed into the test
-// ISO. `assembleTestCmdline` adds tests.run / tests.skip / verbosity
-// overrides on top.
+// DefaultBaseCmdline is the kernel cmdline baked into the test ISO.
 const DefaultBaseCmdline = "tests=on tests.shutdown=on tests.verbosity=summary " +
 	"boot.debug=on roulette=skip"
 
@@ -50,10 +48,8 @@ func (s *stringSlice) Set(v string) error {
 	return nil
 }
 
-// preprocessArgv normalises POSIX-style `--flag value` into Go flag
-// package's accepted `--flag=value`. Boolean flags (no value) are
-// passed through unchanged. This lets users keep typing
-// `--filter slopos_mm::*` exactly as they did with the Python wrapper.
+// preprocessArgv normalises POSIX-style `--flag value` into the flag package's
+// accepted `--flag=value`. Boolean flags are passed through unchanged.
 func preprocessArgv(in []string) []string {
 	booleans := map[string]bool{
 		"--rerun-failed": true,
@@ -75,7 +71,6 @@ func preprocessArgv(in []string) []string {
 			i++
 			continue
 		}
-		// `--flag` followed by a value-looking token — fuse them.
 		if i+1 < len(in) && !strings.HasPrefix(in[i+1], "-") {
 			out = append(out, tok+"="+in[i+1])
 			i += 2
@@ -87,9 +82,8 @@ func preprocessArgv(in []string) []string {
 	return out
 }
 
-// parseArgs runs flag definitions over a preprocessed argv. Returns Args
-// or a non-nil error that the caller should print to stderr (typical: a
-// flag.Parse usage message).
+// parseArgs runs flag definitions over a preprocessed argv. A non-nil error is
+// caller-printable (typically a flag.Parse usage message).
 func parseArgs(argv []string) (*Args, error) {
 	fs := flag.NewFlagSet("run_tests", flag.ContinueOnError)
 	a := &Args{
@@ -127,7 +121,6 @@ func parseArgs(argv []string) (*Args, error) {
 	if a.NoColor {
 		a.ColorMode = "never"
 	}
-	// Mutual-exclusion checks.
 	if a.RerunFailed && len(a.Filters) > 0 {
 		return nil, fmt.Errorf("--rerun-failed and --filter are mutually exclusive")
 	}
@@ -157,10 +150,8 @@ func filterEmpty(in []string) []string {
 	return out
 }
 
-// assembleTestCmdline composes the full kernel cmdline string that gets
-// baked into the test ISO. Verbosity replacement happens via regex (the
-// base string already contains `tests.verbosity=summary`); filter / skip
-// / extra are appended.
+// assembleTestCmdline composes the kernel cmdline baked into the test ISO.
+// Verbosity is substituted in place: base already carries a `tests.verbosity=`.
 func assembleTestCmdline(base string, filters, skips []string, verbosity, extra string) string {
 	parts := []string{base}
 	if len(filters) > 0 {

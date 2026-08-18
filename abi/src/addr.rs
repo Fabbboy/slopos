@@ -1,15 +1,7 @@
 //! Physical and Virtual address types for type-safe memory operations.
 //!
-//! These newtypes prevent accidentally confusing physical addresses with virtual
-//! addresses, which is a common source of bugs in OS development. The types are
-//! zero-cost abstractions (`#[repr(transparent)]`) that compile to raw u64 values.
-//!
-//! # Address Types
-//!
-//! - [`PhysAddr`]: A physical memory address. Cannot be directly dereferenced.
-//! - [`VirtAddr`]: A virtual memory address in kernel or user space.
-//!
-//! # Example
+//! `#[repr(transparent)]` newtypes that compile to raw `u64`, so a physical
+//! address cannot be passed where a virtual one is expected.
 //!
 //! ```ignore
 //! use slopos_abi::addr::{PhysAddr, VirtAddr};
@@ -24,39 +16,24 @@
 
 use crate::PAGE_SIZE;
 
-/// A physical memory address.
-///
-/// Physical addresses cannot be directly dereferenced - they must first be
-/// translated to virtual addresses via the HHDM (Higher Half Direct Map) or
-/// by looking up the page tables.
-///
-/// On x86_64, physical addresses are up to 52 bits (4 PB addressable).
+/// A physical memory address. Not dereferenceable — translate through the HHDM
+/// (Higher Half Direct Map) or the page tables first. Up to 52 bits on x86-64.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[repr(transparent)]
 pub struct PhysAddr(pub u64);
 
-/// A virtual memory address.
-///
-/// Virtual addresses can be kernel-space (higher half) or user-space (lower half).
-/// On x86_64, virtual addresses must be "canonical" - bits 48-63 must be copies
-/// of bit 47 (sign extension).
+/// A virtual memory address, kernel-space (higher half) or user-space (lower
+/// half). On x86-64 it must be canonical: bits 48-63 copy bit 47.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[repr(transparent)]
 pub struct VirtAddr(pub u64);
 
-// =============================================================================
-// PhysAddr implementation
-// =============================================================================
-
 impl PhysAddr {
-    /// The null physical address.
     pub const NULL: Self = Self(0);
 
     /// Maximum valid physical address on x86_64 (52-bit physical address space).
     pub const MAX: Self = Self((1 << 52) - 1);
 
-    /// Create a new physical address from a raw u64 value.
-    ///
     /// # Panics
     ///
     /// Panics if the address exceeds the 52-bit physical address limit.
@@ -76,13 +53,11 @@ impl PhysAddr {
         }
     }
 
-    /// Returns the raw u64 value of this address.
     #[inline]
     pub const fn as_u64(self) -> u64 {
         self.0
     }
 
-    /// Returns true if this is the null address.
     #[inline]
     pub const fn is_null(self) -> bool {
         self.0 == 0
@@ -94,7 +69,6 @@ impl PhysAddr {
         Self(self.0.wrapping_add(off))
     }
 
-    /// Add an offset, returning None on overflow.
     #[inline]
     pub const fn checked_offset(self, off: u64) -> Option<Self> {
         match self.0.checked_add(off) {
@@ -113,7 +87,6 @@ impl PhysAddr {
         Self(crate::alignment::align_up_u64(self.0, align))
     }
 
-    /// Check if address is aligned to the given alignment.
     #[inline]
     pub const fn is_aligned(self, align: u64) -> bool {
         self.0 & (align - 1) == 0
@@ -130,16 +103,9 @@ impl PhysAddr {
     }
 }
 
-// =============================================================================
-// VirtAddr implementation
-// =============================================================================
-
 impl VirtAddr {
-    /// The null virtual address.
     pub const NULL: Self = Self(0);
 
-    /// Create a new virtual address from a raw u64 value.
-    ///
     /// # Panics
     ///
     /// Panics if the address is not canonical.
@@ -163,25 +129,21 @@ impl VirtAddr {
         }
     }
 
-    /// Returns the raw u64 value of this address.
     #[inline]
     pub const fn as_u64(self) -> u64 {
         self.0
     }
 
-    /// Returns true if this is the null address.
     #[inline]
     pub const fn is_null(self) -> bool {
         self.0 == 0
     }
 
-    /// Convert to a const pointer of type T.
     #[inline]
     pub const fn as_ptr<T>(self) -> *const T {
         self.0 as *const T
     }
 
-    /// Convert to a mut pointer of type T.
     #[inline]
     pub const fn as_mut_ptr<T>(self) -> *mut T {
         self.0 as *mut T
@@ -193,7 +155,6 @@ impl VirtAddr {
         Self(self.0.wrapping_add(off))
     }
 
-    /// Add an offset, returning None on overflow.
     #[inline]
     pub const fn checked_offset(self, off: u64) -> Option<Self> {
         match self.0.checked_add(off) {
@@ -212,7 +173,6 @@ impl VirtAddr {
         Self(crate::alignment::align_up_u64(self.0, align))
     }
 
-    /// Check if address is aligned to the given alignment.
     #[inline]
     pub const fn is_aligned(self, align: u64) -> bool {
         self.0 & (align - 1) == 0
@@ -228,15 +188,12 @@ impl VirtAddr {
         self.0 & (PAGE_SIZE - 1)
     }
 
-    /// Check if this address is in kernel space (higher half).
-    ///
-    /// On x86_64 with typical HHDM layout, kernel addresses have bit 47 set.
+    /// Kernel space is the higher half — on x86-64 those addresses have bit 47 set.
     #[inline]
     pub const fn is_kernel_space(self) -> bool {
         self.0 >= 0xFFFF_8000_0000_0000
     }
 
-    /// Check if this address is in user space (lower half).
     #[inline]
     pub const fn is_user_space(self) -> bool {
         self.0 < 0x0000_8000_0000_0000
@@ -254,10 +211,6 @@ impl VirtAddr {
         }
     }
 }
-
-// =============================================================================
-// Conversions
-// =============================================================================
 
 impl From<u64> for PhysAddr {
     #[inline]
@@ -300,10 +253,6 @@ impl<T> From<*mut T> for VirtAddr {
         Self::new(ptr as u64)
     }
 }
-
-// =============================================================================
-// Display implementations
-// =============================================================================
 
 impl core::fmt::LowerHex for PhysAddr {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {

@@ -1,14 +1,7 @@
-//! Low-level AML byte parsing primitives + a tolerant structural walker.
-//!
-//! The walker descends only the container objects that matter for device
-//! enumeration (`Scope`, `Device`) and records the leaf declarations we
-//! need (`Method` arg-counts, `Name`s, `OperationRegion`s, `Field`s,
-//! `Create*Field`s). Anything it cannot parse it bails on *for the
-//! current term list only* — container bounds come from `PkgLength`, so a
-//! bail never corrupts sibling subtrees. Every function returns `Option`
-//! and never panics: a malformed or unexpected DSDT degrades to "found
-//! less", never to a crash (important — this runs at boot on whatever
-//! firmware is present).
+//! Low-level AML byte parsing primitives plus a tolerant structural walker.
+//! Container bounds come from `PkgLength`, so bailing out of one term list
+//! never corrupts a sibling subtree; every function returns `Option`, and a
+//! malformed DSDT degrades to "found less" rather than to a crash.
 
 /// Half-open byte range `[start, end)` within an AML blob.
 #[derive(Clone, Copy)]
@@ -17,7 +10,6 @@ pub struct Range {
     pub end: usize,
 }
 
-// AML opcodes (subset).
 pub const OP_ZERO: u8 = 0x00;
 pub const OP_ONE: u8 = 0x01;
 pub const OP_ALIAS: u8 = 0x06;
@@ -64,7 +56,6 @@ pub const EXT_THERMAL_ZONE: u8 = 0x85;
 pub const EXT_INDEX_FIELD: u8 = 0x86;
 pub const EXT_BANK_FIELD: u8 = 0x87;
 
-/// ACPI region-space byte for `SystemMemory`.
 pub const REGION_SYSTEM_MEMORY: u8 = 0x00;
 
 #[inline]
@@ -77,9 +68,8 @@ fn is_name_char(b: u8) -> bool {
     is_lead_name_char(b) || b.is_ascii_digit()
 }
 
-/// Parse a `PkgLength` at `p`. Returns `(total_len, after_len_pos)` where
-/// `total_len` counts the PkgLength field bytes themselves, so the
-/// enclosing package ends at `p + total_len`.
+/// Returns `(total_len, after_len_pos)`. `total_len` counts the PkgLength
+/// field bytes themselves, so the enclosing package ends at `p + total_len`.
 pub fn pkg_length(aml: &[u8], p: usize) -> Option<(usize, usize)> {
     let lead = *aml.get(p)?;
     let extra = (lead >> 6) as usize;
@@ -94,8 +84,7 @@ pub fn pkg_length(aml: &[u8], p: usize) -> Option<(usize, usize)> {
     Some((len, p + 1 + extra))
 }
 
-/// Parse a NameString at `p`. Returns `(last_seg, new_pos)` where
-/// `last_seg` is the final 4-byte NameSeg (or `None` for a NullName).
+/// Yields the final 4-byte NameSeg, or `None` for a NullName.
 pub fn name_string(aml: &[u8], mut p: usize) -> Option<(Option<[u8; 4]>, usize)> {
     // Prefixes: one RootChar or any number of ParentPrefixChars.
     if aml.get(p).copied() == Some(OP_ROOT_CHAR) {
@@ -141,8 +130,7 @@ fn read_seg(aml: &[u8], p: usize) -> Option<[u8; 4]> {
     Some(seg)
 }
 
-/// Read a fixed-width little-endian integer constant. Returns the value
-/// and the position after it.
+/// Little-endian.
 fn read_uint(aml: &[u8], p: usize, n: usize) -> Option<(u64, usize)> {
     let bytes = aml.get(p..p + n)?;
     let mut v = 0u64;
@@ -152,8 +140,7 @@ fn read_uint(aml: &[u8], p: usize, n: usize) -> Option<(u64, usize)> {
     Some((v, p + n))
 }
 
-/// Evaluate a simple integer TermArg (constant only). Returns
-/// `(value, new_pos)` or `None` if it isn't a plain integer literal.
+/// `None` unless the TermArg is a plain integer literal.
 pub fn const_integer(aml: &[u8], p: usize) -> Option<(u64, usize)> {
     match *aml.get(p)? {
         OP_ZERO => Some((0, p + 1)),
@@ -167,16 +154,13 @@ pub fn const_integer(aml: &[u8], p: usize) -> Option<(u64, usize)> {
     }
 }
 
-/// Skip one DataObject / simple TermArg, returning the position after it.
-/// Handles the forms that appear as `Name` values and as the operand
-/// terms of `OperationRegion` / `Create*Field`. Returns `None` for
-/// anything it doesn't recognise (caller bails).
+/// Handles the forms that appear as `Name` values and as `OperationRegion` /
+/// `Create*Field` operands; anything else yields `None` and the caller bails.
 pub fn skip_term_arg(aml: &[u8], p: usize) -> Option<usize> {
     let op = *aml.get(p)?;
     match op {
         OP_ZERO | OP_ONE | OP_ONES => Some(p + 1),
-        // LocalN (0x60..=0x67) / ArgN (0x68..=0x6e) reference: a single opcode
-        // byte. Appears e.g. as the dynamic base of an `OperationRegion`.
+        // LocalN (0x60..=0x67) / ArgN (0x68..=0x6e): a single opcode byte.
         0x60..=0x6e => Some(p + 1),
         OP_BYTE_PREFIX => Some(p + 2),
         OP_WORD_PREFIX => Some(p + 3),
@@ -198,14 +182,12 @@ pub fn skip_term_arg(aml: &[u8], p: usize) -> Option<usize> {
             let q = skip_term_arg(aml, p + 1)?;
             skip_term_arg(aml, q)
         }
-        // Arithmetic / bitwise operators: two operands plus a Target
-        // (often NullName when compiled from expression context).
+        // Arithmetic / bitwise: two operands plus a Target, often NullName.
         0x72 | 0x74 | 0x77 | 0x79 | 0x7a | 0x7b | 0x7c | 0x7d | 0x7e | 0x7f => {
             let q = skip_term_arg(aml, p + 1)?;
             let q = skip_term_arg(aml, q)?;
             skip_term_arg(aml, q)
         }
-        // Unary operators with no target in the cases we structurally skip.
         0x92 | 0x83 => skip_term_arg(aml, p + 1), // LNot / DerefOf
         // Unary operators with a Target.
         0x80..=0x82 | 0x99 => {
@@ -266,13 +248,9 @@ fn integer_prefix(aml: &[u8], p: usize) -> bool {
     )
 }
 
-/// Skip the base expression of an `OperationRegion`.
-///
-/// Some firmware uses method-call expressions such as `PC2M(_ADR())` for
-/// PCI config-space windows. `skip_term_arg` deliberately treats a bare
-/// NameString as just a reference because it has no method-arity index, so
-/// this helper consumes one extra argument when that makes the following
-/// token look like the region-length integer.
+/// Some firmware writes the base as a method call such as `PC2M(_ADR())`, and
+/// `skip_term_arg` has no arity index so it stops at the bare NameString; this
+/// consumes one extra argument when that makes the next token the length.
 fn skip_op_region_base(aml: &[u8], p: usize) -> Option<usize> {
     let q = skip_term_arg(aml, p)?;
     if integer_prefix(aml, q) {
@@ -285,15 +263,13 @@ fn skip_op_region_base(aml: &[u8], p: usize) -> Option<usize> {
     Some(q)
 }
 
-/// A field element record: `(name_seg, bit_offset, bit_width)`.
 pub struct FieldElem {
     pub seg: [u8; 4],
     pub bit_offset: u32,
     pub bit_width: u32,
 }
 
-/// Walk a Field element list in `[start, end)`, invoking `f` for each
-/// named field with its running bit offset.
+/// `f` receives each named field with its running bit offset.
 pub fn walk_field_list(aml: &[u8], start: usize, end: usize, mut f: impl FnMut(FieldElem)) {
     let mut p = start;
     let mut bit_off: u32 = 0;
@@ -312,8 +288,8 @@ pub fn walk_field_list(aml: &[u8], start: usize, end: usize, mut f: impl FnMut(F
                 p += 3;
             }
             Some(0x02) => {
-                // ConnectField: 0x02 (NameString | BufferData) — bail; we
-                // don't need to read past a connection in our fields.
+                // ConnectField: 0x02 (NameString | BufferData) — bail rather
+                // than decode; no field of interest sits past a connection.
                 return;
             }
             Some(0x03) => {
@@ -340,20 +316,17 @@ pub fn walk_field_list(aml: &[u8], start: usize, end: usize, mut f: impl FnMut(F
     }
 }
 
-/// Visitor invoked by [`walk_terms`] for each declaration of interest.
+/// Invoked by [`walk_terms`] for each declaration of interest.
 pub trait Visitor {
-    /// `Method(name, argc)` with body range `[body_start, end)`.
     fn method(&mut self, _seg: [u8; 4], _argc: u8, _body: Range) {}
-    /// `External(name, MethodObj, argc)`.
+    /// Only for `External(..., MethodObj, argc)`.
     fn external_method(&mut self, _seg: [u8; 4], _argc: u8) {}
-    /// `Name(name, <value>)` with `value` range covering the data object.
+    /// `_value` spans the data object.
     fn name(&mut self, _seg: [u8; 4], _value: Range) {}
-    /// `OperationRegion(name, space, base, len)`.
     fn op_region(&mut self, _seg: [u8; 4], _space: u8, _base: u64, _len: u64) {}
-    /// A field declared inside `Field(region, ...)`.
+    /// A field declared inside `Field(region, …)`.
     fn field(&mut self, _region: [u8; 4], _elem: &FieldElem) {}
-    /// `CreateXField(source, byte_index, name)` / `CreateBitField`.
-    /// `width_bytes` is the access width (1/2/4/8) or 0 for a bit field.
+    /// `_width_bytes` is 1/2/4/8, or 0 for a `CreateBitField`.
     fn create_field(
         &mut self,
         _source: [u8; 4],
@@ -362,7 +335,7 @@ pub trait Visitor {
         _name: [u8; 4],
     ) {
     }
-    /// Entering a `Device(name)`; return `true` to descend into its body.
+    /// Return `true` to descend into the device body.
     fn enter_device(&mut self, _seg: [u8; 4], _body: Range) -> bool {
         true
     }
@@ -385,9 +358,8 @@ fn walk_predicated_pkg<V: Visitor>(
     }
     let mut next = node_end;
 
-    // Structurally walk the Else body too: firmware often uses top-level
-    // conditionals around namespace declarations, and this walker is not
-    // an AML evaluator.
+    // Walk the Else body too: firmware wraps top-level namespace declarations
+    // in conditionals, and this walker is not an evaluator.
     if consume_else && aml.get(next).copied() == Some(OP_ELSE) {
         let (else_total, else_body) = pkg_length(aml, next + 1)?;
         let else_end = (next + 1) + else_total;
@@ -566,9 +538,8 @@ fn walk_ext<V: Visitor>(aml: &[u8], p: usize, end: usize, v: &mut V) -> Option<u
     }
 }
 
-/// Maximum AML container nesting the walker will descend. Real DSDTs nest
-/// ~15–25 deep; this bounds stack use against adversarial/buggy firmware so
-/// the recursive descent can never overflow the boot stack.
+/// Real DSDTs nest ~15–25 deep; the cap bounds recursive-descent stack use
+/// against buggy firmware so the walk cannot overflow the boot stack.
 const MAX_WALK_DEPTH: u32 = 96;
 static WALK_DEPTH: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
 
@@ -579,8 +550,7 @@ impl Drop for WalkDepthGuard {
     }
 }
 
-/// A do-nothing [`Visitor`]: records nothing and never descends. Used to
-/// reuse the structural walkers purely for their end-position arithmetic.
+/// Reuses the structural walkers purely for their end-position arithmetic.
 struct NopVisitor;
 impl Visitor for NopVisitor {
     fn enter_device(&mut self, _seg: [u8; 4], _body: Range) -> bool {
@@ -588,14 +558,9 @@ impl Visitor for NopVisitor {
     }
 }
 
-/// Advance past one statement (`TermObj`) the evaluator does not execute: a
-/// namespace declaration (`Name`/`Alias`/`Create*Field`, or an extended-op
-/// `OperationRegion`/`Field`/…) or a value-less control op. Returns the
-/// position after it, or `None` if the term cannot be structurally bounded.
-///
-/// The executor's fallback for a statement it can't evaluate as an expression,
-/// keeping a method body live across a declaration the narrow I²C-HID
-/// evaluator can't model (e.g. a dynamic GPIO `OperationRegion`).
+/// The executor's fallback for a statement it cannot evaluate: bounds the term
+/// structurally so a method body stays live across a declaration this narrow
+/// evaluator cannot model. `None` if the term cannot be bounded.
 pub fn skip_statement(aml: &[u8], p: usize) -> Option<usize> {
     let op = *aml.get(p)?;
     let mut nop = NopVisitor;
@@ -619,8 +584,7 @@ pub fn skip_statement(aml: &[u8], p: usize) -> Option<usize> {
     }
 }
 
-/// Walk the term list in `[start, end)`, dispatching declarations to
-/// `v`. Descends `Scope` and (when the visitor allows) `Device`.
+/// Descends `Scope`, and `Device` when the visitor allows.
 pub fn walk_terms(aml: &[u8], start: usize, end: usize, v: &mut impl Visitor) {
     let depth = WALK_DEPTH.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
     let _guard = WalkDepthGuard;
@@ -662,8 +626,8 @@ pub fn walk_terms(aml: &[u8], start: usize, end: usize, v: &mut impl Visitor) {
                 p = q;
             }
             0x70 => {
-                // Store(Source, Target). We only collect declarations here;
-                // skip stores that appear in namespace-level conditionals.
+                // Store(Source, Target): only declarations are collected, so a
+                // store inside a namespace-level conditional is skipped.
                 let Some(q) = skip_term_arg(aml, p + 1) else {
                     return;
                 };

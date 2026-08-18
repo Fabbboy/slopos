@@ -1,17 +1,6 @@
-//! Local APIC MMIO register offsets and control flags.
-//!
-//! These are device-level definitions for programming the Local APIC via
-//! memory-mapped I/O.  They are internal to the APIC driver and should not
-//! leak outside the `drivers` crate.
-//!
-//! CPU-architectural APIC definitions (the IA32_APIC_BASE MSR) live in
-//! `slopos_arch::cpu::apic_msr` — a separate abstraction layer consumed by
-//! subsystems that need to discover the APIC base address without touching
-//! LAPIC registers directly (e.g. the memory manager's reservation logic).
-
-// =============================================================================
-// Register Offsets
-// =============================================================================
+//! Local APIC MMIO register offsets and control flags. The IA32_APIC_BASE MSR
+//! definitions live in `slopos_arch::cpu::apic_msr` instead, for subsystems that
+//! need the APIC base without touching LAPIC registers.
 
 pub(crate) const LAPIC_ID: u32 = 0x020;
 pub(crate) const LAPIC_VERSION: u32 = 0x030;
@@ -29,24 +18,12 @@ pub(crate) const LAPIC_TIMER_ICR: u32 = 0x380;
 pub(crate) const LAPIC_TIMER_CCR: u32 = 0x390;
 pub(crate) const LAPIC_TIMER_DCR: u32 = 0x3E0;
 
-// =============================================================================
-// Control Flags
-// =============================================================================
-
 pub(crate) const LAPIC_SPURIOUS_ENABLE: u32 = 1 << 8;
 pub(crate) const LAPIC_LVT_MASKED: u32 = 1 << 16;
-
-// =============================================================================
-// Timer Configuration
-// =============================================================================
 
 pub(crate) const LAPIC_TIMER_ONESHOT: u32 = 0x0000_0000;
 pub(crate) const LAPIC_TIMER_PERIODIC: u32 = 0x0002_0000;
 pub(crate) const LAPIC_TIMER_DIV_16: u32 = 0x3;
-
-// =============================================================================
-// IPI Command Flags
-// =============================================================================
 
 pub(crate) const LAPIC_ICR_DELIVERY_FIXED: u32 = 0 << 8;
 pub(crate) const LAPIC_ICR_DEST_PHYSICAL: u32 = 0 << 11;

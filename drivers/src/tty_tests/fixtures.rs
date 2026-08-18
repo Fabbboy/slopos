@@ -1,15 +1,5 @@
 //! Shared fixtures and imports for TTY tests.
 
-//! Regression tests for the TTY subsystem.
-//!
-//! Tests the `LineDisc`, `TtyDriverKind`, `TtyIndex`, TTY table, and
-//! the per-TTY public API (compositor focus, foreground pgrp, active TTY).
-//!
-//! Coverage includes input flag processing, output processing, signal
-//! generation, flow control, VLNEXT, VWERASE, ECHOCTL, compositor focus /
-//! fg_pgrp split, check_read() as sole read gate, TtyIndex type safety,
-//! and signal constant verification.
-
 pub(super) use slopos_ostd::KBox;
 
 pub(super) use slopos_abi::KernelErrno;
@@ -45,11 +35,9 @@ pub(super) use slopos_ostd::task::{ProcessGroup, Session};
 
 pub(super) use slopos_ostd::{KArc, KWeak};
 
-/// Scratch for reading a discipline's staged echo back out.
-///
-/// Echo lives in the discipline's queue rather than in the `receive_buf`
-/// return value, because the TTY core has to emit it after the slot guard
-/// drops.  A test asserts on it by draining it the same way the emitter does.
+/// Echo is staged in the discipline's queue, not returned from `receive_buf`,
+/// because the core emits it after the slot guard drops; a test asserts on it by
+/// draining it the same way the emitter does.
 pub(super) struct EchoScratch {
     buf: [u8; 512],
     len: usize,
@@ -71,27 +59,20 @@ impl EchoScratch {
     }
 }
 
-/// Returns a TTY to service when it goes out of scope.
-///
-/// A hangup is terminal for the slot, and TTY 0 is the serial console every
-/// later test — and the kernel's own log — writes through. A test that hangs
-/// one up owes the rest of the boot a working console, and owes it on the
-/// failure paths too, which is why it is a guard rather than a closing call.
-///
-/// Termios is restored alongside the flag because a hangup is reachable
-/// through it: a `B0` baud rate hangs the line up, and clearing the flag
-/// without putting the speed back would leave the next `tcsetattr` hanging it
-/// up again.
+/// Returns a TTY to service when it goes out of scope. A hangup is terminal for
+/// the slot, and TTY 0 carries the serial console every later test and the
+/// kernel log write through — a guard rather than a closing call so the failure
+/// paths restore it too. Termios goes back alongside the flag because a `B0`
+/// baud rate hangs the line up, so leaving the speed would hang it up again on
+/// the next `tcsetattr`.
 pub(super) struct HangupScope {
     idx: TtyIndex,
     saved: Option<slopos_abi::syscall::UserTermios>,
 }
 
 impl HangupScope {
-    /// Guard `idx` across a hangup the caller is about to perform itself —
-    /// `vhangup`, a `B0` `tcsetattr`, or `mark_hung_up` reached through the
-    /// slot directly. Construct it *before* the hangup, so the termios it
-    /// snapshots is the healthy one.
+    /// For a hangup the caller performs itself. Construct it *before* the
+    /// hangup, so the termios it snapshots is the healthy one.
     pub(super) fn guard(idx: TtyIndex) -> Self {
         Self {
             idx,
@@ -116,9 +97,8 @@ impl Drop for HangupScope {
     }
 }
 
-/// Holds strong session + foreground-group refs alive so that a `TtySession`'s
-/// weak links resolve for the duration of a test. A `TtySession` only stores
-/// `KWeak`s; keep the owning `SessionScope` in scope across the assertions.
+/// A `TtySession` stores only `KWeak`s, so keep this in scope across the
+/// assertions to hold its session and foreground group resolvable.
 pub(super) struct SessionScope {
     pub(super) session: KArc<Session>,
     pub(super) pgrp: KArc<ProcessGroup>,
@@ -142,13 +122,12 @@ impl SessionScope {
         KArc::downgrade(&self.pgrp)
     }
 
-    /// Attach this scope's session + foreground group to a bare `TtySession`.
     pub(super) fn attach_to(&self, s: &mut TtySession) {
         s.attach(self.session_weak(), self.pgrp_weak());
     }
 
-    /// Mint an additional foreground-group candidate `pgid` inside this scope's
-    /// session (for `set_fg_pgrp*`). The caller keeps the handle alive.
+    /// Another foreground-group candidate in this session; the caller keeps the
+    /// returned handle alive.
     pub(super) fn extra_group(&self, pgid: u32) -> KArc<ProcessGroup> {
         KArc::try_new(ProcessGroup::new(pgid, self.session.clone()).expect("nonzero pgid"))
             .expect("alloc pgrp")
@@ -174,13 +153,10 @@ pub(super) fn boxed_vconsole_state() -> slopos_ostd::KBox<VConsoleState> {
     state
 }
 
-/// Leave `idx`'s input queue empty.
-///
-/// The reads take whatever a reader would see; the flush takes what one would
-/// not. A canonical discipline hands back only complete lines, so an
-/// unterminated tail survives every read and then reappears the moment
-/// something clears `ICANON` — which is how one test's half-typed line becomes
-/// the next test's phantom input.
+/// Leave `idx`'s input queue empty. The reads take what a reader would see, the
+/// flush what one would not: a canonical discipline hands back only complete
+/// lines, so an unterminated tail survives every read and reappears as the next
+/// test's phantom input the moment something clears `ICANON`.
 pub(super) fn drain_tty_nonblock(idx: TtyIndex) {
     let mut scratch = [0u8; 64];
     loop {
@@ -194,14 +170,10 @@ pub(super) fn drain_tty_nonblock(idx: TtyIndex) {
 
 /// Drain `stage`, then take one byte off `peer`, expecting `byte`.
 ///
-/// `tcdrain` is the barrier: it returns once `stage` owes its driver nothing,
-/// which puts the byte in `peer`. Two things sit outside what it can promise,
-/// so the pair is retried rather than asserted once. A `TCOFLUSH` racing an
-/// emission zeroes the in-flight count that emission still owns, and a drain
-/// crossing that window sees a slot that is momentarily settled; and the
-/// water-mark crossing that produces the byte is a one-shot any CPU may
-/// consume, so `stage` is re-drained each round to re-offer whatever is left.
-/// The bound is what keeps a genuinely lost byte a failure rather than a hang.
+/// `tcdrain` is the barrier, but two things sit outside what it promises, so the
+/// pair is retried: a `TCOFLUSH` racing an emission zeroes an in-flight count
+/// that emission still owns, and the water-mark crossing producing the byte is a
+/// one-shot any CPU may consume. The bound keeps a lost byte a failure, not a hang.
 pub(super) fn drain_then_read_byte(stage: TtyIndex, peer: TtyIndex, byte: u8) -> bool {
     const ROUNDS: usize = 64;
     for _ in 0..ROUNDS {
@@ -218,13 +190,9 @@ pub(super) fn drain_then_read_byte(stage: TtyIndex, peer: TtyIndex, byte: u8) ->
     false
 }
 
-/// A live PTY master/slave pair with both ends open.
-///
-/// `master_backing` is the master's owning `TtyBacking`; `slave_backing` is
-/// the shared slave-open (`TtySlaveOpen`), erased to `dyn FileBacking`.
-/// Dropping a `PtyPair` closes both ends: the master drop hangs up the
-/// slave and frees the master slot, and the last slave-open drop frees the
-/// slave slot. The master backing is declared first so it drops first.
+/// A live PTY pair with both ends open. Dropping it closes both: the master drop
+/// hangs up the slave and frees the master slot, the last slave-open drop frees
+/// the slave slot. The master backing is declared first so it drops first.
 pub(super) struct PtyPair {
     pub(super) master: TtyIndex,
     pub(super) slave: TtyIndex,
@@ -232,8 +200,7 @@ pub(super) struct PtyPair {
     pub(super) slave_backing: KArc<dyn FileBacking>,
 }
 
-/// Allocate a PTY pair, unlock the slave, and open it. Both ends are held
-/// open by the returned backings; dropping the [`PtyPair`] closes both.
+/// Allocate a PTY pair, unlock the slave, and open it.
 pub(super) fn open_pty_pair() -> PtyPair {
     tty::table::tty_table_init();
     let (master, master_backing) =
@@ -249,9 +216,8 @@ pub(super) fn open_pty_pair() -> PtyPair {
     }
 }
 
-/// The weak peer link carried in a PTY end's driver, cloned out for direct
-/// `master_write` / `slave_write` calls. A `KWeak` upgrades to `None` once
-/// its referent backing is gone.
+/// The peer link from a PTY end's driver, for direct `master_write` /
+/// `slave_write` calls. It upgrades to `None` once the referent backing is gone.
 pub(super) fn peer_link_of(idx: TtyIndex) -> KWeak<TtyBacking> {
     let guard = TTY_SLOTS[idx.0 as usize].lock();
     match guard.as_ref().map(|tty| &tty.driver) {
@@ -262,16 +228,14 @@ pub(super) fn peer_link_of(idx: TtyIndex) -> KWeak<TtyBacking> {
     }
 }
 
-/// Holds both ends of a packet-mode PTY pair open for the lifetime of a
-/// test. Dropping it closes both ends and frees the pair.
+/// Holds both ends of a packet-mode PTY pair open; dropping it frees the pair.
 pub(super) struct PtyGuard {
     _master_backing: KArc<TtyBacking>,
     _slave_backing: KArc<dyn FileBacking>,
 }
 
-/// Set up a raw-mode PTY pair for packet-mode tests: allocate, unlock and
-/// open the slave, switch it to raw with no input processing, and return
-/// the saved termios plus a guard that keeps both ends open.
+/// A PTY pair with the slave switched to raw, returning its saved termios and a
+/// guard that keeps both ends open.
 pub(super) fn packet_mode_setup_pty() -> Option<(
     TtyIndex,
     TtyIndex,
@@ -287,7 +251,7 @@ pub(super) fn packet_mode_setup_pty() -> Option<(
     let saved = tty::get_termios(slave).ok()?;
     let mut raw = saved;
     raw.c_lflag &= !(LocalFlags::ICANON | LocalFlags::ECHO);
-    raw.c_iflag = InputFlags::empty(); // clear all input flags including IXON
+    raw.c_iflag = InputFlags::empty();
     tty::set_termios(slave, &raw).ok()?;
     Some((
         master,
@@ -300,8 +264,7 @@ pub(super) fn packet_mode_setup_pty() -> Option<(
     ))
 }
 
-/// Restore a packet-mode PTY slave's termios. The pair itself is closed
-/// when the [`PtyGuard`] returned by [`packet_mode_setup_pty`] drops.
+/// Restores termios only; the [`PtyGuard`] closes the pair when it drops.
 pub(super) fn packet_mode_teardown_pty(
     _master: TtyIndex,
     slave: TtyIndex,

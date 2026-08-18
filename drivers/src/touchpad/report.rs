@@ -1,20 +1,14 @@
-//! HID report-descriptor parser (enough for a Precision-Touchpad
-//! digitizer collection).
-//!
-//! Produces a flat list of input fields — `(report_id, usage_page,
-//! usage, bit_offset, bit_size, logical_min/max)` — from which the
-//! gesture engine reads per-contact X/Y/Tip plus the contact count and
-//! button. Multitouch fingers appear as repeated X/Y/Tip occurrences, in
+//! HID report-descriptor parser, enough for a Precision-Touchpad digitizer
+//! collection: produces the flat input-field list the gesture engine reads.
+//! Multitouch fingers appear as repeated X/Y/Tip occurrences in descriptor
 //! order, so the engine indexes them by occurrence.
 
 use slopos_ostd::KVec;
 
-/// HID usage pages we care about.
 pub const PAGE_GENERIC_DESKTOP: u16 = 0x01;
 pub const PAGE_BUTTON: u16 = 0x09;
 pub const PAGE_DIGITIZER: u16 = 0x0d;
 
-/// HID usages we care about.
 pub const USAGE_X: u16 = 0x30; // Generic Desktop
 pub const USAGE_Y: u16 = 0x31; // Generic Desktop
 pub const USAGE_TIP_SWITCH: u16 = 0x42; // Digitizer
@@ -23,35 +17,29 @@ pub const USAGE_INPUT_MODE: u16 = 0x52; // Digitizer (device configuration)
 pub const USAGE_CONTACT_COUNT: u16 = 0x54; // Digitizer
 pub const USAGE_BUTTON_1: u16 = 0x01; // Button page
 
-/// One input field located within a report.
 #[derive(Clone, Copy, Debug)]
 pub struct HidField {
     pub report_id: u8,
     pub usage_page: u16,
     pub usage: u16,
-    /// Bit offset within the report's *data* (after the report-ID byte
-    /// when report IDs are in use).
+    /// Offset within the report *data*, past the report-ID byte when IDs are used.
     pub bit_offset: u32,
     pub bit_size: u32,
     pub logical_min: i32,
     pub logical_max: i32,
 }
 
-/// The parsed input-report layout.
 pub struct ReportFormat {
     pub fields: KVec<HidField>,
-    /// `true` if the descriptor declared report IDs (reports carry a
-    /// leading ID byte).
+    /// The descriptor declared report IDs, so reports carry a leading ID byte.
     pub uses_report_ids: bool,
-    /// Report ID of the "Input Mode" feature, if present. Writing `0x03`
-    /// to it switches the device from mouse-compatibility mode to
-    /// multitouch (Precision Touchpad) mode.
+    /// Report ID of the "Input Mode" feature. Writing `0x03` to it switches the
+    /// device from mouse-compatibility to multitouch mode.
     pub input_mode_report_id: Option<u8>,
 }
 
 impl ReportFormat {
-    /// Iterate the input fields matching `(page, usage)` in descriptor
-    /// order (so the Nth match is finger N for repeated digitizer fields).
+    /// In descriptor order, so the Nth match is finger N.
     pub fn matches(&self, page: u16, usage: u16) -> impl Iterator<Item = &HidField> {
         self.fields
             .iter()
@@ -82,7 +70,6 @@ impl GlobalState {
     }
 }
 
-/// Parse a HID report descriptor into its input-field layout.
 pub fn parse_report_descriptor(desc: &[u8]) -> ReportFormat {
     let mut fields: KVec<HidField> = KVec::new();
     let mut g = GlobalState::new();
@@ -138,8 +125,7 @@ pub fn parse_report_descriptor(desc: &[u8]) -> ReportFormat {
                     }
                     0x9 | 0xb => {
                         // Output / Feature. A Feature carrying the Digitizer
-                        // "Input Mode" usage is the mode selector — record
-                        // its report ID so the host can request multitouch.
+                        // "Input Mode" usage is the multitouch mode selector.
                         if tag == 0xb
                             && usages
                                 .iter()

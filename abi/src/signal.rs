@@ -1,15 +1,10 @@
 //! POSIX signal ABI definitions shared between kernel and userland.
-//!
-//! This module defines signal numbers, signal set operations, sigaction
-//! structures, and related constants for the SlopOS signal subsystem.
 
 /// Maximum number of signals. Signals are numbered 1..NSIG (signal 0 is reserved
 /// for error checking in kill()).
 pub const NSIG: usize = 32;
 
-// =============================================================================
-// Standard signal numbers (POSIX + Linux-compatible subset)
-// =============================================================================
+// Numbering follows the POSIX / Linux-compatible subset.
 
 pub const SIGHUP: u8 = 1;
 pub const SIGINT: u8 = 2;
@@ -35,20 +30,14 @@ pub const SIGTTIN: u8 = 21;
 pub const SIGTTOU: u8 = 22;
 pub const SIGWINCH: u8 = 28;
 
-// =============================================================================
-// Signal set — bitmask of up to 32 signals
-// =============================================================================
-
 /// Bitmask representing a set of signals. Bit N corresponds to signal N+1.
 /// (Signal 0 does not exist; bit 0 = signal 1 = SIGHUP.)
 pub type SigSet = u64;
 
-/// Empty signal set (no signals).
 pub const SIG_EMPTY: SigSet = 0;
 
-/// One drained signal, returned by `read()` on a `FileKind::Signalfd`
-/// (the SlopOS analogue of Linux `struct signalfd_siginfo`, trimmed to the
-/// fields SlopOS tracks). 16 bytes, `#[repr(C)]`.
+/// One drained signal, returned by `read()` on a `FileKind::Signalfd`. SlopOS's
+/// analogue of Linux `struct signalfd_siginfo`, trimmed to 16 bytes.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct SignalfdSiginfo {
@@ -88,22 +77,16 @@ pub const fn sig_bit(signum: u8) -> SigSet {
 
 /// Every bit `sig_bit` can produce: signals `1..=NSIG` occupy bits `0..NSIG`.
 ///
-/// Bits at and above `NSIG` are reserved for kernel-private state and must be
-/// masked off before any code derives a signal number from a pending set. An
-/// unmasked one yields `signum = NSIG + 1`, for which [`sig_bit`] returns 0 —
-/// so the clearing `fetch_and(!0)` is a no-op and the bit re-delivers forever —
-/// and then indexes one past the end of a `[_; NSIG]` action table.
+/// Bits at and above `NSIG` are kernel-private and must be masked off before a
+/// signal number is derived from a pending set: an unmasked one yields
+/// `signum = NSIG + 1`, for which [`sig_bit`] returns 0 — so clearing is a no-op
+/// and the bit re-delivers forever — and it indexes past a `[_; NSIG]` table.
 pub const SIGNAL_MASK: SigSet = (1u64 << NSIG) - 1;
 
-/// Kernel-private: the task has been marked for death, and every blocking
-/// primitive must abort rather than park.
-///
-/// Outside [`SIGNAL_MASK`] deliberately, so it is invisible to `kill`,
-/// `sigprocmask`, `sigaction`, `signalfd` and the delivery path, and costs no
-/// new word on the task — the fatal probe is free inside any predicate that
-/// already loads the pending set. Unreachable from userland: [`sig_bit`]
-/// cannot produce it, and every user-supplied `SigSet` is masked at its entry
-/// point.
+/// Kernel-private: the task is marked for death and every blocking primitive
+/// must abort rather than park. Outside [`SIGNAL_MASK`] deliberately, so it is
+/// invisible to `kill`, `sigprocmask`, `sigaction`, `signalfd` and delivery, and
+/// unreachable from userland — [`sig_bit`] cannot produce it.
 pub const SIGNAL_KILLED: SigSet = 1u64 << NSIG;
 
 const _: () = assert!(SIGNAL_KILLED & SIGNAL_MASK == 0);
@@ -112,30 +95,23 @@ const _: () = assert!(sig_bit(NSIG as u8) & SIGNAL_MASK != 0);
 /// Signals that cannot be caught, blocked, or ignored.
 pub const SIG_UNCATCHABLE: SigSet = sig_bit(SIGKILL) | sig_bit(SIGSTOP);
 
-// =============================================================================
-// Signal actions
-// =============================================================================
-
 /// Special handler values for sigaction.
 pub const SIG_DFL: u64 = 0;
 pub const SIG_IGN: u64 = 1;
 
-/// Flags for sa_flags in sigaction.
 pub const SA_RESTORER: u64 = 0x04000000;
 pub const SA_SIGINFO: u64 = 0x00000004;
 pub const SA_NODEFER: u64 = 0x40000000;
 pub const SA_RESETHAND: u64 = 0x80000000;
 pub const SA_RESTART: u64 = 0x10000000;
 
-/// User-visible sigaction structure passed via rt_sigaction syscall.
-///
-/// Layout matches the Linux kernel `struct sigaction` for x86_64.
+/// User-visible sigaction passed via the `rt_sigaction` syscall. Layout matches
+/// the Linux x86-64 `struct sigaction`.
 #[repr(C)]
 #[derive(Copy, Clone)]
 pub struct UserSigaction {
     /// Signal handler function pointer, or SIG_DFL / SIG_IGN.
     pub sa_handler: u64,
-    /// Flags (SA_RESTORER, SA_SIGINFO, etc.)
     pub sa_flags: u64,
     /// Restorer function pointer (called after handler returns via SA_RESTORER).
     pub sa_restorer: u64,
@@ -154,25 +130,16 @@ impl UserSigaction {
     }
 }
 
-// =============================================================================
-// rt_sigprocmask how parameter
-// =============================================================================
-
+// `how` values for rt_sigprocmask.
 pub const SIG_BLOCK: u32 = 0;
 pub const SIG_UNBLOCK: u32 = 1;
 pub const SIG_SETMASK: u32 = 2;
-
-// =============================================================================
-// Default signal dispositions
-// =============================================================================
 
 /// Default action for each signal.
 #[repr(u8)]
 #[derive(Copy, Clone, PartialEq, Eq)]
 pub enum SigDefault {
-    /// Terminate the process.
     Terminate = 0,
-    /// Ignore the signal.
     Ignore = 1,
     /// Stop the process (not yet implemented, treated as ignore).
     Stop = 2,
@@ -180,13 +147,8 @@ pub enum SigDefault {
     Continue = 3,
 }
 
-/// Return the default disposition for a signal number.
-///
-/// Follows the POSIX default-action table for the signals SlopOS
-/// defines: informational signals (`SIGCHLD`, `SIGWINCH`) are ignored
-/// by default, job-control stops map to `Stop`, `SIGCONT` maps to
-/// `Continue`, and everything else — including any future/unknown
-/// signal number — terminates the process.
+/// Default disposition per the POSIX default-action table; everything else,
+/// including any unknown signal number, terminates the process.
 pub const fn sig_default_action(signum: u8) -> SigDefault {
     match signum {
         SIGCHLD | SIGWINCH => SigDefault::Ignore,
@@ -196,34 +158,21 @@ pub const fn sig_default_action(signum: u8) -> SigDefault {
     }
 }
 
-/// True when `signum`'s default disposition discards the signal
-/// outright (`Ignore`). Used by the send-time drop check: a signal
-/// that is neither blocked nor handled and whose default is `Ignore`
-/// is dropped at the raise site rather than left pending, so it never
-/// spuriously wakes a blocked task.
-///
-/// Deliberately excludes `Stop` / `Continue`: those are delivered (and
-/// currently no-op at the delivery point), so implementing real job
-/// control later does not require revisiting every raise site.
+/// True when `signum`'s default disposition is `Ignore`. The send-time drop
+/// check uses this so an unblocked, unhandled, default-ignored signal is dropped
+/// at the raise site instead of spuriously waking a blocked task. `Stop` and
+/// `Continue` are excluded deliberately: those are still delivered.
 pub const fn sig_default_ignores(signum: u8) -> bool {
     matches!(sig_default_action(signum), SigDefault::Ignore)
 }
 
-// =============================================================================
-// Signal frame — saved on user stack during signal delivery
-// =============================================================================
-
-/// Signal frame pushed onto the user stack when delivering a signal.
-/// rt_sigreturn restores execution state from this frame.
-///
-/// The restorer address is NOT part of this frame — it is pushed as a
-/// separate 8-byte word on the stack before the frame (Linux convention).
-/// When the handler does `ret`, it pops the restorer into RIP, and RSP
-/// then points to this SignalFrame, which rt_sigreturn reads directly.
+/// Signal frame pushed onto the user stack when delivering a signal;
+/// `rt_sigreturn` restores from it. The restorer address is pushed as a separate
+/// 8-byte word *before* the frame (Linux convention), so the handler's `ret` pops
+/// it into RIP and leaves RSP pointing at this frame.
 #[repr(C)]
 #[derive(Copy, Clone)]
 pub struct SignalFrame {
-    /// Signal number being delivered.
     pub signum: u64,
     /// Saved general-purpose registers.
     pub rax: u64,
@@ -244,7 +193,6 @@ pub struct SignalFrame {
     pub r15: u64,
     /// Saved instruction pointer (where to resume after sigreturn).
     pub rip: u64,
-    /// Saved flags register.
     pub rflags: u64,
     /// Saved signal mask (restored by sigreturn).
     pub saved_mask: SigSet,

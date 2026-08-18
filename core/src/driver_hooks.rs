@@ -23,20 +23,9 @@ fn runtime_current_task_pgrp_handle() -> Option<slopos_ostd::KWeak<ProcessGroup>
         .map(KArc::downgrade)
 }
 
-// ---------------------------------------------------------------------------
-// Adapter functions — only for service methods that need type conversion or
-// non-trivial logic.  Pure 1:1 forwards are assigned directly in the static
-// service table below.
-// ---------------------------------------------------------------------------
-
-/// Wake the task named by `task_id`.
-///
-/// The id is resolved through the registry rather than dereferenced: the wait
-/// queue hands this back on an arbitrary CPU at an arbitrary later time, and a
-/// waiter killed while parked never unwinds its own stack, so its node can
-/// outlive it. A weak upgrade answers "already gone" where a pointer would have
-/// named freed memory. [`scheduler::unblock_task_id`] is that lookup — this hook
-/// is now only the service-table shape around it.
+/// Wake the task named by `task_id`. The id is resolved through the registry
+/// rather than dereferenced: a waiter killed while parked never unwinds its own
+/// stack, so its wait node can outlive it.
 fn runtime_unblock_task(task_id: u32) -> i32 {
     scheduler::unblock_task_id(task_id)
 }
@@ -81,10 +70,6 @@ fn runtime_signal_session(sid: u32, signum: u8) -> bool {
     matched
 }
 
-// ---------------------------------------------------------------------------
-// Check if a process group exists within a given session.
-// ---------------------------------------------------------------------------
-
 fn runtime_pgrp_exists_in_session(pgid: u32, sid: u32) -> bool {
     if pgid == 0 || sid == 0 {
         return false;
@@ -100,10 +85,6 @@ fn runtime_pgrp_exists_in_session(pgid: u32, sid: u32) -> bool {
     });
     found
 }
-
-// ---------------------------------------------------------------------------
-// Check if the current task has a signal blocked or set to SIG_IGN.
-// ---------------------------------------------------------------------------
 
 fn runtime_is_current_signal_blocked_or_ignored(signum: u8) -> bool {
     let Some(current) = Current::get() else {
@@ -121,34 +102,25 @@ fn runtime_is_current_signal_blocked_or_ignored(signum: u8) -> bool {
     task.signal_handler(idx) == Some(SIG_IGN)
 }
 
-// ---------------------------------------------------------------------------
-// Check if the current task has any deliverable (pending
-// and not blocked) signals.  Used by the TTY read path to detect signal
-// interruption and return ERESTARTSYS.
-// ---------------------------------------------------------------------------
-
+/// Deliverable (pending and unblocked) signals; the TTY read path uses this to
+/// detect interruption and return `ERESTARTSYS`.
 fn runtime_has_pending_signal() -> bool {
     Current::get().is_some_and(|current| {
         let task = current.task();
-        // Kernel tasks are structurally excluded from delivery, so a bit
-        // pending on one has no consumer. Reporting it would abort every
-        // interruptible wait they take, forever, with nothing able to clear it.
+        // Kernel tasks are structurally excluded from delivery, so a bit pending
+        // on one would abort every interruptible wait they take, forever, with
+        // nothing able to clear it.
         (task.flags & TASK_FLAG_USER_MODE) != 0 && task_has_deliverable_signal(task)
     })
 }
 
-/// Whether the current task has been marked for death.
 fn runtime_current_task_is_killed() -> bool {
     Current::get().is_some_and(|current| current.task().is_killed())
 }
 
-/// Whether the current task must stop waiting, for any reason.
-///
-/// The pair, not either half: a kill is deliberately not a signal — it sits
-/// outside the deliverable range so no delivery path can consume or mask it —
-/// so a loop that polls only for signals never notices one. This is what a
-/// hand-rolled polling loop uses in place of the abort probe the wait
-/// primitives run for their callers.
+/// Whether the current task must stop waiting, for any reason. The pair, not
+/// either half: a kill is deliberately not a signal — it sits outside the
+/// deliverable range — so polling only for signals never notices one.
 fn runtime_current_task_wait_aborted() -> bool {
     Current::get().is_some_and(|current| {
         let task = current.task();
@@ -157,11 +129,8 @@ fn runtime_current_task_wait_aborted() -> bool {
     })
 }
 
-// ---------------------------------------------------------------------------
-// Publish which wait queue the current task is parked on, so teardown can
-// unlink its stack-pinned wait node.
-// ---------------------------------------------------------------------------
-
+/// Publish the wait queue the current task is parked on, so teardown can unlink
+/// its stack-pinned wait node.
 fn runtime_swap_parked_wait_queue(queue: *mut core::ffi::c_void) -> *mut core::ffi::c_void {
     match Current::get() {
         Some(current) => {
@@ -174,32 +143,23 @@ fn runtime_swap_parked_wait_queue(queue: *mut core::ffi::c_void) -> *mut core::f
     }
 }
 
-// ---------------------------------------------------------------------------
-// Check if a process group is orphaned within a session.
-//
-// A process group is orphaned if no member of the group has a parent that is
-// in a *different* process group within the *same* session.  When an orphaned
-// background pgrp tries to perform a terminal operation that would generate
-// SIGTTOU, POSIX requires returning EIO instead (since there is no parent to
-// continue the stopped group).
-// ---------------------------------------------------------------------------
-
+/// A process group is orphaned when no member has a parent in a *different*
+/// process group of the *same* session. POSIX then requires `EIO` where a
+/// terminal operation would otherwise raise SIGTTOU, since no parent is left to
+/// continue the stopped group.
 fn runtime_is_pgrp_orphaned(pgid: u32, sid: u32) -> bool {
     if pgid == 0 || sid == 0 {
-        return false; // no valid group/session — not orphaned by definition
+        return false;
     }
 
-    // First check that the pgrp even has members in the session.
     if !runtime_pgrp_exists_in_session(pgid, sid) {
         return true; // no members at all — effectively orphaned
     }
 
     // Assume orphaned; one member with a parent in a different pgrp of the same
-    // session disproves it. The visitor resolves that parent through the
-    // registry, which is why iteration hands out its guards off-lock.
+    // session disproves it.
     let mut is_orphaned = true;
     task::task_try_for_each_active(|task| {
-        // Only look at members of the target process group.
         if task.pgid() != pgid || task.sid() != sid {
             return ControlFlow::Continue(());
         }
@@ -213,7 +173,6 @@ fn runtime_is_pgrp_orphaned(pgid: u32, sid: u32) -> bool {
             return ControlFlow::Continue(());
         };
 
-        // Parent is in the same session but a different pgrp → not orphaned.
         if parent.sid() == sid && parent.pgid() != pgid {
             is_orphaned = false;
             return ControlFlow::Break(());
@@ -223,10 +182,6 @@ fn runtime_is_pgrp_orphaned(pgid: u32, sid: u32) -> bool {
 
     is_orphaned
 }
-
-// ---------------------------------------------------------------------------
-// Service table — pure forwards reference the real function directly.
-// ---------------------------------------------------------------------------
 
 static DRIVER_RUNTIME_SERVICES: DriverRuntimeServices = DriverRuntimeServices {
     save_preempt_context: scheduler::save_preempt_context,

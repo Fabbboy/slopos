@@ -1,25 +1,14 @@
-/// Canonical color representation: 0xAARRGGBB.
-///
-/// This is the standard encoding used by:
-/// - `abi::pixel::rgba()` and `abi::pixel::rgb()` helpers
-/// - All userland theme constants
-/// - The web/CSS ARGB convention
-///
-/// Use `PixelFormat::encode()` to convert to an `EncodedPixel` for
-/// writing to a specific framebuffer.
+/// Canonical color representation: 0xAARRGGBB (the web/CSS ARGB convention).
+/// `PixelFormat::encode` converts one into an `EncodedPixel` for a framebuffer.
 #[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
 #[repr(transparent)]
 pub struct Color32(pub u32);
 
 impl Color32 {
-    /// Fully transparent black.
     pub const TRANSPARENT: Self = Self(0x00000000);
-    /// Opaque black.
     pub const BLACK: Self = Self(0xFF000000);
-    /// Opaque white.
     pub const WHITE: Self = Self(0xFFFFFFFF);
 
-    /// Construct from individual RGBA components.
     #[inline]
     pub const fn new(r: u8, g: u8, b: u8, a: u8) -> Self {
         Self(((a as u32) << 24) | ((r as u32) << 16) | ((g as u32) << 8) | (b as u32))
@@ -31,22 +20,18 @@ impl Color32 {
         Self::new(r, g, b, 0xFF)
     }
 
-    /// Extract the alpha component.
     #[inline]
     pub const fn alpha(self) -> u8 {
         (self.0 >> 24) as u8
     }
-    /// Extract the red component.
     #[inline]
     pub const fn red(self) -> u8 {
         (self.0 >> 16) as u8
     }
-    /// Extract the green component.
     #[inline]
     pub const fn green(self) -> u8 {
         (self.0 >> 8) as u8
     }
-    /// Extract the blue component.
     #[inline]
     pub const fn blue(self) -> u8 {
         self.0 as u8
@@ -59,17 +44,13 @@ impl Color32 {
     }
 }
 
-/// A color value already encoded for a specific `PixelFormat`.
-///
-/// Produced by `PixelFormat::encode()`. The internal representation
-/// matches what the framebuffer hardware expects — write this directly
-/// to pixel memory.
+/// A color value already encoded for a specific `PixelFormat` — the exact
+/// representation the framebuffer expects; write it straight to pixel memory.
 #[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
 #[repr(transparent)]
 pub struct EncodedPixel(pub u32);
 
 impl EncodedPixel {
-    /// Get the raw u32 value for writing to a pixel buffer.
     #[inline]
     pub const fn to_u32(self) -> u32 {
         self.0
@@ -96,51 +77,28 @@ fn clip_row_span_bounds(
     Some((row as usize, x0 as usize, x1 as usize))
 }
 
-/// Unified drawing surface trait.
-///
-/// `Canvas` merges the responsibilities of the legacy `PixelBuffer` and
-/// `DrawTarget` traits into a single trait. Implementors provide the low-level
-/// byte-writing primitives; higher-level drawing operations are provided as
-/// default methods that use those primitives efficiently.
-///
-/// Two implementations exist:
-/// - **Kernel `GraphicsContext`**: volatile writes to MMIO framebuffer memory
-/// - **Userland `DrawBuffer`**: safe slice writes to shared memory
-///
-/// Colors are passed as `EncodedPixel` values (already converted for the
-/// target's pixel format via `PixelFormat::encode()`).
+/// Unified drawing surface trait. Implementors provide the byte-writing
+/// primitives; the higher-level operations are default methods built on them.
+/// Colors arrive as `EncodedPixel`, already converted for the target format.
 pub trait Canvas {
-    /// Buffer width in pixels.
     fn width(&self) -> u32;
 
-    /// Buffer height in pixels.
     fn height(&self) -> u32;
 
-    /// Row stride in bytes.
     fn pitch_bytes(&self) -> usize;
 
     /// Bytes per pixel (3 or 4).
     fn bytes_per_pixel(&self) -> u8;
 
-    /// The pixel format of this surface.
     fn pixel_format(&self) -> crate::pixel::PixelFormat;
 
-    /// Write a single pre-encoded pixel at the given byte offset.
-    ///
-    /// Implementations handle volatile vs safe writes.
-    /// Callers must ensure `byte_offset` is within buffer bounds.
+    /// Write a pre-encoded pixel at `byte_offset`; the caller must ensure it is
+    /// within the buffer.
     fn write_encoded_at(&mut self, byte_offset: usize, pixel: EncodedPixel);
 
     /// The active scissor (clip) rectangle in buffer-local pixel coordinates.
-    ///
-    /// When `Some`, every drawing primitive must confine its writes to this
-    /// rectangle in addition to the buffer bounds. The default is `None` (no
-    /// scissor): correct for write-through surfaces such as the kernel MMIO
-    /// framebuffer, which always paint their full target. Buffer-backed
-    /// surfaces that perform partial-region repaints (the compositor's
-    /// `DrawBuffer`) override this so solid fills, glyph blits, and
-    /// anti-aliased lines and circles are all confined to the region being
-    /// repainted — without each call site having to thread a clip rect.
+    /// When `Some`, every primitive confines its writes to it as well as to the
+    /// buffer bounds. `None` suits surfaces that always paint their full target.
     #[inline]
     fn scissor(&self) -> Option<crate::damage::DamageRect> {
         None
@@ -151,13 +109,8 @@ pub trait Canvas {
         clip_row_span_bounds(self.width(), self.height(), row, x0, x1)
     }
 
-    /// Fill a horizontal span with a pre-encoded pixel.
-    ///
-    /// Fills pixels from column `x0` to `x1` (inclusive) on `row`.
-    /// Out-of-bounds coordinates are clipped.
-    ///
-    /// The default implementation calls `write_encoded_at` in a loop.
-    /// Implementors should override this for bulk-write optimisations.
+    /// Fills columns `x0..=x1` on `row`, clipping out-of-bounds coordinates.
+    /// Implementors should override the per-pixel default for bulk writes.
     #[inline]
     fn fill_row_span(&mut self, row: i32, x0: i32, x1: i32, pixel: EncodedPixel) {
         let Some((row, x0, x1)) = self.clip_row_span(row, x0, x1) else {
@@ -171,9 +124,6 @@ pub trait Canvas {
         }
     }
 
-    /// Clear the entire buffer to a single encoded pixel value.
-    ///
-    /// Default fills row by row via `fill_row_span`.
     #[inline]
     fn clear_canvas(&mut self, pixel: EncodedPixel) {
         let h = self.height() as i32;
@@ -182,8 +132,6 @@ pub trait Canvas {
             self.fill_row_span(row, 0, w - 1, pixel);
         }
     }
-
-    // -- convenience defaults built on the above primitives --
 
     /// Draw a single pixel (pre-encoded). Out-of-bounds silently ignored.
     #[inline]
@@ -212,31 +160,18 @@ pub trait Canvas {
         }
     }
 
-    /// Read a raw pixel value at the given byte offset.
-    ///
-    /// Returns the pixel as a u32 in the buffer's native encoding (typically
-    /// little-endian ARGB8888). Used by alpha-blending and anti-aliased
-    /// drawing operations that need to read-modify-write pixels.
-    ///
-    /// The default returns 0 (transparent black), which is correct for
-    /// write-only surfaces like MMIO framebuffers. Buffer-backed surfaces
-    /// should override this to read actual pixel data.
+    /// Reads the raw pixel at `byte_offset` in the buffer's native encoding.
+    /// Defaults to 0, correct for write-only surfaces like MMIO framebuffers.
     #[inline]
     fn read_encoded_at(&self, _byte_offset: usize) -> u32 {
         0
     }
 
-    /// Report that a rectangular region was modified.
-    ///
-    /// Drawing functions in the `gfx` crate call this automatically after
-    /// rendering. The default is a no-op — appropriate for direct framebuffer
-    /// surfaces where damage tracking is unnecessary. Buffer-backed surfaces
-    /// (e.g. shared-memory draw buffers) override this to feed their damage
-    /// tracker, eliminating the need for per-call wrapper boilerplate.
+    /// Report that a rectangular region was modified. A no-op by default, which
+    /// suits direct framebuffers; buffer-backed surfaces feed a damage tracker.
     #[inline]
     fn report_damage(&mut self, _rect: crate::damage::DamageRect) {}
 
-    /// Fill a rectangle with a solid encoded pixel value.
     #[inline]
     fn fill_rect_encoded(&mut self, x: i32, y: i32, w: i32, h: i32, pixel: EncodedPixel) {
         if w <= 0 || h <= 0 {

@@ -1,10 +1,6 @@
-//! Split from test_ldisc.rs: test_ldisc_regression.rs
+//! Line-discipline regression tests.
 
 use super::fixtures::*;
-
-// ===========================================================================
-// Deferred Reprint (PENDIN)
-// ===========================================================================
 
 /// PENDIN constant value is 0x4000.
 pub fn test_pendin_flag_value() -> TestResult {
@@ -19,16 +15,13 @@ pub fn test_pendin_flag_value() -> TestResult {
 /// returns ReprintLine instead of processing the byte.
 pub fn test_pendin_auto_set_on_echo_change() -> TestResult {
     let mut ld = LineDisc::new();
-    // Insert some content into the edit buffer so PENDIN triggers.
     ld.input_char(b'h');
     ld.input_char(b'i');
 
-    // Toggle ECHO off — this is an echo-affecting change.
     let mut t = *ld.termios();
     t.c_lflag &= !LocalFlags::ECHO;
     ld.set_termios(&t);
 
-    // The next input_char() should return ReprintLine (deferred reprint).
     let action = ld.input_char(b'x');
     if !matches!(action, InputAction::ReprintLine) {
         klog_info!("TTY_TEST: BUG - expected ReprintLine after echo flag change");
@@ -42,19 +35,16 @@ pub fn test_pendin_one_shot() -> TestResult {
     let mut ld = LineDisc::new();
     ld.input_char(b'a');
 
-    // Toggle ECHOE off to trigger PENDIN.
     let mut t = *ld.termios();
     t.c_lflag &= !LocalFlags::ECHOE;
     ld.set_termios(&t);
 
-    // First call: ReprintLine.
     let first = ld.input_char(b'b');
     if !matches!(first, InputAction::ReprintLine) {
         klog_info!("TTY_TEST: BUG - first input after PENDIN should be ReprintLine");
         return TestResult::Fail;
     }
 
-    // Second call: normal echo (ECHO still on, just ECHOE changed).
     let second = ld.input_char(b'b');
     if matches!(second, InputAction::ReprintLine) {
         klog_info!("TTY_TEST: BUG - PENDIN should be one-shot, not repeat");
@@ -68,22 +58,17 @@ pub fn test_vreprint_clears_pendin() -> TestResult {
     let mut ld = LineDisc::new();
     ld.input_char(b'z');
 
-    // Trigger PENDIN via echo flag change.
     let mut t = *ld.termios();
     t.c_lflag &= !LocalFlags::ECHOK;
     ld.set_termios(&t);
 
-    // Manually reprint with VREPRINT (Ctrl+R).  This should also clear PENDIN.
     let ctrl_r = ld.termios().c_cc[slopos_abi::syscall::VREPRINT];
     let action = ld.input_char(ctrl_r);
-    // This returns ReprintLine from the PENDIN path, not the VREPRINT path,
-    // but PENDIN is now cleared either way.
     if !matches!(action, InputAction::ReprintLine) {
         klog_info!("TTY_TEST: BUG - expected ReprintLine from PENDIN or VREPRINT");
         return TestResult::Fail;
     }
 
-    // Next input should be processed normally — no double reprint.
     let next = ld.input_char(b'a');
     if matches!(next, InputAction::ReprintLine) {
         klog_info!("TTY_TEST: BUG - VREPRINT should have cleared PENDIN");
@@ -97,12 +82,10 @@ pub fn test_pendin_not_set_for_non_echo_flags() -> TestResult {
     let mut ld = LineDisc::new();
     ld.input_char(b'q');
 
-    // Toggle ISIG off — not echo-affecting.
     let mut t = *ld.termios();
     t.c_lflag &= !LocalFlags::ISIG;
     ld.set_termios(&t);
 
-    // Should process input normally, no ReprintLine.
     let action = ld.input_char(b'w');
     if matches!(action, InputAction::ReprintLine) {
         klog_info!("TTY_TEST: BUG - toggling ISIG should not trigger PENDIN");
@@ -114,14 +97,11 @@ pub fn test_pendin_not_set_for_non_echo_flags() -> TestResult {
 /// PENDIN is not set when the edit buffer is empty (nothing to reprint).
 pub fn test_pendin_empty_edit_buffer() -> TestResult {
     let mut ld = LineDisc::new();
-    // Don't type anything — edit buffer is empty.
 
-    // Toggle ECHO off.
     let mut t = *ld.termios();
     t.c_lflag &= !LocalFlags::ECHO;
     ld.set_termios(&t);
 
-    // Should process input normally since there's nothing to reprint.
     let action = ld.input_char(b'a');
     if matches!(action, InputAction::ReprintLine) {
         klog_info!("TTY_TEST: BUG - PENDIN should not fire with empty edit buffer");
@@ -135,15 +115,12 @@ pub fn test_flush_clears_pendin() -> TestResult {
     let mut ld = LineDisc::new();
     ld.input_char(b'a');
 
-    // Trigger PENDIN.
     let mut t = *ld.termios();
     t.c_lflag &= !LocalFlags::ECHOE;
     ld.set_termios(&t);
 
-    // Flush everything — should clear PENDIN.
     ld.flush_all();
 
-    // Input should be processed normally.
     let action = ld.input_char(b'b');
     if matches!(action, InputAction::ReprintLine) {
         klog_info!("TTY_TEST: BUG - flush_all should clear PENDIN");
@@ -157,15 +134,12 @@ pub fn test_flush_input_clears_pendin() -> TestResult {
     let mut ld = LineDisc::new();
     ld.input_char(b'a');
 
-    // Trigger PENDIN.
     let mut t = *ld.termios();
     t.c_lflag &= !LocalFlags::ECHOK;
     ld.set_termios(&t);
 
-    // Flush input — should clear PENDIN.
     ld.flush_input();
 
-    // Input should be processed normally.
     let action = ld.input_char(b'c');
     if matches!(action, InputAction::ReprintLine) {
         klog_info!("TTY_TEST: BUG - flush_input should clear PENDIN");
@@ -173,15 +147,9 @@ pub fn test_flush_input_clears_pendin() -> TestResult {
     }
     TestResult::Pass
 }
-// ===========================================================================
-// Review Fix Regression Tests
-// ===========================================================================
 
-/// Review fix regression: tcflush(TCIFLUSH) clears throttle on a PTY slave.
-///
-/// Before the fix, flushing input via tcflush did not clear the throttle
-/// flag, leaving the master-side writer permanently blocked.  This matches
-/// Linux's n_tty_flush_buffer() → tty_unthrottle() pattern.
+/// tcflush(TCIFLUSH) clears throttle on a PTY slave, or the master-side
+/// writer stays blocked forever.
 pub fn test_review_tcflush_unthrottles_pty() -> TestResult {
     use crate::tty::ldisc::THROTTLE_HIGH_WATER;
     tty::table::tty_table_init();
@@ -198,18 +166,15 @@ pub fn test_review_tcflush_unthrottles_pty() -> TestResult {
     tty::set_pty_lock(master, false).unwrap();
     let _slave_backing = tty::pty_open_slave(slave).unwrap();
 
-    // Raw mode so every byte goes straight to cooked buffer.
     let saved = tty::get_termios(slave).unwrap();
     let mut raw = saved;
     raw.c_lflag &= !(LocalFlags::ICANON | LocalFlags::ECHO);
     tty::set_termios(slave, &raw).unwrap();
 
-    // Fill past high-water to activate throttle.
     for _ in 0..(THROTTLE_HIGH_WATER + 64) {
         tty::push_input(slave, b'X');
     }
 
-    // Confirm throttled.
     {
         let guard = TTY_SLOTS[slave.0 as usize].lock();
         if !guard
@@ -223,7 +188,6 @@ pub fn test_review_tcflush_unthrottles_pty() -> TestResult {
         }
     }
 
-    // Flush input via tcflush — should clear the throttle.
     match tty::tcflush(slave, slopos_abi::syscall::TCIFLUSH) {
         Ok(()) => {}
         Err(e) => {
@@ -233,7 +197,6 @@ pub fn test_review_tcflush_unthrottles_pty() -> TestResult {
         }
     }
 
-    // Verify unthrottled.
     let still_throttled = {
         let guard = TTY_SLOTS[slave.0 as usize].lock();
         guard
@@ -251,10 +214,7 @@ pub fn test_review_tcflush_unthrottles_pty() -> TestResult {
     TestResult::Pass
 }
 
-/// Review fix regression: TCIOFLUSH also clears throttle (via input flush path).
-///
-/// tcflush(TCIOFLUSH) flushes both input and output.  The throttle should
-/// be cleared by the input-flush branch, same as TCIFLUSH.
+/// TCIOFLUSH clears throttle too, via its input-flush branch.
 pub fn test_review_tcflush_both_unthrottles_pty() -> TestResult {
     use crate::tty::ldisc::THROTTLE_HIGH_WATER;
     tty::table::tty_table_init();
@@ -276,15 +236,12 @@ pub fn test_review_tcflush_both_unthrottles_pty() -> TestResult {
     raw.c_lflag &= !(LocalFlags::ICANON | LocalFlags::ECHO);
     tty::set_termios(slave, &raw).unwrap();
 
-    // Throttle the slave.
     for _ in 0..(THROTTLE_HIGH_WATER + 64) {
         tty::push_input(slave, b'Y');
     }
 
-    // Flush both.
     tty::tcflush(slave, slopos_abi::syscall::TCIOFLUSH).unwrap();
 
-    // Verify unthrottled.
     let still_throttled = {
         let guard = TTY_SLOTS[slave.0 as usize].lock();
         guard
@@ -302,13 +259,8 @@ pub fn test_review_tcflush_both_unthrottles_pty() -> TestResult {
     TestResult::Pass
 }
 
-/// Review fix regression: master_write processes full 64-byte batches before
-/// checking throttle, returning a batch-aligned count.
-///
-/// Before the fix, throttle was checked per-byte (O(n) lock acquisitions).
-/// After the fix, throttle is checked once per 64-byte batch.  When throttle
-/// activates mid-batch, the full batch is completed before master_write
-/// returns, so the accepted count is a multiple of the batch size.
+/// master_write checks throttle once per 64-byte batch, not per byte, so a
+/// throttle activating mid-batch still yields a batch-aligned count.
 pub fn test_review_master_write_batch_boundary() -> TestResult {
     use crate::tty::ldisc::THROTTLE_HIGH_WATER;
     tty::table::tty_table_init();
@@ -325,20 +277,17 @@ pub fn test_review_master_write_batch_boundary() -> TestResult {
     tty::set_pty_lock(master, false).unwrap();
     let _slave_backing = tty::pty_open_slave(slave).unwrap();
 
-    // Raw mode.
     let saved = tty::get_termios(slave).unwrap();
     let mut raw = saved;
     raw.c_lflag &= !(LocalFlags::ICANON | LocalFlags::ECHO);
     tty::set_termios(slave, &raw).unwrap();
 
-    // Fill slave to THROTTLE_HIGH_WATER - 10.  Only 10 more bytes until
-    // throttle activates, but the batch (64 bytes) completes fully.
+    // Ten bytes short of the throttle mark, so it activates mid-batch.
     let prefill = THROTTLE_HIGH_WATER - 10;
     for _ in 0..prefill {
         tty::push_input(slave, b'P');
     }
 
-    // Verify not yet throttled.
     {
         let guard = TTY_SLOTS[slave.0 as usize].lock();
         if guard
@@ -352,7 +301,6 @@ pub fn test_review_master_write_batch_boundary() -> TestResult {
         }
     }
 
-    // Get master's peer handle.
     let peer = {
         let guard = TTY_SLOTS[master.0 as usize].lock();
         match guard.as_ref().unwrap().driver {
@@ -364,14 +312,11 @@ pub fn test_review_master_write_batch_boundary() -> TestResult {
         }
     };
 
-    // Write 256 bytes.  Throttle activates at byte ~10 within the first
-    // batch, but the full 64-byte batch completes before the check.
     let burst = [b'Q'; 256];
     let accepted = crate::tty::pty::master_write(&peer, &burst);
 
-    // With BATCH_SIZE=64, the first batch pushes all 64 bytes (throttle
-    // activates at ~byte 10 but isn't checked until after the batch).
-    // The post-batch check sees throttled=true and returns 64.
+    // Throttle is checked only after each 64-byte batch, so the first batch
+    // goes in whole and the count is batch-aligned.
     if accepted != 64 {
         klog_info!(
             "TTY_TEST: BUG - master_write returned {} (expected 64 for batch boundary)",
@@ -385,18 +330,14 @@ pub fn test_review_master_write_batch_boundary() -> TestResult {
     TestResult::Pass
 }
 
-/// Review: c_cflag is authoritative — c_ospeed does NOT override CBAUD bits.
-///
-/// POSIX: c_cflag encodes the baud rate.  c_ispeed/c_ospeed are informational
-/// fields populated by get_termios but do not alter c_cflag in set_termios.
+/// c_ospeed does not override the CBAUD bits. POSIX puts the baud rate in
+/// c_cflag; c_ispeed/c_ospeed are informational fields get_termios fills in.
 pub fn test_review_speed_fields_merge_into_cflag() -> TestResult {
     use slopos_abi::syscall::*;
     tty::table::tty_table_init();
     let idx = TtyIndex(0);
     let saved = tty::get_termios(idx).unwrap();
 
-    // Set c_cflag to B38400, but c_ospeed to a different value.
-    // c_cflag should remain authoritative.
     let mut t = saved;
     t.c_cflag = ControlFlags::from_bits_retain((t.c_cflag.bits() & !CBAUD) | B38400);
     t.c_ospeed = 9600;
@@ -415,7 +356,6 @@ pub fn test_review_speed_fields_merge_into_cflag() -> TestResult {
         return TestResult::Fail;
     }
 
-    // Speed fields should reflect c_cflag (38400), not the c_ospeed we passed.
     if got.c_ospeed != 38400 || got.c_ispeed != 38400 {
         klog_info!(
             "TTY_TEST: BUG - speed fields {}/{}, expected 38400/38400",
@@ -430,9 +370,7 @@ pub fn test_review_speed_fields_merge_into_cflag() -> TestResult {
     TestResult::Pass
 }
 
-/// Review: c_cflag is authoritative — c_ispeed does NOT override CBAUD bits.
-///
-/// Even when c_ospeed is zero and c_ispeed is set, c_cflag CBAUD wins.
+/// c_cflag CBAUD wins even when c_ospeed is zero and c_ispeed is set.
 pub fn test_review_speed_ispeed_fallback() -> TestResult {
     use slopos_abi::syscall::*;
     tty::table::tty_table_init();
@@ -461,9 +399,7 @@ pub fn test_review_speed_ispeed_fallback() -> TestResult {
     TestResult::Pass
 }
 
-/// Review fix regression: unrecognised speed leaves c_cflag unchanged.
-///
-/// When c_ospeed is an unrecognised baud rate, CBAUD bits stay as-is.
+/// An unrecognised c_ospeed leaves the CBAUD bits as they were.
 pub fn test_review_speed_unrecognised_noop() -> TestResult {
     use slopos_abi::syscall::*;
     tty::table::tty_table_init();
@@ -492,11 +428,8 @@ pub fn test_review_speed_unrecognised_noop() -> TestResult {
     TestResult::Pass
 }
 
-/// Review fix regression: poll_events returns POLLERR on hung-up TTY.
-///
-/// Before the fix, poll on a hung-up TTY returned POLLHUP | POLLIN but
-/// not POLLERR.  Programs that detect write errors via POLLERR would miss
-/// the hang-up.  Matches Linux tty_poll() behaviour.
+/// poll_events reports POLLERR on a hung-up TTY, so a program watching only
+/// POLLERR for write errors still sees the hang-up.
 pub fn test_review_pollerr_on_hangup() -> TestResult {
     tty::table::tty_table_init();
     let idx = TtyIndex(0);
@@ -524,10 +457,7 @@ pub fn test_review_pollerr_on_hangup() -> TestResult {
     TestResult::Pass
 }
 
-/// Review fix regression: PTY peer_closed also sets POLLERR.
-///
-/// When the slave side of a PTY is closed and all data is drained, the
-/// master should see POLLERR alongside POLLHUP.
+/// A closed and drained PTY slave shows the master POLLERR beside POLLHUP.
 pub fn test_review_pollerr_on_peer_closed() -> TestResult {
     tty::table::tty_table_init();
 
@@ -543,10 +473,8 @@ pub fn test_review_pollerr_on_peer_closed() -> TestResult {
     tty::set_pty_lock(master, false).unwrap();
     let slave_backing = tty::pty_open_slave(slave).unwrap();
 
-    // Close slave side.
     drop(slave_backing);
 
-    // Poll master — should see POLLHUP and POLLERR.
     let revents = tty::poll_events(
         master,
         slopos_abi::syscall::POLLIN | slopos_abi::syscall::POLLOUT,
@@ -565,21 +493,14 @@ pub fn test_review_pollerr_on_peer_closed() -> TestResult {
     }
     TestResult::Pass
 }
-// ===========================================================================
-// Bug-fix regression tests (TTY review)
-// ===========================================================================
 
-/// BUG 1+2: flush_edit_to_cooked must preserve unflushed bytes when the
-/// cooked buffer is partially occupied.  Before the fix, `edit_len` was
-/// unconditionally reset to 0, silently discarding any bytes that did not
-/// fit in the cooked ring buffer.
+/// flush_edit_to_cooked preserves bytes that did not fit in the cooked ring
+/// rather than resetting `edit_len` and discarding them.
 pub fn test_bugfix_flush_edit_preserves_remainder() -> TestResult {
     use crate::tty::ldisc::LineDisc;
 
     let mut ld = LineDisc::new();
 
-    // Fill the cooked buffer to near-capacity via non-canonical mode.
-    // Leave room for exactly 10 more bytes.
     let spare = 10usize;
     let fill_count = 8192 - spare;
 
@@ -599,9 +520,8 @@ pub fn test_bugfix_flush_edit_preserves_remainder() -> TestResult {
         return TestResult::Fail;
     }
 
-    // Switch to canonical mode and push 20 bytes + newline.
-    // Only `spare` (10) bytes + the newline fit in cooked; the rest (10)
-    // should be preserved in the edit buffer with the fix.
+    // Only `spare` bytes plus the newline fit in cooked; the other 10 must
+    // survive in the edit buffer.
     t.c_lflag |= LocalFlags::ICANON;
     t.c_lflag &= !LocalFlags::ECHO;
     ld.set_termios(&t);
@@ -611,7 +531,6 @@ pub fn test_bugfix_flush_edit_preserves_remainder() -> TestResult {
     }
     ld.input_char(b'\n');
 
-    // Drain ALL cooked data to make room for the remainder.
     let mut drain: KBox<[u8; 8192]> = KBox::zeroed().expect("alloc");
     let drained = ld.read(&mut *drain);
     if drained == 0 {
@@ -619,16 +538,10 @@ pub fn test_bugfix_flush_edit_preserves_remainder() -> TestResult {
         return TestResult::Fail;
     }
 
-    // Now push another newline to flush the preserved remainder.
     ld.input_char(b'\n');
 
-    // If the fix works, the remainder bytes (~10) should now be in the
-    // cooked buffer.  If the old bug persists (edit_len = 0 always),
-    // the cooked buffer would be empty (only the newline itself).
     let avail_after_second = ld.bytes_available();
 
-    // We expect more than just the newline (1 byte) — the preserved
-    // remainder should also have been flushed.
     if avail_after_second <= 1 {
         klog_info!(
             "TTY_TEST: BUG - remainder bytes lost, only {} bytes after second flush",
@@ -637,11 +550,9 @@ pub fn test_bugfix_flush_edit_preserves_remainder() -> TestResult {
         return TestResult::Fail;
     }
 
-    // Read the second line and verify it contains the expected bytes.
     let mut buf2 = [0u8; 64];
     let n2 = ld.read(&mut buf2);
 
-    // Should have the 10 remainder bytes + newline = 11 total.
     if n2 < 2 {
         klog_info!(
             "TTY_TEST: BUG - second read expected >= 2 bytes (remainder + newline), got {}",
@@ -653,8 +564,8 @@ pub fn test_bugfix_flush_edit_preserves_remainder() -> TestResult {
     TestResult::Pass
 }
 
-/// BUG 3: Non-blocking write to a PTY master whose slave is throttled must
-/// return WouldBlock (EAGAIN) instead of blocking.
+/// A non-blocking write to a PTY master whose slave is throttled returns
+/// WouldBlock rather than blocking.
 pub fn test_bugfix_nonblock_write_throttled_pty() -> TestResult {
     tty::table::tty_table_init();
 
@@ -670,23 +581,17 @@ pub fn test_bugfix_nonblock_write_throttled_pty() -> TestResult {
     tty::set_pty_lock(master, false).unwrap();
     let _slave_backing = tty::pty_open_slave(slave).unwrap();
 
-    // Put slave in raw mode so master writes flow into cooked buffer.
     let saved = tty::get_termios(slave).unwrap();
     let mut raw = saved;
     raw.c_lflag &= !(LocalFlags::ICANON | LocalFlags::ECHO);
     tty::set_termios(slave, &raw).unwrap();
 
-    // Fill the slave's cooked buffer past the throttle high-water mark
-    // (THROTTLE_HIGH_WATER = 6144).  Write 6400 bytes in blocking mode.
     let mut fill: KBox<[u8; 6400]> = KBox::zeroed().expect("alloc");
     fill.iter_mut().for_each(|b| *b = b'Z');
     let _ = tty::write(master, &*fill, false);
 
-    // The slave should now be throttled.  A non-blocking write from the
-    // master should return WouldBlock.
     let result = tty::write(master, b"more", true);
 
-    // Clean up.
     tty::set_termios(slave, &saved).unwrap();
 
     match result {
@@ -701,8 +606,7 @@ pub fn test_bugfix_nonblock_write_throttled_pty() -> TestResult {
     }
 }
 
-/// BUG 3 (corollary): Non-blocking write to an unthrottled PTY should
-/// succeed normally.
+/// A non-blocking write to an unthrottled PTY succeeds normally.
 pub fn test_bugfix_nonblock_write_unthrottled_pty() -> TestResult {
     tty::table::tty_table_init();
 
@@ -718,13 +622,11 @@ pub fn test_bugfix_nonblock_write_unthrottled_pty() -> TestResult {
     tty::set_pty_lock(master, false).unwrap();
     let _slave_backing = tty::pty_open_slave(slave).unwrap();
 
-    // Put slave in raw mode.
     let saved = tty::get_termios(slave).unwrap();
     let mut raw = saved;
     raw.c_lflag &= !(LocalFlags::ICANON | LocalFlags::ECHO);
     tty::set_termios(slave, &raw).unwrap();
 
-    // Non-blocking write with an empty (unthrottled) slave should succeed.
     let result = tty::write(master, b"hello", true);
 
     tty::set_termios(slave, &saved).unwrap();
@@ -897,26 +799,22 @@ pub fn test_literal_next_vintr_does_not_bypass_throttle() -> TestResult {
     TestResult::Pass
 }
 
-/// BUG 4: RawDisc input_full prevents silent overflow.  When the master's
-/// raw buffer is full, slave_write should stop accepting bytes instead of
-/// silently dropping them.
+/// With the master's raw buffer full, slave_write stops accepting bytes
+/// instead of dropping them silently.
 pub fn test_bugfix_rawdisc_input_full() -> TestResult {
     use crate::tty::ldisc::RawDisc;
 
     let mut rd = RawDisc::new();
 
-    // RawDisc buffer size is 4096.  Fill it completely.
     for _ in 0..4096 {
         rd.input_char(b'A');
     }
 
-    // Buffer should now report full.
     if !rd.input_full() {
         klog_info!("TTY_TEST: BUG - RawDisc should report input_full after 4096 pushes");
         return TestResult::Fail;
     }
 
-    // Verify bytes_available matches capacity.
     if rd.bytes_available() != 4096 {
         klog_info!(
             "TTY_TEST: BUG - expected 4096 bytes available, got {}",
@@ -925,13 +823,10 @@ pub fn test_bugfix_rawdisc_input_full() -> TestResult {
         return TestResult::Fail;
     }
 
-    // Push one more byte — with the old code this would silently succeed.
-    // With input_full check, callers should not push past capacity.
-    // The RawDisc::input_char itself still silently drops (unchanged), but
-    // slave_write now checks input_full() before each push.
+    // `RawDisc::input_char` drops silently; `slave_write` is what checks
+    // `input_full()` before each push.
     rd.input_char(b'B');
 
-    // Count should still be 4096 (the extra byte was dropped, not added).
     if rd.bytes_available() != 4096 {
         klog_info!(
             "TTY_TEST: BUG - bytes_available should still be 4096 after overflow, got {}",
@@ -943,8 +838,7 @@ pub fn test_bugfix_rawdisc_input_full() -> TestResult {
     TestResult::Pass
 }
 
-/// BUG 4: slave_write respects input_full and returns a short write count
-/// when the master's buffer is full.
+/// slave_write returns a short write count when the master's buffer is full.
 pub fn test_bugfix_slave_write_stops_on_full() -> TestResult {
     tty::table::tty_table_init();
 
@@ -960,7 +854,6 @@ pub fn test_bugfix_slave_write_stops_on_full() -> TestResult {
     tty::set_pty_lock(master, false).unwrap();
     let _slave_backing = tty::pty_open_slave(slave).unwrap();
 
-    // Get the master's peer handle so we can call slave_write directly.
     let _master_peer = {
         let guard = TTY_SLOTS[master.0 as usize].lock();
         match guard.as_ref().unwrap().driver {
@@ -972,8 +865,6 @@ pub fn test_bugfix_slave_write_stops_on_full() -> TestResult {
         }
     };
 
-    // The slave's peer handle points to the MASTER (so slave_write pushes
-    // into the master's RawDisc).  Get the slave's peer handle.
     let slave_peer = {
         let guard = TTY_SLOTS[slave.0 as usize].lock();
         match guard.as_ref().unwrap().driver {
@@ -985,7 +876,6 @@ pub fn test_bugfix_slave_write_stops_on_full() -> TestResult {
         }
     };
 
-    // Fill the master's buffer (4096 bytes via slave_write).
     let mut fill: KBox<[u8; 4096]> = KBox::zeroed().expect("alloc");
     fill.iter_mut().for_each(|b| *b = b'X');
     let written1 = tty::pty::slave_write(&slave_peer, &*fill);
@@ -998,7 +888,6 @@ pub fn test_bugfix_slave_write_stops_on_full() -> TestResult {
         return TestResult::Fail;
     }
 
-    // Now try to write more — should get a short write (0 bytes accepted).
     let extra = [b'Y'; 100];
     let written2 = tty::pty::slave_write(&slave_peer, &extra);
 
@@ -1013,19 +902,17 @@ pub fn test_bugfix_slave_write_stops_on_full() -> TestResult {
     TestResult::Pass
 }
 
-/// BUG 4: LineDisc input_full reports correctly.
+/// LineDisc input_full needs both buffers full, not just the cooked one.
 pub fn test_bugfix_linedisc_input_full() -> TestResult {
     use crate::tty::ldisc::LineDisc;
 
     let mut ld = LineDisc::new();
 
-    // A fresh LineDisc should NOT be full.
     if ld.input_full() {
         klog_info!("TTY_TEST: BUG - fresh LineDisc should not be input_full");
         return TestResult::Fail;
     }
 
-    // Fill cooked buffer to capacity via non-canonical mode.
     let mut t = *ld.termios();
     t.c_lflag &= !(LocalFlags::ICANON | LocalFlags::ECHO);
     ld.set_termios(&t);
@@ -1033,11 +920,6 @@ pub fn test_bugfix_linedisc_input_full() -> TestResult {
         ld.input_char(b'Z');
     }
 
-    // Cooked buffer is full, but edit buffer is empty (non-canonical doesn't
-    // use edit buffer).  So input_full should still be false for LineDisc
-    // (input_full = cooked_full AND edit_full).
-    // Actually in non-canonical mode, input goes to cooked directly,
-    // so edit buffer stays empty.  input_full = both full, so false here.
     if ld.input_full() {
         klog_info!("TTY_TEST: BUG - LineDisc with only cooked full should not be input_full");
         return TestResult::Fail;
@@ -1045,9 +927,6 @@ pub fn test_bugfix_linedisc_input_full() -> TestResult {
 
     TestResult::Pass
 }
-// ---------------------------------------------------------------------------
-// Bug-fix regression tests (TTY architectural review — PARMRK, TCXONC)
-// ---------------------------------------------------------------------------
 
 /// PARMRK atomic insertion: with 3+ bytes free in the cooked buffer, the
 /// full \xff \x00 \x00 triplet is inserted.
@@ -1055,12 +934,10 @@ pub fn test_bugfix_parmrk_atomic_full_insert() -> TestResult {
     use crate::tty::ldisc::LineDisc;
     let mut ld = LineDisc::new();
     let mut t = *ld.termios();
-    // Enable PARMRK, disable canonical mode so we can read directly.
     t.c_iflag = InputFlags::PARMRK;
     t.c_lflag = LocalFlags::empty();
     ld.set_termios(&t);
 
-    // Fill cooked buffer to capacity minus exactly 3 bytes.
     for _ in 0..8189 {
         if !ld.push_cooked(b'X') {
             klog_info!("TTY_TEST: BUG - push_cooked failed during fill");
@@ -1068,8 +945,6 @@ pub fn test_bugfix_parmrk_atomic_full_insert() -> TestResult {
         }
     }
 
-    // Now there is room for exactly 3 bytes.  A break (NUL with PARMRK)
-    // should succeed and insert the full triplet.
     let action = ld.input_char(0x00);
     match action {
         InputAction::None => {}
@@ -1082,7 +957,6 @@ pub fn test_bugfix_parmrk_atomic_full_insert() -> TestResult {
         }
     }
 
-    // Drain the fill bytes first.
     let mut drain: KBox<[u8; 4096]> = KBox::zeroed().expect("alloc");
     let n_drain = ld.read(&mut *drain);
     if n_drain != 4096 {
@@ -1098,7 +972,6 @@ pub fn test_bugfix_parmrk_atomic_full_insert() -> TestResult {
         return TestResult::Fail;
     }
 
-    // Now read the PARMRK triplet.
     let mut buf = [0u8; 8];
     let n = ld.read(&mut buf);
     if n != 3 || buf[0] != 0xFF || buf[1] != 0x00 || buf[2] != 0x00 {
@@ -1118,18 +991,14 @@ pub fn test_bugfix_parmrk_drop_when_insufficient_space() -> TestResult {
     use crate::tty::ldisc::LineDisc;
     let mut ld = LineDisc::new();
     let mut t = *ld.termios();
-    // Enable PARMRK only (no IMAXBEL), disable canonical mode.
     t.c_iflag = InputFlags::PARMRK;
     t.c_lflag = LocalFlags::empty();
     ld.set_termios(&t);
 
-    // Fill cooked buffer to capacity minus 2 bytes — NOT enough for the
-    // 3-byte PARMRK triplet.
     for _ in 0..8190 {
         ld.push_cooked(b'X');
     }
 
-    // A break should be silently dropped (atomic: all-or-nothing).
     let action = ld.input_char(0x00);
     match action {
         InputAction::None => {}
@@ -1142,7 +1011,6 @@ pub fn test_bugfix_parmrk_drop_when_insufficient_space() -> TestResult {
         }
     }
 
-    // Drain the fill bytes.
     let mut drain: KBox<[u8; 4096]> = KBox::zeroed().expect("alloc");
     let n_drain = ld.read(&mut *drain);
     if n_drain != 4096 {
@@ -1158,7 +1026,6 @@ pub fn test_bugfix_parmrk_drop_when_insufficient_space() -> TestResult {
         return TestResult::Fail;
     }
 
-    // No further data should be available — the triplet was dropped.
     let mut buf = [0u8; 8];
     let n = ld.read(&mut buf);
     if n != 0 {
@@ -1178,17 +1045,14 @@ pub fn test_bugfix_parmrk_imaxbel_bell_on_insufficient_space() -> TestResult {
     use crate::tty::ldisc::LineDisc;
     let mut ld = LineDisc::new();
     let mut t = *ld.termios();
-    // Enable PARMRK + IMAXBEL, disable canonical mode.
     t.c_iflag = InputFlags::PARMRK | InputFlags::IMAXBEL;
     t.c_lflag = LocalFlags::empty();
     ld.set_termios(&t);
 
-    // Fill cooked buffer to capacity minus 1 byte.
     for _ in 0..8191 {
         ld.push_cooked(b'X');
     }
 
-    // A break should produce Bell (not None, not a partial push).
     let action = ld.input_char(0x00);
     match action {
         InputAction::Bell => {}
@@ -1201,7 +1065,6 @@ pub fn test_bugfix_parmrk_imaxbel_bell_on_insufficient_space() -> TestResult {
         }
     }
 
-    // Drain and verify no partial PARMRK sequence leaked.
     let mut drain: KBox<[u8; 4096]> = KBox::zeroed().expect("alloc");
     let n_drain = ld.read(&mut *drain);
     if n_drain != 4096 {
@@ -1239,12 +1102,10 @@ pub fn test_bugfix_parmrk_drop_when_buffer_completely_full() -> TestResult {
     t.c_lflag = LocalFlags::empty();
     ld.set_termios(&t);
 
-    // Fill cooked buffer completely.
     for _ in 0..8192 {
         ld.push_cooked(b'X');
     }
 
-    // Break with zero space — must be silently dropped.
     let action = ld.input_char(0x00);
     match action {
         InputAction::None => {}
@@ -1264,7 +1125,6 @@ pub fn test_bugfix_tcxonc_invalid_action_returns_error() -> TestResult {
     tty::table::tty_table_init();
     let idx = TtyIndex(0);
 
-    // Valid actions (0..=3) should succeed.
     for action in 0..=3i32 {
         match tty::tcxonc(idx, action) {
             Ok(()) => {}
@@ -1279,7 +1139,6 @@ pub fn test_bugfix_tcxonc_invalid_action_returns_error() -> TestResult {
         }
     }
 
-    // Invalid actions should return InvalidArg.
     for &bad_action in &[4i32, -1, 99, i32::MAX, i32::MIN] {
         match tty::tcxonc(idx, bad_action) {
             Err(TtyError::InvalidArg) => {}
@@ -1301,7 +1160,6 @@ pub fn test_bugfix_tcxonc_boundary_values() -> TestResult {
     tty::table::tty_table_init();
     let idx = TtyIndex(0);
 
-    // Exact boundary: TCOOFF (0) and TCION (3).
     match tty::tcxonc(idx, slopos_abi::syscall::TCOOFF) {
         Ok(()) => {}
         Err(e) => {
@@ -1317,7 +1175,6 @@ pub fn test_bugfix_tcxonc_boundary_values() -> TestResult {
         }
     }
 
-    // Just outside boundary: 4 and -1.
     match tty::tcxonc(idx, 4) {
         Err(TtyError::InvalidArg) => {}
         other => {
@@ -1340,9 +1197,6 @@ pub fn test_bugfix_tcxonc_boundary_values() -> TestResult {
     }
     TestResult::Pass
 }
-// ===========================================================================
-// Input Wake Batching (WAKEUP_CHARS) tests
-// ===========================================================================
 
 /// WAKEUP_CHARS constant has expected value.
 pub fn test_wakeup_chars_constant() -> TestResult {
@@ -1361,7 +1215,6 @@ pub fn test_wakeup_chars_constant() -> TestResult {
 pub fn test_canonical_wake_on_newline() -> TestResult {
     let mut ld = LineDisc::new();
 
-    // Type chars without newline — should_wake_reader must return false.
     for &c in b"hello" {
         ld.input_char(c);
     }
@@ -1370,7 +1223,6 @@ pub fn test_canonical_wake_on_newline() -> TestResult {
         return TestResult::Fail;
     }
 
-    // Newline completes the line — should_wake_reader must return true.
     ld.input_char(b'\n');
     if !ld.should_wake_reader() {
         klog_info!("TTY_TEST: BUG - canonical no wake after newline");
@@ -1404,12 +1256,10 @@ pub fn test_noncanonical_wake_at_threshold() -> TestResult {
     use crate::tty::ldisc::WAKEUP_CHARS;
     use slopos_abi::syscall::LocalFlags;
     let mut ld = LineDisc::new();
-    // Switch to non-canonical mode.
     let mut t = *ld.termios();
     t.c_lflag &= !LocalFlags::ICANON;
     ld.set_termios(&t);
 
-    // Push exactly WAKEUP_CHARS bytes.
     for _ in 0..WAKEUP_CHARS {
         ld.input_char(b'a');
     }
@@ -1428,19 +1278,16 @@ pub fn test_noncanonical_wake_at_threshold() -> TestResult {
 pub fn test_noncanonical_wake_near_full() -> TestResult {
     use slopos_abi::syscall::LocalFlags;
     let mut ld = LineDisc::new();
-    // Switch to non-canonical mode.
     let mut t = *ld.termios();
     t.c_lflag &= !LocalFlags::ICANON;
     ld.set_termios(&t);
 
-    // Fill cooked buffer to near capacity (8192 - 64 = 8128 bytes).
-    // Push in batches, draining the wake flag each time.
+    // 64 is the near-full margin the wake check uses.
     let target = 8192 - 64;
     let mut pushed = 0usize;
     while pushed < target {
         ld.input_char(b'z');
         pushed += 1;
-        // Drain any intermediate wake triggers.
         if pushed % 256 == 0 && pushed < target {
             let _ = ld.should_wake_reader();
         }
@@ -1515,12 +1362,10 @@ pub fn test_flush_all_resets_wake_counter() -> TestResult {
 pub fn test_rawdisc_wake_batching() -> TestResult {
     use crate::tty::ldisc::WAKEUP_CHARS;
     let mut rd = RawDisc::new();
-    // Enable CREAD so input is accepted.
     let mut t = *rd.termios();
     t.c_cflag |= ControlFlags::CREAD;
     rd.set_termios(&t);
 
-    // Push a few bytes — should NOT wake.
     for _ in 0..10 {
         rd.input_char(b'r');
     }
@@ -1529,7 +1374,6 @@ pub fn test_rawdisc_wake_batching() -> TestResult {
         return TestResult::Fail;
     }
 
-    // Push up to threshold.
     for _ in 10..WAKEUP_CHARS {
         rd.input_char(b'r');
     }
@@ -1560,7 +1404,6 @@ pub fn test_wake_resets_counter() -> TestResult {
         return TestResult::Fail;
     }
 
-    // Drain the buffer, then verify no spurious wake.
     ld.flush_input();
     if ld.should_wake_reader() {
         klog_info!("TTY_TEST: BUG - wake after flush");
@@ -1574,7 +1417,6 @@ pub fn test_wake_resets_counter() -> TestResult {
 pub fn test_canonical_eof_wakes() -> TestResult {
     let mut ld = LineDisc::new();
 
-    // Type chars then Ctrl+D (VEOF = 0x04).
     for &c in b"data" {
         ld.input_char(c);
     }
@@ -1587,9 +1429,6 @@ pub fn test_canonical_eof_wakes() -> TestResult {
 
     TestResult::Pass
 }
-// ===========================================================================
-// no_room-style Overflow Recovery
-// ===========================================================================
 
 /// A fresh LineDisc has no_room = false.
 pub fn test_no_room_initially_false() -> TestResult {
@@ -1608,19 +1447,16 @@ pub fn test_no_room_initially_false() -> TestResult {
 /// Filling cooked buffer then pushing sets no_room.
 pub fn test_no_room_set_on_cooked_full() -> TestResult {
     let mut ld = LineDisc::new();
-    // Fill to capacity.
     for _ in 0..8192 {
         if !ld.push_cooked(b'X') {
             klog_info!("TTY_TEST: BUG - push_cooked failed before buffer full");
             return TestResult::Fail;
         }
     }
-    // Buffer is full but no_room not set yet (no failed push).
     if ld.no_room() {
         klog_info!("TTY_TEST: BUG - no_room set before overflow push");
         return TestResult::Fail;
     }
-    // One more byte triggers no_room.
     if ld.push_cooked(b'Y') {
         klog_info!("TTY_TEST: BUG - push_cooked succeeded on full buffer");
         return TestResult::Fail;
@@ -1648,11 +1484,9 @@ pub fn test_no_room_not_set_before_full() -> TestResult {
 /// overflow_count increments on each dropped byte.
 pub fn test_overflow_count_increments() -> TestResult {
     let mut ld = LineDisc::new();
-    // Fill to capacity.
     for _ in 0..8192 {
         ld.push_cooked(b'X');
     }
-    // Drop 5 bytes.
     for _ in 0..5 {
         ld.push_cooked(b'Z');
     }
@@ -1669,13 +1503,11 @@ pub fn test_overflow_count_increments() -> TestResult {
 /// overflow_count saturates instead of wrapping.
 pub fn test_overflow_count_saturates() -> TestResult {
     let mut ld = LineDisc::new();
-    // Fill buffer.
     for _ in 0..8192 {
         ld.push_cooked(b'X');
     }
-    // Simulate many overflows (we can't do u32::MAX iterations, so verify
-    // the saturation logic via the implementation: push_cooked uses
-    // saturating_add which can never wrap).
+    // A real u32::MAX of iterations is impractical; `push_cooked` uses
+    // `saturating_add`, so counting a bounded run exercises the same path.
     for _ in 0..100 {
         ld.push_cooked(b'Z');
     }
@@ -1686,7 +1518,6 @@ pub fn test_overflow_count_saturates() -> TestResult {
         );
         return TestResult::Fail;
     }
-    // Verify still growing.
     ld.push_cooked(b'W');
     if ld.overflow_count() != 101 {
         klog_info!("TTY_TEST: BUG - overflow_count did not increment to 101");
@@ -1699,16 +1530,14 @@ pub fn test_overflow_count_saturates() -> TestResult {
 pub fn test_no_room_clears_on_drain_below_threshold() -> TestResult {
     use crate::tty::ldisc::THROTTLE_LOW_WATER;
     let mut ld = LineDisc::new();
-    // Fill to capacity and trigger no_room.
     for _ in 0..8192 {
         ld.push_cooked(b'X');
     }
-    ld.push_cooked(b'Y'); // triggers no_room
+    ld.push_cooked(b'Y');
     if !ld.no_room() {
         klog_info!("TTY_TEST: BUG - no_room not set after overflow");
         return TestResult::Fail;
     }
-    // Drain to just above low-water (2048) — no_room should persist.
     let drain_to_above = 8192 - (THROTTLE_LOW_WATER + 1);
     let mut scratch: KBox<[u8; 4096]> = KBox::zeroed().expect("alloc");
     let mut drained = 0usize;
@@ -1728,7 +1557,6 @@ pub fn test_no_room_clears_on_drain_below_threshold() -> TestResult {
         );
         return TestResult::Fail;
     }
-    // Recovery check should not clear (still above threshold).
     if ld.check_no_room_recovery() {
         klog_info!("TTY_TEST: BUG - recovery triggered above low-water");
         return TestResult::Fail;
@@ -1737,13 +1565,11 @@ pub fn test_no_room_clears_on_drain_below_threshold() -> TestResult {
         klog_info!("TTY_TEST: BUG - no_room cleared above low-water");
         return TestResult::Fail;
     }
-    // Read one more byte to drop to exactly low-water.
     let got2 = ld.read(&mut scratch[..1]);
     if got2 != 1 {
         klog_info!("TTY_TEST: BUG - second read failed");
         return TestResult::Fail;
     }
-    // Now recovery should trigger.
     if !ld.check_no_room_recovery() {
         klog_info!("TTY_TEST: BUG - recovery did not trigger at low-water");
         return TestResult::Fail;
@@ -1762,7 +1588,6 @@ pub fn test_no_room_stays_above_threshold() -> TestResult {
         ld.push_cooked(b'X');
     }
     ld.push_cooked(b'Y');
-    // Read only a few bytes (still far above low-water).
     let mut scratch = [0u8; 64];
     ld.read(&mut scratch);
     if !ld.no_room() {
@@ -1822,20 +1647,17 @@ pub fn test_flush_all_clears_no_room() -> TestResult {
 pub fn test_fill_drain_cycle_preserves_throttle() -> TestResult {
     use crate::tty::ldisc::THROTTLE_LOW_WATER;
     let mut ld = LineDisc::new();
-    // Cycle 1: fill → overflow → drain → recovery.
     for _ in 0..8192 {
         ld.push_cooked(b'A');
     }
-    ld.push_cooked(b'B'); // no_room
+    ld.push_cooked(b'B');
     let mut scratch: KBox<[u8; 4096]> = KBox::zeroed().expect("alloc");
     let _ = ld.read(&mut *scratch);
     let _ = ld.read(&mut *scratch);
-    // After full drain, cooked_count == 0 which is below THROTTLE_LOW_WATER.
     if !ld.check_no_room_recovery() {
         klog_info!("TTY_TEST: BUG - recovery did not trigger after full drain");
         return TestResult::Fail;
     }
-    // Cycle 2: fill again — no_room should be clearable again.
     for _ in 0..8192 {
         ld.push_cooked(b'C');
     }
@@ -1844,7 +1666,6 @@ pub fn test_fill_drain_cycle_preserves_throttle() -> TestResult {
         klog_info!("TTY_TEST: BUG - no_room not set on second cycle");
         return TestResult::Fail;
     }
-    // Drain below threshold.
     let drain_amount = 8192 - THROTTLE_LOW_WATER;
     let mut drained = 0usize;
     while drained < drain_amount {
@@ -1877,7 +1698,6 @@ pub fn test_fill_drain_cycle_preserves_throttle() -> TestResult {
 /// RawDisc also tracks no_room on overflow.
 pub fn test_rawdisc_no_room() -> TestResult {
     let mut rd = RawDisc::new();
-    // RawDisc buffer is 4096 bytes.
     for _ in 0..4096 {
         rd.input_char(b'R');
     }
@@ -1885,7 +1705,6 @@ pub fn test_rawdisc_no_room() -> TestResult {
         klog_info!("TTY_TEST: BUG - RawDisc no_room set before overflow");
         return TestResult::Fail;
     }
-    // Overflow.
     rd.input_char(b'S');
     if !rd.no_room() {
         klog_info!("TTY_TEST: BUG - RawDisc no_room not set after overflow");
@@ -1895,7 +1714,6 @@ pub fn test_rawdisc_no_room() -> TestResult {
         klog_info!("TTY_TEST: BUG - RawDisc overflow_count != 1");
         return TestResult::Fail;
     }
-    // Flush clears it.
     rd.flush_all();
     if rd.no_room() || rd.overflow_count() != 0 {
         klog_info!("TTY_TEST: BUG - RawDisc flush_all did not clear no_room");
@@ -1907,16 +1725,13 @@ pub fn test_rawdisc_no_room() -> TestResult {
 /// IMAXBEL bell still works when no_room is set.
 pub fn test_imaxbel_preserved_with_no_room() -> TestResult {
     let mut ld = LineDisc::new();
-    // Put into raw mode with IMAXBEL.
     let mut t = *ld.termios();
     t.c_lflag &= !(LocalFlags::ICANON | LocalFlags::ECHO);
     t.c_iflag |= InputFlags::IMAXBEL;
     ld.set_termios(&t);
-    // Fill cooked buffer.
     for _ in 0..8192 {
         ld.push_cooked(b'X');
     }
-    // Next input_char should return Bell AND set no_room.
     let action = ld.input_char(b'Z');
     let is_bell = matches!(action, InputAction::Bell);
     if !is_bell {
@@ -1934,7 +1749,6 @@ pub fn test_imaxbel_preserved_with_no_room() -> TestResult {
 pub fn test_rawdisc_recovery() -> TestResult {
     use crate::tty::ldisc::THROTTLE_LOW_WATER;
     let mut rd = RawDisc::new();
-    // Fill and overflow.
     for _ in 0..4096 {
         rd.input_char(b'R');
     }
@@ -1943,7 +1757,6 @@ pub fn test_rawdisc_recovery() -> TestResult {
         klog_info!("TTY_TEST: BUG - RawDisc no_room not set");
         return TestResult::Fail;
     }
-    // Drain below low-water.
     let drain_amount = 4096 - THROTTLE_LOW_WATER;
     let mut scratch: KBox<[u8; 4096]> = KBox::zeroed().expect("alloc");
     let got = rd.read(&mut scratch[..drain_amount]);
@@ -1974,7 +1787,6 @@ pub fn test_ldisc_kind_dispatch() -> TestResult {
         klog_info!("TTY_TEST: BUG - LdiscKind::NTty overflow_count initially != 0");
         return TestResult::Fail;
     }
-    // Fill via NTty's raw input to trigger overflow.
     let mut t = *lk.termios();
     t.c_lflag &= !(LocalFlags::ICANON | LocalFlags::ECHO);
     t.c_iflag &= !InputFlags::IMAXBEL;
@@ -1992,9 +1804,6 @@ pub fn test_ldisc_kind_dispatch() -> TestResult {
     }
     TestResult::Pass
 }
-// ---------------------------------------------------------------------------
-// Output Drain Semantics Hardening tests
-// ---------------------------------------------------------------------------
 
 /// wait_output_idle (via is_output_idle) returns true
 /// when no output is in-flight and driver has no pending output (fast path).
@@ -2002,7 +1811,6 @@ pub fn test_drain_idle_fast_path() -> TestResult {
     tty::table::tty_table_init();
     drain_tty_nonblock(TtyIndex(0));
 
-    // Write some output so the inflight counter goes up and back down.
     let _ = tty::write(TtyIndex(0), b"fast-path test", false);
 
     // Synchronous driver: after write returns, output is already idle.
@@ -2023,10 +1831,8 @@ pub fn test_drain_hangup_vacuously_complete() -> TestResult {
     tty::table::tty_table_init();
     drain_tty_nonblock(TtyIndex(0));
 
-    // Hang up TTY 0.
     let _hangup = HangupScope::hang_up(TtyIndex(0));
 
-    // is_output_idle should return true — drain is vacuously complete.
     match tty::is_output_idle(TtyIndex(0)) {
         Ok(true) => TestResult::Pass,
         other => {
@@ -2044,10 +1850,8 @@ pub fn test_tcsbrk_hangup_returns_error() -> TestResult {
     tty::table::tty_table_init();
     let idx = TtyIndex(0);
 
-    // Hang up TTY 0.
     let _hangup = HangupScope::hang_up(idx);
 
-    // tcsbrk on hung-up TTY should return HungUp.
     match tty::tcsbrk(idx, 1) {
         Err(TtyError::HungUp) => TestResult::Pass,
         other => {
@@ -2092,30 +1896,26 @@ pub fn test_tcsbrk_zero_healthy_succeeds() -> TestResult {
     }
 }
 
-/// tcsbrk(arg>0) and TCSETSW share the same drain path.
-/// Verify behavioral parity: both succeed immediately on a synchronous backend.
+/// tcsbrk(arg>0) and TCSETSW share a drain path, so both succeed immediately
+/// on a synchronous backend.
 pub fn test_tcsbrk_and_tcsetsw_share_drain() -> TestResult {
     tty::table::tty_table_init();
     let idx = TtyIndex(0);
     drain_tty_nonblock(idx);
 
-    // Write some output.
     let _ = tty::write(idx, b"drain parity test", false);
 
-    // tcsbrk(1) should succeed immediately (synchronous driver).
     if let Err(e) = tty::tcsbrk(idx, 1) {
         klog_info!("TTY_TEST: BUG - fp13 tcsbrk(1) failed: {:?}", e);
         return TestResult::Fail;
     }
 
-    // set_termios_wait should also succeed immediately.
     let t = tty::get_termios(idx).unwrap();
     if let Err(e) = tty::set_termios_wait(idx, &t) {
         klog_info!("TTY_TEST: BUG - fp13 set_termios_wait failed: {:?}", e);
         return TestResult::Fail;
     }
 
-    // Both completed — they share the same drain path.
     TestResult::Pass
 }
 
@@ -2137,7 +1937,6 @@ pub fn test_drain_invalid_index() -> TestResult {
 /// drain on an unallocated TTY slot returns NotAllocated.
 pub fn test_drain_unallocated_slot() -> TestResult {
     tty::table::tty_table_init();
-    // Slot 7 is not allocated after init.
     match tty::tcsbrk(TtyIndex(7), 1) {
         Err(TtyError::NotAllocated) => TestResult::Pass,
         other => {
@@ -2171,10 +1970,8 @@ pub fn test_pty_tcsbrk_drain_immediate() -> TestResult {
     tty::set_pty_lock(master_idx, false).unwrap();
     let _slave_backing = tty::pty_open_slave(slave_idx).unwrap();
 
-    // Write to master.
     let _ = tty::write(master_idx, b"pty drain fp13", false);
 
-    // tcsbrk drain should succeed immediately.
     let drain_result = tty::tcsbrk(master_idx, 1);
     let idle_result = tty::is_output_idle(master_idx);
 
@@ -2201,7 +1998,6 @@ pub fn test_console_drain_synchronous() -> TestResult {
 
     let _ = tty::write(TtyIndex(0), b"console drain fp13\r\n", false);
 
-    // tcsbrk drain should succeed immediately for synchronous driver.
     match tty::tcsbrk(TtyIndex(0), 1) {
         Ok(()) => {}
         Err(e) => {
@@ -2210,7 +2006,6 @@ pub fn test_console_drain_synchronous() -> TestResult {
         }
     }
 
-    // is_output_idle should also be true.
     match tty::is_output_idle(TtyIndex(0)) {
         Ok(true) => TestResult::Pass,
         other => {
@@ -2328,14 +2123,13 @@ pub fn test_tcsetsf_hangup_returns_error() -> TestResult {
     }
 }
 
-/// Inflight counter starts at 0, bumps during write,
-/// returns to 0 after write completes.  Verifies the split-write accounting.
+/// The inflight counter starts at 0, bumps during a write and returns to 0
+/// once it completes.
 pub fn test_inflight_accounting_round_trip() -> TestResult {
     use core::sync::atomic::Ordering;
     tty::table::tty_table_init();
     drain_tty_nonblock(TtyIndex(0));
 
-    // Before write: inflight must be 0.
     let before = TTY_OUTPUT_INFLIGHT[0].load(Ordering::Acquire);
     if before != 0 {
         klog_info!(
@@ -2345,10 +2139,8 @@ pub fn test_inflight_accounting_round_trip() -> TestResult {
         return TestResult::Fail;
     }
 
-    // Write completes synchronously on serial backend.
     let _ = tty::write(TtyIndex(0), b"inflight round trip", false);
 
-    // After write: inflight must be back to 0.
     let after = TTY_OUTPUT_INFLIGHT[0].load(Ordering::Acquire);
     if after != 0 {
         klog_info!(
@@ -2681,12 +2473,8 @@ pub fn test_receive_buf_accumulates_echo() -> TestResult {
     }
     TestResult::Pass
 }
-// ===========================================================================
-// mod.rs Module Decomposition — Regression Tests
-// ===========================================================================
 
 pub fn test_mod_reexports_io_functions() -> TestResult {
-    // Verify I/O functions are accessible through crate::tty::*
     let _: fn(TtyIndex, &mut [u8], bool) -> Result<usize, TtyError> = tty::read;
     let _: fn(TtyIndex, &[u8], bool) -> Result<usize, TtyError> = tty::write;
     let _: fn(TtyIndex) -> bool = tty::has_data;
@@ -2755,7 +2543,6 @@ pub fn test_tty_struct_fields_accessible() -> TestResult {
     let guard = crate::tty::table::TTY_SLOTS[0].lock();
     if let Some(tty) = guard.as_ref() {
         let _ = tty.index;
-        // active field removed — slot being Some means active
         let _ = tty.flags.contains(TtyFlags::HUNG_UP);
         let _ = tty.flags.contains(TtyFlags::PEER_CLOSED);
         let _ = tty.flags.contains(TtyFlags::SLAVE_LOCKED);
@@ -2817,9 +2604,6 @@ pub fn test_existing_api_smoke_test() -> TestResult {
     let _ = tty::output_queued_bytes(idx);
     TestResult::Pass
 }
-// ===========================================================================
-// Phase 21: Deferred Actions RAII & Boilerplate Reduction
-// ===========================================================================
 
 use crate::tty::PostLockWork;
 
@@ -2903,9 +2687,8 @@ pub fn test_p21_postlockwork_wake_helpers() -> TestResult {
 }
 
 pub fn test_p21_postlockwork_zero_pgid_signal_ignored() -> TestResult {
-    // With no live foreground group, the call sites resolve `None` and never
-    // queue a signal — the "no target, no signal" invariant now lives at
-    // resolution time rather than inside `add_signal`.
+    // "No target, no signal" is enforced at resolution time, not inside
+    // `add_signal`, so a call site with no live group queues nothing.
     let s = TtySession::new();
     let mut plw = PostLockWork::new();
     if let Some(pg) = s.fg_pgrp_handle() {

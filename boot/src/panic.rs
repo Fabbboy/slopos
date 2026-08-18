@@ -15,35 +15,27 @@ use crate::shutdown::execute_kernel;
 
 static PANIC_RIP: AtomicU64 = AtomicU64::new(0);
 static PANIC_RSP: AtomicU64 = AtomicU64::new(0);
-/// RBP of the *interrupted* context (from the trap frame) when the panic
-/// originates in an exception handler. The backtrace walker prefers this
-/// over `PANIC_ORIG_RBP` so a kernel-mode fault prints the faulting call
-/// chain instead of the panic machinery's own frames.
+/// RBP of the *interrupted* context, set when the panic comes from an exception
+/// handler. Preferred over `PANIC_ORIG_RBP` so the report shows the faulting
+/// call chain rather than the panic machinery's own frames.
 static PANIC_FRAME_RBP: AtomicU64 = AtomicU64::new(0);
 static PANIC_HAS_CPU_STATE: StateFlag = StateFlag::new();
 const PANIC_BACKTRACE_MAX: usize = 16;
 
-/// The panicking `&PanicInfo` re-narrowed to a raw pointer, stashed before the
-/// emergency-stack switch so the reporter (running on the emergency stack) can
-/// format the full location + message. The PanicInfo memory stays live — the
-/// switch only moves `RSP`, it does not unwind the panicking frame.
+/// The panicking `&PanicInfo` as a raw pointer. It stays live across the
+/// emergency-stack switch, which moves only `RSP` and unwinds nothing.
 static PANIC_INFO_PTR: AtomicUsize = AtomicUsize::new(0);
-/// Original `RSP` captured before the switch (the reporter's own `RSP` is the
-/// emergency stack, so the interrupted stack pointer must be stashed).
+/// Pre-switch `RSP`: the reporter's own is the emergency stack.
 static PANIC_ORIG_RSP: AtomicU64 = AtomicU64::new(0);
-/// Original `RBP` captured before the switch, so the backtrace walks the
-/// interrupted call chain (the panic origin) rather than the reporter's own
-/// frames on the emergency stack.
+/// Pre-switch `RBP`, so the backtrace walks the panic origin rather than the
+/// reporter's frames on the emergency stack.
 static PANIC_ORIG_RBP: AtomicU64 = AtomicU64::new(0);
 
-/// Bounded spin budget the owner waits for peer CPUs to acknowledge the panic
-/// stop before printing; a stuck peer must never block the report, so the
-/// owner proceeds on timeout.
+/// A stuck peer must never block the report, so the owner proceeds on timeout.
 const PEER_STOP_SPIN_BUDGET: u64 = 50_000_000;
 
-/// Set CPU state from an interrupt frame to be included in panic diagnostics.
-/// `rbp` is the interrupted context's frame pointer; the panic backtrace
-/// walks it so the report shows the faulting call chain.
+/// `rbp` is the interrupted context's frame pointer; the panic backtrace walks
+/// it so the report shows the faulting call chain.
 #[inline]
 pub fn set_panic_cpu_state(rip: u64, rsp: u64, rbp: u64) {
     PANIC_RIP.store(rip, Ordering::SeqCst);
@@ -64,45 +56,28 @@ fn take_panic_cpu_state() -> (Option<u64>, Option<u64>) {
 }
 
 fn panic_serial_write(s: &str) {
-    // Write directly to COM1 via the lock-free early console rather than the
-    // `SERIAL` spinlock. A CPU that faulted while holding `SERIAL` would
-    // otherwise self-deadlock the moment it panics, and concurrent peer
-    // panics would contend on the same lock — the cross-CPU wedge observed
-    // alongside the recursive-panic cascade. `early_console` polls the UART
-    // directly, so it is safe from any context.
+    // The polling `early_console`, never the `SERIAL` spinlock: a CPU that
+    // faulted holding that lock would self-deadlock the moment it panics.
     slopos_ostd::early_console::write_bytes(s.as_bytes());
     slopos_ostd::early_console::write_bytes(b"\n");
-    // One emitted line is real progress, and a panic report — up to 16
-    // symbolized backtrace frames over a polled UART, two port traps per
-    // byte — runs long enough to outlast a timer tick when the panic
-    // originated under an interrupt-disabling lock. The loop above is
-    // bounded by the string already in hand and waits on nothing, so the
-    // touch cannot mask a wedge: a dead UART stops it inside `write_bytes`,
-    // before this line.
+    // A full report over a polled UART outlasts a timer tick, and one emitted
+    // line is real progress. The touch cannot mask a wedge: it is bounded by the
+    // string in hand, and a dead UART stops inside `write_bytes` above.
     slopos_ostd::watchdog::touch();
 }
 
-/// Last-resort, **format-free** abort: print a fixed `&'static str` and halt
-/// without ever building a `format_args!` value.
+/// Last-resort abort: prints only pre-existing `&'static str`s, never a
+/// `format_args!` value.
 ///
-/// `format_args!`/`write!` materialise a `[core::fmt::Argument; N]` array as
-/// an address-taken local, i.e. on the SafeStack *data* stack. That is fine
-/// for the normal panic path — exception context now runs on its own mapped
-/// per-CPU data stack — but it is precisely wrong for the one case where the
-/// **exception data stack itself overflowed**: the normal panic path would
-/// re-fault on the very stack that is exhausted. This routine writes only
-/// pre-existing `&'static str`s through the serial line (no Argument array,
-/// no stack buffer), so it consumes no data stack and cannot recurse.
-///
-/// Diverges. Interrupts are masked first so a nested IRQ cannot perturb the
-/// halt.
+/// `format_args!` materialises a `[core::fmt::Argument; N]` as an address-taken
+/// local, i.e. on the SafeStack *data* stack — exactly the stack that has
+/// overflowed in the one case this exists for, where the normal reporter would
+/// re-fault on it. Interrupts are masked first so no IRQ perturbs the halt.
 pub fn panic_abort_raw(msg: &'static str) -> ! {
     cpu::disable_interrupts();
-    // Fatal by construction, and the degrade target for a re-entered
-    // reporter: ordering validation off before anything below acquires.
+    // Ordering validation off before anything below acquires a lock.
     slopos_ostd::sync::enter_fatal_bypass();
-    // Best-effort: become the panic owner so a concurrent normal panic on
-    // another CPU does not interleave; ignore the result either way.
+    // Best-effort ownership so a concurrent panic on a peer cannot interleave.
     let _ = slopos_ostd::panic::claim_panic_owner(slopos_arch::get_current_cpu() as u32);
     panic_serial_write("\n\n=== KERNEL ABORT ===");
     panic_serial_write(msg);
@@ -110,8 +85,8 @@ pub fn panic_abort_raw(msg: &'static str) -> ! {
     cpu::halt_loop()
 }
 
-/// Capture the panicking call chain's return addresses into `out` by walking
-/// frame pointers from the stashed rbp. Returns the frame count.
+/// Fills `out` with return addresses walked from the stashed rbp; returns the
+/// frame count.
 fn panic_capture_backtrace(out: &mut [u64]) -> usize {
     let frame_rbp = PANIC_FRAME_RBP.load(Ordering::SeqCst);
     let stashed = PANIC_ORIG_RBP.load(Ordering::SeqCst);
@@ -142,9 +117,8 @@ fn panic_capture_backtrace(out: &mut [u64]) -> usize {
 }
 
 fn panic_dump_backtrace() {
-    // Fatal-path rbp selection: prefer the trap frame's RBP (the faulting
-    // context) when an exception path stashed one; then the pre-switch RBP
-    // (the panicking call chain); finally the live RBP.
+    // Prefer the faulting context's RBP, then the panicking call chain's, then
+    // the live one.
     let frame_rbp = PANIC_FRAME_RBP.load(Ordering::SeqCst);
     let stashed = PANIC_ORIG_RBP.load(Ordering::SeqCst);
     let rbp = if frame_rbp != 0 {
@@ -157,11 +131,9 @@ fn panic_dump_backtrace() {
     panic_dump_backtrace_from(rbp)
 }
 
-/// Walk frame pointers from `rbp`, symbolize each return address, and print
-/// the trace via the lock-free serial writer. Shared by the fatal reporter
-/// and the task-scoped recovery report. All frames are printed, including
-/// the panic machinery's own — they symbolize to self-identifying names and
-/// a fixed skip count would silently rot as the handler's call shape
+/// Shared by the fatal reporter and the task-scoped recovery report. Every frame
+/// is printed, the panic machinery's own included: they symbolize to
+/// self-identifying names, and a fixed skip count would rot as the call shape
 /// changes.
 fn panic_dump_backtrace_from(rbp: u64) {
     let mut entries: [StacktraceEntry; PANIC_BACKTRACE_MAX] = [StacktraceEntry {

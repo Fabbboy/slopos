@@ -45,15 +45,10 @@ impl BootInitPhase {
     }
 }
 
-/// Type alias for boot init step functions. Every step receives a
-/// `&mut BootCtx<'_, BspInit>` capability so it can call boot-time-only
-/// mutators (gdt_set_ist, init_scheduler, etc.). Steps that don't touch
-/// boot mutators still take the parameter — uniform signature avoids a
-/// two-tone API and the borrow checker permits the unused param.
-///
-/// HRTB `for<'b>` makes the boot step lifetime-polymorphic so the
-/// step's `'brand` is unified with the brand minted by `run_bsp_init`
-/// at call time rather than baked into the fn-pointer type.
+/// Every step takes the `&mut BootCtx` capability, whether or not it calls a
+/// boot-time-only mutator, so there is one signature rather than two. The HRTB
+/// keeps `'brand` unified with the brand `run_bsp_init` mints at call time
+/// instead of baking it into the fn-pointer type.
 pub type BootInitFn = for<'b> fn(&mut BootCtx<'b, BspInit>) -> i32;
 
 pub struct BootInitStep {
@@ -76,9 +71,8 @@ impl BootInitStep {
     }
 }
 
-/// Internal helper: translate the phase ident into the OSTD registry that
-/// backs it. One entry type, five sections — the phase *is* the section, and
-/// `boot_init_run_all` walks them in enum order.
+/// Translates the phase ident into the OSTD registry backing it;
+/// `boot_init_run_all` walks the five in enum order.
 #[macro_export]
 #[doc(hidden)]
 macro_rules! __boot_init_link_section {
@@ -101,17 +95,11 @@ macro_rules! __boot_init_link_section {
 
 /// Register a boot-init step.
 ///
-/// All boot init functions take `&mut BootCtx` and return `i32`. Use
-/// the `fallible` form for steps whose `i32` return code is consulted;
-/// the bare form wraps a `fn(&mut BootCtx)` (returning unit) into
-/// `Ok(0)`.
-///
-/// Both forms accept `flags = $expr` for explicit priority/optional
-/// flags, or `optional` shorthand to mark a step as
-/// `BOOT_INIT_FLAG_OPTIONAL` (failures are non-fatal).
+/// The `fallible` form keeps the step's `i32` return code; the bare form wraps a
+/// unit-returning `fn(&mut BootCtx)` into `0`. Both take `flags = $expr` for
+/// priority, or the `optional` shorthand that makes failure non-fatal.
 #[macro_export]
 macro_rules! boot_init {
-    // Fallible fn(&mut BootCtx<'_, BspInit>) -> i32, explicit flags
     ($static_name:ident, $phase:ident, $label:expr, $func:path, fallible, flags = $flags:expr) => {
         const _: () = {
             fn wrapper<'b>(
@@ -132,7 +120,6 @@ macro_rules! boot_init {
         const $static_name: () = ();
     };
 
-    // Fallible fn(&mut BootCtx) -> i32, optional shorthand
     ($static_name:ident, $phase:ident, $label:expr, $func:path, fallible, optional) => {
         $crate::boot_init!(
             $static_name,
@@ -144,12 +131,10 @@ macro_rules! boot_init {
         );
     };
 
-    // Fallible fn(&mut BootCtx) -> i32, no flags
     ($static_name:ident, $phase:ident, $label:expr, $func:path, fallible) => {
         $crate::boot_init!($static_name, $phase, $label, $func, fallible, flags = 0);
     };
 
-    // Infallible fn(&mut BootCtx<'_, BspInit>), explicit flags
     ($static_name:ident, $phase:ident, $label:expr, $func:path, flags = $flags:expr) => {
         const _: () = {
             fn wrapper<'b>(
@@ -171,7 +156,6 @@ macro_rules! boot_init {
         const $static_name: () = ();
     };
 
-    // Infallible fn(&mut BootCtx), optional shorthand
     ($static_name:ident, $phase:ident, $label:expr, $func:path, optional) => {
         $crate::boot_init!(
             $static_name,
@@ -182,15 +166,13 @@ macro_rules! boot_init {
         );
     };
 
-    // Infallible fn(&mut BootCtx), no flags (most common)
     ($static_name:ident, $phase:ident, $label:expr, $func:path) => {
         $crate::boot_init!($static_name, $phase, $label, $func, flags = 0);
     };
 }
 
-// Re-export BootCtx + BspInit so the boot_init! macro expansion can
-// name them via the canonical paths `crate::early_init::BootCtx` and
-// `crate::early_init::BspInit`.
+// Re-exported so `boot_init!` expansions can name these by the canonical
+// `crate::early_init::…` paths.
 pub use slopos_hermetic::{BootCtx, BspInit};
 
 pub const fn boot_init_priority(val: u32) -> u32 {
@@ -198,11 +180,9 @@ pub const fn boot_init_priority(val: u32) -> u32 {
 }
 
 struct BootRuntimeContext {
-    /// Bootloader memmap pointer; lives in a `'static` `SyncUnsafeCell`
-    /// published by `limine_protocol::limine_get_memmap_response` whose
-    /// contents are immutable for the kernel's lifetime. Wrapped in
-    /// `KernelSync` so the surrounding `SpinLock<BootRuntimeContext>:
-    /// Sync` is satisfied without a hand-written `unsafe impl Send`.
+    /// Points at bootloader-published data that is immutable for the kernel's
+    /// lifetime. `KernelSync` satisfies the enclosing `SpinLock`'s `Sync` bound
+    /// without a hand-written `unsafe impl Send`.
     memmap: KernelSync<*const limine_protocol::LimineMemmapResponse>,
     hhdm_offset: u64,
     cmdline: Option<&'static str>,
@@ -269,7 +249,6 @@ fn boot_init_report_failure(phase: &[u8], step_name: Option<&[u8]>) {
     klog_info!("[boot:init] FAILURE in {} -> {}", phase_str, step_str);
 }
 
-// Linker symbols from FFI boundary, accessed through the safe
 use slopos_ostd::ffi::registry::{RegistryId, registry_slice};
 
 impl slopos_ostd::ffi::registry::RegistryEntry for BootInitStep {
@@ -283,8 +262,7 @@ impl slopos_ostd::ffi::registry::RegistryEntry for BootInitStep {
     ];
 }
 
-/// Borrow the contiguous `[BootInitStep]` array the linker built for one
-/// phase.
+/// Borrows the contiguous `[BootInitStep]` array the linker built for a phase.
 fn phase_steps(phase: BootInitPhase) -> &'static [BootInitStep] {
     registry_slice::<BootInitStep>(match phase {
         BootInitPhase::EarlyHw => RegistryId::BootInitEarlyHw,
@@ -563,10 +541,9 @@ fn boot_step_boot_config_fn(_ctx: &mut BootCtx<'_, BspInit>) {
         }
     }
 
-    // Lock-order validator policy. `lockdep=warn` reports every distinct
-    // finding once and keeps booting, which enumerates the whole tree in one
-    // boot; `lockdep=off` keeps the held-lock walk that panic recovery needs
-    // but runs no ordering checks.
+    // `lockdep=warn` reports each distinct finding once and keeps booting, so
+    // one boot enumerates the whole tree; `lockdep=off` still keeps the
+    // held-lock walk panic recovery needs, and only drops the ordering checks.
     for token in cmdline.split_whitespace() {
         if let Some(value) = token.strip_prefix("lockdep=") {
             match value {
@@ -593,12 +570,9 @@ fn boot_step_boot_config_fn(_ctx: &mut BootCtx<'_, BspInit>) {
         }
     }
 
-    // Resource-accounting refusal policy. `quota=warn` grants an over-limit
-    // charge and counts it, which is the only tier a peak can be measured on:
-    // a system that dies at its first over-limit cannot report what its real
-    // high-water mark would have been. `quota=off` consults no ceiling at all
-    // while the counters keep moving, so attribution survives with the
-    // enforcement cost removed.
+    // `quota=warn` grants and counts an over-limit charge, the only tier a real
+    // high-water mark can be measured on; `quota=off` keeps the counters moving
+    // but consults no ceiling, so attribution survives without enforcement.
     for token in cmdline.split_whitespace() {
         if let Some(value) = token.strip_prefix("quota=") {
             match value {
@@ -621,10 +595,8 @@ fn boot_step_boot_config_fn(_ctx: &mut BootCtx<'_, BspInit>) {
         }
     }
 
-    // Lockup detector. `watchdog=off` disables it outright,
-    // `watchdog.miss_threshold=` sets the consecutive unchanged samples a
-    // CPU may accumulate before it is reported (100 = 1 s at the 100 Hz
-    // tick), and `watchdog.panic=off` keeps every detection non-fatal.
+    // `watchdog.miss_threshold=` counts consecutive unchanged samples before a
+    // CPU is reported: 100 is one second at the 100 Hz tick.
     for token in cmdline.split_whitespace() {
         match token {
             "watchdog=off" => {
@@ -653,9 +625,8 @@ fn boot_step_boot_config_fn(_ctx: &mut BootCtx<'_, BspInit>) {
         }
     }
 
-    // Root filesystem backing: `root=initramfs` forces the RAM-resident root,
-    // `root=virtio` forces the ext2 disk, and the default (`root=auto`) uses the
-    // initramfs when Limine loaded a module and falls back to the disk.
+    // The unset default is `root=auto`: the initramfs when Limine loaded a
+    // module, otherwise the ext2 disk.
     if cmdline.contains("root=initramfs") {
         crate::boot_services::set_root_mode(crate::boot_services::ROOT_INITRAMFS);
         boot_info(b"Boot option: root=initramfs\0");
@@ -664,8 +635,7 @@ fn boot_step_boot_config_fn(_ctx: &mut BootCtx<'_, BspInit>) {
         boot_info(b"Boot option: root=virtio\0");
     }
 
-    // Diagnostic console: `kconsole=off|on|<hex mask>` plus its sub-knobs. A
-    // typed parser rather than more `contains` arms, so a malformed value
+    // A typed parser rather than more `contains` arms, so a malformed value
     // degrades to the shipped policy instead of to a disabled console.
     let kconsole = slopos_ostd::kconsole::config::parse(cmdline);
     slopos_ostd::kconsole::install(kconsole);
@@ -702,16 +672,10 @@ boot_init!(
 
 fn boot_step_init_phys_virt_offset_fn(ctx: &mut BootCtx<'_, BspInit>) {
     let hhdm = boot_get_hhdm_offset();
-    // One-shot init; the limine step has already populated `hhdm_offset`,
-    // and this is the canonical wiring point for the OSTD phys/virt
-    // offset. Tier-2 OSTD signature is `fn(&BspToken<'_>, u64)`.
     let tok = ctx.bsp_token();
     slopos_ostd::mm::phys::init_phys_virt_offset(&tok, hhdm);
-    // Mirror the offset into the `boot::hhdm` registry that the
-    // `acpi_handoff` / `acpi_region_bytes` helpers consult. The two
-    // registries (`mm::phys::PHYS_VIRT_OFFSET` and `boot::hhdm`) hold
-    // the same u64; both are populated here so consumers can read
-    // through whichever path their layer permits.
+    // `mm::phys::PHYS_VIRT_OFFSET` and `boot::hhdm` hold the same u64; both are
+    // populated here so a consumer can read through whichever its layer permits.
     slopos_ostd::boot::hhdm::register_hhdm_offset(&tok, hhdm);
 }
 
@@ -723,7 +687,7 @@ boot_init!(
     flags = boot_init_priority(10)
 );
 
-/// Implementation of kernel_main - called from FFI boundary
+/// Called from the `kernel_main` FFI boundary.
 pub fn kernel_main_impl() {
     wl_currency::reset();
 
@@ -731,34 +695,21 @@ pub fn kernel_main_impl() {
     slopos_ostd::panic::register_test_abort_shutdown(slopos_testing::tests_request_shutdown);
 
     slopos_ostd::sync::run_bsp_init(|token| {
-        // Initialise the BSP PCR (`init_bsp_pcr` is BSP-only one-shot,
-        // gated on the freshly-minted BspToken). After this point
-        // `current_pcr()` is callable from any subsequent boot step.
+        // `current_pcr()` is callable from every later boot step once this runs.
         let bsp_apic_id = crate::apic_id::read_bsp_apic_id();
         slopos_arch::pcr::init_bsp_pcr(token, bsp_apic_id);
-        // `get_pcr_mut_via_token(0)` is the safe surface: it relies on
-        // the per-CPU-slot Inv. 8 contract, which holds trivially at
-        // BSP-init time because the BSP is the only writer (pre-SMP)
-        // and the slot was minted by `init_bsp_pcr` immediately above.
-        // `bsp_init_gdt_and_install` pairs the `init_gdt`/`install`
-        // halves of the PCR-bringup contract under the same token.
+        // The per-CPU-slot borrow contract holds trivially here: pre-SMP the BSP
+        // is the only writer and the slot was minted immediately above.
         let pcr = slopos_arch::pcr::get_pcr_mut_via_token(0).expect("BSP PCR not initialized");
         pcr.bsp_init_gdt_and_install(token);
 
-        // Activate OSTD's held-lock walker now that PCR is live so
-        // every subsequent SpinLock acquisition is tracked. The panic
-        // handler and catch_panic! recovery use this to poison-unlock
-        // locks the panicking CPU held; before this point
-        // get_current_cpu() is not callable so the walker stays dormant.
+        // Only now, with the PCR live, is `get_current_cpu()` callable, so this
+        // is the earliest point the held-lock walker panic recovery reads can
+        // start tracking acquisitions.
         slopos_ostd::sync::enable_lock_tracking();
 
-        // Tell OSTD which PML4 was loaded by the bootloader. CR3 is a
-        // pure CPU register read; the value persists for the lifetime
-        // of the kernel since this PML4 holds the canonical kernel
-        // mappings. Mask off the low bits before handing it over —
-        // CR3 carries PCID (bits 0..11 with CR4.PCIDE) or PWT/PCD
-        // (bits 3 and 4 without it), and this value is dereferenced as
-        // a table base.
+        // Mask the low CR3 bits before handing the value over as a table base:
+        // they carry PCID with CR4.PCIDE, PWT/PCD without it.
         let cr3 = slopos_arch::cpu::control_regs::read_cr3();
         slopos_ostd::mm::vm_space::register_kernel_master_pml4(
             token,
@@ -772,15 +723,13 @@ pub fn kernel_main_impl() {
         gdt::syscall_msr_init(token);
         serial::write_line("BOOT: early GDT/IDT/SYSCALL initialized");
 
-        // Register platform and syscall service tables before the init phases run.
+        // Service tables must be registered before the init phases run.
         crate::boot_impl::register_boot_services();
         slopos_core::driver_hooks::register_driver_services();
         slopos_drivers::syscall_services_init::init_syscall_services();
 
-        // OSTD bridge registration — formerly the body of
-        // `slopos_kernel_services::ostd_bridge::register_with_ostd`,
-        // inlined here so the OSTD `register_*` hooks see the same
-        // `&BspToken<'brand>` as the surrounding init scope.
+        // Inlined rather than delegated so every `register_*` hook below sees
+        // the same `&BspToken<'brand>` as the surrounding init scope.
         use slopos_kernel_services::ostd_backends::diagnostic_sink::CONSOLE_SINK;
         use slopos_kernel_services::ostd_backends::local_tlb::LOCAL_TLB_DYN;
         use slopos_kernel_services::ostd_backends::preempt::PCR_PREEMPT;
@@ -804,7 +753,6 @@ pub fn kernel_main_impl() {
             b"BOOT: register_with_ostd: registered preempt/diag/tlb/io_mem/io_port/irq/user_mode tables\n",
         );
 
-        // Inlined `slopos_mm::io_mem_mapper_shim::register_with_ostd`.
         slopos_ostd::mm::io_mem::register_io_mem_mapper(
             token,
             &slopos_mm::io_mem_mapper_shim::LEGACY_IO_MEM_MAPPER_DYN,
@@ -821,9 +769,8 @@ pub fn kernel_main_impl() {
         slopos_hermetic::return_after_boot(boot_ctx);
         serial::write_line("BOOT: boot init complete");
 
-        // Map UEFI runtime-services regions into the kernel page table
-        // while the EFI memory map is still live, so firmware `ResetSystem`
-        // stays callable at shutdown. No-op on a BIOS boot.
+        // Must happen while the EFI memory map is still live, so firmware
+        // `ResetSystem` stays callable at shutdown. No-op on a BIOS boot.
         crate::uefi_runtime::map_runtime_regions(boot_get_hhdm_offset());
     });
 
@@ -875,11 +822,9 @@ pub fn kernel_main_impl() {
         }
     }
 
-    // Reliable Abort Core fatal-path smoke (off by default). When the cmdline
-    // carries `panic.fatal_smoke=on`, deliberately raise an UNCAUGHT panic from
-    // a deep call chain so a `just boot-log` run can confirm the emergency-stack
-    // switch prints a clean "=== KERNEL PANIC ===" instead of recursively
-    // faulting. Halts the machine, so it is never enabled under `just test`.
+    // Panic-path smokes, all off by default: each raises a deliberate panic so a
+    // `just boot-log` run can confirm one clean "=== KERNEL PANIC ===" instead
+    // of a recursive fault. Each halts the machine, so never enabled by `just test`.
     if let Some(cmdline) = crate::limine_protocol::kernel_cmdline_str() {
         if cmdline.contains("panic.post_boot_unwind=on") {
             boot_info(b"PANIC SMOKE: raising a deliberate post-boot unwind panic\0");
@@ -930,12 +875,9 @@ fn panic_recover_smoke_observer() {
     }
 }
 
-/// Drive the syscall-boundary recovery end-to-end: spawn the userland
-/// `oops_smoke` binary, whose `SYSCALL_TEST_PANIC` call (armed by the same
-/// `panic.recover_smoke` boot flag) panics inside its syscall context. The
-/// recovery boundary kills the task and this observer confirms the kernel
-/// outlived it; the transcript's `panic recovery: syscall` line is the
-/// positive assertion.
+/// `/bin/oops_smoke` panics inside its own syscall context; the recovery
+/// boundary kills the task and this observer confirms the kernel outlived it.
+/// The transcript's `panic recovery: syscall` line is the positive assertion.
 fn panic_syscall_smoke_observer() {
     use slopos_sched::task::{INVALID_TASK_ID, TASK_FLAG_USER_MODE};
 
@@ -968,11 +910,8 @@ impl Drop for NestedDropPanic {
     }
 }
 
-/// A Drop that panics while a caught unwind is already in flight must land
-/// on the fatal path (a second panic mid-unwind observes the in-flight
-/// counter), printing exactly one clean `=== KERNEL PANIC ===`. Verified by
-/// a `just boot-log` transcript grep; halts the machine, so never enabled
-/// under `just test`.
+/// A Drop that panics while a caught unwind is already in flight must land on
+/// the fatal path, printing exactly one clean `=== KERNEL PANIC ===`.
 fn nested_drop_smoke() {
     let _ = slopos_ostd::panic_recovery::run_recoverable(|| {
         let _guard = NestedDropPanic;
@@ -996,20 +935,17 @@ fn post_boot_unwind_smoke_inner(canary: u64) -> ! {
     panic!("panic.post_boot_unwind: deliberate post-boot panic (canary={canary:#x})");
 }
 
-/// Recurse with a sizeable address-taken buffer per frame (driving the
-/// SafeStack DATA stack deep), then raise an uncaught `panic!` at the bottom —
-/// the original crash's "panic while the data stack is near-full" condition.
-/// With the Reliable Abort Core the panic switches to the emergency stacks and
-/// reports cleanly; without it, formatting would overflow and recurse.
+/// Reproduces "panic while the SafeStack data stack is near-full": an uncaught
+/// panic at the bottom of a deep chain of address-taken buffers, which must
+/// switch to the emergency stacks rather than overflow while formatting.
 #[inline(never)]
 fn fatal_smoke_deep(depth: u32) -> u64 {
     let mut buf = [0u8; 512];
     for (i, b) in buf.iter_mut().enumerate() {
         *b = (i as u8) ^ (depth as u8);
     }
-    // `black_box(&buf)` (by reference — no extra copy that would bust the 2 KiB
-    // frame gate) keeps the address-taken buffer from being optimised away, so
-    // each frame really consumes SafeStack data stack.
+    // By reference: a by-value `black_box` would copy and bust the 2 KiB frame
+    // gate, but the address still has to be taken or the buffer is optimised away.
     core::hint::black_box(&buf);
     if depth == 0 {
         let mut sum = 0u64;

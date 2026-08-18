@@ -1,11 +1,5 @@
-// =============================================================================
-// TTY types
-// =============================================================================
-
-/// Strongly-typed index into the global TTY table.
-///
-/// Wrapping the raw `u8` slot number prevents accidental mix-ups with other
-/// small integer types (task IDs, pgrp IDs, etc.) at API boundaries.
+/// Strongly-typed index into the global TTY table, so a slot number cannot be
+/// confused with a task or pgrp id at an API boundary.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 #[repr(transparent)]
 pub struct TtyIndex(pub u8);
@@ -14,7 +8,7 @@ pub const TCGETS: u64 = 0x5401;
 pub const TCSETS: u64 = 0x5402;
 pub const TCSETSW: u64 = 0x5403;
 pub const TCSETSF: u64 = 0x5404;
-// Missing ioctls.
+// ioctl numbers follow the Linux TTY ABI.
 pub const TCSBRK: u64 = 0x5409;
 pub const TCXONC: u64 = 0x540A;
 pub const TCFLSH: u64 = 0x540B;
@@ -37,25 +31,18 @@ pub const TIOCGWINSZ: u64 = 0x5413;
 pub const TIOCSWINSZ: u64 = 0x5414;
 pub const TIOCSCTTY: u64 = 0x540E;
 /// Detach the calling process from its controlling terminal.
-/// Linux value: 0x5422.
 pub const TIOCNOTTY: u64 = 0x5422;
-/// Get the number of bytes available for reading.
-/// Linux value: 0x541B (same as TIOCINQ).
+/// Get the number of bytes available for reading (same as TIOCINQ).
 pub const FIONREAD: u64 = 0x541B;
 /// Get the number of bytes in the output queue.
-/// Linux value: 0x5411.
 pub const TIOCOUTQ: u64 = 0x5411;
 /// Set PTY slave lock state (0=unlock, 1=lock). Master FD only.
-/// Linux value: 0x40045431.
 pub const TIOCSPTLCK: u64 = 0x4004_5431;
 /// Get PTY slave lock state. Returns 0 (unlocked) or 1 (locked).
-/// Linux value: 0x80045439.
 pub const TIOCGPTLCK: u64 = 0x8004_5439;
 /// Enable/disable PTY packet mode on a master FD.
-/// Linux value: 0x5420.
 pub const TIOCPKT: u64 = 0x5420;
 
-/// Packet mode control byte constants.
 /// Normal data follows — no special event.
 pub const TIOCPKT_DATA: u8 = 0x00;
 /// Slave input queue was flushed.
@@ -75,13 +62,10 @@ pub const TIOCPKT_DOSTOP: u8 = 0x20;
 pub const TIOCGPTPEER: u64 = 0x5441;
 
 /// Set exclusive mode on a TTY — prevents other opens.
-/// Linux value: 0x540C.
 pub const TIOCEXCL: u64 = 0x540C;
 /// Clear exclusive mode on a TTY — allows other opens.
-/// Linux value: 0x540D.
 pub const TIOCNXCL: u64 = 0x540D;
 /// Get exclusive mode state (0 or 1).
-/// Linux value: 0x80045440.
 pub const TIOCGEXCL: u64 = 0x8004_5440;
 
 pub const N_TTY: u32 = 0;
@@ -152,15 +136,8 @@ pub const VDISCARD: usize = 13;
 pub const VLNEXT: usize = 15;
 pub const VEOL2: usize = 16;
 
-// =============================================================================
-// Type-safe termios flag types
-// =============================================================================
-
 bitflags::bitflags! {
     /// Type-safe wrapper for `c_iflag` — input processing flags.
-    ///
-    /// Constructed from the raw `u32` via `InputFlags::from_bits_truncate()`.
-    /// Convert back with `.bits()`.
     #[derive(Clone, Copy, Debug, PartialEq, Eq)]
     pub struct InputFlags: u32 {
         const IGNBRK = 0x001;
@@ -192,9 +169,8 @@ bitflags::bitflags! {
         const ONLRET = 0x20;
         const OLCUC  = 0x02;
 
-        // Tab delay flags (TABDLY/XTABS).
-        // TABDLY is a 2-bit mask; only TAB0 (no expansion) and
-        // TAB3/XTABS (expand to spaces) are implemented.
+        // TABDLY is a 2-bit mask; only TAB0 (no expansion) and TAB3/XTABS
+        // (expand to spaces) are implemented.
         const TABDLY = 0x1800;
         const TAB0   = 0x0000;
         const TAB3   = 0x1800;
@@ -226,9 +202,6 @@ bitflags::bitflags! {
 
 bitflags::bitflags! {
     /// Type-safe wrapper for `c_cflag` — control (hardware) flags.
-    ///
-    /// Full c_cflag ABI with character size, parity,
-    /// stop bits, modem control, baud rates, and hardware flow control.
     #[derive(Clone, Copy, Debug, PartialEq, Eq)]
     pub struct ControlFlags: u32 {
         const CSIZE   = 0o000060;
@@ -246,14 +219,8 @@ bitflags::bitflags! {
     }
 }
 
-// =============================================================================
-// Strongly-typed c_cc index enum
-// =============================================================================
-
-/// Strongly-typed index into the `c_cc` control character array.
-///
-/// Replaces raw `usize` constants (`VINTR`, `VQUIT`, …) with a closed enum
-/// so that invalid indices are compile-time errors.
+/// Strongly-typed index into the `c_cc` control-character array: a closed enum,
+/// so an invalid index is a compile-time error.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[repr(usize)]
 pub enum CcIndex {
@@ -276,7 +243,6 @@ pub enum CcIndex {
 }
 
 impl CcIndex {
-    /// Convert to the underlying `usize` for array indexing.
     #[inline]
     pub const fn as_usize(self) -> usize {
         self as usize
@@ -286,42 +252,32 @@ impl CcIndex {
 /// POSIX `_POSIX_VDISABLE` — value indicating a disabled control character.
 pub const POSIX_VDISABLE: u8 = 0;
 
-// =============================================================================
-// UserTermios typed accessors
-// =============================================================================
-
 impl UserTermios {
-    /// Get the typed input flags.
     #[inline]
     pub fn input_flags(&self) -> InputFlags {
         self.c_iflag
     }
 
-    /// Get the typed output flags.
     #[inline]
     pub fn output_flags(&self) -> OutputFlags {
         self.c_oflag
     }
 
-    /// Get the typed local flags.
     #[inline]
     pub fn local_flags(&self) -> LocalFlags {
         self.c_lflag
     }
 
-    /// Get the typed control flags.
     #[inline]
     pub fn control_flags(&self) -> ControlFlags {
         self.c_cflag
     }
 
-    /// Look up a control character by typed index.
     #[inline]
     pub fn cc(&self, idx: CcIndex) -> u8 {
         self.c_cc[idx.as_usize()]
     }
 
-    /// Set a control character by typed index.
     #[inline]
     pub fn set_cc(&mut self, idx: CcIndex, val: u8) {
         self.c_cc[idx.as_usize()] = val;

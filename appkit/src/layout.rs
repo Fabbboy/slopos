@@ -7,10 +7,6 @@ use crate::event::{EventPhase, EventResponse, MessageSink, WidgetEvent};
 use crate::paint::PaintContext;
 use crate::traits::{MeasureCtx, Widget, WidgetCore, measure_widget, place_widget};
 
-// ---------------------------------------------------------------------------
-// Axis helpers
-// ---------------------------------------------------------------------------
-
 fn main_axis(size: Size, vertical: bool) -> i32 {
     if vertical { size.height } else { size.width }
 }
@@ -36,10 +32,6 @@ fn child_constraints(bc: &BoxConstraints, vertical: bool) -> BoxConstraints {
         }
     }
 }
-
-// ---------------------------------------------------------------------------
-// StackWidget (internal, parameterized by axis)
-// ---------------------------------------------------------------------------
 
 struct StackWidget {
     core: WidgetCore,
@@ -82,7 +74,6 @@ impl StackWidget {
         let mut max_cross: i32 = 0;
         let mut total_flex_weight: u32 = 0;
 
-        // Pass 1: Measure non-flex children, tally flex weights.
         for (i, child) in self.children.iter_mut().enumerate() {
             let w = child.flex_weight();
             if w > 0 {
@@ -102,7 +93,6 @@ impl StackWidget {
         };
         let spacing_total = gap_count.saturating_mul(self.spacing);
 
-        // Pass 2: Distribute remaining space to flex children.
         let mut total_main = total_fixed;
         if total_flex_weight > 0 && constraints.is_main_axis_bounded(v) {
             let remaining = (max_main - total_fixed - spacing_total).max(0);
@@ -132,7 +122,6 @@ impl StackWidget {
                 }
             }
         } else if total_flex_weight > 0 {
-            // Unbounded main axis: measure flex children with loose constraints.
             for (i, child) in self.children.iter_mut().enumerate() {
                 if child.flex_weight() > 0 {
                     let child_size = measure_widget(child.as_mut(), loose, ctx);
@@ -233,9 +222,8 @@ impl StackWidget {
         phase: EventPhase,
         sink: &mut MessageSink,
     ) -> EventResponse {
-        // For pointer events, only forward to children whose rect contains
-        // the pointer position. This prevents a Table from stealing clicks
-        // meant for a sidebar ListView in the same HStack.
+        // A pointer event reaches only the child whose rect contains it, so a
+        // Table cannot steal a click meant for a sibling in the same HStack.
         let pointer_pos = match event {
             WidgetEvent::PointerDown { x, y, .. }
             | WidgetEvent::PointerUp { x, y, .. }
@@ -258,10 +246,6 @@ impl StackWidget {
         EventResponse::Ignored
     }
 }
-
-// ---------------------------------------------------------------------------
-// VStackWidget
-// ---------------------------------------------------------------------------
 
 pub struct VStackWidget {
     inner: StackWidget,
@@ -302,10 +286,6 @@ impl Widget for VStackWidget {
     }
 }
 
-// ---------------------------------------------------------------------------
-// HStackWidget
-// ---------------------------------------------------------------------------
-
 pub struct HStackWidget {
     inner: StackWidget,
 }
@@ -344,10 +324,6 @@ impl Widget for HStackWidget {
         &mut self.inner.children
     }
 }
-
-// ---------------------------------------------------------------------------
-// ZStackWidget
-// ---------------------------------------------------------------------------
 
 pub struct ZStackWidget {
     core: WidgetCore,
@@ -400,9 +376,8 @@ impl Widget for ZStackWidget {
         phase: EventPhase,
         sink: &mut MessageSink,
     ) -> EventResponse {
-        // Topmost layer first, and it may swallow: a ZStack's upper layers are
-        // how modal surfaces are expressed, so a layer that handles nothing
-        // must still not let a click through to the layer it covers.
+        // Topmost layer first, and it may swallow: upper layers are how modal
+        // surfaces are expressed.
         for child in self.children.iter_mut().rev() {
             let resp = child.event(event, phase, sink);
             if resp.is_consumed() {
@@ -418,10 +393,6 @@ impl Widget for ZStackWidget {
         &mut self.children
     }
 }
-
-// ---------------------------------------------------------------------------
-// PaddingWidget
-// ---------------------------------------------------------------------------
 
 pub struct PaddingWidget {
     core: WidgetCore,
@@ -479,10 +450,6 @@ impl Widget for PaddingWidget {
     }
 }
 
-// ---------------------------------------------------------------------------
-// SpacerWidget
-// ---------------------------------------------------------------------------
-
 pub struct SpacerWidget {
     core: WidgetCore,
     length: Length,
@@ -521,10 +488,6 @@ impl Widget for SpacerWidget {
         EventResponse::Ignored
     }
 }
-
-// ---------------------------------------------------------------------------
-// ExpandWidget
-// ---------------------------------------------------------------------------
 
 pub struct ExpandWidget {
     core: WidgetCore,
@@ -576,10 +539,6 @@ impl Widget for ExpandWidget {
     }
 }
 
-// ---------------------------------------------------------------------------
-// BackgroundWidget
-// ---------------------------------------------------------------------------
-
 pub struct BackgroundWidget {
     core: WidgetCore,
     color: Color32,
@@ -624,10 +583,6 @@ impl Widget for BackgroundWidget {
         core::slice::from_mut(&mut self.child)
     }
 }
-
-// ---------------------------------------------------------------------------
-// SizedBoxWidget
-// ---------------------------------------------------------------------------
 
 pub struct SizedBoxWidget {
     core: WidgetCore,

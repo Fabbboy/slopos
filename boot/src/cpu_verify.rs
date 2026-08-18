@@ -40,9 +40,6 @@ pub fn verify_memory_layout() {
         }
     }
 
-    // Sanity-check the kernel-image mapping via OSTD's safe probe
-    // surface — the unsafe `read_volatile` of the linker `_start`
-    // byte lives inside OSTD's `verify_kernel_entry_alive`.
     slopos_ostd::arch::x86_64::kernel_ptr::verify_kernel_entry_alive();
 }
 

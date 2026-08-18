@@ -7,15 +7,10 @@
 //!     -> $crate::syscall::result::SyscallResult
 //! ```
 //!
-//! The first identifier in the parameter list is the *context name*
-//! the body sees (canonically `ctx`); the body then has direct access
-//! to its [`SyscallContext`] methods (`ctx.task_mut()`,
-//! `ctx.process_id()`, `ctx.user_ctx()`, …). Subsequent
-//! `ident: Type` pairs are typed arguments parsed from
-//! `ctx.regs()`.
-//!
-//! Requirement clauses live in a trailing `requires(...)` block. The
-//! body's return type must implement
+//! The first identifier in the parameter list is the *context name* the body
+//! sees (canonically `ctx`); subsequent `ident: Type` pairs are typed arguments
+//! parsed from `ctx.regs()`. Requirement clauses live in a trailing
+//! `requires(...)` block, and the body's return type must implement
 //! [`crate::syscall::result::IntoSyscallResult`].
 //!
 //! # Grammar
@@ -37,7 +32,6 @@
 
 #[macro_export]
 macro_rules! define_syscall {
-    // ── Raw form — body sees only `$ctx` ─────────────────────────────
     (raw $name:ident ($ctx:ident) -> $ret:ty $body:block) => {
         #[allow(unused_variables)]
         pub fn $name(
@@ -47,14 +41,9 @@ macro_rules! define_syscall {
         }
     };
 
-    // ── No-arg, no requirements ──────────────────────────────────────
-    //
-    // Body executes inside a `move` closure whose return type is the
-    // user-declared `$ret`. This lets bodies use both `?` on
-    // `Result<_, Errno>` and `return Err(errno)` / `return Ok(v)` /
-    // `return SyscallResult::NoReturn` with natural variant names.
-    // The outer fn returns `SyscallResult`; the closure's result is
-    // converted via `IntoSyscallResult`.
+    // The body runs inside a `move` closure returning the user-declared `$ret`,
+    // so it can use both `?` on `Result<_, Errno>` and `return Err(errno)` with
+    // natural variant names; `IntoSyscallResult` converts the closure's result.
     ($name:ident ( $ctx:ident ) -> $ret:ty $body:block) => {
         #[allow(unused_variables)]
         pub fn $name(
@@ -65,7 +54,6 @@ macro_rules! define_syscall {
         }
     };
 
-    // ── No-arg, with requirements ────────────────────────────────────
     ($name:ident ( $ctx:ident ) requires ( $($req:tt)* ) -> $ret:ty $body:block) => {
         #[allow(unused_variables)]
         pub fn $name(
@@ -77,7 +65,6 @@ macro_rules! define_syscall {
         }
     };
 
-    // ── Typed args, no requirements ──────────────────────────────────
     ($name:ident ( $ctx:ident, $($arg_name:ident : $arg_ty:ty),+ $(,)? )
         -> $ret:ty $body:block) => {
         #[allow(unused_variables)]
@@ -91,7 +78,6 @@ macro_rules! define_syscall {
         }
     };
 
-    // ── Typed args, with requirements ────────────────────────────────
     ($name:ident ( $ctx:ident, $($arg_name:ident : $arg_ty:ty),+ $(,)? )
         requires ( $($req:tt)* )
         -> $ret:ty $body:block) => {
@@ -106,10 +92,6 @@ macro_rules! define_syscall {
             <$ret as $crate::syscall::result::IntoSyscallResult>::into_syscall_result(__body_value)
         }
     };
-
-    // ─────────────────────────────────────────────────────────────────
-    // Internal: requirement-list TT muncher
-    // ─────────────────────────────────────────────────────────────────
 
     (@reqs $ctx:ident,) => {};
     (@reqs $ctx:ident, ,) => {};
@@ -170,10 +152,6 @@ macro_rules! define_syscall {
         }
         $($crate::define_syscall!(@reqs $ctx, $($rest)*);)?
     };
-
-    // ─────────────────────────────────────────────────────────────────
-    // Internal: typed-argument parser (TT muncher with const-cursor)
-    // ─────────────────────────────────────────────────────────────────
 
     (@parse $ctx:ident, $regs:ident, $cursor:expr, []) => {
         const _: () = {

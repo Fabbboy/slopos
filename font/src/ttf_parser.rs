@@ -5,7 +5,6 @@
 
 use slopos_ostd::KVec;
 
-/// A parsed TrueType font backed by a borrowed byte slice.
 pub struct TtfFont<'a> {
     data: &'a [u8],
     head: HeadTable,
@@ -36,7 +35,6 @@ pub struct HheaTable {
     pub number_of_h_metrics: u16,
 }
 
-/// A single point in a glyph outline.
 #[derive(Clone, Copy, Debug)]
 pub struct OutlinePoint {
     pub x: i16,
@@ -44,13 +42,12 @@ pub struct OutlinePoint {
     pub on_curve: bool,
 }
 
-/// A contour is a closed loop of outline points.
+/// A closed loop of outline points.
 #[derive(Clone, Debug)]
 pub struct Contour {
     pub points: KVec<OutlinePoint>,
 }
 
-/// A complete glyph outline with metrics.
 #[derive(Clone, Debug)]
 pub struct GlyphOutline {
     pub contours: KVec<Contour>,
@@ -60,14 +57,11 @@ pub struct GlyphOutline {
     pub y_max: i16,
 }
 
-/// Horizontal metrics for a glyph.
 #[derive(Clone, Copy, Debug)]
 pub struct HMetrics {
     pub advance_width: u16,
     pub left_side_bearing: i16,
 }
-
-// -- Byte reading helpers --
 
 fn read_u8(data: &[u8], offset: usize) -> Option<u8> {
     data.get(offset).copied()
@@ -96,7 +90,7 @@ fn read_u32(data: &[u8], offset: usize) -> Option<u32> {
     ]))
 }
 
-/// Find a table in the TrueType offset table. Returns the offset and length.
+/// Find a table in the TrueType offset table; returns `(offset, length)`.
 fn find_table(data: &[u8], tag: &[u8; 4]) -> Option<(usize, usize)> {
     let num_tables = read_u16(data, 4)? as usize;
     for i in 0..num_tables {
@@ -114,19 +108,17 @@ fn find_table(data: &[u8], tag: &[u8; 4]) -> Option<(usize, usize)> {
 }
 
 impl<'a> TtfFont<'a> {
-    /// Parse a TrueType font from raw file data.
     pub fn parse(data: &'a [u8]) -> Option<Self> {
         if data.len() < 12 {
             return None;
         }
 
-        // Verify sfVersion (0x00010000 for TrueType)
+        // sfVersion: 0x00010000 (TrueType) or 'true'.
         let sf_version = read_u32(data, 0)?;
         if sf_version != 0x00010000 && sf_version != 0x74727565 {
             return None;
         }
 
-        // Parse head table
         let (head_off, _) = find_table(data, b"head")?;
         let head = HeadTable {
             units_per_em: read_u16(data, head_off + 18)?,
@@ -136,16 +128,13 @@ impl<'a> TtfFont<'a> {
             return None;
         }
 
-        // Parse maxp table
         let (maxp_off, _) = find_table(data, b"maxp")?;
         let maxp = MaxpTable {
             num_glyphs: read_u16(data, maxp_off + 4)?,
         };
 
-        // Find cmap table
         let (cmap_offset, _) = find_table(data, b"cmap")?;
 
-        // Parse hhea table
         let (hhea_off, _) = find_table(data, b"hhea")?;
         let hhea = HheaTable {
             ascender: read_i16(data, hhea_off + 4)?,
@@ -154,7 +143,6 @@ impl<'a> TtfFont<'a> {
             number_of_h_metrics: read_u16(data, hhea_off + 34)?,
         };
 
-        // Find hmtx, loca, glyf tables
         let (hmtx_offset, _) = find_table(data, b"hmtx")?;
         let (loca_offset, _) = find_table(data, b"loca")?;
         let (glyf_offset, _) = find_table(data, b"glyf")?;
@@ -171,22 +159,19 @@ impl<'a> TtfFont<'a> {
         })
     }
 
-    /// Get the font's units-per-em value.
     pub fn units_per_em(&self) -> u16 {
         self.head.units_per_em
     }
 
-    /// Get horizontal header metrics.
     pub fn hhea(&self) -> &HheaTable {
         &self.hhea
     }
 
-    /// Map a Unicode codepoint to a glyph index using the cmap table.
-    ///
-    /// Supports Format 4 (BMP) cmap subtables.
+    /// Map a Unicode codepoint to a glyph index. Only Format 4 (BMP) cmap
+    /// subtables are supported.
     pub fn glyph_index(&self, codepoint: u32) -> Option<u16> {
         if codepoint > 0xFFFF {
-            return None; // Only BMP supported
+            return None;
         }
         let cp = codepoint as u16;
         let data = self.data;
@@ -194,8 +179,7 @@ impl<'a> TtfFont<'a> {
 
         let num_subtables = read_u16(data, cmap_off + 2)? as usize;
 
-        // Find a Format 4 subtable (platform 3/encoding 1 = Windows Unicode BMP,
-        // or platform 0 = Unicode)
+        // platform 0 = Unicode; platform 3 / encoding 1 or 10 = Windows Unicode.
         for i in 0..num_subtables {
             let record = cmap_off + 4 + i * 8;
             let platform_id = read_u16(data, record)?;
@@ -264,7 +248,6 @@ impl<'a> TtfFont<'a> {
         Some(0)
     }
 
-    /// Get horizontal metrics for a glyph.
     pub fn h_metrics(&self, glyph_id: u16) -> Option<HMetrics> {
         let data = self.data;
         let num_h_metrics = self.hhea.number_of_h_metrics as usize;
@@ -277,7 +260,8 @@ impl<'a> TtfFont<'a> {
                 left_side_bearing: read_i16(data, off + 2)?,
             })
         } else {
-            // Last advance width, then lsb array
+            // Past numberOfHMetrics hmtx stores lsb only; the advance width is
+            // the last recorded one.
             let last_aw_off = hmtx + (num_h_metrics - 1) * 4;
             let advance_width = read_u16(data, last_aw_off)?;
             let lsb_index = (glyph_id as usize) - num_h_metrics;
@@ -290,7 +274,7 @@ impl<'a> TtfFont<'a> {
         }
     }
 
-    /// Get the byte offset of a glyph in the glyf table.
+    /// `(offset, length)` of a glyph within the glyf table.
     fn glyph_offset(&self, glyph_id: u16) -> Option<(usize, usize)> {
         let data = self.data;
         let loca = self.loca_offset;
@@ -301,7 +285,7 @@ impl<'a> TtfFont<'a> {
         }
 
         let (off0, off1) = if self.head.index_to_loc_format == 0 {
-            // Short format: offsets are u16, multiply by 2
+            // Short loca stores offsets halved.
             let o0 = read_u16(data, loca + gid * 2)? as usize * 2;
             let o1 = read_u16(data, loca + (gid + 1) * 2)? as usize * 2;
             (o0, o1)

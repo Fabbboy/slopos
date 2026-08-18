@@ -22,10 +22,8 @@ pub fn test_virtio_net_ready_and_link_up() -> TestResult {
     TestResult::Pass
 }
 
-/// The zero-copy SG TX builder links `[header] -> run0 -> run1` correctly: the
-/// header + every non-terminal run carry `VIRTQ_DESC_F_NEXT` pointing at the
-/// next slot, the last run terminates the chain (`flags == 0`, `next == 0`),
-/// and the descriptor addr/len mirror the inputs. Pure — no NIC (SLOPRING § 13).
+/// Zero-copy SG TX chain linkage, `[header] -> run0 -> run1`. Pure — no NIC
+/// (SLOPRING § 13).
 pub fn test_build_tx_chain_links_runs() -> TestResult {
     let slots = [3u16, 4, 5];
     let runs = [(0x0020_0000u64, 1500u32), (0x0030_0000u64, 200u32)];
@@ -50,8 +48,7 @@ pub fn test_build_tx_chain_links_runs() -> TestResult {
         "run 1 terminates the chain"
     );
 
-    // Mismatched slot count and empty payload are rejected (empty datagrams use
-    // the inline single-copy path, not SG DMA).
+    // Empty datagrams take the inline single-copy path, not SG DMA.
     assert_test!(
         virtio_net::build_tx_chain_for_test(&[3, 4], 0x1000, 42, &runs).is_none(),
         "wrong slot count rejected"

@@ -3,10 +3,8 @@
 pub mod keycode;
 pub mod layout;
 
-/// Maximum number of tasks that can have input queues
 pub const MAX_INPUT_TASKS: usize = 32;
 
-/// Maximum events per task queue
 pub const MAX_EVENTS_PER_TASK: usize = 64;
 pub const CLIPBOARD_MAX_SIZE: usize = 4096;
 
@@ -21,22 +19,17 @@ pub const MODIFIER_CTRL: u8 = 1 << 1;
 pub const MODIFIER_ALT: u8 = 1 << 2;
 pub const MODIFIER_SUPER: u8 = 1 << 3;
 pub const MODIFIER_CAPS_LOCK: u8 = 1 << 4;
-/// Num Lock active. Carried in the key-event modifier snapshot so a layout-
-/// independent consumer can resolve keypad keys (digit vs navigation) without
-/// re-tracking lock state.
+/// Num Lock active. Carried in the key-event modifier snapshot so a consumer can
+/// resolve keypad keys (digit vs navigation) without tracking lock state itself.
 pub const MODIFIER_NUM_LOCK: u8 = 1 << 5;
 /// Scroll Lock active.
 pub const MODIFIER_SCROLL_LOCK: u8 = 1 << 6;
-/// AltGr (right Alt) held. Distinct from `MODIFIER_ALT` (which is set for either
-/// Alt) so a layout-aware consumer can tell AltGr-as-text (e.g. `AltGr+2 = @`)
-/// from a left-Alt shortcut chord. Both bits are set when AltGr is held.
+/// AltGr (right Alt) held; `MODIFIER_ALT` is set too. Distinguishes
+/// AltGr-as-text (`AltGr+2 = @`) from a left-Alt shortcut chord.
 pub const MODIFIER_ALTGR: u8 = 1 << 7;
 
-/// Key-event flag bits, carried in `data0[8:16]` of a key `InputEvent`.
-///
-/// Set when the event carries the canonical (HID keycode + text codepoint)
-/// payload in addition to the legacy `(scancode, ascii)` bytes. Older consumers
-/// that only read `key_scancode()`/`key_ascii()` ignore these and keep working.
+/// Key-event flag bits live in `data0[8:16]`. This one marks an event carrying
+/// the canonical (HID keycode + text codepoint) payload beside the legacy bytes.
 pub const KEY_FLAG_HAS_CANONICAL: u8 = 1 << 0;
 /// This press is an auto-repeat, not a fresh physical key-down.
 pub const KEY_FLAG_IS_REPEAT: u8 = 1 << 1;
@@ -47,35 +40,25 @@ pub const KEY_FLAG_FROM_KEYPAD: u8 = 1 << 2;
 pub const POINTER_AXIS_VERTICAL: u32 = 0;
 pub const POINTER_AXIS_HORIZONTAL: u32 = 1;
 
-/// Type of input event
 #[repr(u8)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum InputEventType {
-    /// Key pressed
     #[default]
     KeyPress = 0,
-    /// Key released
     KeyRelease = 1,
-    /// Pointer (mouse) motion
     PointerMotion = 2,
-    /// Pointer button pressed
     PointerButtonPress = 3,
-    /// Pointer button released
     PointerButtonRelease = 4,
-    /// Pointer entered surface
     PointerEnter = 5,
-    /// Pointer left surface
     PointerLeave = 6,
-    /// Window manager requests this app to close gracefully
     CloseRequest = 7,
-    /// Compositor notifies app of a new configured size (resize)
+    /// Compositor notifies the app of a new configured size (resize).
     Configure = 8,
-    /// Pointer axis (scroll wheel) event
+    /// Pointer axis (scroll wheel) event.
     PointerAxis = 9,
 }
 
 impl InputEventType {
-    /// Convert from raw u8 value
     #[inline]
     pub fn from_u8(val: u8) -> Option<Self> {
         match val {
@@ -93,13 +76,11 @@ impl InputEventType {
         }
     }
 
-    /// Returns true if this is a key event (press or release)
     #[inline]
     pub fn is_key_event(self) -> bool {
         matches!(self, Self::KeyPress | Self::KeyRelease)
     }
 
-    /// Returns true if this is a pointer event
     #[inline]
     pub fn is_pointer_event(self) -> bool {
         matches!(
@@ -125,10 +106,6 @@ impl InputEventType {
 ///   data1[ 0:16]  canonical HID usage keycode  -- key_keycode()
 ///   data1[16:32]  text codepoint (BMP; 0=none) -- key_codepoint()
 /// ```
-/// The legacy `scancode`/`ascii` byte positions are unchanged, so consumers
-/// that only call `key_scancode()`/`key_ascii()` are unaffected by the added
-/// fields.
-///
 /// For pointer motion: data0 is x coordinate, data1 is y coordinate
 /// For pointer button: data0 contains button code
 /// For close request: data0/data1 are zero
@@ -139,17 +116,13 @@ pub struct InputEventData {
     pub data1: u32,
 }
 
-/// A complete input event
 #[repr(C)]
 #[derive(Debug, Clone, Copy)]
 pub struct InputEvent {
-    /// Type of event
     pub event_type: InputEventType,
-    /// Padding for alignment
     pub _padding: [u8; 3],
-    /// Timestamp in milliseconds since boot
+    /// Timestamp in milliseconds since boot.
     pub timestamp_ms: u64,
-    /// Event-specific data
     pub data: InputEventData,
 }
 
@@ -165,20 +138,15 @@ impl Default for InputEvent {
 }
 
 impl InputEvent {
-    /// Create a key event carrying only `(scancode, ascii)`; the canonical
-    /// keycode/codepoint/modifier/flag fields are zero-filled. Prefer
-    /// [`key_full`](Self::key_full), which also carries the HID keycode and
-    /// text codepoint.
+    /// Key event carrying only `(scancode, ascii)`; the canonical fields are
+    /// zero-filled. Prefer [`key_full`](Self::key_full).
     pub fn key(event_type: InputEventType, scancode: u8, ascii: u8, timestamp_ms: u64) -> Self {
         Self::key_full(event_type, scancode, ascii, 0, 0, 0, 0, timestamp_ms)
     }
 
-    /// Create a fully-populated key event.
-    ///
     /// `keycode` is a canonical HID Keyboard/Keypad usage (see
     /// [`keycode`](self::keycode)); `codepoint` is the produced Unicode scalar
-    /// (BMP only — the high 16 bits are truncated); `modifiers` is a
-    /// `MODIFIER_*` snapshot; `flags` is a `KEY_FLAG_*` bitset.
+    /// (BMP only — the high 16 bits are truncated).
     #[allow(clippy::too_many_arguments)]
     pub fn key_full(
         event_type: InputEventType,
@@ -203,7 +171,6 @@ impl InputEvent {
         }
     }
 
-    /// Create a pointer motion event
     pub fn pointer_motion(x: i32, y: i32, timestamp_ms: u64) -> Self {
         Self {
             event_type: InputEventType::PointerMotion,
@@ -216,7 +183,6 @@ impl InputEvent {
         }
     }
 
-    /// Create a pointer button event
     pub fn pointer_button(pressed: bool, button: u8, timestamp_ms: u64) -> Self {
         Self {
             event_type: if pressed {
@@ -233,7 +199,6 @@ impl InputEvent {
         }
     }
 
-    /// Create a pointer enter/leave event
     pub fn pointer_enter_leave(enter: bool, x: i32, y: i32, timestamp_ms: u64) -> Self {
         Self {
             event_type: if enter {
@@ -250,7 +215,6 @@ impl InputEvent {
         }
     }
 
-    /// Create a close-request event
     pub fn close_request(timestamp_ms: u64) -> Self {
         Self {
             event_type: InputEventType::CloseRequest,
@@ -260,7 +224,7 @@ impl InputEvent {
         }
     }
 
-    /// Create a configure event (window resize notification)
+    /// Configure event — a window-resize notification.
     pub fn configure(width: u32, height: u32, timestamp_ms: u64) -> Self {
         Self {
             event_type: InputEventType::Configure,
@@ -273,11 +237,8 @@ impl InputEvent {
         }
     }
 
-    /// Create a pointer axis (scroll) event.
-    ///
-    /// `axis`: `POINTER_AXIS_VERTICAL` (0) or `POINTER_AXIS_HORIZONTAL` (1)
-    /// `value_v120`: scroll amount in value120 units (±120 = one wheel click).
-    ///               Positive = down/right, negative = up/left.
+    /// `axis` is `POINTER_AXIS_VERTICAL` or `POINTER_AXIS_HORIZONTAL`;
+    /// `value_v120` is in value120 units (±120 = one wheel click, + is down/right).
     pub fn pointer_axis(axis: u32, value_v120: i32, timestamp_ms: u64) -> Self {
         Self {
             event_type: InputEventType::PointerAxis,
@@ -290,26 +251,23 @@ impl InputEvent {
         }
     }
 
-    /// Extract axis identifier from a PointerAxis event (0 = vertical, 1 = horizontal)
+    /// Axis identifier of a PointerAxis event (0 = vertical, 1 = horizontal).
     #[inline]
     pub fn axis_id(&self) -> u32 {
         self.data.data0
     }
 
-    /// Extract scroll value in value120 units from a PointerAxis event.
-    /// ±120 = one physical wheel click.
+    /// Scroll value in value120 units; ±120 = one physical wheel click.
     #[inline]
     pub fn axis_value_v120(&self) -> i32 {
         self.data.data1 as i32
     }
 
-    /// Extract scancode from key event
     #[inline]
     pub fn key_scancode(&self) -> u8 {
         (self.data.data0 & 0xFF) as u8
     }
 
-    /// Extract ASCII from key event
     #[inline]
     pub fn key_ascii(&self) -> u8 {
         ((self.data.data0 >> 16) & 0xFF) as u8
@@ -333,58 +291,49 @@ impl InputEvent {
         (self.data.data1 & 0xFFFF) as u16
     }
 
-    /// Extract the produced text codepoint. Falls back to the legacy `ascii`
-    /// byte when the canonical codepoint field is empty, so legacy and canonical
-    /// events both yield a usable character.
+    /// The produced text codepoint, falling back to the legacy `ascii` byte when
+    /// the canonical codepoint field is empty.
     #[inline]
     pub fn key_codepoint(&self) -> u32 {
         let cp = (self.data.data1 >> 16) & 0xFFFF;
         if cp != 0 { cp } else { self.key_ascii() as u32 }
     }
 
-    /// True if this event carries the canonical keycode/codepoint payload.
     #[inline]
     pub fn key_has_canonical(&self) -> bool {
         self.key_flags() & KEY_FLAG_HAS_CANONICAL != 0
     }
 
-    /// True if this press is an auto-repeat rather than a fresh key-down.
     #[inline]
     pub fn key_is_repeat(&self) -> bool {
         self.key_flags() & KEY_FLAG_IS_REPEAT != 0
     }
 
-    /// True if the key originated from the numeric keypad block.
     #[inline]
     pub fn key_from_keypad(&self) -> bool {
         self.key_flags() & KEY_FLAG_FROM_KEYPAD != 0
     }
 
-    /// Extract X coordinate from pointer event
     #[inline]
     pub fn pointer_x(&self) -> i32 {
         self.data.data0 as i32
     }
 
-    /// Extract Y coordinate from pointer event
     #[inline]
     pub fn pointer_y(&self) -> i32 {
         self.data.data1 as i32
     }
 
-    /// Extract button from pointer button event
     #[inline]
     pub fn pointer_button_code(&self) -> u8 {
         (self.data.data0 & 0xFF) as u8
     }
 
-    /// Extract width from configure event
     #[inline]
     pub fn configure_width(&self) -> u32 {
         self.data.data0
     }
 
-    /// Extract height from configure event
     #[inline]
     pub fn configure_height(&self) -> u32 {
         self.data.data1
@@ -398,21 +347,17 @@ mod tests {
 
     #[test]
     fn legacy_key_zero_fills_new_fields() {
-        // Legacy layout: scancode in the low byte, ascii in byte 2, the
-        // canonical fields zero.
         let e = InputEvent::key(InputEventType::KeyPress, 0x1E, b'a', 42);
         assert_eq!(e.key_scancode(), 0x1E);
         assert_eq!(e.key_ascii(), b'a');
         assert_eq!(e.data.data0, 0x1E | ((b'a' as u32) << 16));
         assert_eq!(e.data.data1, 0);
-        // New accessors read as empty.
         assert_eq!(e.key_flags(), 0);
         assert_eq!(e.key_modifiers(), 0);
         assert_eq!(e.key_keycode(), 0);
         assert!(!e.key_has_canonical());
         assert!(!e.key_is_repeat());
         assert!(!e.key_from_keypad());
-        // codepoint falls back to the ascii byte when the canonical field is 0.
         assert_eq!(e.key_codepoint(), b'a' as u32);
     }
 
@@ -443,7 +388,6 @@ mod tests {
 
     #[test]
     fn codepoint_prefers_canonical_over_ascii() {
-        // Non-ASCII codepoint with no legacy ascii byte.
         let e = InputEvent::key_full(
             InputEventType::KeyPress,
             0x10,

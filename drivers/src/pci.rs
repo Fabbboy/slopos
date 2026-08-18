@@ -1089,29 +1089,13 @@ pub fn pci_device_owner(dev_idx: usize) -> Option<&'static str> {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Match index, claim table, and the priority-ordered matchmaker.
-//
-// The boot probe runs device-outer, candidates-inner: each device is offered
-// to its matching drivers in (priority, link-index) order until one binds, and
-// the registry records the claim by device index so no second driver is offered
-// a claimed device. Matching is data (the `MatchIndex`), not a per-driver loop.
-//
-// Lock discipline: `ENUM_STATE` (REGISTRY) guards only the device table and is
-// taken briefly inside `pci_get_device` for a single-element copy; `CLAIMED_BY`
-// (RESOURCE) guards only the claim slots. The two are never nested and `probe`
-// runs with neither held, so probes that block on IRQs and allocate stay safe.
-// ---------------------------------------------------------------------------
-
 /// `(vendor << 16) | device` key for the exact-pair index.
 const fn vd_key_of(dev: &PciDeviceInfo) -> u32 {
     ((dev.vendor_id as u32) << 16) | dev.device_id as u32
 }
 
 /// Boot-built index over the driver registry giving O(1) candidate lookup.
-///
-/// `entries` is the flattened driver set (the link-section registry, with any
-/// test drivers appended); the buckets hold link indices into it.
+/// `entries` is the flattened driver set; the buckets hold link indices into it.
 pub(crate) struct MatchIndex {
     entries: KVec<&'static PciDriverEntry>,
     by_vd: KBTreeMap<u32, KVec<u16>>,
@@ -1129,8 +1113,8 @@ impl MatchIndex {
         Self::build_from(entries)
     }
 
-    /// Build over an explicit driver set (shared by [`Self::build`] and the
-    /// in-QEMU unit tests, which pass synthetic drivers).
+    /// Build over an explicit driver set; the in-QEMU unit tests pass synthetic
+    /// drivers here.
     pub(crate) fn build_from(entries: KVec<&'static PciDriverEntry>) -> Result<Self, AllocError> {
         let mut idx = MatchIndex {
             entries,
@@ -1201,19 +1185,15 @@ fn push_unique(out: &mut KVec<u16>, li: u16) -> Result<(), AllocError> {
     Ok(())
 }
 
-/// Per-device ownership slot.
-///
-/// A claimed slot owns the device's managed-resource bag alongside the
-/// binding. The binding is listed first so it drops first: a future unbind
-/// quiesces the driver before the bag releases the resources a late interrupt
-/// could still touch.
+/// Per-device ownership slot. The binding is declared first so it drops first:
+/// an unbind must quiesce the driver before the resource bag releases what a
+/// late interrupt could still touch.
 enum ClaimSlot {
     Unclaimed,
     Claimed {
         binding: Binding,
-        // Owned for its `Drop`: holds the device's acquired resources alive for
-        // the binding's lifetime and releases them when the slot is torn down.
-        // Read by a future unbind path; until then it is live purely as RAII.
+        // Held live purely for its `Drop`, which releases the device's acquired
+        // resources when the slot is torn down.
         #[allow(dead_code)]
         devres: Devres,
     },
@@ -1235,9 +1215,8 @@ impl ClaimTable {
         matches!(self.slots.get(dev_idx), Some(ClaimSlot::Claimed { .. }))
     }
 
-    /// Record a claim, taking ownership of the populated resource bag. Moving
-    /// the bag is allocation-free (just its `KVec` header), so this is safe
-    /// under the `CLAIMED_BY` lock.
+    /// Moving the resource bag is allocation-free (just its `KVec` header), so
+    /// this is safe under the `CLAIMED_BY` lock.
     fn claim(&mut self, dev_idx: usize, binding: Binding, devres: Devres) {
         if dev_idx < self.slots.len() {
             self.slots[dev_idx] = ClaimSlot::Claimed { binding, devres };
@@ -1252,9 +1231,8 @@ static CLAIMED_BY: SpinLock<ClaimTable> = SpinLock::new(
     lock_class!("pci.CLAIMED_BY", LOCK_LEVEL_RESOURCE),
 );
 
-/// Records device claims for the matchmaker, abstracting the live `CLAIMED_BY`
-/// static (boot) from a heap-backed map (unit tests) so the matchmaker core is
-/// exercisable over synthetic devices without a per-call `[ClaimSlot; 256]`.
+/// Abstracts the live `CLAIMED_BY` static (boot) from a heap-backed map (unit
+/// tests), so the matchmaker core is exercisable over synthetic devices.
 pub(crate) trait ClaimSink {
     fn is_claimed(&self, dev_idx: usize) -> bool;
     fn record(&self, dev_idx: usize, name: &'static str, devres: Devres);
@@ -1276,12 +1254,10 @@ impl ClaimSink for GlobalClaims {
 /// Offer each device to its candidate drivers in priority order, recording the
 /// first that binds, then run one bounded deferred-retry pass.
 ///
-/// The device set is supplied by `get_device` and claims go through `claims`,
-/// so the boot path passes [`pci_get_device`]/[`GlobalClaims`] while unit tests
-/// pass synthetic devices and a local sink. `probe` runs with neither lock
-/// held. Boot is BSP-only and single-writer, so the claim re-check across the
-/// lock-free probe is a forward-compatibility seam for Phase-5 SMP rescans, not
-/// a correctness requirement today.
+/// The device set comes from `get_device` and claims go through `claims`, so
+/// the boot path passes [`pci_get_device`]/[`GlobalClaims`] while unit tests
+/// pass synthetic devices and a local sink. `probe` runs with neither the
+/// `ENUM_STATE` nor the `CLAIMED_BY` lock held, so it may block and allocate.
 pub(crate) fn matchmake(
     idx: &MatchIndex,
     device_count: usize,
@@ -1289,8 +1265,6 @@ pub(crate) fn matchmake(
     claims: &dyn ClaimSink,
 ) -> Result<(), AllocError> {
     let mut cands: KVec<u16> = KVec::new();
-    // (driver link-index, device index) worklist; the shape is forward-
-    // compatible with a Phase-5 retry-to-fixpoint queue.
     let mut deferred: KVec<(u16, usize)> = KVec::new();
 
     for dev_idx in 0..device_count {
@@ -1307,11 +1281,9 @@ pub(crate) fn matchmake(
             if !e.entry_matches(&dev) {
                 continue;
             }
-            // The bag is a stack local (its ~24-byte header; resource payloads
-            // are heap-boxed inside `attach`). On `Bound` it moves into the
-            // claim slot; on any other outcome it drops here, releasing every
-            // resource the probe acquired in reverse order. Probe runs with
-            // neither lock held, so its heap-allocating `attach` calls are safe.
+            // On `Bound` the bag moves into the claim slot; on any other outcome
+            // it drops here, releasing every resource the probe acquired in
+            // reverse order.
             let mut devres = Devres::new();
             let mut bound = BoundDevice::new(&dev, &mut devres);
             match (e.probe)(&mut bound) {
@@ -1333,7 +1305,7 @@ pub(crate) fn matchmake(
         }
     }
 
-    // One bounded deferred-retry pass (the full fixpoint queue is Phase 5).
+    // One bounded retry pass; deferral is never retried to a fixpoint.
     for n in 0..deferred.len() {
         let (li, dev_idx) = deferred[n];
         if claims.is_claimed(dev_idx) {
@@ -1385,9 +1357,7 @@ pub fn pci_probe_drivers() {
 }
 
 /// Allocation-free probe used only when [`MatchIndex::build`] cannot allocate.
-/// Device-outer, drivers in link order (no priority sort), one driver per
-/// device. Correct but unordered — the boot heap makes this path unreachable in
-/// practice.
+/// Drivers are tried in link order, so binding is correct but unordered.
 fn pci_probe_drivers_fallback() {
     let device_count = pci_get_device_count();
     for dev_idx in 0..device_count {
@@ -1419,7 +1389,6 @@ fn pci_probe_drivers_fallback() {
     }
 }
 
-/// Retrieve all devices that advertise MSI or MSI-X capability.
 pub fn pci_get_msi_capable_devices() -> ([PciDeviceInfo; PCI_MAX_DEVICES], usize) {
     let state = ENUM_STATE.lock();
     let mut result = [PciDeviceInfo::zeroed(); PCI_MAX_DEVICES];
