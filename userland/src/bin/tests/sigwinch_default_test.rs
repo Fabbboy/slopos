@@ -47,8 +47,7 @@ fn test_sigchld_default_survives() -> bool {
     process::getpid() == pid
 }
 
-/// An installed handler overrides the default-ignore drop: the signal must
-/// still be delivered, not discarded at the send site.
+/// The signal must reach an installed handler, not be discarded at the send site.
 fn test_sigwinch_handler_still_delivers() -> bool {
     SIGWINCH_COUNT.store(0, Ordering::SeqCst);
 

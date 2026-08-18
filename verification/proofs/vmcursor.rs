@@ -124,25 +124,16 @@ pub proof fn cursor_step_preserves(s: CursorState, want: nat)
     chunk_within_frame(s.remaining, page_left, want);
     chunk_within_remaining(s.remaining, page_left, want);
     let c = cursor_chunk(s.remaining, page_left, want);
-    // c <= page_left = page - intra_off  ==>  intra_off + c <= page.
     if (s.intra_off + c) as nat == page() {
-        // Roll to the next frame; (frame_idx+1)*page distributes.
         assert((s.frame_idx + 1) * page() == s.frame_idx * page() + page()) by (nonlinear_arith);
-        // (frame_idx+1)*page + (remaining - c)
-        //   = frame_idx*page + page + remaining - c
-        //   = frame_idx*page + intra_off + remaining   [c = page - intra_off]
-        //   <= n_frames*page                            [inv]
     } else {
-        // Stay in the frame; new_off = intra_off + c <= page, and != page so < page.
-        // frame_idx*page + (intra_off + c) + (remaining - c)
-        //   = frame_idx*page + intra_off + remaining <= n_frames*page  [inv]
+        // Needs no step: staying in the frame leaves the byte accounting intact.
     }
 }
 
-/// Canonical initial cursor: starts at frame 0 with an in-page base offset (the
-/// `PinnedUserBuffer` `base_off`), spanning `remaining` bytes that fit in the
-/// chain. (`VmReader::new` rejects any range that would run past the chain, so
-/// every constructed cursor satisfies this.)
+/// Canonical initial cursor: frame 0, an in-page `PinnedUserBuffer` base
+/// offset, and a range that fits the chain — `VmReader::new` rejects any range
+/// running past it, so every constructed cursor satisfies this.
 pub open spec fn cursor_init(s: CursorState) -> bool {
     &&& s.frame_idx == 0
     &&& s.intra_off < page()
@@ -168,8 +159,7 @@ pub open spec fn cursor_run(s: CursorState, trace: Seq<nat>) -> CursorState
     }
 }
 
-/// Every reachable cursor state satisfies the invariant — the inductive
-/// whole-execution guarantee (mirrors ring_bufpool.rs's main theorem).
+/// Every reachable cursor state satisfies the invariant.
 pub proof fn cursor_inv_on_every_trace(s0: CursorState, trace: Seq<nat>)
     requires
         cursor_init(s0),
@@ -185,10 +175,8 @@ pub proof fn cursor_inv_on_every_trace(s0: CursorState, trace: Seq<nat>)
     }
 }
 
-/// The headline corollary: in every reachable state the next per-frame copy
-/// stays inside the current frame (`intra_off + chunk <= page` — no cross-frame
-/// slice), and whenever a copy happens the cursor points at a valid frame
-/// (`frame_idx < n_frames`).
+/// In every reachable state the next per-frame copy stays inside the current
+/// frame, and whenever a copy happens the cursor points at a valid frame.
 pub proof fn cursor_read_in_bounds(s0: CursorState, trace: Seq<nat>, want: nat)
     requires
         cursor_init(s0),

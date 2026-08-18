@@ -212,9 +212,9 @@ async fn event_loop(
                 Ok(Some(evt)) => evt,
                 _ => break,
             };
-            // The terminal polls the socket directly, so it routes buffer
-            // releases to its renderer itself; otherwise both buffers stay in
-            // flight and the surface falls back to single-buffer updates.
+            // The terminal polls the socket directly, so it must route buffer
+            // releases itself or both buffers stay in flight and the surface
+            // falls back to single-buffer updates.
             if let slopos_protocol::types::Event::BufferRelease { buffer_id, .. } = &evt {
                 surface::release_buffer(*buffer_id);
                 continue;
@@ -243,15 +243,15 @@ async fn event_loop(
                             grid.scroll_view_down(n);
                         }
                         KeyAction::CopySelection => {
-                            // Keyboard copy keeps the selection highlighted
-                            // and never touches the master (no SIGINT).
+                            // Keyboard copy never touches the master, so it
+                            // cannot raise SIGINT.
                             if selection.is_active() {
                                 copy_selection(handle, grid, &selection);
                             }
                         }
                         KeyAction::RequestPaste => {
-                            // The compositor replies with PasteResult, which
-                            // the Paste arm below writes to the master.
+                            // The compositor answers asynchronously; the paste
+                            // arms below carry it to the master.
                             let _ = handle.borrow_client().clipboard_paste();
                         }
                         KeyAction::None => {}
@@ -266,20 +266,16 @@ async fn event_loop(
                         let ch = crate::gfx::font::cell_height().max(1);
                         let cols = (w / cw).clamp(1, grid::MAX_COLS as i32) as u16;
                         let rows = (h / ch).clamp(1, grid::MAX_ROWS as i32) as u16;
-                        // A width change reflows scrollback (rejoining wrapped
-                        // lines and re-wrapping at the new width); pass the
-                        // selection endpoints so the grid remaps them through
-                        // the reflow and a copy survives the resize. A height
-                        // change leaves the absolute line numbering — and so the
-                        // selection — valid, untouched.
+                        // A width change re-wraps scrollback, so the selection
+                        // endpoints go through the reflow to stay valid. A
+                        // height change leaves absolute line numbering intact.
                         let mut pts = selection.endpoints();
                         let outcome = grid.resize(rows, cols, &mut pts);
                         if outcome.reflowed && selection.is_active() {
                             match (pts[0], pts[1]) {
                                 (Some(a), Some(h)) => selection.set_endpoints(a, h),
-                                // An endpoint's content was evicted from the
-                                // re-wrapped history: clear rather than copy a
-                                // stale range.
+                                // An endpoint was evicted from the re-wrapped
+                                // history; a stale range must not be copied.
                                 _ => selection.clear(),
                             }
                         }
@@ -295,8 +291,8 @@ async fn event_loop(
                     return ExitReason::Closed;
                 }
                 CompositorEvent::PointerMotion(x, y) | CompositorEvent::PointerEnter(x, y) => {
-                    // Set the I-beam on enter, when the focus serial that
-                    // authorizes the cursor request is current.
+                    // Only on enter is the focus serial that authorizes a
+                    // cursor request current.
                     if matches!(evt, slopos_protocol::types::Event::PointerEnter { .. }) {
                         surface::set_cursor_shape(slopos_abi::CURSOR_SHAPE_TEXT);
                     }
@@ -329,16 +325,15 @@ async fn event_loop(
                     if input::update_selection(&mut ptr, &mut selection, grid, cw, ch) {
                         repaint_all = true;
                     }
-                    // On release with a non-collapsed selection, copy it to
-                    // the compositor clipboard (a bare click left it inactive).
+                    // A bare click leaves the selection inactive, so only a
+                    // real drag reaches the clipboard here.
                     if !pressed && selection.is_active() {
                         copy_selection(handle, grid, &selection);
                     }
                 }
                 CompositorEvent::PasteReady(len) => {
-                    // The compositor told us the clipboard size; hand it a
-                    // destination memfd of that size to copy into. Drop any
-                    // stale pending buffer first.
+                    // `len` is the clipboard size; hand back a destination
+                    // memfd of exactly that size to copy into.
                     pending_paste = None;
                     if len > 0 {
                         if let Ok(dst) = ShmBuffer::create(len as usize) {
@@ -349,7 +344,6 @@ async fn event_loop(
                     }
                 }
                 CompositorEvent::PasteResult(len) => {
-                    // The destination memfd now holds `len` clipboard bytes.
                     if let Some(dst) = pending_paste.take() {
                         let n = (len as usize).min(dst.size());
                         write_paste(
@@ -366,7 +360,6 @@ async fn event_loop(
 
         pending_writes.drain(master_fd, MASTER_WRITE_BUDGET);
 
-        // --- Drain the PTY master (read until WouldBlock). ---
         // Output damages the cells it writes, so nothing extra is needed here.
         match drain_master(master_fd, grid) {
             MasterDrain::Eof => return ExitReason::ShellGone,
@@ -374,20 +367,18 @@ async fn event_loop(
         }
 
         if repaint_all {
-            // Selection shading is the app's state, not the grid's, so the grid
-            // records no damage for it and the whole view has to repaint.
+            // Selection shading is app state, so the grid records no damage
+            // for it and the whole view has to repaint.
             pending.add_all(grid.cols);
         }
         pending.union(&grid.take_damage());
         present_pending(grid, &selection, cursor_on, &mut history, &mut pending);
 
-        // --- Sleep until the next wake: compositor data, master data, or the
-        // next cursor-blink flip. ---
         let elapsed = last_blink.elapsed();
         if elapsed >= BLINK_INTERVAL {
             cursor_on = !cursor_on;
             last_blink = Instant::now();
-            // A blink inverts one cell. Damaging it is what keeps this frame
+            // A blink inverts one cell; damaging only it keeps the frame
             // proportional to what changed.
             grid.damage_cursor();
             pending.union(&grid.take_damage());
@@ -407,9 +398,8 @@ async fn event_loop(
     }
 }
 
-/// Repaint every cell and present the whole surface, resetting the damage
-/// bookkeeping to match. For the first frame and after a resize, where the
-/// buffers hold nothing a partial repaint could build on.
+/// For the first frame and after a resize, where the buffers hold nothing a
+/// partial repaint could build on.
 fn render_full(
     grid: &TerminalGrid,
     selection: &Selection,

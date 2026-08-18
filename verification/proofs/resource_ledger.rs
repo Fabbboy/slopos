@@ -421,8 +421,8 @@ pub proof fn l5_stale_refund_is_identity(s: Ledger)
 {
 }
 
-/// The generation compare is load-bearing, not decoration: a `RefundLive` on a
-/// state whose generations disagree is also the identity.
+/// (L5) The generation compare is load-bearing: a `RefundLive` on a state
+/// whose generations disagree is also the identity.
 pub proof fn l5_generation_mismatch_refunds_nothing(s: Ledger)
     requires
         s.gen_charge != s.gen_row,
@@ -431,16 +431,10 @@ pub proof fn l5_generation_mismatch_refunds_nothing(s: Ledger)
 {
 }
 
-// ===========================================================================
-// (L3a) No double refund.
-// ===========================================================================
-
-/// A second refund of an already-refunded charge does nothing.
-///
-/// In the tree this is delivered by the type system rather than by a check:
-/// `Charge` is not `Clone`, `release` takes `self` by value, and `Drop` runs
-/// at most once — so a second refund is not a thing that can be written. The
-/// model keeps the flag so the property is stated where the other four are.
+/// (L3a) A second refund of an already-refunded charge does nothing. In the
+/// tree this is delivered by the type system rather than by a check: `Charge`
+/// is not `Clone` and `release` takes `self` by value, so a second refund is
+/// not a thing that can be written.
 pub proof fn l3a_second_refund_is_identity(s: Ledger)
     requires
         !s.charge_held,
@@ -449,7 +443,6 @@ pub proof fn l3a_second_refund_is_identity(s: Ledger)
 {
 }
 
-/// And a refund followed by a second refund lands in the same state as one.
 pub proof fn l3a_refund_is_idempotent(s: Ledger)
     requires
         ledger_inv(s),
@@ -458,10 +451,6 @@ pub proof fn l3a_refund_is_idempotent(s: Ledger)
         step(step(s, Step::RefundLive), Step::RefundLive) == step(s, Step::RefundLive),
 {
 }
-
-// ===========================================================================
-// Whole-trace induction: the invariant holds in every reachable state.
-// ===========================================================================
 
 pub open spec fn ledger_run(s: Ledger, trace: Seq<Step>) -> Ledger
     decreases trace.len(),
@@ -509,19 +498,8 @@ pub proof fn l1_holds_on_every_trace(s0: Ledger, trace: Seq<Step>)
     }
 }
 
-// ===========================================================================
-// (L6) `settle` is idempotent, and only ever shrinks.
-//
-// The property that makes a split exact where FreeBSD's per-object counter
-// could not be. A region carved in two settles once against the tree's new
-// span; settling again must be the identity, or a second call on an unchanged
-// map would refund pages the map still holds. And it must never raise the
-// charge, because growth is pre-reserved by the caller and a `munmap` that
-// could be refused against a ceiling it is *reducing* the use of would be a
-// process unable to give memory back.
-// ===========================================================================
-
-/// Settling twice to the same target is settling once.
+/// (L6) Settling twice to the same target is settling once — a second call on
+/// an unchanged map must not refund pages the map still holds.
 pub proof fn settle_is_idempotent(s: Ledger, want: nat)
     requires
         ledger_inv(s),
@@ -532,7 +510,8 @@ pub proof fn settle_is_idempotent(s: Ledger, want: nat)
 {
 }
 
-/// Settling never raises the charge, and never raises a row.
+/// (L6) Settling never raises the charge, and never raises a row, so a
+/// `munmap` cannot be refused against a ceiling it is reducing the use of.
 pub proof fn settle_only_shrinks(s: Ledger, want: nat)
     requires
         ledger_inv(s),
@@ -544,7 +523,7 @@ pub proof fn settle_only_shrinks(s: Ledger, want: nat)
 {
 }
 
-/// Reclaim gives back only what was charged, so it cannot manufacture
+/// (L6) Reclaim gives back only what was charged, so it cannot manufacture
 /// headroom — the property that makes a reclaimer safe to register.
 pub proof fn reclaim_never_exceeds_the_charge(s: Ledger, n: nat)
     requires
@@ -556,20 +535,12 @@ pub proof fn reclaim_never_exceeds_the_charge(s: Ledger, n: nat)
 {
 }
 
-// ===========================================================================
-// Broken witnesses.
-//
-// Each pairs an `exists` — a reachable state the broken variant corrupts —
-// with a `forall` showing the real step preserves the property. Without these
-// the obligations above could all be vacuous.
-// ===========================================================================
+// Each broken witness pairs an `exists` — a reachable state the broken variant
+// corrupts — with a `forall` showing the real step preserves the property.
+// Without them the obligations above could all be vacuous.
 
-/// BROKEN 1: debit `0..k`, then return `Err` without unwinding.
-///
-/// The hand-written cancel loop upstream ships a warning and a repair store
-/// for exactly this. Violates L4: a denied charge is supposed to be the
-/// identity, and this leaves the leaf permanently short of headroom it never
-/// granted.
+/// BROKEN 1: debit `0..k`, then return `Err` without unwinding. Violates L4,
+/// leaving the leaf permanently short of headroom it never granted.
 pub open spec fn broken_denied_without_unwind(s: Ledger, n: nat) -> Ledger {
     Ledger { used_leaf: (s.used_leaf + n) as nat, ..s }
 }
@@ -605,12 +576,10 @@ pub proof fn broken_denied_without_unwind_violates_l4()
         broken_denied_without_unwind(s, n) != s);
 }
 
-/// BROKEN 2: a refund that skips the generation compare.
-///
-/// Violates L1 and L5 together: it credits whichever principal holds the slot
-/// now, so that row's `used` drops below the sum of the charges actually
-/// outstanding against it — a phantom refund, which is exactly what an
-/// inequality-shaped L1 would fail to catch.
+/// BROKEN 2: a refund that skips the generation compare. Violates L1 and L5
+/// together: it credits whichever principal holds the slot now, dropping that
+/// row's `used` below the charges outstanding against it — the phantom refund
+/// an inequality-shaped L1 would fail to catch.
 pub open spec fn broken_refund_ignores_generation(s: Ledger) -> Ledger {
     Ledger {
         used_leaf: (s.used_leaf - s.charge_amount) as nat,
@@ -626,13 +595,11 @@ pub proof fn broken_refund_ignoring_generation_violates_l1()
         exists|s: Ledger|
             #![trigger broken_refund_ignores_generation(s)]
             ledger_inv(s) && !ledger_inv(broken_refund_ignores_generation(s)),
-        // The real step is the identity on exactly those states.
         forall|s: Ledger| s.gen_charge != s.gen_row ==> #[trigger]
             step(s, Step::RefundLive) == s,
 {
-    // The slot was released and rebound: the row's generation has moved on,
-    // and its 5 units belong to the NEW occupant. A stale charge of 5 refunds
-    // against it anyway.
+    // The slot was released and rebound, so its 5 units belong to the NEW
+    // occupant; a stale charge of 5 refunds against it anyway.
     let s = Ledger {
         used_leaf: 5,
         used_mid: 5,
@@ -660,13 +627,10 @@ pub proof fn broken_refund_ignoring_generation_violates_l1()
         ledger_inv(s) && !ledger_inv(broken_refund_ignores_generation(s)));
 }
 
-/// BROKEN 3: a `Clone`able charge.
-///
-/// Two tokens naming one debit; each refunds, so the row is credited twice for
-/// one charge. Violates L1 in the under-count direction — the failure Windows
-/// needed a dedicated bug check for and XNU a panic-on-negative flag compiled
-/// out of shipping kernels. Here `Charge` is simply not `Clone`, and
-/// `#[derive(Charged)]` refuses to expand alongside `Clone` or `Copy`.
+/// BROKEN 3: a `Clone`able charge. Two tokens naming one debit, each
+/// refunding, so the row is credited twice — L1 in the under-count direction.
+/// `Charge` is not `Clone`, and `#[derive(Charged)]` refuses to expand
+/// alongside `Clone` or `Copy`.
 pub open spec fn broken_double_refund(s: Ledger) -> Ledger {
     Ledger {
         used_leaf: (s.used_leaf - s.charge_amount - s.charge_amount) as nat,
