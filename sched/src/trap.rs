@@ -26,10 +26,8 @@ pub fn trap_running_on_exception_stack() -> bool {
     rsp >= EXCEPTION_STACK_REGION_BASE && rsp < ist_region_end
 }
 
-/// Save the interrupted user-mode frame into the running task's context.
-///
-/// The `Current` guard is the witness the register write needs: the task
-/// written is the one this CPU is running.
+/// Save the interrupted user-mode frame into the running task's context. The
+/// `Current` guard witnesses that the task written is the one this CPU runs.
 pub fn save_task_context_from_interrupt_frame(
     current: &crate::task_struct::Current,
     frame: &InterruptFrame,
@@ -53,7 +51,7 @@ pub fn scheduler_request_reschedule_from_interrupt() {
 pub fn scheduler_handle_timer_interrupt(frame: *mut InterruptFrame) {
     // Ahead of `scheduler_timer_tick` so the heartbeat is recorded before any
     // lock is taken, and outside it so synthetic test calls to that function do
-    // not drive the detector's sample counter with no wall time elapsed.
+    // not drive the detector with no wall time elapsed.
     slopos_ostd::watchdog::tick();
     slopos_mm::mmu::quiesce::tick();
     slopos_ostd::kconsole::poll_from_timer();
@@ -97,7 +95,7 @@ pub fn scheduler_handoff_on_trap_exit(source: TrapExitSource) {
 
     // A task that has committed `Running → Blocked` but not yet yielded must
     // not be descheduled from the trap exit: it would park with no wake armed
-    // and no timeout. The pending flag stays set for a later trap exit.
+    // and no timeout.
     if crate::task_struct::Current::get()
         .is_some_and(|current| current.task().status() == TaskStatus::Blocked)
     {

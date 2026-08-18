@@ -1,8 +1,5 @@
 //! Loopback network device (`lo`): `tx()` queues and `poll_rx()` drains back
 //! into the local ingress pipeline on the next NAPI poll — no wire, no ARP.
-//!
-//! Registered at `DevIndex(0)` by convention, before any physical NIC, and
-//! configured with `127.0.0.1/8` plus a connected route for `127.0.0.0/8`.
 
 use slopos_ostd::lock_class;
 use slopos_ostd::sync::{LOCK_LEVEL_RESOURCE, SpinLock};
@@ -18,9 +15,8 @@ const LOOPBACK_QUEUE_CAPACITY: usize = 256;
 struct LoopbackInner {
     queue: KVecDeque<PacketBuf>,
     stats: NetDeviceStats,
-    /// Cleared by `set_down`. Shares the lock with `queue` so a send racing
-    /// retirement is either drained by it or rejected — never left queued on a
-    /// device nothing will poll again.
+    /// Shares the lock with `queue` so a send racing `set_down` is either
+    /// drained or rejected — never left queued on a device nothing polls again.
     up: bool,
 }
 
@@ -60,9 +56,8 @@ impl NetDevice for LoopbackDev {
             inner.stats.tx_packets += 1;
             inner.stats.tx_bytes += len as u64;
         }
-        // Loopback has no IRQ: without this wake the queue would sit until some
-        // unrelated NIC RX IRQ wakes the kthread. No-op before any driver
-        // registers.
+        // Loopback has no IRQ: without this wake the queue sits until some
+        // unrelated NIC RX IRQ wakes the kthread.
         crate::napi::wake_napi();
         Ok(())
     }
@@ -115,8 +110,6 @@ impl NetDevice for LoopbackDev {
         crate::iface::IfaceKind::Loopback
     }
 
-    /// Loopback has no lower layer, so a constant carrier is a fact rather than
-    /// an assumption.
     fn carrier(&self) -> bool {
         true
     }
@@ -128,11 +121,8 @@ impl NetDevice for LoopbackDev {
 
 use slopos_ostd::klog_info;
 
-/// Register the loopback device, give it an interface, and configure its IPv4
-/// address and route.
-///
-/// **Must be called before any physical NIC registration** so that loopback
-/// gets `DevIndex(0)` by convention.
+/// Must be called before any physical NIC registration so that loopback gets
+/// `DevIndex(0)` by convention.
 pub fn init_loopback() {
     use super::iface::{self, AddrOrigin, AddrScope, IfaceAddr, IfaceKind};
     use super::netdev::DEVICE_REGISTRY;
@@ -155,8 +145,8 @@ pub fn init_loopback() {
     klog_info!("loopback: registered as dev {}", lo_index);
 
     // Attach after registration returns, never from inside it: an administrative
-    // down takes the interface table then the registry, so creating the row under
-    // the registry lock would close a lock cycle.
+    // down takes the interface table then the registry, so creating the row
+    // under the registry lock would close a lock cycle.
     let ifindex = match iface::attach(
         lo_index,
         IfaceKind::Loopback,

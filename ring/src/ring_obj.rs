@@ -1,10 +1,9 @@
 //! The kernel-side ring object: SQ/CQ index state, the in-flight
 //! table, and the per-ring serialization lock (SLOPRING § 6, § 9).
 //!
-//! All plain safe-Rust data. The object owns its [`RingRegion`] and the
-//! cached copies of the kernel-owned indices (`sq_head` / `cq_tail`),
-//! which are the source of truth for control decisions and mirrored
-//! into the shared page on each advance.
+//! The cached kernel-owned indices (`sq_head` / `cq_tail`) are the source of
+//! truth for control decisions, and are mirrored into the shared page on each
+//! advance.
 
 use slopos_abi::ring::{Cqe, RingLayout, SLOPRING_CQ_OVERFLOW};
 use slopos_fs::fileio::FdTable;
@@ -13,17 +12,14 @@ use slopos_fs::fileio::FileRef;
 use crate::region::{RegionError, RingRegion};
 
 /// One armed-but-incomplete SQE — plain data, never a suspended future
-/// (SLOPRING § 9). Holds the strong file reference and the bytes needed to
-/// re-run the non-blocking probe at harvest time, and nothing that
-/// references ring memory.
+/// (SLOPRING § 9). Holds everything needed to re-run the non-blocking probe at
+/// harvest time, and nothing that references ring memory.
 pub struct InFlight {
     /// Correlation cookie, echoed into the eventual CQE.
     pub user_data: u64,
-    /// `OP_*` opcode.
     pub opcode: u8,
-    /// Strong reference to the target open file, resolved once at submit.
-    /// It keeps the backing alive for the op's whole in-flight window even
-    /// if userland closes the fd or reuses the number. `None` for fd-less
+    /// Strong reference to the target open file, resolved once at submit, so
+    /// the backing outlives a close or fd-number reuse. `None` for fd-less
     /// rows (`OP_TIMEOUT`; path/fd-number ops never defer).
     pub file: Option<FileRef>,
     /// User VA of the data buffer / msghdr / sockaddr.
@@ -38,30 +34,26 @@ pub struct InFlight {
     pub off: u64,
     /// For `OP_TIMEOUT`: absolute deadline in ms (`get_time_ms` clock).
     pub deadline_ms: u64,
-    /// Armed-multishot flag (carries [`slopos_abi::ring::SLOPRING_SQE_MULTISHOT`]
-    /// for the row). When set, the harvest keeps the row in flight and
-    /// posts an interim `F_MORE` CQE on each yield instead of removing it.
+    /// [`slopos_abi::ring::SLOPRING_SQE_MULTISHOT`] for this row: the harvest
+    /// keeps it in flight and posts an interim `F_MORE` CQE on each yield.
     pub is_multishot: bool,
     /// OP_POLL_ADD multishot edge cache: the last masked-ready `revents`
-    /// posted (0 = re-armed, fd currently not-ready). A CQE fires only
-    /// when the ready bitset *transitions*, suppressing the level flood
-    /// SlopRing's caller-as-waiter model would otherwise produce.
+    /// posted (0 = re-armed, fd currently not-ready). A CQE fires only when
+    /// the ready bitset *transitions*, suppressing a level flood.
     pub last_revents: u16,
     /// Provided-buffer group id (`SLOPRING_SQE_BUFFER_SELECT`), 0 if unused.
     pub buf_group: u16,
     /// Registered fixed-buffer index (`SLOPRING_SQE_FIXED_BUFFER`).
     pub buf_index: u16,
     /// The `Sqe.flags` buffer-selection bits, carried so the deferred reprobe
-    /// re-applies the same selection (the inline path's bug was dropping it).
+    /// re-applies the same selection.
     pub buf_flags: u8,
 }
 
 impl InFlight {
-    /// Duplicate a row, aliasing its file reference (a deliberate incref).
-    /// The harvest walks a `snapshot()` clone while removing from the live
-    /// table; the alias keeps the description alive for the pass, and the
-    /// live row still holds the authoritative reference that reaps outside
-    /// the ring lock.
+    /// Duplicate a row, aliasing its file reference. The harvest walks a
+    /// `snapshot()` clone while removing from the live table; the live row
+    /// keeps the authoritative reference, which reaps outside the ring lock.
     pub fn alias(&self) -> InFlight {
         InFlight {
             user_data: self.user_data,
@@ -89,11 +81,9 @@ pub struct Ring {
     pub region: RingRegion,
     /// Computed ABI layout (offsets, masks).
     pub layout: RingLayout,
-    /// Kernel-owned SQ consumer cursor (free-running). Mirrored into the
-    /// shared `sq_head` on each advance.
+    /// Kernel-owned SQ consumer cursor (free-running).
     pub sq_head: u32,
-    /// Kernel-owned CQ producer cursor (free-running). Mirrored into the
-    /// shared `cq_tail` on each post.
+    /// Kernel-owned CQ producer cursor (free-running).
     pub cq_tail: u32,
     /// In-flight rows. Bounded by `cq_entries`.
     pub inflight: heapless_vec::InFlightVec,
@@ -103,29 +93,23 @@ pub struct Ring {
     /// The owning process — the only one allowed to enter this ring.
     ///
     /// An [`FdTable`] rather than a raw pid because this is a *permission*
-    /// key. A recycled id would let whichever process next holds that number
-    /// enter a ring it never created, which is the confused deputy with the
-    /// kernel as the deputy: the ring's in-flight ops act on the creator's
-    /// descriptors.
+    /// key: a recycled id would let whichever process next holds that number
+    /// enter a ring it never created and act on the creator's descriptors.
     pub owner: FdTable,
     /// Count of CQEs dropped on overflow (mirrors shared `cq_overflow`).
     pub cq_overflow: u32,
     /// Registered / provided buffer registry (ABI v2 zero-copy path). Shares
-    /// the per-ring lock, so a probe under `with_ring` has exclusive access.
-    /// Heap-boxed so `Ring` stays small enough to construct within the 2 KiB
-    /// stack ceiling when the `KArc<SpinLock<Ring>>` is allocated (Inv. 5').
+    /// the per-ring lock. Heap-boxed so `Ring` stays constructible within the
+    /// 2 KiB stack ceiling (Inv. 5').
     pub buffers: slopos_ostd::KBox<crate::buffers::BufferRegistry>,
     /// Rows retired this `with_ring` span, detached under the per-ring lock
-    /// but dropped by the caller *after* releasing it: a completing op's
-    /// `FileRef` may be the backing's last alias, and its teardown can take
-    /// arbitrary subsystem locks (even re-enter the ring registry for a
-    /// passed ring fd), which must never run under the ring lock.
+    /// but dropped by the caller *after* releasing it: a last `FileRef` drop
+    /// can take arbitrary subsystem locks, even re-entering the ring registry.
     pub pending_reap: slopos_ostd::KVec<InFlight>,
 }
 
 impl Ring {
-    /// Number of unharvested CQEs (`cq_tail - cq_head`), the Linux
-    /// `available_cqes` definition (SLOPRING § 8.3).
+    /// Number of unharvested CQEs (`cq_tail - cq_head`, SLOPRING § 8.3).
     pub fn available_cqes(&self, cq_head: u32) -> u32 {
         self.cq_tail.wrapping_sub(cq_head)
     }
@@ -159,13 +143,10 @@ impl Ring {
             .store_u32_release(self.layout.cq_off_tail as usize, self.cq_tail)
     }
 
-    /// Post a completion with explicit CQE `flags`. If the CQ has a free
-    /// slot, write the CQE and advance `cq_tail`; otherwise increment the
-    /// overflow counter and return `false` (the caller decides whether
-    /// that is acceptable — ownership ops reserve a slot first,
-    /// SLOPRING § 11). `cqe_flags` carries
-    /// [`slopos_abi::ring::SLOPRING_CQE_F_MORE`] for armed multishot
-    /// interim completions (0 for oneshot / terminal CQEs).
+    /// Post a completion with explicit CQE `flags`. Returns `false` when the
+    /// CQ is full — the overflow counter is bumped instead, and the caller
+    /// decides whether that is acceptable (ownership ops reserve a slot
+    /// first, SLOPRING § 11).
     pub fn post_cqe(
         &mut self,
         user_data: u64,
@@ -175,11 +156,10 @@ impl Ring {
         let cq_head = self.read_cq_head()?;
         if self.cq_full(cq_head) {
             self.cq_overflow = self.cq_overflow.wrapping_add(1);
-            // Raise the sticky CQ-overflow flag *before* publishing the
-            // counter, so a userland reader that sees a bumped count never
-            // observes the flag still clear. post_cqe is the single writer
-            // per ring (it runs under the per-ring lock), so a plain store
-            // of the latched bit is correct — no load+OR+store needed.
+            // Latch the sticky flag *before* publishing the counter, so a
+            // reader that sees a bumped count never observes it still clear.
+            // Single writer per ring (the per-ring lock), so a plain store of
+            // the bit is correct — no load+OR+store needed.
             self.region
                 .store_u32_release(self.layout.cq_off_flags as usize, SLOPRING_CQ_OVERFLOW)?;
             self.region
@@ -190,8 +170,6 @@ impl Ring {
         let cqe = Cqe {
             user_data,
             res,
-            // F_MORE (armed multishot interim completions) and the
-            // provided-buffer id bits are set by the caller.
             flags: cqe_flags,
         };
         self.region
@@ -207,8 +185,8 @@ pub mod heapless_vec {
     use super::InFlight;
     use slopos_ostd::KVec;
 
-    /// Capacity-bounded in-flight table. Uses `KVec` for storage but
-    /// never grows past `cap` (SLOPRING § 9 — excess → `-EAGAIN`).
+    /// Capacity-bounded in-flight table; never grows past `cap`, and excess
+    /// submissions complete `-EAGAIN` (SLOPRING § 9).
     pub struct InFlightVec {
         rows: KVec<InFlight>,
         cap: usize,
@@ -254,11 +232,10 @@ pub mod heapless_vec {
             Some(self.rows.swap_remove(i))
         }
 
-        /// Snapshot the rows (aliasing each file reference) into an owned
-        /// vec for harvest re-probing. The clone lets the harvest walk a
-        /// stable set while removing from the live table; the aliased refs
-        /// are never the last (the live row keeps the authoritative one),
-        /// so dropping the snapshot under the ring lock is safe.
+        /// Snapshot the rows (aliasing each file reference) for harvest
+        /// re-probing, so the harvest walks a stable set while removing from
+        /// the live table. An aliased ref is never the last, so dropping the
+        /// snapshot under the ring lock is safe.
         pub fn snapshot(&self) -> KVec<InFlight> {
             let mut out = KVec::with_capacity(self.rows.len()).expect("ring: inflight snapshot");
             for r in self.rows.iter() {
@@ -267,23 +244,19 @@ pub mod heapless_vec {
             out
         }
 
-        /// Find the index of the first row matching `user_data`.
         pub fn find_user_data(&self, user_data: u64) -> Option<usize> {
             self.rows.iter().position(|r| r.user_data == user_data)
         }
 
-        /// Update the OP_POLL_ADD multishot edge cache (`last_revents`) of
-        /// the live row matching `user_data`. The harvest walks a
-        /// `snapshot()` clone, so the edge-transition decision must write
-        /// back to the *live* row through here — a write to the snapshot
-        /// row would be lost.
+        /// Update the OP_POLL_ADD edge cache on the *live* row matching
+        /// `user_data`: the harvest walks a `snapshot()` clone, so a write to
+        /// the snapshot row would be lost.
         pub fn set_last_revents(&mut self, user_data: u64, v: u16) {
             if let Some(i) = self.rows.iter().position(|r| r.user_data == user_data) {
                 self.rows[i].last_revents = v;
             }
         }
 
-        /// Iterate the rows.
         pub fn iter(&self) -> impl Iterator<Item = &InFlight> + '_ {
             self.rows.iter()
         }

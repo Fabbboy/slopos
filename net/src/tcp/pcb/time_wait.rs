@@ -1,17 +1,9 @@
-//! `TimeWait` state: connection fully closed, waiting out `2 × MSL`.
+//! `TimeWait` state: connection fully closed, waiting out `2 × MSL`
+//! (RFC 793 §3.5).
 //!
-//! RFC 793 §3.5: a connection in `TIME_WAIT` ignores most traffic but
-//! does two useful things:
-//!
-//! 1. **Retransmitted FIN** → re-ACK and restart the `2 × MSL` timer.
-//!    The peer may not have seen our previous ACK, so we issue it
-//!    again without transitioning out of TIME_WAIT.
-//! 2. **RST** → release the slot immediately (no reason to wait out
-//!    MSL when the peer's already given up).
-//!
-//! Everything else is dropped silently.  TimeWait carries no send or
-//! receive buffers — those were drained on entry — so there's nothing
-//! useful to do with data or other flags.
+//! A retransmitted FIN is re-ACKed without leaving TIME_WAIT and a RST releases
+//! the slot early; everything else is dropped, since the send and receive
+//! buffers were drained on entry.
 
 use super::super::actions::{Actions, SocketNotify};
 use super::super::challenge_ack;
@@ -24,7 +16,6 @@ use crate::timer::TimerToken;
 /// `2 × MSL` in milliseconds.  MSL = 30 s per RFC 793 §3.3.
 pub const TIME_WAIT_MS: u64 = 60_000;
 
-/// State-specific payload for `TIME_WAIT`.
 #[derive(Debug)]
 pub struct TimeWaitState {
     pub last_rcv_nxt: SeqNum,
@@ -50,7 +41,6 @@ impl TimeWaitState {
         }
     }
 
-    /// Apply an incoming segment to a TimeWait PCB.
     pub fn on_segment(pcb: &mut Pcb, hdr: &TcpHeader, now_ms: u64) -> Actions {
         let mut actions = Actions::new();
 
@@ -59,9 +49,8 @@ impl TimeWaitState {
             unreachable!("TimeWaitState::on_segment called with non-TimeWait state");
         };
 
-        // RST — RFC 5961: validate sequence against frozen window.
-        // In TIME_WAIT, any in-window RST releases the slot early.
-        // No challenge ACK — the connection is already closing.
+        // RST — RFC 5961: validate sequence against the frozen window.
+        // Any in-window RST releases the slot early; no challenge ACK is sent.
         if hdr.is_rst() {
             let effective_wnd = s.last_rcv_wnd as u32;
             match challenge_ack::classify_rst(hdr.seq_num, s.last_rcv_nxt.raw(), effective_wnd) {
@@ -76,8 +65,6 @@ impl TimeWaitState {
             }
         }
 
-        // Retransmitted FIN → re-ACK with the frozen-in-amber sequence
-        // numbers and restart the MSL timer.
         if hdr.is_fin() {
             actions.push_segment(SegmentBuilder::ack(
                 tuple,
@@ -86,18 +73,11 @@ impl TimeWaitState {
                 s.last_rcv_wnd,
             ));
             s.entry_ms = now_ms;
-            // The caller (glue layer) cancels the old timer token
-            // and schedules a new one based on `s.entry_ms`.  We
-            // can't do that inline because Actions doesn't carry
-            // tokens yet — the D.5 cleanup pulls this tidy-up into
-            // the glue layer.
+            // TODO(tech-debt): the MSL timer is not restarted here — `Actions`
+            // carries no timer token, so the glue layer must reschedule from
+            // `s.entry_ms`.
         }
 
-        // Everything else → drop silently.
         actions
     }
-
-    // TimeWait-specific invariants are now checked by
-    // `Pcb::assert_invariants` (buffer_id must be None).  No
-    // per-state debug hook needed.
 }

@@ -35,16 +35,14 @@ pub use task_stats::*;
 pub use task_table::*;
 pub use user_ctx_init::init_user_ctx_for_new_task;
 
-/// Kernel-task entry-point function pointer.
-///
-/// `extern "C"` so a caller can hand a bare `extern "C" fn(*mut c_void)`
-/// straight to the scheduler without a transmute.
+/// Kernel-task entry-point function pointer. `extern "C"` so a caller can hand
+/// one straight to the scheduler without a transmute.
 pub type TaskEntry = extern "C" fn(*mut c_void);
 
 /// Build a [`TaskEntry`] from a kernel-half virtual address.
 ///
 /// Caller invariant: `addr` names a valid instruction sequence reachable on
-/// next dispatch. Every caller passes a kernel-defined constant.
+/// next dispatch.
 ///
 /// # Panics
 ///

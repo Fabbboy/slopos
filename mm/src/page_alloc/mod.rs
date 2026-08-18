@@ -206,17 +206,12 @@ pub type OwnedPageFrame = slopos_ostd::mm::frame::Frame<crate::kernel_meta::Kern
 
 pub use OwnedPageFrame as KernelFrame;
 
-// ---------------------------------------------------------------------------
-// Reclaim
-// ---------------------------------------------------------------------------
-
 /// The TLB quarantine as a reclaim source.
 ///
 /// Frames sit here after being unmapped, waiting for every CPU to prove it has
-/// invalidated its translation. Once the epoch closes they are *already free*
-/// — nothing references them and no work is needed to release them beyond
-/// splicing them back into the free lists. That makes this the cheapest and
-/// most certainly-recoverable pool in the kernel, so it is asked first.
+/// invalidated its translation. Once the epoch closes they are *already free*:
+/// releasing them is only a splice back into the free lists, which makes this
+/// the cheapest pool in the kernel and the first one asked.
 struct QuarantineReclaim;
 
 impl slopos_ostd::mm::reclaim::Reclaimable for QuarantineReclaim {

@@ -9,7 +9,7 @@
 //! whichever write wins is still a fresh unpredictable secret.
 //!
 //! Intentionally **not** a keyed hash — SlopOS ships no SipHash/Blake3
-//! primitive, and a future swap to one needs no caller change.
+//! primitive.
 
 use core::sync::atomic::{AtomicU64, Ordering};
 
@@ -49,8 +49,6 @@ fn fnv_mix(mut h: u64, byte: u8) -> u64 {
     h.wrapping_mul(FNV_PRIME)
 }
 
-/// Generate an Initial Sequence Number for a connection identified by
-/// `tuple`.  See the module-level documentation for the algorithm.
 pub(crate) fn generate_isn(tuple: &TcpTuple) -> u32 {
     let mut h = FNV_OFFSET ^ boot_secret();
     // Network byte order, so mirrored-endian hosts hash the same tuple alike.

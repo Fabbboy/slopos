@@ -1,6 +1,4 @@
 //! stdio — buffered I/O and the sacred printf.
-//!
-//! The Scroll of Output — every formatted byte is a spin of the Wheel of Fate.
 
 use core::ptr;
 
@@ -21,10 +19,6 @@ pub use streams::{stderr, stdin, stdout};
 
 use lock::StreamLock;
 
-// ---------------------------------------------------------------------------
-// Constants
-// ---------------------------------------------------------------------------
-
 /// End-of-file sentinel.
 pub const EOF: i32 = -1;
 
@@ -42,13 +36,9 @@ pub const _IOLBF: i32 = 1;
 /// No buffering mode.
 pub const _IONBF: i32 = 2;
 
-/// FILE flag: end-of-file reached.
 pub const FILE_FLAG_EOF: u32 = 1;
-/// FILE flag: I/O error occurred.
 pub const FILE_FLAG_ERR: u32 = 2;
-/// FILE flag: stream is readable.
 pub const FILE_FLAG_READABLE: u32 = 4;
-/// FILE flag: stream is writable.
 pub const FILE_FLAG_WRITABLE: u32 = 8;
 /// FILE flag: fd should be closed on fclose.
 pub const FILE_FLAG_OWNED_FD: u32 = 16;
@@ -67,11 +57,6 @@ pub const FILE_FLAG_HEAP: u32 = 256;
 /// Internal buffer size for FILE streams.
 pub const BUFSIZ: usize = 4096;
 
-// ---------------------------------------------------------------------------
-// BufferMode
-// ---------------------------------------------------------------------------
-
-/// Buffering strategy for a FILE stream.
 #[derive(Clone, Copy, PartialEq, Eq)]
 #[repr(i32)]
 pub enum BufferMode {
@@ -83,30 +68,21 @@ pub enum BufferMode {
     None = 2,
 }
 
-// ---------------------------------------------------------------------------
-// FILE
-// ---------------------------------------------------------------------------
-
 /// The FILE stream abstraction — every read and write is a gamble.
 ///
-/// One buffer serves both directions, so which direction it currently holds is
-/// state: `FILE_FLAG_READING` and `FILE_FLAG_WRITING` say whose bytes are in
-/// `buf`, and [`FILE::to_read`] / [`FILE::to_write`] are the only transitions
-/// between them. C11 §7.21.5.3 makes the transition the program's business on
-/// an update stream; making it the stream's business here means neither
-/// direction can silently eat the other's bytes.
+/// One buffer serves both directions: `FILE_FLAG_READING`/`FILE_FLAG_WRITING`
+/// say whose bytes are in `buf`, and [`FILE::to_read`]/[`FILE::to_write`] are
+/// the only transitions. C11 §7.21.5.3 leaves that transition to the program on
+/// an update stream; owning it here stops each direction eating the other's
+/// bytes.
 #[repr(C)]
 pub struct FILE {
-    /// File descriptor.
     pub fd: i32,
     /// Current position in the buffer (read or write cursor).
     pub buf_pos: usize,
     /// Number of valid bytes in buffer (meaningful for read buffers).
     pub buf_len: usize,
-    /// Stream state flags (EOF, ERR, READABLE, WRITABLE, OWNED_FD, direction,
-    /// list membership, allocation ownership).
     pub flags: u32,
-    /// Buffering mode.
     pub mode: BufferMode,
     /// `ungetc` push-back slot (−1 = empty, 0–255 = pushed-back byte).
     pub ungot: i32,
@@ -155,9 +131,7 @@ impl FILE {
         ptr::write_bytes(&raw mut (*dst).buf as *mut u8, 0, BUFSIZ);
     }
 
-    /// Flush the write buffer to the underlying fd.
-    ///
-    /// Returns 0 on success, [`EOF`] on error.
+    /// Flush the write buffer to the fd. Returns 0, or [`EOF`] on error.
     pub fn flush_write_buf(&mut self) -> i32 {
         if self.buf_pos == 0 {
             return 0;
@@ -186,9 +160,8 @@ impl FILE {
         0
     }
 
-    /// Refill the read buffer from the underlying fd.
-    ///
-    /// Returns the number of bytes read, or [`EOF`] on error / end-of-file.
+    /// Refill the read buffer. Returns the byte count, or [`EOF`] on error or
+    /// end-of-file.
     pub fn fill_read_buf(&mut self) -> i32 {
         self.buf_pos = 0;
         self.buf_len = 0;
@@ -215,10 +188,9 @@ impl FILE {
         buffered + if self.ungot >= 0 { 1 } else { 0 }
     }
 
-    /// Rewind the fd over unconsumed read-ahead and drop it.
-    ///
-    /// Best effort: `ESPIPE` on a pipe or a terminal is the correct answer, and
-    /// the read-ahead is dropped either way.
+    /// Rewind the fd over unconsumed read-ahead and drop it. Best effort:
+    /// `ESPIPE` on a pipe or a terminal is correct, and the read-ahead goes
+    /// either way.
     pub fn discard_read_ahead(&mut self) {
         let ahead = self.read_ahead_len();
         if ahead > 0 {
@@ -255,14 +227,9 @@ impl FILE {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Process teardown
-// ---------------------------------------------------------------------------
-
-/// Flush every open output stream on the way out of the process.
-///
-/// Bounded: a peer thread wedged in `write()` costs a few milliseconds and is
-/// then skipped, rather than turning a clean exit into a hang.
+/// Flush every open output stream on the way out of the process. Bounded: a
+/// peer thread wedged in `write()` is skipped after a few milliseconds rather
+/// than hanging the exit.
 pub fn __stdio_exit() -> i32 {
     registry::flush_all(WalkMode::BestEffort)
 }

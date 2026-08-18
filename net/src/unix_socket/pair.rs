@@ -15,14 +15,12 @@ use super::buffer::UnixFifo;
 
 /// Soft cap on in-flight file descriptors per direction (SCM_RIGHTS).
 ///
-/// The queue itself is a `KVec` so the bound is enforced at the call
-/// site, not by the storage shape.  Mirrors Linux's `SCM_MAX_FD`
-/// philosophy: a hard upper limit prevents a sender from pinning
-/// arbitrary kernel memory; the exact number is a policy choice.
+/// Enforced at the call site, not by the storage shape: the bound stops a
+/// sender pinning arbitrary kernel memory; the exact number is policy.
 pub(super) const MAX_INFLIGHT_FDS: usize = 8;
 
-/// Pair-table slab capacity.  Every pair owns two slots, so the table
-/// can never need more than half as many entries as the slot table.
+/// Every pair owns two slots, so the table can never need more than half as
+/// many entries as the slot table.
 pub(super) const MAX_UNIX_PAIRS: usize = MAX_UNIX_SOCKETS / 2;
 
 /// Which side of a connected pair this slot represents.
@@ -34,32 +32,25 @@ pub enum PairSide {
 
 /// Per-direction queue of in-flight files (SCM_RIGHTS side-channel).
 ///
-/// Entries are owned [`FileRef`] aliases of the sender's open files:
-/// queueing transfers custody in, delivery moves it on to the receiver's
-/// fd table, and dropping the queue closes whatever was never claimed —
-/// there is no reference for anyone to balance.
+/// Entries are owned [`FileRef`] aliases: queueing takes custody, delivery
+/// moves it to the receiver's fd table, and dropping the queue closes whatever
+/// was never claimed.
 ///
 /// Storage is pre-reserved to [`MAX_INFLIGHT_FDS`] at pair creation so
-/// commit-path pushes never allocate — and, critically, never drop a
-/// `FileRef` while the socket state lock is held (a drop can recurse
-/// into arbitrary file teardown, including `unix_close`).
+/// commit-path pushes never allocate and never drop a `FileRef` under the
+/// socket state lock — a drop can recurse into `unix_close`.
 pub(super) struct AncillaryQueue {
     entries: KVec<InFlightFile>,
 }
 
 /// One in-flight descriptor and the custody charge that accounts for it.
 ///
-/// The charge is the **sender's**, and it is mandatory rather than a
-/// refinement: 8 in-flight descriptors x 2 directions x 16 pairs is 256
-/// `FileRef`s held by no descriptor table at all, against a per-process
-/// descriptor limit far below that. Without a custody axis those references
-/// are owned by the `ConnectionPair` and charged to nobody — Linux answered
-/// the identical hole with a per-user in-flight counter, because no
-/// process-scoped principal outlived the sender.
+/// The charge is the **sender's** and is mandatory: 8 in-flight descriptors x
+/// 2 directions x 16 pairs is 256 `FileRef`s held by no descriptor table at
+/// all, against a far lower per-process descriptor limit.
 ///
 /// The charge travels with the reference, so whichever way the queue empties
-/// — the receiver installs it, or the pair drops — the refund happens exactly
-/// once, in the same move.
+/// the refund happens exactly once, in the same move.
 pub(super) struct InFlightFile {
     pub(super) file: FileRef,
     #[expect(dead_code, reason = "held for ownership; dropping it is the refund")]
@@ -79,8 +70,7 @@ impl AncillaryQueue {
     /// The charge is minted **after** the only two things that can refuse —
     /// the cap and the reservation — because `KVec::push` consumes its
     /// argument on failure, so a token built before a failing push would be
-    /// lost with it. Storage is pre-reserved to `MAX_INFLIGHT_FDS` at pair
-    /// creation, so the push below cannot allocate and cannot fail.
+    /// lost with it.
     pub(super) fn push(&mut self, file: FileRef, sender: AccountId) -> Result<(), FileRef> {
         if self.entries.len() >= MAX_INFLIGHT_FDS {
             return Err(file);
@@ -103,40 +93,32 @@ impl AncillaryQueue {
         Ok(())
     }
 
-    /// Number of files currently queued. Used by the atomic-publish path
-    /// in `unix_sendmsg` to capacity-check the ancillary queue *before*
-    /// committing any fds, so a multi-fd send never publishes a
-    /// partial set to the peer.
     #[inline]
     pub(super) fn len(&self) -> usize {
         self.entries.len()
     }
 
-    /// Drain all entries.  A pure move: the returned `KVec` owns the
-    /// aliases, so the caller can carry them out of the state lock
-    /// before forwarding or dropping them.
+    /// Drain all entries.  The returned `KVec` owns the aliases, so the caller
+    /// can carry them out of the state lock before forwarding or dropping them.
     pub(super) fn drain(&mut self) -> KVec<InFlightFile> {
         core::mem::replace(&mut self.entries, KVec::new())
     }
 }
 
-/// Identifies a connection pair in the [`PairTable`].
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(super) struct PairHandle(u8);
 
 /// Shared state owned jointly by both halves of a connected AF_UNIX pair.
 ///
-/// Body size after the `KVec` switch is ~120 bytes — well under the
-/// 2 KiB stack-frame budget — so this struct is constructed by safe
-/// `Self { … }` syntax with no in-place-init machinery required.
+/// The body is ~120 bytes — well under the 2 KiB stack-frame budget — so it is
+/// constructed by plain `Self { … }` with no in-place-init machinery.
 pub(super) struct ConnectionPair {
     a_to_b: UnixFifo,
     b_to_a: UnixFifo,
     anc_a_to_b: AncillaryQueue,
     anc_b_to_a: AncillaryQueue,
-    /// Live reference count.  Initialised to `2` at connect; each close
-    /// of either endpoint decrements it.  When it reaches `0` the pair
-    /// is removed from the table and its FIFOs / queues drop normally.
+    /// `2` at connect; each endpoint close decrements, and at `0` the pair
+    /// leaves the table and its FIFOs / queues drop.
     refcount: u8,
 }
 
@@ -200,10 +182,9 @@ impl ConnectionPair {
     }
 }
 
-/// Slab of [`ConnectionPair`]s.  Inline storage — the pair body is
-/// small enough (~120 bytes) that boxing would cost an extra
-/// indirection without benefit.  The two FIFOs inside each pair
-/// already carry their 16 KiB payloads on the heap via `KVecDeque`.
+/// Slab of [`ConnectionPair`]s.  Inline storage: boxing so small a body would
+/// only add indirection, and each pair's FIFOs already carry their 16 KiB
+/// payloads on the heap via `KVecDeque`.
 pub(super) struct PairTable {
     pairs: [Option<ConnectionPair>; MAX_UNIX_PAIRS],
 }
@@ -237,11 +218,9 @@ impl PairTable {
             .and_then(|s| s.as_mut())
     }
 
-    /// Decrement the refcount of `handle`.  When it reaches zero the
-    /// pair is detached from the table and returned so the caller can
-    /// drop it *after* releasing the socket state lock — its ancillary
-    /// queues may hold `FileRef`s whose teardown can recurse into
-    /// arbitrary subsystems (including `unix_close` itself).
+    /// Decrement the refcount; at zero the pair is detached and returned so the
+    /// caller can drop it *after* releasing the socket state lock — its
+    /// ancillary `FileRef`s can recurse into `unix_close` on teardown.
     #[must_use]
     pub(super) fn release(&mut self, handle: PairHandle) -> Option<ConnectionPair> {
         let entry = self.pairs.get_mut(handle.0 as usize)?;

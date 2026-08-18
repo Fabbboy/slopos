@@ -1,10 +1,9 @@
 //! Ownership of a half-built task for the length of its build.
 //!
-//! A [`PendingTask`] is deliberately unregistered — no lookup, active-task
-//! walk, census or shutdown sweep can see it — so nothing observes the task
-//! half-built, and equally nothing can recover the orphan if the token is
-//! dropped on the floor. [`SpawnGuard`]'s [`Drop`] is what releases the child
-//! on every exit from the build, including a kill.
+//! A [`PendingTask`] is unregistered — no lookup, walk, census or shutdown
+//! sweep can see it — so nothing can recover the orphan if the token is
+//! dropped. [`SpawnGuard`]'s [`Drop`] releases the child on every exit from the
+//! build, including a kill.
 
 use slopos_ostd::cpu::preempt::PreemptGuard;
 
@@ -20,7 +19,6 @@ pub struct SpawnGuard {
     /// `child_process_id` to the allocator, and the designator fails closed
     /// where a re-resolved number would name a stranger.
     child_table: Option<slopos_fs::fileio::FdTable>,
-    /// `None` once [`commit`](Self::commit) has taken it.
     pending: Option<PendingTask>,
 }
 
@@ -62,21 +60,18 @@ impl SpawnGuard {
     /// Exclusive access to the child under construction; `None` once the guard
     /// is spent.
     ///
-    /// `f` may allocate and take locks but must not block or yield. Anything
-    /// whose release can deallocate — a displaced `KArc` — must be returned out
-    /// of `f` and dropped by the caller: the buddy allocator's reuse path
-    /// performs synchronous cross-CPU TLB drains, which the preempt guard held
-    /// here forbids.
+    /// `f` may allocate and take locks but must not block or yield, and must
+    /// return anything whose release can deallocate — a displaced `KArc` — for
+    /// the caller to drop: freeing under the preempt guard held here would need
+    /// a synchronous cross-CPU TLB drain.
     pub fn with_child<R>(&mut self, f: impl FnOnce(&mut Task) -> R) -> Option<R> {
         let _preempt = PreemptGuard::new();
         let pending = self.pending.as_mut()?;
         Some(f(pending.as_mut()))
     }
 
-    /// Make the child reachable.
-    ///
-    /// `None` means the registry was full or the guard was already spent;
-    /// either way nothing is left to release.
+    /// Make the child reachable. `None` means the registry was full or the
+    /// guard was already spent; either way nothing is left to release.
     pub fn commit(mut self) -> Option<TaskRef> {
         let token = self.pending.take()?;
         let _preempt = PreemptGuard::new();

@@ -47,7 +47,6 @@ pub(super) fn run_task_resource_cleanup_hooks(task_id: u32) {
 }
 
 /// Release task-bound resources before exec() replaces the process image.
-/// Called from `syscall_exec` past the point of no return.
 pub fn task_cleanup_for_exec(task_id: u32) {
     run_task_resource_cleanup_hooks(task_id);
 }

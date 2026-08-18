@@ -1,10 +1,7 @@
 //! TCP sequence number arithmetic (RFC 793 §3.3).
 //!
 //! Sequence numbers are points on a circular 32-bit line: comparison is
-//! wrapping subtraction reinterpreted as `i32`, so a value close to wrap
-//! compares less-than one just past zero. This is **not** `<` on `u32`. The
-//! [`SeqNum`] newtype routes the operators through it; the `seq_lt` family is
-//! the same comparison as free functions.
+//! wrapping subtraction reinterpreted as `i32`, not `<` on `u32`.
 //!
 //! ```ignore
 //! use slopos_net::tcp::seq::SeqNum;

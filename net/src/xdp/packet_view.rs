@@ -1,8 +1,4 @@
 //! Safe view over a received frame for XDP filters.
-//!
-//! At the ingress hook the packet's `head` is still `0`, so
-//! [`PacketView::frame`] is the complete L2 frame and all parses are relative
-//! to it.
 
 use crate::checksum;
 use crate::packetbuf::PacketBuf;

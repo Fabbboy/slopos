@@ -2281,7 +2281,7 @@ fn process_vm_mmap_inner(
         };
         // Force a panic fatal while `vm_space` is out of `inner`; unwinding
         // through the half-mutated global would leave it torn for later
-        // syscalls. Same at every site that takes `vm_space` out.
+        // syscalls.
         let abort_guard = AbortOnUnwind::new();
         let mut vm_space_taken = inner
             .vm_space
@@ -2810,7 +2810,6 @@ fn clone_cow_populate_child(
     Ok(cow_pages)
 }
 
-/// Clone `parent_id`'s address space with COW into `child`'s slot.
 pub fn process_vm_clone_cow_for(parent: ProcessId, child: KArc<Process>) -> Option<ProcessVmRef> {
     let parent_slot = match find_slot_for_pid(parent) {
         Some(s) => s,

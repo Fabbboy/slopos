@@ -1,8 +1,7 @@
 //! Tests for the network-state monitors.
 //!
-//! The interesting properties are all about what one subscriber observes while
-//! another misbehaves, so most of these run two rings side by side: a ring that
-//! stops reading must not cost the ring that keeps up a single record.
+//! Most run two rings side by side: a ring that stops reading must not cost the
+//! ring that keeps up a single record.
 
 use slopos_fs::fileio::FdTable;
 use slopos_testing::TestResult;
@@ -28,38 +27,29 @@ use crate::netseq::net_seq;
 /// kernel's own.
 ///
 /// Deliberately **not** [`NETMON_TABLE`]: these tests run inside a live kernel,
-/// and a monitor opened by a real subscriber must not have its ring emptied (or
-/// its slot recycled) by a test that wanted a clean table. A `static` rather
-/// than a local because the registry is ~16 KiB and the build's stack-frame
-/// gate caps a frame at 2 KiB.
+/// and a real subscriber's ring must not be emptied by a test that wanted a
+/// clean table. A `static` because the registry is ~16 KiB against a 2 KiB
+/// stack-frame gate.
 ///
-/// It shares the global sequence and the global wait queues with the kernel
-/// registry, which is deliberate on both counts: the sequence is what makes two
-/// monitors comparable, and a wake published against a slot index is re-checked
-/// by whoever receives it, so a scratch post can only ever cause a spurious
-/// wakeup, never a missed or a false-positive one.
+/// It shares the global sequence and wait queues with the kernel registry: the
+/// sequence is what makes two monitors comparable, and a wake is re-checked by
+/// whoever receives it, so a scratch post can only cause a spurious wakeup.
 static TEST_MONITORS: NetMonTable = NetMonTable::new(slopos_ostd::lock_class!(
     "NETMON.test",
     slopos_ostd::sync::LOCK_LEVEL_RESOURCE
 ));
 
-/// A process id no real process carries, for the tests that must touch the
-/// kernel registry.
 /// The owner these tests register monitors under.
 ///
 /// The kernel's table rather than a synthetic pid: a monitor's owner is a
 /// permission key, and a made-up number is not one any process could hold.
-/// What the tests need is a *nameable, distinguishable* owner, which this is
-/// without registering a process.
 const TEST_OWNER: FdTable = FdTable::Kernel;
 
-/// Empty the scratch registry and hand it back ready to use.
 fn fresh() -> &'static NetMonTable {
     TEST_MONITORS.clear();
     &TEST_MONITORS
 }
 
-/// One interface-changed record, distinguished by `ifindex`.
 fn post_iface(table: &NetMonTable, ifindex: u32) -> u64 {
     table.post(
         NET_EV_IFACE_CHANGED,
@@ -70,8 +60,8 @@ fn post_iface(table: &NetMonTable, ifindex: u32) -> u64 {
 
 /// Drain everything the monitor holds, calling `f(index, record)` for each.
 ///
-/// Chunked through a small stack array so draining a full ring — 65 records
-/// with the overflow marker — never needs a 2 KiB frame.
+/// Chunked through a small stack array so draining a full ring stays under the
+/// 2 KiB frame gate.
 fn drain_each(table: &NetMonTable, handle: usize, mut f: impl FnMut(usize, NetEvent)) -> usize {
     let mut chunk = [NetEvent::default(); 8];
     let mut total = 0usize;
@@ -96,13 +86,6 @@ fn drain_count(table: &NetMonTable, handle: usize) -> usize {
     drain_each(table, handle, |_, _| {})
 }
 
-// =============================================================================
-// Ordering and the sequence
-// =============================================================================
-
-/// Records come back in the order they were posted, and their sequences
-/// strictly increase — the two properties every consumer of the stream folds
-/// state with.
 fn test_netmon_fifo_order_and_rising_seq() -> TestResult {
     let table = fresh();
     let handle = match table.open(TEST_OWNER, NET_MON_DEFAULT) {
@@ -133,9 +116,7 @@ fn test_netmon_fifo_order_and_rising_seq() -> TestResult {
     pass!()
 }
 
-/// Two monitors share one sequence space, which is what lets a reader merge
-/// their streams — and what makes the snapshot handoff mean the same thing to
-/// both.
+/// One sequence space across rings is what lets a reader merge their streams.
 fn test_netmon_seq_is_global_across_rings() -> TestResult {
     let table = fresh();
     let ifaces = match table.open(TEST_OWNER, NET_MON_IFACE) {

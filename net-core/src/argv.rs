@@ -13,9 +13,8 @@ pub enum TokenError {
 ///
 /// An exact match wins outright even when the token also prefixes other
 /// entries, so a table can grow a longer name beside a shorter one without
-/// breaking existing invocations of the shorter. A token prefixing several
-/// entries is [`TokenError::Ambiguous`], never silently the first. An empty
-/// token is [`TokenError::Unknown`] rather than ambiguous.
+/// breaking existing invocations of the shorter. An empty token is
+/// [`TokenError::Unknown`] rather than ambiguous.
 pub fn resolve_token(input: &[u8], table: &[&'static str]) -> Result<&'static str, TokenError> {
     if input.is_empty() {
         return Err(TokenError::Unknown);
@@ -37,8 +36,8 @@ pub fn resolve_token(input: &[u8], table: &[&'static str]) -> Result<&'static st
     found.ok_or(TokenError::Unknown)
 }
 
-/// The entries a token prefixes, in table order — what an ambiguity message
-/// lists so the reader can pick one.
+/// The entries a token prefixes, in table order, as an ambiguity message lists
+/// them.
 pub fn matches<'t>(
     input: &'t [u8],
     table: &'t [&'static str],
@@ -53,17 +52,12 @@ pub fn matches<'t>(
 /// of every matched bit.
 ///
 /// `accept` maps a flag byte to the bit it sets, so `-tuln` and `-t -u -l -n`
-/// produce the same value and neither the caller nor the parser has to care
-/// which form was typed. A single leading `-` is skipped when present, so an
-/// argument may be passed whole.
-///
-/// A bare `-` carries no flag bytes and yields `Ok(0)`: it is the conventional
-/// stdin/stdout placeholder, and rejecting it here would push a special case
-/// into every caller.
+/// produce the same value. A single leading `-` is skipped when present, so an
+/// argument may be passed whole; a bare `-` carries no flag bytes and yields
+/// `Ok(0)` rather than an error, being the conventional stdin placeholder.
 ///
 /// The first byte with no entry in `accept` stops the scan and is returned as
-/// `Err`, so the caller can name the offending flag rather than the whole
-/// argument. Bits set by earlier bytes of a rejected argument are discarded,
+/// `Err`. Bits set by earlier bytes of a rejected argument are discarded,
 /// because a partially applied option bundle is worse than none.
 pub fn scan_bundled(arg: &[u8], accept: &[(u8, u32)]) -> Result<u32, u8> {
     let flags = match arg.split_first() {
@@ -90,7 +84,6 @@ mod tests {
     #[test]
     fn exact_match_beats_prefix() {
         assert_eq!(resolve_token(b"addr", &["addr", "addrlabel"]), Ok("addr"));
-        // Order in the table must not matter.
         assert_eq!(resolve_token(b"addr", &["addrlabel", "addr"]), Ok("addr"));
     }
 
@@ -113,7 +106,6 @@ mod tests {
     fn unknown_token_is_an_error() {
         assert_eq!(resolve_token(b"zebra", &OBJECTS), Err(TokenError::Unknown));
         assert_eq!(resolve_token(b"x", &OBJECTS), Err(TokenError::Unknown));
-        // Longer than any entry, and a prefix of none.
         assert_eq!(
             resolve_token(b"linkage", &OBJECTS),
             Err(TokenError::Unknown)
@@ -161,7 +153,6 @@ mod tests {
     fn unknown_flag_names_the_byte() {
         assert_eq!(scan_bundled(b"-tx", &NC_FLAGS), Err(b'x'));
         assert_eq!(scan_bundled(b"-x", &NC_FLAGS), Err(b'x'));
-        // The first bad byte wins, not the last.
         assert_eq!(scan_bundled(b"-txy", &NC_FLAGS), Err(b'x'));
     }
 

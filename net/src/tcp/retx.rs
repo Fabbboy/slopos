@@ -1,27 +1,12 @@
 //! SACK-aware send map for in-flight TCP segments (RFC 6675).
 //!
-//! Replaces the old go-back-N `RetxQueue` with a per-segment state machine
-//! that supports selective retransmission:
+//! Per-segment state drives selective retransmission: SACK coverage confirms
+//! entries, DupThresh confirmations past a hole declare it `Lost`, and an RTO
+//! marks everything `Lost` rather than rewinding `snd_nxt`.
 //!
-//! 1. **RTT sampling.**  When a cumulative ACK frees entries, the map reports
-//!    the earliest `InFlight` entry's send time so the
-//!    [`super::rtt::RttEstimator`] can compute RTT.  Only `InFlight` entries
-//!    are eligible — `Retransmitted`, `SackConfirmed`, and `Lost` are not.
-//! 2. **SACK-driven loss detection.**  [`SendMap::apply_sack_blocks`] marks
-//!    entries `SackConfirmed`, then detects losses: any `InFlight` entry
-//!    with ≥ 3 `SackConfirmed` entries after it is marked `Lost` (RFC 6675
-//!    DupThresh = 3).
-//! 3. **Selective retransmit.**  [`SendMap::next_lost`] returns the first
-//!    `Lost` entry so `poll_transmit` can prioritise it over new data.
-//! 4. **RTO fallback.**  [`SendMap::mark_all_lost`] marks every entry `Lost`
-//!    so the transmit loop re-sends them one at a time instead of rewinding
-//!    `snd_nxt` (no go-back-N).
-//!
-//! ## Storage
-//!
-//! An inline `[SendMapEntry; 32]`.  32 × MSS ≈ 46 KB of in-flight data —
-//! generous for a 64 KB send window.  A full map causes new sends to block
-//! until the oldest slot is freed by a cumulative ACK.
+//! Storage is an inline `[SendMapEntry; 32]` — 32 × MSS ≈ 46 KB in flight,
+//! sized for a 64 KB send window. A full map blocks new sends until a
+//! cumulative ACK frees the oldest slot.
 
 use crate::tcp::seq::SeqNum;
 
@@ -31,22 +16,18 @@ pub const SENDMAP_CAPACITY: usize = 32;
 /// DupThresh: number of SACKed entries past a hole to declare it lost.
 const DUP_THRESH: usize = 3;
 
-// ---------------------------------------------------------------------------
-// Per-segment state
-// ---------------------------------------------------------------------------
-
 /// Lifecycle state of a single in-flight segment.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, slopos_ostd::Zeroable)]
 #[repr(u8)]
 pub enum SegmentState {
-    /// Sent, not yet acknowledged or SACKed by the peer. **Discriminant
-    /// 0** — a zero byte is a valid `SegmentState::InFlight`, which the
-    /// [`SendMap`]'s `new_in_slot` zero-fill relies on.
+    /// Sent, not yet acknowledged or SACKed by the peer. **Discriminant 0**: a
+    /// zero byte must be a valid `InFlight`, which [`SendMap`]'s zero-fill
+    /// relies on.
     InFlight = 0,
-    /// Covered by a SACK block from the peer — they have this data.
+    /// Covered by a SACK block from the peer.
     SackConfirmed = 1,
-    /// Declared lost: ≥ DupThresh SACKed entries exist past this hole,
-    /// or an RTO fired.  `poll_transmit` should retransmit this entry.
+    /// Declared lost: ≥ DupThresh SACKed entries exist past this hole, or an
+    /// RTO fired.
     Lost = 2,
     /// Was `Lost`, has been retransmitted, now in flight again.
     Retransmitted = 3,
@@ -58,13 +39,7 @@ impl Default for SegmentState {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Entry
-// ---------------------------------------------------------------------------
-
-/// One in-flight segment's metadata.  The payload lives in the send ring
-/// buffer — this entry only records the sequence-space slice it covers
-/// and the wall time of its first transmission.
+/// One in-flight segment's metadata; the payload lives in the send ring buffer.
 #[derive(Clone, Copy, Debug, slopos_ostd::Zeroable)]
 pub struct SendMapEntry {
     /// First sequence number covered by this entry.
@@ -74,7 +49,6 @@ pub struct SendMapEntry {
     /// Timestamp (`now_ms`) when this segment was first transmitted.
     /// Never updated on retransmit — needed for RTT sampling.
     pub first_send_ms: u64,
-    /// Current lifecycle state.
     pub state: SegmentState,
 }
 
@@ -89,15 +63,10 @@ impl Default for SendMapEntry {
     }
 }
 
-// ---------------------------------------------------------------------------
-// SendMap
-// ---------------------------------------------------------------------------
-
 /// Per-connection send map tracking every unacknowledged segment.
 ///
-/// Invariant: entries are stored in emit order (== sequence order) from
-/// index `0` to `len-1`.  Removing the head shifts the remainder down —
-/// O(n) but n ≤ 32 is negligible.
+/// Invariant: entries are stored in emit order (== sequence order) from index
+/// `0` to `len-1`; removing the head shifts the remainder down.
 #[derive(Clone, Copy, Debug, slopos_ostd::Zeroable)]
 pub struct SendMap {
     entries: [SendMapEntry; SENDMAP_CAPACITY],
@@ -111,7 +80,6 @@ impl Default for SendMap {
 }
 
 impl SendMap {
-    /// Create an empty send map.
     pub const fn new() -> Self {
         Self {
             entries: [SendMapEntry {
@@ -123,10 +91,6 @@ impl SendMap {
             len: 0,
         }
     }
-
-    // -----------------------------------------------------------------------
-    // Capacity / queries
-    // -----------------------------------------------------------------------
 
     #[inline]
     pub fn len(&self) -> usize {
@@ -153,9 +117,8 @@ impl SendMap {
         total
     }
 
-    /// RFC 6675 "pipe" estimate: bytes believed to be in the network.
-    /// Counts only `InFlight` and `Retransmitted` entries — `SackConfirmed`
-    /// (peer has them) and `Lost` (not in the network) are excluded.
+    /// RFC 6675 "pipe" estimate: bytes believed to be in the network. Counts
+    /// only `InFlight` and `Retransmitted` entries.
     pub fn pipe(&self) -> u32 {
         let mut p = 0u32;
         for i in 0..self.len as usize {
@@ -169,7 +132,6 @@ impl SendMap {
         p
     }
 
-    /// True if any entry is in the `Lost` state.
     pub fn has_lost(&self) -> bool {
         for i in 0..self.len as usize {
             if self.entries[i].state == SegmentState::Lost {
@@ -179,7 +141,6 @@ impl SendMap {
         false
     }
 
-    /// First entry with `state == Lost`, or `None`.
     pub fn next_lost(&self) -> Option<&SendMapEntry> {
         for i in 0..self.len as usize {
             if self.entries[i].state == SegmentState::Lost {
@@ -189,12 +150,7 @@ impl SendMap {
         None
     }
 
-    // -----------------------------------------------------------------------
-    // Mutation: send tracking
-    // -----------------------------------------------------------------------
-
-    /// Record that a segment of `len` bytes starting at `seq` has been put
-    /// on the wire at time `now_ms`.  Returns `Err(())` if the map is full.
+    /// Record a segment put on the wire. Returns `Err(())` if the map is full.
     pub fn push_sent(&mut self, seq: SeqNum, len: u32, now_ms: u64) -> Result<(), ()> {
         if self.len as usize >= SENDMAP_CAPACITY {
             return Err(());
@@ -210,16 +166,11 @@ impl SendMap {
         Ok(())
     }
 
-    // -----------------------------------------------------------------------
-    // Mutation: cumulative ACK
-    // -----------------------------------------------------------------------
-
     /// Process a cumulative ACK covering everything up to (but not including)
-    /// `up_to`.  Removes fully-acked entries from the head and returns an
-    /// [`AckOutcome`] with byte count and RTT sample info.
+    /// `up_to`, removing fully-acked entries from the head.
     ///
-    /// RTT samples are only taken from `InFlight` entries — entries that have
-    /// been retransmitted, SACK-confirmed, or marked lost are ineligible.
+    /// RTT samples are only taken from `InFlight` entries — retransmitted,
+    /// SACK-confirmed and lost entries are ineligible.
     pub fn on_cumulative_ack(&mut self, up_to: SeqNum) -> AckOutcome {
         if self.len == 0 {
             return AckOutcome::default();
@@ -233,14 +184,12 @@ impl SendMap {
             let e = &self.entries[i];
             let end = e.seq + e.len;
             if up_to >= end {
-                // Fully acked.
                 bytes_freed = bytes_freed.saturating_add(e.len);
                 if drop_count == 0 && e.state == SegmentState::InFlight {
                     rtt_sample_origin = Some(e.first_send_ms);
                 }
                 drop_count += 1;
             } else if up_to > e.seq {
-                // Partial ACK within head entry — shrink it.
                 debug_assert!(i == drop_count, "partial ACK outside queue head");
                 if i == drop_count {
                     let delta = up_to - e.seq;
@@ -255,7 +204,6 @@ impl SendMap {
             }
         }
 
-        // Shift tail down over dropped entries.
         if drop_count > 0 {
             for i in 0..(self.len as usize - drop_count) {
                 self.entries[i] = self.entries[i + drop_count];
@@ -270,48 +218,34 @@ impl SendMap {
         }
     }
 
-    // -----------------------------------------------------------------------
-    // Mutation: SACK processing + loss detection
-    // -----------------------------------------------------------------------
-
     /// Apply SACK blocks from the peer, then run loss detection.
     ///
-    /// For each SACK block, entries that are **fully** covered (block.left <=
-    /// entry.seq AND block.right >= entry.seq + entry.len) are marked
-    /// `SackConfirmed`.
-    ///
-    /// Then, for each `InFlight` entry, if ≥ `DUP_THRESH` entries after it
-    /// are `SackConfirmed`, the entry is marked `Lost` (RFC 6675 §4).
-    ///
-    /// Returns `true` if any entry was newly marked `Lost`.
+    /// Only entries **fully** covered by a block are marked `SackConfirmed`.
+    /// An `InFlight` entry with ≥ `DUP_THRESH` `SackConfirmed` entries after it
+    /// is marked `Lost` (RFC 6675 §4). Returns `true` on a new loss.
     pub fn apply_sack_blocks(&mut self, blocks: &[(u32, u32)], count: u8) -> bool {
         let n = core::cmp::min(count as usize, blocks.len());
         if n == 0 || self.len == 0 {
             return false;
         }
 
-        // Phase 1: mark SackConfirmed.
         for bi in 0..n {
             let (left, right) = blocks[bi];
-            // Skip degenerate blocks.
             if right <= left {
                 continue;
             }
             for i in 0..self.len as usize {
                 let e = &self.entries[i];
-                // Only promote InFlight or Retransmitted → SackConfirmed.
                 if e.state == SegmentState::SackConfirmed || e.state == SegmentState::Lost {
                     continue;
                 }
                 let e_end = (e.seq + e.len).raw();
-                // Fully covered by this SACK block?
                 if seq_le(left, e.seq.raw()) && seq_ge(right, e_end) {
                     self.entries[i].state = SegmentState::SackConfirmed;
                 }
             }
         }
 
-        // Phase 2: loss detection — DupThresh = 3.
         let mut any_new_loss = false;
         for i in 0..self.len as usize {
             if self.entries[i].state != SegmentState::InFlight {
@@ -332,19 +266,14 @@ impl SendMap {
         any_new_loss
     }
 
-    // -----------------------------------------------------------------------
-    // Mutation: RTO + retransmit lifecycle
-    // -----------------------------------------------------------------------
-
-    /// RTO path: mark every entry as `Lost` so the transmit loop re-sends
-    /// them selectively instead of doing go-back-N.
+    /// RTO path: mark every entry as `Lost` so the transmit loop re-sends them
+    /// selectively instead of doing go-back-N.
     pub fn mark_all_lost(&mut self) {
         for i in 0..self.len as usize {
             self.entries[i].state = SegmentState::Lost;
         }
     }
 
-    /// After retransmitting a `Lost` entry, mark it `Retransmitted`.
     pub fn mark_retransmitted(&mut self, seq: SeqNum) {
         for i in 0..self.len as usize {
             if self.entries[i].seq == seq && self.entries[i].state == SegmentState::Lost {
@@ -354,15 +283,10 @@ impl SendMap {
         }
     }
 
-    /// Drop everything.  Used on connection close and test reset.
     pub fn clear(&mut self) {
         self.len = 0;
     }
 }
-
-// ---------------------------------------------------------------------------
-// Helpers (wrapping sequence comparison via free functions)
-// ---------------------------------------------------------------------------
 
 #[inline]
 fn seq_le(a: u32, b: u32) -> bool {
@@ -374,18 +298,12 @@ fn seq_ge(a: u32, b: u32) -> bool {
     (a.wrapping_sub(b) as i32) >= 0
 }
 
-// ---------------------------------------------------------------------------
-// AckOutcome
-// ---------------------------------------------------------------------------
-
 /// Result of applying a cumulative ACK to the send map.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct AckOutcome {
-    /// Number of bytes freed from the tracked pool by this ACK.
     pub bytes_freed: u32,
-    /// Timestamp of the oldest-freed `InFlight` entry's first transmission,
-    /// or `None` if no eligible entry was freed.
+    /// First transmission of the oldest-freed `InFlight` entry, or `None` if no
+    /// eligible entry was freed.
     pub rtt_sample_origin_ms: Option<u64>,
-    /// Number of entries popped from the head of the map.
     pub entries_removed: u8,
 }

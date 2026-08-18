@@ -1,15 +1,8 @@
 //! Opcode dispatch (SLOPRING § 12).
 //!
-//! Each opcode is a thin adapter that runs the *existing* sync path's
-//! **non-blocking probe** and yields one of:
-//!   * `Outcome::Inline(res)` — ready now (or a validation/`-EFAULT`
-//!     failure): post the CQE immediately;
-//!   * `Outcome::WouldBlock`  — `-EAGAIN`: record an in-flight row, let
-//!     the harvest phase re-probe (SLOPRING § 7).
-//!
-//! Because every opcode calls the same code path as its equivalent sync
-//! syscall, observable results match (R12 parity). No opcode introduces
-//! a new blocking primitive.
+//! Each opcode is a thin adapter over the equivalent sync syscall's
+//! **non-blocking probe**, so observable results match it (R12 parity) and no
+//! opcode introduces a new blocking primitive.
 
 use core::ffi::c_int;
 use slopos_fs::fileio::FdTable;
@@ -42,26 +35,20 @@ pub enum Outcome {
     /// Would block — record an in-flight row and harvest later.
     WouldBlock,
     /// Zero-copy send completed (`OP_SEND_ZC`): post **two** CQEs for this
-    /// `user_data` — a result CQE carrying `res` + `SLOPRING_CQE_F_MORE`
-    /// ("notification to follow"), then a terminal CQE carrying
-    /// `SLOPRING_CQE_F_NOTIF` once the send buffer is reusable (the io_uring
-    /// `SEND_ZC` two-CQE model). On the single-direct-copy backend the buffer
-    /// is reusable the instant the copy completes, so the notification is
-    /// posted immediately after the result (io_uring's `COPIED` fallback).
+    /// `user_data` — a result CQE carrying `res` + `SLOPRING_CQE_F_MORE`, then
+    /// a terminal `SLOPRING_CQE_F_NOTIF` once the send buffer is reusable,
+    /// which on the single-direct-copy backend is immediately.
     InlineNotif(i32),
-    /// Zero-copy send queued for true NIC DMA (`OP_SEND_ZC`): post the
-    /// result CQE carrying `res` + `SLOPRING_CQE_F_MORE` now, but **defer** the
-    /// terminal `SLOPRING_CQE_F_NOTIF` until the driver reclaims the NIC TX
-    /// descriptor (the buffer is still being DMA'd). The token + buffer
-    /// reservation are already recorded in the registry's deferred side table
-    /// (`send_zc_fixed` pushed them); the harvest posts `F_NOTIF` + checks the
-    /// buffer back in once the token flips. The fixed buffer is **not** released
-    /// here — it stays checked out across the DMA.
+    /// Zero-copy send queued for true NIC DMA (`OP_SEND_ZC`): post the result
+    /// CQE with `SLOPRING_CQE_F_MORE` now and **defer** the terminal
+    /// `SLOPRING_CQE_F_NOTIF` until the driver reclaims the NIC TX descriptor.
+    /// The fixed buffer stays checked out across the DMA; the harvest checks it
+    /// back in from the registry's deferred side table once the token flips.
     DeferredNotif(i32),
 }
 
-/// Decode the buffer selection an SQE requests (mutually exclusive flags). The
-/// fixed-buffer flag takes precedence; `None` is the inline path.
+/// Decode the buffer selection an SQE requests. The fixed-buffer flag takes
+/// precedence; `None` is the inline path.
 pub fn buf_sel(sqe: &Sqe) -> Option<BufSel> {
     if sqe.flags & SLOPRING_SQE_FIXED_BUFFER != 0 {
         Some(BufSel::Fixed {
@@ -77,12 +64,10 @@ pub fn buf_sel(sqe: &Sqe) -> Option<BufSel> {
 }
 
 /// The would-block sentinel the fs/net probes return. `Errno::raw()` is
-/// *already* negative (`-11`), so this is `-EAGAIN` directly — negating
-/// it would yield `+11` and silently misclassify every would-block as an
-/// inline completion (the bug that made `OP_READ`/`OP_WRITE` never defer).
+/// *already* negative (`-11`), so this is `-EAGAIN` directly — negating it
+/// would yield `+11` and misclassify a would-block as an inline completion.
 const EAGAIN: i32 = Errno::EAGAIN.raw();
 
-/// `true` iff `res` is the `-EAGAIN` would-block sentinel.
 fn is_eagain(res: i64) -> bool {
     res == EAGAIN as i64
 }
@@ -108,13 +93,12 @@ pub fn inflight_from(sqe: &Sqe, deadline_ms: u64, file: Option<FileRef>) -> InFl
     }
 }
 
-/// Run the non-blocking probe for one SQE in process `table`. Pure
-/// dispatch — never blocks. `file` is the reference resolved at submit for
-/// fd-driven opcodes (`None` for the path/fd-number/no-fd opcodes, or a
-/// closed fd, which the fd-driven arms report as `-EBADF` *after* the
-/// static buffer-selection check). `OP_CANCEL` / `OP_TIMEOUT` are handled
-/// by the caller (they touch ring state), so this returns `Inline(EINVAL)`
-/// for them if it ever sees them (defence in depth).
+/// Run the non-blocking probe for one SQE in process `table`. Pure dispatch —
+/// never blocks. `file` is the reference resolved at submit for fd-driven
+/// opcodes (`None` for the path/fd-number/no-fd opcodes, or a closed fd, which
+/// the fd-driven arms report as `-EBADF` *after* the static buffer-selection
+/// check). `OP_CANCEL` / `OP_TIMEOUT` are handled by the caller (they touch
+/// ring state), so reaching here with one yields `Inline(EINVAL)`.
 pub fn probe(
     table: FdTable,
     sqe: &Sqe,
@@ -126,24 +110,17 @@ pub fn probe(
         OP_NOP => reject_buf(sel).unwrap_or(Outcome::Inline(0)),
         OP_READ => reject_buf(sel).unwrap_or_else(|| with_file(file, |f| probe_read(f, sqe))),
         OP_WRITE => reject_buf(sel).unwrap_or_else(|| with_file(file, |f| probe_write(f, sqe))),
-        // OP_SEND / OP_RECVMSG are socket-typed: they route through the
-        // socket send/recvmsg paths, not the generic file write/read
-        // (SLOPRING § 12). Separate arms from OP_WRITE/OP_READ. With a buffer
-        // selection they use the registered/provided buffer (zero staging
-        // alloc); `sel == None` keeps the inline path byte-for-byte.
+        // Socket-typed: these route through the socket send/recvmsg paths, not
+        // the generic file write/read (SLOPRING § 12).
         OP_SEND => with_file(file, |f| match sel {
             None => crate::net_glue::send_nonblock(f, sqe.addr, sqe.len, sqe.op_flags),
             Some(BufSel::Fixed { index }) => {
                 crate::net_glue::send_fixed(f, index, sqe.len, sqe.op_flags, buffers)
             }
-            // A provided ring is kernel-picks-on-fill, which only makes sense
-            // for recv; send must name its data (a fixed buffer).
+            // A provided ring is kernel-picks-on-fill: send must name its data.
             Some(BufSel::Provided { .. }) => Outcome::Inline(Errno::EINVAL.raw()),
         }),
-        // OP_SEND_ZC: zero-copy send from a registered fixed buffer. Requires
-        // the fixed-buffer flag (it must name its pinned data); the inline /
-        // provided selections are rejected. On success it posts the two-CQE
-        // notification protocol (result + F_NOTIF) — see `send_zc_fixed`.
+        // Zero-copy send must name its pinned data, so only a fixed selection.
         OP_SEND_ZC => with_file(file, |f| match sel {
             Some(BufSel::Fixed { index }) => crate::net_glue::send_zc_fixed(
                 f,
@@ -169,24 +146,21 @@ pub fn probe(
                 crate::net_glue::recvfrom_nonblock(f, sqe.addr, sqe.len, sqe.addr2)
             })
         }),
-        // Path-addressed (opens a new fd) and fd-number-addressed (closes a
-        // number): these hold no target reference.
+        // Path-addressed and fd-number-addressed: no target reference held.
         OP_OPENAT => reject_buf(sel).unwrap_or_else(|| probe_openat(table, sqe)),
         OP_CLOSE => reject_buf(sel).unwrap_or_else(|| probe_close(table, sqe)),
         OP_ACCEPT => reject_buf(sel).unwrap_or_else(|| with_file(file, |f| probe_accept(table, f))),
         OP_CONNECT => reject_buf(sel).unwrap_or_else(|| with_file(file, |f| probe_connect(f, sqe))),
         OP_POLL_ADD => reject_buf(sel).unwrap_or_else(|| with_file(file, |f| probe_poll(f, sqe))),
-        // OP_TIMEOUT / OP_CANCEL are handled in enter.rs (they touch the
-        // ring object, not a file). Reaching here is a logic error.
         OP_TIMEOUT | OP_CANCEL => Outcome::Inline(Errno::EINVAL.raw()),
         _ => Outcome::Inline(Errno::EINVAL.raw()),
     }
 }
 
-/// Run `f` with the op's resolved file reference, or post `-EBADF` if the
-/// fd was closed / invalid at submit (or absent on a reprobe). Applied
-/// *after* `reject_buf`, so a malformed buffer selection still reports
-/// `-EINVAL` even when the fd is also bad (the pre-migration precedence).
+/// Run `f` with the op's resolved file reference, or post `-EBADF` if the fd
+/// was closed / invalid at submit (or absent on a reprobe). Applied *after*
+/// `reject_buf`, so a malformed buffer selection still reports `-EINVAL` even
+/// when the fd is also bad.
 fn with_file(file: Option<&FileRef>, f: impl FnOnce(&FileRef) -> Outcome) -> Outcome {
     match file {
         Some(file) => f(file),
@@ -206,10 +180,6 @@ fn reject_buf(sel: Option<BufSel>) -> Option<Outcome> {
 pub fn reprobe(table: FdTable, row: &InFlight, buffers: &mut BufferRegistry) -> Outcome {
     let sqe = Sqe {
         opcode: row.opcode,
-        // Carry the buffer-selection flags + indices so the deferred reprobe
-        // re-applies the same registered/provided buffer (dropping them — the
-        // original code's `flags: 0, buf_*: 0` — silently lost the selection
-        // on the would-block path).
         flags: row.buf_flags,
         _pad0: 0,
         // The target is addressed by the held reference, not this field.
@@ -253,12 +223,10 @@ fn probe_write(file: &FileRef, sqe: &Sqe) -> Outcome {
     }
 }
 
-/// `OP_OPENAT`: non-blocking file open (SLOPRING § 12). SlopOS fs opens
-/// are immediate (no disk blocking), so this always completes inline.
-/// Mirrors `syscall_fs_open` / `file_open_for_process`: copy the path
-/// from `addr`/`len`, open with `op_flags`, return the new fd (`>= 0`) or
-/// a negated errno. It is an ownership op (installs an fd), so the caller
-/// reserves a CQE slot first. Null `addr` → `-EFAULT` inline.
+/// `OP_OPENAT`: non-blocking file open (SLOPRING § 12). SlopOS fs opens are
+/// immediate, so this always completes inline with the new fd (`>= 0`) or a
+/// negated errno. An ownership op (installs an fd), so the caller reserves a
+/// CQE slot first.
 fn probe_openat(table: FdTable, sqe: &Sqe) -> Outcome {
     if sqe.addr == 0 {
         return Outcome::Inline(Errno::EFAULT.raw());
@@ -276,8 +244,7 @@ fn probe_openat(table: FdTable, sqe: &Sqe) -> Outcome {
         Ok(n) => n,
         Err(_) => return Outcome::Inline(Errno::EFAULT.raw()),
     };
-    // Trim at the first NUL so a NUL-terminated user path opens the right
-    // file (mirrors the syscall layer's `UserCStr` decode).
+    // Trim at the first NUL: a user path is NUL-terminated within `len`.
     let path = match buf[..copied].iter().position(|&b| b == 0) {
         Some(n) => &buf[..n],
         None => &buf[..copied],
@@ -285,9 +252,8 @@ fn probe_openat(table: FdTable, sqe: &Sqe) -> Outcome {
     Outcome::Inline(file_open_for_process(table, path, sqe.op_flags))
 }
 
-/// `OP_CLOSE`: close `fd` via the ring (SLOPRING § 12). Inline; mirrors
-/// `syscall_fs_close` / `file_close_fd`. Returns `0` or a negated errno
-/// (`-EBADF` for a bad fd).
+/// `OP_CLOSE`: close `fd` via the ring (SLOPRING § 12). Always inline; returns
+/// `0` or a negated errno.
 fn probe_close(table: FdTable, sqe: &Sqe) -> Outcome {
     if sqe.fd < 0 {
         return Outcome::Inline(Errno::EBADF.raw());
@@ -303,13 +269,10 @@ fn probe_accept(table: FdTable, file: &FileRef) -> Outcome {
     }
 }
 
-/// `OP_CONNECT`: async non-blocking connect (SLOPRING § 12). Mirrors
-/// [`probe_accept`] — a thin re-entrant adapter over the socket connect path.
-/// `addr` is the user VA of a `SockAddrIn`; the glue validates it and runs
-/// [`crate::net_glue::connect_nonblock`], which initiates the handshake once and
-/// polls it on each re-probe. `-EAGAIN` defers (`WouldBlock`); success / error
-/// completes inline. Not an ownership op: it installs no fd and consumes no
-/// bytes, so no CQE slot is pre-reserved.
+/// `OP_CONNECT`: async non-blocking connect (SLOPRING § 12). `addr` is the user
+/// VA of a `SockAddrIn`; [`crate::net_glue::connect_nonblock`] initiates the
+/// handshake once and polls it on each re-probe. Not an ownership op — it
+/// installs no fd and consumes no bytes, so no CQE slot is pre-reserved.
 fn probe_connect(file: &FileRef, sqe: &Sqe) -> Outcome {
     match crate::net_glue::connect_nonblock(file, sqe.addr, sqe.len) {
         Ok(rc) => crate::net_glue::outcome_from_rc(rc),
@@ -331,19 +294,16 @@ fn probe_poll(file: &FileRef, sqe: &Sqe) -> Outcome {
     }
 }
 
-/// The poll mask an `op_flags` word requests (the bits OP_POLL_ADD wants
-/// to be told about), error/hangup bits always included.
+/// The poll mask an `op_flags` word requests, error/hangup bits always
+/// included.
 pub fn poll_want(op_flags: u32) -> u16 {
     (op_flags as u16) & (POLLIN | POLLOUT | POLLERR | POLLHUP)
 }
 
-/// Level readiness probe for an OP_POLL_ADD row — the raw `revents` the
-/// same `poll(2)` query would report (`file_poll_fd` returns `POLLNVAL`
-/// for a bad fd). Factored out of [`probe_poll`] so the multishot harvest
-/// can diff the masked-ready set against `InFlight::last_revents` and post
-/// only on a transition (the anti-flood edge), and so it can detect
-/// `POLLERR`/`POLLHUP` to terminate the armed row. Returns the raw
-/// `revents` bitset; the caller applies its own mask.
+/// The raw `revents` the same `poll(2)` query would report for an OP_POLL_ADD
+/// row (`POLLNVAL` for a bad fd); the caller applies its own mask. The
+/// multishot harvest diffs it against `InFlight::last_revents` to post only on
+/// a transition, and watches `POLLERR`/`POLLHUP` to terminate the armed row.
 pub fn probe_poll_revents(row: &InFlight) -> u16 {
     let Some(file) = row.file.as_ref() else {
         return POLLNVAL;
@@ -373,9 +333,8 @@ pub fn needs_file_ref(opcode: u8) -> bool {
 /// Does this opcode transfer ownership / consume bytes on success, so
 /// it must reserve a CQE slot *before* running (SLOPRING § 11)?
 pub fn is_ownership_op(opcode: u8) -> bool {
-    // OP_ACCEPT / OP_OPENAT install an fd; OP_READ / OP_RECVMSG /
-    // OP_RECVFROM consume kernel buffer bytes (a datagram, for RECVFROM).
-    // Dropping their CQE would orphan an fd / destroy consumed data.
+    // Dropping their CQE would orphan an installed fd or destroy bytes already
+    // consumed out of a kernel buffer.
     matches!(
         opcode,
         OP_ACCEPT | OP_OPENAT | OP_READ | OP_RECVMSG | OP_RECVFROM

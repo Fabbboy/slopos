@@ -52,8 +52,7 @@ pub(crate) fn pseudo_header_seed(src: [u8; 4], dst: [u8; 4], protocol: u8, l4_le
 
 /// One's-complement sum (RFC 1071) over `len` bytes pulled from a volatile
 /// [`VmReader`] (pinned user pages), read in even-length chunks so no 16-bit
-/// word straddles a chunk boundary. Returns the 32-bit accumulator; combine
-/// with other regions then [`fold`]. Used by the ICMP zero-copy send, whose
+/// word straddles a chunk boundary. Used by the ICMP zero-copy send, whose
 /// checksum has no pseudo-header and so cannot be offloaded on QEMU virtio-net.
 pub(crate) fn ones_complement_sum_reader(
     reader: &mut slopos_ostd::mm::VmReader<'_>,

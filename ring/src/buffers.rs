@@ -1,24 +1,17 @@
 //! Per-ring registered / provided buffer registry (SLOPRING § 13, ABI v2).
 //!
-//! Two io_uring-parity buffer mechanisms, both selected from an [`Sqe`] and
-//! both backed by [`PinnedUserBuffer`] (pinned user pages accessed volatilely —
-//! `ring/` stays `#![forbid(unsafe_code)]`):
+//! Two io_uring-parity buffer mechanisms, both selected from an SQE and both
+//! backed by [`PinnedUserBuffer`]:
 //!
-//! * **Registered fixed buffers** ([`SLOPRING_SQE_FIXED_BUFFER`], `Sqe.buf_index`)
-//!   — `ring_register(RING_REGISTER_BUFFERS)` pins an array of user iovecs once;
-//!   ops reference one by index. The per-op page-table walk + staging-Vec
-//!   allocation + SMAP user-copy the inline path pays are all gone; a
-//!   [`BufBitset`] reserves a buffer while an op holds it, so it cannot be
-//!   reused or unregistered mid-flight (the UAF / orphan-reaping guard — the
-//!   reservation is released only when the op's terminal CQE / cancel lands,
-//!   mirroring the userland reactor's `OpSlot.buf`).
-//! * **Provided buffer rings** ([`SLOPRING_SQE_BUFFER_SELECT`], `Sqe.buf_group`)
-//!   — `ring_register(RING_REGISTER_PBUF_RING)` pins a userland-managed
-//!   `io_uring_buf_ring`; a recv-family op peeks the next published buffer, the
-//!   kernel fills it, reports the chosen `bid` in the CQE
-//!   ([`SLOPRING_CQE_F_BUFFER`]), and commits the ring head.
-//!
-//! [`Sqe`]: slopos_abi::ring::Sqe
+//! * **Registered fixed buffers** (`SLOPRING_SQE_FIXED_BUFFER`, `Sqe.buf_index`)
+//!   — `RING_REGISTER_BUFFERS` pins an array of user iovecs once and ops
+//!   reference one by index. A reservation bit is held from submit until the
+//!   op's terminal CQE / cancel lands, so a buffer cannot be reused or
+//!   unregistered mid-flight.
+//! * **Provided buffer rings** (`SLOPRING_SQE_BUFFER_SELECT`, `Sqe.buf_group`)
+//!   — `RING_REGISTER_PBUF_RING` pins a userland-managed `io_uring_buf_ring`; a
+//!   recv-family op peeks the next published buffer, the kernel fills it,
+//!   reports the chosen `bid` in the CQE, and commits the ring head.
 
 use slopos_abi::Errno;
 use slopos_abi::ring::{
@@ -31,8 +24,8 @@ use slopos_ostd::mm::uframe::KeepaliveFrames;
 use slopos_ostd::mm::{VmReader, VmWriter};
 use slopos_ostd::{TxReclaimToken, ZcNotifToken};
 
-/// Which registered buffer an SQE selects. `None` (neither flag set) is the
-/// inline path — unchanged. Built in `opcode.rs` from the SQE flags.
+/// Which registered buffer an SQE selects; `None` (neither flag set) is the
+/// inline path.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum BufSel {
     /// Fixed buffer `index` in the registered set (`SLOPRING_SQE_FIXED_BUFFER`).
@@ -59,9 +52,7 @@ fn pin_errno(e: PinError) -> Errno {
     }
 }
 
-/// Fixed-capacity checked-out bitset (one bit per registered fixed buffer, up
-/// to [`SLOPRING_MAX_FIXED_BUFFERS`] = 1024 → 16 `u64` words). No heap, no
-/// `unsafe`.
+/// Fixed-capacity checked-out bitset, one bit per registered fixed buffer.
 struct BufBitset {
     words: [u64; (SLOPRING_MAX_FIXED_BUFFERS as usize) / 64],
 }

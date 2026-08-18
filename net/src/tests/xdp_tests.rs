@@ -1,10 +1,8 @@
 //! Tests for the Rust-typed XDP filter chain.
 //!
-//! Covers the chain logic (empty pass-through, ordering, first-non-Pass wins)
-//! and the end-to-end ingress wiring (drop suppresses stack dispatch, pass falls
-//! through, Tx/Redirect reach the device). Recording filters use atomics — never
-//! a `SpinLock` — because `XdpFilter::execute` runs under a `NET_EPOCH` read
-//! guard where acquiring a tracked lock is forbidden.
+//! Recording filters use atomics — never a `SpinLock` — because
+//! `XdpFilter::execute` runs under a `NET_EPOCH` read guard where acquiring a
+//! tracked lock is forbidden.
 
 use core::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
 use slopos_ostd::lock_class;
@@ -24,12 +22,7 @@ use crate::pool::{PACKET_POOL, PacketPool};
 use crate::types::*;
 use crate::xdp::{PacketView, XDP, XdpAction, XdpFilter, xdp_filter};
 
-// =============================================================================
-// Test filters
-// =============================================================================
-
-// Stateless filters via the `#[xdp_filter]` proc-macro (exercises the macro
-// end-to-end). Each generates an upper-cased `'static` instance.
+// Each `#[xdp_filter]` fn generates an upper-cased `'static` instance.
 
 #[xdp_filter]
 fn xdp_test_drop_all(_pkt: &mut PacketView<'_>) -> XdpAction {
@@ -46,11 +39,10 @@ fn xdp_test_tx_all(_pkt: &mut PacketView<'_>) -> XdpAction {
     XdpAction::Tx
 }
 
-// Order-recording filters (stateful → plain impls writing a shared atomic log).
 static ORDER_LOG: AtomicU32 = AtomicU32::new(0);
 
 fn order_push(nibble: u32) {
-    // Single-threaded stest phase: load+store is sufficient (no `SpinLock`).
+    // Single-threaded stest phase: load+store is sufficient.
     let prev = ORDER_LOG.load(Ordering::Relaxed);
     ORDER_LOG.store((prev << 4) | (nibble & 0xF), Ordering::Relaxed);
 }
@@ -73,7 +65,6 @@ impl XdpFilter for RecB {
 }
 static REC_B: RecB = RecB;
 
-// Redirect filter — target device index is set by the test before install.
 static REDIRECT_TARGET: AtomicUsize = AtomicUsize::new(0);
 
 struct RedirectFilter;
@@ -83,10 +74,6 @@ impl XdpFilter for RedirectFilter {
     }
 }
 static REDIRECT_FILTER: RedirectFilter = RedirectFilter;
-
-// =============================================================================
-// Mock device (tx increments stats.tx_packets — the TX observable)
-// =============================================================================
 
 struct MockNetDevice {
     mac_addr: MacAddr,
@@ -142,15 +129,10 @@ impl NetDevice for MockNetDevice {
     }
 }
 
-// =============================================================================
-// Helpers
-// =============================================================================
-
 fn ensure_pool_init() {
     PACKET_POOL.init();
 }
 
-/// Test device handle from a fresh leaked registry (mirrors the ingress tests).
 fn make_test_handle(mac: MacAddr) -> DeviceHandle {
     let registry = KBox::leak(
         KBox::try_new(NetDeviceRegistry::new(lock_class!(
@@ -234,10 +216,6 @@ const DEV_MAC: [u8; 6] = [0x00, 0x11, 0x22, 0x33, 0x44, 0x55];
 const SENDER_MAC: [u8; 6] = [0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff];
 const BROADCAST: [u8; 6] = [0xff; 6];
 
-// =============================================================================
-// Tests
-// =============================================================================
-
 pub fn test_xdp_empty_chain_passes() -> TestResult {
     ensure_pool_init();
     XDP.clear();
@@ -268,7 +246,6 @@ pub fn test_xdp_filter_drop_drops_packet() -> TestResult {
     };
     net_rx(&handle, pkt);
 
-    // Dropped before arp::handle_rx → the cache never learned the sender.
     assert_test!(
         NEIGHBOR_CACHE.lookup(handle.index(), sender_ip).is_none(),
         "drop filter suppresses stack dispatch"
@@ -293,7 +270,6 @@ pub fn test_xdp_filter_pass_falls_through() -> TestResult {
     };
     net_rx(&handle, pkt);
 
-    // Pass → arp::handle_rx ran → cache learned the sender's MAC.
     match NEIGHBOR_CACHE.lookup(handle.index(), sender_ip) {
         Some(mac) => assert_eq_test!(mac, MacAddr(SENDER_MAC), "learned sender MAC"),
         None => return slopos_testing::fail!("pass filter should let the stack run"),
@@ -306,7 +282,6 @@ pub fn test_xdp_filter_pass_falls_through() -> TestResult {
 pub fn test_xdp_filter_chain_order() -> TestResult {
     ensure_pool_init();
 
-    // [RecA, RecB, Drop]: A then B run, then Drop wins.
     ORDER_LOG.store(0, Ordering::Relaxed);
     install_chain(&[&REC_A, &REC_B, &XDP_TEST_DROP_ALL]);
     let frame = build_arp_request(BROADCAST, SENDER_MAC, [192, 168, 1, 44], [192, 168, 1, 1]);
@@ -322,7 +297,6 @@ pub fn test_xdp_filter_chain_order() -> TestResult {
         "filters ran in registration order A then B"
     );
 
-    // [Drop, RecA]: Drop wins immediately; A never runs.
     ORDER_LOG.store(0, Ordering::Relaxed);
     install_chain(&[&XDP_TEST_DROP_ALL, &REC_A]);
     let mut pkt2 = match PacketBuf::from_raw_copy(&frame) {
@@ -368,8 +342,8 @@ pub fn test_xdp_redirect_action() -> TestResult {
     ensure_pool_init();
     let ingress = make_test_handle(MacAddr([0x02, 0x00, 0x00, 0x00, 0x00, 0x10]));
 
-    // Register the redirect target in the GLOBAL registry (net_rx's Redirect
-    // arm transmits via DEVICE_REGISTRY.tx_by_index).
+    // Target must live in the global registry: net_rx's Redirect arm transmits
+    // via DEVICE_REGISTRY.tx_by_index.
     let target_mac = MacAddr([0x02, 0x00, 0x00, 0x00, 0x00, 0x11]);
     let target = KArc::try_new(MockNetDevice::new(target_mac)).expect("test alloc");
     let target_handle = match DEVICE_REGISTRY.register(target) {
@@ -439,10 +413,6 @@ pub fn test_xdp_packet_view_parses() -> TestResult {
 
     pass!()
 }
-
-// =============================================================================
-// Test suite registration
-// =============================================================================
 
 slopos_testing::stest!(name = test_xdp_empty_chain_passes, suite = xdp);
 slopos_testing::stest!(name = test_xdp_filter_drop_drops_packet, suite = xdp);

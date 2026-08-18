@@ -3,22 +3,9 @@
 
 //! SlopRing — io_uring-style submission/completion ring (kernel side).
 //!
-//! The public SlopRing docs describe the full design. This crate is a
-//! `#![forbid(unsafe_code)]` non-OSTD kernel crate that hosts the SQ/CQ
-//! snapshot logic, opcode dispatch, the in-flight table, and the
-//! per-ring serialization lock. All memory access to ring pages goes
-//! through the bounded volatile/atomic `UFrame` accessor OSTD exposes
-//! (the only new OSTD `unsafe`); the ring crate itself contains none.
-//!
-//! **Sync only.** There is no `async fn` here — `scripts/check_no_kernel_async.sh`
-//! enforces it (AD-8/AD-9/R13). Async lives entirely in the userland
-//! runtime that drives this ring.
-//!
-//! ## Public surface
-//!
-//! - [`ring_setup`] / [`ring_enter`] — the two syscall cores, called by
-//!   the `core` syscall handlers.
-//! - [`file_ops::RING_FILE_OPS`] — the `FileKind::Ring` vtable.
+//! Sync only: there is no `async fn` here — `scripts/check_no_kernel_async.sh`
+//! enforces it (AD-8/AD-9/R13). Async lives in the userland runtime that drives
+//! this ring.
 
 pub mod buffers;
 pub mod enter;

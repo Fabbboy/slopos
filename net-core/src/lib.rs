@@ -3,9 +3,8 @@
 //! `alloc`, `unsafe` and syscalls: parsers take `&[u8]`, renderers write into
 //! a [`core::fmt::Write`] the caller supplies.
 //!
-//! Rendered strings are constrained by the console font — ASCII `0x20..=0x7E`,
-//! Latin-1 `0xA0..=0xFF`, and exactly `€ ˚ ˇ`; anything else draws as the
-//! replacement glyph. [`render::is_renderable`] encodes that range.
+//! Rendered strings are constrained by what the console font can draw;
+//! [`render::is_renderable`] encodes that range.
 
 #![no_std]
 #![forbid(unsafe_code)]

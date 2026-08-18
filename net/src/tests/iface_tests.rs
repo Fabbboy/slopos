@@ -14,12 +14,10 @@ use slopos_abi::net::{
     IFF_SLOP_DISABLED, IFF_SLOP_NO_CARRIER, IFF_UP,
 };
 
-/// A scratch table for the tests that mutate one.
-///
 /// Deliberately **not** the kernel's `IFACE_TABLE`: clearing the live table
-/// would delete the boot configuration out from under the running system. A
-/// `static` because the ~1.2 KiB table would blow the 2 KiB stack-frame gate,
-/// and its own lock class keeps the ordering here away from the real table's.
+/// would delete the boot configuration out from under the running system.
+/// `static` because the ~1.2 KiB table would blow the 2 KiB stack-frame gate;
+/// its own lock class keeps the ordering here away from the real table's.
 static TEST_TABLE: iface::IfaceTable = iface::IfaceTable::new(slopos_ostd::lock_class!(
     "NET_IFACES.test",
     slopos_ostd::sync::LOCK_LEVEL_REGISTRY
@@ -58,9 +56,6 @@ fn test_ifname_validation() -> TestResult {
     pass!()
 }
 
-/// Every combination of `(kind, admin_up, enabled, carrier)`, asserted against
-/// both derivations.
-///
 /// The two rows people get wrong: a realised loopback reports `Unknown` rather
 /// than `Up`, matching what `ip link show lo` prints on Linux; an Ethernet
 /// interface that is admin-up while networking is disabled reports `Down`
@@ -202,8 +197,7 @@ fn test_operstate_matrix() -> TestResult {
             );
         }
 
-        // carrier_detect = true, dhcp = false; both modifiers are asserted
-        // separately below.
+        // carrier_detect = true, dhcp = false; both are asserted separately below.
         let flags = if_flags(
             row.kind,
             row.admin_up,
@@ -524,8 +518,6 @@ fn test_addr_list_is_bounded() -> TestResult {
     pass!()
 }
 
-/// An administrative down drops the lease but keeps the operator's own
-/// configuration.
 fn test_retain_addrs_keeps_static_drops_dhcp() -> TestResult {
     let t = fresh_table();
     let idx = t
@@ -616,7 +608,6 @@ fn test_admin_guard_is_exclusive() -> TestResult {
     pass!()
 }
 
-/// An unplugged cable is not a request to disable the interface.
 fn test_carrier_loss_keeps_admin_intent() -> TestResult {
     let t = fresh_table();
     let idx = t
@@ -725,8 +716,7 @@ fn test_first_ipv4_skips_loopback() -> TestResult {
     pass!()
 }
 
-/// An unrealised interface's addresses stop counting as ours, which is what
-/// makes RX acceptance follow administrative state for free.
+/// What makes RX acceptance follow administrative state for free.
 fn test_unrealised_addrs_are_not_ours() -> TestResult {
     let t = fresh_table();
     let eth = t
@@ -784,8 +774,7 @@ fn test_unrealised_addrs_are_not_ours() -> TestResult {
     pass!()
 }
 
-/// A device attached while networking is disabled comes up with intent set but
-/// unrealised, and the next enable realises it — the case a
+/// Intent is set but unrealised, and the next enable realises it — the case a
 /// remember-which-were-up snapshot design gets wrong.
 fn test_attach_while_disabled_is_unrealised() -> TestResult {
     let t = fresh_table();
@@ -832,8 +821,6 @@ fn test_attach_while_disabled_is_unrealised() -> TestResult {
     pass!()
 }
 
-/// `snapshot` reports both what it wrote and the true total, so a caller with
-/// a short buffer can tell it was truncated.
 fn test_snapshot_reports_truncation() -> TestResult {
     let t = fresh_table();
     for i in 0..3u8 {
