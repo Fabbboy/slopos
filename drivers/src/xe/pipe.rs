@@ -27,6 +27,7 @@ pub fn scanline(mmio: &MmioRegion, pipe: Pipe) -> u32 {
 /// instead of the linear (64-byte) one, an 8x vertical replication. Callers that
 /// flip twice in succession must wait here between them.
 pub fn wait_for_vblank(mmio: &MmioRegion, pipe: Pipe) {
+    // One 60 Hz frame (~16.7 ms) plus margin.
     const VBLANK_TIMEOUT_MS: u32 = 25;
     let mut prev = scanline(mmio, pipe);
     let mut elapsed_ms = 0;

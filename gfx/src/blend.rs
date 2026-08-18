@@ -1,6 +1,10 @@
 //! Alpha blending for compositing and anti-aliased rendering.
 //!
 //! All blending operates in the canonical Color32 (0xAARRGGBB) colour space.
+//!
+//! Integer fixed point throughout: `(x * 255 + 127) / 255` is round-to-nearest
+//! for a /255 divide, which is where the `+ 127` and `+ out_a / 2` terms below
+//! come from.
 
 use slopos_abi::damage::DamageRect;
 use slopos_abi::draw::{Canvas, Color32, EncodedPixel};

@@ -495,6 +495,8 @@ pub fn emergency_stack_guard_fault(fault_addr: u64) -> Option<usize> {
     None
 }
 
+/// Allocate and map every IST stack for this CPU.
+///
 /// # Panics
 /// Panics if memory allocation or mapping fails.
 ///

@@ -5,6 +5,9 @@
 //! per-tick stepping and no catch-up cap, so jumping the clock forward by an
 //! hour fires an hour's worth of due timers in one pass — which is what lets
 //! tests fast-forward instantly.
+//!
+//! Due entries are collected under the wheel lock and dispatched outside it, so
+//! a handler may re-enter `schedule` without deadlocking.
 
 use core::sync::atomic::{AtomicU64, Ordering};
 
