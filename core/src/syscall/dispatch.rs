@@ -15,9 +15,6 @@ use crate::syscall::result::SyscallResult;
 pub fn syscall_handle(user_ctx: &UserContext) {
     let sysno = user_ctx.rax();
 
-    // The guard is taken once for the whole exit path: the restart decision and
-    // the signal delivery below both need the task, and delivery runs on the
-    // no-handler arm too.
     let Some(current) = slopos_sched::task_struct::Current::get() else {
         return;
     };
@@ -26,8 +23,8 @@ pub fn syscall_handle(user_ctx: &UserContext) {
         return;
     }
 
-    // Clobber rax with a safe negative sentinel: a handler that forgets to
-    // write a return value must not leak stale register contents to userland.
+    // A handler that forgets to write a return value must not leak stale
+    // register contents to userland.
     user_ctx.set_rax(slopos_abi::syscall::ERRNO_EINVAL as u64);
 
     let entry = syscall_lookup(sysno);
@@ -39,9 +36,8 @@ pub fn syscall_handle(user_ctx: &UserContext) {
             let result = func(&ctx);
             ctx.write_result(result);
 
-            // Restart or convert to `EINTR`, from the pending signal's
-            // `SA_RESTART`. Runs before `deliver_pending_signal` so the signal
-            // frame captures the correct state.
+            // Must precede `deliver_pending_signal` so the signal frame
+            // captures the rewound state.
             handle_erestartsys(task, user_ctx, sysno);
 
             debug_assert_erestartsys_not_leaked(user_ctx);
@@ -54,8 +50,6 @@ pub fn syscall_handle(user_ctx: &UserContext) {
         }
     }
 
-    // Signals are delivered on every syscall exit path, not just when a handler
-    // ran, as Linux checks TIF_SIGPENDING unconditionally on return to user.
     crate::syscall::signal::deliver_pending_signal(&current, user_ctx);
 }
 
@@ -65,9 +59,8 @@ const SYSCALL_INSN_SIZE: u64 = 2;
 
 /// Syscalls that carry a caller-supplied timeout.
 ///
-/// A restart re-arms the *original* timeout, which under signal pressure
-/// livelocks: each delivery starts a fresh full-length wait. These must report
-/// `EINTR` and let userland re-derive the remainder.
+/// A restart re-arms the *original* timeout, so under signal pressure each
+/// delivery starts a fresh full-length wait. These must report `EINTR`.
 const TIMEOUT_BEARING: &[u64] = &[
     slopos_abi::syscall::SYSCALL_SLEEP_MS,
     slopos_abi::syscall::SYSCALL_POLL,
@@ -130,9 +123,7 @@ fn debug_assert_erestartsys_not_leaked(user_ctx: &UserContext) {
     }
 }
 
-/// Invoke a handler directly with a caller-built `UserContext`, mirroring the
-/// dispatch path. Used by `core/src/syscall/tests.rs` to drive handlers without
-/// going through the full ISR entry.
+/// Invoke a handler with a caller-built `UserContext`, bypassing ISR entry.
 pub fn dispatch_handler(
     handler: crate::syscall::common::SyscallHandler,
     task: &slopos_sched::task::TaskRef,

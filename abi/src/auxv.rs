@@ -3,7 +3,6 @@
 //! Stack layout after exec:
 //!   [argc] [argv0..argvN] [NULL] [env0..envN] [NULL] [auxv entries] [AT_NULL,0]
 
-/// Auxiliary vector entry (two u64 words).
 #[repr(C)]
 #[derive(Clone, Copy, Debug)]
 pub struct AuxEntry {
@@ -13,22 +12,17 @@ pub struct AuxEntry {
 
 // Type numbering follows the ELF spec and the Linux x86-64 ABI.
 
-/// End of auxiliary vector.
 pub const AT_NULL: u64 = 0;
 
 /// Entry point of the program (not the interpreter).
 pub const AT_ENTRY: u64 = 9;
 
-/// Address of program headers in memory.
 pub const AT_PHDR: u64 = 3;
 
-/// Size of each program header entry.
 pub const AT_PHENT: u64 = 4;
 
-/// Number of program headers.
 pub const AT_PHNUM: u64 = 5;
 
-/// System page size.
 pub const AT_PAGESZ: u64 = 6;
 
 /// Base address of the interpreter (0 for static binaries).

@@ -6,37 +6,29 @@ import (
 )
 
 // Event is the sealed interface every parser-emitted event implements.
-// The unexported `event()` method prevents external packages from
-// satisfying it (Go's idiomatic equivalent of a Rust enum).
 type Event interface {
 	event()
 }
 
-// EvPhaseStart fires the first time a phase's `KTAP\tTAP version 14`
-// arrives. The renderer uses it to clear per-phase counters and re-draw
-// the bar.
+// EvPhaseStart fires the first time a phase's `KTAP\tTAP version 14` arrives.
 type EvPhaseStart struct {
 	PhaseIdx int
 	Name     string
 }
 
-// EvPlan carries the `1..N` plan number for the phase that's currently
-// open. The bar's denominator and ETA derivation depend on it.
+// EvPlan carries the `1..N` plan number for the phase that's currently open.
 type EvPlan struct {
 	PhaseIdx int
 	N        int
 }
 
-// EvTest is the parser's commit of one fully-formed test result, after
-// any pending diag block (for fails) and any subtests (for utests) have
-// been attached. The recorder routes the embedded TestRecord onto the
-// active phase.
+// EvTest is the parser's commit of one fully-formed test result, with any
+// pending diag block and subtests already attached.
 type EvTest struct {
 	Record *TestRecord
 }
 
-// EvPhaseEnd carries the kernel's footer counters for a phase. The
-// renderer replaces the live bar with a one-line summary at this point.
+// EvPhaseEnd carries the kernel's footer counters for a phase.
 type EvPhaseEnd struct {
 	PhaseIdx  int
 	Name      string
@@ -54,9 +46,7 @@ type EvBail struct {
 	Reason   string
 }
 
-// EvNonKtap surfaces every line that isn't part of the harness wire
-// format. The raw renderer mirrors them; the bar renderer ignores them
-// (keeping a rolling tail for failure-context attachment).
+// EvNonKtap surfaces every line that isn't part of the harness wire format.
 type EvNonKtap struct {
 	Line string
 }
@@ -68,10 +58,9 @@ func (*EvPhaseEnd) event()   {}
 func (*EvBail) event()       {}
 func (*EvNonKtap) event()    {}
 
-// parserState is the FSM state. The diag-vs-log split exists because once
-// a `log: |` line opens a YAML literal block, the only thing that closes
-// it is `KTAP\t  ...` — `KTAP\t…` substrings inside the captured klog
-// must be treated as content, not as new top-level lines.
+// parserState is the FSM state. The diag-vs-log split exists because a
+// `log: |` literal block is closed only by `KTAP\t  ...`; a `KTAP\t` substring
+// inside the captured klog is content, not a new top-level line.
 type parserState int
 
 const (
@@ -80,14 +69,12 @@ const (
 	stateInLogLiteral
 )
 
-// PhaseNames maps phase ordinal to a human-readable label. The kernel
-// emits `TESTS: Starting kernel phase` / `… userland phase` as klog
-// (non-KTAP) hints, so we don't extract them from the wire — we match
-// the prose by ordinal convention (phase 1 = kernel, phase 2 = userland).
+// PhaseNames maps phase ordinal to label by convention (phase 1 = kernel,
+// phase 2 = userland): the kernel emits phase names only as non-KTAP klog,
+// so they are never read off the wire.
 var PhaseNames = []string{"kernel", "userland"}
 
-// phaseNameFor maps a 1-based phase index to its conventional label,
-// falling back to `phaseN` for any unexpected ordinal.
+// phaseNameFor maps a 1-based phase index to its label.
 func phaseNameFor(idx int) string {
 	if idx >= 1 && idx <= len(PhaseNames) {
 		return PhaseNames[idx-1]
@@ -95,9 +82,8 @@ func phaseNameFor(idx int) string {
 	return "phase" + strconv.Itoa(idx)
 }
 
-// KtapParser is a streaming line-by-line parser of the kernel's KTAP
-// output. Pure FSM — one instance per run. Goroutine-unsafe; intended
-// to be driven from the same loop that reads from QEMU's stdout pipe.
+// KtapParser is a streaming line-by-line parser of the kernel's KTAP output.
+// One instance per run; goroutine-unsafe.
 type KtapParser struct {
 	state           parserState
 	phaseIdx        int
@@ -115,10 +101,7 @@ func NewKtapParser() *KtapParser {
 	return &KtapParser{}
 }
 
-// KlogTail returns a copy of the rolling window of recent non-KTAP klog
-// lines. Used by the timeout / silence / truncation paths to surface
-// what the kernel was doing right before the wedge — invaluable when
-// the wrapper aborts a run that never reached an orderly footer.
+// KlogTail returns a copy of the rolling window of recent non-KTAP klog lines.
 func (p *KtapParser) KlogTail() []string {
 	if len(p.klogTail) == 0 {
 		return nil
@@ -128,22 +111,15 @@ func (p *KtapParser) KlogTail() []string {
 	return out
 }
 
-// Feed consumes one input line and returns zero or more events. Each
-// returned event is fully owned by the caller; the parser keeps no
-// reference to it after the function returns.
-//
-// The line should NOT include the trailing newline.
+// Feed consumes one input line, which must NOT include its trailing newline,
+// and returns zero or more events the caller then owns outright.
 func (p *KtapParser) Feed(rawLine string) []Event {
 	line := stripANSI(rawLine)
 
-	// Leading-garbage rescue. TTY-layer regression tests (drivers/tty_tests)
-	// write fixture strings ("hello", "abc", XON/XOFF) directly to COM1 via
-	// the TTY hardware backend, bypassing klog. The next emit_ok then arrives
-	// with those bytes prefixed: `helloKTAP\tok 994 - test_tcoon_resumes_write…`.
-	// Without this we'd classify the line as klog noise and the truncation
-	// guard would mis-diagnose the kernel as dropping output. Only rescue
-	// when we're not currently inside a `log: |` literal — there a `KTAP\t`
-	// substring is genuine captured-log content, not a result line.
+	// TTY-layer tests write fixture bytes straight to COM1, bypassing klog, so
+	// the next result line arrives prefixed: `helloKTAP\tok 994 - …`. Rescue
+	// only outside a `log: |` literal, where a `KTAP\t` substring is genuine
+	// captured-log content rather than a result line.
 	if p.state == stateOutside &&
 		!strings.HasPrefix(line, KtapPrefix) &&
 		strings.Contains(line, KtapPrefix) {
@@ -151,10 +127,8 @@ func (p *KtapParser) Feed(rawLine string) []Event {
 	}
 
 	if !strings.HasPrefix(line, KtapPrefix) {
-		// A non-KTAP line that arrives while we're collecting a captured
-		// log literal means the kernel got interrupted (e.g., a panic on
-		// another CPU writing plain klog). Close the current record's log
-		// gracefully and surface the line.
+		// A non-KTAP line arriving mid-log-literal means the kernel was
+		// interrupted (e.g. a panic on another CPU writing plain klog).
 		var events []Event
 		if p.state == stateInLogLiteral {
 			if ev := p.commitCurrentRecord(); ev != nil {
@@ -170,10 +144,7 @@ func (p *KtapParser) Feed(rawLine string) []Event {
 	return p.feedKtap(body)
 }
 
-// appendKlogTail keeps a bounded rolling window of recent non-KTAP klog
-// lines. When the next failure arrives without a captured log block (rare:
-// kernel hard-panic before orderly emit can flush) we attach this tail
-// for context.
+// appendKlogTail keeps a bounded rolling window of recent non-KTAP klog lines.
 func (p *KtapParser) appendKlogTail(line string) {
 	p.klogTail = append(p.klogTail, line)
 	if len(p.klogTail) > KlogTailLines {
@@ -181,8 +152,6 @@ func (p *KtapParser) appendKlogTail(line string) {
 	}
 }
 
-// openPhase advances the phase counter, resets per-phase parser state,
-// and emits an EvPhaseStart for the new phase.
 func (p *KtapParser) openPhase() *EvPhaseStart {
 	p.phaseIdx++
 	p.phaseName = phaseNameFor(p.phaseIdx)
@@ -195,9 +164,6 @@ func (p *KtapParser) openPhase() *EvPhaseStart {
 	return &EvPhaseStart{PhaseIdx: p.phaseIdx, Name: p.phaseName}
 }
 
-// commitCurrentRecord finalises whatever pending TestRecord exists,
-// attaches accumulated subtests / log content / klog tail, and emits a
-// commit event. Returns nil if there's nothing to commit.
 func (p *KtapParser) commitCurrentRecord() *EvTest {
 	if p.currentRecord == nil {
 		return nil
@@ -207,9 +173,6 @@ func (p *KtapParser) commitCurrentRecord() *EvTest {
 		joined := strings.Join(p.logLines, "\n")
 		rec.Log = &joined
 	}
-	// If a failure has no useful captured log, attach the klog tail so the
-	// failure block shows the recent non-KTAP context (covers kernel
-	// hard-panic before orderly emit could flush).
 	if rec.Outcome.IsFailure() && (rec.Log == nil || *rec.Log == "") && len(p.klogTail) > 0 {
 		rec.PreFailKlogTail = append(rec.PreFailKlogTail, p.klogTail...)
 	}
@@ -226,7 +189,6 @@ func (p *KtapParser) commitCurrentRecord() *EvTest {
 
 // feedKtap dispatches one already-stripped (no `KTAP\t` prefix) line.
 func (p *KtapParser) feedKtap(body string) []Event {
-	// In-log-literal state: only `  ...` exits; everything else is content.
 	if p.state == stateInLogLiteral {
 		if body == "  ..." {
 			if ev := p.commitCurrentRecord(); ev != nil {
@@ -234,9 +196,8 @@ func (p *KtapParser) feedKtap(body string) []Event {
 			}
 			return nil
 		}
-		// 3-space indent denotes literal log content (kernel emits with
-		// `KTAP\t   <text>`). Strip the 3 indent spaces; anything else
-		// (malformed-but-survive) goes in as-is.
+		// The kernel emits literal log content as `KTAP\t   <text>`;
+		// anything else survives as-is.
 		if strings.HasPrefix(body, "   ") {
 			p.logLines = append(p.logLines, body[3:])
 		} else {
@@ -245,7 +206,6 @@ func (p *KtapParser) feedKtap(body string) []Event {
 		return nil
 	}
 
-	// Header.
 	if body == "TAP version 14" {
 		var events []Event
 		if p.currentRecord != nil {
@@ -257,7 +217,6 @@ func (p *KtapParser) feedKtap(body string) []Event {
 		return events
 	}
 
-	// Plan.
 	if m := planRE.FindStringSubmatch(body); m != nil {
 		var events []Event
 		if p.phaseIdx == 0 || !p.tapVersionSeen {
@@ -268,7 +227,6 @@ func (p *KtapParser) feedKtap(body string) []Event {
 		return events
 	}
 
-	// Footer.
 	if m := footerRE.FindStringSubmatch(body); m != nil {
 		var events []Event
 		if p.currentRecord != nil {
@@ -294,7 +252,6 @@ func (p *KtapParser) feedKtap(body string) []Event {
 		return events
 	}
 
-	// Bail.
 	if strings.HasPrefix(body, BailKey) {
 		reason := strings.TrimSpace(body[len(BailKey):])
 		var events []Event
@@ -307,7 +264,6 @@ func (p *KtapParser) feedKtap(body string) []Event {
 		return events
 	}
 
-	// Top-level result. Commits any prior pending diag/log block first.
 	if m := topResultRE.FindStringSubmatch(body); m != nil {
 		var events []Event
 		if p.currentRecord != nil {
@@ -327,18 +283,16 @@ func (p *KtapParser) feedKtap(body string) []Event {
 			p.pendingSubtests = nil
 		}
 		p.currentRecord = rec
-		// Don't commit yet: a `---` block (verbose pass log or fail diag)
-		// may follow. The next top-level event commits this record.
+		// Don't commit yet: a `---` block may follow, and the next
+		// top-level event commits this record.
 		return events
 	}
 
-	// Subtest (2-space indent + ok/not ok).
 	if m := subtestRE.FindStringSubmatch(body); m != nil {
 		p.pendingSubtests = append(p.pendingSubtests, subtestFromMatch(m))
 		return nil
 	}
 
-	// Diag-block delimiters / fields.
 	switch body {
 	case "  ---":
 		p.state = stateInDiag
@@ -372,9 +326,6 @@ func (p *KtapParser) feedKtap(body string) []Event {
 	return nil
 }
 
-// recordFromTopResult builds a TestRecord from a parsed top-level result
-// line's components. Outcome / OverTime / ExpectedPanic / SkipReason /
-// TimeMs are all decoded from the suffix.
 func recordFromTopResult(
 	phaseIdx int, phaseName string,
 	idx int, name, status, suffix string,
@@ -413,8 +364,8 @@ func recordFromTopResult(
 	return rec
 }
 
-// subtestFromMatch decodes a regex match group from `subtestRE` into a
-// Subtest record. Skips are encoded as `ok M - name # SKIP`.
+// subtestFromMatch decodes a `subtestRE` match; skips are encoded as
+// `ok M - name # SKIP`.
 func subtestFromMatch(m []string) Subtest {
 	status, idxStr, name := m[1], m[2], m[3]
 	suffix := ""

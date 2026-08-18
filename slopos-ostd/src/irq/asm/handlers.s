@@ -1,15 +1,11 @@
 # OSTD-side IDT entry-point asm stubs.
 #
 # These stubs are referenced by the IDT after `IdtBuilder::install_default_handlers`
-# wires them up. The shape mirrors the legacy boot-side asm: each entry pushes
-# (vector, error_code) plus the GP register set, calls a kernel-supplied
-# `common_exception_handler(*mut InterruptFrame)`, then unwinds.
+# wires them up.
 #
 # Two external Rust symbols are referenced via `.extern`:
 #   - common_exception_handler  — kernel-side dispatcher (see boot/src/ffi_boundary.rs)
 #   - isr_iret_frame_corrupt    — kernel-side panic on bad IRET (same source)
-# Both resolve cross-crate at link time, the same way the legacy boot-side asm
-# already calls them.
 #
 # AT&T syntax mode is selected by the options(att_syntax) flag on the
 # global_asm! invocation that includes this file. Do not add a syntax
@@ -21,18 +17,11 @@
 # slopos-ostd/src/arch/x86_64/gdt.rs.
 .equ SEL_KERNEL_DATA, 0x10
 
-# External Rust functions.
 .extern common_exception_handler
 .extern isr_iret_frame_corrupt
 
-# -----------------------------------------------------------------------------
-# Generic interrupt handler macro.
-#
-# Pushes (error_code if absent, vector), conditional swapgs on user entry,
-# pushes GP registers in the order matching slopos_ostd::irq::InterruptFrame,
-# loads kernel data segments, calls common_exception_handler with RDI = frame
-# pointer, then unwinds and IRETQs (with conditional swapgs back to user GS).
-# -----------------------------------------------------------------------------
+# GP registers are pushed in the order matching slopos_ostd::irq::InterruptFrame;
+# common_exception_handler is called with RDI = frame pointer.
 .macro INTERRUPT_HANDLER vector, has_error_code
     .if \has_error_code == 0
         pushq $0
@@ -61,9 +50,8 @@
     pushq %r14
     pushq %r15
 
-    # Set up kernel data segments (excluding GS and FS).
-    # GS is managed by SWAPGS for per-CPU access.
-    # FS holds user TLS base via FS_BASE MSR — must not be clobbered.
+    # GS is managed by SWAPGS for per-CPU access; FS holds the user TLS
+    # base via FS_BASE MSR and must not be clobbered.
     movw $SEL_KERNEL_DATA, %ax
     movw %ax, %ds
     movw %ax, %es
@@ -89,7 +77,6 @@
 
     addq $16, %rsp
 
-    # Check if returning to user mode - if so, swap GS back.
     # CS is at offset 8 from RSP (after dropping vector+error: [RIP] [CS] ...).
     testb $3, 8(%rsp)
     jz 2f
@@ -98,9 +85,7 @@
     iretq
 .endm
 
-# -----------------------------------------------------------------------------
 # Exception handlers (vectors 0-19, except reserved 9 and 15).
-# -----------------------------------------------------------------------------
 .global isr0
 isr0:  INTERRUPT_HANDLER 0,  0    # Divide Error
 .global isr1
@@ -138,17 +123,13 @@ isr18: INTERRUPT_HANDLER 18, 0    # Machine Check
 .global isr19
 isr19: INTERRUPT_HANDLER 19, 0    # SIMD FP Exception
 
-# -----------------------------------------------------------------------------
 # Syscall trap-gate stub (vector 0x80). Vestigial: the SYSCALL fast path
 # (LSTAR) is the production entry, but the IDT slot must still be populated
 # in case userland issues `int 0x80` directly.
-# -----------------------------------------------------------------------------
 .global isr128
 isr128: INTERRUPT_HANDLER 128, 0
 
-# -----------------------------------------------------------------------------
 # Legacy IRQ handlers (vectors 32-47, IOAPIC RTE 0-15).
-# -----------------------------------------------------------------------------
 .global irq0
 irq0:  INTERRUPT_HANDLER 32, 0    # Timer
 .global irq1
@@ -182,12 +163,9 @@ irq14: INTERRUPT_HANDLER 46, 0    # ATA Primary
 .global irq15
 irq15: INTERRUPT_HANDLER 47, 0    # ATA Secondary
 
-# -----------------------------------------------------------------------------
 # Reschedule IPI handler (vector 0xFC = 252).
 # Custom shape: identical to INTERRUPT_HANDLER except the post-handler
-# unwind validates CS before IRETQ. Same pre-IRET CS check pattern as
-# the LAPIC timer; both diverted to isr_iret_frame_corrupt on bad CS.
-# -----------------------------------------------------------------------------
+# unwind validates CS before IRETQ.
 .global isr_reschedule_ipi
 isr_reschedule_ipi:
     pushq $0
@@ -257,13 +235,11 @@ isr_reschedule_ipi:
 .Lresched_noswap_exit:
     iretq
 
-# -----------------------------------------------------------------------------
 # LAPIC Timer handler (vector 0xEC = 236).
 #
 # Same custom unwind as the reschedule IPI: pre-IRETQ CS validation that
 # diverts to isr_iret_frame_corrupt on bad CS rather than taking #GP from
 # a corrupted IRETQ.
-# -----------------------------------------------------------------------------
 .global isr_lapic_timer
 isr_lapic_timer:
     pushq $0
@@ -315,7 +291,6 @@ isr_lapic_timer:
 
     addq $16, %rsp
 
-    # ---- IRET frame validation ----
     # [RSP+0]=RIP  [RSP+8]=CS  [RSP+16]=RFLAGS  [RSP+24]=RSP  [RSP+32]=SS
     pushq %rax
     movq  16(%rsp), %rax
@@ -335,9 +310,6 @@ isr_lapic_timer:
 .Ltimer_noswap_exit:
     iretq
 
-# -----------------------------------------------------------------------------
-# Other IPI handlers (generic INTERRUPT_HANDLER shape).
-# -----------------------------------------------------------------------------
 .global isr_tlb_shootdown
 isr_tlb_shootdown:  INTERRUPT_HANDLER 253, 0   # 0xFD
 .global isr_rcu_qs_ipi
@@ -347,13 +319,7 @@ isr_shutdown_ipi:   INTERRUPT_HANDLER 254, 0   # 0xFE
 .global isr_spurious
 isr_spurious:       INTERRUPT_HANDLER 255, 0   # 0xFF
 
-# =============================================================================
-# MSI Interrupt Stubs (vectors 48-223)
-# =============================================================================
-#
-# Generated programmatically using .altmacro + .rept. Each stub uses the
-# generic INTERRUPT_HANDLER macro — the vector number is embedded in the
-# pushed frame so the dispatcher can route to the registered MSI handler.
+# MSI interrupt stubs (vectors 48-223).
 #
 # msi_vector_table[i] = address of stub for vector (48 + i). Consumed by
 # IdtBuilder::install_default_handlers to populate the IDT.

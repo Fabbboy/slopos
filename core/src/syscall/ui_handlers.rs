@@ -68,12 +68,9 @@ define_syscall!(syscall_input_poll_batch
         "InputEventScratch must be aligned for InputEvent",
     );
 
-    // Drain through a small fixed stack scratch in chunks instead of a
-    // per-call heap allocation: this syscall runs at frame rate from the
-    // compositor, and a transient allocation failure here surfaced as
-    // `-ENOMEM` to a hot input path (whose callers then misread the errno
-    // as a huge event count). 8 events × 32 B = 256 B of stack — well
-    // under the frame gate — and no failure mode left besides EFAULT.
+    // Fixed stack scratch rather than a per-call heap allocation: this runs at
+    // frame rate, and an allocation failure would return `-ENOMEM` where the
+    // caller reads the return value as an event count.
     const MAX_BATCH: usize = 64;
     const CHUNK: usize = 8;
     const EVENT_SIZE: usize = core::mem::size_of::<InputEvent>();
@@ -154,10 +151,8 @@ define_syscall!(syscall_openpty
     requires(let pid: process_id)
     -> Result<(), Errno>
 {
-    // Allocate the pair and immediately install the master fd — the fd is
-    // what owns the pair (dropping the backing on any error arm below
-    // tears the freshly-made pair down). Writes the master FD and the
-    // slave pts number to the out params.
+    // The master fd owns the pair: dropping `backing` on any error arm below
+    // tears the freshly-made pair down.
     let (master_idx, backing) = match tty::alloc_pty(pid.account()) {
         Ok(v) => v,
         Err(e) => return Err(Errno::from_raw(e.to_errno()).unwrap_or(Errno::EINVAL)),
@@ -230,8 +225,7 @@ define_syscall!(syscall_fb_flip
     }
     video::set_compositor_task_id(ctx.task_id());
     // 0 = shown, 1 = suppressed (kernel log owns the screen, or a prior present
-    // is still in flight). The compositor treats any nonzero result as "not
-    // shown" and keeps the frame's damage pending for retry.
+    // is still in flight); the compositor keeps damage pending on nonzero.
     Ok(rc as u64)
 });
 
@@ -246,9 +240,7 @@ define_syscall!(syscall_cursor_set_image
     if len == 0 || len > CURSOR_MAX_BYTES {
         return Err(Errno::EINVAL);
     }
-    // Heap-staged (16 KiB exceeds the kernel stack frame budget): copy the
-    // compositor's image into a kernel buffer (SMAP-safe) before handing it to
-    // the GPU backend.
+    // Heap-staged: 16 KiB exceeds the kernel stack frame budget.
     let mut buf = KVec::<u8>::zeroed(len).map_err(|_| Errno::ENOMEM)?;
     let user = MmUserBytes::try_new(image_ptr, len).map_err(|_| Errno::EFAULT)?;
     copy_bytes_from_user(user, &mut buf[..]).map_err(|_| Errno::EFAULT)?;

@@ -202,9 +202,8 @@ func run(rawArgv []string) int {
 	renderer.Finalize(recorder.Summary)
 
 	failures := recorder.Summary.Failures()
-	// A run narrowed by the caller may match nothing; an unfiltered one may
-	// not. `--rerun-failed` counts as a selection: `filters` holds the names
-	// it read from last-fail.list.
+	// `--rerun-failed` counts as a selection: `filters` holds the names it
+	// read from last-fail.list.
 	hasSelection := len(filters) > 0 || len(args.Skips) > 0
 	verdict := ClassifyRun(recorder.Summary, driverRes, hasSelection)
 	if verdict.QemuStatusWarning != "" {

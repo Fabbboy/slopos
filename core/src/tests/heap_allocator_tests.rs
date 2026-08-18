@@ -30,8 +30,7 @@ pub fn test_heap_allocator_suite() -> TestResult {
 
     slopos_sched::scheduler::task_wait_for(task_id);
 
-    // The exited child is either an unreaped Zombie (orphaned spawn helper) or
-    // already auto-reaped; both branches yield the same `ExitInfo`.
+    // The child is either an unreaped zombie or already auto-reaped; both yield the same ExitInfo.
     let info = task_consume_zombie(task_id).or_else(|| task_peek_exit_info(task_id));
     let Some(info) = info else {
         klog_info!("HEAP_ALLOC_TEST: missing exit info for task {}", task_id);

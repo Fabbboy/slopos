@@ -13,55 +13,24 @@ import "fmt"
 //	    harness and planned nothing when the caller asked for everything
 //	130 SIGINT
 //
-// The 1-versus-2 split is the load-bearing one. "Tests failed" and "no
-// tests ran" are different facts and a human reading CI needs to tell them
-// apart, but both must be non-zero, because the only thing automation
-// reads is the exit code.
+// QEMU's exit status is not evidence: `isa-debug-exit` encodes the kernel's
+// verdict as `(value << 1) | 1`, so a passing run leaves QEMU with status 1 —
+// also the status QEMU exits with when it fails to *start* — and
+// `scripts/qemu_run.sh` maps status 1 to "Tests passed" and exits 0. Phase
+// count is the evidence instead: the kernel harness emits `TAP version 14`
+// per phase before anything else, so a run with no phase never reached it.
 //
-// # Why phase count is the evidence, not QEMU's exit status
-//
-// The wrapper cannot trust its child's status here. `isa-debug-exit`
-// encodes the kernel's verdict as `(value << 1) | 1`, so a passing run
-// leaves QEMU with status 1 — and 1 is also the status QEMU exits with
-// when it fails to *start*, for instance when a stale instance still holds
-// the write lock on the fs image. `scripts/qemu_run.sh` maps status 1 to
-// "Tests passed" and exits 0, so a launch failure arrives here wearing a
-// clean status and an empty stream. That is the defect this file exists to
-// close, and no amount of exit-status inspection can close it.
-//
-// What the wrapper *can* trust is what it saw on the wire. The kernel
-// harness emits `TAP version 14` per phase before it emits anything else,
-// so a run that produced no phase at all did not reach the harness,
-// whatever its child claimed.
-//
-// # Why a zero-length run is not the same as a zero-match filter
-//
-// Measured, not assumed: `just test 'zzz_no_such_test::*'` reports
-//
-//	0 tests across 2 phases
-//
-// because both phases still announce themselves and then plan `1..0`. The
-// launch failure reported
-//
-//	0 tests across 0 phases
-//
-// So phase count separates the two cleanly. A filter that matches nothing
-// stays green, which matters more than catching it would: a gate that
-// fails a legitimate `just test 'nomatch::*'` teaches people to distrust
-// it, and a distrusted gate is worse than an absent one.
-//
-// The zero-plan case is still caught when the caller passed no filter and
-// no skip list, because then the kernel planning nothing means something
-// is wrong with the build rather than with the request.
+// A filter matching nothing is a different case and stays green: both phases
+// still announce themselves and plan `1..0`, giving 0 tests across 2 phases
+// where a launch failure gives 0 across 0. A zero plan is an error only when
+// the caller passed no filter and no skip list.
 type RunVerdict struct {
 	// Code is the process exit status.
 	Code int
 	// Diagnostic is a human-facing explanation for stderr, empty when the
-	// run is green. It explains what the wrapper concluded and why, since
-	// the exit code alone cannot.
+	// run is green.
 	Diagnostic string
-	// QemuStatusWarning is the pre-existing "unexpected qemu status"
-	// note, kept separate so its wording does not change.
+	// QemuStatusWarning is the "unexpected qemu status" note.
 	QemuStatusWarning string
 }
 
@@ -86,8 +55,6 @@ func ClassifyRun(s *RunSummary, d DriverResult, hasSelection bool) RunVerdict {
 		return RunVerdict{Code: 130}
 	}
 
-	// Every pre-existing non-zero path keeps its exact behaviour; the new
-	// cases are checked only where the old code fell through to zero.
 	if failedOverall {
 		v := RunVerdict{Code: 1}
 		if d.QemuStatus != nil && *d.QemuStatus != 0 && *d.QemuStatus != 1 {
@@ -99,8 +66,6 @@ func ClassifyRun(s *RunSummary, d DriverResult, hasSelection bool) RunVerdict {
 		return v
 	}
 
-	// No phase header at all: the kernel's test harness never announced
-	// itself, so nothing was executed no matter what the child reported.
 	if len(s.Phases) == 0 {
 		return RunVerdict{
 			Code: 2,
@@ -112,7 +77,6 @@ func ClassifyRun(s *RunSummary, d DriverResult, hasSelection bool) RunVerdict {
 		}
 	}
 
-	// Phases ran but planned nothing, and the caller asked for everything.
 	if s.PlannedTotal() == 0 && !hasSelection {
 		return RunVerdict{
 			Code: 2,

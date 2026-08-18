@@ -68,13 +68,11 @@ pub struct MsixCapability {
 }
 
 impl MsixCapability {
-    /// Whether MSI-X is currently enabled on this device.
     #[inline]
     pub const fn is_enabled(&self) -> bool {
         (self.control & MSIX_CTRL_ENABLE) != 0
     }
 
-    /// Whether the function-level mask is active.
     #[inline]
     pub const fn is_function_masked(&self) -> bool {
         (self.control & MSIX_CTRL_FUNCTION_MASK) != 0
@@ -92,20 +90,16 @@ pub struct MsixTable {
 }
 
 impl MsixTable {
-    /// Number of entries in the MSI-X table.
     #[inline]
     pub const fn table_size(&self) -> u16 {
         self.table_size
     }
 
-    /// Whether the table is successfully mapped and usable.
     #[inline]
     pub fn is_mapped(&self) -> bool {
         self.table.is_mapped()
     }
 
-    /// Read the Vector Control field for a table entry.
-    ///
     /// Returns `None` if `entry_idx` is out of range.
     pub fn read_vector_control(&self, entry_idx: u16) -> Option<u32> {
         if entry_idx >= self.table_size {
@@ -115,8 +109,6 @@ impl MsixTable {
         Some(self.table.read::<u32>(offset))
     }
 
-    /// Check whether a specific table entry's interrupt is pending (PBA bit set).
-    ///
     /// Returns `None` if `entry_idx` is out of range or PBA is not mapped.
     pub fn is_pending(&self, entry_idx: u16) -> Option<bool> {
         if entry_idx >= self.table_size || !self.pba.is_mapped() {
@@ -128,8 +120,6 @@ impl MsixTable {
         Some((pba_word & (1u64 << bit)) != 0)
     }
 
-    /// Read the Message Data field for a table entry.
-    ///
     /// Bits 7:0 contain the interrupt vector.  Returns `None` if
     /// `entry_idx` is out of range.
     pub fn read_msg_data(&self, entry_idx: u16) -> Option<u32> {
@@ -140,9 +130,7 @@ impl MsixTable {
         Some(self.table.read::<u32>(offset))
     }
 
-    /// Read the Message Address (low 32 bits) for a table entry.
-    ///
-    /// Contains the destination APIC ID and addressing mode.  Returns
+    /// Carries the destination APIC ID and addressing mode.  Returns
     /// `None` if `entry_idx` is out of range.
     pub fn read_msg_addr_lo(&self, entry_idx: u16) -> Option<u32> {
         if entry_idx >= self.table_size {
@@ -153,7 +141,6 @@ impl MsixTable {
     }
 }
 
-/// Errors that can occur during MSI-X operations.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MsixError {
     /// The supplied vector number is below 32 (reserved for CPU exceptions).
@@ -168,8 +155,6 @@ pub enum MsixError {
     TableNotMapped,
 }
 
-/// Read and parse the MSI-X capability structure from PCI configuration space.
-///
 /// `cap_offset` is the config-space byte offset of the MSI-X capability header
 /// (obtained from [`PciDeviceInfo::msix_cap_offset`] or
 /// [`pci_find_capability`]).
@@ -299,8 +284,6 @@ pub fn msix_configure(
     Ok(())
 }
 
-/// Mask a specific MSI-X table entry.
-///
 /// Returns `false` if the entry index is out of range or the table is not mapped.
 pub fn msix_mask_entry(table: &MsixTable, entry_idx: u16) -> bool {
     if entry_idx >= table.table_size || !table.is_mapped() {
@@ -314,8 +297,6 @@ pub fn msix_mask_entry(table: &MsixTable, entry_idx: u16) -> bool {
     true
 }
 
-/// Unmask a specific MSI-X table entry.
-///
 /// Returns `false` if the entry index is out of range or the table is not mapped.
 pub fn msix_unmask_entry(table: &MsixTable, entry_idx: u16) -> bool {
     if entry_idx >= table.table_size || !table.is_mapped() {
@@ -329,9 +310,7 @@ pub fn msix_unmask_entry(table: &MsixTable, entry_idx: u16) -> bool {
     true
 }
 
-/// Enable MSI-X for a device and disable legacy INTx.
-///
-/// The two mechanisms must not be active simultaneously.
+/// Also disables legacy INTx; the two mechanisms must not be active simultaneously.
 pub fn msix_enable(bus: u8, dev: u8, func: u8, cap: &MsixCapability) {
     let cap_off = cap.cap_offset;
 
@@ -351,7 +330,7 @@ pub fn msix_enable(bus: u8, dev: u8, func: u8, cap: &MsixCapability) {
     );
 }
 
-/// Disable MSI-X for a device and re-enable legacy INTx.
+/// Also re-enables legacy INTx.
 pub fn msix_disable(bus: u8, dev: u8, func: u8, cap: &MsixCapability) {
     let cap_off = cap.cap_offset;
 

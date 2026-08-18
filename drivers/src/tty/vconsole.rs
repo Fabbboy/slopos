@@ -1,9 +1,7 @@
 //! VConsole - framebuffer-backed virtual console text renderer.
 //!
-//! Manages cursor position, cell buffer, VT100/ANSI emulation (each byte
-//! passes through `VtParser`) and direct framebuffer rendering for TTY 1.
-//! When no framebuffer is registered (early boot or headless), output falls
-//! back to serial mirroring.
+//! Manages cursor position, cell buffer, VT100/ANSI emulation and direct
+//! framebuffer rendering for TTY 1.
 
 use core::sync::atomic::{AtomicBool, Ordering};
 use slopos_ostd::lock_class;
@@ -94,8 +92,8 @@ impl CellGrid {
         }
     }
 
-    /// Size the grid in place. Production sizing allocates outside the console
-    /// lock and hands the buffer over via [`Self::adopt`].
+    /// Production sizing allocates outside the console lock and hands the
+    /// buffer over via [`Self::adopt`].
     #[cfg(feature = "test-hooks")]
     pub(crate) fn allocate(&mut self, rows: usize, cols: usize) {
         let total = rows.saturating_mul(cols);
@@ -162,7 +160,6 @@ impl CellGrid {
         }
     }
 
-    /// Take ownership of a grid allocated by the caller.
     fn adopt(&mut self, cells: Option<KVec<Cell>>, cols: usize) {
         self.cells = cells;
         self.cols = cols;

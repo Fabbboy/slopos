@@ -1,10 +1,8 @@
 //! MSI (Message Signaled Interrupts) support for PCI devices.
 //!
-//! MSI allows PCI devices to deliver interrupts by writing a message directly
-//! to the LAPIC — no IOAPIC redirection involved.  This eliminates shared IRQ
-//! lines, reduces latency, and is mandatory for PCIe devices per spec.
-//!
-//! ## Usage
+//! An MSI device delivers an interrupt by writing a message straight to the
+//! LAPIC, with no IOAPIC redirection. Register layout per PCI Local Bus Spec
+//! §6.8.
 //!
 //! ```ignore
 //! use slopos_core::irq::{msi_alloc_vector, msi_register_handler};
@@ -15,37 +13,16 @@
 //! msi_register_handler(vector, my_handler, ctx, bdf);
 //! msi::msi_configure(bus, dev, func, &cap, vector, apic_id).unwrap();
 //! ```
-//!
-//! ## Register layout reference (PCI Local Bus Spec §6.8)
-//!
-//! ```text
-//! Offset  Size  Field
-//! +0x00   8     Cap ID (0x05) | Next Pointer
-//! +0x02   16    Message Control
-//! +0x04   32    Message Address (lower)
-//! +0x08   32    Message Address (upper) — only if 64-bit capable
-//! +0x08/C 16    Message Data
-//! +0x10/14 32   Mask Bits — only if per-vector masking capable
-//! +0x14/18 32   Pending Bits — only if per-vector masking capable
-//! ```
 
 use crate::msi_common;
 use crate::pci::{pci_config_read16, pci_config_read32, pci_config_write16, pci_config_write32};
 use slopos_ostd::klog_info;
-
-// =============================================================================
-// MSI Message Control register bits (offset +2 from capability base)
-// =============================================================================
 
 const MSI_CTRL_ENABLE: u16 = 1 << 0;
 const MSI_CTRL_MMC_SHIFT: u16 = 1;
 const MSI_CTRL_MME_MASK: u16 = 0x7 << 4;
 const MSI_CTRL_64BIT: u16 = 1 << 7;
 const MSI_CTRL_PVM: u16 = 1 << 8;
-
-// =============================================================================
-// Register offsets (relative to capability base)
-// =============================================================================
 
 const MSI_REG_CONTROL: u16 = 0x02;
 const MSI_REG_ADDR_LO: u16 = 0x04;
@@ -54,10 +31,6 @@ const MSI_REG_DATA_32: u16 = 0x08;
 const MSI_REG_DATA_64: u16 = 0x0C;
 const MSI_REG_MASK_32: u16 = 0x10;
 const MSI_REG_MASK_64: u16 = 0x14;
-
-// =============================================================================
-// Public types
-// =============================================================================
 
 /// Parsed MSI capability information for a PCI device.
 #[derive(Debug, Clone, Copy)]
@@ -68,7 +41,6 @@ pub struct MsiCapability {
     pub control: u16,
     /// Whether the device supports 64-bit message addresses.
     pub is_64bit: bool,
-    /// Whether the device supports per-vector masking.
     pub has_per_vector_masking: bool,
     /// log₂ of the maximum vectors the device can generate (0–5 → 1–32).
     pub multi_message_capable: u8,
@@ -104,7 +76,6 @@ impl MsiCapability {
         })
     }
 
-    /// Whether MSI is currently enabled on this device.
     #[inline]
     pub const fn is_enabled(&self) -> bool {
         (self.control & MSI_CTRL_ENABLE) != 0

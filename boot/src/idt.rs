@@ -136,9 +136,8 @@ impl IrqNestHold {
     }
 
     /// Runs outside interrupt-nesting context so a switched-in task is not
-    /// observed as in-interrupt. The pre-switch scheduler prologue sits on the
-    /// ISR stack beneath the non-unwindable asm trampoline, so a panic there
-    /// must abort rather than unwind towards a catch boundary it cannot reach.
+    /// observed as in-interrupt. The scheduler prologue sits beneath a
+    /// non-unwindable asm trampoline, so a panic there must abort.
     fn handoff(&mut self, source: TrapExitSource) {
         self.leave();
         let abort = slopos_ostd::panic::AbortOnUnwind::new();
@@ -244,11 +243,8 @@ fn handle_tlb_shootdown_ipi() {
 /// nested NMI must push deeper on the same stack rather than reset RSP to an
 /// IST top and overwrite the frame this handler is still using.
 ///
-/// A *returning* NMI may take no lock — `klog!`'s serial backend spins on a
-/// ticket lock the interrupted CPU may hold, and `fblog::capture` takes a
-/// `&mut` on a per-CPU cell this NMI may have interrupted — so output goes
-/// through the watchdog's byte-at-a-time emitter. [`nmi_die`] is exempt:
-/// nothing resumes there.
+/// A *returning* NMI may take no lock, so output goes through the watchdog's
+/// byte-at-a-time emitter. [`nmi_die`] is exempt: nothing resumes there.
 fn nmi_handler(frame: &slopos_arch::InterruptFrame) {
     use slopos_ostd::watchdog::{self, NmiDisposition};
 
@@ -263,7 +259,6 @@ fn nmi_handler(frame: &slopos_arch::InterruptFrame) {
         // We are about to halt, so a non-panicking initiator would spin forever
         // on an ack we will never deliver. Set-only — never clears an ack.
         slopos_mm::tlb::force_ack_local_shootdowns(cpu_id);
-        // Unblock the owner's console/diagnostics paths.
         slopos_ostd::sync::panic_recovery::poison_all_held_locks_no_halt();
         slopos_ostd::panic::mark_cpu_stopped();
         slopos_arch::cpu::disable_interrupts();
@@ -280,8 +275,7 @@ fn nmi_handler(frame: &slopos_arch::InterruptFrame) {
     }
 
     // Neither an unsolicited NMI nor an operator probe is evidence of a fault
-    // here, so neither may spend the budget `panic.oops_limit=` bounds —
-    // otherwise reading the machine's state enough times takes it down.
+    // here, so neither may spend the budget `panic.oops_limit=` bounds.
     if disposition != NmiDisposition::Unsolicited && disposition != NmiDisposition::Probe {
         let (count, _limit_reached) = slopos_ostd::panic_recovery::oops_record();
         watchdog::nmi_emit("NMI: oops ");

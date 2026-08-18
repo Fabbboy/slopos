@@ -3,8 +3,7 @@ package main
 import "time"
 
 // Outcome is the union of result states a test (or sub-test) can land in.
-// Strings are stable and match the JSONL `outcome:` field the Python
-// wrapper emits — Phase 5N's differential diff depends on byte-identity.
+// The strings are stable: they are the JSONL `outcome:` field verbatim.
 type Outcome string
 
 const (
@@ -16,15 +15,13 @@ const (
 	OutcomeTimeout Outcome = "timeout"
 )
 
-// IsFailure groups every outcome the count-the-fails loops should treat as
-// "this is what we want to surface above the bar / in the failure block".
+// IsFailure groups the outcomes that get surfaced as failures.
 func (o Outcome) IsFailure() bool {
 	return o == OutcomeFail || o == OutcomeBail || o == OutcomeTimeout
 }
 
-// Subtest is a single nested test result emitted by a userland (`utest!`)
-// runner. The kernel wraps multiple of them inside one parent `ok N - …`
-// line; the parser buffers them and attaches at parent-commit time.
+// Subtest is a single nested test result from a userland (`utest!`) runner;
+// the kernel nests several under one parent `ok N - …` line.
 type Subtest struct {
 	Idx     int     `json:"idx"`
 	Name    string  `json:"name"`
@@ -32,10 +29,8 @@ type Subtest struct {
 	Msg     string  `json:"msg,omitempty"`
 }
 
-// TestRecord is the per-test datum recorded once and then read by both
-// the renderer and the JSONL sink. Field ordering in JSON tags mirrors
-// the Python @dataclass exactly so a byte-level diff between the two
-// wrappers' --json outputs stays empty (see Phase 5N).
+// TestRecord is the per-test datum read by both the renderer and the JSONL
+// sink.
 type TestRecord struct {
 	PhaseIdx        int       `json:"phase_idx"`
 	PhaseName       string    `json:"phase"`
@@ -72,8 +67,7 @@ type PhaseRecord struct {
 	Tests      []*TestRecord `json:"-"`
 }
 
-// RunSummary is the top-level result aggregator. The renderer reads it at
-// finalize-time; the JSONL sink writes a `run_end` event from it.
+// RunSummary is the top-level result aggregator.
 type RunSummary struct {
 	Phases            []*PhaseRecord
 	StartedMonotonic  time.Time
@@ -83,18 +77,14 @@ type RunSummary struct {
 	TimedOut          bool
 	SilenceHit        bool
 	QemuStatus        *int
-	// AbortKlogTail is the parser's rolling window of recent non-KTAP
-	// klog lines, snapshotted at finalize time when the run aborted
-	// (timeout / silence / truncation). Populated by main; rendered by
-	// the bar renderer above the abort message so CI failures surface
-	// what the kernel was doing right before the wedge.
+	// AbortKlogTail is the parser's klog tail, snapshotted by main when the
+	// run aborted (timeout / silence / truncation).
 	AbortKlogTail []string
 	phaseByIdx    map[int]*PhaseRecord
 }
 
-// WallMs returns the run's wall-clock duration in milliseconds. If the
-// run hasn't finished yet (unusual; only happens before Finalize), it
-// reports the elapsed time so far.
+// WallMs returns the run's wall-clock duration in milliseconds, or the
+// elapsed time so far when called before Finalize.
 func (s *RunSummary) WallMs() int {
 	end := s.FinishedMonotonic
 	if end.IsZero() {
@@ -116,8 +106,7 @@ func (s *RunSummary) AllTests() []*TestRecord {
 	return out
 }
 
-// Failures returns every test whose outcome counts as a failure (Fail,
-// Bail, or Timeout). Order is phase / idx.
+// Failures returns every failing test, in phase / idx order.
 func (s *RunSummary) Failures() []*TestRecord {
 	var out []*TestRecord
 	for _, t := range s.AllTests() {
@@ -170,8 +159,6 @@ func (s *RunSummary) CounterSum(field string) int {
 }
 
 // RunRecorder consumes parser events and maintains the live RunSummary.
-// It's deliberately separate from the renderer so the JSONL sink and the
-// renderer can both read from one consistent view.
 type RunRecorder struct {
 	Summary *RunSummary
 }
@@ -186,7 +173,7 @@ func NewRecorder() *RunRecorder {
 	}
 }
 
-// Record applies one event to the summary state. Pure data: no rendering.
+// Record applies one event to the summary state.
 func (r *RunRecorder) Record(ev Event) {
 	switch e := ev.(type) {
 	case *EvPhaseStart:
@@ -229,9 +216,8 @@ func (r *RunRecorder) Record(ev Event) {
 	// EvNonKtap is consumed only by the raw renderer; recorder ignores it.
 }
 
-// Finalize closes the run, stamps wall-clock end time, captures the QEMU
-// exit status, and detects truncation (planned > observed in any phase
-// that didn't bail intentionally).
+// Finalize stamps the end time, captures the QEMU exit status, and flags
+// truncation: planned > observed in a phase that did not bail.
 func (r *RunRecorder) Finalize(qemuStatus *int) {
 	r.Summary.FinishedMonotonic = time.Now()
 	r.Summary.QemuStatus = qemuStatus

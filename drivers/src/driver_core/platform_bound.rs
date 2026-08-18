@@ -20,7 +20,6 @@ pub struct BoundPlatformDevice<'d> {
 }
 
 impl<'d> BoundPlatformDevice<'d> {
-    /// Pair a device record with the bag its resources attach to.
     pub fn new(info: &'d PlatformDeviceInfo, res: &'d mut Devres) -> Self {
         Self { info, res }
     }

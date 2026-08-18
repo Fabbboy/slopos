@@ -16,8 +16,7 @@ use slopos_net::route;
 use slopos_net::types::{DevIndex, Ipv4Addr};
 use slopos_net::{iface, iface_ctl};
 
-/// The errno each control-plane failure reports, as `SYSCALL_NET_IFACE_CTL`'s
-/// contract specifies.
+/// The errno each control-plane failure reports, per `SYSCALL_NET_IFACE_CTL`'s contract.
 fn iface_errno(err: IfaceError) -> Errno {
     match err {
         IfaceError::NoSuchIface => Errno::ENODEV,
@@ -52,8 +51,7 @@ define_syscall!(syscall_net_iface_ctl
     -> Result<(), Errno>
 {
     // The global operations address the stack, not an interface: requiring the
-    // sentinel index keeps `ip link set eth0 <global op>` from reading as a
-    // per-interface command that quietly moved the master switch.
+    // sentinel index keeps one from reading as a per-interface command.
     match op {
         NET_IFOP_SET_ENABLED => {
             if ifindex != NET_IFINDEX_GLOBAL {
@@ -110,9 +108,9 @@ define_syscall!(syscall_net_iface_ctl
         }
         NET_IFOP_FLUSH_NEIGH => {
             let dev = device_for(ifindex)?;
-            // The cache hands the queued packets back rather than freeing them:
+            // The cache hands queued packets back rather than freeing them:
             // `PacketBuf::drop` takes the pool lock, which must not nest under
-            // the cache's. Dropping the vector here is the free.
+            // the cache's.
             drop(NEIGHBOR_CACHE.flush_device(dev));
             Ok(())
         }
@@ -125,9 +123,8 @@ define_syscall!(syscall_net_iface_ctl
         }
         NET_IFOP_FLUSH_ADDRS => {
             let dev = device_for(ifindex)?;
-            // Addresses first, then the routes derived from them: a connected
-            // route outliving its address forwards onto a prefix the interface
-            // no longer answers for.
+            // Addresses before their derived routes: a connected route outliving
+            // its address forwards onto a prefix the interface no longer answers for.
             iface::retain_addrs(ifindex, |_| false).map_err(iface_errno)?;
             route::remove_device_routes(dev);
             Ok(())
@@ -136,9 +133,8 @@ define_syscall!(syscall_net_iface_ctl
     }
 });
 
-// Add or remove one interface address. One struct per syscall with `len`
-// checked against its size, so no handler reinterprets user memory from an op
-// code.
+// One struct per syscall with `len` checked against its size, so no handler
+// reinterprets user memory from an op code.
 define_syscall!(syscall_net_addr_ctl
     (ctx, op: u32, ptr: u64, len: u64)
     requires(net_admin)
@@ -187,8 +183,6 @@ define_syscall!(syscall_net_addr_ctl
         }
         NET_ADDROP_DEL => {
             iface::del_addr(req.ifindex, addr, req.prefix_len).map_err(iface_errno)?;
-            // The connected route goes with it: a route onto a prefix the
-            // interface no longer answers for is a black hole.
             route::remove(addr.masked(req.prefix_len), req.prefix_len);
             Ok(())
         }
@@ -216,9 +210,9 @@ define_syscall!(syscall_net_route_ctl
     match op {
         NET_ROUTEOP_ADD => {
             let dev = device_for(req.ifindex)?;
-            // The prefix is normalised rather than trusted: `10.0.2.15/24` names
-            // the same route as `10.0.2.0/24`, and storing the un-masked form
-            // would make a delete of one fail to find the other.
+            // The prefix is normalised, not trusted: storing the un-masked form
+            // would make a delete of `10.0.2.0/24` miss a route added as
+            // `10.0.2.15/24`.
             let entry = route::RouteEntry {
                 prefix: prefix.masked(req.prefix_len),
                 prefix_len: req.prefix_len,
@@ -239,8 +233,8 @@ define_syscall!(syscall_net_route_ctl
     }
 });
 
-// Pin the resolver configuration, or hand it back to DHCP: `n_servers == 0`
-// clears the static override rather than configuring zero nameservers.
+// `n_servers == 0` clears the static override rather than configuring zero
+// nameservers.
 define_syscall!(syscall_net_resolver_set
     (ctx, ptr: u64, len: u64)
     requires(net_admin)

@@ -1,6 +1,4 @@
-//! GDT, TSS and SYSCALL-MSR configuration checks. A malformed descriptor, a
-//! wrong TSS RSP0 or a bad STAR/LSTAR value costs a crash or a ring transition,
-//! and none of it shows up in an otherwise healthy boot.
+//! GDT, TSS and SYSCALL-MSR configuration checks.
 
 use slopos_arch::arch::gdt::IstSlot;
 use slopos_arch::cpu;
@@ -14,8 +12,7 @@ use slopos_testing::TestResult;
 use crate::gdt::{gdt_init, gdt_set_ist, gdt_set_kernel_rsp0, syscall_msr_init};
 use crate::idt::{IdtEntry, idt_get_gate};
 
-/// Never used as a stack: it exists only so `KernelStackTop::from_slice` has a
-/// real `&[u8]` to borrow.
+/// Never used as a stack; exists only to give `KernelStackTop::from_slice` a real `&[u8]`.
 #[repr(align(16))]
 struct DummyStack([u8; 64]);
 static DUMMY_TEST_STACK: DummyStack = DummyStack([0u8; 64]);
@@ -86,8 +83,7 @@ pub fn test_data_segment_selectors() -> TestResult {
     let fs = ts_arch::read_fs();
     let gs = ts_arch::read_gs();
 
-    // In 64-bit mode these may legitimately be null or a data selector; what
-    // they must never be is a code selector or carry user RPL.
+    // In 64-bit mode these may legitimately be null or a data selector.
     for (name, sel) in [("DS", ds), ("ES", es)] {
         if sel != 0 && sel != 0x10 {
             klog_info!("GDT_TEST: WARNING - {} is 0x{:x}, not 0 or 0x10", name, sel);
@@ -129,8 +125,7 @@ pub fn test_tss_loaded() -> TestResult {
     TestResult::Pass
 }
 
-/// The value written is an address inside `.text`; only the fixture's
-/// `TssRsp0Shadow` restore on scope drop keeps it from surviving the test.
+/// Writes a `.text` address as RSP0; the fixture's `TssRsp0Shadow` restores it on drop.
 pub fn test_gdt_set_kernel_rsp0_valid() -> TestResult {
     let _scope = KernelTestScope::enter();
     let test_rsp0: u64 = 0xFFFF_FFFF_8010_0000;
@@ -138,8 +133,7 @@ pub fn test_gdt_set_kernel_rsp0_valid() -> TestResult {
     TestResult::Pass
 }
 
-/// Despite the name, null is never written: the runtime API has no validator,
-/// so passing one would smash live kernel state.
+/// Despite the name, null is never written: the runtime API has no validator.
 pub fn test_gdt_set_kernel_rsp0_null() -> TestResult {
     let _scope = KernelTestScope::enter();
     let safe_rsp0: u64 = 0xFFFF_FFFF_8010_0000;
@@ -147,8 +141,7 @@ pub fn test_gdt_set_kernel_rsp0_null() -> TestResult {
     TestResult::Pass
 }
 
-/// `user_rsp0` is never passed in — the unvalidated runtime API would take it.
-/// It stays here to name the gap.
+/// `user_rsp0` is never passed in: the unvalidated runtime API would accept it.
 pub fn test_gdt_set_kernel_rsp0_user_address() -> TestResult {
     let _scope = KernelTestScope::enter();
     let user_rsp0: u64 = 0x0000_7FFF_FFFF_0000;
@@ -176,8 +169,8 @@ pub fn test_gdt_set_ist_valid_indices() -> TestResult {
     TestResult::Pass
 }
 
-/// Empty by design: `IstSlot` has no zero variant, so the rejection this once
-/// checked is now a compile_fail doctest on the enum. Kept for the test count.
+/// Empty by design: `IstSlot` has no zero variant; the rejection is a compile_fail
+/// doctest on the enum.
 pub fn test_gdt_set_ist_index_zero() -> TestResult {
     let _scope = KernelTestScope::enter();
     TestResult::Pass
@@ -215,8 +208,8 @@ pub fn test_star_msr_valid() -> TestResult {
         return TestResult::Fail;
     }
 
-    // SYSRET builds CS from base+16 and SS from base+8, so this layout's base
-    // is 0x13; 0x10 belongs to a GDT that orders user code and data the other way.
+    // This layout's base is 0x13; 0x10 belongs to a GDT that orders user code
+    // and data the other way.
     if sysret_base != 0x13 && sysret_base != 0x10 {
         klog_info!(
             "GDT_TEST: WARNING - STAR SYSRET base is 0x{:x}, expected 0x13 or 0x10",
@@ -604,7 +597,7 @@ pub fn test_tss_rsp0_value_valid() -> TestResult {
     let (_limit, gdt_base) = read_gdtr();
     let tss_index = (tr >> 3) as usize;
 
-    // The TSS descriptor is double-wide; the helper folds the two-u64 read.
+    // The TSS descriptor is double-wide.
     let (tss_base, _limit) = ts_gdt::read_tss_descriptor(gdt_base, tss_index);
 
     // RSP0 sits at TSS64 offset 4 — eight bytes, but not 8-aligned, hence the
@@ -644,8 +637,7 @@ pub fn test_ist_stacks_have_guard_pages() -> TestResult {
     let tss_index = (tr >> 3) as usize;
     let (tss_base, _limit) = ts_gdt::read_tss_descriptor(gdt_base, tss_index);
 
-    // IST1-IST7 are seven 8-byte entries at TSS64 offset 36, after RSP0-2 and
-    // the reserved word.
+    // IST1-IST7 are seven 8-byte entries at TSS64 offset 36.
     let ist_base = tss_base + 36;
 
     let mut issues = 0u32;
@@ -665,7 +657,6 @@ pub fn test_ist_stacks_have_guard_pages() -> TestResult {
             issues += 1;
         }
 
-        // An IST sharing RSP0's address gives the vector no isolation at all.
         let rsp0 = u64::from_le_bytes(ts_gdt::read_bytes_at::<8>(tss_base + 4));
         if ist_ptr == rsp0 {
             klog_info!(
@@ -682,8 +673,7 @@ pub fn test_ist_stacks_have_guard_pages() -> TestResult {
     TestResult::Pass
 }
 
-/// A heuristic: no function prologue starts with NUL padding or INT3 filler,
-/// so either pattern means LSTAR is pointing at something that is not code.
+/// Heuristic: no function prologue starts with NUL padding or INT3 filler.
 pub fn test_lstar_points_to_executable_code() -> TestResult {
     let lstar = cpu::read_msr(Msr::LSTAR);
 

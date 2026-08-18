@@ -31,8 +31,7 @@ impl Widget for SeparatorWidget {
     }
 
     fn measure(&mut self, constraints: BoxConstraints, _ctx: &mut MeasureCtx) -> Size {
-        // Orientation follows the axis the parent left unbounded: a VStack frees
-        // height, so the divider runs across the width.
+        // A VStack frees height, so the divider runs across the width.
         let h_free = !constraints.is_height_bounded();
         let w_free = !constraints.is_width_bounded();
 

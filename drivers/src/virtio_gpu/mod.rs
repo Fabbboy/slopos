@@ -1,22 +1,10 @@
-//! VirtIO GPU 2D driver.
+//! VirtIO GPU 2D driver: a scanout-backed framebuffer presented via
+//! `TRANSFER_TO_HOST_2D` + `RESOURCE_FLUSH`, plus a hardware cursor overlay and
+//! runtime mode-set.
 //!
-//! Provides a real display protocol for the QEMU path: a scanout-backed
-//! framebuffer the compositor draws into, presented to the host via
-//! `TRANSFER_TO_HOST_2D` + `RESOURCE_FLUSH` on each flip, plus a hardware
-//! cursor overlay (cursor queue) and runtime mode-set.
-//!
-//! Device state lives in a heap `KArc<VirtioGpuInner>` whose per-queue IRQ
-//! closure harvests the used ring and wakes parked waiters; commands run on the
-//! shared MSI-X virtio transport in `crate::virtio`. Only the safe `MmioRegion`,
-//! `OwnedPageFrame`, and `Pod` primitives are used, so the crate's
-//! `#![forbid(unsafe_code)]` discipline holds.
-//!
-//! Two virtqueues are used: the control queue (index 0) carries every
-//! resource/scanout/transfer/flush command and its response; the cursor queue
-//! (index 1) carries `UPDATE_CURSOR`/`MOVE_CURSOR`. Control commands are
-//! serialized by `ctrl_lock`, cursor commands by `cursor_lock`, so at most one
-//! command per queue is in flight; the remaining request slots absorb chains
-//! the device still owns after a (rare) timeout.
+//! The control queue (index 0) carries resource/scanout/transfer/flush commands
+//! and their responses, the cursor queue (index 1) `UPDATE_CURSOR`/`MOVE_CURSOR`;
+//! `ctrl_lock`/`cursor_lock` keep at most one command per queue in flight.
 
 mod protocol;
 

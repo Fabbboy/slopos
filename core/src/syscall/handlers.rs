@@ -57,10 +57,7 @@ pub use crate::syscall::ui_handlers::{
     syscall_set_display_mode,
 };
 
-/// Build the static syscall dispatch table from a compact registration list.
-///
-/// Each entry maps a syscall number constant to its handler function and a
-/// debug name string. Unregistered slots remain `{ handler: None, name: null }`.
+/// Build the static syscall dispatch table; unregistered slots stay `None`.
 macro_rules! syscall_table {
     (size: $size:expr; $( [$num:expr] => $handler:expr, $name:literal; )*) => {{
         let mut table: [SyscallEntry; $size] = [SyscallEntry {
@@ -82,7 +79,6 @@ macro_rules! syscall_table {
 static SYSCALL_TABLE: [SyscallEntry; SYSCALL_TABLE_SIZE] = syscall_table! {
     size: SYSCALL_TABLE_SIZE;
 
-    // Core
     [SYSCALL_YIELD]          => syscall_yield,          "yield";
     [SYSCALL_EXIT]           => syscall_exit,           "exit";
     [SYSCALL_WRITE]          => syscall_user_write,     "write";
@@ -105,13 +101,11 @@ static SYSCALL_TABLE: [SyscallEntry; SYSCALL_TABLE_SIZE] = syscall_table! {
     [SYSCALL_CPU_INFO]      => syscall_cpu_info,      "cpu_info";
     [SYSCALL_PERCPU_STATS]  => syscall_percpu_stats,  "percpu_stats";
 
-    // Random / Roulette
     [SYSCALL_GETRANDOM]       => syscall_getrandom,       "getrandom";
     [SYSCALL_ROULETTE]        => syscall_roulette_spin,   "roulette";
     [SYSCALL_ROULETTE_RESULT] => syscall_roulette_result, "roulette_result";
     [SYSCALL_ROULETTE_DRAW]   => syscall_roulette_draw,   "roulette_draw";
 
-    // Filesystem
     [SYSCALL_FS_OPEN]   => syscall_fs_open,   "fs_open";
     [SYSCALL_FS_CLOSE]  => syscall_fs_close,  "fs_close";
     [SYSCALL_FS_READ]   => syscall_fs_read,   "fs_read";
@@ -140,21 +134,17 @@ static SYSCALL_TABLE: [SyscallEntry; SYSCALL_TABLE_SIZE] = syscall_table! {
     [SYSCALL_GETPEERNAME] => syscall_getpeername, "getpeername";
     [SYSCALL_GETSOCKNAME] => syscall_getsockname, "getsockname";
 
-    // TTY
     [SYSCALL_OPENPTY]       => syscall_openpty,       "openpty";
 
-    // Compositor framebuffer
     [SYSCALL_FB_FLIP]             => syscall_fb_flip,             "fb_flip";
     [SYSCALL_CURSOR_SET_IMAGE]    => syscall_cursor_set_image,    "cursor_set_image";
     [SYSCALL_CURSOR_MOVE]         => syscall_cursor_move,         "cursor_move";
     [SYSCALL_SET_DISPLAY_MODE]    => syscall_set_display_mode,    "set_display_mode";
 
-    // Input
     [SYSCALL_INPUT_POLL_BATCH]           => syscall_input_poll_batch,           "input_poll_batch";
     [SYSCALL_CLIPBOARD_COPY]             => syscall_clipboard_copy,             "clipboard_copy";
     [SYSCALL_CLIPBOARD_PASTE]            => syscall_clipboard_paste,            "clipboard_paste";
 
-    // Task management
     [SYSCALL_SPAWN_PATH]     => syscall_spawn_path,     "spawn_path";
     [SYSCALL_WAITPID]        => syscall_waitpid,        "waitpid";
     [SYSCALL_TERMINATE_TASK] => syscall_terminate_task,  "terminate_task";
@@ -164,7 +154,6 @@ static SYSCALL_TABLE: [SyscallEntry; SYSCALL_TABLE_SIZE] = syscall_table! {
     [SYSCALL_FUTEX]          => syscall_futex,           "futex";
     [SYSCALL_ARCH_PRCTL]     => syscall_arch_prctl,      "arch_prctl";
 
-    // Memory
     [SYSCALL_BRK]          => syscall_brk,          "brk";
     [SYSCALL_MMAP]         => syscall_mmap,         "mmap";
     [SYSCALL_MUNMAP]       => syscall_munmap,       "munmap";
@@ -172,13 +161,11 @@ static SYSCALL_TABLE: [SyscallEntry; SYSCALL_TABLE_SIZE] = syscall_table! {
     [SYSCALL_MEMFD_CREATE] => syscall_memfd_create, "memfd_create";
     [SYSCALL_FTRUNCATE]    => syscall_ftruncate,    "ftruncate";
 
-    // SMP / CPU affinity
     [SYSCALL_GET_CPU_COUNT]    => syscall_get_cpu_count,    "get_cpu_count";
     [SYSCALL_GET_CURRENT_CPU]  => syscall_get_current_cpu,  "get_current_cpu";
     [SYSCALL_SET_CPU_AFFINITY] => syscall_set_cpu_affinity, "set_cpu_affinity";
     [SYSCALL_GET_CPU_AFFINITY] => syscall_get_cpu_affinity, "get_cpu_affinity";
 
-    // Process identity
     [SYSCALL_GETPID]  => syscall_getpid,  "getpid";
     [SYSCALL_GETPPID] => syscall_getppid, "getppid";
     [SYSCALL_GETUID]  => syscall_getuid,  "getuid";
@@ -195,7 +182,6 @@ static SYSCALL_TABLE: [SyscallEntry; SYSCALL_TABLE_SIZE] = syscall_table! {
     [SYSCALL_RT_SIGRETURN]   => syscall_rt_sigreturn,   "rt_sigreturn";
     [SYSCALL_SIGDEFAULT]     => syscall_sigdefault,     "sigdefault";
 
-    // File descriptor operations
     [SYSCALL_DUP]   => syscall_dup,   "dup";
     [SYSCALL_DUP2]  => syscall_dup2,  "dup2";
     [SYSCALL_DUP3]  => syscall_dup3,  "dup3";
@@ -212,27 +198,21 @@ static SYSCALL_TABLE: [SyscallEntry; SYSCALL_TABLE_SIZE] = syscall_table! {
     [SYSCALL_SETSID] => syscall_setsid, "setsid";
     [SYSCALL_VHANGUP] => syscall_vhangup, "vhangup";
 
-    // Font management
     [SYSCALL_FONT_SET] => syscall_font_set, "font_set";
 
-    // Keyboard layout
     [SYSCALL_KEYMAP_LOAD] => syscall_keymap_load, "keymap_load";
     [SYSCALL_KEYMAP_GET_NAME] => syscall_keymap_get_name, "keymap_get_name";
 
-    // Userland test harness
     [SYSCALL_TEST_REPORT] => syscall_test_report, "test_report";
     [SYSCALL_RUN_USERLAND_TESTS] => syscall_run_userland_tests, "run_userland_tests";
     [SYSCALL_TEST_PANIC] => syscall_test_panic, "test_panic";
 
-    // SlopRing (io_uring-style submission/completion ring — SLOPRING)
     [SYSCALL_RING_SETUP] => syscall_ring_setup, "ring_setup";
     [SYSCALL_RING_ENTER] => syscall_ring_enter, "ring_enter";
     [SYSCALL_RING_REGISTER] => syscall_ring_register, "ring_register";
 
-    // pidfd: process-exit fd (poll/OP_POLL_ADD-able, reap with waitpid)
     [SYSCALL_PIDFD_OPEN] => syscall_pidfd_open, "pidfd_open";
 
-    // signalfd: pending signals as in-band ring/poll events
     [SYSCALL_SIGNALFD] => syscall_signalfd, "signalfd";
 };
 
