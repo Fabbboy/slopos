@@ -1,8 +1,7 @@
 //! Kernel panic screen display.
 //!
-//! Renders a full-screen panic message when the kernel encounters
-//! an unrecoverable error. Uses the pre-rasterized glyph atlas so
-//! no heap allocation is needed at render time.
+//! Renders a full-screen panic message through the pre-rasterized glyph atlas,
+//! so nothing allocates at render time.
 
 use slopos_abi::draw::{Canvas, Color32};
 use slopos_font::atlas::GlyphAtlas;
@@ -82,7 +81,6 @@ fn draw_symbol_text(ctx: &mut GraphicsContext, atlas: &GlyphAtlas, mut x: i32, y
     }
 }
 
-/// Display the kernel panic screen.
 pub fn display_panic_screen(
     message: Option<&str>,
     rip: Option<u64>,
@@ -119,7 +117,6 @@ pub fn display_panic_screen(
 
     let mut y = 60;
 
-    // Header
     let header = b"=== KERNEL PANIC ===\0";
     let header_width = atlas.bytes_width(header);
     let header_x = (width - header_width) / 2;
@@ -133,7 +130,6 @@ pub fn display_panic_screen(
     );
     y += char_height * 2;
 
-    // Subtitle
     let subtitle = b"An unrecoverable error has occurred\0";
     let subtitle_width = atlas.bytes_width(subtitle);
     let subtitle_x = (width - subtitle_width) / 2;
@@ -147,10 +143,8 @@ pub fn display_panic_screen(
     );
     y += char_height * 2;
 
-    // Separator
     y += char_height;
 
-    // Panic message
     if let Some(msg) = message {
         let msg_label = b"Reason: \0";
         atlas.draw_bytes(&mut ctx, 40, y, msg_label, PANIC_FG_COLOR, PANIC_BG_COLOR);
@@ -174,7 +168,6 @@ pub fn display_panic_screen(
         y += char_height * 2;
     }
 
-    // Register info
     y += char_height;
     let reg_header = b"CPU State:\0";
     atlas.draw_bytes(
@@ -209,8 +202,7 @@ pub fn display_panic_screen(
     draw_register_line(&mut ctx, &atlas, 60, y, b"CR4: \0", cr4);
     y += char_height + 4;
 
-    // Backtrace (most recent call first) — DWARF unwind frames when available,
-    // otherwise frame-pointer return addresses of the wedged/faulting chain.
+    // Most recent call first.
     if !backtrace.is_empty() {
         y += char_height;
         let label = if backtrace_is_unwind {
@@ -243,7 +235,6 @@ pub fn display_panic_screen(
         }
     }
 
-    // Prompt at bottom
     let prompt = b"Press ENTER to shutdown\0";
     let prompt_width = atlas.bytes_width(prompt);
     let prompt_x = (width - prompt_width) / 2;
