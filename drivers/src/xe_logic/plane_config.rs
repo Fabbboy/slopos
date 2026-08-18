@@ -303,7 +303,6 @@ const _: () = {
     ));
     assert!(Tiling::from_field(Tiling::XTiled.to_field()).to_field() == TILING_FIELD_X);
 
-    // ABI pixel-format <-> placed plane-format-bits round-trip.
     assert!(pixel_format_to_plane(PixelFormat::Xrgb8888).is_some());
     assert!(pixel_format_to_plane(PixelFormat::Argb8888).is_some());
     assert!(pixel_format_to_plane(PixelFormat::Rgb888).is_none());

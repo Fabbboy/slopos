@@ -4,14 +4,13 @@ use core::fmt;
 
 /// A four-octet IPv4 address, in network order.
 ///
-/// Named `Ipv4` rather than `Ipv4Addr` so that host-side code and tests can
-/// name it alongside `std::net::Ipv4Addr` without either shadowing the other.
+/// Named `Ipv4` rather than `Ipv4Addr` so host-side code can name it alongside
+/// `std::net::Ipv4Addr`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
 #[repr(transparent)]
 pub struct Ipv4(pub [u8; 4]);
 
 impl Ipv4 {
-    /// `0.0.0.0`.
     pub const UNSPECIFIED: Ipv4 = Ipv4([0, 0, 0, 0]);
 
     #[inline]
@@ -24,8 +23,8 @@ impl Ipv4 {
         self.0
     }
 
-    /// `0.0.0.0` — the wildcard, and what a route uses for "directly
-    /// connected" rather than a gateway.
+    /// The wildcard; a route carries it for "directly connected" rather than
+    /// a gateway.
     #[inline]
     pub const fn is_unspecified(self) -> bool {
         let o = self.0;
@@ -41,11 +40,9 @@ impl Ipv4 {
     /// Parses a dotted-quad literal.
     ///
     /// Strictly four decimal parts, each one to three digits and each at most
-    /// 255. There is no shorthand form: `10.1` is not `10.0.0.1` and
-    /// `0x0a000001` is not an address, because `inet_aton`'s octal and
-    /// short-form rules are a documented source of SSRF filter bypasses. A
-    /// leading zero is read as decimal (`010` is 10, not 8) and is accepted
-    /// rather than rejected, which is the one leniency kept.
+    /// 255: no `inet_aton` shorthand or hex/octal form, whose rules are a
+    /// documented source of SSRF filter bypasses. A leading zero is read as
+    /// decimal (`010` is 10, not 8) and accepted.
     pub fn from_str_bytes(text: &[u8]) -> Option<Ipv4> {
         let mut out = [0u8; 4];
         let mut iter = text.split(|&b| b == b'.');
@@ -120,9 +117,6 @@ mod tests {
         assert_eq!(Ipv4::from_str_bytes(b"10.0.0.1 "), None);
     }
 
-    /// Pinned rather than incidental: a leading zero is decimal here, so
-    /// `010.0.2.15` is `10.0.2.15` and not the `8.0.2.15` an octal-aware
-    /// `inet_aton` would return.
     #[test]
     fn parse_reads_leading_zeros_as_decimal() {
         assert_eq!(

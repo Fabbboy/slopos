@@ -64,14 +64,11 @@ impl FileOps for SocketFileOps {
         if n <= 0 {
             return n as isize;
         }
-        // Clamp to requested length defensively — the socket driver must
-        // not return more than `read_len`, but a kernel panic from a
-        // slice overrun is never acceptable.
+        // Defensive clamp: a driver over-report must not overrun the slice.
         let n = (n as usize).min(read_len);
-        // Linux TCP model: data is consumed from the receive queue before
-        // the copy to userspace.  If copy_to_user faults, the bytes are
-        // lost — this is acceptable because the calling process supplied
-        // a bogus buffer.  See net/ipv4/tcp.c:tcp_recvmsg_locked().
+        // Following the documented Linux TCP behaviour, data is consumed from
+        // the receive queue before the copy out, so a faulting user buffer
+        // loses those bytes.
         match buf.copy_in(0, &tmp[..n]) {
             Ok(written) => written as isize,
             Err(e) => e.as_isize(),
@@ -116,15 +113,11 @@ impl FileOps for SocketFileOps {
     }
 
     fn poll_fused(&self, handle: usize, events: u16) -> slopos_abi::file_ops::FusedPollResult {
-        // Register FIRST, then check readiness (Linux pattern).
+        // Register FIRST, then check readiness.
         let socket_idx = handle as u32;
-        // Always subscribe RECV (POLLIN / POLLHUP / POLLERR wakeups).
         let mut registered = socket::socket_poll_enqueue_recv(socket_idx);
-        // Also subscribe SEND when POLLOUT is requested, so a deferred
-        // write/send that hit -EAGAIN on a full TX buffer is woken when
-        // the buffer drains (TX-drain publishes sock_send_ev). The
-        // harvest re-probes readiness, so a spurious wakeup (already
-        // writable) is harmless.
+        // Subscribing SEND on POLLOUT is what wakes a write that hit -EAGAIN
+        // on a full TX buffer once the TX drain publishes sock_send_ev.
         if (events & POLLOUT) != 0 {
             registered |= socket::socket_poll_enqueue_send(socket_idx);
         }
@@ -142,19 +135,9 @@ impl FileOps for SocketFileOps {
         let writable = socket::socket_poll_writable(socket_idx) as u16;
         let mut revents = 0u16;
 
-        // `readable` / `writable` are u16 bitmaps already keyed on the
-        // POSIX POLLIN/POLLOUT/POLLERR/POLLHUP values from
-        // `slopos-abi::syscall::posix` (POLLIN=0x01, POLLOUT=0x04,
-        // POLLERR=0x08, POLLHUP=0x10). The mask must be those values,
-        // NOT `1` — the old `& 1` test silently dropped POLLOUT
-        // (0x04 & 0x01 == 0) for every connected TCP socket, so
-        // `poll(POLLOUT)` from `connect_timeout`, `write_ready`,
-        // async-runtime readiness etc. returned 0 even when the
-        // kernel side had already flipped POLLOUT on. We then sat in
-        // the poll loop until the peer eventually closed and the
-        // state-machine started raising POLLHUP — which std
-        // misreports as a connect failure with "no error set after
-        // POLLHUP".
+        // `readable` / `writable` are bitmaps keyed on the POSIX
+        // POLLIN/POLLOUT/POLLERR/POLLHUP values, so each mask must be that
+        // value and never `1`.
         if (events & POLLIN) != 0 && (readable & POLLIN) != 0 {
             revents |= POLLIN;
         }
@@ -162,8 +145,7 @@ impl FileOps for SocketFileOps {
             revents |= POLLOUT;
         }
 
-        // Per POSIX, POLLERR and POLLHUP are returned regardless of
-        // whether they were requested in `events`.
+        // Per POSIX, POLLERR and POLLHUP are returned whether requested or not.
         revents |= readable & (POLLERR | POLLHUP);
         revents |= writable & (POLLERR | POLLHUP);
 
@@ -175,10 +157,8 @@ impl FileOps for SocketFileOps {
     }
 
     fn poll_unwait(&self, handle: usize) {
-        // Dequeue BOTH recv and send. `poll_unwait` carries no `events`
-        // mask, and dequeuing an event we never subscribed to is a safe
-        // no-op (the wait-queue remove scans for the current task and
-        // does nothing when it is absent).
+        // `poll_unwait` carries no `events` mask, so dequeue both; removing an
+        // event that was never subscribed is a no-op.
         socket::socket_poll_dequeue_recv(handle as u32);
         socket::socket_poll_dequeue_send(handle as u32);
     }

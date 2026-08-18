@@ -1,9 +1,6 @@
 //! CUBIC congestion control tests (RFC 8312 + Hystart++ RFC 9406).
 //!
 //! Drives the algorithm directly — no TCP state machine, no data path.
-//! Asserts per-RFC 8312 behavior for slow start, CUBIC congestion
-//! avoidance, fast retransmit with β = 0.7, fast convergence, and
-//! Hystart++ slow-start exit.
 
 use slopos_testing::TestResult;
 use slopos_testing::{assert_eq_test, assert_test, pass};
@@ -12,17 +9,12 @@ use crate::tcp::cong::{CcAlgo, CongestionControl, Cubic, INITIAL_CWND};
 
 const MSS: u32 = 1460;
 
-// Synthetic time base for tests (ms).
+// Synthetic time base (ms).
 const T0: u64 = 100_000;
 
-// Helper: feed one ACK with given params.
 fn ack(c: &mut Cubic, acked: u32, rtt: Option<u32>, snd_una: u32, snd_nxt: u32, now_ms: u64) {
     c.on_ack(acked, rtt, snd_una, snd_nxt, now_ms);
 }
-
-// =============================================================================
-// Slow start
-// =============================================================================
 
 pub fn test_cubic_initial_cwnd_is_iw10() -> TestResult {
     let c = Cubic::default();
@@ -32,7 +24,6 @@ pub fn test_cubic_initial_cwnd_is_iw10() -> TestResult {
     pass!()
 }
 
-/// Each ACK in slow start grows cwnd by min(acked, MSS).
 pub fn test_cubic_slow_start_grows_per_ack() -> TestResult {
     let mut c = Cubic::default();
     let c0 = c.cwnd();
@@ -43,15 +34,10 @@ pub fn test_cubic_slow_start_grows_per_ack() -> TestResult {
     pass!()
 }
 
-// =============================================================================
-// Congestion avoidance — CUBIC growth
-// =============================================================================
-
 /// After a loss, CUBIC growth is concave up to W_max, then convex beyond.
 pub fn test_cubic_ca_concave_growth() -> TestResult {
     let mut c = Cubic::new(MSS);
 
-    // Grow cwnd to 40 MSS via slow start.
     let mut una = 0u32;
     for i in 0..40 {
         ack(
@@ -67,12 +53,10 @@ pub fn test_cubic_ca_concave_growth() -> TestResult {
     let pre_loss_cwnd = c.cwnd();
     assert_test!(pre_loss_cwnd >= 40 * MSS, "cwnd grew in slow start");
 
-    // Trigger loss → ssthresh = cwnd * 0.7
     c.on_fast_retransmit(pre_loss_cwnd, una + 10 * MSS);
     let ssthresh_after = c.ssthresh();
     assert_test!(c.cwnd() == ssthresh_after, "cwnd = ssthresh after loss");
 
-    // Exit recovery.
     ack(
         &mut c,
         MSS,
@@ -83,22 +67,18 @@ pub fn test_cubic_ca_concave_growth() -> TestResult {
     );
     assert_test!(!c.in_recovery(), "exited recovery");
 
-    // Now in CA. Feed ACKs over time and verify cwnd grows.
     let cwnd_at_ca_start = c.cwnd();
     let mut now = T0 + 1000;
     for i in 0..100 {
-        now += 20; // 20ms per ACK
+        now += 20;
         una += MSS;
         ack(&mut c, MSS, Some(20), una, una + 10 * MSS, now);
-        // Suppress unused warning.
         let _ = i;
     }
     assert_test!(
         c.cwnd() > cwnd_at_ca_start,
         "cwnd grew in congestion avoidance"
     );
-    // CUBIC should eventually exceed the pre-loss cwnd (convex region).
-    // Feed more ACKs with time passing.
     for _ in 0..500 {
         now += 20;
         una += MSS;

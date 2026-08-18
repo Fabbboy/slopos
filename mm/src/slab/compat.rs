@@ -27,22 +27,19 @@ pub fn kmalloc(size: usize) -> *mut c_void {
     let Some(ptr) = super::KERNEL_SLAB.alloc(size) else {
         return core::ptr::null_mut();
     };
-    // Zero exactly the requested size. Tail padding past `size` is
-    // never read by the caller, so we don't scrub the rounded chunk.
+    // Tail padding past `size` is never read by the caller, so the rounded
+    // chunk is left unscrubbed.
     ptr_buf::with_buf_mut(ptr.as_ptr(), size, |bytes: &mut [u8]| bytes.fill(0));
     ptr.as_ptr() as *mut c_void
 }
 
-/// Transparent alias for [`kmalloc`] — `kmalloc` zeroes by default;
-/// kept for source compatibility with callers that still distinguish
-/// zero vs. uninitialised allocations.
+/// Alias for [`kmalloc`], which already zeroes.
 pub fn kzalloc(size: usize) -> *mut c_void {
     kmalloc(size)
 }
 
-/// Return a previously [`kmalloc`]-ed pointer to the slab/large tier.
-/// Safe to call on `null` (no-op). Wild pointers are silently
-/// swallowed.
+/// Return a previously [`kmalloc`]-ed pointer to the slab/large tier. Null is
+/// a no-op; wild pointers are silently swallowed.
 pub fn kfree(ptr_in: *mut c_void) {
     let Some(nn) = NonNull::new(ptr_in as *mut u8) else {
         return;
@@ -55,12 +52,10 @@ pub fn get_heap_stats_owned() -> HeapStats {
     super::stats::snapshot()
 }
 
-/// Legacy C-ABI knob for runtime diagnostic toggling. Currently a
-/// no-op — poison/redzone checks now run unconditionally in
-/// [`super::allocator`].
+/// Legacy C-ABI knob, now a no-op: [`super::allocator`] runs its
+/// poison/redzone checks unconditionally.
 pub fn kernel_heap_enable_diagnostics(_enable: c_int) {}
 
-/// Print a human-readable heap snapshot via `klog_info!`.
 pub fn print_heap_stats() {
     let s = super::stats::snapshot();
     klog_info!("=== Kernel Heap Statistics ===");
@@ -71,8 +66,6 @@ pub fn print_heap_stats() {
     klog_info!("Frees: {}", s.free_count);
 }
 
-/// Re-export of the minimum kernel-mapping-warmup page count used by
-/// [`super::warmup_for_soft_reboot`]. Exposed here so the test in
-/// `mm/src/tests/tests.rs` can assert the minimum without depending
-/// on `super::HEAP_WARMUP_PAGES` directly.
+/// Re-exported so `mm/src/tests/tests.rs` can assert the warmup minimum
+/// without reaching into `super`.
 pub use super::HEAP_WARMUP_PAGES;

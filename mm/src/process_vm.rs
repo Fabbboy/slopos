@@ -1723,46 +1723,26 @@ pub fn destroy_process_vm(process: ProcessId) -> c_int {
 
         klog_debug!("destroy_process_vm({}): teardown_process_mappings", process);
         teardown_inner_mappings(&mut proc, slot_tlb_key(slot));
-        // The mappings are gone and the authoritative shootdown above has
-        // landed, so no CPU still holds a translation for this address
-        // space. Clearing the mask here — while the slot is still bound —
-        // is what stops the next occupant from inheriting this one's CPU
-        // set and shooting down CPUs that never mapped it.
+        // Cleared while the slot is still bound, after the shootdown above has
+        // landed: otherwise the next occupant inherits this one's CPU set and
+        // shoots down CPUs that never mapped it.
         tlb::unregister_process_tlb(slot_tlb_key(slot));
-        // Drop the OSTD VmSpace — its `Drop` walks the user half and
-        // frees every leaf frame through META_SLOTS plus the
-        // intermediate page tables.
         proc.vm_space = None;
         klog_debug!("destroy_process_vm({}): page table cleanup done", process);
 
-        // Drop the OSTD VmSpace KArc. While the dual-allocation
-        // window remains in effect, the OSTD-managed PML4 is unused
-        // (no user mappings written to it); on drop,
-        // `Frame::<PageTableMeta>::on_drop` returns its PML4 frame to
-        // the buddy allocator and the (empty) user-half tree walker
-        // no-ops. The pending consumer-migration pass will exercise
-        // the real teardown path once user-mapping callsites switch
-        // to `vm_space.cursor_mut`.
         proc.vm_space = None;
 
         proc.process_id = INVALID_PROCESS_ID;
         proc.generation = 0;
         proc.flags = 0;
-        // Taken out here and released below, off the slot lock: this can be
-        // the process's last reference, and `Process::drop` returns the id to
-        // an allocator no lock here covers.
+        // Released below, off the slot lock: this can be the last reference,
+        // and `Process::drop` returns the id to an allocator no lock here
+        // covers.
         released = proc.process.take();
     }
 
-    // Last: the slot is unbound and the shootdown mask is clear, so it is safe
-    // to bind again.
-    //
-    // Destroying a process's address space is destroying the process: nothing
-    // survives it that a later caller could name. So the registration is
-    // retired here, which is what ultimately returns the id — via
-    // `Process::drop`, once this reference and every resolved clone have gone.
-    // Retiring after the unbind, rather than before, is what keeps the id
-    // outliving every translation to the address space it named.
+    // Retired after the unbind, so the id outlives every translation to the
+    // address space it named.
     if let Some(process) = released.as_ref()
         && let Some(handle) = process.handle()
     {
@@ -1850,7 +1830,7 @@ pub fn process_vm_free(process: ProcessId, vaddr: u64, size: u64) -> c_int {
 
     proc.vma_map
         .remove_range(start, end, |_overlap_start, _overlap_end, _region| {
-            // Physical pages already freed above by unmap_and_free_range_inner.
+            // The pages were freed above by `unmap_and_free_range_inner`.
         });
 
     if proc.heap_end == end && end > proc.heap_start {
@@ -1862,19 +1842,11 @@ pub fn process_vm_free(process: ProcessId, vaddr: u64, size: u64) -> c_int {
 }
 
 /// Tear down every bound address space.
-///
-/// A process id names an address space *and* a descriptor table, and both go
-/// with the process: releasing the VM while fs still held a table bound to
-/// that id would let the id's next holder open the dead process's files. That
-/// used to need a runtime-installed hook here, because mm sits below fs and
-/// cannot name `fileio_destroy_table_for_process`. It no longer does — the
-/// descriptor table is keyed on the process too, and retiring the process is
-/// what releases both. mm does not have to reach fs to say so.
 pub fn init_process_vm() -> c_int {
     slopos_ostd::process::quota::register_pages_reconciler(reconcile_page_charges);
     for i in 0..MAX_PROCESSES {
-        // The slot's own process, so the teardown names the object rather
-        // than re-resolving a number that may already have been reissued.
+        // The slot's own process, so the teardown names the object rather than
+        // a number that may already have been reissued.
         let bound = PROCESS_VMS[i].lock().process.clone();
         if let Some(process) = bound
             && let Some(id) = ProcessId::of(&process)
@@ -1893,25 +1865,21 @@ pub fn init_process_vm() -> c_int {
 
 /// Report every bound address space's mapped-versus-charged page counts.
 ///
-/// The audit's `Pages` check. `try_lock` rather than `lock`: the audit runs
-/// from the diagnostic console and from a test, and a slot held by a CPU
-/// mid-mmap is a *transient* disagreement rather than a fault — blocking for
-/// it would order the console behind every address-space operation, and
-/// reporting it would be a false positive.
+/// `try_lock` rather than `lock`: a slot held mid-mmap is a transient
+/// disagreement, and blocking for it would order the diagnostic console behind
+/// every address-space operation.
 fn reconcile_page_charges(report: &mut dyn FnMut(slopos_ostd::process::AccountId, u32, u32)) {
     for slot in PROCESS_VMS.iter() {
         let Some(guard) = slot.try_lock() else {
             continue;
         };
-        // Occupancy asked of the slot's owning process rather than of its id:
-        // an unbound slot has no process, and no number can say that.
         if guard.process.is_none() {
             continue;
         }
         let (walked, tracked, charged) = guard.vma_map.audit();
-        // `walked` is the tree recomputed from scratch and `tracked` the
-        // incrementally-maintained span, so reporting the recomputed one makes
-        // a drift between them visible too rather than trusting the summary.
+        // `walked` is recomputed from the tree, `tracked` the incrementally
+        // maintained span; reporting the recomputed one makes a drift between
+        // them visible rather than trusting the summary.
         debug_assert_eq!(
             walked, tracked,
             "VmaMap span drifted from the tree it summarises"
@@ -1935,14 +1903,11 @@ pub fn get_process_vm_stats() -> ProcessVmStats {
 }
 
 pub fn get_current_process_id() -> u32 {
-    // This function was always racy under SMP with the old global lock (it
-    // returned active_process which could change immediately after).
-    // With per-process locks there is no meaningful "current" concept at the
-    // VM layer -- the scheduler owns that. Return 0 for backwards compat.
+    // TODO(tech-debt): always returns 0 — the VM layer has no "current"
+    // process, the scheduler does; callers should ask it and this should go.
     0
 }
 
-/// Look up the VMA region at a given address. Returns a cloned region.
 pub fn process_vm_get_region(process: ProcessId, addr: u64) -> Option<VmaRegion> {
     let slot = find_slot_for_pid(process)?;
     let guard = PROCESS_VMS[slot].lock();
@@ -1973,10 +1938,8 @@ pub fn process_vm_reset_stack(process: ProcessId) -> c_int {
         None => return -1,
     };
 
-    // Size the frame gather from the stack extent BEFORE taking the
-    // per-process lock: allocating under that IRQs-off lock can itself
-    // trigger a cross-CPU drain — the deadlock class this restructure
-    // removes.
+    // Read the extent before taking the slot lock: allocating under that
+    // IRQs-off lock can itself trigger a cross-CPU drain, and deadlock.
     let (stack_start, stack_end) = slot_read_lock_free(&PROCESS_VMS[slot], |inner| {
         (inner.stack_start, inner.stack_end)
     });
@@ -1985,9 +1948,8 @@ pub fn process_vm_reset_stack(process: ProcessId) -> c_int {
     }
     let page_count = ((stack_end - stack_start) / PAGE_SIZE_4KB) as usize;
 
-    // Collect the unmapped frames so the whole stack is torn down as one
-    // operation and the replacement mapping is installed against a settled
-    // address space, rather than racing page-by-page teardown.
+    // Gathering the frames tears the whole stack down as one operation, so the
+    // replacement mapping is installed against a settled address space.
     let mut gathered: KVec<UFrame<AnonymousMeta>> = match KVec::with_capacity(page_count) {
         Ok(v) => v,
         Err(_) => return -1,

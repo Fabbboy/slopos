@@ -1,22 +1,10 @@
-//! Tests for RFC 793 wrapping sequence-number arithmetic.
-//!
-//! Covers both the free-function form (`seq_lt`/`seq_le`/`seq_gt`/`seq_ge`)
-//! used by the existing state machine and the strongly-typed [`SeqNum`]
-//! newtype that will carry the wrapping-cmp discipline into the post-P3
-//! codebase.
-//!
-//! Includes a csprng-backed fuzz-style round-trip check for `SeqNum +
-//! u32 → SeqNum → distance_to` to catch arithmetic regressions that
-//! escape the hand-written cases.
+//! Tests for RFC 793 wrapping sequence-number arithmetic, in both the
+//! free-function form and the [`SeqNum`] newtype.
 
 use slopos_testing::TestResult;
 use slopos_testing::{assert_eq_test, assert_test, fail, pass};
 
 use crate::tcp::{SeqDelta, SeqNum, seq_ge, seq_gt, seq_le, seq_lt};
-
-// -----------------------------------------------------------------------------
-// Free-function coverage
-// -----------------------------------------------------------------------------
 
 pub fn test_seq_lt_adjacent() -> TestResult {
     assert_test!(seq_lt(10, 11), "10 < 11");
@@ -60,10 +48,6 @@ pub fn test_seq_wrap_across_zero() -> TestResult {
     pass!()
 }
 
-// -----------------------------------------------------------------------------
-// Newtype coverage
-// -----------------------------------------------------------------------------
-
 pub fn test_seqnum_partial_ord_adjacent() -> TestResult {
     let a = SeqNum::new(100);
     let b = SeqNum::new(101);
@@ -74,7 +58,7 @@ pub fn test_seqnum_partial_ord_adjacent() -> TestResult {
 }
 
 /// The newtype's `<` / `>` must route through the wrapping comparison, not
-/// naive u32 comparison.  This is the bug the newtype exists to prevent.
+/// naive u32 comparison.
 pub fn test_seqnum_wrap_across_zero() -> TestResult {
     let low = SeqNum::new(0xFFFF_FFFE);
     let high = SeqNum::new(0x0000_0002);
@@ -122,13 +106,8 @@ pub fn test_seqnum_delta_signed() -> TestResult {
     pass!()
 }
 
-// -----------------------------------------------------------------------------
-// CSPRNG-backed round-trip fuzz
-// -----------------------------------------------------------------------------
-
-/// Deterministic per-test PRNG: a 64-bit linear congruential generator
-/// seeded from a constant so failures are reproducible.  Uses the
-/// same multiplier as `rand_pcg` / glibc's `lrand48`.
+/// Deterministic per-test PRNG seeded from a constant so failures are
+/// reproducible.
 fn splitmix32(state: &mut u64) -> u32 {
     *state = state.wrapping_add(0x9E37_79B9_7F4A_7C15);
     let mut z = *state;
@@ -163,7 +142,6 @@ pub fn test_seqnum_partial_ord_antisymmetric_fuzz() -> TestResult {
     for _ in 0..4_096 {
         let a = SeqNum::new(splitmix32(&mut rng_state));
         let b = SeqNum::new(splitmix32(&mut rng_state));
-        // Skip pairs outside the half-window — ordering is undefined there.
         let fwd = a.distance_to(b);
         let rev = b.distance_to(a);
         if fwd > HALF_WINDOW && rev > HALF_WINDOW {
@@ -182,10 +160,6 @@ pub fn test_seqnum_partial_ord_antisymmetric_fuzz() -> TestResult {
     }
     pass!()
 }
-
-// =============================================================================
-// Register the test suite
-// =============================================================================
 
 slopos_testing::stest!(name = test_seq_lt_adjacent, suite = tcp_seq);
 slopos_testing::stest!(name = test_seq_le_adjacent, suite = tcp_seq);

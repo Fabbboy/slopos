@@ -1,26 +1,15 @@
 //! Kernel-wide allocation surface.
 //!
-//! This module hosts the kernel-blessed wrappers (`KBox`, `KVec`,
-//! `KArc`, `KVecDeque`, `KBTreeMap`, `PinBox`) plus the global
-//! allocator forwarding shim (`KernelHeap`). Every kernel crate
-//! routes heap allocation through these primitives; the wrappers
-//! exist so that large structs cannot materialise on a caller's
-//! stack: the only public constructor for `PinBox<T>` / `KBox<T>`
-//! that allocates-and-fills in place takes an [`Init<T, E>`] recipe,
-//! and the zero-fill constructors (`KBox::zeroed`, `KVec::zeroed`,
-//! `PinBox::zeroed`) require `T: Zeroable`. By-value constructors
-//! (`KBox::try_new`, `KVec::push`, `KArc::try_new`, etc.) exist for
-//! small `T`; the ELF post-link `.stack_sizes` gate
-//! (`scripts/check_stack_sizes.sh`) enforces the upper bound on
-//! what counts as "small".
+//! Hosts the kernel-blessed wrappers (`KBox`, `KVec`, `KArc`, `KVecDeque`,
+//! `KBTreeMap`, `PinBox`) plus the global allocator shim (`KernelHeap`). The
+//! in-place [`Init<T, E>`] and `T: Zeroable` constructors exist so a large `T`
+//! never materialises on a caller's stack; the by-value ones are for small `T`,
+//! with `scripts/check_stack_sizes.sh` enforcing the bound.
 //!
-//! The [`Init<T, E>`] / [`Zeroable`] surface is in-house (see the
-//! sibling [`super::init`] module) — SlopOS deliberately does not
-//! depend on the crates.io `pinned-init` crate or Rust-for-Linux's
-//! in-tree `pin-init`. SlopOS has no self-referential kernel types
-//! and no in-kernel async, so the `Pin` machinery that motivates
-//! those projects is unneeded complexity; our surface is a strict
-//! subset tuned for our allocator and our stack-frame gate.
+//! The [`Init<T, E>`] / [`Zeroable`] surface is in-house (see [`super::init`]):
+//! SlopOS has no self-referential kernel types and no in-kernel async, so the
+//! `Pin` machinery motivating `pinned-init` / `pin-init` would be unneeded
+//! complexity.
 
 use core::cell::SyncUnsafeCell;
 use core::hint;
@@ -38,23 +27,6 @@ pub use alloc::alloc::AllocError;
 
 use super::init::{Init, Zeroable};
 use crate::sync::BspToken;
-
-// ---------------------------------------------------------------------------
-// KernelHeap — owned by OSTD, dispatches via a registered safe `dyn`
-// trait handle.
-//
-// During very early boot (before the kernel slab is up), allocation
-// requests fall through to a 2 MiB bss-resident bump pool owned by
-// this crate. After the kernel slab calls
-// `register_kernel_slab_handle(...)`, all subsequent allocations route
-// through the registered `dyn KernelHeapBackend` — same shape as
-// `register_frame_allocator` consumes `dyn FrameAlloc`.
-//
-// Alignment cookies for layouts with `align > 16` are written **here**
-// (inside the SAFETY-noted block of `KernelHeap::alloc`/`dealloc`),
-// so the backend stays layout-naive — `alloc(size)` returns /
-// `dealloc(ptr)` takes a flat byte pointer.
-// ---------------------------------------------------------------------------
 
 const BUMP_HEAP_SIZE: usize = 2 * 1024 * 1024;
 

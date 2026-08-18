@@ -1,4 +1,4 @@
-//! Process lifecycle — the Rites of Birth and Death.
+//! Process lifecycle — fork, exec, wait, exit.
 
 pub mod atexit;
 pub mod rlimit;

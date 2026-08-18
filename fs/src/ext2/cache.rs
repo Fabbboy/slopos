@@ -70,10 +70,6 @@ impl BlockCache {
 
         let mut entries = KVec::with_capacity(CACHE_ENTRIES).map_err(|_| Ext2Error::OutOfMemory)?;
         for _ in 0..CACHE_ENTRIES {
-            // On the failing iteration `entries` drops with the
-            // partial run already in flight; each in-flight
-            // `Frame<PageCacheMeta>` returns its physical page to
-            // the buddy via `PageCacheMeta::on_drop`.
             entries
                 .push(CacheEntry::new()?)
                 .map_err(|_| Ext2Error::OutOfMemory)?;
@@ -220,14 +216,10 @@ impl BlockCache {
         Ok(())
     }
 
-    /// Write back every dirty block of one [`BlockKind`].
-    ///
-    /// Unlike a fail-fast loop, this attempts *every* dirty slot of the kind
-    /// even if one device write fails, so a transient error on one block does
-    /// not silently strand the rest in the volatile cache. The first error
-    /// encountered is returned after the full pass; successfully written blocks
-    /// are marked clean, failed ones stay dirty (and will be retried on the
-    /// next flush). Returns the number of blocks actually written on success.
+    /// Write back every dirty block of one [`BlockKind`], attempting every slot
+    /// even after a write fails, so one transient error does not strand the
+    /// rest. The first error is returned after the full pass; failed blocks
+    /// stay dirty for the next flush. On success, the number written.
     pub fn flush_kind(
         &mut self,
         kind: BlockKind,
@@ -260,16 +252,14 @@ impl BlockCache {
     }
 
     /// Flush all dirty blocks (data first, then metadata) without device
-    /// barriers. Callers that need durability ordering (`Ext2Fs::sync`)
-    /// interleave [`BlockDevice::flush`] between the phases instead of relying
-    /// on this. Returns the total number of blocks written.
+    /// barriers. Callers needing durability ordering (`Ext2Fs::sync`) interleave
+    /// [`BlockDevice::flush`] between the phases themselves.
     pub fn flush_all(&mut self, device: &dyn BlockDevice) -> Result<usize, Ext2Error> {
         let data = self.flush_kind(BlockKind::Data, device)?;
         let meta = self.flush_kind(BlockKind::Metadata, device)?;
         Ok(data + meta)
     }
 
-    /// Number of dirty (not-yet-written-back) blocks currently held.
     pub fn dirty_count(&self) -> usize {
         self.entries
             .iter()
@@ -302,14 +292,10 @@ impl BlockCache {
     /// Drop up to `want` clean, unpinned cache entries, returning their frames
     /// to the buddy. Returns how many were released.
     ///
-    /// **Clean only, and that is the whole safety argument.** A clean block's
-    /// bytes are already on disk, so dropping it costs a re-read and cannot
-    /// lose data; a dirty one would need a device write, which is I/O on a
-    /// path that runs *because* memory is short. A pinned entry has a live
-    /// `CachedBlock` guard borrowing it and is not ours to drop.
-    ///
-    /// The cache re-grows on demand: `get_kind` allocates a fresh entry when
-    /// none is free, so shrinking costs re-reads rather than correctness.
+    /// Clean only: those bytes are already on disk, so dropping one costs a
+    /// re-read and cannot lose data, whereas a dirty block would need a device
+    /// write on a path that runs *because* memory is short. A pinned entry has
+    /// a live `CachedBlock` guard borrowing it. The cache re-grows on demand.
     pub fn shrink_clean(&mut self, want: u32) -> u32 {
         if want == 0 {
             return 0;
@@ -323,14 +309,9 @@ impl BlockCache {
             if self.entries[i].pinned != 0 || self.entries[i].frame.dirty() {
                 continue;
             }
-            // Drop this entry's index key *before* the removal, and repair the
-            // key of whatever `swap_remove` moves into its place. Rebuilding
-            // the whole index afterwards would be simpler and is wrong: it
-            // needs `KBTreeMap::insert`, which allocates, on the path that
-            // runs *because* allocation failed — and a failed re-insert would
-            // leave a live cached block unreachable under its own number.
-            //
-            // `remove` and the in-place `get_mut` below allocate nothing.
+            // Repair the index in place. Rebuilding it needs
+            // `KBTreeMap::insert`, which allocates, on the path that runs
+            // *because* allocation failed; `remove` and `get_mut` do not.
             self.index.remove(&self.entries[i].block);
             let moved_from = self.entries.len() - 1;
             let moved = if moved_from != i {
@@ -339,8 +320,6 @@ impl BlockCache {
                 None
             };
             let removed_valid = self.entries[moved_from].valid;
-            // Dropping the entry drops its `Frame<PageCacheMeta>`, which is
-            // what actually returns the page.
             self.entries.swap_remove(i);
             if let Some(block) = moved
                 && removed_valid
@@ -354,16 +333,14 @@ impl BlockCache {
     }
 
     fn find_or_evict(&mut self, device: &dyn BlockDevice) -> Result<usize, Ext2Error> {
-        // First pass: find an empty slot.
         for (i, entry) in self.entries.iter().enumerate() {
             if !entry.valid {
                 return Ok(i);
             }
         }
 
-        // Re-grow after a reclaim took entries away. Without this the cache
-        // would stay permanently shrunk and every later miss would evict a
-        // live block instead of using the capacity it is entitled to.
+        // Re-grow after a reclaim took entries away: otherwise the cache stays
+        // permanently shrunk and every later miss evicts a live block.
         if self.entries.len() < CACHE_ENTRIES
             && let Ok(entry) = CacheEntry::new()
             && self.entries.push(entry).is_ok()

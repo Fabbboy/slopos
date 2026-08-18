@@ -1,15 +1,13 @@
 //! TLB quiesce epochs — a frame is not reused until every CPU has invalidated.
 //!
-//! Establishing that by asking the peers at allocation time would make `alloc`
-//! a cross-CPU rendezvous, and `alloc` is reachable from page-fault handlers
-//! and from inside interrupt-disabling locks — where a CPU cannot service the
-//! IPI the allocating CPU waits for. So the obligation is discharged at free
-//! time instead: park the frame, and release it once each CPU has invalidated
-//! on its own schedule. Nothing here ever waits on another CPU; a wedged or
-//! slow peer grows the quarantine and, in the limit, fails an allocation.
+//! The obligation is discharged at free time, not allocation time: `alloc` is
+//! reachable from page-fault handlers and from inside interrupt-disabling
+//! locks, where a CPU cannot service the IPI the allocating CPU would wait for.
+//! Nothing here ever waits on a peer; a wedged one grows the quarantine and, in
+//! the limit, fails an allocation.
 //!
 //! A CPU *acks* an epoch by doing a local all-context invalidation and
-//! publishing the epoch it flushed at. All online CPUs acked ⇒ the epoch
+//! publishing the epoch it flushed at; all online CPUs acked ⇒ the epoch
 //! advances.
 //!
 //! A frame freed during epoch `E` is safe at `E + 2`, not `E + 1`: acking `E`
@@ -18,8 +16,8 @@
 //! ordered after the free's read of `E`.
 //!
 //! Advancing is demand-driven, not periodic — an ack costs the full local TLB,
-//! which is what PCIDs exist to preserve, so it is amortised over a batch
-//! ([`request_advance`]) with a slow tick backstop for an idle system.
+//! so it is amortised over a batch ([`request_advance`]) with a slow tick
+//! backstop for an idle system.
 
 use core::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 

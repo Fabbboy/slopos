@@ -11,20 +11,11 @@ pub enum TokenError {
 
 /// Resolves an abbreviated token against a table of full names.
 ///
-/// An exact match wins outright, even when the token is also a prefix of other
-/// entries: `addr` against `["addr", "addrlabel"]` is `addr`, not ambiguous.
-/// Without that rule a table can never grow a longer name beside a shorter
-/// one, because doing so would break every existing invocation of the shorter.
-///
-/// Otherwise a token that prefixes exactly one entry resolves to it, and a
-/// token that prefixes several is [`TokenError::Ambiguous`] — never silently
-/// the first, which is the failure mode where a new table entry quietly
-/// changes what an existing script does.
-///
-/// An empty token is [`TokenError::Unknown`] rather than ambiguous: it
-/// prefixes everything, but it is a missing argument rather than an
-/// under-specified one, and reporting it as ambiguous would print the entire
-/// table at someone who typed nothing.
+/// An exact match wins outright even when the token also prefixes other
+/// entries, so a table can grow a longer name beside a shorter one without
+/// breaking existing invocations of the shorter. A token prefixing several
+/// entries is [`TokenError::Ambiguous`], never silently the first. An empty
+/// token is [`TokenError::Unknown`] rather than ambiguous.
 pub fn resolve_token(input: &[u8], table: &[&'static str]) -> Result<&'static str, TokenError> {
     if input.is_empty() {
         return Err(TokenError::Unknown);

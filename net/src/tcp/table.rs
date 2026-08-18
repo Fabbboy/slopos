@@ -70,27 +70,23 @@ impl ConnId {
         Self(Self::encode_generation(generation) | ((shard as u32) << 8) | (slot as u32))
     }
 
-    /// Create a ConnId for a listener.
     #[inline]
     pub fn new_listener(slot: usize, generation: u16) -> Self {
         Self(Self::LISTENER_BIT | Self::encode_generation(generation) | (slot as u32))
     }
 
     /// Rebuild an id from a value carried through an interface that only
-    /// speaks `u32` — a timer-wheel payload. The generation is what makes
-    /// such a value self-invalidating once its slot has moved on.
+    /// speaks `u32` — a timer-wheel payload.
     #[inline]
     pub const fn from_raw(value: u32) -> Self {
         Self(value)
     }
 
-    /// The packed value, for storing in a timer payload.
     #[inline]
     pub const fn raw(self) -> u32 {
         self.0
     }
 
-    /// Generation of the occupant this id names.
     #[inline]
     pub const fn generation(self) -> u16 {
         ((self.0 >> Self::GENERATION_SHIFT) & Self::GENERATION_MASK) as u16
@@ -101,7 +97,6 @@ impl ConnId {
         ((generation as u32) & Self::GENERATION_MASK) << Self::GENERATION_SHIFT
     }
 
-    /// Whether this id refers to a listener-table entry.
     #[inline]
     pub fn is_listener(self) -> bool {
         self.0 & Self::LISTENER_BIT != 0
@@ -113,7 +108,6 @@ impl ConnId {
         ((self.0 >> 8) & 0xFF) as usize
     }
 
-    /// Slot index within the shard or listener table.
     #[inline]
     pub fn slot(self) -> usize {
         (self.0 & 0xFF) as usize
@@ -125,10 +119,9 @@ impl ConnId {
         self.shard() * SLOTS_PER_SHARD + self.slot()
     }
 
-    /// True if the encoded shard/slot indices fall inside the static
-    /// table dimensions. Out-of-range ids (e.g. user-supplied integers
-    /// for negative-path tests) are rejected up-front by the
-    /// `with_pcb*` accessors rather than panicking on an array index.
+    /// True if the encoded shard/slot indices fall inside the static table
+    /// dimensions. The `with_pcb*` accessors check it up front so an
+    /// out-of-range id cannot panic on an array index.
     #[inline]
     pub fn is_well_formed(self) -> bool {
         if self.is_listener() {
@@ -159,10 +152,6 @@ const fn next_generation(current: u16) -> u16 {
     }
 }
 
-// =============================================================================
-// Hash function — FNV-1a → masked to NUM_SHARDS
-// =============================================================================
-
 pub(super) fn tcp_hash(tuple: &TcpTuple) -> usize {
     let mut h: u64 = 0xcbf29ce484222325;
     let fnv_prime: u64 = 0x100000001b3;
@@ -179,19 +168,14 @@ pub(super) fn tcp_hash(tuple: &TcpTuple) -> usize {
     ((h >> 48) as usize) & (NUM_SHARDS - 1)
 }
 
-// =============================================================================
-// RCU-published indices
-// =============================================================================
-
-/// Immutable per-shard tuple table. Cloned + mutated + RCU-published on
-/// every install/release. Small (≈48 bytes) — cheap to deep-copy.
+/// Immutable per-shard tuple table, cloned + mutated + RCU-published on every
+/// install/release.
 #[derive(Clone, Default)]
 pub struct TcpShardIndex {
     pub tuples: [Option<TcpTuple>; SLOTS_PER_SHARD],
-    /// Generation of each slot's current occupant. Published in the same RCU
-    /// snapshot as `tuples` so a wait-free `find` reads a tuple and the
-    /// generation of the connection that owns it in one coherent step —
-    /// a separate array would let it mint an id for the wrong occupant.
+    /// Published in the same RCU snapshot as `tuples` so `find` reads a tuple
+    /// and its owner's generation in one coherent step; a separate array would
+    /// let it mint an id for the wrong occupant.
     pub generations: [u16; SLOTS_PER_SHARD],
 }
 
@@ -203,7 +187,6 @@ impl TcpShardIndex {
         }
     }
 
-    /// Find the slot whose stored tuple equals `t`.
     #[inline]
     fn find_exact(&self, t: &TcpTuple) -> Option<usize> {
         for (i, slot) in self.tuples.iter().enumerate() {
@@ -214,15 +197,13 @@ impl TcpShardIndex {
         None
     }
 
-    /// First empty slot index, or `None` if full.
     #[inline]
     fn first_free(&self) -> Option<usize> {
         self.tuples.iter().position(|s| s.is_none())
     }
 
-    /// True if any tuple binds `(local_ip, local_port)`. Wildcards
-    /// honoured both ways (caller-supplied `local_ip == [0;4]` and
-    /// stored `tuple.local_ip == [0;4]`).
+    /// True if any tuple binds `(local_ip, local_port)`; the `0.0.0.0`
+    /// wildcard is honoured on the caller's side and the stored side alike.
     #[inline]
     fn port_in_use(&self, local_ip: [u8; 4], local_port: u16) -> bool {
         self.tuples.iter().any(|slot| {

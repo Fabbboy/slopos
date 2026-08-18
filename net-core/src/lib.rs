@@ -1,30 +1,11 @@
-//! Pure network formatting, parsing and command-grammar core.
+//! Pure network formatting, parsing and command-grammar core, shared so that
+//! [`render`] is the one place a `NET_*` constant becomes a string. Free of
+//! `alloc`, `unsafe` and syscalls: parsers take `&[u8]`, renderers write into
+//! a [`core::fmt::Write`] the caller supplies.
 //!
-//! Two problems put this logic in a crate of its own.
-//!
-//! **The userland crate cannot be tested.** `userland/Cargo.toml` sets
-//! `test = false` on its `[lib]` target and `just test-host` does not name
-//! `slopos-userland`, so every `#[cfg(test)]` inside it is dead code that never
-//! compiles and never runs. Address parsing and argument parsing are exactly
-//! the kind of logic where a silent wrong answer is indistinguishable from a
-//! right one, so they live here, where `cargo test -p slopos-net-core` runs
-//! them on the host.
-//!
-//! **The CLI and the compositor must agree.** `ip` renders a link state and the
-//! status indicator renders the same state; if each spells it itself, the two
-//! drift and a person reading both sees a contradiction. [`render`] is the one
-//! place a `NET_*` constant becomes a string, so there is nothing to drift.
-//!
-//! Everything here is free of `alloc`, `unsafe` and any syscall surface: the
-//! parsers work on `&[u8]` and the renderers write into a
-//! [`core::fmt::Write`], so a caller supplies its own buffer. Interface names
-//! are bytes in the ABI and stay bytes all the way through the `ip` grammar.
-//!
-//! Rendered strings are constrained by the console font: `font/src/lib.rs`
-//! covers ASCII `0x20..=0x7E`, Latin-1 `0xA0..=0xFF`, and exactly `€ ˚ ˇ`.
-//! Anything else draws as the replacement glyph, so an em dash in a
-//! human-facing string is a rendering bug. [`render::is_renderable`] encodes
-//! that range and a test holds every string this crate can produce to it.
+//! Rendered strings are constrained by the console font — ASCII `0x20..=0x7E`,
+//! Latin-1 `0xA0..=0xFF`, and exactly `€ ˚ ˇ`; anything else draws as the
+//! replacement glyph. [`render::is_renderable`] encodes that range.
 
 #![no_std]
 #![forbid(unsafe_code)]

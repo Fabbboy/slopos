@@ -1,9 +1,5 @@
-//! Tests for the loopback device and route/netstack integration.
-//!
-//! Covers:
-//! - 3.T6: Loopback device tx/poll_rx delivery without VirtIO
-//! - an address assignment populates the route table correctly
-//! - a reconfiguration replaces the previous device routes
+//! Tests for the loopback device (tx/poll_rx delivery without VirtIO) and for
+//! route-table population and replacement.
 //!
 //! Interface-table behaviour lives in `iface_tests`, not here.
 
@@ -17,35 +13,24 @@ use crate::pool::PACKET_POOL;
 use crate::route::RouteTable;
 use crate::types::{DevIndex, Ipv4Addr};
 
-// =============================================================================
-// Helpers
-// =============================================================================
-
 fn ensure_pool_init() {
     PACKET_POOL.init();
 }
 
-/// Allocate a dummy packet with known payload.
 fn dummy_packet(fill: u8) -> PacketBuf {
     let data = [fill; 64];
     PacketBuf::from_raw_copy(&data).expect("pool should have capacity")
 }
-
-// =============================================================================
-// 3.T6 — Loopback tx/poll_rx delivery without VirtIO
-// =============================================================================
 
 pub fn test_loopback_tx_then_poll_rx() -> TestResult {
     ensure_pool_init();
 
     let lo = LoopbackDev::new();
 
-    // TX a packet.
     let pkt = dummy_packet(0xAB);
     let result = lo.tx(pkt);
     assert_test!(result.is_ok(), "loopback tx should succeed");
 
-    // Poll it back out.
     let received = lo.poll_rx(16, &PACKET_POOL);
     assert_eq_test!(received.len(), 1, "should receive 1 packet back");
     assert_eq_test!(
@@ -62,26 +47,22 @@ pub fn test_loopback_multiple_tx_poll() -> TestResult {
 
     let lo = LoopbackDev::new();
 
-    // TX 5 packets with distinct payloads.
     for i in 0..5u8 {
         let pkt = dummy_packet(i);
         assert_test!(lo.tx(pkt).is_ok(), "tx should succeed");
     }
 
-    // Poll with budget=3: should get first 3.
     let batch1 = lo.poll_rx(3, &PACKET_POOL);
     assert_eq_test!(batch1.len(), 3, "first poll should return 3 packets");
     assert_eq_test!(batch1[0].payload()[0], 0, "first packet fill=0");
     assert_eq_test!(batch1[1].payload()[0], 1, "second packet fill=1");
     assert_eq_test!(batch1[2].payload()[0], 2, "third packet fill=2");
 
-    // Poll again: remaining 2.
     let batch2 = lo.poll_rx(16, &PACKET_POOL);
     assert_eq_test!(batch2.len(), 2, "second poll should return 2 packets");
     assert_eq_test!(batch2[0].payload()[0], 3, "fourth packet fill=3");
     assert_eq_test!(batch2[1].payload()[0], 4, "fifth packet fill=4");
 
-    // Poll again: empty.
     let batch3 = lo.poll_rx(16, &PACKET_POOL);
     assert_test!(batch3.is_empty(), "third poll should be empty");
 
@@ -93,12 +74,10 @@ pub fn test_loopback_stats() -> TestResult {
 
     let lo = LoopbackDev::new();
 
-    // Initial stats should be zeroed.
     let stats = lo.stats();
     assert_eq_test!(stats.tx_packets, 0, "initial tx_packets = 0");
     assert_eq_test!(stats.rx_packets, 0, "initial rx_packets = 0");
 
-    // TX 2 packets.
     let _ = lo.tx(dummy_packet(0xAA));
     let _ = lo.tx(dummy_packet(0xBB));
 
@@ -110,7 +89,6 @@ pub fn test_loopback_stats() -> TestResult {
         "rx_packets still 0 before poll"
     );
 
-    // Poll 1 packet.
     let _ = lo.poll_rx(1, &PACKET_POOL);
 
     let stats_after_poll = lo.stats();

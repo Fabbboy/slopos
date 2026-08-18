@@ -1,10 +1,5 @@
-//! TCP regression tests.
-//!
-//! Covers: header parsing & construction, checksum computation & verification,
-//! sequence number arithmetic, state machine transitions, connection table
-//! management, three-way handshake (active open and passive open), connection
-//! teardown (active close, passive close, simultaneous close), RST handling,
-//! MSS option parsing, ephemeral port allocation, and TIME_WAIT expiry.
+//! TCP regression tests: wire codec, sequence arithmetic, the state machine,
+//! the connection table, handshakes and teardown.
 //!
 //! All tests run in-kernel during the integration test harness (`tests=on`).
 
@@ -20,15 +15,7 @@ use crate::tcp::{
 };
 use crate::with_data_state;
 
-// =============================================================================
-// Helper: reset global state before each test
-// =============================================================================
-
 use crate::tests::tcp_common::reset_all as reset;
-
-// =============================================================================
-// 1. Header parsing
-// =============================================================================
 
 /// Build a minimal valid TCP header in wire format (big-endian).
 fn make_wire_header(
@@ -88,7 +75,6 @@ pub fn test_tcp_parse_too_short() -> TestResult {
 }
 
 pub fn test_tcp_parse_invalid_data_offset() -> TestResult {
-    // data_offset = 4 (< 5 minimum) should fail.
     let mut buf = make_wire_header(1, 2, 0, 0, 5, 0, 0);
     buf[12] = (4 << 4) & 0xF0;
     assert_test!(
@@ -96,7 +82,6 @@ pub fn test_tcp_parse_invalid_data_offset() -> TestResult {
         "data_offset=4 should fail"
     );
 
-    // data_offset = 0 should fail.
     buf[12] = 0;
     assert_test!(
         tcp::parse_header(&buf).is_none(),
@@ -106,7 +91,6 @@ pub fn test_tcp_parse_invalid_data_offset() -> TestResult {
 }
 
 pub fn test_tcp_parse_with_options() -> TestResult {
-    // data_offset = 6 (24 bytes) — need at least 24 bytes of data.
     let mut buf = [0u8; 24];
     buf[0..2].copy_from_slice(&1234u16.to_be_bytes());
     buf[2..4].copy_from_slice(&5678u16.to_be_bytes());
@@ -125,7 +109,6 @@ pub fn test_tcp_parse_with_options() -> TestResult {
 }
 
 pub fn test_tcp_parse_data_offset_exceeds_buffer() -> TestResult {
-    // data_offset = 15 (60 bytes) but buffer only 20 bytes.
     let mut buf = make_wire_header(1, 2, 0, 0, 5, 0, 0);
     buf[12] = (15 << 4) & 0xF0;
     assert_test!(
@@ -156,10 +139,6 @@ pub fn test_tcp_parse_all_flags() -> TestResult {
     assert_test!(hdr.is_fin_ack(), "FIN+ACK");
     pass!()
 }
-
-// =============================================================================
-// 2. Header construction
-// =============================================================================
 
 pub fn test_tcp_write_header_roundtrip() -> TestResult {
     let orig = tcp::build_header(4321, 80, 0xDEADBEEF, 0xCAFEBABE, TCP_FLAG_ACK, 16384, 5);
@@ -204,7 +183,6 @@ pub fn test_tcp_write_header_with_options() -> TestResult {
         None => return fail!("write 24-byte header failed"),
     };
     assert_eq_test!(written, 24, "wrote 24 bytes");
-    // Options area should be zeroed.
     assert_eq_test!(buf[20], 0, "option byte 0");
     assert_eq_test!(buf[21], 0, "option byte 1");
     assert_eq_test!(buf[22], 0, "option byte 2");
@@ -212,12 +190,7 @@ pub fn test_tcp_write_header_with_options() -> TestResult {
     pass!()
 }
 
-// =============================================================================
-// 3. MSS option parsing
-// =============================================================================
-
 pub fn test_tcp_parse_mss_option() -> TestResult {
-    // MSS option: kind=2, len=4, value=1460
     let opts = [
         tcp::TCP_OPT_MSS,
         tcp::TCP_OPT_MSS_LEN,
@@ -233,7 +206,6 @@ pub fn test_tcp_parse_mss_option() -> TestResult {
 }
 
 pub fn test_tcp_parse_mss_option_with_nop_padding() -> TestResult {
-    // NOP + MSS option
     let opts = [
         tcp::TCP_OPT_NOP,
         tcp::TCP_OPT_MSS,
@@ -285,15 +257,10 @@ pub fn test_tcp_write_mss_option_buffer_too_small() -> TestResult {
     pass!()
 }
 
-// =============================================================================
-// 4. Checksum
-// =============================================================================
-
 pub fn test_tcp_checksum_zero_payload() -> TestResult {
     let src_ip = [10, 0, 0, 1];
     let dst_ip = [10, 0, 0, 2];
 
-    // Build a SYN segment with checksum = 0.
     let hdr = tcp::build_header(8080, 80, 1000, 0, TCP_FLAG_SYN, 32768, 5);
     let mut segment = [0u8; 20];
     tcp::write_header(&hdr, &mut segment);
