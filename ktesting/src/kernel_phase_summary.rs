@@ -6,8 +6,8 @@
 
 use core::sync::atomic::{AtomicBool, AtomicI32, Ordering};
 
-use slopos_ostd::KVec;
 use slopos_ostd::sync::spin::SpinLock;
+use slopos_ostd::KVec;
 
 use crate::{TestConfig, TestRunSummary, Verbosity};
 

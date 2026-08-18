@@ -7,7 +7,7 @@
 use slopos_ostd::lock_class;
 use slopos_ostd::sync::lock_graph;
 
-use crate::{TestResult, assert_test};
+use crate::{assert_test, TestResult};
 
 /// Synthetic class identities, chosen outside every kernel mapping so a stray
 /// deref faults loudly rather than corrupting a real lock.

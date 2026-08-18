@@ -4,7 +4,7 @@
 
 use crate::TestResult;
 use crate::{fail, pass};
-use slopos_arch::cpu::control_regs::{Cr4Flags, Osxsave, Xcr0Flags, read_cr4, xcr0_read};
+use slopos_arch::cpu::control_regs::{read_cr4, xcr0_read, Cr4Flags, Osxsave, Xcr0Flags};
 use slopos_arch::cpu::cpuid::XsaveFeatures;
 use slopos_arch::cpu::xsave;
 use slopos_ostd::KBox;

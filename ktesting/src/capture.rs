@@ -8,9 +8,9 @@
 
 use core::fmt;
 
-use slopos_arch::pcr::{MAX_CPUS, current_cpu_id};
+use slopos_arch::pcr::{current_cpu_id, MAX_CPUS};
 use slopos_ostd::sync::append_log::AppendLog;
-use slopos_ostd::{KlogBackend, klog_swap_backend};
+use slopos_ostd::{klog_swap_backend, KlogBackend};
 
 const PER_CPU_RING_BYTES: usize = 8 * 1024;
 

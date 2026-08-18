@@ -54,6 +54,10 @@ impl TestOutcome {
 
     #[inline]
     pub fn ktap_word(self) -> &'static str {
-        if self.is_pass() { "ok" } else { "not ok" }
+        if self.is_pass() {
+            "ok"
+        } else {
+            "not ok"
+        }
     }
 }

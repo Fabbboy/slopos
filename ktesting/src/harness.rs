@@ -4,17 +4,17 @@
 
 use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
-#[cfg(feature = "tests")]
-use slopos_ostd::KVec;
 use slopos_ostd::klog_info;
 use slopos_ostd::sync::StateFlag;
+#[cfg(feature = "tests")]
+use slopos_ostd::KVec;
 
 use crate::config::TestConfig;
 
 #[cfg(feature = "tests")]
 use crate::config::Verbosity;
 #[cfg(feature = "tests")]
-use crate::registry::{TestDesc, TestKind, registry_sorted};
+use crate::registry::{registry_sorted, TestDesc, TestKind};
 #[cfg(feature = "tests")]
 use crate::result::TestResult;
 
@@ -261,7 +261,11 @@ fn run_phase(
         summary.over_time,
     );
 
-    if bailed || summary.failed > 0 { -1 } else { 0 }
+    if bailed || summary.failed > 0 {
+        -1
+    } else {
+        0
+    }
 }
 
 #[cfg(feature = "tests")]

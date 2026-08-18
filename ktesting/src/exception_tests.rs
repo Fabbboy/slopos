@@ -1,6 +1,6 @@
 use crate::TestResult;
-use slopos_arch::InterruptFrame;
 use slopos_arch::arch::exception::{exception_is_critical, get_exception_name};
+use slopos_arch::InterruptFrame;
 use slopos_ostd::klog_info;
 
 fn create_test_frame(vector: u8, from_user: bool) -> InterruptFrame {
