@@ -1,15 +1,12 @@
-//! Split from test_ldisc.rs: test_ldisc_signals.rs
+//! Line-discipline tests for ISIG signal generation, buffer flush, caret echo
+//! and TtyError errno mappings.
 
 use super::fixtures::*;
-
-// ===========================================================================
-// Signal generation tests
-// ===========================================================================
 
 /// SIGQUIT: Ctrl+\ generates SIGQUIT (signal 3).
 pub fn test_ldisc_signal_ctrl_backslash() -> TestResult {
     let mut ld = LineDisc::new();
-    let action = ld.input_char(0x1C); // Ctrl+\ = VQUIT default
+    let action = ld.input_char(0x1C);
     match action {
         InputAction::Signal(SIGQUIT) => TestResult::Pass,
         InputAction::Signal(s) => {
@@ -30,7 +27,6 @@ pub fn test_ldisc_signal_ctrl_backslash() -> TestResult {
 /// SIGTSTP: Ctrl+Z generates SIGTSTP (signal 20).
 pub fn test_ldisc_signal_ctrl_z() -> TestResult {
     let mut ld = LineDisc::new();
-    // VSUSP default = 0x1A = Ctrl+Z.
     let action = ld.input_char(0x1A);
     match action {
         InputAction::Signal(SIGTSTP) => TestResult::Pass,
@@ -48,26 +44,19 @@ pub fn test_ldisc_signal_ctrl_z() -> TestResult {
         }
     }
 }
-// ===========================================================================
-// Canonical EOF, ISIG Flush & Signal Integrity
-// ===========================================================================
 
-/// Ctrl+D on empty buffer produces EOF (0 bytes) without phantom
-/// has_data state.  Previously, flush_edit_to_cooked incremented line_count
-/// on empty buffer, leaving has_data() stuck true.
+/// Ctrl+D on empty buffer produces EOF (0 bytes) without leaving has_data()
+/// stuck true.
 pub fn test_canonical_eof_empty_no_phantom() -> TestResult {
     let mut ld = LineDisc::new();
 
-    // Press Ctrl+D (VEOF = 0x04) with empty edit buffer.
     ld.input_char(0x04);
 
-    // has_data should be true once (the EOF marker).
     if !ld.has_data() {
         klog_info!("TTY_TEST: BUG - has_data should be true immediately after empty EOF");
         return TestResult::Fail;
     }
 
-    // read() should return 0 (EOF).
     let mut buf = [0u8; 64];
     let n = ld.read(&mut buf);
     if n != 0 {
@@ -75,7 +64,6 @@ pub fn test_canonical_eof_empty_no_phantom() -> TestResult {
         return TestResult::Fail;
     }
 
-    // After consuming the EOF, has_data should be false (no phantom).
     if ld.has_data() {
         klog_info!("TTY_TEST: BUG - has_data still true after consuming empty EOF (phantom state)");
         return TestResult::Fail;
@@ -88,19 +76,16 @@ pub fn test_canonical_eof_empty_no_phantom() -> TestResult {
 pub fn test_canonical_eof_with_pending_text_no_phantom() -> TestResult {
     let mut ld = LineDisc::new();
 
-    // Type "abc" then Ctrl+D.
     for &c in b"abc" {
         ld.input_char(c);
     }
-    ld.input_char(0x04); // VEOF
+    ld.input_char(0x04);
 
-    // Should have data.
     if !ld.has_data() {
         klog_info!("TTY_TEST: BUG - has_data false after text+EOF");
         return TestResult::Fail;
     }
 
-    // Read should return "abc" (3 bytes, no newline).
     let mut buf = [0u8; 64];
     let n = ld.read(&mut buf);
     if n != 3 || &buf[..3] != b"abc" {
@@ -108,7 +93,6 @@ pub fn test_canonical_eof_with_pending_text_no_phantom() -> TestResult {
         return TestResult::Fail;
     }
 
-    // No phantom state.
     if ld.has_data() {
         klog_info!("TTY_TEST: BUG - has_data true after reading text+EOF chunk (phantom)");
         return TestResult::Fail;
@@ -121,19 +105,16 @@ pub fn test_canonical_eof_with_pending_text_no_phantom() -> TestResult {
 pub fn test_isig_flush_no_noflsh() -> TestResult {
     let mut ld = LineDisc::new();
 
-    // Type "abc" into edit buffer (canonical mode, no newline yet).
     for &c in b"abc" {
         ld.input_char(c);
     }
 
-    // Verify edit buffer has content.
     if ld.edit_content().is_empty() {
         klog_info!("TTY_TEST: BUG - edit buffer should have content before signal");
         return TestResult::Fail;
     }
 
-    // Ctrl+C should generate SIGINT and flush input (NOFLSH not set by default).
-    let action = ld.input_char(0x03); // VINTR = Ctrl+C
+    let action = ld.input_char(0x03);
     match action {
         InputAction::Signal(sig) if sig == SIGINT => {}
         other => {
@@ -142,13 +123,11 @@ pub fn test_isig_flush_no_noflsh() -> TestResult {
         }
     }
 
-    // Edit buffer should be flushed.
     if !ld.edit_content().is_empty() {
         klog_info!("TTY_TEST: BUG - edit buffer should be empty after ISIG flush");
         return TestResult::Fail;
     }
 
-    // No cooked data should remain.
     if ld.has_data() {
         klog_info!("TTY_TEST: BUG - has_data true after ISIG flush (should be clear)");
         return TestResult::Fail;
@@ -161,18 +140,15 @@ pub fn test_isig_flush_no_noflsh() -> TestResult {
 pub fn test_isig_flush_with_noflsh() -> TestResult {
     let mut ld = LineDisc::new();
 
-    // Set NOFLSH flag.
     let mut t = *ld.termios();
     t.c_lflag |= LocalFlags::NOFLSH;
     ld.set_termios(&t);
 
-    // Type "abc" into edit buffer.
     for &c in b"abc" {
         ld.input_char(c);
     }
 
-    // Ctrl+C should generate SIGINT but NOT flush.
-    let action = ld.input_char(0x03); // VINTR = Ctrl+C
+    let action = ld.input_char(0x03);
     match action {
         InputAction::Signal(sig) if sig == SIGINT => {}
         other => {
@@ -184,7 +160,6 @@ pub fn test_isig_flush_with_noflsh() -> TestResult {
         }
     }
 
-    // Edit buffer should still have content.
     if ld.edit_content().is_empty() {
         klog_info!("TTY_TEST: BUG - NOFLSH should preserve edit buffer on ISIG");
         return TestResult::Fail;
@@ -197,20 +172,17 @@ pub fn test_isig_flush_with_noflsh() -> TestResult {
 pub fn test_isig_ctrl_c_clears_edit_buffer() -> TestResult {
     let mut ld = LineDisc::new();
 
-    // Type "abc", then Ctrl+C (flushes), then newline.
     for &c in b"abc" {
         ld.input_char(c);
     }
-    let _ = ld.input_char(0x03); // Ctrl+C flushes
+    let _ = ld.input_char(0x03);
     ld.input_char(b'\n');
 
-    // Should have one line.
     if !ld.has_data() {
         klog_info!("TTY_TEST: BUG - has_data false after flush+newline");
         return TestResult::Fail;
     }
 
-    // Read should return just "\n" (1 byte), not "abc\n".
     let mut buf = [0u8; 64];
     let n = ld.read(&mut buf);
     if n != 1 || buf[0] != b'\n' {
@@ -225,11 +197,9 @@ pub fn test_isig_ctrl_c_clears_edit_buffer() -> TestResult {
     TestResult::Pass
 }
 
-/// ISIG flush works for SIGQUIT (Ctrl+\\) too.
 pub fn test_isig_flush_sigquit() -> TestResult {
     let mut ld = LineDisc::new();
 
-    // Type "xyz" then Ctrl+\\ (VQUIT = 0x1C).
     for &c in b"xyz" {
         ld.input_char(c);
     }
@@ -242,7 +212,6 @@ pub fn test_isig_flush_sigquit() -> TestResult {
         }
     }
 
-    // Buffers should be flushed (default: no NOFLSH).
     if !ld.edit_content().is_empty() {
         klog_info!("TTY_TEST: BUG - edit buffer should be empty after SIGQUIT flush");
         return TestResult::Fail;
@@ -255,11 +224,9 @@ pub fn test_isig_flush_sigquit() -> TestResult {
     TestResult::Pass
 }
 
-/// ISIG flush works for SIGTSTP (Ctrl+Z) too.
 pub fn test_isig_flush_sigtstp() -> TestResult {
     let mut ld = LineDisc::new();
 
-    // Type "xyz" then Ctrl+Z (VSUSP = 0x1A).
     for &c in b"xyz" {
         ld.input_char(c);
     }
@@ -272,7 +239,6 @@ pub fn test_isig_flush_sigtstp() -> TestResult {
         }
     }
 
-    // Buffers should be flushed.
     if !ld.edit_content().is_empty() {
         klog_info!("TTY_TEST: BUG - edit buffer should be empty after SIGTSTP flush");
         return TestResult::Fail;
@@ -285,14 +251,9 @@ pub fn test_isig_flush_sigtstp() -> TestResult {
     TestResult::Pass
 }
 
-// ===========================================================================
-// ISIG caret echo (ECHO|ECHOCTL parity with Linux n_tty)
-// ===========================================================================
-
 /// VINTR (Ctrl+C) with ECHO|ECHOCTL echoes `^C` to the output, then signals.
 pub fn test_isig_vintr_echoes_caret() -> TestResult {
     let mut ld = LineDisc::new();
-    // Default termios already has ECHO|ECHOCTL set.
     let batch = ld.receive_buf(&[InputEvent::normal(0x03)]);
     let echo = EchoScratch::drain(&mut ld);
 
@@ -315,7 +276,6 @@ pub fn test_isig_vintr_echoes_caret() -> TestResult {
     TestResult::Pass
 }
 
-/// VQUIT (Ctrl+\\) echoes `^\\` and VSUSP (Ctrl+Z) echoes `^Z`.
 pub fn test_isig_vquit_vsusp_echo_caret() -> TestResult {
     let mut ld = LineDisc::new();
     let quit = ld.receive_buf(&[InputEvent::normal(0x1C)]);
@@ -356,7 +316,6 @@ pub fn test_isig_vquit_vsusp_echo_caret() -> TestResult {
     TestResult::Pass
 }
 
-/// With ECHOCTL cleared, the signal char does NOT echo a caret.
 pub fn test_isig_no_echo_without_echoctl() -> TestResult {
     let mut ld = LineDisc::new();
     let mut t = *ld.termios();
@@ -388,22 +347,20 @@ pub fn test_isig_no_echo_without_echoctl() -> TestResult {
     TestResult::Pass
 }
 
-/// NOFLSH interaction is unchanged: the caret still echoes and the signal
-/// is reported as non-flushing.
+/// With NOFLSH the caret still echoes and the signal is reported as
+/// non-flushing.
 pub fn test_isig_caret_echo_with_noflsh() -> TestResult {
     let mut ld = LineDisc::new();
     let mut t = *ld.termios();
     t.c_lflag |= LocalFlags::NOFLSH;
     ld.set_termios(&t);
 
-    // Type "abc" so we can confirm NOFLSH preserves the edit buffer.
     for &c in b"abc" {
         ld.input_char(c);
     }
 
     let batch = ld.receive_buf(&[InputEvent::normal(0x03)]);
 
-    // Caret still echoes.
     let echo = EchoScratch::drain(&mut ld);
     if echo.as_slice() != b"^C" {
         klog_info!(
@@ -413,7 +370,6 @@ pub fn test_isig_caret_echo_with_noflsh() -> TestResult {
         return TestResult::Fail;
     }
 
-    // Signal reported as non-flushing (flush bool == false).
     match batch.signal {
         Some((sig, flush)) if sig == SIGINT => {
             if flush {
@@ -430,7 +386,6 @@ pub fn test_isig_caret_echo_with_noflsh() -> TestResult {
         }
     }
 
-    // Edit buffer preserved (NOFLSH).
     if ld.edit_content().is_empty() {
         klog_info!("TTY_TEST: BUG - NOFLSH should preserve edit buffer on ISIG");
         return TestResult::Fail;
@@ -439,15 +394,12 @@ pub fn test_isig_caret_echo_with_noflsh() -> TestResult {
     TestResult::Pass
 }
 
-/// Double Ctrl+D does not accumulate phantom line_count.
 pub fn test_double_eof_no_phantom_accumulation() -> TestResult {
     let mut ld = LineDisc::new();
 
-    // Two consecutive Ctrl+D on empty buffer.
     ld.input_char(0x04);
     ld.input_char(0x04);
 
-    // First EOF read.
     let mut buf = [0u8; 64];
     let n1 = ld.read(&mut buf);
     if n1 != 0 {
@@ -458,7 +410,6 @@ pub fn test_double_eof_no_phantom_accumulation() -> TestResult {
         return TestResult::Fail;
     }
 
-    // Second EOF read.
     let n2 = ld.read(&mut buf);
     if n2 != 0 {
         klog_info!(
@@ -468,7 +419,6 @@ pub fn test_double_eof_no_phantom_accumulation() -> TestResult {
         return TestResult::Fail;
     }
 
-    // No phantom state.
     if ld.has_data() {
         klog_info!("TTY_TEST: BUG - has_data true after consuming both EOFs");
         return TestResult::Fail;
@@ -476,9 +426,6 @@ pub fn test_double_eof_no_phantom_accumulation() -> TestResult {
 
     TestResult::Pass
 }
-// ===========================================================================
-// Signal Restart Infrastructure (ERESTARTSYS)
-// ===========================================================================
 
 /// TtyError::Restart maps to -512 (ERESTARTSYS).
 pub fn test_restart_error_to_errno() -> TestResult {
@@ -492,7 +439,6 @@ pub fn test_restart_error_to_errno() -> TestResult {
     TestResult::Pass
 }
 
-/// TtyError::Restart is distinct from SignalInterrupt.
 pub fn test_restart_distinct_from_signal_interrupt() -> TestResult {
     if TtyError::Restart.to_errno() == TtyError::SignalInterrupt.to_errno() {
         klog_info!("TTY_TEST: BUG - Restart and SignalInterrupt map to same errno");
@@ -531,7 +477,6 @@ pub fn test_sa_restart_flag_value() -> TestResult {
     TestResult::Pass
 }
 
-/// SA_RESTART is distinct from other SA_ flags.
 pub fn test_sa_restart_distinct() -> TestResult {
     use slopos_abi::signal::*;
     let sa_restart = SA_RESTART;
@@ -547,7 +492,6 @@ pub fn test_sa_restart_distinct() -> TestResult {
 }
 
 /// SignalInterrupt still maps to EINTR (-4).
-/// Regression: ensure existing behavior is preserved.
 pub fn test_signal_interrupt_still_eintr() -> TestResult {
     if TtyError::SignalInterrupt.to_errno() != -4 {
         klog_info!(
@@ -559,8 +503,6 @@ pub fn test_signal_interrupt_still_eintr() -> TestResult {
     TestResult::Pass
 }
 
-/// All existing TtyError variants preserve their errno mappings.
-/// Regression test: ensure existing error codes are preserved.
 pub fn test_all_error_variants_preserved() -> TestResult {
     let pairs: &[(TtyError, i32)] = &[
         (TtyError::InvalidIndex, -22),
@@ -597,7 +539,6 @@ pub fn test_nonblock_empty_returns_wouldblock() -> TestResult {
     let idx = TtyIndex(0);
     drain_tty_nonblock(idx);
 
-    // Non-blocking read on empty TTY should return WouldBlock.
     let mut buf = [0u8; 64];
     match tty::read(idx, &mut buf, true) {
         Err(TtyError::WouldBlock) => {}
@@ -621,7 +562,6 @@ pub fn test_read_with_data_succeeds() -> TestResult {
     let idx = TtyIndex(0);
     drain_tty_nonblock(idx);
 
-    // Push data + newline (canonical mode).
     for &c in b"hello\n" {
         tty::push_input(idx, c);
     }

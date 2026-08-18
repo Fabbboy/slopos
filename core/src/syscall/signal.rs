@@ -306,7 +306,6 @@ define_syscall!(syscall_kill
     // Deliberately after the permission check: `kill(pid, 0)` is the
     // existence-and-permission probe, so it must be able to answer EPERM.
     if sig == 0 {
-
         return SyscallResult::Ok(0);
     }
 
@@ -322,19 +321,17 @@ define_syscall!(syscall_kill
         };
 
         if signum == SIGKILL {
-            // Reliably fatal without a special case: SIG_UNCATCHABLE is
-            // stripped from every mask so SIGKILL is always deliverable, and
-            // rt_sigaction refuses a handler for it. The kill flag is what a
-            // target parked in a blocking primitive sees — it unwinds by
-            // returning rather than being abandoned mid-stack.
+            // SIG_UNCATCHABLE is stripped from every mask and rt_sigaction
+            // refuses a handler, so SIGKILL is always deliverable. The kill
+            // flag is what a target parked in a blocking primitive sees: it
+            // unwinds by returning rather than being abandoned mid-stack.
             let _ = task_signal_post(&target, SIGKILL);
             task_kill_and_wake(&target);
             signaled += 1;
             continue;
         }
 
-        // POSIX: kill() succeeds even when the disposition discards the
-        // signal — only the wake is skipped for a send-time drop.
+        // POSIX: kill() succeeds even when the disposition discards the signal.
         if task_signal_post(&target, signum) {
             let _ = unblock_task(&target);
         }
@@ -365,8 +362,7 @@ fn sigframe_fpu_addr(sigframe_addr: u64) -> u64 {
 /// Save the interrupted task's live FPU/vector state into its user signal frame
 /// so a handler cannot corrupt it. The kernel is `+soft-float` and has not
 /// touched the vector file since entry, so the live CPU state is still the
-/// user's. Returns false on a user-copy fault. Delivery runs on the interrupted
-/// task's own CPU, so the `Current` witness is the exclusive access it needs.
+/// user's. Returns false on a user-copy fault.
 fn save_fpu_to_sigframe(current: &slopos_sched::task_struct::Current, sigframe_addr: u64) -> bool {
     // Not a switch-out: the state stays live in the register file, so the save
     // keeps the owner tag rather than releasing it.
@@ -385,8 +381,8 @@ fn save_fpu_to_sigframe(current: &slopos_sched::task_struct::Current, sigframe_a
 /// The 2.6 KiB image is borrowed in place rather than staged through a scratch
 /// buffer (2 KiB stack-frame ceiling), so rejection leaves the task owning
 /// bytes it did not author and the reset is what takes them back. `xcr0` comes
-/// from the caller so the mask the image is validated against is the one it is
-/// then restored under.
+/// from the caller so the image is validated against the mask it is then
+/// restored under.
 fn stage_fpu_from_sigframe(
     current: &slopos_sched::task_struct::Current,
     sigframe_addr: u64,
@@ -417,8 +413,6 @@ define_syscall!(syscall_rt_sigreturn (ctx) -> SyscallResult {
         None => return SyscallResult::Err(Errno::EFAULT),
     };
 
-    // The sigreturn caller is this CPU's current task, so the guard is the
-    // witness the FPU accessors need.
     let Some(current) = slopos_sched::task_struct::Current::get() else {
         return SyscallResult::Err(Errno::EFAULT);
     };
@@ -435,7 +429,6 @@ define_syscall!(syscall_rt_sigreturn (ctx) -> SyscallResult {
             return false;
         }
 
-        // `set_regs` re-applies the CS/SS selectors and the RFLAGS mask.
         let mut regs = ctx.user_ctx().regs();
         regs.rax = sigframe.rax;
         regs.rbx = sigframe.rbx;
@@ -471,9 +464,8 @@ define_syscall!(syscall_rt_sigreturn (ctx) -> SyscallResult {
     SyscallResult::NoReturn
 });
 
-/// Read/write view over the user-mode register file that signal delivery
-/// mutates, shared by the syscall-exit ([`UserContext`]) and IRQ-exit
-/// ([`InterruptFrame`]) paths so both stay in lockstep.
+/// Read/write view over the user-mode register file signal delivery mutates,
+/// shared by the syscall-exit and IRQ-exit paths so both stay in lockstep.
 trait UserRegView {
     /// Snapshot the GPR file, with `rflags_user_subset` already masked to the
     /// user-permitted bits so both delivery sites store the same value.
@@ -484,8 +476,7 @@ trait UserRegView {
     fn commit_redirect(&mut self, regs: &UserRegs);
 }
 
-/// Syscall-exit register view over the per-task [`UserContext`]. The trait's
-/// `&mut self` is unused exclusivity here; [`InterruptFrameRegs`] needs it.
+/// Syscall-exit register view over the per-task [`UserContext`].
 struct UserContextRegs<'a> {
     ctx: &'a UserContext,
 }
@@ -564,7 +555,7 @@ impl UserRegView for InterruptFrameRegs<'_> {
 enum SignalDisposition {
     /// Nothing deliverable, or the disposition needs no further work.
     Done,
-    /// Default action is to terminate; the exit fields are already stamped.
+    /// Terminate; the exit fields are already stamped.
     Terminate(u32),
     Handle {
         signum: u8,
@@ -579,7 +570,7 @@ enum SignalDisposition {
 ///
 /// Split from the delivery below so the task borrow ends before anything acts
 /// on the decision: terminating re-enters the task through the registry and
-/// then context-switches.
+/// context-switches.
 fn claim_pending_signal(task_ref: &Task) -> SignalDisposition {
     if (task_ref.flags & TASK_FLAG_USER_MODE) == 0 {
         return SignalDisposition::Done;
@@ -639,10 +630,9 @@ fn deliver_pending_signal_core(
     let (signum, bit, action, saved_mask) = match claim_pending_signal(task_ref) {
         SignalDisposition::Done => {
             // A task marked for death leaves here rather than returning to
-            // userland; the mark is deliberately not a signal. Callers have
-            // established this frame returns to CPL3 off an exception stack,
-            // so it abandons only a register save area on the dying task's own
-            // kernel stack, owning no Rust value.
+            // userland; the mark is deliberately not a signal. This frame
+            // returns to CPL3 off an exception stack and owns no Rust value,
+            // so abandoning it across the switch leaks nothing.
             if task_ref.is_killed() {
                 let task_id = task_ref.task_id;
                 if task_terminate(task_id) == 0 {
@@ -652,8 +642,6 @@ fn deliver_pending_signal_core(
             return;
         }
         SignalDisposition::Terminate(task_id) => {
-            // The guard is a borrow, not an owning handle, so abandoning this
-            // frame across the context switch leaks nothing.
             if task_terminate(task_id) == 0 {
                 schedule();
             }
@@ -671,8 +659,8 @@ fn deliver_pending_signal_core(
 
     // Frame = [restorer ptr (8)] [SignalFrame] [FPU/vector save area]. The
     // restorer pointer doubles as the handler's return address, so SysV wants
-    // `frame_addr % 16 == 8`; aligning to 16 instead misaligns the handler's
-    // stack by 8 and any aligned vector spill it emits faults #GP.
+    // `frame_addr % 16 == 8`; aligning to 16 instead faults #GP on the first
+    // aligned vector spill the handler emits.
     let total_size = 8 + core::mem::size_of::<SignalFrame>() as u64 + FPU_STATE_SIZE as u64;
     let frame_addr = (regs_snapshot.rsp.wrapping_sub(total_size) & !0xF).wrapping_sub(8);
 
@@ -755,9 +743,7 @@ pub fn deliver_pending_signal(
 /// Deliver a pending signal on the IRQ/timer/IPI return-to-user path.
 ///
 /// Without a check here a user task spinning in pure userspace (no syscalls)
-/// would never act on a pending signal and would be unkillable. The `iretq`
-/// that resumes the task loads its register state from `frame`, so a handler
-/// redirect mutates that frame in place.
+/// would never act on a pending signal and would be unkillable.
 ///
 /// No-op unless the frame is non-null, returns to user (`cs & 3 == 3`), a
 /// user-mode task is current, and we are not on an IST/exception stack —

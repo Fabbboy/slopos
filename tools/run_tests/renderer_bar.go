@@ -8,17 +8,10 @@ import (
 	"time"
 )
 
-// BarRenderer is the default UX: a single live progress bar pinned to
-// the bottom of the output. Fail / skip / over-time test events scroll
-// into history above the bar as one-line warnings. When a phase ends
-// the bar is replaced in place by that phase's one-line summary, and a
-// fresh bar appears for the next phase. After all phases finish the
-// bar is erased and the post-run sections (failure detail blocks,
-// slow-tests roundup, summary line) print without it.
-//
-// On non-TTY output (CI logs, pipes, redirects) we suppress the bar
-// entirely and print only the streaming warnings + per-phase summary
-// + post-run sections.
+// BarRenderer is the default UX: a live progress bar pinned to the bottom of
+// the output, with fail / skip / over-time warnings scrolling above it and a
+// one-line summary replacing the bar at each phase end. Non-TTY output (CI
+// logs, pipes, redirects) suppresses the bar entirely.
 type BarRenderer struct {
 	Out          io.Writer
 	Verbosity    string
@@ -36,9 +29,8 @@ type BarRenderer struct {
 	barActive       bool
 }
 
-// NewBarRenderer creates a renderer bound to a Writer. `tty` and
-// `cols` are passed in (rather than re-detected from the Writer) so
-// tests can fake them without involving a real terminal.
+// NewBarRenderer takes `tty` and `cols` rather than re-detecting them from
+// the Writer, so tests can fake a terminal.
 func NewBarRenderer(out io.Writer, verbosity string, colour bool, warnMs int, tty bool, cols int) *BarRenderer {
 	return &BarRenderer{
 		Out:          out,
@@ -64,7 +56,6 @@ func (r *BarRenderer) OnEvent(ev Event, summary *RunSummary) {
 	case *EvBail:
 		r.onBail(e)
 	}
-	// EvNonKtap ignored.
 }
 
 func (r *BarRenderer) beginPhase(ev *EvPhaseStart, summary *RunSummary) {
@@ -85,8 +76,7 @@ func (r *BarRenderer) beginPhase(ev *EvPhaseStart, summary *RunSummary) {
 }
 
 func (r *BarRenderer) onPlan(_ *EvPlan, _ *RunSummary) {
-	// Plan number is now visible in the bar — redraw to pick up the
-	// `1/N` denominator immediately.
+	// Redraw to pick up the `1/N` denominator immediately.
 	r.drawBar()
 }
 
@@ -164,9 +154,7 @@ func (r *BarRenderer) endPhase(ev *EvPhaseEnd, _ *RunSummary) {
 	r.println(fmt.Sprintf("%s %s: %s in %.2fs", marker, ev.Name, strings.Join(parts, ", "), secs))
 }
 
-// Finalize emits all post-run sections: failure blocks, optional verbose
-// pass-logs, slow-tests roundup, summary line. Always runs on a clean
-// line — `eraseBar` + blank line first.
+// Finalize emits all post-run sections, starting from a clean line.
 func (r *BarRenderer) Finalize(summary *RunSummary) {
 	r.eraseBar()
 	r.println("")
@@ -179,10 +167,6 @@ func (r *BarRenderer) Finalize(summary *RunSummary) {
 	}
 	r.renderSummary(summary)
 }
-
-// ---------------------------------------------------------------------
-//  Bar machinery
-// ---------------------------------------------------------------------
 
 func (r *BarRenderer) drawBar() {
 	if !r.TTY {
@@ -310,10 +294,6 @@ func (r *BarRenderer) formatBar() string {
 
 	return prefix + body + "  " + suffix
 }
-
-// ---------------------------------------------------------------------
-//  Post-run sections
-// ---------------------------------------------------------------------
 
 func (r *BarRenderer) renderFailures(summary *RunSummary) {
 	failures := summary.Failures()
@@ -460,11 +440,6 @@ func (r *BarRenderer) renderSummary(summary *RunSummary) {
 
 	r.println(Paint(strings.Repeat("─", 76), ansiDim, r.Colour))
 
-	// On any abort path (timeout / silence / truncation / user interrupt)
-	// surface the parser's klog tail so CI failures aren't a context-free
-	// "TIMED OUT" banner. With summary verbosity (the CI default) klog
-	// is otherwise suppressed entirely, leaving us blind to where the
-	// kernel was when it wedged.
 	if (summary.TimedOut || summary.UserAborted || summary.Truncated) &&
 		len(summary.AbortKlogTail) > 0 {
 		r.println(Paint(
@@ -545,10 +520,6 @@ func (r *BarRenderer) renderSummary(summary *RunSummary) {
 	}
 	r.println(fmt.Sprintf("real time: %.2fs", wallS))
 }
-
-// ---------------------------------------------------------------------
-//  Helpers
-// ---------------------------------------------------------------------
 
 func (r *BarRenderer) println(line string) {
 	fmt.Fprintln(r.Out, line)

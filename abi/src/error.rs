@@ -9,7 +9,7 @@ pub trait KernelErrno {
 }
 
 /// Generates `as_c_int`, `from_c_int`, `is_success` and `is_error` for
-/// `#[repr(i32)]` error enums that follow the kernel's error convention.
+/// `#[repr(i32)]` error enums.
 macro_rules! impl_kernel_error {
     ($ty:ty, fallback: $fallback:ident, variants: { $($val:literal => $variant:ident),* $(,)? }) => {
         impl $ty {
@@ -46,7 +46,6 @@ macro_rules! impl_kernel_error {
     };
 }
 
-/// Shared memory operation errors
 #[repr(i32)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum MemfdError {

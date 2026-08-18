@@ -1,10 +1,8 @@
 //! Typed event-bus primitive tests.
 //!
 //! The kernel test phase runs before the scheduler hands over, so there is no
-//! current task to enqueue or block: a real `wait`/`wake` round-trip belongs to
-//! the userland phase. What is observable here, task-free, is the bus's
-//! structural correctness — routing, idle publishes, the subscription
-//! pre-check.
+//! current task to block: only task-free structure is observable here, and a
+//! real `wait`/`wake` round-trip belongs to the userland phase.
 
 use slopos_abi::event::{CHILD_EXIT_BUCKETS, MAX_PIPES, MAX_TTYS, MAX_UNIX_SOCKETS};
 use slopos_abi::event::{KernelEvent, PipeSlot, SocketSlot, TaskSlot, TtySlot, UnixSocketSlot};
@@ -58,8 +56,6 @@ fn sample_events() -> [KernelEvent; 14] {
 
 pub fn test_event_publish_routes_in_range() -> TestResult {
     for ev in sample_events() {
-        // With no subscriber the publish wakes nobody; the point is that
-        // `queue_for` indexes in range for every variant and boundary id.
         assert_eq_test!(BUS.publish(ev), 0, "idle publish wakes nobody");
         assert_test!(!BUS.publish_one(ev), "idle publish_one wakes nobody");
     }
@@ -100,14 +96,13 @@ slopos_testing::stest!(
 );
 
 /// AF_INET sockets past `MAX_SOCKETS` get their own queue, not a fold-mate's.
-/// A folded index stays correct — every waiter re-checks a predicate over its
-/// own socket — but wakes unrelated sockets, so the routing is asserted
-/// directly rather than the code shape.
+/// A folded index would still be correct — waiters re-check their predicate —
+/// but would wake unrelated sockets.
 pub fn test_event_socket_queues_do_not_alias() -> TestResult {
     use slopos_abi::net::MAX_SOCKET_SLOTS;
 
-    // The spine is allocated by the socket-create path; do it explicitly so
-    // this test does not depend on a socket having been made first.
+    // Normally allocated by the socket-create path; done explicitly so this
+    // test does not depend on a socket having been made first.
     assert_test!(
         slopos_ostd::sync::ensure_socket_queues_allocated(),
         "the per-socket wait-queue spine must allocate"
@@ -126,8 +121,8 @@ pub fn test_event_socket_queues_do_not_alias() -> TestResult {
         !BUS.shares_queue(recv(1), recv((MAX_SOCKET_SLOTS - 1) as u32)),
         "socket 1 and the last slab slot still share a queue"
     );
-    // The positive control: without it the checks above prove nothing about
-    // the comparison itself.
+    // Positive control: without it the checks above prove nothing about
+    // `shares_queue` itself.
     assert_test!(
         BUS.shares_queue(recv(7), recv(7)),
         "one socket must map to one queue"

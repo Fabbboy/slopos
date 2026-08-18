@@ -71,7 +71,7 @@ impl InterruptOverride {
             0 => Polarity::BusDefault,
             1 => Polarity::ActiveHigh,
             3 => Polarity::ActiveLow,
-            _ => Polarity::BusDefault, // reserved → treat as bus default
+            _ => Polarity::BusDefault,
         }
     }
 
@@ -81,7 +81,7 @@ impl InterruptOverride {
             0 => TriggerMode::BusDefault,
             1 => TriggerMode::Edge,
             3 => TriggerMode::Level,
-            _ => TriggerMode::BusDefault, // reserved → treat as bus default
+            _ => TriggerMode::BusDefault,
         }
     }
 }

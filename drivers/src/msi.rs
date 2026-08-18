@@ -87,19 +87,13 @@ impl MsiCapability {
 pub enum MsiError {
     /// The supplied vector number is below 32 (reserved for CPU exceptions).
     InvalidVector,
-    /// The device does not have an MSI capability.
     NoCapability,
 }
 
-// =============================================================================
-// Capability parsing
-// =============================================================================
-
 /// Read and parse the MSI capability structure for a PCI device.
 ///
-/// `cap_offset` is the config-space byte offset of the MSI capability header
-/// (obtained from [`PciDeviceInfo::msi_cap_offset`] or
-/// [`pci_find_capability`]).
+/// `cap_offset` is the config-space byte offset of the capability header, from
+/// [`PciDeviceInfo::msi_cap_offset`] or [`pci_find_capability`].
 pub fn msi_read_capability(bus: u8, dev: u8, func: u8, cap_offset: u16) -> MsiCapability {
     let control = pci_config_read16(bus, dev, func, cap_offset + MSI_REG_CONTROL);
     MsiCapability {
@@ -111,25 +105,11 @@ pub fn msi_read_capability(bus: u8, dev: u8, func: u8, cap_offset: u16) -> MsiCa
     }
 }
 
-// =============================================================================
-// Configuration
-// =============================================================================
-
 /// Configure MSI for a PCI device to deliver a single interrupt.
 ///
 /// Programs the MSI capability registers so that the device writes an MSI
 /// message targeting `target_apic_id` with interrupt `vector`.  Legacy INTx
-/// is disabled and MSI is enabled atomically at the end.
-///
-/// # Programming sequence
-///
-/// 1. Disable MSI (clear enable bit).
-/// 2. Write Message Address (LAPIC base + destination APIC ID).
-/// 3. Write Message Upper Address (always 0 on x86).
-/// 4. Write Message Data (vector + fixed delivery + edge trigger).
-/// 5. Set multi-message enable = 0 (single vector).
-/// 6. Disable legacy INTx in Command register.
-/// 7. Enable MSI.
+/// is disabled and MSI is enabled last.
 ///
 /// # Errors
 ///
@@ -148,12 +128,10 @@ pub fn msi_configure(
 
     let cap_off = cap.cap_offset;
 
-    // 1. Disable MSI while we reprogram the registers.
     let mut ctrl = pci_config_read16(bus, dev, func, cap_off + MSI_REG_CONTROL);
     ctrl &= !MSI_CTRL_ENABLE;
     pci_config_write16(bus, dev, func, cap_off + MSI_REG_CONTROL, ctrl);
 
-    // 2. Message Address — physical mode, target APIC ID.
     pci_config_write32(
         bus,
         dev,
@@ -162,12 +140,11 @@ pub fn msi_configure(
         msi_common::lapic_msg_addr(target_apic_id),
     );
 
-    // 3. Message Upper Address — always 0 on x86.
+    // Message Upper Address is always 0 on x86.
     if cap.is_64bit {
         pci_config_write32(bus, dev, func, cap_off + MSI_REG_ADDR_HI, 0);
     }
 
-    // 4. Message Data — vector, fixed delivery mode, edge triggered.
     pci_config_write16(
         bus,
         dev,
@@ -176,16 +153,14 @@ pub fn msi_configure(
         msi_common::lapic_msg_data(vector) as u16,
     );
 
-    // 5. Request exactly 1 vector (multi-message enable = 0).
+    // Multi-message enable = 0 requests exactly one vector.
     ctrl = pci_config_read16(bus, dev, func, cap_off + MSI_REG_CONTROL);
     ctrl &= !MSI_CTRL_ENABLE;
     ctrl &= !MSI_CTRL_MME_MASK;
     pci_config_write16(bus, dev, func, cap_off + MSI_REG_CONTROL, ctrl);
 
-    // 6. Disable legacy INTx.
     msi_common::disable_intx(bus, dev, func);
 
-    // 7. Enable MSI.
     ctrl |= MSI_CTRL_ENABLE;
     pci_config_write16(bus, dev, func, cap_off + MSI_REG_CONTROL, ctrl);
 

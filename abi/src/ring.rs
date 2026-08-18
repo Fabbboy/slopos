@@ -463,10 +463,9 @@ pub struct RingParams {
 
 const _: () = assert!(core::mem::size_of::<RingParams>() % 8 == 0);
 
-// The kernel copies `to_bytes()` straight into the user's `&mut RingParams`,
-// which userland reads back as a `#[repr(C)]` struct, so the wire image must
-// equal the in-memory layout — including the 4 bytes of implicit padding before
-// the first `u64`. Pin the offsets so a field reorder fails the build.
+// Userland reads back what the kernel copied as a `#[repr(C)]` struct, so the
+// wire image must equal the in-memory layout — including the 4 bytes of
+// implicit padding before the first `u64`.
 const _: () = assert!(core::mem::size_of::<RingParams>() == 80);
 const _: () = assert!(core::mem::offset_of!(RingParams, region_addr) == 64);
 const _: () = assert!(core::mem::offset_of!(RingParams, region_bytes) == 72);
@@ -497,8 +496,7 @@ impl RingParams {
     };
 
     /// Encode into the canonical little-endian byte image: every field at its
-    /// true `offset_of!` position, so the image is byte-identical to the
-    /// `#[repr(C)]` layout and padding bytes stay zero.
+    /// true `offset_of!` position, padding bytes left zero.
     pub fn to_bytes(&self) -> [u8; Self::SERIALIZED_LEN] {
         let mut b = [0u8; Self::SERIALIZED_LEN];
         macro_rules! put {
@@ -528,8 +526,7 @@ impl RingParams {
         b
     }
 
-    /// The exact inverse of [`RingParams::to_bytes`], reading each field from
-    /// its true `offset_of!` position regardless of padding.
+    /// The exact inverse of [`RingParams::to_bytes`].
     pub fn from_bytes(b: &[u8; Self::SERIALIZED_LEN]) -> Self {
         macro_rules! get32 {
             ($field:ident) => {{
@@ -578,8 +575,7 @@ const U32: u32 = 4;
 
 /// Computed offsets and sizes for a ring with `sq_entries` SQ slots. Kernel and
 /// userland both derive the region layout from this one function, so they
-/// cannot disagree: header → SQ control → CQ control → SQE array → CQE array,
-/// each sub-area 64-byte aligned (SLOPRING § 4.1).
+/// cannot disagree (SLOPRING § 4.1).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct RingLayout {
     pub sq_entries: u32,
@@ -599,7 +595,7 @@ pub struct RingLayout {
     pub region_bytes: u32,
 }
 
-/// Align `v` up to the next multiple of `a` (a power of two).
+/// `a` must be a power of two.
 const fn align_up(v: u32, a: u32) -> u32 {
     (v + (a - 1)) & !(a - 1)
 }
@@ -628,8 +624,7 @@ impl RingLayout {
         let cq_off_flags = cq_ctrl + 4 * U32;
 
         // Page-aligned: the region is backed by separate, possibly
-        // non-contiguous frames, and 64 divides 4096, so no SQE can straddle
-        // two of them.
+        // non-contiguous frames, and 64 divides 4096, so no SQE straddles two.
         let sqe_array_off = align_up(cq_ctrl + 4 * U32, 4096);
         let sqe_bytes = sq_entries * core::mem::size_of::<Sqe>() as u32;
 

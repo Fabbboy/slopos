@@ -275,10 +275,8 @@ pub fn get_pty_lock(idx: TtyIndex) -> Result<bool, TtyError> {
     Ok(tty.flags.contains(TtyFlags::SLAVE_LOCKED))
 }
 
-/// Check whether a PTY slave is currently locked.
-///
-/// Returns `true` if the slave at `idx` has `slave_locked == true`,
-/// `false` if unlocked or the slot is not a PTY slave.
+/// Whether the PTY slave at `idx` is locked; `false` if the slot is unlocked
+/// or is not a PTY slave.
 pub fn is_slave_locked(idx: TtyIndex) -> bool {
     let slot = idx.0 as usize;
     if slot >= MAX_TTYS {
@@ -291,7 +289,6 @@ pub fn is_slave_locked(idx: TtyIndex) -> bool {
     }
 }
 
-/// Resolve (and pin) the slave backing paired with the master at `idx`.
 fn resolve_slave_of_master(idx: TtyIndex) -> Result<KArc<TtyBacking>, TtyError> {
     let slot = idx.0 as usize;
     if slot >= MAX_TTYS {
@@ -305,14 +302,7 @@ fn resolve_slave_of_master(idx: TtyIndex) -> Result<KArc<TtyBacking>, TtyError> 
     }
 }
 
-// ---------------------------------------------------------------------------
-// PTY packet mode
-// ---------------------------------------------------------------------------
-
-/// Enable or disable packet mode on a PTY master.
-///
-/// `idx` must refer to a **master** FD.  When packet mode is disabled,
-/// any pending `packet_events` are cleared.
+/// Enable or disable packet mode; `idx` must refer to a **master** FD.
 pub fn set_packet_mode(idx: TtyIndex, enable: bool) -> Result<(), TtyError> {
     let slot = idx.0 as usize;
     if slot >= MAX_TTYS {
@@ -333,7 +323,6 @@ pub fn set_packet_mode(idx: TtyIndex, enable: bool) -> Result<(), TtyError> {
     Ok(())
 }
 
-/// Get the current packet mode state of a PTY master.
 pub fn get_packet_mode(idx: TtyIndex) -> Result<bool, TtyError> {
     let slot = idx.0 as usize;
     if slot >= MAX_TTYS {
@@ -349,18 +338,12 @@ pub fn get_packet_mode(idx: TtyIndex) -> Result<bool, TtyError> {
 }
 
 /// Queue packet event bits on the PTY master paired with a slave at `slave_idx`.
-///
-/// Resolves and pins the master through the slave's peer link, and ORs
-/// `event_bits` into the master's `packet_events` if packet mode is
-/// enabled. Wakes master readers and poll waiters so they see the pending
-/// events.
 pub fn queue_packet_event(slave_idx: TtyIndex, event_bits: u8) {
     let slot = slave_idx.0 as usize;
     if slot >= MAX_TTYS {
         return;
     }
 
-    // Resolve and pin the master through the slave's peer link.
     let master_pin = {
         let guard = TTY_SLOTS[slot].lock();
         let Some(tty) = guard.as_ref() else { return };

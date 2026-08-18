@@ -30,7 +30,6 @@ pub struct HhdmHost;
 
 impl AmlHost for HhdmHost {
     fn read_phys(&self, phys: u64, out: &mut [u8]) {
-        // Never leave `out` partially garbage, and never fault.
         for b in out.iter_mut() {
             *b = 0;
         }
@@ -47,13 +46,12 @@ impl AmlHost for HhdmHost {
             return;
         };
         // The HHDM covers usable RAM only, yet a SystemMemory OperationRegion
-        // can name BIOS-NVS or a reserved aperture: map any missing page
-        // read-only, and bail to zero rather than touch an unmapped one.
+        // can name BIOS-NVS or a reserved aperture.
         let mut page = virt & !0xfff;
         while page < end {
             if slopos_mm::paging::is_mapped(VirtAddr::new(page)) == 0 {
-                // Firmware memory the buddy has never owned and must never be
-                // handed, hence the IO mapping rather than an allocation.
+                // Firmware memory the buddy has never owned, hence an IO
+                // mapping rather than an allocation.
                 let _ = slopos_mm::kernel_mappings::kernel_map_io_4kb(
                     VirtAddr::new(page),
                     PhysAddr::new(page.wrapping_sub(off)),
@@ -399,7 +397,7 @@ fn process_device(
         return None;
     };
 
-    // `HID2` is the `_DSM` fn-1 value; 0x0001 is the I²C-HID default register.
+    // 0x0001 is the I²C-HID default descriptor register.
     let hid_desc_reg = interp
         .locals
         .get(&nameseg_key(b"HID2"))
@@ -655,7 +653,6 @@ fn process_platform_device(
             .map(|v| v.as_int() & 0x01 != 0),
     };
 
-    // `_INI` may patch the resource template.
     if let Some(ini) = members.ini {
         interp.run(ini.start, ini.end);
     }
@@ -684,7 +681,6 @@ fn process_platform_device(
     }
 }
 
-/// Matches either the string or the EISA-packed integer encoding.
 fn value_matches_any_id(aml: &[u8], pos: usize, ids: &[&[u8]]) -> bool {
     match parse_value(aml, pos) {
         Some(AmlVal::Str(s)) => ids.iter().any(|id| s.as_slice() == *id),

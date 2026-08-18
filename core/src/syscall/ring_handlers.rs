@@ -1,10 +1,8 @@
 //! SlopRing syscall handlers (SLOPRING § 6).
 //!
-//! `ring_setup` and `ring_enter` are both **synchronous** — they thread
-//! through the normal `define_syscall!` dispatch path with no executor
-//! turn. The heavy lifting lives in the `slopos-ring` crate; these
-//! handlers only marshal arguments and copy the `RingParams` header out
-//! to userland.
+//! `ring_setup` and `ring_enter` are both **synchronous**: normal
+//! `define_syscall!` dispatch, no executor turn. These handlers only marshal
+//! arguments; the work lives in the `slopos-ring` crate.
 
 use slopos_abi::Errno;
 use slopos_abi::ring::{BufIovec, RegisterBufRingCmd, RingParams, SLOPRING_MAX_FIXED_BUFFERS};
@@ -26,9 +24,8 @@ define_syscall!(syscall_ring_setup
     if params_ptr == 0 {
         return Err(Errno::EFAULT);
     }
-    // Pre-validate the out-pointer range so a bogus pointer fails before
-    // any kernel state is built (the ring_setup closure also re-checks
-    // on the actual copy).
+    // Redundant with the closure's own check, but fails a bogus pointer before
+    // any kernel state is built.
     let _ = MmUserBytes::try_new(params_ptr, core::mem::size_of::<RingParams>())
         .map_err(|_| Errno::EFAULT)?;
 
@@ -49,7 +46,6 @@ define_syscall!(syscall_ring_enter
     requires(let task_id: task_id, let process_id: process_id)
     -> Result<u64, Errno>
 {
-    // Resolve the ring fd → packed registry handle via the fd table.
     let (kind, handle) =
         slopos_fs::fileio::fileio_get_open_file_handle(process_id, ring_fd.raw())
             .ok_or(Errno::EBADF)?;
@@ -69,10 +65,8 @@ define_syscall!(syscall_ring_register
     requires(let process_id: process_id)
     -> Result<u64, Errno>
 {
-    // Registered / provided buffer registration (SLOPRING § 13, ABI v2). This
-    // handler owns user-copy: it marshals the typed argument into a private
-    // kernel copy and hands plain values to the ring crate. Validate ownership
-    // first so a foreign / non-ring fd fails -EBADF, not -ENOSYS.
+    // SLOPRING § 13, ABI v2. Ownership is checked ahead of `op` so a foreign or
+    // non-ring fd fails EBADF rather than ENOSYS.
     let (kind, handle) =
         slopos_fs::fileio::fileio_get_open_file_handle(process_id, ring_fd.raw())
             .ok_or(Errno::EBADF)?;
@@ -88,8 +82,8 @@ define_syscall!(syscall_ring_register
             if arg == 0 {
                 return Err(Errno::EFAULT);
             }
-            // Pre-validate the whole array range, then snapshot each iovec into
-            // a kernel-owned (addr, len) list — never a &T over user memory.
+            // Snapshotted into a kernel-owned (addr, len) list; never a `&T`
+            // over user memory.
             let total = nr_args as usize * BufIovec::SERIALIZED_LEN;
             let _ = MmUserBytes::try_new(arg, total).map_err(|_| Errno::EFAULT)?;
             let mut iovecs: KVec<(u64, u32)> =

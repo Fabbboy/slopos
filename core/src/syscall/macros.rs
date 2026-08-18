@@ -43,7 +43,7 @@ macro_rules! define_syscall {
 
     // The body runs inside a `move` closure returning the user-declared `$ret`,
     // so it can use both `?` on `Result<_, Errno>` and `return Err(errno)` with
-    // natural variant names; `IntoSyscallResult` converts the closure's result.
+    // natural variant names.
     ($name:ident ( $ctx:ident ) -> $ret:ty $body:block) => {
         #[allow(unused_variables)]
         pub fn $name(

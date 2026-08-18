@@ -343,9 +343,8 @@ pub fn msix_disable(bus: u8, dev: u8, func: u8, cap: &MsixCapability) {
     klog_info!("MSI-X: Disabled for BDF {}:{}.{}", bus, dev, func);
 }
 
-/// Set the function-level mask for all MSI-X table entries.
-///
-/// Allows reconfiguring several entries without spurious interrupts.
+/// Masks every entry at once, so several can be reconfigured without spurious
+/// interrupts.
 pub fn msix_set_function_mask(bus: u8, dev: u8, func: u8, cap: &MsixCapability) {
     let cap_off = cap.cap_offset;
     let mut ctrl = pci_config_read16(bus, dev, func, cap_off + MSIX_REG_CONTROL);
@@ -353,7 +352,6 @@ pub fn msix_set_function_mask(bus: u8, dev: u8, func: u8, cap: &MsixCapability) 
     pci_config_write16(bus, dev, func, cap_off + MSIX_REG_CONTROL, ctrl);
 }
 
-/// Clear the function-level mask for all MSI-X table entries.
 pub fn msix_clear_function_mask(bus: u8, dev: u8, func: u8, cap: &MsixCapability) {
     let cap_off = cap.cap_offset;
     let mut ctrl = pci_config_read16(bus, dev, func, cap_off + MSIX_REG_CONTROL);
@@ -361,7 +359,6 @@ pub fn msix_clear_function_mask(bus: u8, dev: u8, func: u8, cap: &MsixCapability
     pci_config_write16(bus, dev, func, cap_off + MSIX_REG_CONTROL, ctrl);
 }
 
-/// Re-read the Message Control register to refresh capability state.
 pub fn msix_refresh_control(bus: u8, dev: u8, func: u8, cap: &mut MsixCapability) {
     cap.control = pci_config_read16(bus, dev, func, cap.cap_offset + MSIX_REG_CONTROL);
 }

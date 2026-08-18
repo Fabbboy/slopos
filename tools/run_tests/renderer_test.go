@@ -20,9 +20,6 @@ func recorderFromLines(lines []string) *RunRecorder {
 	return rec
 }
 
-// Timeout + klog-tail diagnostic: when the run aborts (timeout, silence,
-// truncation) the renderer dumps the parser's recent non-KTAP klog above
-// the abort banner so CI failures aren't context-free.
 func TestRendererTimeoutDumpsKlogTail(t *testing.T) {
 	lines := []string{
 		"KTAP\tTAP version 14",
@@ -61,7 +58,6 @@ func TestRendererTimeoutDumpsKlogTail(t *testing.T) {
 	}
 }
 
-// Smoke test: green run renders summary line, no failure block.
 func TestRendererGreenRunSummary(t *testing.T) {
 	lines := []string{
 		"KTAP\tTAP version 14",

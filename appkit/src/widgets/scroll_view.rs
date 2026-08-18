@@ -150,8 +150,8 @@ impl ScrollViewWidget {
         thumb.contains(px, py)
     }
 
-    /// Every offset change routes through here, so the child's rect and the
-    /// offset can never disagree.
+    /// Every offset change routes through here, so rect and offset cannot
+    /// disagree.
     fn place_child(&mut self) {
         let rect = self.layout_rect();
         place_widget(

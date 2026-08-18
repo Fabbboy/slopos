@@ -90,8 +90,8 @@ pub fn test_kcon_registry_is_populated() -> TestResult {
     TestResult::Pass
 }
 
-/// No two commands claim the same key — the linker concatenates colliding
-/// entries happily, and at runtime one key then produces two dumps.
+/// The linker concatenates colliding registry entries happily; at runtime one
+/// key then produces two dumps.
 pub fn test_kcon_keys_are_unique() -> TestResult {
     let cmds = kconsole::commands();
     for (i, a) in cmds.iter().enumerate() {
@@ -109,9 +109,8 @@ pub fn test_kcon_keys_are_unique() -> TestResult {
     TestResult::Pass
 }
 
-/// Every command declares exactly one class: the mask is a bitwise test, so an
-/// entry with no class bit never runs and one with both runs under the
-/// informational-only default.
+/// The mask is a bitwise test: an entry with no class bit never runs, and one
+/// with both runs under the informational-only default.
 pub fn test_kcon_flags_are_exclusive() -> TestResult {
     for cmd in kconsole::commands() {
         let class = cmd.flags & (KCMD_INFORMATIONAL | KCMD_DESTRUCTIVE);
@@ -126,7 +125,6 @@ pub fn test_kcon_flags_are_exclusive() -> TestResult {
     TestResult::Pass
 }
 
-/// A request reaches its command through the real bottom half.
 pub fn test_kcon_end_to_end_via_bottom_half() -> TestResult {
     with_policy(KConfig::defaults(), || {
         let before = PROBE_RUNS.load(Ordering::Relaxed);
@@ -143,7 +141,6 @@ pub fn test_kcon_end_to_end_via_bottom_half() -> TestResult {
     })
 }
 
-/// Queuing the same command twice before a drain runs it once.
 pub fn test_kcon_request_is_idempotent() -> TestResult {
     with_policy(KConfig::defaults(), || {
         let before = PROBE_RUNS.load(Ordering::Relaxed);
@@ -161,7 +158,6 @@ pub fn test_kcon_request_is_idempotent() -> TestResult {
     })
 }
 
-/// The line budget stops a command that would otherwise flood the console.
 pub fn test_kcon_budget_truncates() -> TestResult {
     let cfg = KConfig {
         max_lines: 8,
@@ -182,8 +178,8 @@ pub fn test_kcon_budget_truncates() -> TestResult {
     })
 }
 
-/// A disabled console queues nothing — the mask is checked at `request`, so a
-/// trigger never reaches the registry at all.
+/// The mask is checked at `request`, so a trigger never reaches the registry
+/// at all.
 pub fn test_kcon_disabled_drops_requests() -> TestResult {
     let off = KConfig {
         mask: 0,
@@ -204,7 +200,6 @@ pub fn test_kcon_disabled_drops_requests() -> TestResult {
     TestResult::Pass
 }
 
-/// A destructive command is refused unless the mask names its class.
 pub fn test_kcon_destructive_needs_the_mask_bit() -> TestResult {
     let refused = with_policy(KConfig::defaults(), || {
         let before = DESTRUCTIVE_RUNS.load(Ordering::Relaxed);
@@ -232,7 +227,6 @@ pub fn test_kcon_destructive_needs_the_mask_bit() -> TestResult {
     TestResult::Pass
 }
 
-/// An unrecognised key is handled rather than dropped.
 pub fn test_kcon_unknown_key_is_consumed() -> TestResult {
     with_policy(KConfig::defaults(), || {
         let before = PROBE_RUNS.load(Ordering::Relaxed);
@@ -250,8 +244,7 @@ pub fn test_kcon_unknown_key_is_consumed() -> TestResult {
     })
 }
 
-/// The console's addresses come back symbolized — the build-time symbol table
-/// can fail open into an empty one.
+/// The build-time symbol table can fail open into an empty one.
 pub fn test_kcon_kernel_text_symbolizes() -> TestResult {
     let probe: fn() -> TestResult = test_kcon_kernel_text_symbolizes;
     let addr = probe as usize as u64;
@@ -262,8 +255,8 @@ pub fn test_kcon_kernel_text_symbolizes() -> TestResult {
     }
 }
 
-/// A command's output actually reaches the log ring. Everything else here only
-/// proves dispatch worked, and `log_forced` bypasses the level filter.
+/// Everything else here only proves dispatch worked; `log_forced` bypasses the
+/// level filter.
 pub fn test_kcon_output_reaches_the_log_ring() -> TestResult {
     const MARKER: &[u8] = b"kconsole probe line 0";
     const WINDOW: usize = 8192;
