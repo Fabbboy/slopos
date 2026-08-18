@@ -1,23 +1,5 @@
-//! TLB (Translation Lookaside Buffer) Shootdown Implementation
-//!
-//! This module provides cross-CPU TLB invalidation for SMP systems.
-//! When page table entries are modified (unmap, permission change, etc.),
-//! we must ensure all CPUs invalidate their cached translations.
-//!
-//! # Architecture
-//!
-//! On uniprocessor systems, a simple `invlpg` instruction suffices.
-//! On SMP systems, we must:
-//! 1. Invalidate on the local CPU
-//! 2. Send IPIs to all other CPUs
-//! 3. Wait for acknowledgment before returning
-//!
-//! # Optimizations
-//!
-//! - INVPCID instruction support for more efficient invalidation
-//! - Batched flushes to reduce IPI overhead
-//! - Full CR3 reload for large ranges (cheaper than many invlpg)
-//! - Per-address-space invalidation via PCID (when available)
+//! Cross-CPU TLB invalidation: a page-table change is not complete until
+//! every CPU that may have cached the translation has invalidated it.
 
 use core::ptr;
 use core::sync::atomic::{AtomicBool, AtomicPtr, AtomicU32, AtomicU64, Ordering};
@@ -33,26 +15,18 @@ use slopos_ostd::{klog_debug, klog_info, klog_warn};
 use crate::memory_layout_defs::MAX_PROCESSES;
 use crate::paging_defs::PAGE_SIZE_4KB;
 
-/// Function pointer type for sending TLB shootdown IPI.
-/// Called with the IPI vector number.
+/// Sends a TLB-shootdown IPI; the argument is the IPI vector number.
 pub type SendIpiFn = fn(u8);
 
-/// Registered IPI sender function (set by drivers/apic during init).
 static IPI_SENDER: AtomicPtr<()> = AtomicPtr::new(ptr::null_mut());
 
-/// Register the IPI sender function.
-/// Must be called from the APIC driver during initialization.
+/// Must be called by the APIC driver during initialization.
 pub fn register_ipi_sender(sender: SendIpiFn) {
     IPI_SENDER.store(sender as *mut (), Ordering::Release);
     klog_debug!("TLB: IPI sender registered");
 }
 
-// =============================================================================
-// Configuration Constants
-// =============================================================================
-
-/// Maximum number of pages to invalidate individually before switching to full flush.
-/// Beyond this threshold, a full TLB flush (CR3 reload) is cheaper.
+/// Above this many pages, a full flush (CR3 reload) beats per-page invlpg.
 const INVLPG_THRESHOLD: usize = 32;
 
 pub use slopos_arch::arch::idt::TLB_SHOOTDOWN_VECTOR;
@@ -65,21 +39,13 @@ pub struct TlbShootdownTimeout {
 
 type TlbResult = Result<(), TlbShootdownTimeout>;
 
-// =============================================================================
-// CPU Feature Detection
-// =============================================================================
-
 use slopos_arch::cpu::cpuid::{
     CPUID_FEAT_ECX_PCID, CPUID_LEAF_FEATURES, CPUID_LEAF_STRUCTURED_EXT, CPUID_SEXT_EBX_INVPCID,
 };
 
-/// Cached CPU feature flags for TLB operations.
 struct TlbFeatures {
-    /// CPU supports INVPCID instruction.
     invpcid_supported: AtomicBool,
-    /// CPU supports PCID (CR4.PCIDE).
     pcid_supported: AtomicBool,
-    /// Features have been detected.
     initialized: AtomicBool,
 }
 
@@ -120,7 +86,6 @@ fn detect_features() {
     );
 }
 
-/// Check if INVPCID instruction is available.
 #[inline]
 pub fn has_invpcid() -> bool {
     if !TLB_FEATURES.initialized.load(Ordering::Acquire) {
@@ -129,7 +94,6 @@ pub fn has_invpcid() -> bool {
     TLB_FEATURES.invpcid_supported.load(Ordering::Relaxed)
 }
 
-/// Check if PCID is available.
 #[inline]
 pub fn has_pcid() -> bool {
     if !TLB_FEATURES.initialized.load(Ordering::Acquire) {
@@ -138,72 +102,25 @@ pub fn has_pcid() -> bool {
     TLB_FEATURES.pcid_supported.load(Ordering::Relaxed)
 }
 
-// =============================================================================
-// SMP State Tracking
-// =============================================================================
-
-// =============================================================================
-// Per-target slot: lock-protected pending op + ack flag.
-//
-// Design (cf. Asterinas `ostd/src/mm/tlb.rs`, Redox `src/percpu.rs`):
-//
-// Each target CPU has a slot containing a `SpinLock<PendingTlbReq>` and an
-// `AtomicBool` ack. The shootdown protocol holds the lock across BOTH the
-// initiator's "push request + clear ACK" and the handler's "take request +
-// set ACK" critical sections. That serialisation is the entire trick.
-//
-// Why the previous design hung:
-//
-//   1. CPU 0 sets cpu_state[2].ack=false, sends IPI to 2
-//   2. CPU 1 concurrently sets cpu_state[2].ack=false (still false), sends IPI
-//   3. LAPIC coalesces the two IPIs into one delivery on CPU 2
-//   4. CPU 2's single handler invocation does `ack=true`
-//   5. CPU 1 wins the read race, sees ack=true, **stores ack=false** and exits
-//   6. CPU 0 reads ack=false; spins forever — no further IPI will ever arrive
-//
-// The new protocol's invariants:
-//
-//   * `ack` transitions to `false` are written ONLY by `queue_request_for_cpu`,
-//     which holds `queue.lock` for the entire push+clear sequence.
-//   * `ack` transitions to `true` are written ONLY by `handle_shootdown_ipi`,
-//     which holds the same lock for the entire take+set sequence.
-//   * `wait_for_acks` is a pure reader (Acquire load); it does NOT reset ack.
-//
-// So two initiators interleave at the lock; the handler's invocation drains
-// the merged queue and stamps `ack=true`; both initiators' subsequent reads
-// observe the same `true`. A coalesced IPI delivers ONE handler invocation,
-// but that one invocation has the merged work for ALL initiators, so per-
-// initiator visibility is preserved.
-// =============================================================================
-
-/// Pending TLB-flush request in a per-target slot.
-///
-/// We merge concurrent requests in place instead of queueing them. If the
-/// slot is already non-empty when a second initiator pushes, the merged
-/// result is promoted to `Full` — coarser than the asterinas per-op stack
-/// (their threshold for full-flush promotion is 32 ops; ours is 2) but
-/// trivially correct under contention. Single-op pushes preserve their
-/// shape, so the common case is unchanged.
+/// Merged pending flush for one target CPU; a second push promotes to `Full`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum PendingFlush {
-    /// Slot is empty.
     None,
-    /// Flush exactly one page at `start`. Kept separate from `Range`
-    /// because the highest user page (`start = 0x7FFFFFFFFFFFF000`) would
-    /// produce `end = 0x8000000000000000`, which is non-canonical on
-    /// x86-64 and panics `VirtAddr::new`. Storing only `start` sidesteps
-    /// that without needing a non-panicking VirtAddr variant.
-    SinglePage { start: u64 },
-    /// Flush every page in `[start, end)`. Caller guarantees `start < end`
-    /// and `end` is canonical.
-    Range { start: u64, end: u64 },
-    /// Flush all TLB entries (CR3 reload).
+    /// Separate from `Range` because the highest user page would give an `end`
+    /// of 0x8000000000000000, which is non-canonical and panics `VirtAddr::new`.
+    SinglePage {
+        start: u64,
+    },
+    /// Flush `[start, end)`. Caller guarantees `start < end` and canonical `end`.
+    Range {
+        start: u64,
+        end: u64,
+    },
     Full,
 }
 
-/// `op` paired with the ASID it targets. `asid == 0` means "any address
-/// space" (the handler always flushes); a non-zero `asid` means the handler
-/// only flushes if its local CR3 currently matches `asid & !0xFFF`.
+/// `asid == 0` means "any address space"; a non-zero `asid` is flushed only by
+/// a CPU whose live CR3 matches `asid & !0xFFF`.
 struct PendingTlbReq {
     op: PendingFlush,
     asid: u64,
@@ -217,8 +134,6 @@ impl PendingTlbReq {
         }
     }
 
-    /// Merge a fresh request into the slot. Single-op stays as-is; any
-    /// second push promotes to `Full`, and mismatched ASIDs widen to 0.
     fn push(&mut self, op: PendingFlush, asid: u64) {
         match self.op {
             PendingFlush::None => {
@@ -234,7 +149,6 @@ impl PendingTlbReq {
         }
     }
 
-    /// Empty the slot, returning the merged op + asid.
     fn take(&mut self) -> (PendingFlush, u64) {
         let op = core::mem::replace(&mut self.op, PendingFlush::None);
         let asid = core::mem::replace(&mut self.asid, 0);
@@ -242,34 +156,22 @@ impl PendingTlbReq {
     }
 }
 
-/// Per-CPU TLB shootdown slot. One per target CPU.
+/// Per-CPU TLB shootdown slot.
 ///
-/// `queue` carries the merged pending request, written only under the lock.
-/// `ack` is the per-target completion flag — handler stores `true` under the
-/// queue lock; initiator clears `false` under the queue lock; `wait_for_acks`
-/// reads (Acquire) and never writes. See the file-level comment for the race
-/// this protocol closes.
-#[repr(C, align(64))] // Cache line aligned to prevent false sharing
+/// `ack` is set `true` only by the handler and cleared only by an initiator's
+/// push, both under `queue`'s lock; `wait_for_acks` is a pure reader. That
+/// serialisation is what keeps a LAPIC-coalesced IPI from letting one
+/// initiator clear an ack another has already consumed.
+#[repr(C, align(64))]
 struct PerCpuTlbState {
-    /// Lock-protected pending request (see `PendingTlbReq`).
     queue: SpinLock<PendingTlbReq>,
-    /// Per-target ack flag. Set `true` by handler under `queue` lock after
-    /// `take`; cleared `false` by initiator under `queue` lock after `push`.
-    /// `wait_for_acks` is a pure reader and MUST NOT write this.
     ack: AtomicBool,
-    /// Lazy-TLB optimisation (orthogonal to the ack protocol). True when this
-    /// CPU is running a kernel/idle task and can skip user-mode TLB flushes.
+    /// True while this CPU runs a kernel/idle task and can skip user flushes.
     is_lazy: AtomicBool,
-    /// Process currently loaded on this CPU (or `INVALID_PROCESS_ID`).
-    /// Read lock-free by `notify_mm_switch` and `current_process_on_cpu`.
+    /// Process loaded on this CPU, or `INVALID_PROCESS_ID`.
     current_process_id: AtomicU32,
-    /// Shootdown key of the address space currently loaded on this CPU,
-    /// as `slot + 1`; 0 means none.
-    ///
-    /// Stored so that switching *away* from an address space costs no
-    /// lookup: `notify_mm_switch` runs on every context switch, and the
-    /// key the outgoing side needs is the one this CPU published when it
-    /// switched in.
+    /// Shootdown key of the address space loaded on this CPU, as `slot + 1`;
+    /// 0 means none.
     current_process_key: AtomicU32,
 }
 
@@ -280,9 +182,7 @@ impl PerCpuTlbState {
                 PendingTlbReq::new(),
                 lock_class!("PerCpuTlbState.queue", LOCK_LEVEL_UNORDERED),
             ),
-            // Start "ack=true" so a `wait_for_acks` issued before any push
-            // returns immediately (cf. asterinas `ACK_REMOTE_FLUSH = true`
-            // initial value). Real waits always queue+clear first.
+            // Initial `true`: a wait issued before any push must not block.
             ack: AtomicBool::new(true),
             is_lazy: AtomicBool::new(false),
             current_process_id: AtomicU32::new(INVALID_PROCESS_ID),
@@ -406,12 +306,9 @@ impl Iterator for CpuMaskIter {
     }
 }
 
-/// Per-process shootdown tracking.
-///
-/// Tracks only which CPUs currently hold a mapping for a process, so
-/// broadcast flushes (`flush_all_for_process`) can target the cpumask
-/// instead of every online CPU. Cross-CPU coherence for individual
-/// page unmaps lives in `mm::mmu::luf`.
+/// CPUs holding a mapping for a process, so a broadcast flush can target the
+/// mask rather than every online CPU. Per-page unmap coherence lives in
+/// `mm::mmu::luf`.
 struct ProcessTlbInfo {
     cpumask: CpuMask,
 }
@@ -431,16 +328,12 @@ static PROCESS_TLB_INFO: [ProcessTlbInfo; MAX_PROCESSES] = {
 
 /// A bounds-proved index into the per-process shootdown table.
 ///
-/// The table is keyed by address-space *slot*, which is what it is as
-/// wide as, so a key that exists at all indexes it totally: there is no
-/// "no entry for this process" arm for a flush to mistake for "nothing to
-/// do". The only way to fail is at the mint, where a process id that
-/// names no live address space is a fact the caller can act on.
+/// Minting is the only fallible step, so a key that exists indexes the table
+/// totally and no flush path has a "no entry" arm to mistake for "nothing to do".
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct TlbProcessKey(u32);
 
 impl TlbProcessKey {
-    /// Mint a key from an address-space slot index.
     pub fn from_slot(slot: u32) -> Option<Self> {
         if (slot as usize) < MAX_PROCESSES {
             Some(Self(slot))
@@ -468,21 +361,14 @@ pub fn unregister_process_tlb(key: TlbProcessKey) {
     process_tlb_info(key).cpumask.clear_all();
 }
 
-/// How many CPUs currently hold a mapping for `process_id`.
-///
-/// The shootdown mask is otherwise write-only from outside this module;
-/// this is what lets a test assert that a destroyed process leaves no CPU
-/// behind for the next holder of its id to shoot down.
+/// Test hook: the shootdown mask is otherwise write-only outside this module.
 #[cfg(feature = "test-hooks")]
 pub fn process_tlb_cpumask_count(key: TlbProcessKey) -> u32 {
     process_tlb_info(key).cpumask.count()
 }
 
-/// Record that `cpu_id` is switching into `new_key`'s address space (or
-/// out of any address space, when it is `None`).
-///
-/// One lookup per switch, on the incoming side only: the outgoing side's
-/// key is the one this CPU stored the last time it switched in.
+/// Record that `cpu_id` is switching into `new_key`'s address space, or out of
+/// any address space when `new_key` is `None`.
 pub fn notify_mm_switch(new_key: Option<TlbProcessKey>, new_process_id: u32, cpu_id: usize) {
     if cpu_id >= MAX_CPUS {
         return;
@@ -511,17 +397,12 @@ pub fn current_process_on_cpu(cpu: usize) -> u32 {
         .load(Ordering::Relaxed)
 }
 
-/// Flush request types.
 #[repr(u32)]
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum FlushType {
-    /// No pending flush.
     None = 0,
-    /// Flush a single page.
     SinglePage = 1,
-    /// Flush a range of pages.
     Range = 2,
-    /// Flush entire TLB (all entries).
     Full = 3,
 }
 
@@ -536,13 +417,10 @@ impl From<u32> for FlushType {
     }
 }
 
-/// Global TLB shootdown state.
 struct TlbShootdownState {
-    /// Per-CPU flush request state.
     cpu_state: [PerCpuTlbState; MAX_CPUS],
-    /// Bitmask of CPUs that are fully online and can handle TLB IPIs.
+    /// CPUs online far enough to service TLB IPIs.
     online_cpus: CpuMask,
-    /// Global sequence number for ordering.
     sequence: AtomicU64,
 }
 
@@ -566,9 +444,8 @@ fn flush_tlb_local_full() {
     crate::mmu::asid::flush_local_all_contexts();
 }
 
-/// Flush this CPU's entire TLB locally (no IPI). Used by an AP joining
-/// the shootdown-target set to discard any stale translation cached
-/// while it was not yet a target, before it runs any task.
+/// Local-only full flush (no IPI): an AP joining the shootdown-target set
+/// drops translations cached while it was not yet a target.
 #[inline]
 pub fn flush_local_all() {
     flush_tlb_local_full();
@@ -579,11 +456,6 @@ fn flush_page_local(vaddr: VirtAddr) {
     cpu::invlpg(vaddr.as_u64());
 }
 
-// User-address unmap flushes go through `mm::mmu::luf::queue_unmap`
-// rather than a per-process generation bump. Kept as a private alias
-// above (`flush_page_local`) for the shootdown-handler path only.
-
-/// Flush a range of pages on the local CPU.
 fn flush_range_local(start: VirtAddr, end: VirtAddr) {
     let start_addr = start.as_u64();
     let end_addr = end.as_u64();
@@ -606,11 +478,6 @@ fn flush_range_local(start: VirtAddr, end: VirtAddr) {
     }
 }
 
-// =============================================================================
-// IPI-Based Shootdown (SMP)
-// =============================================================================
-
-/// Check if we're running in SMP mode (more than one CPU active).
 #[inline]
 pub fn is_smp_active() -> bool {
     TLB_STATE.online_cpus.count() > 1
@@ -621,11 +488,7 @@ pub fn get_active_cpu_count() -> u32 {
     TLB_STATE.online_cpus.count()
 }
 
-/// Notify the TLB subsystem that a new CPU is online.
-///
-/// Called during AP startup after the CPU's topology has been registered
-/// via `slopos_arch::pcr::init_ap_pcr`. This only updates the TLB
-/// shootdown active-CPU count; topology lives in `slopos_arch::pcr`.
+/// Must run after the CPU's topology is registered (`pcr::init_ap_pcr`).
 pub fn notify_cpu_online_id(cpu: usize) {
     TLB_STATE.online_cpus.set(cpu);
 }
@@ -646,11 +509,8 @@ fn send_shootdown_ipi_to_cpu(cpu_idx: usize) {
     slopos_arch::pcr::send_ipi_to_cpu(apic_id, TLB_SHOOTDOWN_VECTOR);
 }
 
-/// Send the TLB-shootdown IPI to each target CPU individually instead
-/// of broadcasting. Per-target sends queue independently in each
-/// LAPIC's IRR so two concurrent initiators don't risk LAPIC-level
-/// coalescing of their wake signals — empirically observed to be the
-/// remaining failure mode after the per-target-queue race fix.
+/// Per-target sends, never a broadcast: each LAPIC queues its own IRR entry, so
+/// two concurrent initiators' wakes cannot coalesce at the LAPIC.
 fn send_shootdown_ipi_per_target(targets: impl IntoIterator<Item = usize>) {
     for cpu_idx in targets {
         send_shootdown_ipi_to_cpu(cpu_idx);
@@ -658,68 +518,38 @@ fn send_shootdown_ipi_per_target(targets: impl IntoIterator<Item = usize>) {
 }
 
 fn wait_for_acks(targets: impl IntoIterator<Item = usize>, initiator_cpu: usize) -> TlbResult {
-    // Interrupt-flag discipline: this wait runs with whatever IF state the
-    // caller established and NEVER force-enables interrupts. Callers
-    // legitimately hold IRQ-disabling SpinLocks across a flush (the COW
-    // path's flush-before-reuse ordering, munmap under the VM lock);
-    // force-enabling IF inside that window would break the lock's
-    // IRQ-safety contract (an IRQ-exit path that takes the same lock on
-    // this CPU would self-deadlock). Deadlock freedom is instead provided
-    // by polling: every spin iteration services OUR own pending shootdown
-    // queue (`service_local_shootdown_queue`), and every contended
-    // SpinLock waiter kernel-wide does the same via the OSTD spin relax
-    // hook — so the target of our wait can always ack, even if it is
-    // spinning IRQs-off on a lock we hold.
+    // Runs with whatever IF the caller established and never force-enables:
+    // callers legitimately hold IRQ-disabling SpinLocks across a flush. Deadlock
+    // freedom comes from polling — this loop and every contended SpinLock waiter
+    // service their own shootdown queue between spins.
     let mut result = Ok(());
     'targets: for cpu_idx in targets {
         if cpu_idx >= MAX_CPUS || cpu_idx == initiator_cpu {
             continue;
         }
 
-        // Re-send the shootdown IPI if the ack does not arrive within a
-        // bounded spin. A single IPI delivery is NOT trustworthy: under
-        // interaction load the initiator's LAPIC ICR can stay busy past
-        // `wait_icr_idle`'s poll cap (the send then proceeds but the edge
-        // may be dropped), and a coalescing/timing edge can leave a target
-        // that never runs the handler — the request stays queued, `ack`
-        // stays false, and the initiator spins forever (observed live:
-        // CPU0 wedged in this loop on the munmap path while every peer sat
-        // idle-HLT). Re-sending is idempotent and safe: the request is
-        // still queued, so the handler `take`s it and stamps `ack=true`;
-        // if it was already handled, `take` returns `None` and the store
-        // is a harmless no-op. This converts a lost IPI from an unbounded
-        // hang into a few-millisecond recovery.
+        // One IPI delivery is not trustworthy: a busy ICR or a coalescing edge
+        // can leave the request queued with no handler run. Re-sending is
+        // idempotent — an already-handled slot `take`s to nothing.
         const RESEND_SPIN: u64 = 1_000_000;
         const MAX_RESENDS: u64 = 256; // bounded recovery (~seconds) before declaring the CPU dead
         let mut spin_count: u64 = 0;
         let mut resends: u64 = 0;
         while !TLB_STATE.cpu_state[cpu_idx].ack.load(Ordering::Acquire) {
-            // Reliable Abort Core interlock: once any CPU is driving a fatal
-            // panic, abandon the wait. A panicking initiator must not spin on
-            // an ack from a CPU it is about to NMI-stop, and a non-panicking
-            // initiator is unblocked by the stop handler's force-ack. Without
-            // this, the panicking CPU wedges here behind a peer in its own
-            // panic — the exact cross-CPU lockup the abort core dissolves.
+            // Abandon the wait once any CPU owns a fatal panic: a panicking
+            // initiator must not spin on a CPU it is about to NMI-stop.
             if slopos_ostd::panic::panic_owner_claimed() {
                 break 'targets;
             }
-            // Stay ack-capable while we wait (see the IF-discipline note
-            // above): drain our own pending shootdown request so a peer
-            // initiator spinning on us completes.
             service_local_shootdown_queue();
             spin_count = spin_count.wrapping_add(1);
             if spin_count >= RESEND_SPIN {
                 spin_count = 0;
                 resends += 1;
                 if resends > MAX_RESENDS {
-                    // The target ignored thousands of re-sent IPIs across
-                    // several seconds. With the relax hook in place a CPU
-                    // spinning on ANY SpinLock still acks, so this means
-                    // the target is genuinely wedged (IRQs-off loop outside
-                    // a tracked lock, or hardware-level lost). NMI it so
-                    // its own watchdog handler dumps the wedged context —
-                    // the diagnosis would otherwise be unrecoverable — then
-                    // surface the fault to the caller.
+                    // A CPU spinning on any SpinLock still acks via the relax
+                    // hook, so the target is genuinely wedged; NMI it so its
+                    // watchdog handler dumps the context.
                     klog_warn!(
                         "TLB: CPU {} never acked shootdown after {} re-sends; giving up",
                         cpu_idx,
@@ -738,11 +568,9 @@ fn wait_for_acks(targets: impl IntoIterator<Item = usize>, initiator_cpu: usize)
                             held[3],
                         );
                     }
-                    // Arm the probe before sending, so the target's handler
-                    // reports the shootdown it owes rather than classifying
-                    // the NMI as unsolicited. A refused arm means a
-                    // watchdog probe is already in flight and will produce
-                    // the same dump.
+                    // Arm before sending, or the target classifies the NMI as
+                    // unsolicited; a refused arm means a probe is already in
+                    // flight.
                     if slopos_ostd::watchdog::arm_probe(
                         cpu_idx,
                         slopos_ostd::watchdog::NmiDisposition::TlbLadder,
@@ -755,32 +583,22 @@ fn wait_for_acks(targets: impl IntoIterator<Item = usize>, initiator_cpu: usize)
                     result = Err(TlbShootdownTimeout { cpu_idx, resends });
                     break 'targets;
                 }
-                // Re-arm: the request is still in the slot if unhandled.
                 send_shootdown_ipi_to_cpu(cpu_idx);
             }
             cpu::pause();
         }
 
-        // DELIBERATELY no `ack.store(false)` here. The lock-protected
-        // push (in `queue_request_for_cpu`) is the sole writer that
-        // transitions ack from true→false. If we reset here, a second
-        // initiator that has already read `true` could see our `false`
-        // and spin forever waiting for an IPI handler that already ran.
-        // See the file-level race description.
+        // Deliberately no `ack.store(false)` here: only the lock-protected push
+        // transitions ack true→false (see `PerCpuTlbState`).
     }
 
     result
 }
 
-/// Poll-service this CPU's pending shootdown request, if any. The lock-free
-/// `ack` fast path makes this cheap enough for spin loops: a single Acquire
-/// load when nothing is pending. Registered as the OSTD contended-spin
-/// relax hook at [`init`] and polled by [`wait_for_acks`], so a CPU that is
-/// busy-waiting — on any SpinLock, or on its own shootdown acks — still
-/// acknowledges incoming shootdowns. This is what makes it safe to issue a
-/// remote flush while holding an IRQ-disabling lock (e.g. the COW path's
-/// flush under the per-process VM lock): the peer spinning on that lock
-/// services us from inside its spin.
+/// Service this CPU's pending shootdown, if any. Registered as the OSTD
+/// contended-spin relax hook in [`init`] and polled by [`wait_for_acks`], so a
+/// CPU busy-waiting on any SpinLock still acks — which is what makes a remote
+/// flush safe to issue while holding an IRQ-disabling lock.
 pub fn service_local_shootdown_queue() {
     let cpu_idx = slopos_arch::pcr::get_current_cpu();
     if cpu_idx >= MAX_CPUS {
@@ -788,18 +606,12 @@ pub fn service_local_shootdown_queue() {
     }
     let slot = &TLB_STATE.cpu_state[cpu_idx];
     if slot.ack.load(Ordering::Acquire) {
-        return; // nothing pending
+        return;
     }
-    // try_lock, NOT lock: this runs from inside contended-spin loops —
-    // including the spin in `handle_shootdown_ipi`'s own queue.lock()
-    // when the real IPI handler races a remote initiator's push. A
-    // blocking lock here would take a second ticket on the same ticket
-    // lock beneath the outer acquisition's unserved ticket and deadlock
-    // this CPU against itself (observed live as a watchdog-NMI'd CPU
-    // wedged in service_local_shootdown_queue → handle_shootdown_ipi →
-    // SpinLock::lock). If the queue is busy, the holder is a brief push
-    // or our own outer frame; skip and let the next relax iteration
-    // retry.
+    // try_lock, not lock: this runs from inside contended-spin loops, including
+    // the spin in `handle_shootdown_ipi`'s own `queue.lock()`. A blocking acquire
+    // would take a second ticket beneath the outer one and deadlock this CPU
+    // against itself.
     let Some(mut queue) = slot.queue.try_lock() else {
         return;
     };
@@ -807,9 +619,8 @@ pub fn service_local_shootdown_queue() {
     slot.ack.store(true, Ordering::Release);
     drop(queue);
 
-    // Same ASID filter + flush dispatch as `handle_shootdown_ipi` (the
-    // early-ack argument holds: the flush completes synchronously below,
-    // before this CPU resumes the work it was spinning on).
+    // Early ack holds here too: the flush below completes before this CPU
+    // resumes the work it was spinning on.
     if asid != 0 {
         let local_cr3 = cpu::read_cr3();
         if (local_cr3 & !0xFFF) != (asid & !0xFFF) {
@@ -826,12 +637,9 @@ pub fn service_local_shootdown_queue() {
     }
 }
 
-/// Force this CPU's shootdown ack to `true` so any outstanding initiator stops
-/// waiting on us. Called by the panic-stop NMI handler just before halting,
-/// since a halted CPU can no longer run the IPI handler that would normally
-/// ack. Set-only — it never clears an ack to `false`, preserving the
-/// "ack true→false only under the queue lock" invariant that keeps a second
-/// merged-IPI initiator from spinning forever.
+/// Force this CPU's ack so outstanding initiators stop waiting on it; the
+/// panic-stop NMI handler calls it before halting. Set-only: never clears an
+/// ack, preserving the "true→false only under the queue lock" invariant.
 pub fn force_ack_local_shootdowns(cpu_idx: usize) {
     if cpu_idx < MAX_CPUS {
         TLB_STATE.cpu_state[cpu_idx]
@@ -887,10 +695,8 @@ pub fn exit_lazy_tlb(cpu: usize) {
     let state = &TLB_STATE.cpu_state[cpu];
     state.is_lazy.store(false, Ordering::Release);
 
-    // No generation-based catch-up is needed on lazy-TLB exit. Frame reuse is
-    // gated on `mm::mmu::quiesce`, and this CPU cannot have acked the epoch
-    // that released a frame without having invalidated first, so it holds no
-    // stale translation to a frame that has since changed hands.
+    // No catch-up flush needed: frame reuse is gated on `mm::mmu::quiesce`, and
+    // this CPU cannot have acked that epoch without having invalidated first.
 }
 
 fn queue_request_for_cpu(cpu_idx: usize, flush_type: FlushType, start: u64, end: u64, asid: u64) {
@@ -910,9 +716,8 @@ fn queue_request_for_cpu(cpu_idx: usize, flush_type: FlushType, start: u64, end:
     };
     let slot = &TLB_STATE.cpu_state[cpu_idx];
 
-    // Hold the lock for `push` + `ack=false`. The handler holds the
-    // same lock for `take` + `ack=true`. That serialisation is what
-    // closes the multi-initiator race (see PerCpuTlbState comment).
+    // The lock must span `push` + `ack=false`; the handler spans `take` +
+    // `ack=true`. That serialisation closes the multi-initiator race.
     let mut queue = slot.queue.lock();
     queue.push(op, asid);
     slot.ack.store(false, Ordering::Relaxed);
@@ -949,11 +754,9 @@ fn targeted_flush_request(
         }
     }
 
-    // A bitmap, not a heap vector. `[usize; MAX_CPUS]` is 2 KiB and blows the
-    // stack-sizes gate, but allocating here is worse: callers hold an
-    // interrupt-disabling lock, and there is no honest behaviour on allocation
-    // failure — reporting a shootdown that reached no peer leaves a stale
-    // translation, erroring aborts a caller mid-unmap.
+    // A bitmap, not an array or a heap vector: `[usize; MAX_CPUS]` is 2 KiB and
+    // blows the stack-sizes gate, and callers hold an IRQ-disabling lock, so
+    // allocating here has no honest failure behaviour.
     let targets = CpuMask::new();
     let mut target_count = 0usize;
 
@@ -981,29 +784,15 @@ fn targeted_flush_request(
     wait_for_acks(targets.iter_set(), initiator)
 }
 
-// =============================================================================
-// Public TLB Flush API
-// =============================================================================
-
-/// Initialize the TLB subsystem.
-/// Called during kernel boot.
 pub fn init() {
     detect_features();
     TLB_STATE.online_cpus.set(0);
-    // Make every contended SpinLock spin in the kernel ack-capable: a
-    // waiter spinning IRQs-off polls + services its own shootdown queue
-    // between PAUSE rounds, so a flush initiator holding the contended
-    // lock can always collect this CPU's ack (the lock-vs-shootdown
-    // cross-CPU deadlock class).
     slopos_ostd::sync::register_spin_relax_hook(service_local_shootdown_queue);
     klog_info!("TLB: Subsystem initialized");
 }
 
-/// Iterate online CPUs excluding `exclude` (typically the initiator).
-///
-/// Returning an iterator — rather than a stack-resident `[usize; MAX_CPUS]`
-/// array — keeps TLB flush entry points off the 2 KiB-per-call frame
-/// hit that a full mask copy would incur.
+/// Online CPUs except `exclude`. An iterator rather than a `[usize; MAX_CPUS]`
+/// array, which would put callers over the 2 KiB stack-frame gate.
 fn online_cpus(exclude: usize) -> impl Iterator<Item = usize> + 'static {
     TLB_STATE
         .online_cpus
@@ -1011,11 +800,6 @@ fn online_cpus(exclude: usize) -> impl Iterator<Item = usize> + 'static {
         .filter(move |&cpu| cpu != exclude)
 }
 
-/// Flush a single page from all CPUs' TLBs.
-///
-/// This is the primary function called after unmapping a page.
-/// On uniprocessor systems, it performs a local invlpg.
-/// On SMP systems, it broadcasts an IPI to all CPUs.
 #[inline]
 fn handle_tlb_result(result: TlbResult, context: &str) {
     if let Err(err) = result {
@@ -1031,15 +815,9 @@ pub fn try_flush_page(vaddr: VirtAddr) -> TlbResult {
         let initiator = slopos_arch::pcr::get_current_cpu();
         TLB_STATE.sequence.fetch_add(1, Ordering::SeqCst);
         broadcast_flush_request(FlushType::SinglePage, vaddr.as_u64(), 0, 0);
-        // Per-target IPIs instead of broadcast: at the LAPIC level a
-        // broadcast IPI to vector V can deliver-then-coalesce with a
-        // second broadcast to the same vector before the first handler
-        // has cleared IRR, dropping the second wake. Per-target sends
-        // queue independently in each LAPIC's IRR and don't collapse
-        // across initiators.
         send_shootdown_ipi_per_target(online_cpus(initiator));
-        // Overlap our own invlpg with the remote CPUs' handlers instead
-        // of running it serially up front (Amit et al. EuroSys '20).
+        // Overlap the local invlpg with the remote handlers rather than running
+        // it serially first (Amit et al., EuroSys '20).
         flush_page_local(vaddr);
         wait_for_acks(online_cpus(initiator), initiator)
     } else {
@@ -1063,10 +841,6 @@ pub fn flush_page_for_process(key: TlbProcessKey, vaddr: VirtAddr) {
     );
 }
 
-/// Flush a range of pages from all CPUs' TLBs.
-///
-/// For small ranges, invalidates each page individually.
-/// For large ranges, performs a full TLB flush.
 pub fn try_flush_range(start: VirtAddr, end: VirtAddr) -> TlbResult {
     if is_smp_active() {
         let initiator = slopos_arch::pcr::get_current_cpu();
@@ -1100,10 +874,6 @@ pub fn flush_range_for_process(key: TlbProcessKey, start: VirtAddr, end: VirtAdd
     );
 }
 
-/// Flush the entire TLB on all CPUs.
-///
-/// This is the most expensive operation but sometimes necessary,
-/// e.g., when changing CR3 or modifying many pages.
 pub fn try_flush_all() -> TlbResult {
     if is_smp_active() {
         let initiator = slopos_arch::pcr::get_current_cpu();
@@ -1130,10 +900,7 @@ pub fn flush_all_for_process(key: TlbProcessKey) {
     handle_tlb_result(try_flush_all_for_process(key), "flush_all_for_process");
 }
 
-/// Flush TLB entries for a specific address space (ASID/CR3) on all CPUs.
-///
-/// This is useful when destroying a process - we only need to flush
-/// entries associated with that process's page tables.
+/// `asid` is a CR3 value; a CPU flushes only if its live CR3 matches it.
 pub fn try_flush_asid(asid: u64) -> TlbResult {
     let current_cr3 = cpu::read_cr3();
     let local_needs_flush = (current_cr3 & !0xFFF) == (asid & !0xFFF);
@@ -1159,12 +926,6 @@ pub fn flush_asid(asid: u64) {
     handle_tlb_result(try_flush_asid(asid), "flush_asid");
 }
 
-/// Handle TLB shootdown IPI on the receiving CPU.
-///
-/// This is called from the interrupt handler when a TLB shootdown
-/// IPI is received. It processes the pending flush request and
-/// sends acknowledgment.
-///
 /// # Safety
 ///
 /// Must be called from interrupt context with interrupts disabled.
@@ -1175,18 +936,10 @@ pub fn handle_shootdown_ipi(cpu_idx: usize) {
 
     let slot = &TLB_STATE.cpu_state[cpu_idx];
 
-    // Take the merged pending request and stamp ACK=true while holding the
-    // lock. This pairs with `queue_request_for_cpu`'s `push + clear-ACK`
-    // under the same lock to give per-initiator visibility even when LAPIC
-    // coalesces multiple IPIs into one handler invocation.
-    //
-    // Early ACK (Amit et al., EuroSys '20): we stamp the ack BEFORE doing
-    // the actual flush. Safe because we are still in IRQ context — IRETQ
-    // is a serialising instruction, so any code that subsequently runs on
-    // this CPU (kernel or user) observes the completed local flush. The
-    // initiator's "ack=true" therefore means "this CPU will flush before
-    // resuming any non-handler work", which is the synchronisation guarantee
-    // page-table mutators actually need.
+    // Take + stamp ACK under the lock, pairing with `queue_request_for_cpu`'s
+    // push + clear so a coalesced IPI still gives per-initiator visibility.
+    // Acking before the flush is safe because IRETQ is serialising: anything
+    // that runs on this CPU afterwards sees the flush completed.
     let (op, asid) = {
         let mut queue = slot.queue.lock();
         let taken = queue.take();
@@ -1194,10 +947,8 @@ pub fn handle_shootdown_ipi(cpu_idx: usize) {
         taken
     };
 
-    // ASID filter: a non-zero `asid` means the initiator only cares if
-    // this CPU's current address space matches. We still acked (above)
-    // because the initiator's wait is bounded on the ACK flag alone, not
-    // on whether the flush was actually performed.
+    // Acked above regardless of the filter: the initiator's wait is bounded on
+    // the flag, not on whether this CPU actually needed the flush.
     if asid != 0 {
         let local_cr3 = cpu::read_cr3();
         if (local_cr3 & !0xFFF) != (asid & !0xFFF) {
@@ -1215,17 +966,13 @@ pub fn handle_shootdown_ipi(cpu_idx: usize) {
     }
 }
 
-/// Batched TLB flush for multiple pages.
-///
-/// Collects multiple flush requests and executes them efficiently.
-/// If the batch exceeds the threshold, performs a full flush instead.
+/// Batches page flushes; at the invlpg threshold the batch degrades to a full flush.
 pub struct TlbFlushBatch {
     pages: [VirtAddr; INVLPG_THRESHOLD],
     count: usize,
 }
 
 impl TlbFlushBatch {
-    /// Create a new empty batch.
     pub const fn new() -> Self {
         Self {
             pages: [VirtAddr::NULL; INVLPG_THRESHOLD],
@@ -1233,8 +980,7 @@ impl TlbFlushBatch {
         }
     }
 
-    /// Add a page to the batch.
-    /// If the batch is full, it will be flushed as a full TLB invalidation.
+    /// Pages past the threshold are dropped; `finish` then flushes everything.
     pub fn add(&mut self, vaddr: VirtAddr) {
         if self.count < INVLPG_THRESHOLD {
             self.pages[self.count] = vaddr;
@@ -1242,7 +988,6 @@ impl TlbFlushBatch {
         }
     }
 
-    /// Flush all batched pages.
     pub fn finish(&mut self) {
         if self.count == 0 {
             return;

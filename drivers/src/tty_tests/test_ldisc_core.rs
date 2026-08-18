@@ -1,12 +1,7 @@
-//! Split from test_ldisc.rs: test_ldisc_core.rs
+//! Tests for the line disciplines, the TTY table, and PTYs.
 
 use super::fixtures::*;
 
-// ===========================================================================
-// LineDisc tests
-// ===========================================================================
-
-/// A fresh LineDisc has no data.
 pub fn test_ldisc_new_has_no_data() -> TestResult {
     let ld = LineDisc::new();
     if ld.has_data() {
@@ -16,7 +11,6 @@ pub fn test_ldisc_new_has_no_data() -> TestResult {
     TestResult::Pass
 }
 
-/// Reading from an empty LineDisc returns 0 bytes.
 pub fn test_ldisc_read_empty() -> TestResult {
     let mut ld = LineDisc::new();
     let mut buf = [0u8; 64];
@@ -28,11 +22,9 @@ pub fn test_ldisc_read_empty() -> TestResult {
     TestResult::Pass
 }
 
-/// Canonical mode: characters accumulate in edit buffer, flush on newline.
 pub fn test_ldisc_canonical_newline() -> TestResult {
     let mut ld = LineDisc::new();
 
-    // Type "abc" — should not produce cooked data yet.
     for &c in b"abc" {
         ld.input_char(c);
     }
@@ -41,7 +33,6 @@ pub fn test_ldisc_canonical_newline() -> TestResult {
         return TestResult::Fail;
     }
 
-    // Press Enter — should flush "abc\n" to cooked.
     ld.input_char(b'\n');
     if !ld.has_data() {
         klog_info!("TTY_TEST: BUG - canonical mode has no data after newline");
@@ -62,15 +53,13 @@ pub fn test_ldisc_canonical_newline() -> TestResult {
     TestResult::Pass
 }
 
-/// Canonical mode: VERASE (backspace) removes the last character.
 pub fn test_ldisc_canonical_backspace() -> TestResult {
     let mut ld = LineDisc::new();
 
-    // Type "abcd", then backspace, then newline.
     for &c in b"abcd" {
         ld.input_char(c);
     }
-    ld.input_char(0x08); // BS
+    ld.input_char(0x08);
     ld.input_char(b'\n');
 
     let mut buf = [0u8; 64];
@@ -86,16 +75,13 @@ pub fn test_ldisc_canonical_backspace() -> TestResult {
     TestResult::Pass
 }
 
-/// Canonical mode: VKILL clears the entire edit buffer.
 pub fn test_ldisc_canonical_kill() -> TestResult {
     let mut ld = LineDisc::new();
 
     for &c in b"hello" {
         ld.input_char(c);
     }
-    // Kill line (default VKILL = 0x15 = Ctrl+U).
     ld.input_char(0x15);
-    // Type "world" and newline.
     for &c in b"world" {
         ld.input_char(c);
     }
@@ -114,14 +100,12 @@ pub fn test_ldisc_canonical_kill() -> TestResult {
     TestResult::Pass
 }
 
-/// Canonical mode: VEOF (Ctrl+D) flushes without adding a newline.
 pub fn test_ldisc_canonical_eof() -> TestResult {
     let mut ld = LineDisc::new();
 
     for &c in b"abc" {
         ld.input_char(c);
     }
-    // EOF = 0x04
     ld.input_char(0x04);
 
     let mut buf = [0u8; 64];
@@ -137,11 +121,10 @@ pub fn test_ldisc_canonical_eof() -> TestResult {
     TestResult::Pass
 }
 
-/// ISIG: Ctrl+C (VINTR) generates a signal action.
 pub fn test_ldisc_signal_ctrl_c() -> TestResult {
     let mut ld = LineDisc::new();
 
-    let action = ld.input_char(0x03); // Ctrl+C
+    let action = ld.input_char(0x03);
     match action {
         InputAction::Signal(SIGINT) => TestResult::Pass,
         InputAction::Signal(s) => {
@@ -155,16 +138,13 @@ pub fn test_ldisc_signal_ctrl_c() -> TestResult {
     }
 }
 
-/// Non-canonical mode: characters go directly to cooked buffer.
 pub fn test_ldisc_raw_mode() -> TestResult {
     let mut ld = LineDisc::new();
 
-    // Switch to raw mode.
     let mut termios = *ld.termios();
     termios.c_lflag &= !LocalFlags::ICANON;
     ld.set_termios(&termios);
 
-    // Each character should be immediately available.
     ld.input_char(b'a');
     if !ld.has_data() {
         klog_info!("TTY_TEST: BUG - raw mode char not immediately available");
@@ -180,11 +160,9 @@ pub fn test_ldisc_raw_mode() -> TestResult {
     TestResult::Pass
 }
 
-/// set_termios: switching from canonical to raw flushes the edit buffer.
 pub fn test_ldisc_set_termios_flush() -> TestResult {
     let mut ld = LineDisc::new();
 
-    // Type some chars in canonical mode (not yet flushed).
     for &c in b"partial" {
         ld.input_char(c);
     }
@@ -193,7 +171,6 @@ pub fn test_ldisc_set_termios_flush() -> TestResult {
         return TestResult::Fail;
     }
 
-    // Switch to raw mode — edit buffer should flush.
     let mut termios = *ld.termios();
     termios.c_lflag &= !LocalFlags::ICANON;
     ld.set_termios(&termios);
@@ -234,7 +211,6 @@ pub fn test_ldisc_flush_all() -> TestResult {
     TestResult::Pass
 }
 
-/// ECHO mode: printable characters return Echo action.
 pub fn test_ldisc_echo_printable() -> TestResult {
     let mut ld = LineDisc::new();
 
@@ -254,7 +230,6 @@ pub fn test_ldisc_echo_printable() -> TestResult {
     TestResult::Pass
 }
 
-/// ECHO mode: newline returns Echo action with '\n'.
 pub fn test_ldisc_echo_newline() -> TestResult {
     let mut ld = LineDisc::new();
 
@@ -273,11 +248,7 @@ pub fn test_ldisc_echo_newline() -> TestResult {
     }
     TestResult::Pass
 }
-// ===========================================================================
-// TtyIndex tests
-// ===========================================================================
 
-/// TtyIndex equality.
 pub fn test_tty_index_eq() -> TestResult {
     let a = TtyIndex(0);
     let b = TtyIndex(0);
@@ -292,21 +263,15 @@ pub fn test_tty_index_eq() -> TestResult {
     }
     TestResult::Pass
 }
-// ===========================================================================
-// Cooked ring buffer boundary tests
-// ===========================================================================
 
-/// Multiple reads drain the cooked buffer correctly.
 pub fn test_ldisc_multiple_reads() -> TestResult {
     let mut ld = LineDisc::new();
 
-    // Type "abcdef\n" — 7 bytes in cooked.
     for &c in b"abcdef" {
         ld.input_char(c);
     }
     ld.input_char(b'\n');
 
-    // Read 3 bytes.
     let mut buf1 = [0u8; 3];
     let n1 = ld.read(&mut buf1);
     if n1 != 3 || &buf1 != b"abc" {
@@ -314,7 +279,6 @@ pub fn test_ldisc_multiple_reads() -> TestResult {
         return TestResult::Fail;
     }
 
-    // Read remaining 4 bytes.
     let mut buf2 = [0u8; 10];
     let n2 = ld.read(&mut buf2);
     if n2 != 4 || &buf2[..4] != b"def\n" {
@@ -322,7 +286,6 @@ pub fn test_ldisc_multiple_reads() -> TestResult {
         return TestResult::Fail;
     }
 
-    // Buffer should now be empty.
     if ld.has_data() {
         klog_info!("TTY_TEST: BUG - buffer not empty after full drain");
         return TestResult::Fail;
@@ -330,11 +293,10 @@ pub fn test_ldisc_multiple_reads() -> TestResult {
     TestResult::Pass
 }
 
-/// Backspace on empty edit buffer is a no-op.
 pub fn test_ldisc_backspace_empty() -> TestResult {
     let mut ld = LineDisc::new();
 
-    let action = ld.input_char(0x08); // BS on empty buffer.
+    let action = ld.input_char(0x08);
     match action {
         InputAction::None => TestResult::Pass,
         _ => {
@@ -343,14 +305,9 @@ pub fn test_ldisc_backspace_empty() -> TestResult {
         }
     }
 }
-// ===========================================================================
-// Output processing via TTY write
-// ===========================================================================
 
-/// TTY write with OPOST+ONLCR: verify data.len() is returned (bytes consumed).
 pub fn test_tty_write_returns_input_len() -> TestResult {
     tty::table::tty_table_init();
-    // Enable OPOST+ONLCR on TTY 0.
     let mut t = tty::get_termios(TtyIndex(0)).unwrap();
     let saved = t;
     t.c_oflag = OutputFlags::OPOST | OutputFlags::ONLCR;
@@ -369,13 +326,7 @@ pub fn test_tty_write_returns_input_len() -> TestResult {
     }
     TestResult::Pass
 }
-// ===========================================================================
-// Input pipeline cleanup tests
-// ===========================================================================
 
-/// Keyboard events are routed to the input_event queue when focus is set.
-/// After pressing a key with keyboard focus on a task, that task's queue
-/// should contain the event and the TTY should NOT receive it.
 pub fn test_keyboard_input_event_delivery() -> TestResult {
     tty::table::tty_table_init();
     tty::set_active_tty(TtyIndex(0));
@@ -399,19 +350,17 @@ pub fn test_keyboard_input_event_delivery() -> TestResult {
     TestResult::Pass
 }
 
-/// Break codes (key release) do not produce TTY input.
 pub fn test_keyboard_break_code_no_input() -> TestResult {
     tty::table::tty_table_init();
     tty::set_active_tty(TtyIndex(0));
     drain_tty_nonblock(TtyIndex(0));
 
-    // Switch to raw mode so any delivered byte is immediately readable.
     let saved = tty::get_termios(TtyIndex(0)).unwrap();
     let mut raw = saved;
     raw.c_lflag &= !LocalFlags::ICANON;
     tty::set_termios(TtyIndex(0), &raw).unwrap();
 
-    // Send break code for 'a' (0x1E | 0x80 = 0x9E).
+    // Break code for 'a': make code 0x1E | 0x80.
     crate::ps2::keyboard::handle_scancode(0x9E);
 
     let mut out = [0u8; 8];
@@ -429,25 +378,20 @@ pub fn test_keyboard_break_code_no_input() -> TestResult {
     TestResult::Pass
 }
 
-/// Modifier key presses (shift, ctrl, alt, caps lock) do not produce
-/// TTY input.
 pub fn test_keyboard_modifier_no_input() -> TestResult {
     tty::table::tty_table_init();
     tty::set_active_tty(TtyIndex(0));
     drain_tty_nonblock(TtyIndex(0));
 
-    // Switch to raw mode.
     let saved = tty::get_termios(TtyIndex(0)).unwrap();
     let mut raw = saved;
     raw.c_lflag &= !LocalFlags::ICANON;
     tty::set_termios(TtyIndex(0), &raw).unwrap();
 
-    // Press Left Shift (make code 0x2A), Left Ctrl (0x1D), Left Alt (0x38).
     crate::ps2::keyboard::handle_scancode(0x2A); // shift press
     crate::ps2::keyboard::handle_scancode(0x1D); // ctrl press
     crate::ps2::keyboard::handle_scancode(0x38); // alt press
 
-    // Release them.
     crate::ps2::keyboard::handle_scancode(0xAA); // shift release
     crate::ps2::keyboard::handle_scancode(0x9D); // ctrl release
     crate::ps2::keyboard::handle_scancode(0xB8); // alt release
@@ -467,19 +411,16 @@ pub fn test_keyboard_modifier_no_input() -> TestResult {
     TestResult::Pass
 }
 
-/// Press + release produces exactly one character (no duplication).
 pub fn test_keyboard_press_release_single_char() -> TestResult {
     tty::table::tty_table_init();
     tty::set_active_tty(TtyIndex(0));
     drain_tty_nonblock(TtyIndex(0));
 
-    // Switch to raw mode.
     let saved = tty::get_termios(TtyIndex(0)).unwrap();
     let mut raw = saved;
     raw.c_lflag &= !LocalFlags::ICANON;
     tty::set_termios(TtyIndex(0), &raw).unwrap();
 
-    // Press 'a' (0x1E) then release 'a' (0x9E).
     crate::ps2::keyboard::handle_scancode(0x1E); // press
     crate::ps2::keyboard::handle_scancode(0x9E); // release
 
@@ -498,21 +439,16 @@ pub fn test_keyboard_press_release_single_char() -> TestResult {
     TestResult::Pass
 }
 
-/// VConsole driver drain_input returns 0 via drain_hw_input_locked (interrupt-driven).
 pub fn test_vconsole_drain_via_drain_hw_input() -> TestResult {
     tty::table::tty_table_init();
 
-    // TTY 1 is VConsole — drain_hw_input_locked should be a no-op (input is
-    // interrupt-driven via push_input), so no data should appear.
     drain_tty_nonblock(TtyIndex(1));
 
-    // Switch to raw mode on TTY 1.
     let saved = tty::get_termios(TtyIndex(1)).unwrap();
     let mut raw = saved;
     raw.c_lflag &= !LocalFlags::ICANON;
     tty::set_termios(TtyIndex(1), &raw).unwrap();
 
-    // has_data should be false — no hardware polling for VConsole.
     let has = tty::has_data(TtyIndex(1));
     tty::set_termios(TtyIndex(1), &saved).unwrap();
 
@@ -523,19 +459,16 @@ pub fn test_vconsole_drain_via_drain_hw_input() -> TestResult {
     TestResult::Pass
 }
 
-/// Multiple key presses produce correct sequence in active TTY.
 pub fn test_keyboard_multi_key_sequence() -> TestResult {
     tty::table::tty_table_init();
     tty::set_active_tty(TtyIndex(0));
     drain_tty_nonblock(TtyIndex(0));
 
-    // Switch to raw mode.
     let saved = tty::get_termios(TtyIndex(0)).unwrap();
     let mut raw = saved;
     raw.c_lflag &= !LocalFlags::ICANON;
     tty::set_termios(TtyIndex(0), &raw).unwrap();
 
-    // Press 'h' (0x23), 'i' (0x17).
     crate::ps2::keyboard::handle_scancode(0x23); // 'h'
     crate::ps2::keyboard::handle_scancode(0x17); // 'i'
 
@@ -554,18 +487,10 @@ pub fn test_keyboard_multi_key_sequence() -> TestResult {
     }
     TestResult::Pass
 }
-// ===========================================================================
-// FD integration tests
-// ===========================================================================
 
-/// tty::write routes bytes through output processing.
-/// With OPOST+ONLCR enabled, writing "\n" should produce 2 bytes on the wire
-/// (CR+LF), but write() must return the *input* byte count.
 pub fn test_tty_write_output_processing() -> TestResult {
     tty::table::tty_table_init();
-    // Save current termios.
     let saved = tty::get_termios(TtyIndex(0)).unwrap();
-    // Enable OPOST + ONLCR.
     let mut t = saved;
     t.c_oflag = OutputFlags::OPOST | OutputFlags::ONLCR;
     tty::set_termios(TtyIndex(0), &t).unwrap();
@@ -574,7 +499,6 @@ pub fn test_tty_write_output_processing() -> TestResult {
     let n = tty::write(TtyIndex(0), data, false);
     tty::set_termios(TtyIndex(0), &saved).unwrap();
 
-    // write() returns input length regardless of output expansion.
     if n != Ok(data.len()) {
         klog_info!(
             "TTY_TEST: BUG - write with OPOST+ONLCR returned {:?} instead of Ok({})",
@@ -586,10 +510,8 @@ pub fn test_tty_write_output_processing() -> TestResult {
     TestResult::Pass
 }
 
-/// tty::write with output processing disabled passes bytes through.
 pub fn test_tty_write_raw_passthrough() -> TestResult {
     tty::table::tty_table_init();
-    // Ensure c_oflag is 0 (no output processing — default).
     let saved = tty::get_termios(TtyIndex(0)).unwrap();
     let mut t = saved;
     t.c_oflag = OutputFlags::empty();
@@ -610,11 +532,10 @@ pub fn test_tty_write_raw_passthrough() -> TestResult {
     TestResult::Pass
 }
 
-/// tty::write to non-existent slot returns NotAllocated.
 pub fn test_tty_write_invalid_index() -> TestResult {
     tty::table::tty_table_init();
     let data = b"nothing";
-    let n = tty::write(TtyIndex(7), data, false); // Slot 7 is not allocated.
+    let n = tty::write(TtyIndex(7), data, false);
     if n != Err(TtyError::NotAllocated) {
         klog_info!(
             "TTY_TEST: BUG - write to invalid TTY returned {:?} instead of NotAllocated",
@@ -625,24 +546,18 @@ pub fn test_tty_write_invalid_index() -> TestResult {
     TestResult::Pass
 }
 
-/// Per-TTY termios isolation — changing TTY 0's termios does not
-/// affect TTY 1.
 pub fn test_tty_per_tty_termios_isolation() -> TestResult {
     tty::table::tty_table_init();
 
-    // Save TTY 0 and TTY 1 termios.
     let t0_saved = tty::get_termios(TtyIndex(0)).unwrap();
     let t1_saved = tty::get_termios(TtyIndex(1)).unwrap();
 
-    // Set OPOST on TTY 0 only.
     let mut t0_new = t0_saved;
     t0_new.c_oflag = OutputFlags::OPOST | OutputFlags::ONLCR;
     tty::set_termios(TtyIndex(0), &t0_new).unwrap();
 
-    // Read back TTY 1 — it should still have its original c_oflag.
     let t1_check = tty::get_termios(TtyIndex(1)).unwrap();
 
-    // Restore TTY 0.
     tty::set_termios(TtyIndex(0), &t0_saved).unwrap();
 
     if t1_check.c_oflag != t1_saved.c_oflag {
@@ -656,15 +571,12 @@ pub fn test_tty_per_tty_termios_isolation() -> TestResult {
     TestResult::Pass
 }
 
-/// Per-TTY winsize isolation — setting winsize on TTY 0 does not
-/// affect TTY 1.
 pub fn test_tty_per_tty_winsize_isolation() -> TestResult {
     tty::table::tty_table_init();
 
     let ws0_saved = tty::get_winsize(TtyIndex(0)).unwrap();
     let ws1_saved = tty::get_winsize(TtyIndex(1)).unwrap();
 
-    // Set a distinct winsize on TTY 0.
     let custom = slopos_abi::syscall::UserWinsize {
         ws_row: 42,
         ws_col: 120,
@@ -673,10 +585,8 @@ pub fn test_tty_per_tty_winsize_isolation() -> TestResult {
     };
     tty::set_winsize(TtyIndex(0), &custom).unwrap();
 
-    // Read back TTY 1 — should be unchanged.
     let ws1_check = tty::get_winsize(TtyIndex(1)).unwrap();
 
-    // Restore TTY 0.
     tty::set_winsize(TtyIndex(0), &ws0_saved).unwrap();
 
     if ws1_check.ws_row != ws1_saved.ws_row || ws1_check.ws_col != ws1_saved.ws_col {
@@ -692,11 +602,9 @@ pub fn test_tty_per_tty_winsize_isolation() -> TestResult {
     TestResult::Pass
 }
 
-/// Per-TTY foreground pgrp isolation.
 pub fn test_tty_per_tty_fg_pgrp_isolation() -> TestResult {
     tty::table::tty_table_init();
 
-    // Install live sessions with distinct foreground groups on TTY 0 and TTY 1.
     let scope0 = SessionScope::new(100, 100);
     let scope1 = SessionScope::new(200, 200);
     tty::session::test_install_session(TtyIndex(0), scope0.session_weak(), scope0.pgrp_weak());
@@ -705,7 +613,6 @@ pub fn test_tty_per_tty_fg_pgrp_isolation() -> TestResult {
     let pgid0 = tty::get_foreground_pgrp(TtyIndex(0)).unwrap_or(0);
     let pgid1 = tty::get_foreground_pgrp(TtyIndex(1)).unwrap_or(0);
 
-    // Clean up.
     tty::detach_session(TtyIndex(0));
     tty::detach_session(TtyIndex(1));
 
@@ -720,21 +627,17 @@ pub fn test_tty_per_tty_fg_pgrp_isolation() -> TestResult {
     TestResult::Pass
 }
 
-/// Per-TTY has_data isolation — data pushed to TTY 0 does not
-/// appear on TTY 1.
 pub fn test_tty_per_tty_has_data_isolation() -> TestResult {
     tty::table::tty_table_init();
     drain_tty_nonblock(TtyIndex(0));
     drain_tty_nonblock(TtyIndex(1));
 
-    // Push a character + newline to TTY 0 only.
     tty::push_input(TtyIndex(0), b'x');
     tty::push_input(TtyIndex(0), b'\n');
 
     let has0 = tty::has_data(TtyIndex(0));
     let has1 = tty::has_data(TtyIndex(1));
 
-    // Clean up.
     drain_tty_nonblock(TtyIndex(0));
 
     if !has0 {
@@ -748,8 +651,6 @@ pub fn test_tty_per_tty_has_data_isolation() -> TestResult {
     TestResult::Pass
 }
 
-/// Per-TTY session isolation — attaching session to TTY 0 does not
-/// affect TTY 1's session.
 pub fn test_tty_per_tty_session_isolation() -> TestResult {
     tty::table::tty_table_init();
 
@@ -758,7 +659,6 @@ pub fn test_tty_per_tty_session_isolation() -> TestResult {
     let sid0 = tty::get_session_id(TtyIndex(0)).unwrap_or(0);
     let sid1 = tty::get_session_id(TtyIndex(1)).unwrap_or(0);
 
-    // Clean up.
     tty::detach_session(TtyIndex(0));
 
     if sid0 != 500 {
@@ -775,7 +675,6 @@ pub fn test_tty_per_tty_session_isolation() -> TestResult {
     TestResult::Pass
 }
 
-/// tty::read on non-existent TTY returns -1.
 pub fn test_tty_read_invalid_tty_returns_error() -> TestResult {
     tty::table::tty_table_init();
     let mut buf = [0u8; 8];
@@ -789,11 +688,7 @@ pub fn test_tty_read_invalid_tty_returns_error() -> TestResult {
     }
     TestResult::Pass
 }
-// ===========================================================================
-// Control-Plane Correctness regression tests
-// ===========================================================================
 
-/// TtyIndex from ABI crate is the same type used in drivers.
 pub fn test_tty_index_abi_type() -> TestResult {
     let idx: slopos_abi::syscall::TtyIndex = slopos_abi::syscall::TtyIndex(3);
     let idx2: TtyIndex = TtyIndex(3);
@@ -808,7 +703,6 @@ pub fn test_tty_index_abi_type() -> TestResult {
     TestResult::Pass
 }
 
-/// Signal constants from ABI match expected POSIX values.
 pub fn test_signal_constants() -> TestResult {
     if SIGINT != 2 {
         klog_info!("TTY_TEST: BUG - SIGINT should be 2, got {}", SIGINT);
@@ -825,18 +719,15 @@ pub fn test_signal_constants() -> TestResult {
     TestResult::Pass
 }
 
-/// set_compositor_focus does NOT modify fg_pgrp.
 pub fn test_set_compositor_focus_does_not_set_fg_pgrp() -> TestResult {
     tty::table::tty_table_init();
-    // Install a live session with a known foreground group first.
     let scope = SessionScope::new(42, 42);
     tty::session::test_install_session(TtyIndex(0), scope.session_weak(), scope.pgrp_weak());
     let fg_before = tty::get_foreground_pgrp(TtyIndex(0)).unwrap_or(0);
 
-    // Change compositor focus.
     let _ = tty::set_compositor_focus(99);
     let fg_after = tty::get_foreground_pgrp(TtyIndex(0)).unwrap_or(0);
-    let _ = tty::set_compositor_focus(0); // Reset.
+    let _ = tty::set_compositor_focus(0);
     tty::detach_session(TtyIndex(0));
 
     if fg_before != fg_after {
@@ -854,16 +745,13 @@ pub fn test_set_compositor_focus_does_not_set_fg_pgrp() -> TestResult {
     TestResult::Pass
 }
 
-/// check_read is the sole read gate — BackgroundRead for non-fg pgrp.
 pub fn test_check_read_sole_gate_background() -> TestResult {
     let scope = SessionScope::new(10, 10);
     let mut s = TtySession::new();
-    scope.attach_to(&mut s); // session=10, fg_pgrp=10
-    s.focused_task_id = 42; // compositor says task 42 is focused
+    scope.attach_to(&mut s);
+    s.focused_task_id = 42;
 
-    // Even though task 42 has compositor focus, if its pgid (99) is NOT
-    // in the foreground pgrp (10), check_read must return BackgroundRead.
-    // This is the key semantic: compositor focus != POSIX foreground.
+    // Compositor focus is not POSIX foreground.
     match s.check_read(99, 10) {
         ForegroundCheck::BackgroundRead => TestResult::Pass,
         other => {
@@ -879,8 +767,6 @@ pub fn test_check_read_sole_gate_background() -> TestResult {
 pub fn test_backing_strong_count_is_open_count() -> TestResult {
     tty::table::tty_table_init();
 
-    // The strong count of the backing is the open count; each clone is
-    // another open and each drop is a close.
     let open1 = tty::open_tty(TtyIndex(0)).expect("open console");
     let open2 = open1.clone();
     let count_two_opens = KArc::strong_count(&open1);
@@ -1232,9 +1118,7 @@ pub fn test_hangup_read_returns_hung_up() -> TestResult {
     let mut out = [0u8; 8];
     let result = tty::read(TtyIndex(0), &mut out, true);
 
-    // hung-up TTY reads now always return EOF (Ok(0)),
-    // regardless of blocking mode.  Previously nonblock returned
-    // Err(HungUp) but POSIX requires EOF for reads after hangup.
+    // POSIX requires EOF, not an error, for reads after hangup.
     match result {
         Ok(0) => TestResult::Pass,
         other => {
@@ -1246,21 +1130,12 @@ pub fn test_hangup_read_returns_hung_up() -> TestResult {
         }
     }
 }
-// ===========================================================================
-// Per-TTY Locking & Performance regression tests
-// ===========================================================================
 
-/// Per-TTY slots are independently lockable — locking slot 0 does
-/// not prevent access to slot 1.
 pub fn test_per_tty_lock_independence() -> TestResult {
     tty::table::tty_table_init();
 
-    // Lock slot 0 and, while holding it, verify we can lock slot 1.
-    //
-    // Two instances of one declaration held at once. Ascending slot index
-    // is the order, so the inner one takes a subclass: lockdep keeps
-    // checking the direction instead of the pair reading as an unordered
-    // same-class nesting.
+    // Two acquires of one lock class: the inner takes a subclass so lockdep
+    // still checks the ascending-slot order instead of an unordered nest.
     let guard0 = TTY_SLOTS[0].lock();
     let guard1 = TTY_SLOTS[1].lock_nested(1);
 
@@ -1276,8 +1151,6 @@ pub fn test_per_tty_lock_independence() -> TestResult {
     TestResult::Pass
 }
 
-/// DriverId round-trip — TtyDriverKind::id() returns the matching
-/// DriverId variant for each driver kind.
 pub fn test_driver_id_round_trip() -> TestResult {
     let serial = TtyDriverKind::SerialConsole(crate::tty::driver::SerialConsoleDriver);
     let vconsole = TtyDriverKind::VConsole(VConsoleDriver);
@@ -1298,12 +1171,9 @@ pub fn test_driver_id_round_trip() -> TestResult {
     TestResult::Pass
 }
 
-/// Split-write returns correct byte count (input length, not output
-/// expansion) through the per-slot locking path.
 pub fn test_split_write_returns_input_len() -> TestResult {
     tty::table::tty_table_init();
 
-    // Enable OPOST+ONLCR on TTY 0 so NL expands to CR+NL.
     let saved = tty::get_termios(TtyIndex(0)).unwrap();
     let mut t = saved;
     t.c_oflag = OutputFlags::OPOST | OutputFlags::ONLCR;
@@ -1324,19 +1194,15 @@ pub fn test_split_write_returns_input_len() -> TestResult {
     TestResult::Pass
 }
 
-/// Idle callback iterates all active TTYs (not just TTY 0).
-/// Push data to TTY 1 and verify has_data reports it after the idle-loop
-/// path runs (via has_data which calls drain_hw_input_locked internally).
 pub fn test_idle_cb_iterates_all_ttys() -> TestResult {
     tty::table::tty_table_init();
     drain_tty_nonblock(TtyIndex(0));
     drain_tty_nonblock(TtyIndex(1));
 
-    // Push data to TTY 1 via push_input (simulates keyboard on vconsole).
     tty::push_input(TtyIndex(1), b'z');
     tty::push_input(TtyIndex(1), b'\n');
 
-    // has_data internally calls drain_hw_input_locked, simulating the idle path.
+    // has_data drains hw input under the slot lock — the idle callback's path.
     let has1 = tty::has_data(TtyIndex(1));
     drain_tty_nonblock(TtyIndex(1));
 
@@ -1347,14 +1213,10 @@ pub fn test_idle_cb_iterates_all_ttys() -> TestResult {
     TestResult::Pass
 }
 
-/// Merged drain+read in a single lock acquisition — verify that
-/// read() returns data that was pushed to the serial TTY (TTY 0) without
-/// requiring multiple separate lock acquisitions.
 pub fn test_merged_drain_read() -> TestResult {
     tty::table::tty_table_init();
     drain_tty_nonblock(TtyIndex(0));
 
-    // Push "ok\n" into TTY 0.
     tty::push_input(TtyIndex(0), b'o');
     tty::push_input(TtyIndex(0), b'k');
     tty::push_input(TtyIndex(0), b'\n');
@@ -1372,12 +1234,9 @@ pub fn test_merged_drain_read() -> TestResult {
     TestResult::Pass
 }
 
-/// TTY_SLOTS uses per-slot locking — with_tty operates on the
-/// correct slot without holding a global lock.
 pub fn test_with_tty_per_slot() -> TestResult {
     tty::table::tty_table_init();
 
-    // Verify with_tty returns the correct index for each allocated slot.
     let idx0 = tty::table::with_tty(TtyIndex(0), |tty| tty.index);
     let idx1 = tty::table::with_tty(TtyIndex(1), |tty| tty.index);
     let idx_empty = tty::table::with_tty(TtyIndex(5), |tty| tty.index);
@@ -1397,9 +1256,6 @@ pub fn test_with_tty_per_slot() -> TestResult {
     TestResult::Pass
 }
 
-/// DriverId is clonable and its variants stay distinguishable — the
-/// identifier carries the weak peer link across the lock-free I/O dispatch
-/// boundary.
 pub fn test_driver_id_clonable() -> TestResult {
     let id = DriverId::SerialConsole;
     let id_clone = id.clone();
@@ -1414,11 +1270,7 @@ pub fn test_driver_id_clonable() -> TestResult {
     }
     TestResult::Pass
 }
-// ===========================================================================
-// Sane Defaults & Output Column Tracking
-// ===========================================================================
 
-/// Verify default termios c_iflag contains ICRNL.
 pub fn test_default_termios_has_icrnl() -> TestResult {
     let ld = LineDisc::new();
     let t = ld.termios();
@@ -1432,7 +1284,6 @@ pub fn test_default_termios_has_icrnl() -> TestResult {
     TestResult::Pass
 }
 
-/// Verify default termios c_oflag contains OPOST | ONLCR.
 pub fn test_default_termios_has_opost_onlcr() -> TestResult {
     let ld = LineDisc::new();
     let t = ld.termios();
@@ -1447,7 +1298,6 @@ pub fn test_default_termios_has_opost_onlcr() -> TestResult {
     TestResult::Pass
 }
 
-/// Verify default termios c_lflag contains ISIG|ICANON|ECHO|ECHOE|ECHOK|ECHOCTL|ECHOKE.
 pub fn test_default_termios_has_full_lflag() -> TestResult {
     let ld = LineDisc::new();
     let t = ld.termios();
@@ -1469,15 +1319,11 @@ pub fn test_default_termios_has_full_lflag() -> TestResult {
     TestResult::Pass
 }
 
-/// Output column advances by 1 for each printable ASCII character.
 pub fn test_output_column_tracking_printable() -> TestResult {
     let mut ld = LineDisc::new();
-    // Defaults have OPOST|ONLCR which is fine — printable chars just advance column.
     for ch in b"Hello" {
         ld.process_output_byte(*ch);
     }
-    // After 5 printable chars, column should be 5.
-    // Verify indirectly: a tab should expand to 8 - (5 % 8) = 3 spaces.
     match ld.process_output_byte(b'\t') {
         OutputAction::Tab(n) => {
             if n != 3 {
@@ -1496,15 +1342,12 @@ pub fn test_output_column_tracking_printable() -> TestResult {
     TestResult::Pass
 }
 
-/// Newline with ONLCR resets column to 0.
 pub fn test_output_column_tracking_newline() -> TestResult {
     let mut ld = LineDisc::new();
-    // Print 5 chars, then newline (ONLCR expands to CR+NL which resets column).
     for ch in b"Hello" {
         ld.process_output_byte(*ch);
     }
     ld.process_output_byte(b'\n');
-    // Column should now be 0.  A tab at column 0 gives 8 spaces.
     match ld.process_output_byte(b'\t') {
         OutputAction::Tab(n) => {
             if n != 8 {
@@ -1520,19 +1363,16 @@ pub fn test_output_column_tracking_newline() -> TestResult {
     TestResult::Pass
 }
 
-/// CR resets column to 0.
 pub fn test_output_column_tracking_cr() -> TestResult {
     let mut ld = LineDisc::new();
-    // Disable ONLCR so CR is not suppressed/converted.
     let mut t = *ld.termios();
-    t.c_oflag = OutputFlags::OPOST | OutputFlags::XTABS; // OPOST + XTABS, no ONLCR
+    t.c_oflag = OutputFlags::OPOST | OutputFlags::XTABS;
     ld.set_termios(&t);
 
     for ch in b"ABCDE" {
         ld.process_output_byte(*ch);
     }
     ld.process_output_byte(b'\r');
-    // Column should be 0 — tab at col 0 = 8 spaces.
     match ld.process_output_byte(b'\t') {
         OutputAction::Tab(n) => {
             if n != 8 {
@@ -1548,10 +1388,8 @@ pub fn test_output_column_tracking_cr() -> TestResult {
     TestResult::Pass
 }
 
-/// Tab expands to correct number of spaces (8-column tab stops).
 pub fn test_output_column_tracking_tab() -> TestResult {
     let mut ld = LineDisc::new();
-    // At column 0, tab should produce 8 spaces.
     match ld.process_output_byte(b'\t') {
         OutputAction::Tab(n) => {
             if n != 8 {
@@ -1564,7 +1402,6 @@ pub fn test_output_column_tracking_tab() -> TestResult {
             return TestResult::Fail;
         }
     }
-    // Column is now 8.  Print 3 chars (column=11), then tab => 8 - (11 % 8) = 5.
     for ch in b"abc" {
         ld.process_output_byte(*ch);
     }
@@ -1583,15 +1420,12 @@ pub fn test_output_column_tracking_tab() -> TestResult {
     TestResult::Pass
 }
 
-/// Backspace decrements column (but not below 0).
 pub fn test_output_column_tracking_backspace() -> TestResult {
     let mut ld = LineDisc::new();
     for ch in b"AB" {
         ld.process_output_byte(*ch);
     }
-    // Column=2.  Backspace -> column=1.
     ld.process_output_byte(0x08);
-    // Tab at column 1 => 8 - (1 % 8) = 7.
     match ld.process_output_byte(b'\t') {
         OutputAction::Tab(n) => {
             if n != 7 {
@@ -1604,9 +1438,8 @@ pub fn test_output_column_tracking_backspace() -> TestResult {
             return TestResult::Fail;
         }
     }
-    // Backspace at column 0 should not underflow.
     let mut ld2 = LineDisc::new();
-    ld2.process_output_byte(0x08); // should stay at 0
+    ld2.process_output_byte(0x08);
     match ld2.process_output_byte(b'\t') {
         OutputAction::Tab(n) => {
             if n != 8 {
@@ -1625,14 +1458,12 @@ pub fn test_output_column_tracking_backspace() -> TestResult {
     TestResult::Pass
 }
 
-/// ONOCR suppresses CR when column is 0.
 pub fn test_onocr_at_column_zero() -> TestResult {
     let mut ld = LineDisc::new();
     let mut t = *ld.termios();
     t.c_oflag = OutputFlags::OPOST | OutputFlags::ONOCR;
     ld.set_termios(&t);
 
-    // At column 0, CR should be suppressed.
     match ld.process_output_byte(b'\r') {
         OutputAction::Suppress => {}
         _other => {
@@ -1640,7 +1471,6 @@ pub fn test_onocr_at_column_zero() -> TestResult {
             return TestResult::Fail;
         }
     }
-    // Move to column 3, then CR should NOT be suppressed.
     for ch in b"abc" {
         ld.process_output_byte(*ch);
     }
@@ -1659,10 +1489,8 @@ pub fn test_onocr_at_column_zero() -> TestResult {
     TestResult::Pass
 }
 
-/// Default ONLCR correctly expands NL to CR+NL.
 pub fn test_default_onlcr_newline_expands() -> TestResult {
     let mut ld = LineDisc::new();
-    // With defaults (OPOST|ONLCR), NL should expand to CR+NL.
     match ld.process_output_byte(b'\n') {
         OutputAction::Emit { buf, len } => {
             if len != 2 || buf[0] != b'\r' || buf[1] != b'\n' {
@@ -1680,15 +1508,8 @@ pub fn test_default_onlcr_newline_expands() -> TestResult {
     }
     TestResult::Pass
 }
-// ===========================================================================
-// ABI Signal Constant Unification
-// ===========================================================================
 
-/// All signal constants come from `abi/src/signal.rs` with correct
-/// POSIX-compatible values.  This test verifies every signal used by the TTY
-/// subsystem matches its expected numeric value.
 pub fn test_signal_values_from_signal_module() -> TestResult {
-    // These are now imported from slopos_abi::signal (the canonical source).
     if SIGINT != 2 {
         klog_info!("TTY_TEST: BUG - SIGINT should be 2, got {}", SIGINT);
         return TestResult::Fail;
@@ -1720,21 +1541,15 @@ pub fn test_signal_values_from_signal_module() -> TestResult {
     TestResult::Pass
 }
 
-/// LineDisc signal generation uses constants from `signal.rs`.
-/// Verifies that ISIG + Ctrl+C still produces the correct signal number after
-/// the import migration.
 pub fn test_ldisc_signal_uses_signal_module() -> TestResult {
     let mut ld = LineDisc::new();
-    // Default termios has ISIG enabled.
     match ld.input_char(3) {
-        // Ctrl+C = 0x03 → SIGINT
         InputAction::Signal(sig) if sig == SIGINT => {}
         _ => {
             klog_info!("TTY_TEST: BUG - Ctrl+C should produce Signal(SIGINT=2)");
             return TestResult::Fail;
         }
     }
-    // Ctrl+\\ = 0x1C → SIGQUIT
     match ld.input_char(28) {
         InputAction::Signal(sig) if sig == SIGQUIT => {}
         _ => {
@@ -1742,7 +1557,6 @@ pub fn test_ldisc_signal_uses_signal_module() -> TestResult {
             return TestResult::Fail;
         }
     }
-    // Ctrl+Z = 0x1A → SIGTSTP
     match ld.input_char(26) {
         InputAction::Signal(sig) if sig == SIGTSTP => {}
         _ => {
@@ -1753,17 +1567,11 @@ pub fn test_ldisc_signal_uses_signal_module() -> TestResult {
     TestResult::Pass
 }
 
-/// SIGHUP and SIGCONT are used by the hangup path.  Verify the
-/// constants are accessible from the signal module and have correct values
-/// (these were previously only imported in `mod.rs` from `signal` — now they
-/// are the sole definition).
 pub fn test_hangup_signals_from_signal_module() -> TestResult {
-    // SIGHUP is sent to the foreground pgrp on TTY hangup.
     if SIGHUP != 1 {
         klog_info!("TTY_TEST: BUG - SIGHUP should be 1, got {}", SIGHUP);
         return TestResult::Fail;
     }
-    // SIGCONT is sent after SIGHUP to wake stopped processes.
     if SIGCONT != 18 {
         klog_info!("TTY_TEST: BUG - SIGCONT should be 18, got {}", SIGCONT);
         return TestResult::Fail;
@@ -1771,8 +1579,6 @@ pub fn test_hangup_signals_from_signal_module() -> TestResult {
     TestResult::Pass
 }
 
-/// Background-read and background-write signals (SIGTTIN, SIGTTOU)
-/// are now sourced from `signal.rs` exclusively.  Verify values.
 pub fn test_job_control_signals_from_signal_module() -> TestResult {
     if SIGTTIN != 21 {
         klog_info!("TTY_TEST: BUG - SIGTTIN should be 21, got {}", SIGTTIN);
@@ -1784,15 +1590,10 @@ pub fn test_job_control_signals_from_signal_module() -> TestResult {
     }
     TestResult::Pass
 }
-// ===========================================================================
-// POSIX Quick Wins — Line Boundaries, SIGWINCH, Word Erase
-// ===========================================================================
 
-/// Canonical mode read returns at most one line per call.
 pub fn test_canonical_one_line_per_read() -> TestResult {
     let mut ld = LineDisc::new();
 
-    // Type two lines: "abc\n" and "def\n".
     for &c in b"abc" {
         ld.input_char(c);
     }
@@ -1802,7 +1603,6 @@ pub fn test_canonical_one_line_per_read() -> TestResult {
     }
     ld.input_char(b'\n');
 
-    // First read should return only the first line.
     let mut buf = [0u8; 64];
     let n1 = ld.read(&mut buf);
     if n1 != 4 || &buf[..4] != b"abc\n" {
@@ -1813,7 +1613,6 @@ pub fn test_canonical_one_line_per_read() -> TestResult {
         return TestResult::Fail;
     }
 
-    // Second read should return the second line.
     let n2 = ld.read(&mut buf);
     if n2 != 4 || &buf[..4] != b"def\n" {
         klog_info!(
@@ -1823,7 +1622,6 @@ pub fn test_canonical_one_line_per_read() -> TestResult {
         return TestResult::Fail;
     }
 
-    // No more data.
     if ld.has_data() {
         klog_info!("TTY_TEST: BUG - has_data should be false after reading both lines");
         return TestResult::Fail;
@@ -1831,11 +1629,9 @@ pub fn test_canonical_one_line_per_read() -> TestResult {
     TestResult::Pass
 }
 
-/// has_data in canonical mode is gated by line_count.
 pub fn test_canonical_has_data_line_count() -> TestResult {
     let mut ld = LineDisc::new();
 
-    // Type characters without newline — has_data should be false.
     for &c in b"hello" {
         ld.input_char(c);
     }
@@ -1844,14 +1640,12 @@ pub fn test_canonical_has_data_line_count() -> TestResult {
         return TestResult::Fail;
     }
 
-    // Press newline — has_data should become true.
     ld.input_char(b'\n');
     if !ld.has_data() {
         klog_info!("TTY_TEST: BUG - canonical has_data false after newline");
         return TestResult::Fail;
     }
 
-    // Read the line — has_data should become false again.
     let mut buf = [0u8; 64];
     let _ = ld.read(&mut buf);
     if ld.has_data() {
@@ -1861,23 +1655,19 @@ pub fn test_canonical_has_data_line_count() -> TestResult {
     TestResult::Pass
 }
 
-/// EOF flush (Ctrl+D) counts as a line boundary.
 pub fn test_canonical_eof_line_boundary() -> TestResult {
     let mut ld = LineDisc::new();
 
-    // Type "abc" then EOF (Ctrl+D = 0x04).
     for &c in b"abc" {
         ld.input_char(c);
     }
-    ld.input_char(0x04); // VEOF
+    ld.input_char(0x04);
 
-    // has_data should be true (EOF-flushed line).
     if !ld.has_data() {
         klog_info!("TTY_TEST: BUG - canonical has_data false after EOF flush");
         return TestResult::Fail;
     }
 
-    // Read should return "abc" (3 bytes, no trailing newline).
     let mut buf = [0u8; 64];
     let n = ld.read(&mut buf);
     if n != 3 || &buf[..3] != b"abc" {
@@ -1885,7 +1675,6 @@ pub fn test_canonical_eof_line_boundary() -> TestResult {
         return TestResult::Fail;
     }
 
-    // has_data should be false after reading the EOF-flushed chunk.
     if ld.has_data() {
         klog_info!("TTY_TEST: BUG - has_data true after reading EOF-flushed chunk");
         return TestResult::Fail;
@@ -1893,7 +1682,6 @@ pub fn test_canonical_eof_line_boundary() -> TestResult {
     TestResult::Pass
 }
 
-/// SIGWINCH constant has the correct value.
 pub fn test_sigwinch_constant() -> TestResult {
     if SIGWINCH != 28 {
         klog_info!("TTY_TEST: BUG - SIGWINCH should be 28, got {}", SIGWINCH);
@@ -1902,26 +1690,21 @@ pub fn test_sigwinch_constant() -> TestResult {
     TestResult::Pass
 }
 
-/// Word erase with path boundaries (slashes are non-word chars).
 pub fn test_word_erase_path_boundary() -> TestResult {
     let mut ld = LineDisc::new();
     let mut t = *ld.termios();
     t.c_lflag |= LocalFlags::IEXTEN;
     ld.set_termios(&t);
 
-    // Type "/usr/local/bin".
     for &c in b"/usr/local/bin" {
         ld.input_char(c);
     }
 
-    // Ctrl+W should erase "bin" (word chars), stopping at "/".
     ld.input_char(0x17);
 
-    // Press Enter and read.
     ld.input_char(b'\n');
     let mut buf = [0u8; 64];
     let n = ld.read(&mut buf);
-    // Expect "/usr/local/" + "\n" = 12 bytes.
     if n != 12 || &buf[..11] != b"/usr/local/" {
         klog_info!(
             "TTY_TEST: BUG - word erase path boundary mismatch (n={}, data={:?})",
@@ -1933,26 +1716,21 @@ pub fn test_word_erase_path_boundary() -> TestResult {
     TestResult::Pass
 }
 
-/// Word erase with mixed word/non-word boundaries.
 pub fn test_word_erase_mixed_boundary() -> TestResult {
     let mut ld = LineDisc::new();
     let mut t = *ld.termios();
     t.c_lflag |= LocalFlags::IEXTEN;
     ld.set_termios(&t);
 
-    // Type "hello---world".
     for &c in b"hello---world" {
         ld.input_char(c);
     }
 
-    // Ctrl+W should erase "world" (word chars), stopping at "-".
     ld.input_char(0x17);
 
-    // Press Enter and read.
     ld.input_char(b'\n');
     let mut buf = [0u8; 64];
     let n = ld.read(&mut buf);
-    // Expect "hello---" + "\n" = 9 bytes.
     if n != 9 || &buf[..8] != b"hello---" {
         klog_info!(
             "TTY_TEST: BUG - word erase mixed boundary mismatch (n={}, data={:?})",
@@ -1964,26 +1742,21 @@ pub fn test_word_erase_mixed_boundary() -> TestResult {
     TestResult::Pass
 }
 
-/// Word erase skips trailing non-word chars then deletes word.
 pub fn test_word_erase_trailing_spaces() -> TestResult {
     let mut ld = LineDisc::new();
     let mut t = *ld.termios();
     t.c_lflag |= LocalFlags::IEXTEN;
     ld.set_termios(&t);
 
-    // Type "hello   " (hello + 3 spaces).
     for &c in b"hello   " {
         ld.input_char(c);
     }
 
-    // Ctrl+W: First pass skips 3 spaces (non-word), second pass deletes "hello".
     ld.input_char(0x17);
 
-    // Press Enter and read.
     ld.input_char(b'\n');
     let mut buf = [0u8; 64];
     let n = ld.read(&mut buf);
-    // Expect "\n" = 1 byte (everything erased).
     if n != 1 || buf[0] != b'\n' {
         klog_info!(
             "TTY_TEST: BUG - word erase trailing spaces mismatch (n={}, data={:?})",
@@ -1995,17 +1768,14 @@ pub fn test_word_erase_trailing_spaces() -> TestResult {
     TestResult::Pass
 }
 
-/// Canonical mode small-buffer read does not lose data.
 pub fn test_canonical_small_buffer_read() -> TestResult {
     let mut ld = LineDisc::new();
 
-    // Type "abcdefgh\n" (9 bytes).
     for &c in b"abcdefgh" {
         ld.input_char(c);
     }
     ld.input_char(b'\n');
 
-    // Read with a 3-byte buffer.
     let mut buf = [0u8; 3];
     let n1 = ld.read(&mut buf);
     if n1 != 3 || &buf[..3] != b"abc" {
@@ -2013,13 +1783,11 @@ pub fn test_canonical_small_buffer_read() -> TestResult {
         return TestResult::Fail;
     }
 
-    // has_data should still be true (mid-line).
     if !ld.has_data() {
         klog_info!("TTY_TEST: BUG - has_data false mid-line");
         return TestResult::Fail;
     }
 
-    // Read remaining bytes — should stop at newline.
     let mut buf2 = [0u8; 64];
     let n2 = ld.read(&mut buf2);
     if n2 != 6 || &buf2[..6] != b"defgh\n" {
@@ -2030,7 +1798,6 @@ pub fn test_canonical_small_buffer_read() -> TestResult {
         return TestResult::Fail;
     }
 
-    // Now has_data should be false.
     if ld.has_data() {
         klog_info!("TTY_TEST: BUG - has_data true after full line consumed");
         return TestResult::Fail;
@@ -2403,8 +2170,6 @@ pub fn test_master_close_hangs_up_slave() -> TestResult {
     tty::set_pty_lock(master, false).unwrap();
     let _slave_backing = tty::pty_open_slave(slave).unwrap();
 
-    // Closing the last master open hangs up the still-open slave: it reports
-    // hung-up and reads return EOF.
     drop(master_backing);
     let is_hung = tty::is_hung_up(slave);
     let mut buf = [0u8; 8];
@@ -2430,16 +2195,12 @@ pub fn test_slave_close_eofs_master_and_stays_reopenable() -> TestResult {
     tty::set_pty_lock(master, false).unwrap();
     let slave_open = tty::pty_open_slave(slave).unwrap();
 
-    // With the slave open and no data, the master read blocks (not EOF).
     let mut buf = [0u8; 8];
     let with_slave_open = tty::read(master, &mut buf, true);
 
-    // Closing the last slave open latches peer-closed: the master reads EOF.
     drop(slave_open);
     let after_close = tty::read(master, &mut buf, true);
 
-    // The master's link keeps the slave slot alive, so it reopens; the
-    // reopen clears the peer-closed latch and the master blocks again.
     let reopened = tty::pty_open_slave(slave);
     let reopen_ok = reopened.is_ok();
     let after_reopen = tty::read(master, &mut buf, true);
@@ -2506,11 +2267,7 @@ pub fn test_pty_canonical_editing_on_slave() -> TestResult {
 
     TestResult::Pass
 }
-// ===========================================================================
-// POSIX Completion Set
-// ===========================================================================
 
-/// IGNBRK discards NUL (break condition).
 pub fn test_ignbrk_discards_break() -> TestResult {
     let mut ld = LineDisc::new();
     let mut t = *ld.termios();
@@ -2522,7 +2279,6 @@ pub fn test_ignbrk_discards_break() -> TestResult {
         klog_info!("TTY_TEST: BUG - IGNBRK should discard break (NUL)");
         return TestResult::Fail;
     }
-    // Verify nothing was buffered.
     if ld.has_data() {
         klog_info!("TTY_TEST: BUG - IGNBRK should not buffer any data");
         return TestResult::Fail;
@@ -2530,14 +2286,12 @@ pub fn test_ignbrk_discards_break() -> TestResult {
     TestResult::Pass
 }
 
-/// BRKINT on NUL generates SIGINT and flushes input.
 pub fn test_brkint_generates_sigint() -> TestResult {
     let mut ld = LineDisc::new();
     let mut t = *ld.termios();
     t.c_iflag = InputFlags::BRKINT;
     t.c_lflag = LocalFlags::ICANON | LocalFlags::ECHO | LocalFlags::ISIG;
     ld.set_termios(&t);
-    // Push some data first, then break.
     ld.input_char(b'a');
     let action = ld.input_char(0x00);
     match action {
@@ -2550,7 +2304,6 @@ pub fn test_brkint_generates_sigint() -> TestResult {
             return TestResult::Fail;
         }
     }
-    // BRKINT should have flushed input.
     if ld.has_data() {
         klog_info!("TTY_TEST: BUG - BRKINT should flush input queues");
         return TestResult::Fail;
@@ -2558,15 +2311,13 @@ pub fn test_brkint_generates_sigint() -> TestResult {
     TestResult::Pass
 }
 
-/// PARMRK on NUL inserts \xff \x00 \x00 sequence.
 pub fn test_parmrk_inserts_marker() -> TestResult {
     let mut ld = LineDisc::new();
     let mut t = *ld.termios();
     t.c_iflag = InputFlags::PARMRK;
-    // Non-canonical mode to read bytes directly.
     t.c_lflag = LocalFlags::empty();
     ld.set_termios(&t);
-    ld.input_char(0x00); // break
+    ld.input_char(0x00);
     let mut buf = [0u8; 8];
     let n = ld.read(&mut buf);
     if n != 3 || buf[0] != 0xFF || buf[1] != 0x00 || buf[2] != 0x00 {
@@ -2580,12 +2331,11 @@ pub fn test_parmrk_inserts_marker() -> TestResult {
     TestResult::Pass
 }
 
-/// NUL without any break flags passes through as regular byte.
 pub fn test_nul_without_break_flags_passes_through() -> TestResult {
     let mut ld = LineDisc::new();
     let mut t = *ld.termios();
-    t.c_iflag = InputFlags::empty(); // No break flags set.
-    t.c_lflag = LocalFlags::empty(); // Non-canonical mode.
+    t.c_iflag = InputFlags::empty();
+    t.c_lflag = LocalFlags::empty();
     ld.set_termios(&t);
     ld.input_char(0x00);
     let mut buf = [0u8; 4];
@@ -2600,18 +2350,15 @@ pub fn test_nul_without_break_flags_passes_through() -> TestResult {
     TestResult::Pass
 }
 
-/// ECHOKE visually erases the line (returns KillLineEcho).
 pub fn test_echoke_visual_erase() -> TestResult {
     let mut ld = LineDisc::new();
     let mut t = *ld.termios();
     t.c_iflag = InputFlags::empty();
     t.c_lflag = LocalFlags::ICANON | LocalFlags::ECHO | LocalFlags::ECHOKE;
     ld.set_termios(&t);
-    // Type "abc" (3 printable chars = 3 columns).
     ld.input_char(b'a');
     ld.input_char(b'b');
     ld.input_char(b'c');
-    // Kill the line (VKILL = Ctrl+U = 0x15).
     let action = ld.input_char(0x15);
     match action {
         InputAction::KillLineEcho { columns } if columns == 3 => {}
@@ -2626,7 +2373,6 @@ pub fn test_echoke_visual_erase() -> TestResult {
     TestResult::Pass
 }
 
-/// ECHOK (without ECHOKE) echoes newline on kill.
 pub fn test_echok_newline_on_kill() -> TestResult {
     let mut ld = LineDisc::new();
     let mut t = *ld.termios();
@@ -2649,21 +2395,17 @@ pub fn test_echok_newline_on_kill() -> TestResult {
     TestResult::Pass
 }
 
-/// ECHOCTL erase produces KillLineEcho with 2 columns for a control char.
 pub fn test_echoctl_erase_two_columns() -> TestResult {
     let mut ld = LineDisc::new();
     let mut t = *ld.termios();
     t.c_iflag = InputFlags::empty();
     t.c_lflag = LocalFlags::ICANON | LocalFlags::ECHO | LocalFlags::ECHOE | LocalFlags::ECHOCTL;
     ld.set_termios(&t);
-    // Insert a control char (Ctrl+A = 0x01) via literal next.
-    // We need IEXTEN for VLNEXT.
+    // Ctrl+V (VLNEXT, needs IEXTEN) inserts the next byte literally.
     t.c_lflag |= LocalFlags::IEXTEN;
     ld.set_termios(&t);
-    // Type Ctrl+V first to enter literal mode, then Ctrl+A.
-    ld.input_char(0x16); // VLNEXT (Ctrl+V)
-    ld.input_char(0x01); // Ctrl+A - inserted literally
-    // Now erase it (VERASE = DEL = 0x7F).
+    ld.input_char(0x16);
+    ld.input_char(0x01);
     let action = ld.input_char(0x7F);
     match action {
         InputAction::KillLineEcho { columns } if columns == 2 => {}
@@ -2678,11 +2420,10 @@ pub fn test_echoctl_erase_two_columns() -> TestResult {
     TestResult::Pass
 }
 
-/// bytes_available returns correct count.
 pub fn test_bytes_available() -> TestResult {
     let mut ld = LineDisc::new();
     let mut t = *ld.termios();
-    t.c_lflag = LocalFlags::empty(); // non-canonical
+    t.c_lflag = LocalFlags::empty();
     t.c_iflag = InputFlags::empty();
     ld.set_termios(&t);
     if ld.bytes_available() != 0 {
@@ -2711,7 +2452,6 @@ pub fn test_bytes_available() -> TestResult {
     TestResult::Pass
 }
 
-/// RawDisc bytes_available works.
 pub fn test_raw_disc_bytes_available() -> TestResult {
     let mut rd = RawDisc::new();
     if rd.bytes_available() != 0 {
@@ -2730,12 +2470,11 @@ pub fn test_raw_disc_bytes_available() -> TestResult {
     TestResult::Pass
 }
 
-/// LdiscKind bytes_available dispatches correctly.
 pub fn test_ldisc_kind_bytes_available() -> TestResult {
     let mut lk = LdiscKind::NTty(LineDisc::new());
     {
         let mut t = *lk.termios();
-        t.c_lflag = LocalFlags::empty(); // non-canonical
+        t.c_lflag = LocalFlags::empty();
         t.c_iflag = InputFlags::empty();
         lk.set_termios(&t);
     }
@@ -2751,7 +2490,6 @@ pub fn test_ldisc_kind_bytes_available() -> TestResult {
     TestResult::Pass
 }
 
-/// FIONREAD constant is defined.
 pub fn test_fionread_constant() -> TestResult {
     if slopos_abi::syscall::FIONREAD != 0x541B {
         klog_info!("TTY_TEST: BUG - FIONREAD should be 0x541B");
@@ -2760,14 +2498,12 @@ pub fn test_fionread_constant() -> TestResult {
     TestResult::Pass
 }
 
-/// KillLineEcho on empty edit buffer returns None.
 pub fn test_kill_empty_line_no_echo() -> TestResult {
     let mut ld = LineDisc::new();
     let mut t = *ld.termios();
     t.c_iflag = InputFlags::empty();
     t.c_lflag = LocalFlags::ICANON | LocalFlags::ECHO | LocalFlags::ECHOKE;
     ld.set_termios(&t);
-    // Kill with empty buffer.
     let action = ld.input_char(0x15);
     if !matches!(action, InputAction::None) {
         klog_info!(
@@ -2779,7 +2515,6 @@ pub fn test_kill_empty_line_no_echo() -> TestResult {
     TestResult::Pass
 }
 
-/// BRKINT + IGNBRK — IGNBRK takes priority.
 pub fn test_ignbrk_takes_priority_over_brkint() -> TestResult {
     let mut ld = LineDisc::new();
     let mut t = *ld.termios();
@@ -2919,9 +2654,6 @@ pub fn test_control_flags_empty() -> TestResult {
     }
     TestResult::Pass
 }
-// ===========================================================================
-// LdiscKind Dispatch Consolidation
-// ===========================================================================
 
 pub fn test_ldisc_ops_linedisc_trait_delegation() -> TestResult {
     let mut ld = LineDisc::new();
@@ -2992,16 +2724,12 @@ pub fn test_ldisc_ops_rawdisc_trait_delegation() -> TestResult {
     TestResult::Pass
 }
 
-/// `dispatch_ldisc!` macro generates correct delegation for `LdiscKind`.
-/// Verifies NTty variant routing.
 pub fn test_dispatch_macro_ntty_routing() -> TestResult {
     let mut lk = LdiscKind::NTty(LineDisc::new());
-    // id() is manually implemented, not via macro.
     if lk.id() != slopos_abi::syscall::N_TTY {
         klog_info!("TTY_TEST: BUG - LdiscKind::NTty id() wrong");
         return TestResult::Fail;
     }
-    // Methods generated by dispatch_ldisc! macro.
     if !lk.is_canonical() {
         klog_info!("TTY_TEST: BUG - LdiscKind::NTty is_canonical should be true");
         return TestResult::Fail;
@@ -3014,7 +2742,6 @@ pub fn test_dispatch_macro_ntty_routing() -> TestResult {
         klog_info!("TTY_TEST: BUG - LdiscKind::NTty bytes_available should be 0");
         return TestResult::Fail;
     }
-    // Feed a char + newline through the macro-dispatched input_char.
     let _ = lk.input_char(b'A');
     let _ = lk.input_char(b'\n');
     if !lk.has_data() {
@@ -3031,8 +2758,6 @@ pub fn test_dispatch_macro_ntty_routing() -> TestResult {
     TestResult::Pass
 }
 
-/// `dispatch_ldisc!` macro generates correct delegation for `LdiscKind`.
-/// Verifies Raw variant routing.
 pub fn test_dispatch_macro_raw_routing() -> TestResult {
     let mut lk = LdiscKind::Raw(RawDisc::new());
     if lk.id() != slopos_abi::syscall::N_RAW {
@@ -3043,7 +2768,6 @@ pub fn test_dispatch_macro_raw_routing() -> TestResult {
         klog_info!("TTY_TEST: BUG - LdiscKind::Raw is_canonical should be false");
         return TestResult::Fail;
     }
-    // Raw mode: input goes directly to buffer.
     let _ = lk.input_char(b'R');
     if !lk.has_data() {
         klog_info!("TTY_TEST: BUG - LdiscKind::Raw should have data after input");
@@ -3067,10 +2791,8 @@ pub fn test_dispatch_macro_raw_routing() -> TestResult {
     TestResult::Pass
 }
 
-/// `LdiscKind::from_id` still works after dispatch refactor.
 pub fn test_from_id_still_works() -> TestResult {
     let default_termios = LineDisc::new().termios().clone();
-    // N_TTY
     let ntty = LdiscKind::from_id(slopos_abi::syscall::N_TTY, default_termios).expect("alloc");
     if ntty.is_none() {
         klog_info!("TTY_TEST: BUG - from_id(N_TTY) returned None");
@@ -3080,7 +2802,6 @@ pub fn test_from_id_still_works() -> TestResult {
         klog_info!("TTY_TEST: BUG - from_id(N_TTY) id mismatch");
         return TestResult::Fail;
     }
-    // N_RAW
     let nraw = LdiscKind::from_id(slopos_abi::syscall::N_RAW, default_termios).expect("alloc");
     if nraw.is_none() {
         klog_info!("TTY_TEST: BUG - from_id(N_RAW) returned None");
@@ -3090,7 +2811,6 @@ pub fn test_from_id_still_works() -> TestResult {
         klog_info!("TTY_TEST: BUG - from_id(N_RAW) id mismatch");
         return TestResult::Fail;
     }
-    // Invalid ID
     if LdiscKind::from_id(999, default_termios)
         .expect("alloc")
         .is_some()
@@ -3101,9 +2821,7 @@ pub fn test_from_id_still_works() -> TestResult {
     TestResult::Pass
 }
 
-/// Output processing via macro-dispatched `process_output_byte`.
 pub fn test_process_output_byte_dispatch() -> TestResult {
-    // NTty with OPOST+ONLCR: '\n' should produce CR+LF.
     let mut ntty = LdiscKind::NTty(LineDisc::new());
     let action = ntty.process_output_byte(b'\n');
     match action {
@@ -3118,7 +2836,6 @@ pub fn test_process_output_byte_dispatch() -> TestResult {
             return TestResult::Fail;
         }
     }
-    // Raw: '\n' should pass through unchanged.
     let mut raw = LdiscKind::Raw(RawDisc::new());
     let action = raw.process_output_byte(b'\n');
     match action {
@@ -3136,9 +2853,7 @@ pub fn test_process_output_byte_dispatch() -> TestResult {
     TestResult::Pass
 }
 
-/// `edit_content` dispatch works for both variants.
 pub fn test_edit_content_dispatch() -> TestResult {
-    // NTty: type some chars (no newline), edit_content should show them.
     let mut ntty = LdiscKind::NTty(LineDisc::new());
     let _ = ntty.input_char(b'h');
     let _ = ntty.input_char(b'i');
@@ -3147,7 +2862,6 @@ pub fn test_edit_content_dispatch() -> TestResult {
         klog_info!("TTY_TEST: BUG - NTty edit_content should show typed chars");
         return TestResult::Fail;
     }
-    // Raw: edit_content is always empty.
     let raw = LdiscKind::Raw(RawDisc::new());
     if !raw.edit_content().is_empty() {
         klog_info!("TTY_TEST: BUG - Raw edit_content should be empty");
@@ -3155,11 +2869,8 @@ pub fn test_edit_content_dispatch() -> TestResult {
     }
     TestResult::Pass
 }
-// ===========================================================================
-// TABDLY/XTABS Output Compatibility
-// ===========================================================================
 
-/// ABI constants have correct Linux-compatible values.
+/// TABDLY/TAB0/TAB3/XTABS bit values follow the Linux termios ABI.
 pub fn test_tabdly_abi_constants() -> TestResult {
     if OutputFlags::TABDLY.bits() != 0x1800 {
         klog_info!(
@@ -3187,7 +2898,6 @@ pub fn test_tabdly_abi_constants() -> TestResult {
         return TestResult::Fail;
     }
 
-    // Verify bitflags variants agree with raw constants.
     if OutputFlags::TABDLY.bits() != 0x1800 {
         klog_info!("TTY_TEST: BUG - OutputFlags::TABDLY mismatch");
         return TestResult::Fail;
@@ -3204,7 +2914,6 @@ pub fn test_tabdly_abi_constants() -> TestResult {
     TestResult::Pass
 }
 
-/// Default termios c_oflag includes XTABS.
 pub fn test_default_oflag_includes_xtabs() -> TestResult {
     let ld = LineDisc::new();
     let oflag = ld.termios().output_flags();
@@ -3225,10 +2934,8 @@ pub fn test_default_oflag_includes_xtabs() -> TestResult {
     TestResult::Pass
 }
 
-/// OPOST|XTABS expands tab to expected number of spaces.
 pub fn test_xtabs_expands_tab_to_spaces() -> TestResult {
     let mut ld = LineDisc::new();
-    // Default has OPOST|XTABS. Tab at column 0 => 8 spaces.
     match ld.process_output_byte(b'\t') {
         OutputAction::Tab(n) => {
             if n != 8 {
@@ -3242,7 +2949,6 @@ pub fn test_xtabs_expands_tab_to_spaces() -> TestResult {
         }
     }
 
-    // Print 3 chars (column=11), tab => 8 - (11 % 8) = 5.
     for ch in b"abc" {
         ld.process_output_byte(*ch);
     }
@@ -3262,10 +2968,8 @@ pub fn test_xtabs_expands_tab_to_spaces() -> TestResult {
     TestResult::Pass
 }
 
-/// OPOST without XTABS passes literal tab through.
 pub fn test_tab0_passes_literal_tab() -> TestResult {
     let mut ld = LineDisc::new();
-    // Clear TABDLY bits (set TAB0) while keeping OPOST.
     let mut t = *ld.termios();
     t.c_oflag = (t.c_oflag & !OutputFlags::TABDLY) | OutputFlags::TAB0;
     ld.set_termios(&t);
@@ -3295,22 +2999,17 @@ pub fn test_tab0_passes_literal_tab() -> TestResult {
     TestResult::Pass
 }
 
-/// TAB0 still tracks column correctly for echo accuracy.
 pub fn test_tab0_column_tracking() -> TestResult {
     let mut ld = LineDisc::new();
-    // Set TAB0 (clear TABDLY bits).
     let mut t = *ld.termios();
     t.c_oflag = (t.c_oflag & !OutputFlags::TABDLY) | OutputFlags::TAB0;
     ld.set_termios(&t);
 
-    // Print 3 chars (column=3), then tab => column advances to 8.
     for ch in b"abc" {
         ld.process_output_byte(*ch);
     }
     ld.process_output_byte(b'\t');
 
-    // Print one more char; column should be 9.
-    // Next tab should advance to column 16 (8 - (9 % 8) = 7 spaces worth).
     ld.process_output_byte(b'x');
     match ld.process_output_byte(b'\t') {
         OutputAction::Emit { buf, len } => {
@@ -3325,18 +3024,14 @@ pub fn test_tab0_column_tracking() -> TestResult {
         }
     }
 
-    // Verify column by checking next tab stop: print 'y' (col 17), tab => 8-(17%8)=7.
-    // Since TAB0, it emits literal tab but column should now be 24.
     ld.process_output_byte(b'y');
-    // Column should be 17.  Tab from 17 => column 24 (7 advance).
-    // We verify indirectly: switch to XTABS and check the space count.
+    // Column is not directly observable; switch to XTABS and count the spaces.
     let mut t2 = *ld.termios();
     t2.c_oflag |= OutputFlags::XTABS;
     ld.set_termios(&t2);
 
     match ld.process_output_byte(b'\t') {
         OutputAction::Tab(n) => {
-            // Column was 17, so 8-(17%8) = 7.
             if n != 7 {
                 klog_info!(
                     "TTY_TEST: BUG - TAB0 column drift: expected 7 spaces, got {}",
@@ -3354,17 +3049,13 @@ pub fn test_tab0_column_tracking() -> TestResult {
     TestResult::Pass
 }
 
-/// Column tracking correct across CR/LF/TAB with XTABS.
 pub fn test_xtabs_column_tracking_mixed() -> TestResult {
     let mut ld = LineDisc::new();
-    // Default: OPOST | ONLCR | XTABS
 
-    // Print "ab" (col=2), CR resets col to 0.
     ld.process_output_byte(b'a');
     ld.process_output_byte(b'b');
     ld.process_output_byte(b'\r');
 
-    // Tab at col 0 => 8 spaces.
     match ld.process_output_byte(b'\t') {
         OutputAction::Tab(n) => {
             if n != 8 {
@@ -3378,10 +3069,8 @@ pub fn test_xtabs_column_tracking_mixed() -> TestResult {
         }
     }
 
-    // NL with ONLCR: column resets to 0 (ONLCR emits CR+NL).
     ld.process_output_byte(b'\n');
 
-    // Tab at col 0 again.
     match ld.process_output_byte(b'\t') {
         OutputAction::Tab(n) => {
             if n != 8 {
@@ -3398,11 +3087,9 @@ pub fn test_xtabs_column_tracking_mixed() -> TestResult {
     TestResult::Pass
 }
 
-/// TABDLY bits roundtrip through termios get/set.
 pub fn test_tabdly_termios_roundtrip() -> TestResult {
     let mut ld = LineDisc::new();
 
-    // Set TAB0 (clear XTABS).
     let mut t = *ld.termios();
     t.c_oflag &= !OutputFlags::TABDLY;
     ld.set_termios(&t);
@@ -3413,7 +3100,6 @@ pub fn test_tabdly_termios_roundtrip() -> TestResult {
         return TestResult::Fail;
     }
 
-    // Set TAB3/XTABS back.
     let mut t2 = *ld.termios();
     t2.c_oflag |= OutputFlags::XTABS;
     ld.set_termios(&t2);
@@ -3427,10 +3113,8 @@ pub fn test_tabdly_termios_roundtrip() -> TestResult {
     TestResult::Pass
 }
 
-/// No OPOST means tab passes through regardless of TABDLY.
 pub fn test_no_opost_tab_passthrough() -> TestResult {
     let mut ld = LineDisc::new();
-    // Disable OPOST entirely.
     let mut t = *ld.termios();
     t.c_oflag = OutputFlags::empty();
     ld.set_termios(&t);
@@ -3455,12 +3139,9 @@ pub fn test_no_opost_tab_passthrough() -> TestResult {
     TestResult::Pass
 }
 
-/// Existing output processing tests still pass with XTABS default.
 pub fn test_existing_output_unaffected() -> TestResult {
     let mut ld = LineDisc::new();
-    // Default: OPOST | ONLCR | XTABS
 
-    // NL with ONLCR should still produce CR+NL.
     match ld.process_output_byte(b'\n') {
         OutputAction::Emit { buf, len } => {
             if len != 2 || buf[0] != b'\r' || buf[1] != b'\n' {
@@ -3474,7 +3155,6 @@ pub fn test_existing_output_unaffected() -> TestResult {
         }
     }
 
-    // Printable character still emitted normally.
     match ld.process_output_byte(b'A') {
         OutputAction::Emit { buf, len } => {
             if len != 1 || buf[0] != b'A' {
