@@ -106,15 +106,13 @@ pub fn test_cubic_tcp_friendliness() -> TestResult {
     let ca_start_cwnd = c.cwnd();
     let acks_per_rtt = ca_start_cwnd / MSS;
 
-    // Fire one RTT's worth of ACKs.
     let mut now = T0;
     for _ in 0..acks_per_rtt {
         now += 20;
         ack(&mut c, MSS, Some(20), 0, 50 * MSS, now);
     }
     let growth = c.cwnd() - ca_start_cwnd;
-    // Reno grows ~1 MSS per RTT.  CUBIC (via TCP-friendliness) should
-    // grow at least half that — generous slack for small-window case.
+    // Reno grows ~1 MSS per RTT; generous slack for the small-window case.
     assert_test!(
         growth >= MSS / 4,
         "TCP-friendliness: grew at least MSS/4 in one RTT"
@@ -122,13 +120,8 @@ pub fn test_cubic_tcp_friendliness() -> TestResult {
     pass!()
 }
 
-// =============================================================================
-// Fast retransmit — β = 0.7
-// =============================================================================
-
 pub fn test_cubic_fast_retransmit_beta_07() -> TestResult {
     let mut c = Cubic::new(MSS);
-    // Grow cwnd to 20 MSS.
     let mut una = 0u32;
     for i in 0..20 {
         ack(&mut c, MSS, Some(20), una, (i + 21) * MSS, T0);
@@ -150,10 +143,6 @@ pub fn test_cubic_fast_retransmit_beta_07() -> TestResult {
     pass!()
 }
 
-// =============================================================================
-// RTO timeout
-// =============================================================================
-
 pub fn test_cubic_timeout_resets_to_one_mss() -> TestResult {
     let mut c = Cubic::new(MSS);
     let mut una = 0u32;
@@ -168,20 +157,14 @@ pub fn test_cubic_timeout_resets_to_one_mss() -> TestResult {
     pass!()
 }
 
-// =============================================================================
-// Recovery exit
-// =============================================================================
-
 pub fn test_cubic_recovery_exit() -> TestResult {
     let mut c = Cubic::new(MSS);
     c.on_fast_retransmit(14600, 5000);
     assert_test!(c.in_recovery(), "in recovery after fast retransmit");
 
-    // snd_una below recover → stay in recovery.
     ack(&mut c, MSS, None, 4000, 10000, T0);
     assert_test!(c.in_recovery(), "still in recovery when snd_una < recover");
 
-    // snd_una at recover → exit.
     ack(&mut c, MSS, None, 5000, 10000, T0 + 100);
     assert_test!(!c.in_recovery(), "exited recovery when snd_una >= recover");
     assert_eq_test!(
@@ -192,13 +175,9 @@ pub fn test_cubic_recovery_exit() -> TestResult {
     pass!()
 }
 
-// =============================================================================
-// Fast convergence (RFC 8312 §4.6)
-// =============================================================================
-
+// Fast convergence: RFC 8312 §4.6.
 pub fn test_cubic_fast_convergence() -> TestResult {
     let mut c = Cubic::new(MSS);
-    // Grow to 30 MSS.
     let mut una = 0u32;
     for i in 0..30 {
         ack(&mut c, MSS, Some(20), una, (i + 31) * MSS, T0);
@@ -206,11 +185,9 @@ pub fn test_cubic_fast_convergence() -> TestResult {
     }
     let first_loss_cwnd = c.cwnd();
 
-    // First loss: sets last_max_cwnd = cwnd.
     c.on_fast_retransmit(first_loss_cwnd, una + 10 * MSS);
     let ssthresh1 = c.ssthresh();
 
-    // Exit recovery.
     ack(
         &mut c,
         MSS,
@@ -220,7 +197,6 @@ pub fn test_cubic_fast_convergence() -> TestResult {
         T0 + 500,
     );
 
-    // Don't fully recover — lose again at a lower cwnd.
     let second_loss_cwnd = c.cwnd();
     assert_test!(
         second_loss_cwnd < first_loss_cwnd,
@@ -229,21 +205,15 @@ pub fn test_cubic_fast_convergence() -> TestResult {
     c.on_fast_retransmit(second_loss_cwnd, una + 20 * MSS);
     let ssthresh2 = c.ssthresh();
 
-    // Fast convergence: origin_point = cwnd * 17/20 (< cwnd), so
-    // ssthresh2 < ssthresh that would result from origin_point = cwnd.
+    // Fast convergence sets origin_point = cwnd * 17/20, below cwnd.
     let naive_ssthresh = (second_loss_cwnd as u64 * 7 / 10) as u32;
     assert_test!(
         ssthresh2 < naive_ssthresh,
         "fast convergence reduced ssthresh below naive β*cwnd"
     );
-    // Sanity: ssthresh2 < ssthresh1.
     assert_test!(ssthresh2 < ssthresh1, "ssthresh decreased on second loss");
     pass!()
 }
-
-// =============================================================================
-// Hystart++ (RFC 9406)
-// =============================================================================
 
 /// RTT increase across rounds triggers CSS (linear growth instead of
 /// exponential).
@@ -251,7 +221,6 @@ pub fn test_cubic_hystart_rtt_exit_to_css() -> TestResult {
     let mut c = Cubic::new(MSS);
 
     // Round 1: seed with low RTT (20 ms).
-    // We need to complete one round to establish a baseline.
     let mut una: u32 = 0;
     let snd_nxt_r1 = 10 * MSS;
     for _ in 0..5 {
@@ -263,24 +232,20 @@ pub fn test_cubic_hystart_rtt_exit_to_css() -> TestResult {
     una = snd_nxt_r1 + MSS;
     let cwnd_after_r1 = c.cwnd();
 
-    // Round 2: RTT jumps to 60 ms (well above 20 + threshold).
-    // threshold = clamp(20/8, 4, 16) = 4.  So 60 > 20 + 4 = 24 → CSS.
+    // Round 2: threshold = clamp(20/8, 4, 16) = 4, so RTT 60 > 20 + 4 → CSS.
     let snd_nxt_r2 = 20 * MSS;
     for _ in 0..5 {
         ack(&mut c, MSS, Some(60), una, snd_nxt_r2, T0 + 200);
         una += MSS;
     }
-    // Complete round 2.
     ack(&mut c, MSS, Some(60), snd_nxt_r2, 30 * MSS, T0 + 300);
     una = snd_nxt_r2 + MSS;
 
-    // In CSS: growth should be linear (much less than exponential).
     let cwnd_before_css_ack = c.cwnd();
     ack(&mut c, MSS, Some(60), una, 30 * MSS, T0 + 320);
     let css_growth = c.cwnd() - cwnd_before_css_ack;
 
-    // In standard SS, growth = MSS per ACK.  In CSS, growth ≈ MSS²/cwnd
-    // which is much smaller for large cwnd.
+    // Standard SS grows MSS per ACK; CSS grows ≈ MSS²/cwnd.
     assert_test!(css_growth < MSS, "CSS: growth per ACK is sublinear (< MSS)");
     let _ = cwnd_after_r1;
     pass!()
@@ -290,7 +255,6 @@ pub fn test_cubic_hystart_rtt_exit_to_css() -> TestResult {
 pub fn test_cubic_css_to_ca_after_5_rounds() -> TestResult {
     let mut c = Cubic::new(MSS);
 
-    // Build up a baseline round with low RTT.
     let mut una: u32 = 0;
     let mut nxt: u32 = 10 * MSS;
 
@@ -312,9 +276,8 @@ pub fn test_cubic_css_to_ca_after_5_rounds() -> TestResult {
     una = nxt + MSS;
     nxt += 10 * MSS;
 
-    // Now in CSS. Complete 5 more rounds with sustained high RTT.
-    // RTT must stay above css_baseline (60) + threshold (≈7) = 67 to
-    // avoid the false-alarm reversion.  Use RTT=70.
+    // RTT must stay above css_baseline (60) + threshold (≈7) = 67 to avoid the
+    // false-alarm reversion, hence 70.
     let mut time = T0 + 400;
     for _round in 0..5 {
         let round_target = nxt;
@@ -323,15 +286,12 @@ pub fn test_cubic_css_to_ca_after_5_rounds() -> TestResult {
             una += MSS;
             time += 20;
         }
-        // Complete this round.
         nxt = round_target + 10 * MSS;
         ack(&mut c, MSS, Some(70), round_target, nxt, time);
         una = round_target + MSS;
         time += 100;
     }
 
-    // After 5 CSS rounds, ssthresh should have been set to cwnd
-    // (transitioning to CA).
     assert_test!(
         c.ssthresh() <= c.cwnd() + MSS,
         "ssthresh set near cwnd after CSS rounds"
@@ -339,18 +299,10 @@ pub fn test_cubic_css_to_ca_after_5_rounds() -> TestResult {
     pass!()
 }
 
-// =============================================================================
-// Integer cube root
-// =============================================================================
-
 pub fn test_cubic_integer_cbrt() -> TestResult {
-    // Test the cube root via the CUBIC algorithm indirectly:
-    // After a loss from a known cwnd, K should be predictable.
-    //
-    // We test by verifying that the algorithm produces reasonable cwnd
-    // growth that matches the cubic function timing.
+    // Exercised indirectly: cwnd growth after a loss must match the cubic
+    // timing K derives from.
     let mut c = Cubic::new(MSS);
-    // Grow to 20 MSS, lose, verify we can recover.
     let mut una = 0u32;
     for i in 0..20 {
         ack(&mut c, MSS, Some(20), una, (i + 21) * MSS, T0);
@@ -359,7 +311,6 @@ pub fn test_cubic_integer_cbrt() -> TestResult {
     let pre_loss = c.cwnd();
     c.on_fast_retransmit(pre_loss, una + 10 * MSS);
 
-    // Exit recovery.
     ack(
         &mut c,
         MSS,
@@ -369,7 +320,6 @@ pub fn test_cubic_integer_cbrt() -> TestResult {
         T0 + 500,
     );
 
-    // Pump ACKs for a long time; eventually cwnd must reach pre_loss.
     let mut now = T0 + 500;
     for _ in 0..2000 {
         now += 20;
@@ -383,10 +333,6 @@ pub fn test_cubic_integer_cbrt() -> TestResult {
     pass!()
 }
 
-// =============================================================================
-// CcAlgo enum dispatch
-// =============================================================================
-
 pub fn test_cc_algo_enum_dispatches_to_cubic() -> TestResult {
     let mut algo = CcAlgo::cubic(MSS);
     let c0 = algo.cwnd();
@@ -394,10 +340,6 @@ pub fn test_cc_algo_enum_dispatches_to_cubic() -> TestResult {
     assert_eq_test!(algo.cwnd(), c0 + MSS, "enum dispatches to Cubic");
     pass!()
 }
-
-// =============================================================================
-// Register the test suite
-// =============================================================================
 
 slopos_testing::stest!(
     name = test_cubic_initial_cwnd_is_iw10,

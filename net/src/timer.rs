@@ -59,76 +59,36 @@ impl TimerToken {
     pub const INVALID: Self = Self(0);
 }
 
-// =============================================================================
-// TimerEntry — internal per-timer state
-// =============================================================================
-
-/// A single pending timer.
-///
-/// Fires (unless `cancelled`) once `crate::clock::now_ms()` reaches or passes
-/// `deadline_ms`.
+/// A single pending timer; fires unless `cancelled` once
+/// `crate::clock::now_ms()` reaches `deadline_ms`.
 struct TimerEntry {
-    /// Absolute millisecond timestamp at which this entry should fire.
     deadline_ms: u64,
-    /// Which subsystem this timer belongs to.
     kind: TimerKind,
-    /// Opaque key identifying the specific resource (ARP entry ID, TCP
-    /// connection ID, reassembly group ID, etc.).
     key: u32,
-    /// Unique token for cancellation.
     token: TimerToken,
-    /// Set to `true` by [`NetTimerWheel::cancel`]; drained entries are skipped.
     cancelled: bool,
 }
 
-// =============================================================================
-// FiredTimer — returned from process_due() for dispatch
-// =============================================================================
-
-/// A timer that has expired and needs to be dispatched to its subsystem.
-///
-/// Returned by [`NetTimerWheel::process_due`].  The caller dispatches each
-/// entry based on its [`kind`](Self::kind) field.  This design allows the
-/// timer wheel to release its internal lock before dispatch, preventing
-/// deadlocks when handlers schedule new timers.
+/// A timer that has expired and needs dispatching to its subsystem.
 #[derive(Clone, Copy, Debug)]
 pub struct FiredTimer {
-    /// Which subsystem should handle this timer.
     pub kind: TimerKind,
-    /// The resource key (ARP entry ID, TCP connection ID, etc.).
-    ///
-    /// Each subsystem must validate that the key still refers to a live
-    /// resource — the original entry may have been closed/freed before the
-    /// timer fires (the timer-cancellation race).
+    /// The resource key (ARP entry ID, TCP connection ID, etc.). Each
+    /// subsystem must validate it still names a live resource: the original
+    /// entry may have been closed or freed before the timer fires.
     pub key: u32,
 }
 
-// =============================================================================
-// TimerWheelInner — state behind the SpinLock
-// =============================================================================
-
-/// Internal mutable state of the timer wheel, protected by [`SpinLock`].
 #[derive(slopos_ostd::SlotFields)]
 struct TimerWheelInner {
-    /// Pending timer entries, keyed by absolute `deadline_ms`.
-    ///
-    /// The network timer population is small (a handful of ARP entries and a
-    /// few timers per active TCP connection), so a flat list scanned by
-    /// absolute deadline is both simpler and fast enough — and, unlike a
-    /// rotating slot array, fast-forwarding the clock can never skip a
-    /// deadline.
+    /// A flat list scanned by absolute deadline: the timer population is small,
+    /// and unlike a rotating slot array, fast-forwarding the clock can never
+    /// skip a deadline.
     entries: KVec<TimerEntry>,
 }
 
-// =============================================================================
-// NetTimerWheel
-// =============================================================================
-
 /// Data-driven timer wheel with typed dispatch and absolute-millisecond
 /// deadlines.
-///
-/// See [module documentation](self) for the time model and concurrency
-/// details.
 ///
 /// # Usage
 ///
@@ -151,22 +111,15 @@ struct TimerWheelInner {
 #[derive(slopos_ostd::SlotFields)]
 pub struct NetTimerWheel {
     inner: SpinLock<TimerWheelInner>,
-    /// Monotonically increasing token generator (lock-free).
-    ///
-    /// Starts at 1; [`TimerToken(0)`](TimerToken::INVALID) is the sentinel
-    /// "invalid" value.
+    /// Starts at 1 so no live token equals [`TimerToken::INVALID`].
     next_token: AtomicU64,
 }
-
-// SAFETY: All mutable state is behind SpinLock (ticket lock with IRQ disable)
-// or AtomicU64.  No unsynchronized shared mutation.
 
 /// Shared by `new` and `init_with`, which build the same logical lock.
 const NET_TIMER_WHEEL_CLASS: &slopos_ostd::sync::lock_tracking::LockClassKey =
     slopos_ostd::lock_class!("NET_TIMER_WHEEL", LOCK_LEVEL_REGISTRY);
 
 impl NetTimerWheel {
-    /// Create a new, empty timer wheel.
     pub const fn new() -> Self {
         Self {
             inner: SpinLock::new(
@@ -201,21 +154,9 @@ impl NetTimerWheel {
         )
     }
 
-    // =========================================================================
-    // schedule
-    // =========================================================================
-
-    /// Schedule a timer to fire `delay_ms` milliseconds from now.
-    ///
-    /// Returns a [`TimerToken`] that can be passed to [`cancel`](Self::cancel)
-    /// to prevent the timer from firing.
-    ///
-    /// # Parameters
-    ///
-    /// - `delay_ms`: Milliseconds from now until the timer fires.  A delay of
-    ///   `0` fires on the next `process_due()` call.
-    /// - `kind`: Which subsystem should handle the expiry.
-    /// - `key`: Opaque resource identifier (ARP entry ID, TCP connection ID, etc.).
+    /// Schedule a timer to fire `delay_ms` milliseconds from now; a delay of
+    /// `0` fires on the next `process_due()` call. The returned [`TimerToken`]
+    /// cancels it via [`cancel`](Self::cancel).
     pub fn schedule(&self, delay_ms: u64, kind: TimerKind, key: u32) -> TimerToken {
         let token = TimerToken(self.next_token.fetch_add(1, Ordering::Relaxed));
         let deadline_ms = crate::clock::now_ms().wrapping_add(delay_ms);
@@ -230,18 +171,9 @@ impl NetTimerWheel {
         token
     }
 
-    // =========================================================================
-    // cancel
-    // =========================================================================
-
-    /// Cancel a previously scheduled timer.
-    ///
-    /// Marks the entry as `cancelled = true` so it is skipped (and reclaimed)
-    /// when the pending list is next drained.  This is O(n) in the number of
-    /// pending timers, which is small.
-    ///
-    /// Returns `true` if the timer was found and cancelled, `false` if it had
-    /// already fired or was not found.
+    /// Cancel a previously scheduled timer: the entry is marked, then skipped
+    /// and reclaimed when the pending list is next drained. `false` means it
+    /// had already fired or was not found.
     pub fn cancel(&self, token: TimerToken) -> bool {
         if token == TimerToken::INVALID {
             return false;
@@ -256,23 +188,16 @@ impl NetTimerWheel {
         false
     }
 
-    // =========================================================================
-    // process_due
-    // =========================================================================
-
     /// Fire every non-cancelled entry whose `deadline_ms` has been reached as
-    /// of `crate::clock::now_ms()`, earliest deadline first.
-    ///
-    /// Cancelled entries are reclaimed.  At most [`MAX_TIMERS_PER_PROCESS`]
-    /// entries fire per call; any further due entries remain pending and fire
-    /// on the next call.  The internal lock is released before this function
-    /// returns, so dispatch handlers may freely schedule or cancel timers.
+    /// of `crate::clock::now_ms()`, earliest deadline first. At most
+    /// [`MAX_TIMERS_PER_PROCESS`] fire per call; the rest wait for the next.
+    /// The internal lock is released before returning, so dispatch handlers
+    /// may freely schedule or cancel timers.
     pub fn process_due(&self) -> KVec<FiredTimer> {
         let now = crate::clock::now_ms();
         let mut fired = KVec::new();
         let mut inner = self.inner.lock();
 
-        // Reclaim cancelled entries first.
         let mut i = 0;
         while i < inner.entries.len() {
             if inner.entries[i].cancelled {
@@ -282,9 +207,8 @@ impl NetTimerWheel {
             }
         }
 
-        // Fire due entries earliest-first, up to the per-call bound.  Selecting
-        // the minimum deadline each round keeps dispatch order deterministic
-        // (and fair under the cap) without sorting the whole list.
+        // Selecting the minimum deadline each round keeps dispatch order
+        // deterministic without sorting the whole list.
         while fired.len() < MAX_TIMERS_PER_PROCESS {
             let mut best: Option<usize> = None;
             let mut best_deadline = u64::MAX;
@@ -305,7 +229,6 @@ impl NetTimerWheel {
             }
         }
 
-        // Lock is released here (drop of SpinLockGuard).
         fired
     }
 
@@ -316,27 +239,12 @@ impl NetTimerWheel {
     }
 }
 
-// =============================================================================
-// Global timer wheel instance
-// =============================================================================
-
-/// The global network timer wheel.
-///
-/// All networking subsystems (ARP neighbor cache, TCP engine, IP reassembly)
-/// schedule their timers through this single wheel.
+/// The one wheel every networking subsystem schedules through.
 pub static NET_TIMER_WHEEL: NetTimerWheel = NetTimerWheel::new();
 
-// =============================================================================
-// Integration: net_timer_process
-// =============================================================================
-
 /// Process pending network timers up to the current clock and dispatch them.
-///
-/// Reads `crate::clock::now_ms()` (via [`NetTimerWheel::process_due`]) and
-/// dispatches every expired entry.  Call it from:
-///
-/// - The NAPI poll loop (fires during active networking)
-/// - The idle wakeup callback (fires during idle periods)
+/// Called from both the NAPI poll loop and the idle wakeup callback, so timers
+/// fire during active networking and during idle periods alike.
 pub fn net_timer_process() {
     // The classifier's tick arms itself here because the first call to this
     // function is when both the wheel and the thread draining it exist.
@@ -349,11 +257,6 @@ pub fn net_timer_process() {
     }
 }
 
-/// Dispatch a single fired timer to the appropriate subsystem.
-///
-/// ARP timers call into the [`NeighborCache`] and execute any
-/// returned I/O actions via the single VirtIO-net device handle.  TCP and
-/// reassembly dispatch remain stubbed for the corresponding.
 fn dispatch_fired_timer(timer: &FiredTimer) {
     match timer.kind {
         TimerKind::ArpExpire => {
@@ -364,8 +267,8 @@ fn dispatch_fired_timer(timer: &FiredTimer) {
             klog_debug!("net_timer: ARP retransmit fired, key={}", timer.key);
             let (action, _dropped) = super::neighbor::NEIGHBOR_CACHE.on_retransmit(timer.key);
             if let Some(act) = action {
-                // Execute the returned action (send ARP request).
-                // multi-NIC support will need per-device handle lookup.
+                // TODO(tech-debt): one global device handle — multi-NIC needs a
+                // per-device lookup.
                 if let Some(handle) =
                     crate::net_driver_service::net_driver().and_then(|d| (d.get_device_handle)())
                 {

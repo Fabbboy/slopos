@@ -1245,7 +1245,6 @@ pub fn test_tcp_rst_in_established() -> TestResult {
 
 pub fn test_tcp_rst_to_unknown_ignored() -> TestResult {
     reset();
-    // RST to a non-existent connection → should be silently ignored.
     let rst = TcpHeader {
         src_port: 80,
         dst_port: 12345,
@@ -1272,7 +1271,6 @@ pub fn test_tcp_syn_in_established_sends_rst() -> TestResult {
 
     let (_id, _server_iss, client_port) = establish_client_connection(local_ip, remote_ip, 80);
 
-    // Unexpected SYN in ESTABLISHED → should RST and close.
     let syn = TcpHeader {
         src_port: 80,
         dst_port: client_port,
@@ -1297,7 +1295,6 @@ pub fn test_tcp_syn_in_established_sends_rst() -> TestResult {
 
 pub fn test_tcp_segment_no_connection_sends_rst() -> TestResult {
     reset();
-    // Non-RST segment to a port with no listener → RST.
     let syn = TcpHeader {
         src_port: 50000,
         dst_port: 9999,
@@ -1387,7 +1384,6 @@ pub fn test_tcp_find_wildcard_listen() -> TestResult {
     reset();
     let listen_id = tcp::listen([0; 4], 80).unwrap();
 
-    // A connection from any IP to port 80 should match the wildcard listener.
     let tuple = TcpTuple {
         local_ip: [10, 0, 0, 1],
         local_port: 80,
@@ -1452,7 +1448,6 @@ pub fn test_tcp_simultaneous_open() -> TestResult {
     let (id, syn_seg) = tcp::connect(local_ip, remote_ip, 80).unwrap();
     let client_port = syn_seg.tuple.local_port;
 
-    // Peer also sends SYN (without ACK — simultaneous open).
     let peer_syn = TcpHeader {
         src_port: 80,
         dst_port: client_port,
@@ -1481,7 +1476,6 @@ pub fn test_tcp_multiple_connections() -> TestResult {
     reset();
     let local_ip = [10, 0, 0, 1];
 
-    // Create 10 connections to different servers.
     let mut ids = [ConnId::SENTINEL; 10];
     for i in 0..10 {
         let remote = [10, 0, (i / 256) as u8, (i % 256 + 1) as u8];
@@ -1490,13 +1484,11 @@ pub fn test_tcp_multiple_connections() -> TestResult {
     }
     assert_eq_test!(tcp::active_count(), 10, "10 active connections");
 
-    // Close half of them.
     for i in (0..10).step_by(2) {
         tcp::close(ids[i]).unwrap();
     }
     assert_eq_test!(tcp::active_count(), 5, "5 remaining after closing evens");
 
-    // The remaining odd-indexed connections should still be SYN_SENT.
     for i in (1..10).step_by(2) {
         assert_eq_test!(
             tcp::get_state(ids[i]),
@@ -1520,8 +1512,6 @@ pub fn test_tcp_isn_same_tuple_delta_is_drift_only() -> TestResult {
     };
     let a = tcp::isn::generate_isn(&tuple);
     let b = tcp::isn::generate_isn(&tuple);
-    // Forward drift must be small for back-to-back calls, and negative
-    // drift is impossible because monotonic_ns is monotonic.
     let delta = b.wrapping_sub(a);
     assert_test!(
         delta <= 1_000_000,
@@ -1530,7 +1520,6 @@ pub fn test_tcp_isn_same_tuple_delta_is_drift_only() -> TestResult {
     pass!()
 }
 
-/// Different 4-tuples must not produce the same ISN.
 pub fn test_tcp_isn_varies_by_tuple() -> TestResult {
     reset();
     let t1 = TcpTuple {
@@ -1560,9 +1549,8 @@ pub fn test_tcp_isn_varies_by_tuple() -> TestResult {
     pass!()
 }
 
-/// The ISN must NOT equal the previous ISN + 64000.  The old
-/// `ISN_COUNTER.fetch_add(64000)` scheme is gone; any caller that relied
-/// on that delta needs to update.
+/// The ISN must not equal the previous ISN + 64000, the fixed delta of the old
+/// `ISN_COUNTER.fetch_add(64000)` scheme.
 pub fn test_tcp_isn_not_monotonic_counter() -> TestResult {
     reset();
     let tuple = TcpTuple {
@@ -1718,8 +1706,7 @@ pub fn test_tcp_buffer_alloc_failure_resets_peer() -> TestResult {
         "the unserviceable connection kept its table slot"
     );
 
-    // The injection is spent, so the next handshake on the same listener
-    // establishes normally.
+    // The injection is spent, so the next handshake establishes normally.
     let syn2 = TcpHeader {
         src_port: 50002,
         dst_port: 80,

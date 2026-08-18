@@ -18,8 +18,6 @@ use crate::tcp::{
 use crate::tests::tcp_common::{self, reset_all as reset};
 use crate::with_data_state;
 
-/// Legacy tuple form of [`tcp_common::establish_connection`], kept so the
-/// ~38 call sites below don't need destructuring rewrites.
 fn establish_connection() -> (ConnId, u32, u16) {
     let c = tcp_common::establish_connection();
     (c.id, c.peer_iss, c.local_port)
@@ -48,10 +46,6 @@ fn inject_data_segment(
     };
     tcp::input(remote_ip, local_ip, &hdr, &[], data, now_ms)
 }
-
-// =============================================================================
-// Ring Buffer
-// =============================================================================
 
 pub fn test_ring_buffer_new_empty() -> TestResult {
     reset();
@@ -286,10 +280,6 @@ pub fn test_ring_buffer_partial_write() -> TestResult {
     pass!()
 }
 
-// =============================================================================
-// Send Buffer
-// =============================================================================
-
 pub fn test_send_enqueue_and_peek() -> TestResult {
     reset();
     let (id, _, _) = establish_connection();
@@ -340,8 +330,6 @@ pub fn test_send_retransmit_timeout() -> TestResult {
     let _ = tcp::poll_transmit(id, &mut payload, 0).unwrap();
 
     assert_eq_test!(tcp::retransmit_check(1000), Some(id), "RTO fired");
-    // After RTO, entries are marked Lost. poll_transmit selectively
-    // retransmits them.
     let (_, n, _) = tcp::poll_transmit(id, &mut payload, 1001).unwrap();
     assert_eq_test!(n, 4, "retransmit of Lost segment");
     assert_test!(&payload[..4] == b"abcd", "retransmit payload");
@@ -420,10 +408,6 @@ pub fn test_send_ack_stops_rto_timer() -> TestResult {
     assert_test!(tcp::retransmit_check(2000).is_none(), "rto timer cleared");
     pass!()
 }
-
-// =============================================================================
-// Receive Buffer
-// =============================================================================
 
 pub fn test_recv_enqueue_dequeue() -> TestResult {
     reset();
@@ -557,10 +541,6 @@ pub fn test_recv_delayed_ack_timeout() -> TestResult {
     );
     pass!()
 }
-
-// =============================================================================
-// Data Transfer Integration
-// =============================================================================
 
 pub fn test_tcp_send_in_established() -> TestResult {
     reset();
@@ -712,10 +692,6 @@ pub fn test_tcp_recv_updates_window() -> TestResult {
     pass!()
 }
 
-// =============================================================================
-// Retransmission
-// =============================================================================
-
 pub fn test_tcp_retransmit_on_timeout() -> TestResult {
     reset();
     let (id, _, _) = establish_connection();
@@ -797,10 +773,6 @@ pub fn test_tcp_retransmit_canceled_by_ack() -> TestResult {
     pass!()
 }
 
-// =============================================================================
-// SendMap wiring + cwnd gating + SACK-driven retransmit (D.1)
-// =============================================================================
-
 pub fn test_retx_queue_populated_by_poll_transmit() -> TestResult {
     reset();
     let c = tcp_common::establish_connection();
@@ -817,23 +789,18 @@ pub fn test_retx_queue_populated_by_poll_transmit() -> TestResult {
 pub fn test_poll_transmit_respects_cwnd() -> TestResult {
     reset();
     let (id, _, _) = establish_connection();
-    // Send a small payload and transmit it.
     let _ = tcp::send(id, b"x").unwrap();
     let mut buf: KBox<[u8; 1500]> = KBox::zeroed().expect("alloc");
     let _ = tcp::poll_transmit(id, &mut *buf, 0).unwrap();
 
-    // Trigger RTO → cwnd shrinks to MSS (1460), entry marked Lost.
     let _ = tcp::retransmit_check(1000);
 
-    // First poll: retransmits the Lost 1-byte entry.
     let (_, n0, _) = tcp::poll_transmit(id, &mut *buf, 1001).unwrap();
     assert_eq_test!(n0, 1, "retransmit of Lost 1-byte entry");
 
-    // Fill the buffer well past cwnd.
     let _ = tcp::send(id, &[0x42; 4380]).unwrap();
 
-    // Second poll: pipe=1 (retransmitted entry), cwnd=1460, effective=1459.
-    // Nagle blocks: 1459 < MSS and pipe > 0.  Disable Nagle.
+    // pipe=1, cwnd=1460 → effective 1459, which Nagle defers as sub-MSS.
     tcp::table::with_pcb_mut(id, |pcb| {
         if let tcp::PcbState::Data(d) = &mut pcb.state {
             d.nagle_enabled = false;
@@ -842,7 +809,7 @@ pub fn test_poll_transmit_respects_cwnd() -> TestResult {
     let (_, n1, _) = tcp::poll_transmit(id, &mut *buf, 1002).unwrap();
     assert_eq_test!(n1, 1459, "second segment limited by cwnd - pipe");
 
-    // Third poll: cwnd exhausted (pipe = 1 + 1459 = 1460 = cwnd).
+    // pipe = 1 + 1459 = 1460 = cwnd.
     assert_test!(
         tcp::poll_transmit(id, &mut *buf, 1003).is_none(),
         "blocked by cwnd"
@@ -852,9 +819,8 @@ pub fn test_poll_transmit_respects_cwnd() -> TestResult {
 
 /// Inject one dup ACK carrying SACK blocks for `segs[1..4]`.
 ///
-/// `#[inline(never)]`: the 28-byte option buffer and the `Actions` slot are a
-/// frame of their own, and folding them into the caller puts it over the 2 KiB
-/// stack gate.
+/// `#[inline(never)]`: folding the option buffer and the `Actions` slot into
+/// the caller puts it over the 2 KiB stack gate.
 #[inline(never)]
 fn inject_sack_dup_ack(c: &tcp_common::EstablishedConn, snd_una: u32, segs: &[(u32, u32); 4]) {
     let peer_seq = c.peer_iss.wrapping_add(1);
@@ -869,8 +835,8 @@ fn inject_sack_dup_ack(c: &tcp_common::EstablishedConn, snd_una: u32, segs: &[(u
     opts[16..20].copy_from_slice(&segs[2].1.to_be_bytes());
     opts[20..24].copy_from_slice(&segs[3].0.to_be_bytes());
     opts[24..28].copy_from_slice(&segs[3].1.to_be_bytes());
-    // Heap-allocated reusable Actions slot — keeps the ~400 B return
-    // value off the stack frame so the 2 KiB gate holds.
+    // Reusable heap Actions slot: the ~400 B return value would put this
+    // frame over the 2 KiB stack gate.
     let mut actions: KBox<tcp::Actions> =
         KBox::try_init(tcp::Actions::init_default()).expect("alloc");
     tcp_common::inject_with_options_into(
@@ -891,14 +857,12 @@ pub fn test_fast_retransmit_triggers_on_3_dup_acks() -> TestResult {
     reset();
     let c = tcp_common::establish_connection();
     let id = c.id;
-    // Enable SACK for this connection.
     tcp::table::with_pcb_mut(id, |pcb| {
         if let tcp::PcbState::Data(d) = &mut pcb.state {
             d.sack_permitted = true;
         }
     });
 
-    // Send 4 MSS-sized segments.
     let mut send_payload: KBox<[u8; 4 * DEFAULT_MSS as usize]> = KBox::zeroed().expect("alloc");
     send_payload.iter_mut().for_each(|b| *b = 0xBB);
     let _ = tcp::send(id, &*send_payload).unwrap();
@@ -909,14 +873,12 @@ pub fn test_fast_retransmit_triggers_on_3_dup_acks() -> TestResult {
         segs[i] = (seg.seq_num, seg.seq_num.wrapping_add(n as u32));
     }
 
-    // One PCB borrow per observation point, not one per field: each expands to
-    // a lock guard and a state match with their own slots.
+    // One PCB borrow per observation point: each expands to a lock guard and
+    // a state match with stack slots of their own.
     let (snd_una, snd_nxt_before) = with_data_state!(id, |d| (d.snd_una.raw(), d.snd_nxt.raw()));
     assert_test!(snd_nxt_before > snd_una, "data in flight");
 
-    // Inject dup ACK with SACK blocks covering segments 2, 3, 4
-    // (skipping segment 1). This creates 3 SACKed entries past seg 1
-    // → seg 1 is declared Lost.
+    // Three SACKed entries past seg 1 declare seg 1 Lost.
     inject_sack_dup_ack(&c, snd_una, &segs);
 
     let (snd_nxt_after, in_recovery, has_lost) = with_data_state!(id, |d| (
@@ -924,12 +886,10 @@ pub fn test_fast_retransmit_triggers_on_3_dup_acks() -> TestResult {
         d.cc.in_recovery(),
         d.sendmap.has_lost()
     ));
-    // snd_nxt does NOT rewind (no go-back-N).
     assert_eq_test!(snd_nxt_after, snd_nxt_before, "snd_nxt not rewound");
     assert_test!(in_recovery, "entered fast recovery");
     assert_test!(has_lost, "segment marked Lost");
 
-    // poll_transmit selectively retransmits the Lost segment.
     let resent = tcp::poll_transmit(id, &mut *buf, 1);
     assert_test!(resent.is_some(), "retransmit of Lost segment");
     let (seg, _, _) = resent.unwrap();
@@ -947,7 +907,6 @@ pub fn test_fast_retransmit_cwnd_reduction() -> TestResult {
         }
     });
 
-    // Send 4 MSS-sized segments.
     let mut send_payload: KBox<[u8; 4 * DEFAULT_MSS as usize]> = KBox::zeroed().expect("alloc");
     send_payload.iter_mut().for_each(|b| *b = 0xCC);
     let _ = tcp::send(id, &*send_payload).unwrap();
@@ -961,11 +920,7 @@ pub fn test_fast_retransmit_cwnd_reduction() -> TestResult {
     let total = with_data_state!(id, |d| d.sendmap.total_bytes());
     assert_eq_test!(total, 4 * DEFAULT_MSS as u32, "4 MSS in flight");
 
-    // SACK segments 2, 3, 4 → segment 1 is Lost.
-    // CUBIC uses cwnd (not pipe) for the loss reduction:
-    //   origin_point = cwnd = 14600 (IW, no ACKs received yet)
-    //   ssthresh = origin_point * 0.7 = 10220
-    //   cwnd = ssthresh = 10220
+    // CUBIC reduces on cwnd, not pipe: cwnd = ssthresh = IW 14600 * 0.7.
     let snd_una = with_data_state!(id, |d| d.snd_una.raw());
     let peer_seq = c.peer_iss.wrapping_add(1);
     let mut opts = [0u8; 28];
@@ -1006,7 +961,6 @@ pub fn test_fast_retransmit_not_during_recovery() -> TestResult {
         }
     });
 
-    // Send 5 segments so we can trigger SACK-based loss detection.
     let mut send_payload: KBox<[u8; 5 * DEFAULT_MSS as usize]> = KBox::zeroed().expect("alloc");
     send_payload.iter_mut().for_each(|b| *b = 0xDD);
     let _ = tcp::send(id, &*send_payload).unwrap();
@@ -1019,12 +973,9 @@ pub fn test_fast_retransmit_not_during_recovery() -> TestResult {
 
     let snd_una = with_data_state!(id, |d| d.snd_una.raw());
     let peer_seq = c.peer_iss.wrapping_add(1);
-    // Heap-allocated reusable Actions slot — see sibling test for
-    // rationale.
     let mut actions: KBox<tcp::Actions> =
         KBox::try_init(tcp::Actions::init_default()).expect("alloc");
 
-    // SACK segs 2,3,4 → seg 1 is Lost, enters recovery.
     let mut opts = [0u8; 28];
     opts[0] = 1;
     opts[1] = 1;
@@ -1052,8 +1003,7 @@ pub fn test_fast_retransmit_not_during_recovery() -> TestResult {
 
     let cwnd_before = with_data_state!(id, |d| d.cc.cwnd());
 
-    // Send another SACK covering seg 5 — loss detection fires again
-    // but should NOT re-enter recovery (already in recovery).
+    // A second SACK re-runs loss detection while already in recovery.
     let mut opts2 = [0u8; 12];
     opts2[0] = 1;
     opts2[1] = 1;
@@ -1091,12 +1041,10 @@ pub fn test_rto_resets_cwnd_and_marks_lost() -> TestResult {
         "sendmap total before RTO"
     );
 
-    // Trigger RTO.
     let _ = tcp::retransmit_check(1000);
 
     let cwnd = with_data_state!(id, |d| d.cc.cwnd());
     assert_eq_test!(cwnd, DEFAULT_MSS as u32, "cwnd reset to MSS");
-    // SendMap is NOT cleared — entries are marked Lost instead.
     assert_test!(
         !with_data_state!(id, |d| d.sendmap.is_empty()),
         "sendmap not cleared"
@@ -1105,19 +1053,12 @@ pub fn test_rto_resets_cwnd_and_marks_lost() -> TestResult {
         with_data_state!(id, |d| d.sendmap.has_lost()),
         "entries marked Lost"
     );
-    // pipe is 0 because Lost entries are excluded.
     assert_eq_test!(with_data_state!(id, |d| d.sendmap.pipe()), 0, "pipe zero");
     pass!()
 }
 
-// =============================================================================
-// SACK (D.2)
-// =============================================================================
-
 pub fn test_sack_permitted_negotiated_active_open() -> TestResult {
     reset();
-    // establish_connection sends SYN with SACK-Permitted.  We inject
-    // a SYN-ACK that also carries SACK-Permitted via raw options.
     let (id, syn_seg) = tcp::connect(
         tcp_common::LOCAL_IP,
         tcp_common::REMOTE_IP,
@@ -1128,7 +1069,6 @@ pub fn test_sack_permitted_negotiated_active_open() -> TestResult {
     let our_iss = syn_seg.seq_num;
     assert_test!(syn_seg.sack_permitted, "SYN carries SACK-Permitted");
 
-    // Build SYN-ACK options: MSS(4B) + SACK-Permitted(2B)
     let opts: [u8; 6] = [
         2, 4, 0x05, 0xB4, // MSS = 1460
         4, 2, // SACK-Permitted
@@ -1160,8 +1100,7 @@ pub fn test_sack_permitted_negotiated_active_open() -> TestResult {
 
 pub fn test_sack_permitted_not_set_without_peer() -> TestResult {
     reset();
-    // Standard establish_connection sends SYN-ACK without SACK-Permitted
-    // (the test helper builds a bare SYN-ACK with no options).
+    // The helper's SYN-ACK carries no options, so SACK is never negotiated.
     let c = tcp_common::establish_connection();
     let permitted = with_data_state!(c.id, |d| d.sack_permitted);
     assert_test!(!permitted, "SACK not permitted when peer omits option");
@@ -1172,7 +1111,6 @@ pub fn test_sack_blocks_sent_on_ooo() -> TestResult {
     reset();
     let c = tcp_common::establish_connection();
     let id = c.id;
-    // Enable SACK on this connection for testing.
     tcp::table::with_pcb_mut(id, |pcb| {
         if let tcp::PcbState::Data(d) = &mut pcb.state {
             d.sack_permitted = true;
@@ -1182,7 +1120,7 @@ pub fn test_sack_blocks_sent_on_ooo() -> TestResult {
     let snd_nxt = with_data_state!(id, |d| d.snd_nxt.raw());
     let peer_seq = c.peer_iss.wrapping_add(1);
 
-    // Inject OOO segment: gap at peer_seq, data at peer_seq+100.
+    // A gap at peer_seq, with data at peer_seq+100.
     let actions = tcp_common::inject(
         tcp_common::REMOTE_IP,
         tcp_common::LOCAL_IP,
@@ -1207,29 +1145,25 @@ pub fn test_sack_blocks_parsed_from_peer_ack() -> TestResult {
     reset();
     let c = tcp_common::establish_connection();
     let id = c.id;
-    // Enable SACK.
     tcp::table::with_pcb_mut(id, |pcb| {
         if let tcp::PcbState::Data(d) = &mut pcb.state {
             d.sack_permitted = true;
         }
     });
 
-    // Send data so we have inflight.
     let _ = tcp::send(id, &[0xAA; 100]).unwrap();
     let mut buf: KBox<[u8; 1500]> = KBox::zeroed().expect("alloc");
     let _ = tcp::poll_transmit(id, &mut *buf, 0).unwrap();
 
     let snd_una = with_data_state!(id, |d| d.snd_una.raw());
 
-    // Inject an ACK carrying SACK blocks in options.
-    // Options: NOP NOP SACK(kind=5, len=10, one block)
     let sack_left = snd_una.wrapping_add(50);
     let sack_right = snd_una.wrapping_add(100);
     let mut opts = [0u8; 12];
-    opts[0] = 1; // NOP
-    opts[1] = 1; // NOP
-    opts[2] = 5; // SACK kind
-    opts[3] = 10; // SACK len (2 + 8)
+    opts[0] = 1;
+    opts[1] = 1;
+    opts[2] = 5;
+    opts[3] = 10;
     opts[4..8].copy_from_slice(&sack_left.to_be_bytes());
     opts[8..12].copy_from_slice(&sack_right.to_be_bytes());
 
@@ -1250,8 +1184,7 @@ pub fn test_sack_blocks_parsed_from_peer_ack() -> TestResult {
         0,
     );
 
-    // SACK blocks are now fed directly into the SendMap (no separate
-    // scoreboard).  Verify the connection is still healthy.
+    // SACK blocks feed straight into the SendMap; there is no scoreboard.
     let permitted = with_data_state!(id, |d| d.sack_permitted);
     assert_test!(permitted, "sack_permitted still set");
     pass!()
@@ -1262,7 +1195,6 @@ pub fn test_sack_scoreboard_cleared_on_forward_ack() -> TestResult {
     let c = tcp_common::establish_connection();
     let id = c.id;
 
-    // Send data and get it acked with a forward ACK.
     let _ = tcp::send(id, &[0xBB; 50]).unwrap();
     let mut buf: KBox<[u8; 1500]> = KBox::zeroed().expect("alloc");
     let (seg, _, _) = tcp::poll_transmit(id, &mut *buf, 0).unwrap();
@@ -1284,7 +1216,6 @@ pub fn test_sack_scoreboard_cleared_on_forward_ack() -> TestResult {
         1,
     );
 
-    // Forward ACK should have freed the entry from the sendmap.
     let empty = with_data_state!(id, |d| d.sendmap.is_empty());
     assert_test!(empty, "sendmap cleared after forward ACK");
     pass!()
@@ -1292,7 +1223,6 @@ pub fn test_sack_scoreboard_cleared_on_forward_ack() -> TestResult {
 
 pub fn test_sack_blocks_from_ooo_assembler() -> TestResult {
     reset();
-    // Test the Assembler sack_blocks() method directly.
     let mut asm = tcp::Assembler::new();
     asm.insert(200, 10); // range [200, 210)
     asm.insert(100, 5); // range [100, 105)
@@ -1300,7 +1230,6 @@ pub fn test_sack_blocks_from_ooo_assembler() -> TestResult {
 
     let (blocks, count) = asm.sack_blocks();
     assert_eq_test!(count, 3, "three SACK blocks");
-    // Should be sorted by left edge.
     assert_eq_test!(blocks[0].0, 100, "first block left");
     assert_eq_test!(blocks[0].1, 105, "first block right");
     assert_eq_test!(blocks[1].0, 200, "second block left");
@@ -1308,14 +1237,9 @@ pub fn test_sack_blocks_from_ooo_assembler() -> TestResult {
     pass!()
 }
 
-// =============================================================================
-// SO_SNDBUF / SO_RCVBUF (D.3)
-// =============================================================================
-
 pub fn test_so_sndbuf_caps_send_space() -> TestResult {
     reset();
     let (id, _, _) = establish_connection();
-    // Default: full 32KB free.
     let before = tcp::send_buffer_space(id);
     assert_test!(before > 1024, "default > 1024");
 
@@ -1323,7 +1247,6 @@ pub fn test_so_sndbuf_caps_send_space() -> TestResult {
     let after = tcp::send_buffer_space(id);
     assert_test!(after <= 1024, "capped to 1024 by SO_SNDBUF");
 
-    // Enqueue should also be limited.
     let wrote = tcp::send(id, &[0xAA; 2000]).unwrap();
     assert_test!(wrote <= 1024, "send limited by effective capacity");
     pass!()
@@ -1341,23 +1264,16 @@ pub fn test_so_rcvbuf_affects_window() -> TestResult {
     pass!()
 }
 
-// =============================================================================
-// Nagle / TCP_NODELAY (D.4)
-// =============================================================================
-
 pub fn test_nagle_defers_sub_mss_when_inflight() -> TestResult {
     reset();
     let (id, _, _) = establish_connection();
     // Re-enable Nagle (test helper disables it).
     tcp::set_nodelay(id, false);
-    // Send MSS bytes to create inflight data.
     let _ = tcp::send(id, &[0xAA; DEFAULT_MSS as usize]).unwrap();
     // A full-MTU scratch buffer is most of the frame budget; keep it off the stack.
     let mut buf = assert_ok!(KVec::<u8>::zeroed(1500), "tx scratch buffer");
     let _ = tcp::poll_transmit(id, &mut buf, 0).unwrap();
-    // inflight = MSS now. Enqueue 10 more bytes (sub-MSS).
     let _ = tcp::send(id, &[0xBB; 10]).unwrap();
-    // Nagle: sub-MSS with inflight → deferred.
     assert_test!(
         tcp::poll_transmit(id, &mut buf, 1).is_none(),
         "Nagle defers sub-MSS when inflight"
@@ -1368,9 +1284,7 @@ pub fn test_nagle_defers_sub_mss_when_inflight() -> TestResult {
 pub fn test_nagle_sends_when_nothing_inflight() -> TestResult {
     reset();
     let (id, _, _) = establish_connection();
-    // Nothing inflight. Send 10 bytes (sub-MSS).
     let _ = tcp::send(id, &[0xCC; 10]).unwrap();
-    // A full-MTU scratch buffer is most of the frame budget; keep it off the stack.
     let mut buf = assert_ok!(KVec::<u8>::zeroed(1500), "tx scratch buffer");
     let result = tcp::poll_transmit(id, &mut buf, 0);
     assert_test!(result.is_some(), "sends sub-MSS when nothing inflight");
@@ -1382,19 +1296,15 @@ pub fn test_nagle_sends_when_nothing_inflight() -> TestResult {
 pub fn test_tcp_nodelay_disables_nagle() -> TestResult {
     reset();
     let c = tcp_common::establish_connection();
-    // Verify the toggle: enable Nagle, check defer, disable, check send.
     tcp::set_nodelay(c.id, false);
     let _ = tcp::send(c.id, b"x").unwrap();
-    // A full-MTU scratch buffer is most of the frame budget; keep it off the stack.
     let mut buf = assert_ok!(KVec::<u8>::zeroed(1500), "tx scratch buffer");
-    let _ = tcp::poll_transmit(c.id, &mut buf, 0).unwrap(); // sends 1 byte
-    let _ = tcp::send(c.id, b"y").unwrap(); // sub-MSS with inflight
-    // Nagle ON: deferred.
+    let _ = tcp::poll_transmit(c.id, &mut buf, 0).unwrap();
+    let _ = tcp::send(c.id, b"y").unwrap();
     assert_test!(
         tcp::poll_transmit(c.id, &mut buf, 1).is_none(),
         "nagle defers"
     );
-    // Toggle to NODELAY: sends.
     tcp::set_nodelay(c.id, true);
     assert_test!(
         tcp::poll_transmit(c.id, &mut buf, 2).is_some(),
@@ -1402,10 +1312,6 @@ pub fn test_tcp_nodelay_disables_nagle() -> TestResult {
     );
     pass!()
 }
-
-// =============================================================================
-// Flow Control
-// =============================================================================
 
 pub fn test_tcp_respects_peer_window() -> TestResult {
     reset();
@@ -1481,7 +1387,7 @@ pub fn test_tcp_zero_window_probe() -> TestResult {
     };
     let _ = tcp::input([10, 0, 0, 2], [10, 0, 0, 1], &zero_wnd, &[], &[], 1);
 
-    // Enqueue new data after zero-window so there is unsent data for the probe
+    // The probe needs unsent data, enqueued after the window closed.
     let _ = tcp::send(id, b"more").unwrap();
 
     let before = with_data_state!(id, |d| d.snd_nxt.raw());
@@ -1534,10 +1440,6 @@ pub fn test_tcp_window_update_resumes_send() -> TestResult {
     assert_test!(resumed.is_some(), "send resumes after window opens");
     pass!()
 }
-
-// =============================================================================
-// Delayed ACK
-// =============================================================================
 
 pub fn test_tcp_delayed_ack_after_two_segments() -> TestResult {
     reset();
@@ -1623,11 +1525,10 @@ pub fn test_tcp_immediate_ack_for_fin() -> TestResult {
 }
 
 /// Allocate `n` zeroed kernel frames as a keepalive page list — a headless
-/// stand-in for a pinned user buffer's (no process VM).
+/// stand-in for a pinned user buffer (no process VM).
 ///
-/// Charged to the root, which is the account a kernel-side pin belongs to;
-/// the arena treats it like any other, so the charge and refund are real
-/// rather than elided for the test.
+/// Charged to the root account, so the charge and refund are real rather than
+/// elided for the test.
 fn alloc_test_frames(n: usize) -> Option<KeepaliveFrames> {
     let alloc = slopos_ostd::mm::frame_alloc::current_frame_allocator()?;
     let mut frames = KVec::with_capacity(n).ok()?;
@@ -1657,10 +1558,8 @@ pub fn test_tcp_zerocopy_chunk_lifecycle() -> TestResult {
     let Some(token) = ZcNotifToken::new() else {
         return fail!("token alloc");
     };
-    // Fresh token owns one (chunk) reference: not yet notifiable.
     assert_test!(!token.is_notifiable(), "fresh token must not be notifiable");
 
-    // Enqueue a 100-byte zero-copy chunk (data at pin base_off 0).
     assert_test!(
         send.enqueue_zerocopy(frames, 0, 100, token.clone()),
         "enqueue_zerocopy"
@@ -1668,8 +1567,8 @@ pub fn test_tcp_zerocopy_chunk_lifecycle() -> TestResult {
     assert_eq_test!(send.buffered_len(), 100, "buffered after enqueue");
     assert_eq_test!(send.unsent_len(), 100, "unsent after enqueue");
 
-    // (Re)transmit reads the chunk's bytes straight from the pinned pages
-    // (zeroed test frames), clamped to the chunk; this is the volatile pin read.
+    // The volatile pin read: straight from the pinned pages, which are
+    // zeroed test frames.
     let mut out = [0xFFu8; 50];
     let got = send.peek_retransmit(0, &mut out);
     assert_eq_test!(got, 50, "peek_retransmit read count from pin");
@@ -1681,7 +1580,6 @@ pub fn test_tcp_zerocopy_chunk_lifecycle() -> TestResult {
     send.mark_sent(100);
     assert_eq_test!(send.inflight(), 100, "inflight after mark_sent");
 
-    // Partial cumulative ACK: the chunk shrinks but its pin stays held.
     send.process_ack(40);
     assert_eq_test!(send.buffered_len(), 60, "buffered after partial ack");
     assert_eq_test!(send.inflight(), 60, "inflight after partial ack");
@@ -1690,8 +1588,7 @@ pub fn test_tcp_zerocopy_chunk_lifecycle() -> TestResult {
         "token must stay held across a partial ack"
     );
 
-    // Full cumulative ACK retires the chunk → its token reference is released.
-    // (With no in-flight DMA references the count hits zero — notifiable.)
+    // With no in-flight DMA references left, the count hits zero.
     send.process_ack(60);
     assert_eq_test!(send.buffered_len(), 0, "buffered after full ack");
     assert_test!(
@@ -1708,7 +1605,6 @@ pub fn test_tcp_zerocopy_no_chunk_straddle() -> TestResult {
         Ok(s) => s,
         Err(_) => return fail!("send state alloc"),
     };
-    // Inline chunk of 30 bytes, then a zero-copy chunk of 100.
     assert_eq_test!(send.enqueue(&[7u8; 30]), 30, "inline enqueue");
     let Some(frames) = alloc_test_frames(1) else {
         return fail!("frame alloc");
@@ -1722,7 +1618,6 @@ pub fn test_tcp_zerocopy_no_chunk_straddle() -> TestResult {
     );
     assert_eq_test!(send.buffered_len(), 130, "buffered = inline + zerocopy");
 
-    // A peek of 80 bytes from offset 0 stops at the inline chunk boundary (30).
     let mut out = [0u8; 80];
     let got = send.peek_unsent(&mut out);
     assert_eq_test!(got, 30, "peek clamps to the inline chunk boundary");

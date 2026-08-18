@@ -6,36 +6,6 @@
 //! hands it [`frame_alloc_handle`] which points at the BSS-resident
 //! [`BUDDY_ALLOCATOR`] singleton.
 //!
-//! # Architecture
-//!
-//! ```text
-//! ┌─────────────────────────────────────────────────────────────────┐
-//! │              Frame::<KernelMeta>::alloc(opts)                   │
-//! │                           │                                     │
-//! │                           ▼                                     │
-//! │              current_frame_allocator()?.alloc(opts)             │
-//! │                           │                                     │
-//! │                           ▼                                     │
-//! │              <BuddyAllocator as FrameAlloc>::alloc              │
-//! │                           │                                     │
-//! │              ┌────────────┴────────────┐                        │
-//! │              │    Order == 0?          │                        │
-//! │              └────────────┬────────────┘                        │
-//! │                   Yes     │      No                             │
-//! │              ┌────────────┴────────────┐                        │
-//! │              ▼                         ▼                        │
-//! │   ┌─────────────────────┐   ┌─────────────────────┐             │
-//! │   │ Per-CPU Page Cache  │   │   Buddy Allocator   │             │
-//! │   │   (lock-free)       │   │   (global lock)     │             │
-//! │   └─────────┬───────────┘   └─────────────────────┘             │
-//! │             │ Empty?                                            │
-//! │             ▼                                                   │
-//! │   ┌─────────────────────┐                                       │
-//! │   │ Refill from buddy   │                                       │
-//! │   └─────────────────────┘                                       │
-//! └─────────────────────────────────────────────────────────────────┘
-//! ```
-//!
 //! See [`buddy`] for the allocator type and [`pcp`] for the per-CPU
 //! cache data layer.
 
@@ -53,14 +23,9 @@ pub use buddy::{
     ALLOC_FLAG_ORDER_SHIFT, BuddyAllocator,
 };
 
-// ---------------------------------------------------------------------------
-// The single global instance.
-// ---------------------------------------------------------------------------
-
 /// BSS-resident buddy allocator. Drives the kernel's physical page
 /// supply once boot has driven the lifecycle through `install_descriptor_table
-/// → seed_from_memory_map → enable_pcp`. The `Send + Sync` bounds on
-/// [`FrameAlloc`] are satisfied by the type's interior locking.
+/// → seed_from_memory_map → enable_pcp`.
 pub static BUDDY_ALLOCATOR: BuddyAllocator = BuddyAllocator::new_uninit();
 
 /// Doubly-indirect reference for
@@ -70,18 +35,11 @@ pub static BUDDY_ALLOCATOR: BuddyAllocator = BuddyAllocator::new_uninit();
 static BUDDY_ALLOCATOR_DYN: &dyn FrameAlloc = &BUDDY_ALLOCATOR;
 
 /// Hand boot the static reference it needs to pass to OSTD's
-/// `register_frame_allocator`. Stable address; safe to call any time
-/// after link.
+/// `register_frame_allocator`.
 #[inline]
 pub fn frame_alloc_handle() -> &'static &'static dyn FrameAlloc {
     &BUDDY_ALLOCATOR_DYN
 }
-
-// ---------------------------------------------------------------------------
-// Public API. Names preserved from the pre-refactor flat module so
-// callers outside `mm/` are unaffected; bodies are thin wrappers over
-// the static [`BUDDY_ALLOCATOR`].
-// ---------------------------------------------------------------------------
 
 /// Raw multi-page buddy entry point. Bootstrap escape for
 /// `kernel_meta::install_meta_slots` (which runs before the OSTD
@@ -159,7 +117,7 @@ pub fn pcp_drain_all() {
 
 /// Promote the batch the closing epoch proved safe. Called by
 /// [`crate::mmu::quiesce`] from whichever CPU closes the epoch — so it must
-/// stay O(1); see `BuddyAllocator::quarantine_rotate`.
+/// stay O(1).
 pub fn quarantine_rotate() {
     BUDDY_ALLOCATOR.quarantine_rotate();
 }
@@ -184,10 +142,6 @@ pub fn quarantine_is_occupied() -> bool {
 pub fn quarantine_frames() -> u32 {
     BUDDY_ALLOCATOR.quarantine_frames()
 }
-
-// ---------------------------------------------------------------------------
-// Stats / diagnostic accessors.
-// ---------------------------------------------------------------------------
 
 pub fn page_allocator_descriptor_size() -> usize {
     core::mem::size_of::<buddy::PageFrame>()
@@ -244,18 +198,9 @@ pub fn page_allocator_paint_all(value: u8) {
     BUDDY_ALLOCATOR.paint_all(value);
 }
 
-// ---------------------------------------------------------------------------
-// OwnedPageFrame typestate alias.
-// ---------------------------------------------------------------------------
-
 /// Owning handle to a single 4 KiB kernel-owned physical frame.
 ///
-/// Aliased onto `slopos_ostd::mm::frame::Frame<KernelMeta>` so the
-/// underlying ref-counted slot machinery from OSTD drives the
-/// allocate/free lifecycle. The kernel-side allocator
-/// ([`BUDDY_ALLOCATOR`]) is registered with OSTD through
-/// [`frame_alloc_handle`], and the final
-/// [`slopos_ostd::mm::frame::Frame`] drop routes back into
+/// The final [`slopos_ostd::mm::frame::Frame`] drop routes back into
 /// [`free_page_frame`] via OSTD's `KernelMeta::on_drop`.
 pub type OwnedPageFrame = slopos_ostd::mm::frame::Frame<crate::kernel_meta::KernelMeta>;
 

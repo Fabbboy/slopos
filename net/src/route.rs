@@ -43,16 +43,12 @@ impl RouteEntry {
         (dst.to_u32_be() & mask) == (self.prefix.to_u32_be() & mask)
     }
 
-    /// Returns the next-hop address for a destination matching this route.
-    ///
-    /// - If `gateway` is non-zero (not `UNSPECIFIED`): return the gateway
-    ///   (the packet must be forwarded through the gateway).
-    /// - Otherwise: return `dst` itself (directly connected subnet — the
-    ///   destination is the next hop).
+    /// The next-hop address for a destination matching this route: the gateway,
+    /// or `dst` itself when the route is directly connected.
     #[inline]
     pub fn next_hop(&self, dst: Ipv4Addr) -> Ipv4Addr {
         if self.gateway.is_unspecified() {
-            dst // directly connected
+            dst
         } else {
             self.gateway
         }
@@ -83,16 +79,11 @@ impl fmt::Display for RouteEntry {
     }
 }
 
-// =============================================================================
-// 3B.2 — RouteTable
-// =============================================================================
-
 /// Inner state of the routing table, behind [`SpinLock`].
 #[derive(slopos_ostd::SlotFields)]
 struct RouteTableInner {
-    /// Routes bucketed by prefix length.  Index 0 = /0 (default routes),
-    /// index 32 = /32 (host routes).  Within each bucket, routes are sorted
-    /// by metric (lowest first).
+    /// Indexed by prefix length: 0 = /0 (default routes), 32 = /32 (host
+    /// routes). Each bucket is sorted by metric, lowest first.
     buckets: [KVec<RouteEntry>; 33],
 }
 
@@ -105,14 +96,10 @@ impl RouteTableInner {
 }
 
 /// Prefix-length-bucketed IPv4 routing table with longest-prefix-match lookup.
-///
-/// See [module documentation](self) for architecture details.
 #[derive(slopos_ostd::SlotFields)]
 pub struct RouteTable {
     inner: SpinLock<RouteTableInner>,
 }
-
-// SAFETY: All mutable state is behind SpinLock.
 
 /// The global routing table.
 pub static ROUTE_TABLE: RouteTable = RouteTable::new();
@@ -122,28 +109,22 @@ const ROUTE_TABLE_CLASS: &slopos_ostd::sync::lock_tracking::LockClassKey =
     slopos_ostd::lock_class!("ROUTE_TABLE", LOCK_LEVEL_REGISTRY);
 
 impl RouteTable {
-    /// Create an empty routing table.
     pub const fn new() -> Self {
         Self {
             inner: SpinLock::new(RouteTableInner::new(), ROUTE_TABLE_CLASS),
         }
     }
 
-    /// In-place [`Init`] recipe equivalent to [`Self::new`] for runtime
-    /// heap allocation. The 33-element `[KVec<RouteEntry>; 33]` slot
-    /// array is otherwise materialised on the caller's stack frame —
-    /// `KBox::try_init(RouteTable::init())` keeps it on the heap.
+    /// In-place [`Init`] recipe equivalent to [`Self::new`]: the 33-element
+    /// `[KVec<RouteEntry>; 33]` would otherwise materialise on the caller's
+    /// stack frame.
     pub fn init() -> impl Init<Self, AllocError> {
-        // Inner-state initialiser: populates each of the 33 buckets.
         let inner_init = init_struct_with(
             |slot: SlotPtr<RouteTableInner>| -> Result<Initialised<RouteTableInner>, AllocError> {
                 write_array_field!(slot, buckets, 33, |_| KVec::<RouteEntry>::new());
                 Ok(slot.finish())
             },
         );
-        // Outer initialiser: the inner SpinLock is initialised in
-        // place via `SpinLock::init_with`, which writes the lock
-        // state and then forwards `inner_init` into the data slot.
         init_struct_with(
             move |slot: SlotPtr<Self>| -> Result<Initialised<Self>, AllocError> {
                 write_init_field!(
@@ -163,11 +144,8 @@ impl RouteTable {
         }
     }
 
-    /// Add a route to the table.
-    ///
-    /// The route is inserted into `buckets[prefix_len]`, sorted by metric
-    /// (lowest first).  If a route with the same `(prefix, prefix_len, dev)`
-    /// already exists, it is replaced.
+    /// Add a route, replacing any existing route with the same
+    /// `(prefix, prefix_len, dev)`.
     ///
     /// Returns `true` if a new route was added, `false` if an existing route
     /// was updated.
@@ -175,7 +153,6 @@ impl RouteTable {
         let mut inner = self.inner.lock();
         let bucket = &mut inner.buckets[entry.prefix_len as usize];
 
-        // Check for existing route with same prefix+dev — update in place.
         for existing in bucket.iter_mut() {
             if existing.prefix == entry.prefix && existing.dev == entry.dev {
                 klog_debug!(
@@ -186,12 +163,9 @@ impl RouteTable {
                 );
                 existing.gateway = entry.gateway;
                 existing.metric = entry.metric;
-                // Re-sort by metric after update. Buckets are capped at
-                // MAX_ROUTES_PER_BUCKET (16), so an insertion sort is
-                // both correct and cheaper than `sort_by_key` — the
-                // latter pulls in core::slice::sort::driftsort, which
-                // carries a 4 KiB aligned-storage stack buffer that
-                // blows the kernel frame budget.
+                // Insertion sort rather than `sort_by_key`: the latter pulls in
+                // `core::slice::sort::driftsort`, whose 4 KiB aligned-storage
+                // stack buffer blows the kernel frame budget.
                 for i in 1..bucket.len() {
                     let mut j = i;
                     while j > 0 && bucket[j - 1].metric > bucket[j].metric {
@@ -203,7 +177,6 @@ impl RouteTable {
             }
         }
 
-        // Enforce per-bucket limit.
         if bucket.len() >= MAX_ROUTES_PER_BUCKET {
             klog_debug!(
                 "route: bucket /{} full ({} routes), dropping add",
@@ -215,16 +188,13 @@ impl RouteTable {
 
         klog_debug!("route: added {:?}", entry);
 
-        // Insert sorted by metric.
         let pos = bucket.partition_point(|r| r.metric <= entry.metric);
         let _ = bucket.insert(pos, entry);
         true
     }
 
-    /// Remove a route matching `(prefix, prefix_len)`.
-    ///
-    /// If multiple routes match (different devices/metrics), removes the first
-    /// match.  Returns `true` if a route was removed.
+    /// Remove a route matching `(prefix, prefix_len)` — the first match if
+    /// several differ by device or metric.
     pub fn remove(&self, prefix: Ipv4Addr, prefix_len: u8) -> bool {
         self.remove_entry(prefix, prefix_len).is_some()
     }
@@ -241,10 +211,8 @@ impl RouteTable {
         Some(removed)
     }
 
-    /// Remove all routes associated with a specific device.
-    ///
-    /// Called before reconfiguring an interface (e.g., DHCP re-lease).
-    /// Returns how many went.
+    /// Remove every route on `dev`, as the DHCP re-lease path does before
+    /// reconfiguring an interface.
     pub fn remove_device_routes(&self, dev: DevIndex) -> usize {
         let mut nothing: [RouteEntry; 0] = [];
         self.remove_device_routes_into(dev, &mut nothing).1
@@ -254,14 +222,11 @@ impl RouteTable {
     /// removed into `out`. Returns `(written, removed)`.
     ///
     /// The entries come back rather than being announced from in here because
-    /// this runs under the table lock, and the monitor post a caller makes with
-    /// them must not: a wake site reached from under this lock would give the
-    /// route table an out-edge it does not otherwise have. `written` may be
-    /// short of `removed` only if a caller supplies a buffer smaller than one
-    /// device's route count — with at most
-    /// [`NET_MAX_ADDRS_PER_IFACE`](slopos_abi::net::NET_MAX_ADDRS_PER_IFACE)
-    /// connected routes plus a default, that does not arise for the callers in
-    /// this tree, which is why it is reported rather than asserted.
+    /// this runs under the table lock, and a wake site reached from under it
+    /// would give the route table an out-edge it does not otherwise have.
+    /// `written` falls short of `removed` only for a buffer smaller than one
+    /// device's route count, which no caller in this tree supplies — hence
+    /// reported rather than asserted.
     pub fn remove_device_routes_into(
         &self,
         dev: DevIndex,
@@ -289,13 +254,8 @@ impl RouteTable {
         (written, removed)
     }
 
-    /// Longest-prefix-match lookup.
-    ///
-    /// Iterates from /32 (host routes) down to /0 (default routes).  Returns
-    /// the `(DevIndex, next_hop)` for the first matching route.
-    ///
-    /// O(32) worst case — one bucket check per possible prefix length,
-    /// regardless of the total number of routes in the table.
+    /// Longest-prefix-match lookup: the `(DevIndex, next_hop)` of the first
+    /// matching route, walking /32 down to /0.
     pub fn lookup(&self, dst: Ipv4Addr) -> Option<(DevIndex, Ipv4Addr)> {
         let inner = self.inner.lock();
         for prefix_len in (0..=32u8).rev() {
@@ -308,13 +268,11 @@ impl RouteTable {
         None
     }
 
-    /// Number of routes in the table (diagnostic).
     pub fn route_count(&self) -> usize {
         let inner = self.inner.lock();
         inner.buckets.iter().map(|b| b.len()).sum()
     }
 
-    /// Collect all routes into a Vec (for ifconfig/diagnostic display).
     pub fn all_routes(&self) -> KVec<RouteEntry> {
         let inner = self.inner.lock();
         let mut routes = KVec::new();
@@ -325,15 +283,9 @@ impl RouteTable {
     }
 }
 
-// =============================================================================
-// Kernel-table shorthands
-// =============================================================================
-//
-// Mirrors [`crate::iface`]'s shorthands, and for the same reason: these wrap
-// the locked mutator and announce what it did once the lock is gone. A post
-// from inside [`RouteTable`] would be a wake site under a `LOCK_LEVEL_REGISTRY`
-// lock, which is exactly what the monitor's leaf-with-no-out-edges shape exists
-// to keep out of the tree.
+// The shorthands below announce only once the table lock is gone: a post from
+// inside [`RouteTable`] would be a wake site under a `LOCK_LEVEL_REGISTRY`
+// lock, and the monitor is deliberately a leaf with no out-edges.
 
 /// Routes reported from a single device removal.
 ///
@@ -351,11 +303,10 @@ const UNROUTED: RouteEntry = RouteEntry {
 
 /// The origin a route's own shape implies.
 ///
-/// [`RouteEntry`] does not record who installed it, and inventing an answer
-/// would be worse than a coarse one: a route with no gateway is by construction
-/// the connected route derived from an address's prefix, and anything else was
-/// installed deliberately. [`add_with_origin`] is how a caller that *does* know
-/// — the DHCP path — says so.
+/// [`RouteEntry`] does not record who installed it: a route with no gateway is
+/// by construction the connected route derived from an address's prefix, and
+/// anything else was installed deliberately. [`add_with_origin`] is how a
+/// caller that *does* know — the DHCP path — says so.
 fn implied_origin(entry: &RouteEntry) -> u8 {
     if entry.gateway.is_unspecified() {
         NET_ROUTE_ORIGIN_KERNEL
@@ -365,9 +316,9 @@ fn implied_origin(entry: &RouteEntry) -> u8 {
 }
 
 fn post_route_event(kind: u16, entry: &RouteEntry, origin: u8) {
-    // Resolving the interface takes the interface table — legal here because
-    // the route table's lock was released before this was called, and neither
-    // is ever held across the other.
+    // Takes the interface table: legal only because the route table's lock was
+    // released before this was called, and neither is ever held across the
+    // other.
     let ifindex = crate::iface::get_by_dev(entry.dev)
         .map(|i| i.ifindex)
         .unwrap_or(NET_IFINDEX_NONE);
@@ -387,9 +338,8 @@ fn post_route_event(kind: u16, entry: &RouteEntry, origin: u8) {
 /// Install a route in the kernel table and announce it.
 ///
 /// Only a genuinely new route is announced: [`RouteTable::add`] reports `false`
-/// both for an in-place update and for a full bucket, and a monitor record
-/// claiming a route was added when the table refused it would be a lie a
-/// renderer would act on.
+/// for an in-place update and for a full bucket alike, and announcing an add
+/// the table refused would mislead a renderer.
 pub fn add(entry: RouteEntry) -> bool {
     add_with_origin(entry, implied_origin(&entry))
 }

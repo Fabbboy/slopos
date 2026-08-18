@@ -1,11 +1,9 @@
 //! Queue-slot allocation for the per-task input queues.
 //!
 //! Task ids are monotonic and never recycled, so the slot table must be keyed
-//! by slot rather than by task id: a table indexed by task id carries a
-//! ceiling, and a long-lived boot session walks past it and silently stops
-//! delivering input to every process created afterwards. These tests drive
-//! task ids far above any id a test boot reaches and assert that delivery,
-//! read-back and release all still work there.
+//! by slot rather than by task id: a table indexed by task id carries a ceiling
+//! that a long-lived boot walks past, silently dropping input for every process
+//! created afterwards. These tests drive ids far above any a test boot reaches.
 
 use slopos_abi::input::{InputEventType, MAX_INPUT_TASKS};
 use slopos_testing::{TestResult, fail, pass};
@@ -15,12 +13,9 @@ use crate::input_event::{
     input_register_compositor, input_request_close, input_send_configure,
 };
 
-/// Comfortably past any id a test boot allocates, and past the ceiling a
-/// task-id-indexed table would impose.
+/// Comfortably past any id a test boot allocates.
 const HIGH_TASK_ID: u32 = 1_000_003;
 
-/// Registration, delivery and read-back work for a task id far above the
-/// bound any task-id-indexed lookup table could carry.
 pub fn test_input_queue_serves_high_task_id() -> TestResult {
     input_cleanup_task(HIGH_TASK_ID);
 
@@ -53,8 +48,8 @@ pub fn test_input_queue_serves_high_task_id() -> TestResult {
     pass!()
 }
 
-/// Cleanup returns the slot to the pool, so an unbounded run of distinct high
-/// task ids never exhausts the [`MAX_INPUT_TASKS`] queues.
+/// Cleanup returns the slot to the pool, so a run of distinct task ids never
+/// exhausts the [`MAX_INPUT_TASKS`] queues.
 pub fn test_input_slot_is_reusable_across_high_task_ids() -> TestResult {
     let rounds = (MAX_INPUT_TASKS * 2) as u32;
     for round in 0..rounds {
@@ -91,8 +86,6 @@ pub fn test_input_slot_is_reusable_across_high_task_ids() -> TestResult {
     pass!()
 }
 
-/// A released slot carries none of the previous owner's events into the task
-/// that claims it next.
 pub fn test_input_slot_release_drops_queued_events() -> TestResult {
     let first = HIGH_TASK_ID + 200;
     let second = HIGH_TASK_ID + 201;
@@ -127,9 +120,8 @@ pub fn test_input_slot_release_drops_queued_events() -> TestResult {
     }
 }
 
-/// The input sink is released when its holder exits. A sink left naming a dead
-/// task swallows every key and pointer event for the rest of the boot, and
-/// re-claims a queue slot for the dead task on each one.
+/// A sink left naming a dead task swallows every key and pointer event for the
+/// rest of the boot.
 pub fn test_input_sink_is_released_on_exit() -> TestResult {
     let first = HIGH_TASK_ID + 300;
     let second = HIGH_TASK_ID + 301;
@@ -162,7 +154,6 @@ pub fn test_input_sink_is_released_on_exit() -> TestResult {
     pass!()
 }
 
-/// Cleanup for an unrelated task leaves the sink alone.
 pub fn test_input_sink_survives_an_unrelated_exit() -> TestResult {
     let holder = HIGH_TASK_ID + 310;
     let other = HIGH_TASK_ID + 311;
@@ -208,15 +199,11 @@ slopos_testing::stest!(
 /// The IRQ-driven routing path never claims a queue slot.
 ///
 /// `input_route_key_full` runs in the PS/2 IRQ handler, where there is no
-/// principal to charge for a slot and no errno path to refuse on. A claim
-/// there acquires one of `MAX_INPUT_TASKS` slots on behalf of a task that
-/// never asked, at a point that cannot say no — so routing looks up, and only
-/// a syscall claims.
+/// principal to charge for a slot and no errno path to refuse on: routing looks
+/// up, and only a syscall claims.
 ///
-/// Routes a key at a task holding focus but with no queue, and asserts no slot
-/// was taken. Focus is set through the raw state rather than
-/// `input_set_keyboard_focus`, which legitimately claims: what is under test
-/// is the routing path in isolation.
+/// Focus is set through the raw state rather than `input_set_keyboard_focus`,
+/// which legitimately claims.
 pub fn test_input_routing_never_claims_a_slot() -> TestResult {
     use crate::input_event::{input_route_key_full, input_set_keyboard_focus};
 
@@ -247,10 +234,8 @@ pub fn test_input_routing_never_claims_a_slot() -> TestResult {
     pass!()
 }
 
-/// Setting focus *does* claim, so the queue exists before the first event.
-///
 /// The other half of the rule: if nothing claimed at a syscall, the routing
-/// path's refusal to claim would simply lose every event.
+/// path's refusal to claim would lose every event.
 pub fn test_input_focus_claims_the_slot_up_front() -> TestResult {
     use crate::input_event::{input_route_key_full, input_set_keyboard_focus};
 

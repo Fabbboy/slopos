@@ -215,33 +215,27 @@ pub fn fileio_clone_table_for_process(src: FdTable, dst: Handle<Process>) -> i32
             if src_fd.close_on_fork {
                 continue;
             }
-            // A child that cannot afford the parent's descriptor population
-            // fails the fork rather than starting life with a partial table:
-            // an inherited fd that silently went missing is a far worse
-            // failure than an `EAGAIN` the caller can see.
+            // A child that cannot afford the parent's descriptors fails the
+            // fork rather than starting life with a partial table.
             let Some(alias) = src_fd.try_alias(dst_account) else {
                 return -1;
             };
             if snapshot.push((i, alias)).is_err() {
-                // Allocation failed mid-snapshot: drop the partial clones
-                // (decrement and refund — src keeps every `OpenFile` alive).
+                // Partial clones drop here; src keeps every `OpenFile` alive.
                 return -1;
             }
         }
     }
 
-    // Step 2: build the destination array and claim its slot, both off-lock.
     let Some(descriptors) = new_descriptor_table() else {
         drop(snapshot);
         return -1;
     };
     let Some(dst_slot) = claim_process_slot(dst) else {
-        // No free slot: drop the cloned aliases (decrement only).
         drop(snapshot);
         return -1;
     };
 
-    // Step 3: move the cloned snapshot into dst under its lock.
     {
         let mut dst_inner = dst_slot.inner.lock();
         dst_inner.in_use = true;
@@ -257,8 +251,6 @@ pub fn fileio_close_on_exec(table: FdTable) {
     let Some(slot) = slot_for_table(table) else {
         return;
     };
-    // Collect the cloexec entries under the lock, clear their slots, drop
-    // the lock, then drop the collected entries (detach-then-drop).
     let closed = {
         let mut inner = slot.inner.lock();
         if !inner.in_use {

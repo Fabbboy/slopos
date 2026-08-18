@@ -201,8 +201,6 @@ impl<const SIZE: usize> SlabAllocator<SIZE> {
                     break;
                 };
                 if !mag.push(ptr) {
-                    // Return the just-popped object back to the slab so
-                    // the count stays consistent.
                     let _ = self.push_to_slab(state, ptr);
                     break;
                 }
@@ -221,10 +219,7 @@ impl<const SIZE: usize> SlabAllocator<SIZE> {
     }
 
     /// Pop one object from an existing partial slab under the class lock.
-    /// Returns `None` if every linked slab is full — the caller grows a
-    /// fresh page OUTSIDE the lock (`build_slab_page`) and links it via
-    /// `link_slab_at_head`, so the buddy allocation never runs under the
-    /// IRQ-off class lock.
+    /// `None` if every linked slab is full.
     fn pop_from_existing_slabs(&self, state: &SlabClassState) -> Option<NonNull<u8>> {
         let mut current = state.slabs.load();
         while let Some(slab_nn) = current {
@@ -235,7 +230,6 @@ impl<const SIZE: usize> SlabAllocator<SIZE> {
                 let Some(obj) = slab.free_list.pop_front() else {
                     return SlabVisit::HeadlessFree;
                 };
-                // Sanity-check the new head before we commit.
                 if let Some(next) = slab.free_list.head() {
                     let next_addr = next.as_ptr() as usize;
                     let slab_start = slab_nn.as_ptr() as usize;
@@ -263,7 +257,6 @@ impl<const SIZE: usize> SlabAllocator<SIZE> {
                 None => return None,
             }
         }
-        // No partial slab — the caller grows one outside the class lock.
         None
     }
 
@@ -312,7 +305,6 @@ impl<const SIZE: usize> SlabAllocator<SIZE> {
                 }
                 current = ByteChain::read_next(curr);
             }
-            // Optional poison.
             SlabHeader::with_body_slice_mut(ptr, object_size, |body| {
                 poison_object_body(body, POISON_FREED)
             });
@@ -323,16 +315,13 @@ impl<const SIZE: usize> SlabAllocator<SIZE> {
         matches!(outcome, Some(true))
     }
 
-    /// Build a fresh slab page WITHOUT taking the class lock. Allocates a
-    /// backing page from the buddy (which may perform a cross-CPU LUF/TLB
-    /// drain that waits for peer IPI acks — see `crate::mmu::luf`), stamps
-    /// the header (magic, size, class_idx) and builds the in-page
-    /// free-list. The returned slab is NOT yet linked into the class list;
-    /// the caller links it under the lock via [`Self::link_slab_at_head`].
-    /// Keeping the buddy allocation off the class lock is load-bearing:
-    /// holding the IRQ-off `SpinLock<SlabClassState>` across the cross-CPU
-    /// drain deadlocks (a peer spinning on this same lock can't service the
-    /// ack IPI).
+    /// Build a fresh slab page WITHOUT taking the class lock: the buddy
+    /// allocation may perform a cross-CPU LUF/TLB drain that waits for peer IPI
+    /// acks (see `crate::mmu::luf`), and holding the IRQ-off
+    /// `SpinLock<SlabClassState>` across it deadlocks — a peer spinning on this
+    /// same lock can't service the ack IPI. The returned slab is NOT yet linked
+    /// into the class list; the caller links it under the lock via
+    /// [`Self::link_slab_at_head`].
     fn build_slab_page(&self) -> Option<NonNull<SlabHeader>> {
         let (slab_base, _paddr) = alloc_slab_page()?;
         let start = SlabHeader::object_start_offset();
