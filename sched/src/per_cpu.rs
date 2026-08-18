@@ -1,38 +1,23 @@
-//! Per-CPU Scheduler for SMP Support
+//! Per-CPU scheduler: each CPU owns a [`PriorityRunQueue`] with local run
+//! queues.
 //!
-//! Each CPU has its own scheduler instance with local run queues.
-//! This minimizes lock contention and improves cache locality.
-//!
-//! # Safety Model
-//!
-//! `PriorityRunQueue` uses interior mutability throughout so that all public
-//! APIs take `&self` (shared reference). This eliminates the UB that arose
-//! from handing out `&mut` to a `static` array element from multiple CPUs.
-//!
-//! - Atomic fields: direct load/store (lock-free).
-//! - `ready_queues`: backed by `IntrusiveLinkedList<Task>` per priority
-//!   level; the list itself uses interior atomics, but operations are
-//!   serialised by `queue_lock` since the linked-list primitive is not
-//!   lock-free across operations.
+//! The run queue is interior-mutable throughout so every public API takes
+//! `&self`. `ready_queues` operations are serialised by `queue_lock` because
+//! the intrusive list is not lock-free across operations.
 
 use core::ptr::{self, NonNull};
 use core::sync::atomic::{AtomicBool, AtomicPtr, AtomicU32, AtomicU64, AtomicUsize, Ordering};
 use slopos_ostd::lock_class;
 
-/// Round-robin counter for fork/spawn CPU placement.  Rotates the starting
-/// position in `find_idlest_cpu()` so sequential forks spread across CPUs
-/// even when all are idle (all have the same load).  Mirrors Linux's
-/// `for_each_cpu_wrap()` pattern in `sched_balance_find_dst_group_cpu()`.
+/// Round-robin start position for fork/spawn CPU placement, so sequential
+/// forks spread across CPUs even when all carry the same load.
 static FORK_RR_COUNTER: AtomicUsize = AtomicUsize::new(0);
 
-/// Test-hooks accessor: read the current `FORK_RR_COUNTER` value for
-/// the hermetic-state snapshot.
 #[cfg(feature = "test-hooks")]
 pub fn fork_rr_counter_value() -> usize {
     FORK_RR_COUNTER.load(Ordering::Relaxed)
 }
 
-/// Test-hooks accessor: restore `FORK_RR_COUNTER` from a snapshot.
 #[cfg(feature = "test-hooks")]
 pub fn fork_rr_counter_set(value: usize) {
     FORK_RR_COUNTER.store(value, Ordering::Relaxed);
@@ -47,10 +32,8 @@ use slopos_ostd::sync::{InitFlag, KernelSync, LOCK_LEVEL_SCHEDULER, SpinLock};
 use slopos_ostd::task::{SchedPlacement, TaskAddr, task_placement_retain, with_parked_node};
 use slopos_ostd::{klog_debug, klog_info};
 
-/// One slot per [`TaskPriority`] variant: `High`, `KernelIo`,
-/// `Normal`, `Low`, `Idle`. Bumped from 4→5 when `KernelIo` landed
-/// in Phase 1 of the scheduler refactor. The repr value of each
-/// variant is the index into [`PriorityRunQueue::ready_queues`].
+/// One slot per [`TaskPriority`] variant; each variant's repr value is its
+/// index into [`PriorityRunQueue::ready_queues`].
 const NUM_PRIORITY_LEVELS: usize = 5;
 
 /// Role tag for the per-CPU `ReadyQueue` intrusive list. Defined in
@@ -58,9 +41,7 @@ const NUM_PRIORITY_LEVELS: usize = 5;
 /// it without OSTD reaching into `core/`.
 pub use slopos_ostd::task::link_roles::ReadyQueueRole;
 
-/// Per-priority FIFO of ready tasks. Refcount accounting is the
-/// caller's job (incremented on enqueue, decremented on dequeue /
-/// remove / drain).
+/// Per-priority FIFO of ready tasks.
 struct ReadyQueue {
     list: KernelSync<IntrusiveLinkedList<Task, ReadyQueueRole>>,
 }

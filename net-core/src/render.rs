@@ -1,11 +1,10 @@
 //! The one place a `NET_*` ABI constant becomes a string.
 //!
-//! `ip` and the compositor's status indicator both name the same states. If
-//! each spelled them itself they would drift, and a person reading a terminal
-//! and a panel at the same time would see two answers to one question. Every
-//! renderer here is total over `u8`: an out-of-range value renders as
-//! `UNKNOWN`-equivalent rather than panicking, because the value came across a
-//! syscall boundary from a kernel that may be newer than the caller.
+//! `ip` and the compositor's status indicator both name the same states, and
+//! two spellings of them would drift. Every renderer here is total over `u8`:
+//! an out-of-range value renders as `UNKNOWN`-equivalent rather than panicking,
+//! because the value came across a syscall boundary from a kernel that may be
+//! newer than the caller.
 
 use core::fmt::Write;
 
@@ -36,14 +35,11 @@ pub const fn oper_state(state: u8) -> &'static str {
         NET_OPER_TESTING => "TESTING",
         NET_OPER_DORMANT => "DORMANT",
         NET_OPER_UP => "UP",
-        // NET_OPER_UNKNOWN and anything a newer kernel adds.
         _ => "UNKNOWN",
     }
 }
 
-/// Neighbour-cache state. The cache implements exactly four; a value outside
-/// them is a kernel this build does not know, not a fifth state to invent a
-/// name for.
+/// Neighbour-cache state. The cache implements exactly four.
 pub const fn neigh_state(state: u8) -> &'static str {
     match state {
         NET_NEIGH_INCOMPLETE => "INCOMPLETE",
@@ -54,7 +50,6 @@ pub const fn neigh_state(state: u8) -> &'static str {
     }
 }
 
-/// DHCP client state.
 pub const fn dhcp_state(state: u8) -> &'static str {
     match state {
         NET_DHCP_DISABLED => "DISABLED",
@@ -68,9 +63,7 @@ pub const fn dhcp_state(state: u8) -> &'static str {
     }
 }
 
-/// Why the DHCP client last left a bound state. Rendered beside
-/// [`dhcp_state`], so it lives here rather than being spelled at the one call
-/// site that happens to need it first.
+/// Why the DHCP client last left a bound state.
 pub const fn dhcp_reason(reason: u8) -> &'static str {
     match reason {
         NET_DHCP_REASON_OK => "ok",
@@ -83,7 +76,7 @@ pub const fn dhcp_reason(reason: u8) -> &'static str {
 }
 
 /// How an address came to be configured. Lowercase, because `ip addr` prints
-/// it as a trailing attribute of a line rather than as a column heading.
+/// it as a trailing attribute rather than as a column heading.
 pub const fn addr_origin(origin: u8) -> &'static str {
     match origin {
         NET_ADDR_ORIGIN_STATIC => "static",
@@ -120,7 +113,6 @@ pub const fn iface_kind(kind: u8) -> &'static str {
         NET_IFKIND_LOOPBACK => "loopback",
         NET_IFKIND_ETHERNET => "ether",
         NET_IFKIND_WIRELESS => "wireless",
-        // NET_IFKIND_UNSPEC and anything a newer kernel adds.
         _ => "none",
     }
 }
@@ -128,9 +120,8 @@ pub const fn iface_kind(kind: u8) -> &'static str {
 /// Socket state, as `ss` spells it.
 ///
 /// `ss`'s abbreviations rather than RFC 793's full names: `ESTAB` not
-/// `ESTABLISHED`, `TIME-WAIT` not `TIME_WAIT`. They are what fits a column and
-/// what a person reading `ss` output elsewhere already recognises, and the
-/// column width in [`crate::columns`] is sized for the longest of them.
+/// `ESTABLISHED`, `TIME-WAIT` not `TIME_WAIT`. The column width in
+/// [`crate::columns`] is sized for the longest of them.
 pub const fn sock_state(state: u8) -> &'static str {
     match state {
         NET_SOCK_CLOSED => "CLOSED",
@@ -164,15 +155,13 @@ pub const fn sock_transport(sock_type: u8, protocol: u8) -> &'static str {
 
 /// What the master networking switch being off looks like. Distinct from
 /// [`NET_CONN_NONE`]'s `"Disconnected"`: nothing is wrong with the network, it
-/// is simply turned off, and telling someone they are disconnected when they
-/// switched networking off themselves sends them debugging a non-problem.
+/// is simply turned off.
 pub const CONNECTIVITY_DISABLED: &str = "Networking off";
 
 /// Connectivity as a sentence for a person, not a constant name.
 ///
-/// Every string here is ASCII. `"Connected - no internet"` uses an ASCII
-/// hyphen and not an em dash on purpose: the console font covers no dash above
-/// U+007F, so an em dash draws as the replacement glyph. See
+/// Every string here is ASCII: the console font covers no dash above U+007F,
+/// so `"Connected - no internet"` uses a hyphen and not an em dash. See
 /// [`is_renderable`].
 pub const fn connectivity(state: u8) -> &'static str {
     match state {
@@ -181,8 +170,8 @@ pub const fn connectivity(state: u8) -> &'static str {
         NET_CONN_LIMITED => "Connected - no internet",
         NET_CONN_LOCAL => "No internet connection",
         NET_CONN_FULL => "Connected",
-        // NET_CONN_UNKNOWN and anything a newer kernel adds: the stack has not
-        // finished deciding, which is a state worth showing rather than hiding.
+        // The stack has not finished deciding, which is worth showing rather
+        // than hiding.
         _ => "Checking...",
     }
 }
@@ -197,8 +186,7 @@ pub const fn connectivity_label(enabled: bool, state: u8) -> &'static str {
     }
 }
 
-/// The `IFF_*` bits and their names, in the order [`write_if_flags`] emits
-/// them. Public so a caller can enumerate the names it may have to lay out.
+/// The `IFF_*` bits and their names, in the order [`write_if_flags`] emits them.
 pub const IF_FLAG_NAMES: [(u32, &str); 9] = [
     (IFF_SLOP_NO_CARRIER, "NO-CARRIER"),
     (IFF_LOOPBACK, "LOOPBACK"),

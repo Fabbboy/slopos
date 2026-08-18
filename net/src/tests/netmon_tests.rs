@@ -164,9 +164,7 @@ fn test_netmon_seq_is_global_across_rings() -> TestResult {
     pass!()
 }
 
-/// The sequence advances for a change nobody is watching. A hole in the
-/// numbering would be indistinguishable from a lost record, and the
-/// snapshot-then-drain handoff would have no way to tell them apart.
+/// A hole in the numbering would be indistinguishable from a lost record.
 fn test_netmon_post_without_subscribers_bumps_seq() -> TestResult {
     let table = fresh();
     assert_eq_test!(table.count(), 0, "the scratch registry starts empty");
@@ -183,8 +181,7 @@ fn test_netmon_post_without_subscribers_bumps_seq() -> TestResult {
     pass!()
 }
 
-/// The protocol a client uses to go from a snapshot to the live stream: open,
-/// query, then discard what the snapshot already contains.
+/// The client protocol: open, query, then discard what the snapshot contains.
 fn test_netmon_snapshot_then_drain_handoff() -> TestResult {
     let table = fresh();
     let handle = match table.open(TEST_OWNER, NET_MON_DEFAULT) {
@@ -218,11 +215,6 @@ fn test_netmon_snapshot_then_drain_handoff() -> TestResult {
     pass!()
 }
 
-// =============================================================================
-// Subscription masks
-// =============================================================================
-
-/// A monitor receives only what it asked for.
 fn test_netmon_mask_filters_kinds() -> TestResult {
     let table = fresh();
     let handle = match table.open(TEST_OWNER, NET_MON_IFACE) {
@@ -250,7 +242,6 @@ fn test_netmon_mask_filters_kinds() -> TestResult {
     assert_eq_test!(seen, 1, "only the subscribed kind is queued");
     assert_test!(kinds_ok, "and it is the interface record");
 
-    // The same table, a ring that asked for routes instead.
     let routes = match table.open(TEST_OWNER, NET_MON_ROUTE) {
         Ok(h) => h,
         Err(_) => return fail!("open routes ring"),
@@ -273,9 +264,8 @@ fn test_netmon_mask_filters_kinds() -> TestResult {
     pass!()
 }
 
-/// The default subscription excludes neighbour churn. ARP is the only
-/// high-rate source in the stack, and including it would keep a bounded ring in
-/// permanent overflow — masking the events a subscriber opened the fd for.
+/// ARP is the only high-rate source in the stack; subscribing to it by default
+/// would keep a bounded ring in permanent overflow.
 fn test_netmon_default_mask_excludes_neigh() -> TestResult {
     assert_eq_test!(
         mask_bit_for_kind(NET_EV_NEIGH_CHANGED) & NET_MON_DEFAULT,
@@ -312,12 +302,6 @@ fn test_netmon_default_mask_excludes_neigh() -> TestResult {
     pass!()
 }
 
-// =============================================================================
-// Overflow
-// =============================================================================
-
-/// A drop episode collapses to exactly one record, ahead of what the ring kept,
-/// carrying the number lost — and it is not repeated once read.
 fn test_netmon_overflow_collapses_to_one_record() -> TestResult {
     const EXTRA: u32 = 6;
     let table = fresh();
@@ -366,14 +350,12 @@ fn test_netmon_overflow_collapses_to_one_record() -> TestResult {
         "the marker names where the stream went stale, which is past what it kept"
     );
 
-    // The latch is cleared: a quiet ring reads empty.
     assert_eq_test!(
         drain_count(table, handle),
         0,
         "the marker is not repeated on the next read"
     );
 
-    // And a fresh drop opens a new episode.
     for ifindex in 0..(NETMON_RING_CAP as u32 + 2) {
         post_iface(table, ifindex);
     }
@@ -390,9 +372,7 @@ fn test_netmon_overflow_collapses_to_one_record() -> TestResult {
     pass!()
 }
 
-/// Overflow is a property of one subscriber, not of the stream. A ring nobody
-/// reads must not cost a ring that keeps up a single record — the whole reason
-/// each subscriber owns its own buffer.
+/// A ring nobody reads must not cost a ring that keeps up a single record.
 fn test_netmon_overflow_is_per_subscriber() -> TestResult {
     const POSTS: u32 = 100;
     let table = fresh();
@@ -448,9 +428,8 @@ fn test_netmon_overflow_is_per_subscriber() -> TestResult {
     pass!()
 }
 
-/// The overflow marker reaches a subscriber whatever it subscribed to. It is
-/// not a network event; it is the ring describing itself, and a reader that
-/// filtered it out would silently apply a stale view forever.
+/// The marker is not a network event but the ring describing itself; a reader
+/// that filtered it out would silently apply a stale view forever.
 fn test_netmon_overflow_ignores_mask() -> TestResult {
     assert_eq_test!(
         mask_bit_for_kind(NET_EV_OVERFLOW),
@@ -499,12 +478,7 @@ fn test_netmon_overflow_ignores_mask() -> TestResult {
     pass!()
 }
 
-// =============================================================================
-// The registry
-// =============================================================================
-
-/// The registry is quota'd, and refuses what it cannot represent. Without a
-/// per-process cap, eight opens from one unprivileged process would leave
+/// Without a per-process cap, opens from one unprivileged process would leave
 /// nothing else on the system able to watch the network.
 fn test_netmon_open_is_bounded() -> TestResult {
     let table = fresh();
@@ -516,9 +490,8 @@ fn test_netmon_open_is_bounded() -> TestResult {
     );
 
     // A distinct *process* per pair, so the registry — not the quota — is what
-    // eventually refuses. Real registrations rather than a synthetic pid plus
-    // an offset: an owner is a permission key, and `FdTable`s are only
-    // distinguishable if the processes behind them are.
+    // eventually refuses. Real registrations because an owner is a permission
+    // key, and `FdTable`s only differ if the processes behind them do.
     let mut owners: slopos_ostd::KVec<slopos_ostd::KArc<slopos_ostd::process::Process>> =
         slopos_ostd::KVec::new();
     let owner_count = slopos_abi::event::MAX_NETMON.div_ceil(NETMON_MAX_PER_PROCESS) + 1;
@@ -563,7 +536,6 @@ fn test_netmon_open_is_bounded() -> TestResult {
     }
     assert_eq_test!(table.count(), 0, "every slot comes back");
 
-    // The quota counts live monitors, not opens: closing one makes room.
     let first = match table.open(TEST_OWNER, NET_MON_DEFAULT) {
         Ok(h) => h,
         Err(_) => return fail!("reopen"),
@@ -607,7 +579,6 @@ fn test_netmon_stale_handle_is_ebadf() -> TestResult {
         "and names no wait-queue slot"
     );
 
-    // The recycled slot is a different monitor, and the old handle misses it.
     let recycled = match table.open(TEST_OWNER, NET_MON_DEFAULT) {
         Ok(h) => h,
         Err(_) => return fail!("reopen"),
@@ -623,7 +594,6 @@ fn test_netmon_stale_handle_is_ebadf() -> TestResult {
         "while the current handle reads the new monitor"
     );
 
-    // Releasing twice is a no-op, not a second release of the recycled slot.
     table.close(handle);
     assert_eq_test!(
         table.count(),

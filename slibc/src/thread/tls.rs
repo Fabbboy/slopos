@@ -1,16 +1,13 @@
 //! TLS initialization — heap-allocate and install TCB via FS_BASE.
 //!
 //! x86_64 variant-II layout: the thread pointer (`fs_base`) points at the
-//! [`Tcb`], and the program's TLS image (`.tdata`/`.tbss`) sits *below* it at
-//! `[tp - tls_size, tp)`. `#[thread_local]` statics are addressed at negative
-//! offsets from `fs_base`.
+//! [`Tcb`], the program's TLS image (`.tdata`/`.tbss`) sits *below* it at
+//! `[tp - tls_size, tp)`, and `#[thread_local]` statics are addressed at
+//! negative offsets from `fs_base`.
 //!
-//! libc owns all TLS — both the main thread and spawned threads build their
-//! own block here, from the program's `PT_TLS` template discovered via
-//! `AT_PHDR`. The kernel only maps the program segments (which already contain
-//! the `.tdata` init image) and exposes a valid `AT_PHDR`; it never constructs
-//! TLS images. Each block copies `.tdata` and zeroes `.tbss` (so e.g. std's
-//! `thread::current::id::ID` reads 0, not uninitialized heap).
+//! libc owns all TLS: every thread, main included, builds its own block from
+//! the program's `PT_TLS` template discovered via `AT_PHDR`, copying `.tdata`
+//! and zeroing `.tbss`. The kernel never constructs a TLS image.
 
 use core::cell::SyncUnsafeCell;
 use core::mem;
@@ -25,8 +22,7 @@ static mut TLS_READY: bool = false;
 
 /// Program TLS template (the `PT_TLS` segment), captured once at startup.
 /// All-integer so `SyncUnsafeCell<TlsTemplate>` is `Sync` without an unsafe
-/// impl. `image_addr` is the in-memory address of the pristine `.tdata`
-/// initialization image (`PT_TLS::p_vaddr`).
+/// impl. `image_addr` addresses the pristine `.tdata` image (`p_vaddr`).
 #[derive(Clone, Copy)]
 struct TlsTemplate {
     image_addr: usize,
@@ -49,10 +45,8 @@ fn align_up(value: usize, align: usize) -> usize {
 }
 
 /// Capture the program's `PT_TLS` template by walking the auxv to `AT_PHDR`
-/// and scanning the program headers (the standard libc approach, à la musl's
-/// `__init_tls`). Idempotent; called once from the main thread's startup with
-/// the stack base (`&argc`). Safe when there is no TLS segment or no usable
-/// `AT_PHDR` (the template stays empty and threads get a TCB-only block).
+/// and scanning the program headers. Idempotent. With no TLS segment or no
+/// usable `AT_PHDR` the template stays empty and threads get a TCB-only block.
 ///
 /// # Safety
 /// `stack_base` must point at the kernel-prepared entry stack (`argc` at
@@ -68,7 +62,7 @@ pub unsafe extern "C" fn capture_tls_template_from_stack(stack_base: *const usiz
     // envp begins after argc + argv[0..argc] + the argv NULL terminator.
     let mut p = stack_base.add(1 + argc + 1);
     while *p != 0 {
-        p = p.add(1); // skip env strings
+        p = p.add(1);
     }
     p = p.add(1); // step past the envp NULL → first auxv entry
 
@@ -88,15 +82,12 @@ pub unsafe extern "C" fn capture_tls_template_from_stack(stack_base: *const usiz
         p = p.add(2);
     }
     if phdr == 0 || phnum == 0 || phent == 0 {
-        return; // no usable program headers → no TLS template
+        return;
     }
 
-    // Walk the program headers (located via AT_PHDR) for PT_TLS, deriving the
-    // load bias from PT_PHDR if present (musl's approach: bias = AT_PHDR -
-    // PT_PHDR.p_vaddr). For a non-relocated executable the bias is 0 and
-    // p_vaddr is absolute. The `.tdata` init image lives at `bias + p_vaddr`
-    // inside the already-mapped data segment, so it stays pristine for every
-    // thread to copy from.
+    // Load bias is `AT_PHDR - PT_PHDR.p_vaddr`, so 0 for a non-relocated
+    // executable. The `.tdata` image at `bias + p_vaddr` lies in the mapped
+    // data segment and stays pristine for every thread to copy from.
     // Elf64_Phdr: p_type@0 (u32), p_vaddr@16, p_filesz@32, p_memsz@40, p_align@48.
     const PT_PHDR: u32 = 6;
     const PT_TLS: u32 = 7;
@@ -131,19 +122,16 @@ pub unsafe extern "C" fn capture_tls_template_from_stack(stack_base: *const usiz
 }
 
 /// Allocate and initialize a per-thread TLS block in variant-II layout.
-/// Returns `(alloc_base, tp)` where `alloc_base` is the raw allocation (to
-/// free later) and `tp` is the thread pointer (= the [`Tcb`] address) to load
-/// into `fs_base`. The TLS image below `tp` has `.tdata` copied and `.tbss`
-/// zeroed; the `Tcb` at `tp` is zeroed. Returns null pointers on OOM.
+/// Returns `(alloc_base, tp)`: the raw allocation to free later, and the
+/// thread pointer (the [`Tcb`] address) to load into `fs_base`. Null on OOM.
 ///
 /// # Safety
 /// Reads `filesz` bytes from the captured template image.
 pub unsafe fn alloc_thread_tls() -> (*mut u8, *mut Tcb) {
     let t = *TLS_TEMPLATE.get();
-    // Variant-II sizing: `align = max(p_align, 8)`, `tls_size = align_up(memsz,
-    // align)`. The linker computes each thread-local's negative `%fs` offset
-    // against this size, so every thread (main and spawned) must size its block
-    // identically or thread-locals land at the wrong address.
+    // The linker computes each thread-local's negative `%fs` offset against
+    // `tls_size`, so every thread must size its block identically or the
+    // thread-locals land at the wrong address.
     let align = t.align.max(8);
     let tls_size = align_up(t.memsz, align);
     let block_size = tls_size + mem::size_of::<Tcb>();
@@ -152,13 +140,13 @@ pub unsafe fn alloc_thread_tls() -> (*mut u8, *mut Tcb) {
     if base.is_null() {
         return (ptr::null_mut(), ptr::null_mut());
     }
-    // Zero the whole TLS image region (covers `.tbss`), then overlay `.tdata`.
+    // Zeroing the whole image region is what initialises `.tbss`.
     ptr::write_bytes(base, 0, tls_size);
     if t.filesz > 0 && t.image_addr != 0 {
         ptr::copy_nonoverlapping(t.image_addr as *const u8, base, t.filesz);
     }
-    // tp sits just above the TLS image; `base` is `align`-aligned and
-    // `tls_size` is a multiple of `align`, so `tp` is `align`-aligned too.
+    // `base` is `align`-aligned and `tls_size` a multiple of `align`, so `tp`
+    // is `align`-aligned too.
     let tp = base.add(tls_size) as *mut Tcb;
     ptr::write_bytes(tp as *mut u8, 0, mem::size_of::<Tcb>());
     (base, tp)
@@ -169,17 +157,14 @@ pub fn tls_is_initialized() -> bool {
     unsafe { TLS_READY }
 }
 
-/// Set up the main thread's TLS. Must be called once during CRT startup,
-/// AFTER [`capture_tls_template_from_stack`] (which it depends on for the
-/// template). Builds the same variant-II TLS block spawned threads use and
-/// installs it as `fs_base`. Until `TLS_READY` flips, `errno` uses its static
-/// fallback, so the allocation/syscalls below are safe with `fs_base == 0`.
+/// Set up the main thread's TLS. Must run after
+/// [`capture_tls_template_from_stack`]. Until `TLS_READY` flips, `errno` uses
+/// its static fallback, so the work below is safe with `fs_base == 0`.
 ///
 /// # Safety
 /// Must be called exactly once from the main thread during CRT startup.
 pub unsafe fn tls_init_main_thread() {
-    // If something already installed a valid TCB (e.g. a future kernel that
-    // bootstraps fs_base), adopt it rather than building a second one.
+    // Adopt an already-installed valid TCB rather than building a second one.
     if let Ok(fs_base) = Sys::arch_prctl_get_fs() {
         if fs_base != 0 {
             let tcb_ptr = fs_base as *mut Tcb;
@@ -191,8 +176,6 @@ pub unsafe fn tls_init_main_thread() {
         }
     }
 
-    // Build the main thread's TLS block in libc — the standard model, and the
-    // exact routine `pthread_create` uses for spawned threads.
     let (_base, tcb_ptr) = alloc_thread_tls();
     if tcb_ptr.is_null() {
         return;

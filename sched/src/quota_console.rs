@@ -232,11 +232,8 @@ pub fn quota_report(phase: &str) {
     });
 }
 
-/// Measured cost of one charge+refund round trip, in TSC cycles.
-///
-/// Recorded by the `test_quota_charge_cost` kernel test and emitted with the
-/// `post-kernel-tests` quota report, because that is the stream the headroom
-/// gate parses. Zero means the test did not run.
+/// Measured cost of one charge+refund round trip, in TSC cycles. Recorded by
+/// the `test_quota_charge_cost` kernel test; zero means the test did not run.
 static CHARGE_COST_NS: [core::sync::atomic::AtomicU64; 2] =
     [const { core::sync::atomic::AtomicU64::new(0) }; 2];
 static CHARGE_COST_DEPTH: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
@@ -249,7 +246,6 @@ pub fn record_charge_cost(shallow_cycles: u64, deep_depth: u32, deep_cycles: u64
     CHARGE_COST_DEPTH.store(deep_depth, Ordering::Release);
 }
 
-/// Emit the measured charge cost, if it has been taken.
 fn report_charge_cost() {
     use core::sync::atomic::Ordering;
     let depth = CHARGE_COST_DEPTH.load(Ordering::Acquire);

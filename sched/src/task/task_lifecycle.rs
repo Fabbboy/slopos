@@ -59,37 +59,21 @@ struct TaskCreateResources {
     /// Packed handle to the task's address space; 0 for a kernel task.
     process_vm_handle: u64,
     /// The process the new task joins, or `None` for a kernel task.
-    ///
-    /// Owning: the task takes this reference at commit, so the process lives
-    /// exactly as long as a task names it or a lease holds it.
     process: Option<KArc<Process>>,
-    /// User-mode stack base (for user tasks, this lives in process VM;
-    /// for kernel tasks, this aliases the kernel stack base).
+    /// For a user task this lives in process VM; for a kernel task it aliases
+    /// the kernel stack base.
     stack_base: u64,
-    /// Owning handle to the kernel-mode stack.  Moves into `Task` on
-    /// success; dropped on failure to auto-release all backing memory.
     kernel_stack: KernelStack,
-    /// Owning handle to the SafeStack-sanitizer unsafe (data) stack.
-    /// Allocated alongside `kernel_stack` so every live task owns both.
     unsafe_stack: UnsafeStack,
 }
 
-/// Everything a new process owns, held together for the length of a build.
-///
-/// The lease is the RAII half of process creation: it takes the id, the
-/// address space and the descriptor table as one step and releases all three
-/// on any early return. [`disarm`](Self::disarm) hands ownership to the task
-/// that reached commit.
-///
-/// It now also carries the `KArc<Process>`. That reference is what the built
-/// task stores, and holding it here rather than minting it at commit is what
-/// makes an abandoned build release the process object too — the id comes back
-/// in `Process::drop`, so a lease that leaked one would leak the id with it.
+/// RAII lease over everything a new process owns — id, address space,
+/// descriptor table and `KArc<Process>` — released on any early return.
+/// [`disarm`](Self::disarm) hands ownership to the task that reached commit.
 struct ProcessResourceLease {
     process_id: u32,
-    /// Packed handle to the address space this lease created, so the task
-    /// it is handed to can name that address space without a pid lookup —
-    /// and without mistaking a later holder of the same id for it.
+    /// Packed handle to the address space this lease created: names it without
+    /// a pid lookup, which could not tell a later holder of the same id apart.
     process_vm_handle: u64,
     /// The process object, or `None` for a lease that owns nothing
     /// ([`none`](Self::none), the `CLONE_VM` case).
@@ -119,7 +103,6 @@ impl ProcessResourceLease {
         self.process_vm_handle
     }
 
-    /// The packed process handle a task built against this lease carries.
     #[inline]
     fn process_handle(&self) -> u64 {
         self.process
@@ -128,9 +111,8 @@ impl ProcessResourceLease {
     }
 
     /// Register a process object for `parent`'s child, or log and refuse.
-    ///
-    /// The accounting edge is the *spawner's* account and is fixed here; there
-    /// is no later opportunity to set it, by design.
+    /// The accounting edge is the spawner's account, fixed here with no later
+    /// opportunity to set it.
     fn mint_process(parent: Option<&Process>) -> Option<KArc<Process>> {
         let (wait_parent, account_parent) = match parent {
             Some(parent) => (parent.handle(), parent.account()),
@@ -148,17 +130,14 @@ impl ProcessResourceLease {
     fn create_user_process(parent: Option<&Process>) -> Option<Self> {
         let process = Self::mint_process(parent)?;
 
-        // Into *this* process's slot: the address-space table and the process
-        // registry are one slot space, so the address space is found by
-        // indexing the process rather than by scanning for its id.
+        // The address-space table and the process registry are one slot space:
+        // the address space is indexed by process, never scanned for by id.
         let Some(vm) = create_process_vm_for(process.clone()) else {
             klog_info!("task_create: Failed to create process VM");
             return None;
         };
         let vm_id = ProcessId::of(&process)?;
 
-        // By handle, into the process's own slot — the same slot its address
-        // space occupies. All three tables are now one slot space.
         if process.handle().map(fileio_create_table_for_process) != Some(0) {
             destroy_process_vm(vm_id);
             return None;
@@ -201,11 +180,8 @@ impl ProcessResourceLease {
         })
     }
 
-    /// Hand ownership to the task that reached commit.
-    ///
-    /// Returns the id for the caller's bookkeeping and the process reference,
-    /// which the task stores. Both are cleared here, so the `Drop` below
-    /// releases nothing.
+    /// Hand ownership to the task that reached commit. Both fields are cleared
+    /// here, so the `Drop` below releases nothing.
     fn disarm(&mut self) -> (u32, Option<KArc<Process>>) {
         let process_id = self.process_id;
         self.process_id = INVALID_PROCESS_ID;
@@ -216,10 +192,8 @@ impl ProcessResourceLease {
 
     /// Release the address space and descriptor table a process owns.
     ///
-    /// Takes the process rather than its id: both tables are keyed on the
-    /// handle, and a pid argument here would have to be re-resolved — which is
-    /// the lookup that cannot distinguish a recycled number from the process
-    /// this lease actually created.
+    /// Takes the process rather than its id: a pid would have to be
+    /// re-resolved, and that lookup cannot tell a recycled number apart.
     fn cleanup_owned_process(
         process: Option<&KArc<Process>>,
         owns_vm: bool,
@@ -239,12 +213,10 @@ impl ProcessResourceLease {
 
 impl Drop for ProcessResourceLease {
     fn drop(&mut self) {
-        // Order matters: `cleanup_owned_process` unbinds the address-space
-        // slot and retires the registration as its last step, and the two
-        // share a slot space. Retiring first would free the registry slot
-        // while the old page tables were still bound to it.
+        // Teardown before retire: the two share a slot space, so retiring first
+        // would free the registry slot with the old page tables still bound.
         Self::cleanup_owned_process(self.process.as_ref(), self.owns_vm, self.owns_file_table);
-        // A lease that never got as far as an address space still holds a
+        // A lease that never reached an address space still holds a
         // registration, and only this can retire it.
         if let Some(process) = self.process.take()
             && let Some(handle) = process.handle()
@@ -256,19 +228,14 @@ impl Drop for ProcessResourceLease {
 
 /// Both stacks for a cloned child, charged to the account they will serve.
 ///
-/// `#[inline(never)]` and returning the pair rather than the account:
-/// resolving the account in `task_clone` put two `KArc<Process>` temporaries
-/// and both `Result<TaskStack, _>` rvalues into that frame and pushed it from
-/// 2016 B to 2264 B, over the 2 KiB gate. One call per clone, on a path that
-/// already maps twelve pages.
+/// `#[inline(never)]`: resolving the account in `task_clone` put the
+/// temporaries in that frame and pushed it over the 2 KiB stack gate.
 #[inline(never)]
 fn clone_child_stacks(
     parent: &Task,
     child_process: &ProcessResourceLease,
     share_vm: bool,
 ) -> Option<(KernelStack, UnsafeStack)> {
-    // A `CLONE_VM` thread shares the parent's process and therefore its
-    // account, so either branch bills the principal the stacks serve.
     let account = if share_vm {
         parent.process().map_or(AccountId::NONE, |p| p.account())
     } else {
@@ -317,8 +284,8 @@ fn allocate_unsafe_stack(size: u64, what: &'static str, account: AccountId) -> O
 }
 
 fn allocate_kernel_task_resources() -> Option<TaskCreateResources> {
-    // A kernel task has no process, so its stacks are the kernel's own and are
-    // charged to the root **explicitly** rather than by a lookup that failed.
+    // A kernel task has no process: the root account is named explicitly, not
+    // taken as the residue of a failed lookup.
     let account = slopos_ostd::process::quota::root();
     let kernel_stack = allocate_kernel_stack(TASK_STACK_SIZE, "kernel stack", account)?;
     let unsafe_stack =

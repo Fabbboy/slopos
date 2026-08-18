@@ -161,7 +161,6 @@ mod tests {
         assert_eq!(scan_bundled(b"-tttt", &NC_FLAGS), Ok(1));
     }
 
-    /// Pinned: a bare `-` is the stdin placeholder and sets nothing.
     #[test]
     fn bare_dash_sets_no_bits() {
         assert_eq!(scan_bundled(b"-", &NC_FLAGS), Ok(0));
@@ -171,7 +170,6 @@ mod tests {
     #[test]
     fn leading_dash_is_optional() {
         assert_eq!(scan_bundled(b"tuln", &NC_FLAGS), Ok(1 | 2 | 4 | 8));
-        // Only one dash is skipped, so `--t` reports the second dash.
         assert_eq!(scan_bundled(b"--t", &NC_FLAGS), Err(b'-'));
     }
 }

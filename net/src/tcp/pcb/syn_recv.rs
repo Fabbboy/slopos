@@ -58,11 +58,8 @@ impl SynRecvState {
         }
     }
 
-    /// Apply an incoming segment to a SYN_RECEIVED PCB.
-    ///
-    /// Returns `Actions` by value rather than `Result<Actions, _>`: wrapping
-    /// the ~1 KiB `Actions` in a `Result` discriminant pushes the per-handler
-    /// stack frame above the stack-size gate.
+    /// Returns `Actions` by value: a `Result` discriminant around the ~1 KiB
+    /// `Actions` pushes the per-handler stack frame above the stack-size gate.
     pub fn on_segment(pcb: &mut Pcb, hdr: &TcpHeader, _now_ms: u64) -> Actions {
         let mut actions = Actions::new();
 

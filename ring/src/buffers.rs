@@ -82,14 +82,11 @@ impl BufBitset {
 struct FixedBufferSet {
     pins: KVec<PinnedUserBuffer>,
     checked_out: BufBitset,
-    /// The ring owner's account, captured at registration.
-    ///
-    /// Held rather than re-resolved at keepalive time: a keepalive is taken on
-    /// the send path, which a process exit races, and re-resolving would
-    /// charge it to `AccountId::NONE` exactly when the pages are least likely
-    /// to be released promptly. The row is generation-stamped, so a charge
-    /// against an account whose process has gone is a defined no-op rather
-    /// than a debit against a stranger.
+    /// The ring owner's account, captured at registration rather than
+    /// re-resolved at keepalive time: a keepalive is taken on the send path,
+    /// which a process exit races, and re-resolving would charge
+    /// `AccountId::NONE` exactly when the pages are least likely to be
+    /// released promptly.
     account: slopos_ostd::process::AccountId,
 }
 
@@ -120,8 +117,8 @@ impl ProvidedBufRing {
     /// empty (`head == tail`).
     fn peek(&self) -> Result<Option<ProvidedBuf>, Errno> {
         let tail = self.read_tail()?;
-        // u16 producer cursor: compare modulo 2^16 (head only ever trails tail
-        // by at most `entries`, well under 2^16).
+        // u16 producer cursor: compare modulo 2^16; head trails tail by at
+        // most `entries`, well under that.
         if (tail & 0xFFFF) == (self.head & 0xFFFF) {
             return Ok(None);
         }
@@ -144,13 +141,6 @@ impl ProvidedBufRing {
     }
 }
 
-/// One in-flight zero-copy send (`OP_SEND_ZC`) awaiting its deferred
-/// `SLOPRING_CQE_F_NOTIF`. The result CQE is posted at submit; this row keeps
-/// the fixed buffer checked out until the driver reclaims the NIC TX descriptor
-/// (the `token` flips), at which point the harvest posts `F_NOTIF` and checks
-/// the buffer back in. Kept in a side table (not an `InFlight` row) because the
-/// token is not `Copy` and the row must **not** be re-probed (that would
-/// re-send).
 /// The driver→ring "buffer reusable" signal a deferred send waits on. UDP/ICMP
 /// use a single-shot generation flip; TCP `MSG_ZEROCOPY` uses a refcounted token
 /// that reaches zero only when the bytes are cumulatively ACKed **and** every
@@ -175,6 +165,10 @@ impl DeferredToken {
     }
 }
 
+/// One in-flight zero-copy send (`OP_SEND_ZC`) awaiting its deferred
+/// `SLOPRING_CQE_F_NOTIF`, keeping the fixed buffer checked out until the token
+/// flips. Kept out of the `InFlight` table because the row must **not** be
+/// re-probed (that would re-send).
 struct DeferredNotif {
     user_data: u64,
     token: DeferredToken,
@@ -186,12 +180,10 @@ struct DeferredNotif {
 pub struct BufferRegistry {
     fixed: Option<FixedBufferSet>,
     provided: KVec<ProvidedBufRing>,
-    /// In-flight zero-copy sends awaiting their deferred `F_NOTIF`. Pre-grown to
-    /// the fixed-buffer count at `register_fixed` so [`push_deferred`] never
-    /// reallocates (a buffer index can hold at most one in-flight ZC send — a
-    /// second `check_out_fixed` is rejected — so the table never exceeds it).
-    ///
-    /// [`push_deferred`]: Self::push_deferred
+    /// In-flight zero-copy sends awaiting their deferred `F_NOTIF`. Pre-grown
+    /// to the fixed-buffer count at `register_fixed` so `push_deferred` never
+    /// reallocates — a buffer index holds at most one in-flight ZC send, since
+    /// a second `check_out_fixed` on it is rejected.
     deferred: KVec<DeferredNotif>,
 }
 
@@ -204,14 +196,10 @@ impl BufferRegistry {
         }
     }
 
-    /// `true` iff any registered buffer (fixed or provided) exists — used to
-    /// advertise the feature only when relevant (informational).
     #[allow(dead_code)]
     pub fn is_empty(&self) -> bool {
         self.fixed.is_none() && self.provided.is_empty()
     }
-
-    // ----- registered fixed buffers (RING_REGISTER_BUFFERS) ----------------
 
     /// Pin and register the fixed-buffer set. Rejects a double-register, an
     /// empty / oversized count, or any non-anonymous / unmapped iovec.
@@ -232,9 +220,6 @@ impl BufferRegistry {
                 .map_err(pin_errno)?;
             pins.push(pin).map_err(|_| Errno::ENOMEM)?;
         }
-        // Pre-grow the deferred-notify side table to the buffer count so
-        // `push_deferred` (after a zero-copy submit that cannot be undone) never
-        // reallocates — at most one in-flight ZC send per buffer index.
         let deferred = KVec::with_capacity(pins.len()).map_err(|_| Errno::ENOMEM)?;
         self.fixed = Some(FixedBufferSet {
             pins,
@@ -252,7 +237,7 @@ impl BufferRegistry {
             None => Err(Errno::EINVAL),
             Some(set) if set.checked_out.any() => Err(Errno::EBUSY),
             Some(_) => {
-                self.fixed = None; // drops pins → releases the page refs
+                self.fixed = None;
                 Ok(())
             }
         }
@@ -277,8 +262,8 @@ impl BufferRegistry {
         Ok(())
     }
 
-    /// Release a fixed-buffer reservation (idempotent / bounds-safe — safe to
-    /// call on a stale index after a concurrent unregister race).
+    /// Release a fixed-buffer reservation; idempotent and safe on a stale
+    /// index after a concurrent unregister.
     pub fn check_in_fixed(&mut self, index: u16) {
         let i = index as usize;
         if let Some(set) = self.fixed.as_mut()
@@ -294,9 +279,7 @@ impl BufferRegistry {
     }
 
     /// A volatile [`VmReader`] over fixed buffer `index`'s first `len` bytes
-    /// (capped at the pin length) — the single-direct-copy send source. The net
-    /// leaf pulls bytes straight from the pinned pages into the socket buffer
-    /// with no intermediate kernel scratch.
+    /// (capped at the pin length) — the single-direct-copy send source.
     pub fn fixed_reader(&self, index: u16, len: usize) -> Result<VmReader<'_>, Errno> {
         let set = self.fixed.as_ref().ok_or(Errno::EINVAL)?;
         let pin = set.pins.get(index as usize).ok_or(Errno::EINVAL)?;
@@ -305,8 +288,7 @@ impl BufferRegistry {
     }
 
     /// A volatile [`VmWriter`] over the whole of fixed buffer `index` — the
-    /// single-direct-copy recv sink. The net leaf fills the pinned pages
-    /// directly from the socket buffer with no intermediate kernel scratch.
+    /// single-direct-copy recv sink.
     pub fn fixed_writer(&self, index: u16) -> Result<VmWriter<'_>, Errno> {
         let set = self.fixed.as_ref().ok_or(Errno::EINVAL)?;
         let pin = set.pins.get(index as usize).ok_or(Errno::EINVAL)?;
@@ -320,9 +302,9 @@ impl BufferRegistry {
         Ok(set.pins.get(index as usize).ok_or(Errno::EINVAL)?.len())
     }
 
-    /// Coalesced physical `(paddr, len)` runs over the first `len` bytes of fixed
-    /// buffer `index` — the scatter-gather payload runs a NIC DMAs straight from
-    /// the pinned pages (`OP_SEND_ZC` zero-copy path).
+    /// Coalesced physical `(paddr, len)` runs over the first `len` bytes of
+    /// fixed buffer `index` — the scatter-gather list a NIC DMAs straight from
+    /// the pinned pages (`OP_SEND_ZC`).
     pub fn fixed_io_slices(&self, index: u16, len: usize) -> Result<KVec<(u64, u32)>, Errno> {
         let set = self.fixed.as_ref().ok_or(Errno::EINVAL)?;
         let pin = set.pins.get(index as usize).ok_or(Errno::EINVAL)?;
