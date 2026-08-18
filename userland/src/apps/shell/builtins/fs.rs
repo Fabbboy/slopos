@@ -168,8 +168,6 @@ pub fn cmd_cat(argc: i32, argv: &[&[u8]]) -> i32 {
                 }
             };
 
-            // Stream the whole file to EOF (large files like /dev/kmsg
-            // exceed one buffer, and the interesting bytes may be at the end).
             let mut tmp = [0u8; SHELL_IO_MAX];
             let mut last_byte = b'\n';
             loop {
@@ -1147,9 +1145,7 @@ pub fn cmd_tee(argc: i32, argv: &[&[u8]]) -> i32 {
 
     let mut buf = [0u8; SHELL_IO_MAX];
     loop {
-        // Wait for stdin readiness with a short timeout so the loop keeps
-        // pumping terminal input — that is what lets the line discipline
-        // see Ctrl+C and interrupt a tee that is blocked on its stdin.
+        // Short poll timeout, so a tee blocked on stdin still sees Ctrl+C.
         let mut pfds = [UserPollFd {
             fd: 0,
             events: POLLIN,

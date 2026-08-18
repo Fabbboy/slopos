@@ -21,9 +21,8 @@ const DEFAULT_WALLPAPER: &str = "/usr/share/slopos/wallpapers/default.png";
 
 /// Hardware cursor overlay dimensions (virtio-gpu mandates 64×64).
 pub const HW_CURSOR_DIM: u32 = 64;
-/// Uniform hotspot offset used when rasterizing any cursor shape into the
-/// hardware overlay. Each cursor shape draws its click-point at this reference,
-/// so the overlay's hotspot lands on the pointer position for every shape.
+/// Reference point every cursor shape draws its click-point at, so the
+/// overlay's hotspot lands on the pointer position for every shape.
 pub const HW_CURSOR_HOTSPOT: u32 = 20;
 
 struct WallpaperCache {
@@ -164,7 +163,6 @@ impl Renderer {
         }
     }
 
-    /// Try to load the TTF font from the filesystem (once).
     fn ensure_font(&mut self) {
         if self.ttf_init_attempted {
             return;
@@ -187,14 +185,12 @@ impl Renderer {
     /// Composite one frame into `buf`, repainting exactly the damaged,
     /// non-occluded pixels in z-order.
     ///
-    /// Walking windows front-to-back, each opaque content box is carved out of
-    /// the still-exposed region, yielding per window the damaged pixels it owns,
-    /// where its shadow may fall, and the background remainder no opaque window
-    /// covers. A window's decorations are confined to that exposed region and its
-    /// shadow to a separate shadow-availability region; both already exclude every
-    /// higher window, so a lower window's chrome can never paint over a window
-    /// stacked above it. `frame_damage` is the precise, disjoint region to
-    /// repaint; a full-output region drives a full redraw.
+    /// Windows are walked front-to-back, each opaque content box carved out of
+    /// the still-exposed region.  A window's decorations are confined to that
+    /// region and its shadow to a separate shadow-availability region; both
+    /// already exclude every higher window, so a lower window's chrome can never
+    /// paint over one stacked above it.  `frame_damage` must be disjoint; a
+    /// full-output region drives a full redraw.
     #[allow(clippy::too_many_arguments)]
     pub fn render(
         &mut self,
@@ -225,7 +221,6 @@ impl Renderer {
             return;
         }
 
-        // ── Occlusion pass (front-to-back) ──────────────────────────────────
         let mut order: Vec<usize> = Vec::with_capacity(window_count);
         for i in 0..window_count {
             if windows[i].state != WINDOW_STATE_MINIMIZED {
@@ -233,15 +228,12 @@ impl Renderer {
             }
         }
 
-        // Two independent occlusion accumulators, both walked top→bottom:
-        //  - `exposed`: damaged pixels not yet covered by an opaque content box,
-        //    used for content/decoration visibility and the background remainder.
-        //  - `shadow_avail`: damaged pixels no higher window has already claimed
-        //    a shadow (or frame footprint) over. Each window's shadow region is a
-        //    translucent black blend, so to avoid double-darkening shared gap
-        //    pixels the topmost window owns them; subtracting each window's full
-        //    shadow box keeps every `shadow_vis` mutually disjoint AND keeps a
-        //    lower shadow off a higher window's content (its box ⊇ its content).
+        // Both accumulators are walked top→bottom.  `exposed` is the damaged
+        // pixels no opaque content box covers yet; `shadow_avail` is those no
+        // higher window has claimed a shadow or frame footprint over.  A shadow
+        // is a translucent black blend, so the topmost window owns shared gap
+        // pixels: subtracting each full shadow box keeps every `shadow_vis`
+        // disjoint and keeps a lower shadow off a higher window's content.
         let mut exposed = frame_damage.clone();
         let mut shadow_avail = frame_damage.clone();
         let mut content_vis: Vec<Region> = Vec::with_capacity(order.len());
@@ -255,24 +247,18 @@ impl Renderer {
             let cbox = content_box(w);
             let sbox = shadow_bounds(w);
 
-            // Content + decoration area still visible (not under higher opaque
-            // content).
             content_vis[k] = exposed.intersect_rect(&fbox);
-            // Shadow halo this window owns, minus its own opaque content (which
-            // overwrites it — avoids the seam double-darken).
+            // Minus its own content, which overwrites the halo: avoids the seam
+            // double-darken.
             let mut sv = shadow_avail.intersect_rect(&sbox);
             sv.subtract(&cbox);
             shadow_vis[k] = sv;
 
-            // This window claims its whole shadow/frame footprint, and its opaque
-            // content occludes everything strictly below it.
             shadow_avail.subtract(&sbox);
             exposed.subtract(&cbox);
         }
         let background_visible = exposed;
 
-        // ── Paint ───────────────────────────────────────────────────────────
-        // 1. Desktop background, only where no opaque window covers it.
         for rect in background_visible.rects() {
             if !self.draw_wallpaper(buf, rect) {
                 gfx::fill_rect(
@@ -286,8 +272,7 @@ impl Renderer {
             }
         }
 
-        // 2. Windows bottom→top: shadow, then content + decorations, each
-        //    clipped to its occlusion-masked visible region.
+        // Bottom→top: shadow first, then content and decorations.
         for k in 0..order.len() {
             let w = windows[order[k]];
             for rect in shadow_vis[k].rects() {
@@ -319,11 +304,9 @@ impl Renderer {
             }
         }
 
-        // 3. Shelf (dock) + 4. system bar: always-on-top chrome. Each self-clips
-        //    to the passed rect (the dock early-returns when empty), so drawing
-        //    them per damaged rect paints their portion once across the disjoint
-        //    region. The dock is drawn unconditionally because its bounds are
-        //    only known after it has drawn.
+        // Always-on-top chrome.  Both self-clip to the passed rect, so drawing
+        // them once per damaged rect paints each portion exactly once.  The dock
+        // is drawn unconditionally: its bounds are only known after it has drawn.
         let bar_rect = DamageRect {
             x0: 0,
             y0: 0,
@@ -352,14 +335,12 @@ impl Renderer {
                     Some(*rect),
                 );
             }
-            // The popover sits above every other piece of chrome: it holds a
-            // pointer grab while open, so anything drawn over it would be
-            // clickable-looking and not clickable.
+            // The popover holds a pointer grab while open, so anything drawn
+            // over it would look clickable and not be.
             popover.draw(buf, net_model, rect);
             buf.set_scissor(None);
         }
 
-        // 5. Software cursor (skipped when the hardware overlay owns the pointer).
         if !hw_cursor {
             let cursor_rect = cursor_bounds(mouse_x, mouse_y, cursor_shape);
             for rect in frame_damage.rects() {
@@ -371,9 +352,8 @@ impl Renderer {
     }
 
     /// Rasterize `cursor_shape` into a 64×64 BGRA hardware-cursor image.
-    /// `out` must be `HW_CURSOR_DIM * HW_CURSOR_DIM * 4` bytes; it is filled
-    /// with a transparent background and the cursor drawn at the hotspot
-    /// reference so the overlay tracks the pointer correctly.
+    /// `out` must be `HW_CURSOR_DIM * HW_CURSOR_DIM * 4` bytes; the shape is
+    /// drawn at the hotspot reference so the overlay tracks the pointer.
     pub fn render_cursor_image(&self, cursor_shape: u8, out: &mut [u8]) {
         for b in out.iter_mut() {
             *b = 0; // transparent (alpha 0)
@@ -428,7 +408,7 @@ impl Renderer {
     }
 
     fn draw_cursor_default(&self, buf: &mut DrawBuffer, mx: i32, my: i32, clip: &DamageRect) {
-        // Classic arrow pointer (12x17, hotspot at top-left corner)
+        // Classic arrow pointer, hotspot at the top-left corner.
         // 0 = transparent, 1 = border (black), 2 = fill (white)
         const W: usize = 12;
         const H: usize = 17;
@@ -507,7 +487,7 @@ impl Renderer {
         );
     }
 
-    /// Vertical double-arrow cursor (N/S resize). 9×17, hotspot centered.
+    /// Vertical double-arrow cursor (N/S resize), hotspot centred.
     fn draw_cursor_ns(&self, buf: &mut DrawBuffer, mx: i32, my: i32, clip: &DamageRect) {
         const W: usize = 9;
         const H: usize = 17;
@@ -534,7 +514,7 @@ impl Renderer {
         self.draw_cursor_bitmap::<W, H>(buf, mx - 4, my - 8, &BITMAP, clip);
     }
 
-    /// Horizontal double-arrow cursor (E/W resize). 17×9, hotspot centered.
+    /// Horizontal double-arrow cursor (E/W resize), hotspot centred.
     fn draw_cursor_ew(&self, buf: &mut DrawBuffer, mx: i32, my: i32, clip: &DamageRect) {
         const W: usize = 17;
         const H: usize = 9;
@@ -553,7 +533,7 @@ impl Renderer {
         self.draw_cursor_bitmap::<W, H>(buf, mx - 8, my - 4, &BITMAP, clip);
     }
 
-    /// Diagonal double-arrow cursor (NW/SE resize). 15×15, hotspot centered.
+    /// Diagonal double-arrow cursor (NW/SE resize), hotspot centred.
     fn draw_cursor_nwse(&self, buf: &mut DrawBuffer, mx: i32, my: i32, clip: &DamageRect) {
         const W: usize = 15;
         const H: usize = 15;
@@ -578,7 +558,7 @@ impl Renderer {
         self.draw_cursor_bitmap::<W, H>(buf, mx - 7, my - 7, &BITMAP, clip);
     }
 
-    /// Diagonal double-arrow cursor (NE/SW resize). 15×15, hotspot centered.
+    /// Diagonal double-arrow cursor (NE/SW resize), hotspot centred.
     fn draw_cursor_nesw(&self, buf: &mut DrawBuffer, mx: i32, my: i32, clip: &DamageRect) {
         const W: usize = 15;
         const H: usize = 15;
@@ -603,7 +583,7 @@ impl Renderer {
         self.draw_cursor_bitmap::<W, H>(buf, mx - 7, my - 7, &BITMAP, clip);
     }
 
-    /// Open hand cursor (grab/ready to drag). 15×16, hotspot at (6,1).
+    /// Open hand cursor (grab), hotspot at (6,1).
     fn draw_cursor_grab(&self, buf: &mut DrawBuffer, mx: i32, my: i32, clip: &DamageRect) {
         const W: usize = 15;
         const H: usize = 16;
@@ -629,7 +609,7 @@ impl Renderer {
         self.draw_cursor_bitmap::<W, H>(buf, mx - 6, my - 1, &BITMAP, clip);
     }
 
-    /// Closed fist cursor (grabbing/active drag). 13×13, hotspot at (5,3).
+    /// Closed fist cursor (grabbing), hotspot at (5,3).
     fn draw_cursor_grabbing(&self, buf: &mut DrawBuffer, mx: i32, my: i32, clip: &DamageRect) {
         const W: usize = 13;
         const H: usize = 13;

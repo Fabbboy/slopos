@@ -1,16 +1,10 @@
-//! The only code that turns a [`GlyphSpec`] into pixels.
+//! The only code that turns a [`GlyphSpec`] into pixels, so the bar and the
+//! network panel share one icon at different scales.
 //!
-//! `slopos_chrome_core::glyph` says what the network indicator looks like as
-//! rectangles in a unit grid; this draws them. One rasteriser is what lets the
-//! bar and the network panel show the same icon at different scales without
-//! either growing its own copy of the shape.
-//!
-//! The badge is cut into the glyph rather than pasted on top: a
-//! background-coloured moat is drawn first, then the badge inside it, then an
-//! anti-aliased outline to feather the moat's edge. Without the moat the badge
-//! sits on the bus and the drops and the whole icon reads as a smudge at 14 px.
-//! Its palette is the window buttons' — amber for a warning, red for a fault —
-//! so the bar and the title bars speak one colour language.
+//! The badge is cut into the glyph rather than pasted on top — moat, badge,
+//! anti-aliased outline — because without the moat the badge sits on the bus
+//! and the drops and the icon reads as a smudge at 14 px. Its palette is the
+//! window buttons': amber for a warning, red for a fault.
 
 use slopos_chrome_core::glyph::{Badge, GLYPH_H, GLYPH_W, GlyphSpec, Ink};
 use slopos_gfx::canvas_ops::{circle_aa, circle_filled, fill_rect_clipped, line_aa};
@@ -18,27 +12,20 @@ use slopos_gfx::canvas_ops::{circle_aa, circle_filled, fill_rect_clipped, line_a
 use crate::gfx::{DamageRect, DrawBuffer};
 use crate::theme::*;
 
-/// Radius of the background moat separating the badge from the shape.
 const BADGE_MOAT_RADIUS: i32 = 4;
 
-/// Radius of the badge itself.
 const BADGE_RADIUS: i32 = 3;
 
-/// Width of the glyph as drawn at `scale`.
 pub const fn glyph_width(scale: i32) -> i32 {
     GLYPH_W * scale
 }
 
-/// Height of the glyph as drawn at `scale`.
 pub const fn glyph_height(scale: i32) -> i32 {
     GLYPH_H * scale
 }
 
-/// Draw `spec` with its top-left at `(x, y)`, scaled by an integer `scale`.
-///
-/// Every primitive is confined to `clip`: the circles and lines below take no
-/// clip argument of their own, so the buffer's scissor is narrowed for the
-/// duration rather than trusting the caller to have set one.
+/// The circles and lines below take no clip argument of their own, so the
+/// buffer's scissor is narrowed to `clip` for the duration.
 pub fn draw(buf: &mut DrawBuffer, spec: &GlyphSpec, x: i32, y: i32, scale: i32, clip: &DamageRect) {
     if scale <= 0 {
         return;
@@ -79,12 +66,9 @@ fn draw_badge(buf: &mut DrawBuffer, badge: Badge, x: i32, y: i32, scale: i32) {
     }
 }
 
-/// A dot in the glyph's bottom-right corner, moat first.
-///
 /// The centre is inset by the moat radius on both axes so the moat lands
-/// entirely inside the glyph's own box — the item's width is the glyph's
-/// width, and a badge that overhung it would be clipped by the neighbouring
-/// slot's damage rect rather than by anything visible.
+/// inside the glyph's box; an overhanging badge would be clipped by the
+/// neighbouring slot's damage rect rather than by anything visible.
 fn draw_dot_badge(
     buf: &mut DrawBuffer,
     x: i32,
@@ -100,12 +84,9 @@ fn draw_dot_badge(
     circle_aa(buf, cx, cy, BADGE_RADIUS, color);
 }
 
-/// A diagonal stroke across the whole glyph, outlined in the bar background so
-/// it separates from the shape beneath it.
-///
-/// Muted ink, not the fault palette: a switched-off network is a choice
-/// someone made, and colouring it like a failure sends them debugging a
-/// non-problem.
+/// Outlined in the bar background so it separates from the shape beneath it.
+/// Muted ink rather than the fault palette: a switched-off network is a choice
+/// someone made, and colouring it like a failure sends them debugging nothing.
 fn draw_slash(buf: &mut DrawBuffer, x: i32, y: i32, scale: i32) {
     let x0 = x - 1;
     let y0 = y - 1;

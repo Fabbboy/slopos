@@ -1,15 +1,9 @@
 //! `ip link` — interfaces, their flags and their counters.
 //!
-//! The output follows iproute2, including two things that look like bugs and
-//! are not. `lo` reports state `UNKNOWN`, because loopback has no link layer to
-//! have an operational state about and RFC 2863 says so; reporting `UP` there
-//! would be inventing a fact. And `NO-CARRIER` sorts first in the flag list,
-//! because it is the one flag that explains why the rest of the line looks
-//! wrong — buried between `MULTICAST` and `UP` it gets missed.
-//!
-//! Fields SlopOS has no answer for are omitted rather than filled in. iproute2
-//! prints `qdisc`, `qlen`, `mode` and `group`; a `qdisc noqueue` here would be
-//! a lie a reader could act on, so those columns simply are not there.
+//! Output follows iproute2, with deliberate deviations: `lo` reports state
+//! `UNKNOWN` per RFC 2863, `NO-CARRIER` sorts first in the flag list, and the
+//! fields SlopOS has no answer for (`qdisc`, `qlen`, `mode`, `group`) are
+//! omitted rather than filled in.
 
 use core::fmt::Write;
 use std::string::String;
@@ -72,9 +66,8 @@ fn print_full(iface: &UserIface, stats: bool) {
     println!("    link/{} {}", iface_kind(iface.kind), Mac(iface.mac));
 
     if stats {
-        // Four columns because SlopOS counts four things. iproute2 prints
-        // `overrun`/`mcast`/`carrier`/`collsns` too; a zero under a heading the
-        // stack never increments reads as a measurement.
+        // Four columns because SlopOS counts four things: a zero under a
+        // heading the stack never increments reads as a measurement.
         println!("    RX: bytes packets errors dropped");
         println!(
             "    {} {} {} {}",

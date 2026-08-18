@@ -2,29 +2,18 @@
 
 //! Ctrl-C-under-output-flood end-to-end regression test.
 //!
-//! Locks the FULL interrupt pipeline that interactive Ctrl-C rides:
-//! PTY master write of 0x03 -> slave line-discipline ISIG -> SIGINT to the
-//! slave's foreground process group -> wake of a writer blocked on the FULL
-//! master read buffer -> delivery (default-kill or installed handler).
+//! Locks the full interrupt pipeline interactive Ctrl-C rides: PTY master write
+//! of 0x03 -> slave line-discipline ISIG -> SIGINT to the slave's foreground
+//! process group -> wake of a writer blocked on the full master read buffer.
 //!
-//! The scenario it guards: a foreground job floods stdout while nothing
-//! drains the master (the terminal is busy/wedged), the master read buffer
-//! fills, and the job blocks inside `write()`. Ctrl-C must still interrupt
-//! it — which requires three kernel behaviors working together:
-//!   1. ISIG fires independent of queue fullness (signal char is processed
-//!      before any buffer-space check),
-//!   2. the blocked write's wait predicate observes the pending signal and
-//!      unwinds with ERESTARTSYS instead of re-blocking forever,
-//!   3. ISIG (NOFLSH clear) flushes the slave's undelivered output — the
-//!      master read buffer — so the flood is discarded, writers wake, and
-//!      the caret echo/prompt land in an empty queue.
-//!
-//! Historic regressions in this pipeline ping-ponged because no automated
-//! test drove it; interactive-only verification cannot keep it locked.
+//! The scenario: a foreground job floods stdout while nothing drains the master,
+//! the master read buffer fills, and the job blocks inside `write()`. Interrupting
+//! it needs ISIG to fire independent of queue fullness, the blocked write's wait
+//! predicate to observe the pending signal instead of re-blocking, and ISIG with
+//! NOFLSH clear to flush the slave's undelivered output.
 
-// Pull in the `slopos-userland` lib crate so its `_start` ELF entry point
-// is linked into the binary (same requirement as the sibling test bins;
-// without it the linker emits entry 0x0 and `do_exec` rejects the ELF).
+// Linked for its `_start` ELF entry point; without it the linker emits entry
+// 0x0 and `do_exec` rejects the ELF.
 use slopos_userland as _;
 
 use core::sync::atomic::{AtomicBool, Ordering};

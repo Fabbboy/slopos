@@ -692,16 +692,13 @@ impl WindowManager {
             wm.hw_cursor_last_y = wm.input.mouse_y;
         }
 
-        // After all input: if focus moved, damage both the old and new
-        // title bars.  No flags to manage — just compare the snapshot.
         let focus_after = wm.input.focused_task();
         if focus_after != focus_before {
             wm.add_title_bar_damage_for_task(focus_before);
             wm.add_title_bar_damage_for_task(focus_after);
-            // The bar names the focused application, and the title-bar damage
-            // above covers the windows only — nothing else in the frame
-            // touches the bar strip, so the name would stay stale until some
-            // unrelated change repainted `y < 24`.
+            // The bar names the focused application and nothing else in the
+            // frame touches the bar strip, so its name would otherwise stay
+            // stale until an unrelated change repainted it.
             let name_rect = wm.system_bar.app_name_damage(output.width);
             wm.output_damage
                 .add_rect(name_rect.x0, name_rect.y0, name_rect.x1, name_rect.y1);
@@ -709,10 +706,6 @@ impl WindowManager {
 
         wm.resync_windows_post_input();
 
-        // Fallback path only: with a `net_monitor` fd armed, refreshes are
-        // driven by the kernel telling us something changed, and this timer
-        // never runs. It exists for the case where the monitor could not be
-        // opened at all.
         if !wm.net_event_driven
             && wm
                 .net_last_poll
@@ -722,38 +715,34 @@ impl WindowManager {
             wm.refresh_from_kernel();
         }
 
-        // Apply the press the input dispatch recorded. Done here rather than
-        // in the dispatch because that path is handed an immutable view of the
-        // chrome; this is the same shape `process_pending_close_requests` uses.
+        // Not applied in the input dispatch: that path is handed an immutable
+        // view of the chrome.
         if let Some(request) = wm.input.take_chrome_request() {
             let screen_w = output.width;
             let screen_h = output.height;
             match request {
                 input::ChromeRequest::PopoverToggle(kind) => {
                     if let Some(item) = wm.system_bar.item_rect(screen_w, kind) {
-                        // The model must be read out first: `toggle` sizes the
-                        // panel from it, and `wm` is borrowed mutably below.
+                        // Read out first: `toggle` sizes the panel from it and
+                        // borrows `wm` mutably.
                         let model = wm.net_cache;
                         wm.popover.toggle(kind, item, &model, screen_w, screen_h);
                     }
                 }
                 input::ChromeRequest::PopoverDismiss => wm.popover.dismiss(),
-                // A press the panel does not claim is still swallowed by the
-                // grab rather than falling through to a window.
+                // A press the panel does not claim is swallowed by the grab
+                // rather than falling through to a window.
                 input::ChromeRequest::PopoverPress { x, y } => {
                     let _ = wm.popover.press(x, y, &wm.net_cache);
                 }
             }
         }
-        // Settle or abandon an outstanding switch request before the panel is
-        // measured, so a request that timed out this frame reverts in the same
-        // frame it expires rather than one later.
+        // Before the panel is measured, so a switch request that timed out
+        // this frame reverts in the same frame rather than one later.
         wm.popover.settle(&wm.net_cache);
         wm.popover
             .fit_to(&wm.net_cache, output.width, output.height);
 
-        // Whatever the popover covered and now covers. Emitted only when the
-        // two differ, so an open popover over an idle network is free.
         let mut popover_damage = [DamageRect::invalid(); 2];
         let popover_damage_count = wm.popover.take_damage(&mut popover_damage);
         for rect in &popover_damage[..popover_damage_count] {
@@ -761,9 +750,6 @@ impl WindowManager {
                 .add_rect(rect.x0, rect.y0, rect.x1, rect.y1);
         }
 
-        // System-bar damage: the clock ticking over, an indicator changing
-        // state, or the items moving. A frame where none of those happened
-        // reports nothing.
         let uptime_secs = time_origin.elapsed().as_secs();
         let mut bar_damage = [DamageRect::invalid(); menu_bar::MAX_BAR_DAMAGE];
         let bar_damage_count =
@@ -777,7 +763,6 @@ impl WindowManager {
         if wm.needs_redraw() {
             let force_full = wm.first_frame || wm.input.needs_full_redraw || wm.force_full_redraw;
 
-            // The precise, disjoint region to repaint this frame.
             let frame_damage = if force_full {
                 Region::full(output.width, output.height)
             } else {
@@ -789,15 +774,13 @@ impl WindowManager {
                 RenderMode::Partial
             };
 
-            // A coalesced SUPERSET of the painted region for the kernel flip
-            // (never fewer pixels than were repainted), so the back-buffer →
-            // scanout copy always covers everything that changed.
+            // A superset of the painted region: never fewer pixels than were
+            // repainted, so the scanout copy covers everything that changed.
             let (damage_arr, damage_n) = frame_damage.to_bounded::<MAX_OUTPUT_DAMAGE_REGIONS>();
 
             if let Some(mut buf) = output.draw_buffer() {
                 buf.set_pixel_format(pixel_format);
 
-                // Determine the active app name for the system bar.
                 let active_app_name =
                     active_window_title(&wm.windows, wm.window_count, wm.input.focused_task());
 
@@ -821,7 +804,7 @@ impl WindowManager {
                 );
             }
 
-            // A full redraw presents the whole buffer (empty damage = full flip).
+            // Empty damage means a full flip.
             let damage_slice: &[DamageRect] = if force_full {
                 &[]
             } else {
@@ -840,18 +823,12 @@ impl WindowManager {
             if flip_result {
                 let present_time = time_origin.elapsed().as_millis() as u64;
 
-                // Only surfaces whose committed content actually reached the
-                // screen this frame are cleared; a commit that landed after the
-                // snapshot keeps its dirty flag and is exported next frame.
                 let presented = core::mem::take(&mut wm.frame_dirty_surfaces);
                 if let Some(ref mut proto) = wm.protocol {
                     proto.mark_frames_done(present_time);
                     proto.clear_presented(&presented);
                 }
             } else {
-                // Present never reached the screen — carry the damage forward so
-                // it is repainted and re-flushed next frame. Surfaces stay dirty
-                // (not cleared) so their content is not lost.
                 if force_full {
                     wm.pending_full = true;
                 } else {
@@ -875,9 +852,6 @@ impl WindowManager {
             wm.first_frame = false;
         }
 
-        // What the last window of frames cost. Deltas, so a steady desktop
-        // reads as `frames=0 bytes=0` and a regression in damage shows up as a
-        // number rather than as a feeling about the frame rate.
         if let Some((frames, bytes)) =
             metrics.take_window(time_origin.elapsed().as_millis() as u64, METRICS_REPORT_MS)
         {
@@ -887,20 +861,11 @@ impl WindowManager {
             tty::write(line.as_bytes());
         }
 
-        // Parse + reap + flush once per frame.
-        //
-        // `process_requests()` here is LOAD-BEARING, not an optimisation:
-        // `cleanup_disconnected`'s close-probe does a non-blocking recv that
-        // pulls any in-flight bytes off the client socket into the Server's
-        // read buffer. That read empties the kernel-side socket, so the
-        // per-client poll-readiness stream never fires again for those
-        // bytes — without an every-frame parse they rot in the buffer
-        // forever. Observed live as a terminal whose SurfaceCommit (sent
-        // between its poll task's drain and the probe) was never processed:
-        // surface attached but never visible, window never appeared. The
-        // legacy sync loop parsed every client every frame for exactly this
-        // reason; the async per-client tasks only add latency-reduction on
-        // top of this guarantee.
+        // `process_requests()` is load-bearing, not an optimisation:
+        // `cleanup_disconnected`'s close-probe recv empties the kernel-side
+        // socket, so the per-client readiness stream never fires again for
+        // bytes it pulled into the read buffer. Without an every-frame parse
+        // those bytes are never handled.
         if let Some(ref mut proto) = wm.protocol {
             proto.process_requests();
             proto.cleanup_disconnected();
@@ -908,9 +873,7 @@ impl WindowManager {
         }
 
         // Dock and shelf launches are fire-and-forget — `spawn_program` keeps
-        // no tid — and the compositor outlives every one of them, so it is
-        // the reaper of record for each. Non-blocking, so a frame with no
-        // exited child costs one syscall that returns immediately.
+        // no tid — and the compositor outlives them, so it reaps them all.
         process::reap_exited_children();
     }
 }
@@ -942,8 +905,6 @@ pub fn compositor_user_main() {
     wm.renderer
         .set_output_info(output.width, output.height, output.bytes_pp, output.pitch);
 
-    // Tell the protocol bridge the display dimensions so it can send
-    // OutputInfo to new clients on accept.
     if let Some(ref mut proto) = wm.protocol {
         proto.set_display_info(
             output.width,
@@ -956,11 +917,8 @@ pub fn compositor_user_main() {
     let pixel_format = fb_info.format;
     let readiness = crate::readiness::ReadinessNotifier::acquire();
 
-    // Drive the compositor as an async root on a single ring. `block_on`
-    // never nests here: `compositor_user_main` is the top-level process entry,
-    // not invoked from another async context. The ring is sized for the peak
-    // armed-row count: one accept-readiness stream + one per connected client
-    // (MAX_CLIENTS) + the frame timer ⇒ 64 entries is comfortable headroom.
+    // Ring sized for the peak armed-row count: one accept-readiness stream,
+    // one per connected client (MAX_CLIENTS), and the frame timer.
     let ring = Ring::setup(64).expect("COMPOSITOR: ring setup failed");
     slopfut::block_on(
         ring,
@@ -970,65 +928,37 @@ pub fn compositor_user_main() {
 
 const TARGET_FRAME_MS: u64 = 16;
 
-/// How often the compositor asks the kernel about the network **when it has no
-/// monitor fd**. Two seconds is slow enough that the syscall is free at 60 Hz
-/// and fast enough that a cable pulled out is reflected before anyone looks
-/// twice at the bar. With a monitor fd this never runs.
+/// Network poll cadence for the fallback path only; with a monitor fd this
+/// never runs. Free at 60 Hz, and fast enough to reflect a pulled cable.
 const NET_POLL_INTERVAL_MS: u128 = 2000;
 
-/// How often the compositor reports what its frames cost.
-///
-/// `FrameMetrics` is otherwise write-only: `record` accumulates and nothing
-/// reads it back, so "did this change make the compositor busier" is not a
-/// question anyone can answer from a boot log. Five seconds is long enough that
-/// the line is rare and short enough that a capture of ordinary length contains
-/// several.
-///
-/// Off unless `SLOPOS_COMPOSITOR_METRICS` is set, because the report goes to the
-/// TTY: on by default it writes over whatever the user is doing, every five
-/// seconds, forever.
+/// Frame-cost report cadence. Off unless `SLOPOS_COMPOSITOR_METRICS` is set,
+/// because the report goes to the TTY over whatever the user is doing.
 const METRICS_REPORT_MS: u64 = 5000;
 
-/// Whether to print the periodic damage report. Read once — the environment
-/// does not change under a running compositor, and this is consulted every
-/// frame.
+/// Whether to print the periodic damage report. Read once by the caller — the
+/// environment does not change under a running compositor.
 fn metrics_reporting_enabled() -> bool {
     std::env::var("SLOPOS_COMPOSITOR_METRICS").is_ok_and(|v| v != "0")
 }
 
-/// Maximum rect count handed to the kernel flip per frame. The precise damage
-/// region is coalesced down to this many bounding rects (a superset of what was
-/// painted) so the back-buffer → scanout copy stays bounded while still covering
-/// every changed pixel. MUST match the kernel's per-flip damage capacity: the
-/// kernel drops rects beyond it, which would leave painted pixels un-scanned-out.
+/// Maximum rect count handed to the kernel flip per frame. Must match the
+/// kernel's per-flip damage capacity: it drops rects beyond that, which would
+/// leave painted pixels un-scanned-out.
 const MAX_OUTPUT_DAMAGE_REGIONS: usize = slopos_abi::damage::MAX_DAMAGE_REGIONS;
 
 /// Maximum new connections drained from the listen backlog in one accept wake.
 const ACCEPT_BATCH: usize = MAX_CLIENTS;
 
-/// Async compositor driver (tokio-style accept-loop + task-per-client + a
-/// frame-timer arm, all on the single-threaded `!Send` executor — shared
-/// state via `Rc<RefCell<…>>` is sound because borrows are short and never
-/// held across an `.await`).
+/// Async compositor driver: an accept task, a task per client, and this root
+/// future as the frame-timer arm, all on the single-threaded `!Send` executor.
+/// Sharing state through `Rc<RefCell<…>>` is sound because no borrow is held
+/// across an `.await`.
 ///
-/// - The frame-timer arm (this root future) owns the framebuffer locals and
-///   ticks the render/commit cadence every [`TARGET_FRAME_MS`].
-/// - The accept task arms `poll_add_multishot(listen_fd, POLLIN)`; each yield
-///   drains the backlog via the existing sync accept path and spawns a
-///   per-client task. Listen-socket readiness — not the synchronous ring
-///   `accept_multishot` — is used so the existing `Server::accept()` stays the
-///   sole client-slot allocator (slop-protocol unchanged); fds are never
-///   accepted out from under it.
-/// - Each per-client task arms `poll_add_multishot(client_fd, POLLIN)` and on
-///   each yield drains that client's requests with the EXISTING sync
-///   `Server::recv_request` (via `ProtocolBridge::process_client`). On
-///   disconnect it exits, dropping its stream → `OP_CANCEL` retires the armed
-///   row, so connect→disconnect→reconnect never leaks rows in the 64-slot ring.
-///
-/// Accept-before-frame ordering is preserved structurally: the accept task is
-/// woken by listen-socket readiness independently of the frame timer, so a new
-/// client is accepted and serviced as soon as it connects, never gated on a
-/// full frame.
+/// The accept task waits on listen-socket readiness rather than the ring's
+/// `accept_multishot`, so `Server::accept()` stays the sole client-slot
+/// allocator and fds are never accepted out from under it. It is woken
+/// independently of the frame timer, so a new client is never gated on a frame.
 async fn compositor_async(
     wm: WindowManager,
     mut output: CompositorOutput,
@@ -1041,10 +971,9 @@ async fn compositor_async(
 
     let wm = Rc::new(RefCell::new(wm));
 
-    // Initial accept pass + request drain BEFORE signalling readiness, exactly
-    // as the legacy top-of-loop did: connections queued during init are
-    // greeted and serviced, and a per-client task is spawned for each, before
-    // init is told the compositor is up.
+    // Accept pass and request drain before signalling readiness, so a
+    // connection queued during init is greeted before init is told the
+    // compositor is up.
     let listen_fd = {
         let mut w = wm.borrow_mut();
         let listen_fd = w.protocol.as_ref().map(|p| p.listen_fd());
@@ -1062,30 +991,19 @@ async fn compositor_async(
         listen_fd
     };
 
-    // Signal readiness now that the first accept pass is done (boot-critical:
-    // init blocks on this byte before launching the shell).
+    // Boot-critical: init blocks on this byte before launching the shell.
     if let Some(n) = readiness.take() {
         n.signal_ready();
     }
 
-    // Network indicator: driven by a monitor fd when one can be opened, and by
-    // the per-frame timer when one cannot.
     {
         let event_driven = spawn_net_monitor_task(wm.clone());
         wm.borrow_mut().net_event_driven = event_driven;
     }
 
-    // Accept task: a multishot listen-readiness stream. Each yield drains the
-    // full backlog and spawns a per-client task per new connection. Runs
-    // concurrently with the frame timer, so newly-connected clients are
-    // serviced without waiting for a frame.
-    //
-    // The stream is re-armed if it ever ends: a multishot row can die on a
-    // transient error (arm failure or an error-terminal CQE), and the listen
-    // socket outlives any such transient. Treating stream-end as permanent
-    // silently killed ALL future accepts — clients connected into the
-    // backlog and waited forever for a greeting (observed live: terminal
-    // window never appeared while the compositor kept rendering).
+    // A multishot row can die on a transient error and the listen socket
+    // outlives any such transient, so stream-end re-arms rather than ending
+    // all future accepts.
     if let Some(listen_fd) = listen_fd {
         let wm_accept = wm.clone();
         slopfut::spawn(async move {
@@ -1105,30 +1023,24 @@ async fn compositor_async(
                     }
                 }
                 tty::write(b"COMPOSITOR: accept stream ended; re-arming\n");
-                // Pace the re-arm so a persistently failing arm cannot
-                // become a hot loop; the per-frame sweep below covers the
-                // gap meanwhile.
+                // Paced so a persistently failing arm cannot become a hot loop;
+                // the per-frame sweep below covers the gap meanwhile.
                 slopfut::time::sleep_ms(50).await;
             }
         });
     }
 
-    // Frame-timer arm: tick the render/commit cadence. The full per-frame
-    // work (input, refresh, render, present, frame_done, cleanup, flush) runs
-    // synchronously under a short `borrow_mut` that is dropped before the next
-    // timer await — so per-client/accept tasks observe no overlapping borrow.
+    // The per-frame work runs synchronously under a `borrow_mut` dropped
+    // before the next timer await, so no other task sees an overlapping borrow.
     let mut frame_count: u32 = 0;
     let mut metrics = FrameMetrics::new(metrics_reporting_enabled());
     let time_origin = Instant::now();
     loop {
         let frame_start = Instant::now();
 
-        // Defensive accept sweep (belt-and-braces over the async accept
-        // task): a non-blocking accept per frame guarantees a connection
-        // queued in the backlog is greeted within one frame even if the
-        // accept-readiness stream is between re-arms. `Server::accept()`
-        // stays the sole slot allocator, so the two paths cannot
-        // double-accept a connection.
+        // Covers the accept task while its readiness stream is between
+        // re-arms. `Server::accept()` stays the sole slot allocator, so the
+        // two paths cannot double-accept a connection.
         {
             let mut accepted = [(0usize, -1i32, 0u64); ACCEPT_BATCH];
             let n = {
@@ -1154,10 +1066,6 @@ async fn compositor_async(
             TARGET_FRAME_MS,
         );
 
-        // Deadline pacing: sleep only the remainder of this frame's budget so the
-        // cadence stays ~TARGET_FRAME_MS regardless of how long the frame's work
-        // took. A frame that overran its budget yields once and runs the next
-        // immediately.
         let elapsed = frame_start.elapsed().as_millis() as u64;
         let remaining = TARGET_FRAME_MS.saturating_sub(elapsed);
         if remaining > 0 {
@@ -1170,19 +1078,14 @@ async fn compositor_async(
 
 /// Drive the network indicator from a `net_monitor` fd instead of a timer.
 ///
-/// The fd is used purely as a change *notification*: every wake re-reads the
-/// whole model through `net_query` rather than applying the event's payload as
-/// a delta. That is what makes a dropped event harmless — the in-band
-/// `NET_EV_OVERFLOW` record wakes us like any other, and the re-query is
-/// authoritative regardless of what was missed. Applying deltas would need the
-/// `seq`-based handoff the ABI documents, to no benefit for a model this small.
+/// The fd is a change *notification* only: every wake re-reads the whole model
+/// through `net_query` rather than applying the event payload as a delta, which
+/// is what makes a dropped event harmless.
 ///
-/// The monitor is opened, then the first query issued, in that order: an
-/// interface that appears between the two shows up as an event rather than
-/// being missed by both.
+/// The monitor is opened before the first query, so an interface appearing
+/// between the two shows up as an event rather than being missed by both.
 ///
-/// Returns whether the fd was opened. A failure leaves the caller on the
-/// timer.
+/// Returns whether the fd was opened; a failure leaves the caller on the timer.
 fn spawn_net_monitor_task(wm: std::rc::Rc<std::cell::RefCell<WindowManager>>) -> bool {
     let fd = match crate::syscall::net::net_monitor(NET_MON_DEFAULT, 0) {
         Ok(fd) => fd,
@@ -1191,8 +1094,7 @@ fn spawn_net_monitor_task(wm: std::rc::Rc<std::cell::RefCell<WindowManager>>) ->
             return false;
         }
     };
-    // The task outlives this frame, so the descriptor is handed to it rather
-    // than closed here; it lives until the compositor exits.
+    // Handed to the task rather than closed here; it lives until exit.
     let raw = fd.into_raw();
 
     wm.borrow_mut().refresh_from_kernel();
@@ -1207,27 +1109,18 @@ fn spawn_net_monitor_task(wm: std::rc::Rc<std::cell::RefCell<WindowManager>>) ->
                 while crate::syscall::fs::read_slice(raw, &mut buf).unwrap_or(0) > 0 {}
                 wm.borrow_mut().refresh_from_kernel();
             }
-            // A multishot row can die on a transient error; the fd outlives
-            // it, so re-arm rather than treating stream-end as permanent.
-            //
-            // Logged rather than silent: there is no polling backstop, and a
-            // monitor that dies and quietly resurrects looks exactly like one
-            // that never died. A healthy stream never ends, so the line costs
-            // nothing.
+            // The fd outlives a multishot row that died on a transient error,
+            // so re-arm. Logged because there is no polling backstop here.
             tty::write(b"COMPOSITOR: net_monitor stream ended; re-arming\n");
-            // Paced so a persistently failing arm cannot become a hot loop.
             slopfut::time::sleep_ms(500).await;
         }
     });
     true
 }
 
-/// Spawn a per-client task that services `idx` (socket `fd`, connection
-/// generation `generation`) until it disconnects. Loops over
-/// `poll_add_multishot(fd, POLLIN)` yields, draining the client's requests with
-/// the existing sync recv path on each readiness. Exits — dropping its stream →
-/// `OP_CANCEL` — when the client disconnects (recv reports it, or the poll
-/// terminates on `POLLHUP`/`POLLERR`).
+/// Spawn a per-client task that drains `idx`'s requests on each readiness of
+/// `fd` until it disconnects, then exits — dropping its stream, which
+/// `OP_CANCEL`s the armed ring row.
 fn spawn_client_task(
     wm: std::rc::Rc<std::cell::RefCell<WindowManager>>,
     idx: usize,
@@ -1237,11 +1130,9 @@ fn spawn_client_task(
     if fd < 0 {
         return;
     }
-    // Identity = (fd, generation). The slot index *and* the fd number are both
-    // recycled by the kernel/Server across disconnect→reconnect, so a successor
-    // client can inherit our exact slot+fd; only the monotonic generation
-    // distinguishes it. A stale task whose `(fd, generation)` no longer matches
-    // exits without touching the successor.
+    // Both the slot index and the fd number are recycled across
+    // disconnect→reconnect, so a successor client can inherit this exact
+    // slot+fd; only the monotonic generation distinguishes it.
     let owns = move |proto: &ProtocolBridge| {
         proto.client_fd(idx) == Some(fd) && proto.client_gen(idx) == Some(generation)
     };
@@ -1262,20 +1153,15 @@ fn spawn_client_task(
                     }
                 }
                 None => {
-                    // Terminal CQE (POLLHUP/POLLERR / cancel). The kernel
-                    // coalesces POLLHUP with a final POLLIN on peer close, and
-                    // the multishot terminal CQE surfaces as `None` *without*
-                    // yielding that last data edge — so drain once before
-                    // teardown to recover a trailing request burst the client
-                    // sent immediately before closing (the legacy sync loop
-                    // drained every client each frame before cleanup).
+                    // The kernel coalesces POLLHUP with a final POLLIN on peer
+                    // close and the terminal CQE surfaces as `None` without
+                    // yielding that data edge, so drain once before teardown
+                    // to recover a trailing request burst.
                     let mut w = wm.borrow_mut();
                     if let Some(ref mut proto) = w.protocol {
                         if owns(proto) {
-                            // `process_client` drains to EOF and, on the
-                            // Disconnected path, already runs the teardown
-                            // funnel and returns false — so only disconnect
-                            // here if it drained without seeing the close.
+                            // A false return means the teardown funnel already
+                            // ran, so only disconnect if it drained clean.
                             if proto.process_client(idx) {
                                 proto.disconnect_client(idx);
                             }
@@ -1289,11 +1175,9 @@ fn spawn_client_task(
     });
 }
 
-/// Read the whole network model out of `net_query`.
-///
-/// Three queries, joined on `ifindex`: the interface table, the addresses, and
-/// the one global record. The resolver is not among them — nothing the bar or
-/// the panel draws reads the model's nameserver list, so it stays empty.
+/// Read the whole network model out of `net_query`: interfaces, addresses and
+/// the one global record, joined on `ifindex`. The resolver is not queried —
+/// nothing the bar or panel draws reads the nameserver list, so it stays empty.
 ///
 /// `None` if any query failed, which the caller reads as "keep what you had".
 fn read_net_model() -> Option<NetPanelModel> {
@@ -1315,9 +1199,8 @@ fn read_net_model() -> Option<NetPanelModel> {
         row.admin_up = iface.admin_up != 0;
         row.carrier = iface.carrier != 0;
         row.oper = iface.oper_state;
-        // The first address on the interface. The indicator asks only whether
-        // there is one; which one it picks matters to the panel, and the panel
-        // reads the full list from `net_cache` rather than this summary.
+        // Any address will do: the indicator asks only whether there is one,
+        // and the panel reads the full list from `net_cache`, not this summary.
         if let Some(addr) = addrs
             .records
             .iter()
@@ -1331,7 +1214,6 @@ fn read_net_model() -> Option<NetPanelModel> {
     Some(model)
 }
 
-/// Return the title of the focused window as a `&str`, or `""` if none.
 fn active_window_title(
     windows: &[UserWindowInfo; MAX_WINDOWS],
     count: u32,

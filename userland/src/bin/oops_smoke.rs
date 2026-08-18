@@ -1,13 +1,11 @@
 #![feature(restricted_std)]
 
-//! Panic-recovery syscall smoke: invoke `SYSCALL_TEST_PANIC` so the kernel
-//! panics inside this task's syscall context. With `panic.recover_smoke=on`
-//! the kernel recovers by killing this task — the process never returns
-//! from the syscall, and the boot-log transcript carries the
-//! `panic recovery: syscall` line. If the syscall returns (any value), the
-//! recovery boundary did not engage; report failure loudly.
+//! Panic-recovery smoke: `SYSCALL_TEST_PANIC` panics the kernel inside this
+//! task's syscall context. Under `panic.recover_smoke=on` the kernel kills the
+//! task, so the syscall must never return — a return means the recovery
+//! boundary did not engage.
 
-// Pull in the userland lib so its `_start` ELF entry point is linked.
+// Linked for its `_start` ELF entry point.
 use slopos_userland as _;
 
 fn main() {

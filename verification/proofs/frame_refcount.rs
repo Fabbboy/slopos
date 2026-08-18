@@ -1,8 +1,5 @@
-// `Frame<M>` reference-count proof.
-//
-// This is a Verus-annotated mirror of the load-bearing state machine in
-// `slopos_ostd::mm::frame::{MetaSlot, Frame, Drop}`. It machine-checks the
-// three reference-count invariants:
+// `Frame<M>` reference-count proof: a Verus mirror of the state machine in
+// `slopos_ostd::mm::frame::{MetaSlot, Frame, Drop}`. It machine-checks:
 //
 //   (I1) If `frame.ref_count() > 0`, the underlying physical frame is
 //        allocated and not on the free list.
@@ -13,76 +10,37 @@
 //   (I4) A frame on the allocator free list has a claimable (non-TYPED)
 //        slot — `Drop` resets the slot to UNUSED *before* it returns the
 //        page, so a concurrent `from_unused` on the recycled paddr never
-//        races a still-TYPED slot (the SMP `PathCorrupt` ring-map bug).
+//        races a still-TYPED slot.
 //
-// State machine. `MetaSlot::ref_count` (AtomicU32) is the slot's whole
-// lifecycle in one atomic, with two sentinels:
+// `MetaSlot::ref_count` (AtomicU32) carries the slot's whole lifecycle in one
+// atomic, with two sentinels:
 //   `REF_COUNT_UNUSED` (u32::MAX) — free and claimable by `from_unused`.
 //   `REF_COUNT_BUSY`   (0)        — transient: a `from_unused` or a `Drop`
 //                                   owns the slot exclusively to construct
 //                                   or tear down the metadata.
 //   `1..=REF_COUNT_MAX`           — that many live `Frame` handles.
-// `from_unused` is `CAS(UNUSED -> BUSY)` (retrying while it reads BUSY);
-// `Drop`'s `fetch_sub(1)` from the last ref (1) lands on BUSY (0). So both
-// construction and destruction hold the slot at BUSY, where `from_unused`
-// retries and `from_in_use` refuses (`from_in_use` bumps only a live count).
-//
-// Background. The Asterinas paper (USENIX ATC '25, Fig. 9) found a real UB
-// in the equivalent OSTD path via KernMiri: a `fetch_add(1)` clone could
-// resurrect a slot whose teardown had already begun (the count had hit the
-// BUSY value), racing the `drop_in_place` of the last dropper. SlopOS closes
-// that race with the conditional increment — `from_in_use` refuses to bump
-// from BUSY/UNUSED (see `frame.rs::from_in_use`). This proof encodes both
-// the fixed clone and the broken `fetch_add` clone and shows the inductive
-// invariant holds for the former and is violated by the latter — so the
-// proof is load-bearing, not vacuous.
-//
-// Modelling strategy. Every method on the real `Frame`/`MetaSlot` touches
-// the slot only through atomic operations (CAS, fetch_update, fetch_sub,
-// Release/Acquire stores). The BUSY sentinel makes construction and
-// destruction *exclusively owned* (no other step can claim or bump a BUSY
-// slot), so each method body is one atomic-bounded `Step` against the shared
-// slot. An inductive invariant that survives every `Step` then holds in
-// every reachable state of every interleaving — which is exactly the
-// concurrency claim (I3): no schedule of clones and drops can reach a state
-// the invariant forbids.
-//
-// Field correspondence to `frame.rs`:
-//   `typed`        <-> the slot is live (`ref_count` in `1..=REF_COUNT_MAX`)
-//   `rc`           <-> the live reference count (`0` models the UNUSED/BUSY
-//                      sentinels — i.e. "no live handle")
-//   `payload_live` <-> the inline `M` payload + vtable are still valid
-//                      (i.e. `drop_in_place` has NOT run)
-//   `on_free_list` <-> the physical frame is back in the FrameAlloc free
-//                      list (released by `return_frame_to_allocator`)
-//   `releases`     <-> ghost counter: how many times the slot's frame has
-//                      been handed back to the allocator this epoch
-//                      (must be exactly 0 while live, at most 1 after).
+// Both construction and destruction park the slot at BUSY, where `from_unused`
+// retries and `from_in_use` refuses. That interlock is what makes each method
+// body one atomic-bounded `Step`, so an inductive invariant over `Step` holds
+// in every reachable state of every interleaving — the concurrency claim (I3).
 
 use vstd::prelude::*;
 
 verus! {
 
-// ---------------------------------------------------------------------------
-// Abstract slot state.
-// ---------------------------------------------------------------------------
-
 /// Abstract image of a single `MetaSlot` plus the allocator's view of the
-/// physical frame it tracks. `payload_live` and `on_free_list` are the two
-/// facts a use-after-free would violate; `releases` is the ghost
-/// double-free counter behind invariant (I2).
+/// physical frame it tracks.
 pub struct Slot {
     /// The slot is live: `MetaSlot::ref_count` in `1..=REF_COUNT_MAX`.
     pub typed: bool,
     /// The live reference count (`0` models the UNUSED/BUSY sentinels).
     pub rc: nat,
-    /// The inline `M` and vtable are still valid — `on_drop` /
-    /// `drop_in_place` have not yet run. A live `Frame` borrow
-    /// (`Frame::borrow`, `as_bytes`, the HHDM accessors) dereferences
-    /// memory whose validity is exactly this bit.
+    /// The inline `M` and vtable are still valid — `drop_in_place` has not
+    /// run. A live `Frame` borrow dereferences memory whose validity is
+    /// exactly this bit.
     pub payload_live: bool,
-    /// The physical frame is sitting in the FrameAlloc free list — i.e. it
-    /// has been `dealloc`'d and a future `alloc` may hand it out again.
+    /// The physical frame is in the FrameAlloc free list — a future `alloc`
+    /// may hand it out again.
     pub on_free_list: bool,
     /// Ghost: number of times this epoch's frame was returned to the
     /// allocator. Behind (I2)'s "exactly once".
@@ -92,44 +50,33 @@ pub struct Slot {
 /// The inductive slot invariant. Every reachable slot state satisfies it;
 /// each `Step` preserves it (`step_preserves` below).
 pub open spec fn slot_inv(s: Slot) -> bool {
-    // (I1) A positive ref-count pins the frame: it is typed, its payload is
-    //      valid, and it is NOT on the allocator free list. This is the
-    //      core "allocated and not free" guarantee.
+    // (I1) A positive ref-count pins the frame: typed, payload valid, not on
+    //      the allocator free list.
     &&& (s.rc > 0 ==> s.typed)
     &&& (s.rc > 0 ==> s.payload_live)
     &&& (s.rc > 0 ==> !s.on_free_list)
-    // (I3) No use-after-free: a valid payload is never simultaneously on the
-    //      free list. Equivalently, the bytes a `Frame::borrow` reads are
-    //      never memory the allocator considers reusable.
+    // (I3) No use-after-free: the bytes a `Frame::borrow` reads are never
+    //      memory the allocator considers reusable.
     &&& !(s.payload_live && s.on_free_list)
-    // (I4) Reclaim-after-reset: a frame on the allocator free list always has
-    //      a claimable (non-TYPED) slot. This is the liveness guarantee the
-    //      `Drop` teardown ordering must provide — reset the slot to UNUSED
-    //      *before* returning the page — so that a concurrent `from_unused`
-    //      handed the recycled paddr never finds it still TYPED (which would
-    //      be a spurious `StateMismatch` → `PathCorrupt`, the SMP ring-map
-    //      bug). `broken_drop_ordering_violates_invariant` below shows the
-    //      pre-fix free-before-reset ordering breaks exactly this conjunct.
+    // (I4) Reclaim-after-reset: a frame on the free list has a claimable
+    //      (non-TYPED) slot, so a concurrent `from_unused` handed the recycled
+    //      paddr never finds it still TYPED (a spurious `StateMismatch` →
+    //      `PathCorrupt`).
     &&& (s.on_free_list ==> !s.typed)
-    // (I2) Exactly-once release. While the payload is live the frame has
-    //      been released zero times; once teardown has run it is released at
-    //      most once. `on_free_list` is reached only via that single
-    //      release, so a second `dealloc` (double-free) is unreachable.
+    // (I2) Exactly-once release: `on_free_list` is reached only via that one
+    //      release, so a second `dealloc` is unreachable.
     &&& (s.payload_live ==> s.releases == 0)
     &&& (s.releases <= 1)
     &&& (s.on_free_list ==> s.releases == 1)
-    // Teardown ordering: a typed-but-dead payload has already hit rc 0
-    //      (Drop zeroes rc before clearing `payload_live`/state).
+    // Drop zeroes rc before clearing `payload_live`.
     &&& (s.typed && !s.payload_live ==> s.rc == 0)
 }
 
 /// The state a fresh, never-allocated slot starts in — `META_SLOTS` is
-/// zero-initialised at boot, so every slot begins `UNUSED`, rc 0, and no
-/// payload. `on_free_list` is the FrameAlloc's *released*-frame predicate:
-/// a slot that has never completed an alloc/dealloc round trip is not a
-/// reclaimed frame, so it starts `false` and only becomes `true` via the
-/// single `DropFinal` release (this is what makes `releases` a faithful
-/// double-free counter — see `slot_inv`'s `on_free_list ==> releases == 1`).
+/// zero-initialised at boot. `on_free_list` is the FrameAlloc's *released*-
+/// frame predicate, so a slot that has never completed an alloc/dealloc round
+/// trip starts `false` and only becomes `true` via the single `DropFinal`
+/// release; that is what makes `releases` a faithful double-free counter.
 pub open spec fn slot_init(s: Slot) -> bool {
     &&& s.typed == false
     &&& s.rc == 0
@@ -138,44 +85,33 @@ pub open spec fn slot_init(s: Slot) -> bool {
     &&& s.releases == 0
 }
 
-// ---------------------------------------------------------------------------
-// Steps: one per atomic-bounded `MetaSlot` method body.
-// ---------------------------------------------------------------------------
-
+/// One step per atomic-bounded `MetaSlot` method body.
 pub enum Step {
-    /// `Frame::from_unused`: CAS `ref_count` UNUSED->BUSY (held exclusively),
-    /// write meta, publish `ref_count = 1` (live). The frame leaves the
-    /// allocator free list (just handed out by `FrameAlloc::alloc`). Resets
-    /// the per-epoch ghost release counter — a fresh allocation is a new
-    /// epoch. The BUSY interlock makes the construct atomic (no other step
-    /// can claim or bump a BUSY slot), so it is one `Step`.
+    /// `Frame::from_unused`: CAS UNUSED->BUSY, write meta, publish
+    /// `ref_count = 1`. The frame leaves the allocator free list, and the
+    /// per-epoch ghost release counter resets — a fresh allocation is a new
+    /// epoch.
     FromUnused,
-    /// `Frame::from_in_use` — the *fixed* clone. `fetch_update` bumps the
-    /// count only from a live value; it refuses BUSY/UNUSED, so it cannot
-    /// resurrect a slot whose last ref just hit BUSY. This is the line that
-    /// closes the Asterinas Fig. 9 race.
+    /// `Frame::from_in_use` — the *fixed* clone. `fetch_update` bumps only
+    /// from a live value; refusing BUSY/UNUSED is what stops it resurrecting
+    /// a slot whose last ref just hit BUSY.
     CloneConditional,
     /// `Frame::drop`, non-final: `fetch_sub(1)` observed a previous value
-    /// > 1, so this is not the last reference. Nothing else happens.
+    /// > 1, so this is not the last reference.
     DropNonFinal,
     /// `Frame::drop`, final: `fetch_sub(1)` observed exactly 1, landing the
-    /// slot at BUSY (held exclusively). The Acquire fence, then `drop_in_place`
-    /// (payload no longer live), then the slot published UNUSED, then —
-    /// *last* — the page returned to the free list (`dealloc`, bumping
-    /// `releases`). Modelled as one atomic-ordered step: the BUSY interlock
-    /// means no other step interleaves the teardown, and the only sub-step a
-    /// peer observes (the page appearing on the free list) happens after the
-    /// slot is already UNUSED, so `typed=false, on_free_list=true` faithfully
-    /// captures every interleaving. (Reset-before-free is what makes this
-    /// atomic model sound — see `broken_drop_ordering_violates_invariant`.)
+    /// slot at BUSY. Acquire fence, `drop_in_place`, slot published UNUSED,
+    /// then — *last* — the page returned to the free list. Modelled as one
+    /// step: the BUSY interlock excludes every peer, and the only sub-step a
+    /// peer can observe (the page appearing on the free list) happens after
+    /// the slot is already UNUSED. That reset-before-free ordering is what
+    /// makes the atomic model sound — see
+    /// `broken_drop_ordering_violates_invariant`.
     DropFinal,
-    /// `Frame::drop`, final, for a meta whose
-    /// `returns_frame_on_last_drop()` is `false` (the statically-borrowed
-    /// kernel-master PML4 and externally-owned DMA segment frames). Same
-    /// teardown as `DropFinal` — payload dropped, slot reset to UNUSED —
-    /// but the page is NOT handed back to the allocator, so `on_free_list`
-    /// stays false and `releases` is untouched. Models the `if return_page`
-    /// false branch of the `Drop` impl.
+    /// `Frame::drop`, final, for a meta whose `returns_frame_on_last_drop()`
+    /// is `false` (the statically-borrowed kernel-master PML4 and
+    /// externally-owned DMA segment frames): same teardown, but the page is
+    /// not handed back, so `on_free_list` and `releases` are untouched.
     DropFinalNoFree,
 }
 
@@ -184,30 +120,24 @@ pub enum Step {
 pub open spec fn step(s: Slot, t: Step) -> Slot {
     match t {
         Step::FromUnused =>
-            // Only fires on a genuinely unused slot (CAS UNUSED->BUSY then
-            // publish live succeeds). The allocator just gave us the frame,
-            // so it is off the free list and a new epoch begins (releases 0).
             if !s.typed && s.rc == 0 && !s.payload_live {
                 Slot { typed: true, rc: 1, payload_live: true, on_free_list: false, releases: 0 }
             } else {
                 s
             },
         Step::CloneConditional =>
-            // fetch_update refuses BUSY/UNUSED (rc == 0); otherwise rc += 1.
             if s.rc > 0 {
                 Slot { rc: (s.rc + 1) as nat, ..s }
             } else {
                 s
             },
         Step::DropNonFinal =>
-            // fetch_sub saw prev > 1: just decrement, teardown not reached.
             if s.rc > 1 {
                 Slot { rc: (s.rc - 1) as nat, ..s }
             } else {
                 s
             },
         Step::DropFinal =>
-            // fetch_sub saw prev == 1: run teardown exactly once.
             if s.rc == 1 {
                 Slot {
                     typed: false,
@@ -220,9 +150,6 @@ pub open spec fn step(s: Slot, t: Step) -> Slot {
                 s
             },
         Step::DropFinalNoFree =>
-            // fetch_sub saw prev == 1, but `returns_frame_on_last_drop` is
-            // false: tear the slot down to UNUSED but keep the page (it is
-            // owned elsewhere). on_free_list stays false; releases untouched.
             if s.rc == 1 {
                 Slot { typed: false, rc: 0, payload_live: false, ..s }
             } else {
@@ -231,16 +158,10 @@ pub open spec fn step(s: Slot, t: Step) -> Slot {
     }
 }
 
-// ---------------------------------------------------------------------------
-// (I1)+(I2)+(I3): the invariant is inductive over every step.
-// ---------------------------------------------------------------------------
-
-/// Every `Step` preserves `slot_inv`. Because each step is the image of an
-/// atomic-bounded method body, and any concurrent interleaving is a
-/// sequence of such steps against the shared slot, this single inductive
-/// fact is the whole-system concurrency guarantee: no schedule of clones
-/// and drops reaches a state violating `slot_inv` (hence no UAF, no
-/// double-free, no positive-rc-on-free-list).
+/// Every `Step` preserves `slot_inv`. Each step is the image of an
+/// atomic-bounded method body and any interleaving is a sequence of such steps
+/// against the shared slot, so this single inductive fact is the whole-system
+/// concurrency guarantee.
 pub proof fn step_preserves(s: Slot, t: Step)
     requires
         slot_inv(s),
@@ -249,8 +170,7 @@ pub proof fn step_preserves(s: Slot, t: Step)
 {
 }
 
-/// The initial slot state satisfies the invariant — base case for the
-/// induction over reachable states below.
+/// The initial slot state satisfies the invariant — base case.
 pub proof fn init_inv(s: Slot)
     requires
         slot_init(s),
@@ -259,14 +179,9 @@ pub proof fn init_inv(s: Slot)
 {
 }
 
-// ---------------------------------------------------------------------------
-// Reachability: lift the inductive step to whole execution traces.
-// ---------------------------------------------------------------------------
-
-/// Replay a finite trace of steps from a start state. A trace is any finite
-/// sequence of `Step`s — i.e. any interleaving of `from_unused` /
-/// `from_in_use` / `drop` calls from any number of CPUs, since each leaves
-/// the shared slot only through these atomic-bounded transitions.
+/// Replay a finite trace of steps from a start state: any interleaving of
+/// `from_unused` / `from_in_use` / `drop` calls from any number of CPUs, since
+/// each leaves the shared slot only through these atomic-bounded transitions.
 pub open spec fn run(s: Slot, trace: Seq<Step>) -> Slot
     decreases trace.len(),
 {
@@ -277,9 +192,8 @@ pub open spec fn run(s: Slot, trace: Seq<Step>) -> Slot
     }
 }
 
-/// MAIN THEOREM. From any initial slot, after *any* trace of clone/drop
-/// steps (any concurrent interleaving), the invariant still holds. This is
-/// the machine-checked statement of (I1)+(I2)+(I3) over all executions.
+/// MAIN THEOREM. From any initial slot, after *any* trace of clone/drop steps
+/// (any concurrent interleaving), the invariant still holds.
 pub proof fn invariant_holds_on_every_trace(s0: Slot, trace: Seq<Step>)
     requires
         slot_init(s0),
@@ -295,15 +209,8 @@ pub proof fn invariant_holds_on_every_trace(s0: Slot, trace: Seq<Step>)
     }
 }
 
-// ---------------------------------------------------------------------------
-// Named corollaries, one per reference-count invariant. These read the
-// three invariants straight off the reachable-state guarantee.
-// ---------------------------------------------------------------------------
-
-/// (I1) "If `frame.ref_count() > 0`, the underlying physical frame is
-/// allocated and not on the free list." In any reachable state, a positive
-/// ref-count implies the frame is typed (allocated) and absent from the
-/// allocator's free list.
+/// (I1) In any reachable state, a positive ref-count implies the frame is
+/// typed (allocated) and absent from the allocator's free list.
 pub proof fn i1_positive_rc_is_allocated(s0: Slot, trace: Seq<Step>)
     requires
         slot_init(s0),
@@ -313,9 +220,8 @@ pub proof fn i1_positive_rc_is_allocated(s0: Slot, trace: Seq<Step>)
     invariant_holds_on_every_trace(s0, trace);
 }
 
-/// (I2) "On the transition to 0, `Drop` releases the frame to the parent
-/// allocator exactly once." A reachable state never exceeds one release,
-/// and being on the free list witnesses exactly one — so no double-free.
+/// (I2) A reachable state never exceeds one release, and being on the free
+/// list witnesses exactly one — so no double-free.
 pub proof fn i2_release_at_most_once(s0: Slot, trace: Seq<Step>)
     requires
         slot_init(s0),
@@ -326,11 +232,8 @@ pub proof fn i2_release_at_most_once(s0: Slot, trace: Seq<Step>)
     invariant_holds_on_every_trace(s0, trace);
 }
 
-/// `DropFinal` is the only step that performs a release, and it does so by
-/// incrementing `releases` by exactly one — the "exactly once on the
-/// transition to 0" half of (I2), stated at the step level. The no-free
-/// teardown (`DropFinalNoFree`) reaches rc 0 the same way but does NOT
-/// release, so it leaves the counter untouched.
+/// (I2, step level) `DropFinal` is the only step that releases, and it bumps
+/// `releases` by exactly one.
 pub proof fn i2_dropfinal_releases_once(s: Slot)
     requires
         slot_inv(s),
@@ -339,21 +242,18 @@ pub proof fn i2_dropfinal_releases_once(s: Slot)
         step(s, Step::DropFinal).releases == s.releases + 1,
         step(s, Step::DropFinal).on_free_list,
         step(s, Step::DropFinal).rc == 0,
-        // The no-free teardown tears down to rc 0 without releasing.
         step(s, Step::DropFinalNoFree).rc == 0,
         step(s, Step::DropFinalNoFree).releases == s.releases,
         !step(s, Step::DropFinalNoFree).on_free_list,
-        // No other step touches the release counter or frees the frame.
         step(s, Step::CloneConditional).releases == s.releases,
         step(s, Step::DropNonFinal).releases == s.releases,
         step(s, Step::FromUnused).releases == s.releases,
 {
 }
 
-/// (I3) "Concurrent `Frame::clone` and `Frame::drop` cannot produce a
-/// use-after-free." In every reachable state a valid payload and free-list
-/// membership are mutually exclusive: no live `Frame::borrow` ever reads
-/// memory the allocator has reclaimed.
+/// (I3) In every reachable state a valid payload and free-list membership are
+/// mutually exclusive: no live `Frame::borrow` ever reads memory the allocator
+/// has reclaimed.
 pub proof fn i3_no_use_after_free(s0: Slot, trace: Seq<Step>)
     requires
         slot_init(s0),
@@ -363,41 +263,26 @@ pub proof fn i3_no_use_after_free(s0: Slot, trace: Seq<Step>)
     invariant_holds_on_every_trace(s0, trace);
 }
 
-// ---------------------------------------------------------------------------
-// The fix is load-bearing: the *broken* `fetch_add(1)` clone breaks (I3).
-// ---------------------------------------------------------------------------
-
-/// The Asterinas Fig. 9 bug, modelled: an *unconditional* `fetch_add(1)`
-/// clone that bumps the ref-count even from 0. This is what `from_in_use`
-/// would be if it used a plain `fetch_add` instead of the conditional
-/// `fetch_update`.
+/// The Asterinas Fig. 9 bug (USENIX ATC '25), modelled: an *unconditional*
+/// `fetch_add(1)` clone that bumps the ref-count even from 0 — what
+/// `from_in_use` would be without the conditional `fetch_update`.
 pub open spec fn broken_clone(s: Slot) -> Slot {
     Slot { rc: (s.rc + 1) as nat, ..s }
 }
 
-/// Witness that the conditional clone is *not* redundant. Take a slot
-/// mid-teardown — rc has hit 0, the payload has been dropped, and the frame
-/// is back on the free list (a perfectly reachable state: it is exactly
-/// `step(_, DropFinal)`'s output). The broken `fetch_add` clone revives it
-/// to rc 1 while it is still on the free list and its payload is dead,
-/// landing in a state that violates `slot_inv` (I1: rc > 0 yet on the free
-/// list with a dead payload). The fixed `CloneConditional` refuses the bump
-/// and stays invariant. This proves the soundness genuinely depends on the
-/// conditional increment.
+/// Witness that the conditional clone is *not* redundant, so this proof is not
+/// vacuous. From a teardown-complete slot (`step(_, DropFinal)`'s own output)
+/// the broken clone revives rc to 1 on a freed frame with a dead payload,
+/// violating (I1); the fixed `CloneConditional` refuses the bump.
 pub proof fn broken_clone_violates_invariant()
     ensures
-        // There is a reachable, invariant-satisfying state on which the
-        // broken clone produces an invariant-violating state...
         exists|s: Slot|
             #![trigger broken_clone(s)]
             slot_inv(s) && !slot_inv(broken_clone(s)),
-        // ...while the fixed clone keeps every such state invariant.
         forall|s: Slot| slot_inv(s) ==> #[trigger] slot_inv(step(s, Step::CloneConditional)),
 {
-    // A teardown-complete slot: rc 0, payload dropped, frame freed.
     let torn = Slot { typed: false, rc: 0, payload_live: false, on_free_list: true, releases: 1 };
     assert(slot_inv(torn));
-    // The broken clone revives rc to 1 while still on the free list.
     let revived = broken_clone(torn);
     assert(revived.rc == 1);
     assert(revived.on_free_list);

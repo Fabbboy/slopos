@@ -3,17 +3,12 @@
 use crate::gfx::{DamageRect, DrawBuffer};
 use crate::syscall::{DisplayInfo, ShmBuffer, window};
 
-// ── Render mode ─────────────────────────────────────────────────────────────
-
 #[derive(Copy, Clone, Eq, PartialEq)]
 pub enum RenderMode {
     Full,
     Partial,
 }
 
-// ── Output buffer ───────────────────────────────────────────────────────────
-
-/// Compositor output buffer backed by shared memory.
 pub struct CompositorOutput {
     buffer: ShmBuffer,
     pub width: u32,
@@ -43,27 +38,21 @@ impl CompositorOutput {
         })
     }
 
-    /// Get a [`DrawBuffer`] for this output.
     pub fn draw_buffer(&mut self) -> Option<DrawBuffer<'_>> {
         let slice = self.buffer.as_mut_slice();
         DrawBuffer::new(slice, self.width, self.height, self.pitch, self.bytes_pp)
     }
 
-    /// Present the output buffer to the framebuffer.
-    /// When `damage` is empty this falls back to full-buffer present.
     pub fn present(&self, damage: &[DamageRect]) -> bool {
         window::fb_flip_damage(self.buffer.fd() as u32, damage) == 0
     }
 }
-
-// ── Window bounds ───────────────────────────────────────────────────────────
 
 use crate::syscall::UserWindowInfo;
 use crate::theme::{SHADOW_OFFSET_Y, SHADOW_SPREAD, TITLE_BAR_HEIGHT};
 
 pub const WINDOW_STATE_MINIMIZED: u8 = 1;
 
-/// Bounds of a window snapshot (for damage tracking between frames).
 #[derive(Copy, Clone, Default)]
 pub struct WindowBounds {
     pub x: i32,
@@ -84,7 +73,6 @@ impl WindowBounds {
         }
     }
 
-    /// Get the full window rect including title bar.
     pub fn to_damage_rect(&self) -> DamageRect {
         if !self.visible {
             return DamageRect::invalid();
@@ -97,8 +85,6 @@ impl WindowBounds {
         }
     }
 }
-
-// ── Frame metrics ───────────────────────────────────────────────────────────
 
 const FRAME_METRICS_WINDOW: usize = 128;
 
@@ -115,16 +101,13 @@ pub struct FrameMetrics {
     /// answer in deltas.
     reported_frames: u64,
     reported_bytes: u64,
-    /// Whether [`take_window`](FrameMetrics::take_window) ever answers. The
-    /// report goes to the TTY, so it is opt-in; recording stays on either way,
-    /// keeping the accounting identical between a reporting run and a quiet one.
+    /// Gates only whether [`take_window`](FrameMetrics::take_window) answers;
+    /// recording stays on either way, so a quiet run accounts identically.
     reporting: bool,
     reported_at_ms: u64,
 }
 
 impl FrameMetrics {
-    /// `reporting` decides only whether [`take_window`](Self::take_window)
-    /// answers; every counter is kept either way.
     pub fn new(reporting: bool) -> Self {
         Self {
             reporting,
@@ -173,16 +156,9 @@ impl FrameMetrics {
     }
 
     /// Frames drawn and bytes copied since the previous report, once per
-    /// `interval_ms`.
-    ///
-    /// Deltas rather than totals: the question this answers is "what does a
-    /// steady desktop cost per frame", and cumulative counters are dominated
-    /// by the full redraws of the first second, which hides exactly the
-    /// regression this exists to catch.
-    ///
-    /// A frame that painted nothing is not counted at all — `record` is only
-    /// reached inside `needs_redraw()` — so `frames=0` over a window is the
-    /// signal that the compositor was genuinely idle.
+    /// `interval_ms`. Deltas rather than totals, because cumulative counters
+    /// are dominated by the full redraws of the first second. A frame that
+    /// painted nothing never reaches `record`, so `frames=0` means idle.
     pub fn take_window(&mut self, now_ms: u64, interval_ms: u64) -> Option<(u64, u64)> {
         if !self.reporting {
             return None;
@@ -201,8 +177,6 @@ impl FrameMetrics {
         Some(report)
     }
 }
-
-// ── Helpers ─────────────────────────────────────────────────────────────────
 
 pub fn estimate_present_bytes(
     _width: u32,

@@ -1,32 +1,20 @@
 #![feature(restricted_std)]
 
-//! End-to-end proof of the network management surface, from the syscalls up to
-//! what `/bin/ip` actually renders.
-//!
-//! Everything below runs against the live stack in QEMU, which is the point:
-//! the kernel-side stests cover `net_query`'s and `netmon`'s internals against
-//! synthetic state, but none of them can show that a real DHCP-configured
-//! interface enumerates correctly, that a blocked `poll` on a monitor fd comes
-//! back when the stack changes, or that the renderer turns any of it into text
-//! a person can read.
+//! End-to-end proof of the network management surface against the live stack
+//! in QEMU, from the syscalls up to what `/bin/ip` actually renders.
 //!
 //! The utest runner spawns test binaries with `TASK_FLAG_USER_MODE |
-//! TASK_FLAG_SYSTEM`, so **this caller holds `SYSTEM` and does not hold
-//! `NET_ADMIN`**. That asymmetry is what makes the containment case
-//! load-bearing: `SYSTEM` is the most privileged bit userland can be spawned
-//! with, and it still buys nothing here, because `require_net_admin` tests one
-//! specific flag that only the kernel's program-identity table confers, on
-//! `/bin/ip`. Every mutation below therefore goes *through* `/bin/ip` rather
-//! than being issued directly.
+//! TASK_FLAG_SYSTEM`, so this caller holds `SYSTEM` and does not hold
+//! `NET_ADMIN`: `require_net_admin` tests one flag that only the kernel's
+//! program-identity table confers, on `/bin/ip`. Every mutation below therefore
+//! goes *through* `/bin/ip` rather than being issued directly.
 //!
-//! Records are decoded here by explicit offset rather than through
-//! `apps::ip::query`, so a layout bug in the renderer's walker cannot make
-//! these assertions pass. The offsets are the ones `abi/src/net.rs` pins with
-//! `offset_of!` assertions.
+//! Records are decoded by explicit offset — the ones `abi/src/net.rs` pins with
+//! `offset_of!` — rather than through `apps::ip::query`, so a layout bug in the
+//! renderer's walker cannot make these assertions pass.
 
-// Pull in the `slopos-userland` lib crate so its `_start` ELF entry point is
-// linked into the binary (same requirement as the sibling test bins; without it
-// the linker emits entry 0x0 and `do_exec` rejects the ELF).
+// Links the lib crate's `_start` ELF entry point into the binary; without it
+// the linker emits entry 0x0 and `do_exec` rejects the ELF.
 use slopos_userland as _;
 
 use std::string::String;
@@ -48,10 +36,6 @@ use slopos_userland::syscall::process;
 const HDR: usize = 24;
 /// `size_of::<UserIface>()`.
 const IFACE_SIZE: usize = 104;
-
-// ---------------------------------------------------------------------------
-// Record decoding, by the offsets `abi/src/net.rs` asserts
-// ---------------------------------------------------------------------------
 
 fn u32_at(bytes: &[u8], at: usize) -> u32 {
     u32::from_le_bytes([bytes[at], bytes[at + 1], bytes[at + 2], bytes[at + 3]])
@@ -125,15 +109,10 @@ fn count_for(what: u32, ifindex: u32) -> Result<u32, SyscallError> {
     Ok(decode_hdr(&probe).total_count)
 }
 
-// ---------------------------------------------------------------------------
-// Spawning a network tool
-// ---------------------------------------------------------------------------
-
 /// Spawn `path` with `words` as its argv, sending stdout to `stdout_fd`.
 ///
-/// Deliberately spawned with nothing but `TASK_FLAG_USER_MODE`: `NET_ADMIN`
-/// comes from the kernel's program-identity table keyed on the path, not from
-/// anything this caller asks for or holds.
+/// Deliberately nothing but `TASK_FLAG_USER_MODE`: `NET_ADMIN` comes from the
+/// program-identity table keyed on the path, not from what this caller holds.
 fn spawn_prog(path: &[u8], words: &[&str], stdout_fd: i32) -> i32 {
     let owned: Vec<Vec<u8>> = words
         .iter()
@@ -164,7 +143,6 @@ fn spawn_prog(path: &[u8], words: &[&str], stdout_fd: i32) -> i32 {
     tid
 }
 
-/// Run `/bin/ip` to completion, returning its exit status.
 fn run_ip(words: &[&str]) -> i32 {
     let tid = spawn_prog(b"/bin/ip", words, 1);
     if tid <= 0 {
@@ -176,9 +154,8 @@ fn run_ip(words: &[&str]) -> i32 {
 /// Run `path` and collect what it wrote to stdout.
 ///
 /// The parent's write end is closed immediately after the spawn, or the read
-/// below would never see EOF — the child's copy is then the only one open. The
-/// pipe is drained *before* reaping, so output larger than one pipe buffer
-/// cannot deadlock the pair.
+/// never sees EOF. The pipe is drained *before* reaping, so output larger than
+/// one pipe buffer cannot deadlock the pair.
 fn capture_prog(path: &[u8], words: &[&str]) -> Option<String> {
     let (read_end, write_end) = fs::pipe().ok()?;
     let tid = spawn_prog(path, words, write_end.raw());
@@ -204,7 +181,6 @@ fn capture_prog(path: &[u8], words: &[&str]) -> Option<String> {
     Some(String::from_utf8_lossy(&out).into_owned())
 }
 
-/// Run `/bin/ip` and collect what it wrote to stdout.
 fn capture_ip(words: &[&str]) -> Option<String> {
     capture_prog(b"/bin/ip", words)
 }
@@ -217,12 +193,6 @@ fn dump(label: &str, text: &str) {
     eprintln!("ip_e2e_test: ---- end {label} ----");
 }
 
-// ---------------------------------------------------------------------------
-// Cases
-// ---------------------------------------------------------------------------
-
-/// The stack enumerates at least loopback and one Ethernet device, and the
-/// header describes the buffer it filled.
 fn iface_table_has_lo_and_ethernet() -> bool {
     let (hdr, rows) = match read_ifaces() {
         Ok(v) => v,
@@ -266,12 +236,9 @@ fn iface_table_has_lo_and_ethernet() -> bool {
     true
 }
 
-/// Loopback's operational state is `UNKNOWN`, not `UP`.
-///
-/// RFC 2863 has no operational state for a link layer that does not exist, and
-/// `ip link` on Linux prints `state UNKNOWN` for `lo` for exactly this reason.
-/// Reporting `UP` would be inventing a fact, and it is the kind of detail that
-/// regresses silently because it looks like a bug when it is right.
+/// RFC 2863 has no operational state for a link layer that does not exist, so
+/// `UNKNOWN` rather than `UP`; `ip link` on Linux prints `state UNKNOWN` for
+/// `lo` for the same reason.
 fn loopback_operstate_is_unknown() -> bool {
     let Ok((_, rows)) = read_ifaces() else {
         eprintln!("ip_e2e_test: net_query(IFACES) failed");
@@ -298,12 +265,10 @@ fn loopback_operstate_is_unknown() -> bool {
 /// The truncation contract: how much exists is read from the header, never from
 /// the return value.
 ///
-/// Three shapes, and the first is a documented-behaviour mismatch rather than a
-/// preference. `SYSCALL_NET_QUERY`'s doc comment says "a zero-length buffer is
-/// the sizing query", but `write_header` refuses anything shorter than the
-/// header with `EINVAL`. The smallest buffer that actually sizes is exactly one
-/// header. Both are pinned here so the discrepancy is visible rather than
-/// resolved by whichever side someone reads first.
+/// `SYSCALL_NET_QUERY`'s doc says "a zero-length buffer is the sizing query",
+/// but `write_header` refuses anything shorter than the header with `EINVAL`,
+/// so the smallest buffer that actually sizes is exactly one header. Both are
+/// pinned here so the discrepancy stays visible.
 fn truncation_is_reported_in_the_header() -> bool {
     let mut nothing: [u8; 0] = [];
     match net_query(NET_Q_IFACES, NET_IFINDEX_NONE, &mut nothing) {
@@ -321,8 +286,6 @@ fn truncation_is_reported_in_the_header() -> bool {
         }
     }
 
-    // A header-sized buffer: the real sizing query. Nothing is transferred and
-    // the total is reported.
     let mut probe = [0u8; HDR];
     let written = match net_query(NET_Q_IFACES, NET_IFINDEX_NONE, &mut probe) {
         Ok(n) => n,
@@ -349,9 +312,6 @@ fn truncation_is_reported_in_the_header() -> bool {
         return false;
     }
 
-    // A one-record buffer: one record fits, and the header still says how many
-    // there are. This is the assertion that would fail if a caller were meant
-    // to infer completeness from the return value.
     let mut one = std::vec![0u8; HDR + IFACE_SIZE];
     let written = match net_query(NET_Q_IFACES, NET_IFINDEX_NONE, &mut one) {
         Ok(n) => n,
@@ -385,12 +345,8 @@ fn truncation_is_reported_in_the_header() -> bool {
     true
 }
 
-/// Reading the stack needs no privilege at all.
-///
-/// The read/write split is the whole shape of this ABI: anyone may ask what the
-/// network looks like and subscribe to changes, and only `/bin/ip` may change
-/// it. A query that quietly required a capability would push every status
-/// indicator into asking for one.
+/// The read/write split of this ABI: anyone may ask what the network looks like
+/// and subscribe to changes; only `/bin/ip` may change it.
 fn queries_and_monitor_are_unprivileged() -> bool {
     let mut probe = [0u8; HDR];
     if let Err(err) = net_query(NET_Q_IFACES, NET_IFINDEX_NONE, &mut probe) {
@@ -420,14 +376,9 @@ fn queries_and_monitor_are_unprivileged() -> bool {
     true
 }
 
-/// A mutating `net_iface_ctl` issued directly from here is refused, *and the
-/// refusal is not something this caller can talk its way out of*.
-///
-/// This task holds `TASK_FLAG_SYSTEM` — the most privileged bit a userland task
-/// can be spawned with — and it is still `EPERM`, because `require_net_admin`
-/// tests `TASK_FLAG_NET_ADMIN` specifically and nothing confers that except the
-/// program-identity table, on `/bin/ip`. The control is the case below, which
-/// performs the same operation through `/bin/ip` and has it succeed.
+/// A mutating `net_iface_ctl` issued directly from here is `EPERM` even holding
+/// `TASK_FLAG_SYSTEM`. The control is [`monitor_fd_wakes_a_blocked_poll`],
+/// which performs the same operation through `/bin/ip` and has it succeed.
 fn direct_mutation_is_eperm_despite_system() -> bool {
     let Ok((_, rows)) = read_ifaces() else {
         eprintln!("ip_e2e_test: net_query(IFACES) failed");

@@ -1,17 +1,10 @@
 //! The system bar's popover: compositor-owned chrome anchored to a status item.
 //!
-//! Drawn by the compositor rather than by a client, for three reasons. It
-//! renders state the compositor already holds, so a surface would add a wire
-//! round trip to show what is in the next struct along. Light-dismiss means it
-//! holds a pointer grab until it closes — every event reaches it, including
-//! ones over client content — and that grab has to live here whichever process
-//! draws the pixels. And `ProtocolBridge::new()` can return `None` while the
-//! compositor still renders, so a system menu that needed a client alive would
-//! be unavailable exactly when someone reached for it.
-//!
-//! Placement is [`slopos_chrome_core::positioner`], not arithmetic here: it is
-//! the `xdg_positioner` parameter set, host-tested, and reusable if a protocol
-//! popup role is ever wired.
+//! Drawn by the compositor rather than by a client: it renders state the
+//! compositor already holds, its light-dismiss pointer grab has to live here
+//! whichever process draws the pixels, and it must stay available when
+//! `ProtocolBridge::new()` returns `None`. Placement comes from
+//! [`slopos_chrome_core::positioner`], not arithmetic here.
 
 use core::fmt::Write;
 use std::string::String;
@@ -33,23 +26,18 @@ use crate::syscall::process;
 use crate::theme::*;
 use std::time::Instant;
 
-/// Width of the network panel.
-///
-/// 320 px is 80 base units. The widest line the model can produce is a detail
-/// row — `ether \u{B7} 255.255.255.255/24`, 26 cells — which fits the 280 px
-/// budget from the second rail with room to spare; anything longer is truncated
-/// by [`fit`] rather than allowed to run under the panel edge.
+/// Width of the network panel. The widest line the model can produce — a detail
+/// row of 26 cells — fits the 280 px budget from the second rail; anything
+/// longer is truncated by [`fit`] rather than run under the panel edge.
 const PANEL_WIDTH: i32 = 320;
 
 /// The base spacing unit. Every gap in the panel is `U * k` for `k` in 1..=4.
 ///
 /// Four, because every fixed dimension the panel inherits is already a multiple
-/// of it — `PANEL_WIDTH` 320, `SWITCH_W` 40, `SWITCH_H` 20, `DOT_D` 8,
-/// `SHELF_PILL_RADIUS` 12, `SYSTEM_BAR_HEIGHT` 24 — and because the panel needs
-/// a group gap exactly three times its row gap, which 12:4 gives and an 8-only
-/// scale cannot. `k >= 5` is excluded: 16 to 20 is +25%, at the
-/// just-noticeable-difference floor, so a 20 beside a 16 reads as a mistake
-/// rather than as a decision. Every kept step is at least +33%.
+/// of it, and because the panel needs a group gap exactly three times its row
+/// gap, which 12:4 gives and an 8-only scale cannot. `k >= 5` is excluded: 16 to
+/// 20 is +25%, at the just-noticeable-difference floor, so a 20 beside a 16
+/// reads as a mistake rather than a decision.
 const U: i32 = 4;
 const SPACE_1: i32 = U;
 const SPACE_2: i32 = 2 * U;
@@ -62,17 +50,15 @@ const PANEL_PAD: i32 = SPACE_3;
 /// Diameter of the per-interface status dot. Ink, not a gap.
 const DOT_D: i32 = SPACE_2;
 
-/// The step from the panel's own rail to the interface rail.
-///
-/// One indivisible rail step, not `DOT_D + something`: the dot happens to live
-/// in the first half of it, and describing it as a sum would put a number in
-/// the source that no gap on screen measures.
+/// The step from the panel's own rail to the interface rail. One indivisible
+/// rail step, not `DOT_D + something`: the dot merely happens to live in the
+/// first half of it.
 const DOT_GUTTER: i32 = SPACE_4;
 
 /// The panel's one hairline weight, for its edge and for the header rule.
 const RULE_H: i32 = 1;
 
-/// Corner radius: the shelf's pill, named rather than re-typed.
+/// Corner radius: the shelf's pill.
 const PANEL_RADIUS: i32 = SHELF_PILL_RADIUS;
 
 /// Gap between the bar's border row and the top of the panel.

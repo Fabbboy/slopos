@@ -24,8 +24,6 @@ fn fork_spinning_child() -> i32 {
     pid
 }
 
-/// SIGINT delivered on IRQ exit kills a pure-spin child; `waitpid` reaps it
-/// with the default-terminate exit code.
 fn test_spin_child_killed_by_sigint() -> bool {
     let pid = fork_spinning_child();
     if pid <= 0 {

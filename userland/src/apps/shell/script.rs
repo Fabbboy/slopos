@@ -1,13 +1,9 @@
 //! Non-interactive input: reading commands from a descriptor.
 //!
-//! A shell whose stdin is a pipe or a file is running a *script*, and the
-//! descriptor it reads that script from is the same one it hands to every
-//! command it runs.  `{ read x; cat; } < file` and `cmd | shell` both depend on
-//! the shell leaving behind exactly what it did not execute, so the framing
-//! lives in [`slopos_shell_core::ScriptReader`], which reads a byte at a time
-//! and is therefore structurally incapable of consuming past the line it
-//! returns.  This module is the thin descriptor-backed source plus the
-//! read-parse-execute loop.
+//! The script descriptor is the same one handed to every command run, so
+//! `{ read x; cat; } < file` depends on the shell consuming nothing past the
+//! line it executes; the framing lives in [`slopos_shell_core::ScriptReader`],
+//! which reads a byte at a time.
 
 use slopos_shell_core::{ByteSource, Line, ScriptReader, SourceError};
 
@@ -19,12 +15,12 @@ use super::buffers::ParsedTokens;
 use super::display::{shell_error, shell_error_named};
 use super::{exec, parser};
 
-/// Longest command line a script may contain.  Beyond this the line is
-/// diagnosed and skipped rather than truncated and run.
+/// Longest command line a script may contain; a longer one is diagnosed and
+/// skipped rather than truncated and run.
 pub const SCRIPT_LINE_MAX: usize = 8192;
 
-/// Expansion headroom: `$VAR` substitution can grow a line well past its
-/// source length.
+/// Expansion headroom: `$VAR` substitution can grow a line past its source
+/// length.
 const SCRIPT_EXPAND_MAX: usize = SCRIPT_LINE_MAX * 2;
 
 /// A [`ByteSource`] over a file descriptor.
@@ -95,8 +91,8 @@ pub fn run_script_file(path: &[u8]) -> i32 {
     }
 }
 
-/// Read commands from `src` until end of input.  Returns the exit status of
-/// the last command run, which is the script's own exit status.
+/// Read commands from `src` until end of input; the last command's status is
+/// the script's own exit status.
 pub fn run_script<S: ByteSource>(src: &mut S) -> i32 {
     let mut reader = ScriptReader::new();
     let mut line = vec![0u8; SCRIPT_LINE_MAX];
@@ -135,8 +131,8 @@ pub fn run_script<S: ByteSource>(src: &mut S) -> i32 {
     }
 }
 
-/// `sh: line N: MSG` — the shape POSIX shells use for a defect in the script
-/// itself rather than in a command it ran.
+/// `sh: line N: MSG` — the POSIX shape for a defect in the script itself
+/// rather than in a command it ran.
 fn report_line_error(lineno: u32, msg: &[u8]) {
     let mut name = [0u8; 24];
     let mut len = 0usize;

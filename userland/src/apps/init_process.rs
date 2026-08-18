@@ -30,9 +30,8 @@ fn spawn_service(name: &str) -> i32 {
     spawn_service_inheriting(name, &[])
 }
 
-/// Spawn a registry service. The child inherits the caller's stdio plus each
-/// fd in `extra_fds` (e.g. the readiness notifier) via the fd-action
-/// allow-list. Up to two extra fds are honored.
+/// The child inherits the caller's stdio plus each fd in `extra_fds` via the
+/// fd-action allow-list. At most two extra fds are honored.
 fn spawn_service_inheriting(name: &str, extra_fds: &[i32]) -> i32 {
     let Some(spec) = program_registry::resolve_program(name) else {
         eprintln!("init: failed to spawn service");
@@ -67,9 +66,8 @@ fn spawn_service_inheriting(name: &str, extra_fds: &[i32]) -> i32 {
 pub fn init_user_main() {
     upgrade_console_font();
 
-    // Re-apply the persisted keyboard-layout choice (`keymap <name>` writes
-    // /etc/keymap) before anything interactive starts. Silent no-op when the
-    // file is missing or invalid — the built-in US default stays active.
+    // Must precede anything interactive; a missing or invalid /etc/keymap
+    // leaves the built-in US default active.
     crate::keymap::apply_persisted_layout();
 
     let mut info = UserSysInfo::default();
@@ -78,15 +76,8 @@ pub fn init_user_main() {
     let tests_enabled = info_ok && (info.boot_flags & BOOT_FLAG_TESTS_ENABLED) != 0;
 
     if tests_enabled {
-        // Drive the kernel-side userland-test phase from this task's
-        // context. The syscall handler walks the `.test_registry`,
-        // spawns each utest binary, blocks on its exit via
-        // `task_wait_for`, drains its `SYSCALL_TEST_REPORT` ring, emits
-        // KTAP, merges with the kernel-phase summary, and triggers the
-        // QEMU shutdown. On success it returns; we then exit so the
-        // boot pipeline doesn't keep the system running waiting for
-        // input. On failure we fall through to the normal init flow so
-        // the user can still reach a shell to investigate.
+        // Exiting on success stops the boot pipeline waiting for input;
+        // failure falls through to the normal flow so a shell is reachable.
         let rc = sys_core::run_userland_tests();
         if rc == 0 {
             sys_core::exit_with_code(0);
@@ -101,21 +92,17 @@ pub fn init_user_main() {
     }
 
     let gate = ReadinessGate::create();
-    // The compositor must inherit the readiness notifier (fd 3) so it can
-    // signal init once it is up; without it, init's gate read would EOF
-    // immediately and race the terminal ahead of a ready compositor. Only
-    // clone the notifier when the gate was actually set up (fd 3 exists).
+    // Without the inherited notifier (fd 3), init's gate read EOFs at once and
+    // races the terminal ahead of a ready compositor. Clone it only when the
+    // gate was actually set up.
     let compositor_tid = if gate.is_some() {
         spawn_service_inheriting("compositor", &[crate::readiness::NOTIFIER_FD])
     } else {
         spawn_service("compositor")
     };
 
-    // Root supervision loop on the slopfut runtime: await the compositor's
-    // readiness byte, spawn the shell, then await the compositor's exit via
-    // a pidfd (`Child::wait`) instead
-    // of a blocking `waitpid`. A small ring suffices — peak in-flight is one
-    // gate read followed by one pidfd poll.
+    // Peak in-flight is one gate read followed by one pidfd poll, so a small
+    // ring suffices.
     match Ring::setup(8) {
         Ok(ring) => {
             slopfut::block_on(ring, async {
@@ -133,8 +120,6 @@ pub fn init_user_main() {
             });
         }
         Err(_) => {
-            // Ring unavailable: fall back to the synchronous boot path so
-            // init never silently stalls.
             if let Some(gate) = gate {
                 gate.wait();
             }
@@ -145,10 +130,8 @@ pub fn init_user_main() {
         }
     }
 
-    // Init outlives every service it starts, so nothing else will ever reap
-    // them: a supervisor that only yields accumulates one unreaped child per
-    // terminal the user closes. Reaping here is what keeps the registry flat
-    // across an interactive session.
+    // Init outlives every service it starts, so nothing else ever reaps them:
+    // yielding alone accumulates one zombie per terminal the user closes.
     loop {
         process::reap_exited_children();
         sys_core::yield_now();

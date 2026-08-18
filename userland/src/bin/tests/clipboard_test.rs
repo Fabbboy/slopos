@@ -1,12 +1,6 @@
 #![feature(restricted_std)]
 
 //! fd-based clipboard: wire format + memfd transport.
-//!
-//! Regression target: the clipboard used to round-trip through a fixed
-//! `[u8; 4096]` inline array, silently truncating large selections. It now
-//! carries only a `u32` length on the wire with the bytes in a memfd passed
-//! via SCM_RIGHTS. These tests pin the new wire shape (tag + u32, no inline
-//! array) and prove a >4 KiB payload survives the memfd transport.
 
 use slopos_userland as _;
 
@@ -16,7 +10,6 @@ use slopos_protocol::{Decode, Encode, FdFifo};
 use slopos_userland::syscall::memory;
 use slopos_userland::syscall::{CachedShmMapping, ShmBuffer, fs};
 
-/// ClipboardCopy encodes to exactly `[tag=13][len:u32 LE]` — no 4 KiB array.
 fn test_clipboard_copy_wire_is_tag_plus_len() -> bool {
     let req = Request::ClipboardCopy {
         len: 0x00AB_CDEF,
@@ -30,7 +23,6 @@ fn test_clipboard_copy_wire_is_tag_plus_len() -> bool {
     n == 5 && buf[0] == 13 && u32::from_le_bytes([buf[1], buf[2], buf[3], buf[4]]) == 0x00AB_CDEF
 }
 
-/// ClipboardRead encodes to `[tag=17][len:u32 LE]`.
 fn test_clipboard_read_wire_is_tag_plus_len() -> bool {
     let req = Request::ClipboardRead {
         len: 1_048_576,
@@ -44,7 +36,6 @@ fn test_clipboard_read_wire_is_tag_plus_len() -> bool {
     n == 5 && buf[0] == 17 && u32::from_le_bytes([buf[1], buf[2], buf[3], buf[4]]) == 1_048_576
 }
 
-/// PasteReady / PasteResult events encode to `[tag][len:u32 LE]`.
 fn test_paste_events_wire_is_tag_plus_len() -> bool {
     let mut buf = [0u8; 64];
     let ready = Event::PasteReady { len: 5000 };
@@ -63,7 +54,6 @@ fn test_paste_events_wire_is_tag_plus_len() -> bool {
     n == 5 && buf[0] == 15 && u32::from_le_bytes([buf[1], buf[2], buf[3], buf[4]]) == 5000
 }
 
-/// Decode with an empty fd FIFO yields `buffer_fd: None`; the length survives.
 fn test_clipboard_copy_decode_without_fd() -> bool {
     let req = Request::ClipboardCopy {
         len: 777_777,
@@ -83,10 +73,8 @@ fn test_clipboard_copy_decode_without_fd() -> bool {
     }
 }
 
-/// Decode pulls the SCM_RIGHTS fd out of the FIFO into `buffer_fd`.
 fn test_clipboard_copy_decode_with_fd() -> bool {
-    // A standalone memfd to prime the FIFO; the decoded OwnedFd owns and
-    // closes it (so we must NOT also close it here).
+    // The decoded OwnedFd owns and closes this fd; the success path must not.
     let fd = memory::memfd_create(0);
     if fd < 0 {
         return false;
@@ -110,7 +98,6 @@ fn test_clipboard_copy_decode_with_fd() -> bool {
     match Request::decode(&buf[..n], &mut fifo) {
         Ok((Request::ClipboardCopy { len, buffer_fd }, _)) => {
             let ok = len == 42 && buffer_fd.as_ref().map(|f| f.raw()) == Some(fd);
-            // `buffer_fd` (OwnedFd) drops here, closing `fd`.
             ok
         }
         _ => {
@@ -120,9 +107,6 @@ fn test_clipboard_copy_decode_with_fd() -> bool {
     }
 }
 
-/// A >4 KiB payload survives the memfd transport: fill a 100 KiB source memfd,
-/// map a duplicate of its fd read-only (as the compositor does on copy), and
-/// confirm every byte matches — the old 4096 cap is gone end to end.
 fn test_memfd_transport_above_4kib() -> bool {
     const SIZE: usize = 100 * 1024;
     let mut src = match ShmBuffer::create(SIZE) {
@@ -132,8 +116,7 @@ fn test_memfd_transport_above_4kib() -> bool {
     for (i, b) in src.as_mut_slice().iter_mut().enumerate() {
         *b = (i % 251) as u8;
     }
-    // Dup the fd so the read-only mapping (which closes its fd on drop) does
-    // not collide with the ShmBuffer's own fd.
+    // The read-only mapping closes its fd on drop, so it cannot share ShmBuffer's.
     let dup = match fs::dup(src.fd()) {
         Ok(f) => f.into_raw(),
         Err(_) => return false,

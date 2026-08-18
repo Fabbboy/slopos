@@ -91,17 +91,10 @@ pub fn current_kernel_thread_spawner() -> Option<&'static dyn KernelThreadSpawne
     Some(*slot)
 }
 
-/// Spawn a new kernel-mode task. Free-function facade over the
-/// registered [`KernelThreadSpawner`] so call sites don't have to
-/// know about the registry indirection.
+/// Spawn a new kernel-mode task through the registered
+/// [`KernelThreadSpawner`].
 ///
-/// `name` is a `'static` string baked into the binary — the scheduler
-/// keeps a fixed-length copy on the task struct. `entry` is a plain
-/// `fn()` (no closure captures, no `*mut c_void` arg); see
-/// [`KernelThreadEntry`] for rationale.
-///
-/// `priority` is the same 0–255 priority the scheduler accepts on its
-/// internal API.
+/// The scheduler keeps a fixed-length copy of `name` on the task struct.
 pub fn spawn(
     name: &'static str,
     entry: KernelThreadEntry,
@@ -113,8 +106,7 @@ pub fn spawn(
     spawner.spawn(name, entry, priority)
 }
 
-/// Test-only reset hook. Allows host integration-test binaries to
-/// re-install a fresh spawner between test binary invocations.
+/// Test-only hook letting a host test binary re-install a fresh spawner.
 #[cfg(any(test, feature = "test-helpers"))]
 pub fn reset_for_test() {
     SPAWNER

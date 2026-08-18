@@ -52,7 +52,6 @@ pub struct BuiltinEntry {
 use BuiltinCategory::*;
 
 pub static BUILTINS: &[BuiltinEntry] = &[
-    // ── System ──────────────────────────────────────────────────────────────
     BuiltinEntry {
         name: "help",
         desc: "Show this help",
@@ -157,7 +156,6 @@ pub static BUILTINS: &[BuiltinEntry] = &[
         category: System,
         func: system::cmd_whoami,
     },
-    // ── Filesystem ──────────────────────────────────────────────────────────
     BuiltinEntry {
         name: "ls",
         desc: "List directory contents",
@@ -294,7 +292,6 @@ pub static BUILTINS: &[BuiltinEntry] = &[
         category: Filesystem,
         func: fs::cmd_tee,
     },
-    // ── Process Control ─────────────────────────────────────────────────────
     BuiltinEntry {
         name: "jobs",
         desc: "List background jobs",
@@ -359,7 +356,6 @@ pub static BUILTINS: &[BuiltinEntry] = &[
         category: Process,
         func: process::cmd_exit,
     },
-    // ── Environment ─────────────────────────────────────────────────────────
     BuiltinEntry {
         name: "export",
         desc: "Set environment variable",
@@ -392,7 +388,6 @@ pub static BUILTINS: &[BuiltinEntry] = &[
         category: Environment,
         func: env::cmd_set,
     },
-    // ── Utility ─────────────────────────────────────────────────────────────
     BuiltinEntry {
         name: "sleep",
         desc: "Sleep for N milliseconds",
@@ -457,7 +452,6 @@ pub static BUILTINS: &[BuiltinEntry] = &[
         category: Utility,
         func: utils::cmd_wl,
     },
-    // ── Network ────────────────────────────────────────────────────────────
     BuiltinEntry {
         name: "resolve",
         desc: "Resolve hostname to IP",

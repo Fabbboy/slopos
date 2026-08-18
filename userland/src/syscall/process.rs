@@ -8,10 +8,9 @@ use slopos_abi::task::TaskPriority;
 
 /// Signal restorer trampoline — called when a signal handler returns.
 ///
-/// The restorer address is pushed as a separate stack word before the
-/// `SignalFrame`.  After the handler's `ret` pops the restorer, RSP points
-/// directly at the `SignalFrame`, so `rt_sigreturn` (syscall 105) reads
-/// the frame from the correct address — no stack adjustment needed.
+/// The restorer address sits in its own stack word ahead of the `SignalFrame`,
+/// so once the handler's `ret` pops it RSP already points at the frame and
+/// `rt_sigreturn` needs no stack adjustment.
 #[unsafe(naked)]
 extern "C" fn signal_restorer() {
     core::arch::naked_asm!("mov eax, 105", "syscall", "ud2");
@@ -38,7 +37,7 @@ pub fn getcwd(buf: &mut [u8]) -> i64 {
     unsafe { syscall2(SYSCALL_GETCWD, buf.as_mut_ptr() as u64, buf.len() as u64) as i64 }
 }
 
-/// Build a `CloneFd` action: share the caller's `src` fd into the child's `target`.
+/// Shares the caller's `src` fd into the child's `target`.
 #[inline(always)]
 pub fn clone_fd(src: i32, target: i32) -> SpawnFdAction {
     SpawnFdAction {
@@ -68,7 +67,6 @@ pub fn spawn_path_with_actions(
     spawn_path_with_env(path, argv, &[], priority, flags, actions, sigdefault_mask)
 }
 
-/// As [`spawn_path_with_actions`], but also handing the child an environment.
 #[inline(always)]
 #[allow(clippy::too_many_arguments)]
 pub fn spawn_path_with_env(
@@ -107,22 +105,19 @@ pub fn spawn_path_with_env(
     }
 }
 
-/// Spawn `path`, cloning the caller's stdio (fd 0/1/2) into the child. This
-/// preserves console inheritance for service/app spawns that used to rely on
-/// whole-table clone.
+/// Clones the caller's stdio (fd 0/1/2) into the child, which is what
+/// preserves console inheritance for service and app spawns.
 #[inline(always)]
 pub fn spawn_path(path: impl AsRef<[u8]>) -> i32 {
     spawn_path_with_attrs(path, TaskPriority::Normal, 0)
 }
 
-/// Spawn `path` at `priority`/`flags`, cloning the caller's stdio into the child.
 #[inline(always)]
 pub fn spawn_path_with_attrs(path: impl AsRef<[u8]>, priority: TaskPriority, flags: u16) -> i32 {
     let stdio = [clone_fd(0, 0), clone_fd(1, 1), clone_fd(2, 2)];
     spawn_path_with_actions(path.as_ref(), &[], priority, flags, &stdio, 0)
 }
 
-/// Reset the given signals to their default disposition (`SIG_DFL`) in one call.
 #[inline(always)]
 pub fn sigdefault(mask: SigSet) -> i64 {
     unsafe { syscall1(SYSCALL_SIGDEFAULT, mask) as i64 }
@@ -133,8 +128,8 @@ pub fn waitpid(task_id: u32) -> i32 {
     unsafe { syscall2(SYSCALL_WAITPID, task_id as u64, 0) as i32 }
 }
 
-/// Allocate a PTY pair. Returns the master as an owned fd plus the slave
-/// pts number (open the slave via `/dev/pts/N` or `TIOCGPTPEER`).
+/// Returns the master as an owned fd plus the slave pts number; open the
+/// slave via `/dev/pts/N` or `TIOCGPTPEER`.
 #[inline(always)]
 pub fn openpty() -> Result<(super::OwnedFd, u32), i64> {
     let mut master_fd: u32 = 0;
@@ -167,18 +162,14 @@ pub fn waitpid_nohang(task_id: u32) -> Option<i32> {
     }
 }
 
-/// Reap one already-exited child, whichever it is, without blocking.
-///
-/// `Some(status)` reaped one; `None` means no child has exited (or the caller
-/// has none). A supervisor that spawns and forgets calls this on a timer to
-/// stay at zero zombies without tracking ids.
+/// Reap one already-exited child, whichever it is, without blocking. `None`
+/// covers both no child having exited and the caller having none.
 #[inline(always)]
 pub fn wait_any_nohang() -> Option<i32> {
     let rc = unsafe { syscall2(SYSCALL_WAITPID, u32::MAX as u64, 1) as i64 };
     if rc < 0 { None } else { Some(rc as i32) }
 }
 
-/// Reap every child that has already exited. Returns how many were reaped.
 #[inline(always)]
 pub fn reap_exited_children() -> usize {
     let mut reaped = 0usize;
@@ -257,9 +248,8 @@ pub fn ignore_signal(signum: u8) -> i32 {
     }
 }
 
-/// Restore a signal's default disposition (`SIG_DFL`).  Forked children
-/// call this before running a command so terminal-generated signals act
-/// on the job rather than inheriting the shell's interactive handlers.
+/// Forked children call this before running a command so terminal-generated
+/// signals act on the job rather than on the shell's interactive handlers.
 #[inline(always)]
 pub fn default_signal(signum: u8) -> i32 {
     let action = UserSigaction {
@@ -279,12 +269,8 @@ pub fn default_signal(signum: u8) -> i32 {
     }
 }
 
-/// Install a custom signal handler with proper restorer trampoline.
-///
-/// The handler receives the signal number as its argument.  When it returns,
-/// the restorer automatically invokes `rt_sigreturn` to resume the
-/// interrupted context.  `SA_RESTART` is deliberately omitted so that
-/// blocking syscalls (e.g. `poll`) return early after the handler runs.
+/// `SA_RESTART` is deliberately omitted, so blocking syscalls (e.g. `poll`)
+/// return early once the handler has run.
 #[inline(always)]
 pub fn set_signal_handler(signum: u8, handler: extern "C" fn(i32)) -> i32 {
     let action = UserSigaction {

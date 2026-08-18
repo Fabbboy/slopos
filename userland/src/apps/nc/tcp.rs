@@ -7,7 +7,6 @@ use slopos_abi::net::{AF_INET, SOCK_STREAM, SockAddrIn};
 
 use super::{NcConfig, verbose_addr, verbose_msg};
 
-/// Build a kernel `SockAddrIn` from a high-level `SocketAddrV4`.
 pub(super) fn to_sockaddr(addr: SocketAddrV4) -> SockAddrIn {
     SockAddrIn {
         family: AF_INET,
@@ -17,22 +16,16 @@ pub(super) fn to_sockaddr(addr: SocketAddrV4) -> SockAddrIn {
     }
 }
 
-/// Extract IP octets and host-order port from a kernel `SockAddrIn`.
 fn from_sockaddr(sa: &SockAddrIn) -> ([u8; 4], u16) {
     (sa.addr, u16::from_be(sa.port))
 }
 
-/// Owned raw socket fd.  Closes via `net::shutdown` + drop of the underlying
-/// `OwnedFd` returned by `net::socket()`.  We store the raw i32 alongside the
-/// owning handle so that poll can borrow it without moving the fd.
 pub(super) struct TcpConn {
     fd: crate::syscall::OwnedFd,
 }
 
 impl TcpConn {
-    /// Wrap an already-connected socket fd (used by the UDP-client path,
-    /// which `connect()`s a datagram socket and then drives it through the
-    /// same async [`Session`](super::ring_io) as TCP).
+    /// Wraps an already-connected socket fd; the UDP-client path uses this too.
     pub(super) fn from_fd(fd: crate::syscall::OwnedFd) -> Self {
         Self { fd }
     }
@@ -66,7 +59,6 @@ pub(super) fn tcp_client(config: &NcConfig) -> u8 {
         config.remote_port,
     );
 
-    // Create socket.
     let fd = match net::socket(AF_INET, SOCK_STREAM, 0) {
         Ok(f) => f,
         Err(_) => {
@@ -75,7 +67,6 @@ pub(super) fn tcp_client(config: &NcConfig) -> u8 {
         }
     };
 
-    // Optional local-port bind before connect.
     if config.local_port != 0 {
         if net::bind_any(fd.raw(), config.local_port).is_err() {
             eprintln!("nc: bind failed (port in use?)");
@@ -106,11 +97,7 @@ pub(super) fn tcp_client(config: &NcConfig) -> u8 {
     run_conn_loop(config, &conn)
 }
 
-/// Established-connection I/O loop for the client path — Ring-driven.
-/// Delegates to the SlopRing [`Session`](super::ring_io) so stdin +
-/// socket are multiplexed through `OP_READ`/`OP_WRITE` and harvested via a
-/// blocking `ring_enter`. The `connect` that produced `conn` stayed a
-/// regular syscall (SLOPRING § 12).
+/// The `connect` that produced `conn` stayed a regular syscall (SLOPRING § 12).
 fn run_conn_loop(config: &NcConfig, conn: &TcpConn) -> u8 {
     super::ring_io::Session::new(config, conn, false)
         .run()
@@ -197,10 +184,8 @@ pub(super) fn tcp_listen(config: &NcConfig) -> u8 {
     }
 }
 
-/// I/O loop for a single accepted connection in listen mode — Ring-driven.
-/// Returns `Some(code)` to exit immediately, or `None` to allow the listen
-/// loop to keep accepting (`keep_listen`). The `accept` that produced
-/// `client` stayed a regular syscall (SLOPRING § 12).
+/// Returns `Some(code)` to exit immediately, `None` to keep accepting.
+/// The `accept` that produced `client` stayed a regular syscall (SLOPRING § 12).
 fn run_listen_session(config: &NcConfig, client: &TcpConn) -> Option<u8> {
     super::ring_io::Session::new(config, client, true).run()
 }

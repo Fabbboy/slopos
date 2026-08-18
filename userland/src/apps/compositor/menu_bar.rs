@@ -148,9 +148,6 @@ impl SystemBar {
     }
 
     /// The screen rect a status item occupies, for anchoring a popover to it.
-    ///
-    /// Laid out through the same path as `draw` and `hit_test`, so a popover
-    /// cannot be anchored to a rectangle the item is not drawn in.
     pub fn item_rect(&self, screen_width: u32, kind: StatusKind) -> Option<DamageRect> {
         let layout = self.layout(screen_width, NO_CURSOR, NO_CURSOR);
         layout.slot_for(kind).map(|slot| DamageRect {
@@ -162,8 +159,7 @@ impl SystemBar {
     }
 
     /// The hover regions to register for this frame: one `(id, rect, hovered)`
-    /// per placed item, from the same layout [`Self::draw`] uses. Returns how
-    /// many were written.
+    /// per placed item.
     pub fn hover_regions(
         &self,
         screen_width: u32,
@@ -189,15 +185,10 @@ impl SystemBar {
 
     /// The strip the system icon and the app-name text occupy.
     ///
-    /// The bar's name changes with keyboard focus, and nothing else in the
-    /// frame damages `y < 24` when focus moves — the title-bar damage covers
-    /// the windows, not the bar — so without this the name stays stale until
-    /// something unrelated repaints the strip.
-    ///
-    /// Bounded by the name's own width cap as well as by the leftmost status
-    /// item: the text is truncated at [`SYSTEM_BAR_MAX_APP_NAME_WIDTH`], so
-    /// repainting all the way out to `app_name_limit` would be most of a
-    /// 1920 px bar to redraw a 200 px label.
+    /// Nothing else in the frame damages `y < 24` when focus moves, so without
+    /// this the name stays stale.  Bounded by the leftmost status item and by
+    /// [`SYSTEM_BAR_MAX_APP_NAME_WIDTH`], which the text is truncated at
+    /// anyway.
     pub fn app_name_damage(&self, screen_width: u32) -> DamageRect {
         let layout = self.layout(screen_width, NO_CURSOR, NO_CURSOR);
         let text_x = SYSTEM_BAR_PADDING_X + SYSTEM_BAR_ICON_SIZE + SYSTEM_BAR_ICON_GAP;
@@ -216,13 +207,10 @@ impl SystemBar {
     /// previous call. Returns how many rects were written to `out`, which must
     /// hold at least [`MAX_BAR_DAMAGE`].
     ///
-    /// Three tiers, cheapest last:
-    ///
-    /// - **Layout change** — an item appeared, vanished, changed width, or the
-    ///   screen resized. Everything left of the changed item moved, so one rect
-    ///   spans from the leftmost of (previous, current) to the right edge.
-    /// - **Content change** — that item's slot alone.
-    /// - **Nothing** — no rects.
+    /// A layout change — an item appeared, vanished, changed width, or the
+    /// screen resized — moves everything left of it, so it emits one rect from
+    /// the leftmost of (previous, current) to the right edge.  A content change
+    /// emits that item's slot alone.
     pub fn take_damage(
         &mut self,
         screen_width: u32,
@@ -282,10 +270,6 @@ impl SystemBar {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Private helpers
-// ---------------------------------------------------------------------------
-
 fn push(out: &mut [DamageRect], count: &mut usize, rect: DamageRect) {
     if *count < out.len() {
         out[*count] = rect;
@@ -293,8 +277,6 @@ fn push(out: &mut [DamageRect], count: &mut usize, rect: DamageRect) {
     }
 }
 
-/// Draw the active app name using the TrueType font, truncating with "..."
-/// if it exceeds `max_w`.
 fn draw_name_ttf(
     buf: &mut DrawBuffer,
     font: &mut FontRenderer,
@@ -318,7 +300,6 @@ fn draw_name_ttf(
         return;
     }
 
-    // Find the longest prefix that fits together with "...".
     let (ell_w, _) = font.measure_text(ELLIPSIS, BAR_FONT_SIZE);
     let budget = max_w - ell_w;
     let prefix_len = find_prefix_len(font, name, budget);
@@ -345,8 +326,6 @@ fn draw_name_ttf(
     );
 }
 
-/// Find the longest byte-aligned prefix of `name` whose rendered width
-/// (at `BAR_FONT_SIZE`) does not exceed `budget` pixels.
 fn find_prefix_len(font: &FontRenderer, name: &str, budget: i32) -> usize {
     let mut best = 0;
     for (i, _) in name.char_indices() {
@@ -362,8 +341,6 @@ fn find_prefix_len(font: &FontRenderer, name: &str, budget: i32) -> usize {
     best
 }
 
-/// Draw the active app name using the bitmap fallback font, truncating with
-/// "..." if it exceeds `max_w`.
 fn draw_name_bitmap(
     buf: &mut DrawBuffer,
     x: i32,
@@ -397,8 +374,6 @@ fn draw_name_bitmap(
     );
 }
 
-/// Find the longest byte-aligned prefix whose bitmap-font width fits in
-/// `budget` pixels.
 fn find_bitmap_prefix_len(name: &str, budget: i32) -> usize {
     let mut best = 0;
     for (i, _) in name.char_indices() {

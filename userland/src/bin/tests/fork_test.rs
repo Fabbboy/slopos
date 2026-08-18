@@ -6,11 +6,6 @@ use slopos_userland::apps::shell;
 
 const EXPECTED: &[u8] = b"piped text\n";
 
-/// Single integration subtest: build an `echo … | tee` pipeline through
-/// the shell's exec path and verify the file contents. Exit-code
-/// distinctions from the legacy harness (20/22/23) collapse to a single
-/// pass/fail bool; the kernel-side runner attaches one indented KTAP
-/// subtest line for this case.
 fn test_fork_pipe_echo_tee() -> bool {
     eprintln!("fork_test: pipeline repro start");
 

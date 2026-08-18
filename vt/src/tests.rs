@@ -1,9 +1,4 @@
 //! Host-side unit tests for the VT100/ANSI parser.
-//!
-//! These mirror the in-kernel `stest!` coverage of the pure parser logic so
-//! the state machine can be exercised on the host without booting QEMU. The
-//! kernel virtual console keeps its own integration tests against the parser
-//! via the `slopos-drivers` crate.
 
 use super::{Direction, EraseMode, SgrAttr, VtAction, VtParser};
 
@@ -80,7 +75,6 @@ fn malformed_sequence_resilience() {
     parser.advance(0x1B);
     parser.advance(b'[');
     assert_eq!(parser.advance(0xFF), VtAction::Nop);
-    // Parser recovers to ground.
     assert_eq!(parser.advance(b'X'), VtAction::Print(b'X' as u32));
 }
 
@@ -91,12 +85,12 @@ fn sgr_multi_param() {
         parser.advance(b);
     }
     assert_eq!(parser.advance(b'm'), VtAction::SetAttribute(SgrAttr::Bold));
-    // Second SGR action is pending — drained on the next advance.
     assert_eq!(
         parser.advance(b'A'),
         VtAction::SetAttribute(SgrAttr::ForegroundColor(1))
     );
-    // Drained pending; the 'A' is then processed.
+    // TODO(tech-debt): a byte fed while the SGR queue drains is discarded, not
+    // reprocessed — the 'A' above never prints.
     assert_eq!(parser.advance(b'B'), VtAction::Print(b'B' as u32));
 }
 

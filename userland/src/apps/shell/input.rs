@@ -23,9 +23,8 @@ use std::collections::VecDeque;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-// Internal key codes — the dispatch `match` keys.  Decoded from either a raw
-// control byte or a parsed escape sequence.  These values are outside the
-// printable ASCII range so they never collide with literal input bytes.
+// Internal key codes, outside the printable ASCII range so they never collide
+// with literal input bytes.
 const KEY_PAGE_UP: u8 = 0x80;
 const KEY_PAGE_DOWN: u8 = 0x81;
 const KEY_UP: u8 = 0x82;
@@ -49,33 +48,25 @@ const ESC: u8 = 0x1b;
 
 const STDIN_FD: i32 = 0;
 
-/// The editor reads one byte per `read(2)`, as GNU readline does, and for the
-/// same reason: fd 0 is shared with every command the shell launches, so
-/// anything read ahead of the newline is either dropped on the floor or stolen
-/// from the program about to run.  Type-ahead entered while `nc` is running
-/// belongs to `nc`.  A chunked read cannot express that; a one-byte read cannot
-/// violate it.
+/// One byte per `read(2)`: fd 0 is shared with every command the shell
+/// launches, so anything read ahead of the newline would be dropped on the floor
+/// or stolen from the program about to run.
 const READ_CHUNK: usize = 1;
 
 /// Default editor width when `tiocgwinsz(0)` fails (no terminal wired).
 const DEFAULT_COLS: usize = 80;
 
-/// Milliseconds to wait disambiguating a bare ESC from the start of a CSI/SS3
-/// escape sequence.  A real escape sequence's bytes arrive back-to-back; a
-/// lone ESC keypress sees no follow-up byte within this window.
+/// Window for telling a bare ESC from the start of a CSI/SS3 sequence: a real
+/// sequence's bytes arrive back-to-back, a lone ESC keypress has no follow-up.
 const ESC_TIMEOUT_MS: u64 = 30;
 
 static PROMPT_COLORS: Mutex<[u8; super::PROMPT_BUF_MAX]> = Mutex::new([0; super::PROMPT_BUF_MAX]);
 static PROMPT_COLORS_LEN: AtomicUsize = AtomicUsize::new(0);
 
 /// Events decoded from bytes already taken off fd 0 but not yet dispatched.
-///
-/// With one-byte reads this only ever holds the tail of a malformed escape
-/// sequence being replayed as literal keys, which the parser emits as a batch.
-/// Those bytes are already off the descriptor, so dropping them at the end of a
-/// prompt would lose input no other reader can recover.  It never holds bytes
-/// the editor has not read — that is what leaves type-ahead available to the
-/// command about to run.
+/// Those bytes are off the descriptor, so dropping them at the end of a prompt
+/// would lose input no other reader can recover. It never holds bytes the editor
+/// has not read — that is what leaves type-ahead for the command about to run.
 static PENDING_EVENTS: Mutex<VecDeque<Decoded>> = Mutex::new(VecDeque::new());
 
 /// Consecutive failures to build the editor's ring.  Bounded so a permanently
@@ -83,13 +74,12 @@ static PENDING_EVENTS: Mutex<VecDeque<Decoded>> = Mutex::new(VecDeque::new());
 static RING_FAILURES: AtomicUsize = AtomicUsize::new(0);
 const RING_FAILURE_LIMIT: usize = 3;
 
-/// What one prompt produced.
 pub enum LineOutcome {
     /// A parsed command line holding this many tokens.
     Ready(usize),
     /// Nothing to run: a blank line, or an editing action that consumed it.
     Empty,
-    /// The line outgrew the editor's buffer.  Refused rather than truncated: a
+    /// The line outgrew the editor's buffer. Refused rather than truncated: a
     /// shortened command line means something other than what was typed.
     TooLong,
     /// End of input — Ctrl+D on an empty line, or the terminal hung up.
@@ -113,18 +103,13 @@ pub fn read_command_line(
         buf.fill(0);
     });
 
-    // Editor terminal width, queried fresh each prompt and re-queried live
-    // whenever SIGWINCH fires mid-edit (see the resize listener below).
     let cols = query_cols();
 
-    // Resize listener: SIGWINCH arrives as an in-band ring event raced
-    // against stdin, so the editor re-wraps mid-edit instead of keeping
-    // stale geometry until the next prompt. Dropping it (end of this call)
-    // restores the signal mask before any child command runs.
+    // Dropping the listener at the end of this call restores the signal mask
+    // before any child command runs.
     let winch = SignalListener::new(sig_bit(SIGWINCH));
 
-    // Set the slave TTY to raw mode: the shell does its own rendering / line
-    // editing.  Mirrors bash/zsh's cfmakeraw() on real Linux.
+    // Raw mode: the shell does its own rendering and line editing.
     let saved_termios = fs::tcgetattr(STDIN_FD).ok();
     if let Some(ref t) = saved_termios {
         let mut raw = *t;
@@ -133,16 +118,13 @@ pub fn read_command_line(
         let _ = fs::tcsetattr(STDIN_FD, &raw);
     }
 
-    // Enable bracketed paste so pasted text arrives wrapped in \x1b[200~..201~
-    // and is inserted literally rather than interpreted as commands.
+    // Bracketed paste on: pasted text arrives wrapped in \x1b[200~..201~ and is
+    // inserted literally rather than interpreted as commands.
     let _ = fs::write_slice(1, b"\x1b[?2004h");
 
     let result = match Ring::setup(16) {
         Ok(ring) => slopfut::block_on(ring, input_loop(tokens, prompt, cols, winch.as_ref())),
         Err(_) => {
-            // Ring unavailable: cannot run the async editor.  Re-prompting
-            // forever would be a silent hot spin, so give up after a few
-            // consecutive failures and let the caller exit.
             crate::syscall::core::yield_now();
             if RING_FAILURES.fetch_add(1, Ordering::Relaxed) + 1 >= RING_FAILURE_LIMIT {
                 super::display::shell_error(b"sh: cannot start the line editor\n");
@@ -156,11 +138,9 @@ pub fn read_command_line(
         RING_FAILURES.store(0, Ordering::Relaxed);
     }
 
-    // Restore canonical mode FIRST (ISIG back on), THEN write the
-    // bracketed-paste-off sequence: the write can block on a full output
-    // queue, and a blocking write in raw mode (ISIG off) cannot be
-    // interrupted from the keyboard — the one ordering that can wedge the
-    // shell unkillably.
+    // Restore canonical mode (ISIG back on) before the paste-off write: that
+    // write can block on a full output queue, and a blocking write with ISIG off
+    // cannot be interrupted from the keyboard.
     if let Some(ref t) = saved_termios {
         let _ = fs::tcsetattr(STDIN_FD, t);
     }
@@ -175,38 +155,30 @@ fn prompt_colors_snapshot() -> ([u8; super::PROMPT_BUF_MAX], usize) {
     (colors, len)
 }
 
-// ---------------------------------------------------------------------------
-// Incremental escape-sequence parser
-// ---------------------------------------------------------------------------
-
-/// One decoded input event from the byte stream.
 enum Decoded {
     /// A printable / control byte or a decoded internal key code.
     Key(u8),
-    /// A complete multi-byte UTF-8 character (`seq[..len]`) — non-ASCII text
-    /// like ä/é/€. Decoded at the parser so raw continuation bytes can never
-    /// alias the internal key-code space (0x80..).
+    /// A complete multi-byte UTF-8 character (`seq[..len]`), decoded here so raw
+    /// continuation bytes can never alias the internal key-code space (0x80..).
     Char([u8; 4], usize),
     /// A run of literal bytes from a bracketed paste (control chars already
     /// stripped except `\t`).
     Paste(Vec<u8>),
 }
 
-/// State machine that consumes the fd0 byte stream and emits [`Decoded`]
-/// events.  Partial escape sequences are retained across `feed` calls so a
-/// sequence split across two reads parses correctly.
+/// Consumes the fd0 byte stream and emits [`Decoded`] events. Partial escape
+/// sequences are retained across `feed` calls, so a sequence split across two
+/// reads still parses.
 struct EscParser {
     /// Bytes of an in-progress escape sequence (starts with ESC).
     pending: Vec<u8>,
     /// True while inside a bracketed-paste run (`\x1b[200~` seen, `201~`
     /// not yet).
     in_paste: bool,
-    /// Accumulated literal paste bytes.
     paste_buf: Vec<u8>,
     /// Last paste byte was `\r`, so a following `\n` is the other half of one
     /// CRLF terminator rather than a second line break.
     paste_last_cr: bool,
-    /// In-progress UTF-8 multi-byte sequence (lead byte seen).
     utf8: [u8; 4],
     utf8_len: usize,
     /// Total bytes the current UTF-8 sequence needs (0 = none pending).
@@ -232,8 +204,8 @@ impl EscParser {
         !self.pending.is_empty() && !self.in_paste
     }
 
-    /// Resolve a buffered bare ESC (timeout elapsed with no follow-up byte):
-    /// emit it as a literal ESC key.
+    /// Resolve a buffered bare ESC — the timeout elapsed with no follow-up
+    /// byte — as a literal ESC key.
     fn flush_escape(&mut self, out: &mut Vec<Decoded>) {
         if self.awaiting_escape() {
             self.pending.clear();
@@ -253,12 +225,10 @@ impl EscParser {
             return;
         }
         if !self.pending.is_empty() {
-            // Inside an escape sequence.
             self.pending.push(b);
             self.try_complete(out);
             return;
         }
-        // UTF-8 accumulation: a pending lead byte collects its continuations.
         if self.utf8_need > 0 {
             if is_utf8_continuation(b) {
                 self.utf8[self.utf8_len] = b;
@@ -267,15 +237,13 @@ impl EscParser {
                     let n = self.utf8_need;
                     self.utf8_need = 0;
                     self.utf8_len = 0;
-                    // Only well-formed sequences (no overlongs/surrogates)
-                    // become text; malformed ones are dropped.
+                    // Overlongs and surrogates are dropped, not shown as text.
                     if core::str::from_utf8(&self.utf8[..n]).is_ok() {
                         out.push(Decoded::Char(self.utf8, n));
                     }
                 }
                 return;
             }
-            // Sequence broken: drop it and reprocess this byte normally.
             self.utf8_need = 0;
             self.utf8_len = 0;
         }
@@ -291,18 +259,15 @@ impl EscParser {
                     _ => 4,
                 };
             }
-            // Stray continuation bytes and invalid leads are dropped — they
-            // must never reach the editor's u8 key dispatch, where 0x80..
-            // are the internal nav codes.
+            // Stray continuation bytes and invalid leads: dropped, since 0x80..
+            // is the editor's internal key-code space.
             0x80..=0xC1 | 0xF5..=0xFF => {}
             _ => out.push(Decoded::Key(b)),
         }
     }
 
     fn feed_paste_byte(&mut self, b: u8, out: &mut Vec<Decoded>) {
-        // The paste terminator is the literal sequence \x1b[201~.  Buffer
-        // bytes after ESC in `pending` to detect it; everything else is
-        // literal paste content (control chars stripped except \t).
+        // The paste terminator is the literal sequence \x1b[201~.
         if !self.pending.is_empty() {
             self.pending.push(b);
             if is_paste_end(&self.pending) {
@@ -313,8 +278,6 @@ impl EscParser {
                     out.push(Decoded::Paste(run));
                 }
             } else if !could_be_paste_end(&self.pending) {
-                // Not the terminator: the ESC and trailing bytes are literal
-                // paste content.  Strip control bytes except \t.
                 let drained = core::mem::take(&mut self.pending);
                 for c in drained {
                     self.push_paste_literal(c);
@@ -330,10 +293,8 @@ impl EscParser {
     }
 
     fn push_paste_literal(&mut self, b: u8) {
-        // Tab, printable ASCII, and UTF-8 bytes (≥ 0x80) are literal paste
-        // content; C0 controls and DEL are stripped — except the line
-        // terminators, which carry the structure of a pasted script.  Dropping
-        // those silently glued two pasted lines into one wrong command.
+        // C0 controls and DEL are stripped, except the line terminators: those
+        // carry the structure of a pasted script.
         let was_cr = core::mem::replace(&mut self.paste_last_cr, b == b'\r');
         match b {
             b'\r' => self.paste_buf.push(b'\n'),
@@ -346,10 +307,6 @@ impl EscParser {
         }
     }
 
-    /// Attempt to recognise a complete escape sequence in `pending`.  On
-    /// success, push the decoded key (or enter paste mode) and clear
-    /// `pending`.  On a still-incomplete prefix, leave `pending` for the next
-    /// byte.  On an unrecognised sequence, drop it.
     fn try_complete(&mut self, out: &mut Vec<Decoded>) {
         let p = &self.pending;
         // Bracketed paste start.
@@ -364,7 +321,7 @@ impl EscParser {
                 self.pending.clear();
                 out.push(Decoded::Key(code));
             }
-            EscMatch::Partial => {} // wait for more bytes
+            EscMatch::Partial => {}
             EscMatch::Invalid => {
                 self.pending.clear();
             }
@@ -378,7 +335,6 @@ enum EscMatch {
     Invalid,
 }
 
-/// True if `s` is a prefix of the bracketed-paste end sequence `\x1b[201~`.
 fn could_be_paste_end(s: &[u8]) -> bool {
     let end = b"\x1b[201~";
     s.len() <= end.len() && end.starts_with(s)
@@ -388,12 +344,10 @@ fn is_paste_end(s: &[u8]) -> bool {
     s == b"\x1b[201~"
 }
 
-/// Decode a buffered escape sequence into an internal key code.  Mirrors the
-/// terminal emulator's encoder: CSI arrows/Home/End and the `~`-terminated
-/// editing keys, plus SS3 arrows (`\x1bO…`) for completeness.
+/// Decode a buffered escape sequence into an internal key code: CSI arrows /
+/// Home / End, the `~`-terminated editing keys, and SS3 arrows (`\x1bO…`).
 fn decode_escape(p: &[u8]) -> EscMatch {
     if p.len() == 1 {
-        // Only ESC so far.
         return EscMatch::Partial;
     }
     match p[1] {
@@ -403,7 +357,6 @@ fn decode_escape(p: &[u8]) -> EscMatch {
     if p.len() == 2 {
         return EscMatch::Partial;
     }
-    // CSI/SS3 final byte forms (no parameters): \x1b[A etc.
     match p[2] {
         b'A' => return EscMatch::Complete(KEY_UP),
         b'B' => return EscMatch::Complete(KEY_DOWN),
@@ -414,7 +367,6 @@ fn decode_escape(p: &[u8]) -> EscMatch {
         b'0'..=b'9' => {} // parameterised: needs a trailing '~'
         _ => return EscMatch::Invalid,
     }
-    // Parameterised `\x1b[<n>~` editing keys.
     if *p.last().unwrap() == b'~' {
         return match &p[2..p.len() - 1] {
             b"3" => EscMatch::Complete(KEY_DELETE),
@@ -433,15 +385,9 @@ fn decode_escape(p: &[u8]) -> EscMatch {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Editor
-// ---------------------------------------------------------------------------
-
-/// A long-lived `SignalListener::recv` future, re-armed only after it
-/// resolves. Holding it across `next_decoded` calls (instead of building a
-/// fresh one per wait) means losing a select race never cancels it — a
-/// completed-but-unobserved resize is reported on the next wait instead of
-/// being discarded with the dropped future.
+/// A long-lived `SignalListener::recv` future, re-armed only after it resolves:
+/// losing a select race must not cancel it, or a completed-but-unobserved resize
+/// would be discarded with the dropped future.
 type WinchFuture<'a> = std::pin::Pin<Box<dyn std::future::Future<Output = u32> + 'a>>;
 
 async fn input_loop(
@@ -454,14 +400,11 @@ async fn input_loop(
     let mut parser = EscParser::new();
     let mut winch_fut: Option<WinchFuture<'_>> =
         winch.map(|w| -> WinchFuture<'_> { Box::pin(w.recv()) });
-    // Decoded events not yet dispatched, seeded with anything the previous
-    // prompt had already taken off fd 0 and not yet acted on.
     let mut queue: VecDeque<Decoded> = std::mem::take(&mut *PENDING_EVENTS.lock().unwrap());
     let mut overflowed = false;
 
-    // Region-relative row the cursor currently sits on (see `redraw`). The
-    // REPL pre-printed the prompt, so the first region starts at its first
-    // row with the cursor resting after it.
+    // Region-relative cursor row (see `redraw`): the REPL pre-printed the
+    // prompt, so the first region starts at its row, cursor resting after it.
     let mut cur_row = row_of_offset(prompt.len(), cols.max(1));
 
     'restart: loop {
@@ -477,8 +420,7 @@ async fn input_loop(
                     match next_decoded(&mut parser, &mut queue, winch_fut.as_mut()).await {
                         Wake::Winch => {
                             // The resolved listener is spent: re-arm it before
-                            // anything else awaits, then refresh the width and
-                            // re-wrap the edit region under the new geometry.
+                            // anything else awaits.
                             if let (Some(slot), Some(w)) = (winch_fut.as_mut(), winch) {
                                 *slot = Box::pin(w.recv());
                             }
@@ -499,9 +441,7 @@ async fn input_loop(
             let c = match decoded {
                 Decoded::Paste(text) => {
                     // A pasted line break ends a command, exactly as typing one
-                    // would.  Split at the first, insert what precedes it, and
-                    // put the remainder back at the head of the queue so the
-                    // next prompt continues where this one left off.
+                    // would; the remainder is queued for the next prompt.
                     if let Some(nl) = text.iter().position(|&b| b == b'\n') {
                         let rest = text[nl + 1..].to_vec();
                         if !rest.is_empty() {
@@ -605,8 +545,7 @@ async fn input_loop(
                     }
                 }
 
-                // Page Up / Page Down: the terminal owns scrollback now, so
-                // these are no-ops at the editor level.
+                // The terminal owns scrollback, so these are editor no-ops.
                 KEY_PAGE_UP | KEY_PAGE_DOWN => {}
 
                 CTRL_K => {
@@ -666,8 +605,8 @@ async fn input_loop(
                 CTRL_L => {
                     shell_write(b"\x1b[2J\x1b[H");
                     cur_row = 0;
-                    // Re-run the editor with a fresh blank line on a cleared
-                    // screen (the async fn restarts; it cannot tail-recurse).
+                    // Restart with a blank line on the cleared screen; an async
+                    // fn cannot tail-recurse.
                     continue 'restart;
                 }
 
@@ -682,8 +621,7 @@ async fn input_loop(
 
                 CTRL_D => {
                     if len == 0 {
-                        // Ctrl+D on an empty line is how a user says "done".
-                        // Echo what they would have typed, then end the shell.
+                        // Echo the `exit` the user would have typed instead.
                         shell_write(b"exit\n");
                         stash(&mut queue);
                         return LineOutcome::Eof;
@@ -716,8 +654,6 @@ async fn input_loop(
                                 &mut cursor_pos,
                             );
                         }
-                        // Re-emit prompt + buffer on a fresh line and keep
-                        // editing the current buffer.
                         redraw(prompt, len, cursor_pos, cols, &mut cur_row);
                     } else if comp.insertion_len > 0 {
                         insert_text(
@@ -751,16 +687,12 @@ async fn input_loop(
             }
         }
 
-        // The inner loop broke on Enter.  Anything still queued was decoded
-        // from bytes already taken off fd 0, so it belongs to the next prompt
-        // rather than to the command about to run.
         stash(&mut queue);
 
         if overflowed {
             return LineOutcome::TooLong;
         }
 
-        // Assemble the line, parse it, and report the token count.
         buffers::with_line_buf(|buf| {
             let capped = cmp::min(len, buf.len() - 1);
             buf[capped] = 0;
@@ -788,7 +720,7 @@ async fn input_loop(
     }
 }
 
-/// Park still-undispatched events for the next prompt.  See [`PENDING_EVENTS`].
+/// Park still-undispatched events for the next prompt. See [`PENDING_EVENTS`].
 fn stash(queue: &mut VecDeque<Decoded>) {
     if queue.is_empty() {
         return;
@@ -797,17 +729,14 @@ fn stash(queue: &mut VecDeque<Decoded>) {
     pending.append(queue);
 }
 
-/// Why `next_decoded` returned: stdin made progress (bytes decoded, ESC
-/// flushed, or a transient state the caller re-arms on), or the terminal
-/// was resized and the caller must re-query its width.
+/// Why `next_decoded` returned: stdin made progress, the terminal was resized
+/// and the caller must re-query its width, or input ended.
 enum Wake {
     Input,
     Winch,
     Eof,
 }
 
-/// Editor terminal width. Falls back to 80 columns when no terminal is
-/// wired (`tiocgwinsz` fails or reports a zero width).
 fn query_cols() -> usize {
     match fs::tiocgwinsz(STDIN_FD) {
         Ok(ws) if ws.ws_col != 0 => ws.ws_col as usize,
@@ -815,8 +744,6 @@ fn query_cols() -> usize {
     }
 }
 
-/// Resolve a buffered lone ESC as a literal keypress (the disambiguation
-/// timer expired with no follow-up byte).
 fn flush_pending_escape(parser: &mut EscParser, queue: &mut std::collections::VecDeque<Decoded>) {
     let mut out = Vec::new();
     parser.flush_escape(&mut out);
@@ -825,20 +752,14 @@ fn flush_pending_escape(parser: &mut EscParser, queue: &mut std::collections::Ve
     }
 }
 
-/// Read the next batch of decoded events into `queue`, blocking on fd 0.
+/// Read the next batch of decoded events into `queue`, blocking on fd 0. A bare
+/// ESC buffered in the parser resolves as a literal keypress if no follow-up
+/// byte arrives within the timeout.
 ///
-/// A bare ESC buffered in the parser is disambiguated with a short timeout: if
-/// no follow-up byte arrives, it resolves as a literal ESC keypress.  When a
-/// resize listener is wired, it is raced as the FIRST select arm against
-/// non-consuming waits only (fd readiness / timer), and reported as
-/// [`Wake::Winch`]:
-///
-/// - first arm: a resize landing in the same reactor batch as input
-///   readiness resolves the select as Winch instead of being the dropped
-///   loser whose already-drained signal would be discarded with it;
-/// - persistent future (see [`WinchFuture`]) + non-consuming peers: losing
-///   an arm never cancels in-flight state that already consumed bytes or a
-///   signal, so neither input nor resizes can be lost to a select race.
+/// The resize listener is raced as the *first* select arm, against non-consuming
+/// waits only (fd readiness / timer): a resize landing in the same reactor batch
+/// as input readiness then wins rather than being dropped with its already
+/// drained signal, and losing an arm never cancels state that consumed bytes.
 async fn next_decoded(
     parser: &mut EscParser,
     queue: &mut std::collections::VecDeque<Decoded>,
@@ -847,8 +768,6 @@ async fn next_decoded(
     let buf = vec![0u8; READ_CHUNK];
 
     let result = if parser.awaiting_escape() {
-        // ESC pending: wait for follow-up readiness against a short timeout.
-        // If the timer wins, the ESC was a lone keypress.
         use slopfut::{Either2, Either3};
         let ready = Box::pin(slopfut::poll_add(STDIN_FD, POLLIN));
         let timer = Box::pin(slopfut::time::sleep_ms(ESC_TIMEOUT_MS));
@@ -870,7 +789,6 @@ async fn next_decoded(
             None
         }
     } else {
-        // No pending escape: park on fd0 readiness, then read.
         use slopfut::Either2;
         let ready = Box::pin(slopfut::poll_add(STDIN_FD, POLLIN));
         match winch {
@@ -887,17 +805,14 @@ async fn next_decoded(
 
     let Some(r) = result else { return Wake::Input };
     if r.res == 0 {
-        // Read of zero bytes = the PTY master hung up (the terminal closed
-        // it).  End of input.  A deliberate Ctrl-D keypress arrives as the byte
-        // 0x04 in the stream and is handled by the editor's CTRL_D arm, not
-        // this path.  Report it so the REPL exits with the status of the last
-        // command it ran, rather than terminating the process from here.
+        // Zero bytes means the PTY master hung up; a deliberate Ctrl-D arrives
+        // as 0x04 and is handled by the CTRL_D arm. Reported rather than exiting
+        // here, so the REPL exits with the status of the last command it ran.
         return Wake::Eof;
     }
     if r.res < 0 {
-        // Only a read that could succeed later is worth re-arming for.  Any
-        // other error would spin the editor at full speed against a descriptor
-        // that is never going to work.
+        // Only a retryable error is worth re-arming for; anything else would
+        // spin the editor at full speed against a descriptor that never works.
         let errno = -r.res as i32;
         let retryable = errno == crate::syscall::SyscallError::EAGAIN.errno()
             || errno == crate::syscall::SyscallError::EINTR.errno();
@@ -912,11 +827,8 @@ async fn next_decoded(
     Wake::Input
 }
 
-// ---------------------------------------------------------------------------
-// UTF-8 aware buffer helpers — the line buffer holds UTF-8 bytes, the cursor
-// always rests on a character boundary, and the terminal renders one cell per
-// character (continuation bytes occupy no cell).
-// ---------------------------------------------------------------------------
+// The line buffer holds UTF-8 bytes, the cursor always rests on a character
+// boundary, and the terminal renders one cell per character.
 
 /// True for a UTF-8 continuation byte (`0b10xx_xxxx`).
 #[inline]
@@ -952,7 +864,6 @@ fn cells_upto(n: usize) -> usize {
     })
 }
 
-/// Remove `buf[start..end]`, shifting the tail left and zero-filling.
 fn delete_byte_range(len: &mut usize, start: usize, end: usize) {
     let removed = end - start;
     buffers::with_line_buf(|buf| {
@@ -979,7 +890,7 @@ fn delete_char_at_cursor(len: &mut usize, cursor_pos: usize) {
     delete_byte_range(len, cursor_pos, end);
 }
 
-/// Insert `text` at the cursor.  Returns `false` when the line buffer was too
+/// Insert `text` at the cursor. Returns `false` when the line buffer was too
 /// full to take all of it, so the caller can refuse the line rather than run a
 /// truncated version of what the user typed.
 fn insert_text(text: &[u8], text_len: usize, len: &mut usize, cursor_pos: &mut usize) -> bool {
@@ -1018,23 +929,20 @@ fn row_of_offset(offset: usize, cols: usize) -> usize {
     if offset == 0 { 0 } else { (offset - 1) / cols }
 }
 
-/// Redraw the edit region in place. Inputs wider than the terminal wrap
-/// across rows, so the redraw is region-based: move to the region's first
-/// row, erase everything below, reprint prompt + buffer (the terminal
-/// wraps), then reposition the cursor. `cur_row` tracks the row (within
-/// the region) the cursor was left on by the previous redraw.
+/// Redraw the edit region in place. Inputs wider than the terminal wrap across
+/// rows, so the redraw is region-based: move to the region's first row, erase
+/// everything below, reprint prompt + buffer, then reposition the cursor.
+/// `cur_row` is the row within the region the previous redraw left it on.
 fn redraw(prompt: &[u8], len: usize, cursor_pos: usize, cols: usize, cur_row: &mut usize) {
     use super::display::shell_write_idx;
     let cols = cols.max(1);
 
-    // Column 0 of the region's first row, then wipe the previous render —
-    // including every wrapped row below.
+    // Column 0 of the region's first row, then wipe every rendered row below.
     shell_write(b"\r");
     emit_cursor_move(*cur_row, b'A');
     shell_write(b"\x1b[J");
 
-    // Colored prompt: emit per-color runs (same palette mapping as the
-    // top-level prompt writer).
+    // Colored prompt: emit per-color runs.
     let (pc_buf, pc_len) = prompt_colors_snapshot();
     let mut i = 0;
     while i < prompt.len() {
@@ -1046,17 +954,14 @@ fn redraw(prompt: &[u8], len: usize, cursor_pos: usize, cols: usize, cur_row: &m
         shell_write_idx(&prompt[start..i], color);
     }
 
-    // Buffer contents (default color).
     buffers::with_line_buf(|buf| {
         shell_write(&buf[..len]);
     });
 
-    // Reposition: back to the region start, then down/right to the target.
-    // Mid-content offsets use committed-wrap coordinates (a row-boundary
-    // offset sits at column 0 of the next row); the end-of-content offset
-    // uses the deferred resting position (last column of the full row).
-    // All geometry is in display CELLS, not bytes (multi-byte UTF-8
-    // characters occupy one cell).
+    // Mid-content offsets use committed-wrap coordinates (a row-boundary offset
+    // sits at column 0 of the next row); the end-of-content offset uses the
+    // deferred resting position (last column of the full row). All geometry is
+    // in display cells, not bytes.
     let total = prompt.len() + cells_upto(len);
     let end_row = row_of_offset(total, cols);
     let offset = prompt.len() + cells_upto(cursor_pos);
