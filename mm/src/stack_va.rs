@@ -1,13 +1,9 @@
 //! Generic fixed-stride VA-region slot allocator with a per-CPU cache.
 //!
-//! A `SpinLock`-protected global bitmap allocator is the source of truth; a
-//! `PreemptGuard`-protected per-CPU cache absorbs the warm path in front of
-//! it. The global `backed_bitmap` may lag for slots living in a CPU's cache
-//! and is re-synchronised on spill.
-//!
-//! The concrete regions (`KstackRegion`, `UstackRegion`) live in the private
-//! `mod kstack` / `mod ustack` blocks below and keep separate statics so
-//! their locks contend independently.
+//! A `SpinLock`-protected global bitmap allocator is the source of truth; the
+//! global `backed_bitmap` may lag for slots living in a CPU's cache and is
+//! re-synchronised on spill. `KstackRegion` and `UstackRegion` keep separate
+//! statics so their locks contend independently.
 
 use core::marker::PhantomData;
 use core::sync::atomic::{AtomicU32, Ordering};
@@ -24,21 +20,15 @@ use crate::paging_defs::PAGE_SIZE_2MB;
 use crate::paging_defs::PageFlags;
 use crate::stack_region::StackRegion;
 
-// ---------------------------------------------------------------------------
-// Cross-cutting small types.
-// ---------------------------------------------------------------------------
-
 /// One entry returned by batch alloc / consumed by batch release.  The
-/// `backed` bit travels with the slot so the warm-reuse fast path can
-/// skip the frame-mapping work.
+/// `backed` bit travels with the slot so warm reuse can skip frame mapping.
 #[derive(Clone, Copy, Debug)]
 pub struct SlotEntry {
     pub idx: u32,
     pub backed: bool,
 }
 
-/// Diagnostic snapshot of one CPU's cache state.  Consumed by tests and
-/// by the per-region `pcp_stats` shim functions.
+/// Diagnostic snapshot of one CPU's cache state.
 #[derive(Default, Clone, Copy)]
 pub struct PcpStats {
     pub count: u32,
@@ -48,22 +38,11 @@ pub struct PcpStats {
     pub spill_count: u32,
 }
 
-// ---------------------------------------------------------------------------
-// Public RAII slot handle.
-// ---------------------------------------------------------------------------
-
-/// RAII handle owning one slot in the `R` VA region.
+/// RAII handle owning one slot in the `R` VA region, returned to the per-CPU
+/// cache on drop (or spilled to the global allocator if the cache is full).
 ///
-/// Returned to the per-CPU cache on drop (or spilled to the global
-/// allocator if the cache is full).  Not `Copy`/`Clone` — double-release
-/// is impossible by construction.
-///
-/// `PhantomData<fn() -> R>` carries the region type without inheriting
-/// any `Send`/`Sync`/`Drop` semantics from `R` (which is uninhabited
-/// anyway).  This is what makes a `StackSlot<KstackRegion>` and a
-/// `StackSlot<UstackRegion>` distinct nominal types — the compiler
-/// rejects passing one where the other is expected, at zero runtime
-/// cost.
+/// `PhantomData<fn() -> R>` makes each region a distinct nominal type without
+/// inheriting `Send`/`Sync`/`Drop` semantics from `R`.
 pub struct StackSlot<R: StackRegion> {
     idx: u32,
     was_backed: bool,
@@ -71,8 +50,6 @@ pub struct StackSlot<R: StackRegion> {
 }
 
 impl<R: StackRegion> StackSlot<R> {
-    /// Construct a handle from a raw `(idx, backed)` pair.  Used only
-    /// by per-region wiring after popping from the cache.
     #[doc(hidden)]
     #[inline]
     pub fn from_entry(entry: SlotEntry) -> Self {
@@ -95,24 +72,19 @@ impl<R: StackRegion> StackSlot<R> {
         VirtAddr::new(self.va_base().as_u64() + R::STRIDE)
     }
 
-    /// Slot index within the region.
     #[inline]
     pub fn index(&self) -> u32 {
         self.idx
     }
 
-    /// `true` if the slot had physical frames mapped on a prior
-    /// allocation cycle.  When true, the caller's `allocate()` can skip
-    /// the frame allocation + page mapping path and just zero the
-    /// existing mapping.
+    /// `true` if the slot had frames mapped on a prior allocation cycle; the
+    /// caller may then zero the existing mapping instead of allocating one.
     #[inline]
     pub fn was_backed(&self) -> bool {
         self.was_backed
     }
 
-    /// Record that the caller has mapped physical frames into this
-    /// slot's VA range.  In-memory only — the global `backed_bitmap`
-    /// syncs lazily on spill.  Idempotent.
+    /// In-memory only — the global `backed_bitmap` syncs lazily on spill.
     #[inline]
     pub fn mark_backed(&mut self) {
         self.was_backed = true;
@@ -128,15 +100,8 @@ impl<R: StackRegion> Drop for StackSlot<R> {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Global bitmap-backed allocator (one per region).
-// ---------------------------------------------------------------------------
-
-/// Global bitmap allocator for one stack region.  Two bitmaps:
-/// `free_bitmap` (1 = slot is free) and `backed_bitmap` (1 = slot has
-/// physical frames mapped).  `WORDS` is the number of `u64` words —
-/// must equal `R::BITMAP_WORDS`; a `const _` cross-check inside the
-/// `impl` enforces this at compile time.
+/// Global bitmap allocator for one stack region: `free_bitmap` (1 = slot is
+/// free) and `backed_bitmap` (1 = slot has physical frames mapped).
 pub struct StackVaAllocator<R: StackRegion, const WORDS: usize> {
     free_bitmap: [u64; WORDS],
     backed_bitmap: [u64; WORDS],
@@ -147,9 +112,8 @@ pub struct StackVaAllocator<R: StackRegion, const WORDS: usize> {
 }
 
 impl<R: StackRegion, const WORDS: usize> StackVaAllocator<R, WORDS> {
-    /// Compile-time consistency check: `WORDS` must match `R::BITMAP_WORDS`.
-    /// Referenced inside `new_uninit` so monomorphisation forces the
-    /// assertion to run for every concrete `<R, WORDS>` pair.
+    /// `WORDS` must match `R::BITMAP_WORDS`. Referenced inside `new_uninit` so
+    /// monomorphisation runs the assertion for every concrete `<R, WORDS>`.
     const _CONSISTENT: () = {
         assert!(
             WORDS == R::BITMAP_WORDS,
@@ -157,10 +121,9 @@ impl<R: StackRegion, const WORDS: usize> StackVaAllocator<R, WORDS> {
         );
     };
 
-    /// Construct an empty allocator suitable for storing in a `static`.
-    /// `init()` must be called once before any `alloc_one` / `release_one`.
+    /// Empty allocator suitable for a `static`; `init()` must run once before
+    /// any `alloc_one` / `release_one`.
     pub const fn new_uninit() -> Self {
-        // Touch _CONSISTENT to force the assertion at instantiation.
         let _: () = Self::_CONSISTENT;
         Self {
             free_bitmap: [0u64; WORDS],
@@ -172,8 +135,7 @@ impl<R: StackRegion, const WORDS: usize> StackVaAllocator<R, WORDS> {
         }
     }
 
-    /// Mark every slot in `[0, R::MAX_SLOTS)` as free, every slot as
-    /// unbacked.  Idempotent.
+    /// Mark every slot free and unbacked. Idempotent.
     pub fn init(&mut self) {
         for w in self.free_bitmap.iter_mut() {
             *w = !0u64;
@@ -194,8 +156,7 @@ impl<R: StackRegion, const WORDS: usize> StackVaAllocator<R, WORDS> {
         self.ready = true;
     }
 
-    /// Claim one free slot, reading its current backed state.  Returns
-    /// `None` if the region is exhausted or the allocator is uninitialised.
+    /// `None` if the region is exhausted or `init()` has not run.
     pub fn alloc_one(&mut self) -> Option<SlotEntry> {
         if !self.ready {
             return None;
@@ -225,7 +186,6 @@ impl<R: StackRegion, const WORDS: usize> StackVaAllocator<R, WORDS> {
         None
     }
 
-    /// Claim up to `out.len()` free slots under a single lock acquisition.
     /// Returns the number of `SlotEntry`s written to the front of `out`.
     pub fn alloc_one_into_slice(&mut self, out: &mut [SlotEntry]) -> usize {
         let mut filled = 0;
@@ -241,7 +201,6 @@ impl<R: StackRegion, const WORDS: usize> StackVaAllocator<R, WORDS> {
         filled
     }
 
-    /// Release one slot, recording whether it is currently backed.
     pub fn release_one(&mut self, entry: SlotEntry) {
         let slot = entry.idx as usize;
         debug_assert!(slot < R::MAX_SLOTS, "stack_va: release out of range");
@@ -260,18 +219,13 @@ impl<R: StackRegion, const WORDS: usize> StackVaAllocator<R, WORDS> {
         self.in_use = self.in_use.saturating_sub(1);
     }
 
-    /// Release a batch of slots under a single lock acquisition.
     pub fn release_batch(&mut self, entries: &[SlotEntry]) {
         for entry in entries {
             self.release_one(*entry);
         }
     }
 
-    /// Permanently mark a slot as allocated (removes it from the free
-    /// pool forever).  Used at init to reserve one sentinel slot per
-    /// 2 MB chunk — the sentinel's mapping forces the intermediate
-    /// page table into existence so runtime allocations never race on
-    /// PT creation.
+    /// Permanently mark a slot as allocated, removing it from the free pool.
     pub fn reserve_sentinel(&mut self, idx: u32) {
         let slot = idx as usize;
         debug_assert!(slot < R::MAX_SLOTS);
@@ -282,22 +236,17 @@ impl<R: StackRegion, const WORDS: usize> StackVaAllocator<R, WORDS> {
         self.backed_bitmap[word_idx] |= mask;
     }
 
-    /// Number of slots currently outside the global free pool — sum over
-    /// dropped-into-PCP and live `StackSlot<R>` handles.
+    /// Slots outside the global free pool: those cached per-CPU plus those
+    /// held by live `StackSlot<R>` handles.
     #[inline]
     pub fn in_use(&self) -> u32 {
         self.in_use
     }
 }
 
-// ---------------------------------------------------------------------------
-// Per-CPU cache (one array per region).
-// ---------------------------------------------------------------------------
-
-/// One CPU's stack-slot cache.  `stack_idx[0..count]` and
+/// One CPU's stack-slot cache; `stack_idx[0..count]` and
 /// `stack_backed[0..count]` are parallel arrays.  Access requires a
-/// `PreemptGuard` for CPU pinning; the atomic stat counters are safe
-/// to read from any CPU.
+/// `PreemptGuard` for CPU pinning; the stat counters are readable from any CPU.
 #[repr(C, align(64))]
 pub struct PerCpuStackCache<R: StackRegion, const CAP: usize> {
     pub stack_idx: [u32; CAP],
@@ -325,9 +274,7 @@ impl<R: StackRegion, const CAP: usize> PerCpuStackCache<R, CAP> {
     }
 }
 
-/// Per-CPU cache storage for the stack-VA allocator. A thin re-export of
-/// `slopos_ostd::sync::cpu_local::CpuLocal<PerCpuStackCache<R, CAP>>` plus
-/// a typed `PcpStats` snapshot helper.
+/// Per-CPU cache storage for the stack-VA allocator.
 pub struct PcpArray<R: StackRegion, const CAP: usize> {
     inner: CpuLocal<PerCpuStackCache<R, CAP>>,
 }
@@ -346,9 +293,8 @@ impl<R: StackRegion, const CAP: usize> PcpArray<R, CAP> {
         self.inner.get_pinned_mut(cpu)
     }
 
-    /// Read another CPU's cache for diagnostics. Benign data race on
-    /// non-atomic fields; the atomic stat counters give a consistent
-    /// per-counter snapshot.
+    /// Read another CPU's cache for diagnostics. Benign data race on the
+    /// non-atomic fields.
     pub fn snapshot(&self, cpu: usize) -> PcpStats {
         let Some(cache) = self.inner.snapshot_for_cpu(cpu) else {
             return PcpStats::default();
@@ -363,20 +309,13 @@ impl<R: StackRegion, const CAP: usize> PcpArray<R, CAP> {
     }
 
     /// Borrow the underlying `CpuLocal` for shutdown-only drain helpers.
-    /// All mutating accessors on the returned reference carry their own
-    /// safety contracts from OSTD; this borrow itself is non-mutating.
     #[inline]
     pub fn cpu_local(&self) -> &CpuLocal<PerCpuStackCache<R, CAP>> {
         &self.inner
     }
 }
 
-// ---------------------------------------------------------------------------
-// Per-region wiring helpers (called from each region's `_*` trait impls).
-// ---------------------------------------------------------------------------
-
-/// Refill the current CPU's cache from the global allocator.  Runs with
-/// one lock acquisition for the batch.
+/// Refill the current CPU's cache from the global allocator in one batch.
 ///
 /// # Safety
 /// Caller must hold a `PreemptGuard`.
@@ -401,9 +340,8 @@ pub fn pcp_refill<R: StackRegion, const WORDS: usize, const CAP: usize, const RE
         return;
     }
 
-    // SlotEntry is Copy + has a sentinel default; pre-populate the batch so
-    // alloc_batch's writes overwrite known-good slots and we can iterate by
-    // value — avoids the MaybeUninit reborrow path entirely.
+    // Pre-populated with a sentinel so the batch iterates by value, avoiding
+    // the `MaybeUninit` reborrow path.
     let mut batch: [SlotEntry; REFILL] = [SlotEntry {
         idx: u32::MAX,
         backed: false,
@@ -424,8 +362,8 @@ pub fn pcp_refill<R: StackRegion, const WORDS: usize, const CAP: usize, const RE
     }
 }
 
-/// Spill a batch of cached slots back to the global allocator.  Invoked
-/// when the cache overflows.  Runs with one lock acquisition.
+/// Spill a batch of cached slots back to the global allocator when the cache
+/// overflows.
 ///
 /// # Safety
 /// Caller must hold a `PreemptGuard`.
@@ -445,9 +383,7 @@ pub fn pcp_spill<R: StackRegion, const WORDS: usize, const CAP: usize, const SPI
         return;
     }
 
-    // Spill from the bottom (oldest) entries so the hot tail stays
-    // cache-resident.  Costs one memmove per spill but keeps LIFO
-    // locality on the surviving entries.
+    // Spill the oldest entries so the hot LIFO tail stays cache-resident.
     let mut batch: [SlotEntry; SPILL] = [SlotEntry {
         idx: u32::MAX,
         backed: false,
@@ -477,8 +413,8 @@ pub fn pcp_spill<R: StackRegion, const WORDS: usize, const CAP: usize, const SPI
     cache.spill_count.fetch_add(1, Ordering::Relaxed);
 }
 
-/// Drain every CPU's cache back to the global allocator.  Shutdown
-/// only — no concurrent PCP activity assumed.
+/// Drain every CPU's cache back to the global allocator.  Shutdown only — no
+/// concurrent PCP activity assumed.
 pub fn pcp_drain_all_impl<
     R: StackRegion,
     const WORDS: usize,
@@ -512,9 +448,8 @@ pub fn pcp_drain_all_impl<
     });
 }
 
-/// Drain the current CPU's cache back to the global allocator.  Test
-/// helper used to make global-bitmap state observable without chasing
-/// PCP effects.
+/// Drain the current CPU's cache.  Test helper: makes global-bitmap state
+/// observable without chasing PCP effects.
 pub fn pcp_flush_current_impl<
     R: StackRegion,
     const WORDS: usize,
@@ -549,9 +484,7 @@ pub fn pcp_flush_current_impl<
     }
 }
 
-/// Allocator-side of slot pop: pop from this CPU's cache (refilling
-/// from the global if empty).  Called by the per-region `_slot_pop`
-/// wiring.  Runs under a single `PreemptGuard`.
+/// Pop from this CPU's cache, refilling from the global allocator if empty.
 pub fn slot_pop_impl<R: StackRegion, const WORDS: usize, const CAP: usize, const REFILL: usize>(
     global: &SpinLock<StackVaAllocator<R, WORDS>>,
     pcp: &PcpArray<R, CAP>,
@@ -578,9 +511,7 @@ pub fn slot_pop_impl<R: StackRegion, const WORDS: usize, const CAP: usize, const
     Some(SlotEntry { idx, backed })
 }
 
-/// Allocator-side of slot push: push back to this CPU's cache
-/// (spilling to the global if full).  Called by the per-region
-/// `_slot_push` wiring.  Runs under a single `PreemptGuard`.
+/// Push back to this CPU's cache, spilling to the global allocator if full.
 pub fn slot_push_impl<R: StackRegion, const WORDS: usize, const CAP: usize, const SPILL: usize>(
     global: &SpinLock<StackVaAllocator<R, WORDS>>,
     pcp: &PcpArray<R, CAP>,
@@ -601,13 +532,11 @@ pub fn slot_push_impl<R: StackRegion, const WORDS: usize, const CAP: usize, cons
     cache.free_count.fetch_add(1, Ordering::Relaxed);
 }
 
-/// Initialise the global allocator and install one page-table sentinel
-/// per 2 MB chunk in the region.  The sentinel mapping forces the
-/// intermediate page table into existence so runtime allocations never
-/// race on PT creation.
+/// Initialise the global allocator and map one sentinel slot per 2 MB chunk;
+/// the sentinel forces the intermediate page table into existence so runtime
+/// allocations never race on PT creation.
 ///
-/// Panics if the page allocator runs out of frames or a sentinel
-/// mapping fails — both indicate severe boot-time misconfiguration.
+/// Panics if the page allocator runs out of frames or a sentinel mapping fails.
 pub fn init_with_sentinels<R: StackRegion, const WORDS: usize>(
     global: &SpinLock<StackVaAllocator<R, WORDS>>,
 ) {
@@ -648,12 +577,8 @@ fn install_pt_sentinels<R: StackRegion, const WORDS: usize>(
     }
 }
 
-// ---------------------------------------------------------------------------
-// Public top-level API.  Routes through the per-region trait wiring.
-// ---------------------------------------------------------------------------
-
-/// Allocate a free slot from region `R`.  Returns `None` only when the
-/// region is genuinely exhausted.
+/// Allocate a free slot from region `R`; `None` only when the region is
+/// exhausted.
 #[inline]
 pub fn alloc_slot<R: StackRegion>() -> Option<StackSlot<R>> {
     R::_slot_pop().map(StackSlot::from_entry)
@@ -665,8 +590,6 @@ pub fn init<R: StackRegion>() {
     R::_init();
 }
 
-/// Total slots outside the global free pool — the sum of slots held in
-/// any CPU's cache plus slots held by live `StackSlot<R>` handles.
 #[inline]
 pub fn in_use_count<R: StackRegion>() -> u32 {
     R::_in_use_count()
@@ -684,36 +607,20 @@ pub fn pcp_flush_current<R: StackRegion>() {
     R::_pcp_flush_current();
 }
 
-/// Diagnostic snapshot of one CPU's cache state.
 #[inline]
 pub fn pcp_stats<R: StackRegion>(cpu: usize) -> PcpStats {
     R::_pcp_stats(cpu)
 }
 
-/// Per-CPU cache capacity for region `R`.
 #[inline]
 pub const fn pcp_capacity<R: StackRegion>() -> usize {
     R::PCP_CAPACITY
 }
 
-// ===========================================================================
-// Concrete region instantiations.
-//
-// One block per region: tunable constants, the global SpinLock-protected
-// allocator static, the per-CPU cache static, and the StackRegion impl
-// that wires them up.  The two regions intentionally have separate
-// statics so their locks contend independently — the K and U warm paths
-// stay independent under churn.
-// ===========================================================================
-
 const REGION_PCP_CAPACITY: usize = 16;
 const REGION_PCP_REFILL_BATCH: usize = 8;
 const REGION_PCP_SPILL_BATCH: usize = 8;
 const REGION_PAGE_FLAGS: u64 = PageFlags::KERNEL_RW.bits() | PageFlags::NO_EXECUTE.bits();
-
-// ---------------------------------------------------------------------------
-// KstackRegion — kernel-mode task stacks.
-// ---------------------------------------------------------------------------
 
 mod kstack {
     use super::*;
@@ -724,7 +631,6 @@ mod kstack {
 
     pub(super) const BITMAP_WORDS: usize = KSTACK_MAX_SLOTS.div_ceil(64);
 
-    // Compile-time region-shape sanity.
     const _: () = {
         let span = KSTACK_VA_END - KSTACK_VA_BASE;
         assert!(
@@ -805,10 +711,6 @@ mod kstack {
         }
     }
 }
-
-// ---------------------------------------------------------------------------
-// UstackRegion — SafeStack-sanitiser data stacks.
-// ---------------------------------------------------------------------------
 
 mod ustack {
     use super::*;

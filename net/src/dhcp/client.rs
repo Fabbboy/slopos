@@ -2,34 +2,10 @@
 //!
 //! I/O-free, in the same idiom as [`DnsResolver`](crate::dns): it is fed events
 //! and returns actions, and it neither sends a packet nor reads a clock of its
-//! own. That is what makes every path below — a lease expiring mid-renewal, a
-//! NAK arriving in REBINDING, sixty seconds of a server not answering —
-//! reachable from a test under `MockClock`, with no network and no waiting.
+//! own.
 //!
-//! # The states, and why each exists
-//!
-//! ```text
-//! Init ──Start──► Selecting ──OFFER──► Requesting ──ACK──► Bound
-//!                     ▲                     │                │
-//!                     └────────NAK──────────┘             T1 │
-//!                                                            ▼
-//!                              Bound ◄──ACK── Renewing ──T2──► Rebinding
-//!                                                                  │
-//!                                              Init ◄──expiry/NAK───┘
-//! ```
-//!
-//! `Renewing` and `Rebinding` are genuinely different and collapsing them is
-//! the classic bug: a renewal is a *unicast* conversation with the server that
-//! granted the lease, while rebinding is a broadcast plea to any server at all,
-//! entered only once the granting server has stopped answering. A client that
-//! broadcast from T1 would make every server on the segment answer for a lease
-//! that was not theirs.
-//!
-//! # Retransmission never gives up
-//!
-//! Backoff runs 4, 8, 16, 32, 64 seconds and then stays at 64 forever. A client
-//! that stopped after N attempts is a machine that never recovers from a server
-//! being rebooted.
+//! `Renewing` unicasts to the granting server; `Rebinding` broadcasts, and is
+//! entered only once that server has stopped answering.
 
 use super::codec::{self, DHCP_FRAME_LEN, DhcpReply, MSG_ACK, MSG_NAK, MSG_OFFER};
 
@@ -39,14 +15,12 @@ pub const RETRY_BASE_MS: u32 = 4_000;
 pub const RETRY_MAX_MS: u32 = 64_000;
 /// Bound on the randomisation applied to every retransmission, ±1 s per
 /// RFC 2131 §4.1. Without it a segment full of machines that lost the same
-/// server retransmits in lockstep forever.
+/// server retransmits in lockstep.
 pub const RETRY_JITTER_MS: u32 = 1_000;
 
-/// Where a message goes.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum DhcpDest {
-    /// 255.255.255.255 at L3, broadcast at L2 — the only thing a client with no
-    /// address, or no known server, can do.
+    /// 255.255.255.255 at L3, broadcast at L2.
     Broadcast,
     /// Unicast to the server that granted the lease.
     Server([u8; 4]),
@@ -59,7 +33,7 @@ pub enum UnbindReason {
     Nak,
     /// The lease ran out without a renewal succeeding.
     Expired,
-    /// The operator or an administrative down stopped the client.
+    /// The client was stopped administratively.
     Stopped,
 }
 
@@ -78,10 +52,9 @@ pub struct DhcpBinding {
 
 /// What the caller must do next.
 ///
-/// Frames are not carried in here: the client owns one transmit buffer and the
-/// caller reads it with [`DhcpClient::frame`]. A 320-byte payload inside an
-/// enum would be copied at every return, on a kernel stack the build caps at
-/// 2 KiB.
+/// Frames are not carried in here — the caller reads [`DhcpClient::frame`] —
+/// because a 320-byte payload inside an enum would be copied at every return,
+/// against a 2 KiB kernel stack budget.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum DhcpAction {
     /// Nothing to do.
@@ -93,22 +66,21 @@ pub enum DhcpAction {
     Bind(DhcpBinding),
     /// Tear the lease down and cancel every timer.
     Unbind(UnbindReason),
-    /// Tear the lease down, then start discovering again — a NAK means the
-    /// address is not ours and no amount of asking for *that* one will help.
+    /// Tear the lease down, then start discovering again: a NAK means the
+    /// address is not ours.
     UnbindThenSend {
         reason: UnbindReason,
         dest: DhcpDest,
         retry_ms: u32,
     },
-    /// Transmit, then tear down. RELEASE has to reach the wire while the
-    /// address is still configured, so the order is load-bearing.
+    /// Transmit, then tear down: RELEASE must reach the wire while the address
+    /// is still configured.
     SendThenUnbind {
         dest: DhcpDest,
         reason: UnbindReason,
     },
 }
 
-/// What happened.
 #[derive(Clone, Copy, Debug)]
 pub enum DhcpEvent<'a> {
     /// Begin, or restart after a stop.
@@ -117,16 +89,14 @@ pub enum DhcpEvent<'a> {
     Stop,
     /// A UDP payload arrived on port 68.
     Reply(&'a [u8]),
-    /// The retransmission timer fired.
     Retransmit,
     /// T1: time to renew with the granting server.
     T1,
     /// T2: time to ask anybody.
     T2,
-    /// The lease ran out.
     Expire,
-    /// The link went away. The address is kept — a cable being unplugged does
-    /// not invalidate a lease, and the server holds the binding either way.
+    /// The link went away; the address is kept, since the server holds the
+    /// binding regardless.
     CarrierDown,
     /// The link came back; confirm the address we still hold.
     CarrierUp,
@@ -161,9 +131,8 @@ pub struct DhcpClient {
     state: DhcpState,
     mac: [u8; 6],
     xid: u32,
-    /// Transaction-id generator. Seeded from the kernel RNG in production; a
-    /// counter would let an off-path attacker predict the next transaction and
-    /// answer it.
+    /// Transaction-id generator, seeded from the kernel RNG: a predictable xid
+    /// lets an off-path attacker answer the transaction.
     rng: u32,
 
     addr: [u8; 4],
@@ -175,7 +144,7 @@ pub struct DhcpClient {
     t1_secs: u32,
     t2_secs: u32,
 
-    /// Backoff base, before jitter. Kept clean so the sequence is assertable.
+    /// Backoff base, before jitter.
     retry_base_ms: u32,
     /// True while the link is down: timers are stopped but the lease is kept.
     link_down: bool,
@@ -186,15 +155,13 @@ pub struct DhcpClient {
 
 impl DhcpClient {
     /// A client that has not started. `seed` must come from the kernel RNG in
-    /// production; a test passes a constant and gets a deterministic run.
+    /// production.
     pub const fn new(mac: [u8; 6], seed: u32) -> Self {
         Self {
             state: DhcpState::Init,
             mac,
             xid: 0,
-            // A zero seed would make the generator a fixed point, so fold in a
-            // constant: the caller's randomness is still the only entropy, but
-            // an unlucky zero does not silently disable it.
+            // Folded constant: a zero seed would make xorshift a fixed point.
             rng: seed ^ 0x9E37_79B9,
             addr: [0; 4],
             mask: [0; 4],
@@ -213,10 +180,8 @@ impl DhcpClient {
 
     /// Re-initialise in place for a fresh start.
     ///
-    /// In place rather than by assigning `DhcpClient::new(..)`, because the
-    /// value is around 360 bytes and materialising it as an rvalue puts it on
-    /// the caller's stack before the move — which, next to a 320-byte frame in
-    /// the same function, is most of the build's 2 KiB frame budget.
+    /// In place rather than by assigning `DhcpClient::new(..)`: the ~360-byte
+    /// rvalue would land on the caller's stack against a 2 KiB frame budget.
     pub fn reset(&mut self, mac: [u8; 6], seed: u32) {
         self.state = DhcpState::Init;
         self.mac = mac;
@@ -265,8 +230,7 @@ impl DhcpClient {
         self.xid
     }
 
-    /// The retransmission delay before jitter — what the backoff sequence
-    /// assertion reads.
+    /// The retransmission delay before jitter.
     #[inline]
     pub const fn retry_base_ms(&self) -> u32 {
         self.retry_base_ms
@@ -278,8 +242,7 @@ impl DhcpClient {
         &self.tx[..self.tx_len]
     }
 
-    /// xorshift32. Small, deterministic from a seed, and unpredictable without
-    /// it — which is all a transaction id needs to be.
+    /// xorshift32.
     fn next_random(&mut self) -> u32 {
         let mut x = self.rng;
         x ^= x << 13;
@@ -294,8 +257,8 @@ impl DhcpClient {
         self.retry_base_ms = RETRY_BASE_MS;
     }
 
-    /// The delay to arm, jittered. RFC 2131 randomises by ±1 s; the base is
-    /// left untouched so the doubling sequence stays exact.
+    /// The delay to arm, jittered; the base is left untouched so the doubling
+    /// sequence stays exact.
     fn jittered_retry(&mut self) -> u32 {
         let spread = 2 * RETRY_JITTER_MS + 1;
         let offset = self.next_random() % spread;
@@ -305,7 +268,7 @@ impl DhcpClient {
             .max(1)
     }
 
-    /// Double the backoff, capped. Never gives up — see the module docs.
+    /// Double the backoff, capped; retransmission never gives up.
     fn back_off(&mut self) {
         self.retry_base_ms = self.retry_base_ms.saturating_mul(2).min(RETRY_MAX_MS);
     }
@@ -323,10 +286,8 @@ impl DhcpClient {
     }
 
     /// Apply a reply's lease times, filling in the RFC 2131 §4.4.5 defaults for
-    /// whichever of T1 and T2 the server left out.
-    ///
-    /// A server is allowed to send a lease and no timers at all, and a client
-    /// that treated the absent values as zero would renew continuously.
+    /// whichever of T1 and T2 the server left out; treating the absent values
+    /// as zero would renew continuously.
     fn adopt(&mut self, reply: &DhcpReply) -> DhcpBinding {
         self.addr = reply.yiaddr;
         self.mask = reply.subnet_mask;
@@ -363,9 +324,8 @@ impl DhcpClient {
 
     /// Feed one event and get the work it implies.
     ///
-    /// `now_ms` is accepted for symmetry with the rest of the stack's
-    /// time-taking interfaces; the transitions themselves are driven by the
-    /// timer events the caller arms, not by comparing clocks in here.
+    /// `now_ms` is unused: transitions are driven by the timer events the
+    /// caller arms, not by comparing clocks in here.
     pub fn step(&mut self, event: DhcpEvent<'_>, now_ms: u64) -> DhcpAction {
         let _ = now_ms;
         match event {
@@ -383,8 +343,7 @@ impl DhcpClient {
 
     fn on_start(&mut self) -> DhcpAction {
         if matches!(self.state, DhcpState::Bound) {
-            // Already running; starting again is not a reason to give up a
-            // working lease.
+            // Starting again is not a reason to give up a working lease.
             return DhcpAction::Idle;
         }
         self.link_down = false;
@@ -427,8 +386,7 @@ impl DhcpClient {
             }
             DhcpState::Requesting => {
                 self.back_off();
-                // The frame is unchanged from the first attempt; rebuilding it
-                // would be the same bytes.
+                // The frame is unchanged from the first attempt.
                 self.send(DhcpDest::Broadcast)
             }
             DhcpState::Renewing => {
@@ -444,8 +402,6 @@ impl DhcpClient {
     }
 
     fn on_reply(&mut self, payload: &[u8]) -> DhcpAction {
-        // A reply for a transaction that is not ours, or one with no message
-        // type, is not evidence of anything.
         let Some(reply) = codec::parse_reply(payload, self.xid) else {
             return DhcpAction::Idle;
         };
@@ -477,15 +433,13 @@ impl DhcpClient {
                 DhcpAction::Bind(binding)
             }
             (DhcpState::Requesting, MSG_NAK) => {
-                // Nothing was ever installed, so there is nothing to unbind —
-                // just start over.
+                // Nothing was ever installed, so there is nothing to unbind.
                 self.clear_lease();
                 self.discover()
             }
             (DhcpState::Renewing, MSG_NAK) | (DhcpState::Rebinding, MSG_NAK) => {
-                // The address is installed and the server says it is not ours.
-                // Give it up immediately: keeping it risks a second host on the
-                // same address.
+                // Give the address up immediately: keeping a NAKed address
+                // risks a second host on it.
                 self.clear_lease();
                 let action = self.discover();
                 let DhcpAction::Send { dest, retry_ms } = action else {
@@ -497,9 +451,6 @@ impl DhcpClient {
                     retry_ms,
                 }
             }
-            // Anything else — an OFFER while bound, an ACK while selecting, a
-            // message type this client does not implement — is ignored rather
-            // than acted on.
             _ => DhcpAction::Idle,
         }
     }
@@ -520,8 +471,8 @@ impl DhcpClient {
             return DhcpAction::Idle;
         }
         self.new_transaction();
-        // Broadcast, and with no server identifier: the granting server has
-        // stopped answering, so this asks anybody who will listen.
+        // Broadcast, with no server identifier: the granting server has stopped
+        // answering.
         self.tx_len = codec::build_request_renew(self.mac, self.xid, self.addr, true, &mut self.tx);
         self.state = DhcpState::Rebinding;
         self.send(DhcpDest::Broadcast)
@@ -539,9 +490,6 @@ impl DhcpClient {
     }
 
     fn on_carrier_down(&mut self) -> DhcpAction {
-        // The lease survives: a server holds the binding for its full term
-        // whether or not this machine's cable is in, and dropping the address
-        // would make a five-second cable reseat cost a full DISCOVER round.
         self.link_down = true;
         DhcpAction::Idle
     }
@@ -549,12 +497,11 @@ impl DhcpClient {
     fn on_carrier_up(&mut self) -> DhcpAction {
         self.link_down = false;
         if self.addr == [0; 4] {
-            // Nothing to confirm — start from the beginning.
             return self.discover();
         }
-        // INIT-REBOOT: ask for the address we still hold. Broadcast and with no
-        // server identifier, because the segment may not be the one the lease
-        // came from and any server there is entitled to NAK it.
+        // INIT-REBOOT: broadcast a request for the address still held, with no
+        // server identifier — the segment may not be the one the lease came
+        // from, and any server there is entitled to NAK it.
         self.new_transaction();
         self.tx_len = codec::build_request_reboot(self.mac, self.xid, self.addr, &mut self.tx);
         self.state = DhcpState::Requesting;

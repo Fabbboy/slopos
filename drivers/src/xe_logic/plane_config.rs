@@ -31,7 +31,6 @@ pub enum Tiling {
     XTiled,
     YTiled,
     YfTiled,
-    /// A tiling-field value this driver does not model.
     Unknown,
 }
 
@@ -94,7 +93,7 @@ impl ColorOrder {
 pub enum PlaneFormat {
     /// The 0b0100 8:8:8:8 code (XRGB / ARGB / XBGR / ABGR).
     Rgb8888,
-    /// A format-field value this driver does not model, kept verbatim.
+    /// An unmodelled format-field value, kept verbatim.
     Unknown(u32),
 }
 
@@ -143,7 +142,6 @@ pub struct PlaneCtl {
     pub render_decompressed: bool,
 }
 
-/// A snapshot of the live primary-plane configuration.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct PlaneConfig {
     pub enable: bool,
@@ -157,7 +155,6 @@ pub struct PlaneConfig {
     pub height: u32,
     pub x: u32,
     pub y: u32,
-    /// GGTT address of the scanout surface.
     pub surf_ggtt: u32,
 }
 
@@ -258,7 +255,7 @@ pub const fn plane_to_pixel_format(plane_format_bits: u32) -> Option<PixelFormat
         .to_pixel_format()
 }
 
-// Compile-time proof that each encode/decode pair inverts, over the live-panel cases.
+// Compile-time proof that each encode/decode pair inverts.
 const _: () = {
     assert!(decode_size(encode_size(1920, 1080)).0 == 1920);
     assert!(decode_size(encode_size(1920, 1080)).1 == 1080);
@@ -271,8 +268,7 @@ const _: () = {
     assert!(linear_stride_reg(1920 * 4) == 120);
     assert!(linear_stride_bytes(linear_stride_reg(1920 * 4)) == 1920 * 4);
 
-    // The live DSPACNTR = 0x94009000 decodes to
-    // enable | XRGB8888 | Y-tiled | render-decompressed | BGR order.
+    // 0x94009000 is the live DSPACNTR left by the firmware modeset.
     let live = decode_ctl(0x9400_9000);
     assert!(live.enable);
     assert!(live.format.to_field() == FORMAT_FIELD_RGB8888);

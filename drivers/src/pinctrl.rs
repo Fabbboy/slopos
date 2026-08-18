@@ -5,15 +5,15 @@
 //! The community windows sit at `SBREG_BAR + community_offset`, neither value
 //! discoverable at runtime: the P2SB device exposing `SBREG_BAR` is
 //! firmware-hidden, and the `_CRS` computing the windows reads an
-//! `OperationRegion` the AML reader cannot resolve. Both are SoC constants
-//! confirmed against silicon by [`init_for_pad`]; a wrong one fails validation
-//! and the caller falls back to polling.
+//! `OperationRegion` the AML reader cannot resolve. [`init_for_pad`] validates
+//! both against silicon; a wrong one fails validation and the caller falls back
+//! to polling.
 
 use slopos_abi::addr::PhysAddr;
 use slopos_mm::mmio::{MmioRegion, MmioRegionExt};
 use slopos_ostd::sync::OnceLock;
 
-/// Community base + 0x0c: offset from that base to the pad-config register block.
+/// Offset from the community base to the pad-config register block.
 const PADBAR: usize = 0x00c;
 /// PADCFG0..3 = 4 dwords = 16 bytes per pad.
 const PAD_NREGS: usize = 4;
@@ -148,7 +148,7 @@ pub fn init_for_pad(crs_gpio_line: u16, edge: bool, active_low: bool) -> Option<
     let ie_off = TGL_GPI_IE + pad.reg_num as usize * 4;
     let bit = 1u32 << pad.gpp_offset;
 
-    // Idempotent: trigger/polarity from the GpioInt, IO-APIC routing, RX enabled.
+    // Idempotent re-programming of the pad from the GpioInt descriptor.
     let mut cfg = mmio.read::<u32>(padcfg0_off);
     cfg &= !PADCFG0_RXEVCFG_MASK;
     if edge {
@@ -221,7 +221,6 @@ pub fn service_pending() -> bool {
 
 #[doc(hidden)]
 pub fn test_pin_for_crs_gpio_touchpad() -> slopos_testing::TestResult {
-    // Touchpad GpioInt line 177 (ISH_GP_4) → pinctrl pin 116.
     match pin_for_crs_gpio(177) {
         Some(116) => slopos_testing::TestResult::Pass,
         _ => slopos_testing::TestResult::Fail,

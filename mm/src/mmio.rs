@@ -1,13 +1,9 @@
 //! `MmioRegion` — kernel-side alias for `slopos_ostd::mm::io_mem::IoMem`.
 //!
-//! All call sites go through OSTD's gated `IoMemRegistry`. The
-//! [`MmioRegionExt`] trait carries the legacy `map` / `map_page` /
-//! `map_1mb` constructors so existing driver code keeps compiling
-//! without changing call shape — under the hood, each `map(...)`
-//! registers the requested phys range with OSTD's dynamic-range
-//! secondary registry and then asks `IoMemRegistry::reserve` for the
-//! mapping. The single MMIO virt allocator now lives in
-//! [`crate::io_mem_mapper_shim`].
+//! [`MmioRegionExt`] keeps the legacy `map` / `map_page` / `map_1mb` shape for
+//! existing driver call sites; each registers the phys range with OSTD's
+//! dynamic-range secondary registry, then reserves through `IoMemRegistry`.
+//! The single MMIO virt allocator lives in [`crate::io_mem_mapper_shim`].
 
 use slopos_abi::addr::PhysAddr;
 use slopos_ostd::mm::io_mem::{
@@ -18,16 +14,12 @@ use crate::paging_defs::PAGE_SIZE_4KB;
 
 pub type MmioRegion = IoMem;
 
-/// Legacy constructor surface for [`MmioRegion`]. `IoMem` itself is
-/// only buildable through `IoMemRegistry::reserve` (or the const
-/// [`MmioRegion::empty`] placeholder); this trait re-introduces the
-/// `MmioRegion::map(phys, size)` shape that ~14 driver call-sites
-/// already use.
+/// `IoMem` is otherwise only buildable through `IoMemRegistry::reserve` or the
+/// const [`MmioRegion::empty`] placeholder.
 pub trait MmioRegionExt: Sized {
-    /// Allocate a kernel virtual window for `[phys, phys + size)`,
-    /// install Uncacheable page-table entries, and return the
-    /// resulting [`MmioRegion`]. Returns `None` for null phys, zero
-    /// size, address-space overflow, or registry / mapper failure.
+    /// Allocate a kernel virtual window for `[phys, phys + size)` with
+    /// Uncacheable page-table entries. `None` on null phys, zero size,
+    /// address-space overflow, or registry / mapper failure.
     fn map(phys: PhysAddr, size: usize) -> Option<Self>;
 
     /// `map(phys, PAGE_SIZE_4KB)`.

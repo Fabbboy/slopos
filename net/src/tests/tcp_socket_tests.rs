@@ -12,17 +12,14 @@ use crate::tcp::listener::{
 };
 use crate::types::{Ipv4Addr, Port, SockAddr};
 
-/// Helper: a SYN queue bound to [`local_addr`], capacity reserved.
 fn make_syn_queue() -> SynQueue {
     SynQueue::with_capacity(local_addr()).expect("syn queue alloc")
 }
 
-/// Helper: an accept queue with the given backlog.
 fn make_listen(backlog: usize) -> TcpListenState {
     TcpListenState::new(backlog, local_addr()).expect("listen state alloc")
 }
 
-/// Helper: create a local listening address.
 fn local_addr() -> SockAddr {
     SockAddr {
         ip: Ipv4Addr([10, 0, 0, 1]),
@@ -30,7 +27,6 @@ fn local_addr() -> SockAddr {
     }
 }
 
-/// Helper: create a unique remote client address.
 fn client_addr(n: u16) -> SockAddr {
     SockAddr {
         ip: Ipv4Addr([192, 168, 1, (n & 0xff) as u8]),
@@ -38,15 +34,10 @@ fn client_addr(n: u16) -> SockAddr {
     }
 }
 
-// =============================================================================
-// T1: SYN queue overflow — fill to SYN_QUEUE_MAX, verify next SYN returns None
-// =============================================================================
-
 pub fn test_syn_queue_overflow() -> TestResult {
     reset_syn_entry_keys();
     let mut syn = make_syn_queue();
 
-    // Fill the SYN queue to capacity.
     for i in 0..SYN_QUEUE_MAX as u16 {
         let client = client_addr(i);
         let result = syn.on_syn(client, 1000 + i as u32, 1460, false, 0, None);
@@ -58,7 +49,6 @@ pub fn test_syn_queue_overflow() -> TestResult {
 
     assert_eq_test!(syn.len(), SYN_QUEUE_MAX, "SYN queue at capacity");
 
-    // Next SYN should be silently dropped (no RST).
     let overflow_client = client_addr(SYN_QUEUE_MAX as u16);
     let overflow_result = syn.on_syn(overflow_client, 9999, 1460, false, 0, None);
     assert_test!(
@@ -66,7 +56,6 @@ pub fn test_syn_queue_overflow() -> TestResult {
         "SYN queue full -> silently dropped (no RST)"
     );
 
-    // Queue length unchanged.
     assert_eq_test!(
         syn.len(),
         SYN_QUEUE_MAX,
@@ -75,11 +64,6 @@ pub fn test_syn_queue_overflow() -> TestResult {
 
     pass!()
 }
-
-// =============================================================================
-// T2: A matching final ACK always completes the handshake; whether the result
-//     can be queued for accept() is the socket layer's separate bound.
-// =============================================================================
 
 pub fn test_accept_queue_overflow() -> TestResult {
     reset_syn_entry_keys();
@@ -128,11 +112,6 @@ pub fn test_accept_queue_overflow() -> TestResult {
     pass!()
 }
 
-// =============================================================================
-// T3: SYN-ACK retransmission — verify 5 retransmissions with backoff, then
-//     removal
-// =============================================================================
-
 pub fn test_syn_ack_retransmit_exhaustion() -> TestResult {
     reset_syn_entry_keys();
     let mut syn = make_syn_queue();
@@ -142,15 +121,12 @@ pub fn test_syn_ack_retransmit_exhaustion() -> TestResult {
     assert_test!(syn_ack.is_some(), "initial SYN accepted");
     assert_eq_test!(syn.len(), 1, "1 entry in SYN queue");
 
-    // The SYN-ACK returned by on_syn tells us the ISS.
     let syn_ack = syn_ack.unwrap();
     let original_iss = syn_ack.seq_num;
 
-    // Determine the entry's key — it's the first key allocated (we reset keys).
-    // Key=1 because we reset_syn_entry_keys() above.
+    // The first key allocated after reset_syn_entry_keys().
     let entry_key = 1u32;
 
-    // Simulate 5 retransmit timer firings — each should return a SYN-ACK.
     for _retry in 1..=SYN_RETRIES_MAX {
         let retransmit = syn.on_retransmit(entry_key);
         assert_test!(retransmit.is_some(), "retransmit should succeed on retry");
@@ -163,7 +139,6 @@ pub fn test_syn_ack_retransmit_exhaustion() -> TestResult {
         assert_eq_test!(syn.len(), 1, "entry still in SYN queue");
     }
 
-    // 6th retransmit (retry > SYN_RETRIES_MAX) — entry should be removed.
     let exhausted = syn.on_retransmit(entry_key);
     assert_test!(
         exhausted.is_none(),
@@ -178,10 +153,6 @@ pub fn test_syn_ack_retransmit_exhaustion() -> TestResult {
     pass!()
 }
 
-// =============================================================================
-// Additional coverage: duplicate SYN retransmits existing SYN-ACK
-// =============================================================================
-
 pub fn test_duplicate_syn_retransmits() -> TestResult {
     reset_syn_entry_keys();
     let mut syn = make_syn_queue();
@@ -191,7 +162,6 @@ pub fn test_duplicate_syn_retransmits() -> TestResult {
     assert_test!(first.is_some(), "first SYN accepted");
     let first_iss = first.unwrap().seq_num;
 
-    // Send duplicate SYN — should retransmit the same SYN-ACK.
     let dup = syn.on_syn(client, 7000, 1460, false, 100, None);
     assert_test!(dup.is_some(), "duplicate SYN triggers SYN-ACK retransmit");
     let dup_iss = dup.unwrap().seq_num;
@@ -206,15 +176,10 @@ pub fn test_duplicate_syn_retransmits() -> TestResult {
     pass!()
 }
 
-// =============================================================================
-// TcpListenState — push_accepted enqueues completed connections
-// =============================================================================
-
 pub fn test_push_accepted_basic() -> TestResult {
     reset_syn_entry_keys();
     let mut listen = make_listen(4);
 
-    // Push an accepted connection directly.
     let accepted = crate::tcp::listener::AcceptedConn {
         tuple: crate::tcp::TcpTuple {
             local_ip: [10, 0, 0, 1],
@@ -237,7 +202,6 @@ pub fn test_push_accepted_basic() -> TestResult {
         "accept queue should have 1 entry"
     );
 
-    // Accept should dequeue it.
     let dequeued = listen.accept();
     assert_test!(
         dequeued.is_some(),
@@ -258,16 +222,11 @@ pub fn test_push_accepted_basic() -> TestResult {
     pass!()
 }
 
-// =============================================================================
-// TcpListenState — push_accepted respects backlog
-// =============================================================================
-
 pub fn test_push_accepted_respects_backlog() -> TestResult {
     reset_syn_entry_keys();
     let backlog = 2usize;
     let mut listen = make_listen(backlog);
 
-    // Fill to backlog.
     for i in 0..backlog as u16 {
         let accepted = crate::tcp::listener::AcceptedConn {
             tuple: crate::tcp::TcpTuple {
@@ -291,7 +250,6 @@ pub fn test_push_accepted_respects_backlog() -> TestResult {
         "accept queue at backlog"
     );
 
-    // Next push should fail (queue full).
     let overflow = crate::tcp::listener::AcceptedConn {
         tuple: crate::tcp::TcpTuple {
             local_ip: [10, 0, 0, 1],
@@ -316,7 +274,6 @@ pub fn test_push_accepted_respects_backlog() -> TestResult {
         "accept queue unchanged after overflow"
     );
 
-    // Drain one, then push again — should succeed.
     let _ = listen.accept();
     assert_eq_test!(
         listen.accept_queue_len(),
@@ -335,14 +292,9 @@ pub fn test_push_accepted_respects_backlog() -> TestResult {
     pass!()
 }
 
-// =============================================================================
-// TcpListenState — backlog clamping
-// =============================================================================
-
 pub fn test_listen_state_backlog_clamping() -> TestResult {
     reset_syn_entry_keys();
 
-    // Backlog 0 should clamp to BACKLOG_MIN (1).
     let listen_min = make_listen(0);
     assert_eq_test!(
         listen_min.backlog(),
@@ -350,7 +302,6 @@ pub fn test_listen_state_backlog_clamping() -> TestResult {
         "backlog=0 should clamp to BACKLOG_MIN"
     );
 
-    // Backlog 999 should clamp to BACKLOG_MAX.
     let listen_max = make_listen(999);
     assert_eq_test!(
         listen_max.backlog(),
@@ -358,7 +309,6 @@ pub fn test_listen_state_backlog_clamping() -> TestResult {
         "backlog=999 should clamp to BACKLOG_MAX"
     );
 
-    // Normal backlog should pass through.
     let listen_normal = make_listen(16);
     assert_eq_test!(
         listen_normal.backlog(),
@@ -369,15 +319,10 @@ pub fn test_listen_state_backlog_clamping() -> TestResult {
     pass!()
 }
 
-// =============================================================================
-// TcpListenState — accept returns FIFO order
-// =============================================================================
-
 pub fn test_accept_fifo_order() -> TestResult {
     reset_syn_entry_keys();
     let mut listen = make_listen(8);
 
-    // Push 3 connections with distinct remote ports.
     for i in 0..3u16 {
         let accepted = crate::tcp::listener::AcceptedConn {
             tuple: crate::tcp::TcpTuple {
@@ -395,7 +340,6 @@ pub fn test_accept_fifo_order() -> TestResult {
         listen.push_accepted(accepted);
     }
 
-    // Accept should return in FIFO order.
     for i in 0..3u16 {
         let conn = listen.accept();
         assert_test!(conn.is_some(), "accept should return connection");
@@ -406,27 +350,20 @@ pub fn test_accept_fifo_order() -> TestResult {
         );
     }
 
-    // Queue should be empty now.
     let none = listen.accept();
     assert_test!(none.is_none(), "accept on empty queue returns None");
 
     pass!()
 }
 
-// =============================================================================
-// TcpListenState — clear wipes both queues
-// =============================================================================
-
 pub fn test_listen_state_clear() -> TestResult {
     reset_syn_entry_keys();
     let mut syn = make_syn_queue();
     let mut listen = make_listen(16);
 
-    // Add something to SYN queue.
     let _ = syn.on_syn(client_addr(0), 1000, 1460, false, 0, None);
     assert_eq_test!(syn.len(), 1, "SYN queue has 1 entry");
 
-    // Push to accept queue.
     let accepted = crate::tcp::listener::AcceptedConn {
         tuple: crate::tcp::TcpTuple {
             local_ip: [10, 0, 0, 1],
@@ -443,7 +380,6 @@ pub fn test_listen_state_clear() -> TestResult {
     listen.push_accepted(accepted);
     assert_eq_test!(listen.accept_queue_len(), 1, "accept queue has 1 entry");
 
-    // Each queue clears its own half now.
     syn.clear();
     listen.clear();
     assert_eq_test!(syn.len(), 0, "SYN queue cleared");
@@ -452,24 +388,14 @@ pub fn test_listen_state_clear() -> TestResult {
     pass!()
 }
 
-// =============================================================================
-// TCP Send/Recv/Shutdown — FIN handling and shutdown semantics
-// =============================================================================
-
 use crate::tcp::{self, ConnId, TCP_FLAG_ACK, TCP_FLAG_FIN, TcpHeader, TcpState};
 use crate::tests::tcp_common;
 
-/// Legacy tuple form of [`tcp_common::establish_connection`], kept so the
-/// test bodies below don't need destructuring rewrites during the P1.2 move.
-///
-/// The canonical helper in `tcp_common` targets `REMOTE_IP = 10.0.0.2` with
-/// `REMOTE_PORT = 80`, which matches the addresses this suite used before.
 fn establish_connection() -> (ConnId, u16, u32) {
     let c = tcp_common::establish_connection();
     (c.id, c.local_port, c.our_iss)
 }
 
-/// Helper: deliver a FIN from the remote peer to a connection.
 fn deliver_peer_fin(id: ConnId) {
     let (tuple, rcv_nxt, snd_nxt) = tcp::with_pcb(id, |pcb| match &pcb.state {
         tcp::PcbState::Data(d) => (pcb.tuple, d.rcv_nxt.raw(), d.snd_nxt.raw()),
@@ -490,7 +416,6 @@ fn deliver_peer_fin(id: ConnId) {
     tcp::input(tuple.remote_ip, tuple.local_ip, &fin_hdr, &[], &[], 0);
 }
 
-/// Helper: deliver data from the remote peer.
 fn deliver_peer_data(id: ConnId, data: &[u8]) {
     let (tuple, rcv_nxt, snd_nxt) = tcp::with_pcb(id, |pcb| match &pcb.state {
         tcp::PcbState::Data(d) => (pcb.tuple, d.rcv_nxt.raw(), d.snd_nxt.raw()),
@@ -511,17 +436,11 @@ fn deliver_peer_data(id: ConnId, data: &[u8]) {
     tcp::input(tuple.remote_ip, tuple.local_ip, &hdr, &[], data, 0);
 }
 
-// =============================================================================
-// 5.T4: FIN handling — peer FIN transitions to CloseWait, recv returns 0 (EOF)
-//       after buffered data is drained.
-// =============================================================================
-
 pub fn test_fin_handling_eof() -> TestResult {
     tcp::reset_all();
 
     let (id, _lp, _iss) = establish_connection();
 
-    // Peer sends some data, then FIN.
     deliver_peer_data(id, b"hello");
     deliver_peer_fin(id);
 
@@ -531,17 +450,14 @@ pub fn test_fin_handling_eof() -> TestResult {
         "should be CLOSE_WAIT after peer FIN"
     );
 
-    // Drain the buffered data.
     let mut buf = [0u8; 64];
     let n = tcp::recv(id, &mut buf).expect("recv should succeed");
     assert_eq_test!(n, 5, "should read 5 bytes of buffered data");
     assert_eq_test!(&buf[..5], b"hello", "buffered data should match");
 
-    // Next recv should return 0 (EOF) — buffer empty + peer closed.
     let n2 = tcp::recv(id, &mut buf).expect("recv should succeed");
     assert_eq_test!(n2, 0, "recv after drain + FIN should return 0 (EOF)");
 
-    // is_peer_closed should be true.
     assert_test!(
         tcp::is_peer_closed(id),
         "tcp_is_peer_closed should be true in CLOSE_WAIT"
@@ -550,20 +466,13 @@ pub fn test_fin_handling_eof() -> TestResult {
     pass!()
 }
 
-// =============================================================================
-// 5.T5: shutdown(SHUT_WR) — sends FIN (Established→FinWait1) but recv still
-//       works for buffered data.
-// =============================================================================
-
 pub fn test_shutdown_write_sends_fin() -> TestResult {
     tcp::reset_all();
 
     let (id, _lp, _iss) = establish_connection();
 
-    // Peer sends data before our shutdown.
     deliver_peer_data(id, b"world");
 
-    // Shutdown write half — should send FIN.
     let result = tcp::shutdown_write(id);
     assert_test!(result.is_ok(), "tcp_shutdown_write should succeed");
     let seg = result.unwrap();
@@ -580,48 +489,38 @@ pub fn test_shutdown_write_sends_fin() -> TestResult {
         "should transition to FIN_WAIT_1"
     );
 
-    // Recv should still work — we only shut down writing.
     let mut buf = [0u8; 64];
     let n = tcp::recv(id, &mut buf).expect("recv should still work");
     assert_eq_test!(n, 5, "should read 5 bytes");
     assert_eq_test!(&buf[..5], b"world", "data should match");
 
-    // Sending should fail (InvalidState — no longer Established/CloseWait).
     let send_result = tcp::send(id, b"test");
     assert_test!(send_result.is_err(), "send after SHUT_WR should fail");
 
     pass!()
 }
 
-// =============================================================================
-// 5.T6: shutdown(SHUT_RD) — recv buffer is cleared, is_peer_closed check.
-// =============================================================================
-
 pub fn test_shutdown_read_discards_buffer() -> TestResult {
     tcp::reset_all();
 
     let (id, _lp, _iss) = establish_connection();
 
-    // Peer sends data.
     deliver_peer_data(id, b"discard me");
 
-    // Verify data is in the buffer.
     assert_test!(
         tcp::recv_available(id) > 0,
         "recv buffer should have data before discard"
     );
 
-    // Discard recv buffer (simulates SHUT_RD at tcp layer).
+    // SHUT_RD at the tcp layer is a recv-buffer discard.
     tcp::recv_discard(id);
 
-    // Buffer should be empty now.
     assert_eq_test!(
         tcp::recv_available(id),
         0,
         "recv buffer should be empty after discard"
     );
 
-    // State should still be Established (shutdown read doesn't change state).
     assert_eq_test!(
         tcp::get_state(id),
         Some(TcpState::Established),
@@ -631,20 +530,14 @@ pub fn test_shutdown_read_discards_buffer() -> TestResult {
     pass!()
 }
 
-// =============================================================================
-// 5.T9: TCP data round-trip — send data, simulate peer echo, recv it back.
-// =============================================================================
-
 pub fn test_tcp_data_roundtrip() -> TestResult {
     tcp::reset_all();
 
     let (id, _lp, _iss) = establish_connection();
 
-    // Write data into the send buffer.
     let written = tcp::send(id, b"ping").expect("tcp_send should succeed");
     assert_eq_test!(written, 4, "should write 4 bytes");
 
-    // Poll transmit to get the outgoing segment.
     let mut tx_buf: KBox<[u8; 1500]> = KBox::zeroed().expect("alloc");
     let result = tcp::poll_transmit(id, &mut *tx_buf, 0);
     assert_test!(result.is_some(), "should have data to transmit");
@@ -652,7 +545,6 @@ pub fn test_tcp_data_roundtrip() -> TestResult {
     assert_eq_test!(payload_len, 4, "transmitted payload should be 4 bytes");
     assert_eq_test!(&tx_buf[..4], b"ping", "payload should be 'ping'");
 
-    // Simulate peer ACK + echo data back.
     let (tuple, rcv_nxt) = tcp::with_pcb(id, |pcb| match &pcb.state {
         tcp::PcbState::Data(d) => (pcb.tuple, d.rcv_nxt.raw()),
         other => panic!("expected Data state, got {}", other.name()),
@@ -671,7 +563,6 @@ pub fn test_tcp_data_roundtrip() -> TestResult {
     };
     tcp::input(tuple.remote_ip, tuple.local_ip, &ack_hdr, &[], b"pong", 0);
 
-    // Read the echoed data.
     let mut buf = [0u8; 64];
     let n = tcp::recv(id, &mut buf).expect("recv should succeed");
     assert_eq_test!(n, 4, "should read 4 bytes");
@@ -679,10 +570,6 @@ pub fn test_tcp_data_roundtrip() -> TestResult {
 
     pass!()
 }
-
-// =============================================================================
-// 5.T10: TCP send buffer space and flow control.
-// =============================================================================
 
 pub fn test_tcp_send_buffer_space() -> TestResult {
     tcp::reset_all();
@@ -692,7 +579,6 @@ pub fn test_tcp_send_buffer_space() -> TestResult {
     let initial_space = tcp::send_buffer_space(id);
     assert_test!(initial_space > 0, "initial send buffer should have space");
 
-    // Fill some of the buffer.
     let data = [0xABu8; 1024];
     let written = tcp::send(id, &data).expect("tcp_send should succeed");
     assert_eq_test!(written, 1024, "should write 1024 bytes");
@@ -704,7 +590,6 @@ pub fn test_tcp_send_buffer_space() -> TestResult {
         "send buffer space should decrease"
     );
 
-    // has_pending_data should be true.
     assert_test!(
         tcp::has_pending_data(id),
         "should have pending data after send"
@@ -713,18 +598,11 @@ pub fn test_tcp_send_buffer_space() -> TestResult {
     pass!()
 }
 
-// =============================================================================
-// 5.T11: Full FIN teardown — active close (Established→FinWait1→FinWait2→
-//        TimeWait) and passive close (Established→CloseWait→LastAck→Closed).
-// =============================================================================
-
 pub fn test_fin_full_teardown() -> TestResult {
     tcp::reset_all();
 
-    // --- Active close path: Established → FIN_WAIT_1 → FIN_WAIT_2 → TIME_WAIT ---
     let (id, _lp, _iss) = establish_connection();
 
-    // Initiate close (sends FIN).
     let close_result = tcp::close(id);
     assert_test!(close_result.is_ok(), "tcp_close should succeed");
     let fin_seg = close_result.unwrap();
@@ -735,7 +613,6 @@ pub fn test_fin_full_teardown() -> TestResult {
         "should be FIN_WAIT_1 after close"
     );
 
-    // Peer ACKs our FIN → FIN_WAIT_2.
     let (tuple, rcv_nxt, snd_nxt) = tcp::with_pcb(id, |pcb| match &pcb.state {
         tcp::PcbState::Data(d) => (pcb.tuple, d.rcv_nxt.raw(), d.snd_nxt.raw()),
         other => panic!("expected Data state, got {}", other.name()),
@@ -745,7 +622,7 @@ pub fn test_fin_full_teardown() -> TestResult {
         src_port: tuple.remote_port,
         dst_port: tuple.local_port,
         seq_num: rcv_nxt,
-        ack_num: snd_nxt, // ACKs our FIN
+        ack_num: snd_nxt,
         data_offset: 5,
         flags: TCP_FLAG_ACK,
         window_size: 65535,
@@ -759,7 +636,6 @@ pub fn test_fin_full_teardown() -> TestResult {
         "should be FIN_WAIT_2 after FIN ack"
     );
 
-    // Peer sends FIN → TIME_WAIT.
     deliver_peer_fin(id);
     assert_eq_test!(
         tcp::get_state(id),
@@ -767,11 +643,9 @@ pub fn test_fin_full_teardown() -> TestResult {
         "should be TIME_WAIT after peer FIN"
     );
 
-    // --- Passive close path: Established → CLOSE_WAIT → LAST_ACK → CLOSED ---
     tcp::reset_all();
     let (id2, _lp2, _iss2) = establish_connection();
 
-    // Peer sends FIN → CLOSE_WAIT.
     deliver_peer_fin(id2);
     assert_eq_test!(
         tcp::get_state(id2),
@@ -779,7 +653,6 @@ pub fn test_fin_full_teardown() -> TestResult {
         "should be CLOSE_WAIT after peer FIN"
     );
 
-    // We close → sends our FIN → LAST_ACK.
     let close_result2 = tcp::close(id2);
     assert_test!(close_result2.is_ok(), "tcp_close should succeed");
     assert_eq_test!(
@@ -788,7 +661,6 @@ pub fn test_fin_full_teardown() -> TestResult {
         "should be LAST_ACK after close from CLOSE_WAIT"
     );
 
-    // Peer ACKs our FIN → CLOSED (released).
     let (tuple2, rcv_nxt2, snd_nxt2) = tcp::with_pcb(id2, |pcb| match &pcb.state {
         tcp::PcbState::Data(d) => (pcb.tuple, d.rcv_nxt.raw(), d.snd_nxt.raw()),
         other => panic!("expected Data state, got {}", other.name()),
@@ -813,7 +685,6 @@ pub fn test_fin_full_teardown() -> TestResult {
         &[],
         0,
     );
-    // Connection should be released.
     assert_test!(
         tcp::get_state(id2).is_none(),
         "should be released after LAST_ACK acked"
@@ -822,7 +693,6 @@ pub fn test_fin_full_teardown() -> TestResult {
     pass!()
 }
 
-// tests
 slopos_testing::stest!(name = test_syn_queue_overflow, suite = tcp_socket);
 slopos_testing::stest!(name = test_accept_queue_overflow, suite = tcp_socket);
 slopos_testing::stest!(
@@ -830,7 +700,6 @@ slopos_testing::stest!(
     suite = tcp_socket
 );
 slopos_testing::stest!(name = test_duplicate_syn_retransmits, suite = tcp_socket);
-// tests
 slopos_testing::stest!(name = test_push_accepted_basic, suite = tcp_socket);
 slopos_testing::stest!(
     name = test_push_accepted_respects_backlog,
@@ -842,7 +711,6 @@ slopos_testing::stest!(
 );
 slopos_testing::stest!(name = test_accept_fifo_order, suite = tcp_socket);
 slopos_testing::stest!(name = test_listen_state_clear, suite = tcp_socket);
-// tests
 slopos_testing::stest!(name = test_fin_handling_eof, suite = tcp_socket);
 slopos_testing::stest!(name = test_shutdown_write_sends_fin, suite = tcp_socket);
 slopos_testing::stest!(
@@ -855,10 +723,9 @@ slopos_testing::stest!(name = test_fin_full_teardown, suite = tcp_socket);
 
 /// A listener's established children are released with it.
 ///
-/// A child installed on the final ACK holds a shard slot and names its
-/// listener as its socket. Nothing else reclaims those once the listener is
-/// gone — they would sit until a RST, a FIN or TIME_WAIT expiry, which is a
-/// slow leak of the machine-wide table driven entirely by a remote peer.
+/// Nothing else reclaims a child once its listener is gone: the shard slots
+/// would sit until a RST, a FIN or TIME_WAIT expiry, a table leak a remote
+/// peer drives.
 pub fn test_listener_release_reclaims_its_children() -> TestResult {
     use crate::tcp::SocketId;
 

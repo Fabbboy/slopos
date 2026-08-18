@@ -1,21 +1,11 @@
 //! Hardware-sequencing half of the Intel xe display driver.
 //!
-//! This module owns the device-facing work the pure [`crate::xe_logic`] layer
-//! deliberately avoids: PCI binding, BAR0 mapping, reading live display
-//! registers, and inheriting the firmware modeset to re-point the active plane at
-//! our own linear framebuffer. The read-only diagnostics identify the silicon,
-//! map the GTTMMADR register window, and decode what the firmware programmed. The
-//! repoint wiring lives in [`repoint`] and the supporting [`snapshot`], [`pipe`],
-//! [`plane`], [`ggtt`], and [`watchdog`] modules; this module maps the register
-//! window once and hands a shared handle to [`repoint::run`]. When the driver
-//! binds to a matching device it drives scanout by default — it inherits the
-//! firmware modeset, repoints the active plane, and layers the hardware cursor
-//! ([`cursor`]) and tear-free present ([`present`]) on top. `xe.modeset=off` is
-//! the `nomodeset` escape that keeps the firmware framebuffer untouched. The only
-//! automatic fallback is the watchdog rollback inside [`repoint`]: if a repoint
-//! does not keep the panel scanning, the firmware framebuffer is restored. All
-//! claim/commit and snapshot/rollback logic lives in [`repoint`]; none of it
-//! leaks into this dispatch.
+//! Owns the device-facing work the pure [`crate::xe_logic`] layer deliberately
+//! avoids: PCI binding, BAR0 mapping, reading live display registers, and
+//! inheriting the firmware modeset to re-point the active plane at our own
+//! linear framebuffer. This module maps the register window once and hands a
+//! shared handle to [`repoint::run`]; all claim/commit and snapshot/rollback
+//! logic lives there, not in this dispatch.
 
 mod cursor;
 mod ddb;
@@ -51,7 +41,6 @@ pub fn set_config(cfg: XeConfig) {
     *XE_CONFIG.lock() = Some(cfg);
 }
 
-/// The active configuration, or the defaults if boot never set one.
 fn config() -> XeConfig {
     let guard = XE_CONFIG.lock();
     guard.unwrap_or_default()
@@ -63,15 +52,11 @@ fn config() -> XeConfig {
 /// over scanout via [`repoint::run`] — that is the default, no knob required.
 /// `xe.modeset=off` is the `nomodeset` escape: the driver maps the register
 /// window, optionally dumps diagnostics, and stays on the firmware framebuffer
-/// without writing a single display register. `xe.diag=on` adds verbose logging
-/// either way. The register window is mapped at most once and shared with
-/// [`diag::dump`] and [`repoint::run`].
+/// without writing a single display register.
 fn xe_probe(bound: &mut BoundDevice<'_>) -> Result<ProbeOutcome, PciProbeError> {
     let info = *bound.info();
     let cfg = config();
 
-    // `xe.force_did` overrides the real PCI Device ID for platform matching;
-    // unset means trust the device's own ID.
     let did = cfg.force_did.unwrap_or(info.device_id);
     let Some(platform) = platform::identify(info.vendor_id, did) else {
         klog_info!("XE: unrecognised display device 0x{:04x}; declining", did);
@@ -80,8 +65,6 @@ fn xe_probe(bound: &mut BoundDevice<'_>) -> Result<ProbeOutcome, PciProbeError> 
 
     klog_info!("XE: matched {} (did 0x{:04x})", platform.name, did);
 
-    // With modesetting disabled and no diagnostics requested there is nothing to
-    // do: leave the firmware framebuffer alone and map nothing.
     if !cfg.modeset && !cfg.diag {
         klog_info!("XE: xe.modeset=off; firmware framebuffer retained");
         return Ok(ProbeOutcome::Declined);

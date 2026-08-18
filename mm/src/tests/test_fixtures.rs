@@ -13,16 +13,9 @@ use crate::user_mappings::{ostd_get_pte_flags_4kb, ostd_map_4kb_user, ostd_mark_
 use slopos_abi::task::INVALID_PROCESS_ID;
 use slopos_ostd::process::ProcessId;
 
-/// RAII guard: owns a process VM, calls `destroy_process_vm` on drop.
-///
-/// Every paging operation flows through the process's OSTD
-/// `KArc<VmSpace>`. The guard exposes thin helpers (`map_test_page`,
-/// `mark_cow`, `is_cow`, `virt_to_phys`, …) that drive the OSTD cursor
-/// under the per-process lock so test bodies don't have to thread the
-/// lock through themselves.
+/// Owns a process VM; the helpers drive the OSTD cursor under the per-process
+/// lock so test bodies do not thread that lock themselves.
 pub struct ProcessVmGuard {
-    /// The process, as a generation-checked designator. `pid()` is still
-    /// available for tests that assert on the number itself.
     pub process: ProcessId,
 }
 
@@ -38,7 +31,6 @@ impl ProcessVmGuard {
         })
     }
 
-    /// The numeric id, for tests that assert on it directly.
     pub fn pid(&self) -> u32 {
         self.process.id()
     }
@@ -53,13 +45,11 @@ impl ProcessVmGuard {
         })
     }
 
-    /// Drive `cow::handle_cow_fault` through the per-process lock.
     pub fn handle_cow_fault(&self, fault_addr: u64) -> Result<(), MmError> {
         process_vm_with_vm_space(self.process, |vs| handle_cow_fault(vs, fault_addr))
             .unwrap_or(Err(MmError::NoAddressSpace))
     }
 
-    /// Drive `demand::handle_demand_fault` through the per-process lock.
     pub fn handle_demand_fault(&self, fault_addr: u64, error_code: u64) -> Result<(), MmError> {
         crate::process_vm::process_vm_with_vm_space_and_region(
             self.process,
@@ -69,9 +59,7 @@ impl ProcessVmGuard {
         .unwrap_or(Err(MmError::NoAddressSpace))
     }
 
-    /// Map a 4 KiB page at `vaddr` into the test process's OSTD
-    /// VmSpace. Returns the physical address that backs the new
-    /// mapping, or `None` on allocation / cursor failure.
+    /// Returns the physical address backing the new mapping.
     pub fn map_test_page(&self, vaddr: u64, flags: u64) -> Option<PhysAddr> {
         let phys = alloc_kernel_page();
         if phys.is_null() {
@@ -89,24 +77,19 @@ impl ProcessVmGuard {
         }
     }
 
-    /// Translate a user VA to its backing physical address (with the
-    /// page-offset bits preserved, mirroring legacy
-    /// `virt_to_phys_in_dir`). Returns `PhysAddr::NULL` if no leaf is
-    /// present.
+    /// Page-offset bits are preserved; `PhysAddr::NULL` if no leaf is present.
     pub fn virt_to_phys(&self, vaddr: u64) -> PhysAddr {
         PhysAddr::new(process_vm_user_va_to_paddr(self.process, vaddr))
     }
 
-    /// Mark the 4 KiB leaf at `vaddr` as copy-on-write in the OSTD
-    /// VmSpace (clears `WRITABLE`, sets the COW software bit). No-op
-    /// if no leaf is present at that VA.
+    /// Clears `WRITABLE` and sets the COW software bit; no-op if no leaf is
+    /// present at `vaddr`.
     pub fn mark_cow(&self, vaddr: u64) {
         let _ = process_vm_with_vm_space(self.process, |vs| {
             let _ = ostd_mark_cow_4kb(vs, VirtAddr::new(vaddr));
         });
     }
 
-    /// Probe whether the 4 KiB leaf at `vaddr` carries the COW marker.
     pub fn is_cow(&self, vaddr: u64) -> bool {
         process_vm_with_vm_space(self.process, |vs| {
             ostd_get_pte_flags_4kb(vs, VirtAddr::new(vaddr))

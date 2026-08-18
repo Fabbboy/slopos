@@ -73,10 +73,6 @@ fn index_of(drivers: &[&'static PciDriverEntry]) -> Result<MatchIndex, AllocErro
     MatchIndex::build_from(entries)
 }
 
-// ---------------------------------------------------------------------------
-// Probe stubs (no hardware). Each uses static counters reset at test start.
-// ---------------------------------------------------------------------------
-
 fn decline_probe(_b: &mut BoundDevice<'_>) -> Result<ProbeOutcome, PciProbeError> {
     Ok(ProbeOutcome::Declined)
 }
@@ -88,10 +84,6 @@ fn bind_probe(_b: &mut BoundDevice<'_>) -> Result<ProbeOutcome, PciProbeError> {
 fn always_true(_info: &PciDeviceInfo) -> bool {
     true
 }
-
-// ---------------------------------------------------------------------------
-// Test 1: index correctness — candidates priority-sorted and deduplicated.
-// ---------------------------------------------------------------------------
 
 static T1_VD: PciDriverEntry = PciDriverEntry {
     name: "t1-vd",
@@ -179,10 +171,6 @@ pub fn test_candidates_priority_sorted_and_deduped() -> TestResult {
     pass!()
 }
 
-// ---------------------------------------------------------------------------
-// Test 2: one matching driver binds the device.
-// ---------------------------------------------------------------------------
-
 static T2_DRV: PciDriverEntry = PciDriverEntry {
     name: "t2-blk",
     match_table: &[PciMatch::VendorDevice {
@@ -212,10 +200,6 @@ pub fn test_binding_records_claim() -> TestResult {
         other => fail!("device should be bound by t2-blk, got {:?}", other),
     }
 }
-
-// ---------------------------------------------------------------------------
-// Test 3: a claimed device is not offered to a lower-priority driver.
-// ---------------------------------------------------------------------------
 
 static T3_B_PROBES: AtomicU32 = AtomicU32::new(0);
 
@@ -265,10 +249,6 @@ pub fn test_dup_claim_prevention() -> TestResult {
         n => fail!("t3-b was probed {} times after device was claimed", n),
     }
 }
-
-// ---------------------------------------------------------------------------
-// Test 4: specific (lower priority) is offered before generic.
-// ---------------------------------------------------------------------------
 
 static T4_SEQ: AtomicU32 = AtomicU32::new(0);
 static T4_SPECIFIC_SEQ: AtomicU32 = AtomicU32::new(u32::MAX);
@@ -340,10 +320,6 @@ pub fn test_specific_beats_generic() -> TestResult {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Test 5: deferred substrate — Deferred on round 1, Bound on the retry pass.
-// ---------------------------------------------------------------------------
-
 static T5_ATTEMPTS: AtomicU32 = AtomicU32::new(0);
 
 fn t5_defer_probe(_b: &mut BoundDevice<'_>) -> Result<ProbeOutcome, PciProbeError> {
@@ -389,11 +365,6 @@ pub fn test_deferred_then_bound() -> TestResult {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Test 6: a probe that acquires a resource then fails releases it — the
-// registry drops the bag on any non-`Bound` outcome.
-// ---------------------------------------------------------------------------
-
 static T6_VECTOR: AtomicU32 = AtomicU32::new(u32::MAX);
 
 fn t6_acquire_then_fail(b: &mut BoundDevice<'_>) -> Result<ProbeOutcome, PciProbeError> {
@@ -401,8 +372,7 @@ fn t6_acquire_then_fail(b: &mut BoundDevice<'_>) -> Result<ProbeOutcome, PciProb
         .request_irq(|_ctx| {})
         .map_err(|_| PciProbeError::OutOfMemory)?;
     T6_VECTOR.store(vector as u32, Ordering::Relaxed);
-    // Acquired a real IRQ vector, then bail — the matchmaker must drop the bag
-    // and free the vector.
+    // Bail after acquiring a real vector: the matchmaker must drop the bag.
     Err(PciProbeError::DeviceFault)
 }
 
@@ -431,7 +401,6 @@ pub fn test_binding_release_on_probe_failure() -> TestResult {
     if matchmake(&idx, devices.len(), &|i| devices.get(i).copied(), &claims).is_err() {
         return fail!("matchmake out of memory");
     }
-    // Probe failed, so the device stays unbound.
     if claims.owner(0).is_some() {
         return fail!("device should be unbound after probe Err");
     }
@@ -440,8 +409,8 @@ pub fn test_binding_release_on_probe_failure() -> TestResult {
         return fail!("probe did not acquire a vector");
     }
     let vector = vector as u8;
-    // The acquired vector must have been freed when the registry dropped the
-    // bag: the lowest free vector comes back and is re-registerable.
+    // Release is observed indirectly: the allocator hands the same vector back
+    // and its dispatch slot re-registers.
     let reclaimed = match slopos_ostd::irq::IrqAllocator::alloc() {
         Ok(l) => l,
         Err(_) => return fail!("vector pool exhausted after release"),

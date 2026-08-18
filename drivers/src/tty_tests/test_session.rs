@@ -154,7 +154,7 @@ pub fn test_session_check_read_replaces_task_has_access_background() -> TestResu
     let scope = SessionScope::new(10, 10);
     let mut s = TtySession::new();
     scope.attach_to(&mut s);
-    s.focused_task_id = 0; // No compositor focus.
+    s.focused_task_id = 0;
     match s.check_read(99, 10) {
         ForegroundCheck::BackgroundRead => TestResult::Pass,
         other => {

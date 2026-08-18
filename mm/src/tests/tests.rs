@@ -21,20 +21,10 @@ use crate::paging_defs::PAGE_SIZE_4KB;
 use crate::process_vm::get_process_vm_stats;
 use crate::slab::{get_heap_stats_owned, kfree, kmalloc, kzalloc};
 
-// ============================================================================
-// PAGE ALLOCATOR (BUDDY) TESTS - 12 tests
-// ============================================================================
-
-/// Test 1: Allocate and free a single 4KB page
-
-/// Resolve a pid these tests just created into the designator `mm` now takes.
-///
-/// A test that holds a raw number from `create_process_vm` is the one caller
-/// that legitimately has to cross back; everywhere else the designator is
-/// carried. Panics on a pid that names no live process, which in a test is the
-/// assertion failing early rather than a lookup silently answering `None`.
 use slopos_ostd::process::ProcessId;
 
+/// Resolves a raw pid a test just created into the designator `mm` takes;
+/// panics on a pid that names no live process.
 pub(super) fn resolve_pid(pid: u32) -> slopos_ostd::process::ProcessId {
     slopos_ostd::process::ProcessId::resolve(pid).expect("a pid this test just created")
 }
@@ -47,7 +37,6 @@ pub fn test_page_alloc_single() -> TestResult {
     pass!()
 }
 
-/// Test 2: Allocate multi-order blocks (2, 4, 8 pages)
 pub fn test_page_alloc_multi_order() -> TestResult {
     let phys2 = alloc_kernel_pages(2);
     assert_not_null!(phys2.as_u64() as *const u8, "allocate 2 pages");
@@ -71,7 +60,6 @@ pub fn test_page_alloc_multi_order() -> TestResult {
     pass!()
 }
 
-/// Test 3: Alloc→free→alloc same size, verify address reuse (coalescing)
 pub fn test_page_alloc_free_cycle() -> TestResult {
     let phys1 = alloc_kernel_page();
     assert_not_null!(phys1.as_u64() as *const u8, "first alloc");
@@ -81,13 +69,10 @@ pub fn test_page_alloc_free_cycle() -> TestResult {
     let phys2 = alloc_kernel_page();
     assert_not_null!(phys2.as_u64() as *const u8, "second alloc after free");
 
-    // With good coalescing, we might get the same address back (not guaranteed)
-    // At minimum, the allocation should succeed
     free_page_frame(phys2);
     pass!()
 }
 
-/// Test 4: Allocate with 0, verify memory is zeroed
 pub fn test_page_alloc_zeroed() -> TestResult {
     let phys = alloc_kernel_page();
     assert_not_null!(phys.as_u64() as *const u8, "allocate zeroed page");
@@ -108,10 +93,9 @@ pub fn test_page_alloc_zeroed() -> TestResult {
     pass!()
 }
 
-/// `io_slices_len` truncates to the send length (not the whole pin) — the
-/// load-bearing zero-copy fix so a short `OP_SEND_ZC` never DMAs stale tail
-/// bytes — and `keepalive_frames` yields one independent owning ref per page
-/// (the driver-side guard against a teardown freeing pages mid-DMA).
+/// `io_slices_len` truncates to the send length, not the whole pin, so a short
+/// `OP_SEND_ZC` never DMAs stale tail bytes; `keepalive_frames` yields one
+/// independent owning ref per page so a teardown cannot free pages mid-DMA.
 pub fn test_pinned_io_slices_len_and_keepalive() -> TestResult {
     use crate::pinned_user_buffer::PinnedUserBuffer;
     let Some(pin) = PinnedUserBuffer::alloc_for_test(8192) else {
@@ -136,16 +120,13 @@ pub fn test_pinned_io_slices_len_and_keepalive() -> TestResult {
     pass!()
 }
 
-/// Offset-aware DMA-run builder (TCP `MSG_ZEROCOPY` retransmit reads a segment
-/// from the middle of a pin): `io_runs_at(off, len)` returns runs summing to
-/// `len`, starting at the pin's first paddr advanced by `base_off + off`, and
-/// rejects an out-of-range window.
+/// Covers TCP `MSG_ZEROCOPY` retransmit, which reads a segment from the middle
+/// of a pin rather than from its start.
 pub fn test_pinned_io_runs_at_offset() -> TestResult {
     use crate::pinned_user_buffer::PinnedUserBuffer;
     let Some(pin) = PinnedUserBuffer::alloc_for_test(8192) else {
         return fail!("pin alloc_for_test failed");
     };
-    // A window wholly inside the first page: one run at base + off.
     let runs = pin.io_runs_at(100, 200);
     let total: u32 = runs.iter().map(|(_, l)| *l).sum();
     assert_test!(
@@ -156,8 +137,7 @@ pub fn test_pinned_io_runs_at_offset() -> TestResult {
     assert_test!(!runs.is_empty(), "io_runs_at must yield a run");
     let first_pa = runs[0].0;
 
-    // The same window at offset 0 starts one base+100 earlier (base_off == 0 for
-    // a test pin), so the offset is reflected in the starting paddr.
+    // `base_off` is 0 for a test pin, so the offset lands directly in the start paddr.
     let runs0 = pin.io_runs_at(0, 200);
     assert_test!(
         first_pa == runs0[0].0 + 100,
@@ -166,11 +146,9 @@ pub fn test_pinned_io_runs_at_offset() -> TestResult {
         runs0[0].0
     );
 
-    // A window crossing the page boundary still sums to len.
     let cross: u32 = pin.io_runs_at(4000, 200).iter().map(|(_, l)| *l).sum();
     assert_test!(cross == 200, "cross-page io_runs_at summed {}", cross);
 
-    // Out of range → empty (never points the NIC past the pin).
     assert_test!(
         pin.io_runs_at(8000, 1000).is_empty(),
         "io_runs_at past the pin must be empty"
@@ -178,7 +156,6 @@ pub fn test_pinned_io_runs_at_offset() -> TestResult {
     pass!()
 }
 
-/// Test 6: Stats accuracy check
 pub fn test_page_alloc_stats() -> TestResult {
     let before = get_page_allocator_stats();
     let (total, alloc_before) = (before.total, before.allocated);
@@ -200,14 +177,11 @@ pub fn test_page_alloc_stats() -> TestResult {
     pass!()
 }
 
-/// Test 7: Free NULL address should not crash
 pub fn test_page_alloc_free_null() -> TestResult {
-    // This should be a no-op, not crash
     let _result = free_page_frame(PhysAddr::NULL);
     pass!()
 }
 
-/// Test 8: Fragmentation stress test
 pub fn test_page_alloc_fragmentation() -> TestResult {
     let mut pages: [PhysAddr; 8] = [PhysAddr::NULL; 8];
     for i in 0..8 {
@@ -220,19 +194,16 @@ pub fn test_page_alloc_fragmentation() -> TestResult {
         }
     }
 
-    // Free alternate pages (0, 2, 4, 6)
     free_page_frame(pages[0]);
     free_page_frame(pages[2]);
     free_page_frame(pages[4]);
     free_page_frame(pages[6]);
 
-    // Try to allocate a 2-page block - may or may not succeed depending on layout
     let large = alloc_kernel_pages(2);
     if !large.is_null() {
         free_page_frame(large);
     }
 
-    // Free remaining
     free_page_frame(pages[1]);
     free_page_frame(pages[3]);
     free_page_frame(pages[5]);
@@ -240,11 +211,6 @@ pub fn test_page_alloc_fragmentation() -> TestResult {
     pass!()
 }
 
-// ============================================================================
-// KERNEL HEAP TESTS - 10 tests
-// ============================================================================
-
-/// Test 1: Small allocations (16, 32, 64 bytes)
 pub fn test_heap_small_alloc() -> TestResult {
     let p16 = kmalloc(16);
     assert_not_null!(p16, "allocate 16 bytes");
@@ -268,7 +234,6 @@ pub fn test_heap_small_alloc() -> TestResult {
     pass!()
 }
 
-/// Test 2: Medium allocations (256, 512, 1024 bytes)
 pub fn test_heap_medium_alloc() -> TestResult {
     let p256 = kmalloc(256);
     assert_not_null!(p256, "allocate 256 bytes");
@@ -292,7 +257,6 @@ pub fn test_heap_medium_alloc() -> TestResult {
     pass!()
 }
 
-/// Test 3: Large allocations (4KB, 16KB)
 pub fn test_heap_large_alloc() -> TestResult {
     let p4k = kmalloc(4096);
     assert_not_null!(p4k, "allocate 4KB");
@@ -308,7 +272,6 @@ pub fn test_heap_large_alloc() -> TestResult {
     pass!()
 }
 
-/// Test 4: kzalloc returns zeroed memory
 pub fn test_heap_kzalloc_zeroed() -> TestResult {
     let ptr = kzalloc(128);
     assert_not_null!(ptr, "kzalloc 128 bytes");
@@ -323,13 +286,11 @@ pub fn test_heap_kzalloc_zeroed() -> TestResult {
     pass!()
 }
 
-/// Test 5: kfree(null) should not crash
 pub fn test_heap_kfree_null() -> TestResult {
     kfree(ptr::null_mut());
     pass!()
 }
 
-/// Test 6: Allocation size zero should return null
 pub fn test_heap_alloc_zero() -> TestResult {
     let ptr = kmalloc(0);
     if !ptr.is_null() {
@@ -339,7 +300,6 @@ pub fn test_heap_alloc_zero() -> TestResult {
     pass!()
 }
 
-/// Test 7: Stats tracking accuracy
 pub fn test_heap_stats() -> TestResult {
     let before = get_heap_stats_owned();
 
@@ -425,14 +385,9 @@ pub fn test_heap_free_list_search() -> TestResult {
     pass!()
 }
 
-/// Regression test: Verify HEAP_WARMUP_PAGES is sufficient for soft reboot coherency.
-///
-/// After soft reboot, x86 paging structure caches may retain stale entries. The fix
-/// requires ≥2 physical frame allocations AND ≥1 page mapping during heap init.
-/// This test ensures HEAP_WARMUP_PAGES is never reduced below the minimum threshold.
-///
-/// If this test fails, framebuffer performance will degrade to ~1 FPS after soft reboot.
-/// See: Intel Application Note 317080-002 "TLBs, Paging-Structure Caches"
+/// After a soft reboot, x86 paging-structure caches may retain stale entries;
+/// evicting them needs ≥2 physical frame allocations and ≥1 page mapping during
+/// heap init (Intel Application Note 317080-002, "TLBs, Paging-Structure Caches").
 pub fn test_heap_warmup_pages_minimum() -> TestResult {
     use crate::slab::HEAP_WARMUP_PAGES;
 
@@ -490,10 +445,6 @@ pub fn test_heap_fragmentation_behind_head() -> TestResult {
     pass!()
 }
 
-// ============================================================================
-// PROCESS VM TESTS (existing)
-// ============================================================================
-
 use crate::process_vm::{
     create_process_vm, destroy_process_vm, init_process_vm, process_vm_get_ostd_pml4_paddr,
     process_vm_handle, process_vm_with_handle,
@@ -506,10 +457,8 @@ pub fn test_process_vm_slot_reuse() -> TestResult {
 
     let initial_active = get_process_vm_stats().active_processes;
 
-    // Designators captured at creation and held. Re-resolving a pid after its
-    // process is destroyed is exactly what this test used to do and what the
-    // re-key removes: the number would come back resolving to a *later*
-    // occupant, and the assertion would silently pass against the wrong one.
+    // Designators are captured at creation and held: re-resolving a destroyed
+    // pid would name whichever process later occupies the slot.
     let none = ProcessId::resolve(1).filter(|_| false);
     let mut procs = [none; 5];
     for i in 0..5 {
@@ -535,8 +484,6 @@ pub fn test_process_vm_slot_reuse() -> TestResult {
         }
     }
 
-    // The held designators now name reaped processes, and answer so rather
-    // than resolving to whichever process took the slot.
     for &idx in &[1usize, 2, 3] {
         let Some(p) = procs[idx] else {
             return fail!("process {} designator", idx);
@@ -573,7 +520,6 @@ pub fn test_process_vm_slot_reuse() -> TestResult {
         }
     }
 
-    // The slots were reused, and the survivors are untouched by that.
     assert_test!(
         process_vm_get_ostd_pml4_paddr(p0) != 0,
         "original process 0 still alive"
@@ -645,20 +591,9 @@ pub fn test_process_vm_counter_reset() -> TestResult {
     pass!()
 }
 
-/// A process id is reissued promptly, and that is now safe.
-///
-/// This replaces a test that asserted the opposite. The id allocator used to
-/// be a FIFO whose reuse order equalled its free order, so a freed id came
-/// back only after every other free id had — damage control for a hazard the
-/// id could not fix, because a stale reference to a recycled id resolved to a
-/// live stranger.
-///
-/// The designator carries a generation now, so a stale reference fails the
-/// check outright (see
-/// [`test_process_vm_handle_stale_after_reuse`]) and the delay buys nothing.
-/// The allocator draws lowest-free, which is what this pins: an id freed and
-/// immediately redrawn is the *expected* behaviour, not a regression. A
-/// re-introduced FIFO would fail here.
+/// The id allocator draws lowest-free, so a freed id is redrawn immediately;
+/// safe because the designator carries a generation (see
+/// [`test_process_vm_handle_stale_after_reuse`]). A FIFO allocator fails here.
 pub fn test_a_freed_process_id_is_reissued_promptly() -> TestResult {
     init_process_vm();
 
@@ -685,13 +620,9 @@ pub fn test_a_freed_process_id_is_reissued_promptly() -> TestResult {
     pass!()
 }
 
-/// A `Handle<ProcessVm>` minted for one process never resolves to the
-/// process that later reuses its **id**.
-///
-/// Ids recycle, so "same pid" stops meaning "same process". The
-/// generation stamped on the slot is what separates the two: the old
-/// handle reports a typed `Stale` rather than handing its holder a
-/// stranger's address space to fault a page into.
+/// A `Handle<ProcessVm>` minted for one process never resolves to the process
+/// that later reuses its id: the generation stamped on the slot separates them,
+/// so the old handle reports `Stale` rather than a stranger's address space.
 pub fn test_process_vm_handle_stale_after_reuse() -> TestResult {
     init_process_vm();
 
@@ -703,21 +634,17 @@ pub fn test_process_vm_handle_stale_after_reuse() -> TestResult {
         destroy_process_vm(resolve_pid(p1));
         return fail!("handle for live p1");
     };
-    // A live handle resolves.
     if process_vm_with_handle(h1, |_| ()).is_err() {
         destroy_process_vm(resolve_pid(p1));
         return fail!("live handle should resolve");
     }
 
-    // Destroy p1: the handle now resolves to NoEntry (slot vacated).
     destroy_process_vm(resolve_pid(p1));
     if process_vm_with_handle(h1, |_| ()) != Err(HandleError::NoEntry) {
         return fail!("destroyed-slot handle should be NoEntry");
     }
 
-    // Redraw. The allocator is lowest-free, so `p1`'s id comes straight back
-    // — which is precisely the case the generation exists to make safe, and
-    // the one a FIFO used to hide behind a `MAX_PROCESS_ID`-long delay.
+    // The allocator is lowest-free, so `p1`'s id comes straight back.
     let p2 = create_process_vm();
     if p2 == INVALID_PROCESS_ID {
         return fail!("create p2");
@@ -735,8 +662,6 @@ pub fn test_process_vm_handle_stale_after_reuse() -> TestResult {
     let live = process_vm_with_handle(h2, |_| ());
     destroy_process_vm(resolve_pid(p2));
 
-    // Same id, same slot, different generation — the case the handle
-    // exists for.
     if h1.slot() != h2.slot() {
         return fail!(
             "the reissued id bound slot {}, not slot {} — the two handles no \
@@ -758,11 +683,6 @@ pub fn test_process_vm_handle_stale_after_reuse() -> TestResult {
     pass!()
 }
 
-// ============================================================================
-// PAGING TESTS - 10 tests
-// ============================================================================
-
-/// Test 1: virt_to_phys on kernel address
 pub fn test_paging_virt_to_phys() -> TestResult {
     let kernel_addr = VirtAddr::new(test_paging_virt_to_phys as *const () as u64);
     let phys = virt_to_phys(kernel_addr);
@@ -773,18 +693,13 @@ pub fn test_paging_virt_to_phys() -> TestResult {
     pass!()
 }
 
-/// Test 2: Kernel directory retrieval — `KERNEL_VM_SPACE` singleton
-/// is wrapping the live kernel-master PML4 by the time tests run.
+/// `KERNEL_VM_SPACE` wraps the live kernel-master PML4 by the time tests run.
 pub fn test_paging_get_kernel_dir() -> TestResult {
     let installed = slopos_kernel_services::kernel_vm_space::try_kernel_vm_space().is_some();
     assert_test!(installed, "kernel_vm_space not installed");
     pass!()
 }
 
-/// Test 3: User accessible check on kernel page (should fail).
-/// The OSTD cursor's `query` over a kernel-half VA returns a
-/// `PageProperty` with `user == false`, so the kernel-mappings
-/// helper reports `false` for any kernel-half VA.
 pub fn test_paging_user_accessible_kernel() -> TestResult {
     use slopos_kernel_services::kernel_vm_space::kernel_vm_space;
     use slopos_ostd::mm::page_property::PageProperty;
@@ -809,9 +724,7 @@ pub fn test_paging_user_accessible_kernel() -> TestResult {
     pass!()
 }
 
-/// Test 4: COW flag on kernel page (should not be set). The OSTD
-/// `software` field is the AVL-bits container; bit 0 is the slopos
-/// COW marker.
+/// The OSTD `software` field holds the AVL bits; bit 0 is the slopos COW marker.
 pub fn test_paging_cow_kernel() -> TestResult {
     use slopos_kernel_services::kernel_vm_space::kernel_vm_space;
 
@@ -832,11 +745,6 @@ pub fn test_paging_cow_kernel() -> TestResult {
     pass!()
 }
 
-// ============================================================================
-// RING BUFFER TESTS - 8 tests (in lib crate, tested via mm)
-// ============================================================================
-
-/// Test ring buffer basic push/pop
 pub fn test_ring_buffer_basic() -> TestResult {
     use slopos_ostd::ring_buffer::RingBuffer;
 
@@ -851,7 +759,6 @@ pub fn test_ring_buffer_basic() -> TestResult {
     pass!()
 }
 
-/// Test ring buffer FIFO order
 pub fn test_ring_buffer_fifo() -> TestResult {
     use slopos_ostd::ring_buffer::RingBuffer;
 
@@ -866,7 +773,6 @@ pub fn test_ring_buffer_fifo() -> TestResult {
     pass!()
 }
 
-/// Test ring buffer empty pop
 pub fn test_ring_buffer_empty_pop() -> TestResult {
     use slopos_ostd::ring_buffer::RingBuffer;
 
@@ -875,7 +781,6 @@ pub fn test_ring_buffer_empty_pop() -> TestResult {
     pass!()
 }
 
-/// Test ring buffer full behavior
 pub fn test_ring_buffer_full() -> TestResult {
     use slopos_ostd::ring_buffer::RingBuffer;
 
@@ -891,7 +796,6 @@ pub fn test_ring_buffer_full() -> TestResult {
     pass!()
 }
 
-/// Test ring buffer overwrite mode
 pub fn test_ring_buffer_overwrite() -> TestResult {
     use slopos_ostd::ring_buffer::RingBuffer;
 
@@ -900,10 +804,8 @@ pub fn test_ring_buffer_overwrite() -> TestResult {
         rb.push_overwrite(i);
     }
 
-    // Push 99 - should overwrite oldest (0)
     rb.push_overwrite(99);
 
-    // Should get 1,2,3,99 in that order
     assert_test!(
         rb.try_pop() == Some(1),
         "overwrite test failed (expected 1)"
@@ -911,7 +813,6 @@ pub fn test_ring_buffer_overwrite() -> TestResult {
     pass!()
 }
 
-/// Test ring buffer wrap around
 pub fn test_ring_buffer_wrap() -> TestResult {
     use slopos_ostd::ring_buffer::RingBuffer;
 
@@ -934,7 +835,6 @@ pub fn test_ring_buffer_wrap() -> TestResult {
     pass!()
 }
 
-/// Test ring buffer reset
 pub fn test_ring_buffer_reset() -> TestResult {
     use slopos_ostd::ring_buffer::RingBuffer;
 
@@ -950,7 +850,6 @@ pub fn test_ring_buffer_reset() -> TestResult {
     pass!()
 }
 
-/// Test ring buffer capacity
 pub fn test_ring_buffer_capacity() -> TestResult {
     use slopos_ostd::ring_buffer::RingBuffer;
 
@@ -959,11 +858,6 @@ pub fn test_ring_buffer_capacity() -> TestResult {
     pass!()
 }
 
-// ============================================================================
-// IRQMUTEX TESTS - 3 tests
-// ============================================================================
-
-/// Test 1: SpinLock basic lock/unlock with guard
 pub fn test_irqmutex_basic() -> TestResult {
     use slopos_ostd::sync::{LOCK_LEVEL_RESOURCE, SpinLock};
 
@@ -983,7 +877,6 @@ pub fn test_irqmutex_basic() -> TestResult {
     pass!()
 }
 
-/// Test 2: SpinLock mutation through guard
 pub fn test_irqmutex_mutation() -> TestResult {
     use slopos_ostd::sync::{LOCK_LEVEL_RESOURCE, SpinLock};
 
@@ -1007,7 +900,6 @@ pub fn test_irqmutex_mutation() -> TestResult {
     pass!()
 }
 
-/// Test 3: SpinLock try_lock
 pub fn test_irqmutex_try_lock() -> TestResult {
     use slopos_ostd::sync::{LOCK_LEVEL_RESOURCE, SpinLock};
 
@@ -1028,10 +920,6 @@ pub fn test_irqmutex_try_lock() -> TestResult {
 
     pass!()
 }
-
-// ============================================================================
-// MEMFD TESTS - replaces old shared memory tests
-// ============================================================================
 
 use crate::memfd;
 
@@ -1088,15 +976,12 @@ pub fn test_memfd_ftruncate_twice() -> TestResult {
 pub fn test_memfd_refcount() -> TestResult {
     let (handle, _ops, backing) =
         memfd::memfd_create(0, slopos_ostd::process::quota::root()).unwrap();
-    // A second alias (fd passing / dup shares the same backing).
     let alias = backing.clone();
-    // First drop: the object stays alive through the remaining alias.
     drop(backing);
     assert_test!(
         memfd::memfd_ftruncate(handle, 4096) == 0,
         "memfd must stay alive while an alias holds it"
     );
-    // Last drop: teardown.
     drop(alias);
     assert_test!(
         memfd::memfd_size(handle) == 0,
@@ -1121,12 +1006,11 @@ pub fn test_memfd_mapcount() -> TestResult {
     memfd::memfd_ftruncate(handle, 4096);
     memfd::memfd_inc_mapcount_by(h, 1);
     memfd::memfd_inc_mapcount_by(h, 1);
-    // Close the fd side — must NOT free pages because map_count > 0.
+    // Closing the fd side must not free pages while map_count > 0; the pages go
+    // on the second dec.
     drop(backing);
-    // Dec mapcounts
     memfd::memfd_dec_mapcount_by(h, 1);
     memfd::memfd_dec_mapcount_by(h, 1);
-    // Now both the fd side and map_count are gone; pages are freed.
     pass!()
 }
 
@@ -1134,7 +1018,6 @@ pub fn test_memfd_get_info() -> TestResult {
     let (handle, _ops, backing) =
         memfd::memfd_create(0, slopos_ostd::process::quota::root()).unwrap();
     let h = memfd::handle_from_raw(handle);
-    // Before ftruncate, get_info should return None
     assert_test!(
         memfd::memfd_get_info(h).is_none(),
         "unsized memfd should return None"
@@ -1161,10 +1044,6 @@ pub fn test_memfd_size_query() -> TestResult {
     pass!()
 }
 
-// ============================================================================
-// RIGOROUS MEMORY TESTS - Actually verify memory contents
-// ============================================================================
-
 pub fn test_page_alloc_write_verify() -> TestResult {
     let phys = alloc_kernel_page();
     assert_not_null!(phys.as_u64() as *const u8, "allocate page");
@@ -1179,13 +1058,11 @@ pub fn test_page_alloc_write_verify() -> TestResult {
 
     let ptr = virt.as_mut_ptr::<u8>();
 
-    // Write 0xAA/0x55 alternating pattern
     for i in 0..4096 {
         let val = if i % 2 == 0 { 0xAA } else { 0x55 };
         page_io::write_volatile_byte(ptr, i, val);
     }
 
-    // Read back and verify
     for i in 0..4096 {
         let expected = if i % 2 == 0 { 0xAA } else { 0x55 };
         let actual = page_io::read_volatile_byte(ptr, i);
@@ -1241,7 +1118,6 @@ pub fn test_page_alloc_no_stale_data() -> TestResult {
 
     free_page_frame(phys1);
 
-    // Allocate with ZERO flag - should be zeroed even if same page reused
     let phys2 = alloc_kernel_page();
     assert_not_null!(phys2.as_u64() as *const u8, "second alloc with zero flag");
 
@@ -1260,7 +1136,6 @@ pub fn test_page_alloc_no_stale_data() -> TestResult {
     pass!()
 }
 
-/// Test: Heap allocation boundary - verify we can use full allocated size
 pub fn test_heap_boundary_write() -> TestResult {
     let sizes = [16usize, 32, 64, 128, 256, 512, 1024];
 
@@ -1299,7 +1174,6 @@ pub fn test_heap_boundary_write() -> TestResult {
     pass!()
 }
 
-/// Test: Multiple allocations don't overlap
 pub fn test_heap_no_overlap() -> TestResult {
     const NUM_ALLOCS: usize = 8;
     let mut ptrs: [*mut c_void; NUM_ALLOCS] = [ptr::null_mut(); NUM_ALLOCS];
@@ -1320,7 +1194,6 @@ pub fn test_heap_no_overlap() -> TestResult {
         }
     }
 
-    // Verify all allocations still have their patterns (no overlap)
     for i in 0..NUM_ALLOCS {
         let byte_ptr = ptrs[i] as *mut u8;
         for j in 0..sizes[i] {
@@ -1346,18 +1219,15 @@ pub fn test_heap_no_overlap() -> TestResult {
     pass!()
 }
 
-/// Test: Double-free doesn't crash (defensive)
 pub fn test_heap_double_free_defensive() -> TestResult {
     let ptr = kmalloc(64);
     assert_not_null!(ptr, "alloc 64 bytes");
 
     kfree(ptr);
-    // Second free - should not crash (may be a no-op or error)
     kfree(ptr);
     pass!()
 }
 
-/// Test: Allocate large block, verify entire region is writable
 pub fn test_heap_large_block_integrity() -> TestResult {
     let size = 8192usize;
     let ptr = kmalloc(size);
@@ -1390,7 +1260,6 @@ pub fn test_heap_large_block_integrity() -> TestResult {
     pass!()
 }
 
-/// Test: Stress test - rapid alloc/free cycles
 pub fn test_heap_stress_cycles() -> TestResult {
     for cycle in 0..100 {
         let ptr = kmalloc(128);
@@ -1463,16 +1332,8 @@ pub fn test_page_alloc_multipage_integrity() -> TestResult {
     pass!()
 }
 
-/// Zero `npages` 4 KiB pages starting at `phys` before returning them
-/// to the page allocator. Tests in this module fill pages with
-/// recognizable byte patterns to verify allocator integrity; without
-/// scrubbing on free, those patterns leak into the buddy free list and
-/// surface in unrelated kernel allocations later in the run (e.g.
-/// scheduler task slots, user-mode stack pages). Concrete failure mode
-/// observed: `i & 0xFF` byte fill in this test produced stale bytes
-/// `0xd8 0xd9 ... 0xdf` at offset `0xd8` in reused pages, which then
-/// became a poison user RIP `0xdfdedddcdbdad9d8` in subsequent userland
-/// tests under TCG.
+/// The buddy allocator does not zero on free, so a test's fill pattern would
+/// otherwise leak into unrelated kernel allocations later in the run.
 fn scrub_pages(phys: PhysAddr, npages: u64) {
     for page in 0..npages {
         let page_phys = PhysAddr::new(phys.as_u64() + page * 4096);
@@ -1483,22 +1344,13 @@ fn scrub_pages(phys: PhysAddr, npages: u64) {
     }
 }
 
-/// Zero `len` bytes at `ptr` before returning the chunk to the kernel
-/// heap. Same rationale as [`scrub_pages`]: tests fill chunks with
-/// recognizable byte patterns then `kfree`; the kernel slab does not
-/// zero on free, so without scrubbing the patterns leak into
-/// subsequent kmalloc consumers (task-struct slots, user-context save
-/// areas, etc.) and surface as memory corruption in unrelated tests.
+/// Same rationale as [`scrub_pages`]: the slab does not zero on free either.
 fn scrub_chunk(ptr: *mut core::ffi::c_void, len: usize) {
     if ptr.is_null() {
         return;
     }
     page_io::write_bytes(ptr as *mut u8, 0, len);
 }
-
-// ============================================================================
-// PROCESS VM AND COW TESTS - Test the dangerous stuff
-// ============================================================================
 
 use crate::cow::is_cow_fault;
 use crate::paging_defs::PageFlags;
@@ -1511,7 +1363,6 @@ pub fn test_process_vm_create_destroy_memory() -> TestResult {
         return fail!("create VM");
     };
 
-    // The process should have a stack mapped - probe the null page.
     let null_page_phys = vm.virt_to_phys(0);
     if null_page_phys.is_null() {
         klog_info!("PROCESS_TEST: Null page not mapped (expected for user process)");
@@ -1529,7 +1380,7 @@ pub fn test_process_vm_alloc_and_access() -> TestResult {
     let user_addr = process_vm_alloc(vm.process, 4096, PageFlags::WRITABLE.bits() as u32);
     assert_test!(user_addr != 0, "process_vm_alloc returned 0");
 
-    // The allocation is LAZY - pages aren't mapped until accessed
+    // The allocation is lazy: pages are not mapped until accessed.
     let phys = vm.virt_to_phys(user_addr);
     if !phys.is_null() {
         if let Some(virt) = phys.to_virt_checked() {
@@ -1590,10 +1441,8 @@ pub fn test_process_vm_brk_byte_granular() -> TestResult {
         "aligned grow not exact"
     );
 
-    // The allocator top-trim shape: an unaligned break a few bytes shy
-    // of a page boundary. The kernel must echo the byte value back
-    // verbatim (the caller's success check is exact equality) while
-    // keeping the partial tail page mapped.
+    // The userland allocator's top-trim shape: an unaligned break a few bytes
+    // shy of a page boundary, which its success check compares for exact equality.
     let trimmed = base + 16 * PAGE_SIZE_4KB - 8;
     assert_test!(
         process_vm_brk(vm.process, trimmed) == trimmed,
@@ -1614,8 +1463,6 @@ pub fn test_process_vm_brk_byte_granular() -> TestResult {
         "page above the rounded break still mapped after shrink"
     );
 
-    // Regrow across the partial page: the post-trim allocation path
-    // that faulted while grow/shrink handshakes were desynced.
     let regrown = base + 32 * PAGE_SIZE_4KB + 24;
     assert_test!(
         process_vm_brk(vm.process, regrown) == regrown,

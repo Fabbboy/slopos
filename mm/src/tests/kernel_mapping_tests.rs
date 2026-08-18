@@ -1,17 +1,13 @@
 //! Kernel-half mapping tests, over the one surface that writes the
 //! kernel master's page tables.
 //!
-//! Every case brackets itself with the buddy's free-page count and
-//! asserts the exact delta, because the two ways this can go wrong are
-//! both invisible otherwise: a page the unmap path forgets leaks, and
-//! one it accounts for twice is handed to the allocator on two paths
-//! and reissued while a live mapping still names it.
+//! Every case brackets itself with the buddy's free-page count and asserts
+//! the exact delta: a page the unmap path forgets leaks, and one it accounts
+//! for twice is reissued while a live mapping still names it.
 //!
-//! Each bracket is preceded by a warm-up map/unmap at the same address.
-//! The first mapping at a fresh VA also allocates the PD and the PT
-//! that reach it, and those are never released — a kernel-half
-//! intermediate stays linked for the lifetime of the kernel — so the
-//! warm-up is what makes the measured delta be about the leaf alone.
+//! Each bracket is preceded by a warm-up map/unmap at the same address,
+//! because the first mapping at a fresh VA also allocates the PD and the PT
+//! that reach it and a kernel-half intermediate is never released.
 
 use slopos_abi::addr::{PhysAddr, VirtAddr};
 use slopos_kernel_services::kernel_vm_space::kernel_vm_space;
@@ -26,10 +22,9 @@ use crate::page_alloc::{alloc_kernel_page, get_page_allocator_stats};
 use crate::paging::{PageTableLevel, kernel_pml4_phys, walk_phys};
 use crate::paging_defs::{PAGE_SIZE_4KB, PageFlags};
 
-/// A kernel-half window nothing else claims: above the HHDM's PML4
-/// entry and below the MMIO window, so no production mapping can
-/// collide with a case running here. Distinct indices at every level so
-/// a transposed path slot cannot alias a correct one.
+/// A kernel-half window nothing else claims: above the HHDM's PML4 entry and
+/// below the MMIO window. Distinct indices at every level, so a transposed
+/// path slot cannot alias a correct one.
 const SCRATCH_VA_BASE: u64 = 0xFFFF_9137_9ABC_D000;
 
 #[inline]
@@ -42,9 +37,8 @@ fn free_pages() -> u32 {
     free
 }
 
-/// Map and unmap `va` once, so the PD and PT that reach it exist before
-/// a bracketed case measures anything. Returns false if either half
-/// failed.
+/// Map and unmap `va` once, so the PD and PT that reach it exist before a
+/// bracketed case measures anything.
 fn warm_up_path(va: VirtAddr) -> bool {
     let pa = alloc_kernel_page();
     if pa.is_null() {
@@ -57,9 +51,8 @@ fn warm_up_path(va: VirtAddr) -> bool {
 }
 
 /// A physical address `META_SLOTS` does not cover — the class of paddr
-/// [`kernel_map_io_4kb`] exists for. The array is sized by the highest
-/// RAM frame, so anything past its end has no slot at all and no
-/// `Frame` can ever be made for it.
+/// [`kernel_map_io_4kb`] exists for. The array is sized by the highest RAM
+/// frame, so nothing past its end can ever be wrapped in a `Frame`.
 fn slotless_paddr() -> Option<PhysAddr> {
     let (_slots, max_pa, inited) = meta_slots_coverage();
     if !inited {
@@ -68,10 +61,6 @@ fn slotless_paddr() -> Option<PhysAddr> {
     Some(PhysAddr::new(max_pa + 0x10_0000))
 }
 
-/// Map, resolve, unmap, and land back on the free-page count we
-/// started from. The unmap path returns the leaf's page to the
-/// allocator; a caller that also freed it would show up here as a
-/// surplus, and a path that dropped it on the floor as a deficit.
 pub fn test_kernel_mapping_round_trip_returns_frame() -> TestResult {
     let va = scratch_va(0);
     assert_test!(!kernel_is_mapped(va), "scratch VA starts unmapped");
@@ -100,12 +89,9 @@ pub fn test_kernel_mapping_round_trip_returns_frame() -> TestResult {
     pass!()
 }
 
-/// The installed leaf carries GLOBAL and does not carry USER.
-///
-/// Nothing else catches a regression here. A kernel leaf without
-/// GLOBAL still translates, so boot succeeds and every other test
-/// passes; the machine merely discards its kernel translations on
-/// every CR3 reload, forever.
+/// A kernel leaf without GLOBAL still translates, so a regression here breaks
+/// no other test — the machine merely discards its kernel translations on
+/// every CR3 reload.
 pub fn test_kernel_mapping_leaf_is_global_supervisor() -> TestResult {
     let va = scratch_va(1);
     assert_test!(!kernel_is_mapped(va), "scratch VA starts unmapped");
@@ -142,9 +128,6 @@ pub fn test_kernel_mapping_leaf_is_global_supervisor() -> TestResult {
     pass!()
 }
 
-/// A second map over a present leaf is refused, the first mapping
-/// survives, and the refused page goes back to the allocator rather
-/// than being stranded.
 pub fn test_kernel_mapping_overlap_refused() -> TestResult {
     let va = scratch_va(2);
     assert_test!(!kernel_is_mapped(va), "scratch VA starts unmapped");
@@ -187,10 +170,9 @@ pub fn test_kernel_mapping_overlap_refused() -> TestResult {
     pass!()
 }
 
-/// `kernel_map_4kb_frame` takes a `Frame<KernelMeta>` directly, which
-/// is what lets a caller that allocated a typed frame hand it over
-/// without destructuring it into a raw address the page table cannot
-/// account for.
+/// `kernel_map_4kb_frame` takes a `Frame<KernelMeta>` directly, so a caller
+/// need not destructure a typed frame into a raw address the page table
+/// cannot account for.
 pub fn test_kernel_map_frame_accepts_kernel_meta() -> TestResult {
     let va = scratch_va(3);
     assert_test!(!kernel_is_mapped(va), "scratch VA starts unmapped");
@@ -218,11 +200,9 @@ pub fn test_kernel_map_frame_accepts_kernel_meta() -> TestResult {
     pass!()
 }
 
-/// The kernel master has two names — the root the read-only walker
-/// descends and the root the cursor writes — and they must be the same
-/// 4 KiB-aligned frame. A CR3 read that kept its PCID or PWT/PCD bits
-/// would make one of them a different value, and both are dereferenced
-/// as a table base.
+/// The root the read-only walker descends and the root the cursor writes must
+/// be the same 4 KiB-aligned frame: a CR3 read that kept its PCID or PWT/PCD
+/// bits would differ, and both are dereferenced as a table base.
 pub fn test_kernel_pml4_roots_agree() -> TestResult {
     let walker_root = kernel_pml4_phys();
     let cursor_root = kernel_vm_space().lock().pml4_paddr();
@@ -239,9 +219,7 @@ pub fn test_kernel_pml4_roots_agree() -> TestResult {
     pass!()
 }
 
-/// A device-physical mapping owns no page. Map and unmap one over a
-/// paddr `META_SLOTS` does not cover and the buddy's free count never
-/// moves — which is the whole point: the alternative is a leaf that
+/// A device-physical mapping owns no page: the alternative is a leaf that
 /// believes it owns a device aperture and eventually hands it to the
 /// allocator.
 pub fn test_kernel_map_io_owns_no_frame() -> TestResult {

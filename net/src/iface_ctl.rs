@@ -2,11 +2,8 @@
 //! table and the neighbour cache.
 //!
 //! > **N-1: a control-plane operation holds at most one network lock at a
-//! > time.** Every multi-structure change is a pipeline of independently
-//! > locked steps over a snapshot, never a transaction.
-//!
-//! All three sit at `LOCK_LEVEL_REGISTRY`, so nesting any two is a same-level
-//! lock-order violation.
+//! > time.** All three sit at `LOCK_LEVEL_REGISTRY`, so nesting any two is a
+//! > same-level lock-order violation.
 
 use slopos_abi::net::{
     NET_EV_GLOBAL_ENABLE, NET_IFINDEX_GLOBAL, NET_MAX_IFACES, NET_ROUTE_ORIGIN_DHCP,
@@ -33,12 +30,9 @@ const METRIC_DEFAULT: u32 = 100;
 /// optionally a default route through `gateway`.
 ///
 /// Replaces any previous routes this device owned, so a reconfiguration does
-/// not leave the old subnet behind.
-///
-/// # Locking
-///
-/// Three separate critical sections, never nested: the interface table, then
-/// the route table for the withdrawal, then for the additions.
+/// not leave the old subnet behind. Three separate critical sections, never
+/// nested: the interface table, then the route table for the withdrawal, then
+/// for the additions.
 pub fn configure_ipv4(
     dev: DevIndex,
     addr: Ipv4Addr,
@@ -55,7 +49,6 @@ pub fn configure_ipv4(
         IfaceAddr::permanent(addr, prefix_len, AddrScope::Global, origin),
     )?;
 
-    // A re-lease onto a different subnet must not leave the old prefix routed.
     route::remove_device_routes(dev);
 
     let mask = prefix_to_mask(prefix_len);
@@ -86,7 +79,6 @@ pub fn configure_ipv4(
     Ok(ifindex)
 }
 
-/// The `NET_ROUTE_ORIGIN_*` that matches an address's origin.
 fn route_origin_of(origin: AddrOrigin) -> u8 {
     match origin {
         AddrOrigin::Dhcp => NET_ROUTE_ORIGIN_DHCP,
@@ -94,7 +86,6 @@ fn route_origin_of(origin: AddrOrigin) -> u8 {
     }
 }
 
-/// The gateway of the default route currently installed for `dev`, if any.
 pub fn default_gateway_for(dev: DevIndex) -> Option<Ipv4Addr> {
     ROUTE_TABLE
         .all_routes()
@@ -103,9 +94,8 @@ pub fn default_gateway_for(dev: DevIndex) -> Option<Ipv4Addr> {
         .map(|r| r.gateway)
 }
 
-/// Apply an interface's administrative intent to the world.
-///
-/// Returns the operational state before and after.
+/// Apply an interface's administrative intent to the world. Returns the
+/// operational state before and after.
 pub fn set_admin_up(ifindex: u32, up: bool) -> Result<(OperState, OperState), IfaceError> {
     let was_up = iface::get(ifindex).map(|i| i.admin_up);
     iface::try_begin_admin(ifindex)?;
@@ -113,8 +103,7 @@ pub fn set_admin_up(ifindex: u32, up: bool) -> Result<(OperState, OperState), If
     iface::end_admin(ifindex);
 
     // After the guard is released, so a subscriber reacting with another
-    // administrative call is not refused by the guard it was told about. A
-    // request that changed nothing is not announced.
+    // administrative call is not refused by the guard it was told about.
     if let Ok((before, after)) = result {
         if was_up != Some(up) {
             if let Some(info) = iface::get(ifindex) {
@@ -138,8 +127,8 @@ fn apply_admin(ifindex: u32, up: bool) -> Result<(OperState, OperState), IfaceEr
 /// What an unrealisation does to a DHCP-assigned address.
 ///
 /// An administrative down invalidates the lease. The master switch does not:
-/// the binding is still valid and only the DHCP client can re-request one, so
-/// `disable; enable` would otherwise strand the machine with no address.
+/// only the DHCP client can re-request one, so `disable; enable` would
+/// otherwise strand the machine with no address.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum LeasePolicy {
     /// Drop DHCP-origin addresses; keep static ones.
@@ -147,7 +136,6 @@ enum LeasePolicy {
     Keep,
 }
 
-/// Make the world match one interface's realisation state.
 fn realise(info: &iface::Iface, up: bool, lease: LeasePolicy) {
     let dev = info.dev;
 
@@ -173,11 +161,8 @@ fn realise(info: &iface::Iface, up: bool, lease: LeasePolicy) {
         return;
     }
 
-    // Before the interface goes down: a RELEASE is matched by source address
-    // and `ciaddr`, so one sent after the unbind names an address this client
-    // no longer holds and the server keeps it reserved for the rest of the
-    // lease. It is also a transmit, so it must stay above the `set_down()`
-    // below, which is the first thing to take the driver's lock.
+    // A RELEASE is matched by source address and `ciaddr`, so it must go out
+    // before the unbind, and it is a transmit, so before `set_down()`.
     if lease == LeasePolicy::Invalidate {
         crate::dhcp::stop_with(dev, true);
     }

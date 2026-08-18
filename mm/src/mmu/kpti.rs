@@ -1,19 +1,11 @@
 //! Kernel Page-Table Isolation (KPTI) — dual-PML4 scaffolding.
 //!
-//! Each `MmContext` would own a kernel PML4 (full kernel upper half) and a user
-//! PML4 whose kernel half maps only what a ring-3 → ring-0 transition needs:
-//! the trampoline code page, the per-CPU PCR page, the per-CPU trampoline stack
-//! and the IDT. Both share the user-half subtree by pointer, so mapping a user
-//! page stays one `map_page` call.
-//!
 //! Only the scaffolding ships. The ring-transition assembly still performs the
 //! single CR3 load, so [`KPTI_ENABLED`] stays `false` and both PML4 references
 //! resolve to the same backing tables.
 
 use core::sync::atomic::{AtomicBool, Ordering};
 
-/// Only flip to `true` once `mm::mmu::trampoline` is wired into the IDT and
-/// SYSCALL MSR targets.
 static KPTI_ENABLED: AtomicBool = AtomicBool::new(false);
 
 #[inline]
@@ -45,8 +37,7 @@ impl TrampolineDescriptor {
     }
 }
 
-/// Stub: allocates no second PML4 and is currently unreferenced. It names the
-/// shape a KPTI build fills in.
+/// Stub: allocates no second PML4 and is currently unreferenced.
 pub fn ensure_user_pml4() -> Result<(), ()> {
     if !kpti_enabled() {
         return Ok(());

@@ -33,8 +33,6 @@ pub fn lpss_disabled() -> bool {
 /// A claimed, initialised I²C controller plus the PCI Bus/Device/Function
 /// it was found at (so an ACPI `_ADR` can be resolved back to it).
 ///
-/// The transfer methods take `&self`; the underlying [`DesignWareI2c`]
-/// drives the hardware through interior-mutable [`MmioRegion`] access.
 /// There is intentionally no transaction lock here: the touchpad poll
 /// thread is the sole consumer of its bus. A second consumer on the same
 /// bus must add serialization (a sleeping `Mutex`, never an IRQ-off
@@ -84,7 +82,6 @@ static I2C_BUSES: SpinLock<[Option<KArc<I2cBus>>; MAX_I2C_BUSES]> = SpinLock::ne
     lock_class!("I2C_BUSES", LOCK_LEVEL_REGISTRY),
 );
 
-/// Record a claimed controller in the registry. Called from the PCI probe.
 pub fn register_bus(bus: KArc<I2cBus>) {
     let mut table = I2C_BUSES.lock();
     for slot in table.iter_mut() {
@@ -95,7 +92,6 @@ pub fn register_bus(bus: KArc<I2cBus>) {
     }
 }
 
-/// Look up a claimed controller by its PCI Bus/Device/Function.
 pub fn bus_by_bdf(bus: u8, device: u8, function: u8) -> Option<KArc<I2cBus>> {
     let table = I2C_BUSES.lock();
     for slot in table.iter() {
@@ -109,9 +105,8 @@ pub fn bus_by_bdf(bus: u8, device: u8, function: u8) -> Option<KArc<I2cBus>> {
 }
 
 /// Resolve an ACPI `_ADR` value (encoding `device << 16 | function`) on
-/// PCI bus 0 to a claimed controller. This is how the touchpad's parent
-/// I²C device (e.g. `\_SB.PC00.I2C1`, `_ADR = 0x00150001`) maps to the
-/// controller the PCI probe claimed.
+/// PCI bus 0 to a claimed controller — e.g. the touchpad's parent I²C
+/// device `\_SB.PC00.I2C1`, `_ADR = 0x00150001`.
 pub fn bus_by_acpi_adr(adr: u32) -> Option<KArc<I2cBus>> {
     let device = ((adr >> 16) & 0xff) as u8;
     let function = (adr & 0xff) as u8;

@@ -1,10 +1,7 @@
 //! Reclaim: bounding holding time, not just acquisition.
 //!
-//! Without reclaim the quota is a first-come land grab with better
-//! bookkeeping — whoever allocated first keeps it, and every later principal
-//! is refused against memory nobody is using. These tests pin the two
-//! properties that make the tier trustworthy: it actually frees pages, and it
-//! refuses rather than blocks when it cannot.
+//! Pins the two properties that make the tier trustworthy: it actually frees
+//! pages, and it refuses rather than blocks when it cannot.
 
 use slopos_ostd::mm::reclaim;
 use slopos_testing::TestResult;
@@ -13,9 +10,6 @@ use slopos_testing::{assert_test, pass};
 use crate::page_alloc::get_page_allocator_stats;
 
 /// Reclaimers are registered, named, and answer without freeing anything.
-///
-/// The counting half of the split: `reclaimable_pages` must be callable
-/// without side effects, because it decides whether a pass is worth making.
 pub fn test_reclaim_registrants_report_without_freeing() -> TestResult {
     let mut names = 0usize;
     reclaim::for_each_reclaimer(|name, _| {
@@ -40,10 +34,6 @@ pub fn test_reclaim_registrants_report_without_freeing() -> TestResult {
 }
 
 /// `run(0)` is a no-op, and `run` never returns more than it was asked for.
-///
-/// The bound matters because the caller sizes its retry on the return value:
-/// a reclaimer that over-reported would make an allocation failure look
-/// recoverable when it is not.
 pub fn test_reclaim_run_respects_its_bound() -> TestResult {
     assert_test!(reclaim::run(0) == 0, "run(0) freed pages");
 
@@ -60,16 +50,12 @@ pub fn test_reclaim_run_respects_its_bound() -> TestResult {
 
 /// Reclaim releases what it reports, and never more than asked.
 ///
-/// Deliberately does **not** assert against the buddy's free count. A
-/// reclaimed page goes to the TLB quarantine first and only reaches a free
-/// list once every CPU has proven it invalidated its translation, so the two
-/// numbers move at different times by design; asserting they move together
-/// would be asserting the quarantine does not exist.
+/// Deliberately asserts nothing against the buddy's free count: a reclaimed
+/// page goes to the TLB quarantine first and only reaches a free list once
+/// every CPU has proven it invalidated its translation.
 ///
-/// Also does not assert that anything *is* reclaimable: the kernel phase runs
-/// at drivers/90, before the services phase mounts ext2, so the block cache
-/// does not exist yet. The load-bearing measurement is the
-/// `RECLAIM[post-userland-tests]` line, emitted once the cache is warm.
+/// Nothing need be reclaimable — the kernel phase runs at drivers/90, before
+/// the services phase mounts ext2, so the block cache does not exist yet.
 pub fn test_reclaim_returns_pages_to_the_buddy() -> TestResult {
     let available = reclaim::reclaimable_pages();
     if available == 0 {

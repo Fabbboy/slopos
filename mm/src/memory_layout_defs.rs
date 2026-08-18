@@ -30,10 +30,8 @@ pub const MMIO_VIRT_SIZE: u64 = 0x0000_0004_0000_0000;
 /// Any stable higher-half address suffices; it has no memory-layout role.
 pub const KERNEL_HALF_PROBE_VA: u64 = 0xFFFF_FFFF_9000_0000;
 
-// Kernel task stacks: frames are mapped on demand into this region, each stack
-// with an unmapped guard page below it to catch overflow by page fault. The
-// region is independent of the kernel image, so growing kernel code costs no
-// task-stack capacity.
+// Kernel task stacks: frames are mapped on demand, each stack with an unmapped
+// guard page below it to catch overflow by page fault.
 
 pub const KSTACK_VA_BASE: u64 = 0xFFFF_FFFF_A000_0000;
 
@@ -47,10 +45,9 @@ pub const KSTACK_GUARD_SIZE: u64 = PAGE_SIZE_4KB;
 
 pub const KSTACK_MAX_SLOTS: usize = ((KSTACK_VA_END - KSTACK_VA_BASE) / KSTACK_STRIDE) as usize;
 
-// SafeStack data stacks, one per task that owns a kernel stack: address-taken
-// locals and dynamic allocas live here while return addresses and register
-// spills stay on the kernel stack, which is what defeats ROP. The slot count
-// matches KSTACK_MAX_SLOTS so every live task can own one of each.
+// SafeStack data stacks, one per kernel stack: address-taken locals and dynamic
+// allocas live here while return addresses and register spills stay on the
+// kernel stack, which is what defeats ROP.
 
 pub const USTACK_VA_BASE: u64 = 0xFFFF_FFFF_D000_0000;
 
@@ -207,9 +204,8 @@ pub struct ProcessMemoryLayout {
     pub user_space_end: u64,
 }
 
-/// Default (non-randomized) process memory layout, used as the base for ASLR
-/// randomization and heap limit checks; ASLR produces a modified copy at
-/// process creation time.
+/// Default (non-randomized) process memory layout; the base for ASLR
+/// randomization and heap limit checks.
 pub const DEFAULT_PROCESS_LAYOUT: ProcessMemoryLayout = ProcessMemoryLayout {
     code_start: PROCESS_CODE_START_VA,
     data_start: PROCESS_DATA_START_VA,

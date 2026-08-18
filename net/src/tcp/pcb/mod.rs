@@ -1,30 +1,13 @@
 //! Process control block — the state machine each TCP connection lives
 //! inside.
 //!
-//! Every active connection owns one [`Pcb`].  The `Pcb` struct is a flat
-//! container with a small common header ([`TcpTuple`], socket back-pointer,
-//! send/recv buffers) plus a variant-sized [`PcbState`] payload that
-//! carries only the fields a given state needs.  The state machine
-//! transitions it via `&mut self` — the smoltcp/h2 pattern — so the
-//! containing `PcbTable` can keep each `Pcb` in place inside a
-//! `[Option<Pcb>; MAX_CONNECTIONS]` slot without any `take()`/put-back
-//! dance.
+//! Every active connection owns one [`Pcb`]: a common header plus a
+//! variant-sized [`PcbState`] payload, with each per-state handler in its own
+//! submodule and this module holding the `Pcb::on_segment` dispatcher.
 //!
-//! Each per-state handler ([`ListenState::on_segment`] etc.) lives in
-//! its own submodule with a dedicated test suite.  This module declares
-//! the types and the top-level `Pcb::on_segment` dispatcher that routes
-//! a decoded segment to the matching handler.
-//!
-//! # Why `&mut self` and not consume-by-value
-//!
-//! A consume-self signature (`fn on_segment(self, ...) -> Pcb`) is the
-//! textbook idiom for standalone state machines, but `Pcb` lives inside
-//! `[Option<Pcb>; MAX_CONNECTIONS]` behind an `SpinLock`.  Consuming
-//! self would require a `take()`/transform/`put_back` dance at every
-//! transition site inside the state handlers, for zero additional
-//! type-safety.  Both `smoltcp` (`smoltcp::socket::tcp::Socket`) and
-//! `h2` (`h2::proto::streams::stream::StreamState`) resolve this the
-//! same way we do: mutate in place via `self.state = PcbState::...`.
+//! Transitions mutate `self.state` in place rather than consuming `self`, so
+//! `PcbTable` can keep a `Pcb` where it sits in its
+//! `[Option<Pcb>; MAX_CONNECTIONS]` slot with no `take()`/put-back dance.
 
 pub mod data;
 pub mod listen;
@@ -43,40 +26,24 @@ use crate::tcp::buffer::TcpBufferPair;
 use crate::tcp::header::TcpHeader;
 use crate::tcp::tuple::TcpTuple;
 
-// -----------------------------------------------------------------------------
-// SocketId — stand-in newtype for the socket-layer back-pointer
-// -----------------------------------------------------------------------------
-
 /// Opaque handle the PCB uses to refer back to its owning socket.
-///
-/// The socket layer continues to identify sockets by `usize` internally;
-/// this newtype is a type-safe wrapper used only where the PCB needs to
-/// record "which socket asked for me".  Zero-cost at runtime
-/// (`#[repr(transparent)]`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 #[repr(transparent)]
 pub struct SocketId(pub u32);
 
-// -----------------------------------------------------------------------------
-// Pcb — the flat container
-// -----------------------------------------------------------------------------
-
 /// Process control block.  One of these per active TCP connection.
 ///
 /// Stored inside `[Option<Pcb>; MAX_CONNECTIONS]` behind
-/// `SpinLock<PcbTable>` (see [`crate::tcp::table`]).  State transitions
-/// mutate `self.state` in place; the glue layer in `tcp::input`
-/// drains the returned [`Actions`] after the table lock is released.
+/// `SpinLock<PcbTable>` (see [`crate::tcp::table`]); the glue layer in
+/// `tcp::input` drains the returned [`Actions`] after that lock is released.
 #[derive(Debug)]
 pub struct Pcb {
-    /// The four-tuple identifying this connection.
     pub tuple: TcpTuple,
 
-    /// Back-pointer to the socket that owns this PCB, when one exists.
-    /// `None` for anonymous server-side children before `accept()`.
+    /// Owning socket; `None` for anonymous server-side children before
+    /// `accept()`.
     pub socket_id: Option<SocketId>,
 
-    /// State-specific payload.  See [`PcbState`].
     pub state: PcbState,
 }
 
@@ -89,15 +56,8 @@ impl Pcb {
         }
     }
 
-    /// Apply a decoded incoming segment to this PCB.  Mutates `self`
-    /// in place and returns the [`Actions`] the glue layer should
-    /// apply after the table lock is dropped.
-    ///
-    /// This is the single dispatch point for incoming segments — every
-    /// state's handler routes through here.  Invariants are checked
-    /// before and after the transition in debug builds; release builds
-    /// compile the check away.
-    /// Apply an incoming segment.
+    /// Apply a decoded incoming segment to this PCB, returning the [`Actions`]
+    /// the glue layer should apply after the table lock is dropped.
     ///
     /// `incoming` is the segment's real four-tuple. For every state but
     /// `Listen` it equals `self.tuple`; a listener's tuple carries a wildcard
@@ -128,11 +88,8 @@ impl Pcb {
         actions
     }
 
-    /// Debug-only invariant audit.  Zero cost in release builds.
-    ///
-    /// Each `PcbState` variant has its own constraints (`DataState`'s
-    /// `snd_una <= snd_nxt`, etc.).  Buffer-lifecycle invariants are
-    /// checked at the table level, not here.
+    /// Debug-only invariant audit; buffer-lifecycle invariants are checked at
+    /// the table level, not here.
     #[inline]
     pub fn assert_invariants(&self) {
         #[cfg(debug_assertions)]
@@ -145,23 +102,14 @@ impl Pcb {
     }
 }
 
-// -----------------------------------------------------------------------------
-// PcbState — enum of per-state structs
-// -----------------------------------------------------------------------------
-
-/// Per-state payload — the five variants correspond roughly to the
-/// RFC 793 state diagram, but with the four closing substates
-/// (`FIN_WAIT_1`, `FIN_WAIT_2`, `CLOSING`, `LAST_ACK`) folded into a
-/// single [`DataState`] variant via the [`data::ClosePhase`] sub-enum.
-/// This is the right split because the closing substates share every
-/// field a `DataState` uses — they only differ in which FIN flags
-/// have been exchanged.
+/// Per-state payload, roughly the RFC 793 state diagram with the four closing
+/// substates (`FIN_WAIT_1`, `FIN_WAIT_2`, `CLOSING`, `LAST_ACK`) folded into
+/// [`DataState`] via [`data::ClosePhase`]: they share every `DataState` field
+/// and differ only in which FIN flags have been exchanged.
 #[derive(Debug)]
 pub enum PcbState {
-    /// Passive open.  The connection is listening for incoming SYNs.
-    /// Child PCBs in `SYN_RECEIVED` state are tracked by the separate
-    /// `tcp::listener::TcpListenState` two-queue model, not inside
-    /// this enum.
+    /// Passive open; children in `SYN_RECEIVED` are tracked by
+    /// `tcp::listener::TcpListenState`'s two-queue model, not this enum.
     Listen(ListenState),
     /// Active open in progress — we sent a SYN and are waiting for
     /// SYN+ACK.
@@ -173,14 +121,11 @@ pub enum PcbState {
     /// `ESTABLISHED`, `FIN_WAIT_1`, `FIN_WAIT_2`, `CLOSE_WAIT`,
     /// `CLOSING`, and `LAST_ACK` — see [`data::ClosePhase`].
     ///
-    /// Boxed because `DataState` is ~3 KiB (congestion control,
-    /// send-map, RTT estimator) while the other variants are ≤100 bytes.
-    /// Without boxing, every `Option<Pcb>` slot would be ~3 KB even for
-    /// a listener or TIME_WAIT entry, inflating the static table by
-    /// hundreds of KB.  The allocation happens once, on SynRecv→Data
-    /// transition. Constructed via `KBox::try_init` from one of
-    /// [`DataState::init_new`] / [`DataState::init_from_syn_recv`] so
-    /// the 3 KiB rvalue never lands on a caller's stack.
+    /// Boxed because `DataState` is ~3 KiB while the other variants are
+    /// ≤100 bytes, which would otherwise size every static table slot.
+    /// Constructed via `KBox::try_init` from [`DataState::init_new`] /
+    /// [`DataState::init_from_syn_recv`] so the rvalue never lands on a
+    /// caller's stack.
     Data(slopos_ostd::KBox<DataState>),
     /// Connection fully torn down, waiting out `2 × MSL` before the
     /// slot can be reused (RFC 793 §3.5).
@@ -200,8 +145,7 @@ impl PcbState {
     }
 
     /// Coarse-grained label used by the socket layer to decide which
-    /// POSIX state to advertise.  Replaces the old `sync_socket_state`
-    /// polling loop.
+    /// POSIX state to advertise.
     pub fn observed_socket_state(&self) -> ObservedSocketState {
         match self {
             Self::Listen(_) => ObservedSocketState::Listening,
@@ -217,7 +161,6 @@ impl PcbState {
         }
     }
 
-    /// Short name for logs / test failures.
     pub const fn name(&self) -> &'static str {
         match self {
             Self::Listen(_) => "LISTEN",
@@ -229,10 +172,8 @@ impl PcbState {
     }
 }
 
-/// The socket layer's view of a connection's state, decoupled from
-/// RFC 793's internal names so the socket layer doesn't need to know
-/// whether a TCP connection is in `FIN_WAIT_2` vs `ESTABLISHED` — both
-/// look "connected" to `recv()` / `send()`.
+/// The socket layer's view of a connection's state: `FIN_WAIT_2` and
+/// `ESTABLISHED` both look "connected" to `recv()` / `send()`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ObservedSocketState {
     Listening,
@@ -241,21 +182,10 @@ pub enum ObservedSocketState {
     Closed,
 }
 
-// -----------------------------------------------------------------------------
-// TcpState — RFC 793 names as a derived read-only view
-// -----------------------------------------------------------------------------
-
 /// RFC 793 state names, derived on demand from [`PcbState`].
 ///
-/// This enum is **never stored** — `PcbState` is the sole source of
-/// truth.  `TcpState` exists so that the socket layer and tests can
-/// query "is this connection in ESTABLISHED?" without knowing the
-/// internal `DataState` / `ClosePhase` split.  It is produced by
-/// [`PcbState::tcp_state()`] and consumed by `tcp_get_state()`.
-///
-/// `Closed` is not representable: a released PCB slot is `None`, not
-/// a state.  Code that previously matched `TcpState::Closed` should
-/// match on the slot being missing (`tcp_get_state() == None`).
+/// Never stored — `PcbState` is the sole source of truth. `Closed` is not
+/// representable: a released PCB slot is `None`, not a state.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum TcpState {
     Listen,
@@ -271,7 +201,6 @@ pub enum TcpState {
 }
 
 impl TcpState {
-    /// Human-readable name for logging.
     pub const fn name(self) -> &'static str {
         match self {
             Self::Listen => "LISTEN",
@@ -295,7 +224,6 @@ impl TcpState {
         )
     }
 
-    /// Is this state a closing/teardown state?
     pub const fn is_closing(self) -> bool {
         matches!(
             self,
@@ -310,7 +238,6 @@ impl TcpState {
 }
 
 impl PcbState {
-    /// Derive the RFC 793 state name from this PCB's current state.
     pub fn tcp_state(&self) -> TcpState {
         match self {
             Self::Listen(_) => TcpState::Listen,

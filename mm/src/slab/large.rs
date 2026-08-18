@@ -1,18 +1,12 @@
 //! Large-allocation tier (> 2048 bytes → direct frame allocation).
 //!
-//! Allocations are taken from the buddy as contiguous multi-page
-//! regions whose first page carries a `LargeAllocHeader` (magic +
-//! page-count + size). The active list is intrusively threaded
-//! through the header's `next: RawLink<LargeAllocHeader>` pointer; a
-//! free list (also intrusive) holds returned regions for first-fit
-//! reuse.
+//! Regions come from the buddy as contiguous pages whose first page carries a
+//! `LargeAllocHeader`; the free list is threaded intrusively through it.
 //!
-//! No external tracking table (`KBTreeMap` etc.) is used: the
-//! discriminator on `kfree` is the page magic at the 4 KiB-aligned
-//! base of the freed pointer (see `super::page::page_kind_for`),
-//! which is set/cleared by the allocator and never collides with
-//! [`super::page::SLAB_MAGIC`] because both magics are written by the
-//! allocator itself at allocation/free time.
+//! There is no external tracking table: `kfree` discriminates on the page
+//! magic at the 4 KiB-aligned base (`super::page::page_kind_for`), which only
+//! the allocator writes, so it never collides with
+//! [`super::page::SLAB_MAGIC`].
 
 use core::ptr::NonNull;
 use core::sync::atomic::{AtomicU64, Ordering};
@@ -58,7 +52,6 @@ impl LargeAlloc {
         }
     }
 
-    /// Allocate `size` bytes (size > 2048 path).
     pub fn alloc(&self, size: usize) -> Option<NonNull<u8>> {
         let header_size = LargeAllocHeader::body_offset();
         let total = size.checked_add(header_size)?;
@@ -67,7 +60,6 @@ impl LargeAlloc {
             return None;
         }
 
-        // Free-list first-fit walk.
         {
             let state = self.inner.lock();
             let mut prev: Option<NonNull<LargeAllocHeader>> = None;
@@ -80,7 +72,6 @@ impl LargeAlloc {
                     break;
                 };
                 if slab_pages >= pages {
-                    // Detach `curr`.
                     match prev {
                         None => state.free_list.store(next),
                         Some(p) => {
@@ -103,7 +94,6 @@ impl LargeAlloc {
             }
         }
 
-        // Fresh allocation from the buddy.
         let (base, _paddr) = alloc_large_pages(pages)?;
         let Some(header_nn) = NonNull::new(base.as_ptr() as *mut LargeAllocHeader) else {
             return None;
@@ -121,9 +111,8 @@ impl LargeAlloc {
         Some(LargeAllocHeader::body_ptr(header_nn))
     }
 
-    /// Return a previously [`Self::alloc`]-ed pointer. The caller has
-    /// already established (via the page magic at the 4 KiB-aligned
-    /// base) that this pointer belongs to a large region.
+    /// The caller has already established, via the page magic at the 4 KiB
+    /// aligned base, that `ptr` belongs to a large region.
     pub fn dealloc(&self, ptr: NonNull<u8>) {
         let base_addr = (ptr.as_ptr() as u64) & !(PAGE_SIZE_4KB - 1);
         let Some(header_nn) = NonNull::new(base_addr as *mut LargeAllocHeader) else {
@@ -161,8 +150,7 @@ impl LargeAlloc {
             }
         }
         let _ = pages;
-        // Free regions stay on the first-fit free list; the buddy keeps
-        // ownership of the physical pages until the slab itself is torn
-        // down.
+        // Freed regions stay on the first-fit free list; the pages go back to
+        // the buddy only when the slab itself is torn down.
     }
 }

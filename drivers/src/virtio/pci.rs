@@ -182,12 +182,10 @@ pub fn setup_interrupts<H: Fn(u8) + Clone + Send + Sync + 'static>(
     let mut queue_vectors = [0u8; MAX_MSIX_QUEUES];
     match core_msi::setup_interrupts(bound, nq, &mut queue_vectors, handler) {
         Some(IrqMechanism::Msix { cap, table }) => {
-            // Tell the device we are NOT using a config-change MSI-X vector.
             if caps.has_common_cfg() {
                 caps.common_cfg
                     .write::<u16>(COMMON_CFG_MSIX_CONFIG, VIRTIO_MSI_NO_VECTOR);
             }
-            // Enable MSI-X on the PCI function.
             msix::msix_enable(info.bus, info.device, info.function, &cap);
             klog_info!(
                 "virtio-msix: {}:{}.{} enabled, {} queue vectors",

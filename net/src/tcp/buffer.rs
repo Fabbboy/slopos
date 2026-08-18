@@ -1,34 +1,17 @@
 //! Per-connection send and receive buffers.
 //!
-//! Each active connection owns a pair of [`RingBuffer`]s plus a small amount
-//! of delayed-ACK state.  The buffers are fixed-size today; resizable
-//! buffers backed by `SO_SNDBUF` / `SO_RCVBUF` are a future feature, and
-//! the `cap` parameter on [`TcpSendState::new`] / [`TcpRecvState::new`] /
-//! [`TcpBufferPair::new`] is the hook it will plug into.  For now every
-//! caller passes [`TCP_BUFFER_SIZE`].
-//!
 //! Buffers are lazily allocated as `Option<TcpBufferPair>` in the parallel
-//! array inside [`super::table::PcbTable`].  Only Data-phase connections
-//! have a buffer (`Some`); Listen, SynSent, SynRecv, and TimeWait keep
-//! `None`.
+//! array inside [`super::table::PcbTable`]: only Data-phase connections have
+//! one; Listen, SynSent, SynRecv and TimeWait keep `None`.
 //!
-//! # Heap-backed ring buffers
-//!
-//! The 32 KiB send and receive ring buffers (`TcpBuffer`) live behind
-//! `KBox<TcpBuffer>` inside [`TcpSendState`] / [`TcpRecvState`] — that is,
-//! through `slopos-ostd`'s kernel-blessed allocation surface.  The
-//! `KBox<T: Zeroable>::zeroed()` path routes to `alloc_zeroed` with no
-//! stack temporary, so no function along
-//! `alloc_buffer_for` → `TcpBufferPair::new` → `TcpSendState::new` /
-//! `TcpRecvState::new` ever reserves 32 KiB on its frame.  `TcpBuffer`
-//! satisfies `Zeroable` through the blanket impl on `RingBuffer<u8, N>`
-//! shipped by `slopos-utils`.
+//! The 32 KiB rings live behind `KBox<TcpBuffer>`, whose `zeroed()` path routes
+//! to `alloc_zeroed` with no stack temporary, so no function along the
+//! allocation chain ever reserves 32 KiB on its frame.
 
 use slopos_ostd::RingBuffer;
 use slopos_ostd::mm::uframe::{KeepaliveFrames, copy_out_frames};
 use slopos_ostd::{AllocError, KBox, KVecDeque, ZcNotifToken};
 
-/// Size of per-connection send/receive ring buffers.
 pub const TCP_BUFFER_SIZE: usize = 32768;
 
 /// Delayed ACK timeout in milliseconds (RFC 1122 §4.2.3.2).
@@ -42,29 +25,21 @@ pub const ZWP_INTERVAL_MS: u64 = 5000;
 
 pub type TcpBuffer = RingBuffer<u8, TCP_BUFFER_SIZE>;
 
-// -----------------------------------------------------------------------------
-// Send state
-// -----------------------------------------------------------------------------
-
-/// One segment of the send byte-stream, in stream order. The queue is a
-/// sequence of these; the bytes they cover are read on (re)transmit and freed
-/// (head-first) on cumulative ACK.
+/// One segment of the send byte-stream, in stream order.
 ///
-/// `Inline` data lives copied in the shared 32 KiB ring (regular `send`); the
-/// concatenation, in queue order, of all `Inline` chunks' bytes *is* the ring's
-/// contents. `Zerocopy` data lives in pinned user pages the NIC DMAs straight
-/// from (TCP `MSG_ZEROCOPY`) — the chunk holds an owning ref on every backing
-/// page (`keepalive`) so the pages survive until cumulative ACK, and a
-/// refcounted [`ZcNotifToken`] gating the buffer-reusable notification.
+/// The concatenation, in queue order, of all `Inline` chunks' bytes *is* the
+/// ring's contents. `Zerocopy` data lives in pinned user pages the NIC DMAs
+/// straight from (TCP `MSG_ZEROCOPY`): the chunk holds an owning ref on every
+/// backing page until cumulative ACK, and a refcounted [`ZcNotifToken`] gating
+/// the buffer-reusable notification.
 enum SendChunk {
     Inline {
         len: u32,
     },
     Zerocopy {
-        /// Owning refs on the pinned pages — held until this chunk is acked.
         keepalive: KeepaliveFrames,
-        /// In-page byte offset of the chunk's data within `keepalive[0]`
-        /// (the pin's `base_off`); advances as the chunk is partially acked.
+        /// In-page byte offset within `keepalive[0]`; advances as the chunk is
+        /// partially acked.
         base_off: usize,
         len: u32,
         token: ZcNotifToken,
@@ -80,11 +55,10 @@ impl SendChunk {
 }
 
 /// The pinned-page source of a zero-copy outgoing segment, handed to the
-/// transmit leaf so it can DMA straight from the pages (or copy-fall-back from
-/// them on a cold neighbor). Carries an **independent** keepalive clone (the
-/// driver TX slot holds it until the descriptor is reclaimed) and the refcounted
-/// notification token. Not `Copy` — it owns page refs — so it rides beside the
-/// `Copy` [`TcpOutSegment`] in the `poll_transmit` result rather than inside it.
+/// transmit leaf to DMA from (or copy-fall-back from on a cold neighbor).
+/// Carries an **independent** keepalive clone, held by the driver TX slot until
+/// the descriptor is reclaimed. Not `Copy` — it owns page refs — so it rides
+/// beside the `Copy` [`TcpOutSegment`] rather than inside it.
 pub struct ZcSource {
     pub keepalive: KeepaliveFrames,
     /// Absolute byte offset of this segment within `keepalive`.
@@ -100,13 +74,11 @@ pub(crate) enum SegmentSource {
     Empty,
     /// `len` bytes copied from the inline ring (the caller peeks them).
     Inline { len: usize },
-    /// `len` bytes the NIC can DMA straight from the pinned pages. Carries an
-    /// **independent** keepalive clone (the driver TX slot holds it until the
-    /// descriptor is reclaimed) and the refcounted notification token.
+    /// `len` bytes the NIC can DMA straight from the pinned pages, with an
+    /// **independent** keepalive clone.
     Zerocopy {
         keepalive: KeepaliveFrames,
-        /// Absolute byte offset of this segment within `keepalive` (the chunk's
-        /// `base_off + intra-offset`), for SG-run / copy-fallback derivation.
+        /// Absolute byte offset of this segment within `keepalive`.
         byte_start: usize,
         len: usize,
         token: ZcNotifToken,

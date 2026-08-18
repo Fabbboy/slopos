@@ -1,13 +1,10 @@
 //! Shared MSI-X / MSI setup orchestration.
 //!
-//! Lifts the allocate → configure → register → enable dance out of any single
-//! driver so a non-virtio device gets MSI-X the same way virtio does. This is a
-//! thin layer over the existing per-vector primitives in [`crate::msix`] /
-//! [`crate::msi`] / `crate::msi_common` — it does **not** introduce a third MSI
-//! abstraction. Its one new behaviour is ownership: each allocated vector +
-//! callback becomes an [`OwnedIrq`] attached to the device's [`Devres`] bag, so
-//! it is released on probe failure or unbind instead of being leaked via
-//! `mem::forget`.
+//! A thin layer over the per-vector primitives in [`crate::msix`] /
+//! [`crate::msi`] / `crate::msi_common`, not a third MSI abstraction. Its one
+//! new behaviour is ownership: each allocated vector + callback becomes an
+//! [`OwnedIrq`] in the device's [`Devres`] bag, so it is released on probe
+//! failure or unbind.
 
 use slopos_ostd::irq::{IrqAllocator, OwnedIrq};
 use slopos_ostd::{KVec, klog_debug};
@@ -16,18 +13,15 @@ use crate::driver_core::bound::BoundDevice;
 use crate::msi::{self, MsiCapability};
 use crate::msix::{self, MsixCapability, MsixTable};
 
-/// Interrupt mechanism configured for a device.
 pub enum IrqMechanism {
     /// Per-queue vectors via the MSI-X table.
     Msix {
-        /// Parsed MSI-X capability.
         cap: MsixCapability,
-        /// Mapped MSI-X table (callers keep it alive for the device lifetime).
+        /// Callers keep it alive for the device lifetime.
         table: MsixTable,
     },
     /// A single shared vector via the MSI capability.
     Msi {
-        /// Parsed MSI capability.
         cap: MsiCapability,
         /// Allocated IDT vector.
         vector: u8,
@@ -41,12 +35,11 @@ const TARGET_APIC_ID: u8 = 0;
 /// MSI-X table and bound to a per-queue dispatch closure.
 ///
 /// `handler` is called with the queue index when its vector fires.
-/// `vectors_out[i]` receives the IDT vector allocated to queue `i`; the caller
-/// sizes the slice (it must be at least `num_queues` long).
+/// `vectors_out` must be at least `num_queues` long; `vectors_out[i]` receives
+/// the IDT vector allocated to queue `i`.
 ///
 /// On any failure returns `None` having released every vector it allocated this
-/// call (the owned bindings accumulate in a local bag that drops on the early
-/// return), so a caller can cleanly fall back to MSI. On success every binding
+/// call, so a caller can cleanly fall back to MSI. On success every binding
 /// moves into the device's [`Devres`] bag.
 pub fn setup_msix<F>(
     bound: &mut BoundDevice<'_>,
@@ -84,10 +77,6 @@ where
         }
     };
 
-    // Owned bindings accumulate here. If any step below fails, this bag drops
-    // on the early return and frees every vector claimed this call (dispatch
-    // slot cleared before the vector bit), leaving a clean slate for MSI
-    // fallback. On full success they move into the device's bag.
     let mut owned: KVec<OwnedIrq> = KVec::new();
     for i in 0..num_queues {
         let line = match IrqAllocator::alloc() {

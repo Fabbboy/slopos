@@ -268,7 +268,6 @@ pub fn test_tcp_checksum_zero_payload() -> TestResult {
     let csum = tcp::tcp_checksum(src_ip, dst_ip, &segment);
     assert_test!(csum != 0, "checksum should be non-zero");
 
-    // Patch checksum into segment and verify.
     segment[16..18].copy_from_slice(&csum.to_be_bytes());
     assert_test!(
         tcp::verify_checksum(src_ip, dst_ip, &segment),
@@ -301,7 +300,6 @@ pub fn test_tcp_checksum_odd_payload_length() -> TestResult {
     let dst_ip = [10, 0, 0, 2];
 
     let hdr = tcp::build_header(1, 2, 0, 0, TCP_FLAG_ACK, 1024, 5);
-    // Odd-length payload to test trailing byte handling.
     let payload = [0xAA, 0xBB, 0xCC];
     let mut segment = [0u8; 23]; // 20 + 3
     tcp::write_header(&hdr, &mut segment);
@@ -327,14 +325,12 @@ pub fn test_tcp_checksum_wrong_ip_fails_verify() -> TestResult {
     let csum = tcp::tcp_checksum(src_ip, dst_ip, &segment);
     segment[16..18].copy_from_slice(&csum.to_be_bytes());
 
-    // Verify with wrong destination IP should fail.
     let wrong_dst = [10, 0, 0, 99];
     assert_test!(
         !tcp::verify_checksum(src_ip, wrong_dst, &segment),
         "wrong dst_ip should fail verify"
     );
 
-    // Verify with wrong source IP should also fail.
     let wrong_src = [10, 0, 0, 99];
     assert_test!(
         !tcp::verify_checksum(wrong_src, dst_ip, &segment),
@@ -363,16 +359,11 @@ pub fn test_tcp_checksum_deterministic() -> TestResult {
     pass!()
 }
 
-// =============================================================================
-// 5. Sequence number arithmetic
-// =============================================================================
-
 pub fn test_tcp_seq_lt() -> TestResult {
     assert_test!(tcp::seq_lt(0, 1), "0 < 1");
     assert_test!(tcp::seq_lt(100, 200), "100 < 200");
     assert_test!(!tcp::seq_lt(1, 0), "1 not < 0");
     assert_test!(!tcp::seq_lt(5, 5), "5 not < 5");
-    // Wrapping: u32::MAX is "before" 0 in sequence space.
     assert_test!(tcp::seq_lt(u32::MAX, 0), "MAX < 0 (wrapping)");
     assert_test!(tcp::seq_lt(u32::MAX - 10, 5), "MAX-10 < 5 (wrapping)");
     pass!()
@@ -400,10 +391,6 @@ pub fn test_tcp_seq_ge() -> TestResult {
     pass!()
 }
 
-// =============================================================================
-// 6. Connection table management
-// =============================================================================
-
 pub fn test_tcp_table_initially_empty() -> TestResult {
     reset();
     assert_eq_test!(tcp::active_count(), 0, "table should start empty");
@@ -421,13 +408,11 @@ pub fn test_tcp_connect_creates_syn_sent() -> TestResult {
     let state = tcp::get_state(id);
     assert_eq_test!(state, Some(TcpState::SynSent), "state should be SYN_SENT");
 
-    // Outgoing segment should be SYN.
     assert_test!(seg.flags & TCP_FLAG_SYN != 0, "SYN flag set");
     assert_test!(seg.flags & TCP_FLAG_ACK == 0, "ACK flag not set");
     assert_eq_test!(seg.mss, Some(DEFAULT_MSS), "MSS advertised");
     assert_eq_test!(seg.window_size, DEFAULT_WINDOW_SIZE, "window advertised");
 
-    // Tuple should be correct.
     assert_eq_test!(seg.tuple.remote_ip, [10, 0, 0, 2], "remote IP");
     assert_eq_test!(seg.tuple.remote_port, 80, "remote port");
     assert_eq_test!(seg.tuple.local_ip, [10, 0, 0, 1], "local IP");
@@ -437,9 +422,8 @@ pub fn test_tcp_connect_creates_syn_sent() -> TestResult {
 
 pub fn test_tcp_table_full_returns_error() -> TestResult {
     reset();
-    // With a sharded table, connections hash-distribute across shards.
-    // One shard fills (SLOTS_PER_SHARD) before others, so we can't fill
-    // to exact total capacity.  Just verify TableFull eventually fires.
+    // Connections hash-distribute across shards, so one shard fills before the
+    // table does and exact total capacity is never reachable.
     let mut established = 0;
     let mut saw_table_full = false;
     for i in 0..512u32 {
@@ -536,23 +520,17 @@ pub fn test_tcp_close_not_found() -> TestResult {
     pass!()
 }
 
-// =============================================================================
-// 7. Active open: three-way handshake (client)
-// =============================================================================
-
 pub fn test_tcp_active_handshake_complete() -> TestResult {
     reset();
     let local_ip = [10, 0, 0, 1];
     let remote_ip = [10, 0, 0, 2];
 
-    // Step 1: Client sends SYN.
     let (id, syn_seg) = tcp::connect(local_ip, remote_ip, 80).unwrap();
     assert_eq_test!(tcp::get_state(id), Some(TcpState::SynSent), "SYN_SENT");
 
     let client_iss = syn_seg.seq_num;
     let client_port = syn_seg.tuple.local_port;
 
-    // Step 2: Server responds with SYN+ACK.
     let server_iss = 5000u32;
     let syn_ack = TcpHeader {
         src_port: 80,
@@ -578,7 +556,6 @@ pub fn test_tcp_active_handshake_complete() -> TestResult {
     assert_test!(ack_seg.flags & TCP_FLAG_SYN == 0, "no SYN in ACK");
     assert_eq_test!(ack_seg.ack_num, server_iss.wrapping_add(1), "ACK number");
 
-    // Verify connection state.
     assert_eq_test!(
         tcp::get_state(id),
         Some(TcpState::Established),
@@ -611,7 +588,6 @@ pub fn test_tcp_active_rst_in_syn_sent() -> TestResult {
     let client_iss = syn_seg.seq_num;
     let client_port = syn_seg.tuple.local_port;
 
-    // Peer sends RST+ACK.
     let rst = TcpHeader {
         src_port: 80,
         dst_port: client_port,
@@ -629,7 +605,6 @@ pub fn test_tcp_active_rst_in_syn_sent() -> TestResult {
         result.notify.contains(SocketNotify::RESET_RECEIVED),
         "reset flag should be set"
     );
-    // Released PCB = None state.
     assert_eq_test!(tcp::get_state(id), None, "connection released");
     assert_eq_test!(tcp::active_count(), 0, "connection released");
     pass!()
@@ -643,7 +618,6 @@ pub fn test_tcp_active_bad_ack_in_syn_sent() -> TestResult {
     let (id, syn_seg) = tcp::connect(local_ip, remote_ip, 80).unwrap();
     let client_port = syn_seg.tuple.local_port;
 
-    // Peer sends SYN+ACK with wrong ack_num.
     let bad_synack = TcpHeader {
         src_port: 80,
         dst_port: client_port,
@@ -657,7 +631,6 @@ pub fn test_tcp_active_bad_ack_in_syn_sent() -> TestResult {
     };
 
     let result = tcp::input(remote_ip, local_ip, &bad_synack, &[], &[], 0);
-    // Should respond with RST.
     assert_test!(
         result.segments().next().is_some(),
         "should send RST for bad ACK"
@@ -665,7 +638,6 @@ pub fn test_tcp_active_bad_ack_in_syn_sent() -> TestResult {
     let seg = result.segments().next().unwrap().clone();
     assert_test!(seg.flags & TCP_FLAG_RST != 0, "RST flag");
 
-    // Connection should still be in SYN_SENT (not destroyed by bad ACK).
     assert_eq_test!(
         tcp::get_state(id),
         Some(TcpState::SynSent),
@@ -683,7 +655,6 @@ pub fn test_tcp_active_mss_negotiation() -> TestResult {
     let client_port = syn_seg.tuple.local_port;
     let client_iss = syn_seg.seq_num;
 
-    // SYN+ACK with MSS option = 536.
     let syn_ack = TcpHeader {
         src_port: 80,
         dst_port: client_port,
@@ -712,20 +683,14 @@ pub fn test_tcp_active_mss_negotiation() -> TestResult {
     pass!()
 }
 
-// =============================================================================
-// 8. Passive open: three-way handshake (server)
-// =============================================================================
-
 pub fn test_tcp_passive_handshake_complete() -> TestResult {
     reset();
     let server_ip = [10, 0, 0, 1];
     let client_ip = [10, 0, 0, 2];
 
-    // Step 1: Server listens.
     let listen_id = tcp::listen(server_ip, 80).unwrap();
     let before = tcp::active_count();
 
-    // Step 2: Client sends SYN.
     let client_iss = 3000u32;
     let syn = TcpHeader {
         src_port: 50000,
@@ -742,9 +707,8 @@ pub fn test_tcp_passive_handshake_complete() -> TestResult {
 
     let result = tcp::input(client_ip, server_ip, &syn, &mss_opt, &[], 0);
 
-    // The SYN buys a SYN-queue entry and a SYN+ACK, and nothing else. Half-open
-    // state must not reach the machine-wide connection table, which is what
-    // makes a flood of unanswered SYNs survivable.
+    // Half-open state must not reach the machine-wide connection table, which
+    // is what makes a flood of unanswered SYNs survivable.
     assert_test!(
         result.accepted.is_none(),
         "a SYN must not produce an accepted connection"
@@ -761,7 +725,6 @@ pub fn test_tcp_passive_handshake_complete() -> TestResult {
         "a SYN must not consume a connection-table slot"
     );
 
-    // Should respond with SYN+ACK.
     assert_test!(result.segments().next().is_some(), "SYN+ACK response");
     let syn_ack = result.segments().next().unwrap().clone();
     assert_test!(syn_ack.flags & TCP_FLAG_SYN != 0, "SYN flag");
@@ -773,14 +736,13 @@ pub fn test_tcp_passive_handshake_complete() -> TestResult {
     );
     let server_iss = syn_ack.seq_num;
 
-    // Listen socket should still be active.
     assert_eq_test!(
         tcp::get_state(listen_id),
         Some(TcpState::Listen),
         "listen still active"
     );
 
-    // Step 3: the final ACK is what promotes the connection into the table.
+    // The final ACK is what promotes the connection into the table.
     let ack = TcpHeader {
         src_port: 50000,
         dst_port: 80,
@@ -827,7 +789,6 @@ pub fn test_tcp_passive_rst_in_syn_received() -> TestResult {
     let listen_id = tcp::listen(server_ip, 80).unwrap();
     let before = tcp::active_count();
 
-    // Client SYN — queued half-open, no table slot.
     let syn = TcpHeader {
         src_port: 50000,
         dst_port: 80,
@@ -846,8 +807,7 @@ pub fn test_tcp_passive_rst_in_syn_received() -> TestResult {
         "a SYN must not consume a connection-table slot"
     );
 
-    // Client abandons the handshake. The listener retires the entry; there is
-    // no PCB to reset and nothing to answer.
+    // The listener retires the queued entry; there is no PCB to reset.
     let rst = TcpHeader {
         src_port: 50000,
         dst_port: 80,
@@ -872,7 +832,6 @@ pub fn test_tcp_passive_rst_in_syn_received() -> TestResult {
         "listen still active"
     );
 
-    // The abandoned handshake left no state: its final ACK now names nothing.
     let stale_ack = TcpHeader {
         src_port: 50000,
         dst_port: 80,
@@ -896,7 +855,6 @@ pub fn test_tcp_passive_ack_to_listen_sends_rst() -> TestResult {
     reset();
     tcp::listen([10, 0, 0, 1], 80).unwrap();
 
-    // Random ACK to a LISTEN socket → should get RST.
     let ack = TcpHeader {
         src_port: 50000,
         dst_port: 80,
@@ -915,11 +873,7 @@ pub fn test_tcp_passive_ack_to_listen_sends_rst() -> TestResult {
     pass!()
 }
 
-// =============================================================================
-// 9. Connection teardown
-// =============================================================================
-
-/// Helper: establish a connection (client side) and return (id, server_iss, client_port).
+/// Establish a client-side connection, returning `(id, server_iss, client_port)`.
 fn establish_client_connection(
     local_ip: [u8; 4],
     remote_ip: [u8; 4],
@@ -957,7 +911,6 @@ pub fn test_tcp_active_close() -> TestResult {
         "ESTABLISHED"
     );
 
-    // Step 1: Client closes → sends FIN.
     let close_result = tcp::close(id).unwrap();
     assert_test!(close_result.is_some(), "FIN segment");
     let fin_seg = close_result.unwrap();
@@ -965,7 +918,6 @@ pub fn test_tcp_active_close() -> TestResult {
     assert_test!(fin_seg.flags & TCP_FLAG_ACK != 0, "ACK with FIN");
     assert_eq_test!(tcp::get_state(id), Some(TcpState::FinWait1), "FIN_WAIT_1");
 
-    // Step 2: Server ACKs the FIN.
     let ack = TcpHeader {
         src_port: 80,
         dst_port: client_port,
@@ -980,7 +932,6 @@ pub fn test_tcp_active_close() -> TestResult {
     let _result = tcp::input(remote_ip, local_ip, &ack, &[], &[], 0);
     assert_eq_test!(tcp::get_state(id), Some(TcpState::FinWait2), "FIN_WAIT_2");
 
-    // Step 3: Server sends its FIN.
     let server_fin = TcpHeader {
         src_port: 80,
         dst_port: client_port,
@@ -1007,7 +958,6 @@ pub fn test_tcp_passive_close() -> TestResult {
 
     let (id, server_iss, client_port) = establish_client_connection(local_ip, remote_ip, 80);
 
-    // Server sends FIN first.
     let snd_nxt = with_data_state!(id, |d| d.snd_nxt.raw());
     let server_fin = TcpHeader {
         src_port: 80,
@@ -1024,12 +974,10 @@ pub fn test_tcp_passive_close() -> TestResult {
     assert_eq_test!(tcp::get_state(id), Some(TcpState::CloseWait), "CLOSE_WAIT");
     assert_test!(result.segments().next().is_some(), "ACK the FIN");
 
-    // Client closes.
     let close_result = tcp::close(id).unwrap();
     assert_test!(close_result.is_some(), "FIN segment");
     assert_eq_test!(tcp::get_state(id), Some(TcpState::LastAck), "LAST_ACK");
 
-    // Server ACKs our FIN.
     let fin_seg = close_result.unwrap();
     let server_ack = TcpHeader {
         src_port: 80,
@@ -1043,7 +991,6 @@ pub fn test_tcp_passive_close() -> TestResult {
         urgent_ptr: 0,
     };
     let _result = tcp::input(remote_ip, local_ip, &server_ack, &[], &[], 0);
-    // Released PCB = None state.
     assert_eq_test!(tcp::get_state(id), None, "released");
     assert_eq_test!(tcp::active_count(), 0, "connection released");
     pass!()
@@ -1056,13 +1003,10 @@ pub fn test_tcp_simultaneous_close() -> TestResult {
 
     let (id, server_iss, client_port) = establish_client_connection(local_ip, remote_ip, 80);
 
-    // Both sides send FIN simultaneously.
-    // Client sends FIN first.
     let close_result = tcp::close(id).unwrap();
     assert_eq_test!(tcp::get_state(id), Some(TcpState::FinWait1), "FIN_WAIT_1");
     let fin_seg = close_result.unwrap();
 
-    // Server's FIN arrives (not ACKing our FIN yet — it was sent simultaneously).
     let snd_una = with_data_state!(id, |d| d.snd_una.raw());
     let server_fin = TcpHeader {
         src_port: 80,
@@ -1079,7 +1023,6 @@ pub fn test_tcp_simultaneous_close() -> TestResult {
     assert_eq_test!(tcp::get_state(id), Some(TcpState::Closing), "CLOSING");
     assert_test!(result.segments().next().is_some(), "ACK the peer FIN");
 
-    // Server ACKs our FIN.
     let ack = TcpHeader {
         src_port: 80,
         dst_port: client_port,
@@ -1096,10 +1039,6 @@ pub fn test_tcp_simultaneous_close() -> TestResult {
     pass!()
 }
 
-// =============================================================================
-// 10. TIME_WAIT handling
-// =============================================================================
-
 pub fn test_tcp_time_wait_expiry() -> TestResult {
     reset();
     let local_ip = [10, 0, 0, 1];
@@ -1107,11 +1046,9 @@ pub fn test_tcp_time_wait_expiry() -> TestResult {
 
     let (id, server_iss, client_port) = establish_client_connection(local_ip, remote_ip, 80);
 
-    // Active close → FIN_WAIT_1.
     let close_result = tcp::close(id).unwrap().unwrap();
     let fin_seq = close_result.seq_num;
 
-    // Server ACKs FIN → FIN_WAIT_2.
     let ack = TcpHeader {
         src_port: 80,
         dst_port: client_port,
@@ -1125,7 +1062,6 @@ pub fn test_tcp_time_wait_expiry() -> TestResult {
     };
     tcp::input(remote_ip, local_ip, &ack, &[], &[], 0);
 
-    // Server sends FIN → TIME_WAIT.
     let server_fin = TcpHeader {
         src_port: 80,
         dst_port: client_port,
@@ -1140,8 +1076,6 @@ pub fn test_tcp_time_wait_expiry() -> TestResult {
     tcp::input(remote_ip, local_ip, &server_fin, &[], &[], 1000);
     assert_eq_test!(tcp::get_state(id), Some(TcpState::TimeWait), "TIME_WAIT");
 
-    // Fire the TIME_WAIT timer directly (the timer wheel approach replaced
-    // the old `tcp_timer_tick` sweep).
     tcp::on_time_wait_expire(id.raw());
     assert_eq_test!(tcp::get_state(id), None, "released");
     assert_eq_test!(tcp::active_count(), 0, "released");
@@ -1155,7 +1089,6 @@ pub fn test_tcp_time_wait_retransmitted_fin() -> TestResult {
 
     let (id, server_iss, client_port) = establish_client_connection(local_ip, remote_ip, 80);
 
-    // Full close sequence to TIME_WAIT.
     let close_result = tcp::close(id).unwrap().unwrap();
     let fin_seq = close_result.seq_num;
 
@@ -1186,7 +1119,6 @@ pub fn test_tcp_time_wait_retransmitted_fin() -> TestResult {
     tcp::input(remote_ip, local_ip, &server_fin, &[], &[], 500);
     assert_eq_test!(tcp::get_state(id), Some(TcpState::TimeWait), "TIME_WAIT");
 
-    // Server retransmits FIN in TIME_WAIT → should re-ACK.
     let result = tcp::input(remote_ip, local_ip, &server_fin, &[], &[], 1000);
     assert_test!(
         result.segments().next().is_some(),
@@ -1284,10 +1216,6 @@ pub fn test_tcp_time_wait_timer() -> TestResult {
     pass!()
 }
 
-// =============================================================================
-// 11. RST handling in various states
-// =============================================================================
-
 pub fn test_tcp_rst_in_established() -> TestResult {
     reset();
     let local_ip = [10, 0, 0, 1];
@@ -1367,10 +1295,6 @@ pub fn test_tcp_syn_in_established_sends_rst() -> TestResult {
     pass!()
 }
 
-// =============================================================================
-// 12. Segment to no matching connection
-// =============================================================================
-
 pub fn test_tcp_segment_no_connection_sends_rst() -> TestResult {
     reset();
     // Non-RST segment to a port with no listener → RST.
@@ -1392,10 +1316,6 @@ pub fn test_tcp_segment_no_connection_sends_rst() -> TestResult {
     pass!()
 }
 
-// =============================================================================
-// 13. Ephemeral port allocation
-// =============================================================================
-
 pub fn test_tcp_ephemeral_ports_unique() -> TestResult {
     reset();
     let p1 = tcp::table::alloc_ephemeral_port().unwrap();
@@ -1409,10 +1329,6 @@ pub fn test_tcp_ephemeral_ports_unique() -> TestResult {
     assert_test!(p1 != p3, "p1 != p3");
     pass!()
 }
-
-// =============================================================================
-// 14. TcpState helpers
-// =============================================================================
 
 pub fn test_tcp_state_names() -> TestResult {
     assert_eq_test!(TcpState::Listen.name(), "LISTEN");
@@ -1453,10 +1369,6 @@ pub fn test_tcp_state_is_closing() -> TestResult {
     pass!()
 }
 
-// =============================================================================
-// 15. Connection table find — exact vs wildcard
-// =============================================================================
-
 pub fn test_tcp_find_exact_match() -> TestResult {
     reset();
     let (id, syn_seg) = tcp::connect([10, 0, 0, 1], [10, 0, 0, 2], 80).unwrap();
@@ -1486,10 +1398,6 @@ pub fn test_tcp_find_wildcard_listen() -> TestResult {
     assert_eq_test!(found, Some(listen_id), "wildcard listen match");
     pass!()
 }
-
-// =============================================================================
-// 16. TcpTuple::matches
-// =============================================================================
 
 pub fn test_tcp_tuple_matches_exact() -> TestResult {
     let t1 = TcpTuple {
@@ -1536,10 +1444,6 @@ pub fn test_tcp_tuple_mismatch() -> TestResult {
     pass!()
 }
 
-// =============================================================================
-// 17. Simultaneous open (SYN_SENT receives SYN without ACK)
-// =============================================================================
-
 pub fn test_tcp_simultaneous_open() -> TestResult {
     reset();
     let local_ip = [10, 0, 0, 1];
@@ -1573,10 +1477,6 @@ pub fn test_tcp_simultaneous_open() -> TestResult {
     pass!()
 }
 
-// =============================================================================
-// 18. Multiple concurrent connections
-// =============================================================================
-
 pub fn test_tcp_multiple_connections() -> TestResult {
     reset();
     let local_ip = [10, 0, 0, 1];
@@ -1607,18 +1507,9 @@ pub fn test_tcp_multiple_connections() -> TestResult {
     pass!()
 }
 
-// =============================================================================
-// ISN generator (fixes SLOPOS-2026-0007 — predictable monotonic ISN)
-// =============================================================================
-
-/// Two calls with the same 4-tuple within the same 4-us drift bucket yield
-/// the same ISN; across buckets the delta is strictly the drift increment.
-///
-/// We can't freeze `monotonic_ns()` in-kernel without adding a clock trait
-/// to the ISN path just for tests, so this test verifies the weaker but
-/// still-useful property: the 32-bit delta between two same-tuple calls
-/// equals the drift difference (which is bounded by elapsed time and
-/// therefore tiny for back-to-back calls).
+/// Two calls with the same 4-tuple differ only by the drift increment, never
+/// by a hash change. `monotonic_ns()` cannot be frozen in-kernel, so the
+/// assertion is the weaker bound that the delta is tiny for back-to-back calls.
 pub fn test_tcp_isn_same_tuple_delta_is_drift_only() -> TestResult {
     reset();
     let tuple = TcpTuple {
@@ -1693,11 +1584,6 @@ pub fn test_tcp_isn_not_monotonic_counter() -> TestResult {
     pass!()
 }
 
-// =============================================================================
-// Register the test suite
-// =============================================================================
-
-// Header parsing (6)
 slopos_testing::stest!(name = test_tcp_parse_minimal_header, suite = tcp);
 slopos_testing::stest!(name = test_tcp_parse_too_short, suite = tcp);
 slopos_testing::stest!(name = test_tcp_parse_invalid_data_offset, suite = tcp);
@@ -1707,11 +1593,9 @@ slopos_testing::stest!(
     suite = tcp
 );
 slopos_testing::stest!(name = test_tcp_parse_all_flags, suite = tcp);
-// Header construction (3)
 slopos_testing::stest!(name = test_tcp_write_header_roundtrip, suite = tcp);
 slopos_testing::stest!(name = test_tcp_write_header_buffer_too_small, suite = tcp);
 slopos_testing::stest!(name = test_tcp_write_header_with_options, suite = tcp);
-// MSS options (5)
 slopos_testing::stest!(name = test_tcp_parse_mss_option, suite = tcp);
 slopos_testing::stest!(
     name = test_tcp_parse_mss_option_with_nop_padding,
@@ -1723,18 +1607,15 @@ slopos_testing::stest!(
     name = test_tcp_write_mss_option_buffer_too_small,
     suite = tcp
 );
-// Checksum (5)
 slopos_testing::stest!(name = test_tcp_checksum_zero_payload, suite = tcp);
 slopos_testing::stest!(name = test_tcp_checksum_with_payload, suite = tcp);
 slopos_testing::stest!(name = test_tcp_checksum_odd_payload_length, suite = tcp);
 slopos_testing::stest!(name = test_tcp_checksum_wrong_ip_fails_verify, suite = tcp);
 slopos_testing::stest!(name = test_tcp_checksum_deterministic, suite = tcp);
-// Sequence number arithmetic (4)
 slopos_testing::stest!(name = test_tcp_seq_lt, suite = tcp);
 slopos_testing::stest!(name = test_tcp_seq_le, suite = tcp);
 slopos_testing::stest!(name = test_tcp_seq_gt, suite = tcp);
 slopos_testing::stest!(name = test_tcp_seq_ge, suite = tcp);
-// Connection table (10)
 slopos_testing::stest!(name = test_tcp_table_initially_empty, suite = tcp);
 slopos_testing::stest!(name = test_tcp_connect_creates_syn_sent, suite = tcp);
 slopos_testing::stest!(name = test_tcp_table_full_returns_error, suite = tcp);
@@ -1745,48 +1626,35 @@ slopos_testing::stest!(name = test_tcp_close_syn_sent_releases_slot, suite = tcp
 slopos_testing::stest!(name = test_tcp_abort_sends_rst, suite = tcp);
 slopos_testing::stest!(name = test_tcp_abort_listen_no_rst, suite = tcp);
 slopos_testing::stest!(name = test_tcp_close_not_found, suite = tcp);
-// Active open handshake (4)
 slopos_testing::stest!(name = test_tcp_active_handshake_complete, suite = tcp);
 slopos_testing::stest!(name = test_tcp_active_rst_in_syn_sent, suite = tcp);
 slopos_testing::stest!(name = test_tcp_active_bad_ack_in_syn_sent, suite = tcp);
 slopos_testing::stest!(name = test_tcp_active_mss_negotiation, suite = tcp);
-// Passive open handshake (3)
 slopos_testing::stest!(name = test_tcp_passive_handshake_complete, suite = tcp);
 slopos_testing::stest!(name = test_tcp_passive_rst_in_syn_received, suite = tcp);
 slopos_testing::stest!(name = test_tcp_passive_ack_to_listen_sends_rst, suite = tcp);
-// Connection teardown (3)
 slopos_testing::stest!(name = test_tcp_active_close, suite = tcp);
 slopos_testing::stest!(name = test_tcp_passive_close, suite = tcp);
 slopos_testing::stest!(name = test_tcp_simultaneous_close, suite = tcp);
-// TIME_WAIT (2)
 slopos_testing::stest!(name = test_tcp_time_wait_expiry, suite = tcp);
 slopos_testing::stest!(name = test_tcp_time_wait_retransmitted_fin, suite = tcp);
 slopos_testing::stest!(name = test_tcp_retransmit_timer, suite = tcp);
 slopos_testing::stest!(name = test_tcp_time_wait_timer, suite = tcp);
-// RST handling (3)
 slopos_testing::stest!(name = test_tcp_rst_in_established, suite = tcp);
 slopos_testing::stest!(name = test_tcp_rst_to_unknown_ignored, suite = tcp);
 slopos_testing::stest!(name = test_tcp_syn_in_established_sends_rst, suite = tcp);
-// Misc (1)
 slopos_testing::stest!(name = test_tcp_segment_no_connection_sends_rst, suite = tcp);
-// Ephemeral ports (1)
 slopos_testing::stest!(name = test_tcp_ephemeral_ports_unique, suite = tcp);
-// State helpers (3)
 slopos_testing::stest!(name = test_tcp_state_names, suite = tcp);
 slopos_testing::stest!(name = test_tcp_state_is_open, suite = tcp);
 slopos_testing::stest!(name = test_tcp_state_is_closing, suite = tcp);
-// Table find (2)
 slopos_testing::stest!(name = test_tcp_find_exact_match, suite = tcp);
 slopos_testing::stest!(name = test_tcp_find_wildcard_listen, suite = tcp);
-// Tuple matching (3)
 slopos_testing::stest!(name = test_tcp_tuple_matches_exact, suite = tcp);
 slopos_testing::stest!(name = test_tcp_tuple_matches_wildcard, suite = tcp);
 slopos_testing::stest!(name = test_tcp_tuple_mismatch, suite = tcp);
-// Simultaneous open (1)
 slopos_testing::stest!(name = test_tcp_simultaneous_open, suite = tcp);
-// Multiple connections (1)
 slopos_testing::stest!(name = test_tcp_multiple_connections, suite = tcp);
-// ISN generator, RFC 6528-ish (3 — fixes SLOPOS-2026-0007)
 slopos_testing::stest!(
     name = test_tcp_isn_same_tuple_delta_is_drift_only,
     suite = tcp
@@ -1794,16 +1662,8 @@ slopos_testing::stest!(
 slopos_testing::stest!(name = test_tcp_isn_varies_by_tuple, suite = tcp);
 slopos_testing::stest!(name = test_tcp_isn_not_monotonic_counter, suite = tcp);
 
-// =============================================================================
-// Connection-buffer allocation failure
-// =============================================================================
-
 /// A handshake that completes with no memory for the connection's rings resets
 /// the peer instead of panicking.
-///
-/// The allocation is 2 x 32 KiB and used to run under the `TCP_PCB_SLOTS`
-/// cli-spinlock with `.expect()`, in softirq, driven by an unauthenticated
-/// remote peer — a kernel panic with interrupts off and a lock held.
 pub fn test_tcp_buffer_alloc_failure_resets_peer() -> TestResult {
     reset();
     let server_ip = [10, 0, 0, 1];

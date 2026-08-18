@@ -1,26 +1,12 @@
 //! User-copy primitives — thin shim over [`slopos_ostd::user::copy`].
 //!
-//! All the byte-copy logic (`rep movsb` between
-//! `__ostd_usercopy_start..__ostd_usercopy_end`, SMAP STAC/CLAC,
-//! page-fault recovery) lives in OSTD. This module adapts the legacy
-//! PCR-implicit signature
+//! All the byte-copy logic (`rep movsb`, SMAP STAC/CLAC, page-fault
+//! recovery) lives in OSTD. This module adapts the PCR-implicit signature
 //! (`copy_from_user(ptr) -> Result<T, UserPtrError>`) onto OSTD's
-//! explicit-`&VmSpace` API by:
-//!
-//!   1. Reading `pcr.syscall_pid` to identify the running user
-//!      process.
-//!   2. Acquiring a [`KArc<VmSpace>`] clone via
-//!      [`crate::process_vm::process_vm_get_vm_space`] (the per-slot
-//!      lock is dropped before the copy runs).
-//!   3. Delegating to OSTD's `copy_*_user`.
-//!   4. Mapping OSTD's [`slopos_ostd::user::copy::UserCopyError`]
-//!      back onto the legacy [`UserPtrError`] enum (preserves the
-//!      kernel callers' single-error-type contract; see
-//!      `mm/src/user_ptr.rs`).
-//!
-//! The page-fault recovery branch in `boot/src/idt.rs` queries OSTD's
-//! `is_ostd_usercopy_ip` directly. No SMAP-STAC asm lives in
-//! `slopos_mm` anymore.
+//! explicit-`&VmSpace` API: it resolves `pcr.syscall_pid` to a
+//! [`KArc<VmSpace>`] (the per-slot lock is dropped before the copy runs) and
+//! maps [`slopos_ostd::user::copy::UserCopyError`] back onto the single
+//! [`UserPtrError`] type kernel callers expect.
 
 use slopos_ostd::sync::InitFlag;
 
@@ -37,12 +23,10 @@ pub fn set_test_process_id(pid: u32) {
     slopos_arch::pcr::set_current_syscall_pid(pid);
 }
 
-/// One-shot probe (latched after the first run) confirming the
-/// kernel-half cannot be reached through the user-VA validator —
-/// catches a misconfigured page-table whose user/kernel boundary is
-/// shifted, before we hand any fault-recovering copy a kernel
-/// address. Identical to the legacy probe, retained here because the
-/// shim still wraps the OSTD copy with kernel-side process-VM glue.
+/// One-shot probe (latched after the first run) confirming the kernel half
+/// cannot be reached through the user-VA validator — catches a page table
+/// whose user/kernel boundary is shifted, before any fault-recovering copy is
+/// handed a kernel address.
 fn check_kernel_guard(process: slopos_ostd::process::ProcessId) -> Result<(), UserPtrError> {
     if KERNEL_GUARD_CHECKED.is_set() {
         return Ok(());
@@ -58,10 +42,9 @@ fn check_kernel_guard(process: slopos_ostd::process::ProcessId) -> Result<(), Us
 #[inline]
 fn current_vm_space() -> Result<slopos_ostd::KArc<slopos_ostd::mm::vm_space::VmSpace>, UserPtrError>
 {
-    // The PCR carries a bare pid across the syscall boundary, so this is where
-    // it stops being a number: resolved once, to a generation-checked
-    // designator, and a pid naming no live process fails here rather than
-    // reaching a slot lookup.
+    // The PCR carries a bare pid across the syscall boundary; resolving it here
+    // to a generation-checked designator means a pid naming no live process
+    // fails before it can reach a slot lookup.
     let Some(process) = slopos_ostd::process::ProcessId::resolve(current_process_id()) else {
         return Err(UserPtrError::NotMapped);
     };
@@ -71,16 +54,12 @@ fn current_vm_space() -> Result<slopos_ostd::KArc<slopos_ostd::mm::vm_space::VmS
 
 /// Copy a `T: Copy` from user space into kernel space.
 ///
-/// Pages are walked through the per-process [`VmSpace`] and confirmed
-/// present + user-readable; the actual transfer is fault-recoverable
-/// via OSTD's `__ostd_raw_usercopy` asm (a concurrent `munmap` on
-/// another CPU surfaces as `UserPtrError::CopyFailed`, never a
-/// kernel panic).
+/// The transfer is fault-recoverable: a concurrent `munmap` on another CPU
+/// surfaces as `UserPtrError::CopyFailed`, never a kernel panic.
 ///
-/// `T: Copy` (rather than OSTD's stricter `T: Pod`) is preserved for
-/// caller-API parity. The shim performs a byte-level copy; callers are
-/// responsible for ensuring `T`'s representation tolerates arbitrary
-/// byte patterns.
+/// `T: Copy` rather than OSTD's stricter `T: Pod`: the copy is byte-level, so
+/// the caller is responsible for ensuring `T`'s representation tolerates
+/// arbitrary byte patterns.
 pub fn copy_from_user<T: Copy>(src: UserPtr<T>) -> Result<T, UserPtrError> {
     let space = current_vm_space()?;
     slopos_ostd::user::copy::copy_value_from_user(&space, src).map_err(Into::into)

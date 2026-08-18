@@ -13,28 +13,27 @@ use slopos_ostd::sync::{InitFlag, Mutex};
 const EXT2_ROOT_INODE: u32 = 2;
 
 struct CachedExt2 {
-    /// The filesystem's sole writable handle to its backing block device, held
-    /// for the kernel's lifetime so no second writer to it can be acquired.
+    /// Sole writable handle to the backing device, held for the kernel's
+    /// lifetime so no second writer can be acquired.
     device: KBox<dyn BlockDevice + Send + Sync>,
     superblock: Ext2Superblock,
     block_size: u32,
     inode_size: u16,
-    /// The persistent write-back buffer cache, sized to `block_size` at mount.
+    /// Sized to `block_size` at mount.
     cache: BlockCache,
     /// Free-count drift from a mutating op. Lives here — not only on the
     /// per-call `Ext2Fs` handle — so a later sync sees earlier ops' dirtiness.
     superblock_dirty: bool,
 }
 
-/// A *sleeping* mutex: ext2 operations perform block-device I/O whose
-/// completion waits are scheduler-backed, so the holder may legitimately
-/// deschedule mid-operation.
+/// A *sleeping* mutex: ext2 block-device I/O waits are scheduler-backed, so
+/// the holder may legitimately deschedule mid-operation.
 static CACHED_EXT2: Mutex<Option<CachedExt2>> =
     Mutex::new(None, lock_class!("CACHED_EXT2", LOCK_LEVEL_RESOURCE));
 static EXT2_VFS_INIT: InitFlag = InitFlag::new();
 
-/// Best-effort count of dirty cache blocks awaiting writeback. The flusher's
-/// wait predicate reads only this and the stop flag, so it takes no lock.
+/// Best-effort dirty-block count: the flusher's wait predicate reads only this
+/// and the stop flag, so it takes no lock.
 static DIRTY_PENDING: AtomicUsize = AtomicUsize::new(0);
 static FLUSH_STOP: KernelIoStop = KernelIoStop::new(
     "ext2-flush",
@@ -88,14 +87,12 @@ impl StaticExt2Vfs {
             note_dirty(dirty);
         }
         // TODO(tech-debt): a failed op leaves its dirtied blocks cached, so a
-        // later sync can persist partial metadata (fsck-recoverable orphan and
-        // free-count drift) — the real fix is a write-ahead journal.
+        // later sync can persist partial metadata — fix is a write-ahead journal.
         result
     }
 }
 
-/// Publish the dirty-block count and, if it crosses the eager threshold, kick
-/// the background flusher. Never holds the FS lock.
+/// Never holds the FS lock.
 fn note_dirty(dirty: usize) {
     DIRTY_PENDING.store(dirty, Ordering::Relaxed);
     if dirty >= FLUSH_EAGER_THRESHOLD {
@@ -271,9 +268,8 @@ pub fn ext2_vfs_init_with_device(device: KBox<dyn BlockDevice + Send + Sync>) ->
     Ok(())
 }
 
-/// Flush all dirty cached blocks and the superblock to the backing device with
-/// ordered durability barriers (see [`Ext2Fs::sync`]). Takes the FS lock, so
-/// the caller must hold none. A no-op if no ext2 filesystem is mounted.
+/// Takes the FS lock, so the caller must hold none. A no-op if no ext2
+/// filesystem is mounted.
 pub fn ext2_vfs_sync() -> VfsResult<()> {
     if !EXT2_VFS_INIT.is_set() {
         return Ok(());
@@ -308,9 +304,8 @@ pub fn ext2_vfs_sync() -> VfsResult<()> {
     result
 }
 
-/// Request a final synchronous writeback at kernel shutdown. Must be called
-/// while interrupts are still enabled — the virtio-blk completion path needs
-/// them. Best-effort.
+/// Must be called with interrupts still enabled — the virtio-blk completion
+/// path needs them. Best-effort.
 pub fn ext2_vfs_shutdown_sync() {
     FLUSH_STOP.request();
     let _ = ext2_vfs_sync();
@@ -322,23 +317,17 @@ fn start_flusher() {
     }
     slopos_ostd::sync::kernel_io_task::register_kernel_io_stop(&FLUSH_STOP);
     if slopos_ostd::spawn_kernel_io!("ext2-flush", ext2_flusher_entry).is_err() {
-        // Roll back so a later mount attempt can retry the spawn; durability is
-        // unaffected, since eviction, `sync` and shutdown still persist.
+        // Roll back so a later mount can retry the spawn; eviction, `sync` and
+        // shutdown still persist without it.
         FLUSH_THREAD_STARTED.reset();
     }
 }
 
 /// Background writeback kthread (analog of Linux per-bdi flusher).
 ///
-/// Sleeps up to [`FLUSH_INTERVAL_MS`], or wakes early when a mutating op
-/// crosses [`FLUSH_EAGER_THRESHOLD`] dirty blocks, then performs one ordered
-/// [`ext2_vfs_sync`]. Runs at `TaskPriority::KernelIo` so writeback keeps up
-/// under user load.
-///
 /// A failed sync leaves blocks dirty, which would satisfy the wait predicate
 /// immediately and retry back-to-back forever, so persistent failures back off
-/// exponentially ([`FLUSH_BACKOFF_MIN_MS`] → [`FLUSH_BACKOFF_MAX_MS`]) and
-/// ignore dirty-counter wakes until the backoff sleep elapses.
+/// exponentially and ignore dirty-counter wakes until the backoff elapses.
 fn ext2_flusher_entry(token: KernelIoToken<'static>) {
     let mut backoff_ms: u64 = 0;
     loop {
@@ -420,9 +409,6 @@ fn ext2_file_type_to_vfs(file_type: u8) -> FileType {
     }
 }
 
-/// The block cache as a reclaim source. Only clean blocks are in scope:
-/// dropping one costs a re-read and loses nothing, whereas writing a dirty one
-/// back is I/O on a path that runs precisely because memory is short.
 struct Ext2CacheReclaim;
 
 impl slopos_ostd::mm::reclaim::Reclaimable for Ext2CacheReclaim {
@@ -431,9 +417,8 @@ impl slopos_ostd::mm::reclaim::Reclaimable for Ext2CacheReclaim {
     }
 
     fn reclaimable_pages(&self) -> u32 {
-        // `try_lock` only: reclaim runs on an allocation-failure path that may
-        // already hold an allocator lock, and the FS lock is a sleeping mutex
-        // held across block I/O — waiting blocks on the I/O that needs memory.
+        // `try_lock` only: the FS lock is a sleeping mutex held across block
+        // I/O, so waiting here blocks on the I/O that needs the memory.
         let Some(guard) = CACHED_EXT2.try_lock() else {
             return 0;
         };
@@ -454,7 +439,6 @@ impl slopos_ostd::mm::reclaim::Reclaimable for Ext2CacheReclaim {
 
 static EXT2_CACHE_RECLAIM: Ext2CacheReclaim = Ext2CacheReclaim;
 
-/// Register the block cache with the reclaim tier. Boot only.
 pub fn register_reclaim(token: &slopos_ostd::sync::BspToken<'_>) {
     slopos_ostd::mm::reclaim::register(token, &EXT2_CACHE_RECLAIM);
 }

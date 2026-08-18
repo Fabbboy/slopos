@@ -8,18 +8,17 @@ use crate::blockdev::BlockDevice;
 
 const CACHE_ENTRIES: usize = 128;
 
-/// Whether a cached block holds file *data* or filesystem *metadata*. The
-/// distinction drives ordered writeback (ext2 `data=ordered`): data blocks must
-/// reach stable storage *before* the metadata that references them, so a crash
-/// cannot expose a fresh inode or dir-entry pointing at stale contents.
+/// Drives ordered writeback (ext2 `data=ordered`): data blocks must reach
+/// stable storage *before* the metadata that references them, so a crash cannot
+/// expose a fresh inode or dir-entry pointing at stale contents.
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
 pub enum BlockKind {
     Data,
     Metadata,
 }
 
-/// One cache slot; its 4 KiB of storage is the `frame`, whose typed metadata
-/// also carries the dirty bit and the owner-key backref.
+/// The `frame` is both the slot's storage and, through its typed metadata, the
+/// dirty bit and the owner-key backref.
 struct CacheEntry {
     block: BlockNum,
     frame: Frame<PageCacheMeta>,
@@ -43,17 +42,12 @@ impl CacheEntry {
     }
 }
 
-/// LRU-ordered, fixed-capacity, **write-back** block cache backed by
-/// [`Frame<PageCacheMeta>`] pages from the buddy allocator.
+/// LRU-ordered, fixed-capacity, **write-back** block cache. One cache lives for
+/// the lifetime of the mount, so dirty blocks accumulate across operations and
+/// are written back on eviction, on [`Self::flush_all`], or by the background
+/// flusher.
 ///
-/// One cache lives for the lifetime of the mount, owned by
-/// `ext2_vfs::CachedExt2` and borrowed `&mut` by the per-call
-/// [`super::Ext2Fs`] handle, so dirty blocks accumulate across operations and
-/// are written back lazily — on eviction, on [`Self::flush_all`], or by the
-/// background flusher.
-///
-/// This cache never issues device flushes itself: `write_at` only means the
-/// device accepted the bytes, and the barriers around ordered phases are
+/// Never issues device flushes itself: the barriers around ordered phases are
 /// `Ext2Fs::sync`'s.
 pub struct BlockCache {
     entries: KVec<CacheEntry>,
@@ -64,8 +58,8 @@ pub struct BlockCache {
 
 impl BlockCache {
     pub fn new(block_size: u32) -> Result<Self, Ext2Error> {
-        // Callers validate this already, but a larger size would
-        // silently truncate sub-block reads.
+        // Callers validate this; a larger size would silently truncate
+        // sub-block reads.
         debug_assert!(block_size as usize <= EXT2_MAX_BLOCK_SIZE as usize);
 
         let mut entries = KVec::with_capacity(CACHE_ENTRIES).map_err(|_| Ext2Error::OutOfMemory)?;
@@ -86,8 +80,7 @@ impl BlockCache {
         self.block_size
     }
 
-    /// Get a metadata block from the cache, reading from the device if not
-    /// cached. The returned [`CachedBlock`] guard pins the slot.
+    /// Get a metadata block, reading from the device on a miss.
     pub fn get<'a>(
         &'a mut self,
         block: BlockNum,
@@ -196,7 +189,6 @@ impl BlockCache {
         Ok(CachedBlock { cache: self, slot })
     }
 
-    /// Flush a specific block to disk if dirty.
     pub fn flush_block(
         &mut self,
         block: BlockNum,
@@ -216,10 +208,8 @@ impl BlockCache {
         Ok(())
     }
 
-    /// Write back every dirty block of one [`BlockKind`], attempting every slot
-    /// even after a write fails, so one transient error does not strand the
-    /// rest. The first error is returned after the full pass; failed blocks
-    /// stay dirty for the next flush. On success, the number written.
+    /// Attempts every slot even after a write fails, returning the first error
+    /// once the pass completes; failed blocks stay dirty for the next flush.
     pub fn flush_kind(
         &mut self,
         kind: BlockKind,
@@ -251,9 +241,8 @@ impl BlockCache {
         }
     }
 
-    /// Flush all dirty blocks (data first, then metadata) without device
-    /// barriers. Callers needing durability ordering (`Ext2Fs::sync`) interleave
-    /// [`BlockDevice::flush`] between the phases themselves.
+    /// Data first, then metadata, without device barriers: callers needing
+    /// durability ordering interleave [`BlockDevice::flush`] between the phases.
     pub fn flush_all(&mut self, device: &dyn BlockDevice) -> Result<usize, Ext2Error> {
         let data = self.flush_kind(BlockKind::Data, device)?;
         let meta = self.flush_kind(BlockKind::Metadata, device)?;
@@ -278,10 +267,8 @@ impl BlockCache {
         }
     }
 
-    /// Frames holding a clean, unpinned block — what [`shrink_clean`] could
-    /// give back right now.
-    ///
-    /// [`shrink_clean`]: Self::shrink_clean
+    /// Frames holding a clean, unpinned block — what [`Self::shrink_clean`]
+    /// could give back right now.
     pub fn reclaimable(&self) -> u32 {
         self.entries
             .iter()
@@ -289,13 +276,9 @@ impl BlockCache {
             .count() as u32
     }
 
-    /// Drop up to `want` clean, unpinned cache entries, returning their frames
-    /// to the buddy. Returns how many were released.
-    ///
-    /// Clean only: those bytes are already on disk, so dropping one costs a
-    /// re-read and cannot lose data, whereas a dirty block would need a device
-    /// write on a path that runs *because* memory is short. A pinned entry has
-    /// a live `CachedBlock` guard borrowing it. The cache re-grows on demand.
+    /// Drop up to `want` clean, unpinned entries, returning their frames to the
+    /// buddy. Clean only: dropping one costs a re-read, whereas a dirty block
+    /// would need a device write on a path that runs *because* memory is short.
     pub fn shrink_clean(&mut self, want: u32) -> u32 {
         if want == 0 {
             return 0;
@@ -309,9 +292,9 @@ impl BlockCache {
             if self.entries[i].pinned != 0 || self.entries[i].frame.dirty() {
                 continue;
             }
-            // Repair the index in place. Rebuilding it needs
+            // Repair the index in place: rebuilding it needs
             // `KBTreeMap::insert`, which allocates, on the path that runs
-            // *because* allocation failed; `remove` and `get_mut` do not.
+            // *because* allocation failed.
             self.index.remove(&self.entries[i].block);
             let moved_from = self.entries.len() - 1;
             let moved = if moved_from != i {
@@ -348,7 +331,6 @@ impl BlockCache {
             return Ok(self.entries.len() - 1);
         }
 
-        // Second pass: find LRU unpinned entry.
         let mut best_slot = None;
         let mut best_lru = u64::MAX;
         for (i, entry) in self.entries.iter().enumerate() {
@@ -360,9 +342,8 @@ impl BlockCache {
 
         let slot = best_slot.ok_or(Ext2Error::DeviceError)?;
 
-        // Flush the victim if dirty. Eviction is a cache-replacement event, not
-        // a durability point, so no device barrier is issued here — the
-        // FS-level `sync` provides ordering/barriers when it matters.
+        // Eviction is a cache-replacement event, not a durability point, so no
+        // device barrier is issued here; FS-level `sync` provides the ordering.
         let victim = &self.entries[slot];
         if victim.frame.dirty() {
             let offset = victim.block.to_disk_offset(self.block_size);
@@ -372,7 +353,6 @@ impl BlockCache {
                 .map_err(|_| Ext2Error::DeviceError)?;
         }
 
-        // Remove from index.
         self.index.remove(&self.entries[slot].block);
         let entry = &mut self.entries[slot];
         entry.valid = false;
@@ -383,7 +363,7 @@ impl BlockCache {
     }
 }
 
-/// RAII guard for a cached block. Automatically unpins on drop.
+/// Pins its cache slot until dropped.
 pub struct CachedBlock<'a> {
     cache: &'a mut BlockCache,
     slot: usize,

@@ -1,20 +1,12 @@
 //! User pointer types — thin re-export of [`slopos_ostd::user::ptr`].
 //!
-//! [`UserPtr`], [`UserSlice`], [`UserBytes`], and [`UserVirtAddr`] live
-//! in OSTD; this module simply forwards the type identities so existing
-//! kernel callers (`slopos_core::syscall`, `slopos_fs`, `slopos_net`,
-//! …) keep their `slopos_mm::user_ptr::UserPtr` import paths.
+//! The types live in OSTD; forwarding them here keeps existing kernel callers'
+//! `slopos_mm::user_ptr::…` import paths working.
 //!
-//! [`UserPtrError`] stays defined locally because the kernel callers'
-//! "validate + copy" combined path returns a single error enum that
-//! covers both pointer-validation failures and runtime copy faults
-//! (page unmapped after validation, SMAP-recovered fault). OSTD's
-//! own `UserPtrError` covers only the validation half — the
-//! `From<slopos_ostd::user::ptr::UserPtrError>` impl below bridges
-//! the two.
-//!
-//! See `slopos_ostd::user::ptr` for the validation rules
-//! (non-null, canonical x86_64, in-user-range, no-overflow).
+//! [`UserPtrError`] stays defined locally because the kernel callers' combined
+//! "validate + copy" path needs one enum covering both validation failures and
+//! runtime copy faults; OSTD's own `UserPtrError` covers only the validation
+//! half.
 
 pub use slopos_ostd::user::ptr::{UserBytes, UserPtr, UserSlice, UserVirtAddr};
 
